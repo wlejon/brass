@@ -248,14 +248,13 @@ TEST_CASE("ISEL - Memory Addressing Modes (Base, Indexed, Offset)") {
 
 TEST_CASE("ISEL - Floating Point Arithmetic and Conversions") {
     Module mod;
-    Function* fn = mod.create_function("test_fp", Type::f64(), {Type::f64(), Type::i64()});
+    Function* fn = mod.create_function("test_fp", Type::f64(), {Type::f64()});
 
     Builder b(mod);
     b.set_function(fn);
 
     BasicBlock* entry = b.append_block("entry");
     Value* f = b.add_block_param(entry, Type::f64());
-    Value* i = b.add_block_param(entry, Type::i64());
 
     Value* f_const = b.build_fconst_f64(3.14159);
     Value* f_add = b.build_add(f, f_const);
@@ -330,3 +329,71 @@ TEST_CASE("ISEL - Function Calls under Win64 and SysV") {
         CHECK_EQ(lir_sysv->frame.outgoing_arg_space, size_t(0)); // 5 args fit in 6 GPRs
     }
 }
+
+TEST_CASE("ISEL - LEA Scale-Disp Arithmetic and Test-Branch Fusion") {
+    Module mod;
+    Function* fn = mod.create_function("fused_test", Type::i64(), {Type::i64(), Type::i64()});
+
+    Builder b(mod);
+    b.set_function(fn);
+
+    BasicBlock* entry = b.append_block("entry");
+    BasicBlock* b_even = b.create_block("b_even");
+    BasicBlock* b_odd = b.create_block("b_odd");
+
+    Value* x = b.add_block_param(entry, Type::i64());
+    Value* y = b.add_block_param(entry, Type::i64());
+
+    // Test fusion: (x & 1) == 0
+    Value* one = b.build_iconst_i64(1);
+    Value* zero = b.build_iconst_i64(0);
+    Value* bit0 = b.build_and(x, one);
+    Value* is_even = b.build_eq(bit0, zero);
+    b.build_br_if(is_even, b_even, {}, b_odd, {});
+
+    // Even: add(add(x, y), 10) -> lea [x + y + 10]
+    fn->append_block(b_even);
+    b.position_at_end(b_even);
+    Value* c10 = b.build_iconst_i64(10);
+    Value* sum_xy = b.build_add(x, y);
+    Value* fused_even = b.build_add(sum_xy, c10);
+    b.build_ret(fused_even);
+
+    // Odd: add(mul(x, 3), 1) -> lea [x + x*2 + 1]
+    fn->append_block(b_odd);
+    b.position_at_end(b_odd);
+    Value* three = b.build_iconst_i64(3);
+    Value* mul3 = b.build_mul(x, three);
+    Value* fused_odd = b.build_add(mul3, one);
+    b.build_ret(fused_odd);
+
+    fn->rebuild_cfg_predecessors();
+    CHECK(verify_function(*fn));
+
+    X64ISel isel(Target::x64_windows(), CallingConvention::win64());
+    auto lir = isel.lower(*fn);
+    CHECK(lir != nullptr);
+
+    // Verify entry block contains Test instead of Cmp
+    bool entry_has_test = false;
+    for (const auto& inst : lir->blocks[0]->instructions) {
+        if (inst->opcode == LirOpcode::Test || inst->opcode == LirOpcode::Test32) {
+            entry_has_test = true;
+        }
+    }
+    CHECK(entry_has_test);
+
+    // Verify even and odd blocks use Lea
+    bool even_has_lea = false;
+    for (const auto& inst : lir->blocks[1]->instructions) {
+        if (inst->opcode == LirOpcode::Lea) even_has_lea = true;
+    }
+    CHECK(even_has_lea);
+
+    bool odd_has_lea = false;
+    for (const auto& inst : lir->blocks[2]->instructions) {
+        if (inst->opcode == LirOpcode::Lea) odd_has_lea = true;
+    }
+    CHECK(odd_has_lea);
+}
+

@@ -641,6 +641,71 @@ void X64ISel::lower_binary_alu(
 
         if (reg_val != nullptr) {
             int32_t C = static_cast<int32_t>(imm_info.val);
+
+            // Check if reg_val is a fused instruction (e.g. mul, shl, add)
+            if (reg_val->is_instruction() && skipped_insts_.count(reg_val->defining_instruction())) {
+                const Instruction* def = reg_val->defining_instruction();
+                if (def->opcode() == Opcode::mul) {
+                    ImmIntInfo m0 = get_imm_int_info(def->operand(0));
+                    ImmIntInfo m1 = get_imm_int_info(def->operand(1));
+                    const Value* m_val = m1.is_imm ? def->operand(0) : def->operand(1);
+                    int64_t mult = m1.is_imm ? m1.val : m0.val;
+                    VReg base_vreg = get_vreg(m_val);
+
+                    if (mult == 2 || mult == 3 || mult == 5 || mult == 9) {
+                        Scale sc = (mult == 2) ? Scale::One : ((mult == 3) ? Scale::Two : ((mult == 5) ? Scale::Four : Scale::Eight));
+                        auto lea_inst = std::make_unique<LirInst>(LirOpcode::Lea);
+                        lea_inst->add_def(LirOperand::vreg(dst, sz));
+                        lea_inst->add_use(LirOperand::mem(base_vreg, base_vreg, sc, C, sz));
+                        lea_inst->mir_origin = &inst;
+                        lir_bb.append_inst(std::move(lea_inst));
+                        return;
+                    }
+                    if (mult == 4 || mult == 8) {
+                        Scale sc = (mult == 4) ? Scale::Four : Scale::Eight;
+                        auto lea_inst = std::make_unique<LirInst>(LirOpcode::Lea);
+                        lea_inst->add_def(LirOperand::vreg(dst, sz));
+                        LirMem m;
+                        m.index_vreg = base_vreg;
+                        m.scale = sc;
+                        m.disp = C;
+                        lea_inst->add_use(LirOperand::mem_custom(m, sz));
+                        lea_inst->mir_origin = &inst;
+                        lir_bb.append_inst(std::move(lea_inst));
+                        return;
+                    }
+                } else if (def->opcode() == Opcode::shl) {
+                    ImmIntInfo s1 = get_imm_int_info(def->operand(1));
+                    if (s1.is_imm && (s1.val == 1 || s1.val == 2 || s1.val == 3)) {
+                        Scale sc = (s1.val == 1) ? Scale::Two : ((s1.val == 2) ? Scale::Four : Scale::Eight);
+                        VReg base_vreg = get_vreg(def->operand(0));
+                        auto lea_inst = std::make_unique<LirInst>(LirOpcode::Lea);
+                        lea_inst->add_def(LirOperand::vreg(dst, sz));
+                        LirMem m;
+                        m.index_vreg = base_vreg;
+                        m.scale = sc;
+                        m.disp = C;
+                        lea_inst->add_use(LirOperand::mem_custom(m, sz));
+                        lea_inst->mir_origin = &inst;
+                        lir_bb.append_inst(std::move(lea_inst));
+                        return;
+                    }
+                } else if (def->opcode() == Opcode::add) {
+                    ImmIntInfo a0 = get_imm_int_info(def->operand(0));
+                    ImmIntInfo a1 = get_imm_int_info(def->operand(1));
+                    if (!a0.is_imm && !a1.is_imm) {
+                        VReg base_vreg = get_vreg(def->operand(0));
+                        VReg idx_vreg = get_vreg(def->operand(1));
+                        auto lea_inst = std::make_unique<LirInst>(LirOpcode::Lea);
+                        lea_inst->add_def(LirOperand::vreg(dst, sz));
+                        lea_inst->add_use(LirOperand::mem(base_vreg, idx_vreg, Scale::One, C, sz));
+                        lea_inst->mir_origin = &inst;
+                        lir_bb.append_inst(std::move(lea_inst));
+                        return;
+                    }
+                }
+            }
+
             VReg r_vreg = get_vreg(reg_val);
             if (C == 0) {
                 if (dst != r_vreg) {
@@ -650,6 +715,15 @@ void X64ISel::lower_binary_alu(
                     mov_inst->mir_origin = &inst;
                     lir_bb.append_inst(std::move(mov_inst));
                 }
+                return;
+            }
+            if (dst == r_vreg) {
+                auto add_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Add32 : LirOpcode::Add);
+                add_inst->add_def(LirOperand::vreg(dst, sz));
+                add_inst->add_use(LirOperand::vreg(dst, sz));
+                add_inst->add_use(LirOperand::imm(C, sz));
+                add_inst->mir_origin = &inst;
+                lir_bb.append_inst(std::move(add_inst));
                 return;
             }
             auto lea_inst = std::make_unique<LirInst>(LirOpcode::Lea);
@@ -689,6 +763,15 @@ void X64ISel::lower_binary_alu(
                     mov_inst->mir_origin = &inst;
                     lir_bb.append_inst(std::move(mov_inst));
                 }
+                return;
+            }
+            if (dst == src0) {
+                auto sub_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Sub32 : LirOpcode::Sub);
+                sub_inst->add_def(LirOperand::vreg(dst, sz));
+                sub_inst->add_use(LirOperand::vreg(dst, sz));
+                sub_inst->add_use(LirOperand::imm(C, sz));
+                sub_inst->mir_origin = &inst;
+                lir_bb.append_inst(std::move(sub_inst));
                 return;
             }
             if (C != INT32_MIN) {
@@ -732,184 +815,6 @@ void X64ISel::lower_binary_alu(
     }
 }
 
-void X64ISel::lower_div_mod(
-    const Instruction& inst,
-    LirBlock& lir_bb,
-    bool is_signed,
-    bool is_mod
-) {
-    VReg dst = get_vreg(inst.result());
-    const Value* op0_val = inst.operand(0);
-    const Value* op1_val = inst.operand(1);
-    VReg op0 = get_vreg(op0_val);
-    uint8_t sz = dst.size;
-
-    if (!is_signed) {
-        ImmIntInfo imm1 = get_imm_int_info(op1_val);
-        if (imm1.is_imm && imm1.val > 0) {
-            uint64_t C = static_cast<uint64_t>(imm1.val);
-            if ((C & (C - 1)) == 0) {
-                int k = 0;
-                while ((1ULL << k) < C) k++;
-                if (!is_mod) {
-                    if (k == 0) {
-                        auto mov_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
-                        mov_inst->add_def(LirOperand::vreg(dst, sz));
-                        mov_inst->add_use(LirOperand::vreg(op0, sz));
-                        mov_inst->mir_origin = &inst;
-                        lir_bb.append_inst(std::move(mov_inst));
-                    } else {
-                        auto mov_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
-                        mov_inst->add_def(LirOperand::vreg(dst, sz));
-                        mov_inst->add_use(LirOperand::vreg(op0, sz));
-                        lir_bb.append_inst(std::move(mov_inst));
-
-                        auto shr_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Shr32 : LirOpcode::Shr);
-                        shr_inst->add_def(LirOperand::vreg(dst, sz));
-                        shr_inst->add_use(LirOperand::vreg(dst, sz));
-                        shr_inst->add_use(LirOperand::imm(k, 1));
-                        shr_inst->mir_origin = &inst;
-                        lir_bb.append_inst(std::move(shr_inst));
-                    }
-                    return;
-                } else {
-                    if (k == 0) {
-                        auto zero_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Xor32 : LirOpcode::Xor);
-                        zero_inst->add_def(LirOperand::vreg(dst, sz));
-                        zero_inst->add_use(LirOperand::vreg(dst, sz));
-                        zero_inst->add_use(LirOperand::vreg(dst, sz));
-                        zero_inst->mir_origin = &inst;
-                        lir_bb.append_inst(std::move(zero_inst));
-                        return;
-                    } else {
-                        uint64_t mask = C - 1;
-                        if (mask <= INT32_MAX) {
-                            auto mov_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
-                            mov_inst->add_def(LirOperand::vreg(dst, sz));
-                            mov_inst->add_use(LirOperand::vreg(op0, sz));
-                            lir_bb.append_inst(std::move(mov_inst));
-
-                            auto and_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::And32 : LirOpcode::And);
-                            and_inst->add_def(LirOperand::vreg(dst, sz));
-                            and_inst->add_use(LirOperand::vreg(dst, sz));
-                            and_inst->add_use(LirOperand::imm(static_cast<int32_t>(mask), sz));
-                            and_inst->mir_origin = &inst;
-                            lir_bb.append_inst(std::move(and_inst));
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    VReg op1 = get_vreg(op1_val);
-
-    // 1. Move op0 into RAX
-    auto mov_rax = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
-    mov_rax->add_def(LirOperand::preg_gpr(GPR::RAX, sz), FixedConstraint::gpr(GPR::RAX));
-    mov_rax->add_use(LirOperand::vreg(op0, sz));
-    lir_bb.append_inst(std::move(mov_rax));
-
-    // 2. Sign-extend RAX into RDX:RAX via cdq/cqo, or zero RDX
-    if (is_signed) {
-        auto extend_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Cdq : LirOpcode::Cqo);
-        extend_inst->add_def(LirOperand::preg_gpr(GPR::RDX, sz), FixedConstraint::gpr(GPR::RDX));
-        extend_inst->add_use(LirOperand::preg_gpr(GPR::RAX, sz), FixedConstraint::gpr(GPR::RAX));
-        lir_bb.append_inst(std::move(extend_inst));
-    } else {
-        auto zero_rdx = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Xor32 : LirOpcode::Xor);
-        zero_rdx->add_def(LirOperand::preg_gpr(GPR::RDX, sz), FixedConstraint::gpr(GPR::RDX));
-        zero_rdx->add_use(LirOperand::preg_gpr(GPR::RDX, sz), FixedConstraint::gpr(GPR::RDX));
-        zero_rdx->add_use(LirOperand::preg_gpr(GPR::RDX, sz), FixedConstraint::gpr(GPR::RDX));
-        lir_bb.append_inst(std::move(zero_rdx));
-    }
-
-    // 3. Emit idiv or div
-    LirOpcode div_op;
-    if (is_signed) {
-        div_op = sz == 4 ? LirOpcode::Idiv32 : LirOpcode::Idiv;
-    } else {
-        div_op = sz == 4 ? LirOpcode::Div32 : LirOpcode::Div;
-    }
-
-    auto div_inst = std::make_unique<LirInst>(div_op);
-    div_inst->add_def(LirOperand::preg_gpr(GPR::RAX, sz), FixedConstraint::gpr(GPR::RAX));
-    div_inst->add_def(LirOperand::preg_gpr(GPR::RDX, sz), FixedConstraint::gpr(GPR::RDX));
-    div_inst->add_use(LirOperand::preg_gpr(GPR::RAX, sz), FixedConstraint::gpr(GPR::RAX));
-    div_inst->add_use(LirOperand::preg_gpr(GPR::RDX, sz), FixedConstraint::gpr(GPR::RDX));
-    div_inst->add_use(LirOperand::vreg(op1, sz));
-    div_inst->mir_origin = &inst;
-    lir_bb.append_inst(std::move(div_inst));
-
-    // 4. Result is in RAX (div) or RDX (mod)
-    GPR res_reg = is_mod ? GPR::RDX : GPR::RAX;
-    auto mov_res = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
-    mov_res->add_def(LirOperand::vreg(dst, sz));
-    mov_res->add_use(LirOperand::preg_gpr(res_reg, sz), FixedConstraint::gpr(res_reg));
-    lir_bb.append_inst(std::move(mov_res));
-}
-
-void X64ISel::lower_shift(
-    const Instruction& inst,
-    LirBlock& lir_bb,
-    LirOpcode op32,
-    LirOpcode op64
-) {
-    VReg dst = get_vreg(inst.result());
-    const Value* op0_val = inst.operand(0);
-    const Value* op1_val = inst.operand(1);
-    VReg op0 = get_vreg(op0_val);
-    uint8_t sz = dst.size;
-
-    ImmIntInfo imm1 = get_imm_int_info(op1_val);
-    if (imm1.is_imm) {
-        uint8_t shift_amt = static_cast<uint8_t>(imm1.val & (sz == 4 ? 31 : 63));
-        if (shift_amt == 0) {
-            auto mov_dst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
-            mov_dst->add_def(LirOperand::vreg(dst, sz));
-            mov_dst->add_use(LirOperand::vreg(op0, sz));
-            mov_dst->mir_origin = &inst;
-            lir_bb.append_inst(std::move(mov_dst));
-            return;
-        }
-
-        auto mov_dst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
-        mov_dst->add_def(LirOperand::vreg(dst, sz));
-        mov_dst->add_use(LirOperand::vreg(op0, sz));
-        lir_bb.append_inst(std::move(mov_dst));
-
-        auto shift_inst = std::make_unique<LirInst>(sz == 4 ? op32 : op64);
-        shift_inst->add_def(LirOperand::vreg(dst, sz));
-        shift_inst->add_use(LirOperand::vreg(dst, sz));
-        shift_inst->add_use(LirOperand::imm(shift_amt, 1));
-        shift_inst->mir_origin = &inst;
-        lir_bb.append_inst(std::move(shift_inst));
-        return;
-    }
-
-    VReg op1 = get_vreg(op1_val);
-    // 1. Copy op0 to dst
-    auto mov_dst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
-    mov_dst->add_def(LirOperand::vreg(dst, sz));
-    mov_dst->add_use(LirOperand::vreg(op0, sz));
-    lir_bb.append_inst(std::move(mov_dst));
-
-    // 2. x86 requires shift amount in CL (RCX)
-    auto mov_cl = std::make_unique<LirInst>(LirOpcode::Mov);
-    mov_cl->add_def(LirOperand::preg_gpr(GPR::RCX, 8), FixedConstraint::gpr(GPR::RCX));
-    mov_cl->add_use(LirOperand::vreg(op1, op1.size));
-    lir_bb.append_inst(std::move(mov_cl));
-
-    // 3. Shift dst by CL
-    auto shift_inst = std::make_unique<LirInst>(sz == 4 ? op32 : op64);
-    shift_inst->add_def(LirOperand::vreg(dst, sz));
-    shift_inst->add_use(LirOperand::vreg(dst, sz));
-    shift_inst->add_use(LirOperand::preg_gpr(GPR::RCX, 1), FixedConstraint::gpr(GPR::RCX));
-    shift_inst->mir_origin = &inst;
-    lir_bb.append_inst(std::move(shift_inst));
-}
-
 void X64ISel::lower_comparison(
     const Instruction& inst,
     LirBlock& lir_bb,
@@ -949,29 +854,43 @@ void X64ISel::lower_comparison(
     } else {
         uint8_t sz = static_cast<uint8_t>(op0_val->type().size_in_bytes());
         if (sz == 0) sz = 8;
-        LirOpcode cmp_lir_op = (sz == 4) ? LirOpcode::Cmp32 : LirOpcode::Cmp;
         Condition final_cond = cond;
 
         ImmIntInfo imm1 = get_imm_int_info(op1_val);
         ImmIntInfo imm0 = get_imm_int_info(op0_val);
 
-        if (imm1.is_imm && imm1.fits_i32) {
+        if (imm1.is_imm && imm1.val == 0) {
+            auto test_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Test32 : LirOpcode::Test);
+            test_inst->add_use(LirOperand::vreg(op0, sz));
+            test_inst->add_use(LirOperand::vreg(op0, sz));
+            lir_bb.append_inst(std::move(test_inst));
+        } else if (imm0.is_imm && imm0.val == 0) {
+            final_cond = swap_relational_condition(cond);
+            auto test_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Test32 : LirOpcode::Test);
+            test_inst->add_use(LirOperand::vreg(op1, sz));
+            test_inst->add_use(LirOperand::vreg(op1, sz));
+            lir_bb.append_inst(std::move(test_inst));
+        } else if (imm1.is_imm && imm1.fits_i32) {
+            LirOpcode cmp_lir_op = (sz == 4) ? LirOpcode::Cmp32 : LirOpcode::Cmp;
             auto cmp_inst = std::make_unique<LirInst>(cmp_lir_op);
             cmp_inst->add_use(LirOperand::vreg(op0, sz));
             cmp_inst->add_use(LirOperand::imm(imm1.val, sz));
             lir_bb.append_inst(std::move(cmp_inst));
         } else if (imm0.is_imm && imm0.fits_i32) {
             final_cond = swap_relational_condition(cond);
+            LirOpcode cmp_lir_op = (sz == 4) ? LirOpcode::Cmp32 : LirOpcode::Cmp;
             auto cmp_inst = std::make_unique<LirInst>(cmp_lir_op);
             cmp_inst->add_use(LirOperand::vreg(op1, sz));
             cmp_inst->add_use(LirOperand::imm(imm0.val, sz));
             lir_bb.append_inst(std::move(cmp_inst));
         } else if (op1_val && op1_val->is_instruction() && can_fuse_load(op1_val->defining_instruction(), &inst)) {
+            LirOpcode cmp_lir_op = (sz == 4) ? LirOpcode::Cmp32 : LirOpcode::Cmp;
             auto cmp_inst = std::make_unique<LirInst>(cmp_lir_op);
             cmp_inst->add_use(LirOperand::vreg(op0, sz));
             cmp_inst->add_use(get_load_mem_operand(op1_val->defining_instruction()));
             lir_bb.append_inst(std::move(cmp_inst));
         } else {
+            LirOpcode cmp_lir_op = (sz == 4) ? LirOpcode::Cmp32 : LirOpcode::Cmp;
             auto cmp_inst = std::make_unique<LirInst>(cmp_lir_op);
             cmp_inst->add_use(LirOperand::vreg(op0, sz));
             cmp_inst->add_use(LirOperand::vreg(op1, sz));
