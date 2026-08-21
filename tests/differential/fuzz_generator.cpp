@@ -347,4 +347,180 @@ void generate_fuzz_patching(Module& mod, std::string_view fn_name, uint64_t seed
     }
 }
 
+void generate_fuzz_matrix_i64(Module& mod, std::string_view fn_name, uint64_t seed) {
+    std::mt19937_64 rng(seed);
+    Function* fn = mod.create_function(fn_name, Type::i64(), {
+        Type::ptr(), Type::ptr(), Type::ptr(), Type::i64()
+    });
+
+    Builder b(mod);
+    b.set_function(fn);
+
+    BasicBlock* entry = b.append_block("bb_entry");
+    BasicBlock* loop_i_hdr = b.create_block("loop_i_hdr");
+    BasicBlock* loop_i_body = b.create_block("loop_i_body");
+    BasicBlock* loop_k_hdr = b.create_block("loop_k_hdr");
+    BasicBlock* loop_k_body = b.create_block("loop_k_body");
+    BasicBlock* loop_i_next = b.create_block("loop_i_next");
+    BasicBlock* exit_bb = b.create_block("exit_bb");
+
+    fn->append_block(loop_i_hdr);
+    fn->append_block(loop_i_body);
+    fn->append_block(loop_k_hdr);
+    fn->append_block(loop_k_body);
+    fn->append_block(loop_i_next);
+    fn->append_block(exit_bb);
+
+    b.position_at_end(entry);
+    Value* A = b.add_block_param(entry, Type::ptr());
+    Value* B = b.add_block_param(entry, Type::ptr());
+    Value* C = b.add_block_param(entry, Type::ptr());
+    Value* N = b.add_block_param(entry, Type::i64());
+
+    Value* zero = b.build_iconst_i64(0);
+    Value* one = b.build_iconst_i64(1);
+    b.build_br(loop_i_hdr, {zero, zero});
+
+    b.position_at_end(loop_i_hdr);
+    Value* i = b.add_block_param(loop_i_hdr, Type::i64());
+    Value* total_acc = b.add_block_param(loop_i_hdr, Type::i64());
+    Value* cond_i = b.build_slt(i, N);
+    b.build_br_if(cond_i, loop_i_body, {}, exit_bb, {total_acc});
+
+    b.position_at_end(loop_i_body);
+    Value* row_a = b.build_mul(i, N);
+    b.build_br(loop_k_hdr, {zero, total_acc});
+
+    b.position_at_end(loop_k_hdr);
+    Value* k = b.add_block_param(loop_k_hdr, Type::i64());
+    Value* cur_acc = b.add_block_param(loop_k_hdr, Type::i64());
+    Value* cond_k = b.build_slt(k, N);
+    b.build_br_if(cond_k, loop_k_body, {}, loop_i_next, {cur_acc});
+
+    b.position_at_end(loop_k_body);
+    Value* idx_a = b.build_add(row_a, k);
+    Value* val_a = b.build_load_indexed(Type::i64(), A, idx_a, 8, 0);
+
+    Value* kN = b.build_mul(k, N);
+    Value* idx_b = b.build_add(kN, i);
+    Value* val_b = b.build_load_indexed(Type::i64(), B, idx_b, 8, 0);
+
+    Value* term = nullptr;
+    uint32_t op_mode = static_cast<uint32_t>(rng() % 4);
+    if (op_mode == 0) {
+        term = b.build_mul(val_a, val_b);
+    } else if (op_mode == 1) {
+        term = b.build_add(b.build_mul(val_a, val_b), b.build_iconst_i64(static_cast<int64_t>(rng() % 31)));
+    } else if (op_mode == 2) {
+        Value* prod = b.build_mul(val_a, val_b);
+        term = b.build_xor(prod, b.build_iconst_i64(0x3333));
+    } else {
+        term = b.build_sub(b.build_mul(val_a, val_b), b.build_iconst_i64(13));
+    }
+
+    Value* new_acc = b.build_add(cur_acc, term);
+    b.build_store_indexed(Type::i64(), C, idx_a, 8, 0, new_acc);
+
+    Value* next_k = b.build_add(k, one);
+    b.build_br(loop_k_hdr, {next_k, new_acc});
+
+    b.position_at_end(loop_i_next);
+    Value* end_row_acc = b.add_block_param(loop_i_next, Type::i64());
+    Value* next_i = b.build_add(i, one);
+    b.build_br(loop_i_hdr, {next_i, end_row_acc});
+
+    b.position_at_end(exit_bb);
+    Value* ret_val = b.add_block_param(exit_bb, Type::i64());
+    b.build_ret(ret_val);
+
+    fn->rebuild_cfg_predecessors();
+}
+
+void generate_fuzz_matrix_f64(Module& mod, std::string_view fn_name, uint64_t seed) {
+    std::mt19937_64 rng(seed);
+    Function* fn = mod.create_function(fn_name, Type::f64(), {
+        Type::ptr(), Type::ptr(), Type::ptr(), Type::i64()
+    });
+
+    Builder b(mod);
+    b.set_function(fn);
+
+    BasicBlock* entry = b.append_block("bb_entry");
+    BasicBlock* loop_i_hdr = b.create_block("loop_i_hdr");
+    BasicBlock* loop_i_body = b.create_block("loop_i_body");
+    BasicBlock* loop_k_hdr = b.create_block("loop_k_hdr");
+    BasicBlock* loop_k_body = b.create_block("loop_k_body");
+    BasicBlock* loop_i_next = b.create_block("loop_i_next");
+    BasicBlock* exit_bb = b.create_block("exit_bb");
+
+    fn->append_block(loop_i_hdr);
+    fn->append_block(loop_i_body);
+    fn->append_block(loop_k_hdr);
+    fn->append_block(loop_k_body);
+    fn->append_block(loop_i_next);
+    fn->append_block(exit_bb);
+
+    b.position_at_end(entry);
+    Value* A = b.add_block_param(entry, Type::ptr());
+    Value* B = b.add_block_param(entry, Type::ptr());
+    Value* C = b.add_block_param(entry, Type::ptr());
+    Value* N = b.add_block_param(entry, Type::i64());
+
+    Value* zero = b.build_iconst_i64(0);
+    Value* zero_f = b.build_fconst_f64(0.0);
+    Value* one = b.build_iconst_i64(1);
+    b.build_br(loop_i_hdr, {zero, zero_f});
+
+    b.position_at_end(loop_i_hdr);
+    Value* i = b.add_block_param(loop_i_hdr, Type::i64());
+    Value* total_acc = b.add_block_param(loop_i_hdr, Type::f64());
+    Value* cond_i = b.build_slt(i, N);
+    b.build_br_if(cond_i, loop_i_body, {}, exit_bb, {total_acc});
+
+    b.position_at_end(loop_i_body);
+    Value* row_a = b.build_mul(i, N);
+    b.build_br(loop_k_hdr, {zero, total_acc});
+
+    b.position_at_end(loop_k_hdr);
+    Value* k = b.add_block_param(loop_k_hdr, Type::i64());
+    Value* cur_acc = b.add_block_param(loop_k_hdr, Type::f64());
+    Value* cond_k = b.build_slt(k, N);
+    b.build_br_if(cond_k, loop_k_body, {}, loop_i_next, {cur_acc});
+
+    b.position_at_end(loop_k_body);
+    Value* idx_a = b.build_add(row_a, k);
+    Value* val_a = b.build_load_indexed(Type::f64(), A, idx_a, 8, 0);
+
+    Value* kN = b.build_mul(k, N);
+    Value* idx_b = b.build_add(kN, i);
+    Value* val_b = b.build_load_indexed(Type::f64(), B, idx_b, 8, 0);
+
+    Value* term = nullptr;
+    uint32_t op_mode = static_cast<uint32_t>(rng() % 3);
+    if (op_mode == 0) {
+        term = b.build_mul(val_a, val_b);
+    } else if (op_mode == 1) {
+        term = b.build_add(b.build_mul(val_a, val_b), b.build_fconst_f64(1.5));
+    } else {
+        term = b.build_sub(b.build_mul(val_a, val_b), b.build_fconst_f64(0.75));
+    }
+
+    Value* new_acc = b.build_add(cur_acc, term);
+    b.build_store_indexed(Type::f64(), C, idx_a, 8, 0, new_acc);
+
+    Value* next_k = b.build_add(k, one);
+    b.build_br(loop_k_hdr, {next_k, new_acc});
+
+    b.position_at_end(loop_i_next);
+    Value* end_row_acc = b.add_block_param(loop_i_next, Type::f64());
+    Value* next_i = b.build_add(i, one);
+    b.build_br(loop_i_hdr, {next_i, end_row_acc});
+
+    b.position_at_end(exit_bb);
+    Value* ret_val = b.add_block_param(exit_bb, Type::f64());
+    b.build_ret(ret_val);
+
+    fn->rebuild_cfg_predecessors();
+}
+
 } // namespace brass::test

@@ -277,53 +277,7 @@ std::unique_ptr<LirFunction> X64ISel::lower(const Function& mir_fn) {
         for (const auto* inst : *bb) {
             if (!inst->produces_value()) continue;
             if (skipped_insts_.count(inst)) continue;
-
-            const Value* res = inst->result();
-            const Value* op0 = inst->operand_count() >= 1 ? inst->operand(0) : nullptr;
-            const Value* op1 = inst->operand_count() >= 2 ? inst->operand(1) : nullptr;
-
-            bool can_reuse_op0 = false;
-            bool can_reuse_op1 = false;
-
-            bool is_two_address = false;
-            bool is_comm = false;
-
-            switch (inst->opcode()) {
-                case Opcode::add:
-                case Opcode::mul:
-                case Opcode::and_:
-                case Opcode::or_:
-                case Opcode::xor_:
-                    is_two_address = true;
-                    is_comm = true;
-                    break;
-                case Opcode::sub:
-                case Opcode::shl:
-                case Opcode::lshr:
-                case Opcode::ashr:
-                    is_two_address = true;
-                    is_comm = false;
-                    break;
-                default:
-                    break;
-            }
-
-            if (is_two_address && op0 != nullptr && op0->type() == res->type() && val_to_vreg_.count(op0)) {
-                if (is_value_dead_after(mir_fn, *bb, inst, op0)) {
-                    can_reuse_op0 = true;
-                } else if (is_comm && op1 != nullptr && op1->type() == res->type() && val_to_vreg_.count(op1) &&
-                           is_value_dead_after(mir_fn, *bb, inst, op1)) {
-                    can_reuse_op1 = true;
-                }
-            }
-
-            if (can_reuse_op0) {
-                val_to_vreg_[res] = get_vreg(op0);
-            } else if (can_reuse_op1) {
-                val_to_vreg_[res] = get_vreg(op1);
-            } else {
-                get_or_alloc_vreg(res);
-            }
+            get_or_alloc_vreg(inst->result());
         }
     }
 
@@ -636,11 +590,10 @@ void X64ISel::lower_branch(const Instruction& inst, LirBlock& lir_bb) {
     if (!target.block) return;
 
     if (!target.args.empty()) {
-        for (size_t i = 0; i < target.args.size(); ++i) {
-            VReg arg_v = get_vreg(target.args[i]);
-            VReg param_v = get_vreg(target.block->param(i));
+        if (target.args.size() == 1) {
+            VReg arg_v = get_vreg(target.args[0]);
+            VReg param_v = get_vreg(target.block->param(0));
             uint8_t sz = param_v.size;
-
             if (arg_v != param_v) {
                 auto mov_inst = std::make_unique<LirInst>(
                     param_v.is_xmm() ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov)
@@ -649,6 +602,16 @@ void X64ISel::lower_branch(const Instruction& inst, LirBlock& lir_bb) {
                 mov_inst->add_use(LirOperand::vreg(arg_v, sz));
                 lir_bb.append_inst(std::move(mov_inst));
             }
+        } else {
+            auto pcopy = std::make_unique<LirInst>(LirOpcode::ParallelCopy);
+            for (size_t i = 0; i < target.args.size(); ++i) {
+                VReg arg_v = get_vreg(target.args[i]);
+                VReg param_v = get_vreg(target.block->param(i));
+                uint8_t sz = param_v.size;
+                pcopy->add_def(LirOperand::vreg(param_v, sz));
+                pcopy->add_use(LirOperand::vreg(arg_v, sz));
+            }
+            lir_bb.append_inst(std::move(pcopy));
         }
     }
 
@@ -731,6 +694,33 @@ void X64ISel::lower_branch_if(const Instruction& inst, LirBlock& lir_bb) {
         branch_cond = Condition::NE;
     }
 
+    auto emit_target_args = [&](LirBlock& bb, const BranchTarget& target) {
+        if (target.args.empty()) return;
+        if (target.args.size() == 1) {
+            VReg arg_v = get_vreg(target.args[0]);
+            VReg param_v = get_vreg(target.block->param(0));
+            uint8_t sz = param_v.size;
+            if (arg_v != param_v) {
+                auto mov_inst = std::make_unique<LirInst>(
+                    param_v.is_xmm() ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov)
+                );
+                mov_inst->add_def(LirOperand::vreg(param_v, sz));
+                mov_inst->add_use(LirOperand::vreg(arg_v, sz));
+                bb.append_inst(std::move(mov_inst));
+            }
+        } else {
+            auto pcopy = std::make_unique<LirInst>(LirOpcode::ParallelCopy);
+            for (size_t i = 0; i < target.args.size(); ++i) {
+                VReg arg_v = get_vreg(target.args[i]);
+                VReg param_v = get_vreg(target.block->param(i));
+                uint8_t sz = param_v.size;
+                pcopy->add_def(LirOperand::vreg(param_v, sz));
+                pcopy->add_use(LirOperand::vreg(arg_v, sz));
+            }
+            bb.append_inst(std::move(pcopy));
+        }
+    };
+
     if (t_target.args.empty() && f_target.args.empty()) {
         auto jcc_inst = std::make_unique<LirInst>(LirOpcode::Jcc);
         jcc_inst->condition = branch_cond;
@@ -747,19 +737,8 @@ void X64ISel::lower_branch_if(const Instruction& inst, LirBlock& lir_bb) {
         jcc_inst->add_use(LirOperand::label(t_target.block->id()));
         lir_bb.append_inst(std::move(jcc_inst));
 
-        for (size_t i = 0; i < f_target.args.size(); ++i) {
-            VReg arg_v = get_vreg(f_target.args[i]);
-            VReg param_v = get_vreg(f_target.block->param(i));
-            uint8_t sz = param_v.size;
-            if (arg_v != param_v) {
-                auto mov_inst = std::make_unique<LirInst>(
-                    param_v.is_xmm() ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov)
-                );
-                mov_inst->add_def(LirOperand::vreg(param_v, sz));
-                mov_inst->add_use(LirOperand::vreg(arg_v, sz));
-                lir_bb.append_inst(std::move(mov_inst));
-            }
-        }
+        emit_target_args(lir_bb, f_target);
+
         auto jmp_f = std::make_unique<LirInst>(LirOpcode::Jmp);
         jmp_f->add_use(LirOperand::label(f_target.block->id()));
         jmp_f->mir_origin = &inst;
@@ -770,19 +749,8 @@ void X64ISel::lower_branch_if(const Instruction& inst, LirBlock& lir_bb) {
         jcc_inst->add_use(LirOperand::label(f_target.block->id()));
         lir_bb.append_inst(std::move(jcc_inst));
 
-        for (size_t i = 0; i < t_target.args.size(); ++i) {
-            VReg arg_v = get_vreg(t_target.args[i]);
-            VReg param_v = get_vreg(t_target.block->param(i));
-            uint8_t sz = param_v.size;
-            if (arg_v != param_v) {
-                auto mov_inst = std::make_unique<LirInst>(
-                    param_v.is_xmm() ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov)
-                );
-                mov_inst->add_def(LirOperand::vreg(param_v, sz));
-                mov_inst->add_use(LirOperand::vreg(arg_v, sz));
-                lir_bb.append_inst(std::move(mov_inst));
-            }
-        }
+        emit_target_args(lir_bb, t_target);
+
         auto jmp_t = std::make_unique<LirInst>(LirOpcode::Jmp);
         jmp_t->add_use(LirOperand::label(t_target.block->id()));
         jmp_t->mir_origin = &inst;
@@ -795,36 +763,14 @@ void X64ISel::lower_branch_if(const Instruction& inst, LirBlock& lir_bb) {
         jcc_inst->add_use(LirOperand::label(true_trampoline->id));
         lir_bb.append_inst(std::move(jcc_inst));
 
-        for (size_t i = 0; i < f_target.args.size(); ++i) {
-            VReg arg_v = get_vreg(f_target.args[i]);
-            VReg param_v = get_vreg(f_target.block->param(i));
-            uint8_t sz = param_v.size;
-            if (arg_v != param_v) {
-                auto mov_inst = std::make_unique<LirInst>(
-                    param_v.is_xmm() ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov)
-                );
-                mov_inst->add_def(LirOperand::vreg(param_v, sz));
-                mov_inst->add_use(LirOperand::vreg(arg_v, sz));
-                lir_bb.append_inst(std::move(mov_inst));
-            }
-        }
+        emit_target_args(lir_bb, f_target);
+
         auto jmp_f = std::make_unique<LirInst>(LirOpcode::Jmp);
         jmp_f->add_use(LirOperand::label(f_target.block->id()));
         lir_bb.append_inst(std::move(jmp_f));
 
-        for (size_t i = 0; i < t_target.args.size(); ++i) {
-            VReg arg_v = get_vreg(t_target.args[i]);
-            VReg param_v = get_vreg(t_target.block->param(i));
-            uint8_t sz = param_v.size;
-            if (arg_v != param_v) {
-                auto mov_inst = std::make_unique<LirInst>(
-                    param_v.is_xmm() ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov)
-                );
-                mov_inst->add_def(LirOperand::vreg(param_v, sz));
-                mov_inst->add_use(LirOperand::vreg(arg_v, sz));
-                true_trampoline->append_inst(std::move(mov_inst));
-            }
-        }
+        emit_target_args(*true_trampoline, t_target);
+
         auto jmp_t = std::make_unique<LirInst>(LirOpcode::Jmp);
         jmp_t->add_use(LirOperand::label(t_target.block->id()));
         true_trampoline->append_inst(std::move(jmp_t));

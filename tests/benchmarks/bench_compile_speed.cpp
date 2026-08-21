@@ -241,8 +241,8 @@ void run_compile_speed_benchmark(std::vector<BenchmarkResult>& results) {
     bool verify_ok = verify_module(*parsed_mod, &ver_diag);
     double verify_ms = sw.stop_ms();
     if (!verify_ok) {
-        std::cerr << "Parsed module verification failed:\n" << ver_diag.format_all() << "\n";
-        assert(false);
+        std::cerr << "FATAL: Parsed module verification failed:\n" << ver_diag.format_all() << "\n";
+        std::abort();
     }
 
     // 3. Benchmark: ISEL, Linear Scan Register Allocation, Peephole, Object Generation, and JIT Load
@@ -250,7 +250,10 @@ void run_compile_speed_benchmark(std::vector<BenchmarkResult>& results) {
     JitExecutionEngine jit;
     bool jit_ok = jit.compile_and_load(*parsed_mod);
     double codegen_ms = sw.stop_ms();
-    assert(jit_ok);
+    if (!jit_ok) {
+        std::cerr << "FATAL: JIT compilation failed in compile speed benchmark!\n";
+        std::abort();
+    }
 
     double total_ms = parse_ms + verify_ms + codegen_ms;
     bool passes_compile_bar = (total_ms < 2000.0) && verify_ok && jit_ok;
@@ -270,7 +273,10 @@ void run_compile_speed_benchmark(std::vector<BenchmarkResult>& results) {
         passes_compile_bar
     );
 
-    assert(passes_compile_bar);
+    if (!passes_compile_bar) {
+        std::cerr << "FATAL: Compile speed benchmark failed to meet bar!\n";
+        std::abort();
+    }
 }
 
 } // namespace brass::bench

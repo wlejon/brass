@@ -494,11 +494,11 @@ void LinearScanAllocator::rewrite_instructions() {
                             const VRegInfo& i_info = fn_.get_vreg_info(op.mem_val.index_vreg);
                             if (i_info.is_spilled) {
                                 auto load_idx = std::make_unique<LirInst>(LirOpcode::Mov);
-                                load_idx->add_def(LirOperand::preg(PReg::gpr(GPR::R9), 8));
+                                load_idx->add_def(LirOperand::preg(PReg::gpr(GPR::R11), 8));
                                 load_idx->add_use(LirOperand::slot(i_info.assigned_spill_slot, 8));
                                 rewritten.push_back(std::move(load_idx));
 
-                                op.mem_val.index_preg = PReg::gpr(GPR::R9);
+                                op.mem_val.index_preg = PReg::gpr(GPR::R11);
                                 op.mem_val.index_vreg = VReg{};
                             }
                         }

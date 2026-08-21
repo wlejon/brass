@@ -157,7 +157,10 @@ void run_gc_benchmark(std::vector<BenchmarkResult>& results) {
     jit.register_external_symbol("bench_leaf_gc_subroutine", reinterpret_cast<void*>(&bench_leaf_gc_subroutine));
     jit.compile_and_load(*mod);
     auto gc_fn = jit.get_function_ptr<int64_t(*)(void*, void*, void*, void*, int64_t)>("brass_gc_caller");
-    assert(gc_fn != nullptr);
+    if (!gc_fn) {
+        std::cerr << "FATAL: brass_gc_caller function pointer is null!\n";
+        std::abort();
+    }
 
     sw.start();
     int64_t brass_res = gc_fn(
@@ -167,7 +170,10 @@ void run_gc_benchmark(std::vector<BenchmarkResult>& results) {
     DoNotOptimize(brass_res);
     double brass_stack_map_ms = sw.stop_ms();
 
-    assert(shadow_res == brass_res);
+    if (shadow_res != brass_res) {
+        std::cerr << "FATAL: GC Model result mismatch: shadow=" << shadow_res << ", Brass=" << brass_res << "\n";
+        std::abort();
+    }
     double speedup = (brass_stack_map_ms > 0.0) ? (shadow_stack_ms / brass_stack_map_ms) : 1.0;
     bool passes_gc_bar = (speedup >= 1.50);
 

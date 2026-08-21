@@ -1,6 +1,7 @@
 #include "bench_numeric.hpp"
 #include "bench_utils.hpp"
 #include <brass/brass.hpp>
+#include <brass/target/x64/x64_isel.hpp>
 #include <vector>
 #include <numeric>
 #include <random>
@@ -13,6 +14,7 @@
 using namespace brass;
 using namespace brass::bench;
 using namespace brass::codegen;
+using namespace brass::x64;
 
 namespace {
 
@@ -144,14 +146,11 @@ std::unique_ptr<Module> build_fib_module() {
     Value* i = b.add_block_param(loop_body, Type::i64());
     Value* a = b.add_block_param(loop_body, Type::i64());
     Value* cur_b = b.add_block_param(loop_body, Type::i64());
-    Value* sum1 = b.build_add(a, cur_b);
-    Value* sum2 = b.build_add(cur_b, sum1);
-    Value* sum3 = b.build_add(sum1, sum2);
-    Value* sum4 = b.build_add(sum2, sum3);
-    Value* four = b.build_iconst_i64(4);
-    Value* next_i = b.build_add(i, four);
+    Value* c = b.build_add(a, cur_b);
+    Value* one = b.build_iconst_i64(1);
+    Value* next_i = b.build_add(i, one);
     Value* in_range = b.build_sle(next_i, n);
-    b.build_br_if(in_range, loop_body, {next_i, sum3, sum4}, exit_bb, {sum4});
+    b.build_br_if(in_range, loop_body, {next_i, cur_b, c}, exit_bb, {c});
 
     fn->append_block(exit_bb);
     b.position_at_end(exit_bb);
@@ -450,7 +449,6 @@ std::unique_ptr<Module> build_matmul_f64_module() {
     Value* zero = b.build_iconst_i64(0);
     Value* zero_f = b.build_fconst_f64(0.0);
     Value* one = b.build_iconst_i64(1);
-    Value* two = b.build_iconst_i64(2);
     b.build_br(loop_i_hdr, {zero});
 
     fn->append_block(loop_i_hdr);
@@ -484,29 +482,16 @@ std::unique_ptr<Module> build_matmul_f64_module() {
 
     fn->append_block(loop_k_body);
     b.position_at_end(loop_k_body);
-    Value* idx_a1 = b.build_add(row_a, k);
-    Value* val_a1 = b.build_load_indexed(Type::f64(), A, idx_a1, 8, 0);
+    Value* idx_a = b.build_add(row_a, k);
+    Value* val_a = b.build_load_indexed(Type::f64(), A, idx_a, 8, 0);
 
-    Value* idx_b1 = b.build_add(kN, j);
-    Value* val_b1 = b.build_load_indexed(Type::f64(), B, idx_b1, 8, 0);
+    Value* idx_b = b.build_add(kN, j);
+    Value* val_b = b.build_load_indexed(Type::f64(), B, idx_b, 8, 0);
 
-    Value* term1 = b.build_mul(val_a1, val_b1);
-
-    Value* k1 = b.build_add(k, one);
-    Value* kN1 = b.build_add(kN, N);
-
-    Value* idx_a2 = b.build_add(row_a, k1);
-    Value* val_a2 = b.build_load_indexed(Type::f64(), A, idx_a2, 8, 0);
-
-    Value* idx_b2 = b.build_add(kN1, j);
-    Value* val_b2 = b.build_load_indexed(Type::f64(), B, idx_b2, 8, 0);
-
-    Value* term2 = b.build_mul(val_a2, val_b2);
-    Value* term_sum = b.build_add(term1, term2);
-    Value* next_sum = b.build_add(sum, term_sum);
-
-    Value* next_kN = b.build_add(kN1, N);
-    Value* next_k = b.build_add(k, two);
+    Value* term = b.build_mul(val_a, val_b);
+    Value* next_sum = b.build_add(sum, term);
+    Value* next_kN = b.build_add(kN, N);
+    Value* next_k = b.build_add(k, one);
     b.build_br(loop_k_hdr, {next_k, next_kN, next_sum});
 
     fn->append_block(loop_j_next);
@@ -597,7 +582,10 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results) {
         JitExecutionEngine jit;
         jit.compile_and_load(*mod);
         auto fib_fn = jit.get_function_ptr<uint64_t(*)(uint64_t)>("fib_iter");
-        assert(fib_fn != nullptr);
+        if (!fib_fn) {
+            std::cerr << "FATAL: fib_iter function pointer is null!\n";
+            std::abort();
+        }
 
         sw.start();
         uint64_t jit_sink = 0;
@@ -609,9 +597,13 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results) {
         }
         double brass_ms = sw.stop_ms();
 
-        assert(native_sink == jit_sink);
+        if (native_sink != jit_sink) {
+            std::cerr << "FATAL: Fibonacci result mismatch: native=" << native_sink << ", JIT=" << jit_sink << "\n";
+            std::abort();
+        }
+
         double ratio = brass_ms / native_ms;
-        results.push_back({"Iterative Fibonacci (N=45)", iters, native_ms, brass_ms, ratio, ratio <= 2.50, "<= 2.5x baseline"});
+        results.push_back({"Iterative Fibonacci (N=45)", iters, native_ms, brass_ms, ratio, ratio <= 1.30, "<= 1.3x baseline"});
         BenchmarkReporter::print_row(results.back());
     }
 
@@ -637,7 +629,10 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results) {
         JitExecutionEngine jit;
         jit.compile_and_load(*mod);
         auto sieve_fn = jit.get_function_ptr<int64_t(*)(int64_t*, int64_t)>("prime_sieve");
-        assert(sieve_fn != nullptr);
+        if (!sieve_fn) {
+            std::cerr << "FATAL: prime_sieve function pointer is null!\n";
+            std::abort();
+        }
 
         sw.start();
         int64_t jit_count = 0;
@@ -650,9 +645,13 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results) {
         }
         double brass_ms = sw.stop_ms();
 
-        assert(native_count == jit_count);
+        if (native_count != jit_count || native_buf != jit_buf) {
+            std::cerr << "FATAL: Prime Sieve result mismatch: native=" << native_count << ", JIT=" << jit_count << "\n";
+            std::abort();
+        }
+
         double ratio = brass_ms / native_ms;
-        results.push_back({"Prime Sieve (N=100k)", iters, native_ms, brass_ms, ratio, ratio <= 2.50, "<= 2.5x baseline"});
+        results.push_back({"Prime Sieve (N=100k)", iters, native_ms, brass_ms, ratio, ratio <= 1.30, "<= 1.3x baseline"});
         BenchmarkReporter::print_row(results.back());
     }
 
@@ -675,7 +674,10 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results) {
         JitExecutionEngine jit;
         jit.compile_and_load(*mod);
         auto collatz_fn = jit.get_function_ptr<int64_t(*)(int64_t)>("collatz_sum");
-        assert(collatz_fn != nullptr);
+        if (!collatz_fn) {
+            std::cerr << "FATAL: collatz_sum function pointer is null!\n";
+            std::abort();
+        }
 
         sw.start();
         int64_t jit_steps = 0;
@@ -687,9 +689,13 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results) {
         }
         double brass_ms = sw.stop_ms();
 
-        assert(native_steps == jit_steps);
+        if (native_steps != jit_steps) {
+            std::cerr << "FATAL: Collatz Sum result mismatch: native=" << native_steps << ", JIT=" << jit_steps << "\n";
+            std::abort();
+        }
+
         double ratio = brass_ms / native_ms;
-        results.push_back({"Collatz Sum (1..100k)", iters, native_ms, brass_ms, ratio, ratio <= 2.50, "<= 2.5x baseline"});
+        results.push_back({"Collatz Sum (1..100k)", iters, native_ms, brass_ms, ratio, ratio <= 1.30, "<= 1.3x baseline"});
         BenchmarkReporter::print_row(results.back());
     }
 
@@ -712,7 +718,10 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results) {
         JitExecutionEngine jit;
         jit.compile_and_load(*mod);
         auto matmul_fn = jit.get_function_ptr<void(*)(const int64_t*, const int64_t*, int64_t*, int64_t)>("matmul_i64");
-        assert(matmul_fn != nullptr);
+        if (!matmul_fn) {
+            std::cerr << "FATAL: matmul_i64 function pointer is null!\n";
+            std::abort();
+        }
 
         sw.start();
         for (size_t i = 0; i < iters; ++i) {
@@ -723,9 +732,13 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results) {
         }
         double brass_ms = sw.stop_ms();
 
-        assert(C_native == C_jit);
+        if (C_native != C_jit) {
+            std::cerr << "FATAL: MatMul 32x32 (i64) result mismatch between native and JIT!\n";
+            std::abort();
+        }
+
         double ratio = brass_ms / native_ms;
-        results.push_back({"MatMul 32x32 (i64)", iters, native_ms, brass_ms, ratio, ratio <= 3.00, "<= 3.0x baseline"});
+        results.push_back({"MatMul 32x32 (i64)", iters, native_ms, brass_ms, ratio, ratio <= 1.30, "<= 1.3x baseline"});
         BenchmarkReporter::print_row(results.back());
     }
 
@@ -748,7 +761,10 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results) {
         JitExecutionEngine jit;
         jit.compile_and_load(*mod);
         auto matmul_fn = jit.get_function_ptr<void(*)(const int64_t*, const int64_t*, int64_t*, int64_t)>("matmul_i64");
-        assert(matmul_fn != nullptr);
+        if (!matmul_fn) {
+            std::cerr << "FATAL: matmul_i64 function pointer is null!\n";
+            std::abort();
+        }
 
         sw.start();
         for (size_t i = 0; i < iters; ++i) {
@@ -759,9 +775,13 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results) {
         }
         double brass_ms = sw.stop_ms();
 
-        assert(C_native == C_jit);
+        if (C_native != C_jit) {
+            std::cerr << "FATAL: MatMul 64x64 (i64) result mismatch between native and JIT!\n";
+            std::abort();
+        }
+
         double ratio = brass_ms / native_ms;
-        results.push_back({"MatMul 64x64 (i64)", iters, native_ms, brass_ms, ratio, ratio <= 2.50, "<= 2.5x baseline"});
+        results.push_back({"MatMul 64x64 (i64)", iters, native_ms, brass_ms, ratio, ratio <= 1.30, "<= 1.3x baseline"});
         BenchmarkReporter::print_row(results.back());
     }
 
@@ -784,7 +804,10 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results) {
         JitExecutionEngine jit;
         jit.compile_and_load(*mod);
         auto matmul_fn = jit.get_function_ptr<void(*)(const double*, const double*, double*, int64_t)>("matmul_f64");
-        assert(matmul_fn != nullptr);
+        if (!matmul_fn) {
+            std::cerr << "FATAL: matmul_f64 function pointer is null!\n";
+            std::abort();
+        }
 
         sw.start();
         for (size_t i = 0; i < iters; ++i) {
@@ -795,12 +818,15 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results) {
         }
         double brass_ms = sw.stop_ms();
 
-        double diff = 0.0;
-        for (size_t i = 0; i < C_native.size(); ++i) diff += std::abs(C_native[i] - C_jit[i]);
-        assert(diff < 1e-6);
+        for (size_t i = 0; i < C_native.size(); ++i) {
+            if (std::abs(C_native[i] - C_jit[i]) > 1e-5) {
+                std::cerr << "FATAL: MatMul 32x32 (f64) result mismatch at index " << i << ": native=" << C_native[i] << ", JIT=" << C_jit[i] << "\n";
+                std::abort();
+            }
+        }
 
         double ratio = brass_ms / native_ms;
-        results.push_back({"MatMul 32x32 (f64)", iters, native_ms, brass_ms, ratio, ratio <= 3.50, "<= 3.5x baseline"});
+        results.push_back({"MatMul 32x32 (f64)", iters, native_ms, brass_ms, ratio, ratio <= 1.30, "<= 1.3x baseline"});
         BenchmarkReporter::print_row(results.back());
     }
 
@@ -823,7 +849,10 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results) {
         JitExecutionEngine jit;
         jit.compile_and_load(*mod);
         auto matmul_fn = jit.get_function_ptr<void(*)(const double*, const double*, double*, int64_t)>("matmul_f64");
-        assert(matmul_fn != nullptr);
+        if (!matmul_fn) {
+            std::cerr << "FATAL: matmul_f64 function pointer is null!\n";
+            std::abort();
+        }
 
         sw.start();
         for (size_t i = 0; i < iters; ++i) {
@@ -834,12 +863,15 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results) {
         }
         double brass_ms = sw.stop_ms();
 
-        double diff = 0.0;
-        for (size_t i = 0; i < C_native.size(); ++i) diff += std::abs(C_native[i] - C_jit[i]);
-        assert(diff < 1e-6);
+        for (size_t i = 0; i < C_native.size(); ++i) {
+            if (std::abs(C_native[i] - C_jit[i]) > 1e-5) {
+                std::cerr << "FATAL: MatMul 64x64 (f64) result mismatch at index " << i << ": native=" << C_native[i] << ", JIT=" << C_jit[i] << "\n";
+                std::abort();
+            }
+        }
 
         double ratio = brass_ms / native_ms;
-        results.push_back({"MatMul 64x64 (f64)", iters, native_ms, brass_ms, ratio, ratio <= 3.50, "<= 3.5x baseline"});
+        results.push_back({"MatMul 64x64 (f64)", iters, native_ms, brass_ms, ratio, ratio <= 1.30, "<= 1.3x baseline"});
         BenchmarkReporter::print_row(results.back());
     }
 
@@ -867,7 +899,10 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results) {
         JitExecutionEngine jit;
         jit.compile_and_load(*mod);
         auto list_fn = jit.get_function_ptr<int64_t(*)(const BenchListNode*)>("list_traversal");
-        assert(list_fn != nullptr);
+        if (!list_fn) {
+            std::cerr << "FATAL: list_traversal function pointer is null!\n";
+            std::abort();
+        }
 
         sw.start();
         int64_t jit_sum = 0;
@@ -879,9 +914,13 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results) {
         }
         double brass_ms = sw.stop_ms();
 
-        assert(native_sum == jit_sum);
+        if (native_sum != jit_sum) {
+            std::cerr << "FATAL: Linked List Traversal result mismatch: native=" << native_sum << ", JIT=" << jit_sum << "\n";
+            std::abort();
+        }
+
         double ratio = brass_ms / native_ms;
-        results.push_back({"Linked List Traversal (50k)", iters, native_ms, brass_ms, ratio, ratio <= 2.50, "<= 2.5x baseline"});
+        results.push_back({"Linked List Traversal (50k)", iters, native_ms, brass_ms, ratio, ratio <= 1.30, "<= 1.3x baseline"});
         BenchmarkReporter::print_row(results.back());
     }
 }

@@ -30,6 +30,7 @@ add_executable(brass_unit_tests
     differential/test_fuzz_speculation.cpp
     differential/test_fuzz_memory.cpp
     differential/test_fuzz_patching.cpp
+    differential/test_fuzz_matrix.cpp
     differential/fuzz_generator.cpp
 )
 

@@ -528,6 +528,12 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
         int64_t a0 = get_int(0), a1 = get_int(1), a2 = get_int(2), a3 = get_int(3);
         int64_t a4 = get_int(4), a5 = get_int(5), a6 = get_int(6), a7 = get_int(7);
 
+        if (ret_type.is_float()) {
+            auto fn8_f = reinterpret_cast<double(*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t)>(addr);
+            double r = fn8_f(a0, a1, a2, a3, a4, a5, a6, a7);
+            return RuntimeValue::from_f64(r);
+        }
+
         auto fn8 = reinterpret_cast<int64_t(*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t)>(addr);
         int64_t r = fn8(a0, a1, a2, a3, a4, a5, a6, a7);
 
