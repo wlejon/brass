@@ -41,6 +41,11 @@ struct BronzeEnv {
 };
 
 static codegen::JitExecutionEngine* g_active_jit = nullptr;
+static void* (*g_custom_fn_resolver)(const char*) = nullptr;
+
+void set_bronze_function_resolver(void* (*resolver)(const char*)) {
+    g_custom_fn_resolver = resolver;
+}
 
 struct BronzeClosure {
     char fn_name[64];
@@ -50,7 +55,12 @@ struct BronzeClosure {
 };
 
 void* bronze_resolve_function(const char* name) {
-    if (name && g_active_jit) {
+    if (!name) return nullptr;
+    if (g_custom_fn_resolver) {
+        void* ptr = g_custom_fn_resolver(name);
+        if (ptr) return ptr;
+    }
+    if (g_active_jit) {
         return g_active_jit->get_symbol_address(name);
     }
     return nullptr;

@@ -44,6 +44,7 @@ add_executable(brass_unit_tests
     differential/test_embedding_differential.cpp
     unit/test_bronze_il_translator.cpp
     differential/test_fuzz_closures_gc.cpp
+    differential/test_fuzz_js_loops.cpp
 )
 
 target_include_directories(brass_unit_tests
