@@ -481,9 +481,12 @@ void LinearScanAllocator::rewrite_instructions() {
 
             if (has_spill_def) {
                 original_spill_def = inst->defs[0];
-                is_xmm_def = (inst->opcode == LirOpcode::Movsd || inst->opcode == LirOpcode::Addsd ||
-                              inst->opcode == LirOpcode::Subsd || inst->opcode == LirOpcode::Mulsd ||
-                              inst->opcode == LirOpcode::Divsd || inst->opcode == LirOpcode::Xorpd);
+                is_xmm_def = (inst->opcode == LirOpcode::Movsd || inst->opcode == LirOpcode::Movss ||
+                              inst->opcode == LirOpcode::Addsd || inst->opcode == LirOpcode::Subsd ||
+                              inst->opcode == LirOpcode::Mulsd || inst->opcode == LirOpcode::Divsd ||
+                              inst->opcode == LirOpcode::Sqrtsd || inst->opcode == LirOpcode::Xorpd ||
+                              inst->opcode == LirOpcode::Cvtsi2sd || inst->opcode == LirOpcode::Cvtsi2sd32 ||
+                              inst->opcode == LirOpcode::Movq_gx);
                 def_scratch = is_xmm_def ? PReg::xmm(XMM::XMM15) : PReg::gpr(GPR::R11);
                 uint8_t sz = original_spill_def.size;
 
@@ -511,9 +514,12 @@ void LinearScanAllocator::rewrite_instructions() {
             // Handle any remaining spill uses with reserved scratch R10 (GPR) or XMM14 (XMM)
             for (size_t i = 0; i < inst->uses.size(); ++i) {
                 if (inst->uses[i].is_spill_slot()) {
-                    bool is_xmm_use = (inst->opcode == LirOpcode::Movsd || inst->opcode == LirOpcode::Addsd ||
-                                      inst->opcode == LirOpcode::Subsd || inst->opcode == LirOpcode::Mulsd ||
-                                      inst->opcode == LirOpcode::Divsd || inst->opcode == LirOpcode::Xorpd);
+                    bool is_xmm_use = (inst->opcode == LirOpcode::Movsd || inst->opcode == LirOpcode::Movss ||
+                                      inst->opcode == LirOpcode::Addsd || inst->opcode == LirOpcode::Subsd ||
+                                      inst->opcode == LirOpcode::Mulsd || inst->opcode == LirOpcode::Divsd ||
+                                      inst->opcode == LirOpcode::Sqrtsd || inst->opcode == LirOpcode::Ucomisd ||
+                                      inst->opcode == LirOpcode::Xorpd || inst->opcode == LirOpcode::Cvttsd2si ||
+                                      inst->opcode == LirOpcode::Cvttsd2si32 || inst->opcode == LirOpcode::Movq_xg);
                     PReg use_scratch = is_xmm_use ? PReg::xmm(XMM::XMM14) : PReg::gpr(GPR::R10);
                     uint8_t sz = inst->uses[i].size;
 

@@ -298,7 +298,11 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
             if (src.is_preg()) {
                 enc_.imul(dst, to_gpr(src));
             } else if (src.is_imm_int()) {
-                enc_.imul(dst, static_cast<int32_t>(src.imm_int));
+                if (inst.uses.size() >= 2 && inst.uses[0].is_preg() && inst.uses[0].preg_val != inst.defs[0].preg_val) {
+                    enc_.imul(dst, to_gpr(inst.uses[0]), static_cast<int32_t>(src.imm_int));
+                } else {
+                    enc_.imul(dst, static_cast<int32_t>(src.imm_int));
+                }
             } else {
                 enc_.imul(dst, to_mem_address(src));
             }
@@ -310,7 +314,11 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
             if (src.is_preg()) {
                 enc_.imul32(dst, to_gpr(src));
             } else if (src.is_imm_int()) {
-                enc_.imul32(dst, static_cast<int32_t>(src.imm_int));
+                if (inst.uses.size() >= 2 && inst.uses[0].is_preg() && inst.uses[0].preg_val != inst.defs[0].preg_val) {
+                    enc_.imul32(dst, to_gpr(inst.uses[0]), static_cast<int32_t>(src.imm_int));
+                } else {
+                    enc_.imul32(dst, static_cast<int32_t>(src.imm_int));
+                }
             } else {
                 enc_.imul32(dst, to_mem_address(src));
             }
@@ -680,7 +688,11 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
             break;
         }
         case LirOpcode::Ucomisd:
-            enc_.ucomisd(to_xmm(inst.uses[0]), to_xmm(inst.uses[1]));
+            if (inst.uses[1].is_mem() || inst.uses[1].is_spill_slot()) {
+                enc_.ucomisd(to_xmm(inst.uses[0]), to_mem_address(inst.uses[1]));
+            } else {
+                enc_.ucomisd(to_xmm(inst.uses[0]), to_xmm(inst.uses[1]));
+            }
             break;
         case LirOpcode::Xorpd:
             enc_.xorpd(to_xmm(inst.defs[0]), to_xmm(inst.uses.back()));
@@ -792,7 +804,11 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
             enc_.pop(to_gpr(inst.defs[0]));
             break;
         case LirOpcode::Lea:
-            enc_.lea(to_gpr(inst.defs[0]), to_mem_address(inst.uses[0]));
+            if (inst.defs[0].size == 4) {
+                enc_.lea32(to_gpr(inst.defs[0]), to_mem_address(inst.uses[0]));
+            } else {
+                enc_.lea(to_gpr(inst.defs[0]), to_mem_address(inst.uses[0]));
+            }
             break;
         case LirOpcode::Safepoint: {
             enc_.call("brass_gc_safepoint");

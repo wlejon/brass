@@ -7,6 +7,226 @@ namespace brass::x64 {
 
 using namespace brass::codegen;
 
+static std::pair<Condition, Condition> get_comparison_conditions(Opcode op) noexcept {
+    switch (op) {
+        case Opcode::eq:  return {Condition::E, Condition::E};
+        case Opcode::ne:  return {Condition::NE, Condition::NE};
+        case Opcode::slt: return {Condition::L, Condition::B};
+        case Opcode::ult: return {Condition::B, Condition::B};
+        case Opcode::sle: return {Condition::LE, Condition::BE};
+        case Opcode::ule: return {Condition::BE, Condition::BE};
+        case Opcode::sgt: return {Condition::G, Condition::A};
+        case Opcode::ugt: return {Condition::A, Condition::A};
+        case Opcode::sge: return {Condition::GE, Condition::AE};
+        case Opcode::uge: return {Condition::AE, Condition::AE};
+        default: return {Condition::None, Condition::None};
+    }
+}
+
+static constexpr Condition swap_relational_condition(Condition cond) noexcept {
+    switch (cond) {
+        case Condition::E:   return Condition::E;
+        case Condition::NE:  return Condition::NE;
+        case Condition::L:   return Condition::G;
+        case Condition::LE:  return Condition::GE;
+        case Condition::G:   return Condition::L;
+        case Condition::GE:  return Condition::LE;
+        case Condition::B:   return Condition::A;
+        case Condition::BE:  return Condition::AE;
+        case Condition::A:   return Condition::B;
+        case Condition::AE:  return Condition::BE;
+        default: return cond;
+    }
+}
+
+X64ISel::ImmIntInfo X64ISel::get_imm_int_info(const Value* val) const {
+    if (!val) return {};
+    if (val->is_instruction()) {
+        const Instruction* def = val->defining_instruction();
+        if (def) {
+            if (def->opcode() == Opcode::iconst_i32) {
+                return {true, static_cast<int64_t>(def->imm_i32()), true, def};
+            }
+            if (def->opcode() == Opcode::iconst_i64) {
+                int64_t v = def->imm_i64();
+                bool fits = (v >= INT32_MIN && v <= INT32_MAX);
+                return {true, v, fits, def};
+            }
+        }
+    }
+    return {};
+}
+
+bool X64ISel::can_fuse_load(const Instruction* load_inst, const Instruction* user_inst) const {
+    if (!load_inst || !user_inst) return false;
+    if (load_inst->opcode() != Opcode::load && load_inst->opcode() != Opcode::load_indexed) {
+        return false;
+    }
+    const Value* res = load_inst->result();
+    if (!res) return false;
+    auto it = use_count_.find(res);
+    if (it == use_count_.end() || it->second != 1) {
+        return false;
+    }
+    if (load_inst->parent() != user_inst->parent()) {
+        return false;
+    }
+    for (const Instruction* cur = load_inst->next(); cur != nullptr && cur != user_inst; cur = cur->next()) {
+        if (cur->opcode() == Opcode::store || cur->opcode() == Opcode::store_indexed ||
+            cur->is_call() || cur->opcode() == Opcode::safepoint || cur->opcode() == Opcode::guard) {
+            return false;
+        }
+    }
+    return true;
+}
+
+LirOperand X64ISel::get_load_mem_operand(const Instruction* load_inst) const {
+    if (!load_inst) return LirOperand{};
+    uint8_t sz = static_cast<uint8_t>(load_inst->type().size_in_bytes());
+    if (sz == 0) sz = 8;
+    if (load_inst->opcode() == Opcode::load) {
+        VReg base = get_vreg(load_inst->operand(0));
+        return LirOperand::mem(base, load_inst->offset(), sz);
+    } else if (load_inst->opcode() == Opcode::load_indexed) {
+        VReg base = get_vreg(load_inst->operand(0));
+        VReg index = get_vreg(load_inst->operand(1));
+        Scale sc = scale_from_int(load_inst->scale());
+        return LirOperand::mem(base, index, sc, load_inst->offset(), sz);
+    }
+    return LirOperand{};
+}
+
+void X64ISel::analyze_function(const Function& mir_fn) {
+    use_count_.clear();
+    skipped_insts_.clear();
+
+    for (const auto* bb : mir_fn.blocks()) {
+        for (const auto* inst : *bb) {
+            for (const auto* op : inst->operands()) {
+                if (op) use_count_[op]++;
+            }
+            for (const auto* arg : inst->branch_target().args) {
+                if (arg) use_count_[arg]++;
+            }
+            for (const auto* arg : inst->true_target().args) {
+                if (arg) use_count_[arg]++;
+            }
+            for (const auto* arg : inst->false_target().args) {
+                if (arg) use_count_[arg]++;
+            }
+            for (const auto* sv : inst->state_map()) {
+                if (sv) use_count_[sv]++;
+            }
+        }
+    }
+
+    // 2. Identify fused comparisons in br_if and guard
+    for (const auto* bb : mir_fn.blocks()) {
+        for (const auto* inst : *bb) {
+            if (inst->opcode() == Opcode::br_if || inst->opcode() == Opcode::guard) {
+                const Value* cond = inst->operand(0);
+                if (cond && cond->is_instruction()) {
+                    const Instruction* def_inst = cond->defining_instruction();
+                    if (def_inst && def_inst->parent() == bb && is_comparison(def_inst->opcode())) {
+                        if (use_count_[cond] == 1) {
+                            skipped_insts_.insert(def_inst);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    std::unordered_map<const Value*, uint32_t> folded_uses;
+
+    // 3. Count folded immediate uses and identify fusible loads for active instructions
+    for (const auto* bb : mir_fn.blocks()) {
+        for (const auto* inst : *bb) {
+            if (skipped_insts_.count(inst)) {
+                continue;
+            }
+
+            if (inst->opcode() == Opcode::br_if) {
+                const Value* cond = inst->operand(0);
+                if (cond && cond->is_instruction()) {
+                    const Instruction* def_inst = cond->defining_instruction();
+                    if (def_inst && def_inst->parent() == bb && is_comparison(def_inst->opcode()) && skipped_insts_.count(def_inst)) {
+                        const Value* lhs = def_inst->operand(0);
+                        const Value* rhs = def_inst->operand(1);
+                        ImmIntInfo rhs_imm = get_imm_int_info(rhs);
+                        ImmIntInfo lhs_imm = get_imm_int_info(lhs);
+
+                        if (rhs_imm.is_imm && rhs_imm.fits_i32) {
+                            folded_uses[rhs]++;
+                        } else if (lhs_imm.is_imm && lhs_imm.fits_i32) {
+                            folded_uses[lhs]++;
+                        } else if (rhs && rhs->is_instruction() && can_fuse_load(rhs->defining_instruction(), inst)) {
+                            skipped_insts_.insert(rhs->defining_instruction());
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            bool is_alu = false;
+            switch (inst->opcode()) {
+                case Opcode::add:
+                case Opcode::sub:
+                case Opcode::mul:
+                case Opcode::and_:
+                case Opcode::or_:
+                case Opcode::xor_:
+                case Opcode::shl:
+                case Opcode::lshr:
+                case Opcode::ashr:
+                case Opcode::udiv:
+                case Opcode::umod:
+                case Opcode::eq:
+                case Opcode::ne:
+                case Opcode::slt:
+                case Opcode::ult:
+                case Opcode::sle:
+                case Opcode::ule:
+                case Opcode::sgt:
+                case Opcode::ugt:
+                case Opcode::sge:
+                case Opcode::uge:
+                    is_alu = true;
+                    break;
+                default:
+                    break;
+            }
+
+            if (is_alu && inst->operand_count() >= 2) {
+                const Value* op0 = inst->operand(0);
+                const Value* op1 = inst->operand(1);
+                ImmIntInfo imm0 = get_imm_int_info(op0);
+                ImmIntInfo imm1 = get_imm_int_info(op1);
+
+                if (imm1.is_imm && imm1.fits_i32) {
+                    folded_uses[op1]++;
+                } else if (imm0.is_imm && imm0.fits_i32) {
+                    folded_uses[op0]++;
+                } else if (op1 && op1->is_instruction() && can_fuse_load(op1->defining_instruction(), inst)) {
+                    skipped_insts_.insert(op1->defining_instruction());
+                } else if (op0 && op0->is_instruction() && can_fuse_load(op0->defining_instruction(), inst)) {
+                    skipped_insts_.insert(op0->defining_instruction());
+                }
+            }
+        }
+    }
+
+    // 4. Skip iconsts whose uses have all been folded into immediate operands
+    for (const auto& [val, fold_count] : folded_uses) {
+        auto it = use_count_.find(val);
+        if (it != use_count_.end() && it->second == fold_count) {
+            if (val->is_instruction()) {
+                skipped_insts_.insert(val->defining_instruction());
+            }
+        }
+    }
+}
+
 X64ISel::X64ISel()
     : target_(Target::host()), cc_(CallingConvention::for_target(Target::host())) {}
 
@@ -24,6 +244,9 @@ std::unique_ptr<LirFunction> X64ISel::lower(const Function& mir_fn) {
     lir_fn_->name = std::string(mir_fn.name());
     lir_fn_->return_type = mir_fn.return_type();
     lir_fn_->calling_conv = cc_;
+
+    // 0. Pre-analyze function to identify fusible comparisons, loads, and immediate folds
+    analyze_function(mir_fn);
 
     // 1. Create all LIR blocks matching MIR blocks
     for (const auto* bb : mir_fn.blocks()) {
@@ -216,7 +439,9 @@ void X64ISel::lower_block(const BasicBlock& bb) {
     if (!lir_bb) return;
 
     for (const auto* inst : bb) {
-        lower_instruction(*inst, *lir_bb);
+        if (!skipped_insts_.count(inst)) {
+            lower_instruction(*inst, *lir_bb);
+        }
     }
 }
 
@@ -394,18 +619,81 @@ void X64ISel::lower_branch(const Instruction& inst, LirBlock& lir_bb) {
 }
 
 void X64ISel::lower_branch_if(const Instruction& inst, LirBlock& lir_bb) {
-    VReg cond = get_vreg(inst.operand(0));
+    const Value* cond_val = inst.operand(0);
     const auto& t_target = inst.true_target();
     const auto& f_target = inst.false_target();
 
-    auto cmp_inst = std::make_unique<LirInst>(LirOpcode::Cmp32);
-    cmp_inst->add_use(LirOperand::vreg(cond, 4));
-    cmp_inst->add_use(LirOperand::imm(0, 4));
-    lir_bb.append_inst(std::move(cmp_inst));
+    const Instruction* cmp_inst = cond_val ? cond_val->defining_instruction() : nullptr;
+    bool is_fused_cmp = cmp_inst && cmp_inst->parent() == inst.parent() && is_comparison(cmp_inst->opcode());
+
+    Condition branch_cond = Condition::NE;
+
+    if (is_fused_cmp) {
+        Opcode cmp_op = cmp_inst->opcode();
+        auto [gpr_c, float_c] = get_comparison_conditions(cmp_op);
+        const Value* lhs = cmp_inst->operand(0);
+        const Value* rhs = cmp_inst->operand(1);
+
+        if (lhs->type().is_float()) {
+            branch_cond = float_c;
+            if (rhs && rhs->is_instruction() && can_fuse_load(rhs->defining_instruction(), &inst)) {
+                auto ucomi = std::make_unique<LirInst>(LirOpcode::Ucomisd);
+                ucomi->add_use(LirOperand::vreg(get_vreg(lhs), 8));
+                ucomi->add_use(get_load_mem_operand(rhs->defining_instruction()));
+                lir_bb.append_inst(std::move(ucomi));
+            } else {
+                auto ucomi = std::make_unique<LirInst>(LirOpcode::Ucomisd);
+                ucomi->add_use(LirOperand::vreg(get_vreg(lhs), 8));
+                ucomi->add_use(LirOperand::vreg(get_vreg(rhs), 8));
+                lir_bb.append_inst(std::move(ucomi));
+            }
+        } else {
+            uint8_t sz = static_cast<uint8_t>(lhs->type().size_in_bytes());
+            if (sz == 0) sz = 8;
+            LirOpcode cmp_lir_op = (sz == 4) ? LirOpcode::Cmp32 : LirOpcode::Cmp;
+
+            ImmIntInfo rhs_imm = get_imm_int_info(rhs);
+            ImmIntInfo lhs_imm = get_imm_int_info(lhs);
+
+            if (rhs_imm.is_imm && rhs_imm.fits_i32) {
+                branch_cond = gpr_c;
+                auto cmp_lir = std::make_unique<LirInst>(cmp_lir_op);
+                cmp_lir->add_use(LirOperand::vreg(get_vreg(lhs), sz));
+                cmp_lir->add_use(LirOperand::imm(rhs_imm.val, sz));
+                lir_bb.append_inst(std::move(cmp_lir));
+            } else if (lhs_imm.is_imm && lhs_imm.fits_i32) {
+                branch_cond = swap_relational_condition(gpr_c);
+                auto cmp_lir = std::make_unique<LirInst>(cmp_lir_op);
+                cmp_lir->add_use(LirOperand::vreg(get_vreg(rhs), sz));
+                cmp_lir->add_use(LirOperand::imm(lhs_imm.val, sz));
+                lir_bb.append_inst(std::move(cmp_lir));
+            } else if (rhs && rhs->is_instruction() && can_fuse_load(rhs->defining_instruction(), &inst)) {
+                branch_cond = gpr_c;
+                auto cmp_lir = std::make_unique<LirInst>(cmp_lir_op);
+                cmp_lir->add_use(LirOperand::vreg(get_vreg(lhs), sz));
+                cmp_lir->add_use(get_load_mem_operand(rhs->defining_instruction()));
+                lir_bb.append_inst(std::move(cmp_lir));
+            } else {
+                branch_cond = gpr_c;
+                auto cmp_lir = std::make_unique<LirInst>(cmp_lir_op);
+                cmp_lir->add_use(LirOperand::vreg(get_vreg(lhs), sz));
+                cmp_lir->add_use(LirOperand::vreg(get_vreg(rhs), sz));
+                lir_bb.append_inst(std::move(cmp_lir));
+            }
+        }
+    } else {
+        VReg cond = get_vreg(cond_val);
+        uint8_t sz = cond.size;
+        auto test_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Test32 : LirOpcode::Test);
+        test_inst->add_use(LirOperand::vreg(cond, sz));
+        test_inst->add_use(LirOperand::vreg(cond, sz));
+        lir_bb.append_inst(std::move(test_inst));
+        branch_cond = Condition::NE;
+    }
 
     if (t_target.args.empty() && f_target.args.empty()) {
         auto jcc_inst = std::make_unique<LirInst>(LirOpcode::Jcc);
-        jcc_inst->condition = Condition::NE;
+        jcc_inst->condition = branch_cond;
         jcc_inst->add_use(LirOperand::label(t_target.block->id()));
         lir_bb.append_inst(std::move(jcc_inst));
 
@@ -417,7 +705,7 @@ void X64ISel::lower_branch_if(const Instruction& inst, LirBlock& lir_bb) {
         auto* true_trampoline = lir_fn_->create_block("br_if_true");
 
         auto jcc_inst = std::make_unique<LirInst>(LirOpcode::Jcc);
-        jcc_inst->condition = Condition::NE;
+        jcc_inst->condition = branch_cond;
         jcc_inst->add_use(LirOperand::label(true_trampoline->id));
         lir_bb.append_inst(std::move(jcc_inst));
 
@@ -571,17 +859,66 @@ void X64ISel::lower_safepoint(const Instruction& inst, LirBlock& lir_bb) {
 }
 
 void X64ISel::lower_guard(const Instruction& inst, LirBlock& lir_bb) {
-    VReg cond = get_vreg(inst.operand(0));
+    const Value* cond_val = inst.operand(0);
+    const Instruction* cmp_inst = cond_val ? cond_val->defining_instruction() : nullptr;
+    bool is_fused_cmp = cmp_inst && cmp_inst->parent() == inst.parent() && is_comparison(cmp_inst->opcode());
 
-    auto cmp_inst = std::make_unique<LirInst>(LirOpcode::Cmp32);
-    cmp_inst->add_use(LirOperand::vreg(cond, 4));
-    cmp_inst->add_use(LirOperand::imm(0, 4));
-    lir_bb.append_inst(std::move(cmp_inst));
+    Condition deopt_cond = Condition::E;
+
+    if (is_fused_cmp) {
+        Opcode cmp_op = cmp_inst->opcode();
+        auto [gpr_c, float_c] = get_comparison_conditions(cmp_op);
+        const Value* lhs = cmp_inst->operand(0);
+        const Value* rhs = cmp_inst->operand(1);
+
+        if (lhs->type().is_float()) {
+            deopt_cond = invert(float_c);
+            auto ucomi = std::make_unique<LirInst>(LirOpcode::Ucomisd);
+            ucomi->add_use(LirOperand::vreg(get_vreg(lhs), 8));
+            ucomi->add_use(LirOperand::vreg(get_vreg(rhs), 8));
+            lir_bb.append_inst(std::move(ucomi));
+        } else {
+            uint8_t sz = static_cast<uint8_t>(lhs->type().size_in_bytes());
+            if (sz == 0) sz = 8;
+            LirOpcode cmp_lir_op = (sz == 4) ? LirOpcode::Cmp32 : LirOpcode::Cmp;
+
+            ImmIntInfo rhs_imm = get_imm_int_info(rhs);
+            ImmIntInfo lhs_imm = get_imm_int_info(lhs);
+
+            if (rhs_imm.is_imm && rhs_imm.fits_i32) {
+                deopt_cond = invert(gpr_c);
+                auto cmp_lir = std::make_unique<LirInst>(cmp_lir_op);
+                cmp_lir->add_use(LirOperand::vreg(get_vreg(lhs), sz));
+                cmp_lir->add_use(LirOperand::imm(rhs_imm.val, sz));
+                lir_bb.append_inst(std::move(cmp_lir));
+            } else if (lhs_imm.is_imm && lhs_imm.fits_i32) {
+                deopt_cond = invert(swap_relational_condition(gpr_c));
+                auto cmp_lir = std::make_unique<LirInst>(cmp_lir_op);
+                cmp_lir->add_use(LirOperand::vreg(get_vreg(rhs), sz));
+                cmp_lir->add_use(LirOperand::imm(lhs_imm.val, sz));
+                lir_bb.append_inst(std::move(cmp_lir));
+            } else {
+                deopt_cond = invert(gpr_c);
+                auto cmp_lir = std::make_unique<LirInst>(cmp_lir_op);
+                cmp_lir->add_use(LirOperand::vreg(get_vreg(lhs), sz));
+                cmp_lir->add_use(LirOperand::vreg(get_vreg(rhs), sz));
+                lir_bb.append_inst(std::move(cmp_lir));
+            }
+        }
+    } else {
+        VReg cond = get_vreg(cond_val);
+        uint8_t sz = cond.size;
+        auto test_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Test32 : LirOpcode::Test);
+        test_inst->add_use(LirOperand::vreg(cond, sz));
+        test_inst->add_use(LirOperand::vreg(cond, sz));
+        lir_bb.append_inst(std::move(test_inst));
+        deopt_cond = Condition::E;
+    }
 
     auto* deopt_block = lir_fn_->create_block("guard_deopt");
 
     auto jcc_inst = std::make_unique<LirInst>(LirOpcode::Jcc);
-    jcc_inst->condition = Condition::E;
+    jcc_inst->condition = deopt_cond;
     jcc_inst->add_use(LirOperand::label(deopt_block->id));
     lir_bb.append_inst(std::move(jcc_inst));
 

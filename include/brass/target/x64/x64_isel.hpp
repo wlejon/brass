@@ -6,6 +6,7 @@
 #include <brass/codegen/lir.hpp>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace brass::x64 {
 
@@ -26,6 +27,20 @@ private:
 
     codegen::LirFunction* lir_fn_ = nullptr;
     std::unordered_map<const Value*, codegen::VReg> val_to_vreg_;
+    std::unordered_map<const Value*, uint32_t> use_count_;
+    std::unordered_set<const Instruction*> skipped_insts_;
+
+    struct ImmIntInfo {
+        bool is_imm = false;
+        int64_t val = 0;
+        bool fits_i32 = false;
+        const Instruction* def_inst = nullptr;
+    };
+
+    ImmIntInfo get_imm_int_info(const Value* val) const;
+    bool can_fuse_load(const Instruction* load_inst, const Instruction* user_inst) const;
+    codegen::LirOperand get_load_mem_operand(const Instruction* load_inst) const;
+    void analyze_function(const Function& mir_fn);
 
     codegen::VReg get_or_alloc_vreg(const Value* val);
     codegen::VReg get_vreg(const Value* val) const;
