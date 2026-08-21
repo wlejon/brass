@@ -22,7 +22,12 @@ size_t brass_stack_walk(
             break;
         }
 
-        const StackMapRecord* rec = stack_maps.find_record(cur_return_ip);
+        const FunctionStackMap* fn_map = stack_maps.find_function_by_ip(cur_return_ip);
+        if (fn_map == nullptr) {
+            break;
+        }
+
+        const StackMapRecord* rec = fn_map->find_record_by_ip(cur_return_ip);
         if (rec != nullptr) {
             for (const auto& root_loc : rec->roots) {
                 intptr_t slot_addr_int = static_cast<intptr_t>(cur_rbp) + root_loc.offset_from_rbp;

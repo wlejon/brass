@@ -1,4 +1,6 @@
 #include "test_framework.hpp"
+#include "diff_harness.hpp"
+#include "fuzz_generator.hpp"
 #include <brass/mir/module.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/verifier.hpp>
@@ -13,42 +15,7 @@
 #include <cmath>
 
 using namespace brass;
-
-namespace {
-
-void assert_diff(
-    const Module& mod,
-    std::string_view fn_name,
-    const std::vector<RuntimeValue>& args
-) {
-    Interpreter interp;
-    RuntimeValue interp_res = interp.run(mod, fn_name, args);
-
-    codegen::JitExecutionEngine jit(Target::host());
-    bool ok = jit.compile_and_load(mod);
-    REQUIRE(ok);
-
-    RuntimeValue jit_res = jit.invoke(fn_name, args);
-
-    if (interp_res.is_f64()) {
-        double d1 = interp_res.as_f64();
-        double d2 = jit_res.as_f64();
-        if (std::isnan(d1)) {
-            CHECK(std::isnan(d2));
-        } else {
-            CHECK(std::abs(d1 - d2) < 1e-9);
-        }
-    } else {
-        if (interp_res.raw_bits() != jit_res.raw_bits()) {
-            std::cout << "MISMATCH in " << fn_name << "\n";
-            std::cout << "Interp: " << interp_res.raw_bits() << " JIT: " << jit_res.raw_bits() << "\n";
-            print_module(mod, std::cout);
-        }
-        CHECK_EQ(interp_res.raw_bits(), jit_res.raw_bits());
-    }
-}
-
-} // namespace
+using namespace brass::test;
 
 TEST_CASE("Differential Exec - Recursive Fibonacci") {
     Module mod("diff_fib");
@@ -556,78 +523,20 @@ TEST_CASE("Differential Exec - Mutual Recursion Across Functions") {
     }
 }
 
-TEST_CASE("Differential Exec - Generative MIR Fuzzer") {
+TEST_CASE("Differential Exec - Generative Expression Fuzzer") {
     std::mt19937_64 rng(1337);
 
-    for (int seed = 0; seed < 40; ++seed) {
-        std::string mod_name = "fuzz_mod_" + std::to_string(seed);
+    for (uint64_t seed = 0; seed < 50; ++seed) {
+        std::string mod_name = "fuzz_expr_mod_" + std::to_string(seed);
         Module mod(mod_name);
-        Function* fn = mod.create_function("fuzz_fn", Type::i64(), {Type::i64(), Type::i64()});
+        std::string fn_name = "fuzz_expr_fn";
 
-        Builder b(mod);
-        b.set_function(fn);
-
-        BasicBlock* entry = b.append_block("entry");
-        Value* x = b.add_block_param(entry, Type::i64());
-        Value* y = b.add_block_param(entry, Type::i64());
-
-        std::vector<Value*> pool = {x, y};
-        int num_insts = 10 + (seed % 15);
-
-        for (int i = 0; i < num_insts; ++i) {
-            uint32_t op_choice = static_cast<uint32_t>(rng() % 10);
-            Value* opA = pool[rng() % pool.size()];
-            Value* opB = pool[rng() % pool.size()];
-
-            Value* res = nullptr;
-            switch (op_choice) {
-                case 0:
-                    res = b.build_add(opA, opB);
-                    break;
-                case 1:
-                    res = b.build_sub(opA, opB);
-                    break;
-                case 2:
-                    res = b.build_and(opA, opB);
-                    break;
-                case 3:
-                    res = b.build_or(opA, opB);
-                    break;
-                case 4:
-                    res = b.build_xor(opA, opB);
-                    break;
-                case 5:
-                    res = b.build_not(opA);
-                    break;
-                case 6: {
-                    Value* shift_c = b.build_iconst_i64(static_cast<int64_t>(rng() % 16));
-                    res = b.build_shl(opA, shift_c);
-                    break;
-                }
-                case 7: {
-                    Value* shift_c = b.build_iconst_i64(static_cast<int64_t>(rng() % 16));
-                    res = b.build_lshr(opA, shift_c);
-                    break;
-                }
-                case 8:
-                    res = b.build_popcnt(opA);
-                    break;
-                case 9:
-                    res = b.build_clz(opA);
-                    break;
-            }
-            if (res) pool.push_back(res);
-        }
-
-        b.build_ret(pool.back());
-
-        fn->rebuild_cfg_predecessors();
-        REQUIRE(verify_function(*fn));
+        generate_fuzz_expr(mod, fn_name, seed + 1000);
 
         for (int t = 0; t < 3; ++t) {
             int64_t vx = static_cast<int64_t>(rng() % 10000);
             int64_t vy = static_cast<int64_t>(rng() % 10000);
-            assert_diff(mod, "fuzz_fn", {RuntimeValue::from_i64(vx), RuntimeValue::from_i64(vy)});
+            assert_diff(mod, fn_name, {RuntimeValue::from_i64(vx), RuntimeValue::from_i64(vy)});
         }
     }
 }

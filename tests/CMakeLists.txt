@@ -25,11 +25,18 @@ add_executable(brass_unit_tests
     differential/test_differential_exec.cpp
     differential/test_moving_gc_native.cpp
     differential/test_speculation_differential.cpp
+    differential/test_fuzz_loops.cpp
+    differential/test_fuzz_gc.cpp
+    differential/test_fuzz_speculation.cpp
+    differential/test_fuzz_memory.cpp
+    differential/test_fuzz_patching.cpp
+    differential/fuzz_generator.cpp
 )
 
 target_include_directories(brass_unit_tests
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/harness
+        ${CMAKE_CURRENT_SOURCE_DIR}/differential
         ${BRASS_INCLUDE_DIR}
 )
 
@@ -43,6 +50,9 @@ add_test(NAME unit_tests COMMAND brass_unit_tests)
 # Benchmarks
 add_executable(brass_benchmarks
     benchmarks/benchmark_suite.cpp
+    benchmarks/bench_numeric.cpp
+    benchmarks/bench_gc.cpp
+    benchmarks/bench_compile_speed.cpp
 )
 
 target_include_directories(brass_benchmarks

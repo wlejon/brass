@@ -8,6 +8,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Export compile commands for language servers
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Default to Release if not specified
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Choose build type: Debug Release RelWithDebInfo MinSizeRel." FORCE)
+endif()
+
 # Compiler flags and warnings
 if(MSVC)
     add_compile_options(
@@ -15,6 +20,8 @@ if(MSVC)
         /permissive-
         /Zc:__cplusplus
         /utf-8
+        $<$<CONFIG:Release>:/O2>
+        $<$<CONFIG:Release>:/Oy->
     )
 else()
     add_compile_options(
@@ -24,6 +31,7 @@ else()
         -Wconversion
         -Wno-unused-parameter
         -fno-omit-frame-pointer
+        $<$<CONFIG:Release>:-O3>
     )
 endif()
 

@@ -10,7 +10,65 @@
 #include <cstddef>
 #include <cassert>
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
+
 namespace brass::bench {
+
+// ============================================================================
+// Compiler Barriers & Anti-DCE Utilities
+// ============================================================================
+
+template <typename T>
+inline void DoNotOptimize(T& val) {
+#if defined(__clang__)
+    asm volatile("" : "+r,m"(val) : : "memory");
+#elif defined(__GNUC__)
+    asm volatile("" : "+m"(val) : : "memory");
+#elif defined(_MSC_VER)
+    #if defined(_M_X64) || defined(_M_IX86)
+    _ReadWriteBarrier();
+    #endif
+    *reinterpret_cast<char volatile*>(&reinterpret_cast<char&>(val)) =
+        *reinterpret_cast<char const volatile*>(&reinterpret_cast<char const&>(val));
+#else
+    char volatile* p = reinterpret_cast<char volatile*>(&val);
+    *p = *p;
+#endif
+}
+
+template <typename T>
+inline void DoNotOptimize(const T& val) {
+#if defined(__clang__)
+    asm volatile("" : : "r,m"(val) : "memory");
+#elif defined(__GNUC__)
+    asm volatile("" : : "m"(val) : "memory");
+#elif defined(_MSC_VER)
+    #if defined(_M_X64) || defined(_M_IX86)
+    _ReadWriteBarrier();
+    #endif
+    char volatile v = *reinterpret_cast<char const volatile*>(&reinterpret_cast<char const&>(val));
+    (void)v;
+#else
+    char const volatile* p = reinterpret_cast<char const volatile*>(&val);
+    (void)*p;
+#endif
+}
+
+inline void ClobberMemory() {
+#if defined(__GNUC__) || defined(__clang__)
+    asm volatile("" : : : "memory");
+#elif defined(_MSC_VER)
+    #if defined(_M_X64) || defined(_M_IX86)
+    _ReadWriteBarrier();
+    #endif
+#endif
+}
+
+// ============================================================================
+// Stopwatch & Benchmark Timing
+// ============================================================================
 
 class Stopwatch {
 public:
@@ -79,9 +137,44 @@ public:
         std::cout << "  - Status:                      " << (passed ? "[PASS] Verified >= 1.5x Speedup" : "[FAIL] Below 1.5x Bar") << "\n";
         std::cout << "========================================================================================\n\n";
     }
+
+    static void print_compile_speed(
+        size_t function_count,
+        size_t instruction_count,
+        size_t mir_bytes,
+        size_t machine_bytes,
+        double parse_ms,
+        double verify_ms,
+        double codegen_ms,
+        double total_ms,
+        bool passed
+    ) {
+        double fn_per_sec = (total_ms > 0.0) ? (static_cast<double>(function_count) / (total_ms / 1000.0)) : 0.0;
+        double kb_per_sec = (total_ms > 0.0) ? (static_cast<double>(mir_bytes) / 1024.0 / (total_ms / 1000.0)) : 0.0;
+
+        std::cout << "\n========================================================================================\n";
+        std::cout << "  BRASS COMPILE-SPEED BENCHMARK:\n";
+        std::cout << "========================================================================================\n";
+        std::cout << "  - Functions Compiled:          " << function_count << "\n";
+        std::cout << "  - MIR Instructions:            " << instruction_count << "\n";
+        std::cout << "  - Textual MIR Source Size:     " << std::fixed << std::setprecision(1) << (static_cast<double>(mir_bytes) / 1024.0) << " KB\n";
+        std::cout << "  - Emitted Machine Code Size:   " << std::fixed << std::setprecision(1) << (static_cast<double>(machine_bytes) / 1024.0) << " KB\n";
+        std::cout << "  - Breakdown:\n";
+        std::cout << "      * MIR Parse:               " << std::fixed << std::setprecision(2) << parse_ms << " ms\n";
+        std::cout << "      * MIR Verification:        " << std::fixed << std::setprecision(2) << verify_ms << " ms\n";
+        std::cout << "      * ISEL, RegAlloc, Codegen: " << std::fixed << std::setprecision(2) << codegen_ms << " ms\n";
+        std::cout << "  - Total End-to-End Time:       " << std::fixed << std::setprecision(2) << total_ms << " ms (Target: < 2000.0 ms)\n";
+        std::cout << "  - Throughput:                  " << std::fixed << std::setprecision(0) << fn_per_sec << " functions/sec | "
+                  << std::fixed << std::setprecision(1) << kb_per_sec << " KB/sec\n";
+        std::cout << "  - Status:                      " << (passed ? "[PASS] Sub-2s Target Met" : "[FAIL] Exceeded 2s Limit") << "\n";
+        std::cout << "========================================================================================\n\n";
+    }
 };
 
+// ============================================================================
 // Shadow-stack frame definition for GC comparison
+// ============================================================================
+
 struct ShadowStackFrame {
     ShadowStackFrame* prev = nullptr;
     uint32_t count = 0;
@@ -95,10 +188,14 @@ struct ThreadShadowStack {
         frame->prev = top;
         frame->count = count;
         top = frame;
+        DoNotOptimize(top);
     }
 
     inline void pop() noexcept {
-        if (top) top = top->prev;
+        if (top) {
+            top = top->prev;
+            DoNotOptimize(top);
+        }
     }
 };
 
