@@ -394,7 +394,7 @@ uintptr_t host_gc_alloc_bridge(size_t size, uint64_t pointer_mask, uint32_t type
     auto* gc = brass::get_active_host_gc();
     if (!gc) return 0;
 
-    if (gc->stress_mode() || !gc->can_allocate_fast(size)) {
+    if (!gc->can_allocate_fast(size)) {
         std::vector<uintptr_t*> ptr_roots;
         std::vector<brass::HostValue*> val_roots;
         gc->collect(ptr_roots, val_roots, caller_rbp, caller_ip);
@@ -406,7 +406,7 @@ uint64_t host_gc_alloc_nanbox_bridge(size_t size, uint64_t pointer_mask, uint32_
     auto* gc = brass::get_active_host_gc();
     if (!gc) return brass::HostValue::null_val().raw();
 
-    if (gc->stress_mode() || !gc->can_allocate_fast(size)) {
+    if (!gc->can_allocate_fast(size)) {
         std::vector<uintptr_t*> ptr_roots;
         std::vector<brass::HostValue*> val_roots;
         gc->collect(ptr_roots, val_roots, caller_rbp, caller_ip);
@@ -424,9 +424,9 @@ void host_gc_safepoint() {
     auto* gc = brass::get_active_host_gc();
     if (!gc) return;
 
-    uintptr_t caller_rbp = 0;
-    uintptr_t caller_ip = 0;
-    get_caller_frame(caller_rbp, caller_ip);
+    void* frame = __builtin_frame_address(0);
+    uintptr_t caller_rbp = frame ? *reinterpret_cast<uintptr_t*>(frame) : 0;
+    uintptr_t caller_ip = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
     gc->safepoint(caller_rbp, caller_ip);
 }
 
@@ -434,10 +434,10 @@ uintptr_t host_gc_alloc(size_t size, uint64_t pointer_mask, uint32_t type_tag) {
     auto* gc = brass::get_active_host_gc();
     if (!gc) return 0;
 
-    if (gc->stress_mode() || !gc->can_allocate_fast(size)) {
-        uintptr_t caller_rbp = 0;
-        uintptr_t caller_ip = 0;
-        get_caller_frame(caller_rbp, caller_ip);
+    if (!gc->can_allocate_fast(size)) {
+        void* frame = __builtin_frame_address(0);
+        uintptr_t caller_rbp = frame ? *reinterpret_cast<uintptr_t*>(frame) : 0;
+        uintptr_t caller_ip = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
         std::vector<uintptr_t*> ptr_roots;
         std::vector<brass::HostValue*> val_roots;
         gc->collect(ptr_roots, val_roots, caller_rbp, caller_ip);
@@ -449,10 +449,10 @@ uint64_t host_gc_alloc_nanbox(size_t size, uint64_t pointer_mask, uint32_t type_
     auto* gc = brass::get_active_host_gc();
     if (!gc) return brass::HostValue::null_val().raw();
 
-    if (gc->stress_mode() || !gc->can_allocate_fast(size)) {
-        uintptr_t caller_rbp = 0;
-        uintptr_t caller_ip = 0;
-        get_caller_frame(caller_rbp, caller_ip);
+    if (!gc->can_allocate_fast(size)) {
+        void* frame = __builtin_frame_address(0);
+        uintptr_t caller_rbp = frame ? *reinterpret_cast<uintptr_t*>(frame) : 0;
+        uintptr_t caller_ip = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
         std::vector<uintptr_t*> ptr_roots;
         std::vector<brass::HostValue*> val_roots;
         gc->collect(ptr_roots, val_roots, caller_rbp, caller_ip);
