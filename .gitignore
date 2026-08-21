@@ -1,0 +1,26 @@
+# Build directories
+build/
+bin/
+lib/
+out/
+.cache/
+compile_commands.json
+
+# IDE / Editor files
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.sln
+*.vcxproj*
+
+# OS specific
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Test outputs and temporary files
+*.tmp
+*.log
+scratch/
