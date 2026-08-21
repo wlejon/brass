@@ -14,6 +14,9 @@ add_executable(brass_unit_tests
     unit/test_lir_isel.cpp
     unit/test_linear_scan.cpp
     unit/test_x64_codegen.cpp
+    unit/test_coff_writer.cpp
+    unit/test_elf_writer.cpp
+    differential/test_differential_exec.cpp
 )
 
 target_include_directories(brass_unit_tests

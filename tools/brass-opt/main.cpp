@@ -15,7 +15,10 @@ void print_usage(const char* prog) {
               << "  -v, --verify          Parse and verify MIR module\n"
               << "  -p, --print           Parse, verify, and print canonical MIR\n"
               << "  --check-roundtrip     Assert byte-identical parse(print(x)) roundtrip\n"
-              << "  -r, --run <fn>        Execute function <fn> in the reference MIR interpreter\n"
+              << "  -c, --compile         Compile MIR module to relocatable object file (.obj/.o)\n"
+              << "  --format <coff|elf>   Object file format for --compile (default: host format)\n"
+              << "  --jit                 Use in-memory JIT execution engine for --run\n"
+              << "  -r, --run <fn>        Execute function <fn>\n"
               << "  --args <a1> <a2>...   Arguments to pass to the function executed with --run\n"
               << "  --gc-stress           Enable moving GC stress mode (collects at every allocation/safepoint)\n"
               << "  -o <file>             Write output to <file> instead of stdout\n";
@@ -51,6 +54,15 @@ bool write_file(const std::string& path, const std::string& content) {
     return true;
 }
 
+bool write_binary_file(const std::string& path, const std::vector<uint8_t>& bytes) {
+    std::ofstream file(path, std::ios::out | std::ios::binary);
+    if (!file.is_open()) {
+        return false;
+    }
+    file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    return true;
+}
+
 brass::RuntimeValue parse_arg_for_type(brass::Type type, const std::string& arg_str) {
     switch (type.kind()) {
         case brass::TypeKind::I32:
@@ -80,11 +92,14 @@ int main(int argc, char** argv) {
     std::string input_file;
     std::string output_file;
     std::string run_fn;
+    std::string obj_format;
     std::vector<std::string> run_arg_strings;
     bool verify_only = false;
     bool print_canonical = false;
     bool check_roundtrip = false;
     bool gc_stress = false;
+    bool compile_object = false;
+    bool use_jit = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -99,6 +114,17 @@ int main(int argc, char** argv) {
             check_roundtrip = true;
         } else if (arg == "--gc-stress") {
             gc_stress = true;
+        } else if (arg == "-c" || arg == "--compile") {
+            compile_object = true;
+        } else if (arg == "--jit") {
+            use_jit = true;
+        } else if (arg == "--format") {
+            if (i + 1 < argc) {
+                obj_format = argv[++i];
+            } else {
+                std::cerr << "Error: --format requires an argument (coff or elf)\n";
+                return 1;
+            }
         } else if (arg == "-r" || arg == "--run") {
             if (i + 1 < argc) {
                 run_fn = argv[++i];
@@ -155,6 +181,42 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (compile_object) {
+        brass::Target target = brass::Target::host();
+        if (obj_format == "coff") {
+            target = brass::Target::x64_windows();
+        } else if (obj_format == "elf") {
+            target = brass::Target::x64_linux();
+        }
+
+        auto obj = brass::object::compile_module_to_object(*mod, target);
+        std::vector<uint8_t> binary_data;
+        if (target.is_windows() || obj_format == "coff") {
+            binary_data = brass::object::emit_coff_object(obj);
+        } else {
+            binary_data = brass::object::emit_elf_object(obj);
+        }
+
+        if (output_file.empty()) {
+            if (input_file != "-") {
+                size_t dot_pos = input_file.find_last_of('.');
+                std::string base = (dot_pos != std::string::npos) ? input_file.substr(0, dot_pos) : input_file;
+                output_file = base + (target.is_windows() ? ".obj" : ".o");
+            } else {
+                output_file = target.is_windows() ? "out.obj" : "out.o";
+            }
+        }
+
+        if (!write_binary_file(output_file, binary_data)) {
+            std::cerr << "Error: Could not write object file to '" << output_file << "'\n";
+            return 1;
+        }
+
+        std::cout << "Successfully emitted object file '" << output_file << "' ("
+                  << binary_data.size() << " bytes, " << (target.is_windows() ? "COFF" : "ELF64") << ")\n";
+        return 0;
+    }
+
     if (!run_fn.empty()) {
         const brass::Function* fn = mod->get_function(run_fn);
         if (!fn) {
@@ -175,6 +237,25 @@ int main(int argc, char** argv) {
             } else {
                 run_args.push_back(brass::RuntimeValue::from_i64(0));
             }
+        }
+
+        if (use_jit) {
+            brass::codegen::JitExecutionEngine jit(brass::Target::host());
+            if (!jit.compile_and_load(*mod)) {
+                std::cerr << "Error: JIT compilation/loading failed for module '" << mod->name() << "'\n";
+                return 1;
+            }
+
+            try {
+                brass::RuntimeValue result = jit.invoke(run_fn, run_args);
+                if (!fn->return_type().is_void()) {
+                    std::cout << result << "\n";
+                }
+            } catch (const std::exception& ex) {
+                std::cerr << "JIT Execution error: " << ex.what() << "\n";
+                return 1;
+            }
+            return 0;
         }
 
         brass::Interpreter interp;

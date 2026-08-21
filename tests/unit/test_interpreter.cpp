@@ -294,7 +294,7 @@ TEST_CASE("Interpreter - Moving GC Heap Execution with Safepoint") {
     // 4. Reads obj2.val and obj2.next.val, adds them and returns sum
     Function* fn = mod.create_function("gc_test_fn", Type::i64(), {});
     b.set_function(fn);
-    BasicBlock* bb = b.append_block("entry");
+    b.append_block("entry");
 
     Value* size16 = b.build_iconst_i64(16);
     Value* mask2 = b.build_iconst_i64(2); // bit 1 is gcref

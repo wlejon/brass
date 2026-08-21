@@ -107,6 +107,9 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
                     enc_.mov(dst_mem, src.preg_val.as_gpr());
                 } else if (src.is_imm_int()) {
                     enc_.mov(dst_mem, static_cast<int32_t>(src.imm_int));
+                } else {
+                    enc_.mov(GPR::R11, to_mem_address(src));
+                    enc_.mov(dst_mem, GPR::R11);
                 }
             }
             break;
@@ -130,6 +133,9 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
                     enc_.mov32(dst_mem, src.preg_val.as_gpr());
                 } else if (src.is_imm_int()) {
                     enc_.mov32(dst_mem, static_cast<int32_t>(src.imm_int));
+                } else {
+                    enc_.mov32(GPR::R11, to_mem_address(src));
+                    enc_.mov32(dst_mem, GPR::R11);
                 }
             }
             break;
@@ -460,6 +466,18 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
         case LirOpcode::Tzcnt32:
             enc_.tzcnt32(to_gpr(inst.defs[0]), to_gpr(inst.uses[0]));
             break;
+        case LirOpcode::Bsr:
+            enc_.bsr(to_gpr(inst.defs[0]), to_gpr(inst.uses[0]));
+            break;
+        case LirOpcode::Bsr32:
+            enc_.bsr32(to_gpr(inst.defs[0]), to_gpr(inst.uses[0]));
+            break;
+        case LirOpcode::Bsf:
+            enc_.bsf(to_gpr(inst.defs[0]), to_gpr(inst.uses[0]));
+            break;
+        case LirOpcode::Bsf32:
+            enc_.bsf32(to_gpr(inst.defs[0]), to_gpr(inst.uses[0]));
+            break;
         case LirOpcode::Cmp: {
             GPR op0 = to_gpr(inst.uses[0]);
             const auto& op1 = inst.uses[1];
@@ -508,7 +526,11 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
             enc_.setcc(inst.condition, to_gpr(inst.defs[0]));
             break;
         case LirOpcode::Cmovcc:
-            enc_.cmovcc(inst.condition, to_gpr(inst.defs[0]), to_gpr(inst.uses.back()));
+            if (inst.defs[0].size == 4) {
+                enc_.cmovcc32(inst.condition, to_gpr(inst.defs[0]), to_gpr(inst.uses.back()));
+            } else {
+                enc_.cmovcc(inst.condition, to_gpr(inst.defs[0]), to_gpr(inst.uses.back()));
+            }
             break;
         case LirOpcode::Movsd: {
             const auto& dst = inst.defs[0];
@@ -521,7 +543,13 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
                     enc_.movsd(dst_x, to_mem_address(src));
                 }
             } else {
-                enc_.movsd(to_mem_address(dst), src.preg_val.as_xmm());
+                MemAddress dst_mem = to_mem_address(dst);
+                if (src.is_preg()) {
+                    enc_.movsd(dst_mem, src.preg_val.as_xmm());
+                } else {
+                    enc_.movsd(XMM::XMM15, to_mem_address(src));
+                    enc_.movsd(dst_mem, XMM::XMM15);
+                }
             }
             break;
         }
@@ -536,7 +564,13 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
                     enc_.movss(dst_x, to_mem_address(src));
                 }
             } else {
-                enc_.movss(to_mem_address(dst), src.preg_val.as_xmm());
+                MemAddress dst_mem = to_mem_address(dst);
+                if (src.is_preg()) {
+                    enc_.movss(dst_mem, src.preg_val.as_xmm());
+                } else {
+                    enc_.movss(XMM::XMM15, to_mem_address(src));
+                    enc_.movss(dst_mem, XMM::XMM15);
+                }
             }
             break;
         }

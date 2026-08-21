@@ -195,6 +195,10 @@ enum class LirOpcode : uint16_t {
     Lzcnt32,
     Tzcnt,
     Tzcnt32,
+    Bsr,
+    Bsr32,
+    Bsf,
+    Bsf32,
     // Compare & Test
     Cmp,
     Cmp32,

@@ -182,15 +182,15 @@ TEST_CASE("ISEL - Bit Counting (clz, ctz, popcnt)") {
     auto lir = isel.lower(*fn);
     CHECK(lir != nullptr);
 
-    bool has_lzcnt = false, has_tzcnt = false, has_popcnt = false;
+    bool has_bsr = false, has_bsf = false, has_popcnt = false;
     for (const auto& inst : lir->blocks[0]->instructions) {
-        if (inst->opcode == LirOpcode::Lzcnt) has_lzcnt = true;
-        if (inst->opcode == LirOpcode::Tzcnt) has_tzcnt = true;
+        if (inst->opcode == LirOpcode::Bsr) has_bsr = true;
+        if (inst->opcode == LirOpcode::Bsf) has_bsf = true;
         if (inst->opcode == LirOpcode::Popcnt) has_popcnt = true;
     }
 
-    CHECK(has_lzcnt);
-    CHECK(has_tzcnt);
+    CHECK(has_bsr);
+    CHECK(has_bsf);
     CHECK(has_popcnt);
 }
 

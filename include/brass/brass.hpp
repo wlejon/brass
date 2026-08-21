@@ -27,8 +27,15 @@
 #include <brass/target/calling_conv.hpp>
 #include <brass/target/x64/x64_registers.hpp>
 #include <brass/target/x64/x64_operands.hpp>
-#include <brass/target/x64/code_buffer.hpp>
-#include <brass/target/x64/x64_encoder.hpp>
+#include <brass/codegen/lir.hpp>
+#include <brass/codegen/live_range.hpp>
+#include <brass/codegen/linear_scan.hpp>
+#include <brass/codegen/emit_context.hpp>
+#include <brass/codegen/jit_exec.hpp>
+
+#include <brass/object/object_writer.hpp>
+#include <brass/object/coff_writer.hpp>
+#include <brass/object/elf_writer.hpp>
 
 #include <string_view>
 

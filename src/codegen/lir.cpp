@@ -74,6 +74,10 @@ std::string_view to_string(LirOpcode op) noexcept {
         case LirOpcode::Lzcnt32: return "lzcnt32";
         case LirOpcode::Tzcnt: return "tzcnt";
         case LirOpcode::Tzcnt32: return "tzcnt32";
+        case LirOpcode::Bsr: return "bsr";
+        case LirOpcode::Bsr32: return "bsr32";
+        case LirOpcode::Bsf: return "bsf";
+        case LirOpcode::Bsf32: return "bsf32";
         case LirOpcode::Cmp: return "cmp";
         case LirOpcode::Cmp32: return "cmp32";
         case LirOpcode::Test: return "test";

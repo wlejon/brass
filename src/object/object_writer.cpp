@@ -1,0 +1,223 @@
+#include <brass/object/object_writer.hpp>
+#include <brass/target/x64/x64_isel.hpp>
+#include <brass/codegen/live_range.hpp>
+#include <brass/codegen/linear_scan.hpp>
+#include <brass/codegen/emit_context.hpp>
+#include <algorithm>
+
+namespace brass::object {
+
+Section* ObjectFile::get_section(std::string_view name) {
+    for (auto& sec : sections) {
+        if (sec.name == name) {
+            return &sec;
+        }
+    }
+    return nullptr;
+}
+
+const Section* ObjectFile::get_section(std::string_view name) const {
+    for (const auto& sec : sections) {
+        if (sec.name == name) {
+            return &sec;
+        }
+    }
+    return nullptr;
+}
+
+int32_t ObjectFile::get_section_index(std::string_view name) const {
+    for (size_t i = 0; i < sections.size(); ++i) {
+        if (sections[i].name == name) {
+            return static_cast<int32_t>(i);
+        }
+    }
+    return SECTION_UNDEF;
+}
+
+Section& ObjectFile::get_or_create_section(
+    std::string_view name,
+    SectionKind kind,
+    SectionFlags flags,
+    uint32_t alignment
+) {
+    for (auto& sec : sections) {
+        if (sec.name == name) {
+            return sec;
+        }
+    }
+    Section sec;
+    sec.name = std::string(name);
+    sec.kind = kind;
+    sec.flags = flags;
+    sec.alignment = alignment;
+    sections.push_back(std::move(sec));
+    return sections.back();
+}
+
+Section& ObjectFile::get_or_create_section(
+    std::string_view name,
+    SectionKind kind,
+    SectionFlags flags
+) {
+    return get_or_create_section(name, kind, flags, 16);
+}
+
+uint32_t ObjectFile::add_symbol(ObjectSymbol sym) {
+    for (size_t i = 0; i < symbols.size(); ++i) {
+        if (symbols[i].name == sym.name) {
+            symbols[i] = std::move(sym);
+            return static_cast<uint32_t>(i);
+        }
+    }
+    symbols.push_back(std::move(sym));
+    return static_cast<uint32_t>(symbols.size() - 1);
+}
+
+const ObjectSymbol* ObjectFile::find_symbol(std::string_view name) const {
+    for (const auto& s : symbols) {
+        if (s.name == name) {
+            return &s;
+        }
+    }
+    return nullptr;
+}
+
+ObjectSymbol* ObjectFile::find_symbol(std::string_view name) {
+    for (auto& s : symbols) {
+        if (s.name == name) {
+            return &s;
+        }
+    }
+    return nullptr;
+}
+
+ModuleCompiler::ModuleCompiler(const Target& target)
+    : target_(target), cc_(CallingConvention::for_target(target)) {}
+
+ModuleCompiler::ModuleCompiler(const Target& target, const CallingConvention& cc)
+    : target_(target), cc_(cc) {}
+
+ObjectFile ModuleCompiler::compile(const Module& mod) {
+    ObjectFile obj;
+    obj.target = target_;
+
+    Section& text_sec = obj.get_or_create_section(
+        ".text",
+        SectionKind::Text,
+        SectionFlags::Read | SectionFlags::Execute | SectionFlags::Alloc,
+        16
+    );
+
+    for (const auto* fn : mod.functions()) {
+        if (!fn) continue;
+
+        // 1. ISel to LIR
+        x64::X64ISel isel(target_, cc_);
+        auto lir = isel.lower(*fn);
+        if (!lir) continue;
+
+        // 2. Liveness Analysis
+        codegen::LivenessAnalysis liveness(*lir);
+        liveness.run();
+
+        // 3. Linear Scan Register Allocation
+        codegen::LinearScanAllocator regalloc(*lir, liveness, cc_);
+        regalloc.allocate();
+
+        // 4. Machine Code Emission
+        codegen::EmitContext emit_ctx(*lir, target_);
+        codegen::CompilationResult res = emit_ctx.compile();
+
+        // 5. Place in .text
+        text_sec.align_to(16);
+        size_t fn_offset = text_sec.data.size();
+        size_t fn_size = res.code_buffer.size();
+        text_sec.emit_bytes(res.code_buffer.span());
+
+        size_t prologue_sz = 0;
+        if (!lir->blocks.empty()) {
+            auto it = res.block_offsets.find(lir->blocks.front()->id);
+            if (it != res.block_offsets.end()) {
+                prologue_sz = it->second;
+            }
+        }
+
+        CompiledFunctionInfo cfi;
+        cfi.name = std::string(fn->name());
+        cfi.text_offset = fn_offset;
+        cfi.text_size = fn_size;
+        cfi.prologue_size = prologue_sz;
+        cfi.frame_info = lir->frame;
+        cfi.cc = cc_;
+        cfi.safepoints = std::move(res.safepoints);
+        obj.functions.push_back(std::move(cfi));
+
+        int32_t text_idx = obj.get_section_index(".text");
+        ObjectSymbol fn_sym;
+        fn_sym.name = std::string(fn->name());
+        fn_sym.section_index = text_idx;
+        fn_sym.value = fn_offset;
+        fn_sym.size = fn_size;
+        fn_sym.binding = SymbolBinding::Global;
+        fn_sym.type = SymbolType::Function;
+        obj.add_symbol(std::move(fn_sym));
+
+        for (const auto& r : res.code_buffer.relocations()) {
+            ObjectRelocation obj_r;
+            obj_r.offset = fn_offset + r.offset;
+            switch (r.kind) {
+                case x64::RelocationKind::PCRel32:
+                    obj_r.kind = RelocKind::PCRel32;
+                    break;
+                case x64::RelocationKind::Abs64:
+                    obj_r.kind = RelocKind::Abs64;
+                    break;
+                case x64::RelocationKind::SecRel32:
+                    obj_r.kind = RelocKind::SecRel32;
+                    break;
+            }
+            obj_r.symbol_name = r.symbol_name;
+            obj_r.addend = r.addend;
+            text_sec.relocations.push_back(std::move(obj_r));
+        }
+    }
+
+    // Record external symbols
+    for (std::string_view ext_sym : mod.external_symbols()) {
+        if (!obj.find_symbol(ext_sym)) {
+            ObjectSymbol sym;
+            sym.name = std::string(ext_sym);
+            sym.section_index = SECTION_UNDEF;
+            sym.value = 0;
+            sym.size = 0;
+            sym.binding = SymbolBinding::Global;
+            sym.type = SymbolType::Function;
+            obj.add_symbol(std::move(sym));
+        }
+    }
+
+    // Add any referenced relocation symbol not yet registered
+    for (const auto& sec : obj.sections) {
+        for (const auto& r : sec.relocations) {
+            if (!r.symbol_name.empty() && !obj.find_symbol(r.symbol_name)) {
+                ObjectSymbol sym;
+                sym.name = r.symbol_name;
+                sym.section_index = SECTION_UNDEF;
+                sym.value = 0;
+                sym.size = 0;
+                sym.binding = SymbolBinding::Global;
+                sym.type = SymbolType::Function;
+                obj.add_symbol(std::move(sym));
+            }
+        }
+    }
+
+    return obj;
+}
+
+ObjectFile compile_module_to_object(const Module& mod, const Target& target) {
+    ModuleCompiler compiler(target);
+    return compiler.compile(mod);
+}
+
+} // namespace brass::object

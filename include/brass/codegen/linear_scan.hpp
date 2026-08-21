@@ -4,6 +4,7 @@
 #include <brass/codegen/live_range.hpp>
 #include <brass/target/calling_conv.hpp>
 #include <vector>
+#include <set>
 #include <unordered_map>
 #include <cstdint>
 
@@ -41,8 +42,8 @@ private:
     void expire_old_intervals(uint32_t current_start);
     bool try_allocate_free_reg(LiveInterval& interval);
     void allocate_blocked_reg(LiveInterval& interval);
+    std::set<uint8_t> get_occupied_regs(const LiveInterval& interval) const;
     int32_t allocate_spill_slot(bool is_gcref);
-
     void rewrite_instructions();
 };
 
