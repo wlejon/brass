@@ -45,6 +45,11 @@
 #include <brass/runtime/resume_table.hpp>
 #include <brass/runtime/patcher.hpp>
 
+#include <brass/embedding/nanbox.hpp>
+#include <brass/embedding/host_gc.hpp>
+#include <brass/embedding/embedding.hpp>
+#include <brass/embedding/brass_c_api.h>
+
 #include <string_view>
 
 namespace brass {

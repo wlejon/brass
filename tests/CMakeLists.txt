@@ -37,6 +37,8 @@ add_executable(brass_unit_tests
     differential/fuzz_generator.cpp
     benchmarks/bench_numeric_modules.cpp
     unit/test_msvc_milestone.cpp
+    unit/test_embedding_api.cpp
+    differential/test_embedding_differential.cpp
 )
 
 target_include_directories(brass_unit_tests
