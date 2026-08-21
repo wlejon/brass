@@ -453,7 +453,33 @@ bool Verifier::verify_function(const Function& fn) {
                     break;
 
                 case Opcode::add:
-                case Opcode::sub:
+                case Opcode::sub: {
+                    if (inst->operand_count() != 2 || !inst->operand(0) || !inst->operand(1)) {
+                        report_error(inst_prefix + "Requires 2 operands.");
+                    } else {
+                        Type t0 = inst->operand(0)->type();
+                        Type t1 = inst->operand(1)->type();
+                        if (t0.is_pointer_or_gcref() && t1.is_integer()) {
+                            if (inst->type() != t0) {
+                                report_error(inst_prefix + "Pointer arithmetic result type must match base pointer type.");
+                            }
+                        } else if (op == Opcode::sub && t0.is_pointer_or_gcref() && t0 == t1) {
+                            if (inst->type() != Type::i64()) {
+                                report_error(inst_prefix + "Pointer difference result type must be i64.");
+                            }
+                        } else if (t0 != t1) {
+                            report_error(inst_prefix + "Operand types mismatch: " +
+                                         std::string(t0.name()) + " vs " + std::string(t1.name()) + ".");
+                        } else if (!t0.is_numeric()) {
+                            report_error(inst_prefix + "Operands must be numeric or pointer.");
+                        } else if (inst->type() != t0) {
+                            report_error(inst_prefix + "Result type (" + std::string(inst->type().name()) +
+                                         ") must match operand type (" + std::string(t0.name()) + ").");
+                        }
+                    }
+                    break;
+                }
+
                 case Opcode::mul:
                 case Opcode::sdiv:
                 case Opcode::udiv:

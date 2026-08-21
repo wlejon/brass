@@ -784,6 +784,36 @@ void X64ISel::lower_binary_alu(
             }
         }
 
+        if (imm0.is_imm) {
+            if (imm0.val == 0) {
+                if (dst != src1) {
+                    auto mov_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
+                    mov_inst->add_def(LirOperand::vreg(dst, sz));
+                    mov_inst->add_use(LirOperand::vreg(src1, sz));
+                    lir_bb.append_inst(std::move(mov_inst));
+                }
+                auto neg_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Neg32 : LirOpcode::Neg);
+                neg_inst->add_def(LirOperand::vreg(dst, sz));
+                neg_inst->add_use(LirOperand::vreg(dst, sz));
+                neg_inst->mir_origin = &inst;
+                lir_bb.append_inst(std::move(neg_inst));
+                return;
+            } else if (imm0.fits_i32) {
+                auto mov_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
+                mov_inst->add_def(LirOperand::vreg(dst, sz));
+                mov_inst->add_use(LirOperand::imm(imm0.val, sz));
+                lir_bb.append_inst(std::move(mov_inst));
+
+                auto sub_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Sub32 : LirOpcode::Sub);
+                sub_inst->add_def(LirOperand::vreg(dst, sz));
+                sub_inst->add_use(LirOperand::vreg(dst, sz));
+                sub_inst->add_use(LirOperand::vreg(src1, sz));
+                sub_inst->mir_origin = &inst;
+                lir_bb.append_inst(std::move(sub_inst));
+                return;
+            }
+        }
+
         if (op1_val && op1_val->is_instruction() && can_fuse_load(op1_val->defining_instruction(), &inst)) {
             emit_mov_alu(src0, get_load_mem_operand(op1_val->defining_instruction()));
         } else if (imm1.is_imm && imm1.fits_i32) {

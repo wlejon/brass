@@ -7,6 +7,7 @@ add_executable(brass_unit_tests
     unit/test_mir_builder.cpp
     unit/test_mir_verifier.cpp
     unit/test_mir_printer_parser.cpp
+    unit/test_mir_loop_opt.cpp
     unit/test_mini_cheney.cpp
     unit/test_interpreter.cpp
     unit/test_target_calling_conv.cpp
@@ -34,6 +35,7 @@ add_executable(brass_unit_tests
     differential/test_fuzz_js_shapes.cpp
     differential/test_fuzz_optimizations.cpp
     differential/fuzz_generator.cpp
+    benchmarks/bench_numeric_modules.cpp
     unit/test_msvc_milestone.cpp
 )
 

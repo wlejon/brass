@@ -3,7 +3,8 @@
 #include <brass/codegen/live_range.hpp>
 #include <brass/codegen/linear_scan.hpp>
 #include <brass/codegen/peephole.hpp>
-#include <brass/codegen/emit_context.hpp>
+#include <brass/mir/loop_opt.hpp>
+#include <brass/mir/verifier.hpp>
 #include <algorithm>
 
 namespace brass::object {
@@ -112,9 +113,18 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
     for (const auto* fn : mod.functions()) {
         if (!fn) continue;
 
+        // 0. Clone and optimize MIR function
+        Module opt_mod(mod.name());
+        for (std::string_view sym : mod.external_symbols()) {
+            opt_mod.add_external_symbol(sym);
+        }
+        Function* opt_fn = clone_function(*fn, opt_mod);
+        optimize_function_loops(*opt_fn);
+        verify_function(*opt_fn);
+
         // 1. ISel to LIR
         x64::X64ISel isel(target_, cc_);
-        auto lir = isel.lower(*fn);
+        auto lir = isel.lower(*opt_fn);
         if (!lir) continue;
 
         // 2. Liveness Analysis

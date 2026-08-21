@@ -53,6 +53,10 @@ public:
 
     uint32_t next_value_id() noexcept { return next_value_id_++; }
     uint32_t next_block_id() noexcept { return next_block_id_++; }
+    uint32_t current_next_value_id() const noexcept { return next_value_id_; }
+    uint32_t current_next_block_id() const noexcept { return next_block_id_; }
+    void set_next_value_id(uint32_t id) noexcept { next_value_id_ = id; }
+    void set_next_block_id(uint32_t id) noexcept { next_block_id_ = id; }
 
     void rebuild_cfg_predecessors();
 

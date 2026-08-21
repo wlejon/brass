@@ -606,7 +606,19 @@ void LinearScanAllocator::rewrite_instructions() {
                 inst->defs[0] = LirOperand::preg(def_scratch, sz);
             }
 
-            // Handle any remaining spill uses with reserved scratch R10 (GPR) or XMM14 (XMM)
+            // Handle any remaining spill uses with reserved scratch registers R10/R11 (GPR) or XMM14/XMM15 (XMM)
+            std::vector<int32_t> orig_slot_indices(inst->uses.size(), -1);
+            for (size_t i = 0; i < inst->uses.size(); ++i) {
+                if (inst->uses[i].is_spill_slot()) {
+                    orig_slot_indices[i] = inst->uses[i].spill_slot;
+                }
+            }
+
+            int gpr_scratch_idx = (has_spill_def && !is_xmm_def) ? 0 : 0;
+            int xmm_scratch_idx = (has_spill_def && is_xmm_def) ? 0 : 0;
+            PReg gpr_scratches[2] = {PReg::gpr(GPR::R10), PReg::gpr(GPR::R11)};
+            PReg xmm_scratches[2] = {PReg::xmm(XMM::XMM14), PReg::xmm(XMM::XMM15)};
+
             for (size_t i = 0; i < inst->uses.size(); ++i) {
                 if (inst->uses[i].is_spill_slot()) {
                     bool is_xmm_use = (inst->opcode == LirOpcode::Movsd || inst->opcode == LirOpcode::Movss ||
@@ -615,18 +627,27 @@ void LinearScanAllocator::rewrite_instructions() {
                                       inst->opcode == LirOpcode::Sqrtsd || inst->opcode == LirOpcode::Ucomisd ||
                                       inst->opcode == LirOpcode::Xorpd || inst->opcode == LirOpcode::Cvttsd2si ||
                                       inst->opcode == LirOpcode::Cvttsd2si32 || inst->opcode == LirOpcode::Movq_gx);
-                    PReg use_scratch = is_xmm_use ? PReg::xmm(XMM::XMM14) : PReg::gpr(GPR::R10);
                     uint8_t sz = inst->uses[i].size;
+                    int32_t slot = inst->uses[i].spill_slot;
 
+                    // Check if this same slot was already loaded for a previous use
+                    PReg use_scratch;
                     bool already_loaded = false;
                     for (size_t j = 0; j < i; ++j) {
-                        if (inst->uses[j].is_preg() && inst->uses[j].preg_val == use_scratch) {
+                        if (orig_slot_indices[j] == slot && inst->uses[j].is_preg()) {
+                            use_scratch = inst->uses[j].preg_val;
                             already_loaded = true;
                             break;
                         }
                     }
 
                     if (!already_loaded) {
+                        if (is_xmm_use) {
+                            use_scratch = xmm_scratches[xmm_scratch_idx < 2 ? xmm_scratch_idx++ : 1];
+                        } else {
+                            use_scratch = gpr_scratches[gpr_scratch_idx < 2 ? gpr_scratch_idx++ : 1];
+                        }
+
                         auto load_use = std::make_unique<LirInst>(
                             is_xmm_use ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov)
                         );
