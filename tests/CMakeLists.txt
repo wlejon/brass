@@ -9,6 +9,8 @@ add_executable(brass_unit_tests
     unit/test_mir_printer_parser.cpp
     unit/test_mini_cheney.cpp
     unit/test_interpreter.cpp
+    unit/test_target_calling_conv.cpp
+    unit/test_x64_encoder.cpp
 )
 
 target_include_directories(brass_unit_tests

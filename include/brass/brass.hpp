@@ -23,6 +23,13 @@
 #include <brass/interpreter/frame.hpp>
 #include <brass/interpreter/interpreter.hpp>
 
+#include <brass/target/target.hpp>
+#include <brass/target/calling_conv.hpp>
+#include <brass/target/x64/x64_registers.hpp>
+#include <brass/target/x64/x64_operands.hpp>
+#include <brass/target/x64/code_buffer.hpp>
+#include <brass/target/x64/x64_encoder.hpp>
+
 #include <string_view>
 
 namespace brass {
