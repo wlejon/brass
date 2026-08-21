@@ -92,6 +92,46 @@ inline bool is_debug_build() {
 #endif
 }
 
+inline std::string get_provenance_git_commit() {
+    auto run_cmd = [](const char* cmd) -> std::string {
+        std::string out;
+#if defined(_WIN32)
+        FILE* pipe = _popen(cmd, "r");
+#else
+        FILE* pipe = popen(cmd, "r");
+#endif
+        if (!pipe) return "";
+        char buf[256];
+        while (fgets(buf, sizeof(buf), pipe) != nullptr) {
+            out += buf;
+        }
+#if defined(_WIN32)
+        int rc = _pclose(pipe);
+#else
+        int rc = pclose(pipe);
+#endif
+        if (rc != 0) return "";
+        while (!out.empty() && (out.back() == '\n' || out.back() == '\r' || out.back() == ' ' || out.back() == '\t')) {
+            out.pop_back();
+        }
+        return out;
+    };
+
+    std::string sha = run_cmd("git rev-parse --short HEAD");
+    if (!sha.empty()) {
+        std::string status = run_cmd("git status --porcelain");
+        if (!status.empty()) {
+            sha += "-dirty";
+        }
+        return sha;
+    }
+#if defined(BRASS_GIT_COMMIT)
+    return BRASS_GIT_COMMIT;
+#else
+    return "unknown";
+#endif
+}
+
 // ============================================================================
 // Stopwatch & Benchmark Timing
 // ============================================================================
@@ -136,6 +176,7 @@ public:
         rm.ratios_ = {
             {"cheney_gc", 1.25},
             {"collatz", 1.30},
+            {"compile_speed", 1000.00},
             {"fib", 1.25},
             {"icache", 0.75},
             {"linked_list", 0.88},
@@ -261,9 +302,15 @@ public:
             if (res.ratio > max_allowed) {
                 all_passed = false;
                 std::ostringstream oss;
-                oss << "Benchmark '" << res.name << "' (key: " << res.key << "): measured "
-                    << std::fixed << std::setprecision(2) << res.ratio << "x exceeds ratchet "
-                    << golden << "x * " << max_regression_factor << " (" << max_allowed << "x)";
+                if (res.key == "compile_speed") {
+                    oss << "Benchmark '" << res.name << "' (key: " << res.key << "): measured "
+                        << std::fixed << std::setprecision(2) << res.ratio << " ms exceeds ratchet "
+                        << golden << " ms * " << max_regression_factor << " (" << max_allowed << " ms)";
+                } else {
+                    oss << "Benchmark '" << res.name << "' (key: " << res.key << "): measured "
+                        << std::fixed << std::setprecision(2) << res.ratio << "x exceeds ratchet "
+                        << golden << "x * " << max_regression_factor << " (" << max_allowed << "x)";
+                }
                 out_failures.push_back(oss.str());
             }
         }
@@ -305,12 +352,8 @@ public:
         char time_str[64];
         std::strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", &tm_buf);
 
-        // 2. Git SHA
-#if defined(BRASS_GIT_COMMIT)
-        std::string git_sha = BRASS_GIT_COMMIT;
-#else
-        std::string git_sha = "unknown";
-#endif
+        // 2. Git SHA (runtime resolution falling back to compile-time definition)
+        std::string git_sha = get_provenance_git_commit();
 
         // 3. Build Type
 #if defined(BRASS_BUILD_TYPE)
@@ -412,9 +455,15 @@ public:
             std::string status_str = is_debug_build() ? "[INFO]" : (pass ? "[PASS]" : "[FAIL]");
 
             std::ostringstream s_golden, s_max, s_measured;
-            s_golden << std::fixed << std::setprecision(2) << golden << "x";
-            s_max << std::fixed << std::setprecision(2) << max_allowed << "x";
-            s_measured << std::fixed << std::setprecision(2) << res.ratio << "x";
+            if (res.key == "compile_speed") {
+                s_golden << std::fixed << std::setprecision(2) << golden << " ms";
+                s_max << std::fixed << std::setprecision(2) << max_allowed << " ms";
+                s_measured << std::fixed << std::setprecision(2) << res.ratio << " ms";
+            } else {
+                s_golden << std::fixed << std::setprecision(2) << golden << "x";
+                s_max << std::fixed << std::setprecision(2) << max_allowed << "x";
+                s_measured << std::fixed << std::setprecision(2) << res.ratio << "x";
+            }
 
             std::cout << std::left
                       << std::setw(24) << res.key

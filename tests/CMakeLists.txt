@@ -65,6 +65,17 @@ execute_process(
 )
 if(NOT BRASS_GIT_COMMIT_HASH)
     set(BRASS_GIT_COMMIT_HASH "unknown")
+else()
+    execute_process(
+        COMMAND git status --porcelain
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_VARIABLE BRASS_GIT_STATUS
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(BRASS_GIT_STATUS)
+        set(BRASS_GIT_COMMIT_HASH "${BRASS_GIT_COMMIT_HASH}-dirty")
+    endif()
 endif()
 
 # Benchmarks

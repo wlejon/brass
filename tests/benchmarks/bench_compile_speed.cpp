@@ -410,6 +410,20 @@ void run_compile_speed_benchmark(std::vector<BenchmarkResult>& results) {
         sub_2s_target
     );
 
+    BenchmarkResult res;
+    res.key = "compile_speed";
+    res.name = "Compile Speed (6k Fns)";
+    res.iterations = target_functions;
+    res.native_ms = 0.0;
+    res.native_scalar_ms = 0.0;
+    res.brass_ms = total_ms;
+    res.ratio = total_ms;
+    res.ratio_vec = 0.0;
+    res.target_ratio = 2000.0;
+    res.passes_bar = sub_2s_target;
+    res.notes = "< 2000.0 ms target";
+    results.push_back(res);
+
     if (!sub_2s_target && !is_debug_build()) {
         std::cerr << "FATAL: Compile speed benchmark failed to meet 2s bar in Release build!\n";
         std::abort();

@@ -1,6 +1,7 @@
 {
   "cheney_gc": 1.25,
   "collatz": 1.30,
+  "compile_speed": 1000.00,
   "fib": 1.25,
   "icache": 0.75,
   "linked_list": 0.88,

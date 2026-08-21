@@ -34,6 +34,11 @@ else()
         -fno-omit-frame-pointer
         $<$<CONFIG:Release>:-O3>
     )
+    if(WIN32 OR MINGW)
+        add_link_options(-static -static-libgcc -static-libstdc++)
+    else()
+        add_link_options(-static-libgcc -static-libstdc++)
+    endif()
 endif()
 
 # brass library include directory
