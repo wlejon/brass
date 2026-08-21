@@ -32,6 +32,7 @@ add_executable(brass_unit_tests
     differential/test_fuzz_patching.cpp
     differential/test_fuzz_matrix.cpp
     differential/test_fuzz_js_shapes.cpp
+    differential/test_fuzz_optimizations.cpp
     differential/fuzz_generator.cpp
 )
 
@@ -48,6 +49,18 @@ target_link_libraries(brass_unit_tests
 )
 
 add_test(NAME unit_tests COMMAND brass_unit_tests)
+
+# Retrieve Git Commit SHA
+execute_process(
+    COMMAND git rev-parse --short HEAD
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE BRASS_GIT_COMMIT_HASH
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(NOT BRASS_GIT_COMMIT_HASH)
+    set(BRASS_GIT_COMMIT_HASH "unknown")
+endif()
 
 # Benchmarks
 add_executable(brass_benchmarks
@@ -66,9 +79,18 @@ target_include_directories(brass_benchmarks
         ${BRASS_INCLUDE_DIR}
 )
 
+target_compile_definitions(brass_benchmarks
+    PRIVATE
+        BRASS_GIT_COMMIT="${BRASS_GIT_COMMIT_HASH}"
+        BRASS_BUILD_TYPE="${CMAKE_BUILD_TYPE}"
+        BRASS_BENCH_RATCHET_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../bench/ratchet.json"
+)
+
 target_link_libraries(brass_benchmarks
     PRIVATE
         brass
 )
 
 add_test(NAME benchmarks COMMAND brass_benchmarks)
+add_test(NAME performance_ratchet COMMAND brass_benchmarks --check-ratchet)
+

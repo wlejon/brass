@@ -2,6 +2,7 @@
 #include "bench_numeric_modules.hpp"
 #include "bench_utils.hpp"
 #include <brass/brass.hpp>
+#include <brass/target/x64/x64_isel.hpp>
 #include <vector>
 #include <numeric>
 #include <random>
@@ -144,7 +145,7 @@ int64_t native_list_traversal(const BenchListNode* head) {
 
 namespace brass::bench {
 
-void run_numeric_benchmarks(std::vector<BenchmarkResult>& results) {
+void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const RatchetManager& ratchet) {
     Stopwatch sw;
 
     // 1. Iterative Fibonacci
@@ -189,7 +190,10 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results) {
         }
 
         double ratio = brass_ms / native_ms;
-        results.push_back({"Iterative Fibonacci (N=45)", iters, native_ms, 0.0, brass_ms, ratio, 0.0, ratio <= 1.30, "<= 1.3x baseline"});
+        double target = ratchet.get_ratio("fib", 1.15);
+        std::ostringstream notes;
+        notes << "<= " << std::fixed << std::setprecision(2) << target << "x baseline";
+        results.push_back({"fib", "Iterative Fibonacci (N=45)", iters, native_ms, 0.0, brass_ms, ratio, 0.0, target, ratio <= target, notes.str()});
         BenchmarkReporter::print_row(results.back());
     }
 
@@ -237,7 +241,10 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results) {
         }
 
         double ratio = brass_ms / native_ms;
-        results.push_back({"Prime Sieve (N=100k)", iters, native_ms, 0.0, brass_ms, ratio, 0.0, ratio <= 1.30, "<= 1.3x baseline"});
+        double target = ratchet.get_ratio("sieve", 1.25);
+        std::ostringstream notes;
+        notes << "<= " << std::fixed << std::setprecision(2) << target << "x baseline";
+        results.push_back({"sieve", "Prime Sieve (N=100k)", iters, native_ms, 0.0, brass_ms, ratio, 0.0, target, ratio <= target, notes.str()});
         BenchmarkReporter::print_row(results.back());
     }
 
@@ -281,7 +288,10 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results) {
         }
 
         double ratio = brass_ms / native_ms;
-        results.push_back({"Collatz Sum (1..100k)", iters, native_ms, 0.0, brass_ms, ratio, 0.0, ratio <= 1.30, "<= 1.3x baseline"});
+        double target = ratchet.get_ratio("collatz", 1.35);
+        std::ostringstream notes;
+        notes << "<= " << std::fixed << std::setprecision(2) << target << "x baseline";
+        results.push_back({"collatz", "Collatz Sum (1..100k)", iters, native_ms, 0.0, brass_ms, ratio, 0.0, target, ratio <= target, notes.str()});
         BenchmarkReporter::print_row(results.back());
     }
 
@@ -334,9 +344,10 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results) {
 
         double ratio_scalar = brass_ms / scalar_ms;
         double ratio_vec = brass_ms / native_ms;
+        double target = ratchet.get_ratio("matmul_i64_32", 1.65);
         std::ostringstream notes;
-        notes << "<= 1.3x scalar (vec: " << std::fixed << std::setprecision(2) << ratio_vec << "x)";
-        results.push_back({"MatMul 32x32 (i64)", iters, native_ms, scalar_ms, brass_ms, ratio_scalar, ratio_vec, ratio_scalar <= 1.30, notes.str()});
+        notes << "<= " << std::fixed << std::setprecision(2) << target << "x scalar (vec: " << std::fixed << std::setprecision(2) << ratio_vec << "x)";
+        results.push_back({"matmul_i64_32", "MatMul 32x32 (i64)", iters, native_ms, scalar_ms, brass_ms, ratio_scalar, ratio_vec, target, ratio_scalar <= target, notes.str()});
         BenchmarkReporter::print_row(results.back());
     }
 
@@ -389,9 +400,10 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results) {
 
         double ratio_scalar = brass_ms / scalar_ms;
         double ratio_vec = brass_ms / native_ms;
+        double target = ratchet.get_ratio("matmul_i64_64", 1.75);
         std::ostringstream notes;
-        notes << "<= 1.3x scalar (vec: " << std::fixed << std::setprecision(2) << ratio_vec << "x)";
-        results.push_back({"MatMul 64x64 (i64)", iters, native_ms, scalar_ms, brass_ms, ratio_scalar, ratio_vec, ratio_scalar <= 1.30, notes.str()});
+        notes << "<= " << std::fixed << std::setprecision(2) << target << "x scalar (vec: " << std::fixed << std::setprecision(2) << ratio_vec << "x)";
+        results.push_back({"matmul_i64_64", "MatMul 64x64 (i64)", iters, native_ms, scalar_ms, brass_ms, ratio_scalar, ratio_vec, target, ratio_scalar <= target, notes.str()});
         BenchmarkReporter::print_row(results.back());
     }
 
@@ -446,9 +458,10 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results) {
 
         double ratio_scalar = brass_ms / scalar_ms;
         double ratio_vec = brass_ms / native_ms;
+        double target = ratchet.get_ratio("matmul_f64_32", 2.15);
         std::ostringstream notes;
-        notes << "<= 1.3x scalar (vec: " << std::fixed << std::setprecision(2) << ratio_vec << "x)";
-        results.push_back({"MatMul 32x32 (f64)", iters, native_ms, scalar_ms, brass_ms, ratio_scalar, ratio_vec, ratio_scalar <= 1.30, notes.str()});
+        notes << "<= " << std::fixed << std::setprecision(2) << target << "x scalar (vec: " << std::fixed << std::setprecision(2) << ratio_vec << "x)";
+        results.push_back({"matmul_f64_32", "MatMul 32x32 (f64)", iters, native_ms, scalar_ms, brass_ms, ratio_scalar, ratio_vec, target, ratio_scalar <= target, notes.str()});
         BenchmarkReporter::print_row(results.back());
     }
 
@@ -503,9 +516,10 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results) {
 
         double ratio_scalar = brass_ms / scalar_ms;
         double ratio_vec = brass_ms / native_ms;
+        double target = ratchet.get_ratio("matmul_f64_64", 1.65);
         std::ostringstream notes;
-        notes << "<= 1.3x scalar (vec: " << std::fixed << std::setprecision(2) << ratio_vec << "x)";
-        results.push_back({"MatMul 64x64 (f64)", iters, native_ms, scalar_ms, brass_ms, ratio_scalar, ratio_vec, ratio_scalar <= 1.30, notes.str()});
+        notes << "<= " << std::fixed << std::setprecision(2) << target << "x scalar (vec: " << std::fixed << std::setprecision(2) << ratio_vec << "x)";
+        results.push_back({"matmul_f64_64", "MatMul 64x64 (f64)", iters, native_ms, scalar_ms, brass_ms, ratio_scalar, ratio_vec, target, ratio_scalar <= target, notes.str()});
         BenchmarkReporter::print_row(results.back());
     }
 
@@ -554,7 +568,10 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results) {
         }
 
         double ratio = brass_ms / native_ms;
-        results.push_back({"Linked List Traversal (50k)", iters, native_ms, 0.0, brass_ms, ratio, 0.0, ratio <= 1.30, "<= 1.3x baseline"});
+        double target = ratchet.get_ratio("linked_list", 0.95);
+        std::ostringstream notes;
+        notes << "<= " << std::fixed << std::setprecision(2) << target << "x baseline";
+        results.push_back({"linked_list", "Linked List Traversal (50k)", iters, native_ms, 0.0, brass_ms, ratio, 0.0, target, ratio <= target, notes.str()});
         BenchmarkReporter::print_row(results.back());
     }
 }

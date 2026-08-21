@@ -176,26 +176,19 @@ void LinearScanAllocator::expire_old_intervals(uint32_t current_start) {
     }
 }
 
-std::set<uint8_t> LinearScanAllocator::get_occupied_regs(const LiveInterval& interval) const {
+std::set<uint8_t> LinearScanAllocator::get_hard_blocked_regs(const LiveInterval& interval) const {
     using namespace brass::x64;
 
     bool is_gpr = interval.vreg.is_gpr();
     const auto& pool = is_gpr ? available_gprs_ : available_xmms_;
 
-    std::set<uint8_t> occupied_regs;
-    for (const auto* act : active_) {
-        if (act->vreg.reg_class == interval.vreg.reg_class && act->assigned_preg.is_valid()) {
-            if (act->overlaps(interval)) {
-                occupied_regs.insert(act->assigned_preg.code);
-            }
-        }
-    }
+    std::set<uint8_t> blocked;
 
     if (interval.spans_call) {
         for (const auto& reg : pool) {
             bool is_callee = is_gpr ? cc_.is_callee_saved(reg.as_gpr()) : cc_.is_callee_saved(reg.as_xmm());
             if (!is_callee) {
-                occupied_regs.insert(reg.code);
+                blocked.insert(reg.code);
             }
         }
     }
@@ -207,13 +200,13 @@ std::set<uint8_t> LinearScanAllocator::get_occupied_regs(const LiveInterval& int
             if (is_gpr && inst->clobbered_gprs != 0) {
                 for (int i = 0; i < 16; ++i) {
                     if (inst->clobbered_gprs & (1u << i)) {
-                        occupied_regs.insert(PReg::gpr(static_cast<GPR>(i)).code);
+                        blocked.insert(PReg::gpr(static_cast<GPR>(i)).code);
                     }
                 }
             } else if (!is_gpr && inst->clobbered_xmms != 0) {
                 for (int i = 0; i < 16; ++i) {
                     if (inst->clobbered_xmms & (1u << i)) {
-                        occupied_regs.insert(PReg::xmm(static_cast<XMM>(i)).code);
+                        blocked.insert(PReg::xmm(static_cast<XMM>(i)).code);
                     }
                 }
             }
@@ -228,7 +221,7 @@ std::set<uint8_t> LinearScanAllocator::get_occupied_regs(const LiveInterval& int
                         }
                     }
                     if (!is_our_pos) {
-                        occupied_regs.insert(inst->defs[i].preg_val.code);
+                        blocked.insert(inst->defs[i].preg_val.code);
                     }
                 } else if (i < inst->def_constraints.size() && inst->def_constraints[i].has_fixed_preg) {
                     PReg fixed_r = inst->def_constraints[i].fixed_preg;
@@ -241,7 +234,7 @@ std::set<uint8_t> LinearScanAllocator::get_occupied_regs(const LiveInterval& int
                             }
                         }
                         if (!is_our_pos) {
-                            occupied_regs.insert(fixed_r.code);
+                            blocked.insert(fixed_r.code);
                         }
                     }
                 }
@@ -257,7 +250,7 @@ std::set<uint8_t> LinearScanAllocator::get_occupied_regs(const LiveInterval& int
                         }
                     }
                     if (!is_our_pos) {
-                        occupied_regs.insert(inst->uses[i].preg_val.code);
+                        blocked.insert(inst->uses[i].preg_val.code);
                     }
                 } else if (i < inst->use_constraints.size() && inst->use_constraints[i].has_fixed_preg) {
                     PReg fixed_r = inst->use_constraints[i].fixed_preg;
@@ -270,7 +263,7 @@ std::set<uint8_t> LinearScanAllocator::get_occupied_regs(const LiveInterval& int
                             }
                         }
                         if (!is_our_pos) {
-                            occupied_regs.insert(fixed_r.code);
+                            blocked.insert(fixed_r.code);
                         }
                     }
                 }
@@ -278,6 +271,18 @@ std::set<uint8_t> LinearScanAllocator::get_occupied_regs(const LiveInterval& int
         }
     }
 
+    return blocked;
+}
+
+std::set<uint8_t> LinearScanAllocator::get_occupied_regs(const LiveInterval& interval) const {
+    std::set<uint8_t> occupied_regs = get_hard_blocked_regs(interval);
+    for (const auto* act : active_) {
+        if (act->vreg.reg_class == interval.vreg.reg_class && act->assigned_preg.is_valid()) {
+            if (act->overlaps(interval)) {
+                occupied_regs.insert(act->assigned_preg.code);
+            }
+        }
+    }
     return occupied_regs;
 }
 
@@ -388,13 +393,13 @@ bool LinearScanAllocator::try_allocate_free_reg(LiveInterval& interval) {
 void LinearScanAllocator::allocate_blocked_reg(LiveInterval& interval) {
     using namespace brass::x64;
 
-    auto occupied = get_occupied_regs(interval);
+    auto hard_blocked = get_hard_blocked_regs(interval);
 
     // Find candidate in active with lowest spill_weight (or furthest end_id for equal weights)
     LiveInterval* candidate = nullptr;
     for (auto* act : active_) {
         if (act->vreg.reg_class == interval.vreg.reg_class && act->assigned_preg.is_valid()) {
-            if (occupied.find(act->assigned_preg.code) != occupied.end()) {
+            if (hard_blocked.find(act->assigned_preg.code) != hard_blocked.end()) {
                 continue;
             }
             if (!candidate) {

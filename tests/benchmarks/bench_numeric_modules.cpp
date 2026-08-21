@@ -249,6 +249,7 @@ std::unique_ptr<Module> build_matmul_i64_module() {
 
     Value* zero = b.build_iconst_i64(0);
     Value* one = b.build_iconst_i64(1);
+    Value* eight = b.build_iconst_i64(8);
     b.build_br(loop_i_hdr, {zero});
 
     fn->append_block(loop_i_hdr);
@@ -260,6 +261,9 @@ std::unique_ptr<Module> build_matmul_i64_module() {
     fn->append_block(loop_i_body);
     b.position_at_end(loop_i_body);
     Value* row_a = b.build_mul(i, N);
+    Value* row_bytes = b.build_mul(row_a, eight);
+    Value* a_row = b.build_add(A, row_bytes);
+    Value* c_row = b.build_add(C, row_bytes);
     b.build_br(loop_j_hdr, {zero});
 
     fn->append_block(loop_j_hdr);
@@ -270,33 +274,33 @@ std::unique_ptr<Module> build_matmul_i64_module() {
 
     fn->append_block(loop_j_body);
     b.position_at_end(loop_j_body);
+    Value* j_bytes = b.build_mul(j, eight);
+    Value* b_col = b.build_add(B, j_bytes);
+    Value* n_bytes = b.build_mul(N, eight);
     b.build_br(loop_k_hdr, {zero, zero, zero});
 
     fn->append_block(loop_k_hdr);
     b.position_at_end(loop_k_hdr);
-    Value* k = b.add_block_param(loop_k_hdr, Type::i64());
-    Value* kN = b.add_block_param(loop_k_hdr, Type::i64());
+    Value* k_bytes = b.add_block_param(loop_k_hdr, Type::i64());
+    Value* kN_bytes = b.add_block_param(loop_k_hdr, Type::i64());
     Value* sum = b.add_block_param(loop_k_hdr, Type::i64());
-    Value* cond_k = b.build_slt(k, N);
+    Value* cond_k = b.build_slt(k_bytes, n_bytes);
     b.build_br_if(cond_k, loop_k_body, {}, loop_j_next, {sum});
 
     fn->append_block(loop_k_body);
     b.position_at_end(loop_k_body);
-    Value* idx_a = b.build_add(row_a, k);
-    Value* val_a = b.build_load_indexed(Type::i64(), A, idx_a, 8, 0);
-    Value* idx_b = b.build_add(kN, j);
-    Value* val_b = b.build_load_indexed(Type::i64(), B, idx_b, 8, 0);
+    Value* val_a = b.build_load_indexed(Type::i64(), a_row, k_bytes, 1, 0);
+    Value* val_b = b.build_load_indexed(Type::i64(), b_col, kN_bytes, 1, 0);
     Value* term = b.build_mul(val_a, val_b);
     Value* next_sum = b.build_add(sum, term);
-    Value* next_kN = b.build_add(kN, N);
-    Value* next_k = b.build_add(k, one);
-    b.build_br(loop_k_hdr, {next_k, next_kN, next_sum});
+    Value* next_kN_bytes = b.build_add(kN_bytes, n_bytes);
+    Value* next_k_bytes = b.build_add(k_bytes, eight);
+    b.build_br(loop_k_hdr, {next_k_bytes, next_kN_bytes, next_sum});
 
     fn->append_block(loop_j_next);
     b.position_at_end(loop_j_next);
     Value* final_sum = b.add_block_param(loop_j_next, Type::i64());
-    Value* idx_c = b.build_add(row_a, j);
-    b.build_store_indexed(Type::i64(), C, idx_c, 8, 0, final_sum);
+    b.build_store_indexed(Type::i64(), c_row, j, 8, 0, final_sum);
     Value* next_j = b.build_add(j, one);
     b.build_br(loop_j_hdr, {next_j});
 
@@ -339,6 +343,7 @@ std::unique_ptr<Module> build_matmul_f64_module() {
     Value* zero = b.build_iconst_i64(0);
     Value* zero_f = b.build_fconst_f64(0.0);
     Value* one = b.build_iconst_i64(1);
+    Value* eight = b.build_iconst_i64(8);
     b.build_br(loop_i_hdr, {zero});
 
     fn->append_block(loop_i_hdr);
@@ -350,6 +355,9 @@ std::unique_ptr<Module> build_matmul_f64_module() {
     fn->append_block(loop_i_body);
     b.position_at_end(loop_i_body);
     Value* row_a = b.build_mul(i, N);
+    Value* row_bytes = b.build_mul(row_a, eight);
+    Value* a_row = b.build_add(A, row_bytes);
+    Value* c_row = b.build_add(C, row_bytes);
     b.build_br(loop_j_hdr, {zero});
 
     fn->append_block(loop_j_hdr);
@@ -360,33 +368,33 @@ std::unique_ptr<Module> build_matmul_f64_module() {
 
     fn->append_block(loop_j_body);
     b.position_at_end(loop_j_body);
+    Value* j_bytes = b.build_mul(j, eight);
+    Value* b_col = b.build_add(B, j_bytes);
+    Value* n_bytes = b.build_mul(N, eight);
     b.build_br(loop_k_hdr, {zero, zero, zero_f});
 
     fn->append_block(loop_k_hdr);
     b.position_at_end(loop_k_hdr);
-    Value* k = b.add_block_param(loop_k_hdr, Type::i64());
-    Value* kN = b.add_block_param(loop_k_hdr, Type::i64());
+    Value* k_bytes = b.add_block_param(loop_k_hdr, Type::i64());
+    Value* kN_bytes = b.add_block_param(loop_k_hdr, Type::i64());
     Value* sum = b.add_block_param(loop_k_hdr, Type::f64());
-    Value* cond_k = b.build_slt(k, N);
+    Value* cond_k = b.build_slt(k_bytes, n_bytes);
     b.build_br_if(cond_k, loop_k_body, {}, loop_j_next, {sum});
 
     fn->append_block(loop_k_body);
     b.position_at_end(loop_k_body);
-    Value* idx_a = b.build_add(row_a, k);
-    Value* val_a = b.build_load_indexed(Type::f64(), A, idx_a, 8, 0);
-    Value* idx_b = b.build_add(kN, j);
-    Value* val_b = b.build_load_indexed(Type::f64(), B, idx_b, 8, 0);
+    Value* val_a = b.build_load_indexed(Type::f64(), a_row, k_bytes, 1, 0);
+    Value* val_b = b.build_load_indexed(Type::f64(), b_col, kN_bytes, 1, 0);
     Value* term = b.build_mul(val_a, val_b);
     Value* next_sum = b.build_add(sum, term);
-    Value* next_kN = b.build_add(kN, N);
-    Value* next_k = b.build_add(k, one);
-    b.build_br(loop_k_hdr, {next_k, next_kN, next_sum});
+    Value* next_kN_bytes = b.build_add(kN_bytes, n_bytes);
+    Value* next_k_bytes = b.build_add(k_bytes, eight);
+    b.build_br(loop_k_hdr, {next_k_bytes, next_kN_bytes, next_sum});
 
     fn->append_block(loop_j_next);
     b.position_at_end(loop_j_next);
     Value* final_sum = b.add_block_param(loop_j_next, Type::f64());
-    Value* idx_c = b.build_add(row_a, j);
-    b.build_store_indexed(Type::f64(), C, idx_c, 8, 0, final_sum);
+    b.build_store_indexed(Type::f64(), c_row, j, 8, 0, final_sum);
     Value* next_j = b.build_add(j, one);
     b.build_br(loop_j_hdr, {next_j});
 

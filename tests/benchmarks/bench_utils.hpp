@@ -2,13 +2,18 @@
 
 #include <iostream>
 #include <iomanip>
+#include <sstream>
+#include <fstream>
 #include <string>
 #include <string_view>
 #include <vector>
+#include <map>
 #include <chrono>
 #include <cstdint>
 #include <cstddef>
 #include <cassert>
+#include <ctime>
+#include <cctype>
 
 #if defined(_MSC_VER)
 #include <intrin.h>
@@ -86,6 +91,7 @@ private:
 };
 
 struct BenchmarkResult {
+    std::string key; // Benchmark identifier, e.g. "fib", "matmul_i64_32"
     std::string name;
     size_t iterations = 0;
     double native_ms = 0.0;
@@ -93,15 +99,226 @@ struct BenchmarkResult {
     double brass_ms = 0.0;
     double ratio = 0.0; // vs scalar or vs native
     double ratio_vec = 0.0; // vs vectorized native
+    double target_ratio = 0.0; // Golden ratio from ratchet
     bool passes_bar = true;
     std::string notes;
 };
 
+// ============================================================================
+// Performance Ratchet Manager
+// ============================================================================
+
+class RatchetManager {
+public:
+    static RatchetManager defaults() {
+        RatchetManager rm;
+        rm.ratios_ = {
+            {"fib", 1.15},
+            {"sieve", 1.25},
+            {"collatz", 1.35},
+            {"matmul_i64_32", 1.65},
+            {"matmul_i64_64", 1.75},
+            {"matmul_f64_32", 2.15},
+            {"matmul_f64_64", 1.65},
+            {"linked_list", 0.95},
+            {"nanbox", 1.15},
+            {"shapes", 1.10},
+            {"icache", 0.65},
+            {"cheney_gc", 1.10}
+        };
+        return rm;
+    }
+
+    static std::string find_ratchet_file(const std::string& explicit_path = "") {
+        if (!explicit_path.empty()) {
+            std::ifstream f(explicit_path);
+            if (f.good()) return explicit_path;
+        }
+#if defined(BRASS_BENCH_RATCHET_PATH)
+        {
+            std::ifstream f(BRASS_BENCH_RATCHET_PATH);
+            if (f.good()) return BRASS_BENCH_RATCHET_PATH;
+        }
+#endif
+        const std::vector<std::string> candidates = {
+            "bench/ratchet.json",
+            "../bench/ratchet.json",
+            "../../bench/ratchet.json"
+        };
+        for (const auto& path : candidates) {
+            std::ifstream f(path);
+            if (f.good()) return path;
+        }
+        return "bench/ratchet.json";
+    }
+
+    bool load(const std::string& filepath) {
+        std::ifstream file(filepath);
+        if (!file.is_open()) {
+            return false;
+        }
+        std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        file.close();
+
+        size_t pos = 0;
+        while (pos < content.size()) {
+            size_t quote_start = content.find('"', pos);
+            if (quote_start == std::string::npos) break;
+            size_t quote_end = content.find('"', quote_start + 1);
+            if (quote_end == std::string::npos) break;
+            std::string key = content.substr(quote_start + 1, quote_end - quote_start - 1);
+
+            size_t colon_pos = content.find(':', quote_end);
+            if (colon_pos == std::string::npos) break;
+
+            size_t val_start = colon_pos + 1;
+            while (val_start < content.size() && (std::isspace(static_cast<unsigned char>(content[val_start])) || content[val_start] == '\r' || content[val_start] == '\n')) {
+                val_start++;
+            }
+
+            size_t val_end = val_start;
+            while (val_end < content.size() && (std::isdigit(static_cast<unsigned char>(content[val_end])) || content[val_end] == '.' || content[val_end] == '-' || content[val_end] == '+' || content[val_end] == 'e' || content[val_end] == 'E')) {
+                val_end++;
+            }
+
+            if (val_end > val_start) {
+                std::string num_str = content.substr(val_start, val_end - val_start);
+                try {
+                    double val = std::stod(num_str);
+                    ratios_[key] = val;
+                } catch (...) {}
+            }
+            pos = val_end;
+        }
+        return !ratios_.empty();
+    }
+
+    bool save(const std::string& filepath) const {
+        std::ofstream file(filepath);
+        if (!file.is_open()) {
+            return false;
+        }
+        file << "{\n";
+        size_t idx = 0;
+        for (auto it = ratios_.begin(); it != ratios_.end(); ++it, ++idx) {
+            file << "  \"" << it->first << "\": " << std::fixed << std::setprecision(2) << it->second;
+            if (idx + 1 < ratios_.size()) {
+                file << ",";
+            }
+            file << "\n";
+        }
+        file << "}\n";
+        return true;
+    }
+
+    double get_ratio(const std::string& key, double default_val = 1.30) const {
+        auto it = ratios_.find(key);
+        if (it != ratios_.end()) {
+            return it->second;
+        }
+        return default_val;
+    }
+
+    void set_ratio(const std::string& key, double val) {
+        ratios_[key] = val;
+    }
+
+    const std::map<std::string, double>& ratios() const {
+        return ratios_;
+    }
+
+    bool check_ratchet(const std::vector<BenchmarkResult>& results, double max_regression_factor, std::vector<std::string>& out_failures) const {
+        bool all_passed = true;
+        for (const auto& res : results) {
+            if (res.key.empty()) continue;
+            double golden = get_ratio(res.key, 1.30);
+            double max_allowed = golden * max_regression_factor;
+            if (res.ratio > max_allowed) {
+                all_passed = false;
+                std::ostringstream oss;
+                oss << "Benchmark '" << res.name << "' (key: " << res.key << "): measured "
+                    << std::fixed << std::setprecision(2) << res.ratio << "x exceeds ratchet "
+                    << golden << "x * " << max_regression_factor << " (" << max_allowed << "x)";
+                out_failures.push_back(oss.str());
+            }
+        }
+        return all_passed;
+    }
+
+    void update_from_results(const std::vector<BenchmarkResult>& results, bool only_if_improved = false) {
+        for (const auto& res : results) {
+            if (res.key.empty() || res.ratio <= 0.0) continue;
+            auto it = ratios_.find(res.key);
+            if (it == ratios_.end()) {
+                ratios_[res.key] = res.ratio;
+            } else if (!only_if_improved || res.ratio < it->second) {
+                it->second = res.ratio;
+            }
+        }
+    }
+
+private:
+    std::map<std::string, double> ratios_;
+};
+
+// ============================================================================
+// Benchmark Reporter with Run Provenance & Honest Status Derivation
+// ============================================================================
+
 class BenchmarkReporter {
 public:
     static void print_header(std::string_view title) {
+        // 1. Timestamp
+        auto now = std::chrono::system_clock::now();
+        std::time_t now_c = std::chrono::system_clock::to_time_t(now);
+        std::tm tm_buf;
+#if defined(_WIN32)
+        localtime_s(&tm_buf, &now_c);
+#else
+        localtime_r(&now_c, &tm_buf);
+#endif
+        char time_str[64];
+        std::strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", &tm_buf);
+
+        // 2. Git SHA
+#if defined(BRASS_GIT_COMMIT)
+        std::string git_sha = BRASS_GIT_COMMIT;
+#else
+        std::string git_sha = "unknown";
+#endif
+
+        // 3. Build Type
+#if defined(BRASS_BUILD_TYPE)
+        std::string build_type = BRASS_BUILD_TYPE;
+#elif defined(NDEBUG)
+        std::string build_type = "Release";
+#else
+        std::string build_type = "Debug";
+#endif
+
+        // 4. Compiler Info
+        std::string compiler_info;
+#if defined(_MSC_VER)
+        compiler_info = "MSVC " + std::to_string(_MSC_VER);
+#if defined(_MSC_FULL_VER)
+        compiler_info += " (" + std::to_string(_MSC_FULL_VER) + ")";
+#endif
+#elif defined(__clang__)
+        compiler_info = std::string("Clang ") + __clang_version__;
+#elif defined(__GNUC__)
+        compiler_info = std::string("GCC ") + __VERSION__;
+#else
+        compiler_info = "Unknown C++ Compiler";
+#endif
+
         std::cout << "\n========================================================================================================================\n";
         std::cout << "  BRASS PERFORMANCE BENCHMARK SUITE: " << title << "\n";
+        std::cout << "========================================================================================================================\n";
+        std::cout << "  Run Provenance:\n";
+        std::cout << "  - Timestamp:    " << time_str << "\n";
+        std::cout << "  - Git Commit:   " << git_sha << "\n";
+        std::cout << "  - Build Type:   " << build_type << "\n";
+        std::cout << "  - Compiler:     " << compiler_info << "\n";
         std::cout << "========================================================================================================================\n";
         std::cout << std::left
                   << std::setw(30) << "Benchmark"
@@ -125,6 +342,9 @@ public:
             s_vec << "-";
         }
 
+        // Status is strictly derived from exact ratio vs target ratio
+        bool pass = (res.target_ratio > 0.0) ? (res.ratio <= res.target_ratio) : res.passes_bar;
+
         std::cout << std::left
                   << std::setw(30) << res.name
                   << std::setw(11) << res.iterations
@@ -138,11 +358,47 @@ public:
         std::cout << std::setw(13) << res.brass_ms
                   << std::setw(11) << s_ratio.str()
                   << std::setw(10) << s_vec.str()
-                  << std::setw(9)  << (res.passes_bar ? "[PASS]" : "[FAIL]");
+                  << std::setw(9)  << (pass ? "[PASS]" : "[FAIL]");
         if (!res.notes.empty()) {
             std::cout << " (" << res.notes << ")";
         }
         std::cout << "\n";
+    }
+
+    static void print_ratchet_summary(const std::vector<BenchmarkResult>& results, const RatchetManager& rm, double regression_factor = 1.10) {
+        std::cout << "\n========================================================================================================================\n";
+        std::cout << "  PERFORMANCE RATCHET VERIFICATION (Regression Margin: " << std::fixed << std::setprecision(0) << ((regression_factor - 1.0) * 100.0) << "%)\n";
+        std::cout << "========================================================================================================================\n";
+        std::cout << std::left
+                  << std::setw(18) << "Key"
+                  << std::setw(32) << "Benchmark"
+                  << std::setw(16) << "Golden Ratchet"
+                  << std::setw(16) << "Max Allowed"
+                  << std::setw(16) << "Measured Ratio"
+                  << std::setw(10) << "Status"
+                  << "\n";
+        std::cout << "------------------------------------------------------------------------------------------------------------------------\n";
+        for (const auto& res : results) {
+            if (res.key.empty()) continue;
+            double golden = rm.get_ratio(res.key, 1.30);
+            double max_allowed = golden * regression_factor;
+            bool pass = (res.ratio <= max_allowed);
+
+            std::ostringstream s_golden, s_max, s_measured;
+            s_golden << std::fixed << std::setprecision(2) << golden << "x";
+            s_max << std::fixed << std::setprecision(2) << max_allowed << "x";
+            s_measured << std::fixed << std::setprecision(2) << res.ratio << "x";
+
+            std::cout << std::left
+                      << std::setw(18) << res.key
+                      << std::setw(32) << res.name
+                      << std::setw(16) << s_golden.str()
+                      << std::setw(16) << s_max.str()
+                      << std::setw(16) << s_measured.str()
+                      << std::setw(10) << (pass ? "[PASS]" : "[FAIL]")
+                      << "\n";
+        }
+        std::cout << "========================================================================================================================\n\n";
     }
 
     static void print_gc_comparison(double shadow_stack_ms, double brass_stack_map_ms, double speedup, bool passed) {

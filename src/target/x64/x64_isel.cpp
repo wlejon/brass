@@ -153,14 +153,13 @@ void X64ISel::analyze_function(const Function& mir_fn) {
                             int64_t mult = m1.is_imm ? m1.val : (m0.is_imm ? m0.val : 0);
                             if (mult == 2 || mult == 3 || mult == 4 || mult == 5 || mult == 8 || mult == 9) {
                                 skipped_insts_.insert(def);
-                                skip_operand_if_dead(def->operand(0));
-                                skip_operand_if_dead(def->operand(1));
+                                if (m0.is_imm) skip_operand_if_dead(def->operand(0));
+                                if (m1.is_imm) skip_operand_if_dead(def->operand(1));
                             }
                         } else if (def->opcode() == Opcode::shl) {
                             ImmIntInfo s1 = get_imm_int_info(def->operand(1));
                             if (s1.is_imm && (s1.val == 1 || s1.val == 2 || s1.val == 3)) {
                                 skipped_insts_.insert(def);
-                                skip_operand_if_dead(def->operand(0));
                                 skip_operand_if_dead(def->operand(1));
                             }
                         } else if (def->opcode() == Opcode::add) {

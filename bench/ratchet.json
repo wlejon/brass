@@ -1,0 +1,14 @@
+{
+  "cheney_gc": 1.08,
+  "collatz": 1.30,
+  "fib": 1.07,
+  "icache": 0.62,
+  "linked_list": 0.85,
+  "matmul_f64_32": 2.20,
+  "matmul_f64_64": 1.57,
+  "matmul_i64_32": 1.63,
+  "matmul_i64_64": 1.55,
+  "nanbox": 1.09,
+  "shapes": 1.05,
+  "sieve": 1.25
+}

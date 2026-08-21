@@ -46,6 +46,7 @@ private:
     bool try_allocate_free_reg(LiveInterval& interval);
     void allocate_blocked_reg(LiveInterval& interval);
     std::set<uint8_t> get_occupied_regs(const LiveInterval& interval) const;
+    std::set<uint8_t> get_hard_blocked_regs(const LiveInterval& interval) const;
     int32_t allocate_spill_slot(bool is_gcref);
     void rewrite_instructions();
 };

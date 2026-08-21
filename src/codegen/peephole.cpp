@@ -260,6 +260,39 @@ bool PeepholeOptimizer::simplify_arithmetic(LirBlock& block) {
             continue;
         }
 
+        // 5. lea reg, [reg + other] -> add reg, other
+        //    lea reg, [other + reg] -> add reg, other
+        //    lea reg, [reg + disp]  -> add reg, disp
+        if (inst.opcode == LirOpcode::Lea && inst.defs.size() == 1 && inst.defs[0].is_preg() &&
+            inst.uses.size() == 1 && inst.uses[0].is_mem()) {
+            PReg dst_reg = inst.defs[0].preg_val;
+            uint8_t sz = inst.defs[0].size;
+            const auto& mem = inst.uses[0].mem_val;
+
+            if (mem.base_preg == dst_reg && mem.index_preg.is_valid() && mem.scale == x64::Scale::One && mem.disp == 0) {
+                inst.opcode = (sz == 4 ? LirOpcode::Add32 : LirOpcode::Add);
+                inst.uses = {LirOperand::preg(dst_reg, sz), LirOperand::preg(mem.index_preg, sz)};
+                stats_.arithmetic_simplified++;
+                changed = true;
+                ++it;
+                continue;
+            } else if (mem.index_preg == dst_reg && mem.base_preg.is_valid() && mem.scale == x64::Scale::One && mem.disp == 0) {
+                inst.opcode = (sz == 4 ? LirOpcode::Add32 : LirOpcode::Add);
+                inst.uses = {LirOperand::preg(dst_reg, sz), LirOperand::preg(mem.base_preg, sz)};
+                stats_.arithmetic_simplified++;
+                changed = true;
+                ++it;
+                continue;
+            } else if (mem.base_preg == dst_reg && !mem.index_preg.is_valid() && mem.disp != 0) {
+                inst.opcode = (sz == 4 ? LirOpcode::Add32 : LirOpcode::Add);
+                inst.uses = {LirOperand::preg(dst_reg, sz), LirOperand::imm(mem.disp, sz)};
+                stats_.arithmetic_simplified++;
+                changed = true;
+                ++it;
+                continue;
+            }
+        }
+
         ++it;
     }
     return changed;

@@ -165,7 +165,7 @@ int64_t shadow_stack_alloc_loop(int64_t num_nodes, ThreadShadowStack& ss) {
 
 namespace brass::bench {
 
-void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results) {
+void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const RatchetManager& ratchet) {
     Stopwatch sw;
 
     // ------------------------------------------------------------------------
@@ -225,7 +225,10 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results) {
         }
 
         double ratio = (native_ms > 0.0) ? (jit_ms / native_ms) : 1.0;
-        BenchmarkResult r{"NaN-Box Tag-Test Loop", iters, native_ms, -1.0, jit_ms, ratio, -1.0, ratio <= 1.30, ""};
+        double target = ratchet.get_ratio("nanbox", 1.15);
+        std::ostringstream notes;
+        notes << "<= " << std::fixed << std::setprecision(2) << target << "x baseline";
+        BenchmarkResult r{"nanbox", "NaN-Box Tag-Test Loop", iters, native_ms, -1.0, jit_ms, ratio, -1.0, target, ratio <= target, notes.str()};
         BenchmarkReporter::print_row(r);
         results.push_back(r);
     }
@@ -291,7 +294,10 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results) {
         }
 
         double ratio = (native_ms > 0.0) ? (jit_ms / native_ms) : 1.0;
-        BenchmarkResult r{"Shape-Guarded Field Loads", iters, native_ms, -1.0, jit_ms, ratio, -1.0, ratio <= 1.30, ""};
+        double target = ratchet.get_ratio("shapes", 1.10);
+        std::ostringstream notes;
+        notes << "<= " << std::fixed << std::setprecision(2) << target << "x baseline";
+        BenchmarkResult r{"shapes", "Shape-Guarded Field Loads", iters, native_ms, -1.0, jit_ms, ratio, -1.0, target, ratio <= target, notes.str()};
         BenchmarkReporter::print_row(r);
         results.push_back(r);
     }
@@ -342,7 +348,10 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results) {
         }
 
         double ratio = (native_ms > 0.0) ? (jit_ms / native_ms) : 1.0;
-        BenchmarkResult r{"Patchable-Call Inline Cache", outer_rounds, native_ms, -1.0, jit_ms, ratio, -1.0, ratio <= 1.30, ""};
+        double target = ratchet.get_ratio("icache", 0.65);
+        std::ostringstream notes;
+        notes << "<= " << std::fixed << std::setprecision(2) << target << "x baseline";
+        BenchmarkResult r{"icache", "Patchable-Call Inline Cache", outer_rounds, native_ms, -1.0, jit_ms, ratio, -1.0, target, ratio <= target, notes.str()};
         BenchmarkReporter::print_row(r);
         results.push_back(r);
     }
@@ -401,7 +410,10 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results) {
         }
 
         double ratio = (shadow_ms > 0.0) ? (jit_ms / shadow_ms) : 1.0;
-        BenchmarkResult r{"Linked Node Alloc (Cheney GC)", gc_rounds, shadow_ms, -1.0, jit_ms, ratio, -1.0, ratio <= 1.30, ""};
+        double target = ratchet.get_ratio("cheney_gc", 1.10);
+        std::ostringstream notes;
+        notes << "<= " << std::fixed << std::setprecision(2) << target << "x baseline";
+        BenchmarkResult r{"cheney_gc", "Linked Node Alloc (Cheney GC)", gc_rounds, shadow_ms, -1.0, jit_ms, ratio, -1.0, target, ratio <= target, notes.str()};
         BenchmarkReporter::print_row(r);
         results.push_back(r);
     }
