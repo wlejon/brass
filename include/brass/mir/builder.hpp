@@ -85,6 +85,14 @@ public:
     Value* build_sge(Value* lhs, Value* rhs);
     Value* build_uge(Value* lhs, Value* rhs);
 
+    // Overflow-checked Arithmetic
+    Value* build_sadd_overflow(Value* lhs, Value* rhs);
+    Value* build_ssub_overflow(Value* lhs, Value* rhs);
+    Value* build_smul_overflow(Value* lhs, Value* rhs);
+    Value* build_uadd_overflow(Value* lhs, Value* rhs);
+    Value* build_usub_overflow(Value* lhs, Value* rhs);
+    Value* build_umul_overflow(Value* lhs, Value* rhs);
+
     // Selection
     Value* build_select(Value* cond, Value* true_val, Value* false_val);
 
@@ -123,6 +131,10 @@ public:
     Instruction* build_br_if(Value* cond, BasicBlock* true_target, BasicBlock* false_target);
     Instruction* build_br_if(Value* cond, BasicBlock* true_target, Span<Value* const> true_args, BasicBlock* false_target, Span<Value* const> false_args);
     Instruction* build_br_if(Value* cond, BasicBlock* true_target, std::initializer_list<Value*> true_args, BasicBlock* false_target, std::initializer_list<Value*> false_args);
+    Instruction* build_switch(Value* val, BasicBlock* default_target, Span<const SwitchCase> cases);
+    Instruction* build_switch(Value* val, BasicBlock* default_target, std::initializer_list<SwitchCase> cases);
+    Instruction* build_switch(Value* val, BasicBlock* default_target, Span<Value* const> default_args, Span<const SwitchCase> cases);
+    Instruction* build_switch(Value* val, BasicBlock* default_target, std::initializer_list<Value*> default_args, std::initializer_list<SwitchCase> cases);
     Instruction* build_ret(Value* val);
     Instruction* build_ret_void();
     Instruction* build_unreachable();

@@ -68,6 +68,8 @@ private:
     void lower_call(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_branch(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_branch_if(const Instruction& inst, codegen::LirBlock& lir_bb);
+    void lower_switch(const Instruction& inst, codegen::LirBlock& lir_bb);
+    void lower_overflow_check(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_return(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_load(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_store(const Instruction& inst, codegen::LirBlock& lir_bb);

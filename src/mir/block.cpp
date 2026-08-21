@@ -130,6 +130,15 @@ std::vector<BasicBlock*> BasicBlock::successors() const {
         if (term->false_target().block) {
             succs.push_back(term->false_target().block);
         }
+    } else if (term->opcode() == Opcode::switch_) {
+        if (term->default_target().block) {
+            succs.push_back(term->default_target().block);
+        }
+        for (const auto& sc : term->switch_cases()) {
+            if (sc.target.block && std::find(succs.begin(), succs.end(), sc.target.block) == succs.end()) {
+                succs.push_back(sc.target.block);
+            }
+        }
     }
     return succs;
 }

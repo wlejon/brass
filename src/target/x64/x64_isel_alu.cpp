@@ -440,6 +440,14 @@ void X64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
         case Opcode::uge:
             lower_comparison(inst, lir_bb, Condition::AE, Condition::AE);
             break;
+        case Opcode::sadd_overflow:
+        case Opcode::ssub_overflow:
+        case Opcode::smul_overflow:
+        case Opcode::uadd_overflow:
+        case Opcode::usub_overflow:
+        case Opcode::umul_overflow:
+            lower_overflow_check(inst, lir_bb);
+            break;
         case Opcode::select:
             lower_select(inst, lir_bb);
             break;
@@ -473,6 +481,9 @@ void X64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
             break;
         case Opcode::br_if:
             lower_branch_if(inst, lir_bb);
+            break;
+        case Opcode::switch_:
+            lower_switch(inst, lir_bb);
             break;
         case Opcode::ret:
             lower_return(inst, lir_bb);

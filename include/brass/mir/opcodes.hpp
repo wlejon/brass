@@ -57,6 +57,14 @@ enum class Opcode : uint16_t {
     sge,
     uge,
 
+    // Overflow-checked Arithmetic
+    sadd_overflow,
+    ssub_overflow,
+    smul_overflow,
+    uadd_overflow,
+    usub_overflow,
+    umul_overflow,
+
     // Selection
     select,
 
@@ -79,6 +87,7 @@ enum class Opcode : uint16_t {
     // Terminators
     br,
     br_if,
+    switch_,
     ret,
     unreachable
 };

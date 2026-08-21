@@ -1,6 +1,7 @@
 #include <brass/codegen/lir.hpp>
 #include <sstream>
 #include <iomanip>
+#include <iostream>
 #include <stdexcept>
 
 namespace brass::codegen {

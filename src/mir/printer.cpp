@@ -200,6 +200,18 @@ public:
                 break;
             }
 
+            case Opcode::sadd_overflow:
+            case Opcode::ssub_overflow:
+            case Opcode::smul_overflow:
+            case Opcode::uadd_overflow:
+            case Opcode::usub_overflow:
+            case Opcode::umul_overflow: {
+                std::string_view op_t = inst.operand(0) ? inst.operand(0)->type().name() : "i32";
+                os_ << opcode_name(op) << "." << op_t << " "
+                    << value_name(inst.operand(0)) << ", " << value_name(inst.operand(1));
+                break;
+            }
+
             case Opcode::select:
                 os_ << "select." << inst.type().name() << " "
                     << value_name(inst.operand(0)) << ", "
@@ -312,6 +324,19 @@ public:
                     << format_branch_target(inst.true_target()) << ", "
                     << format_branch_target(inst.false_target());
                 break;
+
+            case Opcode::switch_: {
+                std::string_view op_t = inst.operand(0) ? inst.operand(0)->type().name() : "i32";
+                os_ << "switch." << op_t << " " << value_name(inst.operand(0))
+                    << ", default: " << format_branch_target(inst.default_target()) << ", [";
+                const auto& cases = inst.switch_cases();
+                for (size_t i = 0; i < cases.size(); ++i) {
+                    if (i > 0) os_ << ", ";
+                    os_ << cases[i].value << ": " << format_branch_target(cases[i].target);
+                }
+                os_ << "]";
+                break;
+            }
 
             case Opcode::ret:
                 os_ << "ret";

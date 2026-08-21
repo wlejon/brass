@@ -300,6 +300,30 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                     frame.set_value(inst->result(), val_umod(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1))));
                     break;
                 }
+                case Opcode::sadd_overflow: {
+                    frame.set_value(inst->result(), val_sadd_overflow(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1))));
+                    break;
+                }
+                case Opcode::ssub_overflow: {
+                    frame.set_value(inst->result(), val_ssub_overflow(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1))));
+                    break;
+                }
+                case Opcode::smul_overflow: {
+                    frame.set_value(inst->result(), val_smul_overflow(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1))));
+                    break;
+                }
+                case Opcode::uadd_overflow: {
+                    frame.set_value(inst->result(), val_uadd_overflow(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1))));
+                    break;
+                }
+                case Opcode::usub_overflow: {
+                    frame.set_value(inst->result(), val_usub_overflow(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1))));
+                    break;
+                }
+                case Opcode::umul_overflow: {
+                    frame.set_value(inst->result(), val_umul_overflow(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1))));
+                    break;
+                }
                 case Opcode::neg: {
                     frame.set_value(inst->result(), val_neg(frame.get_value(inst->operand(0))));
                     break;
@@ -589,6 +613,37 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                     BasicBlock* next_bb = target.block;
                     if (!next_bb) {
                         throw InterpreterException("Conditional branch to null basic block");
+                    }
+
+                    for (size_t i = 0; i < next_bb->param_count() && i < target_args.size(); ++i) {
+                        frame.set_value(next_bb->param(i), target_args[i]);
+                    }
+
+                    cur_bb = next_bb;
+                    transitioned = true;
+                    break;
+                }
+
+                case Opcode::switch_: {
+                    RuntimeValue cond = frame.get_value(inst->operand(0));
+                    int64_t cond_val = cond.is_i32() ? static_cast<int64_t>(cond.as_i32()) : cond.as_i64();
+                    const BranchTarget* selected_target = &inst->default_target();
+                    for (const auto& sc : inst->switch_cases()) {
+                        if (sc.value == cond_val) {
+                            selected_target = &sc.target;
+                            break;
+                        }
+                    }
+
+                    std::vector<RuntimeValue> target_args;
+                    target_args.reserve(selected_target->args.size());
+                    for (Value* a : selected_target->args) {
+                        target_args.push_back(frame.get_value(a));
+                    }
+
+                    BasicBlock* next_bb = selected_target->block;
+                    if (!next_bb) {
+                        throw InterpreterException("Switch target to null basic block");
                     }
 
                     for (size_t i = 0; i < next_bb->param_count() && i < target_args.size(); ++i) {

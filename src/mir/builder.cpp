@@ -331,6 +331,24 @@ Value* Builder::build_ugt(Value* lhs, Value* rhs) { return build_cmp_op(this, ge
 Value* Builder::build_sge(Value* lhs, Value* rhs) { return build_cmp_op(this, get_arena(), Opcode::sge, lhs, rhs); }
 Value* Builder::build_uge(Value* lhs, Value* rhs) { return build_cmp_op(this, get_arena(), Opcode::uge, lhs, rhs); }
 
+static Value* build_overflow_op(Builder* b, Arena& arena, Opcode op, Value* lhs, Value* rhs) {
+    Instruction* inst = arena.make<Instruction>(op, Type::i32());
+    inst->add_operand(lhs);
+    inst->add_operand(rhs);
+    Value* res = b->create_value(Type::i32());
+    res->set_defining_instruction(inst);
+    inst->set_result(res);
+    b->insert(inst);
+    return res;
+}
+
+Value* Builder::build_sadd_overflow(Value* lhs, Value* rhs) { return build_overflow_op(this, get_arena(), Opcode::sadd_overflow, lhs, rhs); }
+Value* Builder::build_ssub_overflow(Value* lhs, Value* rhs) { return build_overflow_op(this, get_arena(), Opcode::ssub_overflow, lhs, rhs); }
+Value* Builder::build_smul_overflow(Value* lhs, Value* rhs) { return build_overflow_op(this, get_arena(), Opcode::smul_overflow, lhs, rhs); }
+Value* Builder::build_uadd_overflow(Value* lhs, Value* rhs) { return build_overflow_op(this, get_arena(), Opcode::uadd_overflow, lhs, rhs); }
+Value* Builder::build_usub_overflow(Value* lhs, Value* rhs) { return build_overflow_op(this, get_arena(), Opcode::usub_overflow, lhs, rhs); }
+Value* Builder::build_umul_overflow(Value* lhs, Value* rhs) { return build_overflow_op(this, get_arena(), Opcode::umul_overflow, lhs, rhs); }
+
 Value* Builder::build_select(Value* cond, Value* true_val, Value* false_val) {
     Type res_type = true_val ? true_val->type() : (false_val ? false_val->type() : Type::i64());
     Instruction* inst = get_arena().make<Instruction>(Opcode::select, res_type);
@@ -561,6 +579,35 @@ Instruction* Builder::build_br_if(Value* cond, BasicBlock* true_target, std::ini
                                  BasicBlock* false_target, std::initializer_list<Value*> false_args) {
     return build_br_if(cond, true_target, Span<Value* const>(true_args.begin(), true_args.size()),
                        false_target, Span<Value* const>(false_args.begin(), false_args.size()));
+}
+
+Instruction* Builder::build_switch(Value* val, BasicBlock* default_target, Span<const SwitchCase> cases) {
+    return build_switch(val, default_target, Span<Value* const>(), cases);
+}
+
+Instruction* Builder::build_switch(Value* val, BasicBlock* default_target, std::initializer_list<SwitchCase> cases) {
+    return build_switch(val, default_target, Span<Value* const>(), Span<const SwitchCase>(cases.begin(), cases.size()));
+}
+
+Instruction* Builder::build_switch(Value* val, BasicBlock* default_target, Span<Value* const> default_args, Span<const SwitchCase> cases) {
+    Instruction* inst = get_arena().make<Instruction>(Opcode::switch_, Type::void_type());
+    inst->add_operand(val);
+    std::vector<Value*> def_args;
+    def_args.reserve(default_args.size());
+    for (size_t i = 0; i < default_args.size(); ++i) {
+        def_args.push_back(default_args[i]);
+    }
+    inst->set_default_target(BranchTarget(default_target, std::move(def_args)));
+    for (size_t i = 0; i < cases.size(); ++i) {
+        inst->add_switch_case(cases[i].value, cases[i].target);
+    }
+    insert(inst);
+    return inst;
+}
+
+Instruction* Builder::build_switch(Value* val, BasicBlock* default_target, std::initializer_list<Value*> default_args, std::initializer_list<SwitchCase> cases) {
+    return build_switch(val, default_target, Span<Value* const>(default_args.begin(), default_args.size()),
+                        Span<const SwitchCase>(cases.begin(), cases.size()));
 }
 
 Instruction* Builder::build_ret(Value* val) {

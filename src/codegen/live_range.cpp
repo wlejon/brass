@@ -253,7 +253,9 @@ void LivenessAnalysis::build_intervals() {
 
         // Add whole-block live range for each variable live out of the block
         for (VReg v : bl.live_out) {
-            intervals_[v.id].add_range(bl.start_id, bl.end_id + 1);
+            if (v.is_valid() && v.id < intervals_.size()) {
+                intervals_[v.id].add_range(bl.start_id, bl.end_id + 1);
+            }
         }
 
         // Walk instructions in reverse
@@ -264,16 +266,16 @@ void LivenessAnalysis::build_intervals() {
             // Defs shorten the live range start to inst_id
             for (size_t i = 0; i < inst->defs.size(); ++i) {
                 const auto& d = inst->defs[i];
-                if (d.is_vreg()) {
+                if (d.is_vreg() && d.vreg_val.is_valid() && d.vreg_val.id < intervals_.size()) {
                     FixedConstraint fc = (i < inst->def_constraints.size()) ? inst->def_constraints[i] : FixedConstraint::none();
                     intervals_[d.vreg_val.id].add_use_pos(inst_id, true, true, fc.fixed_preg);
                     intervals_[d.vreg_val.id].shorten_start(inst_id);
                 } else if (d.is_mem()) {
-                    if (d.mem_val.base_vreg.is_valid()) {
+                    if (d.mem_val.base_vreg.is_valid() && d.mem_val.base_vreg.id < intervals_.size()) {
                         intervals_[d.mem_val.base_vreg.id].add_use_pos(inst_id, false, true);
                         intervals_[d.mem_val.base_vreg.id].add_range(bl.start_id, inst_id);
                     }
-                    if (d.mem_val.index_vreg.is_valid()) {
+                    if (d.mem_val.index_vreg.is_valid() && d.mem_val.index_vreg.id < intervals_.size()) {
                         intervals_[d.mem_val.index_vreg.id].add_use_pos(inst_id, false, true);
                         intervals_[d.mem_val.index_vreg.id].add_range(bl.start_id, inst_id);
                     }
@@ -285,15 +287,15 @@ void LivenessAnalysis::build_intervals() {
                 const auto& u = inst->uses[i];
                 FixedConstraint fc = (i < inst->use_constraints.size()) ? inst->use_constraints[i] : FixedConstraint::none();
 
-                if (u.is_vreg()) {
+                if (u.is_vreg() && u.vreg_val.is_valid() && u.vreg_val.id < intervals_.size()) {
                     intervals_[u.vreg_val.id].add_use_pos(inst_id, false, true, fc.fixed_preg);
                     intervals_[u.vreg_val.id].add_range(bl.start_id, inst_id);
                 } else if (u.is_mem()) {
-                    if (u.mem_val.base_vreg.is_valid()) {
+                    if (u.mem_val.base_vreg.is_valid() && u.mem_val.base_vreg.id < intervals_.size()) {
                         intervals_[u.mem_val.base_vreg.id].add_use_pos(inst_id, false, true);
                         intervals_[u.mem_val.base_vreg.id].add_range(bl.start_id, inst_id);
                     }
-                    if (u.mem_val.index_vreg.is_valid()) {
+                    if (u.mem_val.index_vreg.is_valid() && u.mem_val.index_vreg.id < intervals_.size()) {
                         intervals_[u.mem_val.index_vreg.id].add_use_pos(inst_id, false, true);
                         intervals_[u.mem_val.index_vreg.id].add_range(bl.start_id, inst_id);
                     }

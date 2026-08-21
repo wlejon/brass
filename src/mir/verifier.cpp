@@ -582,6 +582,30 @@ bool Verifier::verify_function(const Function& fn) {
                     break;
                 }
 
+                case Opcode::sadd_overflow:
+                case Opcode::ssub_overflow:
+                case Opcode::smul_overflow:
+                case Opcode::uadd_overflow:
+                case Opcode::usub_overflow:
+                case Opcode::umul_overflow: {
+                    if (inst->operand_count() != 2 || !inst->operand(0) || !inst->operand(1)) {
+                        report_error(inst_prefix + "Requires 2 operands.");
+                    } else {
+                        Type t0 = inst->operand(0)->type();
+                        Type t1 = inst->operand(1)->type();
+                        if (!t0.is_integer() || !t1.is_integer()) {
+                            report_error(inst_prefix + "Overflow arithmetic operands must be integer.");
+                        } else if (t0 != t1) {
+                            report_error(inst_prefix + "Overflow arithmetic operand types mismatch: " +
+                                         std::string(t0.name()) + " vs " + std::string(t1.name()) + ".");
+                        }
+                        if (inst->type() != Type::i32()) {
+                            report_error(inst_prefix + "Overflow arithmetic result type must be i32.");
+                        }
+                    }
+                    break;
+                }
+
                 case Opcode::select: {
                     if (inst->operand_count() != 3 || !inst->operand(0) || !inst->operand(1) || !inst->operand(2)) {
                         report_error(inst_prefix + "Select requires 3 operands (cond, true_val, false_val).");
@@ -783,6 +807,41 @@ bool Verifier::verify_function(const Function& fn) {
                     };
                     check_target(inst->true_target(), "true");
                     check_target(inst->false_target(), "false");
+                    break;
+                }
+
+                case Opcode::switch_: {
+                    if (inst->operand_count() != 1 || !inst->operand(0) || !inst->operand(0)->type().is_integer()) {
+                        report_error(inst_prefix + "switch requires 1 integer condition operand.");
+                    }
+                    auto check_target = [&](const BranchTarget& target, const std::string& label) {
+                        if (!target.block) {
+                            report_error(inst_prefix + label + " target block is null.");
+                        } else {
+                            if (block_set.find(target.block) == block_set.end()) {
+                                report_error(inst_prefix + label + " target block does not belong to function.");
+                            }
+                            if (target.args.size() != target.block->param_count()) {
+                                report_error(inst_prefix + label + " switch passes " + std::to_string(target.args.size()) +
+                                             " arguments, but target expects " + std::to_string(target.block->param_count()) + ".");
+                            } else {
+                                for (size_t a_i = 0; a_i < target.args.size(); ++a_i) {
+                                    check_value_dom(target.args[a_i], label + " arg " + std::to_string(a_i));
+                                    if (target.args[a_i] && target.args[a_i]->type() != target.block->param(a_i)->type()) {
+                                        report_error(inst_prefix + label + " argument " + std::to_string(a_i) +
+                                                     " type (" + std::string(target.args[a_i]->type().name()) +
+                                                     ") does not match target parameter (" +
+                                                     std::string(target.block->param(a_i)->type().name()) + ").");
+                                    }
+                                }
+                            }
+                        }
+                    };
+                    check_target(inst->default_target(), "default");
+                    const auto& cases = inst->switch_cases();
+                    for (size_t c_i = 0; c_i < cases.size(); ++c_i) {
+                        check_target(cases[c_i].target, "case " + std::to_string(cases[c_i].value));
+                    }
                     break;
                 }
 

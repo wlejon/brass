@@ -249,6 +249,14 @@ RuntimeValue val_ugt(RuntimeValue lhs, RuntimeValue rhs);
 RuntimeValue val_sge(RuntimeValue lhs, RuntimeValue rhs);
 RuntimeValue val_uge(RuntimeValue lhs, RuntimeValue rhs);
 
+// Overflow-checked Arithmetic (returns i32: 1 on overflow, 0 on no overflow)
+RuntimeValue val_sadd_overflow(RuntimeValue lhs, RuntimeValue rhs);
+RuntimeValue val_ssub_overflow(RuntimeValue lhs, RuntimeValue rhs);
+RuntimeValue val_smul_overflow(RuntimeValue lhs, RuntimeValue rhs);
+RuntimeValue val_uadd_overflow(RuntimeValue lhs, RuntimeValue rhs);
+RuntimeValue val_usub_overflow(RuntimeValue lhs, RuntimeValue rhs);
+RuntimeValue val_umul_overflow(RuntimeValue lhs, RuntimeValue rhs);
+
 std::string to_string(const RuntimeValue& val);
 std::ostream& operator<<(std::ostream& os, const RuntimeValue& val);
 

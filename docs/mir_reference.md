@@ -52,6 +52,9 @@ Brass MIR has a lean, machine-oriented type system:
 - `and.<type> <lhs>, <rhs>`, `or.<type> <lhs>, <rhs>`, `xor.<type> <lhs>, <rhs>` (`i32`, `i64`)
 - `shl.<type> <lhs>, <rhs>`, `lshr.<type> <lhs>, <rhs>`, `ashr.<type> <lhs>, <rhs>`, `not.<type> <val>` (`i32`, `i64`)
 - `clz.<type> <val>`, `ctz.<type> <val>`, `popcnt.<type> <val>` (`i32`, `i64`)
+- `select.<type> <cond:i32>, <true_val>, <false_val>` (`i32`, `i64`, `f64`, `ptr`, `gcref`)
+- `sadd_overflow.<type> <lhs>, <rhs>`, `ssub_overflow.<type>`, `smul_overflow.<type>` (`i32`, `i64` -> `i32` overflow flag)
+- `uadd_overflow.<type> <lhs>, <rhs>`, `usub_overflow.<type>`, `umul_overflow.<type>` (`i32`, `i64` -> `i32` overflow flag)
 
 ### Comparisons
 - `eq.<type>`, `ne.<type>`, `slt.<type>`, `ult.<type>`, `sle.<type>`, `ule.<type>`, `sgt.<type>`, `ugt.<type>`, `sge.<type>`, `uge.<type>` (`i32`, `i64`, `f64` -> `i32` condition)
@@ -79,6 +82,7 @@ Brass MIR has a lean, machine-oriented type system:
 ### Terminators
 - `br <target_block>(<args...>)`
 - `br_if <cond:i32>, <true_block>(<true_args...>), <false_block>(<false_args...>)`
+- `switch.<type> <val>, default: <def_block>(<def_args...>), [<val_1>: <target_1>(<args_1...>), ...]`
 - `ret [<val>]`
 - `unreachable`
 

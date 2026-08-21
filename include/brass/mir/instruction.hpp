@@ -66,6 +66,16 @@ struct BranchTarget {
     BranchTarget(BasicBlock* b, std::vector<Value*> a) : block(b), args(std::move(a)) {}
 };
 
+struct SwitchCase {
+    int64_t value = 0;
+    BranchTarget target;
+
+    SwitchCase() = default;
+    SwitchCase(int64_t v, BasicBlock* b) : value(v), target(b) {}
+    SwitchCase(int64_t v, BasicBlock* b, std::vector<Value*> a) : value(v), target(b, std::move(a)) {}
+    SwitchCase(int64_t v, BranchTarget t) : value(v), target(std::move(t)) {}
+};
+
 class Instruction {
 public:
     explicit Instruction(Opcode op = Opcode::unreachable, Type type = Type::void_type()) noexcept
@@ -134,6 +144,15 @@ public:
     BranchTarget& branch_target() noexcept { return branch_target_; }
     void set_branch_target(BranchTarget target) { branch_target_ = std::move(target); }
 
+    const BranchTarget& default_target() const noexcept { return branch_target_; }
+    BranchTarget& default_target() noexcept { return branch_target_; }
+    void set_default_target(BranchTarget target) { branch_target_ = std::move(target); }
+
+    const std::vector<SwitchCase>& switch_cases() const noexcept { return switch_cases_; }
+    std::vector<SwitchCase>& switch_cases() noexcept { return switch_cases_; }
+    void add_switch_case(int64_t value, BranchTarget target) { switch_cases_.push_back(SwitchCase(value, std::move(target))); }
+    void add_switch_case(int64_t value, BasicBlock* block, std::vector<Value*> args = {}) { switch_cases_.push_back(SwitchCase(value, block, std::move(args))); }
+
     const BranchTarget& true_target() const noexcept { return true_target_; }
     BranchTarget& true_target() noexcept { return true_target_; }
     void set_true_target(BranchTarget target) { true_target_ = std::move(target); }
@@ -174,6 +193,7 @@ private:
     BranchTarget branch_target_;
     BranchTarget true_target_;
     BranchTarget false_target_;
+    std::vector<SwitchCase> switch_cases_;
 
     std::vector<Value*> state_map_;
 };

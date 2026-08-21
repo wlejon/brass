@@ -320,6 +320,82 @@ RuntimeValue val_uge(RuntimeValue lhs, RuntimeValue rhs) {
     return RuntimeValue::from_i32(lhs.as_u64() >= rhs.as_u64() ? 1 : 0);
 }
 
+RuntimeValue val_sadd_overflow(RuntimeValue lhs, RuntimeValue rhs) {
+    if (lhs.is_i32()) {
+        int32_t a = lhs.as_i32(), b = rhs.as_i32();
+        int64_t sum = static_cast<int64_t>(a) + static_cast<int64_t>(b);
+        bool ovf = (sum < INT32_MIN || sum > INT32_MAX);
+        return RuntimeValue::from_i32(ovf ? 1 : 0);
+    }
+    int64_t a = lhs.as_i64(), b = rhs.as_i64();
+    bool ovf = ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b));
+    return RuntimeValue::from_i32(ovf ? 1 : 0);
+}
+
+RuntimeValue val_ssub_overflow(RuntimeValue lhs, RuntimeValue rhs) {
+    if (lhs.is_i32()) {
+        int32_t a = lhs.as_i32(), b = rhs.as_i32();
+        int64_t diff = static_cast<int64_t>(a) - static_cast<int64_t>(b);
+        bool ovf = (diff < INT32_MIN || diff > INT32_MAX);
+        return RuntimeValue::from_i32(ovf ? 1 : 0);
+    }
+    int64_t a = lhs.as_i64(), b = rhs.as_i64();
+    bool ovf = ((b < 0 && a > INT64_MAX + b) || (b > 0 && a < INT64_MIN + b));
+    return RuntimeValue::from_i32(ovf ? 1 : 0);
+}
+
+RuntimeValue val_smul_overflow(RuntimeValue lhs, RuntimeValue rhs) {
+    if (lhs.is_i32()) {
+        int32_t a = lhs.as_i32(), b = rhs.as_i32();
+        int64_t prod = static_cast<int64_t>(a) * static_cast<int64_t>(b);
+        bool ovf = (prod < INT32_MIN || prod > INT32_MAX);
+        return RuntimeValue::from_i32(ovf ? 1 : 0);
+    }
+    int64_t a = lhs.as_i64(), b = rhs.as_i64();
+    if (a == 0 || b == 0) return RuntimeValue::from_i32(0);
+    if (a == -1 && b == INT64_MIN) return RuntimeValue::from_i32(1);
+    if (b == -1 && a == INT64_MIN) return RuntimeValue::from_i32(1);
+    int64_t prod = a * b;
+    bool ovf = (prod / a != b);
+    return RuntimeValue::from_i32(ovf ? 1 : 0);
+}
+
+RuntimeValue val_uadd_overflow(RuntimeValue lhs, RuntimeValue rhs) {
+    if (lhs.is_i32()) {
+        uint32_t a = lhs.as_u32(), b = rhs.as_u32();
+        bool ovf = (a + b < a);
+        return RuntimeValue::from_i32(ovf ? 1 : 0);
+    }
+    uint64_t a = lhs.as_u64(), b = rhs.as_u64();
+    bool ovf = (a + b < a);
+    return RuntimeValue::from_i32(ovf ? 1 : 0);
+}
+
+RuntimeValue val_usub_overflow(RuntimeValue lhs, RuntimeValue rhs) {
+    if (lhs.is_i32()) {
+        uint32_t a = lhs.as_u32(), b = rhs.as_u32();
+        bool ovf = (a < b);
+        return RuntimeValue::from_i32(ovf ? 1 : 0);
+    }
+    uint64_t a = lhs.as_u64(), b = rhs.as_u64();
+    bool ovf = (a < b);
+    return RuntimeValue::from_i32(ovf ? 1 : 0);
+}
+
+RuntimeValue val_umul_overflow(RuntimeValue lhs, RuntimeValue rhs) {
+    if (lhs.is_i32()) {
+        uint32_t a = lhs.as_u32(), b = rhs.as_u32();
+        uint64_t prod = static_cast<uint64_t>(a) * static_cast<uint64_t>(b);
+        bool ovf = (prod > UINT32_MAX);
+        return RuntimeValue::from_i32(ovf ? 1 : 0);
+    }
+    uint64_t a = lhs.as_u64(), b = rhs.as_u64();
+    if (a == 0 || b == 0) return RuntimeValue::from_i32(0);
+    uint64_t prod = a * b;
+    bool ovf = (prod / a != b);
+    return RuntimeValue::from_i32(ovf ? 1 : 0);
+}
+
 std::string to_string(const RuntimeValue& val) {
     std::ostringstream ss;
     switch (val.kind()) {

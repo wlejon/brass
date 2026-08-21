@@ -51,6 +51,13 @@ std::string_view opcode_name(Opcode op) noexcept {
         case Opcode::sge: return "sge";
         case Opcode::uge: return "uge";
 
+        case Opcode::sadd_overflow: return "sadd_overflow";
+        case Opcode::ssub_overflow: return "ssub_overflow";
+        case Opcode::smul_overflow: return "smul_overflow";
+        case Opcode::uadd_overflow: return "uadd_overflow";
+        case Opcode::usub_overflow: return "usub_overflow";
+        case Opcode::umul_overflow: return "umul_overflow";
+
         case Opcode::select: return "select";
 
         case Opcode::load: return "load";
@@ -68,6 +75,7 @@ std::string_view opcode_name(Opcode op) noexcept {
 
         case Opcode::br: return "br";
         case Opcode::br_if: return "br_if";
+        case Opcode::switch_: return "switch";
         case Opcode::ret: return "ret";
         case Opcode::unreachable: return "unreachable";
     }
@@ -78,6 +86,7 @@ bool is_terminator(Opcode op) noexcept {
     switch (op) {
         case Opcode::br:
         case Opcode::br_if:
+        case Opcode::switch_:
         case Opcode::ret:
         case Opcode::unreachable:
             return true;
@@ -87,7 +96,7 @@ bool is_terminator(Opcode op) noexcept {
 }
 
 bool is_branch(Opcode op) noexcept {
-    return op == Opcode::br || op == Opcode::br_if;
+    return op == Opcode::br || op == Opcode::br_if || op == Opcode::switch_;
 }
 
 bool is_call(Opcode op) noexcept {
@@ -134,6 +143,12 @@ bool is_arithmetic(Opcode op) noexcept {
         case Opcode::smod:
         case Opcode::umod:
         case Opcode::neg:
+        case Opcode::sadd_overflow:
+        case Opcode::ssub_overflow:
+        case Opcode::smul_overflow:
+        case Opcode::uadd_overflow:
+        case Opcode::usub_overflow:
+        case Opcode::umul_overflow:
             return true;
         default:
             return false;

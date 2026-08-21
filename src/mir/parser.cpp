@@ -37,6 +37,7 @@ bool decode_opcode_string(std::string_view str, Opcode& op, Type& type_suffix, T
     if (str == "ret") { op = Opcode::ret; return true; }
     if (str == "br") { op = Opcode::br; return true; }
     if (str == "br_if") { op = Opcode::br_if; return true; }
+    if (str == "switch") { op = Opcode::switch_; return true; }
     if (str == "guard") { op = Opcode::guard; return true; }
     if (str == "resume_point") { op = Opcode::resume_point; return true; }
     if (str == "safepoint") { op = Opcode::safepoint; return true; }
@@ -100,37 +101,23 @@ bool decode_opcode_string(std::string_view str, Opcode& op, Type& type_suffix, T
         return true;
     }
 
-    // Arithmetic / Bitwise
-    if (base == "add") { op = Opcode::add; return true; }
-    if (base == "sub") { op = Opcode::sub; return true; }
-    if (base == "mul") { op = Opcode::mul; return true; }
-    if (base == "sdiv") { op = Opcode::sdiv; return true; }
-    if (base == "udiv") { op = Opcode::udiv; return true; }
-    if (base == "smod") { op = Opcode::smod; return true; }
-    if (base == "umod") { op = Opcode::umod; return true; }
-    if (base == "neg") { op = Opcode::neg; return true; }
-    if (base == "and") { op = Opcode::and_; return true; }
-    if (base == "or") { op = Opcode::or_; return true; }
-    if (base == "xor") { op = Opcode::xor_; return true; }
-    if (base == "shl") { op = Opcode::shl; return true; }
-    if (base == "lshr") { op = Opcode::lshr; return true; }
-    if (base == "ashr") { op = Opcode::ashr; return true; }
-    if (base == "not") { op = Opcode::not_; return true; }
-    if (base == "clz") { op = Opcode::clz; return true; }
-    if (base == "ctz") { op = Opcode::ctz; return true; }
-    if (base == "popcnt") { op = Opcode::popcnt; return true; }
-
-    // Comparisons
-    if (base == "eq") { op = Opcode::eq; return true; }
-    if (base == "ne") { op = Opcode::ne; return true; }
-    if (base == "slt") { op = Opcode::slt; return true; }
-    if (base == "ult") { op = Opcode::ult; return true; }
-    if (base == "sle") { op = Opcode::sle; return true; }
-    if (base == "ule") { op = Opcode::ule; return true; }
-    if (base == "sgt") { op = Opcode::sgt; return true; }
-    if (base == "ugt") { op = Opcode::ugt; return true; }
-    if (base == "sge") { op = Opcode::sge; return true; }
-    if (base == "uge") { op = Opcode::uge; return true; }
+    // Arithmetic / Bitwise / Comparison / Overflow
+    static const std::unordered_map<std::string_view, Opcode> op_map = {
+        {"add", Opcode::add}, {"sub", Opcode::sub}, {"mul", Opcode::mul},
+        {"sdiv", Opcode::sdiv}, {"udiv", Opcode::udiv}, {"smod", Opcode::smod}, {"umod", Opcode::umod},
+        {"neg", Opcode::neg}, {"and", Opcode::and_}, {"or", Opcode::or_}, {"xor", Opcode::xor_},
+        {"shl", Opcode::shl}, {"lshr", Opcode::lshr}, {"ashr", Opcode::ashr}, {"not", Opcode::not_},
+        {"clz", Opcode::clz}, {"ctz", Opcode::ctz}, {"popcnt", Opcode::popcnt},
+        {"eq", Opcode::eq}, {"ne", Opcode::ne}, {"slt", Opcode::slt}, {"ult", Opcode::ult},
+        {"sle", Opcode::sle}, {"ule", Opcode::ule}, {"sgt", Opcode::sgt}, {"ugt", Opcode::ugt},
+        {"sge", Opcode::sge}, {"uge", Opcode::uge},
+        {"sadd_overflow", Opcode::sadd_overflow}, {"ssub_overflow", Opcode::ssub_overflow},
+        {"smul_overflow", Opcode::smul_overflow}, {"uadd_overflow", Opcode::uadd_overflow},
+        {"usub_overflow", Opcode::usub_overflow}, {"umul_overflow", Opcode::umul_overflow},
+        {"switch", Opcode::switch_}
+    };
+    auto it = op_map.find(base);
+    if (it != op_map.end()) { op = it->second; return true; }
 
     // Selection
     if (base == "select") { op = Opcode::select; return true; }
@@ -643,6 +630,28 @@ private:
                 break;
             }
 
+            case Opcode::sadd_overflow:
+            case Opcode::ssub_overflow:
+            case Opcode::smul_overflow:
+            case Opcode::uadd_overflow:
+            case Opcode::usub_overflow:
+            case Opcode::umul_overflow: {
+                Value* lhs = parse_val(); if (!lhs) return false;
+                if (!expect(TokenKind::Comma, "','")) return false;
+                Value* rhs = parse_val(); if (!rhs) return false;
+
+                switch (op) {
+                    case Opcode::sadd_overflow: res_val = b.build_sadd_overflow(lhs, rhs); break;
+                    case Opcode::ssub_overflow: res_val = b.build_ssub_overflow(lhs, rhs); break;
+                    case Opcode::smul_overflow: res_val = b.build_smul_overflow(lhs, rhs); break;
+                    case Opcode::uadd_overflow: res_val = b.build_uadd_overflow(lhs, rhs); break;
+                    case Opcode::usub_overflow: res_val = b.build_usub_overflow(lhs, rhs); break;
+                    case Opcode::umul_overflow: res_val = b.build_umul_overflow(lhs, rhs); break;
+                    default: break;
+                }
+                break;
+            }
+
             case Opcode::select: {
                 Value* cond = parse_val(); if (!cond) return false;
                 if (!expect(TokenKind::Comma, "','")) return false;
@@ -872,6 +881,44 @@ private:
                 if (!parse_branch_target(false_t)) return false;
 
                 b.build_br_if(cond, true_t.block, true_t.args, false_t.block, false_t.args);
+                break;
+            }
+
+            case Opcode::switch_: {
+                Value* cond = parse_val(); if (!cond) return false;
+                if (!expect(TokenKind::Comma, "','")) return false;
+
+                if (peek().text != "default") {
+                    error(peek().location, "Expected 'default:' for switch instruction");
+                    return false;
+                }
+                advance();
+                if (!expect(TokenKind::Colon, "':'")) return false;
+                BranchTarget def_target;
+                if (!parse_branch_target(def_target)) return false;
+
+                if (!expect(TokenKind::Comma, "','")) return false;
+                if (!expect(TokenKind::LBracket, "'['")) return false;
+
+                std::vector<SwitchCase> cases;
+                while (!peek().is(TokenKind::RBracket) && !peek().is(TokenKind::Eof)) {
+                    if (!peek().is(TokenKind::IntLiteral)) {
+                        error(peek().location, "Expected integer case value");
+                        return false;
+                    }
+                    int64_t case_val = advance().int_val;
+                    if (!expect(TokenKind::Colon, "':'")) return false;
+                    BranchTarget case_target;
+                    if (!parse_branch_target(case_target)) return false;
+                    cases.push_back(SwitchCase(case_val, std::move(case_target)));
+
+                    if (!peek().is(TokenKind::RBracket)) {
+                        if (!expect(TokenKind::Comma, "','")) return false;
+                    }
+                }
+                if (!expect(TokenKind::RBracket, "']'")) return false;
+
+                b.build_switch(cond, def_target.block, def_target.args, cases);
                 break;
             }
 
