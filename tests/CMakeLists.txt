@@ -52,6 +52,7 @@ add_test(NAME unit_tests COMMAND brass_unit_tests)
 add_executable(brass_benchmarks
     benchmarks/benchmark_suite.cpp
     benchmarks/bench_numeric.cpp
+    benchmarks/bench_numeric_modules.cpp
     benchmarks/bench_gc.cpp
     benchmarks/bench_compile_speed.cpp
 )

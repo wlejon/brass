@@ -89,8 +89,10 @@ struct BenchmarkResult {
     std::string name;
     size_t iterations = 0;
     double native_ms = 0.0;
+    double native_scalar_ms = 0.0;
     double brass_ms = 0.0;
-    double ratio = 0.0; // brass / native
+    double ratio = 0.0; // vs scalar or vs native
+    double ratio_vec = 0.0; // vs vectorized native
     bool passes_bar = true;
     std::string notes;
 };
@@ -98,30 +100,45 @@ struct BenchmarkResult {
 class BenchmarkReporter {
 public:
     static void print_header(std::string_view title) {
-        std::cout << "\n========================================================================================\n";
+        std::cout << "\n========================================================================================================================\n";
         std::cout << "  BRASS PERFORMANCE BENCHMARK SUITE: " << title << "\n";
-        std::cout << "========================================================================================\n";
+        std::cout << "========================================================================================================================\n";
         std::cout << std::left
-                  << std::setw(32) << "Benchmark"
-                  << std::setw(12) << "Iterations"
-                  << std::setw(14) << "Native (ms)"
-                  << std::setw(14) << "Brass (ms)"
-                  << std::setw(10) << "Ratio"
-                  << std::setw(10) << "Status"
+                  << std::setw(30) << "Benchmark"
+                  << std::setw(11) << "Iterations"
+                  << std::setw(14) << "Native -O3"
+                  << std::setw(14) << "Scalar -O3"
+                  << std::setw(13) << "Brass (ms)"
+                  << std::setw(11) << "vs Scalar"
+                  << std::setw(10) << "vs -O3"
+                  << std::setw(9)  << "Status"
                   << "\n";
-        std::cout << "----------------------------------------------------------------------------------------\n";
+        std::cout << "------------------------------------------------------------------------------------------------------------------------\n";
     }
 
     static void print_row(const BenchmarkResult& res) {
+        std::ostringstream s_ratio, s_vec;
+        s_ratio << std::fixed << std::setprecision(2) << res.ratio << "x";
+        if (res.ratio_vec > 0.0) {
+            s_vec << std::fixed << std::setprecision(2) << res.ratio_vec << "x";
+        } else {
+            s_vec << "-";
+        }
+
         std::cout << std::left
-                  << std::setw(32) << res.name
-                  << std::setw(12) << res.iterations
+                  << std::setw(30) << res.name
+                  << std::setw(11) << res.iterations
                   << std::fixed << std::setprecision(2)
-                  << std::setw(14) << res.native_ms
-                  << std::setw(14) << res.brass_ms
-                  << std::setprecision(2)
-                  << std::setw(10) << res.ratio
-                  << std::setw(10) << (res.passes_bar ? "[PASS]" : "[FAIL]");
+                  << std::setw(14) << res.native_ms;
+        if (res.native_scalar_ms > 0.0) {
+            std::cout << std::setw(14) << res.native_scalar_ms;
+        } else {
+            std::cout << std::setw(14) << "-";
+        }
+        std::cout << std::setw(13) << res.brass_ms
+                  << std::setw(11) << s_ratio.str()
+                  << std::setw(10) << s_vec.str()
+                  << std::setw(9)  << (res.passes_bar ? "[PASS]" : "[FAIL]");
         if (!res.notes.empty()) {
             std::cout << " (" << res.notes << ")";
         }
@@ -129,13 +146,13 @@ public:
     }
 
     static void print_gc_comparison(double shadow_stack_ms, double brass_stack_map_ms, double speedup, bool passed) {
-        std::cout << "\n----------------------------------------------------------------------------------------\n";
+        std::cout << "\n------------------------------------------------------------------------------------------------------------------------\n";
         std::cout << "  GC MODEL COMPARISON (Live GC references across subroutine calls):\n";
         std::cout << "  - (a) Shadow-Stack Model:      " << std::fixed << std::setprecision(2) << shadow_stack_ms << " ms\n";
         std::cout << "  - (b) Brass Stack-Map Model:   " << std::fixed << std::setprecision(2) << brass_stack_map_ms << " ms\n";
         std::cout << "  - Speedup Ratio:               " << std::fixed << std::setprecision(2) << speedup << "x faster (Required: >= 1.5x)\n";
         std::cout << "  - Status:                      " << (passed ? "[PASS] Verified >= 1.5x Speedup" : "[FAIL] Below 1.5x Bar") << "\n";
-        std::cout << "========================================================================================\n\n";
+        std::cout << "========================================================================================================================\n\n";
     }
 
     static void print_compile_speed(
@@ -143,31 +160,38 @@ public:
         size_t instruction_count,
         size_t mir_bytes,
         size_t machine_bytes,
+        size_t peak_rss_bytes,
         double parse_ms,
         double verify_ms,
         double codegen_ms,
         double total_ms,
+        bool deterministic,
         bool passed
     ) {
         double fn_per_sec = (total_ms > 0.0) ? (static_cast<double>(function_count) / (total_ms / 1000.0)) : 0.0;
         double kb_per_sec = (total_ms > 0.0) ? (static_cast<double>(mir_bytes) / 1024.0 / (total_ms / 1000.0)) : 0.0;
 
-        std::cout << "\n========================================================================================\n";
+        std::cout << "\n========================================================================================================================\n";
         std::cout << "  BRASS COMPILE-SPEED BENCHMARK:\n";
-        std::cout << "========================================================================================\n";
+        std::cout << "========================================================================================================================\n";
         std::cout << "  - Functions Compiled:          " << function_count << "\n";
         std::cout << "  - MIR Instructions:            " << instruction_count << "\n";
-        std::cout << "  - Textual MIR Source Size:     " << std::fixed << std::setprecision(1) << (static_cast<double>(mir_bytes) / 1024.0) << " KB\n";
+        std::cout << "  - Textual MIR Source Size:     " << std::fixed << std::setprecision(1) << (static_cast<double>(mir_bytes) / 1024.0) << " KB ("
+                  << std::fixed << std::setprecision(2) << (static_cast<double>(mir_bytes) / 1024.0 / 1024.0) << " MB)\n";
         std::cout << "  - Emitted Machine Code Size:   " << std::fixed << std::setprecision(1) << (static_cast<double>(machine_bytes) / 1024.0) << " KB\n";
+        if (peak_rss_bytes > 0) {
+            std::cout << "  - Peak Working Set (Memory):   " << std::fixed << std::setprecision(2) << (static_cast<double>(peak_rss_bytes) / 1024.0 / 1024.0) << " MB\n";
+        }
         std::cout << "  - Breakdown:\n";
         std::cout << "      * MIR Parse:               " << std::fixed << std::setprecision(2) << parse_ms << " ms\n";
         std::cout << "      * MIR Verification:        " << std::fixed << std::setprecision(2) << verify_ms << " ms\n";
         std::cout << "      * ISEL, RegAlloc, Codegen: " << std::fixed << std::setprecision(2) << codegen_ms << " ms\n";
         std::cout << "  - Total End-to-End Time:       " << std::fixed << std::setprecision(2) << total_ms << " ms (Target: < 2000.0 ms)\n";
+        std::cout << "  - Determinism Verification:    " << (deterministic ? "[PASS] Verified 100% Byte-for-Byte Deterministic" : "[FAIL] Determinism mismatch") << "\n";
         std::cout << "  - Throughput:                  " << std::fixed << std::setprecision(0) << fn_per_sec << " functions/sec | "
                   << std::fixed << std::setprecision(1) << kb_per_sec << " KB/sec\n";
         std::cout << "  - Status:                      " << (passed ? "[PASS] Sub-2s Target Met" : "[FAIL] Exceeded 2s Limit") << "\n";
-        std::cout << "========================================================================================\n\n";
+        std::cout << "========================================================================================================================\n\n";
     }
 };
 
