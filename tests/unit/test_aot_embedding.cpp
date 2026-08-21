@@ -50,7 +50,7 @@ static int64_t g_subroutine_call_count = 0;
 static uintptr_t g_last_r1_old_addr = 0;
 static uintptr_t g_last_r2_old_addr = 0;
 
-int64_t host_hook_in_process(int64_t val) {
+[[maybe_unused]] static int64_t host_hook_in_process(int64_t val) {
     return val * 7;
 }
 
