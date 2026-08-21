@@ -23,6 +23,7 @@ else()
         -Wpedantic
         -Wconversion
         -Wno-unused-parameter
+        -fno-omit-frame-pointer
     )
 endif()
 

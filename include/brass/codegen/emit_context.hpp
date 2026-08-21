@@ -4,6 +4,7 @@
 #include <brass/target/x64/x64_encoder.hpp>
 #include <brass/target/x64/x64_frame.hpp>
 #include <brass/codegen/lir.hpp>
+#include <brass/gc/stack_map.hpp>
 #include <vector>
 #include <unordered_map>
 #include <cstddef>
@@ -21,6 +22,7 @@ struct SafepointRecord {
 struct CompilationResult {
     x64::CodeBuffer code_buffer;
     std::vector<SafepointRecord> safepoints;
+    FunctionStackMap stack_map;
     size_t entry_offset = 0;
     std::unordered_map<uint32_t, size_t> block_offsets;
 };
@@ -37,6 +39,7 @@ private:
     x64::CodeBuffer buffer_;
     x64::X64Encoder enc_;
     std::vector<SafepointRecord> safepoints_;
+    std::vector<StackMapRecord> stack_map_records_;
     std::unordered_map<uint32_t, x64::Label> block_labels_;
 
     x64::MemAddress to_mem_address(const LirOperand& op) const;

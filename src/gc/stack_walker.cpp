@@ -1,0 +1,71 @@
+#include <brass/gc/stack_walker.hpp>
+#include <iostream>
+
+namespace brass {
+
+size_t brass_stack_walk(
+    uintptr_t top_rbp,
+    uintptr_t top_return_ip,
+    const ModuleStackMap& stack_maps,
+    brass_root_visitor_fn visitor,
+    void* user_data
+) {
+    size_t frame_count = 0;
+    uintptr_t cur_rbp = top_rbp;
+    uintptr_t cur_return_ip = top_return_ip;
+
+    constexpr size_t MAX_FRAMES = 1024;
+
+    while (cur_rbp != 0 && cur_return_ip != 0 && frame_count < MAX_FRAMES) {
+        // Frame pointer must be 8-byte aligned
+        if ((cur_rbp % 8) != 0) {
+            break;
+        }
+
+        const StackMapRecord* rec = stack_maps.find_record(cur_return_ip);
+        if (rec != nullptr) {
+            for (const auto& root_loc : rec->roots) {
+                intptr_t slot_addr_int = static_cast<intptr_t>(cur_rbp) + root_loc.offset_from_rbp;
+                void** root_slot = reinterpret_cast<void**>(slot_addr_int);
+                if (visitor && root_slot) {
+                    visitor(root_slot, user_data);
+                }
+            }
+            frame_count++;
+        }
+
+        // Unwind to caller frame:
+        // In standard x86_64 calling conventions:
+        // *(uintptr_t*)cur_rbp = saved caller RBP
+        // *(uintptr_t*)(cur_rbp + 8) = saved caller return IP
+        uintptr_t next_rbp = *reinterpret_cast<const uintptr_t*>(cur_rbp);
+        uintptr_t next_return_ip = *reinterpret_cast<const uintptr_t*>(cur_rbp + 8);
+
+        // Guard against cycles or corrupted stack pointers
+        if (next_rbp == cur_rbp) {
+            break;
+        }
+
+        cur_rbp = next_rbp;
+        cur_return_ip = next_return_ip;
+    }
+
+    return frame_count;
+}
+
+size_t brass_stack_walk(
+    uintptr_t top_rbp,
+    uintptr_t top_return_ip,
+    const ModuleStackMap& stack_maps,
+    const std::function<void(void**)>& visitor
+) {
+    auto adapter = [](void** slot, void* udata) {
+        auto* fn = static_cast<const std::function<void(void**)>*>(udata);
+        if (fn && *fn) {
+            (*fn)(slot);
+        }
+    };
+    return brass_stack_walk(top_rbp, top_return_ip, stack_maps, adapter, const_cast<void*>(static_cast<const void*>(&visitor)));
+}
+
+} // namespace brass

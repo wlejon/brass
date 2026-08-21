@@ -150,6 +150,10 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
         cfi.frame_info = lir->frame;
         cfi.cc = cc_;
         cfi.safepoints = std::move(res.safepoints);
+        cfi.stack_map = std::move(res.stack_map);
+        cfi.stack_map.code_offset = static_cast<uint32_t>(fn_offset);
+        cfi.stack_map.code_size = static_cast<uint32_t>(fn_size);
+        obj.stack_maps.add_function(cfi.stack_map);
         obj.functions.push_back(std::move(cfi));
 
         int32_t text_idx = obj.get_section_index(".text");
@@ -180,6 +184,31 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
             obj_r.addend = r.addend;
             text_sec.relocations.push_back(std::move(obj_r));
         }
+    }
+
+    // Emit compact binary stack maps to .rdata / .rodata section
+    if (!obj.stack_maps.empty()) {
+        std::string ro_sec_name = target_.is_windows() ? ".rdata" : ".rodata";
+        Section& ro_sec = obj.get_or_create_section(
+            ro_sec_name,
+            SectionKind::RoData,
+            SectionFlags::Read | SectionFlags::Alloc,
+            16
+        );
+        ro_sec.align_to(16);
+        size_t map_offset = ro_sec.data.size();
+        std::vector<uint8_t> encoded_maps = encode_stack_maps(obj.stack_maps);
+        ro_sec.emit_bytes(encoded_maps);
+
+        int32_t ro_idx = obj.get_section_index(ro_sec_name);
+        ObjectSymbol map_sym;
+        map_sym.name = "__brass_stack_maps";
+        map_sym.section_index = ro_idx;
+        map_sym.value = map_offset;
+        map_sym.size = encoded_maps.size();
+        map_sym.binding = SymbolBinding::Global;
+        map_sym.type = SymbolType::Object;
+        obj.add_symbol(std::move(map_sym));
     }
 
     // Record external symbols

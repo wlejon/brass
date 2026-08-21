@@ -6,6 +6,7 @@
 #include <brass/codegen/lir.hpp>
 #include <brass/codegen/emit_context.hpp>
 #include <brass/mir/module.hpp>
+#include <brass/gc/stack_map.hpp>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -135,6 +136,7 @@ struct CompiledFunctionInfo {
     codegen::FrameInfo frame_info;
     CallingConvention cc;
     std::vector<codegen::SafepointRecord> safepoints;
+    FunctionStackMap stack_map;
 };
 
 struct ObjectFile {
@@ -142,6 +144,7 @@ struct ObjectFile {
     std::vector<Section> sections;
     std::vector<ObjectSymbol> symbols;
     std::vector<CompiledFunctionInfo> functions;
+    ModuleStackMap stack_maps;
 
     Section* get_section(std::string_view name);
     const Section* get_section(std::string_view name) const;

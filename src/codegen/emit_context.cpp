@@ -47,6 +47,7 @@ MemAddress EmitContext::to_mem_address(const LirOperand& op) const {
 CompilationResult EmitContext::compile() {
     CompilationResult result;
     safepoints_.clear();
+    stack_map_records_.clear();
     block_labels_.clear();
 
     // 1. Compute frame layout
@@ -75,6 +76,9 @@ CompilationResult EmitContext::compile() {
 
     result.code_buffer = std::move(buffer_);
     result.safepoints = std::move(safepoints_);
+    result.stack_map.function_name = fn_.name;
+    result.stack_map.code_size = static_cast<uint32_t>(result.code_buffer.size());
+    result.stack_map.records = std::move(stack_map_records_);
     result.entry_offset = 0;
 
     return result;
@@ -656,11 +660,53 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
         case LirOpcode::Call: {
             const auto& sym_op = inst.uses.back();
             enc_.call(sym_op.symbol_name);
+            size_t return_offset = buffer_.size();
+
+            codegen::FrameInfo mutable_frame = fn_.frame;
+            X64FrameLayout::compute_layout(mutable_frame, fn_.calling_conv);
+
+            StackMapRecord map_rec;
+            map_rec.instruction_offset = static_cast<uint32_t>(return_offset);
+            map_rec.frame_size = static_cast<uint32_t>(mutable_frame.total_frame_size);
+            map_rec.safepoint_id = inst.safepoint_id;
+
+            for (const auto& v : inst.live_gcrefs) {
+                const auto& info = fn_.get_vreg_info(v);
+                if (info.is_spilled) {
+                    int32_t offset = mutable_frame.spill_slot_offset(info.assigned_spill_slot);
+                    map_rec.add_root(StackMapRootLocation::frame_slot(offset));
+                } else if (info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
+                    MemAddress addr = X64FrameLayout::callee_gpr_address(info.assigned_preg.as_gpr(), mutable_frame);
+                    map_rec.add_root(StackMapRootLocation::callee_saved(addr.disp, info.assigned_preg));
+                }
+            }
+            stack_map_records_.push_back(std::move(map_rec));
             break;
         }
         case LirOpcode::CallIndirect: {
             const auto& target_op = inst.uses.back();
             enc_.call(to_gpr(target_op));
+            size_t return_offset = buffer_.size();
+
+            codegen::FrameInfo mutable_frame = fn_.frame;
+            X64FrameLayout::compute_layout(mutable_frame, fn_.calling_conv);
+
+            StackMapRecord map_rec;
+            map_rec.instruction_offset = static_cast<uint32_t>(return_offset);
+            map_rec.frame_size = static_cast<uint32_t>(mutable_frame.total_frame_size);
+            map_rec.safepoint_id = inst.safepoint_id;
+
+            for (const auto& v : inst.live_gcrefs) {
+                const auto& info = fn_.get_vreg_info(v);
+                if (info.is_spilled) {
+                    int32_t offset = mutable_frame.spill_slot_offset(info.assigned_spill_slot);
+                    map_rec.add_root(StackMapRootLocation::frame_slot(offset));
+                } else if (info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
+                    MemAddress addr = X64FrameLayout::callee_gpr_address(info.assigned_preg.as_gpr(), mutable_frame);
+                    map_rec.add_root(StackMapRootLocation::callee_saved(addr.disp, info.assigned_preg));
+                }
+            }
+            stack_map_records_.push_back(std::move(map_rec));
             break;
         }
         case LirOpcode::Ret: {
@@ -679,19 +725,35 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
             enc_.lea(to_gpr(inst.defs[0]), to_mem_address(inst.uses[0]));
             break;
         case LirOpcode::Safepoint: {
+            enc_.call("brass_gc_safepoint");
+            size_t return_offset = buffer_.size();
+
+            codegen::FrameInfo mutable_frame = fn_.frame;
+            X64FrameLayout::compute_layout(mutable_frame, fn_.calling_conv);
+
             SafepointRecord rec;
-            rec.code_offset = buffer_.size();
+            rec.code_offset = return_offset;
             rec.safepoint_id = inst.safepoint_id;
+
+            StackMapRecord map_rec;
+            map_rec.instruction_offset = static_cast<uint32_t>(return_offset);
+            map_rec.frame_size = static_cast<uint32_t>(mutable_frame.total_frame_size);
+            map_rec.safepoint_id = inst.safepoint_id;
 
             for (const auto& v : inst.live_gcrefs) {
                 const auto& info = fn_.get_vreg_info(v);
                 if (info.is_spilled) {
-                    rec.live_gcref_spill_offsets.push_back(fn_.frame.spill_slot_offset(info.assigned_spill_slot));
+                    int32_t offset = mutable_frame.spill_slot_offset(info.assigned_spill_slot);
+                    rec.live_gcref_spill_offsets.push_back(offset);
+                    map_rec.add_root(StackMapRootLocation::frame_slot(offset));
                 } else if (info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
                     rec.live_gcref_registers.push_back(info.assigned_preg.as_gpr());
+                    MemAddress addr = X64FrameLayout::callee_gpr_address(info.assigned_preg.as_gpr(), mutable_frame);
+                    map_rec.add_root(StackMapRootLocation::callee_saved(addr.disp, info.assigned_preg));
                 }
             }
             safepoints_.push_back(std::move(rec));
+            stack_map_records_.push_back(std::move(map_rec));
             break;
         }
         case LirOpcode::GuardExit:

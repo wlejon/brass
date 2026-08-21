@@ -1,6 +1,7 @@
 #include <brass/codegen/jit_exec.hpp>
 #include <brass/object/coff_writer.hpp>
 #include <brass/object/elf_writer.hpp>
+#include <brass/gc/runtime_gc.hpp>
 #include <stdexcept>
 #include <cstring>
 #include <iostream>
@@ -92,10 +93,20 @@ void JitMemoryBlock::make_read_write() {
 }
 
 JitExecutionEngine::JitExecutionEngine(const Target& target)
-    : target_(target) {}
+    : target_(target) {
+    register_external_symbol("brass_gc_alloc", reinterpret_cast<void*>(&brass_gc_alloc));
+    register_external_symbol("brass_gc_safepoint", reinterpret_cast<void*>(&brass_gc_safepoint));
+    register_external_symbol("brass_gc_collect", reinterpret_cast<void*>(&brass_gc_collect));
+    register_external_symbol("brass_runtime_gc_safepoint", reinterpret_cast<void*>(&brass_gc_safepoint));
+}
 
 JitExecutionEngine::JitExecutionEngine()
-    : target_(Target::host()) {}
+    : target_(Target::host()) {
+    register_external_symbol("brass_gc_alloc", reinterpret_cast<void*>(&brass_gc_alloc));
+    register_external_symbol("brass_gc_safepoint", reinterpret_cast<void*>(&brass_gc_safepoint));
+    register_external_symbol("brass_gc_collect", reinterpret_cast<void*>(&brass_gc_collect));
+    register_external_symbol("brass_runtime_gc_safepoint", reinterpret_cast<void*>(&brass_gc_safepoint));
+}
 
 JitExecutionEngine::~JitExecutionEngine() {
     unregister_seh_tables();
@@ -107,6 +118,7 @@ JitExecutionEngine::JitExecutionEngine(JitExecutionEngine&& other) noexcept
       symbol_table_(std::move(other.symbol_table_)),
       external_symbols_(std::move(other.external_symbols_)),
       function_signatures_(std::move(other.function_signatures_)),
+      stack_maps_(std::move(other.stack_maps_)),
       pdata_table_(other.pdata_table_),
       pdata_count_(other.pdata_count_),
       code_base_(other.code_base_) {
@@ -123,6 +135,7 @@ JitExecutionEngine& JitExecutionEngine::operator=(JitExecutionEngine&& other) no
         symbol_table_ = std::move(other.symbol_table_);
         external_symbols_ = std::move(other.external_symbols_);
         function_signatures_ = std::move(other.function_signatures_);
+        stack_maps_ = std::move(other.stack_maps_);
         pdata_table_ = other.pdata_table_;
         pdata_count_ = other.pdata_count_;
         code_base_ = other.code_base_;
@@ -193,6 +206,11 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj) {
 
     if (total_size == 0) return true;
 
+    // Reserve extra space for PLT far-call trampolines
+    size_t trampoline_capacity = 4096;
+    size_t trampoline_offset = (total_size + 15) & ~size_t(15);
+    total_size = trampoline_offset + trampoline_capacity;
+
     // Allocate memory block
     code_mem_ = JitMemoryBlock(total_size);
     if (!code_mem_.is_valid()) {
@@ -200,6 +218,9 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj) {
     }
 
     uint8_t* base_ptr = code_mem_.data();
+    uint8_t* trampoline_ptr = base_ptr + trampoline_offset;
+    size_t trampoline_used = 0;
+    std::unordered_map<std::string, void*> trampolines;
 
     // Copy section data to memory block
     for (size_t i = 0; i < working_obj.sections.size(); ++i) {
@@ -251,6 +272,28 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj) {
                 case object::RelocKind::PCRel32:
                 case object::RelocKind::Plt32: {
                     int64_t disp = reinterpret_cast<int64_t>(target_addr) + r.addend - reinterpret_cast<int64_t>(patch_loc);
+                    if (disp < INT32_MIN || disp > INT32_MAX) {
+                        // Out of 32-bit reach: generate or reuse a 64-bit indirect jump PLT trampoline
+                        void* tramp_addr = nullptr;
+                        auto tramp_it = trampolines.find(r.symbol_name);
+                        if (tramp_it != trampolines.end()) {
+                            tramp_addr = tramp_it->second;
+                        } else {
+                            if (trampoline_used + 16 <= trampoline_capacity) {
+                                uint8_t* t = trampoline_ptr + trampoline_used;
+                                trampoline_used += 16;
+                                // Emit: FF 25 00 00 00 00 (jmp qword ptr [rip + 0]) ; [64-bit target_addr]
+                                t[0] = 0xFF; t[1] = 0x25;
+                                t[2] = 0x00; t[3] = 0x00; t[4] = 0x00; t[5] = 0x00;
+                                *reinterpret_cast<uint64_t*>(t + 6) = reinterpret_cast<uint64_t>(target_addr);
+                                trampolines[r.symbol_name] = t;
+                                tramp_addr = t;
+                            }
+                        }
+                        if (tramp_addr) {
+                            disp = reinterpret_cast<int64_t>(tramp_addr) + r.addend - reinterpret_cast<int64_t>(patch_loc);
+                        }
+                    }
                     *reinterpret_cast<int32_t*>(patch_loc) = static_cast<int32_t>(disp);
                     break;
                 }
@@ -278,6 +321,19 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj) {
     if (target_.is_windows()) {
         register_seh_tables(working_obj, base_ptr);
     }
+
+    // Register and relocate Stack Maps
+    stack_maps_ = working_obj.stack_maps;
+    int32_t text_idx = working_obj.get_section_index(".text");
+    if (text_idx >= 0) {
+        uintptr_t text_base = reinterpret_cast<uintptr_t>(base_ptr + sec_offsets[text_idx]);
+        stack_maps_.relocate(text_base);
+        for (const auto& fn : working_obj.functions) {
+            uintptr_t fn_addr = reinterpret_cast<uintptr_t>(base_ptr + sec_offsets[text_idx] + fn.text_offset);
+            stack_maps_.register_function_address(fn.name, fn_addr, static_cast<uint32_t>(fn.text_size));
+        }
+    }
+    brass_set_active_stack_maps(&stack_maps_);
 
     code_mem_.make_executable();
     return true;

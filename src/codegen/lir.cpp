@@ -379,7 +379,11 @@ int32_t FrameInfo::spill_slot_offset(int32_t slot_idx) const noexcept {
     // Callee-saved GPRs are saved at [rbp - 8], [rbp - 16], ...
     size_t num_callee_gprs = 0;
     for (int i = 0; i < 16; ++i) {
-        if (saved_callee_gprs & (1u << i)) num_callee_gprs++;
+        if (saved_callee_gprs & (1u << i)) {
+            if (i != static_cast<int>(x64::GPR::RSP) && i != static_cast<int>(x64::GPR::RBP)) {
+                num_callee_gprs++;
+            }
+        }
     }
     size_t num_callee_xmms = 0;
     for (int i = 0; i < 16; ++i) {

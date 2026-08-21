@@ -16,7 +16,10 @@ add_executable(brass_unit_tests
     unit/test_x64_codegen.cpp
     unit/test_coff_writer.cpp
     unit/test_elf_writer.cpp
+    unit/test_stack_map.cpp
+    unit/test_stack_walker.cpp
     differential/test_differential_exec.cpp
+    differential/test_moving_gc_native.cpp
 )
 
 target_include_directories(brass_unit_tests

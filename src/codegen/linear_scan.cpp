@@ -61,6 +61,12 @@ void LinearScanAllocator::allocate() {
     for (auto* current : unhandled) {
         expire_old_intervals(current->start_id);
 
+        if (current->vreg.is_gcref && current->spans_call) {
+            current->assigned_spill_slot = allocate_spill_slot(true);
+            current->assigned_preg = PReg{};
+            continue;
+        }
+
         if (!try_allocate_free_reg(*current)) {
             allocate_blocked_reg(*current);
         }
@@ -81,7 +87,39 @@ void LinearScanAllocator::allocate() {
     fn_.frame.saved_callee_gprs = used_callee_gprs_;
     fn_.frame.saved_callee_xmms = used_callee_xmms_;
 
-    // 5. Rewrite all instructions in the function
+    // 5. Record live GC references at all call sites and safepoints
+    for (const auto& block : fn_.blocks) {
+        for (auto& inst : block->instructions) {
+            if (inst->is_call() || inst->opcode == LirOpcode::Safepoint) {
+                inst->live_gcrefs.clear();
+                for (const auto& interval : liveness_.intervals()) {
+                    if (interval.vreg.is_valid() && interval.vreg.is_gcref) {
+                        bool has_def_before = false;
+                        for (const auto& pos : interval.use_positions) {
+                            if (pos.is_def && pos.inst_id < inst->id) {
+                                has_def_before = true;
+                                break;
+                            }
+                        }
+
+                        bool has_use_after = false;
+                        for (const auto& pos : interval.use_positions) {
+                            if (!pos.is_def && pos.inst_id >= inst->id) {
+                                has_use_after = true;
+                                break;
+                            }
+                        }
+
+                        if (has_def_before && has_use_after && interval.covers(inst->id)) {
+                            inst->live_gcrefs.push_back(interval.vreg);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 6. Rewrite all instructions in the function
     rewrite_instructions();
 }
 
@@ -362,6 +400,38 @@ void LinearScanAllocator::rewrite_instructions() {
         std::vector<std::unique_ptr<LirInst>> rewritten;
 
         for (auto& inst : block->instructions) {
+            // First, check if any memory operands have spilled base or index registers
+            for (auto* op_list : {&inst->defs, &inst->uses}) {
+                for (auto& op : *op_list) {
+                    if (op.is_mem()) {
+                        if (op.mem_val.base_vreg.is_valid()) {
+                            const VRegInfo& b_info = fn_.get_vreg_info(op.mem_val.base_vreg);
+                            if (b_info.is_spilled) {
+                                auto load_base = std::make_unique<LirInst>(LirOpcode::Mov);
+                                load_base->add_def(LirOperand::preg(PReg::gpr(GPR::R10), 8));
+                                load_base->add_use(LirOperand::slot(b_info.assigned_spill_slot, 8));
+                                rewritten.push_back(std::move(load_base));
+
+                                op.mem_val.base_preg = PReg::gpr(GPR::R10);
+                                op.mem_val.base_vreg = VReg{};
+                            }
+                        }
+                        if (op.mem_val.index_vreg.is_valid()) {
+                            const VRegInfo& i_info = fn_.get_vreg_info(op.mem_val.index_vreg);
+                            if (i_info.is_spilled) {
+                                auto load_idx = std::make_unique<LirInst>(LirOpcode::Mov);
+                                load_idx->add_def(LirOperand::preg(PReg::gpr(GPR::R9), 8));
+                                load_idx->add_use(LirOperand::slot(i_info.assigned_spill_slot, 8));
+                                rewritten.push_back(std::move(load_idx));
+
+                                op.mem_val.index_preg = PReg::gpr(GPR::R9);
+                                op.mem_val.index_vreg = VReg{};
+                            }
+                        }
+                    }
+                }
+            }
+
             // Rewrite defs and uses
             for (size_t i = 0; i < inst->defs.size(); ++i) {
                 inst->defs[i] = resolve_operand(inst->defs[i]);
@@ -375,36 +445,34 @@ void LinearScanAllocator::rewrite_instructions() {
                 continue;
             }
 
-            bool has_spill_def = !inst->defs.empty() && inst->defs[0].is_spill_slot();
+            bool def_is_mem = !inst->defs.empty() && (inst->defs[0].is_mem() || inst->defs[0].is_spill_slot());
+            bool use_is_mem = !inst->uses.empty() && (inst->uses[0].is_mem() || inst->uses[0].is_spill_slot());
 
-            // Simple moves to/from spill slot:
-            if (inst->opcode == LirOpcode::Mov || inst->opcode == LirOpcode::Mov32 ||
-                inst->opcode == LirOpcode::Movsd || inst->opcode == LirOpcode::Movss) {
-                bool has_spill_use = !inst->uses.empty() && inst->uses[0].is_spill_slot();
-                if (has_spill_def && has_spill_use) {
-                    bool is_xmm = (inst->opcode == LirOpcode::Movsd || inst->opcode == LirOpcode::Movss);
-                    PReg scratch = is_xmm ? PReg::xmm(XMM::XMM15) : PReg::gpr(GPR::R11);
-                    uint8_t sz = inst->uses[0].size;
+            // Moves between memory / spill slots:
+            if ((inst->opcode == LirOpcode::Mov || inst->opcode == LirOpcode::Mov32 ||
+                 inst->opcode == LirOpcode::Movsd || inst->opcode == LirOpcode::Movss) &&
+                def_is_mem && use_is_mem) {
+                bool is_xmm = (inst->opcode == LirOpcode::Movsd || inst->opcode == LirOpcode::Movss);
+                PReg scratch = is_xmm ? PReg::xmm(XMM::XMM15) : PReg::gpr(GPR::R11);
+                uint8_t sz = inst->uses[0].size;
 
-                    auto load_scratch = std::make_unique<LirInst>(
-                        is_xmm ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov)
-                    );
-                    load_scratch->add_def(LirOperand::preg(scratch, sz));
-                    load_scratch->add_use(inst->uses[0]);
-                    rewritten.push_back(std::move(load_scratch));
+                auto load_scratch = std::make_unique<LirInst>(
+                    is_xmm ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov)
+                );
+                load_scratch->add_def(LirOperand::preg(scratch, sz));
+                load_scratch->add_use(inst->uses[0]);
+                rewritten.push_back(std::move(load_scratch));
 
-                    auto store_scratch = std::make_unique<LirInst>(
-                        is_xmm ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov)
-                    );
-                    store_scratch->add_def(inst->defs[0]);
-                    store_scratch->add_use(LirOperand::preg(scratch, sz));
-                    rewritten.push_back(std::move(store_scratch));
-                    continue;
-                } else {
-                    rewritten.push_back(std::move(inst));
-                    continue;
-                }
+                auto store_scratch = std::make_unique<LirInst>(
+                    is_xmm ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov)
+                );
+                store_scratch->add_def(inst->defs[0]);
+                store_scratch->add_use(LirOperand::preg(scratch, sz));
+                rewritten.push_back(std::move(store_scratch));
+                continue;
             }
+
+            bool has_spill_def = !inst->defs.empty() && inst->defs[0].is_spill_slot();
 
             // Other instructions with spill def or spill uses
             LirOperand original_spill_def;

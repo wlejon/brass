@@ -514,6 +514,10 @@ void X64ISel::lower_store_indexed(const Instruction& inst, LirBlock& lir_bb) {
 }
 
 void X64ISel::lower_safepoint(const Instruction& inst, LirBlock& lir_bb) {
+    if (cc_.kind() == CallingConvKind::Win64) {
+        lir_fn_->frame.outgoing_arg_space = std::max(lir_fn_->frame.outgoing_arg_space, size_t(32));
+    }
+
     auto sp_inst = std::make_unique<LirInst>(LirOpcode::Safepoint);
     sp_inst->safepoint_id = inst.resume_id();
     sp_inst->clobbered_gprs = cc_.caller_saved_gpr_mask();

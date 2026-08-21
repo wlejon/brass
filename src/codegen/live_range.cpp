@@ -44,6 +44,27 @@ void LiveInterval::add_range(uint32_t s, uint32_t e) {
     segments = std::move(new_segments);
 }
 
+void LiveInterval::shorten_start(uint32_t from_id) {
+    if (segments.empty()) {
+        segments.push_back({from_id, from_id + 1});
+        start_id = from_id;
+        end_id = std::max(end_id, from_id + 1);
+        return;
+    }
+
+    for (auto& seg : segments) {
+        if (seg.start < from_id && seg.end >= from_id) {
+            seg.start = from_id;
+            break;
+        }
+    }
+
+    start_id = UINT32_MAX;
+    for (const auto& seg : segments) {
+        start_id = std::min(start_id, seg.start);
+    }
+}
+
 void LiveInterval::add_use_pos(uint32_t id, bool is_def, bool requires_reg, PReg fixed) {
     use_positions.push_back(UsePosition{id, is_def, requires_reg, fixed});
     start_id = std::min(start_id, id);
@@ -163,7 +184,7 @@ void LivenessAnalysis::assign_instruction_ids() {
 
         for (const auto& inst : block->instructions) {
             inst->id = current_id;
-            if (inst->is_call()) {
+            if (inst->is_call() || inst->opcode == LirOpcode::Safepoint) {
                 call_inst_ids_.push_back(current_id);
             }
             current_id += 2;
@@ -198,6 +219,13 @@ void LivenessAnalysis::compute_local_liveness() {
             for (const auto& d : inst->defs) {
                 if (d.is_vreg()) {
                     add_vreg_unique(bl.defs, d.vreg_val);
+                } else if (d.is_mem()) {
+                    if (d.mem_val.base_vreg.is_valid() && !contains_vreg(bl.defs, d.mem_val.base_vreg)) {
+                        add_vreg_unique(bl.uses, d.mem_val.base_vreg);
+                    }
+                    if (d.mem_val.index_vreg.is_valid() && !contains_vreg(bl.defs, d.mem_val.index_vreg)) {
+                        add_vreg_unique(bl.uses, d.mem_val.index_vreg);
+                    }
                 }
             }
         }
@@ -261,7 +289,16 @@ void LivenessAnalysis::build_intervals() {
                 if (d.is_vreg()) {
                     FixedConstraint fc = (i < inst->def_constraints.size()) ? inst->def_constraints[i] : FixedConstraint::none();
                     intervals_[d.vreg_val.id].add_use_pos(inst_id, true, true, fc.fixed_preg);
-                    intervals_[d.vreg_val.id].add_range(inst_id, inst_id + 1);
+                    intervals_[d.vreg_val.id].shorten_start(inst_id);
+                } else if (d.is_mem()) {
+                    if (d.mem_val.base_vreg.is_valid()) {
+                        intervals_[d.mem_val.base_vreg.id].add_use_pos(inst_id, false, true);
+                        intervals_[d.mem_val.base_vreg.id].add_range(bl.start_id, inst_id);
+                    }
+                    if (d.mem_val.index_vreg.is_valid()) {
+                        intervals_[d.mem_val.index_vreg.id].add_use_pos(inst_id, false, true);
+                        intervals_[d.mem_val.index_vreg.id].add_range(bl.start_id, inst_id);
+                    }
                 }
             }
 

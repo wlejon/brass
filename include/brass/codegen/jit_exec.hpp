@@ -5,6 +5,7 @@
 #include <brass/mir/function.hpp>
 #include <brass/interpreter/value.hpp>
 #include <brass/object/object_writer.hpp>
+#include <brass/gc/stack_map.hpp>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -67,6 +68,10 @@ public:
         return reinterpret_cast<FuncPtr>(get_symbol_address(name));
     }
 
+    // Stack map access
+    const ModuleStackMap& stack_maps() const noexcept { return stack_maps_; }
+    ModuleStackMap& stack_maps() noexcept { return stack_maps_; }
+
     // Dynamic invocation helper using RuntimeValue
     RuntimeValue invoke(std::string_view name, const std::vector<RuntimeValue>& args);
     RuntimeValue invoke(std::string_view name);
@@ -78,6 +83,7 @@ private:
     std::unordered_map<std::string, void*> symbol_table_;
     std::unordered_map<std::string, void*> external_symbols_;
     std::unordered_map<std::string, std::pair<Type, std::vector<Type>>> function_signatures_;
+    ModuleStackMap stack_maps_;
 
     // Windows SEH registration tracking
     void* pdata_table_ = nullptr;

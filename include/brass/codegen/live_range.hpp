@@ -45,6 +45,7 @@ public:
     explicit LiveInterval(VReg v) : vreg(v) {}
 
     void add_range(uint32_t s, uint32_t e);
+    void shorten_start(uint32_t from_id);
     void add_use_pos(uint32_t id, bool is_def, bool requires_reg = true, PReg fixed = PReg{});
 
     bool covers(uint32_t id) const noexcept;
