@@ -69,7 +69,8 @@ enum class ParamRole {
     BasicIV,
     DerivedIV,
     Invariant,
-    ReductionAcc
+    ReductionAcc,
+    SerialReductionAcc
 };
 
 struct ParamAnalysis {
@@ -250,11 +251,11 @@ bool analyze_loop(
                         if (term != param) {
                             std::unordered_set<const Value*> visited;
                             if (!value_depends_on_param(term, param, loop, visited)) {
-                                bool can_reduce = options.enable_reduction_jam;
                                 if (pa.type == Type::f64() && !options.enable_fp_reduction_jam) {
-                                    can_reduce = false;
-                                }
-                                if (can_reduce) {
+                                    pa.role = ParamRole::SerialReductionAcc;
+                                    pa.update_inst = def;
+                                    cla.reduction_indices.push_back(i);
+                                } else if (options.enable_reduction_jam) {
                                     pa.role = ParamRole::ReductionAcc;
                                     pa.update_inst = def;
                                     cla.reduction_indices.push_back(i);
@@ -479,78 +480,207 @@ bool unroll_loop(
 
     std::vector<Value*> cur_acc_vals(header->param_count());
     std::vector<std::vector<Value*>> next_acc_vals(header->param_count());
+    std::unordered_map<size_t, Value*> serial_acc_map;
 
+    size_t init_non_red_idx = 0;
     for (size_t i = 0; i < header->param_count(); ++i) {
-        if (cla.params[i].role == ParamRole::ReductionAcc && options.enable_reduction_jam) {
+        const ParamAnalysis& pa = cla.params[i];
+        if (pa.role == ParamRole::ReductionAcc && options.enable_reduction_jam) {
             next_acc_vals[i] = reduction_acc_params[i];
+        } else {
+            Value* p = unroll_hdr_params[init_non_red_idx++];
+            if (pa.role == ParamRole::SerialReductionAcc) {
+                serial_acc_map[i] = p;
+            }
         }
     }
 
-    for (size_t k = 0; k < F; ++k) {
-        std::unordered_map<const Value*, Value*> iter_val_map;
+    bool has_serial_reduction = false;
+    for (size_t red_i : cla.reduction_indices) {
+        if (cla.params[red_i].role == ParamRole::SerialReductionAcc) {
+            has_serial_reduction = true;
+            break;
+        }
+    }
 
-        // Map header parameters for iteration k
-        size_t non_red_idx = 0;
-        for (size_t i = 0; i < header->param_count(); ++i) {
-            const ParamAnalysis& pa = cla.params[i];
-            Value* orig_param = header->param(i);
+    std::vector<std::unordered_map<const Value*, Value*>> all_iter_maps(F);
 
-            if (pa.role == ParamRole::ReductionAcc && options.enable_reduction_jam) {
-                // Map accumulator to its current accumulator value
-                iter_val_map[orig_param] = next_acc_vals[i][k];
-            } else if (pa.role == ParamRole::BasicIV || pa.role == ParamRole::DerivedIV) {
-                Value* base_p = unroll_hdr_params[non_red_idx++];
-                if (k == 0) {
-                    iter_val_map[orig_param] = base_p;
+    if (has_serial_reduction) {
+        // Pass 1: Emit all independent operand computations for all F iterations
+        for (size_t k = 0; k < F; ++k) {
+            auto& iter_val_map = all_iter_maps[k];
+            size_t non_red_idx = 0;
+
+            for (size_t i = 0; i < header->param_count(); ++i) {
+                const ParamAnalysis& pa = cla.params[i];
+                Value* orig_param = header->param(i);
+
+                if (pa.role == ParamRole::ReductionAcc && options.enable_reduction_jam) {
+                    iter_val_map[orig_param] = next_acc_vals[i][k];
+                } else if (pa.role == ParamRole::SerialReductionAcc) {
+                    non_red_idx++;
+                } else if (pa.role == ParamRole::BasicIV || pa.role == ParamRole::DerivedIV) {
+                    Value* base_p = unroll_hdr_params[non_red_idx++];
+                    if (k == 0) {
+                        iter_val_map[orig_param] = base_p;
+                    } else {
+                        Value* step_v = get_invariant_val(b, pa.type, pa.step_val);
+                        Value* k_step = make_smart_mul(b, pa.type, step_v, static_cast<int64_t>(k));
+                        Value* k_val = pa.is_sub ? b.build_sub(base_p, k_step) : make_smart_add(b, pa.type, base_p, k_step);
+                        iter_val_map[orig_param] = k_val;
+                    }
                 } else {
-                    Value* step_v = get_invariant_val(b, pa.type, pa.step_val);
-                    Value* k_step = make_smart_mul(b, pa.type, step_v, static_cast<int64_t>(k));
-                    Value* k_val = pa.is_sub ? b.build_sub(base_p, k_step) : make_smart_add(b, pa.type, base_p, k_step);
-                    iter_val_map[orig_param] = k_val;
+                    iter_val_map[orig_param] = unroll_hdr_params[non_red_idx++];
                 }
-            } else {
-                // Invariant
-                iter_val_map[orig_param] = unroll_hdr_params[non_red_idx++];
+            }
+
+            for (Instruction* inst = body->head(); inst != nullptr; inst = inst->next()) {
+                if (inst->is_terminator()) break;
+
+                bool is_serial_update = false;
+                for (size_t red_i : cla.reduction_indices) {
+                    if (cla.params[red_i].role == ParamRole::SerialReductionAcc && inst == cla.params[red_i].update_inst) {
+                        is_serial_update = true;
+                        break;
+                    }
+                }
+                if (is_serial_update) continue;
+
+                Instruction* cloned = fn.parent()->arena().make<Instruction>(inst->opcode(), inst->type());
+                cloned->set_imm_i64(inst->imm_i64());
+                cloned->set_imm_f64(inst->imm_f64());
+                cloned->set_scale(inst->scale());
+                cloned->set_offset(inst->offset());
+                cloned->set_memory_type(inst->memory_type());
+                if (!inst->symbol().empty()) cloned->set_symbol(fn.parent()->string_pool().intern(inst->symbol()));
+
+                for (Value* op : inst->operands()) {
+                    if (!op) continue;
+                    auto it_v = iter_val_map.find(op);
+                    if (it_v != iter_val_map.end()) {
+                        cloned->add_operand(it_v->second);
+                    } else {
+                        cloned->add_operand(op);
+                    }
+                }
+
+                if (inst->produces_value()) {
+                    Value* res = fn.parent()->arena().make<Value>(fn.next_value_id(), inst->type(), ValueKind::InstructionResult);
+                    res->set_defining_instruction(cloned);
+                    cloned->set_result(res);
+                    iter_val_map[inst->result()] = res;
+                }
+
+                unroll_body->append_instruction(cloned);
             }
         }
 
-        // Clone non-terminator body instructions
-        for (Instruction* inst = body->head(); inst != nullptr; inst = inst->next()) {
-            if (inst->is_terminator()) break;
+        // Pass 2: Emit the serial reduction update chain in strict program order
+        for (size_t k = 0; k < F; ++k) {
+            auto& iter_val_map = all_iter_maps[k];
+            for (size_t red_i : cla.reduction_indices) {
+                if (cla.params[red_i].role != ParamRole::SerialReductionAcc) continue;
+                Instruction* inst = cla.params[red_i].update_inst;
+                Value* orig_param = header->param(red_i);
 
-            Instruction* cloned = fn.parent()->arena().make<Instruction>(inst->opcode(), inst->type());
-            cloned->set_imm_i64(inst->imm_i64());
-            cloned->set_imm_f64(inst->imm_f64());
-            cloned->set_scale(inst->scale());
-            cloned->set_offset(inst->offset());
-            cloned->set_memory_type(inst->memory_type());
-            if (!inst->symbol().empty()) cloned->set_symbol(fn.parent()->string_pool().intern(inst->symbol()));
+                iter_val_map[orig_param] = serial_acc_map[red_i];
 
-            for (Value* op : inst->operands()) {
-                if (!op) continue;
-                auto it_v = iter_val_map.find(op);
-                if (it_v != iter_val_map.end()) {
-                    cloned->add_operand(it_v->second);
-                } else {
-                    cloned->add_operand(op);
+                Instruction* cloned = fn.parent()->arena().make<Instruction>(inst->opcode(), inst->type());
+                cloned->set_imm_i64(inst->imm_i64());
+                cloned->set_imm_f64(inst->imm_f64());
+                cloned->set_scale(inst->scale());
+                cloned->set_offset(inst->offset());
+                cloned->set_memory_type(inst->memory_type());
+                if (!inst->symbol().empty()) cloned->set_symbol(fn.parent()->string_pool().intern(inst->symbol()));
+
+                for (Value* op : inst->operands()) {
+                    if (!op) continue;
+                    auto it_v = iter_val_map.find(op);
+                    if (it_v != iter_val_map.end()) {
+                        cloned->add_operand(it_v->second);
+                    } else {
+                        cloned->add_operand(op);
+                    }
                 }
-            }
 
-            if (inst->produces_value()) {
                 Value* res = fn.parent()->arena().make<Value>(fn.next_value_id(), inst->type(), ValueKind::InstructionResult);
                 res->set_defining_instruction(cloned);
                 cloned->set_result(res);
                 iter_val_map[inst->result()] = res;
+                serial_acc_map[red_i] = res;
 
-                // Check if this instruction was the reduction accumulator update
-                for (size_t red_i : cla.reduction_indices) {
-                    if (inst == cla.params[red_i].update_inst) {
-                        next_acc_vals[red_i][k] = res;
+                unroll_body->append_instruction(cloned);
+            }
+        }
+    } else {
+        for (size_t k = 0; k < F; ++k) {
+            std::unordered_map<const Value*, Value*> iter_val_map;
+
+            // Map header parameters for iteration k
+            size_t non_red_idx = 0;
+            for (size_t i = 0; i < header->param_count(); ++i) {
+                const ParamAnalysis& pa = cla.params[i];
+                Value* orig_param = header->param(i);
+
+                if (pa.role == ParamRole::ReductionAcc && options.enable_reduction_jam) {
+                    // Map accumulator to its current accumulator value
+                    iter_val_map[orig_param] = next_acc_vals[i][k];
+                } else if (pa.role == ParamRole::BasicIV || pa.role == ParamRole::DerivedIV) {
+                    Value* base_p = unroll_hdr_params[non_red_idx++];
+                    if (k == 0) {
+                        iter_val_map[orig_param] = base_p;
+                    } else {
+                        Value* step_v = get_invariant_val(b, pa.type, pa.step_val);
+                        Value* k_step = make_smart_mul(b, pa.type, step_v, static_cast<int64_t>(k));
+                        Value* k_val = pa.is_sub ? b.build_sub(base_p, k_step) : make_smart_add(b, pa.type, base_p, k_step);
+                        iter_val_map[orig_param] = k_val;
                     }
+                } else {
+                    // Invariant
+                    iter_val_map[orig_param] = unroll_hdr_params[non_red_idx++];
                 }
             }
 
-            unroll_body->append_instruction(cloned);
+            // Clone non-terminator body instructions
+            for (Instruction* inst = body->head(); inst != nullptr; inst = inst->next()) {
+                if (inst->is_terminator()) break;
+
+                Instruction* cloned = fn.parent()->arena().make<Instruction>(inst->opcode(), inst->type());
+                cloned->set_imm_i64(inst->imm_i64());
+                cloned->set_imm_f64(inst->imm_f64());
+                cloned->set_scale(inst->scale());
+                cloned->set_offset(inst->offset());
+                cloned->set_memory_type(inst->memory_type());
+                if (!inst->symbol().empty()) cloned->set_symbol(fn.parent()->string_pool().intern(inst->symbol()));
+
+                for (Value* op : inst->operands()) {
+                    if (!op) continue;
+                    auto it_v = iter_val_map.find(op);
+                    if (it_v != iter_val_map.end()) {
+                        cloned->add_operand(it_v->second);
+                    } else {
+                        cloned->add_operand(op);
+                    }
+                }
+
+                if (inst->produces_value()) {
+                    Value* res = fn.parent()->arena().make<Value>(fn.next_value_id(), inst->type(), ValueKind::InstructionResult);
+                    res->set_defining_instruction(cloned);
+                    cloned->set_result(res);
+                    iter_val_map[inst->result()] = res;
+
+                    // Check if this instruction was the reduction accumulator update
+                    for (size_t red_i : cla.reduction_indices) {
+                        if (inst == cla.params[red_i].update_inst) {
+                            if (cla.params[red_i].role == ParamRole::ReductionAcc && options.enable_reduction_jam) {
+                                next_acc_vals[red_i][k] = res;
+                            }
+                        }
+                    }
+                }
+
+                unroll_body->append_instruction(cloned);
+            }
         }
     }
 
@@ -564,6 +694,9 @@ bool unroll_loop(
             for (size_t k = 0; k < F; ++k) {
                 next_unroll_latch_args.push_back(next_acc_vals[i][k]);
             }
+        } else if (pa.role == ParamRole::SerialReductionAcc) {
+            next_unroll_latch_args.push_back(serial_acc_map[i]);
+            non_red_idx++;
         } else if (pa.role == ParamRole::BasicIV || pa.role == ParamRole::DerivedIV) {
             Value* base_p = unroll_hdr_params[non_red_idx++];
             Value* step_v = get_invariant_val(b, pa.type, pa.step_val);
@@ -607,6 +740,9 @@ bool unroll_loop(
     // Tree-reduce accumulators in unroll_exit
     std::vector<Value*> reduced_acc_finals(header->param_count(), nullptr);
     for (size_t red_i : cla.reduction_indices) {
+        if (cla.params[red_i].role != ParamRole::ReductionAcc || !options.enable_reduction_jam) {
+            continue;
+        }
         const auto& accs = exit_acc_params[red_i];
         if (F == 4) {
             Value* s01 = b.build_add(accs[0], accs[1]);
@@ -713,7 +849,7 @@ bool unroll_loop(
             Value* step_v = get_invariant_val(b, pa.type, pa.step_val);
             Value* next_v = pa.is_sub ? b.build_sub(p, step_v) : b.build_add(p, step_v);
             rem_next_latch_args[i] = next_v;
-        } else if (pa.role == ParamRole::ReductionAcc) {
+        } else if (pa.role == ParamRole::ReductionAcc || pa.role == ParamRole::SerialReductionAcc) {
             rem_next_latch_args[i] = rem_val_map[pa.update_inst->result()];
         } else {
             rem_next_latch_args[i] = rem_hdr->param(i);
