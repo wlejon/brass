@@ -18,6 +18,11 @@
 #include <brass/mir/printer.hpp>
 #include <brass/mir/parser.hpp>
 
+#include <brass/interpreter/value.hpp>
+#include <brass/gc/mini_cheney.hpp>
+#include <brass/interpreter/frame.hpp>
+#include <brass/interpreter/interpreter.hpp>
+
 #include <string_view>
 
 namespace brass {

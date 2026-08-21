@@ -7,6 +7,8 @@ add_executable(brass_unit_tests
     unit/test_mir_builder.cpp
     unit/test_mir_verifier.cpp
     unit/test_mir_printer_parser.cpp
+    unit/test_mini_cheney.cpp
+    unit/test_interpreter.cpp
 )
 
 target_include_directories(brass_unit_tests
