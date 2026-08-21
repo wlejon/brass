@@ -733,7 +733,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results) {
         double brass_ms = sw.stop_ms();
 
         if (C_native != C_jit) {
-            std::cerr << "FATAL: MatMul 32x32 (i64) result mismatch between native and JIT!\n";
+            std::cerr << "FATAL: MatMul 32x32 (i64) result mismatch: C_native[0]=" << C_native[0] << ", C_jit[0]=" << C_jit[0] << ", C_native[1]=" << C_native[1] << ", C_jit[1]=" << C_jit[1] << "\n";
             std::abort();
         }
 

@@ -252,9 +252,42 @@ void EmitContext::emit_parallel_copy(const LirInst& inst) {
         moves.push_back({inst.defs[i], inst.uses[i], false});
     }
 
-    bool progress = true;
-    while (progress) {
-        progress = false;
+    auto emit_move = [&](const LirOperand& dst, const LirOperand& src) {
+        if (dst.is_preg() && src.is_preg() && dst.preg_val == src.preg_val) return;
+        if (dst.is_preg()) {
+            if (dst.preg_val.is_gpr()) {
+                GPR dst_gpr = dst.preg_val.as_gpr();
+                if (src.is_preg()) {
+                    GPR src_gpr = src.preg_val.as_gpr();
+                    if (dst.size == 4 && src.size == 4) enc_.mov32(dst_gpr, src_gpr);
+                    else enc_.mov(dst_gpr, src_gpr);
+                } else if (src.is_imm_int()) {
+                    if (dst.size == 4) enc_.mov32(dst_gpr, static_cast<uint32_t>(src.imm_int));
+                    else enc_.mov(dst_gpr, src.imm_int);
+                } else {
+                    if (dst.size == 4) enc_.mov32(dst_gpr, to_mem_address(src));
+                    else enc_.mov(dst_gpr, to_mem_address(src));
+                }
+            } else {
+                XMM dst_xmm = dst.preg_val.as_xmm();
+                if (src.is_preg()) enc_.movsd(dst_xmm, src.preg_val.as_xmm());
+                else enc_.movsd(dst_xmm, to_mem_address(src));
+            }
+        } else {
+            MemAddress dst_mem = to_mem_address(dst);
+            if (src.is_preg()) {
+                if (src.preg_val.is_gpr()) {
+                    if (src.size == 4) enc_.mov32(dst_mem, src.preg_val.as_gpr());
+                    else enc_.mov(dst_mem, src.preg_val.as_gpr());
+                } else {
+                    enc_.movsd(dst_mem, src.preg_val.as_xmm());
+                }
+            }
+        }
+    };
+
+    auto peel_acyclic = [&]() -> bool {
+        bool progress = false;
         for (auto& m : moves) {
             if (m.done) continue;
             bool dst_used = false;
@@ -266,58 +299,96 @@ void EmitContext::emit_parallel_copy(const LirInst& inst) {
                 }
             }
             if (!dst_used) {
-                if (m.dst.is_preg()) {
-                    if (m.dst.preg_val.is_gpr()) {
-                        if (m.src.is_preg()) enc_.mov(m.dst.preg_val.as_gpr(), m.src.preg_val.as_gpr());
-                        else enc_.mov(m.dst.preg_val.as_gpr(), to_mem_address(m.src));
-                    } else {
-                        if (m.src.is_preg()) enc_.movsd(m.dst.preg_val.as_xmm(), m.src.preg_val.as_xmm());
-                        else enc_.movsd(m.dst.preg_val.as_xmm(), to_mem_address(m.src));
-                    }
-                }
+                emit_move(m.dst, m.src);
                 m.done = true;
                 progress = true;
             }
         }
-    }
+        return progress;
+    };
 
-    // Resolve cycles with scratch register
-    for (size_t i = 0; i < moves.size(); ++i) {
-        if (moves[i].done) continue;
-        bool is_xmm = moves[i].src.is_preg() && moves[i].src.preg_val.is_xmm();
-        PReg scratch = is_xmm ? PReg::xmm(XMM::XMM15) : PReg::gpr(GPR::R11);
-        if (is_xmm) enc_.movsd(scratch.as_xmm(), moves[i].src.preg_val.as_xmm());
-        else enc_.mov(scratch.as_gpr(), moves[i].src.preg_val.as_gpr());
+    while (true) {
+        while (peel_acyclic()) {}
 
-        moves[i].src = LirOperand::preg(scratch, moves[i].src.size);
+        size_t start_idx = SIZE_MAX;
+        for (size_t i = 0; i < moves.size(); ++i) {
+            if (!moves[i].done) {
+                start_idx = i;
+                break;
+            }
+        }
+        if (start_idx == SIZE_MAX) break;
 
-        progress = true;
-        while (progress) {
-            progress = false;
-            for (auto& m : moves) {
-                if (m.done) continue;
-                bool dst_used = false;
-                for (const auto& other : moves) {
-                    if (!other.done && other.src.is_preg() && m.dst.is_preg() &&
-                        other.src.preg_val == m.dst.preg_val) {
-                        dst_used = true;
-                        break;
-                    }
-                }
-                if (!dst_used) {
-                    if (m.dst.is_preg()) {
-                        if (m.dst.preg_val.is_gpr()) {
-                            if (m.src.is_preg()) enc_.mov(m.dst.preg_val.as_gpr(), m.src.preg_val.as_gpr());
-                            else enc_.mov(m.dst.preg_val.as_gpr(), to_mem_address(m.src));
-                        } else {
-                            if (m.src.is_preg()) enc_.movsd(m.dst.preg_val.as_xmm(), m.src.preg_val.as_xmm());
-                            else enc_.movsd(m.dst.preg_val.as_xmm(), to_mem_address(m.src));
-                        }
-                    }
-                    m.done = true;
-                    progress = true;
+        // Trace permutation cycle
+        std::vector<size_t> cycle;
+        size_t curr = start_idx;
+        while (true) {
+            cycle.push_back(curr);
+            size_t next_idx = SIZE_MAX;
+            for (size_t i = 0; i < moves.size(); ++i) {
+                if (!moves[i].done && moves[i].dst.is_preg() && moves[curr].src.is_preg() &&
+                    moves[i].dst.preg_val == moves[curr].src.preg_val) {
+                    next_idx = i;
+                    break;
                 }
             }
+            if (next_idx == SIZE_MAX || next_idx == start_idx) {
+                break;
+            }
+            bool already_in_cycle = false;
+            for (size_t c : cycle) {
+                if (c == next_idx) {
+                    already_in_cycle = true;
+                    break;
+                }
+            }
+            if (already_in_cycle) break;
+            curr = next_idx;
+        }
+
+        if (cycle.size() == 2) {
+            size_t idx0 = cycle[0];
+            size_t idx1 = cycle[1];
+            auto& m0 = moves[idx0];
+            auto& m1 = moves[idx1];
+
+            if (m0.dst.is_preg() && m0.dst.preg_val.is_gpr() &&
+                m1.dst.is_preg() && m1.dst.preg_val.is_gpr() &&
+                m0.src.is_preg() && m0.src.preg_val.is_gpr() &&
+                m1.src.is_preg() && m1.src.preg_val.is_gpr()) {
+                GPR r0 = m0.dst.preg_val.as_gpr();
+                GPR r1 = m1.dst.preg_val.as_gpr();
+                if (m0.dst.size == 4 && m1.dst.size == 4) {
+                    enc_.xchg32(r0, r1);
+                } else {
+                    enc_.xchg(r0, r1);
+                }
+                m0.done = true;
+                m1.done = true;
+            } else {
+                bool is_xmm = (m0.dst.is_preg() && m0.dst.preg_val.is_xmm()) ||
+                              (m1.dst.is_preg() && m1.dst.preg_val.is_xmm());
+                PReg scratch = is_xmm ? PReg::xmm(XMM::XMM15) : PReg::gpr(GPR::R11);
+                uint8_t sz = m0.dst.size;
+                emit_move(LirOperand::preg(scratch, sz), m0.src);
+                emit_move(m1.dst, m0.dst);
+                emit_move(m0.dst, LirOperand::preg(scratch, sz));
+                m0.done = true;
+                m1.done = true;
+            }
+        } else if (!cycle.empty()) {
+            size_t idx0 = cycle[0];
+            auto& m0 = moves[idx0];
+            bool is_xmm = m0.dst.is_preg() && m0.dst.preg_val.is_xmm();
+            PReg scratch = is_xmm ? PReg::xmm(XMM::XMM15) : PReg::gpr(GPR::R11);
+            uint8_t sz = m0.dst.size;
+
+            emit_move(LirOperand::preg(scratch, sz), m0.dst);
+            size_t last_idx = cycle.back();
+            moves[last_idx].src = LirOperand::preg(scratch, sz);
+        } else {
+            emit_move(moves[start_idx].dst, moves[start_idx].src);
+            moves[start_idx].done = true;
         }
     }
 }

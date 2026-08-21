@@ -25,7 +25,7 @@ struct LiveRangeSegment {
     }
 
     constexpr bool overlaps(const LiveRangeSegment& other) const noexcept {
-        return start <= other.end && other.start <= end;
+        return start < other.end && other.start < end;
     }
 };
 

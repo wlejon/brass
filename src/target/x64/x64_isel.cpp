@@ -756,24 +756,25 @@ void X64ISel::lower_branch_if(const Instruction& inst, LirBlock& lir_bb) {
         jmp_t->mir_origin = &inst;
         lir_bb.append_inst(std::move(jmp_t));
     } else {
-        auto* true_trampoline = lir_fn_->create_block("br_if_true");
+        auto* false_trampoline = lir_fn_->create_block("br_if_false");
 
         auto jcc_inst = std::make_unique<LirInst>(LirOpcode::Jcc);
-        jcc_inst->condition = branch_cond;
-        jcc_inst->add_use(LirOperand::label(true_trampoline->id));
+        jcc_inst->condition = invert(branch_cond);
+        jcc_inst->add_use(LirOperand::label(false_trampoline->id));
         lir_bb.append_inst(std::move(jcc_inst));
 
-        emit_target_args(lir_bb, f_target);
-
-        auto jmp_f = std::make_unique<LirInst>(LirOpcode::Jmp);
-        jmp_f->add_use(LirOperand::label(f_target.block->id()));
-        lir_bb.append_inst(std::move(jmp_f));
-
-        emit_target_args(*true_trampoline, t_target);
+        emit_target_args(lir_bb, t_target);
 
         auto jmp_t = std::make_unique<LirInst>(LirOpcode::Jmp);
         jmp_t->add_use(LirOperand::label(t_target.block->id()));
-        true_trampoline->append_inst(std::move(jmp_t));
+        jmp_t->mir_origin = &inst;
+        lir_bb.append_inst(std::move(jmp_t));
+
+        emit_target_args(*false_trampoline, f_target);
+
+        auto jmp_f = std::make_unique<LirInst>(LirOpcode::Jmp);
+        jmp_f->add_use(LirOperand::label(f_target.block->id()));
+        false_trampoline->append_inst(std::move(jmp_f));
     }
 }
 

@@ -206,6 +206,20 @@ void X64Encoder::mov32(const MemAddress& dst, int32_t imm) {
     buffer_.emit32(static_cast<uint32_t>(imm));
 }
 
+void X64Encoder::xchg(GPR dst, GPR src) {
+    if (dst == src) return;
+    emit_rex(true, is_extended(src), false, is_extended(dst));
+    buffer_.emit8(0x87);
+    emit_modrm(3, reg_code(src), reg_code(dst));
+}
+
+void X64Encoder::xchg32(GPR dst, GPR src) {
+    if (dst == src) return;
+    emit_rex(false, is_extended(src), false, is_extended(dst));
+    buffer_.emit8(0x87);
+    emit_modrm(3, reg_code(src), reg_code(dst));
+}
+
 // 8-bit & 16-bit Moves
 void X64Encoder::mov8(GPR dst, GPR src) {
     bool need_rex = is_extended(src) || is_extended(dst) || reg_id(src) >= 4 || reg_id(dst) >= 4;

@@ -50,6 +50,18 @@ void LinearScanAllocator::build_coalesce_hints() {
                         coalesce_hints_[src.id].push_back(dst);
                     }
                 }
+            } else if (inst->opcode == LirOpcode::ParallelCopy) {
+                size_t n = std::min(inst->defs.size(), inst->uses.size());
+                for (size_t i = 0; i < n; ++i) {
+                    if (inst->defs[i].is_vreg() && inst->uses[i].is_vreg()) {
+                        VReg dst = inst->defs[i].vreg_val;
+                        VReg src = inst->uses[i].vreg_val;
+                        if (dst.reg_class == src.reg_class && dst.id != src.id) {
+                            coalesce_hints_[dst.id].push_back(src);
+                            coalesce_hints_[src.id].push_back(dst);
+                        }
+                    }
+                }
             }
         }
     }

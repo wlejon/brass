@@ -197,6 +197,10 @@ public:
     void mov(const MemAddress& dst, int32_t imm);
     void mov32(const MemAddress& dst, int32_t imm);
 
+    // XCHG (64-bit & 32-bit)
+    void xchg(GPR dst, GPR src);
+    void xchg32(GPR dst, GPR src);
+
     // 8-bit & 16-bit Moves
     void mov8(GPR dst, GPR src);
     void mov8(GPR dst, uint8_t imm);

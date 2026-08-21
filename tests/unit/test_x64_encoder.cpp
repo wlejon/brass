@@ -677,3 +677,23 @@ TEST_CASE("x64 Golden - Multi-byte NOPs and Alignment") {
     CHECK_EQ(buf.size(), size_t(16));
     CHECK_EQ(buf.data()[0], 0xCC);
 }
+
+TEST_CASE("x64 Golden - XCHG Instructions") {
+    CodeBuffer buf;
+    X64Encoder enc(buf);
+
+    enc.xchg(GPR::RAX, GPR::RCX); // 48 87 C1
+    enc.xchg(GPR::R8, GPR::R9);   // 4D 87 C1
+    enc.xchg(GPR::RAX, GPR::R11); // 49 87 C3
+    enc.xchg32(GPR::RAX, GPR::RCX); // 87 C1
+    enc.xchg32(GPR::R8, GPR::R9);   // 45 87 C1
+
+    CHECK_BYTES(buf,
+        0x48, 0x87, 0xC8,
+        0x4D, 0x87, 0xC8,
+        0x4C, 0x87, 0xD8,
+        0x87, 0xC8,
+        0x45, 0x87, 0xC8
+    );
+}
+

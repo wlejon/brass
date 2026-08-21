@@ -80,7 +80,7 @@ bool LiveInterval::covers(uint32_t id) const noexcept {
 }
 
 bool LiveInterval::overlaps(const LiveInterval& other) const noexcept {
-    if (end_id < other.start_id || other.end_id < start_id) return false;
+    if (end_id <= other.start_id || other.end_id <= start_id) return false;
     for (const auto& seg1 : segments) {
         for (const auto& seg2 : other.segments) {
             if (seg1.overlaps(seg2)) return true;
