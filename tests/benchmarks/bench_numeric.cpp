@@ -150,7 +150,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
 
     // 1. Iterative Fibonacci
     {
-        size_t iters = 100000;
+        size_t iters = 500000;
         uint64_t n = 45;
 
         auto (*volatile native_fn)(uint64_t) = &native_fib_iter;

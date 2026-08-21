@@ -87,6 +87,7 @@ void X64FrameLayout::emit_prologue(
     const codegen::FrameInfo& frame,
     const CallingConvention& cc
 ) {
+    (void)cc;
     if (frame.is_leaf) {
         return;
     }
@@ -120,6 +121,7 @@ void X64FrameLayout::emit_epilogue(
     const codegen::FrameInfo& frame,
     const CallingConvention& cc
 ) {
+    (void)cc;
     if (frame.is_leaf) {
         enc.ret();
         return;

@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
+#include <iosfwd>
 
 namespace brass {
 
@@ -117,9 +118,6 @@ private:
 
 std::string_view to_string(CallingConvKind kind) noexcept;
 
-template <typename CharT, typename Traits>
-std::basic_ostream<CharT, Traits>& operator<<(std::basic_ostream<CharT, Traits>& os, CallingConvKind kind) {
-    return os << to_string(kind);
-}
+std::ostream& operator<<(std::ostream& os, CallingConvKind kind);
 
 } // namespace brass

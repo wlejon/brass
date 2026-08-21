@@ -1,4 +1,5 @@
 #include <brass/target/x64/x64_registers.hpp>
+#include <ostream>
 
 namespace brass::x64 {
 
@@ -72,6 +73,22 @@ std::string_view to_string(OperandSize size) noexcept {
     case OperandSize::Qword: return "qword";
     default: return "unknown";
     }
+}
+
+std::ostream& operator<<(std::ostream& os, GPR reg) {
+    return os << to_string(reg);
+}
+
+std::ostream& operator<<(std::ostream& os, XMM reg) {
+    return os << to_string(reg);
+}
+
+std::ostream& operator<<(std::ostream& os, Condition cond) {
+    return os << to_string(cond);
+}
+
+std::ostream& operator<<(std::ostream& os, OperandSize size) {
+    return os << to_string(size);
 }
 
 } // namespace brass::x64

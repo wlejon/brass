@@ -16,12 +16,13 @@ endif()
 # Compiler flags and warnings
 if(MSVC)
     add_compile_options(
-        /W4
-        /permissive-
-        /Zc:__cplusplus
-        /utf-8
-        $<$<CONFIG:Release>:/O2>
-        $<$<CONFIG:Release>:/Oy->
+        $<$<COMPILE_LANGUAGE:CXX>:/W4>
+        $<$<COMPILE_LANGUAGE:CXX>:/WX>
+        $<$<COMPILE_LANGUAGE:CXX>:/permissive->
+        $<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>
+        $<$<COMPILE_LANGUAGE:CXX>:/utf-8>
+        $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:/O2>
+        $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:/Oy->
     )
 else()
     add_compile_options(
@@ -42,6 +43,11 @@ set(BRASS_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
 file(GLOB_RECURSE BRASS_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
 )
+
+if(MSVC)
+    enable_language(ASM_MASM)
+    list(APPEND BRASS_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/gc/gc_msvc_x64.asm")
+endif()
 
 add_library(brass STATIC ${BRASS_SOURCES})
 

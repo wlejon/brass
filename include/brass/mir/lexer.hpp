@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <string_view>
 #include <string>
+#include <iosfwd>
 
 namespace brass {
 

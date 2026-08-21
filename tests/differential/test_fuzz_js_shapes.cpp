@@ -92,11 +92,11 @@ TEST_CASE("Differential Fuzzer - NaN-Boxing and Bitcast Conversions") {
         for (size_t k = 0; k < N; ++k) {
             uint64_t kind = rng() % 3;
             if (kind == 0) {
-                double d = static_cast<double>(rng() % 100) + 0.25;
-                std::memcpy(&data[k], &d, sizeof(double));
+                double val_d = static_cast<double>(rng() % 100) + 0.25;
+                std::memcpy(&data[k], &val_d, sizeof(double));
             } else if (kind == 1) {
-                int32_t iv = static_cast<int32_t>(rng() % 100) - 50;
-                data[k] = (0xFFF90000ULL << 32) | static_cast<uint32_t>(iv);
+                int32_t val_iv = static_cast<int32_t>(rng() % 100) - 50;
+                data[k] = (0xFFF90000ULL << 32) | static_cast<uint32_t>(val_iv);
             } else {
                 data[k] = 0xFFFA000000000000ULL | (rng() % 1000);
             }

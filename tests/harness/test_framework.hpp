@@ -8,6 +8,8 @@
 #include <sstream>
 #include <cmath>
 #include <cstdlib>
+#include <utility>
+#include <type_traits>
 
 namespace brass::test {
 
@@ -139,9 +141,31 @@ inline void report_failure(const char* file, int line, const char* expr, const s
     }
 }
 
+template <typename T>
+concept StandardInteger = std::is_integral_v<T> &&
+    !std::is_same_v<T, bool> &&
+    !std::is_same_v<T, char> &&
+    !std::is_same_v<T, wchar_t> &&
+    !std::is_same_v<T, char8_t> &&
+    !std::is_same_v<T, char16_t> &&
+    !std::is_same_v<T, char32_t>;
+
 template <typename T, typename U>
 inline bool check_equal_impl(const T& a, const U& b) {
-    return a == b;
+    if constexpr (StandardInteger<T> && StandardInteger<U>) {
+        return std::cmp_equal(a, b);
+    } else {
+        return a == b;
+    }
+}
+
+template <typename T, typename U>
+inline bool check_not_equal_impl(const T& a, const U& b) {
+    if constexpr (StandardInteger<T> && StandardInteger<U>) {
+        return !std::cmp_equal(a, b);
+    } else {
+        return a != b;
+    }
 }
 
 template <typename T, typename U>
@@ -157,7 +181,7 @@ inline bool check_equal(const T& a, const U& b, const char* file, int line, cons
 
 template <typename T, typename U>
 inline bool check_not_equal(const T& a, const U& b, const char* file, int line, const char* expr_a, const char* expr_b, bool is_require) {
-    if (a == b) {
+    if (!check_not_equal_impl(a, b)) {
         std::ostringstream oss;
         oss << expr_a << " (" << a << ") != " << expr_b << " (" << b << ")";
         report_failure(file, line, "CHECK_NE failed", oss.str(), is_require);
@@ -181,14 +205,14 @@ inline bool check_not_equal(const T& a, const U& b, const char* file, int line, 
         if (!(expr)) { \
             ::brass::test::report_failure(__FILE__, __LINE__, #expr, "", false); \
         } \
-    } while (false)
+    } while ((void)0, 0)
 
 #define REQUIRE(expr) \
     do { \
         if (!(expr)) { \
             ::brass::test::report_failure(__FILE__, __LINE__, #expr, "", true); \
         } \
-    } while (false)
+    } while ((void)0, 0)
 
 #define CHECK_EQ(a, b) ::brass::test::check_equal((a), (b), __FILE__, __LINE__, #a, #b, false)
 #define REQUIRE_EQ(a, b) ::brass::test::check_equal((a), (b), __FILE__, __LINE__, #a, #b, true)

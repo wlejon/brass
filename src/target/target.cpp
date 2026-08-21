@@ -1,4 +1,5 @@
 #include <brass/target/target.hpp>
+#include <ostream>
 
 namespace brass {
 
@@ -36,6 +37,18 @@ std::string_view to_string(ObjectFormat fmt) noexcept {
     case ObjectFormat::MachO: return "MachO";
     default: return "unknown";
     }
+}
+
+std::ostream& operator<<(std::ostream& os, Arch arch) {
+    return os << to_string(arch);
+}
+
+std::ostream& operator<<(std::ostream& os, OperatingSystem s) {
+    return os << to_string(s);
+}
+
+std::ostream& operator<<(std::ostream& os, ObjectFormat fmt) {
+    return os << to_string(fmt);
 }
 
 } // namespace brass

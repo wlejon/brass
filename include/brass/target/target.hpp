@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string_view>
+#include <iosfwd>
 
 namespace brass {
 
@@ -73,19 +74,8 @@ std::string_view to_string(Arch arch) noexcept;
 std::string_view to_string(OperatingSystem os) noexcept;
 std::string_view to_string(ObjectFormat fmt) noexcept;
 
-template <typename CharT, typename Traits>
-std::basic_ostream<CharT, Traits>& operator<<(std::basic_ostream<CharT, Traits>& os, Arch arch) {
-    return os << to_string(arch);
-}
-
-template <typename CharT, typename Traits>
-std::basic_ostream<CharT, Traits>& operator<<(std::basic_ostream<CharT, Traits>& os, OperatingSystem s) {
-    return os << to_string(s);
-}
-
-template <typename CharT, typename Traits>
-std::basic_ostream<CharT, Traits>& operator<<(std::basic_ostream<CharT, Traits>& os, ObjectFormat fmt) {
-    return os << to_string(fmt);
-}
+std::ostream& operator<<(std::ostream& os, Arch arch);
+std::ostream& operator<<(std::ostream& os, OperatingSystem s);
+std::ostream& operator<<(std::ostream& os, ObjectFormat fmt);
 
 } // namespace brass

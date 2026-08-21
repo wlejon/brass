@@ -17,37 +17,29 @@ size_t brass_stack_walk(
     constexpr size_t MAX_FRAMES = 1024;
 
     while (cur_rbp != 0 && cur_return_ip != 0 && frame_count < MAX_FRAMES) {
-        // Frame pointer must be 8-byte aligned
         if ((cur_rbp % 8) != 0) {
             break;
         }
 
         const FunctionStackMap* fn_map = stack_maps.find_function_by_ip(cur_return_ip);
-        if (fn_map == nullptr) {
-            break;
-        }
-
-        const StackMapRecord* rec = fn_map->find_record_by_ip(cur_return_ip);
-        if (rec != nullptr) {
-            for (const auto& root_loc : rec->roots) {
-                intptr_t slot_addr_int = static_cast<intptr_t>(cur_rbp) + root_loc.offset_from_rbp;
-                void** root_slot = reinterpret_cast<void**>(slot_addr_int);
-                if (visitor && root_slot) {
-                    visitor(root_slot, user_data);
+        if (fn_map != nullptr) {
+            const StackMapRecord* rec = fn_map->find_record_by_ip(cur_return_ip);
+            if (rec != nullptr) {
+                for (const auto& root_loc : rec->roots) {
+                    intptr_t slot_addr_int = static_cast<intptr_t>(cur_rbp) + root_loc.offset_from_rbp;
+                    void** root_slot = reinterpret_cast<void**>(slot_addr_int);
+                    if (visitor && root_slot) {
+                        visitor(root_slot, user_data);
+                    }
                 }
+                frame_count++;
             }
-            frame_count++;
         }
 
-        // Unwind to caller frame:
-        // In standard x86_64 calling conventions:
-        // *(uintptr_t*)cur_rbp = saved caller RBP
-        // *(uintptr_t*)(cur_rbp + 8) = saved caller return IP
         uintptr_t next_rbp = *reinterpret_cast<const uintptr_t*>(cur_rbp);
         uintptr_t next_return_ip = *reinterpret_cast<const uintptr_t*>(cur_rbp + 8);
 
-        // Guard against cycles or corrupted stack pointers
-        if (next_rbp == cur_rbp) {
+        if (next_rbp <= cur_rbp || (next_rbp % 8) != 0) {
             break;
         }
 

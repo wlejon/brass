@@ -28,7 +28,7 @@ void MiniCheneyGC::reset() {
     collection_count_ = 0;
     total_allocations_ = 0;
     total_allocated_bytes_ = 0;
-    std::fill(from_space_.begin(), from_space_.end(), 0);
+    std::fill(from_space_.begin(), from_space_.end(), uint8_t(0));
     poison_space(to_space_.data(), semispace_size_);
     registered_roots_.clear();
 }

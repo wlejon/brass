@@ -441,6 +441,7 @@ private:
     bool parse_instruction(Builder& b, Function* fn,
                            std::unordered_map<std::string, Value*>& value_map,
                            const std::function<BasicBlock*(std::string_view)>& get_or_create_block) {
+        (void)fn;
         std::string result_name;
         bool has_assignment = false;
 

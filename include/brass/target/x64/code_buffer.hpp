@@ -6,6 +6,7 @@
 #include <string>
 #include <span>
 #include <string_view>
+#include <iosfwd>
 
 namespace brass::x64 {
 
@@ -115,9 +116,6 @@ private:
 
 std::string_view to_string(RelocationKind kind) noexcept;
 
-template <typename CharT, typename Traits>
-std::basic_ostream<CharT, Traits>& operator<<(std::basic_ostream<CharT, Traits>& os, RelocationKind kind) {
-    return os << to_string(kind);
-}
+std::ostream& operator<<(std::ostream& os, RelocationKind kind);
 
 } // namespace brass::x64

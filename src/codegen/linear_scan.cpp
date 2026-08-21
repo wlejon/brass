@@ -578,7 +578,11 @@ void LinearScanAllocator::rewrite_instructions() {
                               inst->opcode == LirOpcode::Sqrtsd || inst->opcode == LirOpcode::Xorpd ||
                               inst->opcode == LirOpcode::Cvtsi2sd || inst->opcode == LirOpcode::Cvtsi2sd32 ||
                               inst->opcode == LirOpcode::Movq_xg);
-                def_scratch = is_xmm_def ? PReg::xmm(XMM::XMM15) : PReg::gpr(GPR::R11);
+                if (inst->is_call()) {
+                    def_scratch = is_xmm_def ? PReg::xmm(XMM::XMM0) : PReg::gpr(GPR::RAX);
+                } else {
+                    def_scratch = is_xmm_def ? PReg::xmm(XMM::XMM15) : PReg::gpr(GPR::R11);
+                }
                 uint8_t sz = original_spill_def.size;
 
                 // If instruction reads from def (e.g. add dst, src), load initial value of def into scratch

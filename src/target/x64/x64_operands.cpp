@@ -1,5 +1,6 @@
 #include <brass/target/x64/x64_operands.hpp>
 #include <sstream>
+#include <ostream>
 
 namespace brass::x64 {
 

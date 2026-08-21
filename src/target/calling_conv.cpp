@@ -1,5 +1,6 @@
 #include <brass/target/calling_conv.hpp>
 #include <algorithm>
+#include <ostream>
 
 namespace brass {
 
@@ -124,6 +125,10 @@ std::string_view to_string(CallingConvKind kind) noexcept {
     case CallingConvKind::Custom: return "Custom";
     default: return "unknown";
     }
+}
+
+std::ostream& operator<<(std::ostream& os, CallingConvKind kind) {
+    return os << to_string(kind);
 }
 
 } // namespace brass

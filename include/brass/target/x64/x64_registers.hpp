@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string_view>
+#include <iosfwd>
 
 namespace brass::x64 {
 
@@ -150,24 +151,9 @@ std::string_view to_string(XMM reg) noexcept;
 std::string_view to_string(Condition cond) noexcept;
 std::string_view to_string(OperandSize size) noexcept;
 
-template <typename CharT, typename Traits>
-std::basic_ostream<CharT, Traits>& operator<<(std::basic_ostream<CharT, Traits>& os, GPR reg) {
-    return os << to_string(reg);
-}
-
-template <typename CharT, typename Traits>
-std::basic_ostream<CharT, Traits>& operator<<(std::basic_ostream<CharT, Traits>& os, XMM reg) {
-    return os << to_string(reg);
-}
-
-template <typename CharT, typename Traits>
-std::basic_ostream<CharT, Traits>& operator<<(std::basic_ostream<CharT, Traits>& os, Condition cond) {
-    return os << to_string(cond);
-}
-
-template <typename CharT, typename Traits>
-std::basic_ostream<CharT, Traits>& operator<<(std::basic_ostream<CharT, Traits>& os, OperandSize size) {
-    return os << to_string(size);
-}
+std::ostream& operator<<(std::ostream& os, GPR reg);
+std::ostream& operator<<(std::ostream& os, XMM reg);
+std::ostream& operator<<(std::ostream& os, Condition cond);
+std::ostream& operator<<(std::ostream& os, OperandSize size);
 
 } // namespace brass::x64

@@ -1,8 +1,15 @@
 #include <brass/target/x64/code_buffer.hpp>
-#include <stdexcept>
+#include <brass/target/x64/x64_encoder.hpp>
 #include <algorithm>
+#include <cstring>
+#include <ostream>
+#include <stdexcept>
 
 namespace brass::x64 {
+
+std::ostream& operator<<(std::ostream& os, RelocationKind kind) {
+    return os << to_string(kind);
+}
 
 void CodeBuffer::emit_bytes(const uint8_t* data, size_t count) {
     if (data && count > 0) {

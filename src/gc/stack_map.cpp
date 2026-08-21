@@ -1,6 +1,7 @@
 #include <brass/gc/stack_map.hpp>
 #include <cstring>
 #include <algorithm>
+#include <ostream>
 
 namespace brass {
 

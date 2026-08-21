@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <cmath>
 #include <string>
+#include <ostream>
 
 namespace brass {
 

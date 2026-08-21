@@ -34,6 +34,7 @@ add_executable(brass_unit_tests
     differential/test_fuzz_js_shapes.cpp
     differential/test_fuzz_optimizations.cpp
     differential/fuzz_generator.cpp
+    unit/test_msvc_milestone.cpp
 )
 
 target_include_directories(brass_unit_tests

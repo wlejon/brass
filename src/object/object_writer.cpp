@@ -152,6 +152,7 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
         cfi.text_size = fn_size;
         cfi.prologue_size = prologue_sz;
         cfi.frame_info = lir->frame;
+        x64::X64FrameLayout::compute_layout(cfi.frame_info, cc_);
         cfi.cc = cc_;
         cfi.safepoints = std::move(res.safepoints);
         cfi.stack_map = std::move(res.stack_map);

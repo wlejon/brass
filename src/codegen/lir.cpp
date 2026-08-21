@@ -403,9 +403,9 @@ VReg LirFunction::allocate_vreg(RegClass rc, uint8_t size, bool is_gcref) {
     return v;
 }
 
-LirBlock* LirFunction::create_block(std::string name) {
+LirBlock* LirFunction::create_block(std::string block_name) {
     uint32_t id = static_cast<uint32_t>(blocks.size());
-    auto blk = std::make_unique<LirBlock>(id, std::move(name));
+    auto blk = std::make_unique<LirBlock>(id, std::move(block_name));
     LirBlock* ptr = blk.get();
     blocks.push_back(std::move(blk));
     return ptr;
