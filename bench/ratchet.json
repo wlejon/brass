@@ -13,7 +13,7 @@
   "matmul_i64_32_preopt": 1.50,
   "matmul_i64_64_naive": 1.45,
   "matmul_i64_64_preopt": 1.45,
-  "nanbox": 1.15,
+  "nanbox": 1.20,
   "shapes": 1.10,
   "sieve": 1.25
 }
