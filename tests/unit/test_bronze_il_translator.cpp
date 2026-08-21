@@ -1,6 +1,8 @@
 #include "test_framework.hpp"
 #include <brass/brass.hpp>
 #include <brass/il_translator/il_translator.hpp>
+#include <brass/mir/printer.hpp>
+#include <brass/interpreter/interpreter.hpp>
 #include "msvc_toolchain_helper.hpp"
 #include <iostream>
 #include <sstream>

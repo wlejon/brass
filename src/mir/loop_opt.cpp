@@ -1,6 +1,7 @@
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/loop_analysis.hpp>
 #include <brass/mir/loop_unroll.hpp>
+#include <brass/mir/f64_demote.hpp>
 #include <brass/mir/select_opt.hpp>
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/builder.hpp>
@@ -827,6 +828,10 @@ bool eliminate_dead_induction_cycles(Function& fn) {
 
 bool optimize_function_loops(Function& fn, const LoopOptOptions& options) {
     bool any_changed = false;
+
+    if (options.enable_f64_demote) {
+        any_changed |= f64_demote_pass(fn);
+    }
 
     if (options.enable_diamond_select) {
         any_changed |= simplify_cfg_diamonds(fn);
