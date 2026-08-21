@@ -1,8 +1,8 @@
 {
-  "cheney_gc": 1.08,
+  "cheney_gc": 1.25,
   "collatz": 1.30,
   "fib": 1.25,
-  "icache": 0.65,
+  "icache": 0.75,
   "linked_list": 0.88,
   "matmul_f64_32_naive": 2.15,
   "matmul_f64_32_preopt": 2.15,
