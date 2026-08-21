@@ -874,7 +874,8 @@ bool optimize_function_loops(Function& fn, const LoopOptOptions& options) {
     if (options.enable_unroll) {
         fn.rebuild_cfg_predecessors();
         DominatorTree dom(fn);
-        if (loop_unroll_pass(fn, dom, {options.unroll_factor, true, true})) {
+        bool allow_fp = options.enable_fp_reassociation || fn.allow_fp_reassociation() || (fn.parent() && fn.parent()->allow_fp_reassociation());
+        if (loop_unroll_pass(fn, dom, {options.unroll_factor, true, allow_fp, true})) {
             any_changed = true;
             fn.rebuild_cfg_predecessors();
             DominatorTree dom_after(fn);
@@ -893,8 +894,12 @@ bool optimize_function_loops(Function& fn, const LoopOptOptions& options) {
 
 bool optimize_module_loops(Module& mod, const LoopOptOptions& options) {
     bool changed = false;
+    LoopOptOptions mod_opts = options;
+    if (mod.allow_fp_reassociation()) {
+        mod_opts.enable_fp_reassociation = true;
+    }
     for (Function* fn : mod.functions()) {
-        if (fn) changed |= optimize_function_loops(*fn, options);
+        if (fn) changed |= optimize_function_loops(*fn, mod_opts);
     }
     return changed;
 }

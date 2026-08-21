@@ -103,12 +103,14 @@ Function* clone_function(const Function& src, Module& dst_mod) {
         if (rp.second) dst_fn->add_resume_point(rp.first, block_map[rp.second]);
     }
 
+    dst_fn->set_allow_fp_reassociation(src.allow_fp_reassociation());
     dst_fn->rebuild_cfg_predecessors();
     return dst_fn;
 }
 
 std::unique_ptr<Module> clone_module(const Module& src) {
     auto dst = std::make_unique<Module>(src.name());
+    dst->set_allow_fp_reassociation(src.allow_fp_reassociation());
     for (std::string_view sym : src.external_symbols()) dst->add_external_symbol(sym);
     for (const Function* fn : src.functions()) if (fn) clone_function(*fn, *dst);
     return dst;

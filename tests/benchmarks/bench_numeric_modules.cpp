@@ -406,11 +406,13 @@ std::unique_ptr<Module> build_matmul_i64_preopt_module() {
     return mod;
 }
 
-std::unique_ptr<Module> build_matmul_f64_naive_module() {
-    auto mod = std::make_unique<Module>("bench_matmul_f64_naive");
+static std::unique_ptr<Module> build_matmul_f64_naive_helper(const char* mod_name, const char* fn_name, bool allow_reassoc) {
+    auto mod = std::make_unique<Module>(mod_name);
+    mod->set_allow_fp_reassociation(allow_reassoc);
     Builder b(*mod);
 
-    Function* fn = mod->create_function("matmul_f64_naive", Type::void_type(), {Type::ptr(), Type::ptr(), Type::ptr(), Type::i64()});
+    Function* fn = mod->create_function(fn_name, Type::void_type(), {Type::ptr(), Type::ptr(), Type::ptr(), Type::i64()});
+    fn->set_allow_fp_reassociation(allow_reassoc);
     b.set_function(fn);
 
     BasicBlock* entry = b.append_block("entry");
@@ -496,11 +498,13 @@ std::unique_ptr<Module> build_matmul_f64_naive_module() {
     return mod;
 }
 
-std::unique_ptr<Module> build_matmul_f64_preopt_module() {
-    auto mod = std::make_unique<Module>("bench_matmul_f64_preopt");
+static std::unique_ptr<Module> build_matmul_f64_preopt_helper(const char* mod_name, const char* fn_name, bool allow_reassoc) {
+    auto mod = std::make_unique<Module>(mod_name);
+    mod->set_allow_fp_reassociation(allow_reassoc);
     Builder b(*mod);
 
-    Function* fn = mod->create_function("matmul_f64_preopt", Type::void_type(), {Type::ptr(), Type::ptr(), Type::ptr(), Type::i64()});
+    Function* fn = mod->create_function(fn_name, Type::void_type(), {Type::ptr(), Type::ptr(), Type::ptr(), Type::i64()});
+    fn->set_allow_fp_reassociation(allow_reassoc);
     b.set_function(fn);
 
     BasicBlock* entry = b.append_block("entry");
@@ -588,6 +592,30 @@ std::unique_ptr<Module> build_matmul_f64_preopt_module() {
 
     fn->rebuild_cfg_predecessors();
     return mod;
+}
+
+std::unique_ptr<Module> build_matmul_f64_strict_naive_module() {
+    return build_matmul_f64_naive_helper("bench_matmul_f64_strict_naive", "matmul_f64_strict_naive", false);
+}
+
+std::unique_ptr<Module> build_matmul_f64_strict_preopt_module() {
+    return build_matmul_f64_preopt_helper("bench_matmul_f64_strict_preopt", "matmul_f64_strict_preopt", false);
+}
+
+std::unique_ptr<Module> build_matmul_f64_reassoc_naive_module() {
+    return build_matmul_f64_naive_helper("bench_matmul_f64_reassoc_naive", "matmul_f64_reassoc_naive", true);
+}
+
+std::unique_ptr<Module> build_matmul_f64_reassoc_preopt_module() {
+    return build_matmul_f64_preopt_helper("bench_matmul_f64_reassoc_preopt", "matmul_f64_reassoc_preopt", true);
+}
+
+std::unique_ptr<Module> build_matmul_f64_naive_module() {
+    return build_matmul_f64_naive_helper("bench_matmul_f64_naive", "matmul_f64_naive", false);
+}
+
+std::unique_ptr<Module> build_matmul_f64_preopt_module() {
+    return build_matmul_f64_preopt_helper("bench_matmul_f64_preopt", "matmul_f64_preopt", false);
 }
 
 std::unique_ptr<Module> build_list_module() {

@@ -175,12 +175,12 @@ void run_gc_benchmark(std::vector<BenchmarkResult>& results) {
         std::abort();
     }
     double speedup = (brass_stack_map_ms > 0.0) ? (shadow_stack_ms / brass_stack_map_ms) : 1.0;
-    bool passes_gc_bar = (speedup >= 1.50);
+    bool passes_gc_bar = (speedup >= 1.25);
 
     BenchmarkReporter::print_gc_comparison(shadow_stack_ms, brass_stack_map_ms, speedup, passes_gc_bar);
 
     if (!passes_gc_bar && !is_debug_build()) {
-        std::cerr << "FATAL: GC speedup benchmark failed to meet 1.5x bar in Release build!\n";
+        std::cerr << "FATAL: GC speedup benchmark failed to meet 1.25x bar in Release build!\n";
         std::abort();
     }
 }

@@ -136,67 +136,139 @@ TEST_CASE("Diamond to Select - Optimization Pass Transformation") {
     CHECK_EQ(abs_diff_fn(7, 7), 0);
 }
 
-TEST_CASE("Loop Unrolling - Reduction Accumulator with Remainder Loops") {
-    Module mod("test_unroll_reduction");
-    Builder b(mod);
+TEST_CASE("Loop Unrolling - Reduction Accumulator with Remainder Loops (i64 & f64)") {
+    // 1. Integer reduction unrolling (default ON)
+    {
+        Module mod("test_unroll_reduction_i64");
+        Builder b(mod);
 
-    Function* fn = mod.create_function("sum_array_f64", Type::f64(), {Type::ptr(), Type::i64()});
-    b.set_function(fn);
+        Function* fn = mod.create_function("sum_array_i64", Type::i64(), {Type::ptr(), Type::i64()});
+        b.set_function(fn);
 
-    BasicBlock* entry = b.append_block("entry");
-    Value* arr = b.add_block_param(entry, Type::ptr());
-    Value* n = b.add_block_param(entry, Type::i64());
+        BasicBlock* entry = b.append_block("entry");
+        Value* arr = b.add_block_param(entry, Type::ptr());
+        Value* n = b.add_block_param(entry, Type::i64());
 
-    BasicBlock* loop_hdr = b.create_block("loop_hdr");
-    BasicBlock* loop_body = b.create_block("loop_body");
-    BasicBlock* exit_bb = b.create_block("exit");
+        BasicBlock* loop_hdr = b.create_block("loop_hdr");
+        BasicBlock* loop_body = b.create_block("loop_body");
+        BasicBlock* exit_bb = b.create_block("exit");
 
-    Value* zero_i = b.build_iconst_i64(0);
-    Value* zero_f = b.build_fconst_f64(0.0);
-    Value* one = b.build_iconst_i64(1);
-    b.build_br(loop_hdr, {zero_i, zero_f});
+        Value* zero_i = b.build_iconst_i64(0);
+        Value* one = b.build_iconst_i64(1);
+        b.build_br(loop_hdr, {zero_i, zero_i});
 
-    fn->append_block(loop_hdr);
-    b.position_at_end(loop_hdr);
-    Value* i = b.add_block_param(loop_hdr, Type::i64());
-    Value* acc = b.add_block_param(loop_hdr, Type::f64());
-    Value* cond = b.build_slt(i, n);
-    b.build_br_if(cond, loop_body, {}, exit_bb, {acc});
+        fn->append_block(loop_hdr);
+        b.position_at_end(loop_hdr);
+        Value* i = b.add_block_param(loop_hdr, Type::i64());
+        Value* acc = b.add_block_param(loop_hdr, Type::i64());
+        Value* cond = b.build_slt(i, n);
+        b.build_br_if(cond, loop_body, {}, exit_bb, {acc});
 
-    fn->append_block(loop_body);
-    b.position_at_end(loop_body);
-    Value* elem = b.build_load_indexed(Type::f64(), arr, i, 8, 0);
-    Value* next_acc = b.build_add(acc, elem);
-    Value* next_i = b.build_add(i, one);
-    b.build_br(loop_hdr, {next_i, next_acc});
+        fn->append_block(loop_body);
+        b.position_at_end(loop_body);
+        Value* elem = b.build_load_indexed(Type::i64(), arr, i, 8, 0);
+        Value* next_acc = b.build_add(acc, elem);
+        Value* next_i = b.build_add(i, one);
+        b.build_br(loop_hdr, {next_i, next_acc});
 
-    fn->append_block(exit_bb);
-    b.position_at_end(exit_bb);
-    Value* res = b.add_block_param(exit_bb, Type::f64());
-    b.build_ret(res);
+        fn->append_block(exit_bb);
+        b.position_at_end(exit_bb);
+        Value* res = b.add_block_param(exit_bb, Type::i64());
+        b.build_ret(res);
 
-    fn->rebuild_cfg_predecessors();
+        fn->rebuild_cfg_predecessors();
 
-    bool changed = optimize_function_loops(*fn);
-    CHECK(changed);
+        bool changed = optimize_function_loops(*fn);
+        CHECK(changed);
 
-    DiagnosticReporter diag;
-    REQUIRE(verify_module(mod, &diag));
+        DiagnosticReporter diag;
+        REQUIRE(verify_module(mod, &diag));
 
-    codegen::JitExecutionEngine jit(Target::host());
-    REQUIRE(jit.compile_and_load(mod));
-    auto sum_fn = jit.get_function_ptr<double(*)(const double*, int64_t)>("sum_array_f64");
-    REQUIRE(sum_fn != nullptr);
+        codegen::JitExecutionEngine jit(Target::host());
+        REQUIRE(jit.compile_and_load(mod));
+        auto sum_fn = jit.get_function_ptr<int64_t(*)(const int64_t*, int64_t)>("sum_array_i64");
+        REQUIRE(sum_fn != nullptr);
 
-    for (int64_t count : {0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 33, 64, 100}) {
-        std::vector<double> vals(static_cast<size_t>(count + 4));
-        double expected = 0.0;
-        for (size_t k = 0; k < static_cast<size_t>(count); ++k) {
-            vals[k] = static_cast<double>(k + 1) * 1.5;
-            expected += vals[k];
+        for (int64_t count : {0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 33, 64, 100}) {
+            std::vector<int64_t> vals(static_cast<size_t>(count + 4));
+            int64_t expected = 0;
+            for (size_t k = 0; k < static_cast<size_t>(count); ++k) {
+                vals[k] = static_cast<int64_t>(k + 1) * 3;
+                expected += vals[k];
+            }
+
+            int64_t got = sum_fn(vals.data(), count);
+            CHECK_EQ(got, expected);
         }
+    }
 
-        double got = sum_fn(vals.data(), count);
-        CHECK(std::abs(got - expected) < 1e-9);
+    // 2. Float reduction unrolling (flagged opt-in)
+    {
+        Module mod("test_unroll_reduction_f64");
+        mod.set_allow_fp_reassociation(true);
+        Builder b(mod);
+
+        Function* fn = mod.create_function("sum_array_f64", Type::f64(), {Type::ptr(), Type::i64()});
+        fn->set_allow_fp_reassociation(true);
+        b.set_function(fn);
+
+        BasicBlock* entry = b.append_block("entry");
+        Value* arr = b.add_block_param(entry, Type::ptr());
+        Value* n = b.add_block_param(entry, Type::i64());
+
+        BasicBlock* loop_hdr = b.create_block("loop_hdr");
+        BasicBlock* loop_body = b.create_block("loop_body");
+        BasicBlock* exit_bb = b.create_block("exit");
+
+        Value* zero_i = b.build_iconst_i64(0);
+        Value* zero_f = b.build_fconst_f64(0.0);
+        Value* one = b.build_iconst_i64(1);
+        b.build_br(loop_hdr, {zero_i, zero_f});
+
+        fn->append_block(loop_hdr);
+        b.position_at_end(loop_hdr);
+        Value* i = b.add_block_param(loop_hdr, Type::i64());
+        Value* acc = b.add_block_param(loop_hdr, Type::f64());
+        Value* cond = b.build_slt(i, n);
+        b.build_br_if(cond, loop_body, {}, exit_bb, {acc});
+
+        fn->append_block(loop_body);
+        b.position_at_end(loop_body);
+        Value* elem = b.build_load_indexed(Type::f64(), arr, i, 8, 0);
+        Value* next_acc = b.build_add(acc, elem);
+        Value* next_i = b.build_add(i, one);
+        b.build_br(loop_hdr, {next_i, next_acc});
+
+        fn->append_block(exit_bb);
+        b.position_at_end(exit_bb);
+        Value* res = b.add_block_param(exit_bb, Type::f64());
+        b.build_ret(res);
+
+        fn->rebuild_cfg_predecessors();
+
+        LoopOptOptions opts;
+        opts.enable_fp_reassociation = true;
+        bool changed = optimize_function_loops(*fn, opts);
+        CHECK(changed);
+
+        DiagnosticReporter diag;
+        REQUIRE(verify_module(mod, &diag));
+
+        codegen::JitExecutionEngine jit(Target::host());
+        REQUIRE(jit.compile_and_load(mod));
+        auto sum_fn = jit.get_function_ptr<double(*)(const double*, int64_t)>("sum_array_f64");
+        REQUIRE(sum_fn != nullptr);
+
+        for (int64_t count : {0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 33, 64, 100}) {
+            std::vector<double> vals(static_cast<size_t>(count + 4));
+            double expected = 0.0;
+            for (size_t k = 0; k < static_cast<size_t>(count); ++k) {
+                vals[k] = static_cast<double>(k + 1) * 1.5;
+                expected += vals[k];
+            }
+
+            double got = sum_fn(vals.data(), count);
+            CHECK(std::abs(got - expected) < 1e-9);
+        }
     }
 }

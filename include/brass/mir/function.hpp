@@ -52,6 +52,9 @@ public:
         return resume_points_;
     }
 
+    bool allow_fp_reassociation() const noexcept { return allow_fp_reassociation_; }
+    void set_allow_fp_reassociation(bool allow) noexcept { allow_fp_reassociation_ = allow; }
+
     uint32_t next_value_id() noexcept { return next_value_id_++; }
     uint32_t next_block_id() noexcept { return next_block_id_++; }
     uint32_t current_next_value_id() const noexcept { return next_value_id_; }
@@ -73,6 +76,7 @@ private:
 
     uint32_t next_value_id_ = 0;
     uint32_t next_block_id_ = 0;
+    bool allow_fp_reassociation_ = false;
 };
 
 } // namespace brass

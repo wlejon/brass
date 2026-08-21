@@ -126,7 +126,8 @@ bool analyze_loop(
     Function& fn,
     LoopInfo& loop,
     const DominatorTree& dom,
-    CountedLoopAnalysis& cla
+    CountedLoopAnalysis& cla,
+    const LoopUnrollOptions& options
 ) {
     (void)fn;
     (void)dom;
@@ -249,9 +250,15 @@ bool analyze_loop(
                         if (term != param) {
                             std::unordered_set<const Value*> visited;
                             if (!value_depends_on_param(term, param, loop, visited)) {
-                                pa.role = ParamRole::ReductionAcc;
-                                pa.update_inst = def;
-                                cla.reduction_indices.push_back(i);
+                                bool can_reduce = options.enable_reduction_jam;
+                                if (pa.type == Type::f64() && !options.enable_fp_reduction_jam) {
+                                    can_reduce = false;
+                                }
+                                if (can_reduce) {
+                                    pa.role = ParamRole::ReductionAcc;
+                                    pa.update_inst = def;
+                                    cla.reduction_indices.push_back(i);
+                                }
                             }
                         }
                     }
@@ -331,7 +338,7 @@ bool unroll_loop(
     const LoopUnrollOptions& options
 ) {
     CountedLoopAnalysis cla;
-    if (!analyze_loop(fn, loop, dom, cla)) {
+    if (!analyze_loop(fn, loop, dom, cla, options)) {
         return false;
     }
 
@@ -799,13 +806,17 @@ bool loop_unroll_pass(
     const DominatorTree& dom,
     const LoopUnrollOptions& options
 ) {
+    LoopUnrollOptions effective_opts = options;
+    if (fn.allow_fp_reassociation() || (fn.parent() && fn.parent()->allow_fp_reassociation())) {
+        effective_opts.enable_fp_reduction_jam = true;
+    }
     LoopAnalysis loops(fn, dom);
     std::vector<LoopInfo*> post_order = loops.post_order_loops();
 
     bool any_changed = false;
     for (LoopInfo* loop : post_order) {
         if (!loop) continue;
-        if (unroll_loop(fn, *loop, dom, options)) {
+        if (unroll_loop(fn, *loop, dom, effective_opts)) {
             any_changed = true;
             fn.rebuild_cfg_predecessors();
             break; // restart loop analysis after transforming a loop

@@ -115,11 +115,14 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
 
         // 0. Clone and optimize MIR function
         Module opt_mod(mod.name());
+        opt_mod.set_allow_fp_reassociation(mod.allow_fp_reassociation());
         for (std::string_view sym : mod.external_symbols()) {
             opt_mod.add_external_symbol(sym);
         }
         Function* opt_fn = clone_function(*fn, opt_mod);
-        optimize_function_loops(*opt_fn);
+        LoopOptOptions loop_opts;
+        loop_opts.enable_fp_reassociation = fn->allow_fp_reassociation() || mod.allow_fp_reassociation();
+        optimize_function_loops(*opt_fn, loop_opts);
         verify_function(*opt_fn);
 
         // 1. ISel to LIR

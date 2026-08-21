@@ -8,7 +8,8 @@ namespace brass {
 
 struct LoopUnrollOptions {
     size_t unroll_factor = 4;
-    bool enable_reduction_jam = true;
+    bool enable_reduction_jam = true;       // Integer associative reduction jam (default ON)
+    bool enable_fp_reduction_jam = false;   // Floating-point reduction jam (default OFF / IEEE-strict)
     bool enable_general_unroll = true;
 };
 

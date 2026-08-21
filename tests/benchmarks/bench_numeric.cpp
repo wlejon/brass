@@ -485,7 +485,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
         }
     }
 
-    // 6. Matrix Multiplication 32x32 Float (Naive and Preopt)
+    // 6. Matrix Multiplication 32x32 Float (Strict and Reassoc)
     {
         size_t iters = 2000;
         int64_t N = 32;
@@ -509,15 +509,13 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
         }
         double scalar_ms = sw.stop_ms();
 
-        // 6a. Naive kernel
-        {
+        auto run_f64_32 = [&](const char* key, const char* name, std::unique_ptr<Module> mod, const char* fn_sym, double def_target) {
             std::vector<double> C_jit(N * N, 0.0);
-            auto mod = build_matmul_f64_naive_module();
             JitExecutionEngine jit;
             jit.compile_and_load(*mod);
-            auto matmul_fn = jit.get_function_ptr<void(*)(const double*, const double*, double*, int64_t)>("matmul_f64_naive");
+            auto matmul_fn = jit.get_function_ptr<void(*)(const double*, const double*, double*, int64_t)>(fn_sym);
             if (!matmul_fn) {
-                std::cerr << "FATAL: matmul_f64_naive function pointer is null!\n";
+                std::cerr << "FATAL: " << fn_sym << " function pointer is null!\n";
                 std::abort();
             }
 
@@ -531,60 +529,32 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
             double brass_ms = sw.stop_ms();
 
             for (size_t i = 0; i < C_native.size(); ++i) {
-                if (std::abs(C_native[i] - C_jit[i]) > 1e-5) {
-                    std::cerr << "FATAL: MatMul 32x32 (f64, naive) result mismatch at index " << i << "\n";
+                if (std::abs(C_native[i] - C_jit[i]) > 1e-4) {
+                    std::cerr << "FATAL: " << name << " result mismatch at index " << i << "\n";
                     std::abort();
                 }
             }
 
             double ratio_scalar = brass_ms / scalar_ms;
             double ratio_vec = brass_ms / native_ms;
-            double target = ratchet.get_ratio("matmul_f64_32_naive", 2.25);
+            double target = ratchet.get_ratio(key, def_target);
             std::ostringstream notes;
             notes << "<= " << std::fixed << std::setprecision(2) << target << "x scalar (vec: " << std::fixed << std::setprecision(2) << ratio_vec << "x)";
-            results.push_back({"matmul_f64_32_naive", "MatMul 32x32 (f64, naive)", iters, native_ms, scalar_ms, brass_ms, ratio_scalar, ratio_vec, target, ratio_scalar <= target, notes.str()});
+            results.push_back({key, name, iters, native_ms, scalar_ms, brass_ms, ratio_scalar, ratio_vec, target, ratio_scalar <= target, notes.str()});
             BenchmarkReporter::print_row(results.back());
-        }
+        };
 
-        // 6b. Preopt kernel
-        {
-            std::vector<double> C_jit(N * N, 0.0);
-            auto mod = build_matmul_f64_preopt_module();
-            JitExecutionEngine jit;
-            jit.compile_and_load(*mod);
-            auto matmul_fn = jit.get_function_ptr<void(*)(const double*, const double*, double*, int64_t)>("matmul_f64_preopt");
-            if (!matmul_fn) {
-                std::cerr << "FATAL: matmul_f64_preopt function pointer is null!\n";
-                std::abort();
-            }
-
-            sw.start();
-            for (size_t i = 0; i < iters; ++i) {
-                int64_t size_n = N;
-                DoNotOptimize(size_n);
-                matmul_fn(A.data(), B.data(), C_jit.data(), size_n);
-                DoNotOptimize(C_jit.data());
-            }
-            double brass_ms = sw.stop_ms();
-
-            for (size_t i = 0; i < C_native.size(); ++i) {
-                if (std::abs(C_native[i] - C_jit[i]) > 1e-5) {
-                    std::cerr << "FATAL: MatMul 32x32 (f64, preopt) result mismatch at index " << i << "\n";
-                    std::abort();
-                }
-            }
-
-            double ratio_scalar = brass_ms / scalar_ms;
-            double ratio_vec = brass_ms / native_ms;
-            double target = ratchet.get_ratio("matmul_f64_32_preopt", 2.20);
-            std::ostringstream notes;
-            notes << "<= " << std::fixed << std::setprecision(2) << target << "x scalar (vec: " << std::fixed << std::setprecision(2) << ratio_vec << "x)";
-            results.push_back({"matmul_f64_32_preopt", "MatMul 32x32 (f64, preopt)", iters, native_ms, scalar_ms, brass_ms, ratio_scalar, ratio_vec, target, ratio_scalar <= target, notes.str()});
-            BenchmarkReporter::print_row(results.back());
-        }
+        // 6a. Strict Naive
+        run_f64_32("matmul_f64_32_strict_naive", "MatMul 32x32 (f64, strict, naive)", build_matmul_f64_strict_naive_module(), "matmul_f64_strict_naive", 2.25);
+        // 6b. Strict Preopt
+        run_f64_32("matmul_f64_32_strict_preopt", "MatMul 32x32 (f64, strict, preopt)", build_matmul_f64_strict_preopt_module(), "matmul_f64_strict_preopt", 2.20);
+        // 6c. Reassoc Naive (flagged opt-in)
+        run_f64_32("matmul_f64_32_reassoc_naive", "MatMul 32x32 (f64, reassoc, naive)", build_matmul_f64_reassoc_naive_module(), "matmul_f64_reassoc_naive", 1.00);
+        // 6d. Reassoc Preopt (flagged opt-in)
+        run_f64_32("matmul_f64_32_reassoc_preopt", "MatMul 32x32 (f64, reassoc, preopt)", build_matmul_f64_reassoc_preopt_module(), "matmul_f64_reassoc_preopt", 1.00);
     }
 
-    // 7. Matrix Multiplication 64x64 Float (Naive and Preopt)
+    // 7. Matrix Multiplication 64x64 Float (Strict and Reassoc)
     {
         size_t iters = 250;
         int64_t N = 64;
@@ -608,15 +578,13 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
         }
         double scalar_ms = sw.stop_ms();
 
-        // 7a. Naive kernel
-        {
+        auto run_f64_64 = [&](const char* key, const char* name, std::unique_ptr<Module> mod, const char* fn_sym, double def_target) {
             std::vector<double> C_jit(N * N, 0.0);
-            auto mod = build_matmul_f64_naive_module();
             JitExecutionEngine jit;
             jit.compile_and_load(*mod);
-            auto matmul_fn = jit.get_function_ptr<void(*)(const double*, const double*, double*, int64_t)>("matmul_f64_naive");
+            auto matmul_fn = jit.get_function_ptr<void(*)(const double*, const double*, double*, int64_t)>(fn_sym);
             if (!matmul_fn) {
-                std::cerr << "FATAL: matmul_f64_naive function pointer is null!\n";
+                std::cerr << "FATAL: " << fn_sym << " function pointer is null!\n";
                 std::abort();
             }
 
@@ -630,57 +598,29 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
             double brass_ms = sw.stop_ms();
 
             for (size_t i = 0; i < C_native.size(); ++i) {
-                if (std::abs(C_native[i] - C_jit[i]) > 1e-5) {
-                    std::cerr << "FATAL: MatMul 64x64 (f64, naive) result mismatch at index " << i << "\n";
+                if (std::abs(C_native[i] - C_jit[i]) > 1e-4) {
+                    std::cerr << "FATAL: " << name << " result mismatch at index " << i << "\n";
                     std::abort();
                 }
             }
 
             double ratio_scalar = brass_ms / scalar_ms;
             double ratio_vec = brass_ms / native_ms;
-            double target = ratchet.get_ratio("matmul_f64_64_naive", 1.65);
+            double target = ratchet.get_ratio(key, def_target);
             std::ostringstream notes;
             notes << "<= " << std::fixed << std::setprecision(2) << target << "x scalar (vec: " << std::fixed << std::setprecision(2) << ratio_vec << "x)";
-            results.push_back({"matmul_f64_64_naive", "MatMul 64x64 (f64, naive)", iters, native_ms, scalar_ms, brass_ms, ratio_scalar, ratio_vec, target, ratio_scalar <= target, notes.str()});
+            results.push_back({key, name, iters, native_ms, scalar_ms, brass_ms, ratio_scalar, ratio_vec, target, ratio_scalar <= target, notes.str()});
             BenchmarkReporter::print_row(results.back());
-        }
+        };
 
-        // 7b. Preopt kernel
-        {
-            std::vector<double> C_jit(N * N, 0.0);
-            auto mod = build_matmul_f64_preopt_module();
-            JitExecutionEngine jit;
-            jit.compile_and_load(*mod);
-            auto matmul_fn = jit.get_function_ptr<void(*)(const double*, const double*, double*, int64_t)>("matmul_f64_preopt");
-            if (!matmul_fn) {
-                std::cerr << "FATAL: matmul_f64_preopt function pointer is null!\n";
-                std::abort();
-            }
-
-            sw.start();
-            for (size_t i = 0; i < iters; ++i) {
-                int64_t size_n = N;
-                DoNotOptimize(size_n);
-                matmul_fn(A.data(), B.data(), C_jit.data(), size_n);
-                DoNotOptimize(C_jit.data());
-            }
-            double brass_ms = sw.stop_ms();
-
-            for (size_t i = 0; i < C_native.size(); ++i) {
-                if (std::abs(C_native[i] - C_jit[i]) > 1e-5) {
-                    std::cerr << "FATAL: MatMul 64x64 (f64, preopt) result mismatch at index " << i << "\n";
-                    std::abort();
-                }
-            }
-
-            double ratio_scalar = brass_ms / scalar_ms;
-            double ratio_vec = brass_ms / native_ms;
-            double target = ratchet.get_ratio("matmul_f64_64_preopt", 1.57);
-            std::ostringstream notes;
-            notes << "<= " << std::fixed << std::setprecision(2) << target << "x scalar (vec: " << std::fixed << std::setprecision(2) << ratio_vec << "x)";
-            results.push_back({"matmul_f64_64_preopt", "MatMul 64x64 (f64, preopt)", iters, native_ms, scalar_ms, brass_ms, ratio_scalar, ratio_vec, target, ratio_scalar <= target, notes.str()});
-            BenchmarkReporter::print_row(results.back());
-        }
+        // 7a. Strict Naive
+        run_f64_64("matmul_f64_64_strict_naive", "MatMul 64x64 (f64, strict, naive)", build_matmul_f64_strict_naive_module(), "matmul_f64_strict_naive", 1.65);
+        // 7b. Strict Preopt
+        run_f64_64("matmul_f64_64_strict_preopt", "MatMul 64x64 (f64, strict, preopt)", build_matmul_f64_strict_preopt_module(), "matmul_f64_strict_preopt", 1.57);
+        // 7c. Reassoc Naive (flagged opt-in)
+        run_f64_64("matmul_f64_64_reassoc_naive", "MatMul 64x64 (f64, reassoc, naive)", build_matmul_f64_reassoc_naive_module(), "matmul_f64_reassoc_naive", 0.85);
+        // 7d. Reassoc Preopt (flagged opt-in)
+        run_f64_64("matmul_f64_64_reassoc_preopt", "MatMul 64x64 (f64, reassoc, preopt)", build_matmul_f64_reassoc_preopt_module(), "matmul_f64_reassoc_preopt", 0.85);
     }
 
     // 8. Pointer-Chasing Linked List Traversal

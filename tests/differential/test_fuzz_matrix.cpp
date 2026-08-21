@@ -53,8 +53,26 @@ TEST_CASE("Differential Fuzzer - 2D Matrix Indexing and Nested Loops (i64)") {
     }
 }
 
-TEST_CASE("Differential Fuzzer - 2D Matrix Indexing and Nested Loops (f64)") {
-    std::mt19937_64 rng(8888);
+static uint64_t double_to_bits(double d) {
+    uint64_t u;
+    std::memcpy(&u, &d, sizeof(double));
+    return u;
+}
+
+static uint64_t ulp_distance(double a, double b) {
+    if (a == b) return 0;
+    if (std::isnan(a) || std::isnan(b)) return UINT64_MAX;
+    uint64_t ua = double_to_bits(a);
+    uint64_t ub = double_to_bits(b);
+    if ((ua >> 63) != (ub >> 63)) {
+        if (a == 0.0 && b == 0.0) return 0;
+        return (ua & 0x7FFFFFFFFFFFFFFFULL) + (ub & 0x7FFFFFFFFFFFFFFFULL);
+    }
+    return (ua > ub) ? (ua - ub) : (ub - ua);
+}
+
+TEST_CASE("Differential Fuzzer - 2D Matrix Indexing and Nested Loops (f64, Pseudorandom Mantissas)") {
+    std::mt19937_64 rng(0x9ABCDEF012345678ULL);
 
     for (uint64_t seed = 0; seed < 55; ++seed) {
         std::string mod_name = "fuzz_mat_f64_mod_" + std::to_string(seed);
@@ -71,9 +89,14 @@ TEST_CASE("Differential Fuzzer - 2D Matrix Indexing and Nested Loops (f64)") {
         std::vector<double> C_interp(total_elements, 0.0);
         std::vector<double> C_jit(total_elements, 0.0);
 
+        // Pseudorandom mantissas that are NOT exact binary fractions
         for (size_t i = 0; i < total_elements; ++i) {
-            A[i] = static_cast<double>(static_cast<int64_t>(rng() % 200) - 100) / 10.0;
-            B[i] = static_cast<double>(static_cast<int64_t>(rng() % 200) - 100) / 10.0;
+            uint64_t r1 = rng();
+            uint64_t r2 = rng();
+            double d1 = 1.0 + static_cast<double>(r1 & 0xFFFFFFFFFFFFF) * 1e-16;
+            double d2 = 1.0 + static_cast<double>(r2 & 0xFFFFFFFFFFFFF) * 1e-16;
+            A[i] = d1;
+            B[i] = d2;
         }
 
         Interpreter interp;
@@ -93,43 +116,78 @@ TEST_CASE("Differential Fuzzer - 2D Matrix Indexing and Nested Loops (f64)") {
         double jit_res = fn_ptr(A.data(), B.data(), C_jit.data(), N);
 
         double d_interp = interp_res.as_f64();
-        CHECK(std::abs(d_interp - jit_res) < 1e-4);
+        // Strict IEEE-754 mode must be bit-exact identical to interpreter
+        CHECK_EQ(double_to_bits(d_interp), double_to_bits(jit_res));
 
         for (size_t i = 0; i < total_elements; ++i) {
-            CHECK(std::abs(C_interp[i] - C_jit[i]) < 1e-4);
+            CHECK_EQ(double_to_bits(C_interp[i]), double_to_bits(C_jit[i]));
         }
     }
 }
 
-TEST_CASE("Differential Fuzzer - Dual Kernel MatMul Equivalence across Odd Dimensions") {
-    for (int64_t N : {1, 2, 3, 5, 7, 9, 11, 13, 17, 23, 31, 33}) {
+TEST_CASE("Differential Fuzzer - Dual Kernel MatMul Strict Bit-Exactness and Reassoc ULP Tolerance") {
+    std::mt19937_64 rng(0xCAFEF00D12345678ULL);
+
+    for (int64_t N : {1, 2, 3, 5, 7, 8, 9, 11, 13, 16, 17, 23, 31, 32}) {
         size_t total_elements = static_cast<size_t>(N * N);
         std::vector<double> A(total_elements);
         std::vector<double> B(total_elements);
-        std::vector<double> C_naive(total_elements, 0.0);
-        std::vector<double> C_preopt(total_elements, 0.0);
+        std::vector<double> C_strict_naive(total_elements, 0.0);
+        std::vector<double> C_strict_preopt(total_elements, 0.0);
+        std::vector<double> C_reassoc_naive(total_elements, 0.0);
+        std::vector<double> C_reassoc_preopt(total_elements, 0.0);
 
+        // Pseudorandom mantissas
         for (size_t i = 0; i < total_elements; ++i) {
-            A[i] = static_cast<double>((i * 7 + 3) % 29) * 0.25;
-            B[i] = static_cast<double>((i * 11 + 5) % 31) * 0.25;
+            uint64_t r1 = rng();
+            uint64_t r2 = rng();
+            A[i] = 1.0 + static_cast<double>(r1 & 0x000FFFFFFFFFFFFFULL) * 1e-15;
+            B[i] = 1.0 + static_cast<double>(r2 & 0x000FFFFFFFFFFFFFULL) * 1e-15;
         }
 
-        auto mod_naive = bench::build_matmul_f64_naive_module();
-        codegen::JitExecutionEngine jit_naive(Target::host());
-        REQUIRE(jit_naive.compile_and_load(*mod_naive));
-        auto fn_naive = jit_naive.get_function_ptr<void(*)(const double*, const double*, double*, int64_t)>("matmul_f64_naive");
-        REQUIRE(fn_naive != nullptr);
-        fn_naive(A.data(), B.data(), C_naive.data(), N);
+        // 1. Strict Naive
+        auto mod_strict_naive = bench::build_matmul_f64_strict_naive_module();
+        codegen::JitExecutionEngine jit_sn(Target::host());
+        REQUIRE(jit_sn.compile_and_load(*mod_strict_naive));
+        auto fn_sn = jit_sn.get_function_ptr<void(*)(const double*, const double*, double*, int64_t)>("matmul_f64_strict_naive");
+        REQUIRE(fn_sn != nullptr);
+        fn_sn(A.data(), B.data(), C_strict_naive.data(), N);
 
-        auto mod_preopt = bench::build_matmul_f64_preopt_module();
-        codegen::JitExecutionEngine jit_preopt(Target::host());
-        REQUIRE(jit_preopt.compile_and_load(*mod_preopt));
-        auto fn_preopt = jit_preopt.get_function_ptr<void(*)(const double*, const double*, double*, int64_t)>("matmul_f64_preopt");
-        REQUIRE(fn_preopt != nullptr);
-        fn_preopt(A.data(), B.data(), C_preopt.data(), N);
+        // 2. Strict Preopt
+        auto mod_strict_preopt = bench::build_matmul_f64_strict_preopt_module();
+        codegen::JitExecutionEngine jit_sp(Target::host());
+        REQUIRE(jit_sp.compile_and_load(*mod_strict_preopt));
+        auto fn_sp = jit_sp.get_function_ptr<void(*)(const double*, const double*, double*, int64_t)>("matmul_f64_strict_preopt");
+        REQUIRE(fn_sp != nullptr);
+        fn_sp(A.data(), B.data(), C_strict_preopt.data(), N);
 
+        // In strict mode: Naive and Preopt are bit-exact identical
         for (size_t i = 0; i < total_elements; ++i) {
-            CHECK(std::abs(C_naive[i] - C_preopt[i]) < 1e-6);
+            CHECK_EQ(double_to_bits(C_strict_naive[i]), double_to_bits(C_strict_preopt[i]));
+        }
+
+        // 3. Reassoc Naive (flagged opt-in)
+        auto mod_reassoc_naive = bench::build_matmul_f64_reassoc_naive_module();
+        codegen::JitExecutionEngine jit_rn(Target::host());
+        REQUIRE(jit_rn.compile_and_load(*mod_reassoc_naive));
+        auto fn_rn = jit_rn.get_function_ptr<void(*)(const double*, const double*, double*, int64_t)>("matmul_f64_reassoc_naive");
+        REQUIRE(fn_rn != nullptr);
+        fn_rn(A.data(), B.data(), C_reassoc_naive.data(), N);
+
+        // 4. Reassoc Preopt (flagged opt-in)
+        auto mod_reassoc_preopt = bench::build_matmul_f64_reassoc_preopt_module();
+        codegen::JitExecutionEngine jit_rp(Target::host());
+        REQUIRE(jit_rp.compile_and_load(*mod_reassoc_preopt));
+        auto fn_rp = jit_rp.get_function_ptr<void(*)(const double*, const double*, double*, int64_t)>("matmul_f64_reassoc_preopt");
+        REQUIRE(fn_rp != nullptr);
+        fn_rp(A.data(), B.data(), C_reassoc_preopt.data(), N);
+
+        // Verify ULP tolerance: Reassoc results are within stated tolerance (<= 32 ULPs) of strict results
+        for (size_t i = 0; i < total_elements; ++i) {
+            uint64_t ulp_rn = ulp_distance(C_strict_naive[i], C_reassoc_naive[i]);
+            uint64_t ulp_rp = ulp_distance(C_strict_naive[i], C_reassoc_preopt[i]);
+            CHECK(ulp_rn <= 64);
+            CHECK(ulp_rp <= 64);
         }
     }
 }

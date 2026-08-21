@@ -14,6 +14,7 @@ struct LoopOptOptions {
     bool enable_unroll = true;
     size_t unroll_factor = 4;
     size_t max_iterations = 8;
+    bool enable_fp_reassociation = false; // Opt-in FP reassociation (default OFF / IEEE-strict)
 };
 
 // Optimize loops in a single function (LICM, IVSR, Constant Folding, DCE)

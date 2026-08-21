@@ -45,12 +45,16 @@ public:
         return external_symbols_;
     }
 
+    bool allow_fp_reassociation() const noexcept { return allow_fp_reassociation_; }
+    void set_allow_fp_reassociation(bool allow) noexcept { allow_fp_reassociation_ = allow; }
+
 private:
     Arena arena_;
     StringPool string_pool_;
     std::string_view name_;
     std::vector<Function*> functions_;
     std::vector<std::string_view> external_symbols_;
+    bool allow_fp_reassociation_ = false;
 };
 
 } // namespace brass
