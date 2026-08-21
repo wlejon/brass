@@ -174,21 +174,21 @@ public:
     static RatchetManager defaults() {
         RatchetManager rm;
         rm.ratios_ = {
-            {"cheney_gc", 1.25},
-            {"collatz", 1.30},
+            {"cheney_gc", 1.35},
+            {"collatz", 1.05},
             {"compile_speed", 1000.00},
             {"fib", 1.25},
             {"icache", 0.75},
-            {"linked_list", 0.88},
-            {"matmul_f64_32_naive", 2.15},
-            {"matmul_f64_32_preopt", 2.15},
-            {"matmul_f64_64_naive", 1.65},
-            {"matmul_f64_64_preopt", 1.65},
-            {"matmul_i64_32_naive", 1.65},
-            {"matmul_i64_32_preopt", 1.65},
-            {"matmul_i64_64_naive", 1.65},
-            {"matmul_i64_64_preopt", 1.65},
-            {"nanbox", 1.10},
+            {"linked_list", 0.90},
+            {"matmul_f64_32_naive", 1.00},
+            {"matmul_f64_32_preopt", 1.00},
+            {"matmul_f64_64_naive", 0.85},
+            {"matmul_f64_64_preopt", 0.85},
+            {"matmul_i64_32_naive", 1.50},
+            {"matmul_i64_32_preopt", 1.50},
+            {"matmul_i64_64_naive", 1.45},
+            {"matmul_i64_64_preopt", 1.45},
+            {"nanbox", 1.15},
             {"shapes", 1.10},
             {"sieve", 1.25}
         };
