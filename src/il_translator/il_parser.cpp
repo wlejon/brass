@@ -415,6 +415,59 @@ bool IlParser::parse_instruction(BronzeInstruction& out_inst) {
             break;
         }
 
+        case BronzeOp::PropSet: {
+            Token obj_tok;
+            if (!expect(TokenType::PercentValue, "Expected %obj in prop.set", &obj_tok)) return false;
+            out_inst.operands.push_back(obj_tok.id_num);
+            if (!expect(TokenType::Comma, "Expected ',' after %obj in prop.set")) return false;
+
+            Token key_tok = lexer_.next_token();
+            out_inst.index = static_cast<uint32_t>(key_tok.num_i64);
+            if (!expect(TokenType::Comma, "Expected ',' after keyIndex in prop.set")) return false;
+
+            Token val_tok;
+            if (!expect(TokenType::PercentValue, "Expected %val in prop.set", &val_tok)) return false;
+            out_inst.operands.push_back(val_tok.id_num);
+
+            if (match(TokenType::Comma)) {
+                Token slot_tok = lexer_.next_token();
+                out_inst.depth = static_cast<uint32_t>(slot_tok.num_i64);
+                if (match(TokenType::Comma)) {
+                    Token imm_tok = lexer_.next_token();
+                    out_inst.imm_i64 = imm_tok.num_i64;
+                }
+            }
+            while (match(TokenType::Comma)) {
+                lexer_.next_token();
+            }
+            break;
+        }
+
+        case BronzeOp::ElemSet: {
+            Token obj_tok;
+            if (!expect(TokenType::PercentValue, "Expected %obj in elem.set", &obj_tok)) return false;
+            out_inst.operands.push_back(obj_tok.id_num);
+            if (!expect(TokenType::Comma, "Expected ',' after %obj in elem.set")) return false;
+
+            Token idx_tok;
+            if (!expect(TokenType::PercentValue, "Expected %idx in elem.set", &idx_tok)) return false;
+            out_inst.operands.push_back(idx_tok.id_num);
+            if (!expect(TokenType::Comma, "Expected ',' after %idx in elem.set")) return false;
+
+            Token val_tok;
+            if (!expect(TokenType::PercentValue, "Expected %val in elem.set", &val_tok)) return false;
+            out_inst.operands.push_back(val_tok.id_num);
+
+            if (match(TokenType::Comma)) {
+                Token ic_tok = lexer_.next_token();
+                out_inst.index = static_cast<uint32_t>(ic_tok.num_i64);
+            }
+            while (match(TokenType::Comma)) {
+                lexer_.next_token();
+            }
+            break;
+        }
+
         case BronzeOp::Branch: {
             Token cond_tok;
             if (!expect(TokenType::PercentValue, "Expected %cond value for branch", &cond_tok)) {

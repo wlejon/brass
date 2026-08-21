@@ -33,6 +33,11 @@ PROGRAMS = [
     "11_matrix_recurrence",
     "12_counter_closure",
     "13_nested_curry",
+    "14_array_loop",
+    "15_nested_acc",
+    "16_param_bounds",
+    "17_large_int_overflow",
+    "18_gcd_iter",
 ]
 
 DEMOTED_PROGRAMS = {
@@ -40,6 +45,10 @@ DEMOTED_PROGRAMS = {
     "04_fib_iter",
     "07_prime_count",
     "11_matrix_recurrence",
+    "12_counter_closure",
+    "15_nested_acc",
+    "16_param_bounds",
+    "18_gcd_iter",
 }
 
 NUM_RUNS = 5

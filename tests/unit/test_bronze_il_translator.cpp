@@ -227,7 +227,7 @@ static void* aot_symbol_resolver(const char* name) {
     return reinterpret_cast<void*>(GetProcAddress(g_aot_active_dll, name));
 }
 
-TEST_CASE("Bronze IL - 13-Program Live Corpus JIT and AOT Execution") {
+TEST_CASE("Bronze IL - 18-Program Live Corpus JIT and AOT Execution") {
     std::vector<std::string> corpus_files = {
         "01_arithmetic",
         "02_bitwise",
@@ -241,7 +241,12 @@ TEST_CASE("Bronze IL - 13-Program Live Corpus JIT and AOT Execution") {
         "10_loop_capture",
         "11_matrix_recurrence",
         "12_counter_closure",
-        "13_nested_curry"
+        "13_nested_curry",
+        "14_array_loop",
+        "15_nested_acc",
+        "16_param_bounds",
+        "17_large_int_overflow",
+        "18_gcd_iter"
     };
 
     auto normalize = [](std::string s) {
@@ -274,6 +279,9 @@ TEST_CASE("Bronze IL - 13-Program Live Corpus JIT and AOT Execution") {
         void (*env_set)(int64_t, int32_t, int32_t, int64_t);
         int64_t (*create_func)(const char*, int32_t, int64_t);
         int64_t (*create_array)(int32_t);
+        void (*prop_set)(int64_t, int32_t, int64_t, int32_t, int32_t);
+        int64_t (*elem_get)(int64_t, int64_t);
+        void (*elem_set)(int64_t, int64_t, int64_t, int32_t);
         int64_t (*call_dynamic_0)(int64_t, int64_t);
         int64_t (*call_dynamic_1)(int64_t, int64_t, int64_t);
         int64_t (*call_dynamic_2)(int64_t, int64_t, int64_t, int64_t);
@@ -298,6 +306,9 @@ TEST_CASE("Bronze IL - 13-Program Live Corpus JIT and AOT Execution") {
         &brass::il::bronze_env_set,
         &brass::il::bronze_create_func,
         &brass::il::bronze_create_array,
+        &brass::il::bronze_prop_set,
+        &brass::il::bronze_elem_get,
+        &brass::il::bronze_elem_set,
         &brass::il::bronze_call_dynamic_0,
         &brass::il::bronze_call_dynamic_1,
         &brass::il::bronze_call_dynamic_2,
@@ -335,6 +346,9 @@ TEST_CASE("Bronze IL - 13-Program Live Corpus JIT and AOT Execution") {
             << "    void (*env_set)(int64_t, int32_t, int32_t, int64_t);\n"
             << "    int64_t (*create_func)(const char*, int32_t, int64_t);\n"
             << "    int64_t (*create_array)(int32_t);\n"
+            << "    void (*prop_set)(int64_t, int32_t, int64_t, int32_t, int32_t);\n"
+            << "    int64_t (*elem_get)(int64_t, int64_t);\n"
+            << "    void (*elem_set)(int64_t, int64_t, int64_t, int32_t);\n"
             << "    int64_t (*call_dynamic_0)(int64_t, int64_t);\n"
             << "    int64_t (*call_dynamic_1)(int64_t, int64_t, int64_t);\n"
             << "    int64_t (*call_dynamic_2)(int64_t, int64_t, int64_t, int64_t);\n"
@@ -362,6 +376,9 @@ TEST_CASE("Bronze IL - 13-Program Live Corpus JIT and AOT Execution") {
             << "    void bronze_env_set(int64_t env, int32_t d, int32_t idx, int64_t v) { if (g_rt.env_set) g_rt.env_set(env, d, idx, v); }\n"
             << "    int64_t bronze_create_func(const char* fn_name, int32_t pc, int64_t env) { return g_rt.create_func ? g_rt.create_func(fn_name, pc, env) : 0; }\n"
             << "    int64_t bronze_create_array(int32_t sz) { return g_rt.create_array ? g_rt.create_array(sz) : 0; }\n"
+            << "    void bronze_prop_set(int64_t o, int32_t k, int64_t v, int32_t s, int32_t imm) { if (g_rt.prop_set) g_rt.prop_set(o, k, v, s, imm); }\n"
+            << "    int64_t bronze_elem_get(int64_t a, int64_t i) { return g_rt.elem_get ? g_rt.elem_get(a, i) : 0; }\n"
+            << "    void bronze_elem_set(int64_t a, int64_t i, int64_t v, int32_t s) { if (g_rt.elem_set) g_rt.elem_set(a, i, v, s); }\n"
             << "    int64_t bronze_call_dynamic_0(int64_t c, int64_t th) { return g_rt.call_dynamic_0 ? g_rt.call_dynamic_0(c, th) : 0; }\n"
             << "    int64_t bronze_call_dynamic_1(int64_t c, int64_t th, int64_t a0) { return g_rt.call_dynamic_1 ? g_rt.call_dynamic_1(c, th, a0) : 0; }\n"
             << "    int64_t bronze_call_dynamic_2(int64_t c, int64_t th, int64_t a0, int64_t a1) { return g_rt.call_dynamic_2 ? g_rt.call_dynamic_2(c, th, a0, a1) : 0; }\n"

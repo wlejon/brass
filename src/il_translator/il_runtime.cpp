@@ -182,8 +182,93 @@ int64_t bronze_create_func(const char* fn_name, int32_t param_count, int64_t env
     return reinterpret_cast<int64_t>(closure);
 }
 
-int64_t bronze_create_array(int32_t /*size*/) {
-    return static_cast<int64_t>(kUndefinedTag);
+struct BronzeArray {
+    uint32_t length;
+    uint32_t capacity;
+    int64_t* elements;
+};
+
+static int64_t unbox_to_int64(int64_t v) {
+    uint64_t u = static_cast<uint64_t>(v);
+    if (u < 0xFFF8000000000000ULL) {
+        double d;
+        std::memcpy(&d, &v, sizeof(double));
+        return static_cast<int64_t>(d);
+    } else if ((u >> 48) == 0xFFF9) {
+        return static_cast<int64_t>(static_cast<int32_t>(u & 0xFFFFFFFFULL));
+    }
+    return -1;
+}
+
+int64_t bronze_create_array(int32_t size) {
+    uint32_t cap = size > 0 ? static_cast<uint32_t>(size) : 8;
+    BronzeArray* arr = reinterpret_cast<BronzeArray*>(std::malloc(sizeof(BronzeArray)));
+    if (!arr) return static_cast<int64_t>(kUndefinedTag);
+    arr->length = size > 0 ? static_cast<uint32_t>(size) : 0;
+    arr->capacity = cap;
+    arr->elements = reinterpret_cast<int64_t*>(std::malloc(sizeof(int64_t) * cap));
+    if (arr->elements) {
+        for (uint32_t i = 0; i < cap; ++i) {
+            arr->elements[i] = static_cast<int64_t>(kUndefinedTag);
+        }
+    }
+    return reinterpret_cast<int64_t>(arr);
+}
+
+void bronze_prop_set(int64_t obj_box, int32_t /*key_index*/, int64_t val, int32_t slot_idx, int32_t /*imm*/) {
+    auto* arr = reinterpret_cast<BronzeArray*>(obj_box);
+    if (!arr || slot_idx < 0) return;
+    uint32_t uidx = static_cast<uint32_t>(slot_idx);
+    if (uidx >= arr->capacity) {
+        uint32_t new_cap = (uidx + 1) * 2;
+        int64_t* new_elems = reinterpret_cast<int64_t*>(std::realloc(arr->elements, sizeof(int64_t) * new_cap));
+        if (!new_elems) return;
+        for (uint32_t i = arr->capacity; i < new_cap; ++i) {
+            new_elems[i] = static_cast<int64_t>(kUndefinedTag);
+        }
+        arr->elements = new_elems;
+        arr->capacity = new_cap;
+    }
+    if (arr->elements) {
+        arr->elements[uidx] = val;
+        if (uidx + 1 > arr->length) {
+            arr->length = uidx + 1;
+        }
+    }
+}
+
+int64_t bronze_elem_get(int64_t arr_box, int64_t index_box) {
+    auto* arr = reinterpret_cast<BronzeArray*>(arr_box);
+    if (!arr || !arr->elements) return static_cast<int64_t>(kUndefinedTag);
+    int64_t idx = unbox_to_int64(index_box);
+    if (idx < 0 || static_cast<uint32_t>(idx) >= arr->length) {
+        return static_cast<int64_t>(kUndefinedTag);
+    }
+    return arr->elements[idx];
+}
+
+void bronze_elem_set(int64_t arr_box, int64_t index_box, int64_t val, int32_t /*ic_slot*/) {
+    auto* arr = reinterpret_cast<BronzeArray*>(arr_box);
+    if (!arr) return;
+    int64_t idx = unbox_to_int64(index_box);
+    if (idx < 0) return;
+    uint32_t uidx = static_cast<uint32_t>(idx);
+    if (uidx >= arr->capacity) {
+        uint32_t new_cap = (uidx + 1) * 2;
+        int64_t* new_elems = reinterpret_cast<int64_t*>(std::realloc(arr->elements, sizeof(int64_t) * new_cap));
+        if (!new_elems) return;
+        for (uint32_t i = arr->capacity; i < new_cap; ++i) {
+            new_elems[i] = static_cast<int64_t>(kUndefinedTag);
+        }
+        arr->elements = new_elems;
+        arr->capacity = new_cap;
+    }
+    if (arr->elements) {
+        arr->elements[uidx] = val;
+        if (uidx + 1 > arr->length) {
+            arr->length = uidx + 1;
+        }
+    }
 }
 
 static void* get_closure_code(BronzeClosure* closure) {
@@ -398,6 +483,9 @@ void register_all_runtime_symbols(codegen::JitExecutionEngine& jit) {
     jit.register_external_symbol("bronze_env_set", reinterpret_cast<void*>(&bronze_env_set));
     jit.register_external_symbol("bronze_create_func", reinterpret_cast<void*>(&bronze_create_func));
     jit.register_external_symbol("bronze_create_array", reinterpret_cast<void*>(&bronze_create_array));
+    jit.register_external_symbol("bronze_prop_set", reinterpret_cast<void*>(&bronze_prop_set));
+    jit.register_external_symbol("bronze_elem_get", reinterpret_cast<void*>(&bronze_elem_get));
+    jit.register_external_symbol("bronze_elem_set", reinterpret_cast<void*>(&bronze_elem_set));
 
     jit.register_external_symbol("bronze_call_dynamic_0", reinterpret_cast<void*>(&bronze_call_dynamic_0));
     jit.register_external_symbol("bronze_call_dynamic_1", reinterpret_cast<void*>(&bronze_call_dynamic_1));

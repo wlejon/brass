@@ -63,6 +63,9 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
     mod->add_external_symbol("bronze_env_set");
     mod->add_external_symbol("bronze_create_func");
     mod->add_external_symbol("bronze_create_array");
+    mod->add_external_symbol("bronze_prop_set");
+    mod->add_external_symbol("bronze_elem_get");
+    mod->add_external_symbol("bronze_elem_set");
     mod->add_external_symbol("bronze_call_dynamic_0");
     mod->add_external_symbol("bronze_call_dynamic_1");
     mod->add_external_symbol("bronze_call_dynamic_2");
@@ -138,6 +141,7 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
         LoopOptOptions opt_opts;
         opt_opts.enable_fp_reassociation = options_.allow_fp_reassociation;
         opt_opts.enable_f64_demote = options_.enable_f64_demote;
+        opt_opts.demote_stats = options_.demote_stats_collector;
         optimize_module_loops(*mod, opt_opts);
         if (!verify_module(*mod, diag_)) {
             return nullptr;
@@ -364,7 +368,34 @@ bool IlLowering::lower_instruction(
         }
 
         case BronzeOp::CreateArray: {
-            res_val = b.build_iconst_i64(static_cast<int64_t>(kUndefinedTag));
+            Value* size_val = b.build_iconst_i32(static_cast<int32_t>(inst_ast.param_count));
+            res_val = b.build_call("bronze_create_array", Type::i64(), {size_val});
+            break;
+        }
+
+        case BronzeOp::PropSet: {
+            Value* obj_val = ensure_type(get_opd(0), Type::i64(), b);
+            Value* key_val = b.build_iconst_i32(static_cast<int32_t>(inst_ast.index));
+            Value* val = ensure_type(get_opd(1), Type::i64(), b);
+            Value* slot_val = b.build_iconst_i32(static_cast<int32_t>(inst_ast.depth));
+            Value* imm_val = b.build_iconst_i32(static_cast<int32_t>(inst_ast.imm_i64));
+            b.build_call("bronze_prop_set", Type::void_type(), {obj_val, key_val, val, slot_val, imm_val});
+            break;
+        }
+
+        case BronzeOp::ElemGet: {
+            Value* obj_val = ensure_type(get_opd(0), Type::i64(), b);
+            Value* idx_val = ensure_type(get_opd(1), Type::i64(), b);
+            res_val = b.build_call("bronze_elem_get", Type::i64(), {obj_val, idx_val});
+            break;
+        }
+
+        case BronzeOp::ElemSet: {
+            Value* obj_val = ensure_type(get_opd(0), Type::i64(), b);
+            Value* idx_val = ensure_type(get_opd(1), Type::i64(), b);
+            Value* val = ensure_type(get_opd(2), Type::i64(), b);
+            Value* ic_val = b.build_iconst_i32(static_cast<int32_t>(inst_ast.index));
+            b.build_call("bronze_elem_set", Type::void_type(), {obj_val, idx_val, val, ic_val});
             break;
         }
 

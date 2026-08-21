@@ -1,5 +1,6 @@
 #include <brass/brass.hpp>
 #include <brass/il_translator/il_translator.hpp>
+#include <brass/mir/f64_demote.hpp>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -11,7 +12,7 @@ using namespace brass::il;
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc]\n";
+        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--demote-stats] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc]\n";
         return 1;
     }
 
@@ -20,6 +21,7 @@ int main(int argc, char** argv) {
     bool run_jit = false;
     bool emit_mir = false;
     bool raw_output = false;
+    bool show_demote_stats = false;
     TranslatorOptions options;
 
     for (int i = 1; i < argc; ++i) {
@@ -28,6 +30,8 @@ int main(int argc, char** argv) {
             run_jit = true;
         } else if (arg == "--emit-mir") {
             emit_mir = true;
+        } else if (arg == "--demote-stats") {
+            show_demote_stats = true;
         } else if (arg == "--raw-output") {
             raw_output = true;
         } else if (arg == "--no-opt") {
@@ -59,6 +63,12 @@ int main(int argc, char** argv) {
     buffer << ifs.rdbuf();
     std::string il_source = buffer.str();
 
+    DemoteStats demote_stats;
+    if (show_demote_stats) {
+        options.demote_stats = true;
+        options.demote_stats_collector = &demote_stats;
+    }
+
     DiagnosticReporter diag;
     TranslationResult res = translate_bronze_il(il_source, options, &diag);
     if (!res.success || !res.module) {
@@ -68,6 +78,11 @@ int main(int argc, char** argv) {
             std::cerr << res.error_message << "\n";
         }
         return 1;
+    }
+
+    if (show_demote_stats) {
+        demote_stats.module_name = res.module->name();
+        std::cout << demote_stats.format_report() << "\n";
     }
 
     if (emit_mir) {

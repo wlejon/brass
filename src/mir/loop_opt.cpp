@@ -830,7 +830,9 @@ bool optimize_function_loops(Function& fn, const LoopOptOptions& options) {
     bool any_changed = false;
 
     if (options.enable_f64_demote) {
-        any_changed |= f64_demote_pass(fn);
+        F64DemoteOptions demote_opts;
+        demote_opts.stats = options.demote_stats;
+        any_changed |= f64_demote_pass(fn, demote_opts);
     }
 
     if (options.enable_diamond_select) {
