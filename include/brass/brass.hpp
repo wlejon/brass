@@ -14,6 +14,9 @@
 #include <brass/mir/module.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/verifier.hpp>
+#include <brass/mir/lexer.hpp>
+#include <brass/mir/printer.hpp>
+#include <brass/mir/parser.hpp>
 
 #include <string_view>
 

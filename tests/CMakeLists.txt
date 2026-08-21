@@ -6,6 +6,7 @@ add_executable(brass_unit_tests
     unit/test_core_utils.cpp
     unit/test_mir_builder.cpp
     unit/test_mir_verifier.cpp
+    unit/test_mir_printer_parser.cpp
 )
 
 target_include_directories(brass_unit_tests
