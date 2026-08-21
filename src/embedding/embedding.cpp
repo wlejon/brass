@@ -1,5 +1,8 @@
 #include <brass/embedding/embedding.hpp>
 #include <brass/gc/runtime_gc.hpp>
+#include <brass/object/object_writer.hpp>
+#include <brass/object/coff_writer.hpp>
+#include <brass/object/elf_writer.hpp>
 #include <stdexcept>
 
 namespace brass {
@@ -160,6 +163,23 @@ std::unique_ptr<CompiledModule> HostEngine::compile(const Module& mod) {
 
 std::unique_ptr<CompiledModule> HostEngine::compile(Module& mod) {
     return compile(const_cast<const Module&>(mod));
+}
+
+bool HostEngine::compile_to_object(const Module& mod, const std::string& output_path) {
+    object::ModuleCompiler compiler(options_.target);
+    object::ObjectFile obj = compiler.compile(mod);
+
+    if (options_.target.is_windows()) {
+        object::CoffWriter writer(obj);
+        return writer.write_to_file(output_path);
+    } else {
+        object::ElfWriter writer(obj);
+        return writer.write_to_file(output_path);
+    }
+}
+
+bool HostEngine::compile_to_object(Module& mod, const std::string& output_path) {
+    return compile_to_object(const_cast<const Module&>(mod), output_path);
 }
 
 } // namespace brass

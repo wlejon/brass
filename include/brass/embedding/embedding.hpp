@@ -118,6 +118,10 @@ public:
     std::unique_ptr<CompiledModule> compile(const Module& mod);
     std::unique_ptr<CompiledModule> compile(Module& mod);
 
+    // AOT compilation of MIR Module to Object File (.obj / .o)
+    bool compile_to_object(const Module& mod, const std::string& output_path);
+    bool compile_to_object(Module& mod, const std::string& output_path);
+
     const Target& target() const noexcept { return options_.target; }
     const EngineOptions& options() const noexcept { return options_; }
 
