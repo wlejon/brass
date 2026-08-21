@@ -30,6 +30,9 @@ Value* make_smart_const_int(Builder& b, Type t, int64_t val) {
     if (t == Type::i32()) {
         return b.build_iconst_i32(static_cast<int32_t>(val));
     }
+    if (t == Type::f64()) {
+        return b.build_fconst_f64(static_cast<double>(val));
+    }
     return b.build_iconst_i64(val);
 }
 
@@ -466,6 +469,10 @@ bool unroll_loop(
         case Opcode::ult: unroll_cond = b.build_ult(check_iv, limit_val); break;
         case Opcode::sle: unroll_cond = b.build_sle(check_iv, limit_val); break;
         case Opcode::ule: unroll_cond = b.build_ule(check_iv, limit_val); break;
+        case Opcode::sgt: unroll_cond = b.build_sgt(check_iv, limit_val); break;
+        case Opcode::ugt: unroll_cond = b.build_ugt(check_iv, limit_val); break;
+        case Opcode::sge: unroll_cond = b.build_sge(check_iv, limit_val); break;
+        case Opcode::uge: unroll_cond = b.build_uge(check_iv, limit_val); break;
         default: unroll_cond = b.build_slt(check_iv, limit_val); break;
     }
 
@@ -797,6 +804,10 @@ bool unroll_loop(
         case Opcode::ult: rem_cond = b.build_ult(rem_iv, rem_limit); break;
         case Opcode::sle: rem_cond = b.build_sle(rem_iv, rem_limit); break;
         case Opcode::ule: rem_cond = b.build_ule(rem_iv, rem_limit); break;
+        case Opcode::sgt: rem_cond = b.build_sgt(rem_iv, rem_limit); break;
+        case Opcode::ugt: rem_cond = b.build_ugt(rem_iv, rem_limit); break;
+        case Opcode::sge: rem_cond = b.build_sge(rem_iv, rem_limit); break;
+        case Opcode::uge: rem_cond = b.build_uge(rem_iv, rem_limit); break;
         default: rem_cond = b.build_slt(rem_iv, rem_limit); break;
     }
 

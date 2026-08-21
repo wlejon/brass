@@ -648,8 +648,8 @@ void LinearScanAllocator::rewrite_instructions() {
                 }
             }
 
-            int gpr_scratch_idx = (has_spill_def && !is_xmm_def) ? 0 : 0;
-            int xmm_scratch_idx = (has_spill_def && is_xmm_def) ? 0 : 0;
+            int gpr_scratch_idx = 0;
+            int xmm_scratch_idx = 0;
             PReg gpr_scratches[2] = {PReg::gpr(GPR::R10), PReg::gpr(GPR::R11)};
             PReg xmm_scratches[2] = {PReg::xmm(XMM::XMM4), PReg::xmm(XMM::XMM5)};
 

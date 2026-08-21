@@ -74,20 +74,56 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
     mod->add_external_symbol("bronze_call_dynamic_8");
     mod->add_external_symbol("bronze_call_dynamic_n");
 
-    // 1. Forward-declare all functions
-    for (const auto& fn_ast : ast.functions) {
+    // 1. Forward-declare all functions (uniquifying any duplicate anonymous function names from Bronze)
+    std::unordered_map<std::string, std::vector<size_t>> name_to_indices;
+    for (size_t i = 0; i < ast.functions.size(); ++i) {
+        name_to_indices[ast.functions[i].name].push_back(i);
+    }
+
+    std::vector<std::string> resolved_names(ast.functions.size());
+    for (const auto& [name, indices] : name_to_indices) {
+        if (indices.size() == 1) {
+            resolved_names[indices[0]] = name;
+        } else {
+            // Multiple functions with the same name: distinguish leaf vs non-leaf closures
+            for (size_t idx : indices) {
+                bool has_create_func = false;
+                for (const auto& blk : ast.functions[idx].blocks) {
+                    for (const auto& inst : blk.instructions) {
+                        if (inst.op == BronzeOp::CreateFunc) {
+                            has_create_func = true;
+                            break;
+                        }
+                    }
+                    if (has_create_func) break;
+                }
+                if (has_create_func) {
+                    resolved_names[idx] = name;
+                } else {
+                    resolved_names[idx] = name + "$leaf";
+                }
+            }
+        }
+    }
+
+    for (size_t i = 0; i < ast.functions.size(); ++i) {
+        const auto& fn_ast = ast.functions[i];
+        const std::string& fn_name = resolved_names[i];
+
         std::vector<Type> param_types;
         for (const auto& p : fn_ast.params) {
             param_types.push_back(lower_type(p.second));
         }
         Type ret_type = lower_type(fn_ast.return_type);
-        Function* fn = mod->create_function(fn_ast.name, ret_type, Span<const Type>(param_types.data(), param_types.size()));
+        Function* fn = mod->create_function(fn_name, ret_type, Span<const Type>(param_types.data(), param_types.size()));
         fn->set_allow_fp_reassociation(options_.allow_fp_reassociation);
     }
 
     // 2. Lower each function body
-    for (const auto& fn_ast : ast.functions) {
-        if (!lower_function(fn_ast, *mod)) {
+    for (size_t i = 0; i < ast.functions.size(); ++i) {
+        const auto& fn_ast = ast.functions[i];
+        const std::string& fn_name = resolved_names[i];
+        if (!lower_function(fn_ast, *mod, fn_name)) {
             return nullptr;
         }
     }
@@ -110,8 +146,8 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
     return mod;
 }
 
-bool IlLowering::lower_function(const BronzeFunction& fn_ast, Module& mod) {
-    Function* fn = mod.get_function(fn_ast.name);
+bool IlLowering::lower_function(const BronzeFunction& fn_ast, Module& mod, const std::string& fn_name) {
+    Function* fn = mod.get_function(fn_name);
     if (!fn) return false;
 
     Builder b(mod);
@@ -312,7 +348,11 @@ bool IlLowering::lower_instruction(
         case BronzeOp::CreateFunc: {
             Value* argc_val = b.build_iconst_i32(static_cast<int32_t>(inst_ast.param_count));
             Value* env_val = ensure_type(get_opd(0), Type::i64(), b);
-            const char* name_ptr = _strdup(inst_ast.callee_name.c_str());
+            std::string callee = inst_ast.callee_name;
+            if (fn->name() == callee) {
+                callee = callee + "$leaf";
+            }
+            const char* name_ptr = _strdup(callee.c_str());
             res_val = b.build_call("bronze_create_func", Type::i64(), {
                 b.build_iconst_i64(reinterpret_cast<int64_t>(name_ptr)),
                 argc_val,

@@ -1,6 +1,7 @@
 #include "il_runtime.hpp"
 #include <brass/il_translator/il_translator.hpp>
 #include <brass/codegen/jit_exec.hpp>
+#include <brass/embedding/host_gc.hpp>
 #include <iostream>
 #include <iomanip>
 #include <cmath>
@@ -109,7 +110,16 @@ int64_t bronze_name_resolve(const char* name) {
 
 int64_t bronze_env_create(int64_t parent_box, int32_t size) {
     size_t alloc_size = sizeof(BronzeEnv) + (size > 1 ? sizeof(int64_t) * (size - 1) : 0);
-    auto* env = reinterpret_cast<BronzeEnv*>(std::malloc(alloc_size));
+    BronzeEnv* env = nullptr;
+    HostGC* host_gc = brass::get_active_host_gc();
+    if (host_gc) {
+        // Bit 0 of pointer mask is parent_box link (which is a GC pointer)
+        uint64_t pointer_mask = 1ULL;
+        uintptr_t addr = host_gc->allocate(alloc_size, pointer_mask, 1 /* type_tag */);
+        env = reinterpret_cast<BronzeEnv*>(addr);
+    } else {
+        env = reinterpret_cast<BronzeEnv*>(std::malloc(alloc_size));
+    }
     if (!env) return static_cast<int64_t>(kUndefinedTag);
     env->parent_box = parent_box;
     env->size = size > 0 ? static_cast<uint32_t>(size) : 0;
@@ -141,7 +151,16 @@ void bronze_env_set(int64_t env_box, int32_t depth, int32_t index, int64_t val) 
 }
 
 int64_t bronze_create_func(const char* fn_name, int32_t param_count, int64_t env_box) {
-    auto* closure = reinterpret_cast<BronzeClosure*>(std::malloc(sizeof(BronzeClosure)));
+    BronzeClosure* closure = nullptr;
+    HostGC* host_gc = brass::get_active_host_gc();
+    if (host_gc) {
+        // Field 0: fn_name/code_ptr, Field 1: env_box (pointer_mask bit 1)
+        uint64_t pointer_mask = (1ULL << 1);
+        uintptr_t addr = host_gc->allocate(sizeof(BronzeClosure), pointer_mask, 2 /* type_tag */);
+        closure = reinterpret_cast<BronzeClosure*>(addr);
+    } else {
+        closure = reinterpret_cast<BronzeClosure*>(std::malloc(sizeof(BronzeClosure)));
+    }
     if (!closure) return static_cast<int64_t>(kUndefinedTag);
     std::memset(closure->fn_name, 0, sizeof(closure->fn_name));
     if (fn_name) {

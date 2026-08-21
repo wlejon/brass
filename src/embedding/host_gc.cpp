@@ -54,6 +54,12 @@ HostGC::HostGC(size_t semispace_size)
     poison_space(to_space_.data(), semispace_size_);
 }
 
+HostGC::~HostGC() {
+    if (g_active_host_gc == this) {
+        g_active_host_gc = nullptr;
+    }
+}
+
 void HostGC::poison_space(uint8_t* space, size_t size) noexcept {
     if (!space || size == 0) return;
     auto* words = reinterpret_cast<uint64_t*>(space);
@@ -335,10 +341,7 @@ uintptr_t HostGC::allocate(
     }
 
     if (free_ptr_ + total_size > semispace_size_) {
-        uintptr_t caller_rbp = 0;
-        uintptr_t caller_ip = 0;
-        get_caller_frame(caller_rbp, caller_ip);
-        collect(extra_ptr_roots, extra_val_roots, caller_rbp, caller_ip);
+        collect(extra_ptr_roots, extra_val_roots, 0, 0);
 
         if (free_ptr_ + total_size > semispace_size_) {
             throw std::runtime_error("HostGC: Out of memory after collection");

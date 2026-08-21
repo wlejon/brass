@@ -3,11 +3,14 @@
 #include <cstdint>
 #include <string>
 
-namespace brass::codegen {
+namespace brass {
+class HostGC;
+
+namespace codegen {
 class JitExecutionEngine;
 }
 
-namespace brass::il {
+namespace il {
 
 constexpr uint64_t kUndefinedTag = 0xFFFC000000000000ULL;
 constexpr uint64_t kNullTag      = 0xFFFA000000000000ULL;
@@ -46,4 +49,5 @@ int64_t bronze_call_dynamic_n(int64_t callee_box, int64_t this_box, int32_t argc
 
 void register_all_runtime_symbols(codegen::JitExecutionEngine& jit);
 
-} // namespace brass::il
+} // namespace il
+} // namespace brass

@@ -42,6 +42,8 @@ add_executable(brass_unit_tests
     unit/test_mir_unroll_select.cpp
     unit/test_il_expressibility.cpp
     differential/test_embedding_differential.cpp
+    unit/test_bronze_il_translator.cpp
+    differential/test_fuzz_closures_gc.cpp
 )
 
 target_include_directories(brass_unit_tests

@@ -27,7 +27,7 @@ public:
     using RootProvider = std::function<void(std::vector<uintptr_t*>&, std::vector<HostValue*>&)>;
 
     explicit HostGC(size_t semispace_size = DEFAULT_SEMISPACE_SIZE);
-    ~HostGC() = default;
+    ~HostGC();
 
     HostGC(const HostGC&) = delete;
     HostGC& operator=(const HostGC&) = delete;

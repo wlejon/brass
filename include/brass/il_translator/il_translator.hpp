@@ -6,7 +6,11 @@
 #include <string_view>
 #include <string>
 
-namespace brass::il {
+namespace brass {
+
+class HostGC;
+
+namespace il {
 
 struct TranslatorOptions {
     bool enable_optimizations = true;
@@ -37,4 +41,5 @@ extern "C" void bronze_print_dynamic(int64_t v);
 extern "C" void bronze_print_newline();
 extern "C" double bronze_f64_mod(double a, double b);
 
-} // namespace brass::il
+} // namespace il
+} // namespace brass
