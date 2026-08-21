@@ -132,8 +132,6 @@ std::unique_ptr<Module> build_gc_benchmark_module() {
 namespace brass::bench {
 
 void run_gc_benchmark(std::vector<BenchmarkResult>& results) {
-    (void)results;
-    Stopwatch sw;
     size_t iters = 500000;
 
     int64_t heap_obj0 = 10;
@@ -143,13 +141,6 @@ void run_gc_benchmark(std::vector<BenchmarkResult>& results) {
 
     // (a) Shadow-Stack Model
     ThreadShadowStack ss;
-    sw.start();
-    int64_t shadow_res = shadow_stack_gc_runner(
-        &heap_obj0, &heap_obj1, &heap_obj2, &heap_obj3,
-        static_cast<int64_t>(iters), ss
-    );
-    DoNotOptimize(shadow_res);
-    double shadow_stack_ms = sw.stop_ms();
 
     // (b) Brass Model (Live gcref registers & stack maps, zero shadow-stack pushing)
     auto mod = build_gc_benchmark_module();
@@ -162,27 +153,70 @@ void run_gc_benchmark(std::vector<BenchmarkResult>& results) {
         std::abort();
     }
 
-    sw.start();
-    int64_t brass_res = gc_fn(
-        &heap_obj0, &heap_obj1, &heap_obj2, &heap_obj3,
-        static_cast<int64_t>(iters)
-    );
-    DoNotOptimize(brass_res);
-    double brass_stack_map_ms = sw.stop_ms();
+    int64_t shadow_res = 0;
+    int64_t brass_res = 0;
+
+    std::vector<double> shadow_samples, brass_samples, speedup_samples;
+    shadow_samples.reserve(DEFAULT_BENCH_REPETITIONS);
+    brass_samples.reserve(DEFAULT_BENCH_REPETITIONS);
+    speedup_samples.reserve(DEFAULT_BENCH_REPETITIONS);
+
+    Stopwatch sw;
+    for (size_t r = 0; r < DEFAULT_BENCH_REPETITIONS; ++r) {
+        sw.start();
+        shadow_res = shadow_stack_gc_runner(
+            &heap_obj0, &heap_obj1, &heap_obj2, &heap_obj3,
+            static_cast<int64_t>(iters), ss
+        );
+        DoNotOptimize(shadow_res);
+        double s_ms = sw.stop_ms();
+
+        sw.start();
+        brass_res = gc_fn(
+            &heap_obj0, &heap_obj1, &heap_obj2, &heap_obj3,
+            static_cast<int64_t>(iters)
+        );
+        DoNotOptimize(brass_res);
+        double b_ms = sw.stop_ms();
+
+        shadow_samples.push_back(s_ms);
+        brass_samples.push_back(b_ms);
+        double sp = (b_ms > 0.0) ? (s_ms / b_ms) : 1.0;
+        speedup_samples.push_back(sp);
+    }
+
+    TimingStats shadow_stats(std::move(shadow_samples));
+    TimingStats brass_stats(std::move(brass_samples));
+    TimingStats speedup_stats(std::move(speedup_samples));
 
     if (shadow_res != brass_res) {
         std::cerr << "FATAL: GC Model result mismatch: shadow=" << shadow_res << ", Brass=" << brass_res << "\n";
         std::abort();
     }
-    double speedup = (brass_stack_map_ms > 0.0) ? (shadow_stack_ms / brass_stack_map_ms) : 1.0;
+    double speedup = speedup_stats.median;
     bool passes_gc_bar = (speedup >= 1.25);
 
-    BenchmarkReporter::print_gc_comparison(shadow_stack_ms, brass_stack_map_ms, speedup, passes_gc_bar);
+    BenchmarkReporter::print_gc_comparison(shadow_stats, brass_stats, speedup_stats, passes_gc_bar);
 
-    if (!passes_gc_bar && !is_debug_build()) {
-        std::cerr << "FATAL: GC speedup benchmark failed to meet 1.25x bar in Release build!\n";
-        std::abort();
-    }
+    BenchmarkResult res;
+    res.key = "gc_model_speedup";
+    res.name = "GC Stack-Map Model (vs Shadow-Stack)";
+    res.iterations = iters;
+    res.repetitions = DEFAULT_BENCH_REPETITIONS;
+    res.native_ms = shadow_stats.median;
+    res.native_min_ms = shadow_stats.min;
+    res.native_max_ms = shadow_stats.max;
+    res.native_scalar_ms = 0.0;
+    res.brass_ms = brass_stats.median;
+    res.brass_min_ms = brass_stats.min;
+    res.brass_max_ms = brass_stats.max;
+    res.ratio = speedup_stats.median;
+    res.ratio_min = speedup_stats.min;
+    res.ratio_max = speedup_stats.max;
+    res.target_ratio = 1.25;
+    res.passes_bar = passes_gc_bar;
+    res.notes = ">= 1.25x speedup";
+    results.push_back(res);
 }
 
 } // namespace brass::bench

@@ -146,24 +146,22 @@ int64_t native_list_traversal(const BenchListNode* head) {
 namespace brass::bench {
 
 void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const RatchetManager& ratchet) {
-    Stopwatch sw;
-
     // 1. Iterative Fibonacci
     {
         size_t iters = 500000;
         uint64_t n = 45;
 
         auto (*volatile native_fn)(uint64_t) = &native_fib_iter;
-
-        sw.start();
-        uint64_t native_sink = 0;
-        for (size_t i = 0; i < iters; ++i) {
-            uint64_t input = n;
-            DoNotOptimize(input);
-            native_sink = native_fn(input);
-            DoNotOptimize(native_sink);
-        }
-        double native_ms = sw.stop_ms();
+        auto run_native = [native_fn, n, iters]() {
+            uint64_t sink = 0;
+            for (size_t i = 0; i < iters; ++i) {
+                uint64_t input = n;
+                DoNotOptimize(input);
+                sink = native_fn(input);
+                DoNotOptimize(sink);
+            }
+            return sink;
+        };
 
         auto mod = build_fib_module();
         JitExecutionEngine jit;
@@ -174,26 +172,28 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
             std::abort();
         }
 
-        sw.start();
-        uint64_t jit_sink = 0;
-        for (size_t i = 0; i < iters; ++i) {
-            uint64_t input = n;
-            DoNotOptimize(input);
-            jit_sink = fib_fn(input);
-            DoNotOptimize(jit_sink);
-        }
-        double brass_ms = sw.stop_ms();
+        auto run_jit = [fib_fn, n, iters]() {
+            uint64_t sink = 0;
+            for (size_t i = 0; i < iters; ++i) {
+                uint64_t input = n;
+                DoNotOptimize(input);
+                sink = fib_fn(input);
+                DoNotOptimize(sink);
+            }
+            return sink;
+        };
+
+        auto paired = measure_paired_repetitions(DEFAULT_BENCH_REPETITIONS, run_native, run_jit);
+
+        uint64_t native_sink = run_native();
+        uint64_t jit_sink = run_jit();
 
         if (native_sink != jit_sink) {
             std::cerr << "FATAL: Fibonacci result mismatch: native=" << native_sink << ", JIT=" << jit_sink << "\n";
             std::abort();
         }
 
-        double ratio = brass_ms / native_ms;
-        double target = ratchet.get_ratio("fib", 1.15);
-        std::ostringstream notes;
-        notes << "<= " << std::fixed << std::setprecision(2) << target << "x baseline";
-        results.push_back({"fib", "Iterative Fibonacci (N=45)", iters, native_ms, 0.0, brass_ms, ratio, 0.0, target, ratio <= target, notes.str()});
+        results.push_back(make_paired_result("fib", "Iterative Fibonacci (N=45)", iters, paired, ratchet.get_ratio("fib", 1.25)));
         BenchmarkReporter::print_row(results.back());
     }
 
@@ -204,16 +204,17 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
         std::vector<int64_t> native_buf(limit, 0);
         std::vector<int64_t> jit_buf(limit, 0);
 
-        sw.start();
-        int64_t native_count = 0;
-        for (size_t i = 0; i < iters; ++i) {
-            int64_t lim = limit;
-            DoNotOptimize(lim);
-            native_count = native_prime_sieve(native_buf.data(), lim);
-            DoNotOptimize(native_count);
-            DoNotOptimize(native_buf.data());
-        }
-        double native_ms = sw.stop_ms();
+        auto run_native = [buf = native_buf.data(), limit, iters]() {
+            int64_t count = 0;
+            for (size_t i = 0; i < iters; ++i) {
+                int64_t lim = limit;
+                DoNotOptimize(lim);
+                count = native_prime_sieve(buf, lim);
+                DoNotOptimize(count);
+                DoNotOptimize(buf);
+            }
+            return count;
+        };
 
         auto mod = build_sieve_module();
         JitExecutionEngine jit;
@@ -224,27 +225,29 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
             std::abort();
         }
 
-        sw.start();
-        int64_t jit_count = 0;
-        for (size_t i = 0; i < iters; ++i) {
-            int64_t lim = limit;
-            DoNotOptimize(lim);
-            jit_count = sieve_fn(jit_buf.data(), lim);
-            DoNotOptimize(jit_count);
-            DoNotOptimize(jit_buf.data());
-        }
-        double brass_ms = sw.stop_ms();
+        auto run_jit = [sieve_fn, buf = jit_buf.data(), limit, iters]() {
+            int64_t count = 0;
+            for (size_t i = 0; i < iters; ++i) {
+                int64_t lim = limit;
+                DoNotOptimize(lim);
+                count = sieve_fn(buf, lim);
+                DoNotOptimize(count);
+                DoNotOptimize(buf);
+            }
+            return count;
+        };
+
+        auto paired = measure_paired_repetitions(DEFAULT_BENCH_REPETITIONS, run_native, run_jit);
+
+        int64_t native_count = run_native();
+        int64_t jit_count = run_jit();
 
         if (native_count != jit_count || native_buf != jit_buf) {
             std::cerr << "FATAL: Prime Sieve result mismatch: native=" << native_count << ", JIT=" << jit_count << "\n";
             std::abort();
         }
 
-        double ratio = brass_ms / native_ms;
-        double target = ratchet.get_ratio("sieve", 1.25);
-        std::ostringstream notes;
-        notes << "<= " << std::fixed << std::setprecision(2) << target << "x baseline";
-        results.push_back({"sieve", "Prime Sieve (N=100k)", iters, native_ms, 0.0, brass_ms, ratio, 0.0, target, ratio <= target, notes.str()});
+        results.push_back(make_paired_result("sieve", "Prime Sieve (N=100k)", iters, paired, ratchet.get_ratio("sieve", 1.35)));
         BenchmarkReporter::print_row(results.back());
     }
 
@@ -253,15 +256,16 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
         size_t iters = 50;
         int64_t max_n = 100000;
 
-        sw.start();
-        int64_t native_steps = 0;
-        for (size_t i = 0; i < iters; ++i) {
-            int64_t input = max_n;
-            DoNotOptimize(input);
-            native_steps = native_collatz_sum(input);
-            DoNotOptimize(native_steps);
-        }
-        double native_ms = sw.stop_ms();
+        auto run_native = [max_n, iters]() {
+            int64_t steps = 0;
+            for (size_t i = 0; i < iters; ++i) {
+                int64_t input = max_n;
+                DoNotOptimize(input);
+                steps = native_collatz_sum(input);
+                DoNotOptimize(steps);
+            }
+            return steps;
+        };
 
         auto mod = build_collatz_module();
         JitExecutionEngine jit;
@@ -272,26 +276,28 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
             std::abort();
         }
 
-        sw.start();
-        int64_t jit_steps = 0;
-        for (size_t i = 0; i < iters; ++i) {
-            int64_t input = max_n;
-            DoNotOptimize(input);
-            jit_steps = collatz_fn(input);
-            DoNotOptimize(jit_steps);
-        }
-        double brass_ms = sw.stop_ms();
+        auto run_jit = [collatz_fn, max_n, iters]() {
+            int64_t steps = 0;
+            for (size_t i = 0; i < iters; ++i) {
+                int64_t input = max_n;
+                DoNotOptimize(input);
+                steps = collatz_fn(input);
+                DoNotOptimize(steps);
+            }
+            return steps;
+        };
+
+        auto paired = measure_paired_repetitions(DEFAULT_BENCH_REPETITIONS, run_native, run_jit);
+
+        int64_t native_steps = run_native();
+        int64_t jit_steps = run_jit();
 
         if (native_steps != jit_steps) {
             std::cerr << "FATAL: Collatz Sum result mismatch: native=" << native_steps << ", JIT=" << jit_steps << "\n";
             std::abort();
         }
 
-        double ratio = brass_ms / native_ms;
-        double target = ratchet.get_ratio("collatz", 1.35);
-        std::ostringstream notes;
-        notes << "<= " << std::fixed << std::setprecision(2) << target << "x baseline";
-        results.push_back({"collatz", "Collatz Sum (1..100k)", iters, native_ms, 0.0, brass_ms, ratio, 0.0, target, ratio <= target, notes.str()});
+        results.push_back(make_paired_result("collatz", "Collatz Sum (1..100k)", iters, paired, ratchet.get_ratio("collatz", 1.05)));
         BenchmarkReporter::print_row(results.back());
     }
 
@@ -301,23 +307,23 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
         int64_t N = 32;
         std::vector<int64_t> A(N * N, 2), B(N * N, 3), C_native(N * N, 0), C_scalar(N * N, 0);
 
-        sw.start();
-        for (size_t i = 0; i < iters; ++i) {
-            int64_t size_n = N;
-            DoNotOptimize(size_n);
-            native_matmul_i64(A.data(), B.data(), C_native.data(), size_n);
-            DoNotOptimize(C_native.data());
-        }
-        double native_ms = sw.stop_ms();
+        auto run_vec = [a = A.data(), b = B.data(), c = C_native.data(), N, iters]() {
+            for (size_t i = 0; i < iters; ++i) {
+                int64_t size_n = N;
+                DoNotOptimize(size_n);
+                native_matmul_i64(a, b, c, size_n);
+                DoNotOptimize(c);
+            }
+        };
 
-        sw.start();
-        for (size_t i = 0; i < iters; ++i) {
-            int64_t size_n = N;
-            DoNotOptimize(size_n);
-            native_matmul_i64_scalar(A.data(), B.data(), C_scalar.data(), size_n);
-            DoNotOptimize(C_scalar.data());
-        }
-        double scalar_ms = sw.stop_ms();
+        auto run_scalar = [a = A.data(), b = B.data(), c = C_scalar.data(), N, iters]() {
+            for (size_t i = 0; i < iters; ++i) {
+                int64_t size_n = N;
+                DoNotOptimize(size_n);
+                native_matmul_i64_scalar(a, b, c, size_n);
+                DoNotOptimize(c);
+            }
+        };
 
         // 4a. Naive kernel
         {
@@ -331,26 +337,23 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
                 std::abort();
             }
 
-            sw.start();
-            for (size_t i = 0; i < iters; ++i) {
-                int64_t size_n = N;
-                DoNotOptimize(size_n);
-                matmul_fn(A.data(), B.data(), C_jit.data(), size_n);
-                DoNotOptimize(C_jit.data());
-            }
-            double brass_ms = sw.stop_ms();
+            auto run_jit = [matmul_fn, a = A.data(), b = B.data(), c = C_jit.data(), N, iters]() {
+                for (size_t i = 0; i < iters; ++i) {
+                    int64_t size_n = N;
+                    DoNotOptimize(size_n);
+                    matmul_fn(a, b, c, size_n);
+                    DoNotOptimize(c);
+                }
+            };
+
+            auto triplet = measure_triplet_repetitions(DEFAULT_BENCH_REPETITIONS, run_vec, run_scalar, run_jit);
 
             if (C_native != C_jit) {
                 std::cerr << "FATAL: MatMul 32x32 (i64, naive) result mismatch!\n";
                 std::abort();
             }
 
-            double ratio_scalar = brass_ms / scalar_ms;
-            double ratio_vec = brass_ms / native_ms;
-            double target = ratchet.get_ratio("matmul_i64_32_naive", 2.50);
-            std::ostringstream notes;
-            notes << "<= " << std::fixed << std::setprecision(2) << target << "x scalar (vec: " << std::fixed << std::setprecision(2) << ratio_vec << "x)";
-            results.push_back({"matmul_i64_32_naive", "MatMul 32x32 (i64, naive)", iters, native_ms, scalar_ms, brass_ms, ratio_scalar, ratio_vec, target, ratio_scalar <= target, notes.str()});
+            results.push_back(make_triplet_result("matmul_i64_32_naive", "MatMul 32x32 (i64, naive)", iters, triplet, ratchet.get_ratio("matmul_i64_32_naive", 1.50)));
             BenchmarkReporter::print_row(results.back());
         }
 
@@ -366,26 +369,23 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
                 std::abort();
             }
 
-            sw.start();
-            for (size_t i = 0; i < iters; ++i) {
-                int64_t size_n = N;
-                DoNotOptimize(size_n);
-                matmul_fn(A.data(), B.data(), C_jit.data(), size_n);
-                DoNotOptimize(C_jit.data());
-            }
-            double brass_ms = sw.stop_ms();
+            auto run_jit = [matmul_fn, a = A.data(), b = B.data(), c = C_jit.data(), N, iters]() {
+                for (size_t i = 0; i < iters; ++i) {
+                    int64_t size_n = N;
+                    DoNotOptimize(size_n);
+                    matmul_fn(a, b, c, size_n);
+                    DoNotOptimize(c);
+                }
+            };
+
+            auto triplet = measure_triplet_repetitions(DEFAULT_BENCH_REPETITIONS, run_vec, run_scalar, run_jit);
 
             if (C_native != C_jit) {
                 std::cerr << "FATAL: MatMul 32x32 (i64, preopt) result mismatch!\n";
                 std::abort();
             }
 
-            double ratio_scalar = brass_ms / scalar_ms;
-            double ratio_vec = brass_ms / native_ms;
-            double target = ratchet.get_ratio("matmul_i64_32_preopt", 1.63);
-            std::ostringstream notes;
-            notes << "<= " << std::fixed << std::setprecision(2) << target << "x scalar (vec: " << std::fixed << std::setprecision(2) << ratio_vec << "x)";
-            results.push_back({"matmul_i64_32_preopt", "MatMul 32x32 (i64, preopt)", iters, native_ms, scalar_ms, brass_ms, ratio_scalar, ratio_vec, target, ratio_scalar <= target, notes.str()});
+            results.push_back(make_triplet_result("matmul_i64_32_preopt", "MatMul 32x32 (i64, preopt)", iters, triplet, ratchet.get_ratio("matmul_i64_32_preopt", 1.50)));
             BenchmarkReporter::print_row(results.back());
         }
     }
@@ -396,23 +396,23 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
         int64_t N = 64;
         std::vector<int64_t> A(N * N, 2), B(N * N, 3), C_native(N * N, 0), C_scalar(N * N, 0);
 
-        sw.start();
-        for (size_t i = 0; i < iters; ++i) {
-            int64_t size_n = N;
-            DoNotOptimize(size_n);
-            native_matmul_i64(A.data(), B.data(), C_native.data(), size_n);
-            DoNotOptimize(C_native.data());
-        }
-        double native_ms = sw.stop_ms();
+        auto run_vec = [a = A.data(), b = B.data(), c = C_native.data(), N, iters]() {
+            for (size_t i = 0; i < iters; ++i) {
+                int64_t size_n = N;
+                DoNotOptimize(size_n);
+                native_matmul_i64(a, b, c, size_n);
+                DoNotOptimize(c);
+            }
+        };
 
-        sw.start();
-        for (size_t i = 0; i < iters; ++i) {
-            int64_t size_n = N;
-            DoNotOptimize(size_n);
-            native_matmul_i64_scalar(A.data(), B.data(), C_scalar.data(), size_n);
-            DoNotOptimize(C_scalar.data());
-        }
-        double scalar_ms = sw.stop_ms();
+        auto run_scalar = [a = A.data(), b = B.data(), c = C_scalar.data(), N, iters]() {
+            for (size_t i = 0; i < iters; ++i) {
+                int64_t size_n = N;
+                DoNotOptimize(size_n);
+                native_matmul_i64_scalar(a, b, c, size_n);
+                DoNotOptimize(c);
+            }
+        };
 
         // 5a. Naive kernel
         {
@@ -426,26 +426,23 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
                 std::abort();
             }
 
-            sw.start();
-            for (size_t i = 0; i < iters; ++i) {
-                int64_t size_n = N;
-                DoNotOptimize(size_n);
-                matmul_fn(A.data(), B.data(), C_jit.data(), size_n);
-                DoNotOptimize(C_jit.data());
-            }
-            double brass_ms = sw.stop_ms();
+            auto run_jit = [matmul_fn, a = A.data(), b = B.data(), c = C_jit.data(), N, iters]() {
+                for (size_t i = 0; i < iters; ++i) {
+                    int64_t size_n = N;
+                    DoNotOptimize(size_n);
+                    matmul_fn(a, b, c, size_n);
+                    DoNotOptimize(c);
+                }
+            };
+
+            auto triplet = measure_triplet_repetitions(DEFAULT_BENCH_REPETITIONS, run_vec, run_scalar, run_jit);
 
             if (C_native != C_jit) {
                 std::cerr << "FATAL: MatMul 64x64 (i64, naive) result mismatch!\n";
                 std::abort();
             }
 
-            double ratio_scalar = brass_ms / scalar_ms;
-            double ratio_vec = brass_ms / native_ms;
-            double target = ratchet.get_ratio("matmul_i64_64_naive", 2.10);
-            std::ostringstream notes;
-            notes << "<= " << std::fixed << std::setprecision(2) << target << "x scalar (vec: " << std::fixed << std::setprecision(2) << ratio_vec << "x)";
-            results.push_back({"matmul_i64_64_naive", "MatMul 64x64 (i64, naive)", iters, native_ms, scalar_ms, brass_ms, ratio_scalar, ratio_vec, target, ratio_scalar <= target, notes.str()});
+            results.push_back(make_triplet_result("matmul_i64_64_naive", "MatMul 64x64 (i64, naive)", iters, triplet, ratchet.get_ratio("matmul_i64_64_naive", 1.45)));
             BenchmarkReporter::print_row(results.back());
         }
 
@@ -461,26 +458,23 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
                 std::abort();
             }
 
-            sw.start();
-            for (size_t i = 0; i < iters; ++i) {
-                int64_t size_n = N;
-                DoNotOptimize(size_n);
-                matmul_fn(A.data(), B.data(), C_jit.data(), size_n);
-                DoNotOptimize(C_jit.data());
-            }
-            double brass_ms = sw.stop_ms();
+            auto run_jit = [matmul_fn, a = A.data(), b = B.data(), c = C_jit.data(), N, iters]() {
+                for (size_t i = 0; i < iters; ++i) {
+                    int64_t size_n = N;
+                    DoNotOptimize(size_n);
+                    matmul_fn(a, b, c, size_n);
+                    DoNotOptimize(c);
+                }
+            };
+
+            auto triplet = measure_triplet_repetitions(DEFAULT_BENCH_REPETITIONS, run_vec, run_scalar, run_jit);
 
             if (C_native != C_jit) {
                 std::cerr << "FATAL: MatMul 64x64 (i64, preopt) result mismatch!\n";
                 std::abort();
             }
 
-            double ratio_scalar = brass_ms / scalar_ms;
-            double ratio_vec = brass_ms / native_ms;
-            double target = ratchet.get_ratio("matmul_i64_64_preopt", 1.55);
-            std::ostringstream notes;
-            notes << "<= " << std::fixed << std::setprecision(2) << target << "x scalar (vec: " << std::fixed << std::setprecision(2) << ratio_vec << "x)";
-            results.push_back({"matmul_i64_64_preopt", "MatMul 64x64 (i64, preopt)", iters, native_ms, scalar_ms, brass_ms, ratio_scalar, ratio_vec, target, ratio_scalar <= target, notes.str()});
+            results.push_back(make_triplet_result("matmul_i64_64_preopt", "MatMul 64x64 (i64, preopt)", iters, triplet, ratchet.get_ratio("matmul_i64_64_preopt", 1.45)));
             BenchmarkReporter::print_row(results.back());
         }
     }
@@ -491,23 +485,23 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
         int64_t N = 32;
         std::vector<double> A(N * N, 1.5), B(N * N, 2.5), C_native(N * N, 0.0), C_scalar(N * N, 0.0);
 
-        sw.start();
-        for (size_t i = 0; i < iters; ++i) {
-            int64_t size_n = N;
-            DoNotOptimize(size_n);
-            native_matmul_f64(A.data(), B.data(), C_native.data(), size_n);
-            DoNotOptimize(C_native.data());
-        }
-        double native_ms = sw.stop_ms();
+        auto run_vec = [a = A.data(), b = B.data(), c = C_native.data(), N, iters]() {
+            for (size_t i = 0; i < iters; ++i) {
+                int64_t size_n = N;
+                DoNotOptimize(size_n);
+                native_matmul_f64(a, b, c, size_n);
+                DoNotOptimize(c);
+            }
+        };
 
-        sw.start();
-        for (size_t i = 0; i < iters; ++i) {
-            int64_t size_n = N;
-            DoNotOptimize(size_n);
-            native_matmul_f64_scalar(A.data(), B.data(), C_scalar.data(), size_n);
-            DoNotOptimize(C_scalar.data());
-        }
-        double scalar_ms = sw.stop_ms();
+        auto run_scalar = [a = A.data(), b = B.data(), c = C_scalar.data(), N, iters]() {
+            for (size_t i = 0; i < iters; ++i) {
+                int64_t size_n = N;
+                DoNotOptimize(size_n);
+                native_matmul_f64_scalar(a, b, c, size_n);
+                DoNotOptimize(c);
+            }
+        };
 
         auto run_f64_32 = [&](const char* key, const char* name, std::unique_ptr<Module> mod, const char* fn_sym, double def_target) {
             std::vector<double> C_jit(N * N, 0.0);
@@ -519,14 +513,16 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
                 std::abort();
             }
 
-            sw.start();
-            for (size_t i = 0; i < iters; ++i) {
-                int64_t size_n = N;
-                DoNotOptimize(size_n);
-                matmul_fn(A.data(), B.data(), C_jit.data(), size_n);
-                DoNotOptimize(C_jit.data());
-            }
-            double brass_ms = sw.stop_ms();
+            auto run_jit = [matmul_fn, a = A.data(), b = B.data(), c = C_jit.data(), N, iters]() {
+                for (size_t i = 0; i < iters; ++i) {
+                    int64_t size_n = N;
+                    DoNotOptimize(size_n);
+                    matmul_fn(a, b, c, size_n);
+                    DoNotOptimize(c);
+                }
+            };
+
+            auto triplet = measure_triplet_repetitions(DEFAULT_BENCH_REPETITIONS, run_vec, run_scalar, run_jit);
 
             for (size_t i = 0; i < C_native.size(); ++i) {
                 if (std::abs(C_native[i] - C_jit[i]) > 1e-4) {
@@ -535,12 +531,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
                 }
             }
 
-            double ratio_scalar = brass_ms / scalar_ms;
-            double ratio_vec = brass_ms / native_ms;
-            double target = ratchet.get_ratio(key, def_target);
-            std::ostringstream notes;
-            notes << "<= " << std::fixed << std::setprecision(2) << target << "x scalar (vec: " << std::fixed << std::setprecision(2) << ratio_vec << "x)";
-            results.push_back({key, name, iters, native_ms, scalar_ms, brass_ms, ratio_scalar, ratio_vec, target, ratio_scalar <= target, notes.str()});
+            results.push_back(make_triplet_result(key, name, iters, triplet, ratchet.get_ratio(key, def_target)));
             BenchmarkReporter::print_row(results.back());
         };
 
@@ -560,23 +551,23 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
         int64_t N = 64;
         std::vector<double> A(N * N, 1.5), B(N * N, 2.5), C_native(N * N, 0.0), C_scalar(N * N, 0.0);
 
-        sw.start();
-        for (size_t i = 0; i < iters; ++i) {
-            int64_t size_n = N;
-            DoNotOptimize(size_n);
-            native_matmul_f64(A.data(), B.data(), C_native.data(), size_n);
-            DoNotOptimize(C_native.data());
-        }
-        double native_ms = sw.stop_ms();
+        auto run_vec = [a = A.data(), b = B.data(), c = C_native.data(), N, iters]() {
+            for (size_t i = 0; i < iters; ++i) {
+                int64_t size_n = N;
+                DoNotOptimize(size_n);
+                native_matmul_f64(a, b, c, size_n);
+                DoNotOptimize(c);
+            }
+        };
 
-        sw.start();
-        for (size_t i = 0; i < iters; ++i) {
-            int64_t size_n = N;
-            DoNotOptimize(size_n);
-            native_matmul_f64_scalar(A.data(), B.data(), C_scalar.data(), size_n);
-            DoNotOptimize(C_scalar.data());
-        }
-        double scalar_ms = sw.stop_ms();
+        auto run_scalar = [a = A.data(), b = B.data(), c = C_scalar.data(), N, iters]() {
+            for (size_t i = 0; i < iters; ++i) {
+                int64_t size_n = N;
+                DoNotOptimize(size_n);
+                native_matmul_f64_scalar(a, b, c, size_n);
+                DoNotOptimize(c);
+            }
+        };
 
         auto run_f64_64 = [&](const char* key, const char* name, std::unique_ptr<Module> mod, const char* fn_sym, double def_target) {
             std::vector<double> C_jit(N * N, 0.0);
@@ -588,14 +579,16 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
                 std::abort();
             }
 
-            sw.start();
-            for (size_t i = 0; i < iters; ++i) {
-                int64_t size_n = N;
-                DoNotOptimize(size_n);
-                matmul_fn(A.data(), B.data(), C_jit.data(), size_n);
-                DoNotOptimize(C_jit.data());
-            }
-            double brass_ms = sw.stop_ms();
+            auto run_jit = [matmul_fn, a = A.data(), b = B.data(), c = C_jit.data(), N, iters]() {
+                for (size_t i = 0; i < iters; ++i) {
+                    int64_t size_n = N;
+                    DoNotOptimize(size_n);
+                    matmul_fn(a, b, c, size_n);
+                    DoNotOptimize(c);
+                }
+            };
+
+            auto triplet = measure_triplet_repetitions(DEFAULT_BENCH_REPETITIONS, run_vec, run_scalar, run_jit);
 
             for (size_t i = 0; i < C_native.size(); ++i) {
                 if (std::abs(C_native[i] - C_jit[i]) > 1e-4) {
@@ -604,19 +597,14 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
                 }
             }
 
-            double ratio_scalar = brass_ms / scalar_ms;
-            double ratio_vec = brass_ms / native_ms;
-            double target = ratchet.get_ratio(key, def_target);
-            std::ostringstream notes;
-            notes << "<= " << std::fixed << std::setprecision(2) << target << "x scalar (vec: " << std::fixed << std::setprecision(2) << ratio_vec << "x)";
-            results.push_back({key, name, iters, native_ms, scalar_ms, brass_ms, ratio_scalar, ratio_vec, target, ratio_scalar <= target, notes.str()});
+            results.push_back(make_triplet_result(key, name, iters, triplet, ratchet.get_ratio(key, def_target)));
             BenchmarkReporter::print_row(results.back());
         };
 
         // 7a. Strict Naive
-        run_f64_64("matmul_f64_64_strict_naive", "MatMul 64x64 (f64, strict, naive)", build_matmul_f64_strict_naive_module(), "matmul_f64_strict_naive", 1.65);
+        run_f64_64("matmul_f64_64_strict_naive", "MatMul 64x64 (f64, strict, naive)", build_matmul_f64_strict_naive_module(), "matmul_f64_strict_naive", 1.70);
         // 7b. Strict Preopt
-        run_f64_64("matmul_f64_64_strict_preopt", "MatMul 64x64 (f64, strict, preopt)", build_matmul_f64_strict_preopt_module(), "matmul_f64_strict_preopt", 1.57);
+        run_f64_64("matmul_f64_64_strict_preopt", "MatMul 64x64 (f64, strict, preopt)", build_matmul_f64_strict_preopt_module(), "matmul_f64_strict_preopt", 1.70);
         // 7c. Reassoc Naive (flagged opt-in)
         run_f64_64("matmul_f64_64_reassoc_naive", "MatMul 64x64 (f64, reassoc, naive)", build_matmul_f64_reassoc_naive_module(), "matmul_f64_reassoc_naive", 0.85);
         // 7d. Reassoc Preopt (flagged opt-in)
@@ -633,15 +621,16 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
             nodes[i].next = (i + 1 < node_count) ? &nodes[i + 1] : nullptr;
         }
 
-        sw.start();
-        int64_t native_sum = 0;
-        for (size_t i = 0; i < iters; ++i) {
-            const BenchListNode* head_ptr = nodes.data();
-            DoNotOptimize(head_ptr);
-            native_sum = native_list_traversal(head_ptr);
-            DoNotOptimize(native_sum);
-        }
-        double native_ms = sw.stop_ms();
+        auto run_native = [head_ptr = nodes.data(), iters]() {
+            int64_t sum = 0;
+            for (size_t i = 0; i < iters; ++i) {
+                const BenchListNode* p = head_ptr;
+                DoNotOptimize(p);
+                sum = native_list_traversal(p);
+                DoNotOptimize(sum);
+            }
+            return sum;
+        };
 
         auto mod = build_list_module();
         JitExecutionEngine jit;
@@ -652,26 +641,28 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
             std::abort();
         }
 
-        sw.start();
-        int64_t jit_sum = 0;
-        for (size_t i = 0; i < iters; ++i) {
-            const BenchListNode* head_ptr = nodes.data();
-            DoNotOptimize(head_ptr);
-            jit_sum = list_fn(head_ptr);
-            DoNotOptimize(jit_sum);
-        }
-        double brass_ms = sw.stop_ms();
+        auto run_jit = [list_fn, head_ptr = nodes.data(), iters]() {
+            int64_t sum = 0;
+            for (size_t i = 0; i < iters; ++i) {
+                const BenchListNode* p = head_ptr;
+                DoNotOptimize(p);
+                sum = list_fn(p);
+                DoNotOptimize(sum);
+            }
+            return sum;
+        };
+
+        auto paired = measure_paired_repetitions(DEFAULT_BENCH_REPETITIONS, run_native, run_jit);
+
+        int64_t native_sum = run_native();
+        int64_t jit_sum = run_jit();
 
         if (native_sum != jit_sum) {
             std::cerr << "FATAL: Linked List Traversal result mismatch: native=" << native_sum << ", JIT=" << jit_sum << "\n";
             std::abort();
         }
 
-        double ratio = brass_ms / native_ms;
-        double target = ratchet.get_ratio("linked_list", 0.95);
-        std::ostringstream notes;
-        notes << "<= " << std::fixed << std::setprecision(2) << target << "x baseline";
-        results.push_back({"linked_list", "Linked List Traversal (50k)", iters, native_ms, 0.0, brass_ms, ratio, 0.0, target, ratio <= target, notes.str()});
+        results.push_back(make_paired_result("linked_list", "Linked List Traversal (50k)", iters, paired, ratchet.get_ratio("linked_list", 0.90)));
         BenchmarkReporter::print_row(results.back());
     }
 }

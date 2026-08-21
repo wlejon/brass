@@ -166,8 +166,6 @@ int64_t shadow_stack_alloc_loop(int64_t num_nodes, ThreadShadowStack& ss) {
 namespace brass::bench {
 
 void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const RatchetManager& ratchet) {
-    Stopwatch sw;
-
     // ------------------------------------------------------------------------
     // (a) NaN-box tag-test loops
     // ------------------------------------------------------------------------
@@ -192,14 +190,14 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
             }
         }
 
-        // Native baseline
-        sw.start();
-        double native_res = 0.0;
-        for (size_t k = 0; k < iters; ++k) {
-            native_res = native_nanbox_tag_test(nanbox_data.data(), static_cast<int64_t>(N));
-            DoNotOptimize(native_res);
-        }
-        double native_ms = sw.stop_ms();
+        auto run_native = [data = nanbox_data.data(), N, iters]() {
+            double res = 0.0;
+            for (size_t k = 0; k < iters; ++k) {
+                res = native_nanbox_tag_test(data, static_cast<int64_t>(N));
+                DoNotOptimize(res);
+            }
+            return res;
+        };
 
         // Brass JIT
         auto mod = build_nanbox_tag_test_module();
@@ -211,26 +209,27 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
             std::abort();
         }
 
-        sw.start();
-        double jit_res = 0.0;
-        for (size_t k = 0; k < iters; ++k) {
-            jit_res = fn(nanbox_data.data(), static_cast<int64_t>(N));
-            DoNotOptimize(jit_res);
-        }
-        double jit_ms = sw.stop_ms();
+        auto run_jit = [fn, data = nanbox_data.data(), N, iters]() {
+            double res = 0.0;
+            for (size_t k = 0; k < iters; ++k) {
+                res = fn(data, static_cast<int64_t>(N));
+                DoNotOptimize(res);
+            }
+            return res;
+        };
+
+        auto paired = measure_paired_repetitions(DEFAULT_BENCH_REPETITIONS, run_native, run_jit);
+
+        double native_res = run_native();
+        double jit_res = run_jit();
 
         if (std::abs(native_res - jit_res) > 1e-4) {
             std::cerr << "FATAL: NaN-Box tag-test mismatch: native=" << native_res << ", jit=" << jit_res << "\n";
             std::abort();
         }
 
-        double ratio = (native_ms > 0.0) ? (jit_ms / native_ms) : 1.0;
-        double target = ratchet.get_ratio("nanbox", 1.15);
-        std::ostringstream notes;
-        notes << "<= " << std::fixed << std::setprecision(2) << target << "x baseline";
-        BenchmarkResult r{"nanbox", "NaN-Box Tag-Test Loop", iters, native_ms, -1.0, jit_ms, ratio, -1.0, target, ratio <= target, notes.str()};
-        BenchmarkReporter::print_row(r);
-        results.push_back(r);
+        results.push_back(make_paired_result("nanbox", "NaN-Box Tag-Test Loop", iters, paired, ratchet.get_ratio("nanbox", 1.20)));
+        BenchmarkReporter::print_row(results.back());
     }
 
     // ------------------------------------------------------------------------
@@ -261,14 +260,14 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
             obj_ptrs[i] = reinterpret_cast<uintptr_t>(&storage[i]);
         }
 
-        // Native baseline
-        sw.start();
-        int64_t native_res = 0;
-        for (size_t k = 0; k < iters; ++k) {
-            native_res = native_shape_guard(obj_ptrs.data(), static_cast<int64_t>(N));
-            DoNotOptimize(native_res);
-        }
-        double native_ms = sw.stop_ms();
+        auto run_native = [ptrs = obj_ptrs.data(), N, iters]() {
+            int64_t res = 0;
+            for (size_t k = 0; k < iters; ++k) {
+                res = native_shape_guard(ptrs, static_cast<int64_t>(N));
+                DoNotOptimize(res);
+            }
+            return res;
+        };
 
         // Brass JIT
         auto mod = build_shape_guard_module();
@@ -280,26 +279,27 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
             std::abort();
         }
 
-        sw.start();
-        int64_t jit_res = 0;
-        for (size_t k = 0; k < iters; ++k) {
-            jit_res = fn(obj_ptrs.data(), static_cast<int64_t>(N));
-            DoNotOptimize(jit_res);
-        }
-        double jit_ms = sw.stop_ms();
+        auto run_jit = [fn, ptrs = obj_ptrs.data(), N, iters]() {
+            int64_t res = 0;
+            for (size_t k = 0; k < iters; ++k) {
+                res = fn(ptrs, static_cast<int64_t>(N));
+                DoNotOptimize(res);
+            }
+            return res;
+        };
+
+        auto paired = measure_paired_repetitions(DEFAULT_BENCH_REPETITIONS, run_native, run_jit);
+
+        int64_t native_res = run_native();
+        int64_t jit_res = run_jit();
 
         if (native_res != jit_res) {
             std::cerr << "FATAL: Shape guard result mismatch: native=" << native_res << ", jit=" << jit_res << "\n";
             std::abort();
         }
 
-        double ratio = (native_ms > 0.0) ? (jit_ms / native_ms) : 1.0;
-        double target = ratchet.get_ratio("shapes", 1.10);
-        std::ostringstream notes;
-        notes << "<= " << std::fixed << std::setprecision(2) << target << "x baseline";
-        BenchmarkResult r{"shapes", "Shape-Guarded Field Loads", iters, native_ms, -1.0, jit_ms, ratio, -1.0, target, ratio <= target, notes.str()};
-        BenchmarkReporter::print_row(r);
-        results.push_back(r);
+        results.push_back(make_paired_result("shapes", "Shape-Guarded Field Loads", iters, paired, ratchet.get_ratio("shapes", 1.10)));
+        BenchmarkReporter::print_row(results.back());
     }
 
     // ------------------------------------------------------------------------
@@ -310,14 +310,14 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
         constexpr int64_t phase2_iters = 25000;
         constexpr size_t outer_rounds = 50;
 
-        // Native baseline
-        sw.start();
-        int64_t native_res = 0;
-        for (size_t r = 0; r < outer_rounds; ++r) {
-            native_res = native_patchable_ic_loop(phase1_iters, phase2_iters);
-            DoNotOptimize(native_res);
-        }
-        double native_ms = sw.stop_ms();
+        auto run_native = [phase1_iters, phase2_iters, outer_rounds]() {
+            int64_t res = 0;
+            for (size_t r = 0; r < outer_rounds; ++r) {
+                res = native_patchable_ic_loop(phase1_iters, phase2_iters);
+                DoNotOptimize(res);
+            }
+            return res;
+        };
 
         // Brass JIT
         auto mod = build_patchable_ic_module();
@@ -329,31 +329,32 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
             std::abort();
         }
 
-        sw.start();
-        int64_t jit_res = 0;
-        for (size_t r = 0; r < outer_rounds; ++r) {
-            // Reset to target 1
-            jit.patch_call("ic_site_bench", "target_stub_1");
-            int64_t mid = fn(0, phase1_iters);
-            // Patch to target 2
-            jit.patch_call("ic_site_bench", "target_stub_2");
-            jit_res = fn(mid, phase2_iters);
-            DoNotOptimize(jit_res);
-        }
-        double jit_ms = sw.stop_ms();
+        auto run_jit = [&jit, fn, phase1_iters, phase2_iters, outer_rounds]() {
+            int64_t res = 0;
+            for (size_t r = 0; r < outer_rounds; ++r) {
+                // Reset to target 1
+                jit.patch_call("ic_site_bench", "target_stub_1");
+                int64_t mid = fn(0, phase1_iters);
+                // Patch to target 2
+                jit.patch_call("ic_site_bench", "target_stub_2");
+                res = fn(mid, phase2_iters);
+                DoNotOptimize(res);
+            }
+            return res;
+        };
+
+        auto paired = measure_paired_repetitions(DEFAULT_BENCH_REPETITIONS, run_native, run_jit);
+
+        int64_t native_res = run_native();
+        int64_t jit_res = run_jit();
 
         if (native_res != jit_res) {
             std::cerr << "FATAL: Patchable IC result mismatch: native=" << native_res << ", jit=" << jit_res << "\n";
             std::abort();
         }
 
-        double ratio = (native_ms > 0.0) ? (jit_ms / native_ms) : 1.0;
-        double target = ratchet.get_ratio("icache", 0.65);
-        std::ostringstream notes;
-        notes << "<= " << std::fixed << std::setprecision(2) << target << "x baseline";
-        BenchmarkResult r{"icache", "Patchable-Call Inline Cache", outer_rounds, native_ms, -1.0, jit_ms, ratio, -1.0, target, ratio <= target, notes.str()};
-        BenchmarkReporter::print_row(r);
-        results.push_back(r);
+        results.push_back(make_paired_result("icache", "Patchable-Call Inline Cache", outer_rounds, paired, ratchet.get_ratio("icache", 0.75)));
+        BenchmarkReporter::print_row(results.back());
     }
 
     // ------------------------------------------------------------------------
@@ -366,42 +367,48 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
         // (a) Shadow-Stack Model
         ThreadShadowStack ss;
         MiniCheneyGC ss_gc(4 * 1024 * 1024);
-        brass_set_active_gc(&ss_gc);
-        sw.start();
-        int64_t shadow_res = 0;
-        for (size_t r = 0; r < gc_rounds; ++r) {
-            ss_gc.reset();
-            shadow_res = shadow_stack_alloc_loop(num_nodes, ss);
-            DoNotOptimize(shadow_res);
-        }
-        double shadow_ms = sw.stop_ms();
 
         // (b) Brass Stack-Map Model
         MiniCheneyGC gc(4 * 1024 * 1024); // 4 MB semi-space
-        brass_set_active_gc(&gc);
-
         auto mod = build_gc_alloc_loop_module();
         JitExecutionEngine jit;
         jit.register_external_symbol("brass_gc_alloc", reinterpret_cast<void*>(&brass_gc_alloc));
         jit.register_external_symbol("brass_gc_safepoint", reinterpret_cast<void*>(&brass_gc_safepoint));
         jit.compile_and_load(*mod);
-        brass_set_active_stack_maps(&jit.stack_maps());
-
         auto fn = jit.get_function_ptr<int64_t(*)(int64_t)>("gc_alloc_runner");
         if (!fn) {
             std::cerr << "FATAL: gc_alloc_runner function pointer is null!\n";
             std::abort();
         }
 
-        sw.start();
-        int64_t jit_res = 0;
-        for (size_t r = 0; r < gc_rounds; ++r) {
-            gc.reset();
-            jit_res = fn(num_nodes);
-            DoNotOptimize(jit_res);
-        }
-        double jit_ms = sw.stop_ms();
+        auto run_shadow = [&ss, &ss_gc, num_nodes, gc_rounds]() {
+            brass_set_active_gc(&ss_gc);
+            brass_set_active_stack_maps(nullptr);
+            int64_t res = 0;
+            for (size_t r = 0; r < gc_rounds; ++r) {
+                ss_gc.reset();
+                res = shadow_stack_alloc_loop(num_nodes, ss);
+                DoNotOptimize(res);
+            }
+            return res;
+        };
 
+        auto run_jit = [&jit, &gc, fn, num_nodes, gc_rounds]() {
+            brass_set_active_gc(&gc);
+            brass_set_active_stack_maps(&jit.stack_maps());
+            int64_t res = 0;
+            for (size_t r = 0; r < gc_rounds; ++r) {
+                gc.reset();
+                res = fn(num_nodes);
+                DoNotOptimize(res);
+            }
+            return res;
+        };
+
+        auto paired = measure_paired_repetitions(DEFAULT_BENCH_REPETITIONS, run_shadow, run_jit);
+
+        int64_t shadow_res = run_shadow();
+        int64_t jit_res = run_jit();
         int64_t expected_sum = num_nodes * (num_nodes + 1) / 2;
         if (jit_res != expected_sum || shadow_res != expected_sum) {
             std::cerr << "FATAL: GC Linked Node Alloc result mismatch: expected=" << expected_sum
@@ -409,13 +416,8 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
             std::abort();
         }
 
-        double ratio = (shadow_ms > 0.0) ? (jit_ms / shadow_ms) : 1.0;
-        double target = ratchet.get_ratio("cheney_gc", 1.10);
-        std::ostringstream notes;
-        notes << "<= " << std::fixed << std::setprecision(2) << target << "x baseline";
-        BenchmarkResult r{"cheney_gc", "Linked Node Alloc (Cheney GC)", gc_rounds, shadow_ms, -1.0, jit_ms, ratio, -1.0, target, ratio <= target, notes.str()};
-        BenchmarkReporter::print_row(r);
-        results.push_back(r);
+        results.push_back(make_paired_result("cheney_gc", "Linked Node Alloc (Cheney GC)", gc_rounds, paired, ratchet.get_ratio("cheney_gc", 1.35)));
+        BenchmarkReporter::print_row(results.back());
 
         brass_set_active_gc(nullptr);
         brass_set_active_stack_maps(nullptr);

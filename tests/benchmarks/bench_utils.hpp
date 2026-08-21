@@ -15,6 +15,8 @@
 #include <ctime>
 #include <cctype>
 
+#include <algorithm>
+
 #if defined(_MSC_VER)
 #include <intrin.h>
 #endif
@@ -151,19 +153,252 @@ private:
     std::chrono::time_point<std::chrono::high_resolution_clock> start_time_;
 };
 
+// Timing statistics across multi-repetition measurements
+struct TimingStats {
+    std::vector<double> samples;
+    double median = 0.0;
+    double min = 0.0;
+    double max = 0.0;
+
+    TimingStats() = default;
+
+    explicit TimingStats(std::vector<double> s) {
+        samples = std::move(s);
+        if (samples.empty()) return;
+        std::vector<double> sorted = samples;
+        std::sort(sorted.begin(), sorted.end());
+        min = sorted.front();
+        max = sorted.back();
+        size_t n = sorted.size();
+        if (n % 2 == 1) {
+            median = sorted[n / 2];
+        } else {
+            median = (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0;
+        }
+    }
+
+    TimingStats(std::initializer_list<double> list)
+        : TimingStats(std::vector<double>(list)) {}
+};
+
 struct BenchmarkResult {
     std::string key; // Benchmark identifier, e.g. "fib", "matmul_i64_32_naive"
     std::string name;
     size_t iterations = 0;
+    size_t repetitions = 5;
     double native_ms = 0.0;
+    double native_min_ms = 0.0;
+    double native_max_ms = 0.0;
     double native_scalar_ms = 0.0;
+    double native_scalar_min_ms = 0.0;
+    double native_scalar_max_ms = 0.0;
     double brass_ms = 0.0;
-    double ratio = 0.0; // vs scalar or vs native
-    double ratio_vec = 0.0; // vs vectorized native
+    double brass_min_ms = 0.0;
+    double brass_max_ms = 0.0;
+    double ratio = 0.0; // vs scalar or vs native (median)
+    double ratio_min = 0.0;
+    double ratio_max = 0.0;
+    double ratio_vec = 0.0; // vs vectorized native (median)
+    double ratio_vec_min = 0.0;
+    double ratio_vec_max = 0.0;
     double target_ratio = 0.0; // Golden ratio from ratchet
     bool passes_bar = true;
     std::string notes;
 };
+
+constexpr size_t DEFAULT_BENCH_REPETITIONS = 5;
+
+template <typename F>
+inline TimingStats measure_repetitions(size_t repetitions, F&& func) {
+    // Warmup pass to prime instruction caches and CPU frequency
+    func();
+
+    std::vector<double> samples;
+    samples.reserve(repetitions);
+    Stopwatch sw;
+    for (size_t r = 0; r < repetitions; ++r) {
+        sw.start();
+        func();
+        samples.push_back(sw.stop_ms());
+    }
+    return TimingStats(std::move(samples));
+}
+
+struct PairedRepetitionResult {
+    TimingStats native_stats;
+    TimingStats brass_stats;
+    TimingStats ratio_stats;
+};
+
+template <typename FNative, typename FJit>
+inline PairedRepetitionResult measure_paired_repetitions(size_t repetitions, FNative&& fn_native, FJit&& fn_jit) {
+    // Warmup pass to prime instruction caches and CPU frequency
+    fn_native();
+    fn_jit();
+
+    PairedRepetitionResult res;
+    std::vector<double> nat_samples, jit_samples, ratio_samples;
+    nat_samples.reserve(repetitions);
+    jit_samples.reserve(repetitions);
+    ratio_samples.reserve(repetitions);
+    Stopwatch sw;
+    for (size_t r = 0; r < repetitions; ++r) {
+        sw.start();
+        fn_native();
+        double n_ms = sw.stop_ms();
+
+        sw.start();
+        fn_jit();
+        double j_ms = sw.stop_ms();
+
+        nat_samples.push_back(n_ms);
+        jit_samples.push_back(j_ms);
+        double rat = (n_ms > 0.0) ? (j_ms / n_ms) : 1.0;
+        ratio_samples.push_back(rat);
+    }
+    res.native_stats = TimingStats(std::move(nat_samples));
+    res.brass_stats = TimingStats(std::move(jit_samples));
+    res.ratio_stats = TimingStats(std::move(ratio_samples));
+    return res;
+}
+
+struct TripletRepetitionResult {
+    TimingStats native_stats;       // Vectorized native
+    TimingStats scalar_stats;       // Scalar native
+    TimingStats brass_stats;        // Brass JIT
+    TimingStats ratio_scalar_stats; // Brass / Scalar
+    TimingStats ratio_vec_stats;    // Brass / Vectorized
+};
+
+template <typename F1, typename F2, typename F3>
+inline TripletRepetitionResult measure_triplet_repetitions(
+    size_t repetitions,
+    F1&& fn_vec,
+    F2&& fn_scalar,
+    F3&& fn_jit
+) {
+    // Warmup pass to prime instruction caches and CPU frequency
+    fn_vec();
+    fn_scalar();
+    fn_jit();
+
+    std::vector<double> native_samples, scalar_samples, brass_samples;
+    std::vector<double> ratio_scalar_samples, ratio_vec_samples;
+    native_samples.reserve(repetitions);
+    scalar_samples.reserve(repetitions);
+    brass_samples.reserve(repetitions);
+    ratio_scalar_samples.reserve(repetitions);
+    ratio_vec_samples.reserve(repetitions);
+
+    Stopwatch sw;
+    for (size_t r = 0; r < repetitions; ++r) {
+        sw.start();
+        fn_vec();
+        double n_ms = sw.stop_ms();
+
+        sw.start();
+        fn_scalar();
+        double s_ms = sw.stop_ms();
+
+        sw.start();
+        fn_jit();
+        double j_ms = sw.stop_ms();
+
+        native_samples.push_back(n_ms);
+        scalar_samples.push_back(s_ms);
+        brass_samples.push_back(j_ms);
+
+        double r_scalar = (s_ms > 0.0) ? (j_ms / s_ms) : 1.0;
+        double r_vec = (n_ms > 0.0) ? (j_ms / n_ms) : 1.0;
+        ratio_scalar_samples.push_back(r_scalar);
+        ratio_vec_samples.push_back(r_vec);
+    }
+
+    return TripletRepetitionResult{
+        TimingStats(std::move(native_samples)),
+        TimingStats(std::move(scalar_samples)),
+        TimingStats(std::move(brass_samples)),
+        TimingStats(std::move(ratio_scalar_samples)),
+        TimingStats(std::move(ratio_vec_samples))
+    };
+}
+
+inline BenchmarkResult make_paired_result(
+    const std::string& key,
+    const std::string& name,
+    size_t iterations,
+    const PairedRepetitionResult& paired,
+    double target_ratio,
+    const std::string& notes = ""
+) {
+    BenchmarkResult r;
+    r.key = key;
+    r.name = name;
+    r.iterations = iterations;
+    r.repetitions = paired.ratio_stats.samples.size();
+    r.native_ms = paired.native_stats.median;
+    r.native_min_ms = paired.native_stats.min;
+    r.native_max_ms = paired.native_stats.max;
+    r.native_scalar_ms = 0.0;
+    r.brass_ms = paired.brass_stats.median;
+    r.brass_min_ms = paired.brass_stats.min;
+    r.brass_max_ms = paired.brass_stats.max;
+    r.ratio = paired.ratio_stats.median;
+    r.ratio_min = paired.ratio_stats.min;
+    r.ratio_max = paired.ratio_stats.max;
+    r.ratio_vec = 0.0;
+    r.target_ratio = target_ratio;
+    r.passes_bar = (target_ratio > 0.0) ? (r.ratio <= target_ratio) : true;
+    if (!notes.empty()) {
+        r.notes = notes;
+    } else if (target_ratio > 0.0) {
+        std::ostringstream oss;
+        oss << "<= " << std::fixed << std::setprecision(2) << target_ratio << "x baseline";
+        r.notes = oss.str();
+    }
+    return r;
+}
+
+inline BenchmarkResult make_triplet_result(
+    const std::string& key,
+    const std::string& name,
+    size_t iterations,
+    const TripletRepetitionResult& triplet,
+    double target_ratio,
+    const std::string& notes = ""
+) {
+    BenchmarkResult r;
+    r.key = key;
+    r.name = name;
+    r.iterations = iterations;
+    r.repetitions = triplet.ratio_scalar_stats.samples.size();
+    r.native_ms = triplet.native_stats.median;
+    r.native_min_ms = triplet.native_stats.min;
+    r.native_max_ms = triplet.native_stats.max;
+    r.native_scalar_ms = triplet.scalar_stats.median;
+    r.native_scalar_min_ms = triplet.scalar_stats.min;
+    r.native_scalar_max_ms = triplet.scalar_stats.max;
+    r.brass_ms = triplet.brass_stats.median;
+    r.brass_min_ms = triplet.brass_stats.min;
+    r.brass_max_ms = triplet.brass_stats.max;
+    r.ratio = triplet.ratio_scalar_stats.median;
+    r.ratio_min = triplet.ratio_scalar_stats.min;
+    r.ratio_max = triplet.ratio_scalar_stats.max;
+    r.ratio_vec = triplet.ratio_vec_stats.median;
+    r.ratio_vec_min = triplet.ratio_vec_stats.min;
+    r.ratio_vec_max = triplet.ratio_vec_stats.max;
+    r.target_ratio = target_ratio;
+    r.passes_bar = (target_ratio > 0.0) ? (r.ratio <= target_ratio) : true;
+    if (!notes.empty()) {
+        r.notes = notes;
+    } else {
+        std::ostringstream oss;
+        oss << "<= " << std::fixed << std::setprecision(2) << target_ratio << "x scalar (vec: "
+            << std::fixed << std::setprecision(2) << r.ratio_vec << "x)";
+        r.notes = oss.str();
+    }
+    return r;
+}
 
 // ============================================================================
 // Performance Ratchet Manager
@@ -297,21 +532,34 @@ public:
         bool all_passed = true;
         for (const auto& res : results) {
             if (res.key.empty()) continue;
-            double golden = get_ratio(res.key, 1.30);
-            double max_allowed = golden * max_regression_factor;
-            if (res.ratio > max_allowed) {
-                all_passed = false;
-                std::ostringstream oss;
-                if (res.key == "compile_speed") {
+            if (res.key == "gc_model_speedup") {
+                double golden = get_ratio(res.key, 1.25);
+                double min_allowed = golden * (2.0 - max_regression_factor);
+                if (res.ratio < min_allowed) {
+                    all_passed = false;
+                    std::ostringstream oss;
                     oss << "Benchmark '" << res.name << "' (key: " << res.key << "): measured "
-                        << std::fixed << std::setprecision(2) << res.ratio << " ms exceeds ratchet "
-                        << golden << " ms * " << max_regression_factor << " (" << max_allowed << " ms)";
-                } else {
-                    oss << "Benchmark '" << res.name << "' (key: " << res.key << "): measured "
-                        << std::fixed << std::setprecision(2) << res.ratio << "x exceeds ratchet "
-                        << golden << "x * " << max_regression_factor << " (" << max_allowed << "x)";
+                        << std::fixed << std::setprecision(2) << res.ratio << "x is below ratchet speedup "
+                        << min_allowed << "x";
+                    out_failures.push_back(oss.str());
                 }
-                out_failures.push_back(oss.str());
+            } else {
+                double golden = get_ratio(res.key, 1.30);
+                double max_allowed = golden * max_regression_factor;
+                if (res.ratio > max_allowed) {
+                    all_passed = false;
+                    std::ostringstream oss;
+                    if (res.key == "compile_speed") {
+                        oss << "Benchmark '" << res.name << "' (key: " << res.key << "): measured "
+                            << std::fixed << std::setprecision(2) << res.ratio << " ms exceeds ratchet "
+                            << golden << " ms * " << max_regression_factor << " (" << max_allowed << " ms)";
+                    } else {
+                        oss << "Benchmark '" << res.name << "' (key: " << res.key << "): measured "
+                            << std::fixed << std::setprecision(2) << res.ratio << "x exceeds ratchet "
+                            << golden << "x * " << max_regression_factor << " (" << max_allowed << "x)";
+                    }
+                    out_failures.push_back(oss.str());
+                }
             }
         }
         return all_passed;
@@ -323,6 +571,10 @@ public:
             auto it = ratios_.find(res.key);
             if (it == ratios_.end()) {
                 ratios_[res.key] = res.ratio;
+            } else if (res.key == "gc_model_speedup") {
+                if (!only_if_improved || res.ratio > it->second) {
+                    it->second = res.ratio;
+                }
             } else if (!only_if_improved || res.ratio < it->second) {
                 it->second = res.ratio;
             }
@@ -334,7 +586,7 @@ private:
 };
 
 // ============================================================================
-// Benchmark Reporter with Run Provenance & Honest Status Derivation
+// Reporter
 // ============================================================================
 
 class BenchmarkReporter {
@@ -379,33 +631,44 @@ public:
         compiler_info = "Unknown C++ Compiler";
 #endif
 
-        std::cout << "\n========================================================================================================================\n";
+        std::cout << "\n==================================================================================================================================\n";
         std::cout << "  BRASS PERFORMANCE BENCHMARK SUITE: " << title << "\n";
-        std::cout << "========================================================================================================================\n";
+        std::cout << "==================================================================================================================================\n";
         std::cout << "  Run Provenance:\n";
         std::cout << "  - Timestamp:    " << time_str << "\n";
         std::cout << "  - Git Commit:   " << git_sha << "\n";
         std::cout << "  - Build Type:   " << build_type << "\n";
         std::cout << "  - Compiler:     " << compiler_info << "\n";
-        std::cout << "========================================================================================================================\n";
+        std::cout << "==================================================================================================================================\n";
         std::cout << std::left
                   << std::setw(34) << "Benchmark"
                   << std::setw(11) << "Iterations"
-                  << std::setw(14) << "Native -O3"
-                  << std::setw(14) << "Scalar -O3"
-                  << std::setw(13) << "Brass (ms)"
-                  << std::setw(11) << "vs Scalar"
-                  << std::setw(10) << "vs -O3"
+                  << std::setw(12) << "Native -O3"
+                  << std::setw(12) << "Scalar -O3"
+                  << std::setw(12) << "Brass (ms)"
+                  << std::setw(22) << "vs Scalar"
+                  << std::setw(22) << "vs -O3"
                   << std::setw(9)  << "Status"
                   << "\n";
-        std::cout << "------------------------------------------------------------------------------------------------------------------------\n";
+        std::cout << "----------------------------------------------------------------------------------------------------------------------------------\n";
     }
 
     static void print_row(const BenchmarkResult& res) {
         std::ostringstream s_ratio, s_vec;
-        s_ratio << std::fixed << std::setprecision(2) << res.ratio << "x";
+        if (res.ratio > 0.0) {
+            s_ratio << std::fixed << std::setprecision(2) << res.ratio << "x";
+            if (res.ratio_min > 0.0 && res.ratio_max > 0.0) {
+                s_ratio << " [" << res.ratio_min << "-" << res.ratio_max << "x]";
+            }
+        } else {
+            s_ratio << "-";
+        }
+
         if (res.ratio_vec > 0.0) {
             s_vec << std::fixed << std::setprecision(2) << res.ratio_vec << "x";
+            if (res.ratio_vec_min > 0.0 && res.ratio_vec_max > 0.0) {
+                s_vec << " [" << res.ratio_vec_min << "-" << res.ratio_vec_max << "x]";
+            }
         } else {
             s_vec << "-";
         }
@@ -417,17 +680,23 @@ public:
         std::cout << std::left
                   << std::setw(34) << res.name
                   << std::setw(11) << res.iterations
-                  << std::fixed << std::setprecision(2)
-                  << std::setw(14) << res.native_ms;
-        if (res.native_scalar_ms > 0.0) {
-            std::cout << std::setw(14) << res.native_scalar_ms;
+                  << std::fixed << std::setprecision(2);
+        if (res.native_ms > 0.0) {
+            std::cout << std::setw(12) << res.native_ms;
         } else {
-            std::cout << std::setw(14) << "-";
+            std::cout << std::setw(12) << "-";
         }
-        std::cout << std::setw(13) << res.brass_ms
-                  << std::setw(11) << s_ratio.str()
-                  << std::setw(10) << s_vec.str()
+
+        if (res.native_scalar_ms > 0.0) {
+            std::cout << std::setw(12) << res.native_scalar_ms;
+        } else {
+            std::cout << std::setw(12) << "-";
+        }
+        std::cout << std::setw(12) << res.brass_ms
+                  << std::setw(22) << s_ratio.str()
+                  << std::setw(22) << s_vec.str()
                   << std::setw(9)  << status_str;
+
         if (!res.notes.empty()) {
             std::cout << " (" << res.notes << ")";
         }
@@ -435,62 +704,93 @@ public:
     }
 
     static void print_ratchet_summary(const std::vector<BenchmarkResult>& results, const RatchetManager& rm, double regression_factor = 1.10) {
-        std::cout << "\n========================================================================================================================\n";
-        std::cout << "  PERFORMANCE RATCHET VERIFICATION (Regression Margin: " << std::fixed << std::setprecision(0) << ((regression_factor - 1.0) * 100.0) << "%)\n";
-        std::cout << "========================================================================================================================\n";
+        std::cout << "\n==================================================================================================================================\n";
+        std::cout << "  PERFORMANCE RATCHET VERIFICATION (Regression Margin: " << static_cast<int>((regression_factor - 1.0) * 100.0 + 0.5) << "%)\n";
+        std::cout << "==================================================================================================================================\n";
         std::cout << std::left
-                  << std::setw(24) << "Key"
+                  << std::setw(28) << "Key"
                   << std::setw(34) << "Benchmark"
                   << std::setw(16) << "Golden Ratchet"
                   << std::setw(16) << "Max Allowed"
-                  << std::setw(16) << "Measured Ratio"
+                  << std::setw(26) << "Measured Ratio"
                   << std::setw(10) << "Status"
                   << "\n";
-        std::cout << "------------------------------------------------------------------------------------------------------------------------\n";
+        std::cout << "----------------------------------------------------------------------------------------------------------------------------------\n";
+
         for (const auto& res : results) {
             if (res.key.empty()) continue;
-            double golden = rm.get_ratio(res.key, 1.30);
-            double max_allowed = golden * regression_factor;
-            bool pass = (res.ratio <= max_allowed);
-            std::string status_str = is_debug_build() ? "[INFO]" : (pass ? "[PASS]" : "[FAIL]");
-
             std::ostringstream s_golden, s_max, s_measured;
-            if (res.key == "compile_speed") {
+            std::string status_str;
+
+            if (res.key == "gc_model_speedup") {
+                double golden = rm.get_ratio(res.key, 1.25);
+                double min_allowed = golden * (2.0 - regression_factor);
+                bool pass = (res.ratio >= min_allowed);
+                status_str = is_debug_build() ? "[INFO]" : (pass ? "[PASS]" : "[FAIL]");
+                s_golden << std::fixed << std::setprecision(2) << golden << "x (min)";
+                s_max << std::fixed << std::setprecision(2) << min_allowed << "x (min)";
+                s_measured << std::fixed << std::setprecision(2) << res.ratio << "x";
+                if (res.ratio_min > 0.0 && res.ratio_max > 0.0) {
+                    s_measured << " [" << res.ratio_min << "-" << res.ratio_max << "x]";
+                }
+            } else if (res.key == "compile_speed") {
+                double golden = rm.get_ratio(res.key, 1000.00);
+                double max_allowed = golden * regression_factor;
+                bool pass = (res.ratio <= max_allowed);
+                status_str = is_debug_build() ? "[INFO]" : (pass ? "[PASS]" : "[FAIL]");
                 s_golden << std::fixed << std::setprecision(2) << golden << " ms";
                 s_max << std::fixed << std::setprecision(2) << max_allowed << " ms";
                 s_measured << std::fixed << std::setprecision(2) << res.ratio << " ms";
+                if (res.ratio_min > 0.0 && res.ratio_max > 0.0) {
+                    s_measured << " [" << res.ratio_min << "-" << res.ratio_max << " ms]";
+                }
             } else {
+                double golden = rm.get_ratio(res.key, 1.30);
+                double max_allowed = golden * regression_factor;
+                bool pass = (res.ratio <= max_allowed);
+                status_str = is_debug_build() ? "[INFO]" : (pass ? "[PASS]" : "[FAIL]");
                 s_golden << std::fixed << std::setprecision(2) << golden << "x";
                 s_max << std::fixed << std::setprecision(2) << max_allowed << "x";
                 s_measured << std::fixed << std::setprecision(2) << res.ratio << "x";
+                if (res.ratio_min > 0.0 && res.ratio_max > 0.0) {
+                    s_measured << " [" << res.ratio_min << "-" << res.ratio_max << "x]";
+                }
             }
 
             std::cout << std::left
-                      << std::setw(24) << res.key
+                      << std::setw(28) << res.key
                       << std::setw(34) << res.name
                       << std::setw(16) << s_golden.str()
                       << std::setw(16) << s_max.str()
-                      << std::setw(16) << s_measured.str()
+                      << std::setw(26) << s_measured.str()
                       << std::setw(10) << status_str
                       << "\n";
         }
-        std::cout << "========================================================================================================================\n\n";
+        std::cout << "==================================================================================================================================\n\n";
     }
 
-    static void print_gc_comparison(double shadow_stack_ms, double brass_stack_map_ms, double speedup, bool passed) {
+    static void print_gc_comparison(
+        const TimingStats& shadow_stats,
+        const TimingStats& brass_stats,
+        const TimingStats& speedup_stats,
+        bool passed
+    ) {
         std::string status_str;
         if (is_debug_build()) {
-            status_str = "[INFO] Debug Build (>= 1.5x bar informational)";
+            status_str = "[INFO] Debug Build (>= 1.25x bar informational)";
         } else {
-            status_str = passed ? "[PASS] Verified >= 1.5x Speedup" : "[FAIL] Below 1.5x Bar";
+            status_str = passed ? "[PASS] Verified >= 1.25x Speedup" : "[FAIL] Below 1.25x Bar";
         }
-        std::cout << "\n------------------------------------------------------------------------------------------------------------------------\n";
-        std::cout << "  GC MODEL COMPARISON (Live GC references across subroutine calls):\n";
-        std::cout << "  - (a) Shadow-Stack Model:      " << std::fixed << std::setprecision(2) << shadow_stack_ms << " ms\n";
-        std::cout << "  - (b) Brass Stack-Map Model:   " << std::fixed << std::setprecision(2) << brass_stack_map_ms << " ms\n";
-        std::cout << "  - Speedup Ratio:               " << std::fixed << std::setprecision(2) << speedup << "x faster (Required: >= 1.5x)\n";
+        std::cout << "\n----------------------------------------------------------------------------------------------------------------------------------\n";
+        std::cout << "  GC MODEL COMPARISON (Live GC references across subroutine calls, " << speedup_stats.samples.size() << " repetitions):\n";
+        std::cout << "  - (a) Shadow-Stack Model:      " << std::fixed << std::setprecision(2) << shadow_stats.median << " ms ["
+                  << shadow_stats.min << "-" << shadow_stats.max << " ms]\n";
+        std::cout << "  - (b) Brass Stack-Map Model:   " << std::fixed << std::setprecision(2) << brass_stats.median << " ms ["
+                  << brass_stats.min << "-" << brass_stats.max << " ms]\n";
+        std::cout << "  - Speedup Ratio:               " << std::fixed << std::setprecision(2) << speedup_stats.median << "x ["
+                  << speedup_stats.min << "-" << speedup_stats.max << "x] faster (Required: >= 1.25x)\n";
         std::cout << "  - Status:                      " << status_str << "\n";
-        std::cout << "========================================================================================================================\n\n";
+        std::cout << "==================================================================================================================================\n\n";
     }
 
     static void print_compile_speed(
@@ -499,13 +799,14 @@ public:
         size_t mir_bytes,
         size_t machine_bytes,
         size_t peak_rss_bytes,
-        double parse_ms,
-        double verify_ms,
-        double codegen_ms,
-        double total_ms,
+        const TimingStats& parse_stats,
+        const TimingStats& verify_stats,
+        const TimingStats& codegen_stats,
+        const TimingStats& total_stats,
         bool deterministic,
         bool passed
     ) {
+        double total_ms = total_stats.median;
         double fn_per_sec = (total_ms > 0.0) ? (static_cast<double>(function_count) / (total_ms / 1000.0)) : 0.0;
         double kb_per_sec = (total_ms > 0.0) ? (static_cast<double>(mir_bytes) / 1024.0 / (total_ms / 1000.0)) : 0.0;
 
@@ -516,9 +817,9 @@ public:
             status_str = passed ? "[PASS] Sub-2s Target Met" : "[FAIL] Exceeded 2s Limit";
         }
 
-        std::cout << "\n========================================================================================================================\n";
-        std::cout << "  BRASS COMPILE-SPEED BENCHMARK:\n";
-        std::cout << "========================================================================================================================\n";
+        std::cout << "\n==================================================================================================================================\n";
+        std::cout << "  BRASS COMPILE-SPEED BENCHMARK (" << total_stats.samples.size() << " Repetitions):\n";
+        std::cout << "==================================================================================================================================\n";
         std::cout << "  - Functions Compiled:          " << function_count << "\n";
         std::cout << "  - MIR Instructions:            " << instruction_count << "\n";
         std::cout << "  - Textual MIR Source Size:     " << std::fixed << std::setprecision(1) << (static_cast<double>(mir_bytes) / 1024.0) << " KB ("
@@ -527,16 +828,20 @@ public:
         if (peak_rss_bytes > 0) {
             std::cout << "  - Peak Working Set (Memory):   " << std::fixed << std::setprecision(2) << (static_cast<double>(peak_rss_bytes) / 1024.0 / 1024.0) << " MB\n";
         }
-        std::cout << "  - Breakdown:\n";
-        std::cout << "      * MIR Parse:               " << std::fixed << std::setprecision(2) << parse_ms << " ms\n";
-        std::cout << "      * MIR Verification:        " << std::fixed << std::setprecision(2) << verify_ms << " ms\n";
-        std::cout << "      * ISEL, RegAlloc, Codegen: " << std::fixed << std::setprecision(2) << codegen_ms << " ms\n";
-        std::cout << "  - Total End-to-End Time:       " << std::fixed << std::setprecision(2) << total_ms << " ms (Target: < 2000.0 ms)\n";
+        std::cout << "  - Breakdown (Median [min-max]):\n";
+        std::cout << "      * MIR Parse:               " << std::fixed << std::setprecision(2) << parse_stats.median << " ms ["
+                  << parse_stats.min << "-" << parse_stats.max << " ms]\n";
+        std::cout << "      * MIR Verification:        " << std::fixed << std::setprecision(2) << verify_stats.median << " ms ["
+                  << verify_stats.min << "-" << verify_stats.max << " ms]\n";
+        std::cout << "      * ISEL, RegAlloc, Codegen: " << std::fixed << std::setprecision(2) << codegen_stats.median << " ms ["
+                  << codegen_stats.min << "-" << codegen_stats.max << " ms]\n";
+        std::cout << "  - Total End-to-End Time:       " << std::fixed << std::setprecision(2) << total_stats.median << " ms ["
+                  << total_stats.min << "-" << total_stats.max << " ms] (Target: < 2000.0 ms)\n";
         std::cout << "  - Determinism Verification:    " << (deterministic ? "[PASS] Verified 100% Byte-for-Byte Deterministic" : "[FAIL] Determinism mismatch") << "\n";
         std::cout << "  - Throughput:                  " << std::fixed << std::setprecision(0) << fn_per_sec << " functions/sec | "
                   << std::fixed << std::setprecision(1) << kb_per_sec << " KB/sec\n";
         std::cout << "  - Status:                      " << status_str << "\n";
-        std::cout << "========================================================================================================================\n\n";
+        std::cout << "==================================================================================================================================\n\n";
     }
 };
 
