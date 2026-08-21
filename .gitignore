@@ -25,4 +25,7 @@ Desktop.ini
 # Test outputs and temporary files
 *.tmp
 *.log
+*.obj
+*.lib
+*.exp
 scratch/
