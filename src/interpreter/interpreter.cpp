@@ -186,9 +186,17 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
         }
     } guard{current_frame_, prev_frame, call_depth_};
 
-    // Bind block arguments to entry block parameters
+    // Bind block arguments to start block parameters
     for (size_t i = 0; i < start_block->param_count() && i < block_args.size(); ++i) {
         frame.set_value(start_block->param(i), block_args[i]);
+    }
+
+    // Also bind to entry block parameters if starting at an interior resume block
+    if (start_block != fn.entry_block() && fn.entry_block()) {
+        const auto* entry = fn.entry_block();
+        for (size_t i = 0; i < entry->param_count() && i < block_args.size(); ++i) {
+            frame.set_value(entry->param(i), block_args[i]);
+        }
     }
 
     BasicBlock* cur_bb = start_block;

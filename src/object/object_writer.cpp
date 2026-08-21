@@ -154,6 +154,17 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
         cfi.stack_map.code_offset = static_cast<uint32_t>(fn_offset);
         cfi.stack_map.code_size = static_cast<uint32_t>(fn_size);
         obj.stack_maps.add_function(cfi.stack_map);
+
+        cfi.resume_table = std::move(res.resume_table);
+        obj.resume_tables.register_table(cfi.name, cfi.resume_table);
+
+        for (const auto& ps : res.patch_sites) {
+            runtime::PatchSite global_ps = ps;
+            global_ps.code_offset += fn_offset;
+            obj.patch_sites.register_site(global_ps);
+            cfi.patch_sites.push_back(std::move(global_ps));
+        }
+
         obj.functions.push_back(std::move(cfi));
 
         int32_t text_idx = obj.get_section_index(".text");

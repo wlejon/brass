@@ -72,9 +72,30 @@ public:
     const ModuleStackMap& stack_maps() const noexcept { return stack_maps_; }
     ModuleStackMap& stack_maps() noexcept { return stack_maps_; }
 
+    // Resume tables & interior resume points
+    const runtime::ResumeTableRegistry& resume_tables() const noexcept { return resume_tables_; }
+    const runtime::FunctionResumeTable* get_resume_table(std::string_view fn_name) const noexcept;
+    void* get_resume_target_address(std::string_view fn_name, uint32_t resume_id) const;
+
+    // Runtime patching API
+    const runtime::PatchRegistry& patch_sites() const noexcept { return patch_sites_; }
+    runtime::PatchRegistry& patch_sites() noexcept { return patch_sites_; }
+    bool patch_const32(std::string_view site_name, int32_t new_val);
+    bool patch_const64(std::string_view site_name, int64_t new_val);
+    bool patch_call(std::string_view site_name, const void* new_target);
+    bool patch_call(std::string_view site_name, std::string_view new_target_fn);
+    bool patch_call(std::string_view site_name, const char* new_target_fn) {
+        return patch_call(site_name, std::string_view(new_target_fn));
+    }
+    bool patch_call(std::string_view site_name, const std::string& new_target_fn) {
+        return patch_call(site_name, std::string_view(new_target_fn));
+    }
+
     // Dynamic invocation helper using RuntimeValue
     RuntimeValue invoke(std::string_view name, const std::vector<RuntimeValue>& args);
     RuntimeValue invoke(std::string_view name);
+    RuntimeValue resume(std::string_view name, uint32_t resume_id);
+    RuntimeValue resume(std::string_view name, uint32_t resume_id, const std::vector<RuntimeValue>& args);
 
 private:
     Target target_;
@@ -84,6 +105,9 @@ private:
     std::unordered_map<std::string, void*> external_symbols_;
     std::unordered_map<std::string, std::pair<Type, std::vector<Type>>> function_signatures_;
     ModuleStackMap stack_maps_;
+    runtime::ResumeTableRegistry resume_tables_;
+    runtime::PatchRegistry patch_sites_;
+    uint8_t* text_section_base_ = nullptr;
 
     // Windows SEH registration tracking
     void* pdata_table_ = nullptr;

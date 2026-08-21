@@ -64,6 +64,19 @@ std::unique_ptr<LirFunction> X64ISel::lower(const Function& mir_fn) {
         }
     }
 
+    // 6. Record resume table entries and connect CFG edges for resume targets
+    auto* lir_entry = lir_fn_->entry_block();
+    for (const auto& rp : mir_fn.resume_points()) {
+        if (rp.second) {
+            lir_fn_->resume_entries.push_back({rp.first, rp.second->id()});
+            auto* target_lir = lir_fn_->get_block_by_id(rp.second->id());
+            if (lir_entry && target_lir) {
+                lir_entry->successors.push_back(target_lir);
+                target_lir->predecessors.push_back(lir_entry);
+            }
+        }
+    }
+
     return lir;
 }
 
@@ -174,6 +187,25 @@ void X64ISel::lower_entry_parameters(const Function& mir_fn) {
                     inst->add_use(LirOperand::mem(PReg::gpr(GPR::RBP), disp, sz));
                     lir_entry->append_inst(std::move(inst));
                 }
+            }
+        }
+    }
+
+    // Emit resume point prologue dispatcher after parameters have been saved
+    if (!mir_fn.resume_points().empty() && entry->param_count() > 0) {
+        const auto* param0 = entry->param(0);
+        VReg param0_vreg = get_vreg(param0);
+        for (const auto& rp : mir_fn.resume_points()) {
+            if (rp.second) {
+                auto cmp_inst = std::make_unique<LirInst>(LirOpcode::Cmp32);
+                cmp_inst->add_use(LirOperand::vreg(param0_vreg, 4));
+                cmp_inst->add_use(LirOperand::imm(static_cast<int32_t>(rp.first), 4));
+                lir_entry->append_inst(std::move(cmp_inst));
+
+                auto jcc_inst = std::make_unique<LirInst>(LirOpcode::Jcc);
+                jcc_inst->condition = Condition::E;
+                jcc_inst->add_use(LirOperand::label(rp.second->id()));
+                lir_entry->append_inst(std::move(jcc_inst));
             }
         }
     }
@@ -293,6 +325,12 @@ void X64ISel::lower_call(const Instruction& inst, LirBlock& lir_bb) {
 
     if (inst.opcode() == Opcode::call_indirect) {
         call_lir->add_use(LirOperand::vreg(callee_vreg, 8));
+    } else if (inst.opcode() == Opcode::patchable_call) {
+        call_lir->is_patchable = true;
+        call_lir->patch_symbol = std::string(inst.symbol());
+        std::string callee_name = inst.extra_symbol().empty() ? std::string(inst.symbol()) : std::string(inst.extra_symbol());
+        call_lir->callee_symbol = callee_name;
+        call_lir->add_use(LirOperand::symbol(callee_name));
     } else {
         call_lir->add_use(LirOperand::symbol(std::string(inst.symbol())));
     }
@@ -549,6 +587,7 @@ void X64ISel::lower_guard(const Instruction& inst, LirBlock& lir_bb) {
 
     auto exit_inst = std::make_unique<LirInst>(LirOpcode::GuardExit);
     exit_inst->resume_id = inst.resume_id();
+    exit_inst->exit_symbol = std::string(inst.symbol());
     for (const auto* state_val : inst.state_map()) {
         VReg sv = get_vreg(state_val);
         if (sv.is_valid()) {

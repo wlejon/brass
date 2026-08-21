@@ -10,6 +10,10 @@
 #include <cstddef>
 #include <cstdint>
 
+#include <brass/runtime/resume_table.hpp>
+#include <brass/runtime/patcher.hpp>
+#include <brass/runtime/deopt.hpp>
+
 namespace brass::codegen {
 
 struct SafepointRecord {
@@ -25,6 +29,8 @@ struct CompilationResult {
     FunctionStackMap stack_map;
     size_t entry_offset = 0;
     std::unordered_map<uint32_t, size_t> block_offsets;
+    runtime::FunctionResumeTable resume_table;
+    std::vector<runtime::PatchSite> patch_sites;
 };
 
 class EmitContext {
@@ -41,6 +47,7 @@ private:
     std::vector<SafepointRecord> safepoints_;
     std::vector<StackMapRecord> stack_map_records_;
     std::unordered_map<uint32_t, x64::Label> block_labels_;
+    std::vector<runtime::PatchSite> patch_sites_;
 
     x64::MemAddress to_mem_address(const LirOperand& op) const;
     x64::GPR to_gpr(const LirOperand& op) const;

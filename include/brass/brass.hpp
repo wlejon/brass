@@ -37,6 +37,10 @@
 #include <brass/object/coff_writer.hpp>
 #include <brass/object/elf_writer.hpp>
 
+#include <brass/runtime/deopt.hpp>
+#include <brass/runtime/resume_table.hpp>
+#include <brass/runtime/patcher.hpp>
+
 #include <string_view>
 
 namespace brass {

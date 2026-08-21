@@ -128,6 +128,9 @@ struct Section {
     }
 };
 
+#include <brass/runtime/resume_table.hpp>
+#include <brass/runtime/patcher.hpp>
+
 struct CompiledFunctionInfo {
     std::string name;
     size_t text_offset = 0;
@@ -137,6 +140,8 @@ struct CompiledFunctionInfo {
     CallingConvention cc;
     std::vector<codegen::SafepointRecord> safepoints;
     FunctionStackMap stack_map;
+    runtime::FunctionResumeTable resume_table;
+    std::vector<runtime::PatchSite> patch_sites;
 };
 
 struct ObjectFile {
@@ -145,6 +150,8 @@ struct ObjectFile {
     std::vector<ObjectSymbol> symbols;
     std::vector<CompiledFunctionInfo> functions;
     ModuleStackMap stack_maps;
+    runtime::ResumeTableRegistry resume_tables;
+    runtime::PatchRegistry patch_sites;
 
     Section* get_section(std::string_view name);
     const Section* get_section(std::string_view name) const;

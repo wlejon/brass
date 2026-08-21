@@ -26,9 +26,7 @@ void X64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
             }
             break;
         }
-        case Opcode::iconst_i64:
-        case Opcode::patchable_const_i32:
-        case Opcode::patchable_const_i64: {
+        case Opcode::iconst_i64: {
             VReg dst = get_vreg(inst.result());
             int64_t val = inst.imm_i64();
             uint8_t sz = dst.size;
@@ -60,6 +58,30 @@ void X64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
                     lir_bb.append_inst(std::move(lir_inst));
                 }
             }
+            break;
+        }
+        case Opcode::patchable_const_i32: {
+            VReg dst = get_vreg(inst.result());
+            int32_t val = inst.imm_i32();
+            auto lir_inst = std::make_unique<LirInst>(LirOpcode::Mov32);
+            lir_inst->is_patchable = true;
+            lir_inst->patch_symbol = std::string(inst.symbol());
+            lir_inst->add_def(LirOperand::vreg(dst, 4));
+            lir_inst->add_use(LirOperand::imm(val, 4));
+            lir_inst->mir_origin = &inst;
+            lir_bb.append_inst(std::move(lir_inst));
+            break;
+        }
+        case Opcode::patchable_const_i64: {
+            VReg dst = get_vreg(inst.result());
+            int64_t val = inst.imm_i64();
+            auto lir_inst = std::make_unique<LirInst>(LirOpcode::Movabs);
+            lir_inst->is_patchable = true;
+            lir_inst->patch_symbol = std::string(inst.symbol());
+            lir_inst->add_def(LirOperand::vreg(dst, 8));
+            lir_inst->add_use(LirOperand::imm(val, 8));
+            lir_inst->mir_origin = &inst;
+            lir_bb.append_inst(std::move(lir_inst));
             break;
         }
         case Opcode::fconst_f64: {

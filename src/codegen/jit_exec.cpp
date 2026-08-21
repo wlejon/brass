@@ -2,6 +2,9 @@
 #include <brass/object/coff_writer.hpp>
 #include <brass/object/elf_writer.hpp>
 #include <brass/gc/runtime_gc.hpp>
+#include <brass/runtime/deopt.hpp>
+#include <brass/runtime/resume_table.hpp>
+#include <brass/runtime/patcher.hpp>
 #include <stdexcept>
 #include <cstring>
 #include <iostream>
@@ -98,6 +101,12 @@ JitExecutionEngine::JitExecutionEngine(const Target& target)
     register_external_symbol("brass_gc_safepoint", reinterpret_cast<void*>(&brass_gc_safepoint));
     register_external_symbol("brass_gc_collect", reinterpret_cast<void*>(&brass_gc_collect));
     register_external_symbol("brass_runtime_gc_safepoint", reinterpret_cast<void*>(&brass_gc_safepoint));
+    register_external_symbol("brass_deopt_exit", reinterpret_cast<void*>(&brass_deopt_exit));
+    register_external_symbol("brass_get_thread_deopt_frame", reinterpret_cast<void*>(&brass_get_thread_deopt_frame));
+    register_external_symbol("brass_set_thread_deopt_frame", reinterpret_cast<void*>(&brass_set_thread_deopt_frame));
+    register_external_symbol("brass_patch_const32", reinterpret_cast<void*>(&brass_patch_const32));
+    register_external_symbol("brass_patch_const64", reinterpret_cast<void*>(&brass_patch_const64));
+    register_external_symbol("brass_patch_call", reinterpret_cast<void*>(&brass_patch_call));
 }
 
 JitExecutionEngine::JitExecutionEngine()
@@ -106,6 +115,12 @@ JitExecutionEngine::JitExecutionEngine()
     register_external_symbol("brass_gc_safepoint", reinterpret_cast<void*>(&brass_gc_safepoint));
     register_external_symbol("brass_gc_collect", reinterpret_cast<void*>(&brass_gc_collect));
     register_external_symbol("brass_runtime_gc_safepoint", reinterpret_cast<void*>(&brass_gc_safepoint));
+    register_external_symbol("brass_deopt_exit", reinterpret_cast<void*>(&brass_deopt_exit));
+    register_external_symbol("brass_get_thread_deopt_frame", reinterpret_cast<void*>(&brass_get_thread_deopt_frame));
+    register_external_symbol("brass_set_thread_deopt_frame", reinterpret_cast<void*>(&brass_set_thread_deopt_frame));
+    register_external_symbol("brass_patch_const32", reinterpret_cast<void*>(&brass_patch_const32));
+    register_external_symbol("brass_patch_const64", reinterpret_cast<void*>(&brass_patch_const64));
+    register_external_symbol("brass_patch_call", reinterpret_cast<void*>(&brass_patch_call));
 }
 
 JitExecutionEngine::~JitExecutionEngine() {
@@ -326,14 +341,21 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj) {
     stack_maps_ = working_obj.stack_maps;
     int32_t text_idx = working_obj.get_section_index(".text");
     if (text_idx >= 0) {
-        uintptr_t text_base = reinterpret_cast<uintptr_t>(base_ptr + sec_offsets[text_idx]);
+        text_section_base_ = base_ptr + sec_offsets[text_idx];
+        uintptr_t text_base = reinterpret_cast<uintptr_t>(text_section_base_);
         stack_maps_.relocate(text_base);
         for (const auto& fn : working_obj.functions) {
             uintptr_t fn_addr = reinterpret_cast<uintptr_t>(base_ptr + sec_offsets[text_idx] + fn.text_offset);
             stack_maps_.register_function_address(fn.name, fn_addr, static_cast<uint32_t>(fn.text_size));
         }
+    } else {
+        text_section_base_ = base_ptr;
     }
     brass_set_active_stack_maps(&stack_maps_);
+
+    // Register Resume Tables and Patch Sites
+    resume_tables_ = working_obj.resume_tables;
+    patch_sites_ = working_obj.patch_sites;
 
     code_mem_.make_executable();
     return true;
@@ -523,6 +545,54 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
         double r = fn_f8(f0, f1, f2, f3, f4, f5, f6, f7);
         return RuntimeValue::from_f64(r);
     }
+}
+
+const runtime::FunctionResumeTable* JitExecutionEngine::get_resume_table(std::string_view fn_name) const noexcept {
+    return resume_tables_.get_table(fn_name);
+}
+
+void* JitExecutionEngine::get_resume_target_address(std::string_view fn_name, uint32_t resume_id) const {
+    void* fn_addr = get_symbol_address(fn_name);
+    if (!fn_addr) return nullptr;
+    const auto* table = get_resume_table(fn_name);
+    if (!table) return nullptr;
+    return table->get_target_address(fn_addr, resume_id);
+}
+
+bool JitExecutionEngine::patch_const32(std::string_view site_name, int32_t new_val) {
+    if (!text_section_base_) return false;
+    return patch_sites_.patch_const32(text_section_base_, site_name, new_val);
+}
+
+bool JitExecutionEngine::patch_const64(std::string_view site_name, int64_t new_val) {
+    if (!text_section_base_) return false;
+    return patch_sites_.patch_const64(text_section_base_, site_name, new_val);
+}
+
+bool JitExecutionEngine::patch_call(std::string_view site_name, const void* new_target) {
+    if (!text_section_base_) return false;
+    return patch_sites_.patch_call(text_section_base_, site_name, new_target);
+}
+
+bool JitExecutionEngine::patch_call(std::string_view site_name, std::string_view new_target_fn) {
+    void* target_addr = get_symbol_address(new_target_fn);
+    if (!target_addr) return false;
+    return patch_call(site_name, target_addr);
+}
+
+RuntimeValue JitExecutionEngine::resume(std::string_view name, uint32_t resume_id) {
+    std::vector<RuntimeValue> empty_args;
+    return resume(name, resume_id, empty_args);
+}
+
+RuntimeValue JitExecutionEngine::resume(std::string_view name, uint32_t resume_id, const std::vector<RuntimeValue>& args) {
+    std::vector<RuntimeValue> full_args;
+    full_args.reserve(args.size() + 1);
+    full_args.push_back(RuntimeValue::from_i32(static_cast<int32_t>(resume_id)));
+    for (const auto& a : args) {
+        full_args.push_back(a);
+    }
+    return invoke(name, full_args);
 }
 
 } // namespace brass::codegen

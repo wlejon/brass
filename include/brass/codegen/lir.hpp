@@ -271,6 +271,11 @@ public:
     const Instruction* mir_origin = nullptr;
     uint32_t safepoint_id = 0;
     uint32_t resume_id = 0;
+    uint32_t deopt_reason = 0;
+    std::string exit_symbol;
+    bool is_patchable = false;
+    std::string patch_symbol;
+    std::string callee_symbol;
     std::vector<VReg> live_gcrefs;
 
     LirInst() = default;
@@ -338,6 +343,7 @@ public:
     std::vector<std::unique_ptr<LirBlock>> blocks;
     std::vector<VRegInfo> vreg_table;
     FrameInfo frame;
+    std::vector<std::pair<uint32_t, uint32_t>> resume_entries;
 
     LirFunction() = default;
 

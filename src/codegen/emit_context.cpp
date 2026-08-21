@@ -81,6 +81,18 @@ CompilationResult EmitContext::compile() {
     result.stack_map.records = std::move(stack_map_records_);
     result.entry_offset = 0;
 
+    // 5. Build resume table
+    for (const auto& rp : fn_.resume_entries) {
+        auto it = result.block_offsets.find(rp.second);
+        if (it != result.block_offsets.end()) {
+            std::string block_name;
+            auto* blk = fn_.get_block_by_id(rp.second);
+            if (blk) block_name = blk->name;
+            result.resume_table.add_entry(rp.first, it->second, block_name);
+        }
+    }
+    result.patch_sites = std::move(patch_sites_);
+
     return result;
 }
 
@@ -122,6 +134,26 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
             const auto& dst = inst.defs[0];
             const auto& src = inst.uses[0];
 
+            if (inst.is_patchable && dst.is_preg() && src.is_imm_int()) {
+                GPR dst_gpr = dst.preg_val.as_gpr();
+                size_t imm_off = (static_cast<uint8_t>(dst_gpr) >= 8) ? 2 : 1;
+                size_t pad = runtime::compute_cache_line_padding(buffer_.size(), imm_off, 4);
+                if (pad > 0) {
+                    buffer_.emit_nops(pad);
+                }
+                size_t site_start = buffer_.size();
+                enc_.mov32(dst_gpr, static_cast<uint32_t>(src.imm_int));
+                patch_sites_.emplace_back(
+                    inst.patch_symbol,
+                    runtime::PatchKind::Const32,
+                    site_start,
+                    imm_off,
+                    buffer_.size() - site_start,
+                    src.imm_int
+                );
+                break;
+            }
+
             if (dst.is_preg()) {
                 GPR dst_gpr = dst.preg_val.as_gpr();
                 if (src.is_preg()) {
@@ -146,7 +178,25 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
         }
         case LirOpcode::Movabs: {
             GPR dst_gpr = inst.defs[0].preg_val.as_gpr();
-            enc_.movabs(dst_gpr, static_cast<uint64_t>(inst.uses[0].imm_int));
+            if (inst.is_patchable) {
+                size_t imm_off = 2;
+                size_t pad = runtime::compute_cache_line_padding(buffer_.size(), imm_off, 8);
+                if (pad > 0) {
+                    buffer_.emit_nops(pad);
+                }
+                size_t site_start = buffer_.size();
+                enc_.movabs(dst_gpr, static_cast<uint64_t>(inst.uses[0].imm_int));
+                patch_sites_.emplace_back(
+                    inst.patch_symbol,
+                    runtime::PatchKind::Const64,
+                    site_start,
+                    imm_off,
+                    buffer_.size() - site_start,
+                    inst.uses[0].imm_int
+                );
+            } else {
+                enc_.movabs(dst_gpr, static_cast<uint64_t>(inst.uses[0].imm_int));
+            }
             break;
         }
         case LirOpcode::Movsxd: {
@@ -659,7 +709,27 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
         }
         case LirOpcode::Call: {
             const auto& sym_op = inst.uses.back();
-            enc_.call(sym_op.symbol_name);
+            std::string callee = inst.callee_symbol.empty() ? sym_op.symbol_name : inst.callee_symbol;
+            if (inst.is_patchable) {
+                size_t imm_off = 1;
+                size_t pad = runtime::compute_cache_line_padding(buffer_.size(), imm_off, 4);
+                if (pad > 0) {
+                    buffer_.emit_nops(pad);
+                }
+                size_t site_start = buffer_.size();
+                enc_.call(callee);
+                patch_sites_.emplace_back(
+                    inst.patch_symbol,
+                    runtime::PatchKind::Call,
+                    site_start,
+                    imm_off,
+                    buffer_.size() - site_start,
+                    0,
+                    callee
+                );
+            } else {
+                enc_.call(callee);
+            }
             size_t return_offset = buffer_.size();
 
             codegen::FrameInfo mutable_frame = fn_.frame;
@@ -756,9 +826,112 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
             stack_map_records_.push_back(std::move(map_rec));
             break;
         }
-        case LirOpcode::GuardExit:
-            enc_.ud2();
+        case LirOpcode::GuardExit: {
+            size_t num_uses = inst.uses.size();
+            size_t slots_bytes = num_uses * 8;
+            size_t shadow_space = (fn_.calling_conv.kind() == CallingConvKind::Win64 ? 32 : 0);
+            size_t total_alloc = ((slots_bytes + shadow_space + 15) & ~size_t(15));
+            if (total_alloc < 32 && fn_.calling_conv.kind() == CallingConvKind::Win64) {
+                total_alloc = 32;
+            }
+
+            if (total_alloc > 0) {
+                enc_.sub(GPR::RSP, static_cast<int32_t>(total_alloc));
+            }
+
+            int32_t slots_disp = static_cast<int32_t>(shadow_space);
+
+            for (size_t i = 0; i < num_uses; ++i) {
+                const auto& op = inst.uses[i];
+                int32_t slot_offset = static_cast<int32_t>(slots_disp + i * 8);
+
+                if (op.is_preg()) {
+                    if (op.preg_val.is_gpr()) {
+                        GPR src_gpr = op.preg_val.as_gpr();
+                        if (op.size == 4) {
+                            enc_.movsxd(GPR::R11, src_gpr);
+                            enc_.mov(ptr(GPR::RSP, slot_offset), GPR::R11);
+                        } else {
+                            enc_.mov(ptr(GPR::RSP, slot_offset), src_gpr);
+                        }
+                    } else if (op.preg_val.is_xmm()) {
+                        enc_.movsd(ptr(GPR::RSP, slot_offset), op.preg_val.as_xmm());
+                    }
+                } else if (op.is_spill_slot()) {
+                    MemAddress src_mem = to_mem_address(op);
+                    enc_.mov(GPR::R11, src_mem);
+                    enc_.mov(ptr(GPR::RSP, slot_offset), GPR::R11);
+                } else if (op.is_imm_int()) {
+                    enc_.mov(GPR::R11, op.imm_int);
+                    enc_.mov(ptr(GPR::RSP, slot_offset), GPR::R11);
+                } else if (op.is_mem()) {
+                    MemAddress src_mem = to_mem_address(op);
+                    enc_.mov(GPR::R11, src_mem);
+                    enc_.mov(ptr(GPR::RSP, slot_offset), GPR::R11);
+                }
+            }
+
+            uint32_t rid = inst.resume_id;
+            uint32_t rsn = inst.deopt_reason == 0 ? 1 : inst.deopt_reason;
+            uint32_t cnt = static_cast<uint32_t>(num_uses);
+
+            if (fn_.calling_conv.kind() == CallingConvKind::Win64) {
+                enc_.mov32(GPR::RCX, rid);
+                enc_.mov32(GPR::RDX, rsn);
+                enc_.mov32(GPR::R8, cnt);
+                if (num_uses > 0) {
+                    enc_.lea(GPR::R9, ptr(GPR::RSP, slots_disp));
+                } else {
+                    enc_.xor32(GPR::R9, GPR::R9);
+                }
+            } else {
+                enc_.mov32(GPR::RDI, rid);
+                enc_.mov32(GPR::RSI, rsn);
+                enc_.mov32(GPR::RDX, cnt);
+                if (num_uses > 0) {
+                    enc_.lea(GPR::RCX, ptr(GPR::RSP, slots_disp));
+                } else {
+                    enc_.xor32(GPR::RCX, GPR::RCX);
+                }
+            }
+
+            enc_.call("brass_deopt_exit");
+
+            if (!inst.exit_symbol.empty()) {
+                if (total_alloc > 0) {
+                    enc_.add(GPR::RSP, static_cast<int32_t>(total_alloc));
+                }
+
+                size_t shadow2 = (fn_.calling_conv.kind() == CallingConvKind::Win64 ? 32 : 0);
+                if (shadow2 > 0) enc_.sub(GPR::RSP, static_cast<int32_t>(shadow2));
+                enc_.call("brass_get_thread_deopt_frame");
+                if (shadow2 > 0) enc_.add(GPR::RSP, static_cast<int32_t>(shadow2));
+
+                if (fn_.calling_conv.kind() == CallingConvKind::Win64) {
+                    enc_.lea(GPR::RDX, ptr(GPR::RAX, static_cast<int32_t>(offsetof(runtime::DeoptFrame, slots))));
+                    enc_.mov32(GPR::RCX, rid);
+                    enc_.sub(GPR::RSP, 32);
+                    enc_.call(inst.exit_symbol);
+                    enc_.add(GPR::RSP, 32);
+                } else {
+                    enc_.lea(GPR::RSI, ptr(GPR::RAX, static_cast<int32_t>(offsetof(runtime::DeoptFrame, slots))));
+                    enc_.mov32(GPR::RDI, rid);
+                    enc_.call(inst.exit_symbol);
+                }
+
+                codegen::FrameInfo mutable_frame = fn_.frame;
+                X64FrameLayout::compute_layout(mutable_frame, fn_.calling_conv);
+                X64FrameLayout::emit_epilogue(enc_, mutable_frame, fn_.calling_conv);
+            } else {
+                if (total_alloc > 0) {
+                    enc_.add(GPR::RSP, static_cast<int32_t>(total_alloc));
+                }
+                codegen::FrameInfo mutable_frame = fn_.frame;
+                X64FrameLayout::compute_layout(mutable_frame, fn_.calling_conv);
+                X64FrameLayout::emit_epilogue(enc_, mutable_frame, fn_.calling_conv);
+            }
             break;
+        }
         case LirOpcode::ParallelCopy:
             break;
     }

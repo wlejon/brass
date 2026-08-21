@@ -71,6 +71,7 @@ public:
 
             total++;
             current_test_ = &tc;
+            std::cout << "  [RUN ] " << tc.name << "\n" << std::flush;
             auto start = std::chrono::high_resolution_clock::now();
             try {
                 tc.func();
