@@ -1,4 +1,5 @@
 #include <brass/mir/function.hpp>
+#include <algorithm>
 
 namespace brass {
 
@@ -6,6 +7,14 @@ void Function::append_block(BasicBlock* bb) {
     if (!bb) return;
     bb->set_parent(this);
     blocks_.push_back(bb);
+}
+
+void Function::remove_block(BasicBlock* bb) {
+    if (!bb) return;
+    auto it = std::find(blocks_.begin(), blocks_.end(), bb);
+    if (it != blocks_.end()) {
+        blocks_.erase(it);
+    }
 }
 
 BasicBlock* Function::get_block_by_name(std::string_view name) const noexcept {

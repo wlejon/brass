@@ -163,8 +163,8 @@ void EmitContext::emit_sse_instruction(const LirInst& inst) {
                 MemAddress dst_mem = to_mem_address(dst);
                 if (src.is_preg()) enc_.movsd(dst_mem, src.preg_val.as_xmm());
                 else {
-                    enc_.movsd(XMM::XMM15, to_mem_address(src));
-                    enc_.movsd(dst_mem, XMM::XMM15);
+                    enc_.movsd(XMM::XMM5, to_mem_address(src));
+                    enc_.movsd(dst_mem, XMM::XMM5);
                 }
             }
             break;
@@ -183,8 +183,8 @@ void EmitContext::emit_sse_instruction(const LirInst& inst) {
                 MemAddress dst_mem = to_mem_address(dst);
                 if (src.is_preg()) enc_.movss(dst_mem, src.preg_val.as_xmm());
                 else {
-                    enc_.movss(XMM::XMM15, to_mem_address(src));
-                    enc_.movss(dst_mem, XMM::XMM15);
+                    enc_.movss(XMM::XMM5, to_mem_address(src));
+                    enc_.movss(dst_mem, XMM::XMM5);
                 }
             }
             break;
@@ -368,7 +368,7 @@ void EmitContext::emit_parallel_copy(const LirInst& inst) {
             } else {
                 bool is_xmm = (m0.dst.is_preg() && m0.dst.preg_val.is_xmm()) ||
                               (m1.dst.is_preg() && m1.dst.preg_val.is_xmm());
-                PReg scratch = is_xmm ? PReg::xmm(XMM::XMM15) : PReg::gpr(GPR::R11);
+                PReg scratch = is_xmm ? PReg::xmm(XMM::XMM5) : PReg::gpr(GPR::R11);
                 uint8_t sz = m0.dst.size;
                 emit_move(LirOperand::preg(scratch, sz), m0.src);
                 emit_move(m1.dst, m0.dst);
@@ -380,7 +380,7 @@ void EmitContext::emit_parallel_copy(const LirInst& inst) {
             size_t idx0 = cycle[0];
             auto& m0 = moves[idx0];
             bool is_xmm = m0.dst.is_preg() && m0.dst.preg_val.is_xmm();
-            PReg scratch = is_xmm ? PReg::xmm(XMM::XMM15) : PReg::gpr(GPR::R11);
+            PReg scratch = is_xmm ? PReg::xmm(XMM::XMM5) : PReg::gpr(GPR::R11);
             uint8_t sz = m0.dst.size;
 
             emit_move(LirOperand::preg(scratch, sz), m0.dst);

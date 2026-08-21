@@ -1,5 +1,7 @@
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/loop_analysis.hpp>
+#include <brass/mir/loop_unroll.hpp>
+#include <brass/mir/select_opt.hpp>
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/verifier.hpp>
@@ -43,6 +45,7 @@ bool is_pure_instruction(const Instruction* inst) {
         case Opcode::clz: case Opcode::ctz: case Opcode::popcnt:
         case Opcode::eq: case Opcode::ne: case Opcode::slt: case Opcode::ult:
         case Opcode::sle: case Opcode::ule: case Opcode::sgt: case Opcode::ugt: case Opcode::sge: case Opcode::uge:
+        case Opcode::select:
             return true;
         case Opcode::sdiv: case Opcode::udiv: case Opcode::smod: case Opcode::umod: {
             if (inst->operand_count() < 2 || !inst->operand(1)) return false;
@@ -247,6 +250,22 @@ bool constant_folding_pass(Function& fn) {
                         changed = true;
                     }
                 }
+            } else if (cur->operand_count() == 3 && cur->opcode() == Opcode::select) {
+                Value* cond = cur->operand(0);
+                Value* true_v = cur->operand(1);
+                Value* false_v = cur->operand(2);
+                Value* replacement = nullptr;
+                int64_t cond_c;
+                if (get_const_int(cond, cond_c)) {
+                    replacement = (cond_c != 0) ? true_v : false_v;
+                } else if (true_v == false_v) {
+                    replacement = true_v;
+                }
+                if (replacement) {
+                    replace_all_uses(fn, cur->result(), replacement);
+                    bb->remove_instruction(cur);
+                    changed = true;
+                }
             }
             cur = next;
         }
@@ -259,10 +278,11 @@ struct ExprKey {
     Type type;
     const Value* op0 = nullptr;
     const Value* op1 = nullptr;
+    const Value* op2 = nullptr;
     uint64_t imm_bits = 0;
 
     bool operator==(const ExprKey& o) const noexcept {
-        return op == o.op && type == o.type && op0 == o.op0 && op1 == o.op1 && imm_bits == o.imm_bits;
+        return op == o.op && type == o.type && op0 == o.op0 && op1 == o.op1 && op2 == o.op2 && imm_bits == o.imm_bits;
     }
 };
 
@@ -271,6 +291,7 @@ struct ExprKeyHash {
         size_t h = static_cast<size_t>(k.op);
         h = h * 31 + std::hash<const void*>()(k.op0);
         h = h * 31 + std::hash<const void*>()(k.op1);
+        h = h * 31 + std::hash<const void*>()(k.op2);
         h = h * 31 + static_cast<size_t>(k.imm_bits);
         return h;
     }
@@ -304,6 +325,7 @@ bool cse_pass(Function& fn, DominatorTree& dom) {
                 }
                 if (cur->operand_count() >= 1) key.op0 = cur->operand(0);
                 if (cur->operand_count() >= 2) key.op1 = cur->operand(1);
+                if (cur->operand_count() >= 3) key.op2 = cur->operand(2);
 
                 if (is_commutative(key.op) && key.op0 > key.op1) {
                     std::swap(key.op0, key.op1);
@@ -527,6 +549,7 @@ bool ivsr_pass(Function& fn, LoopInfo& loop, DominatorTree& dom) {
     std::unordered_map<std::pair<const Value*, uint8_t>, Value*, PairHash> biv_scaled_map;
 
     auto get_or_create_scaled_biv = [&](const BasicIV& biv, uint8_t scale) -> Value* {
+        if (scale == 1) return biv.param;
         auto key = std::make_pair(biv.param, scale);
         auto it = biv_scaled_map.find(key);
         if (it != biv_scaled_map.end()) return it->second;
@@ -883,6 +906,10 @@ std::unique_ptr<Module> clone_module(const Module& src) {
 bool optimize_function_loops(Function& fn, const LoopOptOptions& options) {
     bool any_changed = false;
 
+    if (options.enable_diamond_select) {
+        any_changed |= simplify_cfg_diamonds(fn);
+    }
+
     for (size_t iter = 0; iter < options.max_iterations; ++iter) {
         bool iter_changed = false;
         fn.rebuild_cfg_predecessors();
@@ -920,6 +947,23 @@ bool optimize_function_loops(Function& fn, const LoopOptOptions& options) {
         fn.rebuild_cfg_predecessors();
         if (iter_changed) any_changed = true;
         else break;
+    }
+
+    if (options.enable_unroll) {
+        fn.rebuild_cfg_predecessors();
+        DominatorTree dom(fn);
+        if (loop_unroll_pass(fn, dom, {options.unroll_factor, true, true})) {
+            any_changed = true;
+            fn.rebuild_cfg_predecessors();
+            DominatorTree dom_after(fn);
+            constant_folding_pass(fn);
+            cse_pass(fn, dom_after);
+            dead_code_elimination_pass(fn);
+        }
+    }
+
+    if (options.enable_diamond_select) {
+        any_changed |= simplify_cfg_diamonds(fn);
     }
 
     return any_changed;

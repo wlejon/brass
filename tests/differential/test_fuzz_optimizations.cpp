@@ -353,3 +353,56 @@ TEST_CASE("Differential Fuzzer - Load-After-Store Forwarding and Redundant Moves
         CHECK(buf_interp == buf_jit);
     }
 }
+
+TEST_CASE("Differential Fuzzer - Select and Branchless CMOV") {
+    std::mt19937_64 rng(40404);
+
+    for (uint64_t seed = 0; seed < 40; ++seed) {
+        Module mod("fuzz_select_mod_" + std::to_string(seed));
+        Builder b(mod);
+
+        Function* fn_i64 = mod.create_function("fuzz_select_i64", Type::i64(), {Type::i64(), Type::i64(), Type::i64()});
+        b.set_function(fn_i64);
+        BasicBlock* entry_i64 = b.append_block("entry");
+        b.position_at_end(entry_i64);
+        Value* a = b.add_block_param(entry_i64, Type::i64());
+        Value* x = b.add_block_param(entry_i64, Type::i64());
+        Value* y = b.add_block_param(entry_i64, Type::i64());
+        Value* cond_i64 = b.build_slt(a, b.build_iconst_i64(50));
+        Value* sel_i64 = b.build_select(cond_i64, x, y);
+        b.build_ret(sel_i64);
+
+        Function* fn_f64 = mod.create_function("fuzz_select_f64", Type::f64(), {Type::f64(), Type::f64(), Type::f64()});
+        b.set_function(fn_f64);
+        BasicBlock* entry_f64 = b.append_block("entry");
+        b.position_at_end(entry_f64);
+        Value* fa = b.add_block_param(entry_f64, Type::f64());
+        Value* fx = b.add_block_param(entry_f64, Type::f64());
+        Value* fy = b.add_block_param(entry_f64, Type::f64());
+        Value* cond_f64 = b.build_slt(fa, b.build_fconst_f64(0.0));
+        Value* sel_f64 = b.build_select(cond_f64, fx, fy);
+        b.build_ret(sel_f64);
+
+        fn_i64->rebuild_cfg_predecessors();
+        fn_f64->rebuild_cfg_predecessors();
+
+        int64_t v_a = static_cast<int64_t>(rng() % 100);
+        int64_t v_x = static_cast<int64_t>((rng() % 2000) - 1000);
+        int64_t v_y = static_cast<int64_t>((rng() % 2000) - 1000);
+        assert_diff(mod, "fuzz_select_i64", {
+            RuntimeValue::from_i64(v_a),
+            RuntimeValue::from_i64(v_x),
+            RuntimeValue::from_i64(v_y)
+        });
+
+        double d_a = static_cast<double>(static_cast<int64_t>(rng() % 200) - 100) / 10.0;
+        double d_x = static_cast<double>(static_cast<int64_t>(rng() % 2000) - 1000) / 10.0;
+        double d_y = static_cast<double>(static_cast<int64_t>(rng() % 2000) - 1000) / 10.0;
+        assert_diff(mod, "fuzz_select_f64", {
+            RuntimeValue::from_f64(d_a),
+            RuntimeValue::from_f64(d_x),
+            RuntimeValue::from_f64(d_y)
+        });
+    }
+}
+

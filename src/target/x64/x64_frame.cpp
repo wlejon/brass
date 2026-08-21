@@ -112,7 +112,7 @@ void X64FrameLayout::emit_prologue(
     // 5. Save callee-saved XMMs to [rbp - ...] (Win64)
     auto saved_xmms = get_saved_callee_xmms(frame);
     for (XMM x : saved_xmms) {
-        enc.movsd(callee_xmm_address(x, frame), x);
+        enc.movups(callee_xmm_address(x, frame), x);
     }
 }
 
@@ -130,7 +130,7 @@ void X64FrameLayout::emit_epilogue(
     // 1. Restore callee-saved XMMs
     auto saved_xmms = get_saved_callee_xmms(frame);
     for (XMM x : saved_xmms) {
-        enc.movsd(x, callee_xmm_address(x, frame));
+        enc.movups(x, callee_xmm_address(x, frame));
     }
 
     // 2. Restore callee-saved GPRs

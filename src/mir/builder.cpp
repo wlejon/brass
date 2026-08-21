@@ -331,6 +331,19 @@ Value* Builder::build_ugt(Value* lhs, Value* rhs) { return build_cmp_op(this, ge
 Value* Builder::build_sge(Value* lhs, Value* rhs) { return build_cmp_op(this, get_arena(), Opcode::sge, lhs, rhs); }
 Value* Builder::build_uge(Value* lhs, Value* rhs) { return build_cmp_op(this, get_arena(), Opcode::uge, lhs, rhs); }
 
+Value* Builder::build_select(Value* cond, Value* true_val, Value* false_val) {
+    Type res_type = true_val ? true_val->type() : (false_val ? false_val->type() : Type::i64());
+    Instruction* inst = get_arena().make<Instruction>(Opcode::select, res_type);
+    inst->add_operand(cond);
+    inst->add_operand(true_val);
+    inst->add_operand(false_val);
+    Value* res = create_value(res_type);
+    res->set_defining_instruction(inst);
+    inst->set_result(res);
+    insert(inst);
+    return res;
+}
+
 Value* Builder::build_load(Type type, Value* base) {
     return build_load(type, base, 0);
 }

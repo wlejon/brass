@@ -200,6 +200,13 @@ public:
                 break;
             }
 
+            case Opcode::select:
+                os_ << "select." << inst.type().name() << " "
+                    << value_name(inst.operand(0)) << ", "
+                    << value_name(inst.operand(1)) << ", "
+                    << value_name(inst.operand(2));
+                break;
+
             case Opcode::load:
                 os_ << "load." << inst.memory_type().name() << " " << value_name(inst.operand(0));
                 if (inst.offset() != 0) {

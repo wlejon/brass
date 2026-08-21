@@ -440,6 +440,9 @@ void X64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
         case Opcode::uge:
             lower_comparison(inst, lir_bb, Condition::AE, Condition::AE);
             break;
+        case Opcode::select:
+            lower_select(inst, lir_bb);
+            break;
         case Opcode::load:
             lower_load(inst, lir_bb);
             break;

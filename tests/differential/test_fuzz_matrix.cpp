@@ -1,6 +1,7 @@
 #include "test_framework.hpp"
 #include "diff_harness.hpp"
 #include "fuzz_generator.hpp"
+#include "../benchmarks/bench_numeric_modules.hpp"
 #include <random>
 #include <vector>
 #include <cmath>
@@ -99,3 +100,37 @@ TEST_CASE("Differential Fuzzer - 2D Matrix Indexing and Nested Loops (f64)") {
         }
     }
 }
+
+TEST_CASE("Differential Fuzzer - Dual Kernel MatMul Equivalence across Odd Dimensions") {
+    for (int64_t N : {1, 2, 3, 5, 7, 9, 11, 13, 17, 23, 31, 33}) {
+        size_t total_elements = static_cast<size_t>(N * N);
+        std::vector<double> A(total_elements);
+        std::vector<double> B(total_elements);
+        std::vector<double> C_naive(total_elements, 0.0);
+        std::vector<double> C_preopt(total_elements, 0.0);
+
+        for (size_t i = 0; i < total_elements; ++i) {
+            A[i] = static_cast<double>((i * 7 + 3) % 29) * 0.25;
+            B[i] = static_cast<double>((i * 11 + 5) % 31) * 0.25;
+        }
+
+        auto mod_naive = bench::build_matmul_f64_naive_module();
+        codegen::JitExecutionEngine jit_naive(Target::host());
+        REQUIRE(jit_naive.compile_and_load(*mod_naive));
+        auto fn_naive = jit_naive.get_function_ptr<void(*)(const double*, const double*, double*, int64_t)>("matmul_f64_naive");
+        REQUIRE(fn_naive != nullptr);
+        fn_naive(A.data(), B.data(), C_naive.data(), N);
+
+        auto mod_preopt = bench::build_matmul_f64_preopt_module();
+        codegen::JitExecutionEngine jit_preopt(Target::host());
+        REQUIRE(jit_preopt.compile_and_load(*mod_preopt));
+        auto fn_preopt = jit_preopt.get_function_ptr<void(*)(const double*, const double*, double*, int64_t)>("matmul_f64_preopt");
+        REQUIRE(fn_preopt != nullptr);
+        fn_preopt(A.data(), B.data(), C_preopt.data(), N);
+
+        for (size_t i = 0; i < total_elements; ++i) {
+            CHECK(std::abs(C_naive[i] - C_preopt[i]) < 1e-6);
+        }
+    }
+}
+

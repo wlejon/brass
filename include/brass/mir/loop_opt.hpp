@@ -10,6 +10,9 @@ struct LoopOptOptions {
     bool enable_licm = true;
     bool enable_ivsr = true;
     bool enable_dce = true;
+    bool enable_diamond_select = true;
+    bool enable_unroll = true;
+    size_t unroll_factor = 4;
     size_t max_iterations = 8;
 };
 

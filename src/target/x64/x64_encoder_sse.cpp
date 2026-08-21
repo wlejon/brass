@@ -54,6 +54,20 @@ void X64Encoder::movsd(const MemAddress& dst, XMM src) {
     emit_mem_operand(reg_code(src), dst);
 }
 
+void X64Encoder::movups(XMM dst, const MemAddress& src) {
+    emit_rex(false, is_extended(dst), is_extended(src.index), is_extended(src.base));
+    buffer_.emit8(0x0F);
+    buffer_.emit8(0x10);
+    emit_mem_operand(reg_code(dst), src);
+}
+
+void X64Encoder::movups(const MemAddress& dst, XMM src) {
+    emit_rex(false, is_extended(src), is_extended(dst.index), is_extended(dst.base));
+    buffer_.emit8(0x0F);
+    buffer_.emit8(0x11);
+    emit_mem_operand(reg_code(src), dst);
+}
+
 void X64Encoder::movq(XMM dst, GPR src) {
     buffer_.emit8(0x66);
     emit_rex(true, is_extended(dst), false, is_extended(src));

@@ -582,6 +582,29 @@ bool Verifier::verify_function(const Function& fn) {
                     break;
                 }
 
+                case Opcode::select: {
+                    if (inst->operand_count() != 3 || !inst->operand(0) || !inst->operand(1) || !inst->operand(2)) {
+                        report_error(inst_prefix + "Select requires 3 operands (cond, true_val, false_val).");
+                    } else {
+                        Type cond_t = inst->operand(0)->type();
+                        Type t1 = inst->operand(1)->type();
+                        Type t2 = inst->operand(2)->type();
+                        if (cond_t != Type::i32()) {
+                            report_error(inst_prefix + "Select condition type must be i32, got " + std::string(cond_t.name()) + ".");
+                        }
+                        if (t1.is_void() || t2.is_void()) {
+                            report_error(inst_prefix + "Select operands cannot be void.");
+                        } else if (t1 != t2) {
+                            report_error(inst_prefix + "Select value types mismatch: " +
+                                         std::string(t1.name()) + " vs " + std::string(t2.name()) + ".");
+                        } else if (inst->type() != t1) {
+                            report_error(inst_prefix + "Select result type (" + std::string(inst->type().name()) +
+                                         ") must match operand type (" + std::string(t1.name()) + ").");
+                        }
+                    }
+                    break;
+                }
+
                 case Opcode::load: {
                     if (inst->operand_count() != 1 || !inst->operand(0)) {
                         report_error(inst_prefix + "Load requires 1 base operand.");

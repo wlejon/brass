@@ -106,3 +106,183 @@ TEST_CASE("Differential Fuzzer - Collatz Arithmetic Fusion Loop") {
     }
 }
 
+TEST_CASE("Differential Fuzzer - Float Reduction Loop Unrolling with Prime/Odd Trip Counts") {
+    // Tests unroll factor remainder loops for f64 reductions
+    for (int64_t trip_count : {0, 1, 2, 3, 4, 5, 7, 9, 11, 13, 15, 17, 31, 33, 63, 65, 100}) {
+        Module mod("f64_reduction_diff_mod");
+        Builder b(mod);
+
+        Function* fn = mod.create_function("f64_sum_squares", Type::f64(), {Type::ptr(), Type::i64()});
+        b.set_function(fn);
+
+        BasicBlock* entry = b.append_block("entry");
+        Value* arr_ptr = b.add_block_param(entry, Type::ptr());
+        Value* n = b.add_block_param(entry, Type::i64());
+
+        BasicBlock* loop_hdr = b.create_block("loop_hdr");
+        BasicBlock* loop_body = b.create_block("loop_body");
+        BasicBlock* exit_bb = b.create_block("exit");
+
+        Value* zero_i = b.build_iconst_i64(0);
+        Value* zero_f = b.build_fconst_f64(0.0);
+        Value* one_i = b.build_iconst_i64(1);
+
+        b.build_br(loop_hdr, {zero_i, zero_f});
+
+        fn->append_block(loop_hdr);
+        b.position_at_end(loop_hdr);
+        Value* i = b.add_block_param(loop_hdr, Type::i64());
+        Value* acc = b.add_block_param(loop_hdr, Type::f64());
+        Value* cond = b.build_slt(i, n);
+        b.build_br_if(cond, loop_body, {}, exit_bb, {acc});
+
+        fn->append_block(loop_body);
+        b.position_at_end(loop_body);
+        Value* val = b.build_load_indexed(Type::f64(), arr_ptr, i, 8, 0);
+        Value* sq = b.build_mul(val, val);
+        Value* next_acc = b.build_add(acc, sq);
+        Value* next_i = b.build_add(i, one_i);
+        b.build_br(loop_hdr, {next_i, next_acc});
+
+        fn->append_block(exit_bb);
+        b.position_at_end(exit_bb);
+        Value* final_res = b.add_block_param(exit_bb, Type::f64());
+        b.build_ret(final_res);
+
+        fn->rebuild_cfg_predecessors();
+
+        size_t count = static_cast<size_t>(trip_count);
+        std::vector<double> data(count + 4);
+        for (size_t k = 0; k < count + 4; ++k) {
+            data[k] = static_cast<double>(k + 1) * 0.5;
+        }
+
+        Interpreter interp;
+        RuntimeValue interp_res = interp.run(mod, "f64_sum_squares", {
+            RuntimeValue::from_ptr(reinterpret_cast<uintptr_t>(data.data())),
+            RuntimeValue::from_i64(trip_count)
+        });
+
+        codegen::JitExecutionEngine jit(Target::host());
+        REQUIRE(jit.compile_and_load(mod));
+        auto fn_ptr = jit.get_function_ptr<double(*)(const double*, int64_t)>("f64_sum_squares");
+        REQUIRE(fn_ptr != nullptr);
+
+        double jit_res = fn_ptr(data.data(), trip_count);
+        CHECK(std::abs(interp_res.as_f64() - jit_res) < 1e-6);
+    }
+}
+
+TEST_CASE("Differential Fuzzer - Loop Carried Non-Linear Dependence") {
+    // Tests loops with dependencies that forbid unroll-and-jam (acc = acc * 3 + i)
+    for (int64_t n_val : {0, 1, 2, 3, 5, 8, 12, 17, 25}) {
+        Module mod("nonlinear_dep_mod");
+        Builder b(mod);
+
+        Function* fn = mod.create_function("nonlinear_acc", Type::i64(), {Type::i64()});
+        b.set_function(fn);
+
+        BasicBlock* entry = b.append_block("entry");
+        Value* n = b.add_block_param(entry, Type::i64());
+
+        BasicBlock* loop_hdr = b.create_block("loop_hdr");
+        BasicBlock* loop_body = b.create_block("loop_body");
+        BasicBlock* exit_bb = b.create_block("exit");
+
+        Value* zero = b.build_iconst_i64(0);
+        Value* one = b.build_iconst_i64(1);
+        Value* three = b.build_iconst_i64(3);
+        b.build_br(loop_hdr, {zero, one});
+
+        fn->append_block(loop_hdr);
+        b.position_at_end(loop_hdr);
+        Value* i = b.add_block_param(loop_hdr, Type::i64());
+        Value* acc = b.add_block_param(loop_hdr, Type::i64());
+        Value* cond = b.build_slt(i, n);
+        b.build_br_if(cond, loop_body, {}, exit_bb, {acc});
+
+        fn->append_block(loop_body);
+        b.position_at_end(loop_body);
+        Value* acc3 = b.build_mul(acc, three);
+        Value* next_acc = b.build_add(acc3, i);
+        Value* next_i = b.build_add(i, one);
+        b.build_br(loop_hdr, {next_i, next_acc});
+
+        fn->append_block(exit_bb);
+        b.position_at_end(exit_bb);
+        Value* final_res = b.add_block_param(exit_bb, Type::i64());
+        b.build_ret(final_res);
+
+        fn->rebuild_cfg_predecessors();
+
+        assert_diff(mod, "nonlinear_acc", {RuntimeValue::from_i64(n_val)});
+    }
+}
+
+TEST_CASE("Differential Fuzzer - Loops with In-Body Stores") {
+    // Tests loops with stores to ensure memory order is preserved
+    for (int64_t n_val : {1, 2, 4, 7, 15, 23, 32, 47}) {
+        Module mod("store_loop_mod");
+        Builder b(mod);
+
+        Function* fn = mod.create_function("fill_fib_array", Type::void_type(), {Type::ptr(), Type::i64()});
+        b.set_function(fn);
+
+        BasicBlock* entry = b.append_block("entry");
+        Value* arr = b.add_block_param(entry, Type::ptr());
+        Value* n = b.add_block_param(entry, Type::i64());
+
+        BasicBlock* loop_hdr = b.create_block("loop_hdr");
+        BasicBlock* loop_body = b.create_block("loop_body");
+        BasicBlock* exit_bb = b.create_block("exit");
+
+        Value* two = b.build_iconst_i64(2);
+        Value* one = b.build_iconst_i64(1);
+        b.build_br(loop_hdr, {two});
+
+        fn->append_block(loop_hdr);
+        b.position_at_end(loop_hdr);
+        Value* i = b.add_block_param(loop_hdr, Type::i64());
+        Value* cond = b.build_slt(i, n);
+        b.build_br_if(cond, loop_body, {}, exit_bb, {});
+
+        fn->append_block(loop_body);
+        b.position_at_end(loop_body);
+        Value* i_minus_1 = b.build_sub(i, one);
+        Value* i_minus_2 = b.build_sub(i, two);
+        Value* f1 = b.build_load_indexed(Type::i64(), arr, i_minus_1, 8, 0);
+        Value* f2 = b.build_load_indexed(Type::i64(), arr, i_minus_2, 8, 0);
+        Value* f_next = b.build_add(f1, f2);
+        b.build_store_indexed(Type::i64(), arr, i, 8, 0, f_next);
+        Value* next_i = b.build_add(i, one);
+        b.build_br(loop_hdr, {next_i});
+
+        fn->append_block(exit_bb);
+        b.position_at_end(exit_bb);
+        b.build_ret(nullptr);
+
+        fn->rebuild_cfg_predecessors();
+
+        size_t count = static_cast<size_t>(n_val + 4);
+        std::vector<int64_t> arr_interp(count, 0);
+        std::vector<int64_t> arr_jit(count, 0);
+        arr_interp[0] = 0; arr_interp[1] = 1;
+        arr_jit[0] = 0; arr_jit[1] = 1;
+
+        Interpreter interp;
+        interp.run(mod, "fill_fib_array", {
+            RuntimeValue::from_ptr(reinterpret_cast<uintptr_t>(arr_interp.data())),
+            RuntimeValue::from_i64(n_val)
+        });
+
+        codegen::JitExecutionEngine jit(Target::host());
+        REQUIRE(jit.compile_and_load(mod));
+        auto fn_ptr = jit.get_function_ptr<void(*)(int64_t*, int64_t)>("fill_fib_array");
+        REQUIRE(fn_ptr != nullptr);
+        fn_ptr(arr_jit.data(), n_val);
+
+        CHECK(arr_interp == arr_jit);
+    }
+}
+
+

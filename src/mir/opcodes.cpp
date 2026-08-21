@@ -51,6 +51,8 @@ std::string_view opcode_name(Opcode op) noexcept {
         case Opcode::sge: return "sge";
         case Opcode::uge: return "uge";
 
+        case Opcode::select: return "select";
+
         case Opcode::load: return "load";
         case Opcode::store: return "store";
         case Opcode::load_indexed: return "load_indexed";
@@ -184,6 +186,10 @@ bool is_memory(Opcode op) noexcept {
         default:
             return false;
     }
+}
+
+bool is_select(Opcode op) noexcept {
+    return op == Opcode::select;
 }
 
 bool has_side_effects(Opcode op) noexcept {

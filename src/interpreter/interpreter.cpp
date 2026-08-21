@@ -386,6 +386,17 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                     break;
                 }
 
+                case Opcode::select: {
+                    RuntimeValue cond_v = frame.get_value(inst->operand(0));
+                    int32_t cond = cond_v.is_i32() ? cond_v.as_i32() : (cond_v.as_i64() != 0 ? 1 : 0);
+                    if (cond != 0) {
+                        frame.set_value(inst->result(), frame.get_value(inst->operand(1)));
+                    } else {
+                        frame.set_value(inst->result(), frame.get_value(inst->operand(2)));
+                    }
+                    break;
+                }
+
                 case Opcode::load: {
                     RuntimeValue base = frame.get_value(inst->operand(0));
                     RuntimeValue res = gc_.read_memory(base.raw_bits(), inst->offset(), inst->type());

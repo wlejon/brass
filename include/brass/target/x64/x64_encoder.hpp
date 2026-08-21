@@ -246,6 +246,9 @@ public:
     void movsd(XMM dst, const MemAddress& src);
     void movsd(const MemAddress& dst, XMM src);
 
+    void movups(XMM dst, const MemAddress& src);
+    void movups(const MemAddress& dst, XMM src);
+
     void movq(XMM dst, GPR src);
     void movq(GPR dst, XMM src);
     void movq(XMM dst, const MemAddress& src);

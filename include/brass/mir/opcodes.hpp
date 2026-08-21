@@ -57,6 +57,9 @@ enum class Opcode : uint16_t {
     sge,
     uge,
 
+    // Selection
+    select,
+
     // Memory
     load,
     store,
@@ -90,6 +93,7 @@ bool is_arithmetic(Opcode op) noexcept;
 bool is_bitwise(Opcode op) noexcept;
 bool is_comparison(Opcode op) noexcept;
 bool is_memory(Opcode op) noexcept;
+bool is_select(Opcode op) noexcept;
 bool has_side_effects(Opcode op) noexcept;
 
 std::ostream& operator<<(std::ostream& os, Opcode op);

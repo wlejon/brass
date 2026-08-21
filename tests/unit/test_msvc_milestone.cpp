@@ -1,6 +1,7 @@
 #include <brass/mir/module.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/verifier.hpp>
+#include <brass/mir/printer.hpp>
 #include <brass/object/object_writer.hpp>
 #include <brass/object/coff_writer.hpp>
 #include <brass/codegen/jit_exec.hpp>

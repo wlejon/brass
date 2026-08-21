@@ -115,7 +115,7 @@ void X64ISel::analyze_function(const Function& mir_fn) {
 
     for (const auto* bb : mir_fn.blocks()) {
         for (const auto* inst : *bb) {
-            if (inst->opcode() == Opcode::br_if || inst->opcode() == Opcode::guard) {
+            if (inst->opcode() == Opcode::br_if || inst->opcode() == Opcode::guard || inst->opcode() == Opcode::select) {
                 const Value* cond = inst->operand(0);
                 if (cond && cond->is_instruction()) {
                     const Instruction* def_inst = cond->defining_instruction();

@@ -106,7 +106,9 @@ TEST_CASE("MIR Loop Opt - LICM Hoisting Pure Invariant Computations") {
 
     fn->rebuild_cfg_predecessors();
 
-    bool changed = optimize_function_loops(*fn);
+    LoopOptOptions options;
+    options.enable_unroll = false;
+    bool changed = optimize_function_loops(*fn, options);
     CHECK(changed);
 
     DiagnosticReporter diag;
@@ -189,9 +191,7 @@ TEST_CASE("MIR Loop Opt - MatMul f64 Naive Optimization & JIT Execution") {
     Function* fn = mod->get_function("matmul_f64_naive");
     REQUIRE(fn != nullptr);
 
-    bool changed = optimize_function_loops(*fn);
-    CHECK(changed);
-
+    // Optimize function loops is performed by compilation pipeline in compile_and_load
     DiagnosticReporter diag;
     CHECK(verify_function(*fn, &diag));
 

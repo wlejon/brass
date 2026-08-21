@@ -21,6 +21,10 @@ Type parse_type_from_string(std::string_view s) {
     return Type::void_type();
 }
 
+bool is_identifier_or_keyword(TokenKind k) noexcept {
+    return k == TokenKind::Ident || (k >= TokenKind::Kw_func && k <= TokenKind::Kw_void);
+}
+
 bool decode_opcode_string(std::string_view str, Opcode& op, Type& type_suffix, Type& mem_type) {
     type_suffix = Type::void_type();
     mem_type = Type::void_type();
@@ -127,6 +131,9 @@ bool decode_opcode_string(std::string_view str, Opcode& op, Type& type_suffix, T
     if (base == "ugt") { op = Opcode::ugt; return true; }
     if (base == "sge") { op = Opcode::sge; return true; }
     if (base == "uge") { op = Opcode::uge; return true; }
+
+    // Selection
+    if (base == "select") { op = Opcode::select; return true; }
 
     // Memory
     if (base == "load") {
@@ -345,7 +352,7 @@ private:
                     uint32_t resume_id = static_cast<uint32_t>(advance().int_val);
                     if (!expect(TokenKind::Arrow, "'->'")) return nullptr;
 
-                    if (!peek().is(TokenKind::Ident)) {
+                    if (!is_identifier_or_keyword(peek().kind)) {
                         error(peek().location, "Expected target block identifier, got '" + std::string(peek().text) + "'");
                         return nullptr;
                     }
@@ -358,7 +365,7 @@ private:
             }
 
             // Parse block header: BlockName [ ( params ) ] :
-            if (!peek().is(TokenKind::Ident)) {
+            if (!is_identifier_or_keyword(peek().kind)) {
                 error(peek().location, "Expected basic block label (identifier), got '" + std::string(peek().text) + "'");
                 return nullptr;
             }
@@ -422,7 +429,7 @@ private:
             // Parse instructions in this block
             while (!peek().is(TokenKind::RBrace) && !peek().is(TokenKind::Kw_resume_table) && !peek().is(TokenKind::Eof)) {
                 // Check if next token is start of another block
-                if (peek().is(TokenKind::Ident) && lexer_.is_block_header_ahead()) {
+                if (is_identifier_or_keyword(peek().kind) && lexer_.is_block_header_ahead()) {
                     break;
                 }
 
@@ -476,7 +483,7 @@ private:
         };
 
         auto parse_branch_target = [&](BranchTarget& target) -> bool {
-            if (!peek().is(TokenKind::Ident)) {
+            if (!is_identifier_or_keyword(peek().kind)) {
                 error(peek().location, "Expected target basic block identifier, got '" + std::string(peek().text) + "'");
                 return false;
             }
@@ -633,6 +640,16 @@ private:
                     case Opcode::uge: res_val = b.build_uge(lhs, rhs); break;
                     default: break;
                 }
+                break;
+            }
+
+            case Opcode::select: {
+                Value* cond = parse_val(); if (!cond) return false;
+                if (!expect(TokenKind::Comma, "','")) return false;
+                Value* true_v = parse_val(); if (!true_v) return false;
+                if (!expect(TokenKind::Comma, "','")) return false;
+                Value* false_v = parse_val(); if (!false_v) return false;
+                res_val = b.build_select(cond, true_v, false_v);
                 break;
             }
 

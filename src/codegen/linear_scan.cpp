@@ -28,9 +28,12 @@ void LinearScanAllocator::init_register_pools() {
         available_gprs_.push_back(PReg::gpr(g));
     }
 
-    // Available XMMs (excluding scratch XMM14 and XMM15: XMM0..XMM13)
+    // Available XMMs (excluding scratch XMM4 and XMM5: XMM0..XMM3, XMM6..XMM15)
     available_xmms_.clear();
-    for (int i = 0; i < 14; ++i) {
+    for (int i = 0; i <= 3; ++i) {
+        available_xmms_.push_back(PReg::xmm(static_cast<XMM>(i)));
+    }
+    for (int i = 6; i <= 15; ++i) {
         available_xmms_.push_back(PReg::xmm(static_cast<XMM>(i)));
     }
 }
@@ -271,6 +274,33 @@ std::set<uint8_t> LinearScanAllocator::get_hard_blocked_regs(const LiveInterval&
         }
     }
 
+    if (is_gpr) {
+        bool used_as_mem_index = false;
+        for (const auto& block : fn_.blocks) {
+            for (const auto& inst : block->instructions) {
+                for (const auto& op : inst->defs) {
+                    if (op.is_mem() && op.mem_val.index_vreg == interval.vreg) {
+                        used_as_mem_index = true;
+                        break;
+                    }
+                }
+                if (used_as_mem_index) break;
+                for (const auto& op : inst->uses) {
+                    if (op.is_mem() && op.mem_val.index_vreg == interval.vreg) {
+                        used_as_mem_index = true;
+                        break;
+                    }
+                }
+                if (used_as_mem_index) break;
+            }
+            if (used_as_mem_index) break;
+        }
+        if (used_as_mem_index) {
+            blocked.insert(PReg::gpr(x64::GPR::R12).code);
+            blocked.insert(PReg::gpr(x64::GPR::RSP).code);
+        }
+    }
+
     return blocked;
 }
 
@@ -482,6 +512,10 @@ void LinearScanAllocator::rewrite_instructions() {
                     mem.index_vreg = VReg{};
                 }
             }
+            if (mem.index_preg.is_valid() && mem.index_preg == PReg::gpr(x64::GPR::R12) && mem.scale == Scale::One &&
+                mem.base_preg.is_valid() && mem.base_preg != PReg::gpr(x64::GPR::R12)) {
+                std::swap(mem.base_preg, mem.index_preg);
+            }
             return LirOperand::mem_custom(mem, op.size);
         }
         return op;
@@ -544,7 +578,7 @@ void LinearScanAllocator::rewrite_instructions() {
                  inst->opcode == LirOpcode::Movsd || inst->opcode == LirOpcode::Movss) &&
                 def_is_mem && use_is_mem) {
                 bool is_xmm = (inst->opcode == LirOpcode::Movsd || inst->opcode == LirOpcode::Movss);
-                PReg scratch = is_xmm ? PReg::xmm(XMM::XMM15) : PReg::gpr(GPR::R11);
+                PReg scratch = is_xmm ? PReg::xmm(XMM::XMM5) : PReg::gpr(GPR::R11);
                 uint8_t sz = inst->uses[0].size;
 
                 auto load_scratch = std::make_unique<LirInst>(
@@ -581,7 +615,7 @@ void LinearScanAllocator::rewrite_instructions() {
                 if (inst->is_call()) {
                     def_scratch = is_xmm_def ? PReg::xmm(XMM::XMM0) : PReg::gpr(GPR::RAX);
                 } else {
-                    def_scratch = is_xmm_def ? PReg::xmm(XMM::XMM15) : PReg::gpr(GPR::R11);
+                    def_scratch = is_xmm_def ? PReg::xmm(XMM::XMM5) : PReg::gpr(GPR::R11);
                 }
                 uint8_t sz = original_spill_def.size;
 
@@ -606,7 +640,7 @@ void LinearScanAllocator::rewrite_instructions() {
                 inst->defs[0] = LirOperand::preg(def_scratch, sz);
             }
 
-            // Handle any remaining spill uses with reserved scratch registers R10/R11 (GPR) or XMM14/XMM15 (XMM)
+            // Handle any remaining spill uses with reserved scratch registers R10/R11 (GPR) or XMM4/XMM5 (XMM)
             std::vector<int32_t> orig_slot_indices(inst->uses.size(), -1);
             for (size_t i = 0; i < inst->uses.size(); ++i) {
                 if (inst->uses[i].is_spill_slot()) {
@@ -617,7 +651,7 @@ void LinearScanAllocator::rewrite_instructions() {
             int gpr_scratch_idx = (has_spill_def && !is_xmm_def) ? 0 : 0;
             int xmm_scratch_idx = (has_spill_def && is_xmm_def) ? 0 : 0;
             PReg gpr_scratches[2] = {PReg::gpr(GPR::R10), PReg::gpr(GPR::R11)};
-            PReg xmm_scratches[2] = {PReg::xmm(XMM::XMM14), PReg::xmm(XMM::XMM15)};
+            PReg xmm_scratches[2] = {PReg::xmm(XMM::XMM4), PReg::xmm(XMM::XMM5)};
 
             for (size_t i = 0; i < inst->uses.size(); ++i) {
                 if (inst->uses[i].is_spill_slot()) {

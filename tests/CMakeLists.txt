@@ -38,6 +38,7 @@ add_executable(brass_unit_tests
     benchmarks/bench_numeric_modules.cpp
     unit/test_msvc_milestone.cpp
     unit/test_embedding_api.cpp
+    unit/test_mir_unroll_select.cpp
     differential/test_embedding_differential.cpp
 )
 

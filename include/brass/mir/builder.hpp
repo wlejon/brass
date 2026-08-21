@@ -85,6 +85,9 @@ public:
     Value* build_sge(Value* lhs, Value* rhs);
     Value* build_uge(Value* lhs, Value* rhs);
 
+    // Selection
+    Value* build_select(Value* cond, Value* true_val, Value* false_val);
+
     // Memory
     Value* build_load(Type type, Value* base);
     Value* build_load(Type type, Value* base, int32_t offset);
