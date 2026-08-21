@@ -31,6 +31,7 @@ add_executable(brass_unit_tests
     differential/test_fuzz_memory.cpp
     differential/test_fuzz_patching.cpp
     differential/test_fuzz_matrix.cpp
+    differential/test_fuzz_js_shapes.cpp
     differential/fuzz_generator.cpp
 )
 
@@ -53,6 +54,8 @@ add_executable(brass_benchmarks
     benchmarks/benchmark_suite.cpp
     benchmarks/bench_numeric.cpp
     benchmarks/bench_numeric_modules.cpp
+    benchmarks/bench_js_shapes.cpp
+    benchmarks/bench_js_shapes_modules.cpp
     benchmarks/bench_gc.cpp
     benchmarks/bench_compile_speed.cpp
 )

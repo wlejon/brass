@@ -572,7 +572,7 @@ void LinearScanAllocator::rewrite_instructions() {
                               inst->opcode == LirOpcode::Mulsd || inst->opcode == LirOpcode::Divsd ||
                               inst->opcode == LirOpcode::Sqrtsd || inst->opcode == LirOpcode::Xorpd ||
                               inst->opcode == LirOpcode::Cvtsi2sd || inst->opcode == LirOpcode::Cvtsi2sd32 ||
-                              inst->opcode == LirOpcode::Movq_gx);
+                              inst->opcode == LirOpcode::Movq_xg);
                 def_scratch = is_xmm_def ? PReg::xmm(XMM::XMM15) : PReg::gpr(GPR::R11);
                 uint8_t sz = original_spill_def.size;
 
@@ -605,7 +605,7 @@ void LinearScanAllocator::rewrite_instructions() {
                                       inst->opcode == LirOpcode::Mulsd || inst->opcode == LirOpcode::Divsd ||
                                       inst->opcode == LirOpcode::Sqrtsd || inst->opcode == LirOpcode::Ucomisd ||
                                       inst->opcode == LirOpcode::Xorpd || inst->opcode == LirOpcode::Cvttsd2si ||
-                                      inst->opcode == LirOpcode::Cvttsd2si32 || inst->opcode == LirOpcode::Movq_xg);
+                                      inst->opcode == LirOpcode::Cvttsd2si32 || inst->opcode == LirOpcode::Movq_gx);
                     PReg use_scratch = is_xmm_use ? PReg::xmm(XMM::XMM14) : PReg::gpr(GPR::R10);
                     uint8_t sz = inst->uses[i].size;
 

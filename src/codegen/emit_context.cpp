@@ -189,8 +189,8 @@ void EmitContext::emit_sse_instruction(const LirInst& inst) {
             }
             break;
         }
-        case LirOpcode::Movq_gx: enc_.movq(to_xmm(inst.defs[0]), to_gpr(inst.uses[0])); break;
-        case LirOpcode::Movq_xg: enc_.movq(to_gpr(inst.defs[0]), to_xmm(inst.uses[0])); break;
+        case LirOpcode::Movq_xg: enc_.movq(to_xmm(inst.defs[0]), to_gpr(inst.uses[0])); break;
+        case LirOpcode::Movq_gx: enc_.movq(to_gpr(inst.defs[0]), to_xmm(inst.uses[0])); break;
         case LirOpcode::Addsd: {
             XMM dst = to_xmm(inst.defs[0]);
             const auto& src = inst.uses.back();

@@ -124,7 +124,7 @@ void X64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
                 mabs->add_use(LirOperand::imm(static_cast<int64_t>(raw_bits), 8));
                 lir_bb.append_inst(std::move(mabs));
 
-                auto mq = std::make_unique<LirInst>(LirOpcode::Movq_gx);
+                auto mq = std::make_unique<LirInst>(LirOpcode::Movq_xg);
                 mq->add_def(LirOperand::vreg(dst, 8));
                 mq->add_use(LirOperand::vreg(tmp, 8));
                 mq->mir_origin = &inst;
@@ -251,7 +251,7 @@ void X64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
                 mabs->add_use(LirOperand::imm(static_cast<int64_t>(sign_mask), 8));
                 lir_bb.append_inst(std::move(mabs));
 
-                auto mq = std::make_unique<LirInst>(LirOpcode::Movq_gx);
+                auto mq = std::make_unique<LirInst>(LirOpcode::Movq_xg);
                 mq->add_def(LirOperand::vreg(tmp_xmm, 8));
                 mq->add_use(LirOperand::vreg(tmp_gpr, 8));
                 lir_bb.append_inst(std::move(mq));

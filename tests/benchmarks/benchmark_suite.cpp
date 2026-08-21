@@ -1,5 +1,6 @@
 #include "bench_utils.hpp"
 #include "bench_numeric.hpp"
+#include "bench_js_shapes.hpp"
 #include "bench_gc.hpp"
 #include "bench_compile_speed.hpp"
 #include <vector>
@@ -17,10 +18,13 @@ int main(int argc, char** argv) {
     // 1. Numeric & Algorithmic Microbenchmarks
     run_numeric_benchmarks(results);
 
-    // 2. GC Model Comparison (Brass Stack-Maps vs Shadow-Stack)
+    // 2. JS-Shaped Benchmarks (NaN-boxing, shape guards, patchable IC, Cheney GC alloc)
+    run_js_shapes_benchmarks(results);
+
+    // 3. GC Model Comparison (Brass Stack-Maps vs Shadow-Stack)
     run_gc_benchmark(results);
 
-    // 3. Compile-Speed Benchmark (Parse, Verify, ISEL, RegAlloc, Codegen)
+    // 4. Compile-Speed Benchmark (Parse, Verify, ISEL, RegAlloc, Codegen)
     run_compile_speed_benchmark(results);
 
     return 0;

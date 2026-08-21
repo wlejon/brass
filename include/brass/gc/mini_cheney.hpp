@@ -50,6 +50,12 @@ public:
     void set_stress_mode(bool enable) noexcept { stress_mode_ = enable; }
     bool stress_mode() const noexcept { return stress_mode_; }
 
+    // Fast allocation check
+    bool can_allocate_fast(size_t size) const noexcept {
+        size_t aligned_size = (size + 7) & ~static_cast<size_t>(7);
+        return !stress_mode_ && (free_ptr_ + sizeof(GcHeader) + aligned_size <= semispace_size_);
+    }
+
     // Object Validation
     bool is_valid_object(uintptr_t obj_addr) const noexcept;
     bool is_address_in_active_space(uintptr_t addr) const noexcept;

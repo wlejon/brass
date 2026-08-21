@@ -11,8 +11,8 @@ namespace brass {
 
 namespace {
 
-thread_local MiniCheneyGC* g_active_gc = nullptr;
-thread_local const ModuleStackMap* g_active_stack_maps = nullptr;
+static MiniCheneyGC* g_active_gc = nullptr;
+static const ModuleStackMap* g_active_stack_maps = nullptr;
 
 inline void get_caller_frame(uintptr_t& caller_rbp, uintptr_t& caller_ip) noexcept {
 #if defined(_MSC_VER) && !defined(__clang__)
@@ -91,6 +91,10 @@ uintptr_t brass_runtime_gc_alloc(
         throw std::runtime_error("MiniCheneyGC pointer is null in brass_runtime_gc_alloc");
     }
 
+    if (gc->can_allocate_fast(size)) {
+        return gc->allocate(size, pointer_mask, type_tag);
+    }
+
     uintptr_t cur_rbp = rbp;
     uintptr_t cur_ip = return_ip;
 
@@ -140,6 +144,9 @@ uintptr_t brass_gc_alloc(size_t size, uint64_t pointer_mask, uint32_t type_tag) 
     auto* gc = brass::brass_get_active_gc();
     if (!gc) {
         throw std::runtime_error("No active MiniCheneyGC in brass_gc_alloc");
+    }
+    if (gc->can_allocate_fast(size)) {
+        return gc->allocate(size, pointer_mask, type_tag);
     }
     const auto* maps = brass::brass_get_active_stack_maps();
     if (!maps) {
