@@ -11,9 +11,11 @@ func fibIter(%0: f64) -> f64 {
     br %7, b2, b3(%4, %5, %6)
   b2:
     %11: f64 = add %4, %5
-    %12: f64 = const.f64 1
-    %13: f64 = add %6, %12
-    jump b1(%5, %11, %13)
+    %12: f64 = const.f64 1000000007
+    %13: f64 = mod %11, %12
+    %14: f64 = const.f64 1
+    %15: f64 = add %6, %14
+    jump b1(%5, %13, %15)
   b3(%8: f64, %9: f64, %10: f64):
     ret %8
 }
@@ -30,14 +32,17 @@ func run() -> void {
     %7: f64 = call @fibIter(%6)
     %8: f64 = const.f64 30
     %9: f64 = call @fibIter(%8)
-    %10: dynamic = name.resolve "print"
-    %11: dynamic = const.undefined
-    %12: dynamic = box.f64 %1
-    %13: dynamic = box.f64 %3
-    %14: dynamic = box.f64 %5
-    %15: dynamic = box.f64 %7
-    %16: dynamic = box.f64 %9
-    %17: dynamic = call.dynamic %10, %11, 5, %12, %13, %14, %15, %16
+    %10: f64 = const.f64 2.5e+07
+    %11: f64 = call @fibIter(%10)
+    %12: dynamic = name.resolve "print"
+    %13: dynamic = const.undefined
+    %14: dynamic = box.f64 %1
+    %15: dynamic = box.f64 %3
+    %16: dynamic = box.f64 %5
+    %17: dynamic = box.f64 %7
+    %18: dynamic = box.f64 %9
+    %19: dynamic = box.f64 %11
+    %20: dynamic = call.dynamic %12, %13, 6, %14, %15, %16, %17, %18, %19
     ret
 }
 

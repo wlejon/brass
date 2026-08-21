@@ -18,7 +18,7 @@ func loopCapture() -> void {
   b1(%8: dynamic, %9: dynamic):
     %12: dynamic = env.get.tdz %9, 0, 0, "i"
     %13: f64 = unbox.f64 %12
-    %14: f64 = const.f64 4
+    %14: f64 = const.f64 3e+05
     %15: bool = cmp.le %13, %14
     br %15, b2, b4(%8)
   b2:

@@ -1,10 +1,12 @@
 # tools/run_corpus.ps1
-# Automates execution and verification of all 13 Bronze IL corpus programs
+# Automates timed execution and verification of all 13 Bronze IL corpus programs
+# Measures runtime medians and spreads across >= 5 runs per configuration.
 # Implements Law D: report tables are generated, not written.
 
 param (
     [string]$BrassIlPath = "$PSScriptRoot/../build/tools/brass-il.exe",
-    [string]$CorpusDir = "$PSScriptRoot/../tests/bronze_corpus"
+    [string]$CorpusDir = "$PSScriptRoot/../tests/bronze_corpus",
+    [int]$NumRuns = 5
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,14 +27,46 @@ $corpusPrograms = @(
     "13_nested_curry"
 )
 
+$demotedPrograms = @(
+    "03_collatz",
+    "04_fib_iter",
+    "07_prime_count",
+    "11_matrix_recurrence"
+)
+
 function Normalize-Output([string]$text) {
     if ($null -eq $text) { return "" }
     $tokens = $text -split '\s+' | Where-Object { $_ -ne "" }
     return ($tokens -join " ")
 }
 
+function Measure-ConfigTimes([string]$exePath, [string[]]$argsList, [int]$runs) {
+    # Warmup run to eliminate first-time process spawn / disk cache overhead
+    $lastOut = & $exePath @argsList 2>&1 | Out-String
+    $times = @()
+    for ($i = 0; $i -lt $runs; $i++) {
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $procOut = & $exePath @argsList 2>&1 | Out-String
+        $sw.Stop()
+        $times += $sw.Elapsed.TotalMilliseconds
+        $lastOut = $procOut
+    }
+    $sorted = $times | Sort-Object
+    $mid = [int]($runs / 2)
+    $med = $sorted[$mid]
+    $minVal = $sorted[0]
+    $maxVal = $sorted[$runs - 1]
+    $spread = ($maxVal - $minVal) / 2.0
+    return @{
+        Median = $med
+        Spread = $spread
+        Output = (Normalize-Output $lastOut)
+    }
+}
+
 Write-Host "===================================================================================================="
-Write-Host " Running Bronze Corpus Verification Suite (Law D Generated Table)"
+Write-Host " Running Bronze Corpus Timed Verification Suite (Law D Generated Table)"
+Write-Host " Executing $NumRuns runs per configuration for median & spread timing (ms)"
 Write-Host "===================================================================================================="
 
 $results = @()
@@ -55,55 +89,66 @@ foreach ($prog in $corpusPrograms) {
     $nodeNorm = Normalize-Output $nodeOutRaw
 
     # 2. Run Brass JIT Unoptimized (--no-opt)
-    $jitNoOptOutRaw = & $BrassIlPath $ilPath --no-opt --run --raw-output 2>&1 | Out-String
-    $jitNoOptNorm = Normalize-Output $jitNoOptOutRaw
+    $noOptRes = Measure-ConfigTimes $BrassIlPath @($ilPath, "--no-opt", "--run", "--raw-output") $NumRuns
 
-    # 3. Run Brass JIT Default Optimized
-    $jitOptOutRaw = & $BrassIlPath $ilPath --run --raw-output 2>&1 | Out-String
-    $jitOptNorm = Normalize-Output $jitOptOutRaw
+    # 3. Run Brass JIT with demotion disabled (--no-demote)
+    $noDemRes = Measure-ConfigTimes $BrassIlPath @($ilPath, "--no-demote", "--run", "--raw-output") $NumRuns
+
+    # 4. Run Brass JIT Default Full Optimized
+    $optRes = Measure-ConfigTimes $BrassIlPath @($ilPath, "--run", "--raw-output") $NumRuns
 
     # Verify matching
     $nodeMatchesExp = ($nodeNorm -eq $expectedNorm)
-    $jitNoOptMatchesExp = ($jitNoOptNorm -eq $expectedNorm)
-    $jitOptMatchesExp = ($jitOptNorm -eq $expectedNorm)
+    $noOptMatchesExp = ($noOptRes.Output -eq $expectedNorm)
+    $noDemMatchesExp = ($noDemRes.Output -eq $expectedNorm)
+    $optMatchesExp = ($optRes.Output -eq $expectedNorm)
 
     $status = "PASS"
-    if (-not ($nodeMatchesExp -and $jitNoOptMatchesExp -and $jitOptMatchesExp)) {
+    if (-not ($nodeMatchesExp -and $noOptMatchesExp -and $noDemMatchesExp -and $optMatchesExp)) {
         $status = "FAIL"
         $allPass = $false
     }
 
     $demotedInfo = "No"
-    if ($prog -in @("03_collatz", "04_fib_iter", "07_prime_count", "11_matrix_recurrence")) {
+    if ($prog -in $demotedPrograms) {
         $demotedInfo = "Yes (i64 loop)"
+    }
+
+    $speedupStr = if ($optRes.Median -gt 0) {
+        $pct = (($noDemRes.Median / $optRes.Median) - 1.0) * 100.0
+        "{0:+0.0;-0.0;+0.0}%" -f $pct
+    } else {
+        "0.0%"
     }
 
     $results += [PSCustomObject]@{
         Program = $prog
         NodeOracleMatch = if ($nodeMatchesExp) { "Match" } else { "Mismatch" }
-        JitNoOptMatch = if ($jitNoOptMatchesExp) { "Match" } else { "Mismatch" }
-        JitOptMatch = if ($jitOptMatchesExp) { "Match" } else { "Mismatch" }
+        OptTime = ("{0:F1} +/- {1:F1}" -f $optRes.Median, $optRes.Spread)
+        NoDemTime = ("{0:F1} +/- {1:F1}" -f $noDemRes.Median, $noDemRes.Spread)
+        NoOptTime = ("{0:F1} +/- {1:F1}" -f $noOptRes.Median, $noOptRes.Spread)
         Demoted = $demotedInfo
-        Output = $jitOptNorm
+        Speedup = $speedupStr
+        Output = $optRes.Output
         Status = $status
     }
 }
 
 Write-Host ""
-Write-Host "### Generated Verification Table (produced by tools/run_corpus.ps1)"
+Write-Host "### Generated Law D Timed Verification Table (produced by tools/run_corpus.ps1)"
 Write-Host ""
-Write-Host "| # | Program | Node Oracle (node -e '...') | Brass JIT (--no-opt) | Brass JIT (Opt) | f64 Demotion | Output | Status |"
-Write-Host "|---|---------|-----------------------------|----------------------|-----------------|--------------|--------|--------|"
+Write-Host "| # | Program | Full Opt (ms) | No-Demote (ms) | No-Opt (ms) | f64 Demotion | Demote Speedup | Output | Status |"
+Write-Host "|---|---------|---------------|----------------|-------------|--------------|----------------|--------|--------|"
 
 $idx = 1
 foreach ($r in $results) {
-    Write-Host ("| {0:D2} | `{1}` | {2} | {3} | {4} | {5} | `{6}` | **{7}** |" -f $idx, $r.Program, $r.NodeOracleMatch, $r.JitNoOptMatch, $r.JitOptMatch, $r.Demoted, $r.Output, $r.Status)
+    Write-Host ("| {0:D2} | `{1}` | {2} | {3} | {4} | {5} | {6} | `{7}` | **{8}** |" -f $idx, $r.Program, $r.OptTime, $r.NoDemTime, $r.NoOptTime, $r.Demoted, $r.Speedup, $r.Output, $r.Status)
     $idx++
 }
 
 Write-Host ""
 if ($allPass) {
-    Write-Host "[SUCCESS] All 13 Bronze corpus programs 100% verified byte-identical against Node oracle and .expected files."
+    Write-Host ("[SUCCESS] All {0} Bronze corpus programs 100% verified byte-identical across Node.js oracle, --no-opt, --no-demote, and full opt." -f $corpusPrograms.Count)
 } else {
     Write-Host "[FAILURE] Regressions detected in Bronze corpus execution."
     exit 1

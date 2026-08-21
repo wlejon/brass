@@ -11,7 +11,7 @@ using namespace brass::il;
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [-o <output.obj>] [--no-opt] [--reassoc]\n";
+        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc]\n";
         return 1;
     }
 
@@ -32,6 +32,8 @@ int main(int argc, char** argv) {
             raw_output = true;
         } else if (arg == "--no-opt") {
             options.enable_optimizations = false;
+        } else if (arg == "--no-demote") {
+            options.enable_f64_demote = false;
         } else if (arg == "--reassoc") {
             options.allow_fp_reassociation = true;
         } else if (arg == "-o" && i + 1 < argc) {

@@ -8,8 +8,14 @@ function mathTest(a, b) {
   return add + sub + mul + div + rem + neg;
 }
 function run() {
-  let r1 = mathTest(100, 25);
-  let r2 = mathTest(7, 3);
+  let r1 = 0;
+  let r2 = 0;
+  let i = 0;
+  while (i < 4000000) {
+    r1 = mathTest(100, 25);
+    r2 = mathTest(7, 3);
+    i = i + 1;
+  }
   print(r1, r2);
 }
 run();

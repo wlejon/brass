@@ -18,17 +18,30 @@ func mathTest(%0: f64, %1: f64) -> f64 {
 
 func run() -> void {
   b0:
-    %0: f64 = const.f64 100
-    %1: f64 = const.f64 25
-    %2: f64 = call @mathTest(%0, %1)
-    %3: f64 = const.f64 7
-    %4: f64 = const.f64 3
-    %5: f64 = call @mathTest(%3, %4)
-    %6: dynamic = name.resolve "print"
-    %7: dynamic = const.undefined
-    %8: dynamic = box.f64 %2
-    %9: dynamic = box.f64 %5
-    %10: dynamic = call.dynamic %6, %7, 2, %8, %9
+    %0: f64 = const.f64 0
+    %1: f64 = const.f64 0
+    %2: f64 = const.f64 0
+    jump b1(%0, %1, %2)
+  b1(%3: f64, %4: f64, %5: f64):
+    %6: f64 = const.f64 4e+06
+    %7: bool = cmp.lt %5, %6
+    br %7, b2, b3(%3, %4, %5)
+  b2:
+    %11: f64 = const.f64 100
+    %12: f64 = const.f64 25
+    %13: f64 = call @mathTest(%11, %12)
+    %14: f64 = const.f64 7
+    %15: f64 = const.f64 3
+    %16: f64 = call @mathTest(%14, %15)
+    %17: f64 = const.f64 1
+    %18: f64 = add %5, %17
+    jump b1(%13, %16, %18)
+  b3(%8: f64, %9: f64, %10: f64):
+    %19: dynamic = name.resolve "print"
+    %20: dynamic = const.undefined
+    %21: dynamic = box.f64 %8
+    %22: dynamic = box.f64 %9
+    %23: dynamic = call.dynamic %19, %20, 2, %21, %22
     ret
 }
 

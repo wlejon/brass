@@ -42,7 +42,7 @@ func run() -> void {
     %4: f64 = const.f64 2
     %5: f64 = call @ack(%3, %4)
     %6: f64 = const.f64 3
-    %7: f64 = const.f64 3
+    %7: f64 = const.f64 9
     %8: f64 = call @ack(%6, %7)
     %9: dynamic = name.resolve "print"
     %10: dynamic = const.undefined

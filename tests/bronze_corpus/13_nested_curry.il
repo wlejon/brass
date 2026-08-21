@@ -18,23 +18,52 @@ func run() -> void {
     %3: f64 = const.f64 4
     %4: dynamic = box.f64 %3
     %5: dynamic = call.dynamic %1, %2, 1, %4
-    %6: dynamic = const.undefined
-    %7: f64 = const.f64 3
-    %8: dynamic = box.f64 %7
-    %9: dynamic = call.dynamic %5, %6, 1, %8
-    %10: f64 = const.f64 9
-    %11: dynamic = call @curried3(%10)
-    %12: dynamic = const.undefined
-    %13: f64 = const.f64 8
-    %14: dynamic = box.f64 %13
-    %15: dynamic = call.dynamic %11, %12, 1, %14
-    %16: dynamic = const.undefined
-    %17: f64 = const.f64 7
-    %18: dynamic = box.f64 %17
-    %19: dynamic = call.dynamic %15, %16, 1, %18
-    %20: dynamic = name.resolve "print"
-    %21: dynamic = const.undefined
-    %22: dynamic = call.dynamic %20, %21, 2, %9, %19
+    %6: f64 = const.f64 0
+    %7: f64 = const.f64 0
+    %10: dynamic = box.f64 %6
+    jump b1(%10, %7)
+  b1(%8: dynamic, %9: f64):
+    %11: f64 = const.f64 2e+05
+    %12: bool = cmp.lt %9, %11
+    br %12, b2, b3(%8, %9)
+  b2:
+    %15: dynamic = const.undefined
+    %16: f64 = const.f64 3
+    %17: dynamic = box.f64 %16
+    %18: dynamic = call.dynamic %5, %15, 1, %17
+    %19: dynamic = add %8, %18
+    %20: f64 = const.f64 9
+    %21: dynamic = call @curried3(%20)
+    %22: dynamic = const.undefined
+    %23: f64 = const.f64 8
+    %24: dynamic = box.f64 %23
+    %25: dynamic = call.dynamic %21, %22, 1, %24
+    %26: dynamic = const.undefined
+    %27: f64 = const.f64 7
+    %28: dynamic = box.f64 %27
+    %29: dynamic = call.dynamic %25, %26, 1, %28
+    %30: dynamic = add %19, %29
+    %31: f64 = const.f64 1
+    %32: f64 = add %9, %31
+    jump b1(%30, %32)
+  b3(%13: dynamic, %14: f64):
+    %33: dynamic = const.undefined
+    %34: f64 = const.f64 3
+    %35: dynamic = box.f64 %34
+    %36: dynamic = call.dynamic %5, %33, 1, %35
+    %37: f64 = const.f64 9
+    %38: dynamic = call @curried3(%37)
+    %39: dynamic = const.undefined
+    %40: f64 = const.f64 8
+    %41: dynamic = box.f64 %40
+    %42: dynamic = call.dynamic %38, %39, 1, %41
+    %43: dynamic = const.undefined
+    %44: f64 = const.f64 7
+    %45: dynamic = box.f64 %44
+    %46: dynamic = call.dynamic %42, %43, 1, %45
+    %47: dynamic = name.resolve "print"
+    %48: dynamic = const.undefined
+    %49: dynamic = call.dynamic %47, %48, 3, %36, %46, %13
     ret
 }
 

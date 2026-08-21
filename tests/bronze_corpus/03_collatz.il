@@ -32,6 +32,26 @@ func collatz(%0: f64) -> f64 {
     jump b1(%18, %20)
 }
 
+func collatzRange(%0: f64) -> f64 {
+  b0:
+    %1: f64 = const.f64 0
+    %2: f64 = const.f64 1
+    jump b1(%1, %2)
+  b1(%3: f64, %4: f64):
+    %5: bool = cmp.le %4, %0
+    br %5, b2, b3(%3, %4)
+  b2:
+    %8: f64 = call @collatz(%4)
+    %9: f64 = add %3, %8
+    %10: f64 = const.f64 1000000007
+    %11: f64 = mod %9, %10
+    %12: f64 = const.f64 1
+    %13: f64 = add %4, %12
+    jump b1(%11, %13)
+  b3(%6: f64, %7: f64):
+    ret %6
+}
+
 func run() -> void {
   b0:
     %0: f64 = const.f64 27
@@ -40,12 +60,15 @@ func run() -> void {
     %3: f64 = call @collatz(%2)
     %4: f64 = const.f64 1
     %5: f64 = call @collatz(%4)
-    %6: dynamic = name.resolve "print"
-    %7: dynamic = const.undefined
-    %8: dynamic = box.f64 %1
-    %9: dynamic = box.f64 %3
-    %10: dynamic = box.f64 %5
-    %11: dynamic = call.dynamic %6, %7, 3, %8, %9, %10
+    %6: f64 = const.f64 150000
+    %7: f64 = call @collatzRange(%6)
+    %8: dynamic = name.resolve "print"
+    %9: dynamic = const.undefined
+    %10: dynamic = box.f64 %1
+    %11: dynamic = box.f64 %3
+    %12: dynamic = box.f64 %5
+    %13: dynamic = box.f64 %7
+    %14: dynamic = call.dynamic %8, %9, 4, %10, %11, %12, %13
     ret
 }
 

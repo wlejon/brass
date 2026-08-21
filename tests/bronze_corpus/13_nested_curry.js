@@ -8,8 +8,14 @@ function curried3(a) {
 function run() {
   let f1 = curried3(5);
   let f2 = f1(4);
+  let sum = 0;
+  let i = 0;
+  while (i < 200000) {
+    sum = sum + f2(3) + curried3(9)(8)(7);
+    i = i + 1;
+  }
   let r1 = f2(3);
   let r2 = curried3(9)(8)(7);
-  print(r1, r2);
+  print(r1, r2, sum);
 }
 run();

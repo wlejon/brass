@@ -4,7 +4,7 @@ function recurrence2D(n) {
   while (i < n) {
     let j = 0;
     while (j < n) {
-      sum = sum + (i * 3 + j * 7 + 1);
+      sum = (sum + (i * 3 + j * 7 + 1)) % 1000000007;
       j = j + 1;
     }
     i = i + 1;
@@ -14,6 +14,7 @@ function recurrence2D(n) {
 function run() {
   let r5 = recurrence2D(5);
   let r10 = recurrence2D(10);
-  print(r5, r10);
+  let rLarge = recurrence2D(6000);
+  print(r5, r10, rLarge);
 }
 run();

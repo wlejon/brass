@@ -21,6 +21,7 @@ function countPrimes(limit) {
 function run() {
   let c100 = countPrimes(100);
   let c500 = countPrimes(500);
-  print(c100, c500);
+  let cLarge = countPrimes(500000);
+  print(c100, c500, cLarge);
 }
 run();

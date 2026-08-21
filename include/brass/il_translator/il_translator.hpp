@@ -16,6 +16,7 @@ struct TranslatorOptions {
     bool enable_optimizations = true;
     bool allow_fp_reassociation = false;
     bool trace_lowering = false;
+    bool enable_f64_demote = true;
 };
 
 struct TranslationResult {

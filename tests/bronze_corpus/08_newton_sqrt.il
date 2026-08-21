@@ -24,18 +24,31 @@ func sqrtApprox(%0: f64) -> f64 {
 
 func run() -> void {
   b0:
-    %0: f64 = const.f64 144
-    %1: f64 = call @sqrtApprox(%0)
-    %2: f64 = const.f64 256
-    %3: f64 = call @sqrtApprox(%2)
-    %4: f64 = const.f64 625
-    %5: f64 = call @sqrtApprox(%4)
-    %6: dynamic = name.resolve "print"
-    %7: dynamic = const.undefined
-    %8: dynamic = box.f64 %1
-    %9: dynamic = box.f64 %3
-    %10: dynamic = box.f64 %5
-    %11: dynamic = call.dynamic %6, %7, 3, %8, %9, %10
+    %0: f64 = const.f64 0
+    %1: f64 = const.f64 0
+    jump b1(%0, %1)
+  b1(%2: f64, %3: f64):
+    %4: f64 = const.f64 1e+06
+    %5: bool = cmp.lt %3, %4
+    br %5, b2, b3(%2, %3)
+  b2:
+    %8: f64 = const.f64 625
+    %9: f64 = call @sqrtApprox(%8)
+    %10: f64 = add %2, %9
+    %11: f64 = const.f64 1
+    %12: f64 = add %3, %11
+    jump b1(%10, %12)
+  b3(%6: f64, %7: f64):
+    %13: f64 = const.f64 144
+    %14: f64 = call @sqrtApprox(%13)
+    %15: f64 = const.f64 256
+    %16: f64 = call @sqrtApprox(%15)
+    %17: dynamic = name.resolve "print"
+    %18: dynamic = const.undefined
+    %19: dynamic = box.f64 %14
+    %20: dynamic = box.f64 %16
+    %21: dynamic = box.f64 %6
+    %22: dynamic = call.dynamic %17, %18, 3, %19, %20, %21
     ret
 }
 

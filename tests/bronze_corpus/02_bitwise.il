@@ -30,13 +30,25 @@ func bitTest(%0: f64, %1: f64) -> f64 {
 
 func run() -> void {
   b0:
-    %0: f64 = const.f64 12345
-    %1: f64 = const.f64 5
-    %2: f64 = call @bitTest(%0, %1)
-    %3: dynamic = name.resolve "print"
-    %4: dynamic = const.undefined
-    %5: dynamic = box.f64 %2
-    %6: dynamic = call.dynamic %3, %4, 1, %5
+    %0: f64 = const.f64 0
+    %1: f64 = const.f64 0
+    jump b1(%0, %1)
+  b1(%2: f64, %3: f64):
+    %4: f64 = const.f64 6e+06
+    %5: bool = cmp.lt %3, %4
+    br %5, b2, b3(%2, %3)
+  b2:
+    %8: f64 = const.f64 12345
+    %9: f64 = const.f64 5
+    %10: f64 = call @bitTest(%8, %9)
+    %11: f64 = const.f64 1
+    %12: f64 = add %3, %11
+    jump b1(%10, %12)
+  b3(%6: f64, %7: f64):
+    %13: dynamic = name.resolve "print"
+    %14: dynamic = const.undefined
+    %15: dynamic = box.f64 %6
+    %16: dynamic = call.dynamic %13, %14, 1, %15
     ret
 }
 

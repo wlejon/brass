@@ -6,6 +6,7 @@ function run() {
   let f5 = fibRec(5);
   let f10 = fibRec(10);
   let f15 = fibRec(15);
-  print(f5, f10, f15);
+  let f34 = fibRec(34);
+  print(f5, f10, f15, f34);
 }
 run();

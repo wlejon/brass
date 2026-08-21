@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """
 tools/run_corpus.py
-Executes and verifies all 13 Bronze IL corpus programs across Node.js oracle, Brass JIT unoptimized, and Brass JIT optimized.
+Executes and verifies all 13 Bronze IL corpus programs across Node.js oracle,
+Brass JIT unoptimized (--no-opt), Brass JIT no-demote (--no-demote), and Brass JIT full optimized.
+Measures runtime medians and spreads across >= 5 runs per configuration.
 Implements Law D: report tables are generated, not written.
 """
 
 import subprocess
 import sys
+import time
 from pathlib import Path
+from statistics import median
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 CORPUS_DIR = ROOT_DIR / "tests" / "bronze_corpus"
@@ -31,13 +35,40 @@ PROGRAMS = [
     "13_nested_curry",
 ]
 
+DEMOTED_PROGRAMS = {
+    "03_collatz",
+    "04_fib_iter",
+    "07_prime_count",
+    "11_matrix_recurrence",
+}
+
+NUM_RUNS = 5
+
 def normalize(text: str) -> str:
     return " ".join(text.split())
 
+def run_timed_config(cmd, num_runs=NUM_RUNS):
+    # Warmup to eliminate first-time process spawn / OS cache overhead
+    warmup_res = subprocess.run(cmd, capture_output=True, text=True)
+    times = []
+    last_stdout = warmup_res.stdout
+    for _ in range(num_runs):
+        t0 = time.perf_counter()
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        t1 = time.perf_counter()
+        times.append((t1 - t0) * 1000.0)
+        last_stdout = res.stdout
+    med_t = median(times)
+    min_t = min(times)
+    max_t = max(times)
+    spread = (max_t - min_t) / 2.0
+    return med_t, spread, min_t, max_t, normalize(last_stdout)
+
 def main():
-    print("=" * 100)
-    print(" Running Bronze Corpus Verification Suite (Law D Generated Table)")
-    print("=" * 100)
+    print("=" * 115)
+    print(" Running Bronze Corpus Timed Verification Suite (Law D Generated Table)")
+    print(f" Executing {NUM_RUNS} runs per configuration for median & spread timing (ms)")
+    print("=" * 115)
 
     results = []
     all_pass = True
@@ -62,46 +93,61 @@ def main():
         node_norm = normalize(node_res.stdout)
 
         # 2. Run Brass JIT unoptimized (--no-opt)
-        jit_no_opt_res = subprocess.run([str(BRASS_IL), str(il_file), "--no-opt", "--run", "--raw-output"], capture_output=True, text=True)
-        jit_no_opt_norm = normalize(jit_no_opt_res.stdout)
+        no_opt_med, no_opt_spread, no_opt_min, no_opt_max, no_opt_norm = run_timed_config(
+            [str(BRASS_IL), str(il_file), "--no-opt", "--run", "--raw-output"]
+        )
 
-        # 3. Run Brass JIT default optimized
-        jit_opt_res = subprocess.run([str(BRASS_IL), str(il_file), "--run", "--raw-output"], capture_output=True, text=True)
-        jit_opt_norm = normalize(jit_opt_res.stdout)
+        # 3. Run Brass JIT with demotion disabled (--no-demote)
+        no_dem_med, no_dem_spread, no_dem_min, no_dem_max, no_dem_norm = run_timed_config(
+            [str(BRASS_IL), str(il_file), "--no-demote", "--run", "--raw-output"]
+        )
+
+        # 4. Run Brass JIT default full optimized
+        opt_med, opt_spread, opt_min, opt_max, opt_norm = run_timed_config(
+            [str(BRASS_IL), str(il_file), "--run", "--raw-output"]
+        )
 
         node_match = (node_norm == expected_norm)
-        no_opt_match = (jit_no_opt_norm == expected_norm)
-        opt_match = (jit_opt_norm == expected_norm)
+        no_opt_match = (no_opt_norm == expected_norm)
+        no_dem_match = (no_dem_norm == expected_norm)
+        opt_match = (opt_norm == expected_norm)
 
         status = "PASS"
-        if not (node_match and no_opt_match and opt_match):
+        if not (node_match and no_opt_match and no_dem_match and opt_match):
             status = "FAIL"
             all_pass = False
 
-        demoted = "Yes (i64 loop)" if prog in {"03_collatz", "04_fib_iter", "07_prime_count", "11_matrix_recurrence"} else "No"
+        is_demoted = prog in DEMOTED_PROGRAMS
+        demoted_str = "Yes (i64 loop)" if is_demoted else "No"
+
+        # Demote speedup vs no-demote
+        speedup_val = ((no_dem_med / opt_med) - 1.0) * 100.0 if opt_med > 0 else 0.0
+        speedup_str = f"{speedup_val:+.1f}%"
 
         results.append({
             "prog": prog,
             "node_match": "Match" if node_match else "Mismatch",
-            "no_opt_match": "Match" if no_opt_match else "Mismatch",
-            "opt_match": "Match" if opt_match else "Mismatch",
-            "demoted": demoted,
-            "output": jit_opt_norm,
+            "no_opt_time": f"{no_opt_med:.1f} +/- {no_opt_spread:.1f}",
+            "no_dem_time": f"{no_dem_med:.1f} +/- {no_dem_spread:.1f}",
+            "opt_time": f"{opt_med:.1f} +/- {opt_spread:.1f}",
+            "demoted": demoted_str,
+            "speedup": speedup_str,
+            "output": opt_norm,
             "status": status,
         })
 
     print()
-    print("### Generated Verification Table (produced by `tools/run_corpus.py`)")
+    print("### Generated Law D Timed Verification Table (produced by `tools/run_corpus.py`)")
     print()
-    print("| # | Program | Node Oracle (`node -e '...'`) | Brass JIT (`--no-opt`) | Brass JIT (Opt) | f64 Demotion | Output | Status |")
-    print("|---|---------|-------------------------------|------------------------|-----------------|--------------|--------|--------|")
+    print("| # | Program | Full Opt (ms) | No-Demote (ms) | No-Opt (ms) | f64 Demotion | Demote Speedup | Output | Status |")
+    print("|---|---------|---------------|----------------|-------------|--------------|----------------|--------|--------|")
 
     for i, r in enumerate(results, 1):
-        print(f"| {i:02d} | `{r['prog']}` | {r['node_match']} | {r['no_opt_match']} | {r['opt_match']} | {r['demoted']} | `{r['output']}` | **{r['status']}** |")
+        print(f"| {i:02d} | `{r['prog']}` | {r['opt_time']} | {r['no_dem_time']} | {r['no_opt_time']} | {r['demoted']} | {r['speedup']} | `{r['output']}` | **{r['status']}** |")
 
     print()
     if all_pass:
-        print("[SUCCESS] All 13 Bronze corpus programs 100% verified byte-identical against Node oracle and .expected files.")
+        print(f"[SUCCESS] All {len(PROGRAMS)} Bronze corpus programs 100% verified byte-identical across Node.js oracle, --no-opt, --no-demote, and full opt.")
         return 0
     else:
         print("[FAILURE] Regressions detected in Bronze corpus execution.")

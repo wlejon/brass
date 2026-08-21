@@ -28,12 +28,15 @@ func run() -> void {
     %3: f64 = call @fibRec(%2)
     %4: f64 = const.f64 15
     %5: f64 = call @fibRec(%4)
-    %6: dynamic = name.resolve "print"
-    %7: dynamic = const.undefined
-    %8: dynamic = box.f64 %1
-    %9: dynamic = box.f64 %3
-    %10: dynamic = box.f64 %5
-    %11: dynamic = call.dynamic %6, %7, 3, %8, %9, %10
+    %6: f64 = const.f64 34
+    %7: f64 = call @fibRec(%6)
+    %8: dynamic = name.resolve "print"
+    %9: dynamic = const.undefined
+    %10: dynamic = box.f64 %1
+    %11: dynamic = box.f64 %3
+    %12: dynamic = box.f64 %5
+    %13: dynamic = box.f64 %7
+    %14: dynamic = call.dynamic %8, %9, 4, %10, %11, %12, %13
     ret
 }
 

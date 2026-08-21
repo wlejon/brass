@@ -69,11 +69,14 @@ func run() -> void {
     %1: f64 = call @countPrimes(%0)
     %2: f64 = const.f64 500
     %3: f64 = call @countPrimes(%2)
-    %4: dynamic = name.resolve "print"
-    %5: dynamic = const.undefined
-    %6: dynamic = box.f64 %1
-    %7: dynamic = box.f64 %3
-    %8: dynamic = call.dynamic %4, %5, 2, %6, %7
+    %4: f64 = const.f64 5e+05
+    %5: f64 = call @countPrimes(%4)
+    %6: dynamic = name.resolve "print"
+    %7: dynamic = const.undefined
+    %8: dynamic = box.f64 %1
+    %9: dynamic = box.f64 %3
+    %10: dynamic = box.f64 %5
+    %11: dynamic = call.dynamic %6, %7, 3, %8, %9, %10
     ret
 }
 

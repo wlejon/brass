@@ -25,13 +25,15 @@ func recurrence2D(%0: f64) -> f64 {
     %19: f64 = const.f64 1
     %20: f64 = add %18, %19
     %21: f64 = add %9, %20
-    %22: f64 = const.f64 1
-    %23: f64 = add %10, %22
-    jump b4(%21, %23)
-  b6(%12: f64, %13: f64):
+    %22: f64 = const.f64 1000000007
+    %23: f64 = mod %21, %22
     %24: f64 = const.f64 1
-    %25: f64 = add %4, %24
-    jump b1(%12, %25)
+    %25: f64 = add %10, %24
+    jump b4(%23, %25)
+  b6(%12: f64, %13: f64):
+    %26: f64 = const.f64 1
+    %27: f64 = add %4, %26
+    jump b1(%12, %27)
 }
 
 func run() -> void {
@@ -40,11 +42,14 @@ func run() -> void {
     %1: f64 = call @recurrence2D(%0)
     %2: f64 = const.f64 10
     %3: f64 = call @recurrence2D(%2)
-    %4: dynamic = name.resolve "print"
-    %5: dynamic = const.undefined
-    %6: dynamic = box.f64 %1
-    %7: dynamic = box.f64 %3
-    %8: dynamic = call.dynamic %4, %5, 2, %6, %7
+    %4: f64 = const.f64 6000
+    %5: f64 = call @recurrence2D(%4)
+    %6: dynamic = name.resolve "print"
+    %7: dynamic = const.undefined
+    %8: dynamic = box.f64 %1
+    %9: dynamic = box.f64 %3
+    %10: dynamic = box.f64 %5
+    %11: dynamic = call.dynamic %6, %7, 3, %8, %9, %10
     ret
 }
 

@@ -137,6 +137,7 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
     if (options_.enable_optimizations) {
         LoopOptOptions opt_opts;
         opt_opts.enable_fp_reassociation = options_.allow_fp_reassociation;
+        opt_opts.enable_f64_demote = options_.enable_f64_demote;
         optimize_module_loops(*mod, opt_opts);
         if (!verify_module(*mod, diag_)) {
             return nullptr;
