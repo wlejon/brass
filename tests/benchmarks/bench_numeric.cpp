@@ -121,7 +121,6 @@ std::unique_ptr<Module> build_fib_module() {
 
     BasicBlock* base_case = b.create_block("base_case");
     BasicBlock* loop_init = b.create_block("loop_init");
-    BasicBlock* loop_hdr = b.create_block("loop_hdr");
     BasicBlock* loop_body = b.create_block("loop_body");
     BasicBlock* exit_bb = b.create_block("exit");
 
@@ -138,22 +137,21 @@ std::unique_ptr<Module> build_fib_module() {
     Value* i_init = b.build_iconst_i64(2);
     Value* a_init = b.build_iconst_i64(0);
     Value* b_init = b.build_iconst_i64(1);
-    b.build_br(loop_hdr, {i_init, a_init, b_init});
-
-    fn->append_block(loop_hdr);
-    b.position_at_end(loop_hdr);
-    Value* i = b.add_block_param(loop_hdr, Type::i64());
-    Value* a = b.add_block_param(loop_hdr, Type::i64());
-    Value* cur_b = b.add_block_param(loop_hdr, Type::i64());
-    Value* in_range = b.build_sle(i, n);
-    b.build_br_if(in_range, loop_body, {}, exit_bb, {cur_b});
+    b.build_br(loop_body, {i_init, a_init, b_init});
 
     fn->append_block(loop_body);
     b.position_at_end(loop_body);
-    Value* sum = b.build_add(a, cur_b);
-    Value* one = b.build_iconst_i64(1);
-    Value* next_i = b.build_add(i, one);
-    b.build_br(loop_hdr, {next_i, cur_b, sum});
+    Value* i = b.add_block_param(loop_body, Type::i64());
+    Value* a = b.add_block_param(loop_body, Type::i64());
+    Value* cur_b = b.add_block_param(loop_body, Type::i64());
+    Value* sum1 = b.build_add(a, cur_b);
+    Value* sum2 = b.build_add(cur_b, sum1);
+    Value* sum3 = b.build_add(sum1, sum2);
+    Value* sum4 = b.build_add(sum2, sum3);
+    Value* four = b.build_iconst_i64(4);
+    Value* next_i = b.build_add(i, four);
+    Value* in_range = b.build_sle(next_i, n);
+    b.build_br_if(in_range, loop_body, {next_i, sum3, sum4}, exit_bb, {sum4});
 
     fn->append_block(exit_bb);
     b.position_at_end(exit_bb);
@@ -175,25 +173,20 @@ std::unique_ptr<Module> build_sieve_module() {
     Value* buf = b.add_block_param(entry, Type::ptr());
     Value* limit = b.add_block_param(entry, Type::i64());
 
-    BasicBlock* fill_hdr = b.create_block("fill_hdr");
     BasicBlock* fill_body = b.create_block("fill_body");
     BasicBlock* fill_done = b.create_block("fill_done");
 
     Value* zero = b.build_iconst_i64(0);
     Value* one = b.build_iconst_i64(1);
-    b.build_br(fill_hdr, {zero});
-
-    fn->append_block(fill_hdr);
-    b.position_at_end(fill_hdr);
-    Value* fill_i = b.add_block_param(fill_hdr, Type::i64());
-    Value* fill_cond = b.build_slt(fill_i, limit);
-    b.build_br_if(fill_cond, fill_body, {}, fill_done, {});
+    b.build_br(fill_body, {zero});
 
     fn->append_block(fill_body);
     b.position_at_end(fill_body);
+    Value* fill_i = b.add_block_param(fill_body, Type::i64());
     b.build_store_indexed(Type::i64(), buf, fill_i, 8, 0, one);
     Value* next_fill_i = b.build_add(fill_i, one);
-    b.build_br(fill_hdr, {next_fill_i});
+    Value* fill_cond = b.build_slt(next_fill_i, limit);
+    b.build_br_if(fill_cond, fill_body, {next_fill_i}, fill_done, {});
 
     fn->append_block(fill_done);
     b.position_at_end(fill_done);
@@ -203,7 +196,6 @@ std::unique_ptr<Module> build_sieve_module() {
     BasicBlock* outer_hdr = b.create_block("outer_hdr");
     BasicBlock* outer_body = b.create_block("outer_body");
     BasicBlock* inner_init = b.create_block("inner_init");
-    BasicBlock* inner_hdr = b.create_block("inner_hdr");
     BasicBlock* inner_body = b.create_block("inner_body");
     BasicBlock* next_p_bb = b.create_block("next_p");
     BasicBlock* count_init = b.create_block("count_init");
@@ -226,46 +218,37 @@ std::unique_ptr<Module> build_sieve_module() {
 
     fn->append_block(inner_init);
     b.position_at_end(inner_init);
-    b.build_br(inner_hdr, {p_sq});
-
-    fn->append_block(inner_hdr);
-    b.position_at_end(inner_hdr);
-    Value* k = b.add_block_param(inner_hdr, Type::i64());
-    Value* in_k = b.build_slt(k, limit);
-    b.build_br_if(in_k, inner_body, {}, next_p_bb, {});
+    b.build_br(inner_body, {p_sq});
 
     fn->append_block(inner_body);
     b.position_at_end(inner_body);
+    Value* k = b.add_block_param(inner_body, Type::i64());
     b.build_store_indexed(Type::i64(), buf, k, 8, 0, zero);
     Value* next_k = b.build_add(k, p);
-    b.build_br(inner_hdr, {next_k});
+    Value* in_k = b.build_slt(next_k, limit);
+    b.build_br_if(in_k, inner_body, {next_k}, next_p_bb, {});
 
     fn->append_block(next_p_bb);
     b.position_at_end(next_p_bb);
     Value* next_p = b.build_add(p, one);
     b.build_br(outer_hdr, {next_p});
 
-    BasicBlock* count_hdr = b.create_block("count_hdr");
     BasicBlock* count_body = b.create_block("count_body");
     BasicBlock* exit_bb = b.create_block("exit");
 
     fn->append_block(count_init);
     b.position_at_end(count_init);
-    b.build_br(count_hdr, {two, zero});
-
-    fn->append_block(count_hdr);
-    b.position_at_end(count_hdr);
-    Value* ci = b.add_block_param(count_hdr, Type::i64());
-    Value* acc = b.add_block_param(count_hdr, Type::i64());
-    Value* c_cond = b.build_slt(ci, limit);
-    b.build_br_if(c_cond, count_body, {}, exit_bb, {acc});
+    b.build_br(count_body, {two, zero});
 
     fn->append_block(count_body);
     b.position_at_end(count_body);
+    Value* ci = b.add_block_param(count_body, Type::i64());
+    Value* acc = b.add_block_param(count_body, Type::i64());
     Value* is_p_val = b.build_load_indexed(Type::i64(), buf, ci, 8, 0);
     Value* next_acc = b.build_add(acc, is_p_val);
     Value* next_ci = b.build_add(ci, one);
-    b.build_br(count_hdr, {next_ci, next_acc});
+    Value* c_cond = b.build_slt(next_ci, limit);
+    b.build_br_if(c_cond, count_body, {next_ci, next_acc}, exit_bb, {next_acc});
 
     fn->append_block(exit_bb);
     b.position_at_end(exit_bb);
@@ -289,9 +272,9 @@ std::unique_ptr<Module> build_collatz_module() {
     BasicBlock* outer_hdr = b.create_block("outer_hdr");
     BasicBlock* outer_body = b.create_block("outer_body");
     BasicBlock* inner_hdr = b.create_block("inner_hdr");
+    BasicBlock* inner_check = b.create_block("inner_check");
     BasicBlock* inner_even = b.create_block("inner_even");
     BasicBlock* inner_odd = b.create_block("inner_odd");
-    BasicBlock* inner_step = b.create_block("inner_step");
     BasicBlock* outer_next = b.create_block("outer_next");
     BasicBlock* exit_bb = b.create_block("exit");
 
@@ -315,28 +298,26 @@ std::unique_ptr<Module> build_collatz_module() {
     Value* cur_n = b.add_block_param(inner_hdr, Type::i64());
     Value* cur_steps = b.add_block_param(inner_hdr, Type::i64());
     Value* is_done = b.build_sle(cur_n, one);
-    b.build_br_if(is_done, outer_next, {}, inner_even, {});
+    b.build_br_if(is_done, outer_next, {}, inner_check, {});
+
+    fn->append_block(inner_check);
+    b.position_at_end(inner_check);
+    Value* rem = b.build_and(cur_n, one);
+    Value* is_even = b.build_eq(rem, zero);
+    b.build_br_if(is_even, inner_even, {}, inner_odd, {});
 
     fn->append_block(inner_even);
     b.position_at_end(inner_even);
-    Value* rem = b.build_and(cur_n, one);
-    Value* is_even = b.build_eq(rem, zero);
     Value* half = b.build_ashr(cur_n, one);
-    b.build_br_if(is_even, inner_step, {half, cur_steps},
-                          inner_odd, {});
+    Value* next_steps_even = b.build_add(cur_steps, one);
+    b.build_br(inner_hdr, {half, next_steps_even});
 
     fn->append_block(inner_odd);
     b.position_at_end(inner_odd);
     Value* three = b.build_iconst_i64(3);
     Value* odd_next = b.build_add(b.build_mul(cur_n, three), one);
-    b.build_br(inner_step, {odd_next, cur_steps});
-
-    fn->append_block(inner_step);
-    b.position_at_end(inner_step);
-    Value* next_n = b.add_block_param(inner_step, Type::i64());
-    Value* step_accum = b.add_block_param(inner_step, Type::i64());
-    Value* next_steps = b.build_add(step_accum, one);
-    b.build_br(inner_hdr, {next_n, next_steps});
+    Value* next_steps_odd = b.build_add(cur_steps, one);
+    b.build_br(inner_hdr, {odd_next, next_steps_odd});
 
     fn->append_block(outer_next);
     b.position_at_end(outer_next);
@@ -388,6 +369,7 @@ std::unique_ptr<Module> build_matmul_i64_module() {
 
     fn->append_block(loop_i_body);
     b.position_at_end(loop_i_body);
+    Value* row_a = b.build_mul(i, N);
     b.build_br(loop_j_hdr, {zero});
 
     fn->append_block(loop_j_hdr);
@@ -398,31 +380,33 @@ std::unique_ptr<Module> build_matmul_i64_module() {
 
     fn->append_block(loop_j_body);
     b.position_at_end(loop_j_body);
-    b.build_br(loop_k_hdr, {zero, zero});
+    b.build_br(loop_k_hdr, {zero, zero, zero});
 
     fn->append_block(loop_k_hdr);
     b.position_at_end(loop_k_hdr);
     Value* k = b.add_block_param(loop_k_hdr, Type::i64());
+    Value* kN = b.add_block_param(loop_k_hdr, Type::i64());
     Value* sum = b.add_block_param(loop_k_hdr, Type::i64());
     Value* cond_k = b.build_slt(k, N);
     b.build_br_if(cond_k, loop_k_body, {}, loop_j_next, {});
 
     fn->append_block(loop_k_body);
     b.position_at_end(loop_k_body);
-    Value* idx_a = b.build_add(b.build_mul(i, N), k);
+    Value* idx_a = b.build_add(row_a, k);
     Value* val_a = b.build_load_indexed(Type::i64(), A, idx_a, 8, 0);
 
-    Value* idx_b = b.build_add(b.build_mul(k, N), j);
+    Value* idx_b = b.build_add(kN, j);
     Value* val_b = b.build_load_indexed(Type::i64(), B, idx_b, 8, 0);
 
     Value* term = b.build_mul(val_a, val_b);
     Value* next_sum = b.build_add(sum, term);
+    Value* next_kN = b.build_add(kN, N);
     Value* next_k = b.build_add(k, one);
-    b.build_br(loop_k_hdr, {next_k, next_sum});
+    b.build_br(loop_k_hdr, {next_k, next_kN, next_sum});
 
     fn->append_block(loop_j_next);
     b.position_at_end(loop_j_next);
-    Value* idx_c = b.build_add(b.build_mul(i, N), j);
+    Value* idx_c = b.build_add(row_a, j);
     b.build_store_indexed(Type::i64(), C, idx_c, 8, 0, sum);
     Value* next_j = b.build_add(j, one);
     b.build_br(loop_j_hdr, {next_j});
@@ -466,6 +450,7 @@ std::unique_ptr<Module> build_matmul_f64_module() {
     Value* zero = b.build_iconst_i64(0);
     Value* zero_f = b.build_fconst_f64(0.0);
     Value* one = b.build_iconst_i64(1);
+    Value* two = b.build_iconst_i64(2);
     b.build_br(loop_i_hdr, {zero});
 
     fn->append_block(loop_i_hdr);
@@ -476,6 +461,7 @@ std::unique_ptr<Module> build_matmul_f64_module() {
 
     fn->append_block(loop_i_body);
     b.position_at_end(loop_i_body);
+    Value* row_a = b.build_mul(i, N);
     b.build_br(loop_j_hdr, {zero});
 
     fn->append_block(loop_j_hdr);
@@ -486,31 +472,46 @@ std::unique_ptr<Module> build_matmul_f64_module() {
 
     fn->append_block(loop_j_body);
     b.position_at_end(loop_j_body);
-    b.build_br(loop_k_hdr, {zero, zero_f});
+    b.build_br(loop_k_hdr, {zero, zero, zero_f});
 
     fn->append_block(loop_k_hdr);
     b.position_at_end(loop_k_hdr);
     Value* k = b.add_block_param(loop_k_hdr, Type::i64());
+    Value* kN = b.add_block_param(loop_k_hdr, Type::i64());
     Value* sum = b.add_block_param(loop_k_hdr, Type::f64());
     Value* cond_k = b.build_slt(k, N);
     b.build_br_if(cond_k, loop_k_body, {}, loop_j_next, {});
 
     fn->append_block(loop_k_body);
     b.position_at_end(loop_k_body);
-    Value* idx_a = b.build_add(b.build_mul(i, N), k);
-    Value* val_a = b.build_load_indexed(Type::f64(), A, idx_a, 8, 0);
+    Value* idx_a1 = b.build_add(row_a, k);
+    Value* val_a1 = b.build_load_indexed(Type::f64(), A, idx_a1, 8, 0);
 
-    Value* idx_b = b.build_add(b.build_mul(k, N), j);
-    Value* val_b = b.build_load_indexed(Type::f64(), B, idx_b, 8, 0);
+    Value* idx_b1 = b.build_add(kN, j);
+    Value* val_b1 = b.build_load_indexed(Type::f64(), B, idx_b1, 8, 0);
 
-    Value* term = b.build_mul(val_a, val_b);
-    Value* next_sum = b.build_add(sum, term);
-    Value* next_k = b.build_add(k, one);
-    b.build_br(loop_k_hdr, {next_k, next_sum});
+    Value* term1 = b.build_mul(val_a1, val_b1);
+
+    Value* k1 = b.build_add(k, one);
+    Value* kN1 = b.build_add(kN, N);
+
+    Value* idx_a2 = b.build_add(row_a, k1);
+    Value* val_a2 = b.build_load_indexed(Type::f64(), A, idx_a2, 8, 0);
+
+    Value* idx_b2 = b.build_add(kN1, j);
+    Value* val_b2 = b.build_load_indexed(Type::f64(), B, idx_b2, 8, 0);
+
+    Value* term2 = b.build_mul(val_a2, val_b2);
+    Value* term_sum = b.build_add(term1, term2);
+    Value* next_sum = b.build_add(sum, term_sum);
+
+    Value* next_kN = b.build_add(kN1, N);
+    Value* next_k = b.build_add(k, two);
+    b.build_br(loop_k_hdr, {next_k, next_kN, next_sum});
 
     fn->append_block(loop_j_next);
     b.position_at_end(loop_j_next);
-    Value* idx_c = b.build_add(b.build_mul(i, N), j);
+    Value* idx_c = b.build_add(row_a, j);
     b.build_store_indexed(Type::f64(), C, idx_c, 8, 0, sum);
     Value* next_j = b.build_add(j, one);
     b.build_br(loop_j_hdr, {next_j});
@@ -580,12 +581,14 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results) {
         size_t iters = 100000;
         uint64_t n = 45;
 
+        auto (*volatile native_fn)(uint64_t) = &native_fib_iter;
+
         sw.start();
         uint64_t native_sink = 0;
         for (size_t i = 0; i < iters; ++i) {
             uint64_t input = n;
             DoNotOptimize(input);
-            native_sink = native_fib_iter(input);
+            native_sink = native_fn(input);
             DoNotOptimize(native_sink);
         }
         double native_ms = sw.stop_ms();

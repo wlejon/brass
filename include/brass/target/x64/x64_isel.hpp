@@ -37,9 +37,20 @@ private:
         const Instruction* def_inst = nullptr;
     };
 
+    struct MemFold {
+        const Value* base_val = nullptr;
+        const Value* index_val = nullptr;
+        Scale scale = Scale::One;
+        int32_t disp = 0;
+        std::vector<const Instruction*> folded_instructions;
+    };
+
     ImmIntInfo get_imm_int_info(const Value* val) const;
+    MemFold match_address(const Value* ptr, int32_t offset) const;
+    MemFold match_indexed_address(const Value* base, const Value* index, Scale scale, int32_t offset) const;
     bool can_fuse_load(const Instruction* load_inst, const Instruction* user_inst) const;
     codegen::LirOperand get_load_mem_operand(const Instruction* load_inst) const;
+    bool is_value_dead_after(const Function& mir_fn, const BasicBlock& bb, const Instruction* inst, const Value* val) const;
     void analyze_function(const Function& mir_fn);
 
     codegen::VReg get_or_alloc_vreg(const Value* val);

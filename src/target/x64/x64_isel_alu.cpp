@@ -498,10 +498,12 @@ void X64ISel::lower_binary_alu(
 
     if (dst.is_xmm()) {
         auto emit_float_alu = [&](VReg first_src, LirOperand second_src) {
-            auto mov_inst = std::make_unique<LirInst>(LirOpcode::Movsd);
-            mov_inst->add_def(LirOperand::vreg(dst, 8));
-            mov_inst->add_use(LirOperand::vreg(first_src, 8));
-            lir_bb.append_inst(std::move(mov_inst));
+            if (dst != first_src) {
+                auto mov_inst = std::make_unique<LirInst>(LirOpcode::Movsd);
+                mov_inst->add_def(LirOperand::vreg(dst, 8));
+                mov_inst->add_use(LirOperand::vreg(first_src, 8));
+                lir_bb.append_inst(std::move(mov_inst));
+            }
 
             auto alu_inst = std::make_unique<LirInst>(op_f64);
             alu_inst->add_def(LirOperand::vreg(dst, 8));
@@ -516,6 +518,8 @@ void X64ISel::lower_binary_alu(
             emit_float_alu(src0, get_load_mem_operand(op1_val->defining_instruction()));
         } else if (is_comm && op0_val && op0_val->is_instruction() && can_fuse_load(op0_val->defining_instruction(), &inst)) {
             emit_float_alu(src1, get_load_mem_operand(op0_val->defining_instruction()));
+        } else if (is_comm && dst == src1) {
+            emit_float_alu(src1, LirOperand::vreg(src0, 8));
         } else {
             emit_float_alu(src0, LirOperand::vreg(src1, 8));
         }
@@ -527,10 +531,12 @@ void X64ISel::lower_binary_alu(
     ImmIntInfo imm1 = get_imm_int_info(op1_val);
 
     auto emit_mov_alu = [&](VReg first_src, LirOperand second_src) {
-        auto mov_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
-        mov_inst->add_def(LirOperand::vreg(dst, sz));
-        mov_inst->add_use(LirOperand::vreg(first_src, sz));
-        lir_bb.append_inst(std::move(mov_inst));
+        if (dst != first_src) {
+            auto mov_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
+            mov_inst->add_def(LirOperand::vreg(dst, sz));
+            mov_inst->add_use(LirOperand::vreg(first_src, sz));
+            lir_bb.append_inst(std::move(mov_inst));
+        }
 
         auto alu_inst = std::make_unique<LirInst>(sz == 4 ? op32 : op64);
         alu_inst->add_def(LirOperand::vreg(dst, sz));
@@ -558,11 +564,13 @@ void X64ISel::lower_binary_alu(
                 return;
             }
             if (C == 1) {
-                auto mov_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
-                mov_inst->add_def(LirOperand::vreg(dst, sz));
-                mov_inst->add_use(LirOperand::vreg(r_vreg, sz));
-                mov_inst->mir_origin = &inst;
-                lir_bb.append_inst(std::move(mov_inst));
+                if (dst != r_vreg) {
+                    auto mov_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
+                    mov_inst->add_def(LirOperand::vreg(dst, sz));
+                    mov_inst->add_use(LirOperand::vreg(r_vreg, sz));
+                    mov_inst->mir_origin = &inst;
+                    lir_bb.append_inst(std::move(mov_inst));
+                }
                 return;
             }
             if (C == 2 || C == 3 || C == 5 || C == 9) {
@@ -589,10 +597,12 @@ void X64ISel::lower_binary_alu(
             if (C > 0 && (static_cast<uint64_t>(C) & static_cast<uint64_t>(C - 1)) == 0) {
                 int k = 0;
                 while ((1ULL << k) < static_cast<uint64_t>(C)) k++;
-                auto mov_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
-                mov_inst->add_def(LirOperand::vreg(dst, sz));
-                mov_inst->add_use(LirOperand::vreg(r_vreg, sz));
-                lir_bb.append_inst(std::move(mov_inst));
+                if (dst != r_vreg) {
+                    auto mov_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
+                    mov_inst->add_def(LirOperand::vreg(dst, sz));
+                    mov_inst->add_use(LirOperand::vreg(r_vreg, sz));
+                    lir_bb.append_inst(std::move(mov_inst));
+                }
 
                 auto shl_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Shl32 : LirOpcode::Shl);
                 shl_inst->add_def(LirOperand::vreg(dst, sz));
@@ -617,6 +627,8 @@ void X64ISel::lower_binary_alu(
             emit_mov_alu(src0, get_load_mem_operand(op1_val->defining_instruction()));
         } else if (op0_val && op0_val->is_instruction() && can_fuse_load(op0_val->defining_instruction(), &inst)) {
             emit_mov_alu(src1, get_load_mem_operand(op0_val->defining_instruction()));
+        } else if (dst == src1) {
+            emit_mov_alu(src1, LirOperand::vreg(src0, sz));
         } else {
             emit_mov_alu(src0, LirOperand::vreg(src1, sz));
         }
@@ -631,11 +643,13 @@ void X64ISel::lower_binary_alu(
             int32_t C = static_cast<int32_t>(imm_info.val);
             VReg r_vreg = get_vreg(reg_val);
             if (C == 0) {
-                auto mov_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
-                mov_inst->add_def(LirOperand::vreg(dst, sz));
-                mov_inst->add_use(LirOperand::vreg(r_vreg, sz));
-                mov_inst->mir_origin = &inst;
-                lir_bb.append_inst(std::move(mov_inst));
+                if (dst != r_vreg) {
+                    auto mov_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
+                    mov_inst->add_def(LirOperand::vreg(dst, sz));
+                    mov_inst->add_use(LirOperand::vreg(r_vreg, sz));
+                    mov_inst->mir_origin = &inst;
+                    lir_bb.append_inst(std::move(mov_inst));
+                }
                 return;
             }
             auto lea_inst = std::make_unique<LirInst>(LirOpcode::Lea);
@@ -650,6 +664,14 @@ void X64ISel::lower_binary_alu(
             emit_mov_alu(src0, get_load_mem_operand(op1_val->defining_instruction()));
         } else if (op0_val && op0_val->is_instruction() && can_fuse_load(op0_val->defining_instruction(), &inst)) {
             emit_mov_alu(src1, get_load_mem_operand(op0_val->defining_instruction()));
+        } else if (dst != src0 && dst != src1) {
+            auto lea_inst = std::make_unique<LirInst>(LirOpcode::Lea);
+            lea_inst->add_def(LirOperand::vreg(dst, sz));
+            lea_inst->add_use(LirOperand::mem(src0, src1, Scale::One, 0, sz));
+            lea_inst->mir_origin = &inst;
+            lir_bb.append_inst(std::move(lea_inst));
+        } else if (dst == src1) {
+            emit_mov_alu(src1, LirOperand::vreg(src0, sz));
         } else {
             emit_mov_alu(src0, LirOperand::vreg(src1, sz));
         }
@@ -660,11 +682,13 @@ void X64ISel::lower_binary_alu(
         if (imm1.is_imm && imm1.fits_i32) {
             int32_t C = static_cast<int32_t>(imm1.val);
             if (C == 0) {
-                auto mov_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
-                mov_inst->add_def(LirOperand::vreg(dst, sz));
-                mov_inst->add_use(LirOperand::vreg(src0, sz));
-                mov_inst->mir_origin = &inst;
-                lir_bb.append_inst(std::move(mov_inst));
+                if (dst != src0) {
+                    auto mov_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
+                    mov_inst->add_def(LirOperand::vreg(dst, sz));
+                    mov_inst->add_use(LirOperand::vreg(src0, sz));
+                    mov_inst->mir_origin = &inst;
+                    lir_bb.append_inst(std::move(mov_inst));
+                }
                 return;
             }
             if (C != INT32_MIN) {
@@ -701,6 +725,8 @@ void X64ISel::lower_binary_alu(
         emit_mov_alu(src0, get_load_mem_operand(op1_val->defining_instruction()));
     } else if (is_comm && op0_val && op0_val->is_instruction() && can_fuse_load(op0_val->defining_instruction(), &inst)) {
         emit_mov_alu(src1, get_load_mem_operand(op0_val->defining_instruction()));
+    } else if (is_comm && dst == src1) {
+        emit_mov_alu(src1, LirOperand::vreg(src0, sz));
     } else {
         emit_mov_alu(src0, LirOperand::vreg(src1, sz));
     }

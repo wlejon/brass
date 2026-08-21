@@ -45,7 +45,7 @@ TEST_CASE("ISEL - Integer Arithmetic and Logic Lowering") {
     bool has_neg = false, has_not = false, has_ret = false;
 
     for (const auto& inst : bb->instructions) {
-        if (inst->opcode == LirOpcode::Add) has_add = true;
+        if (inst->opcode == LirOpcode::Add || inst->opcode == LirOpcode::Lea) has_add = true;
         if (inst->opcode == LirOpcode::Sub) has_sub = true;
         if (inst->opcode == LirOpcode::Imul) has_imul = true;
         if (inst->opcode == LirOpcode::And) has_and = true;

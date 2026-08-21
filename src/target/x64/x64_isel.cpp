@@ -57,43 +57,29 @@ X64ISel::ImmIntInfo X64ISel::get_imm_int_info(const Value* val) const {
     return {};
 }
 
-bool X64ISel::can_fuse_load(const Instruction* load_inst, const Instruction* user_inst) const {
-    if (!load_inst || !user_inst) return false;
-    if (load_inst->opcode() != Opcode::load && load_inst->opcode() != Opcode::load_indexed) {
-        return false;
-    }
-    const Value* res = load_inst->result();
-    if (!res) return false;
-    auto it = use_count_.find(res);
-    if (it == use_count_.end() || it->second != 1) {
-        return false;
-    }
-    if (load_inst->parent() != user_inst->parent()) {
-        return false;
-    }
-    for (const Instruction* cur = load_inst->next(); cur != nullptr && cur != user_inst; cur = cur->next()) {
-        if (cur->opcode() == Opcode::store || cur->opcode() == Opcode::store_indexed ||
-            cur->is_call() || cur->opcode() == Opcode::safepoint || cur->opcode() == Opcode::guard) {
-            return false;
-        }
-    }
-    return true;
-}
 
-LirOperand X64ISel::get_load_mem_operand(const Instruction* load_inst) const {
-    if (!load_inst) return LirOperand{};
-    uint8_t sz = static_cast<uint8_t>(load_inst->type().size_in_bytes());
-    if (sz == 0) sz = 8;
-    if (load_inst->opcode() == Opcode::load) {
-        VReg base = get_vreg(load_inst->operand(0));
-        return LirOperand::mem(base, load_inst->offset(), sz);
-    } else if (load_inst->opcode() == Opcode::load_indexed) {
-        VReg base = get_vreg(load_inst->operand(0));
-        VReg index = get_vreg(load_inst->operand(1));
-        Scale sc = scale_from_int(load_inst->scale());
-        return LirOperand::mem(base, index, sc, load_inst->offset(), sz);
+
+bool X64ISel::is_value_dead_after(
+    const Function& mir_fn,
+    const BasicBlock& bb,
+    const Instruction* inst,
+    const Value* val
+) const {
+    (void)mir_fn;
+    if (!val) return false;
+    auto it = use_count_.find(val);
+    if (it == use_count_.end() || it->second == 0) return true;
+    uint32_t total_uses = it->second;
+
+    uint32_t uses_seen = 0;
+    for (const auto* cur : bb) {
+        for (const auto* op : cur->operands()) {
+            if (op == val) uses_seen++;
+        }
+        if (cur == inst) break;
     }
-    return LirOperand{};
+
+    return (uses_seen == total_uses);
 }
 
 void X64ISel::analyze_function(const Function& mir_fn) {
@@ -139,10 +125,50 @@ void X64ISel::analyze_function(const Function& mir_fn) {
 
     std::unordered_map<const Value*, uint32_t> folded_uses;
 
-    // 3. Count folded immediate uses and identify fusible loads for active instructions
+    // 3. Count folded uses in load/store/alu/branch/guard
     for (const auto* bb : mir_fn.blocks()) {
         for (const auto* inst : *bb) {
-            if (skipped_insts_.count(inst)) {
+            if (skipped_insts_.count(inst)) continue;
+
+            if (inst->opcode() == Opcode::load) {
+                MemFold mf = match_address(inst->operand(0), inst->offset());
+                for (const auto* fi : mf.folded_instructions) {
+                    if (fi && fi->result()) folded_uses[fi->result()]++;
+                }
+                continue;
+            }
+
+            if (inst->opcode() == Opcode::store) {
+                MemFold mf = match_address(inst->operand(0), inst->offset());
+                for (const auto* fi : mf.folded_instructions) {
+                    if (fi && fi->result()) folded_uses[fi->result()]++;
+                }
+                const Value* src = inst->operand(1);
+                ImmIntInfo imm_src = get_imm_int_info(src);
+                if (imm_src.is_imm && imm_src.fits_i32) {
+                    folded_uses[src]++;
+                }
+                continue;
+            }
+
+            if (inst->opcode() == Opcode::load_indexed) {
+                MemFold mf = match_indexed_address(inst->operand(0), inst->operand(1), scale_from_int(inst->scale()), inst->offset());
+                for (const auto* fi : mf.folded_instructions) {
+                    if (fi && fi->result()) folded_uses[fi->result()]++;
+                }
+                continue;
+            }
+
+            if (inst->opcode() == Opcode::store_indexed) {
+                MemFold mf = match_indexed_address(inst->operand(0), inst->operand(1), scale_from_int(inst->scale()), inst->offset());
+                for (const auto* fi : mf.folded_instructions) {
+                    if (fi && fi->result()) folded_uses[fi->result()]++;
+                }
+                const Value* src = inst->operand(2);
+                ImmIntInfo imm_src = get_imm_int_info(src);
+                if (imm_src.is_imm && imm_src.fits_i32) {
+                    folded_uses[src]++;
+                }
                 continue;
             }
 
@@ -170,27 +196,13 @@ void X64ISel::analyze_function(const Function& mir_fn) {
 
             bool is_alu = false;
             switch (inst->opcode()) {
-                case Opcode::add:
-                case Opcode::sub:
-                case Opcode::mul:
-                case Opcode::and_:
-                case Opcode::or_:
-                case Opcode::xor_:
-                case Opcode::shl:
-                case Opcode::lshr:
-                case Opcode::ashr:
-                case Opcode::udiv:
-                case Opcode::umod:
-                case Opcode::eq:
-                case Opcode::ne:
-                case Opcode::slt:
-                case Opcode::ult:
-                case Opcode::sle:
-                case Opcode::ule:
-                case Opcode::sgt:
-                case Opcode::ugt:
-                case Opcode::sge:
-                case Opcode::uge:
+                case Opcode::add: case Opcode::sub: case Opcode::mul:
+                case Opcode::and_: case Opcode::or_: case Opcode::xor_:
+                case Opcode::shl: case Opcode::lshr: case Opcode::ashr:
+                case Opcode::udiv: case Opcode::umod:
+                case Opcode::eq: case Opcode::ne:
+                case Opcode::slt: case Opcode::ult: case Opcode::sle: case Opcode::ule:
+                case Opcode::sgt: case Opcode::ugt: case Opcode::sge: case Opcode::uge:
                     is_alu = true;
                     break;
                 default:
@@ -216,7 +228,7 @@ void X64ISel::analyze_function(const Function& mir_fn) {
         }
     }
 
-    // 4. Skip iconsts whose uses have all been folded into immediate operands
+    // 4. Skip instructions whose uses have all been folded
     for (const auto& [val, fold_count] : folded_uses) {
         auto it = use_count_.find(val);
         if (it != use_count_.end() && it->second == fold_count) {
@@ -259,9 +271,58 @@ std::unique_ptr<LirFunction> X64ISel::lower(const Function& mir_fn) {
         for (const auto* param : bb->params()) {
             get_or_alloc_vreg(param);
         }
+    }
+
+    for (const auto* bb : mir_fn.blocks()) {
         for (const auto* inst : *bb) {
-            if (inst->produces_value()) {
-                get_or_alloc_vreg(inst->result());
+            if (!inst->produces_value()) continue;
+            if (skipped_insts_.count(inst)) continue;
+
+            const Value* res = inst->result();
+            const Value* op0 = inst->operand_count() >= 1 ? inst->operand(0) : nullptr;
+            const Value* op1 = inst->operand_count() >= 2 ? inst->operand(1) : nullptr;
+
+            bool can_reuse_op0 = false;
+            bool can_reuse_op1 = false;
+
+            bool is_two_address = false;
+            bool is_comm = false;
+
+            switch (inst->opcode()) {
+                case Opcode::add:
+                case Opcode::mul:
+                case Opcode::and_:
+                case Opcode::or_:
+                case Opcode::xor_:
+                    is_two_address = true;
+                    is_comm = true;
+                    break;
+                case Opcode::sub:
+                case Opcode::shl:
+                case Opcode::lshr:
+                case Opcode::ashr:
+                    is_two_address = true;
+                    is_comm = false;
+                    break;
+                default:
+                    break;
+            }
+
+            if (is_two_address && op0 != nullptr && op0->type() == res->type() && val_to_vreg_.count(op0)) {
+                if (is_value_dead_after(mir_fn, *bb, inst, op0)) {
+                    can_reuse_op0 = true;
+                } else if (is_comm && op1 != nullptr && op1->type() == res->type() && val_to_vreg_.count(op1) &&
+                           is_value_dead_after(mir_fn, *bb, inst, op1)) {
+                    can_reuse_op1 = true;
+                }
+            }
+
+            if (can_reuse_op0) {
+                val_to_vreg_[res] = get_vreg(op0);
+            } else if (can_reuse_op1) {
+                val_to_vreg_[res] = get_vreg(op1);
+            } else {
+                get_or_alloc_vreg(res);
             }
         }
     }
@@ -337,44 +398,32 @@ void X64ISel::lower_entry_parameters(const Function& mir_fn) {
     auto* lir_entry = lir_fn_->entry_block();
     if (!lir_entry) return;
 
-    size_t gpr_idx = 0;
-    size_t xmm_idx = 0;
-
+    size_t gpr_idx = 0, xmm_idx = 0;
     for (size_t i = 0; i < entry->param_count(); ++i) {
         const auto* param = entry->param(i);
         VReg param_vreg = get_vreg(param);
         Type t = param->type();
+        uint8_t sz = (t.size_in_bytes() == 4) ? 4 : 8;
+        LirOpcode mov_op = t.is_float() ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
 
         if (cc_.kind() == CallingConvKind::Win64) {
             if (i < 4) {
+                auto inst = std::make_unique<LirInst>(mov_op);
+                inst->add_def(LirOperand::vreg(param_vreg, sz));
                 if (t.is_float()) {
                     XMM xreg = static_cast<XMM>(i);
-                    auto inst = std::make_unique<LirInst>(LirOpcode::Movsd);
-                    inst->add_def(LirOperand::vreg(param_vreg, 8));
                     inst->add_use(LirOperand::preg_xmm(xreg, 8), FixedConstraint::xmm(xreg));
-                    lir_entry->append_inst(std::move(inst));
                 } else {
                     GPR greg = cc_.arg_gpr(i);
-                    uint8_t sz = static_cast<uint8_t>(t.size_in_bytes());
-                    auto inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
-                    inst->add_def(LirOperand::vreg(param_vreg, sz));
                     inst->add_use(LirOperand::preg_gpr(greg, sz), FixedConstraint::gpr(greg));
-                    lir_entry->append_inst(std::move(inst));
                 }
+                lir_entry->append_inst(std::move(inst));
             } else {
                 int32_t disp = static_cast<int32_t>(48 + (i - 4) * 8);
-                uint8_t sz = static_cast<uint8_t>(t.size_in_bytes());
-                if (t.is_float()) {
-                    auto inst = std::make_unique<LirInst>(LirOpcode::Movsd);
-                    inst->add_def(LirOperand::vreg(param_vreg, 8));
-                    inst->add_use(LirOperand::mem(PReg::gpr(GPR::RBP), disp, 8));
-                    lir_entry->append_inst(std::move(inst));
-                } else {
-                    auto inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
-                    inst->add_def(LirOperand::vreg(param_vreg, sz));
-                    inst->add_use(LirOperand::mem(PReg::gpr(GPR::RBP), disp, sz));
-                    lir_entry->append_inst(std::move(inst));
-                }
+                auto inst = std::make_unique<LirInst>(mov_op);
+                inst->add_def(LirOperand::vreg(param_vreg, sz));
+                inst->add_use(LirOperand::mem(PReg::gpr(GPR::RBP), disp, sz));
+                lir_entry->append_inst(std::move(inst));
             }
         } else {
             if (t.is_float()) {
@@ -394,7 +443,6 @@ void X64ISel::lower_entry_parameters(const Function& mir_fn) {
                     lir_entry->append_inst(std::move(inst));
                 }
             } else {
-                uint8_t sz = static_cast<uint8_t>(t.size_in_bytes());
                 if (gpr_idx < cc_.num_arg_gprs()) {
                     GPR greg = cc_.arg_gpr(gpr_idx++);
                     auto inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
@@ -469,40 +517,32 @@ void X64ISel::lower_call(const Instruction& inst, LirBlock& lir_bb) {
         inst.opcode() == Opcode::call_indirect ? LirOpcode::CallIndirect : LirOpcode::Call
     );
 
-    size_t gpr_idx = 0;
-    size_t xmm_idx = 0;
-
+    size_t gpr_idx = 0, xmm_idx = 0;
     for (size_t i = 0; i < num_args; ++i) {
         const auto* arg_val = inst.operand(start_arg + i);
         VReg arg_vreg = get_vreg(arg_val);
         Type t = arg_val->type();
-        uint8_t sz = static_cast<uint8_t>(t.size_in_bytes());
-        if (sz == 0) sz = 8;
+        uint8_t sz = (t.size_in_bytes() == 4) ? 4 : 8;
+        LirOpcode mov_op = t.is_float() ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
 
         if (cc_.kind() == CallingConvKind::Win64) {
             if (i < 4) {
+                auto mov_arg = std::make_unique<LirInst>(mov_op);
                 if (t.is_float()) {
                     XMM xreg = static_cast<XMM>(i);
-                    auto mov_arg = std::make_unique<LirInst>(LirOpcode::Movsd);
                     mov_arg->add_def(LirOperand::preg_xmm(xreg, 8), FixedConstraint::xmm(xreg));
                     mov_arg->add_use(LirOperand::vreg(arg_vreg, 8));
-                    lir_bb.append_inst(std::move(mov_arg));
-
                     call_lir->add_use(LirOperand::preg_xmm(xreg, 8), FixedConstraint::xmm(xreg));
                 } else {
                     GPR greg = cc_.arg_gpr(i);
-                    auto mov_arg = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
                     mov_arg->add_def(LirOperand::preg_gpr(greg, sz), FixedConstraint::gpr(greg));
                     mov_arg->add_use(LirOperand::vreg(arg_vreg, sz));
-                    lir_bb.append_inst(std::move(mov_arg));
-
                     call_lir->add_use(LirOperand::preg_gpr(greg, sz), FixedConstraint::gpr(greg));
                 }
+                lir_bb.append_inst(std::move(mov_arg));
             } else {
                 int32_t disp = static_cast<int32_t>(32 + (i - 4) * 8);
-                auto mov_stack = std::make_unique<LirInst>(
-                    t.is_float() ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov)
-                );
+                auto mov_stack = std::make_unique<LirInst>(mov_op);
                 mov_stack->add_def(LirOperand::mem(PReg::gpr(GPR::RSP), disp, sz));
                 mov_stack->add_use(LirOperand::vreg(arg_vreg, sz));
                 lir_bb.append_inst(std::move(mov_stack));
@@ -514,9 +554,8 @@ void X64ISel::lower_call(const Instruction& inst, LirBlock& lir_bb) {
                     auto mov_arg = std::make_unique<LirInst>(LirOpcode::Movsd);
                     mov_arg->add_def(LirOperand::preg_xmm(xreg, 8), FixedConstraint::xmm(xreg));
                     mov_arg->add_use(LirOperand::vreg(arg_vreg, 8));
-                    lir_bb.append_inst(std::move(mov_arg));
-
                     call_lir->add_use(LirOperand::preg_xmm(xreg, 8), FixedConstraint::xmm(xreg));
+                    lir_bb.append_inst(std::move(mov_arg));
                 } else {
                     size_t stack_idx = (xmm_idx - cc_.num_arg_xmms()) + (gpr_idx > cc_.num_arg_gprs() ? (gpr_idx - cc_.num_arg_gprs()) : 0);
                     int32_t disp = static_cast<int32_t>(stack_idx * 8);
@@ -532,9 +571,8 @@ void X64ISel::lower_call(const Instruction& inst, LirBlock& lir_bb) {
                     auto mov_arg = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
                     mov_arg->add_def(LirOperand::preg_gpr(greg, sz), FixedConstraint::gpr(greg));
                     mov_arg->add_use(LirOperand::vreg(arg_vreg, sz));
-                    lir_bb.append_inst(std::move(mov_arg));
-
                     call_lir->add_use(LirOperand::preg_gpr(greg, sz), FixedConstraint::gpr(greg));
+                    lir_bb.append_inst(std::move(mov_arg));
                 } else {
                     size_t stack_idx = (gpr_idx - cc_.num_arg_gprs()) + (xmm_idx > cc_.num_arg_xmms() ? (xmm_idx - cc_.num_arg_xmms()) : 0);
                     int32_t disp = static_cast<int32_t>(stack_idx * 8);
@@ -603,12 +641,14 @@ void X64ISel::lower_branch(const Instruction& inst, LirBlock& lir_bb) {
             VReg param_v = get_vreg(target.block->param(i));
             uint8_t sz = param_v.size;
 
-            auto mov_inst = std::make_unique<LirInst>(
-                param_v.is_xmm() ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov)
-            );
-            mov_inst->add_def(LirOperand::vreg(param_v, sz));
-            mov_inst->add_use(LirOperand::vreg(arg_v, sz));
-            lir_bb.append_inst(std::move(mov_inst));
+            if (arg_v != param_v) {
+                auto mov_inst = std::make_unique<LirInst>(
+                    param_v.is_xmm() ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov)
+                );
+                mov_inst->add_def(LirOperand::vreg(param_v, sz));
+                mov_inst->add_use(LirOperand::vreg(arg_v, sz));
+                lir_bb.append_inst(std::move(mov_inst));
+            }
         }
     }
 
@@ -701,6 +741,52 @@ void X64ISel::lower_branch_if(const Instruction& inst, LirBlock& lir_bb) {
         jmp_inst->add_use(LirOperand::label(f_target.block->id()));
         jmp_inst->mir_origin = &inst;
         lir_bb.append_inst(std::move(jmp_inst));
+    } else if (t_target.args.empty()) {
+        auto jcc_inst = std::make_unique<LirInst>(LirOpcode::Jcc);
+        jcc_inst->condition = branch_cond;
+        jcc_inst->add_use(LirOperand::label(t_target.block->id()));
+        lir_bb.append_inst(std::move(jcc_inst));
+
+        for (size_t i = 0; i < f_target.args.size(); ++i) {
+            VReg arg_v = get_vreg(f_target.args[i]);
+            VReg param_v = get_vreg(f_target.block->param(i));
+            uint8_t sz = param_v.size;
+            if (arg_v != param_v) {
+                auto mov_inst = std::make_unique<LirInst>(
+                    param_v.is_xmm() ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov)
+                );
+                mov_inst->add_def(LirOperand::vreg(param_v, sz));
+                mov_inst->add_use(LirOperand::vreg(arg_v, sz));
+                lir_bb.append_inst(std::move(mov_inst));
+            }
+        }
+        auto jmp_f = std::make_unique<LirInst>(LirOpcode::Jmp);
+        jmp_f->add_use(LirOperand::label(f_target.block->id()));
+        jmp_f->mir_origin = &inst;
+        lir_bb.append_inst(std::move(jmp_f));
+    } else if (f_target.args.empty()) {
+        auto jcc_inst = std::make_unique<LirInst>(LirOpcode::Jcc);
+        jcc_inst->condition = invert(branch_cond);
+        jcc_inst->add_use(LirOperand::label(f_target.block->id()));
+        lir_bb.append_inst(std::move(jcc_inst));
+
+        for (size_t i = 0; i < t_target.args.size(); ++i) {
+            VReg arg_v = get_vreg(t_target.args[i]);
+            VReg param_v = get_vreg(t_target.block->param(i));
+            uint8_t sz = param_v.size;
+            if (arg_v != param_v) {
+                auto mov_inst = std::make_unique<LirInst>(
+                    param_v.is_xmm() ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov)
+                );
+                mov_inst->add_def(LirOperand::vreg(param_v, sz));
+                mov_inst->add_use(LirOperand::vreg(arg_v, sz));
+                lir_bb.append_inst(std::move(mov_inst));
+            }
+        }
+        auto jmp_t = std::make_unique<LirInst>(LirOpcode::Jmp);
+        jmp_t->add_use(LirOperand::label(t_target.block->id()));
+        jmp_t->mir_origin = &inst;
+        lir_bb.append_inst(std::move(jmp_t));
     } else {
         auto* true_trampoline = lir_fn_->create_block("br_if_true");
 
@@ -713,12 +799,14 @@ void X64ISel::lower_branch_if(const Instruction& inst, LirBlock& lir_bb) {
             VReg arg_v = get_vreg(f_target.args[i]);
             VReg param_v = get_vreg(f_target.block->param(i));
             uint8_t sz = param_v.size;
-            auto mov_inst = std::make_unique<LirInst>(
-                param_v.is_xmm() ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov)
-            );
-            mov_inst->add_def(LirOperand::vreg(param_v, sz));
-            mov_inst->add_use(LirOperand::vreg(arg_v, sz));
-            lir_bb.append_inst(std::move(mov_inst));
+            if (arg_v != param_v) {
+                auto mov_inst = std::make_unique<LirInst>(
+                    param_v.is_xmm() ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov)
+                );
+                mov_inst->add_def(LirOperand::vreg(param_v, sz));
+                mov_inst->add_use(LirOperand::vreg(arg_v, sz));
+                lir_bb.append_inst(std::move(mov_inst));
+            }
         }
         auto jmp_f = std::make_unique<LirInst>(LirOpcode::Jmp);
         jmp_f->add_use(LirOperand::label(f_target.block->id()));
@@ -728,12 +816,14 @@ void X64ISel::lower_branch_if(const Instruction& inst, LirBlock& lir_bb) {
             VReg arg_v = get_vreg(t_target.args[i]);
             VReg param_v = get_vreg(t_target.block->param(i));
             uint8_t sz = param_v.size;
-            auto mov_inst = std::make_unique<LirInst>(
-                param_v.is_xmm() ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov)
-            );
-            mov_inst->add_def(LirOperand::vreg(param_v, sz));
-            mov_inst->add_use(LirOperand::vreg(arg_v, sz));
-            true_trampoline->append_inst(std::move(mov_inst));
+            if (arg_v != param_v) {
+                auto mov_inst = std::make_unique<LirInst>(
+                    param_v.is_xmm() ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov)
+                );
+                mov_inst->add_def(LirOperand::vreg(param_v, sz));
+                mov_inst->add_use(LirOperand::vreg(arg_v, sz));
+                true_trampoline->append_inst(std::move(mov_inst));
+            }
         }
         auto jmp_t = std::make_unique<LirInst>(LirOpcode::Jmp);
         jmp_t->add_use(LirOperand::label(t_target.block->id()));
@@ -779,65 +869,7 @@ void X64ISel::lower_return(const Instruction& inst, LirBlock& lir_bb) {
     lir_bb.append_inst(std::move(ret_inst));
 }
 
-void X64ISel::lower_load(const Instruction& inst, LirBlock& lir_bb) {
-    VReg dst = get_vreg(inst.result());
-    VReg base = get_vreg(inst.operand(0));
-    int32_t disp = inst.offset();
-    uint8_t sz = dst.size;
 
-    LirOpcode op = dst.is_xmm() ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
-    auto lir_inst = std::make_unique<LirInst>(op);
-    lir_inst->add_def(LirOperand::vreg(dst, sz));
-    lir_inst->add_use(LirOperand::mem(base, disp, sz));
-    lir_inst->mir_origin = &inst;
-    lir_bb.append_inst(std::move(lir_inst));
-}
-
-void X64ISel::lower_store(const Instruction& inst, LirBlock& lir_bb) {
-    VReg base = get_vreg(inst.operand(0));
-    VReg src = get_vreg(inst.operand(1));
-    int32_t disp = inst.offset();
-    uint8_t sz = src.size;
-
-    LirOpcode op = src.is_xmm() ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
-    auto lir_inst = std::make_unique<LirInst>(op);
-    lir_inst->add_def(LirOperand::mem(base, disp, sz));
-    lir_inst->add_use(LirOperand::vreg(src, sz));
-    lir_inst->mir_origin = &inst;
-    lir_bb.append_inst(std::move(lir_inst));
-}
-
-void X64ISel::lower_load_indexed(const Instruction& inst, LirBlock& lir_bb) {
-    VReg dst = get_vreg(inst.result());
-    VReg base = get_vreg(inst.operand(0));
-    VReg index = get_vreg(inst.operand(1));
-    Scale sc = scale_from_int(inst.scale());
-    int32_t disp = inst.offset();
-    uint8_t sz = dst.size;
-
-    LirOpcode op = dst.is_xmm() ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
-    auto lir_inst = std::make_unique<LirInst>(op);
-    lir_inst->add_def(LirOperand::vreg(dst, sz));
-    lir_inst->add_use(LirOperand::mem(base, index, sc, disp, sz));
-    lir_inst->mir_origin = &inst;
-    lir_bb.append_inst(std::move(lir_inst));
-}
-
-void X64ISel::lower_store_indexed(const Instruction& inst, LirBlock& lir_bb) {
-    VReg base = get_vreg(inst.operand(0));
-    VReg index = get_vreg(inst.operand(1));
-    VReg src = get_vreg(inst.operand(2));
-    Scale sc = scale_from_int(inst.scale());
-    int32_t disp = inst.offset();
-    uint8_t sz = src.size;
-
-    LirOpcode op = src.is_xmm() ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
-    auto lir_inst = std::make_unique<LirInst>(op);
-    lir_inst->add_def(LirOperand::mem(base, index, sc, disp, sz));
-    lir_inst->add_use(LirOperand::vreg(src, sz));
-    lir_inst->mir_origin = &inst;
-    lir_bb.append_inst(std::move(lir_inst));
-}
 
 void X64ISel::lower_safepoint(const Instruction& inst, LirBlock& lir_bb) {
     if (cc_.kind() == CallingConvKind::Win64) {

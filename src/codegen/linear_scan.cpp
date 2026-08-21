@@ -337,19 +337,6 @@ bool LinearScanAllocator::try_allocate_free_reg(LiveInterval& interval) {
                 candidates.push_back(reg);
             }
         }
-    } else if (interval.max_loop_depth > 0) {
-        for (const auto& reg : pool) {
-            bool is_callee = is_gpr ? cc_.is_callee_saved(reg.as_gpr()) : cc_.is_callee_saved(reg.as_xmm());
-            if (is_callee && occupied_regs.find(reg.code) == occupied_regs.end()) {
-                candidates.push_back(reg);
-            }
-        }
-        for (const auto& reg : pool) {
-            bool is_callee = is_gpr ? cc_.is_callee_saved(reg.as_gpr()) : cc_.is_callee_saved(reg.as_xmm());
-            if (!is_callee && occupied_regs.find(reg.code) == occupied_regs.end()) {
-                candidates.push_back(reg);
-            }
-        }
     } else {
         for (const auto& reg : pool) {
             bool is_callee = is_gpr ? cc_.is_callee_saved(reg.as_gpr()) : cc_.is_callee_saved(reg.as_xmm());
