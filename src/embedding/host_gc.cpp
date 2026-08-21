@@ -3,14 +3,19 @@
 #include <cstring>
 #include <stdexcept>
 
-namespace brass {
+#if defined(_MSC_VER)
+#include <intrin.h>
+extern "C" uintptr_t brass_get_rbp();
+#endif
 
 namespace {
 
-static HostGC* g_active_host_gc = nullptr;
-
 inline void get_caller_frame(uintptr_t& caller_rbp, uintptr_t& caller_ip) noexcept {
-#if defined(__GNUC__) || defined(__clang__)
+#if defined(_MSC_VER) && !defined(__clang__)
+    void** ret_addr_slot = reinterpret_cast<void**>(_AddressOfReturnAddress());
+    caller_ip = reinterpret_cast<uintptr_t>(*ret_addr_slot);
+    caller_rbp = brass_get_rbp();
+#elif defined(__GNUC__) || defined(__clang__)
     void* cur_frame = __builtin_frame_address(0);
     if (cur_frame) {
         caller_rbp = *reinterpret_cast<uintptr_t*>(cur_frame);
@@ -21,6 +26,14 @@ inline void get_caller_frame(uintptr_t& caller_rbp, uintptr_t& caller_ip) noexce
     caller_ip = 0;
 #endif
 }
+
+} // namespace
+
+namespace brass {
+
+namespace {
+
+static HostGC* g_active_host_gc = nullptr;
 
 } // namespace
 
@@ -367,6 +380,44 @@ void HostGC::reset() {
 
 } // namespace brass
 
+#if defined(_MSC_VER)
+
+extern "C" {
+
+void host_gc_safepoint_bridge(uintptr_t caller_rbp, uintptr_t caller_ip) {
+    auto* gc = brass::get_active_host_gc();
+    if (!gc) return;
+    gc->safepoint(caller_rbp, caller_ip);
+}
+
+uintptr_t host_gc_alloc_bridge(size_t size, uint64_t pointer_mask, uint32_t type_tag, uintptr_t caller_rbp, uintptr_t caller_ip) {
+    auto* gc = brass::get_active_host_gc();
+    if (!gc) return 0;
+
+    if (gc->stress_mode() || !gc->can_allocate_fast(size)) {
+        std::vector<uintptr_t*> ptr_roots;
+        std::vector<brass::HostValue*> val_roots;
+        gc->collect(ptr_roots, val_roots, caller_rbp, caller_ip);
+    }
+    return gc->allocate(size, pointer_mask, type_tag);
+}
+
+uint64_t host_gc_alloc_nanbox_bridge(size_t size, uint64_t pointer_mask, uint32_t type_tag, uintptr_t caller_rbp, uintptr_t caller_ip) {
+    auto* gc = brass::get_active_host_gc();
+    if (!gc) return brass::HostValue::null_val().raw();
+
+    if (gc->stress_mode() || !gc->can_allocate_fast(size)) {
+        std::vector<uintptr_t*> ptr_roots;
+        std::vector<brass::HostValue*> val_roots;
+        gc->collect(ptr_roots, val_roots, caller_rbp, caller_ip);
+    }
+    return gc->allocate_value(size, pointer_mask, type_tag).raw();
+}
+
+} // extern "C"
+
+#else
+
 extern "C" {
 
 void host_gc_safepoint() {
@@ -375,13 +426,7 @@ void host_gc_safepoint() {
 
     uintptr_t caller_rbp = 0;
     uintptr_t caller_ip = 0;
-#if defined(__GNUC__) || defined(__clang__)
-    void* frame = __builtin_frame_address(0);
-    if (frame) {
-        caller_rbp = *reinterpret_cast<uintptr_t*>(frame);
-        caller_ip = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
-    }
-#endif
+    get_caller_frame(caller_rbp, caller_ip);
     gc->safepoint(caller_rbp, caller_ip);
 }
 
@@ -392,13 +437,7 @@ uintptr_t host_gc_alloc(size_t size, uint64_t pointer_mask, uint32_t type_tag) {
     if (gc->stress_mode() || !gc->can_allocate_fast(size)) {
         uintptr_t caller_rbp = 0;
         uintptr_t caller_ip = 0;
-#if defined(__GNUC__) || defined(__clang__)
-        void* frame = __builtin_frame_address(0);
-        if (frame) {
-            caller_rbp = *reinterpret_cast<uintptr_t*>(frame);
-            caller_ip = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
-        }
-#endif
+        get_caller_frame(caller_rbp, caller_ip);
         std::vector<uintptr_t*> ptr_roots;
         std::vector<brass::HostValue*> val_roots;
         gc->collect(ptr_roots, val_roots, caller_rbp, caller_ip);
@@ -413,13 +452,7 @@ uint64_t host_gc_alloc_nanbox(size_t size, uint64_t pointer_mask, uint32_t type_
     if (gc->stress_mode() || !gc->can_allocate_fast(size)) {
         uintptr_t caller_rbp = 0;
         uintptr_t caller_ip = 0;
-#if defined(__GNUC__) || defined(__clang__)
-        void* frame = __builtin_frame_address(0);
-        if (frame) {
-            caller_rbp = *reinterpret_cast<uintptr_t*>(frame);
-            caller_ip = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
-        }
-#endif
+        get_caller_frame(caller_rbp, caller_ip);
         std::vector<uintptr_t*> ptr_roots;
         std::vector<brass::HostValue*> val_roots;
         gc->collect(ptr_roots, val_roots, caller_rbp, caller_ip);
@@ -433,4 +466,6 @@ void host_gc_collect() {
     gc->collect();
 }
 
-}
+} // extern "C"
+
+#endif
