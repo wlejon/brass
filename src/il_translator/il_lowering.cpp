@@ -352,9 +352,10 @@ bool IlLowering::lower_instruction(
             if (fn->name() == callee) {
                 callee = callee + "$leaf";
             }
-            const char* name_ptr = _strdup(callee.c_str());
+            // Strings are arena-allocated in Module's StringPool, living for the module lifetime.
+            const char* name_ptr = fn->parent()->string_pool().intern(callee).data();
             res_val = b.build_call("bronze_create_func", Type::i64(), {
-                b.build_iconst_i64(reinterpret_cast<int64_t>(name_ptr)),
+                b.build_iconst_i64(static_cast<int64_t>(reinterpret_cast<uintptr_t>(name_ptr))),
                 argc_val,
                 env_val
             });

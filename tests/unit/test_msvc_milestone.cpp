@@ -710,5 +710,8 @@ TEST_CASE("MSVC Milestone (d) - Stack walker finds live gcrefs across Brass -> M
     CHECK_EQ(res.as_i64(), 13343LL);
     CHECK(gc.collection_count() > initial_collections);
 
+    brass_set_active_gc(nullptr);
+    brass_set_active_stack_maps(nullptr);
+
     FreeLibrary(hDll);
 }

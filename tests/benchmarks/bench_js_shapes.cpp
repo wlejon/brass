@@ -416,6 +416,9 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
         BenchmarkResult r{"cheney_gc", "Linked Node Alloc (Cheney GC)", gc_rounds, shadow_ms, -1.0, jit_ms, ratio, -1.0, target, ratio <= target, notes.str()};
         BenchmarkReporter::print_row(r);
         results.push_back(r);
+
+        brass_set_active_gc(nullptr);
+        brass_set_active_stack_maps(nullptr);
     }
 }
 

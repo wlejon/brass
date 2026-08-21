@@ -352,12 +352,20 @@ RuntimeValue val_smul_overflow(RuntimeValue lhs, RuntimeValue rhs) {
         return RuntimeValue::from_i32(ovf ? 1 : 0);
     }
     int64_t a = lhs.as_i64(), b = rhs.as_i64();
+#if defined(__GNUC__) || defined(__clang__)
+    int64_t res = 0;
+    bool ovf = __builtin_mul_overflow(a, b, &res);
+    return RuntimeValue::from_i32(ovf ? 1 : 0);
+#else
     if (a == 0 || b == 0) return RuntimeValue::from_i32(0);
     if (a == -1 && b == INT64_MIN) return RuntimeValue::from_i32(1);
     if (b == -1 && a == INT64_MIN) return RuntimeValue::from_i32(1);
-    int64_t prod = a * b;
-    bool ovf = (prod / a != b);
-    return RuntimeValue::from_i32(ovf ? 1 : 0);
+    if (a > 0 && b > 0 && a > INT64_MAX / b) return RuntimeValue::from_i32(1);
+    if (a > 0 && b < 0 && b < INT64_MIN / a) return RuntimeValue::from_i32(1);
+    if (a < 0 && b > 0 && a < INT64_MIN / b) return RuntimeValue::from_i32(1);
+    if (a < 0 && b < 0 && a < INT64_MAX / b) return RuntimeValue::from_i32(1);
+    return RuntimeValue::from_i32(0);
+#endif
 }
 
 RuntimeValue val_uadd_overflow(RuntimeValue lhs, RuntimeValue rhs) {

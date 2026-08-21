@@ -30,9 +30,6 @@ Value* make_smart_const_int(Builder& b, Type t, int64_t val) {
     if (t == Type::i32()) {
         return b.build_iconst_i32(static_cast<int32_t>(val));
     }
-    if (t == Type::f64()) {
-        return b.build_fconst_f64(static_cast<double>(val));
-    }
     return b.build_iconst_i64(val);
 }
 
@@ -305,6 +302,16 @@ bool analyze_loop(
     }
 
     if (!found_primary_iv || !cla.limit_val) return false;
+
+    // Verify that the primary IV and all derived IVs are integer types (Type::i32() or Type::i64())
+    for (size_t i = 0; i < header->param_count(); ++i) {
+        const ParamAnalysis& pa = cla.params[i];
+        if (pa.role == ParamRole::BasicIV || pa.role == ParamRole::DerivedIV) {
+            if (pa.type != Type::i32() && pa.type != Type::i64()) {
+                return false;
+            }
+        }
+    }
 
     // Only handle standard ascending `<` or `<=` comparisons (e.g. slt, ult, sle, ule)
     if (cla.cmp_opcode != Opcode::slt && cla.cmp_opcode != Opcode::ult &&

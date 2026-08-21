@@ -42,5 +42,8 @@ TEST_CASE("Differential Fuzzer - Moving GC Roots Across Calls and Safepoints") {
 
         CHECK_EQ(interp_res.as_i64(), jit_res.as_i64());
         CHECK(gc.collection_count() >= 1ULL);
+
+        brass_set_active_gc(nullptr);
+        brass_set_active_stack_maps(nullptr);
     }
 }

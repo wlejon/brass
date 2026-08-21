@@ -115,6 +115,9 @@ TEST_CASE("Moving GC Native - Linked List Allocation and Safepoints") {
         RuntimeValue native_res = jit.invoke("test_list_moving", {});
         CHECK_EQ(native_res.as_i64(), 150LL);
         CHECK(gc.collection_count() >= 5ULL);
+
+        brass_set_active_gc(nullptr);
+        brass_set_active_stack_maps(nullptr);
     }
 }
 
@@ -234,6 +237,9 @@ TEST_CASE("Moving GC Native - Binary Tree Construction and Evacuation") {
 
         RuntimeValue native_res = jit.invoke("test_tree_moving", {});
         CHECK_EQ(native_res.as_i64(), 1031LL);
+
+        brass_set_active_gc(nullptr);
+        brass_set_active_stack_maps(nullptr);
     }
 }
 
@@ -313,5 +319,8 @@ TEST_CASE("Moving GC Native - Cross-Function Call Roots and Callee Registers") {
         RuntimeValue native_res = jit.invoke("process_pair", {RuntimeValue::from_i64(1234), RuntimeValue::from_i64(5678)});
         CHECK_EQ(native_res.as_i64(), 6912LL);
         CHECK(gc.collection_count() >= 3ULL);
+
+        brass_set_active_gc(nullptr);
+        brass_set_active_stack_maps(nullptr);
     }
 }
