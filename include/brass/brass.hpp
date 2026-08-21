@@ -30,6 +30,7 @@
 #include <brass/codegen/lir.hpp>
 #include <brass/codegen/live_range.hpp>
 #include <brass/codegen/linear_scan.hpp>
+#include <brass/codegen/peephole.hpp>
 #include <brass/codegen/emit_context.hpp>
 #include <brass/codegen/jit_exec.hpp>
 

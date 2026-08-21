@@ -34,43 +34,51 @@ Brass MIR has a lean, machine-oriented type system:
 - `iconst.i32 <imm32>` -> `i32`
 - `iconst.i64 <imm64>` -> `i64`
 - `fconst.f64 <imm64>` -> `f64`
-- `patchable_const.i32 <sym>, <imm32>` -> `i32`
-- `patchable_const.i64 <sym>, <imm64>` -> `i64`
-- `sext.i64 <i32>` -> `i64`
-- `zext.i64 <i32>` -> `i64`
-- `trunc.i32 <i64>` -> `i32`
-- `fptosi.i32/i64 <f64>` -> `i32/i64`
-- `sitofp.f64 <i32/i64>` -> `f64`
-- `bitcast.i64 <f64>` -> `i64`
-- `bitcast.f64 <i64>` -> `f64`
+- `patchable_const.i32 @sym, <imm32>` -> `i32`
+- `patchable_const.i64 @sym, <imm64>` -> `i64`
+- `sext.i64 <val:i32>` -> `i64`
+- `zext.i64 <val:i32>` -> `i64`
+- `trunc.i32 <val:i64>` -> `i32`
+- `fptosi.i32 <val:f64>` -> `i32`
+- `fptosi.i64 <val:f64>` -> `i64`
+- `sitofp.f64 <val:i32|i64>` -> `f64`
+- `bitcast.i64 <val:f64>` -> `i64`
+- `bitcast.f64 <val:i64>` -> `f64`
 
 ### Arithmetic & Logic
-- `add`, `sub`, `mul`, `sdiv`, `udiv`, `smod`, `umod`, `neg` (`i32`, `i64`, `f64`)
-- `and`, `or`, `xor`, `shl`, `lshr`, `ashr`, `not` (`i32`, `i64`)
-- `clz`, `ctz`, `popcnt` (`i32`, `i64`)
+- `add.<type> <lhs>, <rhs>`, `sub.<type> <lhs>, <rhs>`, `mul.<type> <lhs>, <rhs>` (`i32`, `i64`, `f64`)
+- `sdiv.<type> <lhs>, <rhs>`, `udiv.<type> <lhs>, <rhs>`, `smod.<type> <lhs>, <rhs>`, `umod.<type> <lhs>, <rhs>` (`i32`, `i64`)
+- `neg.<type> <val>` (`i32`, `i64`, `f64`)
+- `and.<type> <lhs>, <rhs>`, `or.<type> <lhs>, <rhs>`, `xor.<type> <lhs>, <rhs>` (`i32`, `i64`)
+- `shl.<type> <lhs>, <rhs>`, `lshr.<type> <lhs>, <rhs>`, `ashr.<type> <lhs>, <rhs>`, `not.<type> <val>` (`i32`, `i64`)
+- `clz.<type> <val>`, `ctz.<type> <val>`, `popcnt.<type> <val>` (`i32`, `i64`)
 
 ### Comparisons
-- `eq`, `ne`, `slt`, `ult`, `sle`, `ule`, `sgt`, `ugt`, `sge`, `uge` (`i32`, `i64`, `f64` -> `i32` condition)
+- `eq.<type>`, `ne.<type>`, `slt.<type>`, `ult.<type>`, `sle.<type>`, `ule.<type>`, `sgt.<type>`, `ugt.<type>`, `sge.<type>`, `uge.<type>` (`i32`, `i64`, `f64` -> `i32` condition)
 
 ### Memory Operations
-- `load.<type> <base:ptr/gcref>, <offset:i32>` -> `<type>`
-- `store.<type> <base:ptr/gcref>, <offset:i32>, <val>`
+- `load.<type> <base:ptr|gcref>` -> `<type>`
+- `load.<type> <base:ptr|gcref>, <offset:i32>` -> `<type>`
+- `store.<type> <base:ptr|gcref>, <val>`
+- `store.<type> <base:ptr|gcref>, <offset:i32>, <val>`
+- `load_indexed.<type> <base>, <index:i64>, <scale:1|2|4|8>` -> `<type>`
 - `load_indexed.<type> <base>, <index:i64>, <scale:1|2|4|8>, <offset:i32>` -> `<type>`
+- `store_indexed.<type> <base>, <index:i64>, <scale:1|2|4|8>, <val>`
 - `store_indexed.<type> <base>, <index:i64>, <scale:1|2|4|8>, <offset:i32>, <val>`
 
 ### Function Calls & Safepoints
-- `call <fn_symbol>(<args...>)` -> `<return_type>`
-- `call_indirect <callee_ptr:ptr>(<args...>)` -> `<return_type>`
-- `patchable_call <sym>, <default_target>(<args...>)` -> `<return_type>`
+- `call.<type> @fn_symbol(<args...>)` -> `<type>`
+- `call_indirect.<type> <callee_ptr:ptr>(<args...>)` -> `<type>`
+- `patchable_call.<type> @patch_sym, @default_target(<args...>)` -> `<type>`
 - `safepoint`
 
 ### Speculation & Deoptimization
-- `guard <cond:i32>, exit_label, [<state_map_values...>]`
+- `guard %cond, @exit_stub, [%val1, %val2, ...]`
 - `resume_point <resume_id:i32>`
 
 ### Terminators
 - `br <target_block>(<args...>)`
-- `br_if <cond:i32>, <true_block>(<args...>), <false_block>(<args...>)`
+- `br_if <cond:i32>, <true_block>(<true_args...>), <false_block>(<false_args...>)`
 - `ret [<val>]`
 - `unreachable`
 
@@ -79,22 +87,25 @@ Brass MIR has a lean, machine-oriented type system:
 ## 4. Textual Format Example
 
 ```mir
-func @fibonacci(%n: i32) -> i32 {
+module @fib_module
+
+func @fibonacci(%0: i64) -> i64 {
 bb0:
-  %c2 = iconst.i32 2
-  %cond = slt.i32 %n, %c2
-  br_if %cond, bb1, bb2
+  %1 = iconst.i64 2
+  %2 = slt.i64 %0, %1
+  br_if %2, bb_base, bb_rec
 
-bb1:
-  ret %n
+bb_base:
+  ret %0
 
-bb2:
-  %c1 = iconst.i32 1
-  %n1 = sub.i32 %n, %c1
-  %r1 = call @fibonacci(%n1)
-  %n2 = sub.i32 %n, %c2
-  %r2 = call @fibonacci(%n2)
-  %sum = add.i32 %r1, %r2
-  ret %sum
+bb_rec:
+  %3 = iconst.i64 1
+  %4 = sub.i64 %0, %3
+  %5 = call.i64 @fibonacci(%4)
+  %6 = iconst.i64 2
+  %7 = sub.i64 %0, %6
+  %8 = call.i64 @fibonacci(%7)
+  %9 = add.i64 %5, %8
+  ret %9
 }
 ```

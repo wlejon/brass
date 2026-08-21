@@ -2,6 +2,7 @@
 #include <brass/target/x64/x64_isel.hpp>
 #include <brass/codegen/live_range.hpp>
 #include <brass/codegen/linear_scan.hpp>
+#include <brass/codegen/peephole.hpp>
 #include <brass/codegen/emit_context.hpp>
 #include <algorithm>
 
@@ -123,6 +124,9 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
         // 3. Linear Scan Register Allocation
         codegen::LinearScanAllocator regalloc(*lir, liveness, cc_);
         regalloc.allocate();
+
+        // 3.5 LIR Peephole Optimization
+        codegen::run_lir_peephole_optimizations(*lir);
 
         // 4. Machine Code Emission
         codegen::EmitContext emit_ctx(*lir, target_);

@@ -1,6 +1,6 @@
 # Speculation, Guards, and Deoptimization
 
-Brass provides native primitives for speculative optimization in dynamic languages (e.g. JavaScript in Bronze).
+Brass provides native primitives for speculative optimization in dynamic languages (such as JavaScript in the Bronze AOT compiler).
 
 ---
 
@@ -12,16 +12,19 @@ guard %cond, @exit_stub_0, [%val1, %val2, %val3]
 ```
 
 ### Lowering Strategy
-1. The inline fast path executes a conditional branch:
+1. **Fast Path**:
+   The inline fast path tests the condition and branches out-of-line on failure:
    ```x86asm
-   test  eax, eax
-   jz    .Lexit_stub_0
+   cmp  eax, 0
+   je   .Lexit_stub_0
    ```
-2. The slow path (`.Lexit_stub_0`) is placed out-of-line at the end of the function.
-3. The exit stub:
-   - Spills/marshals the specified state map values into the thread's deoptimization buffer (`brass_deopt_frame`).
-   - Sets the target resume ID / metadata pointer.
-   - Tail-calls or jumps to the runtime deoptimization handler or fallback twin function.
+2. **Out-of-Line Exit Stub** (`.Lexit_stub_0`):
+   Placed at the end of the function to keep the fast path instruction cache contiguous.
+3. **State Map Materialization**:
+   The exit stub:
+   - Marshals live values from the state map (`%val1`, `%val2`, `%val3`) into the thread-local deoptimization frame (`brass_deopt_frame`).
+   - Sets the target resume ID and deopt reason.
+   - Tail-calls or returns into the runtime deoptimization handler or generic fallback twin.
 
 ---
 
@@ -45,4 +48,13 @@ bb_resume_loop:
 }
 ```
 
-The compiler emits a dispatch jump table at function entry for resume points.
+The compiler records function resume offsets in the binary metadata and `JitExecutionEngine` can invoke `engine.resume("fn_name", resume_id, args)` directly at the native interior entry point.
+
+---
+
+## 3. Metadata Preservation During Optimization
+
+The LIR peephole optimizer guarantees that:
+- Guard exits and deopt stubs are never removed as dead code.
+- Resume point targets are preserved across branch simplifications.
+- State map live variables maintain their assigned register/spill locations through compilation.

@@ -13,6 +13,7 @@ add_executable(brass_unit_tests
     unit/test_x64_encoder.cpp
     unit/test_lir_isel.cpp
     unit/test_linear_scan.cpp
+    unit/test_peephole.cpp
     unit/test_x64_codegen.cpp
     unit/test_coff_writer.cpp
     unit/test_elf_writer.cpp
@@ -20,6 +21,7 @@ add_executable(brass_unit_tests
     unit/test_stack_walker.cpp
     unit/test_deopt_resume.cpp
     unit/test_patching_concurrency.cpp
+    unit/test_determinism_ratchet.cpp
     differential/test_differential_exec.cpp
     differential/test_moving_gc_native.cpp
     differential/test_speculation_differential.cpp
@@ -37,3 +39,21 @@ target_link_libraries(brass_unit_tests
 )
 
 add_test(NAME unit_tests COMMAND brass_unit_tests)
+
+# Benchmarks
+add_executable(brass_benchmarks
+    benchmarks/benchmark_suite.cpp
+)
+
+target_include_directories(brass_benchmarks
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks
+        ${BRASS_INCLUDE_DIR}
+)
+
+target_link_libraries(brass_benchmarks
+    PRIVATE
+        brass
+)
+
+add_test(NAME benchmarks COMMAND brass_benchmarks)
