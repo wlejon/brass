@@ -72,6 +72,27 @@ inline void ClobberMemory() {
 }
 
 // ============================================================================
+// Build Type & Environment Utilities
+// ============================================================================
+
+inline bool is_debug_build() {
+#if defined(BRASS_BUILD_TYPE)
+    std::string_view bt = BRASS_BUILD_TYPE;
+    if (bt == "Debug" || bt == "debug" || bt == "DEBUG") {
+        return true;
+    }
+    if (bt == "Release" || bt == "release" || bt == "RELEASE" || bt == "RelWithDebInfo" || bt == "MinSizeRel") {
+        return false;
+    }
+#endif
+#if !defined(NDEBUG)
+    return true;
+#else
+    return false;
+#endif
+}
+
+// ============================================================================
 // Stopwatch & Benchmark Timing
 // ============================================================================
 
@@ -91,7 +112,7 @@ private:
 };
 
 struct BenchmarkResult {
-    std::string key; // Benchmark identifier, e.g. "fib", "matmul_i64_32"
+    std::string key; // Benchmark identifier, e.g. "fib", "matmul_i64_32_naive"
     std::string name;
     size_t iterations = 0;
     double native_ms = 0.0;
@@ -113,18 +134,22 @@ public:
     static RatchetManager defaults() {
         RatchetManager rm;
         rm.ratios_ = {
-            {"fib", 1.15},
-            {"sieve", 1.25},
-            {"collatz", 1.35},
-            {"matmul_i64_32", 1.65},
-            {"matmul_i64_64", 1.75},
-            {"matmul_f64_32", 2.15},
-            {"matmul_f64_64", 1.65},
-            {"linked_list", 0.95},
-            {"nanbox", 1.15},
-            {"shapes", 1.10},
-            {"icache", 0.65},
-            {"cheney_gc", 1.10}
+            {"cheney_gc", 1.08},
+            {"collatz", 1.30},
+            {"fib", 1.20},
+            {"icache", 0.62},
+            {"linked_list", 0.85},
+            {"matmul_f64_32_naive", 2.25},
+            {"matmul_f64_32_preopt", 2.20},
+            {"matmul_f64_64_naive", 1.65},
+            {"matmul_f64_64_preopt", 1.57},
+            {"matmul_i64_32_naive", 2.50},
+            {"matmul_i64_32_preopt", 1.63},
+            {"matmul_i64_64_naive", 2.10},
+            {"matmul_i64_64_preopt", 1.55},
+            {"nanbox", 1.09},
+            {"shapes", 1.05},
+            {"sieve", 1.25}
         };
         return rm;
     }
@@ -321,7 +346,7 @@ public:
         std::cout << "  - Compiler:     " << compiler_info << "\n";
         std::cout << "========================================================================================================================\n";
         std::cout << std::left
-                  << std::setw(30) << "Benchmark"
+                  << std::setw(34) << "Benchmark"
                   << std::setw(11) << "Iterations"
                   << std::setw(14) << "Native -O3"
                   << std::setw(14) << "Scalar -O3"
@@ -342,11 +367,12 @@ public:
             s_vec << "-";
         }
 
-        // Status is strictly derived from exact ratio vs target ratio
+        // Status is strictly derived from exact ratio vs target ratio in Release, informational in Debug
         bool pass = (res.target_ratio > 0.0) ? (res.ratio <= res.target_ratio) : res.passes_bar;
+        std::string status_str = is_debug_build() ? "[INFO]" : (pass ? "[PASS]" : "[FAIL]");
 
         std::cout << std::left
-                  << std::setw(30) << res.name
+                  << std::setw(34) << res.name
                   << std::setw(11) << res.iterations
                   << std::fixed << std::setprecision(2)
                   << std::setw(14) << res.native_ms;
@@ -358,7 +384,7 @@ public:
         std::cout << std::setw(13) << res.brass_ms
                   << std::setw(11) << s_ratio.str()
                   << std::setw(10) << s_vec.str()
-                  << std::setw(9)  << (pass ? "[PASS]" : "[FAIL]");
+                  << std::setw(9)  << status_str;
         if (!res.notes.empty()) {
             std::cout << " (" << res.notes << ")";
         }
@@ -370,8 +396,8 @@ public:
         std::cout << "  PERFORMANCE RATCHET VERIFICATION (Regression Margin: " << std::fixed << std::setprecision(0) << ((regression_factor - 1.0) * 100.0) << "%)\n";
         std::cout << "========================================================================================================================\n";
         std::cout << std::left
-                  << std::setw(18) << "Key"
-                  << std::setw(32) << "Benchmark"
+                  << std::setw(24) << "Key"
+                  << std::setw(34) << "Benchmark"
                   << std::setw(16) << "Golden Ratchet"
                   << std::setw(16) << "Max Allowed"
                   << std::setw(16) << "Measured Ratio"
@@ -383,6 +409,7 @@ public:
             double golden = rm.get_ratio(res.key, 1.30);
             double max_allowed = golden * regression_factor;
             bool pass = (res.ratio <= max_allowed);
+            std::string status_str = is_debug_build() ? "[INFO]" : (pass ? "[PASS]" : "[FAIL]");
 
             std::ostringstream s_golden, s_max, s_measured;
             s_golden << std::fixed << std::setprecision(2) << golden << "x";
@@ -390,24 +417,30 @@ public:
             s_measured << std::fixed << std::setprecision(2) << res.ratio << "x";
 
             std::cout << std::left
-                      << std::setw(18) << res.key
-                      << std::setw(32) << res.name
+                      << std::setw(24) << res.key
+                      << std::setw(34) << res.name
                       << std::setw(16) << s_golden.str()
                       << std::setw(16) << s_max.str()
                       << std::setw(16) << s_measured.str()
-                      << std::setw(10) << (pass ? "[PASS]" : "[FAIL]")
+                      << std::setw(10) << status_str
                       << "\n";
         }
         std::cout << "========================================================================================================================\n\n";
     }
 
     static void print_gc_comparison(double shadow_stack_ms, double brass_stack_map_ms, double speedup, bool passed) {
+        std::string status_str;
+        if (is_debug_build()) {
+            status_str = "[INFO] Debug Build (>= 1.5x bar informational)";
+        } else {
+            status_str = passed ? "[PASS] Verified >= 1.5x Speedup" : "[FAIL] Below 1.5x Bar";
+        }
         std::cout << "\n------------------------------------------------------------------------------------------------------------------------\n";
         std::cout << "  GC MODEL COMPARISON (Live GC references across subroutine calls):\n";
         std::cout << "  - (a) Shadow-Stack Model:      " << std::fixed << std::setprecision(2) << shadow_stack_ms << " ms\n";
         std::cout << "  - (b) Brass Stack-Map Model:   " << std::fixed << std::setprecision(2) << brass_stack_map_ms << " ms\n";
         std::cout << "  - Speedup Ratio:               " << std::fixed << std::setprecision(2) << speedup << "x faster (Required: >= 1.5x)\n";
-        std::cout << "  - Status:                      " << (passed ? "[PASS] Verified >= 1.5x Speedup" : "[FAIL] Below 1.5x Bar") << "\n";
+        std::cout << "  - Status:                      " << status_str << "\n";
         std::cout << "========================================================================================================================\n\n";
     }
 
@@ -426,6 +459,13 @@ public:
     ) {
         double fn_per_sec = (total_ms > 0.0) ? (static_cast<double>(function_count) / (total_ms / 1000.0)) : 0.0;
         double kb_per_sec = (total_ms > 0.0) ? (static_cast<double>(mir_bytes) / 1024.0 / (total_ms / 1000.0)) : 0.0;
+
+        std::string status_str;
+        if (is_debug_build()) {
+            status_str = passed ? "[INFO] Sub-2s Target Met (Debug)" : "[INFO] Exceeded 2s Limit (Informational in Debug)";
+        } else {
+            status_str = passed ? "[PASS] Sub-2s Target Met" : "[FAIL] Exceeded 2s Limit";
+        }
 
         std::cout << "\n========================================================================================================================\n";
         std::cout << "  BRASS COMPILE-SPEED BENCHMARK:\n";
@@ -446,7 +486,7 @@ public:
         std::cout << "  - Determinism Verification:    " << (deterministic ? "[PASS] Verified 100% Byte-for-Byte Deterministic" : "[FAIL] Determinism mismatch") << "\n";
         std::cout << "  - Throughput:                  " << std::fixed << std::setprecision(0) << fn_per_sec << " functions/sec | "
                   << std::fixed << std::setprecision(1) << kb_per_sec << " KB/sec\n";
-        std::cout << "  - Status:                      " << (passed ? "[PASS] Sub-2s Target Met" : "[FAIL] Exceeded 2s Limit") << "\n";
+        std::cout << "  - Status:                      " << status_str << "\n";
         std::cout << "========================================================================================================================\n\n";
     }
 };

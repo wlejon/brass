@@ -178,6 +178,11 @@ void run_gc_benchmark(std::vector<BenchmarkResult>& results) {
     bool passes_gc_bar = (speedup >= 1.50);
 
     BenchmarkReporter::print_gc_comparison(shadow_stack_ms, brass_stack_map_ms, speedup, passes_gc_bar);
+
+    if (!passes_gc_bar && !is_debug_build()) {
+        std::cerr << "FATAL: GC speedup benchmark failed to meet 1.5x bar in Release build!\n";
+        std::abort();
+    }
 }
 
 } // namespace brass::bench

@@ -224,11 +224,100 @@ std::unique_ptr<Module> build_collatz_module() {
     return mod;
 }
 
-std::unique_ptr<Module> build_matmul_i64_module() {
-    auto mod = std::make_unique<Module>("bench_matmul_i64");
+std::unique_ptr<Module> build_matmul_i64_naive_module() {
+    auto mod = std::make_unique<Module>("bench_matmul_i64_naive");
     Builder b(*mod);
 
-    Function* fn = mod->create_function("matmul_i64", Type::void_type(), {Type::ptr(), Type::ptr(), Type::ptr(), Type::i64()});
+    Function* fn = mod->create_function("matmul_i64_naive", Type::void_type(), {Type::ptr(), Type::ptr(), Type::ptr(), Type::i64()});
+    b.set_function(fn);
+
+    BasicBlock* entry = b.append_block("entry");
+    Value* A = b.add_block_param(entry, Type::ptr());
+    Value* B = b.add_block_param(entry, Type::ptr());
+    Value* C = b.add_block_param(entry, Type::ptr());
+    Value* N = b.add_block_param(entry, Type::i64());
+
+    BasicBlock* loop_i_hdr = b.create_block("loop_i_hdr");
+    BasicBlock* loop_i_body = b.create_block("loop_i_body");
+    BasicBlock* loop_j_hdr = b.create_block("loop_j_hdr");
+    BasicBlock* loop_j_body = b.create_block("loop_j_body");
+    BasicBlock* loop_k_hdr = b.create_block("loop_k_hdr");
+    BasicBlock* loop_k_body = b.create_block("loop_k_body");
+    BasicBlock* loop_j_next = b.create_block("loop_j_next");
+    BasicBlock* loop_i_next = b.create_block("loop_i_next");
+    BasicBlock* exit_bb = b.create_block("exit");
+
+    Value* zero = b.build_iconst_i64(0);
+    Value* one = b.build_iconst_i64(1);
+    b.build_br(loop_i_hdr, {zero});
+
+    fn->append_block(loop_i_hdr);
+    b.position_at_end(loop_i_hdr);
+    Value* i = b.add_block_param(loop_i_hdr, Type::i64());
+    Value* cond_i = b.build_slt(i, N);
+    b.build_br_if(cond_i, loop_i_body, {}, exit_bb, {});
+
+    fn->append_block(loop_i_body);
+    b.position_at_end(loop_i_body);
+    Value* row_a = b.build_mul(i, N);
+    b.build_br(loop_j_hdr, {zero});
+
+    fn->append_block(loop_j_hdr);
+    b.position_at_end(loop_j_hdr);
+    Value* j = b.add_block_param(loop_j_hdr, Type::i64());
+    Value* cond_j = b.build_slt(j, N);
+    b.build_br_if(cond_j, loop_j_body, {}, loop_i_next, {});
+
+    fn->append_block(loop_j_body);
+    b.position_at_end(loop_j_body);
+    b.build_br(loop_k_hdr, {zero, zero, zero});
+
+    fn->append_block(loop_k_hdr);
+    b.position_at_end(loop_k_hdr);
+    Value* k = b.add_block_param(loop_k_hdr, Type::i64());
+    Value* kN = b.add_block_param(loop_k_hdr, Type::i64());
+    Value* sum = b.add_block_param(loop_k_hdr, Type::i64());
+    Value* cond_k = b.build_slt(k, N);
+    b.build_br_if(cond_k, loop_k_body, {}, loop_j_next, {sum});
+
+    fn->append_block(loop_k_body);
+    b.position_at_end(loop_k_body);
+    Value* idx_a = b.build_add(row_a, k);
+    Value* val_a = b.build_load_indexed(Type::i64(), A, idx_a, 8, 0);
+    Value* idx_b = b.build_add(kN, j);
+    Value* val_b = b.build_load_indexed(Type::i64(), B, idx_b, 8, 0);
+    Value* term = b.build_mul(val_a, val_b);
+    Value* next_sum = b.build_add(sum, term);
+    Value* next_kN = b.build_add(kN, N);
+    Value* next_k = b.build_add(k, one);
+    b.build_br(loop_k_hdr, {next_k, next_kN, next_sum});
+
+    fn->append_block(loop_j_next);
+    b.position_at_end(loop_j_next);
+    Value* final_sum = b.add_block_param(loop_j_next, Type::i64());
+    Value* idx_c = b.build_add(row_a, j);
+    b.build_store_indexed(Type::i64(), C, idx_c, 8, 0, final_sum);
+    Value* next_j = b.build_add(j, one);
+    b.build_br(loop_j_hdr, {next_j});
+
+    fn->append_block(loop_i_next);
+    b.position_at_end(loop_i_next);
+    Value* next_i = b.build_add(i, one);
+    b.build_br(loop_i_hdr, {next_i});
+
+    fn->append_block(exit_bb);
+    b.position_at_end(exit_bb);
+    b.build_ret(nullptr);
+
+    fn->rebuild_cfg_predecessors();
+    return mod;
+}
+
+std::unique_ptr<Module> build_matmul_i64_preopt_module() {
+    auto mod = std::make_unique<Module>("bench_matmul_i64_preopt");
+    Builder b(*mod);
+
+    Function* fn = mod->create_function("matmul_i64_preopt", Type::void_type(), {Type::ptr(), Type::ptr(), Type::ptr(), Type::i64()});
     b.set_function(fn);
 
     BasicBlock* entry = b.append_block("entry");
@@ -317,11 +406,101 @@ std::unique_ptr<Module> build_matmul_i64_module() {
     return mod;
 }
 
-std::unique_ptr<Module> build_matmul_f64_module() {
-    auto mod = std::make_unique<Module>("bench_matmul_f64");
+std::unique_ptr<Module> build_matmul_f64_naive_module() {
+    auto mod = std::make_unique<Module>("bench_matmul_f64_naive");
     Builder b(*mod);
 
-    Function* fn = mod->create_function("matmul_f64", Type::void_type(), {Type::ptr(), Type::ptr(), Type::ptr(), Type::i64()});
+    Function* fn = mod->create_function("matmul_f64_naive", Type::void_type(), {Type::ptr(), Type::ptr(), Type::ptr(), Type::i64()});
+    b.set_function(fn);
+
+    BasicBlock* entry = b.append_block("entry");
+    Value* A = b.add_block_param(entry, Type::ptr());
+    Value* B = b.add_block_param(entry, Type::ptr());
+    Value* C = b.add_block_param(entry, Type::ptr());
+    Value* N = b.add_block_param(entry, Type::i64());
+
+    BasicBlock* loop_i_hdr = b.create_block("loop_i_hdr");
+    BasicBlock* loop_i_body = b.create_block("loop_i_body");
+    BasicBlock* loop_j_hdr = b.create_block("loop_j_hdr");
+    BasicBlock* loop_j_body = b.create_block("loop_j_body");
+    BasicBlock* loop_k_hdr = b.create_block("loop_k_hdr");
+    BasicBlock* loop_k_body = b.create_block("loop_k_body");
+    BasicBlock* loop_j_next = b.create_block("loop_j_next");
+    BasicBlock* loop_i_next = b.create_block("loop_i_next");
+    BasicBlock* exit_bb = b.create_block("exit");
+
+    Value* zero = b.build_iconst_i64(0);
+    Value* zero_f = b.build_fconst_f64(0.0);
+    Value* one = b.build_iconst_i64(1);
+    b.build_br(loop_i_hdr, {zero});
+
+    fn->append_block(loop_i_hdr);
+    b.position_at_end(loop_i_hdr);
+    Value* i = b.add_block_param(loop_i_hdr, Type::i64());
+    Value* cond_i = b.build_slt(i, N);
+    b.build_br_if(cond_i, loop_i_body, {}, exit_bb, {});
+
+    fn->append_block(loop_i_body);
+    b.position_at_end(loop_i_body);
+    Value* row_a = b.build_mul(i, N);
+    b.build_br(loop_j_hdr, {zero});
+
+    fn->append_block(loop_j_hdr);
+    b.position_at_end(loop_j_hdr);
+    Value* j = b.add_block_param(loop_j_hdr, Type::i64());
+    Value* cond_j = b.build_slt(j, N);
+    b.build_br_if(cond_j, loop_j_body, {}, loop_i_next, {});
+
+    fn->append_block(loop_j_body);
+    b.position_at_end(loop_j_body);
+    b.build_br(loop_k_hdr, {zero, zero, zero_f});
+
+    fn->append_block(loop_k_hdr);
+    b.position_at_end(loop_k_hdr);
+    Value* k = b.add_block_param(loop_k_hdr, Type::i64());
+    Value* kN = b.add_block_param(loop_k_hdr, Type::i64());
+    Value* sum = b.add_block_param(loop_k_hdr, Type::f64());
+    Value* cond_k = b.build_slt(k, N);
+    b.build_br_if(cond_k, loop_k_body, {}, loop_j_next, {sum});
+
+    fn->append_block(loop_k_body);
+    b.position_at_end(loop_k_body);
+    Value* idx_a = b.build_add(row_a, k);
+    Value* val_a = b.build_load_indexed(Type::f64(), A, idx_a, 8, 0);
+    Value* idx_b = b.build_add(kN, j);
+    Value* val_b = b.build_load_indexed(Type::f64(), B, idx_b, 8, 0);
+    Value* term = b.build_mul(val_a, val_b);
+    Value* next_sum = b.build_add(sum, term);
+    Value* next_kN = b.build_add(kN, N);
+    Value* next_k = b.build_add(k, one);
+    b.build_br(loop_k_hdr, {next_k, next_kN, next_sum});
+
+    fn->append_block(loop_j_next);
+    b.position_at_end(loop_j_next);
+    Value* final_sum = b.add_block_param(loop_j_next, Type::f64());
+    Value* idx_c = b.build_add(row_a, j);
+    b.build_store_indexed(Type::f64(), C, idx_c, 8, 0, final_sum);
+    Value* next_j = b.build_add(j, one);
+    b.build_br(loop_j_hdr, {next_j});
+
+    fn->append_block(loop_i_next);
+    b.position_at_end(loop_i_next);
+    Value* next_i = b.build_add(i, one);
+    b.build_br(loop_i_hdr, {next_i});
+
+    fn->append_block(exit_bb);
+    b.position_at_end(exit_bb);
+    b.build_ret(nullptr);
+
+    fn->rebuild_cfg_predecessors();
+    return mod;
+}
+
+std::unique_ptr<Module> build_matmul_f64_preopt_module() {
+    auto mod = std::make_unique<Module>("bench_matmul_f64_preopt");
+    Builder b(*mod);
+
+    Function* fn = mod->create_function("matmul_f64_preopt", Type::void_type(), {Type::ptr(), Type::ptr(), Type::ptr(), Type::i64()});
     b.set_function(fn);
 
     BasicBlock* entry = b.append_block("entry");

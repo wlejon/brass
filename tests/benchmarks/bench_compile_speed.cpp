@@ -385,7 +385,12 @@ void run_compile_speed_benchmark(std::vector<BenchmarkResult>& results) {
     }
 
     double total_ms = parse_ms + verify_ms + codegen_ms;
-    bool passes_compile_bar = (total_ms < 2000.0) && verify_ok && jit_ok && deterministic;
+    bool sub_2s_target = (total_ms < 2000.0);
+    bool correctness_ok = verify_ok && jit_ok && deterministic;
+    if (!correctness_ok) {
+        std::cerr << "FATAL: Compile speed benchmark correctness failure!\n";
+        std::abort();
+    }
 
     // Approximate emitted machine code size
     size_t machine_bytes = total_instructions * 4;
@@ -402,11 +407,11 @@ void run_compile_speed_benchmark(std::vector<BenchmarkResult>& results) {
         codegen_ms,
         total_ms,
         deterministic,
-        passes_compile_bar
+        sub_2s_target
     );
 
-    if (!passes_compile_bar) {
-        std::cerr << "FATAL: Compile speed benchmark failed to meet bar!\n";
+    if (!sub_2s_target && !is_debug_build()) {
+        std::cerr << "FATAL: Compile speed benchmark failed to meet 2s bar in Release build!\n";
         std::abort();
     }
 }
