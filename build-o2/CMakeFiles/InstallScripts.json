@@ -1,9 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"D:/projects/brass/build-o2/cmake_install.cmake",
-		"D:/projects/brass/build-o2/tools/cmake_install.cmake",
-		"D:/projects/brass/build-o2/tests/cmake_install.cmake"
-	],
-	"Parallel" : false
-}
