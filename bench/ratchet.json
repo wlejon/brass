@@ -6,7 +6,7 @@
   "icache": 0.75,
   "linked_list": 0.90,
   "matmul_f64_32_strict_naive": 2.25,
-  "matmul_f64_32_strict_preopt": 2.25,
+  "matmul_f64_32_strict_preopt": 2.20,
   "matmul_f64_32_reassoc_naive": 1.00,
   "matmul_f64_32_reassoc_preopt": 1.00,
   "matmul_f64_64_strict_naive": 1.70,
@@ -19,5 +19,5 @@
   "matmul_i64_64_preopt": 1.45,
   "nanbox": 1.20,
   "shapes": 1.10,
-  "sieve": 1.45
+  "sieve": 1.35
 }
