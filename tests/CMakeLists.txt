@@ -11,6 +11,9 @@ add_executable(brass_unit_tests
     unit/test_interpreter.cpp
     unit/test_target_calling_conv.cpp
     unit/test_x64_encoder.cpp
+    unit/test_lir_isel.cpp
+    unit/test_linear_scan.cpp
+    unit/test_x64_codegen.cpp
 )
 
 target_include_directories(brass_unit_tests

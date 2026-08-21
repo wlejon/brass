@@ -105,6 +105,8 @@ public:
 
     InstructionIterator begin() noexcept { return InstructionIterator(head_); }
     InstructionIterator end() noexcept { return InstructionIterator(nullptr); }
+    InstructionIterator begin() const noexcept { return InstructionIterator(head_); }
+    InstructionIterator end() const noexcept { return InstructionIterator(nullptr); }
 
 private:
     uint32_t id_ = 0;
