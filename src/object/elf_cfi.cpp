@@ -103,26 +103,28 @@ void ElfCfiBuilder::build_eh_frame(
         // Augmentation Data Length = 0 (ULEB128)
         eh_frame_sec.emit8(0);
 
-        // Call Frame Instructions:
-        // After push rbp (1 byte)
-        eh_frame_sec.emit8(elf::DW_CFA_advance_loc | 1);
-        eh_frame_sec.emit8(elf::DW_CFA_def_cfa_offset);
-        eh_frame_sec.emit8(16);
-        eh_frame_sec.emit8(elf::DW_CFA_offset | 6); // RBP
-        eh_frame_sec.emit8(2); // offset 2 * -8 = -16
+        if (!fn.frame_info.is_leaf) {
+            // Call Frame Instructions:
+            // After push rbp (1 byte)
+            eh_frame_sec.emit8(elf::DW_CFA_advance_loc | 1);
+            eh_frame_sec.emit8(elf::DW_CFA_def_cfa_offset);
+            eh_frame_sec.emit8(16);
+            eh_frame_sec.emit8(elf::DW_CFA_offset | 6); // RBP
+            eh_frame_sec.emit8(2); // offset 2 * -8 = -16
 
-        // After mov rbp, rsp (3 bytes)
-        eh_frame_sec.emit8(elf::DW_CFA_advance_loc | 3);
-        eh_frame_sec.emit8(elf::DW_CFA_def_cfa_register);
-        eh_frame_sec.emit8(6); // RBP
+            // After mov rbp, rsp (3 bytes)
+            eh_frame_sec.emit8(elf::DW_CFA_advance_loc | 3);
+            eh_frame_sec.emit8(elf::DW_CFA_def_cfa_register);
+            eh_frame_sec.emit8(6); // RBP
 
-        // Callee-saved GPRs (if any)
-        auto saved_gprs = X64FrameLayout::get_saved_callee_gprs(fn.frame_info);
-        for (size_t i = 0; i < saved_gprs.size(); ++i) {
-            uint8_t dreg = to_dwarf_gpr(saved_gprs[i]);
-            uint8_t factored = static_cast<uint8_t>(i + 1); // [rbp - (i+1)*8]
-            eh_frame_sec.emit8(elf::DW_CFA_offset | dreg);
-            eh_frame_sec.emit8(factored);
+            // Callee-saved GPRs (if any)
+            auto saved_gprs = X64FrameLayout::get_saved_callee_gprs(fn.frame_info);
+            for (size_t i = 0; i < saved_gprs.size(); ++i) {
+                uint8_t dreg = to_dwarf_gpr(saved_gprs[i]);
+                uint8_t factored = static_cast<uint8_t>(i + 1); // [rbp - (i+1)*8]
+                eh_frame_sec.emit8(elf::DW_CFA_offset | dreg);
+                eh_frame_sec.emit8(factored);
+            }
         }
 
         eh_frame_sec.align_to(8);

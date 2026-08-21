@@ -56,92 +56,97 @@ void CoffUnwindBuilder::build_unwind_info(
 
         std::vector<UnwindOpSlot> ops;
         uint8_t cur_offset = 0;
+        uint8_t frame_reg_offset = 0;
 
-        // 1. push rbp (1 byte: 0x55)
-        cur_offset += 1;
-        {
-            UnwindOpSlot op;
-            op.code_offset = cur_offset;
-            op.unwind_op = coff::UWOP_PUSH_NONVOL;
-            op.op_info = 5; // RBP
-            op.num_slots = 1;
-            ops.push_back(op);
-        }
+        if (!fn.frame_info.is_leaf) {
+            frame_reg_offset = (0 << 4) | 5; // FrameReg = 5 (RBP), FrameOffset = 0
 
-        // 2. mov rbp, rsp (3 bytes: 0x48 0x89 0xE5)
-        cur_offset += 3;
-        {
-            UnwindOpSlot op;
-            op.code_offset = cur_offset;
-            op.unwind_op = coff::UWOP_SET_FPREG;
-            op.op_info = 0;
-            op.num_slots = 1;
-            ops.push_back(op);
-        }
-
-        // 3. sub rsp, total_frame_size
-        size_t frame_sz = fn.frame_info.total_frame_size;
-        if (frame_sz > 0) {
-            if (frame_sz <= 127) {
-                cur_offset += 4; // 48 83 EC imm8
-            } else {
-                cur_offset += 7; // 48 81 EC imm32
-            }
-
-            UnwindOpSlot op;
-            op.code_offset = cur_offset;
-            if (frame_sz <= 128) {
-                op.unwind_op = coff::UWOP_ALLOC_SMALL;
-                op.op_info = static_cast<uint8_t>((frame_sz - 8) / 8);
+            // 1. push rbp (1 byte: 0x55)
+            cur_offset += 1;
+            {
+                UnwindOpSlot op;
+                op.code_offset = cur_offset;
+                op.unwind_op = coff::UWOP_PUSH_NONVOL;
+                op.op_info = 5; // RBP
                 op.num_slots = 1;
-            } else if (frame_sz <= 512 * 1024 - 8) {
-                op.unwind_op = coff::UWOP_ALLOC_LARGE;
-                op.op_info = 0;
-                op.extra_slot1 = static_cast<uint16_t>(frame_sz / 8);
-                op.num_slots = 2;
-            } else {
-                op.unwind_op = coff::UWOP_ALLOC_LARGE;
-                op.op_info = 1;
-                op.extra_slot1 = static_cast<uint16_t>(frame_sz & 0xFFFF);
-                op.extra_slot2 = static_cast<uint16_t>((frame_sz >> 16) & 0xFFFF);
-                op.num_slots = 3;
+                ops.push_back(op);
             }
-            ops.push_back(op);
-        }
 
-        // 4. Saved callee-saved GPRs
-        auto saved_gprs = X64FrameLayout::get_saved_callee_gprs(fn.frame_info);
-        for (size_t i = 0; i < saved_gprs.size(); ++i) {
-            GPR g = saved_gprs[i];
-            int32_t disp = static_cast<int32_t>((i + 1) * 8);
-            disp <= 127 ? (cur_offset = static_cast<uint8_t>(cur_offset + 4))
-                        : (cur_offset = static_cast<uint8_t>(cur_offset + 7));
+            // 2. mov rbp, rsp (3 bytes: 0x48 0x89 0xE5)
+            cur_offset += 3;
+            {
+                UnwindOpSlot op;
+                op.code_offset = cur_offset;
+                op.unwind_op = coff::UWOP_SET_FPREG;
+                op.op_info = 0;
+                op.num_slots = 1;
+                ops.push_back(op);
+            }
 
-            UnwindOpSlot op;
-            op.code_offset = cur_offset;
-            op.unwind_op = coff::UWOP_SAVE_NONVOL;
-            op.op_info = static_cast<uint8_t>(g);
-            op.extra_slot1 = static_cast<uint16_t>(disp / 8);
-            op.num_slots = 2;
-            ops.push_back(op);
-        }
+            // 3. sub rsp, total_frame_size
+            size_t frame_sz = fn.frame_info.total_frame_size;
+            if (frame_sz > 0) {
+                if (frame_sz <= 127) {
+                    cur_offset += 4; // 48 83 EC imm8
+                } else {
+                    cur_offset += 7; // 48 81 EC imm32
+                }
 
-        // 5. Saved callee-saved XMMs
-        auto saved_xmms = X64FrameLayout::get_saved_callee_xmms(fn.frame_info);
-        size_t gpr_bytes = saved_gprs.size() * 8;
-        for (size_t i = 0; i < saved_xmms.size(); ++i) {
-            XMM x = saved_xmms[i];
-            int32_t disp = static_cast<int32_t>(gpr_bytes + (i + 1) * 16);
-            disp <= 127 ? (cur_offset = static_cast<uint8_t>(cur_offset + 5))
-                        : (cur_offset = static_cast<uint8_t>(cur_offset + 8));
+                UnwindOpSlot op;
+                op.code_offset = cur_offset;
+                if (frame_sz <= 128) {
+                    op.unwind_op = coff::UWOP_ALLOC_SMALL;
+                    op.op_info = static_cast<uint8_t>((frame_sz - 8) / 8);
+                    op.num_slots = 1;
+                } else if (frame_sz <= 512 * 1024 - 8) {
+                    op.unwind_op = coff::UWOP_ALLOC_LARGE;
+                    op.op_info = 0;
+                    op.extra_slot1 = static_cast<uint16_t>(frame_sz / 8);
+                    op.num_slots = 2;
+                } else {
+                    op.unwind_op = coff::UWOP_ALLOC_LARGE;
+                    op.op_info = 1;
+                    op.extra_slot1 = static_cast<uint16_t>(frame_sz & 0xFFFF);
+                    op.extra_slot2 = static_cast<uint16_t>((frame_sz >> 16) & 0xFFFF);
+                    op.num_slots = 3;
+                }
+                ops.push_back(op);
+            }
 
-            UnwindOpSlot op;
-            op.code_offset = cur_offset;
-            op.unwind_op = coff::UWOP_SAVE_XMM128;
-            op.op_info = static_cast<uint8_t>(x);
-            op.extra_slot1 = static_cast<uint16_t>(disp / 16);
-            op.num_slots = 2;
-            ops.push_back(op);
+            // 4. Saved callee-saved GPRs
+            auto saved_gprs = X64FrameLayout::get_saved_callee_gprs(fn.frame_info);
+            for (size_t i = 0; i < saved_gprs.size(); ++i) {
+                GPR g = saved_gprs[i];
+                int32_t disp = static_cast<int32_t>((i + 1) * 8);
+                disp <= 127 ? (cur_offset = static_cast<uint8_t>(cur_offset + 4))
+                            : (cur_offset = static_cast<uint8_t>(cur_offset + 7));
+
+                UnwindOpSlot op;
+                op.code_offset = cur_offset;
+                op.unwind_op = coff::UWOP_SAVE_NONVOL;
+                op.op_info = static_cast<uint8_t>(g);
+                op.extra_slot1 = static_cast<uint16_t>(disp / 8);
+                op.num_slots = 2;
+                ops.push_back(op);
+            }
+
+            // 5. Saved callee-saved XMMs
+            auto saved_xmms = X64FrameLayout::get_saved_callee_xmms(fn.frame_info);
+            size_t gpr_bytes = saved_gprs.size() * 8;
+            for (size_t i = 0; i < saved_xmms.size(); ++i) {
+                XMM x = saved_xmms[i];
+                int32_t disp = static_cast<int32_t>(gpr_bytes + (i + 1) * 16);
+                disp <= 127 ? (cur_offset = static_cast<uint8_t>(cur_offset + 5))
+                            : (cur_offset = static_cast<uint8_t>(cur_offset + 8));
+
+                UnwindOpSlot op;
+                op.code_offset = cur_offset;
+                op.unwind_op = coff::UWOP_SAVE_XMM128;
+                op.op_info = static_cast<uint8_t>(x);
+                op.extra_slot1 = static_cast<uint16_t>(disp / 16);
+                op.num_slots = 2;
+                ops.push_back(op);
+            }
         }
 
         // Total 16-bit slots
@@ -154,7 +159,6 @@ void CoffUnwindBuilder::build_unwind_info(
         uint8_t version_flags = 0x01; // Version = 1, Flags = 0 (UNW_FLAG_NHANDLER)
         uint8_t prolog_sz = static_cast<uint8_t>(fn.prologue_size > 0 ? fn.prologue_size : cur_offset);
         uint8_t cnt_codes = static_cast<uint8_t>(total_slots);
-        uint8_t frame_reg_offset = (0 << 4) | 5; // FrameReg = 5 (RBP), FrameOffset = 0
 
         xdata_sec->emit8(version_flags);
         xdata_sec->emit8(prolog_sz);

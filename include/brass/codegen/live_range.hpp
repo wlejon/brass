@@ -40,6 +40,9 @@ public:
     PReg assigned_preg;
     int32_t assigned_spill_slot = -1;
     bool spans_call = false;
+    uint32_t max_loop_depth = 0;
+    PReg register_hint;
+    VReg coalesce_partner;
 
     LiveInterval() = default;
     explicit LiveInterval(VReg v) : vreg(v) {}
@@ -59,6 +62,7 @@ std::string to_string(const LiveInterval& interval);
 struct BlockLiveness {
     uint32_t start_id = 0;
     uint32_t end_id = 0;
+    uint32_t loop_depth = 0;
     std::vector<VReg> defs;
     std::vector<VReg> uses;
     std::vector<VReg> live_in;
@@ -78,6 +82,7 @@ public:
     const LiveInterval* get_interval(VReg v) const;
 
     const BlockLiveness& block_liveness(const LirBlock* b) const;
+    uint32_t get_loop_depth_at(uint32_t inst_id) const;
 
 private:
     LirFunction& fn_;
@@ -89,6 +94,7 @@ private:
     void compute_local_liveness();
     void compute_global_liveness();
     void build_intervals();
+    void compute_loop_depths();
     void compute_spill_weights();
 };
 

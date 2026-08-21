@@ -149,62 +149,40 @@ void LivenessAnalysis::run() {
     // 5. Build live intervals
     build_intervals();
 
+    // 5.5 Compute loop depths
+    compute_loop_depths();
+
     // 6. Compute spill weights
     compute_spill_weights();
 }
 
-LiveInterval* LivenessAnalysis::get_interval(VReg v) {
-    if (v.id < intervals_.size()) {
-        return &intervals_[v.id];
-    }
-    return nullptr;
-}
-
-const LiveInterval* LivenessAnalysis::get_interval(VReg v) const {
-    if (v.id < intervals_.size()) {
-        return &intervals_[v.id];
-    }
-    return nullptr;
-}
-
-const BlockLiveness& LivenessAnalysis::block_liveness(const LirBlock* b) const {
-    auto it = block_liveness_.find(b);
-    if (it != block_liveness_.end()) {
-        return it->second;
-    }
-    static BlockLiveness empty;
-    return empty;
-}
-
 void LivenessAnalysis::assign_instruction_ids() {
     uint32_t current_id = 0;
-    for (const auto& block : fn_.blocks) {
+    for (auto& block : fn_.blocks) {
         BlockLiveness& bl = block_liveness_[block.get()];
         bl.start_id = current_id;
-
-        for (const auto& inst : block->instructions) {
+        for (auto& inst : block->instructions) {
             inst->id = current_id;
             if (inst->is_call() || inst->opcode == LirOpcode::Safepoint) {
                 call_inst_ids_.push_back(current_id);
             }
-            current_id += 2;
+            current_id += 2; // Step by 2 for split points
         }
-
-        bl.end_id = current_id > 0 ? (current_id - 2) : 0;
+        bl.end_id = (current_id > 0) ? current_id - 2 : 0;
     }
 }
 
 void LivenessAnalysis::compute_local_liveness() {
     for (const auto& block : fn_.blocks) {
         BlockLiveness& bl = block_liveness_[block.get()];
+        bl.defs.clear();
+        bl.uses.clear();
 
         for (const auto& inst : block->instructions) {
             // Uses
             for (const auto& u : inst->uses) {
-                if (u.is_vreg()) {
-                    if (!contains_vreg(bl.defs, u.vreg_val)) {
-                        add_vreg_unique(bl.uses, u.vreg_val);
-                    }
+                if (u.is_vreg() && !contains_vreg(bl.defs, u.vreg_val)) {
+                    add_vreg_unique(bl.uses, u.vreg_val);
                 } else if (u.is_mem()) {
                     if (u.mem_val.base_vreg.is_valid() && !contains_vreg(bl.defs, u.mem_val.base_vreg)) {
                         add_vreg_unique(bl.uses, u.mem_val.base_vreg);
@@ -340,12 +318,149 @@ void LivenessAnalysis::build_intervals() {
     }
 }
 
+LiveInterval* LivenessAnalysis::get_interval(VReg v) {
+    if (v.id < intervals_.size()) {
+        return &intervals_[v.id];
+    }
+    return nullptr;
+}
+
+const LiveInterval* LivenessAnalysis::get_interval(VReg v) const {
+    if (v.id < intervals_.size()) {
+        return &intervals_[v.id];
+    }
+    return nullptr;
+}
+
+const BlockLiveness& LivenessAnalysis::block_liveness(const LirBlock* b) const {
+    auto it = block_liveness_.find(b);
+    if (it != block_liveness_.end()) {
+        return it->second;
+    }
+    static BlockLiveness empty;
+    return empty;
+}
+
+uint32_t LivenessAnalysis::get_loop_depth_at(uint32_t inst_id) const {
+    for (const auto& pair : block_liveness_) {
+        if (inst_id >= pair.second.start_id && inst_id <= pair.second.end_id) {
+            return pair.second.loop_depth;
+        }
+    }
+    return 0;
+}
+
+void LivenessAnalysis::compute_loop_depths() {
+    size_t n = fn_.blocks.size();
+    if (n == 0) return;
+
+    std::unordered_map<const LirBlock*, size_t> block_to_idx;
+    for (size_t i = 0; i < n; ++i) {
+        block_to_idx[fn_.blocks[i].get()] = i;
+        fn_.blocks[i]->loop_depth = 0;
+    }
+
+    // Dominance analysis using iterative dataflow
+    std::vector<std::vector<bool>> dom(n, std::vector<bool>(n, true));
+    dom[0].assign(n, false);
+    dom[0][0] = true;
+
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (size_t i = 1; i < n; ++i) {
+            const auto* blk = fn_.blocks[i].get();
+            std::vector<bool> new_dom(n, true);
+
+            if (blk->predecessors.empty()) {
+                new_dom.assign(n, false);
+            } else {
+                for (const auto* pred : blk->predecessors) {
+                    auto it = block_to_idx.find(pred);
+                    if (it != block_to_idx.end()) {
+                        size_t p_idx = it->second;
+                        for (size_t k = 0; k < n; ++k) {
+                            if (!dom[p_idx][k]) {
+                                new_dom[k] = false;
+                            }
+                        }
+                    }
+                }
+            }
+            new_dom[i] = true;
+
+            if (new_dom != dom[i]) {
+                dom[i] = std::move(new_dom);
+                changed = true;
+            }
+        }
+    }
+
+    // Identify backedges and natural loops
+    for (size_t i = 0; i < n; ++i) {
+        const auto* blk = fn_.blocks[i].get();
+        for (const auto* succ : blk->successors) {
+            auto it = block_to_idx.find(succ);
+            if (it == block_to_idx.end()) continue;
+            size_t s_idx = it->second;
+
+            if (dom[i][s_idx]) {
+                // Backedge i -> s_idx
+                std::vector<bool> in_loop(n, false);
+                in_loop[s_idx] = true;
+                in_loop[i] = true;
+
+                std::vector<size_t> worklist;
+                if (i != s_idx) {
+                    worklist.push_back(i);
+                }
+
+                while (!worklist.empty()) {
+                    size_t curr = worklist.back();
+                    worklist.pop_back();
+
+                    const auto* curr_blk = fn_.blocks[curr].get();
+                    for (const auto* pred : curr_blk->predecessors) {
+                        auto p_it = block_to_idx.find(pred);
+                        if (p_it != block_to_idx.end()) {
+                            size_t p_idx = p_it->second;
+                            if (!in_loop[p_idx]) {
+                                in_loop[p_idx] = true;
+                                worklist.push_back(p_idx);
+                            }
+                        }
+                    }
+                }
+
+                for (size_t k = 0; k < n; ++k) {
+                    if (in_loop[k]) {
+                        fn_.blocks[k]->loop_depth++;
+                    }
+                }
+            }
+        }
+    }
+
+    for (const auto& blk : fn_.blocks) {
+        block_liveness_[blk.get()].loop_depth = blk->loop_depth;
+    }
+}
+
 void LivenessAnalysis::compute_spill_weights() {
     for (auto& interval : intervals_) {
         if (interval.start_id > interval.end_id) continue;
         float len = static_cast<float>(interval.end_id - interval.start_id + 1);
-        float uses_count = static_cast<float>(interval.use_positions.size());
-        interval.spill_weight = uses_count / len;
+        float weighted_uses = 0.0f;
+        uint32_t max_depth = 0;
+
+        for (const auto& pos : interval.use_positions) {
+            uint32_t depth = get_loop_depth_at(pos.inst_id);
+            max_depth = std::max(max_depth, depth);
+            weighted_uses += std::pow(8.0f, static_cast<float>(depth));
+        }
+
+        interval.max_loop_depth = max_depth;
+        interval.spill_weight = weighted_uses / len;
     }
 }
 

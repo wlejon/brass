@@ -312,9 +312,56 @@ bool PeepholeOptimizer::simplify_branches(LirBlock& block, size_t block_index) {
     return changed;
 }
 
+bool PeepholeOptimizer::propagate_copies(LirBlock& block) {
+    bool changed = false;
+    for (size_t i = 0; i < block.instructions.size(); ++i) {
+        const auto& mov_inst = *block.instructions[i];
+        if (is_protected(mov_inst)) continue;
+
+        bool is_reg_move = (mov_inst.opcode == LirOpcode::Mov || mov_inst.opcode == LirOpcode::Mov32 ||
+                            mov_inst.opcode == LirOpcode::Movsd || mov_inst.opcode == LirOpcode::Movss) &&
+                           mov_inst.defs.size() == 1 && mov_inst.defs[0].is_preg() &&
+                           mov_inst.uses.size() == 1 && mov_inst.uses[0].is_preg() &&
+                           mov_inst.defs[0].preg_val != mov_inst.uses[0].preg_val;
+        if (!is_reg_move) continue;
+
+        PReg dst_reg = mov_inst.defs[0].preg_val;
+        PReg src_reg = mov_inst.uses[0].preg_val;
+        uint8_t sz = mov_inst.defs[0].size;
+
+        for (size_t j = i + 1; j < block.instructions.size(); ++j) {
+            auto& candidate = *block.instructions[j];
+            if (is_protected(candidate)) break;
+            if (candidate.is_call() || candidate.is_branch() || candidate.is_terminator()) break;
+
+            if (defines_register(candidate, src_reg)) {
+                break;
+            }
+
+            for (size_t u_idx = 0; u_idx < candidate.uses.size(); ++u_idx) {
+                if (!candidate.defs.empty() && candidate.defs[0].is_preg() && candidate.defs[0].preg_val == dst_reg) {
+                    continue;
+                }
+                if (candidate.uses[u_idx].is_preg() && candidate.uses[u_idx].preg_val == dst_reg &&
+                    candidate.uses[u_idx].size == sz) {
+                    candidate.uses[u_idx].preg_val = src_reg;
+                    stats_.redundant_moves_eliminated++;
+                    changed = true;
+                }
+            }
+
+            if (defines_register(candidate, dst_reg)) {
+                break;
+            }
+        }
+    }
+    return changed;
+}
+
 bool PeepholeOptimizer::optimize_block(LirBlock& block, size_t block_index) {
     bool changed = false;
     changed |= eliminate_redundant_moves(block);
+    changed |= propagate_copies(block);
     changed |= eliminate_load_after_store(block);
     changed |= eliminate_dead_moves(block);
     changed |= simplify_arithmetic(block);

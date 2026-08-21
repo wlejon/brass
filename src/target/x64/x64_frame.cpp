@@ -36,13 +36,14 @@ void X64FrameLayout::compute_layout(codegen::FrameInfo& frame, const CallingConv
     size_t outgoing_bytes = frame.outgoing_arg_space;
 
     // Minimum shadow space for Win64 if outgoing calls exist or if outgoing_bytes > 0
-    if (cc.kind() == CallingConvKind::Win64 && outgoing_bytes > 0) {
+    if (cc.kind() == CallingConvKind::Win64 && (outgoing_bytes > 0 || frame.has_calls)) {
         outgoing_bytes = std::max(outgoing_bytes, size_t(32));
     }
 
     size_t raw_total = gpr_bytes + xmm_bytes + spill_bytes + outgoing_bytes;
     // Align total frame size to 16 bytes
     frame.total_frame_size = (raw_total + 15) & ~size_t(15);
+    frame.is_leaf = (!frame.has_calls && frame.total_frame_size == 0 && saved_gprs.empty() && saved_xmms.empty() && outgoing_bytes == 0);
 }
 
 MemAddress X64FrameLayout::callee_gpr_address(GPR reg, const codegen::FrameInfo& frame) {
@@ -86,6 +87,10 @@ void X64FrameLayout::emit_prologue(
     const codegen::FrameInfo& frame,
     const CallingConvention& cc
 ) {
+    if (frame.is_leaf) {
+        return;
+    }
+
     // 1. push rbp
     enc.push(GPR::RBP);
 
@@ -115,6 +120,11 @@ void X64FrameLayout::emit_epilogue(
     const codegen::FrameInfo& frame,
     const CallingConvention& cc
 ) {
+    if (frame.is_leaf) {
+        enc.ret();
+        return;
+    }
+
     // 1. Restore callee-saved XMMs
     auto saved_xmms = get_saved_callee_xmms(frame);
     for (XMM x : saved_xmms) {

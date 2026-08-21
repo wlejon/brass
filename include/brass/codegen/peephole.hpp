@@ -32,6 +32,7 @@ private:
     bool run_pass();
     bool optimize_block(LirBlock& block, size_t block_index);
     bool eliminate_redundant_moves(LirBlock& block);
+    bool propagate_copies(LirBlock& block);
     bool eliminate_load_after_store(LirBlock& block);
     bool eliminate_dead_moves(LirBlock& block);
     bool simplify_arithmetic(LirBlock& block);

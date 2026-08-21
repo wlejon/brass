@@ -305,6 +305,7 @@ public:
     std::vector<std::unique_ptr<LirInst>> instructions;
     std::vector<LirBlock*> predecessors;
     std::vector<LirBlock*> successors;
+    uint32_t loop_depth = 0;
     x64::Label x64_label;
 
     LirBlock() = default;
@@ -331,6 +332,8 @@ struct FrameInfo {
     x64::RegMask saved_callee_xmms = 0;
     size_t outgoing_arg_space = 0;
     size_t total_frame_size = 0;
+    bool has_calls = false;
+    bool is_leaf = false;
 
     int32_t spill_slot_offset(int32_t slot_idx) const noexcept;
 };

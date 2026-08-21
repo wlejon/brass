@@ -38,7 +38,10 @@ private:
     x64::RegMask used_callee_xmms_ = 0;
     size_t next_spill_slot_ = 0;
 
+    std::unordered_map<uint32_t, std::vector<VReg>> coalesce_hints_;
+
     void init_register_pools();
+    void build_coalesce_hints();
     void expire_old_intervals(uint32_t current_start);
     bool try_allocate_free_reg(LiveInterval& interval);
     void allocate_blocked_reg(LiveInterval& interval);

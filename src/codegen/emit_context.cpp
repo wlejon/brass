@@ -96,17 +96,15 @@ CompilationResult EmitContext::compile() {
     return result;
 }
 
-void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, bool is_first_inst) {
-    (void)is_entry_block;
-    (void)is_first_inst;
-
+void EmitContext::emit_mov_instruction(const LirInst& inst) {
     switch (inst.opcode) {
-        case LirOpcode::Nop:
-            enc_.nop();
-            break;
         case LirOpcode::Mov: {
             const auto& dst = inst.defs[0];
             const auto& src = inst.uses[0];
+
+            if (dst.is_preg() && src.is_preg() && dst.preg_val == src.preg_val) {
+                return; // Skip self-moves
+            }
 
             if (dst.is_preg()) {
                 GPR dst_gpr = dst.preg_val.as_gpr();
@@ -133,6 +131,10 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
         case LirOpcode::Mov32: {
             const auto& dst = inst.defs[0];
             const auto& src = inst.uses[0];
+
+            if (dst.is_preg() && src.is_preg() && dst.preg_val == src.preg_val) {
+                return; // Skip self-moves
+            }
 
             if (inst.is_patchable && dst.is_preg() && src.is_imm_int()) {
                 GPR dst_gpr = dst.preg_val.as_gpr();
@@ -244,371 +246,251 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
             }
             break;
         }
+        default:
+            break;
+    }
+}
+
+void EmitContext::emit_alu_instruction(const LirInst& inst) {
+    switch (inst.opcode) {
         case LirOpcode::Add: {
             GPR dst = to_gpr(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_preg()) {
-                enc_.add(dst, to_gpr(src));
-            } else if (src.is_imm_int()) {
-                enc_.add(dst, static_cast<int32_t>(src.imm_int));
-            } else {
-                enc_.add(dst, to_mem_address(src));
-            }
+            if (src.is_preg()) enc_.add(dst, to_gpr(src));
+            else if (src.is_imm_int()) enc_.add(dst, static_cast<int32_t>(src.imm_int));
+            else enc_.add(dst, to_mem_address(src));
             break;
         }
         case LirOpcode::Add32: {
             GPR dst = to_gpr(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_preg()) {
-                enc_.add32(dst, to_gpr(src));
-            } else if (src.is_imm_int()) {
-                enc_.add32(dst, static_cast<int32_t>(src.imm_int));
-            } else {
-                enc_.add32(dst, to_mem_address(src));
-            }
+            if (src.is_preg()) enc_.add32(dst, to_gpr(src));
+            else if (src.is_imm_int()) enc_.add32(dst, static_cast<int32_t>(src.imm_int));
+            else enc_.add32(dst, to_mem_address(src));
             break;
         }
         case LirOpcode::Sub: {
             GPR dst = to_gpr(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_preg()) {
-                enc_.sub(dst, to_gpr(src));
-            } else if (src.is_imm_int()) {
-                enc_.sub(dst, static_cast<int32_t>(src.imm_int));
-            } else {
-                enc_.sub(dst, to_mem_address(src));
-            }
+            if (src.is_preg()) enc_.sub(dst, to_gpr(src));
+            else if (src.is_imm_int()) enc_.sub(dst, static_cast<int32_t>(src.imm_int));
+            else enc_.sub(dst, to_mem_address(src));
             break;
         }
         case LirOpcode::Sub32: {
             GPR dst = to_gpr(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_preg()) {
-                enc_.sub32(dst, to_gpr(src));
-            } else if (src.is_imm_int()) {
-                enc_.sub32(dst, static_cast<int32_t>(src.imm_int));
-            } else {
-                enc_.sub32(dst, to_mem_address(src));
-            }
+            if (src.is_preg()) enc_.sub32(dst, to_gpr(src));
+            else if (src.is_imm_int()) enc_.sub32(dst, static_cast<int32_t>(src.imm_int));
+            else enc_.sub32(dst, to_mem_address(src));
             break;
         }
         case LirOpcode::Imul: {
             GPR dst = to_gpr(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_preg()) {
-                enc_.imul(dst, to_gpr(src));
-            } else if (src.is_imm_int()) {
+            if (src.is_preg()) enc_.imul(dst, to_gpr(src));
+            else if (src.is_imm_int()) {
                 if (inst.uses.size() >= 2 && inst.uses[0].is_preg() && inst.uses[0].preg_val != inst.defs[0].preg_val) {
                     enc_.imul(dst, to_gpr(inst.uses[0]), static_cast<int32_t>(src.imm_int));
                 } else {
                     enc_.imul(dst, static_cast<int32_t>(src.imm_int));
                 }
-            } else {
-                enc_.imul(dst, to_mem_address(src));
-            }
+            } else enc_.imul(dst, to_mem_address(src));
             break;
         }
         case LirOpcode::Imul32: {
             GPR dst = to_gpr(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_preg()) {
-                enc_.imul32(dst, to_gpr(src));
-            } else if (src.is_imm_int()) {
+            if (src.is_preg()) enc_.imul32(dst, to_gpr(src));
+            else if (src.is_imm_int()) {
                 if (inst.uses.size() >= 2 && inst.uses[0].is_preg() && inst.uses[0].preg_val != inst.defs[0].preg_val) {
                     enc_.imul32(dst, to_gpr(inst.uses[0]), static_cast<int32_t>(src.imm_int));
                 } else {
                     enc_.imul32(dst, static_cast<int32_t>(src.imm_int));
                 }
-            } else {
-                enc_.imul32(dst, to_mem_address(src));
-            }
+            } else enc_.imul32(dst, to_mem_address(src));
             break;
         }
-        case LirOpcode::Idiv: {
-            const auto& src = inst.uses.back();
-            if (src.is_preg()) {
-                enc_.idiv(to_gpr(src));
-            } else {
-                enc_.idiv(to_mem_address(src));
-            }
+        case LirOpcode::Idiv:
+            if (inst.uses.back().is_preg()) enc_.idiv(to_gpr(inst.uses.back()));
+            else enc_.idiv(to_mem_address(inst.uses.back()));
             break;
-        }
-        case LirOpcode::Idiv32: {
-            const auto& src = inst.uses.back();
-            if (src.is_preg()) {
-                enc_.idiv32(to_gpr(src));
-            } else {
-                enc_.idiv32(to_mem_address(src));
-            }
+        case LirOpcode::Idiv32:
+            if (inst.uses.back().is_preg()) enc_.idiv32(to_gpr(inst.uses.back()));
+            else enc_.idiv32(to_mem_address(inst.uses.back()));
             break;
-        }
-        case LirOpcode::Div: {
-            const auto& src = inst.uses.back();
-            if (src.is_preg()) {
-                enc_.div(to_gpr(src));
-            } else {
-                enc_.div(to_mem_address(src));
-            }
+        case LirOpcode::Div:
+            if (inst.uses.back().is_preg()) enc_.div(to_gpr(inst.uses.back()));
+            else enc_.div(to_mem_address(inst.uses.back()));
             break;
-        }
-        case LirOpcode::Div32: {
-            const auto& src = inst.uses.back();
-            if (src.is_preg()) {
-                enc_.div32(to_gpr(src));
-            } else {
-                enc_.div32(to_mem_address(src));
-            }
+        case LirOpcode::Div32:
+            if (inst.uses.back().is_preg()) enc_.div32(to_gpr(inst.uses.back()));
+            else enc_.div32(to_mem_address(inst.uses.back()));
             break;
-        }
-        case LirOpcode::Cdq:
-            enc_.cdq();
-            break;
-        case LirOpcode::Cqo:
-            enc_.cqo();
-            break;
+        case LirOpcode::Cdq: enc_.cdq(); break;
+        case LirOpcode::Cqo: enc_.cqo(); break;
         case LirOpcode::And: {
             GPR dst = to_gpr(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_preg()) {
-                enc_.and_(dst, to_gpr(src));
-            } else if (src.is_imm_int()) {
-                enc_.and_(dst, static_cast<int32_t>(src.imm_int));
-            } else {
-                enc_.and_(dst, to_mem_address(src));
-            }
+            if (src.is_preg()) enc_.and_(dst, to_gpr(src));
+            else if (src.is_imm_int()) enc_.and_(dst, static_cast<int32_t>(src.imm_int));
+            else enc_.and_(dst, to_mem_address(src));
             break;
         }
         case LirOpcode::And32: {
             GPR dst = to_gpr(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_preg()) {
-                enc_.and32(dst, to_gpr(src));
-            } else if (src.is_imm_int()) {
-                enc_.and32(dst, static_cast<int32_t>(src.imm_int));
-            } else {
-                enc_.and32(dst, to_mem_address(src));
-            }
+            if (src.is_preg()) enc_.and32(dst, to_gpr(src));
+            else if (src.is_imm_int()) enc_.and32(dst, static_cast<int32_t>(src.imm_int));
+            else enc_.and32(dst, to_mem_address(src));
             break;
         }
         case LirOpcode::Or: {
             GPR dst = to_gpr(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_preg()) {
-                enc_.or_(dst, to_gpr(src));
-            } else if (src.is_imm_int()) {
-                enc_.or_(dst, static_cast<int32_t>(src.imm_int));
-            } else {
-                enc_.or_(dst, to_mem_address(src));
-            }
+            if (src.is_preg()) enc_.or_(dst, to_gpr(src));
+            else if (src.is_imm_int()) enc_.or_(dst, static_cast<int32_t>(src.imm_int));
+            else enc_.or_(dst, to_mem_address(src));
             break;
         }
         case LirOpcode::Or32: {
             GPR dst = to_gpr(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_preg()) {
-                enc_.or32(dst, to_gpr(src));
-            } else if (src.is_imm_int()) {
-                enc_.or32(dst, static_cast<int32_t>(src.imm_int));
-            } else {
-                enc_.or32(dst, to_mem_address(src));
-            }
+            if (src.is_preg()) enc_.or32(dst, to_gpr(src));
+            else if (src.is_imm_int()) enc_.or32(dst, static_cast<int32_t>(src.imm_int));
+            else enc_.or32(dst, to_mem_address(src));
             break;
         }
         case LirOpcode::Xor: {
             GPR dst = to_gpr(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_preg()) {
-                enc_.xor_(dst, to_gpr(src));
-            } else if (src.is_imm_int()) {
-                enc_.xor_(dst, static_cast<int32_t>(src.imm_int));
-            } else {
-                enc_.xor_(dst, to_mem_address(src));
-            }
+            if (src.is_preg()) enc_.xor_(dst, to_gpr(src));
+            else if (src.is_imm_int()) enc_.xor_(dst, static_cast<int32_t>(src.imm_int));
+            else enc_.xor_(dst, to_mem_address(src));
             break;
         }
         case LirOpcode::Xor32: {
             GPR dst = to_gpr(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_preg()) {
-                enc_.xor32(dst, to_gpr(src));
-            } else if (src.is_imm_int()) {
-                enc_.xor32(dst, static_cast<int32_t>(src.imm_int));
-            } else {
-                enc_.xor32(dst, to_mem_address(src));
-            }
+            if (src.is_preg()) enc_.xor32(dst, to_gpr(src));
+            else if (src.is_imm_int()) enc_.xor32(dst, static_cast<int32_t>(src.imm_int));
+            else enc_.xor32(dst, to_mem_address(src));
             break;
         }
-        case LirOpcode::Not:
-            enc_.not_(to_gpr(inst.defs[0]));
-            break;
-        case LirOpcode::Not32:
-            enc_.not32(to_gpr(inst.defs[0]));
-            break;
-        case LirOpcode::Neg:
-            enc_.neg(to_gpr(inst.defs[0]));
-            break;
-        case LirOpcode::Neg32:
-            enc_.neg32(to_gpr(inst.defs[0]));
-            break;
+        case LirOpcode::Not: enc_.not_(to_gpr(inst.defs[0])); break;
+        case LirOpcode::Not32: enc_.not32(to_gpr(inst.defs[0])); break;
+        case LirOpcode::Neg: enc_.neg(to_gpr(inst.defs[0])); break;
+        case LirOpcode::Neg32: enc_.neg32(to_gpr(inst.defs[0])); break;
         case LirOpcode::Shl: {
             GPR dst = to_gpr(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_imm_int()) {
-                enc_.shl(dst, static_cast<uint8_t>(src.imm_int));
-            } else {
-                enc_.shl(dst); // by CL
-            }
+            if (src.is_imm_int()) enc_.shl(dst, static_cast<uint8_t>(src.imm_int));
+            else enc_.shl(dst);
             break;
         }
         case LirOpcode::Shl32: {
             GPR dst = to_gpr(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_imm_int()) {
-                enc_.shl32(dst, static_cast<uint8_t>(src.imm_int));
-            } else {
-                enc_.shl32(dst);
-            }
+            if (src.is_imm_int()) enc_.shl32(dst, static_cast<uint8_t>(src.imm_int));
+            else enc_.shl32(dst);
             break;
         }
         case LirOpcode::Shr: {
             GPR dst = to_gpr(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_imm_int()) {
-                enc_.shr(dst, static_cast<uint8_t>(src.imm_int));
-            } else {
-                enc_.shr(dst);
-            }
+            if (src.is_imm_int()) enc_.shr(dst, static_cast<uint8_t>(src.imm_int));
+            else enc_.shr(dst);
             break;
         }
         case LirOpcode::Shr32: {
             GPR dst = to_gpr(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_imm_int()) {
-                enc_.shr32(dst, static_cast<uint8_t>(src.imm_int));
-            } else {
-                enc_.shr32(dst);
-            }
+            if (src.is_imm_int()) enc_.shr32(dst, static_cast<uint8_t>(src.imm_int));
+            else enc_.shr32(dst);
             break;
         }
         case LirOpcode::Sar: {
             GPR dst = to_gpr(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_imm_int()) {
-                enc_.sar(dst, static_cast<uint8_t>(src.imm_int));
-            } else {
-                enc_.sar(dst);
-            }
+            if (src.is_imm_int()) enc_.sar(dst, static_cast<uint8_t>(src.imm_int));
+            else enc_.sar(dst);
             break;
         }
         case LirOpcode::Sar32: {
             GPR dst = to_gpr(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_imm_int()) {
-                enc_.sar32(dst, static_cast<uint8_t>(src.imm_int));
-            } else {
-                enc_.sar32(dst);
-            }
+            if (src.is_imm_int()) enc_.sar32(dst, static_cast<uint8_t>(src.imm_int));
+            else enc_.sar32(dst);
             break;
         }
-        case LirOpcode::Popcnt:
-            enc_.popcnt(to_gpr(inst.defs[0]), to_gpr(inst.uses[0]));
-            break;
-        case LirOpcode::Popcnt32:
-            enc_.popcnt32(to_gpr(inst.defs[0]), to_gpr(inst.uses[0]));
-            break;
-        case LirOpcode::Lzcnt:
-            enc_.lzcnt(to_gpr(inst.defs[0]), to_gpr(inst.uses[0]));
-            break;
-        case LirOpcode::Lzcnt32:
-            enc_.lzcnt32(to_gpr(inst.defs[0]), to_gpr(inst.uses[0]));
-            break;
-        case LirOpcode::Tzcnt:
-            enc_.tzcnt(to_gpr(inst.defs[0]), to_gpr(inst.uses[0]));
-            break;
-        case LirOpcode::Tzcnt32:
-            enc_.tzcnt32(to_gpr(inst.defs[0]), to_gpr(inst.uses[0]));
-            break;
-        case LirOpcode::Bsr:
-            enc_.bsr(to_gpr(inst.defs[0]), to_gpr(inst.uses[0]));
-            break;
-        case LirOpcode::Bsr32:
-            enc_.bsr32(to_gpr(inst.defs[0]), to_gpr(inst.uses[0]));
-            break;
-        case LirOpcode::Bsf:
-            enc_.bsf(to_gpr(inst.defs[0]), to_gpr(inst.uses[0]));
-            break;
-        case LirOpcode::Bsf32:
-            enc_.bsf32(to_gpr(inst.defs[0]), to_gpr(inst.uses[0]));
-            break;
+        case LirOpcode::Popcnt: enc_.popcnt(to_gpr(inst.defs[0]), to_gpr(inst.uses[0])); break;
+        case LirOpcode::Popcnt32: enc_.popcnt32(to_gpr(inst.defs[0]), to_gpr(inst.uses[0])); break;
+        case LirOpcode::Lzcnt: enc_.lzcnt(to_gpr(inst.defs[0]), to_gpr(inst.uses[0])); break;
+        case LirOpcode::Lzcnt32: enc_.lzcnt32(to_gpr(inst.defs[0]), to_gpr(inst.uses[0])); break;
+        case LirOpcode::Tzcnt: enc_.tzcnt(to_gpr(inst.defs[0]), to_gpr(inst.uses[0])); break;
+        case LirOpcode::Tzcnt32: enc_.tzcnt32(to_gpr(inst.defs[0]), to_gpr(inst.uses[0])); break;
+        case LirOpcode::Bsr: enc_.bsr(to_gpr(inst.defs[0]), to_gpr(inst.uses[0])); break;
+        case LirOpcode::Bsr32: enc_.bsr32(to_gpr(inst.defs[0]), to_gpr(inst.uses[0])); break;
+        case LirOpcode::Bsf: enc_.bsf(to_gpr(inst.defs[0]), to_gpr(inst.uses[0])); break;
+        case LirOpcode::Bsf32: enc_.bsf32(to_gpr(inst.defs[0]), to_gpr(inst.uses[0])); break;
         case LirOpcode::Cmp: {
             GPR op0 = to_gpr(inst.uses[0]);
             const auto& op1 = inst.uses[1];
-            if (op1.is_preg()) {
-                enc_.cmp(op0, to_gpr(op1));
-            } else if (op1.is_imm_int()) {
-                enc_.cmp(op0, static_cast<int32_t>(op1.imm_int));
-            } else {
-                enc_.cmp(op0, to_mem_address(op1));
-            }
+            if (op1.is_preg()) enc_.cmp(op0, to_gpr(op1));
+            else if (op1.is_imm_int()) enc_.cmp(op0, static_cast<int32_t>(op1.imm_int));
+            else enc_.cmp(op0, to_mem_address(op1));
             break;
         }
         case LirOpcode::Cmp32: {
             GPR op0 = to_gpr(inst.uses[0]);
             const auto& op1 = inst.uses[1];
-            if (op1.is_preg()) {
-                enc_.cmp32(op0, to_gpr(op1));
-            } else if (op1.is_imm_int()) {
-                enc_.cmp32(op0, static_cast<int32_t>(op1.imm_int));
-            } else {
-                enc_.cmp32(op0, to_mem_address(op1));
-            }
+            if (op1.is_preg()) enc_.cmp32(op0, to_gpr(op1));
+            else if (op1.is_imm_int()) enc_.cmp32(op0, static_cast<int32_t>(op1.imm_int));
+            else enc_.cmp32(op0, to_mem_address(op1));
             break;
         }
         case LirOpcode::Test: {
             GPR op0 = to_gpr(inst.uses[0]);
             const auto& op1 = inst.uses[1];
-            if (op1.is_preg()) {
-                enc_.test(op0, to_gpr(op1));
-            } else if (op1.is_imm_int()) {
-                enc_.test(op0, static_cast<int32_t>(op1.imm_int));
-            }
+            if (op1.is_preg()) enc_.test(op0, to_gpr(op1));
+            else if (op1.is_imm_int()) enc_.test(op0, static_cast<int32_t>(op1.imm_int));
             break;
         }
         case LirOpcode::Test32: {
             GPR op0 = to_gpr(inst.uses[0]);
             const auto& op1 = inst.uses[1];
-            if (op1.is_preg()) {
-                enc_.test32(op0, to_gpr(op1));
-            } else if (op1.is_imm_int()) {
-                enc_.test32(op0, static_cast<int32_t>(op1.imm_int));
-            }
+            if (op1.is_preg()) enc_.test32(op0, to_gpr(op1));
+            else if (op1.is_imm_int()) enc_.test32(op0, static_cast<int32_t>(op1.imm_int));
             break;
         }
         case LirOpcode::Setcc:
             enc_.setcc(inst.condition, to_gpr(inst.defs[0]));
             break;
         case LirOpcode::Cmovcc:
-            if (inst.defs[0].size == 4) {
-                enc_.cmovcc32(inst.condition, to_gpr(inst.defs[0]), to_gpr(inst.uses.back()));
-            } else {
-                enc_.cmovcc(inst.condition, to_gpr(inst.defs[0]), to_gpr(inst.uses.back()));
-            }
+            if (inst.defs[0].size == 4) enc_.cmovcc32(inst.condition, to_gpr(inst.defs[0]), to_gpr(inst.uses.back()));
+            else enc_.cmovcc(inst.condition, to_gpr(inst.defs[0]), to_gpr(inst.uses.back()));
             break;
+        default:
+            break;
+    }
+}
+
+void EmitContext::emit_sse_instruction(const LirInst& inst) {
+    switch (inst.opcode) {
         case LirOpcode::Movsd: {
             const auto& dst = inst.defs[0];
             const auto& src = inst.uses[0];
+            if (dst.is_preg() && src.is_preg() && dst.preg_val == src.preg_val) {
+                return; // Skip self-moves
+            }
             if (dst.is_preg()) {
                 XMM dst_x = dst.preg_val.as_xmm();
-                if (src.is_preg()) {
-                    enc_.movsd(dst_x, src.preg_val.as_xmm());
-                } else {
-                    enc_.movsd(dst_x, to_mem_address(src));
-                }
+                if (src.is_preg()) enc_.movsd(dst_x, src.preg_val.as_xmm());
+                else enc_.movsd(dst_x, to_mem_address(src));
             } else {
                 MemAddress dst_mem = to_mem_address(dst);
-                if (src.is_preg()) {
-                    enc_.movsd(dst_mem, src.preg_val.as_xmm());
-                } else {
+                if (src.is_preg()) enc_.movsd(dst_mem, src.preg_val.as_xmm());
+                else {
                     enc_.movsd(XMM::XMM15, to_mem_address(src));
                     enc_.movsd(dst_mem, XMM::XMM15);
                 }
@@ -618,116 +500,171 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
         case LirOpcode::Movss: {
             const auto& dst = inst.defs[0];
             const auto& src = inst.uses[0];
+            if (dst.is_preg() && src.is_preg() && dst.preg_val == src.preg_val) {
+                return; // Skip self-moves
+            }
             if (dst.is_preg()) {
                 XMM dst_x = dst.preg_val.as_xmm();
-                if (src.is_preg()) {
-                    enc_.movss(dst_x, src.preg_val.as_xmm());
-                } else {
-                    enc_.movss(dst_x, to_mem_address(src));
-                }
+                if (src.is_preg()) enc_.movss(dst_x, src.preg_val.as_xmm());
+                else enc_.movss(dst_x, to_mem_address(src));
             } else {
                 MemAddress dst_mem = to_mem_address(dst);
-                if (src.is_preg()) {
-                    enc_.movss(dst_mem, src.preg_val.as_xmm());
-                } else {
+                if (src.is_preg()) enc_.movss(dst_mem, src.preg_val.as_xmm());
+                else {
                     enc_.movss(XMM::XMM15, to_mem_address(src));
                     enc_.movss(dst_mem, XMM::XMM15);
                 }
             }
             break;
         }
-        case LirOpcode::Movq_gx:
-            enc_.movq(to_xmm(inst.defs[0]), to_gpr(inst.uses[0]));
-            break;
-        case LirOpcode::Movq_xg:
-            enc_.movq(to_gpr(inst.defs[0]), to_xmm(inst.uses[0]));
-            break;
+        case LirOpcode::Movq_gx: enc_.movq(to_xmm(inst.defs[0]), to_gpr(inst.uses[0])); break;
+        case LirOpcode::Movq_xg: enc_.movq(to_gpr(inst.defs[0]), to_xmm(inst.uses[0])); break;
         case LirOpcode::Addsd: {
             XMM dst = to_xmm(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_preg()) {
-                enc_.addsd(dst, to_xmm(src));
-            } else {
-                enc_.addsd(dst, to_mem_address(src));
-            }
+            if (src.is_preg()) enc_.addsd(dst, to_xmm(src));
+            else enc_.addsd(dst, to_mem_address(src));
             break;
         }
         case LirOpcode::Subsd: {
             XMM dst = to_xmm(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_preg()) {
-                enc_.subsd(dst, to_xmm(src));
-            } else {
-                enc_.subsd(dst, to_mem_address(src));
-            }
+            if (src.is_preg()) enc_.subsd(dst, to_xmm(src));
+            else enc_.subsd(dst, to_mem_address(src));
             break;
         }
         case LirOpcode::Mulsd: {
             XMM dst = to_xmm(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_preg()) {
-                enc_.mulsd(dst, to_xmm(src));
-            } else {
-                enc_.mulsd(dst, to_mem_address(src));
-            }
+            if (src.is_preg()) enc_.mulsd(dst, to_xmm(src));
+            else enc_.mulsd(dst, to_mem_address(src));
             break;
         }
         case LirOpcode::Divsd: {
             XMM dst = to_xmm(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_preg()) {
-                enc_.divsd(dst, to_xmm(src));
-            } else {
-                enc_.divsd(dst, to_mem_address(src));
-            }
+            if (src.is_preg()) enc_.divsd(dst, to_xmm(src));
+            else enc_.divsd(dst, to_mem_address(src));
             break;
         }
-        case LirOpcode::Sqrtsd: {
-            XMM dst = to_xmm(inst.defs[0]);
-            enc_.sqrtsd(dst, to_xmm(inst.uses.back()));
-            break;
-        }
+        case LirOpcode::Sqrtsd: enc_.sqrtsd(to_xmm(inst.defs[0]), to_xmm(inst.uses.back())); break;
         case LirOpcode::Ucomisd:
-            if (inst.uses[1].is_mem() || inst.uses[1].is_spill_slot()) {
-                enc_.ucomisd(to_xmm(inst.uses[0]), to_mem_address(inst.uses[1]));
-            } else {
-                enc_.ucomisd(to_xmm(inst.uses[0]), to_xmm(inst.uses[1]));
+            if (inst.uses[1].is_mem() || inst.uses[1].is_spill_slot()) enc_.ucomisd(to_xmm(inst.uses[0]), to_mem_address(inst.uses[1]));
+            else enc_.ucomisd(to_xmm(inst.uses[0]), to_xmm(inst.uses[1]));
+            break;
+        case LirOpcode::Xorpd: enc_.xorpd(to_xmm(inst.defs[0]), to_xmm(inst.uses.back())); break;
+        case LirOpcode::Cvtsi2sd: enc_.cvtsi2sd(to_xmm(inst.defs[0]), to_gpr(inst.uses[0])); break;
+        case LirOpcode::Cvtsi2sd32: enc_.cvtsi2sd32(to_xmm(inst.defs[0]), to_gpr(inst.uses[0])); break;
+        case LirOpcode::Cvttsd2si: enc_.cvttsd2si(to_gpr(inst.defs[0]), to_xmm(inst.uses[0])); break;
+        case LirOpcode::Cvttsd2si32: enc_.cvttsd2si32(to_gpr(inst.defs[0]), to_xmm(inst.uses[0])); break;
+        default: break;
+    }
+}
+
+void EmitContext::emit_parallel_copy(const LirInst& inst) {
+    size_t n = inst.defs.size();
+    if (n == 0 || n != inst.uses.size()) return;
+
+    struct Move {
+        LirOperand dst;
+        LirOperand src;
+        bool done = false;
+    };
+
+    std::vector<Move> moves;
+    for (size_t i = 0; i < n; ++i) {
+        if (inst.defs[i].is_preg() && inst.uses[i].is_preg() &&
+            inst.defs[i].preg_val == inst.uses[i].preg_val) {
+            continue; // Skip self moves
+        }
+        moves.push_back({inst.defs[i], inst.uses[i], false});
+    }
+
+    bool progress = true;
+    while (progress) {
+        progress = false;
+        for (auto& m : moves) {
+            if (m.done) continue;
+            bool dst_used = false;
+            for (const auto& other : moves) {
+                if (!other.done && other.src.is_preg() && m.dst.is_preg() &&
+                    other.src.preg_val == m.dst.preg_val) {
+                    dst_used = true;
+                    break;
+                }
             }
-            break;
-        case LirOpcode::Xorpd:
-            enc_.xorpd(to_xmm(inst.defs[0]), to_xmm(inst.uses.back()));
-            break;
-        case LirOpcode::Cvtsi2sd:
-            enc_.cvtsi2sd(to_xmm(inst.defs[0]), to_gpr(inst.uses[0]));
-            break;
-        case LirOpcode::Cvtsi2sd32:
-            enc_.cvtsi2sd32(to_xmm(inst.defs[0]), to_gpr(inst.uses[0]));
-            break;
-        case LirOpcode::Cvttsd2si:
-            enc_.cvttsd2si(to_gpr(inst.defs[0]), to_xmm(inst.uses[0]));
-            break;
-        case LirOpcode::Cvttsd2si32:
-            enc_.cvttsd2si32(to_gpr(inst.defs[0]), to_xmm(inst.uses[0]));
-            break;
-        case LirOpcode::Jmp: {
-            uint32_t target_label = inst.uses[0].label_id;
-            enc_.jmp(block_labels_[target_label]);
-            break;
+            if (!dst_used) {
+                if (m.dst.is_preg()) {
+                    if (m.dst.preg_val.is_gpr()) {
+                        if (m.src.is_preg()) enc_.mov(m.dst.preg_val.as_gpr(), m.src.preg_val.as_gpr());
+                        else enc_.mov(m.dst.preg_val.as_gpr(), to_mem_address(m.src));
+                    } else {
+                        if (m.src.is_preg()) enc_.movsd(m.dst.preg_val.as_xmm(), m.src.preg_val.as_xmm());
+                        else enc_.movsd(m.dst.preg_val.as_xmm(), to_mem_address(m.src));
+                    }
+                }
+                m.done = true;
+                progress = true;
+            }
         }
-        case LirOpcode::Jcc: {
-            uint32_t target_label = inst.uses[0].label_id;
-            enc_.j(inst.condition, block_labels_[target_label]);
-            break;
+    }
+
+    // Resolve cycles with scratch register
+    for (size_t i = 0; i < moves.size(); ++i) {
+        if (moves[i].done) continue;
+        bool is_xmm = moves[i].src.is_preg() && moves[i].src.preg_val.is_xmm();
+        PReg scratch = is_xmm ? PReg::xmm(XMM::XMM15) : PReg::gpr(GPR::R11);
+        if (is_xmm) enc_.movsd(scratch.as_xmm(), moves[i].src.preg_val.as_xmm());
+        else enc_.mov(scratch.as_gpr(), moves[i].src.preg_val.as_gpr());
+
+        moves[i].src = LirOperand::preg(scratch, moves[i].src.size);
+
+        progress = true;
+        while (progress) {
+            progress = false;
+            for (auto& m : moves) {
+                if (m.done) continue;
+                bool dst_used = false;
+                for (const auto& other : moves) {
+                    if (!other.done && other.src.is_preg() && m.dst.is_preg() &&
+                        other.src.preg_val == m.dst.preg_val) {
+                        dst_used = true;
+                        break;
+                    }
+                }
+                if (!dst_used) {
+                    if (m.dst.is_preg()) {
+                        if (m.dst.preg_val.is_gpr()) {
+                            if (m.src.is_preg()) enc_.mov(m.dst.preg_val.as_gpr(), m.src.preg_val.as_gpr());
+                            else enc_.mov(m.dst.preg_val.as_gpr(), to_mem_address(m.src));
+                        } else {
+                            if (m.src.is_preg()) enc_.movsd(m.dst.preg_val.as_xmm(), m.src.preg_val.as_xmm());
+                            else enc_.movsd(m.dst.preg_val.as_xmm(), to_mem_address(m.src));
+                        }
+                    }
+                    m.done = true;
+                    progress = true;
+                }
+            }
         }
+    }
+}
+
+void EmitContext::emit_control_instruction(const LirInst& inst) {
+    switch (inst.opcode) {
+        case LirOpcode::Jmp:
+            enc_.jmp(block_labels_[inst.uses[0].label_id]);
+            break;
+        case LirOpcode::Jcc:
+            enc_.j(inst.condition, block_labels_[inst.uses[0].label_id]);
+            break;
         case LirOpcode::Call: {
             const auto& sym_op = inst.uses.back();
             std::string callee = inst.callee_symbol.empty() ? sym_op.symbol_name : inst.callee_symbol;
             if (inst.is_patchable) {
                 size_t imm_off = 1;
                 size_t pad = runtime::compute_cache_line_padding(buffer_.size(), imm_off, 4);
-                if (pad > 0) {
-                    buffer_.emit_nops(pad);
-                }
+                if (pad > 0) buffer_.emit_nops(pad);
                 size_t site_start = buffer_.size();
                 enc_.call(callee);
                 patch_sites_.emplace_back(
@@ -766,8 +703,7 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
             break;
         }
         case LirOpcode::CallIndirect: {
-            const auto& target_op = inst.uses.back();
-            enc_.call(to_gpr(target_op));
+            enc_.call(to_gpr(inst.uses.back()));
             size_t return_offset = buffer_.size();
 
             codegen::FrameInfo mutable_frame = fn_.frame;
@@ -797,18 +733,11 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
             X64FrameLayout::emit_epilogue(enc_, mutable_frame, fn_.calling_conv);
             break;
         }
-        case LirOpcode::Push:
-            enc_.push(to_gpr(inst.uses[0]));
-            break;
-        case LirOpcode::Pop:
-            enc_.pop(to_gpr(inst.defs[0]));
-            break;
+        case LirOpcode::Push: enc_.push(to_gpr(inst.uses[0])); break;
+        case LirOpcode::Pop: enc_.pop(to_gpr(inst.defs[0])); break;
         case LirOpcode::Lea:
-            if (inst.defs[0].size == 4) {
-                enc_.lea32(to_gpr(inst.defs[0]), to_mem_address(inst.uses[0]));
-            } else {
-                enc_.lea(to_gpr(inst.defs[0]), to_mem_address(inst.uses[0]));
-            }
+            if (inst.defs[0].size == 4) enc_.lea32(to_gpr(inst.defs[0]), to_mem_address(inst.uses[0]));
+            else enc_.lea(to_gpr(inst.defs[0]), to_mem_address(inst.uses[0]));
             break;
         case LirOpcode::Safepoint: {
             enc_.call("brass_gc_safepoint");
@@ -851,10 +780,7 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
                 total_alloc = 32;
             }
 
-            if (total_alloc > 0) {
-                enc_.sub(GPR::RSP, static_cast<int32_t>(total_alloc));
-            }
-
+            if (total_alloc > 0) enc_.sub(GPR::RSP, static_cast<int32_t>(total_alloc));
             int32_t slots_disp = static_cast<int32_t>(shadow_space);
 
             for (size_t i = 0; i < num_uses; ++i) {
@@ -873,16 +799,12 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
                     } else if (op.preg_val.is_xmm()) {
                         enc_.movsd(ptr(GPR::RSP, slot_offset), op.preg_val.as_xmm());
                     }
-                } else if (op.is_spill_slot()) {
+                } else if (op.is_spill_slot() || op.is_mem()) {
                     MemAddress src_mem = to_mem_address(op);
                     enc_.mov(GPR::R11, src_mem);
                     enc_.mov(ptr(GPR::RSP, slot_offset), GPR::R11);
                 } else if (op.is_imm_int()) {
                     enc_.mov(GPR::R11, op.imm_int);
-                    enc_.mov(ptr(GPR::RSP, slot_offset), GPR::R11);
-                } else if (op.is_mem()) {
-                    MemAddress src_mem = to_mem_address(op);
-                    enc_.mov(GPR::R11, src_mem);
                     enc_.mov(ptr(GPR::RSP, slot_offset), GPR::R11);
                 }
             }
@@ -895,29 +817,20 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
                 enc_.mov32(GPR::RCX, rid);
                 enc_.mov32(GPR::RDX, rsn);
                 enc_.mov32(GPR::R8, cnt);
-                if (num_uses > 0) {
-                    enc_.lea(GPR::R9, ptr(GPR::RSP, slots_disp));
-                } else {
-                    enc_.xor32(GPR::R9, GPR::R9);
-                }
+                if (num_uses > 0) enc_.lea(GPR::R9, ptr(GPR::RSP, slots_disp));
+                else enc_.xor32(GPR::R9, GPR::R9);
             } else {
                 enc_.mov32(GPR::RDI, rid);
                 enc_.mov32(GPR::RSI, rsn);
                 enc_.mov32(GPR::RDX, cnt);
-                if (num_uses > 0) {
-                    enc_.lea(GPR::RCX, ptr(GPR::RSP, slots_disp));
-                } else {
-                    enc_.xor32(GPR::RCX, GPR::RCX);
-                }
+                if (num_uses > 0) enc_.lea(GPR::RCX, ptr(GPR::RSP, slots_disp));
+                else enc_.xor32(GPR::RCX, GPR::RCX);
             }
 
             enc_.call("brass_deopt_exit");
 
             if (!inst.exit_symbol.empty()) {
-                if (total_alloc > 0) {
-                    enc_.add(GPR::RSP, static_cast<int32_t>(total_alloc));
-                }
-
+                if (total_alloc > 0) enc_.add(GPR::RSP, static_cast<int32_t>(total_alloc));
                 size_t shadow2 = (fn_.calling_conv.kind() == CallingConvKind::Win64 ? 32 : 0);
                 if (shadow2 > 0) enc_.sub(GPR::RSP, static_cast<int32_t>(shadow2));
                 enc_.call("brass_get_thread_deopt_frame");
@@ -939,16 +852,104 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
                 X64FrameLayout::compute_layout(mutable_frame, fn_.calling_conv);
                 X64FrameLayout::emit_epilogue(enc_, mutable_frame, fn_.calling_conv);
             } else {
-                if (total_alloc > 0) {
-                    enc_.add(GPR::RSP, static_cast<int32_t>(total_alloc));
-                }
+                if (total_alloc > 0) enc_.add(GPR::RSP, static_cast<int32_t>(total_alloc));
                 codegen::FrameInfo mutable_frame = fn_.frame;
                 X64FrameLayout::compute_layout(mutable_frame, fn_.calling_conv);
                 X64FrameLayout::emit_epilogue(enc_, mutable_frame, fn_.calling_conv);
             }
             break;
         }
+        default:
+            break;
+    }
+}
+
+void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, bool is_first_inst) {
+    (void)is_entry_block;
+    (void)is_first_inst;
+
+    switch (inst.opcode) {
+        case LirOpcode::Nop:
+            enc_.nop();
+            break;
+        case LirOpcode::Mov:
+        case LirOpcode::Mov32:
+        case LirOpcode::Movabs:
+        case LirOpcode::Movsxd:
+        case LirOpcode::Movzx8:
+        case LirOpcode::Movzx16:
+        case LirOpcode::Movsx8:
+        case LirOpcode::Movsx16:
+            emit_mov_instruction(inst);
+            break;
+        case LirOpcode::Add:
+        case LirOpcode::Add32:
+        case LirOpcode::Sub:
+        case LirOpcode::Sub32:
+        case LirOpcode::Imul:
+        case LirOpcode::Imul32:
+        case LirOpcode::Idiv:
+        case LirOpcode::Idiv32:
+        case LirOpcode::Div:
+        case LirOpcode::Div32:
+        case LirOpcode::Cdq:
+        case LirOpcode::Cqo:
+        case LirOpcode::And:
+        case LirOpcode::And32:
+        case LirOpcode::Or:
+        case LirOpcode::Or32:
+        case LirOpcode::Xor:
+        case LirOpcode::Xor32:
+        case LirOpcode::Not:
+        case LirOpcode::Not32:
+        case LirOpcode::Neg:
+        case LirOpcode::Neg32:
+        case LirOpcode::Shl:
+        case LirOpcode::Shl32:
+        case LirOpcode::Shr:
+        case LirOpcode::Shr32:
+        case LirOpcode::Sar:
+        case LirOpcode::Sar32:
+        case LirOpcode::Popcnt:
+        case LirOpcode::Popcnt32:
+        case LirOpcode::Lzcnt:
+        case LirOpcode::Lzcnt32:
+        case LirOpcode::Tzcnt:
+        case LirOpcode::Tzcnt32:
+        case LirOpcode::Bsr:
+        case LirOpcode::Bsr32:
+        case LirOpcode::Bsf:
+        case LirOpcode::Bsf32:
+        case LirOpcode::Cmp:
+        case LirOpcode::Cmp32:
+        case LirOpcode::Test:
+        case LirOpcode::Test32:
+        case LirOpcode::Setcc:
+        case LirOpcode::Cmovcc:
+            emit_alu_instruction(inst);
+            break;
+        case LirOpcode::Movsd:
+        case LirOpcode::Movss:
+        case LirOpcode::Movq_gx:
+        case LirOpcode::Movq_xg:
+        case LirOpcode::Addsd:
+        case LirOpcode::Subsd:
+        case LirOpcode::Mulsd:
+        case LirOpcode::Divsd:
+        case LirOpcode::Sqrtsd:
+        case LirOpcode::Ucomisd:
+        case LirOpcode::Xorpd:
+        case LirOpcode::Cvtsi2sd:
+        case LirOpcode::Cvtsi2sd32:
+        case LirOpcode::Cvttsd2si:
+        case LirOpcode::Cvttsd2si32:
+            emit_sse_instruction(inst);
+            break;
         case LirOpcode::ParallelCopy:
+            emit_parallel_copy(inst);
+            break;
+        default:
+            emit_control_instruction(inst);
             break;
     }
 }

@@ -35,7 +35,37 @@ void LinearScanAllocator::init_register_pools() {
     }
 }
 
+void LinearScanAllocator::build_coalesce_hints() {
+    coalesce_hints_.clear();
+    for (const auto& block : fn_.blocks) {
+        for (const auto& inst : block->instructions) {
+            if (inst->opcode == LirOpcode::Mov || inst->opcode == LirOpcode::Mov32 ||
+                inst->opcode == LirOpcode::Movsd || inst->opcode == LirOpcode::Movss) {
+                if (inst->defs.size() >= 1 && inst->defs[0].is_vreg() &&
+                    inst->uses.size() >= 1 && inst->uses[0].is_vreg()) {
+                    VReg dst = inst->defs[0].vreg_val;
+                    VReg src = inst->uses[0].vreg_val;
+                    if (dst.reg_class == src.reg_class && dst.id != src.id) {
+                        coalesce_hints_[dst.id].push_back(src);
+                        coalesce_hints_[src.id].push_back(dst);
+                    }
+                }
+            }
+        }
+    }
+}
+
 void LinearScanAllocator::allocate() {
+    // 0. Build coalescing hints & detect calls
+    build_coalesce_hints();
+    for (const auto& block : fn_.blocks) {
+        for (const auto& inst : block->instructions) {
+            if (inst->is_call() || inst->opcode == LirOpcode::Safepoint || inst->opcode == LirOpcode::GuardExit) {
+                fn_.frame.has_calls = true;
+            }
+        }
+    }
+
     // 1. Collect all non-empty intervals sorted by start_id
     std::vector<LiveInterval*> unhandled;
     for (auto& interval : liveness_.intervals()) {
@@ -143,7 +173,9 @@ std::set<uint8_t> LinearScanAllocator::get_occupied_regs(const LiveInterval& int
     std::set<uint8_t> occupied_regs;
     for (const auto* act : active_) {
         if (act->vreg.reg_class == interval.vreg.reg_class && act->assigned_preg.is_valid()) {
-            occupied_regs.insert(act->assigned_preg.code);
+            if (act->overlaps(interval)) {
+                occupied_regs.insert(act->assigned_preg.code);
+            }
         }
     }
 
@@ -245,12 +277,11 @@ bool LinearScanAllocator::try_allocate_free_reg(LiveInterval& interval) {
 
     std::set<uint8_t> occupied_regs = get_occupied_regs(interval);
 
-    // If interval has a fixed constraint, check if that fixed register is valid
+    // 1. If interval has a fixed constraint, check if that fixed register is valid
     for (const auto& pos : interval.use_positions) {
         if (pos.fixed_reg.is_valid() && pos.fixed_reg.reg_class == interval.vreg.reg_class) {
             uint8_t fixed_code = pos.fixed_reg.code;
             if (occupied_regs.find(fixed_code) == occupied_regs.end()) {
-                // Fixed register is free
                 interval.assigned_preg = pos.fixed_reg;
                 if (is_gpr && cc_.is_callee_saved(static_cast<GPR>(fixed_code))) {
                     used_callee_gprs_ |= reg_mask(static_cast<GPR>(fixed_code));
@@ -258,7 +289,6 @@ bool LinearScanAllocator::try_allocate_free_reg(LiveInterval& interval) {
                     used_callee_xmms_ |= reg_mask(static_cast<XMM>(fixed_code));
                 }
 
-                // Insert into active sorted by end_id
                 active_.push_back(&interval);
                 std::sort(active_.begin(), active_.end(),
                     [](const LiveInterval* a, const LiveInterval* b) {
@@ -269,25 +299,64 @@ bool LinearScanAllocator::try_allocate_free_reg(LiveInterval& interval) {
         }
     }
 
-    // Prioritize callee-saved if spanning a call, otherwise caller-saved
+    // 2. Try Coalescing Hint from partners
+    auto hint_it = coalesce_hints_.find(interval.vreg.id);
+    if (hint_it != coalesce_hints_.end()) {
+        for (VReg partner_v : hint_it->second) {
+            const auto* p_int = liveness_.get_interval(partner_v);
+            if (p_int && p_int->assigned_preg.is_valid() && p_int->assigned_preg.reg_class == interval.vreg.reg_class) {
+                PReg hint_reg = p_int->assigned_preg;
+                if (occupied_regs.find(hint_reg.code) == occupied_regs.end()) {
+                    bool is_callee = is_gpr ? cc_.is_callee_saved(hint_reg.as_gpr()) : cc_.is_callee_saved(hint_reg.as_xmm());
+                    if (!interval.spans_call || is_callee) {
+                        interval.assigned_preg = hint_reg;
+                        if (is_gpr && is_callee) {
+                            used_callee_gprs_ |= reg_mask(hint_reg.as_gpr());
+                        } else if (!is_gpr && is_callee) {
+                            used_callee_xmms_ |= reg_mask(hint_reg.as_xmm());
+                        }
+
+                        active_.push_back(&interval);
+                        std::sort(active_.begin(), active_.end(),
+                            [](const LiveInterval* a, const LiveInterval* b) {
+                                return a->end_id < b->end_id;
+                            });
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Register Pool Priority
     std::vector<PReg> candidates;
     if (interval.spans_call) {
-        // Try callee-saved only (caller-saved were already inserted into occupied_regs)
         for (const auto& reg : pool) {
             bool is_callee = is_gpr ? cc_.is_callee_saved(reg.as_gpr()) : cc_.is_callee_saved(reg.as_xmm());
             if (is_callee && occupied_regs.find(reg.code) == occupied_regs.end()) {
                 candidates.push_back(reg);
             }
         }
-    } else {
-        // Try caller-saved first
+    } else if (interval.max_loop_depth > 0) {
+        for (const auto& reg : pool) {
+            bool is_callee = is_gpr ? cc_.is_callee_saved(reg.as_gpr()) : cc_.is_callee_saved(reg.as_xmm());
+            if (is_callee && occupied_regs.find(reg.code) == occupied_regs.end()) {
+                candidates.push_back(reg);
+            }
+        }
         for (const auto& reg : pool) {
             bool is_callee = is_gpr ? cc_.is_callee_saved(reg.as_gpr()) : cc_.is_callee_saved(reg.as_xmm());
             if (!is_callee && occupied_regs.find(reg.code) == occupied_regs.end()) {
                 candidates.push_back(reg);
             }
         }
-        // Then callee-saved
+    } else {
+        for (const auto& reg : pool) {
+            bool is_callee = is_gpr ? cc_.is_callee_saved(reg.as_gpr()) : cc_.is_callee_saved(reg.as_xmm());
+            if (!is_callee && occupied_regs.find(reg.code) == occupied_regs.end()) {
+                candidates.push_back(reg);
+            }
+        }
         for (const auto& reg : pool) {
             bool is_callee = is_gpr ? cc_.is_callee_saved(reg.as_gpr()) : cc_.is_callee_saved(reg.as_xmm());
             if (is_callee && occupied_regs.find(reg.code) == occupied_regs.end()) {
@@ -322,21 +391,39 @@ void LinearScanAllocator::allocate_blocked_reg(LiveInterval& interval) {
 
     auto occupied = get_occupied_regs(interval);
 
-    // Find candidate in active with latest end_id whose assigned register is valid for interval
+    // Find candidate in active with lowest spill_weight (or furthest end_id for equal weights)
     LiveInterval* candidate = nullptr;
     for (auto* act : active_) {
         if (act->vreg.reg_class == interval.vreg.reg_class && act->assigned_preg.is_valid()) {
             if (occupied.find(act->assigned_preg.code) != occupied.end()) {
                 continue;
             }
-            if (!candidate || act->end_id > candidate->end_id) {
+            if (!candidate) {
+                candidate = act;
+            } else if (act->spill_weight < candidate->spill_weight) {
+                candidate = act;
+            } else if (act->spill_weight == candidate->spill_weight && act->end_id > candidate->end_id) {
                 candidate = act;
             }
         }
     }
 
-    if (candidate && candidate->end_id > interval.end_id) {
-        // Evict candidate and give its register to interval
+    if (candidate && candidate->spill_weight < interval.spill_weight) {
+        interval.assigned_preg = candidate->assigned_preg;
+        candidate->assigned_preg = PReg{};
+        candidate->assigned_spill_slot = allocate_spill_slot(candidate->vreg.is_gcref);
+
+        auto it = std::find(active_.begin(), active_.end(), candidate);
+        if (it != active_.end()) {
+            active_.erase(it);
+        }
+
+        active_.push_back(&interval);
+        std::sort(active_.begin(), active_.end(),
+            [](const LiveInterval* a, const LiveInterval* b) {
+                return a->end_id < b->end_id;
+            });
+    } else if (candidate && candidate->end_id > interval.end_id && candidate->spill_weight <= interval.spill_weight) {
         interval.assigned_preg = candidate->assigned_preg;
         candidate->assigned_preg = PReg{};
         candidate->assigned_spill_slot = allocate_spill_slot(candidate->vreg.is_gcref);
