@@ -2,6 +2,10 @@
 
 add_executable(brass_unit_tests
     unit/test_sanity.cpp
+    unit/test_arena.cpp
+    unit/test_core_utils.cpp
+    unit/test_mir_builder.cpp
+    unit/test_mir_verifier.cpp
 )
 
 target_include_directories(brass_unit_tests
