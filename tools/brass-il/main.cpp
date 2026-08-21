@@ -19,6 +19,7 @@ int main(int argc, char** argv) {
     std::string output_obj;
     bool run_jit = false;
     bool emit_mir = false;
+    bool raw_output = false;
     TranslatorOptions options;
 
     for (int i = 1; i < argc; ++i) {
@@ -27,6 +28,8 @@ int main(int argc, char** argv) {
             run_jit = true;
         } else if (arg == "--emit-mir") {
             emit_mir = true;
+        } else if (arg == "--raw-output") {
+            raw_output = true;
         } else if (arg == "--no-opt") {
             options.enable_optimizations = false;
         } else if (arg == "--reassoc") {
@@ -93,25 +96,33 @@ int main(int argc, char** argv) {
                 auto fn_ptr = jit.get_function_ptr<double(*)()>("main");
                 if (fn_ptr) {
                     double r = fn_ptr();
-                    std::cout << "[brass-il] main() returned f64: " << r << "\n";
+                    if (!raw_output) {
+                        std::cout << "[brass-il] main() returned f64: " << r << "\n";
+                    }
                 }
             } else if (main_fn->return_type() == Type::i32()) {
                 auto fn_ptr = jit.get_function_ptr<int32_t(*)()>("main");
                 if (fn_ptr) {
                     int32_t r = fn_ptr();
-                    std::cout << "[brass-il] main() returned i32: " << r << "\n";
+                    if (!raw_output) {
+                        std::cout << "[brass-il] main() returned i32: " << r << "\n";
+                    }
                 }
             } else if (main_fn->return_type() == Type::i64()) {
                 auto fn_ptr = jit.get_function_ptr<int64_t(*)()>("main");
                 if (fn_ptr) {
                     int64_t r = fn_ptr();
-                    std::cout << "[brass-il] main() returned i64: " << r << "\n";
+                    if (!raw_output) {
+                        std::cout << "[brass-il] main() returned i64: " << r << "\n";
+                    }
                 }
             } else {
                 auto fn_ptr = jit.get_function_ptr<void(*)()>("main");
                 if (fn_ptr) {
                     fn_ptr();
-                    std::cout << "[brass-il] main() executed (void).\n";
+                    if (!raw_output) {
+                        std::cout << "[brass-il] main() executed (void).\n";
+                    }
                 }
             }
         }
