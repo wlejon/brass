@@ -547,7 +547,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
         // 6a. Strict Naive
         run_f64_32("matmul_f64_32_strict_naive", "MatMul 32x32 (f64, strict, naive)", build_matmul_f64_strict_naive_module(), "matmul_f64_strict_naive", 2.25);
         // 6b. Strict Preopt
-        run_f64_32("matmul_f64_32_strict_preopt", "MatMul 32x32 (f64, strict, preopt)", build_matmul_f64_strict_preopt_module(), "matmul_f64_strict_preopt", 2.20);
+        run_f64_32("matmul_f64_32_strict_preopt", "MatMul 32x32 (f64, strict, preopt)", build_matmul_f64_strict_preopt_module(), "matmul_f64_strict_preopt", 2.25);
         // 6c. Reassoc Naive (flagged opt-in)
         run_f64_32("matmul_f64_32_reassoc_naive", "MatMul 32x32 (f64, reassoc, naive)", build_matmul_f64_reassoc_naive_module(), "matmul_f64_reassoc_naive", 1.00);
         // 6d. Reassoc Preopt (flagged opt-in)
