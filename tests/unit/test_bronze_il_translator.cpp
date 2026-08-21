@@ -6,6 +6,7 @@
 #include <vector>
 #include <cmath>
 #include <fstream>
+#include <filesystem>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -65,9 +66,6 @@ func main() -> f64 {
 
     DiagnosticReporter diag;
     TranslationResult res = translate_bronze_il(il_source, {}, &diag);
-    if (!res.success) {
-        std::cerr << "Diagnostics:\n" << diag.format_all() << "\n";
-    }
     REQUIRE(res.success);
     REQUIRE(res.module != nullptr);
 
@@ -77,14 +75,11 @@ func main() -> f64 {
 
     auto math_fn = jit.get_function_ptr<double(*)(double, double)>("mathOps");
     REQUIRE(math_fn != nullptr);
-    // (10+4) + (10-4) + (10*4) + (10/4) + (-10) = 14 + 6 + 40 + 2.5 - 10 = 52.5
     double math_res = math_fn(10.0, 4.0);
     CHECK(std::abs(math_res - 52.5) < 1e-9);
 
     auto bit_fn = jit.get_function_ptr<double(*)(double, double)>("bitOps");
     REQUIRE(bit_fn != nullptr);
-    // 42 & 3 = 2, 42 | 3 = 43, 42 ^ 3 = 41, 42 << 3 = 336, 42 >> 3 = 5, 42 >>> 3 = 5
-    // Sum = 2 + 43 + 41 + 336 + 5 + 5 = 432
     double bit_res = bit_fn(42.0, 3.0);
     CHECK(std::abs(bit_res - 432.0) < 1e-9);
 
@@ -160,11 +155,8 @@ func fib(%0: f64) -> f64 {
 
     auto collatz_fn = jit.get_function_ptr<double(*)(double)>("collatz");
     REQUIRE(collatz_fn != nullptr);
-    // Collatz steps for 27: 111 steps
     CHECK_EQ(collatz_fn(27.0), 111.0);
-    // Collatz steps for 1: 0 steps
     CHECK_EQ(collatz_fn(1.0), 0.0);
-    // Collatz steps for 6: 8 steps (6 -> 3 -> 10 -> 5 -> 16 -> 8 -> 4 -> 2 -> 1)
     CHECK_EQ(collatz_fn(6.0), 8.0);
 
     auto fib_fn = jit.get_function_ptr<double(*)(double)>("fib");
@@ -206,7 +198,6 @@ func compute_checksum(%0: f64, %1: f64) -> f64 {
     HostEngine engine;
     REQUIRE(engine.compile_to_object(*res.module, obj_file));
 
-    // Link into DLL using MSVC link.exe
     std::string link_cmd = "link.exe /NOLOGO /DLL /OUT:\"" + dll_file + "\" \"" + obj_file + "\" /NOENTRY";
     int link_rc = std::system(link_cmd.c_str());
     if (link_rc == 0) {
@@ -217,11 +208,91 @@ func compute_checksum(%0: f64, %1: f64) -> f64 {
         auto fn = reinterpret_cast<ChecksumFn>(GetProcAddress(hModule, "compute_checksum"));
         REQUIRE(fn != nullptr);
 
-        // (5 + 7) + (5 * 7) = 12 + 35 = 47.0
         double result = fn(5.0, 7.0);
         CHECK_EQ(result, 47.0);
 
         FreeLibrary(hModule);
     }
 #endif
+}
+
+TEST_CASE("Bronze IL - 11-Program Live Corpus JIT and AOT Execution") {
+    std::vector<std::string> corpus_files = {
+        "01_arithmetic",
+        "02_bitwise",
+        "03_collatz",
+        "04_fib_iter",
+        "05_fib_rec",
+        "06_ackermann",
+        "07_prime_count",
+        "08_newton_sqrt",
+        "09_closures",
+        "10_loop_capture",
+        "11_matrix_recurrence"
+    };
+
+    for (const auto& name : corpus_files) {
+        std::string il_file = "tests/bronze_corpus/" + name + ".il";
+        std::string exp_file = "tests/bronze_corpus/" + name + ".expected";
+
+        std::ifstream ifs_il(il_file);
+        if (!ifs_il.is_open()) {
+            // Try relative to workspace root
+            il_file = "D:/projects/brass/" + il_file;
+            exp_file = "D:/projects/brass/" + exp_file;
+            ifs_il.open(il_file);
+        }
+        REQUIRE(ifs_il.is_open());
+        std::stringstream ss_il;
+        ss_il << ifs_il.rdbuf();
+        std::string il_content = ss_il.str();
+
+        std::ifstream ifs_exp(exp_file);
+        REQUIRE(ifs_exp.is_open());
+        std::stringstream ss_exp;
+        ss_exp << ifs_exp.rdbuf();
+        std::string expected_output = ss_exp.str();
+
+        // 1. Translate
+        DiagnosticReporter diag;
+        TranslationResult res = translate_bronze_il(il_content, {}, &diag);
+        REQUIRE(res.success);
+        REQUIRE(res.module != nullptr);
+
+        // 2. JIT Execute and verify
+        codegen::JitExecutionEngine jit(Target::host());
+        register_bronze_runtime_symbols(&jit);
+        REQUIRE(jit.compile_and_load(*res.module));
+
+        // Capture stdout
+        std::stringstream captured_out;
+        std::streambuf* old_cout = std::cout.rdbuf(captured_out.rdbuf());
+
+        auto main_fn = jit.get_function_ptr<void(*)()>("main");
+        REQUIRE(main_fn != nullptr);
+        main_fn();
+
+        std::cout.rdbuf(old_cout);
+
+        // Normalize spaces
+        auto normalize = [](const std::string& s) {
+            std::istringstream iss(s);
+            std::string word, result;
+            while (iss >> word) {
+                if (!result.empty()) result += " ";
+                result += word;
+            }
+            return result;
+        };
+
+        std::string actual_norm = normalize(captured_out.str());
+        std::string expected_norm = normalize(expected_output);
+        CHECK_EQ(actual_norm, expected_norm);
+
+        // 3. AOT Compile Object
+        HostEngine engine;
+        std::string obj_out = "tests/bronze_corpus/" + name + ".obj";
+        CHECK(engine.compile_to_object(*res.module, obj_out));
+        std::remove(obj_out.c_str());
+    }
 }

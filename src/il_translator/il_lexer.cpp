@@ -61,6 +61,15 @@ const char* bronze_op_name(BronzeOp op) {
         case BronzeOp::Box: return "box";
         case BronzeOp::Unbox: return "unbox";
         case BronzeOp::Call: return "call";
+        case BronzeOp::CallDynamic: return "call.dynamic";
+        case BronzeOp::NameResolve: return "name.resolve";
+        case BronzeOp::EnvCreate: return "env.create";
+        case BronzeOp::EnvGet: return "env.get";
+        case BronzeOp::EnvSet: return "env.set";
+        case BronzeOp::EnvGetTdz: return "env.get.tdz";
+        case BronzeOp::EnvInitTdz: return "env.init.tdz";
+        case BronzeOp::CreateFunc: return "create.func";
+        case BronzeOp::CreateArray: return "create.array";
         case BronzeOp::Print: return "print";
         case BronzeOp::PrintErr: return "print.err";
         case BronzeOp::Ret: return "ret";
@@ -369,6 +378,15 @@ Token IlLexer::scan_token() {
         if (w == "box") { op_out = BronzeOp::Box; return true; }
         if (w == "unbox") { op_out = BronzeOp::Unbox; return true; }
         if (w == "call") { op_out = BronzeOp::Call; return true; }
+        if (w == "call.dynamic") { op_out = BronzeOp::CallDynamic; return true; }
+        if (w == "name.resolve") { op_out = BronzeOp::NameResolve; return true; }
+        if (w == "env.create") { op_out = BronzeOp::EnvCreate; return true; }
+        if (w == "env.get") { op_out = BronzeOp::EnvGet; return true; }
+        if (w == "env.set") { op_out = BronzeOp::EnvSet; return true; }
+        if (w == "env.get.tdz") { op_out = BronzeOp::EnvGetTdz; return true; }
+        if (w == "env.init.tdz") { op_out = BronzeOp::EnvInitTdz; return true; }
+        if (w == "create.func") { op_out = BronzeOp::CreateFunc; return true; }
+        if (w == "create.array") { op_out = BronzeOp::CreateArray; return true; }
         if (w == "print") { op_out = BronzeOp::Print; return true; }
         if (w == "print.err") { op_out = BronzeOp::PrintErr; return true; }
         if (w == "ret") { op_out = BronzeOp::Ret; return true; }

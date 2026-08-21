@@ -301,6 +301,120 @@ bool IlParser::parse_instruction(BronzeInstruction& out_inst) {
             break;
         }
 
+        case BronzeOp::NameResolve: {
+            Token str_tok;
+            if (!expect(TokenType::StringLiteral, "Expected string literal after name.resolve", &str_tok)) {
+                return false;
+            }
+            out_inst.string_literal = std::string(str_tok.text);
+            break;
+        }
+
+        case BronzeOp::CallDynamic: {
+            Token callee_tok;
+            if (!expect(TokenType::PercentValue, "Expected %callee in call.dynamic", &callee_tok)) {
+                return false;
+            }
+            out_inst.operands.push_back(callee_tok.id_num);
+            if (!expect(TokenType::Comma, "Expected ',' after %callee")) return false;
+
+            Token this_tok;
+            if (!expect(TokenType::PercentValue, "Expected %this in call.dynamic", &this_tok)) {
+                return false;
+            }
+            out_inst.operands.push_back(this_tok.id_num);
+            if (!expect(TokenType::Comma, "Expected ',' after %this")) return false;
+
+            Token argc_tok = lexer_.next_token();
+            out_inst.param_count = static_cast<uint32_t>(argc_tok.num_i64);
+
+            for (uint32_t i = 0; i < out_inst.param_count; ++i) {
+                if (!expect(TokenType::Comma, "Expected ',' before call.dynamic argument")) return false;
+                Token arg_tok;
+                if (!expect(TokenType::PercentValue, "Expected %arg in call.dynamic", &arg_tok)) return false;
+                out_inst.operands.push_back(arg_tok.id_num);
+            }
+            break;
+        }
+
+        case BronzeOp::EnvCreate: {
+            Token parent_tok;
+            if (!expect(TokenType::PercentValue, "Expected %parent in env.create", &parent_tok)) return false;
+            out_inst.operands.push_back(parent_tok.id_num);
+            if (!expect(TokenType::Comma, "Expected ',' after %parent")) return false;
+            Token size_tok = lexer_.next_token();
+            out_inst.param_count = static_cast<uint32_t>(size_tok.num_i64);
+            break;
+        }
+
+        case BronzeOp::EnvSet: {
+            Token env_tok;
+            if (!expect(TokenType::PercentValue, "Expected %env in env.set", &env_tok)) return false;
+            out_inst.operands.push_back(env_tok.id_num);
+            if (!expect(TokenType::Comma, "Expected ',' after %env")) return false;
+            Token depth_tok = lexer_.next_token();
+            out_inst.depth = static_cast<uint32_t>(depth_tok.num_i64);
+            if (!expect(TokenType::Comma, "Expected ',' after depth")) return false;
+            Token idx_tok = lexer_.next_token();
+            out_inst.index = static_cast<uint32_t>(idx_tok.num_i64);
+            if (!expect(TokenType::Comma, "Expected ',' after index")) return false;
+            Token val_tok;
+            if (!expect(TokenType::PercentValue, "Expected %val in env.set", &val_tok)) return false;
+            out_inst.operands.push_back(val_tok.id_num);
+            break;
+        }
+
+        case BronzeOp::EnvGet:
+        case BronzeOp::EnvInitTdz: {
+            Token env_tok;
+            if (!expect(TokenType::PercentValue, "Expected %env in env op", &env_tok)) return false;
+            out_inst.operands.push_back(env_tok.id_num);
+            if (!expect(TokenType::Comma, "Expected ',' after %env")) return false;
+            Token depth_tok = lexer_.next_token();
+            out_inst.depth = static_cast<uint32_t>(depth_tok.num_i64);
+            if (!expect(TokenType::Comma, "Expected ',' after depth")) return false;
+            Token idx_tok = lexer_.next_token();
+            out_inst.index = static_cast<uint32_t>(idx_tok.num_i64);
+            break;
+        }
+
+        case BronzeOp::EnvGetTdz: {
+            Token env_tok;
+            if (!expect(TokenType::PercentValue, "Expected %env in env.get.tdz", &env_tok)) return false;
+            out_inst.operands.push_back(env_tok.id_num);
+            if (!expect(TokenType::Comma, "Expected ',' after %env")) return false;
+            Token depth_tok = lexer_.next_token();
+            out_inst.depth = static_cast<uint32_t>(depth_tok.num_i64);
+            if (!expect(TokenType::Comma, "Expected ',' after depth")) return false;
+            Token idx_tok = lexer_.next_token();
+            out_inst.index = static_cast<uint32_t>(idx_tok.num_i64);
+            if (!expect(TokenType::Comma, "Expected ',' after index")) return false;
+            Token str_tok;
+            if (!expect(TokenType::StringLiteral, "Expected identifier name in env.get.tdz", &str_tok)) return false;
+            out_inst.string_literal = std::string(str_tok.text);
+            break;
+        }
+
+        case BronzeOp::CreateFunc: {
+            Token fn_tok;
+            if (!expect(TokenType::AtFunction, "Expected @func after create.func", &fn_tok)) return false;
+            out_inst.callee_name = std::string(fn_tok.text);
+            if (!expect(TokenType::Comma, "Expected ',' after @func")) return false;
+            Token argc_tok = lexer_.next_token();
+            out_inst.param_count = static_cast<uint32_t>(argc_tok.num_i64);
+            if (!expect(TokenType::Comma, "Expected ',' after param count")) return false;
+            Token env_tok;
+            if (!expect(TokenType::PercentValue, "Expected %env in create.func", &env_tok)) return false;
+            out_inst.operands.push_back(env_tok.id_num);
+            break;
+        }
+
+        case BronzeOp::CreateArray: {
+            Token size_tok = lexer_.next_token();
+            out_inst.param_count = static_cast<uint32_t>(size_tok.num_i64);
+            break;
+        }
+
         case BronzeOp::Branch: {
             Token cond_tok;
             if (!expect(TokenType::PercentValue, "Expected %cond value for branch", &cond_tok)) {

@@ -58,6 +58,15 @@ enum class BronzeOp {
     Box,
     Unbox,
     Call,
+    CallDynamic,
+    NameResolve,
+    EnvCreate,
+    EnvGet,
+    EnvSet,
+    EnvGetTdz,
+    EnvInitTdz,
+    CreateFunc,
+    CreateArray,
     Print,
     PrintErr,
     Ret,
@@ -83,6 +92,11 @@ struct BronzeInstruction {
     BronzeType box_type = BronzeType::Unknown;
     bool raw_unbox = false;
     std::string callee_name;
+    std::string string_literal;
+
+    uint32_t depth = 0;
+    uint32_t index = 0;
+    uint32_t param_count = 0;
 
     BronzeBlockTarget target;
     BronzeBlockTarget else_target;

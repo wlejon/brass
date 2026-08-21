@@ -1,4 +1,5 @@
 #include "il_lowering.hpp"
+#include "il_runtime.hpp"
 #include <brass/mir/verifier.hpp>
 #include <brass/mir/loop_opt.hpp>
 #include <iostream>
@@ -56,6 +57,22 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
     mod->add_external_symbol("bronze_print_dynamic");
     mod->add_external_symbol("bronze_print_newline");
     mod->add_external_symbol("bronze_f64_mod");
+    mod->add_external_symbol("bronze_name_resolve");
+    mod->add_external_symbol("bronze_env_create");
+    mod->add_external_symbol("bronze_env_get");
+    mod->add_external_symbol("bronze_env_set");
+    mod->add_external_symbol("bronze_create_func");
+    mod->add_external_symbol("bronze_create_array");
+    mod->add_external_symbol("bronze_call_dynamic_0");
+    mod->add_external_symbol("bronze_call_dynamic_1");
+    mod->add_external_symbol("bronze_call_dynamic_2");
+    mod->add_external_symbol("bronze_call_dynamic_3");
+    mod->add_external_symbol("bronze_call_dynamic_4");
+    mod->add_external_symbol("bronze_call_dynamic_5");
+    mod->add_external_symbol("bronze_call_dynamic_6");
+    mod->add_external_symbol("bronze_call_dynamic_7");
+    mod->add_external_symbol("bronze_call_dynamic_8");
+    mod->add_external_symbol("bronze_call_dynamic_n");
 
     // 1. Forward-declare all functions
     for (const auto& fn_ast : ast.functions) {
@@ -178,23 +195,146 @@ bool IlLowering::lower_instruction(
             res_val = b.build_iconst_i32(inst_ast.imm_bool ? 1 : 0);
             break;
         case BronzeOp::ConstUndefined:
-            res_val = b.build_iconst_i64(static_cast<int64_t>(0xFFF9000000000000ULL));
+            res_val = b.build_iconst_i64(static_cast<int64_t>(kUndefinedTag));
             break;
         case BronzeOp::ConstNull:
-            res_val = b.build_iconst_i64(static_cast<int64_t>(0xFFFA000000000000ULL));
+            res_val = b.build_iconst_i64(static_cast<int64_t>(kNullTag));
             break;
         case BronzeOp::ConstBigInt:
             res_val = b.build_iconst_i64(inst_ast.imm_i64);
             break;
 
+        case BronzeOp::NameResolve: {
+            if (inst_ast.string_literal == "print" || inst_ast.string_literal == "console.log") {
+                res_val = b.build_iconst_i64(static_cast<int64_t>(kPrintTag));
+            } else if (inst_ast.string_literal == "print.err") {
+                res_val = b.build_iconst_i64(static_cast<int64_t>(kPrintErrTag));
+            } else {
+                res_val = b.build_iconst_i64(static_cast<int64_t>(kUndefinedTag));
+            }
+            break;
+        }
+
+        case BronzeOp::CallDynamic: {
+            Value* callee_val = ensure_type(get_opd(0), Type::i64(), b);
+            Value* this_val = ensure_type(get_opd(1), Type::i64(), b);
+            uint32_t argc = inst_ast.param_count;
+
+            if (argc == 0) {
+                res_val = b.build_call("bronze_call_dynamic_0", Type::i64(), {callee_val, this_val});
+            } else if (argc == 1) {
+                Value* arg0 = ensure_type(get_opd(2), Type::i64(), b);
+                res_val = b.build_call("bronze_call_dynamic_1", Type::i64(), {callee_val, this_val, arg0});
+            } else if (argc == 2) {
+                Value* arg0 = ensure_type(get_opd(2), Type::i64(), b);
+                Value* arg1 = ensure_type(get_opd(3), Type::i64(), b);
+                res_val = b.build_call("bronze_call_dynamic_2", Type::i64(), {callee_val, this_val, arg0, arg1});
+            } else if (argc == 3) {
+                Value* arg0 = ensure_type(get_opd(2), Type::i64(), b);
+                Value* arg1 = ensure_type(get_opd(3), Type::i64(), b);
+                Value* arg2 = ensure_type(get_opd(4), Type::i64(), b);
+                res_val = b.build_call("bronze_call_dynamic_3", Type::i64(), {callee_val, this_val, arg0, arg1, arg2});
+            } else if (argc == 4) {
+                Value* arg0 = ensure_type(get_opd(2), Type::i64(), b);
+                Value* arg1 = ensure_type(get_opd(3), Type::i64(), b);
+                Value* arg2 = ensure_type(get_opd(4), Type::i64(), b);
+                Value* arg3 = ensure_type(get_opd(5), Type::i64(), b);
+                res_val = b.build_call("bronze_call_dynamic_4", Type::i64(), {callee_val, this_val, arg0, arg1, arg2, arg3});
+            } else if (argc == 5) {
+                Value* a0 = ensure_type(get_opd(2), Type::i64(), b);
+                Value* a1 = ensure_type(get_opd(3), Type::i64(), b);
+                Value* a2 = ensure_type(get_opd(4), Type::i64(), b);
+                Value* a3 = ensure_type(get_opd(5), Type::i64(), b);
+                Value* a4 = ensure_type(get_opd(6), Type::i64(), b);
+                res_val = b.build_call("bronze_call_dynamic_5", Type::i64(), {callee_val, this_val, a0, a1, a2, a3, a4});
+            } else if (argc == 6) {
+                Value* a0 = ensure_type(get_opd(2), Type::i64(), b);
+                Value* a1 = ensure_type(get_opd(3), Type::i64(), b);
+                Value* a2 = ensure_type(get_opd(4), Type::i64(), b);
+                Value* a3 = ensure_type(get_opd(5), Type::i64(), b);
+                Value* a4 = ensure_type(get_opd(6), Type::i64(), b);
+                Value* a5 = ensure_type(get_opd(7), Type::i64(), b);
+                res_val = b.build_call("bronze_call_dynamic_6", Type::i64(), {callee_val, this_val, a0, a1, a2, a3, a4, a5});
+            } else if (argc == 7) {
+                Value* a0 = ensure_type(get_opd(2), Type::i64(), b);
+                Value* a1 = ensure_type(get_opd(3), Type::i64(), b);
+                Value* a2 = ensure_type(get_opd(4), Type::i64(), b);
+                Value* a3 = ensure_type(get_opd(5), Type::i64(), b);
+                Value* a4 = ensure_type(get_opd(6), Type::i64(), b);
+                Value* a5 = ensure_type(get_opd(7), Type::i64(), b);
+                Value* a6 = ensure_type(get_opd(8), Type::i64(), b);
+                res_val = b.build_call("bronze_call_dynamic_7", Type::i64(), {callee_val, this_val, a0, a1, a2, a3, a4, a5, a6});
+            } else if (argc == 8) {
+                Value* a0 = ensure_type(get_opd(2), Type::i64(), b);
+                Value* a1 = ensure_type(get_opd(3), Type::i64(), b);
+                Value* a2 = ensure_type(get_opd(4), Type::i64(), b);
+                Value* a3 = ensure_type(get_opd(5), Type::i64(), b);
+                Value* a4 = ensure_type(get_opd(6), Type::i64(), b);
+                Value* a5 = ensure_type(get_opd(7), Type::i64(), b);
+                Value* a6 = ensure_type(get_opd(8), Type::i64(), b);
+                Value* a7 = ensure_type(get_opd(9), Type::i64(), b);
+                res_val = b.build_call("bronze_call_dynamic_8", Type::i64(), {callee_val, this_val, a0, a1, a2, a3, a4, a5, a6, a7});
+            } else {
+                res_val = b.build_iconst_i64(static_cast<int64_t>(kUndefinedTag));
+            }
+            break;
+        }
+
+        case BronzeOp::EnvCreate: {
+            Value* parent_val = ensure_type(get_opd(0), Type::i64(), b);
+            Value* size_val = b.build_iconst_i32(static_cast<int32_t>(inst_ast.param_count));
+            res_val = b.build_call("bronze_env_create", Type::i64(), {parent_val, size_val});
+            break;
+        }
+
+        case BronzeOp::EnvGet:
+        case BronzeOp::EnvGetTdz: {
+            Value* env_val = ensure_type(get_opd(0), Type::i64(), b);
+            Value* depth_val = b.build_iconst_i32(static_cast<int32_t>(inst_ast.depth));
+            Value* idx_val = b.build_iconst_i32(static_cast<int32_t>(inst_ast.index));
+            res_val = b.build_call("bronze_env_get", Type::i64(), {env_val, depth_val, idx_val});
+            break;
+        }
+
+        case BronzeOp::EnvSet: {
+            Value* env_val = ensure_type(get_opd(0), Type::i64(), b);
+            Value* depth_val = b.build_iconst_i32(static_cast<int32_t>(inst_ast.depth));
+            Value* idx_val = b.build_iconst_i32(static_cast<int32_t>(inst_ast.index));
+            Value* val = ensure_type(get_opd(1), Type::i64(), b);
+            b.build_call("bronze_env_set", Type::void_type(), {env_val, depth_val, idx_val, val});
+            break;
+        }
+
+        case BronzeOp::EnvInitTdz: {
+            break;
+        }
+
+        case BronzeOp::CreateFunc: {
+            Value* argc_val = b.build_iconst_i32(static_cast<int32_t>(inst_ast.param_count));
+            Value* env_val = ensure_type(get_opd(0), Type::i64(), b);
+            const char* name_ptr = _strdup(inst_ast.callee_name.c_str());
+            res_val = b.build_call("bronze_create_func", Type::i64(), {
+                b.build_iconst_i64(reinterpret_cast<int64_t>(name_ptr)),
+                argc_val,
+                env_val
+            });
+            break;
+        }
+
+        case BronzeOp::CreateArray: {
+            res_val = b.build_iconst_i64(static_cast<int64_t>(kUndefinedTag));
+            break;
+        }
+
         case BronzeOp::Add: {
             Value* op0 = get_opd(0);
             Value* op1 = get_opd(1);
             if (!op0 || !op1) return false;
-            if (res_type == Type::f64()) {
+            if (res_type == Type::f64() || res_type == Type::i64()) {
                 op0 = ensure_type(op0, Type::f64(), b);
                 op1 = ensure_type(op1, Type::f64(), b);
-                res_val = b.build_add(op0, op1);
+                Value* r = b.build_add(op0, op1);
+                res_val = (res_type == Type::i64()) ? b.build_bitcast_i64_f64(r) : r;
             } else {
                 op0 = ensure_type(op0, Type::i32(), b);
                 op1 = ensure_type(op1, Type::i32(), b);
@@ -207,10 +347,11 @@ bool IlLowering::lower_instruction(
             Value* op0 = get_opd(0);
             Value* op1 = get_opd(1);
             if (!op0 || !op1) return false;
-            if (res_type == Type::f64()) {
+            if (res_type == Type::f64() || res_type == Type::i64()) {
                 op0 = ensure_type(op0, Type::f64(), b);
                 op1 = ensure_type(op1, Type::f64(), b);
-                res_val = b.build_sub(op0, op1);
+                Value* r = b.build_sub(op0, op1);
+                res_val = (res_type == Type::i64()) ? b.build_bitcast_i64_f64(r) : r;
             } else {
                 op0 = ensure_type(op0, Type::i32(), b);
                 op1 = ensure_type(op1, Type::i32(), b);
@@ -223,10 +364,11 @@ bool IlLowering::lower_instruction(
             Value* op0 = get_opd(0);
             Value* op1 = get_opd(1);
             if (!op0 || !op1) return false;
-            if (res_type == Type::f64()) {
+            if (res_type == Type::f64() || res_type == Type::i64()) {
                 op0 = ensure_type(op0, Type::f64(), b);
                 op1 = ensure_type(op1, Type::f64(), b);
-                res_val = b.build_mul(op0, op1);
+                Value* r = b.build_mul(op0, op1);
+                res_val = (res_type == Type::i64()) ? b.build_bitcast_i64_f64(r) : r;
             } else {
                 op0 = ensure_type(op0, Type::i32(), b);
                 op1 = ensure_type(op1, Type::i32(), b);
@@ -239,10 +381,11 @@ bool IlLowering::lower_instruction(
             Value* op0 = get_opd(0);
             Value* op1 = get_opd(1);
             if (!op0 || !op1) return false;
-            if (res_type == Type::f64()) {
+            if (res_type == Type::f64() || res_type == Type::i64()) {
                 op0 = ensure_type(op0, Type::f64(), b);
                 op1 = ensure_type(op1, Type::f64(), b);
-                res_val = b.build_sdiv(op0, op1);
+                Value* r = b.build_sdiv(op0, op1);
+                res_val = (res_type == Type::i64()) ? b.build_bitcast_i64_f64(r) : r;
             } else {
                 op0 = ensure_type(op0, Type::i32(), b);
                 op1 = ensure_type(op1, Type::i32(), b);
@@ -255,10 +398,11 @@ bool IlLowering::lower_instruction(
             Value* op0 = get_opd(0);
             Value* op1 = get_opd(1);
             if (!op0 || !op1) return false;
-            if (res_type == Type::f64()) {
+            if (res_type == Type::f64() || res_type == Type::i64()) {
                 op0 = ensure_type(op0, Type::f64(), b);
                 op1 = ensure_type(op1, Type::f64(), b);
-                res_val = b.build_call("bronze_f64_mod", Type::f64(), {op0, op1});
+                Value* r = b.build_call("bronze_f64_mod", Type::f64(), {op0, op1});
+                res_val = (res_type == Type::i64()) ? b.build_bitcast_i64_f64(r) : r;
             } else {
                 op0 = ensure_type(op0, Type::i32(), b);
                 op1 = ensure_type(op1, Type::i32(), b);
@@ -270,9 +414,10 @@ bool IlLowering::lower_instruction(
         case BronzeOp::Neg: {
             Value* op0 = get_opd(0);
             if (!op0) return false;
-            if (res_type == Type::f64()) {
+            if (res_type == Type::f64() || res_type == Type::i64()) {
                 op0 = ensure_type(op0, Type::f64(), b);
-                res_val = b.build_neg(op0);
+                Value* r = b.build_neg(op0);
+                res_val = (res_type == Type::i64()) ? b.build_bitcast_i64_f64(r) : r;
             } else {
                 op0 = ensure_type(op0, Type::i32(), b);
                 res_val = b.build_neg(op0);
@@ -344,7 +489,7 @@ bool IlLowering::lower_instruction(
         case BronzeOp::RelLt: {
             Value* op0 = get_opd(0);
             Value* op1 = get_opd(1);
-            if (op0->type() == Type::f64() || op1->type() == Type::f64()) {
+            if (op0->type() == Type::f64() || op1->type() == Type::f64() || op0->type() == Type::i64() || op1->type() == Type::i64()) {
                 op0 = ensure_type(op0, Type::f64(), b);
                 op1 = ensure_type(op1, Type::f64(), b);
             }
@@ -355,7 +500,7 @@ bool IlLowering::lower_instruction(
         case BronzeOp::RelLe: {
             Value* op0 = get_opd(0);
             Value* op1 = get_opd(1);
-            if (op0->type() == Type::f64() || op1->type() == Type::f64()) {
+            if (op0->type() == Type::f64() || op1->type() == Type::f64() || op0->type() == Type::i64() || op1->type() == Type::i64()) {
                 op0 = ensure_type(op0, Type::f64(), b);
                 op1 = ensure_type(op1, Type::f64(), b);
             }
@@ -366,7 +511,7 @@ bool IlLowering::lower_instruction(
         case BronzeOp::RelGt: {
             Value* op0 = get_opd(0);
             Value* op1 = get_opd(1);
-            if (op0->type() == Type::f64() || op1->type() == Type::f64()) {
+            if (op0->type() == Type::f64() || op1->type() == Type::f64() || op0->type() == Type::i64() || op1->type() == Type::i64()) {
                 op0 = ensure_type(op0, Type::f64(), b);
                 op1 = ensure_type(op1, Type::f64(), b);
             }
@@ -377,7 +522,7 @@ bool IlLowering::lower_instruction(
         case BronzeOp::RelGe: {
             Value* op0 = get_opd(0);
             Value* op1 = get_opd(1);
-            if (op0->type() == Type::f64() || op1->type() == Type::f64()) {
+            if (op0->type() == Type::f64() || op1->type() == Type::f64() || op0->type() == Type::i64() || op1->type() == Type::i64()) {
                 op0 = ensure_type(op0, Type::f64(), b);
                 op1 = ensure_type(op1, Type::f64(), b);
             }
@@ -389,7 +534,7 @@ bool IlLowering::lower_instruction(
         case BronzeOp::LooseEq: {
             Value* op0 = get_opd(0);
             Value* op1 = get_opd(1);
-            if (op0->type() == Type::f64() || op1->type() == Type::f64()) {
+            if (op0->type() == Type::f64() || op1->type() == Type::f64() || op0->type() == Type::i64() || op1->type() == Type::i64()) {
                 op0 = ensure_type(op0, Type::f64(), b);
                 op1 = ensure_type(op1, Type::f64(), b);
             }
@@ -399,7 +544,7 @@ bool IlLowering::lower_instruction(
         case BronzeOp::CmpNe: {
             Value* op0 = get_opd(0);
             Value* op1 = get_opd(1);
-            if (op0->type() == Type::f64() || op1->type() == Type::f64()) {
+            if (op0->type() == Type::f64() || op1->type() == Type::f64() || op0->type() == Type::i64() || op1->type() == Type::i64()) {
                 op0 = ensure_type(op0, Type::f64(), b);
                 op1 = ensure_type(op1, Type::f64(), b);
             }
@@ -416,12 +561,12 @@ bool IlLowering::lower_instruction(
             } else if (inst_ast.box_type == BronzeType::I32) {
                 Value* i_val = ensure_type(op0, Type::i32(), b);
                 Value* sext = b.build_sext_i64(i_val);
-                Value* tag = b.build_iconst_i64(static_cast<int64_t>(0xFFF9000000000000ULL));
+                Value* tag = b.build_iconst_i64(static_cast<int64_t>(kInt32Tag));
                 res_val = b.build_or(b.build_and(sext, b.build_iconst_i64(0xFFFFFFFFLL)), tag);
             } else if (inst_ast.box_type == BronzeType::Bool) {
                 Value* b_val = ensure_type(op0, Type::i32(), b);
                 Value* zext = b.build_zext_i64(b_val);
-                Value* tag = b.build_iconst_i64(static_cast<int64_t>(0xFFFB000000000000ULL));
+                Value* tag = b.build_iconst_i64(static_cast<int64_t>(kBoolTag));
                 res_val = b.build_or(zext, tag);
             } else {
                 res_val = ensure_type(op0, Type::i64(), b);
@@ -448,16 +593,16 @@ bool IlLowering::lower_instruction(
 
         case BronzeOp::Call: {
             Function* callee = fn->parent()->get_function(inst_ast.callee_name);
-            if (!callee) return false;
+            Type callee_ret = callee ? callee->return_type() : lower_type(inst_ast.result_type);
             std::vector<Value*> args;
             for (size_t i = 0; i < inst_ast.operands.size(); ++i) {
                 Value* arg = get_opd(i);
-                if (i < callee->param_types().size()) {
+                if (callee && i < callee->param_types().size()) {
                     arg = ensure_type(arg, callee->param_types()[i], b);
                 }
                 args.push_back(arg);
             }
-            res_val = b.build_call(inst_ast.callee_name, callee->return_type(), Span<Value* const>(args.data(), args.size()));
+            res_val = b.build_call(inst_ast.callee_name, callee_ret, Span<Value* const>(args.data(), args.size()));
             break;
         }
 
