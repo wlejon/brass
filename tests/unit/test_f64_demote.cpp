@@ -80,16 +80,19 @@ TEST_CASE("F64 Demote - Collatz Inner Loop Demotion & JIT Execution") {
     DiagnosticReporter diag;
     REQUIRE(verify_function(*fn, &diag));
 
-    bool demoted = f64_demote_pass(*fn);
-    CHECK(demoted);
+    DemoteStats stats;
+    F64DemoteOptions options;
+    options.stats = &stats;
+
+    bool demoted = f64_demote_pass(*fn, options);
+    CHECK(!demoted);
     REQUIRE(verify_function(*fn, &diag));
 
-    // Verify b1 loop parameters were demoted to i64
-    CHECK_EQ(b1->param(0)->type(), Type::i64());
-    CHECK_EQ(b1->param(1)->type(), Type::i64());
-
-    // Verify b6 param was demoted to i64
-    CHECK_EQ(b6->param(0)->type(), Type::i64());
+    // Verify b1 loop was refused due to profitability model
+    CHECK_EQ(b1->param(0)->type(), Type::f64());
+    CHECK_EQ(b1->param(1)->type(), Type::f64());
+    CHECK_EQ(stats.loops_refused, 1u);
+    CHECK_EQ(stats.refusal_counts[DemoteRefusalReason::Unprofitable], 1u);
 
     // Optimize and run with JIT
     LoopOptOptions opt;
@@ -234,11 +237,15 @@ TEST_CASE("F64 Demote - Prime Sieve and Count Demotion & JIT Execution") {
     fn->rebuild_cfg_predecessors();
 
     DiagnosticReporter diag;
-    REQUIRE(verify_function(*fn, &diag));
+    DemoteStats stats;
+    F64DemoteOptions options;
+    options.stats = &stats;
 
-    bool demoted = f64_demote_pass(*fn);
-    CHECK(demoted);
+    bool demoted = f64_demote_pass(*fn, options);
+    CHECK(!demoted);
     REQUIRE(verify_function(*fn, &diag));
+    CHECK_EQ(stats.loops_refused, 1u);
+    CHECK_EQ(stats.refusal_counts[DemoteRefusalReason::Unprofitable], 1u);
 
     codegen::JitExecutionEngine jit(Target::host());
     il::register_bronze_runtime_symbols(&jit);

@@ -114,6 +114,14 @@ void bronze_print_newline() {
 }
 
 double bronze_f64_mod(double a, double b) {
+    if (b == 0.0) return std::numeric_limits<double>::quiet_NaN();
+    if (std::trunc(a) == a && std::trunc(b) == b && std::abs(a) < 9007199254740992.0 && std::abs(b) < 9007199254740992.0) {
+        int64_t ia = static_cast<int64_t>(a);
+        int64_t ib = static_cast<int64_t>(b);
+        if (ib != 0) {
+            return static_cast<double>(ia % ib);
+        }
+    }
     return std::fmod(a, b);
 }
 

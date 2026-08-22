@@ -48,11 +48,25 @@ func arraySum(%0: f64) -> dynamic {
 
 func run() -> void {
   b0:
-    %0: dynamic = name.resolve "print"
-    %1: dynamic = const.undefined
-    %2: f64 = const.f64 8
-    %3: dynamic = call @arraySum(%2)
-    %4: dynamic = call.dynamic %0, %1, 1, %3
+    %0: f64 = const.f64 0
+    %1: f64 = const.f64 0
+    %4: dynamic = box.f64 %1
+    jump b1(%0, %4)
+  b1(%2: f64, %3: dynamic):
+    %5: f64 = const.f64 1e+06
+    %6: bool = cmp.lt %2, %5
+    br %6, b2, b3(%2, %3)
+  b2:
+    %9: f64 = const.f64 8
+    %10: dynamic = call @arraySum(%9)
+    %11: dynamic = add %3, %10
+    %12: f64 = const.f64 1
+    %13: f64 = add %2, %12
+    jump b1(%13, %11)
+  b3(%7: f64, %8: dynamic):
+    %14: dynamic = name.resolve "print"
+    %15: dynamic = const.undefined
+    %16: dynamic = call.dynamic %14, %15, 1, %8
     ret
 }
 

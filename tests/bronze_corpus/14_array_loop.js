@@ -9,6 +9,12 @@ function arraySum(n) {
   return sum;
 }
 function run() {
-  print(arraySum(8));
+  let k = 0;
+  let total = 0;
+  while (k < 1000000) {
+    total = total + arraySum(8);
+    k = k + 1;
+  }
+  print(total);
 }
 run();

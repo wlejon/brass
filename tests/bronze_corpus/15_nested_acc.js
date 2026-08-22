@@ -15,8 +15,8 @@ function nestedAcc(n) {
   return outerSum;
 }
 function run() {
-  let r5 = nestedAcc(5);
-  let r10 = nestedAcc(10);
-  print(r5, r10);
+  let r1 = nestedAcc(3000);
+  let r2 = nestedAcc(4000);
+  print(r1, r2);
 }
 run();

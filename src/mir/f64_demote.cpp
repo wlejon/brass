@@ -31,6 +31,8 @@ const char* demote_refusal_reason_string(DemoteRefusalReason reason) {
             return "non-integral constant / float operations";
         case DemoteRefusalReason::DynamicOrNonF64State:
             return "dynamic / non-f64 state";
+        case DemoteRefusalReason::Unprofitable:
+            return "unprofitable";
         case DemoteRefusalReason::Other:
             return "other";
     }
@@ -264,6 +266,43 @@ bool is_value_exact_int(
     return false;
 }
 
+bool is_unprofitable_loop(const LoopInfo* loop, const Function& fn) {
+    if (!loop || !loop->header()) return false;
+
+    bool has_div_in_loop = false;
+    bool has_variable_mod = false;
+
+    for (const BasicBlock* bb : loop->blocks()) {
+        if (!bb) continue;
+        for (const Instruction* inst : *bb) {
+            if (!inst) continue;
+            Opcode op = inst->opcode();
+            if (op == Opcode::sdiv || op == Opcode::udiv) {
+                has_div_in_loop = true;
+            } else if (op == Opcode::smod || op == Opcode::umod || (op == Opcode::call && inst->symbol() == "bronze_f64_mod")) {
+                if (inst->operand_count() >= 2) {
+                    int64_t c = 0;
+                    if (!get_const_int_or_f64_int(inst->operand(1), c)) {
+                        has_variable_mod = true;
+                    }
+                }
+            }
+        }
+    }
+
+    bool has_f64_boundary = false;
+    if (fn.return_type() == Type::f64()) has_f64_boundary = true;
+    for (size_t i = 0; i < fn.param_count(); ++i) {
+        if (fn.param_type(i) == Type::f64()) has_f64_boundary = true;
+    }
+
+    if (has_f64_boundary && (has_div_in_loop || has_variable_mod)) {
+        return true;
+    }
+
+    return false;
+}
+
 void record_loop_stats(
     Function& fn,
     const LoopAnalysis& loops,
@@ -370,10 +409,12 @@ void record_loop_stats(
                 rec.refusal_reason = DemoteRefusalReason::DynamicOrNonF64State;
             } else if (has_non_int_const) {
                 rec.refusal_reason = DemoteRefusalReason::NonIntegralConstantOrFloatOp;
-            } else if (has_unproven_div) {
-                rec.refusal_reason = DemoteRefusalReason::UnprovenDivision;
             } else if (has_call) {
                 rec.refusal_reason = DemoteRefusalReason::CallInBody;
+            } else if (is_unprofitable_loop(loop, fn)) {
+                rec.refusal_reason = DemoteRefusalReason::Unprofitable;
+            } else if (has_unproven_div) {
+                rec.refusal_reason = DemoteRefusalReason::UnprovenDivision;
             } else {
                 rec.refusal_reason = DemoteRefusalReason::NonIntegralStep;
             }
@@ -531,21 +572,53 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
         }
     }
 
-    // 3. Relevance Filtering:
-    // Only demote values that are connected to non-entry block parameters, modulo, or proven exact division
-    std::unordered_set<const Value*> relevant_demote;
+    // 2.5 All-or-nothing loop filtering & Profitability Filtering:
+    for (LoopInfo* loop : loop_analysis.post_order_loops()) {
+        if (!loop || !loop->header()) continue;
+        BasicBlock* header = loop->header();
+        bool all_header_params_exact = true;
+        for (size_t i = 0; i < header->param_count(); ++i) {
+            Value* p = header->param(i);
+            if (!p || !exact_ints.count(p)) {
+                all_header_params_exact = false;
+                break;
+            }
+        }
 
-    // Seed roots: non-entry block parameters in exact_ints, bronze_f64_mod, proven sdiv
-    for (const BasicBlock* bb : fn.blocks()) {
-        if (!bb) continue;
-        if (bb != fn.entry_block()) {
-            for (size_t i = 0; i < bb->param_count(); ++i) {
-                const Value* p = bb->param(i);
-                if (p && exact_ints.count(p)) {
-                    relevant_demote.insert(p);
+        if (!all_header_params_exact || is_unprofitable_loop(loop, fn)) {
+            for (BasicBlock* bb : loop->blocks()) {
+                if (!bb) continue;
+                for (size_t i = 0; i < bb->param_count(); ++i) {
+                    Value* p = bb->param(i);
+                    if (p) exact_ints.erase(p);
+                }
+                for (Instruction* inst : *bb) {
+                    if (inst && inst->result()) {
+                        exact_ints.erase(inst->result());
+                    }
                 }
             }
         }
+    }
+
+    // 3. Relevance Filtering:
+    // Only demote values that are connected to loop headers in exact_ints, modulo, or proven exact division
+    std::unordered_set<const Value*> relevant_demote;
+
+    // Seed roots: loop header parameters in exact_ints, bronze_f64_mod, proven sdiv
+    for (LoopInfo* loop : loop_analysis.post_order_loops()) {
+        if (!loop || !loop->header()) continue;
+        BasicBlock* header = loop->header();
+        for (size_t i = 0; i < header->param_count(); ++i) {
+            Value* p = header->param(i);
+            if (p && exact_ints.count(p)) {
+                relevant_demote.insert(p);
+            }
+        }
+    }
+
+    for (const BasicBlock* bb : fn.blocks()) {
+        if (!bb) continue;
         for (const Instruction* inst : *bb) {
             if (!inst) continue;
             Opcode op = inst->opcode();

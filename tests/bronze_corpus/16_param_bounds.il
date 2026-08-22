@@ -19,12 +19,12 @@ func rangeSum(%0: f64, %1: f64, %2: f64, %3: f64) -> f64 {
 func run() -> void {
   b0:
     %0: f64 = const.f64 0
-    %1: f64 = const.f64 100
+    %1: f64 = const.f64 1.2e+08
     %2: f64 = const.f64 2
     %3: f64 = const.f64 3
     %4: f64 = call @rangeSum(%0, %1, %2, %3)
     %5: f64 = const.f64 10
-    %6: f64 = const.f64 50
+    %6: f64 = const.f64 1e+08
     %7: f64 = const.f64 5
     %8: f64 = const.f64 7
     %9: f64 = call @rangeSum(%5, %6, %7, %8)

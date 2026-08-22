@@ -38,10 +38,10 @@ public:
     }
 
     static bool is_available() {
-        if (std::system("where cl.exe >nul 2>nul") == 0) {
+        if (!find_vcvars64().empty()) {
             return true;
         }
-        return !find_vcvars64().empty();
+        return (std::system("where cl.exe >nul 2>nul") == 0) && (std::system("where link.exe >nul 2>nul") == 0);
     }
 
     static std::filesystem::path temp_dir() {
@@ -52,15 +52,16 @@ public:
 
     static int run_msvc_cmd(const std::string& cmd_line) {
         auto runner_bat = temp_dir() / "msvc_runner.bat";
+        runner_bat.make_preferred();
         std::string vcvars = find_vcvars64();
         {
             std::ofstream ofs(runner_bat);
             if (!vcvars.empty()) {
                 ofs << "@call \"" << vcvars << "\" >nul 2>nul\n";
             }
-            ofs << cmd_line << "\n";
+            ofs << "@" << cmd_line << "\n";
         }
-        std::string invoke_cmd = "cmd.exe /c \"" + runner_bat.string() + "\"";
+        std::string invoke_cmd = "\"" + runner_bat.string() + "\"";
         int code = std::system(invoke_cmd.c_str());
         if (code != 0) {
             std::cerr << "[MSVC Toolchain CMD FAILED (exit " << code << ")]: " << cmd_line << "\n";

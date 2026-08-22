@@ -146,7 +146,8 @@ def main():
             status = "FAIL"
             all_pass = False
 
-        is_demoted = prog in DEMOTED_PROGRAMS
+        demote_check = subprocess.run([str(BRASS_IL), str(il_file), "--demote-stats"], capture_output=True, text=True)
+        is_demoted = "DEMOTED (i64 loop)" in demote_check.stdout
         demoted_str = "Yes (i64 loop)" if is_demoted else "No"
 
         # Demote speedup vs no-demote

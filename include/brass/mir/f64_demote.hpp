@@ -18,6 +18,7 @@ enum class DemoteRefusalReason {
     CallInBody,                     // call in body
     NonIntegralConstantOrFloatOp,   // non-integral constant / float operations
     DynamicOrNonF64State,           // dynamic / non-f64 state
+    Unprofitable,                   // unprofitable
     Other                           // other refusal reason
 };
 

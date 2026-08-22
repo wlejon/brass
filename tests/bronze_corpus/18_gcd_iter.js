@@ -6,9 +6,15 @@ function gcd(a, b) {
   }
   return a;
 }
+
 function run() {
-  let g1 = gcd(1071, 462);
-  let g2 = gcd(123456, 7890);
-  print(g1, g2);
+  let total = 0;
+  let i = 0;
+  while (i < 1200000) {
+    total = total + gcd(1071 + (i % 100), 462 + (i % 50)) + gcd(48 + (i % 20), 18 + (i % 10));
+    i = i + 1;
+  }
+  print(total);
 }
+
 run();

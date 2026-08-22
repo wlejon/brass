@@ -41,9 +41,9 @@ func nestedAcc(%0: f64) -> f64 {
 
 func run() -> void {
   b0:
-    %0: f64 = const.f64 5
+    %0: f64 = const.f64 3000
     %1: f64 = call @nestedAcc(%0)
-    %2: f64 = const.f64 10
+    %2: f64 = const.f64 4000
     %3: f64 = call @nestedAcc(%2)
     %4: dynamic = name.resolve "print"
     %5: dynamic = const.undefined

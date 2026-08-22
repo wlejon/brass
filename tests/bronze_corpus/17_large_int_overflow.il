@@ -6,7 +6,7 @@ func testOverflow() -> f64 {
     %1: f64 = const.f64 0
     jump b1(%0, %1)
   b1(%2: f64, %3: f64):
-    %4: f64 = const.f64 10
+    %4: f64 = const.f64 1e+08
     %5: bool = cmp.lt %3, %4
     br %5, b2, b3(%2, %3)
   b2:

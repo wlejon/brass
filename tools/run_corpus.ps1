@@ -131,8 +131,9 @@ foreach ($prog in $corpusPrograms) {
         $allPass = $false
     }
 
+    $demoteStatsOut = & $exePath $ilFile --demote-stats 2>&1 | Out-String
     $demotedInfo = "No"
-    if ($prog -in $demotedPrograms) {
+    if ($demoteStatsOut -match "DEMOTED \(i64 loop\)") {
         $demotedInfo = "Yes (i64 loop)"
     }
 
