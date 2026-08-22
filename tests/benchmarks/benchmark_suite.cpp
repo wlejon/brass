@@ -45,6 +45,16 @@ int main(int argc, char** argv) {
     // 2. Emit Run Provenance Header
     BenchmarkReporter::print_header("Brass JIT vs Native C++ (-O3) & GC Performance");
 
+    // Warm up CPU clock frequency and OS memory subsystem
+    {
+        volatile double dummy = 0.0;
+        for (int w = 0; w < 2000000; ++w) {
+            dummy += 1.0 / (w + 1.0);
+        }
+        (void)dummy;
+        brass_zeroupper();
+    }
+
     std::vector<BenchmarkResult> results;
 
     // 3. Numeric & Algorithmic Microbenchmarks

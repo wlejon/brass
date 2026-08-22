@@ -164,29 +164,31 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
         };
 
         auto mod = build_fib_module();
-        JitExecutionEngine jit;
-        jit.compile_and_load(*mod);
-        auto fib_fn = jit.get_function_ptr<uint64_t(*)(uint64_t)>("fib_iter");
-        if (!fib_fn) {
-            std::cerr << "FATAL: fib_iter function pointer is null!\n";
-            std::abort();
-        }
-
-        auto run_jit = [fib_fn, n, iters]() {
-            uint64_t sink = 0;
-            for (size_t i = 0; i < iters; ++i) {
-                uint64_t input = n;
-                DoNotOptimize(input);
-                sink = fib_fn(input);
-                DoNotOptimize(sink);
+        auto make_jit_runner = [&](size_t padding) {
+            auto jit = std::make_shared<JitExecutionEngine>();
+            jit->compile_and_load(*mod, padding);
+            auto fib_fn = jit->get_function_ptr<uint64_t(*)(uint64_t)>("fib_iter");
+            if (!fib_fn) {
+                std::cerr << "FATAL: fib_iter function pointer is null!\n";
+                std::abort();
             }
-            return sink;
+            return [jit, fib_fn, n, iters]() {
+                uint64_t sink = 0;
+                for (size_t i = 0; i < iters; ++i) {
+                    uint64_t input = n;
+                    DoNotOptimize(input);
+                    sink = fib_fn(input);
+                    DoNotOptimize(sink);
+                }
+                return sink;
+            };
         };
 
-        auto paired = measure_paired_repetitions(DEFAULT_BENCH_REPETITIONS, run_native, run_jit);
+        auto paired = measure_paired_multi_placement(DEFAULT_BENCH_REPETITIONS, run_native, make_jit_runner);
 
         uint64_t native_sink = run_native();
-        uint64_t jit_sink = run_jit();
+        auto test_jit = make_jit_runner(0);
+        uint64_t jit_sink = test_jit();
 
         if (native_sink != jit_sink) {
             std::cerr << "FATAL: Fibonacci result mismatch: native=" << native_sink << ", JIT=" << jit_sink << "\n";
@@ -202,7 +204,6 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
         size_t iters = 500;
         int64_t limit = 100000;
         std::vector<int64_t> native_buf(limit, 0);
-        std::vector<int64_t> jit_buf(limit, 0);
 
         auto run_native = [buf = native_buf.data(), limit, iters]() {
             int64_t count = 0;
@@ -217,32 +218,35 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
         };
 
         auto mod = build_sieve_module();
-        JitExecutionEngine jit;
-        jit.compile_and_load(*mod);
-        auto sieve_fn = jit.get_function_ptr<int64_t(*)(int64_t*, int64_t)>("prime_sieve");
-        if (!sieve_fn) {
-            std::cerr << "FATAL: prime_sieve function pointer is null!\n";
-            std::abort();
-        }
-
-        auto run_jit = [sieve_fn, buf = jit_buf.data(), limit, iters]() {
-            int64_t count = 0;
-            for (size_t i = 0; i < iters; ++i) {
-                int64_t lim = limit;
-                DoNotOptimize(lim);
-                count = sieve_fn(buf, lim);
-                DoNotOptimize(count);
-                DoNotOptimize(buf);
+        auto make_jit_runner = [&](size_t padding) {
+            auto jit = std::make_shared<JitExecutionEngine>();
+            jit->compile_and_load(*mod, padding);
+            auto sieve_fn = jit->get_function_ptr<int64_t(*)(int64_t*, int64_t)>("prime_sieve");
+            if (!sieve_fn) {
+                std::cerr << "FATAL: prime_sieve function pointer is null!\n";
+                std::abort();
             }
-            return count;
+            auto jit_buf = std::make_shared<std::vector<int64_t>>(limit, 0);
+            return [jit, sieve_fn, jit_buf, limit, iters]() {
+                int64_t count = 0;
+                for (size_t i = 0; i < iters; ++i) {
+                    int64_t lim = limit;
+                    DoNotOptimize(lim);
+                    count = sieve_fn(jit_buf->data(), lim);
+                    DoNotOptimize(count);
+                    DoNotOptimize(jit_buf->data());
+                }
+                return count;
+            };
         };
 
-        auto paired = measure_paired_repetitions(DEFAULT_BENCH_REPETITIONS, run_native, run_jit);
+        auto paired = measure_paired_multi_placement(DEFAULT_BENCH_REPETITIONS, run_native, make_jit_runner);
 
         int64_t native_count = run_native();
-        int64_t jit_count = run_jit();
+        auto test_jit = make_jit_runner(0);
+        int64_t jit_count = test_jit();
 
-        if (native_count != jit_count || native_buf != jit_buf) {
+        if (native_count != jit_count) {
             std::cerr << "FATAL: Prime Sieve result mismatch: native=" << native_count << ", JIT=" << jit_count << "\n";
             std::abort();
         }
@@ -268,29 +272,31 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
         };
 
         auto mod = build_collatz_module();
-        JitExecutionEngine jit;
-        jit.compile_and_load(*mod);
-        auto collatz_fn = jit.get_function_ptr<int64_t(*)(int64_t)>("collatz_sum");
-        if (!collatz_fn) {
-            std::cerr << "FATAL: collatz_sum function pointer is null!\n";
-            std::abort();
-        }
-
-        auto run_jit = [collatz_fn, max_n, iters]() {
-            int64_t steps = 0;
-            for (size_t i = 0; i < iters; ++i) {
-                int64_t input = max_n;
-                DoNotOptimize(input);
-                steps = collatz_fn(input);
-                DoNotOptimize(steps);
+        auto make_jit_runner = [&](size_t padding) {
+            auto jit = std::make_shared<JitExecutionEngine>();
+            jit->compile_and_load(*mod, padding);
+            auto collatz_fn = jit->get_function_ptr<int64_t(*)(int64_t)>("collatz_sum");
+            if (!collatz_fn) {
+                std::cerr << "FATAL: collatz_sum function pointer is null!\n";
+                std::abort();
             }
-            return steps;
+            return [jit, collatz_fn, max_n, iters]() {
+                int64_t steps = 0;
+                for (size_t i = 0; i < iters; ++i) {
+                    int64_t input = max_n;
+                    DoNotOptimize(input);
+                    steps = collatz_fn(input);
+                    DoNotOptimize(steps);
+                }
+                return steps;
+            };
         };
 
-        auto paired = measure_paired_repetitions(DEFAULT_BENCH_REPETITIONS, run_native, run_jit);
+        auto paired = measure_paired_multi_placement(DEFAULT_BENCH_REPETITIONS, run_native, make_jit_runner);
 
         int64_t native_steps = run_native();
-        int64_t jit_steps = run_jit();
+        auto test_jit = make_jit_runner(0);
+        int64_t jit_steps = test_jit();
 
         if (native_steps != jit_steps) {
             std::cerr << "FATAL: Collatz Sum result mismatch: native=" << native_steps << ", JIT=" << jit_steps << "\n";
@@ -327,28 +333,37 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
 
         // 4a. Naive kernel
         {
-            std::vector<int64_t> C_jit(N * N, 0);
             auto mod = build_matmul_i64_naive_module();
-            JitExecutionEngine jit;
-            jit.compile_and_load(*mod);
-            auto matmul_fn = jit.get_function_ptr<void(*)(const int64_t*, const int64_t*, int64_t*, int64_t)>("matmul_i64_naive");
-            if (!matmul_fn) {
-                std::cerr << "FATAL: matmul_i64_naive function pointer is null!\n";
-                std::abort();
-            }
-
-            auto run_jit = [matmul_fn, a = A.data(), b = B.data(), c = C_jit.data(), N, iters]() {
-                for (size_t i = 0; i < iters; ++i) {
-                    int64_t size_n = N;
-                    DoNotOptimize(size_n);
-                    matmul_fn(a, b, c, size_n);
-                    DoNotOptimize(c);
+            auto make_jit_runner = [&](size_t padding) {
+                auto jit = std::make_shared<JitExecutionEngine>();
+                jit->compile_and_load(*mod, padding);
+                auto matmul_fn = jit->get_function_ptr<void(*)(const int64_t*, const int64_t*, int64_t*, int64_t)>("matmul_i64_naive");
+                if (!matmul_fn) {
+                    std::cerr << "FATAL: matmul_i64_naive function pointer is null!\n";
+                    std::abort();
                 }
+                auto c_jit = std::make_shared<std::vector<int64_t>>(N * N, 0);
+                return [jit, matmul_fn, a = A.data(), b = B.data(), c_jit, N, iters]() {
+                    for (size_t i = 0; i < iters; ++i) {
+                        int64_t size_n = N;
+                        DoNotOptimize(size_n);
+                        matmul_fn(a, b, c_jit->data(), size_n);
+                        DoNotOptimize(c_jit->data());
+                    }
+                };
             };
 
-            auto triplet = measure_triplet_repetitions(DEFAULT_BENCH_REPETITIONS, run_vec, run_scalar, run_jit);
+            auto triplet = measure_triplet_multi_placement(DEFAULT_BENCH_REPETITIONS, run_vec, run_scalar, make_jit_runner);
 
-            if (C_native != C_jit) {
+            std::vector<int64_t> C_jit_v(N * N, 0);
+            auto test_jit = make_jit_runner(0);
+            test_jit();
+            native_matmul_i64(A.data(), B.data(), C_native.data(), N);
+            JitExecutionEngine jit_v;
+            jit_v.compile_and_load(*mod);
+            auto fn_v = jit_v.get_function_ptr<void(*)(const int64_t*, const int64_t*, int64_t*, int64_t)>("matmul_i64_naive");
+            fn_v(A.data(), B.data(), C_jit_v.data(), N);
+            if (C_native != C_jit_v) {
                 std::cerr << "FATAL: MatMul 32x32 (i64, naive) result mismatch!\n";
                 std::abort();
             }
@@ -359,28 +374,34 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
 
         // 4b. Preopt kernel
         {
-            std::vector<int64_t> C_jit(N * N, 0);
             auto mod = build_matmul_i64_preopt_module();
-            JitExecutionEngine jit;
-            jit.compile_and_load(*mod);
-            auto matmul_fn = jit.get_function_ptr<void(*)(const int64_t*, const int64_t*, int64_t*, int64_t)>("matmul_i64_preopt");
-            if (!matmul_fn) {
-                std::cerr << "FATAL: matmul_i64_preopt function pointer is null!\n";
-                std::abort();
-            }
-
-            auto run_jit = [matmul_fn, a = A.data(), b = B.data(), c = C_jit.data(), N, iters]() {
-                for (size_t i = 0; i < iters; ++i) {
-                    int64_t size_n = N;
-                    DoNotOptimize(size_n);
-                    matmul_fn(a, b, c, size_n);
-                    DoNotOptimize(c);
+            auto make_jit_runner = [&](size_t padding) {
+                auto jit = std::make_shared<JitExecutionEngine>();
+                jit->compile_and_load(*mod, padding);
+                auto matmul_fn = jit->get_function_ptr<void(*)(const int64_t*, const int64_t*, int64_t*, int64_t)>("matmul_i64_preopt");
+                if (!matmul_fn) {
+                    std::cerr << "FATAL: matmul_i64_preopt function pointer is null!\n";
+                    std::abort();
                 }
+                auto c_jit = std::make_shared<std::vector<int64_t>>(N * N, 0);
+                return [jit, matmul_fn, a = A.data(), b = B.data(), c_jit, N, iters]() {
+                    for (size_t i = 0; i < iters; ++i) {
+                        int64_t size_n = N;
+                        DoNotOptimize(size_n);
+                        matmul_fn(a, b, c_jit->data(), size_n);
+                        DoNotOptimize(c_jit->data());
+                    }
+                };
             };
 
-            auto triplet = measure_triplet_repetitions(DEFAULT_BENCH_REPETITIONS, run_vec, run_scalar, run_jit);
+            auto triplet = measure_triplet_multi_placement(DEFAULT_BENCH_REPETITIONS, run_vec, run_scalar, make_jit_runner);
 
-            if (C_native != C_jit) {
+            std::vector<int64_t> C_jit_v(N * N, 0);
+            JitExecutionEngine jit_v;
+            jit_v.compile_and_load(*mod);
+            auto fn_v = jit_v.get_function_ptr<void(*)(const int64_t*, const int64_t*, int64_t*, int64_t)>("matmul_i64_preopt");
+            fn_v(A.data(), B.data(), C_jit_v.data(), N);
+            if (C_native != C_jit_v) {
                 std::cerr << "FATAL: MatMul 32x32 (i64, preopt) result mismatch!\n";
                 std::abort();
             }
@@ -416,28 +437,34 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
 
         // 5a. Naive kernel
         {
-            std::vector<int64_t> C_jit(N * N, 0);
             auto mod = build_matmul_i64_naive_module();
-            JitExecutionEngine jit;
-            jit.compile_and_load(*mod);
-            auto matmul_fn = jit.get_function_ptr<void(*)(const int64_t*, const int64_t*, int64_t*, int64_t)>("matmul_i64_naive");
-            if (!matmul_fn) {
-                std::cerr << "FATAL: matmul_i64_naive function pointer is null!\n";
-                std::abort();
-            }
-
-            auto run_jit = [matmul_fn, a = A.data(), b = B.data(), c = C_jit.data(), N, iters]() {
-                for (size_t i = 0; i < iters; ++i) {
-                    int64_t size_n = N;
-                    DoNotOptimize(size_n);
-                    matmul_fn(a, b, c, size_n);
-                    DoNotOptimize(c);
+            auto make_jit_runner = [&](size_t padding) {
+                auto jit = std::make_shared<JitExecutionEngine>();
+                jit->compile_and_load(*mod, padding);
+                auto matmul_fn = jit->get_function_ptr<void(*)(const int64_t*, const int64_t*, int64_t*, int64_t)>("matmul_i64_naive");
+                if (!matmul_fn) {
+                    std::cerr << "FATAL: matmul_i64_naive function pointer is null!\n";
+                    std::abort();
                 }
+                auto c_jit = std::make_shared<std::vector<int64_t>>(N * N, 0);
+                return [jit, matmul_fn, a = A.data(), b = B.data(), c_jit, N, iters]() {
+                    for (size_t i = 0; i < iters; ++i) {
+                        int64_t size_n = N;
+                        DoNotOptimize(size_n);
+                        matmul_fn(a, b, c_jit->data(), size_n);
+                        DoNotOptimize(c_jit->data());
+                    }
+                };
             };
 
-            auto triplet = measure_triplet_repetitions(DEFAULT_BENCH_REPETITIONS, run_vec, run_scalar, run_jit);
+            auto triplet = measure_triplet_multi_placement(DEFAULT_BENCH_REPETITIONS, run_vec, run_scalar, make_jit_runner);
 
-            if (C_native != C_jit) {
+            std::vector<int64_t> C_jit_v(N * N, 0);
+            JitExecutionEngine jit_v;
+            jit_v.compile_and_load(*mod);
+            auto fn_v = jit_v.get_function_ptr<void(*)(const int64_t*, const int64_t*, int64_t*, int64_t)>("matmul_i64_naive");
+            fn_v(A.data(), B.data(), C_jit_v.data(), N);
+            if (C_native != C_jit_v) {
                 std::cerr << "FATAL: MatMul 64x64 (i64, naive) result mismatch!\n";
                 std::abort();
             }
@@ -448,28 +475,34 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
 
         // 5b. Preopt kernel
         {
-            std::vector<int64_t> C_jit(N * N, 0);
             auto mod = build_matmul_i64_preopt_module();
-            JitExecutionEngine jit;
-            jit.compile_and_load(*mod);
-            auto matmul_fn = jit.get_function_ptr<void(*)(const int64_t*, const int64_t*, int64_t*, int64_t)>("matmul_i64_preopt");
-            if (!matmul_fn) {
-                std::cerr << "FATAL: matmul_i64_preopt function pointer is null!\n";
-                std::abort();
-            }
-
-            auto run_jit = [matmul_fn, a = A.data(), b = B.data(), c = C_jit.data(), N, iters]() {
-                for (size_t i = 0; i < iters; ++i) {
-                    int64_t size_n = N;
-                    DoNotOptimize(size_n);
-                    matmul_fn(a, b, c, size_n);
-                    DoNotOptimize(c);
+            auto make_jit_runner = [&](size_t padding) {
+                auto jit = std::make_shared<JitExecutionEngine>();
+                jit->compile_and_load(*mod, padding);
+                auto matmul_fn = jit->get_function_ptr<void(*)(const int64_t*, const int64_t*, int64_t*, int64_t)>("matmul_i64_preopt");
+                if (!matmul_fn) {
+                    std::cerr << "FATAL: matmul_i64_preopt function pointer is null!\n";
+                    std::abort();
                 }
+                auto c_jit = std::make_shared<std::vector<int64_t>>(N * N, 0);
+                return [jit, matmul_fn, a = A.data(), b = B.data(), c_jit, N, iters]() {
+                    for (size_t i = 0; i < iters; ++i) {
+                        int64_t size_n = N;
+                        DoNotOptimize(size_n);
+                        matmul_fn(a, b, c_jit->data(), size_n);
+                        DoNotOptimize(c_jit->data());
+                    }
+                };
             };
 
-            auto triplet = measure_triplet_repetitions(DEFAULT_BENCH_REPETITIONS, run_vec, run_scalar, run_jit);
+            auto triplet = measure_triplet_multi_placement(DEFAULT_BENCH_REPETITIONS, run_vec, run_scalar, make_jit_runner);
 
-            if (C_native != C_jit) {
+            std::vector<int64_t> C_jit_v(N * N, 0);
+            JitExecutionEngine jit_v;
+            jit_v.compile_and_load(*mod);
+            auto fn_v = jit_v.get_function_ptr<void(*)(const int64_t*, const int64_t*, int64_t*, int64_t)>("matmul_i64_preopt");
+            fn_v(A.data(), B.data(), C_jit_v.data(), N);
+            if (C_native != C_jit_v) {
                 std::cerr << "FATAL: MatMul 64x64 (i64, preopt) result mismatch!\n";
                 std::abort();
             }
@@ -504,28 +537,35 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
         };
 
         auto run_f64_32 = [&](const char* key, const char* name, std::unique_ptr<Module> mod, const char* fn_sym, double def_target) {
-            std::vector<double> C_jit(N * N, 0.0);
-            JitExecutionEngine jit;
-            jit.compile_and_load(*mod);
-            auto matmul_fn = jit.get_function_ptr<void(*)(const double*, const double*, double*, int64_t)>(fn_sym);
-            if (!matmul_fn) {
-                std::cerr << "FATAL: " << fn_sym << " function pointer is null!\n";
-                std::abort();
-            }
-
-            auto run_jit = [matmul_fn, a = A.data(), b = B.data(), c = C_jit.data(), N, iters]() {
-                for (size_t i = 0; i < iters; ++i) {
-                    int64_t size_n = N;
-                    DoNotOptimize(size_n);
-                    matmul_fn(a, b, c, size_n);
-                    DoNotOptimize(c);
+            auto make_jit_runner = [&](size_t padding) {
+                auto jit = std::make_shared<JitExecutionEngine>();
+                jit->compile_and_load(*mod, padding);
+                auto matmul_fn = jit->get_function_ptr<void(*)(const double*, const double*, double*, int64_t)>(fn_sym);
+                if (!matmul_fn) {
+                    std::cerr << "FATAL: " << fn_sym << " function pointer is null!\n";
+                    std::abort();
                 }
+                auto c_jit = std::make_shared<std::vector<double>>(N * N, 0.0);
+                return [jit, matmul_fn, a = A.data(), b = B.data(), c_jit, N, iters]() {
+                    for (size_t i = 0; i < iters; ++i) {
+                        int64_t size_n = N;
+                        DoNotOptimize(size_n);
+                        matmul_fn(a, b, c_jit->data(), size_n);
+                        DoNotOptimize(c_jit->data());
+                    }
+                };
             };
 
-            auto triplet = measure_triplet_repetitions(DEFAULT_BENCH_REPETITIONS, run_vec, run_scalar, run_jit);
+            auto triplet = measure_triplet_multi_placement(DEFAULT_BENCH_REPETITIONS, run_vec, run_scalar, make_jit_runner);
 
+            std::vector<double> C_jit_v(N * N, 0.0);
+            JitExecutionEngine jit_v;
+            jit_v.compile_and_load(*mod);
+            auto fn_v = jit_v.get_function_ptr<void(*)(const double*, const double*, double*, int64_t)>(fn_sym);
+            fn_v(A.data(), B.data(), C_jit_v.data(), N);
+            native_matmul_f64(A.data(), B.data(), C_native.data(), N);
             for (size_t i = 0; i < C_native.size(); ++i) {
-                if (std::abs(C_native[i] - C_jit[i]) > 1e-4) {
+                if (std::abs(C_native[i] - C_jit_v[i]) > 1e-4) {
                     std::cerr << "FATAL: " << name << " result mismatch at index " << i << "\n";
                     std::abort();
                 }
@@ -570,28 +610,35 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
         };
 
         auto run_f64_64 = [&](const char* key, const char* name, std::unique_ptr<Module> mod, const char* fn_sym, double def_target) {
-            std::vector<double> C_jit(N * N, 0.0);
-            JitExecutionEngine jit;
-            jit.compile_and_load(*mod);
-            auto matmul_fn = jit.get_function_ptr<void(*)(const double*, const double*, double*, int64_t)>(fn_sym);
-            if (!matmul_fn) {
-                std::cerr << "FATAL: " << fn_sym << " function pointer is null!\n";
-                std::abort();
-            }
-
-            auto run_jit = [matmul_fn, a = A.data(), b = B.data(), c = C_jit.data(), N, iters]() {
-                for (size_t i = 0; i < iters; ++i) {
-                    int64_t size_n = N;
-                    DoNotOptimize(size_n);
-                    matmul_fn(a, b, c, size_n);
-                    DoNotOptimize(c);
+            auto make_jit_runner = [&](size_t padding) {
+                auto jit = std::make_shared<JitExecutionEngine>();
+                jit->compile_and_load(*mod, padding);
+                auto matmul_fn = jit->get_function_ptr<void(*)(const double*, const double*, double*, int64_t)>(fn_sym);
+                if (!matmul_fn) {
+                    std::cerr << "FATAL: " << fn_sym << " function pointer is null!\n";
+                    std::abort();
                 }
+                auto c_jit = std::make_shared<std::vector<double>>(N * N, 0.0);
+                return [jit, matmul_fn, a = A.data(), b = B.data(), c_jit, N, iters]() {
+                    for (size_t i = 0; i < iters; ++i) {
+                        int64_t size_n = N;
+                        DoNotOptimize(size_n);
+                        matmul_fn(a, b, c_jit->data(), size_n);
+                        DoNotOptimize(c_jit->data());
+                    }
+                };
             };
 
-            auto triplet = measure_triplet_repetitions(DEFAULT_BENCH_REPETITIONS, run_vec, run_scalar, run_jit);
+            auto triplet = measure_triplet_multi_placement(DEFAULT_BENCH_REPETITIONS, run_vec, run_scalar, make_jit_runner);
 
+            std::vector<double> C_jit_v(N * N, 0.0);
+            JitExecutionEngine jit_v;
+            jit_v.compile_and_load(*mod);
+            auto fn_v = jit_v.get_function_ptr<void(*)(const double*, const double*, double*, int64_t)>(fn_sym);
+            fn_v(A.data(), B.data(), C_jit_v.data(), N);
+            native_matmul_f64(A.data(), B.data(), C_native.data(), N);
             for (size_t i = 0; i < C_native.size(); ++i) {
-                if (std::abs(C_native[i] - C_jit[i]) > 1e-4) {
+                if (std::abs(C_native[i] - C_jit_v[i]) > 1e-4) {
                     std::cerr << "FATAL: " << name << " result mismatch at index " << i << "\n";
                     std::abort();
                 }
@@ -633,29 +680,31 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
         };
 
         auto mod = build_list_module();
-        JitExecutionEngine jit;
-        jit.compile_and_load(*mod);
-        auto list_fn = jit.get_function_ptr<int64_t(*)(const BenchListNode*)>("list_traversal");
-        if (!list_fn) {
-            std::cerr << "FATAL: list_traversal function pointer is null!\n";
-            std::abort();
-        }
-
-        auto run_jit = [list_fn, head_ptr = nodes.data(), iters]() {
-            int64_t sum = 0;
-            for (size_t i = 0; i < iters; ++i) {
-                const BenchListNode* p = head_ptr;
-                DoNotOptimize(p);
-                sum = list_fn(p);
-                DoNotOptimize(sum);
+        auto make_jit_runner = [&](size_t padding) {
+            auto jit = std::make_shared<JitExecutionEngine>();
+            jit->compile_and_load(*mod, padding);
+            auto list_fn = jit->get_function_ptr<int64_t(*)(const BenchListNode*)>("list_traversal");
+            if (!list_fn) {
+                std::cerr << "FATAL: list_traversal function pointer is null!\n";
+                std::abort();
             }
-            return sum;
+            return [jit, list_fn, head_ptr = nodes.data(), iters]() {
+                int64_t sum = 0;
+                for (size_t i = 0; i < iters; ++i) {
+                    const BenchListNode* p = head_ptr;
+                    DoNotOptimize(p);
+                    sum = list_fn(p);
+                    DoNotOptimize(sum);
+                }
+                return sum;
+            };
         };
 
-        auto paired = measure_paired_repetitions(DEFAULT_BENCH_REPETITIONS, run_native, run_jit);
+        auto paired = measure_paired_multi_placement(DEFAULT_BENCH_REPETITIONS, run_native, make_jit_runner);
 
         int64_t native_sum = run_native();
-        int64_t jit_sum = run_jit();
+        auto test_jit = make_jit_runner(0);
+        int64_t jit_sum = test_jit();
 
         if (native_sum != jit_sum) {
             std::cerr << "FATAL: Linked List Traversal result mismatch: native=" << native_sum << ", JIT=" << jit_sum << "\n";

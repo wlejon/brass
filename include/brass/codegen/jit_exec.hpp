@@ -57,8 +57,8 @@ public:
     void register_external_symbol(std::string_view name, void* address);
 
     // Compilation & loading
-    bool compile_and_load(const Module& mod);
-    bool load_object(const object::ObjectFile& obj);
+    bool compile_and_load(const Module& mod, size_t code_padding = 0);
+    bool load_object(const object::ObjectFile& obj, size_t code_padding = 0);
 
     // Function/symbol lookup
     void* get_symbol_address(std::string_view name) const;

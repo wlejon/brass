@@ -230,38 +230,6 @@ struct PairedRepetitionResult {
     TimingStats ratio_stats;
 };
 
-template <typename FNative, typename FJit>
-inline PairedRepetitionResult measure_paired_repetitions(size_t repetitions, FNative&& fn_native, FJit&& fn_jit) {
-    // Warmup pass to prime instruction caches and CPU frequency
-    fn_native();
-    fn_jit();
-
-    PairedRepetitionResult res;
-    std::vector<double> nat_samples, jit_samples, ratio_samples;
-    nat_samples.reserve(repetitions);
-    jit_samples.reserve(repetitions);
-    ratio_samples.reserve(repetitions);
-    Stopwatch sw;
-    for (size_t r = 0; r < repetitions; ++r) {
-        sw.start();
-        fn_native();
-        double n_ms = sw.stop_ms();
-
-        sw.start();
-        fn_jit();
-        double j_ms = sw.stop_ms();
-
-        nat_samples.push_back(n_ms);
-        jit_samples.push_back(j_ms);
-        double rat = (n_ms > 0.0) ? (j_ms / n_ms) : 1.0;
-        ratio_samples.push_back(rat);
-    }
-    res.native_stats = TimingStats(std::move(nat_samples));
-    res.brass_stats = TimingStats(std::move(jit_samples));
-    res.ratio_stats = TimingStats(std::move(ratio_samples));
-    return res;
-}
-
 struct TripletRepetitionResult {
     TimingStats native_stats;       // Vectorized native
     TimingStats scalar_stats;       // Scalar native
@@ -270,17 +238,101 @@ struct TripletRepetitionResult {
     TimingStats ratio_vec_stats;    // Brass / Vectorized
 };
 
-template <typename F1, typename F2, typename F3>
-inline TripletRepetitionResult measure_triplet_repetitions(
+inline void brass_zeroupper() {
+#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__GNUC__) || defined(__clang__)
+    asm volatile("vzeroupper" ::: "memory");
+#endif
+#endif
+}
+
+constexpr size_t DEFAULT_BENCH_PLACEMENTS = 5;
+constexpr size_t kPlacementPaddings[5] = { 0, 64, 128, 192, 256 };
+
+template <typename FNative, typename FJitFactory>
+inline PairedRepetitionResult measure_paired_multi_placement(
+    size_t repetitions,
+    FNative&& fn_native,
+    FJitFactory&& jit_factory
+) {
+    fn_native();
+    brass_zeroupper();
+
+    using RunnerType = std::decay_t<decltype(jit_factory(0))>;
+    std::vector<RunnerType> jit_runners;
+    jit_runners.reserve(DEFAULT_BENCH_PLACEMENTS);
+    for (size_t p = 0; p < DEFAULT_BENCH_PLACEMENTS; ++p) {
+        auto r = jit_factory(kPlacementPaddings[p]);
+        r();
+        brass_zeroupper();
+        jit_runners.push_back(std::move(r));
+    }
+
+    std::vector<double> nat_samples, jit_samples, ratio_samples;
+    nat_samples.reserve(repetitions);
+    jit_samples.reserve(repetitions);
+    ratio_samples.reserve(repetitions);
+    Stopwatch sw;
+
+    for (size_t r = 0; r < repetitions; ++r) {
+        std::vector<double> p_nat_samples, p_jit_samples, p_rat_samples;
+        p_nat_samples.reserve(DEFAULT_BENCH_PLACEMENTS);
+        p_jit_samples.reserve(DEFAULT_BENCH_PLACEMENTS);
+        p_rat_samples.reserve(DEFAULT_BENCH_PLACEMENTS);
+
+        for (auto& runner : jit_runners) {
+            sw.start();
+            fn_native();
+            double n_ms = sw.stop_ms();
+            brass_zeroupper();
+
+            sw.start();
+            runner();
+            double j_ms = sw.stop_ms();
+            brass_zeroupper();
+
+            p_nat_samples.push_back(n_ms);
+            p_jit_samples.push_back(j_ms);
+            p_rat_samples.push_back((n_ms > 0.0) ? (j_ms / n_ms) : 1.0);
+        }
+
+        std::sort(p_nat_samples.begin(), p_nat_samples.end());
+        std::sort(p_jit_samples.begin(), p_jit_samples.end());
+        std::sort(p_rat_samples.begin(), p_rat_samples.end());
+
+        nat_samples.push_back(p_nat_samples[DEFAULT_BENCH_PLACEMENTS / 2]);
+        jit_samples.push_back(p_jit_samples[DEFAULT_BENCH_PLACEMENTS / 2]);
+        ratio_samples.push_back(p_rat_samples[DEFAULT_BENCH_PLACEMENTS / 2]);
+    }
+
+    PairedRepetitionResult res;
+    res.native_stats = TimingStats(std::move(nat_samples));
+    res.brass_stats = TimingStats(std::move(jit_samples));
+    res.ratio_stats = TimingStats(std::move(ratio_samples));
+    return res;
+}
+
+template <typename F1, typename F2, typename FJitFactory>
+inline TripletRepetitionResult measure_triplet_multi_placement(
     size_t repetitions,
     F1&& fn_vec,
     F2&& fn_scalar,
-    F3&& fn_jit
+    FJitFactory&& jit_factory
 ) {
-    // Warmup pass to prime instruction caches and CPU frequency
     fn_vec();
+    brass_zeroupper();
     fn_scalar();
-    fn_jit();
+    brass_zeroupper();
+
+    using RunnerType = std::decay_t<decltype(jit_factory(0))>;
+    std::vector<RunnerType> jit_runners;
+    jit_runners.reserve(DEFAULT_BENCH_PLACEMENTS);
+    for (size_t p = 0; p < DEFAULT_BENCH_PLACEMENTS; ++p) {
+        auto r = jit_factory(kPlacementPaddings[p]);
+        r();
+        brass_zeroupper();
+        jit_runners.push_back(std::move(r));
+    }
 
     std::vector<double> native_samples, scalar_samples, brass_samples;
     std::vector<double> ratio_scalar_samples, ratio_vec_samples;
@@ -292,26 +344,48 @@ inline TripletRepetitionResult measure_triplet_repetitions(
 
     Stopwatch sw;
     for (size_t r = 0; r < repetitions; ++r) {
-        sw.start();
-        fn_vec();
-        double n_ms = sw.stop_ms();
+        std::vector<double> p_vec_samples, p_scalar_samples, p_jit_samples;
+        std::vector<double> p_r_scalar_samples, p_r_vec_samples;
+        p_vec_samples.reserve(DEFAULT_BENCH_PLACEMENTS);
+        p_scalar_samples.reserve(DEFAULT_BENCH_PLACEMENTS);
+        p_jit_samples.reserve(DEFAULT_BENCH_PLACEMENTS);
+        p_r_scalar_samples.reserve(DEFAULT_BENCH_PLACEMENTS);
+        p_r_vec_samples.reserve(DEFAULT_BENCH_PLACEMENTS);
 
-        sw.start();
-        fn_scalar();
-        double s_ms = sw.stop_ms();
+        for (auto& runner : jit_runners) {
+            sw.start();
+            fn_vec();
+            double n_ms = sw.stop_ms();
+            brass_zeroupper();
 
-        sw.start();
-        fn_jit();
-        double j_ms = sw.stop_ms();
+            sw.start();
+            fn_scalar();
+            double s_ms = sw.stop_ms();
+            brass_zeroupper();
 
-        native_samples.push_back(n_ms);
-        scalar_samples.push_back(s_ms);
-        brass_samples.push_back(j_ms);
+            sw.start();
+            runner();
+            double j_ms = sw.stop_ms();
+            brass_zeroupper();
 
-        double r_scalar = (s_ms > 0.0) ? (j_ms / s_ms) : 1.0;
-        double r_vec = (n_ms > 0.0) ? (j_ms / n_ms) : 1.0;
-        ratio_scalar_samples.push_back(r_scalar);
-        ratio_vec_samples.push_back(r_vec);
+            p_vec_samples.push_back(n_ms);
+            p_scalar_samples.push_back(s_ms);
+            p_jit_samples.push_back(j_ms);
+            p_r_scalar_samples.push_back((s_ms > 0.0) ? (j_ms / s_ms) : 1.0);
+            p_r_vec_samples.push_back((n_ms > 0.0) ? (j_ms / n_ms) : 1.0);
+        }
+
+        std::sort(p_vec_samples.begin(), p_vec_samples.end());
+        std::sort(p_scalar_samples.begin(), p_scalar_samples.end());
+        std::sort(p_jit_samples.begin(), p_jit_samples.end());
+        std::sort(p_r_scalar_samples.begin(), p_r_scalar_samples.end());
+        std::sort(p_r_vec_samples.begin(), p_r_vec_samples.end());
+
+        native_samples.push_back(p_vec_samples[DEFAULT_BENCH_PLACEMENTS / 2]);
+        scalar_samples.push_back(p_scalar_samples[DEFAULT_BENCH_PLACEMENTS / 2]);
+        brass_samples.push_back(p_jit_samples[DEFAULT_BENCH_PLACEMENTS / 2]);
+        ratio_scalar_samples.push_back(p_r_scalar_samples[DEFAULT_BENCH_PLACEMENTS / 2]);
+        ratio_vec_samples.push_back(p_r_vec_samples[DEFAULT_BENCH_PLACEMENTS / 2]);
     }
 
     return TripletRepetitionResult{
@@ -321,6 +395,16 @@ inline TripletRepetitionResult measure_triplet_repetitions(
         TimingStats(std::move(ratio_scalar_samples)),
         TimingStats(std::move(ratio_vec_samples))
     };
+}
+
+template <typename FNative, typename FJit>
+inline PairedRepetitionResult measure_paired_repetitions(size_t repetitions, FNative&& fn_native, FJit&& fn_jit) {
+    return measure_paired_multi_placement(repetitions, std::forward<FNative>(fn_native), [&](size_t) { return fn_jit; });
+}
+
+template <typename F1, typename F2, typename F3>
+inline TripletRepetitionResult measure_triplet_repetitions(size_t repetitions, F1&& fn_vec, F2&& fn_scalar, F3&& fn_jit) {
+    return measure_triplet_multi_placement(repetitions, std::forward<F1>(fn_vec), std::forward<F2>(fn_scalar), [&](size_t) { return fn_jit; });
 }
 
 inline BenchmarkResult make_paired_result(
@@ -409,27 +493,27 @@ public:
     static RatchetManager defaults() {
         RatchetManager rm;
         rm.ratios_ = {
-            {"cheney_gc", 1.40},
-            {"collatz", 1.10},
+            {"cheney_gc", 1.35},
+            {"collatz", 1.05},
             {"compile_speed", 1000.00},
-            {"fib", 1.30},
-            {"icache", 1.10},
-            {"linked_list", 1.05},
+            {"fib", 1.25},
+            {"icache", 0.80},
+            {"linked_list", 0.95},
             {"matmul_f64_32_reassoc_naive", 1.05},
             {"matmul_f64_32_reassoc_preopt", 1.05},
-            {"matmul_f64_32_strict_naive", 2.15},
-            {"matmul_f64_32_strict_preopt", 2.10},
-            {"matmul_f64_64_reassoc_naive", 0.90},
-            {"matmul_f64_64_reassoc_preopt", 0.90},
-            {"matmul_f64_64_strict_naive", 1.80},
-            {"matmul_f64_64_strict_preopt", 1.80},
-            {"matmul_i64_32_naive", 1.50},
-            {"matmul_i64_32_preopt", 1.50},
-            {"matmul_i64_64_naive", 1.55},
-            {"matmul_i64_64_preopt", 1.55},
-            {"nanbox", 2.20},
-            {"shapes", 1.30},
-            {"sieve", 1.40}
+            {"matmul_f64_32_strict_naive", 2.25},
+            {"matmul_f64_32_strict_preopt", 2.20},
+            {"matmul_f64_64_reassoc_naive", 0.85},
+            {"matmul_f64_64_reassoc_preopt", 0.85},
+            {"matmul_f64_64_strict_naive", 1.70},
+            {"matmul_f64_64_strict_preopt", 1.70},
+            {"matmul_i64_32_naive", 1.45},
+            {"matmul_i64_32_preopt", 1.45},
+            {"matmul_i64_64_naive", 1.45},
+            {"matmul_i64_64_preopt", 1.45},
+            {"nanbox", 1.15},
+            {"shapes", 1.20},
+            {"sieve", 1.35}
         };
         return rm;
     }

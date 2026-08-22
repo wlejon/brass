@@ -14,7 +14,6 @@ std::unique_ptr<Module> build_nanbox_tag_test_module() {
     Value* data_ptr = b.add_block_param(entry, Type::ptr());
     Value* len = b.add_block_param(entry, Type::i64());
 
-    BasicBlock* loop_hdr = b.create_block("loop_hdr");
     BasicBlock* loop_body = b.create_block("loop_body");
     BasicBlock* bb_double = b.create_block("bb_double");
     BasicBlock* bb_tag_check = b.create_block("bb_tag_check");
@@ -30,17 +29,13 @@ std::unique_ptr<Module> build_nanbox_tag_test_module() {
     Value* shift_32 = b.build_iconst_i64(32);
     Value* int_tag = b.build_iconst_i64(0xFFF90000LL);
 
-    b.build_br(loop_hdr, {zero_i, zero_f});
-
-    fn->append_block(loop_hdr);
-    b.position_at_end(loop_hdr);
-    Value* i = b.add_block_param(loop_hdr, Type::i64());
-    Value* acc = b.add_block_param(loop_hdr, Type::f64());
-    Value* cond = b.build_slt(i, len);
-    b.build_br_if(cond, loop_body, {}, exit_bb, {acc});
+    Value* init_cond = b.build_slt(zero_i, len);
+    b.build_br_if(init_cond, loop_body, {zero_i, zero_f}, exit_bb, {zero_f});
 
     fn->append_block(loop_body);
     b.position_at_end(loop_body);
+    Value* i = b.add_block_param(loop_body, Type::i64());
+    Value* acc = b.add_block_param(loop_body, Type::f64());
     Value* v = b.build_load_indexed(Type::i64(), data_ptr, i, 8, 0);
     Value* is_double = b.build_ult(v, tag_thresh);
     b.build_br_if(is_double, bb_double, {}, bb_tag_check, {});
@@ -50,7 +45,8 @@ std::unique_ptr<Module> build_nanbox_tag_test_module() {
     Value* d = b.build_bitcast_f64_i64(v);
     Value* acc_d = b.build_add(acc, d);
     Value* next_i_d = b.build_add(i, one_i);
-    b.build_br(loop_hdr, {next_i_d, acc_d});
+    Value* cond_d = b.build_slt(next_i_d, len);
+    b.build_br_if(cond_d, loop_body, {next_i_d, acc_d}, exit_bb, {acc_d});
 
     fn->append_block(bb_tag_check);
     b.position_at_end(bb_tag_check);
@@ -64,13 +60,15 @@ std::unique_ptr<Module> build_nanbox_tag_test_module() {
     Value* div = b.build_sitofp_f64_i32(iv);
     Value* acc_int = b.build_add(acc, div);
     Value* next_i_int = b.build_add(i, one_i);
-    b.build_br(loop_hdr, {next_i_int, acc_int});
+    Value* cond_int = b.build_slt(next_i_int, len);
+    b.build_br_if(cond_int, loop_body, {next_i_int, acc_int}, exit_bb, {acc_int});
 
     fn->append_block(bb_fallback);
     b.position_at_end(bb_fallback);
     Value* acc_fb = b.build_add(acc, one_f);
     Value* next_i_fb = b.build_add(i, one_i);
-    b.build_br(loop_hdr, {next_i_fb, acc_fb});
+    Value* cond_fb = b.build_slt(next_i_fb, len);
+    b.build_br_if(cond_fb, loop_body, {next_i_fb, acc_fb}, exit_bb, {acc_fb});
 
     fn->append_block(exit_bb);
     b.position_at_end(exit_bb);
@@ -94,6 +92,7 @@ std::unique_ptr<Module> build_shape_guard_module() {
 
     BasicBlock* loop_body = b.create_block("loop_body");
     BasicBlock* bb_hit_a = b.create_block("bb_hit_a");
+    BasicBlock* loop_latch = b.create_block("loop_latch");
     BasicBlock* bb_slow_path = b.create_block("bb_slow_path");
     BasicBlock* bb_hit_b = b.create_block("bb_hit_b");
     BasicBlock* bb_hit_c = b.create_block("bb_hit_c");
@@ -101,11 +100,13 @@ std::unique_ptr<Module> build_shape_guard_module() {
 
     Value* zero = b.build_iconst_i64(0);
     Value* one = b.build_iconst_i64(1);
+    Value* shape_a = b.build_iconst_i64(0xAA01);
+    Value* shape_b = b.build_iconst_i64(0xBB02);
 
     Value* init_cond = b.build_slt(zero, len);
     b.build_br_if(init_cond, loop_body, {zero, zero}, exit_bb, {zero});
 
-    // Loop body (Fast path: Shape A hit)
+    // 1. Loop body (fast-path entry)
     fn->append_block(loop_body);
     b.position_at_end(loop_body);
     Value* i = b.add_block_param(loop_body, Type::i64());
@@ -113,39 +114,40 @@ std::unique_ptr<Module> build_shape_guard_module() {
 
     Value* obj = b.build_load_indexed(Type::ptr(), objs_ptr, i, 8, 0);
     Value* shape = b.build_load(Type::i64(), obj, 0);
-    Value* is_a = b.build_eq(shape, b.build_iconst_i64(0xAA01));
-    b.build_br_if(is_a, bb_hit_a, {}, bb_slow_path, {});
+    Value* not_a = b.build_ne(shape, shape_a);
+    b.build_br_if(not_a, bb_slow_path, {}, bb_hit_a, {});
 
+    // 2. Fast-path Shape A hit (contiguous fallthrough)
     fn->append_block(bb_hit_a);
     b.position_at_end(bb_hit_a);
     Value* val_a = b.build_load(Type::i64(), obj, 8);
-    Value* next_sum_a = b.build_add(sum, val_a);
-    Value* next_i_a = b.build_add(i, one);
-    Value* cond_a = b.build_slt(next_i_a, len);
-    b.build_br_if(cond_a, loop_body, {next_i_a, next_sum_a}, exit_bb, {next_sum_a});
+    b.build_br(loop_latch, {val_a});
 
-    // Out-of-line slow path (Shape B / Shape C fallback)
+    // 3. Fast-path Loop latch (contiguous fallthrough from bb_hit_a)
+    fn->append_block(loop_latch);
+    b.position_at_end(loop_latch);
+    Value* val_to_add = b.add_block_param(loop_latch, Type::i64());
+    Value* next_sum = b.build_add(sum, val_to_add);
+    Value* next_i = b.build_add(i, one);
+    Value* cond = b.build_slt(next_i, len);
+    b.build_br_if(cond, loop_body, {next_i, next_sum}, exit_bb, {next_sum});
+
+    // 4. Out-of-line slow path (Shape B / Shape C fallback)
     fn->append_block(bb_slow_path);
     b.position_at_end(bb_slow_path);
-    Value* is_b = b.build_eq(shape, b.build_iconst_i64(0xBB02));
-    b.build_br_if(is_b, bb_hit_b, {}, bb_hit_c, {});
+    Value* not_b = b.build_ne(shape, shape_b);
+    b.build_br_if(not_b, bb_hit_c, {}, bb_hit_b, {});
 
     fn->append_block(bb_hit_b);
     b.position_at_end(bb_hit_b);
     Value* val_b = b.build_load(Type::i64(), obj, 16);
-    Value* next_sum_b = b.build_add(sum, val_b);
-    Value* next_i_b = b.build_add(i, one);
-    Value* cond_b = b.build_slt(next_i_b, len);
-    b.build_br_if(cond_b, loop_body, {next_i_b, next_sum_b}, exit_bb, {next_sum_b});
+    b.build_br(loop_latch, {val_b});
 
     fn->append_block(bb_hit_c);
     b.position_at_end(bb_hit_c);
     Value* val_c = b.build_load(Type::i64(), obj, 24);
     Value* val_c2 = b.build_add(val_c, val_c);
-    Value* next_sum_c = b.build_add(sum, val_c2);
-    Value* next_i_c = b.build_add(i, one);
-    Value* cond_c = b.build_slt(next_i_c, len);
-    b.build_br_if(cond_c, loop_body, {next_i_c, next_sum_c}, exit_bb, {next_sum_c});
+    b.build_br(loop_latch, {val_c2});
 
     fn->append_block(exit_bb);
     b.position_at_end(exit_bb);

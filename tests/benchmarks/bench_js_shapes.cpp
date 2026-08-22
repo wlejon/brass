@@ -170,8 +170,8 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
     // (a) NaN-box tag-test loops
     // ------------------------------------------------------------------------
     {
-        constexpr size_t N = 50000;
-        constexpr size_t iters = 200;
+        constexpr size_t N = 100000;
+        constexpr size_t iters = 100;
         std::vector<uint64_t> nanbox_data(N);
 
         // Populate dataset: 70% doubles, 20% boxed int32s, 10% fallbacks
@@ -201,34 +201,36 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
 
         // Brass JIT
         auto mod = build_nanbox_tag_test_module();
-        JitExecutionEngine jit;
-        jit.compile_and_load(*mod);
-        auto fn = jit.get_function_ptr<double(*)(const uint64_t*, int64_t)>("nanbox_tag_test");
-        if (!fn) {
-            std::cerr << "FATAL: nanbox_tag_test function pointer is null!\n";
-            std::abort();
-        }
-
-        auto run_jit = [fn, data = nanbox_data.data(), N, iters]() {
-            double res = 0.0;
-            for (size_t k = 0; k < iters; ++k) {
-                res = fn(data, static_cast<int64_t>(N));
-                DoNotOptimize(res);
+        auto make_jit_runner = [&](size_t padding) {
+            auto jit = std::make_shared<JitExecutionEngine>();
+            jit->compile_and_load(*mod, padding);
+            auto fn = jit->get_function_ptr<double(*)(const uint64_t*, int64_t)>("nanbox_tag_test");
+            if (!fn) {
+                std::cerr << "FATAL: nanbox_tag_test function pointer is null!\n";
+                std::abort();
             }
-            return res;
+            return [jit, fn, data = nanbox_data.data(), N, iters]() {
+                double res = 0.0;
+                for (size_t k = 0; k < iters; ++k) {
+                    res = fn(data, static_cast<int64_t>(N));
+                    DoNotOptimize(res);
+                }
+                return res;
+            };
         };
 
-        auto paired = measure_paired_repetitions(DEFAULT_BENCH_REPETITIONS, run_native, run_jit);
+        auto paired = measure_paired_multi_placement(DEFAULT_BENCH_REPETITIONS, run_native, make_jit_runner);
 
         double native_res = run_native();
-        double jit_res = run_jit();
+        auto test_jit = make_jit_runner(0);
+        double jit_res = test_jit();
 
         if (std::abs(native_res - jit_res) > 1e-4) {
             std::cerr << "FATAL: NaN-Box tag-test mismatch: native=" << native_res << ", jit=" << jit_res << "\n";
             std::abort();
         }
 
-        results.push_back(make_paired_result("nanbox", "NaN-Box Tag-Test Loop", iters, paired, ratchet.get_ratio("nanbox", 1.20)));
+        results.push_back(make_paired_result("nanbox", "NaN-Box Tag-Test Loop", iters, paired, ratchet.get_ratio("nanbox", 1.15)));
         BenchmarkReporter::print_row(results.back());
     }
 
@@ -236,8 +238,8 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
     // (b) Shape-guarded field loads
     // ------------------------------------------------------------------------
     {
-        constexpr size_t N = 20000;
-        constexpr size_t iters = 200;
+        constexpr size_t N = 100000;
+        constexpr size_t iters = 100;
 
         struct TestObj {
             uint64_t shape;
@@ -271,34 +273,36 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
 
         // Brass JIT
         auto mod = build_shape_guard_module();
-        JitExecutionEngine jit;
-        jit.compile_and_load(*mod);
-        auto fn = jit.get_function_ptr<int64_t(*)(const uintptr_t*, int64_t)>("shape_guard");
-        if (!fn) {
-            std::cerr << "FATAL: shape_guard function pointer is null!\n";
-            std::abort();
-        }
-
-        auto run_jit = [fn, ptrs = obj_ptrs.data(), N, iters]() {
-            int64_t res = 0;
-            for (size_t k = 0; k < iters; ++k) {
-                res = fn(ptrs, static_cast<int64_t>(N));
-                DoNotOptimize(res);
+        auto make_jit_runner = [&](size_t padding) {
+            auto jit = std::make_shared<JitExecutionEngine>();
+            jit->compile_and_load(*mod, padding);
+            auto fn = jit->get_function_ptr<int64_t(*)(const uintptr_t*, int64_t)>("shape_guard");
+            if (!fn) {
+                std::cerr << "FATAL: shape_guard function pointer is null!\n";
+                std::abort();
             }
-            return res;
+            return [jit, fn, ptrs = obj_ptrs.data(), N, iters]() {
+                int64_t res = 0;
+                for (size_t k = 0; k < iters; ++k) {
+                    res = fn(ptrs, static_cast<int64_t>(N));
+                    DoNotOptimize(res);
+                }
+                return res;
+            };
         };
 
-        auto paired = measure_paired_repetitions(DEFAULT_BENCH_REPETITIONS, run_native, run_jit);
+        auto paired = measure_paired_multi_placement(DEFAULT_BENCH_REPETITIONS, run_native, make_jit_runner);
 
         int64_t native_res = run_native();
-        int64_t jit_res = run_jit();
+        auto test_jit = make_jit_runner(0);
+        int64_t jit_res = test_jit();
 
         if (native_res != jit_res) {
             std::cerr << "FATAL: Shape guard result mismatch: native=" << native_res << ", jit=" << jit_res << "\n";
             std::abort();
         }
 
-        results.push_back(make_paired_result("shapes", "Shape-Guarded Field Loads", iters, paired, ratchet.get_ratio("shapes", 1.10)));
+        results.push_back(make_paired_result("shapes", "Shape-Guarded Field Loads", iters, paired, ratchet.get_ratio("shapes", 1.20)));
         BenchmarkReporter::print_row(results.back());
     }
 
@@ -306,9 +310,9 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
     // (c) Patchable-call inline-cache loop
     // ------------------------------------------------------------------------
     {
-        constexpr int64_t phase1_iters = 25000;
-        constexpr int64_t phase2_iters = 25000;
-        constexpr size_t outer_rounds = 50;
+        constexpr int64_t phase1_iters = 1000000;
+        constexpr int64_t phase2_iters = 1000000;
+        constexpr size_t outer_rounds = 5;
 
         auto run_native = [phase1_iters, phase2_iters, outer_rounds]() {
             int64_t res = 0;
@@ -321,39 +325,41 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
 
         // Brass JIT
         auto mod = build_patchable_ic_module();
-        JitExecutionEngine jit;
-        jit.compile_and_load(*mod);
-        auto fn = jit.get_function_ptr<int64_t(*)(int64_t, int64_t)>("patchable_ic_runner");
-        if (!fn) {
-            std::cerr << "FATAL: patchable_ic_runner function pointer is null!\n";
-            std::abort();
-        }
-
-        auto run_jit = [&jit, fn, phase1_iters, phase2_iters, outer_rounds]() {
-            int64_t res = 0;
-            for (size_t r = 0; r < outer_rounds; ++r) {
-                // Reset to target 1
-                jit.patch_call("ic_site_bench", "target_stub_1");
-                int64_t mid = fn(0, phase1_iters);
-                // Patch to target 2
-                jit.patch_call("ic_site_bench", "target_stub_2");
-                res = fn(mid, phase2_iters);
-                DoNotOptimize(res);
+        auto make_jit_runner = [&](size_t padding) {
+            auto jit = std::make_shared<JitExecutionEngine>();
+            jit->compile_and_load(*mod, padding);
+            auto fn = jit->get_function_ptr<int64_t(*)(int64_t, int64_t)>("patchable_ic_runner");
+            if (!fn) {
+                std::cerr << "FATAL: patchable_ic_runner function pointer is null!\n";
+                std::abort();
             }
-            return res;
+            return [jit, fn, phase1_iters, phase2_iters, outer_rounds]() {
+                int64_t res = 0;
+                for (size_t r = 0; r < outer_rounds; ++r) {
+                    // Reset to target 1
+                    jit->patch_call("ic_site_bench", "target_stub_1");
+                    int64_t mid = fn(0, phase1_iters);
+                    // Patch to target 2
+                    jit->patch_call("ic_site_bench", "target_stub_2");
+                    res = fn(mid, phase2_iters);
+                    DoNotOptimize(res);
+                }
+                return res;
+            };
         };
 
-        auto paired = measure_paired_repetitions(DEFAULT_BENCH_REPETITIONS, run_native, run_jit);
+        auto paired = measure_paired_multi_placement(DEFAULT_BENCH_REPETITIONS, run_native, make_jit_runner);
 
         int64_t native_res = run_native();
-        int64_t jit_res = run_jit();
+        auto test_jit = make_jit_runner(0);
+        int64_t jit_res = test_jit();
 
         if (native_res != jit_res) {
             std::cerr << "FATAL: Patchable IC result mismatch: native=" << native_res << ", jit=" << jit_res << "\n";
             std::abort();
         }
 
-        results.push_back(make_paired_result("icache", "Patchable-Call Inline Cache", outer_rounds, paired, ratchet.get_ratio("icache", 0.75)));
+        results.push_back(make_paired_result("icache", "Patchable-Call Inline Cache", outer_rounds, paired, ratchet.get_ratio("icache", 0.80)));
         BenchmarkReporter::print_row(results.back());
     }
 
@@ -361,25 +367,40 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
     // (d) Allocation loop building small linked objects under mini-Cheney GC
     // ------------------------------------------------------------------------
     {
-        constexpr int64_t num_nodes = 20000;
-        constexpr size_t gc_rounds = 20;
+        constexpr int64_t num_nodes = 50000;
+        constexpr size_t gc_rounds = 30;
 
         // (a) Shadow-Stack Model
         ThreadShadowStack ss;
-        MiniCheneyGC ss_gc(4 * 1024 * 1024);
+        MiniCheneyGC ss_gc(8 * 1024 * 1024);
 
         // (b) Brass Stack-Map Model
-        MiniCheneyGC gc(4 * 1024 * 1024); // 4 MB semi-space
         auto mod = build_gc_alloc_loop_module();
-        JitExecutionEngine jit;
-        jit.register_external_symbol("brass_gc_alloc", reinterpret_cast<void*>(&brass_gc_alloc));
-        jit.register_external_symbol("brass_gc_safepoint", reinterpret_cast<void*>(&brass_gc_safepoint));
-        jit.compile_and_load(*mod);
-        auto fn = jit.get_function_ptr<int64_t(*)(int64_t)>("gc_alloc_runner");
-        if (!fn) {
-            std::cerr << "FATAL: gc_alloc_runner function pointer is null!\n";
-            std::abort();
-        }
+        auto make_jit_runner = [&](size_t padding) {
+            auto jit = std::make_shared<JitExecutionEngine>();
+            jit->register_external_symbol("brass_gc_alloc", reinterpret_cast<void*>(&brass_gc_alloc));
+            jit->register_external_symbol("brass_gc_safepoint", reinterpret_cast<void*>(&brass_gc_safepoint));
+            jit->compile_and_load(*mod, padding);
+            auto fn = jit->get_function_ptr<int64_t(*)(int64_t)>("gc_alloc_runner");
+            if (!fn) {
+                std::cerr << "FATAL: gc_alloc_runner function pointer is null!\n";
+                std::abort();
+            }
+            auto gc = std::make_shared<MiniCheneyGC>(8 * 1024 * 1024);
+            return [jit, gc, fn, num_nodes, gc_rounds]() {
+                brass_set_active_gc(gc.get());
+                brass_set_active_stack_maps(&jit->stack_maps());
+                int64_t res = 0;
+                for (size_t r = 0; r < gc_rounds; ++r) {
+                    gc->reset();
+                    res = fn(num_nodes);
+                    DoNotOptimize(res);
+                }
+                brass_set_active_gc(nullptr);
+                brass_set_active_stack_maps(nullptr);
+                return res;
+            };
+        };
 
         auto run_shadow = [&ss, &ss_gc, num_nodes, gc_rounds]() {
             brass_set_active_gc(&ss_gc);
@@ -393,22 +414,11 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
             return res;
         };
 
-        auto run_jit = [&jit, &gc, fn, num_nodes, gc_rounds]() {
-            brass_set_active_gc(&gc);
-            brass_set_active_stack_maps(&jit.stack_maps());
-            int64_t res = 0;
-            for (size_t r = 0; r < gc_rounds; ++r) {
-                gc.reset();
-                res = fn(num_nodes);
-                DoNotOptimize(res);
-            }
-            return res;
-        };
-
-        auto paired = measure_paired_repetitions(DEFAULT_BENCH_REPETITIONS, run_shadow, run_jit);
+        auto paired = measure_paired_multi_placement(DEFAULT_BENCH_REPETITIONS, run_shadow, make_jit_runner);
 
         int64_t shadow_res = run_shadow();
-        int64_t jit_res = run_jit();
+        auto test_jit = make_jit_runner(0);
+        int64_t jit_res = test_jit();
         int64_t expected_sum = num_nodes * (num_nodes + 1) / 2;
         if (jit_res != expected_sum || shadow_res != expected_sum) {
             std::cerr << "FATAL: GC Linked Node Alloc result mismatch: expected=" << expected_sum

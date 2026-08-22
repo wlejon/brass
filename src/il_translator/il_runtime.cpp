@@ -66,17 +66,26 @@ void* bronze_resolve_function(const char* name) {
     return nullptr;
 }
 
+static bool g_bronze_print_enabled = true;
+
+void bronze_set_print_enabled(bool enabled) {
+    g_bronze_print_enabled = enabled;
+}
+
 extern "C" {
 
 void bronze_print_f64(double v) {
+    if (!g_bronze_print_enabled) return;
     std::cout << format_js_number(v) << " ";
 }
 
 void bronze_print_i32(int32_t v) {
+    if (!g_bronze_print_enabled) return;
     std::cout << v << " ";
 }
 
 void bronze_print_dynamic(int64_t v) {
+    if (!g_bronze_print_enabled) return;
     uint64_t u = static_cast<uint64_t>(v);
     if (u < 0xFFF8000000000000ULL) {
         double d;
@@ -100,6 +109,7 @@ void bronze_print_dynamic(int64_t v) {
 }
 
 void bronze_print_newline() {
+    if (!g_bronze_print_enabled) return;
     std::cout << "\n";
 }
 

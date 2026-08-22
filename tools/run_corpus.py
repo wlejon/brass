@@ -10,6 +10,7 @@ Implements Law D: report tables are generated, not written.
 import subprocess
 import sys
 import time
+import re
 from pathlib import Path
 from statistics import median
 
@@ -54,10 +55,24 @@ DEMOTED_PROGRAMS = {
 NUM_RUNS = 5
 
 def normalize(text: str) -> str:
+    text = re.sub(r'\[brass-il-timed:[^\]]*\]', '', text)
     return " ".join(text.split())
 
 def run_timed_config(cmd, num_runs=NUM_RUNS):
-    # Warmup to eliminate first-time process spawn / OS cache overhead
+    # Check if cmd is brass-il
+    is_brass_il = any("brass-il" in str(c) for c in cmd)
+    if is_brass_il and "--timed" not in cmd:
+        timed_cmd = list(cmd) + ["--timed", str(num_runs)]
+        res = subprocess.run(timed_cmd, capture_output=True, text=True)
+        m = re.search(r'\[brass-il-timed:\s*([\d\.]+)\s*\+/-\s*([\d\.]+)\s*\(min:\s*([\d\.]+),\s*max:\s*([\d\.]+)\)\]', res.stdout)
+        if m:
+            med_t = float(m.group(1))
+            spread = float(m.group(2))
+            min_t = float(m.group(3))
+            max_t = float(m.group(4))
+            return med_t, spread, min_t, max_t, normalize(res.stdout)
+
+    # Fallback to subprocess timing
     warmup_res = subprocess.run(cmd, capture_output=True, text=True)
     times = []
     last_stdout = warmup_res.stdout
@@ -74,6 +89,11 @@ def run_timed_config(cmd, num_runs=NUM_RUNS):
     return med_t, spread, min_t, max_t, normalize(last_stdout)
 
 def main():
+    if "-h" in sys.argv or "--help" in sys.argv:
+        print("Usage: python tools/run_corpus.py [options]")
+        print("Executes and verifies the Bronze IL corpus suite across Node.js oracle and Brass JIT configurations.")
+        sys.exit(0)
+
     print("=" * 115)
     print(" Running Bronze Corpus Timed Verification Suite (Law D Generated Table)")
     print(f" Executing {NUM_RUNS} runs per configuration for median & spread timing (ms)")

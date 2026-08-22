@@ -5,14 +5,16 @@
 #include <fstream>
 #include <sstream>
 #include <string>
-#include <vector>
+#include <chrono>
+#include <algorithm>
+#include <iomanip>
 
 using namespace brass;
 using namespace brass::il;
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--demote-stats] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc]\n";
+        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--demote-stats] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc] [--timed <N>]\n";
         return 1;
     }
 
@@ -22,6 +24,7 @@ int main(int argc, char** argv) {
     bool emit_mir = false;
     bool raw_output = false;
     bool show_demote_stats = false;
+    int timed_iterations = 0;
     TranslatorOptions options;
 
     for (int i = 1; i < argc; ++i) {
@@ -40,6 +43,8 @@ int main(int argc, char** argv) {
             options.enable_f64_demote = false;
         } else if (arg == "--reassoc") {
             options.allow_fp_reassociation = true;
+        } else if (arg == "--timed" && i + 1 < argc) {
+            timed_iterations = std::max(1, std::stoi(argv[++i]));
         } else if (arg == "-o" && i + 1 < argc) {
             output_obj = argv[++i];
         } else if (arg.rfind("-o", 0) == 0 && arg.size() > 2) {
@@ -109,38 +114,74 @@ int main(int argc, char** argv) {
 
         Function* main_fn = res.module->get_function("main");
         if (main_fn) {
-            if (main_fn->return_type() == Type::f64()) {
-                auto fn_ptr = jit.get_function_ptr<double(*)()>("main");
-                if (fn_ptr) {
-                    double r = fn_ptr();
-                    if (!raw_output) {
-                        std::cout << "[brass-il] main() returned f64: " << r << "\n";
+            auto run_main = [&]() {
+                if (main_fn->return_type() == Type::f64()) {
+                    auto fn_ptr = jit.get_function_ptr<double(*)()>("main");
+                    if (fn_ptr) {
+                        double r = fn_ptr();
+                        if (!raw_output && timed_iterations == 0) {
+                            std::cout << "[brass-il] main() returned f64: " << r << "\n";
+                        }
+                    }
+                } else if (main_fn->return_type() == Type::i32()) {
+                    auto fn_ptr = jit.get_function_ptr<int32_t(*)()>("main");
+                    if (fn_ptr) {
+                        int32_t r = fn_ptr();
+                        if (!raw_output && timed_iterations == 0) {
+                            std::cout << "[brass-il] main() returned i32: " << r << "\n";
+                        }
+                    }
+                } else if (main_fn->return_type() == Type::i64()) {
+                    auto fn_ptr = jit.get_function_ptr<int64_t(*)()>("main");
+                    if (fn_ptr) {
+                        int64_t r = fn_ptr();
+                        if (!raw_output && timed_iterations == 0) {
+                            std::cout << "[brass-il] main() returned i64: " << r << "\n";
+                        }
+                    }
+                } else {
+                    auto fn_ptr = jit.get_function_ptr<void(*)()>("main");
+                    if (fn_ptr) {
+                        fn_ptr();
+                        if (!raw_output && timed_iterations == 0) {
+                            std::cout << "[brass-il] main() executed (void).\n";
+                        }
                     }
                 }
-            } else if (main_fn->return_type() == Type::i32()) {
-                auto fn_ptr = jit.get_function_ptr<int32_t(*)()>("main");
-                if (fn_ptr) {
-                    int32_t r = fn_ptr();
-                    if (!raw_output) {
-                        std::cout << "[brass-il] main() returned i32: " << r << "\n";
-                    }
+            };
+
+            if (timed_iterations > 0) {
+                // First run executes for verification
+                run_main();
+
+                // Silence print statements during timing repetitions
+                bronze_set_print_enabled(false);
+
+                // Warmup
+                run_main();
+
+                // Timed runs
+                std::vector<double> samples;
+                samples.reserve(timed_iterations);
+                for (int iter = 0; iter < timed_iterations; ++iter) {
+                    auto t0 = std::chrono::high_resolution_clock::now();
+                    run_main();
+                    auto t1 = std::chrono::high_resolution_clock::now();
+                    double elapsed_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                    samples.push_back(elapsed_ms);
                 }
-            } else if (main_fn->return_type() == Type::i64()) {
-                auto fn_ptr = jit.get_function_ptr<int64_t(*)()>("main");
-                if (fn_ptr) {
-                    int64_t r = fn_ptr();
-                    if (!raw_output) {
-                        std::cout << "[brass-il] main() returned i64: " << r << "\n";
-                    }
-                }
+
+                bronze_set_print_enabled(true);
+
+                std::sort(samples.begin(), samples.end());
+                double med = samples[samples.size() / 2];
+                double min_v = samples.front();
+                double max_v = samples.back();
+                double spread = (max_v - min_v) / 2.0;
+                std::cout << "\n[brass-il-timed: " << std::fixed << std::setprecision(4)
+                          << med << " +/- " << spread << " (min: " << min_v << ", max: " << max_v << ")]\n";
             } else {
-                auto fn_ptr = jit.get_function_ptr<void(*)()>("main");
-                if (fn_ptr) {
-                    fn_ptr();
-                    if (!raw_output) {
-                        std::cout << "[brass-il] main() executed (void).\n";
-                    }
-                }
+                run_main();
             }
         }
     }

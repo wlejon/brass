@@ -74,10 +74,12 @@ void JitMemoryBlock::make_executable() {
     if (ptr_) {
         DWORD old_protect;
         VirtualProtect(ptr_, size_, PAGE_EXECUTE_READWRITE, &old_protect);
+        FlushInstructionCache(GetCurrentProcess(), ptr_, size_);
     }
 #else
     if (ptr_) {
         mprotect(ptr_, size_, PROT_READ | PROT_WRITE | PROT_EXEC);
+        __builtin___clear_cache(reinterpret_cast<char*>(ptr_), reinterpret_cast<char*>(ptr_ + size_));
     }
 #endif
 }
@@ -165,7 +167,7 @@ void JitExecutionEngine::register_external_symbol(std::string_view name, void* a
     external_symbols_[std::string(name)] = address;
 }
 
-bool JitExecutionEngine::compile_and_load(const Module& mod) {
+bool JitExecutionEngine::compile_and_load(const Module& mod, size_t code_padding) {
     // Record signatures of functions in the module
     for (const auto* fn : mod.functions()) {
         if (!fn) continue;
@@ -174,10 +176,10 @@ bool JitExecutionEngine::compile_and_load(const Module& mod) {
     }
 
     object::ObjectFile obj = object::compile_module_to_object(mod, target_);
-    return load_object(obj);
+    return load_object(obj, code_padding);
 }
 
-bool JitExecutionEngine::load_object(const object::ObjectFile& obj) {
+bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_padding) {
     unregister_seh_tables();
     symbol_table_.clear();
 
@@ -207,7 +209,7 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj) {
     }
 
     // Compute memory size and section offsets
-    size_t total_size = 0;
+    size_t total_size = code_padding;
     std::vector<size_t> sec_offsets(working_obj.sections.size(), 0);
 
     for (size_t i = 0; i < working_obj.sections.size(); ++i) {
@@ -567,17 +569,35 @@ void* JitExecutionEngine::get_resume_target_address(std::string_view fn_name, ui
 
 bool JitExecutionEngine::patch_const32(std::string_view site_name, int32_t new_val) {
     if (!text_section_base_) return false;
-    return patch_sites_.patch_const32(text_section_base_, site_name, new_val);
+    bool ok = patch_sites_.patch_const32(text_section_base_, site_name, new_val);
+#if defined(_WIN32)
+    if (ok && code_mem_.data()) {
+        FlushInstructionCache(GetCurrentProcess(), code_mem_.data(), code_mem_.size());
+    }
+#endif
+    return ok;
 }
 
 bool JitExecutionEngine::patch_const64(std::string_view site_name, int64_t new_val) {
     if (!text_section_base_) return false;
-    return patch_sites_.patch_const64(text_section_base_, site_name, new_val);
+    bool ok = patch_sites_.patch_const64(text_section_base_, site_name, new_val);
+#if defined(_WIN32)
+    if (ok && code_mem_.data()) {
+        FlushInstructionCache(GetCurrentProcess(), code_mem_.data(), code_mem_.size());
+    }
+#endif
+    return ok;
 }
 
 bool JitExecutionEngine::patch_call(std::string_view site_name, const void* new_target) {
     if (!text_section_base_) return false;
-    return patch_sites_.patch_call(text_section_base_, site_name, new_target);
+    bool ok = patch_sites_.patch_call(text_section_base_, site_name, new_target);
+#if defined(_WIN32)
+    if (ok && code_mem_.data()) {
+        FlushInstructionCache(GetCurrentProcess(), code_mem_.data(), code_mem_.size());
+    }
+#endif
+    return ok;
 }
 
 bool JitExecutionEngine::patch_call(std::string_view site_name, std::string_view new_target_fn) {

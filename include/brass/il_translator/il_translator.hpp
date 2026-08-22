@@ -42,6 +42,9 @@ void register_bronze_runtime_symbols(void* jit_engine_ptr);
 // Optional custom function resolver for AOT or dynamic function lookup
 void set_bronze_function_resolver(void* (*resolver)(const char*));
 
+// Control whether Bronze print statements output to stdout
+void bronze_set_print_enabled(bool enabled);
+
 // Runtime helper symbols for Bronze execution
 extern "C" {
 void bronze_print_f64(double v);

@@ -45,11 +45,24 @@ $demotedPrograms = @(
 
 function Normalize-Output([string]$text) {
     if ($null -eq $text) { return "" }
+    $text = [regex]::Replace($text, '\[brass-il-timed:[^\]]*\]', '')
     $tokens = $text -split '\s+' | Where-Object { $_ -ne "" }
     return ($tokens -join " ")
 }
 
 function Measure-ConfigTimes([string]$exePath, [string[]]$argsList, [int]$runs) {
+    if ($exePath -like "*brass-il*" -and ($argsList -notcontains "--timed")) {
+        $timedArgs = @($argsList) + @("--timed", "$runs")
+        $procOut = & $exePath @timedArgs 2>&1 | Out-String
+        if ($procOut -match '\[brass-il-timed:\s*([\d\.]+)\s*\+/-\s*([\d\.]+)\s*\(min:\s*([\d\.]+),\s*max:\s*([\d\.]+)\)\]') {
+            return @{
+                Median = [double]$Matches[1]
+                Spread = [double]$Matches[2]
+                Output = (Normalize-Output $procOut)
+            }
+        }
+    }
+
     # Warmup run to eliminate first-time process spawn / disk cache overhead
     $lastOut = & $exePath @argsList 2>&1 | Out-String
     $times = @()

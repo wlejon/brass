@@ -65,6 +65,10 @@ CompilationResult EmitContext::compile() {
     // 4. Emit blocks
     for (size_t b_idx = 0; b_idx < fn_.blocks.size(); ++b_idx) {
         const auto& block = fn_.blocks[b_idx];
+        if (b_idx > 0) {
+            // Ensure loop headers and branch targets are 16-byte aligned.
+            buffer_.align(16);
+        }
         buffer_.bind(block_labels_[block->id]);
         result.block_offsets[block->id] = buffer_.size();
 

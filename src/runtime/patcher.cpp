@@ -9,6 +9,16 @@
 #include <immintrin.h>
 #endif
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace {
 static inline void memory_fence() noexcept {
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
@@ -44,6 +54,9 @@ bool brass_patch_const32(void* code_addr, int32_t new_val) {
     std::atomic_ref<int32_t> ref(*target_ptr);
     ref.store(new_val, std::memory_order_release);
     memory_fence();
+#if defined(_WIN32)
+    FlushInstructionCache(GetCurrentProcess(), code_addr, sizeof(int32_t));
+#endif
     return true;
 }
 
@@ -53,6 +66,9 @@ bool brass_patch_const64(void* code_addr, int64_t new_val) {
     std::atomic_ref<int64_t> ref(*target_ptr);
     ref.store(new_val, std::memory_order_release);
     memory_fence();
+#if defined(_WIN32)
+    FlushInstructionCache(GetCurrentProcess(), code_addr, sizeof(int64_t));
+#endif
     return true;
 }
 
@@ -82,6 +98,9 @@ bool brass_patch_call(void* call_site_addr, const void* new_target) {
     std::atomic_ref<int32_t> ref(*target_ptr);
     ref.store(disp32, std::memory_order_release);
     memory_fence();
+#if defined(_WIN32)
+    FlushInstructionCache(GetCurrentProcess(), disp_ptr, sizeof(int32_t));
+#endif
     return true;
 }
 
