@@ -227,7 +227,7 @@ static void* aot_symbol_resolver(const char* name) {
     return reinterpret_cast<void*>(GetProcAddress(g_aot_active_dll, name));
 }
 
-TEST_CASE("Bronze IL - 18-Program Live Corpus JIT and AOT Execution") {
+TEST_CASE("Bronze IL - 22-Program Live Corpus JIT and AOT Execution") {
     std::vector<std::string> corpus_files = {
         "01_arithmetic",
         "02_bitwise",
@@ -246,7 +246,11 @@ TEST_CASE("Bronze IL - 18-Program Live Corpus JIT and AOT Execution") {
         "15_nested_acc",
         "16_param_bounds",
         "17_large_int_overflow",
-        "18_gcd_iter"
+        "18_gcd_iter",
+        "19_vec3_acc",
+        "20_mat4_mul",
+        "21_quat_norm",
+        "22_bbox_expand"
     };
 
     auto normalize = [](std::string s) {
@@ -279,6 +283,8 @@ TEST_CASE("Bronze IL - 18-Program Live Corpus JIT and AOT Execution") {
         void (*env_set)(int64_t, int32_t, int32_t, int64_t);
         int64_t (*create_func)(const char*, int32_t, int64_t);
         int64_t (*create_array)(int32_t);
+        int64_t (*create_object)();
+        int64_t (*prop_get)(int64_t, int32_t);
         void (*prop_set)(int64_t, int32_t, int64_t, int32_t, int32_t);
         int64_t (*elem_get)(int64_t, int64_t);
         void (*elem_set)(int64_t, int64_t, int64_t, int32_t);
@@ -306,6 +312,8 @@ TEST_CASE("Bronze IL - 18-Program Live Corpus JIT and AOT Execution") {
         &brass::il::bronze_env_set,
         &brass::il::bronze_create_func,
         &brass::il::bronze_create_array,
+        &brass::il::bronze_create_object,
+        &brass::il::bronze_prop_get,
         &brass::il::bronze_prop_set,
         &brass::il::bronze_elem_get,
         &brass::il::bronze_elem_set,
@@ -326,7 +334,9 @@ TEST_CASE("Bronze IL - 18-Program Live Corpus JIT and AOT Execution") {
     std::filesystem::path wrapper_cpp;
     if (msvc_ready) {
         aot_dir = MsvcToolchain::temp_dir() / "bronze_corpus_aot";
-        std::filesystem::create_directories(aot_dir);
+        std::error_code ec;
+        std::filesystem::remove_all(aot_dir, ec);
+        std::filesystem::create_directories(aot_dir, ec);
         wrapper_cpp = aot_dir / "bronze_runtime_bridge.cpp";
         std::ofstream ofs(wrapper_cpp);
         ofs << "#define NOMINMAX\n"
@@ -346,6 +356,8 @@ TEST_CASE("Bronze IL - 18-Program Live Corpus JIT and AOT Execution") {
             << "    void (*env_set)(int64_t, int32_t, int32_t, int64_t);\n"
             << "    int64_t (*create_func)(const char*, int32_t, int64_t);\n"
             << "    int64_t (*create_array)(int32_t);\n"
+            << "    int64_t (*create_object)();\n"
+            << "    int64_t (*prop_get)(int64_t, int32_t);\n"
             << "    void (*prop_set)(int64_t, int32_t, int64_t, int32_t, int32_t);\n"
             << "    int64_t (*elem_get)(int64_t, int64_t);\n"
             << "    void (*elem_set)(int64_t, int64_t, int64_t, int32_t);\n"
@@ -376,6 +388,8 @@ TEST_CASE("Bronze IL - 18-Program Live Corpus JIT and AOT Execution") {
             << "    void bronze_env_set(int64_t env, int32_t d, int32_t idx, int64_t v) { if (g_rt.env_set) g_rt.env_set(env, d, idx, v); }\n"
             << "    int64_t bronze_create_func(const char* fn_name, int32_t pc, int64_t env) { return g_rt.create_func ? g_rt.create_func(fn_name, pc, env) : 0; }\n"
             << "    int64_t bronze_create_array(int32_t sz) { return g_rt.create_array ? g_rt.create_array(sz) : 0; }\n"
+            << "    int64_t bronze_create_object() { return g_rt.create_object ? g_rt.create_object() : 0; }\n"
+            << "    int64_t bronze_prop_get(int64_t o, int32_t k) { return g_rt.prop_get ? g_rt.prop_get(o, k) : 0; }\n"
             << "    void bronze_prop_set(int64_t o, int32_t k, int64_t v, int32_t s, int32_t imm) { if (g_rt.prop_set) g_rt.prop_set(o, k, v, s, imm); }\n"
             << "    int64_t bronze_elem_get(int64_t a, int64_t i) { return g_rt.elem_get ? g_rt.elem_get(a, i) : 0; }\n"
             << "    void bronze_elem_set(int64_t a, int64_t i, int64_t v, int32_t s) { if (g_rt.elem_set) g_rt.elem_set(a, i, v, s); }\n"
@@ -390,6 +404,7 @@ TEST_CASE("Bronze IL - 18-Program Live Corpus JIT and AOT Execution") {
             << "    int64_t bronze_call_dynamic_8(int64_t c, int64_t th, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6, int64_t a7) { return g_rt.call_dynamic_8 ? g_rt.call_dynamic_8(c, th, a0, a1, a2, a3, a4, a5, a6, a7) : 0; }\n"
             << "    int64_t bronze_call_dynamic_n(int64_t c, int64_t th, int32_t ac, const int64_t* av) { return g_rt.call_dynamic_n ? g_rt.call_dynamic_n(c, th, ac, av) : 0; }\n"
             << "}\n";
+        ofs.close();
     }
 
     for (const auto& name : corpus_files) {
@@ -499,8 +514,8 @@ TEST_CASE("Bronze IL - 18-Program Live Corpus JIT and AOT Execution") {
             }
 
             // Link into DLL
-            std::string cl_cmd = "cl.exe /nologo /LD /EHsc /MD /O2 \"" + wrapper_cpp.string() + "\" \"" +
-                                 obj_file.string() + "\" /Fe:\"" + dll_file.string() + "\" /link /DEF:\"" + def_file.string() + "\"";
+            std::string cl_cmd = "cl.exe /nologo /LD /EHsc /MD /O2 /Fo\"" + (aot_dir / "bronze_runtime_bridge.obj").string() + "\" \"" + wrapper_cpp.string() + "\" \"" +
+                                 obj_file.string() + "\" /Fe\"" + dll_file.string() + "\" /link /DEF:\"" + def_file.string() + "\"";
             int link_res = MsvcToolchain::run_msvc_cmd(cl_cmd);
             REQUIRE_EQ(link_res, 0);
             REQUIRE(std::filesystem::exists(dll_file));

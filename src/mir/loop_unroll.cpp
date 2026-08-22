@@ -1,4 +1,5 @@
 #include <brass/mir/loop_unroll.hpp>
+#include "loop_unroll_analysis.hpp"
 #include <brass/mir/builder.hpp>
 #include <brass/mir/verifier.hpp>
 #include <vector>
@@ -8,8 +9,6 @@
 #include <string>
 
 namespace brass {
-
-#include "loop_unroll_analysis.hpp"
 
 bool unroll_loop(
     Function& fn,

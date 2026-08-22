@@ -70,6 +70,8 @@ const char* bronze_op_name(BronzeOp op) {
         case BronzeOp::EnvInitTdz: return "env.init.tdz";
         case BronzeOp::CreateFunc: return "create.func";
         case BronzeOp::CreateArray: return "create.array";
+        case BronzeOp::CreateObject: return "create.object";
+        case BronzeOp::PropGet: return "prop.get";
         case BronzeOp::PropSet: return "prop.set";
         case BronzeOp::ElemGet: return "elem.get";
         case BronzeOp::ElemSet: return "elem.set";
@@ -390,6 +392,8 @@ Token IlLexer::scan_token() {
         if (w == "env.init.tdz") { op_out = BronzeOp::EnvInitTdz; return true; }
         if (w == "create.func") { op_out = BronzeOp::CreateFunc; return true; }
         if (w == "create.array") { op_out = BronzeOp::CreateArray; return true; }
+        if (w == "create.object") { op_out = BronzeOp::CreateObject; return true; }
+        if (w == "prop.get") { op_out = BronzeOp::PropGet; return true; }
         if (w == "prop.set") { op_out = BronzeOp::PropSet; return true; }
         if (w == "elem.get") { op_out = BronzeOp::ElemGet; return true; }
         if (w == "elem.set") { op_out = BronzeOp::ElemSet; return true; }

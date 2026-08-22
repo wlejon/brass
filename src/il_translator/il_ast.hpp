@@ -67,6 +67,8 @@ enum class BronzeOp {
     EnvInitTdz,
     CreateFunc,
     CreateArray,
+    CreateObject,
+    PropGet,
     PropSet,
     ElemGet,
     ElemSet,

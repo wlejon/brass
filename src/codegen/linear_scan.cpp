@@ -128,9 +128,22 @@ void LinearScanAllocator::allocate() {
     }
 
     // 4. Update function frame info
+    uint32_t final_callee_gprs = 0;
+    uint32_t final_callee_xmms = 0;
+    for (const auto& interval : liveness_.intervals()) {
+        if (interval.vreg.is_valid() && interval.assigned_preg.is_valid()) {
+            PReg preg = interval.assigned_preg;
+            if (preg.is_gpr() && cc_.is_callee_saved(preg.as_gpr())) {
+                final_callee_gprs |= reg_mask(preg.as_gpr());
+            } else if (!preg.is_gpr() && cc_.is_callee_saved(preg.as_xmm())) {
+                final_callee_xmms |= reg_mask(preg.as_xmm());
+            }
+        }
+    }
+
     fn_.frame.num_spill_slots = next_spill_slot_;
-    fn_.frame.saved_callee_gprs = used_callee_gprs_;
-    fn_.frame.saved_callee_xmms = used_callee_xmms_;
+    fn_.frame.saved_callee_gprs = final_callee_gprs;
+    fn_.frame.saved_callee_xmms = final_callee_xmms;
 
     // 5. Record live GC references at all call sites and safepoints
     for (const auto& block : fn_.blocks) {

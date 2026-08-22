@@ -121,6 +121,7 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
         }
         Function* opt_fn = clone_function(*fn, opt_mod);
         LoopOptOptions loop_opts;
+        loop_opts.enable_f64_demote = false;
         loop_opts.enable_fp_reassociation = fn->allow_fp_reassociation() || mod.allow_fp_reassociation();
         optimize_function_loops(*opt_fn, loop_opts);
         verify_function(*opt_fn);

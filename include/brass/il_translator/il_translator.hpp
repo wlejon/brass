@@ -59,6 +59,8 @@ int64_t bronze_env_get(int64_t env_box, int32_t depth, int32_t index);
 void bronze_env_set(int64_t env_box, int32_t depth, int32_t index, int64_t val);
 int64_t bronze_create_func(const char* fn_name, int32_t param_count, int64_t env_box);
 int64_t bronze_create_array(int32_t size);
+int64_t bronze_create_object();
+int64_t bronze_prop_get(int64_t obj_box, int32_t key_index);
 void bronze_prop_set(int64_t obj_box, int32_t key_index, int64_t val, int32_t slot_idx, int32_t imm);
 int64_t bronze_elem_get(int64_t arr_box, int64_t index_box);
 void bronze_elem_set(int64_t arr_box, int64_t index_box, int64_t val, int32_t ic_slot);

@@ -63,6 +63,8 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
     mod->add_external_symbol("bronze_env_set");
     mod->add_external_symbol("bronze_create_func");
     mod->add_external_symbol("bronze_create_array");
+    mod->add_external_symbol("bronze_create_object");
+    mod->add_external_symbol("bronze_prop_get");
     mod->add_external_symbol("bronze_prop_set");
     mod->add_external_symbol("bronze_elem_get");
     mod->add_external_symbol("bronze_elem_set");
@@ -370,6 +372,18 @@ bool IlLowering::lower_instruction(
         case BronzeOp::CreateArray: {
             Value* size_val = b.build_iconst_i32(static_cast<int32_t>(inst_ast.param_count));
             res_val = b.build_call("bronze_create_array", Type::i64(), {size_val});
+            break;
+        }
+
+        case BronzeOp::CreateObject: {
+            res_val = b.build_call("bronze_create_object", Type::i64(), {});
+            break;
+        }
+
+        case BronzeOp::PropGet: {
+            Value* obj_val = ensure_type(get_opd(0), Type::i64(), b);
+            Value* key_val = b.build_iconst_i32(static_cast<int32_t>(inst_ast.index));
+            res_val = b.build_call("bronze_prop_get", Type::i64(), {obj_val, key_val});
             break;
         }
 

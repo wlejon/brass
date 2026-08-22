@@ -415,6 +415,30 @@ bool IlParser::parse_instruction(BronzeInstruction& out_inst) {
             break;
         }
 
+        case BronzeOp::CreateObject: {
+            // no operands
+            break;
+        }
+
+        case BronzeOp::PropGet: {
+            Token obj_tok;
+            if (!expect(TokenType::PercentValue, "Expected %obj in prop.get", &obj_tok)) return false;
+            out_inst.operands.push_back(obj_tok.id_num);
+            if (!expect(TokenType::Comma, "Expected ',' after %obj in prop.get")) return false;
+
+            Token key_tok = lexer_.next_token();
+            out_inst.index = static_cast<uint32_t>(key_tok.num_i64);
+
+            if (match(TokenType::Comma)) {
+                Token slot_tok = lexer_.next_token();
+                out_inst.depth = static_cast<uint32_t>(slot_tok.num_i64);
+            }
+            while (match(TokenType::Comma)) {
+                lexer_.next_token();
+            }
+            break;
+        }
+
         case BronzeOp::PropSet: {
             Token obj_tok;
             if (!expect(TokenType::PercentValue, "Expected %obj in prop.set", &obj_tok)) return false;

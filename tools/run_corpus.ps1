@@ -29,7 +29,11 @@ $corpusPrograms = @(
     "15_nested_acc",
     "16_param_bounds",
     "17_large_int_overflow",
-    "18_gcd_iter"
+    "18_gcd_iter",
+    "19_vec3_acc",
+    "20_mat4_mul",
+    "21_quat_norm",
+    "22_bbox_expand"
 )
 
 $demotedPrograms = @(

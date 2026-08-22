@@ -2,8 +2,7 @@
 
 #include <brass/mir/loop_unroll.hpp>
 #include <brass/mir/builder.hpp>
-#include <brass/mir/dominators.hpp>
-#include <brass/mir/loop_info.hpp>
+#include <brass/mir/loop_opt.hpp>
 #include <vector>
 #include <unordered_set>
 
