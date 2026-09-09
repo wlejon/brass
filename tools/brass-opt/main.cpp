@@ -22,6 +22,8 @@ void print_usage(const char* prog) {
               << "  --args <a1> <a2>...   Arguments to pass to the function executed with --run\n"
               << "  --gc-stress           Enable moving GC stress mode (collects at every allocation/safepoint)\n"
               << "  --inline              Run interprocedural function inlining and IPO optimization pipeline\n"
+              << "  --sroa                Run Scalar Replacement of Aggregates (SROA)\n"
+              << "  --escape-analysis     Run Escape Analysis on module functions\n"
               << "  --vectorize           Run loop vectorization on countable loops\n"
               << "  --slp                 Run SLP straight-line vectorization\n"
               << "  -o <file>             Write output to <file> instead of stdout\n";
@@ -108,6 +110,8 @@ int main(int argc, char** argv) {
     bool compile_object = false;
     bool use_jit = false;
     bool enable_inlining = false;
+    bool enable_sroa = false;
+    bool run_escape_analysis = false;
     bool enable_vectorize = false;
     bool enable_slp = false;
 
@@ -126,6 +130,10 @@ int main(int argc, char** argv) {
             gc_stress = true;
         } else if (arg == "--inline") {
             enable_inlining = true;
+        } else if (arg == "--sroa") {
+            enable_sroa = true;
+        } else if (arg == "--escape-analysis") {
+            run_escape_analysis = true;
         } else if (arg == "--vectorize") {
             enable_vectorize = true;
         } else if (arg == "--slp") {
@@ -197,6 +205,20 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (run_escape_analysis) {
+        for (const brass::Function* fn : mod->functions()) {
+            if (!fn) continue;
+            brass::EscapeAnalysis ea(*fn);
+            std::cout << "Function '" << fn->name() << "': "
+                      << ea.allocations().size() << " allocations ("
+                      << ea.non_escaping_allocations().size() << " non-escaping)\n";
+            for (const brass::Value* alloc_val : ea.allocations()) {
+                std::cout << "  alloc %" << alloc_val->id() << ": "
+                          << brass::escape_state_name(ea.get_escape_state(alloc_val)) << "\n";
+            }
+        }
+    }
+
     if (enable_inlining) {
         brass::InlinerOptions inliner_opts;
         brass::LoopOptOptions loop_opts;
@@ -207,6 +229,24 @@ int main(int argc, char** argv) {
         if (!brass::verify_module(*mod, &inlining_diag) || inlining_diag.has_errors()) {
             std::cerr << "Verification failed after inlining:\n" << inlining_diag.format_all();
             return 1;
+        }
+    } else if (enable_sroa) {
+        brass::sroa_module(*mod);
+        brass::DiagnosticReporter sroa_diag;
+        if (!brass::verify_module(*mod, &sroa_diag) || sroa_diag.has_errors()) {
+            std::cerr << "Verification failed after SROA:\n" << sroa_diag.format_all();
+            return 1;
+        }
+        if (enable_vectorize || enable_slp) {
+            brass::LoopOptOptions loop_opts;
+            loop_opts.enable_vectorize = enable_vectorize;
+            loop_opts.enable_slp = enable_slp;
+            brass::optimize_module_loops(*mod, loop_opts);
+            brass::DiagnosticReporter opt_diag;
+            if (!brass::verify_module(*mod, &opt_diag) || opt_diag.has_errors()) {
+                std::cerr << "Verification failed after vectorization:\n" << opt_diag.format_all();
+                return 1;
+            }
         }
     } else if (enable_vectorize || enable_slp) {
         brass::LoopOptOptions loop_opts;

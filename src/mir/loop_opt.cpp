@@ -6,6 +6,7 @@
 #include <brass/mir/f64_demote.hpp>
 #include <brass/mir/select_opt.hpp>
 #include <brass/mir/dominators.hpp>
+#include <brass/mir/sroa.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/verifier.hpp>
 #include <unordered_map>
@@ -586,6 +587,11 @@ bool optimize_function_loops(Function& fn, const LoopOptOptions& options) {
 
     if (options.enable_diamond_select) {
         any_changed |= simplify_cfg_diamonds(fn);
+    }
+
+    if (options.enable_sroa) {
+        SroaOptions sroa_opts;
+        any_changed |= sroa_function(fn, sroa_opts);
     }
 
     for (size_t iter = 0; iter < options.max_iterations; ++iter) {

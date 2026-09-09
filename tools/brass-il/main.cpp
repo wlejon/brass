@@ -14,7 +14,7 @@ using namespace brass::il;
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--inline] [--vectorize] [--slp] [--demote-stats] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc] [--timed <N>]\n";
+        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--inline] [--sroa] [--escape-analysis] [--vectorize] [--slp] [--demote-stats] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc] [--timed <N>]\n";
         return 1;
     }
 
@@ -35,6 +35,10 @@ int main(int argc, char** argv) {
             emit_mir = true;
         } else if (arg == "--inline") {
             options.enable_inlining = true;
+        } else if (arg == "--sroa") {
+            options.enable_sroa = true;
+        } else if (arg == "--escape-analysis") {
+            options.run_escape_analysis = true;
         } else if (arg == "--vectorize") {
             options.enable_vectorize = true;
         } else if (arg == "--no-vectorize") {
@@ -98,6 +102,20 @@ int main(int argc, char** argv) {
     if (show_demote_stats) {
         demote_stats.module_name = res.module->name();
         std::cout << demote_stats.format_report() << "\n";
+    }
+
+    if (options.run_escape_analysis) {
+        for (const Function* fn : res.module->functions()) {
+            if (!fn) continue;
+            EscapeAnalysis ea(*fn);
+            std::cout << "Escape Analysis for Function '" << fn->name() << "': "
+                      << ea.allocations().size() << " allocations ("
+                      << ea.non_escaping_allocations().size() << " non-escaping)\n";
+            for (const Value* alloc_val : ea.allocations()) {
+                std::cout << "  alloc %" << alloc_val->id() << ": "
+                          << escape_state_name(ea.get_escape_state(alloc_val)) << "\n";
+            }
+        }
     }
 
     if (emit_mir) {

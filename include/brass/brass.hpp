@@ -21,6 +21,8 @@
 #include <brass/mir/devirtualize.hpp>
 #include <brass/mir/inline_transform.hpp>
 #include <brass/mir/inliner.hpp>
+#include <brass/mir/escape_analysis.hpp>
+#include <brass/mir/sroa.hpp>
 #include <brass/mir/lexer.hpp>
 #include <brass/mir/printer.hpp>
 #include <brass/mir/parser.hpp>

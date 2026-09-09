@@ -1,6 +1,7 @@
 #include <brass/mir/inliner.hpp>
 #include <brass/mir/inline_transform.hpp>
 #include <brass/mir/devirtualize.hpp>
+#include <brass/mir/sroa.hpp>
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/loop_analysis.hpp>
 #include <algorithm>
@@ -232,6 +233,12 @@ bool optimize_module_ipo(Module& mod, const InlinerOptions& inline_opts, const L
 
     // 2. Inlining in bottom-up leaf-first order
     changed |= inline_module(mod, inline_opts);
+
+    // 2b. Escape Analysis & SROA pass
+    if (inline_opts.enable_sroa) {
+        SroaOptions sroa_opts;
+        changed |= sroa_module(mod, sroa_opts);
+    }
 
     // 3. Re-run loop optimizations, constant folding, CSE, DCE & f64 demotion
     changed |= optimize_module_loops(mod, loop_opts);

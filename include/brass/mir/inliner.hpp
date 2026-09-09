@@ -17,6 +17,7 @@ struct InlinerOptions {
     size_t max_total_caller_instructions = 1000;
     bool enable_devirtualization = true;
     bool enable_loop_priority = true;
+    bool enable_sroa = true;
 };
 
 // Profitability decision for inlining a specific call site

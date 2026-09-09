@@ -52,6 +52,8 @@ add_executable(brass_unit_tests
     differential/test_simd_differential.cpp
     unit/test_vectorizer.cpp
     differential/test_vectorizer_differential.cpp
+    unit/test_sroa.cpp
+    differential/test_sroa_differential.cpp
 )
 
 target_include_directories(brass_unit_tests
