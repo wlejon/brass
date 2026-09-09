@@ -2,6 +2,7 @@
 #include "il_runtime.hpp"
 #include <brass/mir/verifier.hpp>
 #include <brass/mir/loop_opt.hpp>
+#include <brass/mir/inliner.hpp>
 #include <iostream>
 
 namespace brass::il {
@@ -144,7 +145,12 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
         opt_opts.enable_fp_reassociation = options_.allow_fp_reassociation;
         opt_opts.enable_f64_demote = options_.enable_f64_demote;
         opt_opts.demote_stats = options_.demote_stats_collector;
-        optimize_module_loops(*mod, opt_opts);
+        if (options_.enable_inlining) {
+            InlinerOptions inliner_opts;
+            optimize_module_ipo(*mod, inliner_opts, opt_opts);
+        } else {
+            optimize_module_loops(*mod, opt_opts);
+        }
         if (!verify_module(*mod, diag_)) {
             return nullptr;
         }

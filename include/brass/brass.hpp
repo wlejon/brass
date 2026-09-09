@@ -17,6 +17,10 @@
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/loop_analysis.hpp>
 #include <brass/mir/loop_opt.hpp>
+#include <brass/mir/call_graph.hpp>
+#include <brass/mir/devirtualize.hpp>
+#include <brass/mir/inline_transform.hpp>
+#include <brass/mir/inliner.hpp>
 #include <brass/mir/lexer.hpp>
 #include <brass/mir/printer.hpp>
 #include <brass/mir/parser.hpp>

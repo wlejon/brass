@@ -20,6 +20,7 @@ struct TranslatorOptions {
     bool trace_lowering = false;
     bool enable_f64_demote = true;
     bool demote_stats = false;
+    bool enable_inlining = false;
     DemoteStats* demote_stats_collector = nullptr;
 };
 

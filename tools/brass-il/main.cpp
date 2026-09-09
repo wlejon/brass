@@ -14,7 +14,7 @@ using namespace brass::il;
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--demote-stats] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc] [--timed <N>]\n";
+        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--inline] [--demote-stats] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc] [--timed <N>]\n";
         return 1;
     }
 
@@ -33,6 +33,8 @@ int main(int argc, char** argv) {
             run_jit = true;
         } else if (arg == "--emit-mir") {
             emit_mir = true;
+        } else if (arg == "--inline") {
+            options.enable_inlining = true;
         } else if (arg == "--demote-stats") {
             show_demote_stats = true;
         } else if (arg == "--raw-output") {

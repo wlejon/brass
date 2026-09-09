@@ -46,6 +46,8 @@ add_executable(brass_unit_tests
     differential/test_fuzz_closures_gc.cpp
     differential/test_fuzz_js_loops.cpp
     unit/test_f64_demote.cpp
+    unit/test_inliner.cpp
+    differential/test_inlining_differential.cpp
 )
 
 target_include_directories(brass_unit_tests
