@@ -22,6 +22,8 @@ void print_usage(const char* prog) {
               << "  --args <a1> <a2>...   Arguments to pass to the function executed with --run\n"
               << "  --gc-stress           Enable moving GC stress mode (collects at every allocation/safepoint)\n"
               << "  --inline              Run interprocedural function inlining and IPO optimization pipeline\n"
+              << "  --vectorize           Run loop vectorization on countable loops\n"
+              << "  --slp                 Run SLP straight-line vectorization\n"
               << "  -o <file>             Write output to <file> instead of stdout\n";
 }
 
@@ -106,6 +108,8 @@ int main(int argc, char** argv) {
     bool compile_object = false;
     bool use_jit = false;
     bool enable_inlining = false;
+    bool enable_vectorize = false;
+    bool enable_slp = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -122,6 +126,10 @@ int main(int argc, char** argv) {
             gc_stress = true;
         } else if (arg == "--inline") {
             enable_inlining = true;
+        } else if (arg == "--vectorize") {
+            enable_vectorize = true;
+        } else if (arg == "--slp") {
+            enable_slp = true;
         } else if (arg == "-c" || arg == "--compile") {
             compile_object = true;
         } else if (arg == "--jit") {
@@ -190,10 +198,24 @@ int main(int argc, char** argv) {
     }
 
     if (enable_inlining) {
-        brass::optimize_module_ipo(*mod);
+        brass::InlinerOptions inliner_opts;
+        brass::LoopOptOptions loop_opts;
+        loop_opts.enable_vectorize = enable_vectorize;
+        loop_opts.enable_slp = enable_slp;
+        brass::optimize_module_ipo(*mod, inliner_opts, loop_opts);
         brass::DiagnosticReporter inlining_diag;
         if (!brass::verify_module(*mod, &inlining_diag) || inlining_diag.has_errors()) {
             std::cerr << "Verification failed after inlining:\n" << inlining_diag.format_all();
+            return 1;
+        }
+    } else if (enable_vectorize || enable_slp) {
+        brass::LoopOptOptions loop_opts;
+        loop_opts.enable_vectorize = enable_vectorize;
+        loop_opts.enable_slp = enable_slp;
+        brass::optimize_module_loops(*mod, loop_opts);
+        brass::DiagnosticReporter opt_diag;
+        if (!brass::verify_module(*mod, &opt_diag) || opt_diag.has_errors()) {
+            std::cerr << "Verification failed after vectorization:\n" << opt_diag.format_all();
             return 1;
         }
     }

@@ -50,6 +50,8 @@ add_executable(brass_unit_tests
     differential/test_inlining_differential.cpp
     unit/test_simd_mir.cpp
     differential/test_simd_differential.cpp
+    unit/test_vectorizer.cpp
+    differential/test_vectorizer_differential.cpp
 )
 
 target_include_directories(brass_unit_tests

@@ -21,6 +21,8 @@ struct TranslatorOptions {
     bool enable_f64_demote = true;
     bool demote_stats = false;
     bool enable_inlining = false;
+    bool enable_vectorize = true;
+    bool enable_slp = true;
     DemoteStats* demote_stats_collector = nullptr;
 };
 

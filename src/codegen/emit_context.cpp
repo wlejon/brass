@@ -307,8 +307,16 @@ void EmitContext::emit_parallel_copy(const LirInst& inst) {
                 }
             } else {
                 XMM dst_xmm = dst.preg_val.as_xmm();
-                if (src.is_preg()) enc_.movsd(dst_xmm, src.preg_val.as_xmm());
-                else enc_.movsd(dst_xmm, to_mem_address(src));
+                if (dst.size == 16 || src.size == 16) {
+                    if (src.is_preg()) enc_.movaps(dst_xmm, src.preg_val.as_xmm());
+                    else enc_.movups(dst_xmm, to_mem_address(src));
+                } else if (dst.size == 4 && src.size == 4) {
+                    if (src.is_preg()) enc_.movss(dst_xmm, src.preg_val.as_xmm());
+                    else enc_.movss(dst_xmm, to_mem_address(src));
+                } else {
+                    if (src.is_preg()) enc_.movsd(dst_xmm, src.preg_val.as_xmm());
+                    else enc_.movsd(dst_xmm, to_mem_address(src));
+                }
             }
         } else {
             MemAddress dst_mem = to_mem_address(dst);
@@ -317,7 +325,13 @@ void EmitContext::emit_parallel_copy(const LirInst& inst) {
                     if (src.size == 4) enc_.mov32(dst_mem, src.preg_val.as_gpr());
                     else enc_.mov(dst_mem, src.preg_val.as_gpr());
                 } else {
-                    enc_.movsd(dst_mem, src.preg_val.as_xmm());
+                    if (dst.size == 16 || src.size == 16) {
+                        enc_.movups(dst_mem, src.preg_val.as_xmm());
+                    } else if (dst.size == 4 && src.size == 4) {
+                        enc_.movss(dst_mem, src.preg_val.as_xmm());
+                    } else {
+                        enc_.movsd(dst_mem, src.preg_val.as_xmm());
+                    }
                 }
             }
         }

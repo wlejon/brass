@@ -144,6 +144,8 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
         LoopOptOptions opt_opts;
         opt_opts.enable_fp_reassociation = options_.allow_fp_reassociation;
         opt_opts.enable_f64_demote = options_.enable_f64_demote;
+        opt_opts.enable_vectorize = options_.enable_vectorize;
+        opt_opts.enable_slp = options_.enable_slp;
         opt_opts.demote_stats = options_.demote_stats_collector;
         if (options_.enable_inlining) {
             InlinerOptions inliner_opts;

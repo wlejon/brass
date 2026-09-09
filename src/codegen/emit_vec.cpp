@@ -129,16 +129,24 @@ void EmitContext::emit_vec_instruction(const LirInst& inst) {
         }
         case LirOpcode::Shufps: {
             XMM dst = to_xmm(inst.defs[0]);
-            XMM src = to_xmm(inst.uses[1]);
+            XMM src0 = to_xmm(inst.uses[0]);
+            XMM src1 = to_xmm(inst.uses[1]);
             uint8_t imm = static_cast<uint8_t>(inst.uses.back().imm_int);
-            enc_.shufps(dst, src, imm);
+            if (dst != src0) {
+                enc_.movaps(dst, src0);
+            }
+            enc_.shufps(dst, src1, imm);
             break;
         }
         case LirOpcode::Shufpd: {
             XMM dst = to_xmm(inst.defs[0]);
-            XMM src = to_xmm(inst.uses[1]);
+            XMM src0 = to_xmm(inst.uses[0]);
+            XMM src1 = to_xmm(inst.uses[1]);
             uint8_t imm = static_cast<uint8_t>(inst.uses.back().imm_int);
-            enc_.shufpd(dst, src, imm);
+            if (dst != src0) {
+                enc_.movaps(dst, src0);
+            }
+            enc_.shufpd(dst, src1, imm);
             break;
         }
         case LirOpcode::Pshufd: {
