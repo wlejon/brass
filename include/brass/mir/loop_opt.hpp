@@ -22,6 +22,11 @@ struct LoopOptOptions {
     bool enable_fp_reassociation = false; // Opt-in FP reassociation (default OFF / IEEE-strict)
     bool enable_sroa = false;
     bool enable_gvn = true;
+    bool enable_loop_tile = false;
+    size_t tile_size_i = 16;
+    size_t tile_size_j = 16;
+    size_t tile_size_k = 16;
+    bool enable_loop_interchange = true;
     DemoteStats* demote_stats = nullptr;
 };
 

@@ -3,6 +3,7 @@
 #include <brass/mir/loop_unroll.hpp>
 #include <brass/mir/slp_vectorize.hpp>
 #include <brass/mir/loop_vectorize.hpp>
+#include <brass/mir/loop_tile.hpp>
 #include <brass/mir/f64_demote.hpp>
 #include <brass/mir/select_opt.hpp>
 #include <brass/mir/dominators.hpp>
@@ -632,6 +633,26 @@ bool optimize_function_loops(Function& fn, const LoopOptOptions& options) {
         fn.rebuild_cfg_predecessors();
         if (iter_changed) any_changed = true;
         else break;
+    }
+
+    if (options.enable_loop_tile) {
+        fn.rebuild_cfg_predecessors();
+        DominatorTree dom(fn);
+        LoopTileOptions tile_opts;
+        tile_opts.tile_size_i = options.tile_size_i;
+        tile_opts.tile_size_j = options.tile_size_j;
+        tile_opts.tile_size_k = options.tile_size_k;
+        tile_opts.enable_loop_interchange = options.enable_loop_interchange;
+        if (loop_tile_pass(fn, dom, tile_opts)) {
+            any_changed = true;
+            fn.rebuild_cfg_predecessors();
+            DominatorTree dom_after(fn);
+            if (options.enable_dce) {
+                constant_folding_pass(fn);
+                cse_pass(fn, dom_after);
+                dead_code_elimination_pass(fn);
+            }
+        }
     }
 
     if (options.enable_slp) {

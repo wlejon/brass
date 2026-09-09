@@ -59,6 +59,8 @@ add_executable(brass_unit_tests
     unit/test_pe_dll_writer.cpp
     unit/test_elf_so_writer.cpp
     unit/test_aot_shared_library.cpp
+    unit/test_loop_tile.cpp
+    differential/test_loop_tile_differential.cpp
 )
 
 target_include_directories(brass_unit_tests

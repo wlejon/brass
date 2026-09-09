@@ -27,6 +27,8 @@ struct TranslatorOptions {
     bool run_alias_analysis = false;
     bool enable_vectorize = true;
     bool enable_slp = true;
+    bool enable_loop_tile = true;
+    size_t tile_size = 16;
     DemoteStats* demote_stats_collector = nullptr;
 };
 

@@ -30,6 +30,8 @@ void print_usage(const char* prog) {
               << "  --alias-analysis      Run Alias Analysis on module functions\n"
               << "  --vectorize           Run loop vectorization on countable loops\n"
               << "  --slp                 Run SLP straight-line vectorization\n"
+              << "  --loop-tile           Run loop tiling / cache blocking on nested loops\n"
+              << "  --tile-size <N>       Tile size for loop tiling (default: 16)\n"
               << "  -o <file>             Write output to <file> instead of stdout\n";
 }
 
@@ -122,6 +124,8 @@ int main(int argc, char** argv) {
     bool run_alias_analysis = false;
     bool enable_vectorize = false;
     bool enable_slp = false;
+    bool enable_loop_tile = false;
+    size_t tile_size = 16;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -150,6 +154,17 @@ int main(int argc, char** argv) {
             enable_vectorize = true;
         } else if (arg == "--slp") {
             enable_slp = true;
+        } else if (arg == "--loop-tile") {
+            enable_loop_tile = true;
+        } else if (arg == "--tile-size") {
+            if (i + 1 < argc) {
+                tile_size = static_cast<size_t>(std::stoul(argv[++i]));
+            } else {
+                std::cerr << "Error: --tile-size requires an integer argument\n";
+                return 1;
+            }
+        } else if (arg.rfind("--tile-size=", 0) == 0) {
+            tile_size = static_cast<size_t>(std::stoul(arg.substr(12)));
         } else if (arg == "-c" || arg == "--compile") {
             compile_object = true;
         } else if (arg == "--emit-shared") {
@@ -276,6 +291,10 @@ int main(int argc, char** argv) {
         loop_opts.enable_vectorize = enable_vectorize;
         loop_opts.enable_slp = enable_slp;
         loop_opts.enable_gvn = enable_gvn;
+        loop_opts.enable_loop_tile = enable_loop_tile;
+        loop_opts.tile_size_i = tile_size;
+        loop_opts.tile_size_j = tile_size;
+        loop_opts.tile_size_k = tile_size;
         brass::optimize_module_ipo(*mod, inliner_opts, loop_opts);
         brass::DiagnosticReporter inlining_diag;
         if (!brass::verify_module(*mod, &inlining_diag) || inlining_diag.has_errors()) {
@@ -297,14 +316,18 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
-        if (enable_vectorize || enable_slp) {
+        if (enable_loop_tile || enable_vectorize || enable_slp) {
             brass::LoopOptOptions loop_opts;
             loop_opts.enable_vectorize = enable_vectorize;
             loop_opts.enable_slp = enable_slp;
+            loop_opts.enable_loop_tile = enable_loop_tile;
+            loop_opts.tile_size_i = tile_size;
+            loop_opts.tile_size_j = tile_size;
+            loop_opts.tile_size_k = tile_size;
             brass::optimize_module_loops(*mod, loop_opts);
             brass::DiagnosticReporter opt_diag;
             if (!brass::verify_module(*mod, &opt_diag) || opt_diag.has_errors()) {
-                std::cerr << "Verification failed after vectorization:\n" << opt_diag.format_all();
+                std::cerr << "Verification failed after loop optimization/vectorization:\n" << opt_diag.format_all();
                 return 1;
             }
         }
@@ -315,25 +338,33 @@ int main(int argc, char** argv) {
             std::cerr << "Verification failed after GVN:\n" << gvn_diag.format_all();
             return 1;
         }
-        if (enable_vectorize || enable_slp) {
+        if (enable_loop_tile || enable_vectorize || enable_slp) {
             brass::LoopOptOptions loop_opts;
             loop_opts.enable_vectorize = enable_vectorize;
             loop_opts.enable_slp = enable_slp;
+            loop_opts.enable_loop_tile = enable_loop_tile;
+            loop_opts.tile_size_i = tile_size;
+            loop_opts.tile_size_j = tile_size;
+            loop_opts.tile_size_k = tile_size;
             brass::optimize_module_loops(*mod, loop_opts);
             brass::DiagnosticReporter opt_diag;
             if (!brass::verify_module(*mod, &opt_diag) || opt_diag.has_errors()) {
-                std::cerr << "Verification failed after vectorization:\n" << opt_diag.format_all();
+                std::cerr << "Verification failed after loop optimization/vectorization:\n" << opt_diag.format_all();
                 return 1;
             }
         }
-    } else if (enable_vectorize || enable_slp) {
+    } else if (enable_loop_tile || enable_vectorize || enable_slp) {
         brass::LoopOptOptions loop_opts;
         loop_opts.enable_vectorize = enable_vectorize;
         loop_opts.enable_slp = enable_slp;
+        loop_opts.enable_loop_tile = enable_loop_tile;
+        loop_opts.tile_size_i = tile_size;
+        loop_opts.tile_size_j = tile_size;
+        loop_opts.tile_size_k = tile_size;
         brass::optimize_module_loops(*mod, loop_opts);
         brass::DiagnosticReporter opt_diag;
         if (!brass::verify_module(*mod, &opt_diag) || opt_diag.has_errors()) {
-            std::cerr << "Verification failed after vectorization:\n" << opt_diag.format_all();
+            std::cerr << "Verification failed after loop optimization/vectorization:\n" << opt_diag.format_all();
             return 1;
         }
     }

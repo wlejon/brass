@@ -443,48 +443,69 @@ bool LinearScanAllocator::try_allocate_free_reg(LiveInterval& interval) {
 void LinearScanAllocator::allocate_blocked_reg(LiveInterval& interval) {
     using namespace brass::x64;
 
+    bool is_gpr = interval.vreg.is_gpr();
+    const auto& pool = is_gpr ? available_gprs_ : available_xmms_;
     auto hard_blocked = get_hard_blocked_regs(interval);
 
-    // Find candidate in active with lowest spill_weight (or furthest end_id for equal weights)
-    LiveInterval* candidate = nullptr;
-    for (auto* act : active_) {
-        if (act->vreg.reg_class == interval.vreg.reg_class && act->assigned_preg.is_valid()) {
-            if (hard_blocked.find(act->assigned_preg.code) != hard_blocked.end()) {
+    PReg best_reg{};
+    std::vector<LiveInterval*> best_conflicts;
+    float best_cost = interval.spill_weight;
+    uint32_t best_furthest_end = 0;
+
+    for (const auto& reg : pool) {
+        if (hard_blocked.find(reg.code) != hard_blocked.end()) {
+            continue;
+        }
+        if (interval.spans_call) {
+            bool is_callee = is_gpr ? cc_.is_callee_saved(reg.as_gpr()) : cc_.is_callee_saved(reg.as_xmm());
+            if (!is_callee) {
                 continue;
             }
-            if (!candidate) {
-                candidate = act;
-            } else if (act->spill_weight < candidate->spill_weight) {
-                candidate = act;
-            } else if (act->spill_weight == candidate->spill_weight && act->end_id > candidate->end_id) {
-                candidate = act;
+        }
+
+        std::vector<LiveInterval*> conflicts;
+        float total_weight = 0.0f;
+        uint32_t furthest_end = 0;
+        for (auto* act : active_) {
+            if (act->vreg.reg_class == interval.vreg.reg_class && act->assigned_preg == reg) {
+                if (act->overlaps(interval)) {
+                    conflicts.push_back(act);
+                    total_weight += act->spill_weight;
+                    furthest_end = std::max(furthest_end, act->end_id);
+                }
             }
+        }
+
+        if (conflicts.empty()) {
+            best_reg = reg;
+            best_conflicts.clear();
+            best_cost = 0.0f;
+            break;
+        }
+
+        if (total_weight < best_cost || (total_weight == best_cost && furthest_end > best_furthest_end && best_reg.is_valid())) {
+            best_cost = total_weight;
+            best_reg = reg;
+            best_conflicts = std::move(conflicts);
+            best_furthest_end = furthest_end;
         }
     }
 
-    if (candidate && candidate->spill_weight < interval.spill_weight) {
-        interval.assigned_preg = candidate->assigned_preg;
-        candidate->assigned_preg = PReg{};
-        candidate->assigned_spill_slot = allocate_spill_slot(candidate->vreg.is_gcref, candidate->vreg.size);
-
-        auto it = std::find(active_.begin(), active_.end(), candidate);
-        if (it != active_.end()) {
-            active_.erase(it);
+    if (best_reg.is_valid()) {
+        for (auto* c : best_conflicts) {
+            c->assigned_preg = PReg{};
+            c->assigned_spill_slot = allocate_spill_slot(c->vreg.is_gcref, c->vreg.size);
+            auto it = std::find(active_.begin(), active_.end(), c);
+            if (it != active_.end()) {
+                active_.erase(it);
+            }
         }
 
-        active_.push_back(&interval);
-        std::sort(active_.begin(), active_.end(),
-            [](const LiveInterval* a, const LiveInterval* b) {
-                return a->end_id < b->end_id;
-            });
-    } else if (candidate && candidate->end_id > interval.end_id && candidate->spill_weight <= interval.spill_weight) {
-        interval.assigned_preg = candidate->assigned_preg;
-        candidate->assigned_preg = PReg{};
-        candidate->assigned_spill_slot = allocate_spill_slot(candidate->vreg.is_gcref, candidate->vreg.size);
-
-        auto it = std::find(active_.begin(), active_.end(), candidate);
-        if (it != active_.end()) {
-            active_.erase(it);
+        interval.assigned_preg = best_reg;
+        if (is_gpr && cc_.is_callee_saved(best_reg.as_gpr())) {
+            used_callee_gprs_ |= reg_mask(best_reg.as_gpr());
+        } else if (!is_gpr && cc_.is_callee_saved(best_reg.as_xmm())) {
+            used_callee_xmms_ |= reg_mask(best_reg.as_xmm());
         }
 
         active_.push_back(&interval);

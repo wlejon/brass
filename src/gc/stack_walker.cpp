@@ -1,6 +1,16 @@
 #include <brass/gc/stack_walker.hpp>
 #include <iostream>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 namespace brass {
 
 size_t brass_stack_walk(
@@ -16,7 +26,22 @@ size_t brass_stack_walk(
 
     constexpr size_t MAX_FRAMES = 1024;
 
+#if defined(_WIN32)
+    uintptr_t stack_low = 0;
+    uintptr_t stack_high = UINTPTR_MAX;
+    PNT_TIB tib = reinterpret_cast<PNT_TIB>(NtCurrentTeb());
+    if (tib) {
+        stack_low = reinterpret_cast<uintptr_t>(tib->StackLimit);
+        stack_high = reinterpret_cast<uintptr_t>(tib->StackBase);
+    }
+#endif
+
     while (cur_rbp != 0 && cur_return_ip != 0 && frame_count < MAX_FRAMES) {
+#if defined(_WIN32)
+        if (cur_rbp < stack_low || cur_rbp + 16 > stack_high) {
+            break;
+        }
+#endif
         if ((cur_rbp % 8) != 0) {
             break;
         }
@@ -36,12 +61,23 @@ size_t brass_stack_walk(
             }
         }
 
+#if defined(_WIN32)
+        if (cur_rbp + sizeof(uintptr_t) * 2 > stack_high) {
+            break;
+        }
+#endif
+
         uintptr_t next_rbp = *reinterpret_cast<const uintptr_t*>(cur_rbp);
         uintptr_t next_return_ip = *reinterpret_cast<const uintptr_t*>(cur_rbp + 8);
 
         if (next_rbp <= cur_rbp || (next_rbp % 8) != 0) {
             break;
         }
+#if defined(_WIN32)
+        if (next_rbp < stack_low || next_rbp + 16 > stack_high) {
+            break;
+        }
+#endif
 
         cur_rbp = next_rbp;
         cur_return_ip = next_return_ip;

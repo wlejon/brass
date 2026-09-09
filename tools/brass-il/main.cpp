@@ -14,7 +14,7 @@ using namespace brass::il;
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--emit-shared <output.dll/so>] [-shared] [--inline] [--sroa] [--escape-analysis] [--gvn] [--no-gvn] [--alias-analysis] [--vectorize] [--slp] [--demote-stats] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc] [--timed <N>]\n";
+        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--emit-shared <output.dll/so>] [-shared] [--inline] [--sroa] [--escape-analysis] [--gvn] [--no-gvn] [--alias-analysis] [--vectorize] [--slp] [--loop-tile] [--tile-size <N>] [--demote-stats] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc] [--timed <N>]\n";
         return 1;
     }
 
@@ -62,6 +62,14 @@ int main(int argc, char** argv) {
             options.enable_slp = true;
         } else if (arg == "--no-slp") {
             options.enable_slp = false;
+        } else if (arg == "--loop-tile") {
+            options.enable_loop_tile = true;
+        } else if (arg == "--no-loop-tile") {
+            options.enable_loop_tile = false;
+        } else if (arg == "--tile-size" && i + 1 < argc) {
+            options.tile_size = static_cast<size_t>(std::stoul(argv[++i]));
+        } else if (arg.rfind("--tile-size=", 0) == 0) {
+            options.tile_size = static_cast<size_t>(std::stoul(arg.substr(12)));
         } else if (arg == "--demote-stats") {
             show_demote_stats = true;
         } else if (arg == "--raw-output") {

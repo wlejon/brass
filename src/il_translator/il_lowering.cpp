@@ -148,6 +148,10 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
         opt_opts.enable_f64_demote = options_.enable_f64_demote;
         opt_opts.enable_vectorize = options_.enable_vectorize;
         opt_opts.enable_slp = options_.enable_slp;
+        opt_opts.enable_loop_tile = options_.enable_loop_tile;
+        opt_opts.tile_size_i = options_.tile_size;
+        opt_opts.tile_size_j = options_.tile_size;
+        opt_opts.tile_size_k = options_.tile_size;
         opt_opts.enable_sroa = options_.enable_sroa;
         opt_opts.enable_gvn = options_.enable_gvn;
         opt_opts.demote_stats = options_.demote_stats_collector;
