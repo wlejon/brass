@@ -29,10 +29,15 @@ enum class TokenKind : uint16_t {
     // Types
     Kw_i32,
     Kw_i64,
+    Kw_f32,
     Kw_f64,
     Kw_ptr,
     Kw_gcref,
     Kw_void,
+    Kw_f32x4,
+    Kw_f64x2,
+    Kw_i32x4,
+    Kw_i64x2,
 
     // Identifiers and Names
     Ident,          // foo, bb0, loop_header, add.i32, load.i32

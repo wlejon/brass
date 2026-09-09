@@ -318,6 +318,101 @@ public:
     void cvtss2sd(XMM dst, const MemAddress& src);
 
     // =========================================================================
+    // 128-BIT SIMD VECTOR INSTRUCTIONS (SSE / SSE2 / SSE4.1)
+    // =========================================================================
+
+    void movaps(XMM dst, XMM src);
+    void movaps(XMM dst, const MemAddress& src);
+    void movaps(const MemAddress& dst, XMM src);
+
+    void movups(XMM dst, XMM src);
+
+    void movd(XMM dst, GPR src);
+    void movd(GPR dst, XMM src);
+    void movd(XMM dst, const MemAddress& src);
+    void movd(const MemAddress& dst, XMM src);
+
+    // Float vectors (f32x4)
+    void addps(XMM dst, XMM src);
+    void addps(XMM dst, const MemAddress& src);
+    void subps(XMM dst, XMM src);
+    void subps(XMM dst, const MemAddress& src);
+    void mulps(XMM dst, XMM src);
+    void mulps(XMM dst, const MemAddress& src);
+    void divps(XMM dst, XMM src);
+    void divps(XMM dst, const MemAddress& src);
+    void minps(XMM dst, XMM src);
+    void minps(XMM dst, const MemAddress& src);
+    void maxps(XMM dst, XMM src);
+    void maxps(XMM dst, const MemAddress& src);
+    void sqrtps(XMM dst, XMM src);
+    void sqrtps(XMM dst, const MemAddress& src);
+
+    // Double vectors (f64x2)
+    void addpd(XMM dst, XMM src);
+    void addpd(XMM dst, const MemAddress& src);
+    void subpd(XMM dst, XMM src);
+    void subpd(XMM dst, const MemAddress& src);
+    void mulpd(XMM dst, XMM src);
+    void mulpd(XMM dst, const MemAddress& src);
+    void divpd(XMM dst, XMM src);
+    void divpd(XMM dst, const MemAddress& src);
+    void minpd(XMM dst, XMM src);
+    void minpd(XMM dst, const MemAddress& src);
+    void maxpd(XMM dst, XMM src);
+    void maxpd(XMM dst, const MemAddress& src);
+    void sqrtpd(XMM dst, XMM src);
+    void sqrtpd(XMM dst, const MemAddress& src);
+
+    // Integer vectors (i32x4)
+    void paddd(XMM dst, XMM src);
+    void paddd(XMM dst, const MemAddress& src);
+    void psubd(XMM dst, XMM src);
+    void psubd(XMM dst, const MemAddress& src);
+    void pmulld(XMM dst, XMM src);
+    void pmulld(XMM dst, const MemAddress& src);
+    void pminsd(XMM dst, XMM src);
+    void pminsd(XMM dst, const MemAddress& src);
+    void pmaxsd(XMM dst, XMM src);
+    void pmaxsd(XMM dst, const MemAddress& src);
+
+    // Integer vectors (i64x2)
+    void paddq(XMM dst, XMM src);
+    void paddq(XMM dst, const MemAddress& src);
+    void psubq(XMM dst, XMM src);
+    void psubq(XMM dst, const MemAddress& src);
+
+    // Bitwise vectors
+    void pand(XMM dst, XMM src);
+    void pand(XMM dst, const MemAddress& src);
+    void por(XMM dst, XMM src);
+    void por(XMM dst, const MemAddress& src);
+    void pxor(XMM dst, XMM src);
+    void pxor(XMM dst, const MemAddress& src);
+    void pandn(XMM dst, XMM src);
+    void pandn(XMM dst, const MemAddress& src);
+
+    // Shifts / compares
+    void pcmpeqd(XMM dst, XMM src);
+    void pcmpeqd(XMM dst, const MemAddress& src);
+    void pslld(XMM dst, uint8_t imm);
+    void psllq(XMM dst, uint8_t imm);
+
+    // Shuffles & broadcast
+    void shufps(XMM dst, XMM src, uint8_t imm);
+    void shufpd(XMM dst, XMM src, uint8_t imm);
+    void pshufd(XMM dst, XMM src, uint8_t imm);
+    void movddup(XMM dst, XMM src);
+
+    // Lane insert & extract
+    void pinsrd(XMM dst, GPR src, uint8_t lane);
+    void pextrd(GPR dst, XMM src, uint8_t lane);
+    void pinsrq(XMM dst, GPR src, uint8_t lane);
+    void pextrq(GPR dst, XMM src, uint8_t lane);
+    void insertps(XMM dst, XMM src, uint8_t imm);
+    void extractps(GPR dst, XMM src, uint8_t lane);
+
+    // =========================================================================
     // BIT OPERATIONS (POPCNT, LZCNT, TZCNT, BSF, BSR)
     // =========================================================================
 

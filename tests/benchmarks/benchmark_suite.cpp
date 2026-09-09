@@ -3,6 +3,7 @@
 #include "bench_js_shapes.hpp"
 #include "bench_gc.hpp"
 #include "bench_compile_speed.hpp"
+#include "bench_simd_math.hpp"
 #include <vector>
 #include <string>
 #include <iostream>
@@ -59,6 +60,9 @@ int main(int argc, char** argv) {
 
     // 3. Numeric & Algorithmic Microbenchmarks
     run_numeric_benchmarks(results, ratchet);
+
+    // 3b. SIMD Vector Math Microbenchmarks
+    run_simd_math_benchmarks(results, ratchet);
 
     // 4. JS-Shaped Benchmarks (NaN-boxing, shape guards, patchable IC, Cheney GC alloc)
     run_js_shapes_benchmarks(results, ratchet);

@@ -827,6 +827,9 @@ bool eliminate_dead_induction_cycles(Function& fn) {
 } // namespace
 
 bool optimize_function_loops(Function& fn, const LoopOptOptions& options) {
+    if (!fn.resume_points().empty()) {
+        return false;
+    }
     bool any_changed = false;
 
     if (options.enable_f64_demote) {

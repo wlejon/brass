@@ -70,6 +70,8 @@ brass::RuntimeValue parse_arg_for_type(brass::Type type, const std::string& arg_
             return brass::RuntimeValue::from_i32(static_cast<int32_t>(std::stol(arg_str, nullptr, 0)));
         case brass::TypeKind::I64:
             return brass::RuntimeValue::from_i64(std::stoll(arg_str, nullptr, 0));
+        case brass::TypeKind::F32:
+            return brass::RuntimeValue::from_f32(std::stof(arg_str));
         case brass::TypeKind::F64:
             return brass::RuntimeValue::from_f64(std::stod(arg_str));
         case brass::TypeKind::Ptr:
@@ -78,6 +80,8 @@ brass::RuntimeValue parse_arg_for_type(brass::Type type, const std::string& arg_
             return brass::RuntimeValue::from_gcref(static_cast<uintptr_t>(std::stoull(arg_str, nullptr, 0)));
         case brass::TypeKind::Void:
             return brass::RuntimeValue::from_void();
+        default:
+            break;
     }
     return brass::RuntimeValue::from_i64(std::stoll(arg_str, nullptr, 0));
 }

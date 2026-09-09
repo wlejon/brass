@@ -140,6 +140,12 @@ public:
     uint32_t resume_id() const noexcept { return static_cast<uint32_t>(imm_i64_); }
     void set_resume_id(uint32_t id) noexcept { imm_i64_ = static_cast<int64_t>(id); }
 
+    uint32_t lane() const noexcept { return static_cast<uint32_t>(imm_i64_); }
+    void set_lane(uint32_t l) noexcept { imm_i64_ = static_cast<int64_t>(l); }
+
+    uint32_t shuffle_mask() const noexcept { return static_cast<uint32_t>(imm_i64_); }
+    void set_shuffle_mask(uint32_t m) noexcept { imm_i64_ = static_cast<int64_t>(m); }
+
     const BranchTarget& branch_target() const noexcept { return branch_target_; }
     BranchTarget& branch_target() noexcept { return branch_target_; }
     void set_branch_target(BranchTarget target) { branch_target_ = std::move(target); }

@@ -27,6 +27,28 @@ void X64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
     }
 
     switch (inst.opcode()) {
+        case Opcode::vadd:
+        case Opcode::vsub:
+        case Opcode::vmul:
+        case Opcode::vdiv:
+        case Opcode::vneg:
+        case Opcode::vmin:
+        case Opcode::vmax:
+        case Opcode::vsqrt:
+        case Opcode::vand:
+        case Opcode::vor:
+        case Opcode::vxor:
+        case Opcode::vnot:
+        case Opcode::vload:
+        case Opcode::vstore:
+        case Opcode::vbroadcast:
+        case Opcode::vextract_lane:
+        case Opcode::vinsert_lane:
+        case Opcode::vshuffle:
+        case Opcode::vzero:
+            lower_vector_instruction(inst, lir_bb);
+            break;
+
         case Opcode::iconst_i32: {
             VReg dst = get_vreg(inst.result());
             int32_t val = inst.imm_i32();
@@ -214,17 +236,17 @@ void X64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
             break;
         }
         case Opcode::add:
-            lower_binary_alu(inst, lir_bb, LirOpcode::Add32, LirOpcode::Add, LirOpcode::Addsd);
+            lower_binary_alu(inst, lir_bb, LirOpcode::Add32, LirOpcode::Add, LirOpcode::Addsd, LirOpcode::Addss);
             break;
         case Opcode::sub:
-            lower_binary_alu(inst, lir_bb, LirOpcode::Sub32, LirOpcode::Sub, LirOpcode::Subsd);
+            lower_binary_alu(inst, lir_bb, LirOpcode::Sub32, LirOpcode::Sub, LirOpcode::Subsd, LirOpcode::Subss);
             break;
         case Opcode::mul:
-            lower_binary_alu(inst, lir_bb, LirOpcode::Imul32, LirOpcode::Imul, LirOpcode::Mulsd);
+            lower_binary_alu(inst, lir_bb, LirOpcode::Imul32, LirOpcode::Imul, LirOpcode::Mulsd, LirOpcode::Mulss);
             break;
         case Opcode::sdiv:
             if (inst.type().is_float()) {
-                lower_binary_alu(inst, lir_bb, LirOpcode::Nop, LirOpcode::Nop, LirOpcode::Divsd);
+                lower_binary_alu(inst, lir_bb, LirOpcode::Nop, LirOpcode::Nop, LirOpcode::Divsd, LirOpcode::Divss);
             } else {
                 lower_div_mod(inst, lir_bb, true, false);
             }
@@ -243,28 +265,28 @@ void X64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
             VReg src = get_vreg(inst.operand(0));
             uint8_t sz = dst.size;
             if (dst.is_xmm()) {
-                uint64_t sign_mask = 0x8000000000000000ULL;
-                VReg tmp_gpr = lir_fn_->allocate_vreg(RegClass::GPR, 8);
-                VReg tmp_xmm = lir_fn_->allocate_vreg(RegClass::XMM, 8);
-                auto mabs = std::make_unique<LirInst>(LirOpcode::Movabs);
-                mabs->add_def(LirOperand::vreg(tmp_gpr, 8));
-                mabs->add_use(LirOperand::imm(static_cast<int64_t>(sign_mask), 8));
+                uint64_t sign_mask = (sz == 4) ? 0x80000000ULL : 0x8000000000000000ULL;
+                VReg tmp_gpr = lir_fn_->allocate_vreg(RegClass::GPR, sz == 4 ? 4 : 8);
+                VReg tmp_xmm = lir_fn_->allocate_vreg(RegClass::XMM, sz == 4 ? 4 : 8);
+                auto mabs = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Movabs);
+                mabs->add_def(LirOperand::vreg(tmp_gpr, sz == 4 ? 4 : 8));
+                mabs->add_use(LirOperand::imm(static_cast<int64_t>(sign_mask), sz == 4 ? 4 : 8));
                 lir_bb.append_inst(std::move(mabs));
 
-                auto mq = std::make_unique<LirInst>(LirOpcode::Movq_xg);
-                mq->add_def(LirOperand::vreg(tmp_xmm, 8));
-                mq->add_use(LirOperand::vreg(tmp_gpr, 8));
+                auto mq = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Movd_xg : LirOpcode::Movq_xg);
+                mq->add_def(LirOperand::vreg(tmp_xmm, sz == 4 ? 4 : 8));
+                mq->add_use(LirOperand::vreg(tmp_gpr, sz == 4 ? 4 : 8));
                 lir_bb.append_inst(std::move(mq));
 
-                auto mov_inst = std::make_unique<LirInst>(LirOpcode::Movsd);
-                mov_inst->add_def(LirOperand::vreg(dst, 8));
-                mov_inst->add_use(LirOperand::vreg(src, 8));
+                auto mov_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Movss : LirOpcode::Movsd);
+                mov_inst->add_def(LirOperand::vreg(dst, sz));
+                mov_inst->add_use(LirOperand::vreg(src, sz));
                 lir_bb.append_inst(std::move(mov_inst));
 
-                auto xor_inst = std::make_unique<LirInst>(LirOpcode::Xorpd);
-                xor_inst->add_def(LirOperand::vreg(dst, 8));
-                xor_inst->add_use(LirOperand::vreg(dst, 8));
-                xor_inst->add_use(LirOperand::vreg(tmp_xmm, 8));
+                auto xor_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Xorps : LirOpcode::Xorpd);
+                xor_inst->add_def(LirOperand::vreg(dst, sz));
+                xor_inst->add_use(LirOperand::vreg(dst, sz));
+                xor_inst->add_use(LirOperand::vreg(tmp_xmm, sz));
                 xor_inst->mir_origin = &inst;
                 lir_bb.append_inst(std::move(xor_inst));
             } else {
@@ -282,13 +304,13 @@ void X64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
             break;
         }
         case Opcode::and_:
-            lower_binary_alu(inst, lir_bb, LirOpcode::And32, LirOpcode::And, LirOpcode::Nop);
+            lower_binary_alu(inst, lir_bb, LirOpcode::And32, LirOpcode::And, LirOpcode::Nop, LirOpcode::Nop);
             break;
         case Opcode::or_:
-            lower_binary_alu(inst, lir_bb, LirOpcode::Or32, LirOpcode::Or, LirOpcode::Nop);
+            lower_binary_alu(inst, lir_bb, LirOpcode::Or32, LirOpcode::Or, LirOpcode::Nop, LirOpcode::Nop);
             break;
         case Opcode::xor_:
-            lower_binary_alu(inst, lir_bb, LirOpcode::Xor32, LirOpcode::Xor, LirOpcode::Xorpd);
+            lower_binary_alu(inst, lir_bb, LirOpcode::Xor32, LirOpcode::Xor, LirOpcode::Xorpd, LirOpcode::Xorps);
             break;
         case Opcode::not_: {
             VReg dst = get_vreg(inst.result());
@@ -502,7 +524,8 @@ void X64ISel::lower_binary_alu(
     LirBlock& lir_bb,
     LirOpcode op32,
     LirOpcode op64,
-    LirOpcode op_f64
+    LirOpcode op_f64,
+    LirOpcode op_f32
 ) {
     VReg dst = get_vreg(inst.result());
     const Value* op0_val = inst.operand(0);
@@ -511,17 +534,21 @@ void X64ISel::lower_binary_alu(
     VReg src1 = get_vreg(op1_val);
 
     if (dst.is_xmm()) {
+        uint8_t sz = dst.size;
+        LirOpcode mov_op = (sz == 4) ? LirOpcode::Movss : LirOpcode::Movsd;
+        LirOpcode alu_op = (sz == 4) ? op_f32 : op_f64;
+
         auto emit_float_alu = [&](VReg first_src, LirOperand second_src) {
             if (dst != first_src) {
-                auto mov_inst = std::make_unique<LirInst>(LirOpcode::Movsd);
-                mov_inst->add_def(LirOperand::vreg(dst, 8));
-                mov_inst->add_use(LirOperand::vreg(first_src, 8));
+                auto mov_inst = std::make_unique<LirInst>(mov_op);
+                mov_inst->add_def(LirOperand::vreg(dst, sz));
+                mov_inst->add_use(LirOperand::vreg(first_src, sz));
                 lir_bb.append_inst(std::move(mov_inst));
             }
 
-            auto alu_inst = std::make_unique<LirInst>(op_f64);
-            alu_inst->add_def(LirOperand::vreg(dst, 8));
-            alu_inst->add_use(LirOperand::vreg(dst, 8));
+            auto alu_inst = std::make_unique<LirInst>(alu_op);
+            alu_inst->add_def(LirOperand::vreg(dst, sz));
+            alu_inst->add_use(LirOperand::vreg(dst, sz));
             alu_inst->add_use(second_src);
             alu_inst->mir_origin = &inst;
             lir_bb.append_inst(std::move(alu_inst));
@@ -533,9 +560,9 @@ void X64ISel::lower_binary_alu(
         } else if (is_comm && op0_val && op0_val->is_instruction() && can_fuse_load(op0_val->defining_instruction(), &inst)) {
             emit_float_alu(src1, get_load_mem_operand(op0_val->defining_instruction()));
         } else if (is_comm && dst == src1) {
-            emit_float_alu(src1, LirOperand::vreg(src0, 8));
+            emit_float_alu(src1, LirOperand::vreg(src0, sz));
         } else {
-            emit_float_alu(src0, LirOperand::vreg(src1, 8));
+            emit_float_alu(src0, LirOperand::vreg(src1, sz));
         }
         return;
     }
@@ -873,15 +900,17 @@ void X64ISel::lower_comparison(
     uint8_t dst_sz = dst.size;
 
     if (op0_val->type().is_float()) {
+        uint8_t f_sz = op0.size;
+        LirOpcode ucomi_op = (f_sz == 4) ? LirOpcode::Ucomiss : LirOpcode::Ucomisd;
         if (op1_val && op1_val->is_instruction() && can_fuse_load(op1_val->defining_instruction(), &inst)) {
-            auto ucomi = std::make_unique<LirInst>(LirOpcode::Ucomisd);
-            ucomi->add_use(LirOperand::vreg(op0, 8));
+            auto ucomi = std::make_unique<LirInst>(ucomi_op);
+            ucomi->add_use(LirOperand::vreg(op0, f_sz));
             ucomi->add_use(get_load_mem_operand(op1_val->defining_instruction()));
             lir_bb.append_inst(std::move(ucomi));
         } else {
-            auto ucomi = std::make_unique<LirInst>(LirOpcode::Ucomisd);
-            ucomi->add_use(LirOperand::vreg(op0, 8));
-            ucomi->add_use(LirOperand::vreg(op1, 8));
+            auto ucomi = std::make_unique<LirInst>(ucomi_op);
+            ucomi->add_use(LirOperand::vreg(op0, f_sz));
+            ucomi->add_use(LirOperand::vreg(op1, f_sz));
             lir_bb.append_inst(std::move(ucomi));
         }
 

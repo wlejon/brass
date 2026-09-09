@@ -89,7 +89,28 @@ enum class Opcode : uint16_t {
     br_if,
     switch_,
     ret,
-    unreachable
+    unreachable,
+
+    // Vector Opcodes
+    vadd,
+    vsub,
+    vmul,
+    vdiv,
+    vneg,
+    vmin,
+    vmax,
+    vsqrt,
+    vand,
+    vor,
+    vxor,
+    vnot,
+    vload,
+    vstore,
+    vbroadcast,
+    vextract_lane,
+    vinsert_lane,
+    vshuffle,
+    vzero
 };
 
 std::string_view opcode_name(Opcode op) noexcept;
@@ -103,6 +124,7 @@ bool is_bitwise(Opcode op) noexcept;
 bool is_comparison(Opcode op) noexcept;
 bool is_memory(Opcode op) noexcept;
 bool is_select(Opcode op) noexcept;
+bool is_vector_op(Opcode op) noexcept;
 bool has_side_effects(Opcode op) noexcept;
 
 std::ostream& operator<<(std::ostream& os, Opcode op);

@@ -19,7 +19,7 @@ void X64ISel::lower_switch(const Instruction& inst, LirBlock& lir_bb) {
             uint8_t psz = param_v.size;
             if (arg_v != param_v) {
                 auto mov_inst = std::make_unique<LirInst>(
-                    param_v.is_xmm() ? LirOpcode::Movsd : (psz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov)
+                    param_v.is_xmm() ? ((psz == 16) ? LirOpcode::Movaps : LirOpcode::Movsd) : (psz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov)
                 );
                 mov_inst->add_def(LirOperand::vreg(param_v, psz));
                 mov_inst->add_use(LirOperand::vreg(arg_v, psz));

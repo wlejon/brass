@@ -25,10 +25,15 @@ std::string_view token_kind_name(TokenKind kind) noexcept {
         case TokenKind::Kw_unreachable: return "unreachable";
         case TokenKind::Kw_i32: return "i32";
         case TokenKind::Kw_i64: return "i64";
+        case TokenKind::Kw_f32: return "f32";
         case TokenKind::Kw_f64: return "f64";
         case TokenKind::Kw_ptr: return "ptr";
         case TokenKind::Kw_gcref: return "gcref";
         case TokenKind::Kw_void: return "void";
+        case TokenKind::Kw_f32x4: return "f32x4";
+        case TokenKind::Kw_f64x2: return "f64x2";
+        case TokenKind::Kw_i32x4: return "i32x4";
+        case TokenKind::Kw_i64x2: return "i64x2";
         case TokenKind::Ident: return "identifier";
         case TokenKind::ValueIdent: return "value identifier";
         case TokenKind::SymbolIdent: return "symbol identifier";
@@ -291,10 +296,15 @@ Token Lexer::scan_identifier_or_keyword() {
     // Types
     if (text == "i32") return Token{TokenKind::Kw_i32, text, loc, 0, 0.0};
     if (text == "i64") return Token{TokenKind::Kw_i64, text, loc, 0, 0.0};
+    if (text == "f32") return Token{TokenKind::Kw_f32, text, loc, 0, 0.0};
     if (text == "f64") return Token{TokenKind::Kw_f64, text, loc, 0, 0.0};
     if (text == "ptr") return Token{TokenKind::Kw_ptr, text, loc, 0, 0.0};
     if (text == "gcref") return Token{TokenKind::Kw_gcref, text, loc, 0, 0.0};
     if (text == "void") return Token{TokenKind::Kw_void, text, loc, 0, 0.0};
+    if (text == "f32x4") return Token{TokenKind::Kw_f32x4, text, loc, 0, 0.0};
+    if (text == "f64x2") return Token{TokenKind::Kw_f64x2, text, loc, 0, 0.0};
+    if (text == "i32x4") return Token{TokenKind::Kw_i32x4, text, loc, 0, 0.0};
+    if (text == "i64x2") return Token{TokenKind::Kw_i64x2, text, loc, 0, 0.0};
 
     return Token{TokenKind::Ident, text, loc, 0, 0.0};
 }

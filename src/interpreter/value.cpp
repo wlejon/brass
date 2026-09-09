@@ -12,6 +12,9 @@ RuntimeValue val_add(RuntimeValue lhs, RuntimeValue rhs) {
     if (lhs.is_f64() || rhs.is_f64()) {
         return RuntimeValue::from_f64(lhs.as_f64() + rhs.as_f64());
     }
+    if (lhs.is_f32() || rhs.is_f32()) {
+        return RuntimeValue::from_f32(lhs.as_f32() + rhs.as_f32());
+    }
     if (lhs.is_i32()) {
         uint32_t a = lhs.as_u32();
         uint32_t b = rhs.as_u32();
@@ -31,6 +34,9 @@ RuntimeValue val_add(RuntimeValue lhs, RuntimeValue rhs) {
 RuntimeValue val_sub(RuntimeValue lhs, RuntimeValue rhs) {
     if (lhs.is_f64() || rhs.is_f64()) {
         return RuntimeValue::from_f64(lhs.as_f64() - rhs.as_f64());
+    }
+    if (lhs.is_f32() || rhs.is_f32()) {
+        return RuntimeValue::from_f32(lhs.as_f32() - rhs.as_f32());
     }
     if (lhs.is_i32()) {
         uint32_t a = lhs.as_u32();
@@ -52,6 +58,9 @@ RuntimeValue val_mul(RuntimeValue lhs, RuntimeValue rhs) {
     if (lhs.is_f64() || rhs.is_f64()) {
         return RuntimeValue::from_f64(lhs.as_f64() * rhs.as_f64());
     }
+    if (lhs.is_f32() || rhs.is_f32()) {
+        return RuntimeValue::from_f32(lhs.as_f32() * rhs.as_f32());
+    }
     if (lhs.is_i32()) {
         uint32_t a = lhs.as_u32();
         uint32_t b = rhs.as_u32();
@@ -65,6 +74,9 @@ RuntimeValue val_mul(RuntimeValue lhs, RuntimeValue rhs) {
 RuntimeValue val_sdiv(RuntimeValue lhs, RuntimeValue rhs) {
     if (lhs.is_f64() || rhs.is_f64()) {
         return RuntimeValue::from_f64(lhs.as_f64() / rhs.as_f64());
+    }
+    if (lhs.is_f32() || rhs.is_f32()) {
+        return RuntimeValue::from_f32(lhs.as_f32() / rhs.as_f32());
     }
     if (lhs.is_i32()) {
         int32_t b = rhs.as_i32();
@@ -147,6 +159,9 @@ RuntimeValue val_umod(RuntimeValue lhs, RuntimeValue rhs) {
 RuntimeValue val_neg(RuntimeValue val) {
     if (val.is_f64()) {
         return RuntimeValue::from_f64(-val.as_f64());
+    }
+    if (val.is_f32()) {
+        return RuntimeValue::from_f32(-val.as_f32());
     }
     if (val.is_i32()) {
         uint32_t a = val.as_u32();
@@ -424,6 +439,17 @@ std::string to_string(const RuntimeValue& val) {
             }
             return s;
         }
+        case RuntimeValueKind::F32: {
+            float f = val.as_f32();
+            if (std::isnan(f)) return "nan";
+            if (std::isinf(f)) return (f < 0) ? "-inf" : "inf";
+            ss << std::defaultfloat << f;
+            std::string s = ss.str();
+            if (s.find('.') == std::string::npos && s.find('e') == std::string::npos) {
+                s += ".0";
+            }
+            return s;
+        }
         case RuntimeValueKind::Ptr: {
             ss << "0x" << std::hex << val.as_ptr();
             return ss.str();
@@ -433,6 +459,51 @@ std::string to_string(const RuntimeValue& val) {
                 return "gcref(null)";
             }
             ss << "gcref(0x" << std::hex << val.as_gcref() << ")";
+            return ss.str();
+        }
+        case RuntimeValueKind::F32x4: {
+            ss << "<";
+            for (size_t i = 0; i < 4; ++i) {
+                if (i > 0) ss << ", ";
+                float f = val.f32_lane(i);
+                if (std::isnan(f)) ss << "nan";
+                else if (std::isinf(f)) ss << ((f < 0) ? "-inf" : "inf");
+                else {
+                    std::ostringstream elem;
+                    elem << std::defaultfloat << f;
+                    std::string s = elem.str();
+                    if (s.find('.') == std::string::npos && s.find('e') == std::string::npos) s += ".0";
+                    ss << s;
+                }
+            }
+            ss << ">";
+            return ss.str();
+        }
+        case RuntimeValueKind::F64x2: {
+            ss << "<";
+            for (size_t i = 0; i < 2; ++i) {
+                if (i > 0) ss << ", ";
+                double d = val.f64_lane(i);
+                if (std::isnan(d)) ss << "nan";
+                else if (std::isinf(d)) ss << ((d < 0) ? "-inf" : "inf");
+                else {
+                    std::ostringstream elem;
+                    elem << std::defaultfloat << d;
+                    std::string s = elem.str();
+                    if (s.find('.') == std::string::npos && s.find('e') == std::string::npos) s += ".0";
+                    ss << s;
+                }
+            }
+            ss << ">";
+            return ss.str();
+        }
+        case RuntimeValueKind::I32x4: {
+            ss << "<" << val.i32_lane(0) << ", " << val.i32_lane(1) << ", "
+               << val.i32_lane(2) << ", " << val.i32_lane(3) << ">";
+            return ss.str();
+        }
+        case RuntimeValueKind::I64x2: {
+            ss << "<" << val.i64_lane(0) << ", " << val.i64_lane(1) << ">";
             return ss.str();
         }
     }

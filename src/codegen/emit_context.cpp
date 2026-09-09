@@ -202,11 +202,25 @@ void EmitContext::emit_sse_instruction(const LirInst& inst) {
             else enc_.addsd(dst, to_mem_address(src));
             break;
         }
+        case LirOpcode::Addss: {
+            XMM dst = to_xmm(inst.defs[0]);
+            const auto& src = inst.uses.back();
+            if (src.is_preg()) enc_.addss(dst, to_xmm(src));
+            else enc_.addss(dst, to_mem_address(src));
+            break;
+        }
         case LirOpcode::Subsd: {
             XMM dst = to_xmm(inst.defs[0]);
             const auto& src = inst.uses.back();
             if (src.is_preg()) enc_.subsd(dst, to_xmm(src));
             else enc_.subsd(dst, to_mem_address(src));
+            break;
+        }
+        case LirOpcode::Subss: {
+            XMM dst = to_xmm(inst.defs[0]);
+            const auto& src = inst.uses.back();
+            if (src.is_preg()) enc_.subss(dst, to_xmm(src));
+            else enc_.subss(dst, to_mem_address(src));
             break;
         }
         case LirOpcode::Mulsd: {
@@ -216,6 +230,13 @@ void EmitContext::emit_sse_instruction(const LirInst& inst) {
             else enc_.mulsd(dst, to_mem_address(src));
             break;
         }
+        case LirOpcode::Mulss: {
+            XMM dst = to_xmm(inst.defs[0]);
+            const auto& src = inst.uses.back();
+            if (src.is_preg()) enc_.mulss(dst, to_xmm(src));
+            else enc_.mulss(dst, to_mem_address(src));
+            break;
+        }
         case LirOpcode::Divsd: {
             XMM dst = to_xmm(inst.defs[0]);
             const auto& src = inst.uses.back();
@@ -223,10 +244,22 @@ void EmitContext::emit_sse_instruction(const LirInst& inst) {
             else enc_.divsd(dst, to_mem_address(src));
             break;
         }
+        case LirOpcode::Divss: {
+            XMM dst = to_xmm(inst.defs[0]);
+            const auto& src = inst.uses.back();
+            if (src.is_preg()) enc_.divss(dst, to_xmm(src));
+            else enc_.divss(dst, to_mem_address(src));
+            break;
+        }
         case LirOpcode::Sqrtsd: enc_.sqrtsd(to_xmm(inst.defs[0]), to_xmm(inst.uses.back())); break;
+        case LirOpcode::Sqrtss: enc_.sqrtss(to_xmm(inst.defs[0]), to_xmm(inst.uses.back())); break;
         case LirOpcode::Ucomisd:
             if (inst.uses[1].is_mem() || inst.uses[1].is_spill_slot()) enc_.ucomisd(to_xmm(inst.uses[0]), to_mem_address(inst.uses[1]));
             else enc_.ucomisd(to_xmm(inst.uses[0]), to_xmm(inst.uses[1]));
+            break;
+        case LirOpcode::Ucomiss:
+            if (inst.uses[1].is_mem() || inst.uses[1].is_spill_slot()) enc_.ucomiss(to_xmm(inst.uses[0]), to_mem_address(inst.uses[1]));
+            else enc_.ucomiss(to_xmm(inst.uses[0]), to_xmm(inst.uses[1]));
             break;
         case LirOpcode::Xorpd: enc_.xorpd(to_xmm(inst.defs[0]), to_xmm(inst.uses.back())); break;
         case LirOpcode::Cvtsi2sd: enc_.cvtsi2sd(to_xmm(inst.defs[0]), to_gpr(inst.uses[0])); break;
@@ -680,17 +713,68 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
         case LirOpcode::Movq_gx:
         case LirOpcode::Movq_xg:
         case LirOpcode::Addsd:
+        case LirOpcode::Addss:
         case LirOpcode::Subsd:
+        case LirOpcode::Subss:
         case LirOpcode::Mulsd:
+        case LirOpcode::Mulss:
         case LirOpcode::Divsd:
+        case LirOpcode::Divss:
         case LirOpcode::Sqrtsd:
+        case LirOpcode::Sqrtss:
         case LirOpcode::Ucomisd:
+        case LirOpcode::Ucomiss:
         case LirOpcode::Xorpd:
         case LirOpcode::Cvtsi2sd:
         case LirOpcode::Cvtsi2sd32:
         case LirOpcode::Cvttsd2si:
         case LirOpcode::Cvttsd2si32:
             emit_sse_instruction(inst);
+            break;
+        case LirOpcode::Movaps:
+        case LirOpcode::Movups:
+        case LirOpcode::Movd_xg:
+        case LirOpcode::Movd_gx:
+        case LirOpcode::Addps:
+        case LirOpcode::Subps:
+        case LirOpcode::Mulps:
+        case LirOpcode::Divps:
+        case LirOpcode::Minps:
+        case LirOpcode::Maxps:
+        case LirOpcode::Sqrtps:
+        case LirOpcode::Addpd:
+        case LirOpcode::Subpd:
+        case LirOpcode::Mulpd:
+        case LirOpcode::Divpd:
+        case LirOpcode::Minpd:
+        case LirOpcode::Maxpd:
+        case LirOpcode::Sqrtpd:
+        case LirOpcode::Paddd:
+        case LirOpcode::Psubd:
+        case LirOpcode::Pmulld:
+        case LirOpcode::Pminsd:
+        case LirOpcode::Pmaxsd:
+        case LirOpcode::Paddq:
+        case LirOpcode::Psubq:
+        case LirOpcode::Pand:
+        case LirOpcode::Por:
+        case LirOpcode::Pxor:
+        case LirOpcode::Pandn:
+        case LirOpcode::Pcmpeqd:
+        case LirOpcode::Pslld:
+        case LirOpcode::Psllq:
+        case LirOpcode::Shufps:
+        case LirOpcode::Shufpd:
+        case LirOpcode::Pshufd:
+        case LirOpcode::Movddup:
+        case LirOpcode::Pinsrd:
+        case LirOpcode::Pextrd:
+        case LirOpcode::Pinsrq:
+        case LirOpcode::Pextrq:
+        case LirOpcode::Insertps:
+        case LirOpcode::Extractps:
+        case LirOpcode::Xorps:
+            emit_vec_instruction(inst);
             break;
         case LirOpcode::ParallelCopy:
             emit_parallel_copy(inst);

@@ -7,6 +7,7 @@
 #include <brass/runtime/patcher.hpp>
 #include <stdexcept>
 #include <cstring>
+#include <emmintrin.h>
 #include <iostream>
 
 #if defined(_WIN32)
@@ -127,6 +128,9 @@ JitExecutionEngine::JitExecutionEngine()
 
 JitExecutionEngine::~JitExecutionEngine() {
     unregister_seh_tables();
+    if (brass_get_active_stack_maps() == &stack_maps_) {
+        brass_set_active_stack_maps(nullptr);
+    }
 }
 
 JitExecutionEngine::JitExecutionEngine(JitExecutionEngine&& other) noexcept
@@ -412,6 +416,235 @@ void JitExecutionEngine::unregister_seh_tables() {
 #endif
 }
 
+#if defined(__GNUC__) || defined(__clang__)
+inline __m128 call_jit_vec1_ret_vec(void* addr, __m128 a0) {
+    register __m128 r_xmm0 asm("xmm0") = a0;
+    register __m128 res asm("xmm0");
+    asm volatile(
+        "subq $32, %%rsp\n\t"
+        "call *%1\n\t"
+        "addq $32, %%rsp"
+        : "=x"(res)
+        : "r"(addr), "x"(r_xmm0)
+        : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
+    );
+    return res;
+}
+
+inline float call_jit_vec1_ret_f32(void* addr, __m128 a0) {
+    register __m128 r_xmm0 asm("xmm0") = a0;
+    register float res asm("xmm0");
+    asm volatile(
+        "subq $32, %%rsp\n\t"
+        "call *%1\n\t"
+        "addq $32, %%rsp"
+        : "=x"(res)
+        : "r"(addr), "x"(r_xmm0)
+        : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
+    );
+    return res;
+}
+
+inline double call_jit_vec1_ret_f64(void* addr, __m128 a0) {
+    register __m128 r_xmm0 asm("xmm0") = a0;
+    register double res asm("xmm0");
+    asm volatile(
+        "subq $32, %%rsp\n\t"
+        "call *%1\n\t"
+        "addq $32, %%rsp"
+        : "=x"(res)
+        : "r"(addr), "x"(r_xmm0)
+        : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
+    );
+    return res;
+}
+
+inline int64_t call_jit_vec1_ret_i64(void* addr, __m128 a0) {
+    register __m128 r_xmm0 asm("xmm0") = a0;
+    register int64_t res asm("rax");
+    asm volatile(
+        "subq $32, %%rsp\n\t"
+        "call *%1\n\t"
+        "addq $32, %%rsp"
+        : "=r"(res)
+        : "r"(addr), "x"(r_xmm0)
+        : "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
+    );
+    return res;
+}
+
+inline __m128 call_jit_vec2_ret_vec(void* addr, __m128 a0, __m128 a1) {
+    register __m128 r_xmm0 asm("xmm0") = a0;
+    register __m128 r_xmm1 asm("xmm1") = a1;
+    register __m128 res asm("xmm0");
+    asm volatile(
+        "subq $32, %%rsp\n\t"
+        "call *%1\n\t"
+        "addq $32, %%rsp"
+        : "=x"(res)
+        : "r"(addr), "x"(r_xmm0), "x"(r_xmm1)
+        : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
+    );
+    return res;
+}
+
+inline float call_jit_vec2_ret_f32(void* addr, __m128 a0, __m128 a1) {
+    register __m128 r_xmm0 asm("xmm0") = a0;
+    register __m128 r_xmm1 asm("xmm1") = a1;
+    register float res asm("xmm0");
+    asm volatile(
+        "subq $32, %%rsp\n\t"
+        "call *%1\n\t"
+        "addq $32, %%rsp"
+        : "=x"(res)
+        : "r"(addr), "x"(r_xmm0), "x"(r_xmm1)
+        : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
+    );
+    return res;
+}
+
+inline int64_t call_jit_vec2_ret_i64(void* addr, __m128 a0, __m128 a1) {
+    register __m128 r_xmm0 asm("xmm0") = a0;
+    register __m128 r_xmm1 asm("xmm1") = a1;
+    register int64_t res asm("rax");
+    asm volatile(
+        "subq $32, %%rsp\n\t"
+        "call *%1\n\t"
+        "addq $32, %%rsp"
+        : "=r"(res)
+        : "r"(addr), "x"(r_xmm0), "x"(r_xmm1)
+        : "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
+    );
+    return res;
+}
+
+inline void call_jit_vec_int_ret_void(void* addr, __m128 a0, int64_t a1) {
+    register __m128 r_xmm0 asm("xmm0") = a0;
+    register int64_t r_rdx asm("rdx") = a1;
+    asm volatile(
+        "subq $32, %%rsp\n\t"
+        "call *%0\n\t"
+        "addq $32, %%rsp"
+        :
+        : "r"(addr), "x"(r_xmm0), "r"(r_rdx)
+        : "rax", "rcx", "r8", "r9", "r10", "r11", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
+    );
+}
+
+inline __m128 call_jit_vec_int_ret_vec(void* addr, __m128 a0, int64_t a1) {
+    register __m128 r_xmm0 asm("xmm0") = a0;
+    register int64_t r_rdx asm("rdx") = a1;
+    register __m128 res asm("xmm0");
+    asm volatile(
+        "subq $32, %%rsp\n\t"
+        "call *%1\n\t"
+        "addq $32, %%rsp"
+        : "=x"(res)
+        : "r"(addr), "x"(r_xmm0), "r"(r_rdx)
+        : "rax", "rcx", "r8", "r9", "r10", "r11", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
+    );
+    return res;
+}
+
+inline int64_t call_jit_vec_int_ret_i64(void* addr, __m128 a0, int64_t a1) {
+    register __m128 r_xmm0 asm("xmm0") = a0;
+    register int64_t r_rdx asm("rdx") = a1;
+    register int64_t res asm("rax");
+    asm volatile(
+        "subq $32, %%rsp\n\t"
+        "call *%1\n\t"
+        "addq $32, %%rsp"
+        : "=r"(res)
+        : "r"(addr), "x"(r_xmm0), "r"(r_rdx)
+        : "rcx", "r8", "r9", "r10", "r11", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
+    );
+    return res;
+}
+
+inline void call_jit_int_vec_ret_void(void* addr, int64_t a0, __m128 a1) {
+    register int64_t r_rcx asm("rcx") = a0;
+    register __m128 r_xmm1 asm("xmm1") = a1;
+    asm volatile(
+        "subq $32, %%rsp\n\t"
+        "call *%0\n\t"
+        "addq $32, %%rsp"
+        :
+        : "r"(addr), "r"(r_rcx), "x"(r_xmm1)
+        : "rax", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
+    );
+}
+
+inline __m128 call_jit_int_vec_ret_vec(void* addr, int64_t a0, __m128 a1) {
+    register int64_t r_rcx asm("rcx") = a0;
+    register __m128 r_xmm1 asm("xmm1") = a1;
+    register __m128 res asm("xmm0");
+    asm volatile(
+        "subq $32, %%rsp\n\t"
+        "call *%1\n\t"
+        "addq $32, %%rsp"
+        : "=x"(res)
+        : "r"(addr), "r"(r_rcx), "x"(r_xmm1)
+        : "rax", "rdx", "r8", "r9", "r10", "r11", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
+    );
+    return res;
+}
+
+inline int64_t call_jit_int_vec_ret_i64(void* addr, int64_t a0, __m128 a1) {
+    register int64_t r_rcx asm("rcx") = a0;
+    register __m128 r_xmm1 asm("xmm1") = a1;
+    register int64_t res asm("rax");
+    asm volatile(
+        "subq $32, %%rsp\n\t"
+        "call *%1\n\t"
+        "addq $32, %%rsp"
+        : "=r"(res)
+        : "r"(addr), "r"(r_rcx), "x"(r_xmm1)
+        : "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
+    );
+    return res;
+}
+#elif defined(_MSC_VER)
+inline __m128 call_jit_vec1_ret_vec(void* addr, __m128 a0) {
+    return reinterpret_cast<__m128(__vectorcall*)(__m128)>(addr)(a0);
+}
+inline float call_jit_vec1_ret_f32(void* addr, __m128 a0) {
+    return reinterpret_cast<float(__vectorcall*)(__m128)>(addr)(a0);
+}
+inline double call_jit_vec1_ret_f64(void* addr, __m128 a0) {
+    return reinterpret_cast<double(__vectorcall*)(__m128)>(addr)(a0);
+}
+inline int64_t call_jit_vec1_ret_i64(void* addr, __m128 a0) {
+    return reinterpret_cast<int64_t(__vectorcall*)(__m128)>(addr)(a0);
+}
+inline __m128 call_jit_vec2_ret_vec(void* addr, __m128 a0, __m128 a1) {
+    return reinterpret_cast<__m128(__vectorcall*)(__m128, __m128)>(addr)(a0, a1);
+}
+inline float call_jit_vec2_ret_f32(void* addr, __m128 a0, __m128 a1) {
+    return reinterpret_cast<float(__vectorcall*)(__m128, __m128)>(addr)(a0, a1);
+}
+inline int64_t call_jit_vec2_ret_i64(void* addr, __m128 a0, __m128 a1) {
+    return reinterpret_cast<int64_t(__vectorcall*)(__m128, __m128)>(addr)(a0, a1);
+}
+inline void call_jit_vec_int_ret_void(void* addr, __m128 a0, int64_t a1) {
+    reinterpret_cast<void(__vectorcall*)(__m128, int64_t)>(addr)(a0, a1);
+}
+inline __m128 call_jit_vec_int_ret_vec(void* addr, __m128 a0, int64_t a1) {
+    return reinterpret_cast<__m128(__vectorcall*)(__m128, int64_t)>(addr)(a0, a1);
+}
+inline int64_t call_jit_vec_int_ret_i64(void* addr, __m128 a0, int64_t a1) {
+    return reinterpret_cast<int64_t(__vectorcall*)(__m128, int64_t)>(addr)(a0, a1);
+}
+inline void call_jit_int_vec_ret_void(void* addr, int64_t a0, __m128 a1) {
+    reinterpret_cast<void(__vectorcall*)(int64_t, __m128)>(addr)(a0, a1);
+}
+inline __m128 call_jit_int_vec_ret_vec(void* addr, int64_t a0, __m128 a1) {
+    return reinterpret_cast<__m128(__vectorcall*)(int64_t, __m128)>(addr)(a0, a1);
+}
+inline int64_t call_jit_int_vec_ret_i64(void* addr, int64_t a0, __m128 a1) {
+    return reinterpret_cast<int64_t(__vectorcall*)(int64_t, __m128)>(addr)(a0, a1);
+}
+#endif
+
 RuntimeValue JitExecutionEngine::invoke(std::string_view name) {
     return invoke(name, {});
 }
@@ -450,7 +683,16 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
         if (ret_type.is_void()) {
             reinterpret_cast<void(*)()>(addr)();
             return RuntimeValue::from_void();
+        } else if (ret_type.is_vector()) {
+            __m128 r = reinterpret_cast<__m128(*)()>(addr)();
+            alignas(16) uint8_t b[16];
+            std::memcpy(b, &r, 16);
+            return RuntimeValue::from_v128(ret_type, b);
         } else if (ret_type.is_float()) {
+            if (ret_type.kind() == TypeKind::F32) {
+                float r = reinterpret_cast<float(*)()>(addr)();
+                return RuntimeValue::from_f32(r);
+            }
             double r = reinterpret_cast<double(*)()>(addr)();
             return RuntimeValue::from_f64(r);
         } else if (ret_type.kind() == TypeKind::I32) {
@@ -464,7 +706,27 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
 
     // 1 argument
     if (args.size() == 1) {
-        if (args[0].is_f64()) {
+        if (args[0].is_vector()) {
+            __m128 a0;
+            std::memcpy(&a0, args[0].v128_bytes(), 16);
+            if (ret_type.is_vector()) {
+                __m128 r = call_jit_vec1_ret_vec(addr, a0);
+                alignas(16) uint8_t b[16];
+                std::memcpy(b, &r, 16);
+                return RuntimeValue::from_v128(ret_type, b);
+            } else if (ret_type.is_float()) {
+                if (ret_type.kind() == TypeKind::F32) {
+                    float r = call_jit_vec1_ret_f32(addr, a0);
+                    return RuntimeValue::from_f32(r);
+                }
+                double r = call_jit_vec1_ret_f64(addr, a0);
+                return RuntimeValue::from_f64(r);
+            } else {
+                int64_t r = call_jit_vec1_ret_i64(addr, a0);
+                if (ret_type.kind() == TypeKind::I32) return RuntimeValue::from_i32(static_cast<int32_t>(r));
+                return RuntimeValue::from_i64(r);
+            }
+        } else if (args[0].is_f64()) {
             if (ret_type.is_float()) {
                 double r = reinterpret_cast<double(*)(double)>(addr)(get_float(0));
                 return RuntimeValue::from_f64(r);
@@ -473,7 +735,12 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
                 return RuntimeValue::from_i64(r);
             }
         } else {
-            if (ret_type.is_float()) {
+            if (ret_type.is_vector()) {
+                __m128 r = reinterpret_cast<__m128(*)(int64_t)>(addr)(get_int(0));
+                alignas(16) uint8_t b[16];
+                std::memcpy(b, &r, 16);
+                return RuntimeValue::from_v128(ret_type, b);
+            } else if (ret_type.is_float()) {
                 double r = reinterpret_cast<double(*)(int64_t)>(addr)(get_int(0));
                 return RuntimeValue::from_f64(r);
             } else {
@@ -485,7 +752,57 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
 
     // 2 arguments
     if (args.size() == 2) {
-        if (args[0].is_f64() && args[1].is_f64()) {
+        if (args[0].is_vector() && args[1].is_vector()) {
+            __m128 a0, a1;
+            std::memcpy(&a0, args[0].v128_bytes(), 16);
+            std::memcpy(&a1, args[1].v128_bytes(), 16);
+            if (ret_type.is_vector()) {
+                __m128 r = call_jit_vec2_ret_vec(addr, a0, a1);
+                alignas(16) uint8_t b[16];
+                std::memcpy(b, &r, 16);
+                return RuntimeValue::from_v128(ret_type, b);
+            } else if (ret_type.is_float()) {
+                if (ret_type.kind() == TypeKind::F32) {
+                    float r = call_jit_vec2_ret_f32(addr, a0, a1);
+                    return RuntimeValue::from_f32(r);
+                }
+                double r = reinterpret_cast<double(*)(__m128, __m128)>(addr)(a0, a1);
+                return RuntimeValue::from_f64(r);
+            } else {
+                int64_t r = call_jit_vec2_ret_i64(addr, a0, a1);
+                return RuntimeValue::from_i64(r);
+            }
+        } else if (args[0].is_vector() && !args[1].is_vector()) {
+            __m128 a0;
+            std::memcpy(&a0, args[0].v128_bytes(), 16);
+            if (ret_type.is_void()) {
+                call_jit_vec_int_ret_void(addr, a0, get_int(1));
+                return RuntimeValue::from_void();
+            } else if (ret_type.is_vector()) {
+                __m128 r = call_jit_vec_int_ret_vec(addr, a0, get_int(1));
+                alignas(16) uint8_t b[16];
+                std::memcpy(b, &r, 16);
+                return RuntimeValue::from_v128(ret_type, b);
+            } else {
+                int64_t r = call_jit_vec_int_ret_i64(addr, a0, get_int(1));
+                return RuntimeValue::from_i64(r);
+            }
+        } else if (!args[0].is_vector() && args[1].is_vector()) {
+            __m128 a1;
+            std::memcpy(&a1, args[1].v128_bytes(), 16);
+            if (ret_type.is_void()) {
+                call_jit_int_vec_ret_void(addr, get_int(0), a1);
+                return RuntimeValue::from_void();
+            } else if (ret_type.is_vector()) {
+                __m128 r = call_jit_int_vec_ret_vec(addr, get_int(0), a1);
+                alignas(16) uint8_t b[16];
+                std::memcpy(b, &r, 16);
+                return RuntimeValue::from_v128(ret_type, b);
+            } else {
+                int64_t r = call_jit_int_vec_ret_i64(addr, get_int(0), a1);
+                return RuntimeValue::from_i64(r);
+            }
+        } else if (args[0].is_f64() && args[1].is_f64()) {
             if (ret_type.is_float()) {
                 double r = reinterpret_cast<double(*)(double, double)>(addr)(get_float(0), get_float(1));
                 return RuntimeValue::from_f64(r);
@@ -494,7 +811,12 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
                 return RuntimeValue::from_i64(r);
             }
         } else {
-            if (ret_type.is_float()) {
+            if (ret_type.is_vector()) {
+                __m128 r = reinterpret_cast<__m128(*)(int64_t, int64_t)>(addr)(get_int(0), get_int(1));
+                alignas(16) uint8_t b[16];
+                std::memcpy(b, &r, 16);
+                return RuntimeValue::from_v128(ret_type, b);
+            } else if (ret_type.is_float()) {
                 double r = reinterpret_cast<double(*)(int64_t, int64_t)>(addr)(get_int(0), get_int(1));
                 return RuntimeValue::from_f64(r);
             } else {

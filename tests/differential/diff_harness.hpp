@@ -48,6 +48,24 @@ inline void assert_diff(
         } else {
             CHECK(std::abs(d1 - d2) < 1e-6);
         }
+    } else if (interp_res.is_f32()) {
+        float f1 = interp_res.as_f32();
+        float f2 = jit_res.as_f32();
+        if (std::isnan(f1)) {
+            CHECK(std::isnan(f2));
+        } else {
+            if (std::abs(f1 - f2) >= 1e-6f) {
+                std::cout << "MISMATCH f32 in " << fn_name << ": interp=" << f1 << ", jit=" << f2 << "\n";
+            }
+            CHECK(std::abs(f1 - f2) < 1e-6f);
+        }
+    } else if (interp_res.is_vector()) {
+        if (interp_res != jit_res) {
+            std::cout << "MISMATCH in " << fn_name << "\n";
+            std::cout << "Interp: " << to_string(interp_res) << " JIT: " << to_string(jit_res) << "\n";
+            print_module(mod, std::cout);
+        }
+        CHECK(interp_res == jit_res);
     } else {
         if (interp_res.raw_bits() != jit_res.raw_bits()) {
             std::cout << "MISMATCH in " << fn_name << "\n";

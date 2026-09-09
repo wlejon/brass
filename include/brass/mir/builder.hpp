@@ -106,6 +106,33 @@ public:
     Instruction* build_store_indexed(Type type, Value* base, Value* index, uint8_t scale, int32_t offset, Value* val);
     Instruction* build_store_indexed(Type type, Value* base, Value* index, uint8_t scale, Value* val);
 
+    // Vector Arithmetic & Logic
+    Value* build_vadd(Value* lhs, Value* rhs);
+    Value* build_vsub(Value* lhs, Value* rhs);
+    Value* build_vmul(Value* lhs, Value* rhs);
+    Value* build_vdiv(Value* lhs, Value* rhs);
+    Value* build_vneg(Value* val);
+    Value* build_vmin(Value* lhs, Value* rhs);
+    Value* build_vmax(Value* lhs, Value* rhs);
+    Value* build_vsqrt(Value* val);
+    Value* build_vand(Value* lhs, Value* rhs);
+    Value* build_vor(Value* lhs, Value* rhs);
+    Value* build_vxor(Value* lhs, Value* rhs);
+    Value* build_vnot(Value* val);
+
+    // Vector Memory
+    Value* build_vload(Type type, Value* base);
+    Value* build_vload(Type type, Value* base, int32_t offset);
+    Instruction* build_vstore(Type type, Value* base, Value* val);
+    Instruction* build_vstore(Type type, Value* base, int32_t offset, Value* val);
+
+    // Vector Construction & Swizzle
+    Value* build_vbroadcast(Type vec_type, Value* scalar_val);
+    Value* build_vextract_lane(Value* vec_val, uint32_t lane);
+    Value* build_vinsert_lane(Value* vec_val, Value* scalar_val, uint32_t lane);
+    Value* build_vshuffle(Value* v1, Value* v2, uint32_t mask);
+    Value* build_vzero(Type vec_type);
+
     // Calls & Safepoints
     Value* build_call(std::string_view callee, Type return_type, Span<Value* const> args);
     Value* build_call(std::string_view callee, Type return_type, std::initializer_list<Value*> args);

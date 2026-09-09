@@ -513,7 +513,10 @@ public:
             {"matmul_i64_64_preopt", 1.45},
             {"nanbox", 1.15},
             {"shapes", 1.20},
-            {"sieve", 1.35}
+            {"sieve", 1.35},
+            {"simd_dot4", 0.55},
+            {"simd_matmul4x4", 0.50},
+            {"simd_vec3_math", 0.65}
         };
         return rm;
     }

@@ -78,6 +78,26 @@ std::string_view opcode_name(Opcode op) noexcept {
         case Opcode::switch_: return "switch";
         case Opcode::ret: return "ret";
         case Opcode::unreachable: return "unreachable";
+
+        case Opcode::vadd: return "vadd";
+        case Opcode::vsub: return "vsub";
+        case Opcode::vmul: return "vmul";
+        case Opcode::vdiv: return "vdiv";
+        case Opcode::vneg: return "vneg";
+        case Opcode::vmin: return "vmin";
+        case Opcode::vmax: return "vmax";
+        case Opcode::vsqrt: return "vsqrt";
+        case Opcode::vand: return "vand";
+        case Opcode::vor: return "vor";
+        case Opcode::vxor: return "vxor";
+        case Opcode::vnot: return "vnot";
+        case Opcode::vload: return "vload";
+        case Opcode::vstore: return "vstore";
+        case Opcode::vbroadcast: return "vbroadcast";
+        case Opcode::vextract_lane: return "vextract_lane";
+        case Opcode::vinsert_lane: return "vinsert_lane";
+        case Opcode::vshuffle: return "vshuffle";
+        case Opcode::vzero: return "vzero";
     }
     return "unknown";
 }
@@ -197,6 +217,8 @@ bool is_memory(Opcode op) noexcept {
         case Opcode::store:
         case Opcode::load_indexed:
         case Opcode::store_indexed:
+        case Opcode::vload:
+        case Opcode::vstore:
             return true;
         default:
             return false;
@@ -207,12 +229,40 @@ bool is_select(Opcode op) noexcept {
     return op == Opcode::select;
 }
 
+bool is_vector_op(Opcode op) noexcept {
+    switch (op) {
+        case Opcode::vadd:
+        case Opcode::vsub:
+        case Opcode::vmul:
+        case Opcode::vdiv:
+        case Opcode::vneg:
+        case Opcode::vmin:
+        case Opcode::vmax:
+        case Opcode::vsqrt:
+        case Opcode::vand:
+        case Opcode::vor:
+        case Opcode::vxor:
+        case Opcode::vnot:
+        case Opcode::vload:
+        case Opcode::vstore:
+        case Opcode::vbroadcast:
+        case Opcode::vextract_lane:
+        case Opcode::vinsert_lane:
+        case Opcode::vshuffle:
+        case Opcode::vzero:
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool has_side_effects(Opcode op) noexcept {
     if (is_terminator(op)) return true;
     if (is_call(op)) return true;
     switch (op) {
         case Opcode::store:
         case Opcode::store_indexed:
+        case Opcode::vstore:
         case Opcode::safepoint:
         case Opcode::guard:
         case Opcode::resume_point:

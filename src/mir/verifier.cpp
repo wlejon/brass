@@ -1,4 +1,5 @@
 #include <brass/mir/verifier.hpp>
+#include "verifier_vec.hpp"
 #include <unordered_map>
 #include <unordered_set>
 #include <queue>
@@ -865,6 +866,11 @@ bool Verifier::verify_function(const Function& fn) {
                 }
 
                 case Opcode::unreachable:
+                    break;
+                default:
+                    if (is_vector_op(inst->opcode())) {
+                        verify_vector_instruction(inst, inst_prefix, [this](const std::string& msg) { report_error(msg); });
+                    }
                     break;
             }
         }

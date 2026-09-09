@@ -1,6 +1,7 @@
 #include <brass/mir/parser.hpp>
 #include <brass/mir/lexer.hpp>
 #include <brass/mir/builder.hpp>
+#include "parser_vec.hpp"
 #include <unordered_map>
 #include <vector>
 #include <string>
@@ -14,15 +15,20 @@ namespace {
 Type parse_type_from_string(std::string_view s) {
     if (s == "i32") return Type::i32();
     if (s == "i64") return Type::i64();
+    if (s == "f32") return Type::f32();
     if (s == "f64") return Type::f64();
     if (s == "ptr") return Type::ptr();
     if (s == "gcref") return Type::gcref();
     if (s == "void") return Type::void_type();
+    if (s == "f32x4") return Type::f32x4();
+    if (s == "f64x2") return Type::f64x2();
+    if (s == "i32x4") return Type::i32x4();
+    if (s == "i64x2") return Type::i64x2();
     return Type::void_type();
 }
 
 bool is_identifier_or_keyword(TokenKind k) noexcept {
-    return k == TokenKind::Ident || (k >= TokenKind::Kw_func && k <= TokenKind::Kw_void);
+    return k == TokenKind::Ident || (k >= TokenKind::Kw_func && k <= TokenKind::Kw_i64x2);
 }
 
 bool decode_opcode_string(std::string_view str, Opcode& op, Type& type_suffix, Type& mem_type) {
@@ -32,6 +38,10 @@ bool decode_opcode_string(std::string_view str, Opcode& op, Type& type_suffix, T
     // Check exact matches first
     if (str == "func" || str == "extern" || str == "module" || str == "resume_table" || str == "entry") {
         return false;
+    }
+
+    if (decode_vector_opcode(str, op, type_suffix, mem_type)) {
+        return true;
     }
 
     if (str == "ret") { op = Opcode::ret; return true; }
@@ -214,12 +224,17 @@ private:
         Token tok = peek();
         if (tok.is(TokenKind::Kw_i32)) { advance(); return Type::i32(); }
         if (tok.is(TokenKind::Kw_i64)) { advance(); return Type::i64(); }
+        if (tok.is(TokenKind::Kw_f32)) { advance(); return Type::f32(); }
         if (tok.is(TokenKind::Kw_f64)) { advance(); return Type::f64(); }
         if (tok.is(TokenKind::Kw_ptr)) { advance(); return Type::ptr(); }
         if (tok.is(TokenKind::Kw_gcref)) { advance(); return Type::gcref(); }
         if (tok.is(TokenKind::Kw_void)) { advance(); return Type::void_type(); }
+        if (tok.is(TokenKind::Kw_f32x4)) { advance(); return Type::f32x4(); }
+        if (tok.is(TokenKind::Kw_f64x2)) { advance(); return Type::f64x2(); }
+        if (tok.is(TokenKind::Kw_i32x4)) { advance(); return Type::i32x4(); }
+        if (tok.is(TokenKind::Kw_i64x2)) { advance(); return Type::i64x2(); }
 
-        error(tok.location, "Expected type (i32, i64, f64, ptr, gcref, void), got '" + std::string(tok.text) + "'");
+        error(tok.location, "Expected type (i32, i64, f32, f64, ptr, gcref, void, f32x4, f64x2, i32x4, i64x2), got '" + std::string(tok.text) + "'");
         return Type::void_type();
     }
 
@@ -437,10 +452,14 @@ private:
                            const std::function<BasicBlock*(std::string_view)>& get_or_create_block) {
         (void)fn;
         std::string result_name;
+        Type type_annotation = Type::void_type();
         bool has_assignment = false;
 
         if (peek().is(TokenKind::ValueIdent)) {
             result_name = std::string(advance().text);
+            if (match(TokenKind::Colon)) {
+                type_annotation = parse_type();
+            }
             if (!expect(TokenKind::Equal, "'='")) return false;
             has_assignment = true;
         }
@@ -493,6 +512,7 @@ private:
         };
 
         Value* res_val = nullptr;
+        Instruction* res_inst = nullptr;
 
         switch (op) {
             case Opcode::iconst_i32: {
@@ -615,16 +635,11 @@ private:
                 Value* rhs = parse_val(); if (!rhs) return false;
 
                 switch (op) {
-                    case Opcode::eq: res_val = b.build_eq(lhs, rhs); break;
-                    case Opcode::ne: res_val = b.build_ne(lhs, rhs); break;
-                    case Opcode::slt: res_val = b.build_slt(lhs, rhs); break;
-                    case Opcode::ult: res_val = b.build_ult(lhs, rhs); break;
-                    case Opcode::sle: res_val = b.build_sle(lhs, rhs); break;
-                    case Opcode::ule: res_val = b.build_ule(lhs, rhs); break;
-                    case Opcode::sgt: res_val = b.build_sgt(lhs, rhs); break;
-                    case Opcode::ugt: res_val = b.build_ugt(lhs, rhs); break;
-                    case Opcode::sge: res_val = b.build_sge(lhs, rhs); break;
-                    case Opcode::uge: res_val = b.build_uge(lhs, rhs); break;
+                    case Opcode::eq: res_val = b.build_eq(lhs, rhs); break; case Opcode::ne: res_val = b.build_ne(lhs, rhs); break;
+                    case Opcode::slt: res_val = b.build_slt(lhs, rhs); break; case Opcode::ult: res_val = b.build_ult(lhs, rhs); break;
+                    case Opcode::sle: res_val = b.build_sle(lhs, rhs); break; case Opcode::ule: res_val = b.build_ule(lhs, rhs); break;
+                    case Opcode::sgt: res_val = b.build_sgt(lhs, rhs); break; case Opcode::ugt: res_val = b.build_ugt(lhs, rhs); break;
+                    case Opcode::sge: res_val = b.build_sge(lhs, rhs); break; case Opcode::uge: res_val = b.build_uge(lhs, rhs); break;
                     default: break;
                 }
                 break;
@@ -936,6 +951,25 @@ private:
             case Opcode::unreachable: {
                 b.build_unreachable();
                 break;
+            }
+
+            default: {
+                if (is_vector_op(op)) {
+                    ParserVecContext ctx{
+                        [this]() { return peek(); },
+                        [this]() { return advance(); },
+                        [this](TokenKind k, const std::string& desc) { return expect(k, desc); },
+                        [this](TokenKind k) { return match(k); },
+                        [&]() { return parse_val(); },
+                        [this](SourceLocation loc, const std::string& msg) { error(loc, msg); }
+                    };
+                    if (!parse_vector_instruction(ctx, op, type_annotation, type_suffix, mem_type, b, res_val, res_inst)) {
+                        return false;
+                    }
+                    break;
+                }
+                error(op_tok.location, "Unhandled opcode: '" + std::string(opcode_name(op)) + "'");
+                return false;
             }
         }
 

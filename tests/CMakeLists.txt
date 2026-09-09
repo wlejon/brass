@@ -48,6 +48,8 @@ add_executable(brass_unit_tests
     unit/test_f64_demote.cpp
     unit/test_inliner.cpp
     differential/test_inlining_differential.cpp
+    unit/test_simd_mir.cpp
+    differential/test_simd_differential.cpp
 )
 
 target_include_directories(brass_unit_tests
@@ -96,6 +98,7 @@ add_executable(brass_benchmarks
     benchmarks/bench_js_shapes_modules.cpp
     benchmarks/bench_gc.cpp
     benchmarks/bench_compile_speed.cpp
+    benchmarks/bench_simd_math.cpp
 )
 
 target_include_directories(brass_benchmarks

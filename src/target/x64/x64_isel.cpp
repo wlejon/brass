@@ -378,7 +378,7 @@ VReg X64ISel::get_or_alloc_vreg(const Value* val) {
     }
 
     Type t = val->type();
-    RegClass rc = t.is_float() ? RegClass::XMM : RegClass::GPR;
+    RegClass rc = (t.is_float() || t.is_vector()) ? RegClass::XMM : RegClass::GPR;
     uint8_t sz = static_cast<uint8_t>(t.size_in_bytes());
     if (sz == 0) sz = 8;
     bool is_gc = t.is_gcref();
@@ -409,16 +409,17 @@ void X64ISel::lower_entry_parameters(const Function& mir_fn) {
         const auto* param = entry->param(i);
         VReg param_vreg = get_vreg(param);
         Type t = param->type();
-        uint8_t sz = (t.size_in_bytes() == 4) ? 4 : 8;
-        LirOpcode mov_op = t.is_float() ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
+        uint8_t sz = static_cast<uint8_t>(t.size_in_bytes());
+        if (sz == 0) sz = 8;
+        LirOpcode mov_op = t.is_vector() ? LirOpcode::Movaps : (t.is_float() ? ((sz == 4) ? LirOpcode::Movss : LirOpcode::Movsd) : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov));
 
         if (cc_.kind() == CallingConvKind::Win64) {
             if (i < 4) {
                 auto inst = std::make_unique<LirInst>(mov_op);
                 inst->add_def(LirOperand::vreg(param_vreg, sz));
-                if (t.is_float()) {
+                if (t.is_float() || t.is_vector()) {
                     XMM xreg = static_cast<XMM>(i);
-                    inst->add_use(LirOperand::preg_xmm(xreg, 8), FixedConstraint::xmm(xreg));
+                    inst->add_use(LirOperand::preg_xmm(xreg, sz), FixedConstraint::xmm(xreg));
                 } else {
                     GPR greg = cc_.arg_gpr(i);
                     inst->add_use(LirOperand::preg_gpr(greg, sz), FixedConstraint::gpr(greg));
@@ -432,20 +433,20 @@ void X64ISel::lower_entry_parameters(const Function& mir_fn) {
                 lir_entry->append_inst(std::move(inst));
             }
         } else {
-            if (t.is_float()) {
+            if (t.is_float() || t.is_vector()) {
                 if (xmm_idx < cc_.num_arg_xmms()) {
                     XMM xreg = cc_.arg_xmm(xmm_idx++);
-                    auto inst = std::make_unique<LirInst>(LirOpcode::Movsd);
-                    inst->add_def(LirOperand::vreg(param_vreg, 8));
-                    inst->add_use(LirOperand::preg_xmm(xreg, 8), FixedConstraint::xmm(xreg));
+                    auto inst = std::make_unique<LirInst>(mov_op);
+                    inst->add_def(LirOperand::vreg(param_vreg, sz));
+                    inst->add_use(LirOperand::preg_xmm(xreg, sz), FixedConstraint::xmm(xreg));
                     lir_entry->append_inst(std::move(inst));
                 } else {
                     size_t stack_idx = (xmm_idx - cc_.num_arg_xmms()) + (gpr_idx > cc_.num_arg_gprs() ? (gpr_idx - cc_.num_arg_gprs()) : 0);
                     int32_t disp = static_cast<int32_t>(16 + stack_idx * 8);
                     xmm_idx++;
-                    auto inst = std::make_unique<LirInst>(LirOpcode::Movsd);
-                    inst->add_def(LirOperand::vreg(param_vreg, 8));
-                    inst->add_use(LirOperand::mem(PReg::gpr(GPR::RBP), disp, 8));
+                    auto inst = std::make_unique<LirInst>(mov_op);
+                    inst->add_def(LirOperand::vreg(param_vreg, sz));
+                    inst->add_use(LirOperand::mem(PReg::gpr(GPR::RBP), disp, sz));
                     lir_entry->append_inst(std::move(inst));
                 }
             } else {
@@ -510,7 +511,7 @@ void X64ISel::lower_branch(const Instruction& inst, LirBlock& lir_bb) {
             uint8_t sz = param_v.size;
             if (arg_v != param_v) {
                 auto mov_inst = std::make_unique<LirInst>(
-                    param_v.is_xmm() ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov)
+                    param_v.is_xmm() ? ((sz == 16) ? LirOpcode::Movaps : LirOpcode::Movsd) : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov)
                 );
                 mov_inst->add_def(LirOperand::vreg(param_v, sz));
                 mov_inst->add_use(LirOperand::vreg(arg_v, sz));
@@ -659,7 +660,7 @@ void X64ISel::lower_branch_if(const Instruction& inst, LirBlock& lir_bb) {
             uint8_t sz = param_v.size;
             if (arg_v != param_v) {
                 auto mov_inst = std::make_unique<LirInst>(
-                    param_v.is_xmm() ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov)
+                    param_v.is_xmm() ? ((sz == 16) ? LirOpcode::Movaps : LirOpcode::Movsd) : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov)
                 );
                 mov_inst->add_def(LirOperand::vreg(param_v, sz));
                 mov_inst->add_use(LirOperand::vreg(arg_v, sz));
@@ -744,13 +745,25 @@ void X64ISel::lower_return(const Instruction& inst, LirBlock& lir_bb) {
         if (sz == 0) sz = 8;
 
         if (t.is_float()) {
-            auto mov_ret = std::make_unique<LirInst>(LirOpcode::Movsd);
-            mov_ret->add_def(LirOperand::preg_xmm(XMM::XMM0, 8), FixedConstraint::xmm(XMM::XMM0));
-            mov_ret->add_use(LirOperand::vreg(ret_vreg, 8));
+            LirOpcode ret_mov_op = (sz == 4) ? LirOpcode::Movss : LirOpcode::Movsd;
+            auto mov_ret = std::make_unique<LirInst>(ret_mov_op);
+            mov_ret->add_def(LirOperand::preg_xmm(XMM::XMM0, sz), FixedConstraint::xmm(XMM::XMM0));
+            mov_ret->add_use(LirOperand::vreg(ret_vreg, sz));
             lir_bb.append_inst(std::move(mov_ret));
 
             auto ret_inst = std::make_unique<LirInst>(LirOpcode::Ret);
-            ret_inst->add_use(LirOperand::preg_xmm(XMM::XMM0, 8), FixedConstraint::xmm(XMM::XMM0));
+            ret_inst->add_use(LirOperand::preg_xmm(XMM::XMM0, sz), FixedConstraint::xmm(XMM::XMM0));
+            ret_inst->mir_origin = &inst;
+            lir_bb.append_inst(std::move(ret_inst));
+            return;
+        } else if (t.is_vector()) {
+            auto mov_ret = std::make_unique<LirInst>(LirOpcode::Movaps);
+            mov_ret->add_def(LirOperand::preg_xmm(XMM::XMM0, 16), FixedConstraint::xmm(XMM::XMM0));
+            mov_ret->add_use(LirOperand::vreg(ret_vreg, 16));
+            lir_bb.append_inst(std::move(mov_ret));
+
+            auto ret_inst = std::make_unique<LirInst>(LirOpcode::Ret);
+            ret_inst->add_use(LirOperand::preg_xmm(XMM::XMM0, 16), FixedConstraint::xmm(XMM::XMM0));
             ret_inst->mir_origin = &inst;
             lir_bb.append_inst(std::move(ret_inst));
             return;

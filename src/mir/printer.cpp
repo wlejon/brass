@@ -95,7 +95,11 @@ public:
         os_ << "  ";
 
         if (inst.produces_value() && inst.result()) {
-            os_ << value_name(inst.result()) << " = ";
+            if (inst.type().is_vector() || inst.opcode() == Opcode::vextract_lane) {
+                os_ << value_name(inst.result()) << ": " << inst.type().name() << " = ";
+            } else {
+                os_ << value_name(inst.result()) << " = ";
+            }
         }
 
         Opcode op = inst.opcode();
@@ -337,6 +341,61 @@ public:
                 os_ << "]";
                 break;
             }
+
+            case Opcode::vadd:
+            case Opcode::vsub:
+            case Opcode::vmul:
+            case Opcode::vdiv:
+            case Opcode::vmin:
+            case Opcode::vmax:
+            case Opcode::vand:
+            case Opcode::vor:
+            case Opcode::vxor:
+                os_ << opcode_name(op) << " "
+                    << value_name(inst.operand(0)) << ", " << value_name(inst.operand(1));
+                break;
+
+            case Opcode::vneg:
+            case Opcode::vsqrt:
+            case Opcode::vnot:
+                os_ << opcode_name(op) << " " << value_name(inst.operand(0));
+                break;
+
+            case Opcode::vload:
+                os_ << "vload." << inst.memory_type().name() << " "
+                    << value_name(inst.operand(0)) << ", " << inst.offset();
+                break;
+
+            case Opcode::vstore:
+                os_ << "vstore." << inst.memory_type().name() << " "
+                    << value_name(inst.operand(0)) << ", " << inst.offset() << ", "
+                    << value_name(inst.operand(1));
+                break;
+
+            case Opcode::vbroadcast:
+                os_ << "vbroadcast." << inst.type().name() << " " << value_name(inst.operand(0));
+                break;
+
+            case Opcode::vextract_lane:
+                os_ << "vextract_lane " << value_name(inst.operand(0)) << ", " << inst.lane();
+                break;
+
+            case Opcode::vinsert_lane:
+                os_ << "vinsert_lane " << value_name(inst.operand(0)) << ", "
+                    << value_name(inst.operand(1)) << ", " << inst.lane();
+                break;
+
+            case Opcode::vshuffle: {
+                std::stringstream hex_ss;
+                hex_ss << "0x" << std::uppercase << std::hex << inst.shuffle_mask();
+                os_ << "vshuffle " << value_name(inst.operand(0)) << ", "
+                    << value_name(inst.operand(1)) << ", " << hex_ss.str();
+                break;
+            }
+
+            case Opcode::vzero:
+                os_ << "vzero." << inst.type().name();
+                break;
 
             case Opcode::ret:
                 os_ << "ret";

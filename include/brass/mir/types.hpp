@@ -11,10 +11,15 @@ namespace brass {
 enum class TypeKind : uint8_t {
     I32,
     I64,
+    F32,
     F64,
     Ptr,
     GCRef,
-    Void
+    Void,
+    F32x4,
+    F64x2,
+    I32x4,
+    I64x2
 };
 
 class Type {
@@ -24,21 +29,32 @@ public:
 
     static constexpr Type i32() noexcept { return Type(TypeKind::I32); }
     static constexpr Type i64() noexcept { return Type(TypeKind::I64); }
+    static constexpr Type f32() noexcept { return Type(TypeKind::F32); }
     static constexpr Type f64() noexcept { return Type(TypeKind::F64); }
     static constexpr Type ptr() noexcept { return Type(TypeKind::Ptr); }
     static constexpr Type gcref() noexcept { return Type(TypeKind::GCRef); }
     static constexpr Type void_type() noexcept { return Type(TypeKind::Void); }
 
+    static constexpr Type f32x4() noexcept { return Type(TypeKind::F32x4); }
+    static constexpr Type f64x2() noexcept { return Type(TypeKind::F64x2); }
+    static constexpr Type i32x4() noexcept { return Type(TypeKind::I32x4); }
+    static constexpr Type i64x2() noexcept { return Type(TypeKind::I64x2); }
+
     constexpr TypeKind kind() const noexcept { return kind_; }
 
     constexpr size_t size_in_bytes() const noexcept {
         switch (kind_) {
-            case TypeKind::I32: return 4;
+            case TypeKind::I32:
+            case TypeKind::F32: return 4;
             case TypeKind::I64:
             case TypeKind::F64:
             case TypeKind::Ptr:
             case TypeKind::GCRef: return 8;
             case TypeKind::Void: return 0;
+            case TypeKind::F32x4:
+            case TypeKind::F64x2:
+            case TypeKind::I32x4:
+            case TypeKind::I64x2: return 16;
         }
         return 0;
     }
@@ -48,7 +64,7 @@ public:
     }
 
     constexpr bool is_float() const noexcept {
-        return kind_ == TypeKind::F64;
+        return kind_ == TypeKind::F32 || kind_ == TypeKind::F64;
     }
 
     constexpr bool is_numeric() const noexcept {
@@ -69,6 +85,34 @@ public:
 
     constexpr bool is_void() const noexcept {
         return kind_ == TypeKind::Void;
+    }
+
+    constexpr bool is_vector() const noexcept {
+        return kind_ == TypeKind::F32x4 || kind_ == TypeKind::F64x2 ||
+               kind_ == TypeKind::I32x4 || kind_ == TypeKind::I64x2;
+    }
+
+    constexpr uint32_t vector_lanes() const noexcept {
+        switch (kind_) {
+            case TypeKind::F32x4:
+            case TypeKind::I32x4:
+                return 4;
+            case TypeKind::F64x2:
+            case TypeKind::I64x2:
+                return 2;
+            default:
+                return 0;
+        }
+    }
+
+    constexpr Type element_type() const noexcept {
+        switch (kind_) {
+            case TypeKind::F32x4: return Type(TypeKind::F32);
+            case TypeKind::F64x2: return Type(TypeKind::F64);
+            case TypeKind::I32x4: return Type(TypeKind::I32);
+            case TypeKind::I64x2: return Type(TypeKind::I64);
+            default: return *this;
+        }
     }
 
     std::string_view name() const noexcept;

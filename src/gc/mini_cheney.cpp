@@ -277,18 +277,21 @@ RuntimeValue MiniCheneyGC::read_memory(uintptr_t base, int32_t offset, Type t) c
         }
     }
 
-    uint64_t raw_val = 0;
     if (access_size == 4) {
         uint32_t val32 = 0;
         std::memcpy(&val32, reinterpret_cast<const void*>(effective_addr), 4);
-        raw_val = static_cast<uint64_t>(val32);
+        return RuntimeValue::from_bits(t, static_cast<uint64_t>(val32));
     } else if (access_size == 8) {
+        uint64_t raw_val = 0;
         std::memcpy(&raw_val, reinterpret_cast<const void*>(effective_addr), 8);
+        return RuntimeValue::from_bits(t, raw_val);
+    } else if (access_size == 16) {
+        uint8_t bytes[16];
+        std::memcpy(bytes, reinterpret_cast<const void*>(effective_addr), 16);
+        return RuntimeValue::from_v128(t, bytes);
     } else {
         throw std::runtime_error("Memory Error: Unsupported access size in read_memory");
     }
-
-    return RuntimeValue::from_bits(t, raw_val);
 }
 
 void MiniCheneyGC::write_memory(uintptr_t base, int32_t offset, Type t, RuntimeValue val) {
@@ -309,12 +312,14 @@ void MiniCheneyGC::write_memory(uintptr_t base, int32_t offset, Type t, RuntimeV
         }
     }
 
-    uint64_t raw_val = val.raw_bits();
     if (access_size == 4) {
-        uint32_t val32 = static_cast<uint32_t>(raw_val & 0xFFFFFFFFULL);
+        uint32_t val32 = static_cast<uint32_t>(val.raw_bits() & 0xFFFFFFFFULL);
         std::memcpy(reinterpret_cast<void*>(effective_addr), &val32, 4);
     } else if (access_size == 8) {
+        uint64_t raw_val = val.raw_bits();
         std::memcpy(reinterpret_cast<void*>(effective_addr), &raw_val, 8);
+    } else if (access_size == 16) {
+        std::memcpy(reinterpret_cast<void*>(effective_addr), val.v128_bytes(), 16);
     } else {
         throw std::runtime_error("Memory Error: Unsupported access size in write_memory");
     }

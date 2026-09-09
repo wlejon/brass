@@ -452,6 +452,87 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                     break;
                 }
 
+                case Opcode::vadd: {
+                    frame.set_value(inst->result(), val_vadd(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1))));
+                    break;
+                }
+                case Opcode::vsub: {
+                    frame.set_value(inst->result(), val_vsub(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1))));
+                    break;
+                }
+                case Opcode::vmul: {
+                    frame.set_value(inst->result(), val_vmul(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1))));
+                    break;
+                }
+                case Opcode::vdiv: {
+                    frame.set_value(inst->result(), val_vdiv(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1))));
+                    break;
+                }
+                case Opcode::vneg: {
+                    frame.set_value(inst->result(), val_vneg(frame.get_value(inst->operand(0))));
+                    break;
+                }
+                case Opcode::vmin: {
+                    frame.set_value(inst->result(), val_vmin(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1))));
+                    break;
+                }
+                case Opcode::vmax: {
+                    frame.set_value(inst->result(), val_vmax(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1))));
+                    break;
+                }
+                case Opcode::vsqrt: {
+                    frame.set_value(inst->result(), val_vsqrt(frame.get_value(inst->operand(0))));
+                    break;
+                }
+                case Opcode::vand: {
+                    frame.set_value(inst->result(), val_vand(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1))));
+                    break;
+                }
+                case Opcode::vor: {
+                    frame.set_value(inst->result(), val_vor(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1))));
+                    break;
+                }
+                case Opcode::vxor: {
+                    frame.set_value(inst->result(), val_vxor(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1))));
+                    break;
+                }
+                case Opcode::vnot: {
+                    frame.set_value(inst->result(), val_vnot(frame.get_value(inst->operand(0))));
+                    break;
+                }
+                case Opcode::vload: {
+                    RuntimeValue base = frame.get_value(inst->operand(0));
+                    RuntimeValue res = gc_.read_memory(base.raw_bits(), inst->offset(), inst->type());
+                    frame.set_value(inst->result(), res);
+                    break;
+                }
+                case Opcode::vstore: {
+                    RuntimeValue base = frame.get_value(inst->operand(0));
+                    RuntimeValue val = frame.get_value(inst->operand(1));
+                    gc_.write_memory(base.raw_bits(), inst->offset(), inst->memory_type(), val);
+                    break;
+                }
+                case Opcode::vbroadcast: {
+                    frame.set_value(inst->result(), val_vbroadcast(inst->type(), frame.get_value(inst->operand(0))));
+                    break;
+                }
+                case Opcode::vextract_lane: {
+                    frame.set_value(inst->result(), val_vextract_lane(frame.get_value(inst->operand(0)), inst->lane()));
+                    break;
+                }
+                case Opcode::vinsert_lane: {
+                    frame.set_value(inst->result(), val_vinsert_lane(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1)), inst->lane()));
+                    break;
+                }
+                case Opcode::vshuffle: {
+                    frame.set_value(inst->result(), val_vshuffle(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1)), inst->shuffle_mask()));
+                    break;
+                }
+                case Opcode::vzero: {
+                    frame.set_value(inst->result(), val_vzero(inst->type()));
+                    break;
+                }
+
                 case Opcode::call: {
                     std::string_view callee = inst->symbol();
                     std::vector<RuntimeValue> call_args;

@@ -57,6 +57,7 @@ private:
     void emit_mov_instruction(const LirInst& inst);
     void emit_alu_instruction(const LirInst& inst);
     void emit_sse_instruction(const LirInst& inst);
+    void emit_vec_instruction(const LirInst& inst);
     void emit_parallel_copy(const LirInst& inst);
     void emit_control_instruction(const LirInst& inst);
 };

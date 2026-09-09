@@ -60,7 +60,7 @@ private:
     void lower_block(const BasicBlock& bb);
     void lower_instruction(const Instruction& inst, codegen::LirBlock& lir_bb);
 
-    void lower_binary_alu(const Instruction& inst, codegen::LirBlock& lir_bb, codegen::LirOpcode op32, codegen::LirOpcode op64, codegen::LirOpcode op_f64);
+    void lower_binary_alu(const Instruction& inst, codegen::LirBlock& lir_bb, codegen::LirOpcode op32, codegen::LirOpcode op64, codegen::LirOpcode op_f64, codegen::LirOpcode op_f32);
     void lower_div_mod(const Instruction& inst, codegen::LirBlock& lir_bb, bool is_signed, bool is_mod);
     void lower_shift(const Instruction& inst, codegen::LirBlock& lir_bb, codegen::LirOpcode op32, codegen::LirOpcode op64);
     void lower_comparison(const Instruction& inst, codegen::LirBlock& lir_bb, Condition cond, Condition float_cond);
@@ -77,6 +77,7 @@ private:
     void lower_store_indexed(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_safepoint(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_guard(const Instruction& inst, codegen::LirBlock& lir_bb);
+    void lower_vector_instruction(const Instruction& inst, codegen::LirBlock& lir_bb);
 };
 
 std::unique_ptr<codegen::LirFunction> lower_to_x64_lir(
