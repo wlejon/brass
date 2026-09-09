@@ -67,6 +67,10 @@ add_executable(brass_unit_tests
     unit/test_jump_threading.cpp
     unit/test_block_layout.cpp
     differential/test_unswitch_differential.cpp
+    unit/test_profile_serialization.cpp
+    unit/test_pgo_instrument.cpp
+    unit/test_branch_probability.cpp
+    differential/test_pgo_differential.cpp
 )
 
 target_include_directories(brass_unit_tests

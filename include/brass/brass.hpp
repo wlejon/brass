@@ -30,6 +30,11 @@
 #include <brass/mir/cfg_simplify.hpp>
 #include <brass/mir/loop_unswitch.hpp>
 #include <brass/mir/jump_threading.hpp>
+#include <brass/mir/branch_probability.hpp>
+#include <brass/pgo/profile_format.hpp>
+#include <brass/pgo/profile_data.hpp>
+#include <brass/pgo/instrument.hpp>
+#include <brass/pgo/pgo_opt.hpp>
 #include <brass/mir/lexer.hpp>
 #include <brass/mir/printer.hpp>
 #include <brass/mir/parser.hpp>

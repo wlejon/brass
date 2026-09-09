@@ -15,6 +15,8 @@
 #include <brass/mir/jump_threading.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/verifier.hpp>
+#include <brass/pgo/profile_data.hpp>
+#include <brass/mir/branch_probability.hpp>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -688,16 +690,41 @@ bool optimize_function_loops(Function& fn, const LoopOptOptions& options) {
     }
 
     if (options.enable_unroll) {
-        fn.rebuild_cfg_predecessors();
-        DominatorTree dom(fn);
-        bool allow_fp = options.enable_fp_reassociation || fn.allow_fp_reassociation() || (fn.parent() && fn.parent()->allow_fp_reassociation());
-        if (loop_unroll_pass(fn, dom, {options.unroll_factor, true, allow_fp, true})) {
-            any_changed = true;
+        bool should_unroll = true;
+        if (options.profile_data) {
+            const auto* prof = options.profile_data->find_function(std::string(fn.name()));
+            if (prof) {
+                mir::BranchProbabilityAnalysis bpa(fn, *prof);
+                DominatorTree dom_chk(fn);
+                LoopAnalysis la(fn, dom_chk);
+                bool has_hot_loop = false;
+                for (LoopInfo* loop : la.post_order_loops()) {
+                    if (loop && loop->header()) {
+                        uint64_t hdr_cnt = bpa.block_frequency_info().get_block_count(loop->header());
+                        BasicBlock* ph = loop->preheader();
+                        uint64_t ph_cnt = ph ? bpa.block_frequency_info().get_block_count(ph) : 0;
+                        uint64_t iters = (ph_cnt > 0) ? (hdr_cnt / ph_cnt) : hdr_cnt;
+                        if (iters >= options.min_pgo_unroll_iterations && hdr_cnt >= 10) {
+                            has_hot_loop = true;
+                            break;
+                        }
+                    }
+                }
+                if (!has_hot_loop) should_unroll = false;
+            }
+        }
+        if (should_unroll) {
             fn.rebuild_cfg_predecessors();
-            DominatorTree dom_after(fn);
-            constant_folding_pass(fn);
-            cse_pass(fn, dom_after);
-            dead_code_elimination_pass(fn);
+            DominatorTree dom(fn);
+            bool allow_fp = options.enable_fp_reassociation || fn.allow_fp_reassociation() || (fn.parent() && fn.parent()->allow_fp_reassociation());
+            if (loop_unroll_pass(fn, dom, {options.unroll_factor, true, allow_fp, true})) {
+                any_changed = true;
+                fn.rebuild_cfg_predecessors();
+                DominatorTree dom_after(fn);
+                constant_folding_pass(fn);
+                cse_pass(fn, dom_after);
+                dead_code_elimination_pass(fn);
+            }
         }
     }
 
@@ -757,12 +784,34 @@ bool optimize_function(Function& fn, const LoopOptOptions& options) {
 
     // 2c. Loop Unswitch
     if (options.enable_loop_unswitch) {
-        LoopUnswitchStats* ustats = options.stats ? &options.stats->unswitch_stats : nullptr;
-        if (unswitch_loops_in_function(fn, options.unswitch_options, ustats)) {
-            changed = true;
-            if (options.enable_cfg_simplify) {
-                CfgSimplifyOptions cfg_opts;
-                cfg_simplify_function(fn, cfg_opts);
+        bool should_unswitch = true;
+        if (options.profile_data) {
+            const auto* prof = options.profile_data->find_function(std::string(fn.name()));
+            if (prof) {
+                mir::BranchProbabilityAnalysis bpa(fn, *prof);
+                DominatorTree dom_chk(fn);
+                LoopAnalysis la(fn, dom_chk);
+                bool has_hot_loop = false;
+                for (LoopInfo* loop : la.post_order_loops()) {
+                    if (loop && loop->header()) {
+                        uint64_t hdr_cnt = bpa.block_frequency_info().get_block_count(loop->header());
+                        if (hdr_cnt >= options.min_pgo_unswitch_count) {
+                            has_hot_loop = true;
+                            break;
+                        }
+                    }
+                }
+                if (!has_hot_loop) should_unswitch = false;
+            }
+        }
+        if (should_unswitch) {
+            LoopUnswitchStats* ustats = options.stats ? &options.stats->unswitch_stats : nullptr;
+            if (unswitch_loops_in_function(fn, options.unswitch_options, ustats)) {
+                changed = true;
+                if (options.enable_cfg_simplify) {
+                    CfgSimplifyOptions cfg_opts;
+                    cfg_simplify_function(fn, cfg_opts);
+                }
             }
         }
     }

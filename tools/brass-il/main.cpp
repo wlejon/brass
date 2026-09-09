@@ -14,7 +14,7 @@ using namespace brass::il;
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--emit-shared <output.dll/so>] [-shared] [--inline] [--sroa] [--escape-analysis] [--gvn] [--no-gvn] [--sccp] [--no-sccp] [--guard-elim] [--no-guard-elim] [--cfg-simplify] [--no-cfg-simplify] [--loop-unswitch] [--no-loop-unswitch] [--jump-threading] [--no-jump-threading] [--trace-layout] [--no-trace-layout] [--alias-analysis] [--vectorize] [--slp] [--loop-tile] [--tile-size <N>] [--demote-stats] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc] [--timed <N>]\n";
+        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--emit-shared <output.dll/so>] [-shared] [--inline] [--sroa] [--escape-analysis] [--gvn] [--no-gvn] [--sccp] [--no-sccp] [--guard-elim] [--no-guard-elim] [--cfg-simplify] [--no-cfg-simplify] [--loop-unswitch] [--no-loop-unswitch] [--jump-threading] [--no-jump-threading] [--trace-layout] [--no-trace-layout] [--alias-analysis] [--vectorize] [--slp] [--loop-tile] [--tile-size <N>] [--demote-stats] [--pgo-instrument] [--pgo-use <file>] [--dump-branch-probabilities] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc] [--timed <N>]\n";
         return 1;
     }
 
@@ -27,6 +27,9 @@ int main(int argc, char** argv) {
     bool raw_output = false;
     bool show_demote_stats = false;
     int timed_iterations = 0;
+    bool enable_pgo_instrument = false;
+    std::string pgo_use_file;
+    bool dump_branch_probabilities = false;
     TranslatorOptions options;
 
     for (int i = 1; i < argc; ++i) {
@@ -106,6 +109,14 @@ int main(int argc, char** argv) {
             options.allow_fp_reassociation = true;
         } else if (arg == "--timed" && i + 1 < argc) {
             timed_iterations = std::max(1, std::stoi(argv[++i]));
+        } else if (arg == "--pgo-instrument") {
+            enable_pgo_instrument = true;
+        } else if (arg.rfind("--pgo-use=", 0) == 0) {
+            pgo_use_file = arg.substr(10);
+        } else if (arg == "--pgo-use" && i + 1 < argc) {
+            pgo_use_file = argv[++i];
+        } else if (arg == "--dump-branch-probabilities") {
+            dump_branch_probabilities = true;
         } else if (arg == "-o" && i + 1 < argc) {
             output_obj = argv[++i];
         } else if (arg.rfind("-o", 0) == 0 && arg.size() > 2) {
@@ -196,6 +207,66 @@ int main(int argc, char** argv) {
         }
     }
 
+    std::unique_ptr<brass::pgo::ProfileData> pgo_profile;
+    if (!pgo_use_file.empty()) {
+        std::string pgo_err;
+        pgo_profile = brass::pgo::ProfileData::read_from_file(pgo_use_file, &pgo_err);
+        if (!pgo_profile) {
+            std::cerr << "Error: Could not load profile from '" << pgo_use_file << "': " << pgo_err << "\n";
+            return 1;
+        }
+        if (!dump_branch_probabilities) {
+            brass::pgo::optimize_module_pgo(*res.module, *pgo_profile);
+            DiagnosticReporter pgo_diag;
+            if (!verify_module(*res.module, &pgo_diag) || pgo_diag.has_errors()) {
+                std::cerr << "Verification failed after PGO optimization:\n" << pgo_diag.format_all();
+                return 1;
+            }
+        }
+    }
+
+    if (dump_branch_probabilities) {
+        if (!pgo_profile) {
+            std::cerr << "Error: --dump-branch-probabilities requires --pgo-use=<file.bprof>\n";
+            return 1;
+        }
+        std::cout << "=== Branch Probability Analysis ===\n";
+        for (const Function* fn : res.module->functions()) {
+            if (!fn) continue;
+            const auto* fp = pgo_profile->find_function(std::string(fn->name()));
+            if (!fp) {
+                std::cout << "Function '" << fn->name() << "': No profile available\n";
+                continue;
+            }
+            mir::BranchProbabilityAnalysis bpa(*fn, *fp);
+            const auto& bfi = bpa.block_frequency_info();
+            const auto& bpi = bpa.branch_probability_info();
+            std::cout << "Function '" << fn->name() << "' (entry count=" << bfi.entry_count() << "):\n";
+            for (const BasicBlock* bb : fn->blocks()) {
+                if (!bb) continue;
+                std::cout << "  block " << bb->name() << ": count=" << bfi.get_block_count(bb)
+                          << ", freq=" << bfi.get_block_frequency(bb)
+                          << (bfi.is_hot_block(bb) ? " [HOT]" : "")
+                          << (bfi.is_cold_block(bb) ? " [COLD]" : "") << "\n";
+                for (const BasicBlock* succ : bb->successors()) {
+                    if (!succ) continue;
+                    std::cout << "    edge -> " << succ->name()
+                              << ": count=" << bpi.get_edge_count(bb, succ)
+                              << ", prob=" << bpi.get_edge_probability(bb, succ) << "\n";
+                }
+            }
+        }
+    }
+
+    if (enable_pgo_instrument) {
+        brass::pgo::instrument_module(*res.module);
+        DiagnosticReporter pgo_diag;
+        if (!verify_module(*res.module, &pgo_diag) || pgo_diag.has_errors()) {
+            std::cerr << "Verification failed after PGO instrumentation:\n" << pgo_diag.format_all();
+            return 1;
+        }
+    }
+
     if (emit_mir) {
         std::cout << to_string(*res.module) << "\n";
     }
@@ -228,6 +299,7 @@ int main(int argc, char** argv) {
     if (run_jit || (output_obj.empty() && output_shared.empty() && !emit_shared)) {
         codegen::JitExecutionEngine jit;
         register_bronze_runtime_symbols(&jit);
+        jit.register_external_symbol("brass_pgo_inc", reinterpret_cast<void*>(&brass_pgo_inc));
 
         if (!jit.compile_and_load(*res.module)) {
             std::cerr << "Error: JIT compilation failed.\n";

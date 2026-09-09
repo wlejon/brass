@@ -1,4 +1,6 @@
 #include <brass/codegen/block_layout.hpp>
+#include <brass/mir/function.hpp>
+#include <brass/mir/branch_probability.hpp>
 #include <unordered_set>
 #include <unordered_map>
 #include <vector>
@@ -8,10 +10,17 @@ namespace brass::codegen {
 
 namespace {
 
-bool is_block_cold(const LirFunction& fn, const LirBlock& block) {
+bool is_block_cold(const LirFunction& fn, const LirBlock& block, const BlockLayoutOptions& opts) {
     // Entry block is never cold
     if (!fn.blocks.empty() && fn.blocks[0].get() == &block) {
         return false;
+    }
+
+    if (opts.block_freq && opts.mir_function) {
+        const BasicBlock* mb = opts.mir_function->get_block_by_name(block.name);
+        if (mb && opts.block_freq->get_block_count(mb) == 0) {
+            return true;
+        }
     }
 
     // Check resume entries
@@ -131,7 +140,7 @@ void optimize_block_layout(LirFunction& fn, const BlockLayoutOptions& opts) {
     for (const auto& b : fn.blocks) {
         if (!b) continue;
         id_to_block[b->id] = b.get();
-        if (is_block_cold(fn, *b)) {
+        if (is_block_cold(fn, *b, opts)) {
             cold_blocks.insert(b->id);
         }
     }
@@ -170,6 +179,16 @@ void optimize_block_layout(LirFunction& fn, const BlockLayoutOptions& opts) {
             if (cold_blocks.count(s->id)) {
                 score -= 5000;
             } else {
+                if (opts.branch_prob && opts.mir_function) {
+                    const BasicBlock* curr_mb = opts.mir_function->get_block_by_name(curr->name);
+                    const BasicBlock* s_mb = opts.mir_function->get_block_by_name(s->name);
+                    if (curr_mb && s_mb) {
+                        double prob = opts.branch_prob->get_edge_probability(curr_mb, s_mb);
+                        uint64_t edge_cnt = opts.branch_prob->get_edge_count(curr_mb, s_mb);
+                        score += static_cast<int>(prob * 10000.0) + (edge_cnt > 0 ? 500 : 0);
+                    }
+                }
+
                 score += static_cast<int>(s->loop_depth) * 100;
                 if (s->loop_depth > curr->loop_depth) {
                     score += 80;
@@ -204,8 +223,15 @@ void optimize_block_layout(LirFunction& fn, const BlockLayoutOptions& opts) {
 
             for (const auto& b : fn.blocks) {
                 if (!b || placed.count(b->id) || cold_blocks.count(b->id)) continue;
-                if (static_cast<int>(b->loop_depth) > max_depth) {
-                    max_depth = static_cast<int>(b->loop_depth);
+                int b_score = static_cast<int>(b->loop_depth) * 10;
+                if (opts.block_freq && opts.mir_function) {
+                    const BasicBlock* mb = opts.mir_function->get_block_by_name(b->name);
+                    if (mb) {
+                        b_score += static_cast<int>(std::min<uint64_t>(1000, opts.block_freq->get_block_count(mb)));
+                    }
+                }
+                if (b_score > max_depth) {
+                    max_depth = b_score;
                     next_trace_start = b.get();
                 }
             }

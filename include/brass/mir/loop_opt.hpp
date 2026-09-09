@@ -16,6 +16,10 @@ struct LoopOptStats {
     JumpThreadingStats jump_threading_stats;
 };
 
+namespace pgo {
+class ProfileData;
+}
+
 struct LoopOptOptions {
     bool enable_licm = true;
     bool enable_ivsr = true;
@@ -45,6 +49,9 @@ struct LoopOptOptions {
     JumpThreadingOptions jump_threading_options;
     DemoteStats* demote_stats = nullptr;
     LoopOptStats* stats = nullptr;
+    const pgo::ProfileData* profile_data = nullptr;
+    uint64_t min_pgo_unroll_iterations = 4;
+    uint64_t min_pgo_unswitch_count = 10;
 };
 
 // General optimization pipeline: SROA -> GVN (CSE + RLE + DSE) -> Loop Opt -> SLP Vectorizer

@@ -8,6 +8,10 @@
 
 namespace brass {
 
+namespace pgo {
+class ProfileData;
+}
+
 struct InlinerOptions {
     size_t max_inline_depth = 4;
     size_t leaf_instruction_threshold = 30;
@@ -19,6 +23,8 @@ struct InlinerOptions {
     bool enable_loop_priority = true;
     bool enable_sroa = true;
     bool enable_gvn = true;
+    const pgo::ProfileData* profile_data = nullptr;
+    bool enable_pgo = true;
 };
 
 // Profitability decision for inlining a specific call site

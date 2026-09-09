@@ -8,7 +8,8 @@
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/loop_analysis.hpp>
 #include <algorithm>
-#include <vector>
+#include <brass/pgo/profile_data.hpp>
+#include <brass/mir/branch_probability.hpp>
 
 namespace brass {
 
@@ -53,8 +54,34 @@ bool should_inline_call(
     // Reject recursive cycles to prevent code explosion
     if (cg.is_recursive(&callee)) return false;
 
+    size_t effective_max_depth = options.max_inline_depth;
+    double threshold = static_cast<double>(options.leaf_instruction_threshold);
+
+    // PGO Profitability Model
+    if (options.enable_pgo && options.profile_data) {
+        const auto* caller_prof = options.profile_data->find_function(std::string(caller.name()));
+        if (caller_prof && site.instruction && site.instruction->parent()) {
+            mir::BranchProbabilityAnalysis bpa(caller, *caller_prof);
+            const auto& bfi = bpa.block_frequency_info();
+            const BasicBlock* call_bb = site.instruction->parent();
+            uint64_t call_count = bfi.get_block_count(call_bb);
+            double call_freq = bfi.get_block_frequency(call_bb);
+
+            // Cold call site: suppress inlining
+            if (call_count == 0 || call_freq < 0.001) {
+                return false;
+            }
+
+            // Hot call site: grant significant bonus to inline depth and instruction thresholds
+            if (call_count >= 100 || call_freq >= 0.10) {
+                effective_max_depth += 2;
+                threshold *= 3.0;
+            }
+        }
+    }
+
     // Depth limit
-    if (current_depth >= options.max_inline_depth) return false;
+    if (current_depth >= effective_max_depth) return false;
 
     // Callee size check
     size_t callee_size = get_function_instruction_count(callee);
@@ -71,7 +98,7 @@ bool should_inline_call(
     }
 
     // Profitability model
-    double threshold = static_cast<double>(options.leaf_instruction_threshold);
+    // threshold initialized above and modified by PGO if active
 
     // Loop call priority bonus
     if (options.enable_loop_priority && loop_depth >= 1) {
