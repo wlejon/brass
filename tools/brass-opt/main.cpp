@@ -17,6 +17,8 @@ void print_usage(const char* prog) {
               << "  --check-roundtrip     Assert byte-identical parse(print(x)) roundtrip\n"
               << "  -c, --compile         Compile MIR module to relocatable object file (.obj/.o)\n"
               << "  --format <coff|elf>   Object file format for --compile (default: host format)\n"
+              << "  --emit-shared <file>  Compile MIR module directly to shared library (.dll/.so)\n"
+              << "  -shared               Compile MIR module directly to shared library (.dll/.so)\n"
               << "  --jit                 Use in-memory JIT execution engine for --run\n"
               << "  -r, --run <fn>        Execute function <fn>\n"
               << "  --args <a1> <a2>...   Arguments to pass to the function executed with --run\n"
@@ -104,12 +106,14 @@ int main(int argc, char** argv) {
     std::string output_file;
     std::string run_fn;
     std::string obj_format;
+    std::string shared_output_file;
     std::vector<std::string> run_arg_strings;
     bool verify_only = false;
     bool print_canonical = false;
     bool check_roundtrip = false;
     bool gc_stress = false;
     bool compile_object = false;
+    bool emit_shared = false;
     bool use_jit = false;
     bool enable_inlining = false;
     bool enable_sroa = false;
@@ -148,6 +152,13 @@ int main(int argc, char** argv) {
             enable_slp = true;
         } else if (arg == "-c" || arg == "--compile") {
             compile_object = true;
+        } else if (arg == "--emit-shared") {
+            emit_shared = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                shared_output_file = argv[++i];
+            }
+        } else if (arg == "-shared") {
+            emit_shared = true;
         } else if (arg == "--jit") {
             use_jit = true;
         } else if (arg == "--format") {
@@ -360,6 +371,42 @@ int main(int argc, char** argv) {
 
         std::cout << "Successfully emitted object file '" << output_file << "' ("
                   << binary_data.size() << " bytes, " << (target.is_windows() ? "COFF" : "ELF64") << ")\n";
+        return 0;
+    }
+
+    if (emit_shared) {
+        brass::Target target = brass::Target::host();
+        brass::target::OutputFormat fmt = brass::target::OutputFormat::Auto;
+        if (obj_format == "coff") {
+            target = brass::Target::x64_windows();
+            fmt = brass::target::OutputFormat::WindowsPeDll;
+        } else if (obj_format == "elf") {
+            target = brass::Target::x64_linux();
+            fmt = brass::target::OutputFormat::LinuxElfSo;
+        }
+
+        std::string final_output = shared_output_file.empty() ? output_file : shared_output_file;
+        if (final_output.empty()) {
+            if (input_file != "-") {
+                size_t dot_pos = input_file.find_last_of('.');
+                std::string base = (dot_pos != std::string::npos) ? input_file.substr(0, dot_pos) : input_file;
+                final_output = base + (target.is_windows() ? ".dll" : ".so");
+            } else {
+                final_output = target.is_windows() ? "out.dll" : "out.so";
+            }
+        }
+
+        brass::target::LinkerOptions link_opts;
+        link_opts.format = fmt;
+        link_opts.export_all_functions = true;
+
+        if (!brass::target::AotLinker::link_to_file(*mod, final_output, target, link_opts)) {
+            std::cerr << "Error: Could not link shared library to '" << final_output << "'\n";
+            return 1;
+        }
+
+        std::cout << "Successfully emitted shared library '" << final_output << "' ("
+                  << (target.is_windows() ? "PE32+ DLL" : "ELF64 SO") << ")\n";
         return 0;
     }
 

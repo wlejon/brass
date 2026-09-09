@@ -56,6 +56,9 @@ add_executable(brass_unit_tests
     differential/test_sroa_differential.cpp
     unit/test_gvn.cpp
     differential/test_gvn_differential.cpp
+    unit/test_pe_dll_writer.cpp
+    unit/test_elf_so_writer.cpp
+    unit/test_aot_shared_library.cpp
 )
 
 target_include_directories(brass_unit_tests

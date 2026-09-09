@@ -14,12 +14,14 @@ using namespace brass::il;
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--inline] [--sroa] [--escape-analysis] [--gvn] [--no-gvn] [--alias-analysis] [--vectorize] [--slp] [--demote-stats] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc] [--timed <N>]\n";
+        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--emit-shared <output.dll/so>] [-shared] [--inline] [--sroa] [--escape-analysis] [--gvn] [--no-gvn] [--alias-analysis] [--vectorize] [--slp] [--demote-stats] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc] [--timed <N>]\n";
         return 1;
     }
 
     std::string input_file;
     std::string output_obj;
+    std::string output_shared;
+    bool emit_shared = false;
     bool run_jit = false;
     bool emit_mir = false;
     bool raw_output = false;
@@ -33,6 +35,13 @@ int main(int argc, char** argv) {
             run_jit = true;
         } else if (arg == "--emit-mir") {
             emit_mir = true;
+        } else if (arg == "--emit-shared") {
+            emit_shared = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                output_shared = argv[++i];
+            }
+        } else if (arg == "-shared") {
+            emit_shared = true;
         } else if (arg == "--inline") {
             options.enable_inlining = true;
         } else if (arg == "--sroa") {
@@ -168,7 +177,23 @@ int main(int argc, char** argv) {
         std::cout << "[brass-il] Successfully wrote object to: " << output_obj << "\n";
     }
 
-    if (run_jit || output_obj.empty()) {
+    if (!output_shared.empty() || emit_shared) {
+        std::string out_path = output_shared;
+        if (out_path.empty()) {
+            size_t dot_pos = input_file.find_last_of('.');
+            std::string base = (dot_pos != std::string::npos) ? input_file.substr(0, dot_pos) : input_file;
+            out_path = base + (Target::host().is_windows() ? ".dll" : ".so");
+        }
+        target::LinkerOptions link_opts;
+        link_opts.export_all_functions = true;
+        if (!target::AotLinker::link_to_file(*res.module, out_path, Target::host(), link_opts)) {
+            std::cerr << "Error: Failed to link shared library: " << out_path << "\n";
+            return 1;
+        }
+        std::cout << "[brass-il] Successfully wrote shared library to: " << out_path << "\n";
+    }
+
+    if (run_jit || (output_obj.empty() && output_shared.empty() && !emit_shared)) {
         codegen::JitExecutionEngine jit;
         register_bronze_runtime_symbols(&jit);
 

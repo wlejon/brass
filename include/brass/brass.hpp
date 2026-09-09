@@ -49,6 +49,10 @@
 #include <brass/object/object_writer.hpp>
 #include <brass/object/coff_writer.hpp>
 #include <brass/object/elf_writer.hpp>
+#include <brass/target/pe_dll_writer.hpp>
+#include <brass/target/elf_so_writer.hpp>
+#include <brass/target/aot_linker.hpp>
+#include <brass/target/dynamic_library.hpp>
 
 #include <brass/runtime/deopt.hpp>
 #include <brass/runtime/resume_table.hpp>

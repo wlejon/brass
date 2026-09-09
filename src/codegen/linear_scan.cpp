@@ -202,10 +202,16 @@ std::set<uint8_t> LinearScanAllocator::get_hard_blocked_regs(const LiveInterval&
     std::set<uint8_t> blocked;
 
     if (interval.spans_call) {
-        for (const auto& reg : pool) {
-            bool is_callee = is_gpr ? cc_.is_callee_saved(reg.as_gpr()) : cc_.is_callee_saved(reg.as_xmm());
-            if (!is_callee) {
+        if (interval.vreg.is_gcref) {
+            for (const auto& reg : pool) {
                 blocked.insert(reg.code);
+            }
+        } else {
+            for (const auto& reg : pool) {
+                bool is_callee = is_gpr ? cc_.is_callee_saved(reg.as_gpr()) : cc_.is_callee_saved(reg.as_xmm());
+                if (!is_callee) {
+                    blocked.insert(reg.code);
+                }
             }
         }
     }
