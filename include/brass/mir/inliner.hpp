@@ -18,6 +18,7 @@ struct InlinerOptions {
     bool enable_devirtualization = true;
     bool enable_loop_priority = true;
     bool enable_sroa = true;
+    bool enable_gvn = true;
 };
 
 // Profitability decision for inlining a specific call site

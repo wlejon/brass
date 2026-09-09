@@ -7,6 +7,7 @@
 #include <brass/mir/select_opt.hpp>
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/sroa.hpp>
+#include <brass/mir/gvn.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/verifier.hpp>
 #include <unordered_map>
@@ -694,6 +695,49 @@ bool optimize_module_loops(Module& mod, const LoopOptOptions& options) {
     }
     for (Function* fn : mod.functions()) {
         if (fn) changed |= optimize_function_loops(*fn, mod_opts);
+    }
+    return changed;
+}
+
+bool optimize_function(Function& fn) {
+    LoopOptOptions opts;
+    return optimize_function(fn, opts);
+}
+
+bool optimize_function(Function& fn, const LoopOptOptions& options) {
+    bool changed = false;
+
+    // 1. SROA
+    if (options.enable_sroa) {
+        SroaOptions sroa_opts;
+        changed |= sroa_function(fn, sroa_opts);
+    }
+
+    // 2. GVN (CSE + RLE + DSE)
+    if (options.enable_gvn) {
+        GvnOptions gvn_opts;
+        changed |= gvn_function(fn, gvn_opts);
+    }
+
+    // 3. Loop optimizations, LICM, IVSR, DCE & Vectorization
+    changed |= optimize_function_loops(fn, options);
+
+    return changed;
+}
+
+bool optimize_module(Module& mod) {
+    LoopOptOptions opts;
+    return optimize_module(mod, opts);
+}
+
+bool optimize_module(Module& mod, const LoopOptOptions& options) {
+    bool changed = false;
+    LoopOptOptions mod_opts = options;
+    if (mod.allow_fp_reassociation()) {
+        mod_opts.enable_fp_reassociation = true;
+    }
+    for (Function* fn : mod.functions()) {
+        if (fn) changed |= optimize_function(*fn, mod_opts);
     }
     return changed;
 }

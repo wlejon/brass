@@ -4,6 +4,7 @@
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/inliner.hpp>
 #include <brass/mir/sroa.hpp>
+#include <brass/mir/gvn.hpp>
 #include <iostream>
 
 namespace brass::il {
@@ -148,13 +149,18 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
         opt_opts.enable_vectorize = options_.enable_vectorize;
         opt_opts.enable_slp = options_.enable_slp;
         opt_opts.enable_sroa = options_.enable_sroa;
+        opt_opts.enable_gvn = options_.enable_gvn;
         opt_opts.demote_stats = options_.demote_stats_collector;
         if (options_.enable_sroa) {
             sroa_module(*mod);
         }
+        if (options_.enable_gvn) {
+            gvn_module(*mod);
+        }
         if (options_.enable_inlining) {
             InlinerOptions inliner_opts;
             inliner_opts.enable_sroa = options_.enable_sroa;
+            inliner_opts.enable_gvn = options_.enable_gvn;
             optimize_module_ipo(*mod, inliner_opts, opt_opts);
         } else {
             optimize_module_loops(*mod, opt_opts);

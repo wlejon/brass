@@ -2,6 +2,7 @@
 #include <brass/mir/inline_transform.hpp>
 #include <brass/mir/devirtualize.hpp>
 #include <brass/mir/sroa.hpp>
+#include <brass/mir/gvn.hpp>
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/loop_analysis.hpp>
 #include <algorithm>
@@ -238,6 +239,12 @@ bool optimize_module_ipo(Module& mod, const InlinerOptions& inline_opts, const L
     if (inline_opts.enable_sroa) {
         SroaOptions sroa_opts;
         changed |= sroa_module(mod, sroa_opts);
+    }
+
+    // 2c. GVN (CSE + RLE + DSE) pass
+    if (inline_opts.enable_gvn) {
+        GvnOptions gvn_opts;
+        changed |= gvn_module(mod, gvn_opts);
     }
 
     // 3. Re-run loop optimizations, constant folding, CSE, DCE & f64 demotion

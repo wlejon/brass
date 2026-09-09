@@ -22,7 +22,9 @@ struct TranslatorOptions {
     bool demote_stats = false;
     bool enable_inlining = false;
     bool enable_sroa = false;
+    bool enable_gvn = true;
     bool run_escape_analysis = false;
+    bool run_alias_analysis = false;
     bool enable_vectorize = true;
     bool enable_slp = true;
     DemoteStats* demote_stats_collector = nullptr;

@@ -24,6 +24,8 @@ void print_usage(const char* prog) {
               << "  --inline              Run interprocedural function inlining and IPO optimization pipeline\n"
               << "  --sroa                Run Scalar Replacement of Aggregates (SROA)\n"
               << "  --escape-analysis     Run Escape Analysis on module functions\n"
+              << "  --gvn                 Run Global Value Numbering (GVN), RLE & DSE\n"
+              << "  --alias-analysis      Run Alias Analysis on module functions\n"
               << "  --vectorize           Run loop vectorization on countable loops\n"
               << "  --slp                 Run SLP straight-line vectorization\n"
               << "  -o <file>             Write output to <file> instead of stdout\n";
@@ -111,7 +113,9 @@ int main(int argc, char** argv) {
     bool use_jit = false;
     bool enable_inlining = false;
     bool enable_sroa = false;
+    bool enable_gvn = false;
     bool run_escape_analysis = false;
+    bool run_alias_analysis = false;
     bool enable_vectorize = false;
     bool enable_slp = false;
 
@@ -134,6 +138,10 @@ int main(int argc, char** argv) {
             enable_sroa = true;
         } else if (arg == "--escape-analysis") {
             run_escape_analysis = true;
+        } else if (arg == "--gvn") {
+            enable_gvn = true;
+        } else if (arg == "--alias-analysis") {
+            run_alias_analysis = true;
         } else if (arg == "--vectorize") {
             enable_vectorize = true;
         } else if (arg == "--slp") {
@@ -219,11 +227,44 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (run_alias_analysis) {
+        for (const brass::Function* fn : mod->functions()) {
+            if (!fn) continue;
+            brass::AliasAnalysis aa(*fn);
+            std::cout << "Alias Analysis for Function '" << fn->name() << "':\n";
+            std::vector<const brass::Instruction*> mem_insts;
+            for (const brass::BasicBlock* bb : fn->blocks()) {
+                if (!bb) continue;
+                for (const brass::Instruction* inst : *bb) {
+                    if (inst && brass::is_memory(inst->opcode())) {
+                        mem_insts.push_back(inst);
+                    }
+                }
+            }
+            std::cout << "  " << mem_insts.size() << " memory instructions\n";
+            for (size_t i = 0; i < mem_insts.size(); ++i) {
+                for (size_t j = i + 1; j < mem_insts.size(); ++j) {
+                    const brass::Instruction* m1 = mem_insts[i];
+                    const brass::Instruction* m2 = mem_insts[j];
+                    if (m1->operand_count() > 0 && m2->operand_count() > 0) {
+                        brass::AliasResult res = aa.alias(m1->operand(0), m1->offset(), m1->memory_type(),
+                                                          m2->operand(0), m2->offset(), m2->memory_type());
+                        std::cout << "  " << brass::opcode_name(m1->opcode()) << " (off " << m1->offset() << ") vs "
+                                  << brass::opcode_name(m2->opcode()) << " (off " << m2->offset() << "): "
+                                  << brass::alias_result_name(res) << "\n";
+                    }
+                }
+            }
+        }
+    }
+
     if (enable_inlining) {
         brass::InlinerOptions inliner_opts;
+        inliner_opts.enable_gvn = enable_gvn;
         brass::LoopOptOptions loop_opts;
         loop_opts.enable_vectorize = enable_vectorize;
         loop_opts.enable_slp = enable_slp;
+        loop_opts.enable_gvn = enable_gvn;
         brass::optimize_module_ipo(*mod, inliner_opts, loop_opts);
         brass::DiagnosticReporter inlining_diag;
         if (!brass::verify_module(*mod, &inlining_diag) || inlining_diag.has_errors()) {
@@ -235,6 +276,32 @@ int main(int argc, char** argv) {
         brass::DiagnosticReporter sroa_diag;
         if (!brass::verify_module(*mod, &sroa_diag) || sroa_diag.has_errors()) {
             std::cerr << "Verification failed after SROA:\n" << sroa_diag.format_all();
+            return 1;
+        }
+        if (enable_gvn) {
+            brass::gvn_module(*mod);
+            brass::DiagnosticReporter gvn_diag;
+            if (!brass::verify_module(*mod, &gvn_diag) || gvn_diag.has_errors()) {
+                std::cerr << "Verification failed after GVN:\n" << gvn_diag.format_all();
+                return 1;
+            }
+        }
+        if (enable_vectorize || enable_slp) {
+            brass::LoopOptOptions loop_opts;
+            loop_opts.enable_vectorize = enable_vectorize;
+            loop_opts.enable_slp = enable_slp;
+            brass::optimize_module_loops(*mod, loop_opts);
+            brass::DiagnosticReporter opt_diag;
+            if (!brass::verify_module(*mod, &opt_diag) || opt_diag.has_errors()) {
+                std::cerr << "Verification failed after vectorization:\n" << opt_diag.format_all();
+                return 1;
+            }
+        }
+    } else if (enable_gvn) {
+        brass::gvn_module(*mod);
+        brass::DiagnosticReporter gvn_diag;
+        if (!brass::verify_module(*mod, &gvn_diag) || gvn_diag.has_errors()) {
+            std::cerr << "Verification failed after GVN:\n" << gvn_diag.format_all();
             return 1;
         }
         if (enable_vectorize || enable_slp) {

@@ -23,6 +23,9 @@
 #include <brass/mir/inliner.hpp>
 #include <brass/mir/escape_analysis.hpp>
 #include <brass/mir/sroa.hpp>
+#include <brass/mir/alias_analysis.hpp>
+#include <brass/mir/memory_ssa.hpp>
+#include <brass/mir/gvn.hpp>
 #include <brass/mir/lexer.hpp>
 #include <brass/mir/printer.hpp>
 #include <brass/mir/parser.hpp>

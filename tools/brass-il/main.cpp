@@ -14,7 +14,7 @@ using namespace brass::il;
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--inline] [--sroa] [--escape-analysis] [--vectorize] [--slp] [--demote-stats] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc] [--timed <N>]\n";
+        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--inline] [--sroa] [--escape-analysis] [--gvn] [--no-gvn] [--alias-analysis] [--vectorize] [--slp] [--demote-stats] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc] [--timed <N>]\n";
         return 1;
     }
 
@@ -39,6 +39,12 @@ int main(int argc, char** argv) {
             options.enable_sroa = true;
         } else if (arg == "--escape-analysis") {
             options.run_escape_analysis = true;
+        } else if (arg == "--gvn") {
+            options.enable_gvn = true;
+        } else if (arg == "--no-gvn") {
+            options.enable_gvn = false;
+        } else if (arg == "--alias-analysis") {
+            options.run_alias_analysis = true;
         } else if (arg == "--vectorize") {
             options.enable_vectorize = true;
         } else if (arg == "--no-vectorize") {
@@ -114,6 +120,37 @@ int main(int argc, char** argv) {
             for (const Value* alloc_val : ea.allocations()) {
                 std::cout << "  alloc %" << alloc_val->id() << ": "
                           << escape_state_name(ea.get_escape_state(alloc_val)) << "\n";
+            }
+        }
+    }
+
+    if (options.run_alias_analysis) {
+        for (const Function* fn : res.module->functions()) {
+            if (!fn) continue;
+            AliasAnalysis aa(*fn);
+            std::cout << "Alias Analysis for Function '" << fn->name() << "':\n";
+            std::vector<const Instruction*> mem_insts;
+            for (const BasicBlock* bb : fn->blocks()) {
+                if (!bb) continue;
+                for (const Instruction* inst : *bb) {
+                    if (inst && is_memory(inst->opcode())) {
+                        mem_insts.push_back(inst);
+                    }
+                }
+            }
+            std::cout << "  " << mem_insts.size() << " memory instructions\n";
+            for (size_t i = 0; i < mem_insts.size(); ++i) {
+                for (size_t j = i + 1; j < mem_insts.size(); ++j) {
+                    const Instruction* m1 = mem_insts[i];
+                    const Instruction* m2 = mem_insts[j];
+                    if (m1->operand_count() > 0 && m2->operand_count() > 0) {
+                        AliasResult a_res = aa.alias(m1->operand(0), m1->offset(), m1->memory_type(),
+                                                     m2->operand(0), m2->offset(), m2->memory_type());
+                        std::cout << "  " << opcode_name(m1->opcode()) << " (off " << m1->offset() << ") vs "
+                                  << opcode_name(m2->opcode()) << " (off " << m2->offset() << "): "
+                                  << alias_result_name(a_res) << "\n";
+                    }
+                }
             }
         }
     }

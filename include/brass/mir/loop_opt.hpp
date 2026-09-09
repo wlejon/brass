@@ -21,8 +21,16 @@ struct LoopOptOptions {
     size_t max_iterations = 8;
     bool enable_fp_reassociation = false; // Opt-in FP reassociation (default OFF / IEEE-strict)
     bool enable_sroa = false;
+    bool enable_gvn = true;
     DemoteStats* demote_stats = nullptr;
 };
+
+// General optimization pipeline: SROA -> GVN (CSE + RLE + DSE) -> Loop Opt -> SLP Vectorizer
+bool optimize_function(Function& fn);
+bool optimize_function(Function& fn, const LoopOptOptions& options);
+
+bool optimize_module(Module& mod);
+bool optimize_module(Module& mod, const LoopOptOptions& options);
 
 // Optimize loops in a single function (LICM, IVSR, Constant Folding, DCE)
 bool optimize_function_loops(Function& fn, const LoopOptOptions& options = {});
