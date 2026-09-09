@@ -9,6 +9,8 @@
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/sroa.hpp>
 #include <brass/mir/gvn.hpp>
+#include <brass/mir/sccp.hpp>
+#include <brass/mir/cfg_simplify.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/verifier.hpp>
 #include <unordered_map>
@@ -738,6 +740,17 @@ bool optimize_function(Function& fn, const LoopOptOptions& options) {
     if (options.enable_gvn) {
         GvnOptions gvn_opts;
         changed |= gvn_function(fn, gvn_opts);
+    }
+
+    // 2b. SCCP & Guard Elim & CFG Simplify
+    if (options.enable_sccp) {
+        SccpOptions sccp_opts;
+        sccp_opts.enable_guard_elim = options.enable_guard_elim;
+        changed |= sccp_function(fn, sccp_opts);
+    }
+    if (options.enable_cfg_simplify) {
+        CfgSimplifyOptions cfg_opts;
+        changed |= cfg_simplify_function(fn, cfg_opts);
     }
 
     // 3. Loop optimizations, LICM, IVSR, DCE & Vectorization

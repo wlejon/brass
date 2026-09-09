@@ -23,6 +23,9 @@ struct TranslatorOptions {
     bool enable_inlining = false;
     bool enable_sroa = false;
     bool enable_gvn = true;
+    bool enable_sccp = true;
+    bool enable_guard_elim = true;
+    bool enable_cfg_simplify = true;
     bool run_escape_analysis = false;
     bool run_alias_analysis = false;
     bool enable_vectorize = true;

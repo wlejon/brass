@@ -14,7 +14,7 @@ using namespace brass::il;
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--emit-shared <output.dll/so>] [-shared] [--inline] [--sroa] [--escape-analysis] [--gvn] [--no-gvn] [--alias-analysis] [--vectorize] [--slp] [--loop-tile] [--tile-size <N>] [--demote-stats] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc] [--timed <N>]\n";
+        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--emit-shared <output.dll/so>] [-shared] [--inline] [--sroa] [--escape-analysis] [--gvn] [--no-gvn] [--sccp] [--no-sccp] [--guard-elim] [--no-guard-elim] [--cfg-simplify] [--no-cfg-simplify] [--alias-analysis] [--vectorize] [--slp] [--loop-tile] [--tile-size <N>] [--demote-stats] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc] [--timed <N>]\n";
         return 1;
     }
 
@@ -52,6 +52,18 @@ int main(int argc, char** argv) {
             options.enable_gvn = true;
         } else if (arg == "--no-gvn") {
             options.enable_gvn = false;
+        } else if (arg == "--sccp") {
+            options.enable_sccp = true;
+        } else if (arg == "--no-sccp") {
+            options.enable_sccp = false;
+        } else if (arg == "--guard-elim") {
+            options.enable_guard_elim = true;
+        } else if (arg == "--no-guard-elim") {
+            options.enable_guard_elim = false;
+        } else if (arg == "--cfg-simplify") {
+            options.enable_cfg_simplify = true;
+        } else if (arg == "--no-cfg-simplify") {
+            options.enable_cfg_simplify = false;
         } else if (arg == "--alias-analysis") {
             options.run_alias_analysis = true;
         } else if (arg == "--vectorize") {

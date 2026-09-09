@@ -32,6 +32,9 @@ void print_usage(const char* prog) {
               << "  --slp                 Run SLP straight-line vectorization\n"
               << "  --loop-tile           Run loop tiling / cache blocking on nested loops\n"
               << "  --tile-size <N>       Tile size for loop tiling (default: 16)\n"
+              << "  --sccp                Run Sparse Conditional Constant Propagation (SCCP)\n"
+              << "  --guard-elim          Run Speculation Guard Elimination\n"
+              << "  --cfg-simplify        Run CFG Simplification & Dead Block Compaction\n"
               << "  -o <file>             Write output to <file> instead of stdout\n";
 }
 
@@ -126,6 +129,9 @@ int main(int argc, char** argv) {
     bool enable_slp = false;
     bool enable_loop_tile = false;
     size_t tile_size = 16;
+    bool enable_sccp = false;
+    bool enable_guard_elim = false;
+    bool enable_cfg_simplify = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -148,6 +154,13 @@ int main(int argc, char** argv) {
             run_escape_analysis = true;
         } else if (arg == "--gvn") {
             enable_gvn = true;
+        } else if (arg == "--sccp") {
+            enable_sccp = true;
+        } else if (arg == "--guard-elim") {
+            enable_guard_elim = true;
+            enable_sccp = true;
+        } else if (arg == "--cfg-simplify") {
+            enable_cfg_simplify = true;
         } else if (arg == "--alias-analysis") {
             run_alias_analysis = true;
         } else if (arg == "--vectorize") {
@@ -291,6 +304,9 @@ int main(int argc, char** argv) {
         loop_opts.enable_vectorize = enable_vectorize;
         loop_opts.enable_slp = enable_slp;
         loop_opts.enable_gvn = enable_gvn;
+        loop_opts.enable_sccp = enable_sccp;
+        loop_opts.enable_guard_elim = enable_guard_elim;
+        loop_opts.enable_cfg_simplify = enable_cfg_simplify;
         loop_opts.enable_loop_tile = enable_loop_tile;
         loop_opts.tile_size_i = tile_size;
         loop_opts.tile_size_j = tile_size;
@@ -316,6 +332,24 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
+        if (enable_sccp) {
+            brass::SccpOptions sccp_opts;
+            sccp_opts.enable_guard_elim = enable_guard_elim;
+            brass::sccp_module(*mod, sccp_opts);
+            brass::DiagnosticReporter sccp_diag;
+            if (!brass::verify_module(*mod, &sccp_diag) || sccp_diag.has_errors()) {
+                std::cerr << "Verification failed after SCCP:\n" << sccp_diag.format_all();
+                return 1;
+            }
+        }
+        if (enable_cfg_simplify) {
+            brass::cfg_simplify_module(*mod);
+            brass::DiagnosticReporter cfg_diag;
+            if (!brass::verify_module(*mod, &cfg_diag) || cfg_diag.has_errors()) {
+                std::cerr << "Verification failed after CFG Simplification:\n" << cfg_diag.format_all();
+                return 1;
+            }
+        }
         if (enable_loop_tile || enable_vectorize || enable_slp) {
             brass::LoopOptOptions loop_opts;
             loop_opts.enable_vectorize = enable_vectorize;
@@ -336,6 +370,78 @@ int main(int argc, char** argv) {
         brass::DiagnosticReporter gvn_diag;
         if (!brass::verify_module(*mod, &gvn_diag) || gvn_diag.has_errors()) {
             std::cerr << "Verification failed after GVN:\n" << gvn_diag.format_all();
+            return 1;
+        }
+        if (enable_sccp) {
+            brass::SccpOptions sccp_opts;
+            sccp_opts.enable_guard_elim = enable_guard_elim;
+            brass::sccp_module(*mod, sccp_opts);
+            brass::DiagnosticReporter sccp_diag;
+            if (!brass::verify_module(*mod, &sccp_diag) || sccp_diag.has_errors()) {
+                std::cerr << "Verification failed after SCCP:\n" << sccp_diag.format_all();
+                return 1;
+            }
+        }
+        if (enable_cfg_simplify) {
+            brass::cfg_simplify_module(*mod);
+            brass::DiagnosticReporter cfg_diag;
+            if (!brass::verify_module(*mod, &cfg_diag) || cfg_diag.has_errors()) {
+                std::cerr << "Verification failed after CFG Simplification:\n" << cfg_diag.format_all();
+                return 1;
+            }
+        }
+        if (enable_loop_tile || enable_vectorize || enable_slp) {
+            brass::LoopOptOptions loop_opts;
+            loop_opts.enable_vectorize = enable_vectorize;
+            loop_opts.enable_slp = enable_slp;
+            loop_opts.enable_loop_tile = enable_loop_tile;
+            loop_opts.tile_size_i = tile_size;
+            loop_opts.tile_size_j = tile_size;
+            loop_opts.tile_size_k = tile_size;
+            brass::optimize_module_loops(*mod, loop_opts);
+            brass::DiagnosticReporter opt_diag;
+            if (!brass::verify_module(*mod, &opt_diag) || opt_diag.has_errors()) {
+                std::cerr << "Verification failed after loop optimization/vectorization:\n" << opt_diag.format_all();
+                return 1;
+            }
+        }
+    } else if (enable_sccp) {
+        brass::SccpOptions sccp_opts;
+        sccp_opts.enable_guard_elim = enable_guard_elim;
+        brass::sccp_module(*mod, sccp_opts);
+        brass::DiagnosticReporter sccp_diag;
+        if (!brass::verify_module(*mod, &sccp_diag) || sccp_diag.has_errors()) {
+            std::cerr << "Verification failed after SCCP:\n" << sccp_diag.format_all();
+            return 1;
+        }
+        if (enable_cfg_simplify) {
+            brass::cfg_simplify_module(*mod);
+            brass::DiagnosticReporter cfg_diag;
+            if (!brass::verify_module(*mod, &cfg_diag) || cfg_diag.has_errors()) {
+                std::cerr << "Verification failed after CFG Simplification:\n" << cfg_diag.format_all();
+                return 1;
+            }
+        }
+        if (enable_loop_tile || enable_vectorize || enable_slp) {
+            brass::LoopOptOptions loop_opts;
+            loop_opts.enable_vectorize = enable_vectorize;
+            loop_opts.enable_slp = enable_slp;
+            loop_opts.enable_loop_tile = enable_loop_tile;
+            loop_opts.tile_size_i = tile_size;
+            loop_opts.tile_size_j = tile_size;
+            loop_opts.tile_size_k = tile_size;
+            brass::optimize_module_loops(*mod, loop_opts);
+            brass::DiagnosticReporter opt_diag;
+            if (!brass::verify_module(*mod, &opt_diag) || opt_diag.has_errors()) {
+                std::cerr << "Verification failed after loop optimization/vectorization:\n" << opt_diag.format_all();
+                return 1;
+            }
+        }
+    } else if (enable_cfg_simplify) {
+        brass::cfg_simplify_module(*mod);
+        brass::DiagnosticReporter cfg_diag;
+        if (!brass::verify_module(*mod, &cfg_diag) || cfg_diag.has_errors()) {
+            std::cerr << "Verification failed after CFG Simplification:\n" << cfg_diag.format_all();
             return 1;
         }
         if (enable_loop_tile || enable_vectorize || enable_slp) {

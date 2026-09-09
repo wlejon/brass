@@ -5,6 +5,8 @@
 #include <brass/mir/inliner.hpp>
 #include <brass/mir/sroa.hpp>
 #include <brass/mir/gvn.hpp>
+#include <brass/mir/sccp.hpp>
+#include <brass/mir/cfg_simplify.hpp>
 #include <iostream>
 
 namespace brass::il {
@@ -154,12 +156,23 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
         opt_opts.tile_size_k = options_.tile_size;
         opt_opts.enable_sroa = options_.enable_sroa;
         opt_opts.enable_gvn = options_.enable_gvn;
+        opt_opts.enable_sccp = options_.enable_sccp;
+        opt_opts.enable_guard_elim = options_.enable_guard_elim;
+        opt_opts.enable_cfg_simplify = options_.enable_cfg_simplify;
         opt_opts.demote_stats = options_.demote_stats_collector;
         if (options_.enable_sroa) {
             sroa_module(*mod);
         }
         if (options_.enable_gvn) {
             gvn_module(*mod);
+        }
+        if (options_.enable_sccp) {
+            SccpOptions sccp_opts;
+            sccp_opts.enable_guard_elim = options_.enable_guard_elim;
+            sccp_module(*mod, sccp_opts);
+        }
+        if (options_.enable_cfg_simplify) {
+            cfg_simplify_module(*mod);
         }
         if (options_.enable_inlining) {
             InlinerOptions inliner_opts;

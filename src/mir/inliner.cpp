@@ -3,6 +3,8 @@
 #include <brass/mir/devirtualize.hpp>
 #include <brass/mir/sroa.hpp>
 #include <brass/mir/gvn.hpp>
+#include <brass/mir/sccp.hpp>
+#include <brass/mir/cfg_simplify.hpp>
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/loop_analysis.hpp>
 #include <algorithm>
@@ -245,6 +247,17 @@ bool optimize_module_ipo(Module& mod, const InlinerOptions& inline_opts, const L
     if (inline_opts.enable_gvn) {
         GvnOptions gvn_opts;
         changed |= gvn_module(mod, gvn_opts);
+    }
+
+    // 2d. SCCP & Guard Elim & CFG Simplify pass
+    if (loop_opts.enable_sccp) {
+        SccpOptions sccp_opts;
+        sccp_opts.enable_guard_elim = loop_opts.enable_guard_elim;
+        changed |= sccp_module(mod, sccp_opts);
+    }
+    if (loop_opts.enable_cfg_simplify) {
+        CfgSimplifyOptions cfg_opts;
+        changed |= cfg_simplify_module(mod, cfg_opts);
     }
 
     // 3. Re-run loop optimizations, constant folding, CSE, DCE & f64 demotion

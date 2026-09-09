@@ -61,6 +61,8 @@ add_executable(brass_unit_tests
     unit/test_aot_shared_library.cpp
     unit/test_loop_tile.cpp
     differential/test_loop_tile_differential.cpp
+    unit/test_sccp.cpp
+    differential/test_sccp_differential.cpp
 )
 
 target_include_directories(brass_unit_tests
