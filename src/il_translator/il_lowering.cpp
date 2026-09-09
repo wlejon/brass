@@ -7,6 +7,8 @@
 #include <brass/mir/gvn.hpp>
 #include <brass/mir/sccp.hpp>
 #include <brass/mir/cfg_simplify.hpp>
+#include <brass/mir/loop_unswitch.hpp>
+#include <brass/mir/jump_threading.hpp>
 #include <iostream>
 
 namespace brass::il {
@@ -159,6 +161,9 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
         opt_opts.enable_sccp = options_.enable_sccp;
         opt_opts.enable_guard_elim = options_.enable_guard_elim;
         opt_opts.enable_cfg_simplify = options_.enable_cfg_simplify;
+        opt_opts.enable_loop_unswitch = options_.enable_loop_unswitch;
+        opt_opts.enable_jump_threading = options_.enable_jump_threading;
+        opt_opts.enable_trace_layout = options_.enable_trace_layout;
         opt_opts.demote_stats = options_.demote_stats_collector;
         if (options_.enable_sroa) {
             sroa_module(*mod);
@@ -172,6 +177,15 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
             sccp_module(*mod, sccp_opts);
         }
         if (options_.enable_cfg_simplify) {
+            cfg_simplify_module(*mod);
+        }
+        if (options_.enable_loop_unswitch) {
+            unswitch_loops_in_module(*mod);
+        }
+        if (options_.enable_jump_threading) {
+            jump_thread_module(*mod);
+        }
+        if ((options_.enable_loop_unswitch || options_.enable_jump_threading) && options_.enable_cfg_simplify) {
             cfg_simplify_module(*mod);
         }
         if (options_.enable_inlining) {

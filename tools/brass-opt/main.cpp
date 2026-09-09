@@ -35,6 +35,9 @@ void print_usage(const char* prog) {
               << "  --sccp                Run Sparse Conditional Constant Propagation (SCCP)\n"
               << "  --guard-elim          Run Speculation Guard Elimination\n"
               << "  --cfg-simplify        Run CFG Simplification & Dead Block Compaction\n"
+              << "  --loop-unswitch       Run Loop Unswitching on candidate loops\n"
+              << "  --jump-threading      Run SSA Jump Threading\n"
+              << "  --trace-layout        Run LIR Trace Scheduling & Fall-Through Block Layout\n"
               << "  -o <file>             Write output to <file> instead of stdout\n";
 }
 
@@ -132,6 +135,9 @@ int main(int argc, char** argv) {
     bool enable_sccp = false;
     bool enable_guard_elim = false;
     bool enable_cfg_simplify = false;
+    bool enable_loop_unswitch = false;
+    bool enable_jump_threading = false;
+    bool enable_trace_layout = true;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -161,6 +167,14 @@ int main(int argc, char** argv) {
             enable_sccp = true;
         } else if (arg == "--cfg-simplify") {
             enable_cfg_simplify = true;
+        } else if (arg == "--loop-unswitch") {
+            enable_loop_unswitch = true;
+        } else if (arg == "--jump-threading") {
+            enable_jump_threading = true;
+        } else if (arg == "--trace-layout") {
+            enable_trace_layout = true;
+        } else if (arg == "--no-trace-layout") {
+            enable_trace_layout = false;
         } else if (arg == "--alias-analysis") {
             run_alias_analysis = true;
         } else if (arg == "--vectorize") {
@@ -227,6 +241,8 @@ int main(int argc, char** argv) {
             input_file = arg;
         }
     }
+
+    (void)enable_trace_layout;
 
     if (input_file.empty()) {
         std::cerr << "Error: No input file specified.\n";
@@ -308,6 +324,9 @@ int main(int argc, char** argv) {
         loop_opts.enable_guard_elim = enable_guard_elim;
         loop_opts.enable_cfg_simplify = enable_cfg_simplify;
         loop_opts.enable_loop_tile = enable_loop_tile;
+        loop_opts.enable_loop_unswitch = enable_loop_unswitch;
+        loop_opts.enable_jump_threading = enable_jump_threading;
+        loop_opts.enable_trace_layout = enable_trace_layout;
         loop_opts.tile_size_i = tile_size;
         loop_opts.tile_size_j = tile_size;
         loop_opts.tile_size_k = tile_size;
@@ -471,6 +490,24 @@ int main(int argc, char** argv) {
         brass::DiagnosticReporter opt_diag;
         if (!brass::verify_module(*mod, &opt_diag) || opt_diag.has_errors()) {
             std::cerr << "Verification failed after loop optimization/vectorization:\n" << opt_diag.format_all();
+            return 1;
+        }
+    }
+
+    if (enable_loop_unswitch) {
+        brass::unswitch_loops_in_module(*mod);
+        brass::DiagnosticReporter unsw_diag;
+        if (!brass::verify_module(*mod, &unsw_diag) || unsw_diag.has_errors()) {
+            std::cerr << "Verification failed after Loop Unswitching:\n" << unsw_diag.format_all();
+            return 1;
+        }
+    }
+
+    if (enable_jump_threading) {
+        brass::jump_thread_module(*mod);
+        brass::DiagnosticReporter jt_diag;
+        if (!brass::verify_module(*mod, &jt_diag) || jt_diag.has_errors()) {
+            std::cerr << "Verification failed after Jump Threading:\n" << jt_diag.format_all();
             return 1;
         }
     }

@@ -26,6 +26,9 @@ struct TranslatorOptions {
     bool enable_sccp = true;
     bool enable_guard_elim = true;
     bool enable_cfg_simplify = true;
+    bool enable_loop_unswitch = true;
+    bool enable_jump_threading = true;
+    bool enable_trace_layout = true;
     bool run_escape_analysis = false;
     bool run_alias_analysis = false;
     bool enable_vectorize = true;

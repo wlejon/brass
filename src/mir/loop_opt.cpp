@@ -11,6 +11,8 @@
 #include <brass/mir/gvn.hpp>
 #include <brass/mir/sccp.hpp>
 #include <brass/mir/cfg_simplify.hpp>
+#include <brass/mir/loop_unswitch.hpp>
+#include <brass/mir/jump_threading.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/verifier.hpp>
 #include <unordered_map>
@@ -751,6 +753,30 @@ bool optimize_function(Function& fn, const LoopOptOptions& options) {
     if (options.enable_cfg_simplify) {
         CfgSimplifyOptions cfg_opts;
         changed |= cfg_simplify_function(fn, cfg_opts);
+    }
+
+    // 2c. Loop Unswitch
+    if (options.enable_loop_unswitch) {
+        LoopUnswitchStats* ustats = options.stats ? &options.stats->unswitch_stats : nullptr;
+        if (unswitch_loops_in_function(fn, options.unswitch_options, ustats)) {
+            changed = true;
+            if (options.enable_cfg_simplify) {
+                CfgSimplifyOptions cfg_opts;
+                cfg_simplify_function(fn, cfg_opts);
+            }
+        }
+    }
+
+    // 2d. Jump Threading
+    if (options.enable_jump_threading) {
+        JumpThreadingStats* jstats = options.stats ? &options.stats->jump_threading_stats : nullptr;
+        if (run_jump_threading(fn, options.jump_threading_options, jstats)) {
+            changed = true;
+            if (options.enable_cfg_simplify) {
+                CfgSimplifyOptions cfg_opts;
+                cfg_simplify_function(fn, cfg_opts);
+            }
+        }
     }
 
     // 3. Loop optimizations, LICM, IVSR, DCE & Vectorization

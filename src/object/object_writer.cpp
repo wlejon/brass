@@ -3,6 +3,7 @@
 #include <brass/codegen/live_range.hpp>
 #include <brass/codegen/linear_scan.hpp>
 #include <brass/codegen/peephole.hpp>
+#include <brass/codegen/block_layout.hpp>
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/verifier.hpp>
 #include <algorithm>
@@ -139,7 +140,12 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
         codegen::LinearScanAllocator regalloc(*lir, liveness, cc_);
         regalloc.allocate();
 
-        // 3.5 LIR Peephole Optimization
+        // 3.5 LIR Trace Scheduling & Fall-Through Block Layout
+        if (loop_opts.enable_trace_layout) {
+            codegen::optimize_block_layout(*lir);
+        }
+
+        // 3.6 LIR Peephole Optimization
         codegen::run_lir_peephole_optimizations(*lir);
 
         // 4. Machine Code Emission

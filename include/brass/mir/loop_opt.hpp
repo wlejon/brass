@@ -4,9 +4,17 @@
 #include <brass/mir/function.hpp>
 #include <memory>
 
+#include <brass/mir/loop_unswitch.hpp>
+#include <brass/mir/jump_threading.hpp>
+
 namespace brass {
 
 struct DemoteStats;
+
+struct LoopOptStats {
+    LoopUnswitchStats unswitch_stats;
+    JumpThreadingStats jump_threading_stats;
+};
 
 struct LoopOptOptions {
     bool enable_licm = true;
@@ -25,12 +33,18 @@ struct LoopOptOptions {
     bool enable_sccp = true;
     bool enable_guard_elim = true;
     bool enable_cfg_simplify = true;
+    bool enable_loop_unswitch = false;
+    bool enable_jump_threading = false;
+    bool enable_trace_layout = false;
     bool enable_loop_tile = false;
     size_t tile_size_i = 16;
     size_t tile_size_j = 16;
     size_t tile_size_k = 16;
     bool enable_loop_interchange = true;
+    LoopUnswitchOptions unswitch_options;
+    JumpThreadingOptions jump_threading_options;
     DemoteStats* demote_stats = nullptr;
+    LoopOptStats* stats = nullptr;
 };
 
 // General optimization pipeline: SROA -> GVN (CSE + RLE + DSE) -> Loop Opt -> SLP Vectorizer

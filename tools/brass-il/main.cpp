@@ -14,7 +14,7 @@ using namespace brass::il;
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--emit-shared <output.dll/so>] [-shared] [--inline] [--sroa] [--escape-analysis] [--gvn] [--no-gvn] [--sccp] [--no-sccp] [--guard-elim] [--no-guard-elim] [--cfg-simplify] [--no-cfg-simplify] [--alias-analysis] [--vectorize] [--slp] [--loop-tile] [--tile-size <N>] [--demote-stats] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc] [--timed <N>]\n";
+        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--emit-shared <output.dll/so>] [-shared] [--inline] [--sroa] [--escape-analysis] [--gvn] [--no-gvn] [--sccp] [--no-sccp] [--guard-elim] [--no-guard-elim] [--cfg-simplify] [--no-cfg-simplify] [--loop-unswitch] [--no-loop-unswitch] [--jump-threading] [--no-jump-threading] [--trace-layout] [--no-trace-layout] [--alias-analysis] [--vectorize] [--slp] [--loop-tile] [--tile-size <N>] [--demote-stats] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc] [--timed <N>]\n";
         return 1;
     }
 
@@ -64,6 +64,18 @@ int main(int argc, char** argv) {
             options.enable_cfg_simplify = true;
         } else if (arg == "--no-cfg-simplify") {
             options.enable_cfg_simplify = false;
+        } else if (arg == "--loop-unswitch") {
+            options.enable_loop_unswitch = true;
+        } else if (arg == "--no-loop-unswitch") {
+            options.enable_loop_unswitch = false;
+        } else if (arg == "--jump-threading") {
+            options.enable_jump_threading = true;
+        } else if (arg == "--no-jump-threading") {
+            options.enable_jump_threading = false;
+        } else if (arg == "--trace-layout") {
+            options.enable_trace_layout = true;
+        } else if (arg == "--no-trace-layout") {
+            options.enable_trace_layout = false;
         } else if (arg == "--alias-analysis") {
             options.run_alias_analysis = true;
         } else if (arg == "--vectorize") {

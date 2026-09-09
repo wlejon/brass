@@ -28,6 +28,8 @@
 #include <brass/mir/gvn.hpp>
 #include <brass/mir/sccp.hpp>
 #include <brass/mir/cfg_simplify.hpp>
+#include <brass/mir/loop_unswitch.hpp>
+#include <brass/mir/jump_threading.hpp>
 #include <brass/mir/lexer.hpp>
 #include <brass/mir/printer.hpp>
 #include <brass/mir/parser.hpp>
@@ -45,6 +47,7 @@
 #include <brass/codegen/live_range.hpp>
 #include <brass/codegen/linear_scan.hpp>
 #include <brass/codegen/peephole.hpp>
+#include <brass/codegen/block_layout.hpp>
 #include <brass/codegen/emit_context.hpp>
 #include <brass/codegen/jit_exec.hpp>
 

@@ -63,6 +63,10 @@ add_executable(brass_unit_tests
     differential/test_loop_tile_differential.cpp
     unit/test_sccp.cpp
     differential/test_sccp_differential.cpp
+    unit/test_loop_unswitch.cpp
+    unit/test_jump_threading.cpp
+    unit/test_block_layout.cpp
+    differential/test_unswitch_differential.cpp
 )
 
 target_include_directories(brass_unit_tests
