@@ -133,6 +133,7 @@ bool analyze_vectorizable_loop(
     bool found_primary_iv = false;
     size_t primary_iv_idx = 0;
     Value* limit_val = nullptr;
+    Instruction* primary_iv_step_inst = nullptr;
 
     for (size_t i = 0; i < header->param_count(); ++i) {
         Value* param = header->param(i);
@@ -147,6 +148,7 @@ bool analyze_vectorizable_loop(
                         found_primary_iv = true;
                         primary_iv_idx = i;
                         limit_val = cmp_rhs;
+                        primary_iv_step_inst = def;
                         break;
                     }
                 }
@@ -254,6 +256,17 @@ bool analyze_vectorizable_loop(
         }
 
         if (is_supported_loop_arithmetic(op)) {
+            // Ensure primary IV is not directly used in vector arithmetic,
+            // as vector IV expansion is not supported. The backedge IV step
+            // instruction itself is permitted, as is non-vector-element integer arithmetic.
+            if ((determined_elem_type.is_void() || inst->type() == determined_elem_type) &&
+                inst != primary_iv_step_inst) {
+                for (size_t i = 0; i < inst->operand_count(); ++i) {
+                    if (inst->operand(i) == primary_iv_param) {
+                        return false;
+                    }
+                }
+            }
             continue;
         }
 
@@ -262,6 +275,10 @@ bool analyze_vectorizable_loop(
         }
 
         return false; // Unsupported opcode in loop body
+    }
+
+    if (mem_ops.empty()) {
+        return false; // Loop vectorization requires vector loads/stores
     }
 
     if (vli.has_reduction) {

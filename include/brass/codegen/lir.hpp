@@ -457,11 +457,15 @@ public:
 
     VReg allocate_vreg(RegClass rc, uint8_t size, bool is_gcref = false);
     LirBlock* create_block(std::string name = "");
+    LirBlock* create_block_with_id(uint32_t id, std::string name = "");
     LirBlock* entry_block() const { return blocks.empty() ? nullptr : blocks.front().get(); }
     LirBlock* get_block_by_id(uint32_t id) const;
 
     const VRegInfo& get_vreg_info(VReg v) const;
     VRegInfo& get_vreg_info(VReg v);
+
+private:
+    uint32_t next_block_id_ = 0;
 };
 
 std::string to_string(const LirFunction& fn);

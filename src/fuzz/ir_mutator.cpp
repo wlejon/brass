@@ -406,7 +406,106 @@ bool IrMutator::mutate_constant_immediates(Function& fn, FuzzRng& rng) {
     if (const_insts.empty()) return false;
     Instruction* target = const_insts[rng.pick_index(const_insts.size())];
 
+    bool is_cmp_operand = false;
+    bool is_step_operand = false;
+    bool is_alloc_size = false;
+    bool is_loop_init = false;
+    if (target->produces_value()) {
+        for (BasicBlock* bb : fn.blocks()) {
+            if (!bb) continue;
+            for (Instruction* inst : *bb) {
+                if (inst && is_comparison(inst->opcode())) {
+                    for (size_t i = 0; i < inst->operand_count(); ++i) {
+                        if (inst->operand(i) == target->result()) {
+                            is_cmp_operand = true;
+                            break;
+                        }
+                    }
+                }
+                if (inst && inst->opcode() == Opcode::call) {
+                    if (inst->symbol() == "brass_gc_alloc" && inst->operand_count() > 0 &&
+                        inst->operand(0) == target->result()) {
+                        is_alloc_size = true;
+                    }
+                }
+                if (inst && inst->opcode() == Opcode::add) {
+                    for (size_t i = 0; i < inst->operand_count(); ++i) {
+                        if (inst->operand(i) == target->result()) {
+                            for (BasicBlock* bblk : fn.blocks()) {
+                                if (!bblk) continue;
+                                Instruction* term = bblk->terminator();
+                                if (term && term->opcode() == Opcode::br) {
+                                    for (Value* arg : term->branch_target().args) {
+                                        if (arg == inst->result()) {
+                                            is_step_operand = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (is_step_operand) break;
+                            }
+                        }
+                        if (is_step_operand) break;
+                    }
+                }
+            }
+        }
+
+        for (BasicBlock* bblk : fn.blocks()) {
+            if (!bblk) continue;
+            Instruction* term = bblk->terminator();
+            if (!term) continue;
+            auto check_target = [&](const BranchTarget& bt) {
+                if (!bt.block) return;
+                for (size_t arg_i = 0; arg_i < bt.args.size(); ++arg_i) {
+                    if (bt.args[arg_i] == target->result()) {
+                        if (arg_i < bt.block->param_count()) {
+                            Value* param = bt.block->param(arg_i);
+                            for (BasicBlock* user_bb : fn.blocks()) {
+                                if (!user_bb) continue;
+                                for (Instruction* uinst : *user_bb) {
+                                    if (uinst && is_comparison(uinst->opcode())) {
+                                        for (size_t oi = 0; oi < uinst->operand_count(); ++oi) {
+                                            if (uinst->operand(oi) == param) {
+                                                is_loop_init = true;
+                                                return;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+            if (term->opcode() == Opcode::br) {
+                check_target(term->branch_target());
+            } else if (term->opcode() == Opcode::br_if) {
+                check_target(term->true_target());
+                check_target(term->false_target());
+            }
+            if (is_loop_init) break;
+        }
+    }
+
     if (target->opcode() == Opcode::iconst_i64) {
+        if (is_alloc_size) {
+            target->set_imm_i64(32 + static_cast<int64_t>(rng.next_u32() % 512));
+            return true;
+        }
+        if (is_loop_init) {
+            target->set_imm_i64(static_cast<int64_t>(rng.next_u32() % 3));
+            return true;
+        }
+        if (is_step_operand) {
+            target->set_imm_i64(1 + static_cast<int64_t>(rng.next_u32() % 3));
+            return true;
+        }
+        if (is_cmp_operand) {
+            int64_t bounded = 1 + static_cast<int64_t>(rng.next_u32() % 32);
+            target->set_imm_i64(bounded);
+            return true;
+        }
         uint32_t choice = rng.next_u32() % 3;
         if (choice == 0) {
             target->set_imm_i64(rng.boundary_i64());
@@ -420,6 +519,23 @@ bool IrMutator::mutate_constant_immediates(Function& fn, FuzzRng& rng) {
     }
 
     if (target->opcode() == Opcode::iconst_i32) {
+        if (is_alloc_size) {
+            target->set_imm_i32(32 + static_cast<int32_t>(rng.next_u32() % 512));
+            return true;
+        }
+        if (is_loop_init) {
+            target->set_imm_i32(static_cast<int32_t>(rng.next_u32() % 3));
+            return true;
+        }
+        if (is_step_operand) {
+            target->set_imm_i32(1 + static_cast<int32_t>(rng.next_u32() % 3));
+            return true;
+        }
+        if (is_cmp_operand) {
+            int32_t bounded = 1 + static_cast<int32_t>(rng.next_u32() % 32);
+            target->set_imm_i32(bounded);
+            return true;
+        }
         uint32_t choice = rng.next_u32() % 3;
         if (choice == 0) {
             target->set_imm_i32(rng.boundary_i32());
@@ -485,10 +601,49 @@ bool IrMutator::replace_opcodes(Function& fn, FuzzRng& rng) {
     Instruction* inst = repl_insts[rng.pick_index(repl_insts.size())];
     Opcode op = inst->opcode();
 
-    if (op == Opcode::add) inst->set_opcode(Opcode::sub);
+    if (op == Opcode::add) {
+        bool is_backedge_step = false;
+        if (inst->produces_value()) {
+            for (BasicBlock* bblk : fn.blocks()) {
+                if (!bblk) continue;
+                Instruction* term = bblk->terminator();
+                if (term && term->opcode() == Opcode::br) {
+                    for (Value* arg : term->branch_target().args) {
+                        if (arg == inst->result()) {
+                            is_backedge_step = true;
+                            break;
+                        }
+                    }
+                }
+                if (is_backedge_step) break;
+            }
+        }
+        if (!is_backedge_step) {
+            inst->set_opcode(Opcode::sub);
+        }
+    }
     else if (op == Opcode::sub) inst->set_opcode(Opcode::add);
     else if (op == Opcode::and_) inst->set_opcode(rng.coin_flip() ? Opcode::or_ : Opcode::xor_);
-    else if (op == Opcode::or_)  inst->set_opcode(rng.coin_flip() ? Opcode::and_ : Opcode::xor_);
+    else if (op == Opcode::or_) {
+        bool feeds_div = false;
+        if (inst->produces_value()) {
+            for (BasicBlock* bblk : fn.blocks()) {
+                if (!bblk) continue;
+                for (Instruction* other : *bblk) {
+                    if (other && (other->opcode() == Opcode::sdiv || other->opcode() == Opcode::udiv)) {
+                        if (other->operand_count() >= 2 && other->operand(1) == inst->result()) {
+                            feeds_div = true;
+                            break;
+                        }
+                    }
+                }
+                if (feeds_div) break;
+            }
+        }
+        if (!feeds_div) {
+            inst->set_opcode(rng.coin_flip() ? Opcode::and_ : Opcode::xor_);
+        }
+    }
     else if (op == Opcode::xor_) inst->set_opcode(rng.coin_flip() ? Opcode::and_ : Opcode::or_);
     else if (op == Opcode::slt) inst->set_opcode(Opcode::sgt);
     else if (op == Opcode::sgt) inst->set_opcode(Opcode::slt);

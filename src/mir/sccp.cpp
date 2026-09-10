@@ -90,11 +90,29 @@ Value* get_or_create_constant(Function& fn, const LatticeValue& lat) {
     for (Instruction* inst : *entry) {
         if (!inst) continue;
         if (lat.type() == Type::i32() && inst->opcode() == Opcode::iconst_i32) {
-            if (inst->imm_i32() == lat.as_i32()) return inst->result();
+            if (inst->imm_i32() == lat.as_i32()) {
+                if (inst != entry->head()) {
+                    entry->remove_instruction(inst);
+                    entry->prepend_instruction(inst);
+                }
+                return inst->result();
+            }
         } else if (lat.type() == Type::i64() && inst->opcode() == Opcode::iconst_i64) {
-            if (inst->imm_i64() == lat.as_i64()) return inst->result();
+            if (inst->imm_i64() == lat.as_i64()) {
+                if (inst != entry->head()) {
+                    entry->remove_instruction(inst);
+                    entry->prepend_instruction(inst);
+                }
+                return inst->result();
+            }
         } else if (lat.type() == Type::f64() && inst->opcode() == Opcode::fconst_f64) {
-            if (inst->imm_f64() == lat.as_f64()) return inst->result();
+            if (inst->imm_f64() == lat.as_f64()) {
+                if (inst != entry->head()) {
+                    entry->remove_instruction(inst);
+                    entry->prepend_instruction(inst);
+                }
+                return inst->result();
+            }
         }
     }
 

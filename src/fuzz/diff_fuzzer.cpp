@@ -33,6 +33,8 @@
 
 namespace brass::fuzz {
 
+static void fuzz_deopt_exit() {}
+
 std::string_view status_name(ExecutionStatus status) noexcept {
     switch (status) {
         case ExecutionStatus::Success: return "Success";
@@ -280,19 +282,26 @@ TierResult DiffFuzzer::run_tier0_interp(const Module& mod, std::string_view fn_n
         std::string fault;
         bool prot_ok = run_protected([&]() {
             Interpreter interp;
+            interp.set_max_instructions(500'000);
             interp.register_external_function("brass_pgo_inc", [](Interpreter&, const std::vector<RuntimeValue>&) {
                 return RuntimeValue::from_void();
             });
             interp.register_external_function("brass_gc_alloc", [](Interpreter& in, const std::vector<RuntimeValue>& a) {
                 size_t sz = a.empty() ? 32 : static_cast<size_t>(a[0].as_u64());
+                if (sz > 65536) sz = (sz % 65536) + 32;
                 return RuntimeValue::from_gcref(in.allocate_gc(sz, 0, 1));
             });
             res_box->value = interp.run(mod, fn_name_str, args);
             res_box->status = ExecutionStatus::Success;
         }, fault);
         if (!prot_ok) {
-            res_box->status = ExecutionStatus::CrashOrFault;
-            res_box->fault_message = std::move(fault);
+            if (fault.find("Maximum instruction execution count exceeded") != std::string::npos) {
+                res_box->status = ExecutionStatus::Timeout;
+                res_box->fault_message = "Instruction execution limit exceeded in Interpreter";
+            } else {
+                res_box->status = ExecutionStatus::CrashOrFault;
+                res_box->fault_message = std::move(fault);
+            }
         }
     };
 
@@ -316,6 +325,7 @@ TierResult DiffFuzzer::run_tier1_jit_unopt(const Module& mod, std::string_view f
     auto jit = std::make_shared<codegen::JitExecutionEngine>(Target::host());
     jit->register_external_symbol("brass_pgo_inc", reinterpret_cast<void*>(&brass_pgo_inc));
     jit->register_external_symbol("brass_parallel_for", reinterpret_cast<void*>(&brass_parallel_for));
+    jit->register_external_symbol("fuzz_deopt_exit", reinterpret_cast<void*>(&fuzz_deopt_exit));
 
     try {
         if (!jit->compile_and_load(mod)) {
@@ -394,11 +404,18 @@ TierResult DiffFuzzer::run_tier2_jit_opt(const Module& mod, std::string_view fn_
     opt_opts.enable_loop_fusion = true;
     opt_opts.enable_loop_distribution = true;
     opt_opts.enable_array_contraction = true;
-
     try {
+        DiagnosticReporter diag_pre;
         gvn_pre_module(*opt_mod);
+        if (!verify_module(*opt_mod, &diag_pre)) {
+            res.status = ExecutionStatus::VerificationFailure;
+            res.fault_message = "Verification failed after GVN-PRE: " + diag_pre.format_all();
+            return res;
+        }
+
         WriteBarrierElimination wbe;
         wbe.run_on_module(*opt_mod);
+
         optimize_module(*opt_mod, opt_opts);
 
         DiagnosticReporter diag;
@@ -411,6 +428,7 @@ TierResult DiffFuzzer::run_tier2_jit_opt(const Module& mod, std::string_view fn_
         auto jit = std::make_shared<codegen::JitExecutionEngine>(Target::host());
         jit->register_external_symbol("brass_pgo_inc", reinterpret_cast<void*>(&brass_pgo_inc));
         jit->register_external_symbol("brass_parallel_for", reinterpret_cast<void*>(&brass_parallel_for));
+        jit->register_external_symbol("fuzz_deopt_exit", reinterpret_cast<void*>(&fuzz_deopt_exit));
 
         if (!jit->compile_and_load(*opt_mod)) {
             res.status = ExecutionStatus::CompilationFailure;

@@ -549,18 +549,77 @@ bool unroll_loop(
     Instruction* old_hdr_term = header->terminator();
     const BranchTarget& old_exit_target = cla.exit_on_false ? old_hdr_term->false_target() : old_hdr_term->true_target();
 
+    std::unordered_map<Value*, Value*> exit_rewrite_map;
+    std::vector<Value*> final_exit_args;
+
     if (!old_exit_target.args.empty()) {
-        std::vector<Value*> final_exit_args;
-        for (Value* arg : old_exit_target.args) {
+        for (size_t arg_i = 0; arg_i < old_exit_target.args.size(); ++arg_i) {
+            Value* arg = old_exit_target.args[arg_i];
             if (arg && arg->is_block_param() && arg->defining_block() == header) {
                 final_exit_args.push_back(rem_hdr->param(arg->param_index()));
+                if (arg_i < exit_bb->param_count()) {
+                    exit_rewrite_map[arg] = exit_bb->param(arg_i);
+                }
             } else {
                 final_exit_args.push_back(arg);
             }
         }
-        b.build_br_if(rem_cond, rem_body, {}, exit_bb, final_exit_args);
-    } else {
-        bool uses_header_param = false;
+    }
+
+    for (size_t i = 0; i < header->param_count(); ++i) {
+        Value* hp = header->param(i);
+        if (exit_rewrite_map.count(hp)) continue;
+
+        bool is_used_outside = false;
+        for (BasicBlock* bb : fn.blocks()) {
+            if (bb == unroll_hdr || bb == unroll_body || bb == unroll_exit ||
+                bb == rem_hdr || bb == rem_body || loop.contains(bb)) {
+                continue;
+            }
+            for (Instruction* inst : *bb) {
+                for (Value* op : inst->operands()) {
+                    if (op == hp) { is_used_outside = true; break; }
+                }
+                if (is_used_outside) break;
+                for (Value* a : inst->branch_target().args) {
+                    if (a == hp) { is_used_outside = true; break; }
+                }
+                if (is_used_outside) break;
+                for (Value* a : inst->true_target().args) {
+                    if (a == hp) { is_used_outside = true; break; }
+                }
+                if (is_used_outside) break;
+                for (Value* a : inst->false_target().args) {
+                    if (a == hp) { is_used_outside = true; break; }
+                }
+                if (is_used_outside) break;
+                for (const auto& sc : inst->switch_cases()) {
+                    for (Value* a : sc.target.args) {
+                        if (a == hp) { is_used_outside = true; break; }
+                    }
+                    if (is_used_outside) break;
+                }
+                if (is_used_outside) break;
+            }
+            if (is_used_outside) break;
+        }
+
+        if (is_used_outside) {
+            Value* new_param = b.add_block_param(exit_bb, hp->type());
+            exit_rewrite_map[hp] = new_param;
+            final_exit_args.push_back(rem_hdr->param(i));
+        }
+    }
+
+    b.build_br_if(rem_cond, rem_body, {}, exit_bb, final_exit_args);
+
+    if (!exit_rewrite_map.empty()) {
+        auto update_val = [&](Value*& v) {
+            if (v && exit_rewrite_map.count(v)) {
+                v = exit_rewrite_map[v];
+            }
+        };
+
         for (BasicBlock* bb : fn.blocks()) {
             if (bb == unroll_hdr || bb == unroll_body || bb == unroll_exit ||
                 bb == rem_hdr || bb == rem_body || loop.contains(bb)) {
@@ -569,42 +628,17 @@ bool unroll_loop(
             for (Instruction* inst : *bb) {
                 for (size_t op_i = 0; op_i < inst->operand_count(); ++op_i) {
                     Value* op = inst->operand(op_i);
-                    if (op && op->is_block_param() && op->defining_block() == header) {
-                        uses_header_param = true;
-                        break;
+                    if (op && exit_rewrite_map.count(op)) {
+                        inst->set_operand(op_i, exit_rewrite_map[op]);
                     }
                 }
-                if (uses_header_param) break;
-            }
-            if (uses_header_param) break;
-        }
-
-        if (uses_header_param) {
-            std::unordered_map<Value*, Value*> exit_rewrite_map;
-            for (size_t i = 0; i < header->param_count(); ++i) {
-                Value* new_p = b.add_block_param(exit_bb, header->param(i)->type());
-                exit_rewrite_map[header->param(i)] = new_p;
-            }
-
-            b.position_at_end(rem_hdr);
-            b.build_br_if(rem_cond, rem_body, {}, exit_bb, rem_hdr->params());
-
-            for (BasicBlock* bb : fn.blocks()) {
-                if (bb == unroll_hdr || bb == unroll_body || bb == unroll_exit ||
-                    bb == rem_hdr || bb == rem_body || loop.contains(bb)) {
-                    continue;
-                }
-                for (Instruction* inst : *bb) {
-                    for (size_t op_i = 0; op_i < inst->operand_count(); ++op_i) {
-                        Value* op = inst->operand(op_i);
-                        if (op && exit_rewrite_map.count(op)) {
-                            inst->set_operand(op_i, exit_rewrite_map[op]);
-                        }
-                    }
+                for (Value*& a : inst->branch_target().args) update_val(a);
+                for (Value*& a : inst->true_target().args) update_val(a);
+                for (Value*& a : inst->false_target().args) update_val(a);
+                for (auto& sc : inst->switch_cases()) {
+                    for (Value*& a : sc.target.args) update_val(a);
                 }
             }
-        } else {
-            b.build_br_if(rem_cond, rem_body, {}, exit_bb, {});
         }
     }
 

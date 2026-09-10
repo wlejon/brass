@@ -187,8 +187,14 @@ bool vectorize_loop(
                 } else {
                     continue;
                 }
+            } else if (vec_val->type() == vli.elem_type) {
+                vec_val = b.build_vbroadcast(vli.vec_type, vec_val);
             }
-            next_vec_acc = b.build_vadd(vec_map[acc_op], vec_val);
+            Value* current_acc = vec_map[acc_op];
+            if (current_acc && current_acc->type() == vli.elem_type) {
+                current_acc = b.build_vbroadcast(vli.vec_type, current_acc);
+            }
+            next_vec_acc = b.build_vadd(current_acc ? current_acc : vec_acc_param, vec_val);
             vec_map[inst->result()] = next_vec_acc;
             continue;
         }
@@ -216,6 +222,8 @@ bool vectorize_loop(
                 } else {
                     continue;
                 }
+            } else if (vec_val->type() == vli.elem_type) {
+                vec_val = b.build_vbroadcast(vli.vec_type, vec_val);
             }
             uint8_t shift_amount = (vli.elem_type.size_in_bytes() == 4) ? 2 : 3;
             Value* shift_val = build_const_step(b, vli.iv_type, shift_amount);
@@ -236,7 +244,15 @@ bool vectorize_loop(
             Value* op = inst->operand(op_i);
             auto it_v = vec_map.find(op);
             if (it_v != vec_map.end()) {
-                vec_operands.push_back(it_v->second);
+                Value* v_op = it_v->second;
+                if (v_op->type() == vli.vec_type) {
+                    vec_operands.push_back(v_op);
+                } else if (v_op->type() == vli.elem_type) {
+                    vec_operands.push_back(b.build_vbroadcast(vli.vec_type, v_op));
+                } else {
+                    can_vectorize = false;
+                    break;
+                }
             } else if (op->type() == vli.elem_type) {
                 vec_operands.push_back(b.build_vbroadcast(vli.vec_type, op));
             } else {
@@ -418,18 +434,98 @@ bool vectorize_loop(
     Instruction* old_hdr_term = header->terminator();
     const BranchTarget& old_exit_target = vli.exit_on_false ? old_hdr_term->false_target() : old_hdr_term->true_target();
 
+    std::unordered_map<Value*, Value*> exit_rewrite_map;
     std::vector<Value*> final_exit_args;
+
     if (!old_exit_target.args.empty()) {
-        for (Value* arg : old_exit_target.args) {
+        for (size_t arg_i = 0; arg_i < old_exit_target.args.size(); ++arg_i) {
+            Value* arg = old_exit_target.args[arg_i];
             if (arg && arg->is_block_param() && arg->defining_block() == header) {
                 final_exit_args.push_back(rem_hdr->param(arg->param_index()));
+                if (arg_i < exit_bb->param_count()) {
+                    exit_rewrite_map[arg] = exit_bb->param(arg_i);
+                }
             } else {
                 final_exit_args.push_back(arg);
             }
         }
     }
 
+    for (size_t i = 0; i < header->param_count(); ++i) {
+        Value* hp = header->param(i);
+        if (exit_rewrite_map.count(hp)) continue;
+
+        bool is_used_outside = false;
+        for (BasicBlock* bb : fn.blocks()) {
+            if (bb == vec_hdr || bb == vec_body || bb == vec_exit ||
+                bb == rem_hdr || bb == rem_body || loop.contains(bb)) {
+                continue;
+            }
+            for (Instruction* inst : *bb) {
+                for (Value* op : inst->operands()) {
+                    if (op == hp) { is_used_outside = true; break; }
+                }
+                if (is_used_outside) break;
+                for (Value* a : inst->branch_target().args) {
+                    if (a == hp) { is_used_outside = true; break; }
+                }
+                if (is_used_outside) break;
+                for (Value* a : inst->true_target().args) {
+                    if (a == hp) { is_used_outside = true; break; }
+                }
+                if (is_used_outside) break;
+                for (Value* a : inst->false_target().args) {
+                    if (a == hp) { is_used_outside = true; break; }
+                }
+                if (is_used_outside) break;
+                for (const auto& sc : inst->switch_cases()) {
+                    for (Value* a : sc.target.args) {
+                        if (a == hp) { is_used_outside = true; break; }
+                    }
+                    if (is_used_outside) break;
+                }
+                if (is_used_outside) break;
+            }
+            if (is_used_outside) break;
+        }
+
+        if (is_used_outside) {
+            Value* new_param = b.add_block_param(exit_bb, hp->type());
+            exit_rewrite_map[hp] = new_param;
+            final_exit_args.push_back(rem_hdr->param(i));
+        }
+    }
+
     b.build_br_if(rem_cond, rem_body, {}, exit_bb, final_exit_args);
+
+    if (!exit_rewrite_map.empty()) {
+        auto update_val = [&](Value*& v) {
+            if (v && exit_rewrite_map.count(v)) {
+                v = exit_rewrite_map[v];
+            }
+        };
+
+        for (BasicBlock* bb : fn.blocks()) {
+            if (bb == vec_hdr || bb == vec_body || bb == vec_exit ||
+                bb == rem_hdr || bb == rem_body || loop.contains(bb)) {
+                continue;
+            }
+            for (Instruction* inst : *bb) {
+                for (size_t op_i = 0; op_i < inst->operand_count(); ++op_i) {
+                    Value* op = inst->operand(op_i);
+                    if (op && exit_rewrite_map.count(op)) {
+                        inst->set_operand(op_i, exit_rewrite_map[op]);
+                    }
+                }
+                for (Value*& a : inst->branch_target().args) update_val(a);
+                for (Value*& a : inst->true_target().args) update_val(a);
+                for (Value*& a : inst->false_target().args) update_val(a);
+                for (auto& sc : inst->switch_cases()) {
+                    for (Value*& a : sc.target.args) update_val(a);
+                }
+            }
+        }
+    }
 
     // =========================================================================
     // 8. Remove Old Loop Blocks

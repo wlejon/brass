@@ -159,7 +159,8 @@ LatticeValue evaluate_binary(Opcode op, Type res_type, const LatticeValue& lhs, 
         return LatticeValue::make_bottom(res_type);
     }
 
-    if (res_type == Type::i32()) {
+    Type op_type = (lhs.type() != Type::void_type()) ? lhs.type() : res_type;
+    if (op_type == Type::i32()) {
         int32_t a = lhs.as_i32();
         int32_t b = rhs.as_i32();
         uint32_t ua = static_cast<uint32_t>(a);

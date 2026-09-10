@@ -317,8 +317,7 @@ std::unique_ptr<LirFunction> X64ISel::lower(const Function& mir_fn) {
 
     // 1. Create all LIR blocks matching MIR blocks
     for (const auto* bb : mir_fn.blocks()) {
-        auto* lir_bb = lir_fn_->create_block(std::string(bb->name()));
-        lir_bb->id = bb->id();
+        lir_fn_->create_block_with_id(bb->id(), std::string(bb->name()));
     }
 
     // 2. Allocate VRegs for all block parameters and instructions
