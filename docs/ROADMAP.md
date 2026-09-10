@@ -140,10 +140,12 @@
   - Write Barrier Elimination (WBE) pass: provenance analysis removing barriers on young allocations, non-reference values, and dominating writes.
   - x64 JIT lowering to `brass_gc_write_barrier` runtime hook.
   - 29-program Bronze corpus verification (`29_generational_churn`).
-- **Chunk 18: On-Stack Replacement (OSR) & Multi-Tier Execution Pipeline**:
-  - Invocation & loop backedge profiling counters in functions.
-  - OSR Entry points in MIR and LIR with stack/register reconstruction at loop headers.
-  - Speculative Deopt Ratchet and automatic recompilation feedback.
+- **Chunk 18: On-Stack Replacement (OSR) & Multi-Tier Execution Pipeline [COMPLETED]**:
+  - `TierLevel` state machine (`Tier0_Interpreter` -> `Tier1_Baseline` -> `Tier2_Optimized`) with configurable invocation and loop backedge thresholds.
+  - OSR target analysis and live-in SSA parameter mapping for candidate loop headers (`Block::is_osr_entry()`, `Opcode::osr_entry`).
+  - Native secondary function prologues (`osr_entry_offset`) unpacking `OsrMigrationFrame` into physical registers and stack spill slots.
+  - Bi-directional runtime `OsrCoordinator` migrating running loops from interpreter to native JIT and deoptimizing back upon speculative guard failure.
+  - 30-program Bronze corpus verification (`30_osr_hot_loop`).
 - **Chunk 19: Global Value Numbering with Partial Redundancy Elimination (GVN-PRE) & Critical Edge Splitting**:
   - Maximal fixpoint value numbering with expression congruence.
   - Path-sensitive anticipation (DownSafe) and availability (CanBeAvail) dataflow analyses.
