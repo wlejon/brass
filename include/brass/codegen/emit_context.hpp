@@ -13,6 +13,7 @@
 #include <brass/runtime/resume_table.hpp>
 #include <brass/runtime/patcher.hpp>
 #include <brass/runtime/deopt.hpp>
+#include <brass/runtime/exception.hpp>
 #include <brass/debug/debug_section.hpp>
 
 namespace brass::codegen {
@@ -33,6 +34,7 @@ struct CompilationResult {
     runtime::FunctionResumeTable resume_table;
     std::vector<runtime::PatchSite> patch_sites;
     FunctionDebugTable debug_table;
+    runtime::FunctionExceptionTable exception_table;
 };
 
 class EmitContext {
@@ -50,6 +52,13 @@ private:
     std::vector<StackMapRecord> stack_map_records_;
     std::unordered_map<uint32_t, x64::Label> block_labels_;
     std::vector<runtime::PatchSite> patch_sites_;
+
+    struct PendingExceptionScope {
+        size_t call_start = 0;
+        size_t call_end = 0;
+        uint32_t unwind_block_id = UINT32_MAX;
+    };
+    std::vector<PendingExceptionScope> pending_exception_scopes_;
 
     x64::MemAddress to_mem_address(const LirOperand& op) const;
     x64::GPR to_gpr(const LirOperand& op) const;

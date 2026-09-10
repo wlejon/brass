@@ -91,6 +91,12 @@ enum class Opcode : uint16_t {
     ret,
     unreachable,
 
+    // Exceptions & Unwinding
+    throw_,
+    invoke,
+    landing_pad,
+    resume,
+
     // Vector Opcodes
     vadd,
     vsub,

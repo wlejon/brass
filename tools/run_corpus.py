@@ -45,6 +45,8 @@ PROGRAMS = [
     "22_bbox_expand",
     "23_objects_basic",
     "24_shapes_polymorphic",
+    "25_try_catch_basic",
+    "26_nested_try_finally",
 ]
 
 DEMOTED_PROGRAMS = {

@@ -222,6 +222,9 @@ private:
                     for (const auto& sc : inst->switch_cases()) {
                         record_target_args(sc.target);
                     }
+                } else if (inst->opcode() == Opcode::invoke) {
+                    record_target_args(inst->normal_target());
+                    record_target_args(inst->unwind_target());
                 }
             }
         }
@@ -283,6 +286,9 @@ private:
                 for (const auto& sc : term->switch_cases()) {
                     check_bt(sc.target);
                 }
+            } else if (term->opcode() == Opcode::invoke) {
+                check_bt(term->normal_target());
+                check_bt(term->unwind_target());
             }
         }
 
@@ -313,6 +319,22 @@ private:
 
         if (op == Opcode::br) {
             mark_edge_executable(inst->parent(), inst->branch_target().block);
+            return;
+        }
+
+        if (op == Opcode::invoke) {
+            mark_edge_executable(inst->parent(), inst->normal_target().block);
+            mark_edge_executable(inst->parent(), inst->unwind_target().block);
+            if (inst->produces_value()) {
+                set_lattice(inst->result(), LatticeValue::make_bottom(inst->type()));
+            }
+            return;
+        }
+
+        if (op == Opcode::landing_pad) {
+            if (inst->produces_value()) {
+                set_lattice(inst->result(), LatticeValue::make_bottom(inst->type()));
+            }
             return;
         }
 

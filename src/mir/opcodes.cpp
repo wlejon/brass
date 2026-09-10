@@ -78,6 +78,10 @@ std::string_view opcode_name(Opcode op) noexcept {
         case Opcode::switch_: return "switch";
         case Opcode::ret: return "ret";
         case Opcode::unreachable: return "unreachable";
+        case Opcode::throw_: return "throw";
+        case Opcode::invoke: return "invoke";
+        case Opcode::landing_pad: return "landing_pad";
+        case Opcode::resume: return "resume";
 
         case Opcode::vadd: return "vadd";
         case Opcode::vsub: return "vsub";
@@ -109,6 +113,9 @@ bool is_terminator(Opcode op) noexcept {
         case Opcode::switch_:
         case Opcode::ret:
         case Opcode::unreachable:
+        case Opcode::throw_:
+        case Opcode::invoke:
+        case Opcode::resume:
             return true;
         default:
             return false;
@@ -116,11 +123,11 @@ bool is_terminator(Opcode op) noexcept {
 }
 
 bool is_branch(Opcode op) noexcept {
-    return op == Opcode::br || op == Opcode::br_if || op == Opcode::switch_;
+    return op == Opcode::br || op == Opcode::br_if || op == Opcode::switch_ || op == Opcode::invoke;
 }
 
 bool is_call(Opcode op) noexcept {
-    return op == Opcode::call || op == Opcode::call_indirect || op == Opcode::patchable_call;
+    return op == Opcode::call || op == Opcode::call_indirect || op == Opcode::patchable_call || op == Opcode::invoke;
 }
 
 bool is_constant(Opcode op) noexcept {
@@ -266,6 +273,7 @@ bool has_side_effects(Opcode op) noexcept {
         case Opcode::safepoint:
         case Opcode::guard:
         case Opcode::resume_point:
+        case Opcode::landing_pad:
             return true;
         default:
             return false;

@@ -804,6 +804,65 @@ private:
                 break;
             }
 
+            case Opcode::throw_: {
+                Value* v = parse_val();
+                if (!v) return false;
+                res_inst = b.build_throw(v);
+                break;
+            }
+
+            case Opcode::resume: {
+                if (peek().is(TokenKind::ValueIdent)) {
+                    Value* v = parse_val();
+                    if (!v) return false;
+                    res_inst = b.build_resume(v);
+                } else {
+                    res_inst = b.build_resume();
+                }
+                break;
+            }
+
+            case Opcode::landing_pad: {
+                Type lp_type = type_annotation.is_void() ? (type_suffix.is_void() ? Type::i64() : type_suffix) : type_annotation;
+                res_val = b.build_landing_pad(lp_type);
+                break;
+            }
+
+            case Opcode::invoke: {
+                std::string_view callee = parse_symbol_name();
+                if (has_error_) return false;
+                if (!expect(TokenKind::LParen, "'('")) return false;
+
+                std::vector<Value*> args;
+                while (!peek().is(TokenKind::RParen) && !peek().is(TokenKind::Eof)) {
+                    Value* arg = parse_val();
+                    if (!arg) return false;
+                    args.push_back(arg);
+
+                    if (!peek().is(TokenKind::RParen)) {
+                        if (!expect(TokenKind::Comma, "','")) return false;
+                    }
+                }
+                if (!expect(TokenKind::RParen, "')'")) return false;
+                if (!expect(TokenKind::Comma, "','")) return false;
+
+                BranchTarget normal_t;
+                if (!parse_branch_target(normal_t)) return false;
+                if (!expect(TokenKind::Comma, "','")) return false;
+
+                BranchTarget unwind_t;
+                if (!parse_branch_target(unwind_t)) return false;
+
+                Type invoke_ret_type = has_assignment ? (type_suffix.is_void() ? Type::i32() : type_suffix) : type_suffix;
+                res_inst = b.build_invoke(callee, invoke_ret_type, args,
+                                          normal_t.block, normal_t.args,
+                                          unwind_t.block, unwind_t.args);
+                if (res_inst && res_inst->result()) {
+                    res_val = res_inst->result();
+                }
+                break;
+            }
+
             default: {
                 if (is_vector_op(op)) {
                     ParserVecContext ctx{

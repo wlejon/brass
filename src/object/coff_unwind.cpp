@@ -150,7 +150,8 @@ void CoffUnwindBuilder::build_unwind_info(
         }
 
         // Emit UNWIND_INFO Header (4 bytes)
-        uint8_t version_flags = 0x01; // Version = 1, Flags = 0 (UNW_FLAG_NHANDLER)
+        bool has_ehandler = fn.exception_table.has_scopes();
+        uint8_t version_flags = static_cast<uint8_t>(0x01 | (has_ehandler ? 0x08 : 0x00)); // Version = 1, UNW_FLAG_EHANDLER
         uint8_t prolog_sz = static_cast<uint8_t>(fn.prologue_size > 0 ? fn.prologue_size : cur_offset);
         uint8_t cnt_codes = static_cast<uint8_t>(total_slots);
 
@@ -178,6 +179,27 @@ void CoffUnwindBuilder::build_unwind_info(
         // Pad to DWORD (4-byte) alignment
         if (total_slots % 2 != 0) {
             xdata_sec->emit16(0);
+        }
+
+        if (has_ehandler) {
+            if (!obj.find_symbol("brass_seh_personality")) {
+                ObjectSymbol s;
+                s.name = "brass_seh_personality";
+                s.section_index = SECTION_UNDEF;
+                s.binding = SymbolBinding::Global;
+                s.type = SymbolType::Function;
+                obj.add_symbol(std::move(s));
+            }
+            size_t handler_off = xdata_sec->data.size();
+            xdata_sec->emit32(0);
+            ObjectRelocation r;
+            r.offset = handler_off;
+            r.kind = RelocKind::Addr32NB;
+            r.symbol_name = "brass_seh_personality";
+            r.addend = 0;
+            xdata_sec->relocations.push_back(std::move(r));
+
+            runtime::emit_win64_seh_scope_table(*xdata_sec, fn.exception_table);
         }
 
         // Emit RUNTIME_FUNCTION in .pdata (12 bytes)

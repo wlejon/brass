@@ -45,6 +45,10 @@ bool decode_opcode_string(std::string_view str, Opcode& op, Type& type_suffix, T
     if (str == "safepoint") { op = Opcode::safepoint; return true; }
     if (str == "unreachable") { op = Opcode::unreachable; return true; }
     if (str == "call") { op = Opcode::call; return true; }
+    if (str == "throw") { op = Opcode::throw_; return true; }
+    if (str == "resume") { op = Opcode::resume; return true; }
+    if (str == "landing_pad" || str == "landingpad") { op = Opcode::landing_pad; return true; }
+    if (str == "invoke") { op = Opcode::invoke; return true; }
 
     // Special conversions
     if (str == "sitofp.f64.i32" || str == "sitofp_f64_i32") { op = Opcode::sitofp_f64_i32; type_suffix = Type::f64(); return true; }
@@ -150,6 +154,8 @@ bool decode_opcode_string(std::string_view str, Opcode& op, Type& type_suffix, T
     if (base == "call") { op = Opcode::call; return true; }
     if (base == "call_indirect") { op = Opcode::call_indirect; return true; }
     if (base == "patchable_call") { op = Opcode::patchable_call; return true; }
+    if (base == "invoke") { op = Opcode::invoke; return true; }
+    if (base == "landing_pad" || base == "landingpad") { op = Opcode::landing_pad; return true; }
 
     return false;
 }

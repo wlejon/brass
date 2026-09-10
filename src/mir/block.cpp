@@ -139,6 +139,13 @@ std::vector<BasicBlock*> BasicBlock::successors() const {
                 succs.push_back(sc.target.block);
             }
         }
+    } else if (term->opcode() == Opcode::invoke) {
+        if (term->normal_target().block) {
+            succs.push_back(term->normal_target().block);
+        }
+        if (term->unwind_target().block && std::find(succs.begin(), succs.end(), term->unwind_target().block) == succs.end()) {
+            succs.push_back(term->unwind_target().block);
+        }
     }
     return succs;
 }

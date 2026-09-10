@@ -131,6 +131,7 @@ struct Section {
 
 #include <brass/runtime/resume_table.hpp>
 #include <brass/runtime/patcher.hpp>
+#include <brass/runtime/exception.hpp>
 
 struct CompiledFunctionInfo {
     std::string name;
@@ -143,6 +144,7 @@ struct CompiledFunctionInfo {
     FunctionStackMap stack_map;
     runtime::FunctionResumeTable resume_table;
     std::vector<runtime::PatchSite> patch_sites;
+    runtime::FunctionExceptionTable exception_table;
 };
 
 struct ObjectFile {
@@ -154,6 +156,7 @@ struct ObjectFile {
     runtime::ResumeTableRegistry resume_tables;
     runtime::PatchRegistry patch_sites;
     std::vector<FunctionDebugTable> debug_tables;
+    runtime::ExceptionTableRegistry exception_tables;
 
     Section* get_section(std::string_view name);
     const Section* get_section(std::string_view name) const;

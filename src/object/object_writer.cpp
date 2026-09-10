@@ -200,6 +200,10 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
         cfi.resume_table = std::move(res.resume_table);
         obj.resume_tables.register_table(cfi.name, cfi.resume_table);
 
+        cfi.exception_table = std::move(res.exception_table);
+        cfi.exception_table.set_code_offset(static_cast<uint32_t>(fn_offset));
+        obj.exception_tables.register_table(cfi.name, cfi.exception_table);
+
         for (const auto& ps : res.patch_sites) {
             runtime::PatchSite global_ps = ps;
             global_ps.code_offset += fn_offset;

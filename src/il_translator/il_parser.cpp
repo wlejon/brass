@@ -258,6 +258,7 @@ bool IlParser::parse_instruction(BronzeInstruction& out_inst) {
         }
         case BronzeOp::ConstUndefined:
         case BronzeOp::ConstNull:
+        case BronzeOp::ExcTake:
             break;
 
         case BronzeOp::Call: {

@@ -81,6 +81,8 @@ const char* bronze_op_name(BronzeOp op) {
         case BronzeOp::Ret: return "ret";
         case BronzeOp::Jump: return "jump";
         case BronzeOp::Branch: return "br";
+        case BronzeOp::Throw: return "throw";
+        case BronzeOp::ExcTake: return "exc.take";
         case BronzeOp::Unknown: return "?";
     }
     return "?";
@@ -404,6 +406,8 @@ Token IlLexer::scan_token() {
         if (w == "ret") { op_out = BronzeOp::Ret; return true; }
         if (w == "jump") { op_out = BronzeOp::Jump; return true; }
         if (w == "br") { op_out = BronzeOp::Branch; return true; }
+        if (w == "throw") { op_out = BronzeOp::Throw; return true; }
+        if (w == "exc.take") { op_out = BronzeOp::ExcTake; return true; }
         return false;
     };
 

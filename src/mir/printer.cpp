@@ -342,6 +342,40 @@ public:
                 break;
             }
 
+            case Opcode::throw_:
+                os_ << "throw " << value_name(inst.operand(0));
+                break;
+
+            case Opcode::invoke:
+                if (!inst.type().is_void()) {
+                    os_ << "invoke." << inst.type().name() << " ";
+                } else {
+                    os_ << "invoke ";
+                }
+                os_ << "@" << inst.symbol() << "(";
+                for (size_t i = 0; i < inst.operand_count(); ++i) {
+                    if (i > 0) os_ << ", ";
+                    os_ << value_name(inst.operand(i));
+                }
+                os_ << "), " << format_branch_target(inst.normal_target()) << ", "
+                    << format_branch_target(inst.unwind_target());
+                break;
+
+            case Opcode::landing_pad:
+                if (!inst.type().is_void() && inst.type() != Type::i64()) {
+                    os_ << "landing_pad." << inst.type().name();
+                } else {
+                    os_ << "landing_pad";
+                }
+                break;
+
+            case Opcode::resume:
+                os_ << "resume";
+                if (inst.operand_count() > 0 && inst.operand(0)) {
+                    os_ << " " << value_name(inst.operand(0));
+                }
+                break;
+
             case Opcode::vadd:
             case Opcode::vsub:
             case Opcode::vmul:

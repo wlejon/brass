@@ -81,6 +81,9 @@ public:
     const runtime::FunctionResumeTable* get_resume_table(std::string_view fn_name) const noexcept;
     void* get_resume_target_address(std::string_view fn_name, uint32_t resume_id) const;
 
+    // Exception tables
+    const runtime::ExceptionTableRegistry& exception_tables() const noexcept { return exception_tables_; }
+
     // Runtime patching API
     const runtime::PatchRegistry& patch_sites() const noexcept { return patch_sites_; }
     runtime::PatchRegistry& patch_sites() noexcept { return patch_sites_; }
@@ -111,6 +114,8 @@ private:
     ModuleStackMap stack_maps_;
     runtime::ResumeTableRegistry resume_tables_;
     runtime::PatchRegistry patch_sites_;
+    runtime::ExceptionTableRegistry exception_tables_;
+    std::vector<uintptr_t> registered_exception_fns_;
     uint8_t* text_section_base_ = nullptr;
     // Windows SEH registration tracking
     void* pdata_table_ = nullptr;

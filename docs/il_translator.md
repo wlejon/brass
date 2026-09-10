@@ -24,6 +24,7 @@ The Bronze IL Translator (`brass::il::translate_bronze_il` and `brass-il` CLI) p
 | **Closures** | `create.func @fn, <param_count>, %env` | Code pointer + environment pairing (`BronzeClosure`) | Supported |
 | **Direct Calls & Prints**| `call @name(...)`, `print %0, ...`, `print.err %0, ...` | Direct internal/external subroutine calls & formatted printers | Supported |
 | **Objects & Properties**| `create.object`, `create.array`, `prop.get`, `prop.set`, `elem.get`, `elem.set`, `method.def` | Polymorphic inline caches (PICs), Shape hidden class transitions, moving GC DynamicObject | Supported |
+| **Exception Handling**| `handler b<id>`, `throw %val`, `exc.take` | MIR `invoke`, `throw`, `landing_pad` with zero-cost Win64 SEH & SysV DWARF LSDA unwinding | Supported |
 
 ---
 
@@ -33,8 +34,6 @@ The Bronze IL Translator (`brass::il::translate_bronze_il` and `brass-il` CLI) p
    - *Reason*: Requires getter/setter dynamic property dispatch and call stub synthesis.
 2. **Async / Generator Coroutines (`create.async_machine`, `async.start`, `async.await`, `iter.open`, `iter.step`)**:
    - *Reason*: Requires coroutine state machine transformation and resume point descriptors.
-3. **Exception Tables (`handler b<id>`, `throw`, `exc.take`)**:
-   - *Reason*: Requires Windows SEH / C++ landing pad metadata generation.
 
 ---
 

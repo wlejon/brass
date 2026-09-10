@@ -329,6 +329,8 @@ public:
     std::string patch_symbol;
     std::string callee_symbol;
     std::vector<VReg> live_gcrefs;
+    bool is_invoke = false;
+    uint32_t unwind_block_id = UINT32_MAX;
 
     LirInst() = default;
     explicit LirInst(LirOpcode op) : opcode(op) {}

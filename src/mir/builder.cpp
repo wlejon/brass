@@ -755,4 +755,74 @@ Instruction* Builder::build_unreachable() {
     return inst;
 }
 
+Instruction* Builder::build_throw(Value* val) {
+    Instruction* inst = get_arena().make<Instruction>(Opcode::throw_, Type::void_type());
+    if (val) {
+        inst->add_operand(val);
+    }
+    insert(inst);
+    return inst;
+}
+
+Instruction* Builder::build_resume(Value* val) {
+    Instruction* inst = get_arena().make<Instruction>(Opcode::resume, Type::void_type());
+    if (val) {
+        inst->add_operand(val);
+    }
+    insert(inst);
+    return inst;
+}
+
+Value* Builder::build_landing_pad(Type type) {
+    Instruction* inst = get_arena().make<Instruction>(Opcode::landing_pad, type);
+    Value* res = create_value(type);
+    inst->set_result(res);
+    res->set_defining_instruction(inst);
+    insert(inst);
+    return res;
+}
+
+Instruction* Builder::build_invoke(std::string_view callee, Type return_type, Span<Value* const> args,
+                                   BasicBlock* normal_target, BasicBlock* unwind_target) {
+    return build_invoke(callee, return_type, args, normal_target, {}, unwind_target, {});
+}
+
+Instruction* Builder::build_invoke(std::string_view callee, Type return_type, std::initializer_list<Value*> args,
+                                   BasicBlock* normal_target, BasicBlock* unwind_target) {
+    return build_invoke(callee, return_type, Span<Value* const>(args.begin(), args.size()),
+                        normal_target, {}, unwind_target, {});
+}
+
+Instruction* Builder::build_invoke(std::string_view callee, Type return_type, Span<Value* const> args,
+                                   BasicBlock* normal_target, Span<Value* const> normal_args,
+                                   BasicBlock* unwind_target, Span<Value* const> unwind_args) {
+    Instruction* inst = get_arena().make<Instruction>(Opcode::invoke, return_type);
+    inst->set_symbol(get_string_pool().intern(callee));
+    for (Value* arg : args) {
+        inst->add_operand(arg);
+    }
+    std::vector<Value*> n_args(normal_args.begin(), normal_args.end());
+    inst->set_normal_target(BranchTarget(normal_target, std::move(n_args)));
+
+    std::vector<Value*> u_args(unwind_args.begin(), unwind_args.end());
+    inst->set_unwind_target(BranchTarget(unwind_target, std::move(u_args)));
+
+    if (!return_type.is_void()) {
+        Value* res = create_value(return_type);
+        inst->set_result(res);
+        res->set_defining_instruction(inst);
+    }
+
+    insert(inst);
+    return inst;
+}
+
+Instruction* Builder::build_invoke(std::string_view callee, Type return_type, std::initializer_list<Value*> args,
+                                   BasicBlock* normal_target, std::initializer_list<Value*> normal_args,
+                                   BasicBlock* unwind_target, std::initializer_list<Value*> unwind_args) {
+    return build_invoke(callee, return_type, Span<Value* const>(args.begin(), args.size()),
+                        normal_target, Span<Value* const>(normal_args.begin(), normal_args.size()),
+                        unwind_target, Span<Value* const>(unwind_args.begin(), unwind_args.size()));
+}
+
 } // namespace brass

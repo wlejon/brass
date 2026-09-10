@@ -66,6 +66,10 @@ private:
     void lower_comparison(const Instruction& inst, codegen::LirBlock& lir_bb, Condition cond, Condition float_cond);
     void lower_select(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_call(const Instruction& inst, codegen::LirBlock& lir_bb);
+    void lower_invoke(const Instruction& inst, codegen::LirBlock& lir_bb);
+    void lower_throw(const Instruction& inst, codegen::LirBlock& lir_bb);
+    void lower_resume(const Instruction& inst, codegen::LirBlock& lir_bb);
+    void lower_landing_pad(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_branch(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_branch_if(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_switch(const Instruction& inst, codegen::LirBlock& lir_bb);

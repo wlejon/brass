@@ -1,4 +1,5 @@
 #include <brass/codegen/emit_context.hpp>
+#include <iostream>
 #include <stdexcept>
 
 namespace brass::codegen {
@@ -161,6 +162,25 @@ CompilationResult EmitContext::compile() {
         }
     }
     result.patch_sites = std::move(patch_sites_);
+
+    // 6. Build exception table
+    result.exception_table.set_function_name(std::string(fn_.name));
+    result.exception_table.set_code_size(static_cast<uint32_t>(result.code_buffer.size()));
+    codegen::FrameInfo fn_frame = fn_.frame;
+    x64::X64FrameLayout::compute_layout(fn_frame, fn_.calling_conv);
+    result.exception_table.set_frame_size(static_cast<uint32_t>(fn_frame.total_frame_size));
+    result.exception_table.set_saved_callee_gprs(fn_frame.saved_callee_gprs);
+
+    for (const auto& scope : pending_exception_scopes_) {
+        auto it = result.block_offsets.find(scope.unwind_block_id);
+        if (it != result.block_offsets.end()) {
+            result.exception_table.add_scope(
+                static_cast<uint32_t>(scope.call_start),
+                static_cast<uint32_t>(scope.call_end),
+                static_cast<uint32_t>(it->second)
+            );
+        }
+    }
 
     return result;
 }
@@ -469,6 +489,7 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
             enc_.j(inst.condition, block_labels_[inst.uses[0].label_id]);
             break;
         case LirOpcode::Call: {
+            size_t call_start = buffer_.size();
             const auto& sym_op = inst.uses.back();
             std::string callee = inst.callee_symbol.empty() ? sym_op.symbol_name : inst.callee_symbol;
             if (inst.is_patchable) {
@@ -490,6 +511,10 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
                 enc_.call(callee);
             }
             size_t return_offset = buffer_.size();
+
+            if (inst.is_invoke && inst.unwind_block_id != UINT32_MAX) {
+                pending_exception_scopes_.push_back({call_start, return_offset, inst.unwind_block_id});
+            }
 
             codegen::FrameInfo mutable_frame = fn_.frame;
             X64FrameLayout::compute_layout(mutable_frame, fn_.calling_conv);
@@ -513,8 +538,13 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
             break;
         }
         case LirOpcode::CallIndirect: {
+            size_t call_start = buffer_.size();
             enc_.call(to_gpr(inst.uses.back()));
             size_t return_offset = buffer_.size();
+
+            if (inst.is_invoke && inst.unwind_block_id != UINT32_MAX) {
+                pending_exception_scopes_.push_back({call_start, return_offset, inst.unwind_block_id});
+            }
 
             codegen::FrameInfo mutable_frame = fn_.frame;
             X64FrameLayout::compute_layout(mutable_frame, fn_.calling_conv);

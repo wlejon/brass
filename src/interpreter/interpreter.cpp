@@ -746,6 +746,98 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                 case Opcode::unreachable: {
                     throw InterpreterException("Execution reached unreachable instruction");
                 }
+
+                case Opcode::throw_: {
+                    RuntimeValue val = frame.get_value(inst->operand(0));
+                    current_exception_ = val;
+                    throw InterpreterThrownException(val);
+                }
+
+                case Opcode::resume: {
+                    RuntimeValue val = (inst->operand_count() > 0 && inst->operand(0))
+                        ? frame.get_value(inst->operand(0))
+                        : current_exception_;
+                    current_exception_ = val;
+                    throw InterpreterThrownException(val);
+                }
+
+                case Opcode::landing_pad: {
+                    frame.set_value(inst->result(), current_exception_);
+                    break;
+                }
+
+                case Opcode::invoke: {
+                    std::string_view callee = inst->symbol();
+                    std::vector<RuntimeValue> call_args;
+                    call_args.reserve(inst->operand_count());
+                    for (size_t i = 0; i < inst->operand_count(); ++i) {
+                        call_args.push_back(frame.get_value(inst->operand(i)));
+                    }
+
+                    RuntimeValue call_res;
+                    bool threw = false;
+                    try {
+                        const Function* target_fn = module_ ? module_->get_function(callee) : nullptr;
+                        if (target_fn) {
+                            call_res = execute_function(*target_fn, call_args);
+                        } else {
+                            auto it = external_functions_.find(std::string(callee));
+                            if (it != external_functions_.end()) {
+                                call_res = it->second(*this, call_args);
+                            } else {
+                                throw InterpreterException("Invoke to undefined function: " + std::string(callee));
+                            }
+                        }
+                    } catch (const InterpreterThrownException& ex) {
+                        threw = true;
+                        current_exception_ = ex.value();
+                    }
+
+                    if (!threw) {
+                        if (inst->result() && !inst->type().is_void()) {
+                            frame.set_value(inst->result(), call_res);
+                        }
+
+                        const BranchTarget& target = inst->normal_target();
+                        std::vector<RuntimeValue> target_args;
+                        target_args.reserve(target.args.size());
+                        for (Value* a : target.args) {
+                            target_args.push_back(frame.get_value(a));
+                        }
+
+                        BasicBlock* next_bb = target.block;
+                        if (!next_bb) {
+                            throw InterpreterException("Invoke normal branch to null basic block");
+                        }
+
+                        for (size_t i = 0; i < next_bb->param_count() && i < target_args.size(); ++i) {
+                            frame.set_value(next_bb->param(i), target_args[i]);
+                        }
+
+                        cur_bb = next_bb;
+                        transitioned = true;
+                    } else {
+                        const BranchTarget& target = inst->unwind_target();
+                        std::vector<RuntimeValue> target_args;
+                        target_args.reserve(target.args.size());
+                        for (Value* a : target.args) {
+                            target_args.push_back(frame.get_value(a));
+                        }
+
+                        BasicBlock* next_bb = target.block;
+                        if (!next_bb) {
+                            throw InterpreterException("Invoke unwind branch to null basic block");
+                        }
+
+                        for (size_t i = 0; i < next_bb->param_count() && i < target_args.size(); ++i) {
+                            frame.set_value(next_bb->param(i), target_args[i]);
+                        }
+
+                        cur_bb = next_bb;
+                        transitioned = true;
+                    }
+                    break;
+                }
             }
 
             if (transitioned) {

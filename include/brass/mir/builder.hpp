@@ -173,6 +173,15 @@ public:
     Instruction* build_ret_void();
     Instruction* build_unreachable();
 
+    // Exceptions & Unwinding
+    Instruction* build_throw(Value* val);
+    Instruction* build_resume(Value* val = nullptr);
+    Value* build_landing_pad(Type type = Type::i64());
+    Instruction* build_invoke(std::string_view callee, Type return_type, Span<Value* const> args, BasicBlock* normal_target, BasicBlock* unwind_target);
+    Instruction* build_invoke(std::string_view callee, Type return_type, std::initializer_list<Value*> args, BasicBlock* normal_target, BasicBlock* unwind_target);
+    Instruction* build_invoke(std::string_view callee, Type return_type, Span<Value* const> args, BasicBlock* normal_target, Span<Value* const> normal_args, BasicBlock* unwind_target, Span<Value* const> unwind_args = {});
+    Instruction* build_invoke(std::string_view callee, Type return_type, std::initializer_list<Value*> args, BasicBlock* normal_target, std::initializer_list<Value*> normal_args, BasicBlock* unwind_target, std::initializer_list<Value*> unwind_args = {});
+
     Instruction* insert(Instruction* inst);
     Value* create_value(Type type);
 

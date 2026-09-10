@@ -168,6 +168,14 @@ public:
     BranchTarget& false_target() noexcept { return false_target_; }
     void set_false_target(BranchTarget target) { false_target_ = std::move(target); }
 
+    const BranchTarget& normal_target() const noexcept { return true_target_; }
+    BranchTarget& normal_target() noexcept { return true_target_; }
+    void set_normal_target(BranchTarget target) { true_target_ = std::move(target); }
+
+    const BranchTarget& unwind_target() const noexcept { return false_target_; }
+    BranchTarget& unwind_target() noexcept { return false_target_; }
+    void set_unwind_target(BranchTarget target) { false_target_ = std::move(target); }
+
     const std::vector<Value*>& state_map() const noexcept { return state_map_; }
     std::vector<Value*>& state_map() noexcept { return state_map_; }
     void add_state_value(Value* val) { state_map_.push_back(val); }

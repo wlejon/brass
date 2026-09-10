@@ -255,9 +255,10 @@ bool IlLowering::lower_function(const BronzeFunction& fn_ast, Module& mod, const
     for (const auto& blk_ast : fn_ast.blocks) {
         BasicBlock* bb = block_map[blk_ast.id];
         b.position_at_end(bb);
+        uint32_t cont_counter = 0;
 
         for (const auto& inst_ast : blk_ast.instructions) {
-            if (!lower_instruction(inst_ast, b, fn, val_map, block_map)) {
+            if (!lower_instruction(inst_ast, b, fn, val_map, block_map, blk_ast.handler_id, blk_ast.id, &cont_counter)) {
                 return false;
             }
         }
@@ -272,7 +273,10 @@ bool IlLowering::lower_instruction(
     Builder& b,
     Function* fn,
     std::unordered_map<uint32_t, Value*>& val_map,
-    const std::unordered_map<uint32_t, BasicBlock*>& block_map
+    const std::unordered_map<uint32_t, BasicBlock*>& block_map,
+    uint32_t handler_id,
+    uint32_t block_id,
+    uint32_t* cont_counter
 ) {
     Type res_type = lower_type(inst_ast.result_type);
     Value* res_val = nullptr;
@@ -756,7 +760,43 @@ bool IlLowering::lower_instruction(
                 }
                 args.push_back(arg);
             }
-            res_val = b.build_call(inst_ast.callee_name, callee_ret, Span<Value* const>(args.data(), args.size()));
+            if (handler_id != UINT32_MAX && block_map.count(handler_id)) {
+                BasicBlock* cur_bb = b.current_block();
+                BasicBlock* unwind_bb = block_map.at(handler_id);
+                uint32_t cid = cont_counter ? ++(*cont_counter) : 1;
+                std::string cont_name = "b" + std::to_string(block_id) + "_cont" + std::to_string(cid);
+                BasicBlock* normal_bb = b.append_block(cont_name);
+                b.position_at_end(cur_bb);
+                Instruction* inv = b.build_invoke(inst_ast.callee_name, callee_ret, Span<Value* const>(args.data(), args.size()), normal_bb, unwind_bb);
+                res_val = inv->result();
+                b.position_at_end(normal_bb);
+            } else {
+                res_val = b.build_call(inst_ast.callee_name, callee_ret, Span<Value* const>(args.data(), args.size()));
+            }
+            break;
+        }
+
+        case BronzeOp::Throw: {
+            Value* op0 = get_opd(0);
+            if (!op0) return false;
+            if (handler_id != UINT32_MAX && block_map.count(handler_id)) {
+                BasicBlock* cur_bb = b.current_block();
+                BasicBlock* unwind_bb = block_map.at(handler_id);
+                uint32_t cid = cont_counter ? ++(*cont_counter) : 1;
+                std::string cont_name = "b" + std::to_string(block_id) + "_cont" + std::to_string(cid);
+                BasicBlock* normal_bb = b.append_block(cont_name);
+                b.position_at_end(cur_bb);
+                b.build_invoke("brass_throw", Type::void_type(), {op0}, normal_bb, unwind_bb);
+                b.position_at_end(normal_bb);
+                b.build_unreachable();
+            } else {
+                b.build_throw(op0);
+            }
+            break;
+        }
+
+        case BronzeOp::ExcTake: {
+            res_val = b.build_landing_pad(res_type);
             break;
         }
 

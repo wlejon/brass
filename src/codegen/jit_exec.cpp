@@ -5,6 +5,7 @@
 #include <brass/runtime/deopt.hpp>
 #include <brass/runtime/resume_table.hpp>
 #include <brass/runtime/patcher.hpp>
+#include <brass/runtime/exception.hpp>
 #include <stdexcept>
 #include <cstring>
 #include <emmintrin.h>
@@ -110,6 +111,11 @@ JitExecutionEngine::JitExecutionEngine(const Target& target)
     register_external_symbol("brass_patch_const32", reinterpret_cast<void*>(&brass_patch_const32));
     register_external_symbol("brass_patch_const64", reinterpret_cast<void*>(&brass_patch_const64));
     register_external_symbol("brass_patch_call", reinterpret_cast<void*>(&brass_patch_call));
+    register_external_symbol("brass_throw", reinterpret_cast<void*>(&runtime::brass_throw));
+    register_external_symbol("brass_rethrow", reinterpret_cast<void*>(&runtime::brass_rethrow));
+#if defined(_WIN32)
+    register_external_symbol("brass_seh_personality", reinterpret_cast<void*>(&runtime::brass_seh_personality));
+#endif
 }
 
 JitExecutionEngine::JitExecutionEngine()
@@ -124,10 +130,19 @@ JitExecutionEngine::JitExecutionEngine()
     register_external_symbol("brass_patch_const32", reinterpret_cast<void*>(&brass_patch_const32));
     register_external_symbol("brass_patch_const64", reinterpret_cast<void*>(&brass_patch_const64));
     register_external_symbol("brass_patch_call", reinterpret_cast<void*>(&brass_patch_call));
+    register_external_symbol("brass_throw", reinterpret_cast<void*>(&runtime::brass_throw));
+    register_external_symbol("brass_rethrow", reinterpret_cast<void*>(&runtime::brass_rethrow));
+#if defined(_WIN32)
+    register_external_symbol("brass_seh_personality", reinterpret_cast<void*>(&runtime::brass_seh_personality));
+#endif
 }
 
 JitExecutionEngine::~JitExecutionEngine() {
     unregister_seh_tables();
+    for (uintptr_t fn_addr : registered_exception_fns_) {
+        runtime::get_global_exception_registry().unregister_function_mapping(fn_addr);
+    }
+    registered_exception_fns_.clear();
     if (brass_get_active_stack_maps() == &stack_maps_) {
         brass_set_active_stack_maps(nullptr);
     }
@@ -369,6 +384,21 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
     // Register Resume Tables and Patch Sites
     resume_tables_ = working_obj.resume_tables;
     patch_sites_ = working_obj.patch_sites;
+    exception_tables_ = working_obj.exception_tables;
+
+    if (text_section_base_) {
+        for (const auto& fn : working_obj.functions) {
+            if (fn.text_size > 0) {
+                uintptr_t fn_addr = reinterpret_cast<uintptr_t>(text_section_base_) + fn.text_offset;
+                runtime::get_global_exception_registry().register_function_mapping(
+                    fn_addr,
+                    fn.text_size,
+                    fn.exception_table
+                );
+                registered_exception_fns_.push_back(fn_addr);
+            }
+        }
+    }
 
     code_mem_.make_executable();
     return true;
@@ -387,7 +417,7 @@ void* JitExecutionEngine::get_symbol_address(std::string_view name) const {
 }
 
 void JitExecutionEngine::register_seh_tables(const object::ObjectFile& obj, uint8_t* base_ptr) {
-#if defined(_WIN32) && defined(_M_X64)
+#if defined(_WIN32) && (defined(_M_X64) || defined(__x86_64__))
     unregister_seh_tables();
     int32_t pdata_idx = obj.get_section_index(".pdata");
     if (pdata_idx != object::SECTION_UNDEF) {

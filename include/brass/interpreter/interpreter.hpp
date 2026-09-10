@@ -43,6 +43,16 @@ private:
     DeoptResult result_;
 };
 
+class InterpreterThrownException : public std::exception {
+public:
+    explicit InterpreterThrownException(RuntimeValue val) : value_(val) {}
+    RuntimeValue value() const noexcept { return value_; }
+    const char* what() const noexcept override { return "InterpreterThrownException"; }
+
+private:
+    RuntimeValue value_;
+};
+
 using HostFn = std::function<RuntimeValue(Interpreter& interp, const std::vector<RuntimeValue>& args)>;
 using DeoptHandler = std::function<RuntimeValue(Interpreter& interp, const DeoptResult& deopt)>;
 
@@ -106,6 +116,9 @@ public:
     const InterpreterFrame* current_frame() const noexcept { return current_frame_; }
     void collect_all_roots(std::vector<uintptr_t*>& roots);
 
+    RuntimeValue current_exception() const noexcept { return current_exception_; }
+    void set_current_exception(RuntimeValue val) noexcept { current_exception_ = val; }
+
 private:
     RuntimeValue execute_function(const Function& fn, const std::vector<RuntimeValue>& args);
     RuntimeValue execute_function_from_block(const Function& fn, BasicBlock* start_block, const std::vector<RuntimeValue>& block_args);
@@ -128,6 +141,7 @@ private:
 
     DeoptResult last_deopt_;
     DeoptHandler deopt_handler_;
+    RuntimeValue current_exception_;
 };
 
 } // namespace brass

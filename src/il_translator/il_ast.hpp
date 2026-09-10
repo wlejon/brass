@@ -78,6 +78,8 @@ enum class BronzeOp {
     Ret,
     Jump,
     Branch,
+    Throw,
+    ExcTake,
     Unknown
 };
 
