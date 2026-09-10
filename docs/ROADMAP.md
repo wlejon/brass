@@ -160,6 +160,25 @@
 
 ---
 
+## Phase V: Scalable Parallelism, Hardware Acceleration & Throughput (Chunks 21–23)
+
+- **Chunk 21: AVX2 256-Bit Vector Extension & FMA3 Instruction Set [COMPLETED]**:
+  - 256-bit vector types: `F32x8`, `F64x4`, `I32x8`, `I64x4` (32 bytes).
+  - FMA primitives: `vfma %a, %b, %c`, scalar `fma_f32`, `fma_f64`.
+  - 2-byte (`0xC5`) and 3-byte (`0xC4`) VEX prefix emitter in [`x64_encoder_vex.cpp`](file:///D:/projects/brass/src/target/x64/x64_encoder_vex.cpp) with non-destructive 3-operand encodings.
+  - AVX2 arithmetic, logical, broadcast, and FMA3 instruction set lowering.
+  - FMA pattern matching pass (`mul + add` -> `fma`) and 256-bit loop vectorizer expansion.
+  - 33-program Bronze corpus verification (`33_avx2_fma_matmul`).
+- **Chunk 22: Concurrent Background JIT Compiler Worker Threads**:
+  - Thread-safe compilation queue with worker thread pool.
+  - Non-blocking off-thread optimization of hot functions.
+  - Atomic code installation and entry point swapping.
+- **Chunk 23: Polyhedral Loop Dependence & Auto-Parallelization**:
+  - Multi-threaded loop execution for large-trip count kernels.
+  - Task scheduling runtime with work-stealing thread pool.
+
+---
+
 ## House Rules & Code Conventions
 1. **C++20**: Zero LLVM dependencies.
 2. **Compiler Compatibility**: MSVC, Clang, and GCC 12 clean (no `= {}` default args which GCC 12 rejects).
