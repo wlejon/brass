@@ -174,9 +174,12 @@
   - Request deduplication preventing duplicate compilation of active or queued hot functions.
   - Atomic code installation via `FunctionHandle` and `CodeInstaller`, publishing native entry points with release/acquire memory barriers without pausing mutator execution.
   - 34-program Bronze corpus verification (`34_background_tiering`).
-- **Chunk 23: Polyhedral Loop Dependence & Auto-Parallelization**:
-  - Multi-threaded loop execution for large-trip count kernels.
-  - Task scheduling runtime with work-stealing thread pool.
+- **Chunk 23: Polyhedral Loop Dependence & Auto-Parallelization [COMPLETED]**:
+  - Affine memory subscript analysis and polyhedral distance/direction vector computation (`=`, `<`, `>`, `*`).
+  - DOALL loop classification, loop-carried dependency rejection, and associative reduction detection (sum, product, min, max).
+  - Outlining parallel loop bodies into worker kernels and injecting `brass_parallel_for` runtime dispatch.
+  - Multi-threaded runtime with work-stealing thread pool, dynamic chunking, and per-worker reduction aggregation.
+  - 35-program Bronze corpus verification (`35_parallel_matrix_vector`).
 
 ---
 
