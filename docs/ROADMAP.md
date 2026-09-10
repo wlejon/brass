@@ -189,10 +189,13 @@
   - DWARF 4/5 emitter for Linux ELF and LLDB: `.debug_line` matrix state machine, `.debug_info`, `.debug_abbrev`, and `.debug_str` with function DIEs and `%rbp`-relative frame variables.
   - Windows CodeView emitter for Win64 COFF and Visual Studio / WinDbg: `.debug$S` (file checksums, string table, line numbers, procedure symbols) and `.debug$T` primitive type dictionary.
   - 36-program Bronze corpus verification (`36_debug_source_lines`).
-- **Chunk 25: Continuous Differential Fuzzing, Mutation Engine & Sandboxed Hardening**:
-  - Grammar/SSA mutation engine generating randomized arithmetic, control-flow diamonds, nested loops, exceptions, objects, and arrays.
-  - Sandboxed out-of-process differential runner comparing Interpreter vs Baseline vs Full JIT with timeouts and memory caps.
-  - Automated test-case minimizer (`delta-reducer`) that shrinks failing test cases to minimal single-instruction reproducers.
+- **Chunk 25: Continuous Differential Fuzzing, Mutation Engine & Sandboxed Hardening [COMPLETED]**:
+  - Deterministic SSA / MIR mutation engine with boundary value synthesis, constant mutation, commutative operand swapping, opcode substitution, and block splitting.
+  - Tri-tier differential runner comparing Reference Interpreter vs Unoptimized JIT vs Full Optimizing JIT with Windows Vectored Exception Handling (VEH) and context recovery.
+  - Watchdog task isolation and Windows Job Object memory quotas (256MB cap).
+  - Automated delta-reducer minimizer shrinking complex failing tests into minimal `.min.mir` reproducers.
+  - Standalone `brass-fuzz` CLI tool with high-throughput execution.
+  - 37-program Bronze corpus verification (`37_fuzz_hardened_kernel`).
 
 ---
 
