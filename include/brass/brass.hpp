@@ -53,6 +53,9 @@
 #include <brass/codegen/linear_scan.hpp>
 #include <brass/codegen/peephole.hpp>
 #include <brass/codegen/block_layout.hpp>
+#include <brass/codegen/sched_dag.hpp>
+#include <brass/codegen/instruction_scheduler.hpp>
+#include <brass/codegen/software_pipeline.hpp>
 #include <brass/codegen/emit_context.hpp>
 #include <brass/codegen/jit_exec.hpp>
 

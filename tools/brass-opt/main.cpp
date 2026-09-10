@@ -38,6 +38,8 @@ void print_usage(const char* prog) {
               << "  --loop-unswitch       Run Loop Unswitching on candidate loops\n"
               << "  --jump-threading      Run SSA Jump Threading\n"
               << "  --trace-layout        Run LIR Trace Scheduling & Fall-Through Block Layout\n"
+              << "  --schedule-insns      Run Machine Instruction Scheduling\n"
+              << "  --software-pipeline   Run Loop Modulo Scheduling & Software Pipelining\n"
               << "  --pgo-instrument      Instrument module with Knuth-Stevenson minimal edge counters\n"
               << "  --pgo-use=<file>      Load profile data (.bprof) for profile-guided optimization\n"
               << "  --dump-branch-probabilities Dump block frequencies and edge branch probabilities\n"
@@ -141,6 +143,8 @@ int main(int argc, char** argv) {
     bool enable_loop_unswitch = false;
     bool enable_jump_threading = false;
     bool enable_trace_layout = true;
+    bool enable_schedule_insns = true;
+    bool enable_software_pipeline = false;
     bool enable_pgo_instrument = false;
     std::string pgo_use_file;
     bool dump_branch_probabilities = false;
@@ -181,6 +185,14 @@ int main(int argc, char** argv) {
             enable_trace_layout = true;
         } else if (arg == "--no-trace-layout") {
             enable_trace_layout = false;
+        } else if (arg == "--schedule-insns") {
+            enable_schedule_insns = true;
+        } else if (arg == "--no-schedule-insns") {
+            enable_schedule_insns = false;
+        } else if (arg == "--software-pipeline") {
+            enable_software_pipeline = true;
+        } else if (arg == "--no-software-pipeline") {
+            enable_software_pipeline = false;
         } else if (arg == "--pgo-instrument") {
             enable_pgo_instrument = true;
         } else if (arg.rfind("--pgo-use=", 0) == 0) {
@@ -598,7 +610,12 @@ int main(int argc, char** argv) {
             target = brass::Target::x64_linux();
         }
 
-        auto obj = brass::object::compile_module_to_object(*mod, target);
+        brass::codegen::SchedOptions sched_opts;
+        sched_opts.enable_pre_ra = enable_schedule_insns;
+        sched_opts.enable_post_ra = enable_schedule_insns;
+        sched_opts.enable_software_pipelining = enable_software_pipeline;
+
+        auto obj = brass::object::compile_module_to_object(*mod, target, sched_opts);
         std::vector<uint8_t> binary_data;
         if (target.is_windows() || obj_format == "coff") {
             binary_data = brass::object::emit_coff_object(obj);
@@ -686,6 +703,11 @@ int main(int argc, char** argv) {
 
         if (use_jit) {
             brass::codegen::JitExecutionEngine jit(brass::Target::host());
+            brass::codegen::SchedOptions sched_opts;
+            sched_opts.enable_pre_ra = enable_schedule_insns;
+            sched_opts.enable_post_ra = enable_schedule_insns;
+            sched_opts.enable_software_pipelining = enable_software_pipeline;
+            jit.set_sched_options(sched_opts);
             jit.register_external_symbol("brass_pgo_inc", reinterpret_cast<void*>(&brass_pgo_inc));
             if (!jit.compile_and_load(*mod)) {
                 std::cerr << "Error: JIT compilation/loading failed for module '" << mod->name() << "'\n";

@@ -4,6 +4,8 @@
 #include <brass/codegen/linear_scan.hpp>
 #include <brass/codegen/peephole.hpp>
 #include <brass/codegen/block_layout.hpp>
+#include <brass/codegen/instruction_scheduler.hpp>
+#include <brass/codegen/software_pipeline.hpp>
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/verifier.hpp>
 #include <algorithm>
@@ -132,6 +134,16 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
         auto lir = isel.lower(*opt_fn);
         if (!lir) continue;
 
+        // 1.5 Loop Software Pipelining (if enabled)
+        if (sched_opts_.enable_software_pipelining) {
+            codegen::run_software_pipelining(*lir);
+        }
+
+        // 1.6 Pre-RA Instruction Scheduling (if enabled)
+        if (sched_opts_.enable_pre_ra) {
+            codegen::schedule_function(*lir, sched_opts_);
+        }
+
         // 2. Liveness Analysis
         codegen::LivenessAnalysis liveness(*lir);
         liveness.run();
@@ -139,6 +151,11 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
         // 3. Linear Scan Register Allocation
         codegen::LinearScanAllocator regalloc(*lir, liveness, cc_);
         regalloc.allocate();
+
+        // 3.4 Post-RA Instruction Scheduling (if enabled)
+        if (sched_opts_.enable_post_ra) {
+            codegen::schedule_function(*lir, sched_opts_);
+        }
 
         // 3.5 LIR Trace Scheduling & Fall-Through Block Layout
         if (loop_opts.enable_trace_layout) {
@@ -280,9 +297,15 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
     return obj;
 }
 
-ObjectFile compile_module_to_object(const Module& mod, const Target& target) {
+ObjectFile compile_module_to_object(const Module& mod, const Target& target, const codegen::SchedOptions& sched_opts) {
     ModuleCompiler compiler(target);
+    compiler.set_sched_options(sched_opts);
     return compiler.compile(mod);
+}
+
+ObjectFile compile_module_to_object(const Module& mod, const Target& target) {
+    codegen::SchedOptions default_opts;
+    return compile_module_to_object(mod, target, default_opts);
 }
 
 } // namespace brass::object

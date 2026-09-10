@@ -71,6 +71,10 @@ add_executable(brass_unit_tests
     unit/test_pgo_instrument.cpp
     unit/test_branch_probability.cpp
     differential/test_pgo_differential.cpp
+    unit/test_sched_dag.cpp
+    unit/test_instruction_scheduler.cpp
+    unit/test_software_pipeline.cpp
+    differential/test_sched_differential.cpp
 )
 
 target_include_directories(brass_unit_tests

@@ -58,7 +58,11 @@ public:
 
     // Compilation & loading
     bool compile_and_load(const Module& mod, size_t code_padding = 0);
+    bool compile_and_load(const Module& mod, size_t code_padding, const SchedOptions& sched_opts);
     bool load_object(const object::ObjectFile& obj, size_t code_padding = 0);
+
+    const SchedOptions& sched_options() const noexcept { return sched_opts_; }
+    void set_sched_options(const SchedOptions& opts) { sched_opts_ = opts; }
 
     // Function/symbol lookup
     void* get_symbol_address(std::string_view name) const;
@@ -108,11 +112,11 @@ private:
     runtime::ResumeTableRegistry resume_tables_;
     runtime::PatchRegistry patch_sites_;
     uint8_t* text_section_base_ = nullptr;
-
     // Windows SEH registration tracking
     void* pdata_table_ = nullptr;
     size_t pdata_count_ = 0;
     uintptr_t code_base_ = 0;
+    SchedOptions sched_opts_;
 
     void register_seh_tables(const object::ObjectFile& obj, uint8_t* base_ptr);
     void unregister_seh_tables();

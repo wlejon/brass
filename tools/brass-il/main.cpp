@@ -14,7 +14,7 @@ using namespace brass::il;
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--emit-shared <output.dll/so>] [-shared] [--inline] [--sroa] [--escape-analysis] [--gvn] [--no-gvn] [--sccp] [--no-sccp] [--guard-elim] [--no-guard-elim] [--cfg-simplify] [--no-cfg-simplify] [--loop-unswitch] [--no-loop-unswitch] [--jump-threading] [--no-jump-threading] [--trace-layout] [--no-trace-layout] [--alias-analysis] [--vectorize] [--slp] [--loop-tile] [--tile-size <N>] [--demote-stats] [--pgo-instrument] [--pgo-use <file>] [--dump-branch-probabilities] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc] [--timed <N>]\n";
+        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--emit-shared <output.dll/so>] [-shared] [--inline] [--sroa] [--escape-analysis] [--gvn] [--no-gvn] [--sccp] [--no-sccp] [--guard-elim] [--no-guard-elim] [--cfg-simplify] [--no-cfg-simplify] [--loop-unswitch] [--no-loop-unswitch] [--jump-threading] [--no-jump-threading] [--trace-layout] [--no-trace-layout] [--schedule-insns] [--no-schedule-insns] [--software-pipeline] [--alias-analysis] [--vectorize] [--slp] [--loop-tile] [--tile-size <N>] [--demote-stats] [--pgo-instrument] [--pgo-use <file>] [--dump-branch-probabilities] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc] [--timed <N>]\n";
         return 1;
     }
 
@@ -30,6 +30,8 @@ int main(int argc, char** argv) {
     bool enable_pgo_instrument = false;
     std::string pgo_use_file;
     bool dump_branch_probabilities = false;
+    bool enable_schedule_insns = true;
+    bool enable_software_pipeline = false;
     TranslatorOptions options;
 
     for (int i = 1; i < argc; ++i) {
@@ -79,6 +81,14 @@ int main(int argc, char** argv) {
             options.enable_trace_layout = true;
         } else if (arg == "--no-trace-layout") {
             options.enable_trace_layout = false;
+        } else if (arg == "--schedule-insns") {
+            enable_schedule_insns = true;
+        } else if (arg == "--no-schedule-insns") {
+            enable_schedule_insns = false;
+        } else if (arg == "--software-pipeline") {
+            enable_software_pipeline = true;
+        } else if (arg == "--no-software-pipeline") {
+            enable_software_pipeline = false;
         } else if (arg == "--alias-analysis") {
             options.run_alias_analysis = true;
         } else if (arg == "--vectorize") {
@@ -298,6 +308,11 @@ int main(int argc, char** argv) {
 
     if (run_jit || (output_obj.empty() && output_shared.empty() && !emit_shared)) {
         codegen::JitExecutionEngine jit;
+        codegen::SchedOptions sched_opts;
+        sched_opts.enable_pre_ra = enable_schedule_insns;
+        sched_opts.enable_post_ra = enable_schedule_insns;
+        sched_opts.enable_software_pipelining = enable_software_pipeline;
+        jit.set_sched_options(sched_opts);
         register_bronze_runtime_symbols(&jit);
         jit.register_external_symbol("brass_pgo_inc", reinterpret_cast<void*>(&brass_pgo_inc));
 

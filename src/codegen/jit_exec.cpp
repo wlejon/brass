@@ -142,7 +142,8 @@ JitExecutionEngine::JitExecutionEngine(JitExecutionEngine&& other) noexcept
       stack_maps_(std::move(other.stack_maps_)),
       pdata_table_(other.pdata_table_),
       pdata_count_(other.pdata_count_),
-      code_base_(other.code_base_) {
+      code_base_(other.code_base_),
+      sched_opts_(other.sched_opts_) {
     other.pdata_table_ = nullptr;
     other.pdata_count_ = 0;
     other.code_base_ = 0;
@@ -160,6 +161,7 @@ JitExecutionEngine& JitExecutionEngine::operator=(JitExecutionEngine&& other) no
         pdata_table_ = other.pdata_table_;
         pdata_count_ = other.pdata_count_;
         code_base_ = other.code_base_;
+        sched_opts_ = other.sched_opts_;
         other.pdata_table_ = nullptr;
         other.pdata_count_ = 0;
         other.code_base_ = 0;
@@ -179,8 +181,13 @@ bool JitExecutionEngine::compile_and_load(const Module& mod, size_t code_padding
         function_signatures_[std::string(fn->name())] = {fn->return_type(), std::move(params)};
     }
 
-    object::ObjectFile obj = object::compile_module_to_object(mod, target_);
+    object::ObjectFile obj = object::compile_module_to_object(mod, target_, sched_opts_);
     return load_object(obj, code_padding);
+}
+
+bool JitExecutionEngine::compile_and_load(const Module& mod, size_t code_padding, const SchedOptions& sched_opts) {
+    sched_opts_ = sched_opts;
+    return compile_and_load(mod, code_padding);
 }
 
 bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_padding) {

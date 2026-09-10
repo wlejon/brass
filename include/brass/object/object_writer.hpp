@@ -5,6 +5,7 @@
 #include <brass/target/x64/code_buffer.hpp>
 #include <brass/codegen/lir.hpp>
 #include <brass/codegen/emit_context.hpp>
+#include <brass/codegen/instruction_scheduler.hpp>
 #include <brass/mir/module.hpp>
 #include <brass/gc/stack_map.hpp>
 #include <string>
@@ -170,13 +171,18 @@ public:
     explicit ModuleCompiler(const Target& target);
     ModuleCompiler(const Target& target, const CallingConvention& cc);
 
+    void set_sched_options(const codegen::SchedOptions& opts) { sched_opts_ = opts; }
+    const codegen::SchedOptions& sched_options() const noexcept { return sched_opts_; }
+
     ObjectFile compile(const Module& mod);
 
 private:
     Target target_;
     CallingConvention cc_;
+    codegen::SchedOptions sched_opts_;
 };
 
+ObjectFile compile_module_to_object(const Module& mod, const Target& target, const codegen::SchedOptions& sched_opts);
 ObjectFile compile_module_to_object(const Module& mod, const Target& target);
 
 } // namespace brass::object
