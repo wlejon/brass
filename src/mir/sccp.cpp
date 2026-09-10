@@ -106,7 +106,9 @@ Value* get_or_create_constant(Function& fn, const LatticeValue& lat) {
                 return inst->result();
             }
         } else if (lat.type() == Type::f64() && inst->opcode() == Opcode::fconst_f64) {
-            if (inst->imm_f64() == lat.as_f64()) {
+            double inst_f = inst->imm_f64();
+            double lat_f = lat.as_f64();
+            if (std::memcmp(&inst_f, &lat_f, sizeof(double)) == 0) {
                 if (inst != entry->head()) {
                     entry->remove_instruction(inst);
                     entry->prepend_instruction(inst);

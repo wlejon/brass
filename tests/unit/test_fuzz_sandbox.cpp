@@ -53,13 +53,22 @@ TEST_CASE("DiffFuzzer_ProtectedFaultDivideByZero") {
 
 TEST_CASE("DiffFuzzer_JobObjectSandboxExecution") {
     std::string log;
-    ExecutionStatus status = DiffFuzzer::run_sandboxed_command("cmd.exe /c exit 0", 1000, 64 * 1024 * 1024, log);
+#if defined(_WIN32)
+    const char* cmd = "cmd.exe /c exit 0";
+#else
+    const char* cmd = "exit 0";
+#endif
+    ExecutionStatus status = DiffFuzzer::run_sandboxed_command(cmd, 1000, 64 * 1024 * 1024, log);
     CHECK(status == ExecutionStatus::Success);
 }
 
 TEST_CASE("DiffFuzzer_JobObjectSandboxTimeout") {
     std::string log;
-    // Run ping for 3 seconds with a 150ms timeout
-    ExecutionStatus status = DiffFuzzer::run_sandboxed_command("cmd.exe /c ping 127.0.0.1 -n 4 > nul", 150, 64 * 1024 * 1024, log);
+#if defined(_WIN32)
+    const char* cmd = "cmd.exe /c ping 127.0.0.1 -n 4 > nul";
+#else
+    const char* cmd = "sleep 3";
+#endif
+    ExecutionStatus status = DiffFuzzer::run_sandboxed_command(cmd, 150, 64 * 1024 * 1024, log);
     CHECK(status == ExecutionStatus::Timeout);
 }
