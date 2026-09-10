@@ -129,6 +129,32 @@
 
 ---
 
+## Phase IV: Enterprise JIT/AOT & High-Throughput Execution (Chunks 17–20)
+
+- **Chunk 17: Generational Garbage Collection, Card-Table Remembered Sets, and JIT Write Barrier Elimination (WBE) [COMPLETED]**:
+  - Contiguous 2-generation heap: bump-pointer Nursery (Eden) space and Tenured (Old) space.
+  - 512-byte card table (`CARD_SHIFT = 9`) with 64-bit word skipping for dirty card scanning.
+  - Minor GC scavenge scanning only root sets and dirty cards in Tenured space with age promotion threshold.
+  - Major GC fallback evacuating all reachable objects when tenured space reaches capacity.
+  - MIR `write_barrier %obj, %val` opcode with builder, verifier, printer, parser, and interpreter card-marking support.
+  - Write Barrier Elimination (WBE) pass: provenance analysis removing barriers on young allocations, non-reference values, and dominating writes.
+  - x64 JIT lowering to `brass_gc_write_barrier` runtime hook.
+  - 29-program Bronze corpus verification (`29_generational_churn`).
+- **Chunk 18: On-Stack Replacement (OSR) & Multi-Tier Execution Pipeline**:
+  - Invocation & loop backedge profiling counters in functions.
+  - OSR Entry points in MIR and LIR with stack/register reconstruction at loop headers.
+  - Speculative Deopt Ratchet and automatic recompilation feedback.
+- **Chunk 19: Global Value Numbering with Partial Redundancy Elimination (GVN-PRE) & Critical Edge Splitting**:
+  - Maximal fixpoint value numbering with expression congruence.
+  - Path-sensitive anticipation (DownSafe) and availability (CanBeAvail) dataflow analyses.
+  - Redundant expression elimination across control flow.
+- **Chunk 20: Advanced Loop Transformations: Loop Fusion, Distribution, and Array Contraction**:
+  - Loop fusion across congruent iteration spaces.
+  - Loop fission/distribution for SIMD vectorization.
+  - Array contraction eliminating intermediate temporary buffers.
+
+---
+
 ## House Rules & Code Conventions
 1. **C++20**: Zero LLVM dependencies.
 2. **Compiler Compatibility**: MSVC, Clang, and GCC 12 clean (no `= {}` default args which GCC 12 rejects).
