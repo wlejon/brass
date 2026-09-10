@@ -409,7 +409,7 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
             uint32_t lane = inst.lane();
             Type src_t = inst.operand(0)->type();
 
-            if (src_t.kind() == TypeKind::F32x4) {
+            if (src_t.kind() == TypeKind::F32x4 || src_t.kind() == TypeKind::F32x8) {
                 if (lane == 0) {
                     auto movss = std::make_unique<LirInst>(LirOpcode::Movss);
                     movss->add_def(LirOperand::vreg(dst, 4));
@@ -425,7 +425,7 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
                     shuf->mir_origin = &inst;
                     lir_bb.append_inst(std::move(shuf));
                 }
-            } else if (src_t.kind() == TypeKind::F64x2) {
+            } else if (src_t.kind() == TypeKind::F64x2 || src_t.kind() == TypeKind::F64x4) {
                 if (lane == 0) {
                     auto movsd = std::make_unique<LirInst>(LirOpcode::Movsd);
                     movsd->add_def(LirOperand::vreg(dst, 8));
@@ -442,7 +442,7 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
                     shuf->mir_origin = &inst;
                     lir_bb.append_inst(std::move(shuf));
                 }
-            } else if (src_t.kind() == TypeKind::I32x4) {
+            } else if (src_t.kind() == TypeKind::I32x4 || src_t.kind() == TypeKind::I32x8) {
                 if (lane == 0) {
                     auto movd = std::make_unique<LirInst>(LirOpcode::Movd_gx);
                     movd->add_def(LirOperand::vreg(dst, 4));
@@ -457,7 +457,7 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
                     pext->mir_origin = &inst;
                     lir_bb.append_inst(std::move(pext));
                 }
-            } else if (src_t.kind() == TypeKind::I64x2) {
+            } else if (src_t.kind() == TypeKind::I64x2 || src_t.kind() == TypeKind::I64x4) {
                 if (lane == 0) {
                     auto movq = std::make_unique<LirInst>(LirOpcode::Movd_gx);
                     movq->add_def(LirOperand::vreg(dst, 8));

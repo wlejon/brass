@@ -123,6 +123,9 @@ add_executable(brass_unit_tests
     unit/test_dwarf_emitter.cpp
     unit/test_codeview_emitter.cpp
     unit/test_debug_relocs.cpp
+    unit/test_fuzz_mutator.cpp
+    unit/test_fuzz_sandbox.cpp
+    unit/test_delta_reducer.cpp
 )
 
 target_include_directories(brass_unit_tests

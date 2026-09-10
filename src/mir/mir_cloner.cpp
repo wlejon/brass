@@ -61,6 +61,9 @@ Function* clone_function(const Function& src, Module& dst_mod) {
         return dst_bt;
     };
 
+    std::unordered_map<const Instruction*, Instruction*> inst_map;
+
+    // Pass 1: Create all instructions and their result values
     for (const BasicBlock* src_bb : src.blocks()) {
         if (!src_bb) continue;
         BasicBlock* dst_bb = block_map[src_bb];
@@ -77,9 +80,6 @@ Function* clone_function(const Function& src, Module& dst_mod) {
             if (!src_inst->symbol().empty()) dst_inst->set_symbol(dst_fn->parent()->string_pool().intern(src_inst->symbol()));
             if (!src_inst->extra_symbol().empty()) dst_inst->set_extra_symbol(dst_fn->parent()->string_pool().intern(src_inst->extra_symbol()));
 
-            for (const Value* op : src_inst->operands()) dst_inst->add_operand(map_value(op));
-            for (const Value* sv : src_inst->state_map()) dst_inst->add_state_value(map_value(sv));
-
             if (src_inst->produces_value()) {
                 const Value* src_res = src_inst->result();
                 Value* dst_res = dst_fn->parent()->arena().make<Value>(src_res->id(), src_res->type(), ValueKind::InstructionResult);
@@ -88,15 +88,30 @@ Function* clone_function(const Function& src, Module& dst_mod) {
                 value_map[src_res] = dst_res;
             }
 
+            dst_bb->append_instruction(dst_inst);
+            inst_map[src_inst] = dst_inst;
+        }
+    }
+
+    // Pass 2: Connect operands and control-flow targets
+    for (const BasicBlock* src_bb : src.blocks()) {
+        if (!src_bb) continue;
+        for (const Instruction* src_inst : *src_bb) {
+            if (!src_inst) continue;
+            Instruction* dst_inst = inst_map[src_inst];
+
+            for (const Value* op : src_inst->operands()) dst_inst->add_operand(map_value(op));
+            for (const Value* sv : src_inst->state_map()) dst_inst->add_state_value(map_value(sv));
+
             dst_inst->set_branch_target(map_target(src_inst->branch_target()));
             dst_inst->set_true_target(map_target(src_inst->true_target()));
             dst_inst->set_false_target(map_target(src_inst->false_target()));
             dst_inst->set_default_target(map_target(src_inst->default_target()));
+            dst_inst->set_normal_target(map_target(src_inst->normal_target()));
+            dst_inst->set_unwind_target(map_target(src_inst->unwind_target()));
             for (const auto& sc : src_inst->switch_cases()) {
                 dst_inst->add_switch_case(sc.value, map_target(sc.target));
             }
-
-            dst_bb->append_instruction(dst_inst);
         }
     }
 

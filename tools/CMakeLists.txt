@@ -28,3 +28,17 @@ target_link_libraries(brass-il
     PRIVATE
         brass
 )
+
+add_executable(brass-fuzz
+    brass-fuzz/main.cpp
+)
+
+target_include_directories(brass-fuzz
+    PRIVATE
+        ${BRASS_INCLUDE_DIR}
+)
+
+target_link_libraries(brass-fuzz
+    PRIVATE
+        brass
+)

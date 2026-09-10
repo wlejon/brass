@@ -57,6 +57,7 @@ PROGRAMS = [
     "34_background_tiering",
     "35_parallel_matrix_vector",
     "36_debug_source_lines",
+    "37_fuzz_hardened_kernel",
 ]
 
 DEMOTED_PROGRAMS = {
