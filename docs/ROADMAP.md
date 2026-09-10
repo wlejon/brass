@@ -146,10 +146,12 @@
   - Native secondary function prologues (`osr_entry_offset`) unpacking `OsrMigrationFrame` into physical registers and stack spill slots.
   - Bi-directional runtime `OsrCoordinator` migrating running loops from interpreter to native JIT and deoptimizing back upon speculative guard failure.
   - 30-program Bronze corpus verification (`30_osr_hot_loop`).
-- **Chunk 19: Global Value Numbering with Partial Redundancy Elimination (GVN-PRE) & Critical Edge Splitting**:
-  - Maximal fixpoint value numbering with expression congruence.
-  - Path-sensitive anticipation (DownSafe) and availability (CanBeAvail) dataflow analyses.
-  - Redundant expression elimination across control flow.
+- **Chunk 19: Global Value Numbering with Partial Redundancy Elimination (GVN-PRE) & Critical Edge Splitting [COMPLETED]**:
+  - Synthetic forwarding block injection along critical edges, redirecting branch targets and forwarding block arguments.
+  - SSA-based GVN-PRE algorithm: Anticipation (DownSafe) and Availability (CanBeAvail) dataflow analyses.
+  - Partial redundancy elimination at join blocks, injecting block parameters (phi nodes) and hoisting computations to missing predecessors.
+  - Generalization of Loop Invariant Code Motion (LICM) and Memory Load PRE with alias protection.
+  - 31-program Bronze corpus verification (`31_gvn_pre_diamonds`).
 - **Chunk 20: Advanced Loop Transformations: Loop Fusion, Distribution, and Array Contraction**:
   - Loop fusion across congruent iteration spaces.
   - Loop fission/distribution for SIMD vectorization.
