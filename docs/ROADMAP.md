@@ -152,10 +152,11 @@
   - Partial redundancy elimination at join blocks, injecting block parameters (phi nodes) and hoisting computations to missing predecessors.
   - Generalization of Loop Invariant Code Motion (LICM) and Memory Load PRE with alias protection.
   - 31-program Bronze corpus verification (`31_gvn_pre_diamonds`).
-- **Chunk 20: Advanced Loop Transformations: Loop Fusion, Distribution, and Array Contraction**:
-  - Loop fusion across congruent iteration spaces.
-  - Loop fission/distribution for SIMD vectorization.
-  - Array contraction eliminating intermediate temporary buffers.
+- **Chunk 20: Advanced Loop Transformations: Loop Fusion, Distribution, and Array Contraction [COMPLETED]**:
+  - Loop fusion (jamming): Congruent iteration domain matching, distance vector hazard checks, CFG body merging, and shared induction variables.
+  - Loop distribution (fission): Multi-loop partitioning separating vectorizable and scalar/side-effecting operations to unlock downstream SIMD auto-vectorization.
+  - Array contraction: Intermediate buffer elimination forwarding stores directly to loads within loop iterations, eliminating heap allocations (0 bytes allocated in GC semispace).
+  - 32-program Bronze corpus verification (`32_loop_fusion_contraction`).
 
 ---
 
