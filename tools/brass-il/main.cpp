@@ -1,6 +1,7 @@
 #include <brass/brass.hpp>
 #include <brass/il_translator/il_translator.hpp>
 #include <brass/mir/f64_demote.hpp>
+#include <brass/mir/gvn_pre.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
 #include <brass/runtime/tiering.hpp>
 #include <iostream>
@@ -16,7 +17,7 @@ using namespace brass::il;
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--emit-shared <output.dll/so>] [-shared] [--inline] [--sroa] [--escape-analysis] [--partial-escape] [--sink-allocations] [--dump-pea-stats] [--gvn] [--no-gvn] [--sccp] [--no-sccp] [--guard-elim] [--no-guard-elim] [--cfg-simplify] [--no-cfg-simplify] [--loop-unswitch] [--no-loop-unswitch] [--jump-threading] [--no-jump-threading] [--trace-layout] [--no-trace-layout] [--schedule-insns] [--no-schedule-insns] [--software-pipeline] [--alias-analysis] [--vectorize] [--slp] [--loop-tile] [--tile-size <N>] [--enable-pic] [--dump-ic-stats] [--demote-stats] [--pgo-instrument] [--pgo-use <file>] [--dump-branch-probabilities] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc] [--timed <N>]\n";
+        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--emit-shared <output.dll/so>] [-shared] [--inline] [--sroa] [--escape-analysis] [--partial-escape] [--sink-allocations] [--dump-pea-stats] [--gvn] [--no-gvn] [--enable-pre] [--enable-gvn-pre] [--no-pre] [--no-gvn-pre] [--dump-pre-stats] [--sccp] [--no-sccp] [--guard-elim] [--no-guard-elim] [--cfg-simplify] [--no-cfg-simplify] [--loop-unswitch] [--no-loop-unswitch] [--jump-threading] [--no-jump-threading] [--trace-layout] [--no-trace-layout] [--schedule-insns] [--no-schedule-insns] [--software-pipeline] [--alias-analysis] [--vectorize] [--slp] [--loop-tile] [--tile-size <N>] [--enable-pic] [--dump-ic-stats] [--demote-stats] [--pgo-instrument] [--pgo-use <file>] [--dump-branch-probabilities] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc] [--timed <N>]\n";
         return 1;
     }
 
@@ -82,6 +83,13 @@ int main(int argc, char** argv) {
             options.enable_gvn = true;
         } else if (arg == "--no-gvn") {
             options.enable_gvn = false;
+        } else if (arg == "--enable-pre" || arg == "--enable-gvn-pre") {
+            options.enable_gvn_pre = true;
+        } else if (arg == "--no-pre" || arg == "--no-gvn-pre") {
+            options.enable_gvn_pre = false;
+        } else if (arg == "--dump-pre-stats") {
+            options.dump_pre_stats = true;
+            options.enable_gvn_pre = true;
         } else if (arg == "--sccp") {
             options.enable_sccp = true;
         } else if (arg == "--no-sccp") {
@@ -218,6 +226,11 @@ int main(int argc, char** argv) {
         options.pea_stats_collector = &pea_stats;
     }
 
+    GvnPreStats pre_stats;
+    if (options.dump_pre_stats) {
+        options.pre_stats_collector = &pre_stats;
+    }
+
     DiagnosticReporter diag;
     TranslationResult res = translate_bronze_il(il_source, options, &diag);
     if (!res.success || !res.module) {
@@ -280,6 +293,10 @@ int main(int argc, char** argv) {
 
     if (options.dump_pea_stats) {
         std::cout << pea_stats.format_report() << "\n";
+    }
+
+    if (options.dump_pre_stats) {
+        std::cout << pre_stats.format_report() << "\n";
     }
 
     if (options.enable_partial_escape && !options.enable_allocation_sinking) {

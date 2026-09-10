@@ -194,6 +194,7 @@ public:
 
     Instruction* insert(Instruction* inst);
     Value* create_value(Type type);
+    Arena& arena() { return get_arena(); }
 
 private:
     Arena& get_arena();

@@ -1,7 +1,9 @@
 #include <brass/brass.hpp>
+#include <brass/mir/gvn_pre.hpp>
 #include <brass/mir/write_barrier_elim.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
 #include <brass/runtime/tiering.hpp>
+#include "opt_actions.hpp"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -33,6 +35,8 @@ void print_usage(const char* prog) {
               << "  --sink-allocations    Run Allocation Sinking and Hot Path Scalarization\n"
               << "  --dump-pea-stats      Dump Partial Escape Analysis and Allocation Sinking statistics\n"
               << "  --gvn                 Run Global Value Numbering (GVN), RLE & DSE\n"
+              << "  --enable-pre, --enable-gvn-pre Run Global Value Numbering with PRE (GVN-PRE)\n"
+              << "  --dump-pre-stats      Dump GVN-PRE statistics\n"
               << "  --alias-analysis      Run Alias Analysis on module functions\n"
               << "  --vectorize           Run loop vectorization on countable loops\n"
               << "  --slp                 Run SLP straight-line vectorization\n"
@@ -92,37 +96,6 @@ bool write_file(const std::string& path, const std::string& content) {
     return true;
 }
 
-bool write_binary_file(const std::string& path, const std::vector<uint8_t>& bytes) {
-    std::ofstream file(path, std::ios::out | std::ios::binary);
-    if (!file.is_open()) {
-        return false;
-    }
-    file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-    return true;
-}
-
-brass::RuntimeValue parse_arg_for_type(brass::Type type, const std::string& arg_str) {
-    switch (type.kind()) {
-        case brass::TypeKind::I32:
-            return brass::RuntimeValue::from_i32(static_cast<int32_t>(std::stol(arg_str, nullptr, 0)));
-        case brass::TypeKind::I64:
-            return brass::RuntimeValue::from_i64(std::stoll(arg_str, nullptr, 0));
-        case brass::TypeKind::F32:
-            return brass::RuntimeValue::from_f32(std::stof(arg_str));
-        case brass::TypeKind::F64:
-            return brass::RuntimeValue::from_f64(std::stod(arg_str));
-        case brass::TypeKind::Ptr:
-            return brass::RuntimeValue::from_ptr(static_cast<uintptr_t>(std::stoull(arg_str, nullptr, 0)));
-        case brass::TypeKind::GCRef:
-            return brass::RuntimeValue::from_gcref(static_cast<uintptr_t>(std::stoull(arg_str, nullptr, 0)));
-        case brass::TypeKind::Void:
-            return brass::RuntimeValue::from_void();
-        default:
-            break;
-    }
-    return brass::RuntimeValue::from_i64(std::stoll(arg_str, nullptr, 0));
-}
-
 } // namespace
 
 int main(int argc, char** argv) {
@@ -147,6 +120,9 @@ int main(int argc, char** argv) {
     bool enable_inlining = false;
     bool enable_sroa = false;
     bool enable_gvn = false;
+    bool enable_gvn_pre = false;
+    bool dump_pre_stats = false;
+    brass::GvnPreStats pre_stats;
     bool run_escape_analysis = false;
     bool enable_partial_escape = false;
     bool enable_allocation_sinking = false;
@@ -206,6 +182,11 @@ int main(int argc, char** argv) {
             dump_pea_stats = true;
         } else if (arg == "--gvn") {
             enable_gvn = true;
+        } else if (arg == "--enable-pre" || arg == "--enable-gvn-pre") {
+            enable_gvn_pre = true;
+        } else if (arg == "--dump-pre-stats") {
+            dump_pre_stats = true;
+            enable_gvn_pre = true;
         } else if (arg == "--sccp") {
             enable_sccp = true;
         } else if (arg == "--guard-elim") {
@@ -548,6 +529,16 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
+        if (enable_gvn_pre) {
+            brass::GvnPreOptions pre_opts;
+            pre_opts.stats = &pre_stats;
+            brass::gvn_pre_module(*mod, pre_opts);
+            brass::DiagnosticReporter pre_diag;
+            if (!brass::verify_module(*mod, &pre_diag) || pre_diag.has_errors()) {
+                std::cerr << "Verification failed after GVN-PRE:\n" << pre_diag.format_all();
+                return 1;
+            }
+        }
         if (enable_sccp) {
             brass::SccpOptions sccp_opts;
             sccp_opts.enable_guard_elim = enable_guard_elim;
@@ -581,12 +572,24 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
-    } else if (enable_gvn) {
-        brass::gvn_module(*mod);
-        brass::DiagnosticReporter gvn_diag;
-        if (!brass::verify_module(*mod, &gvn_diag) || gvn_diag.has_errors()) {
-            std::cerr << "Verification failed after GVN:\n" << gvn_diag.format_all();
-            return 1;
+    } else if (enable_gvn || enable_gvn_pre) {
+        if (enable_gvn) {
+            brass::gvn_module(*mod);
+            brass::DiagnosticReporter gvn_diag;
+            if (!brass::verify_module(*mod, &gvn_diag) || gvn_diag.has_errors()) {
+                std::cerr << "Verification failed after GVN:\n" << gvn_diag.format_all();
+                return 1;
+            }
+        }
+        if (enable_gvn_pre) {
+            brass::GvnPreOptions pre_opts;
+            pre_opts.stats = &pre_stats;
+            brass::gvn_pre_module(*mod, pre_opts);
+            brass::DiagnosticReporter pre_diag;
+            if (!brass::verify_module(*mod, &pre_diag) || pre_diag.has_errors()) {
+                std::cerr << "Verification failed after GVN-PRE:\n" << pre_diag.format_all();
+                return 1;
+            }
         }
         if (enable_sccp) {
             brass::SccpOptions sccp_opts;
@@ -726,6 +729,10 @@ int main(int argc, char** argv) {
         std::cout << pea_stats.format_report() << "\n";
     }
 
+    if (dump_pre_stats) {
+        pre_stats.dump(std::cout);
+    }
+
     (void)debug_info;
 
     if (!symbolize_offset_arg.empty()) {
@@ -771,162 +778,37 @@ int main(int argc, char** argv) {
     }
 
     if (compile_object) {
-        brass::Target target = brass::Target::host();
-        if (obj_format == "coff") {
-            target = brass::Target::x64_windows();
-        } else if (obj_format == "elf") {
-            target = brass::Target::x64_linux();
-        }
-
-        brass::codegen::SchedOptions sched_opts;
-        sched_opts.enable_pre_ra = enable_schedule_insns;
-        sched_opts.enable_post_ra = enable_schedule_insns;
-        sched_opts.enable_software_pipelining = enable_software_pipeline;
-
-        auto obj = brass::object::compile_module_to_object(*mod, target, sched_opts);
-        std::vector<uint8_t> binary_data;
-        if (target.is_windows() || obj_format == "coff") {
-            binary_data = brass::object::emit_coff_object(obj);
-        } else {
-            binary_data = brass::object::emit_elf_object(obj);
-        }
-
-        if (output_file.empty()) {
-            if (input_file != "-") {
-                size_t dot_pos = input_file.find_last_of('.');
-                std::string base = (dot_pos != std::string::npos) ? input_file.substr(0, dot_pos) : input_file;
-                output_file = base + (target.is_windows() ? ".obj" : ".o");
-            } else {
-                output_file = target.is_windows() ? "out.obj" : "out.o";
-            }
-        }
-
-        if (!write_binary_file(output_file, binary_data)) {
-            std::cerr << "Error: Could not write object file to '" << output_file << "'\n";
-            return 1;
-        }
-
-        std::cout << "Successfully emitted object file '" << output_file << "' ("
-                  << binary_data.size() << " bytes, " << (target.is_windows() ? "COFF" : "ELF64") << ")\n";
-        return 0;
+        brass::CompileObjectOptions c_opts;
+        c_opts.obj_format = obj_format;
+        c_opts.enable_schedule_insns = enable_schedule_insns;
+        c_opts.enable_software_pipeline = enable_software_pipeline;
+        c_opts.output_file = output_file;
+        c_opts.input_file = input_file;
+        return brass::execute_compile_object(*mod, c_opts) ? 0 : 1;
     }
 
     if (emit_shared) {
-        brass::Target target = brass::Target::host();
-        brass::target::OutputFormat fmt = brass::target::OutputFormat::Auto;
-        if (obj_format == "coff") {
-            target = brass::Target::x64_windows();
-            fmt = brass::target::OutputFormat::WindowsPeDll;
-        } else if (obj_format == "elf") {
-            target = brass::Target::x64_linux();
-            fmt = brass::target::OutputFormat::LinuxElfSo;
-        }
-
-        std::string final_output = shared_output_file.empty() ? output_file : shared_output_file;
-        if (final_output.empty()) {
-            if (input_file != "-") {
-                size_t dot_pos = input_file.find_last_of('.');
-                std::string base = (dot_pos != std::string::npos) ? input_file.substr(0, dot_pos) : input_file;
-                final_output = base + (target.is_windows() ? ".dll" : ".so");
-            } else {
-                final_output = target.is_windows() ? "out.dll" : "out.so";
-            }
-        }
-
-        brass::target::LinkerOptions link_opts;
-        link_opts.format = fmt;
-        link_opts.export_all_functions = true;
-
-        if (!brass::target::AotLinker::link_to_file(*mod, final_output, target, link_opts)) {
-            std::cerr << "Error: Could not link shared library to '" << final_output << "'\n";
-            return 1;
-        }
-
-        std::cout << "Successfully emitted shared library '" << final_output << "' ("
-                  << (target.is_windows() ? "PE32+ DLL" : "ELF64 SO") << ")\n";
-        return 0;
+        brass::EmitSharedOptions s_opts;
+        s_opts.obj_format = obj_format;
+        s_opts.shared_output_file = shared_output_file;
+        s_opts.output_file = output_file;
+        s_opts.input_file = input_file;
+        return brass::execute_emit_shared(*mod, s_opts) ? 0 : 1;
     }
 
     if (!run_fn.empty()) {
-        const brass::Function* fn = mod->get_function(run_fn);
-        if (!fn) {
-            std::cerr << "Error: Function '" << run_fn << "' not found in module '" << mod->name() << "'\n";
-            return 1;
-        }
-
-        std::vector<brass::RuntimeValue> run_args;
-        for (size_t i = 0; i < fn->param_count(); ++i) {
-            if (i < run_arg_strings.size()) {
-                try {
-                    run_args.push_back(parse_arg_for_type(fn->param_type(i), run_arg_strings[i]));
-                } catch (const std::exception& ex) {
-                    std::cerr << "Error: Could not parse argument " << i << " ('" << run_arg_strings[i]
-                              << "') for parameter type " << fn->param_type(i) << ": " << ex.what() << "\n";
-                    return 1;
-                }
-            } else {
-                run_args.push_back(brass::RuntimeValue::from_i64(0));
-            }
-        }
-
-        if (use_jit) {
-            brass::codegen::JitExecutionEngine jit(brass::Target::host());
-            brass::codegen::SchedOptions sched_opts;
-            sched_opts.enable_pre_ra = enable_schedule_insns;
-            sched_opts.enable_post_ra = enable_schedule_insns;
-            sched_opts.enable_software_pipelining = enable_software_pipeline;
-            jit.set_sched_options(sched_opts);
-            jit.register_external_symbol("brass_pgo_inc", reinterpret_cast<void*>(&brass_pgo_inc));
-            if (!jit.compile_and_load(*mod)) {
-                std::cerr << "Error: JIT compilation/loading failed for module '" << mod->name() << "'\n";
-                return 1;
-            }
-
-            try {
-                brass::RuntimeValue result = jit.invoke(run_fn, run_args);
-                if (!fn->return_type().is_void()) {
-                    std::cout << result << "\n";
-                }
-                if (dump_ic_stats) {
-                    brass::runtime::ICRegistry::global().dump_stats(std::cout);
-                }
-            } catch (const std::exception& ex) {
-                std::cerr << "JIT Execution error: " << ex.what() << "\n";
-                return 1;
-            }
-            return 0;
-        }
-
-        brass::Interpreter interp;
-        interp.register_external_function("brass_pgo_inc", [](brass::Interpreter&, const std::vector<brass::RuntimeValue>& args) {
-            if (!args.empty()) {
-                uint32_t idx = args[0].is_i32() ? args[0].as_u32() : static_cast<uint32_t>(args[0].as_u64());
-                brass_pgo_inc(idx);
-            }
-            return brass::RuntimeValue::from_void();
-        });
-        if (gc_stress) {
-            interp.gc().set_stress_mode(true);
-        }
-        if (enable_osr) {
-            brass::runtime::OsrCoordinator::instance().set_enabled(true);
-            brass::runtime::OsrCoordinator::instance().set_threshold(osr_threshold);
-        }
-
-        try {
-            brass::RuntimeValue result = interp.run(*mod, run_fn, run_args);
-            if (!fn->return_type().is_void()) {
-                std::cout << result << "\n";
-            }
-            if (dump_tiering_stats) {
-                brass::runtime::TieringRegistry::instance().dump_stats(std::cout);
-            }
-        } catch (const std::exception& ex) {
-            std::cerr << "Runtime error during execution: " << ex.what() << "\n";
-            return 1;
-        }
-
-        return 0;
+        brass::RunFunctionOptions r_opts;
+        r_opts.run_fn = run_fn;
+        r_opts.run_arg_strings = run_arg_strings;
+        r_opts.use_jit = use_jit;
+        r_opts.gc_stress = gc_stress;
+        r_opts.enable_osr = enable_osr;
+        r_opts.osr_threshold = osr_threshold;
+        r_opts.enable_schedule_insns = enable_schedule_insns;
+        r_opts.enable_software_pipeline = enable_software_pipeline;
+        r_opts.dump_ic_stats = dump_ic_stats;
+        r_opts.dump_tiering_stats = dump_tiering_stats;
+        return brass::execute_run_function(*mod, r_opts) ? 0 : 1;
     }
 
     if (check_roundtrip) {

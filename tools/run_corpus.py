@@ -51,6 +51,7 @@ PROGRAMS = [
     "28_async_chain",
     "29_generational_churn",
     "30_osr_hot_loop",
+    "31_gvn_pre_diamonds",
 ]
 
 DEMOTED_PROGRAMS = {

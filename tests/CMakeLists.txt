@@ -102,6 +102,9 @@ add_executable(brass_unit_tests
     unit/test_osr_entry.cpp
     unit/test_osr_runtime.cpp
     differential/test_osr_differential.cpp
+    unit/test_critical_edge.cpp
+    unit/test_gvn_pre.cpp
+    differential/test_gvn_pre_differential.cpp
 )
 
 target_include_directories(brass_unit_tests

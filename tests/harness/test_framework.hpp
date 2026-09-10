@@ -214,6 +214,9 @@ inline bool check_not_equal(const T& a, const U& b, const char* file, int line, 
         } \
     } while ((void)0, 0)
 
+#define CHECK_FALSE(expr) CHECK(!(expr))
+#define REQUIRE_FALSE(expr) REQUIRE(!(expr))
+
 #define CHECK_EQ(a, b) ::brass::test::check_equal((a), (b), __FILE__, __LINE__, #a, #b, false)
 #define REQUIRE_EQ(a, b) ::brass::test::check_equal((a), (b), __FILE__, __LINE__, #a, #b, true)
 

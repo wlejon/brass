@@ -2,6 +2,7 @@
 
 add_executable(brass-opt
     brass-opt/main.cpp
+    brass-opt/opt_actions.cpp
 )
 
 target_include_directories(brass-opt

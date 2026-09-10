@@ -12,6 +12,7 @@ class HostGC;
 
 struct DemoteStats;
 struct PartialEscapeStats;
+struct GvnPreStats;
 
 namespace il {
 
@@ -43,11 +44,14 @@ struct TranslatorOptions {
     bool dump_ic_stats = false;
     bool enable_wbe = true;
     bool dump_wbe_stats = false;
+    bool enable_gvn_pre = true;
+    bool dump_pre_stats = false;
     bool enable_osr = false;
     uint64_t osr_threshold = 100;
     bool dump_tiering_stats = false;
     DemoteStats* demote_stats_collector = nullptr;
     PartialEscapeStats* pea_stats_collector = nullptr;
+    GvnPreStats* pre_stats_collector = nullptr;
 };
 
 struct TranslationResult {

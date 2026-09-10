@@ -7,6 +7,7 @@
 #include <brass/mir/inliner.hpp>
 #include <brass/mir/sroa.hpp>
 #include <brass/mir/gvn.hpp>
+#include <brass/mir/gvn_pre.hpp>
 #include <brass/mir/sccp.hpp>
 #include <brass/mir/cfg_simplify.hpp>
 #include <brass/mir/loop_unswitch.hpp>
@@ -197,6 +198,11 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
         }
         if (options_.enable_gvn) {
             gvn_module(*mod);
+        }
+        if (options_.enable_gvn_pre) {
+            GvnPreOptions pre_opts;
+            pre_opts.stats = options_.pre_stats_collector;
+            gvn_pre_module(*mod, pre_opts);
         }
         if (options_.enable_sccp) {
             SccpOptions sccp_opts;
