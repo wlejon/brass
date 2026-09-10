@@ -80,6 +80,12 @@ enum class BronzeOp {
     Branch,
     Throw,
     ExcTake,
+    CreateAsyncMachine,
+    AsyncStart,
+    AsyncAwait,
+    IterOpen,
+    IterStep,
+    Yield,
     Unknown
 };
 

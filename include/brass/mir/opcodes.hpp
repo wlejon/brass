@@ -116,7 +116,13 @@ enum class Opcode : uint16_t {
     vextract_lane,
     vinsert_lane,
     vshuffle,
-    vzero
+    vzero,
+
+    // Coroutines
+    coro_create,
+    coro_suspend,
+    coro_resume,
+    coro_destroy
 };
 
 std::string_view opcode_name(Opcode op) noexcept;
@@ -131,6 +137,9 @@ bool is_comparison(Opcode op) noexcept;
 bool is_memory(Opcode op) noexcept;
 bool is_select(Opcode op) noexcept;
 bool is_vector_op(Opcode op) noexcept;
+bool is_coro_op(Opcode op) noexcept;
+bool is_coro_suspend(Opcode op) noexcept;
+bool is_coro_resume(Opcode op) noexcept;
 bool has_side_effects(Opcode op) noexcept;
 
 std::ostream& operator<<(std::ostream& os, Opcode op);

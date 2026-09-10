@@ -83,6 +83,12 @@ const char* bronze_op_name(BronzeOp op) {
         case BronzeOp::Branch: return "br";
         case BronzeOp::Throw: return "throw";
         case BronzeOp::ExcTake: return "exc.take";
+        case BronzeOp::CreateAsyncMachine: return "create.async_machine";
+        case BronzeOp::AsyncStart: return "async.start";
+        case BronzeOp::AsyncAwait: return "async.await";
+        case BronzeOp::IterOpen: return "iter.open";
+        case BronzeOp::IterStep: return "iter.step";
+        case BronzeOp::Yield: return "yield";
         case BronzeOp::Unknown: return "?";
     }
     return "?";
@@ -408,6 +414,12 @@ Token IlLexer::scan_token() {
         if (w == "br") { op_out = BronzeOp::Branch; return true; }
         if (w == "throw") { op_out = BronzeOp::Throw; return true; }
         if (w == "exc.take") { op_out = BronzeOp::ExcTake; return true; }
+        if (w == "create.async_machine") { op_out = BronzeOp::CreateAsyncMachine; return true; }
+        if (w == "async.start") { op_out = BronzeOp::AsyncStart; return true; }
+        if (w == "async.await") { op_out = BronzeOp::AsyncAwait; return true; }
+        if (w == "iter.open") { op_out = BronzeOp::IterOpen; return true; }
+        if (w == "iter.step") { op_out = BronzeOp::IterStep; return true; }
+        if (w == "yield" || w == "coro.suspend") { op_out = BronzeOp::Yield; return true; }
         return false;
     };
 

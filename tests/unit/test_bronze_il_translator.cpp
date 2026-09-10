@@ -431,6 +431,15 @@ TEST_CASE("Bronze IL - 22-Program Live Corpus JIT and AOT Execution") {
             << "    void brass_ic_set_prop(uint32_t sid, uint64_t o, const char* n, uint32_t s, uint64_t v) { if (g_rt.brass_ic_set) g_rt.brass_ic_set(sid, o, n, s, v); }\n"
             << "    uint64_t brass_dynamic_object_get_prop_str(uint64_t o, const char* n) { return g_rt.brass_dyn_get_str ? g_rt.brass_dyn_get_str(o, n) : 0; }\n"
             << "    void brass_dynamic_object_set_prop_str(uint64_t o, const char* n, uint64_t v) { if (g_rt.brass_dyn_set_str) g_rt.brass_dyn_set_str(o, n, v); }\n"
+            << "    uint64_t bronze_create_async_machine(void* f, uint32_t s, uint64_t m, uint64_t e) { (void)f; (void)s; (void)m; (void)e; return 0; }\n"
+            << "    uint64_t bronze_async_start(uint64_t f, uint64_t a) { (void)f; (void)a; return 0; }\n"
+            << "    uint64_t bronze_async_await(uint64_t f, uint64_t v) { (void)f; return v; }\n"
+            << "    uint64_t bronze_iter_open(uint64_t g) { return g; }\n"
+            << "    uint64_t bronze_iter_step(uint64_t i) { (void)i; return 0; }\n"
+            << "    uintptr_t brass_coro_create(void* f, uint32_t s, uint64_t m) { (void)f; (void)s; (void)m; return 0; }\n"
+            << "    uint64_t brass_coro_resume(uintptr_t f, uint64_t v) { (void)f; (void)v; return 0; }\n"
+            << "    uint32_t brass_coro_is_done(uintptr_t f) { (void)f; return 1; }\n"
+            << "    void brass_coro_destroy(uintptr_t f) { (void)f; }\n"
             << "}\n";
         ofs.close();
     }

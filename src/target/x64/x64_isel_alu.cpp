@@ -486,6 +486,12 @@ void X64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
         case Opcode::landing_pad:
             lower_landing_pad(inst, lir_bb);
             break;
+        case Opcode::coro_create:
+        case Opcode::coro_suspend:
+        case Opcode::coro_resume:
+        case Opcode::coro_destroy:
+            lower_coro(inst, lir_bb);
+            break;
         case Opcode::safepoint:
             lower_safepoint(inst, lir_bb);
             break;

@@ -1,0 +1,20 @@
+#pragma once
+
+#include "il_ast.hpp"
+#include <brass/mir/builder.hpp>
+#include <brass/mir/function.hpp>
+#include <unordered_map>
+
+namespace brass::il {
+
+bool is_coro_il_op(BronzeOp op);
+
+bool lower_coro_instruction(
+    const BronzeInstruction& inst_ast,
+    Builder& b,
+    Function* fn,
+    std::unordered_map<uint32_t, Value*>& val_map,
+    Value*& res_val
+);
+
+} // namespace brass::il

@@ -2,6 +2,7 @@
 #include <brass/mir/lexer.hpp>
 #include <brass/mir/builder.hpp>
 #include "parser_vec.hpp"
+#include "parser_coro.hpp"
 #include "parser_decode.hpp"
 #include <unordered_map>
 #include <vector>
@@ -874,6 +875,21 @@ private:
                         [this](SourceLocation loc, const std::string& msg) { error(loc, msg); }
                     };
                     if (!parse_vector_instruction(ctx, op, type_annotation, type_suffix, mem_type, b, res_val, res_inst)) {
+                        return false;
+                    }
+                    break;
+                }
+                if (is_coro_op(op)) {
+                    ParserCoroContext ctx{
+                        [this]() { return peek(); },
+                        [this]() { return advance(); },
+                        [this](TokenKind k, const std::string& desc) { return expect(k, desc); },
+                        [this](TokenKind k) { return match(k); },
+                        [&]() { return parse_val(); },
+                        [this]() { return parse_symbol_name(); },
+                        [this](SourceLocation loc, const std::string& msg) { error(loc, msg); }
+                    };
+                    if (!parse_coro_instruction(ctx, op, type_annotation, type_suffix, b, res_val, res_inst)) {
                         return false;
                     }
                     break;

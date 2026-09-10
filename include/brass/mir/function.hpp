@@ -42,6 +42,7 @@ public:
     }
 
     void append_block(BasicBlock* bb);
+    void prepend_block(BasicBlock* bb);
     void remove_block(BasicBlock* bb);
     BasicBlock* get_block_by_name(std::string_view name) const noexcept;
     BasicBlock* get_block_by_id(uint32_t id) const noexcept;

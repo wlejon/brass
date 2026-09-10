@@ -470,7 +470,7 @@ void X64ISel::lower_entry_parameters(const Function& mir_fn) {
     }
 
     // Emit resume point prologue dispatcher after parameters have been saved
-    if (!mir_fn.resume_points().empty() && entry->param_count() > 0) {
+    if (!mir_fn.resume_points().empty() && entry->param_count() > 0 && entry->param(0)->type() == Type::i32()) {
         const auto* param0 = entry->param(0);
         VReg param0_vreg = get_vreg(param0);
         for (const auto& rp : mir_fn.resume_points()) {

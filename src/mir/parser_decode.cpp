@@ -1,5 +1,6 @@
 #include "parser_decode.hpp"
 #include "parser_vec.hpp"
+#include "parser_coro.hpp"
 #include <unordered_map>
 
 namespace brass {
@@ -33,6 +34,10 @@ bool decode_opcode_string(std::string_view str, Opcode& op, Type& type_suffix, T
     }
 
     if (decode_vector_opcode(str, op, type_suffix, mem_type)) {
+        return true;
+    }
+
+    if (decode_coro_opcode(str, op, type_suffix)) {
         return true;
     }
 

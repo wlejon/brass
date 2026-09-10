@@ -5,6 +5,7 @@
 #include <brass/runtime/shape.hpp>
 #include <brass/runtime/object.hpp>
 #include <brass/runtime/inline_cache.hpp>
+#include <brass/runtime/coroutine.hpp>
 #include <iostream>
 #include <iomanip>
 #include <cmath>
@@ -163,6 +164,14 @@ int64_t bronze_env_create(int64_t parent_box, int32_t size) {
 }
 
 int64_t bronze_env_get(int64_t env_box, int32_t depth, int32_t index) {
+    if (!env_box) return static_cast<int64_t>(kUndefinedTag);
+    if (is_active_coro_frame(static_cast<uintptr_t>(env_box))) {
+        auto* frame = reinterpret_cast<const BrassCoroFrame*>(env_box);
+        if (static_cast<uint32_t>(index) < frame->slot_count) {
+            return static_cast<int64_t>(frame->slots[index]);
+        }
+        return static_cast<int64_t>(kUndefinedTag);
+    }
     auto* cur = reinterpret_cast<BronzeEnv*>(env_box);
     for (int32_t d = 0; d < depth && cur; ++d) {
         cur = reinterpret_cast<BronzeEnv*>(cur->parent_box);
@@ -547,6 +556,13 @@ void register_all_runtime_symbols(codegen::JitExecutionEngine& jit) {
     jit.register_external_symbol("bronze_call_dynamic_7", reinterpret_cast<void*>(&bronze_call_dynamic_7));
     jit.register_external_symbol("bronze_call_dynamic_8", reinterpret_cast<void*>(&bronze_call_dynamic_8));
     jit.register_external_symbol("bronze_call_dynamic_n", reinterpret_cast<void*>(&bronze_call_dynamic_n));
+
+    set_coro_symbol_resolver(&bronze_resolve_function);
+    jit.register_external_symbol("bronze_create_async_machine", reinterpret_cast<void*>(&bronze_create_async_machine));
+    jit.register_external_symbol("bronze_async_start", reinterpret_cast<void*>(&bronze_async_start));
+    jit.register_external_symbol("bronze_async_await", reinterpret_cast<void*>(&bronze_async_await));
+    jit.register_external_symbol("bronze_iter_open", reinterpret_cast<void*>(&bronze_iter_open));
+    jit.register_external_symbol("bronze_iter_step", reinterpret_cast<void*>(&bronze_iter_step));
 }
 
 void register_bronze_runtime_symbols(void* jit_engine_ptr) {

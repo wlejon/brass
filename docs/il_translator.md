@@ -25,6 +25,7 @@ The Bronze IL Translator (`brass::il::translate_bronze_il` and `brass-il` CLI) p
 | **Direct Calls & Prints**| `call @name(...)`, `print %0, ...`, `print.err %0, ...` | Direct internal/external subroutine calls & formatted printers | Supported |
 | **Objects & Properties**| `create.object`, `create.array`, `prop.get`, `prop.set`, `elem.get`, `elem.set`, `method.def` | Polymorphic inline caches (PICs), Shape hidden class transitions, moving GC DynamicObject | Supported |
 | **Exception Handling**| `handler b<id>`, `throw %val`, `exc.take` | MIR `invoke`, `throw`, `landing_pad` with zero-cost Win64 SEH & SysV DWARF LSDA unwinding | Supported |
+| **Coroutines & Async**| `create.async_machine`, `async.start`, `async.await`, `iter.open`, `iter.step`, `yield` | `CoroTransformPass`, `coro_create`, `coro_suspend`, `coro_resume`, `brass_coro_*`, `bronze_iter_*`, `bronze_async_*` | Supported |
 
 ---
 
@@ -32,8 +33,6 @@ The Bronze IL Translator (`brass::il::translate_bronze_il` and `brass-il` CLI) p
 
 1. **Accessor Property Descriptors (`accessor.def`)**:
    - *Reason*: Requires getter/setter dynamic property dispatch and call stub synthesis.
-2. **Async / Generator Coroutines (`create.async_machine`, `async.start`, `async.await`, `iter.open`, `iter.step`)**:
-   - *Reason*: Requires coroutine state machine transformation and resume point descriptors.
 
 ---
 

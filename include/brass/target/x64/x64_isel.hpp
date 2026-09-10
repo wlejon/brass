@@ -82,6 +82,7 @@ private:
     void lower_safepoint(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_guard(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_vector_instruction(const Instruction& inst, codegen::LirBlock& lir_bb);
+    void lower_coro(const Instruction& inst, codegen::LirBlock& lir_bb);
 };
 
 std::unique_ptr<codegen::LirFunction> lower_to_x64_lir(

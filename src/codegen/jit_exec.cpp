@@ -6,6 +6,7 @@
 #include <brass/runtime/resume_table.hpp>
 #include <brass/runtime/patcher.hpp>
 #include <brass/runtime/exception.hpp>
+#include <brass/runtime/coroutine.hpp>
 #include <stdexcept>
 #include <cstring>
 #include <emmintrin.h>
@@ -116,6 +117,15 @@ JitExecutionEngine::JitExecutionEngine(const Target& target)
 #if defined(_WIN32)
     register_external_symbol("brass_seh_personality", reinterpret_cast<void*>(&runtime::brass_seh_personality));
 #endif
+    register_external_symbol("brass_coro_create", reinterpret_cast<void*>(&brass_coro_create));
+    register_external_symbol("brass_coro_resume", reinterpret_cast<void*>(&brass_coro_resume));
+    register_external_symbol("brass_coro_is_done", reinterpret_cast<void*>(&brass_coro_is_done));
+    register_external_symbol("brass_coro_destroy", reinterpret_cast<void*>(&brass_coro_destroy));
+    register_external_symbol("bronze_iter_open", reinterpret_cast<void*>(&bronze_iter_open));
+    register_external_symbol("bronze_iter_step", reinterpret_cast<void*>(&bronze_iter_step));
+    register_external_symbol("bronze_create_async_machine", reinterpret_cast<void*>(&bronze_create_async_machine));
+    register_external_symbol("bronze_async_start", reinterpret_cast<void*>(&bronze_async_start));
+    register_external_symbol("bronze_async_await", reinterpret_cast<void*>(&bronze_async_await));
 }
 
 JitExecutionEngine::JitExecutionEngine()
@@ -135,6 +145,15 @@ JitExecutionEngine::JitExecutionEngine()
 #if defined(_WIN32)
     register_external_symbol("brass_seh_personality", reinterpret_cast<void*>(&runtime::brass_seh_personality));
 #endif
+    register_external_symbol("brass_coro_create", reinterpret_cast<void*>(&brass_coro_create));
+    register_external_symbol("brass_coro_resume", reinterpret_cast<void*>(&brass_coro_resume));
+    register_external_symbol("brass_coro_is_done", reinterpret_cast<void*>(&brass_coro_is_done));
+    register_external_symbol("brass_coro_destroy", reinterpret_cast<void*>(&brass_coro_destroy));
+    register_external_symbol("bronze_iter_open", reinterpret_cast<void*>(&bronze_iter_open));
+    register_external_symbol("bronze_iter_step", reinterpret_cast<void*>(&bronze_iter_step));
+    register_external_symbol("bronze_create_async_machine", reinterpret_cast<void*>(&bronze_create_async_machine));
+    register_external_symbol("bronze_async_start", reinterpret_cast<void*>(&bronze_async_start));
+    register_external_symbol("bronze_async_await", reinterpret_cast<void*>(&bronze_async_await));
 }
 
 JitExecutionEngine::~JitExecutionEngine() {

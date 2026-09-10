@@ -182,6 +182,13 @@ public:
     Instruction* build_invoke(std::string_view callee, Type return_type, Span<Value* const> args, BasicBlock* normal_target, Span<Value* const> normal_args, BasicBlock* unwind_target, Span<Value* const> unwind_args = {});
     Instruction* build_invoke(std::string_view callee, Type return_type, std::initializer_list<Value*> args, BasicBlock* normal_target, std::initializer_list<Value*> normal_args, BasicBlock* unwind_target, std::initializer_list<Value*> unwind_args = {});
 
+    // Coroutines
+    Value* build_coro_create(std::string_view callee, Span<Value* const> args = {});
+    Value* build_coro_create(std::string_view callee, std::initializer_list<Value*> args);
+    Value* build_coro_suspend(Value* yield_val, uint32_t state_id = 0, Type return_type = Type::i64());
+    Value* build_coro_resume(Value* coro_val, Value* input_val = nullptr, Type return_type = Type::i64());
+    Instruction* build_coro_destroy(Value* coro_val);
+
     Instruction* insert(Instruction* inst);
     Value* create_value(Type type);
 

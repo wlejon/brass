@@ -1,4 +1,5 @@
 #include <brass/interpreter/interpreter.hpp>
+#include "interpreter_coro.hpp"
 #include <iostream>
 #include <cmath>
 
@@ -763,6 +764,40 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
 
                 case Opcode::landing_pad: {
                     frame.set_value(inst->result(), current_exception_);
+                    break;
+                }
+
+                case Opcode::coro_create: {
+                    RuntimeValue res = interp_coro_create(*inst, frame, module_);
+                    if (inst->result()) {
+                        frame.set_value(inst->result(), res);
+                    }
+                    break;
+                }
+
+                case Opcode::coro_suspend: {
+                    interp_coro_suspend(*inst, frame, cur_bb);
+                    break;
+                }
+
+                case Opcode::coro_resume: {
+                    RuntimeValue res = interp_coro_resume(
+                        *inst, frame, module_,
+                        [this](const Function& f, const std::vector<RuntimeValue>& a) {
+                            return execute_function(f, a);
+                        },
+                        [this](const Function& f, BasicBlock* bb, const std::vector<RuntimeValue>& a) {
+                            return execute_function_from_block(f, bb, a);
+                        }
+                    );
+                    if (inst->result()) {
+                        frame.set_value(inst->result(), res);
+                    }
+                    break;
+                }
+
+                case Opcode::coro_destroy: {
+                    interp_coro_destroy(*inst, frame);
                     break;
                 }
 

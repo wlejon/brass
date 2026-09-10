@@ -1,6 +1,7 @@
 #include <brass/mir/verifier.hpp>
 #include "verifier_vec.hpp"
 #include "verifier_exceptions.hpp"
+#include "verifier_coro.hpp"
 #include <unordered_map>
 #include <unordered_set>
 #include <queue>
@@ -871,6 +872,8 @@ bool Verifier::verify_function(const Function& fn) {
                 default:
                     if (is_vector_op(inst->opcode())) {
                         verify_vector_instruction(inst, inst_prefix, [this](const std::string& msg) { report_error(msg); });
+                    } else if (is_coro_op(inst->opcode())) {
+                        verify_coro_instruction(inst, bb, inst_prefix, [this](const std::string& msg) { report_error(msg); });
                     } else if (!verify_exception_instruction(inst, bb, inst_prefix, [this](const std::string& msg) { report_error(msg); })) {
                         report_error(inst_prefix + "Unhandled or invalid instruction opcode: " + std::string(opcode_name(inst->opcode())));
                     }

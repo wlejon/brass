@@ -102,6 +102,11 @@ std::string_view opcode_name(Opcode op) noexcept {
         case Opcode::vinsert_lane: return "vinsert_lane";
         case Opcode::vshuffle: return "vshuffle";
         case Opcode::vzero: return "vzero";
+
+        case Opcode::coro_create: return "coro_create";
+        case Opcode::coro_suspend: return "coro_suspend";
+        case Opcode::coro_resume: return "coro_resume";
+        case Opcode::coro_destroy: return "coro_destroy";
     }
     return "unknown";
 }
@@ -263,9 +268,30 @@ bool is_vector_op(Opcode op) noexcept {
     }
 }
 
+bool is_coro_op(Opcode op) noexcept {
+    switch (op) {
+        case Opcode::coro_create:
+        case Opcode::coro_suspend:
+        case Opcode::coro_resume:
+        case Opcode::coro_destroy:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool is_coro_suspend(Opcode op) noexcept {
+    return op == Opcode::coro_suspend;
+}
+
+bool is_coro_resume(Opcode op) noexcept {
+    return op == Opcode::coro_resume;
+}
+
 bool has_side_effects(Opcode op) noexcept {
     if (is_terminator(op)) return true;
     if (is_call(op)) return true;
+    if (is_coro_op(op)) return true;
     switch (op) {
         case Opcode::store:
         case Opcode::store_indexed:

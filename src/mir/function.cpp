@@ -9,6 +9,12 @@ void Function::append_block(BasicBlock* bb) {
     blocks_.push_back(bb);
 }
 
+void Function::prepend_block(BasicBlock* bb) {
+    if (!bb) return;
+    bb->set_parent(this);
+    blocks_.insert(blocks_.begin(), bb);
+}
+
 void Function::remove_block(BasicBlock* bb) {
     if (!bb) return;
     auto it = std::find(blocks_.begin(), blocks_.end(), bb);

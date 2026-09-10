@@ -825,4 +825,66 @@ Instruction* Builder::build_invoke(std::string_view callee, Type return_type, st
                         unwind_target, Span<Value* const>(unwind_args.begin(), unwind_args.size()));
 }
 
+Value* Builder::build_coro_create(std::string_view callee, Span<Value* const> args) {
+    Instruction* inst = get_arena().make<Instruction>(Opcode::coro_create, Type::gcref());
+    inst->set_symbol(get_string_pool().intern(callee));
+    for (Value* arg : args) {
+        inst->add_operand(arg);
+    }
+    Value* res = create_value(Type::gcref());
+    inst->set_result(res);
+    res->set_defining_instruction(inst);
+    insert(inst);
+    return res;
+}
+
+Value* Builder::build_coro_create(std::string_view callee, std::initializer_list<Value*> args) {
+    return build_coro_create(callee, Span<Value* const>(args.begin(), args.size()));
+}
+
+Value* Builder::build_coro_suspend(Value* yield_val, uint32_t state_id, Type return_type) {
+    Instruction* inst = get_arena().make<Instruction>(Opcode::coro_suspend, return_type);
+    if (yield_val) {
+        inst->add_operand(yield_val);
+    }
+    inst->set_resume_id(state_id);
+    if (!return_type.is_void()) {
+        Value* res = create_value(return_type);
+        inst->set_result(res);
+        res->set_defining_instruction(inst);
+        insert(inst);
+        return res;
+    }
+    insert(inst);
+    return nullptr;
+}
+
+Value* Builder::build_coro_resume(Value* coro_val, Value* input_val, Type return_type) {
+    Instruction* inst = get_arena().make<Instruction>(Opcode::coro_resume, return_type);
+    if (coro_val) {
+        inst->add_operand(coro_val);
+    }
+    if (input_val) {
+        inst->add_operand(input_val);
+    }
+    if (!return_type.is_void()) {
+        Value* res = create_value(return_type);
+        inst->set_result(res);
+        res->set_defining_instruction(inst);
+        insert(inst);
+        return res;
+    }
+    insert(inst);
+    return nullptr;
+}
+
+Instruction* Builder::build_coro_destroy(Value* coro_val) {
+    Instruction* inst = get_arena().make<Instruction>(Opcode::coro_destroy, Type::void_type());
+    if (coro_val) {
+        inst->add_operand(coro_val);
+    }
+    insert(inst);
+    return inst;
+}
+
 } // namespace brass

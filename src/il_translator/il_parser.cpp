@@ -410,6 +410,26 @@ bool IlParser::parse_instruction(BronzeInstruction& out_inst) {
             break;
         }
 
+        case BronzeOp::CreateAsyncMachine: {
+            Token fn_tok;
+            if (!expect(TokenType::AtFunction, "Expected @func after create.async_machine", &fn_tok)) return false;
+            out_inst.callee_name = std::string(fn_tok.text);
+            if (match(TokenType::Comma)) {
+                Token next_t = lexer_.next_token();
+                if (next_t.type == TokenType::NumberInt) {
+                    out_inst.param_count = static_cast<uint32_t>(next_t.num_i64);
+                    if (match(TokenType::Comma)) {
+                        Token env_tok;
+                        if (!expect(TokenType::PercentValue, "Expected %env in create.async_machine", &env_tok)) return false;
+                        out_inst.operands.push_back(env_tok.id_num);
+                    }
+                } else if (next_t.type == TokenType::PercentValue) {
+                    out_inst.operands.push_back(next_t.id_num);
+                }
+            }
+            break;
+        }
+
         case BronzeOp::CreateArray: {
             Token size_tok = lexer_.next_token();
             out_inst.param_count = static_cast<uint32_t>(size_tok.num_i64);

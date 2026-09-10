@@ -1,6 +1,8 @@
 #include "il_lowering.hpp"
+#include "il_lowering_coro.hpp"
 #include "il_runtime.hpp"
 #include <brass/mir/verifier.hpp>
+#include <brass/mir/coro_transform.hpp>
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/inliner.hpp>
 #include <brass/mir/sroa.hpp>
@@ -92,6 +94,15 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
     mod->add_external_symbol("bronze_call_dynamic_7");
     mod->add_external_symbol("bronze_call_dynamic_8");
     mod->add_external_symbol("bronze_call_dynamic_n");
+    mod->add_external_symbol("bronze_create_async_machine");
+    mod->add_external_symbol("bronze_async_start");
+    mod->add_external_symbol("bronze_async_await");
+    mod->add_external_symbol("bronze_iter_open");
+    mod->add_external_symbol("bronze_iter_step");
+    mod->add_external_symbol("brass_coro_create");
+    mod->add_external_symbol("brass_coro_resume");
+    mod->add_external_symbol("brass_coro_is_done");
+    mod->add_external_symbol("brass_coro_destroy");
 
     // 1. Forward-declare all functions (uniquifying any duplicate anonymous function names from Bronze)
     std::unordered_map<std::string, std::vector<size_t>> name_to_indices;
@@ -152,7 +163,12 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
         return nullptr;
     }
 
-    // 4. Optionally optimize module
+    // 4. Transform coroutines into state machines
+    CoroTransformOptions coro_opts;
+    coro_opts.first_slot_index = 1;
+    CoroTransformPass(coro_opts).run_on_module(*mod);
+
+    // 5. Optionally optimize module
     if (options_.enable_optimizations) {
         LoopOptOptions opt_opts;
         opt_opts.enable_fp_reassociation = options_.allow_fp_reassociation;
@@ -288,6 +304,16 @@ bool IlLowering::lower_instruction(
         }
         return nullptr;
     };
+
+    if (is_coro_il_op(inst_ast.op)) {
+        if (!lower_coro_instruction(inst_ast, b, fn, val_map, res_val)) {
+            return false;
+        }
+        if (inst_ast.result_id != UINT32_MAX && res_val) {
+            val_map[inst_ast.result_id] = res_val;
+        }
+        return true;
+    }
 
     switch (inst_ast.op) {
         case BronzeOp::ConstF64:

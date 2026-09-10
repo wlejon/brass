@@ -376,6 +376,51 @@ public:
                 }
                 break;
 
+            case Opcode::coro_create: {
+                os_ << "coro_create @" << inst.symbol() << "(";
+                for (size_t i = 0; i < inst.operand_count(); ++i) {
+                    if (i > 0) os_ << ", ";
+                    os_ << value_name(inst.operand(i));
+                }
+                os_ << ")";
+                break;
+            }
+
+            case Opcode::coro_suspend: {
+                if (!inst.type().is_void()) {
+                    os_ << "coro_suspend." << inst.type().name() << " ";
+                } else {
+                    os_ << "coro_suspend ";
+                }
+                if (inst.operand_count() > 0 && inst.operand(0)) {
+                    os_ << value_name(inst.operand(0));
+                } else {
+                    os_ << "0";
+                }
+                if (inst.resume_id() != 0) {
+                    os_ << ", " << inst.resume_id();
+                }
+                break;
+            }
+
+            case Opcode::coro_resume: {
+                if (!inst.type().is_void()) {
+                    os_ << "coro_resume." << inst.type().name() << " ";
+                } else {
+                    os_ << "coro_resume ";
+                }
+                os_ << value_name(inst.operand(0));
+                if (inst.operand_count() > 1 && inst.operand(1)) {
+                    os_ << ", " << value_name(inst.operand(1));
+                }
+                break;
+            }
+
+            case Opcode::coro_destroy: {
+                os_ << "coro_destroy " << value_name(inst.operand(0));
+                break;
+            }
+
             case Opcode::vadd:
             case Opcode::vsub:
             case Opcode::vmul:
