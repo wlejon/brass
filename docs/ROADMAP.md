@@ -117,13 +117,15 @@
   - MIR opcodes: `throw`, `invoke`, `landing_pad`, `resume`.
   - Lowering Bronze IL `handler`, `throw`, `exc.take`.
   - 26-program Bronze corpus verification.
-- **Chunk 15: Stackless Coroutines & Resumable Frames (Async/Await & Generators) [NEXT]**:
-  - Coroutine state machine transformation pass.
-  - GC-tracked resumable frames and Interior Resume Table integration.
-  - Lowering Bronze IL `create.async_machine`, `async.start`, `async.await`, `iter.open`, `iter.step`.
-- **Chunk 16: Partial Escape Analysis (PEA) & Allocation Sinking**:
-  - Sinking allocations from loop headers down into cold exit paths.
-  - Scalarization of boxed numbers / objects in non-escaping paths.
+- **Chunk 15: Stackless Coroutines & Resumable Frames (Async/Await & Generators) [COMPLETED]**:
+  - Coroutine state machine transformation pass (`CoroTransformPass`).
+  - GC-tracked resumable frames (`BrassCoroFrame`) and Interior Resume Table integration.
+  - Lowering Bronze IL `create.async_machine`, `async.start`, `async.await`, `iter.open`, `iter.step`, `yield`.
+  - 28-program Bronze corpus verification.
+- **Chunk 16: Partial Escape Analysis (PEA) & Allocation Sinking [NEXT]**:
+  - Path-sensitive escape analysis across control-flow graphs and dominator trees.
+  - Sinking allocations from loop headers down into cold / bailout exit paths.
+  - Scalarization of boxed numbers / objects in non-escaping hot loop paths.
 
 ---
 
