@@ -159,6 +159,7 @@ std::string_view to_string(LirOpcode op) noexcept {
         case LirOpcode::Lea: return "lea";
         case LirOpcode::ParallelCopy: return "parallel_copy";
         case LirOpcode::Safepoint: return "safepoint";
+        case LirOpcode::WriteBarrier: return "write_barrier";
         case LirOpcode::GuardExit: return "guard_exit";
     }
     return "unknown";

@@ -18,6 +18,7 @@
 namespace brass {
 
 class Interpreter;
+class GenerationalGC;
 
 class InterpreterException : public std::runtime_error {
 public:
@@ -74,6 +75,10 @@ public:
     MiniCheneyGC& gc() noexcept { return gc_; }
     const MiniCheneyGC& gc() const noexcept { return gc_; }
 
+    void set_generational_gc(GenerationalGC* gc) noexcept { gen_gc_ = gc; }
+    GenerationalGC* generational_gc() noexcept { return gen_gc_; }
+    const GenerationalGC* generational_gc() const noexcept { return gen_gc_; }
+
     // Allocation in managed GC heap
     uintptr_t allocate_gc(size_t size, uint64_t pointer_mask = 0, uint32_t type_tag = 0);
 
@@ -126,6 +131,7 @@ private:
 
     const Module* module_ = nullptr;
     MiniCheneyGC gc_;
+    GenerationalGC* gen_gc_ = nullptr;
 
     InterpreterFrame* current_frame_ = nullptr;
     size_t call_depth_ = 0;

@@ -112,6 +112,7 @@ public:
     Value* build_load_indexed(Type type, Value* base, Value* index, uint8_t scale, int32_t offset);
     Instruction* build_store_indexed(Type type, Value* base, Value* index, uint8_t scale, int32_t offset, Value* val);
     Instruction* build_store_indexed(Type type, Value* base, Value* index, uint8_t scale, Value* val);
+    Instruction* build_write_barrier(Value* obj, Value* val);
 
     // Vector Arithmetic & Logic
     Value* build_vadd(Value* lhs, Value* rhs);

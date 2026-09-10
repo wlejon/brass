@@ -429,6 +429,14 @@ Instruction* Builder::build_store_indexed(Type type, Value* base, Value* index, 
     return build_store_indexed(type, base, index, scale, 0, val);
 }
 
+Instruction* Builder::build_write_barrier(Value* obj, Value* val) {
+    Instruction* inst = get_arena().make<Instruction>(Opcode::write_barrier, Type::void_type());
+    inst->add_operand(obj);
+    inst->add_operand(val);
+    insert(inst);
+    return inst;
+}
+
 static Value* build_vec_bin_op(Builder* b, Arena& arena, Opcode op, Value* lhs, Value* rhs) {
     Type res_type = lhs ? lhs->type() : (rhs ? rhs->type() : Type::f32x4());
     Instruction* inst = arena.make<Instruction>(op, res_type);

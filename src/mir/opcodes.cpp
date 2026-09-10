@@ -64,6 +64,7 @@ std::string_view opcode_name(Opcode op) noexcept {
         case Opcode::store: return "store";
         case Opcode::load_indexed: return "load_indexed";
         case Opcode::store_indexed: return "store_indexed";
+        case Opcode::write_barrier: return "write_barrier";
 
         case Opcode::call: return "call";
         case Opcode::call_indirect: return "call_indirect";
@@ -237,6 +238,10 @@ bool is_memory(Opcode op) noexcept {
     }
 }
 
+bool is_write_barrier(Opcode op) noexcept {
+    return op == Opcode::write_barrier;
+}
+
 bool is_select(Opcode op) noexcept {
     return op == Opcode::select;
 }
@@ -296,6 +301,7 @@ bool has_side_effects(Opcode op) noexcept {
         case Opcode::store:
         case Opcode::store_indexed:
         case Opcode::vstore:
+        case Opcode::write_barrier:
         case Opcode::safepoint:
         case Opcode::guard:
         case Opcode::resume_point:

@@ -48,6 +48,7 @@ bool decode_opcode_string(std::string_view str, Opcode& op, Type& type_suffix, T
     if (str == "guard") { op = Opcode::guard; return true; }
     if (str == "resume_point") { op = Opcode::resume_point; return true; }
     if (str == "safepoint") { op = Opcode::safepoint; return true; }
+    if (str == "write_barrier") { op = Opcode::write_barrier; return true; }
     if (str == "unreachable") { op = Opcode::unreachable; return true; }
     if (str == "call") { op = Opcode::call; return true; }
     if (str == "throw") { op = Opcode::throw_; return true; }

@@ -2,6 +2,7 @@
 #include <brass/il_translator/il_translator.hpp>
 #include <brass/codegen/jit_exec.hpp>
 #include <brass/embedding/host_gc.hpp>
+#include <brass/gc/runtime_gc.hpp>
 #include <brass/runtime/shape.hpp>
 #include <brass/runtime/object.hpp>
 #include <brass/runtime/inline_cache.hpp>
@@ -558,6 +559,9 @@ void register_all_runtime_symbols(codegen::JitExecutionEngine& jit) {
     jit.register_external_symbol("bronze_call_dynamic_n", reinterpret_cast<void*>(&bronze_call_dynamic_n));
 
     set_coro_symbol_resolver(&bronze_resolve_function);
+    jit.register_external_symbol("brass_gc_write_barrier", reinterpret_cast<void*>(&brass_gc_write_barrier));
+    jit.register_external_symbol("brass_gc_card_table_base", reinterpret_cast<void*>(&brass_gc_card_table_base));
+    jit.register_external_symbol("brass_gc_heap_base", reinterpret_cast<void*>(&brass_gc_heap_base));
     jit.register_external_symbol("bronze_create_async_machine", reinterpret_cast<void*>(&bronze_create_async_machine));
     jit.register_external_symbol("bronze_async_start", reinterpret_cast<void*>(&bronze_async_start));
     jit.register_external_symbol("bronze_async_await", reinterpret_cast<void*>(&bronze_async_await));

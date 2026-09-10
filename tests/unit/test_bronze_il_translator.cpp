@@ -440,6 +440,7 @@ TEST_CASE("Bronze IL - 22-Program Live Corpus JIT and AOT Execution") {
             << "    uint64_t brass_coro_resume(uintptr_t f, uint64_t v) { (void)f; (void)v; return 0; }\n"
             << "    uint32_t brass_coro_is_done(uintptr_t f) { (void)f; return 1; }\n"
             << "    void brass_coro_destroy(uintptr_t f) { (void)f; }\n"
+            << "    void brass_gc_write_barrier(uintptr_t o, uintptr_t v) { (void)o; (void)v; }\n"
             << "}\n";
         ofs.close();
     }

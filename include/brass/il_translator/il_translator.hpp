@@ -41,6 +41,8 @@ struct TranslatorOptions {
     size_t tile_size = 16;
     bool enable_pic = true;
     bool dump_ic_stats = false;
+    bool enable_wbe = true;
+    bool dump_wbe_stats = false;
     DemoteStats* demote_stats_collector = nullptr;
     PartialEscapeStats* pea_stats_collector = nullptr;
 };

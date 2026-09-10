@@ -73,6 +73,7 @@ enum class Opcode : uint16_t {
     store,
     load_indexed,
     store_indexed,
+    write_barrier,
 
     // Calls & Safepoints
     call,
@@ -135,6 +136,7 @@ bool is_arithmetic(Opcode op) noexcept;
 bool is_bitwise(Opcode op) noexcept;
 bool is_comparison(Opcode op) noexcept;
 bool is_memory(Opcode op) noexcept;
+bool is_write_barrier(Opcode op) noexcept;
 bool is_select(Opcode op) noexcept;
 bool is_vector_op(Opcode op) noexcept;
 bool is_coro_op(Opcode op) noexcept;

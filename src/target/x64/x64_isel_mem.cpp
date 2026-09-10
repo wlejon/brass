@@ -308,4 +308,57 @@ void X64ISel::lower_store_indexed(const Instruction& inst, LirBlock& lir_bb) {
     }
 }
 
+void X64ISel::lower_write_barrier(const Instruction& inst, LirBlock& lir_bb) {
+    const Value* obj_val = inst.operand(0);
+    const Value* val_val = inst.operand(1);
+    if (!obj_val || !val_val) return;
+
+    VReg obj_vreg = get_vreg(obj_val);
+    VReg val_vreg = get_vreg(val_val);
+
+    if (cc_.kind() == CallingConvKind::Win64) {
+        lir_fn_->frame.outgoing_arg_space = std::max(lir_fn_->frame.outgoing_arg_space, size_t(32));
+
+        auto mov_obj = std::make_unique<LirInst>(LirOpcode::Mov);
+        mov_obj->add_def(LirOperand::preg_gpr(GPR::RCX, 8), FixedConstraint::gpr(GPR::RCX));
+        mov_obj->add_use(LirOperand::vreg(obj_vreg, 8));
+        lir_bb.append_inst(std::move(mov_obj));
+
+        auto mov_val = std::make_unique<LirInst>(LirOpcode::Mov);
+        mov_val->add_def(LirOperand::preg_gpr(GPR::RDX, 8), FixedConstraint::gpr(GPR::RDX));
+        mov_val->add_use(LirOperand::vreg(val_vreg, 8));
+        lir_bb.append_inst(std::move(mov_val));
+
+        auto call_wb = std::make_unique<LirInst>(LirOpcode::Call);
+        call_wb->callee_symbol = "brass_gc_write_barrier";
+        call_wb->add_use(LirOperand::preg_gpr(GPR::RCX, 8), FixedConstraint::gpr(GPR::RCX));
+        call_wb->add_use(LirOperand::preg_gpr(GPR::RDX, 8), FixedConstraint::gpr(GPR::RDX));
+        call_wb->add_use(LirOperand::symbol("brass_gc_write_barrier"));
+        call_wb->clobbered_gprs = cc_.caller_saved_gpr_mask();
+        call_wb->clobbered_xmms = cc_.caller_saved_xmm_mask();
+        call_wb->mir_origin = &inst;
+        lir_bb.append_inst(std::move(call_wb));
+    } else {
+        auto mov_obj = std::make_unique<LirInst>(LirOpcode::Mov);
+        mov_obj->add_def(LirOperand::preg_gpr(GPR::RDI, 8), FixedConstraint::gpr(GPR::RDI));
+        mov_obj->add_use(LirOperand::vreg(obj_vreg, 8));
+        lir_bb.append_inst(std::move(mov_obj));
+
+        auto mov_val = std::make_unique<LirInst>(LirOpcode::Mov);
+        mov_val->add_def(LirOperand::preg_gpr(GPR::RSI, 8), FixedConstraint::gpr(GPR::RSI));
+        mov_val->add_use(LirOperand::vreg(val_vreg, 8));
+        lir_bb.append_inst(std::move(mov_val));
+
+        auto call_wb = std::make_unique<LirInst>(LirOpcode::Call);
+        call_wb->callee_symbol = "brass_gc_write_barrier";
+        call_wb->add_use(LirOperand::preg_gpr(GPR::RDI, 8), FixedConstraint::gpr(GPR::RDI));
+        call_wb->add_use(LirOperand::preg_gpr(GPR::RSI, 8), FixedConstraint::gpr(GPR::RSI));
+        call_wb->add_use(LirOperand::symbol("brass_gc_write_barrier"));
+        call_wb->clobbered_gprs = cc_.caller_saved_gpr_mask();
+        call_wb->clobbered_xmms = cc_.caller_saved_xmm_mask();
+        call_wb->mir_origin = &inst;
+        lir_bb.append_inst(std::move(call_wb));
+    }
+}
+
 } // namespace brass::x64

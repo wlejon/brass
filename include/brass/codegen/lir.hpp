@@ -285,6 +285,7 @@ enum class LirOpcode : uint16_t {
     // Parallel Copy & Runtime
     ParallelCopy,
     Safepoint,
+    WriteBarrier,
     GuardExit
 };
 

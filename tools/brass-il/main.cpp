@@ -136,6 +136,12 @@ int main(int argc, char** argv) {
             options.enable_pic = false;
         } else if (arg == "--dump-ic-stats") {
             options.dump_ic_stats = true;
+        } else if (arg == "--wbe" || arg == "--enable-wbe") {
+            options.enable_wbe = true;
+        } else if (arg == "--no-wbe") {
+            options.enable_wbe = false;
+        } else if (arg == "--dump-wbe-stats") {
+            options.dump_wbe_stats = true;
         } else if (arg == "--demote-stats") {
             show_demote_stats = true;
         } else if (arg == "--raw-output") {

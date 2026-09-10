@@ -126,6 +126,9 @@ JitExecutionEngine::JitExecutionEngine(const Target& target)
     register_external_symbol("bronze_create_async_machine", reinterpret_cast<void*>(&bronze_create_async_machine));
     register_external_symbol("bronze_async_start", reinterpret_cast<void*>(&bronze_async_start));
     register_external_symbol("bronze_async_await", reinterpret_cast<void*>(&bronze_async_await));
+    register_external_symbol("brass_gc_write_barrier", reinterpret_cast<void*>(&brass_gc_write_barrier));
+    register_external_symbol("brass_gc_card_table_base", reinterpret_cast<void*>(&brass_gc_card_table_base));
+    register_external_symbol("brass_gc_heap_base", reinterpret_cast<void*>(&brass_gc_heap_base));
 }
 
 JitExecutionEngine::JitExecutionEngine()
@@ -154,6 +157,9 @@ JitExecutionEngine::JitExecutionEngine()
     register_external_symbol("bronze_create_async_machine", reinterpret_cast<void*>(&bronze_create_async_machine));
     register_external_symbol("bronze_async_start", reinterpret_cast<void*>(&bronze_async_start));
     register_external_symbol("bronze_async_await", reinterpret_cast<void*>(&bronze_async_await));
+    register_external_symbol("brass_gc_write_barrier", reinterpret_cast<void*>(&brass_gc_write_barrier));
+    register_external_symbol("brass_gc_card_table_base", reinterpret_cast<void*>(&brass_gc_card_table_base));
+    register_external_symbol("brass_gc_heap_base", reinterpret_cast<void*>(&brass_gc_heap_base));
 }
 
 JitExecutionEngine::~JitExecutionEngine() {

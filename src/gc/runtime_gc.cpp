@@ -13,6 +13,7 @@ namespace brass {
 namespace {
 
 static MiniCheneyGC* g_active_gc = nullptr;
+static GenerationalGC* g_active_gen_gc = nullptr;
 static const ModuleStackMap* g_active_stack_maps = nullptr;
 
 inline void get_caller_frame(uintptr_t& caller_rbp, uintptr_t& caller_ip) noexcept {
@@ -40,6 +41,14 @@ void brass_set_active_gc(MiniCheneyGC* gc) noexcept {
 
 MiniCheneyGC* brass_get_active_gc() noexcept {
     return g_active_gc;
+}
+
+void brass_set_active_generational_gc(GenerationalGC* gc) noexcept {
+    g_active_gen_gc = gc;
+}
+
+GenerationalGC* brass_get_active_generational_gc() noexcept {
+    return g_active_gen_gc;
 }
 
 void brass_set_active_stack_maps(const ModuleStackMap* maps) noexcept {
@@ -122,6 +131,10 @@ uintptr_t brass_runtime_gc_alloc(
 extern "C" {
 
 void brass_runtime_gc_safepoint_bridge(uintptr_t caller_rbp, uintptr_t caller_ip) {
+    if (auto* gen_gc = brass::brass_get_active_generational_gc()) {
+        gen_gc->collect();
+        return;
+    }
     auto* gc = brass::brass_get_active_gc();
     const auto* maps = brass::brass_get_active_stack_maps();
     if (!gc || !maps) return;
@@ -129,6 +142,9 @@ void brass_runtime_gc_safepoint_bridge(uintptr_t caller_rbp, uintptr_t caller_ip
 }
 
 uintptr_t brass_runtime_gc_alloc_bridge(size_t size, uint64_t pointer_mask, uint32_t type_tag, uintptr_t caller_rbp, uintptr_t caller_ip) {
+    if (auto* gen_gc = brass::brass_get_active_generational_gc()) {
+        return gen_gc->allocate(size, pointer_mask, type_tag);
+    }
     auto* gc = brass::brass_get_active_gc();
     if (!gc) {
         return 0;
@@ -143,6 +159,50 @@ uintptr_t brass_runtime_gc_alloc_bridge(size_t size, uint64_t pointer_mask, uint
     return brass::brass_runtime_gc_alloc(gc, *maps, size, pointer_mask, type_tag, caller_rbp, caller_ip);
 }
 
+void brass_gc_write_barrier(uintptr_t obj, uintptr_t val) {
+    auto* gen_gc = brass::brass_get_active_generational_gc();
+    if (!gen_gc) return;
+    if (!gen_gc->is_old(obj)) return;
+    if (!gen_gc->is_young(val)) return;
+    gen_gc->card_table().mark_card(obj);
+}
+
+uint8_t* brass_gc_card_table_base() {
+    auto* gen_gc = brass::brass_get_active_generational_gc();
+    return gen_gc ? gen_gc->card_table().byte_map_base() : nullptr;
+}
+
+uintptr_t brass_gc_heap_base() {
+    auto* gen_gc = brass::brass_get_active_generational_gc();
+    return gen_gc ? gen_gc->card_table().heap_base() : 0;
+}
+
+void brass_gc_safepoint() {
+    if (auto* gen_gc = brass::brass_get_active_generational_gc()) {
+        gen_gc->collect();
+        return;
+    }
+    auto* gc = brass::brass_get_active_gc();
+    if (gc) gc->collect();
+}
+
+uintptr_t brass_gc_alloc(size_t size, uint64_t pointer_mask, uint32_t type_tag) {
+    if (auto* gen_gc = brass::brass_get_active_generational_gc()) {
+        return gen_gc->allocate(size, pointer_mask, type_tag);
+    }
+    auto* gc = brass::brass_get_active_gc();
+    return gc ? gc->allocate(size, pointer_mask, type_tag) : 0;
+}
+
+void brass_gc_collect() {
+    if (auto* gen_gc = brass::brass_get_active_generational_gc()) {
+        gen_gc->collect();
+        return;
+    }
+    auto* gc = brass::brass_get_active_gc();
+    if (gc) gc->collect();
+}
+
 }
 
 #else
@@ -150,6 +210,10 @@ uintptr_t brass_runtime_gc_alloc_bridge(size_t size, uint64_t pointer_mask, uint
 extern "C" {
 
 void brass_gc_safepoint() {
+    if (auto* gen_gc = brass::brass_get_active_generational_gc()) {
+        gen_gc->collect();
+        return;
+    }
     auto* gc = brass::brass_get_active_gc();
     const auto* maps = brass::brass_get_active_stack_maps();
     if (!gc || !maps) return;
@@ -162,6 +226,9 @@ void brass_gc_safepoint() {
 }
 
 uintptr_t brass_gc_alloc(size_t size, uint64_t pointer_mask, uint32_t type_tag) {
+    if (auto* gen_gc = brass::brass_get_active_generational_gc()) {
+        return gen_gc->allocate(size, pointer_mask, type_tag);
+    }
     auto* gc = brass::brass_get_active_gc();
     if (!gc) {
         return 0;
@@ -182,6 +249,10 @@ uintptr_t brass_gc_alloc(size_t size, uint64_t pointer_mask, uint32_t type_tag) 
 }
 
 void brass_gc_collect() {
+    if (auto* gen_gc = brass::brass_get_active_generational_gc()) {
+        gen_gc->collect();
+        return;
+    }
     auto* gc = brass::brass_get_active_gc();
     const auto* maps = brass::brass_get_active_stack_maps();
     if (!gc) return;
@@ -193,6 +264,24 @@ void brass_gc_collect() {
     } else {
         gc->collect();
     }
+}
+
+void brass_gc_write_barrier(uintptr_t obj, uintptr_t val) {
+    auto* gen_gc = brass::brass_get_active_generational_gc();
+    if (!gen_gc) return;
+    if (!gen_gc->is_old(obj)) return;
+    if (!gen_gc->is_young(val)) return;
+    gen_gc->card_table().mark_card(obj);
+}
+
+uint8_t* brass_gc_card_table_base() {
+    auto* gen_gc = brass::brass_get_active_generational_gc();
+    return gen_gc ? gen_gc->card_table().byte_map_base() : nullptr;
+}
+
+uintptr_t brass_gc_heap_base() {
+    auto* gen_gc = brass::brass_get_active_generational_gc();
+    return gen_gc ? gen_gc->card_table().heap_base() : 0;
 }
 
 }

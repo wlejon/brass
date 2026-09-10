@@ -624,6 +624,14 @@ private:
                 break;
             }
 
+            case Opcode::write_barrier: {
+                Value* obj = parse_val(); if (!obj) return false;
+                if (!expect(TokenKind::Comma, "','")) return false;
+                Value* val = parse_val(); if (!val) return false;
+                res_inst = b.build_write_barrier(obj, val);
+                break;
+            }
+
             case Opcode::call: {
                 std::string_view callee = parse_symbol_name();
                 if (has_error_) return false;

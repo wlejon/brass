@@ -717,6 +717,18 @@ bool Verifier::verify_function(const Function& fn) {
                     break;
                 }
 
+                case Opcode::write_barrier: {
+                    if (inst->operand_count() != 2 || !inst->operand(0) || !inst->operand(1)) {
+                        report_error(inst_prefix + "Write barrier requires 2 operands (obj, val).");
+                    } else {
+                        Type obj_t = inst->operand(0)->type();
+                        if (!obj_t.is_pointer_or_gcref() && !obj_t.is_integer()) {
+                            report_error(inst_prefix + "Write barrier obj must be ptr, gcref, or int.");
+                        }
+                    }
+                    break;
+                }
+
                 case Opcode::call: {
                     if (inst->symbol().empty()) {
                         report_error(inst_prefix + "Call requires a non-empty callee symbol.");

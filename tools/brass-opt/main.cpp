@@ -1,4 +1,5 @@
 #include <brass/brass.hpp>
+#include <brass/mir/write_barrier_elim.hpp>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -43,6 +44,8 @@ void print_usage(const char* prog) {
               << "  --trace-layout        Run LIR Trace Scheduling & Fall-Through Block Layout\n"
               << "  --schedule-insns      Run Machine Instruction Scheduling\n"
               << "  --software-pipeline   Run Loop Modulo Scheduling & Software Pipelining\n"
+              << "  --wbe, --enable-wbe   Run Write Barrier Elimination (WBE)\n"
+              << "  --dump-wbe-stats      Dump Write Barrier Elimination statistics\n"
               << "  --pgo-instrument      Instrument module with Knuth-Stevenson minimal edge counters\n"
               << "  --pgo-use=<file>      Load profile data (.bprof) for profile-guided optimization\n"
               << "  --dump-branch-probabilities Dump block frequencies and edge branch probabilities\n"
@@ -164,6 +167,8 @@ int main(int argc, char** argv) {
     std::string symbolize_offset_arg;
     bool enable_pic = true;
     bool dump_ic_stats = false;
+    bool enable_wbe = false;
+    bool dump_wbe_stats = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -216,6 +221,11 @@ int main(int argc, char** argv) {
             enable_software_pipeline = true;
         } else if (arg == "--no-software-pipeline") {
             enable_software_pipeline = false;
+        } else if (arg == "--wbe" || arg == "--enable-wbe") {
+            enable_wbe = true;
+        } else if (arg == "--dump-wbe-stats") {
+            dump_wbe_stats = true;
+            enable_wbe = true;
         } else if (arg == "--pgo-instrument") {
             enable_pgo_instrument = true;
         } else if (arg.rfind("--pgo-use=", 0) == 0) {
@@ -678,6 +688,19 @@ int main(int argc, char** argv) {
         if (!brass::verify_module(*mod, &jt_diag) || jt_diag.has_errors()) {
             std::cerr << "Verification failed after Jump Threading:\n" << jt_diag.format_all();
             return 1;
+        }
+    }
+
+    if (enable_wbe) {
+        brass::WriteBarrierElimination wbe(dump_wbe_stats);
+        wbe.run_on_module(*mod);
+        brass::DiagnosticReporter wbe_diag;
+        if (!brass::verify_module(*mod, &wbe_diag) || wbe_diag.has_errors()) {
+            std::cerr << "Verification failed after Write Barrier Elimination:\n" << wbe_diag.format_all();
+            return 1;
+        }
+        if (dump_wbe_stats) {
+            wbe.dump_stats(std::cout);
         }
     }
 

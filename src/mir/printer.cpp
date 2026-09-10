@@ -257,6 +257,10 @@ public:
                 os_ << ", " << value_name(inst.operand(2));
                 break;
 
+            case Opcode::write_barrier:
+                os_ << "write_barrier " << value_name(inst.operand(0)) << ", " << value_name(inst.operand(1));
+                break;
+
             case Opcode::call:
                 if (!inst.type().is_void()) {
                     os_ << "call." << inst.type().name() << " ";

@@ -94,6 +94,10 @@ add_executable(brass_unit_tests
     unit/test_partial_escape.cpp
     unit/test_allocation_sinking.cpp
     differential/test_pea_differential.cpp
+    unit/test_card_table.cpp
+    unit/test_generational_gc.cpp
+    unit/test_write_barrier_elim.cpp
+    differential/test_generational_differential.cpp
 )
 
 target_include_directories(brass_unit_tests

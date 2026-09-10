@@ -79,6 +79,7 @@ private:
     void lower_store(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_load_indexed(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_store_indexed(const Instruction& inst, codegen::LirBlock& lir_bb);
+    void lower_write_barrier(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_safepoint(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_guard(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_vector_instruction(const Instruction& inst, codegen::LirBlock& lir_bb);

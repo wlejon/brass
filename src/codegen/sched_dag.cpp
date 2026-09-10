@@ -72,6 +72,7 @@ bool is_scheduling_barrier(const LirInst& inst) noexcept {
     switch (inst.opcode) {
         case LirOpcode::Safepoint:
         case LirOpcode::GuardExit:
+        case LirOpcode::WriteBarrier:
             return true;
         default:
             return false;
@@ -265,6 +266,7 @@ uint32_t get_instruction_latency(const LirInst& inst) {
         case LirOpcode::Safepoint:
         case LirOpcode::GuardExit:
         case LirOpcode::ParallelCopy:
+        case LirOpcode::WriteBarrier:
             return 1;
     }
     return 1;

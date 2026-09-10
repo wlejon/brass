@@ -1,4 +1,6 @@
 #include <brass/interpreter/interpreter.hpp>
+#include <brass/gc/generational_gc.hpp>
+#include <brass/gc/runtime_gc.hpp>
 #include "interpreter_coro.hpp"
 #include <iostream>
 #include <cmath>
@@ -450,6 +452,22 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                     int64_t idx_val = idx.is_i32() ? idx.as_i32() : idx.as_i64();
                     int32_t effective_offset = static_cast<int32_t>(idx_val * inst->scale()) + inst->offset();
                     gc_.write_memory(base.raw_bits(), effective_offset, inst->memory_type(), val);
+                    break;
+                }
+                case Opcode::write_barrier: {
+                    RuntimeValue obj = frame.get_value(inst->operand(0));
+                    RuntimeValue val = frame.get_value(inst->operand(1));
+                    uintptr_t obj_addr = obj.raw_bits();
+                    uintptr_t val_addr = val.raw_bits();
+                    GenerationalGC* gen = gen_gc_;
+                    if (!gen) {
+                        gen = brass_get_active_generational_gc();
+                    }
+                    if (gen) {
+                        if (gen->is_old(obj_addr) && gen->is_young(val_addr)) {
+                            gen->card_table().mark_card(obj_addr);
+                        }
+                    }
                     break;
                 }
 

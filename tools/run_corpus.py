@@ -49,6 +49,7 @@ PROGRAMS = [
     "26_nested_try_finally",
     "27_generator_fibonacci",
     "28_async_chain",
+    "29_generational_churn",
 ]
 
 DEMOTED_PROGRAMS = {

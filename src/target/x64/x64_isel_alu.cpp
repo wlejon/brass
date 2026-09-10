@@ -469,6 +469,9 @@ void X64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
         case Opcode::store_indexed:
             lower_store_indexed(inst, lir_bb);
             break;
+        case Opcode::write_barrier:
+            lower_write_barrier(inst, lir_bb);
+            break;
         case Opcode::call:
         case Opcode::call_indirect:
         case Opcode::patchable_call:

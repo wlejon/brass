@@ -11,6 +11,7 @@
 #include <brass/mir/cfg_simplify.hpp>
 #include <brass/mir/loop_unswitch.hpp>
 #include <brass/mir/jump_threading.hpp>
+#include <brass/mir/write_barrier_elim.hpp>
 #include <iostream>
 
 namespace brass::il {
@@ -221,6 +222,10 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
             optimize_module_ipo(*mod, inliner_opts, opt_opts);
         } else {
             optimize_module_loops(*mod, opt_opts);
+        }
+        if (options_.enable_wbe) {
+            WriteBarrierElimination wbe(options_.dump_wbe_stats);
+            wbe.run_on_module(*mod);
         }
         if (!verify_module(*mod, diag_)) {
             return nullptr;
@@ -436,6 +441,7 @@ bool IlLowering::lower_instruction(
             Value* idx_val = b.build_iconst_i32(static_cast<int32_t>(inst_ast.index));
             Value* val = ensure_type(get_opd(1), Type::i64(), b);
             b.build_call("bronze_env_set", Type::void_type(), {env_val, depth_val, idx_val, val});
+            b.build_write_barrier(env_val, val);
             break;
         }
 
@@ -486,6 +492,7 @@ bool IlLowering::lower_instruction(
                 b, obj_val, inst_ast.string_literal, inst_ast.index, val,
                 inst_ast.depth, static_cast<uint32_t>(inst_ast.imm_i64), 0
             );
+            b.build_write_barrier(obj_val, val);
             break;
         }
 
@@ -495,6 +502,7 @@ bool IlLowering::lower_instruction(
             prop_lowering_.lower_method_def(
                 b, obj_val, inst_ast.string_literal, inst_ast.index, closure_val
             );
+            b.build_write_barrier(obj_val, closure_val);
             break;
         }
 
@@ -510,6 +518,7 @@ bool IlLowering::lower_instruction(
             Value* idx_val = ensure_type(get_opd(1), Type::i64(), b);
             Value* val = ensure_type(get_opd(2), Type::i64(), b);
             prop_lowering_.lower_elem_set(b, obj_val, idx_val, val, inst_ast.index);
+            b.build_write_barrier(obj_val, val);
             break;
         }
 
