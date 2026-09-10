@@ -169,10 +169,11 @@
   - AVX2 arithmetic, logical, broadcast, and FMA3 instruction set lowering.
   - FMA pattern matching pass (`mul + add` -> `fma`) and 256-bit loop vectorizer expansion.
   - 33-program Bronze corpus verification (`33_avx2_fma_matmul`).
-- **Chunk 22: Concurrent Background JIT Compiler Worker Threads**:
-  - Thread-safe compilation queue with worker thread pool.
-  - Non-blocking off-thread optimization of hot functions.
-  - Atomic code installation and entry point swapping.
+- **Chunk 22: Concurrent Background JIT Compiler Worker Threads [COMPLETED]**:
+  - Thread-safe priority task queue with worker thread pool managing asynchronous background compilations.
+  - Request deduplication preventing duplicate compilation of active or queued hot functions.
+  - Atomic code installation via `FunctionHandle` and `CodeInstaller`, publishing native entry points with release/acquire memory barriers without pausing mutator execution.
+  - 34-program Bronze corpus verification (`34_background_tiering`).
 - **Chunk 23: Polyhedral Loop Dependence & Auto-Parallelization**:
   - Multi-threaded loop execution for large-trip count kernels.
   - Task scheduling runtime with work-stealing thread pool.
