@@ -120,6 +120,9 @@ add_executable(brass_unit_tests
     unit/test_parallel_runtime.cpp
     unit/test_auto_parallel.cpp
     differential/test_parallel_differential.cpp
+    unit/test_dwarf_emitter.cpp
+    unit/test_codeview_emitter.cpp
+    unit/test_debug_relocs.cpp
 )
 
 target_include_directories(brass_unit_tests

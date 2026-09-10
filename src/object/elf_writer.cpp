@@ -1,4 +1,5 @@
 #include <brass/object/elf_writer.hpp>
+#include <brass/debug/dwarf_emitter.hpp>
 #include <fstream>
 #include <cstring>
 #include <unordered_map>
@@ -55,6 +56,7 @@ uint32_t to_elf_reloc_type(RelocKind kind) {
         case RelocKind::Abs32:   return elf::R_X86_64_32;
         case RelocKind::Addr32NB: return elf::R_X86_64_32;
         case RelocKind::SecRel32: return elf::R_X86_64_32;
+        case RelocKind::SecIdx:   return elf::R_X86_64_NONE;
     }
     return elf::R_X86_64_PC32;
 }
@@ -123,6 +125,12 @@ std::vector<uint8_t> ElfWriter::write() {
         if (eh_frame_sec) {
             ElfCfiBuilder::build_eh_frame(working_obj, *eh_frame_sec);
         }
+    }
+
+    // Generate SysV DWARF debug info (.debug_line, .debug_info, .debug_abbrev, .debug_str)
+    if ((!working_obj.debug_tables.empty() || working_obj.debug_context.file_count() > 0) &&
+        !working_obj.get_section(".debug_line")) {
+        debug::DwarfEmitter::emit(working_obj);
     }
 
     std::vector<ElfShdrEntry> elf_sections;

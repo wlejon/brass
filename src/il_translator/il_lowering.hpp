@@ -32,6 +32,7 @@ private:
     TranslatorOptions options_;
     DiagnosticReporter* diag_ = nullptr;
     PropertyLoweringHelper prop_lowering_;
+    uint32_t current_file_id_ = 0;
     bool has_error_ = false;
 };
 

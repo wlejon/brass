@@ -213,6 +213,7 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
         }
 
         obj.functions.push_back(std::move(cfi));
+        res.debug_table.set_prologue_size(static_cast<uint32_t>(prologue_sz));
         obj.debug_tables.push_back(std::move(res.debug_table));
 
         int32_t text_idx = obj.get_section_index(".text");
@@ -271,6 +272,7 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
     }
 
     // Emit compact binary debug line section (.brass_dbg)
+    obj.debug_context = mod.debug_context();
     if (!obj.debug_tables.empty() && mod.debug_context().file_count() > 0) {
         std::vector<uint8_t> dbg_bytes = serialize_debug_section(mod.debug_context(), obj.debug_tables);
         if (!dbg_bytes.empty()) {

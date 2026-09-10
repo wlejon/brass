@@ -402,6 +402,10 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
                     *reinterpret_cast<uint32_t*>(patch_loc) = val;
                     break;
                 }
+                case object::RelocKind::SecIdx: {
+                    *reinterpret_cast<uint16_t*>(patch_loc) = 1;
+                    break;
+                }
             }
         }
     }

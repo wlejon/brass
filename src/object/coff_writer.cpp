@@ -1,4 +1,5 @@
 #include <brass/object/coff_writer.hpp>
+#include <brass/debug/codeview_emitter.hpp>
 #include <fstream>
 #include <cstring>
 #include <unordered_map>
@@ -38,6 +39,9 @@ uint32_t get_coff_section_characteristics(const Section& sec) {
         if (has_flag(sec.flags, SectionFlags::Write)) {
             flags |= coff::IMAGE_SCN_MEM_WRITE;
         }
+        if (has_flag(sec.flags, SectionFlags::Discardable)) {
+            flags |= coff::IMAGE_SCN_MEM_DISCARDABLE;
+        }
         flags |= coff::IMAGE_SCN_ALIGN_4BYTES;
     }
     return flags;
@@ -54,6 +58,8 @@ uint16_t to_coff_reloc_type(RelocKind kind) {
             return coff::IMAGE_REL_AMD64_ADDR32NB;
         case RelocKind::SecRel32:
             return coff::IMAGE_REL_AMD64_SECREL;
+        case RelocKind::SecIdx:
+            return coff::IMAGE_REL_AMD64_SECTION;
         case RelocKind::Abs32:
             return coff::IMAGE_REL_AMD64_ADDR32;
     }
@@ -95,6 +101,12 @@ std::vector<uint8_t> CoffWriter::write() {
         if (pdata_sec && xdata_sec) {
             CoffUnwindBuilder::build_unwind_info(working_obj, *pdata_sec, *xdata_sec);
         }
+    }
+
+    // Generate Win64 CodeView debug info (.debug$S and .debug$T)
+    if ((!working_obj.debug_tables.empty() || working_obj.debug_context.file_count() > 0) &&
+        !working_obj.get_section(".debug$S")) {
+        debug::CodeViewEmitter::emit(working_obj);
     }
 
     // Build String Table and Symbol Table

@@ -239,6 +239,8 @@ bool IlParser::parse_instruction(BronzeInstruction& out_inst) {
     }
     out_inst.op = op_tok.op;
     out_inst.box_type = op_tok.box_type;
+    out_inst.line = op_tok.line;
+    out_inst.column = op_tok.col;
 
     switch (out_inst.op) {
         case BronzeOp::ConstF64: {

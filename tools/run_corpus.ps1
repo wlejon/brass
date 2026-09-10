@@ -46,7 +46,8 @@ $corpusPrograms = @(
     "32_loop_fusion_contraction",
     "33_avx2_fma_matmul",
     "34_background_tiering",
-    "35_parallel_matrix_vector"
+    "35_parallel_matrix_vector",
+    "36_debug_source_lines"
 )
 
 $demotedPrograms = @(

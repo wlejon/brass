@@ -41,6 +41,7 @@ int main(int argc, char** argv) {
     bool enable_schedule_insns = false;
     bool enable_software_pipeline = false;
     bool debug_info = false;
+    bool dump_debug_lines = false;
     std::string emit_source_map_file;
     std::string symbolize_offset_arg;
     bool enable_background_compile = false;
@@ -58,7 +59,8 @@ int main(int argc, char** argv) {
                       << "  --emit-mir            Print generated MIR\n"
                       << "  --emit-shared <file>  Compile directly to shared library (.dll/.so)\n"
                       << "  -shared               Compile directly to shared library\n"
-                      << "  -g, --debug-info      Preserve and emit debug information and .brass_dbg section\n"
+                      << "  -g, --debug-info, --emit-debug-info Preserve and emit debug info (DWARF / CodeView)\n"
+                      << "  --dump-debug-lines    Dump decoded source line mappings from debug table\n"
                       << "  --emit-source-map=<f> Emit standard JSON Source Map V3 to <f>\n"
                       << "  --symbolize-offset=<fn,off> Symbolize function offset to source location\n"
                       << "  --enable-background-compile Enable background JIT compiler worker threads\n"
@@ -245,8 +247,10 @@ int main(int argc, char** argv) {
             }
         } else if (arg.rfind("-o", 0) == 0 && arg.size() > 2) {
             output_obj = arg.substr(2);
-        } else if (arg == "-g" || arg == "--debug-info") {
+        } else if (arg == "-g" || arg == "--debug-info" || arg == "--emit-debug-info") {
             debug_info = true;
+        } else if (arg == "--dump-debug-lines") {
+            dump_debug_lines = true;
         } else if (arg.rfind("--emit-source-map=", 0) == 0) {
             emit_source_map_file = arg.substr(18);
         } else if (arg == "--emit-source-map" && i + 1 < argc) {
@@ -360,6 +364,24 @@ int main(int argc, char** argv) {
         }
         if (output_obj.empty() && !emit_shared && !run_jit && !emit_mir) {
             std::cout << "Successfully emitted source map to '" << emit_source_map_file << "'\n";
+            return 0;
+        }
+    }
+
+    if (dump_debug_lines) {
+        brass::Target target = brass::Target::host();
+        brass::codegen::SchedOptions sched_opts;
+        auto obj = brass::object::compile_module_to_object(*res.module, target, sched_opts);
+        for (const auto& table : obj.debug_tables) {
+            std::cout << "Function: " << table.function_name() << "\n";
+            for (const auto& entry : table.line_entries()) {
+                std::string fname = res.module->debug_context().get_file(entry.loc.file_id);
+                if (fname.empty()) fname = "source";
+                std::cout << "  0x" << std::hex << entry.code_offset << std::dec << " -> "
+                          << fname << ":" << entry.loc.line << ":" << entry.loc.column << "\n";
+            }
+        }
+        if (output_obj.empty() && !emit_shared && !run_jit && !emit_mir) {
             return 0;
         }
     }

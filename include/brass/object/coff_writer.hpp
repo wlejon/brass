@@ -19,6 +19,7 @@ namespace coff {
     constexpr uint32_t IMAGE_SCN_ALIGN_4BYTES           = 0x00300000;
     constexpr uint32_t IMAGE_SCN_ALIGN_8BYTES           = 0x00400000;
     constexpr uint32_t IMAGE_SCN_ALIGN_16BYTES          = 0x00500000;
+    constexpr uint32_t IMAGE_SCN_MEM_DISCARDABLE        = 0x02000000;
     constexpr uint32_t IMAGE_SCN_MEM_EXECUTE            = 0x20000000;
     constexpr uint32_t IMAGE_SCN_MEM_READ               = 0x40000000;
     constexpr uint32_t IMAGE_SCN_MEM_WRITE              = 0x80000000;
@@ -28,6 +29,7 @@ namespace coff {
     constexpr uint16_t IMAGE_REL_AMD64_ADDR32   = 0x0002;
     constexpr uint16_t IMAGE_REL_AMD64_ADDR32NB = 0x0003;
     constexpr uint16_t IMAGE_REL_AMD64_REL32    = 0x0004;
+    constexpr uint16_t IMAGE_REL_AMD64_SECTION  = 0x000A;
     constexpr uint16_t IMAGE_REL_AMD64_SECREL   = 0x000B;
 
     constexpr uint8_t IMAGE_SYM_CLASS_EXTERNAL = 2;

@@ -72,7 +72,8 @@ void print_usage(const char* prog) {
               << "  --enable-background-compile Enable background JIT compiler worker threads\n"
               << "  --jit-threads=<N>     Number of background JIT worker threads (default: 2)\n"
               << "  --dump-jit-thread-stats Dump background JIT worker thread pool statistics\n"
-              << "  -g, --debug-info      Preserve and emit debug information and .brass_dbg section\n"
+              << "  -g, --debug-info, --emit-debug-info Preserve and emit debug information (DWARF/CodeView)\n"
+              << "  --dump-debug-lines    Dump decoded source line mappings from debug table\n"
               << "  --emit-source-map=<file.map> Emit standard JSON Source Map V3 to <file.map>\n"
               << "  --symbolize-offset=<fn,offset> Symbolize function offset to source location\n"
               << "  -o <file>             Write output to <file> instead of stdout\n";
@@ -164,6 +165,7 @@ int main(int argc, char** argv) {
     std::string pgo_use_file;
     bool dump_branch_probabilities = false;
     bool debug_info = false;
+    bool dump_debug_lines = false;
     std::string emit_source_map_file;
     std::string symbolize_offset_arg;
     bool enable_pic = true;
@@ -365,8 +367,10 @@ int main(int argc, char** argv) {
             }
         } else if (arg.starts_with("-o")) {
             output_file = arg.substr(2);
-        } else if (arg == "-g" || arg == "--debug-info") {
+        } else if (arg == "-g" || arg == "--debug-info" || arg == "--emit-debug-info") {
             debug_info = true;
+        } else if (arg == "--dump-debug-lines") {
+            dump_debug_lines = true;
         } else if (arg.starts_with("--emit-source-map=")) {
             emit_source_map_file = arg.substr(18);
         } else if (arg == "--emit-source-map") {
@@ -811,6 +815,24 @@ int main(int argc, char** argv) {
     }
 
     (void)debug_info;
+
+    if (dump_debug_lines) {
+        brass::Target target = brass::Target::host();
+        brass::codegen::SchedOptions sched_opts;
+        auto obj = brass::object::compile_module_to_object(*mod, target, sched_opts);
+        for (const auto& table : obj.debug_tables) {
+            std::cout << "Function: " << table.function_name() << "\n";
+            for (const auto& entry : table.line_entries()) {
+                std::string fname = mod->debug_context().get_file(entry.loc.file_id);
+                if (fname.empty()) fname = "source";
+                std::cout << "  0x" << std::hex << entry.code_offset << std::dec << " -> "
+                          << fname << ":" << entry.loc.line << ":" << entry.loc.column << "\n";
+            }
+        }
+        if (!compile_object && !emit_shared && run_fn.empty()) {
+            return 0;
+        }
+    }
 
     if (!symbolize_offset_arg.empty()) {
         size_t comma = symbolize_offset_arg.find(',');

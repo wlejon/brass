@@ -30,11 +30,12 @@ enum class SectionKind : uint8_t {
 };
 
 enum class SectionFlags : uint32_t {
-    None    = 0,
-    Read    = 1 << 0,
-    Write   = 1 << 1,
-    Execute = 1 << 2,
-    Alloc   = 1 << 3,
+    None        = 0,
+    Read        = 1 << 0,
+    Write       = 1 << 1,
+    Execute     = 1 << 2,
+    Alloc       = 1 << 3,
+    Discardable = 1 << 4,
 };
 
 inline SectionFlags operator|(SectionFlags a, SectionFlags b) {
@@ -56,6 +57,7 @@ enum class RelocKind : uint8_t {
     Addr32NB,  // 32-bit RVA without base (COFF .pdata / .xdata)
     Plt32,     // 32-bit PLT displacement (ELF)
     Abs32,     // 32-bit absolute VA (ELF)
+    SecIdx,    // 16-bit section index (COFF debug relocation IMAGE_REL_AMD64_SECTION)
 };
 
 struct ObjectRelocation {
@@ -158,6 +160,7 @@ struct ObjectFile {
     runtime::PatchRegistry patch_sites;
     std::vector<FunctionDebugTable> debug_tables;
     runtime::ExceptionTableRegistry exception_tables;
+    DebugContext debug_context;
 
     Section* get_section(std::string_view name);
     const Section* get_section(std::string_view name) const;

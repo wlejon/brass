@@ -61,6 +61,7 @@ Value* IlLowering::ensure_type(Value* val, Type target_type, Builder& b) {
 std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
     auto mod = std::make_unique<Module>(ast.name);
     mod->set_allow_fp_reassociation(options_.allow_fp_reassociation);
+    current_file_id_ = ast.name.empty() ? 0 : mod->debug_context().get_or_add_file(ast.name);
 
     // Register external runtime helper functions
     mod->add_external_symbol("bronze_print_f64");
@@ -303,6 +304,9 @@ bool IlLowering::lower_function(const BronzeFunction& fn_ast, Module& mod, const
         uint32_t cont_counter = 0;
 
         for (const auto& inst_ast : blk_ast.instructions) {
+            if (current_file_id_ != 0 && inst_ast.line > 0) {
+                b.set_current_loc(DebugLoc(current_file_id_, inst_ast.line, inst_ast.column));
+            }
             if (!lower_instruction(inst_ast, b, fn, val_map, block_map, blk_ast.handler_id, blk_ast.id, &cont_counter)) {
                 return false;
             }
