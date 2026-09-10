@@ -502,6 +502,17 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                     break;
                 }
 
+                case Opcode::func_addr: {
+                    std::string_view callee = inst->symbol();
+                    const Function* target_fn = module_ ? module_->get_function(callee) : nullptr;
+                    uintptr_t fn_ptr = reinterpret_cast<uintptr_t>(target_fn);
+                    if (target_fn) {
+                        register_function_pointer(fn_ptr, target_fn);
+                    }
+                    frame.set_value(inst->result(), RuntimeValue::from_ptr(fn_ptr));
+                    break;
+                }
+
                 case Opcode::call: {
                     std::string_view callee = inst->symbol();
                     std::vector<RuntimeValue> call_args;

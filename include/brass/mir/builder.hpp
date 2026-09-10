@@ -155,6 +155,7 @@ public:
     Value* build_patchable_call(std::string_view patch_symbol, std::string_view callee, Type return_type, Span<Value* const> args);
     Value* build_patchable_call(std::string_view patch_symbol, std::string_view callee, Type return_type, std::initializer_list<Value*> args);
     Value* build_patchable_call(std::string_view patch_symbol, std::string_view callee, Type return_type);
+    Value* build_func_addr(std::string_view name);
     Instruction* build_safepoint();
 
     // Speculation

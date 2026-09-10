@@ -45,7 +45,8 @@ $corpusPrograms = @(
     "31_gvn_pre_diamonds",
     "32_loop_fusion_contraction",
     "33_avx2_fma_matmul",
-    "34_background_tiering"
+    "34_background_tiering",
+    "35_parallel_matrix_vector"
 )
 
 $demotedPrograms = @(
@@ -56,7 +57,8 @@ $demotedPrograms = @(
     "12_counter_closure",
     "15_nested_acc",
     "16_param_bounds",
-    "18_gcd_iter"
+    "18_gcd_iter",
+    "35_parallel_matrix_vector"
 )
 
 function Normalize-Output([string]$text) {

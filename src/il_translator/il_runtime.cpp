@@ -7,6 +7,7 @@
 #include <brass/runtime/object.hpp>
 #include <brass/runtime/inline_cache.hpp>
 #include <brass/runtime/coroutine.hpp>
+#include <brass/runtime/parallel_runtime.hpp>
 #include <brass/interpreter/interpreter.hpp>
 #include <iostream>
 #include <iomanip>
@@ -568,6 +569,13 @@ void register_all_runtime_symbols(codegen::JitExecutionEngine& jit) {
     jit.register_external_symbol("bronze_async_await", reinterpret_cast<void*>(&bronze_async_await));
     jit.register_external_symbol("bronze_iter_open", reinterpret_cast<void*>(&bronze_iter_open));
     jit.register_external_symbol("bronze_iter_step", reinterpret_cast<void*>(&bronze_iter_step));
+    jit.register_external_symbol("brass_parallel_for", reinterpret_cast<void*>(&brass_parallel_for));
+    jit.register_external_symbol("brass_set_parallel_workers", reinterpret_cast<void*>(&brass_set_parallel_workers));
+    jit.register_external_symbol("brass_get_parallel_workers", reinterpret_cast<void*>(&brass_get_parallel_workers));
+    jit.register_external_symbol("brass_parallel_reduce_i64", reinterpret_cast<void*>(&brass_parallel_reduce_i64));
+    jit.register_external_symbol("brass_parallel_reduce_f64", reinterpret_cast<void*>(&brass_parallel_reduce_f64));
+    jit.register_external_symbol("brass_parallel_alloc_context", reinterpret_cast<void*>(&brass_parallel_alloc_context));
+    jit.register_external_symbol("brass_parallel_free_context", reinterpret_cast<void*>(&brass_parallel_free_context));
 }
 
 void register_bronze_runtime_symbols(void* jit_engine_ptr) {

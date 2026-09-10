@@ -3,6 +3,8 @@
 #include <brass/mir/fma_opt.hpp>
 #include <brass/mir/f64_demote.hpp>
 #include <brass/mir/gvn_pre.hpp>
+#include <brass/mir/loop_parallel.hpp>
+#include <brass/runtime/parallel_runtime.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
 #include <brass/runtime/tiering.hpp>
 #include <brass/runtime/background_compiler.hpp>
@@ -197,6 +199,18 @@ int main(int argc, char** argv) {
             options.enable_array_contraction = true;
         } else if (arg == "--dump-loop-transform-stats") {
             options.dump_loop_transform_stats = true;
+        } else if (arg == "--enable-parallel-loops") {
+            options.enable_parallel_loops = true;
+        } else if (arg.rfind("--parallel-threshold=", 0) == 0) {
+            options.parallel_threshold = std::stoull(arg.substr(21));
+        } else if (arg == "--parallel-threshold" && i + 1 < argc) {
+            options.parallel_threshold = std::stoull(argv[++i]);
+        } else if (arg.rfind("--parallel-workers=", 0) == 0) {
+            options.parallel_workers = static_cast<uint32_t>(std::stoul(arg.substr(19)));
+        } else if (arg == "--parallel-workers" && i + 1 < argc) {
+            options.parallel_workers = static_cast<uint32_t>(std::stoul(argv[++i]));
+        } else if (arg == "--dump-parallel-stats") {
+            options.dump_parallel_stats = true;
         } else if (arg == "--demote-stats") {
             show_demote_stats = true;
         } else if (arg == "--raw-output") {
@@ -286,6 +300,15 @@ int main(int argc, char** argv) {
         options.fma_stats_collector = &fma_stats;
     }
 
+    ParallelLoopStats parallel_stats;
+    if (options.dump_parallel_stats) {
+        options.parallel_stats_collector = &parallel_stats;
+    }
+
+    if (options.parallel_workers > 0) {
+        brass_set_parallel_workers(options.parallel_workers);
+    }
+
     DiagnosticReporter diag;
     TranslationResult res = translate_bronze_il(il_source, options, &diag);
     if (!res.success || !res.module) {
@@ -356,6 +379,10 @@ int main(int argc, char** argv) {
 
     if (options.dump_fma_stats) {
         std::cout << fma_stats.format_report() << "\n";
+    }
+
+    if (options.dump_parallel_stats) {
+        std::cout << parallel_stats.format_report();
     }
 
     if (options.enable_partial_escape && !options.enable_allocation_sinking) {

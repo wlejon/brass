@@ -725,6 +725,27 @@ bool optimize_function_loops(Function& fn, const LoopOptOptions& options) {
         }
     }
 
+    if (options.enable_parallel_loops) {
+        fn.rebuild_cfg_predecessors();
+        DominatorTree dom(fn);
+        ParallelLoopOptions par_opts;
+        par_opts.parallel_threshold = options.parallel_threshold;
+        par_opts.parallel_workers = options.parallel_workers;
+        par_opts.allow_fp_reassociation = options.enable_fp_reassociation || fn.allow_fp_reassociation() || (fn.parent() && fn.parent()->allow_fp_reassociation());
+        if (options.parallel_stats) {
+            par_opts.stats = options.parallel_stats;
+        } else if (options.stats) {
+            par_opts.stats = &options.stats->parallel_stats;
+        }
+        if (auto_parallelize_function(fn, dom, par_opts)) {
+            any_changed = true;
+            fn.rebuild_cfg_predecessors();
+            if (options.enable_dce) {
+                dead_code_elimination_pass(fn);
+            }
+        }
+    }
+
     if (options.enable_slp) {
         SlpOptions slp_opts;
         slp_opts.allow_fp_reassociation = options.enable_fp_reassociation || fn.allow_fp_reassociation() || (fn.parent() && fn.parent()->allow_fp_reassociation());

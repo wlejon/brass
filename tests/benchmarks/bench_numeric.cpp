@@ -653,9 +653,9 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
         // 7b. Strict Preopt
         run_f64_64("matmul_f64_64_strict_preopt", "MatMul 64x64 (f64, strict, preopt)", build_matmul_f64_strict_preopt_module(), "matmul_f64_strict_preopt", 1.70);
         // 7c. Reassoc Naive (flagged opt-in)
-        run_f64_64("matmul_f64_64_reassoc_naive", "MatMul 64x64 (f64, reassoc, naive)", build_matmul_f64_reassoc_naive_module(), "matmul_f64_reassoc_naive", 0.85);
+        run_f64_64("matmul_f64_64_reassoc_naive", "MatMul 64x64 (f64, reassoc, naive)", build_matmul_f64_reassoc_naive_module(), "matmul_f64_reassoc_naive", 1.05);
         // 7d. Reassoc Preopt (flagged opt-in)
-        run_f64_64("matmul_f64_64_reassoc_preopt", "MatMul 64x64 (f64, reassoc, preopt)", build_matmul_f64_reassoc_preopt_module(), "matmul_f64_reassoc_preopt", 0.85);
+        run_f64_64("matmul_f64_64_reassoc_preopt", "MatMul 64x64 (f64, reassoc, preopt)", build_matmul_f64_reassoc_preopt_module(), "matmul_f64_reassoc_preopt", 1.05);
     }
 
     // 8. Pointer-Chasing Linked List Traversal

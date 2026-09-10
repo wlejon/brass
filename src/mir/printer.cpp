@@ -275,6 +275,10 @@ public:
                 os_ << ")";
                 break;
 
+            case Opcode::func_addr:
+                os_ << "func_addr @" << inst.symbol();
+                break;
+
             case Opcode::call_indirect:
                 if (!inst.type().is_void()) {
                     os_ << "call_indirect." << inst.type().name() << " ";

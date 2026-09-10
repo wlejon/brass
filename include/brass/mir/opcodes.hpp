@@ -82,6 +82,7 @@ enum class Opcode : uint16_t {
     call_indirect,
     patchable_call,
     safepoint,
+    func_addr,
 
     // Speculation
     guard,

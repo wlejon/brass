@@ -164,6 +164,14 @@ void X64Encoder::movabs(GPR dst, uint64_t imm) {
     buffer_.emit64(imm);
 }
 
+void X64Encoder::movabs(GPR dst, const std::string& symbol) {
+    emit_rex(true, false, false, is_extended(dst));
+    buffer_.emit8(static_cast<uint8_t>(0xB8 + reg_code(dst)));
+    size_t patch_off = buffer_.size();
+    buffer_.emit64(0);
+    buffer_.add_relocation(patch_off, RelocationKind::Abs64, symbol, 0);
+}
+
 void X64Encoder::mov64(GPR dst, uint64_t imm) {
     movabs(dst, imm);
 }

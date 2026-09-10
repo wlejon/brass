@@ -15,6 +15,7 @@ struct PartialEscapeStats;
 struct GvnPreStats;
 struct LoopOptStats;
 struct FmaOptStats;
+struct ParallelLoopStats;
 
 namespace il {
 
@@ -64,6 +65,11 @@ struct TranslatorOptions {
     uint32_t vector_width = 0;
     bool dump_fma_stats = false;
     FmaOptStats* fma_stats_collector = nullptr;
+    bool enable_parallel_loops = false;
+    uint64_t parallel_threshold = 1000;
+    uint32_t parallel_workers = 0;
+    bool dump_parallel_stats = false;
+    ParallelLoopStats* parallel_stats_collector = nullptr;
 };
 
 struct TranslationResult {

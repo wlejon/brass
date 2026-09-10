@@ -72,6 +72,7 @@ std::string_view opcode_name(Opcode op) noexcept {
         case Opcode::call_indirect: return "call_indirect";
         case Opcode::patchable_call: return "patchable_call";
         case Opcode::safepoint: return "safepoint";
+        case Opcode::func_addr: return "func_addr";
 
         case Opcode::guard: return "guard";
         case Opcode::resume_point: return "resume_point";

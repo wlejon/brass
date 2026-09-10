@@ -174,6 +174,7 @@ bool decode_opcode_string(std::string_view str, Opcode& op, Type& type_suffix, T
     if (base == "call") { op = Opcode::call; return true; }
     if (base == "call_indirect") { op = Opcode::call_indirect; return true; }
     if (base == "patchable_call") { op = Opcode::patchable_call; return true; }
+    if (base == "func_addr") { op = Opcode::func_addr; return true; }
     if (base == "invoke") { op = Opcode::invoke; return true; }
     if (base == "landing_pad" || base == "landingpad") { op = Opcode::landing_pad; return true; }
 

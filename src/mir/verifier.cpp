@@ -777,6 +777,16 @@ bool Verifier::verify_function(const Function& fn) {
                 case Opcode::safepoint:
                     break;
 
+                case Opcode::func_addr: {
+                    if (inst->operand_count() != 0) {
+                        report_error(inst_prefix + "func_addr requires 0 operands.");
+                    }
+                    if (inst->symbol().empty()) {
+                        report_error(inst_prefix + "func_addr requires a symbol name.");
+                    }
+                    break;
+                }
+
                 case Opcode::guard: {
                     if (inst->operand_count() < 1 || !inst->operand(0) || inst->operand(0)->type() != Type::i32()) {
                         report_error(inst_prefix + "Guard requires i32 condition operand.");

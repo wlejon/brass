@@ -55,6 +55,7 @@ PROGRAMS = [
     "32_loop_fusion_contraction",
     "33_avx2_fma_matmul",
     "34_background_tiering",
+    "35_parallel_matrix_vector",
 ]
 
 DEMOTED_PROGRAMS = {
@@ -66,6 +67,7 @@ DEMOTED_PROGRAMS = {
     "15_nested_acc",
     "16_param_bounds",
     "18_gcd_iter",
+    "35_parallel_matrix_vector",
 }
 
 NUM_RUNS = 5

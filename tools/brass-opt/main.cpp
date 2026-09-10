@@ -47,6 +47,10 @@ void print_usage(const char* prog) {
               << "  --enable-loop-distribution Run loop distribution (loop fission)\n"
               << "  --enable-array-contraction Run array contraction (buffer elimination)\n"
               << "  --dump-loop-transform-stats Dump loop transformation statistics\n"
+              << "  --enable-parallel-loops Run polyhedral loop dependence & auto-parallelization\n"
+              << "  --parallel-threshold=<N> Cost threshold for parallelization (default: 1000)\n"
+              << "  --parallel-workers=<N> Number of parallel worker threads\n"
+              << "  --dump-parallel-stats Dump parallel loop statistics\n"
               << "  --sccp                Run Sparse Conditional Constant Propagation (SCCP)\n"
               << "  --guard-elim          Run Speculation Guard Elimination\n"
               << "  --cfg-simplify        Run CFG Simplification & Dead Block Compaction\n"
@@ -144,6 +148,10 @@ int main(int argc, char** argv) {
     bool enable_loop_distribution = false;
     bool enable_array_contraction = false;
     bool dump_loop_transform_stats = false;
+    bool enable_parallel_loops = false;
+    uint64_t parallel_threshold = 1000;
+    uint32_t parallel_workers = 0;
+    bool dump_parallel_stats = false;
     bool enable_sccp = false;
     bool enable_guard_elim = false;
     bool enable_cfg_simplify = false;
@@ -292,6 +300,18 @@ int main(int argc, char** argv) {
             enable_array_contraction = true;
         } else if (arg == "--dump-loop-transform-stats") {
             dump_loop_transform_stats = true;
+        } else if (arg == "--enable-parallel-loops") {
+            enable_parallel_loops = true;
+        } else if (arg.rfind("--parallel-threshold=", 0) == 0) {
+            parallel_threshold = std::stoull(arg.substr(21));
+        } else if (arg == "--parallel-threshold" && i + 1 < argc) {
+            parallel_threshold = std::stoull(argv[++i]);
+        } else if (arg.rfind("--parallel-workers=", 0) == 0) {
+            parallel_workers = static_cast<uint32_t>(std::stoul(arg.substr(19)));
+        } else if (arg == "--parallel-workers" && i + 1 < argc) {
+            parallel_workers = static_cast<uint32_t>(std::stoul(argv[++i]));
+        } else if (arg == "--dump-parallel-stats") {
+            dump_parallel_stats = true;
         } else if (arg == "--tile-size") {
             if (i + 1 < argc) {
                 tile_size = static_cast<size_t>(std::stoul(argv[++i]));
@@ -554,6 +574,10 @@ int main(int argc, char** argv) {
         loop_opts.vector_width = vector_width;
         loop_opts.dump_fma_stats = dump_fma_stats;
         loop_opts.fma_stats = &fma_stats;
+        loop_opts.enable_parallel_loops = enable_parallel_loops;
+        loop_opts.parallel_threshold = parallel_threshold;
+        loop_opts.parallel_workers = parallel_workers;
+        loop_opts.dump_parallel_stats = dump_parallel_stats;
     };
 
     if (enable_inlining) {
@@ -617,7 +641,7 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
-        bool any_loop_opt = enable_loop_tile || enable_vectorize || enable_slp || enable_loop_fusion || enable_loop_distribution || enable_array_contraction || enable_fma;
+        bool any_loop_opt = enable_loop_tile || enable_vectorize || enable_slp || enable_loop_fusion || enable_loop_distribution || enable_array_contraction || enable_fma || enable_parallel_loops;
         if (any_loop_opt) {
             brass::LoopOptOptions loop_opts;
             init_loop_opts(loop_opts);
@@ -665,7 +689,7 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
-        bool any_loop_opt = enable_loop_tile || enable_vectorize || enable_slp || enable_loop_fusion || enable_loop_distribution || enable_array_contraction || enable_fma;
+        bool any_loop_opt = enable_loop_tile || enable_vectorize || enable_slp || enable_loop_fusion || enable_loop_distribution || enable_array_contraction || enable_fma || enable_parallel_loops;
         if (any_loop_opt) {
             brass::LoopOptOptions loop_opts;
             init_loop_opts(loop_opts);
@@ -693,7 +717,7 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
-        bool any_loop_opt = enable_loop_tile || enable_vectorize || enable_slp || enable_loop_fusion || enable_loop_distribution || enable_array_contraction || enable_fma;
+        bool any_loop_opt = enable_loop_tile || enable_vectorize || enable_slp || enable_loop_fusion || enable_loop_distribution || enable_array_contraction || enable_fma || enable_parallel_loops;
         if (any_loop_opt) {
             brass::LoopOptOptions loop_opts;
             init_loop_opts(loop_opts);
@@ -711,7 +735,7 @@ int main(int argc, char** argv) {
             std::cerr << "Verification failed after CFG Simplification:\n" << cfg_diag.format_all();
             return 1;
         }
-        bool any_loop_opt = enable_loop_tile || enable_vectorize || enable_slp || enable_loop_fusion || enable_loop_distribution || enable_array_contraction || enable_fma;
+        bool any_loop_opt = enable_loop_tile || enable_vectorize || enable_slp || enable_loop_fusion || enable_loop_distribution || enable_array_contraction || enable_fma || enable_parallel_loops;
         if (any_loop_opt) {
             brass::LoopOptOptions loop_opts;
             init_loop_opts(loop_opts);
@@ -722,7 +746,7 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
-    } else if (enable_loop_tile || enable_vectorize || enable_slp || enable_loop_fusion || enable_loop_distribution || enable_array_contraction || enable_fma) {
+    } else if (enable_loop_tile || enable_vectorize || enable_slp || enable_loop_fusion || enable_loop_distribution || enable_array_contraction || enable_fma || enable_parallel_loops) {
         brass::LoopOptOptions loop_opts;
         init_loop_opts(loop_opts);
         brass::optimize_module_loops(*mod, loop_opts);
@@ -780,6 +804,10 @@ int main(int argc, char** argv) {
 
     if (dump_fma_stats) {
         std::cout << fma_stats.format_report() << "\n";
+    }
+
+    if (dump_parallel_stats) {
+        std::cout << loop_stats.parallel_stats.format_report();
     }
 
     (void)debug_info;

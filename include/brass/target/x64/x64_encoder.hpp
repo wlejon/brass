@@ -189,6 +189,7 @@ public:
     void mov(GPR dst, int64_t imm);
     void mov32(GPR dst, uint32_t imm);
     void movabs(GPR dst, uint64_t imm);
+    void movabs(GPR dst, const std::string& symbol);
     void mov64(GPR dst, uint64_t imm);
     void mov(GPR dst, const MemAddress& src);
     void mov32(GPR dst, const MemAddress& src);

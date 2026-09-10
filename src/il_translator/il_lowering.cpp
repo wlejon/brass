@@ -203,6 +203,11 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
         opt_opts.vector_width = options_.vector_width;
         opt_opts.dump_fma_stats = options_.dump_fma_stats;
         opt_opts.fma_stats = options_.fma_stats_collector;
+        opt_opts.enable_parallel_loops = options_.enable_parallel_loops;
+        opt_opts.parallel_threshold = options_.parallel_threshold;
+        opt_opts.parallel_workers = options_.parallel_workers;
+        opt_opts.dump_parallel_stats = options_.dump_parallel_stats;
+        opt_opts.parallel_stats = options_.parallel_stats_collector;
         if (options_.enable_sroa) {
             sroa_module(*mod);
         }

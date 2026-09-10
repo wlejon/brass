@@ -116,6 +116,15 @@ void X64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
             lir_bb.append_inst(std::move(lir_inst));
             break;
         }
+        case Opcode::func_addr: {
+            VReg dst = get_vreg(inst.result());
+            auto lir_inst = std::make_unique<LirInst>(LirOpcode::Movabs);
+            lir_inst->add_def(LirOperand::vreg(dst, 8));
+            lir_inst->add_use(LirOperand::symbol(std::string(inst.symbol())));
+            lir_inst->mir_origin = &inst;
+            lir_bb.append_inst(std::move(lir_inst));
+            break;
+        }
         case Opcode::fconst_f64: {
             VReg dst = get_vreg(inst.result());
             double val = inst.imm_f64();

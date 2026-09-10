@@ -656,8 +656,14 @@ Value* Builder::build_patchable_call(std::string_view patch_symbol, std::string_
     return build_patchable_call(patch_symbol, callee, return_type, Span<Value* const>(args.begin(), args.size()));
 }
 
-Value* Builder::build_patchable_call(std::string_view patch_symbol, std::string_view callee, Type return_type) {
-    return build_patchable_call(patch_symbol, callee, return_type, Span<Value* const>());
+Value* Builder::build_func_addr(std::string_view name) {
+    Instruction* inst = get_arena().make<Instruction>(Opcode::func_addr, Type::ptr());
+    inst->set_symbol(get_string_pool().intern(name));
+    Value* res = create_value(Type::ptr());
+    res->set_defining_instruction(inst);
+    inst->set_result(res);
+    insert(inst);
+    return res;
 }
 
 Instruction* Builder::build_safepoint() {

@@ -670,6 +670,13 @@ private:
                 break;
             }
 
+            case Opcode::func_addr: {
+                std::string_view sym = parse_symbol_name();
+                if (has_error_) return false;
+                res_val = b.build_func_addr(sym);
+                break;
+            }
+
             case Opcode::call_indirect: {
                 Value* callee_ptr = parse_val(); if (!callee_ptr) return false;
                 if (!expect(TokenKind::LParen, "'('")) return false;

@@ -116,6 +116,10 @@ add_executable(brass_unit_tests
     unit/test_background_compiler.cpp
     unit/test_atomic_code_install.cpp
     differential/test_async_jit_differential.cpp
+    unit/test_loop_dependence.cpp
+    unit/test_parallel_runtime.cpp
+    unit/test_auto_parallel.cpp
+    differential/test_parallel_differential.cpp
 )
 
 target_include_directories(brass_unit_tests

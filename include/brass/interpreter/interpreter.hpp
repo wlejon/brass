@@ -87,6 +87,7 @@ public:
     bool has_external_function(std::string_view name) const noexcept;
     void register_function_pointer(uintptr_t ptr, const Function* fn);
     void register_function_pointer(uintptr_t ptr, HostFn fn);
+    const Function* find_function_by_pointer(uintptr_t ptr) const noexcept;
 
     // Dynamic patching
     void patch_const(std::string_view symbol, int64_t val);

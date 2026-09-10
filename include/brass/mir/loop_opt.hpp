@@ -11,6 +11,7 @@
 #include <brass/mir/loop_fusion.hpp>
 #include <brass/mir/loop_distribution.hpp>
 #include <brass/mir/array_contraction.hpp>
+#include <brass/mir/loop_parallel.hpp>
 
 namespace brass {
 
@@ -24,6 +25,7 @@ struct LoopOptStats {
     LoopFusionStats fusion_stats;
     LoopDistributionStats distribution_stats;
     ArrayContractionStats contraction_stats;
+    ParallelLoopStats parallel_stats;
 };
 
 namespace pgo {
@@ -74,6 +76,11 @@ struct LoopOptOptions {
     uint32_t vector_width = 0;
     bool dump_fma_stats = false;
     FmaOptStats* fma_stats = nullptr;
+    bool enable_parallel_loops = false;
+    uint64_t parallel_threshold = 1000;
+    uint32_t parallel_workers = 0;
+    bool dump_parallel_stats = false;
+    ParallelLoopStats* parallel_stats = nullptr;
 };
 
 // General optimization pipeline: SROA -> GVN (CSE + RLE + DSE) -> Loop Opt -> SLP Vectorizer

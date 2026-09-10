@@ -12,6 +12,7 @@
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
 #include <brass/pgo/instrument.hpp>
+#include <brass/runtime/parallel_runtime.hpp>
 #include <iostream>
 #include <fstream>
 
@@ -160,6 +161,13 @@ bool execute_run_function(Module& mod, const RunFunctionOptions& opts) {
         sched_opts.enable_software_pipelining = opts.enable_software_pipeline;
         jit.set_sched_options(sched_opts);
         jit.register_external_symbol("brass_pgo_inc", reinterpret_cast<void*>(&brass_pgo_inc));
+        jit.register_external_symbol("brass_parallel_for", reinterpret_cast<void*>(&brass_parallel_for));
+        jit.register_external_symbol("brass_set_parallel_workers", reinterpret_cast<void*>(&brass_set_parallel_workers));
+        jit.register_external_symbol("brass_get_parallel_workers", reinterpret_cast<void*>(&brass_get_parallel_workers));
+        jit.register_external_symbol("brass_parallel_reduce_i64", reinterpret_cast<void*>(&brass_parallel_reduce_i64));
+        jit.register_external_symbol("brass_parallel_reduce_f64", reinterpret_cast<void*>(&brass_parallel_reduce_f64));
+        jit.register_external_symbol("brass_parallel_alloc_context", reinterpret_cast<void*>(&brass_parallel_alloc_context));
+        jit.register_external_symbol("brass_parallel_free_context", reinterpret_cast<void*>(&brass_parallel_free_context));
         if (!jit.compile_and_load(mod)) {
             std::cerr << "Error: JIT compilation/loading failed for module '" << mod.name() << "'\n";
             return false;
