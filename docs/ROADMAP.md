@@ -183,6 +183,19 @@
 
 ---
 
+## Phase VI: Enterprise Diagnostics, Debugging & Differential Hardening (Chunks 24–25)
+
+- **Chunk 24: Native Debugger Information Emission (DWARF & CodeView) [COMPLETED]**:
+  - DWARF 4/5 emitter for Linux ELF and LLDB: `.debug_line` matrix state machine, `.debug_info`, `.debug_abbrev`, and `.debug_str` with function DIEs and `%rbp`-relative frame variables.
+  - Windows CodeView emitter for Win64 COFF and Visual Studio / WinDbg: `.debug$S` (file checksums, string table, line numbers, procedure symbols) and `.debug$T` primitive type dictionary.
+  - 36-program Bronze corpus verification (`36_debug_source_lines`).
+- **Chunk 25: Continuous Differential Fuzzing, Mutation Engine & Sandboxed Hardening**:
+  - Grammar/SSA mutation engine generating randomized arithmetic, control-flow diamonds, nested loops, exceptions, objects, and arrays.
+  - Sandboxed out-of-process differential runner comparing Interpreter vs Baseline vs Full JIT with timeouts and memory caps.
+  - Automated test-case minimizer (`delta-reducer`) that shrinks failing test cases to minimal single-instruction reproducers.
+
+---
+
 ## House Rules & Code Conventions
 1. **C++20**: Zero LLVM dependencies.
 2. **Compiler Compatibility**: MSVC, Clang, and GCC 12 clean (no `= {}` default args which GCC 12 rejects).
