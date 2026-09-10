@@ -662,6 +662,20 @@ Instruction* Builder::build_resume_point(uint32_t resume_id) {
     return inst;
 }
 
+Instruction* Builder::build_osr_entry(uint32_t loop_header_id, Span<Value* const> live_ins) {
+    Instruction* inst = get_arena().make<Instruction>(Opcode::osr_entry, Type::void_type());
+    inst->set_imm_i64(static_cast<int64_t>(loop_header_id));
+    for (Value* v : live_ins) {
+        if (v) inst->add_operand(v);
+    }
+    insert(inst);
+    return inst;
+}
+
+Instruction* Builder::build_osr_entry(uint32_t loop_header_id, std::initializer_list<Value*> live_ins) {
+    return build_osr_entry(loop_header_id, Span<Value* const>(live_ins.begin(), live_ins.size()));
+}
+
 Instruction* Builder::build_br(BasicBlock* target) {
     return build_br(target, Span<Value* const>());
 }

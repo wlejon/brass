@@ -55,6 +55,10 @@ public:
     const runtime::FunctionResumeTable* get_resume_table(std::string_view fn_name) const noexcept;
     void* get_resume_target_address(std::string_view fn_name, uint32_t resume_id) const;
 
+    // OSR entry queries
+    size_t get_osr_entry_offset(std::string_view fn_name) const;
+    void* get_osr_entry_address(std::string_view fn_name) const;
+
     // Runtime patching
     const runtime::PatchRegistry& patch_sites() const noexcept;
     runtime::PatchRegistry& patch_sites() noexcept;
@@ -117,6 +121,7 @@ public:
     // In-memory compilation of MIR Module
     std::unique_ptr<CompiledModule> compile(const Module& mod);
     std::unique_ptr<CompiledModule> compile(Module& mod);
+    std::unique_ptr<CompiledModule> compile_with_osr(const Module& mod, std::string_view fn_name, uint32_t loop_header_id);
 
     // AOT compilation of MIR Module to Object File (.obj / .o)
     bool compile_to_object(const Module& mod, const std::string& output_path);

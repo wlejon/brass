@@ -1,6 +1,8 @@
 #include <brass/brass.hpp>
 #include <brass/il_translator/il_translator.hpp>
 #include <brass/mir/f64_demote.hpp>
+#include <brass/runtime/osr_coordinator.hpp>
+#include <brass/runtime/tiering.hpp>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -142,6 +144,16 @@ int main(int argc, char** argv) {
             options.enable_wbe = false;
         } else if (arg == "--dump-wbe-stats") {
             options.dump_wbe_stats = true;
+        } else if (arg == "--enable-osr") {
+            options.enable_osr = true;
+        } else if (arg.rfind("--osr-threshold=", 0) == 0) {
+            options.enable_osr = true;
+            options.osr_threshold = std::stoull(arg.substr(16));
+        } else if (arg == "--osr-threshold" && i + 1 < argc) {
+            options.enable_osr = true;
+            options.osr_threshold = std::stoull(argv[++i]);
+        } else if (arg == "--dump-tiering-stats") {
+            options.dump_tiering_stats = true;
         } else if (arg == "--demote-stats") {
             show_demote_stats = true;
         } else if (arg == "--raw-output") {
@@ -418,6 +430,10 @@ int main(int argc, char** argv) {
     }
 
     if (run_jit || (output_obj.empty() && output_shared.empty() && !emit_shared)) {
+        if (options.enable_osr) {
+            brass::runtime::OsrCoordinator::instance().set_enabled(true);
+            brass::runtime::OsrCoordinator::instance().set_threshold(options.osr_threshold);
+        }
         codegen::JitExecutionEngine jit;
         codegen::SchedOptions sched_opts;
         sched_opts.enable_pre_ra = enable_schedule_insns;
@@ -506,6 +522,9 @@ int main(int argc, char** argv) {
 
             if (options.dump_ic_stats) {
                 brass::runtime::ICRegistry::global().dump_stats(std::cout);
+            }
+            if (options.dump_tiering_stats) {
+                brass::runtime::TieringRegistry::instance().dump_stats(std::cout);
             }
         }
     }

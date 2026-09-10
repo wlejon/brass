@@ -109,6 +109,7 @@ public:
 
     // Resume execution at a generic twin resume point
     RuntimeValue resume(const Function& fn, uint32_t resume_id, const std::vector<RuntimeValue>& state_values);
+    RuntimeValue resume_with_frame(const Function& fn, uint32_t resume_id, const std::vector<RuntimeValue>& state_values, InterpreterFrame& frame);
 
     // Execution limits & diagnostics
     void set_max_call_depth(size_t max_depth) noexcept { max_call_depth_ = max_depth; }
@@ -126,7 +127,7 @@ public:
 
 private:
     RuntimeValue execute_function(const Function& fn, const std::vector<RuntimeValue>& args);
-    RuntimeValue execute_function_from_block(const Function& fn, BasicBlock* start_block, const std::vector<RuntimeValue>& block_args);
+    RuntimeValue execute_function_from_block(const Function& fn, BasicBlock* start_block, const std::vector<RuntimeValue>& block_args, InterpreterFrame* existing_frame = nullptr);
     void register_builtin_host_functions();
 
     const Module* module_ = nullptr;

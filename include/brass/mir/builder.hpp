@@ -158,6 +158,8 @@ public:
     Instruction* build_guard(Value* cond, std::string_view exit_label, std::initializer_list<Value*> state_values);
     Instruction* build_guard(Value* cond, std::string_view exit_label);
     Instruction* build_resume_point(uint32_t resume_id);
+    Instruction* build_osr_entry(uint32_t loop_header_id, Span<Value* const> live_ins = {});
+    Instruction* build_osr_entry(uint32_t loop_header_id, std::initializer_list<Value*> live_ins);
 
     // Terminators
     Instruction* build_br(BasicBlock* target);

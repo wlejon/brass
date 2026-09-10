@@ -188,6 +188,7 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
         cfi.text_offset = fn_offset;
         cfi.text_size = fn_size;
         cfi.prologue_size = prologue_sz;
+        cfi.osr_entry_offset = res.osr_entry_offset;
         cfi.frame_info = lir->frame;
         x64::X64FrameLayout::compute_layout(cfi.frame_info, cc_);
         cfi.cc = cc_;

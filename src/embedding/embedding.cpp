@@ -3,6 +3,8 @@
 #include <brass/object/object_writer.hpp>
 #include <brass/object/coff_writer.hpp>
 #include <brass/object/elf_writer.hpp>
+#include <brass/mir/osr.hpp>
+#include <brass/mir/loop_opt.hpp>
 #include <stdexcept>
 
 namespace brass {
@@ -36,6 +38,16 @@ const runtime::FunctionResumeTable* CompiledModule::get_resume_table(std::string
 void* CompiledModule::get_resume_target_address(std::string_view fn_name, uint32_t resume_id) const {
     if (!jit_engine_) return nullptr;
     return jit_engine_->get_resume_target_address(fn_name, resume_id);
+}
+
+size_t CompiledModule::get_osr_entry_offset(std::string_view fn_name) const {
+    if (!jit_engine_) return 0;
+    return jit_engine_->get_osr_entry_offset(fn_name);
+}
+
+void* CompiledModule::get_osr_entry_address(std::string_view fn_name) const {
+    if (!jit_engine_) return nullptr;
+    return jit_engine_->get_osr_entry_address(fn_name);
 }
 
 const runtime::PatchRegistry& CompiledModule::patch_sites() const noexcept {
@@ -163,6 +175,32 @@ std::unique_ptr<CompiledModule> HostEngine::compile(const Module& mod) {
 
 std::unique_ptr<CompiledModule> HostEngine::compile(Module& mod) {
     return compile(const_cast<const Module&>(mod));
+}
+
+std::unique_ptr<CompiledModule> HostEngine::compile_with_osr(const Module& mod, std::string_view fn_name, uint32_t loop_header_id) {
+    Module osr_mod(mod.name());
+    osr_mod.set_allow_fp_reassociation(mod.allow_fp_reassociation());
+    for (std::string_view sym : mod.external_symbols()) {
+        osr_mod.add_external_symbol(sym);
+    }
+    for (const auto* f : mod.functions()) {
+        Function* cloned = clone_function(*f, osr_mod);
+        if (cloned->name() == fn_name) {
+            BasicBlock* header = cloned->get_block_by_id(loop_header_id);
+            if (header) {
+                OsrTarget target = analyze_osr_target(*cloned, header);
+                Instruction* osr_inst = osr_mod.arena().make<Instruction>(Opcode::osr_entry, Type::void_type());
+                osr_inst->set_imm_i64(static_cast<int64_t>(loop_header_id));
+                for (Value* v : target.live_ins) {
+                    if (v) osr_inst->add_operand(v);
+                }
+                if (cloned->entry_block()) {
+                    cloned->entry_block()->prepend_instruction(osr_inst);
+                }
+            }
+        }
+    }
+    return compile(osr_mod);
 }
 
 bool HostEngine::compile_to_object(const Module& mod, const std::string& output_path) {

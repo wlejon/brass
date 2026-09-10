@@ -33,6 +33,9 @@ void X64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
             lower_vector_instruction(inst, lir_bb);
             break;
 
+        case Opcode::osr_entry:
+            break;
+
         case Opcode::iconst_i32: {
             VReg dst = get_vreg(inst.result());
             int32_t val = inst.imm_i32();

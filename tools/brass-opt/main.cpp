@@ -1,5 +1,7 @@
 #include <brass/brass.hpp>
 #include <brass/mir/write_barrier_elim.hpp>
+#include <brass/runtime/osr_coordinator.hpp>
+#include <brass/runtime/tiering.hpp>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -51,6 +53,9 @@ void print_usage(const char* prog) {
               << "  --dump-branch-probabilities Dump block frequencies and edge branch probabilities\n"
               << "  --enable-pic          Enable Polymorphic Inline Caching for dynamic property accesses\n"
               << "  --dump-ic-stats       Dump Inline Cache hit/miss and state statistics\n"
+              << "  --enable-osr          Enable On-Stack Replacement (OSR) in interpreter\n"
+              << "  --osr-threshold=<N>   Loop backedge threshold for OSR migration (default: 100)\n"
+              << "  --dump-tiering-stats  Dump tiering feedback and OSR statistics\n"
               << "  -g, --debug-info      Preserve and emit debug information and .brass_dbg section\n"
               << "  --emit-source-map=<file.map> Emit standard JSON Source Map V3 to <file.map>\n"
               << "  --symbolize-offset=<fn,offset> Symbolize function offset to source location\n"
@@ -169,6 +174,9 @@ int main(int argc, char** argv) {
     bool dump_ic_stats = false;
     bool enable_wbe = false;
     bool dump_wbe_stats = false;
+    bool enable_osr = false;
+    uint64_t osr_threshold = brass::runtime::BACKEDGE_OSR_THRESHOLD;
+    bool dump_tiering_stats = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -226,6 +234,16 @@ int main(int argc, char** argv) {
         } else if (arg == "--dump-wbe-stats") {
             dump_wbe_stats = true;
             enable_wbe = true;
+        } else if (arg == "--enable-osr") {
+            enable_osr = true;
+        } else if (arg.rfind("--osr-threshold=", 0) == 0) {
+            enable_osr = true;
+            osr_threshold = std::stoull(arg.substr(16));
+        } else if (arg == "--osr-threshold" && i + 1 < argc) {
+            enable_osr = true;
+            osr_threshold = std::stoull(argv[++i]);
+        } else if (arg == "--dump-tiering-stats") {
+            dump_tiering_stats = true;
         } else if (arg == "--pgo-instrument") {
             enable_pgo_instrument = true;
         } else if (arg.rfind("--pgo-use=", 0) == 0) {
@@ -890,11 +908,18 @@ int main(int argc, char** argv) {
         if (gc_stress) {
             interp.gc().set_stress_mode(true);
         }
+        if (enable_osr) {
+            brass::runtime::OsrCoordinator::instance().set_enabled(true);
+            brass::runtime::OsrCoordinator::instance().set_threshold(osr_threshold);
+        }
 
         try {
             brass::RuntimeValue result = interp.run(*mod, run_fn, run_args);
             if (!fn->return_type().is_void()) {
                 std::cout << result << "\n";
+            }
+            if (dump_tiering_stats) {
+                brass::runtime::TieringRegistry::instance().dump_stats(std::cout);
             }
         } catch (const std::exception& ex) {
             std::cerr << "Runtime error during execution: " << ex.what() << "\n";

@@ -586,6 +586,14 @@ bool optimize_function_loops(Function& fn, const LoopOptOptions& options) {
     if (!fn.resume_points().empty()) {
         return false;
     }
+    for (const BasicBlock* bb : fn.blocks()) {
+        if (!bb) continue;
+        for (const Instruction* inst : *bb) {
+            if (inst && inst->opcode() == Opcode::osr_entry) {
+                return false;
+            }
+        }
+    }
     bool any_changed = false;
     if (options.enable_f64_demote) {
         F64DemoteOptions demote_opts;

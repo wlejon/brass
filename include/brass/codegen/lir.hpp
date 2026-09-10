@@ -393,6 +393,13 @@ struct FrameInfo {
     int32_t spill_slot_offset(int32_t slot_idx) const noexcept;
 };
 
+struct LirOsrEntry {
+    bool enabled = false;
+    uint32_t loop_header_id = 0;
+    std::vector<VReg> live_in_vregs;
+    std::vector<uint32_t> slot_indices;
+};
+
 class LirFunction {
 public:
     std::string name;
@@ -402,6 +409,7 @@ public:
     std::vector<VRegInfo> vreg_table;
     FrameInfo frame;
     std::vector<std::pair<uint32_t, uint32_t>> resume_entries;
+    LirOsrEntry osr_entry;
 
     LirFunction() = default;
 

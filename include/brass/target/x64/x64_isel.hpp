@@ -8,6 +8,10 @@
 #include <unordered_map>
 #include <unordered_set>
 
+namespace brass {
+struct OsrTarget;
+}
+
 namespace brass::x64 {
 
 class X64ISel {
@@ -18,12 +22,16 @@ public:
 
     std::unique_ptr<codegen::LirFunction> lower(const Function& mir_fn);
 
+    void set_osr_target(const OsrTarget* target) noexcept { osr_target_ = target; }
+    const OsrTarget* osr_target() const noexcept { return osr_target_; }
+
     const Target& target() const noexcept { return target_; }
     const CallingConvention& calling_conv() const noexcept { return cc_; }
 
 private:
     Target target_;
     CallingConvention cc_;
+    const OsrTarget* osr_target_ = nullptr;
 
     codegen::LirFunction* lir_fn_ = nullptr;
     std::unordered_map<const Value*, codegen::VReg> val_to_vreg_;

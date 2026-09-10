@@ -323,6 +323,18 @@ public:
                 os_ << "resume_point " << inst.resume_id();
                 break;
 
+            case Opcode::osr_entry:
+                os_ << "osr_entry " << inst.imm_i64();
+                if (!inst.operands().empty()) {
+                    os_ << " [";
+                    for (size_t i = 0; i < inst.operand_count(); ++i) {
+                        if (i > 0) os_ << ", ";
+                        os_ << value_name(inst.operand(i));
+                    }
+                    os_ << "]";
+                }
+                break;
+
             case Opcode::br:
                 os_ << "br " << format_branch_target(inst.branch_target());
                 break;

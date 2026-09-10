@@ -98,6 +98,10 @@ add_executable(brass_unit_tests
     unit/test_generational_gc.cpp
     unit/test_write_barrier_elim.cpp
     differential/test_generational_differential.cpp
+    unit/test_tiering.cpp
+    unit/test_osr_entry.cpp
+    unit/test_osr_runtime.cpp
+    differential/test_osr_differential.cpp
 )
 
 target_include_directories(brass_unit_tests

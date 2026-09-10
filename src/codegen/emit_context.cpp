@@ -142,6 +142,59 @@ CompilationResult EmitContext::compile() {
         }
     }
 
+    // 4.5 Emit specialized OSR secondary prologue
+    if (fn_.osr_entry.enabled && block_labels_.find(fn_.osr_entry.loop_header_id) != block_labels_.end()) {
+        buffer_.align(16);
+        result.osr_entry_offset = buffer_.size();
+
+        // Secondary prologue: establishes native stack frame
+        X64FrameLayout::emit_prologue(enc_, mutable_frame, fn_.calling_conv);
+
+        // Standard calling convention: 1st argument (OsrMigrationFrame*)
+        // On Win64: RCX; on SysV: RDI
+        GPR arg_reg = (fn_.calling_conv.kind() == CallingConvKind::Win64) ? GPR::RCX : GPR::RDI;
+        // Copy to R10 (scratch register never assigned by linear scan regalloc)
+        enc_.mov(GPR::R10, arg_reg);
+
+        // Unpack migration frame slots directly into physical registers and spill slots
+        for (size_t i = 0; i < fn_.osr_entry.live_in_vregs.size(); ++i) {
+            VReg vr = fn_.osr_entry.live_in_vregs[i];
+            const VRegInfo& info = fn_.get_vreg_info(vr);
+            int32_t slot_offset = static_cast<int32_t>(16 + i * 16);
+
+            if (!info.is_spilled && info.assigned_preg.is_valid()) {
+                PReg preg = info.assigned_preg;
+                if (preg.is_gpr()) {
+                    if (vr.size == 4) {
+                        enc_.mov32(preg.as_gpr(), ptr(GPR::R10, slot_offset));
+                    } else {
+                        enc_.mov(preg.as_gpr(), ptr(GPR::R10, slot_offset));
+                    }
+                } else if (preg.is_xmm()) {
+                    if (vr.size == 4) {
+                        enc_.movss(preg.as_xmm(), ptr(GPR::R10, slot_offset));
+                    } else if (vr.size == 16) {
+                        enc_.movups(preg.as_xmm(), ptr(GPR::R10, slot_offset));
+                    } else {
+                        enc_.movq(preg.as_xmm(), ptr(GPR::R10, slot_offset));
+                    }
+                }
+            } else if (info.is_spilled && info.assigned_spill_slot >= 0) {
+                MemAddress stack_addr = X64FrameLayout::spill_slot_address(info.assigned_spill_slot, mutable_frame);
+                if (vr.is_xmm()) {
+                    enc_.movq(XMM::XMM4, ptr(GPR::R10, slot_offset));
+                    enc_.movsd(stack_addr, XMM::XMM4);
+                } else {
+                    enc_.mov(GPR::R11, ptr(GPR::R10, slot_offset));
+                    enc_.mov(stack_addr, GPR::R11);
+                }
+            }
+        }
+
+        // Emits jump directly to the compiled loop header block
+        enc_.jmp(block_labels_[fn_.osr_entry.loop_header_id]);
+    }
+
     result.code_buffer = std::move(buffer_);
     result.safepoints = std::move(safepoints_);
     result.stack_map.function_name = fn_.name;

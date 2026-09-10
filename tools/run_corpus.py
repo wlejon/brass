@@ -50,6 +50,7 @@ PROGRAMS = [
     "27_generator_fibonacci",
     "28_async_chain",
     "29_generational_churn",
+    "30_osr_hot_loop",
 ]
 
 DEMOTED_PROGRAMS = {

@@ -180,6 +180,7 @@ JitExecutionEngine::JitExecutionEngine(JitExecutionEngine&& other) noexcept
       external_symbols_(std::move(other.external_symbols_)),
       function_signatures_(std::move(other.function_signatures_)),
       stack_maps_(std::move(other.stack_maps_)),
+      osr_entry_offsets_(std::move(other.osr_entry_offsets_)),
       pdata_table_(other.pdata_table_),
       pdata_count_(other.pdata_count_),
       code_base_(other.code_base_),
@@ -198,6 +199,7 @@ JitExecutionEngine& JitExecutionEngine::operator=(JitExecutionEngine&& other) no
         external_symbols_ = std::move(other.external_symbols_);
         function_signatures_ = std::move(other.function_signatures_);
         stack_maps_ = std::move(other.stack_maps_);
+        osr_entry_offsets_ = std::move(other.osr_entry_offsets_);
         pdata_table_ = other.pdata_table_;
         pdata_count_ = other.pdata_count_;
         code_base_ = other.code_base_;
@@ -305,10 +307,14 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
             symbol_table_[sym.name] = base_ptr + sec_offsets[sym.section_index] + sym.value;
         }
     }
+    osr_entry_offsets_.clear();
     for (const auto& fn : working_obj.functions) {
         int32_t text_idx = working_obj.get_section_index(".text");
         if (text_idx >= 0) {
             symbol_table_[fn.name] = base_ptr + sec_offsets[text_idx] + fn.text_offset;
+            if (fn.osr_entry_offset > 0) {
+                osr_entry_offsets_[fn.name] = fn.osr_entry_offset;
+            }
         }
     }
 
@@ -544,6 +550,22 @@ RuntimeValue JitExecutionEngine::resume(std::string_view name, uint32_t resume_i
         full_args.push_back(a);
     }
     return invoke(name, full_args);
+}
+
+size_t JitExecutionEngine::get_osr_entry_offset(std::string_view fn_name) const {
+    auto it = osr_entry_offsets_.find(std::string(fn_name));
+    if (it != osr_entry_offsets_.end()) {
+        return it->second;
+    }
+    return 0;
+}
+
+void* JitExecutionEngine::get_osr_entry_address(std::string_view fn_name) const {
+    size_t off = get_osr_entry_offset(fn_name);
+    if (off == 0) return nullptr;
+    void* fn_addr = get_symbol_address(fn_name);
+    if (!fn_addr) return nullptr;
+    return reinterpret_cast<uint8_t*>(fn_addr) + off;
 }
 
 } // namespace brass::codegen

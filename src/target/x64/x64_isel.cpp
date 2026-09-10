@@ -1,4 +1,5 @@
 #include <brass/target/x64/x64_isel.hpp>
+#include <brass/mir/osr.hpp>
 #include <cstring>
 #include <stdexcept>
 #include <algorithm>
@@ -309,6 +310,8 @@ std::unique_ptr<LirFunction> X64ISel::lower(const Function& mir_fn) {
     lir_fn_->return_type = mir_fn.return_type();
     lir_fn_->calling_conv = cc_;
 
+    const_cast<Function&>(mir_fn).rebuild_cfg_predecessors();
+
     // 0. Pre-analyze function to identify fusible comparisons, loads, and immediate folds
     analyze_function(mir_fn);
 
@@ -364,6 +367,38 @@ std::unique_ptr<LirFunction> X64ISel::lower(const Function& mir_fn) {
                 lir_entry->successors.push_back(target_lir);
                 target_lir->predecessors.push_back(lir_entry);
             }
+        }
+    }
+
+    // 7. Setup OSR entry if requested or present in MIR
+    if (osr_target_ && osr_target_->is_valid()) {
+        lir_fn_->osr_entry.enabled = true;
+        lir_fn_->osr_entry.loop_header_id = osr_target_->loop_header_id;
+        lir_fn_->osr_entry.live_in_vregs.clear();
+        lir_fn_->osr_entry.slot_indices.clear();
+        for (const Value* v : osr_target_->live_ins) {
+            if (v) {
+                VReg vr = get_or_alloc_vreg(v);
+                lir_fn_->osr_entry.live_in_vregs.push_back(vr);
+                lir_fn_->osr_entry.slot_indices.push_back(v->id());
+            }
+        }
+    } else {
+        for (const auto* bb : mir_fn.blocks()) {
+            for (const auto* inst : *bb) {
+                if (inst->opcode() == Opcode::osr_entry) {
+                    lir_fn_->osr_entry.enabled = true;
+                    lir_fn_->osr_entry.loop_header_id = static_cast<uint32_t>(inst->imm_i64());
+                    for (const auto* op : inst->operands()) {
+                        if (op) {
+                            lir_fn_->osr_entry.live_in_vregs.push_back(get_or_alloc_vreg(op));
+                            lir_fn_->osr_entry.slot_indices.push_back(op->id());
+                        }
+                    }
+                    break;
+                }
+            }
+            if (lir_fn_->osr_entry.enabled) break;
         }
     }
 

@@ -63,6 +63,14 @@ public:
         return kind_ == TypeKind::I32 || kind_ == TypeKind::I64;
     }
 
+    constexpr bool is_i32() const noexcept {
+        return kind_ == TypeKind::I32;
+    }
+
+    constexpr bool is_i64() const noexcept {
+        return kind_ == TypeKind::I64;
+    }
+
     constexpr bool is_float() const noexcept {
         return kind_ == TypeKind::F32 || kind_ == TypeKind::F64;
     }

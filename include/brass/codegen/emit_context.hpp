@@ -30,6 +30,7 @@ struct CompilationResult {
     std::vector<SafepointRecord> safepoints;
     FunctionStackMap stack_map;
     size_t entry_offset = 0;
+    size_t osr_entry_offset = 0;
     std::unordered_map<uint32_t, size_t> block_offsets;
     runtime::FunctionResumeTable resume_table;
     std::vector<runtime::PatchSite> patch_sites;
