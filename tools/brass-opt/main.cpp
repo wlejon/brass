@@ -1,4 +1,5 @@
 #include <brass/brass.hpp>
+#include <brass/mir/fma_opt.hpp>
 #include <brass/mir/gvn_pre.hpp>
 #include <brass/mir/write_barrier_elim.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
@@ -158,6 +159,11 @@ int main(int argc, char** argv) {
     bool dump_ic_stats = false;
     bool enable_wbe = false;
     bool dump_wbe_stats = false;
+    bool enable_avx2 = false;
+    bool enable_fma = false;
+    uint32_t vector_width = 0;
+    bool dump_fma_stats = false;
+    brass::FmaOptStats fma_stats;
     bool enable_osr = false;
     uint64_t osr_threshold = brass::runtime::BACKEDGE_OSR_THRESHOLD;
     bool dump_tiering_stats = false;
@@ -250,6 +256,16 @@ int main(int argc, char** argv) {
             run_alias_analysis = true;
         } else if (arg == "--vectorize") {
             enable_vectorize = true;
+        } else if (arg == "--enable-avx2") {
+            enable_avx2 = true;
+        } else if (arg == "--enable-fma" || arg == "--fma") {
+            enable_fma = true;
+        } else if (arg == "--vector-width=256" || arg == "--vector-width-256") {
+            vector_width = 256;
+        } else if (arg.rfind("--vector-width=", 0) == 0) {
+            vector_width = static_cast<uint32_t>(std::stoul(arg.substr(15)));
+        } else if (arg == "--dump-fma-stats") {
+            dump_fma_stats = true;
         } else if (arg == "--slp") {
             enable_slp = true;
         } else if (arg == "--loop-tile") {
@@ -508,23 +524,36 @@ int main(int argc, char** argv) {
         }
     }
 
+    auto init_loop_opts = [&](brass::LoopOptOptions& loop_opts) {
+        loop_opts.enable_vectorize = enable_vectorize;
+        loop_opts.enable_slp = enable_slp;
+        loop_opts.enable_loop_tile = enable_loop_tile;
+        loop_opts.enable_loop_fusion = enable_loop_fusion;
+        loop_opts.enable_loop_distribution = enable_loop_distribution;
+        loop_opts.enable_array_contraction = enable_array_contraction;
+        loop_opts.stats = &loop_stats;
+        loop_opts.tile_size_i = tile_size;
+        loop_opts.tile_size_j = tile_size;
+        loop_opts.tile_size_k = tile_size;
+        loop_opts.enable_avx2 = enable_avx2;
+        loop_opts.enable_fma = enable_fma;
+        loop_opts.vector_width = vector_width;
+        loop_opts.dump_fma_stats = dump_fma_stats;
+        loop_opts.fma_stats = &fma_stats;
+    };
+
     if (enable_inlining) {
         brass::InlinerOptions inliner_opts;
         inliner_opts.enable_gvn = enable_gvn;
         brass::LoopOptOptions loop_opts;
-        loop_opts.enable_vectorize = enable_vectorize;
-        loop_opts.enable_slp = enable_slp;
+        init_loop_opts(loop_opts);
         loop_opts.enable_gvn = enable_gvn;
         loop_opts.enable_sccp = enable_sccp;
         loop_opts.enable_guard_elim = enable_guard_elim;
         loop_opts.enable_cfg_simplify = enable_cfg_simplify;
-        loop_opts.enable_loop_tile = enable_loop_tile;
         loop_opts.enable_loop_unswitch = enable_loop_unswitch;
         loop_opts.enable_jump_threading = enable_jump_threading;
         loop_opts.enable_trace_layout = enable_trace_layout;
-        loop_opts.tile_size_i = tile_size;
-        loop_opts.tile_size_j = tile_size;
-        loop_opts.tile_size_k = tile_size;
         brass::optimize_module_ipo(*mod, inliner_opts, loop_opts);
         brass::DiagnosticReporter inlining_diag;
         if (!brass::verify_module(*mod, &inlining_diag) || inlining_diag.has_errors()) {
@@ -574,19 +603,10 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
-        bool any_loop_opt = enable_loop_tile || enable_vectorize || enable_slp || enable_loop_fusion || enable_loop_distribution || enable_array_contraction;
+        bool any_loop_opt = enable_loop_tile || enable_vectorize || enable_slp || enable_loop_fusion || enable_loop_distribution || enable_array_contraction || enable_fma;
         if (any_loop_opt) {
             brass::LoopOptOptions loop_opts;
-            loop_opts.enable_vectorize = enable_vectorize;
-            loop_opts.enable_slp = enable_slp;
-            loop_opts.enable_loop_tile = enable_loop_tile;
-            loop_opts.enable_loop_fusion = enable_loop_fusion;
-            loop_opts.enable_loop_distribution = enable_loop_distribution;
-            loop_opts.enable_array_contraction = enable_array_contraction;
-            loop_opts.stats = &loop_stats;
-            loop_opts.tile_size_i = tile_size;
-            loop_opts.tile_size_j = tile_size;
-            loop_opts.tile_size_k = tile_size;
+            init_loop_opts(loop_opts);
             brass::optimize_module_loops(*mod, loop_opts);
             brass::DiagnosticReporter opt_diag;
             if (!brass::verify_module(*mod, &opt_diag) || opt_diag.has_errors()) {
@@ -631,19 +651,10 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
-        bool any_loop_opt = enable_loop_tile || enable_vectorize || enable_slp || enable_loop_fusion || enable_loop_distribution || enable_array_contraction;
+        bool any_loop_opt = enable_loop_tile || enable_vectorize || enable_slp || enable_loop_fusion || enable_loop_distribution || enable_array_contraction || enable_fma;
         if (any_loop_opt) {
             brass::LoopOptOptions loop_opts;
-            loop_opts.enable_vectorize = enable_vectorize;
-            loop_opts.enable_slp = enable_slp;
-            loop_opts.enable_loop_tile = enable_loop_tile;
-            loop_opts.enable_loop_fusion = enable_loop_fusion;
-            loop_opts.enable_loop_distribution = enable_loop_distribution;
-            loop_opts.enable_array_contraction = enable_array_contraction;
-            loop_opts.stats = &loop_stats;
-            loop_opts.tile_size_i = tile_size;
-            loop_opts.tile_size_j = tile_size;
-            loop_opts.tile_size_k = tile_size;
+            init_loop_opts(loop_opts);
             brass::optimize_module_loops(*mod, loop_opts);
             brass::DiagnosticReporter opt_diag;
             if (!brass::verify_module(*mod, &opt_diag) || opt_diag.has_errors()) {
@@ -668,19 +679,10 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
-        bool any_loop_opt = enable_loop_tile || enable_vectorize || enable_slp || enable_loop_fusion || enable_loop_distribution || enable_array_contraction;
+        bool any_loop_opt = enable_loop_tile || enable_vectorize || enable_slp || enable_loop_fusion || enable_loop_distribution || enable_array_contraction || enable_fma;
         if (any_loop_opt) {
             brass::LoopOptOptions loop_opts;
-            loop_opts.enable_vectorize = enable_vectorize;
-            loop_opts.enable_slp = enable_slp;
-            loop_opts.enable_loop_tile = enable_loop_tile;
-            loop_opts.enable_loop_fusion = enable_loop_fusion;
-            loop_opts.enable_loop_distribution = enable_loop_distribution;
-            loop_opts.enable_array_contraction = enable_array_contraction;
-            loop_opts.stats = &loop_stats;
-            loop_opts.tile_size_i = tile_size;
-            loop_opts.tile_size_j = tile_size;
-            loop_opts.tile_size_k = tile_size;
+            init_loop_opts(loop_opts);
             brass::optimize_module_loops(*mod, loop_opts);
             brass::DiagnosticReporter opt_diag;
             if (!brass::verify_module(*mod, &opt_diag) || opt_diag.has_errors()) {
@@ -695,19 +697,10 @@ int main(int argc, char** argv) {
             std::cerr << "Verification failed after CFG Simplification:\n" << cfg_diag.format_all();
             return 1;
         }
-        bool any_loop_opt = enable_loop_tile || enable_vectorize || enable_slp || enable_loop_fusion || enable_loop_distribution || enable_array_contraction;
+        bool any_loop_opt = enable_loop_tile || enable_vectorize || enable_slp || enable_loop_fusion || enable_loop_distribution || enable_array_contraction || enable_fma;
         if (any_loop_opt) {
             brass::LoopOptOptions loop_opts;
-            loop_opts.enable_vectorize = enable_vectorize;
-            loop_opts.enable_slp = enable_slp;
-            loop_opts.enable_loop_tile = enable_loop_tile;
-            loop_opts.enable_loop_fusion = enable_loop_fusion;
-            loop_opts.enable_loop_distribution = enable_loop_distribution;
-            loop_opts.enable_array_contraction = enable_array_contraction;
-            loop_opts.stats = &loop_stats;
-            loop_opts.tile_size_i = tile_size;
-            loop_opts.tile_size_j = tile_size;
-            loop_opts.tile_size_k = tile_size;
+            init_loop_opts(loop_opts);
             brass::optimize_module_loops(*mod, loop_opts);
             brass::DiagnosticReporter opt_diag;
             if (!brass::verify_module(*mod, &opt_diag) || opt_diag.has_errors()) {
@@ -715,18 +708,9 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
-    } else if (enable_loop_tile || enable_vectorize || enable_slp || enable_loop_fusion || enable_loop_distribution || enable_array_contraction) {
+    } else if (enable_loop_tile || enable_vectorize || enable_slp || enable_loop_fusion || enable_loop_distribution || enable_array_contraction || enable_fma) {
         brass::LoopOptOptions loop_opts;
-        loop_opts.enable_vectorize = enable_vectorize;
-        loop_opts.enable_slp = enable_slp;
-        loop_opts.enable_loop_tile = enable_loop_tile;
-        loop_opts.enable_loop_fusion = enable_loop_fusion;
-        loop_opts.enable_loop_distribution = enable_loop_distribution;
-        loop_opts.enable_array_contraction = enable_array_contraction;
-        loop_opts.stats = &loop_stats;
-        loop_opts.tile_size_i = tile_size;
-        loop_opts.tile_size_j = tile_size;
-        loop_opts.tile_size_k = tile_size;
+        init_loop_opts(loop_opts);
         brass::optimize_module_loops(*mod, loop_opts);
         brass::DiagnosticReporter opt_diag;
         if (!brass::verify_module(*mod, &opt_diag) || opt_diag.has_errors()) {
@@ -778,6 +762,10 @@ int main(int argc, char** argv) {
         std::cout << loop_stats.fusion_stats.format_report()
                   << loop_stats.distribution_stats.format_report()
                   << loop_stats.contraction_stats.format_report();
+    }
+
+    if (dump_fma_stats) {
+        std::cout << fma_stats.format_report() << "\n";
     }
 
     (void)debug_info;

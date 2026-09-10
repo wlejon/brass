@@ -16,6 +16,10 @@ std::string_view Type::name() const noexcept {
         case TypeKind::F64x2: return "f64x2";
         case TypeKind::I32x4: return "i32x4";
         case TypeKind::I64x2: return "i64x2";
+        case TypeKind::F32x8: return "f32x8";
+        case TypeKind::F64x4: return "f64x4";
+        case TypeKind::I32x8: return "i32x8";
+        case TypeKind::I64x4: return "i64x4";
     }
     return "unknown";
 }

@@ -196,7 +196,7 @@ bool vectorize_loop(
         if (inst->opcode() == Opcode::load_indexed) {
             Value* base = inst->operand(0);
             int32_t offset = inst->offset();
-            uint8_t shift_amount = (vli.vector_width == 4) ? 2 : 3;
+            uint8_t shift_amount = (vli.elem_type.size_in_bytes() == 4) ? 2 : 3;
             Value* shift_val = build_const_step(b, vli.iv_type, shift_amount);
             Value* byte_off = b.build_shl(vec_iv_param, shift_val);
             Value* addr = b.build_add(base, byte_off);
@@ -217,7 +217,7 @@ bool vectorize_loop(
                     continue;
                 }
             }
-            uint8_t shift_amount = (vli.vector_width == 4) ? 2 : 3;
+            uint8_t shift_amount = (vli.elem_type.size_in_bytes() == 4) ? 2 : 3;
             Value* shift_val = build_const_step(b, vli.iv_type, shift_amount);
             Value* byte_off = b.build_shl(vec_iv_param, shift_val);
             Value* addr = b.build_add(base, byte_off);
@@ -298,7 +298,24 @@ bool vectorize_loop(
 
     if (vli.has_reduction) {
         Value* exit_acc = vec_exit->param(vli.reduction_param_index);
-        if (W == 4) {
+        if (W == 8) {
+            Value* l0 = b.build_vextract_lane(exit_acc, 0);
+            Value* l1 = b.build_vextract_lane(exit_acc, 1);
+            Value* l2 = b.build_vextract_lane(exit_acc, 2);
+            Value* l3 = b.build_vextract_lane(exit_acc, 3);
+            Value* l4 = b.build_vextract_lane(exit_acc, 4);
+            Value* l5 = b.build_vextract_lane(exit_acc, 5);
+            Value* l6 = b.build_vextract_lane(exit_acc, 6);
+            Value* l7 = b.build_vextract_lane(exit_acc, 7);
+            Value* s01 = b.build_add(l0, l1);
+            Value* s23 = b.build_add(l2, l3);
+            Value* s45 = b.build_add(l4, l5);
+            Value* s67 = b.build_add(l6, l7);
+            Value* s0123 = b.build_add(s01, s23);
+            Value* s4567 = b.build_add(s45, s67);
+            Value* hsum = b.build_add(s0123, s4567);
+            final_scalar_acc = b.build_add(hsum, vli.reduction_init_val);
+        } else if (W == 4) {
             Value* l0 = b.build_vextract_lane(exit_acc, 0);
             Value* l1 = b.build_vextract_lane(exit_acc, 1);
             Value* l2 = b.build_vextract_lane(exit_acc, 2);

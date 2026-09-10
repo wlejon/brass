@@ -24,6 +24,8 @@ std::string_view opcode_name(Opcode op) noexcept {
         case Opcode::add: return "add";
         case Opcode::sub: return "sub";
         case Opcode::mul: return "mul";
+        case Opcode::fma_f32: return "fma_f32";
+        case Opcode::fma_f64: return "fma_f64";
         case Opcode::sdiv: return "sdiv";
         case Opcode::udiv: return "udiv";
         case Opcode::smod: return "smod";
@@ -89,6 +91,7 @@ std::string_view opcode_name(Opcode op) noexcept {
         case Opcode::vsub: return "vsub";
         case Opcode::vmul: return "vmul";
         case Opcode::vdiv: return "vdiv";
+        case Opcode::vfma: return "vfma";
         case Opcode::vneg: return "vneg";
         case Opcode::vmin: return "vmin";
         case Opcode::vmax: return "vmax";
@@ -172,6 +175,8 @@ bool is_arithmetic(Opcode op) noexcept {
         case Opcode::add:
         case Opcode::sub:
         case Opcode::mul:
+        case Opcode::fma_f32:
+        case Opcode::fma_f64:
         case Opcode::sdiv:
         case Opcode::udiv:
         case Opcode::smod:
@@ -253,6 +258,7 @@ bool is_vector_op(Opcode op) noexcept {
         case Opcode::vsub:
         case Opcode::vmul:
         case Opcode::vdiv:
+        case Opcode::vfma:
         case Opcode::vneg:
         case Opcode::vmin:
         case Opcode::vmax:

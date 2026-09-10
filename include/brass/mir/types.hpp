@@ -19,7 +19,11 @@ enum class TypeKind : uint8_t {
     F32x4,
     F64x2,
     I32x4,
-    I64x2
+    I64x2,
+    F32x8,
+    F64x4,
+    I32x8,
+    I64x4
 };
 
 class Type {
@@ -40,6 +44,11 @@ public:
     static constexpr Type i32x4() noexcept { return Type(TypeKind::I32x4); }
     static constexpr Type i64x2() noexcept { return Type(TypeKind::I64x2); }
 
+    static constexpr Type f32x8() noexcept { return Type(TypeKind::F32x8); }
+    static constexpr Type f64x4() noexcept { return Type(TypeKind::F64x4); }
+    static constexpr Type i32x8() noexcept { return Type(TypeKind::I32x8); }
+    static constexpr Type i64x4() noexcept { return Type(TypeKind::I64x4); }
+
     constexpr TypeKind kind() const noexcept { return kind_; }
 
     constexpr size_t size_in_bytes() const noexcept {
@@ -55,6 +64,10 @@ public:
             case TypeKind::F64x2:
             case TypeKind::I32x4:
             case TypeKind::I64x2: return 16;
+            case TypeKind::F32x8:
+            case TypeKind::F64x4:
+            case TypeKind::I32x8:
+            case TypeKind::I64x4: return 32;
         }
         return 0;
     }
@@ -96,8 +109,17 @@ public:
     }
 
     constexpr bool is_vector() const noexcept {
+        return is_v128() || is_v256();
+    }
+
+    constexpr bool is_v128() const noexcept {
         return kind_ == TypeKind::F32x4 || kind_ == TypeKind::F64x2 ||
                kind_ == TypeKind::I32x4 || kind_ == TypeKind::I64x2;
+    }
+
+    constexpr bool is_v256() const noexcept {
+        return kind_ == TypeKind::F32x8 || kind_ == TypeKind::F64x4 ||
+               kind_ == TypeKind::I32x8 || kind_ == TypeKind::I64x4;
     }
 
     constexpr uint32_t vector_lanes() const noexcept {
@@ -108,6 +130,12 @@ public:
             case TypeKind::F64x2:
             case TypeKind::I64x2:
                 return 2;
+            case TypeKind::F32x8:
+            case TypeKind::I32x8:
+                return 8;
+            case TypeKind::F64x4:
+            case TypeKind::I64x4:
+                return 4;
             default:
                 return 0;
         }
@@ -119,6 +147,10 @@ public:
             case TypeKind::F64x2: return Type(TypeKind::F64);
             case TypeKind::I32x4: return Type(TypeKind::I32);
             case TypeKind::I64x2: return Type(TypeKind::I64);
+            case TypeKind::F32x8: return Type(TypeKind::F32);
+            case TypeKind::F64x4: return Type(TypeKind::F64);
+            case TypeKind::I32x8: return Type(TypeKind::I32);
+            case TypeKind::I64x4: return Type(TypeKind::I64);
             default: return *this;
         }
     }

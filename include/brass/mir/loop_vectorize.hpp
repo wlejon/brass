@@ -10,6 +10,7 @@ struct LoopVectorizeOptions {
     bool enable_f32x4 = true;
     bool enable_i32x4 = true;
     bool enable_f64x2 = true;
+    bool enable_avx2 = false;
     bool allow_fp_reassociation = false;
     uint32_t vector_width = 4;
 };

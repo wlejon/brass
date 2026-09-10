@@ -199,6 +199,14 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                     frame.set_value(inst->result(), val_mul(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1))));
                     break;
                 }
+                case Opcode::fma_f32: {
+                    frame.set_value(inst->result(), val_fma_f32(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1)), frame.get_value(inst->operand(2))));
+                    break;
+                }
+                case Opcode::fma_f64: {
+                    frame.set_value(inst->result(), val_fma_f64(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1)), frame.get_value(inst->operand(2))));
+                    break;
+                }
                 case Opcode::sdiv: {
                     frame.set_value(inst->result(), val_sdiv(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1))));
                     break;
@@ -397,6 +405,10 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                 }
                 case Opcode::vdiv: {
                     frame.set_value(inst->result(), val_vdiv(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1))));
+                    break;
+                }
+                case Opcode::vfma: {
+                    frame.set_value(inst->result(), val_vfma(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1)), frame.get_value(inst->operand(2))));
                     break;
                 }
                 case Opcode::vneg: {

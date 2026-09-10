@@ -1,5 +1,6 @@
 #include <brass/brass.hpp>
 #include <brass/il_translator/il_translator.hpp>
+#include <brass/mir/fma_opt.hpp>
 #include <brass/mir/f64_demote.hpp>
 #include <brass/mir/gvn_pre.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
@@ -132,6 +133,16 @@ int main(int argc, char** argv) {
             options.enable_slp = true;
         } else if (arg == "--no-slp") {
             options.enable_slp = false;
+        } else if (arg == "--enable-avx2") {
+            options.enable_avx2 = true;
+        } else if (arg == "--enable-fma" || arg == "--fma") {
+            options.enable_fma = true;
+        } else if (arg == "--vector-width=256" || arg == "--vector-width-256") {
+            options.vector_width = 256;
+        } else if (arg.rfind("--vector-width=", 0) == 0) {
+            options.vector_width = static_cast<uint32_t>(std::stoul(arg.substr(15)));
+        } else if (arg == "--dump-fma-stats") {
+            options.dump_fma_stats = true;
         } else if (arg == "--loop-tile") {
             options.enable_loop_tile = true;
         } else if (arg == "--no-loop-tile") {
@@ -254,6 +265,11 @@ int main(int argc, char** argv) {
         options.loop_transform_stats_collector = &loop_stats;
     }
 
+    FmaOptStats fma_stats;
+    if (options.dump_fma_stats) {
+        options.fma_stats_collector = &fma_stats;
+    }
+
     DiagnosticReporter diag;
     TranslationResult res = translate_bronze_il(il_source, options, &diag);
     if (!res.success || !res.module) {
@@ -320,6 +336,10 @@ int main(int argc, char** argv) {
 
     if (options.dump_pre_stats) {
         std::cout << pre_stats.format_report() << "\n";
+    }
+
+    if (options.dump_fma_stats) {
+        std::cout << fma_stats.format_report() << "\n";
     }
 
     if (options.enable_partial_escape && !options.enable_allocation_sinking) {

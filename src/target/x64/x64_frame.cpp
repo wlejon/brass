@@ -41,8 +41,8 @@ void X64FrameLayout::compute_layout(codegen::FrameInfo& frame, const CallingConv
     }
 
     size_t raw_total = gpr_bytes + xmm_bytes + spill_bytes + outgoing_bytes;
-    // Align total frame size to 16 bytes
-    frame.total_frame_size = (raw_total + 15) & ~size_t(15);
+    // Align total frame size to 32 bytes (which is also 16-byte aligned)
+    frame.total_frame_size = (raw_total + 31) & ~size_t(31);
     frame.is_leaf = (!frame.has_calls && frame.total_frame_size == 0 && saved_gprs.empty() && saved_xmms.empty() && outgoing_bytes == 0);
 }
 

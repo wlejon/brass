@@ -14,6 +14,10 @@ static Type parse_type_str(std::string_view s) {
     if (s == "f64x2") return Type::f64x2();
     if (s == "i32x4") return Type::i32x4();
     if (s == "i64x2") return Type::i64x2();
+    if (s == "f32x8") return Type::f32x8();
+    if (s == "f64x4") return Type::f64x4();
+    if (s == "i32x8") return Type::i32x8();
+    if (s == "i64x4") return Type::i64x4();
     return Type::void_type();
 }
 
@@ -37,6 +41,7 @@ bool decode_vector_opcode(
     if (base == "vadd") { op = Opcode::vadd; return true; }
     if (base == "vsub") { op = Opcode::vsub; return true; }
     if (base == "vmul") { op = Opcode::vmul; return true; }
+    if (base == "vfma") { op = Opcode::vfma; return true; }
     if (base == "vdiv") { op = Opcode::vdiv; return true; }
     if (base == "vneg") { op = Opcode::vneg; return true; }
     if (base == "vmin") { op = Opcode::vmin; return true; }
@@ -107,6 +112,26 @@ bool parse_vector_instruction(
                 case Opcode::vxor: res_val = b.build_vxor(lhs, rhs); break;
                 default: break;
             }
+            if (res_val && op_t.is_vector()) {
+                res_val->set_type(op_t);
+                if (res_val->defining_instruction()) res_val->defining_instruction()->set_type(op_t);
+            }
+            return true;
+        }
+
+        case Opcode::vfma: {
+            Value* a = ctx.parse_val();
+            if (!a) return false;
+            if (!ctx.expect(TokenKind::Comma, "','")) return false;
+            Value* b_val = ctx.parse_val();
+            if (!b_val) return false;
+            if (!ctx.expect(TokenKind::Comma, "','")) return false;
+            Value* c = ctx.parse_val();
+            if (!c) return false;
+
+            Type op_t = type_annotation.is_vector() ? type_annotation :
+                        (type_suffix.is_vector() ? type_suffix : (a ? a->type() : Type::f32x4()));
+            res_val = b.build_vfma(a, b_val, c);
             if (res_val && op_t.is_vector()) {
                 res_val->set_type(op_t);
                 if (res_val->defining_instruction()) res_val->defining_instruction()->set_type(op_t);

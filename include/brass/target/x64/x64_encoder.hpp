@@ -413,6 +413,118 @@ public:
     void extractps(GPR dst, XMM src, uint8_t lane);
 
     // =========================================================================
+    // AVX / AVX2 (256-BIT) & FMA3 INSTRUCTIONS
+    // =========================================================================
+
+    // Low-level VEX Prefix Emission
+    void emit_vex2(bool r, uint8_t vvvv, bool l, uint8_t pp);
+    void emit_vex3(bool w, bool r, bool x, bool b, uint8_t mmmmm, uint8_t vvvv, bool l, uint8_t pp);
+    void emit_vex(bool w, uint8_t mmmmm, uint8_t pp, bool l, bool r, bool x, bool b, uint8_t vvvv);
+
+    // 256-bit AVX/AVX2 Moves
+    void vmovaps(XMM dst, XMM src);
+    void vmovaps(XMM dst, const MemAddress& src);
+    void vmovaps(const MemAddress& dst, XMM src);
+    void vmovups(XMM dst, XMM src);
+    void vmovups(XMM dst, const MemAddress& src);
+    void vmovups(const MemAddress& dst, XMM src);
+
+    // 256-bit Float Arithmetic (f32x8)
+    void vaddps(XMM dst, XMM src1, XMM src2);
+    void vaddps(XMM dst, XMM src1, const MemAddress& src2);
+    void vsubps(XMM dst, XMM src1, XMM src2);
+    void vsubps(XMM dst, XMM src1, const MemAddress& src2);
+    void vmulps(XMM dst, XMM src1, XMM src2);
+    void vmulps(XMM dst, XMM src1, const MemAddress& src2);
+    void vdivps(XMM dst, XMM src1, XMM src2);
+    void vdivps(XMM dst, XMM src1, const MemAddress& src2);
+    void vminps(XMM dst, XMM src1, XMM src2);
+    void vminps(XMM dst, XMM src1, const MemAddress& src2);
+    void vmaxps(XMM dst, XMM src1, XMM src2);
+    void vmaxps(XMM dst, XMM src1, const MemAddress& src2);
+
+    // 256-bit Double Arithmetic (f64x4)
+    void vaddpd(XMM dst, XMM src1, XMM src2);
+    void vaddpd(XMM dst, XMM src1, const MemAddress& src2);
+    void vsubpd(XMM dst, XMM src1, XMM src2);
+    void vsubpd(XMM dst, XMM src1, const MemAddress& src2);
+    void vmulpd(XMM dst, XMM src1, XMM src2);
+    void vmulpd(XMM dst, XMM src1, const MemAddress& src2);
+    void vdivpd(XMM dst, XMM src1, XMM src2);
+    void vdivpd(XMM dst, XMM src1, const MemAddress& src2);
+    void vminpd(XMM dst, XMM src1, XMM src2);
+    void vminpd(XMM dst, XMM src1, const MemAddress& src2);
+    void vmaxpd(XMM dst, XMM src1, XMM src2);
+    void vmaxpd(XMM dst, XMM src1, const MemAddress& src2);
+
+    // 256-bit Integer Arithmetic (i32x8 & i64x4)
+    void vpaddd(XMM dst, XMM src1, XMM src2);
+    void vpaddd(XMM dst, XMM src1, const MemAddress& src2);
+    void vpsubd(XMM dst, XMM src1, XMM src2);
+    void vpsubd(XMM dst, XMM src1, const MemAddress& src2);
+    void vpmulld(XMM dst, XMM src1, XMM src2);
+    void vpmulld(XMM dst, XMM src1, const MemAddress& src2);
+
+    void vpaddq(XMM dst, XMM src1, XMM src2);
+    void vpaddq(XMM dst, XMM src1, const MemAddress& src2);
+    void vpsubq(XMM dst, XMM src1, XMM src2);
+    void vpsubq(XMM dst, XMM src1, const MemAddress& src2);
+
+    // 256-bit Bitwise Operations
+    void vandps(XMM dst, XMM src1, XMM src2);
+    void vandps(XMM dst, XMM src1, const MemAddress& src2);
+    void vorps(XMM dst, XMM src1, XMM src2);
+    void vorps(XMM dst, XMM src1, const MemAddress& src2);
+    void vxorps(XMM dst, XMM src1, XMM src2);
+    void vxorps(XMM dst, XMM src1, const MemAddress& src2);
+
+    void vandpd(XMM dst, XMM src1, XMM src2);
+    void vandpd(XMM dst, XMM src1, const MemAddress& src2);
+    void vorpd(XMM dst, XMM src1, XMM src2);
+    void vorpd(XMM dst, XMM src1, const MemAddress& src2);
+    void vxorpd(XMM dst, XMM src1, XMM src2);
+    void vxorpd(XMM dst, XMM src1, const MemAddress& src2);
+
+    void vpand(XMM dst, XMM src1, XMM src2);
+    void vpand(XMM dst, XMM src1, const MemAddress& src2);
+    void vpor(XMM dst, XMM src1, XMM src2);
+    void vpor(XMM dst, XMM src1, const MemAddress& src2);
+    void vpxor(XMM dst, XMM src1, XMM src2);
+    void vpxor(XMM dst, XMM src1, const MemAddress& src2);
+
+    // Broadcast into 256-bit registers
+    void vbroadcastss(XMM dst, XMM src);
+    void vbroadcastss(XMM dst, const MemAddress& src);
+    void vbroadcastsd(XMM dst, XMM src);
+    void vbroadcastsd(XMM dst, const MemAddress& src);
+    void vpbroadcastd(XMM dst, XMM src);
+    void vpbroadcastd(XMM dst, const MemAddress& src);
+    void vpbroadcastq(XMM dst, XMM src);
+    void vpbroadcastq(XMM dst, const MemAddress& src);
+
+    // FMA3: Vector FMA (both 128-bit [is_256=false] and 256-bit [is_256=true])
+    void vfmadd213ps(XMM dst, XMM src2, XMM src3, bool is_256 = false);
+    void vfmadd213ps(XMM dst, XMM src2, const MemAddress& src3, bool is_256 = false);
+    void vfmadd231ps(XMM dst, XMM src2, XMM src3, bool is_256 = false);
+    void vfmadd231ps(XMM dst, XMM src2, const MemAddress& src3, bool is_256 = false);
+
+    void vfmadd213pd(XMM dst, XMM src2, XMM src3, bool is_256 = false);
+    void vfmadd213pd(XMM dst, XMM src2, const MemAddress& src3, bool is_256 = false);
+    void vfmadd231pd(XMM dst, XMM src2, XMM src3, bool is_256 = false);
+    void vfmadd231pd(XMM dst, XMM src2, const MemAddress& src3, bool is_256 = false);
+
+    // FMA3: Scalar FMA
+    void vfmadd213ss(XMM dst, XMM src2, XMM src3);
+    void vfmadd213ss(XMM dst, XMM src2, const MemAddress& src3);
+    void vfmadd231ss(XMM dst, XMM src2, XMM src3);
+    void vfmadd231ss(XMM dst, XMM src2, const MemAddress& src3);
+
+    void vfmadd213sd(XMM dst, XMM src2, XMM src3);
+    void vfmadd213sd(XMM dst, XMM src2, const MemAddress& src3);
+    void vfmadd231sd(XMM dst, XMM src2, XMM src3);
+    void vfmadd231sd(XMM dst, XMM src2, const MemAddress& src3);
+
+    // =========================================================================
     // BIT OPERATIONS (POPCNT, LZCNT, TZCNT, BSF, BSR)
     // =========================================================================
 

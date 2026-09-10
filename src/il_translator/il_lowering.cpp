@@ -198,6 +198,11 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
         opt_opts.stats = options_.loop_transform_stats_collector;
         opt_opts.pea_stats = options_.pea_stats_collector;
         opt_opts.demote_stats = options_.demote_stats_collector;
+        opt_opts.enable_avx2 = options_.enable_avx2;
+        opt_opts.enable_fma = options_.enable_fma;
+        opt_opts.vector_width = options_.vector_width;
+        opt_opts.dump_fma_stats = options_.dump_fma_stats;
+        opt_opts.fma_stats = options_.fma_stats_collector;
         if (options_.enable_sroa) {
             sroa_module(*mod);
         }

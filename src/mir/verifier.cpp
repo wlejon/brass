@@ -506,6 +506,30 @@ bool Verifier::verify_function(const Function& fn) {
                     break;
                 }
 
+                case Opcode::fma_f32: {
+                    if (inst->operand_count() != 3 || !inst->operand(0) || !inst->operand(1) || !inst->operand(2)) {
+                        report_error(inst_prefix + "Requires 3 operands.");
+                    } else if (inst->operand(0)->type() != Type::f32() ||
+                               inst->operand(1)->type() != Type::f32() ||
+                               inst->operand(2)->type() != Type::f32() ||
+                               inst->type() != Type::f32()) {
+                        report_error(inst_prefix + "fma_f32 operands and result must be f32.");
+                    }
+                    break;
+                }
+
+                case Opcode::fma_f64: {
+                    if (inst->operand_count() != 3 || !inst->operand(0) || !inst->operand(1) || !inst->operand(2)) {
+                        report_error(inst_prefix + "Requires 3 operands.");
+                    } else if (inst->operand(0)->type() != Type::f64() ||
+                               inst->operand(1)->type() != Type::f64() ||
+                               inst->operand(2)->type() != Type::f64() ||
+                               inst->type() != Type::f64()) {
+                        report_error(inst_prefix + "fma_f64 operands and result must be f64.");
+                    }
+                    break;
+                }
+
                 case Opcode::neg: {
                     if (inst->operand_count() != 1 || !inst->operand(0)) {
                         report_error(inst_prefix + "Requires 1 operand.");

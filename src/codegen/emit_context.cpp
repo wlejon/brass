@@ -887,6 +887,46 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
         case LirOpcode::Insertps:
         case LirOpcode::Extractps:
         case LirOpcode::Xorps:
+        case LirOpcode::Vmovaps:
+        case LirOpcode::Vmovups:
+        case LirOpcode::Vaddps:
+        case LirOpcode::Vsubps:
+        case LirOpcode::Vmulps:
+        case LirOpcode::Vdivps:
+        case LirOpcode::Vminps:
+        case LirOpcode::Vmaxps:
+        case LirOpcode::Vaddpd:
+        case LirOpcode::Vsubpd:
+        case LirOpcode::Vmulpd:
+        case LirOpcode::Vdivpd:
+        case LirOpcode::Vminpd:
+        case LirOpcode::Vmaxpd:
+        case LirOpcode::Vpaddd:
+        case LirOpcode::Vpsubd:
+        case LirOpcode::Vpmulld:
+        case LirOpcode::Vpaddq:
+        case LirOpcode::Vpsubq:
+        case LirOpcode::Vandps:
+        case LirOpcode::Vorps:
+        case LirOpcode::Vxorps:
+        case LirOpcode::Vandpd:
+        case LirOpcode::Vorpd:
+        case LirOpcode::Vxorpd:
+        case LirOpcode::Vpand:
+        case LirOpcode::Vpor:
+        case LirOpcode::Vpxor:
+        case LirOpcode::Vbroadcastss:
+        case LirOpcode::Vbroadcastsd:
+        case LirOpcode::Vpbroadcastd:
+        case LirOpcode::Vpbroadcastq:
+        case LirOpcode::Vfmadd213ps:
+        case LirOpcode::Vfmadd231ps:
+        case LirOpcode::Vfmadd213pd:
+        case LirOpcode::Vfmadd231pd:
+        case LirOpcode::Vfmadd213ss:
+        case LirOpcode::Vfmadd231ss:
+        case LirOpcode::Vfmadd213sd:
+        case LirOpcode::Vfmadd231sd:
             emit_vec_instruction(inst);
             break;
         case LirOpcode::ParallelCopy:

@@ -34,6 +34,10 @@ std::string_view token_kind_name(TokenKind kind) noexcept {
         case TokenKind::Kw_f64x2: return "f64x2";
         case TokenKind::Kw_i32x4: return "i32x4";
         case TokenKind::Kw_i64x2: return "i64x2";
+        case TokenKind::Kw_f32x8: return "f32x8";
+        case TokenKind::Kw_f64x4: return "f64x4";
+        case TokenKind::Kw_i32x8: return "i32x8";
+        case TokenKind::Kw_i64x4: return "i64x4";
         case TokenKind::Ident: return "identifier";
         case TokenKind::ValueIdent: return "value identifier";
         case TokenKind::SymbolIdent: return "symbol identifier";
@@ -305,6 +309,10 @@ Token Lexer::scan_identifier_or_keyword() {
     if (text == "f64x2") return Token{TokenKind::Kw_f64x2, text, loc, 0, 0.0};
     if (text == "i32x4") return Token{TokenKind::Kw_i32x4, text, loc, 0, 0.0};
     if (text == "i64x2") return Token{TokenKind::Kw_i64x2, text, loc, 0, 0.0};
+    if (text == "f32x8") return Token{TokenKind::Kw_f32x8, text, loc, 0, 0.0};
+    if (text == "f64x4") return Token{TokenKind::Kw_f64x4, text, loc, 0, 0.0};
+    if (text == "i32x8") return Token{TokenKind::Kw_i32x8, text, loc, 0, 0.0};
+    if (text == "i64x4") return Token{TokenKind::Kw_i64x4, text, loc, 0, 0.0};
 
     return Token{TokenKind::Ident, text, loc, 0, 0.0};
 }

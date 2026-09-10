@@ -15,6 +15,7 @@
 namespace brass {
 
 struct DemoteStats;
+struct FmaOptStats;
 
 struct LoopOptStats {
     LoopUnswitchStats unswitch_stats;
@@ -68,6 +69,11 @@ struct LoopOptOptions {
     const pgo::ProfileData* profile_data = nullptr;
     uint64_t min_pgo_unroll_iterations = 4;
     uint64_t min_pgo_unswitch_count = 10;
+    bool enable_avx2 = false;
+    bool enable_fma = false;
+    uint32_t vector_width = 0;
+    bool dump_fma_stats = false;
+    FmaOptStats* fma_stats = nullptr;
 };
 
 // General optimization pipeline: SROA -> GVN (CSE + RLE + DSE) -> Loop Opt -> SLP Vectorizer

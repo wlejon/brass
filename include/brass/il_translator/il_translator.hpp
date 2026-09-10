@@ -14,6 +14,7 @@ struct DemoteStats;
 struct PartialEscapeStats;
 struct GvnPreStats;
 struct LoopOptStats;
+struct FmaOptStats;
 
 namespace il {
 
@@ -58,6 +59,11 @@ struct TranslatorOptions {
     PartialEscapeStats* pea_stats_collector = nullptr;
     GvnPreStats* pre_stats_collector = nullptr;
     LoopOptStats* loop_transform_stats_collector = nullptr;
+    bool enable_avx2 = false;
+    bool enable_fma = false;
+    uint32_t vector_width = 0;
+    bool dump_fma_stats = false;
+    FmaOptStats* fma_stats_collector = nullptr;
 };
 
 struct TranslationResult {

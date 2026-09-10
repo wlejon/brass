@@ -17,11 +17,15 @@ Type parse_type_from_string(std::string_view s) {
     if (s == "f64x2") return Type::f64x2();
     if (s == "i32x4") return Type::i32x4();
     if (s == "i64x2") return Type::i64x2();
+    if (s == "f32x8") return Type::f32x8();
+    if (s == "f64x4") return Type::f64x4();
+    if (s == "i32x8") return Type::i32x8();
+    if (s == "i64x4") return Type::i64x4();
     return Type::void_type();
 }
 
 bool is_identifier_or_keyword(TokenKind k) noexcept {
-    return k == TokenKind::Ident || (k >= TokenKind::Kw_func && k <= TokenKind::Kw_i64x2);
+    return k == TokenKind::Ident || (k >= TokenKind::Kw_func && k <= TokenKind::Kw_i64x4);
 }
 
 bool decode_opcode_string(std::string_view str, Opcode& op, Type& type_suffix, Type& mem_type) {
@@ -64,6 +68,9 @@ bool decode_opcode_string(std::string_view str, Opcode& op, Type& type_suffix, T
 
     if (str == "bitcast.i64.f64" || str == "bitcast_i64_f64") { op = Opcode::bitcast_i64_f64; type_suffix = Type::i64(); return true; }
     if (str == "bitcast.f64.i64" || str == "bitcast_f64_i64") { op = Opcode::bitcast_f64_i64; type_suffix = Type::f64(); return true; }
+
+    if (str == "fma.f32" || str == "fma_f32") { op = Opcode::fma_f32; type_suffix = Type::f32(); return true; }
+    if (str == "fma.f64" || str == "fma_f64") { op = Opcode::fma_f64; type_suffix = Type::f64(); return true; }
 
     // Check dot separation: base.suffix or underscore separation
     std::string_view base = str;
@@ -129,6 +136,12 @@ bool decode_opcode_string(std::string_view str, Opcode& op, Type& type_suffix, T
         {"usub_overflow", Opcode::usub_overflow}, {"umul_overflow", Opcode::umul_overflow},
         {"switch", Opcode::switch_}
     };
+    if (base == "fma") {
+        if (type_suffix == Type::f32()) { op = Opcode::fma_f32; return true; }
+        op = Opcode::fma_f64;
+        type_suffix = Type::f64();
+        return true;
+    }
     auto it = op_map.find(base);
     if (it != op_map.end()) { op = it->second; return true; }
 

@@ -109,6 +109,10 @@ add_executable(brass_unit_tests
     unit/test_loop_distribution.cpp
     unit/test_array_contraction.cpp
     differential/test_loop_transform_differential.cpp
+    unit/test_vex_encoder.cpp
+    unit/test_v256_mir.cpp
+    unit/test_fma_opt.cpp
+    differential/test_avx2_differential.cpp
 )
 
 target_include_directories(brass_unit_tests

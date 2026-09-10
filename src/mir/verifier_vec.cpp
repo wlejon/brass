@@ -41,6 +41,34 @@ bool verify_vector_instruction(
             return true;
         }
 
+        case Opcode::vfma: {
+            if (inst->operand_count() != 3 || !inst->operand(0) || !inst->operand(1) || !inst->operand(2)) {
+                report_error(inst_prefix + "Requires 3 operands.");
+                return false;
+            }
+            Type t0 = inst->operand(0)->type();
+            Type t1 = inst->operand(1)->type();
+            Type t2 = inst->operand(2)->type();
+            if (!t0.is_vector() || !t1.is_vector() || !t2.is_vector()) {
+                report_error(inst_prefix + "Operands must be vector types.");
+                return false;
+            }
+            if (t0 != t1 || t0 != t2) {
+                report_error(inst_prefix + "Vector operand types mismatch.");
+                return false;
+            }
+            if (!t0.element_type().is_float()) {
+                report_error(inst_prefix + "vfma operands must be float vector types.");
+                return false;
+            }
+            if (inst->type() != t0) {
+                report_error(inst_prefix + "Result type (" + std::string(inst->type().name()) +
+                             ") must match operand type (" + std::string(t0.name()) + ").");
+                return false;
+            }
+            return true;
+        }
+
         case Opcode::vneg: {
             if (inst->operand_count() != 1 || !inst->operand(0)) {
                 report_error(inst_prefix + "Requires 1 operand.");
@@ -64,8 +92,8 @@ bool verify_vector_instruction(
                 return false;
             }
             Type t0 = inst->operand(0)->type();
-            if (!t0.is_vector() || (t0.kind() != TypeKind::F32x4 && t0.kind() != TypeKind::F64x2)) {
-                report_error(inst_prefix + "Operand must be float vector type (f32x4 or f64x2).");
+            if (!t0.is_vector() || !t0.element_type().is_float()) {
+                report_error(inst_prefix + "Operand must be float vector type.");
                 return false;
             }
             if (inst->type() != t0) {

@@ -37,6 +37,7 @@ struct VReg {
     constexpr bool is_32() const noexcept { return size == 4; }
     constexpr bool is_64() const noexcept { return size == 8; }
     constexpr bool is_128() const noexcept { return size == 16; }
+    constexpr bool is_256() const noexcept { return size == 32; }
 
     constexpr bool operator==(const VReg& other) const noexcept = default;
     constexpr bool operator!=(const VReg& other) const noexcept = default;
@@ -273,6 +274,47 @@ enum class LirOpcode : uint16_t {
     Insertps,
     Extractps,
     Xorps,
+    // 256-bit AVX/AVX2 Vector & FMA
+    Vmovaps,
+    Vmovups,
+    Vaddps,
+    Vsubps,
+    Vmulps,
+    Vdivps,
+    Vminps,
+    Vmaxps,
+    Vaddpd,
+    Vsubpd,
+    Vmulpd,
+    Vdivpd,
+    Vminpd,
+    Vmaxpd,
+    Vpaddd,
+    Vpsubd,
+    Vpmulld,
+    Vpaddq,
+    Vpsubq,
+    Vandps,
+    Vorps,
+    Vxorps,
+    Vandpd,
+    Vorpd,
+    Vxorpd,
+    Vpand,
+    Vpor,
+    Vpxor,
+    Vbroadcastss,
+    Vbroadcastsd,
+    Vpbroadcastd,
+    Vpbroadcastq,
+    Vfmadd213ps,
+    Vfmadd231ps,
+    Vfmadd213pd,
+    Vfmadd231pd,
+    Vfmadd213ss,
+    Vfmadd231ss,
+    Vfmadd213sd,
+    Vfmadd231sd,
     // Branches & Calls
     Jmp,
     Jcc,

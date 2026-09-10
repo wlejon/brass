@@ -289,6 +289,10 @@ RuntimeValue MiniCheneyGC::read_memory(uintptr_t base, int32_t offset, Type t) c
         uint8_t bytes[16];
         std::memcpy(bytes, reinterpret_cast<const void*>(effective_addr), 16);
         return RuntimeValue::from_v128(t, bytes);
+    } else if (access_size == 32) {
+        uint8_t bytes[32];
+        std::memcpy(bytes, reinterpret_cast<const void*>(effective_addr), 32);
+        return RuntimeValue::from_v256(t, bytes);
     } else {
         throw std::runtime_error("Memory Error: Unsupported access size in read_memory");
     }
@@ -320,6 +324,8 @@ void MiniCheneyGC::write_memory(uintptr_t base, int32_t offset, Type t, RuntimeV
         std::memcpy(reinterpret_cast<void*>(effective_addr), &raw_val, 8);
     } else if (access_size == 16) {
         std::memcpy(reinterpret_cast<void*>(effective_addr), val.v128_bytes(), 16);
+    } else if (access_size == 32) {
+        std::memcpy(reinterpret_cast<void*>(effective_addr), val.vec_bytes(), 32);
     } else {
         throw std::runtime_error("Memory Error: Unsupported access size in write_memory");
     }

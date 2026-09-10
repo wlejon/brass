@@ -44,7 +44,8 @@ void LinearScanAllocator::build_coalesce_hints() {
         for (const auto& inst : block->instructions) {
             if (inst->opcode == LirOpcode::Mov || inst->opcode == LirOpcode::Mov32 ||
                 inst->opcode == LirOpcode::Movsd || inst->opcode == LirOpcode::Movss ||
-                inst->opcode == LirOpcode::Movaps) {
+                inst->opcode == LirOpcode::Movaps || inst->opcode == LirOpcode::Vmovaps ||
+                inst->opcode == LirOpcode::Vmovups) {
                 if (inst->defs.size() >= 1 && inst->defs[0].is_vreg() &&
                     inst->uses.size() >= 1 && inst->uses[0].is_vreg()) {
                     VReg dst = inst->defs[0].vreg_val;
@@ -521,6 +522,19 @@ void LinearScanAllocator::allocate_blocked_reg(LiveInterval& interval) {
 }
 
 int32_t LinearScanAllocator::allocate_spill_slot(bool is_gcref, uint8_t size) {
+    if (size == 32) {
+        while ((next_spill_slot_ + 1) % 4 != 0) {
+            next_spill_slot_++;
+            fn_.frame.spill_slot_is_gcref.push_back(false);
+        }
+        int32_t slot = static_cast<int32_t>(next_spill_slot_);
+        next_spill_slot_ += 4;
+        for (int i = 0; i < 4; ++i) {
+            fn_.frame.spill_slot_is_gcref.push_back(false);
+        }
+        fn_.frame.num_spill_slots = next_spill_slot_;
+        return slot;
+    }
     if (size == 16) {
         if ((next_spill_slot_ % 2) == 0) {
             next_spill_slot_++;
@@ -634,10 +648,11 @@ void LinearScanAllocator::rewrite_instructions() {
                 def_is_mem && use_is_mem) {
                 uint8_t sz = inst->uses[0].size;
                 bool is_xmm = (inst->opcode == LirOpcode::Movsd || inst->opcode == LirOpcode::Movss ||
-                               inst->opcode == LirOpcode::Movaps || sz == 16);
+                               inst->opcode == LirOpcode::Movaps || inst->opcode == LirOpcode::Vmovaps ||
+                               inst->opcode == LirOpcode::Vmovups || sz == 16 || sz == 32);
                 PReg scratch = is_xmm ? PReg::xmm(XMM::XMM5) : PReg::gpr(GPR::R11);
 
-                LirOpcode op = is_xmm ? ((sz == 16) ? LirOpcode::Movaps : ((sz == 4) ? LirOpcode::Movss : LirOpcode::Movsd))
+                LirOpcode op = is_xmm ? ((sz == 32) ? LirOpcode::Vmovups : ((sz == 16) ? LirOpcode::Movaps : ((sz == 4) ? LirOpcode::Movss : LirOpcode::Movsd)))
                                       : ((sz == 4) ? LirOpcode::Mov32 : LirOpcode::Mov);
                 auto load_scratch = std::make_unique<LirInst>(op);
                 load_scratch->add_def(LirOperand::preg(scratch, sz));
@@ -688,7 +703,7 @@ void LinearScanAllocator::rewrite_instructions() {
                               inst->opcode == LirOpcode::Shufps || inst->opcode == LirOpcode::Shufpd ||
                               inst->opcode == LirOpcode::Pshufd || inst->opcode == LirOpcode::Movddup ||
                               inst->opcode == LirOpcode::Pinsrd || inst->opcode == LirOpcode::Pinsrq ||
-                              inst->opcode == LirOpcode::Insertps || sz == 16);
+                              inst->opcode == LirOpcode::Insertps || sz == 16 || sz == 32);
                 if (inst->is_call()) {
                     def_scratch = is_xmm_def ? PReg::xmm(XMM::XMM0) : PReg::gpr(GPR::RAX);
                 } else {
@@ -705,7 +720,7 @@ void LinearScanAllocator::rewrite_instructions() {
                 }
 
                 if (reads_def) {
-                    LirOpcode load_op = is_xmm_def ? ((sz == 16) ? LirOpcode::Movaps : ((sz == 4) ? LirOpcode::Movss : LirOpcode::Movsd))
+                    LirOpcode load_op = is_xmm_def ? ((sz == 32) ? LirOpcode::Vmovups : ((sz == 16) ? LirOpcode::Movaps : ((sz == 4) ? LirOpcode::Movss : LirOpcode::Movsd)))
                                                    : ((sz == 4) ? LirOpcode::Mov32 : LirOpcode::Mov);
                     auto load_def = std::make_unique<LirInst>(load_op);
                     load_def->add_def(LirOperand::preg(def_scratch, sz));
@@ -767,8 +782,8 @@ void LinearScanAllocator::rewrite_instructions() {
                                       inst->opcode == LirOpcode::Pcmpeqd || inst->opcode == LirOpcode::Pslld ||
                                       inst->opcode == LirOpcode::Psllq || inst->opcode == LirOpcode::Shufps ||
                                       inst->opcode == LirOpcode::Shufpd || inst->opcode == LirOpcode::Pshufd ||
-                                      inst->opcode == LirOpcode::Movddup || inst->opcode == LirOpcode::Insertps ||
-                                      inst->opcode == LirOpcode::Xorps || sz == 16);
+                                       inst->opcode == LirOpcode::Movddup || inst->opcode == LirOpcode::Insertps ||
+                                       inst->opcode == LirOpcode::Xorps || sz == 16 || sz == 32);
                     }
                     int32_t slot = inst->uses[i].spill_slot;
 
@@ -790,7 +805,7 @@ void LinearScanAllocator::rewrite_instructions() {
                             use_scratch = gpr_scratches[gpr_scratch_idx < 2 ? gpr_scratch_idx++ : 1];
                         }
 
-                        LirOpcode load_op = is_xmm_use ? ((sz == 16) ? LirOpcode::Movaps : ((sz == 4) ? LirOpcode::Movss : LirOpcode::Movsd))
+                        LirOpcode load_op = is_xmm_use ? ((sz == 32) ? LirOpcode::Vmovups : ((sz == 16) ? LirOpcode::Movaps : ((sz == 4) ? LirOpcode::Movss : LirOpcode::Movsd)))
                                                        : ((sz == 4) ? LirOpcode::Mov32 : LirOpcode::Mov);
                         auto load_use = std::make_unique<LirInst>(load_op);
                         load_use->add_def(LirOperand::preg(use_scratch, sz));
@@ -807,7 +822,7 @@ void LinearScanAllocator::rewrite_instructions() {
             // Write back to spill slot if def was spilled
             if (has_spill_def) {
                 uint8_t sz = original_spill_def.size;
-                LirOpcode store_op = is_xmm_def ? ((sz == 16) ? LirOpcode::Movaps : ((sz == 4) ? LirOpcode::Movss : LirOpcode::Movsd))
+                LirOpcode store_op = is_xmm_def ? ((sz == 32) ? LirOpcode::Vmovups : ((sz == 16) ? LirOpcode::Movaps : ((sz == 4) ? LirOpcode::Movss : LirOpcode::Movsd)))
                                                 : ((sz == 4) ? LirOpcode::Mov32 : LirOpcode::Mov);
                 auto store_back = std::make_unique<LirInst>(store_op);
                 store_back->add_def(original_spill_def);

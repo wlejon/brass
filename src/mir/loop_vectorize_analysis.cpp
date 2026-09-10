@@ -273,21 +273,48 @@ bool analyze_vectorizable_loop(
     }
 
     // Configure vector width & vector type
+    bool use_256 = options.enable_avx2 || options.vector_width == 256 || options.vector_width == 8;
     if (determined_elem_type == Type::f32()) {
         if (!options.enable_f32x4) return false;
-        vli.vector_width = 4;
-        vli.elem_type = Type::f32();
-        vli.vec_type = Type::f32x4();
+        if (use_256) {
+            vli.vector_width = 8;
+            vli.elem_type = Type::f32();
+            vli.vec_type = Type::f32x8();
+        } else {
+            vli.vector_width = 4;
+            vli.elem_type = Type::f32();
+            vli.vec_type = Type::f32x4();
+        }
     } else if (determined_elem_type == Type::i32()) {
         if (!options.enable_i32x4) return false;
-        vli.vector_width = 4;
-        vli.elem_type = Type::i32();
-        vli.vec_type = Type::i32x4();
+        if (use_256) {
+            vli.vector_width = 8;
+            vli.elem_type = Type::i32();
+            vli.vec_type = Type::i32x8();
+        } else {
+            vli.vector_width = 4;
+            vli.elem_type = Type::i32();
+            vli.vec_type = Type::i32x4();
+        }
     } else if (determined_elem_type == Type::f64()) {
         if (!options.enable_f64x2) return false;
-        vli.vector_width = 2;
-        vli.elem_type = Type::f64();
-        vli.vec_type = Type::f64x2();
+        if (use_256) {
+            vli.vector_width = 4;
+            vli.elem_type = Type::f64();
+            vli.vec_type = Type::f64x4();
+        } else {
+            vli.vector_width = 2;
+            vli.elem_type = Type::f64();
+            vli.vec_type = Type::f64x2();
+        }
+    } else if (determined_elem_type == Type::i64()) {
+        if (use_256) {
+            vli.vector_width = 4;
+            vli.elem_type = Type::i64();
+            vli.vec_type = Type::i64x4();
+        } else {
+            return false;
+        }
     } else {
         return false;
     }

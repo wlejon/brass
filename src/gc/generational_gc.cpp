@@ -602,6 +602,16 @@ void GenerationalGC::write_field(uintptr_t obj_addr, size_t field_idx, RuntimeVa
 
 RuntimeValue GenerationalGC::read_memory(uintptr_t base, int32_t offset, Type t) const {
     uintptr_t target = base + static_cast<uintptr_t>(offset);
+    if (t.is_v128()) {
+        uint8_t bytes[16];
+        std::memcpy(bytes, reinterpret_cast<const void*>(target), 16);
+        return RuntimeValue::from_v128(t, bytes);
+    }
+    if (t.is_v256()) {
+        uint8_t bytes[32];
+        std::memcpy(bytes, reinterpret_cast<const void*>(target), 32);
+        return RuntimeValue::from_v256(t, bytes);
+    }
     if (t.is_float()) {
         double d = *reinterpret_cast<const double*>(target);
         return RuntimeValue::from_f64(d);
@@ -618,7 +628,11 @@ RuntimeValue GenerationalGC::read_memory(uintptr_t base, int32_t offset, Type t)
 
 void GenerationalGC::write_memory(uintptr_t base, int32_t offset, Type t, RuntimeValue val) {
     uintptr_t target = base + static_cast<uintptr_t>(offset);
-    if (t.is_float()) {
+    if (t.is_v128()) {
+        std::memcpy(reinterpret_cast<void*>(target), val.v128_bytes(), 16);
+    } else if (t.is_v256()) {
+        std::memcpy(reinterpret_cast<void*>(target), val.vec_bytes(), 32);
+    } else if (t.is_float()) {
         *reinterpret_cast<double*>(target) = val.as_f64();
     } else if (t.size_in_bytes() == 4) {
         *reinterpret_cast<int32_t*>(target) = val.as_i32();

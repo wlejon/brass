@@ -7,6 +7,7 @@
 #include <brass/mir/slp_vectorize.hpp>
 #include <brass/mir/loop_vectorize.hpp>
 #include <brass/mir/loop_tile.hpp>
+#include <brass/mir/fma_opt.hpp>
 #include <brass/mir/f64_demote.hpp>
 #include <brass/mir/select_opt.hpp>
 #include <brass/mir/dominators.hpp>
@@ -739,6 +740,8 @@ bool optimize_function_loops(Function& fn, const LoopOptOptions& options) {
         fn.rebuild_cfg_predecessors();
         DominatorTree dom(fn);
         LoopVectorizeOptions vec_opts;
+        vec_opts.enable_avx2 = options.enable_avx2;
+        vec_opts.vector_width = options.vector_width;
         vec_opts.allow_fp_reassociation = options.enable_fp_reassociation || fn.allow_fp_reassociation() || (fn.parent() && fn.parent()->allow_fp_reassociation());
         if (loop_vectorize_pass(fn, dom, vec_opts)) {
             any_changed = true;
@@ -747,6 +750,17 @@ bool optimize_function_loops(Function& fn, const LoopOptOptions& options) {
             if (options.enable_dce) {
                 constant_folding_pass(fn);
                 cse_pass(fn, dom_after);
+                dead_code_elimination_pass(fn);
+            }
+        }
+    }
+
+    if (options.enable_fma) {
+        FmaOptOptions fma_opts;
+        fma_opts.stats = options.fma_stats;
+        if (fma_opt_pass(fn, fma_opts)) {
+            any_changed = true;
+            if (options.enable_dce) {
                 dead_code_elimination_pass(fn);
             }
         }

@@ -450,6 +450,21 @@ public:
                     << value_name(inst.operand(0)) << ", " << value_name(inst.operand(1));
                 break;
 
+            case Opcode::vfma:
+                os_ << "vfma " << value_name(inst.operand(0)) << ", "
+                    << value_name(inst.operand(1)) << ", " << value_name(inst.operand(2));
+                break;
+
+            case Opcode::fma_f32:
+                os_ << "fma.f32 " << value_name(inst.operand(0)) << ", "
+                    << value_name(inst.operand(1)) << ", " << value_name(inst.operand(2));
+                break;
+
+            case Opcode::fma_f64:
+                os_ << "fma.f64 " << value_name(inst.operand(0)) << ", "
+                    << value_name(inst.operand(1)) << ", " << value_name(inst.operand(2));
+                break;
+
             case Opcode::vneg:
             case Opcode::vsqrt:
             case Opcode::vnot:

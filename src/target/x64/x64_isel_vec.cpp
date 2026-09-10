@@ -85,6 +85,43 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
                 break;
             }
 
+            if (t.is_v256()) {
+                LirOpcode op = LirOpcode::Nop;
+                if (inst.opcode() == Opcode::vadd) {
+                    if (t.kind() == TypeKind::F32x8) op = LirOpcode::Vaddps;
+                    else if (t.kind() == TypeKind::F64x4) op = LirOpcode::Vaddpd;
+                    else if (t.kind() == TypeKind::I32x8) op = LirOpcode::Vpaddd;
+                    else if (t.kind() == TypeKind::I64x4) op = LirOpcode::Vpaddq;
+                } else if (inst.opcode() == Opcode::vsub) {
+                    if (t.kind() == TypeKind::F32x8) op = LirOpcode::Vsubps;
+                    else if (t.kind() == TypeKind::F64x4) op = LirOpcode::Vsubpd;
+                    else if (t.kind() == TypeKind::I32x8) op = LirOpcode::Vpsubd;
+                    else if (t.kind() == TypeKind::I64x4) op = LirOpcode::Vpsubq;
+                } else if (inst.opcode() == Opcode::vmul) {
+                    if (t.kind() == TypeKind::F32x8) op = LirOpcode::Vmulps;
+                    else if (t.kind() == TypeKind::F64x4) op = LirOpcode::Vmulpd;
+                    else if (t.kind() == TypeKind::I32x8) op = LirOpcode::Vpmulld;
+                } else if (inst.opcode() == Opcode::vdiv) {
+                    if (t.kind() == TypeKind::F32x8) op = LirOpcode::Vdivps;
+                    else if (t.kind() == TypeKind::F64x4) op = LirOpcode::Vdivpd;
+                } else if (inst.opcode() == Opcode::vmin) {
+                    if (t.kind() == TypeKind::F32x8) op = LirOpcode::Vminps;
+                    else if (t.kind() == TypeKind::F64x4) op = LirOpcode::Vminpd;
+                } else if (inst.opcode() == Opcode::vmax) {
+                    if (t.kind() == TypeKind::F32x8) op = LirOpcode::Vmaxps;
+                    else if (t.kind() == TypeKind::F64x4) op = LirOpcode::Vmaxpd;
+                }
+                if (op != LirOpcode::Nop) {
+                    auto binop = std::make_unique<LirInst>(op);
+                    binop->add_def(LirOperand::vreg(dst, 32));
+                    binop->add_use(LirOperand::vreg(v0, 32));
+                    binop->add_use(LirOperand::vreg(v1, 32));
+                    binop->mir_origin = &inst;
+                    lir_bb.append_inst(std::move(binop));
+                    break;
+                }
+            }
+
             LirOpcode op = LirOpcode::Nop;
             if (inst.opcode() == Opcode::vadd) {
                 if (t.kind() == TypeKind::F32x4) op = LirOpcode::Addps;
@@ -144,6 +181,20 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
             VReg dst = get_vreg(inst.result());
             VReg v0 = get_vreg(inst.operand(0));
             VReg v1 = get_vreg(inst.operand(1));
+
+            if (inst.type().is_v256()) {
+                LirOpcode op = LirOpcode::Vpand;
+                if (inst.opcode() == Opcode::vor) op = LirOpcode::Vpor;
+                else if (inst.opcode() == Opcode::vxor) op = LirOpcode::Vpxor;
+
+                auto binop = std::make_unique<LirInst>(op);
+                binop->add_def(LirOperand::vreg(dst, 32));
+                binop->add_use(LirOperand::vreg(v0, 32));
+                binop->add_use(LirOperand::vreg(v1, 32));
+                binop->mir_origin = &inst;
+                lir_bb.append_inst(std::move(binop));
+                break;
+            }
 
             LirOpcode op = LirOpcode::Pand;
             if (inst.opcode() == Opcode::vor) op = LirOpcode::Por;
@@ -253,10 +304,12 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
             VReg dst = get_vreg(inst.result());
             VReg base = get_vreg(inst.operand(0));
             int32_t offset = inst.offset();
+            uint8_t sz = static_cast<uint8_t>(inst.type().size_in_bytes());
+            LirOpcode op = (sz == 32) ? LirOpcode::Vmovups : LirOpcode::Movups;
 
-            auto load = std::make_unique<LirInst>(LirOpcode::Movups);
-            load->add_def(LirOperand::vreg(dst, 16));
-            load->add_use(LirOperand::mem(base, offset, 16));
+            auto load = std::make_unique<LirInst>(op);
+            load->add_def(LirOperand::vreg(dst, sz));
+            load->add_use(LirOperand::mem(base, offset, sz));
             load->mir_origin = &inst;
             lir_bb.append_inst(std::move(load));
             break;
@@ -266,10 +319,12 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
             VReg base = get_vreg(inst.operand(0));
             VReg val = get_vreg(inst.operand(1));
             int32_t offset = inst.offset();
+            uint8_t sz = static_cast<uint8_t>(inst.memory_type().size_in_bytes());
+            LirOpcode op = (sz == 32) ? LirOpcode::Vmovups : LirOpcode::Movups;
 
-            auto store = std::make_unique<LirInst>(LirOpcode::Movups);
-            store->add_def(LirOperand::mem(base, offset, 16));
-            store->add_use(LirOperand::vreg(val, 16));
+            auto store = std::make_unique<LirInst>(op);
+            store->add_def(LirOperand::mem(base, offset, sz));
+            store->add_use(LirOperand::vreg(val, sz));
             store->mir_origin = &inst;
             lir_bb.append_inst(std::move(store));
             break;
@@ -279,6 +334,27 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
             VReg dst = get_vreg(inst.result());
             VReg src = get_vreg(inst.operand(0));
             Type t = inst.type();
+
+            if (t.is_v256()) {
+                LirOpcode bop = LirOpcode::Vbroadcastss;
+                uint8_t src_sz = 4;
+                if (t.kind() == TypeKind::F64x4) {
+                    bop = LirOpcode::Vbroadcastsd;
+                    src_sz = 8;
+                } else if (t.kind() == TypeKind::I32x8) {
+                    bop = LirOpcode::Vpbroadcastd;
+                    src_sz = 4;
+                } else if (t.kind() == TypeKind::I64x4) {
+                    bop = LirOpcode::Vpbroadcastq;
+                    src_sz = 8;
+                }
+                auto bcast = std::make_unique<LirInst>(bop);
+                bcast->add_def(LirOperand::vreg(dst, 32));
+                bcast->add_use(LirOperand::vreg(src, src_sz));
+                bcast->mir_origin = &inst;
+                lir_bb.append_inst(std::move(bcast));
+                break;
+            }
 
             if (t.kind() == TypeKind::F32x4) {
                 auto movss = std::make_unique<LirInst>(LirOpcode::Movss);
@@ -503,12 +579,75 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
 
         case Opcode::vzero: {
             VReg dst = get_vreg(inst.result());
-            auto z = std::make_unique<LirInst>(LirOpcode::Xorps);
-            z->add_def(LirOperand::vreg(dst, 16));
-            z->add_use(LirOperand::vreg(dst, 16));
-            z->add_use(LirOperand::vreg(dst, 16));
-            z->mir_origin = &inst;
-            lir_bb.append_inst(std::move(z));
+            Type t = inst.type();
+            if (t.is_v256()) {
+                auto z = std::make_unique<LirInst>(LirOpcode::Vxorps);
+                z->add_def(LirOperand::vreg(dst, 32));
+                z->add_use(LirOperand::vreg(dst, 32));
+                z->add_use(LirOperand::vreg(dst, 32));
+                z->mir_origin = &inst;
+                lir_bb.append_inst(std::move(z));
+            } else {
+                auto z = std::make_unique<LirInst>(LirOpcode::Xorps);
+                z->add_def(LirOperand::vreg(dst, 16));
+                z->add_use(LirOperand::vreg(dst, 16));
+                z->add_use(LirOperand::vreg(dst, 16));
+                z->mir_origin = &inst;
+                lir_bb.append_inst(std::move(z));
+            }
+            break;
+        }
+
+        case Opcode::vfma: {
+            uint8_t sz = static_cast<uint8_t>(inst.type().size_in_bytes());
+            VReg dst = get_vreg(inst.result());
+            VReg a = get_vreg(inst.operand(0));
+            VReg b = get_vreg(inst.operand(1));
+            VReg c = get_vreg(inst.operand(2));
+
+            if (dst != a) {
+                auto mov = std::make_unique<LirInst>(sz == 32 ? LirOpcode::Vmovaps : LirOpcode::Movaps);
+                mov->add_def(LirOperand::vreg(dst, sz));
+                mov->add_use(LirOperand::vreg(a, sz));
+                lir_bb.append_inst(std::move(mov));
+            }
+
+            LirOpcode fma_op = (inst.type().kind() == TypeKind::F64x2 || inst.type().kind() == TypeKind::F64x4)
+                             ? LirOpcode::Vfmadd213pd : LirOpcode::Vfmadd213ps;
+
+            auto fma = std::make_unique<LirInst>(fma_op);
+            fma->add_def(LirOperand::vreg(dst, sz));
+            fma->add_use(LirOperand::vreg(dst, sz));
+            fma->add_use(LirOperand::vreg(b, sz));
+            fma->add_use(LirOperand::vreg(c, sz));
+            fma->mir_origin = &inst;
+            lir_bb.append_inst(std::move(fma));
+            break;
+        }
+
+        case Opcode::fma_f32:
+        case Opcode::fma_f64: {
+            uint8_t sz = (inst.opcode() == Opcode::fma_f32) ? 4 : 8;
+            VReg dst = get_vreg(inst.result());
+            VReg a = get_vreg(inst.operand(0));
+            VReg b = get_vreg(inst.operand(1));
+            VReg c = get_vreg(inst.operand(2));
+
+            if (dst != a) {
+                auto mov = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Movss : LirOpcode::Movsd);
+                mov->add_def(LirOperand::vreg(dst, sz));
+                mov->add_use(LirOperand::vreg(a, sz));
+                lir_bb.append_inst(std::move(mov));
+            }
+
+            LirOpcode fma_op = (sz == 4) ? LirOpcode::Vfmadd213ss : LirOpcode::Vfmadd213sd;
+            auto fma = std::make_unique<LirInst>(fma_op);
+            fma->add_def(LirOperand::vreg(dst, sz));
+            fma->add_use(LirOperand::vreg(dst, sz));
+            fma->add_use(LirOperand::vreg(b, sz));
+            fma->add_use(LirOperand::vreg(c, sz));
+            fma->mir_origin = &inst;
+            lir_bb.append_inst(std::move(fma));
             break;
         }
 

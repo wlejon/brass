@@ -506,6 +506,60 @@ std::string to_string(const RuntimeValue& val) {
             ss << "<" << val.i64_lane(0) << ", " << val.i64_lane(1) << ">";
             return ss.str();
         }
+        case RuntimeValueKind::F32x8: {
+            ss << "<";
+            for (size_t i = 0; i < 8; ++i) {
+                if (i > 0) ss << ", ";
+                float f = val.f32_lane(i);
+                if (std::isnan(f)) ss << "nan";
+                else if (std::isinf(f)) ss << ((f < 0) ? "-inf" : "inf");
+                else {
+                    std::ostringstream elem;
+                    elem << std::defaultfloat << f;
+                    std::string s = elem.str();
+                    if (s.find('.') == std::string::npos && s.find('e') == std::string::npos) s += ".0";
+                    ss << s;
+                }
+            }
+            ss << ">";
+            return ss.str();
+        }
+        case RuntimeValueKind::F64x4: {
+            ss << "<";
+            for (size_t i = 0; i < 4; ++i) {
+                if (i > 0) ss << ", ";
+                double d = val.f64_lane(i);
+                if (std::isnan(d)) ss << "nan";
+                else if (std::isinf(d)) ss << ((d < 0) ? "-inf" : "inf");
+                else {
+                    std::ostringstream elem;
+                    elem << std::defaultfloat << d;
+                    std::string s = elem.str();
+                    if (s.find('.') == std::string::npos && s.find('e') == std::string::npos) s += ".0";
+                    ss << s;
+                }
+            }
+            ss << ">";
+            return ss.str();
+        }
+        case RuntimeValueKind::I32x8: {
+            ss << "<";
+            for (size_t i = 0; i < 8; ++i) {
+                if (i > 0) ss << ", ";
+                ss << val.i32_lane(i);
+            }
+            ss << ">";
+            return ss.str();
+        }
+        case RuntimeValueKind::I64x4: {
+            ss << "<";
+            for (size_t i = 0; i < 4; ++i) {
+                if (i > 0) ss << ", ";
+                ss << val.i64_lane(i);
+            }
+            ss << ">";
+            return ss.str();
+        }
     }
     return "<unknown>";
 }

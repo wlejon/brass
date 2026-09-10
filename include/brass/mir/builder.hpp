@@ -64,6 +64,9 @@ public:
     Value* build_add(Value* lhs, Value* rhs);
     Value* build_sub(Value* lhs, Value* rhs);
     Value* build_mul(Value* lhs, Value* rhs);
+    Value* build_fma(Value* a, Value* b, Value* c);
+    Value* build_fma_f32(Value* a, Value* b, Value* c);
+    Value* build_fma_f64(Value* a, Value* b, Value* c);
     Value* build_sdiv(Value* lhs, Value* rhs);
     Value* build_udiv(Value* lhs, Value* rhs);
     Value* build_smod(Value* lhs, Value* rhs);
@@ -80,7 +83,7 @@ public:
     Value* build_ctz(Value* val);
     Value* build_popcnt(Value* val);
 
-    // Comparisons
+    // Comparison
     Value* build_eq(Value* lhs, Value* rhs);
     Value* build_ne(Value* lhs, Value* rhs);
     Value* build_slt(Value* lhs, Value* rhs);
@@ -118,6 +121,7 @@ public:
     Value* build_vadd(Value* lhs, Value* rhs);
     Value* build_vsub(Value* lhs, Value* rhs);
     Value* build_vmul(Value* lhs, Value* rhs);
+    Value* build_vfma(Value* a, Value* b, Value* c);
     Value* build_vdiv(Value* lhs, Value* rhs);
     Value* build_vneg(Value* val);
     Value* build_vmin(Value* lhs, Value* rhs);

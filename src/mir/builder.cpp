@@ -307,6 +307,32 @@ static Value* build_cmp_op(Builder* b, Arena& arena, Opcode op, Value* lhs, Valu
 Value* Builder::build_add(Value* lhs, Value* rhs) { return build_bin_op(this, get_arena(), Opcode::add, lhs, rhs); }
 Value* Builder::build_sub(Value* lhs, Value* rhs) { return build_bin_op(this, get_arena(), Opcode::sub, lhs, rhs); }
 Value* Builder::build_mul(Value* lhs, Value* rhs) { return build_bin_op(this, get_arena(), Opcode::mul, lhs, rhs); }
+
+static Value* build_ternary_op(Builder* b, Arena& arena, Opcode op, Type res_type, Value* a, Value* b_val, Value* c) {
+    Instruction* inst = arena.make<Instruction>(op, res_type);
+    inst->add_operand(a);
+    inst->add_operand(b_val);
+    inst->add_operand(c);
+    Value* res = b->create_value(res_type);
+    res->set_defining_instruction(inst);
+    inst->set_result(res);
+    b->insert(inst);
+    return res;
+}
+
+Value* Builder::build_fma_f32(Value* a, Value* b, Value* c) {
+    return build_ternary_op(this, get_arena(), Opcode::fma_f32, Type::f32(), a, b, c);
+}
+
+Value* Builder::build_fma_f64(Value* a, Value* b, Value* c) {
+    return build_ternary_op(this, get_arena(), Opcode::fma_f64, Type::f64(), a, b, c);
+}
+
+Value* Builder::build_fma(Value* a, Value* b, Value* c) {
+    Type t = a ? a->type() : Type::f64();
+    if (t == Type::f32()) return build_fma_f32(a, b, c);
+    return build_fma_f64(a, b, c);
+}
 Value* Builder::build_sdiv(Value* lhs, Value* rhs) { return build_bin_op(this, get_arena(), Opcode::sdiv, lhs, rhs); }
 Value* Builder::build_udiv(Value* lhs, Value* rhs) { return build_bin_op(this, get_arena(), Opcode::udiv, lhs, rhs); }
 Value* Builder::build_smod(Value* lhs, Value* rhs) { return build_bin_op(this, get_arena(), Opcode::smod, lhs, rhs); }
@@ -463,6 +489,10 @@ static Value* build_vec_un_op(Builder* b, Arena& arena, Opcode op, Value* val) {
 Value* Builder::build_vadd(Value* lhs, Value* rhs) { return build_vec_bin_op(this, get_arena(), Opcode::vadd, lhs, rhs); }
 Value* Builder::build_vsub(Value* lhs, Value* rhs) { return build_vec_bin_op(this, get_arena(), Opcode::vsub, lhs, rhs); }
 Value* Builder::build_vmul(Value* lhs, Value* rhs) { return build_vec_bin_op(this, get_arena(), Opcode::vmul, lhs, rhs); }
+Value* Builder::build_vfma(Value* a, Value* b, Value* c) {
+    Type res_type = a ? a->type() : (b ? b->type() : (c ? c->type() : Type::f32x4()));
+    return build_ternary_op(this, get_arena(), Opcode::vfma, res_type, a, b, c);
+}
 Value* Builder::build_vdiv(Value* lhs, Value* rhs) { return build_vec_bin_op(this, get_arena(), Opcode::vdiv, lhs, rhs); }
 Value* Builder::build_vneg(Value* val) { return build_vec_un_op(this, get_arena(), Opcode::vneg, val); }
 Value* Builder::build_vmin(Value* lhs, Value* rhs) { return build_vec_bin_op(this, get_arena(), Opcode::vmin, lhs, rhs); }

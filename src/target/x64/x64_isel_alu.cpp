@@ -30,6 +30,9 @@ void X64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
         case Opcode::vinsert_lane:
         case Opcode::vshuffle:
         case Opcode::vzero:
+        case Opcode::vfma:
+        case Opcode::fma_f32:
+        case Opcode::fma_f64:
             lower_vector_instruction(inst, lir_bb);
             break;
 

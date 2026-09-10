@@ -274,6 +274,22 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
             reinterpret_cast<void(*)()>(addr)();
             return RuntimeValue::from_void();
         } else if (ret_type.is_vector()) {
+            if (ret_type.is_v256()) {
+                alignas(32) uint8_t b[32];
+#if defined(__GNUC__) || defined(__clang__)
+                asm volatile(
+                    "subq $40, %%rsp\n\t"
+                    "call *%1\n\t"
+                    "vmovups %%ymm0, (%0)\n\t"
+                    "vzeroupper\n\t"
+                    "addq $40, %%rsp\n\t"
+                    :
+                    : "r"(b), "r"(addr)
+                    : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
+                );
+#endif
+                return RuntimeValue::from_v256(ret_type, b);
+            }
             __m128 r = reinterpret_cast<__m128(*)()>(addr)();
             alignas(16) uint8_t b[16];
             std::memcpy(b, &r, 16);
@@ -296,6 +312,25 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
 
     // 1 argument
     if (args.size() == 1) {
+        if (args[0].is_v256()) {
+            if (ret_type.is_v256()) {
+                alignas(32) uint8_t b[32];
+#if defined(__GNUC__) || defined(__clang__)
+                asm volatile(
+                    "subq $40, %%rsp\n\t"
+                    "vmovups (%2), %%ymm0\n\t"
+                    "call *%1\n\t"
+                    "vmovups %%ymm0, (%0)\n\t"
+                    "vzeroupper\n\t"
+                    "addq $40, %%rsp\n\t"
+                    :
+                    : "r"(b), "r"(addr), "r"(args[0].vec_bytes())
+                    : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
+                );
+#endif
+                return RuntimeValue::from_v256(ret_type, b);
+            }
+        }
         if (args[0].is_vector()) {
             __m128 a0;
             std::memcpy(&a0, args[0].v128_bytes(), 16);
@@ -350,6 +385,26 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
 
     // 2 arguments
     if (args.size() == 2) {
+        if (args[0].is_v256() && args[1].is_v256()) {
+            if (ret_type.is_v256()) {
+                alignas(32) uint8_t b[32];
+#if defined(__GNUC__) || defined(__clang__)
+                asm volatile(
+                    "subq $40, %%rsp\n\t"
+                    "vmovups (%2), %%ymm0\n\t"
+                    "vmovups (%3), %%ymm1\n\t"
+                    "call *%1\n\t"
+                    "vmovups %%ymm0, (%0)\n\t"
+                    "vzeroupper\n\t"
+                    "addq $40, %%rsp\n\t"
+                    :
+                    : "r"(b), "r"(addr), "r"(args[0].vec_bytes()), "r"(args[1].vec_bytes())
+                    : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
+                );
+#endif
+                return RuntimeValue::from_v256(ret_type, b);
+            }
+        }
         if (args[0].is_vector() && args[1].is_vector()) {
             __m128 a0, a1;
             std::memcpy(&a0, args[0].v128_bytes(), 16);
@@ -434,6 +489,56 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
 
     // 3 arguments
     if (args.size() == 3) {
+        if (args[0].is_v256() && args[1].is_v256() && args[2].is_v256()) {
+            if (ret_type.is_v256()) {
+                alignas(32) uint8_t b[32];
+#if defined(__GNUC__) || defined(__clang__)
+                asm volatile(
+                    "subq $40, %%rsp\n\t"
+                    "vmovups (%2), %%ymm0\n\t"
+                    "vmovups (%3), %%ymm1\n\t"
+                    "vmovups (%4), %%ymm2\n\t"
+                    "call *%1\n\t"
+                    "vmovups %%ymm0, (%0)\n\t"
+                    "vzeroupper\n\t"
+                    "addq $40, %%rsp\n\t"
+                    :
+                    : "r"(b), "r"(addr), "r"(args[0].vec_bytes()), "r"(args[1].vec_bytes()), "r"(args[2].vec_bytes())
+                    : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
+                );
+#endif
+                return RuntimeValue::from_v256(ret_type, b);
+            }
+        }
+        if (args[0].is_v128() && args[1].is_v128() && args[2].is_v128()) {
+            if (ret_type.is_v128()) {
+                alignas(16) uint8_t b[16];
+#if defined(__GNUC__) || defined(__clang__)
+                asm volatile(
+                    "subq $40, %%rsp\n\t"
+                    "movups (%2), %%xmm0\n\t"
+                    "movups (%3), %%xmm1\n\t"
+                    "movups (%4), %%xmm2\n\t"
+                    "call *%1\n\t"
+                    "movups %%xmm0, (%0)\n\t"
+                    "addq $40, %%rsp\n\t"
+                    :
+                    : "r"(b), "r"(addr), "r"(args[0].v128_bytes()), "r"(args[1].v128_bytes()), "r"(args[2].v128_bytes())
+                    : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
+                );
+#endif
+                return RuntimeValue::from_v128(ret_type, b);
+            }
+        }
+        if ((args[0].is_f32() || args[0].is_f64()) && (args[1].is_f32() || args[1].is_f64()) && (args[2].is_f32() || args[2].is_f64())) {
+            if (ret_type.kind() == TypeKind::F32) {
+                float r = reinterpret_cast<float(*)(float, float, float)>(addr)(args[0].as_f32(), args[1].as_f32(), args[2].as_f32());
+                return RuntimeValue::from_f32(r);
+            } else {
+                double r = reinterpret_cast<double(*)(double, double, double)>(addr)(args[0].as_f64(), args[1].as_f64(), args[2].as_f64());
+                return RuntimeValue::from_f64(r);
+            }
+        }
         if (args[0].is_f64() && args[1].is_f64() && !args[2].is_f64()) {
             if (ret_type.is_float()) {
                 if (ret_type.kind() == TypeKind::F32) {
@@ -444,18 +549,6 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
                 return RuntimeValue::from_f64(r);
             } else {
                 int64_t r = reinterpret_cast<int64_t(*)(double, double, int64_t)>(addr)(get_float(0), get_float(1), get_int(2));
-                return RuntimeValue::from_i64(r);
-            }
-        } else if (args[0].is_f64() && args[1].is_f64() && args[2].is_f64()) {
-            if (ret_type.is_float()) {
-                if (ret_type.kind() == TypeKind::F32) {
-                    float r = reinterpret_cast<float(*)(double, double, double)>(addr)(get_float(0), get_float(1), get_float(2));
-                    return RuntimeValue::from_f32(r);
-                }
-                double r = reinterpret_cast<double(*)(double, double, double)>(addr)(get_float(0), get_float(1), get_float(2));
-                return RuntimeValue::from_f64(r);
-            } else {
-                int64_t r = reinterpret_cast<int64_t(*)(double, double, double)>(addr)(get_float(0), get_float(1), get_float(2));
                 return RuntimeValue::from_i64(r);
             }
         }

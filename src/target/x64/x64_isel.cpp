@@ -446,7 +446,7 @@ void X64ISel::lower_entry_parameters(const Function& mir_fn) {
         Type t = param->type();
         uint8_t sz = static_cast<uint8_t>(t.size_in_bytes());
         if (sz == 0) sz = 8;
-        LirOpcode mov_op = t.is_vector() ? LirOpcode::Movaps : (t.is_float() ? ((sz == 4) ? LirOpcode::Movss : LirOpcode::Movsd) : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov));
+        LirOpcode mov_op = t.is_vector() ? (t.is_v256() ? LirOpcode::Vmovaps : LirOpcode::Movaps) : (t.is_float() ? ((sz == 4) ? LirOpcode::Movss : LirOpcode::Movsd) : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov));
 
         if (cc_.kind() == CallingConvKind::Win64) {
             if (i < 4) {
@@ -803,13 +803,14 @@ void X64ISel::lower_return(const Instruction& inst, LirBlock& lir_bb) {
             lir_bb.append_inst(std::move(ret_inst));
             return;
         } else if (t.is_vector()) {
-            auto mov_ret = std::make_unique<LirInst>(LirOpcode::Movaps);
-            mov_ret->add_def(LirOperand::preg_xmm(XMM::XMM0, 16), FixedConstraint::xmm(XMM::XMM0));
-            mov_ret->add_use(LirOperand::vreg(ret_vreg, 16));
+            LirOpcode ret_mov_op = (sz == 32) ? LirOpcode::Vmovaps : LirOpcode::Movaps;
+            auto mov_ret = std::make_unique<LirInst>(ret_mov_op);
+            mov_ret->add_def(LirOperand::preg_xmm(XMM::XMM0, sz), FixedConstraint::xmm(XMM::XMM0));
+            mov_ret->add_use(LirOperand::vreg(ret_vreg, sz));
             lir_bb.append_inst(std::move(mov_ret));
 
             auto ret_inst = std::make_unique<LirInst>(LirOpcode::Ret);
-            ret_inst->add_use(LirOperand::preg_xmm(XMM::XMM0, 16), FixedConstraint::xmm(XMM::XMM0));
+            ret_inst->add_use(LirOperand::preg_xmm(XMM::XMM0, sz), FixedConstraint::xmm(XMM::XMM0));
             ret_inst->mir_origin = &inst;
             lir_bb.append_inst(std::move(ret_inst));
             return;

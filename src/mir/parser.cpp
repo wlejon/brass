@@ -85,8 +85,12 @@ private:
         if (tok.is(TokenKind::Kw_f64x2)) { advance(); return Type::f64x2(); }
         if (tok.is(TokenKind::Kw_i32x4)) { advance(); return Type::i32x4(); }
         if (tok.is(TokenKind::Kw_i64x2)) { advance(); return Type::i64x2(); }
+        if (tok.is(TokenKind::Kw_f32x8)) { advance(); return Type::f32x8(); }
+        if (tok.is(TokenKind::Kw_f64x4)) { advance(); return Type::f64x4(); }
+        if (tok.is(TokenKind::Kw_i32x8)) { advance(); return Type::i32x8(); }
+        if (tok.is(TokenKind::Kw_i64x4)) { advance(); return Type::i64x4(); }
 
-        error(tok.location, "Expected type (i32, i64, f32, f64, ptr, gcref, void, f32x4, f64x2, i32x4, i64x2), got '" + std::string(tok.text) + "'");
+        error(tok.location, "Expected type (i32, i64, f32, f64, ptr, gcref, void, f32x4, f64x2, i32x4, i64x2, f32x8, f64x4, i32x8, i64x4), got '" + std::string(tok.text) + "'");
         return Type::void_type();
     }
 
@@ -463,6 +467,18 @@ private:
                     case Opcode::ashr: res_val = b.build_ashr(lhs, rhs); break;
                     default: break;
                 }
+                break;
+            }
+
+            case Opcode::fma_f32:
+            case Opcode::fma_f64: {
+                Value* a = parse_val(); if (!a) return false;
+                if (!expect(TokenKind::Comma, "','")) return false;
+                Value* b_val = parse_val(); if (!b_val) return false;
+                if (!expect(TokenKind::Comma, "','")) return false;
+                Value* c = parse_val(); if (!c) return false;
+                if (op == Opcode::fma_f32) res_val = b.build_fma_f32(a, b_val, c);
+                else res_val = b.build_fma_f64(a, b_val, c);
                 break;
             }
 
