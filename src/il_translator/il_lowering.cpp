@@ -187,6 +187,9 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
         opt_opts.enable_loop_unswitch = options_.enable_loop_unswitch;
         opt_opts.enable_jump_threading = options_.enable_jump_threading;
         opt_opts.enable_trace_layout = options_.enable_trace_layout;
+        opt_opts.enable_partial_escape = options_.enable_partial_escape;
+        opt_opts.enable_allocation_sinking = options_.enable_allocation_sinking;
+        opt_opts.pea_stats = options_.pea_stats_collector;
         opt_opts.demote_stats = options_.demote_stats_collector;
         if (options_.enable_sroa) {
             sroa_module(*mod);

@@ -26,6 +26,9 @@ void print_usage(const char* prog) {
               << "  --inline              Run interprocedural function inlining and IPO optimization pipeline\n"
               << "  --sroa                Run Scalar Replacement of Aggregates (SROA)\n"
               << "  --escape-analysis     Run Escape Analysis on module functions\n"
+              << "  --partial-escape      Run Partial Escape Analysis on module functions\n"
+              << "  --sink-allocations    Run Allocation Sinking and Hot Path Scalarization\n"
+              << "  --dump-pea-stats      Dump Partial Escape Analysis and Allocation Sinking statistics\n"
               << "  --gvn                 Run Global Value Numbering (GVN), RLE & DSE\n"
               << "  --alias-analysis      Run Alias Analysis on module functions\n"
               << "  --vectorize           Run loop vectorization on countable loops\n"
@@ -137,6 +140,9 @@ int main(int argc, char** argv) {
     bool enable_sroa = false;
     bool enable_gvn = false;
     bool run_escape_analysis = false;
+    bool enable_partial_escape = false;
+    bool enable_allocation_sinking = false;
+    bool dump_pea_stats = false;
     bool run_alias_analysis = false;
     bool enable_vectorize = false;
     bool enable_slp = false;
@@ -178,6 +184,13 @@ int main(int argc, char** argv) {
             enable_sroa = true;
         } else if (arg == "--escape-analysis") {
             run_escape_analysis = true;
+        } else if (arg == "--partial-escape") {
+            enable_partial_escape = true;
+        } else if (arg == "--sink-allocations") {
+            enable_allocation_sinking = true;
+            enable_partial_escape = true;
+        } else if (arg == "--dump-pea-stats") {
+            dump_pea_stats = true;
         } else if (arg == "--gvn") {
             enable_gvn = true;
         } else if (arg == "--sccp") {
@@ -409,6 +422,35 @@ int main(int argc, char** argv) {
         }
     }
 
+    brass::PartialEscapeStats pea_stats;
+    if (enable_partial_escape && !enable_allocation_sinking) {
+        for (const brass::Function* fn : mod->functions()) {
+            if (!fn) continue;
+            brass::PartialEscapeAnalysis pea(*fn);
+            std::cout << "Function '" << fn->name() << "': "
+                      << pea.candidate_allocations().size() << " candidate allocations\n";
+            for (const brass::Value* alloc_val : pea.candidate_allocations()) {
+                auto frontier = pea.get_materialization_frontier(alloc_val);
+                std::cout << "  alloc %" << alloc_val->id() << ": frontier " << frontier.size() << " edges\n";
+                for (const auto& e : frontier) {
+                    std::cout << "    edge " << (e.from ? e.from->name() : "<null>")
+                              << " -> " << (e.to ? e.to->name() : "<null>") << "\n";
+                }
+            }
+        }
+    }
+
+    if (enable_allocation_sinking) {
+        brass::AllocationSinkingOptions sink_opts;
+        sink_opts.stats = &pea_stats;
+        brass::sink_allocations(*mod, sink_opts);
+        brass::DiagnosticReporter pea_diag;
+        if (!brass::verify_module(*mod, &pea_diag) || pea_diag.has_errors()) {
+            std::cerr << "Verification failed after Allocation Sinking:\n" << pea_diag.format_all();
+            return 1;
+        }
+    }
+
     if (run_alias_analysis) {
         for (const brass::Function* fn : mod->functions()) {
             if (!fn) continue;
@@ -637,6 +679,10 @@ int main(int argc, char** argv) {
             std::cerr << "Verification failed after Jump Threading:\n" << jt_diag.format_all();
             return 1;
         }
+    }
+
+    if (dump_pea_stats) {
+        std::cout << pea_stats.format_report() << "\n";
     }
 
     (void)debug_info;

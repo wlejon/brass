@@ -22,6 +22,8 @@
 #include <brass/mir/inline_transform.hpp>
 #include <brass/mir/inliner.hpp>
 #include <brass/mir/escape_analysis.hpp>
+#include <brass/mir/partial_escape.hpp>
+#include <brass/mir/allocation_sinking.hpp>
 #include <brass/mir/sroa.hpp>
 #include <brass/mir/alias_analysis.hpp>
 #include <brass/mir/memory_ssa.hpp>

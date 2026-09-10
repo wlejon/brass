@@ -602,6 +602,16 @@ bool optimize_function_loops(Function& fn, const LoopOptOptions& options) {
         any_changed |= sroa_function(fn, sroa_opts);
     }
 
+    if (options.enable_allocation_sinking || options.enable_partial_escape) {
+        AllocationSinkingOptions sink_opts;
+        if (options.pea_stats) {
+            sink_opts.stats = options.pea_stats;
+        } else if (options.stats) {
+            sink_opts.stats = &options.stats->pea_stats;
+        }
+        any_changed |= sink_allocations(fn, sink_opts);
+    }
+
     for (size_t iter = 0; iter < options.max_iterations; ++iter) {
         bool iter_changed = false;
         fn.rebuild_cfg_predecessors();
@@ -820,6 +830,23 @@ bool optimize_function(Function& fn, const LoopOptOptions& options) {
     if (options.enable_jump_threading) {
         JumpThreadingStats* jstats = options.stats ? &options.stats->jump_threading_stats : nullptr;
         if (run_jump_threading(fn, options.jump_threading_options, jstats)) {
+            changed = true;
+            if (options.enable_cfg_simplify) {
+                CfgSimplifyOptions cfg_opts;
+                cfg_simplify_function(fn, cfg_opts);
+            }
+        }
+    }
+
+    // 2e. Partial Escape Analysis & Allocation Sinking
+    if (options.enable_allocation_sinking || options.enable_partial_escape) {
+        AllocationSinkingOptions sink_opts;
+        if (options.pea_stats) {
+            sink_opts.stats = options.pea_stats;
+        } else if (options.stats) {
+            sink_opts.stats = &options.stats->pea_stats;
+        }
+        if (sink_allocations(fn, sink_opts)) {
             changed = true;
             if (options.enable_cfg_simplify) {
                 CfgSimplifyOptions cfg_opts;

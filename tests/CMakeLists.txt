@@ -91,6 +91,9 @@ add_executable(brass_unit_tests
     unit/test_coro_transform.cpp
     unit/test_coro_runtime.cpp
     differential/test_coro_differential.cpp
+    unit/test_partial_escape.cpp
+    unit/test_allocation_sinking.cpp
+    differential/test_pea_differential.cpp
 )
 
 target_include_directories(brass_unit_tests

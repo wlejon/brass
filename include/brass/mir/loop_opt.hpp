@@ -6,6 +6,8 @@
 
 #include <brass/mir/loop_unswitch.hpp>
 #include <brass/mir/jump_threading.hpp>
+#include <brass/mir/partial_escape.hpp>
+#include <brass/mir/allocation_sinking.hpp>
 
 namespace brass {
 
@@ -14,6 +16,7 @@ struct DemoteStats;
 struct LoopOptStats {
     LoopUnswitchStats unswitch_stats;
     JumpThreadingStats jump_threading_stats;
+    PartialEscapeStats pea_stats;
 };
 
 namespace pgo {
@@ -49,6 +52,9 @@ struct LoopOptOptions {
     JumpThreadingOptions jump_threading_options;
     DemoteStats* demote_stats = nullptr;
     LoopOptStats* stats = nullptr;
+    PartialEscapeStats* pea_stats = nullptr;
+    bool enable_partial_escape = false;
+    bool enable_allocation_sinking = false;
     const pgo::ProfileData* profile_data = nullptr;
     uint64_t min_pgo_unroll_iterations = 4;
     uint64_t min_pgo_unswitch_count = 10;

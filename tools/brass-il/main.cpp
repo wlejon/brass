@@ -14,7 +14,7 @@ using namespace brass::il;
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--emit-shared <output.dll/so>] [-shared] [--inline] [--sroa] [--escape-analysis] [--gvn] [--no-gvn] [--sccp] [--no-sccp] [--guard-elim] [--no-guard-elim] [--cfg-simplify] [--no-cfg-simplify] [--loop-unswitch] [--no-loop-unswitch] [--jump-threading] [--no-jump-threading] [--trace-layout] [--no-trace-layout] [--schedule-insns] [--no-schedule-insns] [--software-pipeline] [--alias-analysis] [--vectorize] [--slp] [--loop-tile] [--tile-size <N>] [--enable-pic] [--dump-ic-stats] [--demote-stats] [--pgo-instrument] [--pgo-use <file>] [--dump-branch-probabilities] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc] [--timed <N>]\n";
+        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--emit-shared <output.dll/so>] [-shared] [--inline] [--sroa] [--escape-analysis] [--partial-escape] [--sink-allocations] [--dump-pea-stats] [--gvn] [--no-gvn] [--sccp] [--no-sccp] [--guard-elim] [--no-guard-elim] [--cfg-simplify] [--no-cfg-simplify] [--loop-unswitch] [--no-loop-unswitch] [--jump-threading] [--no-jump-threading] [--trace-layout] [--no-trace-layout] [--schedule-insns] [--no-schedule-insns] [--software-pipeline] [--alias-analysis] [--vectorize] [--slp] [--loop-tile] [--tile-size <N>] [--enable-pic] [--dump-ic-stats] [--demote-stats] [--pgo-instrument] [--pgo-use <file>] [--dump-branch-probabilities] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc] [--timed <N>]\n";
         return 1;
     }
 
@@ -69,6 +69,13 @@ int main(int argc, char** argv) {
             options.enable_sroa = true;
         } else if (arg == "--escape-analysis") {
             options.run_escape_analysis = true;
+        } else if (arg == "--partial-escape") {
+            options.enable_partial_escape = true;
+        } else if (arg == "--sink-allocations") {
+            options.enable_allocation_sinking = true;
+            options.enable_partial_escape = true;
+        } else if (arg == "--dump-pea-stats") {
+            options.dump_pea_stats = true;
         } else if (arg == "--gvn") {
             options.enable_gvn = true;
         } else if (arg == "--no-gvn") {
@@ -188,6 +195,11 @@ int main(int argc, char** argv) {
         options.demote_stats_collector = &demote_stats;
     }
 
+    PartialEscapeStats pea_stats;
+    if (options.dump_pea_stats) {
+        options.pea_stats_collector = &pea_stats;
+    }
+
     DiagnosticReporter diag;
     TranslationResult res = translate_bronze_il(il_source, options, &diag);
     if (!res.success || !res.module) {
@@ -246,6 +258,23 @@ int main(int argc, char** argv) {
     if (show_demote_stats) {
         demote_stats.module_name = res.module->name();
         std::cout << demote_stats.format_report() << "\n";
+    }
+
+    if (options.dump_pea_stats) {
+        std::cout << pea_stats.format_report() << "\n";
+    }
+
+    if (options.enable_partial_escape && !options.enable_allocation_sinking) {
+        for (const Function* fn : res.module->functions()) {
+            if (!fn) continue;
+            PartialEscapeAnalysis pea(*fn);
+            std::cout << "Partial Escape Analysis for Function '" << fn->name() << "': "
+                      << pea.candidate_allocations().size() << " candidate allocations\n";
+            for (const Value* alloc_val : pea.candidate_allocations()) {
+                auto frontier = pea.get_materialization_frontier(alloc_val);
+                std::cout << "  alloc %" << alloc_val->id() << ": frontier " << frontier.size() << " edges\n";
+            }
+        }
     }
 
     if (options.run_escape_analysis) {

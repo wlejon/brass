@@ -11,6 +11,7 @@ namespace brass {
 class HostGC;
 
 struct DemoteStats;
+struct PartialEscapeStats;
 
 namespace il {
 
@@ -30,6 +31,9 @@ struct TranslatorOptions {
     bool enable_jump_threading = true;
     bool enable_trace_layout = true;
     bool run_escape_analysis = false;
+    bool enable_partial_escape = false;
+    bool enable_allocation_sinking = false;
+    bool dump_pea_stats = false;
     bool run_alias_analysis = false;
     bool enable_vectorize = true;
     bool enable_slp = true;
@@ -38,6 +42,7 @@ struct TranslatorOptions {
     bool enable_pic = true;
     bool dump_ic_stats = false;
     DemoteStats* demote_stats_collector = nullptr;
+    PartialEscapeStats* pea_stats_collector = nullptr;
 };
 
 struct TranslationResult {
