@@ -43,7 +43,7 @@ void replace_all_uses_in_fn(Function& fn, Value* old_val, Value* new_val) {
 
 } // namespace
 
-InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Function& callee) {
+InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Function& callee, DebugContext* dbg_ctx) {
     InlineResult result;
     if (!call_inst || &caller == &callee) return result;
 
@@ -56,6 +56,18 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
     if (call_inst->operand_count() != callee.param_count()) return result;
 
     Module* mod = caller.parent();
+    if (!dbg_ctx && mod) {
+        dbg_ctx = &mod->debug_context();
+    }
+    uint32_t inline_scope_id = 0;
+    if (dbg_ctx) {
+        DebugLoc callsite_loc = call_inst->loc();
+        inline_scope_id = dbg_ctx->record_inlined_scope(
+            std::string(callee.name()),
+            callsite_loc,
+            callsite_loc.inlined_at_id
+        );
+    }
     BasicBlock* split_head = caller_bb;
     result.split_head = split_head;
 
@@ -150,6 +162,18 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
         return dst_bt;
     };
 
+    auto wrap_loc = [&](DebugLoc src_loc) -> DebugLoc {
+        if (!src_loc.is_valid()) return src_loc;
+        if (!dbg_ctx || inline_scope_id == 0) return src_loc;
+        DebugLoc wrapped = src_loc;
+        if (src_loc.inlined_at_id == 0) {
+            wrapped.inlined_at_id = inline_scope_id;
+        } else {
+            wrapped.inlined_at_id = dbg_ctx->wrap_inlined_scope(src_loc.inlined_at_id, inline_scope_id);
+        }
+        return wrapped;
+    };
+
     // 6. Clone callee instructions into cloned blocks
     for (const BasicBlock* src_bb : callee.blocks()) {
         if (!src_bb) continue;
@@ -161,6 +185,7 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
             if (src_inst->opcode() == Opcode::ret) {
                 // Remap ret to br split_tail(...)
                 Instruction* br_tail = mod->arena().make<Instruction>(Opcode::br, Type::void_type());
+                br_tail->set_loc(wrap_loc(src_inst->loc()));
                 std::vector<Value*> br_args;
                 if (!callee.return_type().is_void() && src_inst->operand_count() > 0) {
                     br_args.push_back(map_val(src_inst->operand(0)));
@@ -171,6 +196,7 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
             }
 
             Instruction* dst_inst = mod->arena().make<Instruction>(src_inst->opcode(), src_inst->type());
+            dst_inst->set_loc(wrap_loc(src_inst->loc()));
             dst_inst->set_imm_i64(src_inst->imm_i64());
             dst_inst->set_imm_f64(src_inst->imm_f64());
             dst_inst->set_scale(src_inst->scale());
@@ -216,6 +242,7 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
 
     // 7. Connect split_head -> cloned callee entry block
     Instruction* br_callee_entry = mod->arena().make<Instruction>(Opcode::br, Type::void_type());
+    br_callee_entry->set_loc(call_inst->loc());
     br_callee_entry->set_branch_target(BranchTarget(block_map[callee_entry], {}));
     split_head->append_instruction(br_callee_entry);
 

@@ -73,6 +73,7 @@ Function* clone_function(const Function& src, Module& dst_mod) {
             dst_inst->set_scale(src_inst->scale());
             dst_inst->set_offset(src_inst->offset());
             dst_inst->set_memory_type(src_inst->memory_type());
+            dst_inst->set_loc(src_inst->loc());
             if (!src_inst->symbol().empty()) dst_inst->set_symbol(dst_fn->parent()->string_pool().intern(src_inst->symbol()));
             if (!src_inst->extra_symbol().empty()) dst_inst->set_extra_symbol(dst_fn->parent()->string_pool().intern(src_inst->extra_symbol()));
 

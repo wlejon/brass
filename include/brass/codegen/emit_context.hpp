@@ -13,6 +13,7 @@
 #include <brass/runtime/resume_table.hpp>
 #include <brass/runtime/patcher.hpp>
 #include <brass/runtime/deopt.hpp>
+#include <brass/debug/debug_section.hpp>
 
 namespace brass::codegen {
 
@@ -31,6 +32,7 @@ struct CompilationResult {
     std::unordered_map<uint32_t, size_t> block_offsets;
     runtime::FunctionResumeTable resume_table;
     std::vector<runtime::PatchSite> patch_sites;
+    FunctionDebugTable debug_table;
 };
 
 class EmitContext {

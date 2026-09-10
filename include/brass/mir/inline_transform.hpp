@@ -7,6 +7,8 @@
 
 namespace brass {
 
+class DebugContext;
+
 struct InlineResult {
     bool success = false;
     BasicBlock* split_head = nullptr;
@@ -23,6 +25,6 @@ struct InlineResult {
 // - Replaces all uses of call_inst->result() with split_tail's return parameter
 // - Connects split_head -> callee entry
 // - Rebuilds CFG predecessors
-InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Function& callee);
+InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Function& callee, DebugContext* dbg_ctx = nullptr);
 
 } // namespace brass

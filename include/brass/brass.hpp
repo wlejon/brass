@@ -76,6 +76,11 @@
 #include <brass/embedding/embedding.hpp>
 #include <brass/embedding/brass_c_api.h>
 
+#include <brass/debug/source_loc.hpp>
+#include <brass/debug/source_map.hpp>
+#include <brass/debug/debug_section.hpp>
+#include <brass/debug/symbolicator.hpp>
+
 #include <string_view>
 
 namespace brass {

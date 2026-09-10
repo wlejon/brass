@@ -101,12 +101,23 @@ CompilationResult EmitContext::compile() {
 
         for (size_t i_idx = 0; i_idx < limit; ++i_idx) {
             const auto& inst = *block->instructions[i_idx];
+            size_t cur_offset = buffer_.size();
+            DebugLoc loc = inst.loc;
+            if (!loc.is_valid() && inst.mir_origin) {
+                loc = inst.mir_origin->loc();
+            }
+            if (loc.is_valid()) {
+                result.debug_table.add_line_entry(static_cast<uint32_t>(cur_offset), loc);
+            }
             emit_instruction(inst, b_idx == 0, i_idx == 0);
         }
 
         if (has_jcc_jmp) {
             const auto& jcc = *block->instructions[n_insts - 2];
             const auto& jmp = *block->instructions[n_insts - 1];
+            if (jcc.loc.is_valid()) {
+                result.debug_table.add_line_entry(static_cast<uint32_t>(buffer_.size()), jcc.loc);
+            }
             uint32_t true_target = jcc.uses[0].label_id;
             uint32_t false_target = jmp.uses[0].label_id;
 
@@ -120,6 +131,9 @@ CompilationResult EmitContext::compile() {
             }
         } else if (has_trailing_jmp) {
             const auto& jmp = *block->instructions[n_insts - 1];
+            if (jmp.loc.is_valid()) {
+                result.debug_table.add_line_entry(static_cast<uint32_t>(buffer_.size()), jmp.loc);
+            }
             uint32_t target = jmp.uses[0].label_id;
             if (target != next_block_id) {
                 enc_.jmp(block_labels_[target]);
@@ -133,6 +147,8 @@ CompilationResult EmitContext::compile() {
     result.stack_map.code_size = static_cast<uint32_t>(result.code_buffer.size());
     result.stack_map.records = std::move(stack_map_records_);
     result.entry_offset = 0;
+    result.debug_table.set_function_name(std::string(fn_.name));
+    result.debug_table.set_code_size(static_cast<uint32_t>(result.code_buffer.size()));
 
     // 5. Build resume table
     for (const auto& rp : fn_.resume_entries) {

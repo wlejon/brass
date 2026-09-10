@@ -320,6 +320,7 @@ public:
     x64::RegMask clobbered_xmms = 0;
     x64::Condition condition = x64::Condition::None;
     const Instruction* mir_origin = nullptr;
+    DebugLoc loc;
     uint32_t safepoint_id = 0;
     uint32_t resume_id = 0;
     uint32_t deopt_reason = 0;

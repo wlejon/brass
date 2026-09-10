@@ -75,6 +75,10 @@ add_executable(brass_unit_tests
     unit/test_instruction_scheduler.cpp
     unit/test_software_pipeline.cpp
     differential/test_sched_differential.cpp
+    unit/test_source_loc.cpp
+    unit/test_source_map.cpp
+    unit/test_symbolicator.cpp
+    differential/test_debug_differential.cpp
 )
 
 target_include_directories(brass_unit_tests

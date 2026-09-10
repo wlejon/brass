@@ -3,6 +3,7 @@
 #include <brass/core/span.hpp>
 #include <brass/mir/types.hpp>
 #include <brass/mir/opcodes.hpp>
+#include <brass/debug/source_loc.hpp>
 #include <cstdint>
 #include <string_view>
 #include <vector>
@@ -177,6 +178,12 @@ public:
     bool has_side_effects() const noexcept { return brass::has_side_effects(opcode_); }
     bool produces_value() const noexcept { return result_ != nullptr && !type_.is_void(); }
 
+    DebugLoc loc() const noexcept { return loc_; }
+    void set_loc(DebugLoc loc) noexcept { loc_ = loc; }
+    void set_loc(uint32_t file_id, uint32_t line, uint32_t col = 0, uint32_t inlined = 0) noexcept {
+        loc_ = DebugLoc(file_id, line, col, inlined);
+    }
+
 private:
     Opcode opcode_ = Opcode::unreachable;
     Type type_ = Type::void_type();
@@ -202,6 +209,7 @@ private:
     std::vector<SwitchCase> switch_cases_;
 
     std::vector<Value*> state_map_;
+    DebugLoc loc_;
 };
 
 } // namespace brass

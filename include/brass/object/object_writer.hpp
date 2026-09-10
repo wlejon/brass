@@ -153,6 +153,7 @@ struct ObjectFile {
     ModuleStackMap stack_maps;
     runtime::ResumeTableRegistry resume_tables;
     runtime::PatchRegistry patch_sites;
+    std::vector<FunctionDebugTable> debug_tables;
 
     Section* get_section(std::string_view name);
     const Section* get_section(std::string_view name) const;

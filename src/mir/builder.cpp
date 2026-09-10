@@ -115,6 +115,9 @@ Value* Builder::add_param(Type type) {
 
 Instruction* Builder::insert(Instruction* inst) {
     if (!inst) return nullptr;
+    if (current_loc_.is_valid()) {
+        inst->set_loc(current_loc_);
+    }
     if (block_) {
         if (insert_before_) {
             block_->insert_before(inst, insert_before_);

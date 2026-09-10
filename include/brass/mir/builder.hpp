@@ -28,6 +28,13 @@ public:
     Function* current_function() const noexcept { return function_; }
     BasicBlock* current_block() const noexcept { return block_; }
 
+    void set_current_loc(DebugLoc loc) noexcept { current_loc_ = loc; }
+    void set_current_loc(uint32_t file_id, uint32_t line, uint32_t col = 0) noexcept {
+        current_loc_ = DebugLoc(file_id, line, col);
+    }
+    DebugLoc current_loc() const noexcept { return current_loc_; }
+    void clear_current_loc() noexcept { current_loc_ = DebugLoc(); }
+
     BasicBlock* create_block();
     BasicBlock* create_block(std::string_view name);
     BasicBlock* append_block();
@@ -177,6 +184,7 @@ private:
     Function* function_ = nullptr;
     BasicBlock* block_ = nullptr;
     Instruction* insert_before_ = nullptr;
+    DebugLoc current_loc_;
 };
 
 } // namespace brass

@@ -208,6 +208,7 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
         }
 
         obj.functions.push_back(std::move(cfi));
+        obj.debug_tables.push_back(std::move(res.debug_table));
 
         int32_t text_idx = obj.get_section_index(".text");
         ObjectSymbol fn_sym;
@@ -262,6 +263,20 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
         map_sym.binding = SymbolBinding::Global;
         map_sym.type = SymbolType::Object;
         obj.add_symbol(std::move(map_sym));
+    }
+
+    // Emit compact binary debug line section (.brass_dbg)
+    if (!obj.debug_tables.empty() && mod.debug_context().file_count() > 0) {
+        std::vector<uint8_t> dbg_bytes = serialize_debug_section(mod.debug_context(), obj.debug_tables);
+        if (!dbg_bytes.empty()) {
+            Section& dbg_sec = obj.get_or_create_section(
+                ".brass_dbg",
+                SectionKind::Custom,
+                SectionFlags::Read,
+                8
+            );
+            dbg_sec.emit_bytes(dbg_bytes);
+        }
     }
 
     // Record external symbols

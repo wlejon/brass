@@ -43,6 +43,9 @@ void print_usage(const char* prog) {
               << "  --pgo-instrument      Instrument module with Knuth-Stevenson minimal edge counters\n"
               << "  --pgo-use=<file>      Load profile data (.bprof) for profile-guided optimization\n"
               << "  --dump-branch-probabilities Dump block frequencies and edge branch probabilities\n"
+              << "  -g, --debug-info      Preserve and emit debug information and .brass_dbg section\n"
+              << "  --emit-source-map=<file.map> Emit standard JSON Source Map V3 to <file.map>\n"
+              << "  --symbolize-offset=<fn,offset> Symbolize function offset to source location\n"
               << "  -o <file>             Write output to <file> instead of stdout\n";
 }
 
@@ -148,6 +151,9 @@ int main(int argc, char** argv) {
     bool enable_pgo_instrument = false;
     std::string pgo_use_file;
     bool dump_branch_probabilities = false;
+    bool debug_info = false;
+    std::string emit_source_map_file;
+    std::string symbolize_offset_arg;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -261,6 +267,26 @@ int main(int argc, char** argv) {
             }
         } else if (arg.starts_with("-o")) {
             output_file = arg.substr(2);
+        } else if (arg == "-g" || arg == "--debug-info") {
+            debug_info = true;
+        } else if (arg.starts_with("--emit-source-map=")) {
+            emit_source_map_file = arg.substr(18);
+        } else if (arg == "--emit-source-map") {
+            if (i + 1 < argc) {
+                emit_source_map_file = argv[++i];
+            } else {
+                std::cerr << "Error: --emit-source-map requires a file argument\n";
+                return 1;
+            }
+        } else if (arg.starts_with("--symbolize-offset=")) {
+            symbolize_offset_arg = arg.substr(19);
+        } else if (arg == "--symbolize-offset") {
+            if (i + 1 < argc) {
+                symbolize_offset_arg = argv[++i];
+            } else {
+                std::cerr << "Error: --symbolize-offset requires <fn,offset> argument\n";
+                return 1;
+            }
         } else if (!arg.empty() && arg[0] == '-') {
             if (arg == "-") {
                 input_file = "-";
@@ -599,6 +625,50 @@ int main(int argc, char** argv) {
         if (!brass::verify_module(*mod, &jt_diag) || jt_diag.has_errors()) {
             std::cerr << "Verification failed after Jump Threading:\n" << jt_diag.format_all();
             return 1;
+        }
+    }
+
+    (void)debug_info;
+
+    if (!symbolize_offset_arg.empty()) {
+        size_t comma = symbolize_offset_arg.find(',');
+        if (comma == std::string::npos) {
+            std::cerr << "Error: Invalid --symbolize-offset format, expected <fn,offset>\n";
+            return 1;
+        }
+        std::string fn_name = symbolize_offset_arg.substr(0, comma);
+        uint32_t offset = static_cast<uint32_t>(std::stoul(symbolize_offset_arg.substr(comma + 1), nullptr, 0));
+
+        brass::Target target = brass::Target::host();
+        brass::codegen::SchedOptions sched_opts;
+        auto obj = brass::object::compile_module_to_object(*mod, target, sched_opts);
+        brass::Symbolicator symbolicator(mod->debug_context(), obj.debug_tables);
+        brass::StackTrace trace = symbolicator.symbolize_offset(fn_name, offset);
+        std::cout << trace.format();
+        return 0;
+    }
+
+    if (!emit_source_map_file.empty()) {
+        brass::Target target = brass::Target::host();
+        brass::codegen::SchedOptions sched_opts;
+        auto obj = brass::object::compile_module_to_object(*mod, target, sched_opts);
+        brass::SourceMap combined_sm(mod->name().empty() ? "output" : std::string(mod->name()));
+        for (const auto& f_path : mod->debug_context().files()) {
+            combined_sm.add_source(f_path);
+        }
+        for (const auto& table : obj.debug_tables) {
+            for (const auto& entry : table.line_entries()) {
+                combined_sm.add_mapping(entry.code_offset, entry.loc);
+            }
+        }
+        std::string sm_err;
+        if (!combined_sm.write_file(emit_source_map_file, &sm_err)) {
+            std::cerr << "Error writing source map: " << sm_err << "\n";
+            return 1;
+        }
+        if (!compile_object && !emit_shared && run_fn.empty()) {
+            std::cout << "Successfully emitted source map to '" << emit_source_map_file << "'\n";
+            return 0;
         }
     }
 
