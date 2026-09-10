@@ -191,6 +191,11 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
         opt_opts.enable_trace_layout = options_.enable_trace_layout;
         opt_opts.enable_partial_escape = options_.enable_partial_escape;
         opt_opts.enable_allocation_sinking = options_.enable_allocation_sinking;
+        opt_opts.enable_loop_fusion = options_.enable_loop_fusion;
+        opt_opts.enable_loop_distribution = options_.enable_loop_distribution;
+        opt_opts.enable_array_contraction = options_.enable_array_contraction;
+        opt_opts.dump_loop_transform_stats = options_.dump_loop_transform_stats;
+        opt_opts.stats = options_.loop_transform_stats_collector;
         opt_opts.pea_stats = options_.pea_stats_collector;
         opt_opts.demote_stats = options_.demote_stats_collector;
         if (options_.enable_sroa) {

@@ -8,6 +8,9 @@
 #include <brass/mir/jump_threading.hpp>
 #include <brass/mir/partial_escape.hpp>
 #include <brass/mir/allocation_sinking.hpp>
+#include <brass/mir/loop_fusion.hpp>
+#include <brass/mir/loop_distribution.hpp>
+#include <brass/mir/array_contraction.hpp>
 
 namespace brass {
 
@@ -17,6 +20,9 @@ struct LoopOptStats {
     LoopUnswitchStats unswitch_stats;
     JumpThreadingStats jump_threading_stats;
     PartialEscapeStats pea_stats;
+    LoopFusionStats fusion_stats;
+    LoopDistributionStats distribution_stats;
+    ArrayContractionStats contraction_stats;
 };
 
 namespace pgo {
@@ -44,6 +50,10 @@ struct LoopOptOptions {
     bool enable_jump_threading = false;
     bool enable_trace_layout = false;
     bool enable_loop_tile = false;
+    bool enable_loop_fusion = false;
+    bool enable_loop_distribution = false;
+    bool enable_array_contraction = false;
+    bool dump_loop_transform_stats = false;
     size_t tile_size_i = 16;
     size_t tile_size_j = 16;
     size_t tile_size_k = 16;

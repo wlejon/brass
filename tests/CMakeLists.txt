@@ -105,6 +105,10 @@ add_executable(brass_unit_tests
     unit/test_critical_edge.cpp
     unit/test_gvn_pre.cpp
     differential/test_gvn_pre_differential.cpp
+    unit/test_loop_fusion.cpp
+    unit/test_loop_distribution.cpp
+    unit/test_array_contraction.cpp
+    differential/test_loop_transform_differential.cpp
 )
 
 target_include_directories(brass_unit_tests

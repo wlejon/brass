@@ -52,6 +52,7 @@ PROGRAMS = [
     "29_generational_churn",
     "30_osr_hot_loop",
     "31_gvn_pre_diamonds",
+    "32_loop_fusion_contraction",
 ]
 
 DEMOTED_PROGRAMS = {

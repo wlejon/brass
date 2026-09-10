@@ -13,6 +13,7 @@ class HostGC;
 struct DemoteStats;
 struct PartialEscapeStats;
 struct GvnPreStats;
+struct LoopOptStats;
 
 namespace il {
 
@@ -49,9 +50,14 @@ struct TranslatorOptions {
     bool enable_osr = false;
     uint64_t osr_threshold = 100;
     bool dump_tiering_stats = false;
+    bool enable_loop_fusion = false;
+    bool enable_loop_distribution = false;
+    bool enable_array_contraction = false;
+    bool dump_loop_transform_stats = false;
     DemoteStats* demote_stats_collector = nullptr;
     PartialEscapeStats* pea_stats_collector = nullptr;
     GvnPreStats* pre_stats_collector = nullptr;
+    LoopOptStats* loop_transform_stats_collector = nullptr;
 };
 
 struct TranslationResult {

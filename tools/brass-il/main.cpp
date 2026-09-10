@@ -162,6 +162,14 @@ int main(int argc, char** argv) {
             options.osr_threshold = std::stoull(argv[++i]);
         } else if (arg == "--dump-tiering-stats") {
             options.dump_tiering_stats = true;
+        } else if (arg == "--enable-loop-fusion") {
+            options.enable_loop_fusion = true;
+        } else if (arg == "--enable-loop-distribution") {
+            options.enable_loop_distribution = true;
+        } else if (arg == "--enable-array-contraction") {
+            options.enable_array_contraction = true;
+        } else if (arg == "--dump-loop-transform-stats") {
+            options.dump_loop_transform_stats = true;
         } else if (arg == "--demote-stats") {
             show_demote_stats = true;
         } else if (arg == "--raw-output") {
@@ -178,12 +186,22 @@ int main(int argc, char** argv) {
             enable_pgo_instrument = true;
         } else if (arg.rfind("--pgo-use=", 0) == 0) {
             pgo_use_file = arg.substr(10);
-        } else if (arg == "--pgo-use" && i + 1 < argc) {
-            pgo_use_file = argv[++i];
+        } else if (arg == "--pgo-use") {
+            if (i + 1 < argc) {
+                pgo_use_file = argv[++i];
+            } else {
+                std::cerr << "Error: --pgo-use requires a file path\n";
+                return 1;
+            }
         } else if (arg == "--dump-branch-probabilities") {
             dump_branch_probabilities = true;
-        } else if (arg == "-o" && i + 1 < argc) {
-            output_obj = argv[++i];
+        } else if (arg == "-o") {
+            if (i + 1 < argc) {
+                output_obj = argv[++i];
+            } else {
+                std::cerr << "Error: -o requires an output file\n";
+                return 1;
+            }
         } else if (arg.rfind("-o", 0) == 0 && arg.size() > 2) {
             output_obj = arg.substr(2);
         } else if (arg == "-g" || arg == "--debug-info") {
@@ -229,6 +247,11 @@ int main(int argc, char** argv) {
     GvnPreStats pre_stats;
     if (options.dump_pre_stats) {
         options.pre_stats_collector = &pre_stats;
+    }
+
+    LoopOptStats loop_stats;
+    if (options.dump_loop_transform_stats) {
+        options.loop_transform_stats_collector = &loop_stats;
     }
 
     DiagnosticReporter diag;
@@ -544,6 +567,12 @@ int main(int argc, char** argv) {
                 brass::runtime::TieringRegistry::instance().dump_stats(std::cout);
             }
         }
+    }
+
+    if (options.dump_loop_transform_stats) {
+        std::cout << loop_stats.fusion_stats.format_report()
+                  << loop_stats.distribution_stats.format_report()
+                  << loop_stats.contraction_stats.format_report();
     }
 
     return 0;

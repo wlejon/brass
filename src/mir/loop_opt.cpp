@@ -1,6 +1,9 @@
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/loop_analysis.hpp>
 #include <brass/mir/loop_unroll.hpp>
+#include <brass/mir/loop_fusion.hpp>
+#include <brass/mir/loop_distribution.hpp>
+#include <brass/mir/array_contraction.hpp>
 #include <brass/mir/slp_vectorize.hpp>
 #include <brass/mir/loop_vectorize.hpp>
 #include <brass/mir/loop_tile.hpp>
@@ -674,6 +677,48 @@ bool optimize_function_loops(Function& fn, const LoopOptOptions& options) {
             if (options.enable_dce) {
                 constant_folding_pass(fn);
                 cse_pass(fn, dom_after);
+                dead_code_elimination_pass(fn);
+            }
+        }
+    }
+
+    if (options.enable_loop_distribution) {
+        fn.rebuild_cfg_predecessors();
+        DominatorTree dom(fn);
+        LoopDistributionOptions dist_opts;
+        if (options.stats) dist_opts.stats = &options.stats->distribution_stats;
+        if (loop_distribution_pass(fn, dom, dist_opts)) {
+            any_changed = true;
+            fn.rebuild_cfg_predecessors();
+            if (options.enable_dce) {
+                dead_code_elimination_pass(fn);
+            }
+        }
+    }
+
+    if (options.enable_loop_fusion) {
+        fn.rebuild_cfg_predecessors();
+        DominatorTree dom(fn);
+        LoopFusionOptions fuse_opts;
+        if (options.stats) fuse_opts.stats = &options.stats->fusion_stats;
+        if (loop_fusion_pass(fn, dom, fuse_opts)) {
+            any_changed = true;
+            fn.rebuild_cfg_predecessors();
+            if (options.enable_dce) {
+                dead_code_elimination_pass(fn);
+            }
+        }
+    }
+
+    if (options.enable_array_contraction) {
+        fn.rebuild_cfg_predecessors();
+        DominatorTree dom(fn);
+        ArrayContractionOptions contract_opts;
+        if (options.stats) contract_opts.stats = &options.stats->contraction_stats;
+        if (array_contraction_pass(fn, dom, contract_opts)) {
+            any_changed = true;
+            fn.rebuild_cfg_predecessors();
+            if (options.enable_dce) {
                 dead_code_elimination_pass(fn);
             }
         }

@@ -42,6 +42,10 @@ void print_usage(const char* prog) {
               << "  --slp                 Run SLP straight-line vectorization\n"
               << "  --loop-tile           Run loop tiling / cache blocking on nested loops\n"
               << "  --tile-size <N>       Tile size for loop tiling (default: 16)\n"
+              << "  --enable-loop-fusion  Run loop fusion (loop jamming)\n"
+              << "  --enable-loop-distribution Run loop distribution (loop fission)\n"
+              << "  --enable-array-contraction Run array contraction (buffer elimination)\n"
+              << "  --dump-loop-transform-stats Dump loop transformation statistics\n"
               << "  --sccp                Run Sparse Conditional Constant Propagation (SCCP)\n"
               << "  --guard-elim          Run Speculation Guard Elimination\n"
               << "  --cfg-simplify        Run CFG Simplification & Dead Block Compaction\n"
@@ -132,6 +136,10 @@ int main(int argc, char** argv) {
     bool enable_slp = false;
     bool enable_loop_tile = false;
     size_t tile_size = 16;
+    bool enable_loop_fusion = false;
+    bool enable_loop_distribution = false;
+    bool enable_array_contraction = false;
+    bool dump_loop_transform_stats = false;
     bool enable_sccp = false;
     bool enable_guard_elim = false;
     bool enable_cfg_simplify = false;
@@ -246,6 +254,14 @@ int main(int argc, char** argv) {
             enable_slp = true;
         } else if (arg == "--loop-tile") {
             enable_loop_tile = true;
+        } else if (arg == "--enable-loop-fusion") {
+            enable_loop_fusion = true;
+        } else if (arg == "--enable-loop-distribution") {
+            enable_loop_distribution = true;
+        } else if (arg == "--enable-array-contraction") {
+            enable_array_contraction = true;
+        } else if (arg == "--dump-loop-transform-stats") {
+            dump_loop_transform_stats = true;
         } else if (arg == "--tile-size") {
             if (i + 1 < argc) {
                 tile_size = static_cast<size_t>(std::stoul(argv[++i]));
@@ -432,6 +448,7 @@ int main(int argc, char** argv) {
     }
 
     brass::PartialEscapeStats pea_stats;
+    brass::LoopOptStats loop_stats;
     if (enable_partial_escape && !enable_allocation_sinking) {
         for (const brass::Function* fn : mod->functions()) {
             if (!fn) continue;
@@ -557,11 +574,16 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
-        if (enable_loop_tile || enable_vectorize || enable_slp) {
+        bool any_loop_opt = enable_loop_tile || enable_vectorize || enable_slp || enable_loop_fusion || enable_loop_distribution || enable_array_contraction;
+        if (any_loop_opt) {
             brass::LoopOptOptions loop_opts;
             loop_opts.enable_vectorize = enable_vectorize;
             loop_opts.enable_slp = enable_slp;
             loop_opts.enable_loop_tile = enable_loop_tile;
+            loop_opts.enable_loop_fusion = enable_loop_fusion;
+            loop_opts.enable_loop_distribution = enable_loop_distribution;
+            loop_opts.enable_array_contraction = enable_array_contraction;
+            loop_opts.stats = &loop_stats;
             loop_opts.tile_size_i = tile_size;
             loop_opts.tile_size_j = tile_size;
             loop_opts.tile_size_k = tile_size;
@@ -609,11 +631,16 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
-        if (enable_loop_tile || enable_vectorize || enable_slp) {
+        bool any_loop_opt = enable_loop_tile || enable_vectorize || enable_slp || enable_loop_fusion || enable_loop_distribution || enable_array_contraction;
+        if (any_loop_opt) {
             brass::LoopOptOptions loop_opts;
             loop_opts.enable_vectorize = enable_vectorize;
             loop_opts.enable_slp = enable_slp;
             loop_opts.enable_loop_tile = enable_loop_tile;
+            loop_opts.enable_loop_fusion = enable_loop_fusion;
+            loop_opts.enable_loop_distribution = enable_loop_distribution;
+            loop_opts.enable_array_contraction = enable_array_contraction;
+            loop_opts.stats = &loop_stats;
             loop_opts.tile_size_i = tile_size;
             loop_opts.tile_size_j = tile_size;
             loop_opts.tile_size_k = tile_size;
@@ -641,11 +668,16 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
-        if (enable_loop_tile || enable_vectorize || enable_slp) {
+        bool any_loop_opt = enable_loop_tile || enable_vectorize || enable_slp || enable_loop_fusion || enable_loop_distribution || enable_array_contraction;
+        if (any_loop_opt) {
             brass::LoopOptOptions loop_opts;
             loop_opts.enable_vectorize = enable_vectorize;
             loop_opts.enable_slp = enable_slp;
             loop_opts.enable_loop_tile = enable_loop_tile;
+            loop_opts.enable_loop_fusion = enable_loop_fusion;
+            loop_opts.enable_loop_distribution = enable_loop_distribution;
+            loop_opts.enable_array_contraction = enable_array_contraction;
+            loop_opts.stats = &loop_stats;
             loop_opts.tile_size_i = tile_size;
             loop_opts.tile_size_j = tile_size;
             loop_opts.tile_size_k = tile_size;
@@ -663,11 +695,16 @@ int main(int argc, char** argv) {
             std::cerr << "Verification failed after CFG Simplification:\n" << cfg_diag.format_all();
             return 1;
         }
-        if (enable_loop_tile || enable_vectorize || enable_slp) {
+        bool any_loop_opt = enable_loop_tile || enable_vectorize || enable_slp || enable_loop_fusion || enable_loop_distribution || enable_array_contraction;
+        if (any_loop_opt) {
             brass::LoopOptOptions loop_opts;
             loop_opts.enable_vectorize = enable_vectorize;
             loop_opts.enable_slp = enable_slp;
             loop_opts.enable_loop_tile = enable_loop_tile;
+            loop_opts.enable_loop_fusion = enable_loop_fusion;
+            loop_opts.enable_loop_distribution = enable_loop_distribution;
+            loop_opts.enable_array_contraction = enable_array_contraction;
+            loop_opts.stats = &loop_stats;
             loop_opts.tile_size_i = tile_size;
             loop_opts.tile_size_j = tile_size;
             loop_opts.tile_size_k = tile_size;
@@ -678,11 +715,15 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
-    } else if (enable_loop_tile || enable_vectorize || enable_slp) {
+    } else if (enable_loop_tile || enable_vectorize || enable_slp || enable_loop_fusion || enable_loop_distribution || enable_array_contraction) {
         brass::LoopOptOptions loop_opts;
         loop_opts.enable_vectorize = enable_vectorize;
         loop_opts.enable_slp = enable_slp;
         loop_opts.enable_loop_tile = enable_loop_tile;
+        loop_opts.enable_loop_fusion = enable_loop_fusion;
+        loop_opts.enable_loop_distribution = enable_loop_distribution;
+        loop_opts.enable_array_contraction = enable_array_contraction;
+        loop_opts.stats = &loop_stats;
         loop_opts.tile_size_i = tile_size;
         loop_opts.tile_size_j = tile_size;
         loop_opts.tile_size_k = tile_size;
@@ -731,6 +772,12 @@ int main(int argc, char** argv) {
 
     if (dump_pre_stats) {
         pre_stats.dump(std::cout);
+    }
+
+    if (dump_loop_transform_stats) {
+        std::cout << loop_stats.fusion_stats.format_report()
+                  << loop_stats.distribution_stats.format_report()
+                  << loop_stats.contraction_stats.format_report();
     }
 
     (void)debug_info;
