@@ -58,6 +58,8 @@ int64_t bronze_call_dynamic_n(int64_t callee_box, int64_t this_box, int32_t argc
 }
 
 void register_all_runtime_symbols(codegen::JitExecutionEngine& jit);
+void unregister_all_runtime_symbols();
+codegen::JitExecutionEngine* get_active_jit();
 
 } // namespace il
 } // namespace brass

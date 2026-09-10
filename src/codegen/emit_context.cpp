@@ -375,11 +375,16 @@ void EmitContext::emit_parallel_copy(const LirInst& inst) {
             inst.defs[i].preg_val == inst.uses[i].preg_val) {
             continue; // Skip self moves
         }
+        if (inst.defs[i].is_spill_slot() && inst.uses[i].is_spill_slot() &&
+            inst.defs[i].spill_slot == inst.uses[i].spill_slot) {
+            continue; // Skip self moves
+        }
         moves.push_back({inst.defs[i], inst.uses[i], false});
     }
 
     auto emit_move = [&](const LirOperand& dst, const LirOperand& src) {
         if (dst.is_preg() && src.is_preg() && dst.preg_val == src.preg_val) return;
+        if (dst.is_spill_slot() && src.is_spill_slot() && dst.spill_slot == src.spill_slot) return;
         if (dst.is_preg()) {
             if (dst.preg_val.is_gpr()) {
                 GPR dst_gpr = dst.preg_val.as_gpr();
@@ -396,7 +401,10 @@ void EmitContext::emit_parallel_copy(const LirInst& inst) {
                 }
             } else {
                 XMM dst_xmm = dst.preg_val.as_xmm();
-                if (dst.size == 16 || src.size == 16) {
+                if (dst.size == 32 || src.size == 32) {
+                    if (src.is_preg()) enc_.vmovaps(dst_xmm, src.preg_val.as_xmm());
+                    else enc_.vmovups(dst_xmm, to_mem_address(src));
+                } else if (dst.size == 16 || src.size == 16) {
                     if (src.is_preg()) enc_.movaps(dst_xmm, src.preg_val.as_xmm());
                     else enc_.movups(dst_xmm, to_mem_address(src));
                 } else if (dst.size == 4 && src.size == 4) {
@@ -414,13 +422,34 @@ void EmitContext::emit_parallel_copy(const LirInst& inst) {
                     if (src.size == 4) enc_.mov32(dst_mem, src.preg_val.as_gpr());
                     else enc_.mov(dst_mem, src.preg_val.as_gpr());
                 } else {
-                    if (dst.size == 16 || src.size == 16) {
+                    if (dst.size == 32 || src.size == 32) {
+                        enc_.vmovups(dst_mem, src.preg_val.as_xmm());
+                    } else if (dst.size == 16 || src.size == 16) {
                         enc_.movups(dst_mem, src.preg_val.as_xmm());
                     } else if (dst.size == 4 && src.size == 4) {
                         enc_.movss(dst_mem, src.preg_val.as_xmm());
                     } else {
                         enc_.movsd(dst_mem, src.preg_val.as_xmm());
                     }
+                }
+            } else if (src.is_imm_int()) {
+                if (dst.size == 4) enc_.mov32(dst_mem, static_cast<int32_t>(src.imm_int));
+                else enc_.mov(dst_mem, static_cast<int32_t>(src.imm_int));
+            } else {
+                // Memory-to-memory move using scratch register
+                MemAddress src_mem = to_mem_address(src);
+                if (dst.size == 32 || src.size == 32) {
+                    enc_.vmovups(XMM::XMM5, src_mem);
+                    enc_.vmovups(dst_mem, XMM::XMM5);
+                } else if (dst.size == 16 || src.size == 16) {
+                    enc_.movups(XMM::XMM5, src_mem);
+                    enc_.movups(dst_mem, XMM::XMM5);
+                } else if (dst.size == 4 && src.size == 4) {
+                    enc_.mov32(GPR::R11, src_mem);
+                    enc_.mov32(dst_mem, GPR::R11);
+                } else {
+                    enc_.mov(GPR::R11, src_mem);
+                    enc_.mov(dst_mem, GPR::R11);
                 }
             }
         }
@@ -432,8 +461,14 @@ void EmitContext::emit_parallel_copy(const LirInst& inst) {
             if (m.done) continue;
             bool dst_used = false;
             for (const auto& other : moves) {
-                if (!other.done && other.src.is_preg() && m.dst.is_preg() &&
-                    other.src.preg_val == m.dst.preg_val) {
+                if (other.done) continue;
+                if (m.dst.is_preg() && other.src.is_preg() &&
+                    m.dst.preg_val == other.src.preg_val) {
+                    dst_used = true;
+                    break;
+                }
+                if (m.dst.is_spill_slot() && other.src.is_spill_slot() &&
+                    m.dst.spill_slot == other.src.spill_slot) {
                     dst_used = true;
                     break;
                 }
@@ -466,10 +501,19 @@ void EmitContext::emit_parallel_copy(const LirInst& inst) {
             cycle.push_back(curr);
             size_t next_idx = SIZE_MAX;
             for (size_t i = 0; i < moves.size(); ++i) {
-                if (!moves[i].done && moves[i].dst.is_preg() && moves[curr].src.is_preg() &&
-                    moves[i].dst.preg_val == moves[curr].src.preg_val) {
-                    next_idx = i;
-                    break;
+                if (!moves[i].done) {
+                    bool match = false;
+                    if (moves[i].dst.is_preg() && moves[curr].src.is_preg() &&
+                        moves[i].dst.preg_val == moves[curr].src.preg_val) {
+                        match = true;
+                    } else if (moves[i].dst.is_spill_slot() && moves[curr].src.is_spill_slot() &&
+                               moves[i].dst.spill_slot == moves[curr].src.spill_slot) {
+                        match = true;
+                    }
+                    if (match) {
+                        next_idx = i;
+                        break;
+                    }
                 }
             }
             if (next_idx == SIZE_MAX || next_idx == start_idx) {
@@ -507,7 +551,10 @@ void EmitContext::emit_parallel_copy(const LirInst& inst) {
                 m1.done = true;
             } else {
                 bool is_xmm = (m0.dst.is_preg() && m0.dst.preg_val.is_xmm()) ||
-                              (m1.dst.is_preg() && m1.dst.preg_val.is_xmm());
+                              (m1.dst.is_preg() && m1.dst.preg_val.is_xmm()) ||
+                              (m0.src.is_preg() && m0.src.preg_val.is_xmm()) ||
+                              (m1.src.is_preg() && m1.src.preg_val.is_xmm()) ||
+                              (m0.dst.size == 16 || m0.dst.size == 32);
                 PReg scratch = is_xmm ? PReg::xmm(XMM::XMM5) : PReg::gpr(GPR::R11);
                 uint8_t sz = m0.dst.size;
                 emit_move(LirOperand::preg(scratch, sz), m0.src);
@@ -519,7 +566,9 @@ void EmitContext::emit_parallel_copy(const LirInst& inst) {
         } else if (!cycle.empty()) {
             size_t idx0 = cycle[0];
             auto& m0 = moves[idx0];
-            bool is_xmm = m0.dst.is_preg() && m0.dst.preg_val.is_xmm();
+            bool is_xmm = (m0.dst.is_preg() && m0.dst.preg_val.is_xmm()) ||
+                          (m0.src.is_preg() && m0.src.preg_val.is_xmm()) ||
+                          (m0.dst.size == 16 || m0.dst.size == 32);
             PReg scratch = is_xmm ? PReg::xmm(XMM::XMM5) : PReg::gpr(GPR::R11);
             uint8_t sz = m0.dst.size;
 
@@ -678,7 +727,7 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
 
             for (size_t i = 0; i < num_uses; ++i) {
                 const auto& op = inst.uses[i];
-                int32_t slot_offset = static_cast<int32_t>(slots_disp + i * 8);
+                int32_t slot_offset = slots_disp + static_cast<int32_t>(i * 8);
 
                 if (op.is_preg()) {
                     if (op.preg_val.is_gpr()) {

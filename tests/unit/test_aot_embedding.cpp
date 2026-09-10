@@ -142,6 +142,7 @@ TEST_CASE("Embedding API - HostEngine::compile_to_object AOT Parity with In-Memo
     CHECK_EQ(obj.resume_tables.size(), jit_resume_tables.size());
 }
 
+#if defined(_WIN32)
 TEST_CASE("Embedding API - End-to-End AOT Linking, Dynamic Patching, and Moving GC Stack Walker") {
     if (!MsvcToolchain::is_available()) {
         std::cout << "  [SKIPPED] MSVC toolchain not available in environment\n";
@@ -453,3 +454,4 @@ TEST_CASE("Embedding API - End-to-End AOT Linking, Dynamic Patching, and Moving 
     FreeLibrary(hDll);
     g_aot_test_gc = nullptr;
 }
+#endif

@@ -146,15 +146,9 @@ uintptr_t brass_coro_create(void* fn_ptr, uint32_t slot_count, uint64_t pointer_
 
     if (!frame) return 0;
 
-    void* actual_fn = fn_ptr;
-    if (g_coro_symbol_resolver && fn_ptr) {
-        void* res = g_coro_symbol_resolver(reinterpret_cast<const char*>(fn_ptr));
-        if (res) actual_fn = res;
-    }
-
     frame->state_id = 0;
     frame->is_done = 0;
-    frame->fn_ptr = actual_fn;
+    frame->fn_ptr = fn_ptr;
     frame->yielded_val = 0;
     frame->resume_arg = 0;
     frame->slot_count = slot_count;
@@ -173,11 +167,6 @@ uint64_t brass_coro_resume(uintptr_t coro_frame, uint64_t input_val) {
     }
 
     frame->resume_arg = input_val;
-
-    if (g_coro_symbol_resolver && frame->fn_ptr != nullptr) {
-        void* res = g_coro_symbol_resolver(reinterpret_cast<const char*>(frame->fn_ptr));
-        if (res) frame->fn_ptr = res;
-    }
 
     if (frame->fn_ptr != nullptr) {
         using CoroFn = uint64_t (*)(BrassCoroFrame*);
@@ -226,7 +215,12 @@ uint64_t bronze_iter_step(uint64_t iter_handle) {
 }
 
 uint64_t bronze_create_async_machine(void* fn_ptr, uint32_t slot_count, uint64_t pointer_mask, uint64_t env) {
-    uintptr_t frame_addr = brass_coro_create(fn_ptr, std::max(slot_count, 1U), pointer_mask);
+    void* actual_fn = fn_ptr;
+    if (g_coro_symbol_resolver && fn_ptr) {
+        void* res = g_coro_symbol_resolver(reinterpret_cast<const char*>(fn_ptr));
+        if (res) actual_fn = res;
+    }
+    uintptr_t frame_addr = brass_coro_create(actual_fn, std::max(slot_count, 1U), pointer_mask);
     if (!frame_addr) return 0;
 
     BrassCoroFrame* frame = reinterpret_cast<BrassCoroFrame*>(frame_addr);

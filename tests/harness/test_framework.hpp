@@ -89,10 +89,10 @@ public:
 
             if (tc.passed && tc.failures.empty()) {
                 passed++;
-                std::cout << "  [PASS] " << tc.name << " (" << tc.duration_ms << " ms)\n";
+                std::cout << "  [PASS] " << tc.name << " (" << tc.duration_ms << " ms)\n" << std::flush;
             } else {
                 failed++;
-                std::cout << "  [FAIL] " << tc.name << " (" << tc.duration_ms << " ms)\n";
+                std::cout << "  [FAIL] " << tc.name << " (" << tc.duration_ms << " ms)\n" << std::flush;
                 for (const auto& fail : tc.failures) {
                     std::cout << "         " << fail.file << ":" << fail.line << ": "
                               << fail.expr;

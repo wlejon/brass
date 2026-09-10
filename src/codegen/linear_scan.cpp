@@ -633,7 +633,7 @@ void LinearScanAllocator::rewrite_instructions() {
                 inst->uses[i] = resolve_operand(inst->uses[i]);
             }
 
-            if (inst->opcode == LirOpcode::Safepoint) {
+            if (inst->opcode == LirOpcode::Safepoint || inst->opcode == LirOpcode::ParallelCopy) {
                 rewritten.push_back(std::move(inst));
                 continue;
             }

@@ -40,7 +40,7 @@ public:
     CallGraph(const CallGraph&) = delete;
     CallGraph& operator=(const CallGraph&) = delete;
     CallGraph(CallGraph&&) noexcept = default;
-    CallGraph& operator=(CallGraph&&) noexcept = default;
+    CallGraph& operator=(CallGraph&&) noexcept = delete;
 
     Module& module() const noexcept { return module_; }
 

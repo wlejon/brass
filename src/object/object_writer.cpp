@@ -9,6 +9,7 @@
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/verifier.hpp>
 #include <algorithm>
+#include <iostream>
 
 namespace brass::object {
 
@@ -246,9 +247,9 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
         }
     }
 
-    // Emit compact binary stack maps to .rdata / .rodata section
+    // Emit compact binary stack maps to .rdata / .rodata / __const section
     if (!obj.stack_maps.empty()) {
-        std::string ro_sec_name = target_.is_windows() ? ".rdata" : ".rodata";
+        std::string ro_sec_name = target_.is_windows() ? ".rdata" : (target_.is_macos() ? "__const" : ".rodata");
         Section& ro_sec = obj.get_or_create_section(
             ro_sec_name,
             SectionKind::RoData,

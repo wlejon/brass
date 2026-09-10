@@ -578,10 +578,21 @@ void register_all_runtime_symbols(codegen::JitExecutionEngine& jit) {
     jit.register_external_symbol("brass_parallel_free_context", reinterpret_cast<void*>(&brass_parallel_free_context));
 }
 
+void unregister_all_runtime_symbols() {
+    g_active_jit = nullptr;
+    set_coro_symbol_resolver(nullptr);
+}
+
+codegen::JitExecutionEngine* get_active_jit() {
+    return g_active_jit;
+}
+
 void register_bronze_runtime_symbols(void* jit_engine_ptr) {
     if (jit_engine_ptr) {
         auto* jit = reinterpret_cast<codegen::JitExecutionEngine*>(jit_engine_ptr);
         register_all_runtime_symbols(*jit);
+    } else {
+        unregister_all_runtime_symbols();
     }
 }
 

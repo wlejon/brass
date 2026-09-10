@@ -34,7 +34,12 @@ else()
         -fno-omit-frame-pointer
         $<$<CONFIG:Release>:-O3>
     )
-    if(WIN32 OR MINGW)
+    if(APPLE)
+        # Default to x86_64 on Apple for JIT engine parity
+        if(NOT CMAKE_OSX_ARCHITECTURES)
+            set(CMAKE_OSX_ARCHITECTURES "x86_64" CACHE STRING "OSX Architectures" FORCE)
+        endif()
+    elseif(WIN32 OR MINGW)
         add_link_options(-static -static-libgcc -static-libstdc++)
     else()
         add_link_options(-static-libgcc -static-libstdc++)
@@ -48,6 +53,11 @@ set(BRASS_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
 file(GLOB_RECURSE BRASS_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
 )
+list(APPEND BRASS_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/object/macho_writer.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/target/macho_dylib_writer.cpp"
+)
+list(REMOVE_DUPLICATES BRASS_SOURCES)
 
 if(MSVC)
     enable_language(ASM_MASM)

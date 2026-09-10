@@ -22,6 +22,7 @@ using namespace brass;
 using namespace brass::object;
 using namespace brass::test;
 
+#if defined(_WIN32)
 // =============================================================================
 // Milestone Item (a): Emit Brass .obj and link with MSVC link.exe into a DLL
 // =============================================================================
@@ -715,3 +716,4 @@ TEST_CASE("MSVC Milestone (d) - Stack walker finds live gcrefs across Brass -> M
 
     FreeLibrary(hDll);
 }
+#endif

@@ -82,7 +82,7 @@ public:
         return v;
     }
 
-    static constexpr RuntimeValue from_ptr(const void* val) noexcept {
+    static RuntimeValue from_ptr(const void* val) noexcept {
         return from_ptr(reinterpret_cast<uintptr_t>(val));
     }
 
@@ -434,7 +434,6 @@ inline RuntimeValue val_bitcast_i64_f64(RuntimeValue v) noexcept {
 }
 
 inline RuntimeValue val_bitcast_f64_i64(RuntimeValue v) noexcept {
-    RuntimeValue res;
     double d = 0.0;
     uint64_t b = v.raw_bits();
     std::memcpy(&d, &b, sizeof(double));

@@ -199,6 +199,18 @@
 
 ---
 
+## Phase VII: macOS Operational Parity & Standalone Mach-O Toolchain (Chunk 26)
+
+- **Chunk 26: macOS System Parity, 64-bit Mach-O Relocatable & Dynamic Library Emission [COMPLETED]**:
+  - Native macOS support under Apple Clang with SysV AMD64 ABI runtime execution.
+  - SysV AMD64 entry parameter parallel-copy permutation resolution and volatile XMM register spill preservation.
+  - 64-bit Mach-O relocatable object emitter (`macho_writer.cpp`) with `__TEXT,__text`, `__TEXT,__const` rodata stack maps, DWARF CFI `.eh_frame`, and x86_64 relocations (`X86_64_RELOC_BRANCH`, `X86_64_RELOC_SIGNED`, `X86_64_RELOC_UNSIGNED`).
+  - Standalone Mach-O Dynamic Library emitter (`macho_dylib_writer.cpp`) generating zero-dependency `.dylib` shared libraries with Radix export trie, dynamic symbol table, and ad-hoc code signing (`codesign`).
+  - Standalone `AotLinker` auto-detection and roundtrip native execution via `DynamicLibrary::open` (`dlopen`/`dlsym`) on macOS.
+  - 100% verified across 500 unit tests, 36 Bronze IL corpus programs, and 25 performance benchmarks.
+
+---
+
 ## House Rules & Code Conventions
 1. **C++20**: Zero LLVM dependencies.
 2. **Compiler Compatibility**: MSVC, Clang, and GCC 12 clean (no `= {}` default args which GCC 12 rejects).

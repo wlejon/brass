@@ -10,8 +10,8 @@ Standalone C++20 library, CMake, zero LLVM dependencies.
 2. **Patchable Code Sites**: Thread-safe dynamic patching for Inline Caches (ICs) and call sites on x64 without stopping mutator threads.
 3. **Speculation & Deoptimization**: Native `guard` and out-of-line side exits with state maps and interior resume tables for generic twin fallbacks.
 4. **LIR Peephole Optimizer & Linear Scan**: Post-regalloc peephole optimizations (redundant move elimination, load-after-store forwarding, dead move elimination, arithmetic zeroing, and branch folding).
-5. **Byte-Level Determinism Ratchet**: 100% byte-for-byte deterministic emission of COFF (Win64) and ELF64 (Linux/SysV) relocatable object files across runs.
-6. **Multi-Format Output & Unwind Info**: Full Win64 SEH (`.pdata`/`.xdata`) and Linux SysV CFI (`.eh_frame`) generation.
+5. **Byte-Level Determinism Ratchet**: 100% byte-for-byte deterministic emission of COFF (Win64), ELF64 (Linux/SysV), and Mach-O (macOS) relocatable object files across runs.
+6. **Multi-Format Output & Unwind Info**: Full Win64 SEH (`.pdata`/`.xdata`), Linux SysV CFI (`.eh_frame`), and macOS 64-bit Mach-O relocatable object (`MH_OBJECT`) and standalone dynamic library (`MH_DYLIB`) generation.
 7. **Differential Verification Oracle**: Built-in reference MIR interpreter and mini-Cheney moving collector harness for differential testing.
 
 ## Performance Bars

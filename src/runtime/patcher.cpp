@@ -56,6 +56,9 @@ bool brass_patch_const32(void* code_addr, int32_t new_val) {
     memory_fence();
 #if defined(_WIN32)
     FlushInstructionCache(GetCurrentProcess(), code_addr, sizeof(int32_t));
+#elif defined(__GNUC__) || defined(__clang__)
+    char* begin = static_cast<char*>(code_addr);
+    __builtin___clear_cache(begin, begin + sizeof(int32_t));
 #endif
     return true;
 }
@@ -68,6 +71,9 @@ bool brass_patch_const64(void* code_addr, int64_t new_val) {
     memory_fence();
 #if defined(_WIN32)
     FlushInstructionCache(GetCurrentProcess(), code_addr, sizeof(int64_t));
+#elif defined(__GNUC__) || defined(__clang__)
+    char* begin = static_cast<char*>(code_addr);
+    __builtin___clear_cache(begin, begin + sizeof(int64_t));
 #endif
     return true;
 }
@@ -100,6 +106,9 @@ bool brass_patch_call(void* call_site_addr, const void* new_target) {
     memory_fence();
 #if defined(_WIN32)
     FlushInstructionCache(GetCurrentProcess(), disp_ptr, sizeof(int32_t));
+#elif defined(__GNUC__) || defined(__clang__)
+    char* begin = reinterpret_cast<char*>(disp_ptr);
+    __builtin___clear_cache(begin, begin + sizeof(int32_t));
 #endif
     return true;
 }

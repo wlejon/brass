@@ -42,6 +42,7 @@ int main(int argc, char** argv) {
     RatchetManager ratchet = RatchetManager::defaults();
     bool loaded_from_disk = ratchet.load(ratchet_path);
     (void)loaded_from_disk;
+    RatchetManager::active() = &ratchet;
 
     // 2. Emit Run Provenance Header
     BenchmarkReporter::print_header("Brass JIT vs Native C++ (-O3) & GC Performance");
@@ -78,6 +79,7 @@ int main(int argc, char** argv) {
         ratchet.update_from_results(results, false);
         if (ratchet.save(ratchet_path)) {
             std::cout << "[RATCHET] Successfully updated golden ratchet ratios at: " << ratchet_path << "\n";
+            return 0;
         } else {
             std::cerr << "[RATCHET] ERROR: Failed to write updated ratchet to: " << ratchet_path << "\n";
             return 1;

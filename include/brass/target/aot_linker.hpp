@@ -12,7 +12,8 @@ namespace brass::target {
 enum class OutputFormat : uint8_t {
     Auto,
     WindowsPeDll,
-    LinuxElfSo
+    LinuxElfSo,
+    MacOSMachODylib
 };
 
 struct LinkerOptions {

@@ -1,8 +1,10 @@
 #include <brass/target/aot_linker.hpp>
 #include <brass/target/pe_dll_writer.hpp>
 #include <brass/target/elf_so_writer.hpp>
+#include <brass/target/macho_dylib_writer.hpp>
 #include <fstream>
 #include <filesystem>
+#include <cstdlib>
 
 namespace brass::target {
 
@@ -27,7 +29,13 @@ bool write_bytes_to_file(const std::string& path, const std::vector<uint8_t>& by
 std::vector<uint8_t> AotLinker::link(const object::ObjectFile& obj, const LinkerOptions& options) {
     OutputFormat fmt = options.format;
     if (fmt == OutputFormat::Auto) {
-        fmt = obj.target.is_windows() ? OutputFormat::WindowsPeDll : OutputFormat::LinuxElfSo;
+        if (obj.target.is_windows()) {
+            fmt = OutputFormat::WindowsPeDll;
+        } else if (obj.target.is_macos()) {
+            fmt = OutputFormat::MacOSMachODylib;
+        } else {
+            fmt = OutputFormat::LinuxElfSo;
+        }
     }
 
     if (fmt == OutputFormat::WindowsPeDll) {
@@ -37,6 +45,13 @@ std::vector<uint8_t> AotLinker::link(const object::ObjectFile& obj, const Linker
         pe_opts.export_all_functions = options.export_all_functions;
         pe_opts.explicit_exports = options.explicit_exports;
         return PeDllWriter::emit(obj, pe_opts);
+    } else if (fmt == OutputFormat::MacOSMachODylib) {
+        MachODylibOptions macho_opts;
+        macho_opts.image_base = 0;
+        macho_opts.install_name = !options.soname.empty() ? options.soname : (!options.module_name.empty() ? options.module_name : "brass_module.dylib");
+        macho_opts.export_all_functions = options.export_all_functions;
+        macho_opts.explicit_exports = options.explicit_exports;
+        return MachODylibWriter::emit(obj, macho_opts);
     } else {
         ElfSoOptions elf_opts;
         elf_opts.soname = options.soname.empty() ? options.module_name : options.soname;
@@ -69,12 +84,28 @@ std::vector<uint8_t> AotLinker::link(const Module& mod) {
 
 bool AotLinker::link_to_file(const object::ObjectFile& obj, const std::string& path, const LinkerOptions& options) {
     LinkerOptions effective_opts = options;
-    if (effective_opts.module_name == "brass_module.dll" && !path.empty()) {
+    if (effective_opts.module_name == "brass_module.dll") {
+        if (obj.target.is_macos()) {
+            effective_opts.module_name = "brass_module.dylib";
+        }
+    }
+    if (!path.empty()) {
         effective_opts.module_name = extract_filename(path);
     }
     std::vector<uint8_t> data = link(obj, effective_opts);
     if (data.empty()) return false;
-    return write_bytes_to_file(path, data);
+    bool ok = write_bytes_to_file(path, data);
+    if (!ok) return false;
+
+#if defined(__APPLE__)
+    if (obj.target.is_macos() || effective_opts.format == OutputFormat::MacOSMachODylib) {
+        std::string cmd = "codesign -s - -f \"" + path + "\" > /dev/null 2>&1";
+        int res = std::system(cmd.c_str());
+        (void)res;
+    }
+#endif
+
+    return true;
 }
 
 bool AotLinker::link_to_file(const object::ObjectFile& obj, const std::string& path) {

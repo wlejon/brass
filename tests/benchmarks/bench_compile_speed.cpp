@@ -17,6 +17,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <psapi.h>
+#elif defined(__APPLE__)
+#include <sys/resource.h>
 #endif
 
 using namespace brass;
@@ -30,6 +32,11 @@ size_t query_peak_memory_bytes() {
     PROCESS_MEMORY_COUNTERS pmc;
     if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) {
         return pmc.PeakWorkingSetSize;
+    }
+#elif defined(__APPLE__)
+    struct rusage r{};
+    if (getrusage(RUSAGE_SELF, &r) == 0) {
+        return static_cast<size_t>(r.ru_maxrss);
     }
 #endif
     return 0;

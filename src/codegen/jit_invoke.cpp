@@ -108,6 +108,7 @@ inline int64_t call_jit_vec2_ret_i64(void* addr, __m128 a0, __m128 a1) {
     return res;
 }
 
+#if defined(_WIN32)
 inline void call_jit_vec_int_ret_void(void* addr, __m128 a0, int64_t a1) {
     register __m128 r_xmm0 asm("xmm0") = a0;
     register int64_t r_rdx asm("rdx") = a1;
@@ -193,6 +194,93 @@ inline int64_t call_jit_int_vec_ret_i64(void* addr, int64_t a0, __m128 a1) {
     );
     return res;
 }
+#else // SysV AMD64 (macOS, Linux)
+inline void call_jit_vec_int_ret_void(void* addr, __m128 a0, int64_t a1) {
+    register __m128 r_xmm0 asm("xmm0") = a0;
+    register int64_t r_rdi asm("rdi") = a1;
+    asm volatile(
+        "subq $32, %%rsp\n\t"
+        "call *%0\n\t"
+        "addq $32, %%rsp"
+        :
+        : "r"(addr), "x"(r_xmm0), "r"(r_rdi)
+        : "rax", "rcx", "rdx", "rsi", "r8", "r9", "r10", "r11", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
+    );
+}
+
+inline __m128 call_jit_vec_int_ret_vec(void* addr, __m128 a0, int64_t a1) {
+    register __m128 r_xmm0 asm("xmm0") = a0;
+    register int64_t r_rdi asm("rdi") = a1;
+    register __m128 res asm("xmm0");
+    asm volatile(
+        "subq $32, %%rsp\n\t"
+        "call *%1\n\t"
+        "addq $32, %%rsp"
+        : "=x"(res)
+        : "r"(addr), "x"(r_xmm0), "r"(r_rdi)
+        : "rax", "rcx", "rdx", "rsi", "r8", "r9", "r10", "r11", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
+    );
+    return res;
+}
+
+inline int64_t call_jit_vec_int_ret_i64(void* addr, __m128 a0, int64_t a1) {
+    register __m128 r_xmm0 asm("xmm0") = a0;
+    register int64_t r_rdi asm("rdi") = a1;
+    register int64_t res asm("rax");
+    asm volatile(
+        "subq $32, %%rsp\n\t"
+        "call *%1\n\t"
+        "addq $32, %%rsp"
+        : "=r"(res)
+        : "r"(addr), "x"(r_xmm0), "r"(r_rdi)
+        : "rcx", "rdx", "rsi", "r8", "r9", "r10", "r11", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
+    );
+    return res;
+}
+
+inline void call_jit_int_vec_ret_void(void* addr, int64_t a0, __m128 a1) {
+    register int64_t r_rdi asm("rdi") = a0;
+    register __m128 r_xmm0 asm("xmm0") = a1;
+    asm volatile(
+        "subq $32, %%rsp\n\t"
+        "call *%0\n\t"
+        "addq $32, %%rsp"
+        :
+        : "r"(addr), "r"(r_rdi), "x"(r_xmm0)
+        : "rax", "rcx", "rdx", "rsi", "r8", "r9", "r10", "r11", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
+    );
+}
+
+inline __m128 call_jit_int_vec_ret_vec(void* addr, int64_t a0, __m128 a1) {
+    register int64_t r_rdi asm("rdi") = a0;
+    register __m128 r_xmm0 asm("xmm0") = a1;
+    register __m128 res asm("xmm0");
+    asm volatile(
+        "subq $32, %%rsp\n\t"
+        "call *%1\n\t"
+        "addq $32, %%rsp"
+        : "=x"(res)
+        : "r"(addr), "r"(r_rdi), "x"(r_xmm0)
+        : "rax", "rcx", "rdx", "rsi", "r8", "r9", "r10", "r11", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
+    );
+    return res;
+}
+
+inline int64_t call_jit_int_vec_ret_i64(void* addr, int64_t a0, __m128 a1) {
+    register int64_t r_rdi asm("rdi") = a0;
+    register __m128 r_xmm0 asm("xmm0") = a1;
+    register int64_t res asm("rax");
+    asm volatile(
+        "subq $32, %%rsp\n\t"
+        "call *%1\n\t"
+        "addq $32, %%rsp"
+        : "=r"(res)
+        : "r"(addr), "r"(r_rdi), "x"(r_xmm0)
+        : "rcx", "rdx", "rsi", "r8", "r9", "r10", "r11", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
+    );
+    return res;
+}
+#endif
 #else
 inline __m128 call_jit_vec1_ret_vec(void* addr, __m128 a0) {
     return reinterpret_cast<__m128(*)(__m128)>(addr)(a0);

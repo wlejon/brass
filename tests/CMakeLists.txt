@@ -18,6 +18,7 @@ add_executable(brass_unit_tests
     unit/test_x64_codegen.cpp
     unit/test_coff_writer.cpp
     unit/test_elf_writer.cpp
+    unit/test_macho_writer.cpp
     unit/test_stack_map.cpp
     unit/test_stack_walker.cpp
     unit/test_deopt_resume.cpp
@@ -141,6 +142,14 @@ target_link_libraries(brass_unit_tests
 )
 
 add_test(NAME unit_tests COMMAND brass_unit_tests)
+set_tests_properties(unit_tests PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
+if(APPLE)
+    add_custom_command(TARGET brass_unit_tests POST_BUILD
+        COMMAND codesign -s - -f $<TARGET_FILE:brass_unit_tests>
+        COMMENT "Ad-hoc code signing brass_unit_tests"
+    )
+endif()
 
 # Retrieve Git Commit SHA
 execute_process(
@@ -197,5 +206,12 @@ target_link_libraries(brass_benchmarks
 
 add_test(NAME benchmarks COMMAND brass_benchmarks)
 add_test(NAME performance_ratchet COMMAND brass_benchmarks --check-ratchet)
-set_tests_properties(benchmarks performance_ratchet PROPERTIES TIMEOUT 300)
+set_tests_properties(benchmarks performance_ratchet PROPERTIES TIMEOUT 300 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
+if(APPLE)
+    add_custom_command(TARGET brass_benchmarks POST_BUILD
+        COMMAND codesign -s - -f $<TARGET_FILE:brass_benchmarks>
+        COMMENT "Ad-hoc code signing brass_benchmarks"
+    )
+endif()
 

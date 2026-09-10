@@ -296,14 +296,15 @@ TEST_CASE("AOT Linker - Roundtrip Native Execution with DynamicLibrary") {
         collatz_oracle.push_back(res.as_i64());
     }
 
-    // Now test AOT Linker & native loading on Windows
-    if (Target::host().is_windows()) {
-        std::filesystem::path dll_path = std::filesystem::temp_directory_path() / "test_aot_roundtrip_module.dll";
+    // Now test AOT Linker & native loading on Windows and macOS
+    if (Target::host().is_windows() || Target::host().is_macos()) {
+        std::string ext = Target::host().is_windows() ? ".dll" : ".dylib";
+        std::filesystem::path dll_path = std::filesystem::temp_directory_path() / ("test_aot_roundtrip_module" + ext);
         std::error_code ec;
         std::filesystem::remove(dll_path, ec);
 
         LinkerOptions opts;
-        opts.module_name = "test_aot_roundtrip_module.dll";
+        opts.module_name = "test_aot_roundtrip_module" + ext;
         opts.export_all_functions = true;
 
         bool linked = AotLinker::link_to_file(*mod, dll_path.string(), Target::host(), opts);
@@ -369,13 +370,14 @@ TEST_CASE("AOT Linker - Selective Function Exports") {
     auto mod = build_aot_roundtrip_module();
     REQUIRE(mod != nullptr);
 
-    if (Target::host().is_windows()) {
-        std::filesystem::path dll_path = std::filesystem::temp_directory_path() / "test_aot_selective_exports.dll";
+    if (Target::host().is_windows() || Target::host().is_macos()) {
+        std::string ext = Target::host().is_windows() ? ".dll" : ".dylib";
+        std::filesystem::path dll_path = std::filesystem::temp_directory_path() / ("test_aot_selective_exports" + ext);
         std::error_code ec;
         std::filesystem::remove(dll_path, ec);
 
         LinkerOptions opts;
-        opts.module_name = "test_aot_selective_exports.dll";
+        opts.module_name = "test_aot_selective_exports" + ext;
         opts.export_all_functions = false;
         opts.explicit_exports = {"fib", "collatz"};
 
@@ -429,14 +431,34 @@ TEST_CASE("AOT Linker - ELF Shared Object Generation Parity") {
     CHECK_EQ(e_type, 3); // ET_DYN
 }
 
+TEST_CASE("AOT Linker - Mach-O Dynamic Library Generation Parity") {
+    auto mod = build_aot_roundtrip_module();
+    REQUIRE(mod != nullptr);
+
+    LinkerOptions opts;
+    opts.format = OutputFormat::MacOSMachODylib;
+    opts.soname = "libaot_test.dylib";
+    opts.export_all_functions = true;
+
+    std::vector<uint8_t> dylib_bytes = AotLinker::link(*mod, Target::x64_macos(), opts);
+    REQUIRE(dylib_bytes.size() >= 4096);
+
+    uint32_t magic = static_cast<uint32_t>(dylib_bytes[0] | (dylib_bytes[1] << 8) | (dylib_bytes[2] << 16) | (dylib_bytes[3] << 24));
+    CHECK_EQ(magic, 0xFEEDFACF); // MH_MAGIC_64
+
+    uint32_t filetype = static_cast<uint32_t>(dylib_bytes[12] | (dylib_bytes[13] << 8) | (dylib_bytes[14] << 16) | (dylib_bytes[15] << 24));
+    CHECK_EQ(filetype, 6); // MH_DYLIB
+}
+
 TEST_CASE("DynamicLibrary - Error Handling on Non-Existent Files and Missing Symbols") {
     std::string err;
     auto lib_bad = DynamicLibrary::open("non_existent_file_definitely_not_here_404.dll", &err);
     CHECK(lib_bad == nullptr);
     CHECK(!err.empty());
 
-    if (Target::host().is_windows()) {
-        std::filesystem::path dll_path = std::filesystem::temp_directory_path() / "test_aot_err_handling.dll";
+    if (Target::host().is_windows() || Target::host().is_macos()) {
+        std::string ext = Target::host().is_windows() ? ".dll" : ".dylib";
+        std::filesystem::path dll_path = std::filesystem::temp_directory_path() / ("test_aot_err_handling" + ext);
         std::error_code ec;
         std::filesystem::remove(dll_path, ec);
 
@@ -444,7 +466,7 @@ TEST_CASE("DynamicLibrary - Error Handling on Non-Existent Files and Missing Sym
         REQUIRE(mod != nullptr);
 
         LinkerOptions opts;
-        opts.module_name = "test_aot_err_handling.dll";
+        opts.module_name = "test_aot_err_handling" + ext;
         bool linked = AotLinker::link_to_file(*mod, dll_path.string(), Target::host(), opts);
         REQUIRE(linked);
 

@@ -7,6 +7,7 @@
 #include <brass/runtime/patcher.hpp>
 #include <brass/runtime/exception.hpp>
 #include <brass/runtime/coroutine.hpp>
+#include "../il_translator/il_runtime.hpp"
 #include <stdexcept>
 #include <cstring>
 #include <emmintrin.h>
@@ -185,6 +186,9 @@ JitExecutionEngine::~JitExecutionEngine() {
     registered_exception_fns_.clear();
     if (brass_get_active_stack_maps() == &stack_maps_) {
         brass_set_active_stack_maps(nullptr);
+    }
+    if (il::get_active_jit() == this) {
+        il::unregister_all_runtime_symbols();
     }
 }
 

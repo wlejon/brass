@@ -152,7 +152,6 @@ func fib(%0: f64) -> f64 {
     TranslationResult res = translate_bronze_il(il_source, {}, &diag);
     REQUIRE(res.success);
     REQUIRE(res.module != nullptr);
-
     codegen::JitExecutionEngine jit(Target::host());
     register_bronze_runtime_symbols(&jit);
     REQUIRE(jit.compile_and_load(*res.module));
@@ -220,12 +219,14 @@ func compute_checksum(%0: f64, %1: f64) -> f64 {
 #endif
 }
 
+#if defined(_WIN32)
 static HMODULE g_aot_active_dll = nullptr;
 
 static void* aot_symbol_resolver(const char* name) {
     if (!name || !g_aot_active_dll) return nullptr;
     return reinterpret_cast<void*>(GetProcAddress(g_aot_active_dll, name));
 }
+#endif
 
 TEST_CASE("Bronze IL - 22-Program Live Corpus JIT and AOT Execution") {
     std::vector<std::string> corpus_files = {
@@ -342,6 +343,7 @@ TEST_CASE("Bronze IL - 22-Program Live Corpus JIT and AOT Execution") {
         &brass::runtime::brass_dynamic_object_get_prop_str,
         &brass::runtime::brass_dynamic_object_set_prop_str
     };
+    (void)host_rt;
 
     bool msvc_ready = MsvcToolchain::is_available();
     std::filesystem::path aot_dir;
@@ -451,8 +453,18 @@ TEST_CASE("Bronze IL - 22-Program Live Corpus JIT and AOT Execution") {
 
         std::ifstream ifs_il(il_file);
         if (!ifs_il.is_open()) {
-            il_file = "D:/projects/brass/" + il_file;
-            exp_file = "D:/projects/brass/" + exp_file;
+            il_file = "../../tests/bronze_corpus/" + name + ".il";
+            exp_file = "../../tests/bronze_corpus/" + name + ".expected";
+            ifs_il.open(il_file);
+        }
+        if (!ifs_il.is_open()) {
+            il_file = "../tests/bronze_corpus/" + name + ".il";
+            exp_file = "../tests/bronze_corpus/" + name + ".expected";
+            ifs_il.open(il_file);
+        }
+        if (!ifs_il.is_open()) {
+            il_file = "D:/projects/brass/tests/bronze_corpus/" + name + ".il";
+            exp_file = "D:/projects/brass/tests/bronze_corpus/" + name + ".expected";
             ifs_il.open(il_file);
         }
         REQUIRE(ifs_il.is_open());
@@ -461,10 +473,6 @@ TEST_CASE("Bronze IL - 22-Program Live Corpus JIT and AOT Execution") {
         std::string il_content = ss_il.str();
 
         std::ifstream ifs_exp(exp_file);
-        if (!ifs_exp.is_open()) {
-            exp_file = "D:/projects/brass/" + exp_file;
-            ifs_exp.open(exp_file);
-        }
         REQUIRE(ifs_exp.is_open());
         std::stringstream ss_exp;
         ss_exp << ifs_exp.rdbuf();
@@ -526,6 +534,7 @@ TEST_CASE("Bronze IL - 22-Program Live Corpus JIT and AOT Execution") {
         // =========================================================================
         // Leg (c): AOT Compile, Link, and Execute Leg
         // =========================================================================
+#if defined(_WIN32)
         if (msvc_ready) {
             TranslatorOptions opts_aot;
             opts_aot.enable_optimizations = true;
@@ -585,5 +594,6 @@ TEST_CASE("Bronze IL - 22-Program Live Corpus JIT and AOT Execution") {
 
             CHECK_EQ(normalize(captured_aot.str()), expected_norm);
         }
+#endif
     }
 }

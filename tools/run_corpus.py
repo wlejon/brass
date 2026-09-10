@@ -19,6 +19,8 @@ CORPUS_DIR = ROOT_DIR / "tests" / "bronze_corpus"
 BRASS_IL = ROOT_DIR / "build" / "tools" / "brass-il.exe"
 if not BRASS_IL.exists():
     BRASS_IL = ROOT_DIR / "build" / "tools" / "brass-il"
+if not BRASS_IL.exists():
+    BRASS_IL = ROOT_DIR / "build_x64" / "tools" / "brass-il"
 
 PROGRAMS = [
     "01_arithmetic",

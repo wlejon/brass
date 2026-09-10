@@ -83,7 +83,14 @@ void* DynamicLibrary::get_symbol(const std::string& name) const {
     FARPROC proc = GetProcAddress(static_cast<HMODULE>(handle_), name.c_str());
     return reinterpret_cast<void*>(proc);
 #else
-    return dlsym(handle_, name.c_str());
+    void* sym = dlsym(handle_, name.c_str());
+#if defined(__APPLE__)
+    if (!sym && !name.empty() && name[0] != '_') {
+        std::string under = "_" + name;
+        sym = dlsym(handle_, under.c_str());
+    }
+#endif
+    return sym;
 #endif
 }
 

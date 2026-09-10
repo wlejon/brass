@@ -8,6 +8,7 @@
 #include <sstream>
 #include <iostream>
 
+#if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -15,12 +16,14 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#endif
 
 namespace brass::test {
 
 class MsvcToolchain {
 public:
     static std::string find_vcvars64() {
+#if defined(_WIN32)
         static const std::vector<std::string> candidates = {
             "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat",
             "C:\\Program Files\\Microsoft Visual Studio\\2022\\Professional\\VC\\Auxiliary\\Build\\vcvars64.bat",
@@ -34,14 +37,19 @@ public:
                 return path;
             }
         }
+#endif
         return "";
     }
 
     static bool is_available() {
+#if defined(_WIN32)
         if (!find_vcvars64().empty()) {
             return true;
         }
         return (std::system("where cl.exe >nul 2>nul") == 0) && (std::system("where link.exe >nul 2>nul") == 0);
+#else
+        return false;
+#endif
     }
 
     static std::filesystem::path temp_dir() {

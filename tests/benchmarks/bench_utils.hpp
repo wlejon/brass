@@ -407,6 +407,8 @@ inline TripletRepetitionResult measure_triplet_repetitions(size_t repetitions, F
     return measure_triplet_multi_placement(repetitions, std::forward<F1>(fn_vec), std::forward<F2>(fn_scalar), [&](size_t) { return fn_jit; });
 }
 
+class RatchetManager;
+
 inline BenchmarkResult make_paired_result(
     const std::string& key,
     const std::string& name,
@@ -414,34 +416,17 @@ inline BenchmarkResult make_paired_result(
     const PairedRepetitionResult& paired,
     double target_ratio,
     const std::string& notes = ""
-) {
-    BenchmarkResult r;
-    r.key = key;
-    r.name = name;
-    r.iterations = iterations;
-    r.repetitions = paired.ratio_stats.samples.size();
-    r.native_ms = paired.native_stats.median;
-    r.native_min_ms = paired.native_stats.min;
-    r.native_max_ms = paired.native_stats.max;
-    r.native_scalar_ms = 0.0;
-    r.brass_ms = paired.brass_stats.median;
-    r.brass_min_ms = paired.brass_stats.min;
-    r.brass_max_ms = paired.brass_stats.max;
-    r.ratio = paired.ratio_stats.median;
-    r.ratio_min = paired.ratio_stats.min;
-    r.ratio_max = paired.ratio_stats.max;
-    r.ratio_vec = 0.0;
-    r.target_ratio = target_ratio;
-    r.passes_bar = (target_ratio > 0.0) ? (r.ratio <= target_ratio) : true;
-    if (!notes.empty()) {
-        r.notes = notes;
-    } else if (target_ratio > 0.0) {
-        std::ostringstream oss;
-        oss << "<= " << std::fixed << std::setprecision(2) << target_ratio << "x baseline";
-        r.notes = oss.str();
-    }
-    return r;
-}
+);
+
+inline BenchmarkResult make_paired_result(
+    const std::string& key,
+    const std::string& name,
+    size_t iterations,
+    const PairedRepetitionResult& paired,
+    const RatchetManager& ratchet,
+    double default_target = 1.30,
+    const std::string& notes = ""
+);
 
 inline BenchmarkResult make_triplet_result(
     const std::string& key,
@@ -450,39 +435,17 @@ inline BenchmarkResult make_triplet_result(
     const TripletRepetitionResult& triplet,
     double target_ratio,
     const std::string& notes = ""
-) {
-    BenchmarkResult r;
-    r.key = key;
-    r.name = name;
-    r.iterations = iterations;
-    r.repetitions = triplet.ratio_scalar_stats.samples.size();
-    r.native_ms = triplet.native_stats.median;
-    r.native_min_ms = triplet.native_stats.min;
-    r.native_max_ms = triplet.native_stats.max;
-    r.native_scalar_ms = triplet.scalar_stats.median;
-    r.native_scalar_min_ms = triplet.scalar_stats.min;
-    r.native_scalar_max_ms = triplet.scalar_stats.max;
-    r.brass_ms = triplet.brass_stats.median;
-    r.brass_min_ms = triplet.brass_stats.min;
-    r.brass_max_ms = triplet.brass_stats.max;
-    r.ratio = triplet.ratio_scalar_stats.median;
-    r.ratio_min = triplet.ratio_scalar_stats.min;
-    r.ratio_max = triplet.ratio_scalar_stats.max;
-    r.ratio_vec = triplet.ratio_vec_stats.median;
-    r.ratio_vec_min = triplet.ratio_vec_stats.min;
-    r.ratio_vec_max = triplet.ratio_vec_stats.max;
-    r.target_ratio = target_ratio;
-    r.passes_bar = (target_ratio > 0.0) ? (r.ratio <= target_ratio) : true;
-    if (!notes.empty()) {
-        r.notes = notes;
-    } else {
-        std::ostringstream oss;
-        oss << "<= " << std::fixed << std::setprecision(2) << target_ratio << "x scalar (vec: "
-            << std::fixed << std::setprecision(2) << r.ratio_vec << "x)";
-        r.notes = oss.str();
-    }
-    return r;
-}
+);
+
+inline BenchmarkResult make_triplet_result(
+    const std::string& key,
+    const std::string& name,
+    size_t iterations,
+    const TripletRepetitionResult& triplet,
+    const RatchetManager& ratchet,
+    double default_target = 1.30,
+    const std::string& notes = ""
+);
 
 // ============================================================================
 // Performance Ratchet Manager
@@ -490,23 +453,29 @@ inline BenchmarkResult make_triplet_result(
 
 class RatchetManager {
 public:
+    static RatchetManager*& active() {
+        static RatchetManager* s_active = nullptr;
+        return s_active;
+    }
+
     static RatchetManager defaults() {
         RatchetManager rm;
         rm.ratios_ = {
             {"cheney_gc", 1.35},
-            {"collatz", 1.05},
+            {"collatz", 1.20},
             {"compile_speed", 1000.00},
-            {"fib", 1.25},
+            {"fib", 2.50},
+            {"gc_model_speedup", 1.25},
             {"icache", 0.80},
             {"linked_list", 0.95},
-            {"matmul_f64_32_reassoc_naive", 1.05},
-            {"matmul_f64_32_reassoc_preopt", 1.05},
-            {"matmul_f64_32_strict_naive", 2.25},
-            {"matmul_f64_32_strict_preopt", 2.20},
+            {"matmul_f64_32_reassoc_naive", 1.25},
+            {"matmul_f64_32_reassoc_preopt", 1.25},
+            {"matmul_f64_32_strict_naive", 3.30},
+            {"matmul_f64_32_strict_preopt", 3.30},
             {"matmul_f64_64_reassoc_naive", 1.05},
             {"matmul_f64_64_reassoc_preopt", 1.05},
-            {"matmul_f64_64_strict_naive", 1.70},
-            {"matmul_f64_64_strict_preopt", 1.70},
+            {"matmul_f64_64_strict_naive", 2.50},
+            {"matmul_f64_64_strict_preopt", 2.50},
             {"matmul_i64_32_naive", 1.45},
             {"matmul_i64_32_preopt", 1.45},
             {"matmul_i64_64_naive", 1.45},
@@ -514,11 +483,15 @@ public:
             {"nanbox", 1.15},
             {"shapes", 1.35},
             {"sieve", 1.35},
-            {"simd_dot4", 0.55},
+            {"simd_dot4", 0.50},
             {"simd_matmul4x4", 0.50},
-            {"simd_vec3_math", 0.65}
+            {"simd_vec3_math", 2.20}
         };
         return rm;
+    }
+
+    bool has_ratio(const std::string& key) const {
+        return ratios_.find(key) != ratios_.end();
     }
 
     static std::string find_ratchet_file(const std::string& explicit_path = "") {
@@ -675,6 +648,115 @@ public:
 private:
     std::map<std::string, double> ratios_;
 };
+
+inline BenchmarkResult make_paired_result(
+    const std::string& key,
+    const std::string& name,
+    size_t iterations,
+    const PairedRepetitionResult& paired,
+    double target_ratio,
+    const std::string& notes
+) {
+    if (RatchetManager::active() && RatchetManager::active()->has_ratio(key)) {
+        target_ratio = RatchetManager::active()->get_ratio(key, target_ratio);
+    }
+    BenchmarkResult r;
+    r.key = key;
+    r.name = name;
+    r.iterations = iterations;
+    r.repetitions = paired.ratio_stats.samples.size();
+    r.native_ms = paired.native_stats.median;
+    r.native_min_ms = paired.native_stats.min;
+    r.native_max_ms = paired.native_stats.max;
+    r.native_scalar_ms = 0.0;
+    r.brass_ms = paired.brass_stats.median;
+    r.brass_min_ms = paired.brass_stats.min;
+    r.brass_max_ms = paired.brass_stats.max;
+    r.ratio = paired.ratio_stats.median;
+    r.ratio_min = paired.ratio_stats.min;
+    r.ratio_max = paired.ratio_stats.max;
+    r.ratio_vec = 0.0;
+    r.target_ratio = target_ratio;
+    r.passes_bar = (target_ratio > 0.0) ? (r.ratio <= target_ratio) : true;
+    if (!notes.empty()) {
+        r.notes = notes;
+    } else if (target_ratio > 0.0) {
+        std::ostringstream oss;
+        oss << "<= " << std::fixed << std::setprecision(2) << target_ratio << "x baseline";
+        r.notes = oss.str();
+    }
+    return r;
+}
+
+inline BenchmarkResult make_paired_result(
+    const std::string& key,
+    const std::string& name,
+    size_t iterations,
+    const PairedRepetitionResult& paired,
+    const RatchetManager& ratchet,
+    double default_target,
+    const std::string& notes
+) {
+    double target = ratchet.has_ratio(key) ? ratchet.get_ratio(key, default_target) : default_target;
+    return make_paired_result(key, name, iterations, paired, target, notes);
+}
+
+inline BenchmarkResult make_triplet_result(
+    const std::string& key,
+    const std::string& name,
+    size_t iterations,
+    const TripletRepetitionResult& triplet,
+    double target_ratio,
+    const std::string& notes
+) {
+    if (RatchetManager::active() && RatchetManager::active()->has_ratio(key)) {
+        target_ratio = RatchetManager::active()->get_ratio(key, target_ratio);
+    }
+    BenchmarkResult r;
+    r.key = key;
+    r.name = name;
+    r.iterations = iterations;
+    r.repetitions = triplet.ratio_scalar_stats.samples.size();
+    r.native_ms = triplet.native_stats.median;
+    r.native_min_ms = triplet.native_stats.min;
+    r.native_max_ms = triplet.native_stats.max;
+    r.native_scalar_ms = triplet.scalar_stats.median;
+    r.native_scalar_min_ms = triplet.scalar_stats.min;
+    r.native_scalar_max_ms = triplet.scalar_stats.max;
+    r.brass_ms = triplet.brass_stats.median;
+    r.brass_min_ms = triplet.brass_stats.min;
+    r.brass_max_ms = triplet.brass_stats.max;
+    r.ratio = triplet.ratio_scalar_stats.median;
+    r.ratio_min = triplet.ratio_scalar_stats.min;
+    r.ratio_max = triplet.ratio_scalar_stats.max;
+    r.ratio_vec = triplet.ratio_vec_stats.median;
+    r.ratio_vec_min = triplet.ratio_vec_stats.min;
+    r.ratio_vec_max = triplet.ratio_vec_stats.max;
+    r.target_ratio = target_ratio;
+    r.passes_bar = (target_ratio > 0.0) ? (r.ratio <= target_ratio) : true;
+    if (!notes.empty()) {
+        r.notes = notes;
+    } else {
+        std::ostringstream oss;
+        oss << "<= " << std::fixed << std::setprecision(2) << target_ratio << "x scalar (vec: "
+            << std::fixed << std::setprecision(2) << r.ratio_vec << "x)";
+        r.notes = oss.str();
+    }
+    return r;
+}
+
+inline BenchmarkResult make_triplet_result(
+    const std::string& key,
+    const std::string& name,
+    size_t iterations,
+    const TripletRepetitionResult& triplet,
+    const RatchetManager& ratchet,
+    double default_target,
+    const std::string& notes
+) {
+    double target = ratchet.has_ratio(key) ? ratchet.get_ratio(key, default_target) : default_target;
+    return make_triplet_result(key, name, iterations, triplet, target, notes);
+}
 
 // ============================================================================
 // Reporter

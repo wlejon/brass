@@ -439,6 +439,7 @@ void X64ISel::lower_entry_parameters(const Function& mir_fn) {
     auto* lir_entry = lir_fn_->entry_block();
     if (!lir_entry) return;
 
+    auto pcopy = std::make_unique<LirInst>(LirOpcode::ParallelCopy);
     size_t gpr_idx = 0, xmm_idx = 0;
     for (size_t i = 0; i < entry->param_count(); ++i) {
         const auto* param = entry->param(i);
@@ -446,63 +447,58 @@ void X64ISel::lower_entry_parameters(const Function& mir_fn) {
         Type t = param->type();
         uint8_t sz = static_cast<uint8_t>(t.size_in_bytes());
         if (sz == 0) sz = 8;
-        LirOpcode mov_op = t.is_vector() ? (t.is_v256() ? LirOpcode::Vmovaps : LirOpcode::Movaps) : (t.is_float() ? ((sz == 4) ? LirOpcode::Movss : LirOpcode::Movsd) : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov));
 
         if (cc_.kind() == CallingConvKind::Win64) {
             if (i < 4) {
-                auto inst = std::make_unique<LirInst>(mov_op);
-                inst->add_def(LirOperand::vreg(param_vreg, sz));
+                pcopy->add_def(LirOperand::vreg(param_vreg, sz));
                 if (t.is_float() || t.is_vector()) {
                     XMM xreg = static_cast<XMM>(i);
-                    inst->add_use(LirOperand::preg_xmm(xreg, sz), FixedConstraint::xmm(xreg));
+                    pcopy->add_use(LirOperand::preg_xmm(xreg, sz));
+                    pcopy->def_constraints.push_back(FixedConstraint::xmm(xreg));
                 } else {
                     GPR greg = cc_.arg_gpr(i);
-                    inst->add_use(LirOperand::preg_gpr(greg, sz), FixedConstraint::gpr(greg));
+                    pcopy->add_use(LirOperand::preg_gpr(greg, sz));
+                    pcopy->def_constraints.push_back(FixedConstraint::gpr(greg));
                 }
-                lir_entry->append_inst(std::move(inst));
             } else {
                 int32_t disp = static_cast<int32_t>(48 + (i - 4) * 8);
-                auto inst = std::make_unique<LirInst>(mov_op);
-                inst->add_def(LirOperand::vreg(param_vreg, sz));
-                inst->add_use(LirOperand::mem(PReg::gpr(GPR::RBP), disp, sz));
-                lir_entry->append_inst(std::move(inst));
+                pcopy->add_def(LirOperand::vreg(param_vreg, sz));
+                pcopy->add_use(LirOperand::mem(PReg::gpr(GPR::RBP), disp, sz));
+                pcopy->def_constraints.push_back(FixedConstraint::none());
             }
         } else {
             if (t.is_float() || t.is_vector()) {
                 if (xmm_idx < cc_.num_arg_xmms()) {
                     XMM xreg = cc_.arg_xmm(xmm_idx++);
-                    auto inst = std::make_unique<LirInst>(mov_op);
-                    inst->add_def(LirOperand::vreg(param_vreg, sz));
-                    inst->add_use(LirOperand::preg_xmm(xreg, sz), FixedConstraint::xmm(xreg));
-                    lir_entry->append_inst(std::move(inst));
+                    pcopy->add_def(LirOperand::vreg(param_vreg, sz));
+                    pcopy->add_use(LirOperand::preg_xmm(xreg, sz));
+                    pcopy->def_constraints.push_back(FixedConstraint::xmm(xreg));
                 } else {
                     size_t stack_idx = (xmm_idx - cc_.num_arg_xmms()) + (gpr_idx > cc_.num_arg_gprs() ? (gpr_idx - cc_.num_arg_gprs()) : 0);
                     int32_t disp = static_cast<int32_t>(16 + stack_idx * 8);
                     xmm_idx++;
-                    auto inst = std::make_unique<LirInst>(mov_op);
-                    inst->add_def(LirOperand::vreg(param_vreg, sz));
-                    inst->add_use(LirOperand::mem(PReg::gpr(GPR::RBP), disp, sz));
-                    lir_entry->append_inst(std::move(inst));
+                    pcopy->add_def(LirOperand::vreg(param_vreg, sz));
+                    pcopy->add_use(LirOperand::mem(PReg::gpr(GPR::RBP), disp, sz));
+                    pcopy->def_constraints.push_back(FixedConstraint::none());
                 }
             } else {
                 if (gpr_idx < cc_.num_arg_gprs()) {
                     GPR greg = cc_.arg_gpr(gpr_idx++);
-                    auto inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
-                    inst->add_def(LirOperand::vreg(param_vreg, sz));
-                    inst->add_use(LirOperand::preg_gpr(greg, sz), FixedConstraint::gpr(greg));
-                    lir_entry->append_inst(std::move(inst));
+                    pcopy->add_def(LirOperand::vreg(param_vreg, sz));
+                    pcopy->add_use(LirOperand::preg_gpr(greg, sz));
+                    pcopy->def_constraints.push_back(FixedConstraint::gpr(greg));
                 } else {
                     size_t stack_idx = (gpr_idx - cc_.num_arg_gprs()) + (xmm_idx > cc_.num_arg_xmms() ? (xmm_idx - cc_.num_arg_xmms()) : 0);
                     int32_t disp = static_cast<int32_t>(16 + stack_idx * 8);
                     gpr_idx++;
-                    auto inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
-                    inst->add_def(LirOperand::vreg(param_vreg, sz));
-                    inst->add_use(LirOperand::mem(PReg::gpr(GPR::RBP), disp, sz));
-                    lir_entry->append_inst(std::move(inst));
+                    pcopy->add_def(LirOperand::vreg(param_vreg, sz));
+                    pcopy->add_use(LirOperand::mem(PReg::gpr(GPR::RBP), disp, sz));
+                    pcopy->def_constraints.push_back(FixedConstraint::none());
                 }
             }
         }
     }
+    lir_entry->append_inst(std::move(pcopy));
 
     // Emit resume point prologue dispatcher after parameters have been saved
     if (!mir_fn.resume_points().empty() && entry->param_count() > 0 && entry->param(0)->type() == Type::i32()) {

@@ -135,11 +135,6 @@ __attribute__((naked)) void brass_jump_to_landing_pad(
     HostValue val,
     const SavedRegisters& regs
 ) {
-    (void)landing_pad_ip;
-    (void)target_rbp;
-    (void)target_rsp;
-    (void)val;
-    (void)regs;
     __asm__ volatile(
         "movq 40(%%rsp), %%r10\n\t"  // 5th arg (&regs) is at 40(%rsp) on Win64
         "movq %%r9, %%rax\n\t"       // 4th arg (val) -> %rax
@@ -169,11 +164,6 @@ __attribute__((naked)) void brass_jump_to_landing_pad(
     HostValue val,
     const SavedRegisters& regs
 ) {
-    (void)landing_pad_ip;
-    (void)target_rbp;
-    (void)target_rsp;
-    (void)val;
-    (void)regs;
     __asm__ volatile(
         "movq %%rcx, %%rax\n\t"      // 4th arg (val) -> %rax
         "movq %%rdi, %%r11\n\t"      // 1st arg (landing_pad_ip) -> %r11
@@ -227,11 +217,16 @@ __attribute__((naked)) void brass_jump_to_landing_pad(
 }
 #endif
 
-extern "C"
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((noinline, optimize("no-omit-frame-pointer")))
+#if defined(__clang__)
+#define BRASS_NOINLINE_NOFP [[noreturn]] __attribute__((noinline))
+#elif defined(__GNUC__)
+#define BRASS_NOINLINE_NOFP [[noreturn]] __attribute__((noinline, optimize("no-omit-frame-pointer")))
+#else
+#define BRASS_NOINLINE_NOFP [[noreturn]]
 #endif
-[[noreturn]] void brass_throw_impl(HostValue val, const SavedRegisters* regs) {
+
+extern "C"
+BRASS_NOINLINE_NOFP void brass_throw_impl(HostValue val, const SavedRegisters* regs) {
     brass_set_current_exception(val);
 
     uintptr_t cur_rbp = 0;
@@ -297,8 +292,7 @@ __attribute__((noinline, optimize("no-omit-frame-pointer")))
 extern "C" {
 
 #if defined(__GNUC__) || defined(__clang__)
-__attribute__((noinline, optimize("no-omit-frame-pointer")))
-[[noreturn]] void brass_throw(HostValue val) {
+BRASS_NOINLINE_NOFP void brass_throw(HostValue val) {
     SavedRegisters regs;
     __asm__ volatile(
         "movq %%r15, %0\n\t"
