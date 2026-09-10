@@ -202,6 +202,14 @@ Token IlLexer::scan_token() {
         pos_++; col_++;
         return Token{TokenType::RBrace, source_.substr(start_pos, 1), start_line, start_col};
     }
+    if (c == '[') {
+        pos_++; col_++;
+        return Token{TokenType::LBracket, source_.substr(start_pos, 1), start_line, start_col};
+    }
+    if (c == ']') {
+        pos_++; col_++;
+        return Token{TokenType::RBracket, source_.substr(start_pos, 1), start_line, start_col};
+    }
 
     // Value reference %N
     if (c == '%') {

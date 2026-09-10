@@ -1,6 +1,7 @@
 #include <brass/runtime/shape.hpp>
 #include <stdexcept>
 #include <string>
+#include <cstring>
 
 namespace brass::runtime {
 
@@ -9,10 +10,14 @@ Shape::Shape(uint32_t id, Shape* parent, PropertyDescriptor transition_prop, uin
       parent_(parent),
       transition_property_(std::move(transition_prop)),
       slot_count_(slot_count) {
+    std::memset(fast_symbol_transitions_, 0, sizeof(fast_symbol_transitions_));
     if (parent_ != nullptr) {
         properties_ = parent_->properties_;
         name_to_prop_idx_ = parent_->name_to_prop_idx_;
         symbol_to_prop_idx_ = parent_->symbol_to_prop_idx_;
+        std::memcpy(fast_symbol_to_slot_, parent_->fast_symbol_to_slot_, sizeof(fast_symbol_to_slot_));
+    } else {
+        std::memset(fast_symbol_to_slot_, 0xFF, sizeof(fast_symbol_to_slot_));
     }
 
     if (!transition_property_.name.empty() || transition_property_.symbol_id != 0) {
@@ -23,6 +28,9 @@ Shape::Shape(uint32_t id, Shape* parent, PropertyDescriptor transition_prop, uin
         }
         if (transition_property_.symbol_id != 0) {
             symbol_to_prop_idx_[transition_property_.symbol_id] = idx;
+            if (transition_property_.symbol_id < FAST_SYMBOL_CAP) {
+                fast_symbol_to_slot_[transition_property_.symbol_id] = static_cast<int16_t>(transition_property_.slot_index);
+            }
         }
     }
 }
@@ -52,6 +60,14 @@ std::optional<uint32_t> Shape::find_slot(std::string_view name) const noexcept {
 }
 
 std::optional<uint32_t> Shape::find_slot(uint32_t symbol_id) const noexcept {
+    if (symbol_id < FAST_SYMBOL_CAP) {
+        int16_t s = fast_symbol_to_slot_[symbol_id];
+        if (s >= 0) return static_cast<uint32_t>(s);
+    }
+    return find_slot_slow(symbol_id);
+}
+
+std::optional<uint32_t> Shape::find_slot_slow(uint32_t symbol_id) const noexcept {
     const auto* prop = find_property(symbol_id);
     if (prop != nullptr) {
         return prop->slot_index;
@@ -68,6 +84,14 @@ Shape* Shape::find_transition(std::string_view name) const noexcept {
 }
 
 Shape* Shape::find_transition(uint32_t symbol_id) const noexcept {
+    if (symbol_id < FAST_SYMBOL_CAP) {
+        Shape* trans = fast_symbol_transitions_[symbol_id];
+        if (trans != nullptr) return trans;
+    }
+    return find_transition_slow(symbol_id);
+}
+
+Shape* Shape::find_transition_slow(uint32_t symbol_id) const noexcept {
     auto it = symbol_transitions_.find(symbol_id);
     if (it != symbol_transitions_.end()) {
         return it->second;
@@ -83,6 +107,9 @@ void Shape::add_transition(std::string_view name, Shape* child) {
 
 void Shape::add_transition(uint32_t symbol_id, Shape* child) {
     if (symbol_id != 0 && child != nullptr) {
+        if (symbol_id < FAST_SYMBOL_CAP) {
+            fast_symbol_transitions_[symbol_id] = child;
+        }
         symbol_transitions_[symbol_id] = child;
     }
 }

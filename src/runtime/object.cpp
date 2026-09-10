@@ -185,6 +185,16 @@ HostValue DynamicObject::get_property(std::string_view name) const {
 
 HostValue DynamicObject::get_property(uint32_t symbol_id) const {
     if (!shape) return HostValue::undefined_val();
+    if (symbol_id < Shape::FAST_SYMBOL_CAP) {
+        int16_t s = shape->fast_symbol_to_slot(symbol_id);
+        if (s >= 0) {
+            uint32_t slot = static_cast<uint32_t>(s);
+            if (slot < inline_capacity) {
+                return inline_slots[slot];
+            }
+            return get_slot(slot);
+        }
+    }
     auto slot = shape->find_slot(symbol_id);
     if (slot) {
         return get_slot(*slot);
@@ -229,6 +239,18 @@ void DynamicObject::set_property(
 ) {
     if (!shape) {
         shape = registry.get_root_shape();
+    }
+    if (symbol_id < Shape::FAST_SYMBOL_CAP) {
+        int16_t s = shape->fast_symbol_to_slot(symbol_id);
+        if (s >= 0) {
+            uint32_t slot = static_cast<uint32_t>(s);
+            if (slot < inline_capacity) {
+                inline_slots[slot] = value;
+                return;
+            }
+            set_slot(slot, value, gc);
+            return;
+        }
     }
     auto slot = shape->find_slot(symbol_id);
     if (slot) {

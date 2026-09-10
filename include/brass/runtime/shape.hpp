@@ -84,14 +84,25 @@ public:
     [[nodiscard]] size_t property_count() const noexcept { return properties_.size(); }
     [[nodiscard]] const std::vector<PropertyDescriptor>& properties() const noexcept { return properties_; }
 
+    static constexpr size_t FAST_SYMBOL_CAP = 64;
+
+    [[nodiscard]] inline int16_t fast_symbol_to_slot(uint32_t symbol_id) const noexcept {
+        if (symbol_id < FAST_SYMBOL_CAP) {
+            return fast_symbol_to_slot_[symbol_id];
+        }
+        return -1;
+    }
+
     [[nodiscard]] const PropertyDescriptor* find_property(std::string_view name) const noexcept;
     [[nodiscard]] const PropertyDescriptor* find_property(uint32_t symbol_id) const noexcept;
     [[nodiscard]] std::optional<uint32_t> find_slot(std::string_view name) const noexcept;
     [[nodiscard]] std::optional<uint32_t> find_slot(uint32_t symbol_id) const noexcept;
+    [[nodiscard]] std::optional<uint32_t> find_slot_slow(uint32_t symbol_id) const noexcept;
 
     // Transition lookup
     [[nodiscard]] Shape* find_transition(std::string_view name) const noexcept;
     [[nodiscard]] Shape* find_transition(uint32_t symbol_id) const noexcept;
+    [[nodiscard]] Shape* find_transition_slow(uint32_t symbol_id) const noexcept;
 
     // Add transition to child shape
     void add_transition(std::string_view name, Shape* child);
@@ -110,6 +121,10 @@ private:
     PropertyDescriptor transition_property_;
     uint32_t slot_count_ = 0;
     std::vector<PropertyDescriptor> properties_;
+
+    // Fast lookup tables for small symbol IDs (0..63)
+    int16_t fast_symbol_to_slot_[FAST_SYMBOL_CAP];
+    Shape* fast_symbol_transitions_[FAST_SYMBOL_CAP];
 
     // Fast lookup maps for properties
     std::unordered_map<std::string, uint32_t> name_to_prop_idx_;

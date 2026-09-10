@@ -21,6 +21,8 @@ enum class TokenType {
     RParen,         // )
     LBrace,         // {
     RBrace,         // }
+    LBracket,       // [
+    RBracket,       // ]
     PercentValue,   // %0, %12
     BlockLabel,     // b0, b1
     AtFunction,     // @fn_name

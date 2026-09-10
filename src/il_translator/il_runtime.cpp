@@ -217,12 +217,11 @@ int64_t bronze_create_func(const char* fn_name, int32_t param_count, int64_t env
     return reinterpret_cast<int64_t>(closure);
 }
 
-static DynamicObject* unpack_dynamic_object(int64_t obj_box) {
+static inline DynamicObject* unpack_dynamic_object(int64_t obj_box) {
     if (!obj_box) return nullptr;
     uint64_t u = static_cast<uint64_t>(obj_box);
-    HostValue hv(u);
-    if (hv.is_gcref()) {
-        return hv.as_gcref_ptr<DynamicObject>();
+    if ((u & HostValue::TAG_MASK) == HostValue::TAG_GCREF) {
+        return reinterpret_cast<DynamicObject*>(u & HostValue::PAYLOAD_MASK);
     }
     if (u < 0x0000800000000000ULL) {
         return reinterpret_cast<DynamicObject*>(obj_box);
@@ -230,7 +229,7 @@ static DynamicObject* unpack_dynamic_object(int64_t obj_box) {
     return nullptr;
 }
 
-static int64_t unbox_to_int64(int64_t v) {
+static inline int64_t unbox_to_int64(int64_t v) {
     uint64_t u = static_cast<uint64_t>(v);
     if (u < 0xFFF8000000000000ULL) {
         double d;
@@ -261,7 +260,17 @@ int64_t bronze_create_object() {
 int64_t bronze_prop_get(int64_t obj_box, int32_t key_index) {
     auto* obj = unpack_dynamic_object(obj_box);
     if (!obj) return static_cast<int64_t>(kUndefinedTag);
-    HostValue val = obj->get_property(static_cast<uint32_t>(key_index));
+    uint32_t sym = static_cast<uint32_t>(key_index);
+    if (obj->shape != nullptr && sym < Shape::FAST_SYMBOL_CAP) {
+        int16_t s = obj->shape->fast_symbol_to_slot(sym);
+        if (s >= 0) {
+            uint32_t slot = static_cast<uint32_t>(s);
+            if (slot < obj->inline_capacity) {
+                return static_cast<int64_t>(obj->inline_slots[slot].raw());
+            }
+        }
+    }
+    HostValue val = obj->get_property(sym);
     if (val.is_undefined()) return static_cast<int64_t>(kUndefinedTag);
     return static_cast<int64_t>(val.raw());
 }
@@ -269,17 +278,34 @@ int64_t bronze_prop_get(int64_t obj_box, int32_t key_index) {
 void bronze_prop_set(int64_t obj_box, int32_t key_index, int64_t val, int32_t slot_idx, int32_t /*imm*/) {
     auto* obj = unpack_dynamic_object(obj_box);
     if (!obj) return;
-    HostGC* gc = brass::get_active_host_gc();
-    obj->set_property(static_cast<uint32_t>(key_index), HostValue(static_cast<uint64_t>(val)), ShapeRegistry::global(), gc);
-    if (slot_idx >= 0 && (obj->element_capacity > 0 || slot_idx < static_cast<int32_t>(obj->length()))) {
+    if (obj->element_capacity > 0 && slot_idx >= 0) {
+        HostGC* gc = brass::get_active_host_gc();
         obj->set_element(slot_idx, HostValue(static_cast<uint64_t>(val)), gc);
+        return;
     }
+    uint32_t sym = static_cast<uint32_t>(key_index);
+    if (obj->shape != nullptr && sym < Shape::FAST_SYMBOL_CAP) {
+        int16_t s = obj->shape->fast_symbol_to_slot(sym);
+        if (s >= 0) {
+            uint32_t slot = static_cast<uint32_t>(s);
+            if (slot < obj->inline_capacity) {
+                obj->inline_slots[slot] = HostValue(static_cast<uint64_t>(val));
+                return;
+            }
+        }
+    }
+    HostGC* gc = brass::get_active_host_gc();
+    obj->set_property(sym, HostValue(static_cast<uint64_t>(val)), ShapeRegistry::global(), gc);
 }
 
 int64_t bronze_elem_get(int64_t arr_box, int64_t index_box) {
     auto* arr = unpack_dynamic_object(arr_box);
     if (!arr) return static_cast<int64_t>(kUndefinedTag);
     int64_t idx = unbox_to_int64(index_box);
+    if (idx >= 0 && static_cast<uint64_t>(idx) < arr->element_count && arr->elements != 0) {
+        const auto* slots = reinterpret_cast<const HostValue*>(arr->elements + sizeof(DynamicObjectBuffer));
+        return static_cast<int64_t>(slots[idx].raw());
+    }
     HostValue val = arr->get_element(idx);
     if (val.is_undefined()) return static_cast<int64_t>(kUndefinedTag);
     return static_cast<int64_t>(val.raw());
@@ -289,6 +315,11 @@ void bronze_elem_set(int64_t arr_box, int64_t index_box, int64_t val, int32_t /*
     auto* arr = unpack_dynamic_object(arr_box);
     if (!arr) return;
     int64_t idx = unbox_to_int64(index_box);
+    if (idx >= 0 && static_cast<uint64_t>(idx) < arr->element_count && arr->elements != 0) {
+        auto* slots = reinterpret_cast<HostValue*>(arr->elements + sizeof(DynamicObjectBuffer));
+        slots[idx] = HostValue(static_cast<uint64_t>(val));
+        return;
+    }
     HostGC* gc = brass::get_active_host_gc();
     arr->set_element(idx, HostValue(static_cast<uint64_t>(val)), gc);
 }

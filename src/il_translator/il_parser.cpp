@@ -194,6 +194,13 @@ bool IlParser::parse_block(BronzeBlock& out_block) {
         out_block.handler_id = handler_tok.id_num;
     }
 
+    // Optional block annotations: [fast 0], [slow 0], etc.
+    while (match(TokenType::LBracket)) {
+        while (!match(TokenType::RBracket) && !match(TokenType::Eof)) {
+            lexer_.next_token();
+        }
+    }
+
     if (!expect(TokenType::Colon, "Expected ':' after block header")) {
         return false;
     }

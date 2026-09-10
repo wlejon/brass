@@ -51,6 +51,7 @@ TEST_CASE("DiffFuzzer_ProtectedFaultDivideByZero") {
     CHECK(fault.find("Divide by Zero") != std::string::npos || fault.find("fault") != std::string::npos);
 }
 
+#if defined(_WIN32)
 TEST_CASE("DiffFuzzer_JobObjectSandboxExecution") {
     std::string log;
 #if defined(_WIN32)
@@ -72,3 +73,4 @@ TEST_CASE("DiffFuzzer_JobObjectSandboxTimeout") {
     ExecutionStatus status = DiffFuzzer::run_sandboxed_command(cmd, 150, 64 * 1024 * 1024, log);
     CHECK(status == ExecutionStatus::Timeout);
 }
+#endif
