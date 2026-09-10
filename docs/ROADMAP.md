@@ -122,7 +122,7 @@
   - GC-tracked resumable frames (`BrassCoroFrame`) and Interior Resume Table integration.
   - Lowering Bronze IL `create.async_machine`, `async.start`, `async.await`, `iter.open`, `iter.step`, `yield`.
   - 28-program Bronze corpus verification.
-- **Chunk 16: Partial Escape Analysis (PEA) & Allocation Sinking [NEXT]**:
+- **Chunk 16: Partial Escape Analysis (PEA) & Allocation Sinking [COMPLETED]**:
   - Path-sensitive escape analysis across control-flow graphs and dominator trees.
   - Sinking allocations from loop headers down into cold / bailout exit paths.
   - Scalarization of boxed numbers / objects in non-escaping hot loop paths.
