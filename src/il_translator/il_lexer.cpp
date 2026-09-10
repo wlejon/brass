@@ -89,6 +89,27 @@ const char* bronze_op_name(BronzeOp op) {
         case BronzeOp::IterOpen: return "iter.open";
         case BronzeOp::IterStep: return "iter.step";
         case BronzeOp::Yield: return "yield";
+        case BronzeOp::ModuleEnvSet: return "module.env.set";
+        case BronzeOp::ModuleEnvGet: return "module.env.get";
+        case BronzeOp::ConcatBegin: return "concat.begin";
+        case BronzeOp::ConcatAppend: return "concat.append";
+        case BronzeOp::ConcatEnd: return "concat.end";
+        case BronzeOp::IsNumber: return "is.number";
+        case BronzeOp::IsDenseArray: return "is.dense_array";
+        case BronzeOp::IsNullish: return "is.nullish";
+        case BronzeOp::GlobalGet: return "global.get";
+        case BronzeOp::MethodCall: return "method.call";
+        case BronzeOp::Construct: return "new";
+        case BronzeOp::FuncRef: return "func.ref";
+        case BronzeOp::ClassExtend: return "class.extend";
+        case BronzeOp::SuperCall: return "call.super";
+        case BronzeOp::SuperGet: return "super.get";
+        case BronzeOp::InstanceOf: return "instanceof";
+        case BronzeOp::In: return "in";
+        case BronzeOp::ElemSetTyped: return "elem.set.typed";
+        case BronzeOp::ElemGetTyped: return "elem.get.typed";
+        case BronzeOp::PinGuard: return "pin.guard";
+        case BronzeOp::CensusRecord: return "census.record";
         case BronzeOp::Unknown: return "?";
     }
     return "?";
@@ -267,13 +288,18 @@ Token IlLexer::scan_token() {
     size_t word_start = pos_;
     while (pos_ < source_.size()) {
         char wc = source_[pos_];
-        if (std::isalnum(static_cast<unsigned char>(wc)) || wc == '_' || wc == '.' || wc == '$') {
+        if (std::isalnum(static_cast<unsigned char>(wc)) || wc == '_' || wc == '.' || wc == '$' || wc == '-' || wc == '+') {
             pos_++; col_++;
         } else {
             break;
         }
     }
     std::string_view word = source_.substr(word_start, pos_ - word_start);
+    if (word.empty()) {
+        pos_++;
+        col_++;
+        return Token{TokenType::Identifier, source_.substr(word_start, 1), start_line, start_col};
+    }
 
     // Block label: b<digits>
     if (word.size() >= 2 && word[0] == 'b' && std::isdigit(static_cast<unsigned char>(word[1]))) {
@@ -428,6 +454,27 @@ Token IlLexer::scan_token() {
         if (w == "iter.open") { op_out = BronzeOp::IterOpen; return true; }
         if (w == "iter.step") { op_out = BronzeOp::IterStep; return true; }
         if (w == "yield" || w == "coro.suspend") { op_out = BronzeOp::Yield; return true; }
+        if (w == "module.env.set") { op_out = BronzeOp::ModuleEnvSet; return true; }
+        if (w == "module.env.get") { op_out = BronzeOp::ModuleEnvGet; return true; }
+        if (w == "concat.begin") { op_out = BronzeOp::ConcatBegin; return true; }
+        if (w == "concat.append") { op_out = BronzeOp::ConcatAppend; return true; }
+        if (w == "concat.end") { op_out = BronzeOp::ConcatEnd; return true; }
+        if (w == "is.number") { op_out = BronzeOp::IsNumber; return true; }
+        if (w == "is.dense_array") { op_out = BronzeOp::IsDenseArray; return true; }
+        if (w == "is.nullish") { op_out = BronzeOp::IsNullish; return true; }
+        if (w == "global.get") { op_out = BronzeOp::GlobalGet; return true; }
+        if (w == "method.call") { op_out = BronzeOp::MethodCall; return true; }
+        if (w == "new") { op_out = BronzeOp::Construct; return true; }
+        if (w == "func.ref") { op_out = BronzeOp::FuncRef; return true; }
+        if (w == "class.extend") { op_out = BronzeOp::ClassExtend; return true; }
+        if (w == "call.super") { op_out = BronzeOp::SuperCall; return true; }
+        if (w == "super.get") { op_out = BronzeOp::SuperGet; return true; }
+        if (w == "instanceof") { op_out = BronzeOp::InstanceOf; return true; }
+        if (w == "in") { op_out = BronzeOp::In; return true; }
+        if (w == "elem.set.typed") { op_out = BronzeOp::ElemSetTyped; return true; }
+        if (w == "elem.get.typed") { op_out = BronzeOp::ElemGetTyped; return true; }
+        if (w == "pin.guard") { op_out = BronzeOp::PinGuard; return true; }
+        if (w == "census.record") { op_out = BronzeOp::CensusRecord; return true; }
         return false;
     };
 

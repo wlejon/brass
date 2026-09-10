@@ -282,7 +282,7 @@ TEST_CASE("Bronze IL - 22-Program Live Corpus JIT and AOT Execution") {
         int64_t (*env_create)(int64_t, int32_t);
         int64_t (*env_get)(int64_t, int32_t, int32_t);
         void (*env_set)(int64_t, int32_t, int32_t, int64_t);
-        int64_t (*create_func)(const char*, int32_t, int64_t);
+        int64_t (*create_func)(void*, int32_t, int64_t);
         int64_t (*create_array)(int32_t);
         int64_t (*create_object)();
         int64_t (*prop_get)(int64_t, int32_t);
@@ -409,7 +409,7 @@ TEST_CASE("Bronze IL - 22-Program Live Corpus JIT and AOT Execution") {
             << "    int64_t bronze_env_create(int64_t parent, int32_t sz) { return g_rt.env_create ? g_rt.env_create(parent, sz) : 0; }\n"
             << "    int64_t bronze_env_get(int64_t env, int32_t d, int32_t idx) { return g_rt.env_get ? g_rt.env_get(env, d, idx) : 0; }\n"
             << "    void bronze_env_set(int64_t env, int32_t d, int32_t idx, int64_t v) { if (g_rt.env_set) g_rt.env_set(env, d, idx, v); }\n"
-            << "    int64_t bronze_create_func(const char* fn_name, int32_t pc, int64_t env) { return g_rt.create_func ? g_rt.create_func(fn_name, pc, env) : 0; }\n"
+            << "    int64_t bronze_create_func(void* fn_name, int32_t pc, int64_t env) { return g_rt.create_func ? g_rt.create_func(fn_name, pc, env) : 0; }\n"
             << "    int64_t bronze_create_array(int32_t sz) { return g_rt.create_array ? g_rt.create_array(sz) : 0; }\n"
             << "    int64_t bronze_create_object() { return g_rt.create_object ? g_rt.create_object() : 0; }\n"
             << "    int64_t bronze_prop_get(int64_t o, int32_t k) { return g_rt.prop_get ? g_rt.prop_get(o, k) : 0; }\n"

@@ -177,7 +177,7 @@ TEST_CASE("ELF64 Writer - Symbol Table and Relocations") {
             const uint8_t* rela = ehdr + rela_off;
             uint64_t r_info = read_u64(rela + 8);
             uint32_t r_type = static_cast<uint32_t>(r_info & 0xFFFFFFFF);
-            CHECK_EQ(r_type, elf::R_X86_64_PC32);
+            CHECK(r_type == elf::R_X86_64_PLT32 || r_type == elf::R_X86_64_PC32);
         }
     }
     CHECK(found_rela_text);

@@ -232,7 +232,7 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
             obj_r.offset = fn_offset + r.offset;
             switch (r.kind) {
                 case x64::RelocationKind::PCRel32:
-                    obj_r.kind = RelocKind::PCRel32;
+                    obj_r.kind = RelocKind::Plt32;
                     break;
                 case x64::RelocationKind::Abs64:
                     obj_r.kind = RelocKind::Abs64;

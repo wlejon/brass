@@ -28,12 +28,16 @@ private:
                            uint32_t* cont_counter = nullptr);
 
     Value* ensure_type(Value* val, Type target_type, Builder& b);
+    std::string resolve_callee(const std::string& callee_name) const;
 
     TranslatorOptions options_;
     DiagnosticReporter* diag_ = nullptr;
     PropertyLoweringHelper prop_lowering_;
     uint32_t current_file_id_ = 0;
     bool has_error_ = false;
+    const BronzeModuleAST* current_ast_ = nullptr;
+    size_t current_fn_idx_ = 0;
+    std::unordered_map<size_t, std::unordered_map<std::string, std::string>> caller_to_callee_map_;
 };
 
 } // namespace brass::il

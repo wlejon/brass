@@ -80,6 +80,21 @@ bool IlParser::parse_module(BronzeModuleAST& out_ast) {
     }
 
     while (!lexer_.is_eof() && lexer_.peek_token().type != TokenType::Eof) {
+        if (lexer_.peek_token().type == TokenType::Identifier && lexer_.peek_token().text == "census") {
+            lexer_.next_token();
+            while (!lexer_.is_eof() && lexer_.peek_token().type != TokenType::LBrace && lexer_.peek_token().type != TokenType::Eof) {
+                lexer_.next_token();
+            }
+            if (match(TokenType::LBrace)) {
+                int depth = 1;
+                while (!lexer_.is_eof() && depth > 0 && lexer_.peek_token().type != TokenType::Eof) {
+                    if (lexer_.peek_token().type == TokenType::LBrace) depth++;
+                    else if (lexer_.peek_token().type == TokenType::RBrace) depth--;
+                    lexer_.next_token();
+                }
+            }
+            continue;
+        }
         BronzeFunction fn;
         if (!parse_function(fn)) {
             return false;
@@ -99,6 +114,13 @@ bool IlParser::parse_function(BronzeFunction& out_fn) {
         return false;
     }
     out_fn.name = std::string(name_tok.text);
+    while (lexer_.peek_token().type != TokenType::LParen &&
+           lexer_.peek_token().type != TokenType::Eof &&
+           lexer_.peek_token().line == name_tok.line) {
+        Token part = lexer_.next_token();
+        out_fn.name += " ";
+        out_fn.name += part.text;
+    }
 
     if (!expect(TokenType::LParen, "Expected '(' after function name")) {
         return false;
@@ -276,12 +298,22 @@ bool IlParser::parse_instruction(BronzeInstruction& out_inst) {
                 return false;
             }
             out_inst.callee_name = std::string(callee_tok.text);
+            while (lexer_.peek_token().type != TokenType::LParen &&
+                   lexer_.peek_token().type != TokenType::Eof &&
+                   lexer_.peek_token().line == callee_tok.line) {
+                Token part = lexer_.next_token();
+                out_inst.callee_name += " ";
+                out_inst.callee_name += part.text;
+            }
 
             if (!expect(TokenType::LParen, "Expected '(' for call argument list")) {
                 return false;
             }
             if (!match(TokenType::RParen)) {
                 while (true) {
+                    if (lexer_.peek_token().text.rfind("env+", 0) == 0) {
+                        lexer_.next_token();
+                    }
                     Token arg_tok;
                     if (!expect(TokenType::PercentValue, "Expected %N argument", &arg_tok)) {
                         return false;
@@ -405,10 +437,28 @@ bool IlParser::parse_instruction(BronzeInstruction& out_inst) {
             break;
         }
 
+        case BronzeOp::ModuleEnvSet: {
+            Token env_tok;
+            if (!expect(TokenType::PercentValue, "Expected %env in module.env.set", &env_tok)) return false;
+            out_inst.operands.push_back(env_tok.id_num);
+            break;
+        }
+
+        case BronzeOp::ModuleEnvGet: {
+            break;
+        }
+
         case BronzeOp::CreateFunc: {
             Token fn_tok;
             if (!expect(TokenType::AtFunction, "Expected @func after create.func", &fn_tok)) return false;
             out_inst.callee_name = std::string(fn_tok.text);
+            while (lexer_.peek_token().type != TokenType::Comma &&
+                   lexer_.peek_token().type != TokenType::Eof &&
+                   lexer_.peek_token().line == fn_tok.line) {
+                Token part = lexer_.next_token();
+                out_inst.callee_name += " ";
+                out_inst.callee_name += part.text;
+            }
             if (!expect(TokenType::Comma, "Expected ',' after @func")) return false;
             Token argc_tok = lexer_.next_token();
             out_inst.param_count = static_cast<uint32_t>(argc_tok.num_i64);
@@ -423,6 +473,13 @@ bool IlParser::parse_instruction(BronzeInstruction& out_inst) {
             Token fn_tok;
             if (!expect(TokenType::AtFunction, "Expected @func after create.async_machine", &fn_tok)) return false;
             out_inst.callee_name = std::string(fn_tok.text);
+            while (lexer_.peek_token().type != TokenType::Comma &&
+                   lexer_.peek_token().type != TokenType::Eof &&
+                   lexer_.peek_token().line == fn_tok.line) {
+                Token part = lexer_.next_token();
+                out_inst.callee_name += " ";
+                out_inst.callee_name += part.text;
+            }
             if (match(TokenType::Comma)) {
                 Token next_t = lexer_.next_token();
                 if (next_t.type == TokenType::NumberInt) {
@@ -467,7 +524,8 @@ bool IlParser::parse_instruction(BronzeInstruction& out_inst) {
                 Token slot_tok = lexer_.next_token();
                 out_inst.depth = static_cast<uint32_t>(slot_tok.num_i64);
             }
-            while (match(TokenType::Comma)) {
+            while (lexer_.peek_token().line == op_tok.line && lexer_.peek_token().type != TokenType::Eof &&
+                   lexer_.peek_token().type != TokenType::BlockLabel && lexer_.peek_token().type != TokenType::RBrace) {
                 lexer_.next_token();
             }
             break;
@@ -499,7 +557,8 @@ bool IlParser::parse_instruction(BronzeInstruction& out_inst) {
                     out_inst.imm_i64 = imm_tok.num_i64;
                 }
             }
-            while (match(TokenType::Comma)) {
+            while (lexer_.peek_token().line == op_tok.line && lexer_.peek_token().type != TokenType::Eof &&
+                   lexer_.peek_token().type != TokenType::BlockLabel && lexer_.peek_token().type != TokenType::RBrace) {
                 lexer_.next_token();
             }
             break;
@@ -522,6 +581,10 @@ bool IlParser::parse_instruction(BronzeInstruction& out_inst) {
             Token closure_tok;
             if (!expect(TokenType::PercentValue, "Expected %closure in method.def", &closure_tok)) return false;
             out_inst.operands.push_back(closure_tok.id_num);
+            while (lexer_.peek_token().line == op_tok.line && lexer_.peek_token().type != TokenType::Eof &&
+                   lexer_.peek_token().type != TokenType::BlockLabel && lexer_.peek_token().type != TokenType::RBrace) {
+                lexer_.next_token();
+            }
             break;
         }
 
@@ -544,7 +607,8 @@ bool IlParser::parse_instruction(BronzeInstruction& out_inst) {
                 Token ic_tok = lexer_.next_token();
                 out_inst.index = static_cast<uint32_t>(ic_tok.num_i64);
             }
-            while (match(TokenType::Comma)) {
+            while (lexer_.peek_token().line == op_tok.line && lexer_.peek_token().type != TokenType::Eof &&
+                   lexer_.peek_token().type != TokenType::BlockLabel && lexer_.peek_token().type != TokenType::RBrace) {
                 lexer_.next_token();
             }
             break;
@@ -571,6 +635,205 @@ bool IlParser::parse_instruction(BronzeInstruction& out_inst) {
             break;
         }
 
+        case BronzeOp::Box: {
+            const Token& peek = lexer_.peek_token();
+            if (peek.type == TokenType::PercentValue) {
+                Token val_tok = lexer_.next_token();
+                out_inst.operands.push_back(val_tok.id_num);
+            } else if (peek.type == TokenType::Identifier || peek.type == TokenType::StringLiteral) {
+                Token str_tok = lexer_.next_token();
+                out_inst.string_literal = std::string(str_tok.text);
+            }
+            while (lexer_.peek_token().line == op_tok.line && lexer_.peek_token().type != TokenType::Eof &&
+                   lexer_.peek_token().type != TokenType::BlockLabel && lexer_.peek_token().type != TokenType::RBrace) {
+                lexer_.next_token();
+            }
+            break;
+        }
+
+        case BronzeOp::GlobalGet: {
+            Token peek = lexer_.peek_token();
+            if (peek.type == TokenType::StringLiteral) {
+                Token str_tok = lexer_.next_token();
+                out_inst.string_literal = std::string(str_tok.text);
+            } else if (peek.type == TokenType::Identifier) {
+                Token id_tok = lexer_.next_token();
+                out_inst.string_literal = std::string(id_tok.text);
+            } else if (peek.type == TokenType::NumberInt) {
+                Token num_tok = lexer_.next_token();
+                out_inst.index = static_cast<uint32_t>(num_tok.num_i64);
+            }
+            while (lexer_.peek_token().line == op_tok.line && lexer_.peek_token().type != TokenType::Eof &&
+                   lexer_.peek_token().type != TokenType::BlockLabel && lexer_.peek_token().type != TokenType::RBrace) {
+                lexer_.next_token();
+            }
+            break;
+        }
+
+        case BronzeOp::ConcatBegin: {
+            if (lexer_.peek_token().type == TokenType::PercentValue) {
+                out_inst.operands.push_back(lexer_.next_token().id_num);
+            }
+            if (match(TokenType::Comma) && lexer_.peek_token().type == TokenType::PercentValue) {
+                out_inst.operands.push_back(lexer_.next_token().id_num);
+            }
+            if (match(TokenType::Comma) && (lexer_.peek_token().type == TokenType::NumberInt || lexer_.peek_token().type == TokenType::NumberFloat)) {
+                out_inst.imm_i64 = lexer_.next_token().num_i64;
+            }
+            while (lexer_.peek_token().line == op_tok.line && lexer_.peek_token().type != TokenType::Eof &&
+                   lexer_.peek_token().type != TokenType::BlockLabel && lexer_.peek_token().type != TokenType::RBrace) {
+                lexer_.next_token();
+            }
+            break;
+        }
+
+        case BronzeOp::FuncRef: {
+            if (lexer_.peek_token().type == TokenType::AtFunction) {
+                out_inst.callee_name = std::string(lexer_.next_token().text);
+                while (lexer_.peek_token().line == op_tok.line && lexer_.peek_token().type != TokenType::Eof &&
+                       lexer_.peek_token().type != TokenType::BlockLabel && lexer_.peek_token().type != TokenType::RBrace &&
+                       lexer_.peek_token().type != TokenType::Comma) {
+                    Token part = lexer_.next_token();
+                    out_inst.callee_name += " ";
+                    out_inst.callee_name += part.text;
+                }
+            }
+            while (lexer_.peek_token().line == op_tok.line && lexer_.peek_token().type != TokenType::Eof &&
+                   lexer_.peek_token().type != TokenType::BlockLabel && lexer_.peek_token().type != TokenType::RBrace) {
+                lexer_.next_token();
+            }
+            break;
+        }
+
+        case BronzeOp::Construct: {
+            if (lexer_.peek_token().type == TokenType::PercentValue) {
+                out_inst.operands.push_back(lexer_.next_token().id_num);
+            }
+            if (match(TokenType::Comma) && (lexer_.peek_token().type == TokenType::NumberInt || lexer_.peek_token().type == TokenType::NumberFloat)) {
+                out_inst.param_count = static_cast<uint32_t>(lexer_.next_token().num_i64);
+            }
+            while (match(TokenType::Comma)) {
+                if (lexer_.peek_token().type == TokenType::PercentValue) {
+                    out_inst.operands.push_back(lexer_.next_token().id_num);
+                } else {
+                    break;
+                }
+            }
+            while (lexer_.peek_token().line == op_tok.line && lexer_.peek_token().type != TokenType::Eof &&
+                   lexer_.peek_token().type != TokenType::BlockLabel && lexer_.peek_token().type != TokenType::RBrace) {
+                lexer_.next_token();
+            }
+            break;
+        }
+
+        case BronzeOp::MethodCall: {
+            if (lexer_.peek_token().type == TokenType::PercentValue) {
+                out_inst.operands.push_back(lexer_.next_token().id_num);
+            }
+            if (match(TokenType::Comma) && (lexer_.peek_token().type == TokenType::NumberInt || lexer_.peek_token().type == TokenType::NumberFloat)) {
+                out_inst.index = static_cast<uint32_t>(lexer_.next_token().num_i64);
+            }
+            if (match(TokenType::Comma) && (lexer_.peek_token().type == TokenType::NumberInt || lexer_.peek_token().type == TokenType::NumberFloat)) {
+                out_inst.depth = static_cast<uint32_t>(lexer_.next_token().num_i64);
+            }
+            while (match(TokenType::Comma)) {
+                Token peek = lexer_.peek_token();
+                if (peek.type == TokenType::Identifier && peek.text == "direct") {
+                    lexer_.next_token();
+                    if (lexer_.peek_token().type == TokenType::AtFunction) {
+                        out_inst.callee_name = std::string(lexer_.next_token().text);
+                    }
+                } else if (peek.type == TokenType::Identifier && (peek.text == "mono" || peek.text == "fn-recv" || peek.text == "family")) {
+                    lexer_.next_token();
+                } else if (peek.type == TokenType::NumberInt || peek.type == TokenType::NumberFloat) {
+                    out_inst.param_count = static_cast<uint32_t>(lexer_.next_token().num_i64);
+                    break;
+                } else {
+                    break;
+                }
+            }
+            while (match(TokenType::Comma)) {
+                if (lexer_.peek_token().type == TokenType::PercentValue) {
+                    out_inst.operands.push_back(lexer_.next_token().id_num);
+                } else {
+                    break;
+                }
+            }
+            while (lexer_.peek_token().line == op_tok.line && lexer_.peek_token().type != TokenType::Eof &&
+                   lexer_.peek_token().type != TokenType::BlockLabel && lexer_.peek_token().type != TokenType::RBrace) {
+                lexer_.next_token();
+            }
+            break;
+        }
+
+        case BronzeOp::SuperCall: {
+            if (lexer_.peek_token().type == TokenType::PercentValue) {
+                out_inst.operands.push_back(lexer_.next_token().id_num);
+            }
+            if (match(TokenType::Comma) && lexer_.peek_token().type == TokenType::PercentValue) {
+                out_inst.operands.push_back(lexer_.next_token().id_num);
+            }
+            if (match(TokenType::Comma) && (lexer_.peek_token().type == TokenType::NumberInt || lexer_.peek_token().type == TokenType::NumberFloat)) {
+                out_inst.param_count = static_cast<uint32_t>(lexer_.next_token().num_i64);
+            }
+            while (match(TokenType::Comma)) {
+                if (lexer_.peek_token().type == TokenType::PercentValue) {
+                    out_inst.operands.push_back(lexer_.next_token().id_num);
+                } else {
+                    break;
+                }
+            }
+            while (lexer_.peek_token().line == op_tok.line && lexer_.peek_token().type != TokenType::Eof &&
+                   lexer_.peek_token().type != TokenType::BlockLabel && lexer_.peek_token().type != TokenType::RBrace) {
+                lexer_.next_token();
+            }
+            break;
+        }
+
+        case BronzeOp::SuperGet: {
+            if (lexer_.peek_token().type == TokenType::PercentValue) {
+                out_inst.operands.push_back(lexer_.next_token().id_num);
+            }
+            if (match(TokenType::Comma) && (lexer_.peek_token().type == TokenType::NumberInt || lexer_.peek_token().type == TokenType::NumberFloat)) {
+                out_inst.index = static_cast<uint32_t>(lexer_.next_token().num_i64);
+            }
+            if (match(TokenType::Comma) && lexer_.peek_token().type == TokenType::PercentValue) {
+                out_inst.operands.push_back(lexer_.next_token().id_num);
+            }
+            while (lexer_.peek_token().line == op_tok.line && lexer_.peek_token().type != TokenType::Eof &&
+                   lexer_.peek_token().type != TokenType::BlockLabel && lexer_.peek_token().type != TokenType::RBrace) {
+                lexer_.next_token();
+            }
+            break;
+        }
+
+        case BronzeOp::PinGuard:
+        case BronzeOp::CensusRecord: {
+            while (lexer_.peek_token().line == op_tok.line && lexer_.peek_token().type != TokenType::Eof &&
+                   lexer_.peek_token().type != TokenType::BlockLabel && lexer_.peek_token().type != TokenType::RBrace) {
+                if (lexer_.peek_token().type == TokenType::PercentValue) {
+                    out_inst.operands.push_back(lexer_.peek_token().id_num);
+                }
+                lexer_.next_token();
+            }
+            break;
+        }
+
+        case BronzeOp::ElemSetTyped: {
+            while (lexer_.peek_token().type == TokenType::PercentValue) {
+                out_inst.operands.push_back(lexer_.next_token().id_num);
+                if (!match(TokenType::Comma)) break;
+            }
+            if (lexer_.peek_token().type == TokenType::NumberInt || lexer_.peek_token().type == TokenType::NumberFloat) {
+                out_inst.imm_i64 = lexer_.next_token().num_i64;
+            }
+            while (lexer_.peek_token().line == op_tok.line && lexer_.peek_token().type != TokenType::Eof &&
+                   lexer_.peek_token().type != TokenType::BlockLabel && lexer_.peek_token().type != TokenType::RBrace) {
+                lexer_.next_token();
+            }
+            break;
+        }
+
         default: {
             // General opcode with comma-separated %N operands
             // e.g. add %0, %1 or unbox.f64 %0, raw
@@ -587,6 +850,10 @@ bool IlParser::parse_instruction(BronzeInstruction& out_inst) {
                 } else {
                     break;
                 }
+            }
+            while (lexer_.peek_token().line == op_tok.line && lexer_.peek_token().type != TokenType::Eof &&
+                   lexer_.peek_token().type != TokenType::BlockLabel && lexer_.peek_token().type != TokenType::RBrace) {
+                lexer_.next_token();
             }
             break;
         }

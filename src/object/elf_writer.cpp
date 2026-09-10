@@ -251,7 +251,7 @@ std::vector<uint8_t> ElfWriter::write() {
             uint32_t r_type = to_elf_reloc_type(r.kind);
             uint64_t r_info = (static_cast<uint64_t>(sym_idx) << 32) | (static_cast<uint64_t>(r_type) & 0xFFFFFFFFULL);
             int64_t addend = r.addend;
-            if (r.kind == RelocKind::PCRel32 || r.kind == RelocKind::Plt32) {
+            if (sec.name != ".eh_frame" && (r.kind == RelocKind::PCRel32 || r.kind == RelocKind::Plt32)) {
                 // In standard x86_64 ELF rela, PC-relative call displacement fixup has addend -4
                 if (addend == 0) addend = -4;
             }

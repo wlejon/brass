@@ -88,13 +88,13 @@ void ElfCfiBuilder::build_eh_frame(
 
         // PC Begin (4 bytes, DW_EH_PE_pcrel | DW_EH_PE_sdata4)
         size_t pc_begin_offset = eh_frame_sec.data.size();
-        eh_frame_sec.emit32(static_cast<uint32_t>(fn.text_offset));
+        eh_frame_sec.emit32(0);
 
         ObjectRelocation r;
         r.offset = pc_begin_offset;
         r.kind = RelocKind::PCRel32;
-        r.symbol_name = fn.name;
-        r.addend = 0;
+        r.symbol_name = ".text";
+        r.addend = static_cast<int64_t>(fn.text_offset);
         eh_frame_sec.relocations.push_back(std::move(r));
 
         // PC Range (4 bytes)

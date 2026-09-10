@@ -107,7 +107,7 @@ int64_t bronze_name_resolve(const char* name);
 int64_t bronze_env_create(int64_t parent_box, int32_t size);
 int64_t bronze_env_get(int64_t env_box, int32_t depth, int32_t index);
 void bronze_env_set(int64_t env_box, int32_t depth, int32_t index, int64_t val);
-int64_t bronze_create_func(const char* fn_name, int32_t param_count, int64_t env_box);
+int64_t bronze_create_func(void* code_ptr, int32_t param_count, int64_t env_box);
 int64_t bronze_create_array(int32_t size);
 int64_t bronze_create_object();
 int64_t bronze_prop_get(int64_t obj_box, int32_t key_index);

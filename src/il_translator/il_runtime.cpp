@@ -195,7 +195,7 @@ void bronze_env_set(int64_t env_box, int32_t depth, int32_t index, int64_t val) 
     }
 }
 
-int64_t bronze_create_func(const char* fn_name, int32_t param_count, int64_t env_box) {
+int64_t bronze_create_func(void* code_ptr, int32_t param_count, int64_t env_box) {
     BronzeClosure* closure = nullptr;
     HostGC* host_gc = brass::get_active_host_gc();
     if (host_gc) {
@@ -208,10 +208,7 @@ int64_t bronze_create_func(const char* fn_name, int32_t param_count, int64_t env
     }
     if (!closure) return static_cast<int64_t>(kUndefinedTag);
     std::memset(closure->fn_name, 0, sizeof(closure->fn_name));
-    if (fn_name) {
-        snprintf(closure->fn_name, sizeof(closure->fn_name), "%s", fn_name);
-    }
-    closure->code_ptr = bronze_resolve_function(closure->fn_name);
+    closure->code_ptr = code_ptr;
     closure->env_box = env_box;
     closure->param_count = param_count >= 0 ? static_cast<uint32_t>(param_count) : 0;
     return reinterpret_cast<int64_t>(closure);
@@ -550,11 +547,153 @@ int64_t bronze_call_dynamic_n(int64_t callee_box, int64_t this_box, int32_t argc
     return static_cast<int64_t>(kUndefinedTag);
 }
 
+#ifndef _WIN32
+__attribute__((weak))
+#endif
+void bronze_register_value_cells(uint64_t* cells, uint64_t count) {
+    (void)cells;
+    (void)count;
+}
+
+#ifndef _WIN32
+__attribute__((weak))
+#endif
+int64_t bronze_concat_begin(int64_t a, int64_t /*b*/, uint32_t /*remaining*/) {
+    return a;
+}
+
+#ifndef _WIN32
+__attribute__((weak))
+#endif
+int64_t bronze_concat_append(int64_t a, int64_t /*b*/) {
+    return a;
+}
+
+#ifndef _WIN32
+__attribute__((weak))
+#endif
+int64_t bronze_concat_end(int64_t a) {
+    return a;
+}
+
+#ifndef _WIN32
+__attribute__((weak))
+#endif
+int64_t bronze_global_get_name(const char* name) {
+    if (!name) return static_cast<int64_t>(kUndefinedTag);
+    if (std::strcmp(name, "globalThis") == 0) {
+        static int64_t g_glob = 0;
+        if (!g_glob) g_glob = bronze_create_object();
+        return g_glob;
+    }
+    return bronze_name_resolve(name);
+}
+
+#ifndef _WIN32
+__attribute__((weak))
+#endif
+int64_t bronze_construct_0(int64_t callee_box) {
+    int64_t obj = bronze_create_object();
+    int64_t res = bronze_call_dynamic_0(callee_box, obj);
+    return (res && (res & 0xFFF0000000000000ULL) != 0xFFF0000000000000ULL) ? res : obj;
+}
+
+#ifndef _WIN32
+__attribute__((weak))
+#endif
+int64_t bronze_construct_1(int64_t callee_box, int64_t arg0) {
+    int64_t obj = bronze_create_object();
+    int64_t res = bronze_call_dynamic_1(callee_box, obj, arg0);
+    return (res && (res & 0xFFF0000000000000ULL) != 0xFFF0000000000000ULL) ? res : obj;
+}
+
+#ifndef _WIN32
+__attribute__((weak))
+#endif
+int64_t bronze_construct_2(int64_t callee_box, int64_t arg0, int64_t arg1) {
+    int64_t obj = bronze_create_object();
+    int64_t res = bronze_call_dynamic_2(callee_box, obj, arg0, arg1);
+    return (res && (res & 0xFFF0000000000000ULL) != 0xFFF0000000000000ULL) ? res : obj;
+}
+
+#ifndef _WIN32
+__attribute__((weak))
+#endif
+int64_t bronze_construct_3(int64_t callee_box, int64_t arg0, int64_t arg1, int64_t arg2) {
+    int64_t obj = bronze_create_object();
+    int64_t res = bronze_call_dynamic_3(callee_box, obj, arg0, arg1, arg2);
+    return (res && (res & 0xFFF0000000000000ULL) != 0xFFF0000000000000ULL) ? res : obj;
+}
+
+#ifndef _WIN32
+__attribute__((weak))
+#endif
+int64_t bronze_construct(int64_t callee_box, uint32_t argc, const int64_t* argv) {
+    if (argc == 0) return bronze_construct_0(callee_box);
+    if (argc == 1) return bronze_construct_1(callee_box, argv[0]);
+    if (argc == 2) return bronze_construct_2(callee_box, argv[0], argv[1]);
+    if (argc == 3) return bronze_construct_3(callee_box, argv[0], argv[1], argv[2]);
+    return bronze_create_object();
+}
+
+#ifndef _WIN32
+__attribute__((weak))
+#endif
+void bronze_class_extends(int64_t sub_box, int64_t super_box) {
+    (void)sub_box;
+    (void)super_box;
+}
+
+#ifndef _WIN32
+__attribute__((weak))
+#endif
+int64_t bronze_super_call(int64_t sub_box, int64_t this_box, uint32_t argc, const int64_t* argv) {
+    (void)sub_box;
+    return bronze_call_dynamic_n(sub_box, this_box, argc, argv);
+}
+
+#ifndef _WIN32
+__attribute__((weak))
+#endif
+int32_t bronze_instanceof(int64_t a_box, int64_t b_box) {
+    (void)a_box;
+    (void)b_box;
+    return 1;
+}
+
+#ifndef _WIN32
+__attribute__((weak))
+#endif
+int64_t bronze_super_get(int64_t proto_box, uint32_t key_index, int64_t this_box) {
+    (void)this_box;
+    return bronze_prop_get(proto_box, static_cast<int32_t>(key_index));
+}
+
+#ifndef _WIN32
+__attribute__((weak))
+#endif
+int32_t bronze_has_property(int64_t key_box, int64_t obj_box) {
+    (void)key_box;
+    (void)obj_box;
+    return 0;
+}
+
+#ifndef _WIN32
+__attribute__((weak))
+#endif
+int32_t bronze_is_nullish(int64_t val_box) {
+    return (val_box == static_cast<int64_t>(kUndefinedTag) || val_box == static_cast<int64_t>(kNullTag)) ? 1 : 0;
+}
+
 } // extern "C"
+
+static int64_t g_bronze_module_env = kUndefinedTag;
 
 void register_all_runtime_symbols(codegen::JitExecutionEngine& jit) {
     g_active_jit = &jit;
 
+    jit.register_external_symbol("__bronze_module_env", reinterpret_cast<void*>(&g_bronze_module_env));
+    jit.register_external_symbol("bronze_register_value_cells", reinterpret_cast<void*>(&bronze_register_value_cells));
     jit.register_external_symbol("bronze_print_f64", reinterpret_cast<void*>(&bronze_print_f64));
     jit.register_external_symbol("bronze_print_i32", reinterpret_cast<void*>(&bronze_print_i32));
     jit.register_external_symbol("bronze_print_dynamic", reinterpret_cast<void*>(&bronze_print_dynamic));
@@ -590,6 +729,22 @@ void register_all_runtime_symbols(codegen::JitExecutionEngine& jit) {
     jit.register_external_symbol("bronze_call_dynamic_7", reinterpret_cast<void*>(&bronze_call_dynamic_7));
     jit.register_external_symbol("bronze_call_dynamic_8", reinterpret_cast<void*>(&bronze_call_dynamic_8));
     jit.register_external_symbol("bronze_call_dynamic_n", reinterpret_cast<void*>(&bronze_call_dynamic_n));
+
+    jit.register_external_symbol("bronze_concat_begin", reinterpret_cast<void*>(&bronze_concat_begin));
+    jit.register_external_symbol("bronze_concat_append", reinterpret_cast<void*>(&bronze_concat_append));
+    jit.register_external_symbol("bronze_concat_end", reinterpret_cast<void*>(&bronze_concat_end));
+    jit.register_external_symbol("bronze_global_get_name", reinterpret_cast<void*>(&bronze_global_get_name));
+    jit.register_external_symbol("bronze_construct_0", reinterpret_cast<void*>(&bronze_construct_0));
+    jit.register_external_symbol("bronze_construct_1", reinterpret_cast<void*>(&bronze_construct_1));
+    jit.register_external_symbol("bronze_construct_2", reinterpret_cast<void*>(&bronze_construct_2));
+    jit.register_external_symbol("bronze_construct_3", reinterpret_cast<void*>(&bronze_construct_3));
+    jit.register_external_symbol("bronze_construct", reinterpret_cast<void*>(&bronze_construct));
+    jit.register_external_symbol("bronze_class_extends", reinterpret_cast<void*>(&bronze_class_extends));
+    jit.register_external_symbol("bronze_super_call", reinterpret_cast<void*>(&bronze_super_call));
+    jit.register_external_symbol("bronze_super_get", reinterpret_cast<void*>(&bronze_super_get));
+    jit.register_external_symbol("bronze_instanceof", reinterpret_cast<void*>(&bronze_instanceof));
+    jit.register_external_symbol("bronze_has_property", reinterpret_cast<void*>(&bronze_has_property));
+    jit.register_external_symbol("bronze_is_nullish", reinterpret_cast<void*>(&bronze_is_nullish));
 
     set_coro_symbol_resolver(&bronze_resolve_function);
     jit.register_external_symbol("brass_gc_write_barrier", reinterpret_cast<void*>(&brass_gc_write_barrier));
