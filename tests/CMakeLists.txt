@@ -113,6 +113,9 @@ add_executable(brass_unit_tests
     unit/test_v256_mir.cpp
     unit/test_fma_opt.cpp
     differential/test_avx2_differential.cpp
+    unit/test_background_compiler.cpp
+    unit/test_atomic_code_install.cpp
+    differential/test_async_jit_differential.cpp
 )
 
 target_include_directories(brass_unit_tests
@@ -184,4 +187,5 @@ target_link_libraries(brass_benchmarks
 
 add_test(NAME benchmarks COMMAND brass_benchmarks)
 add_test(NAME performance_ratchet COMMAND brass_benchmarks --check-ratchet)
+set_tests_properties(benchmarks performance_ratchet PROPERTIES TIMEOUT 300)
 

@@ -8,6 +8,8 @@
 #include <brass/target/aot_linker.hpp>
 #include <brass/runtime/inline_cache.hpp>
 #include <brass/runtime/tiering.hpp>
+#include <brass/runtime/background_compiler.hpp>
+#include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
 #include <brass/pgo/instrument.hpp>
 #include <iostream>
@@ -193,14 +195,25 @@ bool execute_run_function(Module& mod, const RunFunctionOptions& opts) {
         runtime::OsrCoordinator::instance().set_enabled(true);
         runtime::OsrCoordinator::instance().set_threshold(opts.osr_threshold);
     }
+    if (opts.enable_background_compile) {
+        runtime::TieringRegistry::instance().set_background_compile_enabled(true);
+        runtime::TieringRegistry::instance().set_jit_threads(opts.jit_threads);
+        runtime::BackgroundCompiler::instance().start(opts.jit_threads);
+    }
 
     try {
         RuntimeValue result = interp.run(mod, opts.run_fn, run_args);
         if (!fn->return_type().is_void()) {
             std::cout << result << "\n";
         }
+        if (opts.enable_background_compile) {
+            runtime::BackgroundCompiler::instance().wait_idle();
+        }
         if (opts.dump_tiering_stats) {
             runtime::TieringRegistry::instance().dump_stats(std::cout);
+        }
+        if (opts.dump_jit_thread_stats) {
+            runtime::BackgroundCompiler::instance().dump_stats(std::cout);
         }
     } catch (const std::exception& ex) {
         std::cerr << "Runtime error during execution: " << ex.what() << "\n";

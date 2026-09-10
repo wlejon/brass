@@ -7,6 +7,10 @@
 #include <iosfwd>
 #include <memory>
 
+namespace brass {
+class Module;
+}
+
 namespace brass::runtime {
 
 enum class TierLevel : uint8_t {
@@ -30,7 +34,11 @@ struct TieringConfig {
     uint64_t backedge_osr_threshold = BACKEDGE_OSR_THRESHOLD;
     uint64_t deopt_threshold = DEOPT_THRESHOLD;
     bool enable_osr = true;
+    bool enable_background_compile = false;
+    size_t jit_threads = 2;
 };
+
+class FunctionHandle;
 
 class TieringFeedback {
 public:
@@ -41,7 +49,7 @@ public:
 
     // Invocations
     uint64_t invocation_count() const noexcept { return invocations_; }
-    void record_invocation() noexcept { invocations_++; }
+    uint64_t record_invocation() noexcept;
 
     // Loop Backedges
     uint64_t backedge_count() const noexcept { return total_backedges_; }
@@ -130,11 +138,28 @@ public:
     TieringConfig& default_config() noexcept { return config_; }
     void set_default_config(const TieringConfig& config) noexcept { config_ = config; }
 
+    bool is_background_compile_enabled() const noexcept { return config_.enable_background_compile; }
+    void set_background_compile_enabled(bool enabled) noexcept { config_.enable_background_compile = enabled; }
+
+    size_t jit_threads() const noexcept { return config_.jit_threads; }
+    void set_jit_threads(size_t threads) noexcept { config_.jit_threads = threads; }
+
+    void set_active_module(const Module* mod) noexcept { active_module_ = mod; }
+    const Module* active_module() const noexcept { return active_module_; }
+
+    bool on_invocation_threshold_reached(std::string_view fn_name);
+    bool enqueue_compilation(
+        std::string_view fn_name,
+        const Module* mod = nullptr,
+        FunctionHandle* handle = nullptr
+    );
+
     void dump_stats(std::ostream& os) const;
 
 private:
     TieringRegistry() = default;
     TieringConfig config_;
+    const Module* active_module_ = nullptr;
     std::unordered_map<std::string, TieringFeedback> feedback_map_;
 };
 

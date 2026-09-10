@@ -34,6 +34,7 @@ public:
     bool is_valid() const noexcept { return ptr_ != nullptr; }
 
     void make_executable();
+    void make_executable_read_only();
     void make_read_write();
     void reset();
 
@@ -63,6 +64,7 @@ public:
 
     const SchedOptions& sched_options() const noexcept { return sched_opts_; }
     void set_sched_options(const SchedOptions& opts) { sched_opts_ = opts; }
+    void make_executable_read_only() { code_mem_.make_executable_read_only(); }
 
     // Function/symbol lookup
     void* get_symbol_address(std::string_view name) const;

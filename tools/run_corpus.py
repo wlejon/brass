@@ -54,6 +54,7 @@ PROGRAMS = [
     "31_gvn_pre_diamonds",
     "32_loop_fusion_contraction",
     "33_avx2_fma_matmul",
+    "34_background_tiering",
 ]
 
 DEMOTED_PROGRAMS = {

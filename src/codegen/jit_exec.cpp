@@ -87,6 +87,21 @@ void JitMemoryBlock::make_executable() {
 #endif
 }
 
+void JitMemoryBlock::make_executable_read_only() {
+#if defined(_WIN32)
+    if (ptr_) {
+        DWORD old_protect;
+        VirtualProtect(ptr_, size_, PAGE_EXECUTE_READ, &old_protect);
+        FlushInstructionCache(GetCurrentProcess(), ptr_, size_);
+    }
+#else
+    if (ptr_) {
+        mprotect(ptr_, size_, PROT_READ | PROT_EXEC);
+        __builtin___clear_cache(reinterpret_cast<char*>(ptr_), reinterpret_cast<char*>(ptr_ + size_));
+    }
+#endif
+}
+
 void JitMemoryBlock::make_read_write() {
 #if defined(_WIN32)
     if (ptr_) {

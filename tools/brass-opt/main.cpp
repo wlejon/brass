@@ -65,6 +65,9 @@ void print_usage(const char* prog) {
               << "  --enable-osr          Enable On-Stack Replacement (OSR) in interpreter\n"
               << "  --osr-threshold=<N>   Loop backedge threshold for OSR migration (default: 100)\n"
               << "  --dump-tiering-stats  Dump tiering feedback and OSR statistics\n"
+              << "  --enable-background-compile Enable background JIT compiler worker threads\n"
+              << "  --jit-threads=<N>     Number of background JIT worker threads (default: 2)\n"
+              << "  --dump-jit-thread-stats Dump background JIT worker thread pool statistics\n"
               << "  -g, --debug-info      Preserve and emit debug information and .brass_dbg section\n"
               << "  --emit-source-map=<file.map> Emit standard JSON Source Map V3 to <file.map>\n"
               << "  --symbolize-offset=<fn,offset> Symbolize function offset to source location\n"
@@ -167,6 +170,9 @@ int main(int argc, char** argv) {
     bool enable_osr = false;
     uint64_t osr_threshold = brass::runtime::BACKEDGE_OSR_THRESHOLD;
     bool dump_tiering_stats = false;
+    bool enable_background_compile = false;
+    size_t jit_threads = 2;
+    bool dump_jit_thread_stats = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -239,6 +245,14 @@ int main(int argc, char** argv) {
             osr_threshold = std::stoull(argv[++i]);
         } else if (arg == "--dump-tiering-stats") {
             dump_tiering_stats = true;
+        } else if (arg == "--enable-background-compile") {
+            enable_background_compile = true;
+        } else if (arg.rfind("--jit-threads=", 0) == 0) {
+            jit_threads = static_cast<size_t>(std::stoul(arg.substr(14)));
+        } else if (arg == "--jit-threads" && i + 1 < argc) {
+            jit_threads = static_cast<size_t>(std::stoul(argv[++i]));
+        } else if (arg == "--dump-jit-thread-stats") {
+            dump_jit_thread_stats = true;
         } else if (arg == "--pgo-instrument") {
             enable_pgo_instrument = true;
         } else if (arg.rfind("--pgo-use=", 0) == 0) {
@@ -843,6 +857,9 @@ int main(int argc, char** argv) {
         r_opts.enable_software_pipeline = enable_software_pipeline;
         r_opts.dump_ic_stats = dump_ic_stats;
         r_opts.dump_tiering_stats = dump_tiering_stats;
+        r_opts.enable_background_compile = enable_background_compile;
+        r_opts.jit_threads = jit_threads;
+        r_opts.dump_jit_thread_stats = dump_jit_thread_stats;
         return brass::execute_run_function(*mod, r_opts) ? 0 : 1;
     }
 

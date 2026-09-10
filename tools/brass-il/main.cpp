@@ -5,6 +5,8 @@
 #include <brass/mir/gvn_pre.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
 #include <brass/runtime/tiering.hpp>
+#include <brass/runtime/background_compiler.hpp>
+#include <brass/runtime/code_installer.hpp>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -39,6 +41,9 @@ int main(int argc, char** argv) {
     bool debug_info = false;
     std::string emit_source_map_file;
     std::string symbolize_offset_arg;
+    bool enable_background_compile = false;
+    size_t jit_threads = 2;
+    bool dump_jit_thread_stats = false;
     TranslatorOptions options;
 
     for (int i = 1; i < argc; ++i) {
@@ -54,6 +59,9 @@ int main(int argc, char** argv) {
                       << "  -g, --debug-info      Preserve and emit debug information and .brass_dbg section\n"
                       << "  --emit-source-map=<f> Emit standard JSON Source Map V3 to <f>\n"
                       << "  --symbolize-offset=<fn,off> Symbolize function offset to source location\n"
+                      << "  --enable-background-compile Enable background JIT compiler worker threads\n"
+                      << "  --jit-threads=<N>     Number of background JIT worker threads (default: 2)\n"
+                      << "  --dump-jit-thread-stats Dump background JIT worker thread pool statistics\n"
                       << "  -o <file>             Write object file to <file>\n";
             return 0;
         } else if (arg == "--run") {
@@ -173,6 +181,14 @@ int main(int argc, char** argv) {
             options.osr_threshold = std::stoull(argv[++i]);
         } else if (arg == "--dump-tiering-stats") {
             options.dump_tiering_stats = true;
+        } else if (arg == "--enable-background-compile") {
+            enable_background_compile = true;
+        } else if (arg.rfind("--jit-threads=", 0) == 0) {
+            jit_threads = static_cast<size_t>(std::stoul(arg.substr(14)));
+        } else if (arg == "--jit-threads" && i + 1 < argc) {
+            jit_threads = static_cast<size_t>(std::stoul(argv[++i]));
+        } else if (arg == "--dump-jit-thread-stats") {
+            dump_jit_thread_stats = true;
         } else if (arg == "--enable-loop-fusion") {
             options.enable_loop_fusion = true;
         } else if (arg == "--enable-loop-distribution") {
@@ -490,6 +506,41 @@ int main(int argc, char** argv) {
     }
 
     if (run_jit || (output_obj.empty() && output_shared.empty() && !emit_shared)) {
+        if (enable_background_compile) {
+            brass::runtime::TieringRegistry::instance().set_background_compile_enabled(true);
+            brass::runtime::TieringRegistry::instance().set_jit_threads(jit_threads);
+            brass::runtime::BackgroundCompiler::instance().start(jit_threads);
+            brass::runtime::TieringRegistry::instance().set_active_module(res.module.get());
+            for (const Function* fn : res.module->functions()) {
+                if (fn) brass::runtime::FunctionDispatchTable::instance().get_or_create(fn->name(), fn);
+            }
+
+            Interpreter interp;
+            register_bronze_interpreter_symbols(&interp);
+            interp.register_external_function("brass_pgo_inc", [](Interpreter&, const std::vector<RuntimeValue>& args) {
+                if (!args.empty()) {
+                    uint32_t idx = args[0].is_i32() ? args[0].as_u32() : static_cast<uint32_t>(args[0].as_u64());
+                    brass_pgo_inc(idx);
+                }
+                return RuntimeValue::from_void();
+            });
+
+            Function* main_fn = res.module->get_function("main");
+            if (main_fn) {
+                interp.run(*main_fn, {});
+            }
+
+            brass::runtime::BackgroundCompiler::instance().wait_idle();
+
+            if (options.dump_tiering_stats) {
+                brass::runtime::TieringRegistry::instance().dump_stats(std::cout);
+            }
+            if (dump_jit_thread_stats) {
+                brass::runtime::BackgroundCompiler::instance().dump_stats(std::cout);
+            }
+            return 0;
+        }
+
         if (options.enable_osr) {
             brass::runtime::OsrCoordinator::instance().set_enabled(true);
             brass::runtime::OsrCoordinator::instance().set_threshold(options.osr_threshold);
@@ -585,6 +636,9 @@ int main(int argc, char** argv) {
             }
             if (options.dump_tiering_stats) {
                 brass::runtime::TieringRegistry::instance().dump_stats(std::cout);
+            }
+            if (dump_jit_thread_stats) {
+                brass::runtime::BackgroundCompiler::instance().dump_stats(std::cout);
             }
         }
     }

@@ -1,4 +1,6 @@
 #include <brass/runtime/tiering.hpp>
+#include <brass/runtime/background_compiler.hpp>
+#include <brass/runtime/code_installer.hpp>
 #include <ostream>
 #include <iomanip>
 
@@ -22,6 +24,14 @@ TieringFeedback::TieringFeedback(const TieringConfig& config)
 
 TieringFeedback::TieringFeedback(std::string_view fn_name, const TieringConfig& config)
     : fn_name_(fn_name), config_(config) {}
+
+uint64_t TieringFeedback::record_invocation() noexcept {
+    invocations_++;
+    if (invocations_ == config_.invocation_tier1_threshold) {
+        TieringRegistry::instance().on_invocation_threshold_reached(fn_name_);
+    }
+    return invocations_;
+}
 
 uint64_t TieringFeedback::loop_backedges(uint32_t loop_header_id) const noexcept {
     auto it = loop_backedges_.find(loop_header_id);
@@ -127,6 +137,34 @@ void TieringRegistry::clear() {
     feedback_map_.clear();
 }
 
+bool TieringRegistry::on_invocation_threshold_reached(std::string_view fn_name) {
+    if (!config_.enable_background_compile) {
+        return false;
+    }
+    return enqueue_compilation(fn_name, active_module_);
+}
+
+bool TieringRegistry::enqueue_compilation(
+    std::string_view fn_name,
+    const Module* mod,
+    FunctionHandle* handle
+) {
+    const Module* target_mod = mod ? mod : active_module_;
+    if (!target_mod) {
+        return false;
+    }
+    if (!handle) {
+        handle = FunctionDispatchTable::instance().get_or_create(fn_name);
+    }
+    return BackgroundCompiler::instance().enqueue(
+        fn_name,
+        *target_mod,
+        handle,
+        CompilePriority::Normal,
+        TierLevel::Tier2_Optimized
+    );
+}
+
 void TieringRegistry::dump_stats(std::ostream& os) const {
     os << "=== Tiering Feedback Statistics ===\n";
     if (feedback_map_.empty()) {
@@ -160,6 +198,9 @@ void TieringRegistry::dump_stats(std::ostream& os) const {
         }
     }
     os << "====================================\n";
+    if (config_.enable_background_compile) {
+        BackgroundCompiler::instance().dump_stats(os);
+    }
 }
 
 } // namespace brass::runtime

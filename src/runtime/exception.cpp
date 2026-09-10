@@ -20,10 +20,12 @@ const ExceptionScopeEntry* FunctionExceptionTable::find_scope(uint32_t func_ip_o
 }
 
 void ExceptionTableRegistry::register_table(std::string_view fn_name, FunctionExceptionTable table) {
+    std::lock_guard<std::mutex> lock(mutex_);
     tables_[std::string(fn_name)] = std::move(table);
 }
 
 const FunctionExceptionTable* ExceptionTableRegistry::get_table(std::string_view fn_name) const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
     auto it = tables_.find(std::string(fn_name));
     if (it != tables_.end()) {
         return &it->second;
@@ -36,6 +38,7 @@ void ExceptionTableRegistry::register_function_mapping(
     uintptr_t fn_size,
     const FunctionExceptionTable& table
 ) {
+    std::lock_guard<std::mutex> lock(mutex_);
     RangeEntry re;
     re.start = fn_start;
     re.end = fn_start + fn_size;
@@ -44,6 +47,7 @@ void ExceptionTableRegistry::register_function_mapping(
 }
 
 void ExceptionTableRegistry::unregister_function_mapping(uintptr_t fn_start) {
+    std::lock_guard<std::mutex> lock(mutex_);
     for (auto it = ranges_.begin(); it != ranges_.end(); ++it) {
         if (it->start == fn_start) {
             ranges_.erase(it);
@@ -53,11 +57,13 @@ void ExceptionTableRegistry::unregister_function_mapping(uintptr_t fn_start) {
 }
 
 void ExceptionTableRegistry::clear() {
+    std::lock_guard<std::mutex> lock(mutex_);
     tables_.clear();
     ranges_.clear();
 }
 
 const FunctionExceptionTable* ExceptionTableRegistry::find_function_by_pc(uintptr_t pc) const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
     uintptr_t lookup_pc = (pc > 0) ? (pc - 1) : pc;
     for (const auto& r : ranges_) {
         if (lookup_pc >= r.start && lookup_pc < r.end) {
@@ -72,6 +78,7 @@ const ExceptionScopeEntry* ExceptionTableRegistry::find_scope_by_pc(
     uintptr_t* out_fn_start,
     const FunctionExceptionTable** out_table
 ) const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
     uintptr_t lookup_pc = (pc > 0) ? (pc - 1) : pc;
     for (const auto& r : ranges_) {
         if (lookup_pc >= r.start && lookup_pc < r.end) {

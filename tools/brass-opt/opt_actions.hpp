@@ -37,6 +37,9 @@ struct RunFunctionOptions {
     bool enable_software_pipeline = false;
     bool dump_ic_stats = false;
     bool dump_tiering_stats = false;
+    bool enable_background_compile = false;
+    size_t jit_threads = 2;
+    bool dump_jit_thread_stats = false;
 };
 
 bool execute_run_function(Module& mod, const RunFunctionOptions& opts);

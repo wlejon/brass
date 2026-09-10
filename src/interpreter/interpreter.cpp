@@ -3,6 +3,8 @@
 #include <brass/gc/runtime_gc.hpp>
 #include "interpreter_coro.hpp"
 #include <brass/runtime/osr_coordinator.hpp>
+#include <brass/runtime/code_installer.hpp>
+#include <brass/runtime/tiering.hpp>
 #include <iostream>
 #include <cmath>
 
@@ -19,6 +21,8 @@ Interpreter::Interpreter(size_t gc_semispace_size)
 RuntimeValue Interpreter::run(const Function& fn, const std::vector<RuntimeValue>& args) {
     if (fn.parent()) {
         module_ = fn.parent();
+        runtime::TieringRegistry::instance().set_active_module(fn.parent());
+        runtime::FunctionDispatchTable::instance().get_or_create(fn.name(), &fn);
     }
     return execute_function(fn, args);
 }
@@ -71,6 +75,28 @@ RuntimeValue Interpreter::resume_with_frame(const Function& fn, uint32_t resume_
 }
 
 RuntimeValue Interpreter::execute_function(const Function& fn, const std::vector<RuntimeValue>& args) {
+    if (fn.parent() && !runtime::TieringRegistry::instance().active_module()) {
+        runtime::TieringRegistry::instance().set_active_module(fn.parent());
+    }
+
+    auto* handle = runtime::FunctionDispatchTable::instance().find(fn.name());
+    if (handle) {
+        void* native_code = handle->native_entry();
+        if (native_code != nullptr) {
+            return handle->call_native(args);
+        }
+    }
+
+    auto& feedback = runtime::TieringRegistry::instance().get_or_create(fn.name());
+    feedback.record_invocation();
+
+    if (handle) {
+        void* native_code = handle->native_entry();
+        if (native_code != nullptr) {
+            return handle->call_native(args);
+        }
+    }
+
     BasicBlock* entry = fn.entry_block();
     if (!entry) {
         return RuntimeValue::from_void();
@@ -487,6 +513,7 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                     RuntimeValue call_res;
                     const Function* target_fn = module_ ? module_->get_function(callee) : nullptr;
                     if (target_fn) {
+                        runtime::FunctionDispatchTable::instance().get_or_create(callee, target_fn);
                         call_res = execute_function(*target_fn, call_args);
                     } else {
                         auto it = external_functions_.find(std::string(callee));

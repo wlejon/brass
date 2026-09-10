@@ -8,6 +8,7 @@
 #include <vector>
 #include <unordered_map>
 #include <exception>
+#include <mutex>
 
 
 
@@ -82,6 +83,32 @@ private:
 class ExceptionTableRegistry {
 public:
     ExceptionTableRegistry() = default;
+    ExceptionTableRegistry(const ExceptionTableRegistry& other) {
+        std::lock_guard<std::mutex> lock(other.mutex_);
+        tables_ = other.tables_;
+        ranges_ = other.ranges_;
+    }
+    ExceptionTableRegistry& operator=(const ExceptionTableRegistry& other) {
+        if (this != &other) {
+            std::scoped_lock lock(mutex_, other.mutex_);
+            tables_ = other.tables_;
+            ranges_ = other.ranges_;
+        }
+        return *this;
+    }
+    ExceptionTableRegistry(ExceptionTableRegistry&& other) noexcept {
+        std::lock_guard<std::mutex> lock(other.mutex_);
+        tables_ = std::move(other.tables_);
+        ranges_ = std::move(other.ranges_);
+    }
+    ExceptionTableRegistry& operator=(ExceptionTableRegistry&& other) noexcept {
+        if (this != &other) {
+            std::scoped_lock lock(mutex_, other.mutex_);
+            tables_ = std::move(other.tables_);
+            ranges_ = std::move(other.ranges_);
+        }
+        return *this;
+    }
 
     void register_table(std::string_view fn_name, FunctionExceptionTable table);
     [[nodiscard]] const FunctionExceptionTable* get_table(std::string_view fn_name) const noexcept;
@@ -100,6 +127,7 @@ public:
     [[nodiscard]] const std::unordered_map<std::string, FunctionExceptionTable>& tables() const noexcept { return tables_; }
 
 private:
+    mutable std::mutex mutex_;
     std::unordered_map<std::string, FunctionExceptionTable> tables_;
     struct RangeEntry {
         uintptr_t start = 0;

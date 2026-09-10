@@ -7,6 +7,7 @@
 #include <brass/runtime/object.hpp>
 #include <brass/runtime/inline_cache.hpp>
 #include <brass/runtime/coroutine.hpp>
+#include <brass/interpreter/interpreter.hpp>
 #include <iostream>
 #include <iomanip>
 #include <cmath>
@@ -574,6 +575,52 @@ void register_bronze_runtime_symbols(void* jit_engine_ptr) {
         auto* jit = reinterpret_cast<codegen::JitExecutionEngine*>(jit_engine_ptr);
         register_all_runtime_symbols(*jit);
     }
+}
+
+void register_bronze_interpreter_symbols(void* interp_ptr) {
+    if (!interp_ptr) return;
+    auto* interp = reinterpret_cast<Interpreter*>(interp_ptr);
+    interp->register_external_function("bronze_print_f64", [](Interpreter&, const std::vector<RuntimeValue>& args) {
+        if (!args.empty()) bronze_print_f64(args[0].as_f64());
+        return RuntimeValue::from_void();
+    });
+    interp->register_external_function("bronze_print_i32", [](Interpreter&, const std::vector<RuntimeValue>& args) {
+        if (!args.empty()) bronze_print_i32(args[0].as_i32());
+        return RuntimeValue::from_void();
+    });
+    interp->register_external_function("bronze_print_dynamic", [](Interpreter&, const std::vector<RuntimeValue>& args) {
+        if (!args.empty()) bronze_print_dynamic(args[0].as_i64());
+        return RuntimeValue::from_void();
+    });
+    interp->register_external_function("bronze_print_newline", [](Interpreter&, const std::vector<RuntimeValue>&) {
+        bronze_print_newline();
+        return RuntimeValue::from_void();
+    });
+    interp->register_external_function("bronze_f64_mod", [](Interpreter&, const std::vector<RuntimeValue>& args) {
+        if (args.size() >= 2) return RuntimeValue::from_f64(bronze_f64_mod(args[0].as_f64(), args[1].as_f64()));
+        return RuntimeValue::from_f64(0.0);
+    });
+    interp->register_external_function("bronze_call_dynamic_0", [](Interpreter&, const std::vector<RuntimeValue>& args) {
+        int64_t r = bronze_call_dynamic_0(args.size() > 0 ? args[0].as_i64() : 0, args.size() > 1 ? args[1].as_i64() : 0);
+        return RuntimeValue::from_i64(r);
+    });
+    interp->register_external_function("bronze_call_dynamic_1", [](Interpreter&, const std::vector<RuntimeValue>& args) {
+        int64_t r = bronze_call_dynamic_1(
+            args.size() > 0 ? args[0].as_i64() : 0,
+            args.size() > 1 ? args[1].as_i64() : 0,
+            args.size() > 2 ? args[2].as_i64() : 0
+        );
+        return RuntimeValue::from_i64(r);
+    });
+    interp->register_external_function("bronze_call_dynamic_2", [](Interpreter&, const std::vector<RuntimeValue>& args) {
+        int64_t r = bronze_call_dynamic_2(
+            args.size() > 0 ? args[0].as_i64() : 0,
+            args.size() > 1 ? args[1].as_i64() : 0,
+            args.size() > 2 ? args[2].as_i64() : 0,
+            args.size() > 3 ? args[3].as_i64() : 0
+        );
+        return RuntimeValue::from_i64(r);
+    });
 }
 
 } // namespace brass::il
