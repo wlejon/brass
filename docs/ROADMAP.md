@@ -112,11 +112,12 @@
   - Monomorphic, Polymorphic (up to 4 shapes), and Megamorphic ICs with atomic x64 dynamic patching.
   - Lowering `prop.get`, `prop.set`, `elem.get`, `elem.set`, `method.def` in Bronze IL translator.
   - 24-program Bronze corpus verification.
-- **Chunk 14: Zero-Cost Hardware-Assisted Exception Handling [NEXT]**:
+- **Chunk 14: Zero-Cost Hardware-Assisted Exception Handling [COMPLETED]**:
   - Win64 SEH `.pdata`/`.xdata` personality routines and Linux SysV `.gcc_except_table` / DWARF LSDA action tables.
-  - MIR opcodes: `throw`, `invoke`, `landing_pad`, `cleanup`.
+  - MIR opcodes: `throw`, `invoke`, `landing_pad`, `resume`.
   - Lowering Bronze IL `handler`, `throw`, `exc.take`.
-- **Chunk 15: Stackless Coroutines & Resumable Frames (Async/Await & Generators)**:
+  - 26-program Bronze corpus verification.
+- **Chunk 15: Stackless Coroutines & Resumable Frames (Async/Await & Generators) [NEXT]**:
   - Coroutine state machine transformation pass.
   - GC-tracked resumable frames and Interior Resume Table integration.
   - Lowering Bronze IL `create.async_machine`, `async.start`, `async.await`, `iter.open`, `iter.step`.
