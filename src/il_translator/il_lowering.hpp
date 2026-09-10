@@ -2,6 +2,7 @@
 
 #include "il_ast.hpp"
 #include <brass/il_translator/il_translator.hpp>
+#include <brass/il_translator/il_property.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/core/diagnostics.hpp>
 #include <memory>
@@ -27,6 +28,7 @@ private:
 
     TranslatorOptions options_;
     DiagnosticReporter* diag_ = nullptr;
+    PropertyLoweringHelper prop_lowering_;
     bool has_error_ = false;
 };
 

@@ -88,8 +88,47 @@
 
 ---
 
+## Phase II: Advanced Optimization Pipeline & Standalone Toolchain (Chunks 1–12)
+
+- **Chunk 1: MIR Function Inlining & IPO**: Call graph analysis, heuristic inlining, devirtualization.
+- **Chunk 2: 128-Bit SIMD Vector Types**: `v128` vector types, SSE/AVX lowering.
+- **Chunk 3: Loop Vectorizer & SLP Packetizer**: Automatic SIMD vectorization for 3D/graphics kernels.
+- **Chunk 4: Escape Analysis & SROA**: Scalar replacement of aggregates, stack allocation of non-escaping frames.
+- **Chunk 5: GVN, Memory SSA & Alias Analysis**: Redundant load elimination, dead store elimination.
+- **Chunk 6: Standalone AOT Linker**: PE DLL and ELF Shared Object (`.so`) writers without external linkers.
+- **Chunk 7: Loop Polyhedral Tiling**: Cache blocking for multi-dimensional nested loops (`matmul`).
+- **Chunk 8: SCCP, Guard Elimination & CFG Simplification**: Sparse conditional constant propagation, pruning redundant speculative guards.
+- **Chunk 9: Loop Unswitching, Jump Threading & Trace Block Layout**: Fall-through block layout and branch avoidance.
+- **Chunk 10: Profile-Guided Optimization (PGO)**: Minimal edge instrumentation, `.bprof` serialization, Kirchhoff's law edge flow solving.
+- **Chunk 11: Machine Instruction Scheduling & Software Pipelining**: Dependency DAG scheduling, modulo loop pipelining.
+- **Chunk 12: Source Maps & Symbolication**: V3 source map emission, `.brass_dbg` section, stack trace symbolicator.
+
+---
+
+## Phase III: Advanced Dynamic Runtime & System Capabilities (Chunks 13–16)
+
+- **Chunk 13: Polymorphic Inline Caches (PICs), Shape Transitions, and Property Lowering [COMPLETED]**:
+  - `Shape`, `ShapeRegistry`, `DynamicObject` with moving Cheney GC support.
+  - Monomorphic, Polymorphic (up to 4 shapes), and Megamorphic ICs with atomic x64 dynamic patching.
+  - Lowering `prop.get`, `prop.set`, `elem.get`, `elem.set`, `method.def` in Bronze IL translator.
+  - 24-program Bronze corpus verification.
+- **Chunk 14: Zero-Cost Hardware-Assisted Exception Handling [NEXT]**:
+  - Win64 SEH `.pdata`/`.xdata` personality routines and Linux SysV `.gcc_except_table` / DWARF LSDA action tables.
+  - MIR opcodes: `throw`, `invoke`, `landing_pad`, `cleanup`.
+  - Lowering Bronze IL `handler`, `throw`, `exc.take`.
+- **Chunk 15: Stackless Coroutines & Resumable Frames (Async/Await & Generators)**:
+  - Coroutine state machine transformation pass.
+  - GC-tracked resumable frames and Interior Resume Table integration.
+  - Lowering Bronze IL `create.async_machine`, `async.start`, `async.await`, `iter.open`, `iter.step`.
+- **Chunk 16: Partial Escape Analysis (PEA) & Allocation Sinking**:
+  - Sinking allocations from loop headers down into cold exit paths.
+  - Scalarization of boxed numbers / objects in non-escaping paths.
+
+---
+
 ## House Rules & Code Conventions
 1. **C++20**: Zero LLVM dependencies.
 2. **Compiler Compatibility**: MSVC, Clang, and GCC 12 clean (no `= {}` default args which GCC 12 rejects).
 3. **File Size Limit**: Keep files under 1,000 lines. Files approaching or exceeding 2,000 lines must be strictly decomposed into modular headers/sources.
 4. **Validation**: Every subagent chunk must land with complete unit, differential, or golden tests.
+

@@ -23,13 +23,14 @@ The Bronze IL Translator (`brass::il::translate_bronze_il` and `brass-il` CLI) p
 | **Environments & Scope**| `env.create`, `env.get`, `env.set`, `env.get.tdz`, `env.init.tdz` | Heap-allocated lexical environment chains (`BronzeEnv`) | Supported |
 | **Closures** | `create.func @fn, <param_count>, %env` | Code pointer + environment pairing (`BronzeClosure`) | Supported |
 | **Direct Calls & Prints**| `call @name(...)`, `print %0, ...`, `print.err %0, ...` | Direct internal/external subroutine calls & formatted printers | Supported |
+| **Objects & Properties**| `create.object`, `create.array`, `prop.get`, `prop.set`, `elem.get`, `elem.set`, `method.def` | Polymorphic inline caches (PICs), Shape hidden class transitions, moving GC DynamicObject | Supported |
 
 ---
 
 ## 3. Untranslated Constructs (Subset Boundary)
 
-1. **Object & Shape Inline Caches (`prop.get`, `prop.set`, `elem.get`, `elem.set`, `method.def`, `accessor.def`)**:
-   - *Reason*: Requires polymorphic IC cache slot allocation and shape transition tables.
+1. **Accessor Property Descriptors (`accessor.def`)**:
+   - *Reason*: Requires getter/setter dynamic property dispatch and call stub synthesis.
 2. **Async / Generator Coroutines (`create.async_machine`, `async.start`, `async.await`, `iter.open`, `iter.step`)**:
    - *Reason*: Requires coroutine state machine transformation and resume point descriptors.
 3. **Exception Tables (`handler b<id>`, `throw`, `exc.take`)**:

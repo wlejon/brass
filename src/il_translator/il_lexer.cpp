@@ -75,6 +75,7 @@ const char* bronze_op_name(BronzeOp op) {
         case BronzeOp::PropSet: return "prop.set";
         case BronzeOp::ElemGet: return "elem.get";
         case BronzeOp::ElemSet: return "elem.set";
+        case BronzeOp::MethodDef: return "method.def";
         case BronzeOp::Print: return "print";
         case BronzeOp::PrintErr: return "print.err";
         case BronzeOp::Ret: return "ret";
@@ -397,6 +398,7 @@ Token IlLexer::scan_token() {
         if (w == "prop.set") { op_out = BronzeOp::PropSet; return true; }
         if (w == "elem.get") { op_out = BronzeOp::ElemGet; return true; }
         if (w == "elem.set") { op_out = BronzeOp::ElemSet; return true; }
+        if (w == "method.def") { op_out = BronzeOp::MethodDef; return true; }
         if (w == "print") { op_out = BronzeOp::Print; return true; }
         if (w == "print.err") { op_out = BronzeOp::PrintErr; return true; }
         if (w == "ret") { op_out = BronzeOp::Ret; return true; }

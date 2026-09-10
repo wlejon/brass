@@ -298,6 +298,13 @@ TEST_CASE("Bronze IL - 22-Program Live Corpus JIT and AOT Execution") {
         int64_t (*call_dynamic_7)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
         int64_t (*call_dynamic_8)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
         int64_t (*call_dynamic_n)(int64_t, int64_t, int32_t, const int64_t*);
+        void (*method_def)(int64_t, const char*, int32_t, int64_t);
+        int64_t (*ic_get)(uint32_t, int64_t, const char*, int32_t);
+        void (*ic_set)(uint32_t, int64_t, const char*, int32_t, int64_t);
+        uint64_t (*brass_ic_get)(uint32_t, uint64_t, const char*, uint32_t);
+        void (*brass_ic_set)(uint32_t, uint64_t, const char*, uint32_t, uint64_t);
+        uint64_t (*brass_dyn_get_str)(uint64_t, const char*);
+        void (*brass_dyn_set_str)(uint64_t, const char*, uint64_t);
     };
 
     BronzeRuntimeTable host_rt = {
@@ -326,7 +333,14 @@ TEST_CASE("Bronze IL - 22-Program Live Corpus JIT and AOT Execution") {
         &brass::il::bronze_call_dynamic_6,
         &brass::il::bronze_call_dynamic_7,
         &brass::il::bronze_call_dynamic_8,
-        &brass::il::bronze_call_dynamic_n
+        &brass::il::bronze_call_dynamic_n,
+        &brass::il::bronze_method_def,
+        &brass::il::bronze_ic_get,
+        &brass::il::bronze_ic_set,
+        &brass::il::brass_ic_get_prop,
+        &brass::il::brass_ic_set_prop,
+        &brass::runtime::brass_dynamic_object_get_prop_str,
+        &brass::runtime::brass_dynamic_object_set_prop_str
     };
 
     bool msvc_ready = MsvcToolchain::is_available();
@@ -371,6 +385,13 @@ TEST_CASE("Bronze IL - 22-Program Live Corpus JIT and AOT Execution") {
             << "    int64_t (*call_dynamic_7)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
             << "    int64_t (*call_dynamic_8)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
             << "    int64_t (*call_dynamic_n)(int64_t, int64_t, int32_t, const int64_t*);\n"
+            << "    void (*method_def)(int64_t, const char*, int32_t, int64_t);\n"
+            << "    int64_t (*ic_get)(uint32_t, int64_t, const char*, int32_t);\n"
+            << "    void (*ic_set)(uint32_t, int64_t, const char*, int32_t, int64_t);\n"
+            << "    uint64_t (*brass_ic_get)(uint32_t, uint64_t, const char*, uint32_t);\n"
+            << "    void (*brass_ic_set)(uint32_t, uint64_t, const char*, uint32_t, uint64_t);\n"
+            << "    uint64_t (*brass_dyn_get_str)(uint64_t, const char*);\n"
+            << "    void (*brass_dyn_set_str)(uint64_t, const char*, uint64_t);\n"
             << "};\n\n"
             << "static BronzeRuntimeTable g_rt = {};\n\n"
             << "extern \"C\" {\n"
@@ -403,6 +424,13 @@ TEST_CASE("Bronze IL - 22-Program Live Corpus JIT and AOT Execution") {
             << "    int64_t bronze_call_dynamic_7(int64_t c, int64_t th, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6) { return g_rt.call_dynamic_7 ? g_rt.call_dynamic_7(c, th, a0, a1, a2, a3, a4, a5, a6) : 0; }\n"
             << "    int64_t bronze_call_dynamic_8(int64_t c, int64_t th, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6, int64_t a7) { return g_rt.call_dynamic_8 ? g_rt.call_dynamic_8(c, th, a0, a1, a2, a3, a4, a5, a6, a7) : 0; }\n"
             << "    int64_t bronze_call_dynamic_n(int64_t c, int64_t th, int32_t ac, const int64_t* av) { return g_rt.call_dynamic_n ? g_rt.call_dynamic_n(c, th, ac, av) : 0; }\n"
+            << "    void bronze_method_def(int64_t o, const char* n, int32_t s, int64_t c) { if (g_rt.method_def) g_rt.method_def(o, n, s, c); }\n"
+            << "    int64_t bronze_ic_get(uint32_t sid, int64_t o, const char* n, int32_t s) { return g_rt.ic_get ? g_rt.ic_get(sid, o, n, s) : 0; }\n"
+            << "    void bronze_ic_set(uint32_t sid, int64_t o, const char* n, int32_t s, int64_t v) { if (g_rt.ic_set) g_rt.ic_set(sid, o, n, s, v); }\n"
+            << "    uint64_t brass_ic_get_prop(uint32_t sid, uint64_t o, const char* n, uint32_t s) { return g_rt.brass_ic_get ? g_rt.brass_ic_get(sid, o, n, s) : 0; }\n"
+            << "    void brass_ic_set_prop(uint32_t sid, uint64_t o, const char* n, uint32_t s, uint64_t v) { if (g_rt.brass_ic_set) g_rt.brass_ic_set(sid, o, n, s, v); }\n"
+            << "    uint64_t brass_dynamic_object_get_prop_str(uint64_t o, const char* n) { return g_rt.brass_dyn_get_str ? g_rt.brass_dyn_get_str(o, n) : 0; }\n"
+            << "    void brass_dynamic_object_set_prop_str(uint64_t o, const char* n, uint64_t v) { if (g_rt.brass_dyn_set_str) g_rt.brass_dyn_set_str(o, n, v); }\n"
             << "}\n";
         ofs.close();
     }

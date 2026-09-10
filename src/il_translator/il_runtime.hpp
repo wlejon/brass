@@ -39,6 +39,11 @@ int64_t bronze_prop_get(int64_t obj_box, int32_t key_index);
 void bronze_prop_set(int64_t obj_box, int32_t key_index, int64_t val, int32_t slot_idx, int32_t imm);
 int64_t bronze_elem_get(int64_t arr_box, int64_t index_box);
 void bronze_elem_set(int64_t arr_box, int64_t index_box, int64_t val, int32_t ic_slot);
+void bronze_method_def(int64_t obj_box, const char* name, int32_t symbol_id, int64_t closure_box);
+int64_t bronze_ic_get(uint32_t site_id, int64_t obj_box, const char* name, int32_t symbol_id);
+void bronze_ic_set(uint32_t site_id, int64_t obj_box, const char* name, int32_t symbol_id, int64_t val_box);
+uint64_t brass_ic_get_prop(uint32_t site_id, uint64_t obj_raw, const char* name, uint32_t symbol_id);
+void brass_ic_set_prop(uint32_t site_id, uint64_t obj_raw, const char* name, uint32_t symbol_id, uint64_t val_raw);
 
 int64_t bronze_call_dynamic_0(int64_t callee_box, int64_t this_box);
 int64_t bronze_call_dynamic_1(int64_t callee_box, int64_t this_box, int64_t arg0);

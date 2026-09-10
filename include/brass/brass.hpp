@@ -70,6 +70,9 @@
 #include <brass/runtime/deopt.hpp>
 #include <brass/runtime/resume_table.hpp>
 #include <brass/runtime/patcher.hpp>
+#include <brass/runtime/shape.hpp>
+#include <brass/runtime/object.hpp>
+#include <brass/runtime/inline_cache.hpp>
 
 #include <brass/embedding/nanbox.hpp>
 #include <brass/embedding/host_gc.hpp>

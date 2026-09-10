@@ -427,7 +427,11 @@ bool IlParser::parse_instruction(BronzeInstruction& out_inst) {
             if (!expect(TokenType::Comma, "Expected ',' after %obj in prop.get")) return false;
 
             Token key_tok = lexer_.next_token();
-            out_inst.index = static_cast<uint32_t>(key_tok.num_i64);
+            if (key_tok.type == TokenType::StringLiteral) {
+                out_inst.string_literal = std::string(key_tok.text);
+            } else {
+                out_inst.index = static_cast<uint32_t>(key_tok.num_i64);
+            }
 
             if (match(TokenType::Comma)) {
                 Token slot_tok = lexer_.next_token();
@@ -446,8 +450,12 @@ bool IlParser::parse_instruction(BronzeInstruction& out_inst) {
             if (!expect(TokenType::Comma, "Expected ',' after %obj in prop.set")) return false;
 
             Token key_tok = lexer_.next_token();
-            out_inst.index = static_cast<uint32_t>(key_tok.num_i64);
-            if (!expect(TokenType::Comma, "Expected ',' after keyIndex in prop.set")) return false;
+            if (key_tok.type == TokenType::StringLiteral) {
+                out_inst.string_literal = std::string(key_tok.text);
+            } else {
+                out_inst.index = static_cast<uint32_t>(key_tok.num_i64);
+            }
+            if (!expect(TokenType::Comma, "Expected ',' after key in prop.set")) return false;
 
             Token val_tok;
             if (!expect(TokenType::PercentValue, "Expected %val in prop.set", &val_tok)) return false;
@@ -464,6 +472,26 @@ bool IlParser::parse_instruction(BronzeInstruction& out_inst) {
             while (match(TokenType::Comma)) {
                 lexer_.next_token();
             }
+            break;
+        }
+
+        case BronzeOp::MethodDef: {
+            Token obj_tok;
+            if (!expect(TokenType::PercentValue, "Expected %obj in method.def", &obj_tok)) return false;
+            out_inst.operands.push_back(obj_tok.id_num);
+            if (!expect(TokenType::Comma, "Expected ',' after %obj in method.def")) return false;
+
+            Token key_tok = lexer_.next_token();
+            if (key_tok.type == TokenType::StringLiteral) {
+                out_inst.string_literal = std::string(key_tok.text);
+            } else {
+                out_inst.index = static_cast<uint32_t>(key_tok.num_i64);
+            }
+            if (!expect(TokenType::Comma, "Expected ',' after key in method.def")) return false;
+
+            Token closure_tok;
+            if (!expect(TokenType::PercentValue, "Expected %closure in method.def", &closure_tok)) return false;
+            out_inst.operands.push_back(closure_tok.id_num);
             break;
         }
 

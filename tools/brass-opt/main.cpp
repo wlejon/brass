@@ -43,6 +43,8 @@ void print_usage(const char* prog) {
               << "  --pgo-instrument      Instrument module with Knuth-Stevenson minimal edge counters\n"
               << "  --pgo-use=<file>      Load profile data (.bprof) for profile-guided optimization\n"
               << "  --dump-branch-probabilities Dump block frequencies and edge branch probabilities\n"
+              << "  --enable-pic          Enable Polymorphic Inline Caching for dynamic property accesses\n"
+              << "  --dump-ic-stats       Dump Inline Cache hit/miss and state statistics\n"
               << "  -g, --debug-info      Preserve and emit debug information and .brass_dbg section\n"
               << "  --emit-source-map=<file.map> Emit standard JSON Source Map V3 to <file.map>\n"
               << "  --symbolize-offset=<fn,offset> Symbolize function offset to source location\n"
@@ -154,6 +156,8 @@ int main(int argc, char** argv) {
     bool debug_info = false;
     std::string emit_source_map_file;
     std::string symbolize_offset_arg;
+    bool enable_pic = true;
+    bool dump_ic_stats = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -229,6 +233,12 @@ int main(int argc, char** argv) {
             }
         } else if (arg.rfind("--tile-size=", 0) == 0) {
             tile_size = static_cast<size_t>(std::stoul(arg.substr(12)));
+        } else if (arg == "--enable-pic") {
+            enable_pic = true;
+        } else if (arg == "--no-pic") {
+            enable_pic = false;
+        } else if (arg == "--dump-ic-stats") {
+            dump_ic_stats = true;
         } else if (arg == "-c" || arg == "--compile") {
             compile_object = true;
         } else if (arg == "--emit-shared") {
@@ -300,6 +310,7 @@ int main(int argc, char** argv) {
     }
 
     (void)enable_trace_layout;
+    (void)enable_pic;
 
     if (input_file.empty()) {
         std::cerr << "Error: No input file specified.\n";
@@ -788,6 +799,9 @@ int main(int argc, char** argv) {
                 brass::RuntimeValue result = jit.invoke(run_fn, run_args);
                 if (!fn->return_type().is_void()) {
                     std::cout << result << "\n";
+                }
+                if (dump_ic_stats) {
+                    brass::runtime::ICRegistry::global().dump_stats(std::cout);
                 }
             } catch (const std::exception& ex) {
                 std::cerr << "JIT Execution error: " << ex.what() << "\n";

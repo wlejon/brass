@@ -72,6 +72,7 @@ enum class BronzeOp {
     PropSet,
     ElemGet,
     ElemSet,
+    MethodDef,
     Print,
     PrintErr,
     Ret,

@@ -33,7 +33,9 @@ $corpusPrograms = @(
     "19_vec3_acc",
     "20_mat4_mul",
     "21_quat_norm",
-    "22_bbox_expand"
+    "22_bbox_expand",
+    "23_objects_basic",
+    "24_shapes_polymorphic"
 )
 
 $demotedPrograms = @(
@@ -135,7 +137,7 @@ foreach ($prog in $corpusPrograms) {
         $allPass = $false
     }
 
-    $demoteStatsOut = & $exePath $ilFile --demote-stats 2>&1 | Out-String
+    $demoteStatsOut = & $BrassIlPath $ilPath --demote-stats 2>&1 | Out-String
     $demotedInfo = "No"
     if ($demoteStatsOut -match "DEMOTED \(i64 loop\)") {
         $demotedInfo = "Yes (i64 loop)"

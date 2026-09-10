@@ -27,7 +27,7 @@ Type lower_type(BronzeType t) {
 }
 
 IlLowering::IlLowering(const TranslatorOptions& options, DiagnosticReporter* diag)
-    : options_(options), diag_(diag) {}
+    : options_(options), diag_(diag), prop_lowering_(options.enable_pic) {}
 
 Value* IlLowering::ensure_type(Value* val, Type target_type, Builder& b) {
     if (!val || val->type() == target_type) return val;
@@ -75,6 +75,13 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
     mod->add_external_symbol("bronze_prop_set");
     mod->add_external_symbol("bronze_elem_get");
     mod->add_external_symbol("bronze_elem_set");
+    mod->add_external_symbol("bronze_method_def");
+    mod->add_external_symbol("bronze_ic_get");
+    mod->add_external_symbol("bronze_ic_set");
+    mod->add_external_symbol("brass_ic_get_prop");
+    mod->add_external_symbol("brass_ic_set_prop");
+    mod->add_external_symbol("brass_dynamic_object_get_prop_str");
+    mod->add_external_symbol("brass_dynamic_object_set_prop_str");
     mod->add_external_symbol("bronze_call_dynamic_0");
     mod->add_external_symbol("bronze_call_dynamic_1");
     mod->add_external_symbol("bronze_call_dynamic_2");
@@ -433,25 +440,35 @@ bool IlLowering::lower_instruction(
 
         case BronzeOp::PropGet: {
             Value* obj_val = ensure_type(get_opd(0), Type::i64(), b);
-            Value* key_val = b.build_iconst_i32(static_cast<int32_t>(inst_ast.index));
-            res_val = b.build_call("bronze_prop_get", Type::i64(), {obj_val, key_val});
+            res_val = prop_lowering_.lower_prop_get(
+                b, obj_val, inst_ast.string_literal, inst_ast.index, inst_ast.depth
+            );
             break;
         }
 
         case BronzeOp::PropSet: {
             Value* obj_val = ensure_type(get_opd(0), Type::i64(), b);
-            Value* key_val = b.build_iconst_i32(static_cast<int32_t>(inst_ast.index));
             Value* val = ensure_type(get_opd(1), Type::i64(), b);
-            Value* slot_val = b.build_iconst_i32(static_cast<int32_t>(inst_ast.depth));
-            Value* imm_val = b.build_iconst_i32(static_cast<int32_t>(inst_ast.imm_i64));
-            b.build_call("bronze_prop_set", Type::void_type(), {obj_val, key_val, val, slot_val, imm_val});
+            prop_lowering_.lower_prop_set(
+                b, obj_val, inst_ast.string_literal, inst_ast.index, val,
+                inst_ast.depth, static_cast<uint32_t>(inst_ast.imm_i64), 0
+            );
+            break;
+        }
+
+        case BronzeOp::MethodDef: {
+            Value* obj_val = ensure_type(get_opd(0), Type::i64(), b);
+            Value* closure_val = ensure_type(get_opd(1), Type::i64(), b);
+            prop_lowering_.lower_method_def(
+                b, obj_val, inst_ast.string_literal, inst_ast.index, closure_val
+            );
             break;
         }
 
         case BronzeOp::ElemGet: {
             Value* obj_val = ensure_type(get_opd(0), Type::i64(), b);
             Value* idx_val = ensure_type(get_opd(1), Type::i64(), b);
-            res_val = b.build_call("bronze_elem_get", Type::i64(), {obj_val, idx_val});
+            res_val = prop_lowering_.lower_elem_get(b, obj_val, idx_val);
             break;
         }
 
@@ -459,8 +476,7 @@ bool IlLowering::lower_instruction(
             Value* obj_val = ensure_type(get_opd(0), Type::i64(), b);
             Value* idx_val = ensure_type(get_opd(1), Type::i64(), b);
             Value* val = ensure_type(get_opd(2), Type::i64(), b);
-            Value* ic_val = b.build_iconst_i32(static_cast<int32_t>(inst_ast.index));
-            b.build_call("bronze_elem_set", Type::void_type(), {obj_val, idx_val, val, ic_val});
+            prop_lowering_.lower_elem_set(b, obj_val, idx_val, val, inst_ast.index);
             break;
         }
 

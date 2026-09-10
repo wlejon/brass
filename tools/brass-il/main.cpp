@@ -14,7 +14,7 @@ using namespace brass::il;
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--emit-shared <output.dll/so>] [-shared] [--inline] [--sroa] [--escape-analysis] [--gvn] [--no-gvn] [--sccp] [--no-sccp] [--guard-elim] [--no-guard-elim] [--cfg-simplify] [--no-cfg-simplify] [--loop-unswitch] [--no-loop-unswitch] [--jump-threading] [--no-jump-threading] [--trace-layout] [--no-trace-layout] [--schedule-insns] [--no-schedule-insns] [--software-pipeline] [--alias-analysis] [--vectorize] [--slp] [--loop-tile] [--tile-size <N>] [--demote-stats] [--pgo-instrument] [--pgo-use <file>] [--dump-branch-probabilities] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc] [--timed <N>]\n";
+        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--emit-shared <output.dll/so>] [-shared] [--inline] [--sroa] [--escape-analysis] [--gvn] [--no-gvn] [--sccp] [--no-sccp] [--guard-elim] [--no-guard-elim] [--cfg-simplify] [--no-cfg-simplify] [--loop-unswitch] [--no-loop-unswitch] [--jump-threading] [--no-jump-threading] [--trace-layout] [--no-trace-layout] [--schedule-insns] [--no-schedule-insns] [--software-pipeline] [--alias-analysis] [--vectorize] [--slp] [--loop-tile] [--tile-size <N>] [--enable-pic] [--dump-ic-stats] [--demote-stats] [--pgo-instrument] [--pgo-use <file>] [--dump-branch-probabilities] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc] [--timed <N>]\n";
         return 1;
     }
 
@@ -30,7 +30,7 @@ int main(int argc, char** argv) {
     bool enable_pgo_instrument = false;
     std::string pgo_use_file;
     bool dump_branch_probabilities = false;
-    bool enable_schedule_insns = true;
+    bool enable_schedule_insns = false;
     bool enable_software_pipeline = false;
     bool debug_info = false;
     std::string emit_source_map_file;
@@ -123,6 +123,12 @@ int main(int argc, char** argv) {
             options.tile_size = static_cast<size_t>(std::stoul(argv[++i]));
         } else if (arg.rfind("--tile-size=", 0) == 0) {
             options.tile_size = static_cast<size_t>(std::stoul(arg.substr(12)));
+        } else if (arg == "--enable-pic") {
+            options.enable_pic = true;
+        } else if (arg == "--no-pic") {
+            options.enable_pic = false;
+        } else if (arg == "--dump-ic-stats") {
+            options.dump_ic_stats = true;
         } else if (arg == "--demote-stats") {
             show_demote_stats = true;
         } else if (arg == "--raw-output") {
@@ -461,6 +467,10 @@ int main(int argc, char** argv) {
                           << med << " +/- " << spread << " (min: " << min_v << ", max: " << max_v << ")]\n";
             } else {
                 run_main();
+            }
+
+            if (options.dump_ic_stats) {
+                brass::runtime::ICRegistry::global().dump_stats(std::cout);
             }
         }
     }

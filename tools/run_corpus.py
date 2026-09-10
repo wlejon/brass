@@ -43,6 +43,8 @@ PROGRAMS = [
     "20_mat4_mul",
     "21_quat_norm",
     "22_bbox_expand",
+    "23_objects_basic",
+    "24_shapes_polymorphic",
 ]
 
 DEMOTED_PROGRAMS = {
