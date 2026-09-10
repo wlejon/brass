@@ -149,38 +149,32 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
         if (indices.size() == 1) {
             resolved_names[indices[0]] = name;
         } else {
-            for (size_t k = 0; k < indices.size(); ++k) {
-                resolved_names[indices[k]] = (k == 0) ? name : (name + "$" + std::to_string(k));
-            }
-
-            size_t next_k = 0;
-            for (size_t fn_idx = 0; fn_idx < ast.functions.size(); ++fn_idx) {
-                bool is_self = false;
-                for (size_t k = 0; k < indices.size(); ++k) {
-                    if (indices[k] == fn_idx) {
-                        is_self = true;
-                        caller_to_callee_map_[fn_idx][name] = resolved_names[fn_idx];
-                        break;
-                    }
-                }
-                if (is_self) continue;
-
-                bool references_name = false;
-                for (const auto& blk : ast.functions[fn_idx].blocks) {
+            // Distinguish non-leaf vs leaf closures
+            for (size_t idx : indices) {
+                bool has_create_func = false;
+                for (const auto& blk : ast.functions[idx].blocks) {
                     for (const auto& inst : blk.instructions) {
-                        if (inst.callee_name == name) {
-                            references_name = true;
+                        if (inst.op == BronzeOp::CreateFunc) {
+                            has_create_func = true;
                             break;
                         }
                     }
-                    if (references_name) break;
+                    if (has_create_func) break;
                 }
-                if (references_name) {
-                    if (next_k < indices.size()) {
-                        caller_to_callee_map_[fn_idx][name] = resolved_names[indices[next_k++]];
-                    } else {
-                        caller_to_callee_map_[fn_idx][name] = resolved_names[indices.back()];
-                    }
+                if (has_create_func) {
+                    resolved_names[idx] = name;
+                } else {
+                    resolved_names[idx] = name + "$leaf";
+                }
+            }
+
+            for (size_t fn_idx = 0; fn_idx < ast.functions.size(); ++fn_idx) {
+                if (ast.functions[fn_idx].name == name) {
+                    // Inside the non-leaf closure, references to name target the leaf closure
+                    caller_to_callee_map_[fn_idx][name] = name + "$leaf";
+                } else {
+                    // Outside callers target the outer non-leaf closure
+                    caller_to_callee_map_[fn_idx][name] = name;
                 }
             }
         }
