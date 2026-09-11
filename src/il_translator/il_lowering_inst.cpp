@@ -449,7 +449,9 @@ bool IlLowering::lower_instruction(
             }
             Value* arity_val = b.build_iconst_i32(static_cast<int32_t>(arity));
             Value* length_val = b.build_iconst_i32(static_cast<int32_t>(length));
-            Value* name_key = b.build_iconst_i32(static_cast<int32_t>(name_key_val));
+            Value* name_key = (name_key_val != 0xFFFFFFFFu)
+                ? get_key_id(b, name_key_val)
+                : b.build_iconst_i32(static_cast<int32_t>(0xFFFFFFFFu));
             Value* fn_flags = b.build_iconst_i32(static_cast<int32_t>(fn_flags_val));
             Value* slot_cell = b.build_iconst_i64(0);
             res_val = b.build_call("bronze_function_singleton", Type::i64(), {
@@ -478,7 +480,9 @@ bool IlLowering::lower_instruction(
                 length = it_meta->second.required_args;
             }
             Value* length_val = b.build_iconst_i32(static_cast<int32_t>(length));
-            Value* name_key = b.build_iconst_i32(static_cast<int32_t>(name_key_val));
+            Value* name_key = (name_key_val != 0xFFFFFFFFu)
+                ? get_key_id(b, name_key_val)
+                : b.build_iconst_i32(static_cast<int32_t>(0xFFFFFFFFu));
             Value* fn_flags = b.build_iconst_i32(static_cast<int32_t>(fn_flags_val));
             res_val = b.build_call("bronze_create_function", Type::i64(), {
                 code_addr,
