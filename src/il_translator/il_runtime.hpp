@@ -120,6 +120,8 @@ double bronze_pow(double base, double exponent);
 uint64_t bronze_dynamic_pow(uint64_t l, uint64_t r);
 void bronze_register_key_manifest(const uint8_t* data);
 uint64_t bronze_box_str_key(uint32_t key_index);
+uint64_t bronze_box_str(const char* s);
+const char* bronze_unbox_str(uint64_t bits);
 double bronze_unbox_f64(uint64_t bits);
 uint64_t bronze_box_f64(double v);
 int32_t bronze_unbox_i32(uint64_t bits);

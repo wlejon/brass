@@ -201,6 +201,8 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
     mod->add_external_symbol("bronze_census_record");
     mod->add_external_symbol("bronze_register_key_manifest");
     mod->add_external_symbol("bronze_box_str_key");
+    mod->add_external_symbol("bronze_box_str");
+    mod->add_external_symbol("bronze_unbox_str");
     mod->add_external_symbol("bronze_unbox_f64");
     mod->add_external_symbol("bronze_box_f64");
     mod->add_external_symbol("bronze_unbox_i32");

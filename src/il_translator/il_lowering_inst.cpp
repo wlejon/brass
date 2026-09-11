@@ -665,6 +665,9 @@ bool IlLowering::lower_instruction(
                 Value* zext = b.build_zext_i64(b_val);
                 Value* tag = b.build_iconst_i64(static_cast<int64_t>(kBoolTag));
                 res_val = b.build_or(zext, tag);
+            } else if (inst_ast.box_type == BronzeType::Str) {
+                Value* ptr_val = ensure_type(op0, Type::i64(), b);
+                res_val = b.build_call("bronze_box_str", Type::i64(), {ptr_val});
             } else {
                 res_val = ensure_type(op0, Type::i64(), b);
             }
@@ -683,6 +686,9 @@ bool IlLowering::lower_instruction(
                 Value* i_val = ensure_type(op0, Type::i64(), b);
                 res_val = b.build_call("bronze_unbox_bool", Type::i32(), {i_val});
                 res_val = b.build_and(res_val, b.build_iconst_i32(1));
+            } else if (inst_ast.result_type == BronzeType::Str) {
+                Value* i_val = ensure_type(op0, Type::i64(), b);
+                res_val = b.build_call("bronze_unbox_str", Type::i64(), {i_val});
             } else {
                 res_val = op0;
             }

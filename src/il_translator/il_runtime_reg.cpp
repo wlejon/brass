@@ -114,6 +114,8 @@ void register_all_runtime_symbols(codegen::JitExecutionEngine& jit) {
     reg("bronze_main_key_constants", reinterpret_cast<void*>(&g_bronze_main_key_constants));
     reg("bronze_register_key_manifest", reinterpret_cast<void*>(&bronze_register_key_manifest));
     reg("bronze_box_str_key", reinterpret_cast<void*>(&bronze_box_str_key));
+    reg("bronze_box_str", reinterpret_cast<void*>(&bronze_box_str));
+    reg("bronze_unbox_str", reinterpret_cast<void*>(&bronze_unbox_str));
     reg("bronze_unbox_f64", reinterpret_cast<void*>(&bronze_unbox_f64));
     reg("bronze_box_f64", reinterpret_cast<void*>(&bronze_box_f64));
     reg("bronze_unbox_i32", reinterpret_cast<void*>(&bronze_unbox_i32));

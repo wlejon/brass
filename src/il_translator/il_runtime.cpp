@@ -798,6 +798,8 @@ BRONZE_WEAK int32_t bronze_unbox_bool(uint64_t bits) {
 }
 BRONZE_WEAK uint64_t bronze_box_bool(int32_t v) { return static_cast<uint64_t>(v ? 1 : 0) | kBoolTag; }
 BRONZE_WEAK uint64_t bronze_box_str_key(uint32_t /*key_index*/) { return kUndefinedTag; }
+BRONZE_WEAK uint64_t bronze_box_str(const char* /*s*/) { return kUndefinedTag; }
+BRONZE_WEAK const char* bronze_unbox_str(uint64_t /*bits*/) { return ""; }
 BRONZE_WEAK void bronze_register_key_manifest(const uint8_t* /*data*/) {}
 
 static thread_local uint64_t g_bronze_dummy_exception_cell = 0xFFFA000000000000ULL;
