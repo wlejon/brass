@@ -296,7 +296,7 @@ Token IlLexer::scan_token() {
     if (c == '@') {
         pos_++; col_++;
         size_t id_start = pos_;
-        while (pos_ < source_.size() && (std::isalnum(static_cast<unsigned char>(source_[pos_])) || source_[pos_] == '_' || source_[pos_] == '.' || source_[pos_] == '$' || source_[pos_] == '*' || source_[pos_] == '-')) {
+        while (pos_ < source_.size() && (std::isalnum(static_cast<unsigned char>(source_[pos_])) || source_[pos_] == '_' || source_[pos_] == '.' || source_[pos_] == '$' || source_[pos_] == '*' || source_[pos_] == '-' || source_[pos_] == '<' || source_[pos_] == '>')) {
             pos_++; col_++;
         }
         Token tok{TokenType::AtFunction, source_.substr(id_start, pos_ - id_start), start_line, start_col};
@@ -333,7 +333,7 @@ Token IlLexer::scan_token() {
     size_t word_start = pos_;
     while (pos_ < source_.size()) {
         char wc = source_[pos_];
-        if (std::isalnum(static_cast<unsigned char>(wc)) || wc == '_' || wc == '.' || wc == '$' || wc == '-' || wc == '+' || wc == '*') {
+        if (std::isalnum(static_cast<unsigned char>(wc)) || wc == '_' || wc == '.' || wc == '$' || wc == '-' || wc == '+' || wc == '*' || wc == '<' || wc == '>') {
             pos_++; col_++;
         } else {
             break;

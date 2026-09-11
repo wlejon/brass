@@ -121,7 +121,6 @@ bool IlParser::parse_function(BronzeFunction& out_fn) {
            lexer_.peek_token().type != TokenType::Eof &&
            lexer_.peek_token().line == name_tok.line) {
         Token part = lexer_.next_token();
-        out_fn.name += " ";
         out_fn.name += part.text;
     }
 

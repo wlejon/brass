@@ -187,8 +187,11 @@ std::vector<uint8_t> CoffWriter::write() {
         const auto& sec = working_obj.sections[i];
         if (!sec.relocations.empty()) {
             layouts[i].reloc_offset = cur_file_offset;
-            layouts[i].num_relocs = static_cast<uint16_t>(sec.relocations.size());
-            cur_file_offset += layouts[i].num_relocs * 10;
+            const bool overflow = sec.relocations.size() >= 0xFFFF;
+            layouts[i].num_relocs = overflow ? 0xFFFF : static_cast<uint16_t>(sec.relocations.size());
+            const uint32_t total_records = overflow ? static_cast<uint32_t>(sec.relocations.size() + 1)
+                                                    : static_cast<uint32_t>(sec.relocations.size());
+            cur_file_offset += total_records * 10;
         }
     }
 
@@ -233,7 +236,11 @@ std::vector<uint8_t> CoffWriter::write() {
         write_u32(out, 0); // PointerToLinenumbers
         write_u16(out, lay.num_relocs);
         write_u16(out, 0); // NumberOfLinenumbers
-        write_u32(out, get_coff_section_characteristics(sec));
+        uint32_t chars = get_coff_section_characteristics(sec);
+        if (sec.relocations.size() >= 0xFFFF) {
+            chars |= coff::IMAGE_SCN_LNK_NRELOC_OVFL;
+        }
+        write_u32(out, chars);
     }
 
     // Write Raw Section Data
@@ -245,6 +252,13 @@ std::vector<uint8_t> CoffWriter::write() {
 
     // Write Section Relocations (10 bytes each)
     for (const auto& sec : working_obj.sections) {
+        if (sec.relocations.empty()) continue;
+        if (sec.relocations.size() >= 0xFFFF) {
+            // In case of overflow, write actual relocation count as first relocation (+1 for synthetic entry)
+            write_u32(out, static_cast<uint32_t>(sec.relocations.size() + 1));
+            write_u32(out, 0);
+            write_u16(out, 0);
+        }
         for (const auto& r : sec.relocations) {
             write_u32(out, static_cast<uint32_t>(r.offset));
             uint32_t sym_idx = 0;

@@ -332,7 +332,9 @@ bool Verifier::verify_function(const Function& fn) {
                             if (it_def != inst_index.end() && it_use != inst_index.end()) {
                                 if (it_def->second >= it_use->second) {
                                     report_error(inst_prefix + "SSA Dominance violation: " + desc +
-                                                 " is used before or at its definition in the same block.");
+                                                 " is used before or at its definition in the same block (def_idx=" +
+                                                 std::to_string(it_def->second) + " use_idx=" + std::to_string(it_use->second) +
+                                                 " def_op=" + std::to_string(static_cast<int>(def_inst->opcode())) + ").");
                                 }
                             }
                         } else if (dom.is_reachable(bb) && !dom.dominates(def_bb, bb)) {

@@ -87,7 +87,6 @@ bool IlParser::parse_instruction(BronzeInstruction& out_inst) {
                    lexer_.peek_token().type != TokenType::Eof &&
                    lexer_.peek_token().line == callee_tok.line) {
                 Token part = lexer_.next_token();
-                out_inst.callee_name += " ";
                 out_inst.callee_name += part.text;
             }
 
@@ -260,7 +259,6 @@ bool IlParser::parse_instruction(BronzeInstruction& out_inst) {
                    lexer_.peek_token().type != TokenType::Eof &&
                    lexer_.peek_token().line == fn_tok.line) {
                 Token part = lexer_.next_token();
-                out_inst.callee_name += " ";
                 out_inst.callee_name += part.text;
             }
             if (!expect(TokenType::Comma, "Expected ',' after @func")) return false;
@@ -285,7 +283,6 @@ bool IlParser::parse_instruction(BronzeInstruction& out_inst) {
                        lexer_.peek_token().type != TokenType::Eof &&
                        lexer_.peek_token().line == fn_tok.line) {
                     Token part = lexer_.next_token();
-                    out_inst.callee_name += " ";
                     out_inst.callee_name += part.text;
                 }
                 if (match(TokenType::Comma)) {

@@ -635,7 +635,8 @@ bool IlLowering::lower_instruction(
 
         case BronzeOp::DynamicImport: {
             Value* spec = ensure_type(get_opd(0), Type::i64(), b);
-            Value* kidx = get_key_id(b, inst_ast.index);
+            uint32_t key_idx = inst_ast.string_literal.empty() ? inst_ast.index : find_key_constant(inst_ast.string_literal);
+            Value* kidx = get_key_id(b, key_idx);
             res_val = b.build_call("bronze_dynamic_import", Type::i64(), {spec, kidx});
             emit_exception_check();
             break;
@@ -643,7 +644,8 @@ bool IlLowering::lower_instruction(
 
         case BronzeOp::PatternCheck: {
             Value* src = ensure_type(get_opd(0), Type::i64(), b);
-            Value* kidx = get_key_id(b, inst_ast.index);
+            uint32_t key_idx = inst_ast.string_literal.empty() ? inst_ast.index : find_key_constant(inst_ast.string_literal);
+            Value* kidx = get_key_id(b, key_idx);
             res_val = b.build_call("bronze_pattern_check", Type::i64(), {src, kidx});
             emit_exception_check();
             break;

@@ -436,45 +436,63 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
         opt_opts.parallel_workers = options_.parallel_workers;
         opt_opts.dump_parallel_stats = options_.dump_parallel_stats;
         opt_opts.parallel_stats = options_.parallel_stats_collector;
+        auto check_pass = [&](const char* name) {
+            if (!verify_module(*mod, diag_)) {
+                std::fprintf(stderr, "[FATAL] Broken after %s\n", name);
+                return false;
+            }
+            return true;
+        };
         if (options_.enable_sroa) {
             sroa_module(*mod);
+            if (!check_pass("sroa")) return nullptr;
         }
         if (options_.enable_gvn) {
             gvn_module(*mod);
+            if (!check_pass("gvn")) return nullptr;
         }
         if (options_.enable_gvn_pre) {
             GvnPreOptions pre_opts;
             pre_opts.stats = options_.pre_stats_collector;
             gvn_pre_module(*mod, pre_opts);
+            if (!check_pass("gvn_pre")) return nullptr;
         }
         if (options_.enable_sccp) {
             SccpOptions sccp_opts;
             sccp_opts.enable_guard_elim = options_.enable_guard_elim;
             sccp_module(*mod, sccp_opts);
+            if (!check_pass("sccp")) return nullptr;
         }
         if (options_.enable_cfg_simplify) {
             cfg_simplify_module(*mod);
+            if (!check_pass("cfg_simplify 1")) return nullptr;
         }
         if (options_.enable_loop_unswitch) {
             unswitch_loops_in_module(*mod);
+            if (!check_pass("loop_unswitch")) return nullptr;
         }
         if (options_.enable_jump_threading) {
             jump_thread_module(*mod);
+            if (!check_pass("jump_threading")) return nullptr;
         }
         if ((options_.enable_loop_unswitch || options_.enable_jump_threading) && options_.enable_cfg_simplify) {
             cfg_simplify_module(*mod);
+            if (!check_pass("cfg_simplify 2")) return nullptr;
         }
         if (options_.enable_inlining) {
             InlinerOptions inliner_opts;
             inliner_opts.enable_sroa = options_.enable_sroa;
             inliner_opts.enable_gvn = options_.enable_gvn;
             optimize_module_ipo(*mod, inliner_opts, opt_opts);
+            if (!check_pass("ipo")) return nullptr;
         } else {
             optimize_module_loops(*mod, opt_opts);
+            if (!check_pass("loops")) return nullptr;
         }
         if (options_.enable_wbe) {
             WriteBarrierElimination wbe(options_.dump_wbe_stats);
             wbe.run_on_module(*mod);
+            if (!check_pass("wbe")) return nullptr;
         }
         if (!verify_module(*mod, diag_)) {
             return nullptr;

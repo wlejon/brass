@@ -282,44 +282,60 @@ inline int64_t call_jit_int_vec_ret_i64(void* addr, int64_t a0, __m128 a1) {
 }
 #endif
 #else
+extern "C" {
+__m128 brass_call_jit_int_vec_ret_vec(void* addr, int64_t a0, const __m128* a1);
+void brass_call_jit_int_vec_ret_void(void* addr, int64_t a0, const __m128* a1);
+int64_t brass_call_jit_int_vec_ret_i64(void* addr, int64_t a0, const __m128* a1);
+__m128 brass_call_jit_vec_int_ret_vec(void* addr, const __m128* a0, int64_t a1);
+void brass_call_jit_vec_int_ret_void(void* addr, const __m128* a0, int64_t a1);
+int64_t brass_call_jit_vec_int_ret_i64(void* addr, const __m128* a0, int64_t a1);
+__m128 brass_call_jit_vec1_ret_vec(void* addr, const __m128* a0);
+float brass_call_jit_vec1_ret_f32(void* addr, const __m128* a0);
+double brass_call_jit_vec1_ret_f64(void* addr, const __m128* a0);
+int64_t brass_call_jit_vec1_ret_i64(void* addr, const __m128* a0);
+__m128 brass_call_jit_vec2_ret_vec(void* addr, const __m128* a0, const __m128* a1);
+float brass_call_jit_vec2_ret_f32(void* addr, const __m128* a0, const __m128* a1);
+int64_t brass_call_jit_vec2_ret_i64(void* addr, const __m128* a0, const __m128* a1);
+}
+
 inline __m128 call_jit_vec1_ret_vec(void* addr, __m128 a0) {
-    return reinterpret_cast<__m128(*)(__m128)>(addr)(a0);
+    return brass_call_jit_vec1_ret_vec(addr, &a0);
 }
 inline float call_jit_vec1_ret_f32(void* addr, __m128 a0) {
-    return reinterpret_cast<float(*)(__m128)>(addr)(a0);
+    return brass_call_jit_vec1_ret_f32(addr, &a0);
 }
 inline double call_jit_vec1_ret_f64(void* addr, __m128 a0) {
-    return reinterpret_cast<double(*)(__m128)>(addr)(a0);
+    return brass_call_jit_vec1_ret_f64(addr, &a0);
 }
 inline int64_t call_jit_vec1_ret_i64(void* addr, __m128 a0) {
-    return reinterpret_cast<int64_t(*)(__m128)>(addr)(a0);
+    return brass_call_jit_vec1_ret_i64(addr, &a0);
 }
 inline __m128 call_jit_vec2_ret_vec(void* addr, __m128 a0, __m128 a1) {
-    return reinterpret_cast<__m128(*)(__m128, __m128)>(addr)(a0, a1);
+    return brass_call_jit_vec2_ret_vec(addr, &a0, &a1);
 }
 inline float call_jit_vec2_ret_f32(void* addr, __m128 a0, __m128 a1) {
-    return reinterpret_cast<float(*)(__m128, __m128)>(addr)(a0, a1);
+    return brass_call_jit_vec2_ret_f32(addr, &a0, &a1);
 }
 inline int64_t call_jit_vec2_ret_i64(void* addr, __m128 a0, __m128 a1) {
-    return reinterpret_cast<int64_t(*)(__m128, __m128)>(addr)(a0, a1);
+    return brass_call_jit_vec2_ret_i64(addr, &a0, &a1);
 }
 inline void call_jit_vec_int_ret_void(void* addr, __m128 a0, int64_t a1) {
-    reinterpret_cast<void(*)(__m128, int64_t)>(addr)(a0, a1);
+    brass_call_jit_vec_int_ret_void(addr, &a0, a1);
 }
 inline __m128 call_jit_vec_int_ret_vec(void* addr, __m128 a0, int64_t a1) {
-    return reinterpret_cast<__m128(*)(__m128, int64_t)>(addr)(a0, a1);
+    return brass_call_jit_vec_int_ret_vec(addr, &a0, a1);
 }
 inline int64_t call_jit_vec_int_ret_i64(void* addr, __m128 a0, int64_t a1) {
-    return reinterpret_cast<int64_t(*)(__m128, int64_t)>(addr)(a0, a1);
+    return brass_call_jit_vec_int_ret_i64(addr, &a0, a1);
 }
 inline void call_jit_int_vec_ret_void(void* addr, int64_t a0, __m128 a1) {
-    reinterpret_cast<void(*)(int64_t, __m128)>(addr)(a0, a1);
+    brass_call_jit_int_vec_ret_void(addr, a0, &a1);
 }
 inline __m128 call_jit_int_vec_ret_vec(void* addr, int64_t a0, __m128 a1) {
-    return reinterpret_cast<__m128(*)(int64_t, __m128)>(addr)(a0, a1);
+    return brass_call_jit_int_vec_ret_vec(addr, a0, &a1);
 }
 inline int64_t call_jit_int_vec_ret_i64(void* addr, int64_t a0, __m128 a1) {
-    return reinterpret_cast<int64_t(*)(int64_t, __m128)>(addr)(a0, a1);
+    return brass_call_jit_int_vec_ret_i64(addr, a0, &a1);
 }
 #endif
 

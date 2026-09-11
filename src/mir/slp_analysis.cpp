@@ -298,27 +298,29 @@ std::vector<SlpArithBundle> find_slp_arith_bundles(
 
         std::vector<Instruction*> bundle_insts;
         bundle_insts.push_back(inst0);
+        std::unordered_set<Value*> bundle_results;
+        if (inst0->produces_value() && inst0->result()) {
+            bundle_results.insert(inst0->result());
+        }
 
-        for (size_t j = i + 1; j < candidate_insts.size() && bundle_insts.size() < width; ++j) {
-            Instruction* inst_j = candidate_insts[j];
-            if (visited.count(inst_j)) continue;
-            if (inst_j->opcode() == op && inst_j->type() == elem_type) {
-                // Verify inst_j does not use results of previous insts in bundle
-                bool depends_on_bundle = false;
-                for (Instruction* prev : bundle_insts) {
-                    if (prev->produces_value()) {
-                        Value* res = prev->result();
-                        for (Value* opnd : inst_j->operands()) {
-                            if (opnd == res) {
-                                depends_on_bundle = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (depends_on_bundle) break;
+        bool hazard = false;
+        for (Instruction* cur = inst0->next(); cur != nullptr; cur = cur->next()) {
+            if (bundle_insts.size() == width) break;
+
+            for (Value* opnd : cur->operands()) {
+                if (bundle_results.count(opnd)) {
+                    hazard = true;
+                    break;
                 }
-                if (!depends_on_bundle) {
-                    bundle_insts.push_back(inst_j);
+            }
+            if (hazard) break;
+
+            if (visited.count(cur)) continue;
+
+            if (cur->opcode() == op && cur->type() == elem_type) {
+                bundle_insts.push_back(cur);
+                if (cur->produces_value() && cur->result()) {
+                    bundle_results.insert(cur->result());
                 }
             }
         }

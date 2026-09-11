@@ -4,7 +4,8 @@
 
 #if defined(_MSC_VER)
 #include <intrin.h>
-extern "C" void brass_jump_to_landing_pad_msvc(void* ip, void* rbp, void* rsp, uint64_t val);
+namespace brass::runtime { struct SavedRegisters; }
+extern "C" void brass_jump_to_landing_pad_msvc(void* ip, void* rbp, void* rsp, uint64_t val, const brass::runtime::SavedRegisters* regs);
 #endif
 
 namespace brass::runtime {
@@ -197,8 +198,7 @@ __attribute__((naked)) void brass_jump_to_landing_pad(
     HostValue val,
     const SavedRegisters& regs
 ) {
-    (void)regs;
-    brass_jump_to_landing_pad_msvc(landing_pad_ip, target_rbp, target_rsp, val.raw());
+    brass_jump_to_landing_pad_msvc(landing_pad_ip, target_rbp, target_rsp, val.raw(), &regs);
     __assume(0);
 }
 #else
@@ -225,29 +225,16 @@ __attribute__((naked)) void brass_jump_to_landing_pad(
 #define BRASS_NOINLINE_NOFP [[noreturn]]
 #endif
 
-BRASS_NOINLINE_NOFP void brass_throw_impl(HostValue val, const SavedRegisters* regs) {
+extern "C" BRASS_NOINLINE_NOFP void brass_throw_impl(
+    HostValue val,
+    const SavedRegisters* regs,
+    uintptr_t caller_rbp,
+    uintptr_t caller_ip
+) {
     brass_set_current_exception(val);
 
-    uintptr_t cur_rbp = 0;
-    uintptr_t cur_ip = 0;
-
-#if defined(__GNUC__) || defined(__clang__)
-    void* frame = __builtin_frame_address(0);
-    if (frame) {
-        // frame is brass_throw_impl's RBP
-        uintptr_t bt_rbp = *reinterpret_cast<uintptr_t*>(frame); // brass_throw's RBP
-        if (bt_rbp) {
-            cur_ip = *reinterpret_cast<uintptr_t*>(bt_rbp + 8); // return address in caller
-            cur_rbp = *reinterpret_cast<uintptr_t*>(bt_rbp);     // caller's RBP
-        }
-    }
-#elif defined(_MSC_VER)
-    void** ret_addr_ptr = reinterpret_cast<void**>(_AddressOfReturnAddress());
-    if (ret_addr_ptr) {
-        cur_ip = reinterpret_cast<uintptr_t>(*ret_addr_ptr);
-        cur_rbp = reinterpret_cast<uintptr_t>(*(ret_addr_ptr - 1));
-    }
-#endif
+    uintptr_t cur_rbp = caller_rbp;
+    uintptr_t cur_ip = caller_ip;
 
     auto& registry = get_global_exception_registry();
 
@@ -306,12 +293,22 @@ BRASS_NOINLINE_NOFP void brass_throw(HostValue val) {
         :
         : "memory"
     );
-    brass_throw_impl(val, &regs);
+    void* frame = __builtin_frame_address(0);
+    uintptr_t caller_rbp = 0;
+    uintptr_t caller_ip = 0;
+    if (frame) {
+        uintptr_t bt_rbp = *reinterpret_cast<uintptr_t*>(frame);
+        if (bt_rbp) {
+            caller_ip = *reinterpret_cast<uintptr_t*>(bt_rbp + 8);
+            caller_rbp = *reinterpret_cast<uintptr_t*>(bt_rbp);
+        }
+    }
+    brass_throw_impl(val, &regs, caller_rbp, caller_ip);
 }
-#else
+#elif !defined(_MSC_VER)
 [[noreturn]] void brass_throw(HostValue val) {
     SavedRegisters regs{};
-    brass_throw_impl(val, &regs);
+    brass_throw_impl(val, &regs, 0, 0);
 }
 #endif
 

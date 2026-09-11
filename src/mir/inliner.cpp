@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <brass/pgo/profile_data.hpp>
 #include <brass/mir/branch_probability.hpp>
+#include <brass/mir/verifier.hpp>
 
 namespace brass {
 
@@ -258,24 +259,36 @@ bool optimize_module_ipo(Module& mod) {
 bool optimize_module_ipo(Module& mod, const InlinerOptions& inline_opts, const LoopOptOptions& loop_opts) {
     bool changed = false;
 
+    auto check_ipo = [&](const char* step) {
+        if (!verify_module(mod)) {
+            std::fprintf(stderr, "[FATAL] Broken in IPO during: %s\n", step);
+            return false;
+        }
+        return true;
+    };
+
     // 1. Devirtualize monomorphic patchable_calls
     if (inline_opts.enable_devirtualization) {
         changed |= devirtualize_module(mod);
+        if (!check_ipo("devirtualize_module")) return false;
     }
 
     // 2. Inlining in bottom-up leaf-first order
     changed |= inline_module(mod, inline_opts);
+    if (!check_ipo("inline_module")) return false;
 
     // 2b. Escape Analysis & SROA pass
     if (inline_opts.enable_sroa) {
         SroaOptions sroa_opts;
         changed |= sroa_module(mod, sroa_opts);
+        if (!check_ipo("sroa_module")) return false;
     }
 
     // 2c. GVN (CSE + RLE + DSE) pass
     if (inline_opts.enable_gvn) {
         GvnOptions gvn_opts;
         changed |= gvn_module(mod, gvn_opts);
+        if (!check_ipo("gvn_module")) return false;
     }
 
     // 2d. SCCP & Guard Elim & CFG Simplify pass
@@ -283,14 +296,17 @@ bool optimize_module_ipo(Module& mod, const InlinerOptions& inline_opts, const L
         SccpOptions sccp_opts;
         sccp_opts.enable_guard_elim = loop_opts.enable_guard_elim;
         changed |= sccp_module(mod, sccp_opts);
+        if (!check_ipo("sccp_module")) return false;
     }
     if (loop_opts.enable_cfg_simplify) {
         CfgSimplifyOptions cfg_opts;
         changed |= cfg_simplify_module(mod, cfg_opts);
+        if (!check_ipo("cfg_simplify_module")) return false;
     }
 
     // 3. Re-run loop optimizations, constant folding, CSE, DCE & f64 demotion
     changed |= optimize_module_loops(mod, loop_opts);
+    if (!check_ipo("optimize_module_loops")) return false;
 
     return changed;
 }

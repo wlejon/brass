@@ -1,4 +1,10 @@
 cmake_minimum_required(VERSION 3.20)
+
+if(APPLE AND NOT CMAKE_OSX_ARCHITECTURES)
+    # Default to x86_64 on Apple for JIT engine parity
+    set(CMAKE_OSX_ARCHITECTURES "x86_64" CACHE STRING "OSX Architectures" FORCE)
+endif()
+
 project(brass VERSION 0.1.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -16,7 +22,9 @@ endif()
 
 # Compiler flags and warnings
 if(MSVC)
+    string(REPLACE "/EHsc" "/EHs" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
     add_compile_options(
+        $<$<COMPILE_LANGUAGE:CXX>:/EHs>
         $<$<COMPILE_LANGUAGE:CXX>:/W4>
         $<$<COMPILE_LANGUAGE:CXX>:/WX>
         $<$<COMPILE_LANGUAGE:CXX>:/wd4324>
@@ -41,12 +49,7 @@ else()
         -fno-omit-frame-pointer
         $<$<CONFIG:Release>:-O3>
     )
-    if(APPLE)
-        # Default to x86_64 on Apple for JIT engine parity
-        if(NOT CMAKE_OSX_ARCHITECTURES)
-            set(CMAKE_OSX_ARCHITECTURES "x86_64" CACHE STRING "OSX Architectures" FORCE)
-        endif()
-    elseif(WIN32 OR MINGW)
+    if(WIN32 OR MINGW)
         add_link_options(-static -static-libgcc -static-libstdc++)
     else()
         add_link_options(-static-libgcc -static-libstdc++)

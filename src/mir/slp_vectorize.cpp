@@ -304,9 +304,20 @@ static void replace_scalar_uses(
     Value* new_val,
     const std::unordered_set<Instruction*>& dead_insts
 ) {
+    Instruction* def_inst = new_val ? new_val->defining_instruction() : nullptr;
+    BasicBlock* def_bb = def_inst ? def_inst->parent() : nullptr;
+
     for (BasicBlock* bb : fn.blocks()) {
+        if (!bb) continue;
+        bool reached_def = (bb != def_bb || def_inst == nullptr);
         for (Instruction* inst = bb->head(); inst != nullptr; inst = inst->next()) {
+            if (inst == def_inst) {
+                reached_def = true;
+                continue;
+            }
             if (dead_insts.count(inst)) continue;
+            if (!reached_def) continue;
+
             for (size_t op_i = 0; op_i < inst->operand_count(); ++op_i) {
                 if (inst->operand(op_i) == old_val) {
                     inst->set_operand(op_i, new_val);
