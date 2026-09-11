@@ -121,4 +121,13 @@ host_gc_collect PROC
     ret
 host_gc_collect ENDP
 
+; void brass_jump_to_landing_pad_msvc(void* ip, void* rbp, void* rsp, uint64_t val)
+; rcx = ip, rdx = rbp, r8 = rsp, r9 = val
+brass_jump_to_landing_pad_msvc PROC
+    mov rax, r9
+    mov rbp, rdx
+    mov rsp, r8
+    jmp rcx
+brass_jump_to_landing_pad_msvc ENDP
+
 END

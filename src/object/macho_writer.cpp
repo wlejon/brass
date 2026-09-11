@@ -278,7 +278,7 @@ std::vector<uint8_t> MachOWriter::write() {
         uint32_t sec_align = 1u << s.align_pow2;
         if (sec_align > 1) {
             cur_file_offset = (cur_file_offset + (sec_align - 1)) & ~(sec_align - 1);
-            cur_vmaddr = (cur_vmaddr + (sec_align - 1)) & ~(sec_align - 1);
+            cur_vmaddr = (cur_vmaddr + (sec_align - 1)) & ~static_cast<uint64_t>(sec_align - 1);
         }
         s.offset = cur_file_offset;
         s.addr = cur_vmaddr;
@@ -381,7 +381,7 @@ std::vector<uint8_t> MachOWriter::write() {
 
     // Write Section Data
     for (const auto& s : macho_sections) {
-        align_buf(out, 1u << s.align_pow2);
+        align_buf(out, static_cast<size_t>(1ULL << s.align_pow2));
         if (!s.data.empty()) {
             write_bytes(out, s.data.data(), s.data.size());
         }

@@ -107,7 +107,8 @@ void set_bronze_function_resolver(void* (*resolver)(const char*));
 // Control whether Bronze print statements output to stdout
 void bronze_set_print_enabled(bool enabled);
 
-// Runtime helper symbols for Bronze execution
+// Runtime helper symbols for Bronze execution (when not already declared by bronze_abi.h)
+#ifndef BRONZE_ABI_H
 extern "C" {
 void bronze_print_f64(double v);
 void bronze_print_i32(int32_t v);
@@ -144,6 +145,8 @@ int64_t bronze_call_dynamic_7(int64_t callee_box, int64_t this_box, int64_t arg0
 int64_t bronze_call_dynamic_8(int64_t callee_box, int64_t this_box, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t arg5, int64_t arg6, int64_t arg7);
 int64_t bronze_call_dynamic_n(int64_t callee_box, int64_t this_box, int32_t argc, const int64_t* argv);
 }
+#endif
+
 
 } // namespace il
 } // namespace brass

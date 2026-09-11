@@ -176,33 +176,6 @@ uintptr_t brass_gc_heap_base() {
     auto* gen_gc = brass::brass_get_active_generational_gc();
     return gen_gc ? gen_gc->card_table().heap_base() : 0;
 }
-
-void brass_gc_safepoint() {
-    if (auto* gen_gc = brass::brass_get_active_generational_gc()) {
-        gen_gc->collect();
-        return;
-    }
-    auto* gc = brass::brass_get_active_gc();
-    if (gc) gc->collect();
-}
-
-uintptr_t brass_gc_alloc(size_t size, uint64_t pointer_mask, uint32_t type_tag) {
-    if (auto* gen_gc = brass::brass_get_active_generational_gc()) {
-        return gen_gc->allocate(size, pointer_mask, type_tag);
-    }
-    auto* gc = brass::brass_get_active_gc();
-    return gc ? gc->allocate(size, pointer_mask, type_tag) : 0;
-}
-
-void brass_gc_collect() {
-    if (auto* gen_gc = brass::brass_get_active_generational_gc()) {
-        gen_gc->collect();
-        return;
-    }
-    auto* gc = brass::brass_get_active_gc();
-    if (gc) gc->collect();
-}
-
 }
 
 #else

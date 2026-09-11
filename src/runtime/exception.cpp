@@ -4,6 +4,7 @@
 
 #if defined(_MSC_VER)
 #include <intrin.h>
+extern "C" void brass_jump_to_landing_pad_msvc(void* ip, void* rbp, void* rsp, uint64_t val);
 #endif
 
 namespace brass::runtime {
@@ -196,7 +197,6 @@ __attribute__((naked)) void brass_jump_to_landing_pad(
     HostValue val,
     const SavedRegisters& regs
 ) {
-    extern "C" void brass_jump_to_landing_pad_msvc(void* ip, void* rbp, void* rsp, uint64_t val);
     (void)regs;
     brass_jump_to_landing_pad_msvc(landing_pad_ip, target_rbp, target_rsp, val.raw());
     __assume(0);
@@ -225,7 +225,6 @@ __attribute__((naked)) void brass_jump_to_landing_pad(
 #define BRASS_NOINLINE_NOFP [[noreturn]]
 #endif
 
-extern "C"
 BRASS_NOINLINE_NOFP void brass_throw_impl(HostValue val, const SavedRegisters* regs) {
     brass_set_current_exception(val);
 

@@ -699,7 +699,7 @@ bool IlLowering::lower_instruction(
                 if (callee && i < callee->param_types().size()) {
                     arg = ensure_type(arg, callee->param_types()[i], b);
                 }
-                args.push_back(arg);
+                if (arg) args.push_back(arg);
             }
             res_val = b.build_call(callee_name, callee_ret, Span<Value* const>(args.data(), args.size()));
             emit_exception_check();

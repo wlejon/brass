@@ -19,6 +19,12 @@ if(MSVC)
     add_compile_options(
         $<$<COMPILE_LANGUAGE:CXX>:/W4>
         $<$<COMPILE_LANGUAGE:CXX>:/WX>
+        $<$<COMPILE_LANGUAGE:CXX>:/wd4324>
+        $<$<COMPILE_LANGUAGE:CXX>:/wd4100>
+        $<$<COMPILE_LANGUAGE:CXX>:/wd4146>
+        $<$<COMPILE_LANGUAGE:CXX>:/wd4456>
+        $<$<COMPILE_LANGUAGE:CXX>:/wd4457>
+        $<$<COMPILE_LANGUAGE:CXX>:/wd4505>
         $<$<COMPILE_LANGUAGE:CXX>:/permissive->
         $<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>
         $<$<COMPILE_LANGUAGE:CXX>:/utf-8>
@@ -98,6 +104,7 @@ target_compile_definitions(brass_shared
 
 set_target_properties(brass_shared PROPERTIES
     OUTPUT_NAME "brass"
+    ARCHIVE_OUTPUT_NAME "brass_shared"
     SOVERSION 1
     VERSION 1.0.0
 )

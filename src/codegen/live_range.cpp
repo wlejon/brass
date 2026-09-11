@@ -2,6 +2,7 @@
 #include <sstream>
 #include <algorithm>
 #include <cmath>
+#include <bit>
 
 namespace brass::codegen {
 
@@ -294,7 +295,7 @@ void LivenessAnalysis::compute_global_liveness() {
         for (size_t w = 0; w < num_words; ++w) {
             uint64_t in_word = in_vec[w];
             while (in_word != 0) {
-                int bit = __builtin_ctzll(in_word);
+                int bit = std::countr_zero(in_word);
                 uint32_t vid = static_cast<uint32_t>(w * 64 + bit);
                 if (vid < num_vregs) {
                     bl.live_in.push_back(fn_.vreg_table[vid].vreg);
@@ -304,7 +305,7 @@ void LivenessAnalysis::compute_global_liveness() {
 
             uint64_t out_word = out_vec[w];
             while (out_word != 0) {
-                int bit = __builtin_ctzll(out_word);
+                int bit = std::countr_zero(out_word);
                 uint32_t vid = static_cast<uint32_t>(w * 64 + bit);
                 if (vid < num_vregs) {
                     bl.live_out.push_back(fn_.vreg_table[vid].vreg);

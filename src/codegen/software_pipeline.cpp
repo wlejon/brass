@@ -180,6 +180,7 @@ static std::unique_ptr<LirInst> clone_instruction(
 } // namespace
 
 bool is_pipelinable_loop(const LirFunction& fn, const LirBlock& block, const PipelineOptions& opts) {
+    (void)fn;
     if (!opts.enable_software_pipelining) return false;
 
     // Must have a self-backedge

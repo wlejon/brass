@@ -128,6 +128,7 @@ add_executable(brass_unit_tests
     unit/test_fuzz_sandbox.cpp
     unit/test_delta_reducer.cpp
     unit/test_c_api.cpp
+    unit/test_native_cabi.cpp
 )
 
 target_include_directories(brass_unit_tests
