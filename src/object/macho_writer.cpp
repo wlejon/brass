@@ -213,6 +213,7 @@ std::vector<uint8_t> MachOWriter::write() {
 
     // Ensure all symbols referenced by relocations are present
     auto find_or_add_reloc_sym = [&](const std::string& name) {
+        if (sec_name_to_idx.count(name)) return;
         for (const auto& s : local_syms) {
             if (s.original_name == name || s.macho_name == name) return;
         }
@@ -286,6 +287,10 @@ std::vector<uint8_t> MachOWriter::write() {
         cur_vmaddr += s.data.size();
     }
 
+    uint64_t seg_vmsize = cur_vmaddr;
+    uint64_t seg_fileoff = macho_sections.empty() ? 0 : macho_sections[0].offset;
+    uint64_t seg_filesize = macho_sections.empty() ? 0 : (cur_file_offset - seg_fileoff);
+
     // Relocations offset
     for (auto& s : macho_sections) {
         if (!s.relocations.empty()) {
@@ -325,10 +330,6 @@ std::vector<uint8_t> MachOWriter::write() {
     write_u32(out, 0); // reserved
 
     // Write LC_SEGMENT_64
-    uint64_t seg_vmsize = cur_vmaddr;
-    uint64_t seg_fileoff = macho_sections.empty() ? 0 : macho_sections[0].offset;
-    uint64_t seg_filesize = macho_sections.empty() ? 0 : (cur_file_offset - seg_fileoff);
-
     write_u32(out, macho::LC_SEGMENT_64);
     write_u32(out, segment_cmd_size);
     write_fixed_string(out, "", 16); // Empty segname for MH_OBJECT
@@ -393,18 +394,24 @@ std::vector<uint8_t> MachOWriter::write() {
         align_buf(out, 8);
         for (const auto& r : s.relocations) {
             uint32_t sym_idx = 0;
-            auto it = sym_name_to_idx.find(r.symbol_name);
-            if (it != sym_name_to_idx.end()) {
-                sym_idx = it->second;
+            uint32_t r_extern = 1;
+            auto sec_it = sec_name_to_idx.find(r.symbol_name);
+            if (sec_it != sec_name_to_idx.end()) {
+                r_extern = 0;
+                sym_idx = sec_it->second + 1; // 1-based section number
+            } else {
+                auto it = sym_name_to_idx.find(r.symbol_name);
+                if (it != sym_name_to_idx.end()) {
+                    sym_idx = it->second;
+                }
             }
 
             int32_t r_address = static_cast<int32_t>(r.offset);
             uint32_t r_pcrel = 0;
             uint32_t r_length = 2; // 4 bytes by default
-            uint32_t r_extern = 1;
             uint32_t r_type = macho::X86_64_RELOC_BRANCH;
 
-            bool is_func = (sym_idx < all_symbols.size() && all_symbols[sym_idx].type == SymbolType::Function);
+            bool is_func = r_extern && (sym_idx < all_symbols.size() && all_symbols[sym_idx].type == SymbolType::Function);
 
             if (r.kind == RelocKind::PCRel32 || r.kind == RelocKind::Plt32) {
                 r_pcrel = 1;
