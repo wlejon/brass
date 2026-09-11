@@ -1,7 +1,7 @@
-# Bronze IL Textual Translator & Brass Integration Report
+# Bronze IL Textual Translator & Runtime Integration
 
 ## 1. Overview
-The Bronze IL Translator (`brass::il::translate_bronze_il` and `brass-il` CLI) provides a direct, production-grade front door from Bronze's textual Intermediate Language to Brass Machine Intermediate Representation (MIR). It parses raw `bronze.exe il` compiler output verbatim, lowers block-parameter SSA graphs into typed Brass basic blocks, resolves host and dynamic calls, and supports in-memory JIT execution as well as AOT COFF/ELF object compilation.
+The Bronze IL Translator (`brass::il::translate_bronze_il` and `brass-il` CLI) provides a direct, production-grade front door from Bronze's textual Intermediate Language to Brass Machine Intermediate Representation (MIR). It parses raw `bronze.exe il` compiler output verbatim, lowers block-parameter SSA graphs into typed Brass basic blocks, resolves host and dynamic calls, and supports in-memory JIT execution as well as AOT COFF, ELF, and Mach-O object compilation.
 
 ---
 

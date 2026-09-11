@@ -38,14 +38,17 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 
 # Run performance benchmark suite
-./build/tests/brass_benchmarks.exe
+./build/tests/brass_benchmarks
 ```
 
 ## Documentation
 
-- [Roadmap & Milestone Architecture](docs/ROADMAP.md)
 - [MIR Reference Specification](docs/mir_reference.md)
+- [Optimization Passes & Semantics Specification](docs/semantics.md)
 - [GC Contract & Moving Cheney Collector](docs/gc_contract.md)
 - [Speculation, Guards, and Deoptimization](docs/speculation_and_deopt.md)
 - [Patching Protocol & Concurrency Rules](docs/patching_protocol.md)
 - [Consumer's Guide to Lowering](docs/lowering_guide.md)
+- [libbrass Embedding Guide (Public C-ABI)](docs/embedding_guide.md)
+- [Host Engine & Moving GC Embedding Guide](docs/embedding.md)
+- [Bronze IL Translator & Runtime Integration](docs/il_translator.md)

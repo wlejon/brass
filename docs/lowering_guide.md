@@ -15,8 +15,8 @@ This document guides frontend language compilers (such as `bronze`, the JS AOT c
 | Register Allocation | Brass | Linear-scan with live-range splitting |
 | LIR Peephole Optimization | Brass | Redundant moves, dead stores, zeroing, branch fold |
 | Stack Map Generation | Brass | Live `gcref` tracking at call safepoints |
-| Frame Layout & Unwind Emission | Brass | Win64 SEH (`.pdata`/`.xdata`), Linux SysV CFI (`.eh_frame`) |
-| Object File Emission | Brass | Deterministic COFF (`.obj`) and ELF64 (`.o`) |
+| Frame Layout & Unwind Emission | Brass | Win64 SEH (`.pdata`/`.xdata`), Linux SysV CFI (`.eh_frame`), macOS Compact Unwind |
+| Object File Emission | Brass | Deterministic COFF (`.obj`), ELF64 (`.o`), and Mach-O (`.o`) |
 
 ---
 
@@ -64,9 +64,14 @@ assert(verify_module(mod));
 
 // 2. Compile to Relocatable Object File (.obj / .o)
 object::ObjectFile obj = object::compile_module_to_object(mod, Target::host());
-std::vector<uint8_t> binary_bytes = Target::host().is_windows()
-    ? object::emit_coff_object(obj)
-    : object::emit_elf_object(obj);
+std::vector<uint8_t> binary_bytes;
+if (Target::host().is_windows()) {
+    binary_bytes = object::emit_coff_object(obj);
+} else if (Target::host().is_macos()) {
+    binary_bytes = object::emit_macho_object(obj);
+} else {
+    binary_bytes = object::emit_elf_object(obj);
+}
 
 // 3. Or JIT Execute in Memory
 codegen::JitExecutionEngine jit;

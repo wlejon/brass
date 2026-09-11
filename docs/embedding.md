@@ -89,9 +89,9 @@ compiled->walk_stack(top_rbp, top_ip, [](void** root_slot) {
 
 ---
 
-## 3. C-Callable ABI Layer (`brass_c_api.h`)
+## 3. Host C Embedding Interface (`brass/embedding/brass_c_api.h`)
 
-Brass exposes an `extern "C"` ABI designed for FFI bindings (Rust, Zig, C, Go, Python):
+For runtimes integrating directly with the internal host engine and Cheney GC via C FFI, Brass exposes host embedding hooks in `<brass/embedding/brass_c_api.h>` (for the general public `libbrass` compiler SDK C-ABI, see the [Embedding Guide](embedding_guide.md)):
 
 ```c
 #include <brass/embedding/brass_c_api.h>
@@ -104,20 +104,23 @@ brass_engine_register_gc(engine, gc);
 // Register external host symbol
 brass_engine_register_symbol(engine, "my_host_fn", (void*)&my_host_fn);
 
-// Compile module
-brass_module_t* compiled = brass_compile_module(engine, mir_module_ptr);
+// Create and compile module
+brass_module_t* mod = brass_embed_module_create("my_module");
+/* ... populate module ... */
+brass_compiled_module_t* compiled = brass_engine_compile_module(engine, mod);
 
-// Retrieve function pointer
+// Retrieve function entry point
 typedef int64_t (*compute_fn_t)(int64_t);
-compute_fn_t fn = (compute_fn_t)brass_module_get_function_ptr(compiled, "compute");
+compute_fn_t fn = (compute_fn_t)brass_embed_compiled_module_get_symbol(compiled, "compute");
 int64_t res = fn(42);
 
 // Runtime patching via C API
-brass_module_patch_const64(compiled, "bias_site", 100);
-brass_module_patch_call(compiled, "call_site", (const void*)&new_stub);
+brass_compiled_module_patch_const64(compiled, "bias_site", 100);
+brass_compiled_module_patch_call(compiled, "call_site", (const void*)&new_stub);
 
 // Cleanup
-brass_module_destroy(compiled);
+brass_embed_compiled_module_destroy(compiled);
+brass_embed_module_destroy(mod);
 brass_host_gc_destroy(gc);
 brass_engine_destroy(engine);
 ```
