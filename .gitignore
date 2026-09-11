@@ -6,6 +6,8 @@ build_msvc/
 bin/
 lib/
 out/
+dist/
+*.zip
 .cache/
 compile_commands.json
 

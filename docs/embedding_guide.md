@@ -1,6 +1,6 @@
 # Brass Embedding Guide (libbrass SDK & Public C-ABI)
 
-The **Brass Compiler Backend** provides a high-performance, standalone, zero-dependency, and zero-LLVM code-generation infrastructure for garbage-collected dynamic languages, JIT runtimes, and ahead-of-time (AOT) toolchains.
+The **Brass Compiler Backend** provides a high-performance, standalone, and zero-dependency code-generation infrastructure for garbage-collected dynamic languages, JIT runtimes, and ahead-of-time (AOT) toolchains.
 
 The public C-ABI (`<brass/brass_c_api.h>`) and embedder SDK (`libbrass`) allow C, C++, Rust, Zig, Go, Python, and other language runtimes to easily embed Brass for:
 - In-memory JIT code generation and dynamic function pointer execution.

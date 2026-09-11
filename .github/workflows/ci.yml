@@ -1,0 +1,77 @@
+name: CI
+
+# Build + test on every push/PR, on all three platforms brass supports:
+# Linux (GCC/Clang), Windows (MSVC), and macOS (Apple Clang).
+# This is the signal behind the "CI" badge.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Persist the sccache object cache in the GitHub Actions cache across runs.
+  # Without this sccache falls back to per-runner disk which is wiped between runs.
+  SCCACHE_GHA_ENABLED: "true"
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux,   os: ubuntu-24.04 }
+          - { name: windows, os: windows-2022 }
+          - { name: macos,   os: macos-15 }
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build
+
+      - name: Ninja (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      # Put cl.exe and ml64.exe on PATH so Windows can use the Ninja generator
+      # and compile MASM files (src/gc/gc_msvc_x64.asm).
+      - name: MSVC dev environment (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Configure
+        shell: bash
+        run: |
+          EXTRA=""
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # Embedded debug info (/Z7) instead of a separate PDB (/Zi) lets sccache cache MSVC objects
+            EXTRA="-DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded"
+          fi
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
+            $EXTRA
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 4
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -R unit_tests

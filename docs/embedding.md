@@ -1,6 +1,6 @@
 # Brass Embedding API & Host Integration Guide
 
-Brass provides a clean, zero-LLVM, thread-safe embedding surface for embedding dynamic language runtimes, AOT/JIT execution engines, and moving garbage collectors.
+Brass provides a clean, thread-safe embedding surface for embedding dynamic language runtimes, AOT/JIT execution engines, and moving garbage collectors.
 
 ---
 

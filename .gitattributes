@@ -1,0 +1,9 @@
+# Deterministic checkouts. The repo is all-LF and tests verify byte-for-byte
+# determinism across platforms. CI's Windows image sets core.autocrlf=true,
+# which would rewrite line endings. eol=lf overrides that everywhere.
+* text=auto eol=lf
+
+# Shell scripts and CI configs must stay LF
+*.sh        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf

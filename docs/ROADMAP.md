@@ -1,6 +1,6 @@
 # Brass Architecture and Subagent Roadmap
 
-`brass` is a high-performance, standalone code-generation backend library for garbage-collected dynamic languages, written in C++20 with CMake and zero LLVM dependencies.
+`brass` is a high-performance, standalone code-generation backend library for garbage-collected dynamic languages, written in C++20 with CMake.
 
 ---
 
@@ -228,7 +228,7 @@
 ---
 
 ## House Rules & Code Conventions
-1. **C++20**: Zero LLVM dependencies.
+1. **C++20**: Standalone modern C++ implementation.
 2. **Compiler Compatibility**: MSVC, Clang, and GCC 12 clean (no `= {}` default args which GCC 12 rejects).
 3. **File Size Limit**: Keep files under 1,000 lines. Files approaching or exceeding 2,000 lines must be strictly decomposed into modular headers/sources.
 4. **Validation**: Every subagent chunk must land with complete unit, differential, or golden tests.

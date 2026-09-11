@@ -1,0 +1,163 @@
+name: Nightly
+
+# Builds brass for Windows x64, Linux x64, and macOS arm64 every night, runs
+# the unit & differential test suites, packages the CLI tools and SDK libraries,
+# smoke-tests the package layout, and publishes to a rolling "nightly" release.
+
+on:
+  schedule:
+    - cron: "15 7 * * *"   # 07:15 UTC daily
+  workflow_dispatch:        # manual "Run workflow" button
+
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  SCCACHE_GHA_ENABLED: "true"
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-x64, os: windows-2022 }
+          - { name: linux-x64,   os: ubuntu-24.04 }
+          - { name: macos-arm64, os: macos-15 }
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build zip
+
+      - name: Ninja (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      - name: MSVC dev environment (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Configure
+        shell: bash
+        run: |
+          EXTRA=""
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            EXTRA="-DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded"
+          fi
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
+            $EXTRA
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 4
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -R unit_tests
+
+      - name: Package
+        shell: bash
+        run: |
+          VERSION="nightly-$(date -u +%Y%m%d)-$(git rev-parse --short HEAD)"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          PKG="brass-$VERSION-${{ matrix.name }}"
+          echo "PKG=$PKG" >> "$GITHUB_ENV"
+          mkdir -p "dist/$PKG/bin" "dist/$PKG/lib" "dist/$PKG/include"
+
+          if [ "$RUNNER_OS" = "Windows" ]; then EXE=".exe"; else EXE=""; fi
+
+          # CLI tools
+          cp "build/tools/brass-opt$EXE" "dist/$PKG/bin/"
+          cp "build/tools/brass-il$EXE" "dist/$PKG/bin/"
+          cp "build/tools/brass-fuzz$EXE" "dist/$PKG/bin/"
+
+          # Static and shared libraries
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp build/brass.lib "dist/$PKG/lib/"
+            cp build/brass.dll "dist/$PKG/bin/"
+            cp build/brass_shared.lib "dist/$PKG/lib/"
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            cp build/libbrass.a "dist/$PKG/lib/"
+            cp build/libbrass*.dylib "dist/$PKG/lib/"
+          else
+            cp build/libbrass.a "dist/$PKG/lib/"
+            cp -d build/libbrass.so* "dist/$PKG/lib/"
+          fi
+
+          # Headers
+          cp -r include/* "dist/$PKG/include/"
+
+          # Documentation & License
+          cp LICENSE README.md "dist/$PKG/"
+
+      - name: Smoke test (packaged CLI tools)
+        shell: bash
+        run: |
+          PKGDIR="$(pwd)/dist/$PKG"
+          cd "$RUNNER_TEMP"
+          if [ "$RUNNER_OS" = "Windows" ]; then EXE=".exe"; else EXE=""; fi
+          "$PKGDIR/bin/brass-opt$EXE" --help
+          "$PKGDIR/bin/brass-il$EXE" --help
+          "$PKGDIR/bin/brass-fuzz$EXE" --help
+
+      - name: Zip
+        shell: bash
+        run: |
+          cd dist
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a "../$PKG.zip" "$PKG" >/dev/null
+          else
+            zip -qr "../$PKG.zip" "$PKG"
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: brass-${{ matrix.name }}
+          path: brass-nightly-*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish rolling nightly
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
+          NOTES="Automated nightly build from \`${GITHUB_SHA::7}\` on $(date -u +%Y-%m-%d), verified against the full unit and differential test suite.
+
+          Each package contains the Brass compiler CLI tools (\`brass-opt\`, \`brass-il\`, \`brass-fuzz\`), the static and shared libraries (\`libbrass\`), and the C-API / C++ SDK headers under \`include/\`."
+          gh release create nightly \
+            --target "$GITHUB_SHA" \
+            --title "Nightly ($(date -u +%Y-%m-%d))" \
+            --notes "$NOTES" \
+            --latest \
+            artifacts/*.zip
