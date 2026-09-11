@@ -90,7 +90,11 @@ void EmitContext::emit_mov_instruction(const LirInst& inst) {
         case LirOpcode::Movabs: {
             GPR dst_gpr = inst.defs[0].preg_val.as_gpr();
             if (inst.uses[0].is_symbol()) {
-                enc_.lea(dst_gpr, inst.uses[0].symbol_name);
+                if (target_.is_macos()) {
+                    enc_.lea(dst_gpr, inst.uses[0].symbol_name);
+                } else {
+                    enc_.movabs(dst_gpr, inst.uses[0].symbol_name);
+                }
             } else if (inst.is_patchable) {
                 size_t imm_off = 2;
                 size_t pad = runtime::compute_cache_line_padding(buffer_.size(), imm_off, 8);
