@@ -192,6 +192,10 @@ void brass_coro_destroy(uintptr_t coro_frame) {
     unregister_active_coro_frame(frame);
 }
 
+} // extern "C"
+
+namespace brass::runtime {
+
 uint64_t bronze_iter_open(uint64_t gen_or_obj) {
     // Returns the iterator handle (coroutine frame or generator object)
     return gen_or_obj;
@@ -254,4 +258,4 @@ uint64_t bronze_async_await(uint64_t coro_frame, uint64_t val) {
     return val;
 }
 
-}
+} // namespace brass::runtime

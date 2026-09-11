@@ -63,13 +63,6 @@ void set_bronze_function_resolver(void* (*resolver)(const char*)) {
     g_custom_fn_resolver = resolver;
 }
 
-struct BronzeClosure {
-    char fn_name[64];
-    void* code_ptr;
-    int64_t env_box;
-    uint32_t param_count;
-};
-
 void* bronze_resolve_function(const char* name) {
     if (!name) return nullptr;
     if (g_custom_fn_resolver) {
@@ -87,8 +80,6 @@ static bool g_bronze_print_enabled = true;
 void bronze_set_print_enabled(bool enabled) {
     g_bronze_print_enabled = enabled;
 }
-
-extern "C" {
 
 #ifndef _WIN32
 __attribute__((weak))
@@ -411,188 +402,6 @@ void bronze_ic_set(uint32_t site_id, int64_t obj_box, const char* name, int32_t 
     ic->execute_set(obj, HostValue(static_cast<uint64_t>(val_box)), ShapeRegistry::global(), gc);
 }
 
-static inline BronzeClosure* unpack_closure(int64_t callee_box) {
-    if (!callee_box) return nullptr;
-    uint64_t u = static_cast<uint64_t>(callee_box);
-    if ((u & HostValue::TAG_MASK) == HostValue::TAG_GCREF) {
-        return reinterpret_cast<BronzeClosure*>(u & HostValue::PAYLOAD_MASK);
-    }
-    if (u < 0x0000800000000000ULL && u >= 0x1000ULL) {
-        return reinterpret_cast<BronzeClosure*>(callee_box);
-    }
-    return nullptr;
-}
-
-static void* get_closure_code(BronzeClosure* closure) {
-    if (!closure) return nullptr;
-    uintptr_t ptr = reinterpret_cast<uintptr_t>(closure);
-    if (ptr >= 0x0000800000000000ULL || ptr < 0x1000ULL) return nullptr;
-    if (!closure->code_ptr && closure->fn_name[0] != '\0') {
-        closure->code_ptr = bronze_resolve_function(closure->fn_name);
-    }
-    return closure->code_ptr;
-}
-
-using BronzeFnCode = int64_t(*)(int64_t, int64_t, uint32_t, const int64_t*);
-
-int64_t bronze_call_dynamic_0(int64_t callee_box, int64_t this_box) {
-    if (callee_box == static_cast<int64_t>(kPrintTag)) {
-        bronze_print_newline();
-        return static_cast<int64_t>(kUndefinedTag);
-    }
-    auto* closure = unpack_closure(callee_box);
-    void* code = get_closure_code(closure);
-    if (code && closure) {
-        return reinterpret_cast<BronzeFnCode>(code)(closure->env_box, this_box, 0, nullptr);
-    }
-    return static_cast<int64_t>(kUndefinedTag);
-}
-
-int64_t bronze_call_dynamic_1(int64_t callee_box, int64_t this_box, int64_t arg0) {
-    if (callee_box == static_cast<int64_t>(kPrintTag)) {
-        bronze_print_dynamic(arg0);
-        bronze_print_newline();
-        return static_cast<int64_t>(kUndefinedTag);
-    }
-    auto* closure = unpack_closure(callee_box);
-    void* code = get_closure_code(closure);
-    if (code && closure) {
-        int64_t argv[1] = {arg0};
-        return reinterpret_cast<BronzeFnCode>(code)(closure->env_box, this_box, 1, argv);
-    }
-    return static_cast<int64_t>(kUndefinedTag);
-}
-
-static inline void print_dynamic_helper(const int64_t* argv, size_t argc) {
-    for (size_t i = 0; i < argc; ++i) {
-        if (i > 0) bronze_print_space();
-        bronze_print_dynamic(argv[i]);
-    }
-    bronze_print_newline();
-}
-
-int64_t bronze_call_dynamic_2(int64_t callee_box, int64_t this_box, int64_t arg0, int64_t arg1) {
-    if (callee_box == static_cast<int64_t>(kPrintTag)) {
-        const int64_t args[2] = {arg0, arg1};
-        print_dynamic_helper(args, 2);
-        return static_cast<int64_t>(kUndefinedTag);
-    }
-    auto* closure = unpack_closure(callee_box);
-    void* code = get_closure_code(closure);
-    if (code && closure) {
-        int64_t argv[2] = {arg0, arg1};
-        return reinterpret_cast<BronzeFnCode>(code)(closure->env_box, this_box, 2, argv);
-    }
-    return static_cast<int64_t>(kUndefinedTag);
-}
-
-int64_t bronze_call_dynamic_3(int64_t callee_box, int64_t this_box, int64_t arg0, int64_t arg1, int64_t arg2) {
-    if (callee_box == static_cast<int64_t>(kPrintTag)) {
-        const int64_t args[3] = {arg0, arg1, arg2};
-        print_dynamic_helper(args, 3);
-        return static_cast<int64_t>(kUndefinedTag);
-    }
-    auto* closure = unpack_closure(callee_box);
-    void* code = get_closure_code(closure);
-    if (code && closure) {
-        int64_t argv[3] = {arg0, arg1, arg2};
-        return reinterpret_cast<BronzeFnCode>(code)(closure->env_box, this_box, 3, argv);
-    }
-    return static_cast<int64_t>(kUndefinedTag);
-}
-
-int64_t bronze_call_dynamic_4(int64_t callee_box, int64_t this_box, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3) {
-    if (callee_box == static_cast<int64_t>(kPrintTag)) {
-        const int64_t args[4] = {arg0, arg1, arg2, arg3};
-        print_dynamic_helper(args, 4);
-        return static_cast<int64_t>(kUndefinedTag);
-    }
-    auto* closure = unpack_closure(callee_box);
-    void* code = get_closure_code(closure);
-    if (code && closure) {
-        int64_t argv[4] = {arg0, arg1, arg2, arg3};
-        return reinterpret_cast<BronzeFnCode>(code)(closure->env_box, this_box, 4, argv);
-    }
-    return static_cast<int64_t>(kUndefinedTag);
-}
-
-int64_t bronze_call_dynamic_5(int64_t callee_box, int64_t this_box, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4) {
-    if (callee_box == static_cast<int64_t>(kPrintTag)) {
-        const int64_t args[5] = {arg0, arg1, arg2, arg3, arg4};
-        print_dynamic_helper(args, 5);
-        return static_cast<int64_t>(kUndefinedTag);
-    }
-    auto* closure = unpack_closure(callee_box);
-    void* code = get_closure_code(closure);
-    if (code && closure) {
-        int64_t argv[5] = {arg0, arg1, arg2, arg3, arg4};
-        return reinterpret_cast<BronzeFnCode>(code)(closure->env_box, this_box, 5, argv);
-    }
-    return static_cast<int64_t>(kUndefinedTag);
-}
-
-int64_t bronze_call_dynamic_6(int64_t callee_box, int64_t this_box, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t arg5) {
-    if (callee_box == static_cast<int64_t>(kPrintTag)) {
-        const int64_t args[6] = {arg0, arg1, arg2, arg3, arg4, arg5};
-        print_dynamic_helper(args, 6);
-        return static_cast<int64_t>(kUndefinedTag);
-    }
-    auto* closure = unpack_closure(callee_box);
-    void* code = get_closure_code(closure);
-    if (code && closure) {
-        int64_t argv[6] = {arg0, arg1, arg2, arg3, arg4, arg5};
-        return reinterpret_cast<BronzeFnCode>(code)(closure->env_box, this_box, 6, argv);
-    }
-    return static_cast<int64_t>(kUndefinedTag);
-}
-
-int64_t bronze_call_dynamic_7(int64_t callee_box, int64_t this_box, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t arg5, int64_t arg6) {
-    if (callee_box == static_cast<int64_t>(kPrintTag)) {
-        const int64_t args[7] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6};
-        print_dynamic_helper(args, 7);
-        return static_cast<int64_t>(kUndefinedTag);
-    }
-    auto* closure = unpack_closure(callee_box);
-    void* code = get_closure_code(closure);
-    if (code && closure) {
-        int64_t argv[7] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6};
-        return reinterpret_cast<BronzeFnCode>(code)(closure->env_box, this_box, 7, argv);
-    }
-    return static_cast<int64_t>(kUndefinedTag);
-}
-
-int64_t bronze_call_dynamic_8(int64_t callee_box, int64_t this_box, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t arg5, int64_t arg6, int64_t arg7) {
-    if (callee_box == static_cast<int64_t>(kPrintTag)) {
-        const int64_t args[8] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7};
-        print_dynamic_helper(args, 8);
-        return static_cast<int64_t>(kUndefinedTag);
-    }
-    auto* closure = unpack_closure(callee_box);
-    void* code = get_closure_code(closure);
-    if (code && closure) {
-        int64_t argv[8] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7};
-        return reinterpret_cast<BronzeFnCode>(code)(closure->env_box, this_box, 8, argv);
-    }
-    return static_cast<int64_t>(kUndefinedTag);
-}
-
-int64_t bronze_call_dynamic_n(int64_t callee_box, int64_t this_box, int32_t argc, const int64_t* argv) {
-    if (callee_box == static_cast<int64_t>(kPrintTag)) {
-        if (argc > 0 && argv) {
-            print_dynamic_helper(argv, static_cast<size_t>(argc));
-        } else {
-            bronze_print_newline();
-        }
-        return static_cast<int64_t>(kUndefinedTag);
-    }
-    auto* closure = unpack_closure(callee_box);
-    void* code = get_closure_code(closure);
-    if (code && closure) {
-        return reinterpret_cast<BronzeFnCode>(code)(closure->env_box, this_box, static_cast<uint32_t>(argc), argv);
-    }
-    return static_cast<int64_t>(kUndefinedTag);
-}
-
 #ifndef _WIN32
 __attribute__((weak))
 #endif
@@ -646,105 +455,33 @@ BRONZE_WEAK uint64_t bronze_typeof(uint64_t bits) {
     return static_cast<uint64_t>(kUndefinedTag);
 }
 
-BRONZE_WEAK int64_t bronze_construct_0(int64_t callee_box) {
-    int64_t obj = bronze_create_object();
-    int64_t res = bronze_call_dynamic_0(callee_box, obj);
-    return (res && (res & 0xFFF0000000000000ULL) != 0xFFF0000000000000ULL) ? res : obj;
+BRONZE_WEAK uint64_t bronze_create_generator_object(uint64_t resumeBits) {
+    return resumeBits;
 }
-BRONZE_WEAK int64_t bronze_construct_1(int64_t callee_box, int64_t a0) {
-    int64_t obj = bronze_create_object();
-    int64_t res = bronze_call_dynamic_1(callee_box, obj, a0);
-    return (res && (res & 0xFFF0000000000000ULL) != 0xFFF0000000000000ULL) ? res : obj;
+BRONZE_WEAK uint64_t bronze_create_async_generator_object(uint64_t resumeBits) {
+    return resumeBits;
 }
-BRONZE_WEAK int64_t bronze_construct_2(int64_t callee_box, int64_t a0, int64_t a1) {
-    int64_t obj = bronze_create_object();
-    int64_t res = bronze_call_dynamic_2(callee_box, obj, a0, a1);
-    return (res && (res & 0xFFF0000000000000ULL) != 0xFFF0000000000000ULL) ? res : obj;
+BRONZE_WEAK uint64_t bronze_dynamic_import(uint64_t, uint32_t) {
+    return static_cast<uint64_t>(kUndefinedTag);
 }
-BRONZE_WEAK int64_t bronze_construct_3(int64_t callee_box, int64_t a0, int64_t a1, int64_t a2) {
-    int64_t obj = bronze_create_object();
-    int64_t res = bronze_call_dynamic_3(callee_box, obj, a0, a1, a2);
-    return (res && (res & 0xFFF0000000000000ULL) != 0xFFF0000000000000ULL) ? res : obj;
+BRONZE_WEAK uint64_t bronze_iter_value(uint64_t) { return static_cast<uint64_t>(kUndefinedTag); }
+BRONZE_WEAK void bronze_iter_close(uint64_t, int32_t) {}
+BRONZE_WEAK uint64_t bronze_iter_rest(uint64_t) { return bronze_create_array(0); }
+BRONZE_WEAK uint64_t bronze_iter_delegate(uint64_t, uint64_t, uint64_t) { return static_cast<uint64_t>(kUndefinedTag); }
+BRONZE_WEAK uint64_t bronze_async_iter_open(uint64_t o) { return o; }
+BRONZE_WEAK uint64_t bronze_async_iter_next(uint64_t) { return static_cast<uint64_t>(kUndefinedTag); }
+BRONZE_WEAK void bronze_async_iter_close(uint64_t, int32_t) {}
+BRONZE_WEAK uint64_t bronze_pattern_check(uint64_t src, uint32_t) { return src; }
+BRONZE_WEAK void bronze_array_append(uint64_t, uint64_t) {}
+BRONZE_WEAK void bronze_array_append_hole(uint64_t) {}
+BRONZE_WEAK void bronze_array_spread(uint64_t, uint64_t) {}
+BRONZE_WEAK void bronze_object_spread(uint64_t, uint64_t) {}
+BRONZE_WEAK uint64_t bronze_object_rest(uint64_t, uint64_t) { return bronze_create_object(); }
+BRONZE_WEAK uint64_t bronze_dynamic_call_spread(uint64_t callee, uint64_t this_val, uint64_t) {
+    return bronze_call_dynamic_0(callee, this_val);
 }
-BRONZE_WEAK int64_t bronze_construct_4(int64_t callee_box, int64_t a0, int64_t a1, int64_t a2, int64_t a3) {
-    int64_t obj = bronze_create_object();
-    int64_t res = bronze_call_dynamic_4(callee_box, obj, a0, a1, a2, a3);
-    return (res && (res & 0xFFF0000000000000ULL) != 0xFFF0000000000000ULL) ? res : obj;
-}
-BRONZE_WEAK int64_t bronze_construct_5(int64_t callee_box, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4) {
-    int64_t obj = bronze_create_object();
-    int64_t res = bronze_call_dynamic_5(callee_box, obj, a0, a1, a2, a3, a4);
-    return (res && (res & 0xFFF0000000000000ULL) != 0xFFF0000000000000ULL) ? res : obj;
-}
-BRONZE_WEAK int64_t bronze_construct_6(int64_t callee_box, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5) {
-    int64_t obj = bronze_create_object();
-    int64_t res = bronze_call_dynamic_6(callee_box, obj, a0, a1, a2, a3, a4, a5);
-    return (res && (res & 0xFFF0000000000000ULL) != 0xFFF0000000000000ULL) ? res : obj;
-}
-BRONZE_WEAK int64_t bronze_construct_7(int64_t callee_box, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6) {
-    int64_t obj = bronze_create_object();
-    int64_t res = bronze_call_dynamic_7(callee_box, obj, a0, a1, a2, a3, a4, a5, a6);
-    return (res && (res & 0xFFF0000000000000ULL) != 0xFFF0000000000000ULL) ? res : obj;
-}
-BRONZE_WEAK int64_t bronze_construct_8(int64_t callee_box, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6, int64_t a7) {
-    int64_t obj = bronze_create_object();
-    int64_t res = bronze_call_dynamic_8(callee_box, obj, a0, a1, a2, a3, a4, a5, a6, a7);
-    return (res && (res & 0xFFF0000000000000ULL) != 0xFFF0000000000000ULL) ? res : obj;
-}
-BRONZE_WEAK int64_t bronze_construct(int64_t callee_box, uint32_t argc, const int64_t* argv) {
-    if (argc == 0) return bronze_construct_0(callee_box);
-    if (argc == 1) return bronze_construct_1(callee_box, argv[0]);
-    if (argc == 2) return bronze_construct_2(callee_box, argv[0], argv[1]);
-    if (argc == 3) return bronze_construct_3(callee_box, argv[0], argv[1], argv[2]);
-    if (argc == 4) return bronze_construct_4(callee_box, argv[0], argv[1], argv[2], argv[3]);
-    if (argc == 5) return bronze_construct_5(callee_box, argv[0], argv[1], argv[2], argv[3], argv[4]);
-    if (argc == 6) return bronze_construct_6(callee_box, argv[0], argv[1], argv[2], argv[3], argv[4], argv[5]);
-    if (argc == 7) return bronze_construct_7(callee_box, argv[0], argv[1], argv[2], argv[3], argv[4], argv[5], argv[6]);
-    if (argc == 8) return bronze_construct_8(callee_box, argv[0], argv[1], argv[2], argv[3], argv[4], argv[5], argv[6], argv[7]);
-    return bronze_create_object();
-}
-
-BRONZE_WEAK void bronze_class_extends(int64_t, int64_t) {}
-BRONZE_WEAK int64_t bronze_super_call(int64_t sub_box, int64_t this_box, uint32_t argc, const int64_t* argv) {
-    return bronze_call_dynamic_n(sub_box, this_box, argc, argv);
-}
-BRONZE_WEAK int64_t bronze_super_call_0(int64_t sub_box, int64_t this_box) {
-    return bronze_super_call(sub_box, this_box, 0, nullptr);
-}
-BRONZE_WEAK int64_t bronze_super_call_1(int64_t sub_box, int64_t this_box, int64_t a0) {
-    int64_t argv[1] = {a0};
-    return bronze_super_call(sub_box, this_box, 1, argv);
-}
-BRONZE_WEAK int64_t bronze_super_call_2(int64_t sub_box, int64_t this_box, int64_t a0, int64_t a1) {
-    int64_t argv[2] = {a0, a1};
-    return bronze_super_call(sub_box, this_box, 2, argv);
-}
-BRONZE_WEAK int64_t bronze_super_call_3(int64_t sub_box, int64_t this_box, int64_t a0, int64_t a1, int64_t a2) {
-    int64_t argv[3] = {a0, a1, a2};
-    return bronze_super_call(sub_box, this_box, 3, argv);
-}
-BRONZE_WEAK int64_t bronze_super_call_4(int64_t sub_box, int64_t this_box, int64_t a0, int64_t a1, int64_t a2, int64_t a3) {
-    int64_t argv[4] = {a0, a1, a2, a3};
-    return bronze_super_call(sub_box, this_box, 4, argv);
-}
-BRONZE_WEAK int64_t bronze_super_call_5(int64_t sub_box, int64_t this_box, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4) {
-    int64_t argv[5] = {a0, a1, a2, a3, a4};
-    return bronze_super_call(sub_box, this_box, 5, argv);
-}
-BRONZE_WEAK int64_t bronze_super_call_6(int64_t sub_box, int64_t this_box, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5) {
-    int64_t argv[6] = {a0, a1, a2, a3, a4, a5};
-    return bronze_super_call(sub_box, this_box, 6, argv);
-}
-BRONZE_WEAK int64_t bronze_super_call_7(int64_t sub_box, int64_t this_box, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6) {
-    int64_t argv[7] = {a0, a1, a2, a3, a4, a5, a6};
-    return bronze_super_call(sub_box, this_box, 7, argv);
-}
-BRONZE_WEAK int64_t bronze_super_call_8(int64_t sub_box, int64_t this_box, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6, int64_t a7) {
-    int64_t argv[8] = {a0, a1, a2, a3, a4, a5, a6, a7};
-    return bronze_super_call(sub_box, this_box, 8, argv);
-}
-BRONZE_WEAK int64_t bronze_super_call_n(int64_t sub_box, int64_t this_box, uint32_t argc, const int64_t* argv) {
-    return bronze_super_call(sub_box, this_box, argc, argv);
+BRONZE_WEAK uint64_t bronze_construct_spread(uint64_t callee, uint64_t) {
+    return bronze_construct_0(callee);
 }
 BRONZE_WEAK int64_t bronze_arg_at(uint32_t argc, const int64_t* argv, uint32_t index) {
     if (index < argc && argv) return argv[index];
@@ -797,10 +534,19 @@ BRONZE_WEAK int32_t bronze_unbox_bool(uint64_t bits) {
     return (bits & 1) ? 1 : 0;
 }
 BRONZE_WEAK uint64_t bronze_box_bool(int32_t v) { return static_cast<uint64_t>(v ? 1 : 0) | kBoolTag; }
+uint32_t g_bronze_dummy_key_map[4096];
+static struct DummyKeyMapInitializer {
+    DummyKeyMapInitializer() {
+        for (uint32_t i = 0; i < 4096; ++i) {
+            g_bronze_dummy_key_map[i] = i;
+        }
+    }
+} g_dummy_key_map_initializer;
+
 BRONZE_WEAK uint64_t bronze_box_str_key(uint32_t /*key_index*/) { return kUndefinedTag; }
 BRONZE_WEAK uint64_t bronze_box_str(const char* /*s*/) { return kUndefinedTag; }
 BRONZE_WEAK const char* bronze_unbox_str(uint64_t /*bits*/) { return ""; }
-BRONZE_WEAK void bronze_register_key_manifest(const uint8_t* /*data*/) {}
+BRONZE_WEAK void bronze_register_key_manifest(const uint8_t* /*data*/, uint32_t* /*key_map*/) {}
 
 static thread_local uint64_t g_bronze_dummy_exception_cell = 0xFFFA000000000000ULL;
 BRONZE_WEAK uint64_t bronze_exception_get() { return g_bronze_dummy_exception_cell; }
@@ -814,6 +560,47 @@ BRONZE_WEAK int32_t bronze_exception_pending() {
     return g_bronze_dummy_exception_cell != 0xFFFA000000000000ULL;
 }
 BRONZE_WEAK void bronze_uncaught_exception() { std::exit(1); }
+
+struct BronzeDummyGcFrame {
+    BronzeDummyGcFrame* prev;
+    uint64_t count;
+    uint64_t slots[1];
+};
+
+struct DummyShadowStack {
+    std::vector<uint64_t> storage;
+    size_t top = 0;
+    BronzeDummyGcFrame* frame_top = nullptr;
+
+    void ensure_init() {
+        if (storage.empty()) {
+            storage.resize(4 * 1024 * 1024, 0xFFF6000000000000ULL);
+        }
+    }
+};
+static thread_local DummyShadowStack g_dummy_shadow_stack;
+
+BRONZE_WEAK void* bronze_gc_frame_push(uint32_t count) {
+    g_dummy_shadow_stack.ensure_init();
+    size_t cur = g_dummy_shadow_stack.top;
+    g_dummy_shadow_stack.top += 2 + count;
+    auto* frame = reinterpret_cast<BronzeDummyGcFrame*>(&g_dummy_shadow_stack.storage[cur]);
+    frame->prev = g_dummy_shadow_stack.frame_top;
+    frame->count = count;
+    for (uint32_t i = 0; i < count; ++i) {
+        frame->slots[i] = 0xFFF6000000000000ULL;
+    }
+    g_dummy_shadow_stack.frame_top = frame;
+    return frame;
+}
+
+BRONZE_WEAK void bronze_gc_frame_pop() {
+    if (g_dummy_shadow_stack.frame_top) {
+        g_dummy_shadow_stack.top = reinterpret_cast<uint64_t*>(g_dummy_shadow_stack.frame_top) - g_dummy_shadow_stack.storage.data();
+        g_dummy_shadow_stack.frame_top = g_dummy_shadow_stack.frame_top->prev;
+    }
+}
+
 BRONZE_WEAK uint64_t bronze_pin_violation(uint32_t /*key_index*/, uint64_t bits) {
     g_bronze_dummy_exception_cell = bits;
     return 0xFFF6000000000000ULL;
@@ -849,8 +636,45 @@ BRONZE_WEAK uint64_t bronze_dynamic_pow(uint64_t l, uint64_t r) {
     double d = std::pow(to_dbl(static_cast<int64_t>(l)), to_dbl(static_cast<int64_t>(r)));
     uint64_t u = 0; std::memcpy(&u, &d, sizeof(double)); return u;
 }
+static inline uint64_t to_bits(double d) { uint64_t u = 0; std::memcpy(&u, &d, sizeof(double)); return u; }
+BRONZE_WEAK uint64_t bronze_dynamic_bitand(uint64_t l, uint64_t r) {
+    int32_t a = static_cast<int32_t>(to_dbl(static_cast<int64_t>(l)));
+    int32_t b = static_cast<int32_t>(to_dbl(static_cast<int64_t>(r)));
+    return to_bits(static_cast<double>(a & b));
+}
+BRONZE_WEAK uint64_t bronze_dynamic_bitor(uint64_t l, uint64_t r) {
+    int32_t a = static_cast<int32_t>(to_dbl(static_cast<int64_t>(l)));
+    int32_t b = static_cast<int32_t>(to_dbl(static_cast<int64_t>(r)));
+    return to_bits(static_cast<double>(a | b));
+}
+BRONZE_WEAK uint64_t bronze_dynamic_bitxor(uint64_t l, uint64_t r) {
+    int32_t a = static_cast<int32_t>(to_dbl(static_cast<int64_t>(l)));
+    int32_t b = static_cast<int32_t>(to_dbl(static_cast<int64_t>(r)));
+    return to_bits(static_cast<double>(a ^ b));
+}
+BRONZE_WEAK uint64_t bronze_dynamic_shl(uint64_t l, uint64_t r) {
+    int32_t a = static_cast<int32_t>(to_dbl(static_cast<int64_t>(l)));
+    uint32_t b = static_cast<uint32_t>(to_dbl(static_cast<int64_t>(r))) & 31u;
+    return to_bits(static_cast<double>(static_cast<int32_t>(static_cast<uint32_t>(a) << b)));
+}
+BRONZE_WEAK uint64_t bronze_dynamic_shr(uint64_t l, uint64_t r) {
+    int32_t a = static_cast<int32_t>(to_dbl(static_cast<int64_t>(l)));
+    uint32_t b = static_cast<uint32_t>(to_dbl(static_cast<int64_t>(r))) & 31u;
+    return to_bits(static_cast<double>(a >> b));
+}
+BRONZE_WEAK uint64_t bronze_dynamic_ushr(uint64_t l, uint64_t r) {
+    uint32_t a = static_cast<uint32_t>(to_dbl(static_cast<int64_t>(l)));
+    uint32_t b = static_cast<uint32_t>(to_dbl(static_cast<int64_t>(r))) & 31u;
+    return to_bits(static_cast<double>(a >> b));
+}
+BRONZE_WEAK uint64_t bronze_dynamic_bitnot(uint64_t bits) {
+    int32_t a = static_cast<int32_t>(to_dbl(static_cast<int64_t>(bits)));
+    return to_bits(static_cast<double>(~a));
+}
 
-} // extern "C"
+uint64_t bronze_get_new_target() {
+    return static_cast<uint64_t>(kUndefinedTag);
+}
 
 uint32_t g_bronze_main_key_constants = 0;
 int64_t g_bronze_module_env = kUndefinedTag;

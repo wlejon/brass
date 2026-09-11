@@ -84,6 +84,13 @@ bool is_active_coro_frame(uintptr_t frame);
 void visit_active_coro_frames(const std::function<void(uintptr_t*)>& visitor);
 void set_coro_symbol_resolver(void* (*resolver)(const char*));
 
+// Bronze IL Iterator & Async Helpers
+uint64_t bronze_iter_open(uint64_t gen_or_obj);
+uint64_t bronze_iter_step(uint64_t iter_handle);
+uint64_t bronze_create_async_machine(void* fn_ptr, uint32_t slot_count, uint64_t pointer_mask, uint64_t env);
+uint64_t bronze_async_start(uint64_t coro_frame, uint64_t arg);
+uint64_t bronze_async_await(uint64_t coro_frame, uint64_t val);
+
 } // namespace brass::runtime
 
 extern "C" {
@@ -91,11 +98,4 @@ uintptr_t brass_coro_create(void* fn_ptr, uint32_t slot_count, uint64_t pointer_
 uint64_t brass_coro_resume(uintptr_t coro_frame, uint64_t input_val);
 uint32_t brass_coro_is_done(uintptr_t coro_frame);
 void brass_coro_destroy(uintptr_t coro_frame);
-
-// Bronze IL Iterator & Async Helpers
-uint64_t bronze_iter_open(uint64_t gen_or_obj);
-uint64_t bronze_iter_step(uint64_t iter_handle);
-uint64_t bronze_create_async_machine(void* fn_ptr, uint32_t slot_count, uint64_t pointer_mask, uint64_t env);
-uint64_t bronze_async_start(uint64_t coro_frame, uint64_t arg);
-uint64_t bronze_async_await(uint64_t coro_frame, uint64_t val);
 }

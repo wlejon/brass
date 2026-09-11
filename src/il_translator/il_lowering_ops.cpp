@@ -51,6 +51,9 @@ bool lower_ops_instruction(
     auto get_opd = [&](size_t idx) -> Value* {
         if (idx < inst_ast.operands.size()) {
             uint32_t id = inst_ast.operands[idx];
+            if (lowering) {
+                return lowering->get_val_by_id(id, b, val_map);
+            }
             if (val_map.count(id)) return val_map[id];
         }
         return nullptr;
@@ -123,52 +126,69 @@ bool lower_ops_instruction(
             return true;
         }
 
-        case BronzeOp::BitAnd: {
-            Value* op0 = lowering->ensure_type(get_opd(0), Type::i32(), b);
-            Value* op1 = lowering->ensure_type(get_opd(1), Type::i32(), b);
-            Value* r = b.build_and(op0, op1);
-            res_val = (res_type == Type::f64()) ? b.build_sitofp_f64_i32(r) : r;
-            return true;
-        }
-        case BronzeOp::BitOr: {
-            Value* op0 = lowering->ensure_type(get_opd(0), Type::i32(), b);
-            Value* op1 = lowering->ensure_type(get_opd(1), Type::i32(), b);
-            Value* r = b.build_or(op0, op1);
-            res_val = (res_type == Type::f64()) ? b.build_sitofp_f64_i32(r) : r;
-            return true;
-        }
-        case BronzeOp::BitXor: {
-            Value* op0 = lowering->ensure_type(get_opd(0), Type::i32(), b);
-            Value* op1 = lowering->ensure_type(get_opd(1), Type::i32(), b);
-            Value* r = b.build_xor(op0, op1);
-            res_val = (res_type == Type::f64()) ? b.build_sitofp_f64_i32(r) : r;
-            return true;
-        }
-        case BronzeOp::Shl: {
-            Value* op0 = lowering->ensure_type(get_opd(0), Type::i32(), b);
-            Value* op1 = lowering->ensure_type(get_opd(1), Type::i32(), b);
-            Value* r = b.build_shl(op0, op1);
-            res_val = (res_type == Type::f64()) ? b.build_sitofp_f64_i32(r) : r;
-            return true;
-        }
-        case BronzeOp::Shr: {
-            Value* op0 = lowering->ensure_type(get_opd(0), Type::i32(), b);
-            Value* op1 = lowering->ensure_type(get_opd(1), Type::i32(), b);
-            Value* r = b.build_ashr(op0, op1);
-            res_val = (res_type == Type::f64()) ? b.build_sitofp_f64_i32(r) : r;
-            return true;
-        }
+        case BronzeOp::BitAnd:
+        case BronzeOp::BitOr:
+        case BronzeOp::BitXor:
+        case BronzeOp::Shl:
+        case BronzeOp::Shr:
         case BronzeOp::UShr: {
+            if (res_type == Type::i64()) {
+                Value* op0 = lowering->ensure_type(get_opd(0), Type::i64(), b);
+                Value* op1 = lowering->ensure_type(get_opd(1), Type::i64(), b);
+                const char* helper =
+                    inst_ast.op == BronzeOp::BitAnd ? "bronze_dynamic_bitand" :
+                    inst_ast.op == BronzeOp::BitOr  ? "bronze_dynamic_bitor" :
+                    inst_ast.op == BronzeOp::BitXor ? "bronze_dynamic_bitxor" :
+                    inst_ast.op == BronzeOp::Shl    ? "bronze_dynamic_shl" :
+                    inst_ast.op == BronzeOp::Shr    ? "bronze_dynamic_shr" :
+                                                      "bronze_dynamic_ushr";
+                res_val = b.build_call(helper, Type::i64(), {op0, op1});
+                return true;
+            }
             Value* op0 = lowering->ensure_type(get_opd(0), Type::i32(), b);
             Value* op1 = lowering->ensure_type(get_opd(1), Type::i32(), b);
-            Value* r = b.build_lshr(op0, op1);
-            res_val = (res_type == Type::f64()) ? b.build_sitofp_f64_i32(r) : r;
+            Value* r = nullptr;
+            switch (inst_ast.op) {
+                case BronzeOp::BitAnd: r = b.build_and(op0, op1); break;
+                case BronzeOp::BitOr:  r = b.build_or(op0, op1); break;
+                case BronzeOp::BitXor: r = b.build_xor(op0, op1); break;
+                case BronzeOp::Shl: {
+                    Value* count = b.build_and(op1, b.build_iconst_i32(31));
+                    r = b.build_shl(op0, count);
+                    break;
+                }
+                case BronzeOp::Shr: {
+                    Value* count = b.build_and(op1, b.build_iconst_i32(31));
+                    r = b.build_ashr(op0, count);
+                    break;
+                }
+                default: { // UShr
+                    Value* count = b.build_and(op1, b.build_iconst_i32(31));
+                    r = b.build_lshr(op0, count);
+                    break;
+                }
+            }
+            if (res_type == Type::f64()) {
+                if (inst_ast.op == BronzeOp::UShr) {
+                    Value* zext = b.build_zext_i64(r);
+                    res_val = b.build_sitofp_f64_i64(zext);
+                } else {
+                    res_val = b.build_sitofp_f64_i32(r);
+                }
+            } else {
+                res_val = r;
+            }
             return true;
         }
         case BronzeOp::BitNot: {
-            Value* op0 = lowering->ensure_type(get_opd(0), Type::i32(), b);
-            Value* r = b.build_xor(op0, b.build_iconst_i32(-1));
-            res_val = (res_type == Type::f64()) ? b.build_sitofp_f64_i32(r) : r;
+            if (res_type == Type::i64()) {
+                Value* op0 = lowering->ensure_type(get_opd(0), Type::i64(), b);
+                res_val = b.build_call("bronze_dynamic_bitnot", Type::i64(), {op0});
+            } else {
+                Value* op0 = lowering->ensure_type(get_opd(0), Type::i32(), b);
+                Value* r = b.build_xor(op0, b.build_iconst_i32(-1));
+                res_val = (res_type == Type::f64()) ? b.build_sitofp_f64_i32(r) : r;
+            }
             return true;
         }
 

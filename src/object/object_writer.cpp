@@ -287,19 +287,7 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
         }
     }
 
-    // Record external symbols
-    for (std::string_view ext_sym : mod.external_symbols()) {
-        if (!obj.find_symbol(ext_sym)) {
-            ObjectSymbol sym;
-            sym.name = std::string(ext_sym);
-            sym.section_index = SECTION_UNDEF;
-            sym.value = 0;
-            sym.size = 0;
-            sym.binding = SymbolBinding::Global;
-            sym.type = SymbolType::Function;
-            obj.add_symbol(std::move(sym));
-        }
-    }
+
 
     // Add any referenced relocation symbol not yet registered
     for (const auto& sec : obj.sections) {

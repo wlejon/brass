@@ -1,4 +1,5 @@
 #include "il_lowering_coro.hpp"
+#include "il_lowering.hpp"
 #include <brass/runtime/coroutine.hpp>
 #include <brass/mir/module.hpp>
 
@@ -11,6 +12,13 @@ bool is_coro_il_op(BronzeOp op) {
         case BronzeOp::AsyncAwait:
         case BronzeOp::IterOpen:
         case BronzeOp::IterStep:
+        case BronzeOp::IterValue:
+        case BronzeOp::IterClose:
+        case BronzeOp::IterRest:
+        case BronzeOp::IterDelegate:
+        case BronzeOp::AsyncIterOpen:
+        case BronzeOp::AsyncIterNext:
+        case BronzeOp::AsyncIterClose:
         case BronzeOp::Yield:
             return true;
         default:
@@ -19,6 +27,7 @@ bool is_coro_il_op(BronzeOp op) {
 }
 
 bool lower_coro_instruction(
+    IlLowering* lowering,
     const BronzeInstruction& inst_ast,
     Builder& b,
     Function* fn,
@@ -28,6 +37,9 @@ bool lower_coro_instruction(
     auto get_opd = [&](size_t idx) -> Value* {
         if (idx < inst_ast.operands.size()) {
             uint32_t oid = inst_ast.operands[idx];
+            if (lowering) {
+                return lowering->get_val_by_id(oid, b, val_map);
+            }
             if (val_map.count(oid)) return val_map[oid];
         }
         return nullptr;
@@ -82,6 +94,52 @@ bool lower_coro_instruction(
         case BronzeOp::IterStep: {
             Value* iter = get_opd(0);
             res_val = b.build_and(b.build_call("bronze_iter_step", Type::i32(), {iter}), b.build_iconst_i32(1));
+            return true;
+        }
+
+        case BronzeOp::IterValue: {
+            Value* iter = get_opd(0);
+            res_val = b.build_call("bronze_iter_value", Type::i64(), {iter});
+            return true;
+        }
+
+        case BronzeOp::IterClose: {
+            Value* iter = get_opd(0);
+            Value* suppress = b.build_iconst_i32(inst_ast.imm_i64 != 0 ? 1 : 0);
+            b.build_call("bronze_iter_close", Type::void_type(), {iter, suppress});
+            return true;
+        }
+
+        case BronzeOp::IterRest: {
+            Value* iter = get_opd(0);
+            res_val = b.build_call("bronze_iter_rest", Type::i64(), {iter});
+            return true;
+        }
+
+        case BronzeOp::IterDelegate: {
+            Value* iter = get_opd(0);
+            Value* mode = get_opd(1);
+            Value* sent = get_opd(2);
+            res_val = b.build_call("bronze_iter_delegate", Type::i64(), {iter, mode, sent});
+            return true;
+        }
+
+        case BronzeOp::AsyncIterOpen: {
+            Value* iter = get_opd(0);
+            res_val = b.build_call("bronze_async_iter_open", Type::i64(), {iter});
+            return true;
+        }
+
+        case BronzeOp::AsyncIterNext: {
+            Value* iter = get_opd(0);
+            res_val = b.build_call("bronze_async_iter_next", Type::i64(), {iter});
+            return true;
+        }
+
+        case BronzeOp::AsyncIterClose: {
+            Value* iter = get_opd(0);
+            Value* suppress = b.build_iconst_i32(inst_ast.imm_i64 != 0 ? 1 : 0);
+            b.build_call("bronze_async_iter_close", Type::void_type(), {iter, suppress});
             return true;
         }
 

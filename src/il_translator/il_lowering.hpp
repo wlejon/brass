@@ -20,6 +20,11 @@ public:
     std::unique_ptr<Module> lower_module(const BronzeModuleAST& ast);
     Value* ensure_type(Value* val, Type target_type, Builder& b);
     std::string resolve_callee(const std::string& callee_name) const;
+    Value* get_key_id(Builder& b, uint32_t key_idx);
+
+    Value* get_val_by_id(uint32_t id, Builder& b, const std::unordered_map<uint32_t, Value*>& val_map);
+    void set_inst_result(uint32_t result_id, Value* res_val, Builder& b, std::unordered_map<uint32_t, Value*>& val_map);
+    Value* current_fn_frame_ptr() const { return current_fn_frame_ptr_; }
 
 private:
     bool lower_function(const BronzeFunction& fn_ast, Module& mod, const std::string& fn_name);
@@ -39,6 +44,9 @@ private:
     const BronzeModuleAST* current_ast_ = nullptr;
     size_t current_fn_idx_ = 0;
     std::unordered_map<size_t, std::unordered_map<std::string, std::string>> caller_to_callee_map_;
+    std::unordered_set<uint32_t> module_env_regs_;
+    std::unordered_map<uint32_t, uint32_t> current_fn_slot_of_;
+    Value* current_fn_frame_ptr_ = nullptr;
 };
 
 } // namespace brass::il

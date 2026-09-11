@@ -110,10 +110,12 @@ bool IlParser::parse_function(BronzeFunction& out_fn) {
         return false;
     }
 
-    Token name_tok;
-    if (!expect(TokenType::Identifier, "Expected function name", &name_tok)) {
+    Token name_tok = lexer_.peek_token();
+    if (name_tok.type == TokenType::LParen || name_tok.type == TokenType::Eof) {
+        error("Expected function name", name_tok);
         return false;
     }
+    lexer_.next_token();
     out_fn.name = std::string(name_tok.text);
     while (lexer_.peek_token().type != TokenType::LParen &&
            lexer_.peek_token().type != TokenType::Eof &&
@@ -291,6 +293,7 @@ bool IlParser::parse_instruction(BronzeInstruction& out_inst) {
         case BronzeOp::ConstUndefined:
         case BronzeOp::ConstNull:
         case BronzeOp::ExcTake:
+        case BronzeOp::GetNewTarget:
             break;
 
         case BronzeOp::Call: {

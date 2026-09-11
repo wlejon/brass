@@ -16,22 +16,22 @@ Value* PropertyLoweringHelper::lower_prop_get(
     uint32_t symbol_id,
     uint32_t site_id
 ) {
-    Module* mod = b.current_block()->parent()->parent();
-
-    Value* name_val = nullptr;
-    if (!prop_name.empty()) {
-        const char* interned = mod->string_pool().intern(prop_name).data();
-        name_val = b.build_iconst_i64(static_cast<int64_t>(reinterpret_cast<uintptr_t>(interned)));
-    } else {
-        name_val = b.build_iconst_i64(0);
-    }
-
-    Value* sym_val = b.build_iconst_i32(static_cast<int32_t>(symbol_id));
-
-    if (symbol_id != 0 && prop_name.empty()) {
+    if (prop_name.empty()) {
+        Value* sym_val = nullptr;
+        if (symbol_id == 0xFFFFFFFFu) {
+            sym_val = b.build_iconst_i32(static_cast<int32_t>(symbol_id));
+        } else {
+            Value* map_addr = b.build_func_addr("__bronze_key_map");
+            sym_val = b.build_load(Type::i32(), map_addr, static_cast<int32_t>(symbol_id * sizeof(uint32_t)));
+        }
         Value* null_entry = b.build_iconst_i64(0);
         return b.build_call("bronze_prop_get", Type::i64(), {obj, sym_val, null_entry});
     }
+
+    Module* mod = b.current_block()->parent()->parent();
+    const char* interned = mod->string_pool().intern(prop_name).data();
+    Value* name_val = b.build_iconst_i64(static_cast<int64_t>(reinterpret_cast<uintptr_t>(interned)));
+    Value* sym_val = b.build_iconst_i32(static_cast<int32_t>(symbol_id));
 
     if (enable_pic_) {
         uint32_t sid = (site_id != 0) ? site_id : g_global_auto_site_id.fetch_add(1);
@@ -52,24 +52,24 @@ void PropertyLoweringHelper::lower_prop_set(
     uint32_t imm,
     uint32_t site_id
 ) {
-    Module* mod = b.current_block()->parent()->parent();
-
-    Value* name_val = nullptr;
-    if (!prop_name.empty()) {
-        const char* interned = mod->string_pool().intern(prop_name).data();
-        name_val = b.build_iconst_i64(static_cast<int64_t>(reinterpret_cast<uintptr_t>(interned)));
-    } else {
-        name_val = b.build_iconst_i64(0);
-    }
-
-    Value* sym_val = b.build_iconst_i32(static_cast<int32_t>(symbol_id));
-
-    if (symbol_id != 0 && prop_name.empty()) {
+    if (prop_name.empty()) {
+        Value* sym_val = nullptr;
+        if (symbol_id == 0xFFFFFFFFu) {
+            sym_val = b.build_iconst_i32(static_cast<int32_t>(symbol_id));
+        } else {
+            Value* map_addr = b.build_func_addr("__bronze_key_map");
+            sym_val = b.build_load(Type::i32(), map_addr, static_cast<int32_t>(symbol_id * sizeof(uint32_t)));
+        }
         Value* slot_val = b.build_iconst_i64(static_cast<int64_t>(slot_idx));
         Value* strict_val = b.build_iconst_i32(1);
         b.build_call("bronze_prop_set", Type::void_type(), {obj, sym_val, val, slot_val, strict_val});
         return;
     }
+
+    Module* mod = b.current_block()->parent()->parent();
+    const char* interned = mod->string_pool().intern(prop_name).data();
+    Value* name_val = b.build_iconst_i64(static_cast<int64_t>(reinterpret_cast<uintptr_t>(interned)));
+    Value* sym_val = b.build_iconst_i32(static_cast<int32_t>(symbol_id));
 
     if (enable_pic_) {
         uint32_t sid = (site_id != 0) ? site_id : g_global_auto_site_id.fetch_add(1);
@@ -107,7 +107,16 @@ void PropertyLoweringHelper::lower_method_def(
     uint32_t symbol_id,
     Value* closure
 ) {
-    if (prop_name.empty() || symbol_id != 0) {
+    if (prop_name.empty()) {
+        Value* sym_val = nullptr;
+        if (symbol_id == 0xFFFFFFFFu) {
+            sym_val = b.build_iconst_i32(static_cast<int32_t>(symbol_id));
+        } else {
+            Value* map_addr = b.build_func_addr("__bronze_key_map");
+            sym_val = b.build_load(Type::i32(), map_addr, static_cast<int32_t>(symbol_id * sizeof(uint32_t)));
+        }
+        b.build_call("bronze_method_def", Type::void_type(), {obj, sym_val, closure});
+    } else if (symbol_id != 0) {
         Value* sym_val = b.build_iconst_i32(static_cast<int32_t>(symbol_id));
         b.build_call("bronze_method_def", Type::void_type(), {obj, sym_val, closure});
     } else {

@@ -7,9 +7,12 @@
 
 namespace brass::il {
 
+class IlLowering;
+
 bool is_coro_il_op(BronzeOp op);
 
 bool lower_coro_instruction(
+    IlLowering* lowering,
     const BronzeInstruction& inst_ast,
     Builder& b,
     Function* fn,

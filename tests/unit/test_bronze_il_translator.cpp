@@ -1,6 +1,7 @@
 #include "test_framework.hpp"
 #include <brass/brass.hpp>
 #include <brass/il_translator/il_translator.hpp>
+#include "../../src/il_translator/il_runtime.hpp"
 #include <brass/mir/printer.hpp>
 #include <brass/interpreter/interpreter.hpp>
 #include "msvc_toolchain_helper.hpp"
@@ -338,8 +339,8 @@ TEST_CASE("Bronze IL - 22-Program Live Corpus JIT and AOT Execution") {
         &brass::il::bronze_method_def,
         &brass::il::bronze_ic_get,
         &brass::il::bronze_ic_set,
-        &brass::il::brass_ic_get_prop,
-        &brass::il::brass_ic_set_prop,
+        &::brass_ic_get_prop,
+        &::brass_ic_set_prop,
         &brass::runtime::brass_dynamic_object_get_prop_str,
         &brass::runtime::brass_dynamic_object_set_prop_str
     };
@@ -486,6 +487,11 @@ TEST_CASE("Bronze IL - 22-Program Live Corpus JIT and AOT Execution") {
         if (!ifs_il.is_open()) {
             il_file = "../tests/bronze_corpus/" + name + ".il";
             exp_file = "../tests/bronze_corpus/" + name + ".expected";
+            ifs_il.open(il_file);
+        }
+        if (!ifs_il.is_open()) {
+            il_file = "/home/j/projects/brass/tests/bronze_corpus/" + name + ".il";
+            exp_file = "/home/j/projects/brass/tests/bronze_corpus/" + name + ".expected";
             ifs_il.open(il_file);
         }
         if (!ifs_il.is_open()) {

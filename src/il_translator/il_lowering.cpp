@@ -70,6 +70,39 @@ std::string IlLowering::resolve_callee(const std::string& callee_name) const {
     return callee_name;
 }
 
+Value* IlLowering::get_key_id(Builder& b, uint32_t key_idx) {
+    Value* map_addr = b.build_func_addr("__bronze_key_map");
+    return b.build_load(Type::i32(), map_addr, static_cast<int32_t>(key_idx * sizeof(uint32_t)));
+}
+
+Value* IlLowering::get_val_by_id(uint32_t id, Builder& b, const std::unordered_map<uint32_t, Value*>& val_map) {
+    if (module_env_regs_.count(id)) {
+        Value* env_addr = b.build_func_addr("__bronze_module_env");
+        return b.build_load(Type::i64(), env_addr, 0);
+    }
+    if (current_fn_frame_ptr_ != nullptr) {
+        auto it = current_fn_slot_of_.find(id);
+        if (it != current_fn_slot_of_.end()) {
+            return b.build_load(Type::i64(), current_fn_frame_ptr_, static_cast<int32_t>(16 + it->second * 8));
+        }
+    }
+    auto it = val_map.find(id);
+    if (it != val_map.end()) return it->second;
+    return nullptr;
+}
+
+void IlLowering::set_inst_result(uint32_t result_id, Value* res_val, Builder& b, std::unordered_map<uint32_t, Value*>& val_map) {
+    if (result_id == UINT32_MAX || !res_val) return;
+    val_map[result_id] = res_val;
+    if (current_fn_frame_ptr_ != nullptr) {
+        auto it = current_fn_slot_of_.find(result_id);
+        if (it != current_fn_slot_of_.end()) {
+            Value* stored_val = ensure_type(res_val, Type::i64(), b);
+            b.build_store(Type::i64(), current_fn_frame_ptr_, static_cast<int32_t>(16 + it->second * 8), stored_val);
+        }
+    }
+}
+
 static bool instructions_are_identical(const BronzeInstruction& a, const BronzeInstruction& b) {
     if (a.op != b.op || a.result_type != b.result_type || a.result_id != b.result_id) return false;
     if (a.operands != b.operands) return false;
@@ -143,7 +176,16 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
     mod->add_external_symbol("bronze_call_dynamic_6");
     mod->add_external_symbol("bronze_call_dynamic_7");
     mod->add_external_symbol("bronze_call_dynamic_8");
+    mod->add_external_symbol("bronze_call_dynamic_9");
+    mod->add_external_symbol("bronze_call_dynamic_10");
+    mod->add_external_symbol("bronze_call_dynamic_11");
+    mod->add_external_symbol("bronze_call_dynamic_12");
+    mod->add_external_symbol("bronze_call_dynamic_13");
+    mod->add_external_symbol("bronze_call_dynamic_14");
+    mod->add_external_symbol("bronze_call_dynamic_15");
+    mod->add_external_symbol("bronze_call_dynamic_16");
     mod->add_external_symbol("bronze_call_dynamic_n");
+    mod->add_external_symbol("bronze_get_new_target");
     mod->add_external_symbol("bronze_create_async_machine");
     mod->add_external_symbol("bronze_async_start");
     mod->add_external_symbol("bronze_async_await");
@@ -153,6 +195,7 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
     mod->add_external_symbol("brass_coro_resume");
     mod->add_external_symbol("brass_coro_is_done");
     mod->add_external_symbol("brass_coro_destroy");
+    mod->add_external_symbol("__bronze_key_map");
     mod->add_external_symbol("bronze_register_value_cells");
     mod->add_external_symbol("bronze_concat_begin");
     mod->add_external_symbol("bronze_concat_append");
@@ -169,6 +212,14 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
     mod->add_external_symbol("bronze_construct_6");
     mod->add_external_symbol("bronze_construct_7");
     mod->add_external_symbol("bronze_construct_8");
+    mod->add_external_symbol("bronze_construct_9");
+    mod->add_external_symbol("bronze_construct_10");
+    mod->add_external_symbol("bronze_construct_11");
+    mod->add_external_symbol("bronze_construct_12");
+    mod->add_external_symbol("bronze_construct_13");
+    mod->add_external_symbol("bronze_construct_14");
+    mod->add_external_symbol("bronze_construct_15");
+    mod->add_external_symbol("bronze_construct_16");
     mod->add_external_symbol("bronze_construct");
     mod->add_external_symbol("bronze_class_extends");
     mod->add_external_symbol("bronze_super_call");
@@ -181,7 +232,33 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
     mod->add_external_symbol("bronze_super_call_6");
     mod->add_external_symbol("bronze_super_call_7");
     mod->add_external_symbol("bronze_super_call_8");
+    mod->add_external_symbol("bronze_super_call_9");
+    mod->add_external_symbol("bronze_super_call_10");
+    mod->add_external_symbol("bronze_super_call_11");
+    mod->add_external_symbol("bronze_super_call_12");
+    mod->add_external_symbol("bronze_super_call_13");
+    mod->add_external_symbol("bronze_super_call_14");
+    mod->add_external_symbol("bronze_super_call_15");
+    mod->add_external_symbol("bronze_super_call_16");
     mod->add_external_symbol("bronze_super_call_n");
+    mod->add_external_symbol("bronze_create_generator_object");
+    mod->add_external_symbol("bronze_create_async_generator_object");
+    mod->add_external_symbol("bronze_dynamic_import");
+    mod->add_external_symbol("bronze_iter_value");
+    mod->add_external_symbol("bronze_iter_close");
+    mod->add_external_symbol("bronze_iter_rest");
+    mod->add_external_symbol("bronze_iter_delegate");
+    mod->add_external_symbol("bronze_async_iter_open");
+    mod->add_external_symbol("bronze_async_iter_next");
+    mod->add_external_symbol("bronze_async_iter_close");
+    mod->add_external_symbol("bronze_pattern_check");
+    mod->add_external_symbol("bronze_array_append");
+    mod->add_external_symbol("bronze_array_append_hole");
+    mod->add_external_symbol("bronze_array_spread");
+    mod->add_external_symbol("bronze_object_spread");
+    mod->add_external_symbol("bronze_object_rest");
+    mod->add_external_symbol("bronze_dynamic_call_spread");
+    mod->add_external_symbol("bronze_construct_spread");
     mod->add_external_symbol("bronze_arg_at");
     mod->add_external_symbol("bronze_arguments_object");
     mod->add_external_symbol("bronze_rest_args");
@@ -199,7 +276,14 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
     mod->add_external_symbol("bronze_rel_ge");
     mod->add_external_symbol("bronze_pin_guard");
     mod->add_external_symbol("bronze_census_record");
+    mod->add_external_symbol("bronze_census_register");
+    mod->add_external_symbol("__bronze_census_out_path");
+    mod->add_external_symbol("__bronze_census_sites");
     mod->add_external_symbol("bronze_register_key_manifest");
+    const std::string key_sym = (options_.entry_symbol.empty() || options_.entry_symbol == "main" || options_.entry_symbol == "bronze_main")
+                                    ? "bronze_main_key_constants"
+                                    : (options_.entry_symbol + "_key_constants");
+    mod->add_external_symbol(key_sym);
     mod->add_external_symbol("bronze_box_str_key");
     mod->add_external_symbol("bronze_box_str");
     mod->add_external_symbol("bronze_unbox_str");
@@ -214,10 +298,19 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
     mod->add_external_symbol("bronze_exception_take");
     mod->add_external_symbol("bronze_exception_pending");
     mod->add_external_symbol("bronze_uncaught_exception");
+    mod->add_external_symbol("bronze_gc_frame_push");
+    mod->add_external_symbol("bronze_gc_frame_pop");
     mod->add_external_symbol("bronze_pin_violation");
     mod->add_external_symbol("bronze_pin_check_array");
     mod->add_external_symbol("bronze_pow");
     mod->add_external_symbol("bronze_dynamic_pow");
+    mod->add_external_symbol("bronze_dynamic_bitand");
+    mod->add_external_symbol("bronze_dynamic_bitor");
+    mod->add_external_symbol("bronze_dynamic_bitxor");
+    mod->add_external_symbol("bronze_dynamic_shl");
+    mod->add_external_symbol("bronze_dynamic_shr");
+    mod->add_external_symbol("bronze_dynamic_ushr");
+    mod->add_external_symbol("bronze_dynamic_bitnot");
     mod->add_external_symbol("sin");
     mod->add_external_symbol("cos");
     mod->add_external_symbol("sqrt");
@@ -479,6 +572,36 @@ bool IlLowering::lower_function(const BronzeFunction& fn_ast, Module& mod, const
     Function* fn = mod.get_function(fn_name);
     if (!fn) return false;
 
+    module_env_regs_.clear();
+    current_fn_slot_of_.clear();
+    current_fn_frame_ptr_ = nullptr;
+    uint32_t total_slots = 0;
+
+    for (const auto& p : fn_ast.params) {
+        if (p.second == BronzeType::Dynamic || p.second == BronzeType::Unknown) {
+            if (!current_fn_slot_of_.count(p.first)) {
+                current_fn_slot_of_[p.first] = total_slots++;
+            }
+        }
+    }
+    for (const auto& blk : fn_ast.blocks) {
+        for (const auto& p : blk.params) {
+            if (p.second == BronzeType::Dynamic || p.second == BronzeType::Unknown) {
+                if (!current_fn_slot_of_.count(p.first)) {
+                    current_fn_slot_of_[p.first] = total_slots++;
+                }
+            }
+        }
+        for (const auto& inst : blk.instructions) {
+            if (inst.result_id != UINT32_MAX &&
+                (inst.result_type == BronzeType::Dynamic || inst.result_type == BronzeType::Unknown)) {
+                if (!current_fn_slot_of_.count(inst.result_id)) {
+                    current_fn_slot_of_[inst.result_id] = total_slots++;
+                }
+            }
+        }
+    }
+
     Builder b(mod);
     b.set_function(fn);
 
@@ -501,13 +624,37 @@ bool IlLowering::lower_function(const BronzeFunction& fn_ast, Module& mod, const
             Value* param_val = b.add_block_param(entry_bb, param_type);
             val_map[param_id] = param_val;
         }
+
+        b.position_at_end(entry_bb);
+        if (total_slots > 0) {
+            current_fn_frame_ptr_ = b.build_call("bronze_gc_frame_push", Type::ptr(),
+                                                {b.build_iconst_i32(static_cast<int32_t>(total_slots))});
+            for (size_t i = 0; i < fn_ast.params.size(); ++i) {
+                uint32_t param_id = fn_ast.params[i].first;
+                if (current_fn_slot_of_.count(param_id)) {
+                    Value* pval = ensure_type(val_map[param_id], Type::i64(), b);
+                    b.build_store(Type::i64(), current_fn_frame_ptr_,
+                                  static_cast<int32_t>(16 + current_fn_slot_of_[param_id] * 8), pval);
+                }
+            }
+        }
+
         if (fn_name == "main") {
-            b.position_at_end(entry_bb);
             Value* env_addr = b.build_func_addr("__bronze_module_env");
             Value* count_val = b.build_iconst_i64(1);
             b.build_call("bronze_register_value_cells", Type::void_type(), {env_addr, count_val});
-            Value* manifest_addr = b.build_func_addr("bronze_main_key_constants");
-            b.build_call("bronze_register_key_manifest", Type::void_type(), {manifest_addr});
+            const std::string key_sym = (options_.entry_symbol.empty() || options_.entry_symbol == "main" || options_.entry_symbol == "bronze_main")
+                                            ? "bronze_main_key_constants"
+                                            : (options_.entry_symbol + "_key_constants");
+            Value* manifest_addr = b.build_func_addr(key_sym);
+            Value* map_addr = b.build_func_addr("__bronze_key_map");
+            b.build_call("bronze_register_key_manifest", Type::void_type(), {manifest_addr, map_addr});
+            if (options_.enable_census && options_.census_site_count > 0) {
+                Value* out_path = b.build_func_addr("__bronze_census_out_path");
+                Value* sites_addr = b.build_func_addr("__bronze_census_sites");
+                Value* site_count = b.build_iconst_i32(static_cast<int32_t>(options_.census_site_count));
+                b.build_call("bronze_census_register", Type::void_type(), {out_path, sites_addr, site_count, map_addr});
+            }
         }
     }
 
@@ -528,6 +675,16 @@ bool IlLowering::lower_function(const BronzeFunction& fn_ast, Module& mod, const
         BasicBlock* bb = block_map[blk_ast.id];
         b.position_at_end(bb);
         uint32_t cont_counter = 0;
+
+        if (blk_ast.id != fn_ast.blocks[0].id && current_fn_frame_ptr_ != nullptr) {
+            for (const auto& p : blk_ast.params) {
+                if (current_fn_slot_of_.count(p.first)) {
+                    Value* pval = ensure_type(val_map[p.first], Type::i64(), b);
+                    b.build_store(Type::i64(), current_fn_frame_ptr_,
+                                  static_cast<int32_t>(16 + current_fn_slot_of_[p.first] * 8), pval);
+                }
+            }
+        }
 
         for (const auto& inst_ast : blk_ast.instructions) {
             if (current_file_id_ != 0 && inst_ast.line > 0) {
@@ -631,6 +788,35 @@ bool IlLowering::emit_wrapper(const BronzeFunction& fn_ast, Module& mod, const s
         first_source_param = (needs_env ? 1 : 0) + (needs_this ? 1 : 0);
     }
 
+    Value* wrap_frame = nullptr;
+    if (needs_arguments || has_rest) {
+        wrap_frame = b.build_call("bronze_gc_frame_push", Type::ptr(), {b.build_iconst_i32(4)});
+        b.build_store(Type::i64(), wrap_frame, 16 + 0 * 8, val_env);
+        b.build_store(Type::i64(), wrap_frame, 16 + 1 * 8, val_this);
+    }
+
+    Value* arguments_arg = nullptr;
+    if (needs_arguments) {
+        Value* callee_val = is_strict ? b.build_iconst_i64(static_cast<int64_t>(kUndefinedTag)) : val_env;
+        Value* is_strict_val = b.build_iconst_i32(is_strict ? 1 : 0);
+        arguments_arg = b.build_call("bronze_arguments_object", Type::i64(), {val_argc, val_argv, callee_val, is_strict_val});
+        b.build_store(Type::i64(), wrap_frame, 16 + 2 * 8, arguments_arg);
+        val_env = b.build_load(Type::i64(), wrap_frame, 16 + 0 * 8);
+        val_this = b.build_load(Type::i64(), wrap_frame, 16 + 1 * 8);
+    }
+
+    Value* rest_arg = nullptr;
+    if (has_rest) {
+        uint32_t first_rest = static_cast<uint32_t>(fn_ast.params.size() - 1 - first_source_param);
+        rest_arg = b.build_call("bronze_rest_args", Type::i64(), {val_argc, val_argv, b.build_iconst_i32(static_cast<int32_t>(first_rest))});
+        b.build_store(Type::i64(), wrap_frame, 16 + 3 * 8, rest_arg);
+        val_env = b.build_load(Type::i64(), wrap_frame, 16 + 0 * 8);
+        val_this = b.build_load(Type::i64(), wrap_frame, 16 + 1 * 8);
+        if (needs_arguments) {
+            arguments_arg = b.build_load(Type::i64(), wrap_frame, 16 + 2 * 8);
+        }
+    }
+
     const size_t named_count = (fn_ast.params.size() > first_source_param + (has_rest ? 1 : 0))
         ? (fn_ast.params.size() - first_source_param - (has_rest ? 1 : 0))
         : 0;
@@ -647,19 +833,6 @@ bool IlLowering::emit_wrapper(const BronzeFunction& fn_ast, Module& mod, const s
         loaded.push_back(raw);
     }
 
-    Value* arguments_arg = nullptr;
-    if (needs_arguments) {
-        Value* callee_val = is_strict ? b.build_iconst_i64(static_cast<int64_t>(kUndefinedTag)) : val_env;
-        Value* is_strict_val = b.build_iconst_i32(is_strict ? 1 : 0);
-        arguments_arg = b.build_call("bronze_arguments_object", Type::i64(), {val_argc, val_argv, callee_val, is_strict_val});
-    }
-
-    Value* rest_arg = nullptr;
-    if (has_rest) {
-        uint32_t first_rest = static_cast<uint32_t>(fn_ast.params.size() - 1 - first_source_param);
-        rest_arg = b.build_call("bronze_rest_args", Type::i64(), {val_argc, val_argv, b.build_iconst_i32(static_cast<int32_t>(first_rest))});
-    }
-
     std::vector<Value*> call_args;
     if (needs_env) call_args.push_back(val_env);
     if (needs_this) call_args.push_back(val_this);
@@ -674,7 +847,32 @@ bool IlLowering::emit_wrapper(const BronzeFunction& fn_ast, Module& mod, const s
         Value* raw_i64 = loaded[source_idx];
         BronzeType param_type = fn_ast.params[p].second;
         if (param_type == BronzeType::F64) {
-            call_args.push_back(b.build_call("bronze_unbox_f64", Type::f64(), {raw_i64}));
+            bool is_pinned = false;
+            uint32_t pin_key = 0;
+            if (it_meta != options_.function_meta.end() && p < it_meta->second.params_pinned.size() && it_meta->second.params_pinned[p]) {
+                is_pinned = true;
+                pin_key = (p < it_meta->second.param_pin_keys.size()) ? it_meta->second.param_pin_keys[p] : 0;
+            }
+            if (is_pinned) {
+                BasicBlock* cur_bb = b.current_block();
+                BasicBlock* bad_bb = b.append_block("w_pin_bad_" + std::to_string(p));
+                BasicBlock* ok_bb = b.append_block("w_pin_ok_" + std::to_string(p));
+                b.position_at_end(cur_bb);
+                Value* is_num = b.build_ule(raw_i64, b.build_iconst_i64(static_cast<int64_t>(0xFFF0000000000000ULL)));
+                b.build_br_if(is_num, ok_bb, bad_bb);
+
+                b.position_at_end(bad_bb);
+                b.build_call("bronze_pin_violation", Type::i64(), {get_key_id(b, pin_key), raw_i64});
+                if (wrap_frame) {
+                    b.build_call("bronze_gc_frame_pop", Type::void_type(), {});
+                }
+                b.build_ret(b.build_iconst_i64(static_cast<int64_t>(kUndefinedTag)));
+
+                b.position_at_end(ok_bb);
+                call_args.push_back(b.build_bitcast_f64_i64(raw_i64));
+            } else {
+                call_args.push_back(b.build_call("bronze_unbox_f64", Type::f64(), {raw_i64}));
+            }
         } else if (param_type == BronzeType::I32) {
             call_args.push_back(b.build_call("bronze_unbox_i32", Type::i32(), {raw_i64}));
         } else if (param_type == BronzeType::Bool) {
@@ -698,6 +896,9 @@ bool IlLowering::emit_wrapper(const BronzeFunction& fn_ast, Module& mod, const s
         ret_val = b.build_call("bronze_box_bool", Type::i64(), {call_res});
     } else {
         ret_val = call_res;
+    }
+    if (wrap_frame) {
+        b.build_call("bronze_gc_frame_pop", Type::void_type(), {});
     }
     b.build_ret(ret_val);
     wfn->rebuild_cfg_predecessors();

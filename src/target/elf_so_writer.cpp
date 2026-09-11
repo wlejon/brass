@@ -310,7 +310,7 @@ std::vector<uint8_t> ElfSoWriter::write() {
 
     // 5. Layout Segments and Compute Offsets / VAddrs
     constexpr uint64_t PAGE_SIZE = 0x1000;
-    constexpr uint64_t PHDR_COUNT = 5; // PT_PHDR, PT_LOAD(R), PT_LOAD(RX), PT_LOAD(RW), PT_DYNAMIC
+    constexpr uint64_t PHDR_COUNT = 6; // PT_PHDR, PT_LOAD(R), PT_LOAD(RX), PT_LOAD(RW), PT_DYNAMIC, PT_GNU_STACK
 
     uint64_t ehdr_size = 64;
     uint64_t phdrs_size = PHDR_COUNT * 56;
@@ -545,6 +545,8 @@ std::vector<uint8_t> ElfSoWriter::write() {
     uint64_t dyn_vaddr = sections[dynamic_sec_idx].sh_addr;
     uint64_t dyn_sz = sections[dynamic_sec_idx].sh_size;
     write_phdr(elf64::PT_DYNAMIC, elf64::PF_R | elf64::PF_W, dyn_off, dyn_vaddr, dyn_sz, dyn_sz, 8);
+    // 5: PT_GNU_STACK
+    write_phdr(elf64::PT_GNU_STACK, elf64::PF_R | elf64::PF_W, 0, 0, 0, 0, 8);
 
     // Section Data
     for (size_t i = 1; i < sections.size(); ++i) {
