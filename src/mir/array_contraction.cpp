@@ -166,7 +166,7 @@ bool contract_arrays_in_loop(
         for (Instruction* inst : *bb) {
             if (!inst) continue;
             Opcode op = inst->opcode();
-            if (op == Opcode::call && is_allocation_callee(inst->symbol())) {
+            if (op == Opcode::call && (is_allocation_callee(inst->symbol()) || inst->symbol() == "bronze_create_array")) {
                 if (inst->result() && !does_array_escape(fn, loop, inst->result())) {
                     alloc_insts.push_back(inst);
                 }

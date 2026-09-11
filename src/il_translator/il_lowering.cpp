@@ -51,7 +51,15 @@ Value* IlLowering::ensure_type(Value* val, Type target_type, Builder& b) {
         return b.build_trunc_i32(val);
     }
     if (src_type == Type::f64() && target_type == Type::i64()) {
-        return b.build_bitcast_i64_f64(val);
+        if (val->defining_instruction() &&
+            val->defining_instruction()->opcode() == Opcode::bitcast_f64_i64 &&
+            val->defining_instruction()->operand(0)->type() == Type::i64()) {
+            return val->defining_instruction()->operand(0);
+        }
+        Value* bits = b.build_bitcast_i64_f64(val);
+        Value* abs_bits = b.build_and(bits, b.build_iconst_i64(static_cast<int64_t>(0x7FFFFFFFFFFFFFFFULL)));
+        Value* is_nan = b.build_ugt(abs_bits, b.build_iconst_i64(static_cast<int64_t>(0x7FF0000000000000ULL)));
+        return b.build_select(is_nan, b.build_iconst_i64(static_cast<int64_t>(0x7FF8000000000000ULL)), bits);
     }
     if (src_type == Type::i64() && target_type == Type::f64()) {
         return b.build_bitcast_f64_i64(val);
@@ -70,25 +78,48 @@ std::string IlLowering::resolve_callee(const std::string& callee_name) const {
     return callee_name;
 }
 
+std::string IlLowering::resolve_create_func_callee(const std::string& callee_name) {
+    auto it_caller = caller_create_func_targets_.find(current_fn_idx_);
+    if (it_caller != caller_create_func_targets_.end()) {
+        auto it_targets = it_caller->second.find(callee_name);
+        if (it_targets != it_caller->second.end() && !it_targets->second.empty()) {
+            size_t k = create_func_counter_[callee_name]++;
+            if (k < it_targets->second.size()) {
+                return it_targets->second[k];
+            }
+        }
+    }
+    return resolve_callee(callee_name);
+}
+
 Value* IlLowering::get_key_id(Builder& b, uint32_t key_idx) {
     Value* map_addr = b.build_func_addr("__bronze_key_map");
     return b.build_load(Type::i32(), map_addr, static_cast<int32_t>(key_idx * sizeof(uint32_t)));
 }
 
+uint32_t IlLowering::find_key_constant(const std::string& name) const {
+    for (size_t i = 0; i < options_.key_constants.size(); ++i) {
+        if (options_.key_constants[i] == name) return static_cast<uint32_t>(i);
+    }
+    return 0;
+}
+
 Value* IlLowering::get_val_by_id(uint32_t id, Builder& b, const std::unordered_map<uint32_t, Value*>& val_map) {
+    Value* result = nullptr;
     if (module_env_regs_.count(id)) {
         Value* env_addr = b.build_func_addr("__bronze_module_env");
-        return b.build_load(Type::i64(), env_addr, 0);
-    }
-    if (current_fn_frame_ptr_ != nullptr) {
+        result = b.build_load(Type::i64(), env_addr, 0);
+    } else if (current_fn_frame_ptr_ != nullptr) {
         auto it = current_fn_slot_of_.find(id);
         if (it != current_fn_slot_of_.end()) {
-            return b.build_load(Type::i64(), current_fn_frame_ptr_, static_cast<int32_t>(16 + it->second * 8));
+            result = b.build_load(Type::i64(), current_fn_frame_ptr_, static_cast<int32_t>(16 + it->second * 8));
         }
     }
-    auto it = val_map.find(id);
-    if (it != val_map.end()) return it->second;
-    return nullptr;
+    if (!result) {
+        auto it = val_map.find(id);
+        if (it != val_map.end()) result = it->second;
+    }
+    return result;
 }
 
 void IlLowering::set_inst_result(uint32_t result_id, Value* res_val, Builder& b, std::unordered_map<uint32_t, Value*>& val_map) {
@@ -137,187 +168,7 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
     current_file_id_ = ast.name.empty() ? 0 : mod->debug_context().get_or_add_file(ast.name);
 
     // Register external runtime helper functions
-    mod->add_external_symbol("bronze_print_f64");
-    mod->add_external_symbol("bronze_print_i32");
-    mod->add_external_symbol("bronze_print_dynamic");
-    mod->add_external_symbol("bronze_print_space");
-    mod->add_external_symbol("bronze_print_newline");
-    mod->add_external_symbol("bronze_dynamic_add");
-    mod->add_external_symbol("bronze_f64_mod");
-    mod->add_external_symbol("bronze_name_resolve");
-    mod->add_external_symbol("bronze_env_create");
-    mod->add_external_symbol("bronze_env_get");
-    mod->add_external_symbol("bronze_env_set");
-    mod->add_external_symbol("bronze_create_func");
-    mod->add_external_symbol("bronze_create_array");
-    mod->add_external_symbol("bronze_create_object");
-    mod->add_external_symbol("bronze_prop_get");
-    mod->add_external_symbol("bronze_prop_set");
-    mod->add_external_symbol("bronze_elem_get");
-    mod->add_external_symbol("bronze_elem_set");
-    mod->add_external_symbol("bronze_method_def");
-    mod->add_external_symbol("bronze_method_def_computed");
-    mod->add_external_symbol("bronze_define_own_attr");
-    mod->add_external_symbol("bronze_accessor_def");
-    mod->add_external_symbol("bronze_accessor_def_computed");
-    mod->add_external_symbol("bronze_module_namespace");
-    mod->add_external_symbol("bronze_ic_get");
-    mod->add_external_symbol("bronze_ic_set");
-    mod->add_external_symbol("brass_ic_get_prop");
-    mod->add_external_symbol("brass_ic_set_prop");
-    mod->add_external_symbol("brass_dynamic_object_get_prop_str");
-    mod->add_external_symbol("brass_dynamic_object_set_prop_str");
-    mod->add_external_symbol("bronze_call_dynamic_0");
-    mod->add_external_symbol("bronze_call_dynamic_1");
-    mod->add_external_symbol("bronze_call_dynamic_2");
-    mod->add_external_symbol("bronze_call_dynamic_3");
-    mod->add_external_symbol("bronze_call_dynamic_4");
-    mod->add_external_symbol("bronze_call_dynamic_5");
-    mod->add_external_symbol("bronze_call_dynamic_6");
-    mod->add_external_symbol("bronze_call_dynamic_7");
-    mod->add_external_symbol("bronze_call_dynamic_8");
-    mod->add_external_symbol("bronze_call_dynamic_9");
-    mod->add_external_symbol("bronze_call_dynamic_10");
-    mod->add_external_symbol("bronze_call_dynamic_11");
-    mod->add_external_symbol("bronze_call_dynamic_12");
-    mod->add_external_symbol("bronze_call_dynamic_13");
-    mod->add_external_symbol("bronze_call_dynamic_14");
-    mod->add_external_symbol("bronze_call_dynamic_15");
-    mod->add_external_symbol("bronze_call_dynamic_16");
-    mod->add_external_symbol("bronze_call_dynamic_n");
-    mod->add_external_symbol("bronze_get_new_target");
-    mod->add_external_symbol("bronze_create_async_machine");
-    mod->add_external_symbol("bronze_async_start");
-    mod->add_external_symbol("bronze_async_await");
-    mod->add_external_symbol("bronze_iter_open");
-    mod->add_external_symbol("bronze_iter_step");
-    mod->add_external_symbol("brass_coro_create");
-    mod->add_external_symbol("brass_coro_resume");
-    mod->add_external_symbol("brass_coro_is_done");
-    mod->add_external_symbol("brass_coro_destroy");
-    mod->add_external_symbol("__bronze_key_map");
-    mod->add_external_symbol("bronze_register_value_cells");
-    mod->add_external_symbol("bronze_concat_begin");
-    mod->add_external_symbol("bronze_concat_append");
-    mod->add_external_symbol("bronze_concat_end");
-    mod->add_external_symbol("bronze_global_get_name");
-    mod->add_external_symbol("bronze_global_get");
-    mod->add_external_symbol("bronze_typeof");
-    mod->add_external_symbol("bronze_construct_0");
-    mod->add_external_symbol("bronze_construct_1");
-    mod->add_external_symbol("bronze_construct_2");
-    mod->add_external_symbol("bronze_construct_3");
-    mod->add_external_symbol("bronze_construct_4");
-    mod->add_external_symbol("bronze_construct_5");
-    mod->add_external_symbol("bronze_construct_6");
-    mod->add_external_symbol("bronze_construct_7");
-    mod->add_external_symbol("bronze_construct_8");
-    mod->add_external_symbol("bronze_construct_9");
-    mod->add_external_symbol("bronze_construct_10");
-    mod->add_external_symbol("bronze_construct_11");
-    mod->add_external_symbol("bronze_construct_12");
-    mod->add_external_symbol("bronze_construct_13");
-    mod->add_external_symbol("bronze_construct_14");
-    mod->add_external_symbol("bronze_construct_15");
-    mod->add_external_symbol("bronze_construct_16");
-    mod->add_external_symbol("bronze_construct");
-    mod->add_external_symbol("bronze_class_extends");
-    mod->add_external_symbol("bronze_super_call");
-    mod->add_external_symbol("bronze_super_call_0");
-    mod->add_external_symbol("bronze_super_call_1");
-    mod->add_external_symbol("bronze_super_call_2");
-    mod->add_external_symbol("bronze_super_call_3");
-    mod->add_external_symbol("bronze_super_call_4");
-    mod->add_external_symbol("bronze_super_call_5");
-    mod->add_external_symbol("bronze_super_call_6");
-    mod->add_external_symbol("bronze_super_call_7");
-    mod->add_external_symbol("bronze_super_call_8");
-    mod->add_external_symbol("bronze_super_call_9");
-    mod->add_external_symbol("bronze_super_call_10");
-    mod->add_external_symbol("bronze_super_call_11");
-    mod->add_external_symbol("bronze_super_call_12");
-    mod->add_external_symbol("bronze_super_call_13");
-    mod->add_external_symbol("bronze_super_call_14");
-    mod->add_external_symbol("bronze_super_call_15");
-    mod->add_external_symbol("bronze_super_call_16");
-    mod->add_external_symbol("bronze_super_call_n");
-    mod->add_external_symbol("bronze_create_generator_object");
-    mod->add_external_symbol("bronze_create_async_generator_object");
-    mod->add_external_symbol("bronze_dynamic_import");
-    mod->add_external_symbol("bronze_iter_value");
-    mod->add_external_symbol("bronze_iter_close");
-    mod->add_external_symbol("bronze_iter_rest");
-    mod->add_external_symbol("bronze_iter_delegate");
-    mod->add_external_symbol("bronze_async_iter_open");
-    mod->add_external_symbol("bronze_async_iter_next");
-    mod->add_external_symbol("bronze_async_iter_close");
-    mod->add_external_symbol("bronze_pattern_check");
-    mod->add_external_symbol("bronze_array_append");
-    mod->add_external_symbol("bronze_array_append_hole");
-    mod->add_external_symbol("bronze_array_spread");
-    mod->add_external_symbol("bronze_object_spread");
-    mod->add_external_symbol("bronze_object_rest");
-    mod->add_external_symbol("bronze_dynamic_call_spread");
-    mod->add_external_symbol("bronze_construct_spread");
-    mod->add_external_symbol("bronze_arg_at");
-    mod->add_external_symbol("bronze_arguments_object");
-    mod->add_external_symbol("bronze_rest_args");
-    mod->add_external_symbol("bronze_super_get");
-    mod->add_external_symbol("bronze_object_keys");
-    mod->add_external_symbol("bronze_for_in_keys");
-    mod->add_external_symbol("bronze_instanceof");
-    mod->add_external_symbol("bronze_has_property");
-    mod->add_external_symbol("bronze_is_nullish");
-    mod->add_external_symbol("bronze_strict_eq");
-    mod->add_external_symbol("bronze_loose_eq");
-    mod->add_external_symbol("bronze_rel_lt");
-    mod->add_external_symbol("bronze_rel_gt");
-    mod->add_external_symbol("bronze_rel_le");
-    mod->add_external_symbol("bronze_rel_ge");
-    mod->add_external_symbol("bronze_pin_guard");
-    mod->add_external_symbol("bronze_census_record");
-    mod->add_external_symbol("bronze_census_register");
-    mod->add_external_symbol("__bronze_census_out_path");
-    mod->add_external_symbol("__bronze_census_sites");
-    mod->add_external_symbol("bronze_register_key_manifest");
-    const std::string key_sym = (options_.entry_symbol.empty() || options_.entry_symbol == "main" || options_.entry_symbol == "bronze_main")
-                                    ? "bronze_main_key_constants"
-                                    : (options_.entry_symbol + "_key_constants");
-    mod->add_external_symbol(key_sym);
-    mod->add_external_symbol("bronze_box_str_key");
-    mod->add_external_symbol("bronze_box_str");
-    mod->add_external_symbol("bronze_unbox_str");
-    mod->add_external_symbol("bronze_unbox_f64");
-    mod->add_external_symbol("bronze_box_f64");
-    mod->add_external_symbol("bronze_unbox_i32");
-    mod->add_external_symbol("bronze_box_i32");
-    mod->add_external_symbol("bronze_unbox_bool");
-    mod->add_external_symbol("bronze_box_bool");
-    mod->add_external_symbol("bronze_exception_get");
-    mod->add_external_symbol("bronze_exception_set");
-    mod->add_external_symbol("bronze_exception_take");
-    mod->add_external_symbol("bronze_exception_pending");
-    mod->add_external_symbol("bronze_uncaught_exception");
-    mod->add_external_symbol("bronze_gc_frame_push");
-    mod->add_external_symbol("bronze_gc_frame_pop");
-    mod->add_external_symbol("bronze_pin_violation");
-    mod->add_external_symbol("bronze_pin_check_array");
-    mod->add_external_symbol("bronze_pow");
-    mod->add_external_symbol("bronze_dynamic_pow");
-    mod->add_external_symbol("bronze_dynamic_bitand");
-    mod->add_external_symbol("bronze_dynamic_bitor");
-    mod->add_external_symbol("bronze_dynamic_bitxor");
-    mod->add_external_symbol("bronze_dynamic_shl");
-    mod->add_external_symbol("bronze_dynamic_shr");
-    mod->add_external_symbol("bronze_dynamic_ushr");
-    mod->add_external_symbol("bronze_dynamic_bitnot");
-    mod->add_external_symbol("sin");
-    mod->add_external_symbol("cos");
-    mod->add_external_symbol("sqrt");
-    mod->add_external_symbol("fabs");
-    mod->add_external_symbol("floor");
-    mod->add_external_symbol("ceil");
-    mod->add_external_symbol("trunc");
+    register_all_module_external_symbols(mod.get(), options_.entry_symbol);
 
     current_ast_ = &ast;
 
@@ -332,6 +183,7 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
 
     caller_to_callee_map_.clear();
     std::vector<std::string> resolved_names(ast.functions.size());
+    std::unordered_set<std::string> curry_names;
     for (const auto& [name, indices] : name_to_indices) {
         if (indices.size() == 1) {
             resolved_names[indices[0]] = name;
@@ -348,6 +200,29 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
                 resolved_names[indices[0]] = name;
                 for (size_t k = 1; k < indices.size(); ++k) {
                     resolved_names[indices[k]] = ""; // skip duplicate definition
+                }
+                continue;
+            }
+
+            if (name == "main") {
+                size_t entry_idx = indices.back();
+                for (size_t idx : indices) {
+                    if (ast.functions[idx].return_type == BronzeType::Void && ast.functions[idx].params.empty()) {
+                        entry_idx = idx;
+                        break;
+                    }
+                }
+                size_t user_k = 0;
+                for (size_t idx : indices) {
+                    if (idx == entry_idx) {
+                        resolved_names[idx] = "main";
+                    } else {
+                        resolved_names[idx] = "main$" + std::to_string(user_k++);
+                    }
+                }
+                std::string target_callee = (indices[0] == entry_idx && indices.size() > 1) ? resolved_names[indices[1]] : resolved_names[indices[0]];
+                for (size_t fn_idx = 0; fn_idx < ast.functions.size(); ++fn_idx) {
+                    caller_to_callee_map_[fn_idx]["main"] = target_callee;
                 }
                 continue;
             }
@@ -373,6 +248,7 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
 
             if (non_leaf_idx != SIZE_MAX) {
                 // Curry pattern: non-leaf closure retains name; leaf closure gets $leaf
+                curry_names.insert(name);
                 for (size_t idx : indices) {
                     if (idx == non_leaf_idx) {
                         resolved_names[idx] = name;
@@ -388,22 +264,62 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
                     }
                 }
             } else {
-                // Different functions sharing a name (e.g. dupname.js)
                 for (size_t k = 0; k < indices.size(); ++k) {
                     resolved_names[indices[k]] = name + "$" + std::to_string(k);
                 }
-                size_t match_k = 0;
-                for (size_t fn_idx = 0; fn_idx < ast.functions.size(); ++fn_idx) {
-                    for (const auto& blk : ast.functions[fn_idx].blocks) {
-                        for (const auto& inst : blk.instructions) {
-                            if ((inst.op == BronzeOp::Call || inst.op == BronzeOp::CreateFunc ||
-                                 inst.op == BronzeOp::FuncRef) && inst.callee_name == name) {
-                                if (match_k < indices.size()) {
-                                    caller_to_callee_map_[fn_idx][name] = resolved_names[indices[match_k++]];
-                                }
+            }
+        }
+    }
+
+    // Map callers to callees for duplicate function names based on CreateFunc instantiation order and lexical scope inheritance
+    caller_create_func_targets_.clear();
+    std::unordered_map<std::string, size_t> create_func_occurrence;
+    std::unordered_map<size_t, size_t> closure_parent_fn;
+    for (size_t fn_idx = 0; fn_idx < ast.functions.size(); ++fn_idx) {
+        for (const auto& blk : ast.functions[fn_idx].blocks) {
+            for (const auto& inst : blk.instructions) {
+                if (inst.op == BronzeOp::CreateFunc) {
+                    const std::string& cname = inst.callee_name;
+                    auto it = name_to_indices.find(cname);
+                    if (it != name_to_indices.end() && it->second.size() > 1 && cname != "main" && !curry_names.count(cname)) {
+                        size_t k = create_func_occurrence[cname]++;
+                        if (k < it->second.size()) {
+                            size_t child_fn_idx = it->second[k];
+                            const std::string& child_res_name = resolved_names[child_fn_idx];
+                            if (!child_res_name.empty()) {
+                                caller_create_func_targets_[fn_idx][cname].push_back(child_res_name);
+                                caller_to_callee_map_[fn_idx][cname] = child_res_name;
+                                closure_parent_fn[child_fn_idx] = fn_idx;
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+
+    // Propagate mappings from parent scopes down to child closures
+    for (size_t fn_idx = 0; fn_idx < ast.functions.size(); ++fn_idx) {
+        auto pit = closure_parent_fn.find(fn_idx);
+        if (pit != closure_parent_fn.end()) {
+            size_t p = pit->second;
+            auto it_p = caller_to_callee_map_.find(p);
+            if (it_p != caller_to_callee_map_.end()) {
+                for (const auto& [cname, target] : it_p->second) {
+                    if (!curry_names.count(cname) && caller_to_callee_map_[fn_idx].find(cname) == caller_to_callee_map_[fn_idx].end()) {
+                        caller_to_callee_map_[fn_idx][cname] = target;
+                    }
+                }
+            }
+        }
+    }
+
+    // Default fallback for any remaining duplicate function references
+    for (size_t fn_idx = 0; fn_idx < ast.functions.size(); ++fn_idx) {
+        for (const auto& [name, indices] : name_to_indices) {
+            if (indices.size() > 1 && name != "main" && !curry_names.count(name) && !resolved_names[indices[0]].empty()) {
+                if (caller_to_callee_map_[fn_idx].find(name) == caller_to_callee_map_[fn_idx].end()) {
+                    caller_to_callee_map_[fn_idx][name] = resolved_names[indices[0]];
                 }
             }
         }
@@ -574,6 +490,7 @@ bool IlLowering::lower_function(const BronzeFunction& fn_ast, Module& mod, const
 
     module_env_regs_.clear();
     current_fn_slot_of_.clear();
+    create_func_counter_.clear();
     current_fn_frame_ptr_ = nullptr;
     uint32_t total_slots = 0;
 
@@ -643,6 +560,9 @@ bool IlLowering::lower_function(const BronzeFunction& fn_ast, Module& mod, const
             Value* env_addr = b.build_func_addr("__bronze_module_env");
             Value* count_val = b.build_iconst_i64(1);
             b.build_call("bronze_register_value_cells", Type::void_type(), {env_addr, count_val});
+            Value* tpl_addr = b.build_func_addr("__bronze_template_cells");
+            Value* tpl_cells_count = b.build_iconst_i64(1024);
+            b.build_call("bronze_register_value_cells", Type::void_type(), {tpl_addr, tpl_cells_count});
             const std::string key_sym = (options_.entry_symbol.empty() || options_.entry_symbol == "main" || options_.entry_symbol == "bronze_main")
                                             ? "bronze_main_key_constants"
                                             : (options_.entry_symbol + "_key_constants");
@@ -654,6 +574,14 @@ bool IlLowering::lower_function(const BronzeFunction& fn_ast, Module& mod, const
                 Value* sites_addr = b.build_func_addr("__bronze_census_sites");
                 Value* site_count = b.build_iconst_i32(static_cast<int32_t>(options_.census_site_count));
                 b.build_call("bronze_census_register", Type::void_type(), {out_path, sites_addr, site_count, map_addr});
+            }
+            for (size_t f = 0; f < options_.source_files.size(); ++f) {
+                if (options_.source_files[f].entry_count == 0) continue;
+                Value* text_addr = b.build_func_addr("__bronze_source_text_" + std::to_string(f));
+                Value* text_len = b.build_iconst_i32(static_cast<int32_t>(options_.source_files[f].text_len));
+                Value* entries_addr = b.build_func_addr("__bronze_source_entries_" + std::to_string(f));
+                Value* entries_count = b.build_iconst_i32(static_cast<int32_t>(options_.source_files[f].entry_count));
+                b.build_call("bronze_register_fn_sources", Type::void_type(), {text_addr, text_len, entries_addr, entries_count});
             }
         }
     }
@@ -788,35 +716,6 @@ bool IlLowering::emit_wrapper(const BronzeFunction& fn_ast, Module& mod, const s
         first_source_param = (needs_env ? 1 : 0) + (needs_this ? 1 : 0);
     }
 
-    Value* wrap_frame = nullptr;
-    if (needs_arguments || has_rest) {
-        wrap_frame = b.build_call("bronze_gc_frame_push", Type::ptr(), {b.build_iconst_i32(4)});
-        b.build_store(Type::i64(), wrap_frame, 16 + 0 * 8, val_env);
-        b.build_store(Type::i64(), wrap_frame, 16 + 1 * 8, val_this);
-    }
-
-    Value* arguments_arg = nullptr;
-    if (needs_arguments) {
-        Value* callee_val = is_strict ? b.build_iconst_i64(static_cast<int64_t>(kUndefinedTag)) : val_env;
-        Value* is_strict_val = b.build_iconst_i32(is_strict ? 1 : 0);
-        arguments_arg = b.build_call("bronze_arguments_object", Type::i64(), {val_argc, val_argv, callee_val, is_strict_val});
-        b.build_store(Type::i64(), wrap_frame, 16 + 2 * 8, arguments_arg);
-        val_env = b.build_load(Type::i64(), wrap_frame, 16 + 0 * 8);
-        val_this = b.build_load(Type::i64(), wrap_frame, 16 + 1 * 8);
-    }
-
-    Value* rest_arg = nullptr;
-    if (has_rest) {
-        uint32_t first_rest = static_cast<uint32_t>(fn_ast.params.size() - 1 - first_source_param);
-        rest_arg = b.build_call("bronze_rest_args", Type::i64(), {val_argc, val_argv, b.build_iconst_i32(static_cast<int32_t>(first_rest))});
-        b.build_store(Type::i64(), wrap_frame, 16 + 3 * 8, rest_arg);
-        val_env = b.build_load(Type::i64(), wrap_frame, 16 + 0 * 8);
-        val_this = b.build_load(Type::i64(), wrap_frame, 16 + 1 * 8);
-        if (needs_arguments) {
-            arguments_arg = b.build_load(Type::i64(), wrap_frame, 16 + 2 * 8);
-        }
-    }
-
     const size_t named_count = (fn_ast.params.size() > first_source_param + (has_rest ? 1 : 0))
         ? (fn_ast.params.size() - first_source_param - (has_rest ? 1 : 0))
         : 0;
@@ -831,6 +730,47 @@ bool IlLowering::emit_wrapper(const BronzeFunction& fn_ast, Module& mod, const s
             raw = b.build_load(Type::i64(), val_argv, static_cast<int32_t>(n * 8));
         }
         loaded.push_back(raw);
+    }
+
+    Value* wrap_frame = nullptr;
+    if (needs_arguments || has_rest) {
+        uint32_t total_slots = 4 + static_cast<uint32_t>(named_count);
+        wrap_frame = b.build_call("bronze_gc_frame_push", Type::ptr(), {b.build_iconst_i32(static_cast<int32_t>(total_slots))});
+        b.build_store(Type::i64(), wrap_frame, 16 + 0 * 8, val_env);
+        b.build_store(Type::i64(), wrap_frame, 16 + 1 * 8, val_this);
+        b.build_store(Type::i64(), wrap_frame, 16 + 2 * 8, b.build_iconst_i64(static_cast<int64_t>(kUndefinedTag)));
+        b.build_store(Type::i64(), wrap_frame, 16 + 3 * 8, b.build_iconst_i64(static_cast<int64_t>(kUndefinedTag)));
+        for (size_t n = 0; n < named_count; ++n) {
+            b.build_store(Type::i64(), wrap_frame, 16 + static_cast<int32_t>((4 + n) * 8), loaded[n]);
+        }
+    }
+
+    Value* arguments_arg = nullptr;
+    if (needs_arguments) {
+        Value* callee_val = is_strict ? b.build_iconst_i64(static_cast<int64_t>(kUndefinedTag)) : val_env;
+        Value* is_strict_val = b.build_iconst_i32(is_strict ? 1 : 0);
+        arguments_arg = b.build_call("bronze_arguments_object", Type::i64(), {val_argc, val_argv, callee_val, is_strict_val});
+        b.build_store(Type::i64(), wrap_frame, 16 + 2 * 8, arguments_arg);
+        val_env = b.build_load(Type::i64(), wrap_frame, 16 + 0 * 8);
+        val_this = b.build_load(Type::i64(), wrap_frame, 16 + 1 * 8);
+        for (size_t n = 0; n < named_count; ++n) {
+            loaded[n] = b.build_load(Type::i64(), wrap_frame, 16 + static_cast<int32_t>((4 + n) * 8));
+        }
+    }
+
+    Value* rest_arg = nullptr;
+    if (has_rest) {
+        uint32_t first_rest = static_cast<uint32_t>(fn_ast.params.size() - 1 - first_source_param);
+        rest_arg = b.build_call("bronze_rest_args", Type::i64(), {val_argc, val_argv, b.build_iconst_i32(static_cast<int32_t>(first_rest))});
+        b.build_store(Type::i64(), wrap_frame, 16 + 3 * 8, rest_arg);
+        val_env = b.build_load(Type::i64(), wrap_frame, 16 + 0 * 8);
+        val_this = b.build_load(Type::i64(), wrap_frame, 16 + 1 * 8);
+        if (needs_arguments) {
+            arguments_arg = b.build_load(Type::i64(), wrap_frame, 16 + 2 * 8);
+        }
+        for (size_t n = 0; n < named_count; ++n) {
+            loaded[n] = b.build_load(Type::i64(), wrap_frame, 16 + static_cast<int32_t>((4 + n) * 8));
+        }
     }
 
     std::vector<Value*> call_args;

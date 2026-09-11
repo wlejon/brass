@@ -21,8 +21,6 @@ bool is_allocation_callee(std::string_view symbol) noexcept {
     return symbol == "brass_gc_alloc" ||
            symbol == "host_gc_alloc" ||
            symbol == "alloc_obj" ||
-           symbol == "bronze_create_object" ||
-           symbol == "bronze_create_array" ||
            symbol == "make_array" ||
            symbol == "create_array" ||
            symbol == "alloc_array" ||

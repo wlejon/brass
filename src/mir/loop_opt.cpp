@@ -216,7 +216,11 @@ bool constant_folding_pass(Function& fn) {
                     else if (op == Opcode::xor_ && c0 == 0) replacement = op1;
                 } else if (op0 == op1 && (op == Opcode::sub || op == Opcode::xor_)) {
                     b.position_before(cur);
-                    replacement = (res_type == Type::i32()) ? b.build_iconst_i32(0) : b.build_iconst_i64(0);
+                    if (res_type.is_integer()) {
+                        replacement = (res_type == Type::i32()) ? b.build_iconst_i32(0) : b.build_iconst_i64(0);
+                    } else if (op == Opcode::sub && res_type == Type::f64() && fn.allow_fp_reassociation()) {
+                        replacement = b.build_fconst_f64(0.0);
+                    }
                 }
 
                 if (replacement) {

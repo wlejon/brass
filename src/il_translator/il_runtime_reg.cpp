@@ -8,6 +8,7 @@
 #include <brass/runtime/inline_cache.hpp>
 #include <brass/runtime/coroutine.hpp>
 #include <brass/runtime/parallel_runtime.hpp>
+#include <brass/mir/module.hpp>
 #include <cmath>
 #include <vector>
 
@@ -23,20 +24,37 @@ void register_all_runtime_symbols(codegen::JitExecutionEngine& jit) {
 
     reg("__bronze_module_env", reinterpret_cast<void*>(&g_bronze_module_env));
     reg("__bronze_key_map", reinterpret_cast<void*>(g_bronze_dummy_key_map));
+    reg("__bronze_template_cells", reinterpret_cast<void*>(__bronze_template_cells));
+    reg("bronze_template_object", reinterpret_cast<void*>(&bronze_template_object));
     reg("bronze_register_value_cells", reinterpret_cast<void*>(&bronze_register_value_cells));
+    reg("bronze_register_fn_sources", reinterpret_cast<void*>(&bronze_register_fn_sources));
     reg("bronze_print_f64", reinterpret_cast<void*>(&bronze_print_f64));
     reg("bronze_print_i32", reinterpret_cast<void*>(&bronze_print_i32));
     reg("bronze_print_dynamic", reinterpret_cast<void*>(&bronze_print_dynamic));
     reg("bronze_print_space", reinterpret_cast<void*>(&bronze_print_space));
     reg("bronze_print_newline", reinterpret_cast<void*>(&bronze_print_newline));
+    reg("bronze_print_f64_err", reinterpret_cast<void*>(&bronze_print_f64_err));
+    reg("bronze_print_i32_err", reinterpret_cast<void*>(&bronze_print_i32_err));
+    reg("bronze_print_dynamic_err", reinterpret_cast<void*>(&bronze_print_dynamic_err));
+    reg("bronze_print_space_err", reinterpret_cast<void*>(&bronze_print_space_err));
+    reg("bronze_print_newline_err", reinterpret_cast<void*>(&bronze_print_newline_err));
+    reg("bronze_print_spread", reinterpret_cast<void*>(&bronze_print_spread));
+    reg("bronze_print_spread_err", reinterpret_cast<void*>(&bronze_print_spread_err));
+    reg("bronze_immutable_assign", reinterpret_cast<void*>(&bronze_immutable_assign));
     reg("bronze_dynamic_add", reinterpret_cast<void*>(&bronze_dynamic_add));
     reg("bronze_f64_mod", reinterpret_cast<void*>(&bronze_f64_mod));
 
     reg("bronze_name_resolve", reinterpret_cast<void*>(&bronze_name_resolve));
+    reg("bronze_resolve_name", reinterpret_cast<void*>(&bronze_resolve_name));
     reg("bronze_env_create", reinterpret_cast<void*>(&bronze_env_create));
     reg("bronze_env_get", reinterpret_cast<void*>(&bronze_env_get));
+    reg("bronze_env_get_tdz", reinterpret_cast<void*>(&bronze_env_get_tdz));
     reg("bronze_env_set", reinterpret_cast<void*>(&bronze_env_set));
+    reg("bronze_env_ancestor", reinterpret_cast<void*>(&bronze_env_ancestor));
     reg("bronze_create_func", reinterpret_cast<void*>(&bronze_create_func));
+    reg("bronze_create_function", reinterpret_cast<void*>(&bronze_create_function));
+    reg("bronze_function_singleton", reinterpret_cast<void*>(&bronze_function_singleton));
+    reg("bronze_import_meta", reinterpret_cast<void*>(&bronze_import_meta));
     reg("bronze_create_array", reinterpret_cast<void*>(&bronze_create_array));
     reg("bronze_create_object", reinterpret_cast<void*>(&bronze_create_object));
     reg("bronze_prop_get", reinterpret_cast<void*>(&bronze_prop_get));
@@ -132,11 +150,14 @@ void register_all_runtime_symbols(codegen::JitExecutionEngine& jit) {
     reg("bronze_object_spread", reinterpret_cast<void*>(&bronze_object_spread));
     reg("bronze_object_rest", reinterpret_cast<void*>(&bronze_object_rest));
     reg("bronze_dynamic_call_spread", reinterpret_cast<void*>(&bronze_dynamic_call_spread));
+    reg("bronze_call_method_spread", reinterpret_cast<void*>(&bronze_call_method_spread));
     reg("bronze_construct_spread", reinterpret_cast<void*>(&bronze_construct_spread));
+    reg("bronze_super_call_spread", reinterpret_cast<void*>(&bronze_super_call_spread));
     reg("bronze_arg_at", reinterpret_cast<void*>(&bronze_arg_at));
     reg("bronze_arguments_object", reinterpret_cast<void*>(&bronze_arguments_object));
     reg("bronze_rest_args", reinterpret_cast<void*>(&bronze_rest_args));
     reg("bronze_super_get", reinterpret_cast<void*>(&bronze_super_get));
+    reg("bronze_super_set", reinterpret_cast<void*>(&bronze_super_set));
     reg("bronze_object_keys", reinterpret_cast<void*>(&bronze_object_keys));
     reg("bronze_for_in_keys", reinterpret_cast<void*>(&bronze_for_in_keys));
     reg("bronze_instanceof", reinterpret_cast<void*>(&bronze_instanceof));
@@ -154,6 +175,14 @@ void register_all_runtime_symbols(codegen::JitExecutionEngine& jit) {
     reg("bronze_module_namespace", reinterpret_cast<void*>(&bronze_module_namespace));
     reg("bronze_pin_guard", reinterpret_cast<void*>(&bronze_pin_guard));
     reg("bronze_census_record", reinterpret_cast<void*>(&bronze_census_record));
+    reg("bronze_to_int32", reinterpret_cast<void*>(&bronze_to_int32));
+    reg("bronze_to_int32_f64", reinterpret_cast<void*>(&bronze_to_int32_f64));
+    reg("bronze_private_new", reinterpret_cast<void*>(&bronze_private_new));
+    reg("bronze_private_has", reinterpret_cast<void*>(&bronze_private_has));
+    reg("bronze_private_get", reinterpret_cast<void*>(&bronze_private_get));
+    reg("bronze_private_add", reinterpret_cast<void*>(&bronze_private_add));
+    reg("bronze_private_set", reinterpret_cast<void*>(&bronze_private_set));
+    reg("bronze_private_misuse", reinterpret_cast<void*>(&bronze_private_misuse));
     reg("bronze_main_key_constants", reinterpret_cast<void*>(&g_bronze_main_key_constants));
     reg("bronze_register_key_manifest", reinterpret_cast<void*>(&bronze_register_key_manifest));
     reg("bronze_box_str_key", reinterpret_cast<void*>(&bronze_box_str_key));
@@ -183,6 +212,11 @@ void register_all_runtime_symbols(codegen::JitExecutionEngine& jit) {
     reg("bronze_dynamic_shl", reinterpret_cast<void*>(&bronze_dynamic_shl));
     reg("bronze_dynamic_shr", reinterpret_cast<void*>(&bronze_dynamic_shr));
     reg("bronze_dynamic_ushr", reinterpret_cast<void*>(&bronze_dynamic_ushr));
+    reg("bronze_dynamic_sub", reinterpret_cast<void*>(&bronze_dynamic_sub));
+    reg("bronze_dynamic_mul", reinterpret_cast<void*>(&bronze_dynamic_mul));
+    reg("bronze_dynamic_div", reinterpret_cast<void*>(&bronze_dynamic_div));
+    reg("bronze_dynamic_mod", reinterpret_cast<void*>(&bronze_dynamic_mod));
+    reg("bronze_dynamic_neg", reinterpret_cast<void*>(&bronze_dynamic_neg));
     reg("bronze_dynamic_bitnot", reinterpret_cast<void*>(&bronze_dynamic_bitnot));
     reg("sin", reinterpret_cast<void*>(static_cast<double(*)(double)>(&std::sin)));
     reg("cos", reinterpret_cast<void*>(static_cast<double(*)(double)>(&std::cos)));
@@ -198,8 +232,13 @@ void register_all_runtime_symbols(codegen::JitExecutionEngine& jit) {
     reg("brass_gc_card_table_base", reinterpret_cast<void*>(&brass_gc_card_table_base));
     reg("brass_gc_heap_base", reinterpret_cast<void*>(&brass_gc_heap_base));
     reg("bronze_create_async_machine", reinterpret_cast<void*>(&bronze_create_async_machine));
+    reg("bronze_bigint_literal", reinterpret_cast<void*>(&bronze_bigint_literal));
+    reg("bronze_async_machine", reinterpret_cast<void*>(&bronze_async_machine));
     reg("bronze_async_start", reinterpret_cast<void*>(&bronze_async_start));
     reg("bronze_async_await", reinterpret_cast<void*>(&bronze_async_await));
+    reg("bronze_to_string", reinterpret_cast<void*>(&bronze_to_string));
+    reg("bronze_prop_delete", reinterpret_cast<void*>(&bronze_prop_delete));
+    reg("bronze_elem_delete", reinterpret_cast<void*>(&bronze_elem_delete));
     reg("bronze_iter_open", reinterpret_cast<void*>(&bronze_iter_open));
     reg("bronze_iter_step", reinterpret_cast<void*>(&bronze_iter_step));
     reg("brass_parallel_for", reinterpret_cast<void*>(&brass_parallel_for));
@@ -256,6 +295,234 @@ void register_bronze_interpreter_symbols(void* interp_ptr) {
     interp->register_external_function("bronze_call_dynamic_2", [](Interpreter&, const std::vector<RuntimeValue>& a) {
         return RuntimeValue::from_i64(bronze_call_dynamic_2(a.size() > 0 ? a[0].as_i64() : 0, a.size() > 1 ? a[1].as_i64() : 0, a.size() > 2 ? a[2].as_i64() : 0, a.size() > 3 ? a[3].as_i64() : 0));
     });
+}
+
+void register_all_module_external_symbols(Module* mod, const std::string& entry_symbol) {
+    if (!mod) return;
+    static const char* const kSymbols[] = {
+        "bronze_print_f64",
+        "bronze_print_i32",
+        "bronze_print_dynamic",
+        "bronze_print_space",
+        "bronze_print_newline",
+        "bronze_print_f64_err",
+        "bronze_print_i32_err",
+        "bronze_print_dynamic_err",
+        "bronze_print_space_err",
+        "bronze_print_newline_err",
+        "bronze_print_spread",
+        "bronze_print_spread_err",
+        "bronze_immutable_assign",
+        "bronze_dynamic_add",
+        "bronze_f64_mod",
+        "bronze_name_resolve",
+        "bronze_resolve_name",
+        "bronze_env_create",
+        "bronze_env_get",
+        "bronze_env_get_tdz",
+        "bronze_env_set",
+        "bronze_env_ancestor",
+        "bronze_create_func",
+        "bronze_create_function",
+        "bronze_function_singleton",
+        "bronze_import_meta",
+        "bronze_create_array",
+        "bronze_create_object",
+        "bronze_prop_get",
+        "bronze_prop_set",
+        "bronze_elem_get",
+        "bronze_elem_set",
+        "bronze_method_def",
+        "bronze_method_def_computed",
+        "bronze_define_own_attr",
+        "bronze_accessor_def",
+        "bronze_accessor_def_computed",
+        "bronze_module_namespace",
+        "bronze_ic_get",
+        "bronze_ic_set",
+        "brass_ic_get_prop",
+        "brass_ic_set_prop",
+        "brass_dynamic_object_get_prop_str",
+        "brass_dynamic_object_set_prop_str",
+        "bronze_call_dynamic_0",
+        "bronze_call_dynamic_1",
+        "bronze_call_dynamic_2",
+        "bronze_call_dynamic_3",
+        "bronze_call_dynamic_4",
+        "bronze_call_dynamic_5",
+        "bronze_call_dynamic_6",
+        "bronze_call_dynamic_7",
+        "bronze_call_dynamic_8",
+        "bronze_call_dynamic_9",
+        "bronze_call_dynamic_10",
+        "bronze_call_dynamic_11",
+        "bronze_call_dynamic_12",
+        "bronze_call_dynamic_13",
+        "bronze_call_dynamic_14",
+        "bronze_call_dynamic_15",
+        "bronze_call_dynamic_16",
+        "bronze_call_dynamic_n",
+        "bronze_get_new_target",
+        "bronze_create_async_machine",
+        "bronze_bigint_literal",
+        "bronze_async_machine",
+        "bronze_async_start",
+        "bronze_async_await",
+        "bronze_to_string",
+        "bronze_prop_delete",
+        "bronze_elem_delete",
+        "bronze_iter_open",
+        "bronze_iter_step",
+        "brass_coro_create",
+        "brass_coro_resume",
+        "brass_coro_is_done",
+        "brass_coro_destroy",
+        "__bronze_key_map",
+        "__bronze_template_cells",
+        "bronze_template_object",
+        "bronze_register_value_cells",
+        "bronze_register_fn_sources",
+        "bronze_concat_begin",
+        "bronze_concat_append",
+        "bronze_concat_end",
+        "bronze_global_get_name",
+        "bronze_global_get",
+        "bronze_typeof",
+        "bronze_construct_0",
+        "bronze_construct_1",
+        "bronze_construct_2",
+        "bronze_construct_3",
+        "bronze_construct_4",
+        "bronze_construct_5",
+        "bronze_construct_6",
+        "bronze_construct_7",
+        "bronze_construct_8",
+        "bronze_construct_9",
+        "bronze_construct_10",
+        "bronze_construct_11",
+        "bronze_construct_12",
+        "bronze_construct_13",
+        "bronze_construct_14",
+        "bronze_construct_15",
+        "bronze_construct_16",
+        "bronze_construct",
+        "bronze_class_extends",
+        "bronze_super_call",
+        "bronze_super_call_0",
+        "bronze_super_call_1",
+        "bronze_super_call_2",
+        "bronze_super_call_3",
+        "bronze_super_call_4",
+        "bronze_super_call_5",
+        "bronze_super_call_6",
+        "bronze_super_call_7",
+        "bronze_super_call_8",
+        "bronze_super_call_9",
+        "bronze_super_call_10",
+        "bronze_super_call_11",
+        "bronze_super_call_12",
+        "bronze_super_call_13",
+        "bronze_super_call_14",
+        "bronze_super_call_15",
+        "bronze_super_call_16",
+        "bronze_super_call_n",
+        "bronze_create_generator_object",
+        "bronze_create_async_generator_object",
+        "bronze_dynamic_import",
+        "bronze_iter_value",
+        "bronze_iter_close",
+        "bronze_iter_rest",
+        "bronze_iter_delegate",
+        "bronze_async_iter_open",
+        "bronze_async_iter_next",
+        "bronze_async_iter_close",
+        "bronze_pattern_check",
+        "bronze_array_append",
+        "bronze_array_append_hole",
+        "bronze_array_spread",
+        "bronze_object_spread",
+        "bronze_object_rest",
+        "bronze_dynamic_call_spread",
+        "bronze_call_method_spread",
+        "bronze_construct_spread",
+        "bronze_super_call_spread",
+        "bronze_arg_at",
+        "bronze_arguments_object",
+        "bronze_rest_args",
+        "bronze_super_get",
+        "bronze_super_set",
+        "bronze_object_keys",
+        "bronze_for_in_keys",
+        "bronze_instanceof",
+        "bronze_has_property",
+        "bronze_is_nullish",
+        "bronze_strict_eq",
+        "bronze_loose_eq",
+        "bronze_rel_lt",
+        "bronze_rel_gt",
+        "bronze_rel_le",
+        "bronze_rel_ge",
+        "bronze_pin_guard",
+        "bronze_census_record",
+        "bronze_to_int32",
+        "bronze_to_int32_f64",
+        "bronze_private_new",
+        "bronze_private_has",
+        "bronze_private_get",
+        "bronze_private_add",
+        "bronze_private_set",
+        "bronze_private_misuse",
+        "bronze_census_register",
+        "__bronze_census_out_path",
+        "__bronze_census_sites",
+        "bronze_register_key_manifest",
+        "bronze_box_str_key",
+        "bronze_box_str",
+        "bronze_unbox_str",
+        "bronze_unbox_f64",
+        "bronze_box_f64",
+        "bronze_unbox_i32",
+        "bronze_box_i32",
+        "bronze_unbox_bool",
+        "bronze_box_bool",
+        "bronze_exception_get",
+        "bronze_exception_set",
+        "bronze_exception_take",
+        "bronze_exception_pending",
+        "bronze_uncaught_exception",
+        "bronze_gc_frame_push",
+        "bronze_gc_frame_pop",
+        "bronze_pin_violation",
+        "bronze_pin_check_array",
+        "bronze_pow",
+        "bronze_dynamic_pow",
+        "bronze_dynamic_bitand",
+        "bronze_dynamic_bitor",
+        "bronze_dynamic_bitxor",
+        "bronze_dynamic_shl",
+        "bronze_dynamic_shr",
+        "bronze_dynamic_ushr",
+        "bronze_dynamic_sub",
+        "bronze_dynamic_mul",
+        "bronze_dynamic_div",
+        "bronze_dynamic_mod",
+        "bronze_dynamic_neg",
+        "bronze_dynamic_bitnot",
+        "sin",
+        "cos",
+        "sqrt",
+        "fabs",
+        "floor",
+        "ceil",
+        "trunc",
+    };
+    for (const char* sym : kSymbols) {
+        mod->add_external_symbol(sym);
+    }
+    const std::string key_sym = (entry_symbol.empty() || entry_symbol == "main" || entry_symbol == "bronze_main")
+                                    ? "bronze_main_key_constants"
+                                    : (entry_symbol + "_key_constants");
+    mod->add_external_symbol(key_sym);
 }
 
 } // namespace brass::il

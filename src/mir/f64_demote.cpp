@@ -805,11 +805,24 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
                     }
                 }
             } else if (op == Opcode::call) {
-                if (inst->symbol() == "bronze_print_f64") {
-                    if (inst->operand_count() >= 1 && inst->operand(0) && inst->operand(0)->type() == Type::i64()) {
-                        b.position_before(inst);
-                        Value* conv = b.build_sitofp_f64_i64(inst->operand(0));
-                        inst->set_operand(0, conv);
+                bool is_f64_builtin = (inst->symbol() == "bronze_print_f64" || inst->symbol() == "bronze_print_f64_err" ||
+                    inst->symbol() == "bronze_to_int32_f64" || inst->symbol() == "bronze_box_f64" ||
+                    inst->symbol() == "bronze_pow" || inst->symbol() == "bronze_f64_mod" ||
+                    inst->symbol() == "sin" || inst->symbol() == "cos" ||
+                    inst->symbol() == "sqrt" || inst->symbol() == "fabs" ||
+                    inst->symbol() == "floor" || inst->symbol() == "ceil" ||
+                    inst->symbol() == "trunc");
+                if (is_f64_builtin) {
+                    for (size_t i = 0; i < inst->operand_count(); ++i) {
+                        Value* arg = inst->operand(i);
+                        if (!arg) continue;
+                        if (arg->type() == Type::i64()) {
+                            b.position_before(inst);
+                            inst->set_operand(i, b.build_sitofp_f64_i64(arg));
+                        } else if (arg->type() == Type::i32()) {
+                            b.position_before(inst);
+                            inst->set_operand(i, b.build_sitofp_f64_i32(arg));
+                        }
                     }
                 } else if (fn.parent()) {
                     Function* callee = fn.parent()->get_function(inst->symbol());

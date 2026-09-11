@@ -27,6 +27,10 @@ struct FunctionMeta {
     bool has_rest_param = false;
     bool is_strict = false;
     uint32_t first_source_param = 0;
+    uint32_t fn_flags = 0x03; // BRONZE_ABI_FN_FLAGS_ORDINARY (CONSTRUCT | PROTOTYPE)
+    uint32_t name_key = 0xFFFFFFFFu; // BRONZE_ABI_FN_NAME_NONE
+    uint32_t required_args = 0;
+    uint32_t adapt_arity = 0;
     std::vector<bool> params_pinned;
     std::vector<uint32_t> param_pin_keys;
 };
@@ -87,6 +91,11 @@ struct TranslatorOptions {
     std::string entry_symbol;
     bool enable_census = false;
     uint32_t census_site_count = 0;
+    struct SourceFileMeta {
+        uint32_t text_len = 0;
+        uint32_t entry_count = 0;
+    };
+    std::vector<SourceFileMeta> source_files;
 };
 
 struct TranslationResult {

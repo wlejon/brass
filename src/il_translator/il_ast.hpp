@@ -183,6 +183,7 @@ struct BronzeInstruction {
 
     uint32_t line = 0;
     uint32_t column = 0;
+    uint32_t env_hops = UINT32_MAX;
 };
 
 struct BronzeBlock {

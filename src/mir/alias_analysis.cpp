@@ -218,12 +218,7 @@ bool AliasAnalysis::can_clobber(const Instruction* write_inst, const Instruction
                       r_op == Opcode::vload || is_call(r_op));
     if (!reads_mem) return false;
 
-    // Allocation calls (brass_gc_alloc, malloc) produce fresh memory and do not clobber existing memory
     if (is_call(w_op)) {
-        if (is_allocation_callee(write_inst->symbol())) {
-            return false;
-        }
-
         // Check if read is from a non-escaping allocation not passed to this call
         if (r_op == Opcode::load || r_op == Opcode::load_indexed || r_op == Opcode::vload) {
             const Value* r_ptr = read_inst->operand(0);

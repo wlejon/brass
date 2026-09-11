@@ -127,7 +127,7 @@ bool inline_function(Function& fn, Module& mod) {
     return inline_function(fn, mod, opts);
 }
 
-bool inline_function(Function& fn, Module& mod, const InlinerOptions& options) {
+bool inline_function(Function& fn, Module& mod, const InlinerOptions& options, const CallGraph* external_cg) {
     if (fn.blocks().empty() || !fn.entry_block()) return false;
 
     if (options.enable_devirtualization) {
@@ -138,11 +138,13 @@ bool inline_function(Function& fn, Module& mod, const InlinerOptions& options) {
     size_t baseline_size = get_function_instruction_count(fn);
     size_t current_size = baseline_size;
 
+    std::unique_ptr<CallGraph> local_cg;
+    const CallGraph& cg = external_cg ? *external_cg : *(local_cg = std::make_unique<CallGraph>(mod));
+
     for (size_t depth = 0; depth < options.max_inline_depth; ++depth) {
         fn.rebuild_cfg_predecessors();
         DominatorTree dom(fn);
         LoopAnalysis loops(fn, dom);
-        CallGraph cg(mod);
 
         std::vector<LoopInfo*> post_loops = loops.post_order_loops();
 
@@ -241,7 +243,7 @@ bool inline_module(Module& mod, const InlinerOptions& options) {
     for (Function* fn : order) {
         if (!fn) continue;
         // Don't inline into a function that is strictly recursive with itself if forbidden
-        changed |= inline_function(*fn, mod, options);
+        changed |= inline_function(*fn, mod, options, &cg);
     }
 
     return changed;

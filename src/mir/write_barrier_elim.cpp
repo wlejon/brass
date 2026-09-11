@@ -71,16 +71,16 @@ bool WriteBarrierElimination::run_on_function(Function& fn) {
         std::unordered_set<const Value*> young_in_block;
 
         for (Instruction* inst = bb->head(); inst != nullptr; inst = inst->next()) {
+            if (inst->is_call() || inst->opcode() == Opcode::safepoint) {
+                // Calls or safepoints could trigger GC and clean cards or promote objects
+                dirtied_in_block.clear();
+                young_in_block.clear();
+            }
+
             if (is_allocation_inst(inst)) {
                 if (inst->result()) {
                     young_in_block.insert(inst->result());
                 }
-            }
-
-            if ((inst->is_call() && !is_allocation_inst(inst)) || inst->opcode() == Opcode::safepoint) {
-                // Non-allocation calls or safepoints could trigger GC and clean cards or promote objects
-                dirtied_in_block.clear();
-                young_in_block.clear();
             }
 
             // Check if young object escapes via store

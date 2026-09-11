@@ -42,7 +42,7 @@ bool should_inline_call(
 
 // Inlines call sites in a single function
 bool inline_function(Function& fn, Module& mod);
-bool inline_function(Function& fn, Module& mod, const InlinerOptions& options);
+bool inline_function(Function& fn, Module& mod, const InlinerOptions& options, const CallGraph* cg = nullptr);
 
 // Inlines call sites across an entire module in bottom-up leaf-first order
 bool inline_module(Module& mod);
