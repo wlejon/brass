@@ -18,18 +18,18 @@ public:
     IlLowering(const TranslatorOptions& options, DiagnosticReporter* diag = nullptr);
 
     std::unique_ptr<Module> lower_module(const BronzeModuleAST& ast);
+    Value* ensure_type(Value* val, Type target_type, Builder& b);
+    std::string resolve_callee(const std::string& callee_name) const;
 
 private:
     bool lower_function(const BronzeFunction& fn_ast, Module& mod, const std::string& fn_name);
+    bool emit_wrapper(const BronzeFunction& fn_ast, Module& mod, const std::string& fn_name, uint32_t declared_param_count, bool is_closure = false);
     bool lower_instruction(const BronzeInstruction& inst_ast, Builder& b, Function* fn,
                            std::unordered_map<uint32_t, Value*>& val_map,
                            const std::unordered_map<uint32_t, BasicBlock*>& block_map,
                            uint32_t handler_id = UINT32_MAX,
                            uint32_t block_id = 0,
                            uint32_t* cont_counter = nullptr);
-
-    Value* ensure_type(Value* val, Type target_type, Builder& b);
-    std::string resolve_callee(const std::string& callee_name) const;
 
     TranslatorOptions options_;
     DiagnosticReporter* diag_ = nullptr;

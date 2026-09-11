@@ -29,7 +29,8 @@ Value* PropertyLoweringHelper::lower_prop_get(
     Value* sym_val = b.build_iconst_i32(static_cast<int32_t>(symbol_id));
 
     if (symbol_id != 0 && prop_name.empty()) {
-        return b.build_call("bronze_prop_get", Type::i64(), {obj, sym_val});
+        Value* null_entry = b.build_iconst_i64(0);
+        return b.build_call("bronze_prop_get", Type::i64(), {obj, sym_val, null_entry});
     }
 
     if (enable_pic_) {
@@ -64,9 +65,9 @@ void PropertyLoweringHelper::lower_prop_set(
     Value* sym_val = b.build_iconst_i32(static_cast<int32_t>(symbol_id));
 
     if (symbol_id != 0 && prop_name.empty()) {
-        Value* slot_val = b.build_iconst_i32(static_cast<int32_t>(slot_idx));
-        Value* imm_val = b.build_iconst_i32(static_cast<int32_t>(imm));
-        b.build_call("bronze_prop_set", Type::void_type(), {obj, sym_val, val, slot_val, imm_val});
+        Value* slot_val = b.build_iconst_i64(static_cast<int64_t>(slot_idx));
+        Value* strict_val = b.build_iconst_i32(1);
+        b.build_call("bronze_prop_set", Type::void_type(), {obj, sym_val, val, slot_val, strict_val});
         return;
     }
 
@@ -106,18 +107,15 @@ void PropertyLoweringHelper::lower_method_def(
     uint32_t symbol_id,
     Value* closure
 ) {
-    Module* mod = b.current_block()->parent()->parent();
-
-    Value* name_val = nullptr;
-    if (!prop_name.empty()) {
-        const char* interned = mod->string_pool().intern(prop_name).data();
-        name_val = b.build_iconst_i64(static_cast<int64_t>(reinterpret_cast<uintptr_t>(interned)));
+    if (prop_name.empty() || symbol_id != 0) {
+        Value* sym_val = b.build_iconst_i32(static_cast<int32_t>(symbol_id));
+        b.build_call("bronze_method_def", Type::void_type(), {obj, sym_val, closure});
     } else {
-        name_val = b.build_iconst_i64(0);
+        Module* mod = b.current_block()->parent()->parent();
+        const char* interned = mod->string_pool().intern(prop_name).data();
+        Value* name_val = b.build_iconst_i64(static_cast<int64_t>(reinterpret_cast<uintptr_t>(interned)));
+        b.build_call("brass_dynamic_object_set_prop_str", Type::void_type(), {obj, name_val, closure});
     }
-
-    Value* sym_val = b.build_iconst_i32(static_cast<int32_t>(symbol_id));
-    b.build_call("bronze_method_def", Type::void_type(), {obj, name_val, sym_val, closure});
 }
 
 } // namespace brass::il

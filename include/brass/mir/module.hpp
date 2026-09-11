@@ -7,6 +7,7 @@
 #include <brass/debug/source_loc.hpp>
 #include <string_view>
 #include <vector>
+#include <unordered_map>
 #include <initializer_list>
 
 namespace brass {
@@ -57,6 +58,7 @@ private:
     StringPool string_pool_;
     std::string_view name_;
     std::vector<Function*> functions_;
+    std::unordered_map<std::string_view, Function*> function_map_;
     std::vector<std::string_view> external_symbols_;
     bool allow_fp_reassociation_ = false;
     DebugContext debug_context_;

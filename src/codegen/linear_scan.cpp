@@ -558,6 +558,9 @@ void LinearScanAllocator::rewrite_instructions() {
 
     auto resolve_operand = [this](const LirOperand& op) -> LirOperand {
         if (op.is_vreg()) {
+            if (!op.vreg_val.is_valid() || op.vreg_val.id >= fn_.vreg_table.size()) {
+                return op;
+            }
             const VRegInfo& info = fn_.get_vreg_info(op.vreg_val);
             if (info.is_spilled) {
                 return LirOperand::slot(info.assigned_spill_slot, op.size);
@@ -566,14 +569,14 @@ void LinearScanAllocator::rewrite_instructions() {
             }
         } else if (op.is_mem()) {
             LirMem mem = op.mem_val;
-            if (mem.base_vreg.is_valid()) {
+            if (mem.base_vreg.is_valid() && mem.base_vreg.id < fn_.vreg_table.size()) {
                 const VRegInfo& b_info = fn_.get_vreg_info(mem.base_vreg);
                 if (b_info.assigned_preg.is_valid()) {
                     mem.base_preg = b_info.assigned_preg;
                     mem.base_vreg = VReg{};
                 }
             }
-            if (mem.index_vreg.is_valid()) {
+            if (mem.index_vreg.is_valid() && mem.index_vreg.id < fn_.vreg_table.size()) {
                 const VRegInfo& i_info = fn_.get_vreg_info(mem.index_vreg);
                 if (i_info.assigned_preg.is_valid()) {
                     mem.index_preg = i_info.assigned_preg;
@@ -597,7 +600,7 @@ void LinearScanAllocator::rewrite_instructions() {
             for (auto* op_list : {&inst->defs, &inst->uses}) {
                 for (auto& op : *op_list) {
                     if (op.is_mem()) {
-                        if (op.mem_val.base_vreg.is_valid()) {
+                        if (op.mem_val.base_vreg.is_valid() && op.mem_val.base_vreg.id < fn_.vreg_table.size()) {
                             const VRegInfo& b_info = fn_.get_vreg_info(op.mem_val.base_vreg);
                             if (b_info.is_spilled) {
                                 auto load_base = std::make_unique<LirInst>(LirOpcode::Mov);
@@ -609,7 +612,7 @@ void LinearScanAllocator::rewrite_instructions() {
                                 op.mem_val.base_vreg = VReg{};
                             }
                         }
-                        if (op.mem_val.index_vreg.is_valid()) {
+                        if (op.mem_val.index_vreg.is_valid() && op.mem_val.index_vreg.id < fn_.vreg_table.size()) {
                             const VRegInfo& i_info = fn_.get_vreg_info(op.mem_val.index_vreg);
                             if (i_info.is_spilled) {
                                 auto load_idx = std::make_unique<LirInst>(LirOpcode::Mov);

@@ -173,74 +173,143 @@ void LivenessAnalysis::assign_instruction_ids() {
 }
 
 void LivenessAnalysis::compute_local_liveness() {
+    const size_t num_vregs = fn_.vreg_table.size();
+    std::vector<uint8_t> def_set(num_vregs, 0);
+    std::vector<uint8_t> use_set(num_vregs, 0);
+
     for (const auto& block : fn_.blocks) {
         BlockLiveness& bl = block_liveness_[block.get()];
         bl.defs.clear();
         bl.uses.clear();
 
-        for (const auto& inst : block->instructions) {
-            // Uses
-            for (const auto& u : inst->uses) {
-                if (u.is_vreg() && !contains_vreg(bl.defs, u.vreg_val)) {
-                    add_vreg_unique(bl.uses, u.vreg_val);
-                } else if (u.is_mem()) {
-                    if (u.mem_val.base_vreg.is_valid() && !contains_vreg(bl.defs, u.mem_val.base_vreg)) {
-                        add_vreg_unique(bl.uses, u.mem_val.base_vreg);
-                    }
-                    if (u.mem_val.index_vreg.is_valid() && !contains_vreg(bl.defs, u.mem_val.index_vreg)) {
-                        add_vreg_unique(bl.uses, u.mem_val.index_vreg);
-                    }
+        auto add_use = [&](VReg v) {
+            if (v.is_valid() && v.id < num_vregs && !def_set[v.id]) {
+                if (!use_set[v.id]) {
+                    use_set[v.id] = 1;
+                    bl.uses.push_back(v);
                 }
             }
+        };
 
-            // Defs
+        auto add_def = [&](VReg v) {
+            if (v.is_valid() && v.id < num_vregs) {
+                if (!def_set[v.id]) {
+                    def_set[v.id] = 1;
+                    bl.defs.push_back(v);
+                }
+            }
+        };
+
+        for (const auto& inst : block->instructions) {
+            for (const auto& u : inst->uses) {
+                if (u.is_vreg()) {
+                    add_use(u.vreg_val);
+                } else if (u.is_mem()) {
+                    add_use(u.mem_val.base_vreg);
+                    add_use(u.mem_val.index_vreg);
+                }
+            }
             for (const auto& d : inst->defs) {
                 if (d.is_vreg()) {
-                    add_vreg_unique(bl.defs, d.vreg_val);
+                    add_def(d.vreg_val);
                 } else if (d.is_mem()) {
-                    if (d.mem_val.base_vreg.is_valid() && !contains_vreg(bl.defs, d.mem_val.base_vreg)) {
-                        add_vreg_unique(bl.uses, d.mem_val.base_vreg);
-                    }
-                    if (d.mem_val.index_vreg.is_valid() && !contains_vreg(bl.defs, d.mem_val.index_vreg)) {
-                        add_vreg_unique(bl.uses, d.mem_val.index_vreg);
-                    }
+                    add_use(d.mem_val.base_vreg);
+                    add_use(d.mem_val.index_vreg);
                 }
             }
         }
+
+        for (VReg v : bl.defs) def_set[v.id] = 0;
+        for (VReg v : bl.uses) use_set[v.id] = 0;
     }
 }
 
 void LivenessAnalysis::compute_global_liveness() {
+    const size_t num_vregs = fn_.vreg_table.size();
+    const size_t num_words = (num_vregs + 63) / 64;
+    if (num_words == 0) return;
+
+    std::unordered_map<const LirBlock*, std::vector<uint64_t>> live_in_bv;
+    std::unordered_map<const LirBlock*, std::vector<uint64_t>> live_out_bv;
+    std::unordered_map<const LirBlock*, std::vector<uint64_t>> defs_bv;
+    std::unordered_map<const LirBlock*, std::vector<uint64_t>> uses_bv;
+
+    for (const auto& block : fn_.blocks) {
+        const auto* b = block.get();
+        const auto& bl = block_liveness_[b];
+        auto& d = defs_bv[b]; d.assign(num_words, 0);
+        auto& u = uses_bv[b]; u.assign(num_words, 0);
+        live_in_bv[b].assign(num_words, 0);
+        live_out_bv[b].assign(num_words, 0);
+
+        for (VReg v : bl.defs) {
+            if (v.is_valid() && v.id < num_vregs) {
+                d[v.id / 64] |= (1ULL << (v.id % 64));
+            }
+        }
+        for (VReg v : bl.uses) {
+            if (v.is_valid() && v.id < num_vregs) {
+                u[v.id / 64] |= (1ULL << (v.id % 64));
+            }
+        }
+    }
+
     bool changed = true;
     while (changed) {
         changed = false;
 
-        // Process blocks in reverse post-order
         for (auto it = fn_.blocks.rbegin(); it != fn_.blocks.rend(); ++it) {
-            auto* block = it->get();
-            BlockLiveness& bl = block_liveness_[block];
+            const auto* block = it->get();
+            auto& out_vec = live_out_bv[block];
+            auto& in_vec = live_in_bv[block];
+            const auto& def_vec = defs_bv[block];
+            const auto& use_vec = uses_bv[block];
 
-            // LiveOut = union of LiveIn of all successors
-            std::vector<VReg> new_live_out;
             for (const auto* succ : block->successors) {
-                const auto& succ_bl = block_liveness_[succ];
-                for (VReg v : succ_bl.live_in) {
-                    add_vreg_unique(new_live_out, v);
+                const auto& succ_in = live_in_bv[succ];
+                for (size_t w = 0; w < num_words; ++w) {
+                    out_vec[w] |= succ_in[w];
                 }
             }
 
-            // LiveIn = Uses union (LiveOut \ Defs)
-            std::vector<VReg> new_live_in = bl.uses;
-            for (VReg v : new_live_out) {
-                if (!contains_vreg(bl.defs, v)) {
-                    add_vreg_unique(new_live_in, v);
+            for (size_t w = 0; w < num_words; ++w) {
+                uint64_t new_in = use_vec[w] | (out_vec[w] & ~def_vec[w]);
+                if (new_in != in_vec[w]) {
+                    in_vec[w] = new_in;
+                    changed = true;
                 }
             }
+        }
+    }
 
-            if (new_live_in != bl.live_in || new_live_out != bl.live_out) {
-                bl.live_in = std::move(new_live_in);
-                bl.live_out = std::move(new_live_out);
-                changed = true;
+    for (const auto& block : fn_.blocks) {
+        const auto* b = block.get();
+        BlockLiveness& bl = block_liveness_[b];
+        bl.live_in.clear();
+        bl.live_out.clear();
+
+        const auto& in_vec = live_in_bv[b];
+        const auto& out_vec = live_out_bv[b];
+
+        for (size_t w = 0; w < num_words; ++w) {
+            uint64_t in_word = in_vec[w];
+            while (in_word != 0) {
+                int bit = __builtin_ctzll(in_word);
+                uint32_t vid = static_cast<uint32_t>(w * 64 + bit);
+                if (vid < num_vregs) {
+                    bl.live_in.push_back(fn_.vreg_table[vid].vreg);
+                }
+                in_word &= in_word - 1;
+            }
+
+            uint64_t out_word = out_vec[w];
+            while (out_word != 0) {
+                int bit = __builtin_ctzll(out_word);
+                uint32_t vid = static_cast<uint32_t>(w * 64 + bit);
+                if (vid < num_vregs) {
+                    bl.live_out.push_back(fn_.vreg_table[vid].vreg);
+                }
+                out_word &= out_word - 1;
             }
         }
     }

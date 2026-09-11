@@ -78,7 +78,8 @@ void CallGraph::build() {
 
                 if (inst->opcode() == Opcode::call) {
                     std::string_view callee_name = inst->symbol();
-                    Function* callee_fn = module_.get_function(callee_name);
+                    auto it = name_map_.find(callee_name);
+                    Function* callee_fn = (it != name_map_.end()) ? it->second->function : nullptr;
 
                     CallSite cs;
                     cs.instruction = inst;

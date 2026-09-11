@@ -5,6 +5,7 @@
 #include <memory>
 #include <string_view>
 #include <string>
+#include <unordered_map>
 
 namespace brass {
 
@@ -18,6 +19,15 @@ struct FmaOptStats;
 struct ParallelLoopStats;
 
 namespace il {
+
+struct FunctionMeta {
+    bool needs_env = false;
+    bool needs_this = false;
+    bool needs_arguments = false;
+    bool has_rest_param = false;
+    bool is_strict = false;
+    uint32_t first_source_param = 0;
+};
 
 struct TranslatorOptions {
     bool enable_optimizations = true;
@@ -70,6 +80,8 @@ struct TranslatorOptions {
     uint32_t parallel_workers = 0;
     bool dump_parallel_stats = false;
     ParallelLoopStats* parallel_stats_collector = nullptr;
+    std::vector<std::string> key_constants;
+    std::unordered_map<std::string, FunctionMeta> function_meta;
 };
 
 struct TranslationResult {
@@ -110,11 +122,12 @@ void bronze_env_set(int64_t env_box, int32_t depth, int32_t index, int64_t val);
 int64_t bronze_create_func(void* code_ptr, int32_t param_count, int64_t env_box);
 int64_t bronze_create_array(int32_t size);
 int64_t bronze_create_object();
-int64_t bronze_prop_get(int64_t obj_box, int32_t key_index);
-void bronze_prop_set(int64_t obj_box, int32_t key_index, int64_t val, int32_t slot_idx, int32_t imm);
+int64_t bronze_prop_get(int64_t obj_box, int32_t key_index, uint64_t* ic_entry = nullptr);
+void bronze_prop_set(int64_t obj_box, int32_t key_index, int64_t val, uint64_t* ic_entry = nullptr, int32_t strict = 1);
 int64_t bronze_elem_get(int64_t arr_box, int64_t index_box);
 void bronze_elem_set(int64_t arr_box, int64_t index_box, int64_t val, int32_t ic_slot);
-void bronze_method_def(int64_t obj_box, const char* name, int32_t symbol_id, int64_t closure_box);
+void bronze_method_def(int64_t obj_box, int32_t key_index, int64_t closure_box);
+void bronze_method_def_computed(int64_t obj_box, int64_t key_box, int64_t closure_box);
 int64_t bronze_ic_get(uint32_t site_id, int64_t obj_box, const char* name, int32_t symbol_id);
 void bronze_ic_set(uint32_t site_id, int64_t obj_box, const char* name, int32_t symbol_id, int64_t val_box);
 uint64_t brass_ic_get_prop(uint32_t site_id, uint64_t obj_raw, const char* name, uint32_t symbol_id);

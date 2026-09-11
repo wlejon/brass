@@ -285,8 +285,8 @@ TEST_CASE("Bronze IL - 22-Program Live Corpus JIT and AOT Execution") {
         int64_t (*create_func)(void*, int32_t, int64_t);
         int64_t (*create_array)(int32_t);
         int64_t (*create_object)();
-        int64_t (*prop_get)(int64_t, int32_t);
-        void (*prop_set)(int64_t, int32_t, int64_t, int32_t, int32_t);
+        int64_t (*prop_get)(int64_t, int32_t, uint64_t*);
+        void (*prop_set)(int64_t, int32_t, int64_t, uint64_t*, int32_t);
         int64_t (*elem_get)(int64_t, int64_t);
         void (*elem_set)(int64_t, int64_t, int64_t, int32_t);
         int64_t (*call_dynamic_0)(int64_t, int64_t);
@@ -299,7 +299,7 @@ TEST_CASE("Bronze IL - 22-Program Live Corpus JIT and AOT Execution") {
         int64_t (*call_dynamic_7)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
         int64_t (*call_dynamic_8)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
         int64_t (*call_dynamic_n)(int64_t, int64_t, int32_t, const int64_t*);
-        void (*method_def)(int64_t, const char*, int32_t, int64_t);
+        void (*method_def)(int64_t, int32_t, int64_t);
         int64_t (*ic_get)(uint32_t, int64_t, const char*, int32_t);
         void (*ic_set)(uint32_t, int64_t, const char*, int32_t, int64_t);
         uint64_t (*brass_ic_get)(uint32_t, uint64_t, const char*, uint32_t);
@@ -403,6 +403,7 @@ TEST_CASE("Bronze IL - 22-Program Live Corpus JIT and AOT Execution") {
             << "    void bronze_print_f64(double v) { if (g_rt.print_f64) g_rt.print_f64(v); }\n"
             << "    void bronze_print_i32(int32_t v) { if (g_rt.print_i32) g_rt.print_i32(v); }\n"
             << "    void bronze_print_dynamic(int64_t v) { if (g_rt.print_dynamic) g_rt.print_dynamic(v); }\n"
+            << "    void bronze_print_space() { std::cout << \" \"; }\n"
             << "    void bronze_print_newline() { if (g_rt.print_newline) g_rt.print_newline(); }\n"
             << "    double bronze_f64_mod(double a, double b) { return g_rt.f64_mod ? g_rt.f64_mod(a, b) : 0.0; }\n"
             << "    int64_t bronze_name_resolve(const char* name) { return g_rt.name_resolve ? g_rt.name_resolve(name) : 0; }\n"
@@ -412,8 +413,8 @@ TEST_CASE("Bronze IL - 22-Program Live Corpus JIT and AOT Execution") {
             << "    int64_t bronze_create_func(void* fn_name, int32_t pc, int64_t env) { return g_rt.create_func ? g_rt.create_func(fn_name, pc, env) : 0; }\n"
             << "    int64_t bronze_create_array(int32_t sz) { return g_rt.create_array ? g_rt.create_array(sz) : 0; }\n"
             << "    int64_t bronze_create_object() { return g_rt.create_object ? g_rt.create_object() : 0; }\n"
-            << "    int64_t bronze_prop_get(int64_t o, int32_t k) { return g_rt.prop_get ? g_rt.prop_get(o, k) : 0; }\n"
-            << "    void bronze_prop_set(int64_t o, int32_t k, int64_t v, int32_t s, int32_t imm) { if (g_rt.prop_set) g_rt.prop_set(o, k, v, s, imm); }\n"
+            << "    int64_t bronze_prop_get(int64_t o, int32_t k, uint64_t* ic = nullptr) { return g_rt.prop_get ? g_rt.prop_get(o, k) : 0; }\n"
+            << "    void bronze_prop_set(int64_t o, int32_t k, int64_t v, uint64_t* ic = nullptr, int32_t st = 1) { if (g_rt.prop_set) g_rt.prop_set(o, k, v, 0, 0); }\n"
             << "    int64_t bronze_elem_get(int64_t a, int64_t i) { return g_rt.elem_get ? g_rt.elem_get(a, i) : 0; }\n"
             << "    void bronze_elem_set(int64_t a, int64_t i, int64_t v, int32_t s) { if (g_rt.elem_set) g_rt.elem_set(a, i, v, s); }\n"
             << "    int64_t bronze_call_dynamic_0(int64_t c, int64_t th) { return g_rt.call_dynamic_0 ? g_rt.call_dynamic_0(c, th) : 0; }\n"
@@ -460,8 +461,16 @@ TEST_CASE("Bronze IL - 22-Program Live Corpus JIT and AOT Execution") {
             << "    int32_t bronze_instanceof(int64_t a, int64_t b) { (void)a; (void)b; return 0; }\n"
             << "    int32_t bronze_has_property(int64_t k, int64_t o) { (void)k; (void)o; return 0; }\n"
             << "    int32_t bronze_is_nullish(int64_t v) { (void)v; return 0; }\n"
+            << "    uint64_t bronze_exception_get() { return 0; }\n"
+            << "    void bronze_exception_set(uint64_t b) { (void)b; }\n"
+            << "    uint64_t bronze_exception_take() { return 0; }\n"
+            << "    int32_t bronze_exception_pending() { return 0; }\n"
+            << "    void bronze_uncaught_exception() { }\n"
+            << "    uint64_t bronze_pin_violation(uint32_t k, uint64_t b) { (void)k; (void)b; return 0; }\n"
+            << "    void bronze_pin_check_array(uint32_t k, uint64_t b) { (void)k; (void)b; }\n"
             << "}\n";
         ofs.close();
+
     }
 
     for (const auto& name : corpus_files) {

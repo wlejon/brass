@@ -131,8 +131,6 @@ void X64ISel::analyze_function(const Function& mir_fn) {
                                     const Instruction* and_inst = and_val->defining_instruction();
                                     if (and_inst && and_inst->parent() == bb && and_inst->opcode() == Opcode::and_ && use_count_[and_val] == 1) {
                                         skipped_insts_.insert(and_inst);
-                                        skip_operand_if_dead(and_inst->operand(0));
-                                        skip_operand_if_dead(and_inst->operand(1));
                                     }
                                 }
                             }

@@ -21,6 +21,7 @@ Function* Module::create_function(std::string_view name, Type return_type, Span<
     Function* fn = arena_.make<Function>(interned_name, return_type, std::move(params));
     fn->set_parent(this);
     functions_.push_back(fn);
+    function_map_[interned_name] = fn;
     return fn;
 }
 
@@ -33,10 +34,9 @@ Function* Module::create_function(std::string_view name, Type return_type) {
 }
 
 Function* Module::get_function(std::string_view name) const noexcept {
-    for (Function* fn : functions_) {
-        if (fn && fn->name() == name) {
-            return fn;
-        }
+    auto it = function_map_.find(name);
+    if (it != function_map_.end()) {
+        return it->second;
     }
     return nullptr;
 }

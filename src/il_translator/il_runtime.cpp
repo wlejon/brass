@@ -22,6 +22,13 @@ namespace brass::il {
 
 using namespace brass::runtime;
 
+#ifndef _WIN32
+#define BRONZE_WEAK __attribute__((weak))
+#else
+#define BRONZE_WEAK
+#endif
+
+
 std::string format_js_number(double v) {
     if (std::isnan(v)) return "NaN";
     if (std::isinf(v)) return v > 0 ? "Infinity" : "-Infinity";
@@ -83,43 +90,75 @@ void bronze_set_print_enabled(bool enabled) {
 
 extern "C" {
 
+#ifndef _WIN32
+__attribute__((weak))
+#endif
 void bronze_print_f64(double v) {
     if (!g_bronze_print_enabled) return;
-    std::cout << format_js_number(v) << " ";
+    std::cout << format_js_number(v);
 }
 
+#ifndef _WIN32
+__attribute__((weak))
+#endif
 void bronze_print_i32(int32_t v) {
     if (!g_bronze_print_enabled) return;
-    std::cout << v << " ";
+    std::cout << v;
 }
 
+#ifndef _WIN32
+__attribute__((weak))
+#endif
 void bronze_print_dynamic(int64_t v) {
     if (!g_bronze_print_enabled) return;
     uint64_t u = static_cast<uint64_t>(v);
     if (u < 0xFFF8000000000000ULL) {
         double d;
         std::memcpy(&d, &v, sizeof(double));
-        std::cout << format_js_number(d) << " ";
-    } else if ((u >> 48) == 0xFFF9) {
+        std::cout << format_js_number(d);
+    } else if ((u >> 48) == 0xFFF9 || (u >> 48) == 0xFFF3) {
         int32_t iv = static_cast<int32_t>(u & 0xFFFFFFFFULL);
-        std::cout << iv << " ";
-    } else if ((u >> 48) == 0xFFFA) {
-        std::cout << "null ";
-    } else if ((u >> 48) == 0xFFFB) {
+        std::cout << iv;
+    } else if ((u >> 48) == 0xFFFA || (u >> 48) == 0xFFF5) {
+        std::cout << "null";
+    } else if ((u >> 48) == 0xFFFB || (u >> 48) == 0xFFF4) {
         bool b = (u & 1) != 0;
-        std::cout << (b ? "true " : "false ");
-    } else if ((u >> 48) == 0xFFFC) {
-        std::cout << "undefined ";
+        std::cout << (b ? "true" : "false");
+    } else if ((u >> 48) == 0xFFFC || (u >> 48) == 0xFFF6) {
+        std::cout << "undefined";
     } else if (u == kPrintTag) {
-        std::cout << "[Function: print] ";
+        std::cout << "[Function: print]";
     } else {
-        std::cout << "undefined ";
+        std::cout << "undefined";
     }
 }
 
+#ifndef _WIN32
+__attribute__((weak))
+#endif
+void bronze_print_space() {
+    if (!g_bronze_print_enabled) return;
+    std::cout << " ";
+}
+
+#ifndef _WIN32
+__attribute__((weak))
+#endif
 void bronze_print_newline() {
     if (!g_bronze_print_enabled) return;
     std::cout << "\n";
+}
+
+#ifndef _WIN32
+__attribute__((weak))
+#endif
+int64_t bronze_dynamic_add(int64_t a, int64_t b) {
+    if ((static_cast<uint64_t>(a) >> 48) <= 0xFFF8 && (static_cast<uint64_t>(b) >> 48) <= 0xFFF8) {
+        double da = std::bit_cast<double>(a);
+        double db = std::bit_cast<double>(b);
+        return std::bit_cast<int64_t>(da + db);
+    }
+    return static_cast<int64_t>(kUndefinedTag);
 }
 
 double bronze_f64_mod(double a, double b) {
@@ -269,7 +308,7 @@ int64_t bronze_create_object() {
     return reinterpret_cast<int64_t>(obj);
 }
 
-int64_t bronze_prop_get(int64_t obj_box, int32_t key_index) {
+int64_t bronze_prop_get(int64_t obj_box, int32_t key_index, uint64_t* /*ic_entry*/) {
     auto* obj = unpack_dynamic_object(obj_box);
     if (!obj) return static_cast<int64_t>(kUndefinedTag);
     uint32_t sym = static_cast<uint32_t>(key_index);
@@ -287,9 +326,10 @@ int64_t bronze_prop_get(int64_t obj_box, int32_t key_index) {
     return static_cast<int64_t>(val.raw());
 }
 
-void bronze_prop_set(int64_t obj_box, int32_t key_index, int64_t val, int32_t slot_idx, int32_t /*imm*/) {
+void bronze_prop_set(int64_t obj_box, int32_t key_index, int64_t val, uint64_t* ic_entry, int32_t /*strict*/) {
     auto* obj = unpack_dynamic_object(obj_box);
     if (!obj) return;
+    int32_t slot_idx = static_cast<int32_t>(reinterpret_cast<uintptr_t>(ic_entry));
     if (obj->element_capacity > 0 && slot_idx >= 0) {
         HostGC* gc = brass::get_active_host_gc();
         obj->set_element(slot_idx, HostValue(static_cast<uint64_t>(val)), gc);
@@ -336,16 +376,20 @@ void bronze_elem_set(int64_t arr_box, int64_t index_box, int64_t val, int32_t /*
     arr->set_element(idx, HostValue(static_cast<uint64_t>(val)), gc);
 }
 
-void bronze_method_def(int64_t obj_box, const char* name, int32_t symbol_id, int64_t closure_box) {
+void bronze_method_def(int64_t obj_box, int32_t key_index, int64_t closure_box) {
     auto* obj = unpack_dynamic_object(obj_box);
     if (!obj) return;
     HostGC* gc = brass::get_active_host_gc();
     HostValue val(static_cast<uint64_t>(closure_box));
-    if (name && name[0] != '\0') {
-        obj->set_property(name, val, ShapeRegistry::global(), gc);
-    } else {
-        obj->set_property(static_cast<uint32_t>(symbol_id), val, ShapeRegistry::global(), gc);
-    }
+    obj->set_property(static_cast<uint32_t>(key_index), val, ShapeRegistry::global(), gc);
+}
+
+void bronze_method_def_computed(int64_t obj_box, int64_t key_box, int64_t closure_box) {
+    auto* obj = unpack_dynamic_object(obj_box);
+    if (!obj) return;
+    HostGC* gc = brass::get_active_host_gc();
+    HostValue val(static_cast<uint64_t>(closure_box));
+    obj->set_element(static_cast<uint32_t>(key_box), val, gc);
 }
 
 int64_t bronze_ic_get(uint32_t site_id, int64_t obj_box, const char* name, int32_t symbol_id) {
@@ -389,7 +433,9 @@ static void* get_closure_code(BronzeClosure* closure) {
     return closure->code_ptr;
 }
 
-int64_t bronze_call_dynamic_0(int64_t callee_box, int64_t /*this_box*/) {
+using BronzeFnCode = int64_t(*)(int64_t, int64_t, uint32_t, const int64_t*);
+
+int64_t bronze_call_dynamic_0(int64_t callee_box, int64_t this_box) {
     if (callee_box == static_cast<int64_t>(kPrintTag)) {
         bronze_print_newline();
         return static_cast<int64_t>(kUndefinedTag);
@@ -397,14 +443,12 @@ int64_t bronze_call_dynamic_0(int64_t callee_box, int64_t /*this_box*/) {
     auto* closure = unpack_closure(callee_box);
     void* code = get_closure_code(closure);
     if (code && closure) {
-        using Fn0 = int64_t(*)(int64_t);
-        auto fn = reinterpret_cast<Fn0>(code);
-        return fn(closure->env_box);
+        return reinterpret_cast<BronzeFnCode>(code)(closure->env_box, this_box, 0, nullptr);
     }
     return static_cast<int64_t>(kUndefinedTag);
 }
 
-int64_t bronze_call_dynamic_1(int64_t callee_box, int64_t /*this_box*/, int64_t arg0) {
+int64_t bronze_call_dynamic_1(int64_t callee_box, int64_t this_box, int64_t arg0) {
     if (callee_box == static_cast<int64_t>(kPrintTag)) {
         bronze_print_dynamic(arg0);
         bronze_print_newline();
@@ -413,170 +457,139 @@ int64_t bronze_call_dynamic_1(int64_t callee_box, int64_t /*this_box*/, int64_t 
     auto* closure = unpack_closure(callee_box);
     void* code = get_closure_code(closure);
     if (code && closure) {
-        using Fn1 = int64_t(*)(int64_t, int64_t);
-        auto fn = reinterpret_cast<Fn1>(code);
-        return fn(closure->env_box, arg0);
+        int64_t argv[1] = {arg0};
+        return reinterpret_cast<BronzeFnCode>(code)(closure->env_box, this_box, 1, argv);
     }
     return static_cast<int64_t>(kUndefinedTag);
 }
 
-int64_t bronze_call_dynamic_2(int64_t callee_box, int64_t /*this_box*/, int64_t arg0, int64_t arg1) {
+static inline void print_dynamic_helper(const int64_t* argv, size_t argc) {
+    for (size_t i = 0; i < argc; ++i) {
+        if (i > 0) bronze_print_space();
+        bronze_print_dynamic(argv[i]);
+    }
+    bronze_print_newline();
+}
+
+int64_t bronze_call_dynamic_2(int64_t callee_box, int64_t this_box, int64_t arg0, int64_t arg1) {
     if (callee_box == static_cast<int64_t>(kPrintTag)) {
-        bronze_print_dynamic(arg0);
-        bronze_print_dynamic(arg1);
-        bronze_print_newline();
+        const int64_t args[2] = {arg0, arg1};
+        print_dynamic_helper(args, 2);
         return static_cast<int64_t>(kUndefinedTag);
     }
     auto* closure = unpack_closure(callee_box);
     void* code = get_closure_code(closure);
     if (code && closure) {
-        using Fn2 = int64_t(*)(int64_t, int64_t, int64_t);
-        auto fn = reinterpret_cast<Fn2>(code);
-        return fn(closure->env_box, arg0, arg1);
+        int64_t argv[2] = {arg0, arg1};
+        return reinterpret_cast<BronzeFnCode>(code)(closure->env_box, this_box, 2, argv);
     }
     return static_cast<int64_t>(kUndefinedTag);
 }
 
-int64_t bronze_call_dynamic_3(int64_t callee_box, int64_t /*this_box*/, int64_t arg0, int64_t arg1, int64_t arg2) {
+int64_t bronze_call_dynamic_3(int64_t callee_box, int64_t this_box, int64_t arg0, int64_t arg1, int64_t arg2) {
     if (callee_box == static_cast<int64_t>(kPrintTag)) {
-        bronze_print_dynamic(arg0);
-        bronze_print_dynamic(arg1);
-        bronze_print_dynamic(arg2);
-        bronze_print_newline();
+        const int64_t args[3] = {arg0, arg1, arg2};
+        print_dynamic_helper(args, 3);
         return static_cast<int64_t>(kUndefinedTag);
     }
     auto* closure = unpack_closure(callee_box);
     void* code = get_closure_code(closure);
     if (code && closure) {
-        using Fn3 = int64_t(*)(int64_t, int64_t, int64_t, int64_t);
-        auto fn = reinterpret_cast<Fn3>(code);
-        return fn(closure->env_box, arg0, arg1, arg2);
+        int64_t argv[3] = {arg0, arg1, arg2};
+        return reinterpret_cast<BronzeFnCode>(code)(closure->env_box, this_box, 3, argv);
     }
     return static_cast<int64_t>(kUndefinedTag);
 }
 
-int64_t bronze_call_dynamic_4(int64_t callee_box, int64_t /*this_box*/, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3) {
+int64_t bronze_call_dynamic_4(int64_t callee_box, int64_t this_box, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3) {
     if (callee_box == static_cast<int64_t>(kPrintTag)) {
-        bronze_print_dynamic(arg0);
-        bronze_print_dynamic(arg1);
-        bronze_print_dynamic(arg2);
-        bronze_print_dynamic(arg3);
-        bronze_print_newline();
+        const int64_t args[4] = {arg0, arg1, arg2, arg3};
+        print_dynamic_helper(args, 4);
         return static_cast<int64_t>(kUndefinedTag);
     }
     auto* closure = unpack_closure(callee_box);
     void* code = get_closure_code(closure);
     if (code && closure) {
-        using Fn4 = int64_t(*)(int64_t, int64_t, int64_t, int64_t, int64_t);
-        auto fn = reinterpret_cast<Fn4>(code);
-        return fn(closure->env_box, arg0, arg1, arg2, arg3);
+        int64_t argv[4] = {arg0, arg1, arg2, arg3};
+        return reinterpret_cast<BronzeFnCode>(code)(closure->env_box, this_box, 4, argv);
     }
     return static_cast<int64_t>(kUndefinedTag);
 }
 
-int64_t bronze_call_dynamic_5(int64_t callee_box, int64_t /*this_box*/, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4) {
+int64_t bronze_call_dynamic_5(int64_t callee_box, int64_t this_box, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4) {
     if (callee_box == static_cast<int64_t>(kPrintTag)) {
-        bronze_print_dynamic(arg0);
-        bronze_print_dynamic(arg1);
-        bronze_print_dynamic(arg2);
-        bronze_print_dynamic(arg3);
-        bronze_print_dynamic(arg4);
-        bronze_print_newline();
+        const int64_t args[5] = {arg0, arg1, arg2, arg3, arg4};
+        print_dynamic_helper(args, 5);
         return static_cast<int64_t>(kUndefinedTag);
     }
     auto* closure = unpack_closure(callee_box);
     void* code = get_closure_code(closure);
     if (code && closure) {
-        using Fn5 = int64_t(*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
-        auto fn = reinterpret_cast<Fn5>(code);
-        return fn(closure->env_box, arg0, arg1, arg2, arg3, arg4);
+        int64_t argv[5] = {arg0, arg1, arg2, arg3, arg4};
+        return reinterpret_cast<BronzeFnCode>(code)(closure->env_box, this_box, 5, argv);
     }
     return static_cast<int64_t>(kUndefinedTag);
 }
 
-int64_t bronze_call_dynamic_6(int64_t callee_box, int64_t /*this_box*/, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t arg5) {
+int64_t bronze_call_dynamic_6(int64_t callee_box, int64_t this_box, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t arg5) {
     if (callee_box == static_cast<int64_t>(kPrintTag)) {
-        bronze_print_dynamic(arg0);
-        bronze_print_dynamic(arg1);
-        bronze_print_dynamic(arg2);
-        bronze_print_dynamic(arg3);
-        bronze_print_dynamic(arg4);
-        bronze_print_dynamic(arg5);
-        bronze_print_newline();
+        const int64_t args[6] = {arg0, arg1, arg2, arg3, arg4, arg5};
+        print_dynamic_helper(args, 6);
         return static_cast<int64_t>(kUndefinedTag);
     }
     auto* closure = unpack_closure(callee_box);
     void* code = get_closure_code(closure);
     if (code && closure) {
-        using Fn6 = int64_t(*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
-        auto fn = reinterpret_cast<Fn6>(code);
-        return fn(closure->env_box, arg0, arg1, arg2, arg3, arg4, arg5);
+        int64_t argv[6] = {arg0, arg1, arg2, arg3, arg4, arg5};
+        return reinterpret_cast<BronzeFnCode>(code)(closure->env_box, this_box, 6, argv);
     }
     return static_cast<int64_t>(kUndefinedTag);
 }
 
-int64_t bronze_call_dynamic_7(int64_t callee_box, int64_t /*this_box*/, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t arg5, int64_t arg6) {
+int64_t bronze_call_dynamic_7(int64_t callee_box, int64_t this_box, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t arg5, int64_t arg6) {
     if (callee_box == static_cast<int64_t>(kPrintTag)) {
-        bronze_print_dynamic(arg0);
-        bronze_print_dynamic(arg1);
-        bronze_print_dynamic(arg2);
-        bronze_print_dynamic(arg3);
-        bronze_print_dynamic(arg4);
-        bronze_print_dynamic(arg5);
-        bronze_print_dynamic(arg6);
-        bronze_print_newline();
+        const int64_t args[7] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6};
+        print_dynamic_helper(args, 7);
         return static_cast<int64_t>(kUndefinedTag);
     }
     auto* closure = unpack_closure(callee_box);
     void* code = get_closure_code(closure);
     if (code && closure) {
-        using Fn7 = int64_t(*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
-        auto fn = reinterpret_cast<Fn7>(code);
-        return fn(closure->env_box, arg0, arg1, arg2, arg3, arg4, arg5, arg6);
+        int64_t argv[7] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6};
+        return reinterpret_cast<BronzeFnCode>(code)(closure->env_box, this_box, 7, argv);
     }
     return static_cast<int64_t>(kUndefinedTag);
 }
 
-int64_t bronze_call_dynamic_8(int64_t callee_box, int64_t /*this_box*/, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t arg5, int64_t arg6, int64_t arg7) {
+int64_t bronze_call_dynamic_8(int64_t callee_box, int64_t this_box, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t arg5, int64_t arg6, int64_t arg7) {
     if (callee_box == static_cast<int64_t>(kPrintTag)) {
-        bronze_print_dynamic(arg0);
-        bronze_print_dynamic(arg1);
-        bronze_print_dynamic(arg2);
-        bronze_print_dynamic(arg3);
-        bronze_print_dynamic(arg4);
-        bronze_print_dynamic(arg5);
-        bronze_print_dynamic(arg6);
-        bronze_print_dynamic(arg7);
-        bronze_print_newline();
+        const int64_t args[8] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7};
+        print_dynamic_helper(args, 8);
         return static_cast<int64_t>(kUndefinedTag);
     }
     auto* closure = unpack_closure(callee_box);
     void* code = get_closure_code(closure);
     if (code && closure) {
-        using Fn8 = int64_t(*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
-        auto fn = reinterpret_cast<Fn8>(code);
-        return fn(closure->env_box, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7);
+        int64_t argv[8] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7};
+        return reinterpret_cast<BronzeFnCode>(code)(closure->env_box, this_box, 8, argv);
     }
     return static_cast<int64_t>(kUndefinedTag);
 }
 
 int64_t bronze_call_dynamic_n(int64_t callee_box, int64_t this_box, int32_t argc, const int64_t* argv) {
     if (callee_box == static_cast<int64_t>(kPrintTag)) {
-        for (int32_t i = 0; i < argc; ++i) {
-            bronze_print_dynamic(argv[i]);
+        if (argc > 0 && argv) {
+            print_dynamic_helper(argv, static_cast<size_t>(argc));
+        } else {
+            bronze_print_newline();
         }
-        bronze_print_newline();
         return static_cast<int64_t>(kUndefinedTag);
     }
-    if (argc == 0) return bronze_call_dynamic_0(callee_box, this_box);
-    if (argc == 1) return bronze_call_dynamic_1(callee_box, this_box, argv[0]);
-    if (argc == 2) return bronze_call_dynamic_2(callee_box, this_box, argv[0], argv[1]);
-    if (argc == 3) return bronze_call_dynamic_3(callee_box, this_box, argv[0], argv[1], argv[2]);
-    if (argc == 4) return bronze_call_dynamic_4(callee_box, this_box, argv[0], argv[1], argv[2], argv[3]);
-    if (argc == 5) return bronze_call_dynamic_5(callee_box, this_box, argv[0], argv[1], argv[2], argv[3], argv[4]);
-    if (argc == 6) return bronze_call_dynamic_6(callee_box, this_box, argv[0], argv[1], argv[2], argv[3], argv[4], argv[5]);
-    if (argc == 7) return bronze_call_dynamic_7(callee_box, this_box, argv[0], argv[1], argv[2], argv[3], argv[4], argv[5], argv[6]);
-    if (argc == 8) return bronze_call_dynamic_8(callee_box, this_box, argv[0], argv[1], argv[2], argv[3], argv[4], argv[5], argv[6], argv[7]);
+    auto* closure = unpack_closure(callee_box);
+    void* code = get_closure_code(closure);
+    if (code && closure) {
+        return reinterpret_cast<BronzeFnCode>(code)(closure->env_box, this_box, static_cast<uint32_t>(argc), argv);
+    }
     return static_cast<int64_t>(kUndefinedTag);
 }
 
@@ -622,257 +635,231 @@ int64_t bronze_global_get_name(const char* name) {
     return bronze_name_resolve(name);
 }
 
-#ifndef _WIN32
-__attribute__((weak))
-#endif
-int64_t bronze_construct_0(int64_t callee_box) {
+BRONZE_WEAK uint64_t bronze_global_get(uint32_t key_index, uint64_t* cache_cell) {
+    (void)key_index;
+    (void)cache_cell;
+    return static_cast<uint64_t>(kUndefinedTag);
+}
+
+BRONZE_WEAK uint64_t bronze_typeof(uint64_t bits) {
+    (void)bits;
+    return static_cast<uint64_t>(kUndefinedTag);
+}
+
+BRONZE_WEAK int64_t bronze_construct_0(int64_t callee_box) {
     int64_t obj = bronze_create_object();
     int64_t res = bronze_call_dynamic_0(callee_box, obj);
     return (res && (res & 0xFFF0000000000000ULL) != 0xFFF0000000000000ULL) ? res : obj;
 }
-
-#ifndef _WIN32
-__attribute__((weak))
-#endif
-int64_t bronze_construct_1(int64_t callee_box, int64_t arg0) {
+BRONZE_WEAK int64_t bronze_construct_1(int64_t callee_box, int64_t a0) {
     int64_t obj = bronze_create_object();
-    int64_t res = bronze_call_dynamic_1(callee_box, obj, arg0);
+    int64_t res = bronze_call_dynamic_1(callee_box, obj, a0);
     return (res && (res & 0xFFF0000000000000ULL) != 0xFFF0000000000000ULL) ? res : obj;
 }
-
-#ifndef _WIN32
-__attribute__((weak))
-#endif
-int64_t bronze_construct_2(int64_t callee_box, int64_t arg0, int64_t arg1) {
+BRONZE_WEAK int64_t bronze_construct_2(int64_t callee_box, int64_t a0, int64_t a1) {
     int64_t obj = bronze_create_object();
-    int64_t res = bronze_call_dynamic_2(callee_box, obj, arg0, arg1);
+    int64_t res = bronze_call_dynamic_2(callee_box, obj, a0, a1);
     return (res && (res & 0xFFF0000000000000ULL) != 0xFFF0000000000000ULL) ? res : obj;
 }
-
-#ifndef _WIN32
-__attribute__((weak))
-#endif
-int64_t bronze_construct_3(int64_t callee_box, int64_t arg0, int64_t arg1, int64_t arg2) {
+BRONZE_WEAK int64_t bronze_construct_3(int64_t callee_box, int64_t a0, int64_t a1, int64_t a2) {
     int64_t obj = bronze_create_object();
-    int64_t res = bronze_call_dynamic_3(callee_box, obj, arg0, arg1, arg2);
+    int64_t res = bronze_call_dynamic_3(callee_box, obj, a0, a1, a2);
     return (res && (res & 0xFFF0000000000000ULL) != 0xFFF0000000000000ULL) ? res : obj;
 }
-
-#ifndef _WIN32
-__attribute__((weak))
-#endif
-int64_t bronze_construct(int64_t callee_box, uint32_t argc, const int64_t* argv) {
+BRONZE_WEAK int64_t bronze_construct_4(int64_t callee_box, int64_t a0, int64_t a1, int64_t a2, int64_t a3) {
+    int64_t obj = bronze_create_object();
+    int64_t res = bronze_call_dynamic_4(callee_box, obj, a0, a1, a2, a3);
+    return (res && (res & 0xFFF0000000000000ULL) != 0xFFF0000000000000ULL) ? res : obj;
+}
+BRONZE_WEAK int64_t bronze_construct_5(int64_t callee_box, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4) {
+    int64_t obj = bronze_create_object();
+    int64_t res = bronze_call_dynamic_5(callee_box, obj, a0, a1, a2, a3, a4);
+    return (res && (res & 0xFFF0000000000000ULL) != 0xFFF0000000000000ULL) ? res : obj;
+}
+BRONZE_WEAK int64_t bronze_construct_6(int64_t callee_box, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5) {
+    int64_t obj = bronze_create_object();
+    int64_t res = bronze_call_dynamic_6(callee_box, obj, a0, a1, a2, a3, a4, a5);
+    return (res && (res & 0xFFF0000000000000ULL) != 0xFFF0000000000000ULL) ? res : obj;
+}
+BRONZE_WEAK int64_t bronze_construct_7(int64_t callee_box, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6) {
+    int64_t obj = bronze_create_object();
+    int64_t res = bronze_call_dynamic_7(callee_box, obj, a0, a1, a2, a3, a4, a5, a6);
+    return (res && (res & 0xFFF0000000000000ULL) != 0xFFF0000000000000ULL) ? res : obj;
+}
+BRONZE_WEAK int64_t bronze_construct_8(int64_t callee_box, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6, int64_t a7) {
+    int64_t obj = bronze_create_object();
+    int64_t res = bronze_call_dynamic_8(callee_box, obj, a0, a1, a2, a3, a4, a5, a6, a7);
+    return (res && (res & 0xFFF0000000000000ULL) != 0xFFF0000000000000ULL) ? res : obj;
+}
+BRONZE_WEAK int64_t bronze_construct(int64_t callee_box, uint32_t argc, const int64_t* argv) {
     if (argc == 0) return bronze_construct_0(callee_box);
     if (argc == 1) return bronze_construct_1(callee_box, argv[0]);
     if (argc == 2) return bronze_construct_2(callee_box, argv[0], argv[1]);
     if (argc == 3) return bronze_construct_3(callee_box, argv[0], argv[1], argv[2]);
+    if (argc == 4) return bronze_construct_4(callee_box, argv[0], argv[1], argv[2], argv[3]);
+    if (argc == 5) return bronze_construct_5(callee_box, argv[0], argv[1], argv[2], argv[3], argv[4]);
+    if (argc == 6) return bronze_construct_6(callee_box, argv[0], argv[1], argv[2], argv[3], argv[4], argv[5]);
+    if (argc == 7) return bronze_construct_7(callee_box, argv[0], argv[1], argv[2], argv[3], argv[4], argv[5], argv[6]);
+    if (argc == 8) return bronze_construct_8(callee_box, argv[0], argv[1], argv[2], argv[3], argv[4], argv[5], argv[6], argv[7]);
     return bronze_create_object();
 }
 
-#ifndef _WIN32
-__attribute__((weak))
-#endif
-void bronze_class_extends(int64_t sub_box, int64_t super_box) {
-    (void)sub_box;
-    (void)super_box;
-}
-
-#ifndef _WIN32
-__attribute__((weak))
-#endif
-int64_t bronze_super_call(int64_t sub_box, int64_t this_box, uint32_t argc, const int64_t* argv) {
-    (void)sub_box;
+BRONZE_WEAK void bronze_class_extends(int64_t, int64_t) {}
+BRONZE_WEAK int64_t bronze_super_call(int64_t sub_box, int64_t this_box, uint32_t argc, const int64_t* argv) {
     return bronze_call_dynamic_n(sub_box, this_box, argc, argv);
 }
-
-#ifndef _WIN32
-__attribute__((weak))
-#endif
-int32_t bronze_instanceof(int64_t a_box, int64_t b_box) {
-    (void)a_box;
-    (void)b_box;
-    return 1;
+BRONZE_WEAK int64_t bronze_super_call_0(int64_t sub_box, int64_t this_box) {
+    return bronze_super_call(sub_box, this_box, 0, nullptr);
 }
-
-#ifndef _WIN32
-__attribute__((weak))
-#endif
-int64_t bronze_super_get(int64_t proto_box, uint32_t key_index, int64_t this_box) {
-    (void)this_box;
+BRONZE_WEAK int64_t bronze_super_call_1(int64_t sub_box, int64_t this_box, int64_t a0) {
+    int64_t argv[1] = {a0};
+    return bronze_super_call(sub_box, this_box, 1, argv);
+}
+BRONZE_WEAK int64_t bronze_super_call_2(int64_t sub_box, int64_t this_box, int64_t a0, int64_t a1) {
+    int64_t argv[2] = {a0, a1};
+    return bronze_super_call(sub_box, this_box, 2, argv);
+}
+BRONZE_WEAK int64_t bronze_super_call_3(int64_t sub_box, int64_t this_box, int64_t a0, int64_t a1, int64_t a2) {
+    int64_t argv[3] = {a0, a1, a2};
+    return bronze_super_call(sub_box, this_box, 3, argv);
+}
+BRONZE_WEAK int64_t bronze_super_call_4(int64_t sub_box, int64_t this_box, int64_t a0, int64_t a1, int64_t a2, int64_t a3) {
+    int64_t argv[4] = {a0, a1, a2, a3};
+    return bronze_super_call(sub_box, this_box, 4, argv);
+}
+BRONZE_WEAK int64_t bronze_super_call_5(int64_t sub_box, int64_t this_box, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4) {
+    int64_t argv[5] = {a0, a1, a2, a3, a4};
+    return bronze_super_call(sub_box, this_box, 5, argv);
+}
+BRONZE_WEAK int64_t bronze_super_call_6(int64_t sub_box, int64_t this_box, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5) {
+    int64_t argv[6] = {a0, a1, a2, a3, a4, a5};
+    return bronze_super_call(sub_box, this_box, 6, argv);
+}
+BRONZE_WEAK int64_t bronze_super_call_7(int64_t sub_box, int64_t this_box, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6) {
+    int64_t argv[7] = {a0, a1, a2, a3, a4, a5, a6};
+    return bronze_super_call(sub_box, this_box, 7, argv);
+}
+BRONZE_WEAK int64_t bronze_super_call_8(int64_t sub_box, int64_t this_box, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6, int64_t a7) {
+    int64_t argv[8] = {a0, a1, a2, a3, a4, a5, a6, a7};
+    return bronze_super_call(sub_box, this_box, 8, argv);
+}
+BRONZE_WEAK int64_t bronze_super_call_n(int64_t sub_box, int64_t this_box, uint32_t argc, const int64_t* argv) {
+    return bronze_super_call(sub_box, this_box, argc, argv);
+}
+BRONZE_WEAK int64_t bronze_arg_at(uint32_t argc, const int64_t* argv, uint32_t index) {
+    if (index < argc && argv) return argv[index];
+    return static_cast<int64_t>(kUndefinedTag);
+}
+BRONZE_WEAK int64_t bronze_arguments_object(uint32_t argc, const int64_t* /*argv*/, int64_t /*callee*/, int32_t /*is_strict*/) {
+    return bronze_create_array(static_cast<int32_t>(argc));
+}
+BRONZE_WEAK int64_t bronze_rest_args(uint32_t argc, const int64_t* /*argv*/, uint32_t first_index) {
+    uint32_t count = argc > first_index ? (argc - first_index) : 0;
+    return bronze_create_array(static_cast<int32_t>(count));
+}
+BRONZE_WEAK int32_t bronze_instanceof(int64_t, int64_t) { return 1; }
+BRONZE_WEAK int64_t bronze_super_get(int64_t proto_box, uint32_t key_index, int64_t) {
     return bronze_prop_get(proto_box, static_cast<int32_t>(key_index));
 }
-
-#ifndef _WIN32
-__attribute__((weak))
-#endif
-int32_t bronze_has_property(int64_t key_box, int64_t obj_box) {
-    (void)key_box;
-    (void)obj_box;
-    return 0;
+BRONZE_WEAK int64_t bronze_object_keys(int64_t /*obj_box*/) {
+    return bronze_create_array(0);
 }
-
-#ifndef _WIN32
-__attribute__((weak))
-#endif
-int32_t bronze_is_nullish(int64_t val_box) {
+BRONZE_WEAK int64_t bronze_for_in_keys(int64_t /*obj_box*/) {
+    return bronze_create_array(0);
+}
+BRONZE_WEAK int32_t bronze_has_property(int64_t, int64_t) { return 0; }
+BRONZE_WEAK int32_t bronze_is_nullish(int64_t val_box) {
     return (val_box == static_cast<int64_t>(kUndefinedTag) || val_box == static_cast<int64_t>(kNullTag)) ? 1 : 0;
 }
 
-#ifndef _WIN32
-__attribute__((weak))
-#endif
-void bronze_pin_guard(int64_t /*val_box*/, int32_t /*shape*/, const char* /*name*/) {
+BRONZE_WEAK void bronze_define_own_attr(uint64_t /*obj_bits*/, uint32_t /*key_index*/, uint64_t /*val_bits*/, uint32_t /*mask*/) {}
+BRONZE_WEAK void bronze_accessor_def(uint64_t, uint32_t, uint64_t, uint64_t, int32_t) {}
+BRONZE_WEAK void bronze_accessor_def_computed(uint64_t, uint64_t, uint64_t, uint64_t, int32_t) {}
+BRONZE_WEAK uint64_t bronze_module_namespace(uint64_t src) { return src; }
+BRONZE_WEAK void bronze_pin_guard(int64_t /*val_box*/, int32_t /*shape*/, const char* /*name*/) {}
+BRONZE_WEAK void bronze_census_record(uint32_t /*key_id*/, uint32_t /*site_info*/, uint64_t /*value_bits*/) {}
+BRONZE_WEAK double bronze_unbox_f64(uint64_t bits) { return std::bit_cast<double>(bits); }
+BRONZE_WEAK uint64_t bronze_box_f64(double v) { return std::bit_cast<uint64_t>(v); }
+BRONZE_WEAK int32_t bronze_unbox_i32(uint64_t bits) { return static_cast<int32_t>(bits & 0xFFFFFFFFLL); }
+BRONZE_WEAK uint64_t bronze_box_i32(int32_t v) {
+    return (static_cast<uint64_t>(static_cast<int64_t>(v)) & 0xFFFFFFFFLL) | kInt32Tag;
 }
+BRONZE_WEAK int32_t bronze_unbox_bool(uint64_t bits) {
+    if (bits <= 0xFFF0000000000000ULL) {
+        double d = 0.0;
+        std::memcpy(&d, &bits, sizeof(double));
+        return (d != 0.0 && !std::isnan(d)) ? 1 : 0;
+    }
+    uint32_t tag = static_cast<uint32_t>(bits >> 48);
+    if (tag == 0xFFF4) return (bits & 1) ? 1 : 0;
+    if (tag == 0xFFF5 || tag == 0xFFF6) return 0;
+    if (tag == 0xFFF1) return 1;
+    return (bits & 1) ? 1 : 0;
+}
+BRONZE_WEAK uint64_t bronze_box_bool(int32_t v) { return static_cast<uint64_t>(v ? 1 : 0) | kBoolTag; }
+BRONZE_WEAK uint64_t bronze_box_str_key(uint32_t /*key_index*/) { return kUndefinedTag; }
+BRONZE_WEAK void bronze_register_key_manifest(const uint8_t* /*data*/) {}
 
-#ifndef _WIN32
-__attribute__((weak))
-#endif
-void bronze_census_record(uint32_t /*key_id*/, uint32_t /*site_info*/, uint64_t /*value_bits*/) {
+static thread_local uint64_t g_bronze_dummy_exception_cell = 0xFFFA000000000000ULL;
+BRONZE_WEAK uint64_t bronze_exception_get() { return g_bronze_dummy_exception_cell; }
+BRONZE_WEAK void bronze_exception_set(uint64_t bits) { g_bronze_dummy_exception_cell = bits; }
+BRONZE_WEAK uint64_t bronze_exception_take() {
+    uint64_t val = g_bronze_dummy_exception_cell;
+    g_bronze_dummy_exception_cell = 0xFFFA000000000000ULL;
+    return val;
+}
+BRONZE_WEAK int32_t bronze_exception_pending() {
+    return g_bronze_dummy_exception_cell != 0xFFFA000000000000ULL;
+}
+BRONZE_WEAK void bronze_uncaught_exception() { std::exit(1); }
+BRONZE_WEAK uint64_t bronze_pin_violation(uint32_t /*key_index*/, uint64_t bits) {
+    g_bronze_dummy_exception_cell = bits;
+    return 0xFFF6000000000000ULL;
+}
+BRONZE_WEAK void bronze_pin_check_array(uint32_t /*key_index*/, uint64_t /*bits*/) {}
+
+BRONZE_WEAK int32_t bronze_strict_eq(int64_t a, int64_t b) {
+    if (a == b) {
+        uint64_t ua = static_cast<uint64_t>(a);
+        if (ua >= 0xFFF0000000000000ULL) return 1;
+        double da;
+        std::memcpy(&da, &a, sizeof(double));
+        return std::isnan(da) ? 0 : 1;
+    }
+    uint64_t ua = static_cast<uint64_t>(a);
+    uint64_t ub = static_cast<uint64_t>(b);
+    if (ua < 0xFFF0000000000000ULL && ub < 0xFFF0000000000000ULL) {
+        double da, db;
+        std::memcpy(&da, &a, sizeof(double));
+        std::memcpy(&db, &b, sizeof(double));
+        return (da == db) ? 1 : 0;
+    }
+    return 0;
+}
+BRONZE_WEAK int32_t bronze_loose_eq(int64_t a, int64_t b) { return bronze_strict_eq(a, b); }
+static inline double to_dbl(int64_t v) { double d = 0; std::memcpy(&d, &v, sizeof(double)); return d; }
+BRONZE_WEAK int32_t bronze_rel_lt(int64_t a, int64_t b) { return to_dbl(a) < to_dbl(b) ? 1 : 0; }
+BRONZE_WEAK int32_t bronze_rel_gt(int64_t a, int64_t b) { return to_dbl(a) > to_dbl(b) ? 1 : 0; }
+BRONZE_WEAK int32_t bronze_rel_le(int64_t a, int64_t b) { return to_dbl(a) <= to_dbl(b) ? 1 : 0; }
+BRONZE_WEAK int32_t bronze_rel_ge(int64_t a, int64_t b) { return to_dbl(a) >= to_dbl(b) ? 1 : 0; }
+BRONZE_WEAK double bronze_pow(double base, double exp) { return std::pow(base, exp); }
+BRONZE_WEAK uint64_t bronze_dynamic_pow(uint64_t l, uint64_t r) {
+    double d = std::pow(to_dbl(static_cast<int64_t>(l)), to_dbl(static_cast<int64_t>(r)));
+    uint64_t u = 0; std::memcpy(&u, &d, sizeof(double)); return u;
 }
 
 } // extern "C"
 
-static int64_t g_bronze_module_env = kUndefinedTag;
+uint32_t g_bronze_main_key_constants = 0;
+int64_t g_bronze_module_env = kUndefinedTag;
 
-void register_all_runtime_symbols(codegen::JitExecutionEngine& jit) {
-    g_active_jit = &jit;
-
-    jit.register_external_symbol("__bronze_module_env", reinterpret_cast<void*>(&g_bronze_module_env));
-    jit.register_external_symbol("bronze_register_value_cells", reinterpret_cast<void*>(&bronze_register_value_cells));
-    jit.register_external_symbol("bronze_print_f64", reinterpret_cast<void*>(&bronze_print_f64));
-    jit.register_external_symbol("bronze_print_i32", reinterpret_cast<void*>(&bronze_print_i32));
-    jit.register_external_symbol("bronze_print_dynamic", reinterpret_cast<void*>(&bronze_print_dynamic));
-    jit.register_external_symbol("bronze_print_newline", reinterpret_cast<void*>(&bronze_print_newline));
-    jit.register_external_symbol("bronze_f64_mod", reinterpret_cast<void*>(&bronze_f64_mod));
-
-    jit.register_external_symbol("bronze_name_resolve", reinterpret_cast<void*>(&bronze_name_resolve));
-    jit.register_external_symbol("bronze_env_create", reinterpret_cast<void*>(&bronze_env_create));
-    jit.register_external_symbol("bronze_env_get", reinterpret_cast<void*>(&bronze_env_get));
-    jit.register_external_symbol("bronze_env_set", reinterpret_cast<void*>(&bronze_env_set));
-    jit.register_external_symbol("bronze_create_func", reinterpret_cast<void*>(&bronze_create_func));
-    jit.register_external_symbol("bronze_create_array", reinterpret_cast<void*>(&bronze_create_array));
-    jit.register_external_symbol("bronze_create_object", reinterpret_cast<void*>(&bronze_create_object));
-    jit.register_external_symbol("bronze_prop_get", reinterpret_cast<void*>(&bronze_prop_get));
-    jit.register_external_symbol("bronze_prop_set", reinterpret_cast<void*>(&bronze_prop_set));
-    jit.register_external_symbol("bronze_elem_get", reinterpret_cast<void*>(&bronze_elem_get));
-    jit.register_external_symbol("bronze_elem_set", reinterpret_cast<void*>(&bronze_elem_set));
-    jit.register_external_symbol("bronze_method_def", reinterpret_cast<void*>(&bronze_method_def));
-    jit.register_external_symbol("bronze_ic_get", reinterpret_cast<void*>(&bronze_ic_get));
-    jit.register_external_symbol("bronze_ic_set", reinterpret_cast<void*>(&bronze_ic_set));
-    jit.register_external_symbol("brass_ic_get_prop", reinterpret_cast<void*>(&brass_ic_get_prop));
-    jit.register_external_symbol("brass_ic_set_prop", reinterpret_cast<void*>(&brass_ic_set_prop));
-    jit.register_external_symbol("brass_dynamic_object_get_prop_str", reinterpret_cast<void*>(&brass_dynamic_object_get_prop_str));
-    jit.register_external_symbol("brass_dynamic_object_set_prop_str", reinterpret_cast<void*>(&brass_dynamic_object_set_prop_str));
-
-    jit.register_external_symbol("bronze_call_dynamic_0", reinterpret_cast<void*>(&bronze_call_dynamic_0));
-    jit.register_external_symbol("bronze_call_dynamic_1", reinterpret_cast<void*>(&bronze_call_dynamic_1));
-    jit.register_external_symbol("bronze_call_dynamic_2", reinterpret_cast<void*>(&bronze_call_dynamic_2));
-    jit.register_external_symbol("bronze_call_dynamic_3", reinterpret_cast<void*>(&bronze_call_dynamic_3));
-    jit.register_external_symbol("bronze_call_dynamic_4", reinterpret_cast<void*>(&bronze_call_dynamic_4));
-    jit.register_external_symbol("bronze_call_dynamic_5", reinterpret_cast<void*>(&bronze_call_dynamic_5));
-    jit.register_external_symbol("bronze_call_dynamic_6", reinterpret_cast<void*>(&bronze_call_dynamic_6));
-    jit.register_external_symbol("bronze_call_dynamic_7", reinterpret_cast<void*>(&bronze_call_dynamic_7));
-    jit.register_external_symbol("bronze_call_dynamic_8", reinterpret_cast<void*>(&bronze_call_dynamic_8));
-    jit.register_external_symbol("bronze_call_dynamic_n", reinterpret_cast<void*>(&bronze_call_dynamic_n));
-
-    jit.register_external_symbol("bronze_concat_begin", reinterpret_cast<void*>(&bronze_concat_begin));
-    jit.register_external_symbol("bronze_concat_append", reinterpret_cast<void*>(&bronze_concat_append));
-    jit.register_external_symbol("bronze_concat_end", reinterpret_cast<void*>(&bronze_concat_end));
-    jit.register_external_symbol("bronze_global_get_name", reinterpret_cast<void*>(&bronze_global_get_name));
-    jit.register_external_symbol("bronze_construct_0", reinterpret_cast<void*>(&bronze_construct_0));
-    jit.register_external_symbol("bronze_construct_1", reinterpret_cast<void*>(&bronze_construct_1));
-    jit.register_external_symbol("bronze_construct_2", reinterpret_cast<void*>(&bronze_construct_2));
-    jit.register_external_symbol("bronze_construct_3", reinterpret_cast<void*>(&bronze_construct_3));
-    jit.register_external_symbol("bronze_construct", reinterpret_cast<void*>(&bronze_construct));
-    jit.register_external_symbol("bronze_class_extends", reinterpret_cast<void*>(&bronze_class_extends));
-    jit.register_external_symbol("bronze_super_call", reinterpret_cast<void*>(&bronze_super_call));
-    jit.register_external_symbol("bronze_super_get", reinterpret_cast<void*>(&bronze_super_get));
-    jit.register_external_symbol("bronze_instanceof", reinterpret_cast<void*>(&bronze_instanceof));
-    jit.register_external_symbol("bronze_has_property", reinterpret_cast<void*>(&bronze_has_property));
-    jit.register_external_symbol("bronze_is_nullish", reinterpret_cast<void*>(&bronze_is_nullish));
-    jit.register_external_symbol("bronze_pin_guard", reinterpret_cast<void*>(&bronze_pin_guard));
-    jit.register_external_symbol("bronze_census_record", reinterpret_cast<void*>(&bronze_census_record));
-
-    set_coro_symbol_resolver(&bronze_resolve_function);
-    jit.register_external_symbol("brass_gc_write_barrier", reinterpret_cast<void*>(&brass_gc_write_barrier));
-    jit.register_external_symbol("brass_gc_card_table_base", reinterpret_cast<void*>(&brass_gc_card_table_base));
-    jit.register_external_symbol("brass_gc_heap_base", reinterpret_cast<void*>(&brass_gc_heap_base));
-    jit.register_external_symbol("bronze_create_async_machine", reinterpret_cast<void*>(&bronze_create_async_machine));
-    jit.register_external_symbol("bronze_async_start", reinterpret_cast<void*>(&bronze_async_start));
-    jit.register_external_symbol("bronze_async_await", reinterpret_cast<void*>(&bronze_async_await));
-    jit.register_external_symbol("bronze_iter_open", reinterpret_cast<void*>(&bronze_iter_open));
-    jit.register_external_symbol("bronze_iter_step", reinterpret_cast<void*>(&bronze_iter_step));
-    jit.register_external_symbol("brass_parallel_for", reinterpret_cast<void*>(&brass_parallel_for));
-    jit.register_external_symbol("brass_set_parallel_workers", reinterpret_cast<void*>(&brass_set_parallel_workers));
-    jit.register_external_symbol("brass_get_parallel_workers", reinterpret_cast<void*>(&brass_get_parallel_workers));
-    jit.register_external_symbol("brass_parallel_reduce_i64", reinterpret_cast<void*>(&brass_parallel_reduce_i64));
-    jit.register_external_symbol("brass_parallel_reduce_f64", reinterpret_cast<void*>(&brass_parallel_reduce_f64));
-    jit.register_external_symbol("brass_parallel_alloc_context", reinterpret_cast<void*>(&brass_parallel_alloc_context));
-    jit.register_external_symbol("brass_parallel_free_context", reinterpret_cast<void*>(&brass_parallel_free_context));
-}
-
-void unregister_all_runtime_symbols() {
-    g_active_jit = nullptr;
-    set_coro_symbol_resolver(nullptr);
+void set_active_jit(codegen::JitExecutionEngine* jit) {
+    g_active_jit = jit;
 }
 
 codegen::JitExecutionEngine* get_active_jit() {
     return g_active_jit;
 }
 
-void register_bronze_runtime_symbols(void* jit_engine_ptr) {
-    if (jit_engine_ptr) {
-        auto* jit = reinterpret_cast<codegen::JitExecutionEngine*>(jit_engine_ptr);
-        register_all_runtime_symbols(*jit);
-    } else {
-        unregister_all_runtime_symbols();
-    }
-}
-
-void register_bronze_interpreter_symbols(void* interp_ptr) {
-    if (!interp_ptr) return;
-    auto* interp = reinterpret_cast<Interpreter*>(interp_ptr);
-    interp->register_external_function("bronze_print_f64", [](Interpreter&, const std::vector<RuntimeValue>& args) {
-        if (!args.empty()) bronze_print_f64(args[0].as_f64());
-        return RuntimeValue::from_void();
-    });
-    interp->register_external_function("bronze_print_i32", [](Interpreter&, const std::vector<RuntimeValue>& args) {
-        if (!args.empty()) bronze_print_i32(args[0].as_i32());
-        return RuntimeValue::from_void();
-    });
-    interp->register_external_function("bronze_print_dynamic", [](Interpreter&, const std::vector<RuntimeValue>& args) {
-        if (!args.empty()) bronze_print_dynamic(args[0].as_i64());
-        return RuntimeValue::from_void();
-    });
-    interp->register_external_function("bronze_print_newline", [](Interpreter&, const std::vector<RuntimeValue>&) {
-        bronze_print_newline();
-        return RuntimeValue::from_void();
-    });
-    interp->register_external_function("bronze_f64_mod", [](Interpreter&, const std::vector<RuntimeValue>& args) {
-        if (args.size() >= 2) return RuntimeValue::from_f64(bronze_f64_mod(args[0].as_f64(), args[1].as_f64()));
-        return RuntimeValue::from_f64(0.0);
-    });
-    interp->register_external_function("bronze_call_dynamic_0", [](Interpreter&, const std::vector<RuntimeValue>& args) {
-        int64_t r = bronze_call_dynamic_0(args.size() > 0 ? args[0].as_i64() : 0, args.size() > 1 ? args[1].as_i64() : 0);
-        return RuntimeValue::from_i64(r);
-    });
-    interp->register_external_function("bronze_call_dynamic_1", [](Interpreter&, const std::vector<RuntimeValue>& args) {
-        int64_t r = bronze_call_dynamic_1(
-            args.size() > 0 ? args[0].as_i64() : 0,
-            args.size() > 1 ? args[1].as_i64() : 0,
-            args.size() > 2 ? args[2].as_i64() : 0
-        );
-        return RuntimeValue::from_i64(r);
-    });
-    interp->register_external_function("bronze_call_dynamic_2", [](Interpreter&, const std::vector<RuntimeValue>& args) {
-        int64_t r = bronze_call_dynamic_2(
-            args.size() > 0 ? args[0].as_i64() : 0,
-            args.size() > 1 ? args[1].as_i64() : 0,
-            args.size() > 2 ? args[2].as_i64() : 0,
-            args.size() > 3 ? args[3].as_i64() : 0
-        );
-        return RuntimeValue::from_i64(r);
-    });
-}
-
 } // namespace brass::il
+

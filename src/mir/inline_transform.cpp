@@ -174,7 +174,8 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
         return wrapped;
     };
 
-    // 6. Clone callee instructions into cloned blocks
+    // 6. Clone callee instructions into cloned blocks (two passes to resolve any out-of-order block references)
+    std::vector<std::pair<const Instruction*, Instruction*>> inst_pairs;
     for (const BasicBlock* src_bb : callee.blocks()) {
         if (!src_bb) continue;
         BasicBlock* dst_bb = block_map[src_bb];
@@ -183,15 +184,6 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
             if (!src_inst) continue;
 
             if (src_inst->opcode() == Opcode::ret) {
-                // Remap ret to br split_tail(...)
-                Instruction* br_tail = mod->arena().make<Instruction>(Opcode::br, Type::void_type());
-                br_tail->set_loc(wrap_loc(src_inst->loc()));
-                std::vector<Value*> br_args;
-                if (!callee.return_type().is_void() && src_inst->operand_count() > 0) {
-                    br_args.push_back(map_val(src_inst->operand(0)));
-                }
-                br_tail->set_branch_target(BranchTarget(split_tail, std::move(br_args)));
-                dst_bb->append_instruction(br_tail);
                 continue;
             }
 
@@ -209,13 +201,6 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
                 dst_inst->set_extra_symbol(mod->string_pool().intern(src_inst->extra_symbol()));
             }
 
-            for (const Value* op : src_inst->operands()) {
-                dst_inst->add_operand(map_val(op));
-            }
-            for (const Value* sv : src_inst->state_map()) {
-                dst_inst->add_state_value(map_val(sv));
-            }
-
             if (src_inst->produces_value()) {
                 const Value* src_res = src_inst->result();
                 Value* dst_res = mod->arena().make<Value>(
@@ -228,15 +213,44 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
                 value_map[src_res] = dst_res;
             }
 
-            dst_inst->set_branch_target(map_target(src_inst->branch_target()));
-            dst_inst->set_true_target(map_target(src_inst->true_target()));
-            dst_inst->set_false_target(map_target(src_inst->false_target()));
-            dst_inst->set_default_target(map_target(src_inst->default_target()));
-            for (const auto& sc : src_inst->switch_cases()) {
-                dst_inst->add_switch_case(sc.value, map_target(sc.target));
-            }
-
             dst_bb->append_instruction(dst_inst);
+            inst_pairs.emplace_back(src_inst, dst_inst);
+        }
+    }
+
+    // 6b. Second pass: map all operands, state maps, and branch targets
+    for (const auto& [src_inst, dst_inst] : inst_pairs) {
+        for (const Value* op : src_inst->operands()) {
+            dst_inst->add_operand(map_val(op));
+        }
+        for (const Value* sv : src_inst->state_map()) {
+            dst_inst->add_state_value(map_val(sv));
+        }
+
+        dst_inst->set_branch_target(map_target(src_inst->branch_target()));
+        dst_inst->set_true_target(map_target(src_inst->true_target()));
+        dst_inst->set_false_target(map_target(src_inst->false_target()));
+        dst_inst->set_default_target(map_target(src_inst->default_target()));
+        for (const auto& sc : src_inst->switch_cases()) {
+            dst_inst->add_switch_case(sc.value, map_target(sc.target));
+        }
+    }
+
+    // 6c. Remap ret instructions to br split_tail(...)
+    for (const BasicBlock* src_bb : callee.blocks()) {
+        if (!src_bb) continue;
+        BasicBlock* dst_bb = block_map[src_bb];
+        for (const Instruction* src_inst : *src_bb) {
+            if (src_inst && src_inst->opcode() == Opcode::ret) {
+                Instruction* br_tail = mod->arena().make<Instruction>(Opcode::br, Type::void_type());
+                br_tail->set_loc(wrap_loc(src_inst->loc()));
+                std::vector<Value*> br_args;
+                if (!callee.return_type().is_void() && src_inst->operand_count() > 0) {
+                    br_args.push_back(map_val(src_inst->operand(0)));
+                }
+                br_tail->set_branch_target(BranchTarget(split_tail, std::move(br_args)));
+                dst_bb->append_instruction(br_tail);
+            }
         }
     }
 
