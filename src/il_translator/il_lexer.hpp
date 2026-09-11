@@ -10,6 +10,7 @@ namespace brass::il {
 enum class TokenType {
     Eof,
     Module,
+    Census,
     Func,
     Export,
     Handler,

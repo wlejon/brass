@@ -7,6 +7,7 @@
 #include <brass/core/diagnostics.hpp>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace brass::il {
 

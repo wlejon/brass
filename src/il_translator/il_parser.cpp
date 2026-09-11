@@ -80,7 +80,8 @@ bool IlParser::parse_module(BronzeModuleAST& out_ast) {
     }
 
     while (!lexer_.is_eof() && lexer_.peek_token().type != TokenType::Eof) {
-        if (lexer_.peek_token().type == TokenType::Identifier && lexer_.peek_token().text == "census") {
+        if (lexer_.peek_token().type == TokenType::Census ||
+            (lexer_.peek_token().type == TokenType::Identifier && lexer_.peek_token().text == "census")) {
             lexer_.next_token();
             while (!lexer_.is_eof() && lexer_.peek_token().type != TokenType::LBrace && lexer_.peek_token().type != TokenType::Eof) {
                 lexer_.next_token();
@@ -807,13 +808,65 @@ bool IlParser::parse_instruction(BronzeInstruction& out_inst) {
             break;
         }
 
-        case BronzeOp::PinGuard:
-        case BronzeOp::CensusRecord: {
+        case BronzeOp::PinGuard: {
+            Token reg_tok;
+            if (expect(TokenType::PercentValue, "Expected %reg in pin.guard", &reg_tok)) {
+                out_inst.operands.push_back(reg_tok.id_num);
+            }
+            if (match(TokenType::Comma)) {
+                Token shape_tok = lexer_.next_token();
+                if (shape_tok.text == "number") {
+                    out_inst.imm_i64 = 0;
+                } else if (shape_tok.text == "number-or-nullish") {
+                    out_inst.imm_i64 = 1;
+                } else if (shape_tok.text == "dense-array") {
+                    out_inst.imm_i64 = 2;
+                } else if (shape_tok.type == TokenType::NumberInt) {
+                    out_inst.imm_i64 = shape_tok.num_i64;
+                }
+            }
+            if (match(TokenType::Comma)) {
+                Token name_tok = lexer_.next_token();
+                out_inst.string_literal = std::string(name_tok.text);
+            }
             while (lexer_.peek_token().line == op_tok.line && lexer_.peek_token().type != TokenType::Eof &&
                    lexer_.peek_token().type != TokenType::BlockLabel && lexer_.peek_token().type != TokenType::RBrace) {
-                if (lexer_.peek_token().type == TokenType::PercentValue) {
-                    out_inst.operands.push_back(lexer_.peek_token().id_num);
+                lexer_.next_token();
+            }
+            break;
+        }
+
+        case BronzeOp::CensusRecord: {
+            Token reg_tok;
+            if (expect(TokenType::PercentValue, "Expected %reg in census.record", &reg_tok)) {
+                out_inst.operands.push_back(reg_tok.id_num);
+            }
+            if (match(TokenType::Comma)) {
+                Token site_tok = lexer_.next_token();
+                if (site_tok.text == "env-slot") {
+                    out_inst.imm_i64 = 0;
+                } else if (site_tok.text == "field") {
+                    out_inst.imm_i64 = 1;
+                } else if (site_tok.text == "param") {
+                    out_inst.imm_i64 = 2;
+                } else if (site_tok.text == "return") {
+                    out_inst.imm_i64 = 3;
+                } else if (site_tok.text == "opaque-store") {
+                    out_inst.imm_i64 = 4;
+                } else if (site_tok.type == TokenType::NumberInt) {
+                    out_inst.imm_i64 = site_tok.num_i64;
                 }
+            }
+            if (match(TokenType::Comma)) {
+                Token name_tok = lexer_.next_token();
+                if (name_tok.type == TokenType::NumberInt) {
+                    out_inst.index = static_cast<uint32_t>(name_tok.num_i64);
+                } else {
+                    out_inst.string_literal = std::string(name_tok.text);
+                }
+            }
+            while (lexer_.peek_token().line == op_tok.line && lexer_.peek_token().type != TokenType::Eof &&
+                   lexer_.peek_token().type != TokenType::BlockLabel && lexer_.peek_token().type != TokenType::RBrace) {
                 lexer_.next_token();
             }
             break;

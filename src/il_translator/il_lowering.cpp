@@ -133,10 +133,10 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
     mod->add_external_symbol("bronze_instanceof");
     mod->add_external_symbol("bronze_has_property");
     mod->add_external_symbol("bronze_is_nullish");
+    mod->add_external_symbol("bronze_pin_guard");
+    mod->add_external_symbol("bronze_census_record");
 
     current_ast_ = &ast;
-
-    caller_to_callee_map_.clear();
 
     // 1. Forward-declare all functions (uniquifying any duplicate function names from Bronze)
     std::unordered_map<std::string, std::vector<size_t>> name_to_indices;
@@ -144,6 +144,7 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
         name_to_indices[ast.functions[i].name].push_back(i);
     }
 
+    caller_to_callee_map_.clear();
     std::vector<std::string> resolved_names(ast.functions.size());
     for (const auto& [name, indices] : name_to_indices) {
         if (indices.size() == 1) {

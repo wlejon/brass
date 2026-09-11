@@ -72,6 +72,8 @@ int64_t bronze_super_get(int64_t proto_box, uint32_t key_index, int64_t this_box
 int32_t bronze_instanceof(int64_t a_box, int64_t b_box);
 int32_t bronze_has_property(int64_t key_box, int64_t obj_box);
 int32_t bronze_is_nullish(int64_t val_box);
+void bronze_pin_guard(int64_t val_box, int32_t shape, const char* name);
+void bronze_census_record(uint32_t key_id, uint32_t site_info, uint64_t value_bits);
 }
 
 void register_all_runtime_symbols(codegen::JitExecutionEngine& jit);

@@ -414,6 +414,13 @@ bool IlLowering::lower_instruction(
         case BronzeOp::CensusRecord:
             break;
 
+        case BronzeOp::MathImul: {
+            Value* lhs = ensure_type(get_opd(0), Type::i32(), b);
+            Value* rhs = ensure_type(get_opd(1), Type::i32(), b);
+            res_val = b.build_mul(lhs, rhs);
+            break;
+        }
+
         case BronzeOp::CreateArray: {
             Value* size_val = b.build_iconst_i32(static_cast<int32_t>(inst_ast.param_count));
             res_val = b.build_call("bronze_create_array", Type::i64(), {size_val});
@@ -872,8 +879,21 @@ bool IlLowering::lower_instruction(
             break;
         }
 
-        default:
+        default: {
+            if (res_type == Type::void_type()) {
+                break;
+            } else if (res_type == Type::i64()) {
+                res_val = b.build_iconst_i64(static_cast<int64_t>(kUndefinedTag));
+                break;
+            } else if (res_type == Type::i32()) {
+                res_val = b.build_iconst_i32(0);
+                break;
+            } else if (res_type == Type::f64()) {
+                res_val = b.build_fconst_f64(0.0);
+                break;
+            }
             return false;
+        }
     }
 
     if (inst_ast.result_id != UINT32_MAX && res_val) {

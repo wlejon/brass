@@ -110,6 +110,51 @@ const char* bronze_op_name(BronzeOp op) {
         case BronzeOp::ElemGetTyped: return "elem.get.typed";
         case BronzeOp::PinGuard: return "pin.guard";
         case BronzeOp::CensusRecord: return "census.record";
+        case BronzeOp::MathImul: return "math.imul";
+        case BronzeOp::SuperSet: return "super.set";
+        case BronzeOp::MathUnary: return "math.unary";
+        case BronzeOp::CreateGeneratorObject: return "create.generator_object";
+        case BronzeOp::CreateAsyncGeneratorObject: return "create.async_generator_object";
+        case BronzeOp::DynamicImport: return "dynamic_import";
+        case BronzeOp::ModuleNamespace: return "module.namespace";
+        case BronzeOp::ObjectKeys: return "object.keys";
+        case BronzeOp::ForInKeys: return "forin.keys";
+        case BronzeOp::MethodDefComputed: return "method.def.computed";
+        case BronzeOp::AccessorDef: return "accessor.def";
+        case BronzeOp::AccessorDefComputed: return "accessor.def.computed";
+        case BronzeOp::DefineOwnAttr: return "define.own.attr";
+        case BronzeOp::GetNewTarget: return "get.new_target";
+        case BronzeOp::ImportMeta: return "import.meta";
+        case BronzeOp::SuperCallSpread: return "call.super.spread";
+        case BronzeOp::TemplateCached: return "template.cached";
+        case BronzeOp::TemplateObject: return "template.object";
+        case BronzeOp::ArrayAppendHole: return "array.append.hole";
+        case BronzeOp::PropDelete: return "prop.delete";
+        case BronzeOp::ElemDelete: return "elem.delete";
+        case BronzeOp::ImmutableAssign: return "immutable.assign";
+        case BronzeOp::PrivateNew: return "private.new";
+        case BronzeOp::PrivateHas: return "private.has";
+        case BronzeOp::PrivateGet: return "private.get";
+        case BronzeOp::PrivateAdd: return "private.add";
+        case BronzeOp::PrivateSet: return "private.set";
+        case BronzeOp::PrivateMisuse: return "private.misuse";
+        case BronzeOp::AsyncIterOpen: return "async_iter.open";
+        case BronzeOp::AsyncIterNext: return "async_iter.next";
+        case BronzeOp::AsyncIterClose: return "async_iter.close";
+        case BronzeOp::IterValue: return "iter.value";
+        case BronzeOp::IterClose: return "iter.close";
+        case BronzeOp::IterRest: return "iter.rest";
+        case BronzeOp::IterDelegate: return "iter.delegate";
+        case BronzeOp::PatternCheck: return "pattern.check";
+        case BronzeOp::ArrayAppend: return "array.append";
+        case BronzeOp::ArraySpread: return "array.spread";
+        case BronzeOp::ObjectSpread: return "object.spread";
+        case BronzeOp::ObjectRest: return "object.rest";
+        case BronzeOp::DynamicCallSpread: return "call.dynamic.spread";
+        case BronzeOp::MethodCallSpread: return "method.call.spread";
+        case BronzeOp::ConstructSpread: return "new.spread";
+        case BronzeOp::PrintSpread: return "print.spread";
+        case BronzeOp::PrintSpreadErr: return "print.spread.err";
         case BronzeOp::Unknown: return "?";
     }
     return "?";
@@ -321,6 +366,7 @@ Token IlLexer::scan_token() {
 
     // Check keywords
     if (word == "module") return Token{TokenType::Module, word, start_line, start_col};
+    if (word == "census") return Token{TokenType::Census, word, start_line, start_col};
     if (word == "func") return Token{TokenType::Func, word, start_line, start_col};
     if (word == "export") return Token{TokenType::Export, word, start_line, start_col};
     if (word == "handler") return Token{TokenType::Handler, word, start_line, start_col};
@@ -475,6 +521,51 @@ Token IlLexer::scan_token() {
         if (w == "elem.get.typed") { op_out = BronzeOp::ElemGetTyped; return true; }
         if (w == "pin.guard") { op_out = BronzeOp::PinGuard; return true; }
         if (w == "census.record") { op_out = BronzeOp::CensusRecord; return true; }
+        if (w == "math.imul") { op_out = BronzeOp::MathImul; return true; }
+        if (w == "super.set") { op_out = BronzeOp::SuperSet; return true; }
+        if (w == "math.unary") { op_out = BronzeOp::MathUnary; return true; }
+        if (w == "create.generator_object") { op_out = BronzeOp::CreateGeneratorObject; return true; }
+        if (w == "create.async_generator_object") { op_out = BronzeOp::CreateAsyncGeneratorObject; return true; }
+        if (w == "dynamic_import") { op_out = BronzeOp::DynamicImport; return true; }
+        if (w == "module.namespace") { op_out = BronzeOp::ModuleNamespace; return true; }
+        if (w == "object.keys") { op_out = BronzeOp::ObjectKeys; return true; }
+        if (w == "forin.keys") { op_out = BronzeOp::ForInKeys; return true; }
+        if (w == "method.def.computed") { op_out = BronzeOp::MethodDefComputed; return true; }
+        if (w == "accessor.def") { op_out = BronzeOp::AccessorDef; return true; }
+        if (w == "accessor.def.computed") { op_out = BronzeOp::AccessorDefComputed; return true; }
+        if (w == "define.own.attr") { op_out = BronzeOp::DefineOwnAttr; return true; }
+        if (w == "get.new_target") { op_out = BronzeOp::GetNewTarget; return true; }
+        if (w == "import.meta") { op_out = BronzeOp::ImportMeta; return true; }
+        if (w == "call.super.spread") { op_out = BronzeOp::SuperCallSpread; return true; }
+        if (w == "template.cached") { op_out = BronzeOp::TemplateCached; return true; }
+        if (w == "template.object") { op_out = BronzeOp::TemplateObject; return true; }
+        if (w == "array.append.hole") { op_out = BronzeOp::ArrayAppendHole; return true; }
+        if (w == "prop.delete") { op_out = BronzeOp::PropDelete; return true; }
+        if (w == "elem.delete") { op_out = BronzeOp::ElemDelete; return true; }
+        if (w == "immutable.assign") { op_out = BronzeOp::ImmutableAssign; return true; }
+        if (w == "private.new") { op_out = BronzeOp::PrivateNew; return true; }
+        if (w == "private.has") { op_out = BronzeOp::PrivateHas; return true; }
+        if (w == "private.get") { op_out = BronzeOp::PrivateGet; return true; }
+        if (w == "private.add") { op_out = BronzeOp::PrivateAdd; return true; }
+        if (w == "private.set") { op_out = BronzeOp::PrivateSet; return true; }
+        if (w == "private.misuse") { op_out = BronzeOp::PrivateMisuse; return true; }
+        if (w == "async_iter.open") { op_out = BronzeOp::AsyncIterOpen; return true; }
+        if (w == "async_iter.next") { op_out = BronzeOp::AsyncIterNext; return true; }
+        if (w == "async_iter.close") { op_out = BronzeOp::AsyncIterClose; return true; }
+        if (w == "iter.value") { op_out = BronzeOp::IterValue; return true; }
+        if (w == "iter.close") { op_out = BronzeOp::IterClose; return true; }
+        if (w == "iter.rest") { op_out = BronzeOp::IterRest; return true; }
+        if (w == "iter.delegate") { op_out = BronzeOp::IterDelegate; return true; }
+        if (w == "pattern.check") { op_out = BronzeOp::PatternCheck; return true; }
+        if (w == "array.append") { op_out = BronzeOp::ArrayAppend; return true; }
+        if (w == "array.spread") { op_out = BronzeOp::ArraySpread; return true; }
+        if (w == "object.spread") { op_out = BronzeOp::ObjectSpread; return true; }
+        if (w == "object.rest") { op_out = BronzeOp::ObjectRest; return true; }
+        if (w == "call.dynamic.spread") { op_out = BronzeOp::DynamicCallSpread; return true; }
+        if (w == "method.call.spread") { op_out = BronzeOp::MethodCallSpread; return true; }
+        if (w == "new.spread") { op_out = BronzeOp::ConstructSpread; return true; }
+        if (w == "print.spread") { op_out = BronzeOp::PrintSpread; return true; }
+        if (w == "print.spread.err") { op_out = BronzeOp::PrintSpreadErr; return true; }
         return false;
     };
 
