@@ -297,4 +297,64 @@ brass_call_jit_vec2_ret_i64 PROC
     ret
 brass_call_jit_vec2_ret_i64 ENDP
 
+brass_call_jit_v256_0 PROC
+    sub rsp, 40
+    mov rax, rcx
+    call rax
+    vmovups ymmword ptr [rdx], ymm0
+    vzeroupper
+    add rsp, 40
+    ret
+brass_call_jit_v256_0 ENDP
+
+brass_call_jit_v256_1 PROC
+    sub rsp, 40
+    mov rax, rcx
+    vmovups ymm0, ymmword ptr [r8]
+    call rax
+    vmovups ymmword ptr [rdx], ymm0
+    vzeroupper
+    add rsp, 40
+    ret
+brass_call_jit_v256_1 ENDP
+
+brass_call_jit_v256_2 PROC
+    sub rsp, 40
+    mov rax, rcx
+    vmovups ymm0, ymmword ptr [r8]
+    vmovups ymm1, ymmword ptr [r9]
+    call rax
+    vmovups ymmword ptr [rdx], ymm0
+    vzeroupper
+    add rsp, 40
+    ret
+brass_call_jit_v256_2 ENDP
+
+brass_call_jit_v256_3 PROC
+    sub rsp, 48
+    mov rax, rcx
+    vmovups ymm0, ymmword ptr [r8]
+    vmovups ymm1, ymmword ptr [r9]
+    mov r10, qword ptr [rsp + 88]
+    vmovups ymm2, ymmword ptr [r10]
+    call rax
+    vmovups ymmword ptr [rdx], ymm0
+    vzeroupper
+    add rsp, 48
+    ret
+brass_call_jit_v256_3 ENDP
+
+brass_call_jit_v128_3 PROC
+    sub rsp, 48
+    mov rax, rcx
+    movdqu xmm0, xmmword ptr [r8]
+    movdqu xmm1, xmmword ptr [r9]
+    mov r10, qword ptr [rsp + 88]
+    movdqu xmm2, xmmword ptr [r10]
+    call rax
+    movdqu xmmword ptr [rdx], xmm0
+    add rsp, 48
+    ret
+brass_call_jit_v128_3 ENDP
+
 END

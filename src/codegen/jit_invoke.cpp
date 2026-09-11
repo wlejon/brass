@@ -296,6 +296,11 @@ int64_t brass_call_jit_vec1_ret_i64(void* addr, const __m128* a0);
 __m128 brass_call_jit_vec2_ret_vec(void* addr, const __m128* a0, const __m128* a1);
 float brass_call_jit_vec2_ret_f32(void* addr, const __m128* a0, const __m128* a1);
 int64_t brass_call_jit_vec2_ret_i64(void* addr, const __m128* a0, const __m128* a1);
+void brass_call_jit_v256_0(void* addr, uint8_t* out);
+void brass_call_jit_v256_1(void* addr, uint8_t* out, const uint8_t* a0);
+void brass_call_jit_v256_2(void* addr, uint8_t* out, const uint8_t* a0, const uint8_t* a1);
+void brass_call_jit_v256_3(void* addr, uint8_t* out, const uint8_t* a0, const uint8_t* a1, const uint8_t* a2);
+void brass_call_jit_v128_3(void* addr, uint8_t* out, const uint8_t* a0, const uint8_t* a1, const uint8_t* a2);
 }
 
 inline __m128 call_jit_vec1_ret_vec(void* addr, __m128 a0) {
@@ -391,6 +396,8 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
                     : "r"(b), "r"(addr)
                     : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
                 );
+#else
+                brass_call_jit_v256_0(addr, b);
 #endif
                 return RuntimeValue::from_v256(ret_type, b);
             }
@@ -431,6 +438,8 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
                     : "r"(b), "r"(addr), "r"(args[0].vec_bytes())
                     : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
                 );
+#else
+                brass_call_jit_v256_1(addr, b, args[0].vec_bytes());
 #endif
                 return RuntimeValue::from_v256(ret_type, b);
             }
@@ -505,6 +514,8 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
                     : "r"(b), "r"(addr), "r"(args[0].vec_bytes()), "r"(args[1].vec_bytes())
                     : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
                 );
+#else
+                brass_call_jit_v256_2(addr, b, args[0].vec_bytes(), args[1].vec_bytes());
 #endif
                 return RuntimeValue::from_v256(ret_type, b);
             }
@@ -610,6 +621,8 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
                     : "r"(b), "r"(addr), "r"(args[0].vec_bytes()), "r"(args[1].vec_bytes()), "r"(args[2].vec_bytes())
                     : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
                 );
+#else
+                brass_call_jit_v256_3(addr, b, args[0].vec_bytes(), args[1].vec_bytes(), args[2].vec_bytes());
 #endif
                 return RuntimeValue::from_v256(ret_type, b);
             }
@@ -630,6 +643,8 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
                     : "r"(b), "r"(addr), "r"(args[0].v128_bytes()), "r"(args[1].v128_bytes()), "r"(args[2].v128_bytes())
                     : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
                 );
+#else
+                brass_call_jit_v128_3(addr, b, args[0].v128_bytes(), args[1].v128_bytes(), args[2].v128_bytes());
 #endif
                 return RuntimeValue::from_v128(ret_type, b);
             }
