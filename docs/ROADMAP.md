@@ -211,6 +211,22 @@
 
 ---
 
+## Phase VIII: Public C-ABI, Embedder SDK (libbrass), and In-Memory AOT/JIT Compilation (Chunk 27)
+
+- **Chunk 27: Public C-ABI, Embedder SDK (libbrass), and In-Memory AOT/JIT Compilation [COMPLETED]**:
+  - Fully self-contained pure C99/C11 public header (`include/brass/brass_c_api.h`) with versioning defines, export macros (`BRASS_API`, `BRASS_CALL`), and status codes (`BRASS_OK`, `BRASS_ERR_*`).
+  - Opaque handle architecture: `BrassContext`, `BrassModule`, `BrassFunction`, `BrassBlock`, `BrassBuilder`, `BrassValue`, `BrassType`, `BrassJitEngine`, `BrassCompiledModule`, `BrassOptions`.
+  - Rich Types API covering primitives, pointers, GC dynamic references, and 128/256-bit SIMD vector types.
+  - IR Builder API supporting arithmetic, logic, bitwise shifts, comparisons, constants, block parameters, conditional/unconditional branches, returns, loads, stores, function address, and calls.
+  - Context error reporting and exception isolation: all C++ exceptions caught at C-ABI boundary with descriptive diagnostics.
+  - Textual Bronze IL translation bridge (`brass_translate_bronze_il`) lowering high-level dynamic language constructs into optimized native execution.
+  - In-memory JIT execution engine (`brass_jit_compile_module`, `brass_jit_get_function_address`) with external symbol registration.
+  - Standalone in-memory AOT compilation: emitting relocatable `COFF`, `ELF64`, and `Mach-O` byte buffers directly into memory (`brass_compile_to_object`), and compiling standalone shared libraries (`brass_compile_to_shared_lib`).
+  - Shared library build target `brass_shared` (`libbrass.so`, `brass.dll`, `libbrass.dylib`) and public header installation.
+  - Complete embedding documentation (`docs/embedding_guide.md`) and unit/embedding test suite (`tests/unit/test_c_api.cpp`).
+
+---
+
 ## House Rules & Code Conventions
 1. **C++20**: Zero LLVM dependencies.
 2. **Compiler Compatibility**: MSVC, Clang, and GCC 12 clean (no `= {}` default args which GCC 12 rejects).

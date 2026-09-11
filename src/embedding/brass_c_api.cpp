@@ -45,7 +45,7 @@ void brass_engine_register_gc(brass_engine_t* engine, brass_gc_t* gc) {
     engine->engine.register_host_gc(gc ? &gc->gc : nullptr);
 }
 
-brass_module_t* brass_module_create(const char* name) {
+brass_module_t* brass_embed_module_create(const char* name) {
     try {
         auto* mod = new brass_module_t();
         mod->module = std::make_unique<brass::Module>(name ? name : "anonymous");
@@ -55,11 +55,11 @@ brass_module_t* brass_module_create(const char* name) {
     }
 }
 
-void brass_module_destroy(brass_module_t* module) {
+void brass_embed_module_destroy(brass_module_t* module) {
     delete module;
 }
 
-void brass_module_add_external_symbol(brass_module_t* module, const char* name) {
+void brass_embed_module_add_external_symbol(brass_module_t* module, const char* name) {
     if (!module || !module->module || !name) return;
     module->module->add_external_symbol(name);
 }
@@ -77,11 +77,11 @@ brass_compiled_module_t* brass_engine_compile_module(brass_engine_t* engine, con
     }
 }
 
-void brass_compiled_module_destroy(brass_compiled_module_t* module) {
+void brass_embed_compiled_module_destroy(brass_compiled_module_t* module) {
     delete module;
 }
 
-void* brass_compiled_module_get_symbol(const brass_compiled_module_t* module, const char* name) {
+void* brass_embed_compiled_module_get_symbol(const brass_compiled_module_t* module, const char* name) {
     if (!module || !module->module || !name) return nullptr;
     return module->module->get_symbol_address(name);
 }

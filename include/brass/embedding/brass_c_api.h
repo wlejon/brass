@@ -27,16 +27,16 @@ void brass_engine_register_symbol(brass_engine_t* engine, const char* name, void
 void brass_engine_register_gc(brass_engine_t* engine, brass_gc_t* gc);
 
 // Module Management
-brass_module_t* brass_module_create(const char* name);
-void brass_module_destroy(brass_module_t* module);
-void brass_module_add_external_symbol(brass_module_t* module, const char* name);
+brass_module_t* brass_embed_module_create(const char* name);
+void brass_embed_module_destroy(brass_module_t* module);
+void brass_embed_module_add_external_symbol(brass_module_t* module, const char* name);
 
 // Compilation & Lifecycle
 brass_compiled_module_t* brass_engine_compile_module(brass_engine_t* engine, const brass_module_t* module);
-void brass_compiled_module_destroy(brass_compiled_module_t* module);
+void brass_embed_compiled_module_destroy(brass_compiled_module_t* module);
 
 // Symbol Lookup & Entrypoint Retrieval
-void* brass_compiled_module_get_symbol(const brass_compiled_module_t* module, const char* name);
+void* brass_embed_compiled_module_get_symbol(const brass_compiled_module_t* module, const char* name);
 
 // Runtime Patching API
 int brass_compiled_module_patch_const32(brass_compiled_module_t* module, const char* site_name, int32_t new_val);

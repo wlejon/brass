@@ -77,6 +77,39 @@ target_include_directories(brass
 
 target_compile_features(brass PUBLIC cxx_std_20)
 
+# brass shared library (libbrass)
+add_library(brass_shared SHARED ${BRASS_SOURCES})
+
+target_include_directories(brass_shared
+    PUBLIC
+        $<BUILD_INTERFACE:${BRASS_INCLUDE_DIR}>
+        $<INSTALL_INTERFACE:include>
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_compile_features(brass_shared PUBLIC cxx_std_20)
+
+target_compile_definitions(brass_shared
+    PRIVATE
+        BRASS_BUILD_SHARED
+        BRASS_EXPORTS
+)
+
+set_target_properties(brass_shared PROPERTIES
+    OUTPUT_NAME "brass"
+    SOVERSION 1
+    VERSION 1.0.0
+)
+
+# Installation
+install(TARGETS brass brass_shared
+    ARCHIVE DESTINATION lib
+    LIBRARY DESTINATION lib
+    RUNTIME DESTINATION bin
+)
+install(FILES ${BRASS_INCLUDE_DIR}/brass/brass_c_api.h DESTINATION include/brass)
+
 # Tools
 add_subdirectory(tools)
 
