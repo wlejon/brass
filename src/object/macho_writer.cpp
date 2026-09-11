@@ -128,7 +128,7 @@ std::vector<uint8_t> MachOWriter::write() {
             if (entry.align_pow2 < 4) entry.align_pow2 = 4;
         } else if (sec.name == ".rodata" || sec.name == ".rdata" || sec.name == "__const" || sec.kind == SectionKind::RoData) {
             entry.sectname = "__const";
-            entry.segname = "__TEXT";
+            entry.segname = sec.relocations.empty() ? "__TEXT" : "__DATA";
             entry.flags = macho::S_REGULAR;
             if (entry.align_pow2 < 4) entry.align_pow2 = 4;
         } else if (sec.name == ".data" || sec.kind == SectionKind::Data) {
@@ -144,6 +144,13 @@ std::vector<uint8_t> MachOWriter::write() {
             entry.segname = "__TEXT";
             entry.flags = macho::S_REGULAR;
             if (entry.align_pow2 < 3) entry.align_pow2 = 3;
+            if (entry.data.size() >= 4 &&
+                entry.data[entry.data.size() - 4] == 0 &&
+                entry.data[entry.data.size() - 3] == 0 &&
+                entry.data[entry.data.size() - 2] == 0 &&
+                entry.data[entry.data.size() - 1] == 0) {
+                entry.data.resize(entry.data.size() - 4);
+            }
         } else if (sec.name.rfind(".brass_dbg", 0) == 0 || sec.name.rfind(".debug", 0) == 0) {
             entry.sectname = "__" + sec.name.substr(1);
             entry.segname = "__DWARF";
@@ -290,6 +297,37 @@ std::vector<uint8_t> MachOWriter::write() {
     uint64_t seg_vmsize = cur_vmaddr;
     uint64_t seg_fileoff = macho_sections.empty() ? 0 : macho_sections[0].offset;
     uint64_t seg_filesize = macho_sections.empty() ? 0 : (cur_file_offset - seg_fileoff);
+
+    for (auto& sym : all_symbols) {
+        if (sym.n_sect >= 1 && sym.n_sect <= macho_sections.size()) {
+            sym.n_value += macho_sections[sym.n_sect - 1].addr;
+        }
+    }
+
+    // Pre-resolve PC-relative displacements in __eh_frame and clear relocations
+    for (auto& s : macho_sections) {
+        if (s.sectname == "__eh_frame") {
+            uint64_t text_addr = 0;
+            for (const auto& other : macho_sections) {
+                if (other.sectname == "__text") {
+                    text_addr = other.addr;
+                    break;
+                }
+            }
+            for (const auto& r : s.relocations) {
+                int64_t target_addr = static_cast<int64_t>(text_addr) + r.addend;
+                int64_t cur_addr = static_cast<int64_t>(s.addr + r.offset);
+                int32_t disp = static_cast<int32_t>(target_addr - cur_addr);
+                if (r.offset + 4 <= s.data.size()) {
+                    s.data[r.offset + 0] = static_cast<uint8_t>(disp & 0xFF);
+                    s.data[r.offset + 1] = static_cast<uint8_t>((disp >> 8) & 0xFF);
+                    s.data[r.offset + 2] = static_cast<uint8_t>((disp >> 16) & 0xFF);
+                    s.data[r.offset + 3] = static_cast<uint8_t>((disp >> 24) & 0xFF);
+                }
+            }
+            s.relocations.clear();
+        }
+    }
 
     // Relocations offset
     for (auto& s : macho_sections) {

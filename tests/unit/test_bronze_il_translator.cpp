@@ -600,6 +600,11 @@ TEST_CASE("Bronze IL - 22-Program Live Corpus JIT and AOT Execution") {
             ifs_il.open(il_file);
         }
         if (!ifs_il.is_open()) {
+            il_file = "../../../tests/bronze_corpus/" + name + ".il";
+            exp_file = "../../../tests/bronze_corpus/" + name + ".expected";
+            ifs_il.open(il_file);
+        }
+        if (!ifs_il.is_open()) {
             il_file = "../tests/bronze_corpus/" + name + ".il";
             exp_file = "../tests/bronze_corpus/" + name + ".expected";
             ifs_il.open(il_file);

@@ -625,6 +625,15 @@ void X64Encoder::lea(GPR dst, const MemAddress& src) {
     emit_mem_operand(reg_code(dst), src);
 }
 
+void X64Encoder::lea(GPR dst, const std::string& symbol) {
+    emit_rex(true, is_extended(dst), false, false);
+    buffer_.emit8(0x8D);
+    emit_modrm(0, reg_code(dst), 5); // RIP-relative
+    size_t patch_off = buffer_.size();
+    buffer_.emit32(0x00000000);
+    buffer_.add_relocation(patch_off, RelocationKind::PCRel32, symbol, -4);
+}
+
 void X64Encoder::lea32(GPR dst, const MemAddress& src) {
     emit_rex(false, is_extended(dst), is_extended(src.index), is_extended(src.base));
     buffer_.emit8(0x8D);

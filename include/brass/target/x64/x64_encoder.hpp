@@ -677,6 +677,7 @@ public:
     void pop(const MemAddress& mem);
 
     void lea(GPR dst, const MemAddress& src);
+    void lea(GPR dst, const std::string& symbol);
     void lea32(GPR dst, const MemAddress& src);
 
     void int3();
