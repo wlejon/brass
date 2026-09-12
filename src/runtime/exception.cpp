@@ -93,10 +93,9 @@ const ExceptionScopeEntry* ExceptionTableRegistry::find_scope_by_pc(
     return nullptr;
 }
 
-static ExceptionTableRegistry s_global_exception_registry;
-
 ExceptionTableRegistry& get_global_exception_registry() noexcept {
-    return s_global_exception_registry;
+    static auto* registry = new ExceptionTableRegistry();
+    return *registry;
 }
 
 // Thread-local exception storage
