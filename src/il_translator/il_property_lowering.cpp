@@ -94,6 +94,13 @@ static void extract_object_pointer(Builder& b, Value* obj, Value*& obj_ptr, Valu
     obj_ptr = b.build_and(obj, b.build_iconst_i64(static_cast<int64_t>(0x0000FFFFFFFFFFFFULL)));
 }
 
+static Value* box_f64_as_value(Builder& b, Value* f_val) {
+    Value* bits = b.build_bitcast_i64_f64(f_val);
+    Value* abs_bits = b.build_and(bits, b.build_iconst_i64(static_cast<int64_t>(0x7FFFFFFFFFFFFFFFULL)));
+    Value* is_nan = b.build_ugt(abs_bits, b.build_iconst_i64(static_cast<int64_t>(0x7FF0000000000000ULL)));
+    return b.build_select(is_nan, b.build_iconst_i64(static_cast<int64_t>(0x7FF8000000000000ULL)), bits);
+}
+
 static Value* extract_integer_index(Builder& b, Value* index, Value*& fallback_idx, Value*& is_valid_idx) {
     Type idx_type = index->type();
     if (idx_type == Type::i32()) {
@@ -103,7 +110,7 @@ static Value* extract_integer_index(Builder& b, Value* index, Value*& fallback_i
         return idx_i64;
     }
     if (idx_type == Type::f64()) {
-        fallback_idx = b.build_bitcast_i64_f64(index);
+        fallback_idx = box_f64_as_value(b, index);
         Value* idx_i64 = b.build_fptosi_i64(index);
         Value* back_f = b.build_sitofp_f64_i64(idx_i64);
         is_valid_idx = b.build_eq(back_f, index);
@@ -298,7 +305,7 @@ Value* PropertyLoweringHelper::lower_elem_get(
         if (index->type() == Type::i32()) {
             idx_i64 = b.build_sext_i64(index);
         } else if (index->type() == Type::f64()) {
-            idx_i64 = b.build_bitcast_i64_f64(index);
+            idx_i64 = box_f64_as_value(b, index);
         }
         return b.build_call("bronze_elem_get", Type::i64(), {obj, idx_i64});
     }
@@ -361,7 +368,7 @@ void PropertyLoweringHelper::lower_elem_set(
         if (index->type() == Type::i32()) {
             idx_i64 = b.build_sext_i64(index);
         } else if (index->type() == Type::f64()) {
-            idx_i64 = b.build_bitcast_i64_f64(index);
+            idx_i64 = box_f64_as_value(b, index);
         }
         Value* ic_val = b.build_iconst_i32(static_cast<int32_t>(ic_slot));
         b.build_call("bronze_elem_set", Type::void_type(), {obj, idx_i64, val, ic_val});
