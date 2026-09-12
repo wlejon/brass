@@ -121,6 +121,7 @@ TranslationResult translate_bronze_il(
 
 // Register Bronze runtime helper symbols into a JitExecutionEngine or runtime symbol table
 void register_bronze_runtime_symbols(void* jit_engine_ptr);
+void register_bronze_baseline_symbols(void* baseline_jit_ptr);
 void register_bronze_interpreter_symbols(void* interp_ptr);
 
 // Optional custom function resolver for AOT or dynamic function lookup

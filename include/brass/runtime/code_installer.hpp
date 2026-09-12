@@ -18,6 +18,7 @@ namespace brass {
 class Interpreter;
 namespace codegen {
 class JitExecutionEngine;
+class BaselineCompiledFunction;
 }
 }
 
@@ -57,8 +58,16 @@ public:
         return native_entry() != nullptr;
     }
 
+    const std::atomic<void*>* native_entry_ptr() const noexcept {
+        return &native_entry_;
+    }
+
     uint64_t invocation_count() const noexcept {
         return invocation_count_.load(std::memory_order_relaxed);
+    }
+
+    const std::atomic<uint64_t>* invocation_count_ptr() const noexcept {
+        return &invocation_count_;
     }
 
     uint64_t record_call() noexcept {
@@ -67,6 +76,9 @@ public:
 
     void set_jit_engine(std::shared_ptr<codegen::JitExecutionEngine> engine);
     std::shared_ptr<codegen::JitExecutionEngine> jit_engine() const;
+
+    void set_baseline_function(std::shared_ptr<codegen::BaselineCompiledFunction> compiled);
+    std::shared_ptr<codegen::BaselineCompiledFunction> baseline_function() const;
 
     Type return_type() const noexcept { return return_type_; }
     const std::vector<Type>& param_types() const noexcept { return param_types_; }
@@ -90,6 +102,7 @@ private:
 
     mutable std::mutex engine_mutex_;
     std::shared_ptr<codegen::JitExecutionEngine> jit_engine_;
+    std::shared_ptr<codegen::BaselineCompiledFunction> baseline_function_;
 
     Type return_type_ = Type::void_type();
     std::vector<Type> param_types_;

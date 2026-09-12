@@ -1,5 +1,6 @@
 #include <brass/runtime/code_installer.hpp>
 #include <brass/codegen/jit_exec.hpp>
+#include <brass/codegen/baseline_jit.hpp>
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/mir/loop_opt.hpp>
@@ -105,6 +106,16 @@ std::shared_ptr<codegen::JitExecutionEngine> FunctionHandle::jit_engine() const 
     return jit_engine_;
 }
 
+void FunctionHandle::set_baseline_function(std::shared_ptr<codegen::BaselineCompiledFunction> compiled) {
+    std::lock_guard<std::mutex> lock(engine_mutex_);
+    baseline_function_ = std::move(compiled);
+}
+
+std::shared_ptr<codegen::BaselineCompiledFunction> FunctionHandle::baseline_function() const {
+    std::lock_guard<std::mutex> lock(engine_mutex_);
+    return baseline_function_;
+}
+
 RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) const {
     void* addr = native_entry();
     if (!addr) {
@@ -114,6 +125,11 @@ RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) 
     auto engine = jit_engine();
     if (engine) {
         return engine->invoke(name_, args);
+    }
+
+    auto baseline = baseline_function();
+    if (baseline) {
+        return baseline->invoke(args);
     }
 
     // Direct invocation fallback for common signatures when engine pointer is omitted (e.g. unit tests)
@@ -186,7 +202,7 @@ FunctionHandle* FunctionDispatchTable::get_or_create(std::string_view name, cons
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = handles_.find(key);
     if (it != handles_.end()) {
-        if (fn && !it->second->mir_function()) {
+        if (fn) {
             it->second->set_mir_function(fn);
         }
         return it->second.get();

@@ -81,7 +81,7 @@ RuntimeValue Interpreter::execute_function(const Function& fn, const std::vector
     }
 
     auto* handle = runtime::FunctionDispatchTable::instance().find(fn.name());
-    if (handle) {
+    if (handle && handle->mir_function() == &fn) {
         void* native_code = handle->native_entry();
         if (native_code != nullptr) {
             return handle->call_native(args);
@@ -91,7 +91,7 @@ RuntimeValue Interpreter::execute_function(const Function& fn, const std::vector
     auto& feedback = runtime::TieringRegistry::instance().get_or_create(fn.name());
     feedback.record_invocation();
 
-    if (handle) {
+    if (handle && handle->mir_function() == &fn) {
         void* native_code = handle->native_entry();
         if (native_code != nullptr) {
             return handle->call_native(args);

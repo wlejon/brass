@@ -28,6 +28,7 @@ void print_usage(const char* prog) {
               << "  --emit-shared <file>  Compile MIR module directly to shared library (.dll/.so)\n"
               << "  -shared               Compile MIR module directly to shared library (.dll/.so)\n"
               << "  --jit                 Use in-memory JIT execution engine for --run\n"
+              << "  --baseline-jit        Use fast Tier-1 Baseline JIT execution engine for --run\n"
               << "  -r, --run <fn>        Execute function <fn>\n"
               << "  --args <a1> <a2>...   Arguments to pass to the function executed with --run\n"
               << "  --gc-stress           Enable moving GC stress mode (collects at every allocation/safepoint)\n"
@@ -136,6 +137,7 @@ int main(int argc, char** argv) {
     bool compile_object = false;
     bool emit_shared = false;
     bool use_jit = false;
+    bool use_baseline_jit = false;
     bool enable_inlining = false;
     bool enable_speculative_inlining = false;
     bool dump_tfv_stats = false;
@@ -360,6 +362,8 @@ int main(int argc, char** argv) {
             emit_shared = true;
         } else if (arg == "--jit") {
             use_jit = true;
+        } else if (arg == "--baseline-jit") {
+            use_baseline_jit = true;
         } else if (arg == "--format") {
             if (i + 1 < argc) {
                 obj_format = argv[++i];
@@ -911,6 +915,7 @@ int main(int argc, char** argv) {
         r_opts.run_fn = run_fn;
         r_opts.run_arg_strings = run_arg_strings;
         r_opts.use_jit = use_jit;
+        r_opts.use_baseline_jit = use_baseline_jit;
         r_opts.gc_stress = gc_stress;
         r_opts.enable_osr = enable_osr;
         r_opts.osr_threshold = osr_threshold;

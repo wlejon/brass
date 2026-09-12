@@ -7,6 +7,7 @@
 #include <brass/runtime/patcher.hpp>
 #include <brass/runtime/exception.hpp>
 #include <brass/runtime/coroutine.hpp>
+#include <brass/runtime/multi_tier_pipeline.hpp>
 #include "../il_translator/il_runtime.hpp"
 #include <stdexcept>
 #include <cstring>
@@ -588,6 +589,26 @@ void* JitExecutionEngine::get_osr_entry_address(std::string_view fn_name) const 
     void* fn_addr = get_symbol_address(fn_name);
     if (!fn_addr) return nullptr;
     return reinterpret_cast<uint8_t*>(fn_addr) + off;
+}
+
+runtime::MultiTierPipeline* JitExecutionEngine::multi_tier_pipeline() noexcept {
+    return &runtime::MultiTierPipeline::instance();
+}
+
+const runtime::MultiTierPipeline* JitExecutionEngine::multi_tier_pipeline() const noexcept {
+    return &runtime::MultiTierPipeline::instance();
+}
+
+void JitExecutionEngine::set_multi_tier_enabled(bool enabled) {
+    if (enabled) {
+        runtime::MultiTierPipeline::instance().initialize();
+    } else {
+        runtime::MultiTierPipeline::instance().shutdown();
+    }
+}
+
+bool JitExecutionEngine::is_multi_tier_enabled() const noexcept {
+    return runtime::MultiTierPipeline::instance().is_initialized();
 }
 
 } // namespace brass::codegen

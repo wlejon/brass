@@ -10,6 +10,8 @@
 #include <brass/runtime/background_compiler.hpp>
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/type_feedback.hpp>
+#include <brass/codegen/baseline_jit.hpp>
+#include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/mir/speculative_inliner.hpp>
 #include <iostream>
 #include <fstream>
@@ -33,6 +35,8 @@ int main(int argc, char** argv) {
     std::string output_shared;
     bool emit_shared = false;
     bool run_jit = false;
+    bool baseline_jit = false;
+    bool dump_tiering_stats = false;
     bool emit_mir = false;
     bool raw_output = false;
     bool show_demote_stats = false;
@@ -72,10 +76,14 @@ int main(int argc, char** argv) {
                       << "  --dump-range-stats    Dump Range Analysis & Bounds Check Elimination statistics\n"
                       << "  --speculative-inlining Run feedback-driven speculative devirtualization and inlining\n"
                       << "  --dump-tfv-stats      Dump Type Feedback Vector (TFV) statistics\n"
+                      << "  --baseline-jit        Compile and execute using Tier-1 Fast Baseline JIT\n"
+                      << "  --dump-tiering-stats  Dump multi-tier execution statistics\n"
                       << "  -o <file>             Write object file to <file>\n";
             return 0;
         } else if (arg == "--run") {
             run_jit = true;
+        } else if (arg == "--baseline-jit") {
+            baseline_jit = true;
         } else if (arg == "--emit-mir") {
             emit_mir = true;
         } else if (arg == "--emit-shared") {
@@ -210,6 +218,7 @@ int main(int argc, char** argv) {
             options.osr_threshold = std::stoull(argv[++i]);
         } else if (arg == "--dump-tiering-stats") {
             options.dump_tiering_stats = true;
+            dump_tiering_stats = true;
         } else if (arg == "--enable-background-compile") {
             enable_background_compile = true;
         } else if (arg.rfind("--jit-threads=", 0) == 0) {
@@ -601,6 +610,104 @@ int main(int argc, char** argv) {
     }
 
     if (run_jit || (output_obj.empty() && output_shared.empty() && !emit_shared)) {
+        if (baseline_jit) {
+            codegen::BaselineJitCompiler compiler;
+            register_bronze_baseline_symbols(&compiler);
+            compiler.register_external_symbol("brass_pgo_inc", reinterpret_cast<void*>(&brass_pgo_inc));
+
+            if (enable_background_compile) {
+                brass::runtime::TieringRegistry::instance().set_background_compile_enabled(true);
+                brass::runtime::TieringRegistry::instance().set_jit_threads(jit_threads);
+                brass::runtime::BackgroundCompiler::instance().start(jit_threads);
+                brass::runtime::TieringRegistry::instance().set_active_module(res.module.get());
+            }
+
+            auto compiled_fns = compiler.compile_module(*res.module);
+            (void)compiled_fns;
+
+            Function* main_fn = res.module->get_function("main");
+            if (main_fn) {
+                auto* handle = brass::runtime::FunctionDispatchTable::instance().find("main");
+                if (!handle || !handle->has_native_entry()) {
+                    std::cerr << "Error: main() not found in baseline compiled functions\n";
+                    return 1;
+                }
+
+                auto run_main = [&]() {
+                    if (main_fn->return_type() == Type::f64()) {
+                        auto fn_ptr = handle->get_function_ptr<double(*)()>();
+                        if (fn_ptr) {
+                            double r = fn_ptr();
+                            if (!raw_output && timed_iterations == 0) {
+                                std::cout << "[brass-il] main() returned f64: " << r << "\n";
+                            }
+                        }
+                    } else if (main_fn->return_type() == Type::i32()) {
+                        auto fn_ptr = handle->get_function_ptr<int32_t(*)()>();
+                        if (fn_ptr) {
+                            int32_t r = fn_ptr();
+                            if (!raw_output && timed_iterations == 0) {
+                                std::cout << "[brass-il] main() returned i32: " << r << "\n";
+                            }
+                        }
+                    } else if (main_fn->return_type() == Type::i64()) {
+                        auto fn_ptr = handle->get_function_ptr<int64_t(*)()>();
+                        if (fn_ptr) {
+                            int64_t r = fn_ptr();
+                            if (!raw_output && timed_iterations == 0) {
+                                std::cout << "[brass-il] main() returned i64: " << r << "\n";
+                            }
+                        }
+                    } else {
+                        auto fn_ptr = handle->get_function_ptr<void(*)()>();
+                        if (fn_ptr) {
+                            fn_ptr();
+                            if (!raw_output && timed_iterations == 0) {
+                                std::cout << "[brass-il] main() executed (void).\n";
+                            }
+                        }
+                    }
+                };
+
+                if (timed_iterations > 0) {
+                    run_main();
+                    bronze_set_print_enabled(false);
+                    run_main();
+                    std::vector<double> samples;
+                    samples.reserve(timed_iterations);
+                    for (int iter = 0; iter < timed_iterations; ++iter) {
+                        auto t0 = std::chrono::high_resolution_clock::now();
+                        run_main();
+                        auto t1 = std::chrono::high_resolution_clock::now();
+                        double elapsed_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                        samples.push_back(elapsed_ms);
+                    }
+                    bronze_set_print_enabled(true);
+                    std::sort(samples.begin(), samples.end());
+                    double med = samples[samples.size() / 2];
+                    double min_v = samples.front();
+                    double max_v = samples.back();
+                    double spread = (max_v - min_v) / 2.0;
+                    std::cout << "\n[brass-il-timed: " << std::fixed << std::setprecision(4)
+                              << med << " +/- " << spread << " (min: " << min_v << ", max: " << max_v << ")]\n";
+                } else {
+                    run_main();
+                }
+
+                if (enable_background_compile) {
+                    brass::runtime::BackgroundCompiler::instance().wait_idle();
+                }
+
+                if (dump_tiering_stats || options.dump_tiering_stats) {
+                    brass::runtime::MultiTierPipeline::instance().dump_stats(std::cout);
+                }
+                if (dump_jit_thread_stats) {
+                    brass::runtime::BackgroundCompiler::instance().dump_stats(std::cout);
+                }
+            }
+            return 0;
+        }
+
         if (enable_background_compile) {
             brass::runtime::TieringRegistry::instance().set_background_compile_enabled(true);
             brass::runtime::TieringRegistry::instance().set_jit_threads(jit_threads);

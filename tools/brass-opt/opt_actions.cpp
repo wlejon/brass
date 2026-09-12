@@ -1,6 +1,8 @@
 #include "opt_actions.hpp"
 #include <brass/brass.hpp>
 #include <brass/codegen/jit_exec.hpp>
+#include <brass/codegen/baseline_jit.hpp>
+#include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/object/coff_writer.hpp>
 #include <brass/object/elf_writer.hpp>
@@ -12,6 +14,7 @@
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
 #include <brass/pgo/instrument.hpp>
+#include <brass/il_translator/il_translator.hpp>
 #include <brass/runtime/parallel_runtime.hpp>
 #include <iostream>
 #include <fstream>
@@ -153,6 +156,40 @@ bool execute_run_function(Module& mod, const RunFunctionOptions& opts) {
         }
     }
 
+    if (opts.use_baseline_jit) {
+        codegen::BaselineJitCompiler baseline(Target::host());
+        il::register_bronze_baseline_symbols(&baseline);
+        baseline.register_external_symbol("brass_pgo_inc", reinterpret_cast<void*>(&brass_pgo_inc));
+        baseline.register_external_symbol("brass_parallel_for", reinterpret_cast<void*>(&brass_parallel_for));
+        baseline.register_external_symbol("brass_set_parallel_workers", reinterpret_cast<void*>(&brass_set_parallel_workers));
+        baseline.register_external_symbol("brass_get_parallel_workers", reinterpret_cast<void*>(&brass_get_parallel_workers));
+        baseline.register_external_symbol("brass_parallel_reduce_i64", reinterpret_cast<void*>(&brass_parallel_reduce_i64));
+        baseline.register_external_symbol("brass_parallel_reduce_f64", reinterpret_cast<void*>(&brass_parallel_reduce_f64));
+        baseline.register_external_symbol("brass_parallel_alloc_context", reinterpret_cast<void*>(&brass_parallel_alloc_context));
+        baseline.register_external_symbol("brass_parallel_free_context", reinterpret_cast<void*>(&brass_parallel_free_context));
+
+        auto compiled_fns = baseline.compile_module(mod);
+        auto* handle = runtime::FunctionDispatchTable::instance().find(opts.run_fn);
+        if (!handle || !handle->has_native_entry()) {
+            std::cerr << "Error: Baseline JIT compilation failed for '" << opts.run_fn << "'\n";
+            return false;
+        }
+
+        try {
+            RuntimeValue result = handle->call_native(run_args);
+            if (!fn->return_type().is_void()) {
+                std::cout << result << "\n";
+            }
+            if (opts.dump_tiering_stats) {
+                runtime::TieringRegistry::instance().dump_stats(std::cout);
+            }
+        } catch (const std::exception& ex) {
+            std::cerr << "Baseline JIT Execution error: " << ex.what() << "\n";
+            return false;
+        }
+        return true;
+    }
+
     if (opts.use_jit) {
         codegen::JitExecutionEngine jit(Target::host());
         codegen::SchedOptions sched_opts;
@@ -160,6 +197,7 @@ bool execute_run_function(Module& mod, const RunFunctionOptions& opts) {
         sched_opts.enable_post_ra = opts.enable_schedule_insns;
         sched_opts.enable_software_pipelining = opts.enable_software_pipeline;
         jit.set_sched_options(sched_opts);
+        il::register_bronze_runtime_symbols(&jit);
         jit.register_external_symbol("brass_pgo_inc", reinterpret_cast<void*>(&brass_pgo_inc));
         jit.register_external_symbol("brass_parallel_for", reinterpret_cast<void*>(&brass_parallel_for));
         jit.register_external_symbol("brass_set_parallel_workers", reinterpret_cast<void*>(&brass_set_parallel_workers));

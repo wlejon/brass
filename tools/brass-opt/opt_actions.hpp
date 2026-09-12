@@ -30,6 +30,7 @@ struct RunFunctionOptions {
     std::string run_fn;
     std::vector<std::string> run_arg_strings;
     bool use_jit = false;
+    bool use_baseline_jit = false;
     bool gc_stress = false;
     bool enable_osr = false;
     uint64_t osr_threshold = 100;

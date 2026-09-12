@@ -1,5 +1,6 @@
 #include "il_runtime.hpp"
 #include <brass/codegen/jit_exec.hpp>
+#include <brass/codegen/baseline_jit.hpp>
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/embedding/host_gc.hpp>
 #include <brass/gc/runtime_gc.hpp>
@@ -25,8 +26,8 @@ static Shape** get_root_shape_storage() {
     return &g_root_shape_cached;
 }
 
-void register_all_runtime_symbols(codegen::JitExecutionEngine& jit) {
-    set_active_jit(&jit);
+template <typename Engine>
+void register_all_runtime_symbols_generic(Engine& jit) {
     auto reg = [&](const char* name, void* ptr) { jit.register_external_symbol(name, ptr); };
 
     reg("brass_tlab_refill", reinterpret_cast<void*>(&brass_tlab_refill));
@@ -264,6 +265,11 @@ void register_all_runtime_symbols(codegen::JitExecutionEngine& jit) {
     reg("brass_parallel_free_context", reinterpret_cast<void*>(&brass_parallel_free_context));
 }
 
+void register_all_runtime_symbols(codegen::JitExecutionEngine& jit) {
+    set_active_jit(&jit);
+    register_all_runtime_symbols_generic(jit);
+}
+
 void unregister_all_runtime_symbols() {
     set_active_jit(nullptr);
     set_coro_symbol_resolver(nullptr);
@@ -275,6 +281,13 @@ void register_bronze_runtime_symbols(void* jit_engine_ptr) {
         register_all_runtime_symbols(*jit);
     } else {
         unregister_all_runtime_symbols();
+    }
+}
+
+void register_bronze_baseline_symbols(void* baseline_jit_ptr) {
+    if (baseline_jit_ptr) {
+        auto* compiler = reinterpret_cast<codegen::BaselineJitCompiler*>(baseline_jit_ptr);
+        register_all_runtime_symbols_generic(*compiler);
     }
 }
 

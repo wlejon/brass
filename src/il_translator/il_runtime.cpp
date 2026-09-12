@@ -9,6 +9,7 @@
 #include <brass/runtime/inline_cache.hpp>
 #include <brass/runtime/coroutine.hpp>
 #include <brass/runtime/parallel_runtime.hpp>
+#include <brass/runtime/code_installer.hpp>
 #include <brass/interpreter/interpreter.hpp>
 #include <iostream>
 #include <iomanip>
@@ -71,7 +72,12 @@ void* bronze_resolve_function(const char* name) {
         if (ptr) return ptr;
     }
     if (g_active_jit) {
-        return g_active_jit->get_symbol_address(name);
+        void* ptr = g_active_jit->get_symbol_address(name);
+        if (ptr) return ptr;
+    }
+    auto* handle = runtime::FunctionDispatchTable::instance().find(name);
+    if (handle) {
+        return handle->native_entry();
     }
     return nullptr;
 }

@@ -2,6 +2,7 @@
 #include <brass/runtime/background_compiler.hpp>
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/type_feedback.hpp>
+#include <brass/runtime/multi_tier_pipeline.hpp>
 #include <ostream>
 #include <iomanip>
 
@@ -147,6 +148,9 @@ void TieringRegistry::clear() {
 }
 
 bool TieringRegistry::on_invocation_threshold_reached(std::string_view fn_name) {
+    if (MultiTierPipeline::instance().is_initialized()) {
+        return MultiTierPipeline::instance().compile_and_install_tier1(fn_name);
+    }
     if (!config_.enable_background_compile) {
         return false;
     }

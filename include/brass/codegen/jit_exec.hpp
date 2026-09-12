@@ -15,6 +15,10 @@
 #include <cstdint>
 #include <cstddef>
 
+namespace brass::runtime {
+class MultiTierPipeline;
+}
+
 namespace brass::codegen {
 
 class JitMemoryBlock {
@@ -103,6 +107,12 @@ public:
     bool patch_call(std::string_view site_name, const std::string& new_target_fn) {
         return patch_call(site_name, std::string_view(new_target_fn));
     }
+
+    // Multi-tier pipeline integration
+    runtime::MultiTierPipeline* multi_tier_pipeline() noexcept;
+    const runtime::MultiTierPipeline* multi_tier_pipeline() const noexcept;
+    void set_multi_tier_enabled(bool enabled);
+    bool is_multi_tier_enabled() const noexcept;
 
     // Dynamic invocation helper using RuntimeValue
     RuntimeValue invoke(std::string_view name, const std::vector<RuntimeValue>& args);
