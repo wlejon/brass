@@ -3,6 +3,7 @@
 #include "il_ast.hpp"
 #include <brass/il_translator/il_translator.hpp>
 #include <brass/il_translator/il_property.hpp>
+#include <brass/il_translator/il_alloc_lowering.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/core/diagnostics.hpp>
 #include <memory>
@@ -28,6 +29,7 @@ public:
     void set_inst_result(uint32_t result_id, Value* res_val, Builder& b, std::unordered_map<uint32_t, Value*>& val_map);
     Value* current_fn_frame_ptr() const { return current_fn_frame_ptr_; }
     PropertyLoweringHelper& prop_lowering() { return prop_lowering_; }
+    AllocLoweringHelper& alloc_lowering() { return alloc_lowering_; }
     const TranslatorOptions& options() const { return options_; }
 
 private:
@@ -43,6 +45,7 @@ private:
     TranslatorOptions options_;
     DiagnosticReporter* diag_ = nullptr;
     PropertyLoweringHelper prop_lowering_;
+    AllocLoweringHelper alloc_lowering_;
     uint32_t current_file_id_ = 0;
     bool has_error_ = false;
     const BronzeModuleAST* current_ast_ = nullptr;

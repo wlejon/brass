@@ -3,6 +3,7 @@
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/embedding/host_gc.hpp>
 #include <brass/gc/runtime_gc.hpp>
+#include <brass/gc/tlab.hpp>
 #include <brass/runtime/shape.hpp>
 #include <brass/runtime/object.hpp>
 #include <brass/runtime/inline_cache.hpp>
@@ -18,9 +19,22 @@ using namespace brass::runtime;
 
 void* bronze_resolve_function(const char* name);
 
+static Shape* g_root_shape_cached = nullptr;
+static Shape** get_root_shape_storage() {
+    g_root_shape_cached = ShapeRegistry::global().get_root_shape();
+    return &g_root_shape_cached;
+}
+
 void register_all_runtime_symbols(codegen::JitExecutionEngine& jit) {
     set_active_jit(&jit);
     auto reg = [&](const char* name, void* ptr) { jit.register_external_symbol(name, ptr); };
+
+    reg("brass_tlab_refill", reinterpret_cast<void*>(&brass_tlab_refill));
+    reg("brass_tlab_top", reinterpret_cast<void*>(brass_tlab_top_ptr()));
+    reg("brass_tlab_end", reinterpret_cast<void*>(brass_tlab_end_ptr()));
+    reg("brass_tlab_top_ptr", reinterpret_cast<void*>(&brass_tlab_top_ptr));
+    reg("brass_tlab_end_ptr", reinterpret_cast<void*>(&brass_tlab_end_ptr));
+    reg("brass_root_shape", reinterpret_cast<void*>(get_root_shape_storage()));
 
     reg("__bronze_module_env", reinterpret_cast<void*>(&g_bronze_module_env));
     reg("__bronze_key_map", reinterpret_cast<void*>(g_bronze_dummy_key_map));
@@ -377,6 +391,12 @@ void register_all_module_external_symbols(Module* mod, const std::string& entry_
         "brass_coro_resume",
         "brass_coro_is_done",
         "brass_coro_destroy",
+        "brass_tlab_refill",
+        "brass_tlab_top",
+        "brass_tlab_end",
+        "brass_tlab_top_ptr",
+        "brass_tlab_end_ptr",
+        "brass_root_shape",
         "__bronze_key_map",
         "__bronze_template_cells",
         "bronze_template_object",

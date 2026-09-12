@@ -3,6 +3,7 @@
 #include <brass/codegen/jit_exec.hpp>
 #include <brass/embedding/host_gc.hpp>
 #include <brass/gc/runtime_gc.hpp>
+#include <brass/gc/tlab.hpp>
 #include <brass/runtime/shape.hpp>
 #include <brass/runtime/object.hpp>
 #include <brass/runtime/inline_cache.hpp>
@@ -181,6 +182,21 @@ BRONZE_WEAK uint64_t bronze_resolve_name(uint32_t key_index, int32_t soft) {
 
 int64_t bronze_env_create(int64_t parent_box, int32_t size) {
     size_t alloc_size = sizeof(BronzeEnv) + (size > 1 ? sizeof(int64_t) * (size - 1) : 0);
+    auto* tlab = brass::get_active_tlab();
+    if (tlab && tlab->owner_gc && !tlab->owner_gc->stress_mode()) {
+        tlab->refill(alloc_size + sizeof(HostGcHeader));
+        uint64_t pointer_mask = 1ULL;
+        uintptr_t addr = tlab->allocate_fast(alloc_size, pointer_mask, 1 /* type_tag */);
+        if (addr != 0) {
+            auto* env = reinterpret_cast<BronzeEnv*>(addr);
+            env->parent_box = parent_box;
+            env->size = size > 0 ? static_cast<uint32_t>(size) : 0;
+            for (int32_t i = 0; i < size; ++i) {
+                env->slots[i] = static_cast<int64_t>(kUndefinedTag);
+            }
+            return reinterpret_cast<int64_t>(env);
+        }
+    }
     BronzeEnv* env = nullptr;
     HostGC* host_gc = brass::get_active_host_gc();
     if (host_gc) {
@@ -353,6 +369,25 @@ int64_t bronze_create_array(int32_t size) {
 }
 
 int64_t bronze_create_object() {
+    auto* tlab = brass::get_active_tlab();
+    if (tlab && tlab->owner_gc && !tlab->owner_gc->stress_mode()) {
+        tlab->refill(sizeof(DynamicObject) + sizeof(HostGcHeader));
+        uintptr_t addr = tlab->allocate_fast(sizeof(DynamicObject), DynamicObject::POINTER_MASK, DynamicObject::TYPE_TAG_DYNAMIC_OBJECT);
+        if (addr != 0) {
+            auto* obj = reinterpret_cast<DynamicObject*>(addr);
+            obj->shape = ShapeRegistry::global().get_root_shape();
+            obj->inline_capacity = static_cast<uint32_t>(DynamicObject::DEFAULT_INLINE_SLOTS);
+            obj->out_of_line_capacity = 0;
+            obj->out_of_line_slots = 0;
+            for (size_t i = 0; i < DynamicObject::DEFAULT_INLINE_SLOTS; ++i) {
+                obj->inline_slots[i] = HostValue::undefined_val();
+            }
+            obj->element_count = 0;
+            obj->element_capacity = 0;
+            obj->elements = 0;
+            return reinterpret_cast<int64_t>(obj);
+        }
+    }
     HostGC* host_gc = brass::get_active_host_gc();
     DynamicObject* obj = DynamicObject::create(host_gc, ShapeRegistry::global().get_root_shape());
     return reinterpret_cast<int64_t>(obj);

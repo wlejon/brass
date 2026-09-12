@@ -12,6 +12,8 @@
 
 namespace brass {
 
+struct ThreadLocalAllocBuffer;
+
 struct HostGcHeader {
     uint32_t size;                // Object payload size in bytes (8-byte aligned)
     uint32_t type_tag;            // User/runtime type tag
@@ -97,6 +99,13 @@ public:
     size_t total_allocations() const noexcept { return total_allocations_; }
     size_t collection_count() const noexcept { return collection_count_; }
 
+    // TLAB Integration
+    bool allocate_tlab(size_t min_bytes, size_t preferred_size, uintptr_t& out_top, uintptr_t& out_end);
+    void retire_tlab(uintptr_t top, uintptr_t end);
+    void register_tlab(ThreadLocalAllocBuffer* tlab);
+    void unregister_tlab(ThreadLocalAllocBuffer* tlab);
+    void reset_active_tlabs(bool clear_owner = false);
+
     // Reset heap
     void reset();
 
@@ -117,6 +126,7 @@ private:
     const ModuleStackMap* stack_maps_ = nullptr;
     std::vector<HostValue*> registered_val_roots_;
     std::vector<uintptr_t*> registered_ptr_roots_;
+    std::vector<ThreadLocalAllocBuffer*> registered_tlabs_;
     RootProvider root_provider_;
 };
 

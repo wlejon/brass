@@ -61,6 +61,7 @@ struct TranslatorOptions {
     size_t tile_size = 16;
     bool enable_pic = true;
     bool enable_inlined_fastpaths = true;
+    bool enable_tlab = true;
     bool dump_ic_stats = false;
     bool enable_wbe = true;
     bool dump_wbe_stats = false;

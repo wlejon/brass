@@ -1,4 +1,5 @@
 #include <brass/embedding/host_gc.hpp>
+#include <brass/gc/tlab.hpp>
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
@@ -55,6 +56,7 @@ HostGC::HostGC(size_t semispace_size)
 }
 
 HostGC::~HostGC() {
+    reset_active_tlabs(true);
     if (g_active_host_gc == this) {
         g_active_host_gc = nullptr;
     }
@@ -199,6 +201,7 @@ void HostGC::collect(
     uintptr_t top_rbp,
     uintptr_t top_return_ip
 ) {
+    reset_active_tlabs();
     size_t to_free_ptr = 0;
 
     // 1. Relocate roots from native stack frames via Brass stack maps
@@ -333,6 +336,8 @@ uintptr_t HostGC::allocate(
     std::vector<uintptr_t*>& extra_ptr_roots,
     std::vector<HostValue*>& extra_val_roots
 ) {
+    reset_active_tlabs();
+
     size_t aligned_size = (size + 7) & ~static_cast<size_t>(7);
     size_t total_size = sizeof(HostGcHeader) + aligned_size;
 
@@ -371,6 +376,7 @@ HostValue HostGC::allocate_value(size_t size, uint64_t pointer_mask, uint32_t ty
 }
 
 void HostGC::reset() {
+    reset_active_tlabs(true);
     free_ptr_ = 0;
     collection_count_ = 0;
     total_allocations_ = 0;
@@ -379,6 +385,95 @@ void HostGC::reset() {
     registered_ptr_roots_.clear();
     poison_space(from_space_.data(), semispace_size_);
     poison_space(to_space_.data(), semispace_size_);
+}
+
+bool HostGC::allocate_tlab(size_t min_bytes, size_t preferred_size, uintptr_t& out_top, uintptr_t& out_end) {
+    if (stress_mode_) {
+        out_top = 0;
+        out_end = 0;
+        return false;
+    }
+    size_t aligned_min = (min_bytes + 7) & ~static_cast<size_t>(7);
+    size_t chunk_size = std::max(aligned_min, preferred_size);
+    chunk_size = (chunk_size + 7) & ~static_cast<size_t>(7);
+
+    if (chunk_size > semispace_size_) {
+        chunk_size = aligned_min;
+        if (chunk_size > semispace_size_) {
+            out_top = 0;
+            out_end = 0;
+            return false;
+        }
+    }
+
+    if (free_ptr_ + chunk_size > semispace_size_) {
+        if (free_ptr_ + aligned_min <= semispace_size_) {
+            chunk_size = (semispace_size_ - free_ptr_) & ~static_cast<size_t>(7);
+        } else {
+            std::vector<uintptr_t*> ptr_roots;
+            std::vector<HostValue*> val_roots;
+            collect(ptr_roots, val_roots, 0, 0);
+
+            if (free_ptr_ + aligned_min > semispace_size_) {
+                out_top = 0;
+                out_end = 0;
+                return false;
+            }
+            if (free_ptr_ + chunk_size > semispace_size_) {
+                chunk_size = (semispace_size_ - free_ptr_) & ~static_cast<size_t>(7);
+            }
+        }
+    }
+
+    uint8_t* mem = from_space_.data() + free_ptr_;
+    out_top = reinterpret_cast<uintptr_t>(mem);
+    out_end = out_top + chunk_size;
+    free_ptr_ += chunk_size;
+    return true;
+}
+
+void HostGC::retire_tlab(uintptr_t top, uintptr_t end) {
+    if (end == 0 || top > end) return;
+    uintptr_t space_start = reinterpret_cast<uintptr_t>(from_space_.data());
+    uintptr_t space_cur = space_start + free_ptr_;
+    if (end == space_cur) {
+        size_t unused = end - top;
+        free_ptr_ -= unused;
+    }
+}
+
+void HostGC::register_tlab(ThreadLocalAllocBuffer* tlab) {
+    if (!tlab) return;
+    for (auto* t : registered_tlabs_) {
+        if (t == tlab) return;
+    }
+    registered_tlabs_.push_back(tlab);
+}
+
+void HostGC::unregister_tlab(ThreadLocalAllocBuffer* tlab) {
+    auto it = std::remove(registered_tlabs_.begin(), registered_tlabs_.end(), tlab);
+    registered_tlabs_.erase(it, registered_tlabs_.end());
+}
+
+void HostGC::reset_active_tlabs(bool clear_owner) {
+    auto* active = get_active_tlab();
+    if (active && active->owner_gc == this) {
+        active->reset();
+        if (clear_owner) {
+            active->owner_gc = nullptr;
+        }
+    }
+    for (auto* tlab : registered_tlabs_) {
+        if (tlab && tlab != active && tlab->owner_gc == this) {
+            tlab->reset();
+            if (clear_owner) {
+                tlab->owner_gc = nullptr;
+            }
+        }
+    }
+    if (clear_owner) {
+        registered_tlabs_.clear();
+    }
 }
 
 } // namespace brass
