@@ -51,8 +51,8 @@ bool is_pure_instruction(const Instruction* inst) {
         case Opcode::clz: case Opcode::ctz: case Opcode::popcnt:
         case Opcode::eq: case Opcode::ne: case Opcode::slt: case Opcode::ult:
         case Opcode::sle: case Opcode::ule: case Opcode::sgt: case Opcode::ugt: case Opcode::sge: case Opcode::uge:
-        case Opcode::select:
-            return true;
+        case Opcode::select: return true;
+        case Opcode::call: return inst->symbol() == "bronze_tls_block_addr";
         case Opcode::sdiv: case Opcode::udiv: case Opcode::smod: case Opcode::umod: {
             if (inst->operand_count() < 2 || !inst->operand(1)) return false;
             const Value* denom = inst->operand(1);

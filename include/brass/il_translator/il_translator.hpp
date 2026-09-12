@@ -63,6 +63,7 @@ struct TranslatorOptions {
     bool enable_pic = true;
     bool enable_inlined_fastpaths = true;
     bool enable_tlab = false;
+    bool use_bronze_tlab = false;
     bool dump_ic_stats = false;
     bool enable_wbe = true;
     bool dump_wbe_stats = false;

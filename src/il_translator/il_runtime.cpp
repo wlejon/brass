@@ -854,6 +854,7 @@ extern "C" {
 BRONZE_WEAK uintptr_t brass_tlab_top = 0;
 BRONZE_WEAK uintptr_t brass_tlab_end = 0;
 BRONZE_WEAK void* brass_root_shape = nullptr;
+BRONZE_WEAK void* bronze_tls_block_addr() { return nullptr; }
 }
 
 uint32_t g_bronze_main_key_constants = 0;

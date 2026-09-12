@@ -73,6 +73,7 @@ int64_t bronze_ic_get(uint32_t site_id, int64_t obj_box, const char* name, int32
 void bronze_ic_set(uint32_t site_id, int64_t obj_box, const char* name, int32_t symbol_id, int64_t val_box);
 
 extern "C" {
+void* bronze_tls_block_addr();
 uint64_t brass_ic_get_prop(uint32_t site_id, uint64_t obj_raw, const char* name, uint32_t symbol_id);
 void brass_ic_set_prop(uint32_t site_id, uint64_t obj_raw, const char* name, uint32_t symbol_id, uint64_t val_raw);
 }

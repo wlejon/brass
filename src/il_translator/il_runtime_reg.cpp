@@ -36,6 +36,7 @@ void register_all_runtime_symbols_generic(Engine& jit) {
     reg("brass_tlab_top_ptr", reinterpret_cast<void*>(&brass_tlab_top_ptr));
     reg("brass_tlab_end_ptr", reinterpret_cast<void*>(&brass_tlab_end_ptr));
     reg("brass_root_shape", reinterpret_cast<void*>(get_root_shape_storage()));
+    reg("bronze_tls_block_addr", reinterpret_cast<void*>(&bronze_tls_block_addr));
 
     reg("__bronze_module_env", reinterpret_cast<void*>(&g_bronze_module_env));
     reg("__bronze_key_map", reinterpret_cast<void*>(g_bronze_dummy_key_map));
@@ -410,6 +411,7 @@ void register_all_module_external_symbols(Module* mod, const std::string& entry_
         "brass_tlab_top_ptr",
         "brass_tlab_end_ptr",
         "brass_root_shape",
+        "bronze_tls_block_addr",
         "__bronze_key_map",
         "__bronze_template_cells",
         "bronze_template_object",

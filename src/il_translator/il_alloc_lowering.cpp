@@ -7,7 +7,245 @@ Value* AllocLoweringHelper::lower_create_object(Builder& b) {
     if (!enable_tlab_) {
         return b.build_call("bronze_create_object", Type::i64(), {});
     }
+    if (model_ == Model::BronzeTLS) {
+        return lower_create_object_bronze(b);
+    }
+    return lower_create_object_brass(b);
+}
 
+Value* AllocLoweringHelper::lower_create_array(Builder& b, Value* size_val, uint32_t param_count) {
+    if (!enable_tlab_ || param_count > 8) {
+        return b.build_call("bronze_create_array", Type::i64(), {size_val});
+    }
+    if (model_ == Model::BronzeTLS) {
+        return lower_create_array_bronze(b, size_val, param_count);
+    }
+    return lower_create_array_brass(b, size_val, param_count);
+}
+
+Value* AllocLoweringHelper::lower_env_create(Builder& b, Value* parent_val, Value* size_val, uint32_t param_count) {
+    if (!enable_tlab_ || param_count > 32) {
+        return b.build_call("bronze_env_create", Type::i64(), {parent_val, size_val});
+    }
+    if (model_ == Model::BronzeTLS) {
+        return lower_env_create_bronze(b, parent_val, size_val, param_count);
+    }
+    return lower_env_create_brass(b, parent_val, size_val, param_count);
+}
+
+// -----------------------------------------------------------------------------
+// Bronze TLS Allocation Model
+// -----------------------------------------------------------------------------
+
+Value* AllocLoweringHelper::lower_create_object_bronze(Builder& b) {
+    BasicBlock* bb_current = b.current_block();
+    Function* fn = bb_current->parent();
+    uint32_t bid = fn->next_block_id();
+    std::string prefix = "tlab_obj_bronze_" + std::to_string(bid);
+
+    BasicBlock* bb_fast = b.append_block(prefix + "_fast");
+    BasicBlock* bb_fallback = b.append_block(prefix + "_fallback");
+    BasicBlock* bb_merge = b.append_block(prefix + "_merge");
+    Value* merge_val = b.add_block_param(bb_merge, Type::i64());
+
+    b.position_at_end(bb_current);
+
+    constexpr size_t PLAIN_OBJECT_BYTES = 56;
+
+    Value* tls_addr = b.build_call("bronze_tls_block_addr", Type::i64(), {});
+    Value* cur_cursor = b.build_load(Type::i64(), tls_addr, 24);
+    Value* cur_limit = b.build_load(Type::i64(), tls_addr, 32);
+    Value* plain_shape = b.build_load(Type::i64(), tls_addr, 40);
+
+    Value* new_cursor = b.build_add(cur_cursor, b.build_iconst_i64(static_cast<int64_t>(PLAIN_OBJECT_BYTES)));
+    Value* can_fit = b.build_ule(new_cursor, cur_limit);
+    Value* has_shape = b.build_ne(plain_shape, b.build_iconst_i64(0));
+    Value* can_alloc = b.build_and(can_fit, has_shape);
+    b.build_br_if(can_alloc, bb_fast, bb_fallback);
+
+    // Fast path: bump pointer and initialize plain object
+    b.position_at_end(bb_fast);
+    b.build_store(Type::i64(), tls_addr, 24, new_cursor);
+
+    // HeapObjectHeader at cur_cursor (offset 0):
+    // tag = 0xFFF1 (Tag::Object), flags = 0 (HeapKind::Plain), size = 56
+    constexpr uint64_t HEADER_WORD = (static_cast<uint64_t>(PLAIN_OBJECT_BYTES) << 32) | 0xFFF1ULL;
+    b.build_store(Type::i64(), cur_cursor, 0, b.build_iconst_i64(static_cast<int64_t>(HEADER_WORD)));
+
+    // ObjectHeader:
+    // Offset 8: shape = plain_shape
+    b.build_store(Type::i64(), cur_cursor, 8, plain_shape);
+
+    // Offset 16: overflow = Value::fromUndefined() (0xFFF6000000000000ULL)
+    Value* undef_val = b.build_iconst_i64(static_cast<int64_t>(0xFFF6000000000000ULL));
+    b.build_store(Type::i64(), cur_cursor, 16, undef_val);
+
+    // Offsets 24, 32, 40, 48: inline_slots[0..3] = undefined
+    for (int i = 0; i < 4; ++i) {
+        b.build_store(Type::i64(), cur_cursor, 24 + i * 8, undef_val);
+    }
+
+    // NaN-box Tag::Object (0xFFF1ULL << 48)
+    Value* ptr_mask = b.build_iconst_i64(static_cast<int64_t>(0x0000FFFFFFFFFFFFULL));
+    Value* masked_ptr = b.build_and(cur_cursor, ptr_mask);
+    Value* obj_val = b.build_or(masked_ptr, b.build_iconst_i64(static_cast<int64_t>(0xFFF1000000000000ULL)));
+
+    b.build_br(bb_merge, {obj_val});
+
+    // Fallback path
+    b.position_at_end(bb_fallback);
+    Value* fallback_val = b.build_call("bronze_create_object", Type::i64(), {});
+    b.build_br(bb_merge, {fallback_val});
+
+    // Merge block
+    b.position_at_end(bb_merge);
+    return merge_val;
+}
+
+Value* AllocLoweringHelper::lower_create_array_bronze(Builder& b, Value* size_val, uint32_t param_count) {
+    BasicBlock* bb_current = b.current_block();
+    Function* fn = bb_current->parent();
+    uint32_t bid = fn->next_block_id();
+    std::string prefix = "tlab_arr_bronze_" + std::to_string(bid);
+
+    BasicBlock* bb_fast = b.append_block(prefix + "_fast");
+    BasicBlock* bb_fallback = b.append_block(prefix + "_fallback");
+    BasicBlock* bb_merge = b.append_block(prefix + "_merge");
+    Value* merge_val = b.add_block_param(bb_merge, Type::i64());
+
+    b.position_at_end(bb_current);
+
+    constexpr size_t ARR_HDR_BYTES = 40; // BRONZE_ABI_ARRAY_HEADER_BYTES
+    uint32_t cap = (param_count < 4) ? 4 : param_count;
+    size_t elem_block_bytes = 8 + static_cast<size_t>(cap) * 8; // BRONZE_ABI_HDR_BYTES + cap * 8
+    size_t total_needed = ARR_HDR_BYTES + elem_block_bytes;
+
+    Value* tls_addr = b.build_call("bronze_tls_block_addr", Type::i64(), {});
+    Value* cur_cursor = b.build_load(Type::i64(), tls_addr, 24);
+    Value* cur_limit = b.build_load(Type::i64(), tls_addr, 32);
+
+    Value* new_cursor = b.build_add(cur_cursor, b.build_iconst_i64(static_cast<int64_t>(total_needed)));
+    Value* can_alloc = b.build_ule(new_cursor, cur_limit);
+    b.build_br_if(can_alloc, bb_fast, bb_fallback);
+
+    // Fast path
+    b.position_at_end(bb_fast);
+    b.build_store(Type::i64(), tls_addr, 24, new_cursor);
+
+    Value* arr_ptr = cur_cursor;
+    Value* elem_ptr = b.build_add(cur_cursor, b.build_iconst_i64(static_cast<int64_t>(ARR_HDR_BYTES)));
+
+    // 1. ArrayHeader (at arr_ptr):
+    // Word 0 (offset 0): size=40, flags=HeapKind::Array (1), tag=Tag::Object (0xFFF1)
+    constexpr uint64_t ARR_W0 = (static_cast<uint64_t>(ARR_HDR_BYTES) << 32) | (1ULL << 16) | 0xFFF1ULL;
+    b.build_store(Type::i64(), arr_ptr, 0, b.build_iconst_i64(static_cast<int64_t>(ARR_W0)));
+
+    // Word 1 (offset 8): length (lower 32) = param_count, capacity (upper 32) = cap
+    uint64_t arr_w1 = static_cast<uint64_t>(param_count) | (static_cast<uint64_t>(cap) << 32);
+    b.build_store(Type::i64(), arr_ptr, 8, b.build_iconst_i64(static_cast<int64_t>(arr_w1)));
+
+    // Word 2 (offset 16): head_offset=0, reserved=0
+    b.build_store(Type::i64(), arr_ptr, 16, b.build_iconst_i64(0));
+
+    // Word 3 (offset 24): elements = Tag::Object boxed elem_ptr
+    Value* ptr_mask = b.build_iconst_i64(static_cast<int64_t>(0x0000FFFFFFFFFFFFULL));
+    Value* masked_elem_ptr = b.build_and(elem_ptr, ptr_mask);
+    Value* elem_val = b.build_or(masked_elem_ptr, b.build_iconst_i64(static_cast<int64_t>(0xFFF1000000000000ULL)));
+    b.build_store(Type::i64(), arr_ptr, 24, elem_val);
+
+    // Word 4 (offset 32): properties = Value::fromUndefined() (0xFFF6000000000000ULL)
+    Value* undef_val = b.build_iconst_i64(static_cast<int64_t>(0xFFF6000000000000ULL));
+    b.build_store(Type::i64(), arr_ptr, 32, undef_val);
+
+    // 2. Elements Block (at elem_ptr):
+    // Word 0 (offset 0): size=elem_block_bytes, flags=HeapKind::ValueBlock (19), tag=Tag::Object (0xFFF1)
+    uint64_t elem_w0 = (static_cast<uint64_t>(elem_block_bytes) << 32) | (19ULL << 16) | 0xFFF1ULL;
+    b.build_store(Type::i64(), elem_ptr, 0, b.build_iconst_i64(static_cast<int64_t>(elem_w0)));
+
+    // Offsets 8..8+cap*8: slots initialized to Value::fromHole() (0xFFF7000000000000ULL)
+    Value* hole_val = b.build_iconst_i64(static_cast<int64_t>(0xFFF7000000000000ULL));
+    for (uint32_t i = 0; i < cap; ++i) {
+        b.build_store(Type::i64(), elem_ptr, static_cast<int32_t>(8 + i * 8), hole_val);
+    }
+
+    // Tagged array Value
+    Value* masked_arr_ptr = b.build_and(arr_ptr, ptr_mask);
+    Value* res_val = b.build_or(masked_arr_ptr, b.build_iconst_i64(static_cast<int64_t>(0xFFF1000000000000ULL)));
+    b.build_br(bb_merge, {res_val});
+
+    // Fallback path
+    b.position_at_end(bb_fallback);
+    Value* fallback_val = b.build_call("bronze_create_array", Type::i64(), {size_val});
+    b.build_br(bb_merge, {fallback_val});
+
+    // Merge block
+    b.position_at_end(bb_merge);
+    return merge_val;
+}
+
+Value* AllocLoweringHelper::lower_env_create_bronze(Builder& b, Value* parent_val, Value* size_val, uint32_t param_count) {
+    BasicBlock* bb_current = b.current_block();
+    Function* fn = bb_current->parent();
+    uint32_t bid = fn->next_block_id();
+    std::string prefix = "tlab_env_bronze_" + std::to_string(bid);
+
+    BasicBlock* bb_fast = b.append_block(prefix + "_fast");
+    BasicBlock* bb_fallback = b.append_block(prefix + "_fallback");
+    BasicBlock* bb_merge = b.append_block(prefix + "_merge");
+    Value* merge_val = b.add_block_param(bb_merge, Type::i64());
+
+    b.position_at_end(bb_current);
+
+    size_t total_size = 16 + static_cast<size_t>(param_count) * 8;
+
+    Value* tls_addr = b.build_call("bronze_tls_block_addr", Type::i64(), {});
+    Value* cur_cursor = b.build_load(Type::i64(), tls_addr, 24);
+    Value* cur_limit = b.build_load(Type::i64(), tls_addr, 32);
+
+    Value* new_cursor = b.build_add(cur_cursor, b.build_iconst_i64(static_cast<int64_t>(total_size)));
+    Value* can_alloc = b.build_ule(new_cursor, cur_limit);
+    b.build_br_if(can_alloc, bb_fast, bb_fallback);
+
+    // Fast path
+    b.position_at_end(bb_fast);
+    b.build_store(Type::i64(), tls_addr, 24, new_cursor);
+
+    Value* env_ptr = cur_cursor;
+
+    // Word 0 (offset 0): size=total_size, flags=HeapKind::Env (12), tag=Tag::Object (0xFFF1)
+    uint64_t w0 = (static_cast<uint64_t>(total_size) << 32) | (12ULL << 16) | 0xFFF1ULL;
+    b.build_store(Type::i64(), env_ptr, 0, b.build_iconst_i64(static_cast<int64_t>(w0)));
+
+    // Word 1 (offset 8): parent = parent_val
+    b.build_store(Type::i64(), env_ptr, 8, parent_val);
+
+    // Slots (offsets 16, 24, ...): Value::fromUndefined() (0xFFF6000000000000ULL)
+    Value* undef_val = b.build_iconst_i64(static_cast<int64_t>(0xFFF6000000000000ULL));
+    for (uint32_t i = 0; i < param_count; ++i) {
+        b.build_store(Type::i64(), env_ptr, static_cast<int32_t>(16 + i * 8), undef_val);
+    }
+
+    // Tagged env Value
+    Value* ptr_mask = b.build_iconst_i64(static_cast<int64_t>(0x0000FFFFFFFFFFFFULL));
+    Value* masked_env_ptr = b.build_and(env_ptr, ptr_mask);
+    Value* res_val = b.build_or(masked_env_ptr, b.build_iconst_i64(static_cast<int64_t>(0xFFF1000000000000ULL)));
+    b.build_br(bb_merge, {res_val});
+
+    // Fallback path
+    b.position_at_end(bb_fallback);
+    Value* fallback_val = b.build_call("bronze_env_create", Type::i64(), {parent_val, size_val});
+    b.build_br(bb_merge, {fallback_val});
+
+    // Merge block
+    b.position_at_end(bb_merge);
+    return merge_val;
+}
+
+// -----------------------------------------------------------------------------
+// Brass HostGC Allocation Model (Standalone Tests)
+// -----------------------------------------------------------------------------
+
+Value* AllocLoweringHelper::lower_create_object_brass(Builder& b) {
     BasicBlock* bb_current = b.current_block();
     Function* fn = bb_current->parent();
     uint32_t bid = fn->next_block_id();
@@ -84,11 +322,7 @@ Value* AllocLoweringHelper::lower_create_object(Builder& b) {
     return merge_val;
 }
 
-Value* AllocLoweringHelper::lower_create_array(Builder& b, Value* size_val, uint32_t param_count) {
-    if (!enable_tlab_ || param_count > 8) {
-        return b.build_call("bronze_create_array", Type::i64(), {size_val});
-    }
-
+Value* AllocLoweringHelper::lower_create_array_brass(Builder& b, Value* size_val, uint32_t param_count) {
     BasicBlock* bb_current = b.current_block();
     Function* fn = bb_current->parent();
     uint32_t bid = fn->next_block_id();
@@ -176,11 +410,7 @@ Value* AllocLoweringHelper::lower_create_array(Builder& b, Value* size_val, uint
     return merge_val;
 }
 
-Value* AllocLoweringHelper::lower_env_create(Builder& b, Value* parent_val, Value* size_val, uint32_t param_count) {
-    if (!enable_tlab_ || param_count > 32) {
-        return b.build_call("bronze_env_create", Type::i64(), {parent_val, size_val});
-    }
-
+Value* AllocLoweringHelper::lower_env_create_brass(Builder& b, Value* parent_val, Value* size_val, uint32_t param_count) {
     BasicBlock* bb_current = b.current_block();
     Function* fn = bb_current->parent();
     uint32_t bid = fn->next_block_id();

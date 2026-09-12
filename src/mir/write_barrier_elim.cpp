@@ -71,7 +71,7 @@ bool WriteBarrierElimination::run_on_function(Function& fn) {
         std::unordered_set<const Value*> young_in_block;
 
         for (Instruction* inst = bb->head(); inst != nullptr; inst = inst->next()) {
-            if (inst->is_call() || inst->opcode() == Opcode::safepoint) {
+            if ((inst->is_call() && inst->symbol() != "bronze_tls_block_addr") || inst->opcode() == Opcode::safepoint) {
                 // Calls or safepoints could trigger GC and clean cards or promote objects
                 dirtied_in_block.clear();
                 young_in_block.clear();

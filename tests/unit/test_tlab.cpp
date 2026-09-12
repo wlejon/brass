@@ -224,6 +224,49 @@ TEST_CASE("TLAB - Inlined SSA Diamond Generation in AllocLoweringHelper") {
     CHECK(has_fallback_call);
 }
 
+TEST_CASE("TLAB - Bronze TLS SSA Diamond Generation in AllocLoweringHelper") {
+    Module mod("test_alloc_lowering_bronze");
+    Function* fn = mod.create_function("test_create_obj_bronze", Type::i64(), {});
+    Builder b(mod);
+    b.set_function(fn);
+
+    BasicBlock* b0 = b.append_block("entry");
+    b.position_at_end(b0);
+
+    AllocLoweringHelper helper(/*enable_tlab=*/true, AllocLoweringHelper::Model::BronzeTLS);
+    CHECK(helper.enable_tlab());
+    CHECK(helper.model() == AllocLoweringHelper::Model::BronzeTLS);
+
+    Value* obj = helper.lower_create_object(b);
+    b.build_ret(obj);
+
+    bool has_tls_call = false;
+    bool has_cursor_load = false;
+    bool has_limit_load = false;
+    bool has_shape_load = false;
+    bool has_fallback_call = false;
+
+    for (BasicBlock* bb : fn->blocks()) {
+        for (Instruction* inst : *bb) {
+            if (inst->opcode() == Opcode::call) {
+                if (inst->symbol() == "bronze_tls_block_addr") has_tls_call = true;
+                if (inst->symbol() == "bronze_create_object") has_fallback_call = true;
+            }
+            if (inst->opcode() == Opcode::load) {
+                if (inst->offset() == 24) has_cursor_load = true;
+                if (inst->offset() == 32) has_limit_load = true;
+                if (inst->offset() == 40) has_shape_load = true;
+            }
+        }
+    }
+
+    CHECK(has_tls_call);
+    CHECK(has_cursor_load);
+    CHECK(has_limit_load);
+    CHECK(has_shape_load);
+    CHECK(has_fallback_call);
+}
+
 TEST_CASE("TLAB - JIT execution with inlined TLAB allocations") {
     std::string il_src = R"(
 module test_tlab_jit.js

@@ -25,6 +25,9 @@ bool is_commutative_op(Opcode op) noexcept {
 bool is_pure_gvn_op(const Instruction* inst) noexcept {
     if (!inst || !inst->produces_value()) return false;
     Opcode op = inst->opcode();
+    if (op == Opcode::call) {
+        return inst->symbol() == "bronze_tls_block_addr";
+    }
     switch (op) {
         case Opcode::iconst_i32:
         case Opcode::iconst_i64:
