@@ -1,8 +1,10 @@
 #include <brass/codegen/jit_exec.hpp>
-#include <immintrin.h>
 #include <cstring>
 #include <stdexcept>
 #include <iostream>
+
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
 
 namespace brass::codegen {
 
@@ -716,3 +718,22 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
 }
 
 } // namespace brass::codegen
+
+#else // !defined(__x86_64__) && !defined(_M_X64)
+
+namespace brass::codegen {
+
+RuntimeValue JitExecutionEngine::invoke(std::string_view name) {
+    return invoke(name, {});
+}
+
+RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector<RuntimeValue>& args) {
+    (void)name;
+    (void)args;
+    throw std::runtime_error("JitExecutionEngine::invoke is only supported on x86_64");
+}
+
+} // namespace brass::codegen
+
+#endif
+

@@ -3,7 +3,6 @@
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/osr.hpp>
 #include <brass/embedding/embedding.hpp>
-#include <immintrin.h>
 #include <cstring>
 
 namespace brass::runtime {

@@ -1,9 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
 
-if(APPLE AND NOT CMAKE_OSX_ARCHITECTURES)
-    # Default to x86_64 on Apple for JIT engine parity
-    set(CMAKE_OSX_ARCHITECTURES "x86_64" CACHE STRING "OSX Architectures" FORCE)
-endif()
 
 project(brass VERSION 0.1.0 LANGUAGES CXX C)
 

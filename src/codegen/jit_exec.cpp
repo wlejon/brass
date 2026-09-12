@@ -10,7 +10,6 @@
 #include "../il_translator/il_runtime.hpp"
 #include <stdexcept>
 #include <cstring>
-#include <emmintrin.h>
 #include <iostream>
 
 #if defined(_WIN32)
