@@ -26,8 +26,10 @@ using namespace brass::runtime;
 
 #ifndef _WIN32
 #define BRONZE_WEAK __attribute__((weak))
+#define BRONZE_WEAK_DATA __attribute__((weak))
 #else
 #define BRONZE_WEAK
+#define BRONZE_WEAK_DATA __declspec(selectany)
 #endif
 
 
@@ -850,11 +852,20 @@ BRONZE_WEAK uint64_t bronze_immutable_assign() {
     return 0xFFF6000000000000ULL;
 }
 
+static struct BronzeDummyTlsBlock {
+    void* frame_top = nullptr;
+    uint64_t exception_cell = 0xFFF6000000000000ULL;
+    uint32_t proto_epoch = 1;
+    uint64_t alloc_cursor = 0;
+    uint64_t alloc_limit = 0;
+    uint64_t plain_shape = 0;
+} g_bronze_dummy_tls_block;
+
 extern "C" {
-BRONZE_WEAK uintptr_t brass_tlab_top = 0;
-BRONZE_WEAK uintptr_t brass_tlab_end = 0;
-BRONZE_WEAK void* brass_root_shape = nullptr;
-BRONZE_WEAK void* bronze_tls_block_addr() { return nullptr; }
+BRONZE_WEAK_DATA uintptr_t brass_tlab_top = 0;
+BRONZE_WEAK_DATA uintptr_t brass_tlab_end = 0;
+BRONZE_WEAK_DATA void* brass_root_shape = nullptr;
+BRONZE_WEAK void* bronze_tls_block_addr() { return &g_bronze_dummy_tls_block; }
 }
 
 uint32_t g_bronze_main_key_constants = 0;
