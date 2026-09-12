@@ -128,7 +128,7 @@ void brass_clear_current_exception() noexcept {
     t_has_current_exception = false;
 }
 
-#if defined(__GNUC__) || defined(__clang__)
+#if (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(_M_X64))
 #if defined(_WIN32)
 __attribute__((naked)) void brass_jump_to_landing_pad(
     void* landing_pad_ip,

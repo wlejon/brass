@@ -4,6 +4,9 @@
 #include <brass/mir/osr.hpp>
 #include <brass/embedding/embedding.hpp>
 #include <cstring>
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#endif
 
 namespace brass::runtime {
 
@@ -152,6 +155,7 @@ bool OsrCoordinator::try_osr_migration(
             out_result = deopt_occurred ? deopt_res : RuntimeValue::from_f64(r);
         }
     } else if (ret_t.is_vector()) {
+#if defined(__x86_64__) || defined(_M_X64)
         using NativeOsrFn = __m128 (*)(const OsrMigrationFrame*);
         __m128 r = reinterpret_cast<NativeOsrFn>(osr_entry_addr)(&mig_frame);
         if (deopt_occurred) {
@@ -161,6 +165,11 @@ bool OsrCoordinator::try_osr_migration(
             std::memcpy(b, &r, 16);
             out_result = RuntimeValue::from_v128(ret_t, b);
         }
+#else
+        (void)osr_entry_addr;
+        alignas(16) uint8_t b[16] = {0};
+        out_result = RuntimeValue::from_v128(ret_t, b);
+#endif
     } else if (ret_t.is_i32()) {
         using NativeOsrFn = int32_t (*)(const OsrMigrationFrame*);
         int32_t r = reinterpret_cast<NativeOsrFn>(osr_entry_addr)(&mig_frame);
