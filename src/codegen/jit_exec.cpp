@@ -9,6 +9,9 @@
 #include <brass/runtime/coroutine.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include "../il_translator/il_runtime.hpp"
+#include <algorithm>
+#include <mutex>
+#include <vector>
 #include <stdexcept>
 #include <cstring>
 #include <iostream>
@@ -28,13 +31,44 @@
 
 namespace brass::codegen {
 
+namespace {
+static std::vector<std::pair<uintptr_t, uintptr_t>> s_jit_ranges;
+static std::mutex s_jit_ranges_mutex;
+
+void register_jit_memory_range(void* ptr, size_t size) {
+    if (!ptr || size == 0) return;
+    std::lock_guard<std::mutex> lock(s_jit_ranges_mutex);
+    s_jit_ranges.push_back({reinterpret_cast<uintptr_t>(ptr), reinterpret_cast<uintptr_t>(ptr) + size});
+}
+
+void unregister_jit_memory_range(void* ptr) {
+    if (!ptr) return;
+    std::lock_guard<std::mutex> lock(s_jit_ranges_mutex);
+    uintptr_t p = reinterpret_cast<uintptr_t>(ptr);
+    s_jit_ranges.erase(
+        std::remove_if(s_jit_ranges.begin(), s_jit_ranges.end(),
+                       [p](const auto& range) { return range.first == p; }),
+        s_jit_ranges.end());
+}
+} // namespace
+
+bool is_jit_code_address(const void* addr) noexcept {
+    if (!addr) return false;
+    uintptr_t p = reinterpret_cast<uintptr_t>(addr);
+    std::lock_guard<std::mutex> lock(s_jit_ranges_mutex);
+    for (const auto& [start, end] : s_jit_ranges) {
+        if (p >= start && p < end) return true;
+    }
+    return false;
+}
+
 JitMemoryBlock::JitMemoryBlock(size_t size) {
     if (size == 0) return;
     size_t page_aligned = (size + 4095) & ~size_t(4095);
 #if defined(_WIN32)
-    ptr_ = static_cast<uint8_t*>(VirtualAlloc(nullptr, page_aligned, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    ptr_ = static_cast<uint8_t*>(VirtualAlloc(nullptr, page_aligned, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
 #else
-    ptr_ = static_cast<uint8_t*>(mmap(nullptr, page_aligned, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    ptr_ = static_cast<uint8_t*>(mmap(nullptr, page_aligned, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
     if (ptr_ == MAP_FAILED) ptr_ = nullptr;
 #endif
     if (ptr_) size_ = page_aligned;
@@ -63,6 +97,7 @@ JitMemoryBlock& JitMemoryBlock::operator=(JitMemoryBlock&& other) noexcept {
 
 void JitMemoryBlock::reset() {
     if (ptr_) {
+        unregister_jit_memory_range(ptr_);
 #if defined(_WIN32)
         VirtualFree(ptr_, 0, MEM_RELEASE);
 #else
@@ -88,19 +123,19 @@ void JitMemoryBlock::make_executable() {
 #endif
 }
 
-void JitMemoryBlock::make_executable_read_only() {
+void JitMemoryBlock::make_executable_read_only(size_t code_size) {
+    if (!ptr_) return;
+    size_t protect_size = (code_size == 0) ? size_ : ((code_size + 4095) & ~size_t(4095));
+    if (protect_size > size_) protect_size = size_;
 #if defined(_WIN32)
-    if (ptr_) {
-        DWORD old_protect;
-        VirtualProtect(ptr_, size_, PAGE_EXECUTE_READ, &old_protect);
-        FlushInstructionCache(GetCurrentProcess(), ptr_, size_);
-    }
+    DWORD old_protect;
+    VirtualProtect(ptr_, protect_size, PAGE_EXECUTE_READ, &old_protect);
+    FlushInstructionCache(GetCurrentProcess(), ptr_, protect_size);
 #else
-    if (ptr_) {
-        mprotect(ptr_, size_, PROT_READ | PROT_EXEC);
-        __builtin___clear_cache(reinterpret_cast<char*>(ptr_), reinterpret_cast<char*>(ptr_ + size_));
-    }
+    mprotect(ptr_, protect_size, PROT_READ | PROT_EXEC);
+    __builtin___clear_cache(reinterpret_cast<char*>(ptr_), reinterpret_cast<char*>(ptr_ + protect_size));
 #endif
+    register_jit_memory_range(ptr_, protect_size);
 }
 
 void JitMemoryBlock::make_read_write() {
@@ -280,25 +315,44 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
         }
     }
 
-    // Compute memory size and section offsets
+    // Compute memory size and section offsets:
+    // 1. Executable code sections (.text) first
     size_t total_size = code_padding;
     std::vector<size_t> sec_offsets(working_obj.sections.size(), 0);
 
     for (size_t i = 0; i < working_obj.sections.size(); ++i) {
         const auto& sec = working_obj.sections[i];
-        if (sec.alignment > 1) {
-            total_size = (total_size + (sec.alignment - 1)) & ~(size_t(sec.alignment) - 1);
+        if (sec.kind == object::SectionKind::Text || object::has_flag(sec.flags, object::SectionFlags::Execute)) {
+            if (sec.alignment > 1) {
+                total_size = (total_size + (sec.alignment - 1)) & ~(size_t(sec.alignment) - 1);
+            }
+            sec_offsets[i] = total_size;
+            total_size += sec.data.size();
         }
-        sec_offsets[i] = total_size;
-        total_size += sec.data.size();
     }
 
-    if (total_size == 0) return true;
-
-    // Reserve extra space for PLT far-call trampolines
+    // Reserve space for PLT far-call trampolines in the executable region
     size_t trampoline_capacity = 4096;
     size_t trampoline_offset = (total_size + 15) & ~size_t(15);
     total_size = trampoline_offset + trampoline_capacity;
+
+    // Code pages end at 4KB boundary
+    size_t code_pages_size = (total_size + 4095) & ~size_t(4095);
+    total_size = code_pages_size;
+
+    // 2. Non-executable data sections (.rodata, .data, .bss, .pdata, .xdata, etc.)
+    for (size_t i = 0; i < working_obj.sections.size(); ++i) {
+        const auto& sec = working_obj.sections[i];
+        if (sec.kind != object::SectionKind::Text && !object::has_flag(sec.flags, object::SectionFlags::Execute)) {
+            if (sec.alignment > 1) {
+                total_size = (total_size + (sec.alignment - 1)) & ~(size_t(sec.alignment) - 1);
+            }
+            sec_offsets[i] = total_size;
+            total_size += sec.data.size();
+        }
+    }
+
+    if (total_size == 0) return true;
 
     // Allocate memory block
     code_mem_ = JitMemoryBlock(total_size);
@@ -454,7 +508,7 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
         }
     }
 
-    code_mem_.make_executable();
+    code_mem_.make_executable_read_only(code_pages_size);
     return true;
 }
 

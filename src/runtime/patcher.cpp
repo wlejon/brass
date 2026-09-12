@@ -1,4 +1,5 @@
 #include <brass/runtime/patcher.hpp>
+#include <brass/codegen/jit_exec.hpp>
 #include <atomic>
 #include <iostream>
 
@@ -17,6 +18,9 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include <sys/mman.h>
+#include <unistd.h>
 #endif
 
 namespace {
@@ -40,6 +44,64 @@ static inline void atomic_store_release(T* ptr, T val) noexcept {
     ref.store(val, std::memory_order_release);
 #endif
 }
+
+class ScopedCodeWrite {
+public:
+    ScopedCodeWrite(void* addr, size_t size) {
+        if (!addr || size == 0) return;
+        if (!brass::codegen::is_jit_code_address(addr)) {
+            // Not a JIT code page (e.g. stack buffer or data memory). Already writable!
+            writable_ = true;
+            return;
+        }
+#if defined(_WIN32)
+        DWORD old_protect = 0;
+        if (VirtualProtect(addr, size, PAGE_EXECUTE_READWRITE, &old_protect)) {
+            addr_ = addr;
+            size_ = size;
+            old_protect_ = old_protect;
+            active_ = true;
+        }
+#else
+        long page_size = sysconf(_SC_PAGESIZE);
+        if (page_size <= 0) page_size = 4096;
+        uintptr_t start = reinterpret_cast<uintptr_t>(addr);
+        uintptr_t page_start = start & ~static_cast<uintptr_t>(page_size - 1);
+        uintptr_t page_end = (start + size + page_size - 1) & ~static_cast<uintptr_t>(page_size - 1);
+        page_addr_ = reinterpret_cast<void*>(page_start);
+        page_len_ = page_end - page_start;
+
+        if (mprotect(page_addr_, page_len_, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
+            active_ = true;
+        }
+#endif
+    }
+
+    ~ScopedCodeWrite() {
+        if (!active_) return;
+#if defined(_WIN32)
+        DWORD dummy = 0;
+        VirtualProtect(addr_, size_, old_protect_, &dummy);
+#else
+        mprotect(page_addr_, page_len_, PROT_READ | PROT_EXEC);
+#endif
+    }
+
+    bool is_writable() const noexcept { return active_ || writable_; }
+
+private:
+    bool active_ = false;
+    bool writable_ = false;
+#if defined(_WIN32)
+    void* addr_ = nullptr;
+    size_t size_ = 0;
+    DWORD old_protect_ = 0;
+#else
+    void* page_addr_ = nullptr;
+    size_t page_len_ = 0;
+#endif
+};
+
 } // anonymous namespace
 
 namespace brass::runtime {
@@ -63,6 +125,8 @@ extern "C" {
 
 bool brass_patch_const32(void* code_addr, int32_t new_val) {
     if (!code_addr) return false;
+    ScopedCodeWrite write_guard(code_addr, sizeof(int32_t));
+    if (!write_guard.is_writable()) return false;
     auto* target_ptr = reinterpret_cast<int32_t*>(code_addr);
     atomic_store_release(target_ptr, new_val);
     memory_fence();
@@ -77,6 +141,8 @@ bool brass_patch_const32(void* code_addr, int32_t new_val) {
 
 bool brass_patch_const64(void* code_addr, int64_t new_val) {
     if (!code_addr) return false;
+    ScopedCodeWrite write_guard(code_addr, sizeof(int64_t));
+    if (!write_guard.is_writable()) return false;
     auto* target_ptr = reinterpret_cast<int64_t*>(code_addr);
     atomic_store_release(target_ptr, new_val);
     memory_fence();
@@ -109,6 +175,9 @@ bool brass_patch_call(void* call_site_addr, const void* new_target) {
     if (disp < INT32_MIN || disp > INT32_MAX) {
         return false;
     }
+
+    ScopedCodeWrite write_guard(disp_ptr, sizeof(int32_t));
+    if (!write_guard.is_writable()) return false;
 
     int32_t disp32 = static_cast<int32_t>(disp);
     auto* target_ptr = reinterpret_cast<int32_t*>(disp_ptr);

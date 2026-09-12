@@ -38,7 +38,7 @@ public:
     bool is_valid() const noexcept { return ptr_ != nullptr; }
 
     void make_executable();
-    void make_executable_read_only();
+    void make_executable_read_only(size_t code_size = 0);
     void make_read_write();
     void reset();
 
@@ -46,6 +46,8 @@ private:
     uint8_t* ptr_ = nullptr;
     size_t size_ = 0;
 };
+
+bool is_jit_code_address(const void* addr) noexcept;
 
 class JitExecutionEngine {
 public:
@@ -68,7 +70,7 @@ public:
 
     const SchedOptions& sched_options() const noexcept { return sched_opts_; }
     void set_sched_options(const SchedOptions& opts) { sched_opts_ = opts; }
-    void make_executable_read_only() { code_mem_.make_executable_read_only(); }
+    void make_executable_read_only(size_t code_size = 0) { code_mem_.make_executable_read_only(code_size); }
 
     // Function/symbol lookup
     void* get_symbol_address(std::string_view name) const;

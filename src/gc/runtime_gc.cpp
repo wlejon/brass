@@ -8,6 +8,12 @@
 extern "C" uintptr_t brass_get_rbp();
 #endif
 
+#if defined(__GNUC__) || defined(__clang__)
+#define BRASS_WEAK __attribute__((weak))
+#else
+#define BRASS_WEAK
+#endif
+
 namespace brass {
 
 namespace {
@@ -159,7 +165,7 @@ uintptr_t brass_runtime_gc_alloc_bridge(size_t size, uint64_t pointer_mask, uint
     return brass::brass_runtime_gc_alloc(gc, *maps, size, pointer_mask, type_tag, caller_rbp, caller_ip);
 }
 
-void brass_gc_write_barrier(uintptr_t obj, uintptr_t val) {
+BRASS_WEAK void brass_gc_write_barrier(uintptr_t obj, uintptr_t val) {
     auto* gen_gc = brass::brass_get_active_generational_gc();
     if (!gen_gc) return;
     if (!gen_gc->is_old(obj)) return;
@@ -239,7 +245,7 @@ void brass_gc_collect() {
     }
 }
 
-void brass_gc_write_barrier(uintptr_t obj, uintptr_t val) {
+BRASS_WEAK void brass_gc_write_barrier(uintptr_t obj, uintptr_t val) {
     auto* gen_gc = brass::brass_get_active_generational_gc();
     if (!gen_gc) return;
     if (!gen_gc->is_old(obj)) return;
