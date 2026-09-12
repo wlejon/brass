@@ -27,6 +27,19 @@ static inline void memory_fence() noexcept {
     std::atomic_thread_fence(std::memory_order_seq_cst);
 #endif
 }
+
+template <typename T>
+static inline void atomic_store_release(T* ptr, T val) noexcept {
+#if defined(__cpp_lib_atomic_ref)
+    std::atomic_ref<T> ref(*ptr);
+    ref.store(val, std::memory_order_release);
+#elif defined(__GNUC__) || defined(__clang__)
+    __atomic_store_n(ptr, val, __ATOMIC_RELEASE);
+#else
+    std::atomic_ref<T> ref(*ptr);
+    ref.store(val, std::memory_order_release);
+#endif
+}
 } // anonymous namespace
 
 namespace brass::runtime {
@@ -51,8 +64,7 @@ extern "C" {
 bool brass_patch_const32(void* code_addr, int32_t new_val) {
     if (!code_addr) return false;
     auto* target_ptr = reinterpret_cast<int32_t*>(code_addr);
-    std::atomic_ref<int32_t> ref(*target_ptr);
-    ref.store(new_val, std::memory_order_release);
+    atomic_store_release(target_ptr, new_val);
     memory_fence();
 #if defined(_WIN32)
     FlushInstructionCache(GetCurrentProcess(), code_addr, sizeof(int32_t));
@@ -66,8 +78,7 @@ bool brass_patch_const32(void* code_addr, int32_t new_val) {
 bool brass_patch_const64(void* code_addr, int64_t new_val) {
     if (!code_addr) return false;
     auto* target_ptr = reinterpret_cast<int64_t*>(code_addr);
-    std::atomic_ref<int64_t> ref(*target_ptr);
-    ref.store(new_val, std::memory_order_release);
+    atomic_store_release(target_ptr, new_val);
     memory_fence();
 #if defined(_WIN32)
     FlushInstructionCache(GetCurrentProcess(), code_addr, sizeof(int64_t));
@@ -101,8 +112,7 @@ bool brass_patch_call(void* call_site_addr, const void* new_target) {
 
     int32_t disp32 = static_cast<int32_t>(disp);
     auto* target_ptr = reinterpret_cast<int32_t*>(disp_ptr);
-    std::atomic_ref<int32_t> ref(*target_ptr);
-    ref.store(disp32, std::memory_order_release);
+    atomic_store_release(target_ptr, disp32);
     memory_fence();
 #if defined(_WIN32)
     FlushInstructionCache(GetCurrentProcess(), disp_ptr, sizeof(int32_t));
