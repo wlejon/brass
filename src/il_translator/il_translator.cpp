@@ -13,7 +13,7 @@ TranslationResult translate_bronze_il(
     DiagnosticReporter default_diag;
     DiagnosticReporter* active_diag = diag ? diag : &default_diag;
 
-    IlParser parser(il_text, active_diag);
+    IlParser parser(il_text, active_diag, &options);
     BronzeModuleAST ast;
     if (!parser.parse_module(ast)) {
         result.success = false;

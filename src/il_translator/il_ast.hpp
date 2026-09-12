@@ -178,6 +178,13 @@ struct BronzeInstruction {
     uint32_t index = 0;
     uint32_t param_count = 0;
 
+    static constexpr uint32_t kNoStaticSlot = UINT32_MAX;
+    static constexpr uint32_t kNoIcIndex = UINT32_MAX;
+    uint32_t static_slot = kNoStaticSlot;
+    uint32_t ic_index = kNoIcIndex;
+    bool is_mono = false;
+    bool is_fn_recv = false;
+
     BronzeBlockTarget target;
     BronzeBlockTarget else_target;
 

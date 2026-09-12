@@ -10,7 +10,7 @@
 
 namespace brass::il {
 
-static std::atomic<uint32_t> g_global_auto_site_id{1};
+static std::atomic<uint32_t> g_global_auto_site_id{1000000};
 
 Value* PropertyLoweringHelper::lower_prop_get(
     Builder& b,

@@ -1,9 +1,37 @@
 #include "il_parser.hpp"
+#include <brass/il_translator/il_translator.hpp>
 #include <charconv>
 #include <cstdlib>
 #include <limits>
 
 namespace brass::il {
+
+static bool parse_prop_mod(IlLexer& lexer, BronzeInstruction& out_inst, uint32_t op_line, const Token& peek) {
+    if (peek.type == TokenType::Identifier && peek.text == "slot") {
+        lexer.next_token();
+        Token slot_tok = lexer.next_token();
+        if (slot_tok.type == TokenType::NumberInt) {
+            out_inst.static_slot = static_cast<uint32_t>(slot_tok.num_i64);
+        }
+        if (lexer.peek_token().line == op_line && lexer.peek_token().type == TokenType::AtFunction) {
+            lexer.next_token();
+        } else if (lexer.peek_token().line == op_line && lexer.peek_token().type == TokenType::Identifier && lexer.peek_token().text == "family") {
+            lexer.next_token();
+            while (lexer.peek_token().line == op_line && lexer.peek_token().type != TokenType::Comma &&
+                   lexer.peek_token().type != TokenType::Eof && lexer.peek_token().type != TokenType::BlockLabel) {
+                lexer.next_token();
+            }
+        }
+        return true;
+    }
+    if (peek.type == TokenType::Identifier && peek.text == "mono") {
+        lexer.next_token(); out_inst.is_mono = true; return true;
+    }
+    if (peek.type == TokenType::Identifier && peek.text == "fn-recv") {
+        lexer.next_token(); out_inst.is_fn_recv = true; return true;
+    }
+    return false;
+}
 
 bool IlParser::parse_instruction(BronzeInstruction& out_inst) {
     Token peek = lexer_.peek_token();
@@ -326,9 +354,15 @@ bool IlParser::parse_instruction(BronzeInstruction& out_inst) {
                 out_inst.index = static_cast<uint32_t>(key_tok.num_i64);
             }
 
-            if (match(TokenType::Comma)) {
-                Token slot_tok = lexer_.next_token();
-                out_inst.depth = static_cast<uint32_t>(slot_tok.num_i64);
+            while (match(TokenType::Comma)) {
+                const Token& peek = lexer_.peek_token();
+                if (peek.line != op_tok.line) break;
+                if (peek.type == TokenType::NumberInt) {
+                    out_inst.ic_index = static_cast<uint32_t>(lexer_.next_token().num_i64);
+                    out_inst.depth = out_inst.ic_index;
+                } else if (!parse_prop_mod(lexer_, out_inst, op_tok.line, peek)) {
+                    break;
+                }
             }
             break;
         }
@@ -351,12 +385,21 @@ bool IlParser::parse_instruction(BronzeInstruction& out_inst) {
             if (!expect(TokenType::PercentValue, "Expected %val in prop.set", &val_tok)) return false;
             out_inst.operands.push_back(val_tok.id_num);
 
-            if (match(TokenType::Comma)) {
-                Token slot_tok = lexer_.next_token();
-                out_inst.depth = static_cast<uint32_t>(slot_tok.num_i64);
-                if (match(TokenType::Comma)) {
-                    Token imm_tok = lexer_.next_token();
-                    out_inst.imm_i64 = imm_tok.num_i64;
+            bool has_ic_index = false;
+            while (match(TokenType::Comma)) {
+                const Token& peek = lexer_.peek_token();
+                if (peek.line != op_tok.line) break;
+                if (peek.type == TokenType::NumberInt) {
+                    Token num_tok = lexer_.next_token();
+                    if (!has_ic_index) {
+                        out_inst.ic_index = static_cast<uint32_t>(num_tok.num_i64);
+                        out_inst.depth = out_inst.ic_index;
+                        has_ic_index = true;
+                    } else {
+                        out_inst.imm_i64 = num_tok.num_i64;
+                    }
+                } else if (!parse_prop_mod(lexer_, out_inst, op_tok.line, peek)) {
+                    break;
                 }
             }
             break;

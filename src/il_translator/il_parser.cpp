@@ -1,10 +1,11 @@
 #include "il_parser.hpp"
+#include <brass/il_translator/il_translator.hpp>
 #include <sstream>
 
 namespace brass::il {
 
-IlParser::IlParser(std::string_view source, DiagnosticReporter* diag)
-    : lexer_(source), diag_(diag) {}
+IlParser::IlParser(std::string_view source, DiagnosticReporter* diag, const TranslatorOptions* options)
+    : lexer_(source), diag_(diag), options_(options) {}
 
 void IlParser::error(std::string_view msg, const Token& tok) {
     has_error_ = true;

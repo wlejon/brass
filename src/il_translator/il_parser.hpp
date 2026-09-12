@@ -8,9 +8,11 @@
 
 namespace brass::il {
 
+struct TranslatorOptions;
+
 class IlParser {
 public:
-    IlParser(std::string_view source, DiagnosticReporter* diag = nullptr);
+    IlParser(std::string_view source, DiagnosticReporter* diag = nullptr, const TranslatorOptions* options = nullptr);
 
     bool parse_module(BronzeModuleAST& out_ast);
 
@@ -27,6 +29,7 @@ private:
 
     IlLexer lexer_;
     DiagnosticReporter* diag_ = nullptr;
+    const TranslatorOptions* options_ = nullptr;
     bool has_error_ = false;
 };
 
