@@ -1,11 +1,9 @@
 #include "bench_simd_math.hpp"
 #include "bench_utils.hpp"
 #include <brass/brass.hpp>
-#include <brass/target/x64/x64_isel.hpp>
 #include <vector>
 #include <cmath>
 #include <iostream>
-#include <immintrin.h>
 
 using namespace brass;
 using namespace brass::bench;
