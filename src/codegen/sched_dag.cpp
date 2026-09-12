@@ -19,6 +19,7 @@ std::string_view to_string(EdgeKind kind) noexcept {
 }
 
 bool instruction_defines_flags(const LirInst& inst) noexcept {
+    if (inst.is_call()) return true;
     switch (inst.opcode) {
         case LirOpcode::Cmp:
         case LirOpcode::Cmp32:
