@@ -66,6 +66,8 @@ int main(int argc, char** argv) {
                       << "  --enable-background-compile Enable background JIT compiler worker threads\n"
                       << "  --jit-threads=<N>     Number of background JIT worker threads (default: 2)\n"
                       << "  --dump-jit-thread-stats Dump background JIT worker thread pool statistics\n"
+                      << "  --bce                 Run Value Range Analysis & Bounds Check Elimination\n"
+                      << "  --dump-range-stats    Dump Range Analysis & Bounds Check Elimination statistics\n"
                       << "  -o <file>             Write object file to <file>\n";
             return 0;
         } else if (arg == "--run") {
@@ -111,6 +113,13 @@ int main(int argc, char** argv) {
             options.enable_guard_elim = true;
         } else if (arg == "--no-guard-elim") {
             options.enable_guard_elim = false;
+        } else if (arg == "--bce") {
+            options.enable_bce = true;
+        } else if (arg == "--no-bce") {
+            options.enable_bce = false;
+        } else if (arg == "--dump-range-stats") {
+            options.dump_range_stats = true;
+            options.enable_bce = true;
         } else if (arg == "--cfg-simplify") {
             options.enable_cfg_simplify = true;
         } else if (arg == "--no-cfg-simplify") {
@@ -317,6 +326,11 @@ int main(int argc, char** argv) {
         options.parallel_stats_collector = &parallel_stats;
     }
 
+    brass::RangeAnalysisStats range_stats;
+    if (options.dump_range_stats) {
+        options.range_stats_collector = &range_stats;
+    }
+
     if (options.parallel_workers > 0) {
         brass_set_parallel_workers(options.parallel_workers);
     }
@@ -413,6 +427,10 @@ int main(int argc, char** argv) {
 
     if (options.dump_parallel_stats) {
         std::cout << parallel_stats.format_report();
+    }
+
+    if (options.dump_range_stats) {
+        range_stats.dump(std::cout);
     }
 
     if (options.enable_partial_escape && !options.enable_allocation_sinking) {

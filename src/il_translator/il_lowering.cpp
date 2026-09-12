@@ -437,6 +437,9 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
         opt_opts.parallel_workers = options_.parallel_workers;
         opt_opts.dump_parallel_stats = options_.dump_parallel_stats;
         opt_opts.parallel_stats = options_.parallel_stats_collector;
+        opt_opts.enable_bce = options_.enable_bce;
+        opt_opts.dump_range_stats = options_.dump_range_stats;
+        opt_opts.range_stats = options_.range_stats_collector;
         auto check_pass = [&](const char* name) {
             if (!verify_module(*mod, diag_)) {
                 std::fprintf(stderr, "[FATAL] Broken after %s\n", name);

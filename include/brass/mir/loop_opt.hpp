@@ -12,6 +12,7 @@
 #include <brass/mir/loop_distribution.hpp>
 #include <brass/mir/array_contraction.hpp>
 #include <brass/mir/loop_parallel.hpp>
+#include <brass/mir/bounds_check_elim.hpp>
 
 namespace brass {
 
@@ -26,6 +27,7 @@ struct LoopOptStats {
     LoopDistributionStats distribution_stats;
     ArrayContractionStats contraction_stats;
     ParallelLoopStats parallel_stats;
+    RangeAnalysisStats bce_stats;
 };
 
 namespace pgo {
@@ -81,6 +83,9 @@ struct LoopOptOptions {
     uint32_t parallel_workers = 0;
     bool dump_parallel_stats = false;
     ParallelLoopStats* parallel_stats = nullptr;
+    bool enable_bce = false;
+    bool dump_range_stats = false;
+    RangeAnalysisStats* range_stats = nullptr;
 };
 
 // General optimization pipeline: SROA -> GVN (CSE + RLE + DSE) -> Loop Opt -> SLP Vectorizer

@@ -17,6 +17,7 @@ struct GvnPreStats;
 struct LoopOptStats;
 struct FmaOptStats;
 struct ParallelLoopStats;
+struct RangeAnalysisStats;
 
 namespace il {
 
@@ -88,6 +89,9 @@ struct TranslatorOptions {
     uint32_t parallel_workers = 0;
     bool dump_parallel_stats = false;
     ParallelLoopStats* parallel_stats_collector = nullptr;
+    bool enable_bce = true;
+    bool dump_range_stats = false;
+    RangeAnalysisStats* range_stats_collector = nullptr;
     std::vector<std::string> key_constants;
     std::unordered_map<std::string, FunctionMeta> function_meta;
     std::string entry_symbol;

@@ -131,6 +131,8 @@ add_executable(brass_unit_tests
     unit/test_delta_reducer.cpp
     unit/test_c_api.cpp
     unit/test_native_cabi.cpp
+    unit/test_range_analysis.cpp
+    unit/test_bounds_check_elim.cpp
 )
 
 target_include_directories(brass_unit_tests

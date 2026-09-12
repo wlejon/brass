@@ -21,6 +21,8 @@
 #include <brass/mir/verifier.hpp>
 #include <brass/pgo/profile_data.hpp>
 #include <brass/mir/branch_probability.hpp>
+#include <brass/mir/range_analysis.hpp>
+#include <brass/mir/bounds_check_elim.hpp>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -745,6 +747,29 @@ bool optimize_function_loops(Function& fn, const LoopOptOptions& options) {
             any_changed = true;
             fn.rebuild_cfg_predecessors();
             if (options.enable_dce) {
+                dead_code_elimination_pass(fn);
+            }
+        }
+    }
+
+    if (options.enable_bce) {
+        fn.rebuild_cfg_predecessors();
+        RangeAnalysisOptions bce_opts;
+        bce_opts.enable_bce = true;
+        bce_opts.enable_hoisting = true;
+        bce_opts.dump_stats = options.dump_range_stats;
+        if (options.range_stats) {
+            bce_opts.stats = options.range_stats;
+        } else if (options.stats) {
+            bce_opts.stats = &options.stats->bce_stats;
+        }
+        if (run_bounds_check_elimination(fn, *fn.parent(), bce_opts)) {
+            any_changed = true;
+            fn.rebuild_cfg_predecessors();
+            DominatorTree dom_after(fn);
+            if (options.enable_dce) {
+                constant_folding_pass(fn);
+                cse_pass(fn, dom_after);
                 dead_code_elimination_pass(fn);
             }
         }

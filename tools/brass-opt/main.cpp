@@ -53,6 +53,8 @@ void print_usage(const char* prog) {
               << "  --dump-parallel-stats Dump parallel loop statistics\n"
               << "  --sccp                Run Sparse Conditional Constant Propagation (SCCP)\n"
               << "  --guard-elim          Run Speculation Guard Elimination\n"
+              << "  --bce                 Run Value Range Analysis & Bounds Check Elimination\n"
+              << "  --dump-range-stats    Dump Range Analysis & Bounds Check Elimination statistics\n"
               << "  --cfg-simplify        Run CFG Simplification & Dead Block Compaction\n"
               << "  --loop-unswitch       Run Loop Unswitching on candidate loops\n"
               << "  --jump-threading      Run SSA Jump Threading\n"
@@ -155,6 +157,9 @@ int main(int argc, char** argv) {
     bool dump_parallel_stats = false;
     bool enable_sccp = false;
     bool enable_guard_elim = false;
+    bool enable_bce = false;
+    bool dump_range_stats = false;
+    brass::RangeAnalysisStats range_stats;
     bool enable_cfg_simplify = false;
     bool enable_loop_unswitch = false;
     bool enable_jump_threading = false;
@@ -222,6 +227,11 @@ int main(int argc, char** argv) {
         } else if (arg == "--guard-elim") {
             enable_guard_elim = true;
             enable_sccp = true;
+        } else if (arg == "--bce") {
+            enable_bce = true;
+        } else if (arg == "--dump-range-stats") {
+            dump_range_stats = true;
+            enable_bce = true;
         } else if (arg == "--cfg-simplify") {
             enable_cfg_simplify = true;
         } else if (arg == "--loop-unswitch") {
@@ -582,6 +592,9 @@ int main(int argc, char** argv) {
         loop_opts.parallel_threshold = parallel_threshold;
         loop_opts.parallel_workers = parallel_workers;
         loop_opts.dump_parallel_stats = dump_parallel_stats;
+        loop_opts.enable_bce = enable_bce;
+        loop_opts.dump_range_stats = dump_range_stats;
+        loop_opts.range_stats = &range_stats;
     };
 
     if (enable_inlining) {
@@ -750,7 +763,20 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
-    } else if (enable_loop_tile || enable_vectorize || enable_slp || enable_loop_fusion || enable_loop_distribution || enable_array_contraction || enable_fma || enable_parallel_loops) {
+    } else if (enable_bce || enable_loop_tile || enable_vectorize || enable_slp || enable_loop_fusion || enable_loop_distribution || enable_array_contraction || enable_fma || enable_parallel_loops) {
+        if (enable_bce) {
+            brass::RangeAnalysisOptions bce_opts;
+            bce_opts.enable_bce = true;
+            bce_opts.enable_hoisting = true;
+            bce_opts.dump_stats = dump_range_stats;
+            bce_opts.stats = &range_stats;
+            brass::run_bounds_check_elimination(*mod, bce_opts);
+            brass::DiagnosticReporter bce_diag;
+            if (!brass::verify_module(*mod, &bce_diag) || bce_diag.has_errors()) {
+                std::cerr << "Verification failed after BCE:\n" << bce_diag.format_all();
+                return 1;
+            }
+        }
         brass::LoopOptOptions loop_opts;
         init_loop_opts(loop_opts);
         brass::optimize_module_loops(*mod, loop_opts);
@@ -812,6 +838,10 @@ int main(int argc, char** argv) {
 
     if (dump_parallel_stats) {
         std::cout << loop_stats.parallel_stats.format_report();
+    }
+
+    if (dump_range_stats) {
+        range_stats.dump(std::cout);
     }
 
     (void)debug_info;

@@ -11,6 +11,7 @@
 #include <brass/pgo/profile_data.hpp>
 #include <brass/mir/branch_probability.hpp>
 #include <brass/mir/verifier.hpp>
+#include <brass/mir/bounds_check_elim.hpp>
 
 namespace brass {
 
@@ -302,6 +303,21 @@ bool optimize_module_ipo(Module& mod, const InlinerOptions& inline_opts, const L
         CfgSimplifyOptions cfg_opts;
         changed |= cfg_simplify_module(mod, cfg_opts);
         if (!check_ipo("cfg_simplify_module")) return false;
+    }
+
+    // 2e. Range Analysis & BCE pass
+    if (loop_opts.enable_bce) {
+        RangeAnalysisOptions bce_opts;
+        bce_opts.enable_bce = true;
+        bce_opts.enable_hoisting = true;
+        bce_opts.dump_stats = loop_opts.dump_range_stats;
+        if (loop_opts.range_stats) {
+            bce_opts.stats = loop_opts.range_stats;
+        } else if (loop_opts.stats) {
+            bce_opts.stats = &loop_opts.stats->bce_stats;
+        }
+        changed |= run_bounds_check_elimination(mod, bce_opts);
+        if (!check_ipo("run_bounds_check_elimination")) return false;
     }
 
     // 3. Re-run loop optimizations, constant folding, CSE, DCE & f64 demotion
