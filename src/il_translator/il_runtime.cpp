@@ -850,6 +850,12 @@ BRONZE_WEAK uint64_t bronze_immutable_assign() {
     return 0xFFF6000000000000ULL;
 }
 
+extern "C" {
+BRONZE_WEAK uintptr_t brass_tlab_top = 0;
+BRONZE_WEAK uintptr_t brass_tlab_end = 0;
+BRONZE_WEAK void* brass_root_shape = nullptr;
+}
+
 uint32_t g_bronze_main_key_constants = 0;
 int64_t g_bronze_module_env = kUndefinedTag;
 extern "C" uint64_t __bronze_template_cells[1024];

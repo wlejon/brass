@@ -899,6 +899,16 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
                         }
                     }
                 }
+            } else if (op == Opcode::fptosi_i64) {
+                if (inst->operand(0) && inst->operand(0)->type() == Type::i64()) {
+                    replace_all_uses(fn, inst->result(), inst->operand(0));
+                    bb->remove_instruction(inst);
+                } else if (inst->operand(0) && inst->operand(0)->type() == Type::i32()) {
+                    b.position_before(inst);
+                    Value* conv = b.build_sext_i64(inst->operand(0));
+                    replace_all_uses(fn, inst->result(), conv);
+                    bb->remove_instruction(inst);
+                }
             } else if (op == Opcode::fptosi_i32) {
                 if (inst->operand(0) && inst->operand(0)->type() == Type::i64()) {
                     inst->set_opcode(Opcode::trunc_i32);
