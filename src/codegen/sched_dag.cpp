@@ -73,6 +73,7 @@ bool is_scheduling_barrier(const LirInst& inst) noexcept {
         case LirOpcode::Safepoint:
         case LirOpcode::GuardExit:
         case LirOpcode::WriteBarrier:
+        case LirOpcode::ParallelCopy:
             return true;
         default:
             return false;
@@ -485,6 +486,18 @@ void SchedDAG::build_register_dependencies() {
                 }
             }
         }
+        for (const auto& d : inst.defs) {
+            if (d.is_mem()) {
+                if (d.mem_val.base_vreg.is_valid()) uses_vregs.push_back(d.mem_val.base_vreg.id);
+                if (d.mem_val.index_vreg.is_valid()) uses_vregs.push_back(d.mem_val.index_vreg.id);
+                if (d.mem_val.base_preg.is_valid()) {
+                    uses_pregs.push_back((static_cast<uint32_t>(d.mem_val.base_preg.reg_class) << 8) | d.mem_val.base_preg.code);
+                }
+                if (d.mem_val.index_preg.is_valid()) {
+                    uses_pregs.push_back((static_cast<uint32_t>(d.mem_val.index_preg.reg_class) << 8) | d.mem_val.index_preg.code);
+                }
+            }
+        }
         for (const auto& c : inst.use_constraints) {
             if (c.has_fixed_preg && c.fixed_preg.is_valid()) {
                 uses_pregs.push_back((static_cast<uint32_t>(c.fixed_preg.reg_class) << 8) | c.fixed_preg.code);
@@ -648,7 +661,8 @@ void SchedDAG::build_barrier_dependencies() {
     // 2. Full barriers (Safepoints and GuardExits require exact program state; cannot reorder across them)
     for (uint32_t i = 0; i < n; ++i) {
         if (nodes_[i].inst->opcode == LirOpcode::Safepoint ||
-            nodes_[i].inst->opcode == LirOpcode::GuardExit) {
+            nodes_[i].inst->opcode == LirOpcode::GuardExit ||
+            nodes_[i].inst->opcode == LirOpcode::ParallelCopy) {
             for (uint32_t k = 0; k < i; ++k) {
                 add_edge(k, i, EdgeKind::Barrier, 1);
             }

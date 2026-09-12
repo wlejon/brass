@@ -18,6 +18,9 @@ static bool is_block_pre_ra(const LirBlock& block) {
     for (const auto& inst : block.instructions) {
         for (const auto& d : inst->defs) {
             if (d.is_vreg()) return true;
+            if (d.is_mem() && (d.mem_val.base_vreg.is_valid() || d.mem_val.index_vreg.is_valid())) {
+                return true;
+            }
         }
         for (const auto& u : inst->uses) {
             if (u.is_vreg()) return true;
@@ -37,6 +40,16 @@ static RegUsage get_instruction_reg_usage(const LirInst& inst, bool is_pre_ra) {
             if (d.is_vreg()) {
                 if (d.vreg_val.is_xmm()) usage.defs_xmm++;
                 else usage.defs_gpr++;
+            }
+            if (d.is_mem()) {
+                if (d.mem_val.base_vreg.is_valid()) {
+                    if (d.mem_val.base_vreg.is_xmm()) usage.uses_xmm.push_back(d.mem_val.base_vreg.id);
+                    else usage.uses_gpr.push_back(d.mem_val.base_vreg.id);
+                }
+                if (d.mem_val.index_vreg.is_valid()) {
+                    if (d.mem_val.index_vreg.is_xmm()) usage.uses_xmm.push_back(d.mem_val.index_vreg.id);
+                    else usage.uses_gpr.push_back(d.mem_val.index_vreg.id);
+                }
             }
         }
         for (const auto& u : inst.uses) {
@@ -60,6 +73,16 @@ static RegUsage get_instruction_reg_usage(const LirInst& inst, bool is_pre_ra) {
             if (d.is_preg() && d.preg_val.is_valid()) {
                 if (d.preg_val.is_xmm()) usage.defs_xmm++;
                 else usage.defs_gpr++;
+            }
+            if (d.is_mem()) {
+                if (d.mem_val.base_preg.is_valid()) {
+                    if (d.mem_val.base_preg.is_xmm()) usage.uses_xmm.push_back(d.mem_val.base_preg.code);
+                    else usage.uses_gpr.push_back(d.mem_val.base_preg.code);
+                }
+                if (d.mem_val.index_preg.is_valid()) {
+                    if (d.mem_val.index_preg.is_xmm()) usage.uses_xmm.push_back(d.mem_val.index_preg.code);
+                    else usage.uses_gpr.push_back(d.mem_val.index_preg.code);
+                }
             }
         }
         for (uint8_t c = 0; c < 16; ++c) {
