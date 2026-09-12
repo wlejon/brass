@@ -6,30 +6,54 @@
 #include <iostream>
 #include <sstream>
 #include <cmath>
+#include <bit>
 
 namespace brass {
 
 namespace {
 
 inline int64_t sat_add(int64_t a, int64_t b) noexcept {
-    __int128_t res = static_cast<__int128_t>(a) + b;
+#if defined(__SIZEOF_INT128__)
+    __int128 res = static_cast<__int128>(a) + b;
     if (res > INT64_MAX) return INT64_MAX;
     if (res < INT64_MIN) return INT64_MIN;
     return static_cast<int64_t>(res);
+#else
+    if (b > 0 && a > INT64_MAX - b) return INT64_MAX;
+    if (b < 0 && a < INT64_MIN - b) return INT64_MIN;
+    return a + b;
+#endif
 }
 
 inline int64_t sat_sub(int64_t a, int64_t b) noexcept {
-    __int128_t res = static_cast<__int128_t>(a) - b;
+#if defined(__SIZEOF_INT128__)
+    __int128 res = static_cast<__int128>(a) - b;
     if (res > INT64_MAX) return INT64_MAX;
     if (res < INT64_MIN) return INT64_MIN;
     return static_cast<int64_t>(res);
+#else
+    if (b < 0 && a > INT64_MAX + b) return INT64_MAX;
+    if (b > 0 && a < INT64_MIN + b) return INT64_MIN;
+    return a - b;
+#endif
 }
 
 inline int64_t sat_mul(int64_t a, int64_t b) noexcept {
-    __int128_t res = static_cast<__int128_t>(a) * b;
+#if defined(__SIZEOF_INT128__)
+    __int128 res = static_cast<__int128>(a) * b;
     if (res > INT64_MAX) return INT64_MAX;
     if (res < INT64_MIN) return INT64_MIN;
     return static_cast<int64_t>(res);
+#else
+    if (a == 0 || b == 0) return 0;
+    if (a == -1 && b == INT64_MIN) return INT64_MAX;
+    if (b == -1 && a == INT64_MIN) return INT64_MAX;
+    if (a > 0 && b > 0 && a > INT64_MAX / b) return INT64_MAX;
+    if (a > 0 && b < 0 && b < INT64_MIN / a) return INT64_MIN;
+    if (a < 0 && b > 0 && a < INT64_MIN / b) return INT64_MIN;
+    if (a < 0 && b < 0 && a < INT64_MAX / b) return INT64_MAX;
+    return a * b;
+#endif
 }
 
 bool get_const_int(const Value* val, int64_t& out_val) {
@@ -190,7 +214,7 @@ ValueRange ValueRange::or_(const ValueRange& a, const ValueRange& b) noexcept {
         int64_t lower = std::max(a.min_val, b.min_val);
         uint64_t m = static_cast<uint64_t>(a.max_val | b.max_val);
         if (m == 0) return constant(0);
-        int clz = __builtin_clzll(m);
+        int clz = std::countl_zero(m);
         uint64_t bound = (clz == 0) ? UINT64_MAX : ((1ULL << (64 - clz)) - 1ULL);
         int64_t upper = (bound > static_cast<uint64_t>(INT64_MAX)) ? INT64_MAX : static_cast<int64_t>(bound);
         return range(lower, upper);
@@ -206,7 +230,7 @@ ValueRange ValueRange::xor_(const ValueRange& a, const ValueRange& b) noexcept {
     if (a.is_non_negative() && b.is_non_negative()) {
         uint64_t m = static_cast<uint64_t>(a.max_val | b.max_val);
         if (m == 0) return constant(0);
-        int clz = __builtin_clzll(m);
+        int clz = std::countl_zero(m);
         uint64_t bound = (clz == 0) ? UINT64_MAX : ((1ULL << (64 - clz)) - 1ULL);
         int64_t upper = (bound > static_cast<uint64_t>(INT64_MAX)) ? INT64_MAX : static_cast<int64_t>(bound);
         return range(0, upper);
