@@ -488,6 +488,7 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
             InlinerOptions inliner_opts;
             inliner_opts.enable_sroa = options_.enable_sroa;
             inliner_opts.enable_gvn = options_.enable_gvn;
+            inliner_opts.enable_speculative_devirtualization = options_.enable_speculative_inlining;
             optimize_module_ipo(*mod, inliner_opts, opt_opts);
             if (!check_pass("ipo")) return nullptr;
         } else {
