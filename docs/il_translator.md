@@ -24,15 +24,24 @@ The Bronze IL Translator (`brass::il::translate_bronze_il` and `brass-il` CLI) p
 | **Closures** | `create.func @fn, <param_count>, %env` | Code pointer + environment pairing (`BronzeClosure`) | Supported |
 | **Direct Calls & Prints**| `call @name(...)`, `print %0, ...`, `print.err %0, ...` | Direct internal/external subroutine calls & formatted printers | Supported |
 | **Objects & Properties**| `create.object`, `create.array`, `prop.get`, `prop.set`, `elem.get`, `elem.set`, `method.def` | Polymorphic inline caches (PICs), Shape hidden class transitions, moving GC DynamicObject | Supported |
+| **Accessor Properties** | `accessor.def %obj, "key", %getter, %setter`, `accessor.def.computed %obj, %key, %getter, %setter` | Lowered to `bronze_accessor_def` and `bronze_accessor_def_computed` runtime descriptors | Supported |
 | **Exception Handling**| `handler b<id>`, `throw %val`, `exc.take` | MIR `invoke`, `throw`, `landing_pad` with zero-cost Win64 SEH & SysV DWARF LSDA unwinding | Supported |
 | **Coroutines & Async**| `create.async_machine`, `async.start`, `async.await`, `iter.open`, `iter.step`, `yield` | `CoroTransformPass`, `coro_create`, `coro_suspend`, `coro_resume`, `brass_coro_*`, `bronze_iter_*`, `bronze_async_*` | Supported |
 
 ---
 
-## 3. Untranslated Constructs (Subset Boundary)
+## 3. Bronze Corpus Verification Coverage
 
-1. **Accessor Property Descriptors (`accessor.def`)**:
-   - *Reason*: Requires getter/setter dynamic property dispatch and call stub synthesis.
+The translator and runtime integration are validated against the complete 37-test Bronze Corpus (`tests/bronze_corpus/`):
+- **01–08**: Core numeric computation, bitwise operations, Collatz, iterative & recursive Fibonacci, Ackermann, Newton sqrt, and prime sieve.
+- **09–13**: Closures, loop variable capture, lexical environments, counter closures, and nested currying.
+- **14–22**: Arrays, nested accumulation, parameter bounds, overflow handling, vector/matrix math, and bounding boxes.
+- **23–24**: Object instantiation, hidden class Shape transitions, and polymorphic inline caching.
+- **25–26**: Exception handling with nested `try`-`catch` and `try`-`finally` unwind frames.
+- **27–28**: Fibonacci generators (`iter.step`, `yield`) and multi-stage async promise chains.
+- **29–30**: Generational GC allocation churn and On-Stack Replacement (OSR) hot-loop migration.
+- **31–33**: GVN-PRE diamond hoisting, loop fusion with array contraction, and AVX2 FMA matrix multiplication.
+- **34–37**: Background multi-tier JIT compilation, parallel matrix-vector dispatch, DWARF/CodeView source line mapping, and fuzz-hardened kernels.
 
 ---
 

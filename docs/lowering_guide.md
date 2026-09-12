@@ -1,22 +1,26 @@
 # Consumer's Guide to Lowering (Bronze -> Brass)
 
-This document guides frontend language compilers (such as `bronze`, the JS AOT compiler) on mapping high-level typed SSA IR to Brass MIR and using the Brass C++ API.
+This document guides frontend language compilers (such as `bronze`, the JS AOT compiler) on mapping high-level typed SSA IR to Brass MIR and using the Brass C++ and C APIs.
 
 ---
 
-## 1. Division of Responsibility
+## 1. Division of Responsibility & Available Capabilities
 
 | Task | Owned By | Notes |
 | :--- | :--- | :--- |
-| Inlining, Escape Analysis | Consumer (`bronze`) | High-level semantic transformations |
-| Unboxing, Type Specialization | Consumer (`bronze`) | Type inference & speculative specialization |
-| Guard Placement & Check Elimination | Consumer (`bronze`) | Redundant guard removal |
-| Instruction Selection | Brass | Pattern matching & x64 addressing modes |
-| Register Allocation | Brass | Linear-scan with live-range splitting |
-| LIR Peephole Optimization | Brass | Redundant moves, dead stores, zeroing, branch fold |
-| Stack Map Generation | Brass | Live `gcref` tracking at call safepoints |
-| Frame Layout & Unwind Emission | Brass | Win64 SEH (`.pdata`/`.xdata`), Linux SysV CFI (`.eh_frame`), macOS Compact Unwind |
-| Object File Emission | Brass | Deterministic COFF (`.obj`), ELF64 (`.o`), and Mach-O (`.o`) |
+| Lexical Analysis, Parsing & AST Lowering | Consumer (`bronze`) | Frontend language syntax & semantics |
+| Scope & Environment Frame Allocation | Consumer / Runtime | Lexical environment chain lowering (`BronzeEnv`, `BronzeClosure`) |
+| Unboxing & Type Specialization | Consumer (`bronze`) | Speculative unboxing and type tag checks |
+| Function Inlining & Speculative Devirtualization | Brass (or Consumer) | Static IPO inliner and Type Feedback Vector (TFV) speculative devirtualizer |
+| Escape Analysis & Allocation Sinking | Brass | Hot-path scalarization and cold-path allocation sinking (PEA) |
+| Redundant Guard & Bounds Check Elimination | Brass | SCCP guard pruning and interval value range analysis (BCE) |
+| SROA, GVN, PRE & Loop Optimizations | Brass | Scalar replacement, memory SSA forwarding, loop tiling, fusion, unrolling |
+| Auto-Parallelization & Vectorization | Brass | Polyhedral dependence analysis, SIMD loop unrolling (SSE/AVX2), and SLP |
+| Instruction Selection & Register Allocation | Brass | x64 pattern matching, linear-scan with live-range splitting |
+| LIR Peephole & Machine Scheduling | Brass | Post-regalloc peephole optimizations, DAG critical-path instruction scheduling |
+| Stack Map Generation & Moving GC Coordination | Brass | Out-of-band compact binary stack maps for live `gcref` registers and spill slots |
+| Frame Layout & Unwind Metadata Emission | Brass | Zero-cost Win64 SEH (`.pdata`/`.xdata`), Linux SysV CFI (`.eh_frame`), macOS Compact Unwind |
+| Object File & Shared Library Emission | Brass | Deterministic COFF (`.obj`), ELF64 (`.o`), Mach-O (`.o`), PE DLL, and ELF `.so` |
 
 ---
 
@@ -26,15 +30,29 @@ This document guides frontend language compilers (such as `bronze`, the JS AOT c
    - Boxed JS Objects / Managed References -> `Type::gcref()`
    - Unboxed 32-bit Integers / Booleans -> `Type::i32()`
    - Unboxed 64-bit Integers / Raw Addresses -> `Type::i64()` / `Type::ptr()`
-   - IEEE 754 Doubles -> `Type::f64()`
+   - IEEE-754 Floats -> `Type::f32()`, `Type::f64()`
+   - Fixed-width SIMD vectors -> `Type::f32x4()`, `Type::f64x2()`, `Type::f32x8()`, `Type::f64x4()`, `Type::i32x4()`, `Type::i64x2()`, etc.
 2. **Phi Nodes -> Block Arguments**:
-   - Transform SSA Phi nodes into block parameters during lowering.
+   - Transform SSA Phi nodes into canonical basic block parameters during lowering.
 3. **Calls & Inline Caches**:
-   - Monomorphic calls -> `b.build_call("func_name", return_type, args)`
+   - Direct static calls -> `b.build_call("func_name", return_type, args)`
+   - Indirect pointer calls -> `b.build_call_indirect(callee_ptr, return_type, args)`
    - Inline cache sites -> `b.build_patchable_call("ic_site_1", "slow_stub", return_type, args)`
-4. **Guards & Deoptimization**:
-   - Lower speculative checks into `b.build_guard(cond, "deopt_stub_1", live_state_values)`.
-   - Implement interior resume targets in generic twin functions with `b.build_resume_point(resume_id)`.
+4. **Exception Handling & Unwinding**:
+   - Throwing expressions -> `b.build_throw(exception_val)`
+   - Potentially throwing calls -> `b.build_invoke("func_name", return_type, args, normal_block, normal_args, unwind_block, unwind_args)`
+   - Catch block entry -> `b.build_landing_pad(Type::gcref())`
+   - Re-throwing / finally continuation -> `b.build_resume(exception_val)`
+5. **Coroutines & Generators**:
+   - Create coroutine frame -> `b.build_coro_create("fn_symbol", args)`
+   - Yield value -> `b.build_coro_suspend(yield_val, resume_id)`
+   - Resume coroutine -> `b.build_coro_resume(coro_ptr, arg_val)`
+   - Destroy coroutine -> `b.build_coro_destroy(coro_ptr)`
+6. **Speculation, Guards & Deoptimization**:
+   - Lower speculative checks into `b.build_guard(cond, "generic_twin_exit", live_state_values)`.
+   - Implement interior resume targets in generic twin functions with `twin->add_resume_point(resume_id, target_block)`.
+7. **Generational GC Write Barriers**:
+   - When writing a managed pointer into an object field, emit `b.build_write_barrier(object_ref, value_ref)` to mark the generational card table.
 
 ---
 
