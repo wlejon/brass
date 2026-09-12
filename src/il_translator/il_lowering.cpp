@@ -32,7 +32,7 @@ Type lower_type(BronzeType t) {
 }
 
 IlLowering::IlLowering(const TranslatorOptions& options, DiagnosticReporter* diag)
-    : options_(options), diag_(diag), prop_lowering_(options.enable_pic) {}
+    : options_(options), diag_(diag), prop_lowering_(options.enable_pic, options.enable_inlined_fastpaths) {}
 
 Value* IlLowering::ensure_type(Value* val, Type target_type, Builder& b) {
     if (!val || val->type() == target_type) return val;

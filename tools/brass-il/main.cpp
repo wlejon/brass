@@ -22,7 +22,7 @@ using namespace brass::il;
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--emit-shared <output.dll/so>] [-shared] [--inline] [--sroa] [--escape-analysis] [--partial-escape] [--sink-allocations] [--dump-pea-stats] [--gvn] [--no-gvn] [--enable-pre] [--enable-gvn-pre] [--no-pre] [--no-gvn-pre] [--dump-pre-stats] [--sccp] [--no-sccp] [--guard-elim] [--no-guard-elim] [--cfg-simplify] [--no-cfg-simplify] [--loop-unswitch] [--no-loop-unswitch] [--jump-threading] [--no-jump-threading] [--trace-layout] [--no-trace-layout] [--schedule-insns] [--no-schedule-insns] [--software-pipeline] [--alias-analysis] [--vectorize] [--slp] [--loop-tile] [--tile-size <N>] [--enable-pic] [--dump-ic-stats] [--demote-stats] [--pgo-instrument] [--pgo-use <file>] [--dump-branch-probabilities] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc] [--timed <N>]\n";
+        std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--emit-shared <output.dll/so>] [-shared] [--inline] [--sroa] [--escape-analysis] [--partial-escape] [--sink-allocations] [--dump-pea-stats] [--gvn] [--no-gvn] [--enable-pre] [--enable-gvn-pre] [--no-pre] [--no-gvn-pre] [--dump-pre-stats] [--sccp] [--no-sccp] [--guard-elim] [--no-guard-elim] [--cfg-simplify] [--no-cfg-simplify] [--loop-unswitch] [--no-loop-unswitch] [--jump-threading] [--no-jump-threading] [--trace-layout] [--no-trace-layout] [--schedule-insns] [--no-schedule-insns] [--software-pipeline] [--alias-analysis] [--vectorize] [--slp] [--loop-tile] [--tile-size <N>] [--enable-pic] [--dump-ic-stats] [--inlined-fastpaths] [--no-inlined-fastpaths] [--demote-stats] [--pgo-instrument] [--pgo-use <file>] [--dump-branch-probabilities] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc] [--timed <N>]\n";
         return 1;
     }
 
@@ -167,6 +167,10 @@ int main(int argc, char** argv) {
             options.enable_pic = true;
         } else if (arg == "--no-pic") {
             options.enable_pic = false;
+        } else if (arg == "--inlined-fastpaths" || arg == "--enable-inlined-fastpaths") {
+            options.enable_inlined_fastpaths = true;
+        } else if (arg == "--no-inlined-fastpaths" || arg == "--no-fastpaths") {
+            options.enable_inlined_fastpaths = false;
         } else if (arg == "--dump-ic-stats") {
             options.dump_ic_stats = true;
         } else if (arg == "--wbe" || arg == "--enable-wbe") {

@@ -663,7 +663,7 @@ bool Verifier::verify_function(const Function& fn) {
                         report_error(inst_prefix + "Load requires 1 base operand.");
                     } else {
                         Type base_t = inst->operand(0)->type();
-                        if (!base_t.is_pointer_or_gcref()) {
+                        if (!base_t.is_pointer_or_gcref() && base_t != Type::i64()) {
                             report_error(inst_prefix + "Load base must be ptr or gcref, got " +
                                          std::string(base_t.name()) + ".");
                         }
@@ -682,7 +682,7 @@ bool Verifier::verify_function(const Function& fn) {
                     } else {
                         Type base_t = inst->operand(0)->type();
                         Type val_t = inst->operand(1)->type();
-                        if (!base_t.is_pointer_or_gcref()) {
+                        if (!base_t.is_pointer_or_gcref() && base_t != Type::i64()) {
                             report_error(inst_prefix + "Store base must be ptr or gcref, got " +
                                          std::string(base_t.name()) + ".");
                         }
@@ -702,7 +702,7 @@ bool Verifier::verify_function(const Function& fn) {
                     } else {
                         Type base_t = inst->operand(0)->type();
                         Type idx_t = inst->operand(1)->type();
-                        if (!base_t.is_pointer_or_gcref()) {
+                        if (!base_t.is_pointer_or_gcref() && base_t != Type::i64()) {
                             report_error(inst_prefix + "Load indexed base must be ptr or gcref.");
                         }
                         if (!idx_t.is_integer()) {
@@ -726,7 +726,7 @@ bool Verifier::verify_function(const Function& fn) {
                         Type base_t = inst->operand(0)->type();
                         Type idx_t = inst->operand(1)->type();
                         Type val_t = inst->operand(2)->type();
-                        if (!base_t.is_pointer_or_gcref()) {
+                        if (!base_t.is_pointer_or_gcref() && base_t != Type::i64()) {
                             report_error(inst_prefix + "Store indexed base must be ptr or gcref.");
                         }
                         if (!idx_t.is_integer()) {

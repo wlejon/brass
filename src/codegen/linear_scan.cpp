@@ -654,6 +654,20 @@ void LinearScanAllocator::rewrite_instructions() {
                                inst->opcode == LirOpcode::Movaps || inst->opcode == LirOpcode::Vmovaps ||
                                inst->opcode == LirOpcode::Vmovups || sz == 16 || sz == 32);
                 PReg scratch = is_xmm ? PReg::xmm(XMM::XMM5) : PReg::gpr(GPR::R11);
+                if (!is_xmm) {
+                    bool uses_r11 = false;
+                    if (inst->defs[0].is_mem() && (inst->defs[0].mem_val.base_preg == PReg::gpr(GPR::R11) ||
+                                                   inst->defs[0].mem_val.index_preg == PReg::gpr(GPR::R11))) {
+                        uses_r11 = true;
+                    }
+                    if (inst->uses[0].is_mem() && (inst->uses[0].mem_val.base_preg == PReg::gpr(GPR::R11) ||
+                                                   inst->uses[0].mem_val.index_preg == PReg::gpr(GPR::R11))) {
+                        uses_r11 = true;
+                    }
+                    if (uses_r11) {
+                        scratch = PReg::gpr(GPR::R10);
+                    }
+                }
 
                 LirOpcode op = is_xmm ? ((sz == 32) ? LirOpcode::Vmovups : ((sz == 16) ? LirOpcode::Movaps : ((sz == 4) ? LirOpcode::Movss : LirOpcode::Movsd)))
                                       : ((sz == 4) ? LirOpcode::Mov32 : LirOpcode::Mov);

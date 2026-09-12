@@ -83,6 +83,7 @@ add_executable(brass_unit_tests
     unit/test_shapes.cpp
     unit/test_inline_cache.cpp
     unit/test_property_lowering.cpp
+    unit/test_inlined_fastpaths.cpp
     differential/test_pic_differential.cpp
     unit/test_exceptions_mir.cpp
     unit/test_unwind_tables.cpp

@@ -325,12 +325,19 @@ BRONZE_WEAK uint64_t bronze_private_misuse(uint32_t /*nameKeyIndex*/, uint32_t /
 
 static inline int64_t unbox_to_int64(int64_t v) {
     uint64_t u = static_cast<uint64_t>(v);
+    if ((u >> 48) == 0xFFF9 || (u >> 48) == 0xFFF3) {
+        return static_cast<int64_t>(static_cast<int32_t>(u & 0xFFFFFFFFULL));
+    }
+    if ((u >> 48) == 0xFFFF) {
+        return v;
+    }
     if (u <= 0xFFF0000000000000ULL) {
-        double d;
+        if (u < 0x0010000000000000ULL) {
+            return static_cast<int64_t>(u);
+        }
+        double d = 0.0;
         std::memcpy(&d, &v, sizeof(double));
         return static_cast<int64_t>(d);
-    } else if ((u >> 48) == 0xFFF9 || (u >> 48) == 0xFFF3) {
-        return static_cast<int64_t>(static_cast<int32_t>(u & 0xFFFFFFFFULL));
     }
     return -1;
 }

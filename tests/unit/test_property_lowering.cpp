@@ -29,8 +29,8 @@ TEST_CASE("PropertyLowering - Direct MIR Helper Construction") {
     Value* obj = b.add_block_param(b0, Type::i64());
     Value* val = b.add_block_param(b0, Type::i64());
 
-    // Test with PIC enabled
-    PropertyLoweringHelper pic_helper(true);
+    // Test with PIC enabled, inlining disabled to inspect direct call instructions in single block b0
+    PropertyLoweringHelper pic_helper(true, false);
     pic_helper.lower_prop_set(b, obj, "fieldA", 10, val, 0, 0, 101);
     Value* get_res = pic_helper.lower_prop_get(b, obj, "fieldA", 10, 102);
     CHECK(get_res != nullptr);
