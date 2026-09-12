@@ -636,6 +636,13 @@ void RangeAnalysis::infer_loop_induction_variables(const LoopAnalysis& loops) {
         Value* cond = hdr_term->operand(0);
         if (!cond || !cond->is_instruction()) continue;
         Instruction* cmp = cond->defining_instruction();
+        if (cmp && cmp->opcode() == Opcode::and_) {
+            if (cmp->operand(0) && cmp->operand(0)->is_instruction() && is_comparison(cmp->operand(0)->defining_instruction()->opcode())) {
+                cmp = cmp->operand(0)->defining_instruction();
+            } else if (cmp->operand(1) && cmp->operand(1)->is_instruction() && is_comparison(cmp->operand(1)->defining_instruction()->opcode())) {
+                cmp = cmp->operand(1)->defining_instruction();
+            }
+        }
         if (!cmp || !is_comparison(cmp->opcode())) continue;
 
         bool body_is_true = loop->contains(hdr_term->true_target().block);
@@ -812,6 +819,14 @@ void RangeAnalysis::run_analysis(Function& fn, const DominatorTree& dom, const L
                     if (!param_r.is_empty()) {
                         auto it = global_ranges_.find(p);
                         if (it == global_ranges_.end() || it->second != param_r) {
+                            if (iter >= 4 && it != global_ranges_.end()) {
+                                if (param_r.max_val > it->second.max_val) {
+                                    param_r.max_val = (p->type() == Type::i32()) ? INT32_MAX : INT64_MAX;
+                                }
+                                if (param_r.min_val < it->second.min_val) {
+                                    param_r.min_val = (p->type() == Type::i32()) ? INT32_MIN : INT64_MIN;
+                                }
+                            }
                             global_ranges_[p] = param_r;
                             changed = true;
                         }
@@ -827,6 +842,14 @@ void RangeAnalysis::run_analysis(Function& fn, const DominatorTree& dom, const L
                 }
                 auto it = global_ranges_.find(inst->result());
                 if (it == global_ranges_.end() || it->second != r) {
+                    if (iter >= 4 && it != global_ranges_.end()) {
+                        if (r.max_val > it->second.max_val) {
+                            r.max_val = (inst->type() == Type::i32()) ? INT32_MAX : INT64_MAX;
+                        }
+                        if (r.min_val < it->second.min_val) {
+                            r.min_val = (inst->type() == Type::i32()) ? INT32_MIN : INT64_MIN;
+                        }
+                    }
                     global_ranges_[inst->result()] = r;
                     changed = true;
                 }
