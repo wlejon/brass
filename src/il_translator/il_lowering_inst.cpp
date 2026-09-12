@@ -59,6 +59,12 @@ bool IlLowering::lower_instruction(
         }
     };
 
+    auto is_standalone_entry = [&]() -> bool {
+        return (fn->name() == "main") &&
+               (options_.entry_symbol.empty() || options_.entry_symbol == "bronze_main") &&
+               !options_.propagate_exceptions_in_entry;
+    };
+
     auto emit_exception_check = [&]() {
         BasicBlock* cur_bb = b.current_block();
         uint32_t cid = cont_counter ? ++(*cont_counter) : 1;
@@ -79,7 +85,7 @@ bool IlLowering::lower_instruction(
 
         if (created_unw) {
             b.position_at_end(unw_bb);
-            if (fn->name() == "main") {
+            if (is_standalone_entry()) {
                 if (current_fn_frame_ptr_ != nullptr) {
                     b.build_call("bronze_gc_frame_pop", Type::void_type(), {});
                 }
@@ -538,7 +544,7 @@ bool IlLowering::lower_instruction(
 
                 if (handler_id != UINT32_MAX && block_map.count(handler_id)) {
                     b.build_br(block_map.at(handler_id));
-                } else if (fn->name() == "main") {
+                } else if (is_standalone_entry()) {
                     b.build_call("bronze_uncaught_exception", Type::void_type(), {});
                     b.build_unreachable();
                 } else {
@@ -847,7 +853,7 @@ bool IlLowering::lower_instruction(
             b.build_call("bronze_exception_set", Type::void_type(), {op0_i64});
             if (handler_id != UINT32_MAX && block_map.count(handler_id)) {
                 b.build_br(block_map.at(handler_id));
-            } else if (fn->name() == "main") {
+            } else if (is_standalone_entry()) {
                 if (current_fn_frame_ptr_ != nullptr) {
                     b.build_call("bronze_gc_frame_pop", Type::void_type(), {});
                 }

@@ -98,6 +98,7 @@ struct TranslatorOptions {
     std::vector<std::string> key_constants;
     std::unordered_map<std::string, FunctionMeta> function_meta;
     std::string entry_symbol;
+    bool propagate_exceptions_in_entry = false;
     bool enable_census = false;
     uint32_t census_site_count = 0;
     struct SourceFileMeta {
