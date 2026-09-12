@@ -28,9 +28,9 @@ void LinearScanAllocator::init_register_pools() {
         available_gprs_.push_back(PReg::gpr(g));
     }
 
-    // Available XMMs (excluding scratch XMM4 and XMM5: XMM0..XMM3, XMM6..XMM15)
+    // Available XMMs (excluding scratch XMM3, XMM4, and XMM5: XMM0..XMM2, XMM6..XMM15)
     available_xmms_.clear();
-    for (int i = 0; i <= 3; ++i) {
+    for (int i = 0; i <= 2; ++i) {
         available_xmms_.push_back(PReg::xmm(static_cast<XMM>(i)));
     }
     for (int i = 6; i <= 15; ++i) {
@@ -628,6 +628,25 @@ void LinearScanAllocator::rewrite_instructions() {
                 }
             }
 
+            // Track whether defs and uses were originally XMM operands
+            bool orig_def_is_xmm = false;
+            if (!inst->defs.empty()) {
+                if (inst->defs[0].is_vreg() && inst->defs[0].vreg_val.is_valid() && inst->defs[0].vreg_val.id < fn_.vreg_table.size()) {
+                    orig_def_is_xmm = fn_.get_vreg_info(inst->defs[0].vreg_val).vreg.is_xmm();
+                } else if (inst->defs[0].is_preg()) {
+                    orig_def_is_xmm = inst->defs[0].preg_val.is_xmm();
+                }
+            }
+
+            std::vector<bool> orig_use_is_xmm(inst->uses.size(), false);
+            for (size_t i = 0; i < inst->uses.size(); ++i) {
+                if (inst->uses[i].is_vreg() && inst->uses[i].vreg_val.is_valid() && inst->uses[i].vreg_val.id < fn_.vreg_table.size()) {
+                    orig_use_is_xmm[i] = fn_.get_vreg_info(inst->uses[i].vreg_val).vreg.is_xmm();
+                } else if (inst->uses[i].is_preg()) {
+                    orig_use_is_xmm[i] = inst->uses[i].preg_val.is_xmm();
+                }
+            }
+
             // Rewrite defs and uses
             for (size_t i = 0; i < inst->defs.size(); ++i) {
                 inst->defs[i] = resolve_operand(inst->defs[i]);
@@ -650,7 +669,7 @@ void LinearScanAllocator::rewrite_instructions() {
                  inst->opcode == LirOpcode::Movaps) &&
                 def_is_mem && use_is_mem) {
                 uint8_t sz = inst->uses[0].size;
-                bool is_xmm = (inst->opcode == LirOpcode::Movsd || inst->opcode == LirOpcode::Movss ||
+                bool is_xmm = orig_def_is_xmm || orig_use_is_xmm[0] || (inst->opcode == LirOpcode::Movsd || inst->opcode == LirOpcode::Movss ||
                                inst->opcode == LirOpcode::Movaps || inst->opcode == LirOpcode::Vmovaps ||
                                inst->opcode == LirOpcode::Vmovups || sz == 16 || sz == 32);
                 PReg scratch = is_xmm ? PReg::xmm(XMM::XMM5) : PReg::gpr(GPR::R11);
@@ -693,7 +712,7 @@ void LinearScanAllocator::rewrite_instructions() {
             if (has_spill_def) {
                 original_spill_def = inst->defs[0];
                 uint8_t sz = original_spill_def.size;
-                is_xmm_def = (inst->opcode == LirOpcode::Movsd || inst->opcode == LirOpcode::Movss ||
+                is_xmm_def = orig_def_is_xmm || (inst->opcode == LirOpcode::Movsd || inst->opcode == LirOpcode::Movss ||
                               inst->opcode == LirOpcode::Addsd || inst->opcode == LirOpcode::Subsd ||
                               inst->opcode == LirOpcode::Mulsd || inst->opcode == LirOpcode::Divsd ||
                               inst->opcode == LirOpcode::Sqrtsd || inst->opcode == LirOpcode::Xorpd ||
@@ -720,7 +739,13 @@ void LinearScanAllocator::rewrite_instructions() {
                               inst->opcode == LirOpcode::Shufps || inst->opcode == LirOpcode::Shufpd ||
                               inst->opcode == LirOpcode::Pshufd || inst->opcode == LirOpcode::Movddup ||
                               inst->opcode == LirOpcode::Pinsrd || inst->opcode == LirOpcode::Pinsrq ||
-                              inst->opcode == LirOpcode::Insertps || sz == 16 || sz == 32);
+                              inst->opcode == LirOpcode::Insertps ||
+                              inst->opcode == LirOpcode::Vfmadd213ss || inst->opcode == LirOpcode::Vfmadd231ss ||
+                              inst->opcode == LirOpcode::Vfmadd213sd || inst->opcode == LirOpcode::Vfmadd231sd ||
+                              inst->opcode == LirOpcode::Vfmadd213ps || inst->opcode == LirOpcode::Vfmadd231ps ||
+                              inst->opcode == LirOpcode::Vfmadd213pd || inst->opcode == LirOpcode::Vfmadd231pd ||
+                              inst->opcode == LirOpcode::Vbroadcastss || inst->opcode == LirOpcode::Vbroadcastsd ||
+                              sz == 16 || sz == 32);
                 if (inst->is_call()) {
                     def_scratch = is_xmm_def ? PReg::xmm(XMM::XMM0) : PReg::gpr(GPR::RAX);
                 } else {
@@ -748,7 +773,7 @@ void LinearScanAllocator::rewrite_instructions() {
                 inst->defs[0] = LirOperand::preg(def_scratch, sz);
             }
 
-            // Handle any remaining spill uses with reserved scratch registers R10/R11 (GPR) or XMM4/XMM5 (XMM)
+            // Handle any remaining spill uses with reserved scratch registers R10/R11 (GPR) or XMM3/XMM4 (XMM)
             std::vector<int32_t> orig_slot_indices(inst->uses.size(), -1);
             for (size_t i = 0; i < inst->uses.size(); ++i) {
                 if (inst->uses[i].is_spill_slot()) {
@@ -759,48 +784,56 @@ void LinearScanAllocator::rewrite_instructions() {
             int gpr_scratch_idx = 0;
             int xmm_scratch_idx = 0;
             PReg gpr_scratches[2] = {PReg::gpr(GPR::R10), PReg::gpr(GPR::R11)};
-            PReg xmm_scratches[2] = {PReg::xmm(XMM::XMM4), PReg::xmm(XMM::XMM5)};
+            PReg xmm_scratches[2] = {PReg::xmm(XMM::XMM3), PReg::xmm(XMM::XMM4)};
 
             for (size_t i = 0; i < inst->uses.size(); ++i) {
                 if (inst->uses[i].is_spill_slot()) {
                     uint8_t sz = inst->uses[i].size;
-                    bool is_xmm_use = false;
-                    if (inst->opcode == LirOpcode::Pinsrd || inst->opcode == LirOpcode::Pinsrq) {
-                        is_xmm_use = (i == 0);
-                    } else if (inst->opcode == LirOpcode::Movd_xg || inst->opcode == LirOpcode::Movq_xg) {
-                        is_xmm_use = false;
-                    } else if (inst->opcode == LirOpcode::Cvttsd2si || inst->opcode == LirOpcode::Cvttsd2si32 ||
-                               inst->opcode == LirOpcode::Movq_gx || inst->opcode == LirOpcode::Movd_gx ||
-                               inst->opcode == LirOpcode::Pextrd || inst->opcode == LirOpcode::Pextrq ||
-                               inst->opcode == LirOpcode::Extractps) {
-                        is_xmm_use = true;
-                    } else {
-                        is_xmm_use = (inst->opcode == LirOpcode::Movsd || inst->opcode == LirOpcode::Movss ||
-                                      inst->opcode == LirOpcode::Addsd || inst->opcode == LirOpcode::Subsd ||
-                                      inst->opcode == LirOpcode::Mulsd || inst->opcode == LirOpcode::Divsd ||
-                                      inst->opcode == LirOpcode::Sqrtsd || inst->opcode == LirOpcode::Ucomisd ||
-                                      inst->opcode == LirOpcode::Addss || inst->opcode == LirOpcode::Subss ||
-                                      inst->opcode == LirOpcode::Mulss || inst->opcode == LirOpcode::Divss ||
-                                      inst->opcode == LirOpcode::Sqrtss || inst->opcode == LirOpcode::Ucomiss ||
-                                      inst->opcode == LirOpcode::Xorpd || inst->opcode == LirOpcode::Movaps ||
-                                      inst->opcode == LirOpcode::Movups || inst->opcode == LirOpcode::Addps ||
-                                      inst->opcode == LirOpcode::Subps || inst->opcode == LirOpcode::Mulps ||
-                                      inst->opcode == LirOpcode::Divps || inst->opcode == LirOpcode::Minps ||
-                                      inst->opcode == LirOpcode::Maxps || inst->opcode == LirOpcode::Sqrtps ||
-                                      inst->opcode == LirOpcode::Addpd || inst->opcode == LirOpcode::Subpd ||
-                                      inst->opcode == LirOpcode::Mulpd || inst->opcode == LirOpcode::Divpd ||
-                                      inst->opcode == LirOpcode::Minpd || inst->opcode == LirOpcode::Maxpd ||
-                                      inst->opcode == LirOpcode::Sqrtpd || inst->opcode == LirOpcode::Paddd ||
-                                      inst->opcode == LirOpcode::Psubd || inst->opcode == LirOpcode::Pmulld ||
-                                      inst->opcode == LirOpcode::Pminsd || inst->opcode == LirOpcode::Pmaxsd ||
-                                      inst->opcode == LirOpcode::Paddq || inst->opcode == LirOpcode::Psubq ||
-                                      inst->opcode == LirOpcode::Pand || inst->opcode == LirOpcode::Por ||
-                                      inst->opcode == LirOpcode::Pxor || inst->opcode == LirOpcode::Pandn ||
-                                      inst->opcode == LirOpcode::Pcmpeqd || inst->opcode == LirOpcode::Pslld ||
-                                      inst->opcode == LirOpcode::Psllq || inst->opcode == LirOpcode::Shufps ||
-                                      inst->opcode == LirOpcode::Shufpd || inst->opcode == LirOpcode::Pshufd ||
-                                       inst->opcode == LirOpcode::Movddup || inst->opcode == LirOpcode::Insertps ||
-                                       inst->opcode == LirOpcode::Xorps || sz == 16 || sz == 32);
+                    bool is_xmm_use = (i < orig_use_is_xmm.size()) ? orig_use_is_xmm[i] : false;
+                    if (!is_xmm_use) {
+                        if (inst->opcode == LirOpcode::Pinsrd || inst->opcode == LirOpcode::Pinsrq) {
+                            is_xmm_use = (i == 0);
+                        } else if (inst->opcode == LirOpcode::Movd_xg || inst->opcode == LirOpcode::Movq_xg) {
+                            is_xmm_use = false;
+                        } else if (inst->opcode == LirOpcode::Cvttsd2si || inst->opcode == LirOpcode::Cvttsd2si32 ||
+                                   inst->opcode == LirOpcode::Movq_gx || inst->opcode == LirOpcode::Movd_gx ||
+                                   inst->opcode == LirOpcode::Pextrd || inst->opcode == LirOpcode::Pextrq ||
+                                   inst->opcode == LirOpcode::Extractps) {
+                            is_xmm_use = true;
+                        } else {
+                            is_xmm_use = (inst->opcode == LirOpcode::Movsd || inst->opcode == LirOpcode::Movss ||
+                                          inst->opcode == LirOpcode::Addsd || inst->opcode == LirOpcode::Subsd ||
+                                          inst->opcode == LirOpcode::Mulsd || inst->opcode == LirOpcode::Divsd ||
+                                          inst->opcode == LirOpcode::Sqrtsd || inst->opcode == LirOpcode::Ucomisd ||
+                                          inst->opcode == LirOpcode::Addss || inst->opcode == LirOpcode::Subss ||
+                                          inst->opcode == LirOpcode::Mulss || inst->opcode == LirOpcode::Divss ||
+                                          inst->opcode == LirOpcode::Sqrtss || inst->opcode == LirOpcode::Ucomiss ||
+                                          inst->opcode == LirOpcode::Xorpd || inst->opcode == LirOpcode::Movaps ||
+                                          inst->opcode == LirOpcode::Movups || inst->opcode == LirOpcode::Addps ||
+                                          inst->opcode == LirOpcode::Subps || inst->opcode == LirOpcode::Mulps ||
+                                          inst->opcode == LirOpcode::Divps || inst->opcode == LirOpcode::Minps ||
+                                          inst->opcode == LirOpcode::Maxps || inst->opcode == LirOpcode::Sqrtps ||
+                                          inst->opcode == LirOpcode::Addpd || inst->opcode == LirOpcode::Subpd ||
+                                          inst->opcode == LirOpcode::Mulpd || inst->opcode == LirOpcode::Divpd ||
+                                          inst->opcode == LirOpcode::Minpd || inst->opcode == LirOpcode::Maxpd ||
+                                          inst->opcode == LirOpcode::Sqrtpd || inst->opcode == LirOpcode::Paddd ||
+                                          inst->opcode == LirOpcode::Psubd || inst->opcode == LirOpcode::Pmulld ||
+                                          inst->opcode == LirOpcode::Pminsd || inst->opcode == LirOpcode::Pmaxsd ||
+                                          inst->opcode == LirOpcode::Paddq || inst->opcode == LirOpcode::Psubq ||
+                                          inst->opcode == LirOpcode::Pand || inst->opcode == LirOpcode::Por ||
+                                          inst->opcode == LirOpcode::Pxor || inst->opcode == LirOpcode::Pandn ||
+                                          inst->opcode == LirOpcode::Pcmpeqd || inst->opcode == LirOpcode::Pslld ||
+                                          inst->opcode == LirOpcode::Psllq || inst->opcode == LirOpcode::Shufps ||
+                                          inst->opcode == LirOpcode::Shufpd || inst->opcode == LirOpcode::Pshufd ||
+                                          inst->opcode == LirOpcode::Movddup || inst->opcode == LirOpcode::Insertps ||
+                                          inst->opcode == LirOpcode::Xorps ||
+                                          inst->opcode == LirOpcode::Vfmadd213ss || inst->opcode == LirOpcode::Vfmadd231ss ||
+                                          inst->opcode == LirOpcode::Vfmadd213sd || inst->opcode == LirOpcode::Vfmadd231sd ||
+                                          inst->opcode == LirOpcode::Vfmadd213ps || inst->opcode == LirOpcode::Vfmadd231ps ||
+                                          inst->opcode == LirOpcode::Vfmadd213pd || inst->opcode == LirOpcode::Vfmadd231pd ||
+                                          inst->opcode == LirOpcode::Vbroadcastss || inst->opcode == LirOpcode::Vbroadcastsd ||
+                                          sz == 16 || sz == 32);
+                        }
                     }
                     int32_t slot = inst->uses[i].spill_slot;
 
