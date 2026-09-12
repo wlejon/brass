@@ -277,7 +277,7 @@ extern "C" BRASS_NOINLINE_NOFP void brass_throw_impl(
 
 extern "C" {
 
-#if defined(__GNUC__) || defined(__clang__)
+#if (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(_M_X64))
 BRASS_NOINLINE_NOFP void brass_throw(HostValue val) {
     SavedRegisters regs;
     __asm__ volatile(
