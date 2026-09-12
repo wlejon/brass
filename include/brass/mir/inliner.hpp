@@ -20,6 +20,7 @@ struct InlinerOptions {
     size_t max_callee_instruction_count = 120;
     size_t max_total_caller_instructions = 1000;
     bool enable_devirtualization = true;
+    bool enable_speculative_devirtualization = false;
     bool enable_loop_priority = true;
     bool enable_sroa = true;
     bool enable_gvn = true;

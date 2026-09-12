@@ -9,6 +9,8 @@
 #include <brass/runtime/tiering.hpp>
 #include <brass/runtime/background_compiler.hpp>
 #include <brass/runtime/code_installer.hpp>
+#include <brass/runtime/type_feedback.hpp>
+#include <brass/mir/speculative_inliner.hpp>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -68,6 +70,8 @@ int main(int argc, char** argv) {
                       << "  --dump-jit-thread-stats Dump background JIT worker thread pool statistics\n"
                       << "  --bce                 Run Value Range Analysis & Bounds Check Elimination\n"
                       << "  --dump-range-stats    Dump Range Analysis & Bounds Check Elimination statistics\n"
+                      << "  --speculative-inlining Run feedback-driven speculative devirtualization and inlining\n"
+                      << "  --dump-tfv-stats      Dump Type Feedback Vector (TFV) statistics\n"
                       << "  -o <file>             Write object file to <file>\n";
             return 0;
         } else if (arg == "--run") {
@@ -120,6 +124,10 @@ int main(int argc, char** argv) {
         } else if (arg == "--dump-range-stats") {
             options.dump_range_stats = true;
             options.enable_bce = true;
+        } else if (arg == "--speculative-inlining" || arg == "--enable-speculative-inlining") {
+            options.enable_speculative_inlining = true;
+        } else if (arg == "--dump-tfv-stats") {
+            options.dump_tfv_stats = true;
         } else if (arg == "--cfg-simplify") {
             options.enable_cfg_simplify = true;
         } else if (arg == "--no-cfg-simplify") {
@@ -551,6 +559,18 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (options.enable_speculative_inlining && res.module) {
+        SpeculativeInlinerOptions spec_opts;
+        spec_opts.enable_inlining = true;
+        spec_opts.enable_polymorphic = true;
+        run_speculative_devirtualization(*res.module, brass::runtime::FeedbackRegistry::instance(), spec_opts);
+        DiagnosticReporter spec_diag;
+        if (!verify_module(*res.module, &spec_diag) || spec_diag.has_errors()) {
+            std::cerr << "Verification failed after speculative inlining:\n" << spec_diag.format_all();
+            return 1;
+        }
+    }
+
     if (emit_mir) {
         std::cout << to_string(*res.module) << "\n";
     }
@@ -722,6 +742,10 @@ int main(int argc, char** argv) {
         std::cout << loop_stats.fusion_stats.format_report()
                   << loop_stats.distribution_stats.format_report()
                   << loop_stats.contraction_stats.format_report();
+    }
+
+    if (options.dump_tfv_stats) {
+        brass::runtime::FeedbackRegistry::instance().dump_stats(std::cout);
     }
 
     return 0;

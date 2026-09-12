@@ -1,6 +1,7 @@
 #include <brass/runtime/tiering.hpp>
 #include <brass/runtime/background_compiler.hpp>
 #include <brass/runtime/code_installer.hpp>
+#include <brass/runtime/type_feedback.hpp>
 #include <ostream>
 #include <iomanip>
 
@@ -31,6 +32,14 @@ uint64_t TieringFeedback::record_invocation() noexcept {
         TieringRegistry::instance().on_invocation_threshold_reached(fn_name_);
     }
     return invocations_;
+}
+
+TypeFeedbackVector* TieringFeedback::type_feedback_vector() {
+    return &FeedbackRegistry::instance().get_or_create(fn_name_);
+}
+
+const TypeFeedbackVector* TieringFeedback::type_feedback_vector() const {
+    return FeedbackRegistry::instance().find(fn_name_);
 }
 
 uint64_t TieringFeedback::loop_backedges(uint32_t loop_header_id) const noexcept {

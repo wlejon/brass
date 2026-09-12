@@ -92,6 +92,8 @@ struct TranslatorOptions {
     bool enable_bce = true;
     bool dump_range_stats = false;
     RangeAnalysisStats* range_stats_collector = nullptr;
+    bool enable_speculative_inlining = false;
+    bool dump_tfv_stats = false;
     std::vector<std::string> key_constants;
     std::unordered_map<std::string, FunctionMeta> function_meta;
     std::string entry_symbol;

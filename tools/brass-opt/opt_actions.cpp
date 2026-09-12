@@ -231,4 +231,60 @@ bool execute_run_function(Module& mod, const RunFunctionOptions& opts) {
     return true;
 }
 
+bool execute_dump_debug_lines(Module& mod) {
+    Target target = Target::host();
+    codegen::SchedOptions sched_opts;
+    auto obj = object::compile_module_to_object(mod, target, sched_opts);
+    for (const auto& table : obj.debug_tables) {
+        std::cout << "Function: " << table.function_name() << "\n";
+        for (const auto& entry : table.line_entries()) {
+            std::string fname = mod.debug_context().get_file(entry.loc.file_id);
+            if (fname.empty()) fname = "source";
+            std::cout << "  0x" << std::hex << entry.code_offset << std::dec << " -> "
+                      << fname << ":" << entry.loc.line << ":" << entry.loc.column << "\n";
+        }
+    }
+    return true;
+}
+
+bool execute_symbolize_offset(Module& mod, std::string_view symbolize_arg) {
+    size_t comma = symbolize_arg.find(',');
+    if (comma == std::string::npos) {
+        std::cerr << "Error: Invalid --symbolize-offset format, expected <fn,offset>\n";
+        return false;
+    }
+    std::string fn_name(symbolize_arg.substr(0, comma));
+    uint32_t offset = static_cast<uint32_t>(std::stoul(std::string(symbolize_arg.substr(comma + 1)), nullptr, 0));
+
+    Target target = Target::host();
+    codegen::SchedOptions sched_opts;
+    auto obj = object::compile_module_to_object(mod, target, sched_opts);
+    Symbolicator symbolicator(mod.debug_context(), obj.debug_tables);
+    StackTrace trace = symbolicator.symbolize_offset(fn_name, offset);
+    std::cout << trace.format();
+    return true;
+}
+
+bool execute_emit_source_map(Module& mod, const std::string& source_map_file) {
+    Target target = Target::host();
+    codegen::SchedOptions sched_opts;
+    auto obj = object::compile_module_to_object(mod, target, sched_opts);
+    SourceMap combined_sm(mod.name().empty() ? "output" : std::string(mod.name()));
+    for (const auto& f_path : mod.debug_context().files()) {
+        combined_sm.add_source(f_path);
+    }
+    for (const auto& table : obj.debug_tables) {
+        for (const auto& entry : table.line_entries()) {
+            combined_sm.add_mapping(entry.code_offset, entry.loc);
+        }
+    }
+    std::string sm_err;
+    if (!combined_sm.write_file(source_map_file, &sm_err)) {
+        std::cerr << "Error writing source map: " << sm_err << "\n";
+        return false;
+    }
+    std::cout << "Successfully emitted source map to '" << source_map_file << "'\n";
+    return true;
+}
+
 } // namespace brass

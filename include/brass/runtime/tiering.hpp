@@ -13,6 +13,8 @@ class Module;
 
 namespace brass::runtime {
 
+class TypeFeedbackVector;
+
 enum class TierLevel : uint8_t {
     Tier0_Interpreter = 0,
     Tier1_Baseline = 1,
@@ -50,6 +52,10 @@ public:
     // Invocations
     uint64_t invocation_count() const noexcept { return invocations_; }
     uint64_t record_invocation() noexcept;
+
+    // Type feedback vector
+    TypeFeedbackVector* type_feedback_vector();
+    const TypeFeedbackVector* type_feedback_vector() const;
 
     // Loop Backedges
     uint64_t backedge_count() const noexcept { return total_backedges_; }

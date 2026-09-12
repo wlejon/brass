@@ -44,4 +44,8 @@ struct RunFunctionOptions {
 
 bool execute_run_function(Module& mod, const RunFunctionOptions& opts);
 
+bool execute_dump_debug_lines(Module& mod);
+bool execute_symbolize_offset(Module& mod, std::string_view symbolize_arg);
+bool execute_emit_source_map(Module& mod, const std::string& source_map_file);
+
 } // namespace brass

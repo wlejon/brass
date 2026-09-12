@@ -4,6 +4,8 @@
 #include <brass/mir/write_barrier_elim.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
 #include <brass/runtime/tiering.hpp>
+#include <brass/runtime/type_feedback.hpp>
+#include <brass/mir/speculative_inliner.hpp>
 #include "opt_actions.hpp"
 #include <iostream>
 #include <fstream>
@@ -30,6 +32,8 @@ void print_usage(const char* prog) {
               << "  --args <a1> <a2>...   Arguments to pass to the function executed with --run\n"
               << "  --gc-stress           Enable moving GC stress mode (collects at every allocation/safepoint)\n"
               << "  --inline              Run interprocedural function inlining and IPO optimization pipeline\n"
+              << "  --speculative-inlining Run feedback-driven speculative devirtualization and inlining\n"
+              << "  --dump-tfv-stats      Dump Type Feedback Vector (TFV) statistics\n"
               << "  --sroa                Run Scalar Replacement of Aggregates (SROA)\n"
               << "  --escape-analysis     Run Escape Analysis on module functions\n"
               << "  --partial-escape      Run Partial Escape Analysis on module functions\n"
@@ -133,6 +137,8 @@ int main(int argc, char** argv) {
     bool emit_shared = false;
     bool use_jit = false;
     bool enable_inlining = false;
+    bool enable_speculative_inlining = false;
+    bool dump_tfv_stats = false;
     bool enable_sroa = false;
     bool enable_gvn = false;
     bool enable_gvn_pre = false;
@@ -204,6 +210,10 @@ int main(int argc, char** argv) {
             gc_stress = true;
         } else if (arg == "--inline") {
             enable_inlining = true;
+        } else if (arg == "--speculative-inlining" || arg == "--enable-speculative-inlining") {
+            enable_speculative_inlining = true;
+        } else if (arg == "--dump-tfv-stats") {
+            dump_tfv_stats = true;
         } else if (arg == "--sroa") {
             enable_sroa = true;
         } else if (arg == "--escape-analysis") {
@@ -600,6 +610,7 @@ int main(int argc, char** argv) {
     if (enable_inlining) {
         brass::InlinerOptions inliner_opts;
         inliner_opts.enable_gvn = enable_gvn;
+        inliner_opts.enable_speculative_devirtualization = enable_speculative_inlining;
         brass::LoopOptOptions loop_opts;
         init_loop_opts(loop_opts);
         loop_opts.enable_gvn = enable_gvn;
@@ -613,6 +624,16 @@ int main(int argc, char** argv) {
         brass::DiagnosticReporter inlining_diag;
         if (!brass::verify_module(*mod, &inlining_diag) || inlining_diag.has_errors()) {
             std::cerr << "Verification failed after inlining:\n" << inlining_diag.format_all();
+            return 1;
+        }
+    } else if (enable_speculative_inlining) {
+        brass::SpeculativeInlinerOptions spec_opts;
+        spec_opts.enable_inlining = true;
+        spec_opts.enable_polymorphic = true;
+        brass::run_speculative_devirtualization(*mod, spec_opts);
+        brass::DiagnosticReporter spec_diag;
+        if (!brass::verify_module(*mod, &spec_diag) || spec_diag.has_errors()) {
+            std::cerr << "Verification failed after speculative inlining:\n" << spec_diag.format_all();
             return 1;
         }
     } else if (enable_sroa) {
@@ -847,61 +868,21 @@ int main(int argc, char** argv) {
     (void)debug_info;
 
     if (dump_debug_lines) {
-        brass::Target target = brass::Target::host();
-        brass::codegen::SchedOptions sched_opts;
-        auto obj = brass::object::compile_module_to_object(*mod, target, sched_opts);
-        for (const auto& table : obj.debug_tables) {
-            std::cout << "Function: " << table.function_name() << "\n";
-            for (const auto& entry : table.line_entries()) {
-                std::string fname = mod->debug_context().get_file(entry.loc.file_id);
-                if (fname.empty()) fname = "source";
-                std::cout << "  0x" << std::hex << entry.code_offset << std::dec << " -> "
-                          << fname << ":" << entry.loc.line << ":" << entry.loc.column << "\n";
-            }
-        }
+        brass::execute_dump_debug_lines(*mod);
         if (!compile_object && !emit_shared && run_fn.empty()) {
             return 0;
         }
     }
 
     if (!symbolize_offset_arg.empty()) {
-        size_t comma = symbolize_offset_arg.find(',');
-        if (comma == std::string::npos) {
-            std::cerr << "Error: Invalid --symbolize-offset format, expected <fn,offset>\n";
-            return 1;
-        }
-        std::string fn_name = symbolize_offset_arg.substr(0, comma);
-        uint32_t offset = static_cast<uint32_t>(std::stoul(symbolize_offset_arg.substr(comma + 1), nullptr, 0));
-
-        brass::Target target = brass::Target::host();
-        brass::codegen::SchedOptions sched_opts;
-        auto obj = brass::object::compile_module_to_object(*mod, target, sched_opts);
-        brass::Symbolicator symbolicator(mod->debug_context(), obj.debug_tables);
-        brass::StackTrace trace = symbolicator.symbolize_offset(fn_name, offset);
-        std::cout << trace.format();
-        return 0;
+        return brass::execute_symbolize_offset(*mod, symbolize_offset_arg) ? 0 : 1;
     }
 
     if (!emit_source_map_file.empty()) {
-        brass::Target target = brass::Target::host();
-        brass::codegen::SchedOptions sched_opts;
-        auto obj = brass::object::compile_module_to_object(*mod, target, sched_opts);
-        brass::SourceMap combined_sm(mod->name().empty() ? "output" : std::string(mod->name()));
-        for (const auto& f_path : mod->debug_context().files()) {
-            combined_sm.add_source(f_path);
-        }
-        for (const auto& table : obj.debug_tables) {
-            for (const auto& entry : table.line_entries()) {
-                combined_sm.add_mapping(entry.code_offset, entry.loc);
-            }
-        }
-        std::string sm_err;
-        if (!combined_sm.write_file(emit_source_map_file, &sm_err)) {
-            std::cerr << "Error writing source map: " << sm_err << "\n";
+        if (!brass::execute_emit_source_map(*mod, emit_source_map_file)) {
             return 1;
         }
         if (!compile_object && !emit_shared && run_fn.empty()) {
-            std::cout << "Successfully emitted source map to '" << emit_source_map_file << "'\n";
             return 0;
         }
     }
@@ -981,6 +962,10 @@ int main(int argc, char** argv) {
     if (!write_file(output_file, canonical)) {
         std::cerr << "Error: Could not write output file '" << output_file << "'\n";
         return 1;
+    }
+
+    if (dump_tfv_stats) {
+        brass::runtime::FeedbackRegistry::instance().dump_stats(std::cout);
     }
 
     return 0;

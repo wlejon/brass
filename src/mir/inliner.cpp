@@ -12,6 +12,7 @@
 #include <brass/mir/branch_probability.hpp>
 #include <brass/mir/verifier.hpp>
 #include <brass/mir/bounds_check_elim.hpp>
+#include <brass/mir/speculative_inliner.hpp>
 
 namespace brass {
 
@@ -272,6 +273,16 @@ bool optimize_module_ipo(Module& mod, const InlinerOptions& inline_opts, const L
     if (inline_opts.enable_devirtualization) {
         changed |= devirtualize_module(mod);
         if (!check_ipo("devirtualize_module")) return false;
+    }
+
+    // 1b. Speculative Devirtualization & Inlining via Type Feedback Vector (TFV)
+    if (inline_opts.enable_speculative_devirtualization) {
+        SpeculativeInlinerOptions spec_opts;
+        spec_opts.enable_inlining = true;
+        spec_opts.enable_polymorphic = true;
+        spec_opts.max_callee_instruction_count = inline_opts.max_callee_instruction_count;
+        changed |= run_speculative_devirtualization(mod, spec_opts);
+        if (!check_ipo("run_speculative_devirtualization")) return false;
     }
 
     // 2. Inlining in bottom-up leaf-first order

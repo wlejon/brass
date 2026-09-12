@@ -5,6 +5,7 @@
 #include <brass/runtime/osr_coordinator.hpp>
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/tiering.hpp>
+#include <brass/runtime/type_feedback.hpp>
 #include <iostream>
 #include <cmath>
 
@@ -554,6 +555,9 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                     RuntimeValue call_res;
                     auto fn_it = function_pointers_.find(callee_ptr);
                     if (fn_it != function_pointers_.end()) {
+                        runtime::FeedbackRegistry::instance()
+                            .get_or_create(fn.name())
+                            .record_call_target(inst->site_id(), callee_ptr, fn_it->second->name());
                         call_res = execute_function(*fn_it->second, call_args);
                     } else {
                         auto host_it = host_function_pointers_.find(callee_ptr);

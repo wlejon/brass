@@ -12,6 +12,8 @@
 #include <brass/mir/write_barrier_elim.hpp>
 #include <brass/mir/verifier.hpp>
 #include <brass/il_translator/il_translator.hpp>
+#include <brass/mir/speculative_inliner.hpp>
+#include <brass/runtime/type_feedback.hpp>
 #include <stdexcept>
 #include <iostream>
 
@@ -22,6 +24,12 @@ namespace brass::runtime {
 namespace {
 
 bool run_tier2_optimization_pipeline(Module& mod) {
+    // 0. Feedback-Driven Speculative Devirtualization & Inlining from TFVs
+    SpeculativeInlinerOptions spec_opts;
+    spec_opts.enable_inlining = true;
+    spec_opts.enable_polymorphic = true;
+    run_speculative_devirtualization(mod, FeedbackRegistry::instance(), spec_opts);
+
     // 1. Initial GVN & GVN-PRE
     GvnOptions gvn_opts;
     gvn_module(mod, gvn_opts);
@@ -283,6 +291,8 @@ CodeInstallResult CodeInstaller::install_tier2(
     jit->register_external_symbol("brass_gc_alloc", reinterpret_cast<void*>(&brass_gc_alloc));
     jit->register_external_symbol("brass_gc_collect", reinterpret_cast<void*>(&brass_gc_collect));
     jit->register_external_symbol("brass_pgo_inc", reinterpret_cast<void*>(&brass_pgo_inc));
+    jit->register_external_symbol("brass_record_call_feedback", reinterpret_cast<void*>(&brass_record_call_feedback));
+    jit->register_external_symbol("brass_record_property_feedback", reinterpret_cast<void*>(&brass_record_property_feedback));
     il::register_bronze_runtime_symbols(jit.get());
 
     {
