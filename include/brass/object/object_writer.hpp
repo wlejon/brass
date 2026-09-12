@@ -182,12 +182,16 @@ public:
     void set_sched_options(const codegen::SchedOptions& opts) { sched_opts_ = opts; }
     const codegen::SchedOptions& sched_options() const noexcept { return sched_opts_; }
 
+    void set_enable_trace_layout(bool enable) { enable_trace_layout_ = enable; }
+    bool enable_trace_layout() const noexcept { return enable_trace_layout_; }
+
     ObjectFile compile(const Module& mod);
 
 private:
     Target target_;
     CallingConvention cc_;
     codegen::SchedOptions sched_opts_;
+    bool enable_trace_layout_ = false;
 };
 
 ObjectFile compile_module_to_object(const Module& mod, const Target& target, const codegen::SchedOptions& sched_opts);

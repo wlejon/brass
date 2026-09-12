@@ -159,7 +159,7 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
         }
 
         // 3.5 LIR Trace Scheduling & Fall-Through Block Layout
-        if (loop_opts.enable_trace_layout) {
+        if (enable_trace_layout_ || loop_opts.enable_trace_layout) {
             codegen::optimize_block_layout(*lir);
         }
 
