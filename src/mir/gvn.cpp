@@ -233,15 +233,17 @@ bool gvn_function(Function& fn, const GvnOptions& options) {
                     if (def_acc && def_acc->is_def()) {
                         Instruction* def_inst = def_acc->origin_instruction();
                         if (def_inst && (def_inst->opcode() == Opcode::store || def_inst->opcode() == Opcode::vstore)) {
-                            if (def_inst->memory_type() == mtype &&
-                                aa.alias(def_inst->operand(0), def_inst->offset(), def_inst->memory_type(),
-                                         base, off, mtype) == AliasResult::MustAlias) {
-                                Value* stored_val = def_inst->operand(1);
-                                replace_uses(fn, res_val, stored_val);
-                                to_remove.push_back(cur);
-                                if (options.stats) options.stats->loads_forwarded++;
-                                iter_changed = true;
-                                forwarded = true;
+                            if (def_inst->parent() == cur->parent() || dom.dominates(def_inst->parent(), cur->parent())) {
+                                if (def_inst->memory_type() == mtype &&
+                                    aa.alias(def_inst->operand(0), def_inst->offset(), def_inst->memory_type(),
+                                             base, off, mtype) == AliasResult::MustAlias) {
+                                    Value* stored_val = def_inst->operand(1);
+                                    replace_uses(fn, res_val, stored_val);
+                                    to_remove.push_back(cur);
+                                    if (options.stats) options.stats->loads_forwarded++;
+                                    iter_changed = true;
+                                    forwarded = true;
+                                }
                             }
                         }
                     }

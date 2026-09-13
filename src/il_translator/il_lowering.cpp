@@ -519,26 +519,39 @@ bool IlLowering::lower_function(const BronzeFunction& fn_ast, Module& mod, const
     current_fn_frame_ptr_ = nullptr;
     uint32_t total_slots = 0;
 
-    for (const auto& p : fn_ast.params) {
-        if (p.second == BronzeType::Dynamic || p.second == BronzeType::Unknown) {
-            if (!current_fn_slot_of_.count(p.first)) {
-                current_fn_slot_of_[p.first] = total_slots++;
+    bool is_coro_fn = false;
+    for (const auto& blk : fn_ast.blocks) {
+        for (const auto& inst : blk.instructions) {
+            if (inst.op == BronzeOp::Yield) {
+                is_coro_fn = true;
+                break;
             }
         }
+        if (is_coro_fn) break;
     }
-    for (const auto& blk : fn_ast.blocks) {
-        for (const auto& p : blk.params) {
+
+    if (!is_coro_fn) {
+        for (const auto& p : fn_ast.params) {
             if (p.second == BronzeType::Dynamic || p.second == BronzeType::Unknown) {
                 if (!current_fn_slot_of_.count(p.first)) {
                     current_fn_slot_of_[p.first] = total_slots++;
                 }
             }
         }
-        for (const auto& inst : blk.instructions) {
-            if (inst.result_id != UINT32_MAX &&
-                (inst.result_type == BronzeType::Dynamic || inst.result_type == BronzeType::Unknown)) {
-                if (!current_fn_slot_of_.count(inst.result_id)) {
-                    current_fn_slot_of_[inst.result_id] = total_slots++;
+        for (const auto& blk : fn_ast.blocks) {
+            for (const auto& p : blk.params) {
+                if (p.second == BronzeType::Dynamic || p.second == BronzeType::Unknown) {
+                    if (!current_fn_slot_of_.count(p.first)) {
+                        current_fn_slot_of_[p.first] = total_slots++;
+                    }
+                }
+            }
+            for (const auto& inst : blk.instructions) {
+                if (inst.result_id != UINT32_MAX &&
+                    (inst.result_type == BronzeType::Dynamic || inst.result_type == BronzeType::Unknown)) {
+                    if (!current_fn_slot_of_.count(inst.result_id)) {
+                        current_fn_slot_of_[inst.result_id] = total_slots++;
+                    }
                 }
             }
         }
