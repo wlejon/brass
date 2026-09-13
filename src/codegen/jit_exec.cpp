@@ -420,7 +420,6 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
             }
 
             switch (r.kind) {
-                case object::RelocKind::PCRel32:
                 case object::RelocKind::Plt32: {
                     int64_t disp = reinterpret_cast<int64_t>(target_addr) + r.addend - reinterpret_cast<int64_t>(patch_loc);
                     if (disp < INT32_MIN || disp > INT32_MAX) {
@@ -445,6 +444,11 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
                             disp = reinterpret_cast<int64_t>(tramp_addr) + r.addend - reinterpret_cast<int64_t>(patch_loc);
                         }
                     }
+                    *reinterpret_cast<int32_t*>(patch_loc) = static_cast<int32_t>(disp);
+                    break;
+                }
+                case object::RelocKind::PCRel32: {
+                    int64_t disp = reinterpret_cast<int64_t>(target_addr) + r.addend - reinterpret_cast<int64_t>(patch_loc);
                     *reinterpret_cast<int32_t*>(patch_loc) = static_cast<int32_t>(disp);
                     break;
                 }
