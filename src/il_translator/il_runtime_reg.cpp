@@ -558,6 +558,14 @@ void register_all_module_external_symbols(Module* mod, const std::string& entry_
                                     ? "bronze_main_key_constants"
                                     : (entry_symbol + "_key_constants");
     mod->add_external_symbol(key_sym);
+
+    if (!entry_symbol.empty() && entry_symbol != "main" && entry_symbol != "bronze_main") {
+        mod->add_external_symbol("__bronze_module_env_" + entry_symbol);
+        mod->add_external_symbol("__bronze_key_map_" + entry_symbol);
+        mod->add_external_symbol("__bronze_template_cells_" + entry_symbol);
+        mod->add_external_symbol("__bronze_census_out_path_" + entry_symbol);
+        mod->add_external_symbol("__bronze_census_sites_" + entry_symbol);
+    }
 }
 
 } // namespace brass::il

@@ -407,7 +407,7 @@ bool IlLowering::lower_instruction(
 
         case BronzeOp::ModuleEnvSet: {
             Value* env_val = ensure_type(get_opd(0), Type::i64(), b);
-            Value* env_addr = b.build_func_addr("__bronze_module_env");
+            Value* env_addr = b.build_func_addr(module_sym("__bronze_module_env"));
             b.build_store(Type::i64(), env_addr, 0, env_val);
             if (!inst_ast.operands.empty()) {
                 module_env_regs_.insert(inst_ast.operands[0]);
@@ -419,7 +419,7 @@ bool IlLowering::lower_instruction(
             if (inst_ast.result_id != UINT32_MAX) {
                 module_env_regs_.insert(inst_ast.result_id);
             }
-            Value* env_addr = b.build_func_addr("__bronze_module_env");
+            Value* env_addr = b.build_func_addr(module_sym("__bronze_module_env"));
             res_val = b.build_load(Type::i64(), env_addr, 0);
             break;
         }
@@ -699,7 +699,7 @@ bool IlLowering::lower_instruction(
         }
 
         case BronzeOp::TemplateCached: {
-            Value* base = b.build_func_addr("__bronze_template_cells");
+            Value* base = b.build_func_addr(module_sym("__bronze_template_cells"));
             res_val = b.build_load(Type::i64(), base, static_cast<int32_t>(inst_ast.imm_i64 * 8));
             break;
         }
@@ -707,7 +707,7 @@ bool IlLowering::lower_instruction(
         case BronzeOp::TemplateObject: {
             Value* cooked = ensure_type(get_opd(0), Type::i64(), b);
             Value* raw = ensure_type(get_opd(1), Type::i64(), b);
-            Value* cell_ptr = b.build_func_addr("__bronze_template_cells");
+            Value* cell_ptr = b.build_func_addr(module_sym("__bronze_template_cells"));
             if (inst_ast.imm_i64 > 0) {
                 cell_ptr = b.build_add(cell_ptr, b.build_iconst_i64(inst_ast.imm_i64 * 8));
             }

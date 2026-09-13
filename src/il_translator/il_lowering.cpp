@@ -94,7 +94,7 @@ std::string IlLowering::resolve_create_func_callee(const std::string& callee_nam
 }
 
 Value* IlLowering::get_key_id(Builder& b, uint32_t key_idx) {
-    Value* map_addr = b.build_func_addr("__bronze_key_map");
+    Value* map_addr = b.build_func_addr(module_sym("__bronze_key_map"));
     return b.build_load(Type::i32(), map_addr, static_cast<int32_t>(key_idx * sizeof(uint32_t)));
 }
 
@@ -108,7 +108,7 @@ uint32_t IlLowering::find_key_constant(const std::string& name) const {
 Value* IlLowering::get_val_by_id(uint32_t id, Builder& b, const std::unordered_map<uint32_t, Value*>& val_map) {
     Value* result = nullptr;
     if (module_env_regs_.count(id)) {
-        Value* env_addr = b.build_func_addr("__bronze_module_env");
+        Value* env_addr = b.build_func_addr(module_sym("__bronze_module_env"));
         result = b.build_load(Type::i64(), env_addr, 0);
     } else if (current_fn_frame_ptr_ != nullptr) {
         auto it = current_fn_slot_of_.find(id);
@@ -171,6 +171,7 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
 
     // Register external runtime helper functions
     register_all_module_external_symbols(mod.get(), options_.entry_symbol);
+    prop_lowering_.set_key_map_sym(module_sym("__bronze_key_map"));
 
     current_ast_ = &ast;
 
@@ -581,29 +582,29 @@ bool IlLowering::lower_function(const BronzeFunction& fn_ast, Module& mod, const
         }
 
         if (fn_name == "main") {
-            Value* env_addr = b.build_func_addr("__bronze_module_env");
+            Value* env_addr = b.build_func_addr(module_sym("__bronze_module_env"));
             Value* count_val = b.build_iconst_i64(1);
             b.build_call("bronze_register_value_cells", Type::void_type(), {env_addr, count_val});
-            Value* tpl_addr = b.build_func_addr("__bronze_template_cells");
+            Value* tpl_addr = b.build_func_addr(module_sym("__bronze_template_cells"));
             Value* tpl_cells_count = b.build_iconst_i64(1024);
             b.build_call("bronze_register_value_cells", Type::void_type(), {tpl_addr, tpl_cells_count});
             const std::string key_sym = (options_.entry_symbol.empty() || options_.entry_symbol == "main" || options_.entry_symbol == "bronze_main")
                                             ? "bronze_main_key_constants"
                                             : (options_.entry_symbol + "_key_constants");
             Value* manifest_addr = b.build_func_addr(key_sym);
-            Value* map_addr = b.build_func_addr("__bronze_key_map");
+            Value* map_addr = b.build_func_addr(module_sym("__bronze_key_map"));
             b.build_call("bronze_register_key_manifest", Type::void_type(), {manifest_addr, map_addr});
             if (options_.enable_census && options_.census_site_count > 0) {
-                Value* out_path = b.build_func_addr("__bronze_census_out_path");
-                Value* sites_addr = b.build_func_addr("__bronze_census_sites");
+                Value* out_path = b.build_func_addr(module_sym("__bronze_census_out_path"));
+                Value* sites_addr = b.build_func_addr(module_sym("__bronze_census_sites"));
                 Value* site_count = b.build_iconst_i32(static_cast<int32_t>(options_.census_site_count));
                 b.build_call("bronze_census_register", Type::void_type(), {out_path, sites_addr, site_count, map_addr});
             }
             for (size_t f = 0; f < options_.source_files.size(); ++f) {
                 if (options_.source_files[f].entry_count == 0) continue;
-                Value* text_addr = b.build_func_addr("__bronze_source_text_" + std::to_string(f));
+                Value* text_addr = b.build_func_addr(module_sym("__bronze_source_text_" + std::to_string(f)));
                 Value* text_len = b.build_iconst_i32(static_cast<int32_t>(options_.source_files[f].text_len));
-                Value* entries_addr = b.build_func_addr("__bronze_source_entries_" + std::to_string(f));
+                Value* entries_addr = b.build_func_addr(module_sym("__bronze_source_entries_" + std::to_string(f)));
                 Value* entries_count = b.build_iconst_i32(static_cast<int32_t>(options_.source_files[f].entry_count));
                 b.build_call("bronze_register_fn_sources", Type::void_type(), {text_addr, text_len, entries_addr, entries_count});
             }

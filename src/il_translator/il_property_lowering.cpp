@@ -24,7 +24,7 @@ Value* PropertyLoweringHelper::lower_prop_get(
         if (symbol_id == 0xFFFFFFFFu) {
             sym_val = b.build_iconst_i32(static_cast<int32_t>(symbol_id));
         } else {
-            Value* map_addr = b.build_func_addr("__bronze_key_map");
+            Value* map_addr = b.build_func_addr(key_map_sym_);
             sym_val = b.build_load(Type::i32(), map_addr, static_cast<int32_t>(symbol_id * sizeof(uint32_t)));
         }
         Value* null_entry = b.build_iconst_i64(0);
@@ -60,7 +60,7 @@ void PropertyLoweringHelper::lower_prop_set(
         if (symbol_id == 0xFFFFFFFFu) {
             sym_val = b.build_iconst_i32(static_cast<int32_t>(symbol_id));
         } else {
-            Value* map_addr = b.build_func_addr("__bronze_key_map");
+            Value* map_addr = b.build_func_addr(key_map_sym_);
             sym_val = b.build_load(Type::i32(), map_addr, static_cast<int32_t>(symbol_id * sizeof(uint32_t)));
         }
         Value* slot_val = b.build_iconst_i64(static_cast<int64_t>(slot_idx));
@@ -432,7 +432,7 @@ void PropertyLoweringHelper::lower_method_def(
         if (symbol_id == 0xFFFFFFFFu) {
             sym_val = b.build_iconst_i32(static_cast<int32_t>(symbol_id));
         } else {
-            Value* map_addr = b.build_func_addr("__bronze_key_map");
+            Value* map_addr = b.build_func_addr(key_map_sym_);
             sym_val = b.build_load(Type::i32(), map_addr, static_cast<int32_t>(symbol_id * sizeof(uint32_t)));
         }
         b.build_call("bronze_method_def", Type::void_type(), {obj, sym_val, closure});

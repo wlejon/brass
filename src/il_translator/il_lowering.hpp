@@ -31,6 +31,12 @@ public:
     PropertyLoweringHelper& prop_lowering() { return prop_lowering_; }
     AllocLoweringHelper& alloc_lowering() { return alloc_lowering_; }
     const TranslatorOptions& options() const { return options_; }
+    std::string module_sym(const std::string& base) const {
+        if (options_.entry_symbol.empty() || options_.entry_symbol == "main" || options_.entry_symbol == "bronze_main") {
+            return base;
+        }
+        return base + "_" + options_.entry_symbol;
+    }
 
 private:
     bool lower_function(const BronzeFunction& fn_ast, Module& mod, const std::string& fn_name);

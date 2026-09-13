@@ -3,6 +3,7 @@
 #include <brass/mir/builder.hpp>
 #include <brass/mir/instruction.hpp>
 #include <string_view>
+#include <string>
 #include <cstdint>
 
 namespace brass::il {
@@ -17,6 +18,9 @@ public:
 
     [[nodiscard]] bool enable_inlined_fastpaths() const noexcept { return enable_inlined_fastpaths_; }
     void set_enable_inlined_fastpaths(bool enable) noexcept { enable_inlined_fastpaths_ = enable; }
+
+    [[nodiscard]] const std::string& key_map_sym() const noexcept { return key_map_sym_; }
+    void set_key_map_sym(std::string sym) { key_map_sym_ = std::move(sym); }
 
     Value* lower_prop_get(
         Builder& b,
@@ -110,6 +114,7 @@ private:
     bool enable_pic_ = true;
     bool enable_inlined_fastpaths_ = true;
     uint32_t next_auto_site_id_ = 1000;
+    std::string key_map_sym_ = "__bronze_key_map";
 };
 
 } // namespace brass::il
