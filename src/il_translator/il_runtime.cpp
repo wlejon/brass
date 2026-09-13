@@ -19,6 +19,9 @@
 #include <charconv>
 #include <system_error>
 #include <vector>
+#ifndef _WIN32
+#include <dlfcn.h>
+#endif
 
 namespace brass::il {
 
@@ -852,24 +855,41 @@ BRONZE_WEAK uint64_t bronze_immutable_assign() {
     return 0xFFF6000000000000ULL;
 }
 
-static struct BronzeDummyTlsBlock {
+struct BronzeDummyTlsBlock {
     void* frame_top = nullptr;
     uint64_t exception_cell = 0xFFF6000000000000ULL;
     uint32_t proto_epoch = 1;
     uint64_t alloc_cursor = 0;
     uint64_t alloc_limit = 0;
     uint64_t plain_shape = 0;
-} g_bronze_dummy_tls_block;
+};
 
 extern "C" {
 BRONZE_WEAK_DATA uintptr_t brass_tlab_top = 0;
 BRONZE_WEAK_DATA uintptr_t brass_tlab_end = 0;
 BRONZE_WEAK_DATA void* brass_root_shape = nullptr;
 #if defined(_MSC_VER)
-void* brass_dummy_bronze_tls_block_addr() { return &g_bronze_dummy_tls_block; }
+void* brass_dummy_bronze_tls_block_addr() {
+    static thread_local BronzeDummyTlsBlock s_tls;
+    return &s_tls;
+}
 #pragma comment(linker, "/alternatename:bronze_tls_block_addr=brass_dummy_bronze_tls_block_addr")
 #else
-BRONZE_WEAK void* bronze_tls_block_addr() { return &g_bronze_dummy_tls_block; }
+BRONZE_WEAK void* bronze_tls_block_addr() {
+#ifndef _WIN32
+    using Fn = void* (*)();
+    static Fn real_fn = []() -> Fn {
+        void* sym = dlsym(RTLD_DEFAULT, "bronze_tls_block_addr");
+        if (sym && sym != reinterpret_cast<void*>(&bronze_tls_block_addr)) {
+            return reinterpret_cast<Fn>(sym);
+        }
+        return nullptr;
+    }();
+    if (real_fn) return real_fn();
+#endif
+    static thread_local BronzeDummyTlsBlock s_tls;
+    return &s_tls;
+}
 #endif
 }
 
