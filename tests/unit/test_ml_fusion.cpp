@@ -251,5 +251,24 @@ TEST_CASE("Fused GEMV PTX Generation") {
         CHECK(ptx.find("shfl.sync.down.b32") != std::string::npos);
         CHECK(ptx.find("ld.global.f32") != std::string::npos);
     }
+
+    // 3. Fused Q8_0 GEMV PTX
+    {
+        std::string ptx = compiler.emit_ptx_fused_gemv_q8_0();
+        CHECK(ptx.find("fused_gemv_q8_0_kernel") != std::string::npos);
+        CHECK(ptx.find("ld.global.u16") != std::string::npos);
+        CHECK(ptx.find("cvt.f32.f16") != std::string::npos);
+        CHECK(ptx.find("shfl.sync.down.b32") != std::string::npos);
+    }
+
+    // 4. Fused Q4_K GEMV PTX
+    {
+        std::string ptx = compiler.emit_ptx_fused_gemv_q4_k();
+        CHECK(ptx.find("fused_gemv_q4_k_kernel") != std::string::npos);
+        CHECK(ptx.find("ld.global.v4.u32") != std::string::npos);
+        CHECK(ptx.find("cvt.f32.f16") != std::string::npos);
+        CHECK(ptx.find("shfl.sync.down.b32") != std::string::npos);
+    }
 }
+
 

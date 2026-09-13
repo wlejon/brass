@@ -126,6 +126,8 @@ public:
     std::string emit_ptx_block_q8_dot(const target::PtxOptions& opts = {});
     std::string emit_ptx_fused_gemv_swiglu(const target::PtxOptions& opts = {});
     std::string emit_ptx_fused_gemv_residual(const target::PtxOptions& opts = {});
+    std::string emit_ptx_fused_gemv_q8_0(const target::PtxOptions& opts = {});
+    std::string emit_ptx_fused_gemv_q4_k(const target::PtxOptions& opts = {});
 
 private:
     KernelJit jit_;
