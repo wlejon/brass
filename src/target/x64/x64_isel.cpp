@@ -266,13 +266,17 @@ void X64ISel::analyze_function(const Function& mir_fn) {
                 ImmIntInfo imm0 = get_imm_int_info(op0);
                 ImmIntInfo imm1 = get_imm_int_info(op1);
 
+                bool is_comm = (inst->opcode() == Opcode::add || inst->opcode() == Opcode::mul ||
+                                inst->opcode() == Opcode::and_ || inst->opcode() == Opcode::or_ ||
+                                inst->opcode() == Opcode::xor_);
+
                 if (imm1.is_imm && imm1.fits_i32) {
                     folded_uses[op1]++;
-                } else if (imm0.is_imm && imm0.fits_i32) {
+                } else if (is_comm && imm0.is_imm && imm0.fits_i32) {
                     folded_uses[op0]++;
                 } else if (op1 && op1->is_instruction() && can_fuse_load(op1->defining_instruction(), inst)) {
                     skipped_insts_.insert(op1->defining_instruction());
-                } else if (op0 && op0->is_instruction() && can_fuse_load(op0->defining_instruction(), inst)) {
+                } else if (is_comm && op0 && op0->is_instruction() && can_fuse_load(op0->defining_instruction(), inst)) {
                     skipped_insts_.insert(op0->defining_instruction());
                 }
             }

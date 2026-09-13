@@ -102,6 +102,8 @@ bool unroll_loop(
             for (size_t k = 1; k < F; ++k) {
                 if (pa.type == Type::f64()) {
                     unroll_ph_args.push_back(b.build_fconst_f64(0.0));
+                } else if (pa.type == Type::f32()) {
+                    unroll_ph_args.push_back(b.build_fconst_f32(0.0f));
                 } else if (pa.type == Type::i32()) {
                     unroll_ph_args.push_back(b.build_iconst_i32(0));
                 } else {
