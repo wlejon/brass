@@ -80,8 +80,14 @@ void KernelJit::setup_default_symbols(codegen::JitExecutionEngine& engine) const
     engine.register_external_symbol("brass_parallel_free_context", reinterpret_cast<void*>(&brass_parallel_free_context));
 
     // Standard Math Functions (for pure-compute kernels calling elementary transcendental/math routines)
+    static const auto rsqrt_f = +[](float x) -> float { return 1.0f / std::sqrt(x); };
+    static const auto rsqrt_d = +[](double x) -> double { return 1.0 / std::sqrt(x); };
+    static const auto i32_to_f32_f = +[](int32_t x) -> float { return static_cast<float>(x); };
     engine.register_external_symbol("sqrt", reinterpret_cast<void*>(static_cast<double(*)(double)>(&std::sqrt)));
     engine.register_external_symbol("sqrtf", reinterpret_cast<void*>(static_cast<float(*)(float)>(&std::sqrt)));
+    engine.register_external_symbol("rsqrt", reinterpret_cast<void*>(rsqrt_d));
+    engine.register_external_symbol("rsqrtf", reinterpret_cast<void*>(rsqrt_f));
+    engine.register_external_symbol("i32_to_f32", reinterpret_cast<void*>(i32_to_f32_f));
     engine.register_external_symbol("exp", reinterpret_cast<void*>(static_cast<double(*)(double)>(&std::exp)));
     engine.register_external_symbol("expf", reinterpret_cast<void*>(static_cast<float(*)(float)>(&std::exp)));
     engine.register_external_symbol("log", reinterpret_cast<void*>(static_cast<double(*)(double)>(&std::log)));

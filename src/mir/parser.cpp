@@ -391,12 +391,16 @@ private:
             }
             case Opcode::fconst_f64: {
                 if (!peek().is(TokenKind::FloatLiteral) && !peek().is(TokenKind::IntLiteral)) {
-                    error(peek().location, "Expected float literal for fconst.f64");
+                    error(peek().location, "Expected float literal for fconst");
                     return false;
                 }
                 Token tok = advance();
                 double val = tok.is(TokenKind::FloatLiteral) ? tok.float_val : static_cast<double>(tok.int_val);
-                res_val = b.build_fconst_f64(val);
+                if (type_suffix == Type::f32()) {
+                    res_val = b.build_fconst_f32(static_cast<float>(val));
+                } else {
+                    res_val = b.build_fconst_f64(val);
+                }
                 break;
             }
             case Opcode::patchable_const_i32: {

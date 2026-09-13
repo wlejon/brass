@@ -102,7 +102,13 @@ bool decode_opcode_string(std::string_view str, Opcode& op, Type& type_suffix, T
         type_suffix = Type::i32();
         return true;
     }
-    if (base == "fconst") { op = Opcode::fconst_f64; type_suffix = Type::f64(); return true; }
+    if (base == "fconst") {
+        op = Opcode::fconst_f64;
+        if (type_suffix != Type::f32()) {
+            type_suffix = Type::f64();
+        }
+        return true;
+    }
     if (base == "patchable_const") {
         if (type_suffix == Type::i64()) { op = Opcode::patchable_const_i64; return true; }
         op = Opcode::patchable_const_i32;

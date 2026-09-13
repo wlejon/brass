@@ -282,6 +282,17 @@ BRASS_API BrassStatus BRASS_CALL brass_kernel_jit_auto_parallelize(
 );
 
 /* ========================================================================= */
+/* PTX CUDA Target Emitter                                                   */
+/* ========================================================================= */
+BRASS_API BrassStatus BRASS_CALL brass_kernel_emit_ptx(
+    BrassFunction fn,
+    const char* sm_arch,
+    char** out_ptx,
+    size_t* out_len
+);
+BRASS_API void BRASS_CALL brass_free_string(char* str);
+
+/* ========================================================================= */
 /* AOT Binary Compilation                                                    */
 /* ========================================================================= */
 BRASS_API BrassStatus BRASS_CALL brass_compile_to_object(BrassModule mod, int target_format, void** out_bytes, size_t* out_size);

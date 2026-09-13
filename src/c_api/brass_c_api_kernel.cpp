@@ -1,5 +1,7 @@
 #include "brass_c_api_internal.hpp"
+#include <brass/target/ptx_target.hpp>
 #include <cstring>
+#include <cstdlib>
 
 using namespace brass;
 
@@ -229,6 +231,39 @@ BrassStatus brass_kernel_jit_auto_parallelize(
     } catch (const std::exception& e) {
         set_ctx_exception(kj->ctx, "brass_kernel_jit_auto_parallelize", e);
         return BRASS_ERR_GENERIC;
+    }
+}
+
+/* PTX CUDA Target Emitter */
+BrassStatus brass_kernel_emit_ptx(
+    BrassFunction fn,
+    const char* sm_arch,
+    char** out_ptx,
+    size_t* out_len
+) {
+    if (!fn || !fn->func || !out_ptx) return BRASS_ERR_INVALID_ARGUMENT;
+    try {
+        target::PtxOptions opts;
+        if (sm_arch && *sm_arch) {
+            opts.sm_arch = sm_arch;
+        }
+        std::string ptx = target::PtxTarget::emit_function(*fn->func, opts);
+        char* buf = static_cast<char*>(std::malloc(ptx.size() + 1));
+        if (!buf) return BRASS_ERR_GENERIC;
+        std::memcpy(buf, ptx.c_str(), ptx.size() + 1);
+        *out_ptx = buf;
+        if (out_len) {
+            *out_len = ptx.size();
+        }
+        return BRASS_OK;
+    } catch (...) {
+        return BRASS_ERR_GENERIC;
+    }
+}
+
+void brass_free_string(char* str) {
+    if (str) {
+        std::free(str);
     }
 }
 

@@ -370,8 +370,8 @@ bool Verifier::verify_function(const Function& fn) {
                     }
                     break;
                 case Opcode::fconst_f64:
-                    if (inst->type() != Type::f64()) {
-                        report_error(inst_prefix + "Result type must be f64, got " + std::string(inst->type().name()) + ".");
+                    if (inst->type() != Type::f64() && inst->type() != Type::f32()) {
+                        report_error(inst_prefix + "Result type must be f64 or f32, got " + std::string(inst->type().name()) + ".");
                     }
                     break;
                 case Opcode::patchable_const_i32:

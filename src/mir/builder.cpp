@@ -148,6 +148,16 @@ Value* Builder::build_iconst_i64(int64_t val) {
     return res;
 }
 
+Value* Builder::build_fconst_f32(float val) {
+    Instruction* inst = get_arena().make<Instruction>(Opcode::fconst_f64, Type::f32());
+    inst->set_imm_f64(static_cast<double>(val));
+    Value* res = create_value(Type::f32());
+    res->set_defining_instruction(inst);
+    inst->set_result(res);
+    insert(inst);
+    return res;
+}
+
 Value* Builder::build_fconst_f64(double val) {
     Instruction* inst = get_arena().make<Instruction>(Opcode::fconst_f64, Type::f64());
     inst->set_imm_f64(val);

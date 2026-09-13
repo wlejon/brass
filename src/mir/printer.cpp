@@ -111,7 +111,11 @@ public:
                 os_ << "iconst.i64 " << inst.imm_i64();
                 break;
             case Opcode::fconst_f64:
-                os_ << "fconst.f64 " << format_float(inst.imm_f64());
+                if (inst.type() == Type::f32()) {
+                    os_ << "fconst.f32 " << format_float(inst.imm_f64());
+                } else {
+                    os_ << "fconst.f64 " << format_float(inst.imm_f64());
+                }
                 break;
             case Opcode::patchable_const_i32:
                 os_ << "patchable_const.i32 @" << inst.symbol() << ", " << inst.imm_i32();
@@ -573,14 +577,18 @@ private:
 
             for (const Value* param : bb->params()) {
                 if (param && val_names_.find(param) == val_names_.end()) {
-                    val_names_[param] = "%" + std::to_string(next_v_id++);
+                    std::string s = "%";
+                    s += std::to_string(next_v_id++);
+                    val_names_[param] = std::move(s);
                 }
             }
 
             for (const Instruction* inst : *const_cast<BasicBlock*>(bb)) {
                 if (inst && inst->produces_value() && inst->result()) {
                     if (val_names_.find(inst->result()) == val_names_.end()) {
-                        val_names_[inst->result()] = "%" + std::to_string(next_v_id++);
+                        std::string s = "%";
+                        s += std::to_string(next_v_id++);
+                        val_names_[inst->result()] = std::move(s);
                     }
                 }
             }

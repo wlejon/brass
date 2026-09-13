@@ -45,6 +45,7 @@ public:
     // Constants
     Value* build_iconst_i32(int32_t val);
     Value* build_iconst_i64(int64_t val);
+    Value* build_fconst_f32(float val);
     Value* build_fconst_f64(double val);
     Value* build_patchable_const_i32(std::string_view symbol, int32_t initial_val);
     Value* build_patchable_const_i64(std::string_view symbol, int64_t initial_val);
