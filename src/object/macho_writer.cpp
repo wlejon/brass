@@ -451,7 +451,11 @@ std::vector<uint8_t> MachOWriter::write() {
 
             bool is_func = r_extern && (sym_idx < all_symbols.size() && all_symbols[sym_idx].type == SymbolType::Function);
 
-            if (r.kind == RelocKind::PCRel32 || r.kind == RelocKind::Plt32) {
+            if (r.kind == RelocKind::PCRel32) {
+                r_pcrel = 1;
+                r_length = 2;
+                r_type = macho::X86_64_RELOC_SIGNED;
+            } else if (r.kind == RelocKind::Plt32) {
                 r_pcrel = 1;
                 r_length = 2;
                 r_type = is_func ? macho::X86_64_RELOC_BRANCH : macho::X86_64_RELOC_SIGNED;
