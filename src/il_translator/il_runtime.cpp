@@ -865,7 +865,12 @@ extern "C" {
 BRONZE_WEAK_DATA uintptr_t brass_tlab_top = 0;
 BRONZE_WEAK_DATA uintptr_t brass_tlab_end = 0;
 BRONZE_WEAK_DATA void* brass_root_shape = nullptr;
+#if defined(_MSC_VER)
+void* brass_dummy_bronze_tls_block_addr() { return &g_bronze_dummy_tls_block; }
+#pragma comment(linker, "/alternatename:bronze_tls_block_addr=brass_dummy_bronze_tls_block_addr")
+#else
 BRONZE_WEAK void* bronze_tls_block_addr() { return &g_bronze_dummy_tls_block; }
+#endif
 }
 
 uint32_t g_bronze_main_key_constants = 0;
