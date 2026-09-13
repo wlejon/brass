@@ -378,4 +378,181 @@ BrassStatus brass_build_store(BrassBuilder b, BrassType type, BrassValue base, i
     }
 }
 
+BrassValue brass_build_load_indexed(BrassBuilder b, BrassType type, BrassValue base, BrassValue index, uint8_t scale, int32_t offset) {
+    if (!b || !type || !base || !base->val || !index || !index->val) return nullptr;
+    try {
+        Value* res = b->builder.build_load_indexed(type->type, base->val, index->val, scale, offset);
+        return b->ctx ? b->ctx->wrap_value(res) : nullptr;
+    } catch (const std::exception& e) {
+        set_ctx_exception(b->ctx, "brass_build_load_indexed", e);
+        return nullptr;
+    }
+}
+
+BrassStatus brass_build_store_indexed(BrassBuilder b, BrassType type, BrassValue base, BrassValue index, uint8_t scale, int32_t offset, BrassValue val) {
+    if (!b || !type || !base || !base->val || !index || !index->val || !val || !val->val) return BRASS_ERR_INVALID_ARGUMENT;
+    try {
+        b->builder.build_store_indexed(type->type, base->val, index->val, scale, offset, val->val);
+        return BRASS_OK;
+    } catch (const std::exception& e) {
+        set_ctx_exception(b->ctx, "brass_build_store_indexed", e);
+        return BRASS_ERR_GENERIC;
+    }
+}
+
+/* Vector (SIMD) & FMA */
+BrassValue brass_build_fma(BrassBuilder b, BrassValue a, BrassValue b_val, BrassValue c) {
+    if (!b || !a || !a->val || !b_val || !b_val->val || !c || !c->val) return nullptr;
+    try {
+        Value* res = b->builder.build_fma(a->val, b_val->val, c->val);
+        return b->ctx ? b->ctx->wrap_value(res) : nullptr;
+    } catch (const std::exception& e) {
+        set_ctx_exception(b->ctx, "brass_build_fma", e);
+        return nullptr;
+    }
+}
+
+BrassValue brass_build_vfma(BrassBuilder b, BrassValue a, BrassValue b_val, BrassValue c) {
+    if (!b || !a || !a->val || !b_val || !b_val->val || !c || !c->val) return nullptr;
+    try {
+        Value* res = b->builder.build_vfma(a->val, b_val->val, c->val);
+        return b->ctx ? b->ctx->wrap_value(res) : nullptr;
+    } catch (const std::exception& e) {
+        set_ctx_exception(b->ctx, "brass_build_vfma", e);
+        return nullptr;
+    }
+}
+
+BrassValue brass_build_vload(BrassBuilder b, BrassType type, BrassValue base, int32_t offset) {
+    if (!b || !type || !base || !base->val) return nullptr;
+    try {
+        Value* res = b->builder.build_vload(type->type, base->val, offset);
+        return b->ctx ? b->ctx->wrap_value(res) : nullptr;
+    } catch (const std::exception& e) {
+        set_ctx_exception(b->ctx, "brass_build_vload", e);
+        return nullptr;
+    }
+}
+
+BrassStatus brass_build_vstore(BrassBuilder b, BrassType type, BrassValue base, int32_t offset, BrassValue val) {
+    if (!b || !type || !base || !base->val || !val || !val->val) return BRASS_ERR_INVALID_ARGUMENT;
+    try {
+        b->builder.build_vstore(type->type, base->val, offset, val->val);
+        return BRASS_OK;
+    } catch (const std::exception& e) {
+        set_ctx_exception(b->ctx, "brass_build_vstore", e);
+        return BRASS_ERR_GENERIC;
+    }
+}
+
+BrassValue brass_build_vadd(BrassBuilder b, BrassValue lhs, BrassValue rhs) {
+    if (!b || !lhs || !lhs->val || !rhs || !rhs->val) return nullptr;
+    try {
+        Value* res = b->builder.build_vadd(lhs->val, rhs->val);
+        return b->ctx ? b->ctx->wrap_value(res) : nullptr;
+    } catch (const std::exception& e) {
+        set_ctx_exception(b->ctx, "brass_build_vadd", e);
+        return nullptr;
+    }
+}
+
+BrassValue brass_build_vsub(BrassBuilder b, BrassValue lhs, BrassValue rhs) {
+    if (!b || !lhs || !lhs->val || !rhs || !rhs->val) return nullptr;
+    try {
+        Value* res = b->builder.build_vsub(lhs->val, rhs->val);
+        return b->ctx ? b->ctx->wrap_value(res) : nullptr;
+    } catch (const std::exception& e) {
+        set_ctx_exception(b->ctx, "brass_build_vsub", e);
+        return nullptr;
+    }
+}
+
+BrassValue brass_build_vmul(BrassBuilder b, BrassValue lhs, BrassValue rhs) {
+    if (!b || !lhs || !lhs->val || !rhs || !rhs->val) return nullptr;
+    try {
+        Value* res = b->builder.build_vmul(lhs->val, rhs->val);
+        return b->ctx ? b->ctx->wrap_value(res) : nullptr;
+    } catch (const std::exception& e) {
+        set_ctx_exception(b->ctx, "brass_build_vmul", e);
+        return nullptr;
+    }
+}
+
+BrassValue brass_build_vdiv(BrassBuilder b, BrassValue lhs, BrassValue rhs) {
+    if (!b || !lhs || !lhs->val || !rhs || !rhs->val) return nullptr;
+    try {
+        Value* res = b->builder.build_vdiv(lhs->val, rhs->val);
+        return b->ctx ? b->ctx->wrap_value(res) : nullptr;
+    } catch (const std::exception& e) {
+        set_ctx_exception(b->ctx, "brass_build_vdiv", e);
+        return nullptr;
+    }
+}
+
+BrassValue brass_build_vmin(BrassBuilder b, BrassValue lhs, BrassValue rhs) {
+    if (!b || !lhs || !lhs->val || !rhs || !rhs->val) return nullptr;
+    try {
+        Value* res = b->builder.build_vmin(lhs->val, rhs->val);
+        return b->ctx ? b->ctx->wrap_value(res) : nullptr;
+    } catch (const std::exception& e) {
+        set_ctx_exception(b->ctx, "brass_build_vmin", e);
+        return nullptr;
+    }
+}
+
+BrassValue brass_build_vmax(BrassBuilder b, BrassValue lhs, BrassValue rhs) {
+    if (!b || !lhs || !lhs->val || !rhs || !rhs->val) return nullptr;
+    try {
+        Value* res = b->builder.build_vmax(lhs->val, rhs->val);
+        return b->ctx ? b->ctx->wrap_value(res) : nullptr;
+    } catch (const std::exception& e) {
+        set_ctx_exception(b->ctx, "brass_build_vmax", e);
+        return nullptr;
+    }
+}
+
+BrassValue brass_build_vbroadcast(BrassBuilder b, BrassType vec_type, BrassValue scalar_val) {
+    if (!b || !vec_type || !scalar_val || !scalar_val->val) return nullptr;
+    try {
+        Value* res = b->builder.build_vbroadcast(vec_type->type, scalar_val->val);
+        return b->ctx ? b->ctx->wrap_value(res) : nullptr;
+    } catch (const std::exception& e) {
+        set_ctx_exception(b->ctx, "brass_build_vbroadcast", e);
+        return nullptr;
+    }
+}
+
+BrassValue brass_build_vextract_lane(BrassBuilder b, BrassValue vec_val, uint32_t lane) {
+    if (!b || !vec_val || !vec_val->val) return nullptr;
+    try {
+        Value* res = b->builder.build_vextract_lane(vec_val->val, lane);
+        return b->ctx ? b->ctx->wrap_value(res) : nullptr;
+    } catch (const std::exception& e) {
+        set_ctx_exception(b->ctx, "brass_build_vextract_lane", e);
+        return nullptr;
+    }
+}
+
+BrassValue brass_build_vinsert_lane(BrassBuilder b, BrassValue vec_val, BrassValue scalar_val, uint32_t lane) {
+    if (!b || !vec_val || !vec_val->val || !scalar_val || !scalar_val->val) return nullptr;
+    try {
+        Value* res = b->builder.build_vinsert_lane(vec_val->val, scalar_val->val, lane);
+        return b->ctx ? b->ctx->wrap_value(res) : nullptr;
+    } catch (const std::exception& e) {
+        set_ctx_exception(b->ctx, "brass_build_vinsert_lane", e);
+        return nullptr;
+    }
+}
+
+BrassValue brass_build_vzero(BrassBuilder b, BrassType vec_type) {
+    if (!b || !vec_type) return nullptr;
+    try {
+        Value* res = b->builder.build_vzero(vec_type->type);
+        return b->ctx ? b->ctx->wrap_value(res) : nullptr;
+    } catch (const std::exception& e) {
+        set_ctx_exception(b->ctx, "brass_build_vzero", e);
+        return nullptr;
+    }
+}
+
 } /* extern "C" */

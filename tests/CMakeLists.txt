@@ -136,6 +136,7 @@ add_executable(brass_unit_tests
     unit/test_type_feedback.cpp
     unit/test_speculative_inlining.cpp
     unit/test_baseline_jit.cpp
+    unit/test_kernel_jit.cpp
 )
 
 target_include_directories(brass_unit_tests

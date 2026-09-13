@@ -330,6 +330,7 @@ Value* Builder::build_fma_f64(Value* a, Value* b, Value* c) {
 
 Value* Builder::build_fma(Value* a, Value* b, Value* c) {
     Type t = a ? a->type() : Type::f64();
+    if (t.is_vector()) return build_vfma(a, b, c);
     if (t == Type::f32()) return build_fma_f32(a, b, c);
     return build_fma_f64(a, b, c);
 }

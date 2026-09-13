@@ -85,6 +85,9 @@ typedef struct BrassValue_T* BrassValue;
 typedef struct BrassType_T* BrassType;
 typedef struct BrassJitEngine_T* BrassJitEngine;
 typedef struct BrassCompiledModule_T* BrassCompiledModule;
+typedef struct BrassKernelOptions_T* BrassKernelOptions;
+typedef struct BrassKernelJit_T* BrassKernelJit;
+typedef struct BrassKernelFunction_T* BrassKernelFunction;
 
 /* Options configuration struct */
 typedef struct BrassOptions {
@@ -186,6 +189,24 @@ BRASS_API BrassValue BRASS_CALL brass_build_func_addr(BrassBuilder b, const char
 /* Memory */
 BRASS_API BrassValue BRASS_CALL brass_build_load(BrassBuilder b, BrassType type, BrassValue base, int32_t offset);
 BRASS_API BrassStatus BRASS_CALL brass_build_store(BrassBuilder b, BrassType type, BrassValue base, int32_t offset, BrassValue val);
+BRASS_API BrassValue BRASS_CALL brass_build_load_indexed(BrassBuilder b, BrassType type, BrassValue base, BrassValue index, uint8_t scale, int32_t offset);
+BRASS_API BrassStatus BRASS_CALL brass_build_store_indexed(BrassBuilder b, BrassType type, BrassValue base, BrassValue index, uint8_t scale, int32_t offset, BrassValue val);
+
+/* Vector (SIMD) & FMA */
+BRASS_API BrassValue BRASS_CALL brass_build_fma(BrassBuilder b, BrassValue a, BrassValue b_val, BrassValue c);
+BRASS_API BrassValue BRASS_CALL brass_build_vfma(BrassBuilder b, BrassValue a, BrassValue b_val, BrassValue c);
+BRASS_API BrassValue BRASS_CALL brass_build_vload(BrassBuilder b, BrassType type, BrassValue base, int32_t offset);
+BRASS_API BrassStatus BRASS_CALL brass_build_vstore(BrassBuilder b, BrassType type, BrassValue base, int32_t offset, BrassValue val);
+BRASS_API BrassValue BRASS_CALL brass_build_vadd(BrassBuilder b, BrassValue lhs, BrassValue rhs);
+BRASS_API BrassValue BRASS_CALL brass_build_vsub(BrassBuilder b, BrassValue lhs, BrassValue rhs);
+BRASS_API BrassValue BRASS_CALL brass_build_vmul(BrassBuilder b, BrassValue lhs, BrassValue rhs);
+BRASS_API BrassValue BRASS_CALL brass_build_vdiv(BrassBuilder b, BrassValue lhs, BrassValue rhs);
+BRASS_API BrassValue BRASS_CALL brass_build_vmin(BrassBuilder b, BrassValue lhs, BrassValue rhs);
+BRASS_API BrassValue BRASS_CALL brass_build_vmax(BrassBuilder b, BrassValue lhs, BrassValue rhs);
+BRASS_API BrassValue BRASS_CALL brass_build_vbroadcast(BrassBuilder b, BrassType vec_type, BrassValue scalar_val);
+BRASS_API BrassValue BRASS_CALL brass_build_vextract_lane(BrassBuilder b, BrassValue vec_val, uint32_t lane);
+BRASS_API BrassValue BRASS_CALL brass_build_vinsert_lane(BrassBuilder b, BrassValue vec_val, BrassValue scalar_val, uint32_t lane);
+BRASS_API BrassValue BRASS_CALL brass_build_vzero(BrassBuilder b, BrassType vec_type);
 
 /* ========================================================================= */
 /* Bronze IL Translation Bridge                                              */
@@ -202,6 +223,63 @@ BRASS_API BrassCompiledModule BRASS_CALL brass_jit_compile_module(BrassJitEngine
 BRASS_API void* BRASS_CALL brass_jit_get_function_address(BrassJitEngine jit, const char* name);
 BRASS_API void BRASS_CALL brass_compiled_module_destroy(BrassCompiledModule mod);
 BRASS_API void* BRASS_CALL brass_compiled_module_get_symbol(BrassCompiledModule mod, const char* name);
+
+/* ========================================================================= */
+/* Kernel JIT & Polyhedral Loop Parallelization                              */
+/* ========================================================================= */
+typedef struct BrassLoopAnalysis {
+    int is_parallelizable;
+    int is_doall;
+    int is_reduction;
+    int has_const_trip_count;
+    uint64_t const_trip_count;
+    char rejection_reason[256];
+    size_t dependence_count;
+} BrassLoopAnalysis;
+
+/* Kernel Options */
+BRASS_API BrassKernelOptions BRASS_CALL brass_kernel_options_create(void);
+BRASS_API void BRASS_CALL brass_kernel_options_destroy(BrassKernelOptions opts);
+BRASS_API void BRASS_CALL brass_kernel_options_set_optimize(BrassKernelOptions opts, int enable);
+BRASS_API void BRASS_CALL brass_kernel_options_set_avx2(BrassKernelOptions opts, int enable);
+BRASS_API void BRASS_CALL brass_kernel_options_set_fma(BrassKernelOptions opts, int enable);
+BRASS_API void BRASS_CALL brass_kernel_options_set_fp_reassociation(BrassKernelOptions opts, int enable);
+BRASS_API void BRASS_CALL brass_kernel_options_set_vectorize(BrassKernelOptions opts, int enable);
+BRASS_API void BRASS_CALL brass_kernel_options_set_parallel(BrassKernelOptions opts, int enable);
+BRASS_API void BRASS_CALL brass_kernel_options_set_parallel_threshold(BrassKernelOptions opts, uint64_t threshold);
+BRASS_API void BRASS_CALL brass_kernel_options_set_parallel_workers(BrassKernelOptions opts, uint32_t workers);
+BRASS_API void BRASS_CALL brass_kernel_options_set_unroll_factor(BrassKernelOptions opts, size_t factor);
+
+/* Kernel JIT Engine */
+BRASS_API BrassKernelJit BRASS_CALL brass_kernel_jit_create(BrassContext ctx, const BrassKernelOptions opts);
+BRASS_API void BRASS_CALL brass_kernel_jit_destroy(BrassKernelJit kj);
+BRASS_API void BRASS_CALL brass_kernel_jit_set_parallel_workers(BrassKernelJit kj, uint32_t workers);
+BRASS_API uint32_t BRASS_CALL brass_kernel_jit_get_parallel_workers(BrassKernelJit kj);
+BRASS_API void BRASS_CALL brass_kernel_jit_set_parallel_threshold(BrassKernelJit kj, uint64_t threshold);
+BRASS_API uint64_t BRASS_CALL brass_kernel_jit_get_parallel_threshold(BrassKernelJit kj);
+BRASS_API BrassStatus BRASS_CALL brass_kernel_jit_register_symbol(BrassKernelJit kj, const char* name, void* address);
+BRASS_API BrassKernelFunction BRASS_CALL brass_kernel_jit_compile(BrassKernelJit kj, BrassModule mod, const char* entry_name);
+BRASS_API BrassKernelFunction BRASS_CALL brass_kernel_jit_compile_function(BrassKernelJit kj, BrassFunction fn);
+
+/* Compiled Kernel Function */
+BRASS_API void* BRASS_CALL brass_kernel_function_get_address(BrassKernelFunction kfn);
+BRASS_API const char* BRASS_CALL brass_kernel_function_get_name(BrassKernelFunction kfn);
+BRASS_API size_t BRASS_CALL brass_kernel_function_get_code_size(BrassKernelFunction kfn);
+BRASS_API void BRASS_CALL brass_kernel_function_destroy(BrassKernelFunction kfn);
+
+/* Polyhedral Loop Dependence Analysis */
+BRASS_API BrassStatus BRASS_CALL brass_kernel_jit_analyze_loops(
+    BrassKernelJit kj,
+    BrassFunction fn,
+    BrassLoopAnalysis* out_analyses,
+    size_t max_analyses,
+    size_t* out_analysis_count
+);
+BRASS_API BrassStatus BRASS_CALL brass_kernel_jit_auto_parallelize(
+    BrassKernelJit kj,
+    BrassFunction fn,
+    int* out_changed
+);
 
 /* ========================================================================= */
 /* AOT Binary Compilation                                                    */

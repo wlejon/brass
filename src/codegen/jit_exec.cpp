@@ -8,6 +8,7 @@
 #include <brass/runtime/exception.hpp>
 #include <brass/runtime/coroutine.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
+#include <brass/runtime/parallel_runtime.hpp>
 #include "../il_translator/il_runtime.hpp"
 #include <algorithm>
 #include <mutex>
@@ -184,6 +185,13 @@ JitExecutionEngine::JitExecutionEngine(const Target& target)
     register_external_symbol("brass_gc_write_barrier", reinterpret_cast<void*>(&brass_gc_write_barrier));
     register_external_symbol("brass_gc_card_table_base", reinterpret_cast<void*>(&brass_gc_card_table_base));
     register_external_symbol("brass_gc_heap_base", reinterpret_cast<void*>(&brass_gc_heap_base));
+    register_external_symbol("brass_parallel_for", reinterpret_cast<void*>(&brass_parallel_for));
+    register_external_symbol("brass_set_parallel_workers", reinterpret_cast<void*>(&brass_set_parallel_workers));
+    register_external_symbol("brass_get_parallel_workers", reinterpret_cast<void*>(&brass_get_parallel_workers));
+    register_external_symbol("brass_parallel_reduce_i64", reinterpret_cast<void*>(&brass_parallel_reduce_i64));
+    register_external_symbol("brass_parallel_reduce_f64", reinterpret_cast<void*>(&brass_parallel_reduce_f64));
+    register_external_symbol("brass_parallel_alloc_context", reinterpret_cast<void*>(&brass_parallel_alloc_context));
+    register_external_symbol("brass_parallel_free_context", reinterpret_cast<void*>(&brass_parallel_free_context));
 }
 
 JitExecutionEngine::JitExecutionEngine()
@@ -215,6 +223,13 @@ JitExecutionEngine::JitExecutionEngine()
     register_external_symbol("brass_gc_write_barrier", reinterpret_cast<void*>(&brass_gc_write_barrier));
     register_external_symbol("brass_gc_card_table_base", reinterpret_cast<void*>(&brass_gc_card_table_base));
     register_external_symbol("brass_gc_heap_base", reinterpret_cast<void*>(&brass_gc_heap_base));
+    register_external_symbol("brass_parallel_for", reinterpret_cast<void*>(&brass_parallel_for));
+    register_external_symbol("brass_set_parallel_workers", reinterpret_cast<void*>(&brass_set_parallel_workers));
+    register_external_symbol("brass_get_parallel_workers", reinterpret_cast<void*>(&brass_get_parallel_workers));
+    register_external_symbol("brass_parallel_reduce_i64", reinterpret_cast<void*>(&brass_parallel_reduce_i64));
+    register_external_symbol("brass_parallel_reduce_f64", reinterpret_cast<void*>(&brass_parallel_reduce_f64));
+    register_external_symbol("brass_parallel_alloc_context", reinterpret_cast<void*>(&brass_parallel_alloc_context));
+    register_external_symbol("brass_parallel_free_context", reinterpret_cast<void*>(&brass_parallel_free_context));
 }
 
 JitExecutionEngine::~JitExecutionEngine() {

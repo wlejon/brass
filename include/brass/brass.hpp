@@ -62,6 +62,7 @@
 #include <brass/codegen/software_pipeline.hpp>
 #include <brass/codegen/emit_context.hpp>
 #include <brass/codegen/jit_exec.hpp>
+#include <brass/codegen/kernel_jit.hpp>
 
 #include <brass/object/object_writer.hpp>
 #include <brass/object/coff_writer.hpp>

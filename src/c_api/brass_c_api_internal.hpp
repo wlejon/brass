@@ -7,6 +7,7 @@
 #include <brass/mir/builder.hpp>
 #include <brass/mir/instruction.hpp>
 #include <brass/codegen/jit_exec.hpp>
+#include <brass/codegen/kernel_jit.hpp>
 #include <brass/il_translator/il_translator.hpp>
 #include <brass/object/object_writer.hpp>
 #include <brass/object/coff_writer.hpp>
@@ -99,6 +100,20 @@ struct BrassJitEngine_T {
     BrassContext ctx = nullptr;
     std::unique_ptr<brass::codegen::JitExecutionEngine> engine;
     std::vector<std::unique_ptr<BrassCompiledModule_T>> compiled_modules;
+};
+
+struct BrassKernelOptions_T {
+    brass::codegen::KernelOptions opts;
+};
+
+struct BrassKernelFunction_T {
+    BrassContext ctx = nullptr;
+    brass::codegen::KernelFunction kfn;
+};
+
+struct BrassKernelJit_T {
+    BrassContext ctx = nullptr;
+    std::unique_ptr<brass::codegen::KernelJit> jit;
 };
 
 inline void set_ctx_error(BrassContext ctx, const std::string& msg) {
