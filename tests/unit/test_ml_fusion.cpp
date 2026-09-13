@@ -230,3 +230,26 @@ TEST_CASE("ML Fusion - QuantizedQ8DotProduct") {
         CHECK(ptx.find("cvt.rn.f32.s32") != std::string::npos);
     }
 }
+
+TEST_CASE("Fused GEMV PTX Generation") {
+    MlFusionCompiler compiler;
+
+    // 1. Fused GEMV SwiGLU PTX
+    {
+        std::string ptx = compiler.emit_ptx_fused_gemv_swiglu();
+        CHECK(ptx.find("fused_gemv_swiglu_kernel") != std::string::npos);
+        CHECK(ptx.find("ld.global.v4.f32") != std::string::npos);
+        CHECK(ptx.find("shfl.sync.down.b32") != std::string::npos);
+        CHECK(ptx.find("ex2.approx.f32") != std::string::npos);
+    }
+
+    // 2. Fused GEMV Residual PTX
+    {
+        std::string ptx = compiler.emit_ptx_fused_gemv_residual();
+        CHECK(ptx.find("fused_gemv_residual_kernel") != std::string::npos);
+        CHECK(ptx.find("ld.global.v4.f32") != std::string::npos);
+        CHECK(ptx.find("shfl.sync.down.b32") != std::string::npos);
+        CHECK(ptx.find("ld.global.f32") != std::string::npos);
+    }
+}
+

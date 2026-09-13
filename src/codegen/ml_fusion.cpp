@@ -111,7 +111,6 @@ KernelFunction MlFusionCompiler::compile_residual_rms_norm() {
 // =========================================================================
 
 Function* MlFusionCompiler::build_swiglu(Module& mod, std::string_view name) {
-    mod.add_external_symbol("expf");
     Function* fn = mod.create_function(
         name,
         Type::void_type(),
@@ -142,15 +141,34 @@ Function* MlFusionCompiler::build_swiglu(Module& mod, std::string_view name) {
     kb.builder().build_br_if(cond, loop_body, loop_exit);
 
     // loop_body: silu(g) = g / (1.0f + exp(-g)); out[i] = silu(g) * up[i]
+    // Inlined 5th-degree polynomial approximation for exp(-g) with scaling & squaring
     fn->append_block(loop_body);
     kb.position_at_end(loop_body);
     Value* gi = kb.load_f32_indexed(gate, i, 4, 0);
     Value* ui = kb.load_f32_indexed(up, i, 4, 0);
 
     Value* neg_gi = kb.builder().build_neg(gi);
-    Value* exp_neg_g = kb.builder().build_call("expf", Type::f32(), {neg_gi});
-    Value* one_f32 = kb.builder().build_fconst_f32(1.0f);
-    Value* denom = kb.add(one_f32, exp_neg_g);
+    Value* c_inv16 = kb.builder().build_fconst_f32(0.0625f);
+    Value* u = kb.mul(neg_gi, c_inv16);
+
+    Value* c_1_120 = kb.builder().build_fconst_f32(1.0f / 120.0f);
+    Value* c_1_24  = kb.builder().build_fconst_f32(1.0f / 24.0f);
+    Value* c_1_6   = kb.builder().build_fconst_f32(1.0f / 6.0f);
+    Value* c_1_2   = kb.builder().build_fconst_f32(0.5f);
+    Value* c_1_0   = kb.builder().build_fconst_f32(1.0f);
+
+    Value* p5 = kb.builder().build_fma_f32(u, c_1_120, c_1_24);
+    Value* p4 = kb.builder().build_fma_f32(u, p5, c_1_6);
+    Value* p3 = kb.builder().build_fma_f32(u, p4, c_1_2);
+    Value* p2 = kb.builder().build_fma_f32(u, p3, c_1_0);
+    Value* p1 = kb.builder().build_fma_f32(u, p2, c_1_0);
+
+    Value* sq1 = kb.mul(p1, p1);
+    Value* sq2 = kb.mul(sq1, sq1);
+    Value* sq3 = kb.mul(sq2, sq2);
+    Value* exp_neg_g = kb.mul(sq3, sq3);
+
+    Value* denom = kb.add(c_1_0, exp_neg_g);
     Value* silu_g = kb.div(gi, denom);
     Value* res = kb.mul(silu_g, ui);
     kb.store_f32_indexed(out, i, res, 4, 0);
