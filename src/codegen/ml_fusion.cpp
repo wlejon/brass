@@ -106,12 +106,6 @@ KernelFunction MlFusionCompiler::compile_residual_rms_norm() {
     return jit_.compile(mod, "fused_residual_rms_norm");
 }
 
-std::string MlFusionCompiler::emit_ptx_residual_rms_norm(const target::PtxOptions& opts) {
-    Module mod("mod_ptx_residual_rms_norm");
-    Function* fn = build_residual_rms_norm(mod);
-    return target::PtxTarget::emit_function(*fn, opts);
-}
-
 // =========================================================================
 // 2. FusedSwiGLU
 // =========================================================================
@@ -176,12 +170,6 @@ KernelFunction MlFusionCompiler::compile_swiglu() {
     Module mod("mod_swiglu");
     build_swiglu(mod);
     return jit_.compile(mod, "fused_swiglu");
-}
-
-std::string MlFusionCompiler::emit_ptx_swiglu(const target::PtxOptions& opts) {
-    Module mod("mod_ptx_swiglu");
-    Function* fn = build_swiglu(mod);
-    return target::PtxTarget::emit_function(*fn, opts);
 }
 
 // =========================================================================
@@ -256,13 +244,6 @@ KernelFunction MlFusionCompiler::compile_adaln_modulate(bool gated) {
     std::string name = gated ? "fused_adaln_modulate_gated" : "fused_adaln_modulate";
     build_adaln_modulate(mod, gated, name);
     return jit_.compile(mod, name);
-}
-
-std::string MlFusionCompiler::emit_ptx_adaln_modulate(bool gated, const target::PtxOptions& opts) {
-    Module mod("mod_ptx_adaln");
-    std::string name = gated ? "fused_adaln_modulate_gated" : "fused_adaln_modulate";
-    Function* fn = build_adaln_modulate(mod, gated, name);
-    return target::PtxTarget::emit_function(*fn, opts);
 }
 
 // =========================================================================
