@@ -427,24 +427,14 @@ void PropertyLoweringHelper::lower_method_def(
     uint32_t symbol_id,
     Value* closure
 ) {
-    if (prop_name.empty()) {
-        Value* sym_val = nullptr;
-        if (symbol_id == 0xFFFFFFFFu) {
-            sym_val = b.build_iconst_i32(static_cast<int32_t>(symbol_id));
-        } else {
-            Value* map_addr = b.build_func_addr(key_map_sym_);
-            sym_val = b.build_load(Type::i32(), map_addr, static_cast<int32_t>(symbol_id * sizeof(uint32_t)));
-        }
-        b.build_call("bronze_method_def", Type::void_type(), {obj, sym_val, closure});
-    } else if (symbol_id != 0) {
-        Value* sym_val = b.build_iconst_i32(static_cast<int32_t>(symbol_id));
-        b.build_call("bronze_method_def", Type::void_type(), {obj, sym_val, closure});
+    Value* sym_val = nullptr;
+    if (symbol_id == 0xFFFFFFFFu) {
+        sym_val = b.build_iconst_i32(static_cast<int32_t>(symbol_id));
     } else {
-        Module* mod = b.current_block()->parent()->parent();
-        const char* interned = mod->string_pool().intern(prop_name).data();
-        Value* name_val = b.build_iconst_i64(static_cast<int64_t>(reinterpret_cast<uintptr_t>(interned)));
-        b.build_call("brass_dynamic_object_set_prop_str", Type::void_type(), {obj, name_val, closure});
+        Value* map_addr = b.build_func_addr(key_map_sym_);
+        sym_val = b.build_load(Type::i32(), map_addr, static_cast<int32_t>(symbol_id * sizeof(uint32_t)));
     }
+    b.build_call("bronze_method_def", Type::void_type(), {obj, sym_val, closure});
 }
 
 bool is_property_il_op(BronzeOp op) {
