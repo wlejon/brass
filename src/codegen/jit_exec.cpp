@@ -68,11 +68,7 @@ JitMemoryBlock::JitMemoryBlock(size_t size) {
 #if defined(_WIN32)
     ptr_ = static_cast<uint8_t*>(VirtualAlloc(nullptr, page_aligned, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
 #else
-    void* hint = reinterpret_cast<void*>((reinterpret_cast<uintptr_t>(&is_jit_code_address) + 0x10000000ULL) & ~uintptr_t(0xFFF));
-    ptr_ = static_cast<uint8_t*>(mmap(hint, page_aligned, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
-    if (ptr_ == MAP_FAILED || !ptr_) {
-        ptr_ = static_cast<uint8_t*>(mmap(nullptr, page_aligned, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
-    }
+    ptr_ = static_cast<uint8_t*>(mmap(nullptr, page_aligned, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
     if (ptr_ == MAP_FAILED) ptr_ = nullptr;
 #endif
     if (ptr_) size_ = page_aligned;
@@ -424,6 +420,7 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
             }
 
             switch (r.kind) {
+                case object::RelocKind::PCRel32:
                 case object::RelocKind::Plt32: {
                     int64_t disp = reinterpret_cast<int64_t>(target_addr) + r.addend - reinterpret_cast<int64_t>(patch_loc);
                     if (disp < INT32_MIN || disp > INT32_MAX) {
@@ -448,11 +445,6 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
                             disp = reinterpret_cast<int64_t>(tramp_addr) + r.addend - reinterpret_cast<int64_t>(patch_loc);
                         }
                     }
-                    *reinterpret_cast<int32_t*>(patch_loc) = static_cast<int32_t>(disp);
-                    break;
-                }
-                case object::RelocKind::PCRel32: {
-                    int64_t disp = reinterpret_cast<int64_t>(target_addr) + r.addend - reinterpret_cast<int64_t>(patch_loc);
                     *reinterpret_cast<int32_t*>(patch_loc) = static_cast<int32_t>(disp);
                     break;
                 }
