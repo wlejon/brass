@@ -91,7 +91,8 @@ void EmitContext::emit_mov_instruction(const LirInst& inst) {
             GPR dst_gpr = inst.defs[0].preg_val.as_gpr();
             if (inst.uses[0].is_symbol()) {
                 const std::string& sym = inst.uses[0].symbol_name;
-                if (target_.is_macos()) {
+                bool is_external_runtime_sym = sym.starts_with("brass_") || sym.starts_with("_brass_");
+                if (target_.is_macos() && !is_external_runtime_sym) {
                     enc_.lea(dst_gpr, sym);
                 } else {
                     enc_.movabs(dst_gpr, sym);
