@@ -7,6 +7,7 @@
 #include <sstream>
 #include <cmath>
 #include <bit>
+#include <optional>
 
 namespace brass {
 
@@ -704,15 +705,27 @@ void RangeAnalysis::infer_loop_induction_variables(const LoopAnalysis& loops) {
 void RangeAnalysis::visit_dominator_block(
     const BasicBlock* bb,
     const DominatorTree& dom,
-    std::unordered_map<const Value*, ValueRange> current_ranges
+    std::unordered_map<const Value*, ValueRange>& current_ranges
 ) {
     if (!bb) return;
+
+    std::vector<std::pair<const Value*, std::optional<ValueRange>>> rollback;
+    auto set_range = [&](const Value* val, const ValueRange& r) {
+        auto it = current_ranges.find(val);
+        if (it != current_ranges.end()) {
+            rollback.emplace_back(val, it->second);
+            it->second = r;
+        } else {
+            rollback.emplace_back(val, std::nullopt);
+            current_ranges[val] = r;
+        }
+    };
 
     // Load any existing block parameter ranges for this block (e.g. from loop IV inference)
     auto b_it = block_ranges_.find(bb);
     if (b_it != block_ranges_.end()) {
         for (const auto& [param_v, r] : b_it->second) {
-            current_ranges[param_v] = r;
+            set_range(param_v, r);
         }
     }
 
@@ -724,6 +737,17 @@ void RangeAnalysis::visit_dominator_block(
             bool to_true = (term->true_target().block == bb && term->false_target().block != bb);
             bool to_false = (term->false_target().block == bb && term->true_target().block != bb);
             if (to_true || to_false) {
+                Instruction* c_inst = cond ? cond->defining_instruction() : nullptr;
+                if (c_inst) {
+                    if (c_inst->operand_count() >= 2) {
+                        Value* lhs = c_inst->operand(0);
+                        Value* rhs = c_inst->operand(1);
+                        auto it_l = current_ranges.find(lhs);
+                        rollback.emplace_back(lhs, it_l != current_ranges.end() ? std::optional<ValueRange>(it_l->second) : std::nullopt);
+                        auto it_r = current_ranges.find(rhs);
+                        rollback.emplace_back(rhs, it_r != current_ranges.end() ? std::optional<ValueRange>(it_r->second) : std::nullopt);
+                    }
+                }
                 apply_branch_condition(cond, to_true, current_ranges);
             }
         }
@@ -737,7 +761,7 @@ void RangeAnalysis::visit_dominator_block(
             if (inst->type() == Type::i32()) {
                 r.intersect_with(ValueRange::range(INT32_MIN, INT32_MAX));
             }
-            current_ranges[inst->result()] = r;
+            set_range(inst->result(), r);
 
             auto it = global_ranges_.find(inst->result());
             if (it != global_ranges_.end()) {
@@ -755,6 +779,14 @@ void RangeAnalysis::visit_dominator_block(
     for (const BasicBlock* child : dom.children(bb)) {
         if (child) {
             visit_dominator_block(child, dom, current_ranges);
+        }
+    }
+
+    for (auto it = rollback.rbegin(); it != rollback.rend(); ++it) {
+        if (it->second.has_value()) {
+            current_ranges[it->first] = *it->second;
+        } else {
+            current_ranges.erase(it->first);
         }
     }
 }

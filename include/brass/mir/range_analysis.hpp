@@ -128,7 +128,7 @@ private:
     void visit_dominator_block(
         const BasicBlock* bb,
         const DominatorTree& dom,
-        std::unordered_map<const Value*, ValueRange> current_ranges
+        std::unordered_map<const Value*, ValueRange>& current_ranges
     );
     void apply_branch_condition(
         const Value* cond,
