@@ -16,13 +16,13 @@ void EmitContext::emit_vec_instruction(const LirInst& inst) {
             if (dst.is_preg()) {
                 XMM dst_x = dst.preg_val.as_xmm();
                 if (src.is_preg()) enc_.movaps(dst_x, src.preg_val.as_xmm());
-                else enc_.movaps(dst_x, to_mem_address(src));
+                else enc_.movups(dst_x, to_mem_address(src));
             } else {
                 MemAddress dst_mem = to_mem_address(dst);
-                if (src.is_preg()) enc_.movaps(dst_mem, src.preg_val.as_xmm());
+                if (src.is_preg()) enc_.movups(dst_mem, src.preg_val.as_xmm());
                 else {
-                    enc_.movaps(XMM::XMM5, to_mem_address(src));
-                    enc_.movaps(dst_mem, XMM::XMM5);
+                    enc_.movups(XMM::XMM5, to_mem_address(src));
+                    enc_.movups(dst_mem, XMM::XMM5);
                 }
             }
             break;
@@ -53,13 +53,13 @@ void EmitContext::emit_vec_instruction(const LirInst& inst) {
             if (dst.is_preg()) {
                 XMM dst_x = dst.preg_val.as_xmm();
                 if (src.is_preg()) enc_.vmovaps(dst_x, src.preg_val.as_xmm());
-                else enc_.vmovaps(dst_x, to_mem_address(src));
+                else enc_.vmovups(dst_x, to_mem_address(src));
             } else {
                 MemAddress dst_mem = to_mem_address(dst);
-                if (src.is_preg()) enc_.vmovaps(dst_mem, src.preg_val.as_xmm());
+                if (src.is_preg()) enc_.vmovups(dst_mem, src.preg_val.as_xmm());
                 else {
-                    enc_.vmovaps(XMM::XMM5, to_mem_address(src));
-                    enc_.vmovaps(dst_mem, XMM::XMM5);
+                    enc_.vmovups(XMM::XMM5, to_mem_address(src));
+                    enc_.vmovups(dst_mem, XMM::XMM5);
                 }
             }
             break;
