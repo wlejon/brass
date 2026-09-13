@@ -269,6 +269,16 @@ TEST_CASE("Fused GEMV PTX Generation") {
         CHECK(ptx.find("cvt.f32.f16") != std::string::npos);
         CHECK(ptx.find("shfl.sync.down.b32") != std::string::npos);
     }
+
+    // 5. Fused Residual LayerNorm PTX
+    {
+        std::string ptx = compiler.emit_ptx_fused_residual_layernorm();
+        CHECK(ptx.find("fused_residual_layernorm_kernel") != std::string::npos);
+        CHECK(ptx.find("ld.global.v4.f32") != std::string::npos);
+        CHECK(ptx.find("st.global.v4.f32") != std::string::npos);
+        CHECK(ptx.find("shfl.sync.down.b32") != std::string::npos);
+        CHECK(ptx.find("rsqrt.approx.f32") != std::string::npos);
+    }
 }
 
 

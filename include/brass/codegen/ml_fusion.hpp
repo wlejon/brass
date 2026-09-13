@@ -119,6 +119,7 @@ public:
     // --- PTX CUDA Code Generation ---
     std::string emit_ptx_residual_rms_norm(const target::PtxOptions& opts = {});
     std::string emit_ptx_fused_residual_rms_norm(const target::PtxOptions& opts = {});
+    std::string emit_ptx_fused_residual_layernorm(const target::PtxOptions& opts = {});
     std::string emit_ptx_fused_layernorm_modulate(const target::PtxOptions& opts = {});
     std::string emit_ptx_swiglu(const target::PtxOptions& opts = {});
     std::string emit_ptx_adaln_modulate(bool gated = false, const target::PtxOptions& opts = {});
