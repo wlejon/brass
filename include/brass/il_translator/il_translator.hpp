@@ -2,6 +2,7 @@
 
 #include <brass/mir/module.hpp>
 #include <brass/core/diagnostics.hpp>
+#include <brass/il_translator/il_ast.hpp>
 #include <memory>
 #include <string_view>
 #include <string>
@@ -113,6 +114,13 @@ struct TranslationResult {
     std::unique_ptr<Module> module;
     std::string error_message;
 };
+
+// Translate Bronze in-memory AST directly to a Brass MIR Module
+TranslationResult translate_bronze_ast(
+    const BronzeModuleAST& ast,
+    const TranslatorOptions& options = {},
+    DiagnosticReporter* diag = nullptr
+);
 
 // Translate Bronze textual IL directly to a Brass MIR Module
 TranslationResult translate_bronze_il(

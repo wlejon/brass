@@ -4,22 +4,14 @@
 
 namespace brass::il {
 
-TranslationResult translate_bronze_il(
-    std::string_view il_text,
+TranslationResult translate_bronze_ast(
+    const BronzeModuleAST& ast,
     const TranslatorOptions& options,
     DiagnosticReporter* diag
 ) {
     TranslationResult result;
     DiagnosticReporter default_diag;
     DiagnosticReporter* active_diag = diag ? diag : &default_diag;
-
-    IlParser parser(il_text, active_diag, &options);
-    BronzeModuleAST ast;
-    if (!parser.parse_module(ast)) {
-        result.success = false;
-        result.error_message = active_diag->has_errors() ? active_diag->format_all() : "Failed to parse Bronze IL";
-        return result;
-    }
 
     IlLowering lowering(options, active_diag);
     auto mod = lowering.lower_module(ast);
@@ -32,6 +24,26 @@ TranslationResult translate_bronze_il(
     result.success = true;
     result.module = std::move(mod);
     return result;
+}
+
+TranslationResult translate_bronze_il(
+    std::string_view il_text,
+    const TranslatorOptions& options,
+    DiagnosticReporter* diag
+) {
+    DiagnosticReporter default_diag;
+    DiagnosticReporter* active_diag = diag ? diag : &default_diag;
+
+    IlParser parser(il_text, active_diag, &options);
+    BronzeModuleAST ast;
+    if (!parser.parse_module(ast)) {
+        TranslationResult result;
+        result.success = false;
+        result.error_message = active_diag->has_errors() ? active_diag->format_all() : "Failed to parse Bronze IL";
+        return result;
+    }
+
+    return translate_bronze_ast(ast, options, active_diag);
 }
 
 } // namespace brass::il
