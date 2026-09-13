@@ -91,10 +91,7 @@ void EmitContext::emit_mov_instruction(const LirInst& inst) {
             GPR dst_gpr = inst.defs[0].preg_val.as_gpr();
             if (inst.uses[0].is_symbol()) {
                 const std::string& sym = inst.uses[0].symbol_name;
-                bool is_local_module_sym = sym.starts_with("__bronze_") ||
-                                           sym.starts_with("_bronze_") ||
-                                           sym.starts_with("__wrapper_");
-                if (target_.is_macos() && is_local_module_sym) {
+                if (target_.is_macos()) {
                     enc_.lea(dst_gpr, sym);
                 } else {
                     enc_.movabs(dst_gpr, sym);
