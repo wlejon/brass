@@ -49,6 +49,13 @@ class ScopedCodeWrite {
 public:
     ScopedCodeWrite(void* addr, size_t size) {
         if (!addr || size == 0) return;
+#if defined(__APPLE__)
+        // On macOS (specifically x86_64 running under Rosetta 2), JIT memory is kept
+        // PROT_READ | PROT_WRITE | PROT_EXEC to prevent kernel SIGBUS faults caused by
+        // concurrent mprotect calls racing with translated instruction execution.
+        writable_ = true;
+        return;
+#endif
         if (!brass::codegen::is_jit_code_address(addr)) {
             // Not a JIT code page (e.g. stack buffer or data memory). Already writable!
             writable_ = true;

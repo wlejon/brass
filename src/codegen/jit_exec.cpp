@@ -109,22 +109,26 @@ void JitMemoryBlock::reset() {
 }
 
 void JitMemoryBlock::make_executable() {
+    if (!ptr_) return;
 #if defined(_WIN32)
-    if (ptr_) {
-        DWORD old_protect;
-        VirtualProtect(ptr_, size_, PAGE_EXECUTE_READWRITE, &old_protect);
-        FlushInstructionCache(GetCurrentProcess(), ptr_, size_);
-    }
+    DWORD old_protect;
+    VirtualProtect(ptr_, size_, PAGE_EXECUTE_READWRITE, &old_protect);
+    FlushInstructionCache(GetCurrentProcess(), ptr_, size_);
 #else
-    if (ptr_) {
-        mprotect(ptr_, size_, PROT_READ | PROT_WRITE | PROT_EXEC);
-        __builtin___clear_cache(reinterpret_cast<char*>(ptr_), reinterpret_cast<char*>(ptr_ + size_));
-    }
+    mprotect(ptr_, size_, PROT_READ | PROT_WRITE | PROT_EXEC);
+    __builtin___clear_cache(reinterpret_cast<char*>(ptr_), reinterpret_cast<char*>(ptr_ + size_));
 #endif
+    register_jit_memory_range(ptr_, size_);
 }
 
 void JitMemoryBlock::make_executable_read_only(size_t code_size) {
     if (!ptr_) return;
+#if defined(__APPLE__)
+    // On macOS under Rosetta 2, keeping JIT memory RWX prevents SIGBUS crashes
+    // caused by concurrent mprotect permission flipping during in-flight thread execution.
+    make_executable();
+    return;
+#endif
     size_t protect_size = (code_size == 0) ? size_ : ((code_size + 4095) & ~size_t(4095));
     if (protect_size > size_) protect_size = size_;
 #if defined(_WIN32)
