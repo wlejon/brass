@@ -663,6 +663,8 @@ bool IlLowering::lower_function(const BronzeFunction& fn_ast, Module& mod, const
     }
 
     fn->rebuild_cfg_predecessors();
+    fn->sort_blocks_rpo();
+    fn->rebuild_cfg_predecessors();
     return true;
 }
 

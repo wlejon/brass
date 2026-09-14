@@ -300,7 +300,7 @@ TEST_CASE("Bronze IL - 22-Program Live Corpus JIT and AOT Execution") {
         int64_t (*call_dynamic_7)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
         int64_t (*call_dynamic_8)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
         int64_t (*call_dynamic_n)(int64_t, int64_t, int32_t, const int64_t*);
-        void (*method_def)(int64_t, const char*, int32_t, int64_t);
+        void (*method_def)(int64_t, int32_t, int64_t);
         int64_t (*ic_get)(uint32_t, int64_t, const char*, int32_t);
         void (*ic_set)(uint32_t, int64_t, const char*, int32_t, int64_t);
         uint64_t (*brass_ic_get)(uint32_t, uint64_t, const char*, uint32_t);

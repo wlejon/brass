@@ -3,6 +3,8 @@
 #include <iomanip>
 #include <iostream>
 #include <stdexcept>
+#include <algorithm>
+#include <unordered_map>
 
 namespace brass::codegen {
 
@@ -541,6 +543,64 @@ VRegInfo& LirFunction::get_vreg_info(VReg v) {
     throw std::out_of_range("Invalid VReg id in get_vreg_info");
 }
 
+void LirFunction::sort_blocks_rpo() {
+    if (blocks.size() <= 1) return;
+    LirBlock* entry = entry_block();
+    if (!entry) return;
+
+    std::unordered_map<const LirBlock*, size_t> block_idx;
+    block_idx.reserve(blocks.size());
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        if (blocks[i]) block_idx[blocks[i].get()] = i;
+    }
+
+    std::vector<bool> visited(blocks.size(), false);
+    std::vector<LirBlock*> entry_po;
+    entry_po.reserve(blocks.size());
+
+    auto dfs = [&](auto& self, LirBlock* b, std::vector<LirBlock*>& po) -> void {
+        auto it = block_idx.find(b);
+        if (it == block_idx.end() || visited[it->second]) return;
+        visited[it->second] = true;
+        for (LirBlock* succ : b->successors) {
+            if (succ) self(self, succ, po);
+        }
+        po.push_back(b);
+    };
+
+    dfs(dfs, entry, entry_po);
+    std::reverse(entry_po.begin(), entry_po.end());
+
+    std::vector<LirBlock*> other_po;
+    for (const auto& entry_pair : resume_entries) {
+        LirBlock* rb = get_block_by_id(entry_pair.second);
+        if (rb) dfs(dfs, rb, other_po);
+    }
+
+    for (const auto& b : blocks) {
+        if (b) dfs(dfs, b.get(), other_po);
+    }
+
+    std::reverse(other_po.begin(), other_po.end());
+
+    std::vector<LirBlock*> full_order = std::move(entry_po);
+    full_order.insert(full_order.end(), other_po.begin(), other_po.end());
+
+    std::vector<std::unique_ptr<LirBlock>> new_blocks;
+    new_blocks.reserve(blocks.size());
+    std::unordered_map<LirBlock*, std::unique_ptr<LirBlock>> map;
+    for (auto& b : blocks) {
+        map[b.get()] = std::move(b);
+    }
+    for (LirBlock* ptr : full_order) {
+        auto it = map.find(ptr);
+        if (it != map.end() && it->second) {
+            new_blocks.push_back(std::move(it->second));
+        }
+    }
+    blocks = std::move(new_blocks);
+}
+
 std::string to_string(const LirFunction& fn) {
     std::ostringstream ss;
     ss << "function " << fn.name << "() -> " << fn.return_type.name() << " {\n";
@@ -552,3 +612,4 @@ std::string to_string(const LirFunction& fn) {
 }
 
 } // namespace brass::codegen
+

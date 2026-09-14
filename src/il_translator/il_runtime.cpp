@@ -472,16 +472,12 @@ void bronze_elem_set(int64_t arr_box, int64_t index_box, int64_t val, int32_t /*
     arr->set_element(idx, HostValue(static_cast<uint64_t>(val)), gc);
 }
 
-void bronze_method_def(int64_t obj_box, const char* name, int32_t key_index, int64_t closure_box) {
+void bronze_method_def(int64_t obj_box, int32_t key_index, int64_t closure_box) {
     auto* obj = unpack_dynamic_object(obj_box);
     if (!obj) return;
     HostGC* gc = brass::get_active_host_gc();
     HostValue val(static_cast<uint64_t>(closure_box));
-    if (name && *name) {
-        obj->set_property(name, val, ShapeRegistry::global(), gc);
-    } else {
-        obj->set_property(static_cast<uint32_t>(key_index), val, ShapeRegistry::global(), gc);
-    }
+    obj->set_property(static_cast<uint32_t>(key_index), val, ShapeRegistry::global(), gc);
 }
 
 void bronze_method_def_computed(int64_t obj_box, int64_t key_box, int64_t closure_box) {

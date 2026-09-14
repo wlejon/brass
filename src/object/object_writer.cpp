@@ -9,7 +9,6 @@
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/verifier.hpp>
 #include <algorithm>
-#include <iostream>
 
 namespace brass::object {
 
@@ -128,12 +127,16 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
         loop_opts.enable_f64_demote = false;
         loop_opts.enable_fp_reassociation = fn->allow_fp_reassociation() || mod.allow_fp_reassociation();
         optimize_function_loops(*opt_fn, loop_opts);
+        opt_fn->rebuild_cfg_predecessors();
+        opt_fn->sort_blocks_rpo();
+        opt_fn->rebuild_cfg_predecessors();
         verify_function(*opt_fn);
 
         // 1. ISel to LIR
         x64::X64ISel isel(target_, cc_);
         auto lir = isel.lower(*opt_fn);
         if (!lir) continue;
+        lir->sort_blocks_rpo();
 
         // 1.5 Loop Software Pipelining (if enabled)
         if (sched_opts_.enable_software_pipelining) {

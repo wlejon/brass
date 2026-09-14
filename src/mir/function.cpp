@@ -1,5 +1,6 @@
 #include <brass/mir/function.hpp>
 #include <algorithm>
+#include <unordered_map>
 
 namespace brass {
 
@@ -77,4 +78,48 @@ void Function::rebuild_cfg_predecessors() {
     }
 }
 
+void Function::sort_blocks_rpo() {
+    if (blocks_.size() <= 1) return;
+    BasicBlock* entry = entry_block();
+    if (!entry) return;
+
+    std::unordered_map<const BasicBlock*, size_t> block_idx;
+    block_idx.reserve(blocks_.size());
+    for (size_t i = 0; i < blocks_.size(); ++i) {
+        if (blocks_[i]) block_idx[blocks_[i]] = i;
+    }
+
+    std::vector<bool> visited(blocks_.size(), false);
+    std::vector<BasicBlock*> entry_po;
+    entry_po.reserve(blocks_.size());
+
+    auto dfs = [&](auto& self, BasicBlock* bb, std::vector<BasicBlock*>& po) -> void {
+        auto it = block_idx.find(bb);
+        if (it == block_idx.end() || visited[it->second]) return;
+        visited[it->second] = true;
+        for (BasicBlock* succ : bb->successors()) {
+            if (succ) self(self, succ, po);
+        }
+        po.push_back(bb);
+    };
+
+    dfs(dfs, entry, entry_po);
+    std::reverse(entry_po.begin(), entry_po.end());
+
+    std::vector<BasicBlock*> other_po;
+    for (const auto& rp : resume_points_) {
+        if (rp.second) dfs(dfs, rp.second, other_po);
+    }
+
+    for (BasicBlock* bb : blocks_) {
+        if (bb) dfs(dfs, bb, other_po);
+    }
+
+    std::reverse(other_po.begin(), other_po.end());
+
+    entry_po.insert(entry_po.end(), other_po.begin(), other_po.end());
+    blocks_ = std::move(entry_po);
+}
+
 } // namespace brass
+

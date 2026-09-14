@@ -460,6 +460,7 @@ public:
     LirBlock* create_block_with_id(uint32_t id, std::string name = "");
     LirBlock* entry_block() const { return blocks.empty() ? nullptr : blocks.front().get(); }
     LirBlock* get_block_by_id(uint32_t id) const;
+    void sort_blocks_rpo();
 
     const VRegInfo& get_vreg_info(VReg v) const;
     VRegInfo& get_vreg_info(VReg v);

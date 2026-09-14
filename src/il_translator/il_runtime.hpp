@@ -63,7 +63,7 @@ int64_t bronze_prop_get(int64_t obj_box, int32_t key_index, uint64_t* ic_entry =
 void bronze_prop_set(int64_t obj_box, int32_t key_index, int64_t val, uint64_t* ic_entry = nullptr, int32_t strict = 1);
 int64_t bronze_elem_get(int64_t arr_box, int64_t index_box);
 void bronze_elem_set(int64_t arr_box, int64_t index_box, int64_t val, int32_t ic_slot);
-void bronze_method_def(int64_t obj_box, const char* name, int32_t key_index, int64_t closure_box);
+void bronze_method_def(int64_t obj_box, int32_t key_index, int64_t closure_box);
 void bronze_method_def_computed(int64_t obj_box, int64_t key_box, int64_t closure_box);
 void bronze_define_own_attr(uint64_t obj_bits, uint32_t key_index, uint64_t val_bits, uint32_t mask);
 void bronze_accessor_def(uint64_t obj_bits, uint32_t key_index, uint64_t getter_bits, uint64_t setter_bits, int32_t enumerable);
