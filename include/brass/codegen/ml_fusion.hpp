@@ -102,12 +102,17 @@ public:
     KernelJit& jit() noexcept { return jit_; }
     const KernelJit& jit() const noexcept { return jit_; }
 
+    using GemvQ8_0Fn = void (*)(const void* W_q8_0, const float* X, float* Y, uint64_t N, uint64_t K);
+    using GemvQ4_KFn = void (*)(const void* W_q4_k, const float* X, float* Y, uint64_t N, uint64_t K);
+
     // --- MIR Function Builders ---
     Function* build_residual_rms_norm(Module& mod, std::string_view name = "fused_residual_rms_norm");
     Function* build_swiglu(Module& mod, std::string_view name = "fused_swiglu");
     Function* build_adaln_modulate(Module& mod, bool gated = false, std::string_view name = "fused_adaln_modulate");
     Function* build_q8_dot(Module& mod, std::string_view name = "fused_q8_dot");
     Function* build_block_q8_dot(Module& mod, std::string_view name = "fused_block_q8_dot");
+    Function* build_gemv_q8_0(Module& mod, std::string_view name = "gemv_q8_0");
+    Function* build_gemv_q4_k(Module& mod, std::string_view name = "gemv_q4_k");
 
     // --- CPU Compilation (Zero GC overhead) ---
     KernelFunction compile_residual_rms_norm();
@@ -115,6 +120,8 @@ public:
     KernelFunction compile_adaln_modulate(bool gated = false);
     KernelFunction compile_q8_dot();
     KernelFunction compile_block_q8_dot();
+    KernelFunction compile_gemv_q8_0();
+    KernelFunction compile_gemv_q4_k();
 
     // --- PTX CUDA Code Generation ---
     std::string emit_ptx_residual_rms_norm(const target::PtxOptions& opts = {});

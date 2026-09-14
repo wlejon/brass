@@ -523,28 +523,28 @@ void LinearScanAllocator::allocate_blocked_reg(LiveInterval& interval) {
 
 int32_t LinearScanAllocator::allocate_spill_slot(bool is_gcref, uint8_t size) {
     if (size == 32) {
-        while ((next_spill_slot_ + 1) % 4 != 0) {
+        while ((next_spill_slot_ % 4) != 0) {
             next_spill_slot_++;
             fn_.frame.spill_slot_is_gcref.push_back(false);
         }
-        int32_t slot = static_cast<int32_t>(next_spill_slot_);
-        next_spill_slot_ += 4;
         for (int i = 0; i < 4; ++i) {
             fn_.frame.spill_slot_is_gcref.push_back(false);
         }
+        next_spill_slot_ += 4;
         fn_.frame.num_spill_slots = next_spill_slot_;
+        int32_t slot = static_cast<int32_t>(next_spill_slot_ - 1);
         return slot;
     }
     if (size == 16) {
-        if ((next_spill_slot_ % 2) == 0) {
+        while ((next_spill_slot_ % 2) != 0) {
             next_spill_slot_++;
             fn_.frame.spill_slot_is_gcref.push_back(false);
         }
-        int32_t slot = static_cast<int32_t>(next_spill_slot_);
+        fn_.frame.spill_slot_is_gcref.push_back(false);
+        fn_.frame.spill_slot_is_gcref.push_back(false);
         next_spill_slot_ += 2;
-        fn_.frame.spill_slot_is_gcref.push_back(false);
-        fn_.frame.spill_slot_is_gcref.push_back(false);
         fn_.frame.num_spill_slots = next_spill_slot_;
+        int32_t slot = static_cast<int32_t>(next_spill_slot_ - 1);
         return slot;
     }
     int32_t slot = static_cast<int32_t>(next_spill_slot_++);

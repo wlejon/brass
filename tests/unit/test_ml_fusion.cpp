@@ -281,4 +281,144 @@ TEST_CASE("Fused GEMV PTX Generation") {
     }
 }
 
+TEST_CASE("ML Fusion - FusedGemvQ8_0 and FusedGemvQ4_K CPU JIT") {
+    MlFusionCompiler compiler;
+
+    // 1. Q8_0 CPU GEMV JIT
+    {
+        KernelFunction kfn = compiler.compile_gemv_q8_0();
+        CHECK(kfn.is_valid());
+        auto fn_ptr = kfn.as<MlFusionCompiler::GemvQ8_0Fn>();
+        CHECK(fn_ptr != nullptr);
+
+        constexpr uint64_t n = 4;
+        constexpr uint64_t k = 128;
+        constexpr uint64_t bpr = k / 32;
+
+        struct Q8Block {
+            uint16_t d;
+            int8_t   qs[32];
+        };
+        static_assert(sizeof(Q8Block) == 34, "Q8Block must be 34 bytes");
+
+        std::vector<Q8Block> w(n * bpr);
+        std::vector<float> x(k);
+        std::vector<float> y(n, 0.0f);
+        std::vector<float> ref_y(n, 0.0f);
+
+        for (uint64_t i = 0; i < k; ++i) {
+            x[i] = static_cast<float>(i % 11) * 0.1f - 0.5f;
+        }
+
+        for (uint64_t r = 0; r < n; ++r) {
+            float acc = 0.0f;
+            for (uint64_t b = 0; b < bpr; ++b) {
+                Q8Block& blk = w[r * bpr + b];
+                blk.d = 0x3800; // 0.5f in FP16
+                float d_val = 0.5f;
+                for (size_t j = 0; j < 32; ++j) {
+                    blk.qs[j] = static_cast<int8_t>((r * 17 + b * 7 + j * 3) % 25 - 12);
+                    float w_elem = d_val * static_cast<float>(blk.qs[j]);
+                    acc += w_elem * x[b * 32 + j];
+                }
+            }
+            ref_y[r] = acc;
+        }
+
+        fn_ptr(w.data(), x.data(), y.data(), n, k);
+
+        for (uint64_t r = 0; r < n; ++r) {
+            CHECK_NEAR(y[r], ref_y[r], 1e-4f);
+        }
+    }
+
+    // 2. Q4_K CPU GEMV JIT
+    {
+        KernelFunction kfn = compiler.compile_gemv_q4_k();
+        CHECK(kfn.is_valid());
+        auto fn_ptr = kfn.as<MlFusionCompiler::GemvQ4_KFn>();
+        CHECK(fn_ptr != nullptr);
+
+        constexpr uint64_t n = 2;
+        constexpr uint64_t k = 256;
+        constexpr uint64_t bpr = k / 256;
+
+        struct Q4KBlock {
+            uint16_t d;
+            uint16_t dmin;
+            uint8_t  scales[12];
+            uint8_t  qs[128];
+        };
+        static_assert(sizeof(Q4KBlock) == 144, "Q4KBlock must be 144 bytes");
+
+        std::vector<Q4KBlock> w(n * bpr);
+        std::vector<float> x(k);
+        std::vector<float> y(n, 0.0f);
+        std::vector<float> ref_y(n, 0.0f);
+
+        for (uint64_t i = 0; i < k; ++i) {
+            x[i] = static_cast<float>(i % 7) * 0.2f - 0.6f;
+        }
+
+        for (uint64_t r = 0; r < n; ++r) {
+            float acc = 0.0f;
+            for (uint64_t b = 0; b < bpr; ++b) {
+                Q4KBlock& blk = w[r * bpr + b];
+                blk.d = 0x3800;    // 0.5f in FP16
+                blk.dmin = 0x3400; // 0.25f in FP16
+                float d_val = 0.5f;
+                float dmin_val = 0.25f;
+
+                std::memset(blk.scales, 0, 12);
+                for (int j = 0; j < 4; ++j) {
+                    blk.scales[j] = 2;     // sc = 2
+                    blk.scales[j + 4] = 1; // m = 1
+                }
+                for (int j = 4; j < 8; ++j) {
+                    blk.scales[j + 4] = 0x12; // sc_lo = 2, m_lo = 1
+                }
+
+                uint8_t sc[8], m[8];
+                for (int j = 0; j < 8; ++j) {
+                    if (j < 4) {
+                        sc[j] = blk.scales[j] & 0x3F;
+                        m[j]  = blk.scales[j + 4] & 0x3F;
+                    } else {
+                        sc[j] = static_cast<uint8_t>((blk.scales[j + 4] & 0x0F) | ((blk.scales[j - 4] >> 6) << 4));
+                        m[j]  = static_cast<uint8_t>((blk.scales[j + 4] >> 4)   | ((blk.scales[j - 0] >> 6) << 4));
+                    }
+                }
+
+                for (int p = 0; p < 4; ++p) {
+                    const int is_lo = 2 * p;
+                    const int is_hi = 2 * p + 1;
+                    const float w_lo = static_cast<float>(sc[is_lo]) * d_val;
+                    const float w_hi = static_cast<float>(sc[is_hi]) * d_val;
+                    const float b_lo = static_cast<float>(m [is_lo]) * dmin_val;
+                    const float b_hi = static_cast<float>(m [is_hi]) * dmin_val;
+
+                    for (int l = 0; l < 32; ++l) {
+                        uint8_t n_lo = static_cast<uint8_t>((p * 8 + l) % 15);
+                        uint8_t n_hi = static_cast<uint8_t>((p * 4 + l * 2) % 15);
+                        blk.qs[p * 32 + l] = static_cast<uint8_t>((n_lo & 0x0F) | ((n_hi & 0x0F) << 4));
+
+                        float w0 = w_lo * static_cast<float>(n_lo) - b_lo;
+                        float w1 = w_hi * static_cast<float>(n_hi) - b_hi;
+                        acc += w0 * x[is_lo * 32 + l];
+                        acc += w1 * x[is_hi * 32 + l];
+                    }
+                }
+            }
+            ref_y[r] = acc;
+        }
+
+        fn_ptr(w.data(), x.data(), y.data(), n, k);
+
+        for (uint64_t r = 0; r < n; ++r) {
+            CHECK_NEAR(y[r], ref_y[r], 1e-4f);
+        }
+    }
+}
+
+
 
