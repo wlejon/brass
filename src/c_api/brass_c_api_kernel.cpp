@@ -205,8 +205,9 @@ BrassStatus brass_kernel_jit_analyze_loops(
                 out_analyses[i].has_const_trip_count = analyses[i].has_const_trip_count ? 1 : 0;
                 out_analyses[i].const_trip_count = analyses[i].const_trip_count;
                 out_analyses[i].dependence_count = analyses[i].dependences.size();
-                std::strncpy(out_analyses[i].rejection_reason, analyses[i].rejection_reason.c_str(), sizeof(out_analyses[i].rejection_reason) - 1);
-                out_analyses[i].rejection_reason[sizeof(out_analyses[i].rejection_reason) - 1] = '\0';
+                size_t copy_len = std::min(analyses[i].rejection_reason.size(), sizeof(out_analyses[i].rejection_reason) - 1);
+                std::memcpy(out_analyses[i].rejection_reason, analyses[i].rejection_reason.data(), copy_len);
+                out_analyses[i].rejection_reason[copy_len] = '\0';
             }
         }
         return BRASS_OK;
