@@ -377,7 +377,8 @@ std::vector<uint8_t> ElfWriter::write() {
     out.resize(16, 0);
 
     write_u16(out, elf::ET_REL);
-    write_u16(out, elf::EM_X86_64);
+    uint16_t machine = working_obj.target.is_aarch64() ? elf::EM_AARCH64 : elf::EM_X86_64;
+    write_u16(out, machine);
     write_u32(out, elf::EV_CURRENT);
     write_u64(out, 0); // e_entry
     write_u64(out, 0); // e_phoff

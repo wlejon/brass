@@ -10,6 +10,7 @@ namespace brass::object {
 
 namespace coff {
     constexpr uint16_t IMAGE_FILE_MACHINE_AMD64 = 0x8664;
+    constexpr uint16_t IMAGE_FILE_MACHINE_ARM64 = 0xAA64;
 
     constexpr uint32_t IMAGE_SCN_CNT_CODE               = 0x00000020;
     constexpr uint32_t IMAGE_SCN_CNT_INITIALIZED_DATA  = 0x00000040;

@@ -57,6 +57,18 @@ public:
         return Target(Arch::x64, OperatingSystem::macOS, ObjectFormat::MachO, 8, 16);
     }
 
+    static constexpr Target aarch64_linux() noexcept {
+        return Target(Arch::aarch64, OperatingSystem::Linux, ObjectFormat::ELF64, 8, 16);
+    }
+
+    static constexpr Target aarch64_macos() noexcept {
+        return Target(Arch::aarch64, OperatingSystem::macOS, ObjectFormat::MachO, 8, 16);
+    }
+
+    static constexpr Target aarch64_windows() noexcept {
+        return Target(Arch::aarch64, OperatingSystem::Windows, ObjectFormat::COFF, 8, 16);
+    }
+
     static Target host() noexcept;
 
     constexpr bool operator==(const Target& other) const noexcept = default;

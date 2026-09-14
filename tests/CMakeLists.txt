@@ -11,6 +11,10 @@ add_executable(brass_unit_tests
     unit/test_mini_cheney.cpp
     unit/test_interpreter.cpp
     unit/test_target_calling_conv.cpp
+    unit/test_aarch64_registers.cpp
+    unit/test_aarch64_operands.cpp
+    unit/test_aarch64_encoder.cpp
+    unit/test_aarch64_frame.cpp
     unit/test_x64_encoder.cpp
     unit/test_lir_isel.cpp
     unit/test_linear_scan.cpp

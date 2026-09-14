@@ -52,6 +52,8 @@
 #include <brass/target/calling_conv.hpp>
 #include <brass/target/x64/x64_registers.hpp>
 #include <brass/target/x64/x64_operands.hpp>
+#include <brass/target/aarch64/aarch64_registers.hpp>
+#include <brass/target/aarch64/aarch64_operands.hpp>
 #include <brass/codegen/lir.hpp>
 #include <brass/codegen/live_range.hpp>
 #include <brass/codegen/linear_scan.hpp>

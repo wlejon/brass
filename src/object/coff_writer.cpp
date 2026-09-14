@@ -204,7 +204,8 @@ std::vector<uint8_t> CoffWriter::write() {
     out.reserve(sym_table_offset + num_symbols * 18 + string_table.size() + 4);
 
     // Write IMAGE_FILE_HEADER (20 bytes)
-    write_u16(out, coff::IMAGE_FILE_MACHINE_AMD64);
+    uint16_t machine = working_obj.target.is_aarch64() ? coff::IMAGE_FILE_MACHINE_ARM64 : coff::IMAGE_FILE_MACHINE_AMD64;
+    write_u16(out, machine);
     write_u16(out, num_sections);
     write_u32(out, 0); // TimeDateStamp
     write_u32(out, sym_table_offset);

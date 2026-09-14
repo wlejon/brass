@@ -17,6 +17,7 @@ namespace elf {
 
     constexpr uint16_t ET_REL = 1;
     constexpr uint16_t EM_X86_64 = 62;
+    constexpr uint16_t EM_AARCH64 = 183;
 
     constexpr uint32_t SHT_NULL     = 0;
     constexpr uint32_t SHT_PROGBITS = 1;

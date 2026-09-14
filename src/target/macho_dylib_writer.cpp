@@ -488,8 +488,10 @@ std::vector<uint8_t> MachODylibWriter::write() {
 
     uint8_t* hdr_ptr = out.data();
     patch_u32(hdr_ptr + 0, macho::MH_MAGIC_64);
-    patch_u32(hdr_ptr + 4, static_cast<uint32_t>(macho::CPU_TYPE_X86_64));
-    patch_u32(hdr_ptr + 8, static_cast<uint32_t>(macho::CPU_SUBTYPE_X86_64_ALL));
+    uint32_t cpu_type = obj_.target.is_aarch64() ? static_cast<uint32_t>(macho::CPU_TYPE_ARM64) : static_cast<uint32_t>(macho::CPU_TYPE_X86_64);
+    uint32_t cpu_subtype = obj_.target.is_aarch64() ? static_cast<uint32_t>(macho::CPU_SUBTYPE_ARM64_ALL) : static_cast<uint32_t>(macho::CPU_SUBTYPE_X86_64_ALL);
+    patch_u32(hdr_ptr + 4, cpu_type);
+    patch_u32(hdr_ptr + 8, cpu_subtype);
     patch_u32(hdr_ptr + 12, macho::MH_DYLIB);
     patch_u32(hdr_ptr + 16, ncmds);
     patch_u32(hdr_ptr + 20, sizeofcmds);

@@ -719,7 +719,172 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
 
 } // namespace brass::codegen
 
-#else // !defined(__x86_64__) && !defined(_M_X64)
+#elif defined(__aarch64__) || defined(_M_ARM64)
+
+namespace brass::codegen {
+
+RuntimeValue JitExecutionEngine::invoke(std::string_view name) {
+    return invoke(name, {});
+}
+
+RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector<RuntimeValue>& args) {
+    void* addr = get_symbol_address(name);
+    if (!addr) {
+        throw std::runtime_error("JIT Error: Function '" + std::string(name) + "' not found");
+    }
+
+    Type ret_type = Type::i64();
+    auto sig_it = function_signatures_.find(std::string(name));
+    if (sig_it != function_signatures_.end()) {
+        ret_type = sig_it->second.first;
+    }
+
+    auto get_int = [&](size_t idx) -> int64_t {
+        if (idx >= args.size()) return 0;
+        return args[idx].as_i64();
+    };
+
+    auto get_float = [&](size_t idx) -> double {
+        if (idx >= args.size()) return 0.0;
+        return args[idx].as_f64();
+    };
+
+    bool has_float_arg = false;
+    for (const auto& a : args) {
+        if (a.is_f64() || a.is_f32()) has_float_arg = true;
+    }
+
+    if (args.empty()) {
+        if (ret_type.is_void()) {
+            reinterpret_cast<void(*)()>(addr)();
+            return RuntimeValue::from_void();
+        } else if (ret_type.is_float()) {
+            if (ret_type.kind() == TypeKind::F32) {
+                float r = reinterpret_cast<float(*)()>(addr)();
+                return RuntimeValue::from_f32(r);
+            }
+            double r = reinterpret_cast<double(*)()>(addr)();
+            return RuntimeValue::from_f64(r);
+        } else if (ret_type.kind() == TypeKind::I32) {
+            int32_t r = reinterpret_cast<int32_t(*)()>(addr)();
+            return RuntimeValue::from_i32(r);
+        } else {
+            int64_t r = reinterpret_cast<int64_t(*)()>(addr)();
+            return RuntimeValue::from_i64(r);
+        }
+    }
+
+    if (args.size() == 1) {
+        if (has_float_arg) {
+            double a0 = get_float(0);
+            if (ret_type.is_void()) {
+                reinterpret_cast<void(*)(double)>(addr)(a0);
+                return RuntimeValue::from_void();
+            } else if (ret_type.is_float()) {
+                if (ret_type.kind() == TypeKind::F32) {
+                    float r = reinterpret_cast<float(*)(double)>(addr)(a0);
+                    return RuntimeValue::from_f32(r);
+                }
+                double r = reinterpret_cast<double(*)(double)>(addr)(a0);
+                return RuntimeValue::from_f64(r);
+            } else {
+                int64_t r = reinterpret_cast<int64_t(*)(double)>(addr)(a0);
+                return RuntimeValue::from_i64(r);
+            }
+        } else {
+            int64_t a0 = get_int(0);
+            if (ret_type.is_void()) {
+                reinterpret_cast<void(*)(int64_t)>(addr)(a0);
+                return RuntimeValue::from_void();
+            } else if (ret_type.is_float()) {
+                double r = reinterpret_cast<double(*)(int64_t)>(addr)(a0);
+                return RuntimeValue::from_f64(r);
+            } else if (ret_type.kind() == TypeKind::I32) {
+                int32_t r = reinterpret_cast<int32_t(*)(int64_t)>(addr)(a0);
+                return RuntimeValue::from_i32(r);
+            } else {
+                int64_t r = reinterpret_cast<int64_t(*)(int64_t)>(addr)(a0);
+                return RuntimeValue::from_i64(r);
+            }
+        }
+    }
+
+    if (args.size() == 2) {
+        if (has_float_arg) {
+            double a0 = get_float(0), a1 = get_float(1);
+            if (ret_type.is_void()) {
+                reinterpret_cast<void(*)(double, double)>(addr)(a0, a1);
+                return RuntimeValue::from_void();
+            } else if (ret_type.is_float()) {
+                if (ret_type.kind() == TypeKind::F32) {
+                    float r = reinterpret_cast<float(*)(double, double)>(addr)(a0, a1);
+                    return RuntimeValue::from_f32(r);
+                }
+                double r = reinterpret_cast<double(*)(double, double)>(addr)(a0, a1);
+                return RuntimeValue::from_f64(r);
+            } else {
+                int64_t r = reinterpret_cast<int64_t(*)(double, double)>(addr)(a0, a1);
+                return RuntimeValue::from_i64(r);
+            }
+        } else {
+            int64_t a0 = get_int(0), a1 = get_int(1);
+            if (ret_type.is_void()) {
+                reinterpret_cast<void(*)(int64_t, int64_t)>(addr)(a0, a1);
+                return RuntimeValue::from_void();
+            } else if (ret_type.is_float()) {
+                double r = reinterpret_cast<double(*)(int64_t, int64_t)>(addr)(a0, a1);
+                return RuntimeValue::from_f64(r);
+            } else if (ret_type.kind() == TypeKind::I32) {
+                int32_t r = reinterpret_cast<int32_t(*)(int64_t, int64_t)>(addr)(a0, a1);
+                return RuntimeValue::from_i32(r);
+            } else {
+                int64_t r = reinterpret_cast<int64_t(*)(int64_t, int64_t)>(addr)(a0, a1);
+                return RuntimeValue::from_i64(r);
+            }
+        }
+    }
+
+    if (args.size() == 3) {
+        if (has_float_arg) {
+            double a0 = get_float(0), a1 = get_float(1), a2 = get_float(2);
+            double r = reinterpret_cast<double(*)(double, double, double)>(addr)(a0, a1, a2);
+            return RuntimeValue::from_f64(r);
+        }
+        int64_t a0 = get_int(0), a1 = get_int(1), a2 = get_int(2);
+        int64_t r = reinterpret_cast<int64_t(*)(int64_t, int64_t, int64_t)>(addr)(a0, a1, a2);
+        return RuntimeValue::from_i64(r);
+    }
+
+    if (args.size() == 4) {
+        if (has_float_arg) {
+            double a0 = get_float(0), a1 = get_float(1), a2 = get_float(2), a3 = get_float(3);
+            double r = reinterpret_cast<double(*)(double, double, double, double)>(addr)(a0, a1, a2, a3);
+            return RuntimeValue::from_f64(r);
+        }
+        int64_t a0 = get_int(0), a1 = get_int(1), a2 = get_int(2), a3 = get_int(3);
+        int64_t r = reinterpret_cast<int64_t(*)(int64_t, int64_t, int64_t, int64_t)>(addr)(a0, a1, a2, a3);
+        return RuntimeValue::from_i64(r);
+    }
+
+    if (args.size() <= 8) {
+        if (has_float_arg) {
+            double f0 = get_float(0), f1 = get_float(1), f2 = get_float(2), f3 = get_float(3);
+            double f4 = get_float(4), f5 = get_float(5), f6 = get_float(6), f7 = get_float(7);
+            double r = reinterpret_cast<double(*)(double, double, double, double, double, double, double, double)>(addr)(f0, f1, f2, f3, f4, f5, f6, f7);
+            return RuntimeValue::from_f64(r);
+        }
+        int64_t a0 = get_int(0), a1 = get_int(1), a2 = get_int(2), a3 = get_int(3);
+        int64_t a4 = get_int(4), a5 = get_int(5), a6 = get_int(6), a7 = get_int(7);
+        int64_t r = reinterpret_cast<int64_t(*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t)>(addr)(a0, a1, a2, a3, a4, a5, a6, a7);
+        return RuntimeValue::from_i64(r);
+    }
+
+    throw std::runtime_error("JitExecutionEngine::invoke on AArch64 supports up to 8 arguments");
+}
+
+} // namespace brass::codegen
+
+#else // !defined(__x86_64__) && !defined(_M_X64) && !defined(__aarch64__) && !defined(_M_ARM64)
 
 namespace brass::codegen {
 
@@ -730,7 +895,7 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name) {
 RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector<RuntimeValue>& args) {
     (void)name;
     (void)args;
-    throw std::runtime_error("JitExecutionEngine::invoke is only supported on x86_64");
+    throw std::runtime_error("JitExecutionEngine::invoke is only supported on x86_64 and aarch64");
 }
 
 } // namespace brass::codegen

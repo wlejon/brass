@@ -14,6 +14,8 @@ namespace macho {
 
     constexpr int32_t CPU_TYPE_X86_64 = 0x01000007; // CPU_ARCH_ABI64 | 0x7
     constexpr int32_t CPU_SUBTYPE_X86_64_ALL = 3;
+    constexpr int32_t CPU_TYPE_ARM64 = 0x0100000C;  // CPU_ARCH_ABI64 | 0xC
+    constexpr int32_t CPU_SUBTYPE_ARM64_ALL = 0;
 
     constexpr uint32_t MH_OBJECT  = 0x1;
     constexpr uint32_t MH_EXECUTE = 0x2;

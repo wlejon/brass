@@ -359,8 +359,10 @@ std::vector<uint8_t> MachOWriter::write() {
 
     // Write mach_header_64 (32 bytes)
     write_u32(out, macho::MH_MAGIC_64);
-    write_u32(out, static_cast<uint32_t>(macho::CPU_TYPE_X86_64));
-    write_u32(out, static_cast<uint32_t>(macho::CPU_SUBTYPE_X86_64_ALL));
+    uint32_t cpu_type = working_obj.target.is_aarch64() ? static_cast<uint32_t>(macho::CPU_TYPE_ARM64) : static_cast<uint32_t>(macho::CPU_TYPE_X86_64);
+    uint32_t cpu_subtype = working_obj.target.is_aarch64() ? static_cast<uint32_t>(macho::CPU_SUBTYPE_ARM64_ALL) : static_cast<uint32_t>(macho::CPU_SUBTYPE_X86_64_ALL);
+    write_u32(out, cpu_type);
+    write_u32(out, cpu_subtype);
     write_u32(out, macho::MH_OBJECT);
     write_u32(out, 3); // ncmds
     write_u32(out, sizeofcmds);

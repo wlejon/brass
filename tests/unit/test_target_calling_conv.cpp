@@ -30,8 +30,23 @@ TEST_CASE("Target Abstraction - Predefined targets and properties") {
     CHECK(macos_target.is_macos());
     CHECK_EQ(macos_target.object_format(), ObjectFormat::MachO);
 
+    auto aarch64_linux = Target::aarch64_linux();
+    CHECK(aarch64_linux.is_aarch64());
+    CHECK(aarch64_linux.is_linux());
+    CHECK_EQ(aarch64_linux.object_format(), ObjectFormat::ELF64);
+
+    auto aarch64_macos = Target::aarch64_macos();
+    CHECK(aarch64_macos.is_aarch64());
+    CHECK(aarch64_macos.is_macos());
+    CHECK_EQ(aarch64_macos.object_format(), ObjectFormat::MachO);
+
+    auto aarch64_win = Target::aarch64_windows();
+    CHECK(aarch64_win.is_aarch64());
+    CHECK(aarch64_win.is_windows());
+    CHECK_EQ(aarch64_win.object_format(), ObjectFormat::COFF);
+
     auto host = Target::host();
-    CHECK(host.is_x64());
+    CHECK(host.is_x64() || host.is_aarch64());
     CHECK(host.is_64bit());
 
     CHECK_EQ(to_string(Arch::x64), "x64");
@@ -259,3 +274,45 @@ TEST_CASE("Calling Convention - Custom Convention Configuration") {
     CHECK(!custom.is_gcref_preserved(GPR::R12));
     CHECK(!custom.is_gcref_preserved(GPR::RAX));
 }
+
+TEST_CASE("Calling Convention - AAPCS64 and Apple AAPCS64") {
+    auto cc = CallingConvention::aapcs64();
+    CHECK_EQ(cc.kind(), CallingConvKind::AAPCS64);
+    CHECK_EQ(cc.shadow_space(), size_t(0));
+    CHECK_EQ(cc.num_arg_gprs(), size_t(8));
+    CHECK_EQ(cc.num_arg_xmms(), size_t(8));
+    CHECK_EQ(cc.aarch64_arg_gprs().size(), size_t(8));
+    CHECK_EQ(cc.aarch64_arg_fprs().size(), size_t(8));
+    CHECK_EQ(cc.aarch64_ret_gprs().size(), size_t(2));
+    CHECK_EQ(cc.aarch64_ret_fprs().size(), size_t(2));
+
+    CHECK(cc.is_arg_gpr(brass::aarch64::GPR::X0));
+    CHECK(cc.is_arg_gpr(brass::aarch64::GPR::X7));
+    CHECK(!cc.is_arg_gpr(brass::aarch64::GPR::X8));
+
+    CHECK(cc.is_callee_saved(brass::aarch64::GPR::X19));
+    CHECK(cc.is_callee_saved(brass::aarch64::GPR::X28));
+    CHECK(cc.is_callee_saved(brass::aarch64::GPR::FP));
+    CHECK(cc.is_callee_saved(brass::aarch64::GPR::LR));
+
+    CHECK(cc.is_caller_saved(brass::aarch64::GPR::X0));
+    CHECK(cc.is_caller_saved(brass::aarch64::GPR::X18));
+
+    CHECK(cc.is_callee_saved(brass::aarch64::FPR::V8));
+    CHECK(cc.is_callee_saved(brass::aarch64::FPR::V15));
+    CHECK(cc.is_caller_saved(brass::aarch64::FPR::V0));
+    CHECK(cc.is_caller_saved(brass::aarch64::FPR::V16));
+
+    auto apple_cc = CallingConvention::apple_aapcs64();
+    CHECK_EQ(apple_cc.kind(), CallingConvKind::AppleAAPCS64);
+
+    CHECK_EQ(to_string(CallingConvKind::AAPCS64), "AAPCS64");
+    CHECK_EQ(to_string(CallingConvKind::AppleAAPCS64), "AppleAAPCS64");
+
+    auto target_linux = CallingConvention::for_target(Target::aarch64_linux());
+    CHECK_EQ(target_linux.kind(), CallingConvKind::AAPCS64);
+
+    auto target_macos = CallingConvention::for_target(Target::aarch64_macos());
+    CHECK_EQ(target_macos.kind(), CallingConvKind::AppleAAPCS64);
+}
+

@@ -20,6 +20,22 @@ bool CallingConvention::is_ret_xmm(x64::XMM reg) const noexcept {
     return std::find(ret_xmms_.begin(), ret_xmms_.end(), reg) != ret_xmms_.end();
 }
 
+bool CallingConvention::is_arg_gpr(aarch64::GPR reg) const noexcept {
+    return std::find(aarch64_arg_gprs_.begin(), aarch64_arg_gprs_.end(), reg) != aarch64_arg_gprs_.end();
+}
+
+bool CallingConvention::is_arg_fpr(aarch64::FPR reg) const noexcept {
+    return std::find(aarch64_arg_fprs_.begin(), aarch64_arg_fprs_.end(), reg) != aarch64_arg_fprs_.end();
+}
+
+bool CallingConvention::is_ret_gpr(aarch64::GPR reg) const noexcept {
+    return std::find(aarch64_ret_gprs_.begin(), aarch64_ret_gprs_.end(), reg) != aarch64_ret_gprs_.end();
+}
+
+bool CallingConvention::is_ret_fpr(aarch64::FPR reg) const noexcept {
+    return std::find(aarch64_ret_fprs_.begin(), aarch64_ret_fprs_.end(), reg) != aarch64_ret_fprs_.end();
+}
+
 CallingConvention CallingConvention::win64() {
     using namespace brass::x64;
     CallingConvention cc;
@@ -84,7 +100,64 @@ CallingConvention CallingConvention::sysv64() {
     return cc;
 }
 
+CallingConvention CallingConvention::aapcs64() {
+    using namespace brass::aarch64;
+    CallingConvention cc;
+    cc.kind_ = CallingConvKind::AAPCS64;
+    cc.shadow_space_ = 0;
+
+    cc.aarch64_arg_gprs_ = {
+        GPR::X0, GPR::X1, GPR::X2, GPR::X3,
+        GPR::X4, GPR::X5, GPR::X6, GPR::X7
+    };
+    cc.aarch64_arg_fprs_ = {
+        FPR::V0, FPR::V1, FPR::V2, FPR::V3,
+        FPR::V4, FPR::V5, FPR::V6, FPR::V7
+    };
+
+    cc.aarch64_ret_gprs_ = { GPR::X0, GPR::X1 };
+    cc.aarch64_ret_fprs_ = { FPR::V0, FPR::V1 };
+
+    // Callee-saved in AAPCS64: X19..X28, X29(FP), X30(LR)
+    cc.aarch64_callee_saved_gprs_ = 0;
+    for (int i = 19; i <= 30; ++i) {
+        cc.aarch64_callee_saved_gprs_ |= (1u << i);
+    }
+
+    // Callee-saved in AAPCS64: V8..V15 (bottom 64 bits D8..D15)
+    cc.aarch64_callee_saved_fprs_ = 0;
+    for (int i = 8; i <= 15; ++i) {
+        cc.aarch64_callee_saved_fprs_ |= (1u << i);
+    }
+
+    // Caller-saved GPRs: X0..X18
+    cc.aarch64_caller_saved_gprs_ = 0;
+    for (int i = 0; i <= 18; ++i) {
+        cc.aarch64_caller_saved_gprs_ |= (1u << i);
+    }
+
+    // Caller-saved FPRs: V0..V7, V16..V31
+    cc.aarch64_caller_saved_fprs_ = 0;
+    for (int i = 0; i <= 7; ++i) {
+        cc.aarch64_caller_saved_fprs_ |= (1u << i);
+    }
+    for (int i = 16; i <= 31; ++i) {
+        cc.aarch64_caller_saved_fprs_ |= (1u << i);
+    }
+
+    return cc;
+}
+
+CallingConvention CallingConvention::apple_aapcs64() {
+    CallingConvention cc = aapcs64();
+    cc.kind_ = CallingConvKind::AppleAAPCS64;
+    return cc;
+}
+
 CallingConvention CallingConvention::for_target(const Target& target) {
+    if (target.is_aarch64()) {
+        return target.is_macos() ? apple_aapcs64() : aapcs64();
+    }
     if (target.is_windows()) {
         return win64();
     }
@@ -103,6 +176,15 @@ CallingConvention CallingConvention::custom(const CustomCallingConvConfig& confi
     cc.shadow_space_ = config.shadow_space;
     cc.gcref_preserved_gprs_ = config.gcref_preserved_gprs;
 
+    cc.aarch64_arg_gprs_ = config.aarch64_arg_gprs;
+    cc.aarch64_arg_fprs_ = config.aarch64_arg_fprs;
+    cc.aarch64_ret_gprs_ = config.aarch64_ret_gprs;
+    cc.aarch64_ret_fprs_ = config.aarch64_ret_fprs;
+    cc.aarch64_callee_saved_gprs_ = config.aarch64_callee_saved_gprs;
+    cc.aarch64_callee_saved_fprs_ = config.aarch64_callee_saved_fprs;
+    cc.aarch64_caller_saved_gprs_ = config.aarch64_caller_saved_gprs;
+    cc.aarch64_caller_saved_fprs_ = config.aarch64_caller_saved_fprs;
+
     if (config.caller_saved_gprs != 0) {
         cc.caller_saved_gprs_ = config.caller_saved_gprs;
     } else {
@@ -120,9 +202,11 @@ CallingConvention CallingConvention::custom(const CustomCallingConvConfig& confi
 
 std::string_view to_string(CallingConvKind kind) noexcept {
     switch (kind) {
-    case CallingConvKind::Win64: return "Win64";
-    case CallingConvKind::SysV64: return "SysV64";
-    case CallingConvKind::Custom: return "Custom";
+    case CallingConvKind::Win64:        return "Win64";
+    case CallingConvKind::SysV64:       return "SysV64";
+    case CallingConvKind::AAPCS64:      return "AAPCS64";
+    case CallingConvKind::AppleAAPCS64: return "AppleAAPCS64";
+    case CallingConvKind::Custom:       return "Custom";
     default: return "unknown";
     }
 }

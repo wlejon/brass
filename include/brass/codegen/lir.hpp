@@ -425,8 +425,8 @@ struct VRegInfo {
 struct FrameInfo {
     size_t num_spill_slots = 0;
     std::vector<bool> spill_slot_is_gcref;
-    x64::RegMask saved_callee_gprs = 0;
-    x64::RegMask saved_callee_xmms = 0;
+    uint32_t saved_callee_gprs = 0;
+    uint32_t saved_callee_xmms = 0;
     size_t outgoing_arg_space = 0;
     size_t total_frame_size = 0;
     bool has_calls = false;

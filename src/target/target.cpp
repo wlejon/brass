@@ -4,12 +4,22 @@
 namespace brass {
 
 Target Target::host() noexcept {
+#if defined(__aarch64__) || defined(_M_ARM64)
+#if defined(_WIN32) || defined(_WIN64)
+    return Target::aarch64_windows();
+#elif defined(__APPLE__)
+    return Target::aarch64_macos();
+#else
+    return Target::aarch64_linux();
+#endif
+#else
 #if defined(_WIN32) || defined(_WIN64)
     return Target::x64_windows();
 #elif defined(__APPLE__)
     return Target::x64_macos();
 #else
     return Target::x64_linux();
+#endif
 #endif
 }
 
