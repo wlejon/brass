@@ -29,6 +29,11 @@ enum class RuntimeValueKind : uint8_t {
     I64x4
 };
 
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable: 4324) // structure was padded due to alignment specifier
+#endif
+
 class RuntimeValue {
 public:
     constexpr RuntimeValue() noexcept : kind_(RuntimeValueKind::Void), raw_bits_(0), vec_bytes_{} {}
@@ -399,6 +404,10 @@ private:
     uint64_t raw_bits_ = 0;
     alignas(32) uint8_t vec_bytes_[32];
 };
+
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
 // Conversions
 inline RuntimeValue val_sext_i64(RuntimeValue v) noexcept {
