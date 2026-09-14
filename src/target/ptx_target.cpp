@@ -2,6 +2,7 @@
 #include <brass/mir/instruction.hpp>
 #include <brass/mir/block.hpp>
 #include <brass/mir/builder.hpp>
+#include <brass/mir/opcodes.hpp>
 
 #include <sstream>
 #include <iomanip>
@@ -554,8 +555,17 @@ private:
                 } else if (callee == "ptx_warpid" || callee == "ptx_warp_id") {
                     ss << "    mov.u32 " << get_reg(&inst) << ", %warpid;\n";
                 } else {
-                    // Fallback to standard PTX call if regular function
-                    ss << "    // call " << callee << "\n";
+                    // Regular function call
+                    if (inst.type().is_void() || !inst.result()) {
+                        ss << "    call " << callee << ", (";
+                    } else {
+                        ss << "    call (" << get_reg(&inst) << "), " << callee << ", (";
+                    }
+                    for (size_t i = 0; i < inst.operand_count(); ++i) {
+                        if (i > 0) ss << ", ";
+                        ss << get_reg(inst.operand(i));
+                    }
+                    ss << ");\n";
                 }
                 break;
             }
@@ -588,6 +598,47 @@ private:
                 }
                 break;
             }
+
+            case Opcode::unreachable: {
+                ss << "    trap;\n";
+                break;
+            }
+
+            case Opcode::not_: {
+                Type t = inst.type();
+                std::string sfx = (t == Type::i64() || t == Type::ptr()) ? "b64" : "b32";
+                ss << "    not." << sfx << " " << get_reg(&inst) << ", " << get_reg(inst.operand(0)) << ";\n";
+                break;
+            }
+
+            case Opcode::smod: {
+                Type t = inst.type();
+                std::string sfx = (t == Type::i64()) ? "s64" : "s32";
+                ss << "    rem." << sfx << " " << get_reg(&inst) << ", " << get_reg(inst.operand(0))
+                   << ", " << get_reg(inst.operand(1)) << ";\n";
+                break;
+            }
+
+            case Opcode::umod: {
+                Type t = inst.type();
+                std::string sfx = (t == Type::i64()) ? "u64" : "u32";
+                ss << "    rem." << sfx << " " << get_reg(&inst) << ", " << get_reg(inst.operand(0))
+                   << ", " << get_reg(inst.operand(1)) << ";\n";
+                break;
+            }
+
+            case Opcode::bitcast_i64_f64:
+            case Opcode::bitcast_f64_i64: {
+                ss << "    mov.b64 " << get_reg(&inst) << ", " << get_reg(inst.operand(0)) << ";\n";
+                break;
+            }
+
+            case Opcode::safepoint:
+            case Opcode::write_barrier:
+            case Opcode::resume_point:
+            case Opcode::osr_entry:
+                // No-op in GPU kernel execution
+                break;
 
             case Opcode::br: {
                 const BasicBlock* target = inst.branch_target().block;
@@ -632,7 +683,7 @@ private:
             }
 
             default:
-                break;
+                throw std::runtime_error("PtxTarget: unsupported opcode in PTX emission: " + std::string(opcode_name(inst.opcode())));
         }
     }
 

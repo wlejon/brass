@@ -161,3 +161,56 @@ TEST_CASE("PTX Target - C-API Emission and Cleanup") {
     brass_module_destroy(mod);
     brass_context_destroy(ctx);
 }
+
+TEST_CASE("PTX Target - Regular Device Function Calls and Modulo/Bitwise Ops") {
+    Module mod("test_ptx_calls");
+    Function* fn = mod.create_function("caller_kernel", Type::void_type(), {Type::i32(), Type::i32()});
+
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    b.position_at_end(entry);
+
+    Value* x = entry->param(0);
+    Value* y = entry->param(1);
+    Value* smod_val = b.build_smod(x, y);
+    Value* not_val = b.build_not(smod_val);
+    Value* res = b.build_call("custom_device_helper", Type::i32(), {not_val, y});
+    (void)res;
+    b.build_ret_void();
+
+    std::string ptx = PtxTarget::emit_function(*fn);
+
+    CHECK(ptx.find("rem.s32") != std::string::npos);
+    CHECK(ptx.find("not.b32") != std::string::npos);
+    CHECK(ptx.find("call (%r") != std::string::npos);
+    CHECK(ptx.find("custom_device_helper, (%r") != std::string::npos);
+}
+
+TEST_CASE("PTX Target - Unsupported Opcode Diagnostic Error") {
+    Module mod("test_ptx_unsupported");
+    Function* fn = mod.create_function("invalid_kernel", Type::void_type(), {});
+
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    b.position_at_end(entry);
+
+    // coro_create is not supported on PTX
+    Instruction* bad_inst = mod.arena().make<Instruction>(Opcode::coro_create, Type::ptr());
+    Value* bad_val = mod.arena().make<Value>(fn->next_value_id(), Type::ptr(), ValueKind::InstructionResult);
+    bad_val->set_defining_instruction(bad_inst);
+    bad_inst->set_result(bad_val);
+    entry->append_instruction(bad_inst);
+    b.build_ret_void();
+
+    bool threw = false;
+    try {
+        PtxTarget::emit_function(*fn);
+    } catch (const std::runtime_error& err) {
+        threw = true;
+        CHECK(std::string(err.what()).find("unsupported opcode") != std::string::npos);
+    }
+    CHECK(threw);
+}
+

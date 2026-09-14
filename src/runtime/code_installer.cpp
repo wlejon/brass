@@ -154,7 +154,10 @@ RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) 
     }
 
     if (args.size() == 1) {
-        if (return_type_.is_float()) {
+        if (return_type_.is_void()) {
+            reinterpret_cast<void(*)(int64_t)>(addr)(args[0].as_i64());
+            return RuntimeValue::from_void();
+        } else if (return_type_.is_float()) {
             double r = reinterpret_cast<double(*)(double)>(addr)(args[0].as_f64());
             return RuntimeValue::from_f64(r);
         } else {
@@ -164,11 +167,70 @@ RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) 
     }
 
     if (args.size() == 2) {
-        if (return_type_.is_float()) {
+        if (return_type_.is_void()) {
+            reinterpret_cast<void(*)(int64_t, int64_t)>(addr)(args[0].as_i64(), args[1].as_i64());
+            return RuntimeValue::from_void();
+        } else if (return_type_.is_float()) {
             double r = reinterpret_cast<double(*)(double, double)>(addr)(args[0].as_f64(), args[1].as_f64());
             return RuntimeValue::from_f64(r);
         } else {
             int64_t r = reinterpret_cast<int64_t(*)(int64_t, int64_t)>(addr)(args[0].as_i64(), args[1].as_i64());
+            return RuntimeValue::from_i64(r);
+        }
+    }
+
+    if (args.size() == 3) {
+        int64_t a0 = args[0].as_i64(), a1 = args[1].as_i64(), a2 = args[2].as_i64();
+        if (return_type_.is_void()) {
+            reinterpret_cast<void(*)(int64_t, int64_t, int64_t)>(addr)(a0, a1, a2);
+            return RuntimeValue::from_void();
+        } else if (return_type_.is_float()) {
+            double r = reinterpret_cast<double(*)(int64_t, int64_t, int64_t)>(addr)(a0, a1, a2);
+            return RuntimeValue::from_f64(r);
+        } else {
+            int64_t r = reinterpret_cast<int64_t(*)(int64_t, int64_t, int64_t)>(addr)(a0, a1, a2);
+            return RuntimeValue::from_i64(r);
+        }
+    }
+
+    if (args.size() == 4) {
+        int64_t a0 = args[0].as_i64(), a1 = args[1].as_i64(), a2 = args[2].as_i64(), a3 = args[3].as_i64();
+        if (return_type_.is_void()) {
+            reinterpret_cast<void(*)(int64_t, int64_t, int64_t, int64_t)>(addr)(a0, a1, a2, a3);
+            return RuntimeValue::from_void();
+        } else if (return_type_.is_float()) {
+            double r = reinterpret_cast<double(*)(int64_t, int64_t, int64_t, int64_t)>(addr)(a0, a1, a2, a3);
+            return RuntimeValue::from_f64(r);
+        } else {
+            int64_t r = reinterpret_cast<int64_t(*)(int64_t, int64_t, int64_t, int64_t)>(addr)(a0, a1, a2, a3);
+            return RuntimeValue::from_i64(r);
+        }
+    }
+
+    if (args.size() == 5) {
+        int64_t a0 = args[0].as_i64(), a1 = args[1].as_i64(), a2 = args[2].as_i64(), a3 = args[3].as_i64(), a4 = args[4].as_i64();
+        if (return_type_.is_void()) {
+            reinterpret_cast<void(*)(int64_t, int64_t, int64_t, int64_t, int64_t)>(addr)(a0, a1, a2, a3, a4);
+            return RuntimeValue::from_void();
+        } else if (return_type_.is_float()) {
+            double r = reinterpret_cast<double(*)(int64_t, int64_t, int64_t, int64_t, int64_t)>(addr)(a0, a1, a2, a3, a4);
+            return RuntimeValue::from_f64(r);
+        } else {
+            int64_t r = reinterpret_cast<int64_t(*)(int64_t, int64_t, int64_t, int64_t, int64_t)>(addr)(a0, a1, a2, a3, a4);
+            return RuntimeValue::from_i64(r);
+        }
+    }
+
+    if (args.size() == 6) {
+        int64_t a0 = args[0].as_i64(), a1 = args[1].as_i64(), a2 = args[2].as_i64(), a3 = args[3].as_i64(), a4 = args[4].as_i64(), a5 = args[5].as_i64();
+        if (return_type_.is_void()) {
+            reinterpret_cast<void(*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t)>(addr)(a0, a1, a2, a3, a4, a5);
+            return RuntimeValue::from_void();
+        } else if (return_type_.is_float()) {
+            double r = reinterpret_cast<double(*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t)>(addr)(a0, a1, a2, a3, a4, a5);
+            return RuntimeValue::from_f64(r);
+        } else {
+            int64_t r = reinterpret_cast<int64_t(*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t)>(addr)(a0, a1, a2, a3, a4, a5);
             return RuntimeValue::from_i64(r);
         }
     }

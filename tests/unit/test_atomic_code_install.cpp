@@ -111,9 +111,9 @@ TEST_CASE("Atomic Code Install - Seamless Entry Point Swapping") {
     CHECK(handle.has_native_entry());
     CHECK_EQ(handle.tier(), TierLevel::Tier2_Optimized);
 
-    // Wait until mutator observes native entry
+    // Wait until mutator observes native entry and has accumulated invocations
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (!mutator_saw_native.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
+    while ((!mutator_saw_native.load(std::memory_order_acquire) || total_invocations.load(std::memory_order_relaxed) < 105) && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::yield();
     }
 
