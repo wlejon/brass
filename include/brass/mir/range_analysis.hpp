@@ -12,6 +12,8 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <optional>
+#include <utility>
 
 namespace brass {
 
@@ -133,7 +135,8 @@ private:
     void apply_branch_condition(
         const Value* cond,
         bool is_true_edge,
-        std::unordered_map<const Value*, ValueRange>& ranges
+        std::unordered_map<const Value*, ValueRange>& ranges,
+        std::vector<std::pair<const Value*, std::optional<ValueRange>>>& rollback
     );
 
     ValueRange evaluate_instruction(

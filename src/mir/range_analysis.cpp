@@ -472,20 +472,21 @@ ValueRange RangeAnalysis::evaluate_instruction(
 void RangeAnalysis::apply_branch_condition(
     const Value* cond,
     bool is_true_edge,
-    std::unordered_map<const Value*, ValueRange>& ranges
+    std::unordered_map<const Value*, ValueRange>& ranges,
+    std::vector<std::pair<const Value*, std::optional<ValueRange>>>& rollback
 ) {
     if (!cond || !cond->is_instruction()) return;
     const Instruction* cdef = cond->defining_instruction();
     if (!cdef) return;
 
     if (cdef->opcode() == Opcode::and_ && is_true_edge) {
-        apply_branch_condition(cdef->operand(0), true, ranges);
-        apply_branch_condition(cdef->operand(1), true, ranges);
+        apply_branch_condition(cdef->operand(0), true, ranges, rollback);
+        apply_branch_condition(cdef->operand(1), true, ranges, rollback);
         return;
     }
     if (cdef->opcode() == Opcode::or_ && !is_true_edge) {
-        apply_branch_condition(cdef->operand(0), false, ranges);
-        apply_branch_condition(cdef->operand(1), false, ranges);
+        apply_branch_condition(cdef->operand(0), false, ranges, rollback);
+        apply_branch_condition(cdef->operand(1), false, ranges, rollback);
         return;
     }
 
@@ -499,92 +500,100 @@ void RangeAnalysis::apply_branch_condition(
     ValueRange r_lhs = get_context_range(lhs, ranges);
     ValueRange r_rhs = get_context_range(rhs, ranges);
 
+    auto set_val_range = [&](const Value* val, const ValueRange& r) {
+        int64_t c = 0;
+        if (get_const_int(val, c)) return;
+        auto it = ranges.find(val);
+        rollback.emplace_back(val, it != ranges.end() ? std::optional<ValueRange>(it->second) : std::nullopt);
+        ranges[val] = r;
+    };
+
     switch (op) {
         case Opcode::slt: {
             r_lhs.intersect_with(ValueRange::range(INT64_MIN, sat_sub(r_rhs.max_val, 1)));
             r_rhs.intersect_with(ValueRange::range(sat_add(r_lhs.min_val, 1), INT64_MAX));
-            ranges[lhs] = r_lhs;
-            ranges[rhs] = r_rhs;
+            set_val_range(lhs, r_lhs);
+            set_val_range(rhs, r_rhs);
             break;
         }
         case Opcode::sle: {
             r_lhs.intersect_with(ValueRange::range(INT64_MIN, r_rhs.max_val));
             r_rhs.intersect_with(ValueRange::range(r_lhs.min_val, INT64_MAX));
-            ranges[lhs] = r_lhs;
-            ranges[rhs] = r_rhs;
+            set_val_range(lhs, r_lhs);
+            set_val_range(rhs, r_rhs);
             break;
         }
         case Opcode::sgt: {
             r_rhs.intersect_with(ValueRange::range(INT64_MIN, sat_sub(r_lhs.max_val, 1)));
             r_lhs.intersect_with(ValueRange::range(sat_add(r_rhs.min_val, 1), INT64_MAX));
-            ranges[lhs] = r_lhs;
-            ranges[rhs] = r_rhs;
+            set_val_range(lhs, r_lhs);
+            set_val_range(rhs, r_rhs);
             break;
         }
         case Opcode::sge: {
             r_rhs.intersect_with(ValueRange::range(INT64_MIN, r_lhs.max_val));
             r_lhs.intersect_with(ValueRange::range(r_rhs.min_val, INT64_MAX));
-            ranges[lhs] = r_lhs;
-            ranges[rhs] = r_rhs;
+            set_val_range(lhs, r_lhs);
+            set_val_range(rhs, r_rhs);
             break;
         }
         case Opcode::ult: {
             if (r_rhs.max_val >= 0) {
                 r_lhs.intersect_with(ValueRange::range(0, sat_sub(r_rhs.max_val, 1)));
-                ranges[lhs] = r_lhs;
+                set_val_range(lhs, r_lhs);
             }
             r_rhs.intersect_with(ValueRange::range(1, INT64_MAX));
-            ranges[rhs] = r_rhs;
+            set_val_range(rhs, r_rhs);
             break;
         }
         case Opcode::ule: {
             if (r_rhs.max_val >= 0) {
                 r_lhs.intersect_with(ValueRange::range(0, r_rhs.max_val));
-                ranges[lhs] = r_lhs;
+                set_val_range(lhs, r_lhs);
             }
-            ranges[rhs] = r_rhs;
+            set_val_range(rhs, r_rhs);
             break;
         }
         case Opcode::ugt: {
             if (r_lhs.max_val >= 0) {
                 r_rhs.intersect_with(ValueRange::range(0, sat_sub(r_lhs.max_val, 1)));
-                ranges[rhs] = r_rhs;
+                set_val_range(rhs, r_rhs);
             }
             r_lhs.intersect_with(ValueRange::range(1, INT64_MAX));
-            ranges[lhs] = r_lhs;
+            set_val_range(lhs, r_lhs);
             break;
         }
         case Opcode::uge: {
             if (r_lhs.max_val >= 0) {
                 r_rhs.intersect_with(ValueRange::range(0, r_lhs.max_val));
-                ranges[rhs] = r_rhs;
+                set_val_range(rhs, r_rhs);
             }
-            ranges[lhs] = r_lhs;
+            set_val_range(lhs, r_lhs);
             break;
         }
         case Opcode::eq: {
             ValueRange inter = r_lhs;
             inter.intersect_with(r_rhs);
-            ranges[lhs] = inter;
-            ranges[rhs] = inter;
+            set_val_range(lhs, inter);
+            set_val_range(rhs, inter);
             break;
         }
         case Opcode::ne: {
             if (r_rhs.is_constant()) {
                 if (r_lhs.min_val == r_rhs.min_val && r_lhs.max_val > r_rhs.min_val) {
                     r_lhs.min_val = sat_add(r_rhs.min_val, 1);
-                    ranges[lhs] = r_lhs;
+                    set_val_range(lhs, r_lhs);
                 } else if (r_lhs.max_val == r_rhs.min_val && r_lhs.min_val < r_rhs.min_val) {
                     r_lhs.max_val = sat_sub(r_rhs.min_val, 1);
-                    ranges[lhs] = r_lhs;
+                    set_val_range(lhs, r_lhs);
                 }
             } else if (r_lhs.is_constant()) {
                 if (r_rhs.min_val == r_lhs.min_val && r_rhs.max_val > r_lhs.min_val) {
                     r_rhs.min_val = sat_add(r_lhs.min_val, 1);
-                    ranges[rhs] = r_rhs;
+                    set_val_range(rhs, r_rhs);
                 } else if (r_rhs.max_val == r_lhs.min_val && r_rhs.min_val < r_lhs.min_val) {
                     r_rhs.max_val = sat_sub(r_lhs.min_val, 1);
-                    ranges[rhs] = r_rhs;
+                    set_val_range(rhs, r_rhs);
                 }
             }
             break;
@@ -737,18 +746,7 @@ void RangeAnalysis::visit_dominator_block(
             bool to_true = (term->true_target().block == bb && term->false_target().block != bb);
             bool to_false = (term->false_target().block == bb && term->true_target().block != bb);
             if (to_true || to_false) {
-                Instruction* c_inst = cond ? cond->defining_instruction() : nullptr;
-                if (c_inst) {
-                    if (c_inst->operand_count() >= 2) {
-                        Value* lhs = c_inst->operand(0);
-                        Value* rhs = c_inst->operand(1);
-                        auto it_l = current_ranges.find(lhs);
-                        rollback.emplace_back(lhs, it_l != current_ranges.end() ? std::optional<ValueRange>(it_l->second) : std::nullopt);
-                        auto it_r = current_ranges.find(rhs);
-                        rollback.emplace_back(rhs, it_r != current_ranges.end() ? std::optional<ValueRange>(it_r->second) : std::nullopt);
-                    }
-                }
-                apply_branch_condition(cond, to_true, current_ranges);
+                apply_branch_condition(cond, to_true, current_ranges, rollback);
             }
         }
     }
