@@ -126,7 +126,9 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
         LoopOptOptions loop_opts;
         loop_opts.enable_f64_demote = false;
         loop_opts.enable_fp_reassociation = fn->allow_fp_reassociation() || mod.allow_fp_reassociation();
-        optimize_function_loops(*opt_fn, loop_opts);
+        if (enable_mir_opts_) {
+            optimize_function_loops(*opt_fn, loop_opts);
+        }
         opt_fn->rebuild_cfg_predecessors();
         opt_fn->sort_blocks_rpo();
         opt_fn->rebuild_cfg_predecessors();

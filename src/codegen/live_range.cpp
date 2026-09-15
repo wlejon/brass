@@ -26,23 +26,22 @@ void LiveInterval::add_range(uint32_t s, uint32_t e) {
         return;
     }
 
-    // Merge with existing segments
-    std::vector<LiveRangeSegment> new_segments;
-    LiveRangeSegment current{s, e};
-
-    for (const auto& seg : segments) {
-        if (current.end + 1 < seg.start) {
-            new_segments.push_back(current);
-            current = seg;
-        } else if (seg.end + 1 < current.start) {
-            new_segments.push_back(seg);
-        } else {
-            current.start = std::min(current.start, seg.start);
-            current.end = std::max(current.end, seg.end);
-        }
+    // Merge with the existing segments: every one that touches or overlaps
+    // [s, e] — they are sorted, disjoint and never adjacent, so those form
+    // one contiguous run — collapses with it into a single segment in place.
+    auto lo = std::lower_bound(segments.begin(), segments.end(), s,
+        [](const LiveRangeSegment& seg, uint32_t v) { return seg.end + 1 < v; });
+    auto hi = std::upper_bound(lo, segments.end(), e,
+        [](uint32_t v, const LiveRangeSegment& seg) { return v + 1 < seg.start; });
+    LiveRangeSegment merged{s, e};
+    if (lo != hi) {
+        merged.start = std::min(merged.start, lo->start);
+        merged.end = std::max(merged.end, (hi - 1)->end);
+        *lo = merged;
+        segments.erase(lo + 1, hi);
+    } else {
+        segments.insert(lo, merged);
     }
-    new_segments.push_back(current);
-    segments = std::move(new_segments);
 }
 
 void LiveInterval::shorten_start(uint32_t from_id) {
@@ -72,20 +71,22 @@ void LiveInterval::add_use_pos(uint32_t id, bool is_def, bool requires_reg, PReg
     end_id = std::max(end_id, id);
 }
 
+// Segments are kept sorted by start and disjoint (add_range merges, shorten_start
+// only moves a start later), so both queries below are searches, not scans.
 bool LiveInterval::covers(uint32_t id) const noexcept {
     if (id < start_id || id > end_id) return false;
-    for (const auto& seg : segments) {
-        if (seg.contains(id)) return true;
-    }
-    return false;
+    auto it = std::upper_bound(segments.begin(), segments.end(), id,
+        [](uint32_t v, const LiveRangeSegment& seg) { return v < seg.start; });
+    return it != segments.begin() && (it - 1)->contains(id);
 }
 
 bool LiveInterval::overlaps(const LiveInterval& other) const noexcept {
     if (end_id <= other.start_id || other.end_id <= start_id) return false;
-    for (const auto& seg1 : segments) {
-        for (const auto& seg2 : other.segments) {
-            if (seg1.overlaps(seg2)) return true;
-        }
+    auto a = segments.begin();
+    auto b = other.segments.begin();
+    while (a != segments.end() && b != other.segments.end()) {
+        if (a->overlaps(*b)) return true;
+        if (a->end < b->end) ++a; else ++b;
     }
     return false;
 }
@@ -374,15 +375,18 @@ void LivenessAnalysis::build_intervals() {
         }
     }
 
-    // Sort use positions for all intervals and check if interval spans a call
+    // Sort use positions for all intervals and check if interval spans a call.
+    // call_inst_ids_ is in id order, so a segment spans a call exactly when the
+    // first call id at or after its start is still inside it.
     for (auto& interval : intervals_) {
         std::sort(interval.use_positions.begin(), interval.use_positions.end(),
             [](const UsePosition& a, const UsePosition& b) {
                 return a.inst_id < b.inst_id;
             });
 
-        for (uint32_t call_id : call_inst_ids_) {
-            if (interval.covers(call_id)) {
+        for (const auto& seg : interval.segments) {
+            auto it = std::lower_bound(call_inst_ids_.begin(), call_inst_ids_.end(), seg.start);
+            if (it != call_inst_ids_.end() && *it <= seg.end) {
                 interval.spans_call = true;
                 break;
             }
@@ -414,15 +418,17 @@ const BlockLiveness& LivenessAnalysis::block_liveness(const LirBlock* b) const {
 }
 
 uint32_t LivenessAnalysis::get_loop_depth_at(uint32_t inst_id) const {
-    for (const auto& pair : block_liveness_) {
-        if (inst_id >= pair.second.start_id && inst_id <= pair.second.end_id) {
-            return pair.second.loop_depth;
-        }
-    }
-    return 0;
+    // block_ranges_ holds the non-empty blocks by start id; the one that
+    // starts last at or before inst_id is the only one that can hold it.
+    auto it = std::upper_bound(block_ranges_.begin(), block_ranges_.end(), inst_id,
+        [](uint32_t id, const BlockRange& r) { return id < r.start_id; });
+    if (it == block_ranges_.begin()) return 0;
+    --it;
+    return inst_id <= it->end_id ? it->loop_depth : 0;
 }
 
 void LivenessAnalysis::compute_loop_depths() {
+    block_ranges_.clear();
     size_t n = fn_.blocks.size();
     if (n == 0) return;
 
@@ -432,37 +438,45 @@ void LivenessAnalysis::compute_loop_depths() {
         fn_.blocks[i]->loop_depth = 0;
     }
 
-    // Dominance analysis using iterative dataflow
-    std::vector<std::vector<bool>> dom(n, std::vector<bool>(n, true));
-    dom[0].assign(n, false);
-    dom[0][0] = true;
+    // Dominance analysis using iterative dataflow over one bitset per block:
+    // dom(entry) = {entry}; dom(b) = {b} ∪ ∩ dom(pred), a block without
+    // predecessors dominated by itself alone. Blocks unreachable from the
+    // entry (resume entries and what only they reach) take the maximal
+    // solution the iteration converges to, as they always have.
+    const size_t words = (n + 63) / 64;
+    const uint64_t last_mask = (n % 64 == 0) ? ~0ULL : ((1ULL << (n % 64)) - 1);
+    std::vector<uint64_t> dom(n * words, ~0ULL);
+    for (size_t i = 0; i < n; ++i) dom[i * words + words - 1] &= last_mask;
+    auto row = [&](size_t i) { return dom.data() + i * words; };
+    auto set_bit = [](uint64_t* r, size_t k) { r[k / 64] |= (1ULL << (k % 64)); };
+    auto test_bit = [](const uint64_t* r, size_t k) { return (r[k / 64] >> (k % 64)) & 1ULL; };
+    std::fill(row(0), row(0) + words, 0ULL);
+    set_bit(row(0), 0);
 
+    std::vector<uint64_t> new_dom(words);
     bool changed = true;
     while (changed) {
         changed = false;
         for (size_t i = 1; i < n; ++i) {
             const auto* blk = fn_.blocks[i].get();
-            std::vector<bool> new_dom(n, true);
 
             if (blk->predecessors.empty()) {
-                new_dom.assign(n, false);
+                std::fill(new_dom.begin(), new_dom.end(), 0ULL);
             } else {
+                std::fill(new_dom.begin(), new_dom.end(), ~0ULL);
+                new_dom[words - 1] &= last_mask;
                 for (const auto* pred : blk->predecessors) {
                     auto it = block_to_idx.find(pred);
                     if (it != block_to_idx.end()) {
-                        size_t p_idx = it->second;
-                        for (size_t k = 0; k < n; ++k) {
-                            if (!dom[p_idx][k]) {
-                                new_dom[k] = false;
-                            }
-                        }
+                        const uint64_t* p = row(it->second);
+                        for (size_t w = 0; w < words; ++w) new_dom[w] &= p[w];
                     }
                 }
             }
-            new_dom[i] = true;
+            set_bit(new_dom.data(), i);
 
-            if (new_dom != dom[i]) {
-                dom[i] = std::move(new_dom);
+            if (!std::equal(new_dom.begin(), new_dom.end(), row(i))) {
+                std::copy(new_dom.begin(), new_dom.end(), row(i));
                 changed = true;
             }
         }
@@ -476,7 +490,7 @@ void LivenessAnalysis::compute_loop_depths() {
             if (it == block_to_idx.end()) continue;
             size_t s_idx = it->second;
 
-            if (dom[i][s_idx]) {
+            if (test_bit(row(i), s_idx)) {
                 // Backedge i -> s_idx
                 std::vector<bool> in_loop(n, false);
                 in_loop[s_idx] = true;
@@ -514,7 +528,13 @@ void LivenessAnalysis::compute_loop_depths() {
     }
 
     for (const auto& blk : fn_.blocks) {
-        block_liveness_[blk.get()].loop_depth = blk->loop_depth;
+        BlockLiveness& bl = block_liveness_[blk.get()];
+        bl.loop_depth = blk->loop_depth;
+        // Ids are assigned in block order, so this is already sorted by start;
+        // an empty block owns no id and is left out.
+        if (!blk->instructions.empty()) {
+            block_ranges_.push_back(BlockRange{bl.start_id, bl.end_id, bl.loop_depth});
+        }
     }
 }
 

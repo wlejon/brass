@@ -85,10 +85,17 @@ public:
     uint32_t get_loop_depth_at(uint32_t inst_id) const;
 
 private:
+    struct BlockRange {
+        uint32_t start_id;
+        uint32_t end_id;
+        uint32_t loop_depth;
+    };
+
     LirFunction& fn_;
     std::vector<LiveInterval> intervals_;
     std::unordered_map<const LirBlock*, BlockLiveness> block_liveness_;
-    std::vector<uint32_t> call_inst_ids_;
+    std::vector<uint32_t> call_inst_ids_;   // in id order
+    std::vector<BlockRange> block_ranges_;  // non-empty blocks, by start id
 
     void assign_instruction_ids();
     void compute_local_liveness();

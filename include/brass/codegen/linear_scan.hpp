@@ -4,7 +4,6 @@
 #include <brass/codegen/live_range.hpp>
 #include <brass/target/calling_conv.hpp>
 #include <vector>
-#include <set>
 #include <unordered_map>
 #include <cstdint>
 
@@ -40,22 +39,28 @@ private:
 
     std::unordered_map<uint32_t, std::vector<VReg>> coalesce_hints_;
 
-    // Instructions that can block a register for an interval covering them —
-    // any with a clobber mask, a physical-register operand, or a fixed operand
-    // constraint — in id order, so an interval consults only the ones inside
-    // its own range instead of walking the whole function per interval.
-    std::vector<const LirInst*> constrained_insts_;
+    // The instructions that can block a register for an interval covering
+    // them — any with a clobber mask, a physical-register operand, or a fixed
+    // operand constraint — in id order, each packed as
+    //   clobbered gprs | clobbered xmms << 16 | pinned gprs << 32 | pinned xmms << 48
+    // with a sparse table over the words (constraint_or_[k][i] is the OR of
+    // [i, i + 2^k)), so the union over any id range is two lookups and an
+    // interval pays per segment, not per instruction it covers.
+    std::vector<uint32_t> constrained_ids_;
+    std::vector<std::vector<uint64_t>> constraint_or_;
     // Distinct vregs that appear as the index register of a memory operand.
     std::vector<VReg> mem_index_vregs_;
 
     void init_register_pools();
     void build_coalesce_hints();
     void build_constraint_index();
+    uint64_t constraint_or(size_t lo, size_t hi) const noexcept;
     void expire_old_intervals(uint32_t current_start);
     bool try_allocate_free_reg(LiveInterval& interval);
     void allocate_blocked_reg(LiveInterval& interval);
-    std::set<uint8_t> get_occupied_regs(const LiveInterval& interval) const;
-    std::set<uint8_t> get_hard_blocked_regs(const LiveInterval& interval) const;
+    // Register masks over the interval's class (bit = PReg::code).
+    x64::RegMask get_occupied_regs(const LiveInterval& interval) const;
+    x64::RegMask get_hard_blocked_regs(const LiveInterval& interval) const;
     int32_t allocate_spill_slot(bool is_gcref, uint8_t size);
     int32_t allocate_spill_slot(bool is_gcref) { return allocate_spill_slot(is_gcref, 8); }
     void rewrite_instructions();

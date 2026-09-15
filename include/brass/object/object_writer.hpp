@@ -185,6 +185,13 @@ public:
     void set_enable_trace_layout(bool enable) { enable_trace_layout_ = enable; }
     bool enable_trace_layout() const noexcept { return enable_trace_layout_; }
 
+    // The per-function MIR optimizer (loop opts, GVN, SCCP, DCE, unrolling,
+    // vectorization) that runs on every function before instruction
+    // selection. Off is the baseline tier: straight ISel of the MIR as given,
+    // for a host that wants the code now rather than good.
+    void set_enable_mir_opts(bool enable) { enable_mir_opts_ = enable; }
+    bool enable_mir_opts() const noexcept { return enable_mir_opts_; }
+
     ObjectFile compile(const Module& mod);
 
 private:
@@ -192,6 +199,7 @@ private:
     CallingConvention cc_;
     codegen::SchedOptions sched_opts_;
     bool enable_trace_layout_ = false;
+    bool enable_mir_opts_ = true;
 };
 
 ObjectFile compile_module_to_object(const Module& mod, const Target& target, const codegen::SchedOptions& sched_opts);
