@@ -296,45 +296,6 @@ bool optimize_module_ipo(Module& mod, const InlinerOptions& inline_opts, const L
         if (!check_ipo("sroa_module")) return false;
     }
 
-    // 2c. GVN (CSE + RLE + DSE) pass
-    if (inline_opts.enable_gvn) {
-        GvnOptions gvn_opts;
-        changed |= gvn_module(mod, gvn_opts);
-        if (!check_ipo("gvn_module")) return false;
-    }
-
-    // 2d. SCCP & Guard Elim & CFG Simplify pass
-    if (loop_opts.enable_sccp) {
-        SccpOptions sccp_opts;
-        sccp_opts.enable_guard_elim = loop_opts.enable_guard_elim;
-        changed |= sccp_module(mod, sccp_opts);
-        if (!check_ipo("sccp_module")) return false;
-    }
-    if (loop_opts.enable_cfg_simplify) {
-        CfgSimplifyOptions cfg_opts;
-        changed |= cfg_simplify_module(mod, cfg_opts);
-        if (!check_ipo("cfg_simplify_module")) return false;
-    }
-
-    // 2e. Range Analysis & BCE pass
-    if (loop_opts.enable_bce) {
-        RangeAnalysisOptions bce_opts;
-        bce_opts.enable_bce = true;
-        bce_opts.enable_hoisting = true;
-        bce_opts.dump_stats = loop_opts.dump_range_stats;
-        if (loop_opts.range_stats) {
-            bce_opts.stats = loop_opts.range_stats;
-        } else if (loop_opts.stats) {
-            bce_opts.stats = &loop_opts.stats->bce_stats;
-        }
-        changed |= run_bounds_check_elimination(mod, bce_opts);
-        if (!check_ipo("run_bounds_check_elimination")) return false;
-    }
-
-    // 3. Re-run loop optimizations, constant folding, CSE, DCE & f64 demotion
-    changed |= optimize_module_loops(mod, loop_opts);
-    if (!check_ipo("optimize_module_loops")) return false;
-
     return changed;
 }
 

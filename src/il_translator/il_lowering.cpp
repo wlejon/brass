@@ -12,6 +12,7 @@
 #include <brass/mir/cfg_simplify.hpp>
 #include <brass/mir/loop_unswitch.hpp>
 #include <brass/mir/jump_threading.hpp>
+#include <brass/mir/bounds_check_elim.hpp>
 #include <brass/mir/write_barrier_elim.hpp>
 #include <cstring>
 #include <iostream>
@@ -450,10 +451,24 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
             }
             return true;
         };
+        // 1. Light prep: SROA
         if (options_.enable_sroa) {
             sroa_module(*mod);
             if (!check_pass("sroa")) return nullptr;
         }
+
+        // 2. Early Devirtualization & Inlining
+        if (options_.enable_inlining) {
+            InlinerOptions inliner_opts;
+            inliner_opts.enable_sroa = options_.enable_sroa;
+            inliner_opts.enable_gvn = false;
+            inliner_opts.enable_speculative_devirtualization = options_.enable_speculative_inlining;
+            optimize_module_ipo(*mod, inliner_opts, opt_opts);
+            if (!check_pass("ipo")) return nullptr;
+        }
+
+        // 3. Single cohesive scalar and loop optimization pipeline:
+        // GVN -> GVN-PRE -> SCCP -> CFG simplify -> BCE -> Loop optimizations -> WBE
         if (options_.enable_gvn) {
             gvn_module(*mod);
             if (!check_pass("gvn")) return nullptr;
@@ -486,17 +501,18 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
             cfg_simplify_module(*mod);
             if (!check_pass("cfg_simplify 2")) return nullptr;
         }
-        if (options_.enable_inlining) {
-            InlinerOptions inliner_opts;
-            inliner_opts.enable_sroa = options_.enable_sroa;
-            inliner_opts.enable_gvn = options_.enable_gvn;
-            inliner_opts.enable_speculative_devirtualization = options_.enable_speculative_inlining;
-            optimize_module_ipo(*mod, inliner_opts, opt_opts);
-            if (!check_pass("ipo")) return nullptr;
-        } else {
-            optimize_module_loops(*mod, opt_opts);
-            if (!check_pass("loops")) return nullptr;
+        if (options_.enable_bce) {
+            RangeAnalysisOptions bce_opts;
+            bce_opts.enable_bce = true;
+            bce_opts.enable_hoisting = true;
+            bce_opts.dump_stats = options_.dump_range_stats;
+            bce_opts.stats = options_.range_stats_collector;
+            run_bounds_check_elimination(*mod, bce_opts);
+            if (!check_pass("bce")) return nullptr;
         }
+        optimize_module_loops(*mod, opt_opts);
+        if (!check_pass("loops")) return nullptr;
+
         if (options_.enable_wbe) {
             WriteBarrierElimination wbe(options_.dump_wbe_stats);
             wbe.run_on_module(*mod);

@@ -349,6 +349,7 @@ bool try_thread_edge(
 } // namespace
 
 bool run_jump_threading(Function& fn, const JumpThreadingOptions& opts, JumpThreadingStats* stats) {
+    if (fn.name().starts_with("__wrapper_")) return false;
     bool changed = false;
     for (size_t iter = 0; iter < opts.max_iterations; ++iter) {
         fn.rebuild_cfg_predecessors();

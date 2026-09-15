@@ -50,6 +50,9 @@ public:
     bool allow_fp_reassociation() const noexcept { return allow_fp_reassociation_; }
     void set_allow_fp_reassociation(bool allow) noexcept { allow_fp_reassociation_ = allow; }
 
+    bool has_loop_optimizations() const noexcept { return has_loop_optimizations_; }
+    void set_has_loop_optimizations(bool opt) noexcept { has_loop_optimizations_ = opt; }
+
     DebugContext& debug_context() noexcept { return debug_context_; }
     const DebugContext& debug_context() const noexcept { return debug_context_; }
 
@@ -61,6 +64,7 @@ private:
     std::unordered_map<std::string_view, Function*> function_map_;
     std::vector<std::string_view> external_symbols_;
     bool allow_fp_reassociation_ = false;
+    bool has_loop_optimizations_ = false;
     DebugContext debug_context_;
 };
 

@@ -593,7 +593,7 @@ bool eliminate_dead_induction_cycles(Function& fn) {
 } // namespace
 
 bool optimize_function_loops(Function& fn, const LoopOptOptions& options) {
-    if (!fn.resume_points().empty()) {
+    if (!fn.resume_points().empty() || fn.name().starts_with("__wrapper_")) {
         return false;
     }
     for (const BasicBlock* bb : fn.blocks()) {
@@ -868,12 +868,11 @@ bool optimize_function_loops(Function& fn, const LoopOptOptions& options) {
 
 bool optimize_module_loops(Module& mod, const LoopOptOptions& options) {
     bool changed = false;
+    mod.set_has_loop_optimizations(true);
     LoopOptOptions mod_opts = options;
-    if (mod.allow_fp_reassociation()) {
-        mod_opts.enable_fp_reassociation = true;
-    }
+    if (mod.allow_fp_reassociation()) mod_opts.enable_fp_reassociation = true;
     for (Function* fn : mod.functions()) {
-        if (fn) changed |= optimize_function_loops(*fn, mod_opts);
+        if (fn && !fn->name().starts_with("__wrapper_")) changed |= optimize_function_loops(*fn, mod_opts);
     }
     return changed;
 }
@@ -985,10 +984,9 @@ bool optimize_module(Module& mod) {
 
 bool optimize_module(Module& mod, const LoopOptOptions& options) {
     bool changed = false;
+    mod.set_has_loop_optimizations(true);
     LoopOptOptions mod_opts = options;
-    if (mod.allow_fp_reassociation()) {
-        mod_opts.enable_fp_reassociation = true;
-    }
+    if (mod.allow_fp_reassociation()) mod_opts.enable_fp_reassociation = true;
     for (Function* fn : mod.functions()) {
         if (fn) changed |= optimize_function(*fn, mod_opts);
     }

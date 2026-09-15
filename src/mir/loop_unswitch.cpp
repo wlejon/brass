@@ -58,6 +58,7 @@ bool unswitch_loop(Function& fn, LoopInfo& loop, const DominatorTree& dom) {
 }
 
 bool unswitch_loops_in_function(Function& fn, const LoopUnswitchOptions& opts, LoopUnswitchStats* stats) {
+    if (fn.name().starts_with("__wrapper_")) return false;
     bool changed = false;
     constexpr size_t kMaxRounds = 16;
 

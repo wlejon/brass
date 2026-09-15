@@ -203,6 +203,9 @@ bool gvn_pre_function(Function& fn) {
 }
 
 bool gvn_pre_function(Function& fn, const GvnPreOptions& options) {
+    if (fn.name().starts_with("__wrapper_")) {
+        return false;
+    }
     fn.rebuild_cfg_predecessors();
     bool overall_changed = false;
 
@@ -603,7 +606,7 @@ bool gvn_pre_module(Module& mod) {
 bool gvn_pre_module(Module& mod, const GvnPreOptions& options) {
     bool changed = false;
     for (Function* fn : mod.functions()) {
-        if (fn) {
+        if (fn && !fn->name().starts_with("__wrapper_")) {
             changed |= gvn_pre_function(*fn, options);
         }
     }
