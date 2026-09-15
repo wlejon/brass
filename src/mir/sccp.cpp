@@ -631,6 +631,7 @@ bool sccp_function(Function& fn) {
 }
 
 bool sccp_function(Function& fn, const SccpOptions& options) {
+    if (fn.name().starts_with("__wrapper_")) return false;
     SccpEngine engine(fn, options);
     return engine.run();
 }
@@ -643,7 +644,7 @@ bool sccp_module(Module& mod) {
 bool sccp_module(Module& mod, const SccpOptions& options) {
     bool changed = false;
     for (Function* fn : mod.functions()) {
-        if (fn) {
+        if (fn && !fn->name().starts_with("__wrapper_")) {
             changed |= sccp_function(*fn, options);
         }
     }

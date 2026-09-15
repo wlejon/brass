@@ -12,48 +12,76 @@ namespace brass {
 
 namespace {
 
-void replace_uses(Function& fn, Value* old_val, Value* new_val) {
-    if (!old_val || !new_val || old_val == new_val) return;
+void apply_substitutions(Function& fn, const std::unordered_map<Value*, Value*>& subst_map) {
+    if (subst_map.empty()) return;
+
+    auto resolve = [&](Value* v) -> Value* {
+        if (!v) return nullptr;
+        auto it = subst_map.find(v);
+        if (it == subst_map.end()) return v;
+        Value* root = it->second;
+        size_t depth = 0;
+        while (root && depth++ < 100) {
+            auto it2 = subst_map.find(root);
+            if (it2 == subst_map.end()) break;
+            root = it2->second;
+        }
+        return root;
+    };
 
     for (BasicBlock* bb : fn.blocks()) {
         if (!bb) continue;
         for (Instruction* inst : *bb) {
             if (!inst) continue;
             for (size_t i = 0; i < inst->operand_count(); ++i) {
-                if (inst->operand(i) == old_val) {
-                    inst->set_operand(i, new_val);
+                Value* op = inst->operand(i);
+                Value* r = resolve(op);
+                if (r != op) {
+                    inst->set_operand(i, r);
                 }
             }
             for (size_t i = 0; i < inst->branch_target().args.size(); ++i) {
-                if (inst->branch_target().args[i] == old_val) {
-                    inst->branch_target().args[i] = new_val;
+                Value* op = inst->branch_target().args[i];
+                Value* r = resolve(op);
+                if (r != op) {
+                    inst->branch_target().args[i] = r;
                 }
             }
             for (size_t i = 0; i < inst->true_target().args.size(); ++i) {
-                if (inst->true_target().args[i] == old_val) {
-                    inst->true_target().args[i] = new_val;
+                Value* op = inst->true_target().args[i];
+                Value* r = resolve(op);
+                if (r != op) {
+                    inst->true_target().args[i] = r;
                 }
             }
             for (size_t i = 0; i < inst->false_target().args.size(); ++i) {
-                if (inst->false_target().args[i] == old_val) {
-                    inst->false_target().args[i] = new_val;
+                Value* op = inst->false_target().args[i];
+                Value* r = resolve(op);
+                if (r != op) {
+                    inst->false_target().args[i] = r;
                 }
             }
             for (size_t i = 0; i < inst->default_target().args.size(); ++i) {
-                if (inst->default_target().args[i] == old_val) {
-                    inst->default_target().args[i] = new_val;
+                Value* op = inst->default_target().args[i];
+                Value* r = resolve(op);
+                if (r != op) {
+                    inst->default_target().args[i] = r;
                 }
             }
             for (auto& sc : inst->switch_cases()) {
                 for (size_t i = 0; i < sc.target.args.size(); ++i) {
-                    if (sc.target.args[i] == old_val) {
-                        sc.target.args[i] = new_val;
+                    Value* op = sc.target.args[i];
+                    Value* r = resolve(op);
+                    if (r != op) {
+                        sc.target.args[i] = r;
                     }
                 }
             }
             for (size_t i = 0; i < inst->state_map().size(); ++i) {
-                if (inst->state_map()[i] == old_val) {
-                    inst->state_map()[i] = new_val;
+                Value* op = inst->state_map()[i];
+                Value* r = resolve(op);
+                if (r != op) {
+                    inst->state_map()[i] = r;
                 }
             }
         }
@@ -177,6 +205,7 @@ bool gvn_function(Function& fn) {
 }
 
 bool gvn_function(Function& fn, const GvnOptions& options) {
+    if (fn.name().starts_with("__wrapper_")) return false;
     fn.rebuild_cfg_predecessors();
     bool any_changed = false;
 
@@ -193,6 +222,22 @@ bool gvn_function(Function& fn, const GvnOptions& options) {
         if (!entry || !dom.is_reachable(entry)) break;
 
         std::vector<Instruction*> to_remove;
+        std::unordered_map<Value*, Value*> subst_map;
+
+        auto resolve = [&](Value* v) -> Value* {
+            if (!v) return nullptr;
+            auto it = subst_map.find(v);
+            if (it == subst_map.end()) return v;
+            Value* root = it->second;
+            size_t depth = 0;
+            while (root && depth++ < 100) {
+                auto it2 = subst_map.find(root);
+                if (it2 == subst_map.end()) break;
+                root = it2->second;
+            }
+            it->second = root;
+            return root;
+        };
 
         auto visit_block = [&](auto& self, const BasicBlock* bb) -> void {
             table.enter_scope();
@@ -202,12 +247,22 @@ bool gvn_function(Function& fn, const GvnOptions& options) {
                 Instruction* next = cur->next();
                 Opcode op = cur->opcode();
 
+                // Canonicalize operands of cur
+                for (size_t i = 0; i < cur->operand_count(); ++i) {
+                    Value* op_val = cur->operand(i);
+                    Value* r = resolve(op_val);
+                    if (r != op_val) {
+                        cur->set_operand(i, r);
+                    }
+                }
+
                 // 1. Pure Expression CSE with Commutative Canonicalization
                 if (options.enable_cse && is_pure_gvn_op(cur)) {
                     GvnExpression expr = GvnExpression::from_instruction(cur);
                     Value* existing = table.lookup_expression(expr);
                     if (existing && existing != cur->result()) {
-                        replace_uses(fn, cur->result(), existing);
+                        Value* leader = resolve(existing);
+                        subst_map[cur->result()] = leader;
                         to_remove.push_back(cur);
                         if (options.stats) options.stats->expressions_eliminated++;
                         iter_changed = true;
@@ -237,8 +292,8 @@ bool gvn_function(Function& fn, const GvnOptions& options) {
                                 if (def_inst->memory_type() == mtype &&
                                     aa.alias(def_inst->operand(0), def_inst->offset(), def_inst->memory_type(),
                                              base, off, mtype) == AliasResult::MustAlias) {
-                                    Value* stored_val = def_inst->operand(1);
-                                    replace_uses(fn, res_val, stored_val);
+                                    Value* stored_val = resolve(def_inst->operand(1));
+                                    subst_map[res_val] = stored_val;
                                     to_remove.push_back(cur);
                                     if (options.stats) options.stats->loads_forwarded++;
                                     iter_changed = true;
@@ -261,7 +316,8 @@ bool gvn_function(Function& fn, const GvnOptions& options) {
 
                     Value* dominating_load_val = table.lookup_load(load_key);
                     if (dominating_load_val && dominating_load_val != res_val) {
-                        replace_uses(fn, res_val, dominating_load_val);
+                        dominating_load_val = resolve(dominating_load_val);
+                        subst_map[res_val] = dominating_load_val;
                         to_remove.push_back(cur);
                         if (options.stats) options.stats->loads_eliminated++;
                         iter_changed = true;
@@ -292,6 +348,10 @@ bool gvn_function(Function& fn, const GvnOptions& options) {
             }
         }
 
+        if (!subst_map.empty()) {
+            apply_substitutions(fn, subst_map);
+        }
+
         // 3. Dead Store Elimination (DSE)
         if (options.enable_dse) {
             iter_changed |= run_dse_pass(fn, aa, options.stats);
@@ -316,11 +376,12 @@ bool gvn_module(Module& mod) {
 bool gvn_module(Module& mod, const GvnOptions& options) {
     bool changed = false;
     for (Function* fn : mod.functions()) {
-        if (fn) {
+        if (fn && !fn->name().starts_with("__wrapper_")) {
             changed |= gvn_function(*fn, options);
         }
     }
     return changed;
 }
+
 
 } // namespace brass

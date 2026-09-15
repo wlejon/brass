@@ -515,6 +515,7 @@ bool cfg_simplify_function(Function& fn) {
 }
 
 bool cfg_simplify_function(Function& fn, const CfgSimplifyOptions& options) {
+    if (fn.name().starts_with("__wrapper_")) return false;
     CfgSimplifier simplifier(fn, options);
     return simplifier.run();
 }
@@ -527,7 +528,7 @@ bool cfg_simplify_module(Module& mod) {
 bool cfg_simplify_module(Module& mod, const CfgSimplifyOptions& options) {
     bool changed = false;
     for (Function* fn : mod.functions()) {
-        if (fn) {
+        if (fn && !fn->name().starts_with("__wrapper_")) {
             changed |= cfg_simplify_function(*fn, options);
         }
     }
