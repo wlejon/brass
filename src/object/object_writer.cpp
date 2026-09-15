@@ -116,27 +116,30 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
     for (const auto* fn : mod.functions()) {
         if (!fn) continue;
 
-        // 0. Clone and optimize MIR function
-        Module opt_mod(mod.name());
-        opt_mod.set_allow_fp_reassociation(mod.allow_fp_reassociation());
-        for (std::string_view sym : mod.external_symbols()) {
-            opt_mod.add_external_symbol(sym);
-        }
-        Function* opt_fn = clone_function(*fn, opt_mod);
         LoopOptOptions loop_opts;
         loop_opts.enable_f64_demote = false;
         loop_opts.enable_fp_reassociation = fn->allow_fp_reassociation() || mod.allow_fp_reassociation();
+
+        const Function* fn_to_lower = fn;
+        std::unique_ptr<Module> opt_mod;
         if (enable_mir_opts_ && !mod.has_loop_optimizations()) {
+            opt_mod = std::make_unique<Module>(mod.name());
+            opt_mod->set_allow_fp_reassociation(mod.allow_fp_reassociation());
+            for (std::string_view sym : mod.external_symbols()) {
+                opt_mod->add_external_symbol(sym);
+            }
+            Function* opt_fn = clone_function(*fn, *opt_mod);
             optimize_function_loops(*opt_fn, loop_opts);
+            opt_fn->rebuild_cfg_predecessors();
+            opt_fn->sort_blocks_rpo();
+            opt_fn->rebuild_cfg_predecessors();
+            verify_function(*opt_fn);
+            fn_to_lower = opt_fn;
         }
-        opt_fn->rebuild_cfg_predecessors();
-        opt_fn->sort_blocks_rpo();
-        opt_fn->rebuild_cfg_predecessors();
-        verify_function(*opt_fn);
 
         // 1. ISel to LIR
         x64::X64ISel isel(target_, cc_);
-        auto lir = isel.lower(*opt_fn);
+        auto lir = isel.lower(*fn_to_lower);
         if (!lir) continue;
         lir->sort_blocks_rpo();
 

@@ -42,6 +42,7 @@ bool devirtualize_module(Module& mod) {
     bool changed = false;
     for (Function* fn : mod.functions()) {
         if (!fn) continue;
+        if (fn->name().starts_with("__wrapper_")) continue;
         changed |= devirtualize_function(*fn, mod);
     }
     return changed;

@@ -245,6 +245,7 @@ bool inline_module(Module& mod, const InlinerOptions& options) {
     bool changed = false;
     for (Function* fn : order) {
         if (!fn) continue;
+        if (fn->name().starts_with("__wrapper_")) continue;
         // Don't inline into a function that is strictly recursive with itself if forbidden
         changed |= inline_function(*fn, mod, options, &cg);
     }
