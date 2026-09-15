@@ -28,12 +28,9 @@ void LinearScanAllocator::init_register_pools() {
         available_gprs_.push_back(PReg::gpr(g));
     }
 
-    // Available XMMs (excluding scratch XMM3, XMM4, and XMM5: XMM0..XMM2, XMM6..XMM15)
+    // Available XMMs (excluding scratch XMM13, XMM14, and XMM15: XMM0..XMM12)
     available_xmms_.clear();
-    for (int i = 0; i <= 2; ++i) {
-        available_xmms_.push_back(PReg::xmm(static_cast<XMM>(i)));
-    }
-    for (int i = 6; i <= 15; ++i) {
+    for (int i = 0; i <= 12; ++i) {
         available_xmms_.push_back(PReg::xmm(static_cast<XMM>(i)));
     }
 }
@@ -672,7 +669,7 @@ void LinearScanAllocator::rewrite_instructions() {
                 bool is_xmm = orig_def_is_xmm || orig_use_is_xmm[0] || (inst->opcode == LirOpcode::Movsd || inst->opcode == LirOpcode::Movss ||
                                inst->opcode == LirOpcode::Movaps || inst->opcode == LirOpcode::Vmovaps ||
                                inst->opcode == LirOpcode::Vmovups || sz == 16 || sz == 32);
-                PReg scratch = is_xmm ? PReg::xmm(XMM::XMM5) : PReg::gpr(GPR::R11);
+                PReg scratch = is_xmm ? PReg::xmm(XMM::XMM15) : PReg::gpr(GPR::R11);
                 if (!is_xmm) {
                     bool uses_r11 = false;
                     if (inst->defs[0].is_mem() && (inst->defs[0].mem_val.base_preg == PReg::gpr(GPR::R11) ||
@@ -749,7 +746,7 @@ void LinearScanAllocator::rewrite_instructions() {
                 if (inst->is_call()) {
                     def_scratch = is_xmm_def ? PReg::xmm(XMM::XMM0) : PReg::gpr(GPR::RAX);
                 } else {
-                    def_scratch = is_xmm_def ? PReg::xmm(XMM::XMM5) : PReg::gpr(GPR::R11);
+                    def_scratch = is_xmm_def ? PReg::xmm(XMM::XMM15) : PReg::gpr(GPR::R11);
                 }
 
                 // If instruction reads from def (e.g. add dst, src), load initial value of def into scratch
@@ -773,7 +770,7 @@ void LinearScanAllocator::rewrite_instructions() {
                 inst->defs[0] = LirOperand::preg(def_scratch, sz);
             }
 
-            // Handle any remaining spill uses with reserved scratch registers R10/R11 (GPR) or XMM3/XMM4 (XMM)
+            // Handle any remaining spill uses with reserved scratch registers R10/R11 (GPR) or XMM13/XMM14 (XMM)
             std::vector<int32_t> orig_slot_indices(inst->uses.size(), -1);
             for (size_t i = 0; i < inst->uses.size(); ++i) {
                 if (inst->uses[i].is_spill_slot()) {
@@ -784,7 +781,7 @@ void LinearScanAllocator::rewrite_instructions() {
             int gpr_scratch_idx = 0;
             int xmm_scratch_idx = 0;
             PReg gpr_scratches[2] = {PReg::gpr(GPR::R10), PReg::gpr(GPR::R11)};
-            PReg xmm_scratches[2] = {PReg::xmm(XMM::XMM3), PReg::xmm(XMM::XMM4)};
+            PReg xmm_scratches[2] = {PReg::xmm(XMM::XMM13), PReg::xmm(XMM::XMM14)};
 
             for (size_t i = 0; i < inst->uses.size(); ++i) {
                 if (inst->uses[i].is_spill_slot()) {

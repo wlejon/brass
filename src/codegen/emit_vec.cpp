@@ -21,8 +21,8 @@ void EmitContext::emit_vec_instruction(const LirInst& inst) {
                 MemAddress dst_mem = to_mem_address(dst);
                 if (src.is_preg()) enc_.movups(dst_mem, src.preg_val.as_xmm());
                 else {
-                    enc_.movups(XMM::XMM5, to_mem_address(src));
-                    enc_.movups(dst_mem, XMM::XMM5);
+                    enc_.movups(XMM::XMM15, to_mem_address(src));
+                    enc_.movups(dst_mem, XMM::XMM15);
                 }
             }
             break;
@@ -38,8 +38,8 @@ void EmitContext::emit_vec_instruction(const LirInst& inst) {
                 MemAddress dst_mem = to_mem_address(dst);
                 if (src.is_preg()) enc_.movups(dst_mem, src.preg_val.as_xmm());
                 else {
-                    enc_.movups(XMM::XMM5, to_mem_address(src));
-                    enc_.movups(dst_mem, XMM::XMM5);
+                    enc_.movups(XMM::XMM15, to_mem_address(src));
+                    enc_.movups(dst_mem, XMM::XMM15);
                 }
             }
             break;
@@ -58,8 +58,8 @@ void EmitContext::emit_vec_instruction(const LirInst& inst) {
                 MemAddress dst_mem = to_mem_address(dst);
                 if (src.is_preg()) enc_.vmovups(dst_mem, src.preg_val.as_xmm());
                 else {
-                    enc_.vmovups(XMM::XMM5, to_mem_address(src));
-                    enc_.vmovups(dst_mem, XMM::XMM5);
+                    enc_.vmovups(XMM::XMM15, to_mem_address(src));
+                    enc_.vmovups(dst_mem, XMM::XMM15);
                 }
             }
             break;
@@ -75,8 +75,8 @@ void EmitContext::emit_vec_instruction(const LirInst& inst) {
                 MemAddress dst_mem = to_mem_address(dst);
                 if (src.is_preg()) enc_.vmovups(dst_mem, src.preg_val.as_xmm());
                 else {
-                    enc_.vmovups(XMM::XMM5, to_mem_address(src));
-                    enc_.vmovups(dst_mem, XMM::XMM5);
+                    enc_.vmovups(XMM::XMM15, to_mem_address(src));
+                    enc_.vmovups(dst_mem, XMM::XMM15);
                 }
             }
             break;
