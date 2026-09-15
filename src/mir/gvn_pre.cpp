@@ -272,122 +272,204 @@ bool gvn_pre_function(Function& fn, const GvnPreOptions& options) {
             }
         }
 
-        // Collect all candidate expressions
-        std::vector<PreExpression> candidate_exprs;
-        std::unordered_map<PreExpression, const Instruction*, PreExprHash> exemplars;
+        // One walk indexes every candidate's evaluations, every operand
+        // definition and every memory writer; each expression below is then
+        // analysed from its own events (gvn_pre_dataflow.hpp).
+        PreFunctionIndex index;
+        index.build(fn, value_leaders, options.enable_load_pre);
 
-        for (const BasicBlock* bb : fn.blocks()) {
-            if (!bb) continue;
-            for (const Instruction* inst : *bb) {
-                if (!inst || !is_pre_candidate_op(inst)) continue;
-                if (!options.enable_load_pre && (inst->opcode() == Opcode::load || inst->opcode() == Opcode::vload)) {
-                    continue;
+        // The natural loops — a backedge latch -> header with a preheader, and
+        // the blocks that reach the latch without passing the header — in the
+        // (latch, header) order the LICM step visits them. They do not depend
+        // on the expression, so they are built once per iteration.
+        struct NaturalLoop {
+            BasicBlock* header;
+            BasicBlock* latch;
+            BasicBlock* preheader;
+            std::unordered_set<BasicBlock*> blocks;
+        };
+        std::vector<NaturalLoop> loops;
+        for (BasicBlock* latch : fn.blocks()) {
+            if (!latch || !dom.is_reachable(latch)) continue;
+            for (BasicBlock* header : latch->successors()) {
+                if (!header || !dom.is_reachable(header)) continue;
+                if (!dom.dominates(header, latch)) continue; // Not a backedge
+
+                // Find loop preheader: a predecessor of `header` that dominates `header` and is not dominated by header
+                BasicBlock* preheader = nullptr;
+                for (BasicBlock* pred : header->predecessors()) {
+                    if (pred && pred != latch && !dom.dominates(header, pred) && dom.dominates(pred, header)) {
+                        preheader = pred;
+                        break;
+                    }
                 }
+                if (!preheader) continue;
 
-                PreExpression expr = PreExpression::from_instruction(inst, value_leaders);
-                if (exemplars.find(expr) == exemplars.end()) {
-                    candidate_exprs.push_back(expr);
-                    exemplars[expr] = inst;
+                NaturalLoop loop{header, latch, preheader, {}};
+                loop.blocks.insert(header);
+                if (latch != header) {
+                    loop.blocks.insert(latch);
+                    std::vector<BasicBlock*> worklist;
+                    worklist.push_back(latch);
+                    while (!worklist.empty()) {
+                        BasicBlock* cur = worklist.back();
+                        worklist.pop_back();
+                        for (BasicBlock* pred : cur->predecessors()) {
+                            if (pred && loop.blocks.insert(pred).second) {
+                                worklist.push_back(pred);
+                            }
+                        }
+                    }
+                }
+                loops.push_back(std::move(loop));
+            }
+        }
+
+        // Blocks on some CFG cycle (a non-trivial strongly connected
+        // component, so irreducible cycles count too). An expression with a
+        // single evaluation outside every cycle has nothing this pass can do
+        // for it: hoisting out of a loop needs an evaluation in one, and a
+        // join is only partially redundant when the expression is both
+        // anticipated below it and available above it — one evaluation is
+        // both only from inside a cycle. A load is the exception, since a
+        // must-alias store can make it available; that is filtered on the
+        // store types the index recorded.
+        std::unordered_set<const BasicBlock*> cyclic_blocks;
+        {
+            std::unordered_map<const BasicBlock*, uint32_t> dfs_index;
+            std::unordered_map<const BasicBlock*, uint32_t> low_link;
+            std::unordered_set<const BasicBlock*> on_stack;
+            std::vector<const BasicBlock*> scc_stack;
+            struct Frame {
+                const BasicBlock* block;
+                size_t next_succ;
+            };
+            uint32_t next_index = 0;
+            for (const BasicBlock* root : fn.blocks()) {
+                if (!root || dfs_index.count(root)) continue;
+                std::vector<Frame> frames;
+                frames.push_back(Frame{root, 0});
+                dfs_index[root] = low_link[root] = next_index++;
+                scc_stack.push_back(root);
+                on_stack.insert(root);
+                while (!frames.empty()) {
+                    Frame& frame = frames.back();
+                    const BasicBlock* bb = frame.block;
+                    auto succs = bb->successors();
+                    if (frame.next_succ < succs.size()) {
+                        const BasicBlock* succ = succs[frame.next_succ++];
+                        if (!succ) continue;
+                        if (!dfs_index.count(succ)) {
+                            dfs_index[succ] = low_link[succ] = next_index++;
+                            scc_stack.push_back(succ);
+                            on_stack.insert(succ);
+                            frames.push_back(Frame{succ, 0});
+                        } else if (on_stack.count(succ)) {
+                            low_link[bb] = std::min(low_link[bb], dfs_index[succ]);
+                        }
+                        continue;
+                    }
+                    if (low_link[bb] == dfs_index[bb]) {
+                        // bb is the root of an SCC: pop it. A component of
+                        // one block is a cycle only if the block loops to
+                        // itself.
+                        std::vector<const BasicBlock*> component;
+                        while (true) {
+                            const BasicBlock* member = scc_stack.back();
+                            scc_stack.pop_back();
+                            on_stack.erase(member);
+                            component.push_back(member);
+                            if (member == bb) break;
+                        }
+                        bool cyclic = component.size() > 1;
+                        if (!cyclic) {
+                            for (const BasicBlock* succ : bb->successors()) {
+                                if (succ == bb) { cyclic = true; break; }
+                            }
+                        }
+                        if (cyclic) cyclic_blocks.insert(component.begin(), component.end());
+                    }
+                    frames.pop_back();
+                    if (!frames.empty()) {
+                        const BasicBlock* parent = frames.back().block;
+                        low_link[parent] = std::min(low_link[parent], low_link[bb]);
+                    }
                 }
             }
         }
 
-        PreDataflow dataflow(fn, dom, aa);
+        PreDataflow dataflow(fn, dom, aa, index);
 
-        for (const PreExpression& expr : candidate_exprs) {
-            const Instruction* exemplar = exemplars[expr];
-            dataflow.analyze_expression(expr, exemplar, value_leaders);
+        for (const PreExpression& expr : index.candidates) {
+            const Instruction* exemplar = index.exemplars.at(expr);
+            const std::vector<Instruction*>& evals = index.evaluations.at(expr);
+            if (evals.size() == 1) {
+                // A lone evaluation can only be hoisted out of a cycle or fed
+                // by a store of its type; anything else has nothing to gain
+                // from the dataflow, and skipping it is most of the pass on
+                // straight-line code.
+                const BasicBlock* eval_block = index.block_of(evals.front());
+                const bool in_cycle = eval_block && cyclic_blocks.count(eval_block) != 0;
+                const bool store_may_supply = expr.is_load() && index.has_store_of_type(expr.memory_type);
+                if (!in_cycle && !store_may_supply) continue;
+            }
+            dataflow.analyze_expression(expr, exemplar);
 
             // A. Check for Loop Invariant Code Motion (LICM):
-            // Identify loops via backedges (latch -> header where dom.dominates(header, latch)).
             // If an expression is computed inside a loop, all its operands dominate the loop preheader,
             // and no instruction in the loop clobbers it, hoist it to the preheader.
-            for (BasicBlock* latch : fn.blocks()) {
-                if (!latch || !dom.is_reachable(latch)) continue;
-                for (BasicBlock* header : latch->successors()) {
-                    if (!header || !dom.is_reachable(header)) continue;
-                    if (!dom.dominates(header, latch)) continue; // Not a backedge
+            for (const NaturalLoop& loop : loops) {
+                const std::unordered_set<BasicBlock*>& loop_set = loop.blocks;
+                BasicBlock* preheader = loop.preheader;
 
-                    // Found a natural loop with header `header` and latch `latch`
-                    // Find loop preheader: a predecessor of `header` that dominates `header` and is not dominated by header
-                    BasicBlock* preheader = nullptr;
-                    for (BasicBlock* pred : header->predecessors()) {
-                        if (pred && pred != latch && !dom.dominates(header, pred) && dom.dominates(pred, header)) {
-                            preheader = pred;
-                            break;
-                        }
+                bool has_loop_eval = false;
+                for (BasicBlock* b_block : loop_set) {
+                    const auto& b_info = dataflow.get_local_info(b_block);
+                    if (!b_info.evaluations.empty()) {
+                        has_loop_eval = true;
+                        break;
                     }
-                    if (!preheader) continue;
-
-                    // Collect blocks in the natural loop of latch -> header:
-                    // Blocks that can reach latch without passing through header.
-                    std::unordered_set<BasicBlock*> loop_set;
-                    loop_set.insert(header);
-                    if (latch != header) {
-                        loop_set.insert(latch);
-                        std::vector<BasicBlock*> worklist;
-                        worklist.push_back(latch);
-                        while (!worklist.empty()) {
-                            BasicBlock* cur = worklist.back();
-                            worklist.pop_back();
-                            for (BasicBlock* pred : cur->predecessors()) {
-                                if (pred && loop_set.insert(pred).second) {
-                                    worklist.push_back(pred);
-                                }
-                            }
-                        }
-                    }
-
-                    bool has_loop_eval = false;
-                    for (BasicBlock* b_block : loop_set) {
-                        const auto& b_info = dataflow.get_local_info(b_block);
-                        if (!b_info.evaluations.empty()) {
-                            has_loop_eval = true;
-                            break;
-                        }
-                    }
-                    if (!has_loop_eval) continue;
-
-                    // Expression operands must dominate the preheader
-                    if (!dataflow.can_evaluate_at_end(preheader, expr, exemplar)) continue;
-
-                    // If expression is memory load, the entire loop must be transparent
-                    if (expr.is_load()) {
-                        bool loop_transparent = true;
-                        for (BasicBlock* b_block : loop_set) {
-                            if (!dataflow.get_local_info(b_block).transp) {
-                                loop_transparent = false;
-                                break;
-                            }
-                        }
-                        if (!loop_transparent) continue;
-                    }
-
-                    // Hoist expression to preheader if not already available at exit
-                    Value* hoisted_val = dataflow.available_at_exit(preheader);
-                    if (!hoisted_val) {
-                        Builder b(fn);
-                        hoisted_val = insert_hoisted_expression(b, expr, exemplar, preheader, dom);
-                        if (options.stats) options.stats->expressions_hoisted++;
-                    }
-
-                    // Eliminate all evaluations in the loop
-                    for (BasicBlock* b_block : loop_set) {
-                        const auto& b_info = dataflow.get_local_info(b_block);
-                        std::vector<Instruction*> to_remove = b_info.evaluations;
-                        for (Instruction* inst : to_remove) {
-                            if (inst && inst->parent()) {
-                                replace_all_uses(fn, inst->result(), hoisted_val);
-                                inst->parent()->remove_instruction(inst);
-                                if (options.stats) options.stats->expressions_eliminated++;
-                            }
-                        }
-                    }
-
-                    iter_changed = true;
-                    break;
                 }
-                if (iter_changed) break;
+                if (!has_loop_eval) continue;
+
+                // Expression operands must dominate the preheader
+                if (!dataflow.can_evaluate_at_end(preheader, expr, exemplar)) continue;
+
+                // If expression is memory load, the entire loop must be transparent
+                if (expr.is_load()) {
+                    bool loop_transparent = true;
+                    for (BasicBlock* b_block : loop_set) {
+                        if (!dataflow.get_local_info(b_block).transp) {
+                            loop_transparent = false;
+                            break;
+                        }
+                    }
+                    if (!loop_transparent) continue;
+                }
+
+                // Hoist expression to preheader if not already available at exit
+                Value* hoisted_val = dataflow.available_at_exit(preheader);
+                if (!hoisted_val) {
+                    Builder b(fn);
+                    hoisted_val = insert_hoisted_expression(b, expr, exemplar, preheader, dom);
+                    if (options.stats) options.stats->expressions_hoisted++;
+                }
+
+                // Eliminate all evaluations in the loop
+                for (BasicBlock* b_block : loop_set) {
+                    const auto& b_info = dataflow.get_local_info(b_block);
+                    std::vector<Instruction*> to_remove = b_info.evaluations;
+                    for (Instruction* inst : to_remove) {
+                        if (inst && inst->parent()) {
+                            replace_all_uses(fn, inst->result(), hoisted_val);
+                            inst->parent()->remove_instruction(inst);
+                            if (options.stats) options.stats->expressions_eliminated++;
+                        }
+                    }
+                }
+
+                iter_changed = true;
+                break;
             }
 
             if (iter_changed) break;

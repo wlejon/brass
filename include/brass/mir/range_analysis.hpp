@@ -129,6 +129,7 @@ private:
     void propagate_path_sensitive(Function& fn, const DominatorTree& dom);
     void visit_dominator_block(
         const BasicBlock* bb,
+        const BasicBlock* idom,
         const DominatorTree& dom,
         std::unordered_map<const Value*, ValueRange>& current_ranges
     );
@@ -150,7 +151,27 @@ private:
     ) const;
 
     std::unordered_map<const Value*, ValueRange> global_ranges_;
+
+    // The loop-induction ranges pass 2 records for a block's parameters. Pass
+    // 3 loads them when it reaches the block; for a block it never reaches
+    // (unreachable code) they are the block-local answer on their own.
     std::unordered_map<const BasicBlock*, std::unordered_map<const Value*, ValueRange>> block_ranges_;
+
+    // What pass 3 knows per block it visited: only what the block CHANGED in
+    // the in-scope ranges — its parameters, the refinement its lone
+    // predecessor's branch implies, its own instructions' results — and its
+    // immediate dominator. The range of a value at a block is the last write
+    // found walking the dominator chain from the block, else the pass-3
+    // starting snapshot, else the global range. That is exactly what a copy
+    // of the whole in-scope map per block used to answer; the copy was
+    // O(blocks × values) in time and memory, which on a flattened module top
+    // level of a thousand blocks was most of bounds-check elimination.
+    struct BlockDelta {
+        const BasicBlock* idom = nullptr;
+        std::vector<std::pair<const Value*, ValueRange>> changes;  // write order; a value's last entry wins
+    };
+    std::unordered_map<const BasicBlock*, BlockDelta> block_deltas_;
+    std::unordered_map<const Value*, ValueRange> pass3_initial_ranges_;
 };
 
 } // namespace brass

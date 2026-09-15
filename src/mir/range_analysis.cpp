@@ -343,6 +343,24 @@ ValueRange RangeAnalysis::get_range_at(const Value* v, const BasicBlock* bb) con
         return ValueRange::constant(c);
     }
     if (bb) {
+        auto d_it = block_deltas_.find(bb);
+        if (d_it != block_deltas_.end()) {
+            // A block pass 3 reached: the in-scope range is the nearest write
+            // on the dominator chain, else the snapshot pass 3 started from.
+            for (const BlockDelta* delta = &d_it->second;;) {
+                const auto& changes = delta->changes;
+                for (auto c = changes.rbegin(); c != changes.rend(); ++c) {
+                    if (c->first == v) return c->second;
+                }
+                if (!delta->idom) break;
+                auto up = block_deltas_.find(delta->idom);
+                if (up == block_deltas_.end()) break;
+                delta = &up->second;
+            }
+            auto s_it = pass3_initial_ranges_.find(v);
+            if (s_it != pass3_initial_ranges_.end()) return s_it->second;
+            return get_range(v);
+        }
         auto b_it = block_ranges_.find(bb);
         if (b_it != block_ranges_.end()) {
             auto v_it = b_it->second.find(v);
@@ -713,6 +731,7 @@ void RangeAnalysis::infer_loop_induction_variables(const LoopAnalysis& loops) {
 
 void RangeAnalysis::visit_dominator_block(
     const BasicBlock* bb,
+    const BasicBlock* idom,
     const DominatorTree& dom,
     std::unordered_map<const Value*, ValueRange>& current_ranges
 ) {
@@ -770,13 +789,22 @@ void RangeAnalysis::visit_dominator_block(
         }
     }
 
-    for (const auto& [val, r] : current_ranges) {
-        block_ranges_[bb][val] = r;
+    // What this block changed, at the values the changes left in place. Every
+    // write above went through `rollback`, so its entries name exactly the
+    // values whose in-scope range differs here from the dominator's.
+    {
+        BlockDelta& delta = block_deltas_[bb];
+        delta.idom = idom;
+        delta.changes.reserve(rollback.size());
+        for (const auto& entry : rollback) {
+            auto it = current_ranges.find(entry.first);
+            if (it != current_ranges.end()) delta.changes.emplace_back(entry.first, it->second);
+        }
     }
 
     for (const BasicBlock* child : dom.children(bb)) {
         if (child) {
-            visit_dominator_block(child, dom, current_ranges);
+            visit_dominator_block(child, bb, dom, current_ranges);
         }
     }
 
@@ -792,6 +820,8 @@ void RangeAnalysis::visit_dominator_block(
 void RangeAnalysis::run_analysis(Function& fn, const DominatorTree& dom, const LoopAnalysis& loops) {
     global_ranges_.clear();
     block_ranges_.clear();
+    block_deltas_.clear();
+    pass3_initial_ranges_.clear();
 
     // Pass 1: Forward evaluation of instructions and block parameters
     for (size_t iter = 0; iter < 16; ++iter) {
@@ -891,10 +921,13 @@ void RangeAnalysis::run_analysis(Function& fn, const DominatorTree& dom, const L
     // Pass 2: Loop induction variable inference
     infer_loop_induction_variables(loops);
 
-    // Pass 3: Path-sensitive refinement across dominator tree
+    // Pass 3: Path-sensitive refinement across dominator tree. The walk
+    // works on the snapshot itself: every write it makes is rolled back on
+    // the way out, so the map is the starting snapshot again when it returns,
+    // and get_range_at reads it as such.
     if (fn.entry_block()) {
-        std::unordered_map<const Value*, ValueRange> initial_ranges = global_ranges_;
-        visit_dominator_block(fn.entry_block(), dom, initial_ranges);
+        pass3_initial_ranges_ = global_ranges_;
+        visit_dominator_block(fn.entry_block(), nullptr, dom, pass3_initial_ranges_);
     }
 }
 

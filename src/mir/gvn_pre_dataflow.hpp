@@ -52,19 +52,71 @@ struct BlockLocalInfo {
     Value* avail_val = nullptr;
 };
 
+// One walk of the function, shared by every expression the pass analyses in
+// an iteration. Block-local information for an expression depends on three
+// kinds of instruction only — its evaluations, the definitions of its
+// operands, and (for a load) the instructions that may write memory — so
+// with their positions indexed up front, an expression's local info costs
+// its own events rather than a scan of every instruction in the function.
+// Without this the pass was quadratic: a candidate count times the
+// instruction count, on every iteration, and a flattened module top level
+// has thousands of both.
+//
+// Blocks are numbered here too (their order in Function::blocks, nulls
+// skipped), so the per-block state the dataflow keeps is a vector indexed by
+// ordinal rather than a hash map keyed by pointer; with a thousand blocks and
+// a thousand expressions that indexing is most of the pass.
+struct PreFunctionIndex {
+    struct Position {
+        uint32_t block = 0;  // ordinal into `blocks`
+        uint32_t index = 0;  // ordinal within the block
+    };
+    struct Writer {
+        Instruction* inst;
+        uint32_t index;
+    };
+
+    std::vector<BasicBlock*> blocks;
+    std::unordered_map<const BasicBlock*, uint32_t> block_ordinal;
+    // Where every instruction sits.
+    std::unordered_map<const Instruction*, Position> positions;
+    // Per block ordinal, in program order, the instructions
+    // AliasAnalysis::can_clobber can answer true for: stores and calls.
+    std::vector<std::vector<Writer>> memory_writers;
+    // Per candidate expression, its evaluations in program order.
+    std::unordered_map<PreExpression, std::vector<Instruction*>, PreExprHash> evaluations;
+    // Candidate expressions in first-seen order, with the first instruction
+    // evaluating each — the order and exemplars the pass always used.
+    std::vector<PreExpression> candidates;
+    std::unordered_map<PreExpression, const Instruction*, PreExprHash> exemplars;
+    // The memory types some store in the function writes. A load whose type
+    // no store writes can never become available through store-to-load
+    // forwarding, which is the one way a load evaluated once can still be a
+    // PRE target.
+    std::vector<Type> stored_memory_types;
+
+    void build(
+        Function& fn,
+        const std::unordered_map<const Value*, const Value*>& leaders,
+        bool include_load_candidates
+    );
+
+    bool has_store_of_type(Type memory_type) const noexcept;
+    const BasicBlock* block_of(const Instruction* inst) const noexcept;
+};
+
 class PreDataflow {
 public:
     PreDataflow(
         Function& fn,
         const DominatorTree& dom,
-        const AliasAnalysis& aa
+        const AliasAnalysis& aa,
+        const PreFunctionIndex& index
     );
 
-    void analyze_expression(
-        const PreExpression& expr,
-        const Instruction* exemplar,
-        const std::unordered_map<const Value*, const Value*>& leaders = {}
-    );
+    // Block-local information for `expr` from its events in the index, then
+    // anticipation and availability over the CFG.
+    void analyze_expression(const PreExpression& expr, const Instruction* exemplar);
 
     bool is_anticipated_at_entry(const BasicBlock* bb) const;
     bool is_anticipated_at_exit(const BasicBlock* bb) const;
@@ -79,22 +131,33 @@ public:
     const BlockLocalInfo& get_local_info(const BasicBlock* bb) const;
 
 private:
-    void compute_local_info(
-        const PreExpression& expr,
-        const Instruction* exemplar,
-        const std::unordered_map<const Value*, const Value*>& leaders
-    );
+    void compute_local_info(const PreExpression& expr, const Instruction* exemplar);
     void compute_anticipation();
     void compute_availability();
+
+    // The ordinal of a block, or `kNoBlock` for a block the index does not
+    // know (never one of the function's own).
+    static constexpr uint32_t kNoBlock = ~uint32_t{0};
+    uint32_t ordinal(const BasicBlock* bb) const noexcept;
 
     Function& fn_;
     const DominatorTree& dom_;
     const AliasAnalysis& aa_;
+    const PreFunctionIndex& index_;
 
-    std::unordered_map<const BasicBlock*, BlockLocalInfo> local_info_;
-    std::unordered_map<const BasicBlock*, bool> ant_in_;
-    std::unordered_map<const BasicBlock*, bool> ant_out_;
-    std::unordered_map<const BasicBlock*, Value*> avail_at_exit_;
+    // Per block ordinal. `local_info_` is reset only where the previous
+    // expression touched it (`touched_`); the dataflow vectors are rewritten
+    // in full, since every block takes part in them.
+    std::vector<BlockLocalInfo> local_info_;
+    std::vector<uint32_t> touched_;
+    std::vector<uint8_t> ant_in_;
+    std::vector<uint8_t> ant_out_;
+    std::vector<Value*> avail_at_exit_;
+    // Per block ordinal, the successor and predecessor ordinals, so the
+    // fixpoint sweeps index vectors and never touch a pointer map.
+    std::vector<std::vector<uint32_t>> succs_;
+    std::vector<std::vector<uint32_t>> preds_;
+    std::vector<bool> pred_has_unknown_;  // a null predecessor: never all-same
     BlockLocalInfo default_local_info_;
 };
 

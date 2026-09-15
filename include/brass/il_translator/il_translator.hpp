@@ -39,6 +39,17 @@ struct FunctionMeta {
 
 struct TranslatorOptions {
     bool enable_optimizations = true;
+    // Re-verify the whole module after EVERY optimization pass, naming the
+    // pass that broke it. A pass-author's tool: it multiplies the verifier's
+    // cost by the number of passes on every compile, which is a large share of
+    // an in-memory JIT's turnaround. The module is always verified once
+    // before the passes and once after them; this is only the per-pass
+    // bisection in between. Defaults on in debug builds, off in release.
+#if defined(NDEBUG)
+    bool verify_after_each_pass = false;
+#else
+    bool verify_after_each_pass = true;
+#endif
     bool allow_fp_reassociation = false;
     bool trace_lowering = false;
     bool enable_f64_demote = true;

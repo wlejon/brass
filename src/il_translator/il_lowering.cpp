@@ -443,6 +443,7 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
         opt_opts.dump_range_stats = options_.dump_range_stats;
         opt_opts.range_stats = options_.range_stats_collector;
         auto check_pass = [&](const char* name) {
+            if (!options_.verify_after_each_pass) return true;
             if (!verify_module(*mod, diag_)) {
                 std::fprintf(stderr, "[FATAL] Broken after %s\n", name);
                 return false;

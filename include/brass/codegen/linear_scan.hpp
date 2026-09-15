@@ -40,8 +40,17 @@ private:
 
     std::unordered_map<uint32_t, std::vector<VReg>> coalesce_hints_;
 
+    // Instructions that can block a register for an interval covering them —
+    // any with a clobber mask, a physical-register operand, or a fixed operand
+    // constraint — in id order, so an interval consults only the ones inside
+    // its own range instead of walking the whole function per interval.
+    std::vector<const LirInst*> constrained_insts_;
+    // Distinct vregs that appear as the index register of a memory operand.
+    std::vector<VReg> mem_index_vregs_;
+
     void init_register_pools();
     void build_coalesce_hints();
+    void build_constraint_index();
     void expire_old_intervals(uint32_t current_start);
     bool try_allocate_free_reg(LiveInterval& interval);
     void allocate_blocked_reg(LiveInterval& interval);

@@ -171,72 +171,196 @@ size_t PreExprHash::operator()(const PreExpression& k) const noexcept {
     return h;
 }
 
+// ---- PreFunctionIndex ------------------------------------------------------
+
+void PreFunctionIndex::build(
+    Function& fn,
+    const std::unordered_map<const Value*, const Value*>& leaders,
+    bool include_load_candidates
+) {
+    blocks.clear();
+    block_ordinal.clear();
+    positions.clear();
+    memory_writers.clear();
+    evaluations.clear();
+    candidates.clear();
+    exemplars.clear();
+    stored_memory_types.clear();
+
+    for (BasicBlock* bb : fn.blocks()) {
+        if (!bb) continue;
+        const uint32_t ordinal = static_cast<uint32_t>(blocks.size());
+        blocks.push_back(bb);
+        block_ordinal[bb] = ordinal;
+        memory_writers.emplace_back();
+
+        uint32_t index = 0;
+        for (Instruction* inst : *bb) {
+            if (!inst) continue;
+            positions[inst] = Position{ordinal, index};
+
+            const Opcode op = inst->opcode();
+            if (op == Opcode::store || op == Opcode::store_indexed || op == Opcode::vstore || is_call(op)) {
+                memory_writers.back().push_back(Writer{inst, index});
+            }
+            if (op == Opcode::store || op == Opcode::vstore) {
+                const Type mt = inst->memory_type();
+                if (std::find(stored_memory_types.begin(), stored_memory_types.end(), mt) ==
+                    stored_memory_types.end()) {
+                    stored_memory_types.push_back(mt);
+                }
+            }
+            ++index;
+
+            if (!is_pre_candidate_op(inst)) continue;
+            const bool is_load = (op == Opcode::load || op == Opcode::vload);
+            if (is_load && !include_load_candidates) continue;
+
+            // Every instruction whose expression equals a candidate's is a
+            // candidate itself — candidacy is a function of opcode and, for
+            // division, of an operand the expression carries — so the
+            // evaluation lists collected here are exactly what a scan
+            // comparing every instruction's expression would have found.
+            PreExpression expr = PreExpression::from_instruction(inst, leaders);
+            auto ev = evaluations.find(expr);
+            if (ev == evaluations.end()) {
+                evaluations.emplace(expr, std::vector<Instruction*>{inst});
+                candidates.push_back(expr);
+                exemplars[expr] = inst;
+            } else {
+                ev->second.push_back(inst);
+            }
+        }
+    }
+}
+
+bool PreFunctionIndex::has_store_of_type(Type memory_type) const noexcept {
+    return std::find(stored_memory_types.begin(), stored_memory_types.end(), memory_type) !=
+           stored_memory_types.end();
+}
+
+const BasicBlock* PreFunctionIndex::block_of(const Instruction* inst) const noexcept {
+    auto pos = positions.find(inst);
+    if (pos == positions.end()) return nullptr;
+    return blocks[pos->second.block];
+}
+
+// ---- PreDataflow -----------------------------------------------------------
+
 PreDataflow::PreDataflow(
     Function& fn,
     const DominatorTree& dom,
-    const AliasAnalysis& aa
-) : fn_(fn), dom_(dom), aa_(aa) {}
+    const AliasAnalysis& aa,
+    const PreFunctionIndex& index
+) : fn_(fn), dom_(dom), aa_(aa), index_(index) {
+    const size_t n = index_.blocks.size();
+    local_info_.resize(n);
+    ant_in_.assign(n, 1);
+    ant_out_.assign(n, 1);
+    avail_at_exit_.assign(n, nullptr);
+    succs_.resize(n);
+    preds_.resize(n);
+    pred_has_unknown_.assign(n, false);
+    for (size_t i = 0; i < n; ++i) {
+        const BasicBlock* bb = index_.blocks[i];
+        for (const BasicBlock* succ : bb->successors()) {
+            if (!succ) continue;  // skipped by the sweep, exactly as before
+            const uint32_t o = ordinal(succ);
+            if (o != kNoBlock) succs_[i].push_back(o);
+        }
+        for (const BasicBlock* pred : bb->predecessors()) {
+            const uint32_t o = pred ? ordinal(pred) : kNoBlock;
+            if (o == kNoBlock) {
+                pred_has_unknown_[i] = true;
+            } else {
+                preds_[i].push_back(o);
+            }
+        }
+    }
+}
 
-void PreDataflow::analyze_expression(
-    const PreExpression& expr,
-    const Instruction* exemplar,
-    const std::unordered_map<const Value*, const Value*>& leaders
-) {
-    local_info_.clear();
-    ant_in_.clear();
-    ant_out_.clear();
-    avail_at_exit_.clear();
+uint32_t PreDataflow::ordinal(const BasicBlock* bb) const noexcept {
+    if (!bb) return kNoBlock;
+    auto it = index_.block_ordinal.find(bb);
+    return it == index_.block_ordinal.end() ? kNoBlock : it->second;
+}
 
-    compute_local_info(expr, exemplar, leaders);
+void PreDataflow::analyze_expression(const PreExpression& expr, const Instruction* exemplar) {
+    for (uint32_t o : touched_) local_info_[o] = BlockLocalInfo{};
+    touched_.clear();
+
+    compute_local_info(expr, exemplar);
     compute_anticipation();
     compute_availability();
 }
 
-void PreDataflow::compute_local_info(
-    const PreExpression& expr,
-    const Instruction* exemplar,
-    const std::unordered_map<const Value*, const Value*>& leaders
-) {
-    for (BasicBlock* bb : fn_.blocks()) {
-        if (!bb) continue;
-        BlockLocalInfo info;
-        info.transp = true;
-        info.ant_loc = false;
-        info.avail_loc = false;
-        info.avail_val = nullptr;
+// The block-local facts about one expression, from its events alone: its
+// evaluations, the instructions defining its operands, and — for a load —
+// the instructions that may write memory. Each block's events are replayed
+// in position order through the state machine a full scan of the block
+// would have run; an instruction that both defines an operand and may write
+// memory (a call whose result the expression uses) is a kill first and a
+// clobber second, the order the scan applied its two checks in. Blocks with
+// no events keep the default: transparent, nothing anticipated or available.
+void PreDataflow::compute_local_info(const PreExpression& expr, const Instruction* exemplar) {
+    enum class EventKind : uint8_t { Evaluation, Kill, Writer };
+    struct Event {
+        uint32_t block;
+        uint32_t position;
+        EventKind kind;
+        Instruction* inst;
+    };
 
-        bool operand_killed_before_eval = false;
-        bool memory_clobbered_before_eval = false;
+    // The few events every expression has: evaluations and operand kills.
+    std::vector<Event> sparse;
+    auto add_sparse = [&](Instruction* inst, EventKind kind) {
+        auto pos = index_.positions.find(inst);
+        if (pos == index_.positions.end()) return;
+        sparse.push_back(Event{pos->second.block, pos->second.index, kind, inst});
+    };
+    if (auto ev = index_.evaluations.find(expr); ev != index_.evaluations.end()) {
+        for (Instruction* inst : ev->second) add_sparse(inst, EventKind::Evaluation);
+    }
+    for (const Value* op : {expr.op0, expr.op1, expr.op2}) {
+        if (op && op->is_instruction() && op->defining_instruction()) {
+            add_sparse(op->defining_instruction(), EventKind::Kill);
+        }
+    }
+    std::sort(sparse.begin(), sparse.end(), [](const Event& a, const Event& b) {
+        if (a.block != b.block) return a.block < b.block;
+        if (a.position != b.position) return a.position < b.position;
+        return static_cast<uint8_t>(a.kind) < static_cast<uint8_t>(b.kind);
+    });
 
-        for (Instruction* inst : *bb) {
-            if (!inst) continue;
+    const bool track_memory = expr.is_load() && exemplar;
 
-            // Check if inst evaluates expr
-            PreExpression inst_expr = PreExpression::from_instruction(inst, leaders);
-            if (inst_expr == expr) {
+    // One block's events, replayed.
+    BlockLocalInfo info;
+    bool operand_killed_before_eval = false;
+    bool memory_clobbered_before_eval = false;
+    auto begin_block = [&] {
+        info = BlockLocalInfo{};
+        operand_killed_before_eval = false;
+        memory_clobbered_before_eval = false;
+    };
+    auto apply = [&](EventKind kind, Instruction* inst) {
+        switch (kind) {
+            case EventKind::Evaluation:
                 info.evaluations.push_back(inst);
                 if (!info.ant_loc && !operand_killed_before_eval && !memory_clobbered_before_eval) {
                     info.ant_loc = true;
                 }
                 info.avail_loc = true;
                 info.avail_val = inst->result();
-                continue;
-            }
-
-            // Check if inst defines any operand of expr
-            Value* res = inst->result();
-            if (res && (res == expr.op0 || res == expr.op1 || res == expr.op2)) {
+                break;
+            case EventKind::Kill:
                 operand_killed_before_eval = true;
                 info.transp = false;
                 info.avail_loc = false;
                 info.avail_val = nullptr;
-            }
-
-            // For load expressions, check if inst clobbers memory
-            if (expr.is_load() && exemplar) {
-                // Check if inst can clobber exemplar
+                break;
+            case EventKind::Writer:
                 if (aa_.can_clobber(inst, exemplar)) {
-                    // Check for must-alias store-to-load forwarding
                     Opcode op = inst->opcode();
                     if ((op == Opcode::store || op == Opcode::vstore) &&
                         inst->memory_type() == expr.memory_type &&
@@ -252,51 +376,79 @@ void PreDataflow::compute_local_info(
                         info.avail_val = nullptr;
                     }
                 }
+                break;
+        }
+    };
+    auto end_block = [&](uint32_t block) {
+        local_info_[block] = std::move(info);
+        touched_.push_back(block);
+    };
+
+    size_t s = 0;  // cursor into `sparse`
+    if (!track_memory) {
+        while (s < sparse.size()) {
+            const uint32_t block = sparse[s].block;
+            begin_block();
+            for (; s < sparse.size() && sparse[s].block == block; ++s) apply(sparse[s].kind, sparse[s].inst);
+            end_block(block);
+        }
+        return;
+    }
+
+    // A load: every block with a memory writer takes part, merged with that
+    // block's sparse events by position (sparse first on a tie, which is
+    // the kill-before-clobber rule above; an evaluation never shares a
+    // position with a writer).
+    const size_t n = index_.blocks.size();
+    for (uint32_t block = 0; block < n; ++block) {
+        const auto& writers = index_.memory_writers[block];
+        const bool has_sparse = s < sparse.size() && sparse[s].block == block;
+        if (writers.empty() && !has_sparse) continue;
+        begin_block();
+        size_t w = 0;
+        while (w < writers.size() || (s < sparse.size() && sparse[s].block == block)) {
+            const bool sparse_next = s < sparse.size() && sparse[s].block == block &&
+                                     (w >= writers.size() || sparse[s].position <= writers[w].index);
+            if (sparse_next) {
+                apply(sparse[s].kind, sparse[s].inst);
+                ++s;
+            } else {
+                apply(EventKind::Writer, writers[w].inst);
+                ++w;
             }
         }
-
-        local_info_[bb] = std::move(info);
+        end_block(block);
     }
 }
 
 void PreDataflow::compute_anticipation() {
     // Initialize: AntIn and AntOut default to true, except exit blocks
-    for (const BasicBlock* bb : fn_.blocks()) {
-        if (!bb) continue;
-        ant_in_[bb] = true;
-        ant_out_[bb] = true;
-    }
+    const size_t n = index_.blocks.size();
+    std::fill(ant_in_.begin(), ant_in_.end(), uint8_t{1});
+    std::fill(ant_out_.begin(), ant_out_.end(), uint8_t{1});
 
     bool changed = true;
     while (changed) {
         changed = false;
-        const auto& blocks = fn_.blocks();
-        for (auto it = blocks.rbegin(); it != blocks.rend(); ++it) {
-            const BasicBlock* bb = *it;
-            if (!bb) continue;
-
-            bool new_out = true;
-            auto succs = bb->successors();
-            if (succs.empty()) {
-                new_out = false;
+        for (size_t i = n; i-- > 0;) {
+            uint8_t new_out = 1;
+            if (index_.blocks[i]->successors().empty()) {
+                new_out = 0;
             } else {
-                for (const BasicBlock* succ : succs) {
-                    if (succ) {
-                        auto s_it = ant_in_.find(succ);
-                        if (s_it != ant_in_.end() && !s_it->second) {
-                            new_out = false;
-                            break;
-                        }
+                for (uint32_t succ : succs_[i]) {
+                    if (!ant_in_[succ]) {
+                        new_out = 0;
+                        break;
                     }
                 }
             }
 
-            const auto& info = local_info_[bb];
-            bool new_in = info.ant_loc || (info.transp && new_out);
+            const BlockLocalInfo& info = local_info_[i];
+            const uint8_t new_in = (info.ant_loc || (info.transp && new_out)) ? 1 : 0;
 
-            if (new_in != ant_in_[bb] || new_out != ant_out_[bb]) {
-                ant_in_[bb] = new_in;
-                ant_out_[bb] = new_out;
+            if (new_in != ant_in_[i] || new_out != ant_out_[i]) {
+                ant_in_[i] = new_in;
+                ant_out_[i] = new_out;
                 changed = true;
             }
         }
@@ -304,49 +456,41 @@ void PreDataflow::compute_anticipation() {
 }
 
 void PreDataflow::compute_availability() {
-    for (const BasicBlock* bb : fn_.blocks()) {
-        if (!bb) continue;
-        const auto& info = local_info_[bb];
-        if (info.avail_loc && info.avail_val) {
-            avail_at_exit_[bb] = info.avail_val;
-        } else {
-            avail_at_exit_[bb] = nullptr;
-        }
+    const size_t n = index_.blocks.size();
+    for (size_t i = 0; i < n; ++i) {
+        const BlockLocalInfo& info = local_info_[i];
+        avail_at_exit_[i] = (info.avail_loc && info.avail_val) ? info.avail_val : nullptr;
     }
 
     // Forward propagation across transparent blocks
     bool changed = true;
     while (changed) {
         changed = false;
-        for (const BasicBlock* bb : fn_.blocks()) {
-            if (!bb) continue;
-            const auto& info = local_info_[bb];
+        for (size_t i = 0; i < n; ++i) {
+            const BlockLocalInfo& info = local_info_[i];
             if (info.avail_loc) continue;
             if (!info.transp) continue;
-            if (bb->predecessors().empty()) continue;
+            if (index_.blocks[i]->predecessors().empty()) continue;
+            if (pred_has_unknown_[i]) continue;
 
             Value* common_val = nullptr;
             bool all_same = true;
-            for (const BasicBlock* pred : bb->predecessors()) {
-                if (!pred) {
-                    all_same = false;
-                    break;
-                }
-                auto it = avail_at_exit_.find(pred);
-                if (it == avail_at_exit_.end() || it->second == nullptr) {
+            for (uint32_t pred : preds_[i]) {
+                Value* v = avail_at_exit_[pred];
+                if (v == nullptr) {
                     all_same = false;
                     break;
                 }
                 if (!common_val) {
-                    common_val = it->second;
-                } else if (common_val != it->second) {
+                    common_val = v;
+                } else if (common_val != v) {
                     all_same = false;
                     break;
                 }
             }
 
-            if (all_same && common_val && avail_at_exit_[bb] != common_val) {
-                avail_at_exit_[bb] = common_val;
+            if (all_same && common_val && avail_at_exit_[i] != common_val) {
+                avail_at_exit_[i] = common_val;
                 changed = true;
             }
         }
@@ -354,21 +498,18 @@ void PreDataflow::compute_availability() {
 }
 
 bool PreDataflow::is_anticipated_at_entry(const BasicBlock* bb) const {
-    if (!bb) return false;
-    auto it = ant_in_.find(bb);
-    return (it != ant_in_.end()) ? it->second : false;
+    const uint32_t o = ordinal(bb);
+    return o != kNoBlock && ant_in_[o] != 0;
 }
 
 bool PreDataflow::is_anticipated_at_exit(const BasicBlock* bb) const {
-    if (!bb) return false;
-    auto it = ant_out_.find(bb);
-    return (it != ant_out_.end()) ? it->second : false;
+    const uint32_t o = ordinal(bb);
+    return o != kNoBlock && ant_out_[o] != 0;
 }
 
 Value* PreDataflow::available_at_exit(const BasicBlock* bb) const {
-    if (!bb) return nullptr;
-    auto it = avail_at_exit_.find(bb);
-    return (it != avail_at_exit_.end()) ? it->second : nullptr;
+    const uint32_t o = ordinal(bb);
+    return o == kNoBlock ? nullptr : avail_at_exit_[o];
 }
 
 bool PreDataflow::can_evaluate_at_end(
@@ -411,9 +552,8 @@ bool PreDataflow::can_evaluate_at_end(
 }
 
 const BlockLocalInfo& PreDataflow::get_local_info(const BasicBlock* bb) const {
-    if (!bb) return default_local_info_;
-    auto it = local_info_.find(bb);
-    return (it != local_info_.end()) ? it->second : default_local_info_;
+    const uint32_t o = ordinal(bb);
+    return o == kNoBlock ? default_local_info_ : local_info_[o];
 }
 
 } // namespace brass
