@@ -133,7 +133,15 @@ public:
     //       y[row] = silu(w_gate[row] . x) * (w_up[row] . x); block size % 32 == 0
     //   fused_gemv_residual_kernel(w_down, x, res, y, u32 n, u32 k)
     //       y[row] = w_down[row] . x + res[row]; block size % 32 == 0
-    // (ml_fusion_ptx_kernels_norm.cpp / ml_fusion_ptx_kernels_gemv.cpp for the last four)
+    //   fused_gemv_q8_0_kernel(w, x, y, u32 n, u32 k)                  one block per output row
+    //       y[row] = dequant(w[row]) . x over Q8_0 blocks (34 bytes: f16 d + 32 int8);
+    //       k % 32 == 0; block size % 32 == 0 (8 threads per Q8_0 block)
+    //   fused_gemv_q4_k_kernel(w, x, y, u32 n, u32 k)
+    //       same over Q4_K super-blocks (144 bytes: f16 d, f16 dmin, 12 bytes of 6-bit
+    //       scales/mins, 128 bytes of nibbles); k % 256 == 0; block size % 64 == 0
+    //       (64 threads per super-block)
+    // (ml_fusion_ptx_kernels_norm.cpp / ml_fusion_ptx_kernels_gemv.cpp /
+    //  ml_fusion_ptx_kernels_quant.cpp for the last six)
     Function* build_ptx_swiglu(Module& mod);
     Function* build_ptx_adaln_modulate(Module& mod, bool gated);
     Function* build_ptx_residual_rms_norm(Module& mod);
@@ -141,6 +149,8 @@ public:
     Function* build_ptx_residual_layernorm(Module& mod);
     Function* build_ptx_gemv_swiglu(Module& mod);
     Function* build_ptx_gemv_residual(Module& mod);
+    Function* build_ptx_gemv_q8_0(Module& mod);
+    Function* build_ptx_gemv_q4_k(Module& mod);
 
     // --- CPU Compilation (Zero GC overhead) ---
     KernelFunction compile_residual_rms_norm();

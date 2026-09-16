@@ -492,9 +492,11 @@ of volume:
 - Quantized GEMV: replace the `call brass_dequant_*` in
   `build_gemv_q8_0`/`build_gemv_q4_k` (`ml_fusion_quant_cpu.cpp`) with
   `load_u16`/`f16_to_f32` headers and `load_s8`/`vload(i32x4)` + `and`/`lshr`
-  nibble extraction, following the string kernels in
-  `ml_fusion_quant_ptx.cpp`; the existing MIR builders already lower and
-  verify, so the work is device-side dequantization only.
+  nibble extraction, following the string kernels formerly in
+  `ml_fusion_quant_ptx.cpp` (now `ml_fusion_ptx_legacy_quant.cpp`); the
+  existing MIR builders already lower and verify, so the work is device-side
+  dequantization only. (Done in 5c as separate `build_ptx_gemv_*` builders
+  with the string kernels' thread mapping; the CPU builders are unchanged.)
 - Keep the differential test pattern: copy the string kernel verbatim into
   the legacy file first (diff it against the original), then write the
   builder, then compare on device over shapes that hit every path
@@ -607,6 +609,109 @@ registers) plus:
    skip inside (same elements, same order, more iterations) -- the MIR loop
    bounds are the tighter of the two.
 
+### Stage 5c notes (GEMV Q8_0, GEMV Q4_K)
+
+Last migration batch: no `R"PTX(...)"` kernel remains in the library.
+`emit_ptx_fused_gemv_q8_0` and `emit_ptx_fused_gemv_q4_k` now build MIR
+(`build_ptx_gemv_q8_0` / `build_ptx_gemv_q4_k`) and go through
+`PtxTarget::emit_function`; entry names, parameter lists (`w, x, y, u32 n,
+u32 k`), the one-block-per-row launch and the `k % 32 == 0` / `k % 256 == 0`
+requirements are unchanged, so `test_gpu_execution.cpp` and
+`test_ml_fusion.cpp` run untouched. `ml_fusion_quant_ptx.cpp` is deleted;
+`ml_fusion_ptx.cpp` holds all ten thin emitters.
+
+**File layout**
+
+| File | Concern |
+| --- | --- |
+| `src/codegen/ml_fusion_ptx_kernels_quant.cpp` | `build_ptx_gemv_q8_0`, `build_ptx_gemv_q4_k` + `quant_prologue` (early `ret`, `blocks_per_row = k >> 5|8`, `row_base = w + row * bpr * 34|144`, `sb_local = tid >> 3|6`, `stride = ntid >> 3|6`), `block_ptr`, `x_float4`, `fma_lanes`, `store_row_sum` |
+| `src/codegen/ml_fusion_ptx_legacy_quant.cpp` | **LEGACY**: the two replaced templates byte-for-byte (`legacy::legacy_ptx_gemv_q8_0`, `legacy_ptx_gemv_q4_k`). Deleted in Stage 6 |
+| `tests/unit/test_gpu_kernel_migration_quant.cpp` | verify/ptxas/emitter-equality, legacy-vs-MIR differential, host-reference and CPU-JIT cross checks (the 5a/5b file stayed under 600 lines; this one is separate so neither passes 900) |
+
+**Block formats.** Reproduced from the string kernels and cross-checked
+against the CPU dequantizers (`brass_dequant_q8_0_block` /
+`brass_dequant_q4k_block` in `ml_fusion_quant_cpu.cpp`), which are the
+ground truth for the layouts:
+
+- Q8_0 block, 34 bytes: `f16 d` (`ptx_load_u16` -> `ptx_f16_to_f32`), then
+  32 `int8`. Each thread owns 4 weights (`lane = tid & 7`) which it reads
+  as two 16-bit loads at `blk + 2 + lane*4` (blocks are only 2-byte
+  aligned), packs into one word and sign-extends with `shl 24-8j; shr.s32
+  24` -- the string kernel's exact sequence; `w = cvt.rn.f32.s32(q) * d`,
+  then `fma(w, x, acc)` per lane in order.
+- Q4_K super-block, 144 bytes: 16-byte header loaded as one
+  `vload(i32x4)` (`ld.global.v4.u32`): lane 0 is `d | dmin << 16` (`and
+  0xFFFF` / `lshr 16` -> `ptx_f16_to_f32`), lanes 1..3 are `scales[0..3]`,
+  `scales[4..7]`, `scales[8..11]`. Sub-block `is = (tid & 63) >> 3`, quad
+  `lg = tid & 7`; the 6-bit `sc`/`m` follow `get_scale_min_k4`: with `j = is
+  & 3` and `s0/s4/s8 = scales[j]/[j+4]/[j+8]` (one variable `shr` + `and
+  0xFF` per word), `is < 4` gives `sc = s0 & 0x3F, m = s4 & 0x3F`, else `sc
+  = (s8 & 0xF) | ((s0 >> 6) << 4), m = (s8 >> 4) | ((s4 >> 6) << 4)`. Both
+  are computed and chosen with `select` (`selp.b32`) instead of the string
+  kernel's branch -- integer, so bit-identical. The 4 nibbles come from one
+  `ld.global.u32` at `blk + 16 + (is >> 1) * 32 + lg * 4`; sub-block `2p`
+  is the low nibble of `qs[32p..32p+31]`, `2p+1` the high nibble, so lane
+  `j` is `(q4 >> (hi4 + 8j)) & 0xF` with `hi4 = (is & 1) * 4` (the string
+  kernel predicated a `shr 4` instead). `w = fma(d * sc, nib, -(dmin * m))`
+  then `fma(w, x, acc)`, as before.
+- Both: `block_reduce_sum_f32` on one 32-float scratch (same 16/8/4/2/1
+  `shfl.down` tree and `scratch[lane < nwarps]` second stage as the strings),
+  thread 0 stores `y[row]`.
+
+**Block size.** The string kernels stepped the block index by a hard-coded
+32 (Q8_0: 256 threads / 8 per block) and 4 (Q4_K: 256 / 64 per super-block),
+i.e. they were only correct for a 256-thread launch (which is what
+`test_gpu_execution.cpp` and the runtime use): a 128-thread block skipped
+half the blocks, a 1024-thread block counted most of them several times.
+The MIR kernels derive the stride from `ntid` (`ntid >> 3` / `ntid >> 6`),
+which is identical at 256 and correct for every block size that is a
+multiple of 8 (Q8_0; in practice 32) / 64 (Q4_K: a 32-thread block would
+have stride 0). The migration test therefore runs the legacy-vs-MIR
+differential at block 256 only, and checks the other block sizes against
+the host reference. No other contract change.
+
+**Helpers / intrinsics.** None added: `load_u16`, `load_i32`,
+`vload(i32x4)` + `vextract_lane`, `f16_to_f32`, `i32_to_f32`,
+`u32_to_f32`, `select`, `ashr` and `for_range_reduce` covered everything
+(the loop `for (sb = sb_local; sb < bpr; sb += stride)` replaces the string
+kernels' `base_sb` loop with an inner `sb >= bpr` skip: same blocks, same
+order per thread, no conditional inside the body).
+
+**Results (RTX 4090, ptxas 12.9).** Random weights with a fixed xorshift
+seed: Q8_0 `d` in f16 [0.004, 0.05], `qs` uniform over -128..127; Q4_K `d`
+in [0.002, 0.02], `dmin` in [0.001, 0.01], all 12 scale bytes and 128 nibble
+bytes uniform (every 6-bit field and both packings exercised); `x` uniform
+in [-1, 1].
+
+| Kernel | legacy vs MIR (block 256) | MIR vs host reference (double accumulation, all shapes/blocks) | MIR vs CPU JIT (`compile_gemv_*`) |
+| --- | --- | --- | --- |
+| GEMV Q8_0 | bit-identical on all 6 shapes (n in {1, 3, 17, 64}, k in {32, 64, 96, 1024, 4096}, n > grid) | <= 2.17e-6 over 11 shapes, blocks 32/128/256/1024 | 1.51e-6 (n=6, k=1024) |
+| GEMV Q4_K | bit-identical on all 5 shapes (k in {256, 512, 1024, 4096}, n > grid) | <= 2.57e-6 over 10 shapes, blocks 64/128/256/1024 | 1.83e-6 (n=5, k=2048) |
+
+Required: 1e-5 for legacy-vs-MIR, 1e-4 for the references (the CPU
+dequantizers compute `w * nib - m` with separate `mul`/`sub` and the AVX2
+GEMV accumulates in eight lanes, so a few ulp are expected there).
+
+**ISel quality (observed, not fixed; adds to the 5a/5b lists).** PTX
+instruction counts before ptxas, legacy -> MIR: Q8_0 108 -> 167 (56
+`mov`), Q4_K 156 -> 237 (83 `mov`). SASS (sm_89): Q4_K 152 -> 152 (equal:
+the `selp` pair replaces the branch, the reduction epilogue is a few
+instructions shorter); Q8_0 432 -> 112 -- **ptxas unrolled the legacy Q8_0
+loop 8x** (32 `FFMA`, 32 `LDG`) because its stride was the literal 32,
+whereas the MIR loop steps by `ntid >> 3`, a runtime value, and stays
+rolled (4 `FFMA`, 4 `LDG`). That is the one performance-relevant
+difference of this batch: for the 256-thread launch the string kernel had
+more loads in flight per thread. Options for Stage 6: a `.maxntid`/`.reqntid`
+directive plus a builder-side unroll of the block loop by 2-4 (the strided
+loop is trivially unrollable with a remainder guard), or a launch-bound
+constant stride. The remaining PTX-level noise is the known list: every
+shift count / `and` mask / byte offset materialized with `mov.b32` (the
+Q4_K body has 30 of them, 5 for the value `15` alone), `vextract_lane`
+`mov`s for the header words and the x lanes, the `mov.b32 %r, 0` of a
+folded zero byte offset (`ptx_load_u16(ptr, 0)`), the loop back-edge
+copies, `bra` to the next block and the re-read `%tid.x` in
+`block_reduce_sum_f32`.
+
 ## Stages
 
 1. Enablement: Windows CUDA loader, MinGW link fix, portable GPU tests, `ret`
@@ -625,9 +730,12 @@ registers) plus:
    `test_ptx_vector.cpp` run every intrinsic and vector opcode on device.)
 5. Migrate hand-written kernels to MIR builders (batched), with on-device
    differential tests against the legacy kernels and CPU references.
-   (5a done: SwiGLU, AdaLN modulate x2, residual RMSNorm -- see "Stage 5a
-   notes". 5b done: LayerNorm-modulate, residual LayerNorm, GEMV
-   SwiGLU/residual -- see "Stage 5b notes". Remaining: GEMV Q8_0/Q4_K.)
+   (done. 5a: SwiGLU, AdaLN modulate x2, residual RMSNorm -- "Stage 5a
+   notes". 5b: LayerNorm-modulate, residual LayerNorm, GEMV SwiGLU/residual
+   -- "Stage 5b notes". 5c: GEMV Q8_0/Q4_K -- "Stage 5c notes". All ten
+   string kernels are migrated; only the `ml_fusion_ptx_legacy*.{hpp,cpp}`
+   files remain, as the reference side of the migration tests, for Stage 6
+   to delete.)
 6. Remove string templates, decompose files, update docs.
 
 ## File size rule
