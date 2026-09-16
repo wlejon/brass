@@ -7,9 +7,18 @@
 #include <string>
 #include <string_view>
 
-#if defined(__linux__)
+#if defined(_WIN32)
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#  define BRASS_GPU_HAS_LOADER 1
+#elif defined(__linux__)
 #  include <dlfcn.h>
-#  define BRASS_GPU_HAS_DLOPEN 1
+#  define BRASS_GPU_HAS_LOADER 1
 #endif
 
 namespace brass::gpu {
@@ -79,23 +88,38 @@ thread_local std::string tls_last_error;
 
 void set_error(const std::string& msg) { tls_last_error = msg; }
 
-bool init_driver() {
-    std::lock_guard<std::recursive_mutex> lock(api_mutex());
-    DriverApi& a = api();
-    if (a.handle) return a.available;
-#if defined(BRASS_GPU_HAS_DLOPEN)
+// Open the platform's CUDA driver library. Returns nullptr when no driver is
+// installed. On x86-64 every platform uses a single calling convention, so the
+// plain function-pointer types in DriverApi match CUDAAPI on both Windows
+// (nvcuda.dll) and Linux (libcuda.so).
+[[maybe_unused]] void* open_driver_library() {
+#if defined(_WIN32)
+    return reinterpret_cast<void*>(LoadLibraryA("nvcuda.dll"));
+#elif defined(__linux__)
     const char* names[] = { "libcuda.so.1", "libcuda.so", nullptr };
     for (int i = 0; names[i]; ++i) {
-        a.handle = dlopen(names[i], RTLD_NOW | RTLD_GLOBAL);
-        if (a.handle) break;
+        if (void* h = dlopen(names[i], RTLD_NOW | RTLD_GLOBAL)) return h;
     }
-    if (!a.handle) {
-        set_error("libcuda could not be loaded (no NVIDIA driver)");
-        return false;
-    }
+    return nullptr;
+#else
+    return nullptr;
+#endif
+}
 
-    auto sym = [&](const char* name) -> void* { return dlsym(a.handle, name); };
+[[maybe_unused]] void* driver_symbol(void* handle, const char* name) {
+#if defined(_WIN32)
+    return reinterpret_cast<void*>(GetProcAddress(reinterpret_cast<HMODULE>(handle), name));
+#elif defined(__linux__)
+    return dlsym(handle, name);
+#else
+    (void)handle; (void)name;
+    return nullptr;
+#endif
+}
 
+// Resolve every entry point brass uses. Written once; shared by all loaders.
+template <typename Sym>
+void resolve_entry_points(DriverApi& a, Sym&& sym) {
     a.cuInit = reinterpret_cast<CUresult(*)(unsigned int)>(sym("cuInit"));
     a.cuDriverGetVersion = reinterpret_cast<CUresult(*)(int*)>(sym("cuDriverGetVersion"));
     a.cuDeviceGetCount = reinterpret_cast<CUresult(*)(int*)>(sym("cuDeviceGetCount"));
@@ -117,24 +141,47 @@ bool init_driver() {
     a.cuMemGetInfo_v2 = reinterpret_cast<CUresult(*)(size_t*, size_t*)>(sym("cuMemGetInfo_v2"));
     a.cuCtxSynchronize = reinterpret_cast<CUresult(*)()>(sym("cuCtxSynchronize"));
     a.cuGetErrorString = reinterpret_cast<CUresult(*)(CUresult, const char**)>(sym("cuGetErrorString"));
+}
 
-    if (!a.cuInit || !a.cuDeviceGetCount || !a.cuDeviceGet || !a.cuCtxCreate_v2 ||
-        !a.cuModuleLoadDataEx || !a.cuModuleGetFunction || !a.cuLaunchKernel ||
-        !a.cuMemAlloc_v2 || !a.cuMemFree_v2 || !a.cuMemcpyHtoD_v2 || !a.cuMemcpyDtoH_v2) {
-        set_error("libcuda is missing required driver entry points");
-        return false;
+[[maybe_unused]] bool has_required_entry_points(const DriverApi& a) {
+    return a.cuInit && a.cuDeviceGetCount && a.cuDeviceGet && a.cuCtxCreate_v2 &&
+           a.cuModuleLoadDataEx && a.cuModuleGetFunction && a.cuLaunchKernel &&
+           a.cuMemAlloc_v2 && a.cuMemFree_v2 && a.cuMemcpyHtoD_v2 && a.cuMemcpyDtoH_v2;
+}
+
+// Why the driver is unavailable, remembered process-wide so that every thread
+// (tls_last_error is thread-local) gets a message on repeat failures.
+std::string& init_failure() {
+    static std::string s;
+    return s;
+}
+
+bool init_driver() {
+    std::lock_guard<std::recursive_mutex> lock(api_mutex());
+    DriverApi& a = api();
+    if (a.handle || !init_failure().empty()) {
+        if (!a.available) set_error(init_failure());
+        return a.available;
     }
 
-    CUresult r = a.cuInit(0);
-    if (r != CUDA_SUCCESS) {
-        set_error("cuInit failed");
+    auto fail = [&](const char* why) {
+        init_failure() = why;
+        set_error(why);
         return false;
-    }
+    };
+
+#if !defined(BRASS_GPU_HAS_LOADER)
+    return fail("GPU execution is not supported on this platform in this build");
+#else
+    a.handle = open_driver_library();
+    if (!a.handle) return fail("CUDA driver library could not be loaded (no NVIDIA driver)");
+
+    resolve_entry_points(a, [&](const char* name) { return driver_symbol(a.handle, name); });
+    if (!has_required_entry_points(a)) return fail("CUDA driver library is missing required entry points");
+
+    if (a.cuInit(0) != CUDA_SUCCESS) return fail("cuInit failed");
     a.available = true;
     return true;
-#else
-    set_error("GPU execution is only supported on Linux in this build");
-    return false;
 #endif
 }
 
@@ -244,8 +291,8 @@ std::vector<CudaDeviceInfo> cuda_devices() {
         out.push_back(std::move(info));
     }
 
-    // Total memory is per-context; report it for the first device only if we
-    // can query it without disturbing the primary context.
+    // cuMemGetInfo needs a current context. brass keeps one process-wide
+    // context on device 0, so total memory is reported for that device only.
     if (ensure_context() && api().cuMemGetInfo_v2 && !out.empty()) {
         size_t free_b = 0, total_b = 0;
         if (api().cuMemGetInfo_v2(&free_b, &total_b) == CUDA_SUCCESS) out[0].total_memory = total_b;

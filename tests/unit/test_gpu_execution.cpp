@@ -21,6 +21,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
 #include <string>
 #include <vector>
 
@@ -31,26 +34,57 @@ using namespace brass::target;
 
 namespace {
 
+// Skips are printed so that a suite passing without touching a device is
+// distinguishable from one that ran.
+void report_skip(const char* what) {
+    std::cout << "  [SKIP] " << what << "\n" << std::flush;
+}
+
 bool gpu_ready() {
     static const bool ok = cuda_available();
+    if (!ok) report_skip(("CUDA unavailable (" + cuda_last_error() + "): test not executed on device").c_str());
     return ok;
 }
 
+// Portable null-device redirection for std::system (cmd.exe has no /dev/null).
+const char* null_device() {
+#if defined(_WIN32)
+    return "NUL";
+#else
+    return "/dev/null";
+#endif
+}
+
+std::string quiet(const std::string& cmd) {
+    return cmd + " >" + null_device() + " 2>&1";
+}
+
+std::filesystem::path scratch_path(const char* name) {
+    std::error_code ec;
+    std::filesystem::path dir = std::filesystem::temp_directory_path(ec);
+    if (ec) dir = std::filesystem::current_path();
+    return dir / name;
+}
+
 bool ptxas_available() {
-    static const bool ok = (std::system("ptxas --version >/dev/null 2>&1") == 0);
+    static const bool ok = (std::system(quiet("ptxas --version").c_str()) == 0);
+    if (!ok) report_skip("ptxas not on PATH: assembly not validated");
     return ok;
 }
 
 bool ptxas_assembles(const std::string& ptx, const char* arch) {
-    const char* path = "/tmp/brass_gpu_ptx_check.ptx";
+    std::filesystem::path in = scratch_path("brass_gpu_ptx_check.ptx");
+    std::filesystem::path out = scratch_path("brass_gpu_ptx_check.cubin");
     {
-        FILE* f = std::fopen(path, "wb");
+        std::ofstream f(in, std::ios::binary);
         if (!f) return false;
-        std::fwrite(ptx.data(), 1, ptx.size(), f);
-        std::fclose(f);
+        f << ptx;
     }
-    std::string cmd = std::string("ptxas -arch=") + arch + " " + path + " -o /dev/null >/dev/null 2>&1";
-    return std::system(cmd.c_str()) == 0;
+    std::string cmd = std::string("ptxas -arch=") + arch + " \"" + in.string() + "\" -o \"" + out.string() + "\"";
+    bool ok = std::system(quiet(cmd).c_str()) == 0;
+    std::error_code ec;
+    std::filesystem::remove(out, ec);
+    return ok;
 }
 
 bool near(float a, float b, float eps) {
@@ -650,23 +684,26 @@ TEST_CASE("GPU - MIR integer ops (unsigned/64-bit/select/indexed) execute") {
     // --- 64-bit bitwise + shifts ---
     {
         Module mod("mir_bits");
+        // (a, mask, shift, out): the mask is independent of the shift count so
+        // every result is non-trivial and the 64-bit width is actually exercised.
         Function* fn = mod.create_function("bits_ops", Type::void_type(),
-                                           {Type::i64(), Type::i64(), Type::ptr()});
+                                           {Type::i64(), Type::i64(), Type::i64(), Type::ptr()});
         Builder b(mod);
         b.set_function(fn);
         BasicBlock* e = b.append_block("entry");
         b.position_at_end(e);
         b.add_block_param(e, Type::i64());
         b.add_block_param(e, Type::i64());
+        b.add_block_param(e, Type::i64());
         b.add_block_param(e, Type::ptr());
         Value* an = b.build_and(e->param(0), e->param(1));
-        Value* sh = b.build_shl(an, e->param(1));
-        Value* lr = b.build_lshr(an, e->param(1));
-        Value* ar = b.build_ashr(e->param(0), e->param(1));
-        b.build_store(Type::i64(), e->param(2), 0, an);
-        b.build_store(Type::i64(), e->param(2), 8, sh);
-        b.build_store(Type::i64(), e->param(2), 16, lr);
-        b.build_store(Type::i64(), e->param(2), 24, ar);
+        Value* sh = b.build_shl(an, e->param(2));
+        Value* lr = b.build_lshr(an, e->param(2));
+        Value* ar = b.build_ashr(e->param(0), e->param(2));
+        b.build_store(Type::i64(), e->param(3), 0, an);
+        b.build_store(Type::i64(), e->param(3), 8, sh);
+        b.build_store(Type::i64(), e->param(3), 16, lr);
+        b.build_store(Type::i64(), e->param(3), 24, ar);
         b.build_ret_void();
 
         std::string ptx = PtxTarget::emit_function(*fn);
@@ -674,18 +711,18 @@ TEST_CASE("GPU - MIR integer ops (unsigned/64-bit/select/indexed) execute") {
         CudaModule m = CudaModule::load(ptx, &err);
         REQUIRE(m.valid());
 
-        uint64_t a = 0xF0F0F0F0F0F0F0F0ull, s = 8;
+        uint64_t a = 0xF0F0F0F0F0F0F0F0ull, mask = 0x00FFFFFFFFFFFF00ull, s = 8;
         CudaBuffer dout = CudaBuffer::alloc(32);
         void* po = dout.device_ptr();
-        std::vector<void*> args = { &a, &s, &po };
+        std::vector<void*> args = { &a, &mask, &s, &po };
         REQUIRE(gpu_launch(m, "bits_ops", 1, 1, args, &err));
         uint64_t got[4] = {0, 0, 0, 0};
         REQUIRE(dout.download(got, 32));
-        uint64_t and_ref = a & s;
+        uint64_t and_ref = a & mask;                       // 0x00F0F0F0F0F0F000
         CHECK(got[0] == and_ref);
-        CHECK(got[1] == (and_ref << s));
-        CHECK(got[2] == (and_ref >> s));
-        CHECK(got[3] == (uint64_t)((int64_t)a >> s));
+        CHECK(got[1] == (and_ref << s));                   // 0xF0F0F0F0F0F00000
+        CHECK(got[2] == (and_ref >> s));                   // 0x0000F0F0F0F0F0F0
+        CHECK(got[3] == (uint64_t)((int64_t)a >> s));      // 0xFFF0F0F0F0F0F0F0
     }
 
     // --- select with a non-comparison condition + indexed memory ---
@@ -729,7 +766,10 @@ TEST_CASE("GPU - MIR integer ops (unsigned/64-bit/select/indexed) execute") {
 }
 
 TEST_CASE("GPU - public C ABI executes a kernel") {
-    if (!brass_gpu_available()) return;
+    if (!brass_gpu_available()) {
+        report_skip("brass_gpu_available() == 0: C ABI test not executed on device");
+        return;
+    }
     char name[256] = {0};
     if (brass_gpu_device_count() > 0) {
         CHECK(brass_gpu_device_name(0, name, sizeof(name)) == BRASS_OK);

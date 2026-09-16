@@ -41,6 +41,12 @@ public:
         : fn_(fn), opts_(opts) {}
 
     std::string emit() {
+        // PTX `ret` takes no operand and `.entry` kernels cannot return values;
+        // results must be written through pointer parameters.
+        if (!fn_.return_type().is_void()) {
+            throw std::runtime_error("PtxTarget: kernel '" + std::string(fn_.name()) +
+                                     "' has a non-void return type; .entry kernels cannot return values");
+        }
         assign_registers();
 
         // Emit the whole body first so that any registers allocated lazily
@@ -793,12 +799,7 @@ private:
                 break;
             }
             case Opcode::ret: {
-                if (inst.operand_count() > 0 && inst.operand(0) != nullptr &&
-                    !fn_.return_type().is_void()) {
-                    ss << "    ret " << get_reg(inst.operand(0)) << ";\n";
-                } else {
-                    ss << "    ret;\n";
-                }
+                ss << "    ret;\n";
                 break;
             }
 

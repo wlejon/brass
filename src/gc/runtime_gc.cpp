@@ -8,7 +8,11 @@
 extern "C" uintptr_t brass_get_rbp();
 #endif
 
-#if defined(__GNUC__) || defined(__clang__)
+// Weak so that an embedder can supply its own write barrier on ELF/Mach-O.
+// PE/COFF has no true weak symbols: under MinGW ld a weak definition inside a
+// static archive is not pulled in to satisfy a reference, which breaks every
+// link of libbrass.a. Emit a strong definition on Windows.
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(_WIN32)
 #define BRASS_WEAK __attribute__((weak))
 #else
 #define BRASS_WEAK

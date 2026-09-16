@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 // Dynamically-loaded CUDA driver runtime. brass has no link-time dependency on

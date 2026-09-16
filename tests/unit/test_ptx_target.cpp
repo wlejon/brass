@@ -219,3 +219,25 @@ TEST_CASE("PTX Target - Unsupported Opcode Diagnostic Error") {
     CHECK(threw);
 }
 
+TEST_CASE("PTX Target - Non-void kernels are rejected") {
+    // PTX `ret` takes no operand and .entry kernels cannot return values, so
+    // emitting `ret %r1` would be rejected by ptxas. Refuse up front instead.
+    Module mod("test_mod");
+    Function* fn = mod.create_function("ret_val", Type::i32(), {Type::i32()});
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    b.position_at_end(entry);
+    b.add_block_param(entry, Type::i32());
+    b.build_ret(entry->param(0));
+
+    bool threw = false;
+    try {
+        PtxTarget::emit_function(*fn);
+    } catch (const std::runtime_error& err) {
+        threw = true;
+        CHECK(std::string(err.what()).find("cannot return values") != std::string::npos);
+    }
+    CHECK(threw);
+}
+

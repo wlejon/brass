@@ -82,12 +82,10 @@ BrassStatus brass_gpu_module_load(const char* ptx, BrassGpuModule* out_module) {
     if (!ptx || !out_module) return BRASS_ERR_INVALID_ARGUMENT;
     *out_module = nullptr;
     try {
-        std::string err;
-        gpu::CudaModule mod = gpu::CudaModule::load(ptx, &err);
-        if (!mod.valid()) {
-            gpu::cuda_last_error();
-            return BRASS_ERR_COMPILE_FAILED;
-        }
+        // CudaModule::load records the JIT log in the thread-local error,
+        // retrievable through brass_gpu_last_error().
+        gpu::CudaModule mod = gpu::CudaModule::load(ptx);
+        if (!mod.valid()) return BRASS_ERR_COMPILE_FAILED;
         auto* handle = new BrassGpuModule_T();
         handle->module = std::move(mod);
         *out_module = handle;
