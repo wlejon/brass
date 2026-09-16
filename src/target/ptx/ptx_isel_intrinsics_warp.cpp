@@ -77,7 +77,7 @@ void PtxISel::Intrinsics::atom(PtxISel& isel, const brass::Instruction& inst) {
     isel.emit(Inst::make(Opcode::atom, t).space(S).atom(A)
                   .dst(isel.result_reg(inst))
                   .src(Operand::addr(isel.reg_of(inst.operand(0), "pointer"), 0))
-                  .src(isel.reg_of(value, "value")));
+                  .src(isel.operand_of(value, Opcode::atom, 1, t, "value")));
 }
 template void PtxISel::Intrinsics::atom<AtomOp::add, StateSpace::global>(PtxISel&, const brass::Instruction&);
 template void PtxISel::Intrinsics::atom<AtomOp::min, StateSpace::global>(PtxISel&, const brass::Instruction&);
@@ -89,37 +89,40 @@ template void PtxISel::Intrinsics::atom<AtomOp::add, StateSpace::shared>(PtxISel
 // Wide and fused integer multiplies
 // ---------------------------------------------------------------------------
 
+// The multiply sources are checked against the narrow (.u32/.s32) type, so a
+// .wide immediate always fits the operand width.
+
 // mul.wide.u32 %rd, %r, %r    (i32, i32) -> i64
 void PtxISel::Intrinsics::mul_wide_u32(PtxISel& isel, const brass::Instruction& inst) {
     isel.emit(Inst::make(Opcode::mul, Type::u32).wide()
                   .dst(isel.result_reg(inst))
-                  .src(isel.reg_of(inst.operand(0), "argument 0"))
-                  .src(isel.reg_of(inst.operand(1), "argument 1")));
+                  .src(isel.operand_of(inst.operand(0), Opcode::mul, 0, Type::u32, "argument 0"))
+                  .src(isel.operand_of(inst.operand(1), Opcode::mul, 1, Type::u32, "argument 1")));
 }
 
 // mul.wide.s32 %rd, %r, %r    (i32, i32) -> i64
 void PtxISel::Intrinsics::mul_wide_s32(PtxISel& isel, const brass::Instruction& inst) {
     isel.emit(Inst::make(Opcode::mul, Type::s32).wide()
                   .dst(isel.result_reg(inst))
-                  .src(isel.reg_of(inst.operand(0), "argument 0"))
-                  .src(isel.reg_of(inst.operand(1), "argument 1")));
+                  .src(isel.operand_of(inst.operand(0), Opcode::mul, 0, Type::s32, "argument 0"))
+                  .src(isel.operand_of(inst.operand(1), Opcode::mul, 1, Type::s32, "argument 1")));
 }
 
 // mul.hi.u32 %r, %r, %r       (i32, i32) -> i32
 void PtxISel::Intrinsics::mul_hi_u32(PtxISel& isel, const brass::Instruction& inst) {
     isel.emit(Inst::make(Opcode::mul, Type::u32).hi()
                   .dst(isel.result_reg(inst))
-                  .src(isel.reg_of(inst.operand(0), "argument 0"))
-                  .src(isel.reg_of(inst.operand(1), "argument 1")));
+                  .src(isel.operand_of(inst.operand(0), Opcode::mul, 0, Type::u32, "argument 0"))
+                  .src(isel.operand_of(inst.operand(1), Opcode::mul, 1, Type::u32, "argument 1")));
 }
 
 // mad.lo.u32 %r, a, b, c      (i32, i32, i32) -> i32
 void PtxISel::Intrinsics::mad_lo_u32(PtxISel& isel, const brass::Instruction& inst) {
     isel.emit(Inst::make(Opcode::mad, Type::u32).lo()
                   .dst(isel.result_reg(inst))
-                  .src(isel.reg_of(inst.operand(0), "argument 0"))
-                  .src(isel.reg_of(inst.operand(1), "argument 1"))
-                  .src(isel.reg_of(inst.operand(2), "argument 2")));
+                  .src(isel.operand_of(inst.operand(0), Opcode::mad, 0, Type::u32, "argument 0"))
+                  .src(isel.operand_of(inst.operand(1), Opcode::mad, 1, Type::u32, "argument 1"))
+                  .src(isel.operand_of(inst.operand(2), Opcode::mad, 2, Type::u32, "argument 2")));
 }
 
 } // namespace brass::ptx

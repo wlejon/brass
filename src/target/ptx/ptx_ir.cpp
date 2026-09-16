@@ -319,6 +319,67 @@ RegClass reg_class_for(SpecialReg s) noexcept {
     return (s == SpecialReg::clock64 || s == SpecialReg::globaltimer) ? RegClass::B64 : RegClass::B32;
 }
 
+bool is_invariant(SpecialReg s) noexcept {
+    switch (s) {
+        case SpecialReg::warpid:
+        case SpecialReg::smid:
+        case SpecialReg::clock:
+        case SpecialReg::clock64:
+        case SpecialReg::globaltimer:
+            return false;
+        default:
+            return true;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Operand rules
+// ---------------------------------------------------------------------------
+
+bool allows_immediate(Opcode op, size_t src_index) noexcept {
+    switch (op) {
+        case Opcode::mov:
+        case Opcode::neg: case Opcode::abs: case Opcode::not_:
+        case Opcode::rsqrt: case Opcode::sqrt: case Opcode::sin: case Opcode::cos:
+        case Opcode::ex2: case Opcode::lg2: case Opcode::rcp:
+            return src_index == 0;
+        case Opcode::add: case Opcode::sub: case Opcode::mul: case Opcode::div: case Opcode::rem:
+        case Opcode::min: case Opcode::max:
+        case Opcode::and_: case Opcode::or_: case Opcode::xor_:
+        case Opcode::shl: case Opcode::shr:
+        case Opcode::selp:                       // sources 0 and 1; source 2 is the predicate
+            return src_index <= 1;
+        case Opcode::mad: case Opcode::fma:
+            return src_index <= 2;
+        case Opcode::setp:                       // second source only
+            return src_index == 1;
+        case Opcode::st:                         // the stored value
+            return src_index == 1;
+        case Opcode::atom:                       // value (and the cas compare value)
+            return src_index == 1 || src_index == 2;
+        case Opcode::shfl:                       // lane/delta, clamp, member mask
+            return src_index >= 1 && src_index <= 3;
+        case Opcode::bar:                        // barrier id, thread count
+            return src_index <= 1;
+        case Opcode::call:                       // arguments (source 0 is the callee)
+            return src_index >= 1;
+        case Opcode::ld: case Opcode::cvt:
+        case Opcode::bra: case Opcode::ret: case Opcode::trap: case Opcode::exit:
+            return false;
+    }
+    return false;
+}
+
+bool imm_fits(Type t, int64_t v) noexcept {
+    switch (bit_width(t)) {
+        case 64: return true;
+        case 32: return v >= INT32_MIN && v <= static_cast<int64_t>(UINT32_MAX);
+        case 16: return v >= INT16_MIN && v <= static_cast<int64_t>(UINT16_MAX);
+        case 8:  return v >= INT8_MIN && v <= static_cast<int64_t>(UINT8_MAX);
+        default: return false; // pred / none: no integer immediates
+    }
+}
+
 std::string_view to_string(OperandKind k) noexcept {
     switch (k) {
         case OperandKind::None:     return "none";

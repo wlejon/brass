@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <map>
 #include <numeric>
+#include <stdexcept>
 
 using namespace brass;
 using brass::codegen::KernelBuilder;
@@ -127,8 +128,7 @@ const std::map<std::string, Sig>& signatures() {
 
 // Builds a kernel (i32, f32, f64, i64, ptr) that calls `name` per its
 // signature and stores any result through the pointer.
-std::string intrinsic_kernel_ptx(const std::string& name, Sig sig) {
-    Module mod("intrin");
+Function* build_intrinsic_kernel(Module& mod, const std::string& name, Sig sig) {
     Function* f = mod.create_function("intrin", Type::void_type(),
                                       {Type::i32(), Type::f32(), Type::f64(), Type::i64(), Type::ptr()});
     Builder b(mod);
@@ -195,10 +195,22 @@ std::string intrinsic_kernel_ptx(const std::string& name, Sig sig) {
         else b.build_store(r->type(), p, 0, r);
     }
     b.build_ret_void();
-    return target::PtxTarget::emit_function(*f);
+    return f;
+}
+
+std::string intrinsic_kernel_ptx(const std::string& name, Sig sig) {
+    Module mod("intrin");
+    return target::PtxTarget::emit_function(*build_intrinsic_kernel(mod, name, sig));
 }
 
 } // namespace
+
+// Shared with test_ptx_cleanup.cpp (declared in ptx_test_support.hpp).
+brass::Function* ptxtest::build_intrinsic_kernel(brass::Module& mod, const std::string& name) {
+    auto it = signatures().find(name);
+    if (it == signatures().end()) throw std::runtime_error("no intrinsic signature for " + name);
+    return ::build_intrinsic_kernel(mod, name, it->second);
+}
 
 // ---------------------------------------------------------------------------
 // Coverage: the table and the signatures agree; everything assembles.

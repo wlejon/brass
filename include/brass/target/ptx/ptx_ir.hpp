@@ -144,6 +144,29 @@ enum class SpecialReg : uint8_t {
 std::string_view to_string(SpecialReg s) noexcept;
 RegClass reg_class_for(SpecialReg s) noexcept; // B32, or B64 for clock64/globaltimer
 
+// Special registers whose value cannot change for the lifetime of a thread
+// (%tid, %ntid, %ctaid, %nctaid, %laneid, %nwarpid, %nsmid). PtxISel reads
+// each of these once into a register; %warpid/%smid may change when a warp
+// is rescheduled and the clocks tick, so they are read at every use.
+bool is_invariant(SpecialReg s) noexcept;
+
+// ---------------------------------------------------------------------------
+// Operand rules shared by PtxISel and PtxVerifier
+// ---------------------------------------------------------------------------
+
+// Which source positions of an opcode may hold an immediate instead of a
+// register. Single source of truth: PtxISel folds MIR constants into exactly
+// these positions and the verifier rejects an immediate anywhere else. The
+// table is narrower than what ptxas accepts (see docs/ptx_backend_design.md,
+// "Stage 6a notes"): setp takes one only as its second source, cvt/ld and
+// the shfl value never do.
+bool allows_immediate(Opcode op, size_t src_index) noexcept;
+
+// Whether an integer immediate is representable in the width of `t` under
+// either the signed or the unsigned reading (a 32-bit slot accepts
+// -2^31 .. 2^32-1; 64-bit slots accept everything).
+bool imm_fits(Type t, int64_t v) noexcept;
+
 // ---------------------------------------------------------------------------
 // Operands
 // ---------------------------------------------------------------------------

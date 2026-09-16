@@ -82,7 +82,8 @@ inline bool gpu_ready() {
     return ok;
 }
 
-// Lower, verify (dumping diagnostics on failure) and return the IR.
+// Lower with PtxISel only (no cleanup), verify (dumping diagnostics on
+// failure) and return the IR.
 inline brass::ptx::Function lower_ok(const brass::Function& fn) {
     brass::ptx::PtxISel isel;
     brass::ptx::Function out = isel.lower(fn);
@@ -91,6 +92,11 @@ inline brass::ptx::Function lower_ok(const brass::Function& fn) {
     REQUIRE(diags.empty());
     return out;
 }
+
+// Defined in test_ptx_intrinsics.cpp: a kernel (i32, f32, f64, i64, ptr)
+// that calls the intrinsic `name` per its signature table and stores any
+// result through the pointer. Throws for a name the table does not know.
+brass::Function* build_intrinsic_kernel(brass::Module& mod, const std::string& name);
 
 // emit_function + ptxas check (when available). Returns the PTX text.
 inline std::string emit_checked(const brass::Function& fn) {

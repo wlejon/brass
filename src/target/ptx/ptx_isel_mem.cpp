@@ -20,12 +20,14 @@ void PtxISel::lower_load(const brass::Instruction& inst) {
              .src(Operand::addr(reg_of(inst.operand(0), "pointer"), inst.offset())));
 }
 
+// A constant stored value is an immediate (st source 1 in the rule table).
 void PtxISel::lower_store(const brass::Instruction& inst) {
     if (!inst.operand(0) || !inst.operand(1)) malformed(inst, "missing operand");
     const Value* value = inst.operand(1);
-    emit(Inst::make(Opcode::st, type_for(value->type())).space(StateSpace::global)
+    Type t = type_for(value->type());
+    emit(Inst::make(Opcode::st, t).space(StateSpace::global)
              .src(Operand::addr(reg_of(inst.operand(0), "pointer"), inst.offset()))
-             .src(reg_of(value, "value")));
+             .src(operand_of(value, Opcode::st, 1, t, "value")));
 }
 
 // ---------------------------------------------------------------------------
@@ -111,9 +113,10 @@ void PtxISel::lower_store_indexed(const brass::Instruction& inst) {
     const Value* value = inst.operand(2);
     if (!value) malformed(inst, "missing value");
     Reg addr = indexed_address(inst, inst.operand(0), inst.operand(1));
-    emit(Inst::make(Opcode::st, type_for(value->type())).space(StateSpace::global)
+    Type t = type_for(value->type());
+    emit(Inst::make(Opcode::st, t).space(StateSpace::global)
              .src(Operand::addr(addr, inst.offset()))
-             .src(reg_of(value, "value")));
+             .src(operand_of(value, Opcode::st, 1, t, "value")));
 }
 
 } // namespace brass::ptx

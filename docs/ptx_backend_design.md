@@ -106,10 +106,17 @@ Runs on any platform without ptxas. Checks at minimum:
 - guard is a Pred register,
 - `setp` destination is Pred; `selp` condition is Pred,
 - vector operand arity matches `.vN`,
-- shift amounts are B32,
+- shift amounts are B32 (or a `.u32` immediate),
+- an immediate appears only in a source position `allows_immediate(op, i)`
+  permits and fits its slot (`imm_fits`) -- the same table PtxISel folds
+  with (Stage 6a),
 - `ret` inside `.entry` has no operand,
 - every `bra` target label exists,
 - `ld.param` sources name a declared param.
+
+It does not require a block to end in a terminator: falling through to the
+next block (or off the end of the `.entry`) is valid PTX and the cleanup
+passes produce it.
 
 ### PtxISel (`ptx_isel.hpp`)
 
@@ -125,6 +132,11 @@ Lowers MIR -> `ptx::Function`. Rules:
 - Intrinsics are a table: MIR builtin call name -> lowering rule. This
   replaces string matching on callee names inside the instruction switch.
 - Non-void kernels are rejected with a diagnostic (`.entry` cannot return).
+- MIR constants are printed as immediates wherever `allows_immediate` says
+  the opcode takes one (`operand_of`); invariant special registers are read
+  once per function in the `$L_params` prologue (`special_register`). The
+  output then goes through `ptx::cleanup` (`ptx_cleanup.hpp`) before the
+  verifier. See "Stage 6a notes".
 
 #### Stage 3 implementation notes
 
@@ -138,7 +150,8 @@ File layout (mirrors `x64_isel_*.cpp`; every file stays under 1,000 lines):
 | `src/target/ptx/ptx_isel_mem.cpp` | `load/store`, `vload/vstore`, `load_indexed/store_indexed` (address materialization) |
 | `src/target/ptx/ptx_isel_control.cpp` | `br/br_if/ret/unreachable`, edge copies, the parallel-copy resolver |
 | `src/target/ptx/ptx_isel_intrinsics.cpp` | `PtxISel::Intrinsics` (the lowering rules), the name table, plain `call` |
-| `src/target/ptx_target.cpp` | thin facade: ISel -> `ptx::verify` (throws with `format_diagnostics` output) -> `ptx::print` |
+| `src/target/ptx/ptx_cleanup.cpp` | Stage 6a: copy propagation, dead instruction elimination, branch simplification, register renumbering (`ptx_cleanup.hpp`) |
+| `src/target/ptx_target.cpp` | thin facade: ISel -> `ptx::cleanup` (unless `PtxOptions::cleanup` is false) -> `ptx::verify` (throws with `format_diagnostics` output) -> `ptx::print` |
 
 Behaviour worth knowing:
 
@@ -712,6 +725,170 @@ folded zero byte offset (`ptx_load_u16(ptr, 0)`), the loop back-edge
 copies, `bra` to the next block and the re-read `%tid.x` in
 `block_reduce_sum_f32`.
 
+### Stage 6a notes (ISel immediates, special-register cache, cleanup passes)
+
+Works through the 5a/5b/5c "ISel quality" lists. Two changes in PtxISel and
+a new pass file; the facade is now `ISel -> ptx::cleanup -> ptx::verify ->
+PtxPrinter` (`PtxOptions::cleanup = false` gives the raw ISel output, and
+`PtxISel::lower` alone is still what the ISel tests inspect).
+
+| File | Concern |
+| --- | --- |
+| `include/brass/target/ptx/ptx_ir.hpp`, `src/target/ptx/ptx_ir.cpp` | `allows_immediate(op, src_index)`, `imm_fits(type, v)`, `is_invariant(SpecialReg)` |
+| `src/target/ptx/ptx_isel*.cpp` | `operand_of` (constant -> immediate where the table allows), `special_register` (per-function cache), `shift_amount` returns an operand |
+| `src/target/ptx/ptx_verifier.cpp` | rejects an immediate in a position the table forbids or that does not fit the slot |
+| `include/brass/target/ptx/ptx_cleanup.hpp`, `src/target/ptx/ptx_cleanup.cpp` | the four passes and `cleanup()` |
+| `tests/unit/test_ptx_cleanup.cpp` | per-pass tests on hand-built IR, ISel immediate/special tests, the pipeline over every intrinsic and the ten kernels |
+
+**Immediate operands.** One table, `allows_immediate`, is consulted by
+`PtxISel::operand_of` when it turns a MIR value into a source operand and by
+the verifier for every source of every instruction. It is deliberately
+narrower than what ptxas accepts (ptxas takes an immediate in every source
+of `setp`, `cvt` and `shfl`; probed on 12.9):
+
+| Opcode | Immediate allowed in source |
+| --- | --- |
+| `mov`, `neg`, `abs`, `not`, `rsqrt`, `sqrt`, `sin`, `cos`, `ex2`, `lg2`, `rcp` | 0 |
+| `add`, `sub`, `mul`, `div`, `rem`, `min`, `max`, `and`, `or`, `xor`, `shl`, `shr` | 0 or 1 |
+| `selp` | 0 or 1 (2 is the predicate) |
+| `mad`, `fma` | 0, 1 or 2 |
+| `setp` | 1 only (a constant on the left keeps its register) |
+| `st` | 1 (the stored value; the address is never an immediate) |
+| `atom` | 1 and 2 (value, cas compare value) |
+| `shfl` | 1, 2, 3 (delta/lane, clamp, member mask; the value never) |
+| `bar` | 0, 1 |
+| `call` | 1.. (arguments; 0 is the callee) |
+| `ld`, `cvt`, `bra`, `ret`, `trap`, `exit` | none |
+
+Width rule (`imm_fits`): a 64-bit slot takes any `int64_t`; a 32-bit slot
+takes `-2^31 .. 2^32-1` (either reading), 16/8-bit slots likewise; `.pred`
+takes none. Consequences: shift counts are `.u32` immediates when the MIR
+constant fits, whatever the width of the shifted value (a 64-bit count that
+does not fit is still narrowed with `cvt.u32.u64`); `mul.wide`/`mad.wide`
+immediates must fit the *narrow* type (`ptx_mul_wide_u32(x, 144)` prints
+`mul.wide.u32 %rd, %r, 144`); `selp` folds both values; `st` and the
+`ptx_shared_store*`/`ptx_store_*` rules fold the stored value; float
+immediates print as `0f%08X`/`0d%016X`; nothing is ever folded into a Pred.
+`mov` of a constant into a Pred is not representable at all (`imm_fits` is
+false for `.pred`). ISel still emits `mov.b32 %r, c` for every MIR constant
+(it does not know whether every use folded); the cleanup's DCE removes the
+ones with no remaining reader and the renumbering removes their
+declarations, so the printed register count shrinks (SwiGLU: `.reg .b32
+%r<10>` and `.f32 %f<45>` instead of `%r<22>` and `%f<79>`).
+
+**Special-register cache.** `PtxISel::special_register(s)` returns one
+register per invariant special register per function; the `mov.u32 %r,
+%tid.x` is appended to the `$L_params` prologue on first use (the prologue
+is created on demand by `prologue_block()`, before the MIR entry block, so
+it also exists for a kernel without parameters that reads `%tid.x`).
+Invariant means `is_invariant(s)`: `%tid.*`, `%ntid.*`, `%ctaid.*`,
+`%nctaid.*`, `%laneid`, `%nwarpid`, `%nsmid`. `%warpid` and `%smid` are not
+(the PTX ISA allows them to change when a warp is rescheduled), nor are
+`%clock`, `%clock64` and `%globaltimer`; those are read at every use, in
+place, and DCE keeps such a `mov` even when its result is unused.
+`global_tid_x` composes the cached `%ctaid.x`/`%ntid.x`/`%tid.x` with one
+`mad.lo.s32`.
+
+**Cleanup passes** (`ptx::cleanup`: `simplify_branches`, then
+`propagate_copies` + `eliminate_dead_instructions` to a fixed point, then
+`renumber_registers`). Each is a public function, is a no-op on clean input
+(the tests run the pipeline twice and compare the printed body) and only
+removes or renames; none reorders or introduces an instruction.
+
+1. *Copy propagation* looks at plain copies: an unguarded `mov` with one
+   register destination and one register source of the same class and no
+   modifier (`mov.b32 %f0, %r3` across register files is not a copy).
+   - Identity copies are deleted.
+   - Case A, both registers single-def: every read of the destination
+     becomes a read of the source and the `mov` is deleted. Block
+     parameters (multi-def) and the parallel-copy scratch are never
+     rewritten this way.
+   - Case B, the source is single-def and this `mov` is its only read: the
+     defining instruction earlier in the same block writes the destination
+     directly (`add.s32 %r11, %r8, %r5; mov.b32 %r8, %r11` becomes
+     `add.s32 %r8, %r8, %r5`). Refused when the def is guarded or has
+     several destinations, when anything between the def and the `mov`
+     reads or writes the destination (the swap pattern), or when a `bra`,
+     `ret`, `exit` or `trap` sits between them -- a guarded `bra` there
+     would make the early write visible on the taken path where the `mov`
+     never ran. This is what removes the loop back-edge and entry copies of
+     the 5a list.
+   - Guarded copies (the `br_if` taken-edge argument copies) are left as
+     they are.
+2. *Dead instruction elimination* deletes any instruction with a
+   destination none of whose registers is read anywhere, to a fixed point
+   (so a constant chain disappears in one call). Side effects that keep an
+   instruction: `st`, `atom`, `bar`, `call`, `ret`, `bra`, `trap`, `exit`,
+   `shfl` (warp-collective; kept even when its result is unused, which is
+   conservative) and a `mov` from a non-invariant special register. Loads
+   are deletable.
+3. *Branch simplification*: unreachable blocks (worklist from the first
+   block over `bra` targets and fall-through edges; the first block is
+   never removed) are dropped; a trailing `bra next` or `@p bra next` is
+   dropped; `@p bra next; bra B` becomes `@!p bra B`; repeated until the
+   block's tail is stable. Blocks therefore fall through, which the
+   verifier accepts and ptxas accepts (including off the end of an
+   `.entry`; probed).
+4. *Register renumbering* compacts each class's indices in order of the
+   surviving indices and sets `reg_counts` to the number in use.
+
+Instruction counts before ptxas over the ten kernels: Stage 5 (legacy
+string kernel -> 5c ISel), then this stage's ISel alone and after cleanup.
+The ISel-only column is one or two higher than 5c because `special<S>`
+now copies the cached register (`mov %r, %cached`) instead of reading
+`%tid.x` in place; copy propagation removes that.
+
+| Kernel | legacy | 5c ISel (`mov`) | 6a ISel | 6a cleaned (`mov`) |
+| --- | ---: | ---: | ---: | ---: |
+| SwiGLU | 76 | 121 (48) | 122 | 73 (4) |
+| AdaLN modulate | -- | 88 (22) | 91 | 69 (8) |
+| AdaLN modulate, gated | -- | 98 (22) | 101 | 79 (8) |
+| residual RMSNorm | 144 | 200 (56) | 204 | 144 (11) |
+| LayerNorm-modulate | 219 | 332 (100) | 336 | 234 (19) |
+| residual LayerNorm | 212 | 319 (94) | 323 | 223 (15) |
+| GEMV SwiGLU | 146 | 245 (87) | 249 | 158 (11) |
+| GEMV residual | 100 | 155 (52) | 159 | 102 (8) |
+| GEMV Q8_0 | 108 | 167 (56) | 171 | 110 (6) |
+| GEMV Q4_K | 156 | 237 (83) | 241 | 153 (6) |
+
+The 126 intrinsic test kernels go from 1,684 to 633 instructions in total.
+Every cleaned kernel verifies, assembles with `ptxas -arch=sm_89`, and the
+GPU, migration and ML Fusion differential tests are unchanged (the
+KernelBuilder kernels' MIR and the `test_gpu_execution.cpp` tolerances were
+not touched).
+
+**Deliberately not addressed** (from the 5a/5b/5c lists):
+
+- 5a.1 `vextract_lane`/`vinsert_lane` `mov`s: no lane-aliasing scheme was
+  added to ISel because copy propagation removes them (an extract is a
+  single-def copy of the lane register; an insert into a fresh vector
+  coalesces into the lane's def). The four `mov`s left in SwiGLU are the
+  special-register reads. A `mov` survives only where it is a real copy
+  (a guarded edge copy, or a lane inserted into a vector that is also read
+  as a whole).
+- 5b.1 `vbroadcast` hoisting: a loop-invariant broadcast inside the loop
+  body is still 4 `mov.f32` per iteration. That is loop-invariant code
+  motion, not cleanup; ptxas does it.
+- 5b.3 `cvt.s64.s32; shl.b64; add.s64` per indexed shared access: an ISel
+  addressing change (`mad.wide.s32` or a 32-bit shared base), left for the
+  Stage 6 ISel pass because it changes the intrinsic's contract with the
+  verifier's address rules.
+- 5c Q8_0 unrolling / `.maxntid`: a builder/launch-bound question, not a
+  backend one.
+- Algebraic identities: the Q4_K nibble loop leaves an `add.s32 %r, %r, 0`
+  (a folded zero byte offset) which copy propagation does not see as a
+  copy. Folding `add x, 0` / `mul x, 1` is a peephole the cleanup does not
+  have; ptxas removes it.
+- `setp` with a constant first source keeps the register (`setp.lt.s32 %p,
+  %r7, %r1` after `mov.b32 %r7, 7`) by table policy; swapping the operands
+  and the comparison is an ISel change that was not worth the special case.
+- `shfl` is treated as side-effecting so an unused shuffle result does not
+  drop a warp-collective; none of the kernels has one.
+- The verifier does not require a terminator at the end of the last block
+  (it never did; `ret` is never removed, so the kernels still end with one,
+  but hand-built IR may fall off the end and ptxas accepts that). Adding
+  the check is a one-liner if it is ever wanted.
+
 ## Stages
 
 1. Enablement: Windows CUDA loader, MinGW link fix, portable GPU tests, `ret`
@@ -737,6 +914,10 @@ copies, `bra` to the next block and the re-read `%tid.x` in
    files remain, as the reference side of the migration tests, for Stage 6
    to delete.)
 6. Remove string templates, decompose files, update docs.
+   (6a done: ISel immediates, the special-register cache and the
+   `ptx::cleanup` passes -- "Stage 6a notes". Remaining: delete the
+   `ml_fusion_ptx_legacy*` files and their migration tests, remaining
+   decomposition and doc pass.)
 
 ## File size rule
 

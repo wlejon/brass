@@ -216,7 +216,9 @@ private:
                 return;
             case OperandKind::ImmInt:
                 if (is_float(t)) error(what + " is an integer immediate but ." + std::string(to_string(t)) + " requires a float immediate (0f.../0d...)");
-                if (t == Type::pred) error(what + " cannot be an immediate for .pred");
+                else if (t == Type::pred) error(what + " cannot be an immediate for .pred");
+                else if (!imm_fits(t, o.imm_int))
+                    error(what + " immediate " + std::to_string(o.imm_int) + " does not fit ." + std::string(to_string(t)));
                 return;
             case OperandKind::ImmFloat:
                 if (!is_float(t)) {
@@ -235,7 +237,11 @@ private:
 
     // B32 register or integer immediate (shift counts, shfl lanes, bar ids).
     void expect_b32_or_imm(const Operand& o, const std::string& what) {
-        if (o.is_imm_int()) return;
+        if (o.is_imm_int()) {
+            if (!imm_fits(Type::u32, o.imm_int))
+                error(what + " immediate " + std::to_string(o.imm_int) + " does not fit .u32");
+            return;
+        }
         if (!o.is_reg()) {
             error(what + " must be a b32 register or integer immediate, got " +
                   std::string(to_string(o.kind)) + " '" + to_string(o) + "'");
@@ -338,6 +344,14 @@ private:
         for (const auto& o : I.dsts) {
             if (o.is_imm() || o.is_label() || o.is_special() || o.is_symbol() || o.is_param())
                 error("destination '" + to_string(o) + "' is not a register");
+        }
+        // The immediate-position rule (ptx_ir: allows_immediate) is the same
+        // table PtxISel folds constants with; anything outside it is an error
+        // even where ptxas would be lenient.
+        for (size_t i = 0; i < I.srcs.size(); ++i) {
+            if (I.srcs[i].is_imm() && !allows_immediate(I.op, i))
+                error(slot("source", i) + " of " + std::string(to_string(I.op)) + " may not be an immediate ('" +
+                      to_string(I.srcs[i]) + "')");
         }
 
         if (takes_type(I.op)) {

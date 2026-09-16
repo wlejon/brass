@@ -40,10 +40,14 @@ TEST_CASE("PTX Target - Version, SM Architecture, and Function Signature") {
     CHECK(ptx.find("ret;") != std::string::npos);
 }
 
+// The results of these kernels are stored through a pointer parameter: the
+// Stage 6a cleanup deletes side-effect-free instructions whose result is
+// never read, so an unused fma/rsqrt/%tid.x would (correctly) not be printed.
+
 TEST_CASE("PTX Target - Arithmetic and Exact Hex Floating Literals") {
     Module mod("test_math");
     Function* fn = mod.create_function("fma_kernel", Type::void_type(), {
-        Type::f32(), Type::f32()
+        Type::f32(), Type::f32(), Type::ptr()
     });
 
     Builder b(mod);
@@ -52,25 +56,27 @@ TEST_CASE("PTX Target - Arithmetic and Exact Hex Floating Literals") {
     b.position_at_end(entry);
     b.add_block_param(entry, Type::f32());
     b.add_block_param(entry, Type::f32());
+    b.add_block_param(entry, Type::ptr());
 
     Value* a = entry->param(0);
     Value* scale = entry->param(1);
     Value* one = b.build_fconst_f32(1.0f);
     Value* res = b.build_fma_f32(a, scale, one);
-    (void)res;
+    b.build_store(Type::f32(), entry->param(2), 0, res);
     b.build_ret_void();
 
     std::string ptx = PtxTarget::emit_function(*fn);
 
-    // Exact IEEE 754 float format: 1.0f is 0f3F800000
-    CHECK(ptx.find("0f3F800000") != std::string::npos);
-    CHECK(ptx.find("fma.rn.f32") != std::string::npos);
+    // Exact IEEE 754 float format: 1.0f is 0f3F800000, folded into the fma
+    // as an immediate (no mov.f32 of the constant remains).
+    CHECK(ptx.find("fma.rn.f32 %f2, %f0, %f1, 0f3F800000;") != std::string::npos);
+    CHECK(ptx.find("mov.f32") == std::string::npos);
 }
 
 TEST_CASE("PTX Target - Fast Math Approximations") {
     Module mod("test_transcendental");
     Function* fn = mod.create_function("math_kernel", Type::void_type(), {
-        Type::f32()
+        Type::f32(), Type::ptr()
     });
 
     Builder b(mod);
@@ -78,6 +84,7 @@ TEST_CASE("PTX Target - Fast Math Approximations") {
     BasicBlock* entry = b.append_block("entry");
     b.position_at_end(entry);
     b.add_block_param(entry, Type::f32());
+    b.add_block_param(entry, Type::ptr());
 
     Value* x = entry->param(0);
     Value* r1 = b.build_call("rsqrtf", Type::f32(), {x});
@@ -85,7 +92,7 @@ TEST_CASE("PTX Target - Fast Math Approximations") {
     Value* r3 = b.build_call("expf", Type::f32(), {r2});
     Value* r4 = b.build_call("sinf", Type::f32(), {r3});
     Value* r5 = b.build_call("cosf", Type::f32(), {r4});
-    (void)r5;
+    b.build_store(Type::f32(), entry->param(1), 0, r5);
     b.build_ret_void();
 
     std::string ptx = PtxTarget::emit_function(*fn);
@@ -109,18 +116,27 @@ TEST_CASE("PTX Target - Thread Indexing Builtins") {
     b.set_function(fn);
     BasicBlock* entry = b.append_block("entry");
     b.position_at_end(entry);
+    Value* out = b.add_block_param(entry, Type::ptr());
 
     Value* tid = b.build_call("ptx_tid_x", Type::i32(), {});
     Value* gid = b.build_call("ptx_global_tid_x", Type::i32(), {});
-    (void)tid;
-    (void)gid;
+    b.build_store(Type::i32(), out, 0, tid);
+    b.build_store(Type::i32(), out, 4, gid);
     b.build_ret_void();
 
     std::string ptx = PtxTarget::emit_function(*fn);
 
-    CHECK(ptx.find("%tid.x") != std::string::npos);
-    CHECK(ptx.find("%ctaid.x") != std::string::npos);
-    CHECK(ptx.find("%ntid.x") != std::string::npos);
+    // Each special register is read exactly once (in the $L_params prologue)
+    // even though tid_x and global_tid_x both need %tid.x.
+    auto count = [&](const char* needle) {
+        size_t n = 0;
+        for (size_t p = ptx.find(needle); p != std::string::npos; p = ptx.find(needle, p + 1)) ++n;
+        return n;
+    };
+    CHECK_EQ(count("%tid.x"), size_t(1));
+    CHECK_EQ(count("%ctaid.x"), size_t(1));
+    CHECK_EQ(count("%ntid.x"), size_t(1));
+    CHECK(ptx.find("$L_params:") != std::string::npos);
     CHECK(ptx.find("mad.lo.s32") != std::string::npos);
 }
 

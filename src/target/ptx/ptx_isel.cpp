@@ -43,11 +43,13 @@ Function PtxISel::lower(const brass::Function& mir_fn) {
     Function out(std::string(mir_fn.name()), /*entry=*/true);
     fn_ = &out;
     bb_ = nullptr;
+    prologue_ = nullptr;
     origin_ = nullptr;
     regs_.clear();
     preds_.clear();
     blocks_.clear();
     value_uses_.clear();
+    special_cache_.clear();
 
     analyze_uses(mir_fn);
     allocate_registers(mir_fn);
@@ -131,11 +133,7 @@ void PtxISel::lower_params(const brass::Function& mir_fn) {
     const BasicBlock* entry = mir_fn.entry_block();
     if (!entry || entry->param_count() == 0) return;
 
-    // The ld.param prologue is a fall-through block ahead of the entry block
-    // so that a MIR entry block with incoming edges is not re-entered through it.
-    bb_ = fn_->add_block("$L_params");
-    std::rotate(fn_->blocks.begin(), fn_->blocks.end() - 1, fn_->blocks.end());
-
+    bb_ = prologue_block();
     for (size_t i = 0; i < entry->param_count(); ++i) {
         const Value* p = entry->param(i);
         if (!p) {
@@ -151,6 +149,18 @@ void PtxISel::lower_params(const brass::Function& mir_fn) {
                  .dst(reg_of(p, "entry param")).src(param_operands[i]));
     }
     bb_ = nullptr;
+}
+
+// The prologue is a fall-through block ahead of the MIR entry block, so that
+// an entry block with incoming edges is not re-entered through the loads or
+// the special-register reads. It is created on first use, so a kernel with
+// neither params nor special-register reads has no $L_params label.
+Block* PtxISel::prologue_block() {
+    if (!prologue_) {
+        prologue_ = fn_->add_block("$L_params");
+        std::rotate(fn_->blocks.begin(), fn_->blocks.end() - 1, fn_->blocks.end());
+    }
+    return prologue_;
 }
 
 // ---------------------------------------------------------------------------
@@ -323,12 +333,45 @@ Reg PtxISel::materialize_pred(const Value* cond) {
     return p;
 }
 
-Reg PtxISel::shift_amount(const Value* amt) {
+Operand PtxISel::operand_of(const Value* v, Opcode op, size_t src_index, Type t, const char* what) {
+    if (allows_immediate(op, src_index)) {
+        if (is_float(t)) {
+            double d = 0.0;
+            if (const_float(v, &d)) {
+                return t == Type::f32 ? Operand::imm_f32(static_cast<float>(d)) : Operand::imm_f64(d);
+            }
+        } else {
+            int64_t i = 0;
+            if (const_int(v, &i) && imm_fits(t, i)) return Operand::imm(i);
+        }
+    }
+    return Operand::reg(reg_of(v, what));
+}
+
+Operand PtxISel::shift_amount(const Value* amt) {
+    int64_t c = 0;
+    if (const_int(amt, &c) && imm_fits(Type::u32, c)) return Operand::imm(c);
     Reg r = reg_of(amt, "shift amount");
-    if (r.cls == RegClass::B32) return r;
+    if (r.cls == RegClass::B32) return Operand::reg(r);
     Reg narrow = fn_->new_b32();
     emit(Inst::make(Opcode::cvt, Type::u32).from(Type::u64).dst(narrow).src(r));
-    return narrow;
+    return Operand::reg(narrow);
+}
+
+Reg PtxISel::special_register(SpecialReg s) {
+    Type t = reg_class_for(s) == RegClass::B64 ? Type::u64 : Type::u32;
+    if (!is_invariant(s)) {
+        Reg r = fn_->new_reg(reg_class_for(s));
+        emit(Inst::make(Opcode::mov, t).dst(r).src(Operand::special(s)));
+        return r;
+    }
+    auto key = static_cast<uint8_t>(s);
+    auto it = special_cache_.find(key);
+    if (it != special_cache_.end()) return it->second;
+    Reg r = fn_->new_reg(reg_class_for(s));
+    prologue_block()->append(Inst::make(Opcode::mov, t).dst(r).src(Operand::special(s)).origin(origin_));
+    special_cache_[key] = r;
+    return r;
 }
 
 Operand PtxISel::label_of(const BasicBlock* bb) const {

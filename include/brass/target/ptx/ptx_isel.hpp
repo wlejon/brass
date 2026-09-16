@@ -49,11 +49,13 @@ private:
     // ---- state ------------------------------------------------------------
     Function* fn_ = nullptr;
     Block* bb_ = nullptr;
+    Block* prologue_ = nullptr;                                    // $L_params (created on demand)
     const brass::Instruction* origin_ = nullptr;
     std::unordered_map<const Value*, std::vector<Reg>> regs_;     // value -> register run (1 for scalars)
     std::unordered_map<const Value*, Reg> preds_;                  // comparison result -> pred
     std::unordered_map<const BasicBlock*, Block*> blocks_;
     std::unordered_map<const Value*, uint32_t> value_uses_;        // uses other than as a br_if/select condition
+    std::unordered_map<uint8_t, Reg> special_cache_;               // invariant SpecialReg -> register read in the prologue
 
     // ---- setup (ptx_isel.cpp) ---------------------------------------------
     void analyze_uses(const brass::Function& mir_fn);
@@ -61,6 +63,9 @@ private:
     void lower_params(const brass::Function& mir_fn);
     void lower_block(const BasicBlock& bb);
     void lower_instruction(const brass::Instruction& inst);
+    // The fall-through prologue block ahead of the MIR entry block: ld.param
+    // loads and the cached special-register reads live here.
+    Block* prologue_block();
 
     // ---- value access -----------------------------------------------------
     const std::vector<Reg>& regs_of(const Value* v, const char* what) const;
@@ -70,11 +75,24 @@ private:
     Reg pred_of(const Value* v) const; // comparison results only
     bool has_value_uses(const Value* v) const;
 
+    // Source operand for position `src_index` of `op`, whose slot has type
+    // `t`: an immediate when the value is a MIR constant (iconst/fconst), the
+    // rule table (ptx_ir: allows_immediate) permits one there and it fits
+    // `t`; the value's register otherwise. Float constants become 0f/0d
+    // literals of the slot width, integer constants print in decimal.
+    Operand operand_of(const Value* v, Opcode op, size_t src_index, Type t, const char* what);
+
     // Returns a Pred holding `cond != 0`; comparison results are used directly.
     Reg materialize_pred(const Value* cond);
-    // PTX shift counts are 32-bit; 64-bit counts are narrowed with cvt.u32.u64.
-    Reg shift_amount(const Value* amt);
+    // PTX shift counts are 32-bit: a constant becomes a .u32 immediate, a
+    // 64-bit register is narrowed with cvt.u32.u64.
+    Operand shift_amount(const Value* amt);
     Operand label_of(const BasicBlock* bb) const;
+
+    // Register holding a special register. Invariant ones (is_invariant) are
+    // read once, in the prologue, and the same register is returned for every
+    // later read; volatile ones (%clock, %warpid, ...) are read at the use.
+    Reg special_register(SpecialReg s);
 
     Inst& emit(Inst inst);
     [[noreturn]] void malformed(const brass::Instruction& inst, const char* what) const;
@@ -130,8 +148,9 @@ private:
     // ---- intrinsic helpers (ptx_isel_intrinsics.cpp) ----------------------
     // Compile-time integer constant behind a value (iconst_i32/iconst_i64
     // result), used for barrier ids, lane deltas, shared array sizes and
-    // immediate byte offsets.
+    // immediate byte offsets; const_float is the fconst (f32 or f64) form.
     bool const_int(const Value* v, int64_t* out) const;
+    bool const_float(const Value* v, double* out) const;
     // `[base + disp]` for a pointer value and an optional byte-offset value:
     // constant offsets fold into the displacement, others are added into a
     // fresh 64-bit register.

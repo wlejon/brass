@@ -22,14 +22,12 @@ namespace brass::ptx {
 // Special registers
 // ---------------------------------------------------------------------------
 
-// Global thread id along x: ctaid.x * ntid.x + tid.x.
+// Global thread id along x: ctaid.x * ntid.x + tid.x, from the cached
+// prologue reads of the three special registers.
 void PtxISel::Intrinsics::global_tid_x(PtxISel& isel, const brass::Instruction& inst) {
-    Reg tid = isel.fn_->new_b32();
-    Reg ctaid = isel.fn_->new_b32();
-    Reg ntid = isel.fn_->new_b32();
-    isel.emit(Inst::make(Opcode::mov, Type::u32).dst(tid).src(Operand::special(SpecialReg::tid_x)));
-    isel.emit(Inst::make(Opcode::mov, Type::u32).dst(ctaid).src(Operand::special(SpecialReg::ctaid_x)));
-    isel.emit(Inst::make(Opcode::mov, Type::u32).dst(ntid).src(Operand::special(SpecialReg::ntid_x)));
+    Reg tid = isel.special_register(SpecialReg::tid_x);
+    Reg ctaid = isel.special_register(SpecialReg::ctaid_x);
+    Reg ntid = isel.special_register(SpecialReg::ntid_x);
     isel.emit(Inst::make(Opcode::mad, Type::s32).lo()
                   .dst(isel.result_reg(inst)).src(ctaid).src(ntid).src(tid));
 }
@@ -46,8 +44,8 @@ void PtxISel::Intrinsics::binary_float(PtxISel& isel, const brass::Instruction& 
     Type t = type_for(a->type());
     if (!is_float(t)) isel.malformed(inst, "argument 0 is not a float");
     isel.emit(Inst::make(Op, t).dst(isel.result_reg(inst))
-                  .src(isel.reg_of(a, "argument 0"))
-                  .src(isel.reg_of(inst.operand(1), "argument 1")));
+                  .src(isel.operand_of(a, Op, 0, t, "argument 0"))
+                  .src(isel.operand_of(inst.operand(1), Op, 1, t, "argument 1")));
 }
 template void PtxISel::Intrinsics::binary_float<Opcode::min>(PtxISel&, const brass::Instruction&);
 template void PtxISel::Intrinsics::binary_float<Opcode::max>(PtxISel&, const brass::Instruction&);
@@ -56,7 +54,7 @@ template void PtxISel::Intrinsics::binary_float<Opcode::max>(PtxISel&, const bra
 void PtxISel::Intrinsics::exp_f32(PtxISel& isel, const brass::Instruction& inst) {
     Reg scaled = isel.fn_->new_f32();
     isel.emit(Inst::make(Opcode::mul, Type::f32).dst(scaled)
-                  .src(isel.reg_of(inst.operand(0), "argument 0"))
+                  .src(isel.operand_of(inst.operand(0), Opcode::mul, 0, Type::f32, "argument 0"))
                   .src(Operand::imm_f32(1.44269504f)));
     isel.emit(Inst::make(Opcode::ex2, Type::f32).approx().dst(isel.result_reg(inst)).src(scaled));
 }
@@ -94,8 +92,8 @@ void PtxISel::Intrinsics::abs_float(PtxISel& isel, const brass::Instruction& ins
 void PtxISel::Intrinsics::div_approx_f32(PtxISel& isel, const brass::Instruction& inst) {
     isel.emit(Inst::make(Opcode::div, Type::f32).approx()
                   .dst(isel.result_reg(inst))
-                  .src(isel.reg_of(inst.operand(0), "argument 0"))
-                  .src(isel.reg_of(inst.operand(1), "argument 1")));
+                  .src(isel.operand_of(inst.operand(0), Opcode::div, 0, Type::f32, "argument 0"))
+                  .src(isel.operand_of(inst.operand(1), Opcode::div, 1, Type::f32, "argument 1")));
 }
 
 // ---------------------------------------------------------------------------

@@ -26,16 +26,23 @@ struct PtxISel::Intrinsics {
     static const Table& table();
 
     // ---- special registers / math / conversions (ptx_isel_intrinsics.cpp) --
+    // Invariant special registers are read once in the prologue
+    // (PtxISel::special_register) and copied into the result; the copy is
+    // coalesced by the cleanup pass. Volatile ones are read at the use.
     template <SpecialReg S>
     static void special(PtxISel& isel, const brass::Instruction& inst) {
         Type t = reg_class_for(S) == RegClass::B64 ? Type::u64 : Type::u32;
-        isel.emit(Inst::make(Opcode::mov, t).dst(isel.result_reg(inst)).src(Operand::special(S)));
+        if (is_invariant(S)) {
+            isel.emit(Inst::make(Opcode::mov, t).dst(isel.result_reg(inst)).src(isel.special_register(S)));
+        } else {
+            isel.emit(Inst::make(Opcode::mov, t).dst(isel.result_reg(inst)).src(Operand::special(S)));
+        }
     }
     template <Opcode Op>
     static void approx_f32(PtxISel& isel, const brass::Instruction& inst) {
         isel.emit(Inst::make(Op, Type::f32).approx()
                       .dst(isel.result_reg(inst))
-                      .src(isel.reg_of(inst.operand(0), "argument 0")));
+                      .src(isel.operand_of(inst.operand(0), Op, 0, Type::f32, "argument 0")));
     }
     template <Opcode Op>
     static void binary_float(PtxISel& isel, const brass::Instruction& inst); // min/max, type from arg 0

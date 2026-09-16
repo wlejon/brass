@@ -44,19 +44,23 @@ void PtxISel::lower_fconst(const brass::Instruction& inst) {
 // Arithmetic
 // ---------------------------------------------------------------------------
 
+// Two-source ALU op of type `t`: either source may be an immediate
+// (operand_of consults the rule table, so an opcode that takes none simply
+// gets registers).
 void PtxISel::lower_binary(const brass::Instruction& inst, Opcode op) {
-    emit(Inst::make(op, signed_type_for(inst.type()))
+    Type t = signed_type_for(inst.type());
+    emit(Inst::make(op, t)
              .dst(result_reg(inst))
-             .src(reg_of(inst.operand(0), "operand 0"))
-             .src(reg_of(inst.operand(1), "operand 1")));
+             .src(operand_of(inst.operand(0), op, 0, t, "operand 0"))
+             .src(operand_of(inst.operand(1), op, 1, t, "operand 1")));
 }
 
 void PtxISel::lower_mul(const brass::Instruction& inst) {
     Type t = signed_type_for(inst.type());
     Inst mul = Inst::make(Opcode::mul, t)
                    .dst(result_reg(inst))
-                   .src(reg_of(inst.operand(0), "operand 0"))
-                   .src(reg_of(inst.operand(1), "operand 1"));
+                   .src(operand_of(inst.operand(0), Opcode::mul, 0, t, "operand 0"))
+                   .src(operand_of(inst.operand(1), Opcode::mul, 1, t, "operand 1"));
     if (!is_float(t)) mul.lo();
     emit(std::move(mul));
 }
@@ -65,8 +69,8 @@ void PtxISel::lower_div(const brass::Instruction& inst, bool is_unsigned) {
     Type t = is_unsigned ? type_for(inst.type()) : signed_type_for(inst.type());
     Inst div = Inst::make(Opcode::div, t)
                    .dst(result_reg(inst))
-                   .src(reg_of(inst.operand(0), "operand 0"))
-                   .src(reg_of(inst.operand(1), "operand 1"));
+                   .src(operand_of(inst.operand(0), Opcode::div, 0, t, "operand 0"))
+                   .src(operand_of(inst.operand(1), Opcode::div, 1, t, "operand 1"));
     if (is_float(t)) div.rnd(Rounding::rn);
     emit(std::move(div));
 }
@@ -75,22 +79,24 @@ void PtxISel::lower_rem(const brass::Instruction& inst, bool is_unsigned) {
     Type t = is_unsigned ? type_for(inst.type()) : signed_type_for(inst.type());
     emit(Inst::make(Opcode::rem, t)
              .dst(result_reg(inst))
-             .src(reg_of(inst.operand(0), "operand 0"))
-             .src(reg_of(inst.operand(1), "operand 1")));
+             .src(operand_of(inst.operand(0), Opcode::rem, 0, t, "operand 0"))
+             .src(operand_of(inst.operand(1), Opcode::rem, 1, t, "operand 1")));
 }
 
 void PtxISel::lower_fma(const brass::Instruction& inst) {
-    emit(Inst::make(Opcode::fma, type_for(inst.type())).rnd(Rounding::rn)
+    Type t = type_for(inst.type());
+    emit(Inst::make(Opcode::fma, t).rnd(Rounding::rn)
              .dst(result_reg(inst))
-             .src(reg_of(inst.operand(0), "operand 0"))
-             .src(reg_of(inst.operand(1), "operand 1"))
-             .src(reg_of(inst.operand(2), "operand 2")));
+             .src(operand_of(inst.operand(0), Opcode::fma, 0, t, "operand 0"))
+             .src(operand_of(inst.operand(1), Opcode::fma, 1, t, "operand 1"))
+             .src(operand_of(inst.operand(2), Opcode::fma, 2, t, "operand 2")));
 }
 
 void PtxISel::lower_neg(const brass::Instruction& inst) {
-    emit(Inst::make(Opcode::neg, signed_type_for(inst.type()))
+    Type t = signed_type_for(inst.type());
+    emit(Inst::make(Opcode::neg, t)
              .dst(result_reg(inst))
-             .src(reg_of(inst.operand(0), "operand 0")));
+             .src(operand_of(inst.operand(0), Opcode::neg, 0, t, "operand 0")));
 }
 
 // ---------------------------------------------------------------------------
@@ -98,24 +104,26 @@ void PtxISel::lower_neg(const brass::Instruction& inst) {
 // ---------------------------------------------------------------------------
 
 void PtxISel::lower_bitwise(const brass::Instruction& inst, Opcode op) {
-    emit(Inst::make(op, bit_type_for(inst.type()))
+    Type t = bit_type_for(inst.type());
+    emit(Inst::make(op, t)
              .dst(result_reg(inst))
-             .src(reg_of(inst.operand(0), "operand 0"))
-             .src(reg_of(inst.operand(1), "operand 1")));
+             .src(operand_of(inst.operand(0), op, 0, t, "operand 0"))
+             .src(operand_of(inst.operand(1), op, 1, t, "operand 1")));
 }
 
 void PtxISel::lower_not(const brass::Instruction& inst) {
-    emit(Inst::make(Opcode::not_, bit_type_for(inst.type()))
+    Type t = bit_type_for(inst.type());
+    emit(Inst::make(Opcode::not_, t)
              .dst(result_reg(inst))
-             .src(reg_of(inst.operand(0), "operand 0")));
+             .src(operand_of(inst.operand(0), Opcode::not_, 0, t, "operand 0")));
 }
 
 void PtxISel::lower_shift(const brass::Instruction& inst, Opcode op, Type t) {
     if (!inst.operand(1)) malformed(inst, "missing shift amount");
-    Reg amount = shift_amount(inst.operand(1));
+    Operand amount = shift_amount(inst.operand(1));
     emit(Inst::make(op, t)
              .dst(result_reg(inst))
-             .src(reg_of(inst.operand(0), "operand 0"))
+             .src(operand_of(inst.operand(0), op, 0, t, "operand 0"))
              .src(amount));
 }
 
@@ -133,10 +141,12 @@ void PtxISel::lower_comparison(const brass::Instruction& inst, CmpOp cmp, bool i
     Type t = compare_type(lhs->type(), is_unsigned);
     if (is_float(t)) cmp = float_compare_op(cmp);
 
+    // setp takes an immediate only as its second source (rule table); a
+    // constant left-hand side stays in its register.
     Reg p = pred_of(inst.result());
     emit(Inst::make(Opcode::setp, t).cmp(cmp).dst(p)
-             .src(reg_of(lhs, "operand 0"))
-             .src(reg_of(rhs, "operand 1")));
+             .src(operand_of(lhs, Opcode::setp, 0, t, "operand 0"))
+             .src(operand_of(rhs, Opcode::setp, 1, t, "operand 1")));
 
     if (has_value_uses(inst.result())) {
         emit(Inst::make(Opcode::selp, Type::u32).dst(result_reg(inst))
@@ -146,10 +156,11 @@ void PtxISel::lower_comparison(const brass::Instruction& inst, CmpOp cmp, bool i
 
 void PtxISel::lower_select(const brass::Instruction& inst) {
     Reg p = materialize_pred(inst.operand(0));
-    emit(Inst::make(Opcode::selp, bit_type_for(inst.type()))
+    Type t = bit_type_for(inst.type());
+    emit(Inst::make(Opcode::selp, t)
              .dst(result_reg(inst))
-             .src(reg_of(inst.operand(1), "true value"))
-             .src(reg_of(inst.operand(2), "false value"))
+             .src(operand_of(inst.operand(1), Opcode::selp, 0, t, "true value"))
+             .src(operand_of(inst.operand(2), Opcode::selp, 1, t, "false value"))
              .src(p));
 }
 

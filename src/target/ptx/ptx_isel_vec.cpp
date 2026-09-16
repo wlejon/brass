@@ -138,10 +138,12 @@ void PtxISel::lower_vector_not(const brass::Instruction& inst) {
 // Construction and lane access
 // ---------------------------------------------------------------------------
 
+// A constant scalar is broadcast as one `mov` of the immediate per lane
+// (bit_type_for keeps f32/f64, so float constants print as 0f/0d literals).
 void PtxISel::lower_vbroadcast(const brass::Instruction& inst) {
     if (!inst.type().is_vector()) malformed(inst, "result is not a vector type");
     Type t = bit_type_for(inst.type().element_type());
-    Reg scalar = reg_of(inst.operand(0), "scalar operand");
+    Operand scalar = operand_of(inst.operand(0), Opcode::mov, 0, t, "scalar operand");
     for (Reg lane : result_regs(inst)) {
         emit(Inst::make(Opcode::mov, t).dst(lane).src(scalar));
     }
@@ -165,11 +167,11 @@ void PtxISel::lower_vinsert_lane(const brass::Instruction& inst) {
     if (src.size() != dst.size()) malformed(inst, "operand lane count mismatch");
     size_t lane = inst.lane();
     if (lane >= dst.size()) malformed(inst, "lane index out of range");
-    Reg scalar = reg_of(inst.operand(1), "scalar operand");
     Type t = bit_type_for(vec->type().element_type());
+    Operand scalar = operand_of(inst.operand(1), Opcode::mov, 0, t, "scalar operand");
 
     for (size_t i = 0; i < dst.size(); ++i) {
-        emit(Inst::make(Opcode::mov, t).dst(dst[i]).src(i == lane ? scalar : src[i]));
+        emit(Inst::make(Opcode::mov, t).dst(dst[i]).src(i == lane ? scalar : Operand::reg(src[i])));
     }
 }
 

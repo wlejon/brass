@@ -36,6 +36,14 @@ bool PtxISel::const_int(const Value* v, int64_t* out) const {
     return false;
 }
 
+bool PtxISel::const_float(const Value* v, double* out) const {
+    if (!v || !v->is_instruction()) return false;
+    const brass::Instruction* def = v->defining_instruction();
+    if (!def || def->opcode() != brass::Opcode::fconst_f64) return false;
+    *out = def->imm_f64();
+    return true;
+}
+
 Operand PtxISel::address_operand(const Value* ptr, const Value* offset, const char* what) {
     Reg base = reg_of(ptr, what);
     if (base.cls != RegClass::B64) {
@@ -172,7 +180,8 @@ void PtxISel::Intrinsics::shared_store(PtxISel& isel, const brass::Instruction& 
     Reg value = isel.reg_of(inst.operand(1), "value");
     if (value.cls != reg_class_for(T)) isel.malformed(inst, "value type does not match the shared element type");
     Operand addr = isel.address_operand(inst.operand(0), inst.operand(2), "shared pointer");
-    isel.emit(Inst::make(Opcode::st, T).space(StateSpace::shared).src(addr).src(value));
+    isel.emit(Inst::make(Opcode::st, T).space(StateSpace::shared).src(addr)
+                  .src(isel.operand_of(inst.operand(1), Opcode::st, 1, T, "value")));
 }
 template void PtxISel::Intrinsics::shared_store<Type::f32>(PtxISel&, const brass::Instruction&);
 template void PtxISel::Intrinsics::shared_store<Type::u32>(PtxISel&, const brass::Instruction&);
@@ -186,7 +195,8 @@ void PtxISel::Intrinsics::shared_store_indexed(PtxISel& isel, const brass::Instr
     Reg value = isel.reg_of(inst.operand(2), "value");
     if (value.cls != reg_class_for(T)) isel.malformed(inst, "value type does not match the shared element type");
     Operand addr = isel.indexed_operand(inst.operand(0), inst.operand(1), elem_bytes(T), "shared pointer");
-    isel.emit(Inst::make(Opcode::st, T).space(StateSpace::shared).src(addr).src(value));
+    isel.emit(Inst::make(Opcode::st, T).space(StateSpace::shared).src(addr)
+                  .src(isel.operand_of(inst.operand(2), Opcode::st, 1, T, "value")));
 }
 template void PtxISel::Intrinsics::shared_store_indexed<Type::f32>(PtxISel&, const brass::Instruction&);
 template void PtxISel::Intrinsics::shared_store_indexed<Type::u32>(PtxISel&, const brass::Instruction&);
@@ -219,7 +229,8 @@ void PtxISel::Intrinsics::store_narrow(PtxISel& isel, const brass::Instruction& 
     Reg value = isel.reg_of(inst.operand(1), "value");
     if (value.cls != RegClass::B32) isel.malformed(inst, "narrow store value must be i32");
     Operand addr = isel.address_operand(inst.operand(0), inst.operand(2), "pointer");
-    isel.emit(Inst::make(Opcode::st, T).space(StateSpace::global).src(addr).src(value));
+    isel.emit(Inst::make(Opcode::st, T).space(StateSpace::global).src(addr)
+                  .src(isel.operand_of(inst.operand(1), Opcode::st, 1, T, "value")));
 }
 template void PtxISel::Intrinsics::store_narrow<Type::u8>(PtxISel&, const brass::Instruction&);
 template void PtxISel::Intrinsics::store_narrow<Type::u16>(PtxISel&, const brass::Instruction&);

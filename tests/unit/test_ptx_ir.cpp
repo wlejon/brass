@@ -599,6 +599,26 @@ TEST_CASE("PTX IR - verifier rejects vector, shift, immediate and modifier misus
     { Fixture x; x.reject(Inst::make(Opcode::add, Type::f32).dst(x.f).src(x.f1).src(Operand::imm(1)), "requires a float immediate"); }
     { Fixture x; x.reject(Inst::make(Opcode::add, Type::u32).dst(x.r).src(x.r1).src(Operand::imm_f32(1.0f)), "requires an integer immediate"); }
     { Fixture x; x.reject(Inst::make(Opcode::add, Type::u32).dst(Operand::imm(1)).src(x.r1).src(x.r), "is not a register"); }
+    // Immediate positions follow the allows_immediate table (Stage 6a): setp
+    // takes one only as its second source, cvt and the shfl value never do,
+    // and an integer immediate must fit the instruction width.
+    { Fixture x; x.reject(Inst::make(Opcode::setp, Type::s32).cmp(CmpOp::lt).dst(x.p).src(Operand::imm(5)).src(x.r), "source 0 of setp may not be an immediate"); }
+    { Fixture x; x.reject(Inst::make(Opcode::cvt, Type::f32).from(Type::s32).rnd(Rounding::rn).dst(x.f).src(Operand::imm(5)), "source 0 of cvt may not be an immediate"); }
+    { Fixture x; x.reject(Inst::make(Opcode::shfl, Type::b32).sync().shfl(ShflMode::down).dst(x.f).src(Operand::imm_f32(1.0f))
+                              .src(Operand::imm(1)).src(Operand::imm(31)).src(Operand::imm(-1)), "source 0 of shfl may not be an immediate"); }
+    { Fixture x; x.reject(Inst::make(Opcode::selp, Type::b32).dst(x.r).src(x.r1).src(x.r1).src(Operand::imm(1)), "source 2 of selp may not be an immediate"); }
+    { Fixture x; x.reject(Inst::make(Opcode::mov, Type::b32).dst(x.r).src(Operand::imm(5000000000LL)), "immediate 5000000000 does not fit .b32"); }
+    { Fixture x; x.reject(Inst::make(Opcode::mul, Type::u32).wide().dst(x.rd).src(x.r1).src(Operand::imm(-3000000000LL)), "does not fit .u32"); }
+    { Fixture x; x.reject(Inst::make(Opcode::shl, Type::b64).dst(x.rd).src(x.rd1).src(Operand::imm(4294967296LL)), "shift amount immediate 4294967296 does not fit .u32"); }
+    { Fixture x; x.bb->append(Inst::make(Opcode::sub, Type::s32).dst(x.r).src(Operand::imm(5)).src(x.r1)); // either source of an ALU op
+      x.bb->append(Inst::make(Opcode::setp, Type::s32).cmp(CmpOp::lt).dst(x.p).src(x.r).src(Operand::imm(-5)));
+      x.bb->append(Inst::make(Opcode::mov, Type::u32).dst(x.r).src(Operand::imm(4294967295LL)));            // unsigned reading of a 32-bit slot
+      x.bb->append(Inst::make(Opcode::st, Type::f32).space(StateSpace::global).src(Operand::addr(x.rd)).src(Operand::imm_f32(2.0f)));
+      x.bb->append(Inst::make(Opcode::ret));
+      auto d = verify(x.fn); dump(d); CHECK(d.empty()); }
+    { CHECK(allows_immediate(Opcode::add, 0)); CHECK(allows_immediate(Opcode::fma, 2)); CHECK(allows_immediate(Opcode::bar, 1));
+      CHECK(!allows_immediate(Opcode::setp, 0)); CHECK(!allows_immediate(Opcode::ld, 0)); CHECK(!allows_immediate(Opcode::call, 0));
+      CHECK(imm_fits(Type::u8, 255)); CHECK(!imm_fits(Type::u8, 256)); CHECK(imm_fits(Type::s32, -2147483648LL)); CHECK(imm_fits(Type::u64, -1)); }
     { Fixture x; x.reject(Inst::make(Opcode::mul, Type::u32).dst(x.r).src(x.r1).src(x.r), "integer mul requires .lo, .hi or .wide"); }
     { Fixture x; x.reject(Inst::make(Opcode::mul, Type::u32).wide().dst(x.r).src(x.r1).src(x.r), "destination is %r0 (b32) but .u64"); }
     { Fixture x; x.reject(Inst::make(Opcode::mul, Type::f32).lo().dst(x.f).src(x.f1).src(x.f), "only valid for integer mul"); }
