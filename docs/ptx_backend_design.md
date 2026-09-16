@@ -410,6 +410,100 @@ so a kernel using them is a PTX-only builder (which is what the Stage 5
 fused kernels are). The `fabsf/fminf/fmaxf/logf/...` aliases keep working on
 both sides: real libm calls on the CPU, inline PTX on the GPU.
 
+### Stage 5a notes (SwiGLU, AdaLN modulate x2, residual RMSNorm)
+
+First migration batch. `emit_ptx_swiglu`, `emit_ptx_adaln_modulate` and
+`emit_ptx_fused_residual_rms_norm` (+ the `emit_ptx_residual_rms_norm`
+alias) now build MIR and go through `PtxTarget::emit_function`; the entry
+names, parameter lists and launch contracts are unchanged, so
+`test_gpu_execution.cpp` runs untouched against the MIR kernels.
+
+**File layout**
+
+| File | Concern |
+| --- | --- |
+| `src/codegen/ml_fusion_ptx_kernels.cpp` | `build_ptx_swiglu`, `build_ptx_adaln_modulate(gated)`, `build_ptx_residual_rms_norm` plus the shared row-per-block prologue (`row_block_prologue`: early `ret`, row offset, `d & ~3` with the `d % 4 != 0` -> scalar-path guard, float4/scalar loop bounds), `f32_offset`, `silu_fast` |
+| `src/codegen/ml_fusion_ptx.cpp` | the three thin emitters (build -> `emit_function`) and, for now, the LayerNorm-modulate string kernel |
+| `src/codegen/ml_fusion_ptx_legacy.{hpp,cpp}` | **LEGACY**: the four replaced string templates, byte-for-byte, as `legacy::legacy_ptx_{swiglu,adaln_modulate,residual_rms_norm}`. Internal header (tests include it by relative path), no library caller; deleted in Stage 6 |
+| `tests/unit/test_gpu_kernel_migration.cpp` | verify + ptxas of each MIR kernel, and on-device differential runs legacy-vs-MIR over several shapes (d multiple of 4 and not, n not a multiple of the block, several rows/blocks, block sizes 32..1024) plus the host reference at the old tolerances |
+
+**Helper added:** `KernelBuilder::for_range_reduce(start, end, step, init,
+body(i, acc) -> acc')` -- `for_range` with one loop-carried value (the
+RMSNorm sum of squares). The result is the head block's `acc` parameter,
+which is valid in the exit block because the head dominates it, so no copy
+into the exit block is emitted. `body` must return the new accumulator and
+must not end in its own terminator.
+
+**Numerics.** The kernels keep the string kernels' recipes: SiLU is
+`neg; mul log2e; ex2.approx; add 1; rcp.approx; mul; mul`, the RMS is
+`div.approx(sum, cvt.rn.f32.u32 d); add eps; rsqrt.approx`, the block sum
+is the same 16/8/4/2/1 `shfl.down` tree over the same shared partials
+(`block_reduce_sum_f32` reduces the partials in every warp and broadcasts
+lane 0, instead of warp 0 writing a second shared scalar -- same values,
+one shared array instead of two). Differential results (RTX 4090, ptxas
+12.9): every SwiGLU and AdaLN shape agrees bit-for-bit (max relative
+difference 0); RMSNorm agrees bit-for-bit on 5 of 6 shapes and to 7.5e-8
+(1 ulp) on `B=4, D=300, block=256`. The tests require `<= 1e-6` relative.
+
+**ISel quality (observed, not fixed in this batch).** Instruction counts
+before ptxas: SwiGLU 76 -> 121 (48 `mov`), RMSNorm 144 -> 200 (56 `mov`).
+ptxas removes all of it (the differential outputs are identical), but the
+PTX is noisier than the hand-written version for these reasons, in order
+of volume:
+
+1. `vextract_lane`/`vinsert_lane` are `mov`s: a 4-lane insert chain to
+   build the SwiGLU result vector is 16 `mov.f32`, plus 8 for the extracts.
+   A lane-register aliasing scheme (extract = the lane's register, insert
+   into a fresh vector = write the lane register directly) would remove
+   them; alternatively a `vpack(s0..s3)` MIR op.
+2. Constants are always materialized (`mov.b32 %r6, 2; shr.u32 %r7, %r0,
+   %r6`; `mov.f32 %f11, 0f3FB8AA3B` per lane) instead of printed as
+   immediates -- the string kernels use immediates everywhere. Shift
+   counts, `and` masks, `add 1.0` and `vbroadcast` of a constant (4 `mov`s
+   of an already-materialized constant) are the common cases. Intrinsics
+   that *do* fold constants (`shfl` delta, `shared_alloc` count) leave the
+   `mov.b32` of the now-dead constant behind.
+3. Block-argument copies: every loop back-edge is `add.s32 %r11, %r8, %r5;
+   mov.b32 %r8, %r11` and every loop entry `mov.b32 %r8, %r3; bra` -- the
+   parallel-copy resolver could coalesce a copy whose source has no later
+   use into the destination register.
+4. `br_if` always emits `@%p bra A; bra B;` even when `B` is the next
+   block, and `br` to the immediately following block is printed.
+5. Special registers are re-read per use (`global_tid_x` reads `%tid.x`
+   and `%ntid.x` again after `tid_x()`/`ntid_x()`); a CSE of `mov.u32 %r,
+   %tid.x` within a block would fix it.
+6. `x + off` address arithmetic is one `add.s64` per pointer per iteration
+   (same as the hand-written kernels) -- no loss there; `load_f32_indexed`
+   was avoided because it would emit `cvt.s64.s32 + shl + add` per access.
+
+**Guidance for the next batches.**
+
+- LayerNorm-modulate and residual-LayerNorm are the RMSNorm builder with a
+  mean pass first: `row_block_prologue` + `for_range_reduce` twice
+  (sum, then sum of squared deviations) + two `block_reduce_sum_f32` calls
+  on the same 32-float scratch (the helper's trailing `bar.sync` makes
+  reuse safe). Keep `div.approx` for the mean/variance and `rsqrt.approx`
+  for rstd to preserve the 2e-3 tolerances.
+- GEMV SwiGLU/residual: one block per output row, the K loop is
+  `for_range_reduce` over float4s with `vfma` into an `f32x4` accumulator
+  (vector block arguments work), then extract the 4 lanes, add, and
+  `block_reduce_sum_f32`; `silu_fast` is in `ml_fusion_ptx_kernels.cpp`
+  and can move to `KernelBuilder` if a third kernel needs it.
+- Quantized GEMV: replace the `call brass_dequant_*` in
+  `build_gemv_q8_0`/`build_gemv_q4_k` (`ml_fusion_quant_cpu.cpp`) with
+  `load_u16`/`f16_to_f32` headers and `load_s8`/`vload(i32x4)` + `and`/`lshr`
+  nibble extraction, following the string kernels in
+  `ml_fusion_quant_ptx.cpp`; the existing MIR builders already lower and
+  verify, so the work is device-side dequantization only.
+- Keep the differential test pattern: copy the string kernel verbatim into
+  the legacy file first (diff it against the original), then write the
+  builder, then compare on device over shapes that hit every path
+  (aligned/unaligned row, tail, multi-block, block sizes 32 and 1024).
+- Each new kernels file stays under 1,000 lines: put the LayerNorm pair in
+  `ml_fusion_ptx_kernels_norm.cpp`, the GEMV kernels in
+  `ml_fusion_ptx_kernels_gemv.cpp`; move `row_block_prologue` / `silu_fast`
+  into a small internal header when a second file needs them.
+
 ## Stages
 
 1. Enablement: Windows CUDA loader, MinGW link fix, portable GPU tests, `ret`
@@ -427,7 +521,10 @@ both sides: real libm calls on the CPU, inline PTX on the GPU.
    shared-memory model and the helper list. `test_ptx_intrinsics.cpp` and
    `test_ptx_vector.cpp` run every intrinsic and vector opcode on device.)
 5. Migrate hand-written kernels to MIR builders (batched), with on-device
-   differential tests against CPU references.
+   differential tests against the legacy kernels and CPU references.
+   (5a done: SwiGLU, AdaLN modulate x2, residual RMSNorm -- see "Stage 5a
+   notes". Remaining: LayerNorm-modulate, residual LayerNorm, GEMV
+   SwiGLU/residual, GEMV Q8_0/Q4_K.)
 6. Remove string templates, decompose files, update docs.
 
 ## File size rule

@@ -148,6 +148,7 @@ add_executable(brass_unit_tests
     unit/test_ptx_vector.cpp
     unit/test_ml_fusion.cpp
     unit/test_gpu_execution.cpp
+    unit/test_gpu_kernel_migration.cpp
 )
 
 target_include_directories(brass_unit_tests

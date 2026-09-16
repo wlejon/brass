@@ -114,6 +114,21 @@ public:
     Function* build_gemv_q8_0(Module& mod, std::string_view name = "gemv_q8_0");
     Function* build_gemv_q4_k(Module& mod, std::string_view name = "gemv_q4_k");
 
+    // --- GPU kernel builders (PTX-only MIR: ptx_* intrinsics, shared memory) ---
+    // These mirror the launch contract of the former hand-written PTX kernels
+    // (entry name, parameter order and types, one block per row / grid-stride)
+    // and are what emit_ptx_swiglu / emit_ptx_adaln_modulate /
+    // emit_ptx_fused_residual_rms_norm lower. See src/codegen/ml_fusion_ptx_kernels.cpp.
+    //
+    //   fused_swiglu_kernel(gate, up, out, u32 n)                       grid-stride, v4 + scalar tail
+    //   fused_adaln_modulate_kernel(x, scale, shift, y, u32 l, u32 d)   one block per row
+    //   fused_adaln_modulate_gated_kernel(x, scale, shift, gate, y, u32 l, u32 d)
+    //   fused_residual_rms_norm_kernel(x, res, gamma, y, u32 b, u32 d, f32 eps)
+    //       x[row] += res[row] in place; y = x * gamma * rsqrt(mean(x^2) + eps); block size % 32 == 0
+    Function* build_ptx_swiglu(Module& mod);
+    Function* build_ptx_adaln_modulate(Module& mod, bool gated);
+    Function* build_ptx_residual_rms_norm(Module& mod);
+
     // --- CPU Compilation (Zero GC overhead) ---
     KernelFunction compile_residual_rms_norm();
     KernelFunction compile_swiglu();

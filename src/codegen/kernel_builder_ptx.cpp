@@ -222,4 +222,30 @@ void KernelBuilder::for_range(Value* start, Value* end, Value* step, const std::
     b_.position_at_end(exit);
 }
 
+// head(i, acc): if i < end -> body else exit;  body: acc' = body(i, acc); br head(i + step, acc')
+// The result is head's `acc` parameter, which is valid in the exit block
+// because the head dominates it; no copy into the exit block is needed.
+Value* KernelBuilder::for_range_reduce(Value* start, Value* end, Value* step, Value* init,
+                                       const std::function<Value*(Value*, Value*)>& body) {
+    BasicBlock* from = b_.current_block();
+    BasicBlock* head = b_.append_block("for_head");
+    BasicBlock* body_bb = b_.append_block("for_body");
+    BasicBlock* exit = b_.append_block("for_exit");
+    Value* i = b_.add_block_param(head, start->type());
+    Value* acc = b_.add_block_param(head, init->type());
+
+    b_.position_at_end(from);
+    b_.build_br(head, {start, init});
+
+    b_.position_at_end(head);
+    b_.build_br_if(b_.build_slt(i, end), body_bb, exit);
+
+    b_.position_at_end(body_bb);
+    Value* next = body(i, acc);
+    b_.build_br(head, {b_.build_add(i, step), next});
+
+    b_.position_at_end(exit);
+    return acc;
+}
+
 } // namespace brass::codegen

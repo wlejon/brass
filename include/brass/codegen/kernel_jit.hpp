@@ -275,11 +275,16 @@ public:
     Value* atom_add_f32(Value* ptr, Value* val);
     Value* atom_add_i32(Value* ptr, Value* val);
 
-    // Structured control flow. Both leave the builder positioned in the
+    // Structured control flow. All leave the builder positioned in the
     // join/exit block they create. `body` receives the induction variable
     // (same type as `start`); the loop runs while i < end (signed).
     void if_then(Value* cond, const std::function<void()>& body);
     void for_range(Value* start, Value* end, Value* step, const std::function<void(Value*)>& body);
+    // for (i = start; i < end; i += step) acc = body(i, acc); returns the
+    // final acc (a loop-carried block argument: `body` must return the new
+    // value and must not end in its own terminator).
+    Value* for_range_reduce(Value* start, Value* end, Value* step, Value* init,
+                            const std::function<Value*(Value*, Value*)>& body);
 
 private:
     std::unique_ptr<Builder> owned_builder_;
