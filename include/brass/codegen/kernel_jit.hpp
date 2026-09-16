@@ -9,6 +9,7 @@
 #include <brass/mir/loop_parallel.hpp>
 #include <brass/codegen/jit_exec.hpp>
 
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -181,6 +182,104 @@ public:
     // Activation helpers
     Value* relu(Value* val);
     Value* relu_bias(Value* val, Value* bias);
+
+    // ------------------------------------------------------------------
+    // GPU (PTX) kernel helpers. Each is a few lines of MIR around a
+    // `ptx_*` builtin call (lowered by PtxISel, see
+    // docs/ptx_backend_design.md "Stage 4 implementation notes"); nothing
+    // here knows PTX syntax. Implemented in src/codegen/kernel_builder_ptx.cpp.
+    // ------------------------------------------------------------------
+
+    // Constants
+    Value* const_i32(int32_t v) { return b_.build_iconst_i32(v); }
+    Value* const_i64(int64_t v) { return b_.build_iconst_i64(v); }
+    Value* const_f32(float v) { return b_.build_fconst_f32(v); }
+
+    // Thread / block / grid indices (all i32)
+    Value* tid_x();     Value* tid_y();     Value* tid_z();
+    Value* ctaid_x();   Value* ctaid_y();   Value* ctaid_z();
+    Value* ntid_x();    Value* ntid_y();    Value* ntid_z();
+    Value* nctaid_x();  Value* nctaid_y();  Value* nctaid_z();
+    Value* lane_id();
+    Value* warp_id();        // tid_x >> 5 (the warp index within the block, not %warpid)
+    Value* global_tid_x();   // ctaid_x * ntid_x + tid_x
+
+    // Barriers
+    Instruction* sync();                 // bar.sync 0
+    Instruction* bar_sync(uint32_t id);  // bar.sync <id>
+
+    // Warp shuffles: 32-bit values (f32 or i32); delta/lane may be a constant.
+    Value* shfl_down_f32(Value* v, uint32_t delta);
+    Value* shfl_down_f32(Value* v, Value* delta);
+    Value* shfl_up_f32(Value* v, uint32_t delta);
+    Value* shfl_bfly_f32(Value* v, uint32_t lane_mask);
+    Value* shfl_idx_f32(Value* v, uint32_t src_lane);
+    Value* shfl_idx_f32(Value* v, Value* src_lane);
+    Value* shfl_down_i32(Value* v, uint32_t delta);
+    Value* shfl_bfly_i32(Value* v, uint32_t lane_mask);
+    Value* shfl_idx_i32(Value* v, uint32_t src_lane);
+
+    // Reductions. warp_reduce_* leave the full-warp result in lane 0 (the
+    // other lanes hold partial sums). block_reduce_sum_f32 leaves the block
+    // total in *every* thread; `shared_scratch` must be a shared_alloc_f32 of
+    // at least 32 elements, the block size must be a multiple of 32 (up to
+    // 1024) and every thread of the block must reach the call. It contains
+    // two bar.sync and may be called repeatedly with the same scratch. The
+    // builder is left positioned in a new block that the call created.
+    Value* warp_reduce_sum_f32(Value* v);
+    Value* warp_reduce_max_f32(Value* v);
+    Value* block_reduce_sum_f32(Value* v, Value* shared_scratch);
+
+    // Shared memory (per-kernel .shared arrays; count is a compile-time constant)
+    Value* shared_alloc_f32(uint32_t count);
+    Value* shared_alloc_i32(uint32_t count);
+    Value* shared_load_f32(Value* smem, int32_t byte_offset = 0);
+    Value* shared_load_f32_indexed(Value* smem, Value* index);
+    Instruction* shared_store_f32(Value* smem, Value* val, int32_t byte_offset = 0);
+    Instruction* shared_store_f32_indexed(Value* smem, Value* index, Value* val);
+    Value* shared_load_i32(Value* smem, int32_t byte_offset = 0);
+    Value* shared_load_i32_indexed(Value* smem, Value* index);
+    Instruction* shared_store_i32(Value* smem, Value* val, int32_t byte_offset = 0);
+    Instruction* shared_store_i32_indexed(Value* smem, Value* index, Value* val);
+
+    // Fast math (f32)
+    Value* rcp_approx(Value* x);
+    Value* div_approx(Value* a, Value* b);
+    Value* ex2_approx(Value* x);
+    Value* lg2_approx(Value* x);
+    Value* exp_fast(Value* x);      // ex2(x * log2 e)
+    Value* log_fast(Value* x);      // lg2(x) * ln 2
+    Value* rsqrt_approx(Value* x);
+    Value* sqrt_approx(Value* x);
+    Value* fabs(Value* x);          // f32 or f64
+    Value* fmin(Value* a, Value* b);
+    Value* fmax(Value* a, Value* b);
+
+    // Conversions
+    Value* f16_to_f32(Value* bits_i32);
+    Value* f32_to_f16(Value* x);     // i32 holding the f16 bits
+    Value* u32_to_f32(Value* x);
+    Value* i32_to_f32(Value* x);
+    Value* f32_to_u32(Value* x);
+    Value* f32_to_i32(Value* x);
+
+    // Narrow global loads/stores (result/value in i32, zero- or sign-extended)
+    Value* load_u8(Value* ptr, int32_t byte_offset = 0);
+    Value* load_s8(Value* ptr, int32_t byte_offset = 0);
+    Value* load_u16(Value* ptr, int32_t byte_offset = 0);
+    Value* load_s16(Value* ptr, int32_t byte_offset = 0);
+    Instruction* store_u8(Value* ptr, Value* val, int32_t byte_offset = 0);
+    Instruction* store_u16(Value* ptr, Value* val, int32_t byte_offset = 0);
+
+    // Atomics (global memory; return the previous value)
+    Value* atom_add_f32(Value* ptr, Value* val);
+    Value* atom_add_i32(Value* ptr, Value* val);
+
+    // Structured control flow. Both leave the builder positioned in the
+    // join/exit block they create. `body` receives the induction variable
+    // (same type as `start`); the loop runs while i < end (signed).
+    void if_then(Value* cond, const std::function<void()>& body);
+    void for_range(Value* start, Value* end, Value* step, const std::function<void(Value*)>& body);
 
 private:
     std::unique_ptr<Builder> owned_builder_;

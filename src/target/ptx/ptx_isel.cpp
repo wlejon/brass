@@ -229,6 +229,26 @@ void PtxISel::lower_instruction(const brass::Instruction& inst) {
         case Opcode::load_indexed:  lower_load_indexed(inst); break;
         case Opcode::store_indexed: lower_store_indexed(inst); break;
 
+        // Vectors (per-lane scalar instructions, ptx_isel_vec.cpp)
+        case Opcode::vadd:  lower_vector_binary(inst, ptx::Opcode::add); break;
+        case Opcode::vsub:  lower_vector_binary(inst, ptx::Opcode::sub); break;
+        case Opcode::vmul:  lower_vector_binary(inst, ptx::Opcode::mul); break;
+        case Opcode::vdiv:  lower_vector_binary(inst, ptx::Opcode::div); break;
+        case Opcode::vmin:  lower_vector_binary(inst, ptx::Opcode::min); break;
+        case Opcode::vmax:  lower_vector_binary(inst, ptx::Opcode::max); break;
+        case Opcode::vfma:  lower_vector_fma(inst); break;
+        case Opcode::vneg:  lower_vector_unary(inst, ptx::Opcode::neg); break;
+        case Opcode::vsqrt: lower_vector_unary(inst, ptx::Opcode::sqrt); break;
+        case Opcode::vand:  lower_vector_bitwise(inst, ptx::Opcode::and_); break;
+        case Opcode::vor:   lower_vector_bitwise(inst, ptx::Opcode::or_); break;
+        case Opcode::vxor:  lower_vector_bitwise(inst, ptx::Opcode::xor_); break;
+        case Opcode::vnot:  lower_vector_not(inst); break;
+        case Opcode::vbroadcast:    lower_vbroadcast(inst); break;
+        case Opcode::vextract_lane: lower_vextract_lane(inst); break;
+        case Opcode::vinsert_lane:  lower_vinsert_lane(inst); break;
+        case Opcode::vshuffle:      lower_vshuffle(inst); break;
+        case Opcode::vzero:         lower_vzero(inst); break;
+
         // Calls
         case Opcode::call: lower_call(inst); break;
 

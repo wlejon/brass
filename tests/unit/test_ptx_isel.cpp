@@ -610,21 +610,24 @@ std::string intrinsic_kernel_ptx(std::string_view name) {
 
 } // namespace
 
-TEST_CASE("PTX ISel - every intrinsic in the table lowers, verifies and assembles") {
-    std::vector<std::string_view> names = PtxISel::intrinsic_names();
-    // Every name the string-matching emitter accepted must still be present.
-    for (const char* required : {
+// The Stage 3 (string-emitter era) names. The full Stage 4 table is covered
+// signature-by-signature in test_ptx_intrinsics.cpp.
+TEST_CASE("PTX ISel - every legacy intrinsic name lowers, verifies and assembles") {
+    std::vector<std::string_view> names = {
              "ptx_tid_x", "ptx_tid_y", "ptx_tid_z", "ptx_ctaid_x", "ptx_ctaid_y", "ptx_ctaid_z",
              "ptx_ntid_x", "ptx_ntid_y", "ptx_ntid_z", "ptx_global_tid_x", "ptx_global_id_x",
              "rsqrtf", "rsqrt", "ptx_rsqrt", "sqrtf", "sqrt", "ptx_sqrt", "sinf", "sin", "ptx_sin",
              "cosf", "cos", "ptx_cos", "ex2f", "ex2", "ptx_ex2", "expf", "exp", "ptx_exp",
              "i32_to_f32", "bar.sync", "ptx_sync", "ptx_shfl_down_sync_f32", "shfl_down_sync_f32",
-             "ptx_shfl_down_f32", "ptx_laneid", "ptx_lane_id", "ptx_warpid", "ptx_warp_id" }) {
+             "ptx_shfl_down_f32", "ptx_laneid", "ptx_lane_id", "ptx_warpid", "ptx_warp_id" };
+    // Every name the string-matching emitter accepted must still be present.
+    for (std::string_view required : names) {
         bool present = PtxISel::is_intrinsic(required);
         if (!present) std::cerr << "intrinsic table is missing " << required << "\n";
         CHECK(present);
     }
     CHECK(!PtxISel::is_intrinsic("custom_device_helper"));
+    CHECK(PtxISel::intrinsic_names().size() >= names.size());
 
     bool have_ptxas = ptxas_available();
     for (std::string_view name : names) {

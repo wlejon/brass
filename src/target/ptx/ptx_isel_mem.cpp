@@ -1,8 +1,11 @@
-// PtxISel: loads and stores. Everything is .global for now; Stage 4 adds
-// .shared arrays (ld.shared/st.shared through a state-space choice here).
+// PtxISel: loads and stores. MIR load/store/vload/vstore are always .global;
+// shared memory is reached only through the explicit ptx_shared_* intrinsics
+// (ptx_isel_intrinsics_mem.cpp), never by pointer provenance.
 
 #include <brass/target/ptx/ptx_isel.hpp>
 #include <brass/mir/instruction.hpp>
+
+#include <cstddef>
 
 namespace brass::ptx {
 
@@ -27,30 +30,39 @@ void PtxISel::lower_store(const brass::Instruction& inst) {
 
 // ---------------------------------------------------------------------------
 // Vector: a vector value is a contiguous register run, loaded/stored as a
-// {..} tuple with the matching .vN modifier.
+// {..} tuple with the matching .vN modifier. 128-bit vectors are one tuple
+// (v4 of 32-bit lanes or v2 of 64-bit lanes); 256-bit vectors are two
+// tuples 16 bytes apart, which keeps every access a native 16-byte ld/st.
 // ---------------------------------------------------------------------------
 
-VecWidth PtxISel::vec_width_for(const brass::Instruction& inst, brass::Type vt) const {
-    if (vt == brass::Type::f32x4()) return VecWidth::v4;
-    if (vt == brass::Type::f64x2()) return VecWidth::v2;
-    malformed(inst, "unsupported vector type (only f32x4/f64x2 are supported)");
+void PtxISel::emit_vector_access(Opcode op, StateSpace space, brass::Type vt, Reg base, int32_t disp,
+                                 const std::vector<Reg>& lanes) {
+    auto per_tuple = static_cast<size_t>(vt.element_type().size_in_bytes() == 8 ? 2 : 4);
+    Type t = type_for(vt);
+    for (size_t first = 0; first < lanes.size(); first += per_tuple) {
+        std::vector<Reg> tuple(lanes.begin() + static_cast<std::ptrdiff_t>(first),
+                               lanes.begin() + static_cast<std::ptrdiff_t>(first + per_tuple));
+        auto tuple_disp = disp + static_cast<int32_t>(first / per_tuple) * 16;
+        Inst access = Inst::make(op, t).space(space).vec(per_tuple == 2 ? VecWidth::v2 : VecWidth::v4);
+        if (op == Opcode::ld) access.dst(Operand::vec(std::move(tuple))).src(Operand::addr(base, tuple_disp));
+        else                  access.src(Operand::addr(base, tuple_disp)).src(Operand::vec(std::move(tuple)));
+        emit(std::move(access));
+    }
 }
 
 void PtxISel::lower_vload(const brass::Instruction& inst) {
     if (!inst.operand(0)) malformed(inst, "missing pointer");
-    VecWidth width = vec_width_for(inst, inst.type());
-    emit(Inst::make(Opcode::ld, type_for(inst.type())).space(StateSpace::global).vec(width)
-             .dst(Operand::vec(result_regs(inst)))
-             .src(Operand::addr(reg_of(inst.operand(0), "pointer"), inst.offset())));
+    if (!inst.type().is_vector()) malformed(inst, "vector load of a non-vector type");
+    emit_vector_access(Opcode::ld, StateSpace::global, inst.type(),
+                       reg_of(inst.operand(0), "pointer"), inst.offset(), result_regs(inst));
 }
 
 void PtxISel::lower_vstore(const brass::Instruction& inst) {
     if (!inst.operand(0) || !inst.operand(1)) malformed(inst, "missing operand");
     const Value* value = inst.operand(1);
-    VecWidth width = vec_width_for(inst, value->type());
-    emit(Inst::make(Opcode::st, type_for(value->type())).space(StateSpace::global).vec(width)
-             .src(Operand::addr(reg_of(inst.operand(0), "pointer"), inst.offset()))
-             .src(Operand::vec(regs_of(value, "value"))));
+    if (!value->type().is_vector()) malformed(inst, "vector store of a non-vector value");
+    emit_vector_access(Opcode::st, StateSpace::global, value->type(),
+                       reg_of(inst.operand(0), "pointer"), inst.offset(), regs_of(value, "value"));
 }
 
 // ---------------------------------------------------------------------------

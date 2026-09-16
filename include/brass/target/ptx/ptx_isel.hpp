@@ -106,7 +106,40 @@ private:
     void lower_load_indexed(const brass::Instruction& inst);
     void lower_store_indexed(const brass::Instruction& inst);
     Reg indexed_address(const brass::Instruction& inst, const Value* base, const Value* index);
-    VecWidth vec_width_for(const brass::Instruction& inst, brass::Type vt) const;
+    // A vector value is loaded/stored as one or more {..} tuples: v4 for
+    // 4-lane 32-bit, v2 for 2-lane 64-bit; 8-lane / 4-lane-64-bit types
+    // are two tuples 16 bytes apart.
+    void emit_vector_access(Opcode op, StateSpace space, brass::Type vt, Reg base, int32_t disp,
+                            const std::vector<Reg>& lanes);
+
+    // ---- vectors (ptx_isel_vec.cpp) ----------------------------------------
+    // Vector MIR ops lower to one scalar PTX instruction per lane over the
+    // contiguous register run of the vector value.
+    void lower_vector_binary(const brass::Instruction& inst, Opcode op);
+    void lower_vector_unary(const brass::Instruction& inst, Opcode op);
+    void lower_vector_fma(const brass::Instruction& inst);
+    void lower_vector_bitwise(const brass::Instruction& inst, Opcode op);
+    void lower_vector_not(const brass::Instruction& inst);
+    void lower_vbroadcast(const brass::Instruction& inst);
+    void lower_vextract_lane(const brass::Instruction& inst);
+    void lower_vinsert_lane(const brass::Instruction& inst);
+    void lower_vshuffle(const brass::Instruction& inst);
+    void lower_vzero(const brass::Instruction& inst);
+    Type vector_elem_type(const brass::Instruction& inst, brass::Type vt) const;
+
+    // ---- intrinsic helpers (ptx_isel_intrinsics.cpp) ----------------------
+    // Compile-time integer constant behind a value (iconst_i32/iconst_i64
+    // result), used for barrier ids, lane deltas, shared array sizes and
+    // immediate byte offsets.
+    bool const_int(const Value* v, int64_t* out) const;
+    // `[base + disp]` for a pointer value and an optional byte-offset value:
+    // constant offsets fold into the displacement, others are added into a
+    // fresh 64-bit register.
+    Operand address_operand(const Value* ptr, const Value* offset, const char* what);
+    // `[base + index * elem_size]` for an integer index value (i32 or i64).
+    Operand indexed_operand(const Value* ptr, const Value* index, uint32_t elem_size, const char* what);
+    // A B32 lane operand for shfl/bar: immediate when constant, else the register.
+    Operand lane_operand(const Value* v, const char* what);
 
     // ---- control flow (ptx_isel_control.cpp) ------------------------------
     void lower_branch(const brass::Instruction& inst);
@@ -116,7 +149,7 @@ private:
     std::vector<Copy> edge_copies(const brass::Instruction& inst, const BranchTarget& target) const;
     void emit_parallel_copies(std::vector<Copy> copies, const Reg* guard);
 
-    // ---- calls and intrinsics (ptx_isel_intrinsics.cpp) -------------------
+    // ---- calls and intrinsics (ptx_isel_intrinsics*.cpp) ------------------
     void lower_call(const brass::Instruction& inst);
     void lower_plain_call(const brass::Instruction& inst);
 };

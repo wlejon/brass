@@ -236,6 +236,180 @@ per-function `.shared` arrays with `ld.shared`/`st.shared`, `ex2.approx`,
 `rcp.approx`, `div.approx`, `rsqrt.approx`, `f16 -> f32` conversion, `v4`
 loads/stores of `f32`/`u32`, `fma.rn`, `mad.lo`.
 
+#### Stage 4 implementation notes
+
+Stage 5 works from this section plus `include/brass/codegen/kernel_jit.hpp`
+and `src/target/ptx/ptx_isel_intrinsics.cpp`. The inventory of the four
+hand-written kernel files (every mnemonic, modifier, special register and
+state space they use) is covered below; nothing in them needs a string.
+
+**Files added/changed**
+
+| File | Concern |
+| --- | --- |
+| `src/target/ptx/ptx_isel_vec.cpp` | vector MIR ops -> per-lane scalar PTX |
+| `src/target/ptx/ptx_isel_mem.cpp` | `vload/vstore` for every vector type (v4/v2 tuples, two tuples for 256-bit) |
+| `src/target/ptx/ptx_isel_intrinsics.hpp` | private: `struct PtxISel::Intrinsics` (all rule declarations) |
+| `src/target/ptx/ptx_isel_intrinsics.cpp` | the name table; special registers, math, conversions |
+| `src/target/ptx/ptx_isel_intrinsics_warp.cpp` | `bar.sync`, `shfl`, `atom`, `mul.wide/hi`, `mad.lo` |
+| `src/target/ptx/ptx_isel_intrinsics_mem.cpp` | shared memory, narrow loads/stores, operand helpers (`const_int`, `address_operand`, `indexed_operand`, `lane_operand`) |
+| `src/codegen/kernel_builder_ptx.cpp` | `KernelBuilder` GPU helpers |
+| `tests/unit/ptx_test_support.hpp` | ptxas/device helpers, `run_map` harness, host f16 conversion |
+| `tests/unit/test_ptx_intrinsics.cpp` | signature table (coverage-checked against `intrinsic_names()`), on-device tests per family |
+| `tests/unit/test_ptx_vector.cpp` | vector opcodes, reductions, shared memory, control-flow helpers |
+
+**Vector lowering (`ptx_isel_vec.cpp`).** Every vector value already owns a
+contiguous register run of `vector_lanes()` registers of the element class
+(f32x4 -> 4 x `%f`, f64x2 -> 2 x `%fd`, i32x4 -> 4 x `%r`, i64x2 -> 2 x `%rd`,
+and the 8/4-lane 256-bit types likewise). Vector ops emit one scalar
+instruction per lane with the suffix the scalar op would use:
+
+| MIR | per lane (float / integer element) |
+| --- | --- |
+| `vadd vsub vmin vmax` | `add/sub/min/max.f32|f64` / `.s32|s64` |
+| `vmul` | `mul.f32|f64` / `mul.lo.s32|s64` |
+| `vdiv` | `div.rn.f32|f64` / `div.s32|s64` |
+| `vfma` | `fma.rn.f32|f64` / `mad.lo.s32|s64` |
+| `vneg` | `neg.f32|f64` / `neg.s32|s64` |
+| `vsqrt` | `sqrt.rn.f32|f64` (float only) |
+| `vand vor vxor vnot` | `and/or/xor/not.b32|b64` |
+| `vbroadcast` | `mov.b32|b64` of the scalar into each lane |
+| `vextract_lane` | `mov` from lane `inst.lane()` |
+| `vinsert_lane` | `mov` of every lane, the chosen one from the scalar |
+| `vshuffle` | `mov`s using the x64 `shufps`/`shufpd` mask encoding (per 128-bit half: 4-lane result takes lanes 0..1 from `a`, 2..3 from `b`, 2-bit selectors; 2-lane result takes lane 0 from `a`, lane 1 from `b`, 1-bit selectors) |
+| `vzero` | `mov.f32 %f, 0f00000000` / `mov.b32 %r, 0` per lane |
+| `vload/vstore` | `ld/st.global.v4.<f32|u32>` or `.v2.<f64|u64>`; 256-bit types are two tuples at `+0` and `+16` |
+
+All eight vector types (`f32x4 f64x2 i32x4 i64x2 f32x8 f64x4 i32x8 i64x4`)
+are accepted everywhere (arithmetic, loads/stores, block arguments). A
+`vload(i32x4)` is the `ld.global.v4.u32 {..}` header load of the Q4_K kernel;
+lanes come out with `vextract_lane`. With this, `build_gemv_q8_0` /
+`build_gemv_q4_k` in `ml_fusion_quant_cpu.cpp` lower and verify (they still
+`call` the CPU dequantizers, so they do not assemble until Stage 5 replaces
+those calls).
+
+**Intrinsics (`PtxISel::Intrinsics::table()`).** MIR signature on the left
+(`build_call(name, result_type, {args})`), PTX on the right. Arguments named
+`const` must be `iconst_i32`/`iconst_i64` results (`PtxISel::const_int`);
+`lane`/`id` arguments may be constants (printed as immediates) or i32/i64
+registers (narrowed with `cvt.u32.u64` when 64-bit). Optional `[, off]` byte
+offsets fold into `[reg + disp]` when constant, otherwise an `add.s64` is
+emitted.
+
+| Name(s) | Signature | PTX |
+| --- | --- | --- |
+| `ptx_tid_{x,y,z}` `ptx_ctaid_{x,y,z}` `ptx_ntid_{x,y,z}` `ptx_nctaid_{x,y,z}` | `() -> i32` | `mov.u32 %r, %tid.x` ... |
+| `ptx_laneid`/`ptx_lane_id`, `ptx_warpid`/`ptx_warp_id`, `ptx_nwarpid`, `ptx_smid`, `ptx_nsmid`, `ptx_clock` | `() -> i32` | `mov.u32 %r, %laneid` ... (`%warpid` is the hardware warp slot, not `tid/32`) |
+| `ptx_clock64`, `ptx_globaltimer` | `() -> i64` | `mov.u64 %rd, %clock64` / `%globaltimer` |
+| `ptx_global_tid_x`/`ptx_global_id_x` | `() -> i32` | `mad.lo.s32 ctaid.x, ntid.x, tid.x` |
+| `rsqrtf rsqrt ptx_rsqrt` / `sqrtf sqrt ptx_sqrt` / `sinf sin ptx_sin` / `cosf cos ptx_cos` / `ex2f ex2 ptx_ex2` / `lg2f ptx_lg2` / `ptx_rcp ptx_rcp_approx` | `(f32) -> f32` | `rsqrt/sqrt/sin/cos/ex2/lg2/rcp.approx.f32` |
+| `expf exp ptx_exp` | `(f32) -> f32` | `mul.f32 x, log2e; ex2.approx.f32` |
+| `logf log ptx_log` | `(f32) -> f32` | `lg2.approx.f32; mul.f32 ln2` |
+| `ptx_sqrt_rn` | `(f32|f64) -> same` | `sqrt.rn.f32|f64` |
+| `fabsf fabs ptx_fabs` | `(f32|f64) -> same` | `abs.f32|f64` |
+| `fminf fmin ptx_fmin` / `fmaxf fmax ptx_fmax` | `(T, T) -> T`, T = f32|f64 | `min/max.f32|f64` |
+| `ptx_div_approx` | `(f32, f32) -> f32` | `div.approx.f32` (`div.full` is not modelled; MIR `sdiv` on f32 is `div.rn.f32`) |
+| `i32_to_f32 ptx_i32_to_f32` / `ptx_u32_to_f32` | `(i32) -> f32` | `cvt.rn.f32.s32` / `cvt.rn.f32.u32` |
+| `ptx_i64_to_f32` / `ptx_u64_to_f32` | `(i64) -> f32` | `cvt.rn.f32.s64` / `.u64` |
+| `ptx_f32_to_i32` / `ptx_f32_to_u32` | `(f32) -> i32` | `cvt.rzi.s32.f32` / `cvt.rzi.u32.f32` (saturating, truncating) |
+| `ptx_f16_to_f32` | `(i32 bits) -> f32` | `cvt.f32.f16 %f, %r` (low 16 bits of the B32) |
+| `ptx_f32_to_f16` | `(f32) -> i32 bits` | `cvt.rn.f16.f32 %r, %f` |
+| `ptx_f32_to_f64` / `ptx_f64_to_f32` | `(f32) -> f64` / `(f64) -> f32` | `cvt.f64.f32` / `cvt.rn.f32.f64` |
+| `bar.sync` `ptx_sync` | `() -> void` | `bar.sync 0` |
+| `ptx_bar_sync` | `(i32 id) -> void` | `bar.sync id` |
+| `ptx_bar_sync_count` | `(i32 id, i32 nthreads) -> void` | `bar.sync id, nthreads` |
+| `ptx_shfl_{down,up,bfly,xor,idx}_f32` | `(f32, i32 delta) -> f32` | `shfl.sync.<mode>.b32 d, v, delta, clamp, 0xffffffff` (clamp 0 for `up`, 0x1f otherwise, as nvcc emits) |
+| `ptx_shfl_{down,up,bfly,xor,idx}_i32` | `(i32, i32 delta) -> i32` | same |
+| `ptx_shfl_down_sync_f32` `shfl_down_sync_f32` | `(i32 mask, f32, i32 delta) -> f32` | `shfl.sync.down.b32 ... 0x1f, mask` |
+| `ptx_atom_add_f32` | `(ptr, f32) -> f32 old` | `atom.global.add.f32` |
+| `ptx_atom_add_i32` `ptx_atom_add_u32` / `ptx_atom_add_i64` | `(ptr, i32) -> i32` / `(ptr, i64) -> i64` | `atom.global.add.u32` / `.u64` |
+| `ptx_atom_min_i32` `ptx_atom_max_i32` / `ptx_atom_exch_i32` | `(ptr, i32) -> i32` | `atom.global.min/max.s32` / `atom.global.exch.b32` |
+| `ptx_atom_shared_add_f32` / `ptx_atom_shared_add_i32` | `(shared ptr, T) -> T` | `atom.shared.add.f32` / `.u32` |
+| `ptx_mul_wide_u32` / `ptx_mul_wide_s32` | `(i32, i32) -> i64` | `mul.wide.u32` / `.s32` |
+| `ptx_mul_hi_u32` | `(i32, i32) -> i32` | `mul.hi.u32` |
+| `ptx_mad_lo_u32` | `(i32, i32, i32) -> i32` | `mad.lo.u32` |
+| `ptx_shared_alloc_{f32,i32,f64,i64}` | `(const i32 count) -> ptr` | `.shared .align 16 .<f32|u32|f64|u64> smem_<n>[count]` + `mov.u64 %rd, smem_<n>` |
+| `ptx_shared_load_{f32,i32,f64,i64}` | `(ptr[, i32|i64 off]) -> T` | `ld.shared.<T> d, [ptr + off]` |
+| `ptx_shared_load_{f32,i32,f64,i64}_indexed` | `(ptr, i32|i64 index) -> T` | `ld.shared.<T> d, [ptr + index*sizeof(T)]` |
+| `ptx_shared_store_{f32,i32,f64,i64}` | `(ptr, T value[, off]) -> void` | `st.shared.<T> [ptr + off], value` |
+| `ptx_shared_store_{f32,i32,f64,i64}_indexed` | `(ptr, index, T value) -> void` | `st.shared.<T> [ptr + index*sizeof(T)], value` |
+| `ptx_load_{u8,s8,u16,s16}` | `(ptr[, off]) -> i32` | `ld.global.u8/s8/u16/s16 %r, [ptr + off]` (zero-/sign-extended into the B32) |
+| `ptx_store_{u8,u16}` | `(ptr, i32 value[, off]) -> void` | `st.global.u8/u16 [ptr + off], %r` (low bits) |
+
+Things that were considered and not added: `div.full.f32` (no `.full`
+modifier in the IR; `div.approx` or `div.rn` cover the kernels), an
+`i32x4`-specific load intrinsic (MIR `vload` of `i32x4` already prints
+`ld.global.v4.u32`), `mad.lo` pattern matching (`ptx_mad_lo_u32` exists;
+ptxas fuses `mul`+`add` anyway), integer vector types beyond what MIR has.
+
+**Shared memory model.** A `.shared` array is a per-kernel declaration
+created by `ptx_shared_alloc_<T>(count)`: `PtxISel` appends a `SharedDecl`
+(`.align 16`, name `smem_<index>`, unique within the function; the same
+names in different `.entry` bodies are fine because PTX scopes them per
+function -- verified with ptxas on a two-kernel module) and materializes the
+array's shared-window address with `mov.u64 %rd, smem_<n>` into the `ptr`
+result. That 64-bit value is only meaningful to the `ptx_shared_*`
+intrinsics, which emit `ld.shared`/`st.shared` with a B64 base register (the
+verifier accepts B32 or B64 bases for `.shared`; ptxas accepts B64 with
+`.address_size 64`). Plain MIR `load`/`store`/`vload`/`vstore` are always
+`.global`; there is no address-space provenance tracking, so passing a shared
+pointer to `load` is a silent bug -- always use the shared intrinsics.
+Integer arithmetic on the pointer (`add ptr, i64`) is fine as long as the
+result is again consumed only by shared intrinsics (the round-trip test does
+exactly that). Element counts must be compile-time constants (a
+non-constant count throws `PtxISel: ptx_shared_alloc_* requires a positive
+compile-time constant element count`). Static shared usage is the sum of the
+declared arrays; the launch passes `shared_bytes = 0`.
+
+**Narrow loads and f16.** MIR has no i8/i16 types, so 8/16-bit accesses are
+intrinsics that extend into an i32; `ptx_f16_to_f32` takes such an i32 (the
+Q8_0 header is `ptx_load_u16(blk)` -> `ptx_f16_to_f32`; the Q4_K header is a
+`vload(i32x4)` whose lane 0 is split with `and`/`lshr` before
+`ptx_f16_to_f32`, exactly as the hand-written kernel does).
+
+**KernelBuilder helpers (`kernel_jit.hpp`, `kernel_builder_ptx.cpp`).**
+Thin wrappers, each a few lines of MIR around the intrinsics above:
+
+- constants: `const_i32(v) const_i64(v) const_f32(v)`
+- indices (i32): `tid_x/y/z() ctaid_x/y/z() ntid_x/y/z() nctaid_x/y/z()
+  lane_id() warp_id()` (= `tid_x >> 5`) `global_tid_x()`
+- barriers: `sync()` (`bar.sync 0`), `bar_sync(id)`
+- shuffles: `shfl_down_f32(v, delta|Value*) shfl_up_f32(v, delta)
+  shfl_bfly_f32(v, mask) shfl_idx_f32(v, lane|Value*) shfl_down_i32
+  shfl_bfly_i32 shfl_idx_i32`
+- reductions: `warp_reduce_sum_f32(v)` / `warp_reduce_max_f32(v)` (the
+  16/8/4/2/1 `shfl.down` butterfly; result valid in lane 0),
+  `block_reduce_sum_f32(v, scratch)`: warp reduce -> lane 0 of each warp
+  stores `scratch[warp]` (an `if_then`) -> `bar.sync` -> every warp reads
+  `scratch[lane]` for `lane < (ntid+31)/32` (else 0), warp-reduces and
+  broadcasts lane 0 with `shfl.idx`, so *every thread* returns the block
+  total -> `bar.sync` so `scratch` can be reused at once. Requirements:
+  `scratch` is a `shared_alloc_f32` of at least 32 elements, block size a
+  multiple of 32 up to 1024, all threads reach the call. The builder is left
+  in a new block (the `if_then` join), so values computed afterwards must be
+  emitted after the call, which is the natural order anyway.
+- shared memory: `shared_alloc_f32(n) shared_alloc_i32(n)
+  shared_load_f32(smem, byte_off = 0) shared_load_f32_indexed(smem, index)
+  shared_store_f32(smem, val, byte_off = 0) shared_store_f32_indexed(smem,
+  index, val)` and the `_i32` forms
+- fast math: `rcp_approx div_approx ex2_approx lg2_approx exp_fast log_fast
+  rsqrt_approx sqrt_approx fabs fmin fmax`
+- conversions: `f16_to_f32 f32_to_f16 u32_to_f32 i32_to_f32 f32_to_u32
+  f32_to_i32`
+- narrow memory: `load_u8/s8/u16/s16(ptr, byte_off = 0) store_u8/u16(ptr,
+  val, byte_off = 0)`
+- atomics: `atom_add_f32(ptr, v) atom_add_i32(ptr, v)`
+- control flow: `if_then(cond, body)` (creates `if_then`/`if_join` blocks,
+  leaves the builder in the join) and `for_range(start, end, step,
+  body(i))` (`head(i)`: `i < end` signed -> body -> `br head(i + step)`;
+  leaves the builder in the exit block). Both accept bodies that end in
+  their own terminator.
+
+`ptx_*` names are GPU-only: `KernelJit` registers no CPU symbols for them,
+so a kernel using them is a PTX-only builder (which is what the Stage 5
+fused kernels are). The `fabsf/fminf/fmaxf/logf/...` aliases keep working on
+both sides: real libm calls on the CPU, inline PTX on the GPU.
+
 ## Stages
 
 1. Enablement: Windows CUDA loader, MinGW link fix, portable GPU tests, `ret`
@@ -248,7 +422,10 @@ loads/stores of `f32`/`u32`, `fma.rn`, `mad.lo`.
    covers the parallel-copy resolver, suffix selection and the intrinsic
    table.)
 4. Intrinsics and shared memory in MIR + ISel; `KernelBuilder` helpers.
-   Starts from the extension points listed in the Stage 3 notes.
+   (done; see "Stage 4 implementation notes" under "Kernel intrinsics":
+   vector lowering, the full intrinsic table with MIR signatures, the
+   shared-memory model and the helper list. `test_ptx_intrinsics.cpp` and
+   `test_ptx_vector.cpp` run every intrinsic and vector opcode on device.)
 5. Migrate hand-written kernels to MIR builders (batched), with on-device
    differential tests against CPU references.
 6. Remove string templates, decompose files, update docs.

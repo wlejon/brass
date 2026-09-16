@@ -149,6 +149,23 @@ TEST_CASE("GPU - every emitted kernel assembles with ptxas") {
     }
 }
 
+// The quantized GEMV MIR builders (vzero / f32x8 / vfma / vector block
+// arguments) lower and verify since Stage 4. They call the CPU dequantizers
+// (brass_dequant_*), which stay plain PTX `call`s to undeclared symbols, so
+// they are not handed to ptxas here; Stage 5 replaces them with device code.
+TEST_CASE("GPU - MIR gemv_q8_0 / gemv_q4_k lower through PtxISel") {
+    MlFusionCompiler c;
+    Module m8("mir_gemv_q8");
+    std::string q8 = PtxTarget::emit_function(*c.build_gemv_q8_0(m8));
+    Module m4("mir_gemv_q4k");
+    std::string q4 = PtxTarget::emit_function(*c.build_gemv_q4_k(m4));
+    for (const std::string* ptx : {&q8, &q4}) {
+        CHECK(ptx->find("ld.global.v4.f32") != std::string::npos);
+        CHECK(ptx->find("fma.rn.f32") != std::string::npos);
+        CHECK(ptx->find("mov.f32 ") != std::string::npos); // vzero lanes
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MIR -> PTX -> GPU (the actual JIT codegen path), single-thread scalar kernels
 // ---------------------------------------------------------------------------
