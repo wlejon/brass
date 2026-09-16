@@ -126,6 +126,106 @@ Lowers MIR -> `ptx::Function`. Rules:
   replaces string matching on callee names inside the instruction switch.
 - Non-void kernels are rejected with a diagnostic (`.entry` cannot return).
 
+#### Stage 3 implementation notes
+
+File layout (mirrors `x64_isel_*.cpp`; every file stays under 1,000 lines):
+
+| File | Concern |
+| --- | --- |
+| `include/brass/target/ptx/ptx_isel.hpp` | `class PtxISel { ptx::Function lower(const Function&); }`, the intrinsic-table query API, private state |
+| `src/target/ptx/ptx_isel.cpp` | driver, use analysis, register assignment, `ld.param` prologue, opcode dispatch switch, value/register helpers (`reg_of`, `materialize_pred`, `shift_amount`, `emit`) |
+| `src/target/ptx/ptx_isel_alu.cpp` | constants, arithmetic, bitwise, shifts, comparisons, `select`, conversions |
+| `src/target/ptx/ptx_isel_mem.cpp` | `load/store`, `vload/vstore`, `load_indexed/store_indexed` (address materialization) |
+| `src/target/ptx/ptx_isel_control.cpp` | `br/br_if/ret/unreachable`, edge copies, the parallel-copy resolver |
+| `src/target/ptx/ptx_isel_intrinsics.cpp` | `PtxISel::Intrinsics` (the lowering rules), the name table, plain `call` |
+| `src/target/ptx_target.cpp` | thin facade: ISel -> `ptx::verify` (throws with `format_diagnostics` output) -> `ptx::print` |
+
+Behaviour worth knowing:
+
+- **Register mapping lives in one place.** `allocate_registers` assigns every
+  MIR value (entry params, block params, instruction results) a register run
+  up front, in block order: one register for scalars, a contiguous run of
+  `vector_lanes()` registers of the element class for vector types (f32x4,
+  f32x8, f64x2, f64x4, i32x4, ...). Comparison results get a Pred register in
+  addition to their B32 result. Temporaries (narrowed shift counts, indexed
+  addresses, materialized predicates, intrinsic scratch, parallel-copy
+  scratch) are allocated lazily during lowering and therefore number after
+  the value registers. Numbering starts at 0; there is no reserved register.
+- **Comparisons** emit `setp.<cmp>.<type>` into the Pred and only emit the
+  `selp.u32 r, 1, 0, p` integer materialization when the result has a use
+  other than the condition operand of `br_if`/`select` (`analyze_uses`).
+  Float `ne` is `setp.neu` (unordered), matching the x64 lowering; other float
+  comparisons are ordered. Unsigned MIR comparisons use `.u32/.u64`, signed
+  ones and `eq/ne` use `.s32/.s64`.
+- **Predicate materialization** for a non-comparison `br_if`/`select`
+  condition is `setp.ne.u32/u64 p, r, 0` or `setp.neu.f32/f64 p, r, 0f0`,
+  emitted at the use (never cached across blocks).
+- **Kernel parameters** are declared from `Function::param_types()` as
+  `param_<i>` and loaded in a `$L_params` fall-through block placed before
+  the MIR entry block, so an entry block with incoming edges is not
+  re-entered through the loads. Load types come from the entry block
+  parameter types.
+- **Block arguments** become `Copy{dst, src, bit_type}` lists per edge (one
+  per lane for vector values; identity copies dropped).
+  `emit_parallel_copies` emits any copy whose destination no other pending
+  copy still reads; when only cycles remain it moves one source into a
+  scratch register of the same class and redirects its readers, which
+  unblocks the cycle. For `br_if` the taken edge's copies are guarded on the
+  predicate and precede the guarded `bra`; the fall-through edge's copies are
+  unguarded and follow it.
+- **Shift counts** that are 64-bit are narrowed with `cvt.u32.u64` into a
+  fresh B32 (`shift_amount`); `shl` uses `.b32/.b64`, `lshr` `.u32/.u64`,
+  `ashr` `.s32/.s64`.
+- **Indexed addressing** sign-extends a 32-bit index (`cvt.s64.s32`), scales
+  by `shl.b64` for 2/4/8 (or `mul.lo.s64` by an immediate otherwise), adds to
+  the base and addresses `[addr + offset]`.
+- **Errors:** unsupported MIR opcodes throw `runtime_error("PtxISel:
+  unsupported opcode in PTX lowering: <name>")`; malformed instructions
+  throw naming the opcode and the missing piece; non-void kernels throw the
+  Stage 1 "cannot return values" diagnostic; a verifier failure on the
+  lowered IR is reported by `PtxTarget` as a compiler bug with every
+  diagnostic attached.
+- Every emitted `Inst` carries `.origin(&mir_inst)` (set by `PtxISel::emit`).
+
+Golden comparison against the string emitter (all MIR kernels in
+`ml_fusion.cpp` plus the hand-built kernels in `test_gpu_execution.cpp`):
+after normalizing register numbers the only differences are (1) the
+`$L_params:` label, (2) the dropped always-declared `.reg .f64 %fd<1>`, and
+(3) elided dead `selp.u32` materializations for loop-exit comparisons. No
+kernel got longer.
+
+**Intrinsic table** (`src/target/ptx/ptx_isel_intrinsics.cpp`):
+`PtxISel::Intrinsics::table()` maps callee name -> `IntrinsicLowering`
+(`void(*)(PtxISel&, const Instruction&)`). To add one: write a static rule
+in `PtxISel::Intrinsics` (or instantiate the `special<SpecialReg>` /
+`approx_f32<Opcode>` templates) that reads its arguments with
+`isel.reg_of(inst.operand(i), "...")`, allocates scratch with
+`isel.fn_->new_*()`, writes `isel.result_reg(inst)` when the call has a
+result, and calls `isel.emit(...)`; then add one row per name/alias.
+`PtxISel::intrinsic_names()` and `is_intrinsic()` let tests iterate the
+table (`test_ptx_isel.cpp` assembles every entry with ptxas). Every alias the
+string emitter accepted is preserved.
+
+Extension points for Stage 4:
+
+- **Shared memory:** `ptx::Function::add_shared` already exists; the ISel
+  needs a rule that materializes `mov.u32 %r, <name>` for the array base and
+  a state-space choice in `ptx_isel_mem.cpp` (currently every `ld/st` is
+  `.global`). A per-value "address space" map next to `regs_` is the natural
+  place to carry that decision.
+- **`bar.sync <id>` / named barriers:** replace the `Operand::imm(0)` in
+  `Intrinsics::bar_sync` with the first call operand.
+- **`rcp.approx` / `div.approx` / `ex2.approx.ftz`:** `Opcode::rcp` exists;
+  `div.approx` is `Inst::make(Opcode::div, f32).approx()`; both are one-line
+  table rules.
+- **f16 -> f32:** `cvt.f32.f16` with the f16 value in a B32 register
+  (`reg_class_for(Type::f16)` is B32); load it with `ld.global.u16`.
+- **v4 u32 loads:** `vec_width_for` in `ptx_isel_mem.cpp` currently accepts
+  f32x4/f64x2 only; i32x4 values already get a 4-register B32 run, so adding
+  the type there is all that is needed.
+- **`mad.lo`:** either a builtin rule or pattern-matching `add(mul(a,b),c)`
+  in `lower_binary`; the IR verifier already enforces `.lo/.hi/.wide`.
+
 ### Kernel intrinsics
 
 Fused ML kernels are written as MIR via `KernelBuilder` helpers and lowered
@@ -139,11 +239,16 @@ loads/stores of `f32`/`u32`, `fma.rn`, `mad.lo`.
 ## Stages
 
 1. Enablement: Windows CUDA loader, MinGW link fix, portable GPU tests, `ret`
-   fix. On-device tests run on this machine.
-2. ptx IR + printer + verifier with unit tests. No integration.
+   fix. On-device tests run on this machine. (done)
+2. ptx IR + printer + verifier with unit tests. No integration. (done)
 3. `PtxISel` replaces `PtxEmitter`; `PtxTarget::emit_function` becomes
    ISel -> verify -> print. All kernels pass ptxas and on-device tests.
+   (done; see "Stage 3 implementation notes" above. `ptx_target.cpp` is now
+   a 50-line facade, the string emitter is gone, and `test_ptx_isel.cpp`
+   covers the parallel-copy resolver, suffix selection and the intrinsic
+   table.)
 4. Intrinsics and shared memory in MIR + ISel; `KernelBuilder` helpers.
+   Starts from the extension points listed in the Stage 3 notes.
 5. Migrate hand-written kernels to MIR builders (batched), with on-device
    differential tests against CPU references.
 6. Remove string templates, decompose files, update docs.
