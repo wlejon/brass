@@ -73,7 +73,9 @@ void PtxISel::Intrinsics::atom(PtxISel& isel, const brass::Instruction& inst) {
     Type t = (A == AtomOp::min || A == AtomOp::max) ? signed_type_for(vt)
            : (A == AtomOp::exch)                     ? bit_type_for(vt)
                                                      : type_for(vt);
-    if (A != AtomOp::add && is_float(t)) isel.malformed(inst, "only atom.add supports float values");
+    if constexpr (A != AtomOp::add) {
+        if (is_float(t)) isel.malformed(inst, "only atom.add supports float values");
+    }
     isel.emit(Inst::make(Opcode::atom, t).space(S).atom(A)
                   .dst(isel.result_reg(inst))
                   .src(Operand::addr(isel.reg_of(inst.operand(0), "pointer"), 0))
