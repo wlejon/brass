@@ -125,9 +125,22 @@ public:
     //   fused_adaln_modulate_gated_kernel(x, scale, shift, gate, y, u32 l, u32 d)
     //   fused_residual_rms_norm_kernel(x, res, gamma, y, u32 b, u32 d, f32 eps)
     //       x[row] += res[row] in place; y = x * gamma * rsqrt(mean(x^2) + eps); block size % 32 == 0
+    //   fused_layernorm_modulate_kernel(x, gamma, beta, scale, shift, y, u32 r, u32 d, f32 eps)
+    //       y = ((x - mean) * rstd * gamma + beta) * (1 + scale) + shift; two-pass; block size % 32 == 0
+    //   fused_residual_layernorm_kernel(x, res, gamma, beta, y, u32 b, u32 d, f32 eps)
+    //       x[row] += res[row] in place; y = (x - mean) * rstd * gamma + beta; block size % 32 == 0
+    //   fused_gemv_swiglu_kernel(w_gate, w_up, x, y, u32 n, u32 k)    one block per output row
+    //       y[row] = silu(w_gate[row] . x) * (w_up[row] . x); block size % 32 == 0
+    //   fused_gemv_residual_kernel(w_down, x, res, y, u32 n, u32 k)
+    //       y[row] = w_down[row] . x + res[row]; block size % 32 == 0
+    // (ml_fusion_ptx_kernels_norm.cpp / ml_fusion_ptx_kernels_gemv.cpp for the last four)
     Function* build_ptx_swiglu(Module& mod);
     Function* build_ptx_adaln_modulate(Module& mod, bool gated);
     Function* build_ptx_residual_rms_norm(Module& mod);
+    Function* build_ptx_layernorm_modulate(Module& mod);
+    Function* build_ptx_residual_layernorm(Module& mod);
+    Function* build_ptx_gemv_swiglu(Module& mod);
+    Function* build_ptx_gemv_residual(Module& mod);
 
     // --- CPU Compilation (Zero GC overhead) ---
     KernelFunction compile_residual_rms_norm();

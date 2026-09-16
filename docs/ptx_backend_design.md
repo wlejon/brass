@@ -423,7 +423,7 @@ names, parameter lists and launch contracts are unchanged, so
 | File | Concern |
 | --- | --- |
 | `src/codegen/ml_fusion_ptx_kernels.cpp` | `build_ptx_swiglu`, `build_ptx_adaln_modulate(gated)`, `build_ptx_residual_rms_norm` plus the shared row-per-block prologue (`row_block_prologue`: early `ret`, row offset, `d & ~3` with the `d % 4 != 0` -> scalar-path guard, float4/scalar loop bounds), `f32_offset`, `silu_fast` |
-| `src/codegen/ml_fusion_ptx.cpp` | the three thin emitters (build -> `emit_function`) and, for now, the LayerNorm-modulate string kernel |
+| `src/codegen/ml_fusion_ptx.cpp` | the three thin emitters (build -> `emit_function`); the LayerNorm-modulate string kernel stayed here until 5b |
 | `src/codegen/ml_fusion_ptx_legacy.{hpp,cpp}` | **LEGACY**: the four replaced string templates, byte-for-byte, as `legacy::legacy_ptx_{swiglu,adaln_modulate,residual_rms_norm}`. Internal header (tests include it by relative path), no library caller; deleted in Stage 6 |
 | `tests/unit/test_gpu_kernel_migration.cpp` | verify + ptxas of each MIR kernel, and on-device differential runs legacy-vs-MIR over several shapes (d multiple of 4 and not, n not a multiple of the block, several rows/blocks, block sizes 32..1024) plus the host reference at the old tolerances |
 
@@ -504,6 +504,109 @@ of volume:
   `ml_fusion_ptx_kernels_gemv.cpp`; move `row_block_prologue` / `silu_fast`
   into a small internal header when a second file needs them.
 
+### Stage 5b notes (LayerNorm-modulate, residual LayerNorm, GEMV SwiGLU, GEMV residual)
+
+Second migration batch. `emit_ptx_fused_layernorm_modulate`,
+`emit_ptx_fused_residual_layernorm`, `emit_ptx_fused_gemv_swiglu` and
+`emit_ptx_fused_gemv_residual` now build MIR and go through
+`PtxTarget::emit_function`; entry names, parameter lists and launch
+contracts (one block per row, block size a multiple of 32 up to 1024, float4
+fast path only when the row length is a multiple of 4, `x += res` in place
+for the residual LayerNorm, thread 0 of each block writing `y[row]` for the
+GEMVs) are unchanged, so `test_gpu_execution.cpp` and `test_ml_fusion.cpp`
+run untouched against the MIR kernels.
+
+**File layout**
+
+| File | Concern |
+| --- | --- |
+| `src/codegen/ml_fusion_ptx_kernels_common.hpp` | internal header: `f32_offset`, `at`, `silu_fast`, `RowBlock`/`row_block_prologue` (now also exposes `row`), `entry_params` -- moved out of `ml_fusion_ptx_kernels.cpp`'s anonymous namespace (namespace `brass::codegen::ptx_kernels`) |
+| `src/codegen/ml_fusion_ptx_kernels_norm.cpp` | `build_ptx_layernorm_modulate`, `build_ptx_residual_layernorm` + the shared passes `row_sum`, `row_sum_sq_dev`, `block_mean`, `block_rstd` |
+| `src/codegen/ml_fusion_ptx_kernels_gemv.cpp` | `build_ptx_gemv_swiglu`, `build_ptx_gemv_residual` + `gemv_partial_dots` (float4 loop and scalar tail for N weight rows at once), `silu_fast_clamped` |
+| `src/codegen/ml_fusion_ptx.cpp` | now only the eight thin emitters (build -> `emit_function`); `ml_fusion_vision_ptx.cpp` and `ml_fusion_gemv_ptx.cpp` were string-only and are deleted |
+| `src/codegen/ml_fusion_ptx_legacy_norm.cpp`, `ml_fusion_ptx_legacy_gemv.cpp` | **LEGACY**: the four replaced templates byte-for-byte (`legacy::legacy_ptx_{layernorm_modulate,residual_layernorm,gemv_swiglu,gemv_residual}`); `legacy_ptx_header` is now shared from `ml_fusion_ptx_legacy.cpp`. Deleted in Stage 6 |
+| `tests/unit/test_gpu_kernel_migration.cpp` | + verify/ptxas/emitter-equality for the four kernels and legacy-vs-MIR differentials: norms over D in {8, 37, 300, 1024}, rows 1..4, blocks 32..1024 (y and the in-place x); GEMVs over k in {8, 37, 64, 100, 1024, 1027, 2048}, n below and above the grid, blocks 32..1024 |
+
+**Helper added:** `KernelBuilder::for_range_reduce_n(start, end, step,
+inits, body(i, accs) -> accs')` -- `for_range_reduce` with any number of
+loop-carried values (one block argument each); `for_range_reduce` is now the
+one-value wrapper. The GEMV SwiGLU carries the gate and up dot products
+through one K loop with it, as the string kernel does.
+
+**Numerics.** Recipes are the string kernels': the LayerNorms are two-pass
+(mean from plain `add`s in lane order, then `sub` + `fma` of the squared
+deviations about that mean), both statistics are `div.approx` by
+`cvt.rn.f32.u32 d` and rstd is `rsqrt.approx(var + eps)`; the block sums use
+`block_reduce_sum_f32` twice on one 32-float scratch (the helper's trailing
+`bar.sync` makes the reuse safe; the string kernels used `smem[32]` plus two
+shared scalars `s_mean`/`s_rstd` that warp 0 wrote -- `block_reduce_sum_f32`
+instead reduces the partials in every warp and every thread computes the
+same `div.approx`/`rsqrt.approx`, so no broadcast scalar is needed). The GEMV
+K loop is the same per-lane `fma.rn` chain (gate lanes 0..3 then up lanes
+0..3 per float4, scalar tail by `ntid`); the SwiGLU keeps the clamped fast
+SiLU (`mul -log2e; max -88; min 88; ex2.approx; add 1; rcp.approx; mul; mul`),
+which differs from `silu_fast` (Stage 5a, unclamped) and is kept separate as
+`silu_fast_clamped`. The string GEMV SwiGLU used two shared arrays and one
+barrier for both reductions; the MIR kernel runs two `block_reduce_sum_f32`
+on one scratch (four `bar.sync` instead of one -- negligible next to the K
+loop, but a two-value block reduce would restore it).
+
+Differential results (RTX 4090, ptxas 12.9), max relative difference
+legacy vs MIR over 8 norm shapes (D in {8, 37, 300, 1024}, rows 1..4,
+blocks 32..1024) and 7 GEMV shapes (k in {8, 37, 64, 100, 1024, 1027,
+2048}, blocks 32..1024):
+
+| Kernel | Result |
+| --- | --- |
+| GEMV SwiGLU | bit-identical on all 7 shapes |
+| GEMV residual | bit-identical on all 7 shapes |
+| LayerNorm-modulate | bit-identical on 7 of 8; `6.3e-8` (1 ulp) on `R=3, D=37, block=128` |
+| residual LayerNorm | bit-identical on 5 of 8 (the in-place `x` always); `7.4e-8` on the two `D=37` shapes, `1.07e-7` on `B=4, D=300, block=256` |
+
+The 1-ulp cases are not an ISel difference but a ptxas one, verified in the
+SASS: the MIR kernel's `div.approx(var, d); add eps` is unpredicated, and
+ptxas (default `--fmad=true`) contracts the `rcp * total` of the
+`div.approx` expansion with the `add eps` into one `FFMA R10, R10, R11,
+c[eps]`; in the string kernel the same sequence is `@%p3`-predicated and
+stays `FMUL; @!P0 FADD`. So rstd differs by at most one rounding, and the
+same mechanism explains the single 1-ulp RMSNorm shape in 5a. The tests
+require `<= 1e-5` relative and print "bit-identical" or the observed value
+per shape.
+
+**ISel quality (observed, not fixed; adds to the 5a list).** PTX
+instruction counts before ptxas, legacy -> MIR: LayerNorm-modulate 219 ->
+332 (100 `mov`), residual LayerNorm 212 -> 319 (94 `mov`), GEMV SwiGLU
+146 -> 245 (87 `mov`), GEMV residual 100 -> 155 (52 `mov`). After ptxas
+(sm_89 SASS) the MIR norms are *smaller* than the string kernels (240 vs
+312 instructions, the `s_mean`/`s_rstd` round trips and the second
+`cvt.rn.f32.u32` are gone and `rcp(d)` is CSE'd), the GEMV residual is
+equal (112) and the GEMV SwiGLU is 168 vs 160 (the three extra `bar.sync`).
+The PTX-level noise is the 5a list (extract/insert `mov`s, materialized
+constants, block-argument copies, `bra` to the next block, re-read special
+registers) plus:
+
+1. `vbroadcast` of a loop-invariant scalar (`mean`, `rstd`, the `1.0`
+   constant) inside the pass-3 loop body is 4 `mov.f32` per broadcast per
+   iteration; hoisting it or letting the per-lane lowering read the scalar
+   register directly would remove 12 `mov`s per float4 in the
+   LayerNorm-modulate loop.
+2. `for_range_reduce_n` back-edges copy every accumulator through the
+   parallel-copy resolver (`mov.f32 %fA, %fB` per carried value per
+   iteration, plus the same copies on loop entry and at the exit of a loop
+   that feeds the next `for_range_reduce_n`).
+3. `shared_store_f32_indexed`/`shared_load_f32_indexed` with an i32 index
+   emit `cvt.s64.s32; shl.b64; add.s64` per access (`block_reduce_sum_f32`
+   has two); the `ptx_shared_*_indexed` rule could use a `mad.wide.s32` or
+   keep the index 32-bit with a B32 base.
+4. `warp_reduce_sum_f32` leaves the five `mov.b32 %r, 16/8/4/2/1` of the
+   folded shuffle deltas behind (5a item 2), i.e. ten dead `mov`s per block
+   reduction.
+5. The GEMV prologue is `row_block_prologue` with `d = k`, so it computes
+   `vec_d`, `vstart`, `vstep`, `sstart` exactly as the norms do; the string
+   GEMV loop instead ran `base` from 0 by `ntid*4` with an `idx >= k_vec`
+   skip inside (same elements, same order, more iterations) -- the MIR loop
+   bounds are the tighter of the two.
+
 ## Stages
 
 1. Enablement: Windows CUDA loader, MinGW link fix, portable GPU tests, `ret`
@@ -523,8 +626,8 @@ of volume:
 5. Migrate hand-written kernels to MIR builders (batched), with on-device
    differential tests against the legacy kernels and CPU references.
    (5a done: SwiGLU, AdaLN modulate x2, residual RMSNorm -- see "Stage 5a
-   notes". Remaining: LayerNorm-modulate, residual LayerNorm, GEMV
-   SwiGLU/residual, GEMV Q8_0/Q4_K.)
+   notes". 5b done: LayerNorm-modulate, residual LayerNorm, GEMV
+   SwiGLU/residual -- see "Stage 5b notes". Remaining: GEMV Q8_0/Q4_K.)
 6. Remove string templates, decompose files, update docs.
 
 ## File size rule

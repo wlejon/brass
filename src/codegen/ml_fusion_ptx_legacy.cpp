@@ -3,7 +3,8 @@
 // MlFusionCompiler::emit_ptx_{swiglu,adaln_modulate,fused_residual_rms_norm}
 // used to return; it exists only as the reference side of the differential
 // tests in tests/unit/test_gpu_kernel_migration.cpp and is deleted in Stage 6.
-// Do not extend, do not call from library code.
+// Do not extend, do not call from library code. (The Stage 5b templates are
+// in ml_fusion_ptx_legacy_norm.cpp and ml_fusion_ptx_legacy_gemv.cpp.)
 
 #include "ml_fusion_ptx_legacy.hpp"
 
@@ -11,9 +12,7 @@
 
 namespace brass::codegen::legacy {
 
-namespace {
-
-std::string ptx_header(const target::PtxOptions& opts) {
+std::string legacy_ptx_header(const target::PtxOptions& opts) {
     uint32_t major = opts.ptx_version_major;
     uint32_t minor = opts.ptx_version_minor;
     if (opts.sm_arch == "sm_89" && (major < 7 || (major == 7 && minor < 8))) {
@@ -28,15 +27,13 @@ std::string ptx_header(const target::PtxOptions& opts) {
     return ss.str();
 }
 
-} // namespace
-
 // =========================================================================
 // 1. Fused Residual RMSNorm (Parallel CUDA Block/Grid Kernel)
 // =========================================================================
 
 std::string legacy_ptx_residual_rms_norm(const target::PtxOptions& opts) {
     std::ostringstream ss;
-    ss << ptx_header(opts);
+    ss << legacy_ptx_header(opts);
     ss << R"PTX(
 .visible .entry fused_residual_rms_norm_kernel(
     .param .u64 param_x,
@@ -255,7 +252,7 @@ $L_p2_rem_exit:
 
 std::string legacy_ptx_swiglu(const target::PtxOptions& opts) {
     std::ostringstream ss;
-    ss << ptx_header(opts);
+    ss << legacy_ptx_header(opts);
     ss << R"PTX(
 .visible .entry fused_swiglu_kernel(
     .param .u64 param_gate,
@@ -380,7 +377,7 @@ $L_swi_rexit:
 
 std::string legacy_ptx_adaln_modulate(bool gated, const target::PtxOptions& opts) {
     std::ostringstream ss;
-    ss << ptx_header(opts);
+    ss << legacy_ptx_header(opts);
     if (!gated) {
         ss << R"PTX(
 .visible .entry fused_adaln_modulate_kernel(

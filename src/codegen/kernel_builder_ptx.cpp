@@ -6,6 +6,8 @@
 
 #include <brass/codegen/kernel_jit.hpp>
 
+#include <stdexcept>
+
 namespace brass::codegen {
 
 namespace {
@@ -227,25 +229,40 @@ void KernelBuilder::for_range(Value* start, Value* end, Value* step, const std::
 // because the head dominates it; no copy into the exit block is needed.
 Value* KernelBuilder::for_range_reduce(Value* start, Value* end, Value* step, Value* init,
                                        const std::function<Value*(Value*, Value*)>& body) {
+    std::vector<Value*> out = for_range_reduce_n(start, end, step, {init}, [&](Value* i, const std::vector<Value*>& accs) {
+        return std::vector<Value*>{body(i, accs[0])};
+    });
+    return out[0];
+}
+
+// head(i, a0, a1, ...): if i < end -> body else exit;  body: a' = body(i, a); br head(i + step, a'...)
+std::vector<Value*> KernelBuilder::for_range_reduce_n(Value* start, Value* end, Value* step, const std::vector<Value*>& inits,
+                                                      const std::function<std::vector<Value*>(Value*, const std::vector<Value*>&)>& body) {
     BasicBlock* from = b_.current_block();
     BasicBlock* head = b_.append_block("for_head");
     BasicBlock* body_bb = b_.append_block("for_body");
     BasicBlock* exit = b_.append_block("for_exit");
     Value* i = b_.add_block_param(head, start->type());
-    Value* acc = b_.add_block_param(head, init->type());
+    std::vector<Value*> accs;
+    for (Value* init : inits) accs.push_back(b_.add_block_param(head, init->type()));
 
+    std::vector<Value*> entry_args = {start};
+    entry_args.insert(entry_args.end(), inits.begin(), inits.end());
     b_.position_at_end(from);
-    b_.build_br(head, {start, init});
+    b_.build_br(head, entry_args);
 
     b_.position_at_end(head);
     b_.build_br_if(b_.build_slt(i, end), body_bb, exit);
 
     b_.position_at_end(body_bb);
-    Value* next = body(i, acc);
-    b_.build_br(head, {b_.build_add(i, step), next});
+    std::vector<Value*> next = body(i, accs);
+    if (next.size() != inits.size()) throw std::invalid_argument("KernelBuilder::for_range_reduce_n: body returned the wrong number of values");
+    std::vector<Value*> back_args = {b_.build_add(i, step)};
+    back_args.insert(back_args.end(), next.begin(), next.end());
+    b_.build_br(head, back_args);
 
     b_.position_at_end(exit);
-    return acc;
+    return accs;
 }
 
 } // namespace brass::codegen

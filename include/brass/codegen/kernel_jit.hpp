@@ -285,6 +285,10 @@ public:
     // value and must not end in its own terminator).
     Value* for_range_reduce(Value* start, Value* end, Value* step, Value* init,
                             const std::function<Value*(Value*, Value*)>& body);
+    // Same with several loop-carried values (one block argument each): `body`
+    // returns the new values in the order of `inits` (same count and types).
+    std::vector<Value*> for_range_reduce_n(Value* start, Value* end, Value* step, const std::vector<Value*>& inits,
+                                           const std::function<std::vector<Value*>(Value*, const std::vector<Value*>&)>& body);
 
 private:
     std::unique_ptr<Builder> owned_builder_;
