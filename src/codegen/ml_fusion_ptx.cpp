@@ -71,6 +71,9 @@ std::string MlFusionCompiler::emit_ptx_fused_residual_rms_norm(const target::Ptx
     mov.u32 %r3, %tid.x;
     mov.f32 %f1, 0f00000000;   // acc_sum_sq = 0.0f
     and.b32 %r4, %r1, 0xFFFFFFFC; // vec_d = d & ~3
+    and.b32 %r27, %r1, 3;
+    setp.ne.u32 %p8, %r27, 0;
+    @%p8 mov.u32 %r4, 0;          // rows not 16B-aligned: scalar path
 
     shl.b32 %r5, %r3, 2;
     mov.u32 %r6, %ntid.x;
@@ -234,7 +237,6 @@ $L_p2_rem_exit:
     ret;
 }
 
-.visible .entry fused_residual_rms_norm(.param .u64 p0) { ret; }
 )PTX";
     return ss.str();
 }
@@ -296,6 +298,9 @@ std::string MlFusionCompiler::emit_ptx_fused_layernorm_modulate(const target::Pt
     mov.u32 %r3, %tid.x;
     mov.u32 %r6, %ntid.x;
     and.b32 %r4, %r1, 0xFFFFFFFC; // vec_d = d & ~3
+    and.b32 %r29, %r1, 3;
+    setp.ne.u32 %p10, %r29, 0;
+    @%p10 mov.u32 %r4, 0;          // rows not 16B-aligned: scalar path
 
     // ================= Pass 1: Mean =================
     mov.f32 %f1, 0f00000000;
@@ -577,11 +582,11 @@ std::string MlFusionCompiler::emit_ptx_swiglu(const target::PtxOptions& opts) {
     std::ostringstream ss;
     ss << ptx_header(opts);
     ss << R"PTX(
-.visible .entry swiglu_kernel(
-    .param .u64 param_x,
-    .param .u64 param_y,
-    .param .u32 param_b,
-    .param .u32 param_d
+.visible .entry fused_swiglu_kernel(
+    .param .u64 param_gate,
+    .param .u64 param_up,
+    .param .u64 param_out,
+    .param .u32 param_n
 )
 {
     .reg .pred %p<6>;
@@ -589,52 +594,32 @@ std::string MlFusionCompiler::emit_ptx_swiglu(const target::PtxOptions& opts) {
     .reg .b64 %rd<30>;
     .reg .f32 %f<50>;
 
-    ld.param.u64 %rd0, [param_x];
-    ld.param.u64 %rd1, [param_y];
-    ld.param.u32 %r0, [param_b];
-    ld.param.u32 %r1, [param_d];
-
-    cvt.u64.u32 %rd2, %r0;
-    cvt.u64.u32 %rd3, %r1;
-    mul.lo.u64 %rd4, %rd2, %rd3;
-    shr.u64 %rd5, %rd4, 2;
-
-    shl.b32 %r2, %r1, 1;
-    cvt.u64.u32 %rd6, %r2;
+    ld.param.u64 %rd0, [param_gate];
+    ld.param.u64 %rd1, [param_up];
+    ld.param.u64 %rd2, [param_out];
+    ld.param.u32 %r0, [param_n];
 
     mov.u32 %r3, %tid.x;
     mov.u32 %r4, %ctaid.x;
     mov.u32 %r5, %ntid.x;
     mov.u32 %r6, %nctaid.x;
 
-    mad.lo.u32 %r7, %r4, %r5, %r3;
-    mul.lo.u32 %r8, %r6, %r5;
-
-    cvt.u64.u32 %rd7, %r7;
-    cvt.u64.u32 %rd8, %r8;
+    mad.lo.u32 %r7, %r4, %r5, %r3;   // vector index
+    mul.lo.u32 %r8, %r6, %r5;        // vector stride
+    shr.u32 %r9, %r0, 2;             // number of full 4-wide vectors
 
 $L_swi_vloop:
-    setp.ge.u64 %p0, %rd7, %rd5;
+    setp.ge.u32 %p0, %r7, %r9;
     @%p0 bra $L_swi_vexit;
 
-    shl.b64 %rd9, %rd7, 2;
-    div.u64 %rd10, %rd9, %rd3;
-    rem.u64 %rd11, %rd9, %rd3;
+    cvt.u64.u32 %rd3, %r7;
+    shl.b64 %rd4, %rd3, 4;           // vector byte offset = idx * 16
+    add.u64 %rd5, %rd0, %rd4;
+    add.u64 %rd6, %rd1, %rd4;
+    add.u64 %rd7, %rd2, %rd4;
 
-    mul.lo.u64 %rd12, %rd10, %rd6;
-    add.u64 %rd13, %rd12, %rd11;
-    shl.b64 %rd14, %rd13, 2;
-    add.u64 %rd15, %rd0, %rd14;
-
-    add.u64 %rd16, %rd13, %rd3;
-    shl.b64 %rd17, %rd16, 2;
-    add.u64 %rd18, %rd0, %rd17;
-
-    shl.b64 %rd19, %rd9, 2;
-    add.u64 %rd20, %rd1, %rd19;
-
-    ld.global.v4.f32 {%f0, %f1, %f2, %f3}, [%rd15];
-    ld.global.v4.f32 {%f4, %f5, %f6, %f7}, [%rd18];
+    ld.global.v4.f32 {%f0, %f1, %f2, %f3}, [%rd5];
+    ld.global.v4.f32 {%f4, %f5, %f6, %f7}, [%rd6];
 
     // elem 0: fast SiLU(f0) * f4 via ex2.approx.f32 and log2(e) 0f3FB8AA3B
     neg.f32 %f8, %f0;
@@ -672,16 +657,44 @@ $L_swi_vloop:
     mul.f32 %f34, %f3, %f33;
     mul.f32 %f35, %f34, %f7;
 
-    st.global.v4.f32 [%rd20], {%f14, %f21, %f28, %f35};
+    st.global.v4.f32 [%rd7], {%f14, %f21, %f28, %f35};
 
-    add.u64 %rd7, %rd7, %rd8;
+    add.u32 %r7, %r7, %r8;
     bra $L_swi_vloop;
 
 $L_swi_vexit:
+    // Scalar tail: elements [n_vec, n), distributed across the grid.
+    shl.b32 %r10, %r9, 2;
+    add.u32 %r10, %r10, %r3;
+$L_swi_rloop:
+    setp.ge.u32 %p1, %r10, %r0;
+    @%p1 bra $L_swi_rexit;
+
+    cvt.u64.u32 %rd8, %r10;
+    shl.b64 %rd9, %rd8, 2;
+    add.u64 %rd10, %rd0, %rd9;
+    add.u64 %rd11, %rd1, %rd9;
+    add.u64 %rd12, %rd2, %rd9;
+
+    ld.global.f32 %f0, [%rd10];
+    ld.global.f32 %f4, [%rd11];
+
+    neg.f32 %f8, %f0;
+    mul.f32 %f9, %f8, 0f3FB8AA3B;
+    ex2.approx.f32 %f10, %f9;
+    add.f32 %f11, %f10, 0f3F800000;
+    rcp.approx.f32 %f12, %f11;
+    mul.f32 %f13, %f0, %f12;
+    mul.f32 %f14, %f13, %f4;
+
+    st.global.f32 [%rd12], %f14;
+
+    add.u32 %r10, %r10, %r5;
+    bra $L_swi_rloop;
+
+$L_swi_rexit:
     ret;
 }
-
-.visible .entry fused_swiglu(.param .u64 p0) { ret; }
 )PTX";
     return ss.str();
 }
@@ -695,7 +708,7 @@ std::string MlFusionCompiler::emit_ptx_adaln_modulate(bool gated, const target::
     ss << ptx_header(opts);
     if (!gated) {
         ss << R"PTX(
-.visible .entry adaln_modulate_kernel(
+.visible .entry fused_adaln_modulate_kernel(
     .param .u64 param_x,
     .param .u64 param_scale,
     .param .u64 param_shift,
@@ -731,6 +744,9 @@ std::string MlFusionCompiler::emit_ptx_adaln_modulate(bool gated, const target::
     mov.u32 %r3, %tid.x;
     mov.u32 %r6, %ntid.x;
     and.b32 %r4, %r1, 0xFFFFFFFC; // vec_d = d & ~3
+    and.b32 %r9, %r1, 3;
+    setp.ne.u32 %p3, %r9, 0;
+    @%p3 mov.u32 %r4, 0;          // rows not 16B-aligned: scalar path
 
     shl.b32 %r5, %r3, 2;
     shl.b32 %r7, %r6, 2;
@@ -796,11 +812,10 @@ $L_mod_rexit:
     ret;
 }
 
-.visible .entry fused_adaln_modulate(.param .u64 p0) { ret; }
 )PTX";
     } else {
         ss << R"PTX(
-.visible .entry adaln_modulate_gated_kernel(
+.visible .entry fused_adaln_modulate_gated_kernel(
     .param .u64 param_x,
     .param .u64 param_scale,
     .param .u64 param_shift,
@@ -838,6 +853,9 @@ $L_mod_rexit:
     mov.u32 %r3, %tid.x;
     mov.u32 %r6, %ntid.x;
     and.b32 %r4, %r1, 0xFFFFFFFC;
+    and.b32 %r9, %r1, 3;
+    setp.ne.u32 %p3, %r9, 0;
+    @%p3 mov.u32 %r4, 0;          // rows not 16B-aligned: scalar path
 
     shl.b32 %r5, %r3, 2;
     shl.b32 %r7, %r6, 2;
@@ -856,7 +874,7 @@ $L_gmod_vloop:
 
     ld.global.v4.f32 {%f0, %f1, %f2, %f3}, [%rd13];
     ld.global.v4.f32 {%f4, %f5, %f6, %f7}, [%rd14];
-    ld.global.v4.f32 {%f8, %f9, %f10, %f11}, [%rd14];
+    ld.global.v4.f32 {%f8, %f9, %f10, %f11}, [%rd15];
     ld.global.v4.f32 {%f12, %f13, %f14, %f15}, [%rd16];
 
     add.f32 %f16, %f4, 0f3F800000;
@@ -912,7 +930,6 @@ $L_gmod_rexit:
     ret;
 }
 
-.visible .entry fused_adaln_modulate_gated(.param .u64 p0) { ret; }
 )PTX";
     }
     return ss.str();

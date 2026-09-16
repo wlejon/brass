@@ -77,6 +77,9 @@ std::string MlFusionCompiler::emit_ptx_fused_residual_layernorm(const target::Pt
     mov.u32 %r3, %tid.x;
     mov.u32 %r6, %ntid.x;
     and.b32 %r4, %r1, 0xFFFFFFFC; // vec_d = d & ~3
+    and.b32 %r29, %r1, 3;
+    setp.ne.u32 %p10, %r29, 0;
+    @%p10 mov.u32 %r4, 0;          // rows not 16B-aligned: scalar path
 
     // ================= Pass 1: Mean (with in-place X += res) =================
     mov.f32 %f1, 0f00000000;
@@ -343,7 +346,6 @@ $L_res_ln_p3_rexit:
     ret;
 }
 
-.visible .entry fused_residual_layernorm(.param .u64 p0) { ret; }
 )PTX";
     return ss.str();
 }

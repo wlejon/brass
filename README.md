@@ -22,6 +22,7 @@ Standalone C++20 library with CMake.
 9. **Byte-Level Determinism Ratchet**: 100% byte-for-byte deterministic emission of COFF (Win64), ELF64 (Linux/SysV), and Mach-O (macOS) relocatable object files across runs.
 10. **Multi-Format Output & Standalone Linking**: Full Win64 SEH (`.pdata`/`.xdata`), Linux SysV CFI (`.eh_frame`), and built-in PE DLL, ELF `.so`, and Mach-O `.dylib` standalone linkers that produce shared libraries without external linkers.
 11. **Differential Verification Oracle**: Built-in reference MIR interpreter, differential fuzzing harness, and automated Bronze IL translation suite.
+12. **NVIDIA PTX & GPU Execution**: `PtxTarget` lowers MIR to PTX, plus a set of fused ML kernels (RMSNorm, LayerNorm, SwiGLU, AdaLN, GEMV, Q8_0/Q4_K). A dynamically-loaded CUDA driver runtime JIT-compiles the PTX and launches it on device with no link-time CUDA dependency.
 
 ## Performance Bars
 
@@ -44,6 +45,10 @@ ctest --test-dir build --output-on-failure
 # Run performance benchmark suite
 ./build/tests/brass_benchmarks
 ```
+
+GPU tests validate every emitted kernel with `ptxas` and execute it on a real
+device when a CUDA driver is present. They are skipped automatically otherwise,
+and the library itself has no link-time CUDA dependency.
 
 ## Documentation
 

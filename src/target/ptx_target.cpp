@@ -7,6 +7,7 @@
 #include <sstream>
 #include <iomanip>
 #include <cstring>
+#include <stdexcept>
 #include <unordered_map>
 #include <vector>
 
@@ -30,6 +31,10 @@ std::string format_f64_hex(double d) {
     return ss.str();
 }
 
+bool is_64bit_int(Type t) {
+    return t == Type::i64() || t == Type::ptr() || t == Type::gcref();
+}
+
 class PtxEmitter {
 public:
     PtxEmitter(const Function& fn, const PtxOptions& opts)
@@ -38,46 +43,50 @@ public:
     std::string emit() {
         assign_registers();
 
+        // Emit the whole body first so that any registers allocated lazily
+        // (indexed memory addressing, builtin call temporaries) are accounted
+        // for before the .reg declarations are printed.
+        std::ostringstream body;
+
+        if (const auto* entry = fn_.entry_block()) {
+            for (size_t i = 0; i < entry->param_count(); ++i) {
+                const Value* param_val = entry->param(i);
+                if (!param_val) {
+                    throw std::runtime_error("PtxTarget: entry block has a null parameter at index " +
+                                             std::to_string(i));
+                }
+                std::string reg = get_reg(param_val);
+                body << "    ld.param." << ptx_type_suffix(param_val->type()) << " " << reg
+                     << ", [param_" << i << "];\n";
+            }
+        }
+        body << "\n";
+
+        for (size_t b_idx = 0; b_idx < fn_.blocks().size(); ++b_idx) {
+            const BasicBlock* bb = fn_.blocks()[b_idx];
+            body << block_label(bb) << ":\n";
+            for (const auto* inst_ptr : *bb) {
+                emit_instruction(*inst_ptr, body);
+            }
+        }
+
         std::ostringstream ss;
-        // Function declaration
         ss << ".visible .entry " << fn_.name() << "(\n";
-        for (size_t i = 0; i < fn_.param_types().size(); ++i) {
-            ss << "    .param " << param_type_name(fn_.param_types()[i])
-               << " param_" << i;
-            if (i + 1 < fn_.param_types().size()) ss << ",\n";
+        const auto& params = fn_.param_types();
+        for (size_t i = 0; i < params.size(); ++i) {
+            ss << "    .param " << param_type_name(params[i]) << " param_" << i;
+            if (i + 1 < params.size()) ss << ",\n";
             else ss << "\n";
         }
         ss << ")\n{\n";
 
-        // Register allocations
         if (num_pred_ > 0) ss << "    .reg .pred %p<" << num_pred_ << ">;\n";
         if (num_u32_ > 0)  ss << "    .reg .b32 %r<" << num_u32_ << ">;\n";
         if (num_u64_ > 0)  ss << "    .reg .b64 %rd<" << num_u64_ << ">;\n";
         if (num_f32_ > 0)  ss << "    .reg .f32 %f<" << num_f32_ << ">;\n";
         if (num_f64_ > 0)  ss << "    .reg .f64 %fd<" << num_f64_ << ">;\n";
         ss << "\n";
-
-        // Load parameters
-        if (const auto* entry = fn_.entry_block()) {
-            for (size_t i = 0; i < entry->param_count(); ++i) {
-                const Value* param_val = entry->param(i);
-                std::string reg = get_reg(param_val);
-                ss << "    ld.param." << ptx_type_suffix(param_val->type()) << " " << reg
-                   << ", [param_" << i << "];\n";
-            }
-        }
-        ss << "\n";
-
-        // Emit blocks
-        for (size_t b_idx = 0; b_idx < fn_.blocks().size(); ++b_idx) {
-            const BasicBlock* bb = fn_.blocks()[b_idx];
-            ss << block_label(bb) << ":\n";
-
-            for (const auto* inst_ptr : *bb) {
-                emit_instruction(*inst_ptr, ss);
-            }
-        }
-
+        ss << body.str();
         ss << "}\n";
         return ss.str();
     }
@@ -122,6 +131,21 @@ private:
             num_f32_ += 4;
             return "%f" + std::to_string(base);
         }
+        if (t == Type::f32x8()) {
+            uint32_t base = num_f32_;
+            num_f32_ += 8;
+            return "%f" + std::to_string(base);
+        }
+        if (t == Type::f64x2()) {
+            uint32_t base = num_f64_;
+            num_f64_ += 2;
+            return "%fd" + std::to_string(base);
+        }
+        if (t == Type::f64x4()) {
+            uint32_t base = num_f64_;
+            num_f64_ += 4;
+            return "%fd" + std::to_string(base);
+        }
         return "%rd" + std::to_string(num_u64_++);
     }
 
@@ -136,13 +160,13 @@ private:
         if (const auto* entry = fn_.entry_block()) {
             for (size_t i = 0; i < entry->param_count(); ++i) {
                 const Value* param = entry->param(i);
-                reg_map_[param] = alloc_reg(param->type());
+                if (param) reg_map_[param] = alloc_reg(param->type());
             }
         }
 
         for (const auto* bb : fn_.blocks()) {
             for (const auto* param : bb->params()) {
-                if (reg_map_.find(param) == reg_map_.end()) {
+                if (param && reg_map_.find(param) == reg_map_.end()) {
                     reg_map_[param] = alloc_reg(param->type());
                 }
             }
@@ -178,6 +202,60 @@ private:
 
     std::string get_pred(const Instruction* inst) {
         return inst ? get_pred(inst->result()) : "%p0";
+    }
+
+    // Return a predicate register that holds `cond != 0`, emitting a setp if
+    // the condition was not itself produced by a comparison.
+    std::string materialize_pred(const Value* cond, std::ostringstream& ss) {
+        if (!cond) return "%p0";
+        auto it = pred_map_.find(cond);
+        if (it != pred_map_.end()) return it->second;
+
+        std::string p = "%p" + std::to_string(num_pred_++);
+        Type t = cond->type();
+        if (t == Type::f32()) {
+            ss << "    setp.neu.f32 " << p << ", " << get_reg(cond) << ", 0f00000000;\n";
+        } else if (t == Type::f64()) {
+            ss << "    setp.neu.f64 " << p << ", " << get_reg(cond) << ", 0d0000000000000000;\n";
+        } else if (t == Type::i64() || t == Type::ptr() || t == Type::gcref()) {
+            ss << "    setp.ne.u64 " << p << ", " << get_reg(cond) << ", 0;\n";
+        } else {
+            ss << "    setp.ne.u32 " << p << ", " << get_reg(cond) << ", 0;\n";
+        }
+        return p;
+    }
+
+    // Bit width suffix for integer shifts/bitwise instructions.
+    std::string int_width_suffix(Type t) {
+        return is_64bit_int(t) ? "b64" : "b32";
+    }
+
+    // PTX shift instructions take a 32-bit shift amount for both b32 and b64
+    // data. Convert a 64-bit count into a fresh u32 register when necessary.
+    std::string shift_amount_reg(const Value* amt, std::ostringstream& ss) {
+        require(amt != nullptr, "shift missing amount");
+        if (is_64bit_int(amt->type())) {
+            std::string tmp = "%r" + std::to_string(num_u32_++);
+            ss << "    cvt.u32.u64 " << tmp << ", " << get_reg(amt) << ";\n";
+            return tmp;
+        }
+        return get_reg(amt);
+    }
+
+    std::string cmp_type_suffix(Opcode op, Type t) {
+        if (t == Type::f32()) return "f32";
+        if (t == Type::f64()) return "f64";
+        bool width64 = is_64bit_int(t);
+        bool is_unsigned = (op == Opcode::ult || op == Opcode::ule ||
+                            op == Opcode::ugt || op == Opcode::uge);
+        if (is_unsigned) return width64 ? "u64" : "u32";
+        return width64 ? "s64" : "s32";
+    }
+
+    void require(bool cond, const char* what) {
+        if (!cond) {
+            throw std::runtime_error(std::string("PtxTarget: malformed instruction (") + what + ")");
+        }
     }
 
     void emit_instruction(const Instruction& inst, std::ostringstream& ss) {
@@ -274,10 +352,12 @@ private:
                     ss << "    div.rn.f64 " << get_reg(&inst) << ", " << get_reg(inst.operand(0))
                        << ", " << get_reg(inst.operand(1)) << ";\n";
                 } else if (t == Type::i32()) {
-                    ss << "    div.s32 " << get_reg(&inst) << ", " << get_reg(inst.operand(0))
+                    const char* s = (inst.opcode() == Opcode::udiv) ? "u32" : "s32";
+                    ss << "    div." << s << " " << get_reg(&inst) << ", " << get_reg(inst.operand(0))
                        << ", " << get_reg(inst.operand(1)) << ";\n";
                 } else {
-                    ss << "    div.s64 " << get_reg(&inst) << ", " << get_reg(inst.operand(0))
+                    const char* s = (inst.opcode() == Opcode::udiv) ? "u64" : "s64";
+                    ss << "    div." << s << " " << get_reg(&inst) << ", " << get_reg(inst.operand(0))
                        << ", " << get_reg(inst.operand(1)) << ";\n";
                 }
                 break;
@@ -297,33 +377,38 @@ private:
             }
 
             case Opcode::and_: {
-                ss << "    and.b32 " << get_reg(&inst) << ", " << get_reg(inst.operand(0))
-                   << ", " << get_reg(inst.operand(1)) << ";\n";
+                ss << "    and." << int_width_suffix(inst.type()) << " " << get_reg(&inst) << ", "
+                   << get_reg(inst.operand(0)) << ", " << get_reg(inst.operand(1)) << ";\n";
                 break;
             }
             case Opcode::or_: {
-                ss << "    or.b32 " << get_reg(&inst) << ", " << get_reg(inst.operand(0))
-                   << ", " << get_reg(inst.operand(1)) << ";\n";
+                ss << "    or." << int_width_suffix(inst.type()) << " " << get_reg(&inst) << ", "
+                   << get_reg(inst.operand(0)) << ", " << get_reg(inst.operand(1)) << ";\n";
                 break;
             }
             case Opcode::xor_: {
-                ss << "    xor.b32 " << get_reg(&inst) << ", " << get_reg(inst.operand(0))
-                   << ", " << get_reg(inst.operand(1)) << ";\n";
+                ss << "    xor." << int_width_suffix(inst.type()) << " " << get_reg(&inst) << ", "
+                   << get_reg(inst.operand(0)) << ", " << get_reg(inst.operand(1)) << ";\n";
                 break;
             }
             case Opcode::shl: {
-                ss << "    shl.b32 " << get_reg(&inst) << ", " << get_reg(inst.operand(0))
-                   << ", " << get_reg(inst.operand(1)) << ";\n";
+                std::string amt = shift_amount_reg(inst.operand(1), ss);
+                ss << "    shl." << int_width_suffix(inst.type()) << " " << get_reg(&inst) << ", "
+                   << get_reg(inst.operand(0)) << ", " << amt << ";\n";
                 break;
             }
             case Opcode::lshr: {
-                ss << "    shr.u32 " << get_reg(&inst) << ", " << get_reg(inst.operand(0))
-                   << ", " << get_reg(inst.operand(1)) << ";\n";
+                bool w64 = is_64bit_int(inst.type());
+                std::string amt = shift_amount_reg(inst.operand(1), ss);
+                ss << "    shr.u" << (w64 ? "64" : "32") << " " << get_reg(&inst) << ", "
+                   << get_reg(inst.operand(0)) << ", " << amt << ";\n";
                 break;
             }
             case Opcode::ashr: {
-                ss << "    shr.s32 " << get_reg(&inst) << ", " << get_reg(inst.operand(0))
-                   << ", " << get_reg(inst.operand(1)) << ";\n";
+                bool w64 = is_64bit_int(inst.type());
+                std::string amt = shift_amount_reg(inst.operand(1), ss);
+                ss << "    shr.s" << (w64 ? "64" : "32") << " " << get_reg(&inst) << ", "
+                   << get_reg(inst.operand(0)) << ", " << amt << ";\n";
                 break;
             }
 
@@ -344,11 +429,8 @@ private:
                 else if (inst.opcode() == Opcode::sgt || inst.opcode() == Opcode::ugt) cmp = "gt";
                 else if (inst.opcode() == Opcode::sge || inst.opcode() == Opcode::uge) cmp = "ge";
 
-                Type opnd_t = inst.operand(0)->type();
-                std::string type_s = "s32";
-                if (opnd_t == Type::f32()) type_s = "f32";
-                else if (opnd_t == Type::f64()) type_s = "f64";
-                else if (opnd_t == Type::i64() || opnd_t == Type::ptr()) type_s = "s64";
+                Type opnd_t = inst.operand(0) ? inst.operand(0)->type() : Type::i32();
+                std::string type_s = cmp_type_suffix(inst.opcode(), opnd_t);
 
                 std::string p_reg = get_pred(&inst);
                 ss << "    setp." << cmp << "." << type_s << " " << p_reg << ", "
@@ -360,9 +442,12 @@ private:
             }
 
             case Opcode::select: {
-                std::string p_cond = get_pred(inst.operand(0));
+                std::string p_cond = materialize_pred(inst.operand(0), ss);
                 Type t = inst.type();
-                std::string sfx = (t == Type::f32()) ? "f32" : ((t == Type::f64()) ? "f64" : "b32");
+                std::string sfx = (t == Type::f32()) ? "f32"
+                                : (t == Type::f64()) ? "f64"
+                                : (is_64bit_int(t)) ? "b64"
+                                : "b32";
                 ss << "    selp." << sfx << " " << get_reg(&inst) << ", "
                    << get_reg(inst.operand(1)) << ", " << get_reg(inst.operand(2))
                    << ", " << p_cond << ";\n";
@@ -370,6 +455,7 @@ private:
             }
 
             case Opcode::load: {
+                require(inst.operand(0) != nullptr, "load missing pointer");
                 Type t = inst.type();
                 std::string sfx = ptx_type_suffix(t);
                 int32_t off = inst.offset();
@@ -384,6 +470,8 @@ private:
             }
 
             case Opcode::store: {
+                require(inst.operand(0) != nullptr && inst.operand(1) != nullptr,
+                        "store missing operand");
                 Type t = inst.operand(1)->type();
                 std::string sfx = ptx_type_suffix(t);
                 int32_t off = inst.offset();
@@ -398,41 +486,58 @@ private:
             }
 
             case Opcode::vload: {
-                if (inst.type() == Type::f32x4()) {
-                    std::string base_reg = get_reg(&inst);
+                require(inst.operand(0) != nullptr, "vload missing pointer");
+                Type vt = inst.type();
+                std::string base_reg = get_reg(&inst);
+                int32_t off = inst.offset();
+                if (vt == Type::f32x4()) {
                     int r_num = std::stoi(base_reg.substr(2));
-                    int32_t off = inst.offset();
-                    if (off != 0) {
-                        ss << "    ld.global.v4.f32 {"
-                           << "%f" << r_num << ", %f" << (r_num + 1) << ", %f" << (r_num + 2) << ", %f" << (r_num + 3)
-                           << "}, [" << get_reg(inst.operand(0)) << " + " << off << "];\n";
-                    } else {
-                        ss << "    ld.global.v4.f32 {"
-                           << "%f" << r_num << ", %f" << (r_num + 1) << ", %f" << (r_num + 2) << ", %f" << (r_num + 3)
-                           << "}, [" << get_reg(inst.operand(0)) << "];\n";
-                    }
+                    ss << "    ld.global.v4.f32 {"
+                       << "%f" << r_num << ", %f" << (r_num + 1) << ", %f" << (r_num + 2)
+                       << ", %f" << (r_num + 3) << "}, [" << get_reg(inst.operand(0));
+                    if (off != 0) ss << " + " << off;
+                    ss << "];\n";
+                } else if (vt == Type::f64x2()) {
+                    int r_num = std::stoi(base_reg.substr(3));
+                    ss << "    ld.global.v2.f64 {"
+                       << "%fd" << r_num << ", %fd" << (r_num + 1) << "}, ["
+                       << get_reg(inst.operand(0));
+                    if (off != 0) ss << " + " << off;
+                    ss << "];\n";
+                } else {
+                    throw std::runtime_error(
+                        "PtxTarget: unsupported vload vector type (only f32x4/f64x2 are supported)");
                 }
                 break;
             }
 
             case Opcode::vstore: {
-                if (inst.operand(1)->type() == Type::f32x4()) {
-                    std::string base_reg = get_reg(inst.operand(1));
+                require(inst.operand(0) != nullptr && inst.operand(1) != nullptr,
+                        "vstore missing operand");
+                Type vt = inst.operand(1)->type();
+                std::string base_reg = get_reg(inst.operand(1));
+                int32_t off = inst.offset();
+                if (vt == Type::f32x4()) {
                     int r_num = std::stoi(base_reg.substr(2));
-                    int32_t off = inst.offset();
-                    if (off != 0) {
-                        ss << "    st.global.v4.f32 [" << get_reg(inst.operand(0)) << " + " << off
-                           << "], {" << "%f" << r_num << ", %f" << (r_num + 1) << ", %f" << (r_num + 2) << ", %f" << (r_num + 3) << "};\n";
-                    } else {
-                        ss << "    st.global.v4.f32 [" << get_reg(inst.operand(0))
-                           << "], {" << "%f" << r_num << ", %f" << (r_num + 1) << ", %f" << (r_num + 2) << ", %f" << (r_num + 3) << "};\n";
-                    }
+                    ss << "    st.global.v4.f32 [" << get_reg(inst.operand(0));
+                    if (off != 0) ss << " + " << off;
+                    ss << "], {" << "%f" << r_num << ", %f" << (r_num + 1) << ", %f"
+                       << (r_num + 2) << ", %f" << (r_num + 3) << "};\n";
+                } else if (vt == Type::f64x2()) {
+                    int r_num = std::stoi(base_reg.substr(3));
+                    ss << "    st.global.v2.f64 [" << get_reg(inst.operand(0));
+                    if (off != 0) ss << " + " << off;
+                    ss << "], {" << "%fd" << r_num << ", %fd" << (r_num + 1) << "};\n";
+                } else {
+                    throw std::runtime_error(
+                        "PtxTarget: unsupported vstore vector type (only f32x4/f64x2 are supported)");
                 }
                 break;
             }
 
             case Opcode::load_indexed: {
-                // operand(0) = ptr, operand(1) = index
+                require(inst.operand(0) != nullptr && inst.operand(1) != nullptr,
+                        "load_indexed missing operand");
                 Type t = inst.type();
                 uint8_t scale = inst.scale();
                 int32_t off = inst.offset();
@@ -449,22 +554,28 @@ private:
                     std::string scaled_reg = "%rd" + std::to_string(num_u64_++);
                     uint32_t shift = (scale == 8) ? 3 : ((scale == 4) ? 2 : 1);
                     ss << "    shl.b64 " << scaled_reg << ", " << idx_reg << ", " << shift << ";\n";
-                    ss << "    add.s64 " << addr_reg << ", " << get_reg(inst.operand(0)) << ", " << scaled_reg << ";\n";
+                    ss << "    add.s64 " << addr_reg << ", " << get_reg(inst.operand(0))
+                       << ", " << scaled_reg << ";\n";
                 } else {
-                    ss << "    add.s64 " << addr_reg << ", " << get_reg(inst.operand(0)) << ", " << idx_reg << ";\n";
+                    ss << "    add.s64 " << addr_reg << ", " << get_reg(inst.operand(0))
+                       << ", " << idx_reg << ";\n";
                 }
 
                 std::string sfx = ptx_type_suffix(t);
                 if (off != 0) {
-                    ss << "    ld.global." << sfx << " " << get_reg(&inst) << ", [" << addr_reg << " + " << off << "];\n";
+                    ss << "    ld.global." << sfx << " " << get_reg(&inst) << ", [" << addr_reg
+                       << " + " << off << "];\n";
                 } else {
-                    ss << "    ld.global." << sfx << " " << get_reg(&inst) << ", [" << addr_reg << "];\n";
+                    ss << "    ld.global." << sfx << " " << get_reg(&inst) << ", [" << addr_reg
+                       << "];\n";
                 }
                 break;
             }
 
             case Opcode::store_indexed: {
-                // operand(0) = ptr, operand(1) = index, operand(2) = value
+                require(inst.operand(0) != nullptr && inst.operand(1) != nullptr &&
+                            inst.operand(2) != nullptr,
+                        "store_indexed missing operand");
                 Type t = inst.operand(2)->type();
                 uint8_t scale = inst.scale();
                 int32_t off = inst.offset();
@@ -481,9 +592,11 @@ private:
                     std::string scaled_reg = "%rd" + std::to_string(num_u64_++);
                     uint32_t shift = (scale == 8) ? 3 : ((scale == 4) ? 2 : 1);
                     ss << "    shl.b64 " << scaled_reg << ", " << idx_reg << ", " << shift << ";\n";
-                    ss << "    add.s64 " << addr_reg << ", " << get_reg(inst.operand(0)) << ", " << scaled_reg << ";\n";
+                    ss << "    add.s64 " << addr_reg << ", " << get_reg(inst.operand(0))
+                       << ", " << scaled_reg << ";\n";
                 } else {
-                    ss << "    add.s64 " << addr_reg << ", " << get_reg(inst.operand(0)) << ", " << idx_reg << ";\n";
+                    ss << "    add.s64 " << addr_reg << ", " << get_reg(inst.operand(0))
+                       << ", " << idx_reg << ";\n";
                 }
 
                 std::string sfx = ptx_type_suffix(t);
@@ -524,7 +637,8 @@ private:
                     ss << "    mov.u32 " << r_tid << ", %tid.x;\n";
                     ss << "    mov.u32 " << r_ctaid << ", %ctaid.x;\n";
                     ss << "    mov.u32 " << r_ntid << ", %ntid.x;\n";
-                    ss << "    mad.lo.s32 " << get_reg(&inst) << ", " << r_ctaid << ", " << r_ntid << ", " << r_tid << ";\n";
+                    ss << "    mad.lo.s32 " << get_reg(&inst) << ", " << r_ctaid << ", " << r_ntid
+                       << ", " << r_tid << ";\n";
                 } else if (callee == "rsqrtf" || callee == "rsqrt" || callee == "ptx_rsqrt") {
                     ss << "    rsqrt.approx.f32 " << get_reg(&inst) << ", " << get_reg(inst.operand(0)) << ";\n";
                 } else if (callee == "sqrtf" || callee == "sqrt" || callee == "ptx_sqrt") {
@@ -606,7 +720,7 @@ private:
 
             case Opcode::not_: {
                 Type t = inst.type();
-                std::string sfx = (t == Type::i64() || t == Type::ptr()) ? "b64" : "b32";
+                std::string sfx = is_64bit_int(t) ? "b64" : "b32";
                 ss << "    not." << sfx << " " << get_reg(&inst) << ", " << get_reg(inst.operand(0)) << ";\n";
                 break;
             }
@@ -642,43 +756,49 @@ private:
 
             case Opcode::br: {
                 const BasicBlock* target = inst.branch_target().block;
+                require(target != nullptr, "br missing target");
                 emit_phi_copies(target, inst.branch_target().args, ss);
                 ss << "    bra " << block_label(target) << ";\n";
                 break;
             }
             case Opcode::br_if: {
-                const Value* cond = inst.operand(0);
-                std::string p_cond = get_pred(cond);
-                if (pred_map_.find(cond) == pred_map_.end()) {
-                    // Condition is an integer value, test it: setp.ne.s32 %p_tmp, %r_cond, 0
-                    p_cond = "%p" + std::to_string(num_pred_++);
-                    ss << "    setp.ne.s32 " << p_cond << ", " << get_reg(cond) << ", 0;\n";
-                }
+                require(inst.operand(0) != nullptr, "br_if missing condition");
+                std::string p_cond = materialize_pred(inst.operand(0), ss);
 
                 const BasicBlock* true_target = inst.true_target().block;
                 const BasicBlock* false_target = inst.false_target().block;
+                require(true_target != nullptr && false_target != nullptr, "br_if missing target");
 
-                if (true_target && !inst.true_target().args.empty()) {
+                if (!inst.true_target().args.empty()) {
                     for (size_t i = 0; i < true_target->param_count() && i < inst.true_target().args.size(); ++i) {
                         const Value* param = true_target->param(i);
                         const Value* arg = inst.true_target().args[i];
-                        if (param != arg) {
+                        if (param && arg && param != arg) {
                             Type t = param->type();
-                            std::string sfx = (t == Type::f32()) ? "f32" : ((t == Type::f64()) ? "f64" : ((t == Type::i64() || t == Type::ptr()) ? "b64" : "b32"));
-                            ss << "    @" << p_cond << " mov." << sfx << " " << get_reg(param) << ", " << get_reg(arg) << ";\n";
+                            std::string sfx = (t == Type::f32()) ? "f32"
+                                            : (t == Type::f64()) ? "f64"
+                                            : (is_64bit_int(t)) ? "b64"
+                                            : "b32";
+                            ss << "    @" << p_cond << " mov." << sfx << " " << get_reg(param)
+                               << ", " << get_reg(arg) << ";\n";
                         }
                     }
                 }
                 ss << "    @" << p_cond << " bra " << block_label(true_target) << ";\n";
 
-                if (false_target && !inst.false_target().args.empty()) {
+                if (!inst.false_target().args.empty()) {
                     emit_phi_copies(false_target, inst.false_target().args, ss);
                 }
                 ss << "    bra " << block_label(false_target) << ";\n";
                 break;
             }
             case Opcode::ret: {
-                ss << "    ret;\n";
+                if (inst.operand_count() > 0 && inst.operand(0) != nullptr &&
+                    !fn_.return_type().is_void()) {
+                    ss << "    ret " << get_reg(inst.operand(0)) << ";\n";
+                } else {
+                    ss << "    ret;\n";
+                }
                 break;
             }
 
@@ -692,9 +812,12 @@ private:
         for (size_t i = 0; i < target->params().size() && i < args.size(); ++i) {
             const Value* param = target->param(i);
             const Value* arg = args[i];
-            if (param != arg) {
+            if (param && arg && param != arg) {
                 Type t = param->type();
-                std::string sfx = (t == Type::f32()) ? "f32" : ((t == Type::f64()) ? "f64" : ((t == Type::i64() || t == Type::ptr()) ? "b64" : "b32"));
+                std::string sfx = (t == Type::f32()) ? "f32"
+                                : (t == Type::f64()) ? "f64"
+                                : (is_64bit_int(t)) ? "b64"
+                                : "b32";
                 ss << "    mov." << sfx << " " << get_reg(param) << ", " << get_reg(arg) << ";\n";
             }
         }

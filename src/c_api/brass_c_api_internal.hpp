@@ -14,6 +14,7 @@
 #include <brass/object/elf_writer.hpp>
 #include <brass/object/macho_writer.hpp>
 #include <brass/target/aot_linker.hpp>
+#include <brass/gpu/cuda_driver.hpp>
 
 #include <string>
 #include <vector>
@@ -114,6 +115,14 @@ struct BrassKernelFunction_T {
 struct BrassKernelJit_T {
     BrassContext ctx = nullptr;
     std::unique_ptr<brass::codegen::KernelJit> jit;
+};
+
+struct BrassGpuModule_T {
+    brass::gpu::CudaModule module;
+};
+
+struct BrassGpuBuffer_T {
+    brass::gpu::CudaBuffer buffer;
 };
 
 inline void set_ctx_error(BrassContext ctx, const std::string& msg) {

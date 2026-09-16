@@ -143,6 +143,7 @@ add_executable(brass_unit_tests
     unit/test_kernel_jit.cpp
     unit/test_ptx_target.cpp
     unit/test_ml_fusion.cpp
+    unit/test_gpu_execution.cpp
 )
 
 target_include_directories(brass_unit_tests

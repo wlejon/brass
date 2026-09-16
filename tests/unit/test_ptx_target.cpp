@@ -50,6 +50,8 @@ TEST_CASE("PTX Target - Arithmetic and Exact Hex Floating Literals") {
     b.set_function(fn);
     BasicBlock* entry = b.append_block("entry");
     b.position_at_end(entry);
+    b.add_block_param(entry, Type::f32());
+    b.add_block_param(entry, Type::f32());
 
     Value* a = entry->param(0);
     Value* scale = entry->param(1);
@@ -75,6 +77,7 @@ TEST_CASE("PTX Target - Fast Math Approximations") {
     b.set_function(fn);
     BasicBlock* entry = b.append_block("entry");
     b.position_at_end(entry);
+    b.add_block_param(entry, Type::f32());
 
     Value* x = entry->param(0);
     Value* r1 = b.build_call("rsqrtf", Type::f32(), {x});
@@ -170,6 +173,8 @@ TEST_CASE("PTX Target - Regular Device Function Calls and Modulo/Bitwise Ops") {
     b.set_function(fn);
     BasicBlock* entry = b.append_block("entry");
     b.position_at_end(entry);
+    b.add_block_param(entry, Type::i32());
+    b.add_block_param(entry, Type::i32());
 
     Value* x = entry->param(0);
     Value* y = entry->param(1);

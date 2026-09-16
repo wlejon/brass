@@ -293,6 +293,38 @@ BRASS_API BrassStatus BRASS_CALL brass_kernel_emit_ptx(
 BRASS_API void BRASS_CALL brass_free_string(char* str);
 
 /* ========================================================================= */
+/* GPU Execution (CUDA driver loaded dynamically at runtime)                  */
+/* ========================================================================= */
+
+typedef struct BrassGpuModule_T* BrassGpuModule;
+typedef struct BrassGpuBuffer_T* BrassGpuBuffer;
+
+/* Returns 1 when a CUDA driver + device + context is usable, else 0. */
+BRASS_API int BRASS_CALL brass_gpu_available(void);
+BRASS_API int BRASS_CALL brass_gpu_device_count(void);
+BRASS_API BrassStatus BRASS_CALL brass_gpu_device_name(int index, char* out, size_t out_len);
+BRASS_API BrassStatus BRASS_CALL brass_gpu_last_error(char* out, size_t out_len);
+
+/* Device memory. Offsets are byte offsets into the allocation. */
+BRASS_API BrassGpuBuffer BRASS_CALL brass_gpu_buffer_alloc(size_t bytes);
+BRASS_API void BRASS_CALL brass_gpu_buffer_destroy(BrassGpuBuffer buf);
+BRASS_API BrassStatus BRASS_CALL brass_gpu_buffer_upload(BrassGpuBuffer buf, const void* host, size_t bytes, size_t offset);
+BRASS_API BrassStatus BRASS_CALL brass_gpu_buffer_download(BrassGpuBuffer buf, void* host, size_t bytes, size_t offset);
+BRASS_API void* BRASS_CALL brass_gpu_buffer_device_ptr(BrassGpuBuffer buf);
+
+/* PTX module JIT-compiled by the driver. */
+BRASS_API BrassStatus BRASS_CALL brass_gpu_module_load(const char* ptx, BrassGpuModule* out_module);
+BRASS_API void BRASS_CALL brass_gpu_module_destroy(BrassGpuModule mod);
+BRASS_API int BRASS_CALL brass_gpu_module_has_function(BrassGpuModule mod, const char* entry);
+BRASS_API BrassStatus BRASS_CALL brass_gpu_module_launch(
+    BrassGpuModule mod,
+    const char* entry,
+    uint32_t grid_x, uint32_t grid_y, uint32_t grid_z,
+    uint32_t block_x, uint32_t block_y, uint32_t block_z,
+    void** kernel_args, size_t shared_bytes);
+BRASS_API BrassStatus BRASS_CALL brass_gpu_synchronize(void);
+
+/* ========================================================================= */
 /* AOT Binary Compilation                                                    */
 /* ========================================================================= */
 BRASS_API BrassStatus BRASS_CALL brass_compile_to_object(BrassModule mod, int target_format, void** out_bytes, size_t* out_size);

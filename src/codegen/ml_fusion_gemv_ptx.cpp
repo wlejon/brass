@@ -74,12 +74,17 @@ std::string MlFusionCompiler::emit_ptx_fused_gemv_swiglu(const target::PtxOption
     shl.b32 %r6, %r5, 2;
     mov.u32 %r12, 0;
 
+    and.b32 %r28, %r1, 0xFFFFFFFC;
+    and.b32 %r29, %r1, 3;
+    setp.ne.u32 %p8, %r29, 0;
+    @%p8 mov.u32 %r28, 0;            // rows not 16B-aligned: scalar tail only
+
 $L_swiglu_loop:
     setp.ge.u32 %p1, %r12, %r1;
     @%p1 bra $L_swiglu_loop_end;
 
     add.u32 %r4, %r12, %r13;
-    setp.ge.u32 %p2, %r4, %r1;
+    setp.ge.u32 %p2, %r4, %r28;
     @%p2 bra $L_swiglu_skip;
 
     cvt.u64.u32 %rd10, %r4;
@@ -109,6 +114,25 @@ $L_swiglu_skip:
     bra $L_swiglu_loop;
 
 $L_swiglu_loop_end:
+    // Scalar tail for K not divisible by 4: elements [k_vec, k), strided by ntid.
+    mov.u32 %r30, %r28;
+    add.u32 %r31, %r30, %r3;
+$L_swiglu_tail:
+    setp.ge.u32 %p7, %r31, %r1;
+    @%p7 bra $L_swiglu_tail_end;
+    cvt.u64.u32 %rd40, %r31;
+    shl.b64 %rd41, %rd40, 2;
+    add.u64 %rd42, %rd8, %rd41;
+    ld.global.f32 %f60, [%rd42];
+    add.u64 %rd43, %rd9, %rd41;
+    ld.global.f32 %f61, [%rd43];
+    add.u64 %rd44, %rd2, %rd41;
+    ld.global.f32 %f62, [%rd44];
+    fma.rn.f32 %f10, %f60, %f62, %f10;
+    fma.rn.f32 %f11, %f61, %f62, %f11;
+    add.u32 %r31, %r31, %r5;
+    bra $L_swiglu_tail;
+$L_swiglu_tail_end:
     shfl.sync.down.b32 %f32, %f10, 16, 0x1f, 0xffffffff;
     add.f32 %f10, %f10, %f32;
     shfl.sync.down.b32 %f33, %f11, 16, 0x1f, 0xffffffff;
@@ -265,12 +289,17 @@ std::string MlFusionCompiler::emit_ptx_fused_gemv_residual(const target::PtxOpti
     shl.b32 %r6, %r5, 2;
     mov.u32 %r12, 0;
 
+    and.b32 %r28, %r1, 0xFFFFFFFC;
+    and.b32 %r29, %r1, 3;
+    setp.ne.u32 %p8, %r29, 0;
+    @%p8 mov.u32 %r28, 0;            // rows not 16B-aligned: scalar tail only
+
 $L_res_loop:
     setp.ge.u32 %p1, %r12, %r1;
     @%p1 bra $L_res_loop_end;
 
     add.u32 %r4, %r12, %r13;
-    setp.ge.u32 %p2, %r4, %r1;
+    setp.ge.u32 %p2, %r4, %r28;
     @%p2 bra $L_res_skip;
 
     cvt.u64.u32 %rd10, %r4;
@@ -292,6 +321,22 @@ $L_res_skip:
     bra $L_res_loop;
 
 $L_res_loop_end:
+    // Scalar tail for K not divisible by 4: elements [k_vec, k), strided by ntid.
+    mov.u32 %r30, %r28;
+    add.u32 %r31, %r30, %r3;
+$L_res_tail:
+    setp.ge.u32 %p7, %r31, %r1;
+    @%p7 bra $L_res_tail_end;
+    cvt.u64.u32 %rd40, %r31;
+    shl.b64 %rd41, %rd40, 2;
+    add.u64 %rd42, %rd8, %rd41;
+    ld.global.f32 %f60, [%rd42];
+    add.u64 %rd43, %rd1, %rd41;
+    ld.global.f32 %f61, [%rd43];
+    fma.rn.f32 %f10, %f60, %f61, %f10;
+    add.u32 %r31, %r31, %r5;
+    bra $L_res_tail;
+$L_res_tail_end:
     shfl.sync.down.b32 %f32, %f10, 16, 0x1f, 0xffffffff;
     add.f32 %f10, %f10, %f32;
 
