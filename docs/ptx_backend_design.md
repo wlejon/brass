@@ -59,6 +59,38 @@ so there is no register allocator and no `CodeBuffer`.
 - Kernel params carry a `ptx::Type` and a name; the entry-point signature is
   derived from them.
 
+#### Stage 2 implementation notes (deviations from the sketch above)
+
+- Register/type compatibility is stricter than ptxas except for bit types:
+  `.f32`/`.f64` operands must be F32/F64 registers and `.u*/.s*` operands
+  must be B32/B64, but `.b32` accepts B32 *or* F32 and `.b64` accepts B64
+  *or* F64. The relaxation is required by `shfl.sync.down.b32` on f32
+  accumulators and by `mov.b64` bitcasts between %rd and %fd, both of which
+  the existing kernels use.
+- Sub-32-bit types (`.b8 .b16 .u8 .u16 .s8 .s16`) and `.f16` map to B32
+  registers (`reg_class_for`), matching `ld.global.u16 %r` and
+  `cvt.f32.f16 %f, %r` in the hand-written kernels.
+- One extra operand kind, `Symbol`: the address-of-shared-array source in
+  `mov.u32 %r, smem` and the callee of `call`. `Param` operands print as
+  `[name]` and are only legal as `ld.param` sources.
+- Extra opcodes beyond the list: `atom` (with an `AtomOp` modifier, printed
+  as `atom.global.add.f32`), `trap`, `exit`.
+- The suffix table is three functions, all in `ptx_ir`: `type_for` (data
+  suffix: u32/u64/f32/f64, used for ld/st/param/cvt), `signed_type_for`
+  (s32/s64 for signed arithmetic and comparisons) and `bit_type_for`
+  (b32/b64 for mov/selp/bitwise/shifts). `wide_type_for` gives the
+  `mul.wide`/`mad.wide` result type.
+- Integer immediates print in decimal (`4294967295` for a full lane mask);
+  ptxas accepts this. Float immediates print as `0f`/`0d` hex and carry
+  their own width (`imm_f32`/`imm_f64`), which the verifier checks against
+  the instruction type.
+- The verifier additionally enforces the modifier requirements ptxas has for
+  PTX 7.x: integer `mul`/`mad` need `.lo/.hi/.wide`, `fma` needs a rounding
+  mode, float `div` needs `.approx` or a rounding mode, `shfl`/`bar` need
+  `.sync`, `rsqrt/sin/cos/ex2/lg2` need `.approx`, int<->float `cvt` needs a
+  rounding mode, `and/or/xor/shl` need bit types. Diagnostics carry the
+  function, block label, instruction index and printed instruction text.
+
 ### PtxPrinter (`ptx_printer.hpp`)
 
 A single dumb walk. It makes no decisions beyond formatting. It prints the
