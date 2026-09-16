@@ -6,14 +6,14 @@
 // lane extract/insert moves, constants materialized in registers that only
 // immediates read, `bra` to the very next block. ptxas would remove all of
 // it; these passes remove it in the compiler so the printed PTX reads like
-// the hand-written kernels.
+// hand-written assembly.
 //
 // The IR is "SSA-ish": most registers have exactly one def, block parameters
 // and parallel-copy scratch registers have several. Every pass computes
 // def/use counts first and only rewrites registers whose def count it can
 // reason about. None of the passes changes program semantics, and every pass
 // is a no-op on input that is already clean (cleanup() applied twice prints
-// the same text). See docs/ptx_backend_design.md ("Stage 6a notes").
+// the same text). See docs/ptx_backend_design.md ("Cleanup passes").
 
 #include <brass/target/ptx/ptx_ir.hpp>
 

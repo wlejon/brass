@@ -90,7 +90,7 @@ Type wide_type_for(Type t) noexcept;
 
 // Register class that holds a value of the given suffix. Sub-32-bit types and
 // f16 live in B32 registers (PTX permits wider registers for ld/st/cvt of
-// narrow types, and the hand-written kernels rely on it).
+// narrow types; the Q8_0/Q4_K kernels' f16 headers rely on it).
 RegClass reg_class_for(Type t) noexcept;
 RegClass reg_class_for(brass::Type t) noexcept;
 
@@ -158,7 +158,7 @@ bool is_invariant(SpecialReg s) noexcept;
 // register. Single source of truth: PtxISel folds MIR constants into exactly
 // these positions and the verifier rejects an immediate anywhere else. The
 // table is narrower than what ptxas accepts (see docs/ptx_backend_design.md,
-// "Stage 6a notes"): setp takes one only as its second source, cvt/ld and
+// "Immediate operands"): setp takes one only as its second source, cvt/ld and
 // the shfl value never do.
 bool allows_immediate(Opcode op, size_t src_index) noexcept;
 

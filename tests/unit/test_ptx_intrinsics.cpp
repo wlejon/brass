@@ -1,4 +1,4 @@
-// Stage 4 PTX intrinsics: every entry of the PtxISel intrinsic table has a
+// PTX intrinsics: every entry of the PtxISel intrinsic table has a
 // signature row below (the coverage test fails for unknown names), lowers,
 // verifies and assembles with ptxas; the on-device cases run each family
 // against a host reference (visible [SKIP] without ptxas / CUDA).

@@ -10,8 +10,8 @@
 //   ptx_isel_intrinsics.cpp       special registers, math, conversions
 //   ptx_isel_intrinsics_warp.cpp  bar.sync, shfl, atomics, mul.wide/mad
 //   ptx_isel_intrinsics_mem.cpp   shared memory, narrow global loads/stores
-// The MIR-level signatures are documented in docs/ptx_backend_design.md
-// ("Stage 4 implementation notes").
+// The MIR-level signatures are documented in docs/ptx_kernel_authoring.md
+// ("Intrinsic table").
 
 #include <brass/target/ptx/ptx_isel.hpp>
 #include <brass/mir/instruction.hpp>

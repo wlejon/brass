@@ -41,7 +41,7 @@ TEST_CASE("PTX Target - Version, SM Architecture, and Function Signature") {
 }
 
 // The results of these kernels are stored through a pointer parameter: the
-// Stage 6a cleanup deletes side-effect-free instructions whose result is
+// ptx::cleanup pass deletes side-effect-free instructions whose result is
 // never read, so an unused fma/rsqrt/%tid.x would (correctly) not be printed.
 
 TEST_CASE("PTX Target - Arithmetic and Exact Hex Floating Literals") {

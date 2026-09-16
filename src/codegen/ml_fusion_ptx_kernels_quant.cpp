@@ -1,10 +1,9 @@
-// Stage 5c: the two single-token (M = 1) quantized GEMV GPU kernels as MIR
-// (docs/ptx_backend_design.md, "Stage 5c notes"). One block per output row;
-// the block dequantizes its weight row on the fly, dots it with x, reduces,
-// and thread 0 writes y[row]. They reproduce the hand-written PTX they
-// replaced (ml_fusion_ptx_legacy_quant.cpp, kept for the differential tests
-// until Stage 6) and the block formats of the CPU dequantizers in
-// ml_fusion_quant_cpu.cpp (brass_dequant_q8_0_block / brass_dequant_q4k_block):
+// The two single-token (M = 1) quantized GEMV GPU kernels as MIR
+// (docs/ptx_kernel_authoring.md). One block per output row; the block
+// dequantizes its weight row on the fly, dots it with x, reduces, and thread
+// 0 writes y[row]. The block formats are those of the CPU dequantizers in
+// ml_fusion_quant_cpu.cpp (brass_dequant_q8_0_block / brass_dequant_q4k_block),
+// which are the ground truth for the layouts:
 //
 //   fused_gemv_q8_0_kernel(w, x, y, u32 n, u32 k)     k % 32 == 0
 //       Q8_0 block (34 bytes): f16 d, int8 qs[32]; w = d * qs[i]
@@ -16,14 +15,15 @@
 //       of qs[32p..32p+31], sub-block 2p + 1 the high nibble.
 //       64 threads per super-block (is = sub-block, lg = quad); block size % 64 == 0
 //
-// Thread mapping and arithmetic are the string kernels': blocks_per_row =
-// k >> 5 (k >> 8), each thread walks the row's blocks from sb_local = tid /
-// threads_per_block by ntid / threads_per_block, loads the header, its 4
-// weights and the matching float4 of x, and folds the four products with
-// fma in lane order into one f32 accumulator; then block_reduce_sum_f32.
-// The string kernels stepped by a hard-coded 32 (Q8_0) / 4 (Q4_K) -- i.e.
-// they assumed a 256-thread block; the MIR kernels derive the stride from
-// ntid, which is identical at 256 and correct for the other block sizes.
+// Thread mapping: blocks_per_row = k >> 5 (k >> 8); each thread walks the
+// row's blocks from sb_local = tid / threads_per_block by stride = ntid /
+// threads_per_block (so any block size that is a multiple of the threads
+// per block is correct), loads the header, its 4 weights and the matching
+// float4 of x, and folds the four products with fma in lane order into one
+// f32 accumulator; then block_reduce_sum_f32. The block loop is unrolled
+// kQ8Unroll / kQ4KUnroll times by the builder (the stride is a runtime
+// value, so ptxas would otherwise keep it rolled with one block's loads in
+// flight per thread); a remainder loop handles the last blocks.
 
 #include "ml_fusion_ptx_kernels_common.hpp"
 
@@ -128,7 +128,7 @@ Function* MlFusionCompiler::build_ptx_gemv_q8_0(Module& mod) {
             w4[j] = kb.mul(kb.i32_to_f32(qi), d);
         }
         return fma_lanes(kb, w4, xv, acc);
-    });
+    }, kQ8Unroll);
     store_row_sum(kb, q, y, acc, scratch);
     return fn;
 }
@@ -194,7 +194,7 @@ Function* MlFusionCompiler::build_ptx_gemv_q4_k(Module& mod) {
             w4[j] = b.build_fma_f32(wscale, kb.u32_to_f32(nib), neg_wmin);   // wscale * nib - wmin
         }
         return fma_lanes(kb, w4, xv, acc);
-    });
+    }, kQ4KUnroll);
     store_row_sum(kb, q, y, acc, scratch);
     return fn;
 }

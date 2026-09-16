@@ -1,5 +1,5 @@
-// Stage 6a: the ptx::cleanup passes (ptx_cleanup.hpp) and the immediate /
-// special-register changes in PtxISel.
+// The ptx::cleanup passes (ptx_cleanup.hpp) and the immediate /
+// special-register handling in PtxISel.
 //
 //   (a) each pass on a small hand-built ptx::Function, checked on the printed
 //       text: copy propagation (both-single-def and coalescing), dead

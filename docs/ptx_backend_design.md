@@ -1,173 +1,207 @@
 # PTX Backend Design
 
-Status: in progress. This document is the contract for the PTX backend
-restructuring. Each stage below is implemented as a separate commit.
+Status: complete. This document is the reference for the PTX backend: the
+typed PTX IR, the printer and verifier, the instruction selector, the
+cleanup passes, and how they are tested. Writing kernels against the
+backend -- the intrinsic table, the `KernelBuilder` GPU helpers, the shared
+memory model and the fused ML kernels -- is covered in
+[ptx_kernel_authoring.md](ptx_kernel_authoring.md). The "History" section
+at the end records what each stage of the restructuring changed and measured.
 
-## Problem
+## Background
 
-The PTX target historically had two parallel implementations:
-
-1. `PtxTarget` (`src/target/ptx_target.cpp`): a single-pass walk over MIR that
-   wrote PTX text directly into an `ostringstream`. Type suffixes, predicate
-   materialization, block-argument copies, and temporary registers were all
-   decided inline while producing strings. There was no data model in which
-   "`ret` with an operand inside `.entry`" or "`shl.b64` with a 64-bit shift
-   count" is a type error.
-2. Hand-written `R"PTX(...)"` templates in `src/codegen/ml_fusion_*_ptx.cpp`
-   (~2,100 lines of hand register-allocated assembly) for the fused ML kernels,
-   duplicating MIR builders for several of the same kernels in
-   `src/codegen/ml_fusion.cpp`.
+The PTX target originally had two parallel implementations: a single-pass
+walk over MIR that wrote PTX text straight into an `ostringstream` (type
+suffixes, predicate materialization, block-argument copies and temporaries
+all decided inline while producing strings, with no data model in which
+"`ret` with an operand inside `.entry`" is a type error), and ~2,100 lines
+of hand register-allocated `R"PTX(...)"` templates for the fused ML kernels,
+duplicating MIR builders for several of the same kernels.
 
 The x64 backend is shaped as MIR -> `X64ISel` -> LIR (typed instruction data
-structure) -> passes -> `X64Encoder` -> bytes. PTX skipped the middle layers.
+structure) -> passes -> `X64Encoder` -> bytes. The PTX backend now has the
+same shape, with a text printer in place of the byte encoder; PTX has
+virtual registers, no frames and no encoding, so there is no register
+allocator and no `CodeBuffer`. Every fused kernel is MIR built with
+`KernelBuilder`; no PTX string exists in the library.
 
-## Target shape
+## Pipeline
 
 ```
-MIR --PtxISel--> ptx::Function (typed PTX IR) --passes--> PtxPrinter --> text
-                                     |
-                                     +--> PtxVerifier (structural checks, no ptxas)
+MIR --PtxISel--> ptx::Function --ptx::cleanup--> PtxVerifier --> PtxPrinter --> text
+                 (typed PTX IR)   (copy prop, DCE,   (structural,
+                                   branches, renumber)  no ptxas)
 ```
 
-The byte encoder of the x64 pipeline is replaced by a text printer; everything
-else is the same shape. PTX has virtual registers, no frames and no encoding,
-so there is no register allocator and no `CodeBuffer`.
+`PtxTarget::emit_function(fn, opts)` (`src/target/ptx_target.cpp`, a
+50-line facade) runs the four steps; `emit_module` does it per function and
+concatenates the bodies under one header. `PtxOptions` carries the
+`.target` (`sm_arch`, default `sm_70`), the `.version` (7.0) and
+`cleanup` (default true; false prints the raw ISel output, which is the same
+program). A verifier failure on the lowered IR is a compiler bug and throws
+with every diagnostic attached; nothing that fails verification is printed.
 
-### ptx IR (`include/brass/target/ptx/ptx_ir.hpp`)
+## ptx IR (`include/brass/target/ptx/ptx_ir.hpp`)
 
 - `ptx::RegClass { Pred, B32, B64, F32, F64 }` with one counter per class per
-  function. Register counts are known by construction; `.reg` declarations are
-  derived from the function, never guessed.
-- `ptx::Type` enum: the suffix set (`.pred .b8 .b16 .b32 .b64 .u8 .u16 .u32
-  .u64 .s8 .s16 .s32 .s64 .f16 .f32 .f64`). One table maps MIR `Type` ->
-  `ptx::Type`; nothing else decides suffixes.
-- `ptx::Opcode` enum for every mnemonic the backend emits (`ld st mov cvt add
-  sub mul mad fma div rem neg abs min max and or xor not shl shr setp selp
-  bra ret call shfl bar rsqrt sqrt sin cos ex2 lg2 rcp ...`).
-- Modifiers as typed fields, not strings: rounding (`.rn .rz .rm .rp`),
+  function (`Function::new_pred/new_b32/...`). Register counts are known by
+  construction; `.reg` declarations are derived from the function, never
+  guessed. Numbering starts at 0; there is no reserved register.
+- `ptx::Type`: the suffix set (`.pred .b8 .b16 .b32 .b64 .u8 .u16 .u32 .u64
+  .s8 .s16 .s32 .s64 .f16 .f32 .f64`). Three functions map MIR `Type` to a
+  suffix and nothing else decides suffixes: `type_for` (data suffix:
+  u32/u64/f32/f64, used for ld/st/param/cvt), `signed_type_for` (s32/s64 for
+  signed arithmetic and comparisons) and `bit_type_for` (b32/b64 for
+  mov/selp/bitwise/shifts). `wide_type_for` gives the `mul.wide`/`mad.wide`
+  result type. `reg_class_for` maps a suffix to its register class:
+  sub-32-bit types and `.f16` live in B32 registers (PTX permits wider
+  registers for `ld/st/cvt` of narrow types; `ld.global.u16 %r` and
+  `cvt.f32.f16 %f, %r` rely on it).
+- `ptx::Opcode` for every mnemonic the backend emits: `ld st mov cvt add sub
+  mul mad fma div rem neg abs min max and or xor not shl shr setp selp bra
+  ret call shfl bar atom rsqrt sqrt sin cos ex2 lg2 rcp trap exit`.
+- Modifiers are typed fields, not strings: rounding (`.rn .rz .rm .rp`),
   `.approx`, `.ftz`, state space (`.global .shared .param .local`), vector
-  width (`.v2 .v4`), `.lo/.hi/.wide`, comparison operator, `.sync` mask, etc.
-- `ptx::Operand` tagged union: register (class + index), immediate (int or
-  float; the printer owns exact-hex float formatting), address
-  (`[reg + disp]`, `[symbol + disp]`), vector tuple `{r0, r1, r2, r3}`, label,
-  kernel param, special register (`%tid.x`, `%ctaid.x`, `%ntid.x`,
-  `%nctaid.x`, `%laneid`, `%warpid`, ...).
-- `ptx::Inst { opcode, type(s), modifiers, guard predicate (optional, negatable),
-  dst operands, src operands, MIR origin }`.
+  width (`.v2 .v4`), `.lo/.hi/.wide`, comparison operator, `.sync`, shuffle
+  mode, `AtomOp` (printed as `atom.global.add.f32`).
+- `ptx::Operand` tagged union: register (class + index), immediate (integer,
+  or float with its own width `imm_f32`/`imm_f64`), address (`[reg + disp]`
+  with a B32 or B64 base), vector tuple `{r0, r1, r2, r3}`, label, kernel
+  param (prints `[name]`, legal only as an `ld.param` source), special
+  register (`%tid.x`, `%ctaid.x`, `%ntid.x`, `%nctaid.x`, `%laneid`,
+  `%warpid`, `%nwarpid`, `%smid`, `%nsmid`, `%clock`, `%clock64`,
+  `%globaltimer`), and `Symbol` (the address-of-shared-array source of
+  `mov.u64 %rd, smem_0` and the callee of `call`).
+- `ptx::Inst { opcode, type(s), modifiers, guard predicate (optional,
+  negatable), dst operands, src operands, MIR origin }`, built with the
+  fluent `Inst::make(op, type).dst(..).src(..).guard(..)`.
 - `ptx::Block { label, insts }` and `ptx::Function { name, params, shared
-  declarations, reg counts, blocks, is_entry }`.
-- Kernel params carry a `ptx::Type` and a name; the entry-point signature is
-  derived from them.
+  declarations, reg counts, blocks, is_entry }`. Kernel params carry a
+  `ptx::Type` and a name; the entry signature is derived from them. A
+  `SharedDecl` is `.shared .align 16 .<type> name[count]`.
 
-#### Stage 2 implementation notes (deviations from the sketch above)
+**Register/type compatibility** is stricter than ptxas except for bit types:
+`.f32`/`.f64` operands must be F32/F64 registers and `.u*/.s*` operands must
+be B32/B64, but `.b32` accepts B32 *or* F32 and `.b64` accepts B64 *or* F64.
+The relaxation is required by `shfl.sync.down.b32` on f32 accumulators and
+by `mov.b64` bitcasts between `%rd` and `%fd`.
 
-- Register/type compatibility is stricter than ptxas except for bit types:
-  `.f32`/`.f64` operands must be F32/F64 registers and `.u*/.s*` operands
-  must be B32/B64, but `.b32` accepts B32 *or* F32 and `.b64` accepts B64
-  *or* F64. The relaxation is required by `shfl.sync.down.b32` on f32
-  accumulators and by `mov.b64` bitcasts between %rd and %fd, both of which
-  the existing kernels use.
-- Sub-32-bit types (`.b8 .b16 .u8 .u16 .s8 .s16`) and `.f16` map to B32
-  registers (`reg_class_for`), matching `ld.global.u16 %r` and
-  `cvt.f32.f16 %f, %r` in the hand-written kernels.
-- One extra operand kind, `Symbol`: the address-of-shared-array source in
-  `mov.u32 %r, smem` and the callee of `call`. `Param` operands print as
-  `[name]` and are only legal as `ld.param` sources.
-- Extra opcodes beyond the list: `atom` (with an `AtomOp` modifier, printed
-  as `atom.global.add.f32`), `trap`, `exit`.
-- The suffix table is three functions, all in `ptx_ir`: `type_for` (data
-  suffix: u32/u64/f32/f64, used for ld/st/param/cvt), `signed_type_for`
-  (s32/s64 for signed arithmetic and comparisons) and `bit_type_for`
-  (b32/b64 for mov/selp/bitwise/shifts). `wide_type_for` gives the
-  `mul.wide`/`mad.wide` result type.
-- Integer immediates print in decimal (`4294967295` for a full lane mask);
-  ptxas accepts this. Float immediates print as `0f`/`0d` hex and carry
-  their own width (`imm_f32`/`imm_f64`), which the verifier checks against
-  the instruction type.
-- The verifier additionally enforces the modifier requirements ptxas has for
-  PTX 7.x: integer `mul`/`mad` need `.lo/.hi/.wide`, `fma` needs a rounding
-  mode, float `div` needs `.approx` or a rounding mode, `shfl`/`bar` need
-  `.sync`, `rsqrt/sin/cos/ex2/lg2` need `.approx`, int<->float `cvt` needs a
-  rounding mode, `and/or/xor/shl` need bit types. Diagnostics carry the
-  function, block label, instruction index and printed instruction text.
+**Immediate operands.** One table, `allows_immediate(op, src_index)`, is
+consulted by `PtxISel::operand_of` when it turns a MIR value into a source
+operand and by the verifier for every source of every instruction. It is
+deliberately narrower than what ptxas accepts (ptxas takes an immediate in
+every source of `setp`, `cvt` and `shfl`; probed on 12.9):
 
-### PtxPrinter (`ptx_printer.hpp`)
+| Opcode | Immediate allowed in source |
+| --- | --- |
+| `mov`, `neg`, `abs`, `not`, `rsqrt`, `sqrt`, `sin`, `cos`, `ex2`, `lg2`, `rcp` | 0 |
+| `add`, `sub`, `mul`, `div`, `rem`, `min`, `max`, `and`, `or`, `xor`, `shl`, `shr` | 0 or 1 |
+| `selp` | 0 or 1 (2 is the predicate) |
+| `mad`, `fma` | 0, 1 or 2 |
+| `setp` | 1 only (a constant on the left keeps its register) |
+| `st` | 1 (the stored value; the address is never an immediate) |
+| `atom` | 1 and 2 (value, cas compare value) |
+| `shfl` | 1, 2, 3 (delta/lane, clamp, member mask; the value never) |
+| `bar` | 0, 1 |
+| `call` | 1.. (arguments; 0 is the callee) |
+| `ld`, `cvt`, `bra`, `ret`, `trap`, `exit` | none |
 
-A single dumb walk. It makes no decisions beyond formatting. It prints the
-header (`.version`, `.target`, `.address_size`), the entry signature, `.reg`
-declarations (from counts), `.shared` declarations, then blocks in order.
+Width rule (`imm_fits`): a 64-bit slot takes any `int64_t`; a 32-bit slot
+takes `-2^31 .. 2^32-1` (either reading), 16/8-bit slots likewise; `.pred`
+takes none, so `mov` of a constant into a Pred is not representable.
+Consequences: shift counts are `.u32` immediates when the MIR constant fits,
+whatever the width of the shifted value; `mul.wide`/`mad.wide` immediates
+must fit the *narrow* type (`ptx_mul_wide_u32(x, 144)` prints `mul.wide.u32
+%rd, %r, 144`); `selp` folds both values; `st` and the shared/narrow store
+rules fold the stored value. Integer immediates print in decimal
+(`4294967295` for a full lane mask); float immediates print as `0f%08X` /
+`0d%016X` and the verifier checks their width against the instruction type.
 
-### PtxVerifier (`ptx_verifier.hpp`)
+## PtxPrinter (`ptx_printer.hpp`)
 
-Runs on any platform without ptxas. Checks at minimum:
+A single dumb walk that makes no decisions beyond formatting: the header
+(`.version`, `.target`, `.address_size 64`), the entry signature, `.reg`
+declarations from the counts, `.shared` declarations, then blocks in order
+(`print_body` prints only the function, for tests and diagnostics).
+
+## PtxVerifier (`ptx_verifier.hpp`)
+
+Runs on any platform without ptxas and returns a list of diagnostics, each
+carrying the function, block label, instruction index and printed
+instruction text (`format_diagnostics`). It checks:
+
 - register index < declared count for its class,
-- operand register class matches the instruction's type width
-  (e.g. `.f32` operands are F32 registers, `.b64/.u64/.s64` are B64),
-- guard is a Pred register,
-- `setp` destination is Pred; `selp` condition is Pred,
+- operand register class matches the instruction type (the compatibility
+  rule above); an address base is B32 or B64 (`.shared` accepts both),
+- guard is a Pred register; `setp` destination is Pred; `selp` condition is
+  Pred,
 - vector operand arity matches `.vN`,
 - shift amounts are B32 (or a `.u32` immediate),
-- an immediate appears only in a source position `allows_immediate(op, i)`
-  permits and fits its slot (`imm_fits`) -- the same table PtxISel folds
-  with (Stage 6a),
-- `ret` inside `.entry` has no operand,
-- every `bra` target label exists,
-- `ld.param` sources name a declared param.
+- an immediate appears only where `allows_immediate` permits and fits its
+  slot (`imm_fits`); float immediates match the instruction width,
+- the modifier requirements ptxas has for PTX 7.x: integer `mul`/`mad` need
+  `.lo/.hi/.wide`, `fma` needs a rounding mode, float `div` needs `.approx`
+  or a rounding mode, `shfl`/`bar` need `.sync`, `rsqrt/sin/cos/ex2/lg2`
+  need `.approx`, int<->float `cvt` needs a rounding mode, `and/or/xor/shl`
+  need bit types,
+- `ret` inside `.entry` has no operand; every `bra` target label exists;
+  `ld.param` sources name a declared param.
 
 It does not require a block to end in a terminator: falling through to the
-next block (or off the end of the `.entry`) is valid PTX and the cleanup
-passes produce it.
+next block, or off the end of an `.entry`, is valid PTX (probed with ptxas)
+and the cleanup passes produce it.
 
-### PtxISel (`ptx_isel.hpp`)
+## PtxISel (`ptx_isel.hpp`)
 
-Lowers MIR -> `ptx::Function`. Rules:
-- Type suffix selection is table-driven (MIR `Type` -> `ptx::Type`).
-- Comparisons produce Pred registers; `select`/`br_if` on a non-comparison
-  value materialize a predicate with an explicit `setp.ne`.
-- 64-bit shift counts are converted to B32 with `cvt.u32.u64`.
-- Unsigned MIR ops (`udiv`, `urem`, `ult`, ...) emit unsigned PTX types.
-- Block arguments are lowered with a parallel-copy resolver (handles swaps and
-  cycles via a scratch register), predicated on the branch condition for the
-  taken edge of `br_if`.
-- Intrinsics are a table: MIR builtin call name -> lowering rule. This
-  replaces string matching on callee names inside the instruction switch.
-- Non-void kernels are rejected with a diagnostic (`.entry` cannot return).
-- MIR constants are printed as immediates wherever `allows_immediate` says
-  the opcode takes one (`operand_of`); invariant special registers are read
-  once per function in the `$L_params` prologue (`special_register`). The
-  output then goes through `ptx::cleanup` (`ptx_cleanup.hpp`) before the
-  verifier. See "Stage 6a notes".
-
-#### Stage 3 implementation notes
-
-File layout (mirrors `x64_isel_*.cpp`; every file stays under 1,000 lines):
+Lowers one MIR `Function` to a `ptx::Function`. File layout (mirrors
+`x64_isel_*.cpp`):
 
 | File | Concern |
 | --- | --- |
-| `include/brass/target/ptx/ptx_isel.hpp` | `class PtxISel { ptx::Function lower(const Function&); }`, the intrinsic-table query API, private state |
-| `src/target/ptx/ptx_isel.cpp` | driver, use analysis, register assignment, `ld.param` prologue, opcode dispatch switch, value/register helpers (`reg_of`, `materialize_pred`, `shift_amount`, `emit`) |
+| `include/brass/target/ptx/ptx_isel.hpp` | `class PtxISel { ptx::Function lower(const Function&); }`, the intrinsic-table query API (`is_intrinsic`, `intrinsic_names`), private state |
+| `src/target/ptx/ptx_isel.cpp` | driver, use analysis, register assignment, `ld.param` prologue, opcode dispatch, value/register helpers (`reg_of`, `operand_of`, `special_register`, `materialize_pred`, `shift_amount`, `emit`) |
 | `src/target/ptx/ptx_isel_alu.cpp` | constants, arithmetic, bitwise, shifts, comparisons, `select`, conversions |
-| `src/target/ptx/ptx_isel_mem.cpp` | `load/store`, `vload/vstore`, `load_indexed/store_indexed` (address materialization) |
+| `src/target/ptx/ptx_isel_mem.cpp` | `load/store`, `vload/vstore` (v4/v2 tuples, two tuples for 256-bit types), `load_indexed/store_indexed` |
 | `src/target/ptx/ptx_isel_control.cpp` | `br/br_if/ret/unreachable`, edge copies, the parallel-copy resolver |
-| `src/target/ptx/ptx_isel_intrinsics.cpp` | `PtxISel::Intrinsics` (the lowering rules), the name table, plain `call` |
-| `src/target/ptx/ptx_cleanup.cpp` | Stage 6a: copy propagation, dead instruction elimination, branch simplification, register renumbering (`ptx_cleanup.hpp`) |
-| `src/target/ptx_target.cpp` | thin facade: ISel -> `ptx::cleanup` (unless `PtxOptions::cleanup` is false) -> `ptx::verify` (throws with `format_diagnostics` output) -> `ptx::print` |
+| `src/target/ptx/ptx_isel_vec.cpp` | vector MIR ops -> per-lane scalar PTX |
+| `src/target/ptx/ptx_isel_intrinsics.hpp` | private: `struct PtxISel::Intrinsics` (all rule declarations) |
+| `src/target/ptx/ptx_isel_intrinsics.cpp` | the name -> rule table; special registers, math, conversions, plain `call` |
+| `src/target/ptx/ptx_isel_intrinsics_warp.cpp` | `bar.sync`, `shfl`, `atom`, `mul.wide/hi`, `mad.lo` |
+| `src/target/ptx/ptx_isel_intrinsics_mem.cpp` | shared memory, narrow loads/stores, operand helpers (`const_int`, `address_operand`, `indexed_operand`, `lane_operand`) |
 
-Behaviour worth knowing:
+Rules:
 
+- **Type suffixes** come from the `type_for`/`signed_type_for`/`bit_type_for`
+  tables. Unsigned MIR ops (`udiv`, `urem`, `ult`, `lshr`, ...) emit unsigned
+  PTX types; `shl` uses `.b32/.b64`, `lshr` `.u32/.u64`, `ashr` `.s32/.s64`.
 - **Register mapping lives in one place.** `allocate_registers` assigns every
   MIR value (entry params, block params, instruction results) a register run
   up front, in block order: one register for scalars, a contiguous run of
-  `vector_lanes()` registers of the element class for vector types (f32x4,
-  f32x8, f64x2, f64x4, i32x4, ...). Comparison results get a Pred register in
+  `vector_lanes()` registers of the element class for vector types (f32x4 ->
+  4 x `%f`, f64x2 -> 2 x `%fd`, i32x4 -> 4 x `%r`, i64x2 -> 2 x `%rd`, and the
+  8/4-lane 256-bit types likewise). Comparison results get a Pred register in
   addition to their B32 result. Temporaries (narrowed shift counts, indexed
   addresses, materialized predicates, intrinsic scratch, parallel-copy
-  scratch) are allocated lazily during lowering and therefore number after
-  the value registers. Numbering starts at 0; there is no reserved register.
+  scratch) are allocated lazily during lowering and number after the value
+  registers.
+- **Constants** are emitted as `mov.b32/b64/f32/f64 %r, c` (`lower_const`),
+  and `operand_of` prints the constant as an immediate wherever
+  `allows_immediate` permits. ISel does not know whether every use folded,
+  so the `mov` stays; cleanup's DCE removes it when nothing reads the
+  register.
+- **Special registers.** `special_register(s)` returns one register per
+  invariant special register per function; the `mov.u32 %r, %tid.x` is
+  appended to the `$L_params` prologue on first use. Invariant means
+  `is_invariant(s)`: `%tid.*`, `%ntid.*`, `%ctaid.*`, `%nctaid.*`, `%laneid`,
+  `%nwarpid`, `%nsmid`. `%warpid` and `%smid` are not (the PTX ISA allows
+  them to change when a warp is rescheduled), nor are `%clock`, `%clock64`
+  and `%globaltimer`; those are read at every use, in place, and DCE keeps
+  such a `mov` even when its result is unused. `global_tid_x` composes the
+  cached `%ctaid.x`/`%ntid.x`/`%tid.x` with one `mad.lo.s32`.
 - **Comparisons** emit `setp.<cmp>.<type>` into the Pred and only emit the
   `selp.u32 r, 1, 0, p` integer materialization when the result has a use
-  other than the condition operand of `br_if`/`select` (`analyze_uses`).
-  Float `ne` is `setp.neu` (unordered), matching the x64 lowering; other float
+  other than the condition of `br_if`/`select` (`analyze_uses`). Float `ne`
+  is `setp.neu` (unordered), matching the x64 lowering; other float
   comparisons are ordered. Unsigned MIR comparisons use `.u32/.u64`, signed
   ones and `eq/ne` use `.s32/.s64`.
 - **Predicate materialization** for a non-comparison `br_if`/`select`
@@ -175,106 +209,32 @@ Behaviour worth knowing:
   emitted at the use (never cached across blocks).
 - **Kernel parameters** are declared from `Function::param_types()` as
   `param_<i>` and loaded in a `$L_params` fall-through block placed before
-  the MIR entry block, so an entry block with incoming edges is not
-  re-entered through the loads. Load types come from the entry block
-  parameter types.
+  the MIR entry block (created on demand by `prologue_block()`, so it also
+  exists for a kernel without parameters that reads `%tid.x`); an entry
+  block with incoming edges is therefore not re-entered through the loads.
+  Load types come from the entry block parameter types. Non-void kernels
+  are rejected (`.entry` cannot return values).
 - **Block arguments** become `Copy{dst, src, bit_type}` lists per edge (one
   per lane for vector values; identity copies dropped).
   `emit_parallel_copies` emits any copy whose destination no other pending
   copy still reads; when only cycles remain it moves one source into a
   scratch register of the same class and redirects its readers, which
   unblocks the cycle. For `br_if` the taken edge's copies are guarded on the
-  predicate and precede the guarded `bra`; the fall-through edge's copies are
-  unguarded and follow it.
-- **Shift counts** that are 64-bit are narrowed with `cvt.u32.u64` into a
-  fresh B32 (`shift_amount`); `shl` uses `.b32/.b64`, `lshr` `.u32/.u64`,
-  `ashr` `.s32/.s64`.
+  predicate and precede the guarded `bra`; the fall-through edge's copies
+  are unguarded and follow it.
+- **Shift counts** that are 64-bit and not foldable are narrowed with
+  `cvt.u32.u64` into a fresh B32 (`shift_amount`).
 - **Indexed addressing** sign-extends a 32-bit index (`cvt.s64.s32`), scales
   by `shl.b64` for 2/4/8 (or `mul.lo.s64` by an immediate otherwise), adds to
   the base and addresses `[addr + offset]`.
+- **Loads and stores** are always `.global`; shared memory is reached only
+  through the `ptx_shared_*` intrinsics (see the authoring guide).
 - **Errors:** unsupported MIR opcodes throw `runtime_error("PtxISel:
   unsupported opcode in PTX lowering: <name>")`; malformed instructions
-  throw naming the opcode and the missing piece; non-void kernels throw the
-  Stage 1 "cannot return values" diagnostic; a verifier failure on the
-  lowered IR is reported by `PtxTarget` as a compiler bug with every
-  diagnostic attached.
+  throw naming the opcode and the missing piece.
 - Every emitted `Inst` carries `.origin(&mir_inst)` (set by `PtxISel::emit`).
 
-Golden comparison against the string emitter (all MIR kernels in
-`ml_fusion.cpp` plus the hand-built kernels in `test_gpu_execution.cpp`):
-after normalizing register numbers the only differences are (1) the
-`$L_params:` label, (2) the dropped always-declared `.reg .f64 %fd<1>`, and
-(3) elided dead `selp.u32` materializations for loop-exit comparisons. No
-kernel got longer.
-
-**Intrinsic table** (`src/target/ptx/ptx_isel_intrinsics.cpp`):
-`PtxISel::Intrinsics::table()` maps callee name -> `IntrinsicLowering`
-(`void(*)(PtxISel&, const Instruction&)`). To add one: write a static rule
-in `PtxISel::Intrinsics` (or instantiate the `special<SpecialReg>` /
-`approx_f32<Opcode>` templates) that reads its arguments with
-`isel.reg_of(inst.operand(i), "...")`, allocates scratch with
-`isel.fn_->new_*()`, writes `isel.result_reg(inst)` when the call has a
-result, and calls `isel.emit(...)`; then add one row per name/alias.
-`PtxISel::intrinsic_names()` and `is_intrinsic()` let tests iterate the
-table (`test_ptx_isel.cpp` assembles every entry with ptxas). Every alias the
-string emitter accepted is preserved.
-
-Extension points for Stage 4:
-
-- **Shared memory:** `ptx::Function::add_shared` already exists; the ISel
-  needs a rule that materializes `mov.u32 %r, <name>` for the array base and
-  a state-space choice in `ptx_isel_mem.cpp` (currently every `ld/st` is
-  `.global`). A per-value "address space" map next to `regs_` is the natural
-  place to carry that decision.
-- **`bar.sync <id>` / named barriers:** replace the `Operand::imm(0)` in
-  `Intrinsics::bar_sync` with the first call operand.
-- **`rcp.approx` / `div.approx` / `ex2.approx.ftz`:** `Opcode::rcp` exists;
-  `div.approx` is `Inst::make(Opcode::div, f32).approx()`; both are one-line
-  table rules.
-- **f16 -> f32:** `cvt.f32.f16` with the f16 value in a B32 register
-  (`reg_class_for(Type::f16)` is B32); load it with `ld.global.u16`.
-- **v4 u32 loads:** `vec_width_for` in `ptx_isel_mem.cpp` currently accepts
-  f32x4/f64x2 only; i32x4 values already get a 4-register B32 run, so adding
-  the type there is all that is needed.
-- **`mad.lo`:** either a builtin rule or pattern-matching `add(mul(a,b),c)`
-  in `lower_binary`; the IR verifier already enforces `.lo/.hi/.wide`.
-
-### Kernel intrinsics
-
-Fused ML kernels are written as MIR via `KernelBuilder` helpers and lowered
-through `PtxISel`. Where a kernel needs a PTX-only concept, it is an MIR
-builtin with a lowering rule, not a string. Required set (from the existing
-hand-written kernels): thread/block/grid ids, `shfl.sync.down`, `bar.sync`,
-per-function `.shared` arrays with `ld.shared`/`st.shared`, `ex2.approx`,
-`rcp.approx`, `div.approx`, `rsqrt.approx`, `f16 -> f32` conversion, `v4`
-loads/stores of `f32`/`u32`, `fma.rn`, `mad.lo`.
-
-#### Stage 4 implementation notes
-
-Stage 5 works from this section plus `include/brass/codegen/kernel_jit.hpp`
-and `src/target/ptx/ptx_isel_intrinsics.cpp`. The inventory of the four
-hand-written kernel files (every mnemonic, modifier, special register and
-state space they use) is covered below; nothing in them needs a string.
-
-**Files added/changed**
-
-| File | Concern |
-| --- | --- |
-| `src/target/ptx/ptx_isel_vec.cpp` | vector MIR ops -> per-lane scalar PTX |
-| `src/target/ptx/ptx_isel_mem.cpp` | `vload/vstore` for every vector type (v4/v2 tuples, two tuples for 256-bit) |
-| `src/target/ptx/ptx_isel_intrinsics.hpp` | private: `struct PtxISel::Intrinsics` (all rule declarations) |
-| `src/target/ptx/ptx_isel_intrinsics.cpp` | the name table; special registers, math, conversions |
-| `src/target/ptx/ptx_isel_intrinsics_warp.cpp` | `bar.sync`, `shfl`, `atom`, `mul.wide/hi`, `mad.lo` |
-| `src/target/ptx/ptx_isel_intrinsics_mem.cpp` | shared memory, narrow loads/stores, operand helpers (`const_int`, `address_operand`, `indexed_operand`, `lane_operand`) |
-| `src/codegen/kernel_builder_ptx.cpp` | `KernelBuilder` GPU helpers |
-| `tests/unit/ptx_test_support.hpp` | ptxas/device helpers, `run_map` harness, host f16 conversion |
-| `tests/unit/test_ptx_intrinsics.cpp` | signature table (coverage-checked against `intrinsic_names()`), on-device tests per family |
-| `tests/unit/test_ptx_vector.cpp` | vector opcodes, reductions, shared memory, control-flow helpers |
-
-**Vector lowering (`ptx_isel_vec.cpp`).** Every vector value already owns a
-contiguous register run of `vector_lanes()` registers of the element class
-(f32x4 -> 4 x `%f`, f64x2 -> 2 x `%fd`, i32x4 -> 4 x `%r`, i64x2 -> 2 x `%rd`,
-and the 8/4-lane 256-bit types likewise). Vector ops emit one scalar
+**Vector lowering (`ptx_isel_vec.cpp`).** Vector ops emit one scalar
 instruction per lane with the suffix the scalar op would use:
 
 | MIR | per lane (float / integer element) |
@@ -295,505 +255,37 @@ instruction per lane with the suffix the scalar op would use:
 
 All eight vector types (`f32x4 f64x2 i32x4 i64x2 f32x8 f64x4 i32x8 i64x4`)
 are accepted everywhere (arithmetic, loads/stores, block arguments). A
-`vload(i32x4)` is the `ld.global.v4.u32 {..}` header load of the Q4_K kernel;
-lanes come out with `vextract_lane`. With this, `build_gemv_q8_0` /
-`build_gemv_q4_k` in `ml_fusion_quant_cpu.cpp` lower and verify (they still
-`call` the CPU dequantizers, so they do not assemble until Stage 5 replaces
-those calls).
+`vload(i32x4)` is the `ld.global.v4.u32 {..}` header load of the Q4_K
+kernel; lanes come out with `vextract_lane`. The extract/insert `mov`s are
+removed by copy propagation, so they cost nothing in the printed PTX.
 
-**Intrinsics (`PtxISel::Intrinsics::table()`).** MIR signature on the left
-(`build_call(name, result_type, {args})`), PTX on the right. Arguments named
-`const` must be `iconst_i32`/`iconst_i64` results (`PtxISel::const_int`);
-`lane`/`id` arguments may be constants (printed as immediates) or i32/i64
-registers (narrowed with `cvt.u32.u64` when 64-bit). Optional `[, off]` byte
-offsets fold into `[reg + disp]` when constant, otherwise an `add.s64` is
-emitted.
+**Intrinsic table.** `PtxISel::Intrinsics::table()` maps a callee name to an
+`IntrinsicLowering` (`void(*)(PtxISel&, const Instruction&)`); a MIR
+`build_call(name, ...)` whose name is in the table is lowered inline, any
+other `call` prints as a PTX `call` to an undeclared symbol. To add one:
+write a static rule in `PtxISel::Intrinsics` (or instantiate the
+`special<SpecialReg>` / `approx_f32<Opcode>` templates) that reads its
+arguments with `isel.reg_of(inst.operand(i), "...")` or `isel.const_int`,
+allocates scratch with `isel.fn_->new_*()`, writes `isel.result_reg(inst)`
+when the call has a result, and calls `isel.emit(...)`; then add one row per
+name/alias, a signature row in `tests/unit/test_ptx_intrinsics.cpp` (its
+coverage test fails for a table entry without a row) and a line in the
+authoring guide's table. `intrinsic_names()` lets tests iterate the table.
+Shared arrays are per-kernel `SharedDecl`s appended by the
+`ptx_shared_alloc_*` rules (`.align 16`, `smem_<index>`, unique within the
+function; the same names in different `.entry` bodies are fine because PTX
+scopes them per function -- verified on a two-kernel module).
 
-| Name(s) | Signature | PTX |
-| --- | --- | --- |
-| `ptx_tid_{x,y,z}` `ptx_ctaid_{x,y,z}` `ptx_ntid_{x,y,z}` `ptx_nctaid_{x,y,z}` | `() -> i32` | `mov.u32 %r, %tid.x` ... |
-| `ptx_laneid`/`ptx_lane_id`, `ptx_warpid`/`ptx_warp_id`, `ptx_nwarpid`, `ptx_smid`, `ptx_nsmid`, `ptx_clock` | `() -> i32` | `mov.u32 %r, %laneid` ... (`%warpid` is the hardware warp slot, not `tid/32`) |
-| `ptx_clock64`, `ptx_globaltimer` | `() -> i64` | `mov.u64 %rd, %clock64` / `%globaltimer` |
-| `ptx_global_tid_x`/`ptx_global_id_x` | `() -> i32` | `mad.lo.s32 ctaid.x, ntid.x, tid.x` |
-| `rsqrtf rsqrt ptx_rsqrt` / `sqrtf sqrt ptx_sqrt` / `sinf sin ptx_sin` / `cosf cos ptx_cos` / `ex2f ex2 ptx_ex2` / `lg2f ptx_lg2` / `ptx_rcp ptx_rcp_approx` | `(f32) -> f32` | `rsqrt/sqrt/sin/cos/ex2/lg2/rcp.approx.f32` |
-| `expf exp ptx_exp` | `(f32) -> f32` | `mul.f32 x, log2e; ex2.approx.f32` |
-| `logf log ptx_log` | `(f32) -> f32` | `lg2.approx.f32; mul.f32 ln2` |
-| `ptx_sqrt_rn` | `(f32|f64) -> same` | `sqrt.rn.f32|f64` |
-| `fabsf fabs ptx_fabs` | `(f32|f64) -> same` | `abs.f32|f64` |
-| `fminf fmin ptx_fmin` / `fmaxf fmax ptx_fmax` | `(T, T) -> T`, T = f32|f64 | `min/max.f32|f64` |
-| `ptx_div_approx` | `(f32, f32) -> f32` | `div.approx.f32` (`div.full` is not modelled; MIR `sdiv` on f32 is `div.rn.f32`) |
-| `i32_to_f32 ptx_i32_to_f32` / `ptx_u32_to_f32` | `(i32) -> f32` | `cvt.rn.f32.s32` / `cvt.rn.f32.u32` |
-| `ptx_i64_to_f32` / `ptx_u64_to_f32` | `(i64) -> f32` | `cvt.rn.f32.s64` / `.u64` |
-| `ptx_f32_to_i32` / `ptx_f32_to_u32` | `(f32) -> i32` | `cvt.rzi.s32.f32` / `cvt.rzi.u32.f32` (saturating, truncating) |
-| `ptx_f16_to_f32` | `(i32 bits) -> f32` | `cvt.f32.f16 %f, %r` (low 16 bits of the B32) |
-| `ptx_f32_to_f16` | `(f32) -> i32 bits` | `cvt.rn.f16.f32 %r, %f` |
-| `ptx_f32_to_f64` / `ptx_f64_to_f32` | `(f32) -> f64` / `(f64) -> f32` | `cvt.f64.f32` / `cvt.rn.f32.f64` |
-| `bar.sync` `ptx_sync` | `() -> void` | `bar.sync 0` |
-| `ptx_bar_sync` | `(i32 id) -> void` | `bar.sync id` |
-| `ptx_bar_sync_count` | `(i32 id, i32 nthreads) -> void` | `bar.sync id, nthreads` |
-| `ptx_shfl_{down,up,bfly,xor,idx}_f32` | `(f32, i32 delta) -> f32` | `shfl.sync.<mode>.b32 d, v, delta, clamp, 0xffffffff` (clamp 0 for `up`, 0x1f otherwise, as nvcc emits) |
-| `ptx_shfl_{down,up,bfly,xor,idx}_i32` | `(i32, i32 delta) -> i32` | same |
-| `ptx_shfl_down_sync_f32` `shfl_down_sync_f32` | `(i32 mask, f32, i32 delta) -> f32` | `shfl.sync.down.b32 ... 0x1f, mask` |
-| `ptx_atom_add_f32` | `(ptr, f32) -> f32 old` | `atom.global.add.f32` |
-| `ptx_atom_add_i32` `ptx_atom_add_u32` / `ptx_atom_add_i64` | `(ptr, i32) -> i32` / `(ptr, i64) -> i64` | `atom.global.add.u32` / `.u64` |
-| `ptx_atom_min_i32` `ptx_atom_max_i32` / `ptx_atom_exch_i32` | `(ptr, i32) -> i32` | `atom.global.min/max.s32` / `atom.global.exch.b32` |
-| `ptx_atom_shared_add_f32` / `ptx_atom_shared_add_i32` | `(shared ptr, T) -> T` | `atom.shared.add.f32` / `.u32` |
-| `ptx_mul_wide_u32` / `ptx_mul_wide_s32` | `(i32, i32) -> i64` | `mul.wide.u32` / `.s32` |
-| `ptx_mul_hi_u32` | `(i32, i32) -> i32` | `mul.hi.u32` |
-| `ptx_mad_lo_u32` | `(i32, i32, i32) -> i32` | `mad.lo.u32` |
-| `ptx_shared_alloc_{f32,i32,f64,i64}` | `(const i32 count) -> ptr` | `.shared .align 16 .<f32|u32|f64|u64> smem_<n>[count]` + `mov.u64 %rd, smem_<n>` |
-| `ptx_shared_load_{f32,i32,f64,i64}` | `(ptr[, i32|i64 off]) -> T` | `ld.shared.<T> d, [ptr + off]` |
-| `ptx_shared_load_{f32,i32,f64,i64}_indexed` | `(ptr, i32|i64 index) -> T` | `ld.shared.<T> d, [ptr + index*sizeof(T)]` |
-| `ptx_shared_store_{f32,i32,f64,i64}` | `(ptr, T value[, off]) -> void` | `st.shared.<T> [ptr + off], value` |
-| `ptx_shared_store_{f32,i32,f64,i64}_indexed` | `(ptr, index, T value) -> void` | `st.shared.<T> [ptr + index*sizeof(T)], value` |
-| `ptx_load_{u8,s8,u16,s16}` | `(ptr[, off]) -> i32` | `ld.global.u8/s8/u16/s16 %r, [ptr + off]` (zero-/sign-extended into the B32) |
-| `ptx_store_{u8,u16}` | `(ptr, i32 value[, off]) -> void` | `st.global.u8/u16 [ptr + off], %r` (low bits) |
+## Cleanup passes (`ptx_cleanup.hpp`, `src/target/ptx/ptx_cleanup.cpp`)
 
-Things that were considered and not added: `div.full.f32` (no `.full`
-modifier in the IR; `div.approx` or `div.rn` cover the kernels), an
-`i32x4`-specific load intrinsic (MIR `vload` of `i32x4` already prints
-`ld.global.v4.u32`), `mad.lo` pattern matching (`ptx_mad_lo_u32` exists;
-ptxas fuses `mul`+`add` anyway), integer vector types beyond what MIR has.
-
-**Shared memory model.** A `.shared` array is a per-kernel declaration
-created by `ptx_shared_alloc_<T>(count)`: `PtxISel` appends a `SharedDecl`
-(`.align 16`, name `smem_<index>`, unique within the function; the same
-names in different `.entry` bodies are fine because PTX scopes them per
-function -- verified with ptxas on a two-kernel module) and materializes the
-array's shared-window address with `mov.u64 %rd, smem_<n>` into the `ptr`
-result. That 64-bit value is only meaningful to the `ptx_shared_*`
-intrinsics, which emit `ld.shared`/`st.shared` with a B64 base register (the
-verifier accepts B32 or B64 bases for `.shared`; ptxas accepts B64 with
-`.address_size 64`). Plain MIR `load`/`store`/`vload`/`vstore` are always
-`.global`; there is no address-space provenance tracking, so passing a shared
-pointer to `load` is a silent bug -- always use the shared intrinsics.
-Integer arithmetic on the pointer (`add ptr, i64`) is fine as long as the
-result is again consumed only by shared intrinsics (the round-trip test does
-exactly that). Element counts must be compile-time constants (a
-non-constant count throws `PtxISel: ptx_shared_alloc_* requires a positive
-compile-time constant element count`). Static shared usage is the sum of the
-declared arrays; the launch passes `shared_bytes = 0`.
-
-**Narrow loads and f16.** MIR has no i8/i16 types, so 8/16-bit accesses are
-intrinsics that extend into an i32; `ptx_f16_to_f32` takes such an i32 (the
-Q8_0 header is `ptx_load_u16(blk)` -> `ptx_f16_to_f32`; the Q4_K header is a
-`vload(i32x4)` whose lane 0 is split with `and`/`lshr` before
-`ptx_f16_to_f32`, exactly as the hand-written kernel does).
-
-**KernelBuilder helpers (`kernel_jit.hpp`, `kernel_builder_ptx.cpp`).**
-Thin wrappers, each a few lines of MIR around the intrinsics above:
-
-- constants: `const_i32(v) const_i64(v) const_f32(v)`
-- indices (i32): `tid_x/y/z() ctaid_x/y/z() ntid_x/y/z() nctaid_x/y/z()
-  lane_id() warp_id()` (= `tid_x >> 5`) `global_tid_x()`
-- barriers: `sync()` (`bar.sync 0`), `bar_sync(id)`
-- shuffles: `shfl_down_f32(v, delta|Value*) shfl_up_f32(v, delta)
-  shfl_bfly_f32(v, mask) shfl_idx_f32(v, lane|Value*) shfl_down_i32
-  shfl_bfly_i32 shfl_idx_i32`
-- reductions: `warp_reduce_sum_f32(v)` / `warp_reduce_max_f32(v)` (the
-  16/8/4/2/1 `shfl.down` butterfly; result valid in lane 0),
-  `block_reduce_sum_f32(v, scratch)`: warp reduce -> lane 0 of each warp
-  stores `scratch[warp]` (an `if_then`) -> `bar.sync` -> every warp reads
-  `scratch[lane]` for `lane < (ntid+31)/32` (else 0), warp-reduces and
-  broadcasts lane 0 with `shfl.idx`, so *every thread* returns the block
-  total -> `bar.sync` so `scratch` can be reused at once. Requirements:
-  `scratch` is a `shared_alloc_f32` of at least 32 elements, block size a
-  multiple of 32 up to 1024, all threads reach the call. The builder is left
-  in a new block (the `if_then` join), so values computed afterwards must be
-  emitted after the call, which is the natural order anyway.
-- shared memory: `shared_alloc_f32(n) shared_alloc_i32(n)
-  shared_load_f32(smem, byte_off = 0) shared_load_f32_indexed(smem, index)
-  shared_store_f32(smem, val, byte_off = 0) shared_store_f32_indexed(smem,
-  index, val)` and the `_i32` forms
-- fast math: `rcp_approx div_approx ex2_approx lg2_approx exp_fast log_fast
-  rsqrt_approx sqrt_approx fabs fmin fmax`
-- conversions: `f16_to_f32 f32_to_f16 u32_to_f32 i32_to_f32 f32_to_u32
-  f32_to_i32`
-- narrow memory: `load_u8/s8/u16/s16(ptr, byte_off = 0) store_u8/u16(ptr,
-  val, byte_off = 0)`
-- atomics: `atom_add_f32(ptr, v) atom_add_i32(ptr, v)`
-- control flow: `if_then(cond, body)` (creates `if_then`/`if_join` blocks,
-  leaves the builder in the join) and `for_range(start, end, step,
-  body(i))` (`head(i)`: `i < end` signed -> body -> `br head(i + step)`;
-  leaves the builder in the exit block). Both accept bodies that end in
-  their own terminator.
-
-`ptx_*` names are GPU-only: `KernelJit` registers no CPU symbols for them,
-so a kernel using them is a PTX-only builder (which is what the Stage 5
-fused kernels are). The `fabsf/fminf/fmaxf/logf/...` aliases keep working on
-both sides: real libm calls on the CPU, inline PTX on the GPU.
-
-### Stage 5a notes (SwiGLU, AdaLN modulate x2, residual RMSNorm)
-
-First migration batch. `emit_ptx_swiglu`, `emit_ptx_adaln_modulate` and
-`emit_ptx_fused_residual_rms_norm` (+ the `emit_ptx_residual_rms_norm`
-alias) now build MIR and go through `PtxTarget::emit_function`; the entry
-names, parameter lists and launch contracts are unchanged, so
-`test_gpu_execution.cpp` runs untouched against the MIR kernels.
-
-**File layout**
-
-| File | Concern |
-| --- | --- |
-| `src/codegen/ml_fusion_ptx_kernels.cpp` | `build_ptx_swiglu`, `build_ptx_adaln_modulate(gated)`, `build_ptx_residual_rms_norm` plus the shared row-per-block prologue (`row_block_prologue`: early `ret`, row offset, `d & ~3` with the `d % 4 != 0` -> scalar-path guard, float4/scalar loop bounds), `f32_offset`, `silu_fast` |
-| `src/codegen/ml_fusion_ptx.cpp` | the three thin emitters (build -> `emit_function`); the LayerNorm-modulate string kernel stayed here until 5b |
-| `src/codegen/ml_fusion_ptx_legacy.{hpp,cpp}` | **LEGACY**: the four replaced string templates, byte-for-byte, as `legacy::legacy_ptx_{swiglu,adaln_modulate,residual_rms_norm}`. Internal header (tests include it by relative path), no library caller; deleted in Stage 6 |
-| `tests/unit/test_gpu_kernel_migration.cpp` | verify + ptxas of each MIR kernel, and on-device differential runs legacy-vs-MIR over several shapes (d multiple of 4 and not, n not a multiple of the block, several rows/blocks, block sizes 32..1024) plus the host reference at the old tolerances |
-
-**Helper added:** `KernelBuilder::for_range_reduce(start, end, step, init,
-body(i, acc) -> acc')` -- `for_range` with one loop-carried value (the
-RMSNorm sum of squares). The result is the head block's `acc` parameter,
-which is valid in the exit block because the head dominates it, so no copy
-into the exit block is emitted. `body` must return the new accumulator and
-must not end in its own terminator.
-
-**Numerics.** The kernels keep the string kernels' recipes: SiLU is
-`neg; mul log2e; ex2.approx; add 1; rcp.approx; mul; mul`, the RMS is
-`div.approx(sum, cvt.rn.f32.u32 d); add eps; rsqrt.approx`, the block sum
-is the same 16/8/4/2/1 `shfl.down` tree over the same shared partials
-(`block_reduce_sum_f32` reduces the partials in every warp and broadcasts
-lane 0, instead of warp 0 writing a second shared scalar -- same values,
-one shared array instead of two). Differential results (RTX 4090, ptxas
-12.9): every SwiGLU and AdaLN shape agrees bit-for-bit (max relative
-difference 0); RMSNorm agrees bit-for-bit on 5 of 6 shapes and to 7.5e-8
-(1 ulp) on `B=4, D=300, block=256`. The tests require `<= 1e-6` relative.
-
-**ISel quality (observed, not fixed in this batch).** Instruction counts
-before ptxas: SwiGLU 76 -> 121 (48 `mov`), RMSNorm 144 -> 200 (56 `mov`).
-ptxas removes all of it (the differential outputs are identical), but the
-PTX is noisier than the hand-written version for these reasons, in order
-of volume:
-
-1. `vextract_lane`/`vinsert_lane` are `mov`s: a 4-lane insert chain to
-   build the SwiGLU result vector is 16 `mov.f32`, plus 8 for the extracts.
-   A lane-register aliasing scheme (extract = the lane's register, insert
-   into a fresh vector = write the lane register directly) would remove
-   them; alternatively a `vpack(s0..s3)` MIR op.
-2. Constants are always materialized (`mov.b32 %r6, 2; shr.u32 %r7, %r0,
-   %r6`; `mov.f32 %f11, 0f3FB8AA3B` per lane) instead of printed as
-   immediates -- the string kernels use immediates everywhere. Shift
-   counts, `and` masks, `add 1.0` and `vbroadcast` of a constant (4 `mov`s
-   of an already-materialized constant) are the common cases. Intrinsics
-   that *do* fold constants (`shfl` delta, `shared_alloc` count) leave the
-   `mov.b32` of the now-dead constant behind.
-3. Block-argument copies: every loop back-edge is `add.s32 %r11, %r8, %r5;
-   mov.b32 %r8, %r11` and every loop entry `mov.b32 %r8, %r3; bra` -- the
-   parallel-copy resolver could coalesce a copy whose source has no later
-   use into the destination register.
-4. `br_if` always emits `@%p bra A; bra B;` even when `B` is the next
-   block, and `br` to the immediately following block is printed.
-5. Special registers are re-read per use (`global_tid_x` reads `%tid.x`
-   and `%ntid.x` again after `tid_x()`/`ntid_x()`); a CSE of `mov.u32 %r,
-   %tid.x` within a block would fix it.
-6. `x + off` address arithmetic is one `add.s64` per pointer per iteration
-   (same as the hand-written kernels) -- no loss there; `load_f32_indexed`
-   was avoided because it would emit `cvt.s64.s32 + shl + add` per access.
-
-**Guidance for the next batches.**
-
-- LayerNorm-modulate and residual-LayerNorm are the RMSNorm builder with a
-  mean pass first: `row_block_prologue` + `for_range_reduce` twice
-  (sum, then sum of squared deviations) + two `block_reduce_sum_f32` calls
-  on the same 32-float scratch (the helper's trailing `bar.sync` makes
-  reuse safe). Keep `div.approx` for the mean/variance and `rsqrt.approx`
-  for rstd to preserve the 2e-3 tolerances.
-- GEMV SwiGLU/residual: one block per output row, the K loop is
-  `for_range_reduce` over float4s with `vfma` into an `f32x4` accumulator
-  (vector block arguments work), then extract the 4 lanes, add, and
-  `block_reduce_sum_f32`; `silu_fast` is in `ml_fusion_ptx_kernels.cpp`
-  and can move to `KernelBuilder` if a third kernel needs it.
-- Quantized GEMV: replace the `call brass_dequant_*` in
-  `build_gemv_q8_0`/`build_gemv_q4_k` (`ml_fusion_quant_cpu.cpp`) with
-  `load_u16`/`f16_to_f32` headers and `load_s8`/`vload(i32x4)` + `and`/`lshr`
-  nibble extraction, following the string kernels formerly in
-  `ml_fusion_quant_ptx.cpp` (now `ml_fusion_ptx_legacy_quant.cpp`); the
-  existing MIR builders already lower and verify, so the work is device-side
-  dequantization only. (Done in 5c as separate `build_ptx_gemv_*` builders
-  with the string kernels' thread mapping; the CPU builders are unchanged.)
-- Keep the differential test pattern: copy the string kernel verbatim into
-  the legacy file first (diff it against the original), then write the
-  builder, then compare on device over shapes that hit every path
-  (aligned/unaligned row, tail, multi-block, block sizes 32 and 1024).
-- Each new kernels file stays under 1,000 lines: put the LayerNorm pair in
-  `ml_fusion_ptx_kernels_norm.cpp`, the GEMV kernels in
-  `ml_fusion_ptx_kernels_gemv.cpp`; move `row_block_prologue` / `silu_fast`
-  into a small internal header when a second file needs them.
-
-### Stage 5b notes (LayerNorm-modulate, residual LayerNorm, GEMV SwiGLU, GEMV residual)
-
-Second migration batch. `emit_ptx_fused_layernorm_modulate`,
-`emit_ptx_fused_residual_layernorm`, `emit_ptx_fused_gemv_swiglu` and
-`emit_ptx_fused_gemv_residual` now build MIR and go through
-`PtxTarget::emit_function`; entry names, parameter lists and launch
-contracts (one block per row, block size a multiple of 32 up to 1024, float4
-fast path only when the row length is a multiple of 4, `x += res` in place
-for the residual LayerNorm, thread 0 of each block writing `y[row]` for the
-GEMVs) are unchanged, so `test_gpu_execution.cpp` and `test_ml_fusion.cpp`
-run untouched against the MIR kernels.
-
-**File layout**
-
-| File | Concern |
-| --- | --- |
-| `src/codegen/ml_fusion_ptx_kernels_common.hpp` | internal header: `f32_offset`, `at`, `silu_fast`, `RowBlock`/`row_block_prologue` (now also exposes `row`), `entry_params` -- moved out of `ml_fusion_ptx_kernels.cpp`'s anonymous namespace (namespace `brass::codegen::ptx_kernels`) |
-| `src/codegen/ml_fusion_ptx_kernels_norm.cpp` | `build_ptx_layernorm_modulate`, `build_ptx_residual_layernorm` + the shared passes `row_sum`, `row_sum_sq_dev`, `block_mean`, `block_rstd` |
-| `src/codegen/ml_fusion_ptx_kernels_gemv.cpp` | `build_ptx_gemv_swiglu`, `build_ptx_gemv_residual` + `gemv_partial_dots` (float4 loop and scalar tail for N weight rows at once), `silu_fast_clamped` |
-| `src/codegen/ml_fusion_ptx.cpp` | now only the eight thin emitters (build -> `emit_function`); `ml_fusion_vision_ptx.cpp` and `ml_fusion_gemv_ptx.cpp` were string-only and are deleted |
-| `src/codegen/ml_fusion_ptx_legacy_norm.cpp`, `ml_fusion_ptx_legacy_gemv.cpp` | **LEGACY**: the four replaced templates byte-for-byte (`legacy::legacy_ptx_{layernorm_modulate,residual_layernorm,gemv_swiglu,gemv_residual}`); `legacy_ptx_header` is now shared from `ml_fusion_ptx_legacy.cpp`. Deleted in Stage 6 |
-| `tests/unit/test_gpu_kernel_migration.cpp` | + verify/ptxas/emitter-equality for the four kernels and legacy-vs-MIR differentials: norms over D in {8, 37, 300, 1024}, rows 1..4, blocks 32..1024 (y and the in-place x); GEMVs over k in {8, 37, 64, 100, 1024, 1027, 2048}, n below and above the grid, blocks 32..1024 |
-
-**Helper added:** `KernelBuilder::for_range_reduce_n(start, end, step,
-inits, body(i, accs) -> accs')` -- `for_range_reduce` with any number of
-loop-carried values (one block argument each); `for_range_reduce` is now the
-one-value wrapper. The GEMV SwiGLU carries the gate and up dot products
-through one K loop with it, as the string kernel does.
-
-**Numerics.** Recipes are the string kernels': the LayerNorms are two-pass
-(mean from plain `add`s in lane order, then `sub` + `fma` of the squared
-deviations about that mean), both statistics are `div.approx` by
-`cvt.rn.f32.u32 d` and rstd is `rsqrt.approx(var + eps)`; the block sums use
-`block_reduce_sum_f32` twice on one 32-float scratch (the helper's trailing
-`bar.sync` makes the reuse safe; the string kernels used `smem[32]` plus two
-shared scalars `s_mean`/`s_rstd` that warp 0 wrote -- `block_reduce_sum_f32`
-instead reduces the partials in every warp and every thread computes the
-same `div.approx`/`rsqrt.approx`, so no broadcast scalar is needed). The GEMV
-K loop is the same per-lane `fma.rn` chain (gate lanes 0..3 then up lanes
-0..3 per float4, scalar tail by `ntid`); the SwiGLU keeps the clamped fast
-SiLU (`mul -log2e; max -88; min 88; ex2.approx; add 1; rcp.approx; mul; mul`),
-which differs from `silu_fast` (Stage 5a, unclamped) and is kept separate as
-`silu_fast_clamped`. The string GEMV SwiGLU used two shared arrays and one
-barrier for both reductions; the MIR kernel runs two `block_reduce_sum_f32`
-on one scratch (four `bar.sync` instead of one -- negligible next to the K
-loop, but a two-value block reduce would restore it).
-
-Differential results (RTX 4090, ptxas 12.9), max relative difference
-legacy vs MIR over 8 norm shapes (D in {8, 37, 300, 1024}, rows 1..4,
-blocks 32..1024) and 7 GEMV shapes (k in {8, 37, 64, 100, 1024, 1027,
-2048}, blocks 32..1024):
-
-| Kernel | Result |
-| --- | --- |
-| GEMV SwiGLU | bit-identical on all 7 shapes |
-| GEMV residual | bit-identical on all 7 shapes |
-| LayerNorm-modulate | bit-identical on 7 of 8; `6.3e-8` (1 ulp) on `R=3, D=37, block=128` |
-| residual LayerNorm | bit-identical on 5 of 8 (the in-place `x` always); `7.4e-8` on the two `D=37` shapes, `1.07e-7` on `B=4, D=300, block=256` |
-
-The 1-ulp cases are not an ISel difference but a ptxas one, verified in the
-SASS: the MIR kernel's `div.approx(var, d); add eps` is unpredicated, and
-ptxas (default `--fmad=true`) contracts the `rcp * total` of the
-`div.approx` expansion with the `add eps` into one `FFMA R10, R10, R11,
-c[eps]`; in the string kernel the same sequence is `@%p3`-predicated and
-stays `FMUL; @!P0 FADD`. So rstd differs by at most one rounding, and the
-same mechanism explains the single 1-ulp RMSNorm shape in 5a. The tests
-require `<= 1e-5` relative and print "bit-identical" or the observed value
-per shape.
-
-**ISel quality (observed, not fixed; adds to the 5a list).** PTX
-instruction counts before ptxas, legacy -> MIR: LayerNorm-modulate 219 ->
-332 (100 `mov`), residual LayerNorm 212 -> 319 (94 `mov`), GEMV SwiGLU
-146 -> 245 (87 `mov`), GEMV residual 100 -> 155 (52 `mov`). After ptxas
-(sm_89 SASS) the MIR norms are *smaller* than the string kernels (240 vs
-312 instructions, the `s_mean`/`s_rstd` round trips and the second
-`cvt.rn.f32.u32` are gone and `rcp(d)` is CSE'd), the GEMV residual is
-equal (112) and the GEMV SwiGLU is 168 vs 160 (the three extra `bar.sync`).
-The PTX-level noise is the 5a list (extract/insert `mov`s, materialized
-constants, block-argument copies, `bra` to the next block, re-read special
-registers) plus:
-
-1. `vbroadcast` of a loop-invariant scalar (`mean`, `rstd`, the `1.0`
-   constant) inside the pass-3 loop body is 4 `mov.f32` per broadcast per
-   iteration; hoisting it or letting the per-lane lowering read the scalar
-   register directly would remove 12 `mov`s per float4 in the
-   LayerNorm-modulate loop.
-2. `for_range_reduce_n` back-edges copy every accumulator through the
-   parallel-copy resolver (`mov.f32 %fA, %fB` per carried value per
-   iteration, plus the same copies on loop entry and at the exit of a loop
-   that feeds the next `for_range_reduce_n`).
-3. `shared_store_f32_indexed`/`shared_load_f32_indexed` with an i32 index
-   emit `cvt.s64.s32; shl.b64; add.s64` per access (`block_reduce_sum_f32`
-   has two); the `ptx_shared_*_indexed` rule could use a `mad.wide.s32` or
-   keep the index 32-bit with a B32 base.
-4. `warp_reduce_sum_f32` leaves the five `mov.b32 %r, 16/8/4/2/1` of the
-   folded shuffle deltas behind (5a item 2), i.e. ten dead `mov`s per block
-   reduction.
-5. The GEMV prologue is `row_block_prologue` with `d = k`, so it computes
-   `vec_d`, `vstart`, `vstep`, `sstart` exactly as the norms do; the string
-   GEMV loop instead ran `base` from 0 by `ntid*4` with an `idx >= k_vec`
-   skip inside (same elements, same order, more iterations) -- the MIR loop
-   bounds are the tighter of the two.
-
-### Stage 5c notes (GEMV Q8_0, GEMV Q4_K)
-
-Last migration batch: no `R"PTX(...)"` kernel remains in the library.
-`emit_ptx_fused_gemv_q8_0` and `emit_ptx_fused_gemv_q4_k` now build MIR
-(`build_ptx_gemv_q8_0` / `build_ptx_gemv_q4_k`) and go through
-`PtxTarget::emit_function`; entry names, parameter lists (`w, x, y, u32 n,
-u32 k`), the one-block-per-row launch and the `k % 32 == 0` / `k % 256 == 0`
-requirements are unchanged, so `test_gpu_execution.cpp` and
-`test_ml_fusion.cpp` run untouched. `ml_fusion_quant_ptx.cpp` is deleted;
-`ml_fusion_ptx.cpp` holds all ten thin emitters.
-
-**File layout**
-
-| File | Concern |
-| --- | --- |
-| `src/codegen/ml_fusion_ptx_kernels_quant.cpp` | `build_ptx_gemv_q8_0`, `build_ptx_gemv_q4_k` + `quant_prologue` (early `ret`, `blocks_per_row = k >> 5|8`, `row_base = w + row * bpr * 34|144`, `sb_local = tid >> 3|6`, `stride = ntid >> 3|6`), `block_ptr`, `x_float4`, `fma_lanes`, `store_row_sum` |
-| `src/codegen/ml_fusion_ptx_legacy_quant.cpp` | **LEGACY**: the two replaced templates byte-for-byte (`legacy::legacy_ptx_gemv_q8_0`, `legacy_ptx_gemv_q4_k`). Deleted in Stage 6 |
-| `tests/unit/test_gpu_kernel_migration_quant.cpp` | verify/ptxas/emitter-equality, legacy-vs-MIR differential, host-reference and CPU-JIT cross checks (the 5a/5b file stayed under 600 lines; this one is separate so neither passes 900) |
-
-**Block formats.** Reproduced from the string kernels and cross-checked
-against the CPU dequantizers (`brass_dequant_q8_0_block` /
-`brass_dequant_q4k_block` in `ml_fusion_quant_cpu.cpp`), which are the
-ground truth for the layouts:
-
-- Q8_0 block, 34 bytes: `f16 d` (`ptx_load_u16` -> `ptx_f16_to_f32`), then
-  32 `int8`. Each thread owns 4 weights (`lane = tid & 7`) which it reads
-  as two 16-bit loads at `blk + 2 + lane*4` (blocks are only 2-byte
-  aligned), packs into one word and sign-extends with `shl 24-8j; shr.s32
-  24` -- the string kernel's exact sequence; `w = cvt.rn.f32.s32(q) * d`,
-  then `fma(w, x, acc)` per lane in order.
-- Q4_K super-block, 144 bytes: 16-byte header loaded as one
-  `vload(i32x4)` (`ld.global.v4.u32`): lane 0 is `d | dmin << 16` (`and
-  0xFFFF` / `lshr 16` -> `ptx_f16_to_f32`), lanes 1..3 are `scales[0..3]`,
-  `scales[4..7]`, `scales[8..11]`. Sub-block `is = (tid & 63) >> 3`, quad
-  `lg = tid & 7`; the 6-bit `sc`/`m` follow `get_scale_min_k4`: with `j = is
-  & 3` and `s0/s4/s8 = scales[j]/[j+4]/[j+8]` (one variable `shr` + `and
-  0xFF` per word), `is < 4` gives `sc = s0 & 0x3F, m = s4 & 0x3F`, else `sc
-  = (s8 & 0xF) | ((s0 >> 6) << 4), m = (s8 >> 4) | ((s4 >> 6) << 4)`. Both
-  are computed and chosen with `select` (`selp.b32`) instead of the string
-  kernel's branch -- integer, so bit-identical. The 4 nibbles come from one
-  `ld.global.u32` at `blk + 16 + (is >> 1) * 32 + lg * 4`; sub-block `2p`
-  is the low nibble of `qs[32p..32p+31]`, `2p+1` the high nibble, so lane
-  `j` is `(q4 >> (hi4 + 8j)) & 0xF` with `hi4 = (is & 1) * 4` (the string
-  kernel predicated a `shr 4` instead). `w = fma(d * sc, nib, -(dmin * m))`
-  then `fma(w, x, acc)`, as before.
-- Both: `block_reduce_sum_f32` on one 32-float scratch (same 16/8/4/2/1
-  `shfl.down` tree and `scratch[lane < nwarps]` second stage as the strings),
-  thread 0 stores `y[row]`.
-
-**Block size.** The string kernels stepped the block index by a hard-coded
-32 (Q8_0: 256 threads / 8 per block) and 4 (Q4_K: 256 / 64 per super-block),
-i.e. they were only correct for a 256-thread launch (which is what
-`test_gpu_execution.cpp` and the runtime use): a 128-thread block skipped
-half the blocks, a 1024-thread block counted most of them several times.
-The MIR kernels derive the stride from `ntid` (`ntid >> 3` / `ntid >> 6`),
-which is identical at 256 and correct for every block size that is a
-multiple of 8 (Q8_0; in practice 32) / 64 (Q4_K: a 32-thread block would
-have stride 0). The migration test therefore runs the legacy-vs-MIR
-differential at block 256 only, and checks the other block sizes against
-the host reference. No other contract change.
-
-**Helpers / intrinsics.** None added: `load_u16`, `load_i32`,
-`vload(i32x4)` + `vextract_lane`, `f16_to_f32`, `i32_to_f32`,
-`u32_to_f32`, `select`, `ashr` and `for_range_reduce` covered everything
-(the loop `for (sb = sb_local; sb < bpr; sb += stride)` replaces the string
-kernels' `base_sb` loop with an inner `sb >= bpr` skip: same blocks, same
-order per thread, no conditional inside the body).
-
-**Results (RTX 4090, ptxas 12.9).** Random weights with a fixed xorshift
-seed: Q8_0 `d` in f16 [0.004, 0.05], `qs` uniform over -128..127; Q4_K `d`
-in [0.002, 0.02], `dmin` in [0.001, 0.01], all 12 scale bytes and 128 nibble
-bytes uniform (every 6-bit field and both packings exercised); `x` uniform
-in [-1, 1].
-
-| Kernel | legacy vs MIR (block 256) | MIR vs host reference (double accumulation, all shapes/blocks) | MIR vs CPU JIT (`compile_gemv_*`) |
-| --- | --- | --- | --- |
-| GEMV Q8_0 | bit-identical on all 6 shapes (n in {1, 3, 17, 64}, k in {32, 64, 96, 1024, 4096}, n > grid) | <= 2.17e-6 over 11 shapes, blocks 32/128/256/1024 | 1.51e-6 (n=6, k=1024) |
-| GEMV Q4_K | bit-identical on all 5 shapes (k in {256, 512, 1024, 4096}, n > grid) | <= 2.57e-6 over 10 shapes, blocks 64/128/256/1024 | 1.83e-6 (n=5, k=2048) |
-
-Required: 1e-5 for legacy-vs-MIR, 1e-4 for the references (the CPU
-dequantizers compute `w * nib - m` with separate `mul`/`sub` and the AVX2
-GEMV accumulates in eight lanes, so a few ulp are expected there).
-
-**ISel quality (observed, not fixed; adds to the 5a/5b lists).** PTX
-instruction counts before ptxas, legacy -> MIR: Q8_0 108 -> 167 (56
-`mov`), Q4_K 156 -> 237 (83 `mov`). SASS (sm_89): Q4_K 152 -> 152 (equal:
-the `selp` pair replaces the branch, the reduction epilogue is a few
-instructions shorter); Q8_0 432 -> 112 -- **ptxas unrolled the legacy Q8_0
-loop 8x** (32 `FFMA`, 32 `LDG`) because its stride was the literal 32,
-whereas the MIR loop steps by `ntid >> 3`, a runtime value, and stays
-rolled (4 `FFMA`, 4 `LDG`). That is the one performance-relevant
-difference of this batch: for the 256-thread launch the string kernel had
-more loads in flight per thread. Options for Stage 6: a `.maxntid`/`.reqntid`
-directive plus a builder-side unroll of the block loop by 2-4 (the strided
-loop is trivially unrollable with a remainder guard), or a launch-bound
-constant stride. The remaining PTX-level noise is the known list: every
-shift count / `and` mask / byte offset materialized with `mov.b32` (the
-Q4_K body has 30 of them, 5 for the value `15` alone), `vextract_lane`
-`mov`s for the header words and the x lanes, the `mov.b32 %r, 0` of a
-folded zero byte offset (`ptx_load_u16(ptr, 0)`), the loop back-edge
-copies, `bra` to the next block and the re-read `%tid.x` in
-`block_reduce_sum_f32`.
-
-### Stage 6a notes (ISel immediates, special-register cache, cleanup passes)
-
-Works through the 5a/5b/5c "ISel quality" lists. Two changes in PtxISel and
-a new pass file; the facade is now `ISel -> ptx::cleanup -> ptx::verify ->
-PtxPrinter` (`PtxOptions::cleanup = false` gives the raw ISel output, and
-`PtxISel::lower` alone is still what the ISel tests inspect).
-
-| File | Concern |
-| --- | --- |
-| `include/brass/target/ptx/ptx_ir.hpp`, `src/target/ptx/ptx_ir.cpp` | `allows_immediate(op, src_index)`, `imm_fits(type, v)`, `is_invariant(SpecialReg)` |
-| `src/target/ptx/ptx_isel*.cpp` | `operand_of` (constant -> immediate where the table allows), `special_register` (per-function cache), `shift_amount` returns an operand |
-| `src/target/ptx/ptx_verifier.cpp` | rejects an immediate in a position the table forbids or that does not fit the slot |
-| `include/brass/target/ptx/ptx_cleanup.hpp`, `src/target/ptx/ptx_cleanup.cpp` | the four passes and `cleanup()` |
-| `tests/unit/test_ptx_cleanup.cpp` | per-pass tests on hand-built IR, ISel immediate/special tests, the pipeline over every intrinsic and the ten kernels |
-
-**Immediate operands.** One table, `allows_immediate`, is consulted by
-`PtxISel::operand_of` when it turns a MIR value into a source operand and by
-the verifier for every source of every instruction. It is deliberately
-narrower than what ptxas accepts (ptxas takes an immediate in every source
-of `setp`, `cvt` and `shfl`; probed on 12.9):
-
-| Opcode | Immediate allowed in source |
-| --- | --- |
-| `mov`, `neg`, `abs`, `not`, `rsqrt`, `sqrt`, `sin`, `cos`, `ex2`, `lg2`, `rcp` | 0 |
-| `add`, `sub`, `mul`, `div`, `rem`, `min`, `max`, `and`, `or`, `xor`, `shl`, `shr` | 0 or 1 |
-| `selp` | 0 or 1 (2 is the predicate) |
-| `mad`, `fma` | 0, 1 or 2 |
-| `setp` | 1 only (a constant on the left keeps its register) |
-| `st` | 1 (the stored value; the address is never an immediate) |
-| `atom` | 1 and 2 (value, cas compare value) |
-| `shfl` | 1, 2, 3 (delta/lane, clamp, member mask; the value never) |
-| `bar` | 0, 1 |
-| `call` | 1.. (arguments; 0 is the callee) |
-| `ld`, `cvt`, `bra`, `ret`, `trap`, `exit` | none |
-
-Width rule (`imm_fits`): a 64-bit slot takes any `int64_t`; a 32-bit slot
-takes `-2^31 .. 2^32-1` (either reading), 16/8-bit slots likewise; `.pred`
-takes none. Consequences: shift counts are `.u32` immediates when the MIR
-constant fits, whatever the width of the shifted value (a 64-bit count that
-does not fit is still narrowed with `cvt.u32.u64`); `mul.wide`/`mad.wide`
-immediates must fit the *narrow* type (`ptx_mul_wide_u32(x, 144)` prints
-`mul.wide.u32 %rd, %r, 144`); `selp` folds both values; `st` and the
-`ptx_shared_store*`/`ptx_store_*` rules fold the stored value; float
-immediates print as `0f%08X`/`0d%016X`; nothing is ever folded into a Pred.
-`mov` of a constant into a Pred is not representable at all (`imm_fits` is
-false for `.pred`). ISel still emits `mov.b32 %r, c` for every MIR constant
-(it does not know whether every use folded); the cleanup's DCE removes the
-ones with no remaining reader and the renumbering removes their
-declarations, so the printed register count shrinks (SwiGLU: `.reg .b32
-%r<10>` and `.f32 %f<45>` instead of `%r<22>` and `%f<79>`).
-
-**Special-register cache.** `PtxISel::special_register(s)` returns one
-register per invariant special register per function; the `mov.u32 %r,
-%tid.x` is appended to the `$L_params` prologue on first use (the prologue
-is created on demand by `prologue_block()`, before the MIR entry block, so
-it also exists for a kernel without parameters that reads `%tid.x`).
-Invariant means `is_invariant(s)`: `%tid.*`, `%ntid.*`, `%ctaid.*`,
-`%nctaid.*`, `%laneid`, `%nwarpid`, `%nsmid`. `%warpid` and `%smid` are not
-(the PTX ISA allows them to change when a warp is rescheduled), nor are
-`%clock`, `%clock64` and `%globaltimer`; those are read at every use, in
-place, and DCE keeps such a `mov` even when its result is unused.
-`global_tid_x` composes the cached `%ctaid.x`/`%ntid.x`/`%tid.x` with one
-`mad.lo.s32`.
-
-**Cleanup passes** (`ptx::cleanup`: `simplify_branches`, then
-`propagate_copies` + `eliminate_dead_instructions` to a fixed point, then
-`renumber_registers`). Each is a public function, is a no-op on clean input
-(the tests run the pipeline twice and compare the printed body) and only
-removes or renames; none reorders or introduces an instruction.
+`ptx::cleanup` runs `simplify_branches`, then `propagate_copies` +
+`eliminate_dead_instructions` to a fixed point, then `renumber_registers`.
+Each is a public function, is a no-op on clean input (the tests run the
+pipeline twice and compare the printed body) and only removes or renames;
+none reorders or introduces an instruction. The IR is "SSA-ish": most
+registers have exactly one def, block parameters and parallel-copy scratch
+registers have several; every pass computes def/use counts first and only
+rewrites registers whose def count it can reason about.
 
 1. *Copy propagation* looks at plain copies: an unguarded `mov` with one
    register destination and one register source of the same class and no
@@ -811,10 +303,8 @@ removes or renames; none reorders or introduces an instruction.
      reads or writes the destination (the swap pattern), or when a `bra`,
      `ret`, `exit` or `trap` sits between them -- a guarded `bra` there
      would make the early write visible on the taken path where the `mov`
-     never ran. This is what removes the loop back-edge and entry copies of
-     the 5a list.
-   - Guarded copies (the `br_if` taken-edge argument copies) are left as
-     they are.
+     never ran. This removes loop back-edge and entry copies.
+   - Guarded copies (the `br_if` taken-edge argument copies) are left alone.
 2. *Dead instruction elimination* deletes any instruction with a
    destination none of whose registers is read anywhere, to a fixed point
    (so a constant chain disappears in one call). Side effects that keep an
@@ -826,100 +316,139 @@ removes or renames; none reorders or introduces an instruction.
    block over `bra` targets and fall-through edges; the first block is
    never removed) are dropped; a trailing `bra next` or `@p bra next` is
    dropped; `@p bra next; bra B` becomes `@!p bra B`; repeated until the
-   block's tail is stable. Blocks therefore fall through, which the
-   verifier accepts and ptxas accepts (including off the end of an
-   `.entry`; probed).
+   block's tail is stable.
 4. *Register renumbering* compacts each class's indices in order of the
-   surviving indices and sets `reg_counts` to the number in use.
+   surviving indices and sets `reg_counts` to the number in use, so the
+   printed `.reg` counts shrink with the code.
 
-Instruction counts before ptxas over the ten kernels: Stage 5 (legacy
-string kernel -> 5c ISel), then this stage's ISel alone and after cleanup.
-The ISel-only column is one or two higher than 5c because `special<S>`
-now copies the cached register (`mov %r, %cached`) instead of reading
-`%tid.x` in place; copy propagation removes that.
+Deliberately not done (ptxas handles all of it): loop-invariant code motion
+(a `vbroadcast` of a loop-invariant scalar inside a loop body is still 4
+`mov.f32` per iteration), algebraic identities (`add x, 0` from a folded
+zero byte offset survives), swapping `setp` operands so a constant left
+operand can fold, `mad.wide` addressing for indexed shared accesses
+(`cvt.s64.s32; shl.b64; add.s64` per access), and dropping an unused `shfl`.
 
-| Kernel | legacy | 5c ISel (`mov`) | 6a ISel | 6a cleaned (`mov`) |
-| --- | ---: | ---: | ---: | ---: |
-| SwiGLU | 76 | 121 (48) | 122 | 73 (4) |
-| AdaLN modulate | -- | 88 (22) | 91 | 69 (8) |
-| AdaLN modulate, gated | -- | 98 (22) | 101 | 79 (8) |
-| residual RMSNorm | 144 | 200 (56) | 204 | 144 (11) |
-| LayerNorm-modulate | 219 | 332 (100) | 336 | 234 (19) |
-| residual LayerNorm | 212 | 319 (94) | 323 | 223 (15) |
-| GEMV SwiGLU | 146 | 245 (87) | 249 | 158 (11) |
-| GEMV residual | 100 | 155 (52) | 159 | 102 (8) |
-| GEMV Q8_0 | 108 | 167 (56) | 171 | 110 (6) |
-| GEMV Q4_K | 156 | 237 (83) | 241 | 153 (6) |
+## Testing
 
-The 126 intrinsic test kernels go from 1,684 to 633 instructions in total.
-Every cleaned kernel verifies, assembles with `ptxas -arch=sm_89`, and the
-GPU, migration and ML Fusion differential tests are unchanged (the
-KernelBuilder kernels' MIR and the `test_gpu_execution.cpp` tolerances were
-not touched).
+Every test that needs a GPU or ptxas prints a visible `[SKIP]` line and
+passes when they are absent; the library has no link-time CUDA dependency
+(`src/gpu/cuda_driver.cpp` loads the driver at runtime on Windows and
+Linux). `tests/unit/ptx_test_support.hpp` has the shared helpers (ptxas /
+device availability, `lower_ok`, `emit_checked`, `upload`/`launch`/
+`download`, the `run_map` one-element-per-thread harness, host f16
+conversion).
 
-**Deliberately not addressed** (from the 5a/5b/5c lists):
+| File | Covers |
+| --- | --- |
+| `test_ptx_ir.cpp` | IR construction, printer formatting (exact hex floats, modifiers), every verifier rule with a hand-built failing instruction |
+| `test_ptx_isel.cpp` | suffix selection, comparisons and predicate materialization, the parallel-copy resolver (swaps, cycles), indexed addressing, the original intrinsic aliases, error paths |
+| `test_ptx_intrinsics.cpp` | a signature row per table entry (coverage-checked against `intrinsic_names()`), ptxas on each, on-device runs per family |
+| `test_ptx_vector.cpp` | every vector opcode on device vs a host reference, warp/block reductions, shared memory round trips, `if_then`/`for_range` and the unrolled loop forms |
+| `test_ptx_cleanup.cpp` | each pass on hand-built IR, immediate folding and the special-register cache, the pipeline over every intrinsic and all ten kernels (verify + ptxas, idempotence) |
+| `test_ptx_target.cpp` | the facade: header, params, `ret`, options |
+| `test_gpu_execution.cpp` | the CPU-style MIR kernels and every emitted fused kernel on device against host references |
+| `test_gpu_kernels.cpp`, `test_gpu_kernels_quant.cpp` | the ten `build_ptx_*` kernels: verify, ptxas, recipe checks on the PTX text, on-device runs against double-precision host references over shape/block-size grids (see the authoring guide for the tolerances) |
+| `test_ml_fusion.cpp` | the CPU JIT side of the fused kernels |
 
-- 5a.1 `vextract_lane`/`vinsert_lane` `mov`s: no lane-aliasing scheme was
-  added to ISel because copy propagation removes them (an extract is a
-  single-def copy of the lane register; an insert into a fresh vector
-  coalesces into the lane's def). The four `mov`s left in SwiGLU are the
-  special-register reads. A `mov` survives only where it is a real copy
-  (a guarded edge copy, or a lane inserted into a vector that is also read
-  as a whole).
-- 5b.1 `vbroadcast` hoisting: a loop-invariant broadcast inside the loop
-  body is still 4 `mov.f32` per iteration. That is loop-invariant code
-  motion, not cleanup; ptxas does it.
-- 5b.3 `cvt.s64.s32; shl.b64; add.s64` per indexed shared access: an ISel
-  addressing change (`mad.wide.s32` or a 32-bit shared base), left for the
-  Stage 6 ISel pass because it changes the intrinsic's contract with the
-  verifier's address rules.
-- 5c Q8_0 unrolling / `.maxntid`: a builder/launch-bound question, not a
-  backend one.
-- Algebraic identities: the Q4_K nibble loop leaves an `add.s32 %r, %r, 0`
-  (a folded zero byte offset) which copy propagation does not see as a
-  copy. Folding `add x, 0` / `mul x, 1` is a peephole the cleanup does not
-  have; ptxas removes it.
-- `setp` with a constant first source keeps the register (`setp.lt.s32 %p,
-  %r7, %r1` after `mov.b32 %r7, 7`) by table policy; swapping the operands
-  and the comparison is an ISel change that was not worth the special case.
-- `shfl` is treated as side-effecting so an unused shuffle result does not
-  drop a warp-collective; none of the kernels has one.
-- The verifier does not require a terminator at the end of the last block
-  (it never did; `ret` is never removed, so the kernels still end with one,
-  but hand-built IR may fall off the end and ptxas accepts that). Adding
-  the check is a one-liner if it is ever wanted.
+## History
 
-## Stages
+The restructuring was done in six stages, one commit each.
 
-1. Enablement: Windows CUDA loader, MinGW link fix, portable GPU tests, `ret`
-   fix. On-device tests run on this machine. (done)
-2. ptx IR + printer + verifier with unit tests. No integration. (done)
-3. `PtxISel` replaces `PtxEmitter`; `PtxTarget::emit_function` becomes
-   ISel -> verify -> print. All kernels pass ptxas and on-device tests.
-   (done; see "Stage 3 implementation notes" above. `ptx_target.cpp` is now
-   a 50-line facade, the string emitter is gone, and `test_ptx_isel.cpp`
-   covers the parallel-copy resolver, suffix selection and the intrinsic
-   table.)
-4. Intrinsics and shared memory in MIR + ISel; `KernelBuilder` helpers.
-   (done; see "Stage 4 implementation notes" under "Kernel intrinsics":
-   vector lowering, the full intrinsic table with MIR signatures, the
-   shared-memory model and the helper list. `test_ptx_intrinsics.cpp` and
-   `test_ptx_vector.cpp` run every intrinsic and vector opcode on device.)
-5. Migrate hand-written kernels to MIR builders (batched), with on-device
-   differential tests against the legacy kernels and CPU references.
-   (done. 5a: SwiGLU, AdaLN modulate x2, residual RMSNorm -- "Stage 5a
-   notes". 5b: LayerNorm-modulate, residual LayerNorm, GEMV SwiGLU/residual
-   -- "Stage 5b notes". 5c: GEMV Q8_0/Q4_K -- "Stage 5c notes". All ten
-   string kernels are migrated; only the `ml_fusion_ptx_legacy*.{hpp,cpp}`
-   files remain, as the reference side of the migration tests, for Stage 6
-   to delete.)
-6. Remove string templates, decompose files, update docs.
-   (6a done: ISel immediates, the special-register cache and the
-   `ptx::cleanup` passes -- "Stage 6a notes". Remaining: delete the
-   `ml_fusion_ptx_legacy*` files and their migration tests, remaining
-   decomposition and doc pass.)
+**Stage 1 -- enablement.** Windows CUDA driver loader (`LoadLibrary` of
+`nvcuda.dll`, `dlopen` of `libcuda.so` on Linux), a MinGW link fix, the
+`ret`-inside-`.entry` fix in the old emitter, and the first on-device tests.
+
+**Stage 2 -- typed IR, printer, verifier.** `ptx_ir.hpp`, `ptx_printer.cpp`,
+`ptx_verifier.cpp` with unit tests, no integration. The register/type
+compatibility relaxation for bit types, the `Symbol` operand, `atom`/`trap`/
+`exit`, the three suffix tables and the PTX 7.x modifier requirements in
+the verifier date from here.
+
+**Stage 3 -- PtxISel.** Replaced the string emitter; `PtxTarget` became
+ISel -> verify -> print. Golden comparison against the string emitter over
+every MIR kernel: after normalizing register numbers the only differences
+were the `$L_params:` label, the dropped always-declared `.reg .f64 %fd<1>`,
+and elided dead `selp.u32` materializations for loop-exit comparisons. No
+kernel got longer.
+
+**Stage 4 -- intrinsics, vectors, shared memory, KernelBuilder.** The full
+intrinsic table (every mnemonic, modifier, special register and state space
+the hand-written kernels used), per-lane vector lowering for all eight
+vector types, `.shared` arrays with `ld/st.shared`, narrow loads, f16
+conversion, and the `KernelBuilder` GPU helpers (indices, barriers,
+shuffles, warp/block reductions, shared memory, fast math, structured
+control flow). 126 intrinsic test kernels and every vector opcode run on
+device.
+
+**Stage 5 -- kernel migration (5a/5b/5c).** The ten string kernels were
+rewritten as MIR builders with unchanged entry names, parameter lists and
+launch contracts, batch by batch, each batch validated by an on-device
+differential test against the string kernel it replaced (RTX 4090, ptxas
+12.9): 5a SwiGLU, AdaLN modulate (gated and not), residual RMSNorm -- every
+shape bit-identical except one RMSNorm shape at 7.5e-8 (1 ulp); 5b
+LayerNorm-modulate, residual LayerNorm, GEMV SwiGLU, GEMV residual -- the
+GEMVs bit-identical on all 7 shapes, the norms bit-identical on 12 of 16
+and within 1.1e-7 on the rest; 5c GEMV Q8_0 and Q4_K -- bit-identical on
+all 11 shapes at block 256, <= 2.6e-6 against a double-accumulation host
+reference at every block size, <= 1.9e-6 against the CPU JIT GEMVs. The
+1-ulp cases were a ptxas difference, not an ISel one: the MIR kernels'
+unpredicated `div.approx(var, d); add eps` is contracted by ptxas
+(`--fmad=true`) into one `FFMA`, whereas the string kernels' predicated
+sequence stayed `FMUL; @!P0 FADD`. Two contract fixes came out of 5c: the
+string Q8_0/Q4_K kernels stepped the block index by a hard-coded 32 / 4
+(correct only for a 256-thread launch); the MIR kernels derive the stride
+from `ntid` and are correct for every block size that is a multiple of 8 /
+64. Helpers added: `for_range_reduce`, `for_range_reduce_n`,
+`block_reduce_sum_f32`.
+
+**Stage 6a -- immediates, special-register cache, cleanup passes.** PTX
+instruction counts before ptxas over the ten kernels: the string kernel,
+the 5c ISel output, and the cleaned output (`mov` count in parentheses):
+
+| Kernel | string | 5c ISel (`mov`) | 6a cleaned (`mov`) |
+| --- | ---: | ---: | ---: |
+| SwiGLU | 76 | 121 (48) | 73 (4) |
+| AdaLN modulate | -- | 88 (22) | 69 (8) |
+| AdaLN modulate, gated | -- | 98 (22) | 79 (8) |
+| residual RMSNorm | 144 | 200 (56) | 144 (11) |
+| LayerNorm-modulate | 219 | 332 (100) | 234 (19) |
+| residual LayerNorm | 212 | 319 (94) | 223 (15) |
+| GEMV SwiGLU | 146 | 245 (87) | 158 (11) |
+| GEMV residual | 100 | 155 (52) | 102 (8) |
+| GEMV Q8_0 | 108 | 167 (56) | 110 (6) |
+| GEMV Q4_K | 156 | 237 (83) | 153 (6) |
+
+The 126 intrinsic test kernels went from 1,684 to 633 instructions in
+total. After ptxas (sm_89 SASS) the MIR norms were already smaller than
+the string kernels (240 vs 312 instructions: the `s_mean`/`s_rstd` shared
+round trips are gone and `rcp(d)` is CSE'd), the GEMV residual equal
+(112), the GEMV SwiGLU 168 vs 160 (three extra `bar.sync` from running
+`block_reduce_sum_f32` twice), Q4_K equal (152).
+
+**Stage 6b -- string kernels deleted, Q8_0/Q4_K unrolling, docs.** The
+`ml_fusion_ptx_legacy*` files and the differential tests are gone; the
+kernels are checked against double-precision host references instead
+(`test_gpu_kernels*.cpp`). The one performance regression of the migration
+was the Q8_0 block loop: ptxas had unrolled the string kernel's loop 8x
+because its stride was a literal, but keeps the MIR loop rolled because
+the stride is `ntid >> 3` at runtime. `KernelBuilder::for_range*` gained
+an `unroll` factor (main loop over `unroll` bodies with a guarded
+remainder loop) and both quantized GEMVs use 4. SASS (sm_89, ptxas 12.9):
+
+| Kernel | string kernel | MIR rolled | MIR unroll 2 | MIR unroll 4 | MIR unroll 8 |
+| --- | --- | --- | --- | --- | --- |
+| Q8_0 instructions / FFMA / LDG / regs | 432 / 32 / 32 / 27 | 112 / 4 / 4 / 23 | 192 / 12 / 12 / 34 | **264 / 20 / 20 / 39** | 392 / 36 / 36 / 40 |
+| Q4_K instructions / FFMA / LDG / regs | 152 / 8 / 3 / 27 | 152 / 8 / 3 / 29 | 272 / 24 / 9 / 40 | **384 / 40 / 15 / 40** | 600 / 72 / 27 / 40 |
+
+(FFMA/LDG counts include the remainder loop's copy of the body.) Measured
+on the RTX 4090 at block 256, microseconds per launch: Q8_0 4096x4096
+12.0 -> 10.7 (unroll 4; 12.4 at 8), 11008x4096 22.5 -> 21.2 (23.1 at 8);
+Q4_K 4096x4096 14.5 -> 12.9, 16384x16384 175.1 -> 165.4 (165.2 at 8). The
+16384x16384 Q8_0 shape is memory-bound at ~945 GB/s with every factor. No
+`.maxntid`/`.reqntid` directive was needed.
 
 ## File size rule
 
 Files stay under 1,000 lines. A file that grows past that is decomposed by
-concern (as `x64_isel_*.cpp` is). Files over 2,000 lines are never acceptable.
+concern (as `x64_isel_*.cpp` and `ptx_isel_*.cpp` are). Files over 2,000
+lines are never acceptable.

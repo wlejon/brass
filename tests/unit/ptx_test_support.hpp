@@ -1,9 +1,10 @@
 #pragma once
 
 // Shared helpers for the PTX backend tests (test_ptx_intrinsics.cpp,
-// test_ptx_vector.cpp): ptxas / device availability with visible [SKIP]
-// lines, lower+verify of a MIR function, and a small launch-and-download
-// harness for kernels that map input buffers to an output buffer.
+// test_ptx_vector.cpp, test_ptx_cleanup.cpp, test_gpu_kernels*.cpp): ptxas /
+// device availability with visible [SKIP] lines, lower+verify of a MIR
+// function, upload/launch/download, and a small harness for kernels that map
+// input buffers to an output buffer.
 
 #include "test_framework.hpp"
 
@@ -62,8 +63,8 @@ inline bool ptxas_available() {
 }
 
 inline bool ptxas_assembles(const std::string& ptx, const char* arch = "sm_70") {
-    std::filesystem::path in = scratch_path("brass_ptx_stage4_check.ptx");
-    std::filesystem::path out = scratch_path("brass_ptx_stage4_check.cubin");
+    std::filesystem::path in = scratch_path("brass_ptx_check.ptx");
+    std::filesystem::path out = scratch_path("brass_ptx_check.cubin");
     {
         std::ofstream f(in, std::ios::binary);
         if (!f) return false;

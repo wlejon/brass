@@ -149,8 +149,8 @@ add_executable(brass_unit_tests
     unit/test_ptx_cleanup.cpp
     unit/test_ml_fusion.cpp
     unit/test_gpu_execution.cpp
-    unit/test_gpu_kernel_migration.cpp
-    unit/test_gpu_kernel_migration_quant.cpp
+    unit/test_gpu_kernels.cpp
+    unit/test_gpu_kernels_quant.cpp
 )
 
 target_include_directories(brass_unit_tests

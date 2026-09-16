@@ -1,8 +1,8 @@
 // KernelBuilder GPU helpers: thin MIR wrappers over the `ptx_*` builtins that
 // PtxISel lowers (src/target/ptx/ptx_isel_intrinsics*.cpp). Kernels written
 // with these read like CUDA; none of them knows PTX syntax. The builtin
-// signatures are documented in docs/ptx_backend_design.md ("Stage 4
-// implementation notes").
+// signatures and the helper contracts are documented in
+// docs/ptx_kernel_authoring.md.
 
 #include <brass/codegen/kernel_jit.hpp>
 
@@ -203,41 +203,23 @@ void KernelBuilder::if_then(Value* cond, const std::function<void()>& body) {
     b_.position_at_end(join);
 }
 
-// head(i): if i < end -> body else exit;  body: ...; br head(i + step)
-void KernelBuilder::for_range(Value* start, Value* end, Value* step, const std::function<void(Value*)>& body) {
-    BasicBlock* from = b_.current_block();
-    BasicBlock* head = b_.append_block("for_head");
-    BasicBlock* body_bb = b_.append_block("for_body");
-    BasicBlock* exit = b_.append_block("for_exit");
-    Value* i = b_.add_block_param(head, start->type());
-
-    b_.position_at_end(from);
-    b_.build_br(head, {start});
-
-    b_.position_at_end(head);
-    b_.build_br_if(b_.build_slt(i, end), body_bb, exit);
-
-    b_.position_at_end(body_bb);
-    body(i);
-    if (!b_.current_block()->terminator()) b_.build_br(head, {b_.build_add(i, step)});
-
-    b_.position_at_end(exit);
-}
-
-// head(i, acc): if i < end -> body else exit;  body: acc' = body(i, acc); br head(i + step, acc')
-// The result is head's `acc` parameter, which is valid in the exit block
-// because the head dominates it; no copy into the exit block is needed.
-Value* KernelBuilder::for_range_reduce(Value* start, Value* end, Value* step, Value* init,
-                                       const std::function<Value*(Value*, Value*)>& body) {
-    std::vector<Value*> out = for_range_reduce_n(start, end, step, {init}, [&](Value* i, const std::vector<Value*>& accs) {
-        return std::vector<Value*>{body(i, accs[0])};
-    });
-    return out[0];
-}
-
-// head(i, a0, a1, ...): if i < end -> body else exit;  body: a' = body(i, a); br head(i + step, a'...)
-std::vector<Value*> KernelBuilder::for_range_reduce_n(Value* start, Value* end, Value* step, const std::vector<Value*>& inits,
-                                                      const std::function<std::vector<Value*>(Value*, const std::vector<Value*>&)>& body) {
+// The one loop shape every for_range* variant is made of:
+//
+//   from:     span = step * (copies - 1); stride = step * copies   (copies > 1)
+//             br head(start, inits...)
+//   head(i, a...):  if (i + span < end) -> body else exit      (i < end when copies == 1)
+//   body:     a' = body(i, a); a'' = body(i + step, a'); ... (copies times)
+//             br head(i + stride, a''...)
+//   exit:
+//
+// The results are head's `a...` parameters (and `i`), which are valid in the
+// exit block because the head dominates it; no copies into the exit block
+// are needed. With copies == 1 a body that ends in its own terminator simply
+// has no back-edge; with copies > 1 that is an error because the next copy
+// would land after the terminator.
+std::vector<Value*> KernelBuilder::emit_loop(Value* start, Value* end, Value* step, const std::vector<Value*>& inits,
+                                             const LoopBodyN& body, unsigned copies, Value** final_i) {
+    if (copies == 0) throw std::invalid_argument("KernelBuilder: loop unroll factor must be >= 1");
     BasicBlock* from = b_.current_block();
     BasicBlock* head = b_.append_block("for_head");
     BasicBlock* body_bb = b_.append_block("for_body");
@@ -246,23 +228,78 @@ std::vector<Value*> KernelBuilder::for_range_reduce_n(Value* start, Value* end, 
     std::vector<Value*> accs;
     for (Value* init : inits) accs.push_back(b_.add_block_param(head, init->type()));
 
+    b_.position_at_end(from);
+    auto count = [&](unsigned c) -> Value* {
+        return start->type().is_i64() ? b_.build_iconst_i64(static_cast<int64_t>(c)) : b_.build_iconst_i32(static_cast<int32_t>(c));
+    };
+    Value* span = nullptr;                       // step * (copies - 1), loop-invariant
+    Value* stride = step;                        // step * copies
+    if (copies > 1) {
+        span = copies == 2 ? step : b_.build_mul(step, count(copies - 1));
+        stride = b_.build_mul(step, count(copies));
+    }
     std::vector<Value*> entry_args = {start};
     entry_args.insert(entry_args.end(), inits.begin(), inits.end());
-    b_.position_at_end(from);
     b_.build_br(head, entry_args);
 
     b_.position_at_end(head);
-    b_.build_br_if(b_.build_slt(i, end), body_bb, exit);
+    Value* last = span ? b_.build_add(i, span) : i;
+    b_.build_br_if(b_.build_slt(last, end), body_bb, exit);
 
     b_.position_at_end(body_bb);
-    std::vector<Value*> next = body(i, accs);
-    if (next.size() != inits.size()) throw std::invalid_argument("KernelBuilder::for_range_reduce_n: body returned the wrong number of values");
-    std::vector<Value*> back_args = {b_.build_add(i, step)};
-    back_args.insert(back_args.end(), next.begin(), next.end());
-    b_.build_br(head, back_args);
+    Value* ic = i;
+    std::vector<Value*> cur = accs;
+    for (unsigned c = 0; c < copies; ++c) {
+        if (c > 0) {
+            if (b_.current_block()->terminator()) {
+                throw std::invalid_argument("KernelBuilder: an unrolled loop body must not end in its own terminator");
+            }
+            ic = b_.build_add(ic, step);
+        }
+        cur = body(ic, cur);
+        if (cur.size() != inits.size()) throw std::invalid_argument("KernelBuilder::for_range_reduce_n: body returned the wrong number of values");
+    }
+    if (!b_.current_block()->terminator()) {
+        std::vector<Value*> back_args = {b_.build_add(i, stride)};
+        back_args.insert(back_args.end(), cur.begin(), cur.end());
+        b_.build_br(head, back_args);
+    } else if (copies > 1) {
+        throw std::invalid_argument("KernelBuilder: an unrolled loop body must not end in its own terminator");
+    }
 
     b_.position_at_end(exit);
+    if (final_i) *final_i = i;
     return accs;
+}
+
+// for (i = start; i < end; i += step) body(i)
+void KernelBuilder::for_range(Value* start, Value* end, Value* step, const std::function<void(Value*)>& body,
+                              unsigned unroll) {
+    for_range_reduce_n(start, end, step, {}, [&](Value* i, const std::vector<Value*>&) {
+        body(i);
+        return std::vector<Value*>{};
+    }, unroll);
+}
+
+// for (i = start; i < end; i += step) acc = body(i, acc)
+Value* KernelBuilder::for_range_reduce(Value* start, Value* end, Value* step, Value* init,
+                                       const std::function<Value*(Value*, Value*)>& body, unsigned unroll) {
+    std::vector<Value*> out = for_range_reduce_n(start, end, step, {init}, [&](Value* i, const std::vector<Value*>& accs) {
+        return std::vector<Value*>{body(i, accs[0])};
+    }, unroll);
+    return out[0];
+}
+
+// for (i = start; i < end; i += step) a... = body(i, a...). Unrolled: the
+// main loop runs `unroll` bodies per iteration while a full group is left,
+// then the remainder loop (one body per iteration) picks up where it stopped,
+// carrying the main loop's accumulators.
+std::vector<Value*> KernelBuilder::for_range_reduce_n(Value* start, Value* end, Value* step, const std::vector<Value*>& inits,
+                                                      const LoopBodyN& body, unsigned unroll) {
+    if (unroll <= 1) return emit_loop(start, end, step, inits, body, 1, nullptr);
+    Value* rest = nullptr;
+    std::vector<Value*> accs = emit_loop(start, end, step, inits, body, unroll, &rest);
+    return emit_loop(rest, end, step, accs, body, 1, nullptr);
 }
 
 } // namespace brass::codegen

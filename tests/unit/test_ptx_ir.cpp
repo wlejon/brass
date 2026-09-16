@@ -599,7 +599,7 @@ TEST_CASE("PTX IR - verifier rejects vector, shift, immediate and modifier misus
     { Fixture x; x.reject(Inst::make(Opcode::add, Type::f32).dst(x.f).src(x.f1).src(Operand::imm(1)), "requires a float immediate"); }
     { Fixture x; x.reject(Inst::make(Opcode::add, Type::u32).dst(x.r).src(x.r1).src(Operand::imm_f32(1.0f)), "requires an integer immediate"); }
     { Fixture x; x.reject(Inst::make(Opcode::add, Type::u32).dst(Operand::imm(1)).src(x.r1).src(x.r), "is not a register"); }
-    // Immediate positions follow the allows_immediate table (Stage 6a): setp
+    // Immediate positions follow the allows_immediate table: setp
     // takes one only as its second source, cvt and the shfl value never do,
     // and an integer immediate must fit the instruction width.
     { Fixture x; x.reject(Inst::make(Opcode::setp, Type::s32).cmp(CmpOp::lt).dst(x.p).src(Operand::imm(5)).src(x.r), "source 0 of setp may not be an immediate"); }

@@ -9,7 +9,7 @@
 // The lowered function is not verified here; PtxTarget runs ptx::verify on
 // the result and refuses to print anything that fails.
 //
-// See docs/ptx_backend_design.md ("PtxISel", "Stage 3 implementation notes").
+// See docs/ptx_backend_design.md ("PtxISel").
 
 #include <brass/mir/function.hpp>
 #include <brass/target/ptx/ptx_ir.hpp>

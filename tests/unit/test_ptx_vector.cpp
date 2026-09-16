@@ -1,16 +1,17 @@
-// Stage 4 PTX vector lowering and KernelBuilder GPU helpers:
+// PTX vector lowering and KernelBuilder GPU helpers:
 //   - every vector MIR opcode on f32x4 / f64x2 / i32x4 / f32x8 lowers to
 //     per-lane PTX, assembles and matches a host reference on device,
 //   - warp/block reductions, shared-memory round trips, shfl variants,
-//     bar.sync ids, if_then / for_range,
-//   - the ml_fusion gemv_q8_0 / gemv_q4_k MIR builders (previously blocked
-//     on vzero / f32x8) lower and verify.
+//     bar.sync ids, if_then / for_range and the unrolled loop forms,
+//   - the ml_fusion gemv_q8_0 / gemv_q4_k CPU MIR builders (vzero / f32x8)
+//     lower and verify.
 
 #include "ptx_test_support.hpp"
 
 #include <brass/codegen/ml_fusion.hpp>
 
 #include <numeric>
+#include <stdexcept>
 
 using namespace brass;
 using brass::codegen::KernelBuilder;
@@ -460,4 +461,118 @@ TEST_CASE("PTX vector - if_then and for_range build correct control flow") {
     launch(ptx, "cf", 1, 1, {&po, &n_arg});
     auto got = download<int32_t>(dout, 10);
     for (int i = 0; i < 10; ++i) CHECK_EQ(got[i], i * 3 + (i % 2 ? 100 : 0));
+}
+
+TEST_CASE("PTX vector - unrolled for_range visits every element once with a runtime stride") {
+    // Grid-stride loop unrolled 4x: for (i = tid; i < n; i += ntid) { out[i] = i * 3; count[i] += 1 }
+    Module mod("unroll");
+    Function* f = mod.create_function("unroll", Type::void_type(), {Type::ptr(), Type::ptr(), Type::i32()});
+    KernelBuilder kb(mod, f);
+    Builder& b = kb.builder();
+    BasicBlock* e = b.append_block("entry");
+    b.position_at_end(e);
+    Value* out = b.add_block_param(e, Type::ptr());
+    Value* count = b.add_block_param(e, Type::ptr());
+    Value* n = b.add_block_param(e, Type::i32());
+    kb.for_range(kb.tid_x(), n, kb.ntid_x(), [&](Value* i) {
+        kb.store_i32_indexed(out, i, kb.mul(i, kb.const_i32(3)));
+        kb.atom_add_i32(b.build_add(count, b.build_shl(b.build_zext_i64(i), kb.const_i32(2))), kb.const_i32(1));
+    }, 4);
+    b.build_ret_void();
+
+    std::string ptx = emit_checked(*f);
+    // main loop (4 bodies) + remainder loop (1 body): five stores, five atomics, two loop heads
+    size_t stores = 0, atoms = 0, setps = 0;
+    for (size_t p = ptx.find("st.global.u32"); p != std::string::npos; p = ptx.find("st.global.u32", p + 1)) ++stores;
+    for (size_t p = ptx.find("atom.global.add"); p != std::string::npos; p = ptx.find("atom.global.add", p + 1)) ++atoms;
+    for (size_t p = ptx.find("setp.lt.s32"); p != std::string::npos; p = ptx.find("setp.lt.s32", p + 1)) ++setps;
+    CHECK_EQ(stores, size_t(5));
+    CHECK_EQ(atoms, size_t(5));
+    CHECK_EQ(setps, size_t(2));
+    if (!gpu_ready()) return;
+    // n not a multiple of the block, block sizes 32 and 96: main iterations and remainder both run
+    for (uint32_t block : {32u, 96u}) {
+        for (int32_t n_arg : {1, 31, 97, 1000}) {
+            CudaBuffer dout = CudaBuffer::alloc(static_cast<size_t>(n_arg) * 4);
+            CudaBuffer dcount = CudaBuffer::alloc(static_cast<size_t>(n_arg) * 4);
+            REQUIRE(dout.valid() && dout.zero());
+            REQUIRE(dcount.valid() && dcount.zero());
+            void* po = dout.device_ptr(); void* pc = dcount.device_ptr();
+            launch(ptx, "unroll", 1, block, {&po, &pc, &n_arg});
+            auto got = download<int32_t>(dout, static_cast<size_t>(n_arg));
+            auto visits = download<int32_t>(dcount, static_cast<size_t>(n_arg));
+            bool ok = true;
+            for (int32_t i = 0; i < n_arg; ++i) ok = ok && got[i] == i * 3 && visits[i] == 1;
+            if (!ok) std::cerr << "unrolled for_range wrong for block=" << block << " n=" << n_arg << "\n";
+            CHECK(ok);
+        }
+    }
+}
+
+TEST_CASE("PTX vector - unrolled for_range_reduce_n keeps the per-thread element order") {
+    // Two carried values with an order-sensitive recurrence: h = h * 31 + i; s = s + i * i,
+    // over [start, end) by step, unrolled 3x (odd factor: the remainder loop takes 0..2 elements).
+    Module mod("unroll_reduce");
+    Function* f = mod.create_function("unroll_reduce", Type::void_type(),
+                                      {Type::ptr(), Type::i32(), Type::i32(), Type::i32()});
+    KernelBuilder kb(mod, f);
+    Builder& b = kb.builder();
+    BasicBlock* e = b.append_block("entry");
+    b.position_at_end(e);
+    Value* out = b.add_block_param(e, Type::ptr());
+    Value* start = b.add_block_param(e, Type::i32());
+    Value* end = b.add_block_param(e, Type::i32());
+    Value* step = b.add_block_param(e, Type::i32());
+    std::vector<Value*> r = kb.for_range_reduce_n(start, end, step, {kb.const_i32(7), kb.const_i32(0)},
+        [&](Value* i, const std::vector<Value*>& acc) {
+            Value* h = kb.add(kb.mul(acc[0], kb.const_i32(31)), i);
+            Value* s = kb.add(acc[1], kb.mul(i, i));
+            return std::vector<Value*>{h, s};
+        }, 3);
+    kb.store_i32(out, r[0], 0);
+    kb.store_i32(out, r[1], 4);
+    b.build_ret_void();
+
+    std::string ptx = emit_checked(*f);
+    if (!gpu_ready()) return;
+    struct Case { int32_t start, end, step; };
+    for (Case c : {Case{0, 10, 1}, Case{3, 100, 7}, Case{0, 0, 1}, Case{5, 6, 1}, Case{2, 9, 3}, Case{0, 12, 4}}) {
+        CudaBuffer dout = CudaBuffer::alloc(8);
+        REQUIRE(dout.valid() && dout.zero());
+        void* po = dout.device_ptr();
+        launch(ptx, "unroll_reduce", 1, 1, {&po, &c.start, &c.end, &c.step});
+        auto got = download<int32_t>(dout, 2);
+        int32_t h = 7, s = 0;
+        for (int32_t i = c.start; i < c.end; i += c.step) { h = static_cast<int32_t>(static_cast<uint32_t>(h) * 31u + static_cast<uint32_t>(i)); s += i * i; }
+        CHECK_EQ(got[0], h);
+        CHECK_EQ(got[1], s);
+    }
+}
+
+TEST_CASE("PTX vector - an unrolled loop body may not end in its own terminator") {
+    Module mod("unroll_bad");
+    Function* f = mod.create_function("unroll_bad", Type::void_type(), {Type::i32()});
+    KernelBuilder kb(mod, f);
+    Builder& b = kb.builder();
+    BasicBlock* e = b.append_block("entry");
+    b.position_at_end(e);
+    Value* n = b.add_block_param(e, Type::i32());
+    bool threw = false;
+    try {
+        kb.for_range(kb.const_i32(0), n, kb.const_i32(1), [&](Value*) { b.build_ret_void(); }, 2);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    CHECK(threw);
+    // unroll == 1 keeps accepting a body that returns early
+    Module mod2("unroll_ok");
+    Function* f2 = mod2.create_function("unroll_ok", Type::void_type(), {Type::i32()});
+    KernelBuilder kb2(mod2, f2);
+    Builder& b2 = kb2.builder();
+    BasicBlock* e2 = b2.append_block("entry");
+    b2.position_at_end(e2);
+    Value* n2 = b2.add_block_param(e2, Type::i32());
+    kb2.for_range(kb2.const_i32(0), n2, kb2.const_i32(1), [&](Value*) { b2.build_ret_void(); }, 1);
+    b2.build_ret_void();
+    lower_ok(*f2);
 }

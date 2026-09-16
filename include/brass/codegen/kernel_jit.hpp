@@ -186,8 +186,8 @@ public:
     // ------------------------------------------------------------------
     // GPU (PTX) kernel helpers. Each is a few lines of MIR around a
     // `ptx_*` builtin call (lowered by PtxISel, see
-    // docs/ptx_backend_design.md "Stage 4 implementation notes"); nothing
-    // here knows PTX syntax. Implemented in src/codegen/kernel_builder_ptx.cpp.
+    // docs/ptx_kernel_authoring.md); nothing here knows PTX syntax.
+    // Implemented in src/codegen/kernel_builder_ptx.cpp.
     // ------------------------------------------------------------------
 
     // Constants
@@ -277,22 +277,39 @@ public:
 
     // Structured control flow. All leave the builder positioned in the
     // join/exit block they create. `body` receives the induction variable
-    // (same type as `start`); the loop runs while i < end (signed).
+    // (same type as `start`, i32 or i64); the loop runs while i < end (signed).
+    //
+    // `unroll` > 1 emits `unroll` copies of the body per iteration: a main
+    // loop over i while i + step * (unroll - 1) < end, stepping by
+    // step * unroll and calling body(i), body(i + step), ..., then a
+    // remainder loop with the plain step for the elements that are left.
+    // Element order per thread is unchanged. An unrolled body must not end
+    // in its own terminator (the copies are concatenated in one block).
     void if_then(Value* cond, const std::function<void()>& body);
-    void for_range(Value* start, Value* end, Value* step, const std::function<void(Value*)>& body);
+    // for (i = start; i < end; i += step) body(i). With unroll == 1 the body
+    // may end in its own terminator (e.g. a `ret`).
+    void for_range(Value* start, Value* end, Value* step, const std::function<void(Value*)>& body,
+                   unsigned unroll = 1);
     // for (i = start; i < end; i += step) acc = body(i, acc); returns the
     // final acc (a loop-carried block argument: `body` must return the new
     // value and must not end in its own terminator).
     Value* for_range_reduce(Value* start, Value* end, Value* step, Value* init,
-                            const std::function<Value*(Value*, Value*)>& body);
+                            const std::function<Value*(Value*, Value*)>& body, unsigned unroll = 1);
     // Same with several loop-carried values (one block argument each): `body`
     // returns the new values in the order of `inits` (same count and types).
+    using LoopBodyN = std::function<std::vector<Value*>(Value*, const std::vector<Value*>&)>;
     std::vector<Value*> for_range_reduce_n(Value* start, Value* end, Value* step, const std::vector<Value*>& inits,
-                                           const std::function<std::vector<Value*>(Value*, const std::vector<Value*>&)>& body);
+                                           const LoopBodyN& body, unsigned unroll = 1);
 
 private:
     std::unique_ptr<Builder> owned_builder_;
     Builder& b_;
+
+    // One counted loop with `copies` body copies per iteration; see
+    // kernel_builder_ptx.cpp. Returns the final accumulators; `final_i`
+    // receives the induction variable's value in the exit block.
+    std::vector<Value*> emit_loop(Value* start, Value* end, Value* step, const std::vector<Value*>& inits,
+                                  const LoopBodyN& body, unsigned copies, Value** final_i);
 };
 
 class KernelJit {

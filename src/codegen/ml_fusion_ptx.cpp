@@ -1,15 +1,14 @@
 // PTX emitters for the fused ML GPU kernels: each builds the kernel as MIR
 // (ml_fusion_ptx_kernels*.cpp) and lowers it through PtxTarget::emit_function
-// (PtxISel -> verify -> print). The former hand-written string templates live
-// in ml_fusion_ptx_legacy*.cpp until Stage 6, only as the reference side of
-// tests/unit/test_gpu_kernel_migration*.cpp.
+// (PtxISel -> cleanup -> verify -> print). The kernels are validated on
+// device by tests/unit/test_gpu_kernels*.cpp and test_gpu_execution.cpp.
 
 #include <brass/codegen/ml_fusion.hpp>
 
 namespace brass::codegen {
 
 // =========================================================================
-// Stage 5a: residual RMSNorm, SwiGLU, AdaLN modulate (ml_fusion_ptx_kernels.cpp)
+// residual RMSNorm, SwiGLU, AdaLN modulate (ml_fusion_ptx_kernels.cpp)
 // =========================================================================
 
 std::string MlFusionCompiler::emit_ptx_fused_residual_rms_norm(const target::PtxOptions& opts) {
@@ -35,7 +34,7 @@ std::string MlFusionCompiler::emit_ptx_adaln_modulate(bool gated, const target::
 }
 
 // =========================================================================
-// Stage 5b: LayerNorm-modulate, residual LayerNorm (ml_fusion_ptx_kernels_norm.cpp)
+// LayerNorm-modulate, residual LayerNorm (ml_fusion_ptx_kernels_norm.cpp)
 // =========================================================================
 
 std::string MlFusionCompiler::emit_ptx_fused_layernorm_modulate(const target::PtxOptions& opts) {
@@ -51,7 +50,7 @@ std::string MlFusionCompiler::emit_ptx_fused_residual_layernorm(const target::Pt
 }
 
 // =========================================================================
-// Stage 5b: GEMV SwiGLU, GEMV residual (ml_fusion_ptx_kernels_gemv.cpp)
+// GEMV SwiGLU, GEMV residual (ml_fusion_ptx_kernels_gemv.cpp)
 // =========================================================================
 
 std::string MlFusionCompiler::emit_ptx_fused_gemv_swiglu(const target::PtxOptions& opts) {
@@ -67,7 +66,7 @@ std::string MlFusionCompiler::emit_ptx_fused_gemv_residual(const target::PtxOpti
 }
 
 // =========================================================================
-// Stage 5c: GEMV Q8_0, GEMV Q4_K (ml_fusion_ptx_kernels_quant.cpp)
+// GEMV Q8_0, GEMV Q4_K (ml_fusion_ptx_kernels_quant.cpp)
 // =========================================================================
 
 std::string MlFusionCompiler::emit_ptx_fused_gemv_q8_0(const target::PtxOptions& opts) {

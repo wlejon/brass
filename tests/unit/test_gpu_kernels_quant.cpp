@@ -1,24 +1,16 @@
-// Stage 5c kernel migration: the MIR-built quantized GEMV GPU kernels
-// (build_ptx_gemv_q8_0, build_ptx_gemv_q4_k) against the hand-written PTX
-// they replaced (ml_fusion_ptx_legacy_quant.cpp) and against the CPU block
-// formats. Random quantized weights (fixed seed, f16 scales in a sane range)
-// and random x over several n / k / block sizes:
-//
-//   - legacy vs MIR on device, required <= 1e-5 relative (observed values are
-//     printed per shape). The legacy strings hard-code a 256-thread block
-//     (they step the block index by 256 / threads_per_block), so this
-//     comparison runs at block = 256 only;
-//   - MIR vs a host reference that dequantizes exactly as
-//     brass_dequant_q8_0_block / brass_dequant_q4k_block do (double
-//     accumulation), at 1e-4, for every shape including blocks 32/64, 128 and
-//     1024 and n larger than the grid (those rows stay 0);
-//   - MIR vs the CPU JIT GEMV (compile_gemv_q8_0 / compile_gemv_q4_k) for one
-//     shape each, at 1e-4.
-//
+// The quantized GEMV GPU kernels built as MIR (build_ptx_gemv_q8_0,
+// build_ptx_gemv_q4_k) checked on device against host references that
+// dequantize exactly as the CPU dequantizers (brass_dequant_q8_0_block /
+// brass_dequant_q4k_block) do, with double accumulation, and against the CPU
+// JIT GEMVs (compile_gemv_q8_0 / compile_gemv_q4_k). Random quantized weights
+// (fixed seed, f16 scales in a sane range, every 6-bit scale field and both
+// nibble packings exercised) and random x over several n / k / block sizes,
+// including n larger than the grid (those rows stay 0) and blocks 32/64 up
+// to 1024. Required 1e-4 relative; the observed maximum is printed per shape.
+// The kernels must also pass ptx::verify and ptxas and keep their recipe.
 // Visible [SKIP] lines without ptxas / CUDA.
 
 #include "ptx_test_support.hpp"
-#include "../../src/codegen/ml_fusion_ptx_legacy.hpp"
 
 #include <brass/codegen/ml_fusion.hpp>
 
@@ -33,8 +25,7 @@ using namespace ptxtest;
 
 namespace {
 
-constexpr float kMigrationTol = 1e-5f;   // legacy vs MIR
-constexpr float kReferenceTol = 1e-4f;   // MIR vs host / CPU JIT reference
+constexpr float kReferenceTol = 1e-4f;   // GPU vs host / CPU JIT reference
 
 float max_rel_diff(const std::vector<float>& a, const std::vector<float>& b) {
     REQUIRE(a.size() == b.size());
@@ -44,19 +35,6 @@ float max_rel_diff(const std::vector<float>& a, const std::vector<float>& b) {
         worst = std::max(worst, d);
     }
     return worst;
-}
-
-void check_agree(const char* what, const std::vector<float>& legacy, const std::vector<float>& mir, float tol) {
-    float d = max_rel_diff(legacy, mir);
-    if (d == 0.0f) std::printf("    %-44s bit-identical\n", what);
-    else std::printf("    %-44s max rel diff %.3g\n", what, static_cast<double>(d));
-    CHECK(d <= tol);
-    for (size_t i = 0; i < legacy.size(); ++i) {
-        if (!near(mir[i], legacy[i], tol)) {
-            std::fprintf(stderr, "%s: element %zu legacy %.9g mir %.9g\n", what, i, legacy[i], mir[i]);
-            break;
-        }
-    }
 }
 
 // Lower + verify + ptxas for a MIR kernel; returns the PTX text.
@@ -185,26 +163,29 @@ void check_reference(const char* what, const std::vector<float>& got, const std:
 struct QuantShape { uint32_t n, k, grid, block; };
 
 // n in {1, 3, 17, 64} (17 rows on an 8-block grid: rows beyond the grid stay 0),
-// k over the multiples the kernels require, blocks 32/64 .. 1024. Block 256 is the
-// launch the string kernels assumed and the only one they compute correctly.
+// k over the multiples the kernels require -- including counts that are not a
+// multiple of the unrolled stride, so the remainder loop runs -- and blocks
+// 32/64 .. 1024 (256 is what the runtime launches).
 const QuantShape kQ8Shapes[] = {
     {1, 32, 1, 256}, {3, 64, 3, 256}, {17, 96, 17, 256}, {64, 1024, 64, 256}, {3, 4096, 3, 256}, {17, 1024, 8, 256},
     {3, 96, 3, 32}, {64, 64, 64, 32}, {17, 1024, 17, 128}, {4, 4096, 4, 1024}, {1, 32, 1, 1024},
+    {5, 1120, 5, 256}, {2, 2336, 2, 128}, {3, 8192, 3, 256},
 };
 const QuantShape kQ4KShapes[] = {
     {1, 256, 1, 256}, {3, 512, 3, 256}, {17, 1024, 17, 256}, {64, 4096, 64, 256}, {17, 4096, 8, 256},
     {3, 512, 3, 64}, {64, 256, 64, 64}, {17, 1024, 17, 128}, {4, 4096, 4, 1024}, {1, 256, 1, 1024},
+    {5, 1280, 5, 256}, {2, 2816, 2, 128}, {3, 8192, 3, 256},
 };
 
 } // namespace
 
 // ---------------------------------------------------------------------------
-// Static checks: the MIR kernels verify, assemble, and keep the recipe
+// Static checks: the kernels verify, assemble, and keep the recipe
 // ---------------------------------------------------------------------------
 
-TEST_CASE("GPU migration - Stage 5c quantized GEMV MIR kernels verify, assemble and keep the recipe") {
+TEST_CASE("GPU kernels - quantized GEMV kernels verify, assemble and keep the recipe") {
     MlFusionCompiler c;
-    Module m8("mig_gemv_q8_0"), m4("mig_gemv_q4_k");
+    Module m8("k_gemv_q8_0"), m4("k_gemv_q4_k");
     std::string q8 = checked_mir_ptx(c.build_ptx_gemv_q8_0(m8));
     std::string q4 = checked_mir_ptx(c.build_ptx_gemv_q4_k(m4));
 
@@ -224,89 +205,78 @@ TEST_CASE("GPU migration - Stage 5c quantized GEMV MIR kernels verify, assemble 
         has(*p, "shfl.sync.down.b32"); has(*p, "bar.sync 0;"); has(*p, ".shared .align 16 .f32 smem_0[32]");
         has(*p, "st.global.f32"); has(*p, "%ntid.x"); has(*p, "%ctaid.x");
         CHECK(p->find("st.global.v4") == std::string::npos);   // one scalar output per block
-        CHECK(p->find("call ") == std::string::npos);          // no CPU dequantizer calls remain
+        CHECK(p->find("call ") == std::string::npos);          // no CPU dequantizer calls
         CHECK(p->find("div.") == std::string::npos);
     }
     // Q8_0: f16 header, two u16 loads for the 4 int8 (2-byte aligned blocks), sign
-    // extension by shl/shr.s32, cvt.rn.f32.s32 * d then fma.
+    // extension by shl/shr.s32, cvt.rn.f32.s32 * d then fma. The block loop is
+    // unrolled kQ8Unroll times plus a remainder copy of the body.
     has(q8, ".entry fused_gemv_q8_0_kernel(");
     has(q8, "ld.global.u16"); has(q8, "shr.s32"); has(q8, "cvt.rn.f32.s32"); has(q8, "mul.f32");
-    CHECK(count(q8, "ld.global.u16") == 3);
-    CHECK(count(q8, "cvt.rn.f32.s32") == 4);
+    const size_t q8_bodies = MlFusionCompiler::kQ8Unroll + 1;
+    CHECK(count(q8, "ld.global.u16") == 3 * q8_bodies);
+    CHECK(count(q8, "cvt.rn.f32.s32") == 4 * q8_bodies);
+    CHECK(count(q8, "ld.global.v4.f32") == q8_bodies);
     CHECK(q8.find("ld.global.s8") == std::string::npos);
     CHECK(q8.find("ld.global.u8") == std::string::npos);
     // Q4_K: v4.u32 header, u32 nibble word, 6-bit scale/min select, wscale * nib - wmin.
     has(q4, ".entry fused_gemv_q4_k_kernel(");
     has(q4, "ld.global.v4.u32"); has(q4, "cvt.rn.f32.u32"); has(q4, "selp.b32"); has(q4, "neg.f32");
-    CHECK(count(q4, "cvt.f32.f16") == 2);
-    CHECK(count(q4, "cvt.rn.f32.u32") == 6);   // sc, m and the four nibbles
-    CHECK(count(q4, "fma.rn.f32") == 8);       // four dequant + four dot fmas
+    const size_t q4_bodies = MlFusionCompiler::kQ4KUnroll + 1;
+    CHECK(count(q4, "cvt.f32.f16") == 2 * q4_bodies);
+    CHECK(count(q4, "cvt.rn.f32.u32") == 6 * q4_bodies);   // sc, m and the four nibbles
+    CHECK(count(q4, "fma.rn.f32") == 8 * q4_bodies);       // four dequant + four dot fmas
+    CHECK(count(q4, "ld.global.v4.u32") == q4_bodies);
     CHECK(q4.find("ld.global.u8") == std::string::npos);
 
     // The public emitters return exactly these kernels.
     CHECK(c.emit_ptx_fused_gemv_q8_0() == q8);
     CHECK(c.emit_ptx_fused_gemv_q4_k() == q4);
-
-    // Legacy strings still assemble too (they are the reference side below).
-    if (ptxas_available()) {
-        CHECK(ptxas_assembles(codegen::legacy::legacy_ptx_gemv_q8_0()));
-        CHECK(ptxas_assembles(codegen::legacy::legacy_ptx_gemv_q4_k()));
-    }
 }
 
 // ---------------------------------------------------------------------------
-// Differential: legacy string kernel vs MIR kernel on device, plus host reference
+// On-device runs against the host reference
 // ---------------------------------------------------------------------------
 
-TEST_CASE("GPU migration - GEMV Q8_0 legacy vs MIR and host reference across shapes") {
+TEST_CASE("GPU kernels - GEMV Q8_0 matches the host reference across shapes") {
     if (!gpu_ready()) return;
     MlFusionCompiler c;
-    std::string mir = c.emit_ptx_fused_gemv_q8_0();
-    std::string legacy = codegen::legacy::legacy_ptx_gemv_q8_0();
+    std::string ptx = c.emit_ptx_fused_gemv_q8_0();
     Rng rng(0x5C0DE8u);
 
     for (QuantShape s : kQ8Shapes) {
         std::vector<Q8Block> w = random_q8(s.n, s.k, rng);
         std::vector<float> x = random_x(s.k, rng);
-        std::vector<float> b = run_quant(mir, "fused_gemv_q8_0_kernel", w, x, s.n, s.k, s.grid, s.block);
+        std::vector<float> got = run_quant(ptx, "fused_gemv_q8_0_kernel", w, x, s.n, s.k, s.grid, s.block);
+        std::vector<float> ref = host_gemv<Q8Block, 32, host_dequant_q8>(w, x, s.n, s.k, s.grid);
         char what[96];
         std::snprintf(what, sizeof(what), "gemv_q8_0 n=%u k=%u grid=%u block=%u", s.n, s.k, s.grid, s.block);
-        if (s.block == 256) {
-            std::vector<float> a = run_quant(legacy, "fused_gemv_q8_0_kernel", w, x, s.n, s.k, s.grid, s.block);
-            check_agree(what, a, b, kMigrationTol);
-        }
-        std::vector<float> ref = host_gemv<Q8Block, 32, host_dequant_q8>(w, x, s.n, s.k, s.grid);
-        check_reference(what, b, ref, s.grid);
+        check_reference(what, got, ref, s.grid);
     }
 }
 
-TEST_CASE("GPU migration - GEMV Q4_K legacy vs MIR and host reference across shapes") {
+TEST_CASE("GPU kernels - GEMV Q4_K matches the host reference across shapes") {
     if (!gpu_ready()) return;
     MlFusionCompiler c;
-    std::string mir = c.emit_ptx_fused_gemv_q4_k();
-    std::string legacy = codegen::legacy::legacy_ptx_gemv_q4_k();
+    std::string ptx = c.emit_ptx_fused_gemv_q4_k();
     Rng rng(0x5C0DE4u);
 
     for (QuantShape s : kQ4KShapes) {
         std::vector<Q4KBlock> w = random_q4k(s.n, s.k, rng);
         std::vector<float> x = random_x(s.k, rng);
-        std::vector<float> b = run_quant(mir, "fused_gemv_q4_k_kernel", w, x, s.n, s.k, s.grid, s.block);
+        std::vector<float> got = run_quant(ptx, "fused_gemv_q4_k_kernel", w, x, s.n, s.k, s.grid, s.block);
+        std::vector<float> ref = host_gemv<Q4KBlock, 256, host_dequant_q4k>(w, x, s.n, s.k, s.grid);
         char what[96];
         std::snprintf(what, sizeof(what), "gemv_q4_k n=%u k=%u grid=%u block=%u", s.n, s.k, s.grid, s.block);
-        if (s.block == 256) {
-            std::vector<float> a = run_quant(legacy, "fused_gemv_q4_k_kernel", w, x, s.n, s.k, s.grid, s.block);
-            check_agree(what, a, b, kMigrationTol);
-        }
-        std::vector<float> ref = host_gemv<Q4KBlock, 256, host_dequant_q4k>(w, x, s.n, s.k, s.grid);
-        check_reference(what, b, ref, s.grid);
+        check_reference(what, got, ref, s.grid);
     }
 }
 
 // ---------------------------------------------------------------------------
-// Cross check against the CPU JIT GEMVs (the reference layout, not the legacy string)
+// Cross check against the CPU JIT GEMVs (the reference block layout)
 // ---------------------------------------------------------------------------
 
-TEST_CASE("GPU migration - GEMV Q8_0 / Q4_K MIR kernels agree with the CPU JIT GEMVs") {
+TEST_CASE("GPU kernels - GEMV Q8_0 / Q4_K agree with the CPU JIT GEMVs") {
     if (!gpu_ready()) return;
     MlFusionCompiler c;
     Rng rng(0xC0DEC0DEu);

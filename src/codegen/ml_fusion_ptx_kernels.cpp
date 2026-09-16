@@ -1,12 +1,9 @@
-// Stage 5a: GPU kernels written as MIR through the KernelBuilder GPU helpers
-// (docs/ptx_backend_design.md, "Stage 5a notes"). Each builder reproduces the
-// launch contract and the numerical recipe of the hand-written PTX kernel it
-// replaced (src/codegen/ml_fusion_ptx_legacy.cpp, kept only for the
-// differential tests until Stage 6):
+// Element-wise and RMSNorm GPU kernels written as MIR through the
+// KernelBuilder GPU helpers (docs/ptx_kernel_authoring.md):
 //
 //   fused_swiglu_kernel                grid-stride over n/4 float4s, then a
 //                                      scalar tail [n & ~3, n) walked by every
-//                                      block with stride ntid (as before)
+//                                      block with stride ntid
 //   fused_adaln_modulate[_gated]_kernel one block per row; d & ~3 float4s per
 //                                      block then the scalar remainder
 //   fused_residual_rms_norm_kernel     one block per row; x += res in place,
@@ -14,12 +11,12 @@
 //
 // Rows whose length is not a multiple of 4 take the scalar path for the whole
 // row (the float4 loads need 16-byte alignment). SiLU is ex2.approx +
-// rcp.approx and the RMS is div.approx + rsqrt.approx, exactly as before, so
-// the tolerances in test_gpu_execution.cpp are unchanged.
-
+// rcp.approx and the RMS is div.approx + rsqrt.approx; the tolerances in
+// test_gpu_execution.cpp and test_gpu_kernels.cpp assume these recipes.
+//
 // The addressing / prologue helpers (f32_offset, at, silu_fast,
-// row_block_prologue, entry_params) live in ml_fusion_ptx_kernels_common.hpp
-// since Stage 5b, where the LayerNorm and GEMV kernel files share them.
+// row_block_prologue, entry_params) live in ml_fusion_ptx_kernels_common.hpp,
+// shared with the LayerNorm, GEMV and quantized GEMV kernel files.
 
 #include "ml_fusion_ptx_kernels_common.hpp"
 

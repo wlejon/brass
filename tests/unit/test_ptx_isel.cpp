@@ -610,9 +610,10 @@ std::string intrinsic_kernel_ptx(std::string_view name) {
 
 } // namespace
 
-// The Stage 3 (string-emitter era) names. The full Stage 4 table is covered
-// signature-by-signature in test_ptx_intrinsics.cpp.
-TEST_CASE("PTX ISel - every legacy intrinsic name lowers, verifies and assembles") {
+// The intrinsic names and aliases the original string-matching emitter
+// accepted; the full table is covered signature-by-signature in
+// test_ptx_intrinsics.cpp.
+TEST_CASE("PTX ISel - every original intrinsic alias lowers, verifies and assembles") {
     std::vector<std::string_view> names = {
              "ptx_tid_x", "ptx_tid_y", "ptx_tid_z", "ptx_ctaid_x", "ptx_ctaid_y", "ptx_ctaid_z",
              "ptx_ntid_x", "ptx_ntid_y", "ptx_ntid_z", "ptx_global_tid_x", "ptx_global_id_x",

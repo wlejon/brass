@@ -115,10 +115,10 @@ public:
     Function* build_gemv_q4_k(Module& mod, std::string_view name = "gemv_q4_k");
 
     // --- GPU kernel builders (PTX-only MIR: ptx_* intrinsics, shared memory) ---
-    // These mirror the launch contract of the former hand-written PTX kernels
-    // (entry name, parameter order and types, one block per row / grid-stride)
-    // and are what emit_ptx_swiglu / emit_ptx_adaln_modulate /
-    // emit_ptx_fused_residual_rms_norm lower. See src/codegen/ml_fusion_ptx_kernels.cpp.
+    // Each builds one .entry as MIR through the KernelBuilder GPU helpers; the
+    // emit_ptx_* functions below lower them through PtxTarget::emit_function.
+    // Launch contracts (entry name, parameter order and types, one block per
+    // row / grid-stride) -- see docs/ptx_kernel_authoring.md:
     //
     //   fused_swiglu_kernel(gate, up, out, u32 n)                       grid-stride, v4 + scalar tail
     //   fused_adaln_modulate_kernel(x, scale, shift, y, u32 l, u32 d)   one block per row
@@ -140,8 +140,12 @@ public:
     //       same over Q4_K super-blocks (144 bytes: f16 d, f16 dmin, 12 bytes of 6-bit
     //       scales/mins, 128 bytes of nibbles); k % 256 == 0; block size % 64 == 0
     //       (64 threads per super-block)
-    // (ml_fusion_ptx_kernels_norm.cpp / ml_fusion_ptx_kernels_gemv.cpp /
-    //  ml_fusion_ptx_kernels_quant.cpp for the last six)
+    // (src/codegen/ml_fusion_ptx_kernels.cpp, _norm.cpp, _gemv.cpp, _quant.cpp)
+    //
+    // The quantized GEMV block loops are unrolled by these factors (bodies per
+    // main-loop iteration, plus a remainder loop); see ml_fusion_ptx_kernels_quant.cpp.
+    static constexpr unsigned kQ8Unroll = 4;
+    static constexpr unsigned kQ4KUnroll = 4;
     Function* build_ptx_swiglu(Module& mod);
     Function* build_ptx_adaln_modulate(Module& mod, bool gated);
     Function* build_ptx_residual_rms_norm(Module& mod);

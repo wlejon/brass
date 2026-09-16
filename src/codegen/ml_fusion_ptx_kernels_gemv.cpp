@@ -1,9 +1,7 @@
-// Stage 5b: the two single-token (M = 1) GEMV GPU kernels as MIR
-// (docs/ptx_backend_design.md, "Stage 5b notes"). One block per output row
-// (block size a multiple of 32, up to 1024); the block dots its weight row(s)
-// with x, reduces, and thread 0 writes y[row]. They reproduce the hand-written
-// PTX they replaced (ml_fusion_ptx_legacy_gemv.cpp, kept for the differential
-// tests until Stage 6):
+// The two single-token (M = 1) float GEMV GPU kernels as MIR
+// (docs/ptx_kernel_authoring.md). One block per output row (block size a
+// multiple of 32, up to 1024); the block dots its weight row(s) with x,
+// reduces, and thread 0 writes y[row]:
 //
 //   fused_gemv_swiglu_kernel(w_gate, w_up, x, y, u32 n, u32 k)
 //       y[row] = silu(w_gate[row] . x) * (w_up[row] . x)
@@ -14,8 +12,8 @@
 // 0..3, both dot products carried through one loop) over [tid*4, k & ~3) by
 // ntid*4, then a scalar tail over [k & ~3, k) by ntid. When k % 4 != 0 the
 // rows are not 16-byte aligned and the whole row goes through the scalar
-// tail, as before. The SiLU is the string kernel's clamped fast recipe:
-// t = clamp(g * -log2e, -88, 88); g * rcp.approx(1 + ex2.approx(t)).
+// tail. The SiLU is the clamped fast recipe: t = clamp(g * -log2e, -88, 88);
+// g * rcp.approx(1 + ex2.approx(t)), which keeps ex2 finite for |g| > 61.
 
 #include "ml_fusion_ptx_kernels_common.hpp"
 
@@ -42,7 +40,7 @@ GemvRow gemv_prologue(KernelBuilder& kb, Value* n, Value* k) {
 
 // Dot products of `x` with each of `w_rows` over the row, per thread: the
 // float4 loop then the scalar tail, one accumulator per weight row, each lane
-// folded with fma in order (the string kernels' exact chain).
+// folded with fma in order.
 std::vector<Value*> gemv_partial_dots(KernelBuilder& kb, const RowBlock& rb, const std::vector<Value*>& w_rows,
                                       Value* x, Value* k) {
     Builder& b = kb.builder();
@@ -72,7 +70,7 @@ std::vector<Value*> gemv_partial_dots(KernelBuilder& kb, const RowBlock& rb, con
     });
 }
 
-// silu(g) with the GEMV string kernel's clamp: t = max(min(g * -log2e, 88), -88)
+// silu(g) with a clamped exponent: t = max(min(g * -log2e, 88), -88)
 // -> g * rcp(1 + ex2(t)). (Clamping keeps ex2 finite for |g| > 61.)
 Value* silu_fast_clamped(KernelBuilder& kb, Value* g) {
     Value* t = kb.mul(g, kb.const_f32(-1.44269504f));

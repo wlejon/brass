@@ -1,9 +1,6 @@
-// Stage 5b: the two LayerNorm GPU kernels as MIR (docs/ptx_backend_design.md,
-// "Stage 5b notes"). Both are one block per row (block size a multiple of 32,
-// up to 1024) with a two-pass statistic -- mean first, then the mean of the
-// squared deviations -- exactly like the hand-written PTX they replaced
-// (ml_fusion_ptx_legacy_norm.cpp, kept for the differential tests until
-// Stage 6):
+// The two LayerNorm GPU kernels as MIR (docs/ptx_kernel_authoring.md). Both
+// are one block per row (block size a multiple of 32, up to 1024) with a
+// two-pass statistic -- mean first, then the mean of the squared deviations:
 //
 //   fused_layernorm_modulate_kernel   y = ((x - mean) * rstd * gamma + beta)
 //                                       * (1 + scale) + shift
@@ -11,9 +8,12 @@
 //                                     pass); y = (x - mean) * rstd * gamma + beta
 //
 // Rows whose length is not a multiple of 4 take the scalar path for the whole
-// row (float4 loads need 16-byte alignment). The recipe is unchanged: the
-// mean pass is plain adds, the variance pass is sub + fma, mean and variance
-// are div.approx by cvt.rn.f32.u32(d), rstd is rsqrt.approx(var + eps).
+// row (float4 loads need 16-byte alignment). Recipe: the mean pass is plain
+// adds in lane order, the variance pass is sub + fma, mean and variance are
+// div.approx by cvt.rn.f32.u32(d), rstd is rsqrt.approx(var + eps). The two
+// block sums share one 32-float scratch (block_reduce_sum_f32 ends with a
+// bar.sync, so the reuse is safe) and every thread computes the same
+// statistics, so no broadcast scalar is needed.
 
 #include "ml_fusion_ptx_kernels_common.hpp"
 
@@ -24,7 +24,7 @@ using namespace ptx_kernels;
 namespace {
 
 // Pass 1 of the LayerNorm-modulate kernel: per-thread row sum (plain adds,
-// lane order 0..3 as the string kernel does).
+// lane order 0..3).
 Value* row_sum(KernelBuilder& kb, const RowBlock& rb, Value* x_row, Value* d) {
     Builder& b = kb.builder();
     Value* acc = kb.for_range_reduce(rb.vstart, rb.vec_d, rb.vstep, kb.const_f32(0.0f), [&](Value* i, Value* acc) {

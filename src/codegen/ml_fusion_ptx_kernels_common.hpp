@@ -22,7 +22,8 @@ inline Value* at(KernelBuilder& kb, Value* base, Value* byte_off) {
     return kb.builder().build_add(base, byte_off);
 }
 
-// silu(g) = g * rcp(1 + ex2(-g * log2 e))  (the fast recipe of the string kernels)
+// silu(g) = g * rcp.approx(1 + ex2.approx(-g * log2 e)), unclamped (the
+// element-wise SwiGLU; the GEMV SwiGLU clamps the exponent, see silu_fast_clamped)
 inline Value* silu_fast(KernelBuilder& kb, Value* g) {
     Value* e = kb.exp_fast(kb.builder().build_neg(g));
     Value* r = kb.rcp_approx(kb.add(e, kb.const_f32(1.0f)));

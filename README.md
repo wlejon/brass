@@ -22,7 +22,7 @@ Standalone C++20 library with CMake.
 9. **Byte-Level Determinism Ratchet**: 100% byte-for-byte deterministic emission of COFF (Win64), ELF64 (Linux/SysV), and Mach-O (macOS) relocatable object files across runs.
 10. **Multi-Format Output & Standalone Linking**: Full Win64 SEH (`.pdata`/`.xdata`), Linux SysV CFI (`.eh_frame`), and built-in PE DLL, ELF `.so`, and Mach-O `.dylib` standalone linkers that produce shared libraries without external linkers.
 11. **Differential Verification Oracle**: Built-in reference MIR interpreter, differential fuzzing harness, and automated Bronze IL translation suite.
-12. **NVIDIA PTX & GPU Execution**: `PtxTarget` lowers MIR to PTX, plus a set of fused ML kernels (RMSNorm, LayerNorm, SwiGLU, AdaLN, GEMV, Q8_0/Q4_K). A dynamically-loaded CUDA driver runtime JIT-compiles the PTX and launches it on device with no link-time CUDA dependency.
+12. **NVIDIA PTX & GPU Execution**: `PtxTarget` lowers MIR through `PtxISel` into a typed PTX IR, runs cleanup passes (copy propagation, dead code, branch simplification) and a structural verifier, and prints the text. GPU intrinsics (thread indices, shuffles, barriers, `.shared` arrays, approx math, f16, narrow loads, atomics) are MIR builtins with `KernelBuilder` helpers, and the fused ML kernels (RMSNorm, LayerNorm, SwiGLU, AdaLN, GEMV, Q8_0/Q4_K GEMV) are written as MIR with them -- no PTX strings. A dynamically-loaded CUDA driver runtime (Windows and Linux, no link-time CUDA dependency) JIT-compiles the PTX and launches it on device; the tests validate every kernel with `ptxas` and against host references on a real GPU.
 
 ## Performance Bars
 
@@ -61,3 +61,5 @@ and the library itself has no link-time CUDA dependency.
 - [libbrass Embedding Guide (Public C-ABI)](docs/embedding_guide.md)
 - [Host Engine & Moving GC Embedding Guide](docs/embedding.md)
 - [Bronze IL Translator & Runtime Integration](docs/il_translator.md)
+- [PTX Backend Design](docs/ptx_backend_design.md)
+- [Writing PTX Kernels with KernelBuilder](docs/ptx_kernel_authoring.md)
