@@ -398,11 +398,19 @@ void AArch64Encoder::uxth(GPR dst, GPR src) {
 // =============================================================================
 
 void AArch64Encoder::mov(GPR dst, GPR src) {
-    orr(dst, GPR::XZR, src);
+    if (dst == GPR::SP || src == GPR::SP) {
+        add(dst, src, 0);
+    } else {
+        orr(dst, GPR::XZR, src);
+    }
 }
 
 void AArch64Encoder::mov32(GPR dst, GPR src) {
-    orr32(dst, GPR::XZR, src);
+    if (dst == GPR::SP || src == GPR::SP) {
+        add32(dst, src, 0);
+    } else {
+        orr32(dst, GPR::XZR, src);
+    }
 }
 
 void AArch64Encoder::movz(GPR dst, uint16_t imm, uint8_t hw_shift) {
@@ -573,6 +581,12 @@ void AArch64Encoder::bl(Label target) {
         buffer_.emit_inst(0x94000000u);
         buffer_.record_label_fixup(target, patch_off, FixupKind::Branch26);
     }
+}
+
+void AArch64Encoder::b(const std::string& symbol) {
+    size_t off = buffer_.size();
+    buffer_.emit_inst(0x14000000u);
+    buffer_.add_relocation(off, RelocationKind::Jump26, symbol);
 }
 
 void AArch64Encoder::bl(const std::string& symbol) {
@@ -827,6 +841,10 @@ void AArch64Encoder::fdiv(FPR dst, FPR src1, FPR src2) {
     buffer_.emit_inst(0x1E601800u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
 }
 
+void AArch64Encoder::fmadd_d(FPR dst, FPR src1, FPR src2, FPR addend) {
+    buffer_.emit_inst(0x1F400000u | (reg_code(src2) << 16) | (reg_code(addend) << 10) | (reg_code(src1) << 5) | reg_code(dst));
+}
+
 void AArch64Encoder::fsqrt(FPR dst, FPR src) {
     buffer_.emit_inst(0x1E61C000u | (reg_code(src) << 5) | reg_code(dst));
 }
@@ -862,6 +880,10 @@ void AArch64Encoder::fmul_s(FPR dst, FPR src1, FPR src2) {
 
 void AArch64Encoder::fdiv_s(FPR dst, FPR src1, FPR src2) {
     buffer_.emit_inst(0x1E201800u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::fmadd_s(FPR dst, FPR src1, FPR src2, FPR addend) {
+    buffer_.emit_inst(0x1F000000u | (reg_code(src2) << 16) | (reg_code(addend) << 10) | (reg_code(src1) << 5) | reg_code(dst));
 }
 
 void AArch64Encoder::fsqrt_s(FPR dst, FPR src) {
@@ -954,6 +976,15 @@ void AArch64Encoder::ldr(FPR dst, const MemAddress& mem) {
     // 64-bit Dd load
     uint32_t rn = reg_code(mem.base);
     uint32_t rt = reg_code(dst);
+    if (mem.mode == AddrMode::RegOffset && mem.has_index()) {
+        uint32_t rm = reg_code(mem.index);
+        uint32_t ext = static_cast<uint32_t>(mem.extend);
+        uint32_t s = (mem.shift > 0) ? 1u : 0u;
+        uint32_t inst = (3u << 30) | (7u << 27) | (1u << 26) | (1u << 22) | (1u << 21) |
+                        (rm << 16) | (ext << 13) | (s << 12) | (2u << 10) | (rn << 5) | rt;
+        buffer_.emit_inst(inst);
+        return;
+    }
     int64_t off = mem.offset;
 
     if (off >= 0 && (off % 8 == 0) && (off / 8 <= 4095)) {
@@ -971,6 +1002,15 @@ void AArch64Encoder::ldr_s(FPR dst, const MemAddress& mem) {
     // 32-bit Sd load
     uint32_t rn = reg_code(mem.base);
     uint32_t rt = reg_code(dst);
+    if (mem.mode == AddrMode::RegOffset && mem.has_index()) {
+        uint32_t rm = reg_code(mem.index);
+        uint32_t ext = static_cast<uint32_t>(mem.extend);
+        uint32_t s = (mem.shift > 0) ? 1u : 0u;
+        uint32_t inst = (2u << 30) | (7u << 27) | (1u << 26) | (1u << 22) | (1u << 21) |
+                        (rm << 16) | (ext << 13) | (s << 12) | (2u << 10) | (rn << 5) | rt;
+        buffer_.emit_inst(inst);
+        return;
+    }
     int64_t off = mem.offset;
 
     if (off >= 0 && (off % 4 == 0) && (off / 4 <= 4095)) {
@@ -988,6 +1028,15 @@ void AArch64Encoder::ldr_q(FPR dst, const MemAddress& mem) {
     // 128-bit Qd load
     uint32_t rn = reg_code(mem.base);
     uint32_t rt = reg_code(dst);
+    if (mem.mode == AddrMode::RegOffset && mem.has_index()) {
+        uint32_t rm = reg_code(mem.index);
+        uint32_t ext = static_cast<uint32_t>(mem.extend);
+        uint32_t s = (mem.shift > 0) ? 1u : 0u;
+        uint32_t inst = (0u << 30) | (7u << 27) | (1u << 26) | (3u << 22) | (1u << 21) |
+                        (rm << 16) | (ext << 13) | (s << 12) | (2u << 10) | (rn << 5) | rt;
+        buffer_.emit_inst(inst);
+        return;
+    }
     int64_t off = mem.offset;
 
     if (off >= 0 && (off % 16 == 0) && (off / 16 <= 4095)) {
@@ -1002,6 +1051,15 @@ void AArch64Encoder::str(FPR src, const MemAddress& mem) {
     // 64-bit Dd store
     uint32_t rn = reg_code(mem.base);
     uint32_t rt = reg_code(src);
+    if (mem.mode == AddrMode::RegOffset && mem.has_index()) {
+        uint32_t rm = reg_code(mem.index);
+        uint32_t ext = static_cast<uint32_t>(mem.extend);
+        uint32_t s = (mem.shift > 0) ? 1u : 0u;
+        uint32_t inst = (3u << 30) | (7u << 27) | (1u << 26) | (0u << 22) | (1u << 21) |
+                        (rm << 16) | (ext << 13) | (s << 12) | (2u << 10) | (rn << 5) | rt;
+        buffer_.emit_inst(inst);
+        return;
+    }
     int64_t off = mem.offset;
 
     if (off >= 0 && (off % 8 == 0) && (off / 8 <= 4095)) {
@@ -1019,6 +1077,15 @@ void AArch64Encoder::str_s(FPR src, const MemAddress& mem) {
     // 32-bit Sd store
     uint32_t rn = reg_code(mem.base);
     uint32_t rt = reg_code(src);
+    if (mem.mode == AddrMode::RegOffset && mem.has_index()) {
+        uint32_t rm = reg_code(mem.index);
+        uint32_t ext = static_cast<uint32_t>(mem.extend);
+        uint32_t s = (mem.shift > 0) ? 1u : 0u;
+        uint32_t inst = (2u << 30) | (7u << 27) | (1u << 26) | (0u << 22) | (1u << 21) |
+                        (rm << 16) | (ext << 13) | (s << 12) | (2u << 10) | (rn << 5) | rt;
+        buffer_.emit_inst(inst);
+        return;
+    }
     int64_t off = mem.offset;
 
     if (off >= 0 && (off % 4 == 0) && (off / 4 <= 4095)) {
@@ -1036,6 +1103,15 @@ void AArch64Encoder::str_q(FPR src, const MemAddress& mem) {
     // 128-bit Qd store
     uint32_t rn = reg_code(mem.base);
     uint32_t rt = reg_code(src);
+    if (mem.mode == AddrMode::RegOffset && mem.has_index()) {
+        uint32_t rm = reg_code(mem.index);
+        uint32_t ext = static_cast<uint32_t>(mem.extend);
+        uint32_t s = (mem.shift > 0) ? 1u : 0u;
+        uint32_t inst = (0u << 30) | (7u << 27) | (1u << 26) | (2u << 22) | (1u << 21) |
+                        (rm << 16) | (ext << 13) | (s << 12) | (2u << 10) | (rn << 5) | rt;
+        buffer_.emit_inst(inst);
+        return;
+    }
     int64_t off = mem.offset;
 
     if (off >= 0 && (off % 16 == 0) && (off / 16 <= 4095)) {
@@ -1048,27 +1124,121 @@ void AArch64Encoder::str_q(FPR src, const MemAddress& mem) {
 
 void AArch64Encoder::ldp(FPR dst1, FPR dst2, const MemAddress& mem) {
     int64_t off = mem.offset;
-    if (off % 8 != 0) throw std::runtime_error("AArch64Encoder: FP LDP offset not aligned to 8");
+    if (off % 8 != 0) throw std::runtime_error("AArch64Encoder: FP LDP offset must be 8-byte aligned");
     int64_t simm7 = off / 8;
     if (simm7 < -64 || simm7 > 63) throw std::runtime_error("AArch64Encoder: FP LDP offset out of range");
     uint32_t imm7 = static_cast<uint32_t>(simm7) & 0x7Fu;
     uint32_t mode = mem.is_post_indexed() ? 1u : (mem.is_pre_indexed() ? 3u : 2u);
-    buffer_.emit_inst((1u << 30) | (5u << 27) | (mode << 23) | (1u << 22) |
+    buffer_.emit_inst((1u << 30) | (5u << 27) | (1u << 26) | (mode << 23) | (1u << 22) |
                       (imm7 << 15) | (reg_code(dst2) << 10) | (reg_code(mem.base) << 5) | reg_code(dst1));
 }
 
 void AArch64Encoder::stp(FPR src1, FPR src2, const MemAddress& mem) {
     int64_t off = mem.offset;
-    if (off % 8 != 0) throw std::runtime_error("AArch64Encoder: FP STP offset not aligned to 8");
+    if (off % 8 != 0) throw std::runtime_error("AArch64Encoder: FP STP offset must be 8-byte aligned");
     int64_t simm7 = off / 8;
     if (simm7 < -64 || simm7 > 63) throw std::runtime_error("AArch64Encoder: FP STP offset out of range");
     uint32_t imm7 = static_cast<uint32_t>(simm7) & 0x7Fu;
     uint32_t mode = mem.is_post_indexed() ? 1u : (mem.is_pre_indexed() ? 3u : 2u);
-    buffer_.emit_inst((1u << 30) | (5u << 27) | (mode << 23) | (0u << 22) |
+    buffer_.emit_inst((1u << 30) | (5u << 27) | (1u << 26) | (mode << 23) | (0u << 22) |
                       (imm7 << 15) | (reg_code(src2) << 10) | (reg_code(mem.base) << 5) | reg_code(src1));
 }
 
 // 128-bit SIMD Vector
+// 128-bit SIMD Vector (Float)
+void AArch64Encoder::vec_fadd_4s(FPR dst, FPR src1, FPR src2) {
+    buffer_.emit_inst(0x4E20D400u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_fsub_4s(FPR dst, FPR src1, FPR src2) {
+    buffer_.emit_inst(0x4EA0D400u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_fmul_4s(FPR dst, FPR src1, FPR src2) {
+    buffer_.emit_inst(0x6E20DC00u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_fdiv_4s(FPR dst, FPR src1, FPR src2) {
+    buffer_.emit_inst(0x6E20FC00u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_fmla_4s(FPR dst, FPR src1, FPR src2) {
+    buffer_.emit_inst(0x4E20CC00u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_fmin_4s(FPR dst, FPR src1, FPR src2) {
+    buffer_.emit_inst(0x4EA0F400u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_fmax_4s(FPR dst, FPR src1, FPR src2) {
+    buffer_.emit_inst(0x4E20F400u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_fneg_4s(FPR dst, FPR src) {
+    buffer_.emit_inst(0x6EA0F800u | (reg_code(src) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_fsqrt_4s(FPR dst, FPR src) {
+    buffer_.emit_inst(0x6EA1F800u | (reg_code(src) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_fadd_2d(FPR dst, FPR src1, FPR src2) {
+    buffer_.emit_inst(0x4E60D400u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_fsub_2d(FPR dst, FPR src1, FPR src2) {
+    buffer_.emit_inst(0x4EE0D400u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_fmul_2d(FPR dst, FPR src1, FPR src2) {
+    buffer_.emit_inst(0x6E60DC00u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_fdiv_2d(FPR dst, FPR src1, FPR src2) {
+    buffer_.emit_inst(0x6E60FC00u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_fmla_2d(FPR dst, FPR src1, FPR src2) {
+    buffer_.emit_inst(0x4E60CC00u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_fmin_2d(FPR dst, FPR src1, FPR src2) {
+    buffer_.emit_inst(0x4EE0F400u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_fmax_2d(FPR dst, FPR src1, FPR src2) {
+    buffer_.emit_inst(0x4E60F400u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_fneg_2d(FPR dst, FPR src) {
+    buffer_.emit_inst(0x6EE0F800u | (reg_code(src) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_fsqrt_2d(FPR dst, FPR src) {
+    buffer_.emit_inst(0x6EE1F800u | (reg_code(src) << 5) | reg_code(dst));
+}
+
+// 128-bit SIMD Vector (Integer & Bitwise)
+void AArch64Encoder::vec_add_4s(FPR dst, FPR src1, FPR src2) {
+    buffer_.emit_inst(0x4EA08400u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_sub_4s(FPR dst, FPR src1, FPR src2) {
+    buffer_.emit_inst(0x6EA08400u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_mul_4s(FPR dst, FPR src1, FPR src2) {
+    buffer_.emit_inst(0x4EA09C00u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_smin_4s(FPR dst, FPR src1, FPR src2) {
+    buffer_.emit_inst(0x4EA06C00u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_smax_4s(FPR dst, FPR src1, FPR src2) {
+    buffer_.emit_inst(0x4EA06400u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+}
+
 void AArch64Encoder::vec_add_2d(FPR dst, FPR src1, FPR src2) {
     buffer_.emit_inst(0x4EE08400u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
 }
@@ -1077,16 +1247,24 @@ void AArch64Encoder::vec_sub_2d(FPR dst, FPR src1, FPR src2) {
     buffer_.emit_inst(0x6EE08400u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
 }
 
-void AArch64Encoder::vec_add_4s(FPR dst, FPR src1, FPR src2) {
-    buffer_.emit_inst(0x4E208400u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+void AArch64Encoder::vec_and(FPR dst, FPR src1, FPR src2) {
+    buffer_.emit_inst(0x4E201C00u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
 }
 
-void AArch64Encoder::vec_sub_4s(FPR dst, FPR src1, FPR src2) {
-    buffer_.emit_inst(0x6E208400u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+void AArch64Encoder::vec_orr(FPR dst, FPR src1, FPR src2) {
+    buffer_.emit_inst(0x4EA01C00u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
 }
 
-void AArch64Encoder::vec_mul_4s(FPR dst, FPR src1, FPR src2) {
-    buffer_.emit_inst(0x4E209C00u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+void AArch64Encoder::vec_eor(FPR dst, FPR src1, FPR src2) {
+    buffer_.emit_inst(0x6E201C00u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::cnt_8b(FPR dst, FPR src) {
+    buffer_.emit_inst(0x0E205800u | (reg_code(src) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::uaddlv_h(FPR dst, FPR src) {
+    buffer_.emit_inst(0x2E303800u | (reg_code(src) << 5) | reg_code(dst));
 }
 
 // =============================================================================

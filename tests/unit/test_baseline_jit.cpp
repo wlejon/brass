@@ -277,8 +277,12 @@ TEST_CASE("Baseline JIT - Stack map generation for GC roots") {
     REQUIRE(rec != nullptr);
     CHECK_EQ(rec->roots.size(), 1);
     CHECK_EQ(rec->roots[0].kind, StackMapRootKind::FrameSlot);
-    // Offset should be negative (relative to RBP)
+    // Offset is negative (relative to RBP) on x86_64, positive (relative to FP) on AArch64
+#if defined(__aarch64__) || defined(_M_ARM64)
+    CHECK(rec->roots[0].offset_from_rbp > 0);
+#else
     CHECK(rec->roots[0].offset_from_rbp < 0);
+#endif
 }
 
 TEST_CASE("MultiTierPipeline - Tier 0 to Tier 1 to Tier 2 progression") {

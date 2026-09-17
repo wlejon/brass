@@ -1,4 +1,5 @@
 #include <brass/codegen/baseline_jit.hpp>
+#include <brass/target/aarch64/aarch64_baseline_emit.hpp>
 #include <brass/target/x64/x64_encoder.hpp>
 #include <brass/target/calling_conv.hpp>
 #include <brass/gc/runtime_gc.hpp>
@@ -22,6 +23,12 @@ namespace brass::codegen {
 using namespace brass::x64;
 
 BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target target) {
+    if (target.is_aarch64()) {
+        return aarch64::compile_baseline_aarch64(fn, target, [this](std::string_view name) {
+            return resolve_symbol(name);
+        });
+    }
+
     CodeBuffer buffer;
     X64Encoder enc(buffer);
     CallingConvention cc = CallingConvention::for_target(target);

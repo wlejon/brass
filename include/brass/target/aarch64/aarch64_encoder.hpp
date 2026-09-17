@@ -183,6 +183,7 @@ public:
 
     void b(Label target);
     void b(Condition cond, Label target);
+    void b(const std::string& symbol);
     void bl(Label target);
     void bl(const std::string& symbol);
     void blr(GPR target);
@@ -225,6 +226,7 @@ public:
     void fsub(FPR dst, FPR src1, FPR src2);
     void fmul(FPR dst, FPR src1, FPR src2);
     void fdiv(FPR dst, FPR src1, FPR src2);
+    void fmadd_d(FPR dst, FPR src1, FPR src2, FPR addend);
     void fsqrt(FPR dst, FPR src);
     void fabs(FPR dst, FPR src);
     void fneg(FPR dst, FPR src);
@@ -236,6 +238,7 @@ public:
     void fsub_s(FPR dst, FPR src1, FPR src2);
     void fmul_s(FPR dst, FPR src1, FPR src2);
     void fdiv_s(FPR dst, FPR src1, FPR src2);
+    void fmadd_s(FPR dst, FPR src1, FPR src2, FPR addend);
     void fsqrt_s(FPR dst, FPR src);
     void fabs_s(FPR dst, FPR src);
     void fneg_s(FPR dst, FPR src);
@@ -274,12 +277,40 @@ public:
     void ldp(FPR dst1, FPR dst2, const MemAddress& mem); // Dd pair
     void stp(FPR src1, FPR src2, const MemAddress& mem); // Dd pair
 
-    // 128-bit SIMD Vector
-    void vec_add_2d(FPR dst, FPR src1, FPR src2);
-    void vec_sub_2d(FPR dst, FPR src1, FPR src2);
+    // 128-bit SIMD Vector (Float)
+    void vec_fadd_4s(FPR dst, FPR src1, FPR src2);
+    void vec_fsub_4s(FPR dst, FPR src1, FPR src2);
+    void vec_fmul_4s(FPR dst, FPR src1, FPR src2);
+    void vec_fdiv_4s(FPR dst, FPR src1, FPR src2);
+    void vec_fmla_4s(FPR dst, FPR src1, FPR src2);
+    void vec_fmin_4s(FPR dst, FPR src1, FPR src2);
+    void vec_fmax_4s(FPR dst, FPR src1, FPR src2);
+    void vec_fneg_4s(FPR dst, FPR src);
+    void vec_fsqrt_4s(FPR dst, FPR src);
+
+    void vec_fadd_2d(FPR dst, FPR src1, FPR src2);
+    void vec_fsub_2d(FPR dst, FPR src1, FPR src2);
+    void vec_fmul_2d(FPR dst, FPR src1, FPR src2);
+    void vec_fdiv_2d(FPR dst, FPR src1, FPR src2);
+    void vec_fmla_2d(FPR dst, FPR src1, FPR src2);
+    void vec_fmin_2d(FPR dst, FPR src1, FPR src2);
+    void vec_fmax_2d(FPR dst, FPR src1, FPR src2);
+    void vec_fneg_2d(FPR dst, FPR src);
+    void vec_fsqrt_2d(FPR dst, FPR src);
+
+    // 128-bit SIMD Vector (Integer & Bitwise)
     void vec_add_4s(FPR dst, FPR src1, FPR src2);
     void vec_sub_4s(FPR dst, FPR src1, FPR src2);
     void vec_mul_4s(FPR dst, FPR src1, FPR src2);
+    void vec_smin_4s(FPR dst, FPR src1, FPR src2);
+    void vec_smax_4s(FPR dst, FPR src1, FPR src2);
+    void vec_add_2d(FPR dst, FPR src1, FPR src2);
+    void vec_sub_2d(FPR dst, FPR src1, FPR src2);
+    void vec_and(FPR dst, FPR src1, FPR src2);
+    void vec_orr(FPR dst, FPR src1, FPR src2);
+    void vec_eor(FPR dst, FPR src1, FPR src2);
+    void cnt_8b(FPR dst, FPR src);
+    void uaddlv_h(FPR dst, FPR src);
 
     // =========================================================================
     // System & Miscellaneous

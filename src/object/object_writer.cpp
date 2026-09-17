@@ -1,5 +1,8 @@
 #include <brass/object/object_writer.hpp>
 #include <brass/target/x64/x64_isel.hpp>
+#include <brass/target/aarch64/aarch64_isel.hpp>
+#include <brass/target/aarch64/aarch64_emit.hpp>
+#include <brass/target/aarch64/aarch64_frame.hpp>
 #include <brass/codegen/live_range.hpp>
 #include <brass/codegen/linear_scan.hpp>
 #include <brass/codegen/peephole.hpp>
@@ -9,6 +12,8 @@
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/verifier.hpp>
 #include <algorithm>
+#include <iostream>
+#include <fstream>
 
 namespace brass::object {
 
@@ -138,8 +143,14 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
         }
 
         // 1. ISel to LIR
-        x64::X64ISel isel(target_, cc_);
-        auto lir = isel.lower(*fn_to_lower);
+        std::unique_ptr<codegen::LirFunction> lir;
+        if (target_.is_aarch64()) {
+            aarch64::AArch64ISel isel(target_, cc_);
+            lir = isel.lower(*fn_to_lower);
+        } else {
+            x64::X64ISel isel(target_, cc_);
+            lir = isel.lower(*fn_to_lower);
+        }
         if (!lir) continue;
         lir->sort_blocks_rpo();
 
@@ -174,84 +185,170 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
         // 3.6 LIR Peephole Optimization
         codegen::run_lir_peephole_optimizations(*lir);
 
-        // 4. Machine Code Emission
-        codegen::EmitContext emit_ctx(*lir, target_);
-        codegen::CompilationResult res = emit_ctx.compile();
+        if (target_.is_aarch64()) {
+            // 4. AArch64 Machine Code Emission
+            aarch64::AArch64EmitContext emit_ctx(*lir, target_);
+            aarch64::AArch64CompilationResult res = emit_ctx.compile();
 
-        // 5. Place in .text
-        text_sec.align_to(16);
-        size_t fn_offset = text_sec.data.size();
-        size_t fn_size = res.code_buffer.size();
-        text_sec.emit_bytes(res.code_buffer.span());
+            // 5. Place in .text
+            text_sec.align_to(16);
+            size_t fn_offset = text_sec.data.size();
+            size_t fn_size = res.code_buffer.size();
+            text_sec.emit_bytes(res.code_buffer.span());
 
-        size_t prologue_sz = 0;
-        if (!lir->blocks.empty()) {
-            auto it = res.block_offsets.find(lir->blocks.front()->id);
-            if (it != res.block_offsets.end()) {
-                prologue_sz = it->second;
+            size_t prologue_sz = 0;
+            if (!lir->blocks.empty()) {
+                auto it = res.block_offsets.find(lir->blocks.front()->id);
+                if (it != res.block_offsets.end()) {
+                    prologue_sz = it->second;
+                }
             }
-        }
 
-        CompiledFunctionInfo cfi;
-        cfi.name = std::string(fn->name());
-        cfi.text_offset = fn_offset;
-        cfi.text_size = fn_size;
-        cfi.prologue_size = prologue_sz;
-        cfi.osr_entry_offset = res.osr_entry_offset;
-        cfi.frame_info = lir->frame;
-        x64::X64FrameLayout::compute_layout(cfi.frame_info, cc_);
-        cfi.cc = cc_;
-        cfi.safepoints = std::move(res.safepoints);
-        cfi.stack_map = std::move(res.stack_map);
-        cfi.stack_map.code_offset = static_cast<uint32_t>(fn_offset);
-        cfi.stack_map.code_size = static_cast<uint32_t>(fn_size);
-        obj.stack_maps.add_function(cfi.stack_map);
+            CompiledFunctionInfo cfi;
+            cfi.name = std::string(fn->name());
+            cfi.text_offset = fn_offset;
+            cfi.text_size = fn_size;
+            cfi.prologue_size = prologue_sz;
+            cfi.osr_entry_offset = res.osr_entry_offset;
+            cfi.frame_info = lir->frame;
+            aarch64::AArch64FrameLayout::compute_layout(cfi.frame_info, cc_);
+            cfi.cc = cc_;
+            cfi.safepoints = std::move(res.safepoints);
+            cfi.stack_map = std::move(res.stack_map);
+            cfi.stack_map.code_offset = static_cast<uint32_t>(fn_offset);
+            cfi.stack_map.code_size = static_cast<uint32_t>(fn_size);
+            obj.stack_maps.add_function(cfi.stack_map);
 
-        cfi.resume_table = std::move(res.resume_table);
-        obj.resume_tables.register_table(cfi.name, cfi.resume_table);
+            cfi.resume_table = std::move(res.resume_table);
+            obj.resume_tables.register_table(cfi.name, cfi.resume_table);
 
-        cfi.exception_table = std::move(res.exception_table);
-        cfi.exception_table.set_code_offset(static_cast<uint32_t>(fn_offset));
-        obj.exception_tables.register_table(cfi.name, cfi.exception_table);
+            cfi.exception_table = std::move(res.exception_table);
+            cfi.exception_table.set_code_offset(static_cast<uint32_t>(fn_offset));
+            obj.exception_tables.register_table(cfi.name, cfi.exception_table);
 
-        for (const auto& ps : res.patch_sites) {
-            runtime::PatchSite global_ps = ps;
-            global_ps.code_offset += fn_offset;
-            obj.patch_sites.register_site(global_ps);
-            cfi.patch_sites.push_back(std::move(global_ps));
-        }
-
-        obj.functions.push_back(std::move(cfi));
-        res.debug_table.set_prologue_size(static_cast<uint32_t>(prologue_sz));
-        obj.debug_tables.push_back(std::move(res.debug_table));
-
-        int32_t text_idx = obj.get_section_index(".text");
-        ObjectSymbol fn_sym;
-        fn_sym.name = std::string(fn->name());
-        fn_sym.section_index = text_idx;
-        fn_sym.value = fn_offset;
-        fn_sym.size = fn_size;
-        fn_sym.binding = SymbolBinding::Global;
-        fn_sym.type = SymbolType::Function;
-        obj.add_symbol(std::move(fn_sym));
-
-        for (const auto& r : res.code_buffer.relocations()) {
-            ObjectRelocation obj_r;
-            obj_r.offset = fn_offset + r.offset;
-            switch (r.kind) {
-                case x64::RelocationKind::PCRel32:
-                    obj_r.kind = RelocKind::Plt32;
-                    break;
-                case x64::RelocationKind::Abs64:
-                    obj_r.kind = RelocKind::Abs64;
-                    break;
-                case x64::RelocationKind::SecRel32:
-                    obj_r.kind = RelocKind::SecRel32;
-                    break;
+            for (const auto& ps : res.patch_sites) {
+                runtime::PatchSite global_ps = ps;
+                global_ps.code_offset += fn_offset;
+                obj.patch_sites.register_site(global_ps);
+                cfi.patch_sites.push_back(std::move(global_ps));
             }
-            obj_r.symbol_name = r.symbol_name;
-            obj_r.addend = r.addend;
-            text_sec.relocations.push_back(std::move(obj_r));
+
+            obj.functions.push_back(std::move(cfi));
+            res.debug_table.set_prologue_size(static_cast<uint32_t>(prologue_sz));
+            obj.debug_tables.push_back(std::move(res.debug_table));
+
+            int32_t text_idx = obj.get_section_index(".text");
+            ObjectSymbol fn_sym;
+            fn_sym.name = std::string(fn->name());
+            fn_sym.section_index = text_idx;
+            fn_sym.value = fn_offset;
+            fn_sym.size = fn_size;
+            fn_sym.binding = SymbolBinding::Global;
+            fn_sym.type = SymbolType::Function;
+            obj.add_symbol(std::move(fn_sym));
+
+            for (const auto& r : res.code_buffer.relocations()) {
+                ObjectRelocation obj_r;
+                obj_r.offset = fn_offset + r.offset;
+                switch (r.kind) {
+                    case aarch64::RelocationKind::Call26:
+                    case aarch64::RelocationKind::Jump26:
+                        obj_r.kind = RelocKind::Plt32;
+                        break;
+                    case aarch64::RelocationKind::Page21:
+                        obj_r.kind = RelocKind::PCRel32;
+                        break;
+                    case aarch64::RelocationKind::PageOff12:
+                        obj_r.kind = RelocKind::SecRel32;
+                        break;
+                    case aarch64::RelocationKind::Abs64:
+                        obj_r.kind = RelocKind::Abs64;
+                        break;
+                }
+                obj_r.symbol_name = r.symbol_name;
+                obj_r.addend = r.addend;
+                text_sec.relocations.push_back(std::move(obj_r));
+            }
+        } else {
+            // 4. Machine Code Emission
+            codegen::EmitContext emit_ctx(*lir, target_);
+            codegen::CompilationResult res = emit_ctx.compile();
+
+            // 5. Place in .text
+            text_sec.align_to(16);
+            size_t fn_offset = text_sec.data.size();
+            size_t fn_size = res.code_buffer.size();
+            text_sec.emit_bytes(res.code_buffer.span());
+
+            size_t prologue_sz = 0;
+            if (!lir->blocks.empty()) {
+                auto it = res.block_offsets.find(lir->blocks.front()->id);
+                if (it != res.block_offsets.end()) {
+                    prologue_sz = it->second;
+                }
+            }
+
+            CompiledFunctionInfo cfi;
+            cfi.name = std::string(fn->name());
+            cfi.text_offset = fn_offset;
+            cfi.text_size = fn_size;
+            cfi.prologue_size = prologue_sz;
+            cfi.osr_entry_offset = res.osr_entry_offset;
+            cfi.frame_info = lir->frame;
+            x64::X64FrameLayout::compute_layout(cfi.frame_info, cc_);
+            cfi.cc = cc_;
+            cfi.safepoints = std::move(res.safepoints);
+            cfi.stack_map = std::move(res.stack_map);
+            cfi.stack_map.code_offset = static_cast<uint32_t>(fn_offset);
+            cfi.stack_map.code_size = static_cast<uint32_t>(fn_size);
+            obj.stack_maps.add_function(cfi.stack_map);
+
+            cfi.resume_table = std::move(res.resume_table);
+            obj.resume_tables.register_table(cfi.name, cfi.resume_table);
+
+            cfi.exception_table = std::move(res.exception_table);
+            cfi.exception_table.set_code_offset(static_cast<uint32_t>(fn_offset));
+            obj.exception_tables.register_table(cfi.name, cfi.exception_table);
+
+            for (const auto& ps : res.patch_sites) {
+                runtime::PatchSite global_ps = ps;
+                global_ps.code_offset += fn_offset;
+                obj.patch_sites.register_site(global_ps);
+                cfi.patch_sites.push_back(std::move(global_ps));
+            }
+
+            obj.functions.push_back(std::move(cfi));
+            res.debug_table.set_prologue_size(static_cast<uint32_t>(prologue_sz));
+            obj.debug_tables.push_back(std::move(res.debug_table));
+
+            int32_t text_idx = obj.get_section_index(".text");
+            ObjectSymbol fn_sym;
+            fn_sym.name = std::string(fn->name());
+            fn_sym.section_index = text_idx;
+            fn_sym.value = fn_offset;
+            fn_sym.size = fn_size;
+            fn_sym.binding = SymbolBinding::Global;
+            fn_sym.type = SymbolType::Function;
+            obj.add_symbol(std::move(fn_sym));
+
+            for (const auto& r : res.code_buffer.relocations()) {
+                ObjectRelocation obj_r;
+                obj_r.offset = fn_offset + r.offset;
+                switch (r.kind) {
+                    case x64::RelocationKind::PCRel32:
+                        obj_r.kind = RelocKind::Plt32;
+                        break;
+                    case x64::RelocationKind::Abs64:
+                        obj_r.kind = RelocKind::Abs64;
+                        break;
+                    case x64::RelocationKind::SecRel32:
+                        obj_r.kind = RelocKind::SecRel32;
+                        break;
+                }
+                obj_r.symbol_name = r.symbol_name;
+                obj_r.addend = r.addend;
+                text_sec.relocations.push_back(std::move(obj_r));
+            }
         }
     }
 
