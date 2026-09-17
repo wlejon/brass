@@ -37,31 +37,39 @@
 namespace brass::codegen {
 
 namespace {
-static std::vector<std::pair<uintptr_t, uintptr_t>> s_jit_ranges;
-static std::mutex s_jit_ranges_mutex;
+static std::vector<std::pair<uintptr_t, uintptr_t>>& jit_ranges() {
+    static auto* ranges = new std::vector<std::pair<uintptr_t, uintptr_t>>();
+    return *ranges;
+}
+
+static std::mutex& jit_ranges_mutex() {
+    static auto* m = new std::mutex();
+    return *m;
+}
 
 void register_jit_memory_range(void* ptr, size_t size) {
     if (!ptr || size == 0) return;
-    std::lock_guard<std::mutex> lock(s_jit_ranges_mutex);
-    s_jit_ranges.push_back({reinterpret_cast<uintptr_t>(ptr), reinterpret_cast<uintptr_t>(ptr) + size});
+    std::lock_guard<std::mutex> lock(jit_ranges_mutex());
+    jit_ranges().push_back({reinterpret_cast<uintptr_t>(ptr), reinterpret_cast<uintptr_t>(ptr) + size});
 }
 
 void unregister_jit_memory_range(void* ptr) {
     if (!ptr) return;
-    std::lock_guard<std::mutex> lock(s_jit_ranges_mutex);
+    std::lock_guard<std::mutex> lock(jit_ranges_mutex());
     uintptr_t p = reinterpret_cast<uintptr_t>(ptr);
-    s_jit_ranges.erase(
-        std::remove_if(s_jit_ranges.begin(), s_jit_ranges.end(),
+    auto& ranges = jit_ranges();
+    ranges.erase(
+        std::remove_if(ranges.begin(), ranges.end(),
                        [p](const auto& range) { return range.first == p; }),
-        s_jit_ranges.end());
+        ranges.end());
 }
 } // namespace
 
 bool is_jit_code_address(const void* addr) noexcept {
     if (!addr) return false;
     uintptr_t p = reinterpret_cast<uintptr_t>(addr);
-    std::lock_guard<std::mutex> lock(s_jit_ranges_mutex);
-    for (const auto& [start, end] : s_jit_ranges) {
+    std::lock_guard<std::mutex> lock(jit_ranges_mutex());
+    for (const auto& [start, end] : jit_ranges()) {
         if (p >= start && p < end) return true;
     }
     return false;

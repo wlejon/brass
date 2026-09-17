@@ -105,10 +105,20 @@ Value* get_or_create_constant(Function& fn, const LatticeValue& lat) {
                 }
                 return inst->result();
             }
-        } else if (lat.type() == Type::f64() && inst->opcode() == Opcode::fconst_f64) {
+        } else if (lat.type() == Type::f64() && inst->opcode() == Opcode::fconst_f64 && inst->type() == Type::f64()) {
             double inst_f = inst->imm_f64();
             double lat_f = lat.as_f64();
             if (std::memcmp(&inst_f, &lat_f, sizeof(double)) == 0) {
+                if (inst != entry->head()) {
+                    entry->remove_instruction(inst);
+                    entry->prepend_instruction(inst);
+                }
+                return inst->result();
+            }
+        } else if (lat.type() == Type::f32() && inst->opcode() == Opcode::fconst_f64 && inst->type() == Type::f32()) {
+            float inst_f = static_cast<float>(inst->imm_f64());
+            float lat_f = lat.as_f32();
+            if (std::memcmp(&inst_f, &lat_f, sizeof(float)) == 0) {
                 if (inst != entry->head()) {
                     entry->remove_instruction(inst);
                     entry->prepend_instruction(inst);
@@ -133,7 +143,7 @@ Value* get_or_create_constant(Function& fn, const LatticeValue& lat) {
         return b.build_fconst_f64(lat.as_f64());
     }
     if (lat.type() == Type::f32()) {
-        return b.build_fconst_f64(static_cast<double>(lat.as_f32()));
+        return b.build_fconst_f32(lat.as_f32());
     }
 
     return nullptr;

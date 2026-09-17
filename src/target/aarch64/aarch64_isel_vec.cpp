@@ -356,7 +356,7 @@ void AArch64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& li
                     lir_bb.append_inst(std::move(movss));
                 } else {
                     auto shuf = std::make_unique<LirInst>(LirOpcode::Pshufd);
-                    shuf->add_def(LirOperand::vreg(dst, 16));
+                    shuf->add_def(LirOperand::vreg(dst, 4));
                     shuf->add_use(LirOperand::vreg(src, 16));
                     shuf->add_use(LirOperand::vreg(src, 16));
                     shuf->add_use(LirOperand::imm(lane & 3, 1));
@@ -373,7 +373,7 @@ void AArch64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& li
                 } else {
                     emit_movaps(dst, src);
                     auto shuf = std::make_unique<LirInst>(LirOpcode::Shufpd);
-                    shuf->add_def(LirOperand::vreg(dst, 16));
+                    shuf->add_def(LirOperand::vreg(dst, 8));
                     shuf->add_use(LirOperand::vreg(dst, 16));
                     shuf->add_use(LirOperand::vreg(src, 16));
                     shuf->add_use(LirOperand::imm(1, 1));
