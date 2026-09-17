@@ -1,4 +1,7 @@
 #include <brass/codegen/kernel_jit.hpp>
+#include <brass/target/target.hpp>
+#include <brass/mir/printer.hpp>
+#include <iostream>
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/verifier.hpp>
 #include <brass/mir/dominators.hpp>
@@ -79,8 +82,9 @@ void KernelJit::setup_default_symbols(codegen::JitExecutionEngine& engine) const
     engine.register_external_symbol("brass_parallel_alloc_context", reinterpret_cast<void*>(&brass_parallel_alloc_context));
     engine.register_external_symbol("brass_parallel_free_context", reinterpret_cast<void*>(&brass_parallel_free_context));
 
-    // Standard Math Functions (for pure-compute kernels calling elementary transcendental/math routines)
-    static const auto rsqrt_f = +[](float x) -> float { return 1.0f / std::sqrt(x); };
+    static const auto rsqrt_f = +[](float x) -> float {
+        return 1.0f / std::sqrt(x);
+    };
     static const auto rsqrt_d = +[](double x) -> double { return 1.0 / std::sqrt(x); };
     static const auto i32_to_f32_f = +[](int32_t x) -> float { return static_cast<float>(x); };
     engine.register_external_symbol("sqrt", reinterpret_cast<void*>(static_cast<double(*)(double)>(&std::sqrt)));
@@ -246,7 +250,6 @@ KernelFunction KernelJit::compile(Module& mod, std::string_view entry_name) {
             fn->rebuild_cfg_predecessors();
         }
     }
-
     DiagnosticReporter diag;
     if (!verify_module(working_mod, &diag)) {
         throw std::runtime_error("Kernel JIT verification failed: " + diag.format_all());

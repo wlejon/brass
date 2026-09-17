@@ -28,6 +28,10 @@
 #else
 #include <sys/mman.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <pthread.h>
+#include <libkern/OSCacheControl.h>
+#endif
 #endif
 
 namespace brass::codegen {
@@ -68,6 +72,13 @@ JitMemoryBlock::JitMemoryBlock(size_t size) {
     size_t page_aligned = (size + 4095) & ~size_t(4095);
 #if defined(_WIN32)
     ptr_ = static_cast<uint8_t*>(VirtualAlloc(nullptr, page_aligned, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+#elif defined(__APPLE__) && defined(__aarch64__)
+    ptr_ = static_cast<uint8_t*>(mmap(nullptr, page_aligned, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS | MAP_JIT, -1, 0));
+    if (ptr_ == MAP_FAILED) {
+        ptr_ = nullptr;
+    } else {
+        pthread_jit_write_protect_np(0);
+    }
 #else
     ptr_ = static_cast<uint8_t*>(mmap(nullptr, page_aligned, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
     if (ptr_ == MAP_FAILED) ptr_ = nullptr;
@@ -115,6 +126,13 @@ void JitMemoryBlock::make_executable() {
     DWORD old_protect;
     VirtualProtect(ptr_, size_, PAGE_EXECUTE_READWRITE, &old_protect);
     FlushInstructionCache(GetCurrentProcess(), ptr_, size_);
+#elif defined(__APPLE__) && defined(__aarch64__)
+    pthread_jit_write_protect_np(1);
+    sys_dcache_flush(ptr_, size_);
+    sys_icache_invalidate(ptr_, size_);
+#elif defined(__APPLE__)
+    mprotect(ptr_, size_, PROT_READ | PROT_WRITE | PROT_EXEC);
+    __builtin___clear_cache(reinterpret_cast<char*>(ptr_), reinterpret_cast<char*>(ptr_ + size_));
 #else
     mprotect(ptr_, size_, PROT_READ | PROT_WRITE | PROT_EXEC);
     __builtin___clear_cache(reinterpret_cast<char*>(ptr_), reinterpret_cast<char*>(ptr_ + size_));
@@ -124,7 +142,13 @@ void JitMemoryBlock::make_executable() {
 
 void JitMemoryBlock::make_executable_read_only(size_t code_size) {
     if (!ptr_) return;
-#if defined(__APPLE__)
+#if defined(__APPLE__) && defined(__aarch64__)
+    pthread_jit_write_protect_np(1);
+    sys_dcache_flush(ptr_, size_);
+    sys_icache_invalidate(ptr_, size_);
+    register_jit_memory_range(ptr_, size_);
+    return;
+#elif defined(__APPLE__) && defined(__x86_64__)
     // On macOS under Rosetta 2, keeping JIT memory RWX prevents SIGBUS crashes
     // caused by concurrent mprotect permission flipping during in-flight thread execution.
     make_executable();
@@ -148,6 +172,10 @@ void JitMemoryBlock::make_read_write() {
     if (ptr_) {
         DWORD old_protect;
         VirtualProtect(ptr_, size_, PAGE_READWRITE, &old_protect);
+    }
+#elif defined(__APPLE__) && defined(__aarch64__)
+    if (ptr_) {
+        pthread_jit_write_protect_np(0);
     }
 #else
     if (ptr_) {
@@ -286,6 +314,10 @@ JitExecutionEngine& JitExecutionEngine::operator=(JitExecutionEngine&& other) no
 
 void JitExecutionEngine::register_external_symbol(std::string_view name, void* address) {
     external_symbols_[std::string(name)] = address;
+}
+
+void JitExecutionEngine::register_function_signature(std::string_view name, Type ret_type, std::vector<Type> param_types) {
+    function_signatures_[std::string(name)] = {ret_type, std::move(param_types)};
 }
 
 bool JitExecutionEngine::compile_and_load(const Module& mod, size_t code_padding) {
@@ -436,35 +468,79 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
 
             switch (r.kind) {
                 case object::RelocKind::Plt32: {
-                    int64_t disp = reinterpret_cast<int64_t>(target_addr) + r.addend - reinterpret_cast<int64_t>(patch_loc);
-                    if (disp < INT32_MIN || disp > INT32_MAX) {
-                        // Out of 32-bit reach: generate or reuse a 64-bit indirect jump PLT trampoline
-                        void* tramp_addr = nullptr;
-                        auto tramp_it = trampolines.find(r.symbol_name);
-                        if (tramp_it != trampolines.end()) {
-                            tramp_addr = tramp_it->second;
-                        } else {
-                            if (trampoline_used + 16 <= trampoline_capacity) {
-                                uint8_t* t = trampoline_ptr + trampoline_used;
-                                trampoline_used += 16;
-                                // Emit: FF 25 00 00 00 00 (jmp qword ptr [rip + 0]) ; [64-bit target_addr]
-                                t[0] = 0xFF; t[1] = 0x25;
-                                t[2] = 0x00; t[3] = 0x00; t[4] = 0x00; t[5] = 0x00;
-                                *reinterpret_cast<uint64_t*>(t + 6) = reinterpret_cast<uint64_t>(target_addr);
-                                trampolines[r.symbol_name] = t;
-                                tramp_addr = t;
+                    if (target_.is_aarch64()) {
+                        int64_t disp = reinterpret_cast<int64_t>(target_addr) + r.addend - reinterpret_cast<int64_t>(patch_loc);
+                        int64_t disp_words = disp >> 2;
+                        if (disp_words < -33554432 || disp_words > 33554431) {
+                            // Out of 26-bit reach (+-128MB): generate or reuse AArch64 trampoline
+                            void* tramp_addr = nullptr;
+                            auto tramp_it = trampolines.find(r.symbol_name);
+                            if (tramp_it != trampolines.end()) {
+                                tramp_addr = tramp_it->second;
+                            } else {
+                                if (trampoline_used + 16 <= trampoline_capacity) {
+                                    uint8_t* t = trampoline_ptr + trampoline_used;
+                                    trampoline_used += 16;
+                                    // AArch64 trampoline:
+                                    // ldr x16, #8 (0x58000050)
+                                    // br x16      (0xD61F0200)
+                                    // [64-bit target_addr]
+                                    *reinterpret_cast<uint32_t*>(t) = 0x58000050u;
+                                    *reinterpret_cast<uint32_t*>(t + 4) = 0xD61F0200u;
+                                    *reinterpret_cast<uint64_t*>(t + 8) = reinterpret_cast<uint64_t>(target_addr);
+                                    trampolines[r.symbol_name] = t;
+                                    tramp_addr = t;
+                                }
+                            }
+                            if (tramp_addr) {
+                                disp = reinterpret_cast<int64_t>(tramp_addr) + r.addend - reinterpret_cast<int64_t>(patch_loc);
+                                disp_words = disp >> 2;
                             }
                         }
-                        if (tramp_addr) {
-                            disp = reinterpret_cast<int64_t>(tramp_addr) + r.addend - reinterpret_cast<int64_t>(patch_loc);
+                        uint32_t inst = *reinterpret_cast<uint32_t*>(patch_loc);
+                        uint32_t new_inst = (inst & 0xFC000000u) | (static_cast<uint32_t>(disp_words) & 0x03FFFFFFu);
+                        *reinterpret_cast<uint32_t*>(patch_loc) = new_inst;
+                    } else {
+                        int64_t disp = reinterpret_cast<int64_t>(target_addr) + r.addend - reinterpret_cast<int64_t>(patch_loc);
+                        if (disp < INT32_MIN || disp > INT32_MAX) {
+                            // Out of 32-bit reach: generate or reuse a 64-bit indirect jump PLT trampoline
+                            void* tramp_addr = nullptr;
+                            auto tramp_it = trampolines.find(r.symbol_name);
+                            if (tramp_it != trampolines.end()) {
+                                tramp_addr = tramp_it->second;
+                            } else {
+                                if (trampoline_used + 16 <= trampoline_capacity) {
+                                    uint8_t* t = trampoline_ptr + trampoline_used;
+                                    trampoline_used += 16;
+                                    // Emit: FF 25 00 00 00 00 (jmp qword ptr [rip + 0]) ; [64-bit target_addr]
+                                    t[0] = 0xFF; t[1] = 0x25;
+                                    t[2] = 0x00; t[3] = 0x00; t[4] = 0x00; t[5] = 0x00;
+                                    *reinterpret_cast<uint64_t*>(t + 6) = reinterpret_cast<uint64_t>(target_addr);
+                                    trampolines[r.symbol_name] = t;
+                                    tramp_addr = t;
+                                }
+                            }
+                            if (tramp_addr) {
+                                disp = reinterpret_cast<int64_t>(tramp_addr) + r.addend - reinterpret_cast<int64_t>(patch_loc);
+                            }
                         }
+                        *reinterpret_cast<int32_t*>(patch_loc) = static_cast<int32_t>(disp);
                     }
-                    *reinterpret_cast<int32_t*>(patch_loc) = static_cast<int32_t>(disp);
                     break;
                 }
                 case object::RelocKind::PCRel32: {
-                    int64_t disp = reinterpret_cast<int64_t>(target_addr) + r.addend - reinterpret_cast<int64_t>(patch_loc);
-                    *reinterpret_cast<int32_t*>(patch_loc) = static_cast<int32_t>(disp);
+                    if (target_.is_aarch64()) {
+                        int64_t page_diff = (reinterpret_cast<int64_t>(target_addr) >> 12) - (reinterpret_cast<int64_t>(patch_loc) >> 12);
+                        uint32_t inst = *reinterpret_cast<uint32_t*>(patch_loc);
+                        uint32_t imm21 = static_cast<uint32_t>(page_diff) & 0x1FFFFFu;
+                        uint32_t immlo = (imm21 & 0x3u) << 29;
+                        uint32_t immhi = ((imm21 >> 2) & 0x7FFFFu) << 5;
+                        uint32_t new_inst = (inst & 0x9F00001Fu) | immlo | immhi;
+                        *reinterpret_cast<uint32_t*>(patch_loc) = new_inst;
+                    } else {
+                        int64_t disp = reinterpret_cast<int64_t>(target_addr) + r.addend - reinterpret_cast<int64_t>(patch_loc);
+                        *reinterpret_cast<int32_t*>(patch_loc) = static_cast<int32_t>(disp);
+                    }
                     break;
                 }
                 case object::RelocKind::Abs64: {
@@ -472,8 +548,17 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
                     *reinterpret_cast<uint64_t*>(patch_loc) = val;
                     break;
                 }
-                case object::RelocKind::Addr32NB:
                 case object::RelocKind::SecRel32: {
+                    if (target_.is_aarch64()) {
+                        uint32_t pageoff = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(target_addr) & 0xFFFu);
+                        uint32_t inst = *reinterpret_cast<uint32_t*>(patch_loc);
+                        uint32_t new_inst = (inst & 0xFFC003FFu) | ((pageoff & 0xFFFu) << 10);
+                        *reinterpret_cast<uint32_t*>(patch_loc) = new_inst;
+                        break;
+                    }
+                    [[fallthrough]];
+                }
+                case object::RelocKind::Addr32NB: {
                     uint32_t rva = static_cast<uint32_t>(reinterpret_cast<uint8_t*>(target_addr) - base_ptr + r.addend);
                     *reinterpret_cast<uint32_t*>(patch_loc) = rva;
                     break;

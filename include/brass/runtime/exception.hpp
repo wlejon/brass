@@ -147,6 +147,7 @@ bool brass_has_current_exception() noexcept;
 void brass_clear_current_exception() noexcept;
 
 struct SavedRegisters {
+    // x86_64 callee-saved
     uint64_t r15 = 0;
     uint64_t r14 = 0;
     uint64_t r13 = 0;
@@ -154,6 +155,12 @@ struct SavedRegisters {
     uint64_t rdi = 0;
     uint64_t rsi = 0;
     uint64_t rbx = 0;
+    // AArch64 callee-saved
+    uint64_t x19 = 0, x20 = 0, x21 = 0, x22 = 0;
+    uint64_t x23 = 0, x24 = 0, x25 = 0, x26 = 0;
+    uint64_t x27 = 0, x28 = 0, fp = 0, lr = 0;
+    uint64_t d8 = 0, d9 = 0, d10 = 0, d11 = 0;
+    uint64_t d12 = 0, d13 = 0, d14 = 0, d15 = 0;
 };
 
 // 6. In-memory landing pad jump & dispatcher

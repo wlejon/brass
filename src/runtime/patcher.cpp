@@ -21,6 +21,10 @@
 #else
 #include <sys/mman.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <libkern/OSCacheControl.h>
+#include <pthread.h>
+#endif
 #endif
 
 namespace {
@@ -29,6 +33,18 @@ static inline void memory_fence() noexcept {
     _mm_mfence();
 #else
     std::atomic_thread_fence(std::memory_order_seq_cst);
+#endif
+}
+
+static inline void flush_code_cache(void* addr, size_t size) noexcept {
+#if defined(__APPLE__)
+    sys_dcache_flush(addr, size);
+    sys_icache_invalidate(addr, size);
+#elif defined(_WIN32)
+    FlushInstructionCache(GetCurrentProcess(), addr, size);
+#elif defined(__GNUC__) || defined(__clang__)
+    char* begin = static_cast<char*>(addr);
+    __builtin___clear_cache(begin, begin + size);
 #endif
 }
 
@@ -49,7 +65,12 @@ class ScopedCodeWrite {
 public:
     ScopedCodeWrite(void* addr, size_t size) {
         if (!addr || size == 0) return;
-#if defined(__APPLE__)
+#if defined(__APPLE__) && defined(__aarch64__)
+        pthread_jit_write_protect_np(0);
+        active_ = true;
+        writable_ = true;
+        return;
+#elif defined(__APPLE__) && defined(__x86_64__)
         // On macOS (specifically x86_64 running under Rosetta 2), JIT memory is kept
         // PROT_READ | PROT_WRITE | PROT_EXEC to prevent kernel SIGBUS faults caused by
         // concurrent mprotect calls racing with translated instruction execution.
@@ -78,19 +99,25 @@ public:
         page_addr_ = reinterpret_cast<void*>(page_start);
         page_len_ = page_end - page_start;
 
-        if (mprotect(page_addr_, page_len_, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
+        if (mprotect(page_addr_, page_len_, PROT_READ | PROT_WRITE) == 0) {
             active_ = true;
         }
 #endif
     }
 
     ~ScopedCodeWrite() {
+#if defined(__APPLE__) && defined(__aarch64__)
+        if (active_) {
+            pthread_jit_write_protect_np(1);
+        }
+#else
         if (!active_) return;
 #if defined(_WIN32)
         DWORD dummy = 0;
         VirtualProtect(addr_, size_, old_protect_, &dummy);
 #else
         mprotect(page_addr_, page_len_, PROT_READ | PROT_EXEC);
+#endif
 #endif
     }
 
@@ -137,12 +164,7 @@ bool brass_patch_const32(void* code_addr, int32_t new_val) {
     auto* target_ptr = reinterpret_cast<int32_t*>(code_addr);
     atomic_store_release(target_ptr, new_val);
     memory_fence();
-#if defined(_WIN32)
-    FlushInstructionCache(GetCurrentProcess(), code_addr, sizeof(int32_t));
-#elif defined(__GNUC__) || defined(__clang__)
-    char* begin = static_cast<char*>(code_addr);
-    __builtin___clear_cache(begin, begin + sizeof(int32_t));
-#endif
+    flush_code_cache(code_addr, sizeof(int32_t));
     return true;
 }
 
@@ -153,17 +175,34 @@ bool brass_patch_const64(void* code_addr, int64_t new_val) {
     auto* target_ptr = reinterpret_cast<int64_t*>(code_addr);
     atomic_store_release(target_ptr, new_val);
     memory_fence();
-#if defined(_WIN32)
-    FlushInstructionCache(GetCurrentProcess(), code_addr, sizeof(int64_t));
-#elif defined(__GNUC__) || defined(__clang__)
-    char* begin = static_cast<char*>(code_addr);
-    __builtin___clear_cache(begin, begin + sizeof(int64_t));
-#endif
+    flush_code_cache(code_addr, sizeof(int64_t));
     return true;
 }
 
 bool brass_patch_call(void* call_site_addr, const void* new_target) {
     if (!call_site_addr || !new_target) return false;
+
+    // Check ARM64 BL or B instruction
+    if ((reinterpret_cast<uintptr_t>(call_site_addr) & 3) == 0) {
+        uint32_t current_inst = *reinterpret_cast<uint32_t*>(call_site_addr);
+        if ((current_inst & 0xFC000000u) == 0x94000000u || (current_inst & 0xFC000000u) == 0x14000000u) {
+            intptr_t site_int = reinterpret_cast<intptr_t>(call_site_addr);
+            intptr_t target_int = reinterpret_cast<intptr_t>(new_target);
+            int64_t disp = target_int - site_int;
+            if ((disp & 3) != 0) return false;
+            int64_t disp_words = disp >> 2;
+            if (disp_words < -33554432 || disp_words > 33554431) return false; // +-128MB
+            uint32_t opcode = current_inst & 0xFC000000u;
+            uint32_t new_inst = opcode | (static_cast<uint32_t>(disp_words) & 0x03FFFFFFu);
+            ScopedCodeWrite write_guard(call_site_addr, sizeof(uint32_t));
+            if (!write_guard.is_writable()) return false;
+            atomic_store_release(reinterpret_cast<uint32_t*>(call_site_addr), new_inst);
+            memory_fence();
+            flush_code_cache(call_site_addr, sizeof(uint32_t));
+            return true;
+        }
+    }
+
     uint8_t* inst = static_cast<uint8_t*>(call_site_addr);
 
     uint8_t* disp_ptr = inst;
@@ -190,12 +229,7 @@ bool brass_patch_call(void* call_site_addr, const void* new_target) {
     auto* target_ptr = reinterpret_cast<int32_t*>(disp_ptr);
     atomic_store_release(target_ptr, disp32);
     memory_fence();
-#if defined(_WIN32)
-    FlushInstructionCache(GetCurrentProcess(), disp_ptr, sizeof(int32_t));
-#elif defined(__GNUC__) || defined(__clang__)
-    char* begin = reinterpret_cast<char*>(disp_ptr);
-    __builtin___clear_cache(begin, begin + sizeof(int32_t));
-#endif
+    flush_code_cache(disp_ptr, sizeof(int32_t));
     return true;
 }
 

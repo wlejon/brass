@@ -189,6 +189,38 @@ __attribute__((naked)) void brass_jump_to_landing_pad(
     );
 }
 #endif
+#elif (defined(__GNUC__) || defined(__clang__)) && (defined(__aarch64__) || defined(_M_ARM64))
+__attribute__((naked)) void brass_jump_to_landing_pad(
+    void* landing_pad_ip,
+    void* target_rbp,
+    void* target_rsp,
+    HostValue val,
+    const SavedRegisters& regs
+) {
+    __asm__ volatile(
+        "mov x16, x0\n\t"              // x16 = landing_pad_ip
+        // Restore callee-saved registers from regs (x4)
+        "ldp x19, x20, [x4, #56]\n\t"
+        "ldp x21, x22, [x4, #72]\n\t"
+        "ldp x23, x24, [x4, #88]\n\t"
+        "ldp x25, x26, [x4, #104]\n\t"
+        "ldp x27, x28, [x4, #120]\n\t"
+        "ldp d8, d9,   [x4, #152]\n\t"
+        "ldp d10, d11, [x4, #168]\n\t"
+        "ldp d12, d13, [x4, #184]\n\t"
+        "ldp d14, d15, [x4, #200]\n\t"
+        // Restore target FP and SP
+        "mov x29, x1\n\t"              // x29 (fp) = target_rbp
+        "mov sp, x2\n\t"               // sp = target_rsp
+        // Move exception value to X0
+        "mov x0, x3\n\t"               // x0 = val.raw()
+        // Branch to landing pad
+        "br x16\n\t"
+        :
+        :
+        : "memory"
+    );
+}
 #elif defined(_MSC_VER)
 [[noreturn]] void brass_jump_to_landing_pad(
     void* landing_pad_ip,
@@ -246,8 +278,12 @@ extern "C" BRASS_NOINLINE_NOFP void brass_throw_impl(
         if (scope && fn_table) {
             void* landing_pad_ip = reinterpret_cast<void*>(fn_start + scope->landing_pad_offset);
             void* target_rbp = reinterpret_cast<void*>(cur_rbp);
+#if defined(__aarch64__) || defined(_M_ARM64)
+            void* target_rsp = reinterpret_cast<void*>(cur_rbp);
+#else
             uintptr_t target_rsp_val = cur_rbp - fn_table->frame_size();
             void* target_rsp = reinterpret_cast<void*>(target_rsp_val);
+#endif
 
             brass_jump_to_landing_pad(landing_pad_ip, target_rbp, target_rsp, val, *regs);
         }
@@ -303,6 +339,33 @@ BRASS_NOINLINE_NOFP void brass_throw(HostValue val) {
         }
     }
     brass_throw_impl(val, &regs, caller_rbp, caller_ip);
+}
+#elif (defined(__GNUC__) || defined(__clang__)) && (defined(__aarch64__) || defined(_M_ARM64))
+BRASS_NOINLINE_NOFP void brass_throw(HostValue val) {
+    SavedRegisters regs;
+    __asm__ volatile(
+        "stp x19, x20, [%0, #56]\n\t"
+        "stp x21, x22, [%0, #72]\n\t"
+        "stp x23, x24, [%0, #88]\n\t"
+        "stp x25, x26, [%0, #104]\n\t"
+        "stp x27, x28, [%0, #120]\n\t"
+        "stp d8, d9,   [%0, #152]\n\t"
+        "stp d10, d11, [%0, #168]\n\t"
+        "stp d12, d13, [%0, #184]\n\t"
+        "stp d14, d15, [%0, #200]\n\t"
+        :
+        : "r"(&regs)
+        : "memory"
+    );
+    void* frame = __builtin_frame_address(0);
+    uintptr_t caller_fp = 0;
+    uintptr_t caller_ip = 0;
+    if (frame) {
+        auto* fp_ptr = reinterpret_cast<uintptr_t*>(frame);
+        caller_fp = fp_ptr[0];
+        caller_ip = fp_ptr[1];
+    }
+    brass_throw_impl(val, &regs, caller_fp, caller_ip);
 }
 #elif !defined(_MSC_VER)
 [[noreturn]] void brass_throw(HostValue val) {

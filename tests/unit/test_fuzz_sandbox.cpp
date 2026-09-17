@@ -4,6 +4,7 @@
 #include <brass/mir/verifier.hpp>
 #include <thread>
 #include <chrono>
+#include <csignal>
 
 using namespace brass;
 using namespace brass::fuzz;
@@ -41,10 +42,16 @@ TEST_CASE("DiffFuzzer_ProtectedCppException") {
 TEST_CASE("DiffFuzzer_ProtectedFaultDivideByZero") {
     std::string fault;
     bool ok = DiffFuzzer::run_protected([]() {
+#if defined(__aarch64__) || defined(_M_ARM64)
+        // AArch64 hardware integer division does not trap on zero in hardware.
+        // Trigger SIGFPE to verify sandbox signal recovery.
+        raise(SIGFPE);
+#else
         volatile int a = 42;
         volatile int b = 0;
         volatile int c = a / b;
         (void)c;
+#endif
     }, fault);
 
     CHECK_FALSE(ok);

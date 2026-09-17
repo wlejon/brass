@@ -49,6 +49,28 @@ private:
 
 bool is_jit_code_address(const void* addr) noexcept;
 
+struct alignas(16) AArch64InvokeArgs {
+    uint64_t x[8] = {0};
+    alignas(16) uint8_t v[8][16] = {{0}};
+    const uint64_t* stack_words = nullptr;
+    uint64_t stack_word_count = 0;
+    void* target_fn = nullptr;
+};
+
+struct alignas(16) AArch64InvokeResult {
+    uint64_t x0 = 0;
+    uint64_t x1 = 0;
+    alignas(16) uint8_t q0[16] = {0};
+};
+
+void partition_aarch64_invoke_args(
+    const std::vector<RuntimeValue>& args,
+    const std::vector<Type>* param_types,
+    void* target_fn,
+    AArch64InvokeArgs& out_args,
+    std::vector<uint64_t>& stack_words
+);
+
 class JitExecutionEngine {
 public:
     explicit JitExecutionEngine(const Target& target);
@@ -62,6 +84,7 @@ public:
 
     // Register host external function/symbol
     void register_external_symbol(std::string_view name, void* address);
+    void register_function_signature(std::string_view name, Type ret_type, std::vector<Type> param_types = {});
 
     // Compilation & loading
     bool compile_and_load(const Module& mod, size_t code_padding = 0);

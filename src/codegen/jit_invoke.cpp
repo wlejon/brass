@@ -3,6 +3,85 @@
 #include <stdexcept>
 #include <iostream>
 
+namespace brass::codegen {
+
+void partition_aarch64_invoke_args(
+    const std::vector<RuntimeValue>& args,
+    const std::vector<Type>* param_types,
+    void* target_fn,
+    AArch64InvokeArgs& out_args,
+    std::vector<uint64_t>& stack_words
+) {
+    out_args = AArch64InvokeArgs{};
+    out_args.target_fn = target_fn;
+    stack_words.clear();
+
+    size_t gpr_idx = 0;
+    size_t fpr_idx = 0;
+
+    for (size_t i = 0; i < args.size(); ++i) {
+        const auto& arg = args[i];
+        bool is_fpr = false;
+        if (param_types && i < param_types->size()) {
+            const Type& pt = (*param_types)[i];
+            is_fpr = pt.is_float() || pt.is_vector();
+        } else {
+            is_fpr = arg.is_f32() || arg.is_f64() || arg.is_vector();
+        }
+
+        if (is_fpr) {
+            if (fpr_idx < 8) {
+                if (arg.is_vector()) {
+                    std::memcpy(out_args.v[fpr_idx], arg.v128_bytes(), 16);
+                } else if (arg.is_f32()) {
+                    float f = arg.as_f32();
+                    std::memcpy(out_args.v[fpr_idx], &f, sizeof(float));
+                } else {
+                    double d = arg.as_f64();
+                    std::memcpy(out_args.v[fpr_idx], &d, sizeof(double));
+                }
+                fpr_idx++;
+            } else {
+                if (arg.is_vector()) {
+                    if ((stack_words.size() % 2) != 0) {
+                        stack_words.push_back(0); // 16-byte alignment padding
+                    }
+                    uint64_t words[2] = {0, 0};
+                    std::memcpy(words, arg.v128_bytes(), 16);
+                    stack_words.push_back(words[0]);
+                    stack_words.push_back(words[1]);
+                } else if (arg.is_f32()) {
+                    float f = arg.as_f32();
+                    uint64_t w = 0;
+                    std::memcpy(&w, &f, sizeof(float));
+                    stack_words.push_back(w);
+                } else {
+                    double d = arg.as_f64();
+                    uint64_t w = 0;
+                    std::memcpy(&w, &d, sizeof(double));
+                    stack_words.push_back(w);
+                }
+            }
+        } else {
+            uint64_t val = arg.as_u64();
+            if (gpr_idx < 8) {
+                out_args.x[gpr_idx++] = val;
+            } else {
+                stack_words.push_back(val);
+            }
+        }
+    }
+
+    if ((stack_words.size() % 2) != 0) {
+        stack_words.push_back(0); // 16-byte stack alignment
+    }
+
+    out_args.stack_words = stack_words.empty() ? nullptr : stack_words.data();
+    out_args.stack_word_count = stack_words.size();
+}
+
+} // namespace brass::codegen
+
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
 
@@ -723,6 +802,66 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
 
 namespace brass::codegen {
 
+#if defined(__GNUC__) || defined(__clang__)
+extern "C" __attribute__((naked)) void aarch64_invoke_thunk(
+    const AArch64InvokeArgs* args,
+    AArch64InvokeResult* result
+) {
+    __asm__ volatile(
+        "stp x29, x30, [sp, #-32]!\n\t"
+        "mov x29, sp\n\t"
+        "stp x19, x20, [sp, #16]\n\t"
+
+        "mov x19, x1\n\t"              // x19 = result
+        "mov x20, x0\n\t"              // x20 = args
+
+        // Allocate stack arguments if count > 0
+        "ldr x2, [x20, #200]\n\t"      // x2 = stack_word_count
+        "cbz x2, 1f\n\t"
+        "lsl x3, x2, #3\n\t"           // x3 = stack_word_count * 8
+        "sub sp, sp, x3\n\t"           // allocate 16-byte aligned stack
+        "ldr x1, [x20, #192]\n\t"      // x1 = stack_words
+        "mov x4, sp\n\t"               // x4 = sp
+        "2:\n\t"
+        "ldr x5, [x1], #8\n\t"
+        "str x5, [x4], #8\n\t"
+        "subs x2, x2, #1\n\t"
+        "b.ne 2b\n\t"
+
+        "1:\n\t"
+        // Load V0..V7
+        "add x1, x20, #64\n\t"
+        "ldp q0, q1, [x1, #0]\n\t"
+        "ldp q2, q3, [x1, #32]\n\t"
+        "ldp q4, q5, [x1, #64]\n\t"
+        "ldp q6, q7, [x1, #96]\n\t"
+
+        // Load target function address
+        "ldr x16, [x20, #208]\n\t"
+
+        // Load X0..X7
+        "ldp x0, x1, [x20, #0]\n\t"
+        "ldp x2, x3, [x20, #16]\n\t"
+        "ldp x4, x5, [x20, #32]\n\t"
+        "ldp x6, x7, [x20, #48]\n\t"
+
+        // Call target function
+        "blr x16\n\t"
+
+        // Store results
+        "str x0, [x19, #0]\n\t"
+        "str x1, [x19, #8]\n\t"
+        "str q0, [x19, #16]\n\t"
+
+        // Epilogue
+        "mov sp, x29\n\t"
+        "ldp x19, x20, [sp, #16]\n\t"
+        "ldp x29, x30, [sp], #32\n\t"
+        "ret\n\t"
+    );
+}
+#endif
+
 RuntimeValue JitExecutionEngine::invoke(std::string_view name) {
     return invoke(name, {});
 }
@@ -734,152 +873,49 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
     }
 
     Type ret_type = Type::i64();
+    const std::vector<Type>* param_types = nullptr;
     auto sig_it = function_signatures_.find(std::string(name));
     if (sig_it != function_signatures_.end()) {
         ret_type = sig_it->second.first;
+        param_types = &sig_it->second.second;
     }
 
-    auto get_int = [&](size_t idx) -> int64_t {
-        if (idx >= args.size()) return 0;
-        return args[idx].as_i64();
-    };
+    AArch64InvokeArgs invoke_args;
+    std::vector<uint64_t> stack_words;
+    partition_aarch64_invoke_args(args, param_types, addr, invoke_args, stack_words);
 
-    auto get_float = [&](size_t idx) -> double {
-        if (idx >= args.size()) return 0.0;
-        return args[idx].as_f64();
-    };
+    AArch64InvokeResult result;
+#if defined(__GNUC__) || defined(__clang__)
+    aarch64_invoke_thunk(&invoke_args, &result);
+#endif
 
-    bool has_float_arg = false;
-    for (const auto& a : args) {
-        if (a.is_f64() || a.is_f32()) has_float_arg = true;
+    if (ret_type.is_void()) {
+        return RuntimeValue::from_void();
     }
-
-    if (args.empty()) {
-        if (ret_type.is_void()) {
-            reinterpret_cast<void(*)()>(addr)();
-            return RuntimeValue::from_void();
-        } else if (ret_type.is_float()) {
-            if (ret_type.kind() == TypeKind::F32) {
-                float r = reinterpret_cast<float(*)()>(addr)();
-                return RuntimeValue::from_f32(r);
-            }
-            double r = reinterpret_cast<double(*)()>(addr)();
-            return RuntimeValue::from_f64(r);
-        } else if (ret_type.kind() == TypeKind::I32) {
-            int32_t r = reinterpret_cast<int32_t(*)()>(addr)();
-            return RuntimeValue::from_i32(r);
+    if (ret_type.is_vector()) {
+        return RuntimeValue::from_v128(ret_type, result.q0);
+    }
+    if (ret_type.is_float()) {
+        if (ret_type.kind() == TypeKind::F32) {
+            float f = 0.0f;
+            std::memcpy(&f, result.q0, sizeof(float));
+            return RuntimeValue::from_f32(f);
         } else {
-            int64_t r = reinterpret_cast<int64_t(*)()>(addr)();
-            return RuntimeValue::from_i64(r);
+            double d = 0.0;
+            std::memcpy(&d, result.q0, sizeof(double));
+            return RuntimeValue::from_f64(d);
         }
     }
-
-    if (args.size() == 1) {
-        if (has_float_arg) {
-            double a0 = get_float(0);
-            if (ret_type.is_void()) {
-                reinterpret_cast<void(*)(double)>(addr)(a0);
-                return RuntimeValue::from_void();
-            } else if (ret_type.is_float()) {
-                if (ret_type.kind() == TypeKind::F32) {
-                    float r = reinterpret_cast<float(*)(double)>(addr)(a0);
-                    return RuntimeValue::from_f32(r);
-                }
-                double r = reinterpret_cast<double(*)(double)>(addr)(a0);
-                return RuntimeValue::from_f64(r);
-            } else {
-                int64_t r = reinterpret_cast<int64_t(*)(double)>(addr)(a0);
-                return RuntimeValue::from_i64(r);
-            }
-        } else {
-            int64_t a0 = get_int(0);
-            if (ret_type.is_void()) {
-                reinterpret_cast<void(*)(int64_t)>(addr)(a0);
-                return RuntimeValue::from_void();
-            } else if (ret_type.is_float()) {
-                double r = reinterpret_cast<double(*)(int64_t)>(addr)(a0);
-                return RuntimeValue::from_f64(r);
-            } else if (ret_type.kind() == TypeKind::I32) {
-                int32_t r = reinterpret_cast<int32_t(*)(int64_t)>(addr)(a0);
-                return RuntimeValue::from_i32(r);
-            } else {
-                int64_t r = reinterpret_cast<int64_t(*)(int64_t)>(addr)(a0);
-                return RuntimeValue::from_i64(r);
-            }
-        }
+    if (ret_type.kind() == TypeKind::I32) {
+        return RuntimeValue::from_i32(static_cast<int32_t>(result.x0));
     }
-
-    if (args.size() == 2) {
-        if (has_float_arg) {
-            double a0 = get_float(0), a1 = get_float(1);
-            if (ret_type.is_void()) {
-                reinterpret_cast<void(*)(double, double)>(addr)(a0, a1);
-                return RuntimeValue::from_void();
-            } else if (ret_type.is_float()) {
-                if (ret_type.kind() == TypeKind::F32) {
-                    float r = reinterpret_cast<float(*)(double, double)>(addr)(a0, a1);
-                    return RuntimeValue::from_f32(r);
-                }
-                double r = reinterpret_cast<double(*)(double, double)>(addr)(a0, a1);
-                return RuntimeValue::from_f64(r);
-            } else {
-                int64_t r = reinterpret_cast<int64_t(*)(double, double)>(addr)(a0, a1);
-                return RuntimeValue::from_i64(r);
-            }
-        } else {
-            int64_t a0 = get_int(0), a1 = get_int(1);
-            if (ret_type.is_void()) {
-                reinterpret_cast<void(*)(int64_t, int64_t)>(addr)(a0, a1);
-                return RuntimeValue::from_void();
-            } else if (ret_type.is_float()) {
-                double r = reinterpret_cast<double(*)(int64_t, int64_t)>(addr)(a0, a1);
-                return RuntimeValue::from_f64(r);
-            } else if (ret_type.kind() == TypeKind::I32) {
-                int32_t r = reinterpret_cast<int32_t(*)(int64_t, int64_t)>(addr)(a0, a1);
-                return RuntimeValue::from_i32(r);
-            } else {
-                int64_t r = reinterpret_cast<int64_t(*)(int64_t, int64_t)>(addr)(a0, a1);
-                return RuntimeValue::from_i64(r);
-            }
-        }
+    if (ret_type.is_pointer()) {
+        return RuntimeValue::from_ptr(static_cast<uintptr_t>(result.x0));
     }
-
-    if (args.size() == 3) {
-        if (has_float_arg) {
-            double a0 = get_float(0), a1 = get_float(1), a2 = get_float(2);
-            double r = reinterpret_cast<double(*)(double, double, double)>(addr)(a0, a1, a2);
-            return RuntimeValue::from_f64(r);
-        }
-        int64_t a0 = get_int(0), a1 = get_int(1), a2 = get_int(2);
-        int64_t r = reinterpret_cast<int64_t(*)(int64_t, int64_t, int64_t)>(addr)(a0, a1, a2);
-        return RuntimeValue::from_i64(r);
+    if (ret_type.is_gcref()) {
+        return RuntimeValue::from_gcref(static_cast<uintptr_t>(result.x0));
     }
-
-    if (args.size() == 4) {
-        if (has_float_arg) {
-            double a0 = get_float(0), a1 = get_float(1), a2 = get_float(2), a3 = get_float(3);
-            double r = reinterpret_cast<double(*)(double, double, double, double)>(addr)(a0, a1, a2, a3);
-            return RuntimeValue::from_f64(r);
-        }
-        int64_t a0 = get_int(0), a1 = get_int(1), a2 = get_int(2), a3 = get_int(3);
-        int64_t r = reinterpret_cast<int64_t(*)(int64_t, int64_t, int64_t, int64_t)>(addr)(a0, a1, a2, a3);
-        return RuntimeValue::from_i64(r);
-    }
-
-    if (args.size() <= 8) {
-        if (has_float_arg) {
-            double f0 = get_float(0), f1 = get_float(1), f2 = get_float(2), f3 = get_float(3);
-            double f4 = get_float(4), f5 = get_float(5), f6 = get_float(6), f7 = get_float(7);
-            double r = reinterpret_cast<double(*)(double, double, double, double, double, double, double, double)>(addr)(f0, f1, f2, f3, f4, f5, f6, f7);
-            return RuntimeValue::from_f64(r);
-        }
-        int64_t a0 = get_int(0), a1 = get_int(1), a2 = get_int(2), a3 = get_int(3);
-        int64_t a4 = get_int(4), a5 = get_int(5), a6 = get_int(6), a7 = get_int(7);
-        int64_t r = reinterpret_cast<int64_t(*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t)>(addr)(a0, a1, a2, a3, a4, a5, a6, a7);
-        return RuntimeValue::from_i64(r);
-    }
-
-    throw std::runtime_error("JitExecutionEngine::invoke on AArch64 supports up to 8 arguments");
+    return RuntimeValue::from_i64(static_cast<int64_t>(result.x0));
 }
 
 } // namespace brass::codegen

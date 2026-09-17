@@ -6,6 +6,8 @@
 #include <cstring>
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#include <arm_neon.h>
 #endif
 
 namespace brass::runtime {
@@ -163,6 +165,16 @@ bool OsrCoordinator::try_osr_migration(
         } else {
             alignas(16) uint8_t b[16];
             std::memcpy(b, &r, 16);
+            out_result = RuntimeValue::from_v128(ret_t, b);
+        }
+#elif defined(__aarch64__) || defined(_M_ARM64)
+        using NativeOsrFn = uint8x16_t (*)(const OsrMigrationFrame*);
+        uint8x16_t r = reinterpret_cast<NativeOsrFn>(osr_entry_addr)(&mig_frame);
+        if (deopt_occurred) {
+            out_result = deopt_res;
+        } else {
+            alignas(16) uint8_t b[16];
+            vst1q_u8(b, r);
             out_result = RuntimeValue::from_v128(ret_t, b);
         }
 #else
