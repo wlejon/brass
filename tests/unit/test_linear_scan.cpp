@@ -3,6 +3,8 @@
 #include <brass/mir/builder.hpp>
 #include <brass/mir/verifier.hpp>
 #include <brass/target/x64/x64_isel.hpp>
+#include <brass/target/target.hpp>
+#include <brass/target/aarch64/aarch64_registers.hpp>
 #include <brass/codegen/live_range.hpp>
 #include <brass/codegen/linear_scan.hpp>
 
@@ -217,4 +219,209 @@ TEST_CASE("Linear Scan - Callee-Saved Register Selection Across Calls") {
     regalloc.allocate();
 
     CHECK_NE(regalloc.used_callee_saved_gprs(), 0);
+}
+
+TEST_CASE("Linear Scan - AArch64 32 Register Pool Allocation") {
+    LirFunction fn;
+    fn.name = "test_aarch64_pool";
+    fn.calling_conv = CallingConvention::for_target(Target::aarch64_linux());
+
+    LirBlock* entry = fn.create_block("entry");
+
+    // Allocate 25 virtual registers
+    std::vector<VReg> vars;
+    for (int i = 0; i < 25; ++i) {
+        vars.push_back(fn.allocate_vreg(RegClass::GPR, 8));
+    }
+
+    // Initialize all 25 registers
+    for (size_t i = 0; i < 25; ++i) {
+        auto inst = std::make_unique<LirInst>(LirOpcode::Mov);
+        inst->add_def(LirOperand::vreg(vars[i]));
+        inst->add_use(LirOperand::imm(static_cast<int64_t>(i + 1)));
+        entry->append_inst(std::move(inst));
+    }
+
+    // Accumulate all 25 registers so they have overlapping live ranges
+    VReg acc = fn.allocate_vreg(RegClass::GPR, 8);
+    auto init_acc = std::make_unique<LirInst>(LirOpcode::Mov);
+    init_acc->add_def(LirOperand::vreg(acc));
+    init_acc->add_use(LirOperand::vreg(vars[0]));
+    entry->append_inst(std::move(init_acc));
+
+    for (size_t i = 1; i < 25; ++i) {
+        auto add_inst = std::make_unique<LirInst>(LirOpcode::Add);
+        add_inst->add_def(LirOperand::vreg(acc));
+        add_inst->add_use(LirOperand::vreg(acc));
+        add_inst->add_use(LirOperand::vreg(vars[i]));
+        entry->append_inst(std::move(add_inst));
+    }
+
+    auto ret_inst = std::make_unique<LirInst>(LirOpcode::Ret);
+    ret_inst->add_use(LirOperand::vreg(acc));
+    entry->append_inst(std::move(ret_inst));
+
+    LivenessAnalysis liveness(fn);
+    liveness.run();
+
+    LinearScanAllocator regalloc(fn, liveness, fn.calling_conv);
+    regalloc.allocate();
+
+    // Verify > 16 registers are successfully allocated without spilling (demonstrating 32-reg pool works)
+    CHECK_EQ(regalloc.num_spill_slots(), size_t(0));
+    CHECK_EQ(fn.frame.num_spill_slots, size_t(0));
+
+    size_t allocated_pregs = 0;
+    for (const auto& vinfo : fn.vreg_table) {
+        if (!vinfo.is_spilled && vinfo.assigned_preg.is_valid()) {
+            allocated_pregs++;
+        }
+    }
+    CHECK(allocated_pregs > 16);
+    CHECK_EQ(allocated_pregs, size_t(26));
+
+    // Verify all rewritten operands have valid physical registers
+    for (const auto& inst : fn.blocks[0]->instructions) {
+        for (const auto& def_op : inst->defs) {
+            if (def_op.is_reg()) {
+                CHECK(def_op.is_preg());
+                CHECK(def_op.preg_val.is_valid());
+            }
+        }
+        for (const auto& use_op : inst->uses) {
+            if (use_op.is_reg()) {
+                CHECK(use_op.is_preg());
+                CHECK(use_op.preg_val.is_valid());
+            }
+        }
+    }
+
+    // Verify callee-saved registers (X19..X28) are tracked in fn.frame.saved_callee_gprs
+    CHECK_NE(fn.frame.saved_callee_gprs, 0u);
+    CHECK_NE(regalloc.used_callee_saved_gprs(), 0u);
+    CHECK_EQ(fn.frame.saved_callee_gprs, regalloc.used_callee_saved_gprs());
+
+    // Check that callee-saved registers X19..X28 were used (since 26 regs > 17 caller-saved)
+    uint32_t callee_saved_range_mask = 0;
+    for (int i = 19; i <= 28; ++i) {
+        callee_saved_range_mask |= (1u << i);
+    }
+    CHECK_NE(fn.frame.saved_callee_gprs & callee_saved_range_mask, 0u);
+}
+
+TEST_CASE("Linear Scan - AArch64 FPR Pool Allocation") {
+    LirFunction fn;
+    fn.name = "test_aarch64_fpr_pool";
+    fn.calling_conv = CallingConvention::for_target(Target::aarch64_linux());
+
+    LirBlock* entry = fn.create_block("entry");
+
+    // Allocate 25 virtual floating-point registers
+    std::vector<VReg> vars;
+    for (int i = 0; i < 25; ++i) {
+        vars.push_back(fn.allocate_vreg(RegClass::XMM, 8));
+    }
+
+    // Initialize all 25 registers
+    for (size_t i = 0; i < 25; ++i) {
+        auto inst = std::make_unique<LirInst>(LirOpcode::Movsd);
+        inst->add_def(LirOperand::vreg(vars[i]));
+        inst->add_use(LirOperand::imm_f64(static_cast<double>(i + 1)));
+        entry->append_inst(std::move(inst));
+    }
+
+    // Accumulate all 25 registers so they have overlapping live ranges
+    VReg acc = fn.allocate_vreg(RegClass::XMM, 8);
+    auto init_acc = std::make_unique<LirInst>(LirOpcode::Movsd);
+    init_acc->add_def(LirOperand::vreg(acc));
+    init_acc->add_use(LirOperand::vreg(vars[0]));
+    entry->append_inst(std::move(init_acc));
+
+    for (size_t i = 1; i < 25; ++i) {
+        auto add_inst = std::make_unique<LirInst>(LirOpcode::Addsd);
+        add_inst->add_def(LirOperand::vreg(acc));
+        add_inst->add_use(LirOperand::vreg(acc));
+        add_inst->add_use(LirOperand::vreg(vars[i]));
+        entry->append_inst(std::move(add_inst));
+    }
+
+    auto ret_inst = std::make_unique<LirInst>(LirOpcode::Ret);
+    ret_inst->add_use(LirOperand::vreg(acc));
+    entry->append_inst(std::move(ret_inst));
+
+    LivenessAnalysis liveness(fn);
+    liveness.run();
+
+    LinearScanAllocator regalloc(fn, liveness, fn.calling_conv);
+    regalloc.allocate();
+
+    // Verify > 16 registers are successfully allocated without spilling
+    CHECK_EQ(regalloc.num_spill_slots(), size_t(0));
+    CHECK_EQ(fn.frame.num_spill_slots, size_t(0));
+
+    size_t allocated_pregs = 0;
+    for (const auto& vinfo : fn.vreg_table) {
+        if (!vinfo.is_spilled && vinfo.assigned_preg.is_valid()) {
+            allocated_pregs++;
+        }
+    }
+    CHECK(allocated_pregs > 16);
+    CHECK_EQ(allocated_pregs, size_t(26));
+
+    // Caller-saved FPRs are V0..V7 (8) + V16..V29 (14) = 22.
+    // With 26 live registers, at least 4 callee-saved FPRs (V8..V15) must be used.
+    CHECK_NE(fn.frame.saved_callee_xmms, 0u);
+    CHECK_NE(regalloc.used_callee_saved_xmms(), 0u);
+    CHECK_EQ(fn.frame.saved_callee_xmms, regalloc.used_callee_saved_xmms());
+
+    uint32_t callee_saved_fpr_mask = 0;
+    for (int i = 8; i <= 15; ++i) {
+        callee_saved_fpr_mask |= (1u << i);
+    }
+    CHECK_NE(fn.frame.saved_callee_xmms & callee_saved_fpr_mask, 0u);
+}
+
+TEST_CASE("Linear Scan - AArch64 Callee-Saved Register Across Calls") {
+    LirFunction fn;
+    fn.name = "test_aarch64_call_cross";
+    fn.calling_conv = CallingConvention::for_target(Target::aarch64_linux());
+
+    LirBlock* entry = fn.create_block("entry");
+
+    VReg live_across = fn.allocate_vreg(RegClass::GPR, 8);
+    auto init_live = std::make_unique<LirInst>(LirOpcode::Mov);
+    init_live->add_def(LirOperand::vreg(live_across));
+    init_live->add_use(LirOperand::imm(42));
+    entry->append_inst(std::move(init_live));
+
+    // Call instruction clobbering caller-saved registers
+    auto call_inst = std::make_unique<LirInst>(LirOpcode::Call);
+    call_inst->clobbered_gprs = fn.calling_conv.aarch64_caller_saved_gpr_mask();
+    call_inst->clobbered_xmms = fn.calling_conv.aarch64_caller_saved_fpr_mask();
+    entry->append_inst(std::move(call_inst));
+
+    // Use live_across after the call
+    VReg res = fn.allocate_vreg(RegClass::GPR, 8);
+    auto use_inst = std::make_unique<LirInst>(LirOpcode::Add);
+    use_inst->add_def(LirOperand::vreg(res));
+    use_inst->add_use(LirOperand::vreg(live_across));
+    use_inst->add_use(LirOperand::imm(10));
+    entry->append_inst(std::move(use_inst));
+
+    auto ret_inst = std::make_unique<LirInst>(LirOpcode::Ret);
+    ret_inst->add_use(LirOperand::vreg(res));
+    entry->append_inst(std::move(ret_inst));
+
+    LivenessAnalysis liveness(fn);
+    liveness.run();
+
+    LinearScanAllocator regalloc(fn, liveness, fn.calling_conv);
+    regalloc.allocate();
+
+    // live_across must be allocated to a callee-saved register without spilling
+    const auto& info = fn.get_vreg_info(live_across);
+    CHECK(!info.is_spilled);
+    CHECK(info.assigned_preg.is_valid());
+    CHECK(fn.calling_conv.is_callee_saved(info.assigned_preg.as_aarch64_gpr()));
+    CHECK_NE(fn.frame.saved_callee_gprs & aarch64::reg_mask(info.assigned_preg.as_aarch64_gpr()), 0u);
 }

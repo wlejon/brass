@@ -14,24 +14,53 @@ LinearScanAllocator::LinearScanAllocator(
 }
 
 void LinearScanAllocator::init_register_pools() {
-    using namespace brass::x64;
+    if (cc_.target().is_aarch64()) {
+        using namespace brass::aarch64;
+        available_gprs_.clear();
+        // Caller-saved: X0..X14 (excluding X15 as def_scratch, IP0=X16, IP1=X17 as use scratches, and X18 on Darwin)
+        for (int i = 0; i <= 14; ++i) {
+            available_gprs_.push_back(PReg::aarch64_gpr(static_cast<GPR>(i)));
+        }
+        if (!cc_.target().is_macos()) {
+            available_gprs_.push_back(PReg::aarch64_gpr(GPR::X18));
+        }
+        // Callee-saved: X19..X28 (excluding FP=X29, LR=X30, SP=31, XZR=32)
+        for (int i = 19; i <= 28; ++i) {
+            available_gprs_.push_back(PReg::aarch64_gpr(static_cast<GPR>(i)));
+        }
 
-    // Available GPRs (excluding RSP=4, RBP=5, and scratch registers R10=10, R11=11)
-    // Ordered with caller-saved first, then callee-saved
-    std::vector<GPR> gprs = {
-        GPR::RAX, GPR::RCX, GPR::RDX, GPR::R8, GPR::R9,
-        GPR::RBX, GPR::RSI, GPR::RDI, GPR::R12, GPR::R13, GPR::R14, GPR::R15
-    };
+        available_xmms_.clear();
+        // Caller-saved: V0..V7, V16..V28 (excluding V29 as def_scratch, V30, V31 as use scratches)
+        for (int i = 0; i <= 7; ++i) {
+            available_xmms_.push_back(PReg::aarch64_fpr(static_cast<FPR>(i)));
+        }
+        for (int i = 16; i <= 28; ++i) {
+            available_xmms_.push_back(PReg::aarch64_fpr(static_cast<FPR>(i)));
+        }
+        // Callee-saved: V8..V15
+        for (int i = 8; i <= 15; ++i) {
+            available_xmms_.push_back(PReg::aarch64_fpr(static_cast<FPR>(i)));
+        }
+    } else {
+        using namespace brass::x64;
 
-    available_gprs_.clear();
-    for (GPR g : gprs) {
-        available_gprs_.push_back(PReg::gpr(g));
-    }
+        // Available GPRs (excluding RSP=4, RBP=5, and scratch registers R10=10, R11=11)
+        // Ordered with caller-saved first, then callee-saved
+        std::vector<GPR> gprs = {
+            GPR::RAX, GPR::RCX, GPR::RDX, GPR::R8, GPR::R9,
+            GPR::RBX, GPR::RSI, GPR::RDI, GPR::R12, GPR::R13, GPR::R14, GPR::R15
+        };
 
-    // Available XMMs (excluding scratch XMM13, XMM14, and XMM15: XMM0..XMM12)
-    available_xmms_.clear();
-    for (int i = 0; i <= 12; ++i) {
-        available_xmms_.push_back(PReg::xmm(static_cast<XMM>(i)));
+        available_gprs_.clear();
+        for (GPR g : gprs) {
+            available_gprs_.push_back(PReg::gpr(g));
+        }
+
+        // Available XMMs (excluding scratch XMM13, XMM14, and XMM15: XMM0..XMM12)
+        available_xmms_.clear();
+        for (int i = 0; i <= 12; ++i) {
+            available_xmms_.push_back(PReg::xmm(static_cast<XMM>(i)));
+        }
     }
 }
 
@@ -82,7 +111,7 @@ void LinearScanAllocator::build_constraint_index() {
     };
     // A physical-register operand pins that register; otherwise a fixed
     // operand constraint does.
-    auto pinned_by = [](const LirOperand& op, const FixedConstraint* constraint, x64::RegMask& gprs, x64::RegMask& xmms) {
+    auto pinned_by = [](const LirOperand& op, const FixedConstraint* constraint, uint32_t& gprs, uint32_t& xmms) {
         PReg reg;
         if (op.is_preg()) {
             reg = op.preg_val;
@@ -91,16 +120,16 @@ void LinearScanAllocator::build_constraint_index() {
         } else {
             return;
         }
-        if (!reg.is_valid() || reg.code >= 16) return;
-        (reg.reg_class == RegClass::GPR ? gprs : xmms) |= static_cast<x64::RegMask>(1u << reg.code);
+        if (!reg.is_valid() || reg.code >= 32) return;
+        (reg.reg_class == RegClass::GPR ? gprs : xmms) |= (1u << reg.code);
     };
 
-    std::vector<uint64_t> words;
+    std::vector<InstConstraints> words;
     // Instruction ids are assigned in block order by the liveness analysis, so
     // walking the blocks yields the instructions already sorted by id.
     for (const auto& block : fn_.blocks) {
         for (const auto& inst : block->instructions) {
-            x64::RegMask pinned_gprs = 0, pinned_xmms = 0;
+            uint32_t pinned_gprs = 0, pinned_xmms = 0;
             for (size_t i = 0; i < inst->defs.size(); ++i) {
                 pinned_by(inst->defs[i], i < inst->def_constraints.size() ? &inst->def_constraints[i] : nullptr,
                           pinned_gprs, pinned_xmms);
@@ -111,10 +140,12 @@ void LinearScanAllocator::build_constraint_index() {
             }
             if (inst->clobbered_gprs != 0 || inst->clobbered_xmms != 0 || pinned_gprs != 0 || pinned_xmms != 0) {
                 constrained_ids_.push_back(inst->id);
-                words.push_back(static_cast<uint64_t>(inst->clobbered_gprs) |
-                                (static_cast<uint64_t>(inst->clobbered_xmms) << 16) |
-                                (static_cast<uint64_t>(pinned_gprs) << 32) |
-                                (static_cast<uint64_t>(pinned_xmms) << 48));
+                words.push_back(InstConstraints{
+                    inst->clobbered_gprs,
+                    inst->clobbered_xmms,
+                    pinned_gprs,
+                    pinned_xmms
+                });
             }
             for (const auto& op : inst->defs) note_mem_index(op);
             for (const auto& op : inst->uses) note_mem_index(op);
@@ -125,8 +156,8 @@ void LinearScanAllocator::build_constraint_index() {
     if (n == 0) return;
     constraint_or_.push_back(std::move(words));
     for (size_t span = 2; span <= n; span *= 2) {
-        const std::vector<uint64_t>& prev = constraint_or_.back();
-        std::vector<uint64_t> level(n - span + 1);
+        const std::vector<InstConstraints>& prev = constraint_or_.back();
+        std::vector<InstConstraints> level(n - span + 1);
         for (size_t i = 0; i < level.size(); ++i) {
             level[i] = prev[i] | prev[i + span / 2];
         }
@@ -135,8 +166,8 @@ void LinearScanAllocator::build_constraint_index() {
 }
 
 // The OR of the constraint words of constrained instructions [lo, hi).
-uint64_t LinearScanAllocator::constraint_or(size_t lo, size_t hi) const noexcept {
-    if (lo >= hi) return 0;
+InstConstraints LinearScanAllocator::constraint_or(size_t lo, size_t hi) const noexcept {
+    if (lo >= hi) return InstConstraints{};
     const size_t k = static_cast<size_t>(std::bit_width(hi - lo) - 1);
     return constraint_or_[k][lo] | constraint_or_[k][hi - (size_t{1} << k)];
 }
@@ -205,17 +236,25 @@ void LinearScanAllocator::allocate() {
     for (const auto& interval : liveness_.intervals()) {
         if (interval.vreg.is_valid() && interval.assigned_preg.is_valid()) {
             PReg preg = interval.assigned_preg;
-            if (preg.is_gpr() && cc_.is_callee_saved(preg.as_gpr())) {
-                final_callee_gprs |= reg_mask(preg.as_gpr());
-            } else if (!preg.is_gpr() && cc_.is_callee_saved(preg.as_xmm())) {
-                final_callee_xmms |= reg_mask(preg.as_xmm());
+            if (cc_.target().is_aarch64()) {
+                if (preg.is_gpr() && cc_.is_callee_saved(preg.as_aarch64_gpr())) {
+                    final_callee_gprs |= aarch64::reg_mask(preg.as_aarch64_gpr());
+                } else if (!preg.is_gpr() && cc_.is_callee_saved(preg.as_aarch64_fpr())) {
+                    final_callee_xmms |= aarch64::reg_mask(preg.as_aarch64_fpr());
+                }
+            } else {
+                if (preg.is_gpr() && cc_.is_callee_saved(preg.as_gpr())) {
+                    final_callee_gprs |= reg_mask(preg.as_gpr());
+                } else if (!preg.is_gpr() && cc_.is_callee_saved(preg.as_xmm())) {
+                    final_callee_xmms |= reg_mask(preg.as_xmm());
+                }
             }
         }
     }
 
     fn_.frame.num_spill_slots = next_spill_slot_;
-    fn_.frame.saved_callee_gprs = static_cast<x64::RegMask>(final_callee_gprs);
-    fn_.frame.saved_callee_xmms = static_cast<x64::RegMask>(final_callee_xmms);
+    fn_.frame.saved_callee_gprs = final_callee_gprs;
+    fn_.frame.saved_callee_xmms = final_callee_xmms;
 
     // 5. Record live GC references at all call sites and safepoints. A gcref
     //    is live at a site when it has a definition before the site, a use at
@@ -271,14 +310,12 @@ void LinearScanAllocator::expire_old_intervals(uint32_t current_start) {
     }
 }
 
-x64::RegMask LinearScanAllocator::get_hard_blocked_regs(const LiveInterval& interval) const {
-    using namespace brass::x64;
-
+uint32_t LinearScanAllocator::get_hard_blocked_regs(const LiveInterval& interval) const {
     bool is_gpr = interval.vreg.is_gpr();
     const auto& pool = is_gpr ? available_gprs_ : available_xmms_;
 
-    RegMask blocked = 0;
-    auto block = [&blocked](PReg reg) { blocked |= static_cast<RegMask>(1u << reg.code); };
+    uint32_t blocked = 0;
+    auto block = [&blocked](PReg reg) { blocked |= (1u << reg.code); };
 
     if (interval.spans_call) {
         if (interval.vreg.is_gcref) {
@@ -287,7 +324,12 @@ x64::RegMask LinearScanAllocator::get_hard_blocked_regs(const LiveInterval& inte
             }
         } else {
             for (const auto& reg : pool) {
-                bool is_callee = is_gpr ? cc_.is_callee_saved(reg.as_gpr()) : cc_.is_callee_saved(reg.as_xmm());
+                bool is_callee = false;
+                if (cc_.target().is_aarch64()) {
+                    is_callee = is_gpr ? cc_.is_callee_saved(reg.as_aarch64_gpr()) : cc_.is_callee_saved(reg.as_aarch64_fpr());
+                } else {
+                    is_callee = is_gpr ? cc_.is_callee_saved(reg.as_gpr()) : cc_.is_callee_saved(reg.as_xmm());
+                }
                 if (!is_callee) {
                     block(reg);
                 }
@@ -300,11 +342,16 @@ x64::RegMask LinearScanAllocator::get_hard_blocked_regs(const LiveInterval& inte
     // there: at such an instruction the pins minus its own fixed registers
     // count. Use positions are in id order, so the instructions to except
     // are met in order while walking each segment's constrained range.
-    const unsigned clobber_shift = is_gpr ? 0 : 16;
-    const unsigned pinned_shift = is_gpr ? 32 : 48;
-    auto both = [&](uint64_t w) {
-        return static_cast<RegMask>((w >> clobber_shift) & 0xFFFFu) | static_cast<RegMask>((w >> pinned_shift) & 0xFFFFu);
+    auto both = [&](const InstConstraints& c) -> uint32_t {
+        return is_gpr ? (c.clobbered_gprs | c.pinned_gprs) : (c.clobbered_xmms | c.pinned_xmms);
     };
+    auto clobbered = [&](const InstConstraints& c) -> uint32_t {
+        return is_gpr ? c.clobbered_gprs : c.clobbered_xmms;
+    };
+    auto pinned = [&](const InstConstraints& c) -> uint32_t {
+        return is_gpr ? c.pinned_gprs : c.pinned_xmms;
+    };
+
     auto own_fixed = interval.use_positions.begin();
     const auto own_fixed_end = interval.use_positions.end();
     for (const auto& seg : interval.segments) {
@@ -313,11 +360,11 @@ x64::RegMask LinearScanAllocator::get_hard_blocked_regs(const LiveInterval& inte
         while (own_fixed != own_fixed_end && own_fixed->inst_id < seg.start) ++own_fixed;
         while (own_fixed != own_fixed_end && own_fixed->inst_id <= seg.end) {
             const uint32_t at = own_fixed->inst_id;
-            RegMask own = 0;
+            uint32_t own = 0;
             for (; own_fixed != own_fixed_end && own_fixed->inst_id == at; ++own_fixed) {
                 if (own_fixed->fixed_reg.is_valid() && own_fixed->fixed_reg.reg_class == interval.vreg.reg_class &&
-                    own_fixed->fixed_reg.code < 16) {
-                    own |= static_cast<RegMask>(1u << own_fixed->fixed_reg.code);
+                    own_fixed->fixed_reg.code < 32) {
+                    own |= (1u << own_fixed->fixed_reg.code);
                 }
             }
             if (own == 0) continue;
@@ -325,45 +372,70 @@ x64::RegMask LinearScanAllocator::get_hard_blocked_regs(const LiveInterval& inte
                                constrained_ids_.begin();
             if (idx >= hi || constrained_ids_[idx] != at) continue;
             blocked |= both(constraint_or(cur, idx));
-            const uint64_t w = constraint_or_[0][idx];
-            blocked |= static_cast<RegMask>((w >> clobber_shift) & 0xFFFFu);
-            blocked |= static_cast<RegMask>((w >> pinned_shift) & 0xFFFFu) & static_cast<RegMask>(~own);
+            const InstConstraints& w = constraint_or_[0][idx];
+            blocked |= clobbered(w);
+            blocked |= pinned(w) & ~own;
             cur = idx + 1;
         }
         blocked |= both(constraint_or(cur, hi));
     }
 
-    if (is_gpr && std::find(mem_index_vregs_.begin(), mem_index_vregs_.end(), interval.vreg) != mem_index_vregs_.end()) {
-        block(PReg::gpr(x64::GPR::R12));
-        block(PReg::gpr(x64::GPR::RSP));
+    if (cc_.target().is_x64()) {
+        if (is_gpr && std::find(mem_index_vregs_.begin(), mem_index_vregs_.end(), interval.vreg) != mem_index_vregs_.end()) {
+            block(PReg::gpr(x64::GPR::R12));
+            block(PReg::gpr(x64::GPR::RSP));
+        }
     }
 
     return blocked;
 }
 
-x64::RegMask LinearScanAllocator::get_occupied_regs(const LiveInterval& interval) const {
-    x64::RegMask occupied_regs = get_hard_blocked_regs(interval);
+uint32_t LinearScanAllocator::get_occupied_regs(const LiveInterval& interval) const {
+    uint32_t occupied_regs = get_hard_blocked_regs(interval);
     for (const auto* act : active_) {
-        if (act->vreg.reg_class == interval.vreg.reg_class && act->assigned_preg.is_valid()) {
+        if (act->vreg.reg_class == interval.vreg.reg_class && act->assigned_preg.is_valid() &&
+            act->assigned_preg.code < 32) {
             if (act->overlaps(interval)) {
-                occupied_regs |= static_cast<x64::RegMask>(1u << act->assigned_preg.code);
+                occupied_regs |= (1u << act->assigned_preg.code);
             }
         }
     }
     return occupied_regs;
 }
 
-static bool in_mask(x64::RegMask mask, uint8_t code) noexcept {
+static bool in_mask(uint32_t mask, uint8_t code) noexcept {
+    if (code >= 32) return false;
     return (mask >> code) & 1u;
 }
 
 bool LinearScanAllocator::try_allocate_free_reg(LiveInterval& interval) {
-    using namespace brass::x64;
-
     bool is_gpr = interval.vreg.is_gpr();
     const auto& pool = is_gpr ? available_gprs_ : available_xmms_;
 
-    const x64::RegMask occupied_regs = get_occupied_regs(interval);
+    const uint32_t occupied_regs = get_occupied_regs(interval);
+
+    auto check_is_callee = [this, is_gpr](PReg reg) {
+        if (cc_.target().is_aarch64()) {
+            return is_gpr ? cc_.is_callee_saved(reg.as_aarch64_gpr()) : cc_.is_callee_saved(reg.as_aarch64_fpr());
+        } else {
+            return is_gpr ? cc_.is_callee_saved(reg.as_gpr()) : cc_.is_callee_saved(reg.as_xmm());
+        }
+    };
+    auto mark_callee_saved = [this, is_gpr](PReg reg) {
+        if (cc_.target().is_aarch64()) {
+            if (is_gpr && cc_.is_callee_saved(reg.as_aarch64_gpr())) {
+                used_callee_gprs_ |= aarch64::reg_mask(reg.as_aarch64_gpr());
+            } else if (!is_gpr && cc_.is_callee_saved(reg.as_aarch64_fpr())) {
+                used_callee_xmms_ |= aarch64::reg_mask(reg.as_aarch64_fpr());
+            }
+        } else {
+            if (is_gpr && cc_.is_callee_saved(reg.as_gpr())) {
+                used_callee_gprs_ |= x64::reg_mask(reg.as_gpr());
+            } else if (!is_gpr && cc_.is_callee_saved(reg.as_xmm())) {
+                used_callee_xmms_ |= x64::reg_mask(reg.as_xmm());
+            }
+        }
+    };
 
     // 1. If interval has a fixed constraint, check if that fixed register is valid
     for (const auto& pos : interval.use_positions) {
@@ -371,11 +443,7 @@ bool LinearScanAllocator::try_allocate_free_reg(LiveInterval& interval) {
             uint8_t fixed_code = pos.fixed_reg.code;
             if (!in_mask(occupied_regs, fixed_code)) {
                 interval.assigned_preg = pos.fixed_reg;
-                if (is_gpr && cc_.is_callee_saved(static_cast<GPR>(fixed_code))) {
-                    used_callee_gprs_ |= reg_mask(static_cast<GPR>(fixed_code));
-                } else if (!is_gpr && cc_.is_callee_saved(static_cast<XMM>(fixed_code))) {
-                    used_callee_xmms_ |= reg_mask(static_cast<XMM>(fixed_code));
-                }
+                mark_callee_saved(pos.fixed_reg);
 
                 active_.push_back(&interval);
                 std::sort(active_.begin(), active_.end(),
@@ -395,13 +463,11 @@ bool LinearScanAllocator::try_allocate_free_reg(LiveInterval& interval) {
             if (p_int && p_int->assigned_preg.is_valid() && p_int->assigned_preg.reg_class == interval.vreg.reg_class) {
                 PReg hint_reg = p_int->assigned_preg;
                 if (!in_mask(occupied_regs, hint_reg.code)) {
-                    bool is_callee = is_gpr ? cc_.is_callee_saved(hint_reg.as_gpr()) : cc_.is_callee_saved(hint_reg.as_xmm());
+                    bool is_callee = check_is_callee(hint_reg);
                     if (!interval.spans_call || is_callee) {
                         interval.assigned_preg = hint_reg;
-                        if (is_gpr && is_callee) {
-                            used_callee_gprs_ |= reg_mask(hint_reg.as_gpr());
-                        } else if (!is_gpr && is_callee) {
-                            used_callee_xmms_ |= reg_mask(hint_reg.as_xmm());
+                        if (is_callee) {
+                            mark_callee_saved(hint_reg);
                         }
 
                         active_.push_back(&interval);
@@ -420,20 +486,20 @@ bool LinearScanAllocator::try_allocate_free_reg(LiveInterval& interval) {
     std::vector<PReg> candidates;
     if (interval.spans_call) {
         for (const auto& reg : pool) {
-            bool is_callee = is_gpr ? cc_.is_callee_saved(reg.as_gpr()) : cc_.is_callee_saved(reg.as_xmm());
+            bool is_callee = check_is_callee(reg);
             if (is_callee && !in_mask(occupied_regs, reg.code)) {
                 candidates.push_back(reg);
             }
         }
     } else {
         for (const auto& reg : pool) {
-            bool is_callee = is_gpr ? cc_.is_callee_saved(reg.as_gpr()) : cc_.is_callee_saved(reg.as_xmm());
+            bool is_callee = check_is_callee(reg);
             if (!is_callee && !in_mask(occupied_regs, reg.code)) {
                 candidates.push_back(reg);
             }
         }
         for (const auto& reg : pool) {
-            bool is_callee = is_gpr ? cc_.is_callee_saved(reg.as_gpr()) : cc_.is_callee_saved(reg.as_xmm());
+            bool is_callee = check_is_callee(reg);
             if (is_callee && !in_mask(occupied_regs, reg.code)) {
                 candidates.push_back(reg);
             }
@@ -443,12 +509,7 @@ bool LinearScanAllocator::try_allocate_free_reg(LiveInterval& interval) {
     if (!candidates.empty()) {
         PReg chosen = candidates.front();
         interval.assigned_preg = chosen;
-
-        if (is_gpr && cc_.is_callee_saved(chosen.as_gpr())) {
-            used_callee_gprs_ |= reg_mask(chosen.as_gpr());
-        } else if (!is_gpr && cc_.is_callee_saved(chosen.as_xmm())) {
-            used_callee_xmms_ |= reg_mask(chosen.as_xmm());
-        }
+        mark_callee_saved(chosen);
 
         active_.push_back(&interval);
         std::sort(active_.begin(), active_.end(),
@@ -462,19 +523,40 @@ bool LinearScanAllocator::try_allocate_free_reg(LiveInterval& interval) {
 }
 
 void LinearScanAllocator::allocate_blocked_reg(LiveInterval& interval) {
-    using namespace brass::x64;
-
     bool is_gpr = interval.vreg.is_gpr();
     const auto& pool = is_gpr ? available_gprs_ : available_xmms_;
-    const x64::RegMask hard_blocked = get_hard_blocked_regs(interval);
+    const uint32_t hard_blocked = get_hard_blocked_regs(interval);
+
+    auto check_is_callee = [this, is_gpr](PReg reg) {
+        if (cc_.target().is_aarch64()) {
+            return is_gpr ? cc_.is_callee_saved(reg.as_aarch64_gpr()) : cc_.is_callee_saved(reg.as_aarch64_fpr());
+        } else {
+            return is_gpr ? cc_.is_callee_saved(reg.as_gpr()) : cc_.is_callee_saved(reg.as_xmm());
+        }
+    };
+    auto mark_callee_saved = [this, is_gpr](PReg reg) {
+        if (cc_.target().is_aarch64()) {
+            if (is_gpr && cc_.is_callee_saved(reg.as_aarch64_gpr())) {
+                used_callee_gprs_ |= aarch64::reg_mask(reg.as_aarch64_gpr());
+            } else if (!is_gpr && cc_.is_callee_saved(reg.as_aarch64_fpr())) {
+                used_callee_xmms_ |= aarch64::reg_mask(reg.as_aarch64_fpr());
+            }
+        } else {
+            if (is_gpr && cc_.is_callee_saved(reg.as_gpr())) {
+                used_callee_gprs_ |= x64::reg_mask(reg.as_gpr());
+            } else if (!is_gpr && cc_.is_callee_saved(reg.as_xmm())) {
+                used_callee_xmms_ |= x64::reg_mask(reg.as_xmm());
+            }
+        }
+    };
 
     // The active intervals that conflict with this one, bucketed by the
     // register they hold, in active order — one overlap test per interval
     // rather than one per (register, interval) pair.
-    std::vector<LiveInterval*> conflicts_by_reg[16];
+    std::vector<LiveInterval*> conflicts_by_reg[32];
     for (auto* act : active_) {
         if (act->vreg.reg_class == interval.vreg.reg_class && act->assigned_preg.is_valid() &&
-            act->assigned_preg.code < 16 && act->overlaps(interval)) {
+            act->assigned_preg.code < 32 && act->overlaps(interval)) {
             conflicts_by_reg[act->assigned_preg.code].push_back(act);
         }
     }
@@ -489,7 +571,7 @@ void LinearScanAllocator::allocate_blocked_reg(LiveInterval& interval) {
             continue;
         }
         if (interval.spans_call) {
-            bool is_callee = is_gpr ? cc_.is_callee_saved(reg.as_gpr()) : cc_.is_callee_saved(reg.as_xmm());
+            bool is_callee = check_is_callee(reg);
             if (!is_callee) {
                 continue;
             }
@@ -529,11 +611,7 @@ void LinearScanAllocator::allocate_blocked_reg(LiveInterval& interval) {
         }
 
         interval.assigned_preg = best_reg;
-        if (is_gpr && cc_.is_callee_saved(best_reg.as_gpr())) {
-            used_callee_gprs_ |= reg_mask(best_reg.as_gpr());
-        } else if (!is_gpr && cc_.is_callee_saved(best_reg.as_xmm())) {
-            used_callee_xmms_ |= reg_mask(best_reg.as_xmm());
-        }
+        mark_callee_saved(best_reg);
 
         active_.push_back(&interval);
         std::sort(active_.begin(), active_.end(),
@@ -609,14 +687,20 @@ void LinearScanAllocator::rewrite_instructions() {
                     mem.index_vreg = VReg{};
                 }
             }
-            if (mem.index_preg.is_valid() && mem.index_preg == PReg::gpr(x64::GPR::R12) && mem.scale == Scale::One &&
-                mem.base_preg.is_valid() && mem.base_preg != PReg::gpr(x64::GPR::R12)) {
-                std::swap(mem.base_preg, mem.index_preg);
+            if (cc_.target().is_x64()) {
+                if (mem.index_preg.is_valid() && mem.index_preg == PReg::gpr(x64::GPR::R12) && mem.scale == Scale::One &&
+                    mem.base_preg.is_valid() && mem.base_preg != PReg::gpr(x64::GPR::R12)) {
+                    std::swap(mem.base_preg, mem.index_preg);
+                }
             }
             return LirOperand::mem_custom(mem, op.size);
         }
         return op;
     };
+
+    bool is_aarch64 = cc_.target().is_aarch64();
+    PReg base_scratch_reg = is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X16) : PReg::gpr(brass::x64::GPR::R10);
+    PReg idx_scratch_reg = is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X17) : PReg::gpr(brass::x64::GPR::R11);
 
     for (const auto& block : fn_.blocks) {
         std::vector<std::unique_ptr<LirInst>> rewritten;
@@ -630,11 +714,11 @@ void LinearScanAllocator::rewrite_instructions() {
                             const VRegInfo& b_info = fn_.get_vreg_info(op.mem_val.base_vreg);
                             if (b_info.is_spilled) {
                                 auto load_base = std::make_unique<LirInst>(LirOpcode::Mov);
-                                load_base->add_def(LirOperand::preg(PReg::gpr(GPR::R10), 8));
+                                load_base->add_def(LirOperand::preg(base_scratch_reg, 8));
                                 load_base->add_use(LirOperand::slot(b_info.assigned_spill_slot, 8));
                                 rewritten.push_back(std::move(load_base));
 
-                                op.mem_val.base_preg = PReg::gpr(GPR::R10);
+                                op.mem_val.base_preg = base_scratch_reg;
                                 op.mem_val.base_vreg = VReg{};
                             }
                         }
@@ -642,11 +726,11 @@ void LinearScanAllocator::rewrite_instructions() {
                             const VRegInfo& i_info = fn_.get_vreg_info(op.mem_val.index_vreg);
                             if (i_info.is_spilled) {
                                 auto load_idx = std::make_unique<LirInst>(LirOpcode::Mov);
-                                load_idx->add_def(LirOperand::preg(PReg::gpr(GPR::R11), 8));
+                                load_idx->add_def(LirOperand::preg(idx_scratch_reg, 8));
                                 load_idx->add_use(LirOperand::slot(i_info.assigned_spill_slot, 8));
                                 rewritten.push_back(std::move(load_idx));
 
-                                op.mem_val.index_preg = PReg::gpr(GPR::R11);
+                                op.mem_val.index_preg = idx_scratch_reg;
                                 op.mem_val.index_vreg = VReg{};
                             }
                         }
@@ -698,19 +782,22 @@ void LinearScanAllocator::rewrite_instructions() {
                 bool is_xmm = orig_def_is_xmm || orig_use_is_xmm[0] || (inst->opcode == LirOpcode::Movsd || inst->opcode == LirOpcode::Movss ||
                                inst->opcode == LirOpcode::Movaps || inst->opcode == LirOpcode::Vmovaps ||
                                inst->opcode == LirOpcode::Vmovups || sz == 16 || sz == 32);
-                PReg scratch = is_xmm ? PReg::xmm(XMM::XMM15) : PReg::gpr(GPR::R11);
+                PReg scratch = is_xmm ? (is_aarch64 ? PReg::aarch64_fpr(brass::aarch64::FPR::V31) : PReg::xmm(XMM::XMM15))
+                                      : (is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X17) : PReg::gpr(GPR::R11));
                 if (!is_xmm) {
-                    bool uses_r11 = false;
-                    if (inst->defs[0].is_mem() && (inst->defs[0].mem_val.base_preg == PReg::gpr(GPR::R11) ||
-                                                   inst->defs[0].mem_val.index_preg == PReg::gpr(GPR::R11))) {
-                        uses_r11 = true;
+                    PReg gpr_scratch1 = is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X17) : PReg::gpr(GPR::R11);
+                    PReg gpr_scratch0 = is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X16) : PReg::gpr(GPR::R10);
+                    bool uses_scratch1 = false;
+                    if (inst->defs[0].is_mem() && (inst->defs[0].mem_val.base_preg == gpr_scratch1 ||
+                                                   inst->defs[0].mem_val.index_preg == gpr_scratch1)) {
+                        uses_scratch1 = true;
                     }
-                    if (inst->uses[0].is_mem() && (inst->uses[0].mem_val.base_preg == PReg::gpr(GPR::R11) ||
-                                                   inst->uses[0].mem_val.index_preg == PReg::gpr(GPR::R11))) {
-                        uses_r11 = true;
+                    if (inst->uses[0].is_mem() && (inst->uses[0].mem_val.base_preg == gpr_scratch1 ||
+                                                   inst->uses[0].mem_val.index_preg == gpr_scratch1)) {
+                        uses_scratch1 = true;
                     }
-                    if (uses_r11) {
-                        scratch = PReg::gpr(GPR::R10);
+                    if (uses_scratch1) {
+                        scratch = gpr_scratch0;
                     }
                 }
 
@@ -773,9 +860,11 @@ void LinearScanAllocator::rewrite_instructions() {
                               inst->opcode == LirOpcode::Vbroadcastss || inst->opcode == LirOpcode::Vbroadcastsd ||
                               sz == 16 || sz == 32);
                 if (inst->is_call()) {
-                    def_scratch = is_xmm_def ? PReg::xmm(XMM::XMM0) : PReg::gpr(GPR::RAX);
+                    def_scratch = is_xmm_def ? (is_aarch64 ? PReg::aarch64_fpr(brass::aarch64::FPR::V0) : PReg::xmm(XMM::XMM0))
+                                             : (is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X0) : PReg::gpr(GPR::RAX));
                 } else {
-                    def_scratch = is_xmm_def ? PReg::xmm(XMM::XMM15) : PReg::gpr(GPR::R11);
+                    def_scratch = is_xmm_def ? (is_aarch64 ? PReg::aarch64_fpr(brass::aarch64::FPR::V29) : PReg::xmm(XMM::XMM15))
+                                             : (is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X15) : PReg::gpr(GPR::R11));
                 }
 
                 // If instruction reads from def (e.g. add dst, src), load initial value of def into scratch
@@ -809,8 +898,14 @@ void LinearScanAllocator::rewrite_instructions() {
 
             int gpr_scratch_idx = 0;
             int xmm_scratch_idx = 0;
-            PReg gpr_scratches[2] = {PReg::gpr(GPR::R10), PReg::gpr(GPR::R11)};
-            PReg xmm_scratches[2] = {PReg::xmm(XMM::XMM13), PReg::xmm(XMM::XMM14)};
+            PReg gpr_scratches[2] = {
+                is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X16) : PReg::gpr(GPR::R10),
+                is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X17) : PReg::gpr(GPR::R11)
+            };
+            PReg xmm_scratches[2] = {
+                is_aarch64 ? PReg::aarch64_fpr(brass::aarch64::FPR::V30) : PReg::xmm(XMM::XMM13),
+                is_aarch64 ? PReg::aarch64_fpr(brass::aarch64::FPR::V31) : PReg::xmm(XMM::XMM14)
+            };
 
             for (size_t i = 0; i < inst->uses.size(); ++i) {
                 if (inst->uses[i].is_spill_slot()) {

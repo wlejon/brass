@@ -45,10 +45,16 @@ std::string_view to_string(LirOpcode op) noexcept {
         case LirOpcode::Movzx16: return "movzx16";
         case LirOpcode::Add: return "add";
         case LirOpcode::Add32: return "add32";
+        case LirOpcode::Adds: return "adds";
+        case LirOpcode::Adds32: return "adds32";
         case LirOpcode::Sub: return "sub";
         case LirOpcode::Sub32: return "sub32";
+        case LirOpcode::Subs: return "subs";
+        case LirOpcode::Subs32: return "subs32";
         case LirOpcode::Imul: return "imul";
         case LirOpcode::Imul32: return "imul32";
+        case LirOpcode::Smulh: return "smulh";
+        case LirOpcode::Umulh: return "umulh";
         case LirOpcode::Idiv: return "idiv";
         case LirOpcode::Idiv32: return "idiv32";
         case LirOpcode::Div: return "div";
@@ -104,6 +110,8 @@ std::string_view to_string(LirOpcode op) noexcept {
         case LirOpcode::Ucomisd: return "ucomisd";
         case LirOpcode::Ucomiss: return "ucomiss";
         case LirOpcode::Xorpd: return "xorpd";
+        case LirOpcode::Fneg: return "fneg";
+        case LirOpcode::Fneg32: return "fneg32";
         case LirOpcode::Cvtsi2sd: return "cvtsi2sd";
         case LirOpcode::Cvtsi2sd32: return "cvtsi2sd32";
         case LirOpcode::Cvttsd2si: return "cvttsd2si";
@@ -126,6 +134,8 @@ std::string_view to_string(LirOpcode op) noexcept {
         case LirOpcode::Minpd: return "minpd";
         case LirOpcode::Maxpd: return "maxpd";
         case LirOpcode::Sqrtpd: return "sqrtpd";
+        case LirOpcode::Fneg4s: return "fneg4s";
+        case LirOpcode::Fneg2d: return "fneg2d";
         case LirOpcode::Paddd: return "paddd";
         case LirOpcode::Psubd: return "psubd";
         case LirOpcode::Pmulld: return "pmulld";
@@ -137,6 +147,7 @@ std::string_view to_string(LirOpcode op) noexcept {
         case LirOpcode::Por: return "por";
         case LirOpcode::Pxor: return "pxor";
         case LirOpcode::Pandn: return "pandn";
+        case LirOpcode::Pnot: return "pnot";
         case LirOpcode::Pcmpeqd: return "pcmpeqd";
         case LirOpcode::Pslld: return "pslld";
         case LirOpcode::Psllq: return "psllq";
@@ -229,6 +240,14 @@ LirOperand LirOperand::preg_gpr(x64::GPR g, uint8_t sz) {
 
 LirOperand LirOperand::preg_xmm(x64::XMM x, uint8_t sz) {
     return preg(PReg::xmm(x), sz);
+}
+
+LirOperand LirOperand::preg_aarch64_gpr(aarch64::GPR g, uint8_t sz) {
+    return preg(PReg::aarch64_gpr(g), sz);
+}
+
+LirOperand LirOperand::preg_aarch64_fpr(aarch64::FPR f, uint8_t sz) {
+    return preg(PReg::aarch64_fpr(f), sz);
 }
 
 LirOperand LirOperand::imm(int64_t v, uint8_t sz) {
@@ -340,10 +359,20 @@ std::string to_string(const LirOperand& op) {
             break;
         case LirOperandKind::PReg:
             if (op.preg_val.is_gpr()) {
-                ss << x64::to_string(op.preg_val.as_gpr(),
-                    op.size == 4 ? x64::OperandSize::Dword : x64::OperandSize::Qword);
+                if (op.preg_val.code < 16) {
+                    ss << x64::to_string(op.preg_val.as_gpr(),
+                        op.size == 4 ? x64::OperandSize::Dword : x64::OperandSize::Qword);
+                } else {
+                    ss << aarch64::to_string(op.preg_val.as_aarch64_gpr(),
+                        op.size == 4 ? aarch64::OperandSize::Word : aarch64::OperandSize::Xword);
+                }
             } else if (op.preg_val.is_xmm()) {
-                ss << x64::to_string(op.preg_val.as_xmm());
+                if (op.preg_val.code < 16) {
+                    ss << x64::to_string(op.preg_val.as_xmm());
+                } else {
+                    ss << aarch64::to_string(op.preg_val.as_aarch64_fpr(),
+                        op.size == 4 ? aarch64::OperandSize::Word : aarch64::OperandSize::Xword);
+                }
             } else {
                 ss << "preg(" << static_cast<int>(op.preg_val.code) << ")";
             }
@@ -358,7 +387,11 @@ std::string to_string(const LirOperand& op) {
             ss << "[";
             bool has_prev = false;
             if (op.mem_val.base_preg.is_valid()) {
-                ss << x64::to_string(op.mem_val.base_preg.as_gpr());
+                if (op.mem_val.base_preg.code < 16) {
+                    ss << x64::to_string(op.mem_val.base_preg.as_gpr());
+                } else {
+                    ss << aarch64::to_string(op.mem_val.base_preg.as_aarch64_gpr());
+                }
                 has_prev = true;
             } else if (op.mem_val.base_vreg.is_valid()) {
                 ss << "%v" << op.mem_val.base_vreg.id;
@@ -366,7 +399,11 @@ std::string to_string(const LirOperand& op) {
             }
             if (op.mem_val.index_preg.is_valid()) {
                 if (has_prev) ss << " + ";
-                ss << x64::to_string(op.mem_val.index_preg.as_gpr());
+                if (op.mem_val.index_preg.code < 16) {
+                    ss << x64::to_string(op.mem_val.index_preg.as_gpr());
+                } else {
+                    ss << aarch64::to_string(op.mem_val.index_preg.as_aarch64_gpr());
+                }
                 if (op.mem_val.scale != x64::Scale::One) {
                     ss << "*" << static_cast<int>(op.mem_val.scale);
                 }

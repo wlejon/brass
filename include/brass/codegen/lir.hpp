@@ -3,6 +3,7 @@
 #include <brass/target/x64/x64_registers.hpp>
 #include <brass/target/x64/x64_operands.hpp>
 #include <brass/target/x64/code_buffer.hpp>
+#include <brass/target/aarch64/aarch64_registers.hpp>
 #include <brass/target/calling_conv.hpp>
 #include <brass/mir/types.hpp>
 #include <brass/mir/instruction.hpp>
@@ -47,7 +48,7 @@ struct PReg {
     static constexpr uint8_t kInvalid = 0xFF;
 
     RegClass reg_class = RegClass::GPR;
-    uint8_t code = kInvalid; // 0..15
+    uint8_t code = kInvalid; // 0..31
 
     constexpr bool is_valid() const noexcept { return code != kInvalid; }
     constexpr bool is_gpr() const noexcept { return reg_class == RegClass::GPR && is_valid(); }
@@ -60,6 +61,13 @@ struct PReg {
         return is_xmm() ? static_cast<x64::XMM>(code) : x64::XMM::None;
     }
 
+    constexpr aarch64::GPR as_aarch64_gpr() const noexcept {
+        return is_gpr() ? static_cast<aarch64::GPR>(code) : aarch64::GPR::None;
+    }
+    constexpr aarch64::FPR as_aarch64_fpr() const noexcept {
+        return is_xmm() ? static_cast<aarch64::FPR>(code) : aarch64::FPR::None;
+    }
+
     static constexpr PReg gpr(x64::GPR r) noexcept {
         PReg p;
         p.reg_class = RegClass::GPR;
@@ -70,6 +78,20 @@ struct PReg {
     static constexpr PReg xmm(x64::XMM r) noexcept {
         PReg p;
         p.reg_class = RegClass::XMM;
+        p.code = static_cast<uint8_t>(r);
+        return p;
+    }
+
+    static constexpr PReg aarch64_gpr(aarch64::GPR r) noexcept {
+        PReg p;
+        p.reg_class = RegClass::GPR;
+        p.code = static_cast<uint8_t>(r);
+        return p;
+    }
+
+    static constexpr PReg aarch64_fpr(aarch64::FPR r) noexcept {
+        PReg p;
+        p.reg_class = RegClass::XMM; // XMM represents vector/floating-point register class
         p.code = static_cast<uint8_t>(r);
         return p;
     }
@@ -123,6 +145,8 @@ struct LirOperand {
     static LirOperand preg(PReg p, uint8_t sz = 8);
     static LirOperand preg_gpr(x64::GPR g, uint8_t sz = 8);
     static LirOperand preg_xmm(x64::XMM x, uint8_t sz = 8);
+    static LirOperand preg_aarch64_gpr(aarch64::GPR g, uint8_t sz = 8);
+    static LirOperand preg_aarch64_fpr(aarch64::FPR f, uint8_t sz = 8);
     static LirOperand imm(int64_t v, uint8_t sz = 8);
     static LirOperand imm_f64(double v);
     static LirOperand mem(VReg base, int32_t disp = 0, uint8_t sz = 8);
@@ -165,10 +189,16 @@ enum class LirOpcode : uint16_t {
     // ALU 64 & 32
     Add,
     Add32,
+    Adds,
+    Adds32,
     Sub,
     Sub32,
+    Subs,
+    Subs32,
     Imul,
     Imul32,
+    Smulh,
+    Umulh,
     Idiv,
     Idiv32,
     Div,
@@ -226,6 +256,8 @@ enum class LirOpcode : uint16_t {
     Ucomisd,
     Ucomiss,
     Xorpd,
+    Fneg,
+    Fneg32,
     Cvtsi2sd,
     Cvtsi2sd32,
     Cvttsd2si,
@@ -249,6 +281,8 @@ enum class LirOpcode : uint16_t {
     Minpd,
     Maxpd,
     Sqrtpd,
+    Fneg4s,
+    Fneg2d,
     Paddd,
     Psubd,
     Pmulld,
@@ -260,6 +294,7 @@ enum class LirOpcode : uint16_t {
     Por,
     Pxor,
     Pandn,
+    Pnot,
     Pcmpeqd,
     Pslld,
     Psllq,
@@ -349,6 +384,12 @@ struct FixedConstraint {
     static constexpr FixedConstraint xmm(x64::XMM x) noexcept {
         return FixedConstraint{true, PReg::xmm(x)};
     }
+    static constexpr FixedConstraint aarch64_gpr(aarch64::GPR g) noexcept {
+        return FixedConstraint{true, PReg::aarch64_gpr(g)};
+    }
+    static constexpr FixedConstraint aarch64_fpr(aarch64::FPR f) noexcept {
+        return FixedConstraint{true, PReg::aarch64_fpr(f)};
+    }
 };
 
 class LirInst {
@@ -359,8 +400,8 @@ public:
     std::vector<LirOperand> uses;
     std::vector<FixedConstraint> def_constraints;
     std::vector<FixedConstraint> use_constraints;
-    x64::RegMask clobbered_gprs = 0;
-    x64::RegMask clobbered_xmms = 0;
+    uint32_t clobbered_gprs = 0;
+    uint32_t clobbered_xmms = 0;
     x64::Condition condition = x64::Condition::None;
     const Instruction* mir_origin = nullptr;
     DebugLoc loc;

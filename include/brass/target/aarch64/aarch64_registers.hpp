@@ -122,13 +122,13 @@ constexpr Condition invert(Condition cond) noexcept {
     return static_cast<Condition>(static_cast<uint8_t>(cond) ^ 1);
 }
 
-constexpr uint8_t reg_code(GPR reg) noexcept {
-    if (reg == GPR::SP || reg == GPR::XZR) return 31;
-    return static_cast<uint8_t>(reg) & 0x1F;
+constexpr uint32_t reg_code(GPR reg) noexcept {
+    if (reg == GPR::SP || reg == GPR::XZR) return 31u;
+    return static_cast<uint32_t>(reg) & 0x1Fu;
 }
 
-constexpr uint8_t reg_code(FPR reg) noexcept {
-    return static_cast<uint8_t>(reg) & 0x1F;
+constexpr uint32_t reg_code(FPR reg) noexcept {
+    return static_cast<uint32_t>(reg) & 0x1Fu;
 }
 
 constexpr uint8_t reg_id(GPR reg) noexcept {

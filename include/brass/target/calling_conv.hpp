@@ -46,6 +46,7 @@ public:
     CallingConvention() = default;
 
     CallingConvKind kind() const noexcept { return kind_; }
+    const Target& target() const noexcept { return target_; }
     size_t shadow_space() const noexcept { return shadow_space_; }
 
     // x64 Register queries
@@ -180,6 +181,7 @@ public:
 
 private:
     CallingConvKind kind_ = CallingConvKind::Win64;
+    Target target_ = Target::x64_windows();
 
     // x64 members
     std::vector<x64::GPR> arg_gprs_;

@@ -40,6 +40,7 @@ CallingConvention CallingConvention::win64() {
     using namespace brass::x64;
     CallingConvention cc;
     cc.kind_ = CallingConvKind::Win64;
+    cc.target_ = Target::x64_windows();
     cc.shadow_space_ = 32;
 
     cc.arg_gprs_ = { GPR::RCX, GPR::RDX, GPR::R8, GPR::R9 };
@@ -75,6 +76,7 @@ CallingConvention CallingConvention::sysv64() {
     using namespace brass::x64;
     CallingConvention cc;
     cc.kind_ = CallingConvKind::SysV64;
+    cc.target_ = Target::x64_linux();
     cc.shadow_space_ = 0;
 
     cc.arg_gprs_ = { GPR::RDI, GPR::RSI, GPR::RDX, GPR::RCX, GPR::R8, GPR::R9 };
@@ -104,6 +106,7 @@ CallingConvention CallingConvention::aapcs64() {
     using namespace brass::aarch64;
     CallingConvention cc;
     cc.kind_ = CallingConvKind::AAPCS64;
+    cc.target_ = Target::aarch64_linux();
     cc.shadow_space_ = 0;
 
     cc.aarch64_arg_gprs_ = {
@@ -151,17 +154,21 @@ CallingConvention CallingConvention::aapcs64() {
 CallingConvention CallingConvention::apple_aapcs64() {
     CallingConvention cc = aapcs64();
     cc.kind_ = CallingConvKind::AppleAAPCS64;
+    cc.target_ = Target::aarch64_macos();
     return cc;
 }
 
 CallingConvention CallingConvention::for_target(const Target& target) {
+    CallingConvention cc;
     if (target.is_aarch64()) {
-        return target.is_macos() ? apple_aapcs64() : aapcs64();
+        cc = target.is_macos() ? apple_aapcs64() : aapcs64();
+    } else if (target.is_windows()) {
+        cc = win64();
+    } else {
+        cc = sysv64();
     }
-    if (target.is_windows()) {
-        return win64();
-    }
-    return sysv64();
+    cc.target_ = target;
+    return cc;
 }
 
 CallingConvention CallingConvention::custom(const CustomCallingConvConfig& config) {
