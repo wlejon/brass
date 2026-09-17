@@ -64,6 +64,7 @@ TEST_CASE("Unwind Tables - Win64 SEH Scope Table Emitter") {
 
 TEST_CASE("Unwind Tables - COFF UNW_FLAG_EHANDLER & Personality Relocation") {
     ObjectFile obj;
+    obj.target = Target::x64_windows();
     Section& text_sec = obj.get_or_create_section(".text", SectionKind::Text, SectionFlags::Read | SectionFlags::Execute);
     text_sec.emit32(0x90909090); // 4 dummy nops
 
@@ -96,6 +97,86 @@ TEST_CASE("Unwind Tables - COFF UNW_FLAG_EHANDLER & Personality Relocation") {
         }
     }
     CHECK(found_personality_reloc);
+}
+
+TEST_CASE("Unwind Tables - COFF ARM64 Packed Unwind & .xdata EHANDLER") {
+    // 1. Packed unwind without exception scopes
+    {
+        ObjectFile obj;
+        obj.target = Target::aarch64_windows();
+        Section& text_sec = obj.get_or_create_section(".text", SectionKind::Text, SectionFlags::Read | SectionFlags::Execute);
+        text_sec.emit32(0xD503201F); // nop
+
+        CompiledFunctionInfo cfi;
+        cfi.name = "leaf_fn";
+        cfi.text_offset = 0;
+        cfi.text_size = 4;
+        cfi.frame_info.is_leaf = true;
+        cfi.frame_info.total_frame_size = 0;
+        obj.functions.push_back(std::move(cfi));
+
+        obj.get_or_create_section(".pdata", SectionKind::Data, SectionFlags::Read);
+        obj.get_or_create_section(".xdata", SectionKind::Data, SectionFlags::Read);
+
+        Section* pdata_sec = obj.get_section(".pdata");
+        Section* xdata_sec = obj.get_section(".xdata");
+        REQUIRE(pdata_sec != nullptr);
+        REQUIRE(xdata_sec != nullptr);
+
+        CoffUnwindBuilder::build_unwind_info(obj, *pdata_sec, *xdata_sec);
+
+        pdata_sec = obj.get_section(".pdata");
+        xdata_sec = obj.get_section(".xdata");
+        REQUIRE_EQ(pdata_sec->data.size(), 8u);
+        uint32_t packed_word = 0;
+        std::memcpy(&packed_word, pdata_sec->data.data() + 4, 4);
+        CHECK_EQ(packed_word & 0x3, 0x1u); // Flag = 01 (packed unwind data)
+    }
+
+    // 2. Full .xdata with exception scopes (X=1)
+    {
+        ObjectFile obj;
+        obj.target = Target::aarch64_windows();
+        Section& text_sec = obj.get_or_create_section(".text", SectionKind::Text, SectionFlags::Read | SectionFlags::Execute);
+        text_sec.emit32(0xD503201F); // nop
+
+        CompiledFunctionInfo cfi;
+        cfi.name = "seh_fn";
+        cfi.text_offset = 0;
+        cfi.text_size = 4;
+        cfi.frame_info.is_leaf = false;
+        cfi.frame_info.total_frame_size = 32;
+        cfi.exception_table.set_function_name("seh_fn");
+        cfi.exception_table.add_scope(1, 3, 4);
+        obj.functions.push_back(std::move(cfi));
+
+        obj.get_or_create_section(".pdata", SectionKind::Data, SectionFlags::Read);
+        obj.get_or_create_section(".xdata", SectionKind::Data, SectionFlags::Read);
+
+        Section* pdata_sec = obj.get_section(".pdata");
+        Section* xdata_sec = obj.get_section(".xdata");
+        REQUIRE(pdata_sec != nullptr);
+        REQUIRE(xdata_sec != nullptr);
+
+        CoffUnwindBuilder::build_unwind_info(obj, *pdata_sec, *xdata_sec);
+
+        pdata_sec = obj.get_section(".pdata");
+        xdata_sec = obj.get_section(".xdata");
+        REQUIRE_EQ(pdata_sec->data.size(), 8u);
+        REQUIRE(!xdata_sec->data.empty());
+        uint32_t xdata_hdr = 0;
+        std::memcpy(&xdata_hdr, xdata_sec->data.data(), 4);
+        CHECK((xdata_hdr & (1u << 20)) != 0); // X bit set
+
+        bool found_personality_reloc = false;
+        for (const auto& r : xdata_sec->relocations) {
+            if (r.symbol_name == "brass_seh_personality") {
+                found_personality_reloc = true;
+                break;
+            }
+        }
+        CHECK(found_personality_reloc);
+    }
 }
 
 TEST_CASE("Unwind Tables - SysV DWARF LSDA Emitter") {

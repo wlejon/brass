@@ -309,10 +309,21 @@ std::vector<uint8_t> PeDllWriter::write() {
             uint32_t reloc_rva = sec.rva + static_cast<uint32_t>(r.offset);
 
             if (r.kind == object::RelocKind::PCRel32 || r.kind == object::RelocKind::Plt32) {
-                int64_t disp = static_cast<int64_t>(target_rva + r.addend) - static_cast<int64_t>(reloc_rva + 4);
-                int32_t disp32 = static_cast<int32_t>(disp);
-                if (r.offset + 4 <= sec.data.size()) {
-                    std::memcpy(sec.data.data() + r.offset, &disp32, 4);
+                if (working_obj.target.is_aarch64()) {
+                    int64_t disp = static_cast<int64_t>(target_rva + r.addend) - static_cast<int64_t>(reloc_rva);
+                    int64_t disp_words = disp >> 2;
+                    if (r.offset + 4 <= sec.data.size()) {
+                        uint32_t inst = 0;
+                        std::memcpy(&inst, sec.data.data() + r.offset, 4);
+                        inst = (inst & 0xFC000000u) | (static_cast<uint32_t>(disp_words) & 0x03FFFFFFu);
+                        std::memcpy(sec.data.data() + r.offset, &inst, 4);
+                    }
+                } else {
+                    int64_t disp = static_cast<int64_t>(target_rva + r.addend) - static_cast<int64_t>(reloc_rva + 4);
+                    int32_t disp32 = static_cast<int32_t>(disp);
+                    if (r.offset + 4 <= sec.data.size()) {
+                        std::memcpy(sec.data.data() + r.offset, &disp32, 4);
+                    }
                 }
             } else if (r.kind == object::RelocKind::Addr32NB) {
                 uint32_t val32 = static_cast<uint32_t>(target_rva + r.addend);
@@ -420,7 +431,8 @@ std::vector<uint8_t> PeDllWriter::write() {
     write_u32(out, pe::IMAGE_NT_SIGNATURE);
 
     // IMAGE_FILE_HEADER (20 bytes)
-    write_u16(out, pe::IMAGE_FILE_MACHINE_AMD64);
+    uint16_t machine = working_obj.target.is_aarch64() ? pe::IMAGE_FILE_MACHINE_ARM64 : pe::IMAGE_FILE_MACHINE_AMD64;
+    write_u16(out, machine);
     write_u16(out, static_cast<uint16_t>(sections.size()));
     write_u32(out, 0); // TimeDateStamp
     write_u32(out, 0); // PointerToSymbolTable

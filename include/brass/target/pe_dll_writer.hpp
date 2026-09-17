@@ -11,6 +11,7 @@ namespace pe {
     constexpr uint16_t IMAGE_DOS_SIGNATURE = 0x5A4D;     // "MZ"
     constexpr uint32_t IMAGE_NT_SIGNATURE  = 0x00004550; // "PE\0\0"
     constexpr uint16_t IMAGE_FILE_MACHINE_AMD64 = 0x8664;
+    constexpr uint16_t IMAGE_FILE_MACHINE_ARM64 = 0xAA64;
 
     constexpr uint16_t IMAGE_FILE_RELOCS_STRIPPED         = 0x0001;
     constexpr uint16_t IMAGE_FILE_EXECUTABLE_IMAGE        = 0x0002;

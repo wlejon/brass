@@ -17,11 +17,11 @@ void LinearScanAllocator::init_register_pools() {
     if (cc_.target().is_aarch64()) {
         using namespace brass::aarch64;
         available_gprs_.clear();
-        // Caller-saved: X0..X14 (excluding X15 as def_scratch, IP0=X16, IP1=X17 as use scratches, and X18 on Darwin)
+        // Caller-saved: X0..X14 (excluding X15 as def_scratch, IP0=X16, IP1=X17 as use scratches, and X18 on Darwin/Windows)
         for (int i = 0; i <= 14; ++i) {
             available_gprs_.push_back(PReg::aarch64_gpr(static_cast<GPR>(i)));
         }
-        if (!cc_.target().is_macos()) {
+        if (!cc_.target().is_macos() && !cc_.target().is_windows()) {
             available_gprs_.push_back(PReg::aarch64_gpr(GPR::X18));
         }
         // Callee-saved: X19..X28 (excluding FP=X29, LR=X30, SP=31, XZR=32)

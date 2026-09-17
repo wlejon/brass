@@ -69,24 +69,16 @@ endif()
 
 # Does brass emit machine code for the target this build is for?
 #
-# Everything below the LIR — emit_context, baseline_emit, the register
-# allocator, target/x64, the runtime's unwinder and patcher — is x86_64 only.
-# src/target/aarch64 is encoder and ABI scaffolding with no emission behind it,
-# and nothing in the pipeline rejects an aarch64 target: on an arm64 build the
-# library compiles and links (the x64 encoder is plain C++) and the first
-# attempt to *run* what it produced is SIGBUS. So the answer is decided here,
-# once, and consumers read it rather than each guessing from the OS and CPU:
-# bronze's compiled-JS entries, brotensor's trace JIT, every *_api test that
-# executes JavaScript. BRASS_HOST_BACKEND is a CACHE INTERNAL so it is visible
-# from any directory of a build that add_subdirectory()s brass, however deep
-# (bro → bronze → brass), and the macro of the same name is on the target so
-# C++ can ask too. When the aarch64 emitter lands, extend the match.
+# Brass supports native machine code generation for x86_64 and AArch64.
+# BRASS_HOST_BACKEND is a CACHE INTERNAL so it is visible from any directory
+# of a build that add_subdirectory()s brass, however deep (bro -> bronze -> brass),
+# and the macro of the same name is on the target so C++ can ask too.
 if(APPLE AND CMAKE_OSX_ARCHITECTURES)
     set(_brass_target_arch "${CMAKE_OSX_ARCHITECTURES}")
 else()
     set(_brass_target_arch "${CMAKE_SYSTEM_PROCESSOR}")
 endif()
-if(_brass_target_arch MATCHES "^(x86_64|AMD64|amd64|x64)$")
+if(_brass_target_arch MATCHES "^(x86_64|AMD64|amd64|x64|aarch64|arm64|ARM64)$")
     set(_brass_host_backend ON)
 else()
     set(_brass_host_backend OFF)

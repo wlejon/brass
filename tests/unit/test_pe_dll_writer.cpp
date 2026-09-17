@@ -321,3 +321,48 @@ TEST_CASE("PE DLL Writer - Win64 SEH .pdata and .xdata Exception Directory") {
     CHECK(end_addr > begin_addr);
     CHECK(unwind_info_addr > 0);
 }
+
+TEST_CASE("PE DLL Writer - ARM64 Machine Type and Relocations") {
+    Module mod("test_pe_arm64");
+    Function* fn = mod.create_function("arm64_add", Type::i64(), {Type::i64(), Type::i64()});
+
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    Value* a = b.add_block_param(entry, Type::i64());
+    Value* c = b.add_block_param(entry, Type::i64());
+    Value* sum = b.build_add(a, c);
+    b.build_ret(sum);
+
+    fn->rebuild_cfg_predecessors();
+    REQUIRE(verify_function(*fn));
+
+    object::ObjectFile obj = object::compile_module_to_object(mod, Target::aarch64_windows());
+    PeDllOptions opts;
+    opts.module_name = "test_pe_arm64.dll";
+    opts.image_base = 0x180000000ULL;
+    std::vector<uint8_t> dll = PeDllWriter::emit(obj, opts);
+
+    REQUIRE(dll.size() >= 0x400);
+
+    // 1. DOS Header
+    uint16_t dos_magic = read_u16(dll.data());
+    CHECK_EQ(dos_magic, pe::IMAGE_DOS_SIGNATURE);
+    uint32_t pe_offset = read_u32(dll.data() + 0x3C);
+    CHECK_EQ(pe_offset, 0x80u);
+
+    // 2. PE Signature
+    const uint8_t* pe_hdr = dll.data() + pe_offset;
+    uint32_t pe_sig = read_u32(pe_hdr);
+    CHECK_EQ(pe_sig, pe::IMAGE_NT_SIGNATURE);
+
+    // 3. IMAGE_FILE_HEADER: Machine should be ARM64 (0xAA64)
+    const uint8_t* file_hdr = pe_hdr + 4;
+    uint16_t machine = read_u16(file_hdr + 0);
+    CHECK_EQ(machine, pe::IMAGE_FILE_MACHINE_ARM64);
+
+    // 4. Check that export directory exists and is valid
+    const uint8_t* opt_hdr = file_hdr + 20;
+    uint32_t export_rva = read_u32(opt_hdr + 112);
+    CHECK(export_rva > 0);
+}

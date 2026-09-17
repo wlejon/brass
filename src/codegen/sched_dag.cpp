@@ -540,7 +540,7 @@ void SchedDAG::build_register_dependencies() {
                 defs_pregs.push_back((static_cast<uint32_t>(c.fixed_preg.reg_class) << 8) | c.fixed_preg.code);
             }
         }
-        for (uint8_t c = 0; c < 16; ++c) {
+        for (uint8_t c = 0; c < 32; ++c) {
             if (inst.clobbered_gprs & (1u << c)) {
                 defs_pregs.push_back((static_cast<uint32_t>(RegClass::GPR) << 8) | c);
             }

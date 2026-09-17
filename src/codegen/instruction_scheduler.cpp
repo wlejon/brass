@@ -85,7 +85,7 @@ static RegUsage get_instruction_reg_usage(const LirInst& inst, bool is_pre_ra) {
                 }
             }
         }
-        for (uint8_t c = 0; c < 16; ++c) {
+        for (uint8_t c = 0; c < 32; ++c) {
             if (inst.clobbered_gprs & (1u << c)) usage.defs_gpr++;
             if (inst.clobbered_xmms & (1u << c)) usage.defs_xmm++;
         }

@@ -435,12 +435,25 @@ BrassStatus brass_compile_to_object(BrassModule mod, int target_format, void** o
 
     try {
         Target target = Target::host();
-        if (target_format == BRASS_OBJECT_COFF) {
+        const bool host_is_aarch64 = target.is_aarch64();
+        if (target_format == BRASS_OBJECT_COFF_AARCH64) {
+            target = Target::aarch64_windows();
+        } else if (target_format == BRASS_OBJECT_ELF_AARCH64) {
+            target = Target::aarch64_linux();
+        } else if (target_format == BRASS_OBJECT_MACHO_AARCH64) {
+            target = Target::aarch64_macos();
+        } else if (target_format == BRASS_OBJECT_COFF_X64) {
             target = Target::x64_windows();
-        } else if (target_format == BRASS_OBJECT_ELF) {
+        } else if (target_format == BRASS_OBJECT_ELF_X64) {
             target = Target::x64_linux();
-        } else if (target_format == BRASS_OBJECT_MACHO) {
+        } else if (target_format == BRASS_OBJECT_MACHO_X64) {
             target = Target::x64_macos();
+        } else if (target_format == BRASS_OBJECT_COFF) {
+            target = host_is_aarch64 ? Target::aarch64_windows() : Target::x64_windows();
+        } else if (target_format == BRASS_OBJECT_ELF) {
+            target = host_is_aarch64 ? Target::aarch64_linux() : Target::x64_linux();
+        } else if (target_format == BRASS_OBJECT_MACHO) {
+            target = host_is_aarch64 ? Target::aarch64_macos() : Target::x64_macos();
         }
 
         for (auto* fn : mod->mod->functions()) {
@@ -451,10 +464,10 @@ BrassStatus brass_compile_to_object(BrassModule mod, int target_format, void** o
         object::ObjectFile obj = compiler.compile(*mod->mod);
 
         std::vector<uint8_t> bytes;
-        if (target_format == BRASS_OBJECT_COFF || (target_format == BRASS_OBJECT_AUTO && target.is_windows())) {
+        if (target.is_windows()) {
             object::CoffWriter writer(obj);
             bytes = writer.write();
-        } else if (target_format == BRASS_OBJECT_MACHO || (target_format == BRASS_OBJECT_AUTO && target.is_macos())) {
+        } else if (target.is_macos()) {
             object::MachOWriter writer(obj);
             bytes = writer.write();
         } else {
@@ -494,15 +507,34 @@ BrassStatus brass_compile_to_shared_lib(BrassModule mod, const char* output_path
         target::LinkerOptions link_opts;
         link_opts.export_all_functions = true;
         Target target = Target::host();
+        const bool host_is_aarch64 = target.is_aarch64();
         if (opts) {
-            if (opts->target_format == BRASS_OBJECT_COFF) {
+            if (opts->target_format == BRASS_OBJECT_COFF_AARCH64) {
+                target = Target::aarch64_windows();
+                link_opts.format = target::OutputFormat::WindowsPeDll;
+            } else if (opts->target_format == BRASS_OBJECT_ELF_AARCH64) {
+                target = Target::aarch64_linux();
+                link_opts.format = target::OutputFormat::LinuxElfSo;
+            } else if (opts->target_format == BRASS_OBJECT_MACHO_AARCH64) {
+                target = Target::aarch64_macos();
+                link_opts.format = target::OutputFormat::MacOSMachODylib;
+            } else if (opts->target_format == BRASS_OBJECT_COFF_X64) {
                 target = Target::x64_windows();
                 link_opts.format = target::OutputFormat::WindowsPeDll;
-            } else if (opts->target_format == BRASS_OBJECT_ELF) {
+            } else if (opts->target_format == BRASS_OBJECT_ELF_X64) {
                 target = Target::x64_linux();
                 link_opts.format = target::OutputFormat::LinuxElfSo;
-            } else if (opts->target_format == BRASS_OBJECT_MACHO) {
+            } else if (opts->target_format == BRASS_OBJECT_MACHO_X64) {
                 target = Target::x64_macos();
+                link_opts.format = target::OutputFormat::MacOSMachODylib;
+            } else if (opts->target_format == BRASS_OBJECT_COFF) {
+                target = host_is_aarch64 ? Target::aarch64_windows() : Target::x64_windows();
+                link_opts.format = target::OutputFormat::WindowsPeDll;
+            } else if (opts->target_format == BRASS_OBJECT_ELF) {
+                target = host_is_aarch64 ? Target::aarch64_linux() : Target::x64_linux();
+                link_opts.format = target::OutputFormat::LinuxElfSo;
+            } else if (opts->target_format == BRASS_OBJECT_MACHO) {
+                target = host_is_aarch64 ? Target::aarch64_macos() : Target::x64_macos();
                 link_opts.format = target::OutputFormat::MacOSMachODylib;
             }
         }

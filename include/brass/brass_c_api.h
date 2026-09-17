@@ -69,10 +69,16 @@ typedef enum BrassLaneKind {
 
 /* Object file formats for AOT emission */
 typedef enum BrassObjectFormat {
-    BRASS_OBJECT_AUTO  = 0,
-    BRASS_OBJECT_COFF  = 1,
-    BRASS_OBJECT_ELF   = 2,
-    BRASS_OBJECT_MACHO = 3
+    BRASS_OBJECT_AUTO          = 0,
+    BRASS_OBJECT_COFF          = 1,
+    BRASS_OBJECT_ELF           = 2,
+    BRASS_OBJECT_MACHO         = 3,
+    BRASS_OBJECT_COFF_AARCH64  = 4,
+    BRASS_OBJECT_ELF_AARCH64   = 5,
+    BRASS_OBJECT_MACHO_AARCH64 = 6,
+    BRASS_OBJECT_COFF_X64      = 7,
+    BRASS_OBJECT_ELF_X64       = 8,
+    BRASS_OBJECT_MACHO_X64     = 9
 } BrassObjectFormat;
 
 /* Opaque handles */

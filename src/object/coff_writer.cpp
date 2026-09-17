@@ -94,8 +94,8 @@ CoffWriter::CoffWriter(const ObjectFile& obj)
 std::vector<uint8_t> CoffWriter::write() {
     ObjectFile working_obj = obj_;
 
-    // Generate Win64 SEH tables if functions exist (x86_64 only)
-    if (!working_obj.functions.empty() && !working_obj.target.is_aarch64()) {
+    // Generate Win64 SEH tables if functions exist
+    if (!working_obj.functions.empty()) {
         working_obj.get_or_create_section(
             ".xdata",
             SectionKind::XData,

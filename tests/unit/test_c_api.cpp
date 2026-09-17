@@ -233,10 +233,24 @@ TEST_CASE("C-API - In-Memory AOT Relocatable Object Emission") {
     CHECK(coff_bytes != nullptr);
     CHECK(coff_size > 20);
 
-    // Validate COFF machine field: AMD64 = 0x8664
+    // Validate COFF machine field: AMD64 = 0x8664 or ARM64 = 0xAA64
     uint16_t coff_machine = *reinterpret_cast<const uint16_t*>(coff_bytes);
-    CHECK_EQ(coff_machine, 0x8664);
+    CHECK(coff_machine == 0x8664 || coff_machine == 0xAA64);
     brass_free_buffer(coff_bytes);
+
+    // Validate explicit ARM64 COFF emission
+    void* arm64_coff_bytes = nullptr;
+    size_t arm64_coff_size = 0;
+    CHECK_EQ(brass_compile_to_object(mod, BRASS_OBJECT_COFF_AARCH64, &arm64_coff_bytes, &arm64_coff_size), BRASS_OK);
+    CHECK_EQ(*reinterpret_cast<const uint16_t*>(arm64_coff_bytes), 0xAA64);
+    brass_free_buffer(arm64_coff_bytes);
+
+    // Validate explicit x64 COFF emission
+    void* x64_coff_bytes = nullptr;
+    size_t x64_coff_size = 0;
+    CHECK_EQ(brass_compile_to_object(mod, BRASS_OBJECT_COFF_X64, &x64_coff_bytes, &x64_coff_size), BRASS_OK);
+    CHECK_EQ(*reinterpret_cast<const uint16_t*>(x64_coff_bytes), 0x8664);
+    brass_free_buffer(x64_coff_bytes);
 
     // 2. Emit Linux ELF Object in memory
     void* elf_bytes = nullptr;
