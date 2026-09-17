@@ -97,6 +97,18 @@ std::vector<float> run_swiglu(const std::string& ptx, const std::vector<float>& 
     return download<float>(dout, n);
 }
 
+// Packed SwiGLU: x is [b, 2d] (gate | up per row), y = silu(gate) * up is [b, d], grid-stride
+std::vector<float> run_swiglu_packed(const std::string& ptx, const std::vector<float>& x, uint32_t b, uint32_t d,
+                                     uint32_t grid, uint32_t block) {
+    CudaBuffer dx = upload(x);
+    CudaBuffer dy = CudaBuffer::alloc(b * d * 4);
+    REQUIRE(dy.valid() && dy.zero());
+    void* px = dx.device_ptr(); void* py = dy.device_ptr();
+    uint32_t bb = b, dd = d;
+    launch(ptx, "fused_swiglu_packed_kernel", grid, block, {&px, &py, &bb, &dd});
+    return download<float>(dy, b * d);
+}
+
 // AdaLN modulate: y[row] = x[row] * (1 + scale) + shift [* gate], block per row
 std::vector<float> run_adaln(const std::string& ptx, bool gated, uint32_t L, uint32_t D, uint32_t block,
                              const std::vector<float>& x, const std::vector<float>& scale,
@@ -195,8 +207,9 @@ std::vector<float> run_gemv_res(const std::string& ptx, uint32_t n, uint32_t k, 
 
 TEST_CASE("GPU kernels - SwiGLU, AdaLN and RMSNorm verify, assemble and keep the approx recipe") {
     MlFusionCompiler c;
-    Module ms("k_swiglu"), ma("k_adaln"), mg("k_adaln_g"), mr("k_rms");
+    Module ms("k_swiglu"), msp("k_swiglu_packed"), ma("k_adaln"), mg("k_adaln_g"), mr("k_rms");
     std::string swiglu = checked_mir_ptx(c.build_ptx_swiglu(ms));
+    std::string swiglu_p = checked_mir_ptx(c.build_ptx_swiglu_packed(msp));
     std::string adaln = checked_mir_ptx(c.build_ptx_adaln_modulate(ma, false));
     std::string adaln_g = checked_mir_ptx(c.build_ptx_adaln_modulate(mg, true));
     std::string rms = checked_mir_ptx(c.build_ptx_residual_rms_norm(mr));
@@ -209,6 +222,10 @@ TEST_CASE("GPU kernels - SwiGLU, AdaLN and RMSNorm verify, assemble and keep the
     has(swiglu, ".entry fused_swiglu_kernel(");
     has(swiglu, "ex2.approx.f32"); has(swiglu, "rcp.approx.f32"); has(swiglu, "0f3FB8AA3B");
     has(swiglu, "ld.global.v4.f32"); has(swiglu, "st.global.v4.f32"); has(swiglu, "%nctaid.x");
+    has(swiglu_p, ".entry fused_swiglu_packed_kernel(");
+    has(swiglu_p, "ex2.approx.f32"); has(swiglu_p, "rcp.approx.f32"); has(swiglu_p, "0f3FB8AA3B");
+    has(swiglu_p, "ld.global.v4.f32"); has(swiglu_p, "st.global.v4.f32"); has(swiglu_p, "%nctaid.x");
+    has(swiglu_p, "div.u32"); // row = e / d
     has(adaln, ".entry fused_adaln_modulate_kernel(");
     has(adaln, "fma.rn.f32"); has(adaln, "ld.global.v4.f32"); has(adaln, "st.global.v4.f32");
     has(adaln_g, ".entry fused_adaln_modulate_gated_kernel(");
@@ -219,6 +236,7 @@ TEST_CASE("GPU kernels - SwiGLU, AdaLN and RMSNorm verify, assemble and keep the
 
     // The public emitters return exactly these kernels.
     CHECK(c.emit_ptx_swiglu() == swiglu);
+    CHECK(c.emit_ptx_swiglu_packed() == swiglu_p);
     CHECK(c.emit_ptx_adaln_modulate(false) == adaln);
     CHECK(c.emit_ptx_adaln_modulate(true) == adaln_g);
     CHECK(c.emit_ptx_fused_residual_rms_norm() == rms);
@@ -296,6 +314,38 @@ TEST_CASE("GPU kernels - SwiGLU matches the host reference across shapes") {
         for (uint32_t i = 0; i < s.n; ++i) ref[i] = silu(g[i]) * u[i];
         char what[96];
         std::snprintf(what, sizeof(what), "swiglu n=%u grid=%u block=%u", s.n, s.grid, s.block);
+        check_reference(what, got, ref, kApproxTol);
+    }
+}
+
+TEST_CASE("GPU kernels - packed SwiGLU matches the host reference across shapes") {
+    if (!gpu_ready()) return;
+    MlFusionCompiler c;
+    std::string ptx = c.emit_ptx_swiglu_packed();
+
+    // d % 4 == 0 (float4 path) and not (all scalar); b * d not a multiple of
+    // the grid's thread count; more threads than outputs; a single row.
+    struct Shape { uint32_t b, d, grid, block; };
+    for (Shape s : {Shape{1, 64, 1, 64}, Shape{4, 100, 2, 128}, Shape{3, 101, 1, 64}, Shape{8, 1152, 4, 256},
+                    Shape{2, 7, 2, 32}, Shape{1, 4096, 8, 1024}, Shape{5, 12, 1, 1024}}) {
+        std::vector<float> x(static_cast<size_t>(s.b) * 2 * s.d);
+        for (uint32_t r = 0; r < s.b; ++r) {
+            for (uint32_t col = 0; col < s.d; ++col) {
+                uint32_t e = r * s.d + col;
+                x[static_cast<size_t>(r) * 2 * s.d + col] = (static_cast<float>(e % 211) - 105.0f) * 0.08f;
+                x[static_cast<size_t>(r) * 2 * s.d + s.d + col] = static_cast<float>(e % 8) * 0.5f - 1.0f;
+            }
+        }
+        std::vector<float> got = run_swiglu_packed(ptx, x, s.b, s.d, s.grid, s.block);
+        std::vector<double> ref(static_cast<size_t>(s.b) * s.d);
+        for (uint32_t r = 0; r < s.b; ++r) {
+            for (uint32_t col = 0; col < s.d; ++col) {
+                const float* row = &x[static_cast<size_t>(r) * 2 * s.d];
+                ref[static_cast<size_t>(r) * s.d + col] = silu(row[col]) * row[s.d + col];
+            }
+        }
+        char what[96];
+        std::snprintf(what, sizeof(what), "swiglu_packed b=%u d=%u grid=%u block=%u", s.b, s.d, s.grid, s.block);
         check_reference(what, got, ref, kApproxTol);
     }
 }

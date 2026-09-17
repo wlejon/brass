@@ -128,6 +128,7 @@ TEST_CASE("GPU - every emitted kernel assembles with ptxas") {
         { "rms", c.emit_ptx_fused_residual_rms_norm() },
         { "lnmod", c.emit_ptx_fused_layernorm_modulate() },
         { "swiglu", c.emit_ptx_swiglu() },
+        { "swiglu_packed", c.emit_ptx_swiglu_packed() },
         { "adaln", c.emit_ptx_adaln_modulate(false) },
         { "adaln_gated", c.emit_ptx_adaln_modulate(true) },
         { "q8dot", c.emit_ptx_q8_dot() },

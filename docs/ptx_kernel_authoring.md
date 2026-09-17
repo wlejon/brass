@@ -204,7 +204,7 @@ blocks are only 2-byte aligned, so their four int8 weights are read as two
 | File | Kernels | Shared helpers |
 | --- | --- | --- |
 | `src/codegen/ml_fusion_ptx_kernels_common.hpp` | -- | `f32_offset`, `at`, `silu_fast`, `RowBlock`/`row_block_prologue` (early `ret` for `row >= rows`, row byte offset, `d & ~3` with the `d % 4 != 0` -> scalar-path guard, float4/scalar loop bounds), `entry_params` |
-| `ml_fusion_ptx_kernels.cpp` | `fused_swiglu_kernel`, `fused_adaln_modulate[_gated]_kernel`, `fused_residual_rms_norm_kernel` | |
+| `ml_fusion_ptx_kernels.cpp` | `fused_swiglu_kernel`, `fused_swiglu_packed_kernel`, `fused_adaln_modulate[_gated]_kernel`, `fused_residual_rms_norm_kernel` | |
 | `ml_fusion_ptx_kernels_norm.cpp` | `fused_layernorm_modulate_kernel`, `fused_residual_layernorm_kernel` | `row_sum`, `row_sum_sq_dev`, `block_mean`, `block_rstd` |
 | `ml_fusion_ptx_kernels_gemv.cpp` | `fused_gemv_swiglu_kernel`, `fused_gemv_residual_kernel` | `gemv_prologue`, `gemv_partial_dots` (float4 loop and scalar tail for N weight rows at once), `silu_fast_clamped` |
 | `ml_fusion_ptx_kernels_quant.cpp` | `fused_gemv_q8_0_kernel`, `fused_gemv_q4_k_kernel` | `quant_prologue`, `block_ptr`, `x_float4`, `fma_lanes`, `store_row_sum` |
@@ -215,6 +215,7 @@ blocks are only 2-byte aligned, so their four int8 weights are read as two
 | Kernel | Parameters | Launch | Computes |
 | --- | --- | --- | --- |
 | `fused_swiglu_kernel` | `gate, up, out, n` | grid-stride | `out = silu(gate) * up` over n/4 float4s, then a scalar tail `[n & ~3, n)` walked by every block with stride `ntid` |
+| `fused_swiglu_packed_kernel` | `x, y, b, d` | grid-stride over the `b * d` outputs | the same over one packed gate\|up projection: `x` is `[b, 2d]` with gate in columns `[0, d)` and up in `[d, 2d)` of each row, `y` is `[b, d]`; float4s only when `d % 4 == 0`, else all scalar. The layout `brotensor::swiglu_forward` is defined on |
 | `fused_adaln_modulate_kernel` | `x, scale, shift, y, l, d` | one block per row (`l` rows of `d`) | `y = x * (1 + scale) + shift` |
 | `fused_adaln_modulate_gated_kernel` | `x, scale, shift, gate, y, l, d` | one block per row | `... * gate` |
 | `fused_residual_rms_norm_kernel` | `x, res, gamma, y, b, d, f32 eps` | one block per row | `x += res` in place; `y = x * gamma * rsqrt(mean(x^2) + eps)` |

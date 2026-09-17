@@ -27,6 +27,12 @@ std::string MlFusionCompiler::emit_ptx_swiglu(const target::PtxOptions& opts) {
     return target::PtxTarget::emit_function(*fn, opts);
 }
 
+std::string MlFusionCompiler::emit_ptx_swiglu_packed(const target::PtxOptions& opts) {
+    Module mod("mod_ptx_swiglu_packed");
+    Function* fn = build_ptx_swiglu_packed(mod);
+    return target::PtxTarget::emit_function(*fn, opts);
+}
+
 std::string MlFusionCompiler::emit_ptx_adaln_modulate(bool gated, const target::PtxOptions& opts) {
     Module mod(gated ? "mod_ptx_adaln_gated" : "mod_ptx_adaln");
     Function* fn = build_ptx_adaln_modulate(mod, gated);

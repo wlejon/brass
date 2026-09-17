@@ -121,6 +121,10 @@ public:
     // row / grid-stride) -- see docs/ptx_kernel_authoring.md:
     //
     //   fused_swiglu_kernel(gate, up, out, u32 n)                       grid-stride, v4 + scalar tail
+    //   fused_swiglu_packed_kernel(x, y, u32 b, u32 d)                  grid-stride, v4 + scalar tail
+    //       x is [b, 2d] with gate in columns [0, d) and up in [d, 2d) of each row
+    //       (a single gate|up projection), y is [b, d]: y[r][c] = silu(x[r][c]) * x[r][d + c].
+    //       The layout brotensor::swiglu_forward is defined on; float4 path when d % 4 == 0
     //   fused_adaln_modulate_kernel(x, scale, shift, y, u32 l, u32 d)   one block per row
     //   fused_adaln_modulate_gated_kernel(x, scale, shift, gate, y, u32 l, u32 d)
     //   fused_residual_rms_norm_kernel(x, res, gamma, y, u32 b, u32 d, f32 eps)
@@ -147,6 +151,7 @@ public:
     static constexpr unsigned kQ8Unroll = 4;
     static constexpr unsigned kQ4KUnroll = 4;
     Function* build_ptx_swiglu(Module& mod);
+    Function* build_ptx_swiglu_packed(Module& mod);
     Function* build_ptx_adaln_modulate(Module& mod, bool gated);
     Function* build_ptx_residual_rms_norm(Module& mod);
     Function* build_ptx_layernorm_modulate(Module& mod);
@@ -171,6 +176,7 @@ public:
     std::string emit_ptx_fused_residual_layernorm(const target::PtxOptions& opts = {});
     std::string emit_ptx_fused_layernorm_modulate(const target::PtxOptions& opts = {});
     std::string emit_ptx_swiglu(const target::PtxOptions& opts = {});
+    std::string emit_ptx_swiglu_packed(const target::PtxOptions& opts = {});
     std::string emit_ptx_adaln_modulate(bool gated = false, const target::PtxOptions& opts = {});
     std::string emit_ptx_q8_dot(const target::PtxOptions& opts = {});
     std::string emit_ptx_block_q8_dot(const target::PtxOptions& opts = {});

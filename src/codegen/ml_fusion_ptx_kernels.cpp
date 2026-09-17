@@ -4,6 +4,9 @@
 //   fused_swiglu_kernel                grid-stride over n/4 float4s, then a
 //                                      scalar tail [n & ~3, n) walked by every
 //                                      block with stride ntid
+//   fused_swiglu_packed_kernel         the same over one packed [b, 2d] gate|up
+//                                      projection; grid-stride over b*d outputs,
+//                                      float4s only when d % 4 == 0
 //   fused_adaln_modulate[_gated]_kernel one block per row; d & ~3 float4s per
 //                                      block then the scalar remainder
 //   fused_residual_rms_norm_kernel     one block per row; x += res in place,
@@ -63,6 +66,68 @@ Function* MlFusionCompiler::build_ptx_swiglu(Module& mod) {
         Value* g = kb.load_f32(at(kb, gate, off));
         Value* u = kb.load_f32(at(kb, up, off));
         kb.store_f32(at(kb, out, off), kb.mul(silu_fast(kb, g), u));
+    });
+
+    b.build_ret_void();
+    return fn;
+}
+
+// =========================================================================
+// 1b. fused_swiglu_packed_kernel(x, y, u32 b, u32 d): the same SiLU(gate) * up
+//     over one packed gate|up projection: x is [b, 2d] with gate in columns
+//     [0, d) and up in [d, 2d) of each row, y is [b, d]. Grid-stride over the
+//     b*d outputs; an output index e sits at row e / d, column e - row * d, so
+//     gate is x[row * 2d + col] and up is d floats further along the row. The
+//     float4 path needs d % 4 == 0 (a float4 must not straddle a row, and the
+//     rows must be 16-byte aligned); otherwise every element takes the scalar
+//     path.
+// =========================================================================
+
+Function* MlFusionCompiler::build_ptx_swiglu_packed(Module& mod) {
+    Function* fn = mod.create_function("fused_swiglu_packed_kernel", Type::void_type(),
+                                       {Type::ptr(), Type::ptr(), Type::i32(), Type::i32()});
+    KernelBuilder kb(mod, fn);
+    Builder& b = kb.builder();
+    std::vector<Value*> p = entry_params(kb, fn);
+    Value* x = p[0]; Value* y = p[1]; Value* rows = p[2]; Value* d = p[3];
+
+    Value* n = kb.mul(rows, d);
+    Value* gtid = kb.global_tid_x();
+    Value* gstride = kb.mul(kb.nctaid_x(), kb.ntid_x());
+    Value* d_bytes = f32_offset(kb, d);
+
+    // e -> (byte offset of x[row][col], byte offset of y[e])
+    auto gate_off = [&](Value* e) {
+        Value* row = b.build_udiv(e, d);
+        Value* col = kb.sub(e, kb.mul(row, d));
+        Value* xe = kb.add(kb.mul(row, b.build_shl(d, kb.const_i32(1))), col);
+        return f32_offset(kb, xe);
+    };
+
+    // float4 body over [gtid, n / 4) when d % 4 == 0, else empty
+    Value* misaligned = b.build_ne(b.build_and(d, kb.const_i32(3)), kb.const_i32(0));
+    Value* nvec = b.build_select(misaligned, kb.const_i32(0), b.build_lshr(n, kb.const_i32(2)));
+    kb.for_range(gtid, nvec, gstride, [&](Value* i) {
+        Value* e = b.build_shl(i, kb.const_i32(2));
+        Value* goff = gate_off(e);
+        Value* vg = kb.vload_f32x4(at(kb, x, goff));
+        Value* vu = kb.vload_f32x4(at(kb, x, kb.add(goff, d_bytes)));
+        Value* res = vg;
+        for (uint32_t lane = 0; lane < 4; ++lane) {
+            Value* g = b.build_vextract_lane(vg, lane);
+            Value* u = b.build_vextract_lane(vu, lane);
+            res = b.build_vinsert_lane(res, kb.mul(silu_fast(kb, g), u), lane);
+        }
+        kb.vstore_f32x4(at(kb, y, f32_offset(kb, e)), res);
+    });
+
+    // scalar tail [nvec * 4, n), grid-strided like the body
+    Value* tail_start = kb.add(b.build_shl(nvec, kb.const_i32(2)), gtid);
+    kb.for_range(tail_start, n, gstride, [&](Value* e) {
+        Value* goff = gate_off(e);
+        Value* g = kb.load_f32(at(kb, x, goff));
+        Value* u = kb.load_f32(at(kb, x, kb.add(goff, d_bytes)));
+        kb.store_f32(at(kb, y, f32_offset(kb, e)), kb.mul(silu_fast(kb, g), u));
     });
 
     b.build_ret_void();
