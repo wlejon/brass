@@ -99,7 +99,7 @@ public:
         page_addr_ = reinterpret_cast<void*>(page_start);
         page_len_ = page_end - page_start;
 
-        if (mprotect(page_addr_, page_len_, PROT_READ | PROT_WRITE) == 0) {
+        if (mprotect(page_addr_, page_len_, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
             active_ = true;
         }
 #endif
