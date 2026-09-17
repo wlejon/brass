@@ -5,7 +5,12 @@
 #include <cstdint>
 #include <cmath>
 #include <algorithm>
+// The AVX2 / F16C paths below are already behind __AVX2__ / __F16C__; the
+// header has to be gated the same way, since <immintrin.h> is an #error on
+// arm64 (AppleClang 15 on an Apple Silicon runner).
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
 #include <immintrin.h>
+#endif
 
 namespace brass::codegen {
 
