@@ -52,20 +52,22 @@ void X64ISel::lower_select(const Instruction& inst, LirBlock& lir_bb) {
     VReg g_true{};
 
     if (is_float) {
-        g_false = lir_fn_->allocate_vreg(RegClass::GPR, 8);
-        g_true = lir_fn_->allocate_vreg(RegClass::GPR, 8);
+        uint8_t gsz = (sz == 4) ? 4 : 8;
+        g_false = lir_fn_->allocate_vreg(RegClass::GPR, gsz);
+        g_true = lir_fn_->allocate_vreg(RegClass::GPR, gsz);
         target_reg = g_false;
 
         VReg f_vreg = get_vreg(false_val);
-        auto mq_f = std::make_unique<LirInst>(LirOpcode::Movq_gx);
-        mq_f->add_def(LirOperand::vreg(g_false, 8));
-        mq_f->add_use(LirOperand::vreg(f_vreg, 8));
+        LirOpcode mov_to_g = (sz == 4) ? LirOpcode::Movd_gx : LirOpcode::Movq_gx;
+        auto mq_f = std::make_unique<LirInst>(mov_to_g);
+        mq_f->add_def(LirOperand::vreg(g_false, gsz));
+        mq_f->add_use(LirOperand::vreg(f_vreg, sz));
         lir_bb.append_inst(std::move(mq_f));
 
         VReg t_vreg = get_vreg(true_val);
-        auto mq_t = std::make_unique<LirInst>(LirOpcode::Movq_gx);
-        mq_t->add_def(LirOperand::vreg(g_true, 8));
-        mq_t->add_use(LirOperand::vreg(t_vreg, 8));
+        auto mq_t = std::make_unique<LirInst>(mov_to_g);
+        mq_t->add_def(LirOperand::vreg(g_true, gsz));
+        mq_t->add_use(LirOperand::vreg(t_vreg, sz));
         lir_bb.append_inst(std::move(mq_t));
     } else {
         ImmIntInfo false_imm = get_imm_int_info(false_val);
@@ -143,15 +145,19 @@ void X64ISel::lower_select(const Instruction& inst, LirBlock& lir_bb) {
 
         if (lhs->type().is_float()) {
             select_cond = float_c;
+            uint8_t cmp_sz = static_cast<uint8_t>(lhs->type().size_in_bytes());
+            if (cmp_sz == 0) cmp_sz = 4;
+            LirOpcode ucomi_op = (cmp_sz == 4) ? LirOpcode::Ucomiss : LirOpcode::Ucomisd;
+
             if (rhs && rhs->is_instruction() && can_fuse_load(rhs->defining_instruction(), &inst)) {
-                auto ucomi = std::make_unique<LirInst>(LirOpcode::Ucomisd);
-                ucomi->add_use(LirOperand::vreg(get_vreg(lhs), 8));
+                auto ucomi = std::make_unique<LirInst>(ucomi_op);
+                ucomi->add_use(LirOperand::vreg(get_vreg(lhs), cmp_sz));
                 ucomi->add_use(get_load_mem_operand(rhs->defining_instruction()));
                 lir_bb.append_inst(std::move(ucomi));
             } else {
-                auto ucomi = std::make_unique<LirInst>(LirOpcode::Ucomisd);
-                ucomi->add_use(LirOperand::vreg(get_vreg(lhs), 8));
-                ucomi->add_use(LirOperand::vreg(get_vreg(rhs), 8));
+                auto ucomi = std::make_unique<LirInst>(ucomi_op);
+                ucomi->add_use(LirOperand::vreg(get_vreg(lhs), cmp_sz));
+                ucomi->add_use(LirOperand::vreg(get_vreg(rhs), cmp_sz));
                 lir_bb.append_inst(std::move(ucomi));
             }
         } else {
@@ -243,7 +249,7 @@ void X64ISel::lower_select(const Instruction& inst, LirBlock& lir_bb) {
     }
 
     // 4. Emit cmovcc
-    uint8_t op_sz = is_float ? 8 : sz;
+    uint8_t op_sz = is_float ? (sz == 4 ? 4 : 8) : sz;
     auto cmov = std::make_unique<LirInst>(LirOpcode::Cmovcc);
     cmov->condition = select_cond;
     cmov->add_def(LirOperand::vreg(target_reg, op_sz));
@@ -254,9 +260,10 @@ void X64ISel::lower_select(const Instruction& inst, LirBlock& lir_bb) {
 
     // 5. If float, move result back to dst XMM
     if (is_float) {
-        auto mq_res = std::make_unique<LirInst>(LirOpcode::Movq_xg);
-        mq_res->add_def(LirOperand::vreg(dst, 8));
-        mq_res->add_use(LirOperand::vreg(g_false, 8));
+        LirOpcode mov_to_x = (sz == 4) ? LirOpcode::Movd_xg : LirOpcode::Movq_xg;
+        auto mq_res = std::make_unique<LirInst>(mov_to_x);
+        mq_res->add_def(LirOperand::vreg(dst, sz));
+        mq_res->add_use(LirOperand::vreg(g_false, op_sz));
         lir_bb.append_inst(std::move(mq_res));
     }
 }

@@ -33,6 +33,22 @@ struct KernelOptions {
     uint64_t parallel_threshold = 1000;
     uint32_t parallel_workers = 0; // 0 = hardware concurrency
     ParallelLoopStats* parallel_stats = nullptr;
+    bool enable_ftz_daz = true;
+
+    static KernelOptions audio_realtime() {
+        KernelOptions opts;
+        opts.enable_optimizations = true;
+        opts.enable_avx2 = true;
+        opts.enable_fma = true;
+        opts.enable_fp_reassociation = true;
+        opts.enable_vectorize = false; // loops explicitly structured via AudioKernelBuilder
+        opts.enable_slp = false;
+        opts.enable_unroll = true;
+        opts.unroll_factor = 2;
+        opts.enable_parallel = false;
+        opts.enable_ftz_daz = true;
+        return opts;
+    }
 };
 
 struct KernelDependenceInfo {
