@@ -906,11 +906,27 @@ static struct BronzeTemplateCellsInit {
 } g_bronze_template_cells_init;
 uint64_t __bronze_template_cells[1024];
 
+// The stand-in for a host that brings no `bronze_template_object` of its own.
+// It is an `extern "C"` name the host DOES define when it is bronze, so on
+// MSVC — where BRONZE_WEAK is nothing — it must not be a plain definition: a
+// bronze link that puts brass.lib ahead of the runtime under /FORCE:MULTIPLE
+// kept THIS body and dropped bronze's, and every tagged template in the CLI
+// came out with no `raw` and no freeze. The same /alternatename the TLS block
+// uses above binds the name only when nothing else defines it.
+#if defined(_MSC_VER)
+extern "C" uint64_t brass_dummy_bronze_template_object(uint64_t cookedBits, uint64_t rawBits, uint64_t* cell) {
+    (void)rawBits;
+    if (cell) *cell = cookedBits;
+    return cookedBits;
+}
+#pragma comment(linker, "/alternatename:bronze_template_object=brass_dummy_bronze_template_object")
+#else
 extern "C" BRONZE_WEAK uint64_t bronze_template_object(uint64_t cookedBits, uint64_t rawBits, uint64_t* cell) {
     (void)rawBits;
     if (cell) *cell = cookedBits;
     return cookedBits;
 }
+#endif
 
 void set_active_jit(codegen::JitExecutionEngine* jit) {
     g_active_jit = jit;
