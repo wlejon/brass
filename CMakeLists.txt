@@ -1,15 +1,20 @@
 cmake_minimum_required(VERSION 3.20)
 
-if(APPLE AND NOT CMAKE_OSX_ARCHITECTURES)
-    # Default to x86_64 on Apple for JIT engine parity
-    set(CMAKE_OSX_ARCHITECTURES "x86_64" CACHE STRING "OSX Architectures" FORCE)
-endif()
-
 # Is brass the build, or a piece of someone else's?
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     set(BRASS_IS_TOP_LEVEL ON)
 else()
     set(BRASS_IS_TOP_LEVEL OFF)
+endif()
+
+# Default to x86_64 on Apple for JIT engine parity — top-level only. A
+# subproject does not decide the architecture: bronze add_subdirectory()s
+# brass halfway through its own configure, and a FORCEd cache write here
+# left every target defined after that point x86_64 while the ones before
+# stayed arm64 (an unlinkable libbronze_runtime_shared.dylib on an Apple
+# Silicon runner). Hosts pass CMAKE_OSX_ARCHITECTURES themselves.
+if(BRASS_IS_TOP_LEVEL AND APPLE AND NOT CMAKE_OSX_ARCHITECTURES)
+    set(CMAKE_OSX_ARCHITECTURES "x86_64" CACHE STRING "OSX Architectures" FORCE)
 endif()
 
 project(brass VERSION 0.1.0 LANGUAGES CXX C)
