@@ -15,6 +15,7 @@ namespace elf64 {
 
     constexpr uint16_t ET_DYN = 3;
     constexpr uint16_t EM_X86_64 = 62;
+    constexpr uint16_t EM_AARCH64 = 183;
 
     constexpr uint32_t PT_NULL    = 0;
     constexpr uint32_t PT_LOAD    = 1;
@@ -69,6 +70,7 @@ namespace elf64 {
     constexpr uint32_t R_X86_64_PLT32    = 4;
     constexpr uint32_t R_X86_64_RELATIVE = 8;
     constexpr uint32_t R_X86_64_32       = 10;
+    constexpr uint32_t R_AARCH64_RELATIVE = 1027;
 }
 
 struct ElfSoOptions {

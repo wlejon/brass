@@ -34,6 +34,18 @@ namespace coff {
     constexpr uint16_t IMAGE_REL_AMD64_SECTION  = 0x000A;
     constexpr uint16_t IMAGE_REL_AMD64_SECREL   = 0x000B;
 
+    // ARM64 relocation types
+    constexpr uint16_t IMAGE_REL_ARM64_ABSOLUTE       = 0x0000;
+    constexpr uint16_t IMAGE_REL_ARM64_ADDR32         = 0x0001;
+    constexpr uint16_t IMAGE_REL_ARM64_ADDR32NB       = 0x0002;
+    constexpr uint16_t IMAGE_REL_ARM64_BRANCH26       = 0x0003;
+    constexpr uint16_t IMAGE_REL_ARM64_PAGE21         = 0x0004;
+    constexpr uint16_t IMAGE_REL_ARM64_PAGEOFFSET_12A = 0x0006;
+    constexpr uint16_t IMAGE_REL_ARM64_PAGEOFFSET_12L = 0x0007;
+    constexpr uint16_t IMAGE_REL_ARM64_SECREL         = 0x0008;
+    constexpr uint16_t IMAGE_REL_ARM64_SECTION        = 0x000E;
+    constexpr uint16_t IMAGE_REL_ARM64_ADDR64         = 0x000E; // on arm64 coff
+
     constexpr uint8_t IMAGE_SYM_CLASS_EXTERNAL = 2;
     constexpr uint8_t IMAGE_SYM_CLASS_STATIC   = 3;
     constexpr uint16_t IMAGE_SYM_DTYPE_FUNCTION = 0x20;

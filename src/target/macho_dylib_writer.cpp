@@ -301,8 +301,8 @@ std::vector<uint8_t> MachODylibWriter::write() {
         cur_text_end = const_fileoff + static_cast<uint32_t>(const_size);
     }
 
-    constexpr uint32_t PAGE_SIZE = 4096;
-    uint32_t text_filesize = (cur_text_end + (PAGE_SIZE - 1)) & ~(PAGE_SIZE - 1);
+    uint32_t page_size = obj_.target.is_aarch64() ? 16384u : 4096u;
+    uint32_t text_filesize = (cur_text_end + (page_size - 1)) & ~(page_size - 1);
     uint64_t text_vmsize = text_filesize;
 
     // Layout __DATA segment (if needed)
@@ -323,7 +323,7 @@ std::vector<uint8_t> MachODylibWriter::write() {
             data_sec_size = data_sec->data.size();
             cur_data_end = data_sec_fileoff + static_cast<uint32_t>(data_sec_size);
         }
-        data_filesize = (cur_data_end - data_fileoff + (PAGE_SIZE - 1)) & ~(PAGE_SIZE - 1);
+        data_filesize = (cur_data_end - data_fileoff + (page_size - 1)) & ~(page_size - 1);
         data_vmsize = data_filesize;
     }
 
@@ -349,26 +349,69 @@ std::vector<uint8_t> MachODylibWriter::write() {
 
             uint64_t reloc_vaddr = sec_vaddr + r.offset;
 
-            if (r.kind == RelocKind::PCRel32 || r.kind == RelocKind::Plt32) {
-                int64_t disp = static_cast<int64_t>(target_vaddr + static_cast<uint64_t>(r.addend)) - static_cast<int64_t>(reloc_vaddr + 4);
-                int32_t disp32 = static_cast<int32_t>(disp);
-                if (r.offset + 4 <= sec.data.size()) {
-                    std::memcpy(sec.data.data() + r.offset, &disp32, 4);
+            bool is_aarch64 = working_obj.target.is_aarch64();
+            if (is_aarch64) {
+                if (r.kind == RelocKind::Plt32) {
+                    int64_t disp = static_cast<int64_t>(target_vaddr + static_cast<uint64_t>(r.addend)) - static_cast<int64_t>(reloc_vaddr);
+                    int64_t disp_words = disp >> 2;
+                    if (r.offset + 4 <= sec.data.size()) {
+                        uint32_t inst = 0;
+                        std::memcpy(&inst, sec.data.data() + r.offset, 4);
+                        uint32_t new_inst = (inst & 0xFC000000u) | (static_cast<uint32_t>(disp_words) & 0x03FFFFFFu);
+                        std::memcpy(sec.data.data() + r.offset, &new_inst, 4);
+                    }
+                } else if (r.kind == RelocKind::PCRel32) {
+                    int64_t page_diff = (static_cast<int64_t>(target_vaddr) >> 12) - (static_cast<int64_t>(reloc_vaddr) >> 12);
+                    uint32_t imm21 = static_cast<uint32_t>(page_diff) & 0x1FFFFFu;
+                    uint32_t immlo = (imm21 & 3u) << 29;
+                    uint32_t immhi = ((imm21 >> 2) & 0x7FFFFu) << 5;
+                    if (r.offset + 4 <= sec.data.size()) {
+                        uint32_t inst = 0;
+                        std::memcpy(&inst, sec.data.data() + r.offset, 4);
+                        uint32_t new_inst = (inst & 0x9F00001Fu) | immlo | immhi;
+                        std::memcpy(sec.data.data() + r.offset, &new_inst, 4);
+                    }
+                } else if (r.kind == RelocKind::SecRel32) {
+                    uint32_t pageoff = static_cast<uint32_t>(target_vaddr & 0xFFFu);
+                    if (r.offset + 4 <= sec.data.size()) {
+                        uint32_t inst = 0;
+                        std::memcpy(&inst, sec.data.data() + r.offset, 4);
+                        uint32_t new_inst = (inst & 0xFFC003FFu) | (pageoff << 10);
+                        std::memcpy(sec.data.data() + r.offset, &new_inst, 4);
+                    }
+                } else if (r.kind == RelocKind::Abs64) {
+                    uint64_t val64 = target_vaddr + static_cast<uint64_t>(r.addend);
+                    if (r.offset + 8 <= sec.data.size()) {
+                        std::memcpy(sec.data.data() + r.offset, &val64, 8);
+                    }
+                } else if (r.kind == RelocKind::Abs32 || r.kind == RelocKind::Addr32NB) {
+                    uint32_t val32 = static_cast<uint32_t>(target_vaddr + static_cast<uint64_t>(r.addend));
+                    if (r.offset + 4 <= sec.data.size()) {
+                        std::memcpy(sec.data.data() + r.offset, &val32, 4);
+                    }
                 }
-            } else if (r.kind == RelocKind::SecRel32) {
-                uint32_t val32 = static_cast<uint32_t>(static_cast<int64_t>(sym ? sym->value : 0) + r.addend);
-                if (r.offset + 4 <= sec.data.size()) {
-                    std::memcpy(sec.data.data() + r.offset, &val32, 4);
-                }
-            } else if (r.kind == RelocKind::Abs64) {
-                uint64_t val64 = target_vaddr + static_cast<uint64_t>(r.addend);
-                if (r.offset + 8 <= sec.data.size()) {
-                    std::memcpy(sec.data.data() + r.offset, &val64, 8);
-                }
-            } else if (r.kind == RelocKind::Abs32 || r.kind == RelocKind::Addr32NB) {
-                uint32_t val32 = static_cast<uint32_t>(target_vaddr + static_cast<uint64_t>(r.addend));
-                if (r.offset + 4 <= sec.data.size()) {
-                    std::memcpy(sec.data.data() + r.offset, &val32, 4);
+            } else {
+                if (r.kind == RelocKind::PCRel32 || r.kind == RelocKind::Plt32) {
+                    int64_t disp = static_cast<int64_t>(target_vaddr + static_cast<uint64_t>(r.addend)) - static_cast<int64_t>(reloc_vaddr + 4);
+                    int32_t disp32 = static_cast<int32_t>(disp);
+                    if (r.offset + 4 <= sec.data.size()) {
+                        std::memcpy(sec.data.data() + r.offset, &disp32, 4);
+                    }
+                } else if (r.kind == RelocKind::SecRel32) {
+                    uint32_t val32 = static_cast<uint32_t>(static_cast<int64_t>(sym ? sym->value : 0) + r.addend);
+                    if (r.offset + 4 <= sec.data.size()) {
+                        std::memcpy(sec.data.data() + r.offset, &val32, 4);
+                    }
+                } else if (r.kind == RelocKind::Abs64) {
+                    uint64_t val64 = target_vaddr + static_cast<uint64_t>(r.addend);
+                    if (r.offset + 8 <= sec.data.size()) {
+                        std::memcpy(sec.data.data() + r.offset, &val64, 8);
+                    }
+                } else if (r.kind == RelocKind::Abs32 || r.kind == RelocKind::Addr32NB) {
+                    uint32_t val32 = static_cast<uint32_t>(target_vaddr + static_cast<uint64_t>(r.addend));
+                    if (r.offset + 4 <= sec.data.size()) {
+                        std::memcpy(sec.data.data() + r.offset, &val32, 4);
+                    }
                 }
             }
         }
@@ -473,7 +516,7 @@ std::vector<uint8_t> MachODylibWriter::write() {
     cur_linkedit_off += strsize;
 
     uint32_t linkedit_filesize = cur_linkedit_off - linkedit_fileoff;
-    uint64_t linkedit_vmsize = (linkedit_filesize + (PAGE_SIZE - 1)) & ~(PAGE_SIZE - 1);
+    uint64_t linkedit_vmsize = (linkedit_filesize + (page_size - 1)) & ~(page_size - 1);
 
     // Build binary buffer
     std::vector<uint8_t> out(cur_linkedit_off, 0);

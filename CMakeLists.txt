@@ -7,14 +7,9 @@ else()
     set(BRASS_IS_TOP_LEVEL OFF)
 endif()
 
-# Default to x86_64 on Apple for JIT engine parity — top-level only. A
-# subproject does not decide the architecture: bronze add_subdirectory()s
-# brass halfway through its own configure, and a FORCEd cache write here
-# left every target defined after that point x86_64 while the ones before
-# stayed arm64 (an unlinkable libbronze_runtime_shared.dylib on an Apple
-# Silicon runner). Hosts pass CMAKE_OSX_ARCHITECTURES themselves.
 if(BRASS_IS_TOP_LEVEL AND APPLE AND NOT CMAKE_OSX_ARCHITECTURES)
-    set(CMAKE_OSX_ARCHITECTURES "x86_64" CACHE STRING "OSX Architectures" FORCE)
+    # Default to host architecture on Apple Silicon (native arm64) or Intel (x86_64)
+    # Users can pass -DCMAKE_OSX_ARCHITECTURES=x86_64 to test under Rosetta
 endif()
 
 project(brass VERSION 0.1.0 LANGUAGES CXX C)

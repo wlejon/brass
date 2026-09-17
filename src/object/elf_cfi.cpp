@@ -1,5 +1,6 @@
 #include <brass/object/elf_writer.hpp>
 #include <brass/target/x64/x64_frame.hpp>
+#include <brass/target/aarch64/aarch64_frame.hpp>
 #include <vector>
 #include <algorithm>
 
@@ -8,6 +9,15 @@ namespace brass::object {
 using namespace brass::x64;
 
 namespace {
+
+void emit_uleb128(Section& sec, uint64_t val) {
+    do {
+        uint8_t byte = val & 0x7F;
+        val >>= 7;
+        if (val != 0) byte |= 0x80;
+        sec.emit8(byte);
+    } while (val != 0);
+}
 
 uint8_t to_dwarf_gpr(GPR reg) {
     switch (reg) {
@@ -46,6 +56,8 @@ void ElfCfiBuilder::build_eh_frame(
 ) {
     eh_frame_sec.align_to(8);
 
+    bool is_aarch64 = obj.target.is_aarch64();
+
     // 1. Common Information Entry (CIE)
     size_t cie_start = eh_frame_sec.data.size();
     eh_frame_sec.emit32(0); // Length placeholder
@@ -57,21 +69,35 @@ void ElfCfiBuilder::build_eh_frame(
     eh_frame_sec.emit8('R');
     eh_frame_sec.emit8(0);
 
-    eh_frame_sec.emit8(1);    // Code alignment factor = 1 (ULEB128)
-    eh_frame_sec.emit8(0x78); // Data alignment factor = -8 (SLEB128)
-    eh_frame_sec.emit8(16);   // Return address register = 16 (RIP) (ULEB128)
-    eh_frame_sec.emit8(1);    // Augmentation data length = 1 (ULEB128)
-    eh_frame_sec.emit8(elf::DW_EH_PE_pcrel | elf::DW_EH_PE_sdata4); // 0x1B
+    if (is_aarch64) {
+        eh_frame_sec.emit8(4);    // Code alignment factor = 4 (ULEB128)
+        eh_frame_sec.emit8(0x78); // Data alignment factor = -8 (SLEB128)
+        eh_frame_sec.emit8(30);   // Return address register = 30 (LR / X30) (ULEB128)
+        eh_frame_sec.emit8(1);    // Augmentation data length = 1 (ULEB128)
+        eh_frame_sec.emit8(elf::DW_EH_PE_pcrel | elf::DW_EH_PE_sdata4); // 0x1B
 
-    // Initial instructions:
-    // DW_CFA_def_cfa (RSP, 8)
-    eh_frame_sec.emit8(elf::DW_CFA_def_cfa);
-    eh_frame_sec.emit8(7); // RSP
-    eh_frame_sec.emit8(8); // offset 8
+        // Initial instructions:
+        // DW_CFA_def_cfa register 31 (SP), offset 0
+        eh_frame_sec.emit8(elf::DW_CFA_def_cfa);
+        eh_frame_sec.emit8(31); // SP
+        eh_frame_sec.emit8(0);  // offset 0
+    } else {
+        eh_frame_sec.emit8(1);    // Code alignment factor = 1 (ULEB128)
+        eh_frame_sec.emit8(0x78); // Data alignment factor = -8 (SLEB128)
+        eh_frame_sec.emit8(16);   // Return address register = 16 (RIP) (ULEB128)
+        eh_frame_sec.emit8(1);    // Augmentation data length = 1 (ULEB128)
+        eh_frame_sec.emit8(elf::DW_EH_PE_pcrel | elf::DW_EH_PE_sdata4); // 0x1B
 
-    // DW_CFA_offset (RIP, 1 * -8 = -8)
-    eh_frame_sec.emit8(elf::DW_CFA_offset | 16);
-    eh_frame_sec.emit8(1);
+        // Initial instructions:
+        // DW_CFA_def_cfa (RSP, 8)
+        eh_frame_sec.emit8(elf::DW_CFA_def_cfa);
+        eh_frame_sec.emit8(7); // RSP
+        eh_frame_sec.emit8(8); // offset 8
+
+        // DW_CFA_offset (RIP, 1 * -8 = -8)
+        eh_frame_sec.emit8(elf::DW_CFA_offset | 16);
+        eh_frame_sec.emit8(1);
+    }
 
     eh_frame_sec.align_to(8);
     uint32_t cie_len = static_cast<uint32_t>(eh_frame_sec.data.size() - cie_start - 4);
@@ -104,26 +130,57 @@ void ElfCfiBuilder::build_eh_frame(
         eh_frame_sec.emit8(0);
 
         if (!fn.frame_info.is_leaf) {
-            // Call Frame Instructions:
-            // After push rbp (1 byte)
-            eh_frame_sec.emit8(elf::DW_CFA_advance_loc | 1);
-            eh_frame_sec.emit8(elf::DW_CFA_def_cfa_offset);
-            eh_frame_sec.emit8(16);
-            eh_frame_sec.emit8(elf::DW_CFA_offset | 6); // RBP
-            eh_frame_sec.emit8(2); // offset 2 * -8 = -16
+            if (is_aarch64) {
+                uint8_t num_insts = (fn.frame_info.total_frame_size <= 512) ? 2 : 3;
+                eh_frame_sec.emit8(elf::DW_CFA_advance_loc | num_insts);
 
-            // After mov rbp, rsp (3 bytes)
-            eh_frame_sec.emit8(elf::DW_CFA_advance_loc | 3);
-            eh_frame_sec.emit8(elf::DW_CFA_def_cfa_register);
-            eh_frame_sec.emit8(6); // RBP
+                // DW_CFA_def_cfa register 29 (FP), offset
+                eh_frame_sec.emit8(elf::DW_CFA_def_cfa);
+                eh_frame_sec.emit8(29); // FP (X29)
+                uint64_t total_size = fn.frame_info.total_frame_size > 0 ? fn.frame_info.total_frame_size : 16;
+                emit_uleb128(eh_frame_sec, total_size);
 
-            // Callee-saved GPRs (if any)
-            auto saved_gprs = X64FrameLayout::get_saved_callee_gprs(fn.frame_info);
-            for (size_t i = 0; i < saved_gprs.size(); ++i) {
-                uint8_t dreg = to_dwarf_gpr(saved_gprs[i]);
-                uint8_t factored = static_cast<uint8_t>(i + 1); // [rbp - (i+1)*8]
-                eh_frame_sec.emit8(elf::DW_CFA_offset | dreg);
-                eh_frame_sec.emit8(factored);
+                uint64_t fp_factored = total_size / 8;
+                uint64_t lr_factored = fp_factored > 0 ? fp_factored - 1 : 1;
+
+                // DW_CFA_offset for 29 (FP)
+                eh_frame_sec.emit8(elf::DW_CFA_offset | 29);
+                emit_uleb128(eh_frame_sec, fp_factored);
+
+                // DW_CFA_offset for 30 (LR)
+                eh_frame_sec.emit8(elf::DW_CFA_offset | 30);
+                emit_uleb128(eh_frame_sec, lr_factored);
+
+                // Callee-saved GPRs (X19..X28)
+                auto saved_gprs = aarch64::AArch64FrameLayout::get_saved_callee_gprs(fn.frame_info);
+                for (size_t i = 0; i < saved_gprs.size(); ++i) {
+                    uint8_t dreg = static_cast<uint8_t>(saved_gprs[i]);
+                    uint64_t gpr_factored = (total_size >= (16 + (i + 1) * 8)) ? (total_size - (16 + i * 8)) / 8 : (i + 2);
+                    eh_frame_sec.emit8(elf::DW_CFA_offset | dreg);
+                    emit_uleb128(eh_frame_sec, gpr_factored);
+                }
+            } else {
+                // Call Frame Instructions:
+                // After push rbp (1 byte)
+                eh_frame_sec.emit8(elf::DW_CFA_advance_loc | 1);
+                eh_frame_sec.emit8(elf::DW_CFA_def_cfa_offset);
+                eh_frame_sec.emit8(16);
+                eh_frame_sec.emit8(elf::DW_CFA_offset | 6); // RBP
+                eh_frame_sec.emit8(2); // offset 2 * -8 = -16
+
+                // After mov rbp, rsp (3 bytes)
+                eh_frame_sec.emit8(elf::DW_CFA_advance_loc | 3);
+                eh_frame_sec.emit8(elf::DW_CFA_def_cfa_register);
+                eh_frame_sec.emit8(6); // RBP
+
+                // Callee-saved GPRs (if any)
+                auto saved_gprs = X64FrameLayout::get_saved_callee_gprs(fn.frame_info);
+                for (size_t i = 0; i < saved_gprs.size(); ++i) {
+                    uint8_t dreg = to_dwarf_gpr(saved_gprs[i]);
+                    uint8_t factored = static_cast<uint8_t>(i + 1); // [rbp - (i+1)*8]
+                    eh_frame_sec.emit8(elf::DW_CFA_offset | dreg);
+                    eh_frame_sec.emit8(factored);
+                }
             }
         }
 

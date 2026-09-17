@@ -73,6 +73,19 @@ namespace macho {
     constexpr uint8_t X86_64_RELOC_SIGNED_2   = 7;
     constexpr uint8_t X86_64_RELOC_SIGNED_4   = 8;
     constexpr uint8_t X86_64_RELOC_TLV        = 9;
+
+    // ARM64 relocation types
+    constexpr uint32_t ARM64_RELOC_UNSIGNED            = 0;
+    constexpr uint32_t ARM64_RELOC_SUBTRACTOR          = 1;
+    constexpr uint32_t ARM64_RELOC_BRANCH26            = 2;
+    constexpr uint32_t ARM64_RELOC_PAGE21              = 3;
+    constexpr uint32_t ARM64_RELOC_PAGEOFF12           = 4;
+    constexpr uint32_t ARM64_RELOC_GOT_LOAD_PAGE21     = 5;
+    constexpr uint32_t ARM64_RELOC_GOT_LOAD_PAGEOFF12  = 6;
+    constexpr uint32_t ARM64_RELOC_POINTER_TO_GOT      = 7;
+    constexpr uint32_t ARM64_RELOC_TLVP_LOAD_PAGE21    = 8;
+    constexpr uint32_t ARM64_RELOC_TLVP_LOAD_PAGEOFF12 = 9;
+    constexpr uint32_t ARM64_RELOC_ADDEND              = 10;
 }
 
 class MachOWriter {

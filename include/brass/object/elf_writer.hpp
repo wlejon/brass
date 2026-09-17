@@ -48,6 +48,21 @@ namespace elf {
     constexpr uint32_t R_X86_64_32S      = 11;
     constexpr uint32_t R_X86_64_PC64     = 24;
 
+    // AArch64 relocation types
+    constexpr uint32_t R_AARCH64_NONE             = 0;
+    constexpr uint32_t R_AARCH64_ABS64            = 257;
+    constexpr uint32_t R_AARCH64_ABS32            = 258;
+    constexpr uint32_t R_AARCH64_PREL32           = 261;
+    constexpr uint32_t R_AARCH64_MOVW_UABS_G0     = 263;
+    constexpr uint32_t R_AARCH64_MOVW_UABS_G1     = 265;
+    constexpr uint32_t R_AARCH64_MOVW_UABS_G2     = 267;
+    constexpr uint32_t R_AARCH64_MOVW_UABS_G3     = 269;
+    constexpr uint32_t R_AARCH64_ADR_PREL_PG_HI21 = 275;
+    constexpr uint32_t R_AARCH64_ADD_ABS_LO12_NC  = 277;
+    constexpr uint32_t R_AARCH64_JUMP26           = 282;
+    constexpr uint32_t R_AARCH64_CALL26           = 283;
+    constexpr uint32_t R_AARCH64_RELATIVE         = 1027;
+
     // DWARF CFI Call Frame Instructions
     constexpr uint8_t DW_CFA_advance_loc        = 0x40;
     constexpr uint8_t DW_CFA_offset             = 0x80;

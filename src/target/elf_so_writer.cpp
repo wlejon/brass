@@ -424,19 +424,62 @@ std::vector<uint8_t> ElfSoWriter::write() {
 
             uint64_t reloc_vaddr = sec.sh_addr + r.offset;
 
-            if (r.kind == object::RelocKind::PCRel32 || r.kind == object::RelocKind::Plt32) {
-                int64_t disp = static_cast<int64_t>(target_vaddr + static_cast<uint64_t>(r.addend)) - static_cast<int64_t>(reloc_vaddr + 4);
-                int32_t disp32 = static_cast<int32_t>(disp);
-                if (r.offset + 4 <= sec.data.size()) {
-                    std::memcpy(sec.data.data() + r.offset, &disp32, 4);
+            bool is_aarch64 = working_obj.target.is_aarch64();
+            if (is_aarch64) {
+                if (r.kind == object::RelocKind::Plt32) {
+                    int64_t disp = static_cast<int64_t>(target_vaddr + static_cast<uint64_t>(r.addend)) - static_cast<int64_t>(reloc_vaddr);
+                    int64_t disp_words = disp >> 2;
+                    if (r.offset + 4 <= sec.data.size()) {
+                        uint32_t inst = 0;
+                        std::memcpy(&inst, sec.data.data() + r.offset, 4);
+                        uint32_t new_inst = (inst & 0xFC000000u) | (static_cast<uint32_t>(disp_words) & 0x03FFFFFFu);
+                        std::memcpy(sec.data.data() + r.offset, &new_inst, 4);
+                    }
+                } else if (r.kind == object::RelocKind::PCRel32) {
+                    int64_t page_diff = (static_cast<int64_t>(target_vaddr) >> 12) - (static_cast<int64_t>(reloc_vaddr) >> 12);
+                    uint32_t imm21 = static_cast<uint32_t>(page_diff) & 0x1FFFFFu;
+                    uint32_t immlo = (imm21 & 3u) << 29;
+                    uint32_t immhi = ((imm21 >> 2) & 0x7FFFFu) << 5;
+                    if (r.offset + 4 <= sec.data.size()) {
+                        uint32_t inst = 0;
+                        std::memcpy(&inst, sec.data.data() + r.offset, 4);
+                        uint32_t new_inst = (inst & 0x9F00001Fu) | immlo | immhi;
+                        std::memcpy(sec.data.data() + r.offset, &new_inst, 4);
+                    }
+                } else if (r.kind == object::RelocKind::SecRel32) {
+                    uint32_t pageoff = static_cast<uint32_t>(target_vaddr & 0xFFFu);
+                    if (r.offset + 4 <= sec.data.size()) {
+                        uint32_t inst = 0;
+                        std::memcpy(&inst, sec.data.data() + r.offset, 4);
+                        uint32_t new_inst = (inst & 0xFFC003FFu) | (pageoff << 10);
+                        std::memcpy(sec.data.data() + r.offset, &new_inst, 4);
+                    }
+                } else if (r.kind == object::RelocKind::Abs64) {
+                    write_u64(rela_data, reloc_vaddr);
+                    uint64_t r_info = elf64::R_AARCH64_RELATIVE;
+                    write_u64(rela_data, r_info);
+                    write_i64(rela_data, static_cast<int64_t>(target_vaddr + static_cast<uint64_t>(r.addend)));
+                } else if (r.kind == object::RelocKind::Abs32 || r.kind == object::RelocKind::Addr32NB) {
+                    uint32_t val32 = static_cast<uint32_t>(target_vaddr + static_cast<uint64_t>(r.addend));
+                    if (r.offset + 4 <= sec.data.size()) {
+                        std::memcpy(sec.data.data() + r.offset, &val32, 4);
+                    }
                 }
-            } else if (r.kind == object::RelocKind::Abs64) {
-                // Emit R_X86_64_RELATIVE relocation into .rela.dyn
-                // r_offset (8), r_info (8), r_addend (8)
-                write_u64(rela_data, reloc_vaddr);
-                uint64_t r_info = elf64::R_X86_64_RELATIVE;
-                write_u64(rela_data, r_info);
-                write_i64(rela_data, static_cast<int64_t>(target_vaddr + static_cast<uint64_t>(r.addend)));
+            } else {
+                if (r.kind == object::RelocKind::PCRel32 || r.kind == object::RelocKind::Plt32) {
+                    int64_t disp = static_cast<int64_t>(target_vaddr + static_cast<uint64_t>(r.addend)) - static_cast<int64_t>(reloc_vaddr + 4);
+                    int32_t disp32 = static_cast<int32_t>(disp);
+                    if (r.offset + 4 <= sec.data.size()) {
+                        std::memcpy(sec.data.data() + r.offset, &disp32, 4);
+                    }
+                } else if (r.kind == object::RelocKind::Abs64) {
+                    // Emit R_X86_64_RELATIVE relocation into .rela.dyn
+                    // r_offset (8), r_info (8), r_addend (8)
+                    write_u64(rela_data, reloc_vaddr);
+                    uint64_t r_info = elf64::R_X86_64_RELATIVE;
+                    write_u64(rela_data, r_info);
+                    write_i64(rela_data, static_cast<int64_t>(target_vaddr + static_cast<uint64_t>(r.addend)));
+                }
             }
         }
     }
@@ -507,7 +550,7 @@ std::vector<uint8_t> ElfSoWriter::write() {
     for (int i = 0; i < 8; ++i) write_u8(out, 0); // e_ident padding
 
     write_u16(out, elf64::ET_DYN); // e_type
-    write_u16(out, elf64::EM_X86_64); // e_machine
+    write_u16(out, working_obj.target.is_aarch64() ? elf64::EM_AARCH64 : elf64::EM_X86_64); // e_machine
     write_u32(out, elf64::EV_CURRENT); // e_version
     write_u64(out, 0); // e_entry
     write_u64(out, 64); // e_phoff (immediately after Ehdr)

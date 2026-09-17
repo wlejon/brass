@@ -48,7 +48,19 @@ void align_buf(std::vector<uint8_t>& buf, size_t align) {
     }
 }
 
-uint32_t to_elf_reloc_type(RelocKind kind) {
+uint32_t to_elf_reloc_type(RelocKind kind, bool is_aarch64) {
+    if (is_aarch64) {
+        switch (kind) {
+            case RelocKind::Plt32:    return elf::R_AARCH64_CALL26;
+            case RelocKind::PCRel32:  return elf::R_AARCH64_PREL32;
+            case RelocKind::SecRel32: return elf::R_AARCH64_ADD_ABS_LO12_NC;
+            case RelocKind::Abs64:    return elf::R_AARCH64_ABS64;
+            case RelocKind::Abs32:    return elf::R_AARCH64_ABS32;
+            case RelocKind::Addr32NB: return elf::R_AARCH64_PREL32;
+            case RelocKind::SecIdx:   return elf::R_AARCH64_NONE;
+        }
+        return elf::R_AARCH64_PREL32;
+    }
     switch (kind) {
         case RelocKind::PCRel32: return elf::R_X86_64_PC32;
         case RelocKind::Plt32:   return elf::R_X86_64_PLT32;
@@ -248,10 +260,11 @@ std::vector<uint8_t> ElfWriter::write() {
             if (it != sym_name_to_idx.end()) {
                 sym_idx = it->second;
             }
-            uint32_t r_type = to_elf_reloc_type(r.kind);
+            bool is_aarch64 = working_obj.target.is_aarch64();
+            uint32_t r_type = to_elf_reloc_type(r.kind, is_aarch64);
             uint64_t r_info = (static_cast<uint64_t>(sym_idx) << 32) | (static_cast<uint64_t>(r_type) & 0xFFFFFFFFULL);
             int64_t addend = r.addend;
-            if (sec.name != ".eh_frame" && (r.kind == RelocKind::PCRel32 || r.kind == RelocKind::Plt32)) {
+            if (!is_aarch64 && sec.name != ".eh_frame" && (r.kind == RelocKind::PCRel32 || r.kind == RelocKind::Plt32)) {
                 // In standard x86_64 ELF rela, PC-relative call displacement fixup has addend -4
                 if (addend == 0) addend = -4;
             }

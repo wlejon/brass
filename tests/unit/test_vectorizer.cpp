@@ -60,10 +60,6 @@ TEST_CASE("SLP - 4D Coordinate Operation Packetization") {
 
     // Verify module after SLP
     DiagnosticReporter diag_after;
-    if (!verify_module(mod, &diag_after)) {
-        std::cerr << diag_after.format_all() << "\n";
-        print_module(mod, std::cerr);
-    }
     REQUIRE(verify_module(mod, &diag_after));
 
     // Verify vector store exists in entry block

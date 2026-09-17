@@ -47,7 +47,19 @@ uint32_t get_coff_section_characteristics(const Section& sec) {
     return flags;
 }
 
-uint16_t to_coff_reloc_type(RelocKind kind) {
+uint16_t to_coff_reloc_type(RelocKind kind, bool is_aarch64) {
+    if (is_aarch64) {
+        switch (kind) {
+            case RelocKind::Plt32:    return coff::IMAGE_REL_ARM64_BRANCH26;
+            case RelocKind::PCRel32:  return coff::IMAGE_REL_ARM64_PAGE21;
+            case RelocKind::SecRel32: return coff::IMAGE_REL_ARM64_PAGEOFFSET_12A;
+            case RelocKind::Abs64:    return coff::IMAGE_REL_ARM64_ADDR64;
+            case RelocKind::Addr32NB: return coff::IMAGE_REL_ARM64_ADDR32NB;
+            case RelocKind::SecIdx:   return coff::IMAGE_REL_ARM64_SECTION;
+            case RelocKind::Abs32:    return coff::IMAGE_REL_ARM64_ADDR32;
+        }
+        return coff::IMAGE_REL_ARM64_BRANCH26;
+    }
     switch (kind) {
         case RelocKind::PCRel32:
         case RelocKind::Plt32:
@@ -82,8 +94,8 @@ CoffWriter::CoffWriter(const ObjectFile& obj)
 std::vector<uint8_t> CoffWriter::write() {
     ObjectFile working_obj = obj_;
 
-    // Generate Win64 SEH tables if functions exist
-    if (!working_obj.functions.empty()) {
+    // Generate Win64 SEH tables if functions exist (x86_64 only)
+    if (!working_obj.functions.empty() && !working_obj.target.is_aarch64()) {
         working_obj.get_or_create_section(
             ".xdata",
             SectionKind::XData,
@@ -268,7 +280,7 @@ std::vector<uint8_t> CoffWriter::write() {
                 sym_idx = it->second;
             }
             write_u32(out, sym_idx);
-            write_u16(out, to_coff_reloc_type(r.kind));
+            write_u16(out, to_coff_reloc_type(r.kind, working_obj.target.is_aarch64()));
         }
     }
 

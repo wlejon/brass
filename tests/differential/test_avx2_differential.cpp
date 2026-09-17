@@ -5,6 +5,7 @@
 #include <brass/mir/verifier.hpp>
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/codegen/jit_exec.hpp>
+#include <brass/target/target.hpp>
 #include <vector>
 #include <iostream>
 #include <cmath>
@@ -79,6 +80,7 @@ static void build_scalar_fma_test(
 }
 
 TEST_CASE("AVX2 Differential - F32x8 Arithmetic") {
+    if (!Target::host().is_x64()) { std::cout << "  [SKIP] AVX2 not supported on non-x86 host\n"; return; }
     Module mod("avx2_diff_f32x8");
     build_v256_binop_test(mod, "f32x8_add", Type::f32x8(), Opcode::vadd);
     build_v256_binop_test(mod, "f32x8_sub", Type::f32x8(), Opcode::vsub);
@@ -101,6 +103,7 @@ TEST_CASE("AVX2 Differential - F32x8 Arithmetic") {
 }
 
 TEST_CASE("AVX2 Differential - F64x4 Arithmetic") {
+    if (!Target::host().is_x64()) { std::cout << "  [SKIP] AVX2 not supported on non-x86 host\n"; return; }
     Module mod("avx2_diff_f64x4");
     build_v256_binop_test(mod, "f64x4_add", Type::f64x4(), Opcode::vadd);
     build_v256_binop_test(mod, "f64x4_sub", Type::f64x4(), Opcode::vsub);
@@ -117,6 +120,7 @@ TEST_CASE("AVX2 Differential - F64x4 Arithmetic") {
 }
 
 TEST_CASE("AVX2 Differential - I32x8 and I64x4 Arithmetic") {
+    if (!Target::host().is_x64()) { std::cout << "  [SKIP] AVX2 not supported on non-x86 host\n"; return; }
     Module mod("avx2_diff_int");
     build_v256_binop_test(mod, "i32x8_add", Type::i32x8(), Opcode::vadd);
     build_v256_binop_test(mod, "i32x8_sub", Type::i32x8(), Opcode::vsub);
@@ -148,6 +152,7 @@ TEST_CASE("AVX2 Differential - I32x8 and I64x4 Arithmetic") {
 }
 
 TEST_CASE("AVX2 Differential - FMA3 Operations") {
+    if (!Target::host().is_x64()) { std::cout << "  [SKIP] AVX2 not supported on non-x86 host\n"; return; }
     Module mod("avx2_diff_fma");
     build_v256_fma_test(mod, "vfma_f32x8", Type::f32x8());
     build_v256_fma_test(mod, "vfma_f64x4", Type::f64x4());

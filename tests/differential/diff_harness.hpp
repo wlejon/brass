@@ -46,6 +46,9 @@ inline void assert_diff(
         if (std::isnan(d1)) {
             CHECK(std::isnan(d2));
         } else {
+            if (std::abs(d1 - d2) >= 1e-6) {
+                std::cout << "MISMATCH f64 in " << fn_name << ": interp=" << d1 << ", jit=" << d2 << "\n";
+            }
             CHECK(std::abs(d1 - d2) < 1e-6);
         }
     } else if (interp_res.is_f32()) {

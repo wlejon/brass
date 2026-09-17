@@ -453,26 +453,55 @@ std::vector<uint8_t> MachOWriter::write() {
 
             bool is_func = r_extern && (sym_idx < all_symbols.size() && all_symbols[sym_idx].type == SymbolType::Function);
 
-            if (r.kind == RelocKind::PCRel32) {
-                r_pcrel = 1;
-                r_length = 2;
-                r_type = macho::X86_64_RELOC_SIGNED;
-            } else if (r.kind == RelocKind::Plt32) {
-                r_pcrel = 1;
-                r_length = 2;
-                r_type = is_func ? macho::X86_64_RELOC_BRANCH : macho::X86_64_RELOC_SIGNED;
-            } else if (r.kind == RelocKind::SecRel32) {
-                r_pcrel = 1;
-                r_length = 2;
-                r_type = macho::X86_64_RELOC_SIGNED;
-            } else if (r.kind == RelocKind::Abs64) {
-                r_pcrel = 0;
-                r_length = 3; // 8 bytes
-                r_type = macho::X86_64_RELOC_UNSIGNED;
-            } else if (r.kind == RelocKind::Abs32 || r.kind == RelocKind::Addr32NB) {
-                r_pcrel = 0;
-                r_length = 2;
-                r_type = macho::X86_64_RELOC_UNSIGNED;
+            bool is_aarch64 = working_obj.target.is_aarch64();
+            if (is_aarch64) {
+                if (r.kind == RelocKind::Plt32) {
+                    r_type = macho::ARM64_RELOC_BRANCH26;
+                    r_pcrel = 1;
+                    r_length = 2;
+                } else if (r.kind == RelocKind::PCRel32) {
+                    r_type = macho::ARM64_RELOC_PAGE21;
+                    r_pcrel = 1;
+                    r_length = 2;
+                } else if (r.kind == RelocKind::SecRel32) {
+                    r_type = macho::ARM64_RELOC_PAGEOFF12;
+                    r_pcrel = 0;
+                    r_length = 2;
+                } else if (r.kind == RelocKind::Abs64) {
+                    r_type = macho::ARM64_RELOC_UNSIGNED;
+                    r_pcrel = 0;
+                    r_length = 3;
+                } else if (r.kind == RelocKind::Abs32 || r.kind == RelocKind::Addr32NB) {
+                    r_type = macho::ARM64_RELOC_UNSIGNED;
+                    r_pcrel = 0;
+                    r_length = 2;
+                } else {
+                    r_type = macho::ARM64_RELOC_UNSIGNED;
+                    r_pcrel = 0;
+                    r_length = 2;
+                }
+            } else {
+                if (r.kind == RelocKind::PCRel32) {
+                    r_pcrel = 1;
+                    r_length = 2;
+                    r_type = macho::X86_64_RELOC_SIGNED;
+                } else if (r.kind == RelocKind::Plt32) {
+                    r_pcrel = 1;
+                    r_length = 2;
+                    r_type = is_func ? macho::X86_64_RELOC_BRANCH : macho::X86_64_RELOC_SIGNED;
+                } else if (r.kind == RelocKind::SecRel32) {
+                    r_pcrel = 1;
+                    r_length = 2;
+                    r_type = macho::X86_64_RELOC_SIGNED;
+                } else if (r.kind == RelocKind::Abs64) {
+                    r_pcrel = 0;
+                    r_length = 3; // 8 bytes
+                    r_type = macho::X86_64_RELOC_UNSIGNED;
+                } else if (r.kind == RelocKind::Abs32 || r.kind == RelocKind::Addr32NB) {
+                    r_pcrel = 0;
+                    r_length = 2;
+                    r_type = macho::X86_64_RELOC_UNSIGNED;
+                }
             }
 
             uint32_t word2 = (sym_idx & 0x00FFFFFF)
