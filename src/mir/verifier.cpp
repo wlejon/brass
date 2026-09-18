@@ -674,6 +674,16 @@ bool Verifier::verify_function(const Function& fn) {
                     break;
                 }
 
+                case Opcode::alloca_: {
+                    if (inst->operand_count() != 0) {
+                        report_error(inst_prefix + "Alloca requires 0 operands.");
+                    }
+                    if (!inst->type().is_pointer_or_gcref() && inst->type() != Type::i64()) {
+                        report_error(inst_prefix + "Alloca result type must be ptr or i64.");
+                    }
+                    break;
+                }
+
                 case Opcode::load: {
                     if (inst->operand_count() != 1 || !inst->operand(0)) {
                         report_error(inst_prefix + "Load requires 1 base operand.");

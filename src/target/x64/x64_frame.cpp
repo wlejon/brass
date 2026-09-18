@@ -33,6 +33,8 @@ void X64FrameLayout::compute_layout(codegen::FrameInfo& frame, const CallingConv
     size_t gpr_bytes = saved_gprs.size() * 8;
     size_t xmm_bytes = saved_xmms.size() * 16;
     size_t spill_bytes = frame.num_spill_slots * 8;
+    size_t local_bytes = (frame.local_frame_bytes + 15) & ~size_t(15);
+    frame.local_frame_bytes = local_bytes;
     size_t outgoing_bytes = frame.outgoing_arg_space;
 
     // Minimum shadow space for Win64 if outgoing calls exist or if outgoing_bytes > 0
@@ -40,10 +42,10 @@ void X64FrameLayout::compute_layout(codegen::FrameInfo& frame, const CallingConv
         outgoing_bytes = std::max(outgoing_bytes, size_t(32));
     }
 
-    size_t raw_total = gpr_bytes + xmm_bytes + spill_bytes + outgoing_bytes;
+    size_t raw_total = gpr_bytes + xmm_bytes + spill_bytes + local_bytes + outgoing_bytes;
     // Align total frame size to 32 bytes (which is also 16-byte aligned)
     frame.total_frame_size = (raw_total + 31) & ~size_t(31);
-    frame.is_leaf = (!frame.has_calls && frame.total_frame_size == 0 && saved_gprs.empty() && saved_xmms.empty() && outgoing_bytes == 0);
+    frame.is_leaf = (!frame.has_calls && frame.total_frame_size == 0 && saved_gprs.empty() && saved_xmms.empty() && outgoing_bytes == 0 && local_bytes == 0);
 }
 
 MemAddress X64FrameLayout::callee_gpr_address(GPR reg, const codegen::FrameInfo& frame) {
@@ -79,6 +81,18 @@ MemAddress X64FrameLayout::spill_slot_address(int32_t slot_idx, const codegen::F
     int32_t base_offset = static_cast<int32_t>(gpr_offset + xmm_offset);
 
     int32_t disp = -(base_offset + (slot_idx + 1) * 8);
+    return ptr(GPR::RBP, disp);
+}
+
+MemAddress X64FrameLayout::local_frame_address(int32_t offset, const codegen::FrameInfo& frame) {
+    auto saved_gprs = get_saved_callee_gprs(frame);
+    auto saved_xmms = get_saved_callee_xmms(frame);
+    size_t gpr_offset = saved_gprs.size() * 8;
+    size_t xmm_offset = saved_xmms.size() * 16;
+    int32_t base_offset = static_cast<int32_t>(gpr_offset + xmm_offset);
+    int32_t spill_bytes = static_cast<int32_t>(frame.num_spill_slots * 8);
+
+    int32_t disp = -(base_offset + spill_bytes + static_cast<int32_t>(frame.local_frame_bytes)) + offset;
     return ptr(GPR::RBP, disp);
 }
 

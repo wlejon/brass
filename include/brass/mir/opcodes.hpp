@@ -72,6 +72,7 @@ enum class Opcode : uint16_t {
     select,
 
     // Memory
+    alloca_,
     load,
     store,
     load_indexed,

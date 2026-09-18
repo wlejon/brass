@@ -527,6 +527,9 @@ void X64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
         case Opcode::select:
             lower_select(inst, lir_bb);
             break;
+        case Opcode::alloca_:
+            lower_alloca(inst, lir_bb);
+            break;
         case Opcode::load:
             lower_load(inst, lir_bb);
             break;

@@ -109,6 +109,7 @@ public:
     Value* build_select(Value* cond, Value* true_val, Value* false_val);
 
     // Memory
+    Value* build_alloca(uint32_t size, uint32_t align = 8);
     Value* build_load(Type type, Value* base);
     Value* build_load(Type type, Value* base, int32_t offset);
     Instruction* build_store(Type type, Value* base, int32_t offset, Value* val);

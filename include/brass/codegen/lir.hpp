@@ -108,6 +108,7 @@ enum class LirOperandKind : uint8_t {
     ImmFloat,
     Mem,
     SpillSlot,
+    LocalSlot,
     Label,
     Symbol,
     Condition
@@ -136,6 +137,7 @@ struct LirOperand {
     double imm_float = 0.0;
     LirMem mem_val;
     int32_t spill_slot = -1;
+    int32_t local_offset = 0;
     uint32_t label_id = 0;
     std::string symbol_name;
     x64::Condition cond = x64::Condition::None;
@@ -155,6 +157,7 @@ struct LirOperand {
     static LirOperand mem(PReg base, PReg index, x64::Scale scale = x64::Scale::One, int32_t disp = 0, uint8_t sz = 8);
     static LirOperand mem_custom(const LirMem& m, uint8_t sz = 8);
     static LirOperand slot(int32_t slot_idx, uint8_t sz = 8);
+    static LirOperand local_slot(int32_t offset, uint8_t sz = 8);
     static LirOperand label(uint32_t id);
     static LirOperand symbol(std::string name);
     static LirOperand condition(x64::Condition c);
@@ -166,6 +169,7 @@ struct LirOperand {
     bool is_imm_float() const noexcept { return kind == LirOperandKind::ImmFloat; }
     bool is_mem() const noexcept { return kind == LirOperandKind::Mem; }
     bool is_spill_slot() const noexcept { return kind == LirOperandKind::SpillSlot; }
+    bool is_local_slot() const noexcept { return kind == LirOperandKind::LocalSlot; }
     bool is_label() const noexcept { return kind == LirOperandKind::Label; }
     bool is_symbol() const noexcept { return kind == LirOperandKind::Symbol; }
     bool is_condition() const noexcept { return kind == LirOperandKind::Condition; }
@@ -465,6 +469,7 @@ struct VRegInfo {
 
 struct FrameInfo {
     size_t num_spill_slots = 0;
+    size_t local_frame_bytes = 0;
     std::vector<bool> spill_slot_is_gcref;
     uint32_t saved_callee_gprs = 0;
     uint32_t saved_callee_xmms = 0;

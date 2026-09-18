@@ -25,6 +25,7 @@ std::string_view to_string(LirOperandKind kind) noexcept {
         case LirOperandKind::ImmFloat: return "imm_float";
         case LirOperandKind::Mem: return "mem";
         case LirOperandKind::SpillSlot: return "spill_slot";
+        case LirOperandKind::LocalSlot: return "local_slot";
         case LirOperandKind::Label: return "label";
         case LirOperandKind::Symbol: return "symbol";
         case LirOperandKind::Condition: return "cond";
@@ -322,6 +323,14 @@ LirOperand LirOperand::slot(int32_t slot_idx, uint8_t sz) {
     return op;
 }
 
+LirOperand LirOperand::local_slot(int32_t offset, uint8_t sz) {
+    LirOperand op;
+    op.kind = LirOperandKind::LocalSlot;
+    op.local_offset = offset;
+    op.size = sz;
+    return op;
+}
+
 LirOperand LirOperand::label(uint32_t id) {
     LirOperand op;
     op.kind = LirOperandKind::Label;
@@ -429,6 +438,9 @@ std::string to_string(const LirOperand& op) {
         }
         case LirOperandKind::SpillSlot:
             ss << "slot(" << op.spill_slot << ")";
+            break;
+        case LirOperandKind::LocalSlot:
+            ss << "local(" << op.local_offset << ")";
             break;
         case LirOperandKind::Label:
             ss << "L" << op.label_id;

@@ -33,13 +33,15 @@ void AArch64FrameLayout::compute_layout(codegen::FrameInfo& frame, const Calling
     size_t gpr_bytes = saved_gprs.size() * 8;
     size_t fpr_bytes = saved_fprs.size() * 8;
     size_t spill_bytes = frame.num_spill_slots * 8;
+    size_t local_bytes = (frame.local_frame_bytes + 15) & ~size_t(15);
+    frame.local_frame_bytes = local_bytes;
     size_t outgoing_bytes = (frame.outgoing_arg_space + 15) & ~size_t(15);
     size_t header_bytes = 16; // FP (X29) + LR (X30)
 
-    size_t raw_total = header_bytes + gpr_bytes + fpr_bytes + spill_bytes + outgoing_bytes;
+    size_t raw_total = header_bytes + gpr_bytes + fpr_bytes + spill_bytes + local_bytes + outgoing_bytes;
     // Align total frame size to 16 bytes
     frame.total_frame_size = (raw_total + 15) & ~size_t(15);
-    frame.is_leaf = (!frame.has_calls && frame.num_spill_slots == 0 && saved_gprs.empty() && saved_fprs.empty() && outgoing_bytes == 0);
+    frame.is_leaf = (!frame.has_calls && frame.num_spill_slots == 0 && saved_gprs.empty() && saved_fprs.empty() && outgoing_bytes == 0 && local_bytes == 0);
 }
 
 MemAddress AArch64FrameLayout::callee_gpr_address(GPR reg, const codegen::FrameInfo& frame) {
@@ -73,6 +75,14 @@ MemAddress AArch64FrameLayout::spill_slot_address(int32_t slot_idx, const codege
     size_t base_offset = 16 + saved_gprs.size() * 8 + saved_fprs.size() * 8;
 
     int64_t disp = static_cast<int64_t>(base_offset + static_cast<size_t>(slot_idx) * 8);
+    return ptr(GPR::FP, disp);
+}
+
+MemAddress AArch64FrameLayout::local_frame_address(int32_t offset, const codegen::FrameInfo& frame) {
+    auto saved_gprs = get_saved_callee_gprs(frame);
+    auto saved_fprs = get_saved_callee_fprs(frame);
+    size_t base_offset = 16 + saved_gprs.size() * 8 + saved_fprs.size() * 8 + frame.num_spill_slots * 8;
+    int64_t disp = static_cast<int64_t>(base_offset) + offset;
     return ptr(GPR::FP, disp);
 }
 

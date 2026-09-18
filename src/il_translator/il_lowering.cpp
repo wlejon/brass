@@ -617,8 +617,15 @@ bool IlLowering::lower_function(const BronzeFunction& fn_ast, Module& mod, const
         }
 
         b.position_at_end(entry_bb);
+        Value* tls_addr = b.build_call("bronze_tls_block_addr", Type::ptr(), {});
+        current_fn_call_frame_ = b.build_alloca(32, 8);
+        Value* old_top = b.build_load(Type::ptr(), tls_addr, 248);
         Value* desc_addr = b.build_func_addr(module_sym("__bronze_fn_desc_" + fn_name));
-        b.build_call("bronze_call_frame_push", Type::void_type(), {desc_addr});
+        b.build_store(Type::ptr(), current_fn_call_frame_, 0, old_top);
+        b.build_store(Type::ptr(), current_fn_call_frame_, 8, desc_addr);
+        b.build_store(Type::i64(), current_fn_call_frame_, 16, b.build_iconst_i64(0));
+        b.build_store(Type::ptr(), current_fn_call_frame_, 24, tls_addr);
+        b.build_store(Type::ptr(), tls_addr, 248, current_fn_call_frame_);
         if (total_slots > 0) {
             current_fn_frame_ptr_ = b.build_call("bronze_gc_frame_push", Type::ptr(),
                                                 {b.build_iconst_i32(static_cast<int32_t>(total_slots))});

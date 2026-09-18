@@ -202,8 +202,6 @@ int32_t bronze_exception_pending();
 void bronze_uncaught_exception();
 void* bronze_gc_frame_push(uint32_t count);
 void bronze_gc_frame_pop();
-void bronze_call_frame_push(void* desc);
-void bronze_call_frame_pop();
 uint64_t bronze_pin_violation(uint32_t key_index, uint64_t bits);
 void bronze_pin_check_array(uint32_t key_index, uint64_t bits);
 double bronze_pow(double base, double exponent);

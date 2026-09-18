@@ -63,6 +63,7 @@ std::string_view opcode_name(Opcode op) noexcept {
 
         case Opcode::select: return "select";
 
+        case Opcode::alloca_: return "alloca";
         case Opcode::load: return "load";
         case Opcode::store: return "store";
         case Opcode::load_indexed: return "load_indexed";
@@ -235,6 +236,7 @@ bool is_comparison(Opcode op) noexcept {
 
 bool is_memory(Opcode op) noexcept {
     switch (op) {
+        case Opcode::alloca_:
         case Opcode::load:
         case Opcode::store:
         case Opcode::load_indexed:
@@ -312,6 +314,7 @@ bool has_side_effects(Opcode op) noexcept {
     if (is_call(op)) return true;
     if (is_coro_op(op)) return true;
     switch (op) {
+        case Opcode::alloca_:
         case Opcode::store:
         case Opcode::store_indexed:
         case Opcode::vstore:

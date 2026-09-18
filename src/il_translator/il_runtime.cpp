@@ -725,9 +725,6 @@ BRONZE_WEAK void bronze_gc_frame_pop() {
     }
 }
 
-BRONZE_WEAK void bronze_call_frame_push(void* /*desc*/) {}
-BRONZE_WEAK void bronze_call_frame_pop() {}
-
 BRONZE_WEAK uint64_t bronze_pin_violation(uint32_t /*key_index*/, uint64_t bits) {
     g_bronze_dummy_exception_cell = bits;
     return 0xFFF6000000000000ULL;

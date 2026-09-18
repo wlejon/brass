@@ -19,6 +19,7 @@ public:
     static void emit_epilogue(X64Encoder& enc, const codegen::FrameInfo& frame, const CallingConvention& cc);
 
     static MemAddress spill_slot_address(int32_t slot_idx, const codegen::FrameInfo& frame);
+    static MemAddress local_frame_address(int32_t offset, const codegen::FrameInfo& frame);
     static MemAddress callee_gpr_address(GPR reg, const codegen::FrameInfo& frame);
     static MemAddress callee_xmm_address(XMM reg, const codegen::FrameInfo& frame);
 

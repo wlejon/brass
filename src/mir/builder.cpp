@@ -412,6 +412,17 @@ Value* Builder::build_select(Value* cond, Value* true_val, Value* false_val) {
     return res;
 }
 
+Value* Builder::build_alloca(uint32_t size, uint32_t align) {
+    Instruction* inst = get_arena().make<Instruction>(Opcode::alloca_, Type::ptr());
+    inst->set_imm_i32(static_cast<int32_t>(size));
+    inst->set_offset(static_cast<int32_t>(align));
+    Value* res = create_value(Type::ptr());
+    res->set_defining_instruction(inst);
+    inst->set_result(res);
+    insert(inst);
+    return res;
+}
+
 Value* Builder::build_load(Type type, Value* base) {
     return build_load(type, base, 0);
 }

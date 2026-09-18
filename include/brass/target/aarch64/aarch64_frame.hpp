@@ -19,6 +19,7 @@ public:
     static void emit_epilogue(AArch64Encoder& enc, const codegen::FrameInfo& frame, const CallingConvention& cc);
 
     static MemAddress spill_slot_address(int32_t slot_idx, const codegen::FrameInfo& frame);
+    static MemAddress local_frame_address(int32_t offset, const codegen::FrameInfo& frame);
     static MemAddress incoming_arg_address(int32_t caller_stack_offset, const codegen::FrameInfo& frame);
     static MemAddress callee_gpr_address(GPR reg, const codegen::FrameInfo& frame);
     static MemAddress callee_fpr_address(FPR reg, const codegen::FrameInfo& frame);
