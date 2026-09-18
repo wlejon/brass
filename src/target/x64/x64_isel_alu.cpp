@@ -530,6 +530,15 @@ void X64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
         case Opcode::alloca_:
             lower_alloca(inst, lir_bb);
             break;
+        case Opcode::pinned_tls_read:
+            lower_pinned_tls_read(inst, lir_bb);
+            break;
+        case Opcode::pinned_tls_write:
+            lower_pinned_tls_write(inst, lir_bb);
+            break;
+        case Opcode::read_sp:
+            lower_read_sp(inst, lir_bb);
+            break;
         case Opcode::load:
             lower_load(inst, lir_bb);
             break;

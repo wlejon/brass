@@ -361,6 +361,39 @@ void X64ISel::lower_write_barrier(const Instruction& inst, LirBlock& lir_bb) {
     }
 }
 
+// The pinned register is outside the allocator's pool (LirFunction::
+// reserved_gprs), so a read is a plain copy out of it and a write a plain
+// copy into it; the write also forces the prologue to save the register,
+// since the module entry that writes it is an ordinary callee to whoever
+// called it.
+void X64ISel::lower_pinned_tls_read(const Instruction& inst, LirBlock& lir_bb) {
+    VReg dst = get_or_alloc_vreg(inst.result());
+    auto mov = std::make_unique<LirInst>(LirOpcode::Mov);
+    mov->add_def(LirOperand::vreg(dst, 8));
+    mov->add_use(LirOperand::preg_gpr(kPinnedTlsGpr, 8), FixedConstraint::gpr(kPinnedTlsGpr));
+    mov->mir_origin = &inst;
+    lir_bb.append_inst(std::move(mov));
+}
+
+void X64ISel::lower_pinned_tls_write(const Instruction& inst, LirBlock& lir_bb) {
+    VReg src = get_vreg(inst.operand(0));
+    auto mov = std::make_unique<LirInst>(LirOpcode::Mov);
+    mov->add_def(LirOperand::preg_gpr(kPinnedTlsGpr, 8), FixedConstraint::gpr(kPinnedTlsGpr));
+    mov->add_use(LirOperand::vreg(src, 8));
+    mov->mir_origin = &inst;
+    lir_bb.append_inst(std::move(mov));
+    lir_fn_->forced_saved_gprs |= reg_mask(kPinnedTlsGpr);
+}
+
+void X64ISel::lower_read_sp(const Instruction& inst, LirBlock& lir_bb) {
+    VReg dst = get_or_alloc_vreg(inst.result());
+    auto mov = std::make_unique<LirInst>(LirOpcode::Mov);
+    mov->add_def(LirOperand::vreg(dst, 8));
+    mov->add_use(LirOperand::preg_gpr(GPR::RSP, 8), FixedConstraint::gpr(GPR::RSP));
+    mov->mir_origin = &inst;
+    lir_bb.append_inst(std::move(mov));
+}
+
 void X64ISel::lower_alloca(const Instruction& inst, LirBlock& lir_bb) {
     uint32_t size = static_cast<uint32_t>(inst.imm_i32());
     uint32_t align = static_cast<uint32_t>(inst.offset());

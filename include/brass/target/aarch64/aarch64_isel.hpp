@@ -16,6 +16,10 @@ struct OsrTarget;
 
 namespace brass::aarch64 {
 
+// The register a module with Module::pinned_tls_register() keeps its
+// thread-local block in (callee-saved under AAPCS64). See x64::kPinnedTlsGpr.
+inline constexpr GPR kPinnedTlsGpr = GPR::X28;
+
 class AArch64ISel {
 public:
     AArch64ISel();
@@ -75,6 +79,9 @@ private:
     void lower_shift(const Instruction& inst, codegen::LirBlock& lir_bb, codegen::LirOpcode op32, codegen::LirOpcode op64);
     void lower_comparison(const Instruction& inst, codegen::LirBlock& lir_bb, x64::Condition cond, x64::Condition float_cond);
     void lower_select(const Instruction& inst, codegen::LirBlock& lir_bb);
+    void lower_pinned_tls_read(const Instruction& inst, codegen::LirBlock& lir_bb);
+    void lower_pinned_tls_write(const Instruction& inst, codegen::LirBlock& lir_bb);
+    void lower_read_sp(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_call(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_invoke(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_throw(const Instruction& inst, codegen::LirBlock& lir_bb);

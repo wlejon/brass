@@ -1,4 +1,5 @@
 #include <brass/target/aarch64/aarch64_isel.hpp>
+#include <brass/mir/module.hpp>
 #include <brass/mir/osr.hpp>
 #include <cstring>
 #include <stdexcept>
@@ -235,6 +236,9 @@ std::unique_ptr<LirFunction> AArch64ISel::lower(const Function& mir_fn) {
     lir_fn_->name = std::string(mir_fn.name());
     lir_fn_->return_type = mir_fn.return_type();
     lir_fn_->calling_conv = cc_;
+    if (mir_fn.parent() && mir_fn.parent()->pinned_tls_register()) {
+        lir_fn_->reserved_gprs |= reg_mask(kPinnedTlsGpr);
+    }
 
     const_cast<Function&>(mir_fn).rebuild_cfg_predecessors();
 
@@ -899,6 +903,16 @@ void AArch64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
 
         case Opcode::select:
             lower_select(inst, lir_bb);
+            break;
+
+        case Opcode::pinned_tls_read:
+            lower_pinned_tls_read(inst, lir_bb);
+            break;
+        case Opcode::pinned_tls_write:
+            lower_pinned_tls_write(inst, lir_bb);
+            break;
+        case Opcode::read_sp:
+            lower_read_sp(inst, lir_bb);
             break;
 
         case Opcode::load:

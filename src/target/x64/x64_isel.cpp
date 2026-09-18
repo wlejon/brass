@@ -1,4 +1,5 @@
 #include <brass/target/x64/x64_isel.hpp>
+#include <brass/mir/module.hpp>
 #include <brass/mir/osr.hpp>
 #include <cstring>
 #include <stdexcept>
@@ -311,6 +312,9 @@ std::unique_ptr<LirFunction> X64ISel::lower(const Function& mir_fn) {
     lir_fn_->name = std::string(mir_fn.name());
     lir_fn_->return_type = mir_fn.return_type();
     lir_fn_->calling_conv = cc_;
+    if (mir_fn.parent() && mir_fn.parent()->pinned_tls_register()) {
+        lir_fn_->reserved_gprs |= reg_mask(kPinnedTlsGpr);
+    }
 
     const_cast<Function&>(mir_fn).rebuild_cfg_predecessors();
 

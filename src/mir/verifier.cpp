@@ -684,6 +684,26 @@ bool Verifier::verify_function(const Function& fn) {
                     break;
                 }
 
+                case Opcode::pinned_tls_read:
+                case Opcode::read_sp: {
+                    if (inst->operand_count() != 0) {
+                        report_error(inst_prefix + std::string(opcode_name(inst->opcode())) +
+                                     " requires 0 operands.");
+                    }
+                    if (!inst->type().is_pointer_or_gcref() && inst->type() != Type::i64()) {
+                        report_error(inst_prefix + std::string(opcode_name(inst->opcode())) +
+                                     " result type must be ptr or i64.");
+                    }
+                    break;
+                }
+
+                case Opcode::pinned_tls_write: {
+                    if (inst->operand_count() != 1 || !inst->operand(0)) {
+                        report_error(inst_prefix + "pinned_tls_write requires 1 operand.");
+                    }
+                    break;
+                }
+
                 case Opcode::load: {
                     if (inst->operand_count() != 1 || !inst->operand(0)) {
                         report_error(inst_prefix + "Load requires 1 base operand.");

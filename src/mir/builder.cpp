@@ -423,6 +423,31 @@ Value* Builder::build_alloca(uint32_t size, uint32_t align) {
     return res;
 }
 
+Value* Builder::build_pinned_tls_read() {
+    Instruction* inst = get_arena().make<Instruction>(Opcode::pinned_tls_read, Type::i64());
+    Value* res = create_value(Type::i64());
+    res->set_defining_instruction(inst);
+    inst->set_result(res);
+    insert(inst);
+    return res;
+}
+
+Instruction* Builder::build_pinned_tls_write(Value* addr) {
+    Instruction* inst = get_arena().make<Instruction>(Opcode::pinned_tls_write, Type::void_type());
+    inst->add_operand(addr);
+    insert(inst);
+    return inst;
+}
+
+Value* Builder::build_read_sp() {
+    Instruction* inst = get_arena().make<Instruction>(Opcode::read_sp, Type::i64());
+    Value* res = create_value(Type::i64());
+    res->set_defining_instruction(inst);
+    inst->set_result(res);
+    insert(inst);
+    return res;
+}
+
 Value* Builder::build_load(Type type, Value* base) {
     return build_load(type, base, 0);
 }

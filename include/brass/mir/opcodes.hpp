@@ -79,6 +79,16 @@ enum class Opcode : uint16_t {
     store_indexed,
     write_barrier,
 
+    // Pinned-register reads and writes. `pinned_tls_read` yields the address
+    // held in the register the module pins for its thread-local block (x64:
+    // R13, aarch64: X28), `pinned_tls_write` stores one into it — only the
+    // module entry does that, after fetching the block from the runtime —
+    // and `read_sp` yields the stack pointer after the prologue, for the
+    // stack-limit check. See Module::pinned_tls_register().
+    pinned_tls_read,
+    pinned_tls_write,
+    read_sp,
+
     // Calls & Safepoints
     call,
     call_indirect,

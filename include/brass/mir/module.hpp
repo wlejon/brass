@@ -50,6 +50,15 @@ public:
     bool allow_fp_reassociation() const noexcept { return allow_fp_reassociation_; }
     void set_allow_fp_reassociation(bool allow) noexcept { allow_fp_reassociation_ = allow; }
 
+    // When set, every function in the module keeps one callee-saved register
+    // (x64: R13, aarch64: X28) out of allocation and reads its thread-local
+    // block through it (Opcode::pinned_tls_read). The module entry writes it
+    // (Opcode::pinned_tls_write); every other way into the module's code —
+    // a callback the runtime invokes — must arrive with the register already
+    // set, which is the runtime's trampoline's job.
+    bool pinned_tls_register() const noexcept { return pinned_tls_register_; }
+    void set_pinned_tls_register(bool pinned) noexcept { pinned_tls_register_ = pinned; }
+
     bool has_loop_optimizations() const noexcept { return has_loop_optimizations_; }
     void set_has_loop_optimizations(bool opt) noexcept { has_loop_optimizations_ = opt; }
 
@@ -64,6 +73,7 @@ private:
     std::unordered_map<std::string_view, Function*> function_map_;
     std::vector<std::string_view> external_symbols_;
     bool allow_fp_reassociation_ = false;
+    bool pinned_tls_register_ = false;
     bool has_loop_optimizations_ = false;
     DebugContext debug_context_;
 };

@@ -498,6 +498,12 @@ public:
     FrameInfo frame;
     std::vector<std::pair<uint32_t, uint32_t>> resume_entries;
     LirOsrEntry osr_entry;
+    // Registers the allocator must never hand out (Module::pinned_tls_register),
+    // and registers the prologue must save even though no vreg lives in them:
+    // a pinned register the function writes (the module entry) is the caller's
+    // to get back. Both are x64 GPR masks on x64 and aarch64 GPR masks on aarch64.
+    uint32_t reserved_gprs = 0;
+    uint32_t forced_saved_gprs = 0;
 
     LirFunction() = default;
 

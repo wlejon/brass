@@ -26,6 +26,7 @@ void LinearScanAllocator::init_register_pools() {
         }
         // Callee-saved: X19..X28 (excluding FP=X29, LR=X30, SP=31, XZR=32)
         for (int i = 19; i <= 28; ++i) {
+            if (fn_.reserved_gprs & (1u << i)) continue;
             available_gprs_.push_back(PReg::aarch64_gpr(static_cast<GPR>(i)));
         }
 
@@ -53,6 +54,7 @@ void LinearScanAllocator::init_register_pools() {
 
         available_gprs_.clear();
         for (GPR g : gprs) {
+            if (fn_.reserved_gprs & reg_mask(g)) continue;
             available_gprs_.push_back(PReg::gpr(g));
         }
 
@@ -253,7 +255,7 @@ void LinearScanAllocator::allocate() {
     }
 
     fn_.frame.num_spill_slots = next_spill_slot_;
-    fn_.frame.saved_callee_gprs = final_callee_gprs;
+    fn_.frame.saved_callee_gprs = final_callee_gprs | fn_.forced_saved_gprs;
     fn_.frame.saved_callee_xmms = final_callee_xmms;
 
     // 5. Record live GC references at all call sites and safepoints. A gcref

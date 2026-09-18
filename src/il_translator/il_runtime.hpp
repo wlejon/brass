@@ -14,6 +14,14 @@ class JitExecutionEngine;
 namespace il {
 
 constexpr uint64_t kUndefinedTag = 0xFFF6000000000000ULL;
+
+// The bronze thread-local block, as pinned-register code reads it
+// (bronze_abi_tls.h: BRONZE_TLS_*_OFF, BRONZE_ABI_NO_EXCEPTION_BITS). The
+// bronze runtime static_asserts the offsets against its struct; a change
+// there moves the ABI stamp, so a mismatch here fails at load, not silently.
+constexpr int32_t kBronzeTlsExceptionCellOff = 8;
+constexpr int32_t kBronzeTlsStackLimitOff = 248;
+constexpr uint64_t kBronzeNoExceptionBits = 0xFFF7000000000000ULL;
 constexpr uint64_t kNullTag      = 0xFFF5000000000000ULL;
 constexpr uint64_t kBoolTag      = 0xFFF4000000000000ULL;
 constexpr uint64_t kInt32Tag     = 0xFFF3000000000000ULL;
@@ -71,6 +79,13 @@ void bronze_accessor_def_computed(uint64_t obj_bits, uint64_t key_bits, uint64_t
 uint64_t bronze_module_namespace(uint64_t src_bits);
 int64_t bronze_ic_get(uint32_t site_id, int64_t obj_box, const char* name, int32_t symbol_id);
 void bronze_ic_set(uint32_t site_id, int64_t obj_box, const char* name, int32_t symbol_id, int64_t val_box);
+
+// Pinned-register mode (TranslatorOptions::pin_tls_register): the module
+// entry's fetch of the block, which also arms the thread's stack limit, and
+// the raise the stack-limit check calls before returning. Fallbacks for
+// brass's own tests; the bronze runtime registers the real ones by name.
+void* bronze_tls_enter();
+void bronze_stack_overflow();
 
 extern "C" {
 void* bronze_tls_block_addr();

@@ -1,7 +1,18 @@
 #include <brass/il_translator/il_alloc_lowering.hpp>
+#include <brass/mir/module.hpp>
 #include <string>
 
 namespace brass::il {
+
+// The bronze thread-local block: through the pinned register when the module
+// has one, otherwise the helper call.
+static Value* bronze_tls_addr(Builder& b) {
+    Module* mod = b.current_block()->parent()->parent();
+    if (mod && mod->pinned_tls_register()) {
+        return b.build_pinned_tls_read();
+    }
+    return b.build_call("bronze_tls_block_addr", Type::i64(), {});
+}
 
 Value* AllocLoweringHelper::lower_create_object(Builder& b) {
     if (!enable_tlab_) {
@@ -52,7 +63,7 @@ Value* AllocLoweringHelper::lower_create_object_bronze(Builder& b) {
 
     constexpr size_t PLAIN_OBJECT_BYTES = 56;
 
-    Value* tls_addr = b.build_call("bronze_tls_block_addr", Type::i64(), {});
+    Value* tls_addr = bronze_tls_addr(b);
     Value* cur_cursor = b.build_load(Type::i64(), tls_addr, 24);
     Value* cur_limit = b.build_load(Type::i64(), tls_addr, 32);
     Value* plain_shape = b.build_load(Type::i64(), tls_addr, 40);
@@ -120,7 +131,7 @@ Value* AllocLoweringHelper::lower_create_array_bronze(Builder& b, Value* size_va
     size_t elem_block_bytes = 8 + static_cast<size_t>(cap) * 8; // BRONZE_ABI_HDR_BYTES + cap * 8
     size_t total_needed = ARR_HDR_BYTES + elem_block_bytes;
 
-    Value* tls_addr = b.build_call("bronze_tls_block_addr", Type::i64(), {});
+    Value* tls_addr = bronze_tls_addr(b);
     Value* cur_cursor = b.build_load(Type::i64(), tls_addr, 24);
     Value* cur_limit = b.build_load(Type::i64(), tls_addr, 32);
 
@@ -198,7 +209,7 @@ Value* AllocLoweringHelper::lower_env_create_bronze(Builder& b, Value* parent_va
 
     size_t total_size = 16 + static_cast<size_t>(param_count) * 8;
 
-    Value* tls_addr = b.build_call("bronze_tls_block_addr", Type::i64(), {});
+    Value* tls_addr = bronze_tls_addr(b);
     Value* cur_cursor = b.build_load(Type::i64(), tls_addr, 24);
     Value* cur_limit = b.build_load(Type::i64(), tls_addr, 32);
 

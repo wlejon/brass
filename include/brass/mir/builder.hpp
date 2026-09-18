@@ -108,6 +108,11 @@ public:
     // Selection
     Value* build_select(Value* cond, Value* true_val, Value* false_val);
 
+    // Pinned registers (see Opcode::pinned_tls_read). Both reads yield i64.
+    Value* build_pinned_tls_read();
+    Instruction* build_pinned_tls_write(Value* addr);
+    Value* build_read_sp();
+
     // Memory
     Value* build_alloca(uint32_t size, uint32_t align = 8);
     Value* build_load(Type type, Value* base);

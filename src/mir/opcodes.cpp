@@ -70,6 +70,10 @@ std::string_view opcode_name(Opcode op) noexcept {
         case Opcode::store_indexed: return "store_indexed";
         case Opcode::write_barrier: return "write_barrier";
 
+        case Opcode::pinned_tls_read: return "pinned_tls_read";
+        case Opcode::pinned_tls_write: return "pinned_tls_write";
+        case Opcode::read_sp: return "read_sp";
+
         case Opcode::call: return "call";
         case Opcode::call_indirect: return "call_indirect";
         case Opcode::patchable_call: return "patchable_call";
@@ -319,6 +323,9 @@ bool has_side_effects(Opcode op) noexcept {
         case Opcode::store_indexed:
         case Opcode::vstore:
         case Opcode::write_barrier:
+        case Opcode::pinned_tls_read:
+        case Opcode::pinned_tls_write:
+        case Opcode::read_sp:
         case Opcode::safepoint:
         case Opcode::guard:
         case Opcode::resume_point:

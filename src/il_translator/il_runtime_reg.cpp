@@ -218,6 +218,8 @@ void register_all_runtime_symbols_generic(Engine& jit) {
     reg("bronze_uncaught_exception", reinterpret_cast<void*>(&bronze_uncaught_exception));
     reg("bronze_gc_frame_push", reinterpret_cast<void*>(&bronze_gc_frame_push));
     reg("bronze_gc_frame_pop", reinterpret_cast<void*>(&bronze_gc_frame_pop));
+    reg("bronze_tls_enter", reinterpret_cast<void*>(&bronze_tls_enter));
+    reg("bronze_stack_overflow", reinterpret_cast<void*>(&bronze_stack_overflow));
     reg("bronze_pin_violation", reinterpret_cast<void*>(&bronze_pin_violation));
     reg("bronze_pin_check_array", reinterpret_cast<void*>(&bronze_pin_check_array));
     reg("bronze_pow", reinterpret_cast<void*>(&bronze_pow));
@@ -527,6 +529,8 @@ void register_all_module_external_symbols(Module* mod, const std::string& entry_
         "bronze_uncaught_exception",
         "bronze_gc_frame_push",
         "bronze_gc_frame_pop",
+        "bronze_tls_enter",
+        "bronze_stack_overflow",
         "bronze_pin_violation",
         "bronze_pin_check_array",
         "bronze_pow",

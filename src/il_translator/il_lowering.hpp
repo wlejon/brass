@@ -62,6 +62,11 @@ private:
     std::unordered_set<uint32_t> module_env_regs_;
     std::unordered_map<uint32_t, uint32_t> current_fn_slot_of_;
     Value* current_fn_frame_ptr_ = nullptr;
+    // The stack-limit check the function was given at entry (pinned-register
+    // mode), kept so a body that turned out to call nothing can drop it.
+    BasicBlock* stack_check_entry_bb_ = nullptr;
+    BasicBlock* stack_check_overflow_bb_ = nullptr;
+    BasicBlock* stack_check_body_bb_ = nullptr;
     struct ExternalSig {
         Type return_type = Type::void_type();
         std::vector<Type> param_types;

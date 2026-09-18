@@ -181,6 +181,7 @@ static bool functions_are_identical(const BronzeFunction& a, const BronzeFunctio
 std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
     auto mod = std::make_unique<Module>(ast.name);
     mod->set_allow_fp_reassociation(options_.allow_fp_reassociation);
+    mod->set_pinned_tls_register(options_.pin_tls_register);
     current_file_id_ = mod->debug_context().get_or_add_file(ast.name.empty() ? "<anonymous>" : ast.name);
 
     // Register external runtime helper functions
@@ -617,6 +618,49 @@ bool IlLowering::lower_function(const BronzeFunction& fn_ast, Module& mod, const
         }
 
         b.position_at_end(entry_bb);
+        if (options_.pin_tls_register) {
+            // The module entry is the one function the runtime calls without
+            // its trampoline (bro and the CLI call the exported symbol
+            // directly), so it fetches the block itself. Every other
+            // function arrives with the register set by its caller: a
+            // compiled caller never touches it, a runtime caller went
+            // through `bronze_enter_js`.
+            if (fn_name == "main") {
+                Value* tls = b.build_call("bronze_tls_enter", Type::i64(), {});
+                b.build_pinned_tls_write(tls);
+            }
+            // Stack-limit check, before anything is pushed that an early
+            // return would have to pop: below the limit, the runtime raises
+            // the RangeError and the function returns as if it had thrown.
+            Value* tls = b.build_pinned_tls_read();
+            Value* limit = b.build_load(Type::i64(), tls, kBronzeTlsStackLimitOff);
+            Value* sp = b.build_read_sp();
+            Value* below = b.build_ult(sp, limit);
+            // append_block moves the insertion point, so come back to the
+            // entry for the branch.
+            BasicBlock* overflow_bb = b.append_block("stack_overflow");
+            BasicBlock* body_bb = b.append_block("stack_ok");
+            b.position_at_end(entry_bb);
+            b.build_br_if(below, overflow_bb, body_bb);
+            b.position_at_end(overflow_bb);
+            b.build_call("bronze_stack_overflow", Type::void_type(), {});
+            if (fn->return_type() == Type::void_type()) {
+                b.build_ret_void();
+            } else if (fn->return_type() == Type::f64()) {
+                b.build_ret(b.build_fconst_f64(0.0));
+            } else if (fn->return_type() == Type::i32()) {
+                b.build_ret(b.build_iconst_i32(0));
+            } else {
+                b.build_ret(b.build_iconst_i64(static_cast<int64_t>(kUndefinedTag)));
+            }
+            // The IL's first block now lowers into the checked continuation;
+            // its parameters stay on the real entry block, which dominates it.
+            block_map[fn_ast.blocks[0].id] = body_bb;
+            b.position_at_end(body_bb);
+            stack_check_entry_bb_ = entry_bb;
+            stack_check_overflow_bb_ = overflow_bb;
+            stack_check_body_bb_ = body_bb;
+        }
         if (total_slots > 0) {
             current_fn_frame_ptr_ = b.build_call("bronze_gc_frame_push", Type::ptr(),
                                                 {b.build_iconst_i32(static_cast<int32_t>(total_slots))});
@@ -698,6 +742,30 @@ bool IlLowering::lower_function(const BronzeFunction& fn_ast, Module& mod, const
                 return false;
             }
         }
+    }
+
+    if (stack_check_entry_bb_ != nullptr) {
+        // A function that calls nothing cannot recurse, and its frame is the
+        // one the prologue elides when nothing forces it — so the check goes
+        // unless the body made a call.
+        bool has_call = false;
+        for (BasicBlock* bb : fn->blocks()) {
+            if (bb == stack_check_overflow_bb_) continue;
+            for (Instruction* inst = bb->head(); inst && !has_call; inst = inst->next()) {
+                has_call = inst->is_call();
+            }
+            if (has_call) break;
+        }
+        if (!has_call) {
+            BasicBlock* entry_bb = stack_check_entry_bb_;
+            while (entry_bb->head()) entry_bb->remove_instruction(entry_bb->head());
+            b.position_at_end(entry_bb);
+            b.build_br(stack_check_body_bb_);
+            fn->remove_block(stack_check_overflow_bb_);
+        }
+        stack_check_entry_bb_ = nullptr;
+        stack_check_overflow_bb_ = nullptr;
+        stack_check_body_bb_ = nullptr;
     }
 
     fn->rebuild_cfg_predecessors();

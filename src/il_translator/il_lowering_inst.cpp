@@ -79,8 +79,16 @@ bool IlLowering::lower_instruction(
         }
 
         b.position_at_end(cur_bb);
-        Value* pending = b.build_call("bronze_exception_pending", Type::i32(), {});
-        Value* is_pending = b.build_ne(pending, b.build_iconst_i32(0));
+        Value* is_pending = nullptr;
+        if (options_.pin_tls_register) {
+            // One load through the pinned register instead of a helper call.
+            Value* tls = b.build_pinned_tls_read();
+            Value* cell = b.build_load(Type::i64(), tls, kBronzeTlsExceptionCellOff);
+            is_pending = b.build_ne(cell, b.build_iconst_i64(static_cast<int64_t>(kBronzeNoExceptionBits)));
+        } else {
+            Value* pending = b.build_call("bronze_exception_pending", Type::i32(), {});
+            is_pending = b.build_ne(pending, b.build_iconst_i32(0));
+        }
         b.build_br_if(is_pending, unw_bb, cont_bb);
 
         if (created_unw) {

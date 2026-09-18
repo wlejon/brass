@@ -893,6 +893,11 @@ BRONZE_WEAK void* bronze_tls_block_addr() {
 #endif
 }
 
+// Pinned-register mode is a bronze-runtime feature; brass's own dummy block
+// has no stack limit, so the fallbacks are the block itself and a no-op.
+BRONZE_WEAK void* bronze_tls_enter() { return bronze_tls_block_addr(); }
+BRONZE_WEAK void bronze_stack_overflow() {}
+
 uint32_t g_bronze_main_key_constants = 0;
 int64_t g_bronze_module_env = kUndefinedTag;
 extern "C" uint64_t __bronze_template_cells[1024];

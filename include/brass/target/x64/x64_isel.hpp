@@ -14,6 +14,11 @@ struct OsrTarget;
 
 namespace brass::x64 {
 
+// The register a module with Module::pinned_tls_register() keeps its
+// thread-local block in: callee-saved on both x64 conventions, so a C++
+// helper called from generated code hands it back untouched.
+inline constexpr GPR kPinnedTlsGpr = GPR::R13;
+
 class X64ISel {
 public:
     X64ISel();
@@ -84,6 +89,9 @@ private:
     void lower_overflow_check(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_return(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_alloca(const Instruction& inst, codegen::LirBlock& lir_bb);
+    void lower_pinned_tls_read(const Instruction& inst, codegen::LirBlock& lir_bb);
+    void lower_pinned_tls_write(const Instruction& inst, codegen::LirBlock& lir_bb);
+    void lower_read_sp(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_load(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_store(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_load_indexed(const Instruction& inst, codegen::LirBlock& lir_bb);

@@ -37,6 +37,37 @@ static constexpr LirCond swap_relational_condition(LirCond cond) noexcept {
     }
 }
 
+// See x64_isel_mem.cpp: the pinned register sits outside the allocator's
+// pool, so these are plain copies. `mov xd, sp` is `add xd, sp, #0`.
+void AArch64ISel::lower_pinned_tls_read(const Instruction& inst, LirBlock& lir_bb) {
+    VReg dst = get_or_alloc_vreg(inst.result());
+    auto mov = std::make_unique<LirInst>(LirOpcode::Mov);
+    mov->add_def(LirOperand::vreg(dst, 8));
+    mov->add_use(LirOperand::preg_aarch64_gpr(kPinnedTlsGpr, 8), FixedConstraint::aarch64_gpr(kPinnedTlsGpr));
+    mov->mir_origin = &inst;
+    lir_bb.append_inst(std::move(mov));
+}
+
+void AArch64ISel::lower_pinned_tls_write(const Instruction& inst, LirBlock& lir_bb) {
+    VReg src = get_vreg(inst.operand(0));
+    auto mov = std::make_unique<LirInst>(LirOpcode::Mov);
+    mov->add_def(LirOperand::preg_aarch64_gpr(kPinnedTlsGpr, 8), FixedConstraint::aarch64_gpr(kPinnedTlsGpr));
+    mov->add_use(LirOperand::vreg(src, 8));
+    mov->mir_origin = &inst;
+    lir_bb.append_inst(std::move(mov));
+    lir_fn_->forced_saved_gprs |= reg_mask(kPinnedTlsGpr);
+}
+
+void AArch64ISel::lower_read_sp(const Instruction& inst, LirBlock& lir_bb) {
+    VReg dst = get_or_alloc_vreg(inst.result());
+    auto add = std::make_unique<LirInst>(LirOpcode::Add);
+    add->add_def(LirOperand::vreg(dst, 8));
+    add->add_use(LirOperand::preg_aarch64_gpr(GPR::SP, 8), FixedConstraint::aarch64_gpr(GPR::SP));
+    add->add_use(LirOperand::imm(0, 8));
+    add->mir_origin = &inst;
+    lir_bb.append_inst(std::move(add));
+}
+
 void AArch64ISel::lower_select(const Instruction& inst, LirBlock& lir_bb) {
     const Value* cond_val = inst.operand(0);
     const Value* true_val = inst.operand(1);
