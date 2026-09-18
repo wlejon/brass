@@ -617,6 +617,8 @@ bool IlLowering::lower_function(const BronzeFunction& fn_ast, Module& mod, const
         }
 
         b.position_at_end(entry_bb);
+        Value* desc_addr = b.build_func_addr(module_sym("__bronze_fn_desc_" + fn_name));
+        b.build_call("bronze_call_frame_push", Type::void_type(), {desc_addr});
         if (total_slots > 0) {
             current_fn_frame_ptr_ = b.build_call("bronze_gc_frame_push", Type::ptr(),
                                                 {b.build_iconst_i32(static_cast<int32_t>(total_slots))});

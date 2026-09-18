@@ -45,6 +45,7 @@ bool IlLowering::lower_instruction(
     };
 
     auto emit_default_ret = [&]() {
+        b.build_call("bronze_call_frame_pop", Type::void_type(), {});
         if (current_fn_frame_ptr_ != nullptr) {
             b.build_call("bronze_gc_frame_pop", Type::void_type(), {});
         }
@@ -86,6 +87,7 @@ bool IlLowering::lower_instruction(
         if (created_unw) {
             b.position_at_end(unw_bb);
             if (is_standalone_entry()) {
+                b.build_call("bronze_call_frame_pop", Type::void_type(), {});
                 if (current_fn_frame_ptr_ != nullptr) {
                     b.build_call("bronze_gc_frame_pop", Type::void_type(), {});
                 }
@@ -862,6 +864,7 @@ bool IlLowering::lower_instruction(
             if (handler_id != UINT32_MAX && block_map.count(handler_id)) {
                 b.build_br(block_map.at(handler_id));
             } else if (is_standalone_entry()) {
+                b.build_call("bronze_call_frame_pop", Type::void_type(), {});
                 if (current_fn_frame_ptr_ != nullptr) {
                     b.build_call("bronze_gc_frame_pop", Type::void_type(), {});
                 }
@@ -950,6 +953,7 @@ bool IlLowering::lower_instruction(
             if (ret_val && fn->return_type() != Type::void_type()) {
                 ret_val = ensure_type(ret_val, fn->return_type(), b);
             }
+            b.build_call("bronze_call_frame_pop", Type::void_type(), {});
             if (current_fn_frame_ptr_ != nullptr) {
                 b.build_call("bronze_gc_frame_pop", Type::void_type(), {});
             }
