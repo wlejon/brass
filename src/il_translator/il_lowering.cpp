@@ -181,7 +181,7 @@ static bool functions_are_identical(const BronzeFunction& a, const BronzeFunctio
 std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
     auto mod = std::make_unique<Module>(ast.name);
     mod->set_allow_fp_reassociation(options_.allow_fp_reassociation);
-    current_file_id_ = ast.name.empty() ? 0 : mod->debug_context().get_or_add_file(ast.name);
+    current_file_id_ = mod->debug_context().get_or_add_file(ast.name.empty() ? "<anonymous>" : ast.name);
 
     // Register external runtime helper functions
     register_all_module_external_symbols(mod.get(), options_.entry_symbol);
@@ -691,6 +691,8 @@ bool IlLowering::lower_function(const BronzeFunction& fn_ast, Module& mod, const
         for (const auto& inst_ast : blk_ast.instructions) {
             if (current_file_id_ != 0 && inst_ast.line > 0) {
                 b.set_current_loc(DebugLoc(current_file_id_, inst_ast.line, inst_ast.column));
+            } else {
+                b.clear_current_loc();
             }
             if (!lower_instruction(inst_ast, b, fn, val_map, block_map, blk_ast.handler_id, blk_ast.id, &cont_counter)) {
                 return false;

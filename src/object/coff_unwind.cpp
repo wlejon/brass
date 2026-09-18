@@ -121,7 +121,7 @@ static void build_aarch64_unwind_info(ObjectFile& obj) {
             size_t pdata_offset = pdata_sec->data.size();
 
             // Word 0: BeginAddress
-            pdata_sec->emit32(static_cast<uint32_t>(fn.text_offset));
+            pdata_sec->emit32(0);
             ObjectRelocation r0;
             r0.offset = pdata_offset + 0;
             r0.kind = RelocKind::Addr32NB;
@@ -337,7 +337,7 @@ void CoffUnwindBuilder::build_unwind_info(
         size_t pdata_offset = pdata_sec->data.size();
 
         // 1. BeginAddress
-        pdata_sec->emit32(static_cast<uint32_t>(fn.text_offset));
+        pdata_sec->emit32(0);
         ObjectRelocation r0;
         r0.offset = pdata_offset + 0;
         r0.kind = RelocKind::Addr32NB;
@@ -346,7 +346,7 @@ void CoffUnwindBuilder::build_unwind_info(
         pdata_sec->relocations.push_back(std::move(r0));
 
         // 2. EndAddress
-        pdata_sec->emit32(static_cast<uint32_t>(fn.text_offset + fn.text_size));
+        pdata_sec->emit32(static_cast<uint32_t>(fn.text_size));
         ObjectRelocation r1;
         r1.offset = pdata_offset + 4;
         r1.kind = RelocKind::Addr32NB;
