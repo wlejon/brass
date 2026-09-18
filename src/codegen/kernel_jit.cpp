@@ -87,11 +87,16 @@ void KernelJit::setup_default_symbols(codegen::JitExecutionEngine& engine) const
     };
     static const auto rsqrt_d = +[](double x) -> double { return 1.0 / std::sqrt(x); };
     static const auto i32_to_f32_f = +[](int32_t x) -> float { return static_cast<float>(x); };
+    static const auto f32_to_i32_f = +[](float x) -> int32_t { return static_cast<int32_t>(x); };
     engine.register_external_symbol("sqrt", reinterpret_cast<void*>(static_cast<double(*)(double)>(&std::sqrt)));
     engine.register_external_symbol("sqrtf", reinterpret_cast<void*>(static_cast<float(*)(float)>(&std::sqrt)));
     engine.register_external_symbol("rsqrt", reinterpret_cast<void*>(rsqrt_d));
     engine.register_external_symbol("rsqrtf", reinterpret_cast<void*>(rsqrt_f));
     engine.register_external_symbol("i32_to_f32", reinterpret_cast<void*>(i32_to_f32_f));
+    engine.register_external_symbol("f32_to_i32", reinterpret_cast<void*>(f32_to_i32_f));
+    engine.register_external_symbol("ptx_f32_to_i32", reinterpret_cast<void*>(f32_to_i32_f));
+    engine.register_external_symbol("floor", reinterpret_cast<void*>(static_cast<double(*)(double)>(&std::floor)));
+    engine.register_external_symbol("floorf", reinterpret_cast<void*>(static_cast<float(*)(float)>(&std::floor)));
     engine.register_external_symbol("exp", reinterpret_cast<void*>(static_cast<double(*)(double)>(&std::exp)));
     engine.register_external_symbol("expf", reinterpret_cast<void*>(static_cast<float(*)(float)>(&std::exp)));
     engine.register_external_symbol("log", reinterpret_cast<void*>(static_cast<double(*)(double)>(&std::log)));
