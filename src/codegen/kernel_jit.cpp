@@ -88,6 +88,12 @@ void KernelJit::setup_default_symbols(codegen::JitExecutionEngine& engine) const
     static const auto rsqrt_d = +[](double x) -> double { return 1.0 / std::sqrt(x); };
     static const auto i32_to_f32_f = +[](int32_t x) -> float { return static_cast<float>(x); };
     static const auto f32_to_i32_f = +[](float x) -> int32_t { return static_cast<int32_t>(x); };
+    static const auto ptx_load_u8_f = +[](const uint8_t* ptr, int32_t off) -> int32_t {
+        return static_cast<int32_t>(ptr[off]);
+    };
+    static const auto ptx_store_u8_f = +[](uint8_t* ptr, int32_t val, int32_t off) -> void {
+        ptr[off] = static_cast<uint8_t>(val);
+    };
     engine.register_external_symbol("sqrt", reinterpret_cast<void*>(static_cast<double(*)(double)>(&std::sqrt)));
     engine.register_external_symbol("sqrtf", reinterpret_cast<void*>(static_cast<float(*)(float)>(&std::sqrt)));
     engine.register_external_symbol("rsqrt", reinterpret_cast<void*>(rsqrt_d));
@@ -95,6 +101,9 @@ void KernelJit::setup_default_symbols(codegen::JitExecutionEngine& engine) const
     engine.register_external_symbol("i32_to_f32", reinterpret_cast<void*>(i32_to_f32_f));
     engine.register_external_symbol("f32_to_i32", reinterpret_cast<void*>(f32_to_i32_f));
     engine.register_external_symbol("ptx_f32_to_i32", reinterpret_cast<void*>(f32_to_i32_f));
+    engine.register_external_symbol("ptx_i32_to_f32", reinterpret_cast<void*>(i32_to_f32_f));
+    engine.register_external_symbol("ptx_load_u8", reinterpret_cast<void*>(ptx_load_u8_f));
+    engine.register_external_symbol("ptx_store_u8", reinterpret_cast<void*>(ptx_store_u8_f));
     engine.register_external_symbol("floor", reinterpret_cast<void*>(static_cast<double(*)(double)>(&std::floor)));
     engine.register_external_symbol("floorf", reinterpret_cast<void*>(static_cast<float(*)(float)>(&std::floor)));
     engine.register_external_symbol("exp", reinterpret_cast<void*>(static_cast<double(*)(double)>(&std::exp)));

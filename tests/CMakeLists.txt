@@ -148,6 +148,7 @@ add_executable(brass_unit_tests
     unit/test_audio_intrinsics.cpp
     unit/test_sdf_builder.cpp
     unit/test_grammar_builder.cpp
+    unit/test_image_builder.cpp
     unit/test_ptx_target.cpp
     unit/test_ptx_ir.cpp
     unit/test_ptx_isel.cpp
