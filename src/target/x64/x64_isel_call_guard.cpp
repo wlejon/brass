@@ -142,13 +142,8 @@ void X64ISel::lower_call(const Instruction& inst, LirBlock& lir_bb) {
         call_lir->add_use(LirOperand::symbol(std::string(inst.symbol())));
     }
 
-    if (inst.symbol() == "bronze_tls_block_addr") {
-        call_lir->clobbered_gprs = reg_mask(GPR::RAX) | reg_mask(GPR::RCX) | reg_mask(GPR::RDX);
-        call_lir->clobbered_xmms = 0;
-    } else {
-        call_lir->clobbered_gprs = cc_.caller_saved_gpr_mask();
-        call_lir->clobbered_xmms = cc_.caller_saved_xmm_mask();
-    }
+    call_lir->clobbered_gprs = cc_.caller_saved_gpr_mask();
+    call_lir->clobbered_xmms = cc_.caller_saved_xmm_mask();
 
     Type ret_t = inst.type();
     if (!ret_t.is_void()) {
