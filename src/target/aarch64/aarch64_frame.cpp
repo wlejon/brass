@@ -33,7 +33,7 @@ void AArch64FrameLayout::compute_layout(codegen::FrameInfo& frame, const Calling
     size_t gpr_bytes = saved_gprs.size() * 8;
     size_t fpr_bytes = saved_fprs.size() * 8;
     size_t spill_bytes = frame.num_spill_slots * 8;
-    size_t outgoing_bytes = frame.outgoing_arg_space;
+    size_t outgoing_bytes = (frame.outgoing_arg_space + 15) & ~size_t(15);
     size_t header_bytes = 16; // FP (X29) + LR (X30)
 
     size_t raw_total = header_bytes + gpr_bytes + fpr_bytes + spill_bytes + outgoing_bytes;
@@ -76,6 +76,12 @@ MemAddress AArch64FrameLayout::spill_slot_address(int32_t slot_idx, const codege
     return ptr(GPR::FP, disp);
 }
 
+MemAddress AArch64FrameLayout::incoming_arg_address(int32_t caller_stack_offset, const codegen::FrameInfo& frame) {
+    size_t outgoing_bytes = (frame.outgoing_arg_space + 15) & ~size_t(15);
+    int64_t disp = static_cast<int64_t>(frame.total_frame_size - outgoing_bytes) + caller_stack_offset;
+    return ptr(GPR::FP, disp);
+}
+
 void AArch64FrameLayout::emit_prologue(
     AArch64Encoder& enc,
     const codegen::FrameInfo& frame,
@@ -87,16 +93,23 @@ void AArch64FrameLayout::emit_prologue(
     }
 
     size_t total_size = frame.total_frame_size;
-    if (total_size <= 512) {
+    size_t outgoing_bytes = (frame.outgoing_arg_space + 15) & ~size_t(15);
+
+    if (total_size <= 504 && outgoing_bytes == 0) {
         // stp fp, lr, [sp, #-total_size]!
         enc.stp(GPR::FP, GPR::LR, pre_idx(GPR::SP, -static_cast<int64_t>(total_size)));
+        // mov fp, sp
+        enc.mov(GPR::FP, GPR::SP);
     } else {
         enc.sub(GPR::SP, GPR::SP, static_cast<uint32_t>(total_size));
-        enc.stp(GPR::FP, GPR::LR, ptr(GPR::SP, 0));
+        if (outgoing_bytes == 0) {
+            enc.stp(GPR::FP, GPR::LR, ptr(GPR::SP, 0));
+            enc.mov(GPR::FP, GPR::SP);
+        } else {
+            enc.stp(GPR::FP, GPR::LR, ptr(GPR::SP, static_cast<int64_t>(outgoing_bytes)));
+            enc.add(GPR::FP, GPR::SP, static_cast<uint32_t>(outgoing_bytes));
+        }
     }
-
-    // mov fp, sp
-    enc.mov(GPR::FP, GPR::SP);
 
     // Save callee-saved GPRs (paired where possible)
     auto saved_gprs = get_saved_callee_gprs(frame);
@@ -155,11 +168,17 @@ void AArch64FrameLayout::emit_epilogue(
     }
 
     size_t total_size = frame.total_frame_size;
-    if (total_size <= 512) {
+    size_t outgoing_bytes = (frame.outgoing_arg_space + 15) & ~size_t(15);
+
+    if (total_size <= 504 && outgoing_bytes == 0) {
         // ldp fp, lr, [sp], #total_size
         enc.ldp(GPR::FP, GPR::LR, post_idx(GPR::SP, static_cast<int64_t>(total_size)));
     } else {
-        enc.ldp(GPR::FP, GPR::LR, ptr(GPR::SP, 0));
+        if (outgoing_bytes == 0) {
+            enc.ldp(GPR::FP, GPR::LR, ptr(GPR::SP, 0));
+        } else {
+            enc.ldp(GPR::FP, GPR::LR, ptr(GPR::FP, 0));
+        }
         enc.add(GPR::SP, GPR::SP, static_cast<uint32_t>(total_size));
     }
 

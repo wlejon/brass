@@ -62,6 +62,11 @@ private:
     std::unordered_set<uint32_t> module_env_regs_;
     std::unordered_map<uint32_t, uint32_t> current_fn_slot_of_;
     Value* current_fn_frame_ptr_ = nullptr;
+    struct ExternalSig {
+        Type return_type = Type::void_type();
+        std::vector<Type> param_types;
+    };
+    std::unordered_map<std::string, ExternalSig> external_signatures_;
 };
 
 } // namespace brass::il

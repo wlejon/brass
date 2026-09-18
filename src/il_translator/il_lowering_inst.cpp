@@ -828,6 +828,14 @@ bool IlLowering::lower_instruction(
             std::string callee_name = resolve_callee(inst_ast.callee_name);
             Function* callee = fn->parent()->get_function(callee_name);
             Type callee_ret = callee ? callee->return_type() : lower_type(inst_ast.result_type);
+            const std::vector<Type>* expected_params = callee ? &callee->param_types() : nullptr;
+            if (!expected_params) {
+                auto it_ext = external_signatures_.find(callee_name);
+                if (it_ext != external_signatures_.end()) {
+                    expected_params = &it_ext->second.param_types;
+                    callee_ret = it_ext->second.return_type;
+                }
+            }
             std::vector<Value*> args;
             for (size_t i = 0; i < inst_ast.operands.size(); ++i) {
                 Value* arg = get_opd(i);
@@ -836,8 +844,8 @@ bool IlLowering::lower_instruction(
                     Value* hops_val = b.build_iconst_i32(static_cast<int32_t>(inst_ast.env_hops));
                     arg = b.build_call("bronze_env_ancestor", Type::i64(), {env_val, hops_val});
                 }
-                if (callee && i < callee->param_types().size()) {
-                    arg = ensure_type(arg, callee->param_types()[i], b);
+                if (expected_params && i < expected_params->size()) {
+                    arg = ensure_type(arg, (*expected_params)[i], b);
                 }
                 if (arg) args.push_back(arg);
             }

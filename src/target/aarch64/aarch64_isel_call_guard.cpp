@@ -56,7 +56,8 @@ void AArch64ISel::lower_call(const Instruction& inst, LirBlock& lir_bb) {
 
     size_t gpr_idx = 0;
     size_t fpr_idx = 0;
-    size_t stack_idx = 0;
+    size_t stack_bytes = 0;
+    bool is_apple = (cc_.kind() == CallingConvKind::AppleAAPCS64);
 
     for (size_t i = 0; i < num_args; ++i) {
         const auto* arg_val = inst.operand(start_arg + i);
@@ -78,8 +79,12 @@ void AArch64ISel::lower_call(const Instruction& inst, LirBlock& lir_bb) {
                 call_lir->add_use(LirOperand::preg_aarch64_fpr(freg, sz), FixedConstraint::aarch64_fpr(freg));
                 lir_bb.append_inst(std::move(mov_arg));
             } else {
-                int32_t disp = static_cast<int32_t>(stack_idx * 8);
-                stack_idx++;
+                size_t align = is_apple ? ((sz >= 16) ? 16 : (sz >= 8 ? 8 : (sz >= 4 ? 4 : (sz >= 2 ? 2 : 1))))
+                                        : ((sz >= 16) ? 16 : 8);
+                stack_bytes = (stack_bytes + align - 1) & ~(align - 1);
+                int32_t disp = static_cast<int32_t>(stack_bytes);
+                stack_bytes += is_apple ? sz : ((sz >= 16) ? 16 : 8);
+
                 auto mov_stack = std::make_unique<LirInst>(mov_op);
                 mov_stack->add_def(LirOperand::mem(PReg::aarch64_gpr(GPR::SP), disp, sz));
                 mov_stack->add_use(LirOperand::vreg(arg_vreg, sz));
@@ -94,8 +99,12 @@ void AArch64ISel::lower_call(const Instruction& inst, LirBlock& lir_bb) {
                 call_lir->add_use(LirOperand::preg_aarch64_gpr(greg, sz), FixedConstraint::aarch64_gpr(greg));
                 lir_bb.append_inst(std::move(mov_arg));
             } else {
-                int32_t disp = static_cast<int32_t>(stack_idx * 8);
-                stack_idx++;
+                size_t align = is_apple ? ((sz >= 16) ? 16 : (sz >= 8 ? 8 : (sz >= 4 ? 4 : (sz >= 2 ? 2 : 1))))
+                                        : ((sz >= 16) ? 16 : 8);
+                stack_bytes = (stack_bytes + align - 1) & ~(align - 1);
+                int32_t disp = static_cast<int32_t>(stack_bytes);
+                stack_bytes += is_apple ? sz : ((sz >= 16) ? 16 : 8);
+
                 auto mov_stack = std::make_unique<LirInst>(mov_op);
                 mov_stack->add_def(LirOperand::mem(PReg::aarch64_gpr(GPR::SP), disp, sz));
                 mov_stack->add_use(LirOperand::vreg(arg_vreg, sz));
@@ -104,7 +113,7 @@ void AArch64ISel::lower_call(const Instruction& inst, LirBlock& lir_bb) {
         }
     }
 
-    size_t required_stack_space = stack_idx * 8;
+    size_t required_stack_space = (stack_bytes + 15) & ~size_t(15);
     lir_fn_->frame.outgoing_arg_space = std::max(lir_fn_->frame.outgoing_arg_space, required_stack_space);
     lir_fn_->frame.has_calls = true;
 

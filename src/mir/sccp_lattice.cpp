@@ -305,8 +305,10 @@ LatticeValue evaluate_conversion(Opcode op, Type res_type, const LatticeValue& v
     switch (op) {
         case Opcode::sext_i64:
             return LatticeValue::make_i64(static_cast<int64_t>(val.as_i32()));
-        case Opcode::zext_i64:
-            return LatticeValue::make_i64(static_cast<int64_t>(static_cast<uint64_t>(static_cast<uint32_t>(val.as_i32()))));
+        case Opcode::zext_i64: {
+            uint64_t u = (val.type() == Type::i8()) ? static_cast<uint8_t>(val.as_i32()) : static_cast<uint64_t>(static_cast<uint32_t>(val.as_i32()));
+            return LatticeValue::make_i64(static_cast<int64_t>(u));
+        }
         case Opcode::trunc_i32:
             return LatticeValue::make_i32(static_cast<int32_t>(val.as_i64()));
         case Opcode::fptosi_i32:

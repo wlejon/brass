@@ -47,6 +47,28 @@ private:
     size_t size_ = 0;
 };
 
+class DataMemoryBlock {
+public:
+    DataMemoryBlock() = default;
+    explicit DataMemoryBlock(size_t size, void* address_hint = nullptr);
+    ~DataMemoryBlock();
+
+    DataMemoryBlock(const DataMemoryBlock&) = delete;
+    DataMemoryBlock& operator=(const DataMemoryBlock&) = delete;
+    DataMemoryBlock(DataMemoryBlock&& other) noexcept;
+    DataMemoryBlock& operator=(DataMemoryBlock&& other) noexcept;
+
+    uint8_t* data() noexcept { return ptr_; }
+    const uint8_t* data() const noexcept { return ptr_; }
+    size_t size() const noexcept { return size_; }
+    bool is_valid() const noexcept { return ptr_ != nullptr; }
+    void reset();
+
+private:
+    uint8_t* ptr_ = nullptr;
+    size_t size_ = 0;
+};
+
 bool is_jit_code_address(const void* addr) noexcept;
 
 struct alignas(16) AArch64InvokeArgs {
@@ -148,6 +170,7 @@ public:
 private:
     Target target_;
     JitMemoryBlock code_mem_;
+    DataMemoryBlock data_mem_;
 
     std::unordered_map<std::string, void*> symbol_table_;
     std::unordered_map<std::string, void*> external_symbols_;

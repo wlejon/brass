@@ -40,6 +40,7 @@ public:
 
 private:
     const codegen::LirFunction& fn_;
+    codegen::FrameInfo frame_;
     Target target_;
     aarch64::CodeBuffer buffer_;
     aarch64::AArch64Encoder enc_;
@@ -56,7 +57,7 @@ private:
     std::vector<PendingExceptionScope> pending_exception_scopes_;
 
     MemAddress to_mem_address(const codegen::LirOperand& op);
-    MemAddress ensure_accessible_mem(const MemAddress& mem, GPR scratch = GPR::X16);
+    MemAddress ensure_accessible_mem(const MemAddress& mem, GPR scratch = GPR::X16, int size_bytes = 8);
     GPR to_gpr(const codegen::LirOperand& op) const;
     FPR to_fpr(const codegen::LirOperand& op) const;
 

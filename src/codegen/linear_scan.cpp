@@ -17,8 +17,8 @@ void LinearScanAllocator::init_register_pools() {
     if (cc_.target().is_aarch64()) {
         using namespace brass::aarch64;
         available_gprs_.clear();
-        // Caller-saved: X0..X14 (excluding X15 as def_scratch, IP0=X16, IP1=X17 as use scratches, and X18 on Darwin/Windows)
-        for (int i = 0; i <= 14; ++i) {
+        // Caller-saved: X0..X11 (excluding X12, X13 as use scratches, X14 as def_scratch, X15, X16, X17 as emitter scratches, and X18 on Darwin/Windows)
+        for (int i = 0; i <= 11; ++i) {
             available_gprs_.push_back(PReg::aarch64_gpr(static_cast<GPR>(i)));
         }
         if (!cc_.target().is_macos() && !cc_.target().is_windows()) {
@@ -30,11 +30,11 @@ void LinearScanAllocator::init_register_pools() {
         }
 
         available_xmms_.clear();
-        // Caller-saved: V0..V7, V16..V28 (excluding V29 as def_scratch, V30, V31 as use scratches)
+        // Caller-saved: V0..V7, V16..V26 (excluding V27 as def_scratch, V28, V29 as use scratches, V30, V31 as emitter scratches)
         for (int i = 0; i <= 7; ++i) {
             available_xmms_.push_back(PReg::aarch64_fpr(static_cast<FPR>(i)));
         }
-        for (int i = 16; i <= 28; ++i) {
+        for (int i = 16; i <= 26; ++i) {
             available_xmms_.push_back(PReg::aarch64_fpr(static_cast<FPR>(i)));
         }
         // Callee-saved: V8..V15
@@ -699,8 +699,8 @@ void LinearScanAllocator::rewrite_instructions() {
     };
 
     bool is_aarch64 = cc_.target().is_aarch64();
-    PReg base_scratch_reg = is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X16) : PReg::gpr(brass::x64::GPR::R10);
-    PReg idx_scratch_reg = is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X17) : PReg::gpr(brass::x64::GPR::R11);
+    PReg base_scratch_reg = is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X12) : PReg::gpr(brass::x64::GPR::R10);
+    PReg idx_scratch_reg = is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X13) : PReg::gpr(brass::x64::GPR::R11);
 
     for (const auto& block : fn_.blocks) {
         std::vector<std::unique_ptr<LirInst>> rewritten;
@@ -782,11 +782,11 @@ void LinearScanAllocator::rewrite_instructions() {
                 bool is_xmm = orig_def_is_xmm || orig_use_is_xmm[0] || (inst->opcode == LirOpcode::Movsd || inst->opcode == LirOpcode::Movss ||
                                inst->opcode == LirOpcode::Movaps || inst->opcode == LirOpcode::Vmovaps ||
                                inst->opcode == LirOpcode::Vmovups || sz == 16 || sz == 32);
-                PReg scratch = is_xmm ? (is_aarch64 ? PReg::aarch64_fpr(brass::aarch64::FPR::V31) : PReg::xmm(XMM::XMM15))
-                                      : (is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X17) : PReg::gpr(GPR::R11));
+                PReg scratch = is_xmm ? (is_aarch64 ? PReg::aarch64_fpr(brass::aarch64::FPR::V29) : PReg::xmm(XMM::XMM15))
+                                      : (is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X13) : PReg::gpr(GPR::R11));
                 if (!is_xmm) {
-                    PReg gpr_scratch1 = is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X17) : PReg::gpr(GPR::R11);
-                    PReg gpr_scratch0 = is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X16) : PReg::gpr(GPR::R10);
+                    PReg gpr_scratch1 = is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X13) : PReg::gpr(GPR::R11);
+                    PReg gpr_scratch0 = is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X12) : PReg::gpr(GPR::R10);
                     bool uses_scratch1 = false;
                     if (inst->defs[0].is_mem() && (inst->defs[0].mem_val.base_preg == gpr_scratch1 ||
                                                    inst->defs[0].mem_val.index_preg == gpr_scratch1)) {
@@ -863,8 +863,8 @@ void LinearScanAllocator::rewrite_instructions() {
                     def_scratch = is_xmm_def ? (is_aarch64 ? PReg::aarch64_fpr(brass::aarch64::FPR::V0) : PReg::xmm(XMM::XMM0))
                                              : (is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X0) : PReg::gpr(GPR::RAX));
                 } else {
-                    def_scratch = is_xmm_def ? (is_aarch64 ? PReg::aarch64_fpr(brass::aarch64::FPR::V29) : PReg::xmm(XMM::XMM15))
-                                             : (is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X15) : PReg::gpr(GPR::R11));
+                    def_scratch = is_xmm_def ? (is_aarch64 ? PReg::aarch64_fpr(brass::aarch64::FPR::V27) : PReg::xmm(XMM::XMM15))
+                                             : (is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X14) : PReg::gpr(GPR::R11));
                 }
 
                 // If instruction reads from def (e.g. add dst, src), load initial value of def into scratch
@@ -899,12 +899,12 @@ void LinearScanAllocator::rewrite_instructions() {
             int gpr_scratch_idx = 0;
             int xmm_scratch_idx = 0;
             PReg gpr_scratches[2] = {
-                is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X16) : PReg::gpr(GPR::R10),
-                is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X17) : PReg::gpr(GPR::R11)
+                is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X12) : PReg::gpr(GPR::R10),
+                is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X13) : PReg::gpr(GPR::R11)
             };
             PReg xmm_scratches[2] = {
-                is_aarch64 ? PReg::aarch64_fpr(brass::aarch64::FPR::V30) : PReg::xmm(XMM::XMM13),
-                is_aarch64 ? PReg::aarch64_fpr(brass::aarch64::FPR::V31) : PReg::xmm(XMM::XMM14)
+                is_aarch64 ? PReg::aarch64_fpr(brass::aarch64::FPR::V28) : PReg::xmm(XMM::XMM13),
+                is_aarch64 ? PReg::aarch64_fpr(brass::aarch64::FPR::V29) : PReg::xmm(XMM::XMM14)
             };
 
             for (size_t i = 0; i < inst->uses.size(); ++i) {

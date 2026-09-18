@@ -47,6 +47,17 @@ static std::mutex& jit_ranges_mutex() {
     return *m;
 }
 
+static size_t get_system_page_size() {
+#if defined(_WIN32)
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    return si.dwPageSize;
+#else
+    long sz = sysconf(_SC_PAGESIZE);
+    return (sz > 0) ? static_cast<size_t>(sz) : 4096;
+#endif
+}
+
 void register_jit_memory_range(void* ptr, size_t size) {
     if (!ptr || size == 0) return;
     std::lock_guard<std::mutex> lock(jit_ranges_mutex());
@@ -77,7 +88,8 @@ bool is_jit_code_address(const void* addr) noexcept {
 
 JitMemoryBlock::JitMemoryBlock(size_t size) {
     if (size == 0) return;
-    size_t page_aligned = (size + 4095) & ~size_t(4095);
+    size_t page_sz = get_system_page_size();
+    size_t page_aligned = (size + page_sz - 1) & ~(page_sz - 1);
 #if defined(_WIN32)
     ptr_ = static_cast<uint8_t*>(VirtualAlloc(nullptr, page_aligned, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
 #elif defined(__APPLE__) && defined(__aarch64__)
@@ -162,7 +174,8 @@ void JitMemoryBlock::make_executable_read_only(size_t code_size) {
     make_executable();
     return;
 #endif
-    size_t protect_size = (code_size == 0) ? size_ : ((code_size + 4095) & ~size_t(4095));
+    size_t page_sz = get_system_page_size();
+    size_t protect_size = (code_size == 0) ? size_ : ((code_size + page_sz - 1) & ~(page_sz - 1));
     if (protect_size > size_) protect_size = size_;
 #if defined(_WIN32)
     DWORD old_protect;
@@ -190,6 +203,57 @@ void JitMemoryBlock::make_read_write() {
         mprotect(ptr_, size_, PROT_READ | PROT_WRITE);
     }
 #endif
+}
+
+DataMemoryBlock::DataMemoryBlock(size_t size, void* address_hint) {
+    if (size == 0) return;
+    size_t page_sz = get_system_page_size();
+    size_t page_aligned = (size + page_sz - 1) & ~(page_sz - 1);
+#if defined(_WIN32)
+    ptr_ = static_cast<uint8_t*>(VirtualAlloc(address_hint, page_aligned, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    if (!ptr_ && address_hint) {
+        ptr_ = static_cast<uint8_t*>(VirtualAlloc(nullptr, page_aligned, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    }
+#else
+    ptr_ = static_cast<uint8_t*>(mmap(address_hint, page_aligned, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    if (ptr_ == MAP_FAILED) {
+        ptr_ = nullptr;
+    }
+#endif
+    if (ptr_) size_ = page_aligned;
+}
+
+DataMemoryBlock::~DataMemoryBlock() {
+    reset();
+}
+
+DataMemoryBlock::DataMemoryBlock(DataMemoryBlock&& other) noexcept
+    : ptr_(other.ptr_), size_(other.size_) {
+    other.ptr_ = nullptr;
+    other.size_ = 0;
+}
+
+DataMemoryBlock& DataMemoryBlock::operator=(DataMemoryBlock&& other) noexcept {
+    if (this != &other) {
+        reset();
+        ptr_ = other.ptr_;
+        size_ = other.size_;
+        other.ptr_ = nullptr;
+        other.size_ = 0;
+    }
+    return *this;
+}
+
+void DataMemoryBlock::reset() {
+    if (ptr_) {
+#if defined(_WIN32)
+        VirtualFree(ptr_, 0, MEM_RELEASE);
+#else
+        munmap(ptr_, size_);
+#endif
+        ptr_ = nullptr;
+        size_ = 0;
+    }
 }
 
 JitExecutionEngine::JitExecutionEngine(const Target& target)
@@ -285,6 +349,7 @@ JitExecutionEngine::~JitExecutionEngine() {
 JitExecutionEngine::JitExecutionEngine(JitExecutionEngine&& other) noexcept
     : target_(other.target_),
       code_mem_(std::move(other.code_mem_)),
+      data_mem_(std::move(other.data_mem_)),
       symbol_table_(std::move(other.symbol_table_)),
       external_symbols_(std::move(other.external_symbols_)),
       function_signatures_(std::move(other.function_signatures_)),
@@ -304,6 +369,7 @@ JitExecutionEngine& JitExecutionEngine::operator=(JitExecutionEngine&& other) no
         unregister_seh_tables();
         target_ = other.target_;
         code_mem_ = std::move(other.code_mem_);
+        data_mem_ = std::move(other.data_mem_);
         symbol_table_ = std::move(other.symbol_table_);
         external_symbols_ = std::move(other.external_symbols_);
         function_signatures_ = std::move(other.function_signatures_);
@@ -374,86 +440,119 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
         }
     }
 
+    size_t page_sz = get_system_page_size();
+
     // Compute memory size and section offsets:
     // 1. Executable code sections (.text) first
-    size_t total_size = code_padding;
+    size_t code_size = code_padding;
     std::vector<size_t> sec_offsets(working_obj.sections.size(), 0);
+    std::vector<bool> is_code_sec(working_obj.sections.size(), false);
 
     for (size_t i = 0; i < working_obj.sections.size(); ++i) {
         const auto& sec = working_obj.sections[i];
         if (sec.kind == object::SectionKind::Text || object::has_flag(sec.flags, object::SectionFlags::Execute)) {
+            is_code_sec[i] = true;
             if (sec.alignment > 1) {
-                total_size = (total_size + (sec.alignment - 1)) & ~(size_t(sec.alignment) - 1);
+                code_size = (code_size + (sec.alignment - 1)) & ~(size_t(sec.alignment) - 1);
             }
-            sec_offsets[i] = total_size;
-            total_size += sec.data.size();
+            sec_offsets[i] = code_size;
+            code_size += sec.data.size();
         }
     }
 
     // Reserve space for PLT far-call trampolines in the executable region
     size_t trampoline_capacity = 4096;
-    size_t trampoline_offset = (total_size + 15) & ~size_t(15);
-    total_size = trampoline_offset + trampoline_capacity;
+    size_t trampoline_offset = (code_size + 15) & ~size_t(15);
+    if (code_size > 0 || !working_obj.functions.empty()) {
+        code_size = trampoline_offset + trampoline_capacity;
+    }
 
-    // Code pages end at 4KB boundary
-    size_t code_pages_size = (total_size + 4095) & ~size_t(4095);
-    total_size = code_pages_size;
+    // Code pages end at system page boundary
+    size_t code_pages_size = (code_size > 0) ? ((code_size + page_sz - 1) & ~(page_sz - 1)) : 0;
 
     // 2. Non-executable data sections (.rodata, .data, .bss, .pdata, .xdata, etc.)
+    size_t data_size = 0;
     for (size_t i = 0; i < working_obj.sections.size(); ++i) {
         const auto& sec = working_obj.sections[i];
-        if (sec.kind != object::SectionKind::Text && !object::has_flag(sec.flags, object::SectionFlags::Execute)) {
+        if (!is_code_sec[i]) {
             if (sec.alignment > 1) {
-                total_size = (total_size + (sec.alignment - 1)) & ~(size_t(sec.alignment) - 1);
+                data_size = (data_size + (sec.alignment - 1)) & ~(size_t(sec.alignment) - 1);
             }
-            sec_offsets[i] = total_size;
-            total_size += sec.data.size();
+            sec_offsets[i] = data_size;
+            data_size += sec.data.size();
+        }
+    }
+    size_t data_pages_size = (data_size > 0) ? ((data_size + page_sz - 1) & ~(page_sz - 1)) : 0;
+
+    if (code_pages_size == 0 && data_pages_size == 0) return true;
+
+    // Allocate memory blocks
+    if (code_pages_size > 0) {
+        code_mem_ = JitMemoryBlock(code_pages_size);
+        if (!code_mem_.is_valid()) {
+            return false;
+        }
+    } else {
+        code_mem_.reset();
+    }
+
+    void* hint = code_mem_.is_valid() ? (code_mem_.data() + code_mem_.size()) : nullptr;
+    if (data_pages_size > 0) {
+        data_mem_ = DataMemoryBlock(data_pages_size, hint);
+        if (!data_mem_.is_valid()) {
+            code_mem_.reset();
+            return false;
+        }
+    } else {
+        data_mem_.reset();
+    }
+
+    std::vector<uint8_t*> sec_bases(working_obj.sections.size(), nullptr);
+    for (size_t i = 0; i < working_obj.sections.size(); ++i) {
+        if (is_code_sec[i]) {
+            sec_bases[i] = code_mem_.data() + sec_offsets[i];
+        } else {
+            sec_bases[i] = data_mem_.data() + sec_offsets[i];
         }
     }
 
-    if (total_size == 0) return true;
-
-    // Allocate memory block
-    code_mem_ = JitMemoryBlock(total_size);
-    if (!code_mem_.is_valid()) {
-        return false;
-    }
-
-    uint8_t* base_ptr = code_mem_.data();
-    uint8_t* trampoline_ptr = base_ptr + trampoline_offset;
+    uint8_t* trampoline_ptr = code_mem_.is_valid() ? (code_mem_.data() + trampoline_offset) : nullptr;
     size_t trampoline_used = 0;
     std::unordered_map<std::string, void*> trampolines;
 
     // Copy section data to memory block
     for (size_t i = 0; i < working_obj.sections.size(); ++i) {
         const auto& sec = working_obj.sections[i];
-        if (!sec.data.empty()) {
-            std::memcpy(base_ptr + sec_offsets[i], sec.data.data(), sec.data.size());
+        if (!sec.data.empty() && sec_bases[i]) {
+            std::memcpy(sec_bases[i], sec.data.data(), sec.data.size());
         }
-        symbol_table_[sec.name] = base_ptr + sec_offsets[i];
+        symbol_table_[sec.name] = sec_bases[i];
     }
 
     // Register symbols
     for (const auto& sym : working_obj.symbols) {
         if (sym.section_index >= 0 && sym.section_index < static_cast<int32_t>(working_obj.sections.size())) {
-            symbol_table_[sym.name] = base_ptr + sec_offsets[sym.section_index] + sym.value;
+            symbol_table_[sym.name] = sec_bases[sym.section_index] + sym.value;
         }
     }
     osr_entry_offsets_.clear();
     for (const auto& fn : working_obj.functions) {
         int32_t text_idx = working_obj.get_section_index(".text");
-        if (text_idx >= 0) {
-            symbol_table_[fn.name] = base_ptr + sec_offsets[text_idx] + fn.text_offset;
+        if (text_idx >= 0 && sec_bases[text_idx]) {
+            symbol_table_[fn.name] = sec_bases[text_idx] + fn.text_offset;
             if (fn.osr_entry_offset > 0) {
                 osr_entry_offsets_[fn.name] = fn.osr_entry_offset;
             }
         }
     }
 
+    uint8_t* module_base = code_mem_.is_valid() ? code_mem_.data() : data_mem_.data();
+
     // Resolve relocations
     for (size_t i = 0; i < working_obj.sections.size(); ++i) {
         const auto& sec = working_obj.sections[i];
-        uint8_t* sec_runtime_base = base_ptr + sec_offsets[i];
+        uint8_t* sec_runtime_base = sec_bases[i];
+        if (!sec_runtime_base) continue;
 
         for (const auto& r : sec.relocations) {
             uint8_t* patch_loc = sec_runtime_base + r.offset;
@@ -486,7 +585,7 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
                             if (tramp_it != trampolines.end()) {
                                 tramp_addr = tramp_it->second;
                             } else {
-                                if (trampoline_used + 16 <= trampoline_capacity) {
+                                if (trampoline_ptr && trampoline_used + 16 <= trampoline_capacity) {
                                     uint8_t* t = trampoline_ptr + trampoline_used;
                                     trampoline_used += 16;
                                     // AArch64 trampoline:
@@ -517,7 +616,7 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
                             if (tramp_it != trampolines.end()) {
                                 tramp_addr = tramp_it->second;
                             } else {
-                                if (trampoline_used + 16 <= trampoline_capacity) {
+                                if (trampoline_ptr && trampoline_used + 16 <= trampoline_capacity) {
                                     uint8_t* t = trampoline_ptr + trampoline_used;
                                     trampoline_used += 16;
                                     // Emit: FF 25 00 00 00 00 (jmp qword ptr [rip + 0]) ; [64-bit target_addr]
@@ -567,7 +666,7 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
                     [[fallthrough]];
                 }
                 case object::RelocKind::Addr32NB: {
-                    uint32_t rva = static_cast<uint32_t>(reinterpret_cast<uint8_t*>(target_addr) - base_ptr + r.addend);
+                    uint32_t rva = static_cast<uint32_t>(reinterpret_cast<uint8_t*>(target_addr) - module_base + r.addend);
                     *reinterpret_cast<uint32_t*>(patch_loc) = rva;
                     break;
                 }
@@ -586,22 +685,22 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
 
     // Windows SEH Registration
     if (target_.is_windows()) {
-        register_seh_tables(working_obj, base_ptr);
+        register_seh_tables(working_obj, module_base);
     }
 
     // Register and relocate Stack Maps
     stack_maps_ = working_obj.stack_maps;
     int32_t text_idx = working_obj.get_section_index(".text");
-    if (text_idx >= 0) {
-        text_section_base_ = base_ptr + sec_offsets[text_idx];
+    if (text_idx >= 0 && sec_bases[text_idx]) {
+        text_section_base_ = sec_bases[text_idx];
         uintptr_t text_base = reinterpret_cast<uintptr_t>(text_section_base_);
         stack_maps_.relocate(text_base);
         for (const auto& fn : working_obj.functions) {
-            uintptr_t fn_addr = reinterpret_cast<uintptr_t>(base_ptr + sec_offsets[text_idx] + fn.text_offset);
+            uintptr_t fn_addr = reinterpret_cast<uintptr_t>(sec_bases[text_idx] + fn.text_offset);
             stack_maps_.register_function_address(fn.name, fn_addr, static_cast<uint32_t>(fn.text_size));
         }
     } else {
-        text_section_base_ = base_ptr;
+        text_section_base_ = module_base;
     }
     brass_set_active_stack_maps(&stack_maps_);
 
@@ -624,7 +723,9 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
         }
     }
 
-    code_mem_.make_executable_read_only(code_pages_size);
+    if (code_mem_.is_valid()) {
+        code_mem_.make_executable_read_only(code_pages_size);
+    }
     return true;
 }
 

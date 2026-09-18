@@ -54,6 +54,7 @@ public:
     Value* build_sext_i64(Value* val);
     Value* build_zext_i64(Value* val);
     Value* build_trunc_i32(Value* val);
+    Value* build_trunc_i8(Value* val);
     Value* build_fptosi_i32(Value* val);
     Value* build_fptosi_i64(Value* val);
     Value* build_sitofp_f64_i32(Value* val);

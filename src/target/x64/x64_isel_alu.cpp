@@ -190,13 +190,41 @@ void X64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
             lir_bb.append_inst(std::move(lir_inst));
             break;
         }
-        case Opcode::zext_i64:
+        case Opcode::zext_i64: {
+            VReg dst = get_vreg(inst.result());
+            VReg src = get_vreg(inst.operand(0));
+            if (inst.operand(0)->type() == Type::i8()) {
+                auto lir_inst = std::make_unique<LirInst>(LirOpcode::Movzx8);
+                lir_inst->add_def(LirOperand::vreg(dst, 4));
+                lir_inst->add_use(LirOperand::vreg(src, 1));
+                lir_inst->mir_origin = &inst;
+                lir_bb.append_inst(std::move(lir_inst));
+            } else {
+                auto lir_inst = std::make_unique<LirInst>(LirOpcode::Mov32);
+                lir_inst->add_def(LirOperand::vreg(dst, 4));
+                lir_inst->add_use(LirOperand::vreg(src, 4));
+                lir_inst->mir_origin = &inst;
+                lir_bb.append_inst(std::move(lir_inst));
+            }
+            break;
+        }
+
         case Opcode::trunc_i32: {
             VReg dst = get_vreg(inst.result());
             VReg src = get_vreg(inst.operand(0));
             auto lir_inst = std::make_unique<LirInst>(LirOpcode::Mov32);
             lir_inst->add_def(LirOperand::vreg(dst, 4));
             lir_inst->add_use(LirOperand::vreg(src, 4));
+            lir_inst->mir_origin = &inst;
+            lir_bb.append_inst(std::move(lir_inst));
+            break;
+        }
+        case Opcode::trunc_i8: {
+            VReg dst = get_vreg(inst.result());
+            VReg src = get_vreg(inst.operand(0));
+            auto lir_inst = std::make_unique<LirInst>(LirOpcode::Mov);
+            lir_inst->add_def(LirOperand::vreg(dst, 1));
+            lir_inst->add_use(LirOperand::vreg(src, 1));
             lir_inst->mir_origin = &inst;
             lir_bb.append_inst(std::move(lir_inst));
             break;

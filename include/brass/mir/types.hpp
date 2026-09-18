@@ -9,6 +9,8 @@
 namespace brass {
 
 enum class TypeKind : uint8_t {
+    I8,
+    I16,
     I32,
     I64,
     F32,
@@ -31,6 +33,8 @@ public:
     constexpr Type() noexcept : kind_(TypeKind::Void) {}
     constexpr explicit Type(TypeKind kind) noexcept : kind_(kind) {}
 
+    static constexpr Type i8() noexcept { return Type(TypeKind::I8); }
+    static constexpr Type i16() noexcept { return Type(TypeKind::I16); }
     static constexpr Type i32() noexcept { return Type(TypeKind::I32); }
     static constexpr Type i64() noexcept { return Type(TypeKind::I64); }
     static constexpr Type f32() noexcept { return Type(TypeKind::F32); }
@@ -53,6 +57,8 @@ public:
 
     constexpr size_t size_in_bytes() const noexcept {
         switch (kind_) {
+            case TypeKind::I8: return 1;
+            case TypeKind::I16: return 2;
             case TypeKind::I32:
             case TypeKind::F32: return 4;
             case TypeKind::I64:
@@ -73,7 +79,15 @@ public:
     }
 
     constexpr bool is_integer() const noexcept {
-        return kind_ == TypeKind::I32 || kind_ == TypeKind::I64;
+        return kind_ == TypeKind::I8 || kind_ == TypeKind::I16 || kind_ == TypeKind::I32 || kind_ == TypeKind::I64;
+    }
+
+    constexpr bool is_i8() const noexcept {
+        return kind_ == TypeKind::I8;
+    }
+
+    constexpr bool is_i16() const noexcept {
+        return kind_ == TypeKind::I16;
     }
 
     constexpr bool is_i32() const noexcept {

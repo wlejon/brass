@@ -228,6 +228,8 @@ public:
         RuntimeValue v;
         v.raw_bits_ = bits;
         switch (type.kind()) {
+            case TypeKind::I8:
+            case TypeKind::I16:
             case TypeKind::I32: v.kind_ = RuntimeValueKind::I32; break;
             case TypeKind::I64: v.kind_ = RuntimeValueKind::I64; break;
             case TypeKind::F32: v.kind_ = RuntimeValueKind::F32; break;

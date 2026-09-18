@@ -1042,6 +1042,9 @@ void AArch64Encoder::ldr_q(FPR dst, const MemAddress& mem) {
     if (off >= 0 && (off % 16 == 0) && (off / 16 <= 4095)) {
         uint32_t imm12 = static_cast<uint32_t>(off / 16) & 0xFFFu;
         buffer_.emit_inst(0x3DC00000u | (imm12 << 10) | (rn << 5) | rt);
+    } else if (off >= -256 && off <= 255) {
+        uint32_t simm9 = static_cast<uint32_t>(off) & 0x1FFu;
+        buffer_.emit_inst(0x3CC00000u | (simm9 << 12) | (rn << 5) | rt);
     } else {
         throw std::runtime_error("AArch64Encoder: 128-bit FP load offset out of range");
     }
@@ -1117,6 +1120,9 @@ void AArch64Encoder::str_q(FPR src, const MemAddress& mem) {
     if (off >= 0 && (off % 16 == 0) && (off / 16 <= 4095)) {
         uint32_t imm12 = static_cast<uint32_t>(off / 16) & 0xFFFu;
         buffer_.emit_inst(0x3D800000u | (imm12 << 10) | (rn << 5) | rt);
+    } else if (off >= -256 && off <= 255) {
+        uint32_t simm9 = static_cast<uint32_t>(off) & 0x1FFu;
+        buffer_.emit_inst(0x3C800000u | (simm9 << 12) | (rn << 5) | rt);
     } else {
         throw std::runtime_error("AArch64Encoder: 128-bit FP store offset out of range");
     }

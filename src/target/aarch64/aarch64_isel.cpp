@@ -359,7 +359,8 @@ void AArch64ISel::lower_entry_parameters(const Function& mir_fn) {
     auto pcopy = std::make_unique<LirInst>(LirOpcode::ParallelCopy);
     size_t gpr_idx = 0;
     size_t fpr_idx = 0;
-    size_t stack_idx = 0;
+    size_t stack_bytes = 0;
+    bool is_apple = (cc_.kind() == CallingConvKind::AppleAAPCS64);
 
     for (size_t i = 0; i < entry->param_count(); ++i) {
         const auto* param = entry->param(i);
@@ -375,10 +376,14 @@ void AArch64ISel::lower_entry_parameters(const Function& mir_fn) {
                 pcopy->add_def(LirOperand::vreg(param_vreg, sz));
                 pcopy->add_use(LirOperand::preg_aarch64_fpr(freg, sz), FixedConstraint::aarch64_fpr(freg));
             } else {
-                int32_t disp = static_cast<int32_t>(16 + stack_idx * 8);
-                stack_idx++;
+                size_t align = is_apple ? ((sz >= 16) ? 16 : (sz >= 8 ? 8 : (sz >= 4 ? 4 : (sz >= 2 ? 2 : 1))))
+                                        : ((sz >= 16) ? 16 : 8);
+                stack_bytes = (stack_bytes + align - 1) & ~(align - 1);
+                int32_t caller_offset = static_cast<int32_t>(stack_bytes);
+                stack_bytes += is_apple ? sz : ((sz >= 16) ? 16 : 8);
+
                 pcopy->add_def(LirOperand::vreg(param_vreg, sz));
-                pcopy->add_use(LirOperand::mem(PReg::aarch64_gpr(GPR::FP), disp, sz));
+                pcopy->add_use(LirOperand::mem(PReg::aarch64_gpr(GPR::FP), -1 - caller_offset, sz));
             }
         } else {
             if (gpr_idx < 8) {
@@ -386,10 +391,14 @@ void AArch64ISel::lower_entry_parameters(const Function& mir_fn) {
                 pcopy->add_def(LirOperand::vreg(param_vreg, sz));
                 pcopy->add_use(LirOperand::preg_aarch64_gpr(greg, sz), FixedConstraint::aarch64_gpr(greg));
             } else {
-                int32_t disp = static_cast<int32_t>(16 + stack_idx * 8);
-                stack_idx++;
+                size_t align = is_apple ? ((sz >= 16) ? 16 : (sz >= 8 ? 8 : (sz >= 4 ? 4 : (sz >= 2 ? 2 : 1))))
+                                        : ((sz >= 16) ? 16 : 8);
+                stack_bytes = (stack_bytes + align - 1) & ~(align - 1);
+                int32_t caller_offset = static_cast<int32_t>(stack_bytes);
+                stack_bytes += is_apple ? sz : ((sz >= 16) ? 16 : 8);
+
                 pcopy->add_def(LirOperand::vreg(param_vreg, sz));
-                pcopy->add_use(LirOperand::mem(PReg::aarch64_gpr(GPR::FP), disp, sz));
+                pcopy->add_use(LirOperand::mem(PReg::aarch64_gpr(GPR::FP), -1 - caller_offset, sz));
             }
         }
     }
@@ -628,13 +637,42 @@ void AArch64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
             break;
         }
 
-        case Opcode::zext_i64:
+        case Opcode::zext_i64: {
+            VReg dst = get_vreg(inst.result());
+            VReg src = get_vreg(inst.operand(0));
+            if (inst.operand(0)->type() == Type::i8()) {
+                auto lir_inst = std::make_unique<LirInst>(LirOpcode::Movzx8);
+                lir_inst->add_def(LirOperand::vreg(dst, 4));
+                lir_inst->add_use(LirOperand::vreg(src, 1));
+                lir_inst->mir_origin = &inst;
+                lir_bb.append_inst(std::move(lir_inst));
+            } else {
+                auto lir_inst = std::make_unique<LirInst>(LirOpcode::Mov32);
+                lir_inst->add_def(LirOperand::vreg(dst, 4));
+                lir_inst->add_use(LirOperand::vreg(src, 4));
+                lir_inst->mir_origin = &inst;
+                lir_bb.append_inst(std::move(lir_inst));
+            }
+            break;
+        }
+
         case Opcode::trunc_i32: {
             VReg dst = get_vreg(inst.result());
             VReg src = get_vreg(inst.operand(0));
             auto lir_inst = std::make_unique<LirInst>(LirOpcode::Mov32);
             lir_inst->add_def(LirOperand::vreg(dst, 4));
             lir_inst->add_use(LirOperand::vreg(src, 4));
+            lir_inst->mir_origin = &inst;
+            lir_bb.append_inst(std::move(lir_inst));
+            break;
+        }
+
+        case Opcode::trunc_i8: {
+            VReg dst = get_vreg(inst.result());
+            VReg src = get_vreg(inst.operand(0));
+            auto lir_inst = std::make_unique<LirInst>(LirOpcode::Mov);
+            lir_inst->add_def(LirOperand::vreg(dst, 1));
+            lir_inst->add_use(LirOperand::vreg(src, 1));
             lir_inst->mir_origin = &inst;
             lir_bb.append_inst(std::move(lir_inst));
             break;

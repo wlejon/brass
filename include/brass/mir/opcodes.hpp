@@ -18,6 +18,7 @@ enum class Opcode : uint16_t {
     sext_i64,
     zext_i64,
     trunc_i32,
+    trunc_i8,
     fptosi_i32,
     fptosi_i64,
     sitofp_f64_i32,

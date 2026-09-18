@@ -85,6 +85,8 @@ uint32_t bit_width(Type t) noexcept {
 
 Type type_for(brass::Type t) noexcept {
     switch (t.kind()) {
+        case TypeKind::I8:    return Type::u8;
+        case TypeKind::I16:   return Type::u16;
         case TypeKind::I32:   return Type::u32;
         case TypeKind::I64:   return Type::u64;
         case TypeKind::F32:   return Type::f32;

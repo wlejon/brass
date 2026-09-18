@@ -5,6 +5,8 @@ namespace brass {
 
 std::string_view Type::name() const noexcept {
     switch (kind_) {
+        case TypeKind::I8: return "i8";
+        case TypeKind::I16: return "i16";
         case TypeKind::I32: return "i32";
         case TypeKind::I64: return "i64";
         case TypeKind::F32: return "f32";

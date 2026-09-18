@@ -30,7 +30,10 @@ static Condition to_aarch64_cond(x64::Condition cond) noexcept {
 }
 
 AArch64EmitContext::AArch64EmitContext(const LirFunction& fn, const Target& target)
-    : fn_(fn), target_(target), enc_(buffer_) {}
+    : fn_(fn), target_(target), enc_(buffer_) {
+    frame_ = fn_.frame;
+    AArch64FrameLayout::compute_layout(frame_, fn_.calling_conv);
+}
 
 GPR AArch64EmitContext::to_gpr(const LirOperand& op) const {
     if (op.is_preg() && op.preg_val.is_gpr()) {
@@ -48,11 +51,19 @@ FPR AArch64EmitContext::to_fpr(const LirOperand& op) const {
 
 MemAddress AArch64EmitContext::to_mem_address(const LirOperand& op) {
     if (op.is_spill_slot()) {
-        return AArch64FrameLayout::spill_slot_address(op.spill_slot, fn_.frame);
+        if (op.spill_slot < 0) {
+            int32_t caller_offset = -1 - op.spill_slot;
+            return AArch64FrameLayout::incoming_arg_address(caller_offset, frame_);
+        }
+        return AArch64FrameLayout::spill_slot_address(op.spill_slot, frame_);
     }
     if (op.is_mem()) {
         const auto& m = op.mem_val;
         GPR base = m.base_preg.is_valid() ? m.base_preg.as_aarch64_gpr() : GPR::None;
+        if (base == GPR::FP && m.disp < 0 && !m.index_preg.is_valid() && !m.index_vreg.is_valid()) {
+            int32_t caller_offset = -1 - m.disp;
+            return AArch64FrameLayout::incoming_arg_address(caller_offset, frame_);
+        }
         GPR index = m.index_preg.is_valid() ? m.index_preg.as_aarch64_gpr() : GPR::None;
 
         if (base != GPR::None && index != GPR::None) {
@@ -62,15 +73,16 @@ MemAddress AArch64EmitContext::to_mem_address(const LirOperand& op) {
             else if (m.scale == x64::Scale::Two) shift = 1;
 
             if (m.disp != 0) {
+                GPR disp_scratch = (base == GPR::X16 || index == GPR::X16) ? GPR::X17 : GPR::X16;
                 if (m.disp >= 0 && m.disp <= 4095) {
-                    enc_.add(GPR::X16, base, static_cast<uint32_t>(m.disp));
+                    enc_.add(disp_scratch, base, static_cast<uint32_t>(m.disp));
                 } else if (m.disp < 0 && -m.disp <= 4095) {
-                    enc_.sub(GPR::X16, base, static_cast<uint32_t>(-m.disp));
+                    enc_.sub(disp_scratch, base, static_cast<uint32_t>(-m.disp));
                 } else {
-                    enc_.mov(GPR::X16, static_cast<uint64_t>(m.disp));
-                    enc_.add(GPR::X16, base, GPR::X16);
+                    enc_.mov(disp_scratch, static_cast<uint64_t>(m.disp));
+                    enc_.add(disp_scratch, base, disp_scratch);
                 }
-                return MemAddress::base_index(GPR::X16, index, ExtendType::UXTX, shift);
+                return MemAddress::base_index(disp_scratch, index, ExtendType::UXTX, shift);
             }
             return MemAddress::base_index(base, index, ExtendType::UXTX, shift);
         } else if (base != GPR::None) {
@@ -84,14 +96,23 @@ MemAddress AArch64EmitContext::to_mem_address(const LirOperand& op) {
     return ptr(GPR::FP, 0);
 }
 
-MemAddress AArch64EmitContext::ensure_accessible_mem(const MemAddress& mem, GPR scratch) {
+MemAddress AArch64EmitContext::ensure_accessible_mem(const MemAddress& mem, GPR scratch, int size_bytes) {
     if (mem.mode != AddrMode::Offset) return mem;
     int64_t off = mem.offset;
-    if (off >= -256 && off <= 16380 && (off >= 0 ? (off % 8 == 0) : true)) {
+    if (off >= -256 && off <= 255) {
         return mem;
     }
-    enc_.mov(scratch, static_cast<uint64_t>(off));
-    enc_.add(scratch, mem.base, scratch);
+    if (size_bytes > 0 && off >= 0 && (off % size_bytes == 0) && (off / size_bytes <= 4095)) {
+        return mem;
+    }
+    if (off >= 0 && off <= 4095) {
+        enc_.add(scratch, mem.base, static_cast<uint32_t>(off));
+    } else if (off < 0 && -off <= 4095) {
+        enc_.sub(scratch, mem.base, static_cast<uint32_t>(-off));
+    } else {
+        enc_.mov(scratch, static_cast<uint64_t>(off));
+        enc_.add(scratch, mem.base, scratch);
+    }
     return ptr(scratch, 0);
 }
 
@@ -104,8 +125,8 @@ AArch64CompilationResult AArch64EmitContext::compile() {
     patch_sites_.clear();
 
     // 1. Compute frame layout
-    codegen::FrameInfo mutable_frame = fn_.frame;
-    AArch64FrameLayout::compute_layout(mutable_frame, fn_.calling_conv);
+    frame_ = fn_.frame;
+    AArch64FrameLayout::compute_layout(frame_, fn_.calling_conv);
 
     // 2. Create labels for all blocks
     for (const auto& block : fn_.blocks) {
@@ -113,7 +134,7 @@ AArch64CompilationResult AArch64EmitContext::compile() {
     }
 
     // 3. Emit prologue at entry
-    AArch64FrameLayout::emit_prologue(enc_, mutable_frame, fn_.calling_conv);
+    AArch64FrameLayout::emit_prologue(enc_, frame_, fn_.calling_conv);
 
     // 4. Emit blocks
     for (size_t b_idx = 0; b_idx < fn_.blocks.size(); ++b_idx) {
@@ -198,7 +219,7 @@ AArch64CompilationResult AArch64EmitContext::compile() {
         buffer_.align(16);
         result.osr_entry_offset = buffer_.size();
 
-        AArch64FrameLayout::emit_prologue(enc_, mutable_frame, fn_.calling_conv);
+        AArch64FrameLayout::emit_prologue(enc_, frame_, fn_.calling_conv);
 
         // AAPCS64 1st argument (OsrMigrationFrame*) is X0
         enc_.mov(GPR::X16, GPR::X0);
@@ -226,7 +247,7 @@ AArch64CompilationResult AArch64EmitContext::compile() {
                     }
                 }
             } else if (info.is_spilled && info.assigned_spill_slot >= 0) {
-                MemAddress stack_addr = AArch64FrameLayout::spill_slot_address(info.assigned_spill_slot, mutable_frame);
+                MemAddress stack_addr = AArch64FrameLayout::spill_slot_address(info.assigned_spill_slot, frame_);
                 stack_addr = ensure_accessible_mem(stack_addr, GPR::X17);
                 if (vr.is_xmm()) {
                     enc_.ldr(FPR::V31, ptr(GPR::X16, slot_offset));
@@ -265,10 +286,8 @@ AArch64CompilationResult AArch64EmitContext::compile() {
     // 6. Build exception table
     result.exception_table.set_function_name(std::string(fn_.name));
     result.exception_table.set_code_size(static_cast<uint32_t>(result.code_buffer.size()));
-    codegen::FrameInfo fn_frame = fn_.frame;
-    AArch64FrameLayout::compute_layout(fn_frame, fn_.calling_conv);
-    result.exception_table.set_frame_size(static_cast<uint32_t>(fn_frame.total_frame_size));
-    result.exception_table.set_saved_callee_gprs(fn_frame.saved_callee_gprs);
+    result.exception_table.set_frame_size(static_cast<uint32_t>(frame_.total_frame_size));
+    result.exception_table.set_saved_callee_gprs(frame_.saved_callee_gprs);
 
     for (const auto& scope : pending_exception_scopes_) {
         auto it = result.block_offsets.find(scope.unwind_block_id);
@@ -301,21 +320,41 @@ void AArch64EmitContext::emit_mov_instruction(const LirInst& inst) {
                 } else if (src.is_imm_int()) {
                     enc_.mov(dst_gpr, static_cast<uint64_t>(src.imm_int));
                 } else {
-                    enc_.ldr(dst_gpr, ensure_accessible_mem(to_mem_address(src)));
+                    if (dst.size == 1 || src.size == 1) enc_.ldrb(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 1));
+                    else if (dst.size == 2 || src.size == 2) enc_.ldrh(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 2));
+                    else if (dst.size == 4 || src.size == 4) enc_.ldr32(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 4));
+                    else enc_.ldr(dst_gpr, ensure_accessible_mem(to_mem_address(src)));
                 }
             } else {
                 MemAddress dst_mem = ensure_accessible_mem(to_mem_address(dst), GPR::X17);
                 GPR data_scratch = (dst_mem.base == GPR::X16 || dst_mem.index == GPR::X16) ? GPR::X15 : GPR::X16;
                 if (src.is_preg()) {
-                    enc_.str(src.preg_val.as_aarch64_gpr(), dst_mem);
+                    if (dst.size == 1 || src.size == 1) enc_.strb(src.preg_val.as_aarch64_gpr(), dst_mem);
+                    else if (dst.size == 2 || src.size == 2) enc_.strh(src.preg_val.as_aarch64_gpr(), dst_mem);
+                    else if (dst.size == 4 || src.size == 4) enc_.str32(src.preg_val.as_aarch64_gpr(), dst_mem);
+                    else enc_.str(src.preg_val.as_aarch64_gpr(), dst_mem);
                 } else if (src.is_imm_int()) {
-                    enc_.mov(data_scratch, static_cast<uint64_t>(src.imm_int));
-                    enc_.str(data_scratch, dst_mem);
+                    if (dst.size == 1) {
+                        enc_.mov32(data_scratch, static_cast<uint32_t>(src.imm_int & 0xff));
+                        enc_.strb(data_scratch, dst_mem);
+                    } else if (dst.size == 2) {
+                        enc_.mov32(data_scratch, static_cast<uint32_t>(src.imm_int & 0xffff));
+                        enc_.strh(data_scratch, dst_mem);
+                    } else if (dst.size == 4) {
+                        enc_.mov32(data_scratch, static_cast<uint32_t>(src.imm_int));
+                        enc_.str32(data_scratch, dst_mem);
+                    } else {
+                        enc_.mov(data_scratch, static_cast<uint64_t>(src.imm_int));
+                        enc_.str(data_scratch, dst_mem);
+                    }
                 } else {
                     GPR src_scratch = (dst_mem.base == GPR::X17 || dst_mem.index == GPR::X17) ? GPR::X15 : GPR::X17;
                     if (src_scratch == data_scratch) src_scratch = (data_scratch == GPR::X16) ? GPR::X15 : GPR::X16;
                     enc_.ldr(data_scratch, ensure_accessible_mem(to_mem_address(src), src_scratch));
-                    enc_.str(data_scratch, dst_mem);
+                    if (dst.size == 1 || src.size == 1) enc_.strb(data_scratch, dst_mem);
+                    else if (dst.size == 2 || src.size == 2) enc_.strh(data_scratch, dst_mem);
+                    else if (dst.size == 4 || src.size == 4) enc_.str32(data_scratch, dst_mem);
+                    else enc_.str(data_scratch, dst_mem);
                 }
             }
             break;
@@ -356,21 +395,37 @@ void AArch64EmitContext::emit_mov_instruction(const LirInst& inst) {
                 } else if (src.is_imm_int()) {
                     enc_.mov32(dst_gpr, static_cast<uint32_t>(src.imm_int));
                 } else {
-                    enc_.ldr32(dst_gpr, ensure_accessible_mem(to_mem_address(src)));
+                    if (dst.size == 1 || src.size == 1) enc_.ldrb(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 1));
+                    else if (dst.size == 2 || src.size == 2) enc_.ldrh(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 2));
+                    else enc_.ldr32(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 4));
                 }
             } else {
-                MemAddress dst_mem = ensure_accessible_mem(to_mem_address(dst), GPR::X17);
+                MemAddress dst_mem = ensure_accessible_mem(to_mem_address(dst), GPR::X17, 4);
                 GPR data_scratch = (dst_mem.base == GPR::X16 || dst_mem.index == GPR::X16) ? GPR::X15 : GPR::X16;
                 if (src.is_preg()) {
-                    enc_.str32(src.preg_val.as_aarch64_gpr(), dst_mem);
+                    if (dst.size == 1 || src.size == 1) enc_.strb(src.preg_val.as_aarch64_gpr(), dst_mem);
+                    else if (dst.size == 2 || src.size == 2) enc_.strh(src.preg_val.as_aarch64_gpr(), dst_mem);
+                    else enc_.str32(src.preg_val.as_aarch64_gpr(), dst_mem);
                 } else if (src.is_imm_int()) {
-                    enc_.mov32(data_scratch, static_cast<uint32_t>(src.imm_int));
-                    enc_.str32(data_scratch, dst_mem);
+                    if (dst.size == 1) {
+                        enc_.mov32(data_scratch, static_cast<uint32_t>(src.imm_int & 0xff));
+                        enc_.strb(data_scratch, dst_mem);
+                    } else if (dst.size == 2) {
+                        enc_.mov32(data_scratch, static_cast<uint32_t>(src.imm_int & 0xffff));
+                        enc_.strh(data_scratch, dst_mem);
+                    } else {
+                        enc_.mov32(data_scratch, static_cast<uint32_t>(src.imm_int));
+                        enc_.str32(data_scratch, dst_mem);
+                    }
                 } else {
                     GPR src_scratch = (dst_mem.base == GPR::X17 || dst_mem.index == GPR::X17) ? GPR::X15 : GPR::X17;
                     if (src_scratch == data_scratch) src_scratch = (data_scratch == GPR::X16) ? GPR::X15 : GPR::X16;
-                    enc_.ldr32(data_scratch, ensure_accessible_mem(to_mem_address(src), src_scratch));
-                    enc_.str32(data_scratch, dst_mem);
+                    if (src.size == 1) enc_.ldrb(data_scratch, ensure_accessible_mem(to_mem_address(src), src_scratch, 1));
+                    else if (src.size == 2) enc_.ldrh(data_scratch, ensure_accessible_mem(to_mem_address(src), src_scratch, 2));
+                    else enc_.ldr32(data_scratch, ensure_accessible_mem(to_mem_address(src), src_scratch, 4));
+                    if (dst.size == 1) enc_.strb(data_scratch, dst_mem);
+                    else if (dst.size == 2) enc_.strh(data_scratch, dst_mem);
+                    else enc_.str32(data_scratch, dst_mem);
                 }
             }
             break;
@@ -419,7 +474,7 @@ void AArch64EmitContext::emit_mov_instruction(const LirInst& inst) {
             if (inst.uses[0].is_preg()) {
                 enc_.sxtw(dst_gpr, inst.uses[0].preg_val.as_aarch64_gpr());
             } else {
-                enc_.ldrsw(dst_gpr, ensure_accessible_mem(to_mem_address(inst.uses[0])));
+                enc_.ldrsw(dst_gpr, ensure_accessible_mem(to_mem_address(inst.uses[0]), GPR::X16, 4));
             }
             break;
         }
@@ -429,7 +484,7 @@ void AArch64EmitContext::emit_mov_instruction(const LirInst& inst) {
             if (inst.uses[0].is_preg()) {
                 enc_.uxtb(dst_gpr, inst.uses[0].preg_val.as_aarch64_gpr());
             } else {
-                enc_.ldrb(dst_gpr, ensure_accessible_mem(to_mem_address(inst.uses[0])));
+                enc_.ldrb(dst_gpr, ensure_accessible_mem(to_mem_address(inst.uses[0]), GPR::X16, 1));
             }
             break;
         }
@@ -439,7 +494,7 @@ void AArch64EmitContext::emit_mov_instruction(const LirInst& inst) {
             if (inst.uses[0].is_preg()) {
                 enc_.uxth(dst_gpr, inst.uses[0].preg_val.as_aarch64_gpr());
             } else {
-                enc_.ldrh(dst_gpr, ensure_accessible_mem(to_mem_address(inst.uses[0])));
+                enc_.ldrh(dst_gpr, ensure_accessible_mem(to_mem_address(inst.uses[0]), GPR::X16, 2));
             }
             break;
         }
@@ -449,7 +504,7 @@ void AArch64EmitContext::emit_mov_instruction(const LirInst& inst) {
             if (inst.uses[0].is_preg()) {
                 enc_.sxtb(dst_gpr, inst.uses[0].preg_val.as_aarch64_gpr());
             } else {
-                enc_.ldrsb(dst_gpr, ensure_accessible_mem(to_mem_address(inst.uses[0])));
+                enc_.ldrsb(dst_gpr, ensure_accessible_mem(to_mem_address(inst.uses[0]), GPR::X16, 1));
             }
             break;
         }
@@ -459,7 +514,7 @@ void AArch64EmitContext::emit_mov_instruction(const LirInst& inst) {
             if (inst.uses[0].is_preg()) {
                 enc_.sxth(dst_gpr, inst.uses[0].preg_val.as_aarch64_gpr());
             } else {
-                enc_.ldrsh(dst_gpr, ensure_accessible_mem(to_mem_address(inst.uses[0])));
+                enc_.ldrsh(dst_gpr, ensure_accessible_mem(to_mem_address(inst.uses[0]), GPR::X16, 2));
             }
             break;
         }
@@ -1870,7 +1925,7 @@ void AArch64EmitContext::emit_vec_instruction(const LirInst& inst) {
             if (l0 == l1 && l1 == l2 && l2 == l3) {
                 buffer_.emit_inst(0x4E040400u | (l0 << 19) | (reg_code(src) << 5) | reg_code(dst));
             } else {
-                FPR tmp = (src == FPR::V31) ? FPR::V29 : FPR::V31;
+                FPR tmp = (src == FPR::V31) ? FPR::V30 : FPR::V31;
                 buffer_.emit_inst(0x6E040400u | (0u << 19) | (l0 << 13) | (reg_code(src) << 5) | reg_code(tmp));
                 buffer_.emit_inst(0x6E040400u | (1u << 19) | (l1 << 13) | (reg_code(src) << 5) | reg_code(tmp));
                 buffer_.emit_inst(0x6E040400u | (2u << 19) | (l2 << 13) | (reg_code(src) << 5) | reg_code(tmp));
@@ -1892,7 +1947,7 @@ void AArch64EmitContext::emit_vec_instruction(const LirInst& inst) {
             if (v0 == v1 && l0 == l1 && l1 == l2 && l2 == l3) {
                 buffer_.emit_inst(0x4E040400u | (l0 << 19) | (reg_code(v0) << 5) | reg_code(dst));
             } else {
-                FPR tmp = (v0 == FPR::V31 || v1 == FPR::V31) ? FPR::V29 : FPR::V31;
+                FPR tmp = (v0 == FPR::V31 || v1 == FPR::V31) ? FPR::V30 : FPR::V31;
                 buffer_.emit_inst(0x6E040400u | (0u << 19) | (l0 << 13) | (reg_code(v0) << 5) | reg_code(tmp));
                 buffer_.emit_inst(0x6E040400u | (1u << 19) | (l1 << 13) | (reg_code(v0) << 5) | reg_code(tmp));
                 buffer_.emit_inst(0x6E040400u | (2u << 19) | (l2 << 13) | (reg_code(v1) << 5) | reg_code(tmp));
@@ -1909,7 +1964,7 @@ void AArch64EmitContext::emit_vec_instruction(const LirInst& inst) {
             uint32_t mask = static_cast<uint32_t>(inst.uses.back().imm_int);
             uint32_t l0 = mask & 1;
             uint32_t l1 = (mask >> 1) & 1;
-            FPR tmp = (v0 == FPR::V31 || v1 == FPR::V31) ? FPR::V29 : FPR::V31;
+            FPR tmp = (v0 == FPR::V31 || v1 == FPR::V31) ? FPR::V30 : FPR::V31;
             buffer_.emit_inst(0x6E080400u | (0u << 20) | (l0 << 14) | (reg_code(v0) << 5) | reg_code(tmp));
             buffer_.emit_inst(0x6E080400u | (1u << 20) | (l1 << 14) | (reg_code(v1) << 5) | reg_code(tmp));
             enc_.vec_orr(dst, tmp, tmp);
@@ -1987,10 +2042,14 @@ void AArch64EmitContext::emit_parallel_copy(const LirInst& inst) {
                     if (dst.size == 4 && src.size == 4) enc_.mov32(dst_gpr, src_gpr);
                     else enc_.mov(dst_gpr, src_gpr);
                 } else if (src.is_imm_int()) {
-                    if (dst.size == 4) enc_.mov32(dst_gpr, static_cast<uint32_t>(src.imm_int));
+                    if (dst.size == 1) enc_.mov32(dst_gpr, static_cast<uint32_t>(src.imm_int & 0xff));
+                    else if (dst.size == 2) enc_.mov32(dst_gpr, static_cast<uint32_t>(src.imm_int & 0xffff));
+                    else if (dst.size == 4) enc_.mov32(dst_gpr, static_cast<uint32_t>(src.imm_int));
                     else enc_.mov(dst_gpr, static_cast<uint64_t>(src.imm_int));
                 } else {
-                    if (dst.size == 4) enc_.ldr32(dst_gpr, ensure_accessible_mem(to_mem_address(src)));
+                    if (dst.size == 1 || src.size == 1) enc_.ldrb(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 1));
+                    else if (dst.size == 2 || src.size == 2) enc_.ldrh(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 2));
+                    else if (dst.size == 4 || src.size == 4) enc_.ldr32(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 4));
                     else enc_.ldr(dst_gpr, ensure_accessible_mem(to_mem_address(src)));
                 }
             } else {
@@ -2011,7 +2070,9 @@ void AArch64EmitContext::emit_parallel_copy(const LirInst& inst) {
             GPR data_scratch = (dst_mem.base == GPR::X16 || dst_mem.index == GPR::X16) ? GPR::X15 : GPR::X16;
             if (src.is_preg()) {
                 if (src.preg_val.is_gpr()) {
-                    if (dst.size == 4 || src.size == 4) enc_.str32(src.preg_val.as_aarch64_gpr(), dst_mem);
+                    if (dst.size == 1 || src.size == 1) enc_.strb(src.preg_val.as_aarch64_gpr(), dst_mem);
+                    else if (dst.size == 2 || src.size == 2) enc_.strh(src.preg_val.as_aarch64_gpr(), dst_mem);
+                    else if (dst.size == 4 || src.size == 4) enc_.str32(src.preg_val.as_aarch64_gpr(), dst_mem);
                     else enc_.str(src.preg_val.as_aarch64_gpr(), dst_mem);
                 } else {
                     if (dst.size == 16 || src.size == 16) enc_.str_q(src.preg_val.as_aarch64_fpr(), dst_mem);
@@ -2019,7 +2080,13 @@ void AArch64EmitContext::emit_parallel_copy(const LirInst& inst) {
                     else enc_.str(src.preg_val.as_aarch64_fpr(), dst_mem);
                 }
             } else if (src.is_imm_int()) {
-                if (dst.size == 4) {
+                if (dst.size == 1) {
+                    enc_.mov32(data_scratch, static_cast<uint32_t>(src.imm_int & 0xff));
+                    enc_.strb(data_scratch, dst_mem);
+                } else if (dst.size == 2) {
+                    enc_.mov32(data_scratch, static_cast<uint32_t>(src.imm_int & 0xffff));
+                    enc_.strh(data_scratch, dst_mem);
+                } else if (dst.size == 4) {
                     enc_.mov32(data_scratch, static_cast<uint32_t>(src.imm_int));
                     enc_.str32(data_scratch, dst_mem);
                 } else {
@@ -2033,6 +2100,12 @@ void AArch64EmitContext::emit_parallel_copy(const LirInst& inst) {
                 if (dst.size == 16 || src.size == 16) {
                     enc_.ldr_q(FPR::V31, src_mem);
                     enc_.str_q(FPR::V31, dst_mem);
+                } else if (dst.size == 1 || src.size == 1) {
+                    enc_.ldrb(data_scratch, src_mem);
+                    enc_.strb(data_scratch, dst_mem);
+                } else if (dst.size == 2 || src.size == 2) {
+                    enc_.ldrh(data_scratch, src_mem);
+                    enc_.strh(data_scratch, dst_mem);
                 } else if (dst.size == 4 || src.size == 4) {
                     enc_.ldr32(data_scratch, src_mem);
                     enc_.str32(data_scratch, dst_mem);
@@ -2173,21 +2246,18 @@ void AArch64EmitContext::emit_control_instruction(const LirInst& inst) {
                 pending_exception_scopes_.push_back({call_start, return_offset, inst.unwind_block_id});
             }
 
-            codegen::FrameInfo mutable_frame = fn_.frame;
-            AArch64FrameLayout::compute_layout(mutable_frame, fn_.calling_conv);
-
             StackMapRecord map_rec;
             map_rec.instruction_offset = static_cast<uint32_t>(return_offset);
-            map_rec.frame_size = static_cast<uint32_t>(mutable_frame.total_frame_size);
+            map_rec.frame_size = static_cast<uint32_t>(frame_.total_frame_size);
             map_rec.safepoint_id = inst.safepoint_id;
 
             for (const auto& v : inst.live_gcrefs) {
                 const auto& info = fn_.get_vreg_info(v);
                 if (info.is_spilled) {
-                    int32_t offset = static_cast<int32_t>(AArch64FrameLayout::spill_slot_address(info.assigned_spill_slot, mutable_frame).offset);
+                    int32_t offset = static_cast<int32_t>(AArch64FrameLayout::spill_slot_address(info.assigned_spill_slot, frame_).offset);
                     map_rec.add_root(StackMapRootLocation::frame_slot(offset));
                 } else if (info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
-                    int32_t offset = static_cast<int32_t>(AArch64FrameLayout::callee_gpr_address(info.assigned_preg.as_aarch64_gpr(), mutable_frame).offset);
+                    int32_t offset = static_cast<int32_t>(AArch64FrameLayout::callee_gpr_address(info.assigned_preg.as_aarch64_gpr(), frame_).offset);
                     map_rec.add_root(StackMapRootLocation::callee_saved(offset, info.assigned_preg));
                 }
             }
@@ -2204,21 +2274,18 @@ void AArch64EmitContext::emit_control_instruction(const LirInst& inst) {
                 pending_exception_scopes_.push_back({call_start, return_offset, inst.unwind_block_id});
             }
 
-            codegen::FrameInfo mutable_frame = fn_.frame;
-            AArch64FrameLayout::compute_layout(mutable_frame, fn_.calling_conv);
-
             StackMapRecord map_rec;
             map_rec.instruction_offset = static_cast<uint32_t>(return_offset);
-            map_rec.frame_size = static_cast<uint32_t>(mutable_frame.total_frame_size);
+            map_rec.frame_size = static_cast<uint32_t>(frame_.total_frame_size);
             map_rec.safepoint_id = inst.safepoint_id;
 
             for (const auto& v : inst.live_gcrefs) {
                 const auto& info = fn_.get_vreg_info(v);
                 if (info.is_spilled) {
-                    int32_t offset = static_cast<int32_t>(AArch64FrameLayout::spill_slot_address(info.assigned_spill_slot, mutable_frame).offset);
+                    int32_t offset = static_cast<int32_t>(AArch64FrameLayout::spill_slot_address(info.assigned_spill_slot, frame_).offset);
                     map_rec.add_root(StackMapRootLocation::frame_slot(offset));
                 } else if (info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
-                    int32_t offset = static_cast<int32_t>(AArch64FrameLayout::callee_gpr_address(info.assigned_preg.as_aarch64_gpr(), mutable_frame).offset);
+                    int32_t offset = static_cast<int32_t>(AArch64FrameLayout::callee_gpr_address(info.assigned_preg.as_aarch64_gpr(), frame_).offset);
                     map_rec.add_root(StackMapRootLocation::callee_saved(offset, info.assigned_preg));
                 }
             }
@@ -2227,9 +2294,7 @@ void AArch64EmitContext::emit_control_instruction(const LirInst& inst) {
         }
 
         case LirOpcode::Ret: {
-            codegen::FrameInfo mutable_frame = fn_.frame;
-            AArch64FrameLayout::compute_layout(mutable_frame, fn_.calling_conv);
-            AArch64FrameLayout::emit_epilogue(enc_, mutable_frame, fn_.calling_conv);
+            AArch64FrameLayout::emit_epilogue(enc_, frame_, fn_.calling_conv);
             break;
         }
 
@@ -2306,27 +2371,24 @@ void AArch64EmitContext::emit_control_instruction(const LirInst& inst) {
             enc_.bl("brass_gc_safepoint");
             size_t return_offset = buffer_.size();
 
-            codegen::FrameInfo mutable_frame = fn_.frame;
-            AArch64FrameLayout::compute_layout(mutable_frame, fn_.calling_conv);
-
             SafepointRecord rec;
             rec.code_offset = return_offset;
             rec.safepoint_id = inst.safepoint_id;
 
             StackMapRecord map_rec;
             map_rec.instruction_offset = static_cast<uint32_t>(return_offset);
-            map_rec.frame_size = static_cast<uint32_t>(mutable_frame.total_frame_size);
+            map_rec.frame_size = static_cast<uint32_t>(frame_.total_frame_size);
             map_rec.safepoint_id = inst.safepoint_id;
 
             for (const auto& v : inst.live_gcrefs) {
                 const auto& info = fn_.get_vreg_info(v);
                 if (info.is_spilled) {
-                    int32_t offset = static_cast<int32_t>(AArch64FrameLayout::spill_slot_address(info.assigned_spill_slot, mutable_frame).offset);
+                    int32_t offset = static_cast<int32_t>(AArch64FrameLayout::spill_slot_address(info.assigned_spill_slot, frame_).offset);
                     rec.live_gcref_spill_offsets.push_back(offset);
                     map_rec.add_root(StackMapRootLocation::frame_slot(offset));
                 } else if (info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
                     rec.live_gcref_registers.push_back(static_cast<x64::GPR>(info.assigned_preg.code));
-                    int32_t offset = static_cast<int32_t>(AArch64FrameLayout::callee_gpr_address(info.assigned_preg.as_aarch64_gpr(), mutable_frame).offset);
+                    int32_t offset = static_cast<int32_t>(AArch64FrameLayout::callee_gpr_address(info.assigned_preg.as_aarch64_gpr(), frame_).offset);
                     map_rec.add_root(StackMapRootLocation::callee_saved(offset, info.assigned_preg));
                 }
             }
@@ -2389,14 +2451,10 @@ void AArch64EmitContext::emit_control_instruction(const LirInst& inst) {
                 enc_.mov32(GPR::X0, rid);
                 enc_.bl(inst.exit_symbol);
 
-                codegen::FrameInfo mutable_frame = fn_.frame;
-                AArch64FrameLayout::compute_layout(mutable_frame, fn_.calling_conv);
-                AArch64FrameLayout::emit_epilogue(enc_, mutable_frame, fn_.calling_conv);
+                AArch64FrameLayout::emit_epilogue(enc_, frame_, fn_.calling_conv);
             } else {
                 if (total_alloc > 0) enc_.add(GPR::SP, GPR::SP, static_cast<uint32_t>(total_alloc));
-                codegen::FrameInfo mutable_frame = fn_.frame;
-                AArch64FrameLayout::compute_layout(mutable_frame, fn_.calling_conv);
-                AArch64FrameLayout::emit_epilogue(enc_, mutable_frame, fn_.calling_conv);
+                AArch64FrameLayout::emit_epilogue(enc_, frame_, fn_.calling_conv);
             }
             break;
         }

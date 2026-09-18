@@ -392,9 +392,17 @@ bool Verifier::verify_function(const Function& fn) {
                     break;
 
                 case Opcode::sext_i64:
-                case Opcode::zext_i64:
                     if (inst->operand_count() != 1 || !inst->operand(0) || inst->operand(0)->type() != Type::i32()) {
                         report_error(inst_prefix + "Requires 1 i32 operand.");
+                    }
+                    if (inst->type() != Type::i64()) {
+                        report_error(inst_prefix + "Result type must be i64.");
+                    }
+                    break;
+                case Opcode::zext_i64:
+                    if (inst->operand_count() != 1 || !inst->operand(0) ||
+                        (inst->operand(0)->type() != Type::i32() && inst->operand(0)->type() != Type::i8())) {
+                        report_error(inst_prefix + "Requires 1 i32 or i8 operand.");
                     }
                     if (inst->type() != Type::i64()) {
                         report_error(inst_prefix + "Result type must be i64.");
@@ -406,6 +414,14 @@ bool Verifier::verify_function(const Function& fn) {
                     }
                     if (inst->type() != Type::i32()) {
                         report_error(inst_prefix + "Result type must be i32.");
+                    }
+                    break;
+                case Opcode::trunc_i8:
+                    if (inst->operand_count() != 1 || !inst->operand(0) || !inst->operand(0)->type().is_integer()) {
+                        report_error(inst_prefix + "Requires 1 integer operand.");
+                    }
+                    if (inst->type() != Type::i8()) {
+                        report_error(inst_prefix + "Result type must be i8.");
                     }
                     break;
                 case Opcode::fptosi_i32:

@@ -253,16 +253,19 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
                     enc.mov(slot_addr(inst.result()), GPR::RAX);
                     break;
                 }
-                case Opcode::zext_i64: {
-                    enc.mov32(GPR::RAX, slot_addr(inst.operand(0)));
+                case Opcode::zext_i64:
+                    if (inst.operand(0)->type() == Type::i8()) enc.movzx8(GPR::RAX, slot_addr(inst.operand(0)));
+                    else enc.mov32(GPR::RAX, slot_addr(inst.operand(0)));
                     enc.mov(slot_addr(inst.result()), GPR::RAX);
                     break;
-                }
-                case Opcode::trunc_i32: {
+                case Opcode::trunc_i32:
                     enc.mov32(GPR::RAX, slot_addr(inst.operand(0)));
                     enc.mov32(slot_addr(inst.result()), GPR::RAX);
                     break;
-                }
+                case Opcode::trunc_i8:
+                    enc.movzx8(GPR::RAX, slot_addr(inst.operand(0)));
+                    enc.mov8(slot_addr(inst.result()), GPR::RAX);
+                    break;
                 case Opcode::fptosi_i32: {
                     enc.movsd(XMM::XMM0, slot_addr(inst.operand(0)));
                     enc.cvttsd2si32(GPR::RAX, XMM::XMM0);

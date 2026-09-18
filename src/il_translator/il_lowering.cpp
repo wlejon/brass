@@ -22,7 +22,7 @@ namespace brass::il {
 Type lower_type(BronzeType t) {
     switch (t) {
         case BronzeType::Void: return Type::void_type();
-        case BronzeType::Bool: return Type::i32();
+        case BronzeType::Bool: return Type::i8();
         case BronzeType::I32: return Type::i32();
         case BronzeType::F64: return Type::f64();
         case BronzeType::Str: return Type::ptr();
@@ -40,6 +40,19 @@ Value* IlLowering::ensure_type(Value* val, Type target_type, Builder& b) {
     if (!val || val->type() == target_type) return val;
 
     Type src_type = val->type();
+    if (target_type == Type::i8()) {
+        if (src_type == Type::i64()) {
+            val = b.build_trunc_i32(val);
+        }
+        return b.build_trunc_i8(val);
+    }
+    if (src_type == Type::i8()) {
+        val = b.build_zext_i64(val);
+        if (target_type == Type::i32()) {
+            return b.build_trunc_i32(val);
+        }
+        src_type = Type::i64();
+    }
     if (src_type == Type::f64() && target_type == Type::i32()) {
         return b.build_fptosi_i32(val);
     }
@@ -186,6 +199,7 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
     }
 
     caller_to_callee_map_.clear();
+    external_signatures_.clear();
     std::vector<std::string> resolved_names(ast.functions.size());
     std::unordered_set<std::string> curry_names;
     for (const auto& [name, indices] : name_to_indices) {
@@ -352,6 +366,10 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
             param_types.push_back(lower_type(p.second));
         }
         Type ret_type = lower_type(fn_ast.return_type);
+        if (fn_ast.blocks.empty()) {
+            external_signatures_[fn_name] = {ret_type, std::move(param_types)};
+            continue;
+        }
         Function* fn = mod->create_function(fn_name, ret_type, Span<const Type>(param_types.data(), param_types.size()));
         fn->set_allow_fp_reassociation(options_.allow_fp_reassociation);
 
@@ -368,8 +386,9 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
     // 2. Lower each function body
     for (size_t i = 0; i < ast.functions.size(); ++i) {
         if (resolved_names[i].empty()) continue;
-        current_fn_idx_ = i;
         const auto& fn_ast = ast.functions[i];
+        if (fn_ast.blocks.empty()) continue;
+        current_fn_idx_ = i;
         const std::string& fn_name = resolved_names[i];
         if (!lower_function(fn_ast, *mod, fn_name)) {
             return nullptr;
@@ -873,7 +892,7 @@ bool IlLowering::emit_wrapper(const BronzeFunction& fn_ast, Module& mod, const s
         } else if (param_type == BronzeType::I32) {
             call_args.push_back(b.build_call("bronze_unbox_i32", Type::i32(), {raw_i64}));
         } else if (param_type == BronzeType::Bool) {
-            call_args.push_back(b.build_and(b.build_call("bronze_unbox_bool", Type::i32(), {raw_i64}), b.build_iconst_i32(1)));
+            call_args.push_back(b.build_trunc_i8(b.build_call("bronze_unbox_bool", Type::i32(), {raw_i64})));
         } else {
             call_args.push_back(raw_i64);
         }
@@ -890,7 +909,7 @@ bool IlLowering::emit_wrapper(const BronzeFunction& fn_ast, Module& mod, const s
     } else if (fn_ast.return_type == BronzeType::I32) {
         ret_val = b.build_call("bronze_box_i32", Type::i64(), {call_res});
     } else if (fn_ast.return_type == BronzeType::Bool) {
-        ret_val = b.build_call("bronze_box_bool", Type::i64(), {call_res});
+        ret_val = b.build_call("bronze_box_bool", Type::i64(), {ensure_type(call_res, Type::i32(), b)});
     } else {
         ret_val = call_res;
     }

@@ -14,6 +14,7 @@ std::string_view opcode_name(Opcode op) noexcept {
         case Opcode::sext_i64: return "sext_i64";
         case Opcode::zext_i64: return "zext_i64";
         case Opcode::trunc_i32: return "trunc_i32";
+        case Opcode::trunc_i8: return "trunc_i8";
         case Opcode::fptosi_i32: return "fptosi_i32";
         case Opcode::fptosi_i64: return "fptosi_i64";
         case Opcode::sitofp_f64_i32: return "sitofp_f64_i32";
@@ -159,6 +160,7 @@ bool is_conversion(Opcode op) noexcept {
         case Opcode::sext_i64:
         case Opcode::zext_i64:
         case Opcode::trunc_i32:
+        case Opcode::trunc_i8:
         case Opcode::fptosi_i32:
         case Opcode::fptosi_i64:
         case Opcode::sitofp_f64_i32:

@@ -73,10 +73,13 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
     frame_size = (frame_size + 15) & ~15;
     if (frame_size < 16) frame_size = 16;
 
-    auto ensure_accessible_mem = [&](const MemAddress& mem, GPR scratch = GPR::X16) -> MemAddress {
+    auto ensure_accessible_mem = [&](const MemAddress& mem, GPR scratch = GPR::X16, int size_bytes = 8) -> MemAddress {
         if (mem.mode != AddrMode::Offset) return mem;
         int64_t off = mem.offset;
-        if (off >= -256 && off <= 16380 && (off >= 0 ? (off % 8 == 0) : true)) {
+        if (off >= -256 && off <= 255) {
+            return mem;
+        }
+        if (size_bytes > 0 && off >= 0 && (off % size_bytes == 0) && (off / size_bytes <= 4095)) {
             return mem;
         }
         if (off >= 0 && off <= 4095) {
@@ -138,12 +141,15 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
     if (entry_bb) {
         size_t gpr_idx = 0;
         size_t fpr_idx = 0;
-        size_t stack_idx = 0;
+        size_t stack_bytes = 0;
+        bool is_apple = target.is_macos();
 
         for (size_t i = 0; i < entry_bb->param_count(); ++i) {
             const Value* param = entry_bb->param(i);
             int32_t p_off = slot_map[param];
             bool is_flt = param->type().is_float();
+            uint8_t sz = static_cast<uint8_t>(param->type().size_in_bytes());
+            if (sz == 0) sz = 8;
 
             if (is_flt) {
                 if (fpr_idx < 8) {
@@ -154,7 +160,12 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
                         enc.str(src_fpr, slot_off_addr(p_off));
                     }
                 } else {
-                    int32_t caller_stack_off = frame_size + static_cast<int32_t>(stack_idx++ * 8);
+                    size_t align = is_apple ? ((sz >= 16) ? 16 : (sz >= 8 ? 8 : (sz >= 4 ? 4 : (sz >= 2 ? 2 : 1))))
+                                            : ((sz >= 16) ? 16 : 8);
+                    stack_bytes = (stack_bytes + align - 1) & ~(align - 1);
+                    int32_t caller_stack_off = frame_size + static_cast<int32_t>(stack_bytes);
+                    stack_bytes += is_apple ? sz : ((sz >= 16) ? 16 : 8);
+
                     if (param->type().kind() == TypeKind::F32) {
                         enc.ldr_s(FPR::V0, ensure_accessible_mem(ptr(GPR::FP, caller_stack_off)));
                         enc.str_s(FPR::V0, slot_off_addr(p_off));
@@ -166,14 +177,29 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
             } else {
                 if (gpr_idx < 8) {
                     GPR src_gpr = static_cast<GPR>(gpr_idx++);
-                    if (param->type().is_i32()) {
+                    if (sz == 1) {
+                        enc.strb(src_gpr, slot_off_addr(p_off));
+                    } else if (sz == 2) {
+                        enc.strh(src_gpr, slot_off_addr(p_off));
+                    } else if (param->type().is_i32()) {
                         enc.str32(src_gpr, slot_off_addr(p_off));
                     } else {
                         enc.str(src_gpr, slot_off_addr(p_off));
                     }
                 } else {
-                    int32_t caller_stack_off = frame_size + static_cast<int32_t>(stack_idx++ * 8);
-                    if (param->type().is_i32()) {
+                    size_t align = is_apple ? ((sz >= 16) ? 16 : (sz >= 8 ? 8 : (sz >= 4 ? 4 : (sz >= 2 ? 2 : 1))))
+                                            : ((sz >= 16) ? 16 : 8);
+                    stack_bytes = (stack_bytes + align - 1) & ~(align - 1);
+                    int32_t caller_stack_off = frame_size + static_cast<int32_t>(stack_bytes);
+                    stack_bytes += is_apple ? sz : ((sz >= 16) ? 16 : 8);
+
+                    if (sz == 1) {
+                        enc.ldrb(GPR::X0, ensure_accessible_mem(ptr(GPR::FP, caller_stack_off)));
+                        enc.strb(GPR::X0, slot_off_addr(p_off));
+                    } else if (sz == 2) {
+                        enc.ldrh(GPR::X0, ensure_accessible_mem(ptr(GPR::FP, caller_stack_off)));
+                        enc.strh(GPR::X0, slot_off_addr(p_off));
+                    } else if (param->type().is_i32()) {
                         enc.ldr32(GPR::X0, ensure_accessible_mem(ptr(GPR::FP, caller_stack_off)));
                         enc.str32(GPR::X0, slot_off_addr(p_off));
                     } else {
@@ -275,13 +301,22 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
                     break;
                 }
                 case Opcode::zext_i64: {
-                    enc.ldr32(GPR::X0, slot_addr(inst.operand(0)));
+                    if (inst.operand(0)->type() == Type::i8()) {
+                        enc.ldrb(GPR::X0, slot_addr(inst.operand(0)));
+                    } else {
+                        enc.ldr32(GPR::X0, slot_addr(inst.operand(0)));
+                    }
                     enc.str(GPR::X0, slot_addr(inst.result()));
                     break;
                 }
                 case Opcode::trunc_i32: {
                     enc.ldr32(GPR::X0, slot_addr(inst.operand(0)));
                     enc.str32(GPR::X0, slot_addr(inst.result()));
+                    break;
+                }
+                case Opcode::trunc_i8: {
+                    enc.ldrb(GPR::X0, slot_addr(inst.operand(0)));
+                    enc.strb(GPR::X0, slot_addr(inst.result()));
                     break;
                 }
                 case Opcode::fptosi_i32: {

@@ -237,7 +237,7 @@ bool constant_folding_pass(Function& fn) {
                     Value* replacement = nullptr;
                     b.position_before(cur);
                     if (op == Opcode::sext_i64) replacement = b.build_iconst_i64(static_cast<int64_t>(static_cast<int32_t>(c0)));
-                    else if (op == Opcode::zext_i64) replacement = b.build_iconst_i64(static_cast<int64_t>(static_cast<uint64_t>(static_cast<uint32_t>(c0))));
+                    else if (op == Opcode::zext_i64) replacement = b.build_iconst_i64(static_cast<int64_t>((op0->type() == Type::i8()) ? static_cast<uint8_t>(c0) : static_cast<uint64_t>(static_cast<uint32_t>(c0))));
                     else if (op == Opcode::trunc_i32) replacement = b.build_iconst_i32(static_cast<int32_t>(c0));
 
                     if (replacement) {

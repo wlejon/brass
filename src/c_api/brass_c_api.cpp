@@ -9,6 +9,8 @@ using namespace brass;
 
 /* Static Type Singletons */
 static BrassType_T s_type_void{ Type::void_type() };
+static BrassType_T s_type_i8{ Type::i8() };
+static BrassType_T s_type_i16{ Type::i16() };
 static BrassType_T s_type_i32{ Type::i32() };
 static BrassType_T s_type_i64{ Type::i64() };
 static BrassType_T s_type_f32{ Type::f32() };
@@ -29,6 +31,8 @@ static BrassType_T s_type_v256_i64{ Type::i64x4() };
 BrassType get_type_handle(Type t) {
     switch (t.kind()) {
         case TypeKind::Void: return &s_type_void;
+        case TypeKind::I8: return &s_type_i8;
+        case TypeKind::I16: return &s_type_i16;
         case TypeKind::I32: return &s_type_i32;
         case TypeKind::I64: return &s_type_i64;
         case TypeKind::F32: return &s_type_f32;

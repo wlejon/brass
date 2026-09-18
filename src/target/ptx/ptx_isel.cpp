@@ -222,8 +222,13 @@ void PtxISel::lower_instruction(const brass::Instruction& inst) {
 
         // Conversions
         case Opcode::sext_i64:       lower_cvt(inst, Type::s64, Type::s32); break;
-        case Opcode::zext_i64:       lower_cvt(inst, Type::u64, Type::u32); break;
+        case Opcode::zext_i64:
+            lower_cvt(inst, Type::u64, inst.operand(0)->type().is_i8() ? Type::u8 : Type::u32);
+            break;
         case Opcode::trunc_i32:      lower_cvt(inst, Type::u32, Type::u64); break;
+        case Opcode::trunc_i8:
+            lower_cvt(inst, Type::u8, inst.operand(0)->type().is_i64() ? Type::u64 : Type::u32);
+            break;
         case Opcode::sitofp_f64_i32: lower_sitofp(inst, Type::s32); break;
         case Opcode::sitofp_f64_i64: lower_sitofp(inst, Type::s64); break;
         case Opcode::fptosi_i32:     lower_fptosi(inst, Type::s32); break;

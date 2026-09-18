@@ -182,11 +182,20 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                     break;
                 }
                 case Opcode::zext_i64: {
-                    frame.set_value(inst->result(), val_zext_i64(frame.get_value(inst->operand(0))));
+                    RuntimeValue v = frame.get_value(inst->operand(0));
+                    if (inst->operand(0)->type() == Type::i8()) {
+                        frame.set_value(inst->result(), RuntimeValue::from_u64(static_cast<uint64_t>(v.as_u32() & 0xff)));
+                    } else {
+                        frame.set_value(inst->result(), val_zext_i64(v));
+                    }
                     break;
                 }
                 case Opcode::trunc_i32: {
                     frame.set_value(inst->result(), val_trunc_i32(frame.get_value(inst->operand(0))));
+                    break;
+                }
+                case Opcode::trunc_i8: {
+                    frame.set_value(inst->result(), RuntimeValue::from_i32(frame.get_value(inst->operand(0)).as_i32() & 0xff));
                     break;
                 }
                 case Opcode::fptosi_i32: {

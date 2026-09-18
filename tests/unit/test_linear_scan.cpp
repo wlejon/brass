@@ -228,28 +228,28 @@ TEST_CASE("Linear Scan - AArch64 32 Register Pool Allocation") {
 
     LirBlock* entry = fn.create_block("entry");
 
-    // Allocate 25 virtual registers
+    // Allocate 22 virtual registers
     std::vector<VReg> vars;
-    for (int i = 0; i < 25; ++i) {
+    for (int i = 0; i < 22; ++i) {
         vars.push_back(fn.allocate_vreg(RegClass::GPR, 8));
     }
 
-    // Initialize all 25 registers
-    for (size_t i = 0; i < 25; ++i) {
+    // Initialize all 22 registers
+    for (size_t i = 0; i < 22; ++i) {
         auto inst = std::make_unique<LirInst>(LirOpcode::Mov);
         inst->add_def(LirOperand::vreg(vars[i]));
         inst->add_use(LirOperand::imm(static_cast<int64_t>(i + 1)));
         entry->append_inst(std::move(inst));
     }
 
-    // Accumulate all 25 registers so they have overlapping live ranges
+    // Accumulate all 22 registers so they have overlapping live ranges
     VReg acc = fn.allocate_vreg(RegClass::GPR, 8);
     auto init_acc = std::make_unique<LirInst>(LirOpcode::Mov);
     init_acc->add_def(LirOperand::vreg(acc));
     init_acc->add_use(LirOperand::vreg(vars[0]));
     entry->append_inst(std::move(init_acc));
 
-    for (size_t i = 1; i < 25; ++i) {
+    for (size_t i = 1; i < 22; ++i) {
         auto add_inst = std::make_unique<LirInst>(LirOpcode::Add);
         add_inst->add_def(LirOperand::vreg(acc));
         add_inst->add_use(LirOperand::vreg(acc));
@@ -278,7 +278,7 @@ TEST_CASE("Linear Scan - AArch64 32 Register Pool Allocation") {
         }
     }
     CHECK(allocated_pregs > 16);
-    CHECK_EQ(allocated_pregs, size_t(26));
+    CHECK_EQ(allocated_pregs, size_t(23));
 
     // Verify all rewritten operands have valid physical registers
     for (const auto& inst : fn.blocks[0]->instructions) {

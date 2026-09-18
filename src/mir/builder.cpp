@@ -220,6 +220,16 @@ Value* Builder::build_trunc_i32(Value* val) {
     return res;
 }
 
+Value* Builder::build_trunc_i8(Value* val) {
+    Instruction* inst = get_arena().make<Instruction>(Opcode::trunc_i8, Type::i8());
+    inst->add_operand(val);
+    Value* res = create_value(Type::i8());
+    res->set_defining_instruction(inst);
+    inst->set_result(res);
+    insert(inst);
+    return res;
+}
+
 Value* Builder::build_fptosi_i32(Value* val) {
     Instruction* inst = get_arena().make<Instruction>(Opcode::fptosi_i32, Type::i32());
     inst->add_operand(val);
