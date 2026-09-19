@@ -61,11 +61,7 @@ Value* AudioKernelBuilder::vclamp_f32x8(Value* x, Value* min_val, Value* max_val
 }
 
 Value* AudioKernelBuilder::clamp_f32(Value* x, Value* min_val, Value* max_val) {
-    // In MIR: max(x, min_val), then min with max_val
-    Value* cond_min = builder().build_sgt(x, min_val);
-    Value* t_min = builder().build_select(cond_min, x, min_val);
-    Value* cond_max = builder().build_slt(t_min, max_val);
-    return builder().build_select(cond_max, t_min, max_val);
+    return builder().build_fmin_f32(builder().build_fmax_f32(x, min_val), max_val);
 }
 
 // ── IIR Biquad (Direct Form II Transposed) ──────────────────────────────────
@@ -279,12 +275,10 @@ Value* AudioKernelBuilder::sin_norm(Value* phase01) {
     Value* y = sub(phase01, c_05);
 
     Value* fold_pos = sub(c_05, y);
-    Value* is_less = builder().build_slt(y, fold_pos);
-    Value* t1 = builder().build_select(is_less, y, fold_pos);
+    Value* t1 = builder().build_fmin_f32(y, fold_pos);
 
     Value* fold_neg = sub(c_neg05, y);
-    Value* is_greater = builder().build_sgt(t1, fold_neg);
-    Value* t = builder().build_select(is_greater, t1, fold_neg);
+    Value* t = builder().build_fmax_f32(t1, fold_neg);
 
     Value* th = mul(t, const_f32(6.28318530718f));
     Value* th2 = mul(th, th);
@@ -335,8 +329,7 @@ Value* AudioKernelBuilder::cos_norm(Value* phase01) {
     Value* c_1 = const_f32(1.0f);
     Value* c_025 = const_f32(0.25f);
     Value* one_minus_p = sub(c_1, phase01);
-    Value* is_less = builder().build_slt(phase01, one_minus_p);
-    Value* p_sym = builder().build_select(is_less, phase01, one_minus_p);
+    Value* p_sym = builder().build_fmin_f32(phase01, one_minus_p);
     Value* t = sub(c_025, p_sym);
 
     Value* th = mul(t, const_f32(6.28318530718f));
