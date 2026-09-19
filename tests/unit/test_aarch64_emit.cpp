@@ -241,6 +241,19 @@ TEST_CASE("AArch64 Emit - Floating Point and SIMD Vector Ops") {
     cvttsd2si_mem->add_use(LirOperand::mem(PReg::aarch64_gpr(GPR::X0), 32, 8));
     bb->append_inst(std::move(cvttsd2si_mem));
 
+    // Xorps v0, v0 (zero float reg)
+    auto xorps_inst = std::make_unique<LirInst>(LirOpcode::Xorps);
+    xorps_inst->add_def(LirOperand::preg_aarch64_fpr(FPR::V0, 4));
+    xorps_inst->add_use(LirOperand::preg_aarch64_fpr(FPR::V0, 4));
+    xorps_inst->add_use(LirOperand::preg_aarch64_fpr(FPR::V0, 4));
+    bb->append_inst(std::move(xorps_inst));
+
+    // Not32 w1, w1
+    auto not32_inst = std::make_unique<LirInst>(LirOpcode::Not32);
+    not32_inst->add_def(LirOperand::preg_aarch64_gpr(GPR::X1, 4));
+    not32_inst->add_use(LirOperand::preg_aarch64_gpr(GPR::X1, 4));
+    bb->append_inst(std::move(not32_inst));
+
     // Ret
     auto ret = std::make_unique<LirInst>(LirOpcode::Ret);
     bb->append_inst(std::move(ret));

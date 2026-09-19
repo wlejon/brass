@@ -376,6 +376,7 @@ void AArch64EmitContext::emit_instruction(const LirInst& inst, bool is_entry_blo
         case LirOpcode::Ucomisd:
         case LirOpcode::Ucomiss:
         case LirOpcode::Xorpd:
+        case LirOpcode::Xorps:
         case LirOpcode::Fneg:
         case LirOpcode::Fneg32:
         case LirOpcode::Cvtsi2sd:
@@ -444,7 +445,6 @@ void AArch64EmitContext::emit_instruction(const LirInst& inst, bool is_entry_blo
         case LirOpcode::Pextrq:
         case LirOpcode::Extractps:
         case LirOpcode::Insertps:
-        case LirOpcode::Xorps:
         case LirOpcode::Vbroadcastss:
         case LirOpcode::Vbroadcastsd:
         case LirOpcode::Vpbroadcastd:

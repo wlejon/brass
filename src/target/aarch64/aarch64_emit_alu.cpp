@@ -394,6 +394,7 @@ void AArch64EmitContext::emit_alu_instruction(const LirInst& inst) {
         }
 
         case LirOpcode::Not: enc_.mvn(to_gpr(inst.defs[0]), to_gpr(inst.uses[0])); break;
+        case LirOpcode::Not32: enc_.mvn32(to_gpr(inst.defs[0]), to_gpr(inst.uses[0])); break;
         case LirOpcode::Neg: {
             if (to_fpr(inst.defs[0]) != FPR::None) {
                 FPR src = (inst.uses.empty() || to_fpr(inst.uses[0]) == FPR::None) ? to_fpr(inst.defs[0]) : to_fpr(inst.uses[0]);
