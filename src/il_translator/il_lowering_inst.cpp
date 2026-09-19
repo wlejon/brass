@@ -270,6 +270,48 @@ bool IlLowering::lower_instruction(
                 if (direct_fn->return_type() == Type::void_type()) {
                     res_val = b.build_iconst_i64(static_cast<int64_t>(kUndefinedTag));
                 }
+            } else if (Value* site = prop_lowering_.ic_site(b, inst_ast.ic_index)) {
+                // The designed path (bronze_abi.h, "the METHOD-CALL site"):
+                // one helper that reads the method, latches the site and
+                // dispatches. The arguments are staged in this function's
+                // GC frame — the helper's property read can run a getter,
+                // and a collection during it must find and forward them —
+                // so `argv` is a pointer into rooted slots exactly as the
+                // runtime's own `bronze_call_dynamic_N` callers arrange.
+                // A function lowered without a frame (none exists today; a
+                // coroutine body would be one) pushes a frame of its own
+                // around the call instead.
+                Value* argv = nullptr;
+                bool pushed_frame = false;
+                if (argc == 0) {
+                    argv = b.build_iconst_i64(0);
+                } else if (current_fn_frame_ptr_ != nullptr) {
+                    const int32_t base = static_cast<int32_t>(16 + method_argv_slot_ * 8);
+                    for (size_t a = 0; a < argc; ++a) {
+                        Value* arg = ensure_type(get_opd(1 + a), Type::i64(), b);
+                        b.build_store(Type::i64(), current_fn_frame_ptr_,
+                                      static_cast<int32_t>(base + a * 8), arg);
+                    }
+                    argv = b.build_add(current_fn_frame_ptr_, b.build_iconst_i64(base));
+                } else {
+                    Value* frame = b.build_call("bronze_gc_frame_push", Type::ptr(),
+                                                {b.build_iconst_i32(static_cast<int32_t>(argc))});
+                    for (size_t a = 0; a < argc; ++a) {
+                        Value* arg = ensure_type(get_opd(1 + a), Type::i64(), b);
+                        b.build_store(Type::i64(), frame, static_cast<int32_t>(16 + a * 8), arg);
+                    }
+                    argv = b.build_add(frame, b.build_iconst_i64(16));
+                    pushed_frame = true;
+                }
+                // Nothing between the receiver read above and the call can
+                // allocate: `ensure_type` is pure conversion and the stores
+                // are stores, so `recv` is still the live bits here.
+                Value* argc_val = b.build_iconst_i32(static_cast<int32_t>(argc));
+                res_val = b.build_call("bronze_call_method", Type::i64(),
+                                       {recv, get_key_id(b, inst_ast.index), argc_val, argv, site});
+                if (pushed_frame) {
+                    b.build_call("bronze_gc_frame_pop", Type::void_type(), {});
+                }
             } else {
                 Value* null_entry = b.build_iconst_i64(0);
                 Value* method = b.build_call("bronze_prop_get", Type::i64(), {recv, get_key_id(b, inst_ast.index), null_entry});
@@ -737,8 +779,9 @@ bool IlLowering::lower_instruction(
             Value* this_val = ensure_type(get_opd(0), Type::i64(), b);
             Value* args = ensure_type(get_opd(1), Type::i64(), b);
             Value* key_id = get_key_id(b, inst_ast.index);
-            Value* null_entry = b.build_iconst_i64(0);
-            res_val = b.build_call("bronze_call_method_spread", Type::i64(), {this_val, key_id, args, null_entry});
+            Value* site = prop_lowering_.ic_site(b, inst_ast.ic_index);
+            Value* entry = site ? site : b.build_iconst_i64(0);
+            res_val = b.build_call("bronze_call_method_spread", Type::i64(), {this_val, key_id, args, entry});
             emit_exception_check();
             break;
         }

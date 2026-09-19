@@ -120,6 +120,20 @@ struct TranslatorOptions {
     bool pin_tls_register = false;
     bool enable_census = false;
     uint32_t census_site_count = 0;
+    // The module's inline-cache table (bronze_abi.h, "the inline property
+    // cache contract"): `ic_site_count` sites of BRONZE_ABI_IC_SITE_SIZE
+    // bytes each, laid out by the embedder as the module data symbol
+    // `__bronze_ic_table` (module-suffixed). A property read, a property
+    // write and a method call whose IL carries an ic index below the count
+    // pass the address of THEIR site's way 0 to the runtime helper; zero
+    // sites (the default, and every standalone brass test) keeps every site
+    // pointer null, which the helpers accept as "cache nothing".
+    // `method_ic_sites` is the subset of indexes that belong to METHOD-CALL
+    // sites, whose env words the module must hand to
+    // `bronze_register_method_ic_cells` at init; the embedder emits them as
+    // the u64 array `__bronze_method_ic_sites` in that order.
+    uint32_t ic_site_count = 0;
+    std::vector<uint32_t> method_ic_sites;
     struct SourceFileMeta {
         uint32_t text_len = 0;
         uint32_t entry_count = 0;

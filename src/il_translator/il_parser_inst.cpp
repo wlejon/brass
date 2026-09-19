@@ -691,7 +691,10 @@ bool IlParser::parse_instruction(BronzeInstruction& out_inst) {
                 out_inst.index = static_cast<uint32_t>(lexer_.next_token().num_i64);
             }
             if (match(TokenType::Comma) && (lexer_.peek_token().type == TokenType::NumberInt || lexer_.peek_token().type == TokenType::NumberFloat)) {
-                out_inst.depth = static_cast<uint32_t>(lexer_.next_token().num_i64);
+                // The site number, as `prop.get`/`prop.set` carry it: both
+                // fields, so the textual and the in-memory AST paths agree.
+                out_inst.ic_index = static_cast<uint32_t>(lexer_.next_token().num_i64);
+                out_inst.depth = out_inst.ic_index;
             }
             while (match(TokenType::Comma)) {
                 Token peek = lexer_.peek_token();
@@ -731,7 +734,10 @@ bool IlParser::parse_instruction(BronzeInstruction& out_inst) {
                 out_inst.index = static_cast<uint32_t>(lexer_.next_token().num_i64);
             }
             if (match(TokenType::Comma) && (lexer_.peek_token().type == TokenType::NumberInt || lexer_.peek_token().type == TokenType::NumberFloat)) {
-                out_inst.depth = static_cast<uint32_t>(lexer_.next_token().num_i64);
+                // The site number, as `prop.get`/`prop.set` carry it: both
+                // fields, so the textual and the in-memory AST paths agree.
+                out_inst.ic_index = static_cast<uint32_t>(lexer_.next_token().num_i64);
+                out_inst.depth = out_inst.ic_index;
             }
             while (match(TokenType::Comma)) {
                 Token peek = lexer_.peek_token();

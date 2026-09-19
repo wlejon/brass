@@ -28,6 +28,9 @@ public:
     Value* get_val_by_id(uint32_t id, Builder& b, const std::unordered_map<uint32_t, Value*>& val_map);
     void set_inst_result(uint32_t result_id, Value* res_val, Builder& b, std::unordered_map<uint32_t, Value*>& val_map);
     Value* current_fn_frame_ptr() const { return current_fn_frame_ptr_; }
+    // The first GC-frame slot of the current function's method-call argv
+    // block (lower_function sizes it); meaningful only with a frame.
+    uint32_t method_argv_slot() const { return method_argv_slot_; }
     PropertyLoweringHelper& prop_lowering() { return prop_lowering_; }
     AllocLoweringHelper& alloc_lowering() { return alloc_lowering_; }
     const TranslatorOptions& options() const { return options_; }
@@ -62,6 +65,7 @@ private:
     std::unordered_set<uint32_t> module_env_regs_;
     std::unordered_map<uint32_t, uint32_t> current_fn_slot_of_;
     Value* current_fn_frame_ptr_ = nullptr;
+    uint32_t method_argv_slot_ = 0;
     // The stack-limit check the function was given at entry (pinned-register
     // mode), kept so a body that turned out to call nothing can drop it.
     BasicBlock* stack_check_entry_bb_ = nullptr;

@@ -22,6 +22,11 @@ constexpr uint64_t kUndefinedTag = 0xFFF6000000000000ULL;
 constexpr int32_t kBronzeTlsExceptionCellOff = 8;
 constexpr int32_t kBronzeTlsStackLimitOff = 248;
 constexpr uint64_t kBronzeNoExceptionBits = 0xFFF7000000000000ULL;
+// One inline-cache SITE in the module's `__bronze_ic_table`
+// (BRONZE_ABI_IC_SITE_SIZE: BRONZE_ABI_IC_WAYS entries of
+// BRONZE_ABI_IC_ENTRY_SIZE bytes). The table is indexed by site, and a
+// helper takes the address of a site's way 0.
+constexpr uint32_t kBronzeIcSiteSize = 96;
 constexpr uint64_t kNullTag      = 0xFFF5000000000000ULL;
 constexpr uint64_t kBoolTag      = 0xFFF4000000000000ULL;
 constexpr uint64_t kInt32Tag     = 0xFFF3000000000000ULL;
@@ -195,6 +200,8 @@ void bronze_object_spread(uint64_t obj, uint64_t val);
 uint64_t bronze_object_rest(uint64_t src, uint64_t excluded);
 uint64_t bronze_dynamic_call_spread(uint64_t callee, uint64_t this_val, uint64_t args_arr);
 uint64_t bronze_call_method_spread(uint64_t this_val, uint32_t key_index, uint64_t args_arr, void* ic_entry);
+uint64_t bronze_call_method(uint64_t this_val, uint32_t key_index, uint32_t argc, const uint64_t* argv, void* ic_entry);
+void bronze_register_method_ic_cells(uint64_t* ic_table, const uint64_t* site_indexes, uint64_t count);
 uint64_t bronze_construct_spread(uint64_t callee, uint64_t args_arr);
 uint64_t bronze_super_call_spread(uint64_t base, uint64_t this_val, uint64_t args_arr);
 int64_t bronze_object_keys(int64_t obj_box);

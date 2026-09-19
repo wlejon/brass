@@ -187,6 +187,7 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
     // Register external runtime helper functions
     register_all_module_external_symbols(mod.get(), options_.entry_symbol);
     prop_lowering_.set_key_map_sym(module_sym("__bronze_key_map"));
+    prop_lowering_.set_ic_table(module_sym("__bronze_ic_table"), options_.ic_site_count);
 
     current_ast_ = &ast;
 
@@ -554,6 +555,7 @@ bool IlLowering::lower_function(const BronzeFunction& fn_ast, Module& mod, const
     current_fn_slot_of_.clear();
     create_func_counter_.clear();
     current_fn_frame_ptr_ = nullptr;
+    method_argv_slot_ = 0;
     uint32_t total_slots = 0;
 
     bool is_coro_fn = false;
@@ -592,6 +594,26 @@ bool IlLowering::lower_function(const BronzeFunction& fn_ast, Module& mod, const
                 }
             }
         }
+        // The argv block a dynamic method call stages its arguments in
+        // (`bronze_call_method` takes `const uint64_t* argv`): the widest
+        // method call's worth of slots at the END of the same GC frame, so
+        // the arguments are rooted — and forwarded — exactly as the frame's
+        // other Values are while the helper's property read can collect.
+        // Nested calls cannot overlap: an argument is a value already
+        // computed by the time its call stores it, and the stores happen
+        // right before the call. Sized over every method call, including
+        // the ones that resolve to a direct edge, which merely leaves a few
+        // slots holding the `undefined` the push gave them.
+        uint32_t widest_method_argc = 0;
+        for (const auto& blk : fn_ast.blocks) {
+            for (const auto& inst : blk.instructions) {
+                if (inst.op == BronzeOp::MethodCall && inst.param_count > widest_method_argc) {
+                    widest_method_argc = inst.param_count;
+                }
+            }
+        }
+        method_argv_slot_ = total_slots;
+        total_slots += widest_method_argc;
     }
 
     Builder b(mod);
@@ -687,6 +709,17 @@ bool IlLowering::lower_function(const BronzeFunction& fn_ast, Module& mod, const
             Value* manifest_addr = b.build_func_addr(key_sym);
             Value* map_addr = b.build_func_addr(module_sym("__bronze_key_map"));
             b.build_call("bronze_register_key_manifest", Type::void_type(), {manifest_addr, map_addr});
+            // The method-call sites' env words, registered as value cells
+            // (bronze_abi.h, bronze_register_method_ic_cells): a latched
+            // direct-form entry may hold a closure's environment record —
+            // a heap Value in module data — and only registration keeps it
+            // current across a collection.
+            if (options_.ic_site_count > 0 && !options_.method_ic_sites.empty()) {
+                Value* table_addr = b.build_func_addr(module_sym("__bronze_ic_table"));
+                Value* sites_addr = b.build_func_addr(module_sym("__bronze_method_ic_sites"));
+                Value* site_count = b.build_iconst_i64(static_cast<int64_t>(options_.method_ic_sites.size()));
+                b.build_call("bronze_register_method_ic_cells", Type::void_type(), {table_addr, sites_addr, site_count});
+            }
             if (options_.enable_census && options_.census_site_count > 0) {
                 Value* out_path = b.build_func_addr(module_sym("__bronze_census_out_path"));
                 Value* sites_addr = b.build_func_addr(module_sym("__bronze_census_sites"));

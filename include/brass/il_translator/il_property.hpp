@@ -22,12 +22,27 @@ public:
     [[nodiscard]] const std::string& key_map_sym() const noexcept { return key_map_sym_; }
     void set_key_map_sym(std::string sym) { key_map_sym_ = std::move(sym); }
 
+    // The module's inline-cache table: `site_count` sites of
+    // kBronzeIcSiteSize bytes at the data symbol `sym`. Zero sites (the
+    // default) means no table, and every site pointer stays null.
+    void set_ic_table(std::string sym, uint32_t site_count) {
+        ic_table_sym_ = std::move(sym);
+        ic_site_count_ = site_count;
+    }
+    [[nodiscard]] uint32_t ic_site_count() const noexcept { return ic_site_count_; }
+
+    // The address of site `ic_index`'s way 0 — what the bronze helpers take
+    // as their BRONZE_ABI_MU64 operand — or null when the index names no site
+    // in this module's table (kNoIcIndex, or a module compiled without one).
+    Value* ic_site(Builder& b, uint32_t ic_index);
+
     Value* lower_prop_get(
         Builder& b,
         Value* obj,
         std::string_view prop_name,
         uint32_t symbol_id,
-        uint32_t site_id
+        uint32_t site_id,
+        Value* ic_entry = nullptr
     );
 
     Value* lower_prop_get(
@@ -60,7 +75,8 @@ public:
         Value* val,
         uint32_t slot_idx,
         uint32_t imm,
-        uint32_t site_id
+        uint32_t site_id,
+        Value* ic_entry = nullptr
     );
 
     void lower_prop_set(
@@ -115,6 +131,8 @@ private:
     bool enable_inlined_fastpaths_ = true;
     uint32_t next_auto_site_id_ = 1000;
     std::string key_map_sym_ = "__bronze_key_map";
+    std::string ic_table_sym_ = "__bronze_ic_table";
+    uint32_t ic_site_count_ = 0;
 };
 
 } // namespace brass::il

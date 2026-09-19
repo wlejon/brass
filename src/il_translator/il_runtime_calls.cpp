@@ -503,4 +503,24 @@ BRONZE_WEAK int64_t bronze_super_call_n(int64_t sub_box, int64_t this_box, uint3
     return bronze_super_call(sub_box, this_box, argc, argv);
 }
 
+// The standalone stand-in for bronze's `bronze_call_method`: the method read
+// and the dispatch, with the site ignored (this runtime keeps no per-site
+// cache). The embedder's runtime replaces it by name.
+BRONZE_WEAK uint64_t bronze_call_method(uint64_t this_val, uint32_t key_index, uint32_t argc,
+                                        const uint64_t* argv, void* /*ic_entry*/) {
+    const int64_t callee = bronze_prop_get(static_cast<int64_t>(this_val), static_cast<int32_t>(key_index));
+    if (callee == static_cast<int64_t>(kPrintTag)) {
+        print_dynamic_helper(reinterpret_cast<const int64_t*>(argv), argc);
+        return kUndefinedTag;
+    }
+    auto* closure = unpack_closure(callee);
+    void* code = get_closure_code(closure);
+    if (code && closure) {
+        return static_cast<uint64_t>(reinterpret_cast<BronzeFnCode>(code)(
+            closure->env_box, static_cast<int64_t>(this_val), argc,
+            reinterpret_cast<const int64_t*>(argv)));
+    }
+    return kUndefinedTag;
+}
+
 } // namespace brass::il

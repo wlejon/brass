@@ -515,6 +515,12 @@ void bronze_register_value_cells(uint64_t* cells, uint64_t count) {
     (void)count;
 }
 
+BRONZE_WEAK void bronze_register_method_ic_cells(uint64_t* ic_table, const uint64_t* site_indexes, uint64_t count) {
+    (void)ic_table;
+    (void)site_indexes;
+    (void)count;
+}
+
 BRONZE_WEAK void bronze_register_fn_sources(const char* text, uint32_t text_len, const uint64_t* entries, uint32_t count) {
     (void)text;
     (void)text_len;

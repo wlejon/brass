@@ -1,5 +1,6 @@
 #include "il_property_lowering.hpp"
 #include "il_lowering.hpp"
+#include "il_runtime.hpp"
 #include <brass/il_translator/il_property.hpp>
 #include <brass/mir/function.hpp>
 #include <brass/mir/module.hpp>
@@ -12,12 +13,21 @@ namespace brass::il {
 
 static std::atomic<uint32_t> g_global_auto_site_id{1000000};
 
+Value* PropertyLoweringHelper::ic_site(Builder& b, uint32_t ic_index) {
+    if (ic_index >= ic_site_count_) return nullptr;
+    Value* table = b.build_func_addr(ic_table_sym_);
+    if (ic_index == 0) return table;
+    const uint64_t byte_offset = static_cast<uint64_t>(ic_index) * kBronzeIcSiteSize;
+    return b.build_add(table, b.build_iconst_i64(static_cast<int64_t>(byte_offset)));
+}
+
 Value* PropertyLoweringHelper::lower_prop_get(
     Builder& b,
     Value* obj,
     std::string_view prop_name,
     uint32_t symbol_id,
-    uint32_t site_id
+    uint32_t site_id,
+    Value* ic_entry
 ) {
     if (prop_name.empty()) {
         Value* sym_val = nullptr;
@@ -27,8 +37,8 @@ Value* PropertyLoweringHelper::lower_prop_get(
             Value* map_addr = b.build_func_addr(key_map_sym_);
             sym_val = b.build_load(Type::i32(), map_addr, static_cast<int32_t>(symbol_id * sizeof(uint32_t)));
         }
-        Value* null_entry = b.build_iconst_i64(0);
-        return b.build_call("bronze_prop_get", Type::i64(), {obj, sym_val, null_entry});
+        Value* entry = ic_entry ? ic_entry : b.build_iconst_i64(0);
+        return b.build_call("bronze_prop_get", Type::i64(), {obj, sym_val, entry});
     }
 
     Module* mod = b.current_block()->parent()->parent();
@@ -53,7 +63,8 @@ void PropertyLoweringHelper::lower_prop_set(
     Value* val,
     uint32_t slot_idx,
     uint32_t imm,
-    uint32_t site_id
+    uint32_t site_id,
+    Value* ic_entry
 ) {
     if (prop_name.empty()) {
         Value* sym_val = nullptr;
@@ -63,9 +74,11 @@ void PropertyLoweringHelper::lower_prop_set(
             Value* map_addr = b.build_func_addr(key_map_sym_);
             sym_val = b.build_load(Type::i32(), map_addr, static_cast<int32_t>(symbol_id * sizeof(uint32_t)));
         }
-        Value* slot_val = b.build_iconst_i64(static_cast<int64_t>(slot_idx));
+        // The fourth operand is the site pointer and nothing else: a site the
+        // module has no table entry for passes null, never an index.
+        Value* entry = ic_entry ? ic_entry : b.build_iconst_i64(0);
         Value* strict_val = b.build_iconst_i32(imm != 0 ? 1 : 0);
-        b.build_call("bronze_prop_set", Type::void_type(), {obj, sym_val, val, slot_val, strict_val});
+        b.build_call("bronze_prop_set", Type::void_type(), {obj, sym_val, val, entry, strict_val});
         return;
     }
 
@@ -507,8 +520,9 @@ bool lower_property_instruction(
     switch (inst_ast.op) {
         case BronzeOp::PropGet: {
             Value* obj_val = ensure_type(get_opd(0), Type::i64());
+            Value* site = prop_lowering.ic_site(b, inst_ast.ic_index);
             res_val = prop_lowering.lower_prop_get(
-                b, obj_val, inst_ast.string_literal, inst_ast.index, inst_ast.depth
+                b, obj_val, inst_ast.string_literal, inst_ast.index, inst_ast.depth, site
             );
             emit_exception_check();
             return true;
@@ -517,9 +531,10 @@ bool lower_property_instruction(
         case BronzeOp::PropSet: {
             Value* obj_val = ensure_type(get_opd(0), Type::i64());
             Value* val = ensure_type(get_opd(1), Type::i64());
+            Value* site = prop_lowering.ic_site(b, inst_ast.ic_index);
             prop_lowering.lower_prop_set(
                 b, obj_val, inst_ast.string_literal, inst_ast.index, val,
-                inst_ast.depth, static_cast<uint32_t>(inst_ast.imm_i64), 0
+                inst_ast.depth, static_cast<uint32_t>(inst_ast.imm_i64), 0, site
             );
             b.build_write_barrier(obj_val, val);
             emit_exception_check();

@@ -167,6 +167,8 @@ void register_all_runtime_symbols_generic(Engine& jit) {
     reg("bronze_object_rest", reinterpret_cast<void*>(&bronze_object_rest));
     reg("bronze_dynamic_call_spread", reinterpret_cast<void*>(&bronze_dynamic_call_spread));
     reg("bronze_call_method_spread", reinterpret_cast<void*>(&bronze_call_method_spread));
+    reg("bronze_call_method", reinterpret_cast<void*>(&bronze_call_method));
+    reg("bronze_register_method_ic_cells", reinterpret_cast<void*>(&bronze_register_method_ic_cells));
     reg("bronze_construct_spread", reinterpret_cast<void*>(&bronze_construct_spread));
     reg("bronze_super_call_spread", reinterpret_cast<void*>(&bronze_super_call_spread));
     reg("bronze_arg_at", reinterpret_cast<void*>(&bronze_arg_at));
@@ -481,6 +483,10 @@ void register_all_module_external_symbols(Module* mod, const std::string& entry_
         "bronze_object_rest",
         "bronze_dynamic_call_spread",
         "bronze_call_method_spread",
+        "bronze_call_method",
+        "bronze_register_method_ic_cells",
+        "__bronze_ic_table",
+        "__bronze_method_ic_sites",
         "bronze_construct_spread",
         "bronze_super_call_spread",
         "bronze_arg_at",
@@ -569,6 +575,8 @@ void register_all_module_external_symbols(Module* mod, const std::string& entry_
         mod->add_external_symbol("__bronze_template_cells_" + entry_symbol);
         mod->add_external_symbol("__bronze_census_out_path_" + entry_symbol);
         mod->add_external_symbol("__bronze_census_sites_" + entry_symbol);
+        mod->add_external_symbol("__bronze_ic_table_" + entry_symbol);
+        mod->add_external_symbol("__bronze_method_ic_sites_" + entry_symbol);
     }
 }
 
