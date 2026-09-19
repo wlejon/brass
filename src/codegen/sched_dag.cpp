@@ -273,7 +273,6 @@ uint32_t get_instruction_latency(const LirInst& inst) {
         default:
             return 1;
     }
-    return 1;
 }
 
 struct MemoryRef {
