@@ -225,6 +225,7 @@ void AArch64EmitContext::emit_fp_instruction(const LirInst& inst) {
             bool is_double = (inst.opcode == LirOpcode::Vfmadd213sd || inst.opcode == LirOpcode::Vfmadd231sd);
             bool is_213 = (inst.opcode == LirOpcode::Vfmadd213ss || inst.opcode == LirOpcode::Vfmadd213sd);
             FPR dst = to_fpr(inst.defs[0]);
+            FPR src1 = (inst.uses.size() >= 3) ? to_fpr(inst.uses[0]) : dst;
             size_t s2_idx = (inst.uses.size() >= 3) ? 1 : 0;
             size_t s3_idx = (inst.uses.size() >= 3) ? 2 : 1;
             FPR src2 = to_fpr(inst.uses[s2_idx]);
@@ -237,9 +238,9 @@ void AArch64EmitContext::emit_fp_instruction(const LirInst& inst) {
                 else enc_.ldr_s(FPR::V31, ensure_accessible_mem(to_mem_address(src3_op)));
             }
 
-            FPR sn = is_213 ? dst : src2;
+            FPR sn = is_213 ? src1 : src2;
             FPR sm = is_213 ? src2 : src3;
-            FPR sa = is_213 ? src3 : dst;
+            FPR sa = is_213 ? src3 : src1;
 
             if (is_double) enc_.fmadd_d(dst, sn, sm, sa);
             else enc_.fmadd_s(dst, sn, sm, sa);

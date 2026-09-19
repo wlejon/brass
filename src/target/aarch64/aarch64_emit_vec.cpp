@@ -330,41 +330,49 @@ void AArch64EmitContext::emit_vec_instruction(const LirInst& inst) {
             bool is_double = (inst.opcode == LirOpcode::Vfmadd213pd || inst.opcode == LirOpcode::Vfmadd231pd);
             bool is_213 = (inst.opcode == LirOpcode::Vfmadd213ps || inst.opcode == LirOpcode::Vfmadd213pd);
             FPR dst = to_fpr(inst.defs[0]);
+            FPR src1 = (inst.uses.size() >= 3) ? to_fpr(inst.uses[0]) : dst;
             size_t s2_idx = (inst.uses.size() >= 3) ? 1 : 0;
             size_t s3_idx = (inst.uses.size() >= 3) ? 2 : 1;
             FPR src2 = to_fpr(inst.uses[s2_idx]);
             const auto& src3_op = inst.uses[s3_idx];
 
             if (is_213) {
-                // 213: dst = (dst * src2) + src3
+                // 213: dst = (src1 * src2) + src3
                 // In AArch64, fmla Vd, Vn, Vm computes Vd = Vd + (Vn * Vm).
                 if (src3_op.is_preg()) {
                     FPR src3 = to_fpr(src3_op);
-                    if (src3 == dst) {
-                        if (is_double) enc_.vec_fmla_2d(dst, dst, src2);
-                        else enc_.vec_fmla_4s(dst, dst, src2);
-                    } else {
-                        enc_.vec_orr(FPR::V31, src3, src3);
-                        if (is_double) enc_.vec_fmla_2d(FPR::V31, dst, src2);
-                        else enc_.vec_fmla_4s(FPR::V31, dst, src2);
-                        enc_.vec_orr(dst, FPR::V31, FPR::V31);
-                    }
+                    enc_.vec_orr(FPR::V31, src3, src3);
+                    if (is_double) enc_.vec_fmla_2d(FPR::V31, src1, src2);
+                    else enc_.vec_fmla_4s(FPR::V31, src1, src2);
+                    enc_.vec_orr(dst, FPR::V31, FPR::V31);
                 } else {
                     enc_.ldr_q(FPR::V31, ensure_accessible_mem(to_mem_address(src3_op)));
-                    if (is_double) enc_.vec_fmla_2d(FPR::V31, dst, src2);
-                    else enc_.vec_fmla_4s(FPR::V31, dst, src2);
+                    if (is_double) enc_.vec_fmla_2d(FPR::V31, src1, src2);
+                    else enc_.vec_fmla_4s(FPR::V31, src1, src2);
                     enc_.vec_orr(dst, FPR::V31, FPR::V31);
                 }
             } else {
-                // 231: dst = (src2 * src3) + dst
+                // 231: dst = (src2 * src3) + src1
+                FPR acc = dst;
+                bool aliases_other_src = (dst == src2 || (src3_op.is_preg() && dst == to_fpr(src3_op)));
+                if (aliases_other_src) {
+                    enc_.vec_orr(FPR::V30, src1, src1);
+                    acc = FPR::V30;
+                } else if (dst != src1) {
+                    enc_.vec_orr(dst, src1, src1);
+                }
+
                 if (src3_op.is_preg()) {
                     FPR src3 = to_fpr(src3_op);
-                    if (is_double) enc_.vec_fmla_2d(dst, src2, src3);
-                    else enc_.vec_fmla_4s(dst, src2, src3);
+                    if (is_double) enc_.vec_fmla_2d(acc, src2, src3);
+                    else enc_.vec_fmla_4s(acc, src2, src3);
                 } else {
                     enc_.ldr_q(FPR::V31, ensure_accessible_mem(to_mem_address(src3_op)));
-                    if (is_double) enc_.vec_fmla_2d(dst, src2, FPR::V31);
-                    else enc_.vec_fmla_4s(dst, src2, FPR::V31);
+                    if (is_double) enc_.vec_fmla_2d(acc, src2, FPR::V31);
+                    else enc_.vec_fmla_4s(acc, src2, FPR::V31);
+                }
+                if (acc != dst) {
+                    enc_.vec_orr(dst, acc, acc);
                 }
             }
             break;
