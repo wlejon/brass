@@ -85,6 +85,18 @@ void FunctionDebugTable::add_line_entry(uint32_t code_offset, DebugLoc loc) {
     if (line_entries_.empty() || code_offset >= line_entries_.back().code_offset) {
         if (!line_entries_.empty() && line_entries_.back().code_offset == code_offset) {
             line_entries_.back().loc = loc;
+            // The overwrite may have made the entry say what its predecessor
+            // already says; drop it under the same rule as below.
+            const size_t n = line_entries_.size();
+            if (n >= 2 && line_entries_[n - 2].loc == loc) line_entries_.pop_back();
+        } else if (!line_entries_.empty() && line_entries_.back().loc == loc) {
+            // A run of instructions on one location needs one entry: every
+            // consumer (resolve_offset, the CodeView and DWARF line programs,
+            // bronze's pc tables) maps an offset to the entry at or before
+            // it, so an entry restating its predecessor's location changes no
+            // answer and only grows the table. The emitter records a location
+            // per instruction; without this the table was one entry per
+            // instruction, ~650k for a pixi.js compile.
         } else {
             line_entries_.push_back({code_offset, loc});
         }
