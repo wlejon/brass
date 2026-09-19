@@ -83,10 +83,7 @@ Value* ImageBuilder::u8_to_f32(Value* u8_val, Value* scale, Value* bias) {
 }
 
 Value* ImageBuilder::clamp_f32(Value* val, Value* min_val, Value* max_val) {
-    Value* is_less = builder().build_slt(val, min_val);
-    Value* t = builder().build_select(is_less, min_val, val);
-    Value* is_greater = builder().build_sgt(t, max_val);
-    return builder().build_select(is_greater, max_val, t);
+    return builder().build_fmin_f32(builder().build_fmax_f32(val, min_val), max_val);
 }
 
 Value* ImageBuilder::clamp_i32(Value* val, Value* min_val, Value* max_val) {
