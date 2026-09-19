@@ -158,17 +158,107 @@ void AArch64EmitContext::emit_fp_instruction(const LirInst& inst) {
             break;
         }
 
-        case LirOpcode::Sqrtsd: enc_.fsqrt(to_fpr(inst.defs[0]), to_fpr(inst.uses.back())); break;
-        case LirOpcode::Sqrtss: enc_.fsqrt_s(to_fpr(inst.defs[0]), to_fpr(inst.uses.back())); break;
+        case LirOpcode::Sqrtsd: {
+            FPR dst = to_fpr(inst.defs[0]);
+            const auto& src = inst.uses.back();
+            if (src.is_preg()) enc_.fsqrt(dst, to_fpr(src));
+            else {
+                enc_.ldr(FPR::V31, ensure_accessible_mem(to_mem_address(src)));
+                enc_.fsqrt(dst, FPR::V31);
+            }
+            break;
+        }
+        case LirOpcode::Sqrtss: {
+            FPR dst = to_fpr(inst.defs[0]);
+            const auto& src = inst.uses.back();
+            if (src.is_preg()) enc_.fsqrt_s(dst, to_fpr(src));
+            else {
+                enc_.ldr_s(FPR::V31, ensure_accessible_mem(to_mem_address(src)));
+                enc_.fsqrt_s(dst, FPR::V31);
+            }
+            break;
+        }
 
-        case LirOpcode::Floor32: enc_.frintm_s(to_fpr(inst.defs[0]), to_fpr(inst.uses.back())); break;
-        case LirOpcode::Floor64: enc_.frintm(to_fpr(inst.defs[0]), to_fpr(inst.uses.back())); break;
-        case LirOpcode::Ceil32: enc_.frintp_s(to_fpr(inst.defs[0]), to_fpr(inst.uses.back())); break;
-        case LirOpcode::Ceil64: enc_.frintp(to_fpr(inst.defs[0]), to_fpr(inst.uses.back())); break;
-        case LirOpcode::Round32: enc_.frinta_s(to_fpr(inst.defs[0]), to_fpr(inst.uses.back())); break;
-        case LirOpcode::Round64: enc_.frinta(to_fpr(inst.defs[0]), to_fpr(inst.uses.back())); break;
-        case LirOpcode::Fabs32: enc_.fabs_s(to_fpr(inst.defs[0]), to_fpr(inst.uses.back())); break;
-        case LirOpcode::Fabs64: enc_.fabs(to_fpr(inst.defs[0]), to_fpr(inst.uses.back())); break;
+        case LirOpcode::Floor32: {
+            FPR dst = to_fpr(inst.defs[0]);
+            const auto& src = inst.uses.back();
+            if (src.is_preg()) enc_.frintm_s(dst, to_fpr(src));
+            else {
+                enc_.ldr_s(FPR::V31, ensure_accessible_mem(to_mem_address(src)));
+                enc_.frintm_s(dst, FPR::V31);
+            }
+            break;
+        }
+        case LirOpcode::Floor64: {
+            FPR dst = to_fpr(inst.defs[0]);
+            const auto& src = inst.uses.back();
+            if (src.is_preg()) enc_.frintm(dst, to_fpr(src));
+            else {
+                enc_.ldr(FPR::V31, ensure_accessible_mem(to_mem_address(src)));
+                enc_.frintm(dst, FPR::V31);
+            }
+            break;
+        }
+        case LirOpcode::Ceil32: {
+            FPR dst = to_fpr(inst.defs[0]);
+            const auto& src = inst.uses.back();
+            if (src.is_preg()) enc_.frintp_s(dst, to_fpr(src));
+            else {
+                enc_.ldr_s(FPR::V31, ensure_accessible_mem(to_mem_address(src)));
+                enc_.frintp_s(dst, FPR::V31);
+            }
+            break;
+        }
+        case LirOpcode::Ceil64: {
+            FPR dst = to_fpr(inst.defs[0]);
+            const auto& src = inst.uses.back();
+            if (src.is_preg()) enc_.frintp(dst, to_fpr(src));
+            else {
+                enc_.ldr(FPR::V31, ensure_accessible_mem(to_mem_address(src)));
+                enc_.frintp(dst, FPR::V31);
+            }
+            break;
+        }
+        case LirOpcode::Round32: {
+            FPR dst = to_fpr(inst.defs[0]);
+            const auto& src = inst.uses.back();
+            if (src.is_preg()) enc_.frinta_s(dst, to_fpr(src));
+            else {
+                enc_.ldr_s(FPR::V31, ensure_accessible_mem(to_mem_address(src)));
+                enc_.frinta_s(dst, FPR::V31);
+            }
+            break;
+        }
+        case LirOpcode::Round64: {
+            FPR dst = to_fpr(inst.defs[0]);
+            const auto& src = inst.uses.back();
+            if (src.is_preg()) enc_.frinta(dst, to_fpr(src));
+            else {
+                enc_.ldr(FPR::V31, ensure_accessible_mem(to_mem_address(src)));
+                enc_.frinta(dst, FPR::V31);
+            }
+            break;
+        }
+        case LirOpcode::Fabs32: {
+            FPR dst = to_fpr(inst.defs[0]);
+            const auto& src = inst.uses.back();
+            if (src.is_preg()) enc_.fabs_s(dst, to_fpr(src));
+            else {
+                enc_.ldr_s(FPR::V31, ensure_accessible_mem(to_mem_address(src)));
+                enc_.fabs_s(dst, FPR::V31);
+            }
+            break;
+        }
+        case LirOpcode::Fabs64: {
+            FPR dst = to_fpr(inst.defs[0]);
+            const auto& src = inst.uses.back();
+            if (src.is_preg()) enc_.fabs(dst, to_fpr(src));
+            else {
+                enc_.ldr(FPR::V31, ensure_accessible_mem(to_mem_address(src)));
+                enc_.fabs(dst, FPR::V31);
+            }
+            break;
+        }
 
         case LirOpcode::Minss: {
             FPR dst = to_fpr(inst.defs[0]);
@@ -270,27 +360,139 @@ void AArch64EmitContext::emit_fp_instruction(const LirInst& inst) {
         }
 
         case LirOpcode::Xorpd:
-        case LirOpcode::Xorps:
-            enc_.vec_eor(to_fpr(inst.defs[0]), to_fpr(inst.uses[0]), to_fpr(inst.uses.back()));
+        case LirOpcode::Xorps: {
+            FPR dst = to_fpr(inst.defs[0]);
+            FPR src1 = (inst.uses.size() >= 2) ? to_fpr(inst.uses[0]) : dst;
+            const auto& src2 = inst.uses.back();
+            if (src2.is_preg()) enc_.vec_eor(dst, src1, to_fpr(src2));
+            else {
+                enc_.ldr_q(FPR::V31, ensure_accessible_mem(to_mem_address(src2)));
+                enc_.vec_eor(dst, src1, FPR::V31);
+            }
             break;
+        }
 
-        case LirOpcode::Fneg:
-            enc_.fneg(to_fpr(inst.defs[0]), to_fpr(inst.uses.back()));
+        case LirOpcode::Fneg: {
+            FPR dst = to_fpr(inst.defs[0]);
+            const auto& src = inst.uses.back();
+            if (src.is_preg()) enc_.fneg(dst, to_fpr(src));
+            else {
+                enc_.ldr(FPR::V31, ensure_accessible_mem(to_mem_address(src)));
+                enc_.fneg(dst, FPR::V31);
+            }
             break;
-        case LirOpcode::Fneg32:
-            enc_.fneg_s(to_fpr(inst.defs[0]), to_fpr(inst.uses.back()));
+        }
+        case LirOpcode::Fneg32: {
+            FPR dst = to_fpr(inst.defs[0]);
+            const auto& src = inst.uses.back();
+            if (src.is_preg()) enc_.fneg_s(dst, to_fpr(src));
+            else {
+                enc_.ldr_s(FPR::V31, ensure_accessible_mem(to_mem_address(src)));
+                enc_.fneg_s(dst, FPR::V31);
+            }
             break;
+        }
 
-        case LirOpcode::Cvtsi2sd: enc_.scvtf_d(to_fpr(inst.defs[0]), to_gpr(inst.uses[0])); break;
-        case LirOpcode::Cvtsi2sd32: enc_.scvtf_d32(to_fpr(inst.defs[0]), to_gpr(inst.uses[0])); break;
-        case LirOpcode::Cvttsd2si: enc_.fcvtzs_d(to_gpr(inst.defs[0]), to_fpr(inst.uses[0])); break;
-        case LirOpcode::Cvttsd2si32: enc_.fcvtzs_d32(to_gpr(inst.defs[0]), to_fpr(inst.uses[0])); break;
-        case LirOpcode::Cvtsi2ss: enc_.scvtf_s(to_fpr(inst.defs[0]), to_gpr(inst.uses[0])); break;
-        case LirOpcode::Cvtsi2ss32: enc_.scvtf_s32(to_fpr(inst.defs[0]), to_gpr(inst.uses[0])); break;
-        case LirOpcode::Cvttss2si: enc_.fcvtzs_s(to_gpr(inst.defs[0]), to_fpr(inst.uses[0])); break;
-        case LirOpcode::Cvttss2si32: enc_.fcvtzs_s32(to_gpr(inst.defs[0]), to_fpr(inst.uses[0])); break;
-        case LirOpcode::Cvtsd2ss: enc_.fcvt_s_d(to_fpr(inst.defs[0]), to_fpr(inst.uses[0])); break;
-        case LirOpcode::Cvtss2sd: enc_.fcvt_d_s(to_fpr(inst.defs[0]), to_fpr(inst.uses[0])); break;
+        case LirOpcode::Cvtsi2sd: {
+            FPR dst = to_fpr(inst.defs[0]);
+            const auto& src = inst.uses[0];
+            if (src.is_preg()) enc_.scvtf_d(dst, to_gpr(src));
+            else {
+                enc_.ldr(GPR::X16, ensure_accessible_mem(to_mem_address(src), GPR::X16, 8));
+                enc_.scvtf_d(dst, GPR::X16);
+            }
+            break;
+        }
+        case LirOpcode::Cvtsi2sd32: {
+            FPR dst = to_fpr(inst.defs[0]);
+            const auto& src = inst.uses[0];
+            if (src.is_preg()) enc_.scvtf_d32(dst, to_gpr(src));
+            else {
+                enc_.ldr32(GPR::X16, ensure_accessible_mem(to_mem_address(src), GPR::X16, 4));
+                enc_.scvtf_d32(dst, GPR::X16);
+            }
+            break;
+        }
+        case LirOpcode::Cvttsd2si: {
+            GPR dst = to_gpr(inst.defs[0]);
+            const auto& src = inst.uses[0];
+            if (src.is_preg()) enc_.fcvtzs_d(dst, to_fpr(src));
+            else {
+                enc_.ldr(FPR::V31, ensure_accessible_mem(to_mem_address(src)));
+                enc_.fcvtzs_d(dst, FPR::V31);
+            }
+            break;
+        }
+        case LirOpcode::Cvttsd2si32: {
+            GPR dst = to_gpr(inst.defs[0]);
+            const auto& src = inst.uses[0];
+            if (src.is_preg()) enc_.fcvtzs_d32(dst, to_fpr(src));
+            else {
+                enc_.ldr(FPR::V31, ensure_accessible_mem(to_mem_address(src)));
+                enc_.fcvtzs_d32(dst, FPR::V31);
+            }
+            break;
+        }
+        case LirOpcode::Cvtsi2ss: {
+            FPR dst = to_fpr(inst.defs[0]);
+            const auto& src = inst.uses[0];
+            if (src.is_preg()) enc_.scvtf_s(dst, to_gpr(src));
+            else {
+                enc_.ldr(GPR::X16, ensure_accessible_mem(to_mem_address(src), GPR::X16, 8));
+                enc_.scvtf_s(dst, GPR::X16);
+            }
+            break;
+        }
+        case LirOpcode::Cvtsi2ss32: {
+            FPR dst = to_fpr(inst.defs[0]);
+            const auto& src = inst.uses[0];
+            if (src.is_preg()) enc_.scvtf_s32(dst, to_gpr(src));
+            else {
+                enc_.ldr32(GPR::X16, ensure_accessible_mem(to_mem_address(src), GPR::X16, 4));
+                enc_.scvtf_s32(dst, GPR::X16);
+            }
+            break;
+        }
+        case LirOpcode::Cvttss2si: {
+            GPR dst = to_gpr(inst.defs[0]);
+            const auto& src = inst.uses[0];
+            if (src.is_preg()) enc_.fcvtzs_s(dst, to_fpr(src));
+            else {
+                enc_.ldr_s(FPR::V31, ensure_accessible_mem(to_mem_address(src)));
+                enc_.fcvtzs_s(dst, FPR::V31);
+            }
+            break;
+        }
+        case LirOpcode::Cvttss2si32: {
+            GPR dst = to_gpr(inst.defs[0]);
+            const auto& src = inst.uses[0];
+            if (src.is_preg()) enc_.fcvtzs_s32(dst, to_fpr(src));
+            else {
+                enc_.ldr_s(FPR::V31, ensure_accessible_mem(to_mem_address(src)));
+                enc_.fcvtzs_s32(dst, FPR::V31);
+            }
+            break;
+        }
+        case LirOpcode::Cvtsd2ss: {
+            FPR dst = to_fpr(inst.defs[0]);
+            const auto& src = inst.uses[0];
+            if (src.is_preg()) enc_.fcvt_s_d(dst, to_fpr(src));
+            else {
+                enc_.ldr(FPR::V31, ensure_accessible_mem(to_mem_address(src)));
+                enc_.fcvt_s_d(dst, FPR::V31);
+            }
+            break;
+        }
+        case LirOpcode::Cvtss2sd: {
+            FPR dst = to_fpr(inst.defs[0]);
+            const auto& src = inst.uses[0];
+            if (src.is_preg()) enc_.fcvt_d_s(dst, to_fpr(src));
+            else {
+                enc_.ldr_s(FPR::V31, ensure_accessible_mem(to_mem_address(src)));
+                enc_.fcvt_d_s(dst, FPR::V31);
+            }
+            break;
+        }
 
         default:
             break;

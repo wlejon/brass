@@ -211,6 +211,36 @@ TEST_CASE("AArch64 Emit - Floating Point and SIMD Vector Ops") {
     subps->add_use(LirOperand::preg_aarch64_fpr(FPR::V7, 16));
     bb->append_inst(std::move(subps));
 
+    // Fabs32 v0, [x0]
+    auto fabs32_mem = std::make_unique<LirInst>(LirOpcode::Fabs32);
+    fabs32_mem->add_def(LirOperand::preg_aarch64_fpr(FPR::V0, 4));
+    fabs32_mem->add_use(LirOperand::mem(PReg::aarch64_gpr(GPR::X0), 0, 4));
+    bb->append_inst(std::move(fabs32_mem));
+
+    // Sqrtss v1, [x0 + 8]
+    auto sqrtss_mem = std::make_unique<LirInst>(LirOpcode::Sqrtss);
+    sqrtss_mem->add_def(LirOperand::preg_aarch64_fpr(FPR::V1, 4));
+    sqrtss_mem->add_use(LirOperand::mem(PReg::aarch64_gpr(GPR::X0), 8, 4));
+    bb->append_inst(std::move(sqrtss_mem));
+
+    // Floor32 v2, [x0 + 16]
+    auto floor32_mem = std::make_unique<LirInst>(LirOpcode::Floor32);
+    floor32_mem->add_def(LirOperand::preg_aarch64_fpr(FPR::V2, 4));
+    floor32_mem->add_use(LirOperand::mem(PReg::aarch64_gpr(GPR::X0), 16, 4));
+    bb->append_inst(std::move(floor32_mem));
+
+    // Cvtsi2sd v3, [x0 + 24]
+    auto cvtsi2sd_mem = std::make_unique<LirInst>(LirOpcode::Cvtsi2sd);
+    cvtsi2sd_mem->add_def(LirOperand::preg_aarch64_fpr(FPR::V3, 8));
+    cvtsi2sd_mem->add_use(LirOperand::mem(PReg::aarch64_gpr(GPR::X0), 24, 8));
+    bb->append_inst(std::move(cvtsi2sd_mem));
+
+    // Cvttsd2si x1, [x0 + 32]
+    auto cvttsd2si_mem = std::make_unique<LirInst>(LirOpcode::Cvttsd2si);
+    cvttsd2si_mem->add_def(LirOperand::preg_aarch64_gpr(GPR::X1, 8));
+    cvttsd2si_mem->add_use(LirOperand::mem(PReg::aarch64_gpr(GPR::X0), 32, 8));
+    bb->append_inst(std::move(cvttsd2si_mem));
+
     // Ret
     auto ret = std::make_unique<LirInst>(LirOpcode::Ret);
     bb->append_inst(std::move(ret));
