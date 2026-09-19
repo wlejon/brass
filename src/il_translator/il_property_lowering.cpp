@@ -55,6 +55,87 @@ Value* PropertyLoweringHelper::lower_prop_get(
     return b.build_call("brass_dynamic_object_get_prop_str", Type::i64(), {obj, name_val});
 }
 
+Value* PropertyLoweringHelper::lower_prop_get_mono(
+    Builder& b,
+    Value* obj,
+    uint32_t key_index,
+    Value* ic_entry,
+    const std::function<void()>& emit_exception_check
+) {
+    // The bronze object model as the inline hit reads it (bronze_abi.h):
+    // a NaN-boxed Value whose tag is BRONZE_ABI_TAG_OBJECT, whose header
+    // word's low half is (flags << 16) | tag — so one i32 compare against
+    // the tag alone says "an object, and a PLAIN one" — the Shape* at
+    // BRONZE_ABI_OBJ_SHAPE_OFFSET, and the inline slots from
+    // BRONZE_ABI_OBJ_SLOTS_OFFSET. The site's way 0 is InlineCache: the
+    // shape at 0 and the (depth << 32 | slot) word at 8, which is below
+    // BRONZE_ABI_OBJ_INLINE_SLOTS exactly when the entry names an own
+    // property in an inline slot — the accessor, absent and depth bits all
+    // live in the high half, so the one unsigned compare refuses them.
+    //
+    // The guard is ONE branch, not a tag branch followed by a shape
+    // branch: the header and shape loads go through a base that a select
+    // steers at the thread's own ABI block when the value is not an
+    // object — always mapped, wider than the two words read — so nothing
+    // is ever dereferenced through a non-pointer payload and the loaded
+    // words are simply wrong in a way the `is_obj` term of the AND then
+    // refuses. (The TLS pointer is the one i64-typed mapped address the
+    // lowering has in hand; the site address is a `ptr` a select cannot
+    // pair with the masked payload.)
+    // Straight-line code before a single two-way split keeps the site to
+    // three new blocks with no critical edge, which is what keeps
+    // GVN-PRE's per-hoist restart from going quadratic over a function
+    // with hundreds of property reads.
+    constexpr uint64_t kTagMask = 0xFFFF000000000000ULL;
+    constexpr uint64_t kObjectTagBits = 0xFFF1000000000000ULL;
+    constexpr uint64_t kPayloadMask = 0x0000FFFFFFFFFFFFULL;
+    constexpr int32_t kPlainHeaderLow = 0x0000FFF1;
+    constexpr int32_t kShapeOffset = 8;
+    constexpr int32_t kSlotsOffset = 24;
+    constexpr int64_t kInlineSlots = 4;
+    constexpr int32_t kIcShapeOffset = 0;
+    constexpr int32_t kIcSlotWordOffset = 8;
+
+    BasicBlock* bb_current = b.current_block();
+    Function* fn = bb_current->parent();
+    const uint32_t bid = fn->next_block_id();
+    const std::string prefix = "ic_get_" + std::to_string(bid);
+
+    BasicBlock* bb_fast = b.append_block(prefix + "_hit");
+    BasicBlock* bb_slow = b.append_block(prefix + "_miss");
+    BasicBlock* bb_merge = b.append_block(prefix + "_merge");
+    Value* merge_val = b.add_block_param(bb_merge, Type::i64());
+
+    b.position_at_end(bb_current);
+    Value* tag = b.build_and(obj, b.build_iconst_i64(static_cast<int64_t>(kTagMask)));
+    Value* is_obj = b.build_eq(tag, b.build_iconst_i64(static_cast<int64_t>(kObjectTagBits)));
+    Value* ptr = b.build_and(obj, b.build_iconst_i64(static_cast<int64_t>(kPayloadMask)));
+    Value* base = b.build_select(is_obj, ptr, b.build_pinned_tls_read());
+    Value* header_low = b.build_load(Type::i32(), base, 0);
+    Value* is_plain = b.build_eq(header_low, b.build_iconst_i32(kPlainHeaderLow));
+    Value* shape = b.build_load(Type::i64(), base, kShapeOffset);
+    Value* cached_shape = b.build_load(Type::i64(), ic_entry, kIcShapeOffset);
+    Value* shape_match = b.build_eq(shape, cached_shape);
+    Value* slot_word = b.build_load(Type::i64(), ic_entry, kIcSlotWordOffset);
+    Value* slot_inline = b.build_ult(slot_word, b.build_iconst_i64(kInlineSlots));
+    Value* hit = b.build_and(b.build_and(is_obj, is_plain), b.build_and(shape_match, slot_inline));
+    b.build_br_if(hit, bb_fast, bb_slow);
+
+    b.position_at_end(bb_fast);
+    Value* fast_val = b.build_load_indexed(Type::i64(), ptr, slot_word, 8, kSlotsOffset);
+    b.build_br(bb_merge, {fast_val});
+
+    b.position_at_end(bb_slow);
+    Value* map_addr = b.build_func_addr(key_map_sym_);
+    Value* sym_val = b.build_load(Type::i32(), map_addr, static_cast<int32_t>(key_index * sizeof(uint32_t)));
+    Value* slow_val = b.build_call("bronze_prop_get", Type::i64(), {obj, sym_val, ic_entry});
+    emit_exception_check();
+    b.build_br(bb_merge, {slow_val});
+
+    b.position_at_end(bb_merge);
+    return merge_val;
+}
+
 void PropertyLoweringHelper::lower_prop_set(
     Builder& b,
     Value* obj,
@@ -521,6 +602,20 @@ bool lower_property_instruction(
         case BronzeOp::PropGet: {
             Value* obj_val = ensure_type(get_opd(0), Type::i64());
             Value* site = prop_lowering.ic_site(b, inst_ast.ic_index);
+            // A site the IL calls monomorphic gets the way-0 guard-and-load
+            // in front of the helper: one compare against the most recently
+            // installed shape (the helper fills move-to-front), never a
+            // chain over the other ways. Every site could carry it — the
+            // guard is correct for any receiver — but each one is a merge
+            // GVN-PRE re-walks the function for, and on three.js putting it
+            // at every read doubled the optimized compile for a gain the
+            // `mono` sites alone already deliver.
+            if (site && inst_ast.is_mono && prop_lowering.enable_inlined_fastpaths() &&
+                inst_ast.string_literal.empty() && inst_ast.index != 0xFFFFFFFFu) {
+                res_val = prop_lowering.lower_prop_get_mono(b, obj_val, inst_ast.index, site,
+                                                            emit_exception_check);
+                return true;
+            }
             res_val = prop_lowering.lower_prop_get(
                 b, obj_val, inst_ast.string_literal, inst_ast.index, inst_ast.depth, site
             );

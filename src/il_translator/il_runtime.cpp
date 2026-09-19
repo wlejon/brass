@@ -422,28 +422,30 @@ int64_t bronze_prop_get(int64_t obj_box, int32_t key_index, uint64_t* /*ic_entry
     return static_cast<int64_t>(val.raw());
 }
 
-void bronze_prop_set(int64_t obj_box, int32_t key_index, int64_t val, uint64_t* ic_entry, int32_t /*strict*/) {
+// The fourth operand is the site's inline-cache entry, or null for a site
+// with none; this stand-in caches nothing and never reads it. A key here is
+// an opaque symbol — the textual IL carries no key strings — so an array
+// literal's element stores (`create.array` then `prop.set` with the key of
+// "0", "1", ...) cannot be told apart from named properties by their keys.
+// The stand-in's model: the k-th distinct key stored into an element-capable
+// object is also its element k, which is exactly the order a literal's
+// stores arrive in and what `elem.get` reads back.
+void bronze_prop_set(int64_t obj_box, int32_t key_index, int64_t val, uint64_t* /*ic_entry*/, int32_t /*strict*/) {
     auto* obj = unpack_dynamic_object(obj_box);
     if (!obj) return;
-    int32_t slot_idx = static_cast<int32_t>(reinterpret_cast<uintptr_t>(ic_entry));
-    if (obj->element_capacity > 0 && slot_idx >= 0) {
-        HostGC* gc = brass::get_active_host_gc();
-        obj->set_element(slot_idx, HostValue(static_cast<uint64_t>(val)), gc);
-        return;
-    }
     uint32_t sym = static_cast<uint32_t>(key_index);
-    if (obj->shape != nullptr && sym < Shape::FAST_SYMBOL_CAP) {
-        int16_t s = obj->shape->fast_symbol_to_slot(sym);
-        if (s >= 0) {
-            uint32_t slot = static_cast<uint32_t>(s);
-            if (slot < obj->inline_capacity) {
-                obj->inline_slots[slot] = HostValue(static_cast<uint64_t>(val));
-                return;
-            }
-        }
-    }
     HostGC* gc = brass::get_active_host_gc();
-    obj->set_property(sym, HostValue(static_cast<uint64_t>(val)), ShapeRegistry::global(), gc);
+    const HostValue hv(static_cast<uint64_t>(val));
+    std::optional<uint32_t> slot = obj->shape ? obj->shape->find_slot(sym) : std::nullopt;
+    if (slot && *slot < obj->inline_capacity) {
+        obj->inline_slots[*slot] = hv;
+    } else {
+        obj->set_property(sym, hv, ShapeRegistry::global(), gc);
+        slot = obj->shape ? obj->shape->find_slot(sym) : std::nullopt;
+    }
+    if (obj->element_capacity > 0 && slot) {
+        obj->set_element(static_cast<int64_t>(*slot), hv, gc);
+    }
 }
 
 int64_t bronze_elem_get(int64_t arr_box, int64_t index_box) {
