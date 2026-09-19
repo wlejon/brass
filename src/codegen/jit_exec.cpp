@@ -106,6 +106,21 @@ JitMemoryBlock::JitMemoryBlock(size_t size) {
     if (ptr_) size_ = page_aligned;
 }
 
+JitMemoryBlock::JitMemoryBlock(size_t code_size, size_t data_size) {
+#if defined(__APPLE__) && defined(__aarch64__)
+    // A MAP_JIT mapping is write-protected as a whole per thread once the
+    // code is sealed, so data pages cannot share it; the loader puts them in
+    // their own block beside this one.
+    *this = JitMemoryBlock(code_size);
+    (void)data_size;
+#else
+    size_t page_sz = get_system_page_size();
+    size_t code_pages = (code_size + page_sz - 1) & ~(page_sz - 1);
+    size_t data_pages = (data_size + page_sz - 1) & ~(page_sz - 1);
+    *this = JitMemoryBlock(code_pages + data_pages);
+#endif
+}
+
 JitMemoryBlock::~JitMemoryBlock() {
     reset();
 }
@@ -486,9 +501,15 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
 
     if (code_pages_size == 0 && data_pages_size == 0) return true;
 
-    // Allocate memory blocks
+    // Allocate memory: the data pages directly after the code pages in the
+    // SAME mapping wherever the platform allows it (JitMemoryBlock says why:
+    // .pdata and Addr32NB are 32-bit offsets from the code base, and a
+    // separately placed data block can land below the code or beyond 4 GB,
+    // where the truncated offset sends the unwinder into unmapped memory).
+    // The hint-placed separate block remains for the MAP_JIT case only.
+    uint8_t* data_base = nullptr;
     if (code_pages_size > 0) {
-        code_mem_ = JitMemoryBlock(code_pages_size);
+        code_mem_ = JitMemoryBlock(code_pages_size, data_pages_size);
         if (!code_mem_.is_valid()) {
             return false;
         }
@@ -496,13 +517,18 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
         code_mem_.reset();
     }
 
-    void* hint = code_mem_.is_valid() ? (code_mem_.data() + code_mem_.size()) : nullptr;
-    if (data_pages_size > 0) {
+    if (data_pages_size > 0 && code_mem_.is_valid() &&
+        code_mem_.size() >= code_pages_size + data_pages_size) {
+        data_mem_.reset();
+        data_base = code_mem_.data() + code_pages_size;
+    } else if (data_pages_size > 0) {
+        void* hint = code_mem_.is_valid() ? (code_mem_.data() + code_mem_.size()) : nullptr;
         data_mem_ = DataMemoryBlock(data_pages_size, hint);
         if (!data_mem_.is_valid()) {
             code_mem_.reset();
             return false;
         }
+        data_base = data_mem_.data();
     } else {
         data_mem_.reset();
     }
@@ -512,7 +538,7 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
         if (is_code_sec[i]) {
             sec_bases[i] = code_mem_.data() + sec_offsets[i];
         } else {
-            sec_bases[i] = data_mem_.data() + sec_offsets[i];
+            sec_bases[i] = data_base ? data_base + sec_offsets[i] : nullptr;
         }
     }
 

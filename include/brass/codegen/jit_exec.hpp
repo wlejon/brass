@@ -25,6 +25,14 @@ class JitMemoryBlock {
 public:
     JitMemoryBlock() = default;
     explicit JitMemoryBlock(size_t size);
+    // One mapping holding the code pages first and `data_size` bytes of data
+    // pages after them, so that every image-relative 32-bit offset in the
+    // loaded object (.pdata's function and unwind-info RVAs, Addr32NB
+    // relocations) is a small positive distance from the code base. Two
+    // separate mappings can land in either order and further apart than an
+    // RVA can express. Where code must be its own MAP_JIT mapping (Apple
+    // Silicon) only the code pages are allocated, and size() says so.
+    JitMemoryBlock(size_t code_size, size_t data_size);
     ~JitMemoryBlock();
 
     JitMemoryBlock(const JitMemoryBlock&) = delete;
