@@ -278,7 +278,8 @@ void ImageBuilder::emit_resize_rgba8_kernel(
     Value* sw_minus_1 = builder().build_sub(src_w, one_i);
     Value* sh_minus_1 = builder().build_sub(src_h, one_i);
 
-    Value* is_premul = builder().build_ne(premultiply_alpha, zero_i);
+    Value* premul_byte = builder().build_and(premultiply_alpha, mask_ff);
+    Value* is_premul = builder().build_ne(premul_byte, zero_i);
 
     for_range(y_start, y_end, one_i, [&](Value* y) {
         Value* y_f = u8_to_f32(y);
