@@ -67,14 +67,11 @@ void ImageBuilder::unpremultiply_alpha_u8(
 }
 
 Value* ImageBuilder::u8_to_f32(Value* u8_val, Value* scale, Value* bias) {
-    if (builder().current_module() && !builder().current_module()->has_external_symbol("i32_to_f32")) {
-        builder().current_module()->add_external_symbol("i32_to_f32");
-    }
     Value* clean_u8 = u8_val;
     if (u8_val->type().is_i64()) {
         clean_u8 = builder().build_trunc_i32(u8_val);
     }
-    Value* f_val = builder().build_call("i32_to_f32", Type::f32(), {clean_u8});
+    Value* f_val = builder().build_sitofp_f32_i32(clean_u8);
     if (scale && bias) {
         return fma(f_val, scale, bias);
     } else if (scale) {
@@ -100,10 +97,7 @@ Value* ImageBuilder::clamp_i32(Value* val, Value* min_val, Value* max_val) {
 }
 
 Value* ImageBuilder::floor_f32(Value* x) {
-    if (builder().current_module() && !builder().current_module()->has_external_symbol("floorf")) {
-        builder().current_module()->add_external_symbol("floorf");
-    }
-    return builder().build_call("floorf", Type::f32(), {x});
+    return builder().build_floor_f32(x);
 }
 
 Value* ImageBuilder::f32_to_u8(Value* f32_val) {
@@ -112,10 +106,7 @@ Value* ImageBuilder::f32_to_u8(Value* f32_val) {
     Value* max_f = const_f32(255.0f);
     Value* rounded = add(f32_val, half);
     Value* clamped = clamp_f32(rounded, zero_f, max_f);
-    if (builder().current_module() && !builder().current_module()->has_external_symbol("f32_to_i32")) {
-        builder().current_module()->add_external_symbol("f32_to_i32");
-    }
-    return builder().build_call("f32_to_i32", Type::i32(), {clamped});
+    return builder().build_fptosi_i32_f32(clamped);
 }
 
 Value* ImageBuilder::load_u8(Value* ptr, Value* byte_offset) {
@@ -148,15 +139,6 @@ void ImageBuilder::emit_fused_preproc_kernel(
     }
 
     if (builder().current_module()) {
-        if (!builder().current_module()->has_external_symbol("floorf")) {
-            builder().current_module()->add_external_symbol("floorf");
-        }
-        if (!builder().current_module()->has_external_symbol("i32_to_f32")) {
-            builder().current_module()->add_external_symbol("i32_to_f32");
-        }
-        if (!builder().current_module()->has_external_symbol("f32_to_i32")) {
-            builder().current_module()->add_external_symbol("f32_to_i32");
-        }
         if (!builder().current_module()->has_external_symbol("ptx_load_u8")) {
             builder().current_module()->add_external_symbol("ptx_load_u8");
         }
@@ -194,7 +176,7 @@ void ImageBuilder::emit_fused_preproc_kernel(
         Value* y_f = u8_to_f32(y);
         Value* fy = sub(mul(add(y_f, half_f), ys), half_f);
         Value* floor_y = floor_f32(fy);
-        Value* iy0_raw = builder().build_call("f32_to_i32", Type::i32(), {floor_y});
+        Value* iy0_raw = builder().build_fptosi_i32_f32(floor_y);
         Value* iy1_raw = builder().build_add(iy0_raw, one_i);
         Value* ty_raw = sub(fy, floor_y);
 
@@ -210,7 +192,7 @@ void ImageBuilder::emit_fused_preproc_kernel(
             Value* x_f = u8_to_f32(x);
             Value* fx = sub(mul(add(x_f, half_f), xs), half_f);
             Value* floor_x = floor_f32(fx);
-            Value* ix0_raw = builder().build_call("f32_to_i32", Type::i32(), {floor_x});
+            Value* ix0_raw = builder().build_fptosi_i32_f32(floor_x);
             Value* ix1_raw = builder().build_add(ix0_raw, one_i);
             Value* tx_raw = sub(fx, floor_x);
 
@@ -278,18 +260,6 @@ void ImageBuilder::emit_resize_rgba8_kernel(
         builder().set_function(fn);
     }
 
-    if (builder().current_module()) {
-        if (!builder().current_module()->has_external_symbol("floorf")) {
-            builder().current_module()->add_external_symbol("floorf");
-        }
-        if (!builder().current_module()->has_external_symbol("i32_to_f32")) {
-            builder().current_module()->add_external_symbol("i32_to_f32");
-        }
-        if (!builder().current_module()->has_external_symbol("f32_to_i32")) {
-            builder().current_module()->add_external_symbol("f32_to_i32");
-        }
-    }
-
     Value* zero_i = const_i32(0);
     Value* one_i = const_i32(1);
     Value* zero_f = const_f32(0.0f);
@@ -317,7 +287,7 @@ void ImageBuilder::emit_resize_rgba8_kernel(
         Value* y_f = u8_to_f32(y);
         Value* fy = sub(mul(add(y_f, half_f), ys), half_f);
         Value* floor_y = floor_f32(fy);
-        Value* iy0_raw = builder().build_call("f32_to_i32", Type::i32(), {floor_y});
+        Value* iy0_raw = builder().build_fptosi_i32_f32(floor_y);
         Value* iy1_raw = builder().build_add(iy0_raw, one_i);
         Value* ty_raw = sub(fy, floor_y);
 
@@ -333,7 +303,7 @@ void ImageBuilder::emit_resize_rgba8_kernel(
             Value* x_f = u8_to_f32(x);
             Value* fx = sub(mul(add(x_f, half_f), xs), half_f);
             Value* floor_x = floor_f32(fx);
-            Value* ix0_raw = builder().build_call("f32_to_i32", Type::i32(), {floor_x});
+            Value* ix0_raw = builder().build_fptosi_i32_f32(floor_x);
             Value* ix1_raw = builder().build_add(ix0_raw, one_i);
             Value* tx_raw = sub(fx, floor_x);
 

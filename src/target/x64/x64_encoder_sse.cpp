@@ -253,6 +253,58 @@ void X64Encoder::orpd(XMM dst, const MemAddress& src) {
     emit_mem_operand(reg_code(dst), src);
 }
 
+void X64Encoder::minsd(XMM dst, XMM src) {
+    buffer_.emit8(0xF2);
+    emit_rex(false, is_extended(dst), false, is_extended(src));
+    buffer_.emit8(0x0F);
+    buffer_.emit8(0x5D);
+    emit_modrm(3, reg_code(dst), reg_code(src));
+}
+
+void X64Encoder::minsd(XMM dst, const MemAddress& src) {
+    buffer_.emit8(0xF2);
+    emit_rex(false, is_extended(dst), is_extended(src.index), is_extended(src.base));
+    buffer_.emit8(0x0F);
+    buffer_.emit8(0x5D);
+    emit_mem_operand(reg_code(dst), src);
+}
+
+void X64Encoder::maxsd(XMM dst, XMM src) {
+    buffer_.emit8(0xF2);
+    emit_rex(false, is_extended(dst), false, is_extended(src));
+    buffer_.emit8(0x0F);
+    buffer_.emit8(0x5F);
+    emit_modrm(3, reg_code(dst), reg_code(src));
+}
+
+void X64Encoder::maxsd(XMM dst, const MemAddress& src) {
+    buffer_.emit8(0xF2);
+    emit_rex(false, is_extended(dst), is_extended(src.index), is_extended(src.base));
+    buffer_.emit8(0x0F);
+    buffer_.emit8(0x5F);
+    emit_mem_operand(reg_code(dst), src);
+}
+
+void X64Encoder::roundsd(XMM dst, XMM src, uint8_t mode) {
+    buffer_.emit8(0x66);
+    emit_rex(false, is_extended(dst), false, is_extended(src));
+    buffer_.emit8(0x0F);
+    buffer_.emit8(0x3A);
+    buffer_.emit8(0x0B);
+    emit_modrm(3, reg_code(dst), reg_code(src));
+    buffer_.emit8(mode);
+}
+
+void X64Encoder::roundsd(XMM dst, const MemAddress& src, uint8_t mode) {
+    buffer_.emit8(0x66);
+    emit_rex(false, is_extended(dst), is_extended(src.index), is_extended(src.base));
+    buffer_.emit8(0x0F);
+    buffer_.emit8(0x3A);
+    buffer_.emit8(0x0B);
+    emit_mem_operand(reg_code(dst), src);
+    buffer_.emit8(mode);
+}
+
 // Single FP Arithmetic
 void X64Encoder::addss(XMM dst, XMM src) {
     buffer_.emit8(0xF3);
@@ -332,6 +384,58 @@ void X64Encoder::sqrtss(XMM dst, const MemAddress& src) {
     buffer_.emit8(0x0F);
     buffer_.emit8(0x51);
     emit_mem_operand(reg_code(dst), src);
+}
+
+void X64Encoder::minss(XMM dst, XMM src) {
+    buffer_.emit8(0xF3);
+    emit_rex(false, is_extended(dst), false, is_extended(src));
+    buffer_.emit8(0x0F);
+    buffer_.emit8(0x5D);
+    emit_modrm(3, reg_code(dst), reg_code(src));
+}
+
+void X64Encoder::minss(XMM dst, const MemAddress& src) {
+    buffer_.emit8(0xF3);
+    emit_rex(false, is_extended(dst), is_extended(src.index), is_extended(src.base));
+    buffer_.emit8(0x0F);
+    buffer_.emit8(0x5D);
+    emit_mem_operand(reg_code(dst), src);
+}
+
+void X64Encoder::maxss(XMM dst, XMM src) {
+    buffer_.emit8(0xF3);
+    emit_rex(false, is_extended(dst), false, is_extended(src));
+    buffer_.emit8(0x0F);
+    buffer_.emit8(0x5F);
+    emit_modrm(3, reg_code(dst), reg_code(src));
+}
+
+void X64Encoder::maxss(XMM dst, const MemAddress& src) {
+    buffer_.emit8(0xF3);
+    emit_rex(false, is_extended(dst), is_extended(src.index), is_extended(src.base));
+    buffer_.emit8(0x0F);
+    buffer_.emit8(0x5F);
+    emit_mem_operand(reg_code(dst), src);
+}
+
+void X64Encoder::roundss(XMM dst, XMM src, uint8_t mode) {
+    buffer_.emit8(0x66);
+    emit_rex(false, is_extended(dst), false, is_extended(src));
+    buffer_.emit8(0x0F);
+    buffer_.emit8(0x3A);
+    buffer_.emit8(0x0A);
+    emit_modrm(3, reg_code(dst), reg_code(src));
+    buffer_.emit8(mode);
+}
+
+void X64Encoder::roundss(XMM dst, const MemAddress& src, uint8_t mode) {
+    buffer_.emit8(0x66);
+    emit_rex(false, is_extended(dst), is_extended(src.index), is_extended(src.base));
+    buffer_.emit8(0x0F);
+    buffer_.emit8(0x3A);
+    buffer_.emit8(0x0A);
+    emit_mem_operand(reg_code(dst), src);
+    buffer_.emit8(mode);
 }
 
 void X64Encoder::ucomiss(XMM dst, XMM src) {

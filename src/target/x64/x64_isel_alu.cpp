@@ -229,66 +229,34 @@ void X64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
             lir_bb.append_inst(std::move(lir_inst));
             break;
         }
-        case Opcode::fptosi_i32: {
-            VReg dst = get_vreg(inst.result());
-            VReg src = get_vreg(inst.operand(0));
-            auto lir_inst = std::make_unique<LirInst>(LirOpcode::Cvttsd2si32);
-            lir_inst->add_def(LirOperand::vreg(dst, 4));
-            lir_inst->add_use(LirOperand::vreg(src, 8));
-            lir_inst->mir_origin = &inst;
-            lir_bb.append_inst(std::move(lir_inst));
+        case Opcode::sqrt_f32:
+        case Opcode::sqrt_f64:
+        case Opcode::floor_f32:
+        case Opcode::floor_f64:
+        case Opcode::ceil_f32:
+        case Opcode::ceil_f64:
+        case Opcode::round_f32:
+        case Opcode::round_f64:
+        case Opcode::fabs_f32:
+        case Opcode::fabs_f64:
+        case Opcode::fmin_f32:
+        case Opcode::fmin_f64:
+        case Opcode::fmax_f32:
+        case Opcode::fmax_f64:
+        case Opcode::sitofp_f32_i32:
+        case Opcode::sitofp_f32_i64:
+        case Opcode::sitofp_f64_i32:
+        case Opcode::sitofp_f64_i64:
+        case Opcode::fptosi_i32_f32:
+        case Opcode::fptosi_i64_f32:
+        case Opcode::fptosi_i32:
+        case Opcode::fptosi_i64:
+        case Opcode::fptrunc_f32_f64:
+        case Opcode::fpext_f64_f32:
+        case Opcode::bitcast_i64_f64:
+        case Opcode::bitcast_f64_i64:
+            lower_fp_instruction(inst, lir_bb);
             break;
-        }
-        case Opcode::fptosi_i64: {
-            VReg dst = get_vreg(inst.result());
-            VReg src = get_vreg(inst.operand(0));
-            auto lir_inst = std::make_unique<LirInst>(LirOpcode::Cvttsd2si);
-            lir_inst->add_def(LirOperand::vreg(dst, 8));
-            lir_inst->add_use(LirOperand::vreg(src, 8));
-            lir_inst->mir_origin = &inst;
-            lir_bb.append_inst(std::move(lir_inst));
-            break;
-        }
-        case Opcode::sitofp_f64_i32: {
-            VReg dst = get_vreg(inst.result());
-            VReg src = get_vreg(inst.operand(0));
-            auto lir_inst = std::make_unique<LirInst>(LirOpcode::Cvtsi2sd32);
-            lir_inst->add_def(LirOperand::vreg(dst, 8));
-            lir_inst->add_use(LirOperand::vreg(src, 4));
-            lir_inst->mir_origin = &inst;
-            lir_bb.append_inst(std::move(lir_inst));
-            break;
-        }
-        case Opcode::sitofp_f64_i64: {
-            VReg dst = get_vreg(inst.result());
-            VReg src = get_vreg(inst.operand(0));
-            auto lir_inst = std::make_unique<LirInst>(LirOpcode::Cvtsi2sd);
-            lir_inst->add_def(LirOperand::vreg(dst, 8));
-            lir_inst->add_use(LirOperand::vreg(src, 8));
-            lir_inst->mir_origin = &inst;
-            lir_bb.append_inst(std::move(lir_inst));
-            break;
-        }
-        case Opcode::bitcast_i64_f64: {
-            VReg dst = get_vreg(inst.result());
-            VReg src = get_vreg(inst.operand(0));
-            auto lir_inst = std::make_unique<LirInst>(LirOpcode::Movq_gx);
-            lir_inst->add_def(LirOperand::vreg(dst, 8));
-            lir_inst->add_use(LirOperand::vreg(src, 8));
-            lir_inst->mir_origin = &inst;
-            lir_bb.append_inst(std::move(lir_inst));
-            break;
-        }
-        case Opcode::bitcast_f64_i64: {
-            VReg dst = get_vreg(inst.result());
-            VReg src = get_vreg(inst.operand(0));
-            auto lir_inst = std::make_unique<LirInst>(LirOpcode::Movq_xg);
-            lir_inst->add_def(LirOperand::vreg(dst, 8));
-            lir_inst->add_use(LirOperand::vreg(src, 8));
-            lir_inst->mir_origin = &inst;
-            lir_bb.append_inst(std::move(lir_inst));
-            break;
-        }
         case Opcode::add:
             lower_binary_alu(inst, lir_bb, LirOpcode::Add32, LirOpcode::Add, LirOpcode::Addsd, LirOpcode::Addss);
             break;

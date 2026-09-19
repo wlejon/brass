@@ -17,8 +17,14 @@ std::string_view opcode_name(Opcode op) noexcept {
         case Opcode::trunc_i8: return "trunc_i8";
         case Opcode::fptosi_i32: return "fptosi_i32";
         case Opcode::fptosi_i64: return "fptosi_i64";
+        case Opcode::fptosi_i32_f32: return "fptosi_i32_f32";
+        case Opcode::fptosi_i64_f32: return "fptosi_i64_f32";
         case Opcode::sitofp_f64_i32: return "sitofp_f64_i32";
         case Opcode::sitofp_f64_i64: return "sitofp_f64_i64";
+        case Opcode::sitofp_f32_i32: return "sitofp_f32_i32";
+        case Opcode::sitofp_f32_i64: return "sitofp_f32_i64";
+        case Opcode::fptrunc_f32_f64: return "fptrunc_f32_f64";
+        case Opcode::fpext_f64_f32: return "fpext_f64_f32";
         case Opcode::bitcast_i64_f64: return "bitcast_i64_f64";
         case Opcode::bitcast_f64_i64: return "bitcast_f64_i64";
 
@@ -27,6 +33,20 @@ std::string_view opcode_name(Opcode op) noexcept {
         case Opcode::mul: return "mul";
         case Opcode::fma_f32: return "fma_f32";
         case Opcode::fma_f64: return "fma_f64";
+        case Opcode::sqrt_f32: return "sqrt_f32";
+        case Opcode::sqrt_f64: return "sqrt_f64";
+        case Opcode::floor_f32: return "floor_f32";
+        case Opcode::floor_f64: return "floor_f64";
+        case Opcode::ceil_f32: return "ceil_f32";
+        case Opcode::ceil_f64: return "ceil_f64";
+        case Opcode::round_f32: return "round_f32";
+        case Opcode::round_f64: return "round_f64";
+        case Opcode::fabs_f32: return "fabs_f32";
+        case Opcode::fabs_f64: return "fabs_f64";
+        case Opcode::fmin_f32: return "fmin_f32";
+        case Opcode::fmin_f64: return "fmin_f64";
+        case Opcode::fmax_f32: return "fmax_f32";
+        case Opcode::fmax_f64: return "fmax_f64";
         case Opcode::sdiv: return "sdiv";
         case Opcode::udiv: return "udiv";
         case Opcode::smod: return "smod";
@@ -168,8 +188,14 @@ bool is_conversion(Opcode op) noexcept {
         case Opcode::trunc_i8:
         case Opcode::fptosi_i32:
         case Opcode::fptosi_i64:
+        case Opcode::fptosi_i32_f32:
+        case Opcode::fptosi_i64_f32:
         case Opcode::sitofp_f64_i32:
         case Opcode::sitofp_f64_i64:
+        case Opcode::sitofp_f32_i32:
+        case Opcode::sitofp_f32_i64:
+        case Opcode::fptrunc_f32_f64:
+        case Opcode::fpext_f64_f32:
         case Opcode::bitcast_i64_f64:
         case Opcode::bitcast_f64_i64:
             return true;
@@ -185,6 +211,20 @@ bool is_arithmetic(Opcode op) noexcept {
         case Opcode::mul:
         case Opcode::fma_f32:
         case Opcode::fma_f64:
+        case Opcode::sqrt_f32:
+        case Opcode::sqrt_f64:
+        case Opcode::floor_f32:
+        case Opcode::floor_f64:
+        case Opcode::ceil_f32:
+        case Opcode::ceil_f64:
+        case Opcode::round_f32:
+        case Opcode::round_f64:
+        case Opcode::fabs_f32:
+        case Opcode::fabs_f64:
+        case Opcode::fmin_f32:
+        case Opcode::fmin_f64:
+        case Opcode::fmax_f32:
+        case Opcode::fmax_f64:
         case Opcode::sdiv:
         case Opcode::udiv:
         case Opcode::smod:

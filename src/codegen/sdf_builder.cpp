@@ -5,32 +5,23 @@ namespace brass::codegen {
 // ── Scalar Math Helpers ─────────────────────────────────────────────────────
 
 Value* SdfKernelBuilder::abs_f32(Value* v) {
-    Value* zero = const_f32(0.0f);
-    Value* is_neg = builder().build_slt(v, zero);
-    Value* neg_v = builder().build_neg(v);
-    return builder().build_select(is_neg, neg_v, v);
+    return builder().build_fabs_f32(v);
 }
 
 Value* SdfKernelBuilder::min_f32(Value* a, Value* b) {
-    Value* is_less = builder().build_slt(a, b);
-    return builder().build_select(is_less, a, b);
+    return builder().build_fmin_f32(a, b);
 }
 
 Value* SdfKernelBuilder::max_f32(Value* a, Value* b) {
-    Value* is_greater = builder().build_sgt(a, b);
-    return builder().build_select(is_greater, a, b);
+    return builder().build_fmax_f32(a, b);
 }
 
 Value* SdfKernelBuilder::clamp_f32(Value* x, Value* min_val, Value* max_val) {
-    Value* t = max_f32(x, min_val);
-    return min_f32(t, max_val);
+    return min_f32(max_f32(x, min_val), max_val);
 }
 
 Value* SdfKernelBuilder::sqrt_f32(Value* x) {
-    if (builder().current_module() && !builder().current_module()->has_external_symbol("sqrtf")) {
-        builder().current_module()->add_external_symbol("sqrtf");
-    }
-    return builder().build_call("sqrtf", Type::f32(), {x});
+    return builder().build_sqrt_f32(x);
 }
 
 Value* SdfKernelBuilder::length2(Value* x, Value* y) {
@@ -53,21 +44,14 @@ Value* SdfKernelBuilder::lerp_f32(Value* a, Value* b, Value* t) {
 
 Value* SdfKernelBuilder::to_f32(Value* val) {
     if (val->type() == Type::f32()) return val;
-    if (builder().current_module() && !builder().current_module()->has_external_symbol("i32_to_f32")) {
-        builder().current_module()->add_external_symbol("i32_to_f32");
-    }
-    Value* i32_val = val;
     if (val->type().is_i64()) {
-        i32_val = builder().build_trunc_i32(val);
+        return builder().build_sitofp_f32_i64(val);
     }
-    return builder().build_call("i32_to_f32", Type::f32(), {i32_val});
+    return builder().build_sitofp_f32_i32(val);
 }
 
 Value* SdfKernelBuilder::floor_f32(Value* x) {
-    if (builder().current_module() && !builder().current_module()->has_external_symbol("floorf")) {
-        builder().current_module()->add_external_symbol("floorf");
-    }
-    return builder().build_call("floorf", Type::f32(), {x});
+    return builder().build_floor_f32(x);
 }
 
 // ── Primitives ──────────────────────────────────────────────────────────────
@@ -277,10 +261,7 @@ Value* SdfKernelBuilder::noise_3d(Value* px, Value* py, Value* pz) {
 
         // Mask to positive 15-bit integer [0, 32767]
         Value* masked = builder().build_and(h, const_i32(0x7FFF));
-        if (builder().current_module() && !builder().current_module()->has_external_symbol("i32_to_f32")) {
-            builder().current_module()->add_external_symbol("i32_to_f32");
-        }
-        Value* h_f = builder().build_call("i32_to_f32", Type::f32(), {masked});
+        Value* h_f = builder().build_sitofp_f32_i32(masked);
 
         // Map [0, 32767] to [-1.0, 1.0]: h_f * (2.0 / 32767.0) - 1.0
         Value* scale = const_f32(2.0f / 32767.0f);

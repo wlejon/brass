@@ -337,29 +337,26 @@ void AArch64ISel::lower_branch_if(const Instruction& inst, LirBlock& lir_bb) {
 
     auto emit_target_args = [&](LirBlock& bb, const BranchTarget& target) {
         if (target.args.empty()) return;
-        if (target.args.size() == 1) {
-            VReg arg_v = get_vreg(target.args[0]);
-            VReg param_v = get_vreg(target.block->param(0));
-            uint8_t sz = param_v.size;
-            if (arg_v != param_v) {
-                auto mov_inst = std::make_unique<LirInst>(
-                    param_v.is_xmm() ? ((sz == 16) ? LirOpcode::Movaps : (sz == 4 ? LirOpcode::Movss : LirOpcode::Movsd)) : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov)
-                );
-                mov_inst->add_def(LirOperand::vreg(param_v, sz));
-                mov_inst->add_use(LirOperand::vreg(arg_v, sz));
-                bb.append_inst(std::move(mov_inst));
-            }
-        } else {
-            auto pcopy = std::make_unique<LirInst>(LirOpcode::ParallelCopy);
-            for (size_t i = 0; i < target.args.size(); ++i) {
-                VReg arg_v = get_vreg(target.args[i]);
-                VReg param_v = get_vreg(target.block->param(i));
+        auto pcopy = std::make_unique<LirInst>(LirOpcode::ParallelCopy);
+        for (size_t i = 0; i < target.args.size(); ++i) {
+            const Value* arg = target.args[i];
+            const Value* param = target.block->param(i);
+            if (param->type().is_v256()) {
+                VRegPair arg_p = get_vreg_pair(arg);
+                VRegPair param_p = get_vreg_pair(param);
+                pcopy->add_def(LirOperand::vreg(param_p.lo, 16));
+                pcopy->add_use(LirOperand::vreg(arg_p.lo, 16));
+                pcopy->add_def(LirOperand::vreg(param_p.hi, 16));
+                pcopy->add_use(LirOperand::vreg(arg_p.hi, 16));
+            } else {
+                VReg arg_v = get_vreg(arg);
+                VReg param_v = get_vreg(param);
                 uint8_t sz = param_v.size;
                 pcopy->add_def(LirOperand::vreg(param_v, sz));
                 pcopy->add_use(LirOperand::vreg(arg_v, sz));
             }
-            bb.append_inst(std::move(pcopy));
         }
+        bb.append_inst(std::move(pcopy));
     };
 
     if (t_target.args.empty() && f_target.args.empty()) {

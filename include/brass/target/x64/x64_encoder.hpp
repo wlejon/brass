@@ -275,6 +275,12 @@ public:
     void andpd(XMM dst, const MemAddress& src);
     void orpd(XMM dst, XMM src);
     void orpd(XMM dst, const MemAddress& src);
+    void minsd(XMM dst, XMM src);
+    void minsd(XMM dst, const MemAddress& src);
+    void maxsd(XMM dst, XMM src);
+    void maxsd(XMM dst, const MemAddress& src);
+    void roundsd(XMM dst, XMM src, uint8_t mode);
+    void roundsd(XMM dst, const MemAddress& src, uint8_t mode);
 
     // Single-Precision Arithmetic
     void addss(XMM dst, XMM src);
@@ -287,6 +293,12 @@ public:
     void divss(XMM dst, const MemAddress& src);
     void sqrtss(XMM dst, XMM src);
     void sqrtss(XMM dst, const MemAddress& src);
+    void minss(XMM dst, XMM src);
+    void minss(XMM dst, const MemAddress& src);
+    void maxss(XMM dst, XMM src);
+    void maxss(XMM dst, const MemAddress& src);
+    void roundss(XMM dst, XMM src, uint8_t mode);
+    void roundss(XMM dst, const MemAddress& src, uint8_t mode);
     void ucomiss(XMM dst, XMM src);
     void ucomiss(XMM dst, const MemAddress& src);
     void xorps(XMM dst, XMM src);

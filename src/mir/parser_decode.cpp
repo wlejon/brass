@@ -65,12 +65,35 @@ bool decode_opcode_string(std::string_view str, Opcode& op, Type& type_suffix, T
     if (str == "sitofp.f64.i32" || str == "sitofp_f64_i32") { op = Opcode::sitofp_f64_i32; type_suffix = Type::f64(); return true; }
     if (str == "sitofp.f64.i64" || str == "sitofp_f64_i64") { op = Opcode::sitofp_f64_i64; type_suffix = Type::f64(); return true; }
     if (str == "sitofp.f64") { op = Opcode::sitofp_f64_i32; type_suffix = Type::f64(); return true; }
+    if (str == "sitofp.f32.i32" || str == "sitofp_f32_i32") { op = Opcode::sitofp_f32_i32; type_suffix = Type::f32(); return true; }
+    if (str == "sitofp.f32.i64" || str == "sitofp_f32_i64") { op = Opcode::sitofp_f32_i64; type_suffix = Type::f32(); return true; }
+    if (str == "sitofp.f32") { op = Opcode::sitofp_f32_i32; type_suffix = Type::f32(); return true; }
+
+    if (str == "fptosi.i32.f32" || str == "fptosi_i32_f32") { op = Opcode::fptosi_i32_f32; type_suffix = Type::i32(); return true; }
+    if (str == "fptosi.i64.f32" || str == "fptosi_i64_f32") { op = Opcode::fptosi_i64_f32; type_suffix = Type::i64(); return true; }
+    if (str == "fptrunc.f32.f64" || str == "fptrunc_f32_f64") { op = Opcode::fptrunc_f32_f64; type_suffix = Type::f32(); return true; }
+    if (str == "fpext.f64.f32" || str == "fpext_f64_f32") { op = Opcode::fpext_f64_f32; type_suffix = Type::f64(); return true; }
 
     if (str == "bitcast.i64.f64" || str == "bitcast_i64_f64") { op = Opcode::bitcast_i64_f64; type_suffix = Type::i64(); return true; }
     if (str == "bitcast.f64.i64" || str == "bitcast_f64_i64") { op = Opcode::bitcast_f64_i64; type_suffix = Type::f64(); return true; }
 
     if (str == "fma.f32" || str == "fma_f32") { op = Opcode::fma_f32; type_suffix = Type::f32(); return true; }
     if (str == "fma.f64" || str == "fma_f64") { op = Opcode::fma_f64; type_suffix = Type::f64(); return true; }
+
+    if (str == "sqrt.f32" || str == "sqrt_f32") { op = Opcode::sqrt_f32; type_suffix = Type::f32(); return true; }
+    if (str == "sqrt.f64" || str == "sqrt_f64") { op = Opcode::sqrt_f64; type_suffix = Type::f64(); return true; }
+    if (str == "floor.f32" || str == "floor_f32") { op = Opcode::floor_f32; type_suffix = Type::f32(); return true; }
+    if (str == "floor.f64" || str == "floor_f64") { op = Opcode::floor_f64; type_suffix = Type::f64(); return true; }
+    if (str == "ceil.f32" || str == "ceil_f32") { op = Opcode::ceil_f32; type_suffix = Type::f32(); return true; }
+    if (str == "ceil.f64" || str == "ceil_f64") { op = Opcode::ceil_f64; type_suffix = Type::f64(); return true; }
+    if (str == "round.f32" || str == "round_f32") { op = Opcode::round_f32; type_suffix = Type::f32(); return true; }
+    if (str == "round.f64" || str == "round_f64") { op = Opcode::round_f64; type_suffix = Type::f64(); return true; }
+    if (str == "fabs.f32" || str == "fabs_f32") { op = Opcode::fabs_f32; type_suffix = Type::f32(); return true; }
+    if (str == "fabs.f64" || str == "fabs_f64") { op = Opcode::fabs_f64; type_suffix = Type::f64(); return true; }
+    if (str == "fmin.f32" || str == "fmin_f32") { op = Opcode::fmin_f32; type_suffix = Type::f32(); return true; }
+    if (str == "fmin.f64" || str == "fmin_f64") { op = Opcode::fmin_f64; type_suffix = Type::f64(); return true; }
+    if (str == "fmax.f32" || str == "fmax_f32") { op = Opcode::fmax_f32; type_suffix = Type::f32(); return true; }
+    if (str == "fmax.f64" || str == "fmax_f64") { op = Opcode::fmax_f64; type_suffix = Type::f64(); return true; }
 
     // Check dot separation: base.suffix or underscore separation
     std::string_view base = str;

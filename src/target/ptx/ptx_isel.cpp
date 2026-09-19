@@ -196,6 +196,44 @@ void PtxISel::lower_instruction(const brass::Instruction& inst) {
         case Opcode::smod:    lower_rem(inst, false); break;
         case Opcode::umod:    lower_rem(inst, true); break;
         case Opcode::neg:     lower_neg(inst); break;
+        case Opcode::sqrt_f32:
+        case Opcode::sqrt_f64: {
+            Type t = type_for(inst.type());
+            emit(Inst::make(ptx::Opcode::sqrt, t).rnd(Rounding::rn)
+                     .dst(result_reg(inst))
+                     .src(reg_of(inst.operand(0), "operand 0")));
+            break;
+        }
+        case Opcode::floor_f32:
+        case Opcode::floor_f64: {
+            Type t = type_for(inst.type());
+            lower_cvt(inst, t, t, Rounding::rmi);
+            break;
+        }
+        case Opcode::ceil_f32:
+        case Opcode::ceil_f64: {
+            Type t = type_for(inst.type());
+            lower_cvt(inst, t, t, Rounding::rpi);
+            break;
+        }
+        case Opcode::round_f32:
+        case Opcode::round_f64: {
+            Type t = type_for(inst.type());
+            lower_cvt(inst, t, t, Rounding::rni);
+            break;
+        }
+        case Opcode::fabs_f32:
+        case Opcode::fabs_f64: {
+            Type t = type_for(inst.type());
+            emit(Inst::make(ptx::Opcode::abs, t)
+                     .dst(result_reg(inst))
+                     .src(reg_of(inst.operand(0), "operand 0")));
+            break;
+        }
+        case Opcode::fmin_f32:
+        case Opcode::fmin_f64: lower_binary(inst, ptx::Opcode::min); break;
+        case Opcode::fmax_f32:
+        case Opcode::fmax_f64: lower_binary(inst, ptx::Opcode::max); break;
 
         // Bitwise and shifts
         case Opcode::and_: lower_bitwise(inst, ptx::Opcode::and_); break;
@@ -229,10 +267,16 @@ void PtxISel::lower_instruction(const brass::Instruction& inst) {
         case Opcode::trunc_i8:
             lower_cvt(inst, Type::u8, inst.operand(0)->type().is_i64() ? Type::u64 : Type::u32);
             break;
-        case Opcode::sitofp_f64_i32: lower_sitofp(inst, Type::s32); break;
-        case Opcode::sitofp_f64_i64: lower_sitofp(inst, Type::s64); break;
-        case Opcode::fptosi_i32:     lower_fptosi(inst, Type::s32); break;
-        case Opcode::fptosi_i64:     lower_fptosi(inst, Type::s64); break;
+        case Opcode::sitofp_f64_i32:
+        case Opcode::sitofp_f32_i32: lower_sitofp(inst, Type::s32); break;
+        case Opcode::sitofp_f64_i64:
+        case Opcode::sitofp_f32_i64: lower_sitofp(inst, Type::s64); break;
+        case Opcode::fptosi_i32:
+        case Opcode::fptosi_i32_f32: lower_fptosi(inst, Type::s32); break;
+        case Opcode::fptosi_i64:
+        case Opcode::fptosi_i64_f32: lower_fptosi(inst, Type::s64); break;
+        case Opcode::fptrunc_f32_f64: lower_cvt(inst, Type::f32, Type::f64, Rounding::rn); break;
+        case Opcode::fpext_f64_f32:   lower_cvt(inst, Type::f64, Type::f32, Rounding::rn); break;
         case Opcode::bitcast_i64_f64:
         case Opcode::bitcast_f64_i64: lower_bitcast(inst); break;
 

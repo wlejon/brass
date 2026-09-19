@@ -100,6 +100,7 @@ private:
     void lower_safepoint(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_guard(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_vector_instruction(const Instruction& inst, codegen::LirBlock& lir_bb);
+    void lower_fp_instruction(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_coro(const Instruction& inst, codegen::LirBlock& lir_bb);
 };
 

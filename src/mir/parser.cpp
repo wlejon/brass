@@ -433,8 +433,14 @@ private:
             case Opcode::trunc_i32: { Value* v = parse_val(); if (!v) return false; res_val = b.build_trunc_i32(v); break; }
             case Opcode::fptosi_i32: { Value* v = parse_val(); if (!v) return false; res_val = b.build_fptosi_i32(v); break; }
             case Opcode::fptosi_i64: { Value* v = parse_val(); if (!v) return false; res_val = b.build_fptosi_i64(v); break; }
+            case Opcode::fptosi_i32_f32: { Value* v = parse_val(); if (!v) return false; res_val = b.build_fptosi_i32_f32(v); break; }
+            case Opcode::fptosi_i64_f32: { Value* v = parse_val(); if (!v) return false; res_val = b.build_fptosi_i64_f32(v); break; }
             case Opcode::sitofp_f64_i32: { Value* v = parse_val(); if (!v) return false; res_val = b.build_sitofp_f64_i32(v); break; }
             case Opcode::sitofp_f64_i64: { Value* v = parse_val(); if (!v) return false; res_val = b.build_sitofp_f64_i64(v); break; }
+            case Opcode::sitofp_f32_i32: { Value* v = parse_val(); if (!v) return false; res_val = b.build_sitofp_f32_i32(v); break; }
+            case Opcode::sitofp_f32_i64: { Value* v = parse_val(); if (!v) return false; res_val = b.build_sitofp_f32_i64(v); break; }
+            case Opcode::fptrunc_f32_f64: { Value* v = parse_val(); if (!v) return false; res_val = b.build_fptrunc_f32_f64(v); break; }
+            case Opcode::fpext_f64_f32: { Value* v = parse_val(); if (!v) return false; res_val = b.build_fpext_f64_f32(v); break; }
             case Opcode::bitcast_i64_f64: { Value* v = parse_val(); if (!v) return false; res_val = b.build_bitcast_i64_f64(v); break; }
             case Opcode::bitcast_f64_i64: { Value* v = parse_val(); if (!v) return false; res_val = b.build_bitcast_f64_i64(v); break; }
 
@@ -450,7 +456,11 @@ private:
             case Opcode::xor_:
             case Opcode::shl:
             case Opcode::lshr:
-            case Opcode::ashr: {
+            case Opcode::ashr:
+            case Opcode::fmin_f32:
+            case Opcode::fmin_f64:
+            case Opcode::fmax_f32:
+            case Opcode::fmax_f64: {
                 Value* lhs = parse_val(); if (!lhs) return false;
                 if (!expect(TokenKind::Comma, "','")) return false;
                 Value* rhs = parse_val(); if (!rhs) return false;
@@ -469,6 +479,10 @@ private:
                     case Opcode::shl: res_val = b.build_shl(lhs, rhs); break;
                     case Opcode::lshr: res_val = b.build_lshr(lhs, rhs); break;
                     case Opcode::ashr: res_val = b.build_ashr(lhs, rhs); break;
+                    case Opcode::fmin_f32: res_val = b.build_fmin_f32(lhs, rhs); break;
+                    case Opcode::fmin_f64: res_val = b.build_fmin_f64(lhs, rhs); break;
+                    case Opcode::fmax_f32: res_val = b.build_fmax_f32(lhs, rhs); break;
+                    case Opcode::fmax_f64: res_val = b.build_fmax_f64(lhs, rhs); break;
                     default: break;
                 }
                 break;
@@ -487,6 +501,16 @@ private:
             }
 
             case Opcode::neg: { Value* v = parse_val(); if (!v) return false; res_val = b.build_neg(v); break; }
+            case Opcode::sqrt_f32: { Value* v = parse_val(); if (!v) return false; res_val = b.build_sqrt_f32(v); break; }
+            case Opcode::sqrt_f64: { Value* v = parse_val(); if (!v) return false; res_val = b.build_sqrt_f64(v); break; }
+            case Opcode::floor_f32: { Value* v = parse_val(); if (!v) return false; res_val = b.build_floor_f32(v); break; }
+            case Opcode::floor_f64: { Value* v = parse_val(); if (!v) return false; res_val = b.build_floor_f64(v); break; }
+            case Opcode::ceil_f32: { Value* v = parse_val(); if (!v) return false; res_val = b.build_ceil_f32(v); break; }
+            case Opcode::ceil_f64: { Value* v = parse_val(); if (!v) return false; res_val = b.build_ceil_f64(v); break; }
+            case Opcode::round_f32: { Value* v = parse_val(); if (!v) return false; res_val = b.build_round_f32(v); break; }
+            case Opcode::round_f64: { Value* v = parse_val(); if (!v) return false; res_val = b.build_round_f64(v); break; }
+            case Opcode::fabs_f32: { Value* v = parse_val(); if (!v) return false; res_val = b.build_fabs_f32(v); break; }
+            case Opcode::fabs_f64: { Value* v = parse_val(); if (!v) return false; res_val = b.build_fabs_f64(v); break; }
             case Opcode::not_: { Value* v = parse_val(); if (!v) return false; res_val = b.build_not(v); break; }
             case Opcode::clz: { Value* v = parse_val(); if (!v) return false; res_val = b.build_clz(v); break; }
             case Opcode::ctz: { Value* v = parse_val(); if (!v) return false; res_val = b.build_ctz(v); break; }

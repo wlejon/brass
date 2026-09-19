@@ -230,6 +230,11 @@ public:
     void fsqrt(FPR dst, FPR src);
     void fabs(FPR dst, FPR src);
     void fneg(FPR dst, FPR src);
+    void fmin(FPR dst, FPR src1, FPR src2);
+    void fmax(FPR dst, FPR src1, FPR src2);
+    void frintm(FPR dst, FPR src);
+    void frintp(FPR dst, FPR src);
+    void frinta(FPR dst, FPR src);
     void fcmp(FPR src1, FPR src2);
     void fcmp_zero(FPR src);
 
@@ -242,6 +247,11 @@ public:
     void fsqrt_s(FPR dst, FPR src);
     void fabs_s(FPR dst, FPR src);
     void fneg_s(FPR dst, FPR src);
+    void fmin_s(FPR dst, FPR src1, FPR src2);
+    void fmax_s(FPR dst, FPR src1, FPR src2);
+    void frintm_s(FPR dst, FPR src);
+    void frintp_s(FPR dst, FPR src);
+    void frinta_s(FPR dst, FPR src);
     void fcmp_s(FPR src1, FPR src2);
     void fcmp_zero_s(FPR src);
 

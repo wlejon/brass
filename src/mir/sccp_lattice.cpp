@@ -1,5 +1,6 @@
 #include "sccp_lattice.hpp"
 #include <bit>
+#include <cmath>
 #include <limits>
 #include <cstring>
 
@@ -82,6 +83,27 @@ LatticeValue evaluate_unary(Opcode op, Type res_type, const LatticeValue& val) {
             break;
         }
 
+        case Opcode::sqrt_f32:
+            return LatticeValue::make_f32(std::sqrt(val.as_f32()));
+        case Opcode::sqrt_f64:
+            return LatticeValue::make_f64(std::sqrt(val.as_f64()));
+        case Opcode::floor_f32:
+            return LatticeValue::make_f32(std::floor(val.as_f32()));
+        case Opcode::floor_f64:
+            return LatticeValue::make_f64(std::floor(val.as_f64()));
+        case Opcode::ceil_f32:
+            return LatticeValue::make_f32(std::ceil(val.as_f32()));
+        case Opcode::ceil_f64:
+            return LatticeValue::make_f64(std::ceil(val.as_f64()));
+        case Opcode::round_f32:
+            return LatticeValue::make_f32(std::round(val.as_f32()));
+        case Opcode::round_f64:
+            return LatticeValue::make_f64(std::round(val.as_f64()));
+        case Opcode::fabs_f32:
+            return LatticeValue::make_f32(std::fabs(val.as_f32()));
+        case Opcode::fabs_f64:
+            return LatticeValue::make_f64(std::fabs(val.as_f64()));
+
         default:
             break;
     }
@@ -131,6 +153,8 @@ LatticeValue evaluate_binary(Opcode op, Type res_type, const LatticeValue& lhs, 
                 case Opcode::sub: return LatticeValue::make_f32(f1 - f2);
                 case Opcode::mul: return LatticeValue::make_f32(f1 * f2);
                 case Opcode::sdiv: return LatticeValue::make_f32(f1 / f2);
+                case Opcode::fmin_f32: return LatticeValue::make_f32(std::fmin(f1, f2));
+                case Opcode::fmax_f32: return LatticeValue::make_f32(std::fmax(f1, f2));
                 case Opcode::eq: return LatticeValue::make_i32(f1 == f2 ? 1 : 0);
                 case Opcode::ne: return LatticeValue::make_i32(f1 != f2 ? 1 : 0);
                 case Opcode::slt: return LatticeValue::make_i32(f1 < f2 ? 1 : 0);
@@ -147,6 +171,8 @@ LatticeValue evaluate_binary(Opcode op, Type res_type, const LatticeValue& lhs, 
                 case Opcode::sub: return LatticeValue::make_f64(d1 - d2);
                 case Opcode::mul: return LatticeValue::make_f64(d1 * d2);
                 case Opcode::sdiv: return LatticeValue::make_f64(d1 / d2);
+                case Opcode::fmin_f64: return LatticeValue::make_f64(std::fmin(d1, d2));
+                case Opcode::fmax_f64: return LatticeValue::make_f64(std::fmax(d1, d2));
                 case Opcode::eq: return LatticeValue::make_i32(d1 == d2 ? 1 : 0);
                 case Opcode::ne: return LatticeValue::make_i32(d1 != d2 ? 1 : 0);
                 case Opcode::slt: return LatticeValue::make_i32(d1 < d2 ? 1 : 0);
@@ -313,12 +339,24 @@ LatticeValue evaluate_conversion(Opcode op, Type res_type, const LatticeValue& v
             return LatticeValue::make_i32(static_cast<int32_t>(val.as_i64()));
         case Opcode::fptosi_i32:
             return LatticeValue::make_i32(static_cast<int32_t>(val.as_f64()));
+        case Opcode::fptosi_i32_f32:
+            return LatticeValue::make_i32(static_cast<int32_t>(val.as_f32()));
         case Opcode::fptosi_i64:
             return LatticeValue::make_i64(static_cast<int64_t>(val.as_f64()));
+        case Opcode::fptosi_i64_f32:
+            return LatticeValue::make_i64(static_cast<int64_t>(val.as_f32()));
         case Opcode::sitofp_f64_i32:
             return LatticeValue::make_f64(static_cast<double>(val.as_i32()));
+        case Opcode::sitofp_f32_i32:
+            return LatticeValue::make_f32(static_cast<float>(val.as_i32()));
         case Opcode::sitofp_f64_i64:
             return LatticeValue::make_f64(static_cast<double>(val.as_i64()));
+        case Opcode::sitofp_f32_i64:
+            return LatticeValue::make_f32(static_cast<float>(val.as_i64()));
+        case Opcode::fptrunc_f32_f64:
+            return LatticeValue::make_f32(static_cast<float>(val.as_f64()));
+        case Opcode::fpext_f64_f32:
+            return LatticeValue::make_f64(static_cast<double>(val.as_f32()));
         case Opcode::bitcast_i64_f64: {
             double d = val.as_f64();
             int64_t i = 0;

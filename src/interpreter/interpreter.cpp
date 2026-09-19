@@ -198,22 +198,16 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                     frame.set_value(inst->result(), RuntimeValue::from_i32(frame.get_value(inst->operand(0)).as_i32() & 0xff));
                     break;
                 }
-                case Opcode::fptosi_i32: {
-                    frame.set_value(inst->result(), val_fptosi_i32(frame.get_value(inst->operand(0))));
-                    break;
-                }
-                case Opcode::fptosi_i64: {
-                    frame.set_value(inst->result(), val_fptosi_i64(frame.get_value(inst->operand(0))));
-                    break;
-                }
-                case Opcode::sitofp_f64_i32: {
-                    frame.set_value(inst->result(), val_sitofp_f64_i32(frame.get_value(inst->operand(0))));
-                    break;
-                }
-                case Opcode::sitofp_f64_i64: {
-                    frame.set_value(inst->result(), val_sitofp_f64_i64(frame.get_value(inst->operand(0))));
-                    break;
-                }
+                case Opcode::fptosi_i32: frame.set_value(inst->result(), val_fptosi_i32(frame.get_value(inst->operand(0)))); break;
+                case Opcode::fptosi_i64: frame.set_value(inst->result(), val_fptosi_i64(frame.get_value(inst->operand(0)))); break;
+                case Opcode::fptosi_i32_f32: frame.set_value(inst->result(), val_fptosi_i32_f32(frame.get_value(inst->operand(0)))); break;
+                case Opcode::fptosi_i64_f32: frame.set_value(inst->result(), val_fptosi_i64_f32(frame.get_value(inst->operand(0)))); break;
+                case Opcode::sitofp_f64_i32: frame.set_value(inst->result(), val_sitofp_f64_i32(frame.get_value(inst->operand(0)))); break;
+                case Opcode::sitofp_f64_i64: frame.set_value(inst->result(), val_sitofp_f64_i64(frame.get_value(inst->operand(0)))); break;
+                case Opcode::sitofp_f32_i32: frame.set_value(inst->result(), val_sitofp_f32_i32(frame.get_value(inst->operand(0)))); break;
+                case Opcode::sitofp_f32_i64: frame.set_value(inst->result(), val_sitofp_f32_i64(frame.get_value(inst->operand(0)))); break;
+                case Opcode::fptrunc_f32_f64: frame.set_value(inst->result(), val_fptrunc_f32_f64(frame.get_value(inst->operand(0)))); break;
+                case Opcode::fpext_f64_f32: frame.set_value(inst->result(), val_fpext_f64_f32(frame.get_value(inst->operand(0)))); break;
                 case Opcode::bitcast_i64_f64: {
                     frame.set_value(inst->result(), val_bitcast_i64_f64(frame.get_value(inst->operand(0))));
                     break;
@@ -243,6 +237,20 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                     frame.set_value(inst->result(), val_fma_f64(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1)), frame.get_value(inst->operand(2))));
                     break;
                 }
+                case Opcode::sqrt_f32: frame.set_value(inst->result(), val_sqrt_f32(frame.get_value(inst->operand(0)))); break;
+                case Opcode::sqrt_f64: frame.set_value(inst->result(), val_sqrt_f64(frame.get_value(inst->operand(0)))); break;
+                case Opcode::floor_f32: frame.set_value(inst->result(), val_floor_f32(frame.get_value(inst->operand(0)))); break;
+                case Opcode::floor_f64: frame.set_value(inst->result(), val_floor_f64(frame.get_value(inst->operand(0)))); break;
+                case Opcode::ceil_f32: frame.set_value(inst->result(), val_ceil_f32(frame.get_value(inst->operand(0)))); break;
+                case Opcode::ceil_f64: frame.set_value(inst->result(), val_ceil_f64(frame.get_value(inst->operand(0)))); break;
+                case Opcode::round_f32: frame.set_value(inst->result(), val_round_f32(frame.get_value(inst->operand(0)))); break;
+                case Opcode::round_f64: frame.set_value(inst->result(), val_round_f64(frame.get_value(inst->operand(0)))); break;
+                case Opcode::fabs_f32: frame.set_value(inst->result(), val_fabs_f32(frame.get_value(inst->operand(0)))); break;
+                case Opcode::fabs_f64: frame.set_value(inst->result(), val_fabs_f64(frame.get_value(inst->operand(0)))); break;
+                case Opcode::fmin_f32: frame.set_value(inst->result(), val_fmin_f32(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1)))); break;
+                case Opcode::fmin_f64: frame.set_value(inst->result(), val_fmin_f64(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1)))); break;
+                case Opcode::fmax_f32: frame.set_value(inst->result(), val_fmax_f32(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1)))); break;
+                case Opcode::fmax_f64: frame.set_value(inst->result(), val_fmax_f64(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1)))); break;
                 case Opcode::sdiv: {
                     frame.set_value(inst->result(), val_sdiv(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1))));
                     break;

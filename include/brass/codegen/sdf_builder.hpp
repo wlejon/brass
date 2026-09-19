@@ -21,20 +21,19 @@ public:
     explicit SdfKernelBuilder(Builder& b) noexcept
         : KernelBuilder(b) {}
 
-    // ── Scalar Math Helpers ─────────────────────────────────────────────────
-    // Branchless absolute value: select(slt(v, 0), neg(v), v)
+    // Native absolute value: fabs_f32
     Value* abs_f32(Value* v);
 
-    // Branchless minimum: select(slt(a, b), a, b)
+    // Native minimum: fmin_f32
     Value* min_f32(Value* a, Value* b);
 
-    // Branchless maximum: select(sgt(a, b), a, b)
+    // Native maximum: fmax_f32
     Value* max_f32(Value* a, Value* b);
 
     // Clamp x to [min_val, max_val]
     Value* clamp_f32(Value* x, Value* min_val, Value* max_val);
 
-    // Square root via external "sqrtf" symbol
+    // Native square root: sqrt_f32
     Value* sqrt_f32(Value* x);
 
     // 2D Euclidean length: sqrt(x^2 + y^2)
@@ -49,7 +48,7 @@ public:
     // Converts integer (i32/i64) or float to f32
     Value* to_f32(Value* val);
 
-    // Floor function for f32 returning float
+    // Native floor function for f32: floor_f32
     Value* floor_f32(Value* x);
 
     // ── Primitives ──────────────────────────────────────────────────────────

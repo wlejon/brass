@@ -139,11 +139,29 @@ public:
             case Opcode::fptosi_i64:
                 os_ << "fptosi.i64 " << value_name(inst.operand(0));
                 break;
+            case Opcode::fptosi_i32_f32:
+                os_ << "fptosi.i32.f32 " << value_name(inst.operand(0));
+                break;
+            case Opcode::fptosi_i64_f32:
+                os_ << "fptosi.i64.f32 " << value_name(inst.operand(0));
+                break;
             case Opcode::sitofp_f64_i32:
                 os_ << "sitofp.f64.i32 " << value_name(inst.operand(0));
                 break;
             case Opcode::sitofp_f64_i64:
                 os_ << "sitofp.f64.i64 " << value_name(inst.operand(0));
+                break;
+            case Opcode::sitofp_f32_i32:
+                os_ << "sitofp.f32.i32 " << value_name(inst.operand(0));
+                break;
+            case Opcode::sitofp_f32_i64:
+                os_ << "sitofp.f32.i64 " << value_name(inst.operand(0));
+                break;
+            case Opcode::fptrunc_f32_f64:
+                os_ << "fptrunc.f32.f64 " << value_name(inst.operand(0));
+                break;
+            case Opcode::fpext_f64_f32:
+                os_ << "fpext.f64.f32 " << value_name(inst.operand(0));
                 break;
             case Opcode::bitcast_i64_f64:
                 os_ << "bitcast.i64.f64 " << value_name(inst.operand(0));
@@ -473,10 +491,28 @@ public:
                     << value_name(inst.operand(1)) << ", " << value_name(inst.operand(2));
                 break;
 
+            case Opcode::sqrt_f32:
+            case Opcode::sqrt_f64:
+            case Opcode::floor_f32:
+            case Opcode::floor_f64:
+            case Opcode::ceil_f32:
+            case Opcode::ceil_f64:
+            case Opcode::round_f32:
+            case Opcode::round_f64:
+            case Opcode::fabs_f32:
+            case Opcode::fabs_f64:
             case Opcode::vneg:
             case Opcode::vsqrt:
             case Opcode::vnot:
                 os_ << opcode_name(op) << " " << value_name(inst.operand(0));
+                break;
+
+            case Opcode::fmin_f32:
+            case Opcode::fmin_f64:
+            case Opcode::fmax_f32:
+            case Opcode::fmax_f64:
+                os_ << opcode_name(op) << " " << value_name(inst.operand(0)) << ", "
+                    << value_name(inst.operand(1));
                 break;
 
             case Opcode::vload:

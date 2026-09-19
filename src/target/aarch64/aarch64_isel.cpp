@@ -18,220 +18,11 @@ AArch64ISel::AArch64ISel(const Target& target)
 AArch64ISel::AArch64ISel(const Target& target, const CallingConvention& cc)
     : target_(target), cc_(cc) {}
 
-AArch64ISel::ImmIntInfo AArch64ISel::get_imm_int_info(const Value* val) const {
-    if (!val) return {};
-    if (val->is_instruction()) {
-        const Instruction* def = val->defining_instruction();
-        if (def) {
-            if (def->opcode() == Opcode::iconst_i32) {
-                return {true, static_cast<int64_t>(def->imm_i32()), true, def};
-            }
-            if (def->opcode() == Opcode::iconst_i64) {
-                int64_t v = def->imm_i64();
-                bool fits = (v >= INT32_MIN && v <= INT32_MAX);
-                return {true, v, fits, def};
-            }
-        }
-    }
-    return {};
-}
-
-bool AArch64ISel::is_value_dead_after(
-    const Function& mir_fn,
-    const BasicBlock& bb,
-    const Instruction* inst,
-    const Value* val
-) const {
-    (void)mir_fn;
-    if (!val) return false;
-    auto it = use_count_.find(val);
-    if (it == use_count_.end() || it->second == 0) return true;
-    uint32_t total_uses = it->second;
-
-    uint32_t uses_seen = 0;
-    for (const auto* cur : bb) {
-        for (const auto* op : cur->operands()) {
-            if (op == val) uses_seen++;
-        }
-        if (cur == inst) break;
-    }
-
-    return (uses_seen == total_uses);
-}
-
-void AArch64ISel::analyze_function(const Function& mir_fn) {
-    use_count_.clear();
-    skipped_insts_.clear();
-
-    for (const auto* bb : mir_fn.blocks()) {
-        for (const auto* inst : *bb) {
-            for (const auto* op : inst->operands()) {
-                if (op) use_count_[op]++;
-            }
-            for (const auto* arg : inst->branch_target().args) {
-                if (arg) use_count_[arg]++;
-            }
-            for (const auto* arg : inst->true_target().args) {
-                if (arg) use_count_[arg]++;
-            }
-            for (const auto* arg : inst->false_target().args) {
-                if (arg) use_count_[arg]++;
-            }
-            for (const auto* sv : inst->state_map()) {
-                if (sv) use_count_[sv]++;
-            }
-        }
-    }
-
-    for (const auto* bb : mir_fn.blocks()) {
-        for (const auto* inst : *bb) {
-            if (inst->opcode() == Opcode::br_if || inst->opcode() == Opcode::guard || inst->opcode() == Opcode::select) {
-                const Value* cond = inst->operand(0);
-                if (cond && cond->is_instruction()) {
-                    const Instruction* def_inst = cond->defining_instruction();
-                    if (def_inst && def_inst->parent() == bb && is_comparison(def_inst->opcode())) {
-                        if (use_count_[cond] == 1) {
-                            skipped_insts_.insert(def_inst);
-                            if (def_inst->opcode() == Opcode::eq || def_inst->opcode() == Opcode::ne) {
-                                ImmIntInfo c0 = get_imm_int_info(def_inst->operand(0));
-                                ImmIntInfo c1 = get_imm_int_info(def_inst->operand(1));
-                                const Value* and_val = (c1.is_imm && c1.val == 0) ? def_inst->operand(0) : ((c0.is_imm && c0.val == 0) ? def_inst->operand(1) : nullptr);
-                                if (and_val && and_val->is_instruction()) {
-                                    const Instruction* and_inst = and_val->defining_instruction();
-                                    if (and_inst && and_inst->parent() == bb && and_inst->opcode() == Opcode::and_ && use_count_[and_val] == 1) {
-                                        skipped_insts_.insert(and_inst);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    std::unordered_map<const Value*, uint32_t> folded_uses;
-
-    for (const auto* bb : mir_fn.blocks()) {
-        for (const auto* inst : *bb) {
-            if (skipped_insts_.count(inst)) continue;
-
-            if (inst->opcode() == Opcode::load) {
-                MemFold mf = match_address(inst->operand(0), inst->offset());
-                for (const auto* fi : mf.folded_instructions) {
-                    if (fi && fi->result()) folded_uses[fi->result()]++;
-                }
-                continue;
-            }
-
-            if (inst->opcode() == Opcode::store) {
-                MemFold mf = match_address(inst->operand(0), inst->offset());
-                for (const auto* fi : mf.folded_instructions) {
-                    if (fi && fi->result()) folded_uses[fi->result()]++;
-                }
-                const Value* src = inst->operand(1);
-                ImmIntInfo imm_src = get_imm_int_info(src);
-                if (imm_src.is_imm && imm_src.fits_i32) {
-                    folded_uses[src]++;
-                }
-                continue;
-            }
-
-            if (inst->opcode() == Opcode::load_indexed) {
-                MemFold mf = match_indexed_address(inst->operand(0), inst->operand(1), x64::scale_from_int(inst->scale()), inst->offset());
-                for (const auto* fi : mf.folded_instructions) {
-                    if (fi && fi->result()) folded_uses[fi->result()]++;
-                }
-                continue;
-            }
-
-            if (inst->opcode() == Opcode::store_indexed) {
-                MemFold mf = match_indexed_address(inst->operand(0), inst->operand(1), x64::scale_from_int(inst->scale()), inst->offset());
-                for (const auto* fi : mf.folded_instructions) {
-                    if (fi && fi->result()) folded_uses[fi->result()]++;
-                }
-                const Value* src = inst->operand(2);
-                ImmIntInfo imm_src = get_imm_int_info(src);
-                if (imm_src.is_imm && imm_src.fits_i32) {
-                    folded_uses[src]++;
-                }
-                continue;
-            }
-
-            if (inst->opcode() == Opcode::br_if) {
-                const Value* cond = inst->operand(0);
-                if (cond && cond->is_instruction()) {
-                    const Instruction* def_inst = cond->defining_instruction();
-                    if (def_inst && def_inst->parent() == bb && is_comparison(def_inst->opcode()) && skipped_insts_.count(def_inst)) {
-                        const Value* lhs = def_inst->operand(0);
-                        const Value* rhs = def_inst->operand(1);
-                        ImmIntInfo rhs_imm = get_imm_int_info(rhs);
-                        ImmIntInfo lhs_imm = get_imm_int_info(lhs);
-
-                        if (rhs_imm.is_imm && rhs_imm.fits_i32) {
-                            folded_uses[rhs]++;
-                        } else if (lhs_imm.is_imm && lhs_imm.fits_i32) {
-                            folded_uses[lhs]++;
-                        } else if (rhs && rhs->is_instruction() && can_fuse_load(rhs->defining_instruction(), inst)) {
-                            skipped_insts_.insert(rhs->defining_instruction());
-                        }
-                        continue;
-                    }
-                }
-            }
-
-            bool is_alu = false;
-            switch (inst->opcode()) {
-                case Opcode::add: case Opcode::sub: case Opcode::mul:
-                case Opcode::and_: case Opcode::or_: case Opcode::xor_:
-                case Opcode::shl: case Opcode::lshr: case Opcode::ashr:
-                case Opcode::udiv: case Opcode::umod:
-                case Opcode::eq: case Opcode::ne:
-                case Opcode::slt: case Opcode::ult: case Opcode::sle: case Opcode::ule:
-                case Opcode::sgt: case Opcode::ugt: case Opcode::sge: case Opcode::uge:
-                    is_alu = true;
-                    break;
-                default:
-                    break;
-            }
-
-            if (is_alu && inst->operand_count() >= 2) {
-                const Value* op0 = inst->operand(0);
-                const Value* op1 = inst->operand(1);
-                ImmIntInfo imm0 = get_imm_int_info(op0);
-                ImmIntInfo imm1 = get_imm_int_info(op1);
-
-                bool is_comm = (inst->opcode() == Opcode::add || inst->opcode() == Opcode::mul ||
-                                inst->opcode() == Opcode::and_ || inst->opcode() == Opcode::or_ ||
-                                inst->opcode() == Opcode::xor_);
-
-                if (imm1.is_imm && imm1.fits_i32) {
-                    folded_uses[op1]++;
-                } else if (is_comm && imm0.is_imm && imm0.fits_i32) {
-                    folded_uses[op0]++;
-                } else if (op1 && op1->is_instruction() && can_fuse_load(op1->defining_instruction(), inst)) {
-                    skipped_insts_.insert(op1->defining_instruction());
-                } else if (is_comm && op0 && op0->is_instruction() && can_fuse_load(op0->defining_instruction(), inst)) {
-                    skipped_insts_.insert(op0->defining_instruction());
-                }
-            }
-        }
-    }
-
-    for (const auto& [val, fold_count] : folded_uses) {
-        auto it = use_count_.find(val);
-        if (it != use_count_.end() && it->second == fold_count) {
-            if (val->is_instruction()) {
-                skipped_insts_.insert(val->defining_instruction());
-            }
-        }
-    }
-}
-
 std::unique_ptr<LirFunction> AArch64ISel::lower(const Function& mir_fn) {
     auto lir = std::make_unique<LirFunction>();
     lir_fn_ = lir.get();
     val_to_vreg_.clear();
+    val_to_vreg_pair_.clear();
 
     lir_fn_->name = std::string(mir_fn.name());
     lir_fn_->return_type = mir_fn.return_type();
@@ -250,7 +41,11 @@ std::unique_ptr<LirFunction> AArch64ISel::lower(const Function& mir_fn) {
 
     for (const auto* bb : mir_fn.blocks()) {
         for (const auto* param : bb->params()) {
-            get_or_alloc_vreg(param);
+            if (param->type().is_v256()) {
+                get_or_alloc_vreg_pair(param);
+            } else {
+                get_or_alloc_vreg(param);
+            }
         }
     }
 
@@ -258,7 +53,11 @@ std::unique_ptr<LirFunction> AArch64ISel::lower(const Function& mir_fn) {
         for (const auto* inst : *bb) {
             if (!inst->produces_value()) continue;
             if (skipped_insts_.count(inst)) continue;
-            get_or_alloc_vreg(inst->result());
+            if (inst->type().is_v256()) {
+                get_or_alloc_vreg_pair(inst->result());
+            } else {
+                get_or_alloc_vreg(inst->result());
+            }
         }
     }
 
@@ -334,6 +133,10 @@ VReg AArch64ISel::get_or_alloc_vreg(const Value* val) {
     }
 
     Type t = val->type();
+    if (t.is_v256()) {
+        return get_or_alloc_vreg_pair(val).lo;
+    }
+
     RegClass rc = (t.is_float() || t.is_vector()) ? RegClass::XMM : RegClass::GPR;
     uint8_t sz = static_cast<uint8_t>(t.size_in_bytes());
     if (sz == 0) sz = 8;
@@ -353,6 +156,30 @@ VReg AArch64ISel::get_vreg(const Value* val) const {
     return VReg{};
 }
 
+AArch64ISel::VRegPair AArch64ISel::get_or_alloc_vreg_pair(const Value* val) {
+    if (!val) return VRegPair{};
+    auto it = val_to_vreg_pair_.find(val);
+    if (it != val_to_vreg_pair_.end()) {
+        return it->second;
+    }
+
+    VReg lo = lir_fn_->allocate_vreg(RegClass::XMM, 16, false);
+    VReg hi = lir_fn_->allocate_vreg(RegClass::XMM, 16, false);
+    VRegPair pair{lo, hi};
+    val_to_vreg_pair_[val] = pair;
+    val_to_vreg_[val] = lo;
+    return pair;
+}
+
+AArch64ISel::VRegPair AArch64ISel::get_vreg_pair(const Value* val) const {
+    if (!val) return VRegPair{};
+    auto it = val_to_vreg_pair_.find(val);
+    if (it != val_to_vreg_pair_.end()) {
+        return it->second;
+    }
+    return VRegPair{};
+}
+
 void AArch64ISel::lower_entry_parameters(const Function& mir_fn) {
     const auto* entry = mir_fn.entry_block();
     if (!entry || entry->params().empty()) return;
@@ -368,8 +195,43 @@ void AArch64ISel::lower_entry_parameters(const Function& mir_fn) {
 
     for (size_t i = 0; i < entry->param_count(); ++i) {
         const auto* param = entry->param(i);
-        VReg param_vreg = get_vreg(param);
         Type t = param->type();
+
+        if (t.is_v256()) {
+            VRegPair pair = get_vreg_pair(param);
+            if (fpr_idx + 1 < 8) {
+                FPR r_lo = static_cast<FPR>(fpr_idx++);
+                FPR r_hi = static_cast<FPR>(fpr_idx++);
+                pcopy->add_def(LirOperand::vreg(pair.lo, 16));
+                pcopy->add_use(LirOperand::preg_aarch64_fpr(r_lo, 16), FixedConstraint::aarch64_fpr(r_lo));
+                pcopy->add_def(LirOperand::vreg(pair.hi, 16));
+                pcopy->add_use(LirOperand::preg_aarch64_fpr(r_hi, 16), FixedConstraint::aarch64_fpr(r_hi));
+            } else if (fpr_idx < 8) {
+                FPR r_lo = static_cast<FPR>(fpr_idx++);
+                pcopy->add_def(LirOperand::vreg(pair.lo, 16));
+                pcopy->add_use(LirOperand::preg_aarch64_fpr(r_lo, 16), FixedConstraint::aarch64_fpr(r_lo));
+
+                size_t align = 16;
+                stack_bytes = (stack_bytes + align - 1) & ~(align - 1);
+                int32_t caller_offset = static_cast<int32_t>(stack_bytes);
+                stack_bytes += 16;
+                pcopy->add_def(LirOperand::vreg(pair.hi, 16));
+                pcopy->add_use(LirOperand::mem(PReg::aarch64_gpr(GPR::FP), -1 - caller_offset, 16));
+            } else {
+                size_t align = 16;
+                stack_bytes = (stack_bytes + align - 1) & ~(align - 1);
+                int32_t caller_offset = static_cast<int32_t>(stack_bytes);
+                stack_bytes += 32;
+
+                pcopy->add_def(LirOperand::vreg(pair.lo, 16));
+                pcopy->add_use(LirOperand::mem(PReg::aarch64_gpr(GPR::FP), -1 - caller_offset, 16));
+                pcopy->add_def(LirOperand::vreg(pair.hi, 16));
+                pcopy->add_use(LirOperand::mem(PReg::aarch64_gpr(GPR::FP), -1 - (caller_offset + 16), 16));
+            }
+            continue;
+        }
+
+        VReg param_vreg = get_vreg(param);
         uint8_t sz = static_cast<uint8_t>(t.size_in_bytes());
         if (sz == 0) sz = 8;
 
@@ -682,71 +544,34 @@ void AArch64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
             break;
         }
 
-        case Opcode::fptosi_i32: {
-            VReg dst = get_vreg(inst.result());
-            VReg src = get_vreg(inst.operand(0));
-            auto lir_inst = std::make_unique<LirInst>(LirOpcode::Cvttsd2si32);
-            lir_inst->add_def(LirOperand::vreg(dst, 4));
-            lir_inst->add_use(LirOperand::vreg(src, 8));
-            lir_inst->mir_origin = &inst;
-            lir_bb.append_inst(std::move(lir_inst));
+        case Opcode::sqrt_f32:
+        case Opcode::sqrt_f64:
+        case Opcode::floor_f32:
+        case Opcode::floor_f64:
+        case Opcode::ceil_f32:
+        case Opcode::ceil_f64:
+        case Opcode::round_f32:
+        case Opcode::round_f64:
+        case Opcode::fabs_f32:
+        case Opcode::fabs_f64:
+        case Opcode::fmin_f32:
+        case Opcode::fmin_f64:
+        case Opcode::fmax_f32:
+        case Opcode::fmax_f64:
+        case Opcode::sitofp_f32_i32:
+        case Opcode::sitofp_f32_i64:
+        case Opcode::sitofp_f64_i32:
+        case Opcode::sitofp_f64_i64:
+        case Opcode::fptosi_i32_f32:
+        case Opcode::fptosi_i64_f32:
+        case Opcode::fptosi_i32:
+        case Opcode::fptosi_i64:
+        case Opcode::fptrunc_f32_f64:
+        case Opcode::fpext_f64_f32:
+        case Opcode::bitcast_i64_f64:
+        case Opcode::bitcast_f64_i64:
+            lower_fp_instruction(inst, lir_bb);
             break;
-        }
-
-        case Opcode::fptosi_i64: {
-            VReg dst = get_vreg(inst.result());
-            VReg src = get_vreg(inst.operand(0));
-            auto lir_inst = std::make_unique<LirInst>(LirOpcode::Cvttsd2si);
-            lir_inst->add_def(LirOperand::vreg(dst, 8));
-            lir_inst->add_use(LirOperand::vreg(src, 8));
-            lir_inst->mir_origin = &inst;
-            lir_bb.append_inst(std::move(lir_inst));
-            break;
-        }
-
-        case Opcode::sitofp_f64_i32: {
-            VReg dst = get_vreg(inst.result());
-            VReg src = get_vreg(inst.operand(0));
-            auto lir_inst = std::make_unique<LirInst>(LirOpcode::Cvtsi2sd32);
-            lir_inst->add_def(LirOperand::vreg(dst, 8));
-            lir_inst->add_use(LirOperand::vreg(src, 4));
-            lir_inst->mir_origin = &inst;
-            lir_bb.append_inst(std::move(lir_inst));
-            break;
-        }
-
-        case Opcode::sitofp_f64_i64: {
-            VReg dst = get_vreg(inst.result());
-            VReg src = get_vreg(inst.operand(0));
-            auto lir_inst = std::make_unique<LirInst>(LirOpcode::Cvtsi2sd);
-            lir_inst->add_def(LirOperand::vreg(dst, 8));
-            lir_inst->add_use(LirOperand::vreg(src, 8));
-            lir_inst->mir_origin = &inst;
-            lir_bb.append_inst(std::move(lir_inst));
-            break;
-        }
-
-        case Opcode::bitcast_i64_f64: {
-            VReg dst = get_vreg(inst.result());
-            VReg src = get_vreg(inst.operand(0));
-            auto lir_inst = std::make_unique<LirInst>(LirOpcode::Movq_gx);
-            lir_inst->add_def(LirOperand::vreg(dst, 8));
-            lir_inst->add_use(LirOperand::vreg(src, 8));
-            lir_inst->mir_origin = &inst;
-            lir_bb.append_inst(std::move(lir_inst));
-            break;
-        }
-
-        case Opcode::bitcast_f64_i64: {
-            VReg dst = get_vreg(inst.result());
-            VReg src = get_vreg(inst.operand(0));
-            auto lir_inst = std::make_unique<LirInst>(LirOpcode::Movq_xg);
-            lir_inst->add_def(LirOperand::vreg(dst, 8));
-            lir_inst->add_use(LirOperand::vreg(src, 8));
-            lir_inst->mir_origin = &inst;
-            lir_bb.append_inst(std::move(lir_inst));
-            break;
-        }
 
         case Opcode::add:
             lower_binary_alu(inst, lir_bb, LirOpcode::Add32, LirOpcode::Add, LirOpcode::Addsd, LirOpcode::Addss);
@@ -987,92 +812,7 @@ void AArch64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
     }
 }
 
-void AArch64ISel::lower_return(const Instruction& inst, LirBlock& lir_bb) {
-    if (inst.operand_count() > 0) {
-        const auto* ret_val = inst.operand(0);
-        VReg ret_vreg = get_vreg(ret_val);
-        Type t = ret_val->type();
-        uint8_t sz = static_cast<uint8_t>(t.size_in_bytes());
-        if (sz == 0) sz = 8;
 
-        if (t.is_float()) {
-            LirOpcode ret_mov_op = (sz == 4) ? LirOpcode::Movss : LirOpcode::Movsd;
-            auto mov_ret = std::make_unique<LirInst>(ret_mov_op);
-            mov_ret->add_def(LirOperand::preg_aarch64_fpr(FPR::V0, sz), FixedConstraint::aarch64_fpr(FPR::V0));
-            mov_ret->add_use(LirOperand::vreg(ret_vreg, sz));
-            lir_bb.append_inst(std::move(mov_ret));
-
-            auto ret_inst = std::make_unique<LirInst>(LirOpcode::Ret);
-            ret_inst->add_use(LirOperand::preg_aarch64_fpr(FPR::V0, sz), FixedConstraint::aarch64_fpr(FPR::V0));
-            ret_inst->mir_origin = &inst;
-            lir_bb.append_inst(std::move(ret_inst));
-            return;
-        } else if (t.is_vector()) {
-            LirOpcode ret_mov_op = (sz == 32) ? LirOpcode::Vmovaps : LirOpcode::Movaps;
-            auto mov_ret = std::make_unique<LirInst>(ret_mov_op);
-            mov_ret->add_def(LirOperand::preg_aarch64_fpr(FPR::V0, sz), FixedConstraint::aarch64_fpr(FPR::V0));
-            mov_ret->add_use(LirOperand::vreg(ret_vreg, sz));
-            lir_bb.append_inst(std::move(mov_ret));
-
-            auto ret_inst = std::make_unique<LirInst>(LirOpcode::Ret);
-            ret_inst->add_use(LirOperand::preg_aarch64_fpr(FPR::V0, sz), FixedConstraint::aarch64_fpr(FPR::V0));
-            ret_inst->mir_origin = &inst;
-            lir_bb.append_inst(std::move(ret_inst));
-            return;
-        } else {
-            auto mov_ret = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
-            mov_ret->add_def(LirOperand::preg_aarch64_gpr(GPR::X0, sz), FixedConstraint::aarch64_gpr(GPR::X0));
-            mov_ret->add_use(LirOperand::vreg(ret_vreg, sz));
-            lir_bb.append_inst(std::move(mov_ret));
-
-            auto ret_inst = std::make_unique<LirInst>(LirOpcode::Ret);
-            ret_inst->add_use(LirOperand::preg_aarch64_gpr(GPR::X0, sz), FixedConstraint::aarch64_gpr(GPR::X0));
-            ret_inst->mir_origin = &inst;
-            lir_bb.append_inst(std::move(ret_inst));
-            return;
-        }
-    }
-
-    auto ret_inst = std::make_unique<LirInst>(LirOpcode::Ret);
-    ret_inst->mir_origin = &inst;
-    lir_bb.append_inst(std::move(ret_inst));
-}
-
-void AArch64ISel::lower_branch(const Instruction& inst, LirBlock& lir_bb) {
-    const auto& target = inst.branch_target();
-    if (!target.block) return;
-
-    if (!target.args.empty()) {
-        if (target.args.size() == 1) {
-            VReg arg_v = get_vreg(target.args[0]);
-            VReg param_v = get_vreg(target.block->param(0));
-            uint8_t sz = param_v.size;
-            if (arg_v != param_v) {
-                auto mov_inst = std::make_unique<LirInst>(
-                    param_v.is_xmm() ? ((sz == 16) ? LirOpcode::Movaps : (sz == 4 ? LirOpcode::Movss : LirOpcode::Movsd)) : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov)
-                );
-                mov_inst->add_def(LirOperand::vreg(param_v, sz));
-                mov_inst->add_use(LirOperand::vreg(arg_v, sz));
-                lir_bb.append_inst(std::move(mov_inst));
-            }
-        } else {
-            auto pcopy = std::make_unique<LirInst>(LirOpcode::ParallelCopy);
-            for (size_t i = 0; i < target.args.size(); ++i) {
-                VReg arg_v = get_vreg(target.args[i]);
-                VReg param_v = get_vreg(target.block->param(i));
-                uint8_t sz = param_v.size;
-                pcopy->add_def(LirOperand::vreg(param_v, sz));
-                pcopy->add_use(LirOperand::vreg(arg_v, sz));
-            }
-            lir_bb.append_inst(std::move(pcopy));
-        }
-    }
-
-    auto jmp_inst = std::make_unique<LirInst>(LirOpcode::Jmp);
-    jmp_inst->add_use(LirOperand::label(target.block->id()));
-    jmp_inst->mir_origin = &inst;
-    lir_bb.append_inst(std::move(jmp_inst));
-}
 
 std::unique_ptr<LirFunction> lower_to_aarch64_lir(
     const Function& mir_fn,

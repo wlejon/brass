@@ -61,8 +61,61 @@ void AArch64ISel::lower_call(const Instruction& inst, LirBlock& lir_bb) {
 
     for (size_t i = 0; i < num_args; ++i) {
         const auto* arg_val = inst.operand(start_arg + i);
-        VReg arg_vreg = get_vreg(arg_val);
         Type t = arg_val->type();
+
+        if (t.is_v256()) {
+            VRegPair pair = get_vreg_pair(arg_val);
+            if (fpr_idx + 1 < 8) {
+                FPR r_lo = static_cast<FPR>(fpr_idx++);
+                FPR r_hi = static_cast<FPR>(fpr_idx++);
+                auto mov_lo = std::make_unique<LirInst>(LirOpcode::Movups);
+                mov_lo->add_def(LirOperand::preg_aarch64_fpr(r_lo, 16), FixedConstraint::aarch64_fpr(r_lo));
+                mov_lo->add_use(LirOperand::vreg(pair.lo, 16));
+                call_lir->add_use(LirOperand::preg_aarch64_fpr(r_lo, 16), FixedConstraint::aarch64_fpr(r_lo));
+                lir_bb.append_inst(std::move(mov_lo));
+
+                auto mov_hi = std::make_unique<LirInst>(LirOpcode::Movups);
+                mov_hi->add_def(LirOperand::preg_aarch64_fpr(r_hi, 16), FixedConstraint::aarch64_fpr(r_hi));
+                mov_hi->add_use(LirOperand::vreg(pair.hi, 16));
+                call_lir->add_use(LirOperand::preg_aarch64_fpr(r_hi, 16), FixedConstraint::aarch64_fpr(r_hi));
+                lir_bb.append_inst(std::move(mov_hi));
+            } else if (fpr_idx < 8) {
+                FPR r_lo = static_cast<FPR>(fpr_idx++);
+                auto mov_lo = std::make_unique<LirInst>(LirOpcode::Movups);
+                mov_lo->add_def(LirOperand::preg_aarch64_fpr(r_lo, 16), FixedConstraint::aarch64_fpr(r_lo));
+                mov_lo->add_use(LirOperand::vreg(pair.lo, 16));
+                call_lir->add_use(LirOperand::preg_aarch64_fpr(r_lo, 16), FixedConstraint::aarch64_fpr(r_lo));
+                lir_bb.append_inst(std::move(mov_lo));
+
+                size_t align = 16;
+                stack_bytes = (stack_bytes + align - 1) & ~(align - 1);
+                int32_t disp = static_cast<int32_t>(stack_bytes);
+                stack_bytes += 16;
+
+                auto mov_stack = std::make_unique<LirInst>(LirOpcode::Movups);
+                mov_stack->add_def(LirOperand::mem(PReg::aarch64_gpr(GPR::SP), disp, 16));
+                mov_stack->add_use(LirOperand::vreg(pair.hi, 16));
+                lir_bb.append_inst(std::move(mov_stack));
+            } else {
+                size_t align = 16;
+                stack_bytes = (stack_bytes + align - 1) & ~(align - 1);
+                int32_t disp = static_cast<int32_t>(stack_bytes);
+                stack_bytes += 32;
+
+                auto mov_stack_lo = std::make_unique<LirInst>(LirOpcode::Movups);
+                mov_stack_lo->add_def(LirOperand::mem(PReg::aarch64_gpr(GPR::SP), disp, 16));
+                mov_stack_lo->add_use(LirOperand::vreg(pair.lo, 16));
+                lir_bb.append_inst(std::move(mov_stack_lo));
+
+                auto mov_stack_hi = std::make_unique<LirInst>(LirOpcode::Movups);
+                mov_stack_hi->add_def(LirOperand::mem(PReg::aarch64_gpr(GPR::SP), disp + 16, 16));
+                mov_stack_hi->add_use(LirOperand::vreg(pair.hi, 16));
+                lir_bb.append_inst(std::move(mov_stack_hi));
+            }
+            continue;
+        }
+
+        VReg arg_vreg = get_vreg(arg_val);
         uint8_t sz = static_cast<uint8_t>(t.size_in_bytes());
         if (sz == 0) sz = 8;
         bool is_fpr = (t.is_float() || t.is_vector());
@@ -135,13 +188,16 @@ void AArch64ISel::lower_call(const Instruction& inst, LirBlock& lir_bb) {
 
     Type ret_t = inst.type();
     if (!ret_t.is_void()) {
-        uint8_t ret_sz = static_cast<uint8_t>(ret_t.size_in_bytes());
-        if (ret_sz == 0) ret_sz = 8;
-        if (ret_t.is_float()) {
-            call_lir->add_def(LirOperand::preg_aarch64_fpr(FPR::V0, ret_sz), FixedConstraint::aarch64_fpr(FPR::V0));
-        } else if (ret_t.is_vector()) {
+        if (ret_t.is_v256()) {
+            call_lir->add_def(LirOperand::preg_aarch64_fpr(FPR::V0, 16), FixedConstraint::aarch64_fpr(FPR::V0));
+            call_lir->add_def(LirOperand::preg_aarch64_fpr(FPR::V1, 16), FixedConstraint::aarch64_fpr(FPR::V1));
+        } else if (ret_t.is_float() || ret_t.is_vector()) {
+            uint8_t ret_sz = static_cast<uint8_t>(ret_t.size_in_bytes());
+            if (ret_sz == 0) ret_sz = 8;
             call_lir->add_def(LirOperand::preg_aarch64_fpr(FPR::V0, ret_sz), FixedConstraint::aarch64_fpr(FPR::V0));
         } else {
+            uint8_t ret_sz = static_cast<uint8_t>(ret_t.size_in_bytes());
+            if (ret_sz == 0) ret_sz = 8;
             call_lir->add_def(LirOperand::preg_aarch64_gpr(GPR::X0, ret_sz), FixedConstraint::aarch64_gpr(GPR::X0));
         }
     }
@@ -150,24 +206,37 @@ void AArch64ISel::lower_call(const Instruction& inst, LirBlock& lir_bb) {
     lir_bb.append_inst(std::move(call_lir));
 
     if (inst.produces_value()) {
-        VReg dst = get_vreg(inst.result());
-        uint8_t ret_sz = static_cast<uint8_t>(ret_t.size_in_bytes());
-        if (ret_sz == 0) ret_sz = 8;
-        if (ret_t.is_float()) {
-            auto mov_ret = std::make_unique<LirInst>(ret_sz == 4 ? LirOpcode::Movss : LirOpcode::Movsd);
-            mov_ret->add_def(LirOperand::vreg(dst, ret_sz));
-            mov_ret->add_use(LirOperand::preg_aarch64_fpr(FPR::V0, ret_sz), FixedConstraint::aarch64_fpr(FPR::V0));
-            lir_bb.append_inst(std::move(mov_ret));
-        } else if (ret_t.is_vector()) {
-            auto mov_ret = std::make_unique<LirInst>((ret_sz == 32) ? LirOpcode::Vmovaps : LirOpcode::Movaps);
-            mov_ret->add_def(LirOperand::vreg(dst, ret_sz));
-            mov_ret->add_use(LirOperand::preg_aarch64_fpr(FPR::V0, ret_sz), FixedConstraint::aarch64_fpr(FPR::V0));
-            lir_bb.append_inst(std::move(mov_ret));
+        if (ret_t.is_v256()) {
+            VRegPair dst_pair = get_vreg_pair(inst.result());
+            auto mov_lo = std::make_unique<LirInst>(LirOpcode::Movaps);
+            mov_lo->add_def(LirOperand::vreg(dst_pair.lo, 16));
+            mov_lo->add_use(LirOperand::preg_aarch64_fpr(FPR::V0, 16), FixedConstraint::aarch64_fpr(FPR::V0));
+            lir_bb.append_inst(std::move(mov_lo));
+
+            auto mov_hi = std::make_unique<LirInst>(LirOpcode::Movaps);
+            mov_hi->add_def(LirOperand::vreg(dst_pair.hi, 16));
+            mov_hi->add_use(LirOperand::preg_aarch64_fpr(FPR::V1, 16), FixedConstraint::aarch64_fpr(FPR::V1));
+            lir_bb.append_inst(std::move(mov_hi));
         } else {
-            auto mov_ret = std::make_unique<LirInst>(ret_sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
-            mov_ret->add_def(LirOperand::vreg(dst, ret_sz));
-            mov_ret->add_use(LirOperand::preg_aarch64_gpr(GPR::X0, ret_sz), FixedConstraint::aarch64_gpr(GPR::X0));
-            lir_bb.append_inst(std::move(mov_ret));
+            VReg dst = get_vreg(inst.result());
+            uint8_t ret_sz = static_cast<uint8_t>(ret_t.size_in_bytes());
+            if (ret_sz == 0) ret_sz = 8;
+            if (ret_t.is_float()) {
+                auto mov_ret = std::make_unique<LirInst>(ret_sz == 4 ? LirOpcode::Movss : LirOpcode::Movsd);
+                mov_ret->add_def(LirOperand::vreg(dst, ret_sz));
+                mov_ret->add_use(LirOperand::preg_aarch64_fpr(FPR::V0, ret_sz), FixedConstraint::aarch64_fpr(FPR::V0));
+                lir_bb.append_inst(std::move(mov_ret));
+            } else if (ret_t.is_vector()) {
+                auto mov_ret = std::make_unique<LirInst>(LirOpcode::Movaps);
+                mov_ret->add_def(LirOperand::vreg(dst, 16));
+                mov_ret->add_use(LirOperand::preg_aarch64_fpr(FPR::V0, 16), FixedConstraint::aarch64_fpr(FPR::V0));
+                lir_bb.append_inst(std::move(mov_ret));
+            } else {
+                auto mov_ret = std::make_unique<LirInst>(ret_sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
+                mov_ret->add_def(LirOperand::vreg(dst, ret_sz));
+                mov_ret->add_use(LirOperand::preg_aarch64_gpr(GPR::X0, ret_sz), FixedConstraint::aarch64_gpr(GPR::X0));
+                lir_bb.append_inst(std::move(mov_ret));
+            }
         }
     }
 }

@@ -16,8 +16,31 @@
 #include <brass/runtime/deopt.hpp>
 #include <brass/runtime/exception.hpp>
 #include <brass/debug/debug_section.hpp>
+#include <brass/target/x64/x64_registers.hpp>
 
 namespace brass::aarch64 {
+
+inline Condition to_aarch64_cond(brass::x64::Condition cond) noexcept {
+    switch (cond) {
+        case brass::x64::Condition::O:   return Condition::VS;
+        case brass::x64::Condition::NO:  return Condition::VC;
+        case brass::x64::Condition::B:   return Condition::CC;
+        case brass::x64::Condition::AE:  return Condition::CS;
+        case brass::x64::Condition::E:   return Condition::EQ;
+        case brass::x64::Condition::NE:  return Condition::NE;
+        case brass::x64::Condition::BE:  return Condition::LS;
+        case brass::x64::Condition::A:   return Condition::HI;
+        case brass::x64::Condition::S:   return Condition::MI;
+        case brass::x64::Condition::NS:  return Condition::PL;
+        case brass::x64::Condition::P:   return Condition::VS;
+        case brass::x64::Condition::NP:  return Condition::VC;
+        case brass::x64::Condition::L:   return Condition::LT;
+        case brass::x64::Condition::GE:  return Condition::GE;
+        case brass::x64::Condition::LE:  return Condition::LE;
+        case brass::x64::Condition::G:   return Condition::GT;
+        default:                         return Condition::AL;
+    }
+}
 
 struct AArch64CompilationResult {
     aarch64::CodeBuffer code_buffer;

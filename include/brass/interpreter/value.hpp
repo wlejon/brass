@@ -8,6 +8,7 @@
 #include <string_view>
 #include <iosfwd>
 #include <bit>
+#include <cmath>
 
 namespace brass {
 
@@ -432,12 +433,92 @@ inline RuntimeValue val_fptosi_i64(RuntimeValue v) noexcept {
     return RuntimeValue::from_i64(static_cast<int64_t>(v.as_f64()));
 }
 
+inline RuntimeValue val_fptosi_i32_f32(RuntimeValue v) noexcept {
+    return RuntimeValue::from_i32(static_cast<int32_t>(v.as_f32()));
+}
+
+inline RuntimeValue val_fptosi_i64_f32(RuntimeValue v) noexcept {
+    return RuntimeValue::from_i64(static_cast<int64_t>(v.as_f32()));
+}
+
 inline RuntimeValue val_sitofp_f64_i32(RuntimeValue v) noexcept {
     return RuntimeValue::from_f64(static_cast<double>(v.as_i32()));
 }
 
 inline RuntimeValue val_sitofp_f64_i64(RuntimeValue v) noexcept {
     return RuntimeValue::from_f64(static_cast<double>(v.as_i64()));
+}
+
+inline RuntimeValue val_sitofp_f32_i32(RuntimeValue v) noexcept {
+    return RuntimeValue::from_f32(static_cast<float>(v.as_i32()));
+}
+
+inline RuntimeValue val_sitofp_f32_i64(RuntimeValue v) noexcept {
+    return RuntimeValue::from_f32(static_cast<float>(v.as_i64()));
+}
+
+inline RuntimeValue val_fptrunc_f32_f64(RuntimeValue v) noexcept {
+    return RuntimeValue::from_f32(static_cast<float>(v.as_f64()));
+}
+
+inline RuntimeValue val_fpext_f64_f32(RuntimeValue v) noexcept {
+    return RuntimeValue::from_f64(static_cast<double>(v.as_f32()));
+}
+
+inline RuntimeValue val_sqrt_f32(RuntimeValue v) noexcept {
+    return RuntimeValue::from_f32(std::sqrt(v.as_f32()));
+}
+
+inline RuntimeValue val_sqrt_f64(RuntimeValue v) noexcept {
+    return RuntimeValue::from_f64(std::sqrt(v.as_f64()));
+}
+
+inline RuntimeValue val_floor_f32(RuntimeValue v) noexcept {
+    return RuntimeValue::from_f32(std::floor(v.as_f32()));
+}
+
+inline RuntimeValue val_floor_f64(RuntimeValue v) noexcept {
+    return RuntimeValue::from_f64(std::floor(v.as_f64()));
+}
+
+inline RuntimeValue val_ceil_f32(RuntimeValue v) noexcept {
+    return RuntimeValue::from_f32(std::ceil(v.as_f32()));
+}
+
+inline RuntimeValue val_ceil_f64(RuntimeValue v) noexcept {
+    return RuntimeValue::from_f64(std::ceil(v.as_f64()));
+}
+
+inline RuntimeValue val_round_f32(RuntimeValue v) noexcept {
+    return RuntimeValue::from_f32(std::round(v.as_f32()));
+}
+
+inline RuntimeValue val_round_f64(RuntimeValue v) noexcept {
+    return RuntimeValue::from_f64(std::round(v.as_f64()));
+}
+
+inline RuntimeValue val_fabs_f32(RuntimeValue v) noexcept {
+    return RuntimeValue::from_f32(std::fabs(v.as_f32()));
+}
+
+inline RuntimeValue val_fabs_f64(RuntimeValue v) noexcept {
+    return RuntimeValue::from_f64(std::fabs(v.as_f64()));
+}
+
+inline RuntimeValue val_fmin_f32(RuntimeValue a, RuntimeValue b) noexcept {
+    return RuntimeValue::from_f32(std::fmin(a.as_f32(), b.as_f32()));
+}
+
+inline RuntimeValue val_fmin_f64(RuntimeValue a, RuntimeValue b) noexcept {
+    return RuntimeValue::from_f64(std::fmin(a.as_f64(), b.as_f64()));
+}
+
+inline RuntimeValue val_fmax_f32(RuntimeValue a, RuntimeValue b) noexcept {
+    return RuntimeValue::from_f32(std::fmax(a.as_f32(), b.as_f32()));
+}
+
+inline RuntimeValue val_fmax_f64(RuntimeValue a, RuntimeValue b) noexcept {
+    return RuntimeValue::from_f64(std::fmax(a.as_f64(), b.as_f64()));
 }
 
 inline RuntimeValue val_bitcast_i64_f64(RuntimeValue v) noexcept {

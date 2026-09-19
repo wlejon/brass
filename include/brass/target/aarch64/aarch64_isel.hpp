@@ -39,8 +39,14 @@ private:
     CallingConvention cc_;
     const OsrTarget* osr_target_ = nullptr;
 
+    struct VRegPair {
+        codegen::VReg lo;
+        codegen::VReg hi;
+    };
+
     codegen::LirFunction* lir_fn_ = nullptr;
     std::unordered_map<const Value*, codegen::VReg> val_to_vreg_;
+    std::unordered_map<const Value*, VRegPair> val_to_vreg_pair_;
     std::unordered_map<const Value*, uint32_t> use_count_;
     std::unordered_set<const Instruction*> skipped_insts_;
 
@@ -69,6 +75,8 @@ private:
 
     codegen::VReg get_or_alloc_vreg(const Value* val);
     codegen::VReg get_vreg(const Value* val) const;
+    VRegPair get_or_alloc_vreg_pair(const Value* val);
+    VRegPair get_vreg_pair(const Value* val) const;
 
     void lower_entry_parameters(const Function& mir_fn);
     void lower_block(const BasicBlock& bb);
@@ -100,6 +108,7 @@ private:
     void lower_safepoint(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_guard(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_vector_instruction(const Instruction& inst, codegen::LirBlock& lir_bb);
+    void lower_fp_instruction(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_coro(const Instruction& inst, codegen::LirBlock& lir_bb);
 };
 
