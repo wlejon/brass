@@ -13,8 +13,10 @@
 #include <vector>
 #include <cstdint>
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <span>
+#include <unordered_map>
 
 namespace brass::object {
 
@@ -169,9 +171,26 @@ struct ObjectFile {
     Section& get_or_create_section(std::string_view name, SectionKind kind, SectionFlags flags, uint32_t alignment);
     Section& get_or_create_section(std::string_view name, SectionKind kind, SectionFlags flags);
 
+    // A symbol is unique by name: add_symbol replaces an existing entry of
+    // the same name in place (its index is what relocations hold) and
+    // appends otherwise. Both it and find_symbol go through the name index
+    // below rather than a scan of `symbols` — at ~19k symbols the scans
+    // were a quarter of a second per module.
     uint32_t add_symbol(ObjectSymbol sym);
     const ObjectSymbol* find_symbol(std::string_view name) const;
     ObjectSymbol* find_symbol(std::string_view name);
+
+private:
+    struct NameHash {
+        using is_transparent = void;
+        size_t operator()(std::string_view s) const noexcept { return std::hash<std::string_view>{}(s); }
+    };
+    // name -> index into `symbols`. `symbols` is public and a caller may
+    // append to it directly, so the index is checked against the vector's
+    // size on every use and rebuilt when it has fallen behind; a rename in
+    // place is the one edit it cannot see, and nothing performs one.
+    mutable std::unordered_map<std::string, uint32_t, NameHash, std::equal_to<>> symbol_index_;
+    void sync_symbol_index() const;
 };
 
 class ModuleCompiler {

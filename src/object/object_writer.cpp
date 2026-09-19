@@ -72,33 +72,38 @@ Section& ObjectFile::get_or_create_section(
     return get_or_create_section(name, kind, flags, 16);
 }
 
-uint32_t ObjectFile::add_symbol(ObjectSymbol sym) {
+void ObjectFile::sync_symbol_index() const {
+    if (symbol_index_.size() == symbols.size()) return;
+    symbol_index_.clear();
+    symbol_index_.reserve(symbols.size());
     for (size_t i = 0; i < symbols.size(); ++i) {
-        if (symbols[i].name == sym.name) {
-            symbols[i] = std::move(sym);
-            return static_cast<uint32_t>(i);
-        }
+        // The FIRST entry of a name wins, which is what the scan answered.
+        symbol_index_.try_emplace(symbols[i].name, static_cast<uint32_t>(i));
     }
+}
+
+uint32_t ObjectFile::add_symbol(ObjectSymbol sym) {
+    sync_symbol_index();
+    if (auto it = symbol_index_.find(std::string_view(sym.name)); it != symbol_index_.end()) {
+        symbols[it->second] = std::move(sym);
+        return it->second;
+    }
+    const uint32_t index = static_cast<uint32_t>(symbols.size());
+    symbol_index_.emplace(sym.name, index);
     symbols.push_back(std::move(sym));
-    return static_cast<uint32_t>(symbols.size() - 1);
+    return index;
 }
 
 const ObjectSymbol* ObjectFile::find_symbol(std::string_view name) const {
-    for (const auto& s : symbols) {
-        if (s.name == name) {
-            return &s;
-        }
-    }
-    return nullptr;
+    sync_symbol_index();
+    auto it = symbol_index_.find(name);
+    return it == symbol_index_.end() ? nullptr : &symbols[it->second];
 }
 
 ObjectSymbol* ObjectFile::find_symbol(std::string_view name) {
-    for (auto& s : symbols) {
-        if (s.name == name) {
-            return &s;
-        }
-    }
-    return nullptr;
+    sync_symbol_index();
+    auto it = symbol_index_.find(name);
+    return it == symbol_index_.end() ? nullptr : &symbols[it->second];
 }
 
 ModuleCompiler::ModuleCompiler(const Target& target)
