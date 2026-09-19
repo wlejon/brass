@@ -13,9 +13,13 @@ namespace brass {
 
 namespace {
 
+#if defined(__SIZEOF_INT128__)
+__extension__ typedef __int128 int128_t;
+#endif
+
 inline int64_t sat_add(int64_t a, int64_t b) noexcept {
 #if defined(__SIZEOF_INT128__)
-    __int128 res = static_cast<__int128>(a) + b;
+    int128_t res = static_cast<int128_t>(a) + b;
     if (res > INT64_MAX) return INT64_MAX;
     if (res < INT64_MIN) return INT64_MIN;
     return static_cast<int64_t>(res);
@@ -28,7 +32,7 @@ inline int64_t sat_add(int64_t a, int64_t b) noexcept {
 
 inline int64_t sat_sub(int64_t a, int64_t b) noexcept {
 #if defined(__SIZEOF_INT128__)
-    __int128 res = static_cast<__int128>(a) - b;
+    int128_t res = static_cast<int128_t>(a) - b;
     if (res > INT64_MAX) return INT64_MAX;
     if (res < INT64_MIN) return INT64_MIN;
     return static_cast<int64_t>(res);
@@ -41,7 +45,7 @@ inline int64_t sat_sub(int64_t a, int64_t b) noexcept {
 
 inline int64_t sat_mul(int64_t a, int64_t b) noexcept {
 #if defined(__SIZEOF_INT128__)
-    __int128 res = static_cast<__int128>(a) * b;
+    int128_t res = static_cast<int128_t>(a) * b;
     if (res > INT64_MAX) return INT64_MAX;
     if (res < INT64_MIN) return INT64_MIN;
     return static_cast<int64_t>(res);

@@ -6,11 +6,11 @@
 
 namespace brass::codegen {
 
-static bool contains_vreg(const std::vector<VReg>& vec, VReg v) {
+[[maybe_unused]] static bool contains_vreg(const std::vector<VReg>& vec, VReg v) {
     return std::find(vec.begin(), vec.end(), v) != vec.end();
 }
 
-static void add_vreg_unique(std::vector<VReg>& vec, VReg v) {
+[[maybe_unused]] static void add_vreg_unique(std::vector<VReg>& vec, VReg v) {
     if (v.is_valid() && !contains_vreg(vec, v)) {
         vec.push_back(v);
     }

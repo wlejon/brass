@@ -809,6 +809,8 @@ void AArch64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
             lir_bb.append_inst(std::move(lir_inst));
             break;
         }
+        default:
+            break;
     }
 }
 

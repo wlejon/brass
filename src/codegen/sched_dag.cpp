@@ -270,6 +270,8 @@ uint32_t get_instruction_latency(const LirInst& inst) {
         case LirOpcode::ParallelCopy:
         case LirOpcode::WriteBarrier:
             return 1;
+        default:
+            return 1;
     }
     return 1;
 }

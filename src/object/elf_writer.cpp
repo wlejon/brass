@@ -151,6 +151,18 @@ std::vector<uint8_t> ElfWriter::write() {
         debug::DwarfEmitter::emit(working_obj);
     }
 
+    // Read-only sections with relocations (.rodata) must be placed in .data.rel.ro
+    // with SHF_WRITE on ELF, so GNU ld / gold can group them into PT_GNU_RELRO
+    // without emitting text relocations (DT_TEXTREL) in PIEs or shared objects.
+    for (auto& sec : working_obj.sections) {
+        if ((sec.kind == SectionKind::RoData || sec.name == ".rodata") && !sec.relocations.empty()) {
+            if (sec.name == ".rodata") {
+                sec.name = ".data.rel.ro";
+            }
+            sec.flags = sec.flags | SectionFlags::Write;
+        }
+    }
+
     std::vector<ElfShdrEntry> elf_sections;
 
     // 0. NULL section
