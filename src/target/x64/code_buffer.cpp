@@ -202,6 +202,7 @@ std::string_view to_string(RelocationKind kind) noexcept {
     case RelocationKind::PCRel32:  return "PCRel32";
     case RelocationKind::Abs64:    return "Abs64";
     case RelocationKind::SecRel32: return "SecRel32";
+    case RelocationKind::GotPCRel32: return "GotPCRel32";
     default: return "unknown";
     }
 }

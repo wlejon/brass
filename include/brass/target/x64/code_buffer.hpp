@@ -18,9 +18,17 @@ struct Label {
 };
 
 enum class RelocationKind : uint8_t {
-    PCRel32,  // 32-bit PC-relative displacement (e.g. call/jmp target)
-    Abs64,    // 64-bit absolute address (e.g. mov reg, imm64)
-    SecRel32, // 32-bit section-relative offset
+    PCRel32,    // 32-bit PC-relative displacement (e.g. call/jmp target)
+    Abs64,      // 64-bit absolute address (e.g. mov reg, imm64)
+    SecRel32,   // 32-bit section-relative offset
+    // 32-bit PC-relative displacement to the slot that holds the symbol's
+    // address: the disp32 of `mov r64, [rip + disp32]`, the addend carrying
+    // the instruction tail (-4). The load is what makes the code position
+    // independent — the slot (a GOT or IAT entry) is what the loader binds —
+    // and whoever places the object may relax it to `lea r64, [rip + sym]`
+    // once the symbol is known to be defined in the same image
+    // (object::relax_got_loads).
+    GotPCRel32,
 };
 
 struct Relocation {

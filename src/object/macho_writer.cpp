@@ -96,6 +96,9 @@ MachOWriter::MachOWriter(const ObjectFile& obj)
 
 std::vector<uint8_t> MachOWriter::write() {
     ObjectFile working_obj = obj_;
+    // Loads of the object's own symbols become `lea`s; the rest are
+    // GOT_LOAD relocations for ld64 to bind (and relax if it can).
+    relax_got_loads(working_obj);
 
     // Generate DWARF .eh_frame for unwinding
     if (!working_obj.functions.empty()) {
@@ -493,6 +496,10 @@ std::vector<uint8_t> MachOWriter::write() {
                     r_pcrel = 1;
                     r_length = 2;
                     r_type = macho::X86_64_RELOC_SIGNED;
+                } else if (r.kind == RelocKind::GotPCRel32) {
+                    r_pcrel = 1;
+                    r_length = 2;
+                    r_type = macho::X86_64_RELOC_GOT_LOAD;
                 } else if (r.kind == RelocKind::Abs64) {
                     r_pcrel = 0;
                     r_length = 3; // 8 bytes

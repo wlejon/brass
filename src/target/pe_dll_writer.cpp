@@ -49,6 +49,9 @@ std::vector<uint8_t> PeDllWriter::write() {
     error_.clear();
     object::ObjectFile working_obj = obj_;
     const bool aarch64 = working_obj.target.is_aarch64();
+    // Loads of the object's own symbols become `lea`s; what is left loads
+    // an import's IAT slot.
+    object::relax_got_loads(working_obj);
 
     // 1. Build SEH unwind tables (.pdata & .xdata) if functions exist
     if (!working_obj.functions.empty()) {
@@ -250,6 +253,7 @@ std::vector<uint8_t> PeDllWriter::write() {
         for (const auto& r : sec.relocations) {
             uint32_t target_rva = 0;
             const auto* sym = working_obj.find_symbol(r.symbol_name);
+            const bool got_load = r.kind == object::RelocKind::GotPCRel32;
             if (sym && sym->section_index >= 0) {
                 const auto& src_sec = working_obj.sections[static_cast<size_t>(sym->section_index)];
                 PeSectionMeta* sm = find_meta(src_sec.name == ".rodata" ? ".rdata" : src_sec.name);
@@ -262,14 +266,21 @@ std::vector<uint8_t> PeDllWriter::write() {
             } else if (PeSectionMeta* sm = find_meta(r.symbol_name == ".rodata" ? ".rdata" : r.symbol_name)) {
                 target_rva = sm->rva;
             } else if (const auto* imp = imports.plan.find(r.symbol_name)) {
-                target_rva = imports.thunk_rva(imp->index, text_meta->rva);
+                // A GOT load reads the IAT slot, which holds the import's
+                // real address; every other reference takes the thunk.
+                target_rva = got_load ? imports.slot_rvas[imp->index]
+                                      : imports.thunk_rva(imp->index, text_meta->rva);
             } else {
                 error_ = "unresolved symbol '" + r.symbol_name + "' referenced from " + sec.name;
                 return {};
             }
+            if (got_load && !imports.plan.find(r.symbol_name)) {
+                error_ = "internal: GOT load of '" + r.symbol_name + "' survived relaxation without an import";
+                return {};
+            }
 
             const uint32_t reloc_rva = sec.rva + static_cast<uint32_t>(r.offset);
-            if (r.kind == object::RelocKind::PCRel32 || r.kind == object::RelocKind::Plt32) {
+            if (r.kind == object::RelocKind::PCRel32 || r.kind == object::RelocKind::Plt32 || got_load) {
                 if (r.offset + 4 > sec.data.size()) continue;
                 if (aarch64) {
                     int64_t disp = static_cast<int64_t>(target_rva + r.addend) - static_cast<int64_t>(reloc_rva);

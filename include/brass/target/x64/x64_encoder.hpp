@@ -190,6 +190,10 @@ public:
     void mov32(GPR dst, uint32_t imm);
     void movabs(GPR dst, uint64_t imm);
     void movabs(GPR dst, const std::string& symbol);
+    // The address of `symbol`, position-independently: `mov dst, [rip +
+    // slot]` against the symbol's GOT/IAT slot (RelocationKind::GotPCRel32).
+    // Same length as the `lea` a defined symbol relaxes it to.
+    void mov_got(GPR dst, const std::string& symbol);
     void mov64(GPR dst, uint64_t imm);
     void mov(GPR dst, const MemAddress& src);
     void mov32(GPR dst, const MemAddress& src);

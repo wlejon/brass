@@ -90,13 +90,15 @@ void EmitContext::emit_mov_instruction(const LirInst& inst) {
         case LirOpcode::Movabs: {
             GPR dst_gpr = inst.defs[0].preg_val.as_gpr();
             if (inst.uses[0].is_symbol()) {
-                const std::string& sym = inst.uses[0].symbol_name;
-                bool is_external_runtime_sym = sym.starts_with("brass_") || sym.starts_with("_brass_");
-                if (target_.is_macos() && !is_external_runtime_sym) {
-                    enc_.lea(dst_gpr, sym);
-                } else {
-                    enc_.movabs(dst_gpr, sym);
-                }
+                // A symbol's address is never an absolute word in the code:
+                // a `movabs` would be a relocation inside .text, which
+                // dyld refuses and ld.so takes only under DT_TEXTREL. The
+                // GOT load is position independent for every symbol;
+                // whether the symbol is defined in this module (bronze
+                // defines its data symbols after brass has emitted the
+                // code that names them) is settled where the object is
+                // placed, which relaxes the defined ones to a `lea`.
+                enc_.mov_got(dst_gpr, inst.uses[0].symbol_name);
             } else if (inst.is_patchable) {
                 size_t imm_off = 2;
                 size_t pad = runtime::compute_cache_line_padding(buffer_.size(), imm_off, 8);

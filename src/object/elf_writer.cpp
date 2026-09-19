@@ -58,6 +58,7 @@ uint32_t to_elf_reloc_type(RelocKind kind, bool is_aarch64) {
             case RelocKind::Abs32:    return elf::R_AARCH64_ABS32;
             case RelocKind::Addr32NB: return elf::R_AARCH64_PREL32;
             case RelocKind::SecIdx:   return elf::R_AARCH64_NONE;
+            case RelocKind::GotPCRel32: return elf::R_AARCH64_NONE;   // x64 only
         }
         return elf::R_AARCH64_PREL32;
     }
@@ -69,6 +70,7 @@ uint32_t to_elf_reloc_type(RelocKind kind, bool is_aarch64) {
         case RelocKind::Addr32NB: return elf::R_X86_64_32;
         case RelocKind::SecRel32: return elf::R_X86_64_32;
         case RelocKind::SecIdx:   return elf::R_X86_64_NONE;
+        case RelocKind::GotPCRel32: return elf::R_X86_64_REX_GOTPCRELX;
     }
     return elf::R_X86_64_PC32;
 }
@@ -124,6 +126,10 @@ ElfWriter::ElfWriter(const ObjectFile& obj)
 
 std::vector<uint8_t> ElfWriter::write() {
     ObjectFile working_obj = obj_;
+    // Loads of the object's own symbols become `lea`s here; the linker
+    // could relax them itself (REX_GOTPCRELX), and it still binds the
+    // loads of the undefined ones through its GOT.
+    relax_got_loads(working_obj);
 
     // Generate SysV DWARF .eh_frame
     if (!working_obj.functions.empty()) {
@@ -264,7 +270,8 @@ std::vector<uint8_t> ElfWriter::write() {
             uint32_t r_type = to_elf_reloc_type(r.kind, is_aarch64);
             uint64_t r_info = (static_cast<uint64_t>(sym_idx) << 32) | (static_cast<uint64_t>(r_type) & 0xFFFFFFFFULL);
             int64_t addend = r.addend;
-            if (!is_aarch64 && sec.name != ".eh_frame" && (r.kind == RelocKind::PCRel32 || r.kind == RelocKind::Plt32)) {
+            if (!is_aarch64 && sec.name != ".eh_frame" &&
+                (r.kind == RelocKind::PCRel32 || r.kind == RelocKind::Plt32 || r.kind == RelocKind::GotPCRel32)) {
                 // In standard x86_64 ELF rela, PC-relative call displacement fixup has addend -4
                 if (addend == 0) addend = -4;
             }

@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <cstring>
 #include <iostream>
+#include <unordered_set>
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -431,6 +432,18 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
     symbol_table_.clear();
 
     object::ObjectFile working_obj = obj;
+    // Loads of the object's own symbols become `lea`s; what is left loads
+    // a slot this engine owns beside the code, one per external symbol.
+    size_t got_slots = 0;
+    if (object::relax_got_loads(working_obj) > 0) {
+        std::unordered_set<std::string> got_symbols;
+        for (const auto& sec : working_obj.sections) {
+            for (const auto& r : sec.relocations) {
+                if (r.kind == object::RelocKind::GotPCRel32) got_symbols.insert(r.symbol_name);
+            }
+        }
+        got_slots = got_symbols.size();
+    }
 
     // Generate unwind tables for Windows / Linux
     if (target_.is_windows()) {
@@ -475,11 +488,15 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
         }
     }
 
-    // Reserve space for PLT far-call trampolines in the executable region
+    // Reserve space for PLT far-call trampolines in the executable region,
+    // and after them the GOT: one 8-byte slot per external symbol whose
+    // address the code loads. Both sit in the code mapping so that every
+    // rip-relative displacement onto them fits in 32 bits.
     size_t trampoline_capacity = 4096;
     size_t trampoline_offset = (code_size + 15) & ~size_t(15);
+    size_t got_offset = trampoline_offset + trampoline_capacity;
     if (code_size > 0 || !working_obj.functions.empty()) {
-        code_size = trampoline_offset + trampoline_capacity;
+        code_size = got_offset + got_slots * 8;
     }
 
     // Code pages end at system page boundary
@@ -545,6 +562,9 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
     uint8_t* trampoline_ptr = code_mem_.is_valid() ? (code_mem_.data() + trampoline_offset) : nullptr;
     size_t trampoline_used = 0;
     std::unordered_map<std::string, void*> trampolines;
+    uint8_t* got_ptr = code_mem_.is_valid() ? (code_mem_.data() + got_offset) : nullptr;
+    size_t got_used = 0;
+    std::unordered_map<std::string, uint8_t*> got_slot_of;
 
     // Copy section data to memory block
     for (size_t i = 0; i < working_obj.sections.size(); ++i) {
@@ -679,6 +699,27 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
                 case object::RelocKind::Abs64: {
                     uint64_t val = reinterpret_cast<uint64_t>(target_addr) + static_cast<uint64_t>(r.addend);
                     *reinterpret_cast<uint64_t*>(patch_loc) = val;
+                    break;
+                }
+                case object::RelocKind::GotPCRel32: {
+                    // The symbol is external (relax_got_loads took every
+                    // defined one): its address goes into this symbol's
+                    // slot and the load reads the slot.
+                    uint8_t* slot = nullptr;
+                    auto slot_it = got_slot_of.find(r.symbol_name);
+                    if (slot_it != got_slot_of.end()) {
+                        slot = slot_it->second;
+                    } else if (got_ptr && got_used < got_slots) {
+                        slot = got_ptr + got_used * 8;
+                        ++got_used;
+                        *reinterpret_cast<uint64_t*>(slot) = reinterpret_cast<uint64_t>(target_addr);
+                        got_slot_of[r.symbol_name] = slot;
+                    } else {
+                        std::cerr << "JIT Error: no GOT slot for '" << r.symbol_name << "'\n";
+                        return false;
+                    }
+                    int64_t disp = reinterpret_cast<int64_t>(slot) + r.addend - reinterpret_cast<int64_t>(patch_loc);
+                    *reinterpret_cast<int32_t*>(patch_loc) = static_cast<int32_t>(disp);
                     break;
                 }
                 case object::RelocKind::SecRel32: {

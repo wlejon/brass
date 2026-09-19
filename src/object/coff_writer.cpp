@@ -57,12 +57,14 @@ uint16_t to_coff_reloc_type(RelocKind kind, bool is_aarch64) {
             case RelocKind::Addr32NB: return coff::IMAGE_REL_ARM64_ADDR32NB;
             case RelocKind::SecIdx:   return coff::IMAGE_REL_ARM64_SECTION;
             case RelocKind::Abs32:    return coff::IMAGE_REL_ARM64_ADDR32;
+            case RelocKind::GotPCRel32: return coff::IMAGE_REL_ARM64_ADDR64;   // x64 only
         }
         return coff::IMAGE_REL_ARM64_BRANCH26;
     }
     switch (kind) {
         case RelocKind::PCRel32:
         case RelocKind::Plt32:
+        case RelocKind::GotPCRel32:   // none left after materialize_got_slots
             return coff::IMAGE_REL_AMD64_REL32;
         case RelocKind::Abs64:
             return coff::IMAGE_REL_AMD64_ADDR64;
@@ -93,6 +95,12 @@ CoffWriter::CoffWriter(const ObjectFile& obj)
 
 std::vector<uint8_t> CoffWriter::write() {
     ObjectFile working_obj = obj_;
+    // COFF has no GOT-relative relocation for a system linker to bind, so
+    // the object carries its own slots: an ADDR64 word per undefined symbol
+    // in .rdata (a base relocation in the image, like a vtable's), the load
+    // a REL32 onto it. Loads of the object's own symbols become `lea`s.
+    materialize_got_slots(working_obj, ".rdata", SectionKind::RoData,
+                          SectionFlags::Read | SectionFlags::Alloc);
 
     // Generate Win64 SEH tables if functions exist
     if (!working_obj.functions.empty()) {

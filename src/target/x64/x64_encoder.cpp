@@ -172,6 +172,15 @@ void X64Encoder::movabs(GPR dst, const std::string& symbol) {
     buffer_.add_relocation(patch_off, RelocationKind::Abs64, symbol, 0);
 }
 
+void X64Encoder::mov_got(GPR dst, const std::string& symbol) {
+    emit_rex(true, is_extended(dst), false, false);
+    buffer_.emit8(0x8B);
+    emit_modrm(0, reg_code(dst), 5); // RIP-relative
+    size_t patch_off = buffer_.size();
+    buffer_.emit32(0x00000000);
+    buffer_.add_relocation(patch_off, RelocationKind::GotPCRel32, symbol, -4);
+}
+
 void X64Encoder::mov64(GPR dst, uint64_t imm) {
     movabs(dst, imm);
 }

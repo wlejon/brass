@@ -97,6 +97,10 @@ std::vector<uint8_t> MachODylibWriter::write() {
     ObjectFile working_obj = obj_;
     const bool aarch64 = working_obj.target.is_aarch64();
     const uint32_t page_size = aarch64 ? 16384u : 4096u;
+    // Loads of the object's own symbols become `lea`s; what is left loads
+    // an import's __got entry. That is what keeps __TEXT free of absolute
+    // words: dyld slides the image without writing into it.
+    relax_got_loads(working_obj);
     const uint64_t base = options_.image_base;
 
     // ---- the object's sections ---------------------------------------------
@@ -298,6 +302,7 @@ std::vector<uint8_t> MachODylibWriter::write() {
             uint64_t target = 0;
             const imports::Imported* imp = nullptr;
             const auto* sym = working_obj.find_symbol(r.symbol_name);
+            const bool got_load = r.kind == RelocKind::GotPCRel32;
             if (sym && sym->section_index >= 0) {
                 if (!symbol_vaddr(*sym, target)) {
                     error_ = "relocation against '" + r.symbol_name + "' names a section that is not placed in the image";
@@ -306,9 +311,15 @@ std::vector<uint8_t> MachODylibWriter::write() {
             } else if (const Placed* ps = placed_for(r.symbol_name)) {
                 target = ps->vaddr;
             } else if ((imp = imports.find(r.symbol_name)) != nullptr) {
-                target = stub_vaddr(imp->index);
+                // A GOT load reads the __got entry dyld binds, which is the
+                // import's own address; every other reference takes the stub.
+                target = got_load ? got_vaddr(imp->index) : stub_vaddr(imp->index);
             } else {
                 error_ = "unresolved symbol '" + r.symbol_name + "' referenced from " + p.source;
+                return {};
+            }
+            if (got_load && !imp) {
+                error_ = "internal: GOT load of '" + r.symbol_name + "' survived relaxation without an import";
                 return {};
             }
 
@@ -345,7 +356,7 @@ std::vector<uint8_t> MachODylibWriter::write() {
                     continue;
                 }
                 patch_u32(p.data, r.offset, inst);
-            } else if (r.kind == RelocKind::PCRel32 || r.kind == RelocKind::Plt32) {
+            } else if (r.kind == RelocKind::PCRel32 || r.kind == RelocKind::Plt32 || got_load) {
                 // disp = S + A - P, the addend carrying the instruction tail.
                 const int64_t disp = static_cast<int64_t>(target) + r.addend - static_cast<int64_t>(at);
                 patch_u32(p.data, r.offset, static_cast<uint32_t>(static_cast<int32_t>(disp)));

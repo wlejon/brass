@@ -9,7 +9,9 @@
 // the thunk, and taking its address yields the thunk. The loader fills the IAT
 // at load time; nothing in the image holds an import's real address before
 // then, which is why data references cannot be pointed at the callee
-// directly.
+// directly. The one reference that does see the real address is a GOT load
+// (RelocKind::GotPCRel32): it reads the IAT slot itself, so an imported data
+// object is reached as the object and not as a thunk over it.
 
 #include "import_plan.hpp"
 
@@ -28,6 +30,8 @@ struct Table {
     uint32_t directory_size = 0;
     uint32_t iat_rva = 0;
     uint32_t iat_size = 0;
+    // The IAT slot of each import, by Plan::symbols index; filled by `emit`.
+    std::vector<uint32_t> slot_rvas;
 
     bool empty() const { return plan.empty(); }
     // Size of the `.idata` section, known before layout.

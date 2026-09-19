@@ -89,6 +89,9 @@ std::vector<uint8_t> ElfSoWriter::write() {
     error_.clear();
     object::ObjectFile working_obj = obj_;
     const bool aarch64 = working_obj.target.is_aarch64();
+    // Loads of the object's own symbols become `lea`s; what is left loads
+    // an import's GOT slot.
+    object::relax_got_loads(working_obj);
 
     // 1. Exports
     std::vector<std::string> export_names;
@@ -180,9 +183,11 @@ std::vector<uint8_t> ElfSoWriter::write() {
 
     // 5. Sections, with every size that layout needs already known
     size_t rela_count = imports.symbols.size();   // one GLOB_DAT per import
-    // An absolute address inside .text (x64's movabs) is a relocation into
-    // the executable segment; DT_TEXTREL is what tells the loader to make it
+    // An absolute address inside .text would be a relocation into the
+    // executable segment; DT_TEXTREL is what tells the loader to make it
     // writable for the duration, and without the tag the write is a fault.
+    // x64 code no longer holds one (every symbol address is a lea or a GOT
+    // load), so the tag is only ever set for an object built some other way.
     bool text_relocs = false;
     for (const auto& sec : working_obj.sections) {
         if (sec.name != ".text" && sec.name != ro_source && sec.name != ".data") continue;
@@ -368,6 +373,7 @@ std::vector<uint8_t> ElfSoWriter::write() {
             uint64_t target_vaddr = 0;
             const imports::Imported* imp = nullptr;
             const auto* sym = working_obj.find_symbol(r.symbol_name);
+            const bool got_load = r.kind == object::RelocKind::GotPCRel32;
             if (sym && sym->section_index >= 0) {
                 const auto& src_sec = working_obj.sections[static_cast<size_t>(sym->section_index)];
                 const ElfShdr* placed = section_for(src_sec.name);
@@ -380,9 +386,15 @@ std::vector<uint8_t> ElfSoWriter::write() {
             } else if (const ElfShdr* placed = section_for(r.symbol_name)) {
                 target_vaddr = placed->sh_addr;
             } else if ((imp = imports.find(r.symbol_name)) != nullptr) {
-                target_vaddr = stub_vaddr(imp->index);
+                // A GOT load reads the slot the GLOB_DAT fills, which is the
+                // import's own address; every other reference takes the stub.
+                target_vaddr = got_load ? sections[got_idx].sh_addr + imp->index * 8 : stub_vaddr(imp->index);
             } else {
                 error_ = "unresolved symbol '" + r.symbol_name + "' referenced from " + sec.name;
+                return {};
+            }
+            if (got_load && !imp) {
+                error_ = "internal: GOT load of '" + r.symbol_name + "' survived relaxation without an import";
                 return {};
             }
 
@@ -419,9 +431,9 @@ std::vector<uint8_t> ElfSoWriter::write() {
                     continue;
                 }
                 patch_u32(sec.data, r.offset, inst);
-            } else if (r.kind == object::RelocKind::PCRel32 || r.kind == object::RelocKind::Plt32) {
+            } else if (r.kind == object::RelocKind::PCRel32 || r.kind == object::RelocKind::Plt32 || got_load) {
                 // disp = S + A - P, the addend carrying the instruction tail
-                // (-4 for a call or lea) exactly as the JIT applies it.
+                // (-4 for a call, lea or GOT load) exactly as the JIT applies it.
                 const int64_t disp = static_cast<int64_t>(target_vaddr) + r.addend - static_cast<int64_t>(reloc_vaddr);
                 patch_u32(sec.data, r.offset, static_cast<uint32_t>(static_cast<int32_t>(disp)));
             }

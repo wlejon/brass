@@ -349,6 +349,9 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
                     case x64::RelocationKind::SecRel32:
                         obj_r.kind = RelocKind::SecRel32;
                         break;
+                    case x64::RelocationKind::GotPCRel32:
+                        obj_r.kind = RelocKind::GotPCRel32;
+                        break;
                 }
                 obj_r.symbol_name = r.symbol_name;
                 obj_r.addend = r.addend;
@@ -427,6 +430,73 @@ ObjectFile compile_module_to_object(const Module& mod, const Target& target, con
 ObjectFile compile_module_to_object(const Module& mod, const Target& target) {
     codegen::SchedOptions default_opts;
     return compile_module_to_object(mod, target, default_opts);
+}
+
+namespace {
+
+bool names_defined(const ObjectFile& obj, std::string_view name) {
+    if (const auto* sym = obj.find_symbol(name)) {
+        if (sym->section_index >= 0) return true;
+    }
+    for (const auto& sec : obj.sections) {
+        if (sec.name == name) return true;
+    }
+    return false;
+}
+
+} // namespace
+
+size_t relax_got_loads(ObjectFile& obj) {
+    size_t left = 0;
+    for (auto& sec : obj.sections) {
+        for (auto& r : sec.relocations) {
+            if (r.kind != RelocKind::GotPCRel32) continue;
+            // The opcode byte sits two before the displacement: REX, 8B,
+            // ModRM(mod=00 reg=r rm=101), disp32.
+            const bool is_mov = r.offset >= 2 && r.offset + 4 <= sec.data.size() &&
+                                sec.data[r.offset - 2] == 0x8B;
+            if (!is_mov || !names_defined(obj, r.symbol_name)) {
+                ++left;
+                continue;
+            }
+            sec.data[r.offset - 2] = 0x8D;
+            r.kind = RelocKind::PCRel32;
+        }
+    }
+    return left;
+}
+
+void materialize_got_slots(ObjectFile& obj, std::string_view slot_section, SectionKind kind,
+                           SectionFlags flags) {
+    if (relax_got_loads(obj) == 0) return;
+    // The slots go at the end of the section, after whatever it holds.
+    Section& slots = obj.get_or_create_section(slot_section, kind, flags, 8);
+    const int32_t slots_index = obj.get_section_index(slot_section);
+    std::unordered_map<std::string, std::string> slot_of;   // symbol -> slot symbol
+    for (auto& sec : obj.sections) {
+        if (&sec == &slots) continue;
+        for (auto& r : sec.relocations) {
+            if (r.kind != RelocKind::GotPCRel32) continue;
+            auto it = slot_of.find(r.symbol_name);
+            if (it == slot_of.end()) {
+                slots.align_to(8);
+                const size_t at = slots.data.size();
+                slots.relocations.push_back({at, RelocKind::Abs64, r.symbol_name, 0, 0});
+                slots.emit64(0);
+                ObjectSymbol slot_sym;
+                slot_sym.name = r.symbol_name + "$got";
+                slot_sym.section_index = slots_index;
+                slot_sym.value = at;
+                slot_sym.size = 8;
+                slot_sym.binding = SymbolBinding::Local;
+                slot_sym.type = SymbolType::Object;
+                obj.add_symbol(std::move(slot_sym));
+                it = slot_of.emplace(r.symbol_name, r.symbol_name + "$got").first;
+            }
+            r.kind = RelocKind::PCRel32;
+            r.symbol_name = it->second;
+        }
+    }
 }
 
 } // namespace brass::object

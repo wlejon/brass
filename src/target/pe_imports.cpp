@@ -123,10 +123,12 @@ void Table::emit(std::vector<uint8_t>& idata, uint32_t idata_rva, std::vector<ui
     iat_size = static_cast<uint32_t>(iat_end - iat_begin);
 
     // The thunks: each jumps through its own IAT slot.
+    slot_rvas.assign(plan.symbols.size(), 0);
     for (size_t l = 0; l < nlibs; ++l) {
         for (size_t k = 0; k < groups[l].size(); ++k) {
             const size_t sym = groups[l][k];
             const uint32_t slot_rva = idata_rva + static_cast<uint32_t>(iat_off[l] + k * 8);
+            slot_rvas[sym] = slot_rva;
             const size_t thunk = thunk_base + sym * thunk_stride;
             const uint32_t thunk_at = text_rva + static_cast<uint32_t>(thunk);
             if (aarch64) {

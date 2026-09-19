@@ -60,6 +60,14 @@ enum class RelocKind : uint8_t {
     Plt32,     // 32-bit PLT displacement (ELF)
     Abs32,     // 32-bit absolute VA (ELF)
     SecIdx,    // 16-bit section index (COFF debug relocation IMAGE_REL_AMD64_SECTION)
+    // 32-bit PC-relative displacement to the slot holding the symbol's
+    // address (x64 `mov r64, [rip + disp32]`, addend -4): a GOT entry on
+    // ELF and Mach-O, an IAT entry on PE, a slot the JIT owns in-process.
+    // Every address a function materialises is emitted this way; the one
+    // against a symbol the same object defines is relaxed to a `lea` of the
+    // symbol before the image is laid out (relax_got_loads), so only
+    // imports go through a slot.
+    GotPCRel32,
 };
 
 struct ObjectRelocation {
@@ -223,5 +231,24 @@ private:
 
 ObjectFile compile_module_to_object(const Module& mod, const Target& target, const codegen::SchedOptions& sched_opts);
 ObjectFile compile_module_to_object(const Module& mod, const Target& target);
+
+// Turns every GotPCRel32 load of a symbol the object itself defines (or of
+// one of its sections) into `lea r64, [rip + symbol]` — the opcode byte
+// before the displacement goes from 8B to 8D, the relocation becomes a
+// PCRel32 with the same addend — and leaves the loads of undefined symbols
+// for the placer's GOT. Run by the image writers and the JIT loader on their
+// working copy, once the object is complete: a host may define data symbols
+// after code generation, and it is only then that "defined" is known. The
+// return value is the number of loads left, every one against an undefined
+// symbol.
+size_t relax_got_loads(ObjectFile& obj);
+
+// For an object that is going to a system linker without a GOT of its own
+// (COFF): after relax_got_loads, every remaining load takes an 8-byte slot
+// in `slot_section`, an Abs64 relocation binds the slot to its symbol, and
+// the load is rewritten as a PCRel32 against a local symbol at the slot.
+// Distinct symbols get distinct slots; repeated loads share one.
+void materialize_got_slots(ObjectFile& obj, std::string_view slot_section, SectionKind kind,
+                           SectionFlags flags);
 
 } // namespace brass::object

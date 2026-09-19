@@ -47,6 +47,7 @@ namespace elf {
     constexpr uint32_t R_X86_64_32       = 10;
     constexpr uint32_t R_X86_64_32S      = 11;
     constexpr uint32_t R_X86_64_PC64     = 24;
+    constexpr uint32_t R_X86_64_REX_GOTPCRELX = 42;   // GOT-relative load the linker may relax
 
     // AArch64 relocation types
     constexpr uint32_t R_AARCH64_NONE             = 0;
