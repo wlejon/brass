@@ -286,7 +286,13 @@ TEST_CASE("PE DLL Writer - Win64 SEH .pdata and .xdata Exception Directory") {
     REQUIRE(verify_function(*fn));
 
     object::ObjectFile obj = object::compile_module_to_object(mod, Target::x64_windows());
-    std::vector<uint8_t> dll = PeDllWriter::emit(obj);
+    // The callee is undefined, so the image needs somewhere to import it from.
+    PeDllOptions opts;
+    opts.imports.push_back({"callee.dll", {"target_callee"}});
+    std::string err;
+    std::vector<uint8_t> dll = PeDllWriter::emit(obj, opts, &err);
+    REQUIRE(!dll.empty());
+    CHECK(err.empty());
 
     uint32_t pe_offset = read_u32(dll.data() + 0x3C);
     const uint8_t* opt_hdr = dll.data() + pe_offset + 24;

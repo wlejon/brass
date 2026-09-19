@@ -155,9 +155,10 @@ TEST_CASE("Audio JIT - Oscillator sin and cos normalized waveform accuracy") {
 
     fn_ptr(phases.data(), sins.data(), coss.data(), N);
 
+    constexpr double kPi = 3.14159265358979323846;
     for (int i = 0; i < N; ++i) {
-        double expected_s = std::sin(2.0 * M_PI * phases[i]);
-        double expected_c = std::cos(2.0 * M_PI * phases[i]);
+        double expected_s = std::sin(2.0 * kPi * phases[i]);
+        double expected_c = std::cos(2.0 * kPi * phases[i]);
         CHECK_NEAR(sins[i], static_cast<float>(expected_s), 1e-5f);
         CHECK_NEAR(coss[i], static_cast<float>(expected_c), 1e-5f);
     }

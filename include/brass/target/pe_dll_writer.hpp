@@ -1,6 +1,7 @@
 #pragma once
 
 #include <brass/object/object_writer.hpp>
+#include <brass/target/image_imports.hpp>
 #include <string>
 #include <vector>
 #include <cstdint>
@@ -33,6 +34,7 @@ namespace pe {
     constexpr uint32_t IMAGE_DIRECTORY_ENTRY_EXCEPTION = 3;
     constexpr uint32_t IMAGE_DIRECTORY_ENTRY_SECURITY  = 4;
     constexpr uint32_t IMAGE_DIRECTORY_ENTRY_BASERELOC = 5;
+    constexpr uint32_t IMAGE_DIRECTORY_ENTRY_IAT       = 12;
 
     constexpr uint16_t IMAGE_REL_BASED_ABSOLUTE = 0;
     constexpr uint16_t IMAGE_REL_BASED_HIGHLOW  = 3;
@@ -44,6 +46,9 @@ struct PeDllOptions {
     std::string module_name = "brass_module.dll";
     bool export_all_functions = true;
     std::vector<std::string> explicit_exports;
+    // Where every undefined symbol a relocation names comes from. A referenced
+    // symbol outside these lists is an error, never an address of zero.
+    std::vector<ImportLibrary> imports;
 };
 
 class PeDllWriter {
@@ -51,15 +56,20 @@ public:
     PeDllWriter(const object::ObjectFile& obj, const PeDllOptions& options);
     explicit PeDllWriter(const object::ObjectFile& obj);
 
+    // Empty on failure, with `error()` saying why.
     std::vector<uint8_t> write();
     bool write_to_file(const std::string& path);
+    const std::string& error() const noexcept { return error_; }
 
     static std::vector<uint8_t> emit(const object::ObjectFile& obj, const PeDllOptions& options);
+    static std::vector<uint8_t> emit(const object::ObjectFile& obj, const PeDllOptions& options,
+                                     std::string* error_out);
     static std::vector<uint8_t> emit(const object::ObjectFile& obj);
 
 private:
     object::ObjectFile obj_;
     PeDllOptions options_;
+    std::string error_;
 };
 
 } // namespace brass::target
