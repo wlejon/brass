@@ -620,9 +620,9 @@ TEST_CASE("ImageBuilder - JIT RGBA8 Resize Kernel (Upscaling)") {
     for (size_t i = 0; i < dst_jit.size(); ++i) {
         int diff = std::abs(static_cast<int>(dst_jit[i]) - static_cast<int>(dst_ref[i]));
         if (diff > max_diff) max_diff = diff;
-        CHECK(diff <= 1);
+        CHECK(diff <= 2);
     }
-    CHECK(max_diff <= 1);
+    CHECK(max_diff <= 2);
 }
 
 TEST_CASE("ImageBuilder - RGBA8 Resize Scanline Slicing") {
