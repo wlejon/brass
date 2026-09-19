@@ -60,12 +60,11 @@ void AArch64ISel::lower_pinned_tls_write(const Instruction& inst, LirBlock& lir_
 
 void AArch64ISel::lower_read_sp(const Instruction& inst, LirBlock& lir_bb) {
     VReg dst = get_or_alloc_vreg(inst.result());
-    auto add = std::make_unique<LirInst>(LirOpcode::Add);
-    add->add_def(LirOperand::vreg(dst, 8));
-    add->add_use(LirOperand::preg_aarch64_gpr(GPR::SP, 8), FixedConstraint::aarch64_gpr(GPR::SP));
-    add->add_use(LirOperand::imm(0, 8));
-    add->mir_origin = &inst;
-    lir_bb.append_inst(std::move(add));
+    auto mov = std::make_unique<LirInst>(LirOpcode::Mov);
+    mov->add_def(LirOperand::vreg(dst, 8));
+    mov->add_use(LirOperand::preg_aarch64_gpr(GPR::SP, 8), FixedConstraint::aarch64_gpr(GPR::SP));
+    mov->mir_origin = &inst;
+    lir_bb.append_inst(std::move(mov));
 }
 
 void AArch64ISel::lower_select(const Instruction& inst, LirBlock& lir_bb) {

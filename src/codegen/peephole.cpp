@@ -229,7 +229,12 @@ bool PeepholeOptimizer::simplify_arithmetic(LirBlock& block) {
         if ((inst.opcode == LirOpcode::Add || inst.opcode == LirOpcode::Add32) &&
             inst.defs.size() >= 1 && inst.defs[0].is_preg() &&
             !inst.uses.empty() && inst.uses.back().is_imm_int() && inst.uses.back().imm_int == 0) {
-            it = block.instructions.erase(it);
+            if (inst.uses.size() >= 2 && inst.uses[0].is_preg() && inst.defs[0].preg_val != inst.uses[0].preg_val) {
+                inst.opcode = (inst.opcode == LirOpcode::Add32 ? LirOpcode::Mov32 : LirOpcode::Mov);
+                inst.uses.pop_back();
+            } else {
+                it = block.instructions.erase(it);
+            }
             stats_.arithmetic_simplified++;
             changed = true;
             continue;
@@ -239,7 +244,12 @@ bool PeepholeOptimizer::simplify_arithmetic(LirBlock& block) {
         if ((inst.opcode == LirOpcode::Sub || inst.opcode == LirOpcode::Sub32) &&
             inst.defs.size() >= 1 && inst.defs[0].is_preg() &&
             !inst.uses.empty() && inst.uses.back().is_imm_int() && inst.uses.back().imm_int == 0) {
-            it = block.instructions.erase(it);
+            if (inst.uses.size() >= 2 && inst.uses[0].is_preg() && inst.defs[0].preg_val != inst.uses[0].preg_val) {
+                inst.opcode = (inst.opcode == LirOpcode::Sub32 ? LirOpcode::Mov32 : LirOpcode::Mov);
+                inst.uses.pop_back();
+            } else {
+                it = block.instructions.erase(it);
+            }
             stats_.arithmetic_simplified++;
             changed = true;
             continue;
@@ -249,7 +259,12 @@ bool PeepholeOptimizer::simplify_arithmetic(LirBlock& block) {
         if ((inst.opcode == LirOpcode::Imul || inst.opcode == LirOpcode::Imul32) &&
             inst.defs.size() >= 1 && inst.defs[0].is_preg() &&
             !inst.uses.empty() && inst.uses.back().is_imm_int() && inst.uses.back().imm_int == 1) {
-            it = block.instructions.erase(it);
+            if (inst.uses.size() >= 2 && inst.uses[0].is_preg() && inst.defs[0].preg_val != inst.uses[0].preg_val) {
+                inst.opcode = (inst.opcode == LirOpcode::Imul32 ? LirOpcode::Mov32 : LirOpcode::Mov);
+                inst.uses.pop_back();
+            } else {
+                it = block.instructions.erase(it);
+            }
             stats_.arithmetic_simplified++;
             changed = true;
             continue;
@@ -374,6 +389,14 @@ bool PeepholeOptimizer::propagate_copies(LirBlock& block) {
         PReg dst_reg = mov_inst.defs[0].preg_val;
         PReg src_reg = mov_inst.uses[0].preg_val;
         uint8_t sz = mov_inst.defs[0].size;
+
+        if (src_reg.is_gpr()) {
+            if (fn_.calling_conv.target().is_aarch64()) {
+                if (src_reg.code == 31) continue; // SP
+            } else {
+                if (src_reg.code == 4) continue; // RSP
+            }
+        }
 
         for (size_t j = i + 1; j < block.instructions.size(); ++j) {
             auto& candidate = *block.instructions[j];

@@ -551,6 +551,26 @@ public:
                 os_ << "vzero." << inst.type().name();
                 break;
 
+            case Opcode::trunc_i8:
+                os_ << "trunc.i8 " << value_name(inst.operand(0));
+                break;
+
+            case Opcode::alloca_:
+                os_ << "alloca " << inst.imm_i32() << ", " << inst.offset();
+                break;
+
+            case Opcode::pinned_tls_read:
+                os_ << "pinned_tls_read";
+                break;
+
+            case Opcode::pinned_tls_write:
+                os_ << "pinned_tls_write " << value_name(inst.operand(0));
+                break;
+
+            case Opcode::read_sp:
+                os_ << "read_sp";
+                break;
+
             case Opcode::ret:
                 os_ << "ret";
                 if (inst.operand_count() > 0 && inst.operand(0)) {
