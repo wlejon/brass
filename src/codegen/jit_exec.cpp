@@ -432,10 +432,15 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
     symbol_table_.clear();
 
     object::ObjectFile working_obj = obj;
-    // Loads of the object's own symbols become `lea`s; what is left loads
-    // a slot this engine owns beside the code, one per external symbol.
+    // Every GOT load whose symbol turns out to be within reach of the code
+    // — the object's own, and in practice the process's — is relaxed to a
+    // `lea` once addresses are known; the rest read a slot this engine owns
+    // beside the code. Slots are reserved for all of them, since which are
+    // which is only settled below. In-process, unlike in an image, "defined
+    // here" is not the criterion: a separately mapped data block can be out
+    // of a lea's reach and a host symbol within it.
     size_t got_slots = 0;
-    if (object::relax_got_loads(working_obj) > 0) {
+    {
         std::unordered_set<std::string> got_symbols;
         for (const auto& sec : working_obj.sections) {
             for (const auto& r : sec.relocations) {
@@ -702,9 +707,18 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
                     break;
                 }
                 case object::RelocKind::GotPCRel32: {
-                    // The symbol is external (relax_got_loads took every
-                    // defined one): its address goes into this symbol's
-                    // slot and the load reads the slot.
+                    // Within reach: the load becomes a lea of the symbol
+                    // (8B -> 8D, the same relaxation an image writer does
+                    // for a defined symbol). Otherwise the address goes into
+                    // this symbol's slot and the load reads the slot.
+                    const int64_t direct = reinterpret_cast<int64_t>(target_addr) + r.addend -
+                                           reinterpret_cast<int64_t>(patch_loc);
+                    if (direct >= INT32_MIN && direct <= INT32_MAX && r.offset >= 2 &&
+                        patch_loc[-2] == 0x8B) {
+                        patch_loc[-2] = 0x8D;
+                        *reinterpret_cast<int32_t*>(patch_loc) = static_cast<int32_t>(direct);
+                        break;
+                    }
                     uint8_t* slot = nullptr;
                     auto slot_it = got_slot_of.find(r.symbol_name);
                     if (slot_it != got_slot_of.end()) {

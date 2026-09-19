@@ -50,6 +50,15 @@ std::unique_ptr<Module> build_module() {
     b.build_ret(b.build_add(hn, b.build_iconst_i64(1)));
     helper->rebuild_cfg_predecessors();
 
+    // far_addr() = &ext_far, never dereferenced: the JIT registers it at an
+    // address no mapping is near, so the load has to go through a slot.
+    mod->add_external_symbol("ext_far");
+    Function* far_fn = mod->create_function("far_addr", Type::ptr());
+    b.set_function(far_fn);
+    b.append_block("entry");
+    b.build_ret(b.build_func_addr("ext_far"));
+    far_fn->rebuild_cfg_predecessors();
+
     Function* probe = mod->create_function("probe", Type::i64(), {Type::i64()});
     b.set_function(probe);
     BasicBlock* entry = b.append_block("entry");
@@ -134,9 +143,11 @@ bool has_load_of(const std::vector<object::ObjectRelocation>& loads, const char*
 LinkerOptions link_options(const std::string& library) {
     LinkerOptions opts;
     opts.export_all_functions = true;
-    opts.imports.push_back({library, {"ext_data", "ext_fn"}});
+    opts.imports.push_back({library, {"ext_data", "ext_fn", "ext_far"}});
     return opts;
 }
+
+bool is_import(const std::string& name) { return name == "ext_data" || name == "ext_far"; }
 
 struct Range { uint64_t lo = 0, hi = 0; bool holds(uint64_t a) const { return a >= lo && a < hi; } };
 
@@ -152,9 +163,9 @@ TEST_CASE("PIC x64 - Every Symbol Address Is a GOT Load Until the Object Is Plac
     CHECK(has_load_of(loads, "ext_data"));
     CHECK_FALSE(has_load_of(loads, "ext_fn"));   // a call, not an address
 
-    // Placing it: the defined ones become leas, the import stays a load.
+    // Placing it: the defined ones become leas, the imports stay loads.
     object::ObjectFile placed = obj;
-    CHECK_EQ(object::relax_got_loads(placed), size_t(1));
+    CHECK_EQ(object::relax_got_loads(placed), size_t(2));
     const object::Section* text = placed.get_section(".text");
     size_t leas = 0, gots = 0;
     for (const auto& r : text->relocations) {
@@ -163,13 +174,13 @@ TEST_CASE("PIC x64 - Every Symbol Address Is a GOT Load Until the Object Is Plac
             ++leas;
         }
         if (r.kind == object::RelocKind::GotPCRel32) {
-            CHECK_EQ(r.symbol_name, std::string("ext_data"));
+            CHECK(is_import(r.symbol_name));
             CHECK_EQ(text->data[r.offset - 2], uint8_t(0x8B));
             ++gots;
         }
     }
     CHECK(leas >= 2);
-    CHECK_EQ(gots, size_t(1));
+    CHECK_EQ(gots, size_t(2));
 }
 
 TEST_CASE("PIC x64 - A COFF Object Carries Its Own Slot For an Import's Address") {
@@ -246,7 +257,7 @@ TEST_CASE("PIC x64 - Mach-O Dylib: Leas Into __TEXT and __const, GOT Loads Into 
         const uint8_t* site = dylib.data() + text_fileoff + r.offset;
         const uint64_t pc = text.lo + r.offset + 4;
         const uint64_t target = static_cast<uint64_t>(static_cast<int64_t>(pc) + rdi32(site));
-        if (r.symbol_name == "ext_data") {
+        if (is_import(r.symbol_name)) {
             CHECK_EQ(site[-2], uint8_t(0x8B));
             CHECK(got.holds(target));
             CHECK_EQ((target - got.lo) % 8, uint64_t(0));
@@ -306,7 +317,7 @@ TEST_CASE("PIC x64 - Mach-O Dylib: Leas Into __TEXT and __const, GOT Loads Into 
         }
         if (op == 0) break;
     }
-    CHECK_EQ(binds, size_t(2));
+    CHECK_EQ(binds, size_t(3));
 }
 
 TEST_CASE("PIC x64 - ELF Shared Object Needs No DT_TEXTREL and Loads the Import's GOT Slot") {
@@ -345,7 +356,7 @@ TEST_CASE("PIC x64 - ELF Shared Object Needs No DT_TEXTREL and Loads the Import'
     for (const auto& r : loads) {
         const uint8_t* site = so.data() + text_off + r.offset;
         const uint64_t target = static_cast<uint64_t>(static_cast<int64_t>(text.lo + r.offset + 4) + rdi32(site));
-        if (r.symbol_name == "ext_data") {
+        if (is_import(r.symbol_name)) {
             CHECK_EQ(site[-2], uint8_t(0x8B));
             CHECK(got.holds(target));
         } else {
@@ -383,7 +394,7 @@ TEST_CASE("PIC x64 - PE DLL Loads the Import's IAT Slot, Not Its Thunk") {
     for (const auto& r : loads) {
         const uint8_t* site = dll.data() + text_raw + r.offset;
         const uint64_t target = static_cast<uint64_t>(static_cast<int64_t>(text_rva + r.offset + 4) + rdi32(site));
-        if (r.symbol_name == "ext_data") {
+        if (is_import(r.symbol_name)) {
             CHECK_EQ(site[-2], uint8_t(0x8B));
             CHECK(iat.holds(target));
         } else {
@@ -399,9 +410,13 @@ TEST_CASE("PIC x64 - JIT Binds an Import's Address Through Its Own Slot") {
     define_table(obj);
 
     int64_t ext_data = 7;
+    // An address no mapping is anywhere near: out of a lea's reach, so its
+    // load has to come through a slot; ext_data may go either way.
+    void* const far_ptr = reinterpret_cast<void*>(uintptr_t{0x0000123456789AB8});
     codegen::JitExecutionEngine jit(Target::host());
     jit.register_external_symbol("ext_data", &ext_data);
     jit.register_external_symbol("ext_fn", reinterpret_cast<void*>(&ext_fn_impl));
+    jit.register_external_symbol("ext_far", far_ptr);
     REQUIRE(jit.load_object(obj));
     auto probe = jit.get_function_ptr<int64_t (*)(int64_t)>("probe");
     REQUIRE(probe != nullptr);
@@ -410,5 +425,8 @@ TEST_CASE("PIC x64 - JIT Binds an Import's Address Through Its Own Slot") {
     CHECK_EQ(probe(2), int64_t(1032));
     CHECK_EQ(probe(5), int64_t(1163));
     ext_data = 100;
-    CHECK_EQ(probe(1), int64_t(1113));   // the slot holds the address, not a copy
+    CHECK_EQ(probe(1), int64_t(1113));   // the address of the variable, not a copy of it
+    auto far_addr = jit.get_function_ptr<void* (*)()>("far_addr");
+    REQUIRE(far_addr != nullptr);
+    CHECK_EQ(far_addr(), far_ptr);
 }
