@@ -163,7 +163,11 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                     break;
                 }
                 case Opcode::fconst_f64: {
-                    frame.set_value(inst->result(), RuntimeValue::from_f64(inst->imm_f64()));
+                    if (inst->type() == Type::f32()) {
+                        frame.set_value(inst->result(), RuntimeValue::from_f32(static_cast<float>(inst->imm_f64())));
+                    } else {
+                        frame.set_value(inst->result(), RuntimeValue::from_f64(inst->imm_f64()));
+                    }
                     break;
                 }
                 case Opcode::patchable_const_i32: {

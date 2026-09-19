@@ -503,3 +503,32 @@ TEST_CASE("SCCP - Constant Select Optimization with Dynamic Condition") {
     RuntimeValue iv0 = interp.run(mod, "select_const", {RuntimeValue::from_i32(0)});
     CHECK_EQ(iv0.as_i64(), 100);
 }
+
+TEST_CASE("SCCP - Float32 Constant Propagation and Subtraction") {
+    Module mod("test_sccp_f32");
+    Builder b(mod);
+
+    Function* fn = mod.create_function("f32_sub", Type::f32(), {});
+    b.set_function(fn);
+
+    BasicBlock* entry = b.append_block("entry");
+    b.position_at_end(entry);
+    Value* c1 = b.build_fconst_f32(1.0f);
+    Value* c0 = b.build_fconst_f32(0.0f);
+    Value* res = b.build_sub(c1, c0);
+    b.build_ret(res);
+
+    fn->rebuild_cfg_predecessors();
+    REQUIRE(verify_function(*fn));
+
+    SccpOptions opts;
+    bool changed = sccp_function(*fn, opts);
+    CHECK(changed);
+    REQUIRE(verify_function(*fn));
+
+    CHECK_EQ(count_opcodes(*fn, Opcode::sub), 0ULL);
+
+    Interpreter interp;
+    RuntimeValue iv = interp.run(mod, "f32_sub", {});
+    CHECK_EQ(iv.as_f32(), 1.0f);
+}

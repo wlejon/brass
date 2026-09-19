@@ -320,12 +320,22 @@ public:
     }
 
     float as_f32() const noexcept {
+        if (is_f64()) {
+            double d = 0.0;
+            std::memcpy(&d, &raw_bits_, sizeof(double));
+            return static_cast<float>(d);
+        }
         float f = 0.0f;
         std::memcpy(&f, &raw_bits_, sizeof(float));
         return f;
     }
 
     double as_f64() const noexcept {
+        if (is_f32()) {
+            float f = 0.0f;
+            std::memcpy(&f, &raw_bits_, sizeof(float));
+            return static_cast<double>(f);
+        }
         double d = 0.0;
         std::memcpy(&d, &raw_bits_, sizeof(double));
         return d;

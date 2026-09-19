@@ -343,7 +343,11 @@ private:
             return;
         }
         if (op == Opcode::fconst_f64) {
-            set_lattice(inst->result(), LatticeValue::make_f64(inst->imm_f64()));
+            if (inst->type() == Type::f32()) {
+                set_lattice(inst->result(), LatticeValue::make_f32(static_cast<float>(inst->imm_f64())));
+            } else {
+                set_lattice(inst->result(), LatticeValue::make_f64(inst->imm_f64()));
+            }
             return;
         }
 

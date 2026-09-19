@@ -88,8 +88,14 @@ public:
 
     int32_t as_i32() const noexcept { return static_cast<int32_t>(data_.i64_val); }
     int64_t as_i64() const noexcept { return data_.i64_val; }
-    float as_f32() const noexcept { return data_.f32_val; }
-    double as_f64() const noexcept { return data_.f64_val; }
+    float as_f32() const noexcept {
+        if (type_ == Type::f64()) return static_cast<float>(data_.f64_val);
+        return data_.f32_val;
+    }
+    double as_f64() const noexcept {
+        if (type_ == Type::f32()) return static_cast<double>(data_.f32_val);
+        return data_.f64_val;
+    }
     uint64_t as_ptr() const noexcept { return data_.ptr_val; }
 
     bool is_int_zero() const noexcept {
