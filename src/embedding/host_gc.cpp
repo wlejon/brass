@@ -284,8 +284,8 @@ void HostGC::collect(
         uintptr_t obj_payload = reinterpret_cast<uintptr_t>(hdr + 1);
         size_t num_fields = hdr->size / 8;
 
-        for (size_t i = 0; i < num_fields && i < 64; ++i) {
-            if ((hdr->pointer_mask & (1ULL << i)) != 0) {
+        for (size_t i = 0; i < num_fields; ++i) {
+            if (hdr->is_field_pointer(i)) {
                 auto* field_ptr = reinterpret_cast<uint64_t*>(obj_payload + i * 8);
                 HostValue field_val(*field_ptr);
                 if (field_val.is_gcref()) {

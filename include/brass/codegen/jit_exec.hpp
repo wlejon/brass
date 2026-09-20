@@ -101,6 +101,28 @@ void partition_aarch64_invoke_args(
     std::vector<uint64_t>& stack_words
 );
 
+struct alignas(16) X64SysVInvokeArgs {
+    uint64_t gpr[6] = {0};                 // RDI, RSI, RDX, RCX, R8, R9
+    alignas(16) uint8_t xmm[8][16] = {{0}};// XMM0..XMM7
+    const uint64_t* stack_words = nullptr;
+    uint64_t stack_word_count = 0;
+    void* target_fn = nullptr;
+};
+
+struct alignas(16) X64SysVInvokeResult {
+    uint64_t rax = 0;
+    uint64_t rdx = 0;
+    alignas(16) uint8_t xmm0[16] = {0};
+};
+
+void partition_x64_sysv_invoke_args(
+    const std::vector<RuntimeValue>& args,
+    const std::vector<Type>* param_types,
+    void* target_fn,
+    X64SysVInvokeArgs& out_args,
+    std::vector<uint64_t>& stack_words
+);
+
 class JitExecutionEngine {
 public:
     explicit JitExecutionEngine(const Target& target);

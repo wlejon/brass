@@ -5,6 +5,7 @@
 #include <memory>
 #include <algorithm>
 #include <cassert>
+#include <stdexcept>
 
 namespace brass::codegen {
 
@@ -361,7 +362,7 @@ void LinearScanAllocator::rewrite_instructions() {
                     int32_t slot = inst->uses[i].spill_slot;
 
                     // Check if this same slot was already loaded for a previous use
-                    PReg use_scratch;
+                    PReg use_scratch{};
                     bool already_loaded = false;
                     for (size_t j = 0; j < i; ++j) {
                         if (orig_slot_indices[j] == slot && inst->uses[j].is_preg()) {
@@ -372,7 +373,7 @@ void LinearScanAllocator::rewrite_instructions() {
                     }
 
                     if (!already_loaded) {
-                        [[maybe_unused]] bool found = false;
+                        bool found = false;
                         if (is_xmm_use) {
                             for (PReg s : xmm_scratches) {
                                 bool is_busy = false;
@@ -404,7 +405,9 @@ void LinearScanAllocator::rewrite_instructions() {
                                 }
                             }
                         }
-                        assert(found && "Insufficient scratch registers for spilled operands: scratch conflict or reuse");
+                        if (!found) {
+                            throw std::runtime_error("Insufficient scratch registers for spilled operands: scratch conflict or reuse");
+                        }
                         for ([[maybe_unused]] PReg b : busy_registers) {
                             assert(use_scratch != b && "Scratch register clobbers a busy register (base, idx, or def)!");
                         }

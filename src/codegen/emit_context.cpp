@@ -1,6 +1,7 @@
 #include <brass/codegen/emit_context.hpp>
 #include <iostream>
 #include <stdexcept>
+#include <cassert>
 
 namespace brass::codegen {
 
@@ -684,6 +685,8 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
             break;
         }
         default:
+            assert(false && "Unhandled LIR opcode in x64 control emit");
+            enc_.ud2();
             break;
     }
 }
@@ -884,8 +887,21 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
         case LirOpcode::ParallelCopy:
             emit_parallel_copy(inst);
             break;
-        default:
+        case LirOpcode::Jmp:
+        case LirOpcode::Jcc:
+        case LirOpcode::Call:
+        case LirOpcode::CallIndirect:
+        case LirOpcode::Ret:
+        case LirOpcode::Push:
+        case LirOpcode::Pop:
+        case LirOpcode::Lea:
+        case LirOpcode::Safepoint:
+        case LirOpcode::GuardExit:
             emit_control_instruction(inst);
+            break;
+        default:
+            assert(false && "Unhandled LIR opcode in x64 emit");
+            enc_.ud2();
             break;
     }
 }

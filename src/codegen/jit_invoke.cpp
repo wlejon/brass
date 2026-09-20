@@ -425,6 +425,11 @@ inline int64_t call_jit_int_vec_ret_i64(void* addr, int64_t a0, __m128 a1) {
 }
 #endif
 
+extern "C" void x64_sysv_invoke_thunk(
+    const X64SysVInvokeArgs* args,
+    X64SysVInvokeResult* result
+);
+
 RuntimeValue JitExecutionEngine::invoke(std::string_view name) {
     return invoke(name, {});
 }
@@ -754,46 +759,48 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
         }
     }
 
-    // 3 to 8 arguments (Integer / Pointer paths)
-    if (!has_float_arg) {
-        int64_t a0 = get_int(0), a1 = get_int(1), a2 = get_int(2), a3 = get_int(3);
-        int64_t a4 = get_int(4), a5 = get_int(5), a6 = get_int(6), a7 = get_int(7);
-
-        if (ret_type.is_float()) {
-            if (ret_type.kind() == TypeKind::F32) {
-                auto fn8_f = reinterpret_cast<float(*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t)>(addr);
-                float r = fn8_f(a0, a1, a2, a3, a4, a5, a6, a7);
-                return RuntimeValue::from_f32(r);
-            }
-            auto fn8_f = reinterpret_cast<double(*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t)>(addr);
-            double r = fn8_f(a0, a1, a2, a3, a4, a5, a6, a7);
-            return RuntimeValue::from_f64(r);
-        }
-
-        auto fn8 = reinterpret_cast<int64_t(*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t)>(addr);
-        int64_t r = fn8(a0, a1, a2, a3, a4, a5, a6, a7);
-
-        if (ret_type.is_void()) return RuntimeValue::from_void();
-        if (ret_type.kind() == TypeKind::I32) return RuntimeValue::from_i32(static_cast<int32_t>(r));
-        if (ret_type.is_pointer()) return RuntimeValue::from_ptr(static_cast<uintptr_t>(r));
-        if (ret_type.is_gcref()) return RuntimeValue::from_gcref(static_cast<uintptr_t>(r));
-        return RuntimeValue::from_i64(r);
-    } else {
-        // Multi-arg Float path
-        double f0 = get_float(0), f1 = get_float(1), f2 = get_float(2), f3 = get_float(3);
-        double f4 = get_float(4), f5 = get_float(5), f6 = get_float(6), f7 = get_float(7);
-
-        if (ret_type.is_float()) {
-            if (ret_type.kind() == TypeKind::F32) {
-                auto fn_f8 = reinterpret_cast<float(*)(double, double, double, double, double, double, double, double)>(addr);
-                float r = fn_f8(f0, f1, f2, f3, f4, f5, f6, f7);
-                return RuntimeValue::from_f32(r);
-            }
-        }
-        auto fn_f8 = reinterpret_cast<double(*)(double, double, double, double, double, double, double, double)>(addr);
-        double r = fn_f8(f0, f1, f2, f3, f4, f5, f6, f7);
-        return RuntimeValue::from_f64(r);
+    // 3 or more arguments: support arbitrary counts, stack passing, and mixed integer/float signatures
+    const std::vector<Type>* param_types = nullptr;
+    if (sig_it != function_signatures_.end()) {
+        param_types = &sig_it->second.second;
     }
+
+    X64SysVInvokeArgs invoke_args;
+    std::vector<uint64_t> stack_words;
+    partition_x64_sysv_invoke_args(args, param_types, addr, invoke_args, stack_words);
+
+    X64SysVInvokeResult result;
+#if defined(__GNUC__) || defined(__clang__)
+    x64_sysv_invoke_thunk(&invoke_args, &result);
+#endif
+
+    if (ret_type.is_void()) {
+        return RuntimeValue::from_void();
+    }
+    if (ret_type.is_vector()) {
+        return RuntimeValue::from_v128(ret_type, result.xmm0);
+    }
+    if (ret_type.is_float()) {
+        if (ret_type.kind() == TypeKind::F32) {
+            float f = 0.0f;
+            std::memcpy(&f, result.xmm0, sizeof(float));
+            return RuntimeValue::from_f32(f);
+        } else {
+            double d = 0.0;
+            std::memcpy(&d, result.xmm0, sizeof(double));
+            return RuntimeValue::from_f64(d);
+        }
+    }
+    if (ret_type.kind() == TypeKind::I32) {
+        return RuntimeValue::from_i32(static_cast<int32_t>(result.rax));
+    }
+    if (ret_type.is_pointer()) {
+        return RuntimeValue::from_ptr(static_cast<uintptr_t>(result.rax));
+    }
+    if (ret_type.is_gcref()) {
+        return RuntimeValue::from_gcref(static_cast<uintptr_t>(result.rax));
+    }
+    return RuntimeValue::from_i64(static_cast<int64_t>(result.rax));
 }
 
 } // namespace brass::codegen

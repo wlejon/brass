@@ -19,6 +19,16 @@ struct HostGcHeader {
     uint32_t type_tag;            // User/runtime type tag
     uint64_t pointer_mask;        // Bit i is 1 if 8-byte field i is a GCRef pointer or HostValue containing a GCRef
     uintptr_t forwarding_address; // Forwarding address during collection when evacuated to To-Space
+
+    // Returns whether 8-byte field at index `i` is a pointer/GCRef.
+    // For objects with >64 fields (>512 bytes), bit 63 denotes that all subsequent fields
+    // (field 63 and beyond) are pointers (e.g. DynamicObjectBuffer element arrays).
+    bool is_field_pointer(size_t i) const noexcept {
+        if (i < 63) {
+            return (pointer_mask & (1ULL << i)) != 0;
+        }
+        return (pointer_mask & (1ULL << 63)) != 0;
+    }
 };
 
 class HostGC {
