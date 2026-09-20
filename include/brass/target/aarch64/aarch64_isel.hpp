@@ -100,6 +100,7 @@ private:
     void lower_switch(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_overflow_check(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_return(const Instruction& inst, codegen::LirBlock& lir_bb);
+    void lower_alloca(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_load(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_store(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_load_indexed(const Instruction& inst, codegen::LirBlock& lir_bb);

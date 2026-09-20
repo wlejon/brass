@@ -569,3 +569,36 @@ TEST_CASE("AArch64 ISEL - 128-bit Vector SIMD Operations") {
     CHECK(found_load);
     CHECK(found_store);
 }
+
+// 12. Stack Alloca Lowering
+TEST_CASE("AArch64 ISEL - Stack Alloca Lowering") {
+    Module mod;
+    Function* fn = mod.create_function("test_alloca", Type::ptr(), {});
+
+    Builder b(mod);
+    b.set_function(fn);
+
+    BasicBlock* entry = b.append_block("entry");
+    Value* slot = b.build_alloca(32, 16);
+    b.build_ret(slot);
+
+    fn->rebuild_cfg_predecessors();
+    CHECK(verify_function(*fn));
+
+    AArch64ISel isel(Target::aarch64_linux(), CallingConvention::aapcs64());
+    auto lir = isel.lower(*fn);
+    REQUIRE(lir != nullptr);
+    CHECK(lir->frame.local_frame_bytes >= 32);
+
+    bool found_lea = false;
+    for (const auto& inst : lir->blocks[0]->instructions) {
+        if (inst->opcode == LirOpcode::Lea) {
+            found_lea = true;
+            REQUIRE(!inst->uses.empty());
+            CHECK(inst->uses[0].is_local_slot());
+            CHECK_EQ(inst->uses[0].size, 8);
+        }
+    }
+    CHECK(found_lea);
+}
+

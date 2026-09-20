@@ -731,6 +731,10 @@ void AArch64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
             lower_select(inst, lir_bb);
             break;
 
+        case Opcode::alloca_:
+            lower_alloca(inst, lir_bb);
+            break;
+
         case Opcode::pinned_tls_read:
             lower_pinned_tls_read(inst, lir_bb);
             break;

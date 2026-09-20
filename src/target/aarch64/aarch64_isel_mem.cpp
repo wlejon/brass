@@ -339,4 +339,22 @@ void AArch64ISel::lower_store_indexed(const Instruction& inst, LirBlock& lir_bb)
     }
 }
 
+void AArch64ISel::lower_alloca(const Instruction& inst, LirBlock& lir_bb) {
+    uint32_t size = static_cast<uint32_t>(inst.imm_i32());
+    uint32_t align = static_cast<uint32_t>(inst.offset());
+    if (align == 0) align = 8;
+
+    size_t cur = lir_fn_->frame.local_frame_bytes;
+    size_t aligned_cur = (cur + align - 1) & ~size_t(align - 1);
+    lir_fn_->frame.local_frame_bytes = aligned_cur + size;
+
+    VReg dst = get_or_alloc_vreg(inst.result());
+    auto lea_inst = std::make_unique<LirInst>(LirOpcode::Lea);
+    lea_inst->add_def(LirOperand::vreg(dst, 8));
+    lea_inst->add_use(LirOperand::local_slot(static_cast<int32_t>(aligned_cur), 8));
+    lea_inst->mir_origin = &inst;
+    lir_bb.append_inst(std::move(lea_inst));
+}
+
 } // namespace brass::aarch64
+

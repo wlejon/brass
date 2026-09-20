@@ -1,4 +1,5 @@
 #include <brass/target/aarch64/aarch64_emit.hpp>
+#include <brass/runtime/deopt.hpp>
 #include <cassert>
 #include <stdexcept>
 #include <string>
@@ -317,6 +318,14 @@ void AArch64EmitContext::emit_control_instruction(const LirInst& inst) {
                     enc_.mov(GPR::X16, static_cast<uint64_t>(addr.offset));
                     enc_.add(dst, GPR::FP, GPR::X16);
                 }
+            } else if (op.is_local_slot()) {
+                MemAddress addr = AArch64FrameLayout::local_frame_address(op.local_offset, fn_.frame);
+                if (addr.offset >= 0 && addr.offset <= 4095) {
+                    enc_.add(dst, GPR::FP, static_cast<uint32_t>(addr.offset));
+                } else {
+                    enc_.mov(GPR::X16, static_cast<uint64_t>(addr.offset));
+                    enc_.add(dst, GPR::FP, GPR::X16);
+                }
             } else if (op.is_mem()) {
                 const auto& m = op.mem_val;
                 GPR base = m.base_preg.is_valid() ? m.base_preg.as_aarch64_gpr() : GPR::None;
@@ -420,7 +429,7 @@ void AArch64EmitContext::emit_control_instruction(const LirInst& inst) {
                     } else if (op.preg_val.is_xmm()) {
                         enc_.str(op.preg_val.as_aarch64_fpr(), ptr(GPR::SP, slot_offset));
                     }
-                } else if (op.is_spill_slot() || op.is_mem()) {
+                } else if (op.is_spill_slot() || op.is_mem() || op.is_local_slot()) {
                     MemAddress src_mem = ensure_accessible_mem(to_mem_address(op));
                     enc_.ldr(GPR::X16, src_mem);
                     enc_.str(GPR::X16, ptr(GPR::SP, slot_offset));
@@ -454,6 +463,14 @@ void AArch64EmitContext::emit_control_instruction(const LirInst& inst) {
                 AArch64FrameLayout::emit_epilogue(enc_, frame_, fn_.calling_conv);
             } else {
                 if (total_alloc > 0) enc_.add(GPR::SP, GPR::SP, static_cast<uint32_t>(total_alloc));
+                if (inst.deopt_reason == static_cast<uint32_t>(runtime::DeoptReason::BoundsCheckFailed)) {
+                    // Out-of-bounds guards must not silently exit returning uninitialized garbage.
+                    // If brass_deopt_exit returned null (unhandled deopt), trap with brk(0).
+                    Label handle_ok = buffer_.create_label();
+                    enc_.cbnz(GPR::X0, handle_ok);
+                    enc_.brk(0);
+                    buffer_.bind(handle_ok);
+                }
                 AArch64FrameLayout::emit_epilogue(enc_, frame_, fn_.calling_conv);
             }
             break;

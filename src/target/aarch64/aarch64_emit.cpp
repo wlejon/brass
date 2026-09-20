@@ -36,6 +36,9 @@ MemAddress AArch64EmitContext::to_mem_address(const LirOperand& op) {
         }
         return AArch64FrameLayout::spill_slot_address(op.spill_slot, frame_);
     }
+    if (op.is_local_slot()) {
+        return AArch64FrameLayout::local_frame_address(op.local_offset, frame_);
+    }
     if (op.is_mem()) {
         const auto& m = op.mem_val;
         GPR base = m.base_preg.is_valid() ? m.base_preg.as_aarch64_gpr() : GPR::None;

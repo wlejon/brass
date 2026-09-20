@@ -1,4 +1,5 @@
 #include <brass/codegen/emit_context.hpp>
+#include <brass/runtime/deopt.hpp>
 #include <iostream>
 #include <stdexcept>
 #include <cassert>
@@ -678,6 +679,15 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
                 X64FrameLayout::emit_epilogue(enc_, mutable_frame, fn_.calling_conv);
             } else {
                 if (total_alloc > 0) enc_.add(GPR::RSP, static_cast<int32_t>(total_alloc));
+                if (inst.deopt_reason == static_cast<uint32_t>(runtime::DeoptReason::BoundsCheckFailed)) {
+                    // Out-of-bounds guards must not silently exit returning uninitialized garbage.
+                    // If brass_deopt_exit returned null (unhandled deopt), trap with ud2.
+                    enc_.test(GPR::RAX, GPR::RAX);
+                    Label handle_ok = buffer_.create_label();
+                    enc_.j(Condition::NE, handle_ok);
+                    enc_.ud2();
+                    buffer_.bind(handle_ok);
+                }
                 codegen::FrameInfo mutable_frame = fn_.frame;
                 X64FrameLayout::compute_layout(mutable_frame, fn_.calling_conv);
                 X64FrameLayout::emit_epilogue(enc_, mutable_frame, fn_.calling_conv);

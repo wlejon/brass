@@ -6,6 +6,7 @@
 #include <brass/mir/bounds_check_elim.hpp>
 #include <brass/mir/cfg_simplify.hpp>
 #include <brass/codegen/jit_exec.hpp>
+#include <brass/runtime/deopt.hpp>
 #include <vector>
 #include <numeric>
 
@@ -228,6 +229,10 @@ TEST_CASE("BCE - Loop Bounds Check Hoisting") {
             if (inst->opcode() == Opcode::guard) {
                 found_guard = true;
                 CHECK_EQ(inst->symbol(), "@exit_stub");
+                CHECK_EQ(inst->offset(), static_cast<int32_t>(runtime::DeoptReason::BoundsCheckFailed));
+                CHECK_EQ(inst->state_map().size(), size_t(2));
+                CHECK_EQ(inst->state_map()[0], zero);
+                CHECK_EQ(inst->state_map()[1], zero);
             }
         }
     }

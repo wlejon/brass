@@ -3,6 +3,7 @@
 #include <brass/mir/cfg_simplify.hpp>
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/loop_analysis.hpp>
+#include <brass/runtime/deopt.hpp>
 #include <unordered_set>
 #include <vector>
 
@@ -358,6 +359,11 @@ bool hoist_loop_bounds_checks(
                         // Emit preheader guard with captured loop/preheader deopt state
                         std::vector<Value*> deopt_state;
                         if (ph_term) {
+                            for (Value* arg : ph_term->branch_target().args) {
+                                if (arg) {
+                                    deopt_state.push_back(arg);
+                                }
+                            }
                             for (size_t i = 0; i < ph_term->operand_count(); ++i) {
                                 if (ph_term->operand(i)) {
                                     deopt_state.push_back(ph_term->operand(i));
@@ -369,7 +375,8 @@ bool hoist_loop_bounds_checks(
                                 if (p) deopt_state.push_back(p);
                             }
                         }
-                        b.build_guard(in_bounds, "@exit_stub", deopt_state);
+                        Instruction* guard_inst = b.build_guard(in_bounds, "@exit_stub", deopt_state);
+                        guard_inst->set_offset(static_cast<int32_t>(runtime::DeoptReason::BoundsCheckFailed));
 
                         // Eliminate per-iteration bounds check inside loop
                         b.position_before(cur);
