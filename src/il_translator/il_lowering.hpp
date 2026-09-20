@@ -34,6 +34,9 @@ public:
     PropertyLoweringHelper& prop_lowering() { return prop_lowering_; }
     AllocLoweringHelper& alloc_lowering() { return alloc_lowering_; }
     const TranslatorOptions& options() const { return options_; }
+    const BronzeModuleAST* current_ast() const { return current_ast_; }
+    DiagnosticReporter* diag() const { return diag_; }
+    void set_has_error(bool e) { has_error_ = e; }
     std::string module_sym(const std::string& base) const {
         if (options_.entry_symbol.empty() || options_.entry_symbol == "main" || options_.entry_symbol == "bronze_main") {
             return base;

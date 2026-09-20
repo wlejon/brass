@@ -1,4 +1,5 @@
 #include "il_lowering.hpp"
+#include "il_lowering_calls.hpp"
 #include "il_lowering_coro.hpp"
 #include "il_lowering_ops.hpp"
 #include "il_property_lowering.hpp"
@@ -33,15 +34,6 @@ bool IlLowering::lower_instruction(
             return get_val_by_id(inst_ast.operands[idx]);
         }
         return nullptr;
-    };
-
-    auto build_call_dynamic = [&](const std::vector<Value*>& dyn_args) -> Value* {
-        size_t argc = dyn_args.size() > 2 ? dyn_args.size() - 2 : 0;
-        if (argc <= 16) {
-            std::string helper = "bronze_call_dynamic_" + std::to_string(argc);
-            return b.build_call(helper, Type::i64(), Span<Value* const>(dyn_args.data(), dyn_args.size()));
-        }
-        return b.build_iconst_i64(static_cast<int64_t>(kUndefinedTag));
     };
 
     auto emit_default_ret = [&]() {
@@ -124,6 +116,14 @@ bool IlLowering::lower_instruction(
 
     if (is_property_il_op(inst_ast.op)) {
         if (!lower_property_instruction(this, inst_ast, b, fn, val_map, res_val, emit_exception_check)) {
+            return false;
+        }
+        set_inst_result(inst_ast.result_id, res_val, b, val_map);
+        return true;
+    }
+
+    if (is_call_il_op(inst_ast.op)) {
+        if (!lower_call_instruction(this, inst_ast, b, fn, val_map, res_val, emit_exception_check)) {
             return false;
         }
         set_inst_result(inst_ast.result_id, res_val, b, val_map);
@@ -220,159 +220,6 @@ bool IlLowering::lower_instruction(
             break;
         }
 
-
-        case BronzeOp::Construct: {
-            Value* ctor = ensure_type(get_opd(0), Type::i64(), b);
-            uint32_t argc = inst_ast.param_count;
-            std::vector<Value*> call_args = {ctor};
-            for (uint32_t i = 0; i < argc && i < 16; ++i) {
-                call_args.push_back(ensure_type(get_opd(1 + i), Type::i64(), b));
-            }
-            std::string helper = "bronze_construct_" + std::to_string(std::min(argc, 16u));
-            res_val = b.build_call(helper, Type::i64(), call_args);
-            emit_exception_check();
-            break;
-        }
-
-        case BronzeOp::MethodCall: {
-            Value* recv = ensure_type(get_opd(0), Type::i64(), b);
-            uint32_t argc = inst_ast.param_count;
-            std::string callee = resolve_callee(inst_ast.callee_name);
-            if (!callee.empty() && std::isdigit(static_cast<unsigned char>(callee[0]))) {
-                uint32_t f_idx = static_cast<uint32_t>(std::stoul(callee));
-                if (current_ast_ && f_idx < current_ast_->functions.size()) {
-                    callee = resolve_callee(current_ast_->functions[f_idx].name);
-                }
-            }
-            Function* direct_fn = (!callee.empty() && fn->parent()) ? fn->parent()->get_function(callee) : nullptr;
-            bool can_direct = false;
-            if (direct_fn) {
-                auto it_m = options_.function_meta.find(callee);
-                if (it_m != options_.function_meta.end()) {
-                    can_direct = it_m->second.needs_this && !it_m->second.needs_arguments &&
-                                 !it_m->second.has_rest_param && !it_m->second.needs_env &&
-                                 (direct_fn->param_types().size() == argc + 1);
-                } else {
-                    can_direct = (direct_fn->param_types().size() == argc + 1);
-                }
-            }
-            if (can_direct) {
-                std::vector<Value*> call_args = {ensure_type(recv, direct_fn->param_types()[0], b)};
-                for (size_t p = 1; p < direct_fn->param_types().size(); ++p) {
-                    size_t arg_idx = p - 1;
-                    Value* a = arg_idx < argc ? get_opd(1 + arg_idx) : nullptr;
-                    call_args.push_back(a ? ensure_type(a, direct_fn->param_types()[p], b) :
-                        (direct_fn->param_types()[p] == Type::f64() ? b.build_fconst_f64(0.0) :
-                         direct_fn->param_types()[p] == Type::i32() ? b.build_iconst_i32(0) :
-                         b.build_iconst_i64(static_cast<int64_t>(kUndefinedTag))));
-                }
-                res_val = b.build_call(callee, direct_fn->return_type(), Span<Value* const>(call_args.data(), call_args.size()));
-                if (direct_fn->return_type() == Type::void_type()) {
-                    res_val = b.build_iconst_i64(static_cast<int64_t>(kUndefinedTag));
-                }
-            } else if (Value* site = prop_lowering_.ic_site(b, inst_ast.ic_index)) {
-                // The designed path (bronze_abi.h, "the METHOD-CALL site"):
-                // one helper that reads the method, latches the site and
-                // dispatches. The arguments are staged in this function's
-                // GC frame — the helper's property read can run a getter,
-                // and a collection during it must find and forward them —
-                // so `argv` is a pointer into rooted slots exactly as the
-                // runtime's own `bronze_call_dynamic_N` callers arrange.
-                // A function lowered without a frame (none exists today; a
-                // coroutine body would be one) pushes a frame of its own
-                // around the call instead.
-                Value* argv = nullptr;
-                bool pushed_frame = false;
-                if (argc == 0) {
-                    argv = b.build_iconst_i64(0);
-                } else if (current_fn_frame_ptr_ != nullptr) {
-                    const int32_t base = static_cast<int32_t>(16 + method_argv_slot_ * 8);
-                    for (size_t a = 0; a < argc; ++a) {
-                        Value* arg = ensure_type(get_opd(1 + a), Type::i64(), b);
-                        b.build_store(Type::i64(), current_fn_frame_ptr_,
-                                      static_cast<int32_t>(base + a * 8), arg);
-                    }
-                    argv = b.build_add(current_fn_frame_ptr_, b.build_iconst_i64(base));
-                } else {
-                    Value* frame = b.build_call("bronze_gc_frame_push", Type::ptr(),
-                                                {b.build_iconst_i32(static_cast<int32_t>(argc))});
-                    for (size_t a = 0; a < argc; ++a) {
-                        Value* arg = ensure_type(get_opd(1 + a), Type::i64(), b);
-                        b.build_store(Type::i64(), frame, static_cast<int32_t>(16 + a * 8), arg);
-                    }
-                    argv = b.build_add(frame, b.build_iconst_i64(16));
-                    pushed_frame = true;
-                }
-                // Nothing between the receiver read above and the call can
-                // allocate: `ensure_type` is pure conversion and the stores
-                // are stores, so `recv` is still the live bits here.
-                Value* argc_val = b.build_iconst_i32(static_cast<int32_t>(argc));
-                res_val = b.build_call("bronze_call_method", Type::i64(),
-                                       {recv, get_key_id(b, inst_ast.index), argc_val, argv, site});
-                if (pushed_frame) {
-                    b.build_call("bronze_gc_frame_pop", Type::void_type(), {});
-                }
-            } else {
-                Value* null_entry = b.build_iconst_i64(0);
-                Value* method = b.build_call("bronze_prop_get", Type::i64(), {recv, get_key_id(b, inst_ast.index), null_entry});
-                emit_exception_check();
-                recv = ensure_type(get_opd(0), Type::i64(), b);
-                std::vector<Value*> dyn_args = {method, recv};
-                for (size_t a = 0; a < argc; ++a) {
-                    dyn_args.push_back(ensure_type(get_opd(1 + a), Type::i64(), b));
-                }
-                res_val = build_call_dynamic(dyn_args);
-            }
-            emit_exception_check();
-            break;
-        }
-
-        case BronzeOp::SuperCall: {
-            Value* base_ctor = ensure_type(get_opd(0), Type::i64(), b);
-            Value* this_val = ensure_type(get_opd(1), Type::i64(), b);
-            uint32_t argc = inst_ast.param_count;
-            std::vector<Value*> super_args = {base_ctor, this_val};
-            for (size_t a = 0; a < argc; ++a) {
-                super_args.push_back(ensure_type(get_opd(2 + a), Type::i64(), b));
-            }
-            if (argc <= 16) {
-                std::string helper = "bronze_super_call_" + std::to_string(argc);
-                res_val = b.build_call(helper, Type::i64(), Span<Value* const>(super_args.data(), super_args.size()));
-            } else {
-                res_val = b.build_iconst_i64(static_cast<int64_t>(kUndefinedTag));
-            }
-            emit_exception_check();
-            break;
-        }
-
-        case BronzeOp::SuperCallSpread: {
-            Value* base_ctor = ensure_type(get_opd(0), Type::i64(), b);
-            Value* this_val = ensure_type(get_opd(1), Type::i64(), b);
-            Value* args = ensure_type(get_opd(2), Type::i64(), b);
-            res_val = b.build_call("bronze_super_call_spread", Type::i64(), {base_ctor, this_val, args});
-            emit_exception_check();
-            break;
-        }
-
-        case BronzeOp::SuperGet: {
-            Value* proto = ensure_type(get_opd(0), Type::i64(), b);
-            Value* this_val = ensure_type(get_opd(1), Type::i64(), b);
-            Value* kidx = get_key_id(b, inst_ast.index);
-            res_val = b.build_call("bronze_super_get", Type::i64(), {proto, kidx, this_val});
-            break;
-        }
-
-        case BronzeOp::SuperSet: {
-            Value* proto = ensure_type(get_opd(0), Type::i64(), b);
-            Value* this_val = ensure_type(get_opd(1), Type::i64(), b);
-            Value* val = ensure_type(get_opd(2), Type::i64(), b);
-            Value* kidx = get_key_id(b, inst_ast.index);
-            Value* strict = b.build_iconst_i32(inst_ast.imm_i64 != 0 ? 1 : 0);
-            b.build_call("bronze_super_set", Type::void_type(), {proto, kidx, this_val, val, strict});
-            emit_exception_check();
-            break;
-        }
-
         case BronzeOp::ObjectKeys: {
             Value* obj = ensure_type(get_opd(0), Type::i64(), b);
             res_val = b.build_call("bronze_object_keys", Type::i64(), {obj});
@@ -383,19 +230,6 @@ bool IlLowering::lower_instruction(
         case BronzeOp::ForInKeys: {
             Value* obj = ensure_type(get_opd(0), Type::i64(), b);
             res_val = b.build_call("bronze_for_in_keys", Type::i64(), {obj});
-            emit_exception_check();
-            break;
-        }
-
-        case BronzeOp::CallDynamic: {
-            Value* callee_val = ensure_type(get_opd(0), Type::i64(), b);
-            Value* this_val = ensure_type(get_opd(1), Type::i64(), b);
-            uint32_t argc = inst_ast.param_count;
-            std::vector<Value*> dyn_args = {callee_val, this_val};
-            for (size_t a = 0; a < argc; ++a) {
-                dyn_args.push_back(ensure_type(get_opd(2 + a), Type::i64(), b));
-            }
-            res_val = build_call_dynamic(dyn_args);
             emit_exception_check();
             break;
         }
@@ -471,83 +305,6 @@ bool IlLowering::lower_instruction(
             }
             Value* env_addr = b.build_func_addr(module_sym("__bronze_module_env"));
             res_val = b.build_load(Type::i64(), env_addr, 0);
-            break;
-        }
-
-        case BronzeOp::FuncRef: {
-            std::string callee = inst_ast.callee_name;
-            if (!callee.empty() && std::isdigit(static_cast<unsigned char>(callee[0]))) {
-                uint32_t f_idx = static_cast<uint32_t>(std::stoul(callee));
-                if (current_ast_ && f_idx < current_ast_->functions.size()) {
-                    callee = current_ast_->functions[f_idx].name;
-                }
-            }
-            callee = resolve_callee(callee);
-            Value* code_addr = b.build_func_addr("__wrapper_" + callee);
-            uint32_t arity = 0;
-            uint32_t length = 0;
-            uint32_t name_key_val = 0xFFFFFFFFu;
-            uint32_t fn_flags_val = 0x03;
-            auto it_meta = options_.function_meta.find(callee);
-            if (it_meta != options_.function_meta.end()) {
-                fn_flags_val = it_meta->second.fn_flags;
-                name_key_val = it_meta->second.name_key;
-                length = it_meta->second.required_args;
-                arity = it_meta->second.adapt_arity;
-            } else if (current_ast_) {
-                for (const auto& f : current_ast_->functions) {
-                    if (f.name == callee) {
-                        length = static_cast<uint32_t>(f.params.size());
-                        arity = length;
-                        break;
-                    }
-                }
-            }
-            Value* arity_val = b.build_iconst_i32(static_cast<int32_t>(arity));
-            Value* length_val = b.build_iconst_i32(static_cast<int32_t>(length));
-            Value* name_key = (name_key_val != 0xFFFFFFFFu)
-                ? get_key_id(b, name_key_val)
-                : b.build_iconst_i32(static_cast<int32_t>(0xFFFFFFFFu));
-            Value* fn_flags = b.build_iconst_i32(static_cast<int32_t>(fn_flags_val));
-            Value* slot_cell = b.build_iconst_i64(0);
-            res_val = b.build_call("bronze_function_singleton", Type::i64(), {
-                code_addr,
-                arity_val,
-                length_val,
-                name_key,
-                fn_flags,
-                slot_cell
-            });
-            break;
-        }
-
-        case BronzeOp::CreateFunc: {
-            std::string callee = resolve_create_func_callee(inst_ast.callee_name);
-            Value* code_addr = b.build_func_addr("__wrapper_" + callee);
-            Value* arity_val = b.build_iconst_i32(static_cast<int32_t>(inst_ast.param_count));
-            Value* env_val = ensure_type(get_opd(0), Type::i64(), b);
-            uint32_t length = 0;
-            uint32_t name_key_val = 0xFFFFFFFFu;
-            uint32_t fn_flags_val = 0x03;
-            auto it_meta = options_.function_meta.find(callee);
-            if (it_meta != options_.function_meta.end()) {
-                fn_flags_val = it_meta->second.fn_flags;
-                name_key_val = it_meta->second.name_key;
-                length = it_meta->second.required_args;
-            }
-            Value* length_val = b.build_iconst_i32(static_cast<int32_t>(length));
-            Value* name_key = (name_key_val != 0xFFFFFFFFu)
-                ? get_key_id(b, name_key_val)
-                : b.build_iconst_i32(static_cast<int32_t>(0xFFFFFFFFu));
-            Value* fn_flags = b.build_iconst_i32(static_cast<int32_t>(fn_flags_val));
-            res_val = b.build_call("bronze_create_function", Type::i64(), {
-                code_addr,
-                arity_val,
-                length_val,
-                name_key,
-                fn_flags,
-                env_val
-            });
             break;
         }
 
@@ -762,34 +519,6 @@ bool IlLowering::lower_instruction(
                 cell_ptr = b.build_add(cell_ptr, b.build_iconst_i64(inst_ast.imm_i64 * 8));
             }
             res_val = b.build_call("bronze_template_object", Type::i64(), {cooked, raw, cell_ptr});
-            emit_exception_check();
-            break;
-        }
-
-        case BronzeOp::DynamicCallSpread: {
-            Value* callee = ensure_type(get_opd(0), Type::i64(), b);
-            Value* this_val = ensure_type(get_opd(1), Type::i64(), b);
-            Value* args = ensure_type(get_opd(2), Type::i64(), b);
-            res_val = b.build_call("bronze_dynamic_call_spread", Type::i64(), {callee, this_val, args});
-            emit_exception_check();
-            break;
-        }
-
-        case BronzeOp::MethodCallSpread: {
-            Value* this_val = ensure_type(get_opd(0), Type::i64(), b);
-            Value* args = ensure_type(get_opd(1), Type::i64(), b);
-            Value* key_id = get_key_id(b, inst_ast.index);
-            Value* site = prop_lowering_.ic_site(b, inst_ast.ic_index);
-            Value* entry = site ? site : b.build_iconst_i64(0);
-            res_val = b.build_call("bronze_call_method_spread", Type::i64(), {this_val, key_id, args, entry});
-            emit_exception_check();
-            break;
-        }
-
-        case BronzeOp::ConstructSpread: {
-            Value* callee = ensure_type(get_opd(0), Type::i64(), b);
-            Value* args = ensure_type(get_opd(1), Type::i64(), b);
-            res_val = b.build_call("bronze_construct_spread", Type::i64(), {callee, args});
             emit_exception_check();
             break;
         }
@@ -1009,17 +738,10 @@ bool IlLowering::lower_instruction(
         }
 
         default: {
-            if (res_type == Type::void_type()) {
-                break;
-            } else if (res_type == Type::i64()) {
-                res_val = b.build_iconst_i64(static_cast<int64_t>(kUndefinedTag));
-                break;
-            } else if (res_type == Type::i32()) {
-                res_val = b.build_iconst_i32(0);
-                break;
-            } else if (res_type == Type::f64()) {
-                res_val = b.build_fconst_f64(0.0);
-                break;
+            has_error_ = true;
+            if (diag_) {
+                diag_->error(SourceLocation("", inst_ast.line, inst_ast.column),
+                             "Unhandled Bronze IL opcode: " + std::to_string(static_cast<int>(inst_ast.op)));
             }
             return false;
         }

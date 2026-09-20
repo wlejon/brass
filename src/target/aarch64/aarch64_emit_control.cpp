@@ -1,4 +1,7 @@
 #include <brass/target/aarch64/aarch64_emit.hpp>
+#include <cassert>
+#include <stdexcept>
+#include <string>
 
 namespace brass::aarch64 {
 
@@ -457,7 +460,8 @@ void AArch64EmitContext::emit_control_instruction(const LirInst& inst) {
         }
 
         default:
-            break;
+            assert(false && "Unhandled LIR opcode in AArch64 control emit");
+            throw std::runtime_error("Unhandled LIR opcode in AArch64 control emit: " + std::to_string(static_cast<int>(inst.opcode)));
     }
 }
 

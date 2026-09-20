@@ -491,9 +491,22 @@ void AArch64EmitContext::emit_instruction(const LirInst& inst, bool is_entry_blo
             emit_parallel_copy(inst);
             break;
 
-        default:
+        case LirOpcode::Jmp:
+        case LirOpcode::Jcc:
+        case LirOpcode::Call:
+        case LirOpcode::CallIndirect:
+        case LirOpcode::Ret:
+        case LirOpcode::Push:
+        case LirOpcode::Pop:
+        case LirOpcode::Lea:
+        case LirOpcode::Safepoint:
+        case LirOpcode::GuardExit:
             emit_control_instruction(inst);
             break;
+
+        default:
+            assert(false && "Unhandled LIR opcode in AArch64 emit");
+            throw std::runtime_error("Unhandled LIR opcode in AArch64 emit: " + std::to_string(static_cast<int>(inst.opcode)));
     }
 }
 

@@ -4,6 +4,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <algorithm>
+#include <cassert>
 
 namespace brass::aarch64 {
 
@@ -810,7 +811,8 @@ void AArch64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
             break;
         }
         default:
-            break;
+            assert(false && "Unhandled MIR opcode in AArch64 ISel");
+            throw std::runtime_error("Unhandled MIR opcode in AArch64 ISel: " + std::string(opcode_name(inst.opcode())));
     }
 }
 
