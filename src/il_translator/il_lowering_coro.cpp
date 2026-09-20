@@ -1,7 +1,9 @@
 #include "il_lowering_coro.hpp"
 #include "il_lowering.hpp"
+#include "il_runtime.hpp"
 #include <brass/runtime/coroutine.hpp>
 #include <brass/mir/module.hpp>
+#include <brass/codegen/jit_exec.hpp>
 
 namespace brass::il {
 
@@ -64,9 +66,13 @@ bool lower_coro_instruction(
                 env_val = b.build_iconst_i64(0);
             }
 
-            std::string callee = inst_ast.callee_name;
+            std::string callee = lowering ? lowering->resolve_create_func_callee(inst_ast.callee_name) : inst_ast.callee_name;
+            std::string fn_name_sym = lowering ? lowering->module_sym("__bronze_fn_name_" + callee) : ("__bronze_fn_name_" + callee);
             const char* name_ptr = fn->parent()->string_pool().intern(callee).data();
-            Value* fn_name_val = b.build_iconst_i64(static_cast<int64_t>(reinterpret_cast<uintptr_t>(name_ptr)));
+            if (auto* jit = get_active_jit()) {
+                jit->register_external_symbol(fn_name_sym, const_cast<char*>(name_ptr));
+            }
+            Value* fn_name_val = b.build_func_addr(fn_name_sym);
 
             res_val = b.build_call("bronze_create_async_machine", Type::i64(), {
                 fn_name_val,

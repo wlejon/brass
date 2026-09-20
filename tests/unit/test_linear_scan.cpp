@@ -425,3 +425,132 @@ TEST_CASE("Linear Scan - AArch64 Callee-Saved Register Across Calls") {
     CHECK(fn.calling_conv.is_callee_saved(info.assigned_preg.as_aarch64_gpr()));
     CHECK_NE(fn.frame.saved_callee_gprs & aarch64::reg_mask(info.assigned_preg.as_aarch64_gpr()), 0u);
 }
+
+TEST_CASE("Linear Scan - GPR 3 Spilled Operands Distinct Scratch Registers") {
+    LirFunction fn;
+    fn.name = "test_gpr_ternary_spill_reload";
+    fn.calling_conv = CallingConvention::for_target(Target::x64_linux());
+
+    LirBlock* entry = fn.create_block("entry");
+
+    // Force register pressure with 20 live GPR vregs so spills are guaranteed
+    std::vector<VReg> vars;
+    for (int i = 0; i < 20; ++i) {
+        vars.push_back(fn.allocate_vreg(RegClass::GPR, 8));
+        auto inst = std::make_unique<LirInst>(LirOpcode::Mov);
+        inst->add_def(LirOperand::vreg(vars.back()));
+        inst->add_use(LirOperand::imm(i + 1));
+        entry->append_inst(std::move(inst));
+    }
+
+    VReg res = fn.allocate_vreg(RegClass::GPR, 8);
+    auto ternary_inst = std::make_unique<LirInst>(LirOpcode::Add);
+    ternary_inst->add_def(LirOperand::vreg(res));
+    ternary_inst->add_use(LirOperand::vreg(vars[0]));
+    ternary_inst->add_use(LirOperand::vreg(vars[1]));
+    ternary_inst->add_use(LirOperand::vreg(vars[2]));
+    entry->append_inst(std::move(ternary_inst));
+
+    for (size_t i = 3; i < vars.size(); ++i) {
+        auto dummy = std::make_unique<LirInst>(LirOpcode::Add);
+        dummy->add_def(LirOperand::vreg(res));
+        dummy->add_use(LirOperand::vreg(res));
+        dummy->add_use(LirOperand::vreg(vars[i]));
+        entry->append_inst(std::move(dummy));
+    }
+
+    auto ret_inst = std::make_unique<LirInst>(LirOpcode::Ret);
+    ret_inst->add_use(LirOperand::vreg(res));
+    entry->append_inst(std::move(ret_inst));
+
+    LivenessAnalysis liveness(fn);
+    liveness.run();
+
+    LinearScanAllocator regalloc(fn, liveness, fn.calling_conv);
+    regalloc.allocate();
+    CHECK(regalloc.num_spill_slots() > 0);
+
+    // Verify all 3 uses on the ternary instruction have distinct physical registers
+    LirInst* rewritten_ternary = nullptr;
+    for (const auto& inst : entry->instructions) {
+        if (inst->opcode == LirOpcode::Add && inst->uses.size() == 3) {
+            rewritten_ternary = inst.get();
+            break;
+        }
+    }
+    REQUIRE(rewritten_ternary != nullptr);
+    REQUIRE_EQ(rewritten_ternary->uses.size(), 3u);
+
+    std::vector<PReg> used_pregs;
+    for (const auto& use : rewritten_ternary->uses) {
+        REQUIRE(use.is_preg());
+        used_pregs.push_back(use.preg_val);
+    }
+    CHECK(used_pregs[0] != used_pregs[1]);
+    CHECK(used_pregs[1] != used_pregs[2]);
+    CHECK(used_pregs[0] != used_pregs[2]);
+}
+
+TEST_CASE("Linear Scan - XMM 3 Spilled Operands Distinct Scratch Registers") {
+    LirFunction fn;
+    fn.name = "test_xmm_ternary_spill_reload";
+    fn.calling_conv = CallingConvention::for_target(Target::x64_linux());
+
+    LirBlock* entry = fn.create_block("entry");
+
+    // Force register pressure with 20 live XMM vregs (pool only has 12)
+    std::vector<VReg> vars;
+    for (int i = 0; i < 20; ++i) {
+        vars.push_back(fn.allocate_vreg(RegClass::XMM, 8));
+        auto inst = std::make_unique<LirInst>(LirOpcode::Movsd);
+        inst->add_def(LirOperand::vreg(vars.back()));
+        inst->add_use(LirOperand::slot(static_cast<int32_t>(i), 8));
+        entry->append_inst(std::move(inst));
+    }
+
+    VReg res = fn.allocate_vreg(RegClass::XMM, 8);
+    auto fma_inst = std::make_unique<LirInst>(LirOpcode::Vfmadd213sd);
+    fma_inst->add_def(LirOperand::vreg(res));
+    fma_inst->add_use(LirOperand::vreg(vars[0]));
+    fma_inst->add_use(LirOperand::vreg(vars[1]));
+    fma_inst->add_use(LirOperand::vreg(vars[2]));
+    entry->append_inst(std::move(fma_inst));
+
+    for (size_t i = 3; i < vars.size(); ++i) {
+        auto dummy = std::make_unique<LirInst>(LirOpcode::Addsd);
+        dummy->add_def(LirOperand::vreg(res));
+        dummy->add_use(LirOperand::vreg(res));
+        dummy->add_use(LirOperand::vreg(vars[i]));
+        entry->append_inst(std::move(dummy));
+    }
+
+    auto ret_inst = std::make_unique<LirInst>(LirOpcode::Ret);
+    ret_inst->add_use(LirOperand::vreg(res));
+    entry->append_inst(std::move(ret_inst));
+
+    LivenessAnalysis liveness(fn);
+    liveness.run();
+
+    LinearScanAllocator regalloc(fn, liveness, fn.calling_conv);
+    regalloc.allocate();
+    CHECK(regalloc.num_spill_slots() > 0);
+
+    LirInst* rewritten_fma = nullptr;
+    for (const auto& inst : entry->instructions) {
+        if (inst->opcode == LirOpcode::Vfmadd213sd) {
+            rewritten_fma = inst.get();
+            break;
+        }
+    }
+    REQUIRE(rewritten_fma != nullptr);
+    REQUIRE_EQ(rewritten_fma->uses.size(), 3u);
+
+    std::vector<PReg> used_pregs;
+    for (const auto& use : rewritten_fma->uses) {
+        REQUIRE(use.is_preg());
+        used_pregs.push_back(use.preg_val);
+    }
+    CHECK(used_pregs[0] != used_pregs[1]);
+    CHECK(used_pregs[1] != used_pregs[2]);
+    CHECK(used_pregs[0] != used_pregs[2]);
+}

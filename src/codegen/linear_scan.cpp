@@ -17,7 +17,7 @@ void LinearScanAllocator::init_register_pools() {
     if (cc_.target().is_aarch64()) {
         using namespace brass::aarch64;
         available_gprs_.clear();
-        // Caller-saved: X0..X11 (excluding X12, X13 as use scratches, X14 as def_scratch, X15, X16, X17 as emitter scratches, and X18 on Darwin/Windows)
+        // Caller-saved: X0..X11 (excluding X12, X13, X15 as use scratches, X14 as def_scratch, X16, X17 as emitter scratches, and X18 on Darwin/Windows)
         for (int i = 0; i <= 11; ++i) {
             available_gprs_.push_back(PReg::aarch64_gpr(static_cast<GPR>(i)));
         }
@@ -31,11 +31,11 @@ void LinearScanAllocator::init_register_pools() {
         }
 
         available_xmms_.clear();
-        // Caller-saved: V0..V7, V16..V26 (excluding V27 as def_scratch, V28, V29 as use scratches, V30, V31 as emitter scratches)
+        // Caller-saved: V0..V7, V16..V25 (excluding V26, V28, V29 as use scratches, V27 as def_scratch, V30, V31 as emitter scratches)
         for (int i = 0; i <= 7; ++i) {
             available_xmms_.push_back(PReg::aarch64_fpr(static_cast<FPR>(i)));
         }
-        for (int i = 16; i <= 26; ++i) {
+        for (int i = 16; i <= 25; ++i) {
             available_xmms_.push_back(PReg::aarch64_fpr(static_cast<FPR>(i)));
         }
         // Callee-saved: V8..V15
@@ -45,11 +45,11 @@ void LinearScanAllocator::init_register_pools() {
     } else {
         using namespace brass::x64;
 
-        // Available GPRs (excluding RSP=4, RBP=5, and scratch registers R10=10, R11=11)
+        // Available GPRs (excluding RSP=4, RBP=5, scratch registers R10=10, R11=11, R15=15, and def_scratch R14=14)
         // Ordered with caller-saved first, then callee-saved
         std::vector<GPR> gprs = {
             GPR::RAX, GPR::RCX, GPR::RDX, GPR::R8, GPR::R9,
-            GPR::RBX, GPR::RSI, GPR::RDI, GPR::R12, GPR::R13, GPR::R14, GPR::R15
+            GPR::RBX, GPR::RSI, GPR::RDI, GPR::R12, GPR::R13
         };
 
         available_gprs_.clear();
@@ -58,9 +58,9 @@ void LinearScanAllocator::init_register_pools() {
             available_gprs_.push_back(PReg::gpr(g));
         }
 
-        // Available XMMs (excluding scratch XMM13, XMM14, and XMM15: XMM0..XMM12)
+        // Available XMMs (excluding scratch XMM12, XMM13, XMM14, and def_scratch XMM15: XMM0..XMM11)
         available_xmms_.clear();
-        for (int i = 0; i <= 12; ++i) {
+        for (int i = 0; i <= 11; ++i) {
             available_xmms_.push_back(PReg::xmm(static_cast<XMM>(i)));
         }
     }
@@ -252,6 +252,12 @@ void LinearScanAllocator::allocate() {
                 }
             }
         }
+    }
+
+    if (!cc_.target().is_aarch64() && next_spill_slot_ > 0) {
+        // If function spills on x64, scratch registers R14 and R15 may be used during rewrite.
+        // Ensure they are marked as saved callee-saved GPRs in the frame layout.
+        final_callee_gprs |= brass::x64::reg_mask(brass::x64::GPR::R14) | brass::x64::reg_mask(brass::x64::GPR::R15);
     }
 
     fn_.frame.num_spill_slots = next_spill_slot_;
