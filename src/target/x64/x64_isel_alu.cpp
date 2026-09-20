@@ -566,7 +566,7 @@ void X64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
             lower_return(inst, lir_bb);
             break;
         case Opcode::unreachable: {
-            auto lir_inst = std::make_unique<LirInst>(LirOpcode::Nop);
+            auto lir_inst = std::make_unique<LirInst>(LirOpcode::Trap);
             lir_inst->mir_origin = &inst;
             lir_bb.append_inst(std::move(lir_inst));
             break;

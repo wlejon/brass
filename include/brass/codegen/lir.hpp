@@ -385,7 +385,9 @@ enum class LirOpcode : uint16_t {
     ParallelCopy,
     Safepoint,
     WriteBarrier,
-    GuardExit
+    GuardExit,
+    Trap,
+    Ud2 = Trap
 };
 
 std::string_view to_string(LirOpcode op) noexcept;

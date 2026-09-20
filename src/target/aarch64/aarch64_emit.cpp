@@ -290,6 +290,9 @@ void AArch64EmitContext::emit_instruction(const LirInst& inst, bool is_entry_blo
         case LirOpcode::Nop:
             enc_.nop();
             break;
+        case LirOpcode::Trap:
+            enc_.brk(0);
+            break;
 
         case LirOpcode::Mov:
         case LirOpcode::Mov32:

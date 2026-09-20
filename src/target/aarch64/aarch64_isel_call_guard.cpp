@@ -394,7 +394,9 @@ void AArch64ISel::lower_guard(const Instruction& inst, LirBlock& lir_bb) {
 
     auto exit_inst = std::make_unique<LirInst>(LirOpcode::GuardExit);
     exit_inst->resume_id = inst.resume_id();
-    exit_inst->exit_symbol = std::string(inst.symbol());
+    if (inst.symbol() != "@exit_stub" && inst.symbol() != "exit_stub") {
+        exit_inst->exit_symbol = std::string(inst.symbol());
+    }
 
     for (const auto* val : inst.state_map()) {
         if (val) {

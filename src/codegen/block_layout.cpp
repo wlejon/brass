@@ -43,7 +43,7 @@ bool is_block_cold(const LirFunction& fn, const LirBlock& block, const BlockLayo
         if (inst->opcode == LirOpcode::Safepoint && inst->deopt_reason != 0) {
             return true;
         }
-        if (inst->opcode == LirOpcode::GuardExit) {
+        if (inst->opcode == LirOpcode::GuardExit || inst->opcode == LirOpcode::Trap) {
             return true;
         }
         if (!inst->exit_symbol.empty() || inst->callee_symbol == "brass_deopt_exit") {
@@ -78,7 +78,8 @@ BlockBranchTargets get_branch_targets(const LirBlock& block) {
                 break;
             }
             if (block.instructions[static_cast<size_t>(i)]->opcode == LirOpcode::Jmp ||
-                block.instructions[static_cast<size_t>(i)]->opcode == LirOpcode::Ret) {
+                block.instructions[static_cast<size_t>(i)]->opcode == LirOpcode::Ret ||
+                block.instructions[static_cast<size_t>(i)]->opcode == LirOpcode::Trap) {
                 break;
             }
         }
@@ -125,7 +126,8 @@ void optimize_block_layout(LirFunction& fn, const BlockLayoutOptions& opts) {
         auto& b = fn.blocks[i];
         if (!b || b->instructions.empty()) continue;
         const auto& last = *b->instructions.back();
-        if (last.opcode != LirOpcode::Jmp && last.opcode != LirOpcode::Ret && last.opcode != LirOpcode::GuardExit) {
+        if (last.opcode != LirOpcode::Jmp && last.opcode != LirOpcode::Ret &&
+            last.opcode != LirOpcode::GuardExit && last.opcode != LirOpcode::Trap) {
             if (i + 1 < fn.blocks.size() && fn.blocks[i + 1]) {
                 auto jmp = std::make_unique<LirInst>(LirOpcode::Jmp);
                 jmp->add_use(LirOperand::label(fn.blocks[i + 1]->id));

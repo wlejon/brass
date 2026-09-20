@@ -272,8 +272,14 @@ void DataMemoryBlock::reset() {
     }
 }
 
+static void* brass_exit_stub(uint32_t, const uint64_t*) {
+    return nullptr;
+}
+
 JitExecutionEngine::JitExecutionEngine(const Target& target)
     : target_(target) {
+    register_external_symbol("@exit_stub", reinterpret_cast<void*>(&brass_exit_stub));
+    register_external_symbol("exit_stub", reinterpret_cast<void*>(&brass_exit_stub));
     register_external_symbol("brass_gc_alloc", reinterpret_cast<void*>(&brass_gc_alloc));
     register_external_symbol("brass_gc_safepoint", reinterpret_cast<void*>(&brass_gc_safepoint));
     register_external_symbol("brass_gc_collect", reinterpret_cast<void*>(&brass_gc_collect));
@@ -312,6 +318,8 @@ JitExecutionEngine::JitExecutionEngine(const Target& target)
 
 JitExecutionEngine::JitExecutionEngine()
     : target_(Target::host()) {
+    register_external_symbol("@exit_stub", reinterpret_cast<void*>(&brass_exit_stub));
+    register_external_symbol("exit_stub", reinterpret_cast<void*>(&brass_exit_stub));
     register_external_symbol("brass_gc_alloc", reinterpret_cast<void*>(&brass_gc_alloc));
     register_external_symbol("brass_gc_safepoint", reinterpret_cast<void*>(&brass_gc_safepoint));
     register_external_symbol("brass_gc_collect", reinterpret_cast<void*>(&brass_gc_collect));

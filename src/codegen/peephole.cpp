@@ -21,7 +21,7 @@ bool PeepholeOptimizer::is_protected(const LirInst& inst) noexcept {
     if (inst.resume_id != 0) return true;
     if (inst.is_patchable) return true;
     if (inst.opcode == LirOpcode::Safepoint) return true;
-    if (inst.opcode == LirOpcode::GuardExit) return true;
+    if (inst.opcode == LirOpcode::GuardExit || inst.opcode == LirOpcode::Trap) return true;
     if (inst.opcode == LirOpcode::Call || inst.opcode == LirOpcode::CallIndirect) return true;
     if (!inst.live_gcrefs.empty()) return true;
     return false;

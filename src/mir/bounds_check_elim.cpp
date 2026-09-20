@@ -355,8 +355,21 @@ bool hoist_loop_bounds_checks(
                             }
                         }
 
-                        // Emit preheader guard
-                        b.build_guard(in_bounds, "@exit_stub");
+                        // Emit preheader guard with captured loop/preheader deopt state
+                        std::vector<Value*> deopt_state;
+                        if (ph_term) {
+                            for (size_t i = 0; i < ph_term->operand_count(); ++i) {
+                                if (ph_term->operand(i)) {
+                                    deopt_state.push_back(ph_term->operand(i));
+                                }
+                            }
+                        }
+                        if (deopt_state.empty() && fn.entry_block()) {
+                            for (Value* p : fn.entry_block()->params()) {
+                                if (p) deopt_state.push_back(p);
+                            }
+                        }
+                        b.build_guard(in_bounds, "@exit_stub", deopt_state);
 
                         // Eliminate per-iteration bounds check inside loop
                         b.position_before(cur);

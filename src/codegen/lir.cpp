@@ -233,6 +233,7 @@ std::string_view to_string(LirOpcode op) noexcept {
         case LirOpcode::Safepoint: return "safepoint";
         case LirOpcode::WriteBarrier: return "write_barrier";
         case LirOpcode::GuardExit: return "guard_exit";
+        case LirOpcode::Trap: return "trap";
     }
     return "unknown";
 }
@@ -475,7 +476,8 @@ std::string to_string(const LirOperand& op) {
 
 bool LirInst::is_terminator() const noexcept {
     return opcode == LirOpcode::Ret || opcode == LirOpcode::Jmp ||
-           opcode == LirOpcode::Jcc || opcode == LirOpcode::GuardExit;
+           opcode == LirOpcode::Jcc || opcode == LirOpcode::GuardExit ||
+           opcode == LirOpcode::Trap;
 }
 
 bool LirInst::is_branch() const noexcept {

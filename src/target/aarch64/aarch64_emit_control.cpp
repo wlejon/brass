@@ -443,7 +443,7 @@ void AArch64EmitContext::emit_control_instruction(const LirInst& inst) {
 
             enc_.bl("brass_deopt_exit");
 
-            if (!inst.exit_symbol.empty()) {
+            if (!inst.exit_symbol.empty() && inst.exit_symbol != "@exit_stub" && inst.exit_symbol != "exit_stub") {
                 if (total_alloc > 0) enc_.add(GPR::SP, GPR::SP, static_cast<uint32_t>(total_alloc));
                 enc_.bl("brass_get_thread_deopt_frame");
                 // X0 now holds DeoptFrame*

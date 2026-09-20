@@ -653,7 +653,7 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
 
             enc_.call("brass_deopt_exit");
 
-            if (!inst.exit_symbol.empty()) {
+            if (!inst.exit_symbol.empty() && inst.exit_symbol != "@exit_stub" && inst.exit_symbol != "exit_stub") {
                 if (total_alloc > 0) enc_.add(GPR::RSP, static_cast<int32_t>(total_alloc));
                 size_t shadow2 = (fn_.calling_conv.kind() == CallingConvKind::Win64 ? 32 : 0);
                 if (shadow2 > 0) enc_.sub(GPR::RSP, static_cast<int32_t>(shadow2));
@@ -695,6 +695,9 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
     switch (inst.opcode) {
         case LirOpcode::Nop:
             enc_.nop();
+            break;
+        case LirOpcode::Trap:
+            enc_.ud2();
             break;
         case LirOpcode::Mov:
         case LirOpcode::Mov32:

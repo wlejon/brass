@@ -267,6 +267,7 @@ uint32_t get_instruction_latency(const LirInst& inst) {
         case LirOpcode::Ret:
         case LirOpcode::Safepoint:
         case LirOpcode::GuardExit:
+        case LirOpcode::Trap:
         case LirOpcode::ParallelCopy:
         case LirOpcode::WriteBarrier:
             return 1;
