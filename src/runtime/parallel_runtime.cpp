@@ -9,6 +9,7 @@ namespace {
 
 thread_local uint32_t t_current_worker_id = 0;
 thread_local bool t_is_worker_thread = false;
+thread_local uint32_t t_nesting_depth = 0;
 
 int64_t get_initial_reduction_i64(ReductionKind kind) noexcept {
     switch (kind) {
@@ -50,6 +51,7 @@ ParallelRuntime::~ParallelRuntime() {
 }
 
 void ParallelRuntime::set_num_workers(uint32_t n) {
+    std::lock_guard<std::mutex> lock(dispatch_mutex_);
     if (n == 0) n = 1;
     if (n == num_workers_ && !worker_data_.empty()) return;
 
@@ -68,6 +70,7 @@ void ParallelRuntime::set_num_workers(uint32_t n) {
 }
 
 uint32_t ParallelRuntime::get_num_workers() const {
+    std::lock_guard<std::mutex> lock(dispatch_mutex_);
     return num_workers_;
 }
 
@@ -184,6 +187,53 @@ void ParallelRuntime::parallel_for(
 ) {
     if (trip_count == 0 || !kernel) return;
 
+    // Nested or worker-thread fallback
+    if (t_nesting_depth > 0 || t_is_worker_thread) {
+        if (is_reduction(reduction)) {
+            int64_t local_red_i64 = get_initial_reduction_i64(reduction);
+            double local_red_f64 = get_initial_reduction_f64(reduction);
+
+            uint32_t saved_worker_id = t_current_worker_id;
+            uint32_t cur_w = (saved_worker_id < worker_data_.size()) ? saved_worker_id : 0;
+            int64_t saved_i64 = worker_data_.empty() ? 0 : worker_data_[cur_w]->red_i64;
+            double saved_f64 = worker_data_.empty() ? 0.0 : worker_data_[cur_w]->red_f64;
+            ReductionKind saved_red = current_reduction_;
+
+            if (!worker_data_.empty()) {
+                worker_data_[cur_w]->red_i64 = local_red_i64;
+                worker_data_[cur_w]->red_f64 = local_red_f64;
+            }
+            current_reduction_ = reduction;
+
+            kernel(0, trip_count, context);
+
+            if (red_target != nullptr) {
+                if (is_fp_reduction(reduction)) {
+                    *reinterpret_cast<double*>(red_target) = worker_data_.empty() ? local_red_f64 : worker_data_[cur_w]->red_f64;
+                } else {
+                    *reinterpret_cast<int64_t*>(red_target) = worker_data_.empty() ? local_red_i64 : worker_data_[cur_w]->red_i64;
+                }
+            }
+
+            if (!worker_data_.empty()) {
+                worker_data_[cur_w]->red_i64 = saved_i64;
+                worker_data_[cur_w]->red_f64 = saved_f64;
+            }
+            current_reduction_ = saved_red;
+        } else {
+            kernel(0, trip_count, context);
+        }
+        return;
+    }
+
+    std::lock_guard<std::mutex> dispatch_lock(dispatch_mutex_);
+    t_nesting_depth++;
+    struct NestingGuard {
+        ~NestingGuard() {
+            t_nesting_depth--;
+        }
+    } nest_guard;
+
     // Single-worker or trivial workload fallback
     if (num_workers_ <= 1 || trip_count <= grain_size) {
         current_reduction_ = reduction;
@@ -197,13 +247,12 @@ void ParallelRuntime::parallel_for(
 
         if (is_reduction(reduction) && red_target != nullptr) {
             if (is_fp_reduction(reduction)) {
-                double* target = reinterpret_cast<double*>(red_target);
-                *target = combine_reduction_f64(reduction, *target, worker_data_[0]->red_f64);
+                *reinterpret_cast<double*>(red_target) = worker_data_[0]->red_f64;
             } else {
-                int64_t* target = reinterpret_cast<int64_t*>(red_target);
-                *target = combine_reduction_i64(reduction, *target, worker_data_[0]->red_i64);
+                *reinterpret_cast<int64_t*>(red_target) = worker_data_[0]->red_i64;
             }
         }
+        current_reduction_ = ReductionKind::None;
         return;
     }
 
@@ -253,14 +302,14 @@ void ParallelRuntime::parallel_for(
     if (is_reduction(reduction) && red_target != nullptr) {
         if (is_fp_reduction(reduction)) {
             double* target = reinterpret_cast<double*>(red_target);
-            double total = *target;
+            double total = get_initial_reduction_f64(reduction);
             for (uint32_t i = 0; i < num_workers_; ++i) {
                 total = combine_reduction_f64(reduction, total, worker_data_[i]->red_f64);
             }
             *target = total;
         } else {
             int64_t* target = reinterpret_cast<int64_t*>(red_target);
-            int64_t total = *target;
+            int64_t total = get_initial_reduction_i64(reduction);
             for (uint32_t i = 0; i < num_workers_; ++i) {
                 total = combine_reduction_i64(reduction, total, worker_data_[i]->red_i64);
             }
@@ -270,6 +319,7 @@ void ParallelRuntime::parallel_for(
 
     current_kernel_ = nullptr;
     current_context_ = nullptr;
+    current_reduction_ = ReductionKind::None;
 }
 
 void* ParallelRuntime::alloc_context(size_t bytes) {

@@ -159,6 +159,7 @@ extern "C" {
 
 bool brass_patch_const32(void* code_addr, int32_t new_val) {
     if (!code_addr) return false;
+    if (!brass::runtime::is_cache_line_safe(code_addr, sizeof(int32_t))) return false;
     ScopedCodeWrite write_guard(code_addr, sizeof(int32_t));
     if (!write_guard.is_writable()) return false;
     auto* target_ptr = reinterpret_cast<int32_t*>(code_addr);
@@ -170,6 +171,7 @@ bool brass_patch_const32(void* code_addr, int32_t new_val) {
 
 bool brass_patch_const64(void* code_addr, int64_t new_val) {
     if (!code_addr) return false;
+    if (!brass::runtime::is_cache_line_safe(code_addr, sizeof(int64_t))) return false;
     ScopedCodeWrite write_guard(code_addr, sizeof(int64_t));
     if (!write_guard.is_writable()) return false;
     auto* target_ptr = reinterpret_cast<int64_t*>(code_addr);
@@ -186,6 +188,7 @@ bool brass_patch_call(void* call_site_addr, const void* new_target) {
     if ((reinterpret_cast<uintptr_t>(call_site_addr) & 3) == 0) {
         uint32_t current_inst = *reinterpret_cast<uint32_t*>(call_site_addr);
         if ((current_inst & 0xFC000000u) == 0x94000000u || (current_inst & 0xFC000000u) == 0x14000000u) {
+            if (!brass::runtime::is_cache_line_safe(call_site_addr, sizeof(uint32_t))) return false;
             intptr_t site_int = reinterpret_cast<intptr_t>(call_site_addr);
             intptr_t target_int = reinterpret_cast<intptr_t>(new_target);
             int64_t disp = target_int - site_int;
@@ -207,12 +210,14 @@ bool brass_patch_call(void* call_site_addr, const void* new_target) {
 
     uint8_t* disp_ptr = inst;
     uint8_t* next_ip = inst + 5;
-    if (*inst == 0xE8) {
+    if (*inst == 0xE8 || *inst == 0xE9) {
         disp_ptr = inst + 1;
         next_ip = inst + 5;
     } else {
         next_ip = inst + 4;
     }
+
+    if (!brass::runtime::is_cache_line_safe(disp_ptr, sizeof(int32_t))) return false;
 
     intptr_t target_int = reinterpret_cast<intptr_t>(new_target);
     intptr_t next_ip_int = reinterpret_cast<intptr_t>(next_ip);

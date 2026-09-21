@@ -168,6 +168,8 @@ private:
     ReductionKind current_reduction_ = ReductionKind::None;
     std::atomic<uint32_t> active_tasks_{0};
     std::atomic<uint32_t> task_generation_{0};
+
+    mutable std::mutex dispatch_mutex_;
 };
 
 } // namespace brass::runtime

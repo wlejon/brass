@@ -303,6 +303,9 @@ public:
     constexpr bool is_i64x4() const noexcept { return kind_ == RuntimeValueKind::I64x4; }
     constexpr bool is_null() const noexcept { return raw_bits_ == 0; }
 
+    constexpr bool is_u32() const noexcept { return is_i32(); }
+    constexpr bool is_u64() const noexcept { return is_i64(); }
+
     int32_t as_i32() const noexcept {
         return static_cast<int32_t>(static_cast<uint32_t>(raw_bits_ & 0xFFFFFFFFULL));
     }
@@ -312,6 +315,9 @@ public:
     }
 
     int64_t as_i64() const noexcept {
+        if (is_i32()) {
+            return static_cast<int64_t>(as_i32());
+        }
         return static_cast<int64_t>(raw_bits_);
     }
 
@@ -320,10 +326,21 @@ public:
     }
 
     float as_f32() const noexcept {
+        if (is_f32()) {
+            float f = 0.0f;
+            std::memcpy(&f, &raw_bits_, sizeof(float));
+            return f;
+        }
         if (is_f64()) {
             double d = 0.0;
             std::memcpy(&d, &raw_bits_, sizeof(double));
             return static_cast<float>(d);
+        }
+        if (is_i32()) {
+            return static_cast<float>(as_i32());
+        }
+        if (is_i64()) {
+            return static_cast<float>(as_i64());
         }
         float f = 0.0f;
         std::memcpy(&f, &raw_bits_, sizeof(float));
@@ -331,10 +348,21 @@ public:
     }
 
     double as_f64() const noexcept {
+        if (is_f64()) {
+            double d = 0.0;
+            std::memcpy(&d, &raw_bits_, sizeof(double));
+            return d;
+        }
         if (is_f32()) {
             float f = 0.0f;
             std::memcpy(&f, &raw_bits_, sizeof(float));
             return static_cast<double>(f);
+        }
+        if (is_i32()) {
+            return static_cast<double>(as_i32());
+        }
+        if (is_i64()) {
+            return static_cast<double>(as_i64());
         }
         double d = 0.0;
         std::memcpy(&d, &raw_bits_, sizeof(double));

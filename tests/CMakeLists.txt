@@ -161,6 +161,7 @@ add_executable(brass_unit_tests
     unit/test_gpu_execution.cpp
     unit/test_gpu_kernels.cpp
     unit/test_gpu_kernels_quant.cpp
+    unit/test_phase1_concurrency.cpp
 )
 
 target_include_directories(brass_unit_tests

@@ -62,6 +62,43 @@ HostGC::~HostGC() {
     }
 }
 
+HostGC::HostGC(HostGC&& other) noexcept {
+    std::lock_guard<std::recursive_mutex> lock(other.gc_mutex_);
+    semispace_size_ = other.semispace_size_;
+    from_space_ = std::move(other.from_space_);
+    to_space_ = std::move(other.to_space_);
+    free_ptr_.store(other.free_ptr_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    stress_mode_ = other.stress_mode_;
+    collection_count_.store(other.collection_count_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    total_allocations_.store(other.total_allocations_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    total_allocated_bytes_.store(other.total_allocated_bytes_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    stack_maps_ = other.stack_maps_;
+    registered_val_roots_ = std::move(other.registered_val_roots_);
+    registered_ptr_roots_ = std::move(other.registered_ptr_roots_);
+    registered_tlabs_ = std::move(other.registered_tlabs_);
+    root_provider_ = std::move(other.root_provider_);
+}
+
+HostGC& HostGC::operator=(HostGC&& other) noexcept {
+    if (this != &other) {
+        std::scoped_lock lock(gc_mutex_, other.gc_mutex_);
+        semispace_size_ = other.semispace_size_;
+        from_space_ = std::move(other.from_space_);
+        to_space_ = std::move(other.to_space_);
+        free_ptr_.store(other.free_ptr_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        stress_mode_ = other.stress_mode_;
+        collection_count_.store(other.collection_count_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        total_allocations_.store(other.total_allocations_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        total_allocated_bytes_.store(other.total_allocated_bytes_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        stack_maps_ = other.stack_maps_;
+        registered_val_roots_ = std::move(other.registered_val_roots_);
+        registered_ptr_roots_ = std::move(other.registered_ptr_roots_);
+        registered_tlabs_ = std::move(other.registered_tlabs_);
+        root_provider_ = std::move(other.root_provider_);
+    }
+    return *this;
+}
+
 void HostGC::poison_space(uint8_t* space, size_t size) noexcept {
     if (!space || size == 0) return;
     auto* words = reinterpret_cast<uint64_t*>(space);
@@ -135,22 +172,26 @@ void HostGC::write_value_field(uintptr_t obj_addr, size_t field_idx, HostValue v
 
 void HostGC::register_root(HostValue* root_slot) {
     if (root_slot) {
+        std::lock_guard<std::recursive_mutex> lock(gc_mutex_);
         registered_val_roots_.push_back(root_slot);
     }
 }
 
 void HostGC::unregister_root(HostValue* root_slot) {
+    std::lock_guard<std::recursive_mutex> lock(gc_mutex_);
     auto it = std::remove(registered_val_roots_.begin(), registered_val_roots_.end(), root_slot);
     registered_val_roots_.erase(it, registered_val_roots_.end());
 }
 
 void HostGC::register_root(uintptr_t* root_slot) {
     if (root_slot) {
+        std::lock_guard<std::recursive_mutex> lock(gc_mutex_);
         registered_ptr_roots_.push_back(root_slot);
     }
 }
 
 void HostGC::unregister_root(uintptr_t* root_slot) {
+    std::lock_guard<std::recursive_mutex> lock(gc_mutex_);
     auto it = std::remove(registered_ptr_roots_.begin(), registered_ptr_roots_.end(), root_slot);
     registered_ptr_roots_.erase(it, registered_ptr_roots_.end());
 }
@@ -201,6 +242,7 @@ void HostGC::collect(
     uintptr_t top_rbp,
     uintptr_t top_return_ip
 ) {
+    std::lock_guard<std::recursive_mutex> lock(gc_mutex_);
     reset_active_tlabs();
     size_t to_free_ptr = 0;
 
@@ -256,12 +298,12 @@ void HostGC::collect(
         }
     }
 
-    // 4. Relocate provider roots
+    // 4. Custom root provider hook
     if (root_provider_) {
-        std::vector<uintptr_t*> prov_ptrs;
-        std::vector<HostValue*> prov_vals;
-        root_provider_(prov_ptrs, prov_vals);
-        for (auto* val_root : prov_vals) {
+        std::vector<uintptr_t*> provider_ptr_roots;
+        std::vector<HostValue*> provider_val_roots;
+        root_provider_(provider_ptr_roots, provider_val_roots);
+        for (auto* val_root : provider_val_roots) {
             if (val_root && val_root->is_gcref()) {
                 uintptr_t old_addr = val_root->as_gcref();
                 if (is_address_in_active_space(old_addr)) {
@@ -270,23 +312,23 @@ void HostGC::collect(
                 }
             }
         }
-        for (auto* ptr_root : prov_ptrs) {
+        for (auto* ptr_root : provider_ptr_roots) {
             if (ptr_root && *ptr_root && is_address_in_active_space(*ptr_root)) {
                 *ptr_root = evacuate_object(*ptr_root, to_free_ptr);
             }
         }
     }
 
-    // 5. Cheney scan queue: scan evacuated objects in To-Space
+    // 5. Cheney scanning of newly evacuated objects in To-Space
     size_t scan_ptr = 0;
     while (scan_ptr < to_free_ptr) {
         auto* hdr = reinterpret_cast<HostGcHeader*>(to_space_.data() + scan_ptr);
-        uintptr_t obj_payload = reinterpret_cast<uintptr_t>(hdr + 1);
-        size_t num_fields = hdr->size / 8;
+        size_t field_count = hdr->size / sizeof(uint64_t);
+        auto* fields = reinterpret_cast<uint64_t*>(hdr + 1);
 
-        for (size_t i = 0; i < num_fields; ++i) {
+        for (size_t i = 0; i < field_count; ++i) {
             if (hdr->is_field_pointer(i)) {
-                auto* field_ptr = reinterpret_cast<uint64_t*>(obj_payload + i * 8);
+                auto* field_ptr = &fields[i];
                 HostValue field_val(*field_ptr);
                 if (field_val.is_gcref()) {
                     uintptr_t child = field_val.as_gcref();
@@ -309,8 +351,8 @@ void HostGC::collect(
 
     // 6. Swap semispaces and poison old From-Space
     std::swap(from_space_, to_space_);
-    free_ptr_ = to_free_ptr;
-    collection_count_++;
+    free_ptr_.store(to_free_ptr, std::memory_order_release);
+    collection_count_.fetch_add(1, std::memory_order_relaxed);
     poison_space(to_space_.data(), semispace_size_);
 }
 
@@ -336,6 +378,7 @@ uintptr_t HostGC::allocate(
     std::vector<uintptr_t*>& extra_ptr_roots,
     std::vector<HostValue*>& extra_val_roots
 ) {
+    std::lock_guard<std::recursive_mutex> lock(gc_mutex_);
     reset_active_tlabs();
 
     size_t aligned_size = (size + 7) & ~static_cast<size_t>(7);
@@ -345,15 +388,20 @@ uintptr_t HostGC::allocate(
         throw std::runtime_error("HostGC: Object size exceeds semispace capacity");
     }
 
-    if (free_ptr_ + total_size > semispace_size_) {
-        collect(extra_ptr_roots, extra_val_roots, 0, 0);
+    size_t cur_free = free_ptr_.load(std::memory_order_relaxed);
+    if (cur_free + total_size > semispace_size_) {
+        uintptr_t caller_rbp = 0;
+        uintptr_t caller_ip = 0;
+        get_caller_frame(caller_rbp, caller_ip);
+        collect(extra_ptr_roots, extra_val_roots, caller_rbp, caller_ip);
 
-        if (free_ptr_ + total_size > semispace_size_) {
+        cur_free = free_ptr_.load(std::memory_order_relaxed);
+        if (cur_free + total_size > semispace_size_) {
             throw std::runtime_error("HostGC: Out of memory after collection");
         }
     }
 
-    uint8_t* obj_mem = from_space_.data() + free_ptr_;
+    uint8_t* obj_mem = from_space_.data() + cur_free;
     auto* hdr = reinterpret_cast<HostGcHeader*>(obj_mem);
     hdr->size = static_cast<uint32_t>(aligned_size);
     hdr->type_tag = type_tag;
@@ -363,9 +411,9 @@ uintptr_t HostGC::allocate(
     uintptr_t payload_addr = reinterpret_cast<uintptr_t>(hdr + 1);
     std::memset(reinterpret_cast<void*>(payload_addr), 0, aligned_size);
 
-    free_ptr_ += total_size;
-    total_allocations_++;
-    total_allocated_bytes_ += aligned_size;
+    free_ptr_.store(cur_free + total_size, std::memory_order_release);
+    total_allocations_.fetch_add(1, std::memory_order_relaxed);
+    total_allocated_bytes_.fetch_add(aligned_size, std::memory_order_relaxed);
 
     return payload_addr;
 }
@@ -376,11 +424,12 @@ HostValue HostGC::allocate_value(size_t size, uint64_t pointer_mask, uint32_t ty
 }
 
 void HostGC::reset() {
+    std::lock_guard<std::recursive_mutex> lock(gc_mutex_);
     reset_active_tlabs(true);
-    free_ptr_ = 0;
-    collection_count_ = 0;
-    total_allocations_ = 0;
-    total_allocated_bytes_ = 0;
+    free_ptr_.store(0, std::memory_order_relaxed);
+    collection_count_.store(0, std::memory_order_relaxed);
+    total_allocations_.store(0, std::memory_order_relaxed);
+    total_allocated_bytes_.store(0, std::memory_order_relaxed);
     registered_val_roots_.clear();
     registered_ptr_roots_.clear();
     poison_space(from_space_.data(), semispace_size_);
@@ -393,6 +442,7 @@ bool HostGC::allocate_tlab(size_t min_bytes, size_t preferred_size, uintptr_t& o
         out_end = 0;
         return false;
     }
+    std::lock_guard<std::recursive_mutex> lock(gc_mutex_);
     size_t aligned_min = (min_bytes + 7) & ~static_cast<size_t>(7);
     size_t chunk_size = std::max(aligned_min, preferred_size);
     chunk_size = (chunk_size + 7) & ~static_cast<size_t>(7);
@@ -406,44 +456,51 @@ bool HostGC::allocate_tlab(size_t min_bytes, size_t preferred_size, uintptr_t& o
         }
     }
 
-    if (free_ptr_ + chunk_size > semispace_size_) {
-        if (free_ptr_ + aligned_min <= semispace_size_) {
-            chunk_size = (semispace_size_ - free_ptr_) & ~static_cast<size_t>(7);
+    size_t cur_free = free_ptr_.load(std::memory_order_relaxed);
+    if (cur_free + chunk_size > semispace_size_) {
+        if (cur_free + aligned_min <= semispace_size_) {
+            chunk_size = (semispace_size_ - cur_free) & ~static_cast<size_t>(7);
         } else {
             std::vector<uintptr_t*> ptr_roots;
             std::vector<HostValue*> val_roots;
-            collect(ptr_roots, val_roots, 0, 0);
+            uintptr_t caller_rbp = 0;
+            uintptr_t caller_ip = 0;
+            get_caller_frame(caller_rbp, caller_ip);
+            collect(ptr_roots, val_roots, caller_rbp, caller_ip);
 
-            if (free_ptr_ + aligned_min > semispace_size_) {
+            cur_free = free_ptr_.load(std::memory_order_relaxed);
+            if (cur_free + aligned_min > semispace_size_) {
                 out_top = 0;
                 out_end = 0;
                 return false;
             }
-            if (free_ptr_ + chunk_size > semispace_size_) {
-                chunk_size = (semispace_size_ - free_ptr_) & ~static_cast<size_t>(7);
+            if (cur_free + chunk_size > semispace_size_) {
+                chunk_size = (semispace_size_ - cur_free) & ~static_cast<size_t>(7);
             }
         }
     }
 
-    uint8_t* mem = from_space_.data() + free_ptr_;
+    uint8_t* mem = from_space_.data() + cur_free;
     out_top = reinterpret_cast<uintptr_t>(mem);
     out_end = out_top + chunk_size;
-    free_ptr_ += chunk_size;
+    free_ptr_.store(cur_free + chunk_size, std::memory_order_release);
     return true;
 }
 
 void HostGC::retire_tlab(uintptr_t top, uintptr_t end) {
     if (end == 0 || top > end) return;
+    std::lock_guard<std::recursive_mutex> lock(gc_mutex_);
     uintptr_t space_start = reinterpret_cast<uintptr_t>(from_space_.data());
-    uintptr_t space_cur = space_start + free_ptr_;
+    uintptr_t space_cur = space_start + free_ptr_.load(std::memory_order_relaxed);
     if (end == space_cur) {
         size_t unused = end - top;
-        free_ptr_ -= unused;
+        free_ptr_.fetch_sub(unused, std::memory_order_relaxed);
     }
 }
 
 void HostGC::register_tlab(ThreadLocalAllocBuffer* tlab) {
     if (!tlab) return;
+    std::lock_guard<std::recursive_mutex> lock(gc_mutex_);
     for (auto* t : registered_tlabs_) {
         if (t == tlab) return;
     }
@@ -451,11 +508,13 @@ void HostGC::register_tlab(ThreadLocalAllocBuffer* tlab) {
 }
 
 void HostGC::unregister_tlab(ThreadLocalAllocBuffer* tlab) {
+    std::lock_guard<std::recursive_mutex> lock(gc_mutex_);
     auto it = std::remove(registered_tlabs_.begin(), registered_tlabs_.end(), tlab);
     registered_tlabs_.erase(it, registered_tlabs_.end());
 }
 
 void HostGC::reset_active_tlabs(bool clear_owner) {
+    std::lock_guard<std::recursive_mutex> lock(gc_mutex_);
     auto* active = get_active_tlab();
     if (active && active->owner_gc == this) {
         active->reset();

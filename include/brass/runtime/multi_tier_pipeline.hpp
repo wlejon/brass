@@ -13,18 +13,42 @@
 #include <string_view>
 #include <unordered_map>
 #include <mutex>
+#include <unordered_set>
+#include <atomic>
 #include <iosfwd>
 #include <cstdint>
 
 namespace brass::runtime {
 
 struct MultiTierStats {
-    uint64_t tier0_invocations = 0;
-    uint64_t tier1_compilations = 0;
-    uint64_t tier1_invocations = 0;
-    uint64_t tier2_compilations = 0;
-    uint64_t tier2_invocations = 0;
-    uint64_t total_tier1_compile_time_us = 0;
+    std::atomic<uint64_t> tier0_invocations{0};
+    std::atomic<uint64_t> tier1_compilations{0};
+    std::atomic<uint64_t> tier1_invocations{0};
+    std::atomic<uint64_t> tier2_compilations{0};
+    std::atomic<uint64_t> tier2_invocations{0};
+    std::atomic<uint64_t> total_tier1_compile_time_us{0};
+
+    MultiTierStats() = default;
+
+    MultiTierStats(const MultiTierStats& other) noexcept
+        : tier0_invocations(other.tier0_invocations.load(std::memory_order_relaxed)),
+          tier1_compilations(other.tier1_compilations.load(std::memory_order_relaxed)),
+          tier1_invocations(other.tier1_invocations.load(std::memory_order_relaxed)),
+          tier2_compilations(other.tier2_compilations.load(std::memory_order_relaxed)),
+          tier2_invocations(other.tier2_invocations.load(std::memory_order_relaxed)),
+          total_tier1_compile_time_us(other.total_tier1_compile_time_us.load(std::memory_order_relaxed)) {}
+
+    MultiTierStats& operator=(const MultiTierStats& other) noexcept {
+        if (this != &other) {
+            tier0_invocations.store(other.tier0_invocations.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            tier1_compilations.store(other.tier1_compilations.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            tier1_invocations.store(other.tier1_invocations.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            tier2_compilations.store(other.tier2_compilations.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            tier2_invocations.store(other.tier2_invocations.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            total_tier1_compile_time_us.store(other.total_tier1_compile_time_us.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        }
+        return *this;
+    }
 };
 
 class MultiTierPipeline {
@@ -90,6 +114,9 @@ private:
     mutable std::mutex mutex_;
     std::unordered_map<std::string, std::shared_ptr<codegen::BaselineCompiledFunction>> baseline_functions_;
     MultiTierStats stats_;
+
+    mutable std::mutex compiling_mutex_;
+    std::unordered_set<std::string> in_progress_compilations_;
 };
 
 } // namespace brass::runtime

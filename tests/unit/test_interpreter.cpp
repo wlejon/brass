@@ -69,7 +69,7 @@ TEST_CASE("Interpreter - Bitcasts & Float Conversions") {
     Interpreter interp;
     RuntimeValue res = interp.run(*fn, {RuntimeValue::from_i32(10)});
     // 10 * 0.5 = 5.0. Bitcast 5.0 to i64
-    double d = res.as_f64();
+    double d = val_bitcast_f64_i64(res).as_f64();
     CHECK_EQ(d, 5.0);
 }
 

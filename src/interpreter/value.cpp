@@ -15,20 +15,21 @@ RuntimeValue val_add(RuntimeValue lhs, RuntimeValue rhs) {
     if (lhs.is_f32() || rhs.is_f32()) {
         return RuntimeValue::from_f32(lhs.as_f32() + rhs.as_f32());
     }
-    if (lhs.is_i32()) {
+    if (lhs.is_ptr() || lhs.is_gcref()) {
+        uint64_t a = lhs.raw_bits();
+        int64_t b = rhs.is_i32() ? static_cast<int64_t>(rhs.as_i32()) : rhs.as_i64();
+        uint64_t res = a + static_cast<uint64_t>(b);
+        return lhs.is_ptr() ? RuntimeValue::from_ptr(static_cast<uintptr_t>(res))
+                            : RuntimeValue::from_gcref(static_cast<uintptr_t>(res));
+    }
+    if (lhs.is_i32() && rhs.is_i32()) {
         uint32_t a = lhs.as_u32();
         uint32_t b = rhs.as_u32();
         return RuntimeValue::from_u32(a + b);
     }
-    if (lhs.is_ptr() || lhs.is_gcref()) {
-        uint64_t a = lhs.raw_bits();
-        uint64_t b = rhs.raw_bits();
-        return lhs.is_ptr() ? RuntimeValue::from_ptr(static_cast<uintptr_t>(a + b))
-                            : RuntimeValue::from_gcref(static_cast<uintptr_t>(a + b));
-    }
-    uint64_t a = lhs.as_u64();
-    uint64_t b = rhs.as_u64();
-    return RuntimeValue::from_u64(a + b);
+    int64_t a = lhs.is_i32() ? static_cast<int64_t>(lhs.as_i32()) : lhs.as_i64();
+    int64_t b = rhs.is_i32() ? static_cast<int64_t>(rhs.as_i32()) : rhs.as_i64();
+    return RuntimeValue::from_i64(a + b);
 }
 
 RuntimeValue val_sub(RuntimeValue lhs, RuntimeValue rhs) {
@@ -38,20 +39,21 @@ RuntimeValue val_sub(RuntimeValue lhs, RuntimeValue rhs) {
     if (lhs.is_f32() || rhs.is_f32()) {
         return RuntimeValue::from_f32(lhs.as_f32() - rhs.as_f32());
     }
-    if (lhs.is_i32()) {
+    if (lhs.is_ptr() || lhs.is_gcref()) {
+        uint64_t a = lhs.raw_bits();
+        int64_t b = rhs.is_i32() ? static_cast<int64_t>(rhs.as_i32()) : rhs.as_i64();
+        uint64_t res = a - static_cast<uint64_t>(b);
+        return lhs.is_ptr() ? RuntimeValue::from_ptr(static_cast<uintptr_t>(res))
+                            : RuntimeValue::from_gcref(static_cast<uintptr_t>(res));
+    }
+    if (lhs.is_i32() && rhs.is_i32()) {
         uint32_t a = lhs.as_u32();
         uint32_t b = rhs.as_u32();
         return RuntimeValue::from_u32(a - b);
     }
-    if (lhs.is_ptr() || lhs.is_gcref()) {
-        uint64_t a = lhs.raw_bits();
-        uint64_t b = rhs.raw_bits();
-        return lhs.is_ptr() ? RuntimeValue::from_ptr(static_cast<uintptr_t>(a - b))
-                            : RuntimeValue::from_gcref(static_cast<uintptr_t>(a - b));
-    }
-    uint64_t a = lhs.as_u64();
-    uint64_t b = rhs.as_u64();
-    return RuntimeValue::from_u64(a - b);
+    int64_t a = lhs.is_i32() ? static_cast<int64_t>(lhs.as_i32()) : lhs.as_i64();
+    int64_t b = rhs.is_i32() ? static_cast<int64_t>(rhs.as_i32()) : rhs.as_i64();
+    return RuntimeValue::from_i64(a - b);
 }
 
 RuntimeValue val_mul(RuntimeValue lhs, RuntimeValue rhs) {
@@ -61,14 +63,14 @@ RuntimeValue val_mul(RuntimeValue lhs, RuntimeValue rhs) {
     if (lhs.is_f32() || rhs.is_f32()) {
         return RuntimeValue::from_f32(lhs.as_f32() * rhs.as_f32());
     }
-    if (lhs.is_i32()) {
+    if (lhs.is_i32() && rhs.is_i32()) {
         uint32_t a = lhs.as_u32();
         uint32_t b = rhs.as_u32();
         return RuntimeValue::from_u32(a * b);
     }
-    uint64_t a = lhs.as_u64();
-    uint64_t b = rhs.as_u64();
-    return RuntimeValue::from_u64(a * b);
+    int64_t a = lhs.is_i32() ? static_cast<int64_t>(lhs.as_i32()) : lhs.as_i64();
+    int64_t b = rhs.is_i32() ? static_cast<int64_t>(rhs.as_i32()) : rhs.as_i64();
+    return RuntimeValue::from_i64(a * b);
 }
 
 RuntimeValue val_sdiv(RuntimeValue lhs, RuntimeValue rhs) {
@@ -78,7 +80,7 @@ RuntimeValue val_sdiv(RuntimeValue lhs, RuntimeValue rhs) {
     if (lhs.is_f32() || rhs.is_f32()) {
         return RuntimeValue::from_f32(lhs.as_f32() / rhs.as_f32());
     }
-    if (lhs.is_i32()) {
+    if (lhs.is_i32() && rhs.is_i32()) {
         int32_t b = rhs.as_i32();
         if (b == 0) {
             throw std::runtime_error("Interpreter error: Division by zero (i32 sdiv)");
@@ -89,11 +91,11 @@ RuntimeValue val_sdiv(RuntimeValue lhs, RuntimeValue rhs) {
         }
         return RuntimeValue::from_i32(a / b);
     }
-    int64_t b = rhs.as_i64();
+    int64_t b = rhs.is_i32() ? static_cast<int64_t>(rhs.as_i32()) : rhs.as_i64();
     if (b == 0) {
         throw std::runtime_error("Interpreter error: Division by zero (i64 sdiv)");
     }
-    int64_t a = lhs.as_i64();
+    int64_t a = lhs.is_i32() ? static_cast<int64_t>(lhs.as_i32()) : lhs.as_i64();
     if (a == std::numeric_limits<int64_t>::min() && b == -1) {
         return RuntimeValue::from_i64(std::numeric_limits<int64_t>::min());
     }
@@ -101,7 +103,7 @@ RuntimeValue val_sdiv(RuntimeValue lhs, RuntimeValue rhs) {
 }
 
 RuntimeValue val_udiv(RuntimeValue lhs, RuntimeValue rhs) {
-    if (lhs.is_i32()) {
+    if (lhs.is_i32() && rhs.is_i32()) {
         uint32_t b = rhs.as_u32();
         if (b == 0) {
             throw std::runtime_error("Interpreter error: Division by zero (i32 udiv)");
@@ -119,7 +121,10 @@ RuntimeValue val_smod(RuntimeValue lhs, RuntimeValue rhs) {
     if (lhs.is_f64() || rhs.is_f64()) {
         return RuntimeValue::from_f64(std::fmod(lhs.as_f64(), rhs.as_f64()));
     }
-    if (lhs.is_i32()) {
+    if (lhs.is_f32() || rhs.is_f32()) {
+        return RuntimeValue::from_f32(std::fmod(lhs.as_f32(), rhs.as_f32()));
+    }
+    if (lhs.is_i32() && rhs.is_i32()) {
         int32_t b = rhs.as_i32();
         if (b == 0) {
             throw std::runtime_error("Interpreter error: Modulo by zero (i32 smod)");
@@ -130,11 +135,11 @@ RuntimeValue val_smod(RuntimeValue lhs, RuntimeValue rhs) {
         }
         return RuntimeValue::from_i32(a % b);
     }
-    int64_t b = rhs.as_i64();
+    int64_t b = rhs.is_i32() ? static_cast<int64_t>(rhs.as_i32()) : rhs.as_i64();
     if (b == 0) {
         throw std::runtime_error("Interpreter error: Modulo by zero (i64 smod)");
     }
-    int64_t a = lhs.as_i64();
+    int64_t a = lhs.is_i32() ? static_cast<int64_t>(lhs.as_i32()) : lhs.as_i64();
     if (a == std::numeric_limits<int64_t>::min() && b == -1) {
         return RuntimeValue::from_i64(0);
     }

@@ -9,6 +9,8 @@
 #include <functional>
 #include <memory>
 #include <stdexcept>
+#include <atomic>
+#include <mutex>
 
 namespace brass {
 
@@ -43,8 +45,8 @@ public:
 
     HostGC(const HostGC&) = delete;
     HostGC& operator=(const HostGC&) = delete;
-    HostGC(HostGC&&) noexcept = default;
-    HostGC& operator=(HostGC&&) noexcept = default;
+    HostGC(HostGC&&) noexcept;
+    HostGC& operator=(HostGC&&) noexcept;
 
     // Active stack maps registration
     void set_stack_maps(const ModuleStackMap* maps) noexcept { stack_maps_ = maps; }
@@ -85,7 +87,7 @@ public:
     // Fast allocation check
     bool can_allocate_fast(size_t size) const noexcept {
         size_t aligned_size = (size + 7) & ~static_cast<size_t>(7);
-        return !stress_mode_ && (free_ptr_ + sizeof(HostGcHeader) + aligned_size <= semispace_size_);
+        return !stress_mode_ && (free_ptr_.load(std::memory_order_relaxed) + sizeof(HostGcHeader) + aligned_size <= semispace_size_);
     }
 
     // Object Validation
@@ -104,10 +106,10 @@ public:
 
     // Statistics
     size_t semispace_size() const noexcept { return semispace_size_; }
-    size_t bytes_allocated_active() const noexcept { return free_ptr_; }
-    size_t total_allocated_bytes() const noexcept { return total_allocated_bytes_; }
-    size_t total_allocations() const noexcept { return total_allocations_; }
-    size_t collection_count() const noexcept { return collection_count_; }
+    size_t bytes_allocated_active() const noexcept { return free_ptr_.load(std::memory_order_relaxed); }
+    size_t total_allocated_bytes() const noexcept { return total_allocated_bytes_.load(std::memory_order_relaxed); }
+    size_t total_allocations() const noexcept { return total_allocations_.load(std::memory_order_relaxed); }
+    size_t collection_count() const noexcept { return collection_count_.load(std::memory_order_relaxed); }
 
     // TLAB Integration
     bool allocate_tlab(size_t min_bytes, size_t preferred_size, uintptr_t& out_top, uintptr_t& out_end);
@@ -126,18 +128,20 @@ private:
     size_t semispace_size_;
     std::vector<uint8_t> from_space_;
     std::vector<uint8_t> to_space_;
-    size_t free_ptr_ = 0;
+    std::atomic<size_t> free_ptr_{0};
 
     bool stress_mode_ = false;
-    size_t collection_count_ = 0;
-    size_t total_allocations_ = 0;
-    size_t total_allocated_bytes_ = 0;
+    std::atomic<size_t> collection_count_{0};
+    std::atomic<size_t> total_allocations_{0};
+    std::atomic<size_t> total_allocated_bytes_{0};
 
     const ModuleStackMap* stack_maps_ = nullptr;
     std::vector<HostValue*> registered_val_roots_;
     std::vector<uintptr_t*> registered_ptr_roots_;
     std::vector<ThreadLocalAllocBuffer*> registered_tlabs_;
     RootProvider root_provider_;
+
+    mutable std::recursive_mutex gc_mutex_;
 };
 
 // Global active HostGC for native JIT bridge callbacks
