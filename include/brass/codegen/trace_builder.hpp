@@ -169,6 +169,85 @@ public:
         return mul(half_x, one_plus_tanh);
     }
 
+    // exp(y) for an 8-wide vector, by the same 5th-order / p^16 scheme the
+    // activations above use: exp(y) = (P5(y/16))^16, with P5 the truncated
+    // Taylor series. Branchless and FMA-only.
+    Value* vexp_f32x8(Value* y) {
+        Value* c_inv16 = vbroadcast(Type::f32x8(), builder().build_fconst_f32(0.0625f));
+        Value* c_10    = vbroadcast(Type::f32x8(), builder().build_fconst_f32(1.0f));
+        Value* c_1_120 = vbroadcast(Type::f32x8(), builder().build_fconst_f32(1.0f / 120.0f));
+        Value* c_1_24  = vbroadcast(Type::f32x8(), builder().build_fconst_f32(1.0f / 24.0f));
+        Value* c_1_6   = vbroadcast(Type::f32x8(), builder().build_fconst_f32(1.0f / 6.0f));
+        Value* c_1_2   = vbroadcast(Type::f32x8(), builder().build_fconst_f32(0.5f));
+
+        Value* u  = vmul(y, c_inv16);
+        Value* p5 = vfma(u, c_1_120, c_1_24);
+        Value* p4 = vfma(u, p5, c_1_6);
+        Value* p3 = vfma(u, p4, c_1_2);
+        Value* p2 = vfma(u, p3, c_10);
+        Value* p1 = vfma(u, p2, c_10);
+
+        Value* sq1 = vmul(p1, p1);
+        Value* sq2 = vmul(sq1, sq1);
+        Value* sq3 = vmul(sq2, sq2);
+        return vmul(sq3, sq3);
+    }
+
+    // Scalar exp(y) — same scheme as vexp_f32x8.
+    Value* exp_f32(Value* y) {
+        Value* c_inv16 = builder().build_fconst_f32(0.0625f);
+        Value* c_10    = builder().build_fconst_f32(1.0f);
+        Value* c_1_120 = builder().build_fconst_f32(1.0f / 120.0f);
+        Value* c_1_24  = builder().build_fconst_f32(1.0f / 24.0f);
+        Value* c_1_6   = builder().build_fconst_f32(1.0f / 6.0f);
+        Value* c_1_2   = builder().build_fconst_f32(0.5f);
+
+        Value* u  = mul(y, c_inv16);
+        Value* p5 = builder().build_fma_f32(u, c_1_120, c_1_24);
+        Value* p4 = builder().build_fma_f32(u, p5, c_1_6);
+        Value* p3 = builder().build_fma_f32(u, p4, c_1_2);
+        Value* p2 = builder().build_fma_f32(u, p3, c_10);
+        Value* p1 = builder().build_fma_f32(u, p2, c_10);
+
+        Value* sq1 = mul(p1, p1);
+        Value* sq2 = mul(sq1, sq1);
+        Value* sq3 = mul(sq2, sq2);
+        return mul(sq3, sq3);
+    }
+
+    // sigmoid(x) = 1 / (1 + exp(-x))
+    Value* vsigmoid_f32x8(Value* x) {
+        Value* c_10   = vbroadcast(Type::f32x8(), builder().build_fconst_f32(1.0f));
+        Value* c_neg1 = vbroadcast(Type::f32x8(), builder().build_fconst_f32(-1.0f));
+        Value* e = vexp_f32x8(vmul(x, c_neg1));
+        return vdiv(c_10, vadd(c_10, e));
+    }
+
+    Value* sigmoid_f32(Value* x) {
+        Value* c_10   = builder().build_fconst_f32(1.0f);
+        Value* c_neg1 = builder().build_fconst_f32(-1.0f);
+        Value* e = exp_f32(mul(x, c_neg1));
+        return div(c_10, add(c_10, e));
+    }
+
+    // tanh(x) = 2 / (1 + exp(-2x)) - 1 — the same identity vgelu_f32x8 uses
+    // inline, exposed as an op of its own.
+    Value* vtanh_f32x8(Value* x) {
+        Value* c_10   = vbroadcast(Type::f32x8(), builder().build_fconst_f32(1.0f));
+        Value* c_20   = vbroadcast(Type::f32x8(), builder().build_fconst_f32(2.0f));
+        Value* c_neg2 = vbroadcast(Type::f32x8(), builder().build_fconst_f32(-2.0f));
+        Value* e = vexp_f32x8(vmul(x, c_neg2));
+        return vsub(vdiv(c_20, vadd(c_10, e)), c_10);
+    }
+
+    Value* tanh_f32(Value* x) {
+        Value* c_10   = builder().build_fconst_f32(1.0f);
+        Value* c_20   = builder().build_fconst_f32(2.0f);
+        Value* c_neg2 = builder().build_fconst_f32(-2.0f);
+        Value* e = exp_f32(mul(x, c_neg2));
+        return sub(div(c_20, add(c_10, e)), c_10);
+    }
+
     // Horizontal sum of an 8-wide float vector using destination scratch buffer
     Value* reduce_vsum8(Value* scratch, Value* vsum) {
         vstore_f32x8(scratch, vsum);
