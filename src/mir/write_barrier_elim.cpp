@@ -8,6 +8,10 @@ bool WriteBarrierElimination::is_non_pointer_value(const Value* val) const noexc
     if (!val) return true;
 
     Type t = val->type();
+    if (t.is_gcref() || t.is_pointer()) {
+        return false;
+    }
+
     if (t.is_float() || t.is_vector() || t.is_void()) {
         return true;
     }

@@ -1,5 +1,6 @@
 #include "loop_dependence.hpp"
 #include <brass/mir/opcodes.hpp>
+#include <brass/mir/alias_analysis.hpp>
 #include <algorithm>
 
 namespace brass {
@@ -197,9 +198,9 @@ void analyze_nest_memory_accesses(Function& fn, LoopNest& nest) {
 }
 
 void compute_nest_dependences(Function& fn, LoopNest& nest) {
-    (void)fn;
     nest.dependences().clear();
     const auto& accesses = nest.memory_accesses();
+    AliasAnalysis aa(fn);
 
     for (size_t i = 0; i < accesses.size(); ++i) {
         for (size_t j = i + 1; j < accesses.size(); ++j) {
@@ -209,8 +210,19 @@ void compute_nest_dependences(Function& fn, LoopNest& nest) {
             // Only analyze read-write, write-read, write-write
             if (!a1.is_store && !a2.is_store) continue;
 
-            // If base pointers are distinct and invariant/function args, assume no alias
-            if (a1.base != a2.base) continue;
+            // If base pointers are distinct, check alias analysis
+            if (a1.base != a2.base) {
+                if (a1.base && a2.base && aa.alias(a1.base, a2.base) == AliasResult::NoAlias) {
+                    continue;
+                }
+                DependenceVector dep;
+                dep.directions.assign(nest.depth(), DependenceDirection::Any);
+                dep.distances.assign(nest.depth(), 0);
+                dep.has_distance = false;
+                dep.is_loop_independent = false;
+                nest.dependences().push_back(dep);
+                continue;
+            }
 
             DependenceVector dep;
             dep.directions.assign(nest.depth(), DependenceDirection::Equal);

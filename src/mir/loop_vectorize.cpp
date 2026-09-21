@@ -86,8 +86,12 @@ bool vectorize_loop(
         }
     }
 
+    for (size_t i = 0; i < vec_hdr->param_count(); ++i) {
+        b.add_block_param(vec_exit, vec_hdr->param(i)->type());
+    }
+
     // =========================================================================
-    // 3. Populate Preheader Branch to vec_hdr
+    // 3. Populate Preheader Branch to vec_hdr with Trip Count Guard
     // =========================================================================
     Instruction* ph_term = preheader->terminator();
     b.position_before(ph_term);
@@ -112,14 +116,51 @@ bool vectorize_loop(
         }
     }
 
+    // Trip count guard: (limit - init) >= W
+    Value* tc = b.build_sub(vli.limit_val, vli.init_iv);
+    if (vli.cmp_opcode == Opcode::sle || vli.cmp_opcode == Opcode::ule) {
+        Value* one = build_const_step(b, vli.iv_type, 1);
+        tc = b.build_add(tc, one);
+    }
+    Value* w_val = build_const_step(b, vli.iv_type, static_cast<int64_t>(W));
+    Value* tc_guard = nullptr;
+    if (vli.cmp_opcode == Opcode::ult || vli.cmp_opcode == Opcode::ule) {
+        Value* valid = (vli.cmp_opcode == Opcode::ule)
+            ? b.build_ule(vli.init_iv, vli.limit_val)
+            : b.build_ult(vli.init_iv, vli.limit_val);
+        Value* ge_w = b.build_uge(tc, w_val);
+        tc_guard = b.build_and(valid, ge_w);
+    } else {
+        Value* valid = (vli.cmp_opcode == Opcode::sle)
+            ? b.build_sle(vli.init_iv, vli.limit_val)
+            : b.build_slt(vli.init_iv, vli.limit_val);
+        Value* ge_w = b.build_sge(tc, w_val);
+        tc_guard = b.build_and(valid, ge_w);
+    }
+
     if (ph_term->opcode() == Opcode::br) {
-        ph_term->set_branch_target(BranchTarget(vec_hdr, vec_ph_args));
+        ph_term->parent()->remove_instruction(ph_term);
+        b.position_at_end(preheader);
+        b.build_br_if(tc_guard, vec_hdr, vec_ph_args, vec_exit, vec_ph_args);
     } else if (ph_term->opcode() == Opcode::br_if) {
+        BasicBlock* vec_guard = b.create_block(base_name + "_vec_guard");
+        auto& fn_blks = fn.blocks();
+        auto it_vh = std::find(fn_blks.begin(), fn_blks.end(), vec_hdr);
+        fn_blks.insert(it_vh, vec_guard);
+        vec_guard->set_parent(&fn);
+
         if (ph_term->true_target().block == header) {
-            ph_term->set_true_target(BranchTarget(vec_hdr, vec_ph_args));
+            ph_term->set_true_target(BranchTarget(vec_guard, vec_ph_args));
         } else {
-            ph_term->set_false_target(BranchTarget(vec_hdr, vec_ph_args));
+            ph_term->set_false_target(BranchTarget(vec_guard, vec_ph_args));
         }
+
+        b.position_at_end(vec_guard);
+        std::vector<Value*> guard_params;
+        for (Value* a : vec_ph_args) {
+            guard_params.push_back(b.add_block_param(vec_guard, a->type()));
+        }
+        b.build_br_if(tc_guard, vec_hdr, guard_params, vec_exit, guard_params);
     }
 
     // =========================================================================
@@ -304,10 +345,6 @@ bool vectorize_loop(
     // 6. Vector Exit Block (Horizontal Reduction & Branch to Remainder)
     // =========================================================================
     b.position_at_end(vec_exit);
-
-    for (size_t i = 0; i < vec_hdr->param_count(); ++i) {
-        b.add_block_param(vec_exit, vec_hdr->param(i)->type());
-    }
 
     Value* exit_iv = vec_exit->param(vli.primary_iv_index);
     Value* final_scalar_acc = nullptr;

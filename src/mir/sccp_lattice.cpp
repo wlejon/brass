@@ -337,14 +337,34 @@ LatticeValue evaluate_conversion(Opcode op, Type res_type, const LatticeValue& v
         }
         case Opcode::trunc_i32:
             return LatticeValue::make_i32(static_cast<int32_t>(val.as_i64()));
-        case Opcode::fptosi_i32:
-            return LatticeValue::make_i32(static_cast<int32_t>(val.as_f64()));
-        case Opcode::fptosi_i32_f32:
-            return LatticeValue::make_i32(static_cast<int32_t>(val.as_f32()));
-        case Opcode::fptosi_i64:
-            return LatticeValue::make_i64(static_cast<int64_t>(val.as_f64()));
-        case Opcode::fptosi_i64_f32:
-            return LatticeValue::make_i64(static_cast<int64_t>(val.as_f32()));
+        case Opcode::fptosi_i32: {
+            double d = val.as_f64();
+            if (std::isnan(d) || d < static_cast<double>(INT32_MIN) || d > static_cast<double>(INT32_MAX)) {
+                return LatticeValue::make_bottom(res_type);
+            }
+            return LatticeValue::make_i32(static_cast<int32_t>(d));
+        }
+        case Opcode::fptosi_i32_f32: {
+            float f = val.as_f32();
+            if (std::isnan(f) || f < static_cast<float>(INT32_MIN) || f >= 2147483648.0f) {
+                return LatticeValue::make_bottom(res_type);
+            }
+            return LatticeValue::make_i32(static_cast<int32_t>(f));
+        }
+        case Opcode::fptosi_i64: {
+            double d = val.as_f64();
+            if (std::isnan(d) || d < -9223372036854775808.0 || d >= 9223372036854775808.0) {
+                return LatticeValue::make_bottom(res_type);
+            }
+            return LatticeValue::make_i64(static_cast<int64_t>(d));
+        }
+        case Opcode::fptosi_i64_f32: {
+            float f = val.as_f32();
+            if (std::isnan(f) || f < -9223372036854775808.0f || f >= 9223372036854775808.0f) {
+                return LatticeValue::make_bottom(res_type);
+            }
+            return LatticeValue::make_i64(static_cast<int64_t>(f));
+        }
         case Opcode::sitofp_f64_i32:
             return LatticeValue::make_f64(static_cast<double>(val.as_i32()));
         case Opcode::sitofp_f32_i32:

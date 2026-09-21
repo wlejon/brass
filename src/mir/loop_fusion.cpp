@@ -1,4 +1,5 @@
 #include <brass/mir/loop_fusion.hpp>
+#include <brass/mir/alias_analysis.hpp>
 #include <brass/mir/opcodes.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/verifier.hpp>
@@ -392,6 +393,12 @@ static bool check_dependencies(const FusibleLoopInfo& l1, const FusibleLoopInfo&
     collect_memory_accesses(l1, acc1);
     collect_memory_accesses(l2, acc2);
 
+    Function* fn = (l1.loop && l1.loop->header()) ? l1.loop->header()->parent() : nullptr;
+    std::unique_ptr<AliasAnalysis> aa;
+    if (fn) {
+        aa = std::make_unique<AliasAnalysis>(*fn);
+    }
+
     for (const auto& a1 : acc1) {
         for (const auto& a2 : acc2) {
             if (a1.base == a2.base) {
@@ -403,6 +410,14 @@ static bool check_dependencies(const FusibleLoopInfo& l1, const FusibleLoopInfo&
                 // Both are indexed by their respective primary IV: distance is 0.
                 // In fused loop: loop 1 executes before loop 2 in iteration i.
                 // A store in loop 1 followed by load in loop 2 is a valid forward dep.
+            } else if (a1.is_store || a2.is_store) {
+                if (aa && a1.base && a2.base) {
+                    if (aa->alias(a1.base, a2.base) != AliasResult::NoAlias) {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
             }
         }
     }

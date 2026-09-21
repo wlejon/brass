@@ -156,7 +156,7 @@ bool inline_function(Function& fn, Module& mod, const InlinerOptions& options, c
         for (BasicBlock* bb : fn.blocks()) {
             if (!bb) continue;
             for (Instruction* inst : *bb) {
-                if (!inst || inst->opcode() != Opcode::call) continue;
+                if (!inst || (inst->opcode() != Opcode::call && inst->opcode() != Opcode::invoke)) continue;
 
                 Function* callee = mod.get_function(inst->symbol());
                 if (!callee || callee == &fn) continue;

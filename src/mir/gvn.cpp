@@ -312,7 +312,8 @@ bool gvn_function(Function& fn, const GvnOptions& options) {
                     int64_t dummy = 0;
                     const Value* underlying_base = aa.get_underlying_base(base, dummy);
                     uint32_t mem_id = def_acc ? def_acc->id() : 0;
-                    AvailableLoadKey load_key{ underlying_base ? underlying_base : base, off, mtype, mem_id };
+                    int32_t total_off = off + static_cast<int32_t>(dummy);
+                    AvailableLoadKey load_key{ underlying_base ? underlying_base : base, total_off, mtype, mem_id };
 
                     Value* dominating_load_val = table.lookup_load(load_key);
                     if (dominating_load_val && dominating_load_val != res_val) {

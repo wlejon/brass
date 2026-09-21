@@ -129,7 +129,15 @@ const Value* AliasAnalysis::get_underlying_base(const Value* ptr, int64_t& out_o
 
 bool AliasAnalysis::is_distinct_allocation(const Value* base1, const Value* base2) const {
     if (!base1 || !base2 || base1 == base2) return false;
-    return is_allocation(base1) && is_allocation(base2);
+    if (is_allocation(base1) && is_allocation(base2)) return true;
+    if (fn_ && fn_->entry_block()) {
+        const BasicBlock* entry = fn_->entry_block();
+        if (base1->is_block_param() && base2->is_block_param() &&
+            base1->defining_block() == entry && base2->defining_block() == entry) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool AliasAnalysis::is_non_escaping(const Value* base) const {
@@ -137,6 +145,10 @@ bool AliasAnalysis::is_non_escaping(const Value* base) const {
     const EscapeAnalysis* ea = escape_analysis();
     if (!ea) return false;
     return ea->get_escape_state(base) == EscapeState::NoEscape;
+}
+
+AliasResult AliasAnalysis::alias(const Value* ptr1, const Value* ptr2) const {
+    return alias(ptr1, 0, Type::void_type(), ptr2, 0, Type::void_type());
 }
 
 AliasResult AliasAnalysis::alias(const Value* ptr1, int32_t off1, const Value* ptr2, int32_t off2) const {
@@ -198,6 +210,42 @@ AliasResult AliasAnalysis::alias(
         }
 
         if (is_non_escaping(base1) || is_non_escaping(base2)) {
+            return AliasResult::NoAlias;
+        }
+    }
+
+    // 4. Check origin base allocations through arbitrary pointer arithmetic
+    auto get_origin_alloc = [](const Value* ptr) -> const Value* {
+        const Value* cur = ptr;
+        while (cur && cur->is_instruction()) {
+            const Instruction* inst = cur->defining_instruction();
+            if (!inst) break;
+            if (inst->opcode() == Opcode::add) {
+                if (inst->operand(0) && (inst->operand(0)->type().is_pointer() || inst->operand(0)->type().is_gcref())) {
+                    cur = inst->operand(0);
+                    continue;
+                } else if (inst->operand(1) && (inst->operand(1)->type().is_pointer() || inst->operand(1)->type().is_gcref())) {
+                    cur = inst->operand(1);
+                    continue;
+                }
+            } else if (inst->opcode() == Opcode::sub) {
+                if (inst->operand(0) && (inst->operand(0)->type().is_pointer() || inst->operand(0)->type().is_gcref())) {
+                    cur = inst->operand(0);
+                    continue;
+                }
+            }
+            break;
+        }
+        return cur;
+    };
+
+    const Value* orig1 = get_origin_alloc(ptr1);
+    const Value* orig2 = get_origin_alloc(ptr2);
+    if (orig1 && orig2 && orig1 != orig2) {
+        if (is_distinct_allocation(orig1, orig2)) {
+            return AliasResult::NoAlias;
+        }
+        if (is_non_escaping(orig1) || is_non_escaping(orig2)) {
             return AliasResult::NoAlias;
         }
     }

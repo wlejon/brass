@@ -33,6 +33,7 @@ public:
     AliasAnalysis& operator=(AliasAnalysis&&) noexcept;
 
     // Disambiguation Query API
+    AliasResult alias(const Value* ptr1, const Value* ptr2) const;
     AliasResult alias(const Value* ptr1, int32_t off1, const Value* ptr2, int32_t off2) const;
     AliasResult alias(const Value* ptr1, int32_t off1, Type type1,
                       const Value* ptr2, int32_t off2, Type type2) const;

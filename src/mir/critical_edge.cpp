@@ -9,6 +9,12 @@ namespace brass {
 bool is_critical_edge(const BasicBlock* src, const BasicBlock* dst) {
     if (!src || !dst) return false;
 
+    // Do not split critical edges to exception landing pads with plain branch
+    // instructions that violate the exception verifier (which requires landing_pad as first instruction).
+    if (dst->head() && dst->head()->opcode() == Opcode::landing_pad) {
+        return false;
+    }
+
     // Count unique successors of src
     auto succs = src->successors();
     std::vector<const BasicBlock*> unique_succs;

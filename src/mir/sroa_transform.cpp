@@ -211,6 +211,21 @@ bool SroaTransformer::process_candidate(const Value* alloc_val, const EscapeAnal
         return false;
     }
 
+    // Reject promotion if any field byte ranges overlap
+    for (auto it1 = fields.begin(); it1 != fields.end(); ++it1) {
+        int32_t start1 = it1->first;
+        int32_t sz1 = static_cast<int32_t>(std::max<uint32_t>(1, it1->second.size_in_bytes()));
+        int32_t end1 = start1 + sz1;
+        for (auto it2 = std::next(it1); it2 != fields.end(); ++it2) {
+            int32_t start2 = it2->first;
+            int32_t sz2 = static_cast<int32_t>(std::max<uint32_t>(1, it2->second.size_in_bytes()));
+            int32_t end2 = start2 + sz2;
+            if (std::max(start1, start2) < std::min(end1, end2)) {
+                return false; // Overlapping field ranges
+            }
+        }
+    }
+
     // 3. If there are no live loads, all stores and the allocation are dead!
     if (live_offsets.empty()) {
         for (Instruction* st : candidate_stores) {

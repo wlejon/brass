@@ -128,10 +128,13 @@ bool parse_subscript_expression(
     SubscriptExpr& out_expr
 );
 
+class AliasAnalysis;
+
 // Dependence analysis between two memory accesses
 ParallelDependence check_subscript_dependence(
     const ParallelMemAccess& a1,
-    const ParallelMemAccess& a2
+    const ParallelMemAccess& a2,
+    const AliasAnalysis* aa = nullptr
 );
 
 // Analyze loop for parallelism

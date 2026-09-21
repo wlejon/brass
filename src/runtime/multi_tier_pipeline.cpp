@@ -173,9 +173,9 @@ void MultiTierPipeline::on_invocation(std::string_view fn_name) {
     }
 
     auto& fb = TieringRegistry::instance().get_feedback(fn_name);
+    TierLevel tier = fb.current_tier();
     uint64_t count = fb.record_invocation();
 
-    TierLevel tier = fb.current_tier();
     if (tier == TierLevel::Tier0_Interpreter) {
         stats_.tier0_invocations.fetch_add(1, std::memory_order_relaxed);
         if (count >= config_.invocation_tier1_threshold && !fb.is_bailout_set()) {

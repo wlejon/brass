@@ -1,4 +1,5 @@
 #include <brass/mir/loop_parallel.hpp>
+#include <brass/mir/alias_analysis.hpp>
 #include <brass/mir/opcodes.hpp>
 #include <brass/mir/builder.hpp>
 #include <sstream>
@@ -179,7 +180,8 @@ bool parse_subscript_expression(
 
 ParallelDependence check_subscript_dependence(
     const ParallelMemAccess& a1,
-    const ParallelMemAccess& a2
+    const ParallelMemAccess& a2,
+    const AliasAnalysis* aa
 ) {
     ParallelDependence dep;
     dep.src = a1.inst;
@@ -207,11 +209,22 @@ ParallelDependence check_subscript_dependence(
         return dep;
     }
 
-    // If distinct base pointers, assume disjoint memory regions
+    // If distinct base pointers, check alias analysis
     if (a1.expr.base != a2.expr.base) {
         if (a1.expr.base != nullptr && a2.expr.base != nullptr) {
-            dep.kind = DependenceKind::None;
-            dep.is_loop_carried = false;
+            if (aa && aa->alias(a1.expr.base, a2.expr.base) == AliasResult::NoAlias) {
+                dep.kind = DependenceKind::None;
+                dep.is_loop_carried = false;
+                return dep;
+            }
+            if (!aa) {
+                dep.kind = DependenceKind::None;
+                dep.is_loop_carried = false;
+                return dep;
+            }
+            dep.dir = DependenceDir::Any;
+            dep.is_loop_carried = true;
+            dep.has_distance = false;
             return dep;
         }
     }
@@ -507,10 +520,11 @@ bool analyze_parallel_loop(
         }
     }
 
+    AliasAnalysis aa(fn);
     pli.dependences.clear();
     for (size_t i = 0; i < pli.accesses.size(); ++i) {
         for (size_t j = i + 1; j < pli.accesses.size(); ++j) {
-            ParallelDependence dep = check_subscript_dependence(pli.accesses[i], pli.accesses[j]);
+            ParallelDependence dep = check_subscript_dependence(pli.accesses[i], pli.accesses[j], &aa);
             if (dep.kind != DependenceKind::None) {
                 pli.dependences.push_back(dep);
                 if (dep.is_loop_carried) {

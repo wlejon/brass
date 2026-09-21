@@ -71,6 +71,10 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
     BasicBlock* split_head = caller_bb;
     result.split_head = split_head;
 
+    bool is_invoke = (call_inst->opcode() == Opcode::invoke);
+    BranchTarget normal_target = is_invoke ? call_inst->normal_target() : BranchTarget{};
+    BranchTarget unwind_target = is_invoke ? call_inst->unwind_target() : BranchTarget{};
+
     // 1. Create split_tail block
     std::string tail_name = std::string(caller_bb->name()) + ".split_tail";
     BasicBlock* split_tail = mod->arena().make<BasicBlock>(
@@ -90,6 +94,13 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
     for (Instruction* ti : tail_insts) {
         caller_bb->remove_instruction(ti);
         split_tail->append_instruction(ti);
+    }
+
+    if (is_invoke) {
+        Instruction* br_norm = mod->arena().make<Instruction>(Opcode::br, Type::void_type());
+        br_norm->set_loc(call_inst->loc());
+        br_norm->set_branch_target(normal_target);
+        split_tail->append_instruction(br_norm);
     }
 
     // 3. Setup return value forwarding via split_tail block parameter
@@ -176,6 +187,7 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
 
     // 6. Clone callee instructions into cloned blocks (two passes to resolve any out-of-order block references)
     std::vector<std::pair<const Instruction*, Instruction*>> inst_pairs;
+    std::unordered_map<const BasicBlock*, BasicBlock*> final_block_map;
     for (const BasicBlock* src_bb : callee.blocks()) {
         if (!src_bb) continue;
         BasicBlock* dst_bb = block_map[src_bb];
@@ -184,6 +196,51 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
             if (!src_inst) continue;
 
             if (src_inst->opcode() == Opcode::ret) {
+                continue;
+            }
+
+            if (is_invoke && src_inst->opcode() == Opcode::call) {
+                // If inlining an invoke call site, calls inside callee can throw and
+                // must unwind to caller's invoke landing pad (unwind_target).
+                BasicBlock* cont_bb = mod->arena().make<BasicBlock>(
+                    caller.next_block_id(),
+                    mod->string_pool().intern(std::string(dst_bb->name()) + ".call_cont")
+                );
+                cont_bb->set_parent(&caller);
+                cloned_blocks.push_back(cont_bb);
+
+                Instruction* dst_inst = mod->arena().make<Instruction>(Opcode::invoke, src_inst->type());
+                dst_inst->set_loc(wrap_loc(src_inst->loc()));
+                dst_inst->set_imm_i64(src_inst->imm_i64());
+                dst_inst->set_imm_f64(src_inst->imm_f64());
+                dst_inst->set_scale(src_inst->scale());
+                dst_inst->set_offset(src_inst->offset());
+                dst_inst->set_memory_type(src_inst->memory_type());
+                if (!src_inst->symbol().empty()) {
+                    dst_inst->set_symbol(mod->string_pool().intern(src_inst->symbol()));
+                }
+                if (!src_inst->extra_symbol().empty()) {
+                    dst_inst->set_extra_symbol(mod->string_pool().intern(src_inst->extra_symbol()));
+                }
+                dst_inst->set_normal_target(BranchTarget(cont_bb, {}));
+                dst_inst->set_unwind_target(unwind_target);
+
+                if (src_inst->produces_value()) {
+                    const Value* src_res = src_inst->result();
+                    Value* dst_res = mod->arena().make<Value>(
+                        caller.next_value_id(),
+                        src_res->type(),
+                        ValueKind::InstructionResult
+                    );
+                    dst_res->set_defining_instruction(dst_inst);
+                    dst_inst->set_result(dst_res);
+                    value_map[src_res] = dst_res;
+                }
+
+                dst_bb->append_instruction(dst_inst);
+                inst_pairs.emplace_back(src_inst, dst_inst);
+
+                dst_bb = cont_bb;
                 continue;
             }
 
@@ -216,6 +273,7 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
             dst_bb->append_instruction(dst_inst);
             inst_pairs.emplace_back(src_inst, dst_inst);
         }
+        final_block_map[src_bb] = dst_bb;
     }
 
     // 6b. Second pass: map all operands, state maps, and branch targets
@@ -227,19 +285,30 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
             dst_inst->add_state_value(map_val(sv));
         }
 
-        dst_inst->set_branch_target(map_target(src_inst->branch_target()));
-        dst_inst->set_true_target(map_target(src_inst->true_target()));
-        dst_inst->set_false_target(map_target(src_inst->false_target()));
-        dst_inst->set_default_target(map_target(src_inst->default_target()));
-        for (const auto& sc : src_inst->switch_cases()) {
-            dst_inst->add_switch_case(sc.value, map_target(sc.target));
+        if (dst_inst->opcode() == Opcode::invoke && src_inst->opcode() == Opcode::call) {
+            continue;
+        }
+
+        if (src_inst->opcode() == Opcode::br) {
+            dst_inst->set_branch_target(map_target(src_inst->branch_target()));
+        } else if (src_inst->opcode() == Opcode::br_if) {
+            dst_inst->set_true_target(map_target(src_inst->true_target()));
+            dst_inst->set_false_target(map_target(src_inst->false_target()));
+        } else if (src_inst->opcode() == Opcode::switch_) {
+            dst_inst->set_default_target(map_target(src_inst->default_target()));
+            for (const auto& sc : src_inst->switch_cases()) {
+                dst_inst->add_switch_case(sc.value, map_target(sc.target));
+            }
+        } else if (src_inst->opcode() == Opcode::invoke) {
+            dst_inst->set_normal_target(map_target(src_inst->normal_target()));
+            dst_inst->set_unwind_target(map_target(src_inst->unwind_target()));
         }
     }
 
     // 6c. Remap ret instructions to br split_tail(...)
     for (const BasicBlock* src_bb : callee.blocks()) {
         if (!src_bb) continue;
-        BasicBlock* dst_bb = block_map[src_bb];
+        BasicBlock* dst_bb = final_block_map.count(src_bb) ? final_block_map[src_bb] : block_map[src_bb];
         for (const Instruction* src_inst : *src_bb) {
             if (src_inst && src_inst->opcode() == Opcode::ret) {
                 Instruction* br_tail = mod->arena().make<Instruction>(Opcode::br, Type::void_type());

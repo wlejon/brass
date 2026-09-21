@@ -30,6 +30,13 @@ void for_each_target_pointing_to(Instruction* term, BasicBlock* target_bb, auto&
                 fn(sc.target);
             }
         }
+    } else if (term->opcode() == Opcode::invoke) {
+        if (term->normal_target().block == target_bb) {
+            fn(term->normal_target());
+        }
+        if (term->unwind_target().block == target_bb) {
+            fn(term->unwind_target());
+        }
     }
 }
 
@@ -62,6 +69,13 @@ size_t count_uses(const Function& fn, const Value* val) {
                     for (Value* arg : sc.target.args) {
                         if (arg == val) count++;
                     }
+                }
+            } else if (inst->opcode() == Opcode::invoke) {
+                for (Value* arg : inst->normal_target().args) {
+                    if (arg == val) count++;
+                }
+                for (Value* arg : inst->unwind_target().args) {
+                    if (arg == val) count++;
                 }
             }
             for (Value* sv : inst->state_map()) {
@@ -111,6 +125,17 @@ void replace_all_uses(Function& fn, Value* old_val, Value* new_val) {
                         if (sc.target.args[i] == old_val) {
                             sc.target.args[i] = new_val;
                         }
+                    }
+                }
+            } else if (inst->opcode() == Opcode::invoke) {
+                for (size_t i = 0; i < inst->normal_target().args.size(); ++i) {
+                    if (inst->normal_target().args[i] == old_val) {
+                        inst->normal_target().args[i] = new_val;
+                    }
+                }
+                for (size_t i = 0; i < inst->unwind_target().args.size(); ++i) {
+                    if (inst->unwind_target().args[i] == old_val) {
+                        inst->unwind_target().args[i] = new_val;
                     }
                 }
             }
@@ -314,6 +339,9 @@ private:
                         for (auto& sc : term->switch_cases()) {
                             if (sc.target.block == bb) targets_to_bb.push_back(&sc.target);
                         }
+                    } else if (term->opcode() == Opcode::invoke) {
+                        if (term->normal_target().block == bb) targets_to_bb.push_back(&term->normal_target());
+                        if (term->unwind_target().block == bb) targets_to_bb.push_back(&term->unwind_target());
                     }
 
                     if (targets_to_bb.size() == 1) {
