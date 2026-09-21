@@ -1,9 +1,43 @@
 #include <brass/target/aarch64/aarch64_isel.hpp>
+#include <brass/mir/module.hpp>
+#include <brass/runtime/coroutine.hpp>
 #include <algorithm>
 
 namespace brass::aarch64 {
 
 using namespace brass::codegen;
+
+namespace {
+
+struct CoroFrameDescriptor {
+    uint32_t slot_count = 0;
+    uint64_t pointer_mask = 0;
+};
+
+CoroFrameDescriptor analyze_coro_callee(const Function* callee) {
+    CoroFrameDescriptor desc{0, 0};
+    if (!callee) return desc;
+
+    for (const auto* bb : callee->blocks()) {
+        for (const auto* inst : *bb) {
+            if (inst->opcode() == Opcode::store || inst->opcode() == Opcode::load) {
+                if (inst->offset() >= runtime::CORO_OFFSET_SLOTS) {
+                    uint32_t slot = static_cast<uint32_t>((inst->offset() - runtime::CORO_OFFSET_SLOTS) / 8);
+                    desc.slot_count = std::max(desc.slot_count, slot + 1);
+                    if (inst->memory_type().is_pointer_or_gcref() ||
+                        (inst->opcode() == Opcode::store && inst->operand(1) && inst->operand(1)->type().is_pointer_or_gcref())) {
+                        if (slot < 64) {
+                            desc.pointer_mask |= (1ULL << slot);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return desc;
+}
+
+} // namespace
 
 void AArch64ISel::lower_coro(const Instruction& inst, LirBlock& lir_bb) {
     lir_fn_->frame.has_calls = true;
@@ -19,14 +53,64 @@ void AArch64ISel::lower_coro(const Instruction& inst, LirBlock& lir_bb) {
             mov_fn->add_use(LirOperand::symbol(std::string(inst.symbol())));
             lir_bb.append_inst(std::move(mov_fn));
 
+            uint32_t slot_count = 16;
+            uint64_t pointer_mask = 0;
+            VReg slot_vreg{};
+            VReg mask_vreg{};
+
+            const Function* callee_fn = (mir_fn_ && mir_fn_->parent())
+                ? mir_fn_->parent()->get_function(inst.symbol())
+                : nullptr;
+            if (callee_fn) {
+                auto desc = analyze_coro_callee(callee_fn);
+                if (desc.slot_count > 0) {
+                    slot_count = desc.slot_count;
+                    pointer_mask = desc.pointer_mask;
+                }
+            }
+
+            if (inst.operand_count() >= 2) {
+                ImmIntInfo imm0 = get_imm_int_info(inst.operand(0));
+                if (imm0.is_imm) {
+                    slot_count = static_cast<uint32_t>(imm0.val);
+                } else {
+                    slot_vreg = get_vreg(inst.operand(0));
+                }
+                ImmIntInfo imm1 = get_imm_int_info(inst.operand(1));
+                if (imm1.is_imm) {
+                    pointer_mask = static_cast<uint64_t>(imm1.val);
+                } else {
+                    mask_vreg = get_vreg(inst.operand(1));
+                }
+            } else if (inst.operand_count() == 1) {
+                ImmIntInfo imm0 = get_imm_int_info(inst.operand(0));
+                if (imm0.is_imm) {
+                    slot_count = static_cast<uint32_t>(imm0.val);
+                } else {
+                    slot_vreg = get_vreg(inst.operand(0));
+                }
+            } else if (inst.imm_i64() != 0) {
+                slot_count = static_cast<uint32_t>(inst.imm_i64());
+            }
+
+            if (slot_count < 1) slot_count = 1;
+
             auto mov_slots = std::make_unique<LirInst>(LirOpcode::Mov32);
             mov_slots->add_def(LirOperand::preg_aarch64_gpr(arg1, 4), FixedConstraint::aarch64_gpr(arg1));
-            mov_slots->add_use(LirOperand::imm(16, 4));
+            if (slot_vreg.is_valid()) {
+                mov_slots->add_use(LirOperand::vreg(slot_vreg, 4));
+            } else {
+                mov_slots->add_use(LirOperand::imm(static_cast<int64_t>(slot_count), 4));
+            }
             lir_bb.append_inst(std::move(mov_slots));
 
             auto mov_mask = std::make_unique<LirInst>(LirOpcode::Mov);
             mov_mask->add_def(LirOperand::preg_aarch64_gpr(arg2, 8), FixedConstraint::aarch64_gpr(arg2));
-            mov_mask->add_use(LirOperand::imm(0, 8));
+            if (mask_vreg.is_valid()) {
+                mov_mask->add_use(LirOperand::vreg(mask_vreg, 8));
+            } else {
+                mov_mask->add_use(LirOperand::imm(static_cast<int64_t>(pointer_mask), 8));
+            }
             lir_bb.append_inst(std::move(mov_mask));
 
             auto call_lir = std::make_unique<LirInst>(LirOpcode::Call);

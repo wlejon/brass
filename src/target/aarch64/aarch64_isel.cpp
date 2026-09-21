@@ -22,6 +22,7 @@ AArch64ISel::AArch64ISel(const Target& target, const CallingConvention& cc)
 std::unique_ptr<LirFunction> AArch64ISel::lower(const Function& mir_fn) {
     auto lir = std::make_unique<LirFunction>();
     lir_fn_ = lir.get();
+    mir_fn_ = &mir_fn;
     val_to_vreg_.clear();
     val_to_vreg_pair_.clear();
 

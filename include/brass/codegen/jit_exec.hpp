@@ -123,6 +123,24 @@ void partition_x64_sysv_invoke_args(
     std::vector<uint64_t>& stack_words
 );
 
+#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__GNUC__) || defined(__clang__)
+extern "C" void x64_sysv_invoke_thunk(
+    const X64SysVInvokeArgs* args,
+    X64SysVInvokeResult* result
+);
+#endif
+#endif
+
+#if defined(__aarch64__) || defined(_M_ARM64)
+#if defined(__GNUC__) || defined(__clang__)
+extern "C" void aarch64_invoke_thunk(
+    const AArch64InvokeArgs* args,
+    AArch64InvokeResult* result
+);
+#endif
+#endif
+
 class JitExecutionEngine {
 public:
     explicit JitExecutionEngine(const Target& target);

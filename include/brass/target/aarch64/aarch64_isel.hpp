@@ -45,6 +45,7 @@ private:
     };
 
     codegen::LirFunction* lir_fn_ = nullptr;
+    const Function* mir_fn_ = nullptr;
     std::unordered_map<const Value*, codegen::VReg> val_to_vreg_;
     std::unordered_map<const Value*, VRegPair> val_to_vreg_pair_;
     std::unordered_map<const Value*, uint32_t> use_count_;

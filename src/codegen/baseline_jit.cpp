@@ -1,4 +1,5 @@
 #include <brass/codegen/baseline_jit.hpp>
+#include <brass/codegen/jit_exec.hpp>
 #include <brass/target/x64/x64_encoder.hpp>
 #include <brass/target/calling_conv.hpp>
 #include <brass/gc/runtime_gc.hpp>
@@ -47,6 +48,64 @@ RuntimeValue BaselineCompiledFunction::invoke(const std::vector<RuntimeValue>& a
     }
 
     void* addr = entry_point_;
+
+    const std::vector<Type>* ptypes = param_types_.empty() ? nullptr : &param_types_;
+
+#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__GNUC__) || defined(__clang__)
+    X64SysVInvokeArgs invoke_args;
+    std::vector<uint64_t> stack_words;
+    partition_x64_sysv_invoke_args(args, ptypes, addr, invoke_args, stack_words);
+
+    X64SysVInvokeResult result;
+    x64_sysv_invoke_thunk(&invoke_args, &result);
+
+    if (return_type_.is_void()) return RuntimeValue::from_void();
+    if (return_type_.is_vector()) return RuntimeValue::from_v128(return_type_, result.xmm0);
+    if (return_type_.is_float()) {
+        if (return_type_.kind() == TypeKind::F32) {
+            float f = 0.0f;
+            std::memcpy(&f, result.xmm0, sizeof(float));
+            return RuntimeValue::from_f32(f);
+        } else {
+            double d = 0.0;
+            std::memcpy(&d, result.xmm0, sizeof(double));
+            return RuntimeValue::from_f64(d);
+        }
+    }
+    if (return_type_.kind() == TypeKind::I32) return RuntimeValue::from_i32(static_cast<int32_t>(result.rax));
+    if (return_type_.is_pointer()) return RuntimeValue::from_ptr(static_cast<uintptr_t>(result.rax));
+    if (return_type_.is_gcref()) return RuntimeValue::from_gcref(static_cast<uintptr_t>(result.rax));
+    return RuntimeValue::from_i64(static_cast<int64_t>(result.rax));
+#endif
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#if defined(__GNUC__) || defined(__clang__)
+    AArch64InvokeArgs invoke_args;
+    std::vector<uint64_t> stack_words;
+    partition_aarch64_invoke_args(args, ptypes, addr, invoke_args, stack_words);
+
+    AArch64InvokeResult result;
+    aarch64_invoke_thunk(&invoke_args, &result);
+
+    if (return_type_.is_void()) return RuntimeValue::from_void();
+    if (return_type_.is_vector()) return RuntimeValue::from_v128(return_type_, result.q0);
+    if (return_type_.is_float()) {
+        if (return_type_.kind() == TypeKind::F32) {
+            float f = 0.0f;
+            std::memcpy(&f, result.q0, sizeof(float));
+            return RuntimeValue::from_f32(f);
+        } else {
+            double d = 0.0;
+            std::memcpy(&d, result.q0, sizeof(double));
+            return RuntimeValue::from_f64(d);
+        }
+    }
+    if (return_type_.kind() == TypeKind::I32) return RuntimeValue::from_i32(static_cast<int32_t>(result.x0));
+    if (return_type_.is_pointer()) return RuntimeValue::from_ptr(static_cast<uintptr_t>(result.x0));
+    if (return_type_.is_gcref()) return RuntimeValue::from_gcref(static_cast<uintptr_t>(result.x0));
+    return RuntimeValue::from_i64(static_cast<int64_t>(result.x0));
+#endif
+#endif
 
     auto get_i64 = [&](size_t idx) -> int64_t {
         if (idx >= args.size()) return 0;

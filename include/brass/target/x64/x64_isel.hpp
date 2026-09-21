@@ -39,6 +39,7 @@ private:
     const OsrTarget* osr_target_ = nullptr;
 
     codegen::LirFunction* lir_fn_ = nullptr;
+    const Function* mir_fn_ = nullptr;
     std::unordered_map<const Value*, codegen::VReg> val_to_vreg_;
     std::unordered_map<const Value*, uint32_t> use_count_;
     std::unordered_set<const Instruction*> skipped_insts_;
