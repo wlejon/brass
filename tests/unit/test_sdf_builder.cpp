@@ -2,6 +2,10 @@
 #include <brass/codegen/sdf_builder.hpp>
 #include <brass/codegen/kernel_jit.hpp>
 #include <brass/target/target.hpp>
+#include <brass/target/x64/x64_isel.hpp>
+#include <brass/codegen/linear_scan.hpp>
+#include <brass/codegen/live_range.hpp>
+#include <brass/codegen/emit_context.hpp>
 
 #include <vector>
 #include <cmath>
@@ -742,6 +746,19 @@ TEST_CASE("SDF JIT - Capsule and Plane Evaluation") {
                                     0.0f, 1.0f, 0.0f, 0.0f);
         CHECK_NEAR(res_cap[static_cast<size_t>(i)], exp_cap, 1e-5f);
         CHECK_NEAR(res_plane[static_cast<size_t>(i)], exp_plane, 1e-5f);
+    }
+
+    {
+        x64::X64ISel isel(Target::x64_windows(), CallingConvention::win64());
+        auto lir = isel.lower(*fn);
+        CHECK(lir != nullptr);
+        LivenessAnalysis liveness(*lir);
+        liveness.run();
+        LinearScanAllocator regalloc(*lir, liveness, CallingConvention::win64());
+        regalloc.allocate();
+        EmitContext emit_ctx(*lir, Target::x64_windows());
+        CompilationResult res = emit_ctx.compile();
+        CHECK(!res.code_buffer.empty());
     }
 }
 
