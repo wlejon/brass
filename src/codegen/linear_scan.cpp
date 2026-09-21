@@ -260,6 +260,37 @@ void LinearScanAllocator::allocate() {
         final_callee_gprs |= brass::x64::reg_mask(brass::x64::GPR::R14) | brass::x64::reg_mask(brass::x64::GPR::R15);
     }
 
+    if (cc_.kind() == CallingConvKind::Win64) {
+        if (next_spill_slot_ > 0) {
+            final_callee_xmms |= brass::x64::reg_mask(brass::x64::XMM::XMM12) |
+                                 brass::x64::reg_mask(brass::x64::XMM::XMM13) |
+                                 brass::x64::reg_mask(brass::x64::XMM::XMM14) |
+                                 brass::x64::reg_mask(brass::x64::XMM::XMM15);
+        } else {
+            bool uses_xmm_scratch = false;
+            for (const auto& block : fn_.blocks) {
+                for (const auto& inst : block->instructions) {
+                    if (inst->opcode == LirOpcode::Fabs32 || inst->opcode == LirOpcode::Fabs64) {
+                        uses_xmm_scratch = true;
+                        break;
+                    }
+                    if (inst->opcode == LirOpcode::ParallelCopy && inst->defs.size() > 1) {
+                        uses_xmm_scratch = true;
+                        break;
+                    }
+                    if (!inst->defs.empty() && !inst->uses.empty() && inst->defs[0].is_mem() && inst->uses[0].is_mem()) {
+                        uses_xmm_scratch = true;
+                        break;
+                    }
+                }
+                if (uses_xmm_scratch) break;
+            }
+            if (uses_xmm_scratch) {
+                final_callee_xmms |= brass::x64::reg_mask(brass::x64::XMM::XMM15);
+            }
+        }
+    }
+
     fn_.frame.num_spill_slots = next_spill_slot_;
     fn_.frame.saved_callee_gprs = final_callee_gprs | fn_.forced_saved_gprs;
     fn_.frame.saved_callee_xmms = final_callee_xmms;
