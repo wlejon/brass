@@ -578,7 +578,7 @@ TEST_CASE("AArch64 ISEL - Stack Alloca Lowering") {
     Builder b(mod);
     b.set_function(fn);
 
-    BasicBlock* entry = b.append_block("entry");
+    b.append_block("entry");
     Value* slot = b.build_alloca(32, 16);
     b.build_ret(slot);
 
