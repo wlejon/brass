@@ -496,6 +496,7 @@ struct FrameInfo {
     size_t outgoing_arg_space = 0;
     size_t total_frame_size = 0;
     bool has_calls = false;
+    bool has_stack_args = false;
     bool is_leaf = false;
 
     int32_t spill_slot_offset(int32_t slot_idx) const noexcept;

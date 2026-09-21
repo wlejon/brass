@@ -67,16 +67,16 @@ void X64ISel::lower_call(const Instruction& inst, LirBlock& lir_bb) {
         VReg arg_vreg = get_vreg(arg_val);
         Type t = arg_val->type();
         uint8_t sz = (t.size_in_bytes() == 4) ? 4 : 8;
-        LirOpcode mov_op = t.is_float() ? LirOpcode::Movsd : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
+        LirOpcode mov_op = t.is_float() ? (sz == 4 ? LirOpcode::Movss : LirOpcode::Movsd) : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
 
         if (cc_.kind() == CallingConvKind::Win64) {
             if (i < 4) {
                 auto mov_arg = std::make_unique<LirInst>(mov_op);
                 if (t.is_float()) {
                     XMM xreg = static_cast<XMM>(i);
-                    mov_arg->add_def(LirOperand::preg_xmm(xreg, 8), FixedConstraint::xmm(xreg));
-                    mov_arg->add_use(LirOperand::vreg(arg_vreg, 8));
-                    call_lir->add_use(LirOperand::preg_xmm(xreg, 8), FixedConstraint::xmm(xreg));
+                    mov_arg->add_def(LirOperand::preg_xmm(xreg, sz), FixedConstraint::xmm(xreg));
+                    mov_arg->add_use(LirOperand::vreg(arg_vreg, sz));
+                    call_lir->add_use(LirOperand::preg_xmm(xreg, sz), FixedConstraint::xmm(xreg));
                 } else {
                     GPR greg = cc_.arg_gpr(i);
                     mov_arg->add_def(LirOperand::preg_gpr(greg, sz), FixedConstraint::gpr(greg));
@@ -95,18 +95,18 @@ void X64ISel::lower_call(const Instruction& inst, LirBlock& lir_bb) {
             if (t.is_float()) {
                 if (xmm_idx < cc_.num_arg_xmms()) {
                     XMM xreg = cc_.arg_xmm(xmm_idx++);
-                    auto mov_arg = std::make_unique<LirInst>(LirOpcode::Movsd);
-                    mov_arg->add_def(LirOperand::preg_xmm(xreg, 8), FixedConstraint::xmm(xreg));
-                    mov_arg->add_use(LirOperand::vreg(arg_vreg, 8));
-                    call_lir->add_use(LirOperand::preg_xmm(xreg, 8), FixedConstraint::xmm(xreg));
+                    auto mov_arg = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Movss : LirOpcode::Movsd);
+                    mov_arg->add_def(LirOperand::preg_xmm(xreg, sz), FixedConstraint::xmm(xreg));
+                    mov_arg->add_use(LirOperand::vreg(arg_vreg, sz));
+                    call_lir->add_use(LirOperand::preg_xmm(xreg, sz), FixedConstraint::xmm(xreg));
                     lir_bb.append_inst(std::move(mov_arg));
                 } else {
                     size_t stack_idx = (xmm_idx - cc_.num_arg_xmms()) + (gpr_idx > cc_.num_arg_gprs() ? (gpr_idx - cc_.num_arg_gprs()) : 0);
                     int32_t disp = static_cast<int32_t>(stack_idx * 8);
                     xmm_idx++;
-                    auto mov_stack = std::make_unique<LirInst>(LirOpcode::Movsd);
-                    mov_stack->add_def(LirOperand::mem(PReg::gpr(GPR::RSP), disp, 8));
-                    mov_stack->add_use(LirOperand::vreg(arg_vreg, 8));
+                    auto mov_stack = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Movss : LirOpcode::Movsd);
+                    mov_stack->add_def(LirOperand::mem(PReg::gpr(GPR::RSP), disp, sz));
+                    mov_stack->add_use(LirOperand::vreg(arg_vreg, sz));
                     lir_bb.append_inst(std::move(mov_stack));
                 }
             } else {
@@ -149,7 +149,7 @@ void X64ISel::lower_call(const Instruction& inst, LirBlock& lir_bb) {
     if (!ret_t.is_void()) {
         uint8_t ret_sz = static_cast<uint8_t>(ret_t.size_in_bytes());
         if (ret_t.is_float()) {
-            call_lir->add_def(LirOperand::preg_xmm(XMM::XMM0, 8), FixedConstraint::xmm(XMM::XMM0));
+            call_lir->add_def(LirOperand::preg_xmm(XMM::XMM0, ret_sz), FixedConstraint::xmm(XMM::XMM0));
         } else {
             call_lir->add_def(LirOperand::preg_gpr(GPR::RAX, ret_sz), FixedConstraint::gpr(GPR::RAX));
         }
@@ -160,13 +160,13 @@ void X64ISel::lower_call(const Instruction& inst, LirBlock& lir_bb) {
 
     if (inst.produces_value()) {
         VReg dst = get_vreg(inst.result());
+        uint8_t ret_sz = static_cast<uint8_t>(ret_t.size_in_bytes());
         if (ret_t.is_float()) {
-            auto mov_ret = std::make_unique<LirInst>(LirOpcode::Movsd);
-            mov_ret->add_def(LirOperand::vreg(dst, 8));
-            mov_ret->add_use(LirOperand::preg_xmm(XMM::XMM0, 8), FixedConstraint::xmm(XMM::XMM0));
+            auto mov_ret = std::make_unique<LirInst>(ret_sz == 4 ? LirOpcode::Movss : LirOpcode::Movsd);
+            mov_ret->add_def(LirOperand::vreg(dst, ret_sz));
+            mov_ret->add_use(LirOperand::preg_xmm(XMM::XMM0, ret_sz), FixedConstraint::xmm(XMM::XMM0));
             lir_bb.append_inst(std::move(mov_ret));
         } else {
-            uint8_t ret_sz = static_cast<uint8_t>(ret_t.size_in_bytes());
             auto mov_ret = std::make_unique<LirInst>(ret_sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
             mov_ret->add_def(LirOperand::vreg(dst, ret_sz));
             mov_ret->add_use(LirOperand::preg_gpr(GPR::RAX, ret_sz), FixedConstraint::gpr(GPR::RAX));

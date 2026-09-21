@@ -656,7 +656,7 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
                 int64_t r = call_jit_int_vec_ret_i64(addr, get_int(0), a1);
                 return RuntimeValue::from_i64(r);
             }
-        } else if (args[0].is_f64() && args[1].is_f64()) {
+        } else if ((args[0].is_f64() || args[0].is_f32()) && (args[1].is_f64() || args[1].is_f32())) {
             if (ret_type.is_float()) {
                 if (ret_type.kind() == TypeKind::F32) {
                     float r = reinterpret_cast<float(*)(double, double)>(addr)(get_float(0), get_float(1));
@@ -668,7 +668,7 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
                 int64_t r = reinterpret_cast<int64_t(*)(double, double)>(addr)(get_float(0), get_float(1));
                 return RuntimeValue::from_i64(r);
             }
-        } else {
+        } else if (!args[0].is_f64() && !args[0].is_f32() && !args[1].is_f64() && !args[1].is_f32()) {
             if (ret_type.is_vector()) {
                 __m128 r = reinterpret_cast<__m128(*)(int64_t, int64_t)>(addr)(get_int(0), get_int(1));
                 alignas(16) uint8_t b[16];
@@ -765,6 +765,14 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
         param_types = &sig_it->second.second;
     }
 
+#if defined(_WIN32)
+    X64Win64InvokeArgs invoke_args;
+    std::vector<uint64_t> stack_words;
+    partition_x64_win64_invoke_args(args, param_types, addr, invoke_args, stack_words);
+
+    X64Win64InvokeResult result;
+    x64_win64_invoke_thunk(&invoke_args, &result);
+#else
     X64SysVInvokeArgs invoke_args;
     std::vector<uint64_t> stack_words;
     partition_x64_sysv_invoke_args(args, param_types, addr, invoke_args, stack_words);
@@ -772,6 +780,7 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
     X64SysVInvokeResult result;
 #if defined(__GNUC__) || defined(__clang__)
     x64_sysv_invoke_thunk(&invoke_args, &result);
+#endif
 #endif
 
     if (ret_type.is_void()) {

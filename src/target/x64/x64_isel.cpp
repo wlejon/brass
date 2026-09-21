@@ -468,6 +468,7 @@ void X64ISel::lower_entry_parameters(const Function& mir_fn) {
                 }
             } else {
                 int32_t disp = static_cast<int32_t>(48 + (i - 4) * 8);
+                lir_fn_->frame.has_stack_args = true;
                 pcopy->add_def(LirOperand::vreg(param_vreg, sz));
                 pcopy->add_use(LirOperand::mem(PReg::gpr(GPR::RBP), disp, sz));
                 pcopy->def_constraints.push_back(FixedConstraint::none());
@@ -482,6 +483,7 @@ void X64ISel::lower_entry_parameters(const Function& mir_fn) {
                 } else {
                     size_t stack_idx = (xmm_idx - cc_.num_arg_xmms()) + (gpr_idx > cc_.num_arg_gprs() ? (gpr_idx - cc_.num_arg_gprs()) : 0);
                     int32_t disp = static_cast<int32_t>(16 + stack_idx * 8);
+                    lir_fn_->frame.has_stack_args = true;
                     xmm_idx++;
                     pcopy->add_def(LirOperand::vreg(param_vreg, sz));
                     pcopy->add_use(LirOperand::mem(PReg::gpr(GPR::RBP), disp, sz));
@@ -496,6 +498,7 @@ void X64ISel::lower_entry_parameters(const Function& mir_fn) {
                 } else {
                     size_t stack_idx = (gpr_idx - cc_.num_arg_gprs()) + (xmm_idx > cc_.num_arg_xmms() ? (xmm_idx - cc_.num_arg_xmms()) : 0);
                     int32_t disp = static_cast<int32_t>(16 + stack_idx * 8);
+                    lir_fn_->frame.has_stack_args = true;
                     gpr_idx++;
                     pcopy->add_def(LirOperand::vreg(param_vreg, sz));
                     pcopy->add_use(LirOperand::mem(PReg::gpr(GPR::RBP), disp, sz));

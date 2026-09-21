@@ -115,11 +115,32 @@ struct alignas(16) X64SysVInvokeResult {
     alignas(16) uint8_t xmm0[16] = {0};
 };
 
+struct alignas(16) X64Win64InvokeArgs {
+    uint64_t gpr[4] = {0};                 // RCX, RDX, R8, R9
+    alignas(16) uint8_t xmm[4][16] = {{0}};// XMM0..XMM3
+    const uint64_t* stack_words = nullptr;
+    uint64_t stack_word_count = 0;
+    void* target_fn = nullptr;
+};
+
+struct alignas(16) X64Win64InvokeResult {
+    uint64_t rax = 0;
+    alignas(16) uint8_t xmm0[16] = {0};
+};
+
 void partition_x64_sysv_invoke_args(
     const std::vector<RuntimeValue>& args,
     const std::vector<Type>* param_types,
     void* target_fn,
     X64SysVInvokeArgs& out_args,
+    std::vector<uint64_t>& stack_words
+);
+
+void partition_x64_win64_invoke_args(
+    const std::vector<RuntimeValue>& args,
+    const std::vector<Type>* param_types,
+    void* target_fn,
+    X64Win64InvokeArgs& out_args,
     std::vector<uint64_t>& stack_words
 );
 
@@ -130,6 +151,10 @@ extern "C" void x64_sysv_invoke_thunk(
     X64SysVInvokeResult* result
 );
 #endif
+extern "C" void x64_win64_invoke_thunk(
+    const X64Win64InvokeArgs* args,
+    X64Win64InvokeResult* result
+);
 #endif
 
 #if defined(__aarch64__) || defined(_M_ARM64)

@@ -357,4 +357,61 @@ brass_call_jit_v128_3 PROC
     ret
 brass_call_jit_v128_3 ENDP
 
+; void x64_win64_invoke_thunk(const X64Win64InvokeArgs* args, X64Win64InvokeResult* result)
+; rcx = args
+; rdx = result
+x64_win64_invoke_thunk PROC
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    push r13
+
+    mov r12, rcx
+    mov r13, rdx
+
+    mov rcx, qword ptr [r12 + 104] ; stack_word_count
+    lea rax, [rcx + 4]             ; 4 + stack_word_count
+    test rax, 1
+    jnz alloc_odd
+    inc rax
+alloc_odd:
+    shl rax, 3
+    sub rsp, rax
+
+    test rcx, rcx
+    jz skip_stack_copy
+    mov rsi, qword ptr [r12 + 96]  ; args->stack_words
+    lea rdi, [rsp + 32]            ; [rsp + 32]
+    rep movsq
+skip_stack_copy:
+
+    movdqu xmm0, xmmword ptr [r12 + 32]
+    movdqu xmm1, xmmword ptr [r12 + 48]
+    movdqu xmm2, xmmword ptr [r12 + 64]
+    movdqu xmm3, xmmword ptr [r12 + 80]
+
+    mov rcx, qword ptr [r12 + 0]
+    mov rdx, qword ptr [r12 + 8]
+    mov r8,  qword ptr [r12 + 16]
+    mov r9,  qword ptr [r12 + 24]
+
+    mov r11, qword ptr [r12 + 112]
+    call r11
+
+    mov qword ptr [r13], rax
+    movdqu xmmword ptr [r13 + 16], xmm0
+
+    lea rsp, [rbp - 40]
+    pop r13
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
+    pop rbp
+    ret
+x64_win64_invoke_thunk ENDP
+
 END
