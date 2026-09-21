@@ -127,7 +127,7 @@ RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) 
         return engine->invoke(name_, args);
     }
 
-    const std::vector<Type>* ptypes = param_types_.empty() ? nullptr : &param_types_;
+    [[maybe_unused]] const std::vector<Type>* ptypes = param_types_.empty() ? nullptr : &param_types_;
 
 #if defined(__x86_64__) || defined(_M_X64)
 #if defined(__GNUC__) || defined(__clang__)

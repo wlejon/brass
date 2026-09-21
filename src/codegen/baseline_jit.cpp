@@ -49,7 +49,7 @@ RuntimeValue BaselineCompiledFunction::invoke(const std::vector<RuntimeValue>& a
 
     void* addr = entry_point_;
 
-    const std::vector<Type>* ptypes = param_types_.empty() ? nullptr : &param_types_;
+    [[maybe_unused]] const std::vector<Type>* ptypes = param_types_.empty() ? nullptr : &param_types_;
 
 #if defined(__x86_64__) || defined(_M_X64)
 #if defined(__GNUC__) || defined(__clang__)
