@@ -6,6 +6,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <charconv>
+#include <bit>
 #include <vector>
 #ifndef _WIN32
 #include <dlfcn.h>

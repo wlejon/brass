@@ -1,4 +1,5 @@
 #include <brass/target/aarch64/aarch64_logical_imm.hpp>
+#include <bit>
 
 namespace brass::aarch64 {
 
@@ -40,7 +41,7 @@ bool encode_logical_immediate(uint64_t val, bool is_64bit, uint32_t& n, uint32_t
         }
         // rot_elem must be of the form (1 << run_len) - 1 with 1 <= run_len < esize
         if ((rot_elem & (rot_elem + 1ULL)) == 0 && rot_elem != 0 && rot_elem != emask) {
-            uint32_t run_len = static_cast<uint32_t>(__builtin_popcountll(rot_elem));
+            uint32_t run_len = static_cast<uint32_t>(std::popcount(rot_elem));
             immr_found = r;
             run_len_found = run_len;
             found = true;

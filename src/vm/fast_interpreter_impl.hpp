@@ -12,7 +12,7 @@
 #include <limits>
 #include <algorithm>
 
-#if defined(_MSC_VER)
+#if defined(_WIN32)
 #include <malloc.h>
 #define BRASS_ALLOCA _alloca
 #else
