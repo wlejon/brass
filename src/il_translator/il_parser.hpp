@@ -20,6 +20,7 @@ private:
     bool parse_function(BronzeFunction& out_fn);
     bool parse_block(BronzeBlock& out_block);
     bool parse_instruction(BronzeInstruction& out_inst);
+    bool parse_instruction_ops(BronzeInstruction& out_inst, const Token& op_tok);
     bool parse_block_target(BronzeBlockTarget& out_target);
     bool parse_type(BronzeType& out_type);
 
