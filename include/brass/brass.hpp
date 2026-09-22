@@ -90,6 +90,8 @@
 #include <brass/debug/source_map.hpp>
 #include <brass/debug/debug_section.hpp>
 #include <brass/debug/symbolicator.hpp>
+#include <brass/vm/bytecode.hpp>
+#include <brass/vm/bytecode_compiler.hpp>
 
 #include <string_view>
 
