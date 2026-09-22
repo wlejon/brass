@@ -13,6 +13,8 @@
 
 namespace brass {
 
+class BasicBlock;
+
 enum class BytecodeOp : uint8_t {
     // Nop / Trap
     nop = 0,
@@ -357,6 +359,9 @@ public:
     uint32_t num_params = 0;
     Type return_type = Type::void_type();
     std::vector<Type> param_types;
+    std::vector<Type> register_types;
+    std::unordered_map<uint32_t, uint8_t> ssa_to_reg;
+    std::unordered_map<uint32_t, const BasicBlock*> pc_block_map;
     std::vector<ExceptionEntry> exception_table;
     std::vector<ResumePointEntry> resume_points;
     std::vector<OsrEntry> osr_entries;

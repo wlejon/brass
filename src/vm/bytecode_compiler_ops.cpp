@@ -691,11 +691,19 @@ void FunctionCompilerContext::lower_coroutine(const Instruction& inst) {
             emit(BytecodeOp::landing_pad, get_result_reg(inst), 0, 0);
             break;
         case Opcode::resume:
-            emit(BytecodeOp::resume, inst.operand_count() > 0 ? get_reg(inst.operand(0)) : 0, 0, 0);
+            emit(BytecodeOp::resume, inst.operand_count() > 0 && inst.operand(0) ? get_reg(inst.operand(0)) : 255, 0, 0);
             break;
         case Opcode::invoke: {
             uint32_t start_pc = static_cast<uint32_t>(out.current_pc());
-            lower_call(inst);
+            uint8_t dst = inst.result() ? get_result_reg(inst) : 255;
+            CallSiteInfo cs;
+            cs.callee = std::string(inst.symbol());
+            cs.dst_reg = dst;
+            for (size_t i = 0; i < inst.operand_count(); ++i) {
+                cs.arg_regs.push_back(get_reg(inst.operand(i)));
+            }
+            uint32_t cs_idx = out.add_call_site(std::move(cs));
+            emit_ad(BytecodeOp::invoke, dst, static_cast<uint16_t>(cs_idx));
             uint32_t end_pc = static_cast<uint32_t>(out.current_pc());
 
             ExceptionEntry ee;
@@ -713,18 +721,36 @@ void FunctionCompilerContext::lower_coroutine(const Instruction& inst) {
             exception_fixups.push_back({ee_idx, inst.unwind_target().block});
             break;
         }
-        case Opcode::coro_create:
-            emit(BytecodeOp::coro_create, get_result_reg(inst), 0, 0);
+        case Opcode::coro_create: {
+            uint8_t dst = get_result_reg(inst);
+            CallSiteInfo cs;
+            cs.callee = std::string(inst.symbol());
+            cs.dst_reg = dst;
+            for (size_t i = 0; i < inst.operand_count(); ++i) {
+                cs.arg_regs.push_back(get_reg(inst.operand(i)));
+            }
+            uint32_t cs_idx = out.add_call_site(std::move(cs));
+            emit_ad(BytecodeOp::coro_create, dst, static_cast<uint16_t>(cs_idx));
             break;
-        case Opcode::coro_suspend:
-            emit(BytecodeOp::coro_suspend, 0, 0, 0);
+        }
+        case Opcode::coro_suspend: {
+            uint8_t yield_reg = inst.operand_count() > 0 && inst.operand(0) ? get_reg(inst.operand(0)) : 0;
+            uint8_t dst_reg = inst.result() ? get_result_reg(inst) : 255;
+            emit(BytecodeOp::coro_suspend, dst_reg, yield_reg, static_cast<uint8_t>(inst.resume_id()));
             break;
-        case Opcode::coro_resume:
-            emit(BytecodeOp::coro_resume, get_result_reg(inst), get_reg(inst.operand(0)), 0);
+        }
+        case Opcode::coro_resume: {
+            uint8_t dst = get_result_reg(inst);
+            uint8_t coro_reg = get_reg(inst.operand(0));
+            uint8_t input_reg = inst.operand_count() > 1 && inst.operand(1) ? get_reg(inst.operand(1)) : 255;
+            emit(BytecodeOp::coro_resume, dst, coro_reg, input_reg);
             break;
-        case Opcode::coro_destroy:
-            emit(BytecodeOp::coro_destroy, 0, get_reg(inst.operand(0)), 0);
+        }
+        case Opcode::coro_destroy: {
+            uint8_t coro_reg = get_reg(inst.operand(0));
+            emit(BytecodeOp::coro_destroy, 0, coro_reg, 0);
             break;
+        }
         default: break;
     }
 }

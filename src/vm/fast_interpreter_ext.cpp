@@ -1,5 +1,6 @@
 #include "fast_interpreter_impl.hpp"
 #include <brass/runtime/parallel_runtime.hpp>
+#include <brass/runtime/osr_coordinator.hpp>
 #include <cmath>
 
 namespace brass {
@@ -295,6 +296,29 @@ void FastInterpreter::execute_vector_op(FastFrame& frame, uint32_t inst) {
         default:
             break;
     }
+}
+
+bool FastInterpreter::handle_osr_backedge(FastFrame& frame, uint32_t target_pc, RuntimeValue& out_res) {
+    if (!frame.mir_fn) return false;
+    const Function& fn = *frame.mir_fn;
+
+    runtime::TieringFeedback& fb = runtime::TieringRegistry::instance().get_or_create(fn.name());
+    fb.record_backedge();
+
+    if (!runtime::OsrCoordinator::instance().is_enabled()) {
+        return false;
+    }
+
+    const BytecodeFunction* bfn = frame.bfn;
+    if (!bfn) return false;
+
+    auto it = bfn->pc_block_map.find(target_pc);
+    if (it == bfn->pc_block_map.end() || !it->second) {
+        return false;
+    }
+
+    BasicBlock* loop_header = const_cast<BasicBlock*>(it->second);
+    return runtime::OsrCoordinator::instance().try_osr_migration(*this, fn, loop_header, frame, out_res);
 }
 
 } // namespace brass

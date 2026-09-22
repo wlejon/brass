@@ -3,6 +3,9 @@
 #include <brass/vm/fast_interpreter.hpp>
 #include <brass/gc/generational_gc.hpp>
 #include <brass/gc/runtime_gc.hpp>
+#include <brass/runtime/coroutine.hpp>
+#include <brass/runtime/deopt.hpp>
+#include <brass/runtime/tiering.hpp>
 #include <cmath>
 #include <cstring>
 #include <bit>
@@ -26,6 +29,32 @@
 #endif
 
 namespace brass {
+
+struct FastCoroSuspendException : public std::exception {
+    uint64_t yielded_val = 0;
+    uint32_t state_id = 0;
+
+    explicit FastCoroSuspendException(uint64_t yv, uint32_t sid = 0)
+        : yielded_val(yv), state_id(sid) {}
+
+    const char* what() const noexcept override {
+        return "FastInterpreter coroutine suspended";
+    }
+};
+
+struct FastCoroState {
+    uint32_t state_id = 0;
+    bool is_done = false;
+    const BytecodeFunction* bfn = nullptr;
+    const Function* mir_fn = nullptr;
+    uint32_t pc = 0;
+    std::vector<uint64_t> registers;
+    std::vector<uint8_t> vector_storage;
+    uint64_t yielded_val = 0;
+    uint64_t resume_arg = 0;
+    uint8_t resume_dst_reg = 0;
+    runtime::BrassCoroFrame* c_frame = nullptr;
+};
 
 struct FastFrame {
     const BytecodeFunction* bfn = nullptr;

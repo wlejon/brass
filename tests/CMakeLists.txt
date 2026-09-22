@@ -12,6 +12,7 @@ add_executable(brass_unit_tests
     unit/test_interpreter.cpp
     unit/test_bytecode_compiler.cpp
     unit/test_fast_interpreter.cpp
+    unit/test_fast_interpreter_advanced.cpp
     unit/test_target_calling_conv.cpp
     unit/test_aarch64_registers.cpp
     unit/test_aarch64_operands.cpp

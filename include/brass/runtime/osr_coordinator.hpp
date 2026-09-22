@@ -18,6 +18,8 @@
 
 namespace brass {
 class Interpreter;
+class FastInterpreter;
+struct FastFrame;
 }
 
 namespace brass::runtime {
@@ -47,6 +49,14 @@ public:
         const Function& fn,
         BasicBlock* loop_header,
         InterpreterFrame& frame,
+        RuntimeValue& out_result
+    );
+
+    bool try_osr_migration(
+        FastInterpreter& interp,
+        const Function& fn,
+        BasicBlock* loop_header,
+        FastFrame& frame,
         RuntimeValue& out_result
     );
 

@@ -1,5 +1,7 @@
 #include <brass/runtime/osr_coordinator.hpp>
 #include <brass/interpreter/interpreter.hpp>
+#include <brass/vm/fast_interpreter.hpp>
+#include "../vm/fast_interpreter_impl.hpp"
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/osr.hpp>
 #include <brass/embedding/embedding.hpp>
@@ -241,6 +243,175 @@ bool OsrCoordinator::try_osr_migration(
         using NativeOsrFn = int64_t (*)(const OsrMigrationFrame*);
         int64_t r = reinterpret_cast<NativeOsrFn>(osr_entry_addr)(&mig_frame);
         out_result = deopt_occurred ? deopt_res : RuntimeValue::from_bits(ret_t, static_cast<uint64_t>(r));
+    }
+
+    total_osr_migrations_++;
+    return true;
+}
+
+bool OsrCoordinator::try_osr_migration(
+    FastInterpreter& interp,
+    const Function& fn,
+    BasicBlock* loop_header,
+    FastFrame& frame,
+    RuntimeValue& out_result
+) {
+    if (!enabled_ || !loop_header) return false;
+
+    TieringFeedback& feedback = TieringRegistry::instance().get_or_create(fn.name());
+    feedback.record_backedge();
+
+    if (feedback.is_bailed_out() || !feedback.should_trigger_osr(threshold_)) {
+        return false;
+    }
+
+    std::string cache_key = std::string(fn.name()) + "@" + std::to_string(loop_header->id());
+    CompiledModule* comp_mod = nullptr;
+    void* osr_entry_addr = nullptr;
+    OsrTarget target;
+
+    {
+        std::lock_guard<std::mutex> lock(osr_mutex_);
+        auto mod_it = osr_modules_.find(cache_key);
+        if (mod_it != osr_modules_.end()) {
+            comp_mod = mod_it->second.get();
+        } else {
+            if (!fn.parent()) return false;
+            HostEngine engine;
+            auto compiled = engine.compile_with_osr(*fn.parent(), fn.name(), loop_header->id());
+            if (!compiled) {
+                feedback.record_bailout("OSR compilation failed");
+                return false;
+            }
+            comp_mod = compiled.get();
+            osr_modules_[cache_key] = std::move(compiled);
+
+            OsrTarget t = analyze_osr_target(const_cast<Function&>(fn), loop_header);
+            osr_targets_[cache_key] = std::move(t);
+        }
+
+        if (!comp_mod) return false;
+
+        target = osr_targets_[cache_key];
+        osr_entry_addr = comp_mod->get_osr_entry_address(fn.name());
+        if (!osr_entry_addr) {
+            feedback.record_bailout("OSR entry point not found");
+            return false;
+        }
+    }
+
+    // Pack migration frame with live-in values from the FastFrame
+    OsrMigrationFrame mig_frame;
+    mig_frame.loop_header_id = loop_header->id();
+    const BytecodeFunction* bfn = frame.bfn;
+    for (size_t i = 0; i < target.live_ins.size() && i < OsrMigrationFrame::kMaxInlineSlots; ++i) {
+        Value* v = target.live_ins[i];
+        uint64_t val = 0;
+        if (bfn) {
+            auto it = bfn->ssa_to_reg.find(v->id());
+            if (it != bfn->ssa_to_reg.end() && it->second < frame.num_registers) {
+                val = frame.registers[it->second];
+            }
+        }
+        mig_frame.add_slot(static_cast<uint32_t>(i), val);
+    }
+
+    bool deopt_occurred = false;
+    RuntimeValue deopt_res;
+
+    auto prev_handler = get_deopt_handler();
+    register_deopt_handler([&](const DeoptFrame& dframe) -> void* {
+        deopt_occurred = true;
+        total_native_deopts_++;
+        TieringFeedback& fb = TieringRegistry::instance().get_or_create(fn.name());
+        fb.record_deoptimization();
+        std::vector<RuntimeValue> state_vals = dframe.to_runtime_values();
+        const Instruction* g_inst = nullptr;
+        for (const auto* bb : fn.blocks()) {
+            if (!bb) continue;
+            for (const auto* inst : *bb) {
+                if (inst && inst->opcode() == Opcode::guard && inst->resume_id() == dframe.resume_id) {
+                    g_inst = inst;
+                    break;
+                }
+            }
+            if (g_inst) break;
+        }
+        if (g_inst) {
+            for (size_t i = 0; i < g_inst->state_map().size() && i < state_vals.size(); ++i) {
+                const Value* sv = g_inst->state_map()[i];
+                if (sv && sv->type().is_gcref() && !state_vals[i].is_gcref()) {
+                    state_vals[i] = RuntimeValue::from_gcref(state_vals[i].as_u64());
+                }
+            }
+        }
+        deopt_res = interp.resume(fn, dframe.resume_id, state_vals);
+        return reinterpret_cast<void*>(deopt_res.as_u64());
+    });
+
+    struct HandlerScopeGuard {
+        DeoptHandlerFn prev;
+        ~HandlerScopeGuard() {
+            register_deopt_handler(prev);
+        }
+    } guard{prev_handler};
+
+    // Invoke specialized OSR entry stub
+    Type ret_t = fn.return_type();
+    if (ret_t.is_void()) {
+        using NativeOsrFn = void (*)(const OsrMigrationFrame*);
+        reinterpret_cast<NativeOsrFn>(osr_entry_addr)(&mig_frame);
+        out_result = deopt_occurred ? deopt_res : RuntimeValue::from_void();
+    } else if (ret_t.is_float()) {
+        if (ret_t.kind() == TypeKind::F32) {
+            using NativeOsrFn = float (*)(const OsrMigrationFrame*);
+            float r = reinterpret_cast<NativeOsrFn>(osr_entry_addr)(&mig_frame);
+            out_result = deopt_occurred ? deopt_res : RuntimeValue::from_f32(r);
+        } else {
+            using NativeOsrFn = double (*)(const OsrMigrationFrame*);
+            double r = reinterpret_cast<NativeOsrFn>(osr_entry_addr)(&mig_frame);
+            out_result = deopt_occurred ? deopt_res : RuntimeValue::from_f64(r);
+        }
+    } else if (ret_t.is_vector()) {
+#if defined(__x86_64__) || defined(_M_X64)
+        using NativeOsrFn = __m128 (*)(const OsrMigrationFrame*);
+        __m128 r = reinterpret_cast<NativeOsrFn>(osr_entry_addr)(&mig_frame);
+        if (deopt_occurred) {
+            out_result = deopt_res;
+        } else {
+            alignas(16) uint8_t b[16];
+            std::memcpy(b, &r, 16);
+            out_result = RuntimeValue::from_v128(ret_t, b);
+        }
+#elif defined(__aarch64__) || defined(_M_ARM64)
+        using NativeOsrFn = uint8x16_t (*)(const OsrMigrationFrame*);
+        uint8x16_t r = reinterpret_cast<NativeOsrFn>(osr_entry_addr)(&mig_frame);
+        if (deopt_occurred) {
+            out_result = deopt_res;
+        } else {
+            alignas(16) uint8_t b[16];
+            vst1q_u8(b, r);
+            out_result = RuntimeValue::from_v128(ret_t, b);
+        }
+#else
+        (void)osr_entry_addr;
+        alignas(16) uint8_t b[16] = {0};
+        out_result = RuntimeValue::from_v128(ret_t, b);
+#endif
+    } else if (ret_t.is_i32()) {
+        using NativeOsrFn = int32_t (*)(const OsrMigrationFrame*);
+        int32_t r = reinterpret_cast<NativeOsrFn>(osr_entry_addr)(&mig_frame);
+        out_result = deopt_occurred ? deopt_res : RuntimeValue::from_i32(r);
+    } else {
+        using NativeOsrFn = uint64_t (*)(const OsrMigrationFrame*);
+        uint64_t r = reinterpret_cast<NativeOsrFn>(osr_entry_addr)(&mig_frame);
+        if (deopt_occurred) {
+            out_result = deopt_res;
+        } else if (ret_t.is_gcref()) {
+            out_result = RuntimeValue::from_gcref(static_cast<uintptr_t>(r));
+        } else {
+            out_result = RuntimeValue::from_bits(ret_t, r);
+        }
     }
 
     total_osr_migrations_++;

@@ -23,6 +23,7 @@ class GenerationalGC;
 class FastInterpreter;
 
 struct FastFrame;
+struct FastCoroState;
 
 using FastHostFn = std::function<RuntimeValue(FastInterpreter& interp, const std::vector<RuntimeValue>& args)>;
 using FastDeoptHandler = std::function<RuntimeValue(FastInterpreter& interp, const DeoptResult& deopt)>;
@@ -51,7 +52,7 @@ public:
     MiniCheneyGC& gc() noexcept { return gc_; }
     const MiniCheneyGC& gc() const noexcept { return gc_; }
 
-    void set_generational_gc(GenerationalGC* gc) noexcept { gen_gc_ = gc; }
+    void set_generational_gc(GenerationalGC* gc) noexcept;
     GenerationalGC* generational_gc() noexcept { return gen_gc_; }
     const GenerationalGC* generational_gc() const noexcept { return gen_gc_; }
 
@@ -123,6 +124,26 @@ public:
     const BytecodeFunction* get_or_compile(const Function& fn);
     void clear_compile_cache() noexcept;
 
+    // Coroutine operations
+    uintptr_t coro_create(const BytecodeFunction* bfn, const std::vector<uint64_t>& args = {});
+    uintptr_t coro_create(const Function& fn, const std::vector<RuntimeValue>& args = {});
+    uintptr_t coro_create(const Module& mod, std::string_view callee, const std::vector<RuntimeValue>& args = {});
+    uintptr_t coro_create(std::string_view callee, const std::vector<RuntimeValue>& args = {});
+    uint64_t coro_resume(uintptr_t handle, uint64_t input_val = 0);
+    RuntimeValue coro_resume_val(uintptr_t handle, RuntimeValue input_val = RuntimeValue::from_i64(0));
+    void coro_suspend(FastFrame& frame, uint8_t dst_reg, uint8_t yield_reg, uint32_t resume_id);
+    void coro_destroy(uintptr_t handle);
+    bool coro_is_done(uintptr_t handle) const;
+    FastCoroState* get_coro_state(uintptr_t handle);
+
+    // Exception handling helpers
+    void handle_throw(FastFrame& frame, uint8_t reg, const uint32_t*& pc, const uint32_t* code_base);
+    void handle_invoke(FastFrame& frame, const CallSiteInfo& cs, const uint32_t*& pc, const uint32_t* code_base);
+    void handle_resume(FastFrame& frame, uint8_t reg);
+
+    // OSR backedge helper
+    bool handle_osr_backedge(FastFrame& frame, uint32_t target_pc, RuntimeValue& out_res);
+
     // Internal execution helpers
     RuntimeValue execute_frame(FastFrame& frame);
     RuntimeValue execute_call(FastFrame& frame, const CallSiteInfo& cs, BytecodeOp call_op);
@@ -158,6 +179,9 @@ private:
     DeoptResult last_deopt_;
     FastDeoptHandler deopt_handler_;
     RuntimeValue current_exception_;
+
+    std::unordered_map<uintptr_t, std::unique_ptr<FastCoroState>> active_coros_;
+    FastCoroState* active_coro_frame_ = nullptr;
 };
 
 } // namespace brass

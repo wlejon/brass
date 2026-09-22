@@ -29,7 +29,9 @@ std::unique_ptr<BytecodeFunction> BytecodeCompiler::compile(const Function& fn) 
         for (size_t i = 0; i < entry->param_count(); ++i) {
             const Value* p = entry->param(i);
             if (p) {
-                ctx.reg_map[p->id()] = static_cast<uint8_t>(next_reg++);
+                uint8_t r = static_cast<uint8_t>(next_reg++);
+                ctx.reg_map[p->id()] = r;
+                bfn->ssa_to_reg[p->id()] = r;
             }
         }
     } else {
@@ -43,7 +45,9 @@ std::unique_ptr<BytecodeFunction> BytecodeCompiler::compile(const Function& fn) 
         for (size_t i = 0; i < bb->param_count(); ++i) {
             const Value* p = bb->param(i);
             if (p) {
-                ctx.reg_map[p->id()] = static_cast<uint8_t>(next_reg++);
+                uint8_t r = static_cast<uint8_t>(next_reg++);
+                ctx.reg_map[p->id()] = r;
+                bfn->ssa_to_reg[p->id()] = r;
             }
         }
     }
@@ -53,7 +57,9 @@ std::unique_ptr<BytecodeFunction> BytecodeCompiler::compile(const Function& fn) 
         if (!bb) continue;
         for (const auto* inst : *bb) {
             if (inst && inst->produces_value() && inst->result()) {
-                ctx.reg_map[inst->result()->id()] = static_cast<uint8_t>(next_reg++);
+                uint8_t r = static_cast<uint8_t>(next_reg++);
+                ctx.reg_map[inst->result()->id()] = r;
+                bfn->ssa_to_reg[inst->result()->id()] = r;
             }
         }
     }
@@ -62,6 +68,29 @@ std::unique_ptr<BytecodeFunction> BytecodeCompiler::compile(const Function& fn) 
     ctx.scratch_reg = static_cast<uint8_t>(next_reg++);
     ctx.scratch_reg2 = static_cast<uint8_t>(next_reg++);
     bfn->num_registers = next_reg;
+
+    bfn->register_types.assign(next_reg, Type::i64());
+    if (entry) {
+        for (size_t i = 0; i < entry->param_count(); ++i) {
+            const Value* p = entry->param(i);
+            if (p) bfn->register_types[ctx.get_reg(p)] = p->type();
+        }
+    }
+    for (const auto* bb : fn.blocks()) {
+        if (!bb || bb == entry) continue;
+        for (size_t i = 0; i < bb->param_count(); ++i) {
+            const Value* p = bb->param(i);
+            if (p) bfn->register_types[ctx.get_reg(p)] = p->type();
+        }
+    }
+    for (const auto* bb : fn.blocks()) {
+        if (!bb) continue;
+        for (const auto* inst : *bb) {
+            if (inst && inst->produces_value() && inst->result()) {
+                bfn->register_types[ctx.get_reg(inst->result())] = inst->result()->type();
+            }
+        }
+    }
 
     if (next_reg > 256) {
         throw std::runtime_error("Function @" + std::string(fn.name()) +
@@ -72,7 +101,9 @@ std::unique_ptr<BytecodeFunction> BytecodeCompiler::compile(const Function& fn) 
     // Step 2: Linearize Blocks & Lower Instructions
     for (const auto* bb : fn.blocks()) {
         if (!bb) continue;
-        ctx.block_pc_map[bb] = static_cast<uint32_t>(bfn->current_pc());
+        uint32_t b_pc = static_cast<uint32_t>(bfn->current_pc());
+        ctx.block_pc_map[bb] = b_pc;
+        bfn->pc_block_map[b_pc] = bb;
 
         for (const auto* inst : *bb) {
             if (!inst) continue;

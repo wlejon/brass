@@ -35,88 +35,74 @@ const BytecodeFunction* FastInterpreter::get_or_compile(const Function& fn) {
     return ptr;
 }
 
+void FastInterpreter::set_generational_gc(GenerationalGC* gc) noexcept {
+    gen_gc_ = gc;
+    if (gen_gc_) {
+        gen_gc_->set_root_provider([this](std::vector<uintptr_t*>& roots) {
+            this->collect_all_roots(roots);
+        });
+    }
+}
+
 uintptr_t FastInterpreter::allocate_gc(size_t size, uint64_t pointer_mask, uint32_t type_tag) {
     std::vector<uintptr_t*> roots;
     collect_all_roots(roots);
+    if (gen_gc_) {
+        return gen_gc_->allocate(size, pointer_mask, type_tag, roots);
+    }
     return gc_.allocate(size, pointer_mask, type_tag, roots);
 }
 
 void FastInterpreter::collect_all_roots(std::vector<uintptr_t*>& roots) {
+    // 1. Walk active frames on the call stack
     for (FastFrame* f = current_frame_; f != nullptr; f = f->caller) {
         for (uint32_t i = 0; i < f->num_registers; ++i) {
-            uintptr_t val = static_cast<uintptr_t>(f->registers[i]);
-            if (val != 0 && (gc_.is_valid_object(val) || (gen_gc_ && gen_gc_->is_valid_object(val)))) {
+            if (f->registers[i] == 0) continue;
+            bool is_gc = false;
+            if (f->bfn && i < f->bfn->register_types.size()) {
+                is_gc = f->bfn->register_types[i].is_gcref();
+            }
+            if (!is_gc) {
+                uintptr_t val = static_cast<uintptr_t>(f->registers[i]);
+                is_gc = gc_.is_valid_object(val) || (gen_gc_ && gen_gc_->is_valid_object(val));
+            }
+            if (is_gc) {
                 roots.push_back(reinterpret_cast<uintptr_t*>(&f->registers[i]));
             }
         }
     }
-}
 
-RuntimeValue FastInterpreter::run(const Function& fn) {
-    return run(fn, {});
-}
-
-RuntimeValue FastInterpreter::run(const Function& fn, const std::vector<RuntimeValue>& args) {
-    if (fn.parent()) {
-        module_ = fn.parent();
-    }
-    const BytecodeFunction* bfn = get_or_compile(fn);
-    return run(*bfn, args);
-}
-
-RuntimeValue FastInterpreter::run(const BytecodeFunction& fn) {
-    return run(fn, {});
-}
-
-RuntimeValue FastInterpreter::run(const BytecodeFunction& fn, const std::vector<RuntimeValue>& args) {
-    uint32_t num_regs = std::max<uint32_t>(fn.num_registers, 1);
-    uint64_t* registers = static_cast<uint64_t*>(BRASS_ALLOCA(num_regs * sizeof(uint64_t)));
-    std::memset(registers, 0, num_regs * sizeof(uint64_t));
-
-    FastFrame frame;
-    frame.bfn = &fn;
-    frame.registers = registers;
-    frame.num_registers = num_regs;
-
-    for (size_t i = 0; i < args.size() && i < num_regs; ++i) {
-        registers[i] = args[i].raw_bits();
-        if (args[i].is_vector()) {
-            uint8_t* vregs = frame.ensure_vector_regs();
-            std::memcpy(vregs + i * 32, args[i].vec_bytes(), 32);
+    // 2. Scan suspended coroutines
+    for (auto& [handle, coro] : active_coros_) {
+        if (coro && !coro->is_done) {
+            for (size_t i = 0; i < coro->registers.size(); ++i) {
+                if (coro->registers[i] == 0) continue;
+                bool is_gc = false;
+                if (coro->bfn && i < coro->bfn->register_types.size()) {
+                    is_gc = coro->bfn->register_types[i].is_gcref();
+                }
+                if (!is_gc) {
+                    uintptr_t val = static_cast<uintptr_t>(coro->registers[i]);
+                    is_gc = gc_.is_valid_object(val) || (gen_gc_ && gen_gc_->is_valid_object(val));
+                }
+                if (is_gc) {
+                    roots.push_back(reinterpret_cast<uintptr_t*>(&coro->registers[i]));
+                }
+            }
         }
     }
 
-    FrameGuard guard(*this, frame);
-    return execute_frame(frame);
-}
-
-RuntimeValue FastInterpreter::run(std::string_view fn_name) {
-    return run(fn_name, {});
-}
-
-RuntimeValue FastInterpreter::run(std::string_view fn_name, const std::vector<RuntimeValue>& args) {
-    if (bytecode_module_) {
-        const BytecodeFunction* bfn = bytecode_module_->get_function(fn_name);
-        if (bfn) return run(*bfn, args);
+    // 3. Scan current_exception_ if gcref
+    if (current_exception_.is_gcref() && !current_exception_.is_null()) {
+        roots.push_back(reinterpret_cast<uintptr_t*>(&current_exception_.raw_bits_ref()));
     }
-    if (module_) {
-        const Function* fn = module_->get_function(fn_name);
-        if (fn) return run(*fn, args);
-    }
-    throw InterpreterException("Function @" + std::string(fn_name) + " not found");
-}
 
-RuntimeValue FastInterpreter::run(const Module& mod, std::string_view entry_name) {
-    return run(mod, entry_name, {});
-}
-
-RuntimeValue FastInterpreter::run(const Module& mod, std::string_view entry_name, const std::vector<RuntimeValue>& args) {
-    module_ = &mod;
-    const Function* fn = mod.get_function(entry_name);
-    if (!fn) {
-        throw InterpreterException("Entry function @" + std::string(entry_name) + " not found in module");
+    // 4. Scan last_deopt_ state map if gcref
+    for (auto& val : last_deopt_.state_map) {
+        if (val.is_gcref() && !val.is_null()) {
+            roots.push_back(reinterpret_cast<uintptr_t*>(&val.raw_bits_ref()));
+        }
     }
-    return run(*fn, args);
 }
 
 RuntimeValue FastInterpreter::resume(const Function& fn, uint32_t resume_id, const std::vector<RuntimeValue>& state_values) {
@@ -145,17 +131,28 @@ RuntimeValue FastInterpreter::resume(const BytecodeFunction& fn, uint32_t resume
 
     FastFrame frame;
     frame.bfn = &fn;
+    frame.mir_fn = module_ ? module_->get_function(fn.name) : nullptr;
     frame.registers = registers;
     frame.num_registers = num_regs;
     frame.pc = target_entry->target_pc;
 
-    for (size_t i = 0; i < state_values.size() && i < target_entry->param_regs.size(); ++i) {
-        uint8_t reg = target_entry->param_regs[i];
-        if (reg < num_regs) {
-            registers[reg] = state_values[i].raw_bits();
+    if (!target_entry->param_regs.empty()) {
+        for (size_t i = 0; i < state_values.size() && i < target_entry->param_regs.size(); ++i) {
+            uint8_t reg = target_entry->param_regs[i];
+            if (reg < num_regs) {
+                registers[reg] = state_values[i].raw_bits();
+                if (state_values[i].is_vector()) {
+                    uint8_t* vregs = frame.ensure_vector_regs();
+                    std::memcpy(vregs + reg * 32, state_values[i].vec_bytes(), 32);
+                }
+            }
+        }
+    } else {
+        for (size_t i = 0; i < state_values.size() && i < num_regs; ++i) {
+            registers[i] = state_values[i].raw_bits();
             if (state_values[i].is_vector()) {
                 uint8_t* vregs = frame.ensure_vector_regs();
-                std::memcpy(vregs + reg * 32, state_values[i].vec_bytes(), 32);
+                std::memcpy(vregs + i * 32, state_values[i].vec_bytes(), 32);
             }
         }
     }
@@ -677,13 +674,29 @@ loop_start:
         }
 
         OP_CASE(jump) {
-            pc += decode_s16(inst);
+            int16_t off = decode_s16(inst);
+            if (off < 0) {
+                uint32_t target_pc = static_cast<uint32_t>(pc - code_base + off);
+                RuntimeValue osr_res;
+                if (handle_osr_backedge(frame, target_pc, osr_res)) {
+                    return osr_res;
+                }
+            }
+            pc += off;
             DISPATCH();
         }
 
         OP_CASE(jump_if) {
             if (registers[decode_dst(inst)] != 0) {
-                pc += decode_s16(inst);
+                int16_t off = decode_s16(inst);
+                if (off < 0) {
+                    uint32_t target_pc = static_cast<uint32_t>(pc - code_base + off);
+                    RuntimeValue osr_res;
+                    if (handle_osr_backedge(frame, target_pc, osr_res)) {
+                        return osr_res;
+                    }
+                }
+                pc += off;
             } else {
                 pc++;
             }
@@ -692,7 +705,15 @@ loop_start:
 
         OP_CASE(jump_if_not) {
             if (registers[decode_dst(inst)] == 0) {
-                pc += decode_s16(inst);
+                int16_t off = decode_s16(inst);
+                if (off < 0) {
+                    uint32_t target_pc = static_cast<uint32_t>(pc - code_base + off);
+                    RuntimeValue osr_res;
+                    if (handle_osr_backedge(frame, target_pc, osr_res)) {
+                        return osr_res;
+                    }
+                }
+                pc += off;
             } else {
                 pc++;
             }
@@ -782,12 +803,44 @@ loop_start:
                 last_deopt_.exit_stub = g.exit_stub;
                 last_deopt_.resume_id = g.resume_id;
                 last_deopt_.state_map.clear();
+                last_deopt_.state_map.reserve(g.state_regs.size());
+
+                runtime::DeoptFrame df;
+                df.resume_id = g.resume_id;
+                df.exit_symbol = g.exit_stub;
+                df.reason = runtime::DeoptReason::Generic;
+
                 for (uint8_t sreg : g.state_regs) {
-                    last_deopt_.state_map.push_back(RuntimeValue::from_bits(Type::i64(), registers[sreg]));
+                    Type t = (sreg < fn.register_types.size()) ? fn.register_types[sreg] : Type::i64();
+                    RuntimeValue rv = RuntimeValue::from_bits(t, registers[sreg]);
+                    last_deopt_.state_map.push_back(rv);
+                    df.push_value(registers[sreg], t.is_gcref() ? runtime::DeoptValueKind::GcRef : runtime::DeoptValueKind::Int64);
                 }
+                runtime::set_thread_deopt_frame(&df);
+
                 if (deopt_handler_) {
                     return deopt_handler_(*this, last_deopt_);
                 }
+
+                if (module_ && !g.exit_stub.empty()) {
+                    const Function* stub_fn = module_->get_function(g.exit_stub);
+                    if (stub_fn) {
+                        return run(*stub_fn, last_deopt_.state_map);
+                    }
+                }
+
+                for (const auto& rp : fn.resume_points) {
+                    if (rp.resume_id == g.resume_id) {
+                        if (!rp.param_regs.empty()) {
+                            for (size_t i = 0; i < last_deopt_.state_map.size() && i < rp.param_regs.size(); ++i) {
+                                registers[rp.param_regs[i]] = last_deopt_.state_map[i].raw_bits();
+                            }
+                        }
+                        pc = code_base + rp.target_pc;
+                        DISPATCH();
+                    }
+                }
+
                 throw DeoptException(last_deopt_);
             }
             pc++;
@@ -806,44 +859,14 @@ loop_start:
 
         OP_CASE(throw_) {
             uint8_t reg = decode_dst(inst);
-            current_exception_ = RuntimeValue::from_bits(Type::i64(), registers[reg]);
-            uint32_t cur_pc = static_cast<uint32_t>(pc - code_base);
-            bool caught = false;
-            for (const auto& ee : fn.exception_table) {
-                if (cur_pc >= ee.start_pc && cur_pc < ee.end_pc) {
-                    pc = code_base + ee.handler_pc;
-                    caught = true;
-                    break;
-                }
-            }
-            if (caught) {
-                DISPATCH();
-            }
-            throw InterpreterThrownException(current_exception_);
+            handle_throw(frame, reg, pc, code_base);
+            DISPATCH();
         }
 
         OP_CASE(invoke) {
             uint16_t cs_idx = decode_u16(inst);
             const auto& cs = fn.call_sites[cs_idx];
-            bool threw = false;
-            try {
-                execute_call(frame, cs, BytecodeOp::call);
-            } catch (const InterpreterThrownException& ex) {
-                threw = true;
-                current_exception_ = ex.value();
-            }
-
-            uint32_t cur_pc = static_cast<uint32_t>(pc - code_base);
-            if (threw) {
-                for (const auto& ee : fn.exception_table) {
-                    if (cur_pc >= ee.start_pc && cur_pc <= ee.end_pc) {
-                        pc = code_base + ee.handler_pc;
-                        DISPATCH();
-                    }
-                }
-                throw InterpreterThrownException(current_exception_);
-            }
-            pc++;
+            handle_invoke(frame, cs, pc, code_base);
             DISPATCH();
         }
 
@@ -854,16 +877,53 @@ loop_start:
         }
 
         OP_CASE(resume) {
-            if (decode_dst(inst) != 0) {
-                current_exception_ = RuntimeValue::from_bits(Type::i64(), registers[decode_dst(inst)]);
-            }
-            throw InterpreterThrownException(current_exception_);
+            uint8_t reg = decode_dst(inst);
+            handle_resume(frame, reg);
+            pc++;
+            DISPATCH();
         }
 
-        OP_CASE(coro_create)
-        OP_CASE(coro_suspend)
-        OP_CASE(coro_resume)
+        OP_CASE(coro_create) {
+            uint8_t dst = decode_dst(inst);
+            uint16_t cs_idx = decode_u16(inst);
+            const auto& cs = fn.call_sites[cs_idx];
+            std::vector<RuntimeValue> args;
+            args.reserve(cs.arg_regs.size());
+            for (uint8_t ar : cs.arg_regs) {
+                args.push_back(RuntimeValue::from_bits(Type::i64(), registers[ar]));
+            }
+            uintptr_t handle = coro_create(cs.callee, args);
+            registers[dst] = handle;
+            pc++;
+            DISPATCH();
+        }
+
+        OP_CASE(coro_suspend) {
+            uint8_t dst_reg = decode_dst(inst);
+            uint8_t yield_reg = decode_src1(inst);
+            uint32_t resume_id = decode_src2(inst);
+            frame.pc = static_cast<uint32_t>(pc - code_base);
+            coro_suspend(frame, dst_reg, yield_reg, resume_id);
+            pc++;
+            DISPATCH();
+        }
+
+        OP_CASE(coro_resume) {
+            uint8_t dst = decode_dst(inst);
+            uint8_t coro_reg = decode_src1(inst);
+            uint8_t input_reg = decode_src2(inst);
+            uintptr_t handle = registers[coro_reg];
+            uint64_t input_val = (input_reg != 255 && input_reg < frame.num_registers) ? registers[input_reg] : 0;
+            uint64_t res = coro_resume(handle, input_val);
+            registers[dst] = res;
+            pc++;
+            DISPATCH();
+        }
+
         OP_CASE(coro_destroy) {
+            uint8_t coro_reg = decode_src1(inst);
+            uintptr_t handle = registers[coro_reg];
+            coro_destroy(handle);
             pc++;
             DISPATCH();
         }

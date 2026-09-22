@@ -263,4 +263,72 @@ RuntimeValue FastInterpreter::execute_call_indirect(FastFrame& frame, const Call
     throw InterpreterException("Call indirect to unregistered target pointer: " + std::to_string(ptr));
 }
 
+RuntimeValue FastInterpreter::run(const Function& fn) {
+    return run(fn, {});
+}
+
+RuntimeValue FastInterpreter::run(const Function& fn, const std::vector<RuntimeValue>& args) {
+    if (fn.parent()) {
+        module_ = fn.parent();
+    }
+    const BytecodeFunction* bfn = get_or_compile(fn);
+    return run(*bfn, args);
+}
+
+RuntimeValue FastInterpreter::run(const BytecodeFunction& fn) {
+    return run(fn, {});
+}
+
+RuntimeValue FastInterpreter::run(const BytecodeFunction& fn, const std::vector<RuntimeValue>& args) {
+    uint32_t num_regs = std::max<uint32_t>(fn.num_registers, 1);
+    uint64_t* registers = static_cast<uint64_t*>(BRASS_ALLOCA(num_regs * sizeof(uint64_t)));
+    std::memset(registers, 0, num_regs * sizeof(uint64_t));
+
+    FastFrame frame;
+    frame.bfn = &fn;
+    frame.mir_fn = module_ ? module_->get_function(fn.name) : nullptr;
+    frame.registers = registers;
+    frame.num_registers = num_regs;
+
+    for (size_t i = 0; i < args.size() && i < num_regs; ++i) {
+        registers[i] = args[i].raw_bits();
+        if (args[i].is_vector()) {
+            uint8_t* vregs = frame.ensure_vector_regs();
+            std::memcpy(vregs + i * 32, args[i].vec_bytes(), 32);
+        }
+    }
+
+    FrameGuard guard(*this, frame);
+    return execute_frame(frame);
+}
+
+RuntimeValue FastInterpreter::run(std::string_view fn_name) {
+    return run(fn_name, {});
+}
+
+RuntimeValue FastInterpreter::run(std::string_view fn_name, const std::vector<RuntimeValue>& args) {
+    if (bytecode_module_) {
+        const BytecodeFunction* bfn = bytecode_module_->get_function(fn_name);
+        if (bfn) return run(*bfn, args);
+    }
+    if (module_) {
+        const Function* fn = module_->get_function(fn_name);
+        if (fn) return run(*fn, args);
+    }
+    throw InterpreterException("Function @" + std::string(fn_name) + " not found");
+}
+
+RuntimeValue FastInterpreter::run(const Module& mod, std::string_view entry_name) {
+    return run(mod, entry_name, {});
+}
+
+RuntimeValue FastInterpreter::run(const Module& mod, std::string_view entry_name, const std::vector<RuntimeValue>& args) {
+    module_ = &mod;
+    const Function* fn = mod.get_function(entry_name);
+    if (!fn) {
+        throw InterpreterException("Entry function @" + std::string(entry_name) + " not found in module");
+    }
+    return run(*fn, args);
+}
+
 } // namespace brass
