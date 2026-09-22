@@ -92,6 +92,7 @@
 #include <brass/debug/symbolicator.hpp>
 #include <brass/vm/bytecode.hpp>
 #include <brass/vm/bytecode_compiler.hpp>
+#include <brass/vm/fast_interpreter.hpp>
 
 #include <string_view>
 
