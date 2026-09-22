@@ -52,12 +52,22 @@ bool GenerationalGC::is_in_nursery(uintptr_t addr) const noexcept {
     return (addr >= start + sizeof(GenGcHeader)) && (addr < start + nursery_free_);
 }
 
-bool GenerationalGC::is_in_survivor(uintptr_t addr) const noexcept {
+bool GenerationalGC::is_in_survivor_from(uintptr_t addr) const noexcept {
     uintptr_t sf_start = heap_base_ + survivor_from_offset_;
+    return (addr >= sf_start + sizeof(GenGcHeader)) && (addr < sf_start + survivor_from_free_);
+}
+
+bool GenerationalGC::is_in_survivor_to(uintptr_t addr) const noexcept {
     uintptr_t st_start = heap_base_ + survivor_to_offset_;
-    bool in_from = (addr >= sf_start + sizeof(GenGcHeader)) && (addr < sf_start + survivor_from_free_);
-    bool in_to = (addr >= st_start + sizeof(GenGcHeader)) && (addr < st_start + survivor_to_free_);
-    return in_from || in_to;
+    return (addr >= st_start + sizeof(GenGcHeader)) && (addr < st_start + survivor_to_free_);
+}
+
+bool GenerationalGC::is_in_survivor(uintptr_t addr) const noexcept {
+    return is_in_survivor_from(addr) || is_in_survivor_to(addr);
+}
+
+bool GenerationalGC::is_scavenge_source(uintptr_t addr) const noexcept {
+    return is_in_nursery(addr) || is_in_survivor_from(addr);
 }
 
 bool GenerationalGC::is_young(uintptr_t addr) const noexcept {
@@ -231,7 +241,7 @@ void GenerationalGC::poison_range(uint8_t* start, size_t size) noexcept {
 }
 
 uintptr_t GenerationalGC::evacuate_young_object(uintptr_t obj_addr) {
-    if (!is_young(obj_addr)) return obj_addr;
+    if (!is_scavenge_source(obj_addr)) return obj_addr;
 
     auto* old_hdr = reinterpret_cast<GenGcHeader*>(obj_addr - sizeof(GenGcHeader));
     if (old_hdr->forwarding_address != 0) {
@@ -315,9 +325,9 @@ void GenerationalGC::minor_collect(std::vector<uintptr_t*>& extra_roots) {
                 // Preceding object overlaps card
                 size_t num_fields = prev_hdr->size / 8;
                 for (size_t f = 0; f < num_fields; ++f) {
-                    if (prev_hdr->pointer_mask & (1ULL << f)) {
+                    if (f < 64 && (prev_hdr->pointer_mask & (1ULL << f))) {
                         auto* slot = reinterpret_cast<uintptr_t*>(*prev_it + f * 8);
-                        if (*slot != 0 && is_young(*slot)) {
+                        if (*slot != 0 && is_scavenge_source(*slot)) {
                             card_roots.push_back(slot);
                         }
                     }
@@ -330,9 +340,9 @@ void GenerationalGC::minor_collect(std::vector<uintptr_t*>& extra_roots) {
             if (!hdr) continue;
             size_t num_fields = hdr->size / 8;
             for (size_t f = 0; f < num_fields; ++f) {
-                if (hdr->pointer_mask & (1ULL << f)) {
+                if (f < 64 && (hdr->pointer_mask & (1ULL << f))) {
                     auto* slot = reinterpret_cast<uintptr_t*>(*it + f * 8);
-                    if (*slot != 0 && is_young(*slot)) {
+                    if (*slot != 0 && is_scavenge_source(*slot)) {
                         card_roots.push_back(slot);
                     }
                 }
@@ -340,16 +350,20 @@ void GenerationalGC::minor_collect(std::vector<uintptr_t*>& extra_roots) {
         }
     });
 
+    // Deduplicate card roots to prevent processing the same slot multiple times
+    std::sort(card_roots.begin(), card_roots.end());
+    card_roots.erase(std::unique(card_roots.begin(), card_roots.end()), card_roots.end());
+
     // 2. Evacuate objects referenced by stack/thread roots
     for (uintptr_t* root_slot : all_roots) {
-        if (root_slot && *root_slot != 0 && is_young(*root_slot)) {
+        if (root_slot && *root_slot != 0 && is_scavenge_source(*root_slot)) {
             *root_slot = evacuate_young_object(*root_slot);
         }
     }
 
     // 3. Evacuate objects referenced by dirty card roots
     for (uintptr_t* card_root : card_roots) {
-        if (card_root && *card_root != 0 && is_young(*card_root)) {
+        if (card_root && *card_root != 0 && is_scavenge_source(*card_root)) {
             *card_root = evacuate_young_object(*card_root);
         }
     }
@@ -367,9 +381,9 @@ void GenerationalGC::minor_collect(std::vector<uintptr_t*>& extra_roots) {
 
             size_t num_fields = hdr->size / 8;
             for (size_t f = 0; f < num_fields; ++f) {
-                if (hdr->pointer_mask & (1ULL << f)) {
+                if (f < 64 && (hdr->pointer_mask & (1ULL << f))) {
                     auto* slot = reinterpret_cast<uintptr_t*>(payload + f * 8);
-                    if (*slot != 0 && is_young(*slot)) {
+                    if (*slot != 0 && is_scavenge_source(*slot)) {
                         *slot = evacuate_young_object(*slot);
                     }
                 }
@@ -383,13 +397,13 @@ void GenerationalGC::minor_collect(std::vector<uintptr_t*>& extra_roots) {
             size_t num_fields = hdr->size / 8;
             bool points_to_young = false;
             for (size_t f = 0; f < num_fields; ++f) {
-                if (hdr->pointer_mask & (1ULL << f)) {
+                if (f < 64 && (hdr->pointer_mask & (1ULL << f))) {
                     auto* slot = reinterpret_cast<uintptr_t*>(payload + f * 8);
-                    if (*slot != 0 && is_young(*slot)) {
+                    if (*slot != 0 && is_scavenge_source(*slot)) {
                         *slot = evacuate_young_object(*slot);
-                        if (is_young(*slot)) {
-                            points_to_young = true;
-                        }
+                    }
+                    if (*slot != 0 && is_young(*slot)) {
+                        points_to_young = true;
                     }
                 }
             }
@@ -412,7 +426,7 @@ void GenerationalGC::minor_collect(std::vector<uintptr_t*>& extra_roots) {
             if (prev_hdr && (*prev_it + prev_hdr->size) > card_start) {
                 size_t num_fields = prev_hdr->size / 8;
                 for (size_t f = 0; f < num_fields; ++f) {
-                    if (prev_hdr->pointer_mask & (1ULL << f)) {
+                    if (f < 64 && (prev_hdr->pointer_mask & (1ULL << f))) {
                         uintptr_t child = *reinterpret_cast<const uintptr_t*>(*prev_it + f * 8);
                         if (child != 0 && is_young(child)) {
                             still_dirty = true;
@@ -429,7 +443,7 @@ void GenerationalGC::minor_collect(std::vector<uintptr_t*>& extra_roots) {
                 if (!hdr) continue;
                 size_t num_fields = hdr->size / 8;
                 for (size_t f = 0; f < num_fields; ++f) {
-                    if (hdr->pointer_mask & (1ULL << f)) {
+                    if (f < 64 && (hdr->pointer_mask & (1ULL << f))) {
                         uintptr_t child = *reinterpret_cast<const uintptr_t*>(*it + f * 8);
                         if (child != 0 && is_young(child)) {
                             still_dirty = true;
@@ -523,7 +537,7 @@ void GenerationalGC::major_collect(std::vector<uintptr_t*>& extra_roots) {
 
         size_t num_fields = hdr->size / 8;
         for (size_t f = 0; f < num_fields; ++f) {
-            if (hdr->pointer_mask & (1ULL << f)) {
+            if (f < 64 && (hdr->pointer_mask & (1ULL << f))) {
                 auto* slot = reinterpret_cast<uintptr_t*>(obj_pos + sizeof(GenGcHeader) + f * 8);
                 if (*slot != 0 && is_valid_object(*slot)) {
                     *slot = evacuate_to_tenured(*slot);

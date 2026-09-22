@@ -15,9 +15,16 @@ class Arena {
 public:
     static constexpr size_t DefaultChunkSize = 64 * 1024; // 64 KB
 
+    using CleanupFn = void (*)(void*);
+    struct CleanupEntry {
+        CleanupFn fn;
+        void* obj;
+    };
+
     struct Marker {
         size_t chunk_index = 0;
         size_t offset = 0;
+        size_t cleanup_count = 0;
     };
 
     explicit Arena(size_t default_chunk_size = DefaultChunkSize);
@@ -31,10 +38,22 @@ public:
     void* allocate(size_t size, size_t alignment);
     void* allocate(size_t size);
 
+    void register_cleanup(CleanupFn fn, void* obj) {
+        cleanups_.push_back(CleanupEntry{fn, obj});
+    }
+
+    [[nodiscard]] size_t cleanup_count() const noexcept { return cleanups_.size(); }
+
     template <typename T, typename... Args>
     T* make(Args&&... args) {
         void* mem = allocate(sizeof(T), alignof(T));
-        return ::new (mem) T(std::forward<Args>(args)...);
+        T* obj = ::new (mem) T(std::forward<Args>(args)...);
+        if constexpr (!std::is_trivially_destructible_v<T>) {
+            register_cleanup([](void* ptr) {
+                static_cast<T*>(ptr)->~T();
+            }, obj);
+        }
+        return obj;
     }
 
     template <typename T>
@@ -47,6 +66,13 @@ public:
         if constexpr (!std::is_trivially_default_constructible_v<T>) {
             for (size_t i = 0; i < count; ++i) {
                 ::new (static_cast<void*>(ptr + i)) T();
+            }
+        }
+        if constexpr (!std::is_trivially_destructible_v<T>) {
+            for (size_t i = count; i > 0; --i) {
+                register_cleanup([](void* p) {
+                    static_cast<T*>(p)->~T();
+                }, ptr + (i - 1));
             }
         }
         return Span<T>(ptr, count);
@@ -97,6 +123,7 @@ private:
     size_t current_chunk_idx_ = 0;
     size_t bytes_allocated_ = 0;
     size_t bytes_capacity_ = 0;
+    std::vector<CleanupEntry> cleanups_;
 };
 
 class ScopedArenaReset {

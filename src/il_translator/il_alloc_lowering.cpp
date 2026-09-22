@@ -531,7 +531,13 @@ Value* AllocLoweringHelper::lower_env_create_brass(Builder& b, Value* parent_val
     // HostGcHeader at cur_top
     uint64_t w0 = static_cast<uint64_t>(alloc_size) | (HOSTGC_TYPE_ENV << 32);
     b.build_store(Type::i64(), cur_top, 0, b.build_iconst_i64(static_cast<int64_t>(w0)));
-    b.build_store(Type::i64(), cur_top, 8, b.build_iconst_i64(1));
+    uint64_t ptr_mask = 1ULL;
+    for (uint32_t i = 0; i < param_count; ++i) {
+        if (2 + i < 64) {
+            ptr_mask |= (1ULL << (2 + i));
+        }
+    }
+    b.build_store(Type::i64(), cur_top, 8, b.build_iconst_i64(static_cast<int64_t>(ptr_mask)));
     b.build_store(Type::i64(), cur_top, 16, b.build_iconst_i64(0));
 
     // BronzeEnv payload at env_addr

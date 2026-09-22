@@ -16,7 +16,8 @@ Arena::Arena(Arena&& other) noexcept
       chunks_(std::move(other.chunks_)),
       current_chunk_idx_(other.current_chunk_idx_),
       bytes_allocated_(other.bytes_allocated_),
-      bytes_capacity_(other.bytes_capacity_) {
+      bytes_capacity_(other.bytes_capacity_),
+      cleanups_(std::move(other.cleanups_)) {
     other.current_chunk_idx_ = 0;
     other.bytes_allocated_ = 0;
     other.bytes_capacity_ = 0;
@@ -30,6 +31,7 @@ Arena& Arena::operator=(Arena&& other) noexcept {
         current_chunk_idx_ = other.current_chunk_idx_;
         bytes_allocated_ = other.bytes_allocated_;
         bytes_capacity_ = other.bytes_capacity_;
+        cleanups_ = std::move(other.cleanups_);
 
         other.current_chunk_idx_ = 0;
         other.bytes_allocated_ = 0;
@@ -98,12 +100,18 @@ void* Arena::allocate(size_t size) {
 
 Arena::Marker Arena::get_marker() const noexcept {
     if (chunks_.empty()) {
-        return Marker{0, 0};
+        return Marker{0, 0, cleanups_.size()};
     }
-    return Marker{current_chunk_idx_, chunks_[current_chunk_idx_].used};
+    return Marker{current_chunk_idx_, chunks_[current_chunk_idx_].used, cleanups_.size()};
 }
 
 void Arena::reset_to_marker(Marker marker) {
+    while (cleanups_.size() > marker.cleanup_count) {
+        auto entry = cleanups_.back();
+        cleanups_.pop_back();
+        entry.fn(entry.obj);
+    }
+
     if (chunks_.empty()) {
         return;
     }
@@ -124,6 +132,11 @@ void Arena::reset_to_marker(Marker marker) {
 }
 
 void Arena::reset() {
+    while (!cleanups_.empty()) {
+        auto entry = cleanups_.back();
+        cleanups_.pop_back();
+        entry.fn(entry.obj);
+    }
     current_chunk_idx_ = 0;
     for (auto& chunk : chunks_) {
         chunk.used = 0;
@@ -132,6 +145,11 @@ void Arena::reset() {
 }
 
 void Arena::clear() {
+    while (!cleanups_.empty()) {
+        auto entry = cleanups_.back();
+        cleanups_.pop_back();
+        entry.fn(entry.obj);
+    }
     for (auto& chunk : chunks_) {
         if (chunk.memory != nullptr) {
             ::operator delete(chunk.memory);

@@ -193,10 +193,15 @@ BRONZE_WEAK uint64_t bronze_resolve_name(uint32_t key_index, int32_t soft) {
 
 int64_t bronze_env_create(int64_t parent_box, int32_t size) {
     size_t alloc_size = sizeof(BronzeEnv) + (size > 1 ? sizeof(int64_t) * (size - 1) : 0);
+    uint64_t pointer_mask = 1ULL;
+    for (int32_t i = 0; i < size; ++i) {
+        if (2 + i < 64) {
+            pointer_mask |= (1ULL << (2 + i));
+        }
+    }
     auto* tlab = brass::get_active_tlab();
     if (tlab && tlab->owner_gc && !tlab->owner_gc->stress_mode()) {
         tlab->refill(alloc_size + sizeof(HostGcHeader));
-        uint64_t pointer_mask = 1ULL;
         uintptr_t addr = tlab->allocate_fast(alloc_size, pointer_mask, 1 /* type_tag */);
         if (addr != 0) {
             auto* env = reinterpret_cast<BronzeEnv*>(addr);
@@ -211,8 +216,7 @@ int64_t bronze_env_create(int64_t parent_box, int32_t size) {
     BronzeEnv* env = nullptr;
     HostGC* host_gc = brass::get_active_host_gc();
     if (host_gc) {
-        // Bit 0 of pointer mask is parent_box link (which is a GC pointer)
-        uint64_t pointer_mask = 1ULL;
+        // Bit 0 is parent_box; bits 2+i are slots
         uintptr_t addr = host_gc->allocate(alloc_size, pointer_mask, 1 /* type_tag */);
         env = reinterpret_cast<BronzeEnv*>(addr);
     } else {

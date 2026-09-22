@@ -76,6 +76,9 @@ public:
     [[nodiscard]] bool is_old(uintptr_t addr) const noexcept;
     [[nodiscard]] bool is_in_nursery(uintptr_t addr) const noexcept;
     [[nodiscard]] bool is_in_survivor(uintptr_t addr) const noexcept;
+    [[nodiscard]] bool is_in_survivor_from(uintptr_t addr) const noexcept;
+    [[nodiscard]] bool is_in_survivor_to(uintptr_t addr) const noexcept;
+    [[nodiscard]] bool is_scavenge_source(uintptr_t addr) const noexcept;
     [[nodiscard]] bool is_in_tenured(uintptr_t addr) const noexcept;
     [[nodiscard]] bool is_valid_object(uintptr_t addr) const noexcept;
 

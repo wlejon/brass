@@ -341,6 +341,7 @@ void PropertyLoweringHelper::lower_prop_set_slot(
 ) {
     Value* obj_ptr = b.build_and(obj, b.build_iconst_i64(static_cast<int64_t>(0x0000FFFFFFFFFFFFULL)));
     b.build_store(Type::i64(), obj_ptr, static_cast<int32_t>(24 + slot_idx * 8), val);
+    b.build_call("brass_gc_write_barrier", Type::void_type(), {obj_ptr, val});
 }
 
 void PropertyLoweringHelper::lower_prop_set_guarded(
@@ -504,6 +505,7 @@ void PropertyLoweringHelper::lower_elem_set(
 
     b.position_at_end(bb_fast);
     b.build_store_indexed(Type::i64(), elements, idx_i64, 8, 8, val);
+    b.build_call("brass_gc_write_barrier", Type::void_type(), {elements, val});
     b.build_br(bb_merge);
 
     b.position_at_end(bb_fallback);

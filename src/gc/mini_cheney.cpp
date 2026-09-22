@@ -125,8 +125,8 @@ void MiniCheneyGC::collect(std::vector<uintptr_t*>& roots) {
         uintptr_t payload_addr = reinterpret_cast<uintptr_t>(to_space_.data() + scan_ptr + sizeof(GcHeader));
 
         size_t num_fields = hdr->size / 8;
-        for (size_t i = 0; i < num_fields && i < 64; ++i) {
-            if ((hdr->pointer_mask & (1ULL << i)) != 0) {
+        for (size_t i = 0; i < num_fields; ++i) {
+            if (i < 64 && (hdr->pointer_mask & (1ULL << i)) != 0) {
                 uintptr_t* field_ptr = reinterpret_cast<uintptr_t*>(payload_addr + i * 8);
                 if (*field_ptr != 0) {
                     *field_ptr = evacuate_object(*field_ptr, to_free_ptr);
