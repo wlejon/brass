@@ -26,6 +26,18 @@ static Value* build_vec_un_op(Builder* b, Arena& arena, Opcode op, Value* val) {
     return res;
 }
 
+Value* Builder::build_fadd(Value* lhs, Value* rhs) {
+    Type res_type = lhs ? lhs->type() : (rhs ? rhs->type() : Type::f32());
+    Instruction* inst = get_arena().make<Instruction>(Opcode::add, res_type);
+    inst->add_operand(lhs);
+    inst->add_operand(rhs);
+    Value* res = create_value(res_type);
+    res->set_defining_instruction(inst);
+    inst->set_result(res);
+    insert(inst);
+    return res;
+}
+
 Value* Builder::build_vadd(Value* lhs, Value* rhs) { return build_vec_bin_op(this, get_arena(), Opcode::vadd, lhs, rhs); }
 Value* Builder::build_vsub(Value* lhs, Value* rhs) { return build_vec_bin_op(this, get_arena(), Opcode::vsub, lhs, rhs); }
 Value* Builder::build_vmul(Value* lhs, Value* rhs) { return build_vec_bin_op(this, get_arena(), Opcode::vmul, lhs, rhs); }

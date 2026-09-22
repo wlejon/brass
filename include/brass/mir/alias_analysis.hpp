@@ -45,6 +45,7 @@ public:
     const Value* get_underlying_base(const Value* ptr, int64_t& out_offset) const;
     bool is_distinct_allocation(const Value* base1, const Value* base2) const;
     bool is_non_escaping(const Value* base) const;
+    bool is_global_or_external_arg(const Value* base) const;
     bool is_allocation(const Value* val) const;
 
     const Function& function() const noexcept { return *fn_; }

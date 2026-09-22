@@ -17,6 +17,9 @@ void for_each_branch_target(Instruction* term, auto&& fn) {
         for (auto& sc : term->switch_cases()) {
             fn(sc.target);
         }
+    } else if (term->opcode() == Opcode::invoke) {
+        fn(term->normal_target());
+        fn(term->unwind_target());
     }
 }
 
@@ -194,16 +197,21 @@ bool SroaTransformer::process_candidate(const Value* alloc_val, const EscapeAnal
             }
 
             // Check branch arguments: alias may only be passed to an alias block parameter
+            bool branch_arg_invalid = false;
             for_each_branch_target(inst, [&](const BranchTarget& bt) {
                 if (!bt.block) return;
                 for (size_t i = 0; i < bt.args.size(); ++i) {
                     if (aliases.count(bt.args[i]) > 0) {
                         if (i >= bt.block->param_count() || aliases.count(bt.block->param(i)) == 0) {
                             // Passed to a non-alias parameter
+                            branch_arg_invalid = true;
                         }
                     }
                 }
             });
+            if (branch_arg_invalid) {
+                return false;
+            }
         }
     }
 

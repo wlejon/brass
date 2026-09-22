@@ -88,8 +88,11 @@ bool AliasAnalysis::is_allocation(const Value* val) const {
     if (ea && ea->is_allocation(val)) return true;
     if (val->is_instruction()) {
         const Instruction* inst = val->defining_instruction();
-        if (inst && inst->opcode() == Opcode::call) {
-            return is_allocation_callee(inst->symbol());
+        if (inst) {
+            if (inst->opcode() == Opcode::alloca_) return true;
+            if (inst->opcode() == Opcode::call) {
+                return is_allocation_callee(inst->symbol());
+            }
         }
     }
     return false;
@@ -133,7 +136,8 @@ bool AliasAnalysis::is_distinct_allocation(const Value* base1, const Value* base
     if (fn_ && fn_->entry_block()) {
         const BasicBlock* entry = fn_->entry_block();
         if (base1->is_block_param() && base2->is_block_param() &&
-            base1->defining_block() == entry && base2->defining_block() == entry) {
+            base1->defining_block() == entry && base2->defining_block() == entry &&
+            base1 != base2) {
             return true;
         }
     }
@@ -142,9 +146,41 @@ bool AliasAnalysis::is_distinct_allocation(const Value* base1, const Value* base
 
 bool AliasAnalysis::is_non_escaping(const Value* base) const {
     if (!base) return false;
+    if (base->is_instruction()) {
+        const Instruction* inst = base->defining_instruction();
+        if (inst && inst->opcode() == Opcode::alloca_) {
+            const EscapeAnalysis* ea = escape_analysis();
+            if (!ea) return true;
+            return ea->get_escape_state(base) == EscapeState::NoEscape;
+        }
+    }
     const EscapeAnalysis* ea = escape_analysis();
     if (!ea) return false;
     return ea->get_escape_state(base) == EscapeState::NoEscape;
+}
+
+bool AliasAnalysis::is_global_or_external_arg(const Value* base) const {
+    if (!base) return false;
+    if (fn_ && fn_->entry_block()) {
+        const BasicBlock* entry = fn_->entry_block();
+        if (base->is_block_param() && base->defining_block() == entry) {
+            return true;
+        }
+    }
+    if (base->is_instruction()) {
+        const Instruction* inst = base->defining_instruction();
+        if (inst) {
+            Opcode op = inst->opcode();
+            if (op == Opcode::pinned_tls_read || op == Opcode::func_addr) {
+                return true;
+            }
+        }
+    }
+    const EscapeAnalysis* ea = escape_analysis();
+    if (ea && ea->get_escape_state(base) == EscapeState::GlobalEscape && !is_allocation(base)) {
+        return true;
+    }
+    return false;
 }
 
 AliasResult AliasAnalysis::alias(const Value* ptr1, const Value* ptr2) const {
@@ -168,12 +204,7 @@ AliasResult AliasAnalysis::alias(
         return AliasResult::NoAlias;
     }
 
-    // 2. Type-based alias disambiguation (incompatible memory types)
-    if (are_incompatible_memory_types(type1, type2)) {
-        return AliasResult::NoAlias;
-    }
-
-    // 3. Extract underlying base allocations and accumulated constant offsets
+    // 2. Extract underlying base allocations and accumulated constant offsets
     int64_t accum1 = 0;
     int64_t accum2 = 0;
     const Value* base1 = get_underlying_base(ptr1, accum1);
@@ -189,7 +220,7 @@ AliasResult AliasAnalysis::alias(
         int64_t total_off2 = static_cast<int64_t>(off2) + accum2;
 
         if (base1 == base2) {
-            if (total_off1 == total_off2) {
+            if (total_off1 == total_off2 && type1 == type2) {
                 return AliasResult::MustAlias;
             }
             // Same base pointer with provably distinct constant byte offsets
@@ -198,18 +229,30 @@ AliasResult AliasAnalysis::alias(
             if (sz1 == 0) sz1 = 4U;
             if (sz2 == 0) sz2 = 4U;
 
-            if (total_off1 + sz1 <= total_off2 || total_off2 + sz2 <= total_off1 || total_off1 != total_off2) {
+            if (total_off1 + sz1 <= total_off2 || total_off2 + sz2 <= total_off1) {
                 return AliasResult::NoAlias;
+            }
+            if (total_off1 == total_off2) {
+                return AliasResult::MustAlias;
             }
             return AliasResult::MayAlias;
         }
 
-        // Distinct base allocations or distinct non-escaping objects -> NoAlias
+        // Type-based alias disambiguation (incompatible memory types) for distinct bases
+        if (are_incompatible_memory_types(type1, type2)) {
+            return AliasResult::NoAlias;
+        }
+
+        // Distinct base allocations -> NoAlias
         if (is_distinct_allocation(base1, base2)) {
             return AliasResult::NoAlias;
         }
 
-        if (is_non_escaping(base1) || is_non_escaping(base2)) {
+        // A non-escaping allocation does not alias globals or external arguments
+        if (is_non_escaping(base1) && is_global_or_external_arg(base2)) {
+            return AliasResult::NoAlias;
+        }
+        if (is_non_escaping(base2) && is_global_or_external_arg(base1)) {
             return AliasResult::NoAlias;
         }
     }
@@ -245,7 +288,10 @@ AliasResult AliasAnalysis::alias(
         if (is_distinct_allocation(orig1, orig2)) {
             return AliasResult::NoAlias;
         }
-        if (is_non_escaping(orig1) || is_non_escaping(orig2)) {
+        if (is_non_escaping(orig1) && is_global_or_external_arg(orig2)) {
+            return AliasResult::NoAlias;
+        }
+        if (is_non_escaping(orig2) && is_global_or_external_arg(orig1)) {
             return AliasResult::NoAlias;
         }
     }

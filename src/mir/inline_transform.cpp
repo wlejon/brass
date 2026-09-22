@@ -8,6 +8,24 @@ namespace brass {
 
 namespace {
 
+void for_each_branch_target(Instruction* term, auto&& fn) {
+    if (!term) return;
+    if (term->opcode() == Opcode::br) {
+        fn(term->branch_target());
+    } else if (term->opcode() == Opcode::br_if) {
+        fn(term->true_target());
+        fn(term->false_target());
+    } else if (term->opcode() == Opcode::switch_) {
+        fn(term->default_target());
+        for (auto& sc : term->switch_cases()) {
+            fn(sc.target);
+        }
+    } else if (term->opcode() == Opcode::invoke) {
+        fn(term->normal_target());
+        fn(term->unwind_target());
+    }
+}
+
 void replace_all_uses_in_fn(Function& fn, Value* old_val, Value* new_val) {
     if (!old_val || !new_val || old_val == new_val) return;
     for (BasicBlock* bb : fn.blocks()) {
@@ -17,23 +35,11 @@ void replace_all_uses_in_fn(Function& fn, Value* old_val, Value* new_val) {
             for (size_t i = 0; i < inst->operand_count(); ++i) {
                 if (inst->operand(i) == old_val) inst->set_operand(i, new_val);
             }
-            for (size_t i = 0; i < inst->branch_target().args.size(); ++i) {
-                if (inst->branch_target().args[i] == old_val) inst->branch_target().args[i] = new_val;
-            }
-            for (size_t i = 0; i < inst->true_target().args.size(); ++i) {
-                if (inst->true_target().args[i] == old_val) inst->true_target().args[i] = new_val;
-            }
-            for (size_t i = 0; i < inst->false_target().args.size(); ++i) {
-                if (inst->false_target().args[i] == old_val) inst->false_target().args[i] = new_val;
-            }
-            for (size_t i = 0; i < inst->default_target().args.size(); ++i) {
-                if (inst->default_target().args[i] == old_val) inst->default_target().args[i] = new_val;
-            }
-            for (auto& sc : inst->switch_cases()) {
-                for (size_t i = 0; i < sc.target.args.size(); ++i) {
-                    if (sc.target.args[i] == old_val) sc.target.args[i] = new_val;
+            for_each_branch_target(inst, [&](BranchTarget& bt) {
+                for (size_t i = 0; i < bt.args.size(); ++i) {
+                    if (bt.args[i] == old_val) bt.args[i] = new_val;
                 }
-            }
+            });
             for (size_t i = 0; i < inst->state_map().size(); ++i) {
                 if (inst->state_map()[i] == old_val) inst->state_map()[i] = new_val;
             }
@@ -357,23 +363,11 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
             for (size_t i = 0; i < ti->operand_count(); ++i) {
                 if (ti->operand(i) == old_call_res) ti->set_operand(i, ret_param);
             }
-            for (size_t i = 0; i < ti->branch_target().args.size(); ++i) {
-                if (ti->branch_target().args[i] == old_call_res) ti->branch_target().args[i] = ret_param;
-            }
-            for (size_t i = 0; i < ti->true_target().args.size(); ++i) {
-                if (ti->true_target().args[i] == old_call_res) ti->true_target().args[i] = ret_param;
-            }
-            for (size_t i = 0; i < ti->false_target().args.size(); ++i) {
-                if (ti->false_target().args[i] == old_call_res) ti->false_target().args[i] = ret_param;
-            }
-            for (size_t i = 0; i < ti->default_target().args.size(); ++i) {
-                if (ti->default_target().args[i] == old_call_res) ti->default_target().args[i] = ret_param;
-            }
-            for (auto& sc : ti->switch_cases()) {
-                for (size_t i = 0; i < sc.target.args.size(); ++i) {
-                    if (sc.target.args[i] == old_call_res) sc.target.args[i] = ret_param;
+            for_each_branch_target(ti, [&](BranchTarget& bt) {
+                for (size_t i = 0; i < bt.args.size(); ++i) {
+                    if (bt.args[i] == old_call_res) bt.args[i] = ret_param;
                 }
-            }
+            });
             for (size_t i = 0; i < ti->state_map().size(); ++i) {
                 if (ti->state_map()[i] == old_call_res) ti->state_map()[i] = ret_param;
             }

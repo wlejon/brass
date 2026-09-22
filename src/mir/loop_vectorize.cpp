@@ -116,26 +116,45 @@ bool vectorize_loop(
         }
     }
 
-    // Trip count guard: (limit - init) >= W
-    Value* tc = b.build_sub(vli.limit_val, vli.init_iv);
-    if (vli.cmp_opcode == Opcode::sle || vli.cmp_opcode == Opcode::ule) {
-        Value* one = build_const_step(b, vli.iv_type, 1);
-        tc = b.build_add(tc, one);
-    }
-    Value* w_val = build_const_step(b, vli.iv_type, static_cast<int64_t>(W));
+    // Trip count guard: ensure at least one full vector width W iteration can execute without signed overflow
+    Value* w_minus_1_step = build_const_step(b, vli.iv_type, static_cast<int64_t>(W - 1));
+    Value* last_vec_iv = b.build_add(vli.init_iv, w_minus_1_step);
     Value* tc_guard = nullptr;
     if (vli.cmp_opcode == Opcode::ult || vli.cmp_opcode == Opcode::ule) {
-        Value* valid = (vli.cmp_opcode == Opcode::ule)
-            ? b.build_ule(vli.init_iv, vli.limit_val)
-            : b.build_ult(vli.init_iv, vli.limit_val);
-        Value* ge_w = b.build_uge(tc, w_val);
-        tc_guard = b.build_and(valid, ge_w);
+        Value* no_ovf = b.build_ule(vli.init_iv, last_vec_iv);
+        Value* in_limit = (vli.cmp_opcode == Opcode::ule)
+            ? b.build_ule(last_vec_iv, vli.limit_val)
+            : b.build_ult(last_vec_iv, vli.limit_val);
+        tc_guard = b.build_and(no_ovf, in_limit);
     } else {
-        Value* valid = (vli.cmp_opcode == Opcode::sle)
-            ? b.build_sle(vli.init_iv, vli.limit_val)
-            : b.build_slt(vli.init_iv, vli.limit_val);
-        Value* ge_w = b.build_sge(tc, w_val);
-        tc_guard = b.build_and(valid, ge_w);
+        Value* no_ovf = b.build_sle(vli.init_iv, last_vec_iv);
+        Value* in_limit = (vli.cmp_opcode == Opcode::sle)
+            ? b.build_sle(last_vec_iv, vli.limit_val)
+            : b.build_slt(last_vec_iv, vli.limit_val);
+        tc_guard = b.build_and(no_ovf, in_limit);
+    }
+
+    // Runtime alias checks for memory operations that may alias
+    for (const auto& check : vli.alias_checks) {
+        uint8_t shift1 = (check.op1.elem_type.size_in_bytes() == 4) ? 2 : 3;
+        uint8_t shift2 = (check.op2.elem_type.size_in_bytes() == 4) ? 2 : 3;
+        Value* s1 = build_const_step(b, vli.iv_type, shift1);
+        Value* s2 = build_const_step(b, vli.iv_type, shift2);
+
+        Value* off_init1 = b.build_add(b.build_shl(vli.init_iv, s1), b.build_iconst_i64(check.op1.offset));
+        Value* off_limit1 = b.build_add(b.build_shl(vli.limit_val, s1), b.build_iconst_i64(check.op1.offset));
+        Value* ptr_start1 = b.build_add(check.op1.base, off_init1);
+        Value* ptr_end1 = b.build_add(check.op1.base, off_limit1);
+
+        Value* off_init2 = b.build_add(b.build_shl(vli.init_iv, s2), b.build_iconst_i64(check.op2.offset));
+        Value* off_limit2 = b.build_add(b.build_shl(vli.limit_val, s2), b.build_iconst_i64(check.op2.offset));
+        Value* ptr_start2 = b.build_add(check.op2.base, off_init2);
+        Value* ptr_end2 = b.build_add(check.op2.base, off_limit2);
+
+        Value* cond1 = b.build_ule(ptr_end1, ptr_start2);
+        Value* cond2 = b.build_ule(ptr_end2, ptr_start1);
+        Value* no_overlap = b.build_or(cond1, cond2);
+        tc_guard = b.build_and(tc_guard, no_overlap);
     }
 
     if (ph_term->opcode() == Opcode::br) {
@@ -351,6 +370,13 @@ bool vectorize_loop(
 
     if (vli.has_reduction) {
         Value* exit_acc = vec_exit->param(vli.reduction_param_index);
+        auto reduce_add = [&](Value* x, Value* y) -> Value* {
+            if (vli.reduction_type.is_float()) {
+                return b.build_fadd(x, y);
+            }
+            return b.build_add(x, y);
+        };
+
         if (W == 8) {
             Value* l0 = b.build_vextract_lane(exit_acc, 0);
             Value* l1 = b.build_vextract_lane(exit_acc, 1);
@@ -360,28 +386,28 @@ bool vectorize_loop(
             Value* l5 = b.build_vextract_lane(exit_acc, 5);
             Value* l6 = b.build_vextract_lane(exit_acc, 6);
             Value* l7 = b.build_vextract_lane(exit_acc, 7);
-            Value* s01 = b.build_add(l0, l1);
-            Value* s23 = b.build_add(l2, l3);
-            Value* s45 = b.build_add(l4, l5);
-            Value* s67 = b.build_add(l6, l7);
-            Value* s0123 = b.build_add(s01, s23);
-            Value* s4567 = b.build_add(s45, s67);
-            Value* hsum = b.build_add(s0123, s4567);
-            final_scalar_acc = b.build_add(hsum, vli.reduction_init_val);
+            Value* s01 = reduce_add(l0, l1);
+            Value* s23 = reduce_add(l2, l3);
+            Value* s45 = reduce_add(l4, l5);
+            Value* s67 = reduce_add(l6, l7);
+            Value* s0123 = reduce_add(s01, s23);
+            Value* s4567 = reduce_add(s45, s67);
+            Value* hsum = reduce_add(s0123, s4567);
+            final_scalar_acc = reduce_add(hsum, vli.reduction_init_val);
         } else if (W == 4) {
             Value* l0 = b.build_vextract_lane(exit_acc, 0);
             Value* l1 = b.build_vextract_lane(exit_acc, 1);
             Value* l2 = b.build_vextract_lane(exit_acc, 2);
             Value* l3 = b.build_vextract_lane(exit_acc, 3);
-            Value* s01 = b.build_add(l0, l1);
-            Value* s23 = b.build_add(l2, l3);
-            Value* hsum = b.build_add(s01, s23);
-            final_scalar_acc = b.build_add(hsum, vli.reduction_init_val);
+            Value* s01 = reduce_add(l0, l1);
+            Value* s23 = reduce_add(l2, l3);
+            Value* hsum = reduce_add(s01, s23);
+            final_scalar_acc = reduce_add(hsum, vli.reduction_init_val);
         } else {
             Value* l0 = b.build_vextract_lane(exit_acc, 0);
             Value* l1 = b.build_vextract_lane(exit_acc, 1);
-            Value* hsum = b.build_add(l0, l1);
-            final_scalar_acc = b.build_add(hsum, vli.reduction_init_val);
+            Value* hsum = reduce_add(l0, l1);
+            final_scalar_acc = reduce_add(hsum, vli.reduction_init_val);
         }
     }
 

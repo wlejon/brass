@@ -70,6 +70,7 @@ public:
 
     // Arithmetic / Logic
     Value* build_add(Value* lhs, Value* rhs);
+    Value* build_fadd(Value* lhs, Value* rhs);
     Value* build_sub(Value* lhs, Value* rhs);
     Value* build_mul(Value* lhs, Value* rhs);
     Value* build_fma(Value* a, Value* b, Value* c);

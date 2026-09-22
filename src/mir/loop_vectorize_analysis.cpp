@@ -1,4 +1,5 @@
 #include "loop_vectorize_analysis.hpp"
+#include <brass/mir/alias_analysis.hpp>
 #include <brass/mir/opcodes.hpp>
 #include <algorithm>
 
@@ -336,6 +337,58 @@ bool analyze_vectorizable_loop(
         return false;
     }
 
+    // Ensure memory accesses do not alias without runtime checks or proven NoAlias
+    AliasAnalysis aa(fn);
+    std::vector<VectorizableLoopInfo::RuntimeAliasCheck> alias_checks;
+    for (size_t i = 0; i < mem_ops.size(); ++i) {
+        for (size_t j = i + 1; j < mem_ops.size(); ++j) {
+            const auto& m1 = mem_ops[i];
+            const auto& m2 = mem_ops[j];
+            if (!m1.is_store && !m2.is_store) {
+                continue; // Load-load pairs never hazard
+            }
+
+            if (m1.base == m2.base) {
+                if (m1.offset != m2.offset) {
+                    // Different offsets on same base: cross-iteration dependence
+                    return false;
+                }
+                // Same base and same offset: store-store or store-load
+                if (m1.is_store && m2.is_store) {
+                    return false;
+                }
+                // Store and load to same address: safe only if load strictly precedes store in body
+                bool m1_is_load = !m1.is_store;
+                bool m2_is_store = m2.is_store;
+                if (!m1_is_load || !m2_is_store) {
+                    return false;
+                }
+                bool found_m1 = false;
+                bool m1_before_m2 = false;
+                for (const Instruction* cur = body_bb->head(); cur != nullptr; cur = cur->next()) {
+                    if (cur == m1.inst) found_m1 = true;
+                    else if (cur == m2.inst) {
+                        if (found_m1) m1_before_m2 = true;
+                        break;
+                    }
+                }
+                if (!m1_before_m2) {
+                    return false;
+                }
+            } else {
+                // Different bases: check static alias analysis
+                AliasResult res = aa.alias(m1.base, m1.offset, m1.elem_type, m2.base, m2.offset, m2.elem_type);
+                if (res != AliasResult::NoAlias) {
+                    if (!options.enable_runtime_alias_checks) {
+                        return false;
+                    }
+                    alias_checks.push_back({m1, m2});
+                }
+            }
+        }
+    }
+
+    vli.alias_checks = std::move(alias_checks);
     vli.mem_ops = std::move(mem_ops);
     vli.is_vectorizable = true;
     return true;

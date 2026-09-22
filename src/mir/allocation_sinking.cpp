@@ -23,6 +23,9 @@ void for_each_branch_target(Instruction* term, auto&& fn) {
         for (auto& sc : term->switch_cases()) {
             fn(sc.target);
         }
+    } else if (term->opcode() == Opcode::invoke) {
+        fn(term->normal_target());
+        fn(term->unwind_target());
     }
 }
 

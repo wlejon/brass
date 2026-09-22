@@ -44,6 +44,11 @@ struct VectorizableLoopInfo {
     Value* reduction_init_val = nullptr;
 
     std::vector<VectorizableMemOp> mem_ops;
+    struct RuntimeAliasCheck {
+        VectorizableMemOp op1;
+        VectorizableMemOp op2;
+    };
+    std::vector<RuntimeAliasCheck> alias_checks;
 };
 
 bool analyze_vectorizable_loop(

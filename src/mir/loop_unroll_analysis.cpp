@@ -19,6 +19,22 @@ bool get_const_int(const Value* val, int64_t& out_val) {
     return false;
 }
 
+static Opcode swap_comparison_operands(Opcode op) noexcept {
+    switch (op) {
+        case Opcode::slt: return Opcode::sgt;
+        case Opcode::sle: return Opcode::sge;
+        case Opcode::sgt: return Opcode::slt;
+        case Opcode::sge: return Opcode::sle;
+        case Opcode::ult: return Opcode::ugt;
+        case Opcode::ule: return Opcode::uge;
+        case Opcode::ugt: return Opcode::ult;
+        case Opcode::uge: return Opcode::ule;
+        case Opcode::eq:  return Opcode::eq;
+        case Opcode::ne:  return Opcode::ne;
+        default: return op;
+    }
+}
+
 Value* make_smart_const_int(Builder& b, Type t, int64_t val) {
     if (t == Type::i32()) {
         return b.build_iconst_i32(static_cast<int32_t>(val));
@@ -233,7 +249,7 @@ bool analyze_loop(
                     cla.cmp_opcode = cmp_inst->opcode();
                     cla.limit_val = cmp_rhs;
                 } else if (param == cmp_rhs && loop.is_loop_invariant(cmp_lhs)) {
-                    cla.cmp_opcode = cmp_inst->opcode();
+                    cla.cmp_opcode = swap_comparison_operands(cmp_inst->opcode());
                     cla.limit_val = cmp_lhs;
                 }
             }
@@ -259,7 +275,9 @@ bool analyze_loop(
     }
 
     if (cla.cmp_opcode != Opcode::slt && cla.cmp_opcode != Opcode::ult &&
-        cla.cmp_opcode != Opcode::sle && cla.cmp_opcode != Opcode::ule) {
+        cla.cmp_opcode != Opcode::sle && cla.cmp_opcode != Opcode::ule &&
+        cla.cmp_opcode != Opcode::sgt && cla.cmp_opcode != Opcode::ugt &&
+        cla.cmp_opcode != Opcode::sge && cla.cmp_opcode != Opcode::uge) {
         return false;
     }
 

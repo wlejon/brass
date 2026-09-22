@@ -49,6 +49,7 @@ add_executable(brass_unit_tests
     unit/test_embedding_api.cpp
     unit/test_aot_embedding.cpp
     unit/test_mir_unroll_select.cpp
+    unit/test_mir_alias_safety.cpp
     unit/test_il_expressibility.cpp
     differential/test_embedding_differential.cpp
     unit/test_bronze_il_translator.cpp

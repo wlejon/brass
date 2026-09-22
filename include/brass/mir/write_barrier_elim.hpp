@@ -33,8 +33,9 @@ public:
     void reset_stats() noexcept { stats_ = WbeStats{}; }
     void dump_stats(std::ostream& os) const;
 
-private:
     bool is_non_pointer_value(const Value* val) const noexcept;
+
+private:
     bool is_allocation_inst(const Instruction* inst) const noexcept;
 
     bool dump_stats_ = false;

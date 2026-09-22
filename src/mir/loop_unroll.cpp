@@ -116,7 +116,15 @@ bool unroll_loop(
     }
 
     // Replace preheader branch target
-    ph_term->set_branch_target(BranchTarget(unroll_hdr, std::move(unroll_ph_args)));
+    if (ph_term->opcode() == Opcode::br) {
+        ph_term->set_branch_target(BranchTarget(unroll_hdr, std::move(unroll_ph_args)));
+    } else if (ph_term->opcode() == Opcode::br_if) {
+        if (ph_term->true_target().block == header) {
+            ph_term->set_true_target(BranchTarget(unroll_hdr, std::move(unroll_ph_args)));
+        } else {
+            ph_term->set_false_target(BranchTarget(unroll_hdr, std::move(unroll_ph_args)));
+        }
+    }
 
     // =========================================================================
     // 4. Unroll Header: Evaluate Main Loop Trip Condition
@@ -137,7 +145,7 @@ bool unroll_loop(
     // Compute check_val = cur_iv + (F - 1) * iv_step
     Value* iv_step = get_invariant_val(b, iv_type, primary_iv.step_val);
     Value* f_minus_1_step = make_smart_mul(b, iv_type, iv_step, static_cast<int64_t>(F - 1));
-    Value* check_iv = make_smart_add(b, iv_type, cur_iv, f_minus_1_step);
+    Value* check_iv = primary_iv.is_sub ? b.build_sub(cur_iv, f_minus_1_step) : make_smart_add(b, iv_type, cur_iv, f_minus_1_step);
     Value* limit_val = get_invariant_val(b, iv_type, cla.limit_val);
 
     Value* unroll_cond = nullptr;
@@ -151,6 +159,21 @@ bool unroll_loop(
         case Opcode::sge: unroll_cond = b.build_sge(check_iv, limit_val); break;
         case Opcode::uge: unroll_cond = b.build_uge(check_iv, limit_val); break;
         default: unroll_cond = b.build_slt(check_iv, limit_val); break;
+    }
+
+    // Guard against signed/unsigned overflow when check_iv = cur_iv + (F - 1) * step
+    Value* no_ovf = nullptr;
+    if (cla.cmp_opcode == Opcode::slt || cla.cmp_opcode == Opcode::sle) {
+        no_ovf = b.build_sle(cur_iv, check_iv);
+    } else if (cla.cmp_opcode == Opcode::sgt || cla.cmp_opcode == Opcode::sge) {
+        no_ovf = b.build_sge(cur_iv, check_iv);
+    } else if (cla.cmp_opcode == Opcode::ult || cla.cmp_opcode == Opcode::ule) {
+        no_ovf = b.build_ule(cur_iv, check_iv);
+    } else if (cla.cmp_opcode == Opcode::ugt || cla.cmp_opcode == Opcode::uge) {
+        no_ovf = b.build_uge(cur_iv, check_iv);
+    }
+    if (no_ovf) {
+        unroll_cond = b.build_and(no_ovf, unroll_cond);
     }
 
     // Branch to unroll_body (on true) or unroll_exit (on false)

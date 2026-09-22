@@ -62,6 +62,7 @@ bool EscapeAnalysis::is_allocation(const Value* val) const {
     if (!val || !val->is_instruction()) return false;
     const Instruction* inst = val->defining_instruction();
     if (!inst) return false;
+    if (inst->opcode() == Opcode::alloca_) return true;
     return inst->opcode() == Opcode::call && is_allocation_callee(inst->symbol());
 }
 
@@ -125,6 +126,17 @@ void EscapeAnalysis::run() {
             Opcode op = inst->opcode();
 
             switch (op) {
+                case Opcode::alloca_: {
+                    const Value* res = inst->result();
+                    if (res) {
+                        CGNode* obj = graph_->create_object_node(res, EscapeState::NoEscape);
+                        CGNode* ref = graph_->get_or_create_ref_node(res);
+                        graph_->add_points_to(ref, obj);
+                        allocations_.push_back(res);
+                    }
+                    break;
+                }
+
                 case Opcode::call: {
                     std::string_view callee = inst->symbol();
                     if (is_allocation_callee(callee)) {

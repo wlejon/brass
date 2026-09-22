@@ -4,6 +4,39 @@
 
 namespace brass {
 
+namespace {
+
+bool is_object_tag_value(const Value* val) noexcept {
+    if (!val || !val->is_instruction()) return false;
+    const Instruction* inst = val->defining_instruction();
+    if (!inst || inst->opcode() != Opcode::iconst_i64) return false;
+    uint64_t imm = static_cast<uint64_t>(inst->imm_i64());
+    // Bronze object tag is TAG_OBJECT (0xFFF1) shifted by 48 bits: 0xFFF1000000000000ULL
+    return (imm == 0xFFF1000000000000ULL) || ((imm >> 48) == 0xFFF1ULL);
+}
+
+bool is_tagged_pointer_value(const Value* val) noexcept {
+    if (!val) return false;
+    if (val->type().is_pointer_or_gcref()) return true;
+    if (is_object_tag_value(val)) return true;
+    if (val->is_instruction()) {
+        const Instruction* inst = val->defining_instruction();
+        if (!inst) return false;
+        if (inst->opcode() == Opcode::or_) {
+            for (size_t i = 0; i < inst->operand_count(); ++i) {
+                if (is_tagged_pointer_value(inst->operand(i))) return true;
+            }
+        } else if (inst->opcode() == Opcode::and_) {
+            for (size_t i = 0; i < inst->operand_count(); ++i) {
+                if (inst->operand(i) && (inst->operand(i)->type().is_pointer_or_gcref() || is_tagged_pointer_value(inst->operand(i)))) return true;
+            }
+        }
+    }
+    return false;
+}
+
+} // namespace
+
 bool WriteBarrierElimination::is_non_pointer_value(const Value* val) const noexcept {
     if (!val) return true;
 
@@ -34,6 +67,20 @@ bool WriteBarrierElimination::is_non_pointer_value(const Value* val) const noexc
         }
         if (op == Opcode::bitcast_i64_f64) {
             return true; // Floats cast to i64 (like NaN-boxed floats)
+        }
+        if (op == Opcode::or_) {
+            // Bronze lowers object pointers by bitwise OR with object tags.
+            // Do not treat Opcode::or_ as a non-pointer if either operand is an object/pointer type or tagged pointer.
+            const Value* op0 = def->operand(0);
+            const Value* op1 = def->operand(1);
+            if ((op0 && (op0->type().is_pointer_or_gcref() || is_tagged_pointer_value(op0))) ||
+                (op1 && (op1->type().is_pointer_or_gcref() || is_tagged_pointer_value(op1)))) {
+                return false;
+            }
+            if (!is_non_pointer_value(op0) || !is_non_pointer_value(op1)) {
+                return false;
+            }
+            return true;
         }
         if (is_arithmetic(op) || is_bitwise(op) || is_comparison(op)) {
             return true;
