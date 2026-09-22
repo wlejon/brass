@@ -3,17 +3,8 @@
 #include "il_runtime.hpp"
 #include <brass/mir/verifier.hpp>
 #include <brass/mir/coro_transform.hpp>
-#include <brass/mir/loop_opt.hpp>
-#include <brass/mir/inliner.hpp>
-#include <brass/mir/sroa.hpp>
-#include <brass/mir/gvn.hpp>
-#include <brass/mir/gvn_pre.hpp>
-#include <brass/mir/sccp.hpp>
-#include <brass/mir/cfg_simplify.hpp>
-#include <brass/mir/loop_unswitch.hpp>
-#include <brass/mir/jump_threading.hpp>
-#include <brass/mir/bounds_check_elim.hpp>
-#include <brass/mir/write_barrier_elim.hpp>
+#include <brass/il_translator/il_pipeline.hpp>
+#include <cstdio>
 #include <cstring>
 #include <iostream>
 
@@ -425,120 +416,18 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
 
     // 5. Optionally optimize module
     if (options_.enable_optimizations) {
-        LoopOptOptions opt_opts;
-        opt_opts.enable_fp_reassociation = options_.allow_fp_reassociation;
-        opt_opts.enable_f64_demote = options_.enable_f64_demote;
-        opt_opts.enable_vectorize = options_.enable_vectorize;
-        opt_opts.enable_slp = options_.enable_slp;
-        opt_opts.enable_loop_tile = options_.enable_loop_tile;
-        opt_opts.tile_size_i = options_.tile_size;
-        opt_opts.tile_size_j = options_.tile_size;
-        opt_opts.tile_size_k = options_.tile_size;
-        opt_opts.enable_sroa = options_.enable_sroa;
-        opt_opts.enable_gvn = options_.enable_gvn;
-        opt_opts.enable_sccp = options_.enable_sccp;
-        opt_opts.enable_guard_elim = options_.enable_guard_elim;
-        opt_opts.enable_cfg_simplify = options_.enable_cfg_simplify;
-        opt_opts.enable_loop_unswitch = options_.enable_loop_unswitch;
-        opt_opts.enable_jump_threading = options_.enable_jump_threading;
-        opt_opts.enable_trace_layout = options_.enable_trace_layout;
-        opt_opts.enable_partial_escape = options_.enable_partial_escape;
-        opt_opts.enable_allocation_sinking = options_.enable_allocation_sinking;
-        opt_opts.enable_loop_fusion = options_.enable_loop_fusion;
-        opt_opts.enable_loop_distribution = options_.enable_loop_distribution;
-        opt_opts.enable_array_contraction = options_.enable_array_contraction;
-        opt_opts.dump_loop_transform_stats = options_.dump_loop_transform_stats;
-        opt_opts.stats = options_.loop_transform_stats_collector;
-        opt_opts.pea_stats = options_.pea_stats_collector;
-        opt_opts.demote_stats = options_.demote_stats_collector;
-        opt_opts.enable_avx2 = options_.enable_avx2;
-        opt_opts.enable_fma = options_.enable_fma;
-        opt_opts.vector_width = options_.vector_width;
-        opt_opts.dump_fma_stats = options_.dump_fma_stats;
-        opt_opts.fma_stats = options_.fma_stats_collector;
-        opt_opts.enable_parallel_loops = options_.enable_parallel_loops;
-        opt_opts.parallel_threshold = options_.parallel_threshold;
-        opt_opts.parallel_workers = options_.parallel_workers;
-        opt_opts.dump_parallel_stats = options_.dump_parallel_stats;
-        opt_opts.parallel_stats = options_.parallel_stats_collector;
-        opt_opts.enable_bce = options_.enable_bce;
-        opt_opts.dump_range_stats = options_.dump_range_stats;
-        opt_opts.range_stats = options_.range_stats_collector;
-        auto check_pass = [&](const char* name) {
+        PassPipelineHooks hooks;
+        hooks.after_pass = [&](std::string_view name) {
             if (!options_.verify_after_each_pass) return true;
             if (!verify_module(*mod, diag_)) {
-                std::fprintf(stderr, "[FATAL] Broken after %s\n", name);
+                std::fprintf(stderr, "[FATAL] Broken after %.*s\n",
+                             static_cast<int>(name.size()), name.data());
                 return false;
             }
             return true;
         };
-        // 1. Light prep: SROA
-        if (options_.enable_sroa) {
-            sroa_module(*mod);
-            if (!check_pass("sroa")) return nullptr;
-        }
-
-        // 2. Early Devirtualization & Inlining
-        if (options_.enable_inlining) {
-            InlinerOptions inliner_opts;
-            inliner_opts.enable_sroa = options_.enable_sroa;
-            inliner_opts.enable_gvn = false;
-            inliner_opts.enable_speculative_devirtualization = options_.enable_speculative_inlining;
-            inliner_opts.only_inline_leaf_functions = options_.inline_leaf_only;
-            optimize_module_ipo(*mod, inliner_opts, opt_opts);
-            if (!check_pass("ipo")) return nullptr;
-        }
-
-        // 3. Single cohesive scalar and loop optimization pipeline:
-        // GVN -> GVN-PRE -> SCCP -> CFG simplify -> BCE -> Loop optimizations -> WBE
-        if (options_.enable_gvn) {
-            gvn_module(*mod);
-            if (!check_pass("gvn")) return nullptr;
-        }
-        if (options_.enable_gvn_pre) {
-            GvnPreOptions pre_opts;
-            pre_opts.stats = options_.pre_stats_collector;
-            gvn_pre_module(*mod, pre_opts);
-            if (!check_pass("gvn_pre")) return nullptr;
-        }
-        if (options_.enable_sccp) {
-            SccpOptions sccp_opts;
-            sccp_opts.enable_guard_elim = options_.enable_guard_elim;
-            sccp_module(*mod, sccp_opts);
-            if (!check_pass("sccp")) return nullptr;
-        }
-        if (options_.enable_cfg_simplify) {
-            cfg_simplify_module(*mod);
-            if (!check_pass("cfg_simplify 1")) return nullptr;
-        }
-        if (options_.enable_loop_unswitch) {
-            unswitch_loops_in_module(*mod);
-            if (!check_pass("loop_unswitch")) return nullptr;
-        }
-        if (options_.enable_jump_threading) {
-            jump_thread_module(*mod);
-            if (!check_pass("jump_threading")) return nullptr;
-        }
-        if ((options_.enable_loop_unswitch || options_.enable_jump_threading) && options_.enable_cfg_simplify) {
-            cfg_simplify_module(*mod);
-            if (!check_pass("cfg_simplify 2")) return nullptr;
-        }
-        if (options_.enable_bce) {
-            RangeAnalysisOptions bce_opts;
-            bce_opts.enable_bce = true;
-            bce_opts.enable_implied_checks = true;
-            bce_opts.dump_stats = options_.dump_range_stats;
-            bce_opts.stats = options_.range_stats_collector;
-            run_bounds_check_elimination(*mod, bce_opts);
-            if (!check_pass("bce")) return nullptr;
-        }
-        optimize_module_loops(*mod, opt_opts);
-        if (!check_pass("loops")) return nullptr;
-
-        if (options_.enable_wbe) {
-            WriteBarrierElimination wbe(options_.dump_wbe_stats);
-            wbe.run_on_module(*mod);
-            if (!check_pass("wbe")) return nullptr;
+        if (!run_pass_pipeline(*mod, pass_pipeline_options(options_), hooks)) {
+            return nullptr;
         }
         if (!verify_module(*mod, diag_)) {
             return nullptr;

@@ -1,4 +1,5 @@
 #include "gvn_table.hpp"
+#include <brass/mir/gc_refs.hpp>
 
 namespace brass {
 
@@ -24,6 +25,9 @@ bool is_commutative_op(Opcode op) noexcept {
 
 bool is_pure_gvn_op(const Instruction* inst) noexcept {
     if (!inst || !inst->produces_value()) return false;
+    // Replacing a derived gcref by a dominating copy would stretch its live
+    // range across blocks and GC points (gc_refs.hpp).
+    if (is_derived_gcref(inst->result())) return false;
     Opcode op = inst->opcode();
     if (op == Opcode::call) {
         return inst->symbol() == "bronze_tls_block_addr";

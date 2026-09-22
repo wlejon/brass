@@ -1,9 +1,11 @@
 #include <brass/brass.hpp>
 #include <brass/fuzz/ir_mutator.hpp>
+#include <brass/fuzz/program_generator.hpp>
 #include <brass/fuzz/diff_fuzzer.hpp>
 #include <brass/fuzz/delta_reducer.hpp>
 #include <brass/mir/parser.hpp>
 #include <brass/mir/printer.hpp>
+#include <brass/mir/verifier.hpp>
 
 #include <iostream>
 #include <fstream>
@@ -11,8 +13,15 @@
 #include <string>
 #include <vector>
 #include <chrono>
+#include <map>
 #include <unordered_set>
 #include <iomanip>
+#include <cstdio>
+#include <cstdlib>
+#include <algorithm>
+#include <climits>
+#include <cstdint>
+#include <filesystem>
 
 using namespace brass;
 using namespace brass::fuzz;
@@ -21,15 +30,187 @@ static void print_usage(const char* prog) {
     std::cout << "brass-fuzz - Brass Differential Fuzzing & Hardening Tool (v" << brass::version_string() << ")\n"
               << "Usage: " << prog << " [options]\n\n"
               << "Options:\n"
-              << "  -h, --help            Show this help message\n"
-              << "  --iterations=<N>      Number of test iterations to generate and run (default: 50)\n"
-              << "  --seed=<N>            64-bit initial RNG seed (default: current epoch time)\n"
-              << "  --timeout-ms=<N>      Execution timeout per test in milliseconds (default: 500)\n"
-              << "  --minimize=<path>     Run Delta-Reducer on reproducer MIR at <path>\n"
-              << "  --repro=<path>        Execute differential verification on reproducer MIR at <path>\n"
-              << "  --repro-dir=<dir>     Directory to save reproducer files on failure (default: .)\n"
-              << "  --sandboxed           Enable OS process isolation & memory quota (Windows Job Objects)\n";
+              << "  -h, --help                 Show this help message\n"
+              << "  --iterations=<N>           Number of programs to generate and run (default: 50)\n"
+              << "  --seed=<N>                 First seed; program i uses seed+i (default: current time)\n"
+              << "  --timeout-ms=<N>           Execution timeout per tier in milliseconds (default: 500)\n"
+              << "  --pipeline=all|bronze|legacy\n"
+              << "                             Optimizer run by the optimized tiers (default: all)\n"
+              << "  --generator=structured|legacy\n"
+              << "                             Program generator (default: structured)\n"
+              << "  --skip-pass=<a,b,...>      Leave these pipeline steps out (e.g. jump_threading)\n"
+              << "  --max-statements=<N>       Statements per generated program (default: 36); small\n"
+              << "                             values re-find a failure class as a small program\n"
+              << "  --no-div-overflow          Never generate INT_MIN / -1\n"
+              << "  --no-bisect                Do not search for the first pass that changes the answer\n"
+              << "  --max-repros-per-class=<N> Reproducer files saved per failure class (default: 3)\n"
+              << "  --minimize=<path>          Run the delta reducer on a reproducer, keeping its failure class\n"
+              << "  --repro=<path>             Re-run a reproducer (reads its ARGS, PIPELINE and SKIP lines);\n"
+              << "                             exits 0 on pass, 2 on failure, 3 on a failure other than\n"
+              << "                             --expect-class=<class> when that is given\n"
+              << "  --repro-dir=<dir>          Directory for reproducer files (default: .)\n"
+              << "  --chunk-size=<N>           Run the campaign as child processes of N programs each, so\n"
+              << "                             a fault that kills the process loses one chunk only\n"
+              << "  --sandboxed                Enable OS process isolation & memory quota (Windows Job Objects)\n";
 }
+
+namespace {
+
+struct ReproHeader {
+    std::vector<RuntimeValue> args;
+    std::string pipeline;
+    std::string failure_class;
+    std::vector<std::string> skip;
+    bool has_skip = false;
+};
+
+std::vector<std::string> split_list(const std::string& text) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (char c : text) {
+        if (c == ',' || c == ' ') {
+            if (!cur.empty()) out.push_back(cur);
+            cur.clear();
+        } else {
+            cur.push_back(c);
+        }
+    }
+    if (!cur.empty()) out.push_back(cur);
+    return out;
+}
+
+ReproHeader read_repro_header(const std::string& source) {
+    ReproHeader h;
+    std::istringstream in(source);
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.rfind("; ARGS:", 0) == 0) {
+            std::istringstream vals(line.substr(7));
+            long long v = 0;
+            while (vals >> v) h.args.push_back(RuntimeValue::from_i64(static_cast<int64_t>(v)));
+        } else if (line.rfind("; PIPELINE: ", 0) == 0) {
+            h.pipeline = line.substr(12);
+        } else if (line.rfind("; CLASS: ", 0) == 0) {
+            h.failure_class = line.substr(9);
+        } else if (line.rfind("; SKIP:", 0) == 0) {
+            h.skip = split_list(line.substr(7));
+            h.has_skip = true;
+        }
+    }
+    if (h.args.empty()) h.args = {RuntimeValue::from_i64(1), RuntimeValue::from_i64(2)};
+    return h;
+}
+
+std::string entry_name(const Module& mod) {
+    if (mod.get_function("fuzz_fn")) return "fuzz_fn";
+    if (mod.function_count() > 0 && mod.functions()[0]) return std::string(mod.functions()[0]->name());
+    return "fuzz_fn";
+}
+
+bool read_file(const std::string& path, std::string& out) {
+    std::ifstream file(path);
+    if (!file.is_open()) return false;
+    out.assign((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    return true;
+}
+
+// Runs the campaign as child processes of `chunk` programs each. A codegen
+// bug can corrupt the fuzzer beyond what the fault handler recovers, and
+// in one process that ends the whole campaign; here it costs one chunk.
+int run_chunked(int argc, char** argv, uint64_t first_seed, uint32_t iterations, uint32_t chunk,
+                const std::string& repro_dir) {
+    std::string passthrough;
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg.rfind("--iterations=", 0) == 0 || arg.rfind("-n=", 0) == 0 || arg.rfind("--seed=", 0) == 0 ||
+            arg.rfind("-s=", 0) == 0 || arg.rfind("--chunk-size=", 0) == 0) {
+            continue;
+        }
+        passthrough += " \"" + arg + "\"";
+    }
+    struct Agg {
+        uint64_t count = 0;
+        uint64_t first_seed = UINT64_MAX;
+        std::string first_line;
+    };
+    std::map<std::string, Agg> classes;
+    uint64_t passed = 0, failed = 0, lost = 0;
+    std::vector<std::string> crashed;
+    std::filesystem::create_directories(repro_dir);
+
+    for (uint32_t done = 0; done < iterations; done += chunk) {
+        const uint32_t n = std::min(chunk, iterations - done);
+        const uint64_t seed = first_seed + done;
+        const std::string log = repro_dir + "/chunk_" + std::to_string(seed) + ".log";
+        const std::string cmd = "\"\"" + std::string(argv[0]) + "\"" + passthrough + " --seed=" +
+                                std::to_string(seed) + " --iterations=" + std::to_string(n) + " >\"" + log +
+                                "\" 2>&1\"";
+        const int rc = std::system(cmd.c_str());
+        std::string text;
+        read_file(log, text);
+        std::istringstream in(text);
+        std::string line;
+        bool in_table = false;
+        bool finished = false;
+        std::map<std::string, Agg> partial;
+        while (std::getline(in, line)) {
+            if (line.rfind(" Passed             : ", 0) == 0) {
+                passed += std::stoull(line.substr(22));
+                finished = true;
+            } else if (line.rfind(" Failures           : ", 0) == 0) {
+                failed += std::stoull(line.substr(22));
+            } else if (line.rfind(" Failure classes", 0) == 0) {
+                in_table = true;
+            } else if (in_table && line.rfind("   ", 0) == 0) {
+                // "   COUNT  CLASS  (first: ...)"; class names may contain spaces.
+                const size_t num = line.find_first_not_of(' ');
+                const size_t gap = line.find("  ", num);
+                const size_t tail = line.find("  (first:", gap);
+                if (num == std::string::npos || gap == std::string::npos || tail == std::string::npos) continue;
+                classes[line.substr(gap + 2, tail - gap - 2)].count += std::stoull(line.substr(num, gap - num));
+            } else if (line.rfind("[FAIL] Seed ", 0) == 0) {
+                // First occurrence of a class in this chunk: remember the seed.
+                const size_t open = line.find(" [");
+                const size_t close = line.find("]:", open);
+                if (open == std::string::npos || close == std::string::npos) continue;
+                const uint64_t s = std::stoull(line.substr(12, open - 12));
+                Agg& a = partial[line.substr(open + 2, close - open - 2)];
+                if (s < a.first_seed) {
+                    a.first_seed = s;
+                    a.first_line = line.substr(0, 200);
+                }
+            }
+        }
+        for (const auto& [cls, a] : partial) {
+            Agg& g = classes[cls];
+            if (!finished) g.count += 1;
+            if (a.first_seed < g.first_seed) {
+                g.first_seed = a.first_seed;
+                g.first_line = a.first_line;
+            }
+        }
+        if (!finished) {
+            ++lost;
+            crashed.push_back("seeds " + std::to_string(seed) + ".." + std::to_string(seed + n - 1) +
+                              " (exit " + std::to_string(rc) + ", " + log + ")");
+        }
+        std::cout << "chunk " << seed << " +" << n << (finished ? " done" : " CRASHED") << std::endl;
+    }
+
+    std::cout << "\n============================================================\n"
+              << " Chunked campaign: " << iterations << " programs from seed " << first_seed << " in chunks of "
+              << chunk << "\n Passed: " << passed << "  Failed: " << failed << "  (in finished chunks)\n"
+              << " Crashed chunks: " << lost << "\n";
+    for (const std::string& c : crashed) std::cout << "   " << c << "\n";
+    std::cout << " Failure classes (a crashed chunk counts each class it reached once):\n";
+    for (const auto& [cls, a] : classes) {
+        std::cout << "   " << std::setw(6) << a.count << "  " << cls << "  (first: seed " << a.first_seed << ")\n";
+    }
+    std::cout << "============================================================\n";
+    return (failed == 0 && lost == 0) ? 0 : 1;
+}
+
+} // namespace
 
 int main(int argc, char** argv) {
     uint32_t iterations = 50;
@@ -39,6 +220,17 @@ int main(int argc, char** argv) {
     std::string repro_path;
     std::string repro_dir = ".";
     bool sandboxed = false;
+    bool pipeline_given = false;
+    FuzzPipeline pipeline = FuzzPipeline::AllPasses;
+    bool legacy_generator = false;
+    bool div_overflow = true;
+    bool bisect = true;
+    uint32_t max_repros_per_class = 3;
+    uint32_t max_statements = ProgramGeneratorOptions{}.max_statements;
+    std::string expect_class;
+    bool skip_given = false;
+    std::vector<std::string> skip_passes;
+    uint32_t chunk_size = 0;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -55,6 +247,32 @@ int main(int argc, char** argv) {
             initial_seed = std::stoull(arg.substr(3));
         } else if (arg.rfind("--timeout-ms=", 0) == 0) {
             timeout_ms = static_cast<uint32_t>(std::stoul(arg.substr(13)));
+        } else if (arg.rfind("--pipeline=", 0) == 0) {
+            if (!parse_pipeline(arg.substr(11), pipeline)) {
+                std::cerr << "Unknown pipeline '" << arg.substr(11) << "' (expected all, bronze or legacy)\n";
+                return 1;
+            }
+            pipeline_given = true;
+        } else if (arg.rfind("--generator=", 0) == 0) {
+            const std::string g = arg.substr(12);
+            if (g != "structured" && g != "legacy") {
+                std::cerr << "Unknown generator '" << g << "' (expected structured or legacy)\n";
+                return 1;
+            }
+            legacy_generator = g == "legacy";
+        } else if (arg.rfind("--skip-pass=", 0) == 0) {
+            for (const std::string& s : split_list(arg.substr(12))) skip_passes.push_back(s);
+            skip_given = true;
+        } else if (arg.rfind("--expect-class=", 0) == 0) {
+            expect_class = arg.substr(15);
+        } else if (arg.rfind("--max-statements=", 0) == 0) {
+            max_statements = static_cast<uint32_t>(std::stoul(arg.substr(17)));
+        } else if (arg == "--no-div-overflow") {
+            div_overflow = false;
+        } else if (arg == "--no-bisect") {
+            bisect = false;
+        } else if (arg.rfind("--max-repros-per-class=", 0) == 0) {
+            max_repros_per_class = static_cast<uint32_t>(std::stoul(arg.substr(23)));
         } else if (arg.rfind("--minimize=", 0) == 0) {
             minimize_path = arg.substr(11);
         } else if (arg.rfind("--repro=", 0) == 0) {
@@ -63,6 +281,11 @@ int main(int argc, char** argv) {
             repro_dir = arg.substr(12);
         } else if (arg == "--sandboxed") {
             sandboxed = true;
+        } else if (arg.rfind("--chunk-size=", 0) == 0) {
+            chunk_size = static_cast<uint32_t>(std::stoul(arg.substr(13)));
+        } else {
+            std::cerr << "Unknown option '" << arg << "'\n";
+            return 1;
         }
     }
 
@@ -72,120 +295,130 @@ int main(int argc, char** argv) {
         );
     }
 
-    // Mode 1: Reproduce an existing failing test case
-    if (!repro_path.empty()) {
-        std::ifstream file(repro_path);
-        if (!file.is_open()) {
-            std::cerr << "Error: Could not open reproducer file '" << repro_path << "'\n";
-            return 1;
-        }
-        std::string source((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-
-        DiagnosticReporter diag;
-        auto mod = parse_module(source, &diag);
-        if (!mod) {
-            std::cerr << "Error parsing reproducer: " << diag.format_all() << "\n";
-            return 1;
-        }
-
-        std::string fn_name = "fuzz_fn";
-        if (mod->get_function("fuzz_fn")) {
-            fn_name = "fuzz_fn";
-        } else if (mod->function_count() > 0 && mod->functions()[0]) {
-            fn_name = std::string(mod->functions()[0]->name());
-        }
-
-        DiffFuzzerOptions diff_opts;
-        diff_opts.timeout_ms = timeout_ms;
-        diff_opts.reproducer_dir = repro_dir;
-        diff_opts.sandbox_process = sandboxed;
-        DiffFuzzer fuzzer(diff_opts);
-
-        std::cout << "Replaying reproducer '" << repro_path << "' on function '" << fn_name << "'...\n";
-        DiffResult res = fuzzer.run_test(*mod, fn_name, {RuntimeValue::from_i64(1), RuntimeValue::from_i64(2)}, 0);
-        if (res.passed) {
-            std::cout << "Result: PASSED (Tiers matched: Interp=" << res.tier0_interp.value
-                      << ", JIT unopt=" << res.tier1_jit_unopt.value
-                      << ", JIT opt=" << res.tier2_jit_opt.value << ")\n";
-            return 0;
-        } else {
-            std::cout << "Result: FAILED / REPRODUCED: " << res.mismatch_reason << "\n";
-            return 2;
-        }
-    }
-
-    // Mode 2: Delta Minimizer
-    if (!minimize_path.empty()) {
-        std::ifstream file(minimize_path);
-        if (!file.is_open()) {
-            std::cerr << "Error: Could not open file to minimize: '" << minimize_path << "'\n";
-            return 1;
-        }
-        std::string source((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-
-        DiagnosticReporter diag;
-        auto mod = parse_module(source, &diag);
-        if (!mod) {
-            std::cerr << "Error parsing module to minimize: " << diag.format_all() << "\n";
-            return 1;
-        }
-
-        std::string fn_name = "fuzz_fn";
-        if (mod->get_function("fuzz_fn")) {
-            fn_name = "fuzz_fn";
-        } else if (mod->function_count() > 0 && mod->functions()[0]) {
-            fn_name = std::string(mod->functions()[0]->name());
-        }
-
-        std::cout << "Running automated delta-reducer on '" << minimize_path << "' (" << fn_name << ")...\n";
-
-        DiffFuzzerOptions diff_opts;
-        diff_opts.timeout_ms = timeout_ms;
-        DiffFuzzer fuzzer(diff_opts);
-
-        auto oracle = [&](const Module& m, std::string_view name) -> bool {
-            DiffResult r = fuzzer.run_test(m, name, {RuntimeValue::from_i64(1), RuntimeValue::from_i64(2)}, 0);
-            return !r.passed;
-        };
-
-        DeltaReducer reducer;
-        ReductionResult res = reducer.reduce(*mod, fn_name, oracle);
-
-        if (!res.success) {
-            std::cout << "Could not reduce: initial test did not fail oracle or error occurred.\n";
-            return 1;
-        }
-
-        std::cout << "Reduction complete:\n"
-                  << "  Instructions: " << res.initial_instructions << " -> " << res.final_instructions << "\n"
-                  << "  Blocks:       " << res.initial_blocks << " -> " << res.final_blocks << "\n";
-
-        std::string out_mir = minimize_path + ".min.mir";
-        std::string out_il = minimize_path + ".min.il";
-        if (res.minimized_module) {
-            DeltaReducer::export_mir(*res.minimized_module, out_mir);
-            DeltaReducer::export_il(*res.minimized_module, out_il);
-            std::cout << "Saved minimal reproducer to:\n"
-                      << "  " << out_mir << "\n"
-                      << "  " << out_il << "\n";
-        }
-        return 0;
-    }
-
-    // Mode 3: Continuous Differential Fuzzing
-    std::cout << "Starting Brass Differential Fuzzer (Iterations: " << iterations
-              << ", Seed: " << initial_seed << ", Timeout: " << timeout_ms << "ms)...\n";
-
     DiffFuzzerOptions diff_opts;
     diff_opts.timeout_ms = timeout_ms;
     diff_opts.reproducer_dir = repro_dir;
     diff_opts.sandbox_process = sandboxed;
+    diff_opts.pipeline = pipeline;
+    diff_opts.bisect = bisect;
+    diff_opts.skip_passes = skip_passes;
+
+    // Modes 1 and 2 work on an existing reproducer.
+    const std::string& input_path = !repro_path.empty() ? repro_path : minimize_path;
+    if (!input_path.empty()) {
+        std::string source;
+        if (!read_file(input_path, source)) {
+            std::cerr << "Error: Could not open '" << input_path << "'\n";
+            return 1;
+        }
+        DiagnosticReporter diag;
+        auto mod = parse_module(source, &diag);
+        if (!mod) {
+            std::cerr << "Error parsing '" << input_path << "': " << diag.format_all() << "\n";
+            return 1;
+        }
+        const ReproHeader header = read_repro_header(source);
+        if (!pipeline_given && !header.pipeline.empty()) {
+            parse_pipeline(header.pipeline, diff_opts.pipeline);
+        }
+        if (!skip_given && header.has_skip) diff_opts.skip_passes = header.skip;
+        diff_opts.save_reproducers = false;
+        DiffFuzzer fuzzer(diff_opts);
+        const std::string fn_name = entry_name(*mod);
+
+        if (!repro_path.empty()) {
+            std::cout << "Replaying '" << repro_path << "' on '" << fn_name << "' with pipeline "
+                      << pipeline_name(diff_opts.pipeline) << "...\n";
+            DiffResult res = fuzzer.run_test(*mod, fn_name, header.args, 0);
+            if (res.passed) {
+                std::cout << "Result: PASSED (Interp=" << res.tier0_interp.value
+                          << ", JIT unopt=" << res.tier1_jit_unopt.value
+                          << ", JIT opt=" << res.tier2_jit_opt.value
+                          << ", Interp opt=" << res.tier3_interp_opt.value << ")\n";
+                return 0;
+            }
+            std::cout << "Result: FAILED [" << res.failure_class << "]: " << res.mismatch_reason << "\n";
+            return (expect_class.empty() || res.failure_class == expect_class) ? 2 : 3;
+        }
+
+        std::string target_class = header.failure_class;
+        if (target_class.empty()) {
+            DiffResult first = fuzzer.run_test(*mod, fn_name, header.args, 0);
+            if (first.passed) {
+                std::cout << "Could not reduce: the reproducer passes.\n";
+                return 1;
+            }
+            target_class = first.failure_class;
+        }
+        std::cout << "Reducing '" << minimize_path << "' (" << fn_name << "), keeping class "
+                  << target_class << "..." << std::endl;
+
+        // Candidates run in a child process: a program that trips a codegen
+        // bug can corrupt the process that runs it.
+        auto write_candidate = [&](const Module& m, const std::string& path) {
+            std::ofstream os(path);
+            os << "; CLASS: " << target_class << "\n; PIPELINE: " << pipeline_name(diff_opts.pipeline) << "\n";
+            if (!diff_opts.skip_passes.empty()) {
+                os << "; SKIP:";
+                for (const std::string& s : diff_opts.skip_passes) os << ' ' << s;
+                os << "\n";
+            }
+            os << "; ARGS:";
+            for (const RuntimeValue& a : header.args) os << ' ' << static_cast<int64_t>(a.raw_bits());
+            os << "\n\n";
+            print_module(m, os);
+        };
+        const std::string cand_path = minimize_path + ".cand.mir";
+        const std::string self = argv[0];
+        auto oracle = [&](const Module& m, std::string_view) -> bool {
+            write_candidate(m, cand_path);
+            const std::string cmd = "\"\"" + self + "\" --repro=\"" + cand_path + "\" --expect-class=" +
+                                    target_class + " --timeout-ms=" + std::to_string(timeout_ms) +
+                                    (bisect ? "" : " --no-bisect") + " >NUL 2>&1\"";
+            return std::system(cmd.c_str()) == 2;
+        };
+        if (!oracle(*mod, fn_name)) {
+            std::cout << "Could not reduce: the reproducer does not fail with " << target_class << ".\n";
+            return 1;
+        }
+        DeltaReducerOptions ropts;
+        ropts.max_passes = 40;
+        DeltaReducer reducer(ropts);
+        ReductionResult res = reducer.reduce(*mod, fn_name, oracle);
+        std::remove(cand_path.c_str());
+        if (!res.success || !res.minimized_module) {
+            std::cout << "Could not reduce.\n";
+            return 1;
+        }
+        std::cout << "Reduction complete:\n"
+                  << "  Instructions: " << res.initial_instructions << " -> " << res.final_instructions << "\n"
+                  << "  Blocks:       " << res.initial_blocks << " -> " << res.final_blocks << "\n";
+        const std::string out_mir = minimize_path + ".min.mir";
+        write_candidate(*res.minimized_module, out_mir);
+        std::cout << "Saved minimal reproducer to " << out_mir << "\n";
+        return 0;
+    }
+
+    if (chunk_size > 0) return run_chunked(argc, argv, initial_seed, iterations, chunk_size, repro_dir);
+
+    // Mode 3: continuous differential fuzzing.
+    std::cout << "Starting Brass Differential Fuzzer (Iterations: " << iterations
+              << ", Seed: " << initial_seed << ", Timeout: " << timeout_ms << "ms, Pipeline: "
+              << pipeline_name(pipeline) << ", Generator: " << (legacy_generator ? "legacy" : "structured")
+              << ")...\n";
+
+    diff_opts.save_reproducers = false;
     DiffFuzzer fuzzer(diff_opts);
 
     uint32_t pass_count = 0;
     uint32_t fail_count = 0;
-    uint32_t timeout_count = 0;
-    uint32_t fault_count = 0;
+    struct ClassInfo {
+        uint32_t count = 0;
+        uint32_t saved = 0;
+        uint64_t first_seed = 0;
+        std::string first_path;
+    };
+    std::map<std::string, ClassInfo> classes;
 
     std::unordered_set<uint64_t> covered_edges;
     std::unordered_set<uint32_t> covered_opcodes;
@@ -196,47 +429,40 @@ int main(int argc, char** argv) {
         uint64_t seed = initial_seed + i;
         Module mod("fuzz_mod_" + std::to_string(seed));
 
-        IrGeneratorOptions gen_opts;
-        gen_opts.min_instructions = 10;
-        gen_opts.max_instructions = 30;
-        gen_opts.enable_vectors = true;
-        gen_opts.enable_loops = true;
-        gen_opts.enable_diamonds = true;
-        gen_opts.enable_switches = true;
-        gen_opts.enable_exceptions = true;
-
-        IrGenerator generator(gen_opts);
-        Function* fn = generator.generate(mod, "fuzz_fn", seed);
+        Function* fn = nullptr;
+        if (legacy_generator) {
+            IrGeneratorOptions gen_opts;
+            gen_opts.min_instructions = 10;
+            gen_opts.max_instructions = 30;
+            IrGenerator generator(gen_opts);
+            fn = generator.generate(mod, "fuzz_fn", seed);
+            FuzzRng mut_rng(seed ^ 0xDEADBEEFULL);
+            if (fn) IrMutator::mutate_function(*fn, mut_rng);
+        } else {
+            ProgramGeneratorOptions gen_opts;
+            gen_opts.enable_div_overflow = div_overflow;
+            gen_opts.max_statements = max_statements;
+            ProgramGenerator generator(gen_opts);
+            fn = generator.generate(mod, "fuzz_fn", seed);
+        }
         if (!fn) {
             fail_count++;
             continue;
         }
 
-        // Apply mutations
-        FuzzRng mut_rng(seed ^ 0xDEADBEEFULL);
-        IrMutator::mutate_function(*fn, mut_rng);
-
-        // Record edge and opcode coverage
         for (BasicBlock* bb : fn->blocks()) {
             if (!bb) continue;
             for (Instruction* inst : *bb) {
                 if (inst) covered_opcodes.insert(static_cast<uint32_t>(inst->opcode()));
             }
             Instruction* term = bb->terminator();
-            if (term) {
-                if (term->branch_target().block) {
-                    uint64_t edge = (static_cast<uint64_t>(bb->id()) << 32) | term->branch_target().block->id();
-                    covered_edges.insert(edge);
-                }
-                if (term->true_target().block) {
-                    uint64_t edge = (static_cast<uint64_t>(bb->id()) << 32) | term->true_target().block->id();
-                    covered_edges.insert(edge);
-                }
-                if (term->false_target().block) {
-                    uint64_t edge = (static_cast<uint64_t>(bb->id()) << 32) | term->false_target().block->id();
-                    covered_edges.insert(edge);
-                }
-            }
+            if (!term) continue;
+            auto edge = [&](const BasicBlock* to) {
+                if (to) covered_edges.insert((static_cast<uint64_t>(bb->id()) << 32) | to->id());
+            };
+            edge(term->branch_target().block);
+            edge(term->true_target().block);
+            edge(term->false_target().block);
         }
 
         std::vector<RuntimeValue> args = {
@@ -247,22 +473,37 @@ int main(int argc, char** argv) {
         DiffResult res = fuzzer.run_test(mod, "fuzz_fn", args, seed);
         if (res.passed) {
             pass_count++;
-        } else {
-            fail_count++;
-            if (res.tier0_interp.status == ExecutionStatus::Timeout ||
-                res.tier1_jit_unopt.status == ExecutionStatus::Timeout ||
-                res.tier2_jit_opt.status == ExecutionStatus::Timeout) {
-                timeout_count++;
+            continue;
+        }
+        fail_count++;
+        ClassInfo& info = classes[res.failure_class];
+        info.count++;
+        std::string path;
+        if (info.saved < max_repros_per_class) {
+            path = DiffFuzzer::save_reproducer(mod, seed, res.reproducer_note, repro_dir);
+            info.saved++;
+            if (path.empty()) {
+                std::cout << "[WARN] Could not write a reproducer into " << repro_dir << "\n";
             }
-            if (res.tier0_interp.status == ExecutionStatus::CrashOrFault ||
-                res.tier1_jit_unopt.status == ExecutionStatus::CrashOrFault ||
-                res.tier2_jit_opt.status == ExecutionStatus::CrashOrFault) {
-                fault_count++;
+        }
+        if (!path.empty()) {
+            // A reproducer is only useful if the text form is the same program.
+            std::string text;
+            DiagnosticReporter pdiag;
+            std::unique_ptr<Module> back = read_file(path, text) ? parse_module(text, &pdiag) : nullptr;
+            if (!back || !verify_module(*back, &pdiag)) {
+                std::cout << "[WARN] Reproducer " << path << " does not parse back cleanly: "
+                          << pdiag.format_all().substr(0, 300) << "\n";
             }
-            std::cout << "[FAIL] Seed " << seed << ": " << res.mismatch_reason << "\n";
-            if (!res.reproducer_path.empty()) {
-                std::cout << "       Saved reproducer: " << res.reproducer_path << "\n";
+            if (info.first_path.empty()) {
+                info.first_path = path;
+                info.first_seed = seed;
             }
+        }
+        if (info.count == 1) {
+            std::cout << "[FAIL] Seed " << seed << " [" << res.failure_class << "]: "
+                      << res.mismatch_reason.substr(0, 300) << "\n";
+            if (!path.empty()) std::cout << "       Saved reproducer: " << path << "\n";
         }
     }
 
@@ -275,16 +516,22 @@ int main(int argc, char** argv) {
               << "============================================================\n"
               << "              Brass Differential Fuzzing Report             \n"
               << "============================================================\n"
+              << " Pipeline           : " << pipeline_name(pipeline) << "\n"
               << " Total test cases   : " << iterations << "\n"
               << " Passed             : " << pass_count << " (" << std::fixed << std::setprecision(1) << pass_rate << "%)\n"
-              << " Discrepancies      : " << fail_count << "\n"
-              << " Timeouts           : " << timeout_count << "\n"
-              << " Faults/Crashes     : " << fault_count << "\n"
+              << " Failures           : " << fail_count << "\n"
               << " Total time elapsed : " << std::setprecision(2) << elapsed_sec << "s\n"
               << " Execution rate     : " << std::setprecision(1) << rate << " tests/sec\n"
               << " Edge coverage      : " << covered_edges.size() << " unique CFG edges\n"
-              << " Opcode coverage    : " << covered_opcodes.size() << " unique MIR opcodes\n"
-              << "============================================================\n";
+              << " Opcode coverage    : " << covered_opcodes.size() << " unique MIR opcodes\n";
+    if (!classes.empty()) {
+        std::cout << " Failure classes    :\n";
+        for (const auto& [name, info] : classes) {
+            std::cout << "   " << std::setw(6) << info.count << "  " << name
+                      << "  (first: seed " << info.first_seed << ", " << info.first_path << ")\n";
+        }
+    }
+    std::cout << "============================================================\n";
 
     return (fail_count == 0) ? 0 : 1;
 }

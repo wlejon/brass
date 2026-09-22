@@ -1,15 +1,33 @@
 #include <brass/mir/loop_distribution.hpp>
-#include <brass/mir/opcodes.hpp>
+#include <brass/mir/alias_analysis.hpp>
 #include <brass/mir/builder.hpp>
-#include <brass/mir/verifier.hpp>
-#include <brass/mir/loop_vectorize.hpp>
+#include <brass/mir/module.hpp>
+#include <brass/mir/opcodes.hpp>
+#include "int_fold.hpp"
+#include "ir_clone.hpp"
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-#include <algorithm>
-#include <iostream>
 
+// Loop distribution splits one loop into two over the same iteration space:
+// the first runs the vectorizable part of every iteration, the second the
+// rest. Every operation of the second part that used to run before an
+// operation of the first part of a later iteration now runs after it, so the
+// two parts must commute across iterations. The analysis accepts only what
+// makes that provable:
+//   - the loop is a header holding just its exit test plus one body block,
+//     counted by its only header parameter with a positive constant step;
+//   - nothing in the body may trap, deoptimize, or call anything except a
+//     module function whose single block computes a value from its
+//     arguments alone;
+//   - every memory access of one part is disjoint from every access of the
+//     other unless both only read;
+//   - a value the second part needs from the first is either recomputed from
+//     the induction variable and loop invariants, or reloaded from the slot
+//     of an induction-indexed store no other store can overwrite.
+// Values the second part needs are never kept in a temporary buffer: sizing
+// one needs a trip count that may be negative, overflow, or be unbounded.
 namespace brass {
 
 std::string LoopDistributionStats::format_report() const {
@@ -25,7 +43,7 @@ std::string LoopDistributionStats::format_report() const {
 
 namespace {
 
-static bool get_const_int(const Value* val, int64_t& out_val) {
+bool get_const_int(const Value* val, int64_t& out_val) {
     if (!val || !val->is_instruction()) return false;
     const Instruction* def = val->defining_instruction();
     if (!def) return false;
@@ -40,67 +58,80 @@ static bool get_const_int(const Value* val, int64_t& out_val) {
     return false;
 }
 
-static bool is_supported_vector_arithmetic(Opcode op) {
+bool is_supported_vector_arithmetic(Opcode op) {
     switch (op) {
-        case Opcode::add:
-        case Opcode::sub:
-        case Opcode::mul:
-        case Opcode::sdiv:
-        case Opcode::udiv:
-        case Opcode::neg:
-        case Opcode::vmin:
-        case Opcode::vmax:
-        case Opcode::vsqrt:
-        case Opcode::and_:
-        case Opcode::or_:
-        case Opcode::xor_:
-        case Opcode::not_:
+        case Opcode::add: case Opcode::sub: case Opcode::mul:
+        case Opcode::sdiv: case Opcode::udiv: case Opcode::neg:
+        case Opcode::vmin: case Opcode::vmax: case Opcode::vsqrt:
+        case Opcode::and_: case Opcode::or_: case Opcode::xor_: case Opcode::not_:
         case Opcode::select:
-        case Opcode::sext_i64:
-        case Opcode::zext_i64:
-        case Opcode::trunc_i32:
-        case Opcode::sitofp_f64_i32:
-        case Opcode::sitofp_f64_i64:
-        case Opcode::fptosi_i32:
-        case Opcode::fptosi_i64:
-        case Opcode::eq:
-        case Opcode::ne:
-        case Opcode::slt:
-        case Opcode::ult:
-        case Opcode::sle:
-        case Opcode::ule:
-        case Opcode::sgt:
-        case Opcode::ugt:
-        case Opcode::sge:
-        case Opcode::uge:
-        case Opcode::iconst_i32:
-        case Opcode::iconst_i64:
-        case Opcode::fconst_f64:
+        case Opcode::sext_i64: case Opcode::zext_i64: case Opcode::trunc_i32:
+        case Opcode::sitofp_f64_i32: case Opcode::sitofp_f64_i64:
+        case Opcode::fptosi_i32: case Opcode::fptosi_i64:
+        case Opcode::eq: case Opcode::ne:
+        case Opcode::slt: case Opcode::ult: case Opcode::sle: case Opcode::ule:
+        case Opcode::sgt: case Opcode::ugt: case Opcode::sge: case Opcode::uge:
+        case Opcode::iconst_i32: case Opcode::iconst_i64: case Opcode::fconst_f64:
             return true;
         default:
             return false;
     }
 }
 
-static bool is_unvectorizable_opcode(Opcode op) {
-    if (is_call(op)) return true;
-    switch (op) {
+bool is_memory_access(Opcode op) {
+    return op == Opcode::load || op == Opcode::load_indexed || op == Opcode::store || op == Opcode::store_indexed;
+}
+
+bool is_store(Opcode op) {
+    return op == Opcode::store || op == Opcode::store_indexed;
+}
+
+// Computes its result from its operands alone: no memory, no effects, no trap.
+bool is_pure_computation(const Instruction& inst) {
+    if (inst.is_terminator() || inst.is_call() || inst.has_side_effects()) return false;
+    switch (inst.opcode()) {
+        case Opcode::load:
+        case Opcode::load_indexed:
+        case Opcode::vload:
+        case Opcode::alloca_:
+        case Opcode::landing_pad:
         case Opcode::safepoint:
         case Opcode::guard:
         case Opcode::resume_point:
-        case Opcode::throw_:
-        case Opcode::invoke:
-        case Opcode::landing_pad:
-        case Opcode::resume:
         case Opcode::osr_entry:
-        case Opcode::coro_create:
-        case Opcode::coro_suspend:
-        case Opcode::coro_resume:
-        case Opcode::coro_destroy:
-            return true;
-        default:
             return false;
+        case Opcode::sdiv:
+        case Opcode::udiv:
+        case Opcode::smod:
+        case Opcode::umod: {
+            if (inst.type().is_float()) return true;
+            int64_t divisor = 0;
+            const unsigned width = int_fold::width_of(inst.type());
+            return get_const_int(inst.operand(1), divisor) && width != 0 &&
+                   !int_fold::division_may_trap(inst.opcode(), width, divisor);
+        }
+        default:
+            return true;
     }
+}
+
+// A call to a module function of one block that only computes from its
+// arguments: it can run at any point relative to memory operations.
+bool is_pure_leaf_call(const Function& fn, const Instruction& inst) {
+    if (inst.opcode() != Opcode::call || !fn.parent()) return false;
+    const Function* callee = fn.parent()->get_function(inst.symbol());
+    if (!callee || callee == &fn || callee->blocks().size() != 1) return false;
+    const BasicBlock* only = callee->blocks().front();
+    if (!only) return false;
+    for (const Instruction* ci : *only) {
+        if (!ci) return false;
+        if (ci->is_terminator()) {
+            if (ci->opcode() != Opcode::ret) return false;
+            continue;
+        }
+        if (!is_pure_computation(*ci)) return false;
+    }
+    return true;
 }
 
 struct DistributableLoopInfo {
@@ -108,136 +139,268 @@ struct DistributableLoopInfo {
     BasicBlock* preheader = nullptr;
     BasicBlock* header = nullptr;
     BasicBlock* body = nullptr;
-    BasicBlock* latch = nullptr;
     BasicBlock* exit_bb = nullptr;
-    BranchTarget* ph_bt = nullptr;
-    BranchTarget* latch_bt = nullptr;
-
-    size_t iv_index = 0;
     Value* iv_param = nullptr;
-    Type iv_type = Type::i64();
     Value* init_val = nullptr;
     Value* limit_val = nullptr;
-    int64_t step = 1;
-    Opcode cmp_opcode = Opcode::slt;
-    bool exit_on_false = true;
+    Instruction* cmp_inst = nullptr;
     Instruction* iv_inc_inst = nullptr;
+    int64_t step = 1;
+    bool exit_on_false = true;
 };
 
-static bool extract_distributable_loop(Function& fn, LoopInfo& loop, DistributableLoopInfo& info) {
+bool extract_distributable_loop(LoopInfo& loop, DistributableLoopInfo& info) {
     BasicBlock* header = loop.header();
-    if (!header || loop.latches().size() != 1) return false;
-    BasicBlock* latch = loop.latches()[0];
-    if (!latch) return false;
+    if (!header || loop.latches().size() != 1 || loop.blocks().size() != 2 || header->param_count() != 1) return false;
+    BasicBlock* body = loop.latches()[0];
+    if (!body || body == header) return false;
 
-    BasicBlock* preheader = loop.preheader();
-    if (!preheader) preheader = LoopAnalysis::ensure_preheader(fn, loop);
+    BasicBlock* preheader = nullptr;
+    for (BasicBlock* pred : header->predecessors()) {
+        if (!pred || loop.contains(pred)) continue;
+        if (preheader && preheader != pred) return false;
+        preheader = pred;
+    }
     if (!preheader) return false;
-
-    Instruction* ph_term = preheader->terminator();
-    Instruction* latch_term = latch->terminator();
+    const Instruction* ph_term = preheader->terminator();
+    const Instruction* body_term = body->terminator();
     Instruction* hdr_term = header->terminator();
-    if (!ph_term || !latch_term || !hdr_term) return false;
+    if (!ph_term || ph_term->opcode() != Opcode::br || ph_term->branch_target().block != header) return false;
+    if (!body_term || body_term->opcode() != Opcode::br || body_term->branch_target().block != header) return false;
+    if (!hdr_term || hdr_term->opcode() != Opcode::br_if) return false;
+    if (ph_term->branch_target().args.size() != 1 || body_term->branch_target().args.size() != 1) return false;
 
-    BranchTarget* ph_bt = nullptr;
-    if (ph_term->opcode() == Opcode::br && ph_term->branch_target().block == header) {
-        ph_bt = &ph_term->branch_target();
-    } else if (ph_term->opcode() == Opcode::br_if) {
-        if (ph_term->true_target().block == header) ph_bt = &ph_term->true_target();
-        else if (ph_term->false_target().block == header) ph_bt = &ph_term->false_target();
-    }
-    if (!ph_bt || ph_bt->args.size() != header->param_count()) return false;
-
-    BranchTarget* latch_bt = nullptr;
-    if (latch_term->opcode() == Opcode::br && latch_term->branch_target().block == header) {
-        latch_bt = &latch_term->branch_target();
-    }
-    if (!latch_bt || latch_bt->args.size() != header->param_count()) return false;
-
-    if (hdr_term->opcode() != Opcode::br_if) return false;
-
-    Value* cond_val = hdr_term->operand(0);
-    if (!cond_val || !cond_val->is_instruction()) return false;
-    Instruction* cmp_inst = cond_val->defining_instruction();
-    if (!cmp_inst || !is_comparison(cmp_inst->opcode()) || cmp_inst->parent() != header) return false;
-
-    BasicBlock* body_bb = nullptr;
-    BasicBlock* exit_bb = nullptr;
     bool exit_on_false = true;
-
-    if (loop.contains(hdr_term->true_target().block) && !loop.contains(hdr_term->false_target().block)) {
-        body_bb = hdr_term->true_target().block;
+    BasicBlock* exit_bb = nullptr;
+    if (hdr_term->true_target().block == body && !loop.contains(hdr_term->false_target().block)) {
         exit_bb = hdr_term->false_target().block;
-        exit_on_false = true;
-    } else if (!loop.contains(hdr_term->true_target().block) && loop.contains(hdr_term->false_target().block)) {
-        body_bb = hdr_term->false_target().block;
+    } else if (hdr_term->false_target().block == body && !loop.contains(hdr_term->true_target().block)) {
         exit_bb = hdr_term->true_target().block;
         exit_on_false = false;
     } else {
         return false;
     }
+    if (!exit_bb || !hdr_term->true_target().args.empty() || !hdr_term->false_target().args.empty()) return false;
 
-    if (!body_bb || !exit_bb) return false;
-    if (loop.blocks().size() > 2) return false; // Single body + header
+    Value* iv = header->param(0);
+    Value* cond = hdr_term->operand(0);
+    Instruction* cmp = (cond && cond->is_instruction()) ? cond->defining_instruction() : nullptr;
+    if (!cmp || cmp->parent() != header || header->head() != cmp || cmp->next() != hdr_term) return false;
+    const Opcode op = cmp->opcode();
+    if (op != Opcode::slt && op != Opcode::ult && op != Opcode::sle && op != Opcode::ule) return false;
+    if (cmp->operand(0) != iv || !cmp->operand(1) || !loop.is_loop_invariant(cmp->operand(1))) return false;
 
-    Opcode cmp_op = cmp_inst->opcode();
-    if (cmp_op != Opcode::slt && cmp_op != Opcode::ult &&
-        cmp_op != Opcode::sle && cmp_op != Opcode::ule) {
-        return false;
-    }
-
-    Value* cmp_lhs = cmp_inst->operand(0);
-    Value* cmp_rhs = cmp_inst->operand(1);
-
-    bool found_iv = false;
-    size_t iv_idx = 0;
-    int64_t step_val = 1;
-    Value* limit = nullptr;
-    Instruction* iv_inc = nullptr;
-
-    for (size_t i = 0; i < header->param_count(); ++i) {
-        Value* param = header->param(i);
-        if (param == cmp_lhs && loop.is_loop_invariant(cmp_rhs)) {
-            Value* latch_next = latch_bt->args[i];
-            if (latch_next && latch_next->is_instruction()) {
-                Instruction* def = latch_next->defining_instruction();
-                if (def && def->opcode() == Opcode::add) {
-                    Value* step_op = (def->operand(0) == param) ? def->operand(1) : ((def->operand(1) == param) ? def->operand(0) : nullptr);
-                    int64_t c = 0;
-                    if (step_op && get_const_int(step_op, c) && c > 0) {
-                        found_iv = true;
-                        iv_idx = i;
-                        step_val = c;
-                        limit = cmp_rhs;
-                        iv_inc = def;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    if (!found_iv || !limit) return false;
+    Value* next = body_term->branch_target().args[0];
+    Instruction* inc = (next && next->is_instruction()) ? next->defining_instruction() : nullptr;
+    if (!inc || inc->opcode() != Opcode::add || inc->parent() != body) return false;
+    Value* step_op = inc->operand(0) == iv ? inc->operand(1) : (inc->operand(1) == iv ? inc->operand(0) : nullptr);
+    int64_t step = 0;
+    if (!get_const_int(step_op, step) || step <= 0) return false;
 
     info.loop = &loop;
     info.preheader = preheader;
     info.header = header;
-    info.body = body_bb;
-    info.latch = latch;
+    info.body = body;
     info.exit_bb = exit_bb;
-    info.ph_bt = ph_bt;
-    info.latch_bt = latch_bt;
-    info.iv_index = iv_idx;
-    info.iv_param = header->param(iv_idx);
-    info.iv_type = info.iv_param->type();
-    info.init_val = ph_bt->args[iv_idx];
-    info.limit_val = limit;
-    info.step = step_val;
-    info.cmp_opcode = cmp_op;
+    info.iv_param = iv;
+    info.init_val = ph_term->branch_target().args[0];
+    info.limit_val = cmp->operand(1);
+    info.cmp_inst = cmp;
+    info.iv_inc_inst = inc;
+    info.step = step;
     info.exit_on_false = exit_on_false;
-    info.iv_inc_inst = iv_inc;
-
     return true;
+}
+
+enum class Reject { None, PureVectorizable, PureScalar, Illegal };
+
+struct Plan {
+    DistributableLoopInfo info;
+    std::vector<Instruction*> part2;                              // body order
+    std::vector<Instruction*> remat;                              // body order
+    std::unordered_map<const Value*, const Instruction*> reload;  // value -> the store that holds it
+};
+
+class Planner {
+public:
+    Planner(Function& fn, Plan& plan) : fn_(fn), plan_(plan), info_(plan.info) {}
+
+    Reject run() {
+        std::unordered_set<const Instruction*> part2;
+        size_t vectorizable = 0;
+        size_t scalar = 0;
+        for (Instruction* inst : *info_.body) {
+            if (!inst || inst->is_terminator() || inst == info_.iv_inc_inst) continue;
+            const Opcode op = inst->opcode();
+            if (op == Opcode::call) {
+                if (!is_pure_leaf_call(fn_, *inst)) return Reject::Illegal;
+                part2.insert(inst);
+                ++scalar;
+            } else if (is_memory_access(op)) {
+                if (is_vectorizable_access(*inst)) {
+                    ++vectorizable;
+                } else {
+                    part2.insert(inst);
+                    ++scalar;
+                }
+            } else if (is_pure_computation(*inst)) {
+                if (is_supported_vector_arithmetic(op)) {
+                    ++vectorizable;
+                } else {
+                    part2.insert(inst);
+                    ++scalar;
+                }
+            } else {
+                return Reject::Illegal;
+            }
+        }
+        if (scalar == 0) return Reject::PureVectorizable;
+        if (vectorizable == 0) return Reject::PureScalar;
+
+        // Whatever consumes a second-part value joins the second part.
+        for (bool grew = true; grew;) {
+            grew = false;
+            for (Instruction* inst : *info_.body) {
+                if (!inst || inst->is_terminator() || part2.count(inst)) continue;
+                bool uses_part2 = false;
+                ir::for_each_use(*inst, [&](Value* v) {
+                    if (v && v->is_instruction() && part2.count(v->defining_instruction())) uses_part2 = true;
+                });
+                if (!uses_part2) continue;
+                if (inst == info_.iv_inc_inst) return Reject::Illegal;
+                part2.insert(inst);
+                grew = true;
+            }
+        }
+
+        std::vector<Instruction*> part1_memory;
+        std::vector<Instruction*> part2_memory;
+        bool part1_stores = false;
+        for (Instruction* inst : *info_.body) {
+            if (!inst || inst->is_terminator() || inst == info_.iv_inc_inst) continue;
+            const bool second = part2.count(inst) != 0;
+            if (second) plan_.part2.push_back(inst);
+            if (!is_memory_access(inst->opcode())) continue;
+            (second ? part2_memory : part1_memory).push_back(inst);
+            if (!second && is_store(inst->opcode())) part1_stores = true;
+        }
+        if (plan_.part2.empty() || !part1_stores) return Reject::PureScalar;
+
+        AliasAnalysis aa(fn_);
+        for (const Instruction* a : part1_memory) {
+            for (const Instruction* b : part2_memory) {
+                if (!is_store(a->opcode()) && !is_store(b->opcode())) continue;
+                if (aa.alias(a->operand(0), b->operand(0)) != AliasResult::NoAlias) return Reject::Illegal;
+            }
+        }
+
+        // Every value the second part reads must be available in the second loop.
+        std::unordered_set<const Instruction*> remat;
+        for (const Instruction* inst : plan_.part2) {
+            bool ok = true;
+            ir::for_each_use(*inst, [&](Value* v) {
+                if (ok && !provide(v, part2, part1_memory, aa, remat, 0)) ok = false;
+            });
+            if (!ok) return Reject::Illegal;
+        }
+        // The second loop steps its own copy of the induction variable.
+        bool step_ok = true;
+        ir::for_each_use(*info_.iv_inc_inst, [&](Value* v) {
+            if (step_ok && !provide(v, part2, part1_memory, aa, remat, 0)) step_ok = false;
+        });
+        if (!step_ok) return Reject::Illegal;
+        for (Instruction* inst : *info_.body) {
+            if (remat.count(inst)) plan_.remat.push_back(inst);
+        }
+        return Reject::None;
+    }
+
+private:
+    bool is_vectorizable_access(const Instruction& inst) const {
+        const Opcode op = inst.opcode();
+        if (op != Opcode::load_indexed && op != Opcode::store_indexed) return false;
+        return info_.loop->is_loop_invariant(inst.operand(0)) && inst.operand(1) == info_.iv_param;
+    }
+
+    bool defined_in_loop(const Value* v) const {
+        if (v->is_block_param()) return info_.loop->contains(v->defining_block());
+        const Instruction* def = v->defining_instruction();
+        return def && info_.loop->contains(def->parent());
+    }
+
+    // Whether the second loop can have `v`: it is defined outside the loop,
+    // is the induction variable, comes from the second part, or can be
+    // recomputed or reloaded there.
+    bool provide(const Value* v, const std::unordered_set<const Instruction*>& part2,
+                 const std::vector<Instruction*>& part1_memory, const AliasAnalysis& aa,
+                 std::unordered_set<const Instruction*>& remat, int depth) {
+        if (!v) return true;
+        if (v == info_.iv_param) return true;
+        if (!defined_in_loop(v)) return true;
+        if (v->is_block_param() || depth > 8) return false;
+        const Instruction* def = v->defining_instruction();
+        if (def->parent() != info_.body || def == info_.iv_inc_inst) return false;
+        if (part2.count(def) || remat.count(def) || plan_.reload.count(v)) return true;
+        if (is_pure_computation(*def)) {
+            const auto saved_remat = remat;
+            const auto saved_reload = plan_.reload;
+            bool ok = true;
+            ir::for_each_use(*def, [&](Value* op) {
+                if (ok && !provide(op, part2, part1_memory, aa, remat, depth + 1)) ok = false;
+            });
+            if (ok) {
+                remat.insert(def);
+                return true;
+            }
+            remat = saved_remat;
+            plan_.reload = saved_reload;
+        }
+        if (const Instruction* store = reloadable_store(v, part1_memory, aa)) {
+            plan_.reload[v] = store;
+            return true;
+        }
+        return false;
+    }
+
+    // A first-part store of `v` to base[iv] whose slot nothing else in the
+    // first loop overwrites: the store's own later iterations hit other slots
+    // because the elements do not overlap, and every other store is to a
+    // disjoint object. Second-part stores are already known to be disjoint.
+    const Instruction* reloadable_store(const Value* v, const std::vector<Instruction*>& part1_memory,
+                                        const AliasAnalysis& aa) const {
+        const Instruction* found = nullptr;
+        for (const Instruction* s : part1_memory) {
+            if (s->opcode() != Opcode::store_indexed || s->operand(2) != v || !is_vectorizable_access(*s)) continue;
+            if (s->memory_type() != v->type() || s->scale() < v->type().size_in_bytes()) continue;
+            found = s;
+            break;
+        }
+        if (!found) return nullptr;
+        for (const Instruction* s : part1_memory) {
+            if (s == found || !is_store(s->opcode())) continue;
+            if (aa.alias(s->operand(0), found->operand(0)) != AliasResult::NoAlias) return nullptr;
+        }
+        return found;
+    }
+
+    Function& fn_;
+    Plan& plan_;
+    DistributableLoopInfo& info_;
+};
+
+Reject plan_distribution(Function& fn, LoopInfo& loop, Plan& plan) {
+    if (!extract_distributable_loop(loop, plan.info)) return Reject::Illegal;
+    return Planner(fn, plan).run();
+}
+
+void record_rejection(Reject r, const LoopDistributionOptions& options) {
+    if (!options.stats) return;
+    switch (r) {
+        case Reject::PureVectorizable: options.stats->rejected_pure_vectorizable++; break;
+        case Reject::PureScalar: options.stats->rejected_pure_scalar++; break;
+        case Reject::Illegal: options.stats->rejected_cycles++; break;
+        case Reject::None: break;
+    }
 }
 
 } // namespace
@@ -250,103 +413,10 @@ bool can_distribute_loop(
 ) {
     (void)dom;
     if (options.stats) options.stats->candidates_checked++;
-
-    DistributableLoopInfo info;
-    if (!extract_distributable_loop(fn, loop, info)) return false;
-
-    // Inspect instructions in the body
-    size_t vectorizable_count = 0;
-    size_t unvectorizable_count = 0;
-
-    for (Instruction* inst = info.body->head(); inst != nullptr; inst = inst->next()) {
-        if (inst->is_terminator() || inst == info.iv_inc_inst) continue;
-        Opcode op = inst->opcode();
-
-        if (is_unvectorizable_opcode(op)) {
-            unvectorizable_count++;
-        } else if (op == Opcode::load_indexed || op == Opcode::store_indexed) {
-            Value* base = inst->operand(0);
-            Value* idx = inst->operand(1);
-            if (info.loop->is_loop_invariant(base) && idx == info.iv_param) {
-                vectorizable_count++;
-            } else {
-                unvectorizable_count++;
-            }
-        } else if (is_supported_vector_arithmetic(op)) {
-            vectorizable_count++;
-        } else {
-            unvectorizable_count++;
-        }
-    }
-
-    if (unvectorizable_count == 0) {
-        if (options.stats) options.stats->rejected_pure_vectorizable++;
-        return false;
-    }
-    if (vectorizable_count == 0) {
-        if (options.stats) options.stats->rejected_pure_scalar++;
-        return false;
-    }
-
-    // Check dependency graph: Partition 2 = unvectorizable and its downstream dependencies.
-    // Partition 1 = remaining instructions.
-    // Partition 1 must not depend on Partition 2.
-    std::unordered_set<Instruction*> part2;
-    for (Instruction* inst = info.body->head(); inst != nullptr; inst = inst->next()) {
-        if (inst->is_terminator() || inst == info.iv_inc_inst) continue;
-        Opcode op = inst->opcode();
-        if (is_unvectorizable_opcode(op)) {
-            part2.insert(inst);
-        } else if (op == Opcode::load_indexed || op == Opcode::store_indexed) {
-            Value* base = inst->operand(0);
-            Value* idx = inst->operand(1);
-            if (!info.loop->is_loop_invariant(base) || idx != info.iv_param) {
-                part2.insert(inst);
-            }
-        } else if (!is_supported_vector_arithmetic(op)) {
-            part2.insert(inst);
-        }
-    }
-
-    // Grow part2 forward through SSA uses
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (Instruction* inst = info.body->head(); inst != nullptr; inst = inst->next()) {
-            if (inst->is_terminator() || inst == info.iv_inc_inst || part2.count(inst) > 0) continue;
-            for (size_t i = 0; i < inst->operand_count(); ++i) {
-                Value* op_val = inst->operand(i);
-                if (op_val && op_val->is_instruction()) {
-                    Instruction* def = op_val->defining_instruction();
-                    if (def && part2.count(def) > 0) {
-                        part2.insert(inst);
-                        changed = true;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    // Check if any vectorizable instruction in Partition 1 remains, with at least one store
-    size_t part1_count = 0;
-    size_t part1_stores = 0;
-    for (Instruction* inst = info.body->head(); inst != nullptr; inst = inst->next()) {
-        if (inst->is_terminator() || inst == info.iv_inc_inst) continue;
-        if (part2.count(inst) == 0) {
-            part1_count++;
-            if (inst->opcode() == Opcode::store_indexed || inst->opcode() == Opcode::store) {
-                part1_stores++;
-            }
-        }
-    }
-
-    if (part1_count == 0 || part1_stores == 0) {
-        if (options.stats) options.stats->rejected_cycles++;
-        return false;
-    }
-
-    return true;
+    Plan plan;
+    const Reject r = plan_distribution(fn, loop, plan);
+    record_rejection(r, options);
+    return r == Reject::None;
 }
 
 bool distribute_loop(
@@ -355,181 +425,74 @@ bool distribute_loop(
     const DominatorTree& dom,
     const LoopDistributionOptions& options
 ) {
-    if (!can_distribute_loop(fn, loop, dom, options)) return false;
+    (void)dom;
+    if (!fn.parent()) return false;
+    Plan plan;
+    if (plan_distribution(fn, loop, plan) != Reject::None) return false;
+    const DistributableLoopInfo& info = plan.info;
 
-    DistributableLoopInfo info;
-    extract_distributable_loop(fn, loop, info);
+    // ph -> hdr <-> body, hdr -> exit1 -> hdr2 <-> body2, hdr2 -> original exit
+    BasicBlock* exit1 = ir::new_block(fn, "dist_exit1");
+    BasicBlock* hdr2 = ir::new_block(fn, "dist_hdr2");
+    BasicBlock* body2 = ir::new_block(fn, "dist_body2");
+    Value* iv2 = ir::new_block_param(fn, hdr2, info.iv_param->type());
 
-    BasicBlock* hdr = info.header;
-    BasicBlock* body = info.body;
-    BasicBlock* latch = info.latch;
-    BasicBlock* ph = info.preheader;
-    BasicBlock* orig_exit = info.exit_bb;
+    ir::ValueMap values;
+    values[info.iv_param] = iv2;
+    const ir::BlockMap no_blocks;
+    std::unordered_set<const Instruction*> remat(plan.remat.begin(), plan.remat.end());
+    std::unordered_set<const Instruction*> part2(plan.part2.begin(), plan.part2.end());
 
-    // Partition instructions
-    std::unordered_set<Instruction*> part2_set;
-    for (Instruction* inst = body->head(); inst != nullptr; inst = inst->next()) {
-        if (inst->is_terminator() || inst == info.iv_inc_inst) continue;
-        Opcode op = inst->opcode();
-        if (is_unvectorizable_opcode(op)) {
-            part2_set.insert(inst);
-        } else if (op == Opcode::load_indexed || op == Opcode::store_indexed) {
-            Value* base = inst->operand(0);
-            Value* idx = inst->operand(1);
-            if (!info.loop->is_loop_invariant(base) || idx != info.iv_param) {
-                part2_set.insert(inst);
-            }
-        } else if (!is_supported_vector_arithmetic(op)) {
-            part2_set.insert(inst);
-        }
-    }
-
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (Instruction* inst = body->head(); inst != nullptr; inst = inst->next()) {
-            if (inst->is_terminator() || inst == info.iv_inc_inst || part2_set.count(inst) > 0) continue;
-            for (size_t i = 0; i < inst->operand_count(); ++i) {
-                Value* op_val = inst->operand(i);
-                if (op_val && op_val->is_instruction()) {
-                    Instruction* def = op_val->defining_instruction();
-                    if (def && part2_set.count(def) > 0) {
-                        part2_set.insert(inst);
-                        changed = true;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    std::vector<Instruction*> part1_insts;
-    std::vector<Instruction*> part2_insts;
-
-    for (Instruction* inst = body->head(); inst != nullptr; inst = inst->next()) {
-        if (inst->is_terminator() || inst == info.iv_inc_inst) continue;
-        if (part2_set.count(inst) > 0) {
-            part2_insts.push_back(inst);
-        } else {
-            part1_insts.push_back(inst);
-        }
-    }
-
-    // Create Loop 2 blocks:
-    // ph -> hdr1 -> body1 -> latch1 -> exit1
-    // exit1 -> hdr2 -> body2 -> latch2 -> orig_exit
     Builder b(*fn.parent());
     b.set_function(&fn);
-
-    BasicBlock* exit1 = b.create_block("dist_exit1");
-    BasicBlock* hdr2 = b.create_block("dist_hdr2");
-    BasicBlock* body2 = b.create_block("dist_body2");
-
-    fn.append_block(exit1);
-    fn.append_block(hdr2);
-    fn.append_block(body2);
-
-    // Setup hdr2 parameters
-    Value* iv2 = b.add_block_param(hdr2, info.iv_type);
-
-    // Any values computed in part1 and used in part2:
-    // If stored to an array, reload from array.
-    // If not stored to an array, allocate buffer in preheader, store in loop 1, reload in loop 2.
-    std::unordered_map<Value*, Value*> array_reloads;
-
-    // Find array stores in part1: map value -> array base
-    std::unordered_map<Value*, Value*> stored_arrays;
-    for (Instruction* inst : part1_insts) {
-        if (inst->opcode() == Opcode::store_indexed && inst->operand(1) == info.iv_param) {
-            stored_arrays[inst->operand(2)] = inst->operand(0);
-        }
-    }
-
-    // For any instruction in part2 using a def from part1:
     b.position_at_end(body2);
-    for (Instruction* inst : part2_insts) {
-        for (size_t op_i = 0; op_i < inst->operand_count(); ++op_i) {
-            Value* op_val = inst->operand(op_i);
-            if (op_val == info.iv_param) {
-                inst->set_operand(op_i, iv2);
-                continue;
+
+    // Walk the body in order so every value exists in body2 before its use.
+    std::vector<Instruction*> order;
+    for (Instruction* inst : *info.body) {
+        if (inst && !inst->is_terminator()) order.push_back(inst);
+    }
+    for (Instruction* inst : order) {
+        if (remat.count(inst)) {
+            body2->append_instruction(ir::clone_instruction(fn, *inst, values, no_blocks));
+        } else if (part2.count(inst)) {
+            info.body->remove_instruction(inst);
+            for (size_t i = 0; i < inst->operand_count(); ++i) {
+                auto it = values.find(inst->operand(i));
+                if (it != values.end()) inst->set_operand(i, it->second);
             }
-            if (!op_val || !op_val->is_instruction()) continue;
-            Instruction* def = op_val->defining_instruction();
-            if (def && def->parent() == body && part2_set.count(def) == 0) {
-                // op_val is defined in part1 and used in part2
-                if (array_reloads.count(op_val) == 0) {
-                    Value* reloaded = nullptr;
-                    uint8_t scale = static_cast<uint8_t>(op_val->type().size_in_bytes());
-                    auto it_arr = stored_arrays.find(op_val);
-                    if (it_arr != stored_arrays.end()) {
-                        Value* base = it_arr->second;
-                        reloaded = b.build_load_indexed(op_val->type(), base, iv2, scale);
-                    } else {
-                        // Create temporary buffer in preheader
-                        Builder ph_b(*fn.parent());
-                        ph_b.set_function(&fn);
-                        ph_b.position_before(ph->terminator());
-                        Value* elem_size = ph_b.build_iconst_i64(static_cast<int64_t>(scale));
-                        Value* total_bytes = ph_b.build_mul(info.limit_val, elem_size);
-                        Value* tmp_buf = ph_b.build_call("brass_gc_alloc", Type::gcref(), {total_bytes});
-
-                        // Store in loop 1
-                        Builder b1(*fn.parent());
-                        b1.set_function(&fn);
-                        b1.position_before(latch->terminator());
-                        b1.build_store_indexed(op_val->type(), tmp_buf, info.iv_param, scale, op_val);
-
-                        // Reload in loop 2
-                        reloaded = b.build_load_indexed(op_val->type(), tmp_buf, iv2, scale);
-                    }
-                    array_reloads[op_val] = reloaded;
-                }
-                inst->set_operand(op_i, array_reloads[op_val]);
+            body2->append_instruction(inst);
+        }
+        if (inst->result()) {
+            auto rl = plan.reload.find(inst->result());
+            if (rl != plan.reload.end()) {
+                const Instruction* store = rl->second;
+                Value* loaded = b.build_load_indexed(inst->result()->type(), store->operand(0), iv2,
+                                                     store->scale(), store->offset());
+                values[inst->result()] = loaded;
             }
         }
     }
 
-    // Move part2 instructions into body2
-    for (Instruction* inst : part2_insts) {
-        body->remove_instruction(inst);
-        body2->append_instruction(inst);
-    }
+    ir::ValueMap tail_values = values;
+    Instruction* inc2 = ir::clone_instruction(fn, *info.iv_inc_inst, tail_values, no_blocks);
+    body2->append_instruction(inc2);
+    const ir::BlockMap to_hdr2{{info.header, hdr2}};
+    body2->append_instruction(ir::clone_instruction(fn, *info.body->terminator(), tail_values, to_hdr2));
 
-    // Connect body2: compute next iv2 and branch back to hdr2
-    b.position_at_end(body2);
-    Value* step_val = (info.iv_type == Type::i32()) ? b.build_iconst_i32(static_cast<int32_t>(info.step)) : b.build_iconst_i64(info.step);
-    Value* next_iv2 = b.build_add(iv2, step_val);
-    b.build_br(hdr2, {next_iv2});
+    ir::ValueMap hdr_values{{info.iv_param, iv2}};
+    hdr2->append_instruction(ir::clone_instruction(fn, *info.cmp_inst, hdr_values, no_blocks));
+    const ir::BlockMap to_body2{{info.body, body2}};
+    hdr2->append_instruction(ir::clone_instruction(fn, *info.header->terminator(), hdr_values, to_body2));
 
-    // Setup hdr2 terminator
-    b.position_at_end(hdr2);
-    Value* cond2 = nullptr;
-    switch (info.cmp_opcode) {
-        case Opcode::slt: cond2 = b.build_slt(iv2, info.limit_val); break;
-        case Opcode::ult: cond2 = b.build_ult(iv2, info.limit_val); break;
-        case Opcode::sle: cond2 = b.build_sle(iv2, info.limit_val); break;
-        case Opcode::ule: cond2 = b.build_ule(iv2, info.limit_val); break;
-        default: cond2 = b.build_slt(iv2, info.limit_val); break;
-    }
-    if (info.exit_on_false) {
-        b.build_br_if(cond2, body2, {}, orig_exit, {});
-    } else {
-        b.build_br_if(cond2, orig_exit, {}, body2, {});
-    }
-
-    // Setup exit1: branches to hdr2 with init_val
     b.position_at_end(exit1);
     b.build_br(hdr2, {info.init_val});
 
-    // Update hdr1 exit branch to target exit1
-    Instruction* hdr_term = hdr->terminator();
-    BranchTarget& exit_tgt = info.exit_on_false ? hdr_term->false_target() : hdr_term->true_target();
-    exit_tgt.block = exit1;
-    exit_tgt.args.clear();
+    Instruction* hdr_term = info.header->terminator();
+    BranchTarget& exit_edge = info.exit_on_false ? hdr_term->false_target() : hdr_term->true_target();
+    exit_edge.block = exit1;
 
     fn.rebuild_cfg_predecessors();
-
     if (options.stats) options.stats->loops_distributed++;
     return true;
 }
@@ -540,26 +503,19 @@ bool loop_distribution_pass(
     const LoopDistributionOptions& options
 ) {
     bool any_distributed = false;
-    bool changed = true;
-
-    while (changed) {
+    for (bool changed = true; changed;) {
         changed = false;
         fn.rebuild_cfg_predecessors();
         DominatorTree current_dom(fn);
         LoopAnalysis la(fn, current_dom);
-
         for (LoopInfo* loop : la.post_order_loops()) {
-            if (!loop) continue;
-            if (can_distribute_loop(fn, *loop, current_dom, options)) {
-                if (distribute_loop(fn, *loop, current_dom, options)) {
-                    changed = true;
-                    any_distributed = true;
-                    break;
-                }
+            if (loop && distribute_loop(fn, *loop, current_dom, options)) {
+                changed = true;
+                any_distributed = true;
+                break;
             }
         }
     }
-
     return any_distributed;
 }
 

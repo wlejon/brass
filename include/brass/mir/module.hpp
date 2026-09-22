@@ -48,6 +48,16 @@ public:
         return external_symbols_;
     }
 
+    // Declares that calls to external `sym` return a fresh object no other
+    // pointer refers to, and touch no memory the caller can see. Alias and
+    // escape analysis rely on that promise, so only a frontend that owns the
+    // allocator's contract may make it. Printed as `extern @sym allocator`.
+    void add_allocation_function(std::string_view sym);
+    bool is_allocation_function(std::string_view sym) const noexcept;
+    const std::vector<std::string_view>& allocation_functions() const noexcept {
+        return allocation_functions_;
+    }
+
     bool allow_fp_reassociation() const noexcept { return allow_fp_reassociation_; }
     void set_allow_fp_reassociation(bool allow) noexcept { allow_fp_reassociation_ = allow; }
 
@@ -73,6 +83,7 @@ private:
     std::vector<Function*> functions_;
     std::unordered_map<std::string_view, Function*> function_map_;
     std::vector<std::string_view> external_symbols_;
+    std::vector<std::string_view> allocation_functions_;
     bool allow_fp_reassociation_ = false;
     bool pinned_tls_register_ = false;
     bool has_loop_optimizations_ = false;

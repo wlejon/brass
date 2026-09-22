@@ -218,7 +218,7 @@ bool contract_in_loop(Function& fn, const LoopInfo& loop, const RangeAnalysis& r
             if (!inst || inst->opcode() != Opcode::call || !inst->result()) continue;
             if (inst->symbol() == "bronze_create_array") {
                 candidates.emplace_back(inst, BufferKind::BronzeArray);
-            } else if (is_allocation_callee(inst->symbol())) {
+            } else if (is_allocation_call(inst)) {
                 candidates.emplace_back(inst, BufferKind::Raw);
             }
         }
@@ -251,10 +251,10 @@ bool array_contraction_pass(
 ) {
     bool changed = false;
 
-    // Fusing a loop that fills a buffer with the loop that drains it puts
-    // each write next to its read, which is what contraction needs.
-    LoopFusionOptions fusion_opts;
-    loop_fusion_pass(fn, dom, fusion_opts);
+    if (options.fuse_loops_first) {
+        LoopFusionOptions fusion_opts;
+        changed |= loop_fusion_pass(fn, dom, fusion_opts);
+    }
 
     fn.rebuild_cfg_predecessors();
     DominatorTree current_dom(fn);

@@ -137,6 +137,10 @@ private:
         }
 
         mod.add_external_symbol(sym_name);
+        if (peek().is(TokenKind::Ident) && peek().text == "allocator") {
+            advance();
+            mod.add_allocation_function(sym_name);
+        }
         return true;
     }
 
@@ -371,22 +375,15 @@ private:
         Instruction* res_inst = nullptr;
 
         switch (op) {
-            case Opcode::iconst_i32: {
-                if (!peek().is(TokenKind::IntLiteral)) {
-                    error(peek().location, "Expected integer literal for iconst.i32");
-                    return false;
-                }
-                int32_t val = static_cast<int32_t>(advance().int_val);
-                res_val = b.build_iconst_i32(val);
-                break;
-            }
+            case Opcode::iconst_i32:
             case Opcode::iconst_i64: {
+                const bool is32 = op == Opcode::iconst_i32;
                 if (!peek().is(TokenKind::IntLiteral)) {
-                    error(peek().location, "Expected integer literal for iconst.i64");
+                    error(peek().location, std::string("Expected integer literal for ") + (is32 ? "iconst.i32" : "iconst.i64"));
                     return false;
                 }
-                int64_t val = advance().int_val;
-                res_val = b.build_iconst_i64(val);
+                const int64_t val = advance().int_val;
+                res_val = is32 ? b.build_iconst_i32(static_cast<int32_t>(val)) : b.build_iconst_i64(val);
                 break;
             }
             case Opcode::fconst_f64: {
@@ -753,6 +750,16 @@ private:
 
             case Opcode::safepoint: {
                 b.build_safepoint();
+                break;
+            }
+
+            case Opcode::alloca_: {  // `alloca SIZE, ALIGN`, as the printer writes it
+                const int64_t size = peek().is(TokenKind::IntLiteral) ? advance().int_val : -1;
+                if (size < 0 || !match(TokenKind::Comma) || !peek().is(TokenKind::IntLiteral)) {
+                    error(peek().location, "Expected 'alloca SIZE, ALIGN'");
+                    return false;
+                }
+                res_val = b.build_alloca(static_cast<uint32_t>(size), static_cast<uint32_t>(advance().int_val));
                 break;
             }
 

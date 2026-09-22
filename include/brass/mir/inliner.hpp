@@ -19,7 +19,10 @@ struct InlinerOptions {
     double loop_call_priority_bonus = 4.0;
     size_t max_callee_instruction_count = 120;
     size_t max_total_caller_instructions = 1000;
-    bool enable_devirtualization = true;
+    // Rewrites every patchable_call to a direct call of its default target.
+    // Only correct when nothing will ever patch those sites (brass_patch_call,
+    // inline caches), which the compiler cannot know, so it is opt-in.
+    bool enable_devirtualization = false;
     bool enable_speculative_devirtualization = false;
     bool enable_loop_priority = true;
     bool enable_sroa = true;

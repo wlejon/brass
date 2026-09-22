@@ -169,7 +169,7 @@ void PartialEscapeAnalysis::analyze() {
         if (!bb) continue;
         for (const Instruction* inst : *bb) {
             if (!inst) continue;
-            if (inst->opcode() == Opcode::call && is_allocation_callee(inst->symbol())) {
+            if (is_allocation_call(inst)) {
                 const Value* res = inst->result();
                 if (res) {
                     analyze_allocation(res);

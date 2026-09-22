@@ -15,6 +15,8 @@ This document audits all optimization passes in Brass, specifying observable flo
    - Signed zeroes (`+0.0` vs `-0.0`), infinities, and NaN payloads are maintained.
 3. **Deterministic Integer Modulo Arithmetic**:
    Integer scalar operations execute two's complement wrapping arithmetic modulo $2^{32}$ (`i32`) and $2^{64}$ (`i64`), with associative and commutative properties valid under modular ring equivalence. Vector integer lanes operate identically per lane.
+   - **Signed division overflow wraps**: `sdiv MIN, -1` is `MIN` and `smod MIN, -1` is `0` at both widths. The interpreters, the constant folder (`src/mir/int_fold`), the x64 backends (which guard `idiv` against a `-1` divisor instead of taking the `#DE` fault) and AArch64 (whose `sdiv` already wraps) all produce this result, so passes may fold it and may execute a division by a constant other than `0` speculatively.
+   - **Division by zero is a program error**: `sdiv`, `udiv`, `smod` and `umod` with a zero divisor raise an error in the interpreters and fault on x64; the result on AArch64 (`0`) is not a defined MIR result. Frontends that need a defined answer must test the divisor. Optimizers never fold such a division, never introduce one, and never hoist or speculate a division whose divisor is not a known non-zero constant.
 4. **Memory SSA & Precise Alias Analysis**:
    Load elimination (RLE), store forwarding, and dead store elimination (DSE) are strictly gated by memory SSA barriers, escape analysis, and unaliased provenance proofs.
 

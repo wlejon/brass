@@ -148,13 +148,13 @@ bool emit_baseline_x64_op(X64BaselineEmitter& emitter, const Instruction& inst) 
                 enc.mov32(GPR::RAX, slot_addr(inst.operand(0)));
                 enc.cdq();
                 enc.mov32(GPR::RCX, slot_addr(inst.operand(1)));
-                enc.idiv32(GPR::RCX);
+                enc.idiv32_wrapping(GPR::RCX);
                 enc.mov32(slot_addr(inst.result()), GPR::RAX);
             } else {
                 enc.mov(GPR::RAX, slot_addr(inst.operand(0)));
                 enc.cqo();
                 enc.mov(GPR::RCX, slot_addr(inst.operand(1)));
-                enc.idiv(GPR::RCX);
+                enc.idiv_wrapping(GPR::RCX);
                 enc.mov(slot_addr(inst.result()), GPR::RAX);
             }
             return true;
@@ -171,13 +171,13 @@ bool emit_baseline_x64_op(X64BaselineEmitter& emitter, const Instruction& inst) 
                 enc.mov32(GPR::RAX, slot_addr(inst.operand(0)));
                 enc.cdq();
                 enc.mov32(GPR::RCX, slot_addr(inst.operand(1)));
-                enc.idiv32(GPR::RCX);
+                enc.idiv32_wrapping(GPR::RCX);
                 enc.mov32(slot_addr(inst.result()), GPR::RDX);
             } else {
                 enc.mov(GPR::RAX, slot_addr(inst.operand(0)));
                 enc.cqo();
                 enc.mov(GPR::RCX, slot_addr(inst.operand(1)));
-                enc.idiv(GPR::RCX);
+                enc.idiv_wrapping(GPR::RCX);
                 enc.mov(slot_addr(inst.result()), GPR::RDX);
             }
             return true;

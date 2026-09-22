@@ -311,6 +311,41 @@ void X64Encoder::idiv32(const MemAddress& src) {
     emit_mem_operand(7, src);
 }
 
+namespace {
+
+// cmp src, -1; jne divide; neg rax; xor edx, edx; jmp done; divide: idiv src; done:
+template <typename Cmp, typename Neg, typename Div>
+void emit_wrapping_idiv(X64Encoder& enc, CodeBuffer& buffer, Cmp&& cmp_minus_one, Neg&& neg_rax, Div&& idiv) {
+    Label divide = buffer.create_label();
+    Label done = buffer.create_label();
+    cmp_minus_one();
+    enc.jne(divide);
+    neg_rax();
+    enc.xor32(GPR::RDX, GPR::RDX);
+    enc.jmp(done);
+    buffer.bind(divide);
+    idiv();
+    buffer.bind(done);
+}
+
+} // namespace
+
+void X64Encoder::idiv_wrapping(GPR src) {
+    emit_wrapping_idiv(*this, buffer_, [&] { cmp(src, -1); }, [&] { neg(GPR::RAX); }, [&] { idiv(src); });
+}
+
+void X64Encoder::idiv32_wrapping(GPR src) {
+    emit_wrapping_idiv(*this, buffer_, [&] { cmp32(src, -1); }, [&] { neg32(GPR::RAX); }, [&] { idiv32(src); });
+}
+
+void X64Encoder::idiv_wrapping(const MemAddress& src) {
+    emit_wrapping_idiv(*this, buffer_, [&] { cmp(src, -1); }, [&] { neg(GPR::RAX); }, [&] { idiv(src); });
+}
+
+void X64Encoder::idiv32_wrapping(const MemAddress& src) {
+    emit_wrapping_idiv(*this, buffer_, [&] { cmp32(src, -1); }, [&] { neg32(GPR::RAX); }, [&] { idiv32(src); });
+}
+
 void X64Encoder::imul(GPR src) {
     emit_rex(true, false, false, is_extended(src));
     buffer_.emit8(0xF7);

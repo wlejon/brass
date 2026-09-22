@@ -1,36 +1,73 @@
 #include <brass/mir/write_barrier_elim.hpp>
-#include <unordered_set>
+#include <brass/gc/gc_limits.hpp>
+#include <brass/mir/gc_refs.hpp>
 #include <iostream>
+#include <set>
+#include <unordered_set>
+#include <utility>
 
 namespace brass {
 
 namespace {
 
-bool is_object_tag_value(const Value* val) noexcept {
+// Depth bound for the operand walk that proves a value carries no pointer.
+// Past it the value is assumed to be a pointer, which keeps the barrier.
+constexpr int kMaxNonPointerDepth = 8;
+
+bool constant_integer(const Value* val, int64_t& out) noexcept {
     if (!val || !val->is_instruction()) return false;
-    const Instruction* inst = val->defining_instruction();
-    if (!inst || inst->opcode() != Opcode::iconst_i64) return false;
-    uint64_t imm = static_cast<uint64_t>(inst->imm_i64());
-    // Bronze object tag is TAG_OBJECT (0xFFF1) shifted by 48 bits: 0xFFF1000000000000ULL
-    return (imm == 0xFFF1000000000000ULL) || ((imm >> 48) == 0xFFF1ULL);
+    const Instruction* def = val->defining_instruction();
+    if (!def) return false;
+    if (def->opcode() == Opcode::iconst_i64) {
+        out = def->imm_i64();
+        return true;
+    }
+    if (def->opcode() == Opcode::iconst_i32) {
+        out = def->imm_i32();
+        return true;
+    }
+    return false;
 }
 
-bool is_tagged_pointer_value(const Value* val) noexcept {
-    if (!val) return false;
-    if (val->type().is_pointer_or_gcref()) return true;
-    if (is_object_tag_value(val)) return true;
-    if (val->is_instruction()) {
-        const Instruction* inst = val->defining_instruction();
-        if (!inst) return false;
-        if (inst->opcode() == Opcode::or_) {
-            for (size_t i = 0; i < inst->operand_count(); ++i) {
-                if (is_tagged_pointer_value(inst->operand(i))) return true;
-            }
-        } else if (inst->opcode() == Opcode::and_) {
-            for (size_t i = 0; i < inst->operand_count(); ++i) {
-                if (inst->operand(i) && (inst->operand(i)->type().is_pointer_or_gcref() || is_tagged_pointer_value(inst->operand(i)))) return true;
-            }
+bool non_pointer_value(const Value* val, int depth) noexcept {
+    if (!val) return true;
+    const Type t = val->type();
+    if (t.is_gcref() || t.is_pointer()) return false;
+    // Floats, vectors, 32-bit and narrower integers never hold a 64-bit
+    // heap address, and a comparison result is 0 or 1.
+    if (t.is_float() || t.is_vector() || t.is_void()) return true;
+    if (t.kind() != TypeKind::I64) return true;
+
+    // An i64 block parameter or function argument may carry a (possibly
+    // NaN-boxed) reference: nothing is known about it.
+    if (!val->is_instruction()) return false;
+    const Instruction* def = val->defining_instruction();
+    if (!def) return false;
+
+    const Opcode op = def->opcode();
+    if (op == Opcode::iconst_i64 || op == Opcode::iconst_i32) return true;
+    if (is_comparison(op)) return true;
+    switch (op) {
+        case Opcode::clz: case Opcode::ctz: case Opcode::popcnt:
+        case Opcode::sext_i64: case Opcode::zext_i64:
+        case Opcode::fptosi_i64: case Opcode::fptosi_i64_f32:
+        case Opcode::bitcast_f64_i64:
+            // Counts, widened 32-bit values and converted floats are numbers
+            // by construction; a boxed double is not a heap address.
+            return true;
+        default:
+            break;
+    }
+    if (depth >= kMaxNonPointerDepth) return false;
+    // Arithmetic and bit operations can build an address out of a pointer
+    // operand (tagging, untagging, offsetting), so the result is a number
+    // only when every input is.
+    if (is_arithmetic(op) || is_bitwise(op) || op == Opcode::select) {
+        const size_t first = op == Opcode::select ? 1 : 0;
+        for (size_t i = first; i < def->operand_count(); ++i) {
+            if (!non_pointer_value(def->operand(i), depth + 1)) return false;
         }
+        return true;
     }
     return false;
 }
@@ -38,105 +75,18 @@ bool is_tagged_pointer_value(const Value* val) noexcept {
 } // namespace
 
 bool WriteBarrierElimination::is_non_pointer_value(const Value* val) const noexcept {
-    if (!val) return true;
-
-    Type t = val->type();
-    if (t.is_gcref() || t.is_pointer()) {
-        return false;
-    }
-
-    if (t.is_float() || t.is_vector() || t.is_void()) {
-        return true;
-    }
-
-    if (t.kind() == TypeKind::I32) {
-        return true; // 32-bit integers are never pointers
-    }
-
-    if (val->is_instruction()) {
-        const Instruction* def = val->defining_instruction();
-        if (!def) return false;
-
-        Opcode op = def->opcode();
-        if (op == Opcode::iconst_i32 || op == Opcode::fconst_f64) {
-            return true;
-        }
-        if (op == Opcode::iconst_i64) {
-            // Immediate integer constants, including 0 (null) or numbers
-            return true;
-        }
-        if (op == Opcode::bitcast_i64_f64) {
-            return true; // Floats cast to i64 (like NaN-boxed floats)
-        }
-        if (op == Opcode::or_) {
-            // Bronze lowers object pointers by bitwise OR with object tags.
-            // Do not treat Opcode::or_ as a non-pointer if either operand is an object/pointer type or tagged pointer.
-            const Value* op0 = def->operand(0);
-            const Value* op1 = def->operand(1);
-            if ((op0 && (op0->type().is_pointer_or_gcref() || is_tagged_pointer_value(op0))) ||
-                (op1 && (op1->type().is_pointer_or_gcref() || is_tagged_pointer_value(op1)))) {
-                return false;
-            }
-            if (!is_non_pointer_value(op0) || !is_non_pointer_value(op1)) {
-                return false;
-            }
-            return true;
-        }
-        if (is_arithmetic(op) || is_bitwise(op) || is_comparison(op)) {
-            return true;
-        }
-        if (op == Opcode::trunc_i32 || op == Opcode::fptosi_i32 || op == Opcode::fptosi_i64) {
-            return true;
-        }
-    }
-
-    return false;
+    return non_pointer_value(val, 0);
 }
 
 bool WriteBarrierElimination::is_allocation_inst(const Instruction* inst) const noexcept {
-    if (!inst) return false;
-
-    if (inst->is_call()) {
-        std::string_view callee = inst->symbol();
-        if (callee == "brass_gc_alloc") {
-            // Direct tenured allocation check: allocations with total size > 256KB
-            // bypass nursery allocation and are allocated directly into tenured space.
-            if (inst->operand_count() >= 1) {
-                const Value* sz_val = inst->operand(0);
-                if (sz_val && sz_val->is_instruction()) {
-                    const Instruction* def = sz_val->defining_instruction();
-                    if (def && (def->opcode() == Opcode::iconst_i64 || def->opcode() == Opcode::iconst_i32)) {
-                        int64_t sz = def->opcode() == Opcode::iconst_i64 ? def->imm_i64() : def->imm_i32();
-                        if (sz < 0 || static_cast<size_t>(sz) + 32 > (256 * 1024)) {
-                            return false;
-                        }
-                    }
-                }
-            }
-            return true;
-        }
-        if (callee == "bronze_create_object" ||
-            callee == "bronze_create_array" ||
-            callee == "bronze_env_create" ||
-            callee == "bronze_create_func" ||
-            callee == "bronze_create_async_machine") {
-            if (callee == "bronze_create_array" && inst->operand_count() >= 1) {
-                const Value* cap_val = inst->operand(0);
-                if (cap_val && cap_val->is_instruction()) {
-                    const Instruction* def = cap_val->defining_instruction();
-                    if (def && (def->opcode() == Opcode::iconst_i64 || def->opcode() == Opcode::iconst_i32)) {
-                        int64_t cap = def->opcode() == Opcode::iconst_i64 ? def->imm_i64() : def->imm_i32();
-                        if (cap < 0 || static_cast<size_t>(cap) * 8 + 32 > (256 * 1024)) {
-                            return false;
-                        }
-                    }
-                }
-            }
-            return true;
-        }
-    }
-
-    return false;
+    if (!inst || inst->opcode() != Opcode::call) return false;
+    // Only brass's own allocator has a known placement policy. A request
+    // larger than half the nursery goes straight to tenured space, so the
+    // result is young only for a constant size below the guaranteed bound.
+    if (inst->symbol() != "brass_gc_alloc" || inst->operand_count() < 1) return false;
+    int64_t size = 0;
+    if (!constant_integer(inst->operand(0), size)) return false;
+    return size >= 0 && static_cast<uint64_t>(size) <= kMaxAlwaysYoungPayloadBytes;
 }
 
 bool WriteBarrierElimination::run_on_function(Function& fn) {
@@ -146,63 +96,54 @@ bool WriteBarrierElimination::run_on_function(Function& fn) {
     for (BasicBlock* bb : fn.blocks()) {
         if (!bb) continue;
 
-        std::unordered_set<const Value*> dirtied_in_block;
+        // The runtime barrier marks the card of `obj` only when `obj` is old
+        // and the stored value is young, so a barrier is redundant only
+        // after one with the same object *and* the same value: an earlier
+        // barrier storing an old value leaves the card clean.
+        std::set<std::pair<const Value*, const Value*>> barriered;
         std::unordered_set<const Value*> young_in_block;
 
         for (Instruction* inst = bb->head(); inst != nullptr; inst = inst->next()) {
-            if ((inst->is_call() && inst->symbol() != "bronze_tls_block_addr") || inst->opcode() == Opcode::safepoint) {
-                // Calls or safepoints could trigger GC and clean cards or promote objects
-                dirtied_in_block.clear();
+            // A collection may promote young objects and clean cards, so
+            // facts about ages and marked cards die at a GC point.
+            if (may_trigger_gc(*inst)) {
+                barriered.clear();
                 young_in_block.clear();
             }
 
-            if (is_allocation_inst(inst)) {
-                if (inst->result()) {
-                    young_in_block.insert(inst->result());
-                }
+            if (is_allocation_inst(inst) && inst->result()) {
+                young_in_block.insert(inst->result());
             }
 
-            // Check if young object escapes via store
-            if (inst->opcode() == Opcode::store) {
-                const Value* val_stored = inst->operand(1);
-                if (val_stored) young_in_block.erase(val_stored);
-            } else if (inst->opcode() == Opcode::store_indexed) {
-                const Value* val_stored = inst->operand(2);
-                if (val_stored) young_in_block.erase(val_stored);
+            if (inst->opcode() != Opcode::write_barrier) continue;
+
+            stats_.total_barriers++;
+            const Value* obj = inst->operand(0);
+            const Value* val = inst->operand(1);
+
+            bool eliminate = false;
+            if (is_non_pointer_value(val)) {
+                // Rule 1: the stored value cannot be a young reference.
+                stats_.eliminated_non_pointer++;
+                eliminate = true;
+            } else if (obj && young_in_block.count(obj) > 0) {
+                // Rule 2: a young object needs no card mark, and nothing
+                // since its allocation could have promoted it.
+                stats_.eliminated_young_provenance++;
+                eliminate = true;
+            } else if (obj && barriered.count({obj, val}) > 0) {
+                // Rule 3: an identical barrier already ran with no collection
+                // in between, so it left the card exactly as this one would.
+                stats_.eliminated_redundant++;
+                eliminate = true;
             }
 
-            if (inst->opcode() == Opcode::write_barrier) {
-                stats_.total_barriers++;
-                const Value* obj = inst->operand(0);
-                const Value* val = inst->operand(1);
-
-                bool eliminate = false;
-
-                // Rule 1: val is known non-pointer, immediate, int, float, null
-                if (is_non_pointer_value(val)) {
-                    stats_.eliminated_non_pointer++;
-                    eliminate = true;
-                }
-                // Rule 2: obj is newly allocated within current function and has not escaped
-                else if (obj && young_in_block.count(obj) > 0) {
-                    stats_.eliminated_young_provenance++;
-                    eliminate = true;
-                }
-                // Rule 3: Redundant barrier on obj already dirtied in current block without intervening call/safepoint
-                else if (obj && dirtied_in_block.count(obj) > 0) {
-                    stats_.eliminated_redundant++;
-                    eliminate = true;
-                }
-
-                if (eliminate) {
-                    to_remove.push_back(inst);
-                    changed = true;
-                } else {
-                    stats_.remaining_barriers++;
-                    if (obj) {
-                        dirtied_in_block.insert(obj);
-                    }
-                }
+            if (eliminate) {
+                to_remove.push_back(inst);
+                changed = true;
+            } else {
+                stats_.remaining_barriers++;
+                if (obj) barriered.insert({obj, val});
             }
         }
     }

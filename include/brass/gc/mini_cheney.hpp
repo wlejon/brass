@@ -84,6 +84,10 @@ public:
     void reset();
 
 private:
+    // Checks that [base + offset, + size) lies inside one live object. `base`
+    // is either an object start or a derived pointer into an object's
+    // payload (MIR `add gcref, i64`), which is resolved by walking the heap.
+    void check_access(uintptr_t base, int32_t offset, size_t size, const char* what) const;
     uintptr_t evacuate_object(uintptr_t obj_addr, size_t& to_free_ptr);
     void poison_space(uint8_t* space, size_t size) noexcept;
     void gather_all_roots(std::vector<uintptr_t*>& roots);

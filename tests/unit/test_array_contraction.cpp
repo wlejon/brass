@@ -97,6 +97,7 @@ TEST_CASE("Array Contraction - Eliminate Buffer and Verify 0 Cheney GC Allocatio
     // 2. Run Array Contraction pass (which fuses and contracts)
     DominatorTree dom(*fn);
     ArrayContractionOptions contract_opts;
+    contract_opts.fuse_loops_first = true;
     ArrayContractionStats stats;
     contract_opts.stats = &stats;
 
@@ -206,6 +207,7 @@ TEST_CASE("Array Contraction - Bronze Dynamic Object Arrays") {
 
     DominatorTree dom(*fn);
     ArrayContractionOptions contract_opts;
+    contract_opts.fuse_loops_first = true;
     ArrayContractionStats stats;
     contract_opts.stats = &stats;
 

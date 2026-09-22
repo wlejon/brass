@@ -60,4 +60,16 @@ bool Module::has_external_symbol(std::string_view sym) const noexcept {
     return std::find(external_symbols_.begin(), external_symbols_.end(), sym) != external_symbols_.end();
 }
 
+void Module::add_allocation_function(std::string_view sym) {
+    add_external_symbol(sym);
+    std::string_view interned_sym = string_pool_.intern(sym);
+    if (!is_allocation_function(interned_sym)) {
+        allocation_functions_.push_back(interned_sym);
+    }
+}
+
+bool Module::is_allocation_function(std::string_view sym) const noexcept {
+    return std::find(allocation_functions_.begin(), allocation_functions_.end(), sym) != allocation_functions_.end();
+}
+
 } // namespace brass

@@ -96,21 +96,23 @@ TEST_CASE("WBE - Redundant intra-block write barrier elimination") {
     Value* val1 = b.add_block_param(entry, Type::gcref());
     Value* val2 = b.add_block_param(entry, Type::gcref());
 
-    // First barrier on obj
+    // The card is marked only when the stored value is young, so a barrier
+    // for a different value is not made redundant by the first one; a
+    // repeat of the same object/value pair is.
     b.build_write_barrier(obj, val1);
-    // Second barrier on obj with different value in same block
     b.build_write_barrier(obj, val2);
+    b.build_write_barrier(obj, val1);
     b.build_ret_void();
 
-    CHECK_EQ(count_write_barriers(*fn), 2ULL);
+    CHECK_EQ(count_write_barriers(*fn), 3ULL);
 
     WriteBarrierElimination wbe;
     bool changed = wbe.run_on_function(*fn);
 
     CHECK(changed);
-    CHECK_EQ(count_write_barriers(*fn), 1ULL);
+    CHECK_EQ(count_write_barriers(*fn), 2ULL);
     CHECK_EQ(wbe.stats().eliminated_redundant, 1U);
-    CHECK_EQ(wbe.stats().remaining_barriers, 1U);
+    CHECK_EQ(wbe.stats().remaining_barriers, 2U);
 
     DiagnosticReporter diag;
     CHECK(verify_module(mod, &diag));

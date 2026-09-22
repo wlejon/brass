@@ -182,7 +182,9 @@ TEST_CASE("Software Pipeline - End-to-End Vector Sum Execution") {
     Value* idx = b.add_block_param(loop_bb, Type::i64());
     Value* acc = b.add_block_param(loop_bb, Type::f32x4());
 
-    Value* elem = b.build_load_indexed(Type::f32x4(), ptr, idx, 16, 0);
+    // A 16-byte stride is not an encodable scale: scale the index first.
+    Value* byte_off = b.build_mul(idx, b.build_iconst_i64(16));
+    Value* elem = b.build_load_indexed(Type::f32x4(), ptr, byte_off, 1, 0);
     Value* next_acc = b.build_vadd(acc, elem);
     Value* one = b.build_iconst_i64(1);
     Value* next_idx = b.build_add(idx, one);

@@ -61,6 +61,24 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
     // Check parameter count
     if (call_inst->operand_count() != callee.param_count()) return result;
 
+    // At an invoke site every way the callee can raise must end at the
+    // invoke's handler. Plain calls are rewritten into invokes below; a
+    // throw, a resume, or any other kind of call would unwind straight past
+    // the handler, so such callees are not inlined there.
+    if (call_inst->opcode() == Opcode::invoke) {
+        for (const BasicBlock* bb : callee.blocks()) {
+            if (!bb) continue;
+            for (const Instruction* inst : *bb) {
+                if (!inst) continue;
+                const Opcode op = inst->opcode();
+                if (op == Opcode::throw_ || op == Opcode::resume ||
+                    (is_call(op) && op != Opcode::call && op != Opcode::invoke)) {
+                    return result;
+                }
+            }
+        }
+    }
+
     Module* mod = caller.parent();
     if (!dbg_ctx && mod) {
         dbg_ctx = &mod->debug_context();

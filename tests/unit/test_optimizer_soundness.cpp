@@ -3,7 +3,7 @@
 // where the code is executable, by running it before and after on the
 // interpreter and after on the JIT.
 
-#include "test_framework.hpp"
+#include "soundness_helpers.hpp"
 #include <brass/brass.hpp>
 #include <brass/mir/parser.hpp>
 #include <brass/mir/printer.hpp>
@@ -17,6 +17,7 @@
 #include <brass/mir/dominators.hpp>
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/codegen/jit_exec.hpp>
+#include <brass/codegen/baseline_jit.hpp>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -27,93 +28,7 @@
 #include <vector>
 
 using namespace brass;
-
-namespace {
-
-std::unique_ptr<Module> parse(std::string_view text) {
-    DiagnosticReporter diag;
-    auto mod = parse_module(text, &diag);
-    if (!mod) std::cerr << diag.format_all() << "\n";
-    REQUIRE(mod != nullptr);
-    return mod;
-}
-
-Function* find_fn(Module& mod, std::string_view name) {
-    Function* fn = mod.get_function(name);
-    REQUIRE(fn != nullptr);
-    return fn;
-}
-
-size_t count_opcode(const Function& fn, Opcode op) {
-    size_t n = 0;
-    for (const BasicBlock* bb : fn.blocks()) {
-        for (const Instruction* inst : *bb) {
-            if (inst->opcode() == op) ++n;
-        }
-    }
-    return n;
-}
-
-size_t count_calls(const Function& fn, std::string_view symbol) {
-    size_t n = 0;
-    for (const BasicBlock* bb : fn.blocks()) {
-        for (const Instruction* inst : *bb) {
-            if (inst->opcode() == Opcode::call && inst->symbol() == symbol) ++n;
-        }
-    }
-    return n;
-}
-
-// Runs `fn_name` on the interpreter, applies `transform` to a fresh copy of
-// the module, then runs the transformed code on the interpreter and the JIT.
-// All three must agree on every argument set.
-void check_transform_preserves(std::string_view mir, std::string_view fn_name,
-                               const std::function<void(Module&)>& transform,
-                               const std::vector<std::vector<RuntimeValue>>& arg_sets) {
-    auto original = parse(mir);
-    auto optimized = parse(mir);
-    transform(*optimized);
-    DiagnosticReporter diag;
-    const bool verified = verify_module(*optimized, &diag);
-    if (!verified) {
-        std::cerr << diag.format_all() << "\n";
-        print_module(*optimized, std::cerr);
-    }
-    REQUIRE(verified);
-
-    codegen::JitExecutionEngine jit(Target::host());
-    REQUIRE(jit.compile_and_load(*optimized));
-
-    for (const auto& args : arg_sets) {
-        Interpreter before_interp;
-        const uint64_t before = before_interp.run(*original, fn_name, args).raw_bits();
-        Interpreter after_interp;
-        const uint64_t after = after_interp.run(*optimized, fn_name, args).raw_bits();
-        const uint64_t after_jit = jit.invoke(fn_name, args).raw_bits();
-        if (before != after || before != after_jit) {
-            std::cerr << "MISMATCH in " << fn_name << ": before=" << before << " after=" << after
-                      << " jit=" << after_jit << "\n";
-            print_module(*optimized, std::cerr);
-        }
-        CHECK_EQ(before, after);
-        CHECK_EQ(before, after_jit);
-    }
-}
-
-RuntimeValue i64(int64_t v) { return RuntimeValue::from_i64(v); }
-RuntimeValue i32(int32_t v) { return RuntimeValue::from_i32(v); }
-
-void run_loop_pipeline(Module& mod) {
-    LoopOptOptions opts;
-    opts.enable_bce = true;
-    optimize_module_loops(mod, opts);
-}
-
-void run_bce(Module& mod) {
-    run_bounds_check_elimination(mod);
-}
-
-} // namespace
+using namespace soundness;
 
 // ---------------------------------------------------------------------------
 // Alias analysis
@@ -326,8 +241,9 @@ TEST_CASE("Soundness - loop-pipeline constant folding works at the operation's w
     }
 }
 
-TEST_CASE("Soundness - INT64_MIN sdiv -1 is left for run time, not folded or crashed on") {
-    auto mod = parse(R"(
+TEST_CASE("Soundness - MIN sdiv -1 folds to the wrapped result at both widths") {
+    // docs/semantics.md: MIN / -1 == MIN and MIN % -1 == 0.
+    constexpr std::string_view text = R"(
 func @d(%x: i64) -> i64 {
 bb0:
   %a = iconst.i64 -9223372036854775808
@@ -335,19 +251,80 @@ bb0:
   %r = sdiv %a, %b
   %m = smod %a, %b
   %s = add %r, %m
-  ret %s
+  %a32 = iconst.i32 -2147483648
+  %b32 = iconst.i32 -1
+  %r32 = sdiv %a32, %b32
+  %m32 = smod %a32, %b32
+  %s32 = add %r32, %m32
+  %w = sext_i64 %s32
+  %t = xor %s, %w
+  ret %t
 }
-)");
+)";
+    auto mod = parse(text);
     run_loop_pipeline(*mod);
     sccp_module(*mod);
-    CHECK_EQ(count_opcode(*find_fn(*mod, "d"), Opcode::sdiv), size_t(1));
-    CHECK_EQ(count_opcode(*find_fn(*mod, "d"), Opcode::smod), size_t(1));
+    CHECK_EQ(count_opcode(*find_fn(*mod, "d"), Opcode::sdiv), size_t(0));
+    CHECK_EQ(count_opcode(*find_fn(*mod, "d"), Opcode::smod), size_t(0));
+    Interpreter interp;
+    const int64_t expected = std::numeric_limits<int64_t>::min() ^
+                             static_cast<int64_t>(std::numeric_limits<int32_t>::min());
+    CHECK_EQ(interp.run(*mod, "d", {i64(0)}).as_i64(), expected);
+    check_transform_preserves(text, "d", [](Module& m) { sccp_module(m); }, {{i64(0)}});
 }
 
-TEST_CASE("Soundness - LICM does not hoist a division by -1 out of a guarded block") {
-    // x / -1 traps for x == INT64_MIN; the loop only divides when x differs.
+TEST_CASE("Soundness - run-time MIN sdiv -1 wraps on the interpreter and both x64 JITs") {
     constexpr std::string_view text = R"(
-func @f(%x: i64, %n: i64) -> i64 {
+func @d64(%a: i64, %b: i64) -> i64 {
+bb0:
+  %q = sdiv %a, %b
+  %r = smod %a, %b
+  %s = xor %q, %r
+  ret %s
+}
+
+func @d32(%a: i32, %b: i32) -> i32 {
+bb0:
+  %q = sdiv %a, %b
+  %r = smod %a, %b
+  %s = xor %q, %r
+  ret %s
+}
+)";
+    const int64_t min64 = std::numeric_limits<int64_t>::min();
+    const int32_t min32 = std::numeric_limits<int32_t>::min();
+    auto nothing = [](Module&) {};
+    check_transform_preserves(text, "d64", nothing,
+                              {{i64(min64), i64(-1)}, {i64(min64), i64(1)}, {i64(-7), i64(-1)}, {i64(7), i64(-2)}});
+    check_transform_preserves(text, "d32", nothing,
+                              {{i32(min32), i32(-1)}, {i32(min32), i32(1)}, {i32(-7), i32(-1)}, {i32(7), i32(-2)}});
+
+    auto mod = parse(text);
+    Interpreter interp;
+    CHECK_EQ(interp.run(*mod, "d64", {i64(min64), i64(-1)}).as_i64(), min64);
+    CHECK_EQ(interp.run(*mod, "d32", {i32(min32), i32(-1)}).as_i32(), min32);
+
+    if (Target::host().is_x64()) {
+        codegen::BaselineJitCompiler baseline;
+        auto compiled = baseline.compile_module(*mod);
+        for (const auto& cf : compiled) {
+            REQUIRE(cf.is_valid());
+            if (cf.name() == "d64") {
+                CHECK_EQ(cf.invoke({i64(min64), i64(-1)}).as_i64(), min64);
+                CHECK_EQ(cf.invoke({i64(-9), i64(-1)}).as_i64(), int64_t(9));
+            } else {
+                CHECK_EQ(cf.invoke({i32(min32), i32(-1)}).as_i32(), min32);
+                CHECK_EQ(cf.invoke({i32(-9), i32(-1)}).as_i32(), int32_t(9));
+            }
+        }
+    }
+}
+
+TEST_CASE("Soundness - LICM does not hoist a division by a possibly-zero divisor out of a guarded block") {
+    // The loop divides only when d != 0; hoisting the invariant division to
+    // the preheader would divide by zero when d == 0.
+    constexpr std::string_view text = R"(
+func @f(%x: i64, %n: i64, %d: i64) -> i64 {
 bb0:
   %zero = iconst.i64 0
   br bb1(%zero, %zero)
@@ -357,13 +334,12 @@ bb1(%i: i64, %acc: i64):
   br_if %c, bb2, bb5(%acc)
 
 bb2:
-  %min = iconst.i64 -9223372036854775808
-  %safe = ne %x, %min
+  %z = iconst.i64 0
+  %safe = ne %d, %z
   br_if %safe, bb3, bb4(%acc)
 
 bb3:
-  %m1 = iconst.i64 -1
-  %q = sdiv %x, %m1
+  %q = sdiv %x, %d
   %a2 = add %acc, %q
   br bb4(%a2)
 
@@ -383,7 +359,8 @@ bb5(%r: i64):
         CHECK_NE(inst->opcode(), Opcode::sdiv);
     }
     check_transform_preserves(text, "f", run_loop_pipeline,
-                              {{i64(std::numeric_limits<int64_t>::min()), i64(3)}, {i64(7), i64(3)}});
+                              {{i64(std::numeric_limits<int64_t>::min()), i64(3), i64(0)},
+                               {i64(7), i64(3), i64(-1)}, {i64(7), i64(3), i64(2)}});
 }
 
 // ---------------------------------------------------------------------------

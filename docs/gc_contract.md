@@ -26,6 +26,15 @@ The linear scan register allocator (`LinearScanAllocator`) enforces a precise al
 - **Spill Slot Zero-Initialization**: Frame slots holding `gcref` values (`spill_slot_is_gcref`) are zero-initialized in function prologues. This guarantees that if a GC cycle is triggered before a slot is populated, the stack walker observes a null pointer (`0`) rather than uninitialized stack debris.
 - **Site Recording**: For each call site and safepoint instruction, `inst->live_gcrefs` records every active `gcref` virtual register whose live interval covers the site, mapping directly to stack spill offsets relative to `RBP`.
 
+### 1.3. Derived References
+A *derived* reference is a `gcref` that may point inside an object rather than at its start: the result of `add` or `sub` on a `gcref`, or a `select` between values at least one of which is derived. Stack maps record every live `gcref` as an object root, and a collector that relocates an interior pointer as if it were an object start corrupts the heap. MIR therefore restricts where derived references may live, and the verifier (`verify_derived_gcrefs`) enforces it:
+
+- A derived reference is used only in the block that defines it.
+- No GC point lies between its definition and any of its uses. GC points are `safepoint`, the coroutine operations, and every call except the few runtime helpers that cannot collect (see `may_trigger_gc` in `include/brass/mir/gc_refs.hpp`).
+- It is never a GC point's operand, a block argument, a return value, deopt state, the value written by a store, or the value operand of `write_barrier`.
+
+Optimizations keep this rule by not treating derived references as ordinary pure values: LICM, CSE, GVN and PRE never hoist, merge or rematerialize them, because doing so could stretch a live range across a safepoint or out of its block. Frontends that need an interior pointer across a GC point keep the base `gcref` live and recompute the offset after the GC point.
+
 ---
 
 ## 2. Binary Stack Map Format (`BSCM`) & Return Address Lookup
@@ -166,6 +175,7 @@ To collect young generations without scanning the entire tenured generation, Bra
       }
   }
   ```
+- **Barrier Elimination**: `WriteBarrierElimination` drops a barrier only when it can prove the barrier would do nothing: the stored value is not a pointer; the object was allocated since the last GC point by `brass_gc_alloc` with a constant payload of at most `kMaxAlwaysYoungPayloadBytes` (objects above half the nursery go straight to the tenured generation, and the nursery is never smaller than `kMinNurseryBytes`, see `include/brass/gc/gc_limits.hpp`); or an earlier barrier since the last GC point covered the same object *and the same value*. A barrier for a different value on the same object is never redundant.
 - **Minor Collection Scanning**: Minor collections inspect only dirty cards in the card table. Pointers inside tenured objects residing on dirty cards are scavenged, and the card is cleared (`0`) upon completion.
 
 ### 3.4. Thread-Local Allocation Buffers (TLAB) & Synchronization

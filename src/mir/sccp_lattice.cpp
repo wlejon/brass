@@ -72,7 +72,13 @@ LatticeValue evaluate_unary(Opcode op, Type res_type, const LatticeValue& val) {
 }
 
 LatticeValue evaluate_binary(Opcode op, Type res_type, const LatticeValue& lhs, const LatticeValue& rhs) {
-    bool is_int = (res_type == Type::i32() || res_type == Type::i64() || res_type == Type::ptr());
+    // Pointer arithmetic is never folded: its result must stay a pointer,
+    // and an integer constant cannot stand in for one.
+    if (res_type.is_pointer_or_gcref()) {
+        if (lhs.is_top() || rhs.is_top()) return LatticeValue::make_top();
+        return LatticeValue::make_bottom(res_type);
+    }
+    bool is_int = (res_type == Type::i32() || res_type == Type::i64());
 
     // Short circuits for pure integer operations
     if (is_int && op == Opcode::mul) {

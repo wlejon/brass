@@ -261,6 +261,33 @@ void MiniCheneyGC::write_field(uintptr_t obj_addr, size_t field_idx, RuntimeValu
     write_field(obj_addr, field_idx, val.raw_bits());
 }
 
+void MiniCheneyGC::check_access(uintptr_t base, int32_t offset, size_t size, const char* what) const {
+    if (!is_address_in_active_space(base)) return;
+    if (is_valid_object(base)) {
+        const GcHeader* hdr = get_header(base);
+        if (offset >= 0 && static_cast<size_t>(offset) + size <= hdr->size) return;
+    }
+    // Either an object start accessed out of bounds, or a derived pointer
+    // (whose preceding bytes may even look like a header). Objects sit back
+    // to back in the active space, so a linear walk finds the one whose
+    // payload contains `base`; only accesses that fail the check above pay.
+    const uintptr_t start = reinterpret_cast<uintptr_t>(from_space_.data());
+    uintptr_t pos = start;
+    while (pos + sizeof(GcHeader) <= start + free_ptr_) {
+        const GcHeader* hdr = reinterpret_cast<const GcHeader*>(pos);
+        const uintptr_t payload = pos + sizeof(GcHeader);
+        if (base >= payload && base < payload + hdr->size) {
+            const int64_t rel = static_cast<int64_t>(base - payload) + offset;
+            if (rel < 0 || static_cast<uint64_t>(rel) + size > hdr->size) {
+                throw std::runtime_error("Memory Error: GC object access out of bounds");
+            }
+            return;
+        }
+        pos = payload + hdr->size;
+    }
+    throw std::runtime_error(std::string("Memory Error: Invalid GC object access in ") + what);
+}
+
 RuntimeValue MiniCheneyGC::read_memory(uintptr_t base, int32_t offset, Type t) const {
     if (base == 0) {
         throw std::runtime_error("Memory Error: Null pointer dereference in read_memory");
@@ -268,16 +295,7 @@ RuntimeValue MiniCheneyGC::read_memory(uintptr_t base, int32_t offset, Type t) c
 
     uintptr_t effective_addr = static_cast<uintptr_t>(static_cast<int64_t>(base) + offset);
     size_t access_size = t.size_in_bytes();
-
-    if (is_address_in_active_space(base)) {
-        if (!is_valid_object(base)) {
-            throw std::runtime_error("Memory Error: Invalid GC object access in read_memory");
-        }
-        const GcHeader* hdr = get_header(base);
-        if (offset < 0 || static_cast<size_t>(offset) + access_size > hdr->size) {
-            throw std::runtime_error("Memory Error: GC object access out of bounds");
-        }
-    }
+    check_access(base, offset, access_size, "read_memory");
 
     if (access_size == 4) {
         uint32_t val32 = 0;
@@ -307,16 +325,7 @@ void MiniCheneyGC::write_memory(uintptr_t base, int32_t offset, Type t, RuntimeV
 
     uintptr_t effective_addr = static_cast<uintptr_t>(static_cast<int64_t>(base) + offset);
     size_t access_size = t.size_in_bytes();
-
-    if (is_address_in_active_space(base)) {
-        if (!is_valid_object(base)) {
-            throw std::runtime_error("Memory Error: Invalid GC object access in write_memory");
-        }
-        const GcHeader* hdr = get_header(base);
-        if (offset < 0 || static_cast<size_t>(offset) + access_size > hdr->size) {
-            throw std::runtime_error("Memory Error: GC object access out of bounds");
-        }
-    }
+    check_access(base, offset, access_size, "write_memory");
 
     if (access_size == 4) {
         uint32_t val32 = static_cast<uint32_t>(val.raw_bits() & 0xFFFFFFFFULL);

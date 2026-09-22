@@ -562,6 +562,10 @@ bool IrMutator::swap_commutative_operands(Function& fn, FuzzRng& rng) {
         if (!bb) continue;
         for (Instruction* inst : *bb) {
             if (!inst || inst->operand_count() < 2) continue;
+            // `add gcref, i64` is pointer arithmetic: its operands are not
+            // interchangeable.
+            if (!inst->operand(0) || !inst->operand(1) ||
+                inst->operand(0)->type() != inst->operand(1)->type()) continue;
             Opcode op = inst->opcode();
             if (op == Opcode::add || op == Opcode::mul || op == Opcode::and_ ||
                 op == Opcode::or_  || op == Opcode::xor_ || op == Opcode::eq ||
@@ -694,7 +698,8 @@ bool IrMutator::split_basic_blocks(Function& fn, FuzzRng& rng) {
     if (to_move.empty()) return false;
 
     Builder b(fn);
-    BasicBlock* new_bb = b.create_block("split_bb");
+    // Unique, so a printed reproducer parses back to the same CFG.
+    BasicBlock* new_bb = b.create_block("split_bb" + std::to_string(fn.blocks().size()));
     auto& blist = fn.blocks();
     auto it = std::find(blist.begin(), blist.end(), bb);
     if (it != blist.end()) {

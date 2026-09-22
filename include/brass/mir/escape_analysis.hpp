@@ -64,7 +64,14 @@ private:
     std::unordered_map<const Value*, EscapeState> escape_states_;
 };
 
-// Check if a callee symbol represents an allocation routine
+// True for the allocators whose contract brass itself knows: each call
+// returns memory no other live pointer refers to and writes nothing else the
+// caller can observe. Alias analysis, memory SSA and escape analysis build
+// on that promise, so it is never inferred from a symbol's spelling.
 bool is_allocation_callee(std::string_view symbol) noexcept;
+
+// True when `inst` is a direct call to such an allocator, or to a function
+// its module declares as one (Module::add_allocation_function).
+bool is_allocation_call(const Instruction* inst) noexcept;
 
 } // namespace brass

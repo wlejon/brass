@@ -19,6 +19,10 @@ struct ArrayContractionStats {
 
 struct ArrayContractionOptions {
     ArrayContractionStats* stats = nullptr;
+    // Fuse producer and consumer loops first, which puts each write next to
+    // its read. Loop fusion is a transform of its own that the pipeline can
+    // disable, so contraction only runs it when asked.
+    bool fuse_loops_first = false;
 };
 
 // Contract arrays in a single loop (or fused loop).

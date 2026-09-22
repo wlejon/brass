@@ -1,6 +1,7 @@
 #include "gvn_pre_dataflow.hpp"
 #include "int_fold.hpp"
 #include <brass/mir/opcodes.hpp>
+#include <brass/mir/gc_refs.hpp>
 #include <algorithm>
 #include <cstring>
 
@@ -28,6 +29,8 @@ bool is_pre_commutative_op(Opcode op) noexcept {
 
 bool is_pre_candidate_op(const Instruction* inst) noexcept {
     if (!inst || !inst->produces_value()) return false;
+    // PRE would carry a derived gcref through a block parameter (gc_refs.hpp).
+    if (is_derived_gcref(inst->result())) return false;
     Opcode op = inst->opcode();
     if (op == Opcode::load || op == Opcode::vload) {
         return true;

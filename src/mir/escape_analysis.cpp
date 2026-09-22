@@ -1,5 +1,6 @@
 #include <brass/mir/escape_analysis.hpp>
 #include "escape_graph.hpp"
+#include <brass/mir/module.hpp>
 #include <ostream>
 
 namespace brass {
@@ -20,14 +21,17 @@ std::ostream& operator<<(std::ostream& os, EscapeState state) {
 bool is_allocation_callee(std::string_view symbol) noexcept {
     return symbol == "brass_gc_alloc" ||
            symbol == "host_gc_alloc" ||
-           symbol == "alloc_obj" ||
-           symbol == "make_array" ||
-           symbol == "create_array" ||
-           symbol == "alloc_array" ||
            symbol == "malloc" ||
-           symbol == "calloc" ||
-           symbol.starts_with("alloc_") ||
-           symbol.ends_with("_alloc");
+           symbol == "calloc";
+}
+
+bool is_allocation_call(const Instruction* inst) noexcept {
+    if (!inst || inst->opcode() != Opcode::call) return false;
+    if (is_allocation_callee(inst->symbol())) return true;
+    const BasicBlock* bb = inst->parent();
+    const Function* fn = bb ? bb->parent() : nullptr;
+    const Module* mod = fn ? fn->parent() : nullptr;
+    return mod && mod->is_allocation_function(inst->symbol());
 }
 
 EscapeAnalysis::EscapeAnalysis(const Function& fn)
@@ -63,7 +67,7 @@ bool EscapeAnalysis::is_allocation(const Value* val) const {
     const Instruction* inst = val->defining_instruction();
     if (!inst) return false;
     if (inst->opcode() == Opcode::alloca_) return true;
-    return inst->opcode() == Opcode::call && is_allocation_callee(inst->symbol());
+    return is_allocation_call(inst);
 }
 
 namespace {
@@ -139,7 +143,7 @@ void EscapeAnalysis::run() {
 
                 case Opcode::call: {
                     std::string_view callee = inst->symbol();
-                    if (is_allocation_callee(callee)) {
+                    if (is_allocation_call(inst)) {
                         const Value* res = inst->result();
                         if (res) {
                             CGNode* obj = graph_->create_object_node(res, EscapeState::NoEscape);
@@ -148,8 +152,9 @@ void EscapeAnalysis::run() {
                             allocations_.push_back(res);
                         }
                     } else {
+                        // Only callees declared through the options are trusted
+                        // not to publish their arguments; a name says nothing.
                         bool is_arg_escape = options_.arg_escape_callees.count(std::string(callee)) > 0 ||
-                                             callee.starts_with("arg_escape") ||
                                              !options_.treat_unhandled_calls_as_global;
                         EscapeState call_escape = is_arg_escape ? EscapeState::ArgEscape : EscapeState::GlobalEscape;
                         for (size_t i = 0; i < inst->operand_count(); ++i) {

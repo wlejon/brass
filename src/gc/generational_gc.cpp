@@ -1,4 +1,5 @@
 #include <brass/gc/generational_gc.hpp>
+#include <brass/gc/gc_limits.hpp>
 #include <brass/runtime/coroutine.hpp>
 #include <algorithm>
 #include <cstring>
@@ -6,12 +7,18 @@
 
 namespace brass {
 
+// Write-barrier elimination treats small constant-size allocations as young;
+// that holds only while the large-object cutoff (half the nursery) cannot
+// drop below the compile-time bound.
+static_assert(sizeof(GenGcHeader) + 7 <= kGcAllocationOverheadBytes,
+              "allocation overhead budget must cover the header and alignment");
+
 GenerationalGC::GenerationalGC(
     size_t nursery_size,
     size_t survivor_size,
     size_t tenured_size,
     uint8_t tenuring_threshold
-)   : nursery_size_((nursery_size + 7) & ~static_cast<size_t>(7)),
+)   : nursery_size_((std::max(nursery_size, kMinNurseryBytes) + 7) & ~static_cast<size_t>(7)),
       survivor_size_((survivor_size + 7) & ~static_cast<size_t>(7)),
       tenured_size_((tenured_size + 7) & ~static_cast<size_t>(7)),
       tenuring_threshold_(tenuring_threshold) {

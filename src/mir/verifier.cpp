@@ -3,6 +3,7 @@
 #include "verifier_exceptions.hpp"
 #include "verifier_coro.hpp"
 #include "verifier_dom.hpp"
+#include "verifier_gc.hpp"
 #include <unordered_map>
 #include <unordered_set>
 #include <queue>
@@ -849,6 +850,8 @@ bool Verifier::verify_function(const Function& fn) {
             }
         }
     }
+
+    verify_derived_gcrefs(fn, fn_prefix, [this](const std::string& msg) { report_error(msg); });
 
     // Verify resume points
     for (const auto& entry_pair : fn.resume_points()) {

@@ -19,6 +19,7 @@
 #include <brass/mir/jump_threading.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/verifier.hpp>
+#include <brass/mir/gc_refs.hpp>
 #include <brass/pgo/profile_data.hpp>
 #include <brass/mir/branch_probability.hpp>
 #include <brass/mir/range_analysis.hpp>
@@ -56,6 +57,9 @@ bool get_const_int(const Value* val, int64_t& out_val) {
 
 bool is_pure_instruction(const Instruction* inst) {
     if (!inst) return false;
+    // Pure, but tied to its block: hoisting or merging a derived gcref could
+    // keep it live across a GC point (gc_refs.hpp).
+    if (is_derived_gcref(inst->result())) return false;
     Opcode op = inst->opcode();
     switch (op) {
         case Opcode::iconst_i32: case Opcode::iconst_i64: case Opcode::fconst_f64:
@@ -143,6 +147,8 @@ std::unordered_map<const Value*, uint32_t> compute_use_counts(const Function& fn
 // Drops parameter `p_i` of `bb` and the matching argument on every edge into
 // it, whatever kind of terminator the edge comes from.
 void remove_block_param(BasicBlock* bb, size_t p_i) {
+    Function* fn = bb->parent();
+    if (!fn) return;
     auto& params = bb->params();
     params.erase(params.begin() + static_cast<std::ptrdiff_t>(p_i));
     for (size_t k = p_i; k < params.size(); ++k) {
@@ -153,9 +159,10 @@ void remove_block_param(BasicBlock* bb, size_t p_i) {
             bt.args.erase(bt.args.begin() + static_cast<std::ptrdiff_t>(p_i));
         }
     };
-    std::unordered_set<BasicBlock*> seen;
-    for (BasicBlock* pred : bb->predecessors()) {
-        if (!pred || !seen.insert(pred).second) continue;
+    // Scan every terminator rather than the cached predecessor list, which
+    // earlier edits in the same pass may have left stale.
+    for (BasicBlock* pred : fn->blocks()) {
+        if (!pred) continue;
         Instruction* term = pred->terminator();
         if (!term) continue;
         drop_arg(term->branch_target());
@@ -675,6 +682,7 @@ bool optimize_function_loops(Function& fn, const LoopOptOptions& options) {
         fn.rebuild_cfg_predecessors();
         DominatorTree dom(fn);
         ArrayContractionOptions contract_opts;
+        contract_opts.fuse_loops_first = options.enable_loop_fusion;
         if (options.stats) contract_opts.stats = &options.stats->contraction_stats;
         if (array_contraction_pass(fn, dom, contract_opts)) {
             any_changed = true;

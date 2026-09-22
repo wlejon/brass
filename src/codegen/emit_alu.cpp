@@ -231,12 +231,12 @@ void EmitContext::emit_alu_instruction(const LirInst& inst) {
             break;
         }
         case LirOpcode::Idiv:
-            if (inst.uses.back().is_preg()) enc_.idiv(to_gpr(inst.uses.back()));
-            else enc_.idiv(to_mem_address(inst.uses.back()));
+            if (inst.uses.back().is_preg()) enc_.idiv_wrapping(to_gpr(inst.uses.back()));
+            else enc_.idiv_wrapping(to_mem_address(inst.uses.back()));
             break;
         case LirOpcode::Idiv32:
-            if (inst.uses.back().is_preg()) enc_.idiv32(to_gpr(inst.uses.back()));
-            else enc_.idiv32(to_mem_address(inst.uses.back()));
+            if (inst.uses.back().is_preg()) enc_.idiv32_wrapping(to_gpr(inst.uses.back()));
+            else enc_.idiv32_wrapping(to_mem_address(inst.uses.back()));
             break;
         case LirOpcode::Div:
             if (inst.uses.back().is_preg()) enc_.div(to_gpr(inst.uses.back()));

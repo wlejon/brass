@@ -173,7 +173,11 @@ bool SroaTransformer::process_candidate(const Value* alloc_val, const EscapeAnal
             for (size_t i = 0; i < inst->operand_count(); ++i) {
                 const Value* op = inst->operand(i);
                 if (aliases.count(op) > 0) {
+                    // A narrowing store or widening load does not move the
+                    // whole value through memory, so it cannot become an SSA copy.
+                    const Type mem = inst->memory_type();
                     if (inst->opcode() == Opcode::load && i == 0) {
+                        if (!mem.is_void() && mem != inst->type()) return false;
                         candidate_loads.push_back(inst);
                         live_offsets.insert(inst->offset());
                         auto [it, inserted] = fields.insert({inst->offset(), inst->type()});
@@ -186,6 +190,7 @@ bool SroaTransformer::process_candidate(const Value* alloc_val, const EscapeAnal
                         if (aliases.count(stored_val) > 0) {
                             return false; // Storing aggregate pointer into itself
                         }
+                        if (stored_val && !mem.is_void() && mem != stored_val->type()) return false;
                         Type stored_type = stored_val ? stored_val->type() : inst->memory_type();
                         auto [it, inserted] = fields.insert({inst->offset(), stored_type});
                         if (!inserted && it->second != stored_type) {
@@ -198,17 +203,22 @@ bool SroaTransformer::process_candidate(const Value* alloc_val, const EscapeAnal
                 }
             }
 
-            // Check branch arguments: alias may only be passed to an alias block parameter
+            // Deopt state would need the whole object rematerialized.
+            for (const Value* sv : inst->state_map()) {
+                if (aliases.count(sv) > 0) return false;
+            }
+
+            // An alias may only flow into an alias parameter, and an alias
+            // parameter may only receive an alias: a parameter that is
+            // sometimes this object and sometimes another pointer cannot have
+            // its field loads replaced by this object's field values.
             bool branch_arg_invalid = false;
             for_each_branch_target(inst, [&](const BranchTarget& bt) {
                 if (!bt.block) return;
                 for (size_t i = 0; i < bt.args.size(); ++i) {
-                    if (aliases.count(bt.args[i]) > 0) {
-                        if (i >= bt.block->param_count() || aliases.count(bt.block->param(i)) == 0) {
-                            // Passed to a non-alias parameter
-                            branch_arg_invalid = true;
-                        }
-                    }
+                    const bool arg_alias = aliases.count(bt.args[i]) > 0;
+                    const bool param_alias = i < bt.block->param_count() && aliases.count(bt.block->param(i)) > 0;
+                    if (arg_alias != param_alias) branch_arg_invalid = true;
                 }
             });
             if (branch_arg_invalid) {
@@ -236,8 +246,9 @@ bool SroaTransformer::process_candidate(const Value* alloc_val, const EscapeAnal
         }
     }
 
-    // 3. If there are no live loads, all stores and the allocation are dead!
-    if (live_offsets.empty()) {
+    // 3. If there are no live loads, all stores and the allocation are dead.
+    // With alias parameters the general path below also removes their edges.
+    if (live_offsets.empty() && aliases.size() == 1) {
         for (Instruction* st : candidate_stores) {
             if (st && st->parent()) {
                 st->parent()->remove_instruction(st);
@@ -261,6 +272,55 @@ bool SroaTransformer::process_candidate(const Value* alloc_val, const EscapeAnal
     }
 
     DominatorTree dom(fn_);
+
+    // Field liveness. The allocation itself redefines every field (each
+    // execution makes a fresh object), so it kills like a store. A field is
+    // live into a block if a load of it is reachable without an intervening
+    // store to it or re-execution of the allocation; parameters go only where
+    // the field is live, so no edge ever needs a value from a path on which
+    // the object does not exist yet.
+    enum class Event { None, Load, Kill };
+    auto first_event = [&](const Instruction* from, int32_t off) {
+        for (const Instruction* cur = from; cur; cur = cur->next()) {
+            if (cur == alloc_inst) return Event::Kill;
+            if (cur->operand_count() > 0 && aliases.count(cur->operand(0)) && cur->offset() == off) {
+                if (cur->opcode() == Opcode::load) return Event::Load;
+                if (cur->opcode() == Opcode::store) return Event::Kill;
+            }
+        }
+        return Event::None;
+    };
+    std::unordered_map<int32_t, std::unordered_set<const BasicBlock*>> live_in;
+    auto live_into_any_successor = [&](const BasicBlock* b, int32_t off) {
+        for (const BasicBlock* s : b->successors()) {
+            if (s && live_in[off].count(s)) return true;
+        }
+        return false;
+    };
+    for (const auto& [off, type] : fields) {
+        if (!live_offsets.count(off)) continue;
+        auto& live = live_in[off];
+        for (bool grew = true; grew;) {
+            grew = false;
+            for (BasicBlock* b : fn_.blocks()) {
+                if (!b || live.count(b)) continue;
+                const Event e = first_event(b->head(), off);
+                if (e == Event::Load || (e == Event::None && live_into_any_successor(b, off))) {
+                    live.insert(b);
+                    grew = true;
+                }
+            }
+        }
+        // A load that can see the allocation's initial contents needs a zero
+        // of the field's type, and MIR has no constant for a null pointer.
+        const bool numeric = type == Type::i32() || type == Type::i64() || type == Type::f32() || type == Type::f64();
+        if (!numeric) {
+            const Event after = first_event(alloc_inst->next(), off);
+            if (after == Event::Load || (after == Event::None && live_into_any_successor(alloc_inst->parent(), off))) {
+                return false;
+            }
+        }
+    }
 
     // Compute Dominance Frontiers
     std::unordered_map<const BasicBlock*, std::vector<BasicBlock*>> df;
@@ -318,7 +378,7 @@ bool SroaTransformer::process_candidate(const Value* alloc_val, const EscapeAnal
     for (BasicBlock* b : fn_.blocks()) {
         if (!b) continue;
         for (const FieldInfo& f : sorted_live_fields) {
-            if (field_idf[f.offset].count(b) > 0) {
+            if (field_idf[f.offset].count(b) > 0 && live_in[f.offset].count(b) > 0) {
                 fields_for_block[b].push_back(f);
             }
         }
@@ -351,21 +411,23 @@ bool SroaTransformer::process_candidate(const Value* alloc_val, const EscapeAnal
             }
         }
 
-        // Initial zero definition in alloc block
-        if (bb == alloc_bb) {
-            for (const FieldInfo& f : sorted_live_fields) {
-                if (current_def.find(f.offset) == current_def.end()) {
-                    current_def[f.offset] = get_or_create_zero_constant(builder, entry_bb, f.type);
-                }
-            }
-        }
-
         // Process instructions in bb
         Instruction* cur = bb->head();
         while (cur) {
             Instruction* next = cur->next();
 
             if (cur == alloc_inst) {
+                // Every execution starts a fresh, zeroed object; values from a
+                // previous execution (a loop-carried parameter) do not survive.
+                for (const FieldInfo& f : sorted_live_fields) {
+                    const bool numeric = f.type == Type::i32() || f.type == Type::i64() ||
+                                         f.type == Type::f32() || f.type == Type::f64();
+                    if (numeric) {
+                        current_def[f.offset] = get_or_create_zero_constant(builder, entry_bb, f.type);
+                    } else {
+                        current_def.erase(f.offset);
+                    }
+                }
                 insts_to_remove.insert(cur);
             } else if (cur->opcode() == Opcode::store && aliases.count(cur->operand(0)) > 0) {
                 int32_t off = cur->offset();

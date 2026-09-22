@@ -325,6 +325,7 @@ TEST_CASE("Differential - Array Contraction Intermediate Buffer Elimination") {
         Function* opt_fn = opt_mod->get_function("map_reduce");
         DominatorTree dom(*opt_fn);
         ArrayContractionOptions contract_opts;
+        contract_opts.fuse_loops_first = true;
         ArrayContractionStats stats;
         contract_opts.stats = &stats;
 

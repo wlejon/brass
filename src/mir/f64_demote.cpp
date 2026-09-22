@@ -272,7 +272,9 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
         }
     }
 
-    // 2. Fixed-Point Dataflow Iteration
+    // 2. Fixed-Point Dataflow Iteration, repeated whenever the range check
+    // below removes values the rest depended on.
+    auto propagate_exactness = [&]() {
     bool changed = true;
     while (changed) {
         changed = false;
@@ -365,6 +367,11 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
                 }
             }
         }
+    }
+    };
+    propagate_exactness();
+    while (drop_unprovable_exact_values(fn, dom, loop_analysis, exact_ints)) {
+        propagate_exactness();
     }
 
     // 2.5 All-or-nothing loop filtering & Profitability Filtering:

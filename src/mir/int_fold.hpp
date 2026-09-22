@@ -22,8 +22,9 @@ int64_t canonical(int64_t v, unsigned width) noexcept;
 
 // Two-operand integer operations and comparisons at `width` bits.
 // Comparisons yield 0 or 1. Returns nullopt when the operation has no single
-// defined result to fold to: division or remainder by zero, and signed
-// division or remainder of the minimum value by -1 (which traps on x86).
+// defined result to fold to: division or remainder by zero. Signed division
+// of the minimum value by -1 wraps to the minimum value (remainder 0), as
+// docs/semantics.md defines it.
 std::optional<int64_t> binary(Opcode op, unsigned width, int64_t a, int64_t b) noexcept;
 
 // neg, not, clz, ctz, popcnt at `width` bits.

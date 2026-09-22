@@ -34,7 +34,8 @@ bool division_may_trap(Opcode op, unsigned width, int64_t divisor) noexcept {
     switch (op) {
         case Opcode::sdiv:
         case Opcode::smod:
-            return canonical(divisor, width) == 0 || canonical(divisor, width) == -1;
+            // MIN / -1 wraps (docs/semantics.md), so only zero traps.
+            return canonical(divisor, width) == 0;
         case Opcode::udiv:
         case Opcode::umod:
             return canonical(divisor, width) == 0;
@@ -67,7 +68,10 @@ std::optional<int64_t> binary(Opcode op, unsigned width, int64_t a_in, int64_t b
         }
         case Opcode::sdiv:
         case Opcode::smod:
-            if (b == 0 || (a == min_signed(width) && b == -1)) return std::nullopt;
+            if (b == 0) return std::nullopt;
+            // Two's-complement wrap: MIN / -1 == MIN and MIN % -1 == 0, the
+            // answer the interpreters and every backend produce.
+            if (a == min_signed(width) && b == -1) return op == Opcode::sdiv ? min_signed(width) : 0;
             return canonical(op == Opcode::sdiv ? a / b : a % b, width);
         case Opcode::udiv:
         case Opcode::umod:

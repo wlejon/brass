@@ -7,7 +7,8 @@
 namespace brass {
 
 // Devirtualizes a single patchable_call instruction to a direct call if the target callee
-// is defined as a function within the module.
+// is defined as a function within the module. The site stops being patchable, so this is
+// only correct when the embedder never retargets it at run time.
 bool devirtualize_call(Instruction* inst, Module& mod);
 
 // Devirtualizes all monomorphic patchable_call sites in a function to direct calls.

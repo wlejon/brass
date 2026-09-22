@@ -129,6 +129,13 @@ public:
     void idiv32(GPR src);
     void idiv(const MemAddress& src);
     void idiv32(const MemAddress& src);
+    // Signed RDX:RAX / src with MIR semantics: a divisor of -1 yields
+    // RAX = -RAX (wrapping, so MIN / -1 == MIN) and RDX = 0 instead of the
+    // #DE fault idiv raises for MIN / -1. Clobbers flags.
+    void idiv_wrapping(GPR src);
+    void idiv32_wrapping(GPR src);
+    void idiv_wrapping(const MemAddress& src);
+    void idiv32_wrapping(const MemAddress& src);
 
     void imul(GPR src);
     void imul32(GPR src);

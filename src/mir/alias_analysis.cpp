@@ -129,7 +129,7 @@ bool AliasAnalysis::is_allocation(const Value* val) const {
         if (inst) {
             if (inst->opcode() == Opcode::alloca_) return true;
             if (inst->opcode() == Opcode::call) {
-                return is_allocation_callee(inst->symbol());
+                return is_allocation_call(inst);
             }
         }
     }

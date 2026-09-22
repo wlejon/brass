@@ -1,14 +1,35 @@
 #include <brass/mir/loop_fusion.hpp>
 #include <brass/mir/alias_analysis.hpp>
-#include <brass/mir/opcodes.hpp>
-#include <brass/mir/builder.hpp>
-#include <brass/mir/verifier.hpp>
 #include <brass/mir/escape_analysis.hpp>
+#include <brass/mir/opcodes.hpp>
+#include <brass/mir/range_analysis.hpp>
+#include "int_fold.hpp"
+#include "ir_clone.hpp"
+#include <cmath>
+#include <cstring>
+#include <memory>
+#include <optional>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
-#include <algorithm>
+#include <vector>
 
+// Loop fusion runs two adjacent loops with the same iteration space as one.
+// Iteration i of the fused loop executes the first loop's body for i and
+// then the second's, so every pair of operations that the original order
+// kept apart (all of loop 1 before any of loop 2) must commute unless the
+// second loop only ever looks at what the first wrote in the same or an
+// earlier iteration. The analysis below accepts only the shapes where that
+// is provable:
+//   - both loops are a header plus one body/latch block, counted by an
+//     induction variable with identical start, limit, step and exit test;
+//   - the code between them is pure, does not depend on loop 1, and can run
+//     before loop 1;
+//   - loop 2 reads nothing loop 1 computes except through memory;
+//   - neither loop calls anything but a declared allocator, deoptimizes, or
+//     may trap; and every memory access pair where one side writes is either
+//     provably disjoint or indexes the same buffer by the induction variable
+//     with identical, non-overlapping element geometry.
 namespace brass {
 
 std::string LoopFusionStats::format_report() const {
@@ -24,61 +45,82 @@ std::string LoopFusionStats::format_report() const {
 
 namespace {
 
-static bool get_const_int(const Value* val, int64_t& out_val) {
-    while (val && val->is_instruction()) {
-        const Instruction* def = val->defining_instruction();
-        if (!def) return false;
-        if (def->opcode() == Opcode::iconst_i32) {
-            out_val = static_cast<int64_t>(def->imm_i32());
-            return true;
+// The exact integer a constant denotes, without reinterpreting bits:
+// integer constants, their widenings, and integral float constants.
+std::optional<int64_t> exact_int_constant(const Value* val) {
+    if (!val || !val->is_instruction()) return std::nullopt;
+    const Instruction* def = val->defining_instruction();
+    if (!def) return std::nullopt;
+    switch (def->opcode()) {
+        case Opcode::iconst_i32: return static_cast<int64_t>(def->imm_i32());
+        case Opcode::iconst_i64: return def->imm_i64();
+        case Opcode::fconst_f64: {
+            const double d = def->imm_f64();
+            if (!std::isfinite(d) || d != std::trunc(d) || std::fabs(d) > 9007199254740992.0) return std::nullopt;
+            return static_cast<int64_t>(d);
         }
-        if (def->opcode() == Opcode::iconst_i64) {
-            out_val = def->imm_i64();
-            return true;
-        }
-        if (def->opcode() == Opcode::fconst_f64) {
-            out_val = static_cast<int64_t>(def->imm_f64());
-            return true;
-        }
-        if ((def->opcode() == Opcode::sitofp_f64_i64 || def->opcode() == Opcode::sitofp_f64_i32 ||
-             def->opcode() == Opcode::fptosi_i64 || def->opcode() == Opcode::fptosi_i32 ||
-             def->opcode() == Opcode::bitcast_i64_f64 || def->opcode() == Opcode::bitcast_f64_i64 ||
-             def->opcode() == Opcode::sext_i64 || def->opcode() == Opcode::zext_i64) && def->operand_count() >= 1) {
-            val = def->operand(0);
-            continue;
-        }
-        return false;
+        case Opcode::sext_i64:
+        case Opcode::zext_i64:
+            if (def->operand_count() < 1 || !def->operand(0)) return std::nullopt;
+            if (auto c = exact_int_constant(def->operand(0))) {
+                return int_fold::convert(def->opcode(), def->operand(0)->type(), *c);
+            }
+            return std::nullopt;
+        default:
+            return std::nullopt;
     }
-    return false;
 }
 
-static void replace_all_uses(Function& fn, Value* old_val, Value* new_val) {
-    if (!old_val || !new_val || old_val == new_val) return;
-    for (BasicBlock* bb : fn.blocks()) {
-        if (!bb) continue;
-        for (Instruction* inst : *bb) {
-            if (!inst) continue;
-            for (size_t i = 0; i < inst->operand_count(); ++i) {
-                if (inst->operand(i) == old_val) inst->set_operand(i, new_val);
-            }
-            for (size_t i = 0; i < inst->branch_target().args.size(); ++i) {
-                if (inst->branch_target().args[i] == old_val) inst->branch_target().args[i] = new_val;
-            }
-            for (size_t i = 0; i < inst->true_target().args.size(); ++i) {
-                if (inst->true_target().args[i] == old_val) inst->true_target().args[i] = new_val;
-            }
-            for (size_t i = 0; i < inst->false_target().args.size(); ++i) {
-                if (inst->false_target().args[i] == old_val) inst->false_target().args[i] = new_val;
-            }
-            for (size_t i = 0; i < inst->default_target().args.size(); ++i) {
-                if (inst->default_target().args[i] == old_val) inst->default_target().args[i] = new_val;
-            }
-            for (auto& sc : inst->switch_cases()) {
-                for (size_t i = 0; i < sc.target.args.size(); ++i) {
-                    if (sc.target.args[i] == old_val) sc.target.args[i] = new_val;
-                }
-            }
+// Same SSA value, or two constants that denote the identical bit pattern
+// of the same type.
+bool same_value(const Value* a, const Value* b) {
+    if (a == b) return true;
+    if (!a || !b || a->type() != b->type() || !a->is_instruction() || !b->is_instruction()) return false;
+    const Instruction* da = a->defining_instruction();
+    const Instruction* db = b->defining_instruction();
+    if (!da || !db || da->opcode() != db->opcode()) return false;
+    switch (da->opcode()) {
+        case Opcode::iconst_i32:
+        case Opcode::iconst_i64:
+            return da->imm_i64() == db->imm_i64();
+        case Opcode::fconst_f64: {
+            const double x = da->imm_f64();
+            const double y = db->imm_f64();
+            return std::memcmp(&x, &y, sizeof(double)) == 0;
         }
+        default:
+            return false;
+    }
+}
+
+bool is_iv_conversion(Opcode op) {
+    return op == Opcode::sitofp_f64_i64 || op == Opcode::sitofp_f64_i32 ||
+           op == Opcode::sext_i64 || op == Opcode::zext_i64;
+}
+
+// Pure, reads no memory, and cannot trap: safe to execute at a different
+// point relative to the loops' memory operations.
+bool is_movable(const Instruction* inst) {
+    if (!inst || inst->is_terminator()) return false;
+    if (inst->has_side_effects() || inst->is_call()) return false;
+    switch (inst->opcode()) {
+        case Opcode::load:
+        case Opcode::load_indexed:
+        case Opcode::vload:
+        case Opcode::alloca_:
+        case Opcode::landing_pad:
+            return false;
+        case Opcode::sdiv:
+        case Opcode::udiv:
+        case Opcode::smod:
+        case Opcode::umod: {
+            if (inst->type().is_float()) return true;
+            auto divisor = exact_int_constant(inst->operand(1));
+            const unsigned width = int_fold::width_of(inst->type());
+            return divisor && width != 0 && !int_fold::division_may_trap(inst->opcode(), width, *divisor);
+        }
+        default:
+            return true;
     }
 }
 
@@ -86,365 +128,444 @@ struct FusibleLoopInfo {
     LoopInfo* loop = nullptr;
     BasicBlock* preheader = nullptr;
     BasicBlock* header = nullptr;
-    BasicBlock* body = nullptr;
     BasicBlock* latch = nullptr;
     BasicBlock* exit_bb = nullptr;
-    BranchTarget* ph_bt = nullptr;
-    BranchTarget* latch_bt = nullptr;
-
     size_t iv_index = 0;
     Value* iv_param = nullptr;
-    Type iv_type = Type::i64();
     Value* init_val = nullptr;
     Value* limit_val = nullptr;
+    Instruction* cmp_inst = nullptr;
+    std::optional<Opcode> cmp_conversion;
     int64_t step = 1;
     Opcode cmp_opcode = Opcode::slt;
     bool exit_on_false = true;
 };
 
-static bool extract_fusible_loop(Function& fn, LoopInfo& loop, FusibleLoopInfo& info) {
+// The loop's sole outside predecessor when it ends in an unconditional branch
+// to the header. Found rather than created, so analysis never edits the CFG.
+BasicBlock* find_preheader(const LoopInfo& loop) {
     BasicBlock* header = loop.header();
-    if (!header || loop.latches().size() != 1) return false;
+    if (!header) return nullptr;
+    BasicBlock* found = nullptr;
+    for (BasicBlock* pred : header->predecessors()) {
+        if (!pred || loop.contains(pred)) continue;
+        if (found && found != pred) return nullptr;
+        found = pred;
+    }
+    if (!found) return nullptr;
+    const Instruction* term = found->terminator();
+    if (!term || term->opcode() != Opcode::br || term->branch_target().block != header) return nullptr;
+    return found;
+}
 
+bool extract_fusible_loop(LoopInfo& loop, FusibleLoopInfo& info) {
+    BasicBlock* header = loop.header();
+    BasicBlock* preheader = loop.preheader() ? loop.preheader() : find_preheader(loop);
+    if (!header || !preheader || loop.latches().size() != 1 || loop.blocks().size() != 2) return false;
     BasicBlock* latch = loop.latches()[0];
-    if (!latch) return false;
-
-    BasicBlock* preheader = loop.preheader();
-    if (!preheader) preheader = LoopAnalysis::ensure_preheader(fn, loop);
-    if (!preheader) return false;
+    if (!latch || latch == header) return false;
 
     Instruction* ph_term = preheader->terminator();
     Instruction* latch_term = latch->terminator();
     Instruction* hdr_term = header->terminator();
-    if (!ph_term || !latch_term || !hdr_term) return false;
+    if (!ph_term || ph_term->opcode() != Opcode::br || ph_term->branch_target().block != header) return false;
+    if (!latch_term || latch_term->opcode() != Opcode::br || latch_term->branch_target().block != header) return false;
+    if (!hdr_term || hdr_term->opcode() != Opcode::br_if) return false;
+    const BranchTarget& ph_bt = ph_term->branch_target();
+    const BranchTarget& latch_bt = latch_term->branch_target();
+    if (ph_bt.args.size() != header->param_count() || latch_bt.args.size() != header->param_count()) return false;
 
-    BranchTarget* ph_bt = nullptr;
-    if (ph_term->opcode() == Opcode::br && ph_term->branch_target().block == header) {
-        ph_bt = &ph_term->branch_target();
-    } else if (ph_term->opcode() == Opcode::br_if) {
-        if (ph_term->true_target().block == header) ph_bt = &ph_term->true_target();
-        else if (ph_term->false_target().block == header) ph_bt = &ph_term->false_target();
-    }
-    if (!ph_bt || ph_bt->args.size() != header->param_count()) return false;
-
-    BranchTarget* latch_bt = nullptr;
-    if (latch_term->opcode() == Opcode::br && latch_term->branch_target().block == header) {
-        latch_bt = &latch_term->branch_target();
-    }
-    if (!latch_bt || latch_bt->args.size() != header->param_count()) return false;
-
-    if (hdr_term->opcode() != Opcode::br_if) return false;
-
-    Value* cond_val = hdr_term->operand(0);
-    if (!cond_val || !cond_val->is_instruction()) return false;
-    Instruction* cmp_inst = cond_val->defining_instruction();
-    if (!cmp_inst || !is_comparison(cmp_inst->opcode()) || cmp_inst->parent() != header) return false;
-
-    BasicBlock* body_bb = nullptr;
-    BasicBlock* exit_bb = nullptr;
     bool exit_on_false = true;
-
-    if (loop.contains(hdr_term->true_target().block) && !loop.contains(hdr_term->false_target().block)) {
-        body_bb = hdr_term->true_target().block;
+    BasicBlock* exit_bb = nullptr;
+    if (hdr_term->true_target().block == latch && !loop.contains(hdr_term->false_target().block)) {
         exit_bb = hdr_term->false_target().block;
-        exit_on_false = true;
-    } else if (!loop.contains(hdr_term->true_target().block) && loop.contains(hdr_term->false_target().block)) {
-        body_bb = hdr_term->false_target().block;
+        if (!hdr_term->true_target().args.empty()) return false;
+    } else if (hdr_term->false_target().block == latch && !loop.contains(hdr_term->true_target().block)) {
         exit_bb = hdr_term->true_target().block;
         exit_on_false = false;
+        if (!hdr_term->false_target().args.empty()) return false;
     } else {
         return false;
     }
+    if (!exit_bb) return false;
 
-    if (!body_bb || !exit_bb) return false;
+    Value* cond = hdr_term->operand(0);
+    Instruction* cmp = (cond && cond->is_instruction()) ? cond->defining_instruction() : nullptr;
+    if (!cmp || cmp->parent() != header) return false;
+    const Opcode cmp_op = cmp->opcode();
+    if (cmp_op != Opcode::slt && cmp_op != Opcode::ult && cmp_op != Opcode::sle && cmp_op != Opcode::ule) return false;
+    Value* lhs = cmp->operand(0);
+    Value* rhs = cmp->operand(1);
+    if (!lhs || !rhs || !loop.is_loop_invariant(rhs)) return false;
 
-    Opcode cmp_op = cmp_inst->opcode();
-    if (cmp_op != Opcode::slt && cmp_op != Opcode::ult &&
-        cmp_op != Opcode::sle && cmp_op != Opcode::ule) {
-        return false;
+    Value* iv_candidate = lhs;
+    std::optional<Opcode> conversion;
+    if (lhs->is_instruction() && lhs->defining_instruction()->parent() == header &&
+        is_iv_conversion(lhs->defining_instruction()->opcode())) {
+        conversion = lhs->defining_instruction()->opcode();
+        iv_candidate = lhs->defining_instruction()->operand(0);
     }
+    if (!iv_candidate || !iv_candidate->is_block_param() || iv_candidate->defining_block() != header) return false;
 
-    Value* cmp_lhs = cmp_inst->operand(0);
-    Value* cmp_rhs = cmp_inst->operand(1);
-
-    bool found_iv = false;
-    size_t iv_idx = 0;
-    int64_t step_val = 1;
-    Value* limit = nullptr;
-
-    for (size_t i = 0; i < header->param_count(); ++i) {
-        Value* param = header->param(i);
-        Value* effective_cmp_lhs = cmp_lhs;
-        if (effective_cmp_lhs && effective_cmp_lhs->is_instruction()) {
-            Instruction* d = effective_cmp_lhs->defining_instruction();
-            if (d && (d->opcode() == Opcode::sitofp_f64_i64 || d->opcode() == Opcode::sitofp_f64_i32 ||
-                      d->opcode() == Opcode::fptosi_i64 || d->opcode() == Opcode::fptosi_i32 ||
-                      d->opcode() == Opcode::bitcast_i64_f64 || d->opcode() == Opcode::bitcast_f64_i64 ||
-                      d->opcode() == Opcode::sext_i64 || d->opcode() == Opcode::zext_i64)) {
-                if (d->operand_count() >= 1) effective_cmp_lhs = d->operand(0);
-            }
-        }
-        if ((param == cmp_lhs || param == effective_cmp_lhs) && loop.is_loop_invariant(cmp_rhs)) {
-            Value* latch_next = latch_bt->args[i];
-            if (latch_next && latch_next->is_instruction()) {
-                Instruction* def = latch_next->defining_instruction();
-                if (def && def->opcode() == Opcode::add) {
-                    Value* step_op = (def->operand(0) == param) ? def->operand(1) : ((def->operand(1) == param) ? def->operand(0) : nullptr);
-                    int64_t c = 0;
-                    if (step_op && get_const_int(step_op, c) && c > 0) {
-                        found_iv = true;
-                        iv_idx = i;
-                        step_val = c;
-                        limit = cmp_rhs;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    if (!found_iv || !limit) return false;
+    const size_t idx = iv_candidate->param_index();
+    Value* next = latch_bt.args[idx];
+    Instruction* inc = (next && next->is_instruction()) ? next->defining_instruction() : nullptr;
+    if (!inc || inc->opcode() != Opcode::add || inc->parent() != latch) return false;
+    Value* step_op = inc->operand(0) == iv_candidate ? inc->operand(1)
+                   : (inc->operand(1) == iv_candidate ? inc->operand(0) : nullptr);
+    auto step = exact_int_constant(step_op);
+    if (!step || *step <= 0) return false;
 
     info.loop = &loop;
     info.preheader = preheader;
     info.header = header;
-    info.body = body_bb;
     info.latch = latch;
     info.exit_bb = exit_bb;
-    info.ph_bt = ph_bt;
-    info.latch_bt = latch_bt;
-    info.iv_index = iv_idx;
-    info.iv_param = header->param(iv_idx);
-    info.iv_type = info.iv_param->type();
-    info.init_val = ph_bt->args[iv_idx];
-    info.limit_val = limit;
-    info.step = step_val;
+    info.iv_index = idx;
+    info.iv_param = iv_candidate;
+    info.init_val = ph_bt.args[idx];
+    info.limit_val = rhs;
+    info.cmp_inst = cmp;
+    info.cmp_conversion = conversion;
+    info.step = *step;
     info.cmp_opcode = cmp_op;
     info.exit_on_false = exit_on_false;
-
     return true;
 }
 
-static bool check_adjacency(const FusibleLoopInfo& l1, const FusibleLoopInfo& l2) {
-    if (l1.loop == l2.loop) return false;
-    if (l1.loop->parent() != l2.loop->parent()) return false;
+bool check_domain_congruence(const FusibleLoopInfo& l1, const FusibleLoopInfo& l2) {
+    return l1.iv_param->type() == l2.iv_param->type() &&
+           l1.step == l2.step &&
+           l1.cmp_opcode == l2.cmp_opcode &&
+           l1.exit_on_false == l2.exit_on_false &&
+           l1.cmp_conversion == l2.cmp_conversion &&
+           l1.cmp_inst->operand(0)->type() == l2.cmp_inst->operand(0)->type() &&
+           same_value(l1.init_val, l2.init_val) &&
+           same_value(l1.limit_val, l2.limit_val);
+}
 
-    BasicBlock* curr = l1.exit_bb;
-    std::unordered_set<const BasicBlock*> visited;
+// The blocks from loop 1's exit to loop 2's header: each entered only from
+// the previous one, ending in the preheader of loop 2.
+bool collect_bridge(const FusibleLoopInfo& l1, const FusibleLoopInfo& l2, std::vector<BasicBlock*>& bridge) {
+    if (l1.loop == l2.loop || l1.loop->parent() != l2.loop->parent()) return false;
+    const auto& exit_preds = l1.exit_bb->predecessors();
+    if (exit_preds.size() != 1 || exit_preds[0] != l1.header) return false;
+    for (const BasicBlock* pred : l2.header->predecessors()) {
+        if (pred != l2.preheader && pred != l2.latch) return false;
+    }
 
-    while (curr && curr != l2.preheader && curr != l2.header) {
-        if (!visited.insert(curr).second) return false;
-        // The bridge block must not branch or contain side-effects
-        Instruction* term = curr->terminator();
-        if (!term || term->opcode() != Opcode::br) return false;
-
-        for (Instruction* inst = curr->head(); inst != term; inst = inst->next()) {
-            if (!inst) continue;
-            Opcode op = inst->opcode();
-            if (is_call(op) || has_side_effects(op)) return false;
+    BasicBlock* cur = l1.exit_bb;
+    while (cur && cur != l2.header) {
+        if (bridge.size() > 16) return false;
+        if (cur != l1.exit_bb) {
+            if (cur->param_count() != 0) return false;
+            const auto& preds = cur->predecessors();
+            if (preds.size() != 1 || preds[0] != bridge.back()) return false;
         }
-
-        curr = term->branch_target().block;
+        Instruction* term = cur->terminator();
+        if (!term || term->opcode() != Opcode::br) return false;
+        bridge.push_back(cur);
+        cur = term->branch_target().block;
     }
-
-    if (curr != l2.preheader && curr != l2.header) return false;
-
-    // Loop 2 preheader must have only 1 predecessor (the path from loop 1)
-    if (l2.preheader && l2.preheader->predecessors().size() > 1) {
-        return false;
-    }
-
-    return true;
+    return cur == l2.header && !bridge.empty() && bridge.back() == l2.preheader;
 }
 
-static bool check_domain_congruence(const FusibleLoopInfo& l1, const FusibleLoopInfo& l2) {
-    if (l1.step != l2.step) return false;
-    if (l1.cmp_opcode != l2.cmp_opcode) return false;
-    if (l1.exit_on_false != l2.exit_on_false) return false;
-
-    // Check initial values
-    if (l1.init_val != l2.init_val) {
-        int64_t c1 = 0, c2 = 0;
-        bool has_c1 = get_const_int(l1.init_val, c1);
-        bool has_c2 = get_const_int(l2.init_val, c2);
-        if (!has_c1 || !has_c2 || c1 != c2) return false;
-    }
-
-    // Check limit values
-    if (l1.limit_val != l2.limit_val) {
-        int64_t c1 = 0, c2 = 0;
-        bool has_c1 = get_const_int(l1.limit_val, c1);
-        bool has_c2 = get_const_int(l2.limit_val, c2);
-        if (!has_c1 || !has_c2 || c1 != c2) return false;
-    }
-
-    return true;
+bool uses_any(const Instruction& inst, const std::unordered_set<const Value*>& defs) {
+    bool found = false;
+    ir::for_each_use(inst, [&](Value* v) { if (defs.count(v)) found = true; });
+    return found;
 }
 
 struct MemAccess {
-    Instruction* inst = nullptr;
     Value* base = nullptr;
     Value* index = nullptr;
-    int64_t const_offset = 0;
+    uint8_t scale = 1;
+    int32_t offset = 0;
+    size_t size = 0;
     bool is_store = false;
-    bool is_iv_indexed = false;
+    // An element access of a fresh bronze array, addressed only through the
+    // runtime's element calls.
+    bool bronze_element = false;
 };
 
-static Value* unwrap_boxed_index(Value* val) {
-    while (val && val->is_instruction()) {
-        Instruction* def = val->defining_instruction();
-        if (!def) break;
-        if (def->opcode() == Opcode::call && def->symbol() == "box_f64" && def->operand_count() >= 1) {
-            val = def->operand(0);
-            continue;
-        }
-        if ((def->opcode() == Opcode::bitcast_i64_f64 || def->opcode() == Opcode::bitcast_f64_i64 ||
-             def->opcode() == Opcode::sitofp_f64_i64 || def->opcode() == Opcode::sitofp_f64_i32 ||
-             def->opcode() == Opcode::fptosi_i64 || def->opcode() == Opcode::fptosi_i32 ||
-             def->opcode() == Opcode::sext_i64 || def->opcode() == Opcode::zext_i64) && def->operand_count() >= 1) {
-            val = def->operand(0);
-            continue;
-        }
-        break;
-    }
-    return val;
+bool is_bronze_elem_call(const Instruction& inst) {
+    if (inst.opcode() != Opcode::call) return false;
+    return (inst.symbol() == "bronze_elem_get" && inst.operand_count() == 2) ||
+           (inst.symbol() == "bronze_elem_set" && inst.operand_count() >= 3);
 }
 
-static void collect_memory_accesses(const FusibleLoopInfo& info, std::vector<MemAccess>& accesses) {
-    for (BasicBlock* bb : info.loop->blocks()) {
+// A `bronze_create_array` result used only as the receiver of element calls
+// and write barriers: no other code can reach its elements or give it
+// accessors, so its element calls act as plain reads and writes of their
+// slot. Array contraction relies on the same property.
+bool is_private_bronze_array(const Function& fn, const Value* arr) {
+    if (!arr || !arr->is_instruction()) return false;
+    const Instruction* def = arr->defining_instruction();
+    if (!def || def->opcode() != Opcode::call || def->symbol() != "bronze_create_array") return false;
+    for (const BasicBlock* bb : fn.blocks()) {
         if (!bb) continue;
-        for (Instruction* inst : *bb) {
-            if (!inst) continue;
-            Opcode op = inst->opcode();
+        for (const Instruction* inst : *bb) {
+            bool as_receiver = inst->operand_count() > 0 && inst->operand(0) == arr &&
+                               (is_bronze_elem_call(*inst) || inst->opcode() == Opcode::write_barrier);
+            bool other_use = false;
+            ir::for_each_use(*inst, [&](Value* v) { if (v == arr) other_use = true; });
+            for (size_t i = 1; i < inst->operand_count(); ++i) {
+                if (inst->operand(i) == arr) as_receiver = false;
+            }
+            if (other_use && !as_receiver) return false;
+        }
+    }
+    return true;
+}
 
-            if (op == Opcode::store_indexed) {
-                MemAccess acc;
-                acc.inst = inst;
+// The runtime answers a read with the last write to the same slot only for
+// plain element indices (see array_contraction.cpp).
+bool is_plain_element_index(const Value* idx, const BasicBlock* bb, const RangeAnalysis& ra) {
+    if (!idx || (idx->type() != Type::i64() && idx->type() != Type::i32())) return false;
+    const ValueRange r = ra.get_range_at(idx, bb);
+    return !r.is_empty() && r.min_val >= 0 && r.max_val < INT32_MAX;
+}
+
+// Describes the memory `inst` touches, or returns false when it is not a
+// plain load or store (those are handled by the effect check).
+bool describe_access(const Instruction& inst, MemAccess& acc) {
+    switch (inst.opcode()) {
+        case Opcode::load:
+        case Opcode::vload:
+            acc.base = inst.operand(0);
+            acc.size = inst.type().size_in_bytes();
+            break;
+        case Opcode::store:
+        case Opcode::vstore:
+            acc.base = inst.operand(0);
+            acc.size = inst.operand(1) ? inst.operand(1)->type().size_in_bytes() : 0;
+            acc.is_store = true;
+            break;
+        case Opcode::load_indexed:
+            acc.base = inst.operand(0);
+            acc.index = inst.operand(1);
+            acc.size = inst.type().size_in_bytes();
+            break;
+        case Opcode::store_indexed:
+            acc.base = inst.operand(0);
+            acc.index = inst.operand(1);
+            acc.size = inst.operand(2) ? inst.operand(2)->type().size_in_bytes() : 0;
+            acc.is_store = true;
+            break;
+        default:
+            return false;
+    }
+    acc.scale = inst.scale();
+    acc.offset = inst.offset();
+    return true;
+}
+
+// Rejects anything whose relative order with the other loop's operations
+// is observable: calls other than declared allocators, deoptimization,
+// exceptions, coroutine switches, and divisions that may trap.
+bool effects_reorderable(const Function& fn, const LoopInfo& loop, const RangeAnalysis& ra,
+                         std::vector<MemAccess>& accesses) {
+    for (BasicBlock* bb : loop.blocks()) {
+        for (Instruction* inst : *bb) {
+            if (inst->is_terminator()) continue;
+            MemAccess acc;
+            if (describe_access(*inst, acc)) {
+                accesses.push_back(acc);
+                continue;
+            }
+            if (is_bronze_elem_call(*inst)) {
+                // Any other element call may run accessors or reach a
+                // shared array, and so does not commute with anything.
+                if (!is_private_bronze_array(fn, inst->operand(0)) ||
+                    !is_plain_element_index(inst->operand(1), bb, ra)) {
+                    return false;
+                }
                 acc.base = inst->operand(0);
                 acc.index = inst->operand(1);
-                acc.is_store = true;
-                acc.is_iv_indexed = (acc.index == info.iv_param);
+                acc.scale = 8;
+                acc.size = 8;
+                acc.is_store = inst->symbol() == "bronze_elem_set";
+                acc.bronze_element = true;
                 accesses.push_back(acc);
-            } else if (op == Opcode::load_indexed) {
-                MemAccess acc;
-                acc.inst = inst;
-                acc.base = inst->operand(0);
-                acc.index = inst->operand(1);
-                acc.is_store = false;
-                acc.is_iv_indexed = (acc.index == info.iv_param);
-                accesses.push_back(acc);
-            } else if (op == Opcode::call && inst->symbol() == "bronze_elem_set") {
-                MemAccess acc;
-                acc.inst = inst;
-                acc.base = inst->operand(0);
-                acc.index = unwrap_boxed_index(inst->operand(1));
-                acc.is_store = true;
-                acc.is_iv_indexed = (acc.index == info.iv_param);
-                accesses.push_back(acc);
-            } else if (op == Opcode::call && inst->symbol() == "bronze_elem_get") {
-                MemAccess acc;
-                acc.inst = inst;
-                acc.base = inst->operand(0);
-                acc.index = unwrap_boxed_index(inst->operand(1));
-                acc.is_store = false;
-                acc.is_iv_indexed = (acc.index == info.iv_param);
-                accesses.push_back(acc);
+                continue;
+            }
+            const Opcode op = inst->opcode();
+            if (op == Opcode::safepoint || op == Opcode::write_barrier) continue;
+            if (is_allocation_call(inst)) continue;
+            if (inst->has_side_effects() || inst->is_call()) return false;
+            if ((op == Opcode::sdiv || op == Opcode::udiv || op == Opcode::smod || op == Opcode::umod) &&
+                !is_movable(inst)) {
+                return false;
             }
         }
+    }
+    return true;
+}
+
+bool accesses_commute(const MemAccess& a, const MemAccess& b, const FusibleLoopInfo& l1,
+                      const FusibleLoopInfo& l2, const AliasAnalysis& aa) {
+    if (!a.is_store && !b.is_store) return true;
+    if (!a.base || !b.base) return false;
+    // A private bronze array is reachable only through its own element
+    // calls, so it is disjoint from every other access.
+    if ((a.bronze_element || b.bronze_element) && a.base != b.base) return true;
+    if (a.bronze_element != b.bronze_element) return true;
+    if (!a.bronze_element && aa.alias(a.base, b.base) == AliasResult::NoAlias) return true;
+    // Element i of the same buffer on both sides: the fused loop touches it
+    // in iteration i only, loop 1 first, exactly as the original order did.
+    return a.index == l1.iv_param && b.index == l2.iv_param && a.base == b.base &&
+           a.scale == b.scale && a.offset == b.offset && a.size == b.size && a.size != 0 &&
+           static_cast<size_t>(a.scale) >= a.size;
+}
+
+bool check_dependencies(Function& fn, const FusibleLoopInfo& l1, const FusibleLoopInfo& l2,
+                        const std::vector<BasicBlock*>& bridge) {
+    // Values that exist only once loop 1 has run (or is running).
+    std::unordered_set<const Value*> loop1_defs;
+    for (BasicBlock* bb : l1.loop->blocks()) {
+        for (Value* p : bb->params()) loop1_defs.insert(p);
+        for (Instruction* inst : *bb) if (inst->result()) loop1_defs.insert(inst->result());
+    }
+    for (Value* p : l1.exit_bb->params()) loop1_defs.insert(p);
+
+    // The bridge moves in front of loop 1.
+    for (BasicBlock* bb : bridge) {
+        for (Instruction* inst : *bb) {
+            if (uses_any(*inst, loop1_defs)) return false;
+            if (!inst->is_terminator() && !is_movable(inst)) return false;
+        }
+    }
+    // Loop 2 runs interleaved with loop 1: it may not read loop 1's values.
+    for (BasicBlock* bb : l2.loop->blocks()) {
+        for (Instruction* inst : *bb) {
+            if (uses_any(*inst, loop1_defs)) return false;
+        }
+    }
+    // Loop 2's header joins loop 1's header, which runs once more than a body.
+    for (Instruction* inst : *l2.header) {
+        if (!inst->is_terminator() && !is_movable(inst)) return false;
+    }
+
+    std::vector<MemAccess> acc1;
+    std::vector<MemAccess> acc2;
+    RangeAnalysis ra(fn);
+    if (!effects_reorderable(fn, *l1.loop, ra, acc1) || !effects_reorderable(fn, *l2.loop, ra, acc2)) return false;
+    if (acc1.empty() || acc2.empty()) return true;
+    AliasAnalysis aa(fn);
+    for (const MemAccess& a : acc1) {
+        for (const MemAccess& b : acc2) {
+            if (!accesses_commute(a, b, l1, l2, aa)) return false;
+        }
+    }
+    return true;
+}
+
+bool analyze_pair(Function& fn, LoopInfo& loop1, LoopInfo& loop2, const LoopFusionOptions& options,
+                  FusibleLoopInfo& info1, FusibleLoopInfo& info2, std::vector<BasicBlock*>& bridge) {
+    if (options.stats) options.stats->candidates_checked++;
+    if (!extract_fusible_loop(loop1, info1) || !extract_fusible_loop(loop2, info2)) return false;
+    if (!collect_bridge(info1, info2, bridge)) {
+        if (options.stats) options.stats->rejected_non_adjacent++;
+        return false;
+    }
+    if (!check_domain_congruence(info1, info2)) {
+        if (options.stats) options.stats->rejected_domain_mismatch++;
+        return false;
+    }
+    if (!check_dependencies(fn, info1, info2, bridge)) {
+        if (options.stats) options.stats->rejected_dependencies++;
+        return false;
+    }
+    // Loop 1's exit values move to loop 2's exit, which must be its own.
+    if (info1.exit_bb->param_count() != 0) {
+        const auto& preds = info2.exit_bb->predecessors();
+        if (preds.size() != 1 || preds[0] != info2.header) return false;
+    }
+    return true;
+}
+
+void remap_uses(Instruction& inst, const std::unordered_map<const Value*, Value*>& repl) {
+    auto sub = [&](Value*& v) {
+        auto it = repl.find(v);
+        if (it != repl.end()) v = it->second;
+    };
+    for (Value*& op : inst.operands()) sub(op);
+    for (Value*& sv : inst.state_map()) sub(sv);
+    ir::for_each_target(inst, [&](BranchTarget& t) { for (Value*& a : t.args) sub(a); });
+}
+
+void move_before(BasicBlock* from, BasicBlock* to, Instruction* before,
+                 const std::unordered_map<const Value*, Value*>& repl) {
+    std::vector<Instruction*> insts;
+    for (Instruction* inst : *from) {
+        if (!inst->is_terminator()) insts.push_back(inst);
+    }
+    for (Instruction* inst : insts) {
+        from->remove_instruction(inst);
+        remap_uses(*inst, repl);
+        to->insert_before(inst, before);
     }
 }
 
-static bool check_dependencies(const FusibleLoopInfo& l1, const FusibleLoopInfo& l2) {
-    // 1. Check unknown external calls with side effects
-    for (BasicBlock* bb : l1.loop->blocks()) {
-        for (Instruction* inst : *bb) {
-            if (inst->is_terminator()) continue;
-            Opcode op = inst->opcode();
-            if (is_call(op)) {
-                std::string_view sym = inst->symbol();
-                if (sym != "bronze_elem_get" && sym != "bronze_elem_set" &&
-                    sym != "bronze_prop_set" && sym != "bronze_prop_get" &&
-                    sym != "box_f64" && sym != "unbox_f64" &&
-                    !is_allocation_callee(sym)) {
-                    // Unknown call in loop 1 could have side effects
-                    return false;
-                }
-            }
-        }
-    }
-    for (BasicBlock* bb : l2.loop->blocks()) {
-        for (Instruction* inst : *bb) {
-            if (inst->is_terminator()) continue;
-            Opcode op = inst->opcode();
-            if (is_call(op)) {
-                std::string_view sym = inst->symbol();
-                if (sym != "bronze_elem_get" && sym != "bronze_elem_set" &&
-                    sym != "bronze_prop_set" && sym != "bronze_prop_get" &&
-                    sym != "box_f64" && sym != "unbox_f64" &&
-                    !is_allocation_callee(sym)) {
-                    return false;
-                }
-            }
-        }
+void do_fuse(Function& fn, const FusibleLoopInfo& info1, const FusibleLoopInfo& info2,
+             const std::vector<BasicBlock*>& bridge) {
+    BasicBlock* hdr1 = info1.header;
+    BasicBlock* hdr2 = info2.header;
+    Instruction* ph1_term = info1.preheader->terminator();
+    Instruction* hdr1_term = hdr1->terminator();
+    Instruction* latch1_term = info1.latch->terminator();
+    Instruction* hdr2_term = hdr2->terminator();
+    Instruction* ph2_term = info2.preheader->terminator();
+    Instruction* latch2_term = info2.latch->terminator();
+
+    // Loop 2's carried values become extra parameters of loop 1's header;
+    // its induction variable is loop 1's.
+    std::unordered_map<const Value*, Value*> repl;
+    repl[info2.iv_param] = info1.iv_param;
+    std::vector<size_t> carried;
+    for (size_t i = 0; i < hdr2->param_count(); ++i) {
+        if (i == info2.iv_index) continue;
+        repl[hdr2->param(i)] = ir::new_block_param(fn, hdr1, hdr2->param(i)->type());
+        carried.push_back(i);
     }
 
-    // 2. Check memory conflicts between loop 1 and loop 2
-    std::vector<MemAccess> acc1, acc2;
-    collect_memory_accesses(l1, acc1);
-    collect_memory_accesses(l2, acc2);
+    // The bridge (pure, independent of loop 1) runs before loop 1 now.
+    for (BasicBlock* bb : bridge) move_before(bb, info1.preheader, ph1_term, repl);
+    for (size_t i : carried) ph1_term->branch_target().args.push_back(ph2_term->branch_target().args[i]);
 
-    Function* fn = (l1.loop && l1.loop->header()) ? l1.loop->header()->parent() : nullptr;
-    std::unique_ptr<AliasAnalysis> aa;
-    if (fn) {
-        aa = std::make_unique<AliasAnalysis>(*fn);
+    move_before(hdr2, hdr1, hdr1_term, repl);
+    move_before(info2.latch, info1.latch, latch1_term, repl);
+    for (size_t i : carried) {
+        Value* next = latch2_term->branch_target().args[i];
+        auto it = repl.find(next);
+        latch1_term->branch_target().args.push_back(it != repl.end() ? it->second : next);
     }
 
-    for (const auto& a1 : acc1) {
-        for (const auto& a2 : acc2) {
-            if (a1.base == a2.base) {
-                // If accesses touch the same array, check indices
-                if (!a1.is_iv_indexed || !a2.is_iv_indexed) {
-                    // Non-IV or non-congruent indexing on shared array is unsafe
-                    return false;
-                }
-                // Both are indexed by their respective primary IV: distance is 0.
-                // In fused loop: loop 1 executes before loop 2 in iteration i.
-                // A store in loop 1 followed by load in loop 2 is a valid forward dep.
-            } else if (a1.is_store || a2.is_store) {
-                if (aa && a1.base && a2.base) {
-                    if (aa->alias(a1.base, a2.base) != AliasResult::NoAlias) {
-                        return false;
-                    }
-                } else {
-                    return false;
-                }
-            }
-        }
+    // The fused header exits to loop 2's exit, carrying both loops' results.
+    BranchTarget& exit1 = info1.exit_on_false ? hdr1_term->false_target() : hdr1_term->true_target();
+    const BranchTarget& exit2 = info2.exit_on_false ? hdr2_term->false_target() : hdr2_term->true_target();
+    std::vector<Value*> loop1_exit_args = exit1.args;
+    std::vector<Value*> fused_args;
+    for (Value* a : exit2.args) {
+        auto it = repl.find(a);
+        fused_args.push_back(it != repl.end() ? it->second : a);
+    }
+    for (size_t k = 0; k < info1.exit_bb->param_count(); ++k) {
+        repl[info1.exit_bb->param(k)] = ir::new_block_param(fn, info2.exit_bb, info1.exit_bb->param(k)->type());
+        fused_args.push_back(loop1_exit_args[k]);
+    }
+    exit1 = BranchTarget(info2.exit_bb, std::move(fused_args));
+
+    // Uses after the loops of loop 2's parameters and loop 1's exit values.
+    for (BasicBlock* bb : fn.blocks()) {
+        if (!bb) continue;
+        for (Instruction* inst : *bb) remap_uses(*inst, repl);
     }
 
-    // 3. Ensure loop 2 does not use a loop-carried non-invariant value computed inside loop 1
-    std::unordered_set<const Value*> l1_body_defs;
-    for (BasicBlock* bb : l1.loop->blocks()) {
-        for (Instruction* inst : *bb) {
-            if (inst->result()) {
-                l1_body_defs.insert(inst->result());
-            }
-        }
-    }
-
-    for (BasicBlock* bb : l2.loop->blocks()) {
-        for (Instruction* inst : *bb) {
-            for (size_t i = 0; i < inst->operand_count(); ++i) {
-                Value* op_val = inst->operand(i);
-                if (op_val && l1_body_defs.count(op_val) > 0) {
-                    // Direct SSA use of a per-iteration value from loop 1 across iterations
-                    return false;
-                }
-            }
-        }
-    }
-
-    return true;
+    for (BasicBlock* bb : bridge) fn.remove_block(bb);
+    fn.remove_block(info2.latch);
+    fn.remove_block(hdr2);
+    fn.rebuild_cfg_predecessors();
 }
 
 } // namespace
@@ -457,29 +578,9 @@ bool can_fuse_loops(
     const LoopFusionOptions& options
 ) {
     (void)dom;
-    if (options.stats) options.stats->candidates_checked++;
-
     FusibleLoopInfo info1, info2;
-    if (!extract_fusible_loop(fn, loop1, info1) || !extract_fusible_loop(fn, loop2, info2)) {
-        return false;
-    }
-
-    if (!check_adjacency(info1, info2)) {
-        if (options.stats) options.stats->rejected_non_adjacent++;
-        return false;
-    }
-
-    if (!check_domain_congruence(info1, info2)) {
-        if (options.stats) options.stats->rejected_domain_mismatch++;
-        return false;
-    }
-
-    if (!check_dependencies(info1, info2)) {
-        if (options.stats) options.stats->rejected_dependencies++;
-        return false;
-    }
-
-    return true;
+    std::vector<BasicBlock*> bridge;
+    return analyze_pair(fn, loop1, loop2, options, info1, info2, bridge);
 }
 
 bool fuse_loops(
@@ -489,190 +590,11 @@ bool fuse_loops(
     const DominatorTree& dom,
     const LoopFusionOptions& options
 ) {
-    if (!can_fuse_loops(fn, loop1, loop2, dom, options)) {
-        return false;
-    }
-
+    (void)dom;
     FusibleLoopInfo info1, info2;
-    extract_fusible_loop(fn, loop1, info1);
-    extract_fusible_loop(fn, loop2, info2);
-
-    BasicBlock* hdr1 = info1.header;
-    BasicBlock* hdr2 = info2.header;
-    BasicBlock* body1 = info1.body;
-    BasicBlock* body2 = info2.body;
-    BasicBlock* latch1 = info1.latch;
-    BasicBlock* latch2 = info2.latch;
-
-    // 1. Extend hdr1 with hdr2's non-IV parameters
-    std::unordered_map<Value*, Value*> param_map;
-    std::vector<size_t> non_iv_indices;
-
-    Builder b(fn);
-    for (size_t i = 0; i < hdr2->param_count(); ++i) {
-        if (i == info2.iv_index) continue;
-        Value* p2 = hdr2->param(i);
-        Value* new_p = b.add_block_param(hdr1, p2->type());
-        param_map[p2] = new_p;
-        non_iv_indices.push_back(i);
-    }
-
-    // 2. Extend preheader branch arguments to hdr1
-    if (info1.ph_bt) {
-        for (size_t idx : non_iv_indices) {
-            Value* init_val = (info2.ph_bt && idx < info2.ph_bt->args.size()) ? info2.ph_bt->args[idx] : nullptr;
-            info1.ph_bt->args.push_back(init_val);
-        }
-    }
-
-    // 2b. Move any invariant/bridge instructions from info2.preheader (and bridge blocks) to info1.preheader
-    Instruction* ph1_term = info1.preheader ? info1.preheader->terminator() : nullptr;
-    if (ph1_term) {
-        BasicBlock* bridge = info1.exit_bb;
-        std::unordered_set<BasicBlock*> visited_bridge;
-        while (bridge && bridge != info2.header) {
-            if (!visited_bridge.insert(bridge).second) break;
-            std::vector<Instruction*> bridge_insts;
-            for (Instruction* inst = bridge->head(); inst != nullptr; inst = inst->next()) {
-                if (!inst->is_terminator()) {
-                    bridge_insts.push_back(inst);
-                }
-            }
-            for (Instruction* inst : bridge_insts) {
-                bridge->remove_instruction(inst);
-                info1.preheader->insert_before(inst, ph1_term);
-            }
-            Instruction* term = bridge->terminator();
-            if (term && term->opcode() == Opcode::br) {
-                bridge = term->branch_target().block;
-            } else {
-                break;
-            }
-        }
-        if (info2.preheader && info2.preheader != info1.exit_bb && visited_bridge.count(info2.preheader) == 0) {
-            std::vector<Instruction*> ph2_insts;
-            for (Instruction* inst = info2.preheader->head(); inst != nullptr; inst = inst->next()) {
-                if (!inst->is_terminator()) {
-                    ph2_insts.push_back(inst);
-                }
-            }
-            for (Instruction* inst : ph2_insts) {
-                info2.preheader->remove_instruction(inst);
-                info1.preheader->insert_before(inst, ph1_term);
-            }
-        }
-    }
-
-    // 2c. Move any non-terminator instructions in hdr2 (other than condition definition) into hdr1
-    Instruction* hdr1_term = hdr1->terminator();
-    Value* hdr2_cond = hdr2->terminator() ? hdr2->terminator()->operand(0) : nullptr;
-    Instruction* hdr2_cond_inst = (hdr2_cond && hdr2_cond->is_instruction()) ? hdr2_cond->defining_instruction() : nullptr;
-
-    std::vector<Instruction*> hdr2_to_move;
-    for (Instruction* inst = hdr2->head(); inst != nullptr; inst = inst->next()) {
-        if (!inst->is_terminator() && inst != hdr2_cond_inst) {
-            hdr2_to_move.push_back(inst);
-        }
-    }
-    for (Instruction* inst : hdr2_to_move) {
-        hdr2->remove_instruction(inst);
-        for (size_t op_i = 0; op_i < inst->operand_count(); ++op_i) {
-            Value* op_val = inst->operand(op_i);
-            if (op_val == info2.iv_param) {
-                inst->set_operand(op_i, info1.iv_param);
-            } else if (param_map.count(op_val) > 0) {
-                inst->set_operand(op_i, param_map[op_val]);
-            }
-        }
-        hdr1->insert_before(inst, hdr1_term);
-    }
-
-    // 3. Move non-terminator instructions of body2 into body1
-    Instruction* latch1_term = latch1->terminator();
-    std::vector<Instruction*> to_move;
-    for (Instruction* inst = body2->head(); inst != nullptr; inst = inst->next()) {
-        if (!inst->is_terminator()) {
-            to_move.push_back(inst);
-        }
-    }
-
-    for (Instruction* inst : to_move) {
-        body2->remove_instruction(inst);
-        // Remap operands: iv2 -> iv1, params of hdr2 -> new params of hdr1
-        for (size_t op_i = 0; op_i < inst->operand_count(); ++op_i) {
-            Value* op_val = inst->operand(op_i);
-            if (op_val == info2.iv_param) {
-                inst->set_operand(op_i, info1.iv_param);
-            } else if (param_map.count(op_val) > 0) {
-                inst->set_operand(op_i, param_map[op_val]);
-            }
-        }
-        body1->insert_before(inst, latch1_term);
-    }
-
-    // 4. Update latch1 backedge arguments
-    Instruction* latch2_term = latch2->terminator();
-    BranchTarget& l1_bt = latch1_term->branch_target();
-    const BranchTarget& l2_bt = latch2_term->branch_target();
-
-    for (size_t idx : non_iv_indices) {
-        Value* next_val = (idx < l2_bt.args.size()) ? l2_bt.args[idx] : nullptr;
-        if (next_val == info2.iv_param) {
-            next_val = info1.iv_param;
-        } else if (param_map.count(next_val) > 0) {
-            next_val = param_map[next_val];
-        }
-        l1_bt.args.push_back(next_val);
-    }
-
-    // 5. Update hdr1 exit branch to target info2.exit_bb
-    hdr1_term = hdr1->terminator();
-    Instruction* hdr2_term = hdr2->terminator();
-    BranchTarget& l1_exit_target = info1.exit_on_false ? hdr1_term->false_target() : hdr1_term->true_target();
-    const BranchTarget& l2_exit_target = info2.exit_on_false ? hdr2_term->false_target() : hdr2_term->true_target();
-
-    std::vector<Value*> orig_l1_exit_args = l1_exit_target.args;
-
-    l1_exit_target.block = l2_exit_target.block;
-    l1_exit_target.args.clear();
-    for (Value* arg : l2_exit_target.args) {
-        if (arg == info2.iv_param) {
-            arg = info1.iv_param;
-        } else if (param_map.count(arg) > 0) {
-            arg = param_map[arg];
-        }
-        l1_exit_target.args.push_back(arg);
-    }
-
-    // If info1.exit_bb had parameters (e.g. reduction accumulators), forward them to info2.exit_bb
-    if (info1.exit_bb && info1.exit_bb != info2.header && info1.exit_bb != info2.exit_bb) {
-        for (size_t k = 0; k < info1.exit_bb->params().size(); ++k) {
-            Value* p = info1.exit_bb->params()[k];
-            Value* arg_val = (k < orig_l1_exit_args.size()) ? orig_l1_exit_args[k] : nullptr;
-            Value* exit_p = b.add_block_param(info2.exit_bb, p->type());
-            replace_all_uses(fn, p, exit_p);
-            l1_exit_target.args.push_back(arg_val);
-        }
-    }
-
-    // Replace any external uses of hdr2 params
-    for (auto& [old_p, new_p] : param_map) {
-        replace_all_uses(fn, old_p, new_p);
-    }
-
-    // 6. Remove dead blocks of loop 2
-    if (info1.exit_bb != info2.header && info1.exit_bb != info2.exit_bb && info1.exit_bb != hdr1) {
-        fn.remove_block(info1.exit_bb);
-    }
-    if (info2.preheader && info2.preheader != hdr1 && info2.preheader != info2.exit_bb) {
-        fn.remove_block(info2.preheader);
-    }
-    if (body2 != body1) fn.remove_block(body2);
-    if (latch2 != body2 && latch2 != latch1) fn.remove_block(latch2);
-    fn.remove_block(hdr2);
-
-    fn.rebuild_cfg_predecessors();
-
+    std::vector<BasicBlock*> bridge;
+    if (!analyze_pair(fn, loop1, loop2, options, info1, info2, bridge)) return false;
+    do_fuse(fn, info1, info2, bridge);
     if (options.stats) options.stats->loops_fused++;
     return true;
 }
@@ -682,6 +604,7 @@ bool loop_fusion_pass(
     const DominatorTree& dom,
     const LoopFusionOptions& options
 ) {
+    (void)dom;
     bool any_fused = false;
     bool changed = true;
 
@@ -692,18 +615,14 @@ bool loop_fusion_pass(
         LoopAnalysis la(fn, current_dom);
 
         const auto& loops = la.top_level_loops();
-        for (size_t i = 0; i < loops.size(); ++i) {
-            for (size_t j = 0; j < loops.size(); ++j) {
+        for (size_t i = 0; i < loops.size() && !changed; ++i) {
+            for (size_t j = 0; j < loops.size() && !changed; ++j) {
                 if (i == j) continue;
-                if (can_fuse_loops(fn, *loops[i], *loops[j], current_dom, options)) {
-                    if (fuse_loops(fn, *loops[i], *loops[j], current_dom, options)) {
-                        changed = true;
-                        any_fused = true;
-                        break;
-                    }
+                if (fuse_loops(fn, *loops[i], *loops[j], current_dom, options)) {
+                    changed = true;
+                    any_fused = true;
                 }
             }
-            if (changed) break;
         }
     }
 

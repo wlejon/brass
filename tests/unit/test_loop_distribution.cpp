@@ -19,7 +19,15 @@ TEST_CASE("Loop Distribution - Split Mixed Loop and Enable Vectorization") {
     //   v = load_indexed src, i
     //   res = mul v, 3
     //   store_indexed dst, i, res
-    //   call @dummy_side_effect(res)
+    //   call @scalar_helper(res)
+    // scalar_helper touches no memory, so it may run after every store.
+    Function* helper = mod.create_function("scalar_helper", Type::void_type(), {Type::i32()});
+    b.set_function(helper);
+    b.position_at_end(b.append_block("entry"));
+    b.add_block_param(helper->entry_block(), Type::i32());
+    b.build_ret_void();
+    helper->rebuild_cfg_predecessors();
+
     Function* fn = mod.create_function("mixed_loop", Type::void_type(), {Type::gcref(), Type::gcref(), Type::i64()});
     b.set_function(fn);
 
@@ -51,7 +59,7 @@ TEST_CASE("Loop Distribution - Split Mixed Loop and Enable Vectorization") {
     b.build_store_indexed(Type::i32(), dst, i, 4, multiplied);
 
     // Unvectorizable call that previously blocked vectorization
-    b.build_call("dummy_side_effect", Type::void_type(), {multiplied});
+    b.build_call("scalar_helper", Type::void_type(), {multiplied});
 
     Value* next_i = b.build_add(i, one);
     b.build_br(hdr, {next_i});

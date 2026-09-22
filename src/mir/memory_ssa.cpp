@@ -141,7 +141,7 @@ void MemorySSA::build() {
                 def_blocks.insert(bb);
                 break;
             }
-            if ((is_call(op) && !is_allocation_callee(inst->symbol())) || is_coro_op(op)) {
+            if ((is_call(op) && !is_allocation_call(inst)) || is_coro_op(op)) {
                 def_blocks.insert(bb);
                 break;
             }
@@ -209,7 +209,7 @@ void MemorySSA::build() {
                 all_accesses_.push_back(std::move(def));
             } else if (is_call(op) || is_coro_op(op)) {
                 // Coroutine operations run the coroutine body, which may write anything.
-                if (is_coro_op(op) || !is_allocation_callee(inst->symbol())) {
+                if (is_coro_op(op) || !is_allocation_call(inst)) {
                     MemoryAccess* current_def = version_stack.back();
                     auto def = std::make_unique<MemoryDef>(next_access_id_++, const_cast<BasicBlock*>(bb), inst, current_def);
                     inst_to_access_[inst] = def.get();

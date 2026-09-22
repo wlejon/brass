@@ -2,420 +2,81 @@
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/codegen/jit_exec.hpp>
 #include <brass/mir/verifier.hpp>
-#include <brass/mir/printer.hpp>
 #include <brass/mir/loop_opt.hpp>
-#include <brass/mir/gvn_pre.hpp>
-#include <brass/mir/write_barrier_elim.hpp>
 #include <brass/runtime/parallel_runtime.hpp>
 #include <brass/pgo/instrument.hpp>
 #include <brass/gc/mini_cheney.hpp>
 #include <brass/gc/runtime_gc.hpp>
 
 #include <chrono>
-#include <thread>
-#include <mutex>
-#include <condition_variable>
-#include <fstream>
-#include <sstream>
-#include <iostream>
 #include <cmath>
-#include <csetjmp>
-
-#if defined(_WIN32)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#else
-#include <csignal>
-#include <cstring>
-#include <cerrno>
-#include <unistd.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <sys/resource.h>
-#include <sys/time.h>
-#endif
+#include <mutex>
+#include <sstream>
 
 namespace brass::fuzz {
 
 static void fuzz_deopt_exit() {}
 
-std::string_view status_name(ExecutionStatus status) noexcept {
-    switch (status) {
-        case ExecutionStatus::Success: return "Success";
-        case ExecutionStatus::Timeout: return "Timeout";
-        case ExecutionStatus::MemoryExceeded: return "MemoryExceeded";
-        case ExecutionStatus::CrashOrFault: return "CrashOrFault";
-        case ExecutionStatus::VerificationFailure: return "VerificationFailure";
-        case ExecutionStatus::CompilationFailure: return "CompilationFailure";
-        case ExecutionStatus::ExceptionThrown: return "ExceptionThrown";
+namespace {
+
+double elapsed_ms(std::chrono::steady_clock::time_point t0) {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+}
+
+bool values_match(const RuntimeValue& v1, const RuntimeValue& v2) {
+    if (v1.is_f64()) {
+        double d1 = v1.as_f64();
+        double d2 = v2.as_f64();
+        // NaN payloads are not part of the answer.
+        if (std::isnan(d1)) return std::isnan(d2);
+        return (v1.raw_bits() == v2.raw_bits()) || (std::abs(d1 - d2) < 1e-6);
     }
-    return "Unknown";
-}
-
-#if defined(_WIN32)
-static thread_local bool s_in_protected = false;
-alignas(16) static thread_local CONTEXT s_recovery_context;
-static thread_local DWORD s_fault_code = 0;
-static thread_local volatile bool s_fault_occurred = false;
-
-static LONG WINAPI FuzzVectoredHandler(EXCEPTION_POINTERS* ep) {
-    if (s_in_protected && ep && ep->ExceptionRecord && ep->ContextRecord) {
-        DWORD code = ep->ExceptionRecord->ExceptionCode;
-        if (code == EXCEPTION_ACCESS_VIOLATION ||
-            code == EXCEPTION_INT_DIVIDE_BY_ZERO ||
-            code == EXCEPTION_ILLEGAL_INSTRUCTION ||
-            code == EXCEPTION_FLT_DIVIDE_BY_ZERO ||
-            code == EXCEPTION_DATATYPE_MISALIGNMENT) {
-            s_in_protected = false;
-            s_fault_code = code;
-            s_fault_occurred = true;
-            *ep->ContextRecord = s_recovery_context;
-            return EXCEPTION_CONTINUE_EXECUTION;
-        }
+    if (v1.is_f32()) {
+        float f1 = v1.as_f32();
+        float f2 = v2.as_f32();
+        if (std::isnan(f1)) return std::isnan(f2);
+        return (v1.raw_bits() == v2.raw_bits()) || (std::abs(f1 - f2) < 1e-6f);
     }
-    return EXCEPTION_CONTINUE_SEARCH;
+    if (v1.is_vector()) {
+        return v1 == v2;
+    }
+    return v1.raw_bits() == v2.raw_bits();
 }
 
-static void ensure_vectored_handler_installed() {
-    static std::once_flag flag;
-    std::call_once(flag, []() {
-        AddVectoredExceptionHandler(1, FuzzVectoredHandler);
-    });
+std::string_view failure_kind(const TierResult& r) {
+    switch (r.status) {
+        case ExecutionStatus::Success: return "mismatch";
+        case ExecutionStatus::Timeout: return "timeout";
+        case ExecutionStatus::CompilationFailure: return "compile";
+        case ExecutionStatus::VerificationFailure: return "verify";
+        default: break;
+    }
+    const std::string& m = r.fault_message;
+    if (m.find("Integer Overflow") != std::string::npos) return "int-overflow-trap";
+    if (m.find("Integer Divide by Zero") != std::string::npos) return "div-zero-trap";
+    if (m.find("Access Violation") != std::string::npos) return "access-violation";
+    if (m.find("Illegal Instruction") != std::string::npos) return "illegal-instruction";
+    if (m.find("bad_alloc") != std::string::npos) return "bad-alloc";
+    if (m.find("Exception") != std::string::npos) return "exception";
+    return "fault";
 }
 
-static void format_win_fault(DWORD code, std::string& out_msg) {
+std::string describe(const TierResult& r) {
     std::ostringstream ss;
-    ss << "Hardware fault 0x" << std::hex << code;
-    if (code == EXCEPTION_ACCESS_VIOLATION) ss << " (Access Violation)";
-    else if (code == EXCEPTION_INT_DIVIDE_BY_ZERO) ss << " (Integer Divide by Zero)";
-    else if (code == EXCEPTION_ILLEGAL_INSTRUCTION) ss << " (Illegal Instruction)";
-    else if (code == EXCEPTION_FLT_DIVIDE_BY_ZERO) ss << " (Float Divide by Zero)";
-    out_msg = ss.str();
-}
-#else
-static thread_local sigjmp_buf s_posix_recovery_env;
-static thread_local volatile sig_atomic_t s_posix_in_protected = 0;
-static thread_local volatile sig_atomic_t s_posix_fault_sig = 0;
-
-static void posix_fuzz_sig_handler(int sig, siginfo_t* info, void* ctx) {
-    (void)info;
-    (void)ctx;
-    if (s_posix_in_protected) {
-        s_posix_in_protected = 0;
-        s_posix_fault_sig = sig;
-        siglongjmp(s_posix_recovery_env, 1);
-    }
-    struct sigaction sa;
-    std::memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = SIG_DFL;
-    sigemptyset(&sa.sa_mask);
-    sigaction(sig, &sa, nullptr);
-    raise(sig);
-}
-
-static void ensure_posix_signal_handler_installed() {
-    static std::once_flag flag;
-    std::call_once(flag, []() {
-        struct sigaction sa;
-        std::memset(&sa, 0, sizeof(sa));
-        sa.sa_sigaction = posix_fuzz_sig_handler;
-        sa.sa_flags = SA_SIGINFO;
-        sigemptyset(&sa.sa_mask);
-        sigaction(SIGFPE, &sa, nullptr);
-        sigaction(SIGSEGV, &sa, nullptr);
-        sigaction(SIGBUS, &sa, nullptr);
-        sigaction(SIGILL, &sa, nullptr);
-    });
-}
-
-static void format_posix_fault(int sig, std::string& out_msg) {
-    std::ostringstream ss;
-    ss << "Hardware fault: ";
-    if (sig == SIGFPE) ss << "Integer Divide by Zero / Arithmetic (SIGFPE)";
-    else if (sig == SIGSEGV) ss << "Segmentation Fault (SIGSEGV)";
-    else if (sig == SIGBUS) ss << "Bus Error (SIGBUS)";
-    else if (sig == SIGILL) ss << "Illegal Instruction (SIGILL)";
-    else ss << "Signal " << sig;
-    out_msg = ss.str();
-}
-#endif
-
-bool DiffFuzzer::run_protected(const std::function<void()>& action, std::string& fault_msg) {
-#if defined(_WIN32)
-    ensure_vectored_handler_installed();
-    s_fault_code = 0;
-    s_fault_occurred = false;
-    s_in_protected = false;
-    std::atomic_signal_fence(std::memory_order_seq_cst);
-    RtlCaptureContext(&s_recovery_context);
-    std::atomic_signal_fence(std::memory_order_seq_cst);
-    if (s_fault_occurred) {
-        s_in_protected = false;
-        format_win_fault(s_fault_code, fault_msg);
-        return false;
-    }
-    s_in_protected = true;
-    bool ok = true;
-    try {
-        action();
-    } catch (const std::exception& ex) {
-        fault_msg = std::string("C++ Exception: ") + ex.what();
-        ok = false;
-    } catch (...) {
-        fault_msg = "Unknown Exception";
-        ok = false;
-    }
-    s_in_protected = false;
-    return ok;
-#else
-    ensure_posix_signal_handler_installed();
-    s_posix_fault_sig = 0;
-    s_posix_in_protected = 0;
-
-    if (sigsetjmp(s_posix_recovery_env, 1) != 0) {
-        s_posix_in_protected = 0;
-        format_posix_fault(s_posix_fault_sig, fault_msg);
-        return false;
-    }
-
-    s_posix_in_protected = 1;
-    bool ok = true;
-    try {
-        action();
-    } catch (const std::exception& ex) {
-        fault_msg = std::string("C++ Exception: ") + ex.what();
-        ok = false;
-    } catch (...) {
-        fault_msg = "Unknown Exception";
-        ok = false;
-    }
-    s_posix_in_protected = 0;
-    return ok;
-#endif
-}
-
-struct WatchdogState {
-    std::mutex mtx;
-    std::condition_variable cv;
-    std::atomic<bool> finished{false};
-};
-
-bool DiffFuzzer::run_with_watchdog(const std::function<void()>& action, uint32_t timeout_ms) {
-    auto state = std::make_shared<WatchdogState>();
-
-    std::thread worker([state, action]() {
-        action();
-        state->finished.store(true, std::memory_order_release);
-        state->cv.notify_one();
-    });
-
-    std::unique_lock<std::mutex> lock(state->mtx);
-    bool completed = state->cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&]() {
-        return state->finished.load(std::memory_order_acquire);
-    });
-
-    if (!completed) {
-#if defined(_WIN32)
-        TerminateThread(reinterpret_cast<HANDLE>(worker.native_handle()), 1);
-#endif
-        worker.detach();
-        return false;
-    }
-
-    if (worker.joinable()) {
-        worker.join();
-    }
-    return true;
-}
-
-ExecutionStatus DiffFuzzer::run_sandboxed_command(const std::string& command_line,
-                                                 uint32_t timeout_ms,
-                                                 size_t memory_limit_bytes,
-                                                 std::string& out_log) {
-#if defined(_WIN32)
-    HANDLE hJob = CreateJobObjectW(NULL, NULL);
-    if (!hJob) {
-        out_log = "Failed to create Windows Job Object";
-        return ExecutionStatus::CompilationFailure;
-    }
-
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli = {};
-    jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_PROCESS_MEMORY | JOB_OBJECT_LIMIT_JOB_MEMORY;
-    jeli.ProcessMemoryLimit = (memory_limit_bytes > 0) ? memory_limit_bytes : (256 * 1024 * 1024);
-    jeli.JobMemoryLimit = jeli.ProcessMemoryLimit;
-    SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli));
-
-    STARTUPINFOA si = {};
-    si.cb = sizeof(si);
-    PROCESS_INFORMATION pi = {};
-
-    std::vector<char> cmd(command_line.begin(), command_line.end());
-    cmd.push_back('\0');
-
-    DWORD flags = CREATE_SUSPENDED | CREATE_BREAKAWAY_FROM_JOB;
-    BOOL created = CreateProcessA(NULL, cmd.data(), NULL, NULL, FALSE,
-                                  flags, NULL, NULL, &si, &pi);
-    if (!created) {
-        flags = CREATE_SUSPENDED;
-        created = CreateProcessA(NULL, cmd.data(), NULL, NULL, FALSE,
-                                 flags, NULL, NULL, &si, &pi);
-    }
-    if (!created) {
-        CloseHandle(hJob);
-        out_log = "Failed to launch sandboxed child process: " + std::to_string(GetLastError());
-        return ExecutionStatus::CompilationFailure;
-    }
-
-    AssignProcessToJobObject(hJob, pi.hProcess);
-    ResumeThread(pi.hThread);
-
-    DWORD wait_res = WaitForSingleObject(pi.hProcess, timeout_ms);
-    ExecutionStatus status = ExecutionStatus::Success;
-
-    if (wait_res == WAIT_TIMEOUT) {
-        TerminateProcess(pi.hProcess, 124);
-        status = ExecutionStatus::Timeout;
-        out_log = "Process terminated: execution exceeded timeout limit.";
+    if (r.status == ExecutionStatus::Success) {
+        ss << r.value;
     } else {
-        DWORD exit_code = 0;
-        GetExitCodeProcess(pi.hProcess, &exit_code);
-        if (exit_code == 0) {
-            status = ExecutionStatus::Success;
-        } else if (exit_code == 0xC0000005) {
-            status = ExecutionStatus::CrashOrFault;
-            out_log = "Hardware fault: STATUS_ACCESS_VIOLATION (0xC0000005)";
-        } else if (exit_code == 0xC0000094) {
-            status = ExecutionStatus::CrashOrFault;
-            out_log = "Hardware fault: STATUS_INTEGER_DIVIDE_BY_ZERO (0xC0000094)";
-        } else if (exit_code == 0xC000001D) {
-            status = ExecutionStatus::CrashOrFault;
-            out_log = "Hardware fault: STATUS_ILLEGAL_INSTRUCTION (0xC000001D)";
-        } else if (exit_code == 0xC0000017) {
-            status = ExecutionStatus::MemoryExceeded;
-            out_log = "Memory quota exceeded limit";
-        } else {
-            status = ExecutionStatus::CrashOrFault;
-            out_log = "Process exited with failure code: " + std::to_string(exit_code);
-        }
+        ss << status_name(r.status) << ": " << r.fault_message;
     }
-
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    CloseHandle(hJob);
-    return status;
-#else
-    std::string actual_cmd = command_line;
-    if (actual_cmd.rfind("cmd.exe /c exit ", 0) == 0) {
-        actual_cmd = "exit " + actual_cmd.substr(16);
-    } else if (actual_cmd.rfind("cmd.exe /c ping ", 0) == 0) {
-        actual_cmd = "sleep 3";
-    } else if (actual_cmd.rfind("cmd.exe /c ", 0) == 0) {
-        actual_cmd = actual_cmd.substr(11);
-    }
-
-    pid_t pid = fork();
-    if (pid < 0) {
-        out_log = "Failed to fork child process: " + std::string(strerror(errno));
-        return ExecutionStatus::CompilationFailure;
-    }
-
-    if (pid == 0) {
-        if (memory_limit_bytes > 0) {
-            struct rlimit rl;
-            rl.rlim_cur = static_cast<rlim_t>(memory_limit_bytes);
-            rl.rlim_max = static_cast<rlim_t>(memory_limit_bytes);
-#if defined(RLIMIT_AS)
-            setrlimit(RLIMIT_AS, &rl);
-#elif defined(RLIMIT_DATA)
-            setrlimit(RLIMIT_DATA, &rl);
-#endif
-        }
-
-        execl("/bin/sh", "sh", "-c", actual_cmd.c_str(), static_cast<char*>(nullptr));
-        _exit(127);
-    }
-
-    auto start_time = std::chrono::steady_clock::now();
-    int status = 0;
-    bool finished = false;
-
-    while (!finished) {
-        pid_t res = waitpid(pid, &status, WNOHANG);
-        if (res == pid) {
-            finished = true;
-            break;
-        } else if (res < 0) {
-            out_log = "waitpid error: " + std::string(strerror(errno));
-            return ExecutionStatus::CrashOrFault;
-        }
-
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - start_time
-        ).count();
-
-        if (elapsed >= timeout_ms) {
-            kill(pid, SIGKILL);
-            waitpid(pid, nullptr, 0);
-            out_log = "Process terminated: execution exceeded timeout limit.";
-            return ExecutionStatus::Timeout;
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-
-    if (WIFEXITED(status)) {
-        int exit_code = WEXITSTATUS(status);
-        if (exit_code == 0) {
-            return ExecutionStatus::Success;
-        } else {
-            out_log = "Process exited with failure code: " + std::to_string(exit_code);
-            return ExecutionStatus::CrashOrFault;
-        }
-    } else if (WIFSIGNALED(status)) {
-        int sig = WTERMSIG(status);
-        if (sig == SIGKILL) {
-            out_log = "Memory quota exceeded or external kill";
-            return ExecutionStatus::MemoryExceeded;
-        } else if (sig == SIGSEGV) {
-            out_log = "Hardware fault: STATUS_ACCESS_VIOLATION (SIGSEGV)";
-            return ExecutionStatus::CrashOrFault;
-        } else if (sig == SIGFPE) {
-            out_log = "Hardware fault: STATUS_INTEGER_DIVIDE_BY_ZERO (SIGFPE)";
-            return ExecutionStatus::CrashOrFault;
-        } else if (sig == SIGILL) {
-            out_log = "Hardware fault: STATUS_ILLEGAL_INSTRUCTION (SIGILL)";
-            return ExecutionStatus::CrashOrFault;
-        } else {
-            out_log = "Process terminated by signal " + std::to_string(sig);
-            return ExecutionStatus::CrashOrFault;
-        }
-    }
-
-    return ExecutionStatus::Success;
-#endif
+    return ss.str();
 }
 
-std::string DiffFuzzer::save_reproducer(const Module& mod, uint64_t seed, std::string_view reason,
-                                        const std::string& dir) {
-    std::string filename = dir + "/fuzz_failure_" + std::to_string(seed) + ".mir";
-    std::ofstream os(filename);
-    if (!os.is_open()) return "";
-    os << "; REPRODUCER FOR SEED: " << seed << "\n";
-    os << "; FAILURE REASON:\n";
-    std::string reason_str(reason);
-    std::istringstream rss(reason_str);
-    std::string rline;
-    while (std::getline(rss, rline)) {
-        os << "; " << rline << "\n";
-    }
-    os << "\n";
-    print_module(mod, os);
-    return filename;
+} // namespace
+
+bool tier_results_match(const TierResult& a, const TierResult& b) {
+    if (a.status != b.status) return false;
+    if (a.status != ExecutionStatus::Success) return true;
+    return values_match(a.value, b.value);
 }
 
 DiffFuzzer::DiffFuzzer(const DiffFuzzerOptions& options) : options_(options) {}
@@ -424,11 +85,13 @@ DiffFuzzer::~DiffFuzzer() = default;
 TierResult DiffFuzzer::run_tier0_interp(const Module& mod, std::string_view fn_name,
                                         const std::vector<RuntimeValue>& args) {
     TierResult res;
-    auto t0 = std::chrono::high_resolution_clock::now();
+    const auto t0 = std::chrono::steady_clock::now();
 
     auto res_box = std::make_shared<TierResult>();
     std::string fn_name_str(fn_name);
 
+    // The interpreter's own brass_gc_alloc is used as-is: any size clamp or
+    // ignored pointer mask here would make it disagree with the JIT's GC.
     auto worker_task = [res_box, &mod, fn_name_str, args]() {
         std::string fault;
         bool prot_ok = run_protected([&]() {
@@ -437,10 +100,8 @@ TierResult DiffFuzzer::run_tier0_interp(const Module& mod, std::string_view fn_n
             interp.register_external_function("brass_pgo_inc", [](Interpreter&, const std::vector<RuntimeValue>&) {
                 return RuntimeValue::from_void();
             });
-            interp.register_external_function("brass_gc_alloc", [](Interpreter& in, const std::vector<RuntimeValue>& a) {
-                size_t sz = a.empty() ? 32 : static_cast<size_t>(a[0].as_u64());
-                if (sz > 65536) sz = (sz % 65536) + 32;
-                return RuntimeValue::from_gcref(in.allocate_gc(sz, 0, 1));
+            interp.register_external_function("fuzz_deopt_exit", [](Interpreter&, const std::vector<RuntimeValue>&) {
+                return RuntimeValue::from_void();
             });
             res_box->value = interp.run(mod, fn_name_str, args);
             res_box->status = ExecutionStatus::Success;
@@ -462,31 +123,28 @@ TierResult DiffFuzzer::run_tier0_interp(const Module& mod, std::string_view fn_n
     } else {
         res = std::move(*res_box);
     }
-
-    auto t1 = std::chrono::high_resolution_clock::now();
-    res.duration_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    res.duration_ms = elapsed_ms(t0);
     return res;
 }
 
-TierResult DiffFuzzer::run_tier1_jit_unopt(const Module& mod, std::string_view fn_name,
-                                          const std::vector<RuntimeValue>& args) {
+TierResult DiffFuzzer::run_jit(const Module& mod, std::string_view fn_name,
+                               const std::vector<RuntimeValue>& args, std::string_view label) {
     TierResult res;
-    auto t0 = std::chrono::high_resolution_clock::now();
+    const auto t0 = std::chrono::steady_clock::now();
 
     auto jit = std::make_shared<codegen::JitExecutionEngine>(Target::host());
     jit->register_external_symbol("brass_pgo_inc", reinterpret_cast<void*>(&brass_pgo_inc));
     jit->register_external_symbol("brass_parallel_for", reinterpret_cast<void*>(&brass_parallel_for));
     jit->register_external_symbol("fuzz_deopt_exit", reinterpret_cast<void*>(&fuzz_deopt_exit));
 
-    try {
-        if (!jit->compile_and_load(mod)) {
-            res.status = ExecutionStatus::CompilationFailure;
-            res.fault_message = "JIT unoptimized compilation failed";
-            return res;
-        }
-    } catch (const std::exception& e) {
+    bool compiled = false;
+    std::string compile_fault;
+    const bool compile_ok = run_protected([&]() { compiled = jit->compile_and_load(mod); }, compile_fault);
+    if (!compile_ok || !compiled) {
         res.status = ExecutionStatus::CompilationFailure;
-        res.fault_message = std::string("JIT unoptimized compilation exception: ") + e.what();
+        res.fault_message = "JIT " + std::string(label) + " compilation failed" +
+                            (compile_ok ? std::string() : ": " + compile_fault);
+        res.duration_ms = elapsed_ms(t0);
         return res;
     }
 
@@ -515,203 +173,206 @@ TierResult DiffFuzzer::run_tier1_jit_unopt(const Module& mod, std::string_view f
 
     if (!run_with_watchdog(worker_task, options_.timeout_ms)) {
         res.status = ExecutionStatus::Timeout;
-        res.fault_message = "Watchdog timeout exceeded in JIT unoptimized";
+        res.fault_message = "Watchdog timeout exceeded in JIT " + std::string(label);
     } else {
         res = std::move(*res_box);
     }
-
-    auto t1 = std::chrono::high_resolution_clock::now();
-    res.duration_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    res.duration_ms = elapsed_ms(t0);
     return res;
+}
+
+TierResult DiffFuzzer::run_tier1_jit_unopt(const Module& mod, std::string_view fn_name,
+                                          const std::vector<RuntimeValue>& args) {
+    return run_jit(mod, fn_name, args, "unoptimized");
+}
+
+OptimizeOutcome DiffFuzzer::optimize(const Module& mod,
+                                     const std::function<bool(std::string_view, const Module&)>& after_step) {
+    struct State {
+        std::mutex mtx;
+        std::string current;
+        std::unique_ptr<Module> module;
+        OptimizeOutcome outcome;
+    };
+    auto state = std::make_shared<State>();
+    state->module = clone_module(mod);
+    if (!state->module) {
+        OptimizeOutcome out;
+        out.status = ExecutionStatus::CompilationFailure;
+        out.message = "Failed to clone module for optimization";
+        return out;
+    }
+    const FuzzPipeline pipeline = options_.pipeline;
+    const std::vector<std::string> skip = options_.skip_passes;
+
+    auto task = [state, pipeline, skip, after_step]() {
+        Module& m = *state->module;
+        PassPipelineHooks hooks;
+        hooks.before_pass = [&](std::string_view name) {
+            std::lock_guard<std::mutex> lock(state->mtx);
+            state->current = std::string(name);
+        };
+        hooks.after_pass = [&](std::string_view name) {
+            DiagnosticReporter diag;
+            if (!verify_module(m, &diag)) {
+                state->outcome.status = ExecutionStatus::VerificationFailure;
+                state->outcome.pass = std::string(name);
+                state->outcome.message = "Verification failed after " + std::string(name) + ": " + diag.format_all();
+                return false;
+            }
+            return !after_step || after_step(name, m);
+        };
+        std::string fault;
+        if (!run_protected([&]() { run_fuzz_pipeline(m, pipeline, hooks, skip); }, fault)) {
+            std::lock_guard<std::mutex> lock(state->mtx);
+            state->outcome.status = ExecutionStatus::CrashOrFault;
+            state->outcome.pass = state->current;
+            state->outcome.message = "Fault in pass " + state->current + ": " + fault;
+        }
+    };
+
+    OptimizeOutcome out;
+    if (!run_with_watchdog(task, options_.pipeline_timeout_ms)) {
+        // The worker may still own the module; leave the state to it.
+        std::lock_guard<std::mutex> lock(state->mtx);
+        out.status = ExecutionStatus::Timeout;
+        out.pass = state->current;
+        out.message = "Pipeline timeout in pass " + state->current;
+        return out;
+    }
+    out = std::move(state->outcome);
+    if (out.status == ExecutionStatus::Success) out.module = std::move(state->module);
+    return out;
 }
 
 TierResult DiffFuzzer::run_tier2_jit_opt(const Module& mod, std::string_view fn_name,
                                         const std::vector<RuntimeValue>& args) {
-    TierResult res;
-    auto t0 = std::chrono::high_resolution_clock::now();
-
-    auto opt_mod = clone_module(mod);
-    if (!opt_mod) {
-        res.status = ExecutionStatus::CompilationFailure;
-        res.fault_message = "Failed to clone module for Tier 2 optimization";
+    OptimizeOutcome opt = optimize(mod);
+    if (!opt.module) {
+        TierResult res;
+        res.status = opt.status;
+        res.fault_message = opt.message;
         return res;
     }
-
-    LoopOptOptions opt_opts;
-    opt_opts.enable_gvn = true;
-    opt_opts.enable_sccp = true;
-    opt_opts.enable_cfg_simplify = true;
-    opt_opts.enable_licm = true;
-    opt_opts.enable_ivsr = true;
-    opt_opts.enable_dce = true;
-    opt_opts.enable_diamond_select = true;
-    opt_opts.enable_unroll = true;
-    opt_opts.enable_slp = true;
-    opt_opts.enable_vectorize = true;
-    opt_opts.enable_avx2 = true;
-    opt_opts.enable_fma = true;
-    opt_opts.enable_partial_escape = true;
-    opt_opts.enable_allocation_sinking = true;
-    opt_opts.enable_loop_fusion = true;
-    opt_opts.enable_loop_distribution = true;
-    opt_opts.enable_array_contraction = true;
-    try {
-        DiagnosticReporter diag_pre;
-        gvn_pre_module(*opt_mod);
-        if (!verify_module(*opt_mod, &diag_pre)) {
-            res.status = ExecutionStatus::VerificationFailure;
-            res.fault_message = "Verification failed after GVN-PRE: " + diag_pre.format_all();
-            return res;
-        }
-
-        WriteBarrierElimination wbe;
-        wbe.run_on_module(*opt_mod);
-
-        optimize_module(*opt_mod, opt_opts);
-
-        DiagnosticReporter diag;
-        if (!verify_module(*opt_mod, &diag)) {
-            res.status = ExecutionStatus::VerificationFailure;
-            res.fault_message = "Verification failed after Tier 2 optimization: " + diag.format_all();
-            return res;
-        }
-
-        auto jit = std::make_shared<codegen::JitExecutionEngine>(Target::host());
-        jit->register_external_symbol("brass_pgo_inc", reinterpret_cast<void*>(&brass_pgo_inc));
-        jit->register_external_symbol("brass_parallel_for", reinterpret_cast<void*>(&brass_parallel_for));
-        jit->register_external_symbol("fuzz_deopt_exit", reinterpret_cast<void*>(&fuzz_deopt_exit));
-
-        if (!jit->compile_and_load(*opt_mod)) {
-            res.status = ExecutionStatus::CompilationFailure;
-            res.fault_message = "JIT optimized compilation failed";
-            return res;
-        }
-
-        auto res_box = std::make_shared<TierResult>();
-        std::string fn_name_str(fn_name);
-
-        auto worker_task = [jit, res_box, fn_name_str, args]() {
-            auto gc = std::make_unique<MiniCheneyGC>(256 * 1024);
-            MiniCheneyGC* old_gc = brass_get_active_gc();
-            brass_set_active_gc(gc.get());
-            struct GcGuard {
-                MiniCheneyGC* old;
-                ~GcGuard() { brass_set_active_gc(old); }
-            } guard{old_gc};
-
-            std::string fault;
-            bool prot_ok = run_protected([&]() {
-                res_box->value = jit->invoke(fn_name_str, args);
-                res_box->status = ExecutionStatus::Success;
-            }, fault);
-            if (!prot_ok) {
-                res_box->status = ExecutionStatus::CrashOrFault;
-                res_box->fault_message = std::move(fault);
-            }
-        };
-
-        if (!run_with_watchdog(worker_task, options_.timeout_ms)) {
-            res.status = ExecutionStatus::Timeout;
-            res.fault_message = "Watchdog timeout exceeded in JIT optimized";
-        } else {
-            res = std::move(*res_box);
-        }
-    } catch (const std::exception& e) {
-        res.status = ExecutionStatus::CompilationFailure;
-        res.fault_message = std::string("JIT optimized compilation exception: ") + e.what();
-        return res;
-    }
-
-    auto t1 = std::chrono::high_resolution_clock::now();
-    res.duration_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-    return res;
+    return run_jit(*opt.module, fn_name, args, "optimized");
 }
 
-static bool values_match(const RuntimeValue& v1, const RuntimeValue& v2) {
-    if (v1.is_f64()) {
-        double d1 = v1.as_f64();
-        double d2 = v2.as_f64();
-        if (std::isnan(d1)) return std::isnan(d2);
-        return (v1.raw_bits() == v2.raw_bits()) || (std::abs(d1 - d2) < 1e-6);
-    }
-    if (v1.is_f32()) {
-        float f1 = v1.as_f32();
-        float f2 = v2.as_f32();
-        if (std::isnan(f1)) return std::isnan(f2);
-        return (v1.raw_bits() == v2.raw_bits()) || (std::abs(f1 - f2) < 1e-6f);
-    }
-    if (v1.is_vector()) {
-        return v1 == v2;
-    }
-    return v1.raw_bits() == v2.raw_bits();
+std::string DiffFuzzer::bisect_first_bad_step(const Module& mod, std::string_view fn_name,
+                                              const std::vector<RuntimeValue>& args,
+                                              const TierResult& expected, bool use_jit) {
+    std::string bad;
+    optimize(mod, [&](std::string_view step, const Module& cur) {
+        TierResult r = use_jit ? run_jit(cur, fn_name, args, "bisect") : run_tier0_interp(cur, fn_name, args);
+        if (tier_results_match(expected, r)) return true;
+        bad = std::string(step);
+        return false;
+    });
+    // The last step's module is the one that failed, so finding no step
+    // means the failure did not happen again: the answer is nondeterministic.
+    return bad.empty() ? std::string("nondeterministic") : bad;
 }
 
 DiffResult DiffFuzzer::run_test(const Module& mod, std::string_view fn_name,
                                 const std::vector<RuntimeValue>& args, uint64_t seed) {
     DiffResult result;
+    auto fail = [&](std::string cls, std::string reason, std::string pass = {}) {
+        result.passed = false;
+        result.failure_class = std::move(cls);
+        result.failing_pass = std::move(pass);
+        std::ostringstream ss;
+        ss << reason << "\nCLASS: " << result.failure_class
+           << "\nPIPELINE: " << pipeline_name(options_.pipeline);
+        if (!options_.skip_passes.empty()) {
+            ss << "\nSKIP:";
+            for (const std::string& s : options_.skip_passes) ss << ' ' << s;
+        }
+        ss << "\nARGS:";
+        for (const RuntimeValue& a : args) ss << ' ' << static_cast<int64_t>(a.raw_bits());
+        result.mismatch_reason = std::move(reason);
+        result.reproducer_note = ss.str();
+        if (options_.save_reproducers) {
+            result.reproducer_path = save_reproducer(mod, seed, result.reproducer_note, options_.reproducer_dir);
+        }
+        return result;
+    };
 
     DiagnosticReporter ver_diag;
     if (!verify_module(mod, &ver_diag)) {
-        result.passed = false;
-        result.mismatch_reason = "Initial module verification failed: " + ver_diag.format_all();
-        result.reproducer_path = save_reproducer(mod, seed, result.mismatch_reason, options_.reproducer_dir);
-        return result;
+        return fail("generator:invalid", "Initial module verification failed: " + ver_diag.format_all());
     }
 
-    if (options_.tier0_interpreter) {
-        result.tier0_interp = run_tier0_interp(mod, fn_name, args);
+    // The interpreter on the original program is the reference answer.
+    result.tier0_interp = run_tier0_interp(mod, fn_name, args);
+    if (result.tier0_interp.status != ExecutionStatus::Success) {
+        return fail("interp:" + std::string(failure_kind(result.tier0_interp)),
+                    "Tier 0 (Interpreter) failed: " + result.tier0_interp.fault_message);
     }
-    if (options_.tier1_jit_unopt) {
-        result.tier1_jit_unopt = run_tier1_jit_unopt(mod, fn_name, args);
-    }
-    if (options_.tier2_jit_opt) {
-        result.tier2_jit_opt = run_tier2_jit_opt(mod, fn_name, args);
-    }
+    const TierResult& expected = result.tier0_interp;
 
-    // Check status consistency
-    if (options_.tier0_interpreter && result.tier0_interp.status != ExecutionStatus::Success) {
-        result.passed = false;
-        result.mismatch_reason = "Tier 0 (Interpreter) failed: " + result.tier0_interp.fault_message;
-        result.reproducer_path = save_reproducer(mod, seed, result.mismatch_reason, options_.reproducer_dir);
-        return result;
-    }
-
-    if (options_.tier1_jit_unopt && result.tier1_jit_unopt.status != ExecutionStatus::Success) {
-        result.passed = false;
-        result.mismatch_reason = "Tier 1 (JIT unoptimized) failed: " + result.tier1_jit_unopt.fault_message;
-        result.reproducer_path = save_reproducer(mod, seed, result.mismatch_reason, options_.reproducer_dir);
-        return result;
-    }
-
-    if (options_.tier2_jit_opt && result.tier2_jit_opt.status != ExecutionStatus::Success) {
-        result.passed = false;
-        result.mismatch_reason = "Tier 2 (JIT optimized) failed: " + result.tier2_jit_opt.fault_message;
-        result.reproducer_path = save_reproducer(mod, seed, result.mismatch_reason, options_.reproducer_dir);
-        return result;
-    }
-
-    // Compare results between tiers
-    if (options_.tier0_interpreter && options_.tier1_jit_unopt) {
-        if (!values_match(result.tier0_interp.value, result.tier1_jit_unopt.value)) {
-            result.passed = false;
-            std::ostringstream ss;
-            ss << "Mismatch between Tier 0 (Interp=" << result.tier0_interp.value
-               << ") and Tier 1 (JIT unopt=" << result.tier1_jit_unopt.value << ")";
-            result.mismatch_reason = ss.str();
-            result.reproducer_path = save_reproducer(mod, seed, result.mismatch_reason, options_.reproducer_dir);
-            return result;
+    OptimizeOutcome opt;
+    if (options_.tier2_jit_opt || options_.tier3_interp_opt) {
+        opt = optimize(mod);
+        if (!opt.module) {
+            std::string cls = opt.status == ExecutionStatus::VerificationFailure ? "verify"
+                            : opt.status == ExecutionStatus::Timeout ? "pass-timeout" : "pass-fault";
+            result.tier2_jit_opt.status = opt.status;
+            result.tier2_jit_opt.fault_message = opt.message;
+            return fail(cls + "@" + opt.pass, opt.message, opt.pass);
         }
     }
 
-    if (options_.tier1_jit_unopt && options_.tier2_jit_opt) {
-        if (!values_match(result.tier1_jit_unopt.value, result.tier2_jit_opt.value)) {
-            result.passed = false;
-            std::ostringstream ss;
-            ss << "Mismatch between Tier 1 (JIT unopt=" << result.tier1_jit_unopt.value
-               << ") and Tier 2 (JIT opt=" << result.tier2_jit_opt.value << ")";
-            result.mismatch_reason = ss.str();
-            result.reproducer_path = save_reproducer(mod, seed, result.mismatch_reason, options_.reproducer_dir);
-            return result;
+    // Optimizer bugs first: they are platform-independent and cheapest to read.
+    if (options_.tier3_interp_opt) {
+        result.tier3_interp_opt = run_tier0_interp(*opt.module, fn_name, args);
+        if (!tier_results_match(expected, result.tier3_interp_opt)) {
+            std::string pass = options_.bisect ? bisect_first_bad_step(mod, fn_name, args, expected, false) : "?";
+            return fail("interp-opt:" + std::string(failure_kind(result.tier3_interp_opt)) + "@" + pass,
+                        "Tier 3 (Interpreter on optimized) = " + describe(result.tier3_interp_opt) +
+                        ", Tier 0 (Interpreter) = " + describe(expected) + "; first differing step: " + pass,
+                        pass);
+        }
+    }
+
+    if (options_.tier1_jit_unopt) {
+        result.tier1_jit_unopt = run_tier1_jit_unopt(mod, fn_name, args);
+        if (!tier_results_match(expected, result.tier1_jit_unopt)) {
+            // Machine code whose answer changes between runs is a different
+            // bug from one that is consistently wrong; keep them apart.
+            const TierResult again = run_tier1_jit_unopt(mod, fn_name, args);
+            const bool flaky = !tier_results_match(result.tier1_jit_unopt, again);
+            return fail(std::string(flaky ? "jit-unopt-flaky:" : "jit-unopt:") +
+                            std::string(failure_kind(result.tier1_jit_unopt)),
+                        "Tier 1 (JIT unopt) = " + describe(result.tier1_jit_unopt) +
+                        ", Tier 0 (Interpreter) = " + describe(expected));
+        }
+    }
+
+    if (options_.tier2_jit_opt) {
+        result.tier2_jit_opt = run_jit(*opt.module, fn_name, args, "optimized");
+        if (!tier_results_match(expected, result.tier2_jit_opt)) {
+            // Bisecting re-runs the JIT after every step, which only names
+            // the right pass when the answers are reproducible. A program
+            // the unoptimized JIT sometimes gets wrong, or optimized code
+            // that answers differently each run, is a backend bug.
+            for (int k = 0; k < 2; ++k) {
+                const TierResult unopt = run_tier1_jit_unopt(mod, fn_name, args);
+                if (!tier_results_match(expected, unopt)) {
+                    return fail("jit-unopt-flaky:" + std::string(failure_kind(unopt)),
+                                "Tier 1 (JIT unopt) on a re-run = " + describe(unopt) +
+                                    ", Tier 0 (Interpreter) = " + describe(expected));
+                }
+            }
+            const TierResult again = run_jit(*opt.module, fn_name, args, "optimized");
+            if (!tier_results_match(result.tier2_jit_opt, again)) {
+                return fail("jit-opt-flaky:" + std::string(failure_kind(result.tier2_jit_opt)),
+                            "Tier 2 (JIT opt) = " + describe(result.tier2_jit_opt) + ", then " + describe(again) +
+                                ", Tier 0 (Interpreter) = " + describe(expected));
+            }
+            std::string pass = options_.bisect ? bisect_first_bad_step(mod, fn_name, args, expected, true) : "?";
+            return fail("jit-opt:" + std::string(failure_kind(result.tier2_jit_opt)) + "@" + pass,
+                        "Tier 2 (JIT opt) = " + describe(result.tier2_jit_opt) +
+                        ", Tier 0 (Interpreter) = " + describe(expected) + "; first differing step: " + pass,
+                        pass);
         }
     }
 

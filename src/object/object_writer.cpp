@@ -12,6 +12,7 @@
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/verifier.hpp>
 #include <algorithm>
+#include <stdexcept>
 #include <iostream>
 #include <fstream>
 
@@ -140,11 +141,20 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
                 opt_mod->add_external_symbol(sym);
             }
             Function* opt_fn = clone_function(*fn, *opt_mod);
-            optimize_function_loops(*opt_fn, loop_opts);
+            // The optimizer's guarantees hold only for well-formed input;
+            // IR the verifier rejects is lowered as given, unoptimized.
+            const bool input_valid = verify_function(*opt_fn);
+            if (input_valid) optimize_function_loops(*opt_fn, loop_opts);
             opt_fn->rebuild_cfg_predecessors();
             opt_fn->sort_blocks_rpo();
             opt_fn->rebuild_cfg_predecessors();
-            verify_function(*opt_fn);
+            // Lowering broken IR would emit wrong code silently; an
+            // optimizer bug has to surface here instead.
+            DiagnosticReporter diag;
+            if (input_valid && !verify_function(*opt_fn, &diag)) {
+                throw std::runtime_error("MIR loop optimization produced invalid IR for '" +
+                                         std::string(fn->name()) + "':\n" + diag.format_all());
+            }
             fn_to_lower = opt_fn;
         }
 

@@ -58,6 +58,10 @@ struct NestMemoryAccess {
     std::vector<AccessIndexTerm> terms;
     int32_t const_offset = 0;
     uint8_t scale = 1;
+    // False when the index (or the operation itself) is not a sum of
+    // induction-variable terms and constants; nothing is known about the
+    // addresses it touches.
+    bool analyzable = true;
 };
 
 class LoopNest {
