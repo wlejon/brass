@@ -134,6 +134,7 @@ struct TranslatorOptions {
     // the u64 array `__bronze_method_ic_sites` in that order.
     uint32_t ic_site_count = 0;
     std::vector<uint32_t> method_ic_sites;
+    uint32_t template_site_count = 0;
     struct SourceFileMeta {
         uint32_t text_len = 0;
         uint32_t entry_count = 0;

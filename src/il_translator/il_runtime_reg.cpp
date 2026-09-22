@@ -129,6 +129,7 @@ void register_all_runtime_symbols_generic(Engine& jit) {
     reg("bronze_construct_15", reinterpret_cast<void*>(&bronze_construct_15));
     reg("bronze_construct_16", reinterpret_cast<void*>(&bronze_construct_16));
     reg("bronze_construct", reinterpret_cast<void*>(&bronze_construct));
+    reg("bronze_construct_n", reinterpret_cast<void*>(&bronze_construct_n));
     reg("bronze_class_extends", reinterpret_cast<void*>(&bronze_class_extends));
     reg("bronze_super_call", reinterpret_cast<void*>(&bronze_super_call));
     reg("bronze_super_call_0", reinterpret_cast<void*>(&bronze_super_call_0));
@@ -445,6 +446,7 @@ void register_all_module_external_symbols(Module* mod, const std::string& entry_
         "bronze_construct_15",
         "bronze_construct_16",
         "bronze_construct",
+        "bronze_construct_n",
         "bronze_class_extends",
         "bronze_super_call",
         "bronze_super_call_0",

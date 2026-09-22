@@ -152,6 +152,7 @@ int64_t bronze_construct_14(int64_t callee_box, int64_t a0, int64_t a1, int64_t 
 int64_t bronze_construct_15(int64_t callee_box, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6, int64_t a7, int64_t a8, int64_t a9, int64_t a10, int64_t a11, int64_t a12, int64_t a13, int64_t a14);
 int64_t bronze_construct_16(int64_t callee_box, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6, int64_t a7, int64_t a8, int64_t a9, int64_t a10, int64_t a11, int64_t a12, int64_t a13, int64_t a14, int64_t a15);
 int64_t bronze_construct(int64_t callee_box, uint32_t argc, const int64_t* argv);
+int64_t bronze_construct_n(int64_t callee_box, uint32_t argc, const int64_t* argv);
 void bronze_class_extends(int64_t sub_box, int64_t super_box);
 int64_t bronze_super_call(int64_t sub_box, int64_t this_box, uint32_t argc, const int64_t* argv);
 int64_t bronze_super_call_0(int64_t sub_box, int64_t this_box);

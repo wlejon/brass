@@ -34,7 +34,12 @@ static Value* build_call_dynamic(Builder& b, const std::vector<Value*>& dyn_args
         std::string helper = "bronze_call_dynamic_" + std::to_string(argc);
         return b.build_call(helper, Type::i64(), Span<Value* const>(dyn_args.data(), dyn_args.size()));
     }
-    return b.build_iconst_i64(static_cast<int64_t>(kUndefinedTag));
+    Value* argv = b.build_alloca(static_cast<uint32_t>(argc * sizeof(uint64_t)), 8);
+    for (size_t i = 0; i < argc; ++i) {
+        b.build_store(Type::i64(), argv, static_cast<int32_t>(i * sizeof(uint64_t)), dyn_args[2 + i]);
+    }
+    Value* argc_val = b.build_iconst_i32(static_cast<int32_t>(argc));
+    return b.build_call("bronze_call_dynamic_n", Type::i64(), {dyn_args[0], dyn_args[1], argc_val, argv});
 }
 
 bool lower_call_instruction(
@@ -65,12 +70,22 @@ bool lower_call_instruction(
         case BronzeOp::Construct: {
             Value* ctor = ensure_type(get_opd(0), Type::i64());
             uint32_t argc = inst_ast.param_count;
-            std::vector<Value*> call_args = {ctor};
-            for (uint32_t i = 0; i < argc && i < 16; ++i) {
-                call_args.push_back(ensure_type(get_opd(1 + i), Type::i64()));
+            if (argc <= 16) {
+                std::vector<Value*> call_args = {ctor};
+                for (uint32_t i = 0; i < argc; ++i) {
+                    call_args.push_back(ensure_type(get_opd(1 + i), Type::i64()));
+                }
+                std::string helper = "bronze_construct_" + std::to_string(argc);
+                res_val = b.build_call(helper, Type::i64(), call_args);
+            } else {
+                Value* argv = b.build_alloca(static_cast<uint32_t>(argc * sizeof(uint64_t)), 8);
+                for (uint32_t i = 0; i < argc; ++i) {
+                    b.build_store(Type::i64(), argv, static_cast<int32_t>(i * sizeof(uint64_t)),
+                                  ensure_type(get_opd(1 + i), Type::i64()));
+                }
+                Value* argc_val = b.build_iconst_i32(static_cast<int32_t>(argc));
+                res_val = b.build_call("bronze_construct_n", Type::i64(), {ctor, argc_val, argv});
             }
-            std::string helper = "bronze_construct_" + std::to_string(std::min(argc, 16u));
-            res_val = b.build_call(helper, Type::i64(), call_args);
             if (emit_exception_check) emit_exception_check();
             break;
         }
@@ -183,15 +198,21 @@ bool lower_call_instruction(
             Value* base_ctor = ensure_type(get_opd(0), Type::i64());
             Value* this_val = ensure_type(get_opd(1), Type::i64());
             uint32_t argc = inst_ast.param_count;
-            std::vector<Value*> super_args = {base_ctor, this_val};
-            for (size_t a = 0; a < argc; ++a) {
-                super_args.push_back(ensure_type(get_opd(2 + a), Type::i64()));
-            }
             if (argc <= 16) {
+                std::vector<Value*> super_args = {base_ctor, this_val};
+                for (size_t a = 0; a < argc; ++a) {
+                    super_args.push_back(ensure_type(get_opd(2 + a), Type::i64()));
+                }
                 std::string helper = "bronze_super_call_" + std::to_string(argc);
                 res_val = b.build_call(helper, Type::i64(), Span<Value* const>(super_args.data(), super_args.size()));
             } else {
-                res_val = b.build_iconst_i64(static_cast<int64_t>(kUndefinedTag));
+                Value* argv = b.build_alloca(static_cast<uint32_t>(argc * sizeof(uint64_t)), 8);
+                for (size_t a = 0; a < argc; ++a) {
+                    b.build_store(Type::i64(), argv, static_cast<int32_t>(a * sizeof(uint64_t)),
+                                  ensure_type(get_opd(2 + a), Type::i64()));
+                }
+                Value* argc_val = b.build_iconst_i32(static_cast<int32_t>(argc));
+                res_val = b.build_call("bronze_super_call_n", Type::i64(), {base_ctor, this_val, argc_val, argv});
             }
             if (emit_exception_check) emit_exception_check();
             break;

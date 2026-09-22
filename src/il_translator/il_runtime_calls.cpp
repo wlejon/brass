@@ -428,6 +428,10 @@ BRONZE_WEAK int64_t bronze_construct(int64_t callee_box, uint32_t argc, const in
     return bronze_create_object();
 }
 
+BRONZE_WEAK int64_t bronze_construct_n(int64_t callee_box, uint32_t argc, const int64_t* argv) {
+    return bronze_construct(callee_box, argc, argv);
+}
+
 BRONZE_WEAK void bronze_class_extends(int64_t, int64_t) {}
 BRONZE_WEAK int64_t bronze_super_call(int64_t sub_box, int64_t this_box, uint32_t argc, const int64_t* argv) {
     return bronze_call_dynamic_n(sub_box, this_box, argc, argv);
