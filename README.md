@@ -11,13 +11,13 @@ Standalone C++20 library with CMake.
 
 ## Key Features
 
-1. **Precise Moving GC with Values in Registers**: First-class `gcref` tracking in SSA MIR and register allocator, generating compact binary stack maps and runtime stack walking for moving garbage collectors (achieving **3.9x+ speedup** over shadow stacks).
+1. **Precise Moving GC with Values in Registers**: First-class `gcref` tracking in SSA MIR with a hybrid register & stack map design: `gcref` pointers reside directly in native CPU registers during intra-procedural computation (achieving zero-overhead fast paths), and the linear scan allocator precisely spills them to stack slots across calls and safepoint boundaries, generating compact binary stack maps (`BSCM`) for moving GC root relocation without shadow stacks.
 2. **Generational GC, Card Table & TLAB**: Two-generation GC with nursery, survivor, and tenured spaces, 512-byte card table tracking for old-to-young pointers, and lock-free thread-local allocation buffers (`TLAB`).
-3. **Thread-Safe Runtime Patching**: Dynamic patching for Inline Caches (ICs) and call sites on x64 without stopping mutator threads, guaranteed safe via cache-line alignment and hardware memory snooping.
+3. **Thread-Safe Runtime Dynamic Patching**: Dynamic patching for Inline Caches (ICs), call sites (`0xE8`), and near jumps (`0xE9`) on x64/AArch64 without stopping mutator threads, executed via thread-safe atomic 32-bit displacement patching with verified cache-line boundary alignment (`is_cache_line_safe`) and processor memory bus snooping.
 4. **Speculation, Deoptimization & OSR**: Native `guard` checks with out-of-line exit stubs, captured `DeoptFrame` state maps, interior resume tables, and On-Stack Replacement (OSR) migrating interpreter loops into running JIT loops.
 5. **Comprehensive Optimization Pipeline**: Global Value Numbering (GVN & GVN-PRE), Sparse Conditional Constant Propagation (SCCP), SROA, Partial Escape Analysis & Allocation Sinking (PEA), Value Range Analysis & Bounds Check Elimination (BCE), loop unswitching, tiling, fusion, and array contraction.
 6. **SIMD & SLP Vectorization**: Automatic straight-line (SLP) and loop vectorization generating 128-bit SSE (`v128`) and 256-bit AVX2 (`v256`) instructions with hardware FMA contraction.
-7. **Polyhedral Auto-Parallelization**: Polyhedral loop dependence analysis with multithreaded chunk execution via an integrated parallel thread pool.
+7. **Loop Dependence & Auto-Parallelization**: Affine loop dependence analysis (distance and direction vectors with alias analysis disambiguation) with multithreaded chunk execution via the parallel runtime.
 8. **Coroutines & Exception Handling**: Native zero-cost exception handling (`invoke`, `landing_pad`, `throw`, `resume`) and first-class coroutine state-machine lowering (`coro_create`, `coro_suspend`, `coro_resume`).
 9. **Byte-Level Determinism Ratchet**: 100% byte-for-byte deterministic emission of COFF (Win64), ELF64 (Linux/SysV), and Mach-O (macOS) relocatable object files across runs.
 10. **Multi-Format Output & Standalone Linking**: Full Win64 SEH (`.pdata`/`.xdata`), Linux SysV CFI (`.eh_frame`), and built-in PE DLL, ELF `.so`, and Mach-O `.dylib` standalone linkers that produce shared libraries without external linkers.
@@ -26,9 +26,10 @@ Standalone C++20 library with CMake.
 
 ## Performance Bars
 
-- **Native Throughput**: Matches or beats compiled C++ baseline code across numeric loops, prime sieve, Collatz, matrix multiplication, and linked list traversals (within <= 1.3x envelope of Clang -O2).
-- **GC Efficiency**: 3.9x+ faster than explicit shadow-stack tracking by keeping managed pointers directly in native CPU registers with zero runtime GC overhead on fast paths.
+- **Native Throughput**: Matches or beats compiled C++ baseline code across numeric loops, prime sieve, Collatz, matrix multiplication, and linked list traversals (within <= 1.8x envelope of Clang -O2 on naive scalar loops, beating Clang -O2 down to 0.28x-0.70x on vectorized SIMD kernels).
+- **GC Efficiency**: Measured >= 1.25x to 3.9x faster than explicit shadow-stack tracking across GC reference benchmarks by keeping managed pointers directly in native CPU registers with zero runtime GC overhead on fast paths, spilling to stack slots only across calls and safepoints with compact binary stack map tracking.
 - **Determinism**: 100% byte-identical object files verified under scrambled heap allocations.
+- **Compile Throughput**: Sub-second compilation of 6,000+ functions (> 7,000 functions/sec, > 3.2 MB/sec) directly into executable native machine code.
 
 ## Building & Testing
 

@@ -47,28 +47,55 @@ This document audits all optimization passes in Brass, specifying observable flo
 
 ### 2.4. Global Value Numbering & Memory Optimization (`gvn_function`)
 - **Pass Type**: Scoped hash-based GVN with Redundant Load Elimination (RLE) and Dead Store Elimination (DSE).
-- **Behavior**: Evaluates memory SSA versioning to forward unaliased stores to subsequent loads, eliminating redundant memory reads. Traps and volatile boundaries act as memory clobbers.
+- **Dominator-Tree Scoping**: Traverses basic blocks in dominator-tree pre-order, tracking value identities in scoped hash tables.
+- **Redundant Load Elimination (RLE)**: Tracks available memory loads using `AvailableLoadKey` composed of:
+  - `underlying_base`: Canonical base pointer resolved via `AliasAnalysis::get_underlying_base(base, dummy_offset)`.
+  - `total_off`: Offset combining instruction offset and base offset (`off + dummy_offset`).
+  - `mtype`: Loaded memory value type.
+  - `mem_id`: Memory SSA access version identifier.
+  When a dominating load or unaliased store to the same canonical address exists under an identical memory version, redundant loads are replaced with dominating values.
+- **Store Forwarding & Dead Store Elimination (DSE)**: Forwards stored values to subsequent loads without intermediate memory reads, and removes stores that are unconditionally overwritten before any intervening read or clobber.
+- **Memory SSA Barriers**: Function calls, safepoints, volatile memory accesses, and aliasing stores act as clobber boundaries that invalidate affected memory keys.
 - **Flags**: Enabled by default via `LoopOptOptions::enable_gvn = true` / CLI `--gvn`.
 
 ---
 
 ### 2.5. GVN Partial Redundancy Elimination (`gvn_pre_pass`)
 - **Pass Type**: Global Value Numbering with Partial Redundancy Elimination (GVN-PRE).
-- **Behavior**: Identifies partially redundant expressions across CFG join diamonds and inserts computations in predecessor paths to hoist calculations into common predecessors without altering execution paths.
+- **Syntactic & Leader-Based PRE**: Analyzes expressions partially redundant across CFG paths using canonical value leaders from GVN.
+- **Dataflow Analysis**:
+  - Computes `ANT_LOC` (locally anticipated), `TRANSP` (transparent to clobbers), and `AVAIL_LOC` (locally available) for candidate expressions.
+  - Solves backwards anticipability and forwards availability dataflow equations to determine optimal insertion points.
+- **Critical Edge Splitting**: Automatically splits critical edges (`split_critical_edges_for_pre`) by inserting synthetic predecessor blocks, preserving single-entry CFG semantics and preventing speculative execution along non-candidate paths.
+- **Join Synthesis**: Inserts computations on predecessor branches and creates basic block parameters (phi nodes) at join diamonds.
+- **Memory Load-PRE**: Hoists memory loads out of loop headers or across branch diamonds when memory SSA guarantees unaliased transparency along all contributing paths.
 - **Flags**: Opt-in via CLI `--enable-pre` / `--enable-gvn-pre`.
 
 ---
 
 ### 2.6. Sparse Conditional Constant Propagation & Guard Elimination (`sccp_function`)
 - **Pass Type**: Inter-block dataflow lattice propagation.
-- **Behavior**: Propagates constant integers, floats, and branch conditions simultaneously. Eliminates dead CFG branches and folds speculative `guard` instructions whose condition is statically proven true (`cond == 1`).
+- **Lattice Representation**: Three-level lattice per value: $\top$ (Uninitialized), $\text{Constant}(c)$, $\bot$ (Overdefined), alongside executable flags for CFG branch edges.
+- **Branch Pruning & Guard Elimination**: Folds conditional branches with constant conditions, eliminating dead blocks. Folds speculative `guard` instructions proven statically true (`cond == 1`).
+- **Safe Float-to-Int Conversion Bounds**:
+  - Evaluates float-to-signed-integer conversions (`fptosi_i32`, `fptosi_i32_f32`, `fptosi_i64`, `fptosi_i64_f32`).
+  - Strict Boundary Checking: Validates that inputs are non-NaN (`!std::isnan`) and strictly within representable integer ranges:
+    - `i32` target: checks $\text{INT32\_MIN} \le d \le \text{INT32\_MAX}$ (or $< 2147483648.0\text{f}$ for `f32`).
+    - `i64` target: checks $-9223372036854775808.0 \le d < 9223372036854775808.0$.
+  - Out-of-bounds or NaN inputs evaluate to $\bot$ (`LatticeValue::make_bottom(res_type)`), preventing undefined behavior or host CPU trapping during compilation.
 - **Flags**: Enabled by default via `LoopOptOptions::enable_sccp = true` and `LoopOptOptions::enable_guard_elim = true` / CLI `--sccp`, `--guard-elim`.
 
 ---
 
 ### 2.7. Scalar Replacement of Aggregates (`sroa_function`)
 - **Pass Type**: Memory aggregate disintegration into SSA scalar values.
-- **Behavior**: Identifies non-escaping stack allocations and structured memory objects. Replaces struct fields and disjoint memory slots with discrete SSA registers, eliminating heap allocations and pointer indirection.
+- **Behavior**: Analyzes non-escaping stack allocations and structured heap memory. Disintegrates aggregates into discrete scalar fields indexed by byte offset, replacing pointer loads and stores with direct SSA values.
+- **Overlapping Field Rejection**:
+  - Gathers all field access intervals $[start, start + size)$.
+  - For every distinct pair of fields $(1, 2)$, checks for interval overlap:
+    $$\max(start_1, start_2) < \min(start_1 + size_1, start_2 + size_2)$$
+  - If any two field byte ranges overlap, SROA strictly rejects the candidate allocation from promotion. This prevents corruption caused by type-punned memory, union field sharing, or unaligned partial byte slices.
+- **Allocation Pruning**: When all loads from an unescaping aggregate are eliminated or dead, the backing allocation and all remaining dead stores are removed.
 - **Flags**: Gated by `LoopOptOptions::enable_sroa` (default `false`) / CLI `--sroa`.
 
 ---
@@ -132,14 +159,24 @@ This document audits all optimization passes in Brass, specifying observable flo
 
 ### 2.16. Loop Tiling & Cache Blocking (`loop_tile_pass`)
 - **Pass Type**: Polyhedral loop nest transformation.
-- **Behavior**: Tiles multidimensional nested loops into $N \times N$ cache-friendly iteration blocks (default block size 16) and applies loop interchange to optimize CPU L1/L2 cache locality.
+- **Behavior**:
+  - Tiles multidimensional nested loops into $B \times B$ cache-friendly iteration blocks (default block size 16).
+  - Strip-mines outer iteration spaces into tile loops and element loops, then applies loop interchange to ensure inner iterations access contiguous cache lines with stride-1 access patterns.
+  - Improves CPU L1/L2 data cache hit rates and eliminates cache line bouncing.
+  - Dependence Validation: Tiling legality is checked against loop dependence vectors, ensuring no negative distance dependences are inverted.
 - **Flags**: Gated by `LoopOptOptions::enable_loop_tile` (default `false`) / CLI `--loop-tile`.
 
 ---
 
 ### 2.17. Loop Fusion & Loop Distribution (`loop_fusion_pass`, `loop_distribution_pass`)
 - **Pass Type**: Polyhedral loop restructuring.
-- **Behavior**: Loop fusion (jamming) merges adjacent loops with identical trip counts to increase temporal data reuse; loop distribution (fission) splits independent loop statements to expose vectorization opportunities.
+- **Loop Fusion (Jamming)**:
+  - Merges two adjacent counted loops into a single loop body.
+  - Legality Criteria: Loops must be directly adjacent (no intervening side-effecting code), share identical trip counts and iteration domains, and have no backwards loop-carried data dependencies ($L_2 \to L_1$).
+  - Benefits: Promotes temporal cache locality by allowing consumer loops to read data while it remains warm in L1/L2 cache from the producer loop, while eliminating redundant induction variables and branches.
+- **Loop Distribution (Fission)**:
+  - Splits a complex loop containing independent statement groups into separate loops.
+  - Isolates vectorizable or parallelizable statements from operations with dependencies or side-effects.
 - **Flags**: Gated by `LoopOptOptions::enable_loop_fusion` and `enable_loop_distribution` / CLI `--enable-loop-fusion`, `--enable-loop-distribution`.
 
 ---
@@ -151,19 +188,34 @@ This document audits all optimization passes in Brass, specifying observable flo
 
 ---
 
-### 2.19. Polyhedral Auto-Parallelization (`auto_parallelize_function`)
-- **Pass Type**: Multithreaded loop scheduling.
-- **Behavior**: Uses polyhedral distance/direction vector dependence analysis to prove absence of loop-carried dependencies, generating task chunks executed across worker threads via `ParallelRuntime`.
+### 2.19. Loop Dependence Analysis & Auto-Parallelization (`auto_parallelize_function`)
+- **Pass Type**: Affine loop dependence analysis and multithreaded scheduling.
+- **Distance & Direction Vectors**:
+  - For every pair of memory accesses inside nested loops (RAW, WAR, WAW), computes iteration distance vectors ($\vec{d} = (d_1, \dots, d_m)$) and direction vectors ($\vec{D} \in \{=, <, >, \le, \ge, \neq, *\}$).
+- **Alias Analysis Disambiguation**:
+  - Evaluates base pointers using `AliasAnalysis::alias(base1, base2)`.
+  - If pointer bases are proven unaliased (`AliasResult::NoAlias`), no loop-carried dependence exists.
+  - If alias analysis returns `MayAlias` or offsets cannot be proven disjoint, conservative `DependenceDirection::Any` dependences are recorded.
+- **Auto-Parallelization**:
+  - When outer loop carried dependencies are absent ($\vec{d}_0 = 0$ or direction $=$), iterations are proven independent.
+  - Partitions loop trip counts into contiguous chunks executed across worker threads via `brass_parallel_for` and `ParallelRuntime`.
+  - Supports algebraic reductions (Sum, Product, Min, Max for `i64` and `f64`) with thread-local accumulators and tree reduction combiners.
 - **Flags**: Gated by `LoopOptOptions::enable_parallel_loops` (default `false`) / CLI `--enable-parallel-loops`.
 
 ---
 
-### 2.20. Vectorization (SLP & Counted Loop) (`slp_vectorize_function`, `loop_vectorize_pass`)
+### 2.20. Vectorization (Counted Loop & SLP) (`loop_vectorize_pass`, `slp_vectorize_function`)
 - **Pass Type**: SIMD vector code generation (SSE 128-bit and AVX2 256-bit).
-- **Behavior**:
-  - **SLP Vectorization**: Combines independent isomorphic scalar computations into parallel SIMD vector operations (`f32x4`, `f64x2`, `f32x8`, `f64x4`, `i32x4`, etc.).
-  - **Loop Vectorization**: Unrolls counted loops by vector factors (e.g. 4 or 8), generating vector loads, stores, and arithmetic.
-  - Floating-point reduction loops adhere strictly to IEEE serial order unless FP reassociation is explicitly permitted.
+- **Counted Loop Vectorization**:
+  - Unrolls counted loops by vector lane factor $W$ (e.g., 4 for `f32x4` / `i32x4`, 8 for `f32x8`), emitting SIMD vector operations.
+  - **Trip-Count Guard ($N \ge W$)**:
+    - Constructs an explicit trip-count guard in the loop preheader:
+      $$tc = \text{limit} - \text{init} \quad (\text{or } +1 \text{ for } \le)$$
+    - Evaluates validity ($\text{init} < \text{limit}$) and sufficient iterations ($tc \ge W$).
+    - Directs small trip counts ($tc < W$) through a conditional branch (`br_if tc_guard, vec_hdr, vec_exit`) to bypass the vector body completely and enter the scalar epilogue loop.
+    - Eliminates vector underflow, buffer overrun, and memory corruption on small iterations.
+  - **Scalar Epilogue**: Handles tail remainder iterations ($N \bmod W$).
+- **SLP Vectorization**: Combines independent isomorphic scalar computations into parallel SIMD vector operations within basic blocks.
 - **Flags**: Enabled by default via `LoopOptOptions::enable_slp = true`, `enable_vectorize = true` / CLI `--slp`, `--vectorize`.
 
 ---
@@ -225,9 +277,9 @@ This document audits all optimization passes in Brass, specifying observable flo
 | **Constant Folding** | `i32`, `i64`, `f32`, `f64` | Bit-exact IEEE-754 & 2's complement | ON | `LoopOptOptions::enable_dce` |
 | **CSE** | All types | Bit-exact; non-reassociating | ON | `LoopOptOptions::enable_dce` |
 | **DCE** | All types | Prunes dead values & induction cycles | ON | `LoopOptOptions::enable_dce` |
-| **GVN (CSE + RLE + DSE)** | All types | Memory SSA unaliased store forwarding | ON | `LoopOptOptions::enable_gvn` |
-| **GVN-PRE** | All types | Hoists partial redundancies across joins | OFF | CLI `--enable-pre` |
-| **SCCP & Guard Elim** | `i32`, `i64`, `f32`, `f64` | Folds constants & true guards | ON | `LoopOptOptions::enable_sccp` |
+| **GVN (CSE + RLE + DSE)** | All types | Memory SSA unaliased store forwarding & RLE | ON | `LoopOptOptions::enable_gvn` |
+| **GVN-PRE** | All types | Hoists partial redundancies across joins & critical edges | OFF | CLI `--enable-pre` |
+| **SCCP & Guard Elim** | `i32`, `i64`, `f32`, `f64` | Folds constants, true guards & safe float casts | ON | `LoopOptOptions::enable_sccp` |
 | **CFG Simplification** | Control flow | Merges blocks, removes dead code | ON | `LoopOptOptions::enable_cfg_simplify` |
 | **LICM** | All types | Hoists loop-invariant operations | ON | `LoopOptOptions::enable_licm` |
 | **IVSR** | `i32`, `i64` only | Bit-exact modular arithmetic | ON | `LoopOptOptions::enable_ivsr` |
@@ -235,10 +287,10 @@ This document audits all optimization passes in Brass, specifying observable flo
 | **Integer Unroll Jam** | `i32`, `i64` | Bit-exact 2's complement parallel split | ON | `LoopOptOptions::enable_unroll` |
 | **FP Unroll Jam** | `f32`, `f64` | Reassociates IEEE-754 additions | **OFF** (Strict) | `LoopOptOptions::enable_fp_reassociation` |
 | **SLP Vectorization** | `f32`, `f64`, `i32`, `i64` | SIMD isomorphic operation packing | ON | `LoopOptOptions::enable_slp` |
-| **Loop Vectorization** | `f32`, `f64`, `i32`, `i64` | Counted loop vector unrolling | ON | `LoopOptOptions::enable_vectorize` |
+| **Loop Vectorization** | `f32`, `f64`, `i32`, `i64` | Counted loop vector unrolling with $N \ge W$ guard | ON | `LoopOptOptions::enable_vectorize` |
 | **F64 Demotion** | `f64` -> `f32` | Safe precision narrowing | ON | `LoopOptOptions::enable_f64_demote` |
 | **FMA Optimization** | `f32`, `f64`, vectors | Contracts mul+add to hardware FMA | OFF | `LoopOptOptions::enable_fma` |
-| **SROA** | Structs, aggregates | Scalarizes memory into SSA registers | OFF | `LoopOptOptions::enable_sroa` |
+| **SROA** | Structs, aggregates | Scalarizes memory with overlap rejection | OFF | `LoopOptOptions::enable_sroa` |
 | **Range Analysis & BCE** | `i32`, `i64` | Eliminates redundant bounds checks | OFF | `LoopOptOptions::enable_bce` |
 | **PEA & Alloc Sinking** | `gcref`, heap objects | Sinks allocations to cold exit paths | OFF | `LoopOptOptions::enable_allocation_sinking` |
 | **Loop Unswitch** | Loops | Duplicates loop around invariant cond | OFF | `LoopOptOptions::enable_loop_unswitch` |
@@ -246,7 +298,7 @@ This document audits all optimization passes in Brass, specifying observable flo
 | **Loop Tiling & Cache** | Nested loops | Blocks loop nests for cache locality | OFF | `LoopOptOptions::enable_loop_tile` |
 | **Loop Fusion / Fission** | Loops | Merges or splits loop iterations | OFF | `LoopOptOptions::enable_loop_fusion` / `distribution` |
 | **Array Contraction** | Memory buffers | Eliminates intermediate array buffers | OFF | `LoopOptOptions::enable_array_contraction` |
-| **Auto-Parallelization** | Counted loops | Multithreaded chunk dispatch | OFF | `LoopOptOptions::enable_parallel_loops` |
+| **Auto-Parallelization** | Counted loops | Affine loop dependence & parallel chunk dispatch | OFF | `LoopOptOptions::enable_parallel_loops` |
 | **Inlining (Static & Spec)**| Call sites | Inlines call targets, fastpath guards | OFF | CLI `--inline`, `--speculative-inlining` |
 | **Write Barrier Elim** | `gcref` stores | Eliminates redundant card markings | OFF | CLI `--wbe`, `--enable-wbe` |
 | **Instruction Scheduling** | Machine LIR | DAG critical path latency scheduling | ON | `SchedOptions::enable_scheduling` |
