@@ -12,6 +12,10 @@
 
 namespace brass::runtime {
 
+static thread_local brass::Interpreter* t_active_interpreter = nullptr;
+static thread_local const brass::Function* t_active_fn = nullptr;
+static thread_local brass::InterpreterFrame* t_active_frame = nullptr;
+
 OsrCoordinator& OsrCoordinator::instance() {
     static OsrCoordinator s_instance;
     return s_instance;
@@ -19,7 +23,24 @@ OsrCoordinator& OsrCoordinator::instance() {
 
 OsrCoordinator::OsrCoordinator() = default;
 
+void OsrCoordinator::set_active_interpreter(Interpreter* interp) noexcept {
+    t_active_interpreter = interp;
+}
+
+Interpreter* OsrCoordinator::active_interpreter() const noexcept {
+    return t_active_interpreter;
+}
+
+void OsrCoordinator::set_active_frame(InterpreterFrame* frame) noexcept {
+    t_active_frame = frame;
+}
+
+InterpreterFrame* OsrCoordinator::active_frame() const noexcept {
+    return t_active_frame;
+}
+
 void OsrCoordinator::clear_cache() {
+    std::lock_guard<std::mutex> lock(osr_mutex_);
     osr_modules_.clear();
     osr_targets_.clear();
     loop_latches_.clear();
@@ -30,6 +51,7 @@ bool OsrCoordinator::is_loop_backedge(const Function& fn, const BasicBlock* from
     if (!from_bb || !to_bb) return false;
 
     std::string fn_name(fn.name());
+    std::lock_guard<std::mutex> lock(osr_mutex_);
     auto it = backedge_pairs_.find(fn_name);
     if (it == backedge_pairs_.end()) {
         const_cast<Function&>(fn).rebuild_cfg_predecessors();
@@ -72,32 +94,37 @@ bool OsrCoordinator::try_osr_migration(
 
     std::string cache_key = std::string(fn.name()) + "@" + std::to_string(loop_header->id());
     CompiledModule* comp_mod = nullptr;
+    void* osr_entry_addr = nullptr;
+    OsrTarget target;
 
-    auto mod_it = osr_modules_.find(cache_key);
-    if (mod_it != osr_modules_.end()) {
-        comp_mod = mod_it->second.get();
-    } else {
-        if (!fn.parent()) return false;
-        HostEngine engine;
-        auto compiled = engine.compile_with_osr(*fn.parent(), fn.name(), loop_header->id());
-        if (!compiled) {
-            feedback.record_bailout("OSR compilation failed");
+    {
+        std::lock_guard<std::mutex> lock(osr_mutex_);
+        auto mod_it = osr_modules_.find(cache_key);
+        if (mod_it != osr_modules_.end()) {
+            comp_mod = mod_it->second.get();
+        } else {
+            if (!fn.parent()) return false;
+            HostEngine engine;
+            auto compiled = engine.compile_with_osr(*fn.parent(), fn.name(), loop_header->id());
+            if (!compiled) {
+                feedback.record_bailout("OSR compilation failed");
+                return false;
+            }
+            comp_mod = compiled.get();
+            osr_modules_[cache_key] = std::move(compiled);
+
+            OsrTarget t = analyze_osr_target(const_cast<Function&>(fn), loop_header);
+            osr_targets_[cache_key] = std::move(t);
+        }
+
+        if (!comp_mod) return false;
+
+        target = osr_targets_[cache_key];
+        osr_entry_addr = comp_mod->get_osr_entry_address(fn.name());
+        if (!osr_entry_addr) {
+            feedback.record_bailout("OSR entry point not found");
             return false;
         }
-        comp_mod = compiled.get();
-        osr_modules_[cache_key] = std::move(compiled);
-
-        OsrTarget target = analyze_osr_target(const_cast<Function&>(fn), loop_header);
-        osr_targets_[cache_key] = std::move(target);
-    }
-
-    if (!comp_mod) return false;
-
-    const OsrTarget& target = osr_targets_[cache_key];
-    void* osr_entry_addr = comp_mod->get_osr_entry_address(fn.name());
-    if (!osr_entry_addr) {
-        feedback.record_bailout("OSR entry point not found");
-        return false;
     }
 
     // Pack migration frame with live-in values from the interpreter frame
@@ -109,10 +136,14 @@ bool OsrCoordinator::try_osr_migration(
         mig_frame.add_slot(static_cast<uint32_t>(i), val.as_u64());
     }
 
-    // Set active execution context for potential native deoptimization
-    active_interpreter_ = &interp;
-    active_fn_ = &fn;
-    active_frame_ = &frame;
+    // Set active execution context for potential native deoptimization on this thread
+    Interpreter* prev_interp = t_active_interpreter;
+    const Function* prev_fn = t_active_fn;
+    InterpreterFrame* prev_frame = t_active_frame;
+
+    t_active_interpreter = &interp;
+    t_active_fn = &fn;
+    t_active_frame = &frame;
 
     bool deopt_occurred = false;
     RuntimeValue deopt_res;
@@ -124,22 +155,41 @@ bool OsrCoordinator::try_osr_migration(
         TieringFeedback& fb = TieringRegistry::instance().get_or_create(fn.name());
         fb.record_deoptimization();
         std::vector<RuntimeValue> state_vals = dframe.to_runtime_values();
+        const Instruction* g_inst = nullptr;
+        for (const auto* bb : fn.blocks()) {
+            if (!bb) continue;
+            for (const auto* inst : *bb) {
+                if (inst && inst->opcode() == Opcode::guard && inst->resume_id() == dframe.resume_id) {
+                    g_inst = inst;
+                    break;
+                }
+            }
+            if (g_inst) break;
+        }
+        if (g_inst) {
+            for (size_t i = 0; i < g_inst->state_map().size() && i < state_vals.size(); ++i) {
+                const Value* sv = g_inst->state_map()[i];
+                if (sv && sv->type().is_gcref() && !state_vals[i].is_gcref()) {
+                    state_vals[i] = RuntimeValue::from_gcref(state_vals[i].as_u64());
+                }
+            }
+        }
         deopt_res = interp.resume_with_frame(fn, dframe.resume_id, state_vals, frame);
         return reinterpret_cast<void*>(deopt_res.as_u64());
     });
 
     struct HandlerScopeGuard {
         DeoptHandlerFn prev;
-        Interpreter*& cur_interp;
-        const Function*& cur_fn;
-        InterpreterFrame*& cur_frame;
+        Interpreter* prev_interp;
+        const Function* prev_fn;
+        InterpreterFrame* prev_frame;
         ~HandlerScopeGuard() {
             register_deopt_handler(prev);
-            cur_interp = nullptr;
-            cur_fn = nullptr;
-            cur_frame = nullptr;
+            t_active_interpreter = prev_interp;
+            t_active_fn = prev_fn;
+            t_active_frame = prev_frame;
         }
-    } guard{prev_handler, active_interpreter_, active_fn_, active_frame_};
+    } guard{prev_handler, prev_interp, prev_fn, prev_frame};
 
     // Invoke specialized OSR entry stub
     Type ret_t = fn.return_type();
@@ -199,17 +249,39 @@ bool OsrCoordinator::try_osr_migration(
 
 void* OsrCoordinator::handle_native_deopt(const DeoptFrame& deopt_frame) {
     total_native_deopts_++;
-    if (active_fn_) {
-        TieringFeedback& fb = TieringRegistry::instance().get_or_create(active_fn_->name());
+    const Function* cur_fn = t_active_fn;
+    Interpreter* cur_interp = t_active_interpreter;
+    InterpreterFrame* cur_frame = t_active_frame;
+    if (cur_fn) {
+        TieringFeedback& fb = TieringRegistry::instance().get_or_create(cur_fn->name());
         fb.record_deoptimization();
     }
-    if (active_interpreter_ && active_fn_) {
+    if (cur_interp && cur_fn) {
         std::vector<RuntimeValue> state_vals = deopt_frame.to_runtime_values();
+        const Instruction* g_inst = nullptr;
+        for (const auto* bb : cur_fn->blocks()) {
+            if (!bb) continue;
+            for (const auto* inst : *bb) {
+                if (inst && inst->opcode() == Opcode::guard && inst->resume_id() == deopt_frame.resume_id) {
+                    g_inst = inst;
+                    break;
+                }
+            }
+            if (g_inst) break;
+        }
+        if (g_inst) {
+            for (size_t i = 0; i < g_inst->state_map().size() && i < state_vals.size(); ++i) {
+                const Value* sv = g_inst->state_map()[i];
+                if (sv && sv->type().is_gcref() && !state_vals[i].is_gcref()) {
+                    state_vals[i] = RuntimeValue::from_gcref(state_vals[i].as_u64());
+                }
+            }
+        }
         RuntimeValue res;
-        if (active_frame_) {
-            res = active_interpreter_->resume_with_frame(*active_fn_, deopt_frame.resume_id, state_vals, *active_frame_);
+        if (cur_frame) {
+            res = cur_interp->resume_with_frame(*cur_fn, deopt_frame.resume_id, state_vals, *cur_frame);
         } else {
-            res = active_interpreter_->resume(*active_fn_, deopt_frame.resume_id, state_vals);
+            res = cur_interp->resume(*cur_fn, deopt_frame.resume_id, state_vals);
         }
         return reinterpret_cast<void*>(res.as_u64());
     }

@@ -53,6 +53,9 @@ public:
     [[nodiscard]] void* patch_point() const noexcept { return patch_point_; }
     void set_patch_point(void* addr) noexcept { patch_point_ = addr; }
 
+    [[nodiscard]] void* slot_patch_point() const noexcept { return slot_patch_point_; }
+    void set_slot_patch_point(void* addr) noexcept { slot_patch_point_ = addr; }
+
     [[nodiscard]] std::string_view patch_site_name() const noexcept { return patch_site_name_; }
     void set_patch_site_name(std::string name) noexcept { patch_site_name_ = std::move(name); }
 
@@ -90,6 +93,7 @@ private:
 
     void* call_site_address_ = nullptr;
     void* patch_point_ = nullptr;
+    void* slot_patch_point_ = nullptr;
     std::string patch_site_name_;
 };
 

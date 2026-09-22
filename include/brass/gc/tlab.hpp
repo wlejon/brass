@@ -15,6 +15,7 @@ struct ThreadLocalAllocBuffer {
     size_t default_size = 64 * 1024; // Default chunk refill size (64 KB)
 
     void init(HostGC* gc, size_t default_sz = 64 * 1024);
+    ~ThreadLocalAllocBuffer();
     void refill(size_t min_bytes);
     void reset();
     uintptr_t allocate_fast(size_t size, uint64_t pointer_mask = 0, uint32_t type_tag = 0);
@@ -41,5 +42,7 @@ extern "C" {
 uintptr_t brass_tlab_refill(size_t min_bytes);
 uintptr_t* brass_tlab_top_ptr() noexcept;
 uintptr_t* brass_tlab_end_ptr() noexcept;
+uintptr_t* brass_current_thread_tlab_top() noexcept;
+uintptr_t* brass_current_thread_tlab_end() noexcept;
 
 }

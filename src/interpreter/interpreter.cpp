@@ -60,16 +60,28 @@ RuntimeValue Interpreter::resume_with_frame(const Function& fn, uint32_t resume_
         if (guard_inst) break;
     }
 
+    size_t val_idx = 0;
     if (guard_inst) {
-        for (size_t i = 0; i < guard_inst->state_map().size() && i < state_values.size(); ++i) {
+        for (size_t i = 0; i < guard_inst->state_map().size() && val_idx < state_values.size(); ++i, ++val_idx) {
             const Value* sv = guard_inst->state_map()[i];
             if (sv) {
-                frame.set_value(sv, state_values[i]);
+                RuntimeValue rv = state_values[val_idx];
+                if (sv->type().is_gcref() && !rv.is_gcref()) {
+                    rv = RuntimeValue::from_gcref(rv.as_u64());
+                }
+                frame.set_value(sv, rv);
             }
         }
     }
-    for (size_t i = 0; i < target_bb->param_count() && i < state_values.size(); ++i) {
-        frame.set_value(target_bb->param(i), state_values[i]);
+    for (size_t p = 0; p < target_bb->param_count() && val_idx < state_values.size(); ++p, ++val_idx) {
+        const Value* pv = target_bb->param(p);
+        if (pv) {
+            RuntimeValue rv = state_values[val_idx];
+            if (pv->type().is_gcref() && !rv.is_gcref()) {
+                rv = RuntimeValue::from_gcref(rv.as_u64());
+            }
+            frame.set_value(pv, rv);
+        }
     }
 
     return execute_function_from_block(fn, target_bb, {}, &frame);

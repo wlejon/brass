@@ -12,7 +12,22 @@ bool patch_monomorphic_ic(
     uint32_t slot,
     PatchRegistry* patch_registry
 ) {
-    (void)slot;
+    if (!shape) {
+        return false;
+    }
+
+    std::optional<uint32_t> prop_slot;
+    if (!ic.prop_name().empty()) {
+        prop_slot = shape->find_slot(ic.prop_name());
+    } else if (ic.symbol_id() != 0) {
+        prop_slot = shape->find_slot(ic.symbol_id());
+    }
+    if (prop_slot.has_value()) {
+        slot = *prop_slot;
+    } else if (!ic.prop_name().empty() || ic.symbol_id() != 0) {
+        return false;
+    }
+
     bool success = true;
 
     // 1. If direct patch point address is set for cached shape comparison
@@ -20,11 +35,24 @@ bool patch_monomorphic_ic(
         success = brass_patch_const64(ic.patch_point(), reinterpret_cast<int64_t>(shape)) && success;
     }
 
-    // 2. If registered in a PatchRegistry by name
-    if (patch_registry != nullptr && !ic.patch_site_name().empty() && shape != nullptr) {
-        std::string shape_site = std::string(ic.patch_site_name()) + "_shape";
-        if (patch_registry->has_site(shape_site)) {
-            success = patch_registry->patch_const64(nullptr, shape_site, reinterpret_cast<int64_t>(shape)) && success;
+    // 2. If direct patch point address is set for property slot displacement
+    if (ic.slot_patch_point() != nullptr) {
+        int32_t disp = static_cast<int32_t>(offsetof(DynamicObject, inline_slots) + slot * sizeof(uint64_t));
+        success = brass_patch_const32(ic.slot_patch_point(), disp) && success;
+    }
+
+    // 3. If registered in a PatchRegistry by name
+    if (patch_registry != nullptr && !ic.patch_site_name().empty()) {
+        if (shape != nullptr) {
+            std::string shape_site = std::string(ic.patch_site_name()) + "_shape";
+            if (patch_registry->has_site(shape_site)) {
+                success = patch_registry->patch_const64(nullptr, shape_site, reinterpret_cast<int64_t>(shape)) && success;
+            }
+        }
+        std::string slot_site = std::string(ic.patch_site_name()) + "_slot";
+        if (patch_registry->has_site(slot_site)) {
+            int32_t disp = static_cast<int32_t>(offsetof(DynamicObject, inline_slots) + slot * sizeof(uint64_t));
+            success = patch_registry->patch_const32(nullptr, slot_site, disp) && success;
         }
     }
 

@@ -180,14 +180,12 @@ extern "C" {
 // 7. Win64 SEH scope table emitter and personality routine
 void emit_win64_seh_scope_table(object::Section& xdata_sec, const FunctionExceptionTable& table);
 
-#if defined(_WIN32)
 extern "C" int brass_seh_personality(
     void* ExceptionRecord,
     void* EstablisherFrame,
     void* ContextRecord,
     void* DispatcherContext
 );
-#endif
 
 // 8. SysV DWARF LSDA emitter
 void emit_sysv_lsda(object::Section& lsda_sec, const FunctionExceptionTable& table);

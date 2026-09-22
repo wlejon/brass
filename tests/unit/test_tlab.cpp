@@ -205,9 +205,9 @@ TEST_CASE("TLAB - Inlined SSA Diamond Generation in AllocLoweringHelper") {
 
     for (BasicBlock* bb : fn->blocks()) {
         for (Instruction* inst : *bb) {
-            if (inst->opcode() == Opcode::func_addr) {
-                if (inst->symbol() == "brass_tlab_top") has_top_load = true;
-                if (inst->symbol() == "brass_tlab_end") has_end_load = true;
+            if (inst->opcode() == Opcode::func_addr || inst->opcode() == Opcode::call) {
+                if (inst->symbol() == "brass_tlab_top" || inst->symbol() == "brass_current_thread_tlab_top") has_top_load = true;
+                if (inst->symbol() == "brass_tlab_end" || inst->symbol() == "brass_current_thread_tlab_end") has_end_load = true;
             }
             if (inst->opcode() == Opcode::ule) {
                 has_ule = true;

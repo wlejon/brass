@@ -349,8 +349,8 @@ Value* AllocLoweringHelper::lower_create_object_brass(Builder& b) {
 
     constexpr size_t TOTAL_SIZE = DYNAMIC_OBJECT_TOTAL; // 128 bytes
 
-    Value* top_ptr = b.build_func_addr("brass_tlab_top");
-    Value* end_ptr = b.build_func_addr("brass_tlab_end");
+    Value* top_ptr = b.build_call("brass_current_thread_tlab_top", Type::ptr());
+    Value* end_ptr = b.build_call("brass_current_thread_tlab_end", Type::ptr());
     Value* cur_top = b.build_load(Type::i64(), top_ptr, 0);
     Value* cur_end = b.build_load(Type::i64(), end_ptr, 0);
 
@@ -429,8 +429,8 @@ Value* AllocLoweringHelper::lower_create_array_brass(Builder& b, Value* size_val
     constexpr size_t BUF_TOTAL = HOSTGC_HEADER_SIZE + BUF_PAYLOAD; // 96 bytes
     constexpr size_t TOTAL_SIZE = OBJ_TOTAL + BUF_TOTAL; // 224 bytes
 
-    Value* top_ptr = b.build_func_addr("brass_tlab_top");
-    Value* end_ptr = b.build_func_addr("brass_tlab_end");
+    Value* top_ptr = b.build_call("brass_current_thread_tlab_top", Type::ptr());
+    Value* end_ptr = b.build_call("brass_current_thread_tlab_end", Type::ptr());
     Value* cur_top = b.build_load(Type::i64(), top_ptr, 0);
     Value* cur_end = b.build_load(Type::i64(), end_ptr, 0);
 
@@ -513,8 +513,8 @@ Value* AllocLoweringHelper::lower_env_create_brass(Builder& b, Value* parent_val
     size_t alloc_size = (param_count <= 1) ? 24 : (16 + static_cast<size_t>(param_count) * 8);
     size_t total_size = HOSTGC_HEADER_SIZE + alloc_size;
 
-    Value* top_ptr = b.build_func_addr("brass_tlab_top");
-    Value* end_ptr = b.build_func_addr("brass_tlab_end");
+    Value* top_ptr = b.build_call("brass_current_thread_tlab_top", Type::ptr());
+    Value* end_ptr = b.build_call("brass_current_thread_tlab_end", Type::ptr());
     Value* cur_top = b.build_load(Type::i64(), top_ptr, 0);
     Value* cur_end = b.build_load(Type::i64(), end_ptr, 0);
 

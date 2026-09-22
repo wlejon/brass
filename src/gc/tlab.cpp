@@ -24,6 +24,13 @@ void ThreadLocalAllocBuffer::init(HostGC* gc, size_t default_sz) {
     }
 }
 
+ThreadLocalAllocBuffer::~ThreadLocalAllocBuffer() {
+    if (owner_gc) {
+        owner_gc->unregister_tlab(this);
+        owner_gc = nullptr;
+    }
+}
+
 void ThreadLocalAllocBuffer::refill(size_t min_bytes) {
     if (!owner_gc || owner_gc->stress_mode()) {
         reset();
@@ -126,6 +133,14 @@ uintptr_t* brass_tlab_top_ptr() noexcept {
 uintptr_t* brass_tlab_end_ptr() noexcept {
     auto* tlab = brass::get_active_tlab();
     return tlab ? &tlab->end : &brass::s_fallback_zero;
+}
+
+uintptr_t* brass_current_thread_tlab_top() noexcept {
+    return brass_tlab_top_ptr();
+}
+
+uintptr_t* brass_current_thread_tlab_end() noexcept {
+    return brass_tlab_end_ptr();
 }
 
 }

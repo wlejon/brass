@@ -531,6 +531,14 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
                     enc_.call(inst.exit_symbol);
                 }
 
+                if (fn_.return_type.kind() == TypeKind::F64) {
+                    enc_.movq(XMM::XMM0, GPR::RAX);
+                } else if (fn_.return_type.kind() == TypeKind::F32) {
+                    enc_.movd(XMM::XMM0, GPR::RAX);
+                } else if (fn_.return_type.is_v128()) {
+                    enc_.movq(XMM::XMM0, GPR::RAX);
+                }
+
                 codegen::FrameInfo mutable_frame = fn_.frame;
                 X64FrameLayout::compute_layout(mutable_frame, fn_.calling_conv);
                 X64FrameLayout::emit_epilogue(enc_, mutable_frame, fn_.calling_conv);
@@ -545,6 +553,14 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
                     enc_.ud2();
                     buffer_.bind(handle_ok);
                 }
+                if (fn_.return_type.kind() == TypeKind::F64) {
+                    enc_.movq(XMM::XMM0, GPR::RAX);
+                } else if (fn_.return_type.kind() == TypeKind::F32) {
+                    enc_.movd(XMM::XMM0, GPR::RAX);
+                } else if (fn_.return_type.is_v128()) {
+                    enc_.movq(XMM::XMM0, GPR::RAX);
+                }
+
                 codegen::FrameInfo mutable_frame = fn_.frame;
                 X64FrameLayout::compute_layout(mutable_frame, fn_.calling_conv);
                 X64FrameLayout::emit_epilogue(enc_, mutable_frame, fn_.calling_conv);

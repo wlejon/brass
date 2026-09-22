@@ -27,9 +27,11 @@ std::string_view to_string(DeoptValueKind kind) noexcept {
     switch (kind) {
         case DeoptValueKind::Int32: return "Int32";
         case DeoptValueKind::Int64: return "Int64";
+        case DeoptValueKind::Float32: return "Float32";
         case DeoptValueKind::Float64: return "Float64";
         case DeoptValueKind::Pointer: return "Pointer";
         case DeoptValueKind::GcRef: return "GcRef";
+        case DeoptValueKind::Boolean: return "Boolean";
         default: return "Unknown";
     }
 }
@@ -44,12 +46,16 @@ RuntimeValue DeoptValue::to_runtime_value() const {
             return RuntimeValue::from_i32(as_i32());
         case DeoptValueKind::Int64:
             return RuntimeValue::from_i64(as_i64());
+        case DeoptValueKind::Float32:
+            return RuntimeValue::from_f32(as_f32());
         case DeoptValueKind::Float64:
             return RuntimeValue::from_f64(as_f64());
         case DeoptValueKind::Pointer:
             return RuntimeValue::from_ptr(as_ptr());
         case DeoptValueKind::GcRef:
             return RuntimeValue::from_gcref(as_gcref());
+        case DeoptValueKind::Boolean:
+            return RuntimeValue::from_i32(as_bool() ? 1 : 0);
         default:
             return RuntimeValue::from_i64(as_i64());
     }
@@ -60,6 +66,8 @@ DeoptValue DeoptValue::from_runtime_value(const RuntimeValue& rv) {
         return DeoptValue::i32(rv.as_i32());
     } else if (rv.is_i64()) {
         return DeoptValue::i64(rv.as_i64());
+    } else if (rv.is_f32()) {
+        return DeoptValue::f32(rv.as_f32());
     } else if (rv.is_f64()) {
         return DeoptValue::f64(rv.as_f64());
     } else if (rv.is_ptr()) {
@@ -117,7 +125,7 @@ void brass_set_thread_deopt_frame(const brass::runtime::DeoptFrame* frame) {
     brass::runtime::set_thread_deopt_frame(frame);
 }
 
-void* brass_deopt_exit(uint32_t resume_id, uint32_t reason, uint32_t count, const uint64_t* raw_slots) {
+void* brass_deopt_exit_typed(uint32_t resume_id, uint32_t reason, uint32_t count, const uint64_t* raw_slots, const uint8_t* raw_kinds) {
     auto* frame = brass::runtime::get_thread_deopt_frame();
     frame->clear();
     frame->resume_id = resume_id;
@@ -127,7 +135,11 @@ void* brass_deopt_exit(uint32_t resume_id, uint32_t reason, uint32_t count, cons
     if (raw_slots) {
         for (size_t i = 0; i < frame->count; ++i) {
             frame->slots[i] = raw_slots[i];
-            frame->kinds[i] = brass::runtime::DeoptValueKind::Int64;
+            if (raw_kinds) {
+                frame->kinds[i] = static_cast<brass::runtime::DeoptValueKind>(raw_kinds[i]);
+            } else {
+                frame->kinds[i] = brass::runtime::DeoptValueKind::Int64;
+            }
         }
     }
 
@@ -136,6 +148,10 @@ void* brass_deopt_exit(uint32_t resume_id, uint32_t reason, uint32_t count, cons
         return handler(*frame);
     }
     return nullptr;
+}
+
+void* brass_deopt_exit(uint32_t resume_id, uint32_t reason, uint32_t count, const uint64_t* raw_slots) {
+    return brass_deopt_exit_typed(resume_id, reason, count, raw_slots, nullptr);
 }
 
 }

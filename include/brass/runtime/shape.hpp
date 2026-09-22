@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <optional>
 
 namespace brass::runtime {
@@ -108,14 +109,11 @@ public:
     void add_transition(std::string_view name, Shape* child);
     void add_transition(uint32_t symbol_id, Shape* child);
 
-    [[nodiscard]] const std::unordered_map<std::string, Shape*>& string_transitions() const noexcept {
-        return string_transitions_;
-    }
-    [[nodiscard]] const std::unordered_map<uint32_t, Shape*>& symbol_transitions() const noexcept {
-        return symbol_transitions_;
-    }
+    [[nodiscard]] std::unordered_map<std::string, Shape*> string_transitions() const;
+    [[nodiscard]] std::unordered_map<uint32_t, Shape*> symbol_transitions() const;
 
 private:
+    mutable std::shared_mutex shape_mutex_;
     uint32_t id_ = 0;
     Shape* parent_ = nullptr;
     PropertyDescriptor transition_property_;

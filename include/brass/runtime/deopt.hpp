@@ -33,7 +33,9 @@ enum class DeoptValueKind : uint8_t {
     Int64 = 1,
     Float64 = 2,
     Pointer = 3,
-    GcRef = 4
+    GcRef = 4,
+    Float32 = 5,
+    Boolean = 6
 };
 
 std::string_view to_string(DeoptValueKind kind) noexcept;
@@ -54,6 +56,12 @@ struct DeoptValue {
         return DeoptValue(DeoptValueKind::Int64, static_cast<uint64_t>(v));
     }
 
+    static DeoptValue f32(float v) noexcept {
+        uint32_t bits = 0;
+        std::memcpy(&bits, &v, sizeof(float));
+        return DeoptValue(DeoptValueKind::Float32, static_cast<uint64_t>(bits));
+    }
+
     static DeoptValue f64(double v) noexcept {
         uint64_t bits = 0;
         std::memcpy(&bits, &v, sizeof(double));
@@ -68,6 +76,10 @@ struct DeoptValue {
         return DeoptValue(DeoptValueKind::GcRef, static_cast<uint64_t>(v));
     }
 
+    static constexpr DeoptValue boolean(bool v) noexcept {
+        return DeoptValue(DeoptValueKind::Boolean, v ? 1ULL : 0ULL);
+    }
+
     int32_t as_i32() const noexcept {
         return static_cast<int32_t>(static_cast<uint32_t>(raw & 0xFFFFFFFFULL));
     }
@@ -76,10 +88,21 @@ struct DeoptValue {
         return static_cast<int64_t>(raw);
     }
 
+    float as_f32() const noexcept {
+        uint32_t bits = static_cast<uint32_t>(raw & 0xFFFFFFFFULL);
+        float f = 0.0f;
+        std::memcpy(&f, &bits, sizeof(float));
+        return f;
+    }
+
     double as_f64() const noexcept {
         double d = 0.0;
         std::memcpy(&d, &raw, sizeof(double));
         return d;
+    }
+
+    bool as_bool() const noexcept {
+        return raw != 0;
     }
 
     uintptr_t as_ptr() const noexcept {
@@ -170,6 +193,7 @@ extern "C" {
     brass::runtime::DeoptFrame* brass_get_thread_deopt_frame();
     void brass_set_thread_deopt_frame(const brass::runtime::DeoptFrame* frame);
     void* brass_deopt_exit(uint32_t resume_id, uint32_t reason, uint32_t count, const uint64_t* raw_slots);
+    void* brass_deopt_exit_typed(uint32_t resume_id, uint32_t reason, uint32_t count, const uint64_t* raw_slots, const uint8_t* raw_kinds);
 }
 
 namespace brass::runtime {
@@ -177,6 +201,7 @@ namespace brass::runtime {
 using ::brass_get_thread_deopt_frame;
 using ::brass_set_thread_deopt_frame;
 using ::brass_deopt_exit;
+using ::brass_deopt_exit_typed;
 
 using DeoptHandlerFn = std::function<void*(const DeoptFrame&)>;
 

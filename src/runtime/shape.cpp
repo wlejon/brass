@@ -36,6 +36,7 @@ Shape::Shape(uint32_t id, Shape* parent, PropertyDescriptor transition_prop, uin
 }
 
 const PropertyDescriptor* Shape::find_property(std::string_view name) const noexcept {
+    std::shared_lock<std::shared_mutex> lock(shape_mutex_);
     auto it = name_to_prop_idx_.find(std::string(name));
     if (it != name_to_prop_idx_.end()) {
         return &properties_[it->second];
@@ -44,6 +45,7 @@ const PropertyDescriptor* Shape::find_property(std::string_view name) const noex
 }
 
 const PropertyDescriptor* Shape::find_property(uint32_t symbol_id) const noexcept {
+    std::shared_lock<std::shared_mutex> lock(shape_mutex_);
     auto it = symbol_to_prop_idx_.find(symbol_id);
     if (it != symbol_to_prop_idx_.end()) {
         return &properties_[it->second];
@@ -76,6 +78,7 @@ std::optional<uint32_t> Shape::find_slot_slow(uint32_t symbol_id) const noexcept
 }
 
 Shape* Shape::find_transition(std::string_view name) const noexcept {
+    std::shared_lock<std::shared_mutex> lock(shape_mutex_);
     auto it = string_transitions_.find(std::string(name));
     if (it != string_transitions_.end()) {
         return it->second;
@@ -84,14 +87,20 @@ Shape* Shape::find_transition(std::string_view name) const noexcept {
 }
 
 Shape* Shape::find_transition(uint32_t symbol_id) const noexcept {
+    std::shared_lock<std::shared_mutex> lock(shape_mutex_);
     if (symbol_id < FAST_SYMBOL_CAP) {
         Shape* trans = fast_symbol_transitions_[symbol_id];
         if (trans != nullptr) return trans;
     }
-    return find_transition_slow(symbol_id);
+    auto it = symbol_transitions_.find(symbol_id);
+    if (it != symbol_transitions_.end()) {
+        return it->second;
+    }
+    return nullptr;
 }
 
 Shape* Shape::find_transition_slow(uint32_t symbol_id) const noexcept {
+    std::shared_lock<std::shared_mutex> lock(shape_mutex_);
     auto it = symbol_transitions_.find(symbol_id);
     if (it != symbol_transitions_.end()) {
         return it->second;
@@ -101,17 +110,29 @@ Shape* Shape::find_transition_slow(uint32_t symbol_id) const noexcept {
 
 void Shape::add_transition(std::string_view name, Shape* child) {
     if (!name.empty() && child != nullptr) {
+        std::unique_lock<std::shared_mutex> lock(shape_mutex_);
         string_transitions_[std::string(name)] = child;
     }
 }
 
 void Shape::add_transition(uint32_t symbol_id, Shape* child) {
     if (symbol_id != 0 && child != nullptr) {
+        std::unique_lock<std::shared_mutex> lock(shape_mutex_);
         if (symbol_id < FAST_SYMBOL_CAP) {
             fast_symbol_transitions_[symbol_id] = child;
         }
         symbol_transitions_[symbol_id] = child;
     }
+}
+
+std::unordered_map<std::string, Shape*> Shape::string_transitions() const {
+    std::shared_lock<std::shared_mutex> lock(shape_mutex_);
+    return string_transitions_;
+}
+
+std::unordered_map<uint32_t, Shape*> Shape::symbol_transitions() const {
+    std::shared_lock<std::shared_mutex> lock(shape_mutex_);
+    return symbol_transitions_;
 }
 
 ShapeRegistry::ShapeRegistry() {

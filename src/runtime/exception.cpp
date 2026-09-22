@@ -269,6 +269,8 @@ extern "C" BRASS_NOINLINE_NOFP void brass_throw_impl(
 
     auto& registry = get_global_exception_registry();
 
+    SavedRegisters current_regs = regs ? *regs : SavedRegisters{};
+
     // Walk call stack via RBP frame chaining
     while (cur_rbp != 0 && cur_ip != 0) {
         uintptr_t fn_start = 0;
@@ -285,7 +287,7 @@ extern "C" BRASS_NOINLINE_NOFP void brass_throw_impl(
             void* target_rsp = reinterpret_cast<void*>(target_rsp_val);
 #endif
 
-            brass_jump_to_landing_pad(landing_pad_ip, target_rbp, target_rsp, val, *regs);
+            brass_jump_to_landing_pad(landing_pad_ip, target_rbp, target_rsp, val, current_regs);
         }
 
         // Check if cur_ip belongs to a registered Brass function
@@ -293,6 +295,55 @@ extern "C" BRASS_NOINLINE_NOFP void brass_throw_impl(
         if (!cur_fn) {
             // Reached non-Brass frame (host code). Stop walking.
             break;
+        }
+
+        // Restore intermediate callee-saved registers preserved by cur_fn on its stack
+        uint32_t gpr_mask = cur_fn->saved_callee_gprs();
+        if (gpr_mask != 0) {
+#if defined(__aarch64__) || defined(_M_ARM64)
+            size_t slot_idx = 0;
+            for (int i = 19; i <= 28; ++i) {
+                if (gpr_mask & (1u << i)) {
+                    int64_t disp = 16 + static_cast<int64_t>(slot_idx * 8);
+                    uint64_t saved_val = *reinterpret_cast<const uint64_t*>(cur_rbp + disp);
+                    switch (i) {
+                        case 19: current_regs.x19 = saved_val; break;
+                        case 20: current_regs.x20 = saved_val; break;
+                        case 21: current_regs.x21 = saved_val; break;
+                        case 22: current_regs.x22 = saved_val; break;
+                        case 23: current_regs.x23 = saved_val; break;
+                        case 24: current_regs.x24 = saved_val; break;
+                        case 25: current_regs.x25 = saved_val; break;
+                        case 26: current_regs.x26 = saved_val; break;
+                        case 27: current_regs.x27 = saved_val; break;
+                        case 28: current_regs.x28 = saved_val; break;
+                        default: break;
+                    }
+                    slot_idx++;
+                }
+            }
+#else
+            size_t slot_idx = 0;
+            for (int i = 0; i < 16; ++i) {
+                if (gpr_mask & (1u << i)) {
+                    if (i != 4 && i != 5) {
+                        int32_t disp = -static_cast<int32_t>((slot_idx + 1) * 8);
+                        uint64_t saved_val = *reinterpret_cast<const uint64_t*>(cur_rbp + disp);
+                        switch (i) {
+                            case 15: current_regs.r15 = saved_val; break;
+                            case 14: current_regs.r14 = saved_val; break;
+                            case 13: current_regs.r13 = saved_val; break;
+                            case 12: current_regs.r12 = saved_val; break;
+                            case 7:  current_regs.rdi = saved_val; break;
+                            case 6:  current_regs.rsi = saved_val; break;
+                            case 3:  current_regs.rbx = saved_val; break;
+                            default: break;
+                        }
+                        slot_idx++;
+                    }
+                }
+            }
+#endif
         }
 
         auto* rbp_ptr = reinterpret_cast<uintptr_t*>(cur_rbp);
