@@ -63,6 +63,8 @@ private:
     size_t next_spill_slot_ = 0;
 
     std::unordered_map<uint32_t, std::vector<VReg>> coalesce_hints_;
+    std::unordered_map<uint32_t, std::vector<PReg>> fixed_preg_hints_;
+    std::unordered_multimap<uint64_t, PReg> vreg_at_preg_hints_;
 
     // The instructions that can block a register for an interval covering
     // them — any with a clobber mask, a physical-register operand, or a fixed

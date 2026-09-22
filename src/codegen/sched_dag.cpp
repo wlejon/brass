@@ -37,8 +37,6 @@ bool instruction_defines_flags(const LirInst& inst) noexcept {
         case LirOpcode::Or32:
         case LirOpcode::Xor:
         case LirOpcode::Xor32:
-        case LirOpcode::Not:
-        case LirOpcode::Not32:
         case LirOpcode::Neg:
         case LirOpcode::Neg32:
         case LirOpcode::Shl:

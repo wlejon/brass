@@ -264,6 +264,34 @@ std::vector<uint8_t> CoffWriter::write() {
         write_u32(out, chars);
     }
 
+    // Patch inline addends into section data for COFF relocations
+    for (auto& sec : working_obj.sections) {
+        for (const auto& r : sec.relocations) {
+            if (r.addend != 0) {
+                if (r.kind == RelocKind::Addr32NB || r.kind == RelocKind::PCRel32 ||
+                    r.kind == RelocKind::SecRel32 || r.kind == RelocKind::Abs32) {
+                    if (r.offset + 4 <= sec.data.size()) {
+                        uint32_t current_val = 0;
+                        std::memcpy(&current_val, sec.data.data() + r.offset, sizeof(uint32_t));
+                        if (current_val == 0) {
+                            uint32_t addend_val = static_cast<uint32_t>(r.addend);
+                            std::memcpy(sec.data.data() + r.offset, &addend_val, sizeof(uint32_t));
+                        }
+                    }
+                } else if (r.kind == RelocKind::Abs64) {
+                    if (r.offset + 8 <= sec.data.size()) {
+                        uint64_t current_val = 0;
+                        std::memcpy(&current_val, sec.data.data() + r.offset, sizeof(uint64_t));
+                        if (current_val == 0) {
+                            uint64_t addend_val = static_cast<uint64_t>(r.addend);
+                            std::memcpy(sec.data.data() + r.offset, &addend_val, sizeof(uint64_t));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Write Raw Section Data
     for (const auto& sec : working_obj.sections) {
         if (!sec.data.empty()) {

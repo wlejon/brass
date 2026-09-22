@@ -552,7 +552,8 @@ int32_t FrameInfo::spill_slot_offset(int32_t slot_idx) const noexcept {
         if (saved_callee_xmms & (1u << i)) num_callee_xmms++;
     }
 
-    size_t gpr_bytes = (num_callee_xmms > 0) ? ((num_callee_gprs * 8 + 15) & ~size_t(15)) : (num_callee_gprs * 8);
+    bool needs_gpr_align = (num_callee_xmms > 0) || (num_spill_slots > 0) || (local_frame_bytes > 0);
+    size_t gpr_bytes = needs_gpr_align ? ((num_callee_gprs * 8 + 15) & ~size_t(15)) : (num_callee_gprs * 8);
     int32_t callee_offset = static_cast<int32_t>(gpr_bytes + num_callee_xmms * 16);
     return -(callee_offset + static_cast<int32_t>((slot_idx + 1) * 8));
 }

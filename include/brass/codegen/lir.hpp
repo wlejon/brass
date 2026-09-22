@@ -150,6 +150,7 @@ struct LirOperand {
     static LirOperand preg_aarch64_gpr(aarch64::GPR g, uint8_t sz = 8);
     static LirOperand preg_aarch64_fpr(aarch64::FPR f, uint8_t sz = 8);
     static LirOperand imm(int64_t v, uint8_t sz = 8);
+    static LirOperand imm32(int32_t v) { return imm(v, 4); }
     static LirOperand imm_f64(double v);
     static LirOperand mem(VReg base, int32_t disp = 0, uint8_t sz = 8);
     static LirOperand mem(PReg base, int32_t disp = 0, uint8_t sz = 8);

@@ -72,6 +72,7 @@ namespace dwarf {
 
     // Register / Location Expression Opcodes
     constexpr uint8_t DW_OP_reg6   = 0x56; // %rbp in x86_64
+    constexpr uint8_t DW_OP_reg29  = 0x6d; // x29 (FP) in AArch64
     constexpr uint8_t DW_OP_fbreg  = 0x91;
 
     // Languages
@@ -88,6 +89,7 @@ struct DwarfOptions {
     uint16_t version = 4;
     std::string comp_dir = ".";
     std::string producer = "brass 1.0";
+    Target target = Target::x64_linux();
 };
 
 class DwarfLineEmitter {
@@ -114,6 +116,7 @@ private:
 class DwarfInfoEmitter {
 public:
     explicit DwarfInfoEmitter(DwarfOptions opts = {});
+    explicit DwarfInfoEmitter(const object::ObjectFile& obj, DwarfOptions opts = {});
 
     void emit(
         const DebugContext& ctx,
@@ -127,6 +130,7 @@ public:
 
 private:
     DwarfOptions opts_;
+    object::ObjectFile obj_;
 };
 
 class DwarfEmitter {

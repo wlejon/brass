@@ -68,31 +68,50 @@ void LinearScanAllocator::init_register_pools() {
 
 void LinearScanAllocator::build_coalesce_hints() {
     coalesce_hints_.clear();
+    fixed_preg_hints_.clear();
+    vreg_at_preg_hints_.clear();
     for (const auto& block : fn_.blocks) {
         for (const auto& inst : block->instructions) {
             if (inst->opcode == LirOpcode::Mov || inst->opcode == LirOpcode::Mov32 ||
                 inst->opcode == LirOpcode::Movsd || inst->opcode == LirOpcode::Movss ||
                 inst->opcode == LirOpcode::Movaps || inst->opcode == LirOpcode::Vmovaps ||
                 inst->opcode == LirOpcode::Vmovups) {
-                if (inst->defs.size() >= 1 && inst->defs[0].is_vreg() &&
-                    inst->uses.size() >= 1 && inst->uses[0].is_vreg()) {
-                    VReg dst = inst->defs[0].vreg_val;
-                    VReg src = inst->uses[0].vreg_val;
-                    if (dst.reg_class == src.reg_class && dst.id != src.id) {
-                        coalesce_hints_[dst.id].push_back(src);
-                        coalesce_hints_[src.id].push_back(dst);
+                if (inst->defs.size() >= 1 && inst->uses.size() >= 1) {
+                    const auto& def = inst->defs[0];
+                    const auto& use = inst->uses[0];
+                    if (def.is_vreg() && use.is_vreg()) {
+                        VReg dst = def.vreg_val;
+                        VReg src = use.vreg_val;
+                        if (dst.reg_class == src.reg_class && dst.id != src.id) {
+                            coalesce_hints_[dst.id].push_back(src);
+                            coalesce_hints_[src.id].push_back(dst);
+                        }
+                    } else if (def.is_vreg() && use.is_preg()) {
+                        fixed_preg_hints_[def.vreg_val.id].push_back(use.preg_val);
+                        vreg_at_preg_hints_.emplace((static_cast<uint64_t>(def.vreg_val.id) << 32) | inst->id, use.preg_val);
+                    } else if (def.is_preg() && use.is_vreg()) {
+                        fixed_preg_hints_[use.vreg_val.id].push_back(def.preg_val);
+                        vreg_at_preg_hints_.emplace((static_cast<uint64_t>(use.vreg_val.id) << 32) | inst->id, def.preg_val);
                     }
                 }
             } else if (inst->opcode == LirOpcode::ParallelCopy) {
                 size_t n = std::min(inst->defs.size(), inst->uses.size());
                 for (size_t i = 0; i < n; ++i) {
-                    if (inst->defs[i].is_vreg() && inst->uses[i].is_vreg()) {
-                        VReg dst = inst->defs[i].vreg_val;
-                        VReg src = inst->uses[i].vreg_val;
+                    const auto& def = inst->defs[i];
+                    const auto& use = inst->uses[i];
+                    if (def.is_vreg() && use.is_vreg()) {
+                        VReg dst = def.vreg_val;
+                        VReg src = use.vreg_val;
                         if (dst.reg_class == src.reg_class && dst.id != src.id) {
                             coalesce_hints_[dst.id].push_back(src);
                             coalesce_hints_[src.id].push_back(dst);
                         }
+                    } else if (def.is_vreg() && use.is_preg()) {
+                        fixed_preg_hints_[def.vreg_val.id].push_back(use.preg_val);
+                        vreg_at_preg_hints_.emplace((static_cast<uint64_t>(def.vreg_val.id) << 32) | inst->id, use.preg_val);
+                    } else if (def.is_preg() && use.is_vreg()) {
+                        fixed_preg_hints_[use.vreg_val.id].push_back(def.preg_val);
+                        vreg_at_preg_hints_.emplace((static_cast<uint64_t>(use.vreg_val.id) << 32) | inst->id, def.preg_val);
                     }
                 }
             }
@@ -406,6 +425,14 @@ uint32_t LinearScanAllocator::get_hard_blocked_regs(const LiveInterval& interval
                     own |= (1u << own_fixed->fixed_reg.code);
                 }
             }
+            if (!vreg_at_preg_hints_.empty()) {
+                auto [h_beg, h_end] = vreg_at_preg_hints_.equal_range((static_cast<uint64_t>(interval.vreg.id) << 32) | at);
+                for (auto h = h_beg; h != h_end; ++h) {
+                    if (h->second.is_valid() && h->second.reg_class == interval.vreg.reg_class && h->second.code < 32) {
+                        own |= (1u << h->second.code);
+                    }
+                }
+            }
             if (own == 0) continue;
             const size_t idx = std::lower_bound(constrained_ids_.begin() + cur, constrained_ids_.begin() + hi, at) -
                                constrained_ids_.begin();
@@ -490,6 +517,31 @@ bool LinearScanAllocator::try_allocate_free_reg(LiveInterval& interval) {
                         return a->end_id < b->end_id;
                     });
                 return true;
+            }
+        }
+    }
+
+    // 1.5. Try Fixed Physical Register Hints
+    auto fixed_hint_it = fixed_preg_hints_.find(interval.vreg.id);
+    if (fixed_hint_it != fixed_preg_hints_.end()) {
+        for (PReg hint_reg : fixed_hint_it->second) {
+            if (hint_reg.is_valid() && hint_reg.reg_class == interval.vreg.reg_class && hint_reg.code < 32) {
+                if (!in_mask(occupied_regs, hint_reg.code)) {
+                    bool is_callee = check_is_callee(hint_reg);
+                    if (!interval.spans_call || is_callee) {
+                        interval.assigned_preg = hint_reg;
+                        if (is_callee) {
+                            mark_callee_saved(hint_reg);
+                        }
+
+                        active_.push_back(&interval);
+                        std::sort(active_.begin(), active_.end(),
+                            [](const LiveInterval* a, const LiveInterval* b) {
+                                return a->end_id < b->end_id;
+                            });
+                        return true;
+                    }
+                }
             }
         }
     }

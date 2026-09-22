@@ -275,7 +275,12 @@ std::vector<uint8_t> DwarfLineEmitter::emit_standalone_line_table(
 }
 
 DwarfInfoEmitter::DwarfInfoEmitter(DwarfOptions opts)
-    : opts_(std::move(opts)) {}
+    : opts_(std::move(opts)) {
+    obj_.target = opts_.target;
+}
+
+DwarfInfoEmitter::DwarfInfoEmitter(const object::ObjectFile& obj, DwarfOptions opts)
+    : opts_(std::move(opts)), obj_(obj) {}
 
 void DwarfInfoEmitter::emit(
     const DebugContext& ctx,
@@ -514,9 +519,9 @@ void DwarfInfoEmitter::emit(
         // DW_AT_high_pc
         info_sec.emit64(fn.text_size);
 
-        // DW_AT_frame_base: DW_FORM_exprloc (1 byte, DW_OP_reg6)
+        // DW_AT_frame_base: DW_FORM_exprloc (1 byte, DW_OP_reg6 or DW_OP_reg29)
         encode_uleb128(info_sec.data, 1);
-        info_sec.emit8(dwarf::DW_OP_reg6);
+        info_sec.emit8(obj_.target.is_aarch64() ? dwarf::DW_OP_reg29 : dwarf::DW_OP_reg6);
 
         if (has_children) {
             for (const auto& var : tbl->variables()) {
@@ -578,7 +583,9 @@ void DwarfEmitter::emit(object::ObjectFile& obj, const DwarfOptions& opts) {
     }
 
     if (info_sec && abbrev_sec && str_sec) {
-        DwarfInfoEmitter info_emitter(opts);
+        DwarfOptions effective_opts = opts;
+        effective_opts.target = obj.target;
+        DwarfInfoEmitter info_emitter(obj, effective_opts);
         info_emitter.emit(obj.debug_context, obj.debug_tables, obj.functions, *info_sec, *abbrev_sec, *str_sec, total_text_size);
     }
 }

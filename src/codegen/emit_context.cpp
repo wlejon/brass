@@ -476,8 +476,18 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
             break;
         case LirOpcode::Call: {
             size_t call_start = buffer_.size();
-            const auto& sym_op = inst.uses.back();
-            std::string callee = inst.callee_symbol.empty() ? sym_op.symbol_name : inst.callee_symbol;
+            std::string callee = inst.callee_symbol;
+            if (callee.empty()) {
+                for (const auto& u : inst.uses) {
+                    if (u.is_symbol()) {
+                        callee = u.symbol_name;
+                        break;
+                    }
+                }
+            }
+            if (callee.empty() && !inst.uses.empty()) {
+                callee = inst.uses.back().symbol_name;
+            }
             if (inst.is_patchable) {
                 size_t imm_off = 1;
                 size_t pad = runtime::compute_cache_line_padding(buffer_.size(), imm_off, 4);

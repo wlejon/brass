@@ -130,6 +130,14 @@ void X64ISel::lower_call(const Instruction& inst, LirBlock& lir_bb) {
         }
     }
 
+    if (cc_.kind() == CallingConvKind::SysV) {
+        auto mov_al = std::make_unique<LirInst>(LirOpcode::Mov32);
+        mov_al->add_def(LirOperand::preg_gpr(GPR::RAX, 4), FixedConstraint::gpr(GPR::RAX));
+        mov_al->add_use(LirOperand::imm32(static_cast<int32_t>(std::min(xmm_idx, size_t(8)))));
+        lir_bb.append_inst(std::move(mov_al));
+        call_lir->add_use(LirOperand::preg_gpr(GPR::RAX, 4), FixedConstraint::gpr(GPR::RAX));
+    }
+
     if (inst.opcode() == Opcode::call_indirect) {
         call_lir->add_use(LirOperand::vreg(callee_vreg, 8));
     } else if (inst.opcode() == Opcode::patchable_call) {
@@ -139,7 +147,9 @@ void X64ISel::lower_call(const Instruction& inst, LirBlock& lir_bb) {
         call_lir->callee_symbol = callee_name;
         call_lir->add_use(LirOperand::symbol(callee_name));
     } else {
-        call_lir->add_use(LirOperand::symbol(std::string(inst.symbol())));
+        std::string callee_name = std::string(inst.symbol());
+        call_lir->callee_symbol = callee_name;
+        call_lir->add_use(LirOperand::symbol(callee_name));
     }
 
     call_lir->clobbered_gprs = cc_.caller_saved_gpr_mask();

@@ -14,6 +14,7 @@ namespace brass {
 enum class CallingConvKind : uint8_t {
     Win64,
     SysV64,
+    SysV = SysV64,
     AAPCS64,
     AppleAAPCS64,
     Custom,
