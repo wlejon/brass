@@ -25,6 +25,16 @@ enum class TierLevel : uint8_t {
 std::string_view to_string(TierLevel tier) noexcept;
 std::ostream& operator<<(std::ostream& os, TierLevel tier);
 
+enum class Tier0Interpreter : uint8_t {
+    Oracle = 0,
+    Fast = 1,
+    FastInterpreter = 1
+};
+using Tier0Engine = Tier0Interpreter;
+
+std::string_view to_string(Tier0Interpreter kind) noexcept;
+std::ostream& operator<<(std::ostream& os, Tier0Interpreter kind);
+
 // Standard default threshold constants
 inline constexpr uint64_t INVOCATION_TIER1_THRESHOLD = 50;
 inline constexpr uint64_t INVOCATION_TIER2_THRESHOLD = 200;
@@ -39,6 +49,17 @@ struct TieringConfig {
     bool enable_osr = true;
     bool enable_background_compile = false;
     size_t jit_threads = 2;
+    Tier0Interpreter tier0_interpreter = Tier0Interpreter::Oracle;
+
+    bool use_fast_interpreter() const noexcept {
+        return tier0_interpreter == Tier0Interpreter::Fast;
+    }
+    void set_tier0_interpreter(Tier0Interpreter kind) noexcept {
+        tier0_interpreter = kind;
+    }
+    void set_use_fast_interpreter(bool enable) noexcept {
+        tier0_interpreter = enable ? Tier0Interpreter::Fast : Tier0Interpreter::Oracle;
+    }
 };
 
 class FunctionHandle;
@@ -144,6 +165,11 @@ public:
     const TieringConfig& default_config() const noexcept { return config_; }
     TieringConfig& default_config() noexcept { return config_; }
     void set_default_config(const TieringConfig& config) noexcept { config_ = config; }
+
+    Tier0Interpreter tier0_interpreter() const noexcept { return config_.tier0_interpreter; }
+    void set_tier0_interpreter(Tier0Interpreter kind) noexcept { config_.tier0_interpreter = kind; }
+    bool use_fast_interpreter() const noexcept { return config_.use_fast_interpreter(); }
+    void set_use_fast_interpreter(bool enable) noexcept { config_.set_use_fast_interpreter(enable); }
 
     bool is_background_compile_enabled() const noexcept { return config_.enable_background_compile; }
     void set_background_compile_enabled(bool enabled) noexcept { config_.enable_background_compile = enabled; }

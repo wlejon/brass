@@ -1,5 +1,6 @@
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/interpreter/interpreter.hpp>
+#include <brass/vm/fast_interpreter.hpp>
 #include <brass/il_translator/il_translator.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <iostream>
@@ -51,6 +52,16 @@ void MultiTierPipeline::set_config(const TieringConfig& config) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     config_ = config;
     TieringRegistry::instance().set_default_config(config_);
+}
+
+void MultiTierPipeline::set_tier0_interpreter(Tier0Interpreter kind) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    config_.tier0_interpreter = kind;
+    TieringRegistry::instance().set_default_config(config_);
+}
+
+void MultiTierPipeline::set_use_fast_interpreter(bool enable) noexcept {
+    set_tier0_interpreter(enable ? Tier0Interpreter::Fast : Tier0Interpreter::Oracle);
 }
 
 void MultiTierPipeline::register_baseline_compiled(std::shared_ptr<codegen::BaselineCompiledFunction> fn) {
@@ -209,16 +220,24 @@ RuntimeValue MultiTierPipeline::execute(
         BackgroundCompiler::instance().start(config_.jit_threads);
     }
 
-    Interpreter interp;
-    il::register_bronze_interpreter_symbols(&interp);
-
     auto* fn = mod.get_function(entry_fn);
     if (!fn) {
         throw std::runtime_error("MultiTierPipeline::execute: function '" + std::string(entry_fn) + "' not found");
     }
 
     auto* handle = FunctionDispatchTable::instance().get_or_create(entry_fn, fn);
-    RuntimeValue result = handle->call(interp, args);
+    RuntimeValue result;
+
+    if (config_.use_fast_interpreter()) {
+        FastInterpreter fast_interp;
+        fast_interp.set_module(&mod);
+        il::register_bronze_fast_interpreter_symbols(&fast_interp);
+        result = handle->call(fast_interp, args);
+    } else {
+        Interpreter interp;
+        il::register_bronze_interpreter_symbols(&interp);
+        result = handle->call(interp, args);
+    }
 
     if (config_.enable_background_compile) {
         BackgroundCompiler::instance().wait_idle();
@@ -250,7 +269,7 @@ void MultiTierPipeline::dump_stats(std::ostream& os) const {
     uint64_t t2_invs = s.tier2_invocations.load(std::memory_order_relaxed);
 
     os << "=== Multi-Tier Execution Pipeline Statistics ===\n";
-    os << "  Tier 0 (Interpreter) Invocations: " << t0_invs << "\n";
+    os << "  Tier 0 (" << to_string(config_.tier0_interpreter) << ") Invocations: " << t0_invs << "\n";
     os << "  Tier 1 (Baseline JIT) Compilations: " << t1_comps << "\n";
     os << "  Tier 1 (Baseline JIT) Invocations:   " << t1_invs << "\n";
     if (t1_comps > 0) {

@@ -166,6 +166,7 @@ TranslationResult translate_bronze_il(
 void register_bronze_runtime_symbols(void* jit_engine_ptr);
 void register_bronze_baseline_symbols(void* baseline_jit_ptr);
 void register_bronze_interpreter_symbols(void* interp_ptr);
+void register_bronze_fast_interpreter_symbols(void* fast_interp_ptr);
 
 // Optional custom function resolver for AOT or dynamic function lookup
 void set_bronze_function_resolver(void* (*resolver)(const char*));

@@ -16,6 +16,7 @@
 
 namespace brass {
 class Interpreter;
+class FastInterpreter;
 namespace codegen {
 class JitExecutionEngine;
 class BaselineCompiledFunction;
@@ -92,6 +93,7 @@ public:
     // Dynamic invocation
     RuntimeValue call_native(const std::vector<RuntimeValue>& args = {}) const;
     RuntimeValue call(Interpreter& interp, const std::vector<RuntimeValue>& args = {});
+    RuntimeValue call(FastInterpreter& interp, const std::vector<RuntimeValue>& args = {});
 
 private:
     std::string name_;

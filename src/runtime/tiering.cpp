@@ -21,6 +21,18 @@ std::ostream& operator<<(std::ostream& os, TierLevel tier) {
     return os << to_string(tier);
 }
 
+std::string_view to_string(Tier0Interpreter kind) noexcept {
+    switch (kind) {
+        case Tier0Interpreter::Oracle: return "Oracle";
+        case Tier0Interpreter::Fast:   return "FastInterpreter";
+    }
+    return "Unknown";
+}
+
+std::ostream& operator<<(std::ostream& os, Tier0Interpreter kind) {
+    return os << to_string(kind);
+}
+
 TieringFeedback::TieringFeedback(const TieringConfig& config)
     : config_(config) {}
 

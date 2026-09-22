@@ -1,4 +1,5 @@
 #include "fast_interpreter_impl.hpp"
+#include <brass/runtime/code_installer.hpp>
 #include <iostream>
 
 namespace brass {
@@ -84,6 +85,29 @@ RuntimeValue FastInterpreter::execute_call(FastFrame& frame, const CallSiteInfo&
         callee_name = get_patched_call(cs.callee, default_callee);
     }
 
+    // 0. Check Tiering & Native entry in FunctionDispatchTable
+    auto* handle = runtime::FunctionDispatchTable::instance().find(callee_name);
+    if (handle && handle->has_native_entry()) {
+        const Function* mir_fn = handle->mir_function();
+        std::vector<RuntimeValue> call_args;
+        call_args.reserve(cs.arg_regs.size());
+        for (size_t i = 0; i < cs.arg_regs.size(); ++i) {
+            uint8_t src_r = cs.arg_regs[i];
+            uint64_t bits = frame.registers[src_r];
+            Type arg_ty = (mir_fn && i < mir_fn->param_count()) ? mir_fn->param_type(i) : Type::i64();
+            call_args.push_back(RuntimeValue::from_bits(arg_ty, bits));
+        }
+        RuntimeValue ret_val = handle->call_native(call_args);
+        if (cs.dst_reg != 255) {
+            frame.registers[cs.dst_reg] = ret_val.raw_bits();
+            if (ret_val.is_vector()) {
+                uint8_t* vregs = frame.ensure_vector_regs();
+                std::memcpy(vregs + cs.dst_reg * 32, ret_val.vec_bytes(), 32);
+            }
+        }
+        return ret_val;
+    }
+
     // 1. Check if it's a known bytecode function or can be compiled from MIR
     const BytecodeFunction* target_bfn = nullptr;
     if (bytecode_module_) {
@@ -97,6 +121,30 @@ RuntimeValue FastInterpreter::execute_call(FastFrame& frame, const CallSiteInfo&
     }
 
     if (target_bfn) {
+        auto& feedback = runtime::TieringRegistry::instance().get_or_create(callee_name);
+        feedback.record_invocation();
+
+        if (handle && handle->has_native_entry()) {
+            const Function* mir_fn = handle->mir_function();
+            std::vector<RuntimeValue> call_args;
+            call_args.reserve(cs.arg_regs.size());
+            for (size_t i = 0; i < cs.arg_regs.size(); ++i) {
+                uint8_t src_r = cs.arg_regs[i];
+                uint64_t bits = frame.registers[src_r];
+                Type arg_ty = (mir_fn && i < mir_fn->param_count()) ? mir_fn->param_type(i) : Type::i64();
+                call_args.push_back(RuntimeValue::from_bits(arg_ty, bits));
+            }
+            RuntimeValue ret_val = handle->call_native(call_args);
+            if (cs.dst_reg != 255) {
+                frame.registers[cs.dst_reg] = ret_val.raw_bits();
+                if (ret_val.is_vector()) {
+                    uint8_t* vregs = frame.ensure_vector_regs();
+                    std::memcpy(vregs + cs.dst_reg * 32, ret_val.vec_bytes(), 32);
+                }
+            }
+            return ret_val;
+        }
+
         if (call_depth_ >= max_call_depth_) {
             throw InterpreterException("Call stack depth limit exceeded (" + std::to_string(max_call_depth_) + ")");
         }
@@ -270,7 +318,29 @@ RuntimeValue FastInterpreter::run(const Function& fn) {
 RuntimeValue FastInterpreter::run(const Function& fn, const std::vector<RuntimeValue>& args) {
     if (fn.parent()) {
         module_ = fn.parent();
+        if (!runtime::TieringRegistry::instance().active_module()) {
+            runtime::TieringRegistry::instance().set_active_module(fn.parent());
+        }
     }
+
+    auto* handle = runtime::FunctionDispatchTable::instance().find(fn.name());
+    if (handle && handle->mir_function() == &fn) {
+        void* native_code = handle->native_entry();
+        if (native_code != nullptr) {
+            return handle->call_native(args);
+        }
+    }
+
+    auto& feedback = runtime::TieringRegistry::instance().get_or_create(fn.name());
+    feedback.record_invocation();
+
+    if (handle && handle->mir_function() == &fn) {
+        void* native_code = handle->native_entry();
+        if (native_code != nullptr) {
+            return handle->call_native(args);
+        }
+    }
+
     const BytecodeFunction* bfn = get_or_compile(fn);
     return run(*bfn, args);
 }

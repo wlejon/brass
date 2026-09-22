@@ -63,6 +63,11 @@ public:
     TieringConfig& config() noexcept { return config_; }
     void set_config(const TieringConfig& config) noexcept;
 
+    Tier0Interpreter tier0_interpreter() const noexcept { return config_.tier0_interpreter; }
+    void set_tier0_interpreter(Tier0Interpreter kind) noexcept;
+    bool use_fast_interpreter() const noexcept { return config_.use_fast_interpreter(); }
+    void set_use_fast_interpreter(bool enable) noexcept;
+
     codegen::BaselineJitCompiler& baseline_compiler() noexcept { return baseline_compiler_; }
     const codegen::BaselineJitCompiler& baseline_compiler() const noexcept { return baseline_compiler_; }
 

@@ -4,6 +4,7 @@
 #include "bench_gc.hpp"
 #include "bench_compile_speed.hpp"
 #include "bench_simd_math.hpp"
+#include "bench_interpreter.hpp"
 #include <vector>
 #include <string>
 #include <iostream>
@@ -73,6 +74,9 @@ int main(int argc, char** argv) {
 
     // 6. Compile-Speed Benchmark (Parse, Verify, ISEL, RegAlloc, Codegen)
     run_compile_speed_benchmark(results);
+
+    // 6b. Fast Bytecode Interpreter Benchmarks (Oracle vs FastInterpreter vs Baseline JIT vs Native C++)
+    run_interpreter_benchmarks(results, ratchet);
 
     // 7. Update ratchet if requested
     if (update_ratchet) {

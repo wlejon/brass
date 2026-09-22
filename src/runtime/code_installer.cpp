@@ -2,6 +2,7 @@
 #include <brass/codegen/jit_exec.hpp>
 #include <brass/codegen/baseline_jit.hpp>
 #include <brass/interpreter/interpreter.hpp>
+#include <brass/vm/fast_interpreter.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/gvn.hpp>
@@ -360,6 +361,18 @@ RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) 
 }
 
 RuntimeValue FunctionHandle::call(Interpreter& interp, const std::vector<RuntimeValue>& args) {
+    void* addr = native_entry();
+    if (addr != nullptr) {
+        return call_native(args);
+    }
+    record_call();
+    if (mir_function_) {
+        return interp.run(*mir_function_, args);
+    }
+    return RuntimeValue::from_void();
+}
+
+RuntimeValue FunctionHandle::call(FastInterpreter& interp, const std::vector<RuntimeValue>& args) {
     void* addr = native_entry();
     if (addr != nullptr) {
         return call_native(args);

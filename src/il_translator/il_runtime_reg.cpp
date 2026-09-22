@@ -2,6 +2,7 @@
 #include <brass/codegen/jit_exec.hpp>
 #include <brass/codegen/baseline_jit.hpp>
 #include <brass/interpreter/interpreter.hpp>
+#include <brass/vm/fast_interpreter.hpp>
 #include <brass/embedding/host_gc.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/gc/tlab.hpp>
@@ -347,6 +348,86 @@ void register_bronze_interpreter_symbols(void* interp_ptr) {
     });
     interp->register_external_function("bronze_stack_overflow", [](Interpreter&, const std::vector<RuntimeValue>&) {
         bronze_stack_overflow();
+        return RuntimeValue::from_void();
+    });
+    interp->register_external_function("bronze_register_value_cells", [](Interpreter&, const std::vector<RuntimeValue>& a) {
+        if (a.size() >= 2) {
+            uint64_t* cells = reinterpret_cast<uint64_t*>(a[0].as_ptr());
+            uint64_t count = a[1].as_u64();
+            bronze_register_value_cells(cells, count);
+        }
+        return RuntimeValue::from_void();
+    });
+    interp->register_external_function("bronze_register_key_manifest", [](Interpreter&, const std::vector<RuntimeValue>& a) {
+        const uint8_t* data = a.size() > 0 ? reinterpret_cast<const uint8_t*>(a[0].as_ptr()) : nullptr;
+        uint32_t* map = a.size() > 1 ? reinterpret_cast<uint32_t*>(a[1].as_ptr()) : nullptr;
+        bronze_register_key_manifest(data, map);
+        return RuntimeValue::from_void();
+    });
+}
+
+void register_bronze_fast_interpreter_symbols(void* fast_interp_ptr) {
+    if (!fast_interp_ptr) return;
+    auto* interp = reinterpret_cast<FastInterpreter*>(fast_interp_ptr);
+    interp->register_external_function("bronze_print_f64", [](FastInterpreter&, const std::vector<RuntimeValue>& args) {
+        if (!args.empty()) bronze_print_f64(args[0].as_f64());
+        return RuntimeValue::from_void();
+    });
+    interp->register_external_function("bronze_print_i32", [](FastInterpreter&, const std::vector<RuntimeValue>& args) {
+        if (!args.empty()) bronze_print_i32(args[0].as_i32());
+        return RuntimeValue::from_void();
+    });
+    interp->register_external_function("bronze_print_dynamic", [](FastInterpreter&, const std::vector<RuntimeValue>& args) {
+        if (!args.empty()) bronze_print_dynamic(args[0].as_i64());
+        return RuntimeValue::from_void();
+    });
+    interp->register_external_function("bronze_print_newline", [](FastInterpreter&, const std::vector<RuntimeValue>&) {
+        bronze_print_newline();
+        return RuntimeValue::from_void();
+    });
+    interp->register_external_function("bronze_f64_mod", [](FastInterpreter&, const std::vector<RuntimeValue>& args) {
+        return (args.size() >= 2) ? RuntimeValue::from_f64(bronze_f64_mod(args[0].as_f64(), args[1].as_f64())) : RuntimeValue::from_f64(0.0);
+    });
+    interp->register_external_function("bronze_call_dynamic_0", [](FastInterpreter&, const std::vector<RuntimeValue>& a) {
+        return RuntimeValue::from_i64(bronze_call_dynamic_0(a.size() > 0 ? a[0].as_i64() : 0, a.size() > 1 ? a[1].as_i64() : 0));
+    });
+    interp->register_external_function("bronze_call_dynamic_1", [](FastInterpreter&, const std::vector<RuntimeValue>& a) {
+        return RuntimeValue::from_i64(bronze_call_dynamic_1(a.size() > 0 ? a[0].as_i64() : 0, a.size() > 1 ? a[1].as_i64() : 0, a.size() > 2 ? a[2].as_i64() : 0));
+    });
+    interp->register_external_function("bronze_call_dynamic_2", [](FastInterpreter&, const std::vector<RuntimeValue>& a) {
+        return RuntimeValue::from_i64(bronze_call_dynamic_2(a.size() > 0 ? a[0].as_i64() : 0, a.size() > 1 ? a[1].as_i64() : 0, a.size() > 2 ? a[2].as_i64() : 0, a.size() > 3 ? a[3].as_i64() : 0));
+    });
+    interp->register_external_function("bronze_arg_at", [](FastInterpreter&, const std::vector<RuntimeValue>& a) {
+        if (a.size() < 3) return RuntimeValue::from_i64(static_cast<int64_t>(kUndefinedTag));
+        uint32_t argc = static_cast<uint32_t>(a[0].as_i32());
+        const int64_t* argv = reinterpret_cast<const int64_t*>(a[1].as_ptr());
+        uint32_t idx = static_cast<uint32_t>(a[2].as_i32());
+        return RuntimeValue::from_i64(bronze_arg_at(argc, argv, idx));
+    });
+    interp->register_external_function("bronze_gc_frame_push", [](FastInterpreter&, const std::vector<RuntimeValue>& a) {
+        uint32_t count = a.empty() ? 0 : static_cast<uint32_t>(a[0].as_i32());
+        return RuntimeValue::from_ptr(bronze_gc_frame_push(count));
+    });
+    interp->register_external_function("bronze_gc_frame_pop", [](FastInterpreter&, const std::vector<RuntimeValue>&) {
+        bronze_gc_frame_pop();
+        return RuntimeValue::from_void();
+    });
+    interp->register_external_function("bronze_stack_overflow", [](FastInterpreter&, const std::vector<RuntimeValue>&) {
+        bronze_stack_overflow();
+        return RuntimeValue::from_void();
+    });
+    interp->register_external_function("bronze_register_value_cells", [](FastInterpreter&, const std::vector<RuntimeValue>& a) {
+        if (a.size() >= 2) {
+            uint64_t* cells = reinterpret_cast<uint64_t*>(a[0].as_ptr());
+            uint64_t count = a[1].as_u64();
+            bronze_register_value_cells(cells, count);
+        }
+        return RuntimeValue::from_void();
+    });
+    interp->register_external_function("bronze_register_key_manifest", [](FastInterpreter&, const std::vector<RuntimeValue>& a) {
+        const uint8_t* data = a.size() > 0 ? reinterpret_cast<const uint8_t*>(a[0].as_ptr()) : nullptr;
+        uint32_t* map = a.size() > 1 ? reinterpret_cast<uint32_t*>(a[1].as_ptr()) : nullptr;
+        bronze_register_key_manifest(data, map);
         return RuntimeValue::from_void();
     });
 }
