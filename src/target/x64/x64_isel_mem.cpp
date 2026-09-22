@@ -213,7 +213,8 @@ void X64ISel::lower_load(const Instruction& inst, LirBlock& lir_bb) {
         mem_op = LirOperand::mem(base_vreg, mf.disp, sz);
     }
 
-    LirOpcode op = dst.is_xmm() ? (sz == 4 ? LirOpcode::Movss : LirOpcode::Movsd) : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
+    LirOpcode op = dst.is_xmm() ? (sz == 4 ? LirOpcode::Movss : LirOpcode::Movsd)
+                                : (sz == 1 ? LirOpcode::Movzx8 : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov));
     auto lir_inst = std::make_unique<LirInst>(op);
     lir_inst->add_def(LirOperand::vreg(dst, sz));
     lir_inst->add_use(mem_op);
@@ -267,7 +268,8 @@ void X64ISel::lower_load_indexed(const Instruction& inst, LirBlock& lir_bb) {
         mem_op = LirOperand::mem(base_vreg, mf.disp, sz);
     }
 
-    LirOpcode op = dst.is_xmm() ? (sz == 4 ? LirOpcode::Movss : LirOpcode::Movsd) : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
+    LirOpcode op = dst.is_xmm() ? (sz == 4 ? LirOpcode::Movss : LirOpcode::Movsd)
+                                : (sz == 1 ? LirOpcode::Movzx8 : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov));
     auto lir_inst = std::make_unique<LirInst>(op);
     lir_inst->add_def(LirOperand::vreg(dst, sz));
     lir_inst->add_use(mem_op);

@@ -394,6 +394,8 @@ private:
             case Opcode::shfl:  verify_shfl(); break;
             case Opcode::bar:   verify_bar(); break;
             case Opcode::atom:  verify_atom(); break;
+            case Opcode::activemask: verify_activemask(); break;
+            case Opcode::vote:       verify_vote(); break;
             default:
                 if (is_binary_alu(I.op)) verify_binary();
                 else if (is_unary_math(I.op)) verify_unary_math();
@@ -585,6 +587,22 @@ private:
         expect_b32_or_imm(I.srcs[1], "lane delta (source 1)");
         expect_b32_or_imm(I.srcs[2], "clamp (source 2)");
         expect_b32_or_imm(I.srcs[3], "member mask (source 3)");
+    }
+
+    void verify_activemask() {
+        const Inst& I = *inst_;
+        if (!check_arity(1, 0, 0)) return;
+        if (I.type != Type::b32) error("activemask requires .b32");
+        expect_reg(I.dsts[0], Type::b32, "destination");
+    }
+
+    void verify_vote() {
+        const Inst& I = *inst_;
+        if (!I.is_sync) error("vote requires .sync");
+        if (!check_arity(1, 2, 2)) return;
+        expect_reg(I.dsts[0], Type::b32, "destination");
+        expect_reg(I.srcs[0], Type::pred, "predicate (source 0)");
+        expect_b32_or_imm(I.srcs[1], "member mask (source 1)");
     }
 
     void verify_bar() {

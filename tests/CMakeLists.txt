@@ -173,6 +173,7 @@ add_executable(brass_unit_tests
     unit/test_gc_runtime_hardening.cpp
     unit/test_deopt_concurrency_hardening.cpp
     unit/test_mir_optimizer_hardening.cpp
+    unit/test_frontend_gpu_hardening.cpp
 )
 
 target_include_directories(brass_unit_tests

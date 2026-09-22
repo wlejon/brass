@@ -73,6 +73,8 @@ namespace dwarf {
     // Register / Location Expression Opcodes
     constexpr uint8_t DW_OP_reg6   = 0x56; // %rbp in x86_64
     constexpr uint8_t DW_OP_reg29  = 0x6d; // x29 (FP) in AArch64
+    constexpr uint8_t DW_OP_breg6  = 0x76; // base %rbp + offset in x86_64
+    constexpr uint8_t DW_OP_breg29 = 0x8d; // base x29 (FP) + offset in AArch64
     constexpr uint8_t DW_OP_fbreg  = 0x91;
 
     // Languages

@@ -519,9 +519,10 @@ void DwarfInfoEmitter::emit(
         // DW_AT_high_pc
         info_sec.emit64(fn.text_size);
 
-        // DW_AT_frame_base: DW_FORM_exprloc (1 byte, DW_OP_reg6 or DW_OP_reg29)
-        encode_uleb128(info_sec.data, 1);
-        info_sec.emit8(obj_.target.is_aarch64() ? dwarf::DW_OP_reg29 : dwarf::DW_OP_reg6);
+        // DW_AT_frame_base: DW_FORM_exprloc (2 bytes, DW_OP_breg6 0 or DW_OP_breg29 0)
+        encode_uleb128(info_sec.data, 2);
+        info_sec.emit8(obj_.target.is_aarch64() ? dwarf::DW_OP_breg29 : dwarf::DW_OP_breg6);
+        encode_sleb128(info_sec.data, 0);
 
         if (has_children) {
             for (const auto& var : tbl->variables()) {

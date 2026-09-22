@@ -30,6 +30,15 @@ void patch_u16(std::vector<uint8_t>& buf, size_t offset, uint16_t v) {
     }
 }
 
+void patch_u32(std::vector<uint8_t>& buf, size_t offset, uint32_t v) {
+    if (offset + 4 <= buf.size()) {
+        buf[offset + 0] = static_cast<uint8_t>(v & 0xFF);
+        buf[offset + 1] = static_cast<uint8_t>((v >> 8) & 0xFF);
+        buf[offset + 2] = static_cast<uint8_t>((v >> 16) & 0xFF);
+        buf[offset + 3] = static_cast<uint8_t>((v >> 24) & 0xFF);
+    }
+}
+
 void write_str(std::vector<uint8_t>& buf, const std::string& str) {
     buf.insert(buf.end(), str.begin(), str.end());
     buf.push_back(0);
@@ -206,7 +215,8 @@ void CodeViewEmitter::emit_debug_s(
             write_u16(sym_payload, 0); // Length placeholder
             write_u16(sym_payload, codeview::S_GPROC32);
             write_u32(sym_payload, 0); // pParent
-            write_u32(sym_payload, 0); // pEnd
+            size_t pend_offset = sym_payload.size();
+            write_u32(sym_payload, 0); // pEnd placeholder
             write_u32(sym_payload, 0); // pNext
             write_u32(sym_payload, static_cast<uint32_t>(fn.text_size));
             write_u32(sym_payload, static_cast<uint32_t>(fn.prologue_size));
@@ -245,7 +255,7 @@ void CodeViewEmitter::emit_debug_s(
                     write_u32(sym_payload, static_cast<uint32_t>(var.stack_offset));
                     uint32_t tid = var.type_index > 0 ? var.type_index : codeview::T_INT8;
                     write_u32(sym_payload, tid);
-                    write_u16(sym_payload, codeview::CV_AMD64_RBP);
+                    write_u16(sym_payload, opts.is_aarch64 ? codeview::CV_ARM64_FP : codeview::CV_AMD64_RBP);
                     write_str(sym_payload, var.name);
                     pad_to_4(sym_payload);
                     patch_u16(sym_payload, var_rec_start, static_cast<uint16_t>((sym_payload.size() - var_rec_start) - 2));
@@ -253,8 +263,10 @@ void CodeViewEmitter::emit_debug_s(
             }
 
             // End marker S_PROC_ID_END (0x114F)
+            uint32_t proc_end_offset = static_cast<uint32_t>(sym_payload.size());
             write_u16(sym_payload, 2);
             write_u16(sym_payload, codeview::S_PROC_ID_END);
+            patch_u32(sym_payload, pend_offset, proc_end_offset);
         }
 
         debug_s_sec.emit32(codeview::DEBUG_S_SYMBOLS);
@@ -337,7 +349,11 @@ void CodeViewEmitter::emit(object::ObjectFile& obj, const CodeViewOptions& opts)
     auto* t_sec = obj.get_section(".debug$T");
 
     if (s_sec && t_sec) {
-        emit_debug_s(obj.debug_context, obj.debug_tables, obj.functions, *s_sec, opts);
+        CodeViewOptions effective_opts = opts;
+        if (obj.target.is_aarch64()) {
+            effective_opts.is_aarch64 = true;
+        }
+        emit_debug_s(obj.debug_context, obj.debug_tables, obj.functions, *s_sec, effective_opts);
         emit_debug_t(*t_sec);
     }
 }

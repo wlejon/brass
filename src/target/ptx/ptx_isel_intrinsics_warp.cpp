@@ -41,18 +41,28 @@ void PtxISel::Intrinsics::shfl_down_sync_f32(PtxISel& isel, const brass::Instruc
                   .src(isel.reg_of(inst.operand(0), "member mask")));
 }
 
-// shfl.sync.<mode>.b32 d, value, delta_or_lane, clamp, 0xffffffff   for (value, delta)
+// shfl.sync.<mode>.b32 d, value, delta_or_lane, clamp, mask   for (value, delta[, mask])
 template <ShflMode M>
 void PtxISel::Intrinsics::shfl(PtxISel& isel, const brass::Instruction& inst) {
     const Value* value = inst.operand(0);
     if (!value) isel.malformed(inst, "missing value");
     if (value->type().size_in_bytes() != 4) isel.malformed(inst, "shfl value must be a 32-bit f32/i32");
+
+    Operand mask_op;
+    if (inst.operand_count() > 2 && inst.operand(2) != nullptr) {
+        mask_op = isel.lane_operand(inst.operand(2), "member mask");
+    } else {
+        Reg mask_reg = isel.fn_->new_b32();
+        isel.emit(Inst::make(Opcode::activemask, Type::b32).dst(mask_reg));
+        mask_op = Operand::reg(mask_reg);
+    }
+
     isel.emit(Inst::make(Opcode::shfl, Type::b32).sync().shfl(M)
                   .dst(isel.result_reg(inst))
                   .src(isel.reg_of(value, "value"))
                   .src(isel.lane_operand(inst.operand(1), "lane delta"))
                   .src(Operand::imm(M == ShflMode::up ? 0 : 0x1f))
-                  .src(Operand::imm(0xffffffffLL)));
+                  .src(mask_op));
 }
 template void PtxISel::Intrinsics::shfl<ShflMode::down>(PtxISel&, const brass::Instruction&);
 template void PtxISel::Intrinsics::shfl<ShflMode::up>(PtxISel&, const brass::Instruction&);

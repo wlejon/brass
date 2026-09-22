@@ -188,6 +188,8 @@ std::string_view to_string(Opcode op) noexcept {
         case Opcode::ex2:   return "ex2";
         case Opcode::lg2:   return "lg2";
         case Opcode::rcp:   return "rcp";
+        case Opcode::activemask: return "activemask";
+        case Opcode::vote:  return "vote";
     }
     return "?";
 }
@@ -365,6 +367,9 @@ bool allows_immediate(Opcode op, size_t src_index) noexcept {
             return src_index <= 1;
         case Opcode::call:                       // arguments (source 0 is the callee)
             return src_index >= 1;
+        case Opcode::vote:                       // mask is source 1
+            return src_index == 1;
+        case Opcode::activemask:
         case Opcode::ld: case Opcode::cvt:
         case Opcode::bra: case Opcode::ret: case Opcode::trap: case Opcode::exit:
             return false;

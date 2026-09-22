@@ -283,7 +283,7 @@ TEST_CASE("Backend Hardening - COFF writer patches inline addends") {
 // =============================================================================
 
 TEST_CASE("Backend Hardening - DWARF frame base emits DW_OP_reg29 on AArch64") {
-    // 1. AArch64 target emits DW_OP_reg29 (0x6d)
+    // 1. AArch64 target emits DW_OP_breg29 (0x8d) 0
     {
         ObjectFile obj;
         obj.target = Target::aarch64_linux();
@@ -314,17 +314,17 @@ TEST_CASE("Backend Hardening - DWARF frame base emits DW_OP_reg29 on AArch64") {
         REQUIRE(info_sec != nullptr);
         REQUIRE(!info_sec->data.empty());
 
-        bool found_reg29 = false;
-        bool found_reg6 = false;
+        bool found_breg29 = false;
+        bool found_breg6 = false;
         for (uint8_t byte : info_sec->data) {
-            if (byte == dwarf::DW_OP_reg29) found_reg29 = true;
-            if (byte == dwarf::DW_OP_reg6) found_reg6 = true;
+            if (byte == dwarf::DW_OP_breg29) found_breg29 = true;
+            if (byte == dwarf::DW_OP_breg6) found_breg6 = true;
         }
-        CHECK(found_reg29);
-        CHECK(!found_reg6);
+        CHECK(found_breg29);
+        CHECK(!found_breg6);
     }
 
-    // 2. x64 target emits DW_OP_reg6 (0x56)
+    // 2. x64 target emits DW_OP_breg6 (0x76) 0
     {
         ObjectFile obj;
         obj.target = Target::x64_linux();
@@ -355,10 +355,10 @@ TEST_CASE("Backend Hardening - DWARF frame base emits DW_OP_reg29 on AArch64") {
         REQUIRE(info_sec != nullptr);
         REQUIRE(!info_sec->data.empty());
 
-        bool found_reg6 = false;
+        bool found_breg6 = false;
         for (uint8_t byte : info_sec->data) {
-            if (byte == dwarf::DW_OP_reg6) found_reg6 = true;
+            if (byte == dwarf::DW_OP_breg6) found_breg6 = true;
         }
-        CHECK(found_reg6);
+        CHECK(found_breg6);
     }
 }

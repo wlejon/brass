@@ -9,16 +9,10 @@ Value* GrammarBuilder::load_byte(Value* base_ptr, Value* byte_offset) {
     if (byte_offset->type().is_i32()) {
         offset_i64 = builder().build_zext_i64(byte_offset);
     }
-    // Align offset to 8-byte boundary (on i64 integers)
-    Value* mask_align = const_i64(~int64_t(7));
-    Value* aligned_offset = builder().build_and(offset_i64, mask_align);
-    Value* byte_idx_in_word = builder().build_and(offset_i64, const_i64(7));
-    Value* shift = builder().build_shl(byte_idx_in_word, const_i64(3)); // byte_idx * 8
-    Value* word_ptr = builder().build_add(base_ptr, aligned_offset);
-    Value* word = load_i64(word_ptr, 0);
-    Value* shifted = builder().build_lshr(word, shift);
-    Value* byte_val = builder().build_and(shifted, const_i64(0xFF));
-    return builder().build_trunc_i32(byte_val);
+    Value* byte_ptr = builder().build_add(base_ptr, offset_i64);
+    Value* raw_byte = builder().build_load(Type::i8(), byte_ptr, 0);
+    Value* byte_i64 = builder().build_zext_i64(raw_byte);
+    return builder().build_trunc_i32(byte_i64);
 }
 
 Value* GrammarBuilder::dfa_table_step(Value* transition_table, Value* current_state, Value* byte_val) {

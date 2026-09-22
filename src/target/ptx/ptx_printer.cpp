@@ -109,6 +109,10 @@ std::string mnemonic(const Inst& inst) {
         case Opcode::setp:
             suffix(to_string(inst.cmp_op));
             break;
+        case Opcode::vote:
+            if (inst.is_sync) suffix("sync");
+            suffix("ballot");
+            break;
         default:
             break;
     }

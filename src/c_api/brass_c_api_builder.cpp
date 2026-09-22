@@ -10,7 +10,14 @@ BrassBuilder brass_builder_create(BrassContext ctx, BrassFunction fn) {
         b->ctx = ctx;
         if (fn && fn->func) {
             b->func = fn->func;
+            b->mod = fn->mod ? fn->mod : (fn->func ? fn->func->parent() : nullptr);
             b->builder.set_function(fn->func);
+            b->is_valid = true;
+        } else {
+            b->is_valid = false;
+        }
+        if (ctx) {
+            ctx->builders.push_back(b);
         }
         return b;
     } catch (const std::exception& e) {
@@ -20,17 +27,22 @@ BrassBuilder brass_builder_create(BrassContext ctx, BrassFunction fn) {
 }
 
 void brass_builder_destroy(BrassBuilder b) {
+    if (!b) return;
+    if (b->ctx) {
+        auto& list = b->ctx->builders;
+        list.erase(std::remove(list.begin(), list.end(), b), list.end());
+    }
     delete b;
 }
 
 void brass_builder_position_at_end(BrassBuilder b, BrassBlock blk) {
-    if (!b || !blk || !blk->block) return;
+    if (!b || !b->is_valid || !blk || !blk->block) return;
     b->builder.position_at_end(blk->block);
 }
 
 /* Constants */
 BrassValue brass_build_iconst_i32(BrassBuilder b, int32_t val) {
-    if (!b) return nullptr;
+    if (!b || !b->is_valid || !b->func) return nullptr;
     try {
         Value* res = b->builder.build_iconst_i32(val);
         return b->ctx ? b->ctx->wrap_value(res) : nullptr;
@@ -41,7 +53,7 @@ BrassValue brass_build_iconst_i32(BrassBuilder b, int32_t val) {
 }
 
 BrassValue brass_build_iconst_i64(BrassBuilder b, int64_t val) {
-    if (!b) return nullptr;
+    if (!b || !b->is_valid || !b->func) return nullptr;
     try {
         Value* res = b->builder.build_iconst_i64(val);
         return b->ctx ? b->ctx->wrap_value(res) : nullptr;

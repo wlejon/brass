@@ -47,11 +47,14 @@ namespace codeview {
     // Registers
     constexpr uint16_t CV_AMD64_RBP = 334;
     constexpr uint16_t CV_AMD64_RSP = 335;
+    constexpr uint16_t CV_ARM64_FP  = 79;
+    constexpr uint16_t CV_ARM64_SP  = 81;
 }
 
 struct CodeViewOptions {
     bool emit_symbols = true;
     bool emit_lines = true;
+    bool is_aarch64 = false;
 };
 
 class CodeViewEmitter {

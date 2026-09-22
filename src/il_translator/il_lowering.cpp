@@ -610,6 +610,10 @@ bool IlLowering::lower_function(const BronzeFunction& fn_ast, Module& mod, const
                 if (inst.op == BronzeOp::MethodCall && inst.param_count > widest_method_argc) {
                     widest_method_argc = inst.param_count;
                 }
+                if ((inst.op == BronzeOp::Construct || inst.op == BronzeOp::SuperCall || inst.op == BronzeOp::CallDynamic) &&
+                    inst.param_count > 16 && inst.param_count > widest_method_argc) {
+                    widest_method_argc = inst.param_count;
+                }
             }
         }
         method_argv_slot_ = total_slots;

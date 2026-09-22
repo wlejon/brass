@@ -123,7 +123,10 @@ BrassContext brass_context_create(void) {
 }
 
 void brass_context_destroy(BrassContext ctx) {
-    delete ctx;
+    try {
+        delete ctx;
+    } catch (...) {
+    }
 }
 
 const char* brass_context_get_last_error(BrassContext ctx) {
@@ -153,7 +156,14 @@ BrassModule brass_module_create(BrassContext ctx, const char* name) {
 }
 
 void brass_module_destroy(BrassModule mod) {
-    delete mod;
+    if (!mod) return;
+    try {
+        if (mod->ctx && mod->mod) {
+            mod->ctx->invalidate_module_handles(mod->mod.get());
+        }
+        delete mod;
+    } catch (...) {
+    }
 }
 
 void brass_module_add_external_symbol(BrassModule mod, const char* name) {
@@ -256,7 +266,7 @@ BrassBlock brass_function_append_block(BrassFunction fn, const char* name) {
         BasicBlock* bb = arena.make<BasicBlock>(id, sym);
         bb->set_parent(fn->func);
         fn->func->append_block(bb);
-        return fn->ctx ? fn->ctx->wrap_block(bb, fn->func) : nullptr;
+        return fn->ctx ? fn->ctx->wrap_block(bb, fn->func, fn->mod) : nullptr;
     } catch (const std::exception& e) {
         set_ctx_exception(fn->ctx, "brass_function_append_block", e);
         return nullptr;
@@ -270,7 +280,7 @@ BrassValue brass_block_add_param(BrassBlock blk, BrassType type) {
         uint32_t id = blk->func->next_value_id();
         Value* val = arena.make<Value>(id, type->type, ValueKind::BlockParam);
         blk->block->add_param(val);
-        return blk->ctx ? blk->ctx->wrap_value(val) : nullptr;
+        return blk->ctx ? blk->ctx->wrap_value(val, blk->mod ? blk->mod : blk->func->parent()) : nullptr;
     } catch (const std::exception& e) {
         set_ctx_exception(blk->ctx, "brass_block_add_param", e);
         return nullptr;
@@ -280,7 +290,7 @@ BrassValue brass_block_add_param(BrassBlock blk, BrassType type) {
 BrassValue brass_block_get_param(BrassBlock blk, size_t index) {
     if (!blk || !blk->block) return nullptr;
     Value* val = blk->block->param(index);
-    return (val && blk->ctx) ? blk->ctx->wrap_value(val) : nullptr;
+    return (val && blk->ctx) ? blk->ctx->wrap_value(val, blk->mod ? blk->mod : (blk->func ? blk->func->parent() : nullptr)) : nullptr;
 }
 
 BrassValue brass_function_get_param(BrassFunction fn, size_t index) {
@@ -305,7 +315,7 @@ BrassValue brass_function_get_param(BrassFunction fn, size_t index) {
         }
 
         Value* val = entry->param(index);
-        return (val && fn->ctx) ? fn->ctx->wrap_value(val) : nullptr;
+        return (val && fn->ctx) ? fn->ctx->wrap_value(val, fn->mod) : nullptr;
     } catch (const std::exception& e) {
         set_ctx_exception(fn->ctx, "brass_function_get_param", e);
         return nullptr;
@@ -419,7 +429,11 @@ BrassCompiledModule brass_jit_compile_module(BrassJitEngine jit, BrassModule mod
 
 void* brass_jit_get_function_address(BrassJitEngine jit, const char* name) {
     if (!jit || !jit->engine || !name) return nullptr;
-    return jit->engine->get_symbol_address(name);
+    try {
+        return jit->engine->get_symbol_address(name);
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 void brass_compiled_module_destroy(BrassCompiledModule mod) {
@@ -428,7 +442,11 @@ void brass_compiled_module_destroy(BrassCompiledModule mod) {
 
 void* brass_compiled_module_get_symbol(BrassCompiledModule mod, const char* name) {
     if (!mod || !mod->jit) return nullptr;
-    return brass_jit_get_function_address(mod->jit, name);
+    try {
+        return brass_jit_get_function_address(mod->jit, name);
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 /* AOT Binary Compilation */

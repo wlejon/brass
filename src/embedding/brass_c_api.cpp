@@ -32,17 +32,26 @@ brass_engine_t* brass_engine_create(void) {
 }
 
 void brass_engine_destroy(brass_engine_t* engine) {
-    delete engine;
+    try {
+        delete engine;
+    } catch (...) {
+    }
 }
 
 void brass_engine_register_symbol(brass_engine_t* engine, const char* name, void* address) {
     if (!engine || !name) return;
-    engine->engine.register_external_symbol(name, address);
+    try {
+        engine->engine.register_external_symbol(name, address);
+    } catch (...) {
+    }
 }
 
 void brass_engine_register_gc(brass_engine_t* engine, brass_gc_t* gc) {
     if (!engine) return;
-    engine->engine.register_host_gc(gc ? &gc->gc : nullptr);
+    try {
+        engine->engine.register_host_gc(gc ? &gc->gc : nullptr);
+    } catch (...) {
+    }
 }
 
 brass_module_t* brass_embed_module_create(const char* name) {
@@ -56,12 +65,18 @@ brass_module_t* brass_embed_module_create(const char* name) {
 }
 
 void brass_embed_module_destroy(brass_module_t* module) {
-    delete module;
+    try {
+        delete module;
+    } catch (...) {
+    }
 }
 
 void brass_embed_module_add_external_symbol(brass_module_t* module, const char* name) {
     if (!module || !module->module || !name) return;
-    module->module->add_external_symbol(name);
+    try {
+        module->module->add_external_symbol(name);
+    } catch (...) {
+    }
 }
 
 brass_compiled_module_t* brass_engine_compile_module(brass_engine_t* engine, const brass_module_t* module) {
@@ -78,32 +93,55 @@ brass_compiled_module_t* brass_engine_compile_module(brass_engine_t* engine, con
 }
 
 void brass_embed_compiled_module_destroy(brass_compiled_module_t* module) {
-    delete module;
+    try {
+        delete module;
+    } catch (...) {
+    }
 }
 
 void* brass_embed_compiled_module_get_symbol(const brass_compiled_module_t* module, const char* name) {
     if (!module || !module->module || !name) return nullptr;
-    return module->module->get_symbol_address(name);
+    try {
+        return module->module->get_symbol_address(name);
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 int brass_compiled_module_patch_const32(brass_compiled_module_t* module, const char* site_name, int32_t new_val) {
     if (!module || !module->module || !site_name) return 0;
-    return module->module->patch_constant(site_name, new_val) ? 1 : 0;
+    try {
+        return module->module->patch_constant(site_name, new_val) ? 1 : 0;
+    } catch (...) {
+        return 0;
+    }
 }
 
 int brass_compiled_module_patch_const64(brass_compiled_module_t* module, const char* site_name, int64_t new_val) {
     if (!module || !module->module || !site_name) return 0;
-    return module->module->patch_constant(site_name, new_val) ? 1 : 0;
+    try {
+        return module->module->patch_constant(site_name, new_val) ? 1 : 0;
+    } catch (...) {
+        return 0;
+    }
 }
 
 int brass_compiled_module_patch_call(brass_compiled_module_t* module, const char* site_name, const void* new_target) {
     if (!module || !module->module || !site_name) return 0;
-    return module->module->patch_call(site_name, new_target) ? 1 : 0;
+    try {
+        return module->module->patch_call(site_name, new_target) ? 1 : 0;
+    } catch (...) {
+        return 0;
+    }
 }
 
 int brass_compiled_module_patch_call_target(brass_compiled_module_t* module, const char* site_name, const char* new_target_fn) {
     if (!module || !module->module || !site_name || !new_target_fn) return 0;
-    return module->module->patch_call(site_name, std::string_view(new_target_fn)) ? 1 : 0;
+    try {
+        return module->module->patch_call(site_name, std::string_view(new_target_fn)) ? 1 : 0;
+    } catch (...) {
+        return 0;
+    }
 }
 
 size_t brass_compiled_module_walk_stack(
@@ -114,7 +152,11 @@ size_t brass_compiled_module_walk_stack(
     void* user_data
 ) {
     if (!module || !module->module || !visitor) return 0;
-    return module->module->walk_stack(rbp, return_ip, visitor, user_data);
+    try {
+        return module->module->walk_stack(rbp, return_ip, visitor, user_data);
+    } catch (...) {
+        return 0;
+    }
 }
 
 brass_gc_t* brass_host_gc_create(size_t semispace_size) {
@@ -126,7 +168,10 @@ brass_gc_t* brass_host_gc_create(size_t semispace_size) {
 }
 
 void brass_host_gc_destroy(brass_gc_t* gc) {
-    delete gc;
+    try {
+        delete gc;
+    } catch (...) {
+    }
 }
 
 uintptr_t brass_host_gc_allocate(brass_gc_t* gc, size_t size, uint64_t pointer_mask, uint32_t type_tag) {
@@ -149,32 +194,52 @@ brass_value_t brass_host_gc_allocate_value(brass_gc_t* gc, size_t size, uint64_t
 
 void brass_host_gc_collect(brass_gc_t* gc) {
     if (!gc) return;
-    gc->gc.collect();
+    try {
+        gc->gc.collect();
+    } catch (...) {
+    }
 }
 
 void brass_host_gc_safepoint(brass_gc_t* gc, uintptr_t rbp, uintptr_t return_ip) {
     if (!gc) return;
-    gc->gc.safepoint(rbp, return_ip);
+    try {
+        gc->gc.safepoint(rbp, return_ip);
+    } catch (...) {
+    }
 }
 
 void brass_host_gc_set_stress_mode(brass_gc_t* gc, int enable) {
     if (!gc) return;
-    gc->gc.set_stress_mode(enable != 0);
+    try {
+        gc->gc.set_stress_mode(enable != 0);
+    } catch (...) {
+    }
 }
 
 int brass_host_gc_get_stress_mode(const brass_gc_t* gc) {
     if (!gc) return 0;
-    return gc->gc.stress_mode() ? 1 : 0;
+    try {
+        return gc->gc.stress_mode() ? 1 : 0;
+    } catch (...) {
+        return 0;
+    }
 }
 
 size_t brass_host_gc_collection_count(const brass_gc_t* gc) {
     if (!gc) return 0;
-    return gc->gc.collection_count();
+    try {
+        return gc->gc.collection_count();
+    } catch (...) {
+        return 0;
+    }
 }
 
 void brass_host_gc_reset(brass_gc_t* gc) {
     if (!gc) return;
-    gc->gc.reset();
+    try {
+        gc->gc.reset();
+    } catch (...) {
+    }
 }
 
 brass_value_t brass_value_from_f64(double d) {
