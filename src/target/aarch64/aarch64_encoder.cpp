@@ -20,12 +20,48 @@ void AArch64Encoder::emit_add_sub_imm(bool is_64, bool is_sub, bool set_flags, G
     } else if ((imm & 0xFFFu) == 0 && (imm >> 12) <= 4095) {
         uint32_t inst = base | (1u << 22) | ((imm >> 12) << 10) | (reg_code(src) << 5) | reg_code(dst);
         buffer_.emit_inst(inst);
-    } else {
-        if (set_flags && (dst == GPR::XZR || reg_code(dst) == 31)) {
+    } else if (set_flags) {
+        if (dst == GPR::XZR || reg_code(dst) == 31) {
             throw std::invalid_argument("AArch64Encoder: flag-setting add/sub immediate cannot be split with XZR destination");
         }
-        // Materialize in scratch register (XZR is not usable, but if immediate is large we can split)
-        // Split into high and low:
+        // Materialize full constant into scratch register X16 so flags are set soundly in a single instruction
+        GPR scratch = (src == GPR::X16) ? GPR::X17 : GPR::X16;
+        if (is_64) {
+            mov(scratch, static_cast<uint64_t>(imm));
+            if (is_sub) {
+                subs(dst, src, scratch);
+            } else {
+                adds(dst, src, scratch);
+            }
+        } else {
+            mov32(scratch, imm);
+            if (is_sub) {
+                subs32(dst, src, scratch);
+            } else {
+                adds32(dst, src, scratch);
+            }
+        }
+    } else if ((imm & 0xFF000000u) != 0) {
+        // Bits 24..31 cannot fit in a 2-instruction 12-bit high/low split.
+        // Materialize full constant into scratch register X16 rather than silently truncating.
+        GPR scratch = (src == GPR::X16) ? GPR::X17 : GPR::X16;
+        if (is_64) {
+            mov(scratch, static_cast<uint64_t>(imm));
+            if (is_sub) {
+                sub(dst, src, scratch);
+            } else {
+                add(dst, src, scratch);
+            }
+        } else {
+            mov32(scratch, imm);
+            if (is_sub) {
+                sub32(dst, src, scratch);
+            } else {
+                add32(dst, src, scratch);
+            }
+        }
+    } else {
+        // Non-flag-setting immediate with bits 24..31 == 0: split into high (shifted) and low
         uint32_t low = imm & 0xFFFu;
         uint32_t high = imm & 0x00FFF000u;
         if (high != 0) {
@@ -47,11 +83,23 @@ void AArch64Encoder::emit_add_sub_imm(bool is_64, bool is_sub, bool set_flags, G
 // =============================================================================
 
 void AArch64Encoder::add(GPR dst, GPR src1, GPR src2) {
-    buffer_.emit_inst(0x8B000000u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+    if (dst == GPR::SP || src1 == GPR::SP) {
+        constexpr uint32_t option_uxtx = 0b011u;
+        buffer_.emit_inst(0x8B200000u | (reg_code(src2) << 16) | (option_uxtx << 13) |
+                          (reg_code(src1) << 5) | reg_code(dst));
+    } else {
+        buffer_.emit_inst(0x8B000000u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+    }
 }
 
 void AArch64Encoder::add32(GPR dst, GPR src1, GPR src2) {
-    buffer_.emit_inst(0x0B000000u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+    if (dst == GPR::SP || src1 == GPR::SP) {
+        constexpr uint32_t option_uxtw = 0b010u;
+        buffer_.emit_inst(0x0B200000u | (reg_code(src2) << 16) | (option_uxtw << 13) |
+                          (reg_code(src1) << 5) | reg_code(dst));
+    } else {
+        buffer_.emit_inst(0x0B000000u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+    }
 }
 
 void AArch64Encoder::add(GPR dst, GPR src, uint32_t imm) {
@@ -79,11 +127,23 @@ void AArch64Encoder::adds32(GPR dst, GPR src, uint32_t imm) {
 }
 
 void AArch64Encoder::sub(GPR dst, GPR src1, GPR src2) {
-    buffer_.emit_inst(0xCB000000u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+    if (dst == GPR::SP || src1 == GPR::SP) {
+        constexpr uint32_t option_uxtx = 0b011u;
+        buffer_.emit_inst(0xCB200000u | (reg_code(src2) << 16) | (option_uxtx << 13) |
+                          (reg_code(src1) << 5) | reg_code(dst));
+    } else {
+        buffer_.emit_inst(0xCB000000u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+    }
 }
 
 void AArch64Encoder::sub32(GPR dst, GPR src1, GPR src2) {
-    buffer_.emit_inst(0x4B000000u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+    if (dst == GPR::SP || src1 == GPR::SP) {
+        constexpr uint32_t option_uxtw = 0b010u;
+        buffer_.emit_inst(0x4B200000u | (reg_code(src2) << 16) | (option_uxtw << 13) |
+                          (reg_code(src1) << 5) | reg_code(dst));
+    } else {
+        buffer_.emit_inst(0x4B000000u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+    }
 }
 
 void AArch64Encoder::sub(GPR dst, GPR src, uint32_t imm) {
@@ -158,73 +218,7 @@ void AArch64Encoder::negs32(GPR dst, GPR src) {
     subs32(dst, GPR::XZR, src);
 }
 
-// =============================================================================
-// Logical: AND, BIC, ORR, ORN, EOR, EON, TST, MVN
-// =============================================================================
-
-void AArch64Encoder::and_(GPR dst, GPR src1, GPR src2) {
-    buffer_.emit_inst(0x8A000000u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
-}
-
-void AArch64Encoder::and32(GPR dst, GPR src1, GPR src2) {
-    buffer_.emit_inst(0x0A000000u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
-}
-
-void AArch64Encoder::bic(GPR dst, GPR src1, GPR src2) {
-    buffer_.emit_inst(0x8A200000u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
-}
-
-void AArch64Encoder::bic32(GPR dst, GPR src1, GPR src2) {
-    buffer_.emit_inst(0x0A200000u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
-}
-
-void AArch64Encoder::orr(GPR dst, GPR src1, GPR src2) {
-    buffer_.emit_inst(0xAA000000u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
-}
-
-void AArch64Encoder::orr32(GPR dst, GPR src1, GPR src2) {
-    buffer_.emit_inst(0x2A000000u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
-}
-
-void AArch64Encoder::orn(GPR dst, GPR src1, GPR src2) {
-    buffer_.emit_inst(0xAA200000u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
-}
-
-void AArch64Encoder::orn32(GPR dst, GPR src1, GPR src2) {
-    buffer_.emit_inst(0x2A200000u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
-}
-
-void AArch64Encoder::eor(GPR dst, GPR src1, GPR src2) {
-    buffer_.emit_inst(0xCA000000u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
-}
-
-void AArch64Encoder::eor32(GPR dst, GPR src1, GPR src2) {
-    buffer_.emit_inst(0x4A000000u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
-}
-
-void AArch64Encoder::eon(GPR dst, GPR src1, GPR src2) {
-    buffer_.emit_inst(0xCA200000u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
-}
-
-void AArch64Encoder::eon32(GPR dst, GPR src1, GPR src2) {
-    buffer_.emit_inst(0x4A200000u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
-}
-
-void AArch64Encoder::tst(GPR src1, GPR src2) {
-    buffer_.emit_inst(0xEA000000u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | 31u);
-}
-
-void AArch64Encoder::tst32(GPR src1, GPR src2) {
-    buffer_.emit_inst(0x6A000000u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | 31u);
-}
-
-void AArch64Encoder::mvn(GPR dst, GPR src) {
-    orn(dst, GPR::XZR, src);
-}
-
-void AArch64Encoder::mvn32(GPR dst, GPR src) {
-    orn32(dst, GPR::XZR, src);
-}
+// Logical operations (register & immediate) are implemented in aarch64_encoder_logical.cpp
 
 // =============================================================================
 // Multiply & Divide
@@ -553,7 +547,11 @@ void AArch64Encoder::b(Label target) {
     size_t patch_off = buffer_.size();
     if (buffer_.is_bound(target)) {
         int64_t disp = static_cast<int64_t>(buffer_.label_offset(target)) - static_cast<int64_t>(patch_off);
-        uint32_t imm26 = static_cast<uint32_t>(disp >> 2) & 0x03FFFFFFu;
+        int64_t wdisp = disp >> 2;
+        if (wdisp < -(1 << 25) || wdisp > ((1 << 25) - 1)) {
+            throw std::runtime_error("AArch64Encoder: Branch target out of 26-bit range");
+        }
+        uint32_t imm26 = static_cast<uint32_t>(wdisp) & 0x03FFFFFFu;
         buffer_.emit_inst(0x14000000u | imm26);
     } else {
         buffer_.emit_inst(0x14000000u);
@@ -566,7 +564,11 @@ void AArch64Encoder::b(Condition cond, Label target) {
     uint32_t base = 0x54000000u | static_cast<uint32_t>(cond);
     if (buffer_.is_bound(target)) {
         int64_t disp = static_cast<int64_t>(buffer_.label_offset(target)) - static_cast<int64_t>(patch_off);
-        uint32_t imm19 = static_cast<uint32_t>(disp >> 2) & 0x0007FFFFu;
+        int64_t wdisp = disp >> 2;
+        if (wdisp < -(1 << 18) || wdisp > ((1 << 18) - 1)) {
+            throw std::runtime_error("AArch64Encoder: Conditional branch target out of 19-bit range");
+        }
+        uint32_t imm19 = static_cast<uint32_t>(wdisp) & 0x0007FFFFu;
         buffer_.emit_inst(base | (imm19 << 5));
     } else {
         buffer_.emit_inst(base);
@@ -578,7 +580,11 @@ void AArch64Encoder::bl(Label target) {
     size_t patch_off = buffer_.size();
     if (buffer_.is_bound(target)) {
         int64_t disp = static_cast<int64_t>(buffer_.label_offset(target)) - static_cast<int64_t>(patch_off);
-        uint32_t imm26 = static_cast<uint32_t>(disp >> 2) & 0x03FFFFFFu;
+        int64_t wdisp = disp >> 2;
+        if (wdisp < -(1 << 25) || wdisp > ((1 << 25) - 1)) {
+            throw std::runtime_error("AArch64Encoder: Branch target out of 26-bit range");
+        }
+        uint32_t imm26 = static_cast<uint32_t>(wdisp) & 0x03FFFFFFu;
         buffer_.emit_inst(0x94000000u | imm26);
     } else {
         buffer_.emit_inst(0x94000000u);
@@ -615,7 +621,11 @@ void AArch64Encoder::cbz(GPR reg, Label target) {
     uint32_t base = 0xB4000000u | reg_code(reg);
     if (buffer_.is_bound(target)) {
         int64_t disp = static_cast<int64_t>(buffer_.label_offset(target)) - static_cast<int64_t>(patch_off);
-        uint32_t imm19 = static_cast<uint32_t>(disp >> 2) & 0x0007FFFFu;
+        int64_t wdisp = disp >> 2;
+        if (wdisp < -(1 << 18) || wdisp > ((1 << 18) - 1)) {
+            throw std::runtime_error("AArch64Encoder: Conditional branch target out of 19-bit range");
+        }
+        uint32_t imm19 = static_cast<uint32_t>(wdisp) & 0x0007FFFFu;
         buffer_.emit_inst(base | (imm19 << 5));
     } else {
         buffer_.emit_inst(base);
@@ -628,7 +638,11 @@ void AArch64Encoder::cbz32(GPR reg, Label target) {
     uint32_t base = 0x34000000u | reg_code(reg);
     if (buffer_.is_bound(target)) {
         int64_t disp = static_cast<int64_t>(buffer_.label_offset(target)) - static_cast<int64_t>(patch_off);
-        uint32_t imm19 = static_cast<uint32_t>(disp >> 2) & 0x0007FFFFu;
+        int64_t wdisp = disp >> 2;
+        if (wdisp < -(1 << 18) || wdisp > ((1 << 18) - 1)) {
+            throw std::runtime_error("AArch64Encoder: Conditional branch target out of 19-bit range");
+        }
+        uint32_t imm19 = static_cast<uint32_t>(wdisp) & 0x0007FFFFu;
         buffer_.emit_inst(base | (imm19 << 5));
     } else {
         buffer_.emit_inst(base);
@@ -641,7 +655,11 @@ void AArch64Encoder::cbnz(GPR reg, Label target) {
     uint32_t base = 0xB5000000u | reg_code(reg);
     if (buffer_.is_bound(target)) {
         int64_t disp = static_cast<int64_t>(buffer_.label_offset(target)) - static_cast<int64_t>(patch_off);
-        uint32_t imm19 = static_cast<uint32_t>(disp >> 2) & 0x0007FFFFu;
+        int64_t wdisp = disp >> 2;
+        if (wdisp < -(1 << 18) || wdisp > ((1 << 18) - 1)) {
+            throw std::runtime_error("AArch64Encoder: Conditional branch target out of 19-bit range");
+        }
+        uint32_t imm19 = static_cast<uint32_t>(wdisp) & 0x0007FFFFu;
         buffer_.emit_inst(base | (imm19 << 5));
     } else {
         buffer_.emit_inst(base);
@@ -654,7 +672,11 @@ void AArch64Encoder::cbnz32(GPR reg, Label target) {
     uint32_t base = 0x35000000u | reg_code(reg);
     if (buffer_.is_bound(target)) {
         int64_t disp = static_cast<int64_t>(buffer_.label_offset(target)) - static_cast<int64_t>(patch_off);
-        uint32_t imm19 = static_cast<uint32_t>(disp >> 2) & 0x0007FFFFu;
+        int64_t wdisp = disp >> 2;
+        if (wdisp < -(1 << 18) || wdisp > ((1 << 18) - 1)) {
+            throw std::runtime_error("AArch64Encoder: Conditional branch target out of 19-bit range");
+        }
+        uint32_t imm19 = static_cast<uint32_t>(wdisp) & 0x0007FFFFu;
         buffer_.emit_inst(base | (imm19 << 5));
     } else {
         buffer_.emit_inst(base);

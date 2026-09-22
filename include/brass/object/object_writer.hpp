@@ -68,6 +68,7 @@ enum class RelocKind : uint8_t {
     // symbol before the image is laid out (relax_got_loads), so only
     // imports go through a slot.
     GotPCRel32,
+    AdrPage21, // AArch64 ADRP page-relative relocation (R_AARCH64_ADR_PREL_PG_HI21)
 };
 
 struct ObjectRelocation {

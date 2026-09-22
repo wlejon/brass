@@ -3,6 +3,7 @@
 #include <brass/target/aarch64/aarch64_registers.hpp>
 #include <brass/target/aarch64/aarch64_operands.hpp>
 #include <brass/target/aarch64/code_buffer.hpp>
+#include <brass/target/aarch64/aarch64_logical_imm.hpp>
 #include <cstdint>
 #include <cstddef>
 #include <string>
@@ -86,6 +87,22 @@ public:
     // MVN (alias for ORN dst, XZR, src)
     void mvn(GPR dst, GPR src);
     void mvn32(GPR dst, GPR src);
+
+    // Logical Immediates (ARMv8 Bitmask)
+    static bool encode_logical_immediate(uint64_t val, bool is_64bit, uint32_t& n, uint32_t& immr, uint32_t& imms) noexcept {
+        return ::brass::aarch64::encode_logical_immediate(val, is_64bit, n, immr, imms);
+    }
+
+    void and_imm(GPR dst, GPR src, uint64_t imm);
+    void and32_imm(GPR dst, GPR src, uint32_t imm);
+    void orr_imm(GPR dst, GPR src, uint64_t imm);
+    void orr32_imm(GPR dst, GPR src, uint32_t imm);
+    void eor_imm(GPR dst, GPR src, uint64_t imm);
+    void eor32_imm(GPR dst, GPR src, uint32_t imm);
+    void ands_imm(GPR dst, GPR src, uint64_t imm);
+    void ands32_imm(GPR dst, GPR src, uint32_t imm);
+    void tst_imm(GPR src, uint64_t imm);
+    void tst32_imm(GPR src, uint32_t imm);
 
     // =========================================================================
     // Multiply & Divide
@@ -335,6 +352,7 @@ private:
     CodeBuffer& buffer_;
 
     void emit_add_sub_imm(bool is_64, bool is_sub, bool set_flags, GPR dst, GPR src, uint32_t imm);
+    void emit_logical_imm(uint32_t opc, bool is_64, GPR dst, GPR src, uint64_t imm);
     void emit_load_store_imm(bool is_load, uint8_t size_bytes, bool is_signed, GPR reg, const MemAddress& mem);
     void emit_load_store_pair(bool is_load, bool is_64, GPR reg1, GPR reg2, const MemAddress& mem);
 };

@@ -304,8 +304,13 @@ void AArch64EmitContext::emit_alu_instruction(const LirInst& inst) {
             if (src2.is_preg()) {
                 enc_.and_(dst, src1, to_gpr(src2));
             } else if (src2.is_imm_int()) {
-                enc_.mov(GPR::X16, static_cast<uint64_t>(src2.imm_int));
-                enc_.and_(dst, src1, GPR::X16);
+                uint32_t n, immr, imms;
+                if (AArch64Encoder::encode_logical_immediate(static_cast<uint64_t>(src2.imm_int), true, n, immr, imms)) {
+                    enc_.and_imm(dst, src1, static_cast<uint64_t>(src2.imm_int));
+                } else {
+                    enc_.mov(GPR::X16, static_cast<uint64_t>(src2.imm_int));
+                    enc_.and_(dst, src1, GPR::X16);
+                }
             } else {
                 enc_.ldr(GPR::X16, ensure_accessible_mem(to_mem_address(src2)));
                 enc_.and_(dst, src1, GPR::X16);
@@ -320,8 +325,13 @@ void AArch64EmitContext::emit_alu_instruction(const LirInst& inst) {
             if (src2.is_preg()) {
                 enc_.and32(dst, src1, to_gpr(src2));
             } else if (src2.is_imm_int()) {
-                enc_.mov32(GPR::X16, static_cast<uint32_t>(src2.imm_int));
-                enc_.and32(dst, src1, GPR::X16);
+                uint32_t n, immr, imms;
+                if (AArch64Encoder::encode_logical_immediate(static_cast<uint32_t>(src2.imm_int), false, n, immr, imms)) {
+                    enc_.and32_imm(dst, src1, static_cast<uint32_t>(src2.imm_int));
+                } else {
+                    enc_.mov32(GPR::X16, static_cast<uint32_t>(src2.imm_int));
+                    enc_.and32(dst, src1, GPR::X16);
+                }
             } else {
                 enc_.ldr32(GPR::X16, ensure_accessible_mem(to_mem_address(src2)));
                 enc_.and32(dst, src1, GPR::X16);
@@ -336,8 +346,13 @@ void AArch64EmitContext::emit_alu_instruction(const LirInst& inst) {
             if (src2.is_preg()) {
                 enc_.orr(dst, src1, to_gpr(src2));
             } else if (src2.is_imm_int()) {
-                enc_.mov(GPR::X16, static_cast<uint64_t>(src2.imm_int));
-                enc_.orr(dst, src1, GPR::X16);
+                uint32_t n, immr, imms;
+                if (AArch64Encoder::encode_logical_immediate(static_cast<uint64_t>(src2.imm_int), true, n, immr, imms)) {
+                    enc_.orr_imm(dst, src1, static_cast<uint64_t>(src2.imm_int));
+                } else {
+                    enc_.mov(GPR::X16, static_cast<uint64_t>(src2.imm_int));
+                    enc_.orr(dst, src1, GPR::X16);
+                }
             } else {
                 enc_.ldr(GPR::X16, ensure_accessible_mem(to_mem_address(src2)));
                 enc_.orr(dst, src1, GPR::X16);
@@ -352,8 +367,13 @@ void AArch64EmitContext::emit_alu_instruction(const LirInst& inst) {
             if (src2.is_preg()) {
                 enc_.orr32(dst, src1, to_gpr(src2));
             } else if (src2.is_imm_int()) {
-                enc_.mov32(GPR::X16, static_cast<uint32_t>(src2.imm_int));
-                enc_.orr32(dst, src1, GPR::X16);
+                uint32_t n, immr, imms;
+                if (AArch64Encoder::encode_logical_immediate(static_cast<uint32_t>(src2.imm_int), false, n, immr, imms)) {
+                    enc_.orr32_imm(dst, src1, static_cast<uint32_t>(src2.imm_int));
+                } else {
+                    enc_.mov32(GPR::X16, static_cast<uint32_t>(src2.imm_int));
+                    enc_.orr32(dst, src1, GPR::X16);
+                }
             } else {
                 enc_.ldr32(GPR::X16, ensure_accessible_mem(to_mem_address(src2)));
                 enc_.orr32(dst, src1, GPR::X16);
@@ -368,8 +388,13 @@ void AArch64EmitContext::emit_alu_instruction(const LirInst& inst) {
             if (src2.is_preg()) {
                 enc_.eor(dst, src1, to_gpr(src2));
             } else if (src2.is_imm_int()) {
-                enc_.mov(GPR::X16, static_cast<uint64_t>(src2.imm_int));
-                enc_.eor(dst, src1, GPR::X16);
+                uint32_t n, immr, imms;
+                if (AArch64Encoder::encode_logical_immediate(static_cast<uint64_t>(src2.imm_int), true, n, immr, imms)) {
+                    enc_.eor_imm(dst, src1, static_cast<uint64_t>(src2.imm_int));
+                } else {
+                    enc_.mov(GPR::X16, static_cast<uint64_t>(src2.imm_int));
+                    enc_.eor(dst, src1, GPR::X16);
+                }
             } else {
                 enc_.ldr(GPR::X16, ensure_accessible_mem(to_mem_address(src2)));
                 enc_.eor(dst, src1, GPR::X16);
@@ -384,8 +409,13 @@ void AArch64EmitContext::emit_alu_instruction(const LirInst& inst) {
             if (src2.is_preg()) {
                 enc_.eor32(dst, src1, to_gpr(src2));
             } else if (src2.is_imm_int()) {
-                enc_.mov32(GPR::X16, static_cast<uint32_t>(src2.imm_int));
-                enc_.eor32(dst, src1, GPR::X16);
+                uint32_t n, immr, imms;
+                if (AArch64Encoder::encode_logical_immediate(static_cast<uint32_t>(src2.imm_int), false, n, immr, imms)) {
+                    enc_.eor32_imm(dst, src1, static_cast<uint32_t>(src2.imm_int));
+                } else {
+                    enc_.mov32(GPR::X16, static_cast<uint32_t>(src2.imm_int));
+                    enc_.eor32(dst, src1, GPR::X16);
+                }
             } else {
                 enc_.ldr32(GPR::X16, ensure_accessible_mem(to_mem_address(src2)));
                 enc_.eor32(dst, src1, GPR::X16);
@@ -591,8 +621,13 @@ void AArch64EmitContext::emit_alu_instruction(const LirInst& inst) {
             if (op1.is_preg()) {
                 enc_.tst(op0, to_gpr(op1));
             } else if (op1.is_imm_int()) {
-                enc_.mov(GPR::X16, static_cast<uint64_t>(op1.imm_int));
-                enc_.tst(op0, GPR::X16);
+                uint32_t n, immr, imms;
+                if (AArch64Encoder::encode_logical_immediate(static_cast<uint64_t>(op1.imm_int), true, n, immr, imms)) {
+                    enc_.tst_imm(op0, static_cast<uint64_t>(op1.imm_int));
+                } else {
+                    enc_.mov(GPR::X16, static_cast<uint64_t>(op1.imm_int));
+                    enc_.tst(op0, GPR::X16);
+                }
             } else {
                 enc_.ldr(GPR::X16, ensure_accessible_mem(to_mem_address(op1)));
                 enc_.tst(op0, GPR::X16);
@@ -606,8 +641,13 @@ void AArch64EmitContext::emit_alu_instruction(const LirInst& inst) {
             if (op1.is_preg()) {
                 enc_.tst32(op0, to_gpr(op1));
             } else if (op1.is_imm_int()) {
-                enc_.mov32(GPR::X16, static_cast<uint32_t>(op1.imm_int));
-                enc_.tst32(op0, GPR::X16);
+                uint32_t n, immr, imms;
+                if (AArch64Encoder::encode_logical_immediate(static_cast<uint32_t>(op1.imm_int), false, n, immr, imms)) {
+                    enc_.tst32_imm(op0, static_cast<uint32_t>(op1.imm_int));
+                } else {
+                    enc_.mov32(GPR::X16, static_cast<uint32_t>(op1.imm_int));
+                    enc_.tst32(op0, GPR::X16);
+                }
             } else {
                 enc_.ldr32(GPR::X16, ensure_accessible_mem(to_mem_address(op1)));
                 enc_.tst32(op0, GPR::X16);

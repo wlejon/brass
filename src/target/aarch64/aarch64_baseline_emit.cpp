@@ -144,7 +144,7 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
     buffer.bind(fn_entry_label);
 
     // 2. Prologue: stp fp, lr, [sp, #-frame_size]!; mov fp, sp
-    if (frame_size <= 512) {
+    if (frame_size <= 504) {
         enc.stp(GPR::FP, GPR::LR, pre_idx(GPR::SP, -frame_size));
     } else {
         if (frame_size <= 4095) {
@@ -456,7 +456,7 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
                             enc.ldr(GPR::X0, emitter.slot_addr(rval));
                         }
                     }
-                    if (frame_size <= 512) {
+                    if (frame_size <= 504) {
                         enc.ldp(GPR::FP, GPR::LR, post_idx(GPR::SP, frame_size));
                     } else {
                         enc.ldp(GPR::FP, GPR::LR, ptr(GPR::SP, 0));

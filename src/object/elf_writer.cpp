@@ -51,13 +51,14 @@ void align_buf(std::vector<uint8_t>& buf, size_t align) {
 uint32_t to_elf_reloc_type(RelocKind kind, bool is_aarch64) {
     if (is_aarch64) {
         switch (kind) {
-            case RelocKind::Plt32:    return elf::R_AARCH64_CALL26;
-            case RelocKind::PCRel32:  return elf::R_AARCH64_PREL32;
-            case RelocKind::SecRel32: return elf::R_AARCH64_ADD_ABS_LO12_NC;
-            case RelocKind::Abs64:    return elf::R_AARCH64_ABS64;
-            case RelocKind::Abs32:    return elf::R_AARCH64_ABS32;
-            case RelocKind::Addr32NB: return elf::R_AARCH64_PREL32;
-            case RelocKind::SecIdx:   return elf::R_AARCH64_NONE;
+            case RelocKind::Plt32:     return elf::R_AARCH64_CALL26;
+            case RelocKind::PCRel32:   return elf::R_AARCH64_PREL32;
+            case RelocKind::AdrPage21: return elf::R_AARCH64_ADR_PREL_PG_HI21;
+            case RelocKind::SecRel32:  return elf::R_AARCH64_ADD_ABS_LO12_NC;
+            case RelocKind::Abs64:     return elf::R_AARCH64_ABS64;
+            case RelocKind::Abs32:     return elf::R_AARCH64_ABS32;
+            case RelocKind::Addr32NB:  return elf::R_AARCH64_PREL32;
+            case RelocKind::SecIdx:    return elf::R_AARCH64_NONE;
             case RelocKind::GotPCRel32: return elf::R_AARCH64_NONE;   // x64 only
         }
         return elf::R_AARCH64_PREL32;
@@ -71,6 +72,7 @@ uint32_t to_elf_reloc_type(RelocKind kind, bool is_aarch64) {
         case RelocKind::SecRel32: return elf::R_X86_64_32;
         case RelocKind::SecIdx:   return elf::R_X86_64_NONE;
         case RelocKind::GotPCRel32: return elf::R_X86_64_REX_GOTPCRELX;
+        case RelocKind::AdrPage21: return elf::R_X86_64_PC32;
     }
     return elf::R_X86_64_PC32;
 }

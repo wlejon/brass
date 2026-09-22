@@ -262,7 +262,7 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
                         obj_r.kind = RelocKind::Plt32;
                         break;
                     case aarch64::RelocationKind::Page21:
-                        obj_r.kind = RelocKind::PCRel32;
+                        obj_r.kind = RelocKind::AdrPage21;
                         break;
                     case aarch64::RelocationKind::PageOff12:
                         obj_r.kind = RelocKind::SecRel32;

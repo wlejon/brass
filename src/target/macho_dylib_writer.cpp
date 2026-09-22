@@ -346,7 +346,7 @@ std::vector<uint8_t> MachODylibWriter::write() {
                 if (r.kind == RelocKind::Plt32) {
                     const int64_t disp = static_cast<int64_t>(target) + r.addend - static_cast<int64_t>(at);
                     inst = (inst & 0xFC000000u) | (static_cast<uint32_t>(disp >> 2) & 0x03FFFFFFu);
-                } else if (r.kind == RelocKind::PCRel32) {
+                } else if (r.kind == RelocKind::PCRel32 || r.kind == RelocKind::AdrPage21) {
                     inst = (inst & 0x9F00001Fu) | (aarch64_adrp(0, at, target) & 0x60FFFFE0u);
                 } else if (r.kind == RelocKind::SecRel32) {
                     inst = (inst & 0xFFC003FFu) | (static_cast<uint32_t>(target & 0xFFFu) << 10);

@@ -694,6 +694,7 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
                     }
                     break;
                 }
+                case object::RelocKind::AdrPage21:
                 case object::RelocKind::PCRel32: {
                     if (target_.is_aarch64()) {
                         int64_t page_diff = (reinterpret_cast<int64_t>(target_addr) >> 12) - (reinterpret_cast<int64_t>(patch_loc) >> 12);

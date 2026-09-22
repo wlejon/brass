@@ -99,6 +99,8 @@ struct ElfSoOptions {
     std::vector<ImportLibrary> imports;
     // DT_RUNPATH entries, in order.
     std::vector<std::string> rpaths;
+    // Page alignment for loadable segments (0 = default: 0x10000 for AArch64, 0x1000 for x86_64).
+    uint64_t page_size = 0;
 };
 
 class ElfSoWriter {

@@ -462,7 +462,7 @@ std::vector<uint8_t> MachOWriter::write() {
                     r_type = macho::ARM64_RELOC_BRANCH26;
                     r_pcrel = 1;
                     r_length = 2;
-                } else if (r.kind == RelocKind::PCRel32) {
+                } else if (r.kind == RelocKind::PCRel32 || r.kind == RelocKind::AdrPage21) {
                     r_type = macho::ARM64_RELOC_PAGE21;
                     r_pcrel = 1;
                     r_length = 2;

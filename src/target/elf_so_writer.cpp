@@ -89,6 +89,7 @@ std::vector<uint8_t> ElfSoWriter::write() {
     error_.clear();
     object::ObjectFile working_obj = obj_;
     const bool aarch64 = working_obj.target.is_aarch64();
+    const uint64_t page_size = options_.page_size != 0 ? options_.page_size : (aarch64 ? 0x10000ULL : 0x1000ULL);
     // Loads of the object's own symbols become `lea`s; what is left loads
     // an import's GOT slot.
     object::relax_got_loads(working_obj);
@@ -280,18 +281,18 @@ std::vector<uint8_t> ElfSoWriter::write() {
     place(rela_idx);
     const uint64_t seg_r_end = cur;
 
-    cur = align_up(cur, PAGE_SIZE);
+    cur = align_up(cur, page_size);
     const uint64_t seg_rx_start = cur;
     place(text_idx);
     if (plt_idx) place(plt_idx);
     const uint64_t seg_rx_end = cur;
 
-    cur = align_up(cur, PAGE_SIZE);
+    cur = align_up(cur, page_size);
     const uint64_t seg_rw_start = cur;
     if (rodata_idx) place(rodata_idx);
     if (got_idx) place(got_idx);
     place(dynamic_idx);
-    const uint64_t relro_end = align_up(cur, PAGE_SIZE);
+    const uint64_t relro_end = align_up(cur, page_size);
     if (data_idx) {
         cur = relro_end;
         place(data_idx);
@@ -526,11 +527,11 @@ std::vector<uint8_t> ElfSoWriter::write() {
         write_u64(out, align);
     };
     write_phdr(elf64::PT_PHDR, elf64::PF_R, 64, 64, PHDR_COUNT * 56, PHDR_COUNT * 56, 8);
-    write_phdr(elf64::PT_LOAD, elf64::PF_R, 0, 0, seg_r_end, seg_r_end, PAGE_SIZE);
+    write_phdr(elf64::PT_LOAD, elf64::PF_R, 0, 0, seg_r_end, seg_r_end, page_size);
     write_phdr(elf64::PT_LOAD, elf64::PF_R | elf64::PF_X, seg_rx_start, seg_rx_start,
-               seg_rx_end - seg_rx_start, seg_rx_end - seg_rx_start, PAGE_SIZE);
+               seg_rx_end - seg_rx_start, seg_rx_end - seg_rx_start, page_size);
     write_phdr(elf64::PT_LOAD, elf64::PF_R | elf64::PF_W, seg_rw_start, seg_rw_start,
-               seg_rw_end - seg_rw_start, seg_rw_end - seg_rw_start, PAGE_SIZE);
+               seg_rw_end - seg_rw_start, seg_rw_end - seg_rw_start, page_size);
     write_phdr(elf64::PT_DYNAMIC, elf64::PF_R | elf64::PF_W, sections[dynamic_idx].sh_offset,
                sections[dynamic_idx].sh_addr, sections[dynamic_idx].sh_size, sections[dynamic_idx].sh_size, 8);
     write_phdr(elf64::PT_GNU_RELRO, elf64::PF_R, seg_rw_start, seg_rw_start, relro_end - seg_rw_start,

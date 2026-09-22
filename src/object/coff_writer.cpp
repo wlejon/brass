@@ -52,6 +52,7 @@ uint16_t to_coff_reloc_type(RelocKind kind, bool is_aarch64) {
         switch (kind) {
             case RelocKind::Plt32:    return coff::IMAGE_REL_ARM64_BRANCH26;
             case RelocKind::PCRel32:  return coff::IMAGE_REL_ARM64_PAGE21;
+            case RelocKind::AdrPage21: return coff::IMAGE_REL_ARM64_PAGE21;
             case RelocKind::SecRel32: return coff::IMAGE_REL_ARM64_PAGEOFFSET_12A;
             case RelocKind::Abs64:    return coff::IMAGE_REL_ARM64_ADDR64;
             case RelocKind::Addr32NB: return coff::IMAGE_REL_ARM64_ADDR32NB;
@@ -64,6 +65,7 @@ uint16_t to_coff_reloc_type(RelocKind kind, bool is_aarch64) {
     switch (kind) {
         case RelocKind::PCRel32:
         case RelocKind::Plt32:
+        case RelocKind::AdrPage21:
         case RelocKind::GotPCRel32:   // none left after materialize_got_slots
             return coff::IMAGE_REL_AMD64_REL32;
         case RelocKind::Abs64:
@@ -269,6 +271,7 @@ std::vector<uint8_t> CoffWriter::write() {
         for (const auto& r : sec.relocations) {
             if (r.addend != 0) {
                 if (r.kind == RelocKind::Addr32NB || r.kind == RelocKind::PCRel32 ||
+                    r.kind == RelocKind::AdrPage21 ||
                     r.kind == RelocKind::SecRel32 || r.kind == RelocKind::Abs32) {
                     if (r.offset + 4 <= sec.data.size()) {
                         uint32_t current_val = 0;
