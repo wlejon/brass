@@ -52,10 +52,14 @@ bool should_inline_call(
 ) {
     (void)site;
     if (&caller == &callee) return false;
+    if (caller.name().starts_with("__wrapper_") || callee.name().starts_with("__wrapper_")) return false;
     if (callee.blocks().empty() || !callee.entry_block()) return false;
 
     // Reject recursive cycles to prevent code explosion
     if (cg.is_recursive(&callee)) return false;
+
+    // If restricted to leaf functions for stack trace / unwind safety, reject non-leaf callees
+    if (options.only_inline_leaf_functions && !cg.is_leaf(&callee)) return false;
 
     size_t effective_max_depth = options.max_inline_depth;
     double threshold = static_cast<double>(options.leaf_instruction_threshold);

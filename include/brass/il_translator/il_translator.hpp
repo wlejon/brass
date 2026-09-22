@@ -55,6 +55,7 @@ struct TranslatorOptions {
     bool enable_f64_demote = true;
     bool demote_stats = false;
     bool enable_inlining = false;
+    bool inline_leaf_only = true;
     bool enable_sroa = false;
     bool enable_gvn = true;
     bool enable_sccp = true;

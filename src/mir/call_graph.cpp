@@ -141,7 +141,7 @@ void CallGraph::build() {
             }
         }
 
-        node->is_leaf = node->callees.empty();
+        node->is_leaf = node->call_sites.empty();
     }
 
     // 3. Compute SCCs and bottom-up order

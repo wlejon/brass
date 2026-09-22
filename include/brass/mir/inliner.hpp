@@ -26,6 +26,7 @@ struct InlinerOptions {
     bool enable_gvn = true;
     const pgo::ProfileData* profile_data = nullptr;
     bool enable_pgo = true;
+    bool only_inline_leaf_functions = false;
 };
 
 // Profitability decision for inlining a specific call site
