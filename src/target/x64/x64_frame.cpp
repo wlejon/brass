@@ -30,7 +30,7 @@ void X64FrameLayout::compute_layout(codegen::FrameInfo& frame, const CallingConv
     auto saved_gprs = get_saved_callee_gprs(frame);
     auto saved_xmms = get_saved_callee_xmms(frame);
 
-    size_t gpr_bytes = saved_gprs.size() * 8;
+    size_t gpr_bytes = saved_xmms.empty() ? (saved_gprs.size() * 8) : ((saved_gprs.size() * 8 + 15) & ~size_t(15));
     size_t xmm_bytes = saved_xmms.size() * 16;
     size_t spill_bytes = frame.num_spill_slots * 8;
     size_t local_bytes = (frame.local_frame_bytes + 15) & ~size_t(15);
@@ -62,7 +62,7 @@ MemAddress X64FrameLayout::callee_gpr_address(GPR reg, const codegen::FrameInfo&
 MemAddress X64FrameLayout::callee_xmm_address(XMM reg, const codegen::FrameInfo& frame) {
     auto saved_gprs = get_saved_callee_gprs(frame);
     auto saved_xmms = get_saved_callee_xmms(frame);
-    size_t gpr_offset = saved_gprs.size() * 8;
+    size_t gpr_offset = (saved_gprs.size() * 8 + 15) & ~size_t(15);
 
     for (size_t i = 0; i < saved_xmms.size(); ++i) {
         if (saved_xmms[i] == reg) {
@@ -76,7 +76,7 @@ MemAddress X64FrameLayout::callee_xmm_address(XMM reg, const codegen::FrameInfo&
 MemAddress X64FrameLayout::spill_slot_address(int32_t slot_idx, const codegen::FrameInfo& frame) {
     auto saved_gprs = get_saved_callee_gprs(frame);
     auto saved_xmms = get_saved_callee_xmms(frame);
-    size_t gpr_offset = saved_gprs.size() * 8;
+    size_t gpr_offset = saved_xmms.empty() ? (saved_gprs.size() * 8) : ((saved_gprs.size() * 8 + 15) & ~size_t(15));
     size_t xmm_offset = saved_xmms.size() * 16;
     int32_t base_offset = static_cast<int32_t>(gpr_offset + xmm_offset);
 
@@ -87,7 +87,7 @@ MemAddress X64FrameLayout::spill_slot_address(int32_t slot_idx, const codegen::F
 MemAddress X64FrameLayout::local_frame_address(int32_t offset, const codegen::FrameInfo& frame) {
     auto saved_gprs = get_saved_callee_gprs(frame);
     auto saved_xmms = get_saved_callee_xmms(frame);
-    size_t gpr_offset = saved_gprs.size() * 8;
+    size_t gpr_offset = saved_xmms.empty() ? (saved_gprs.size() * 8) : ((saved_gprs.size() * 8 + 15) & ~size_t(15));
     size_t xmm_offset = saved_xmms.size() * 16;
     int32_t base_offset = static_cast<int32_t>(gpr_offset + xmm_offset);
     int32_t spill_bytes = static_cast<int32_t>(frame.num_spill_slots * 8);

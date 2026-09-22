@@ -131,16 +131,20 @@ void ElfCfiBuilder::build_eh_frame(
 
         if (!fn.frame_info.is_leaf) {
             if (is_aarch64) {
-                uint8_t num_insts = (fn.frame_info.total_frame_size <= 512) ? 2 : 3;
+                uint64_t total_size = fn.frame_info.total_frame_size > 0 ? fn.frame_info.total_frame_size : 16;
+                uint64_t outgoing_bytes = (fn.frame_info.outgoing_arg_space + 15) & ~size_t(15);
+                uint64_t cfa_offset = total_size >= outgoing_bytes ? (total_size - outgoing_bytes) : total_size;
+                if (cfa_offset == 0) cfa_offset = 16;
+
+                uint8_t num_insts = (total_size <= 504 && outgoing_bytes == 0) ? 2 : 3;
                 eh_frame_sec.emit8(elf::DW_CFA_advance_loc | num_insts);
 
                 // DW_CFA_def_cfa register 29 (FP), offset
                 eh_frame_sec.emit8(elf::DW_CFA_def_cfa);
                 eh_frame_sec.emit8(29); // FP (X29)
-                uint64_t total_size = fn.frame_info.total_frame_size > 0 ? fn.frame_info.total_frame_size : 16;
-                emit_uleb128(eh_frame_sec, total_size);
+                emit_uleb128(eh_frame_sec, cfa_offset);
 
-                uint64_t fp_factored = total_size / 8;
+                uint64_t fp_factored = cfa_offset / 8;
                 uint64_t lr_factored = fp_factored > 0 ? fp_factored - 1 : 1;
 
                 // DW_CFA_offset for 29 (FP)
@@ -155,9 +159,22 @@ void ElfCfiBuilder::build_eh_frame(
                 auto saved_gprs = aarch64::AArch64FrameLayout::get_saved_callee_gprs(fn.frame_info);
                 for (size_t i = 0; i < saved_gprs.size(); ++i) {
                     uint8_t dreg = static_cast<uint8_t>(saved_gprs[i]);
-                    uint64_t gpr_factored = (total_size >= (16 + (i + 1) * 8)) ? (total_size - (16 + i * 8)) / 8 : (i + 2);
+                    uint64_t gpr_factored = (cfa_offset >= (16 + (i + 1) * 8)) ? (cfa_offset - (16 + i * 8)) / 8 : (i + 2);
                     eh_frame_sec.emit8(elf::DW_CFA_offset | dreg);
                     emit_uleb128(eh_frame_sec, gpr_factored);
+                }
+
+                // Callee-saved FPRs (V8..V15)
+                auto saved_fprs = aarch64::AArch64FrameLayout::get_saved_callee_fprs(fn.frame_info);
+                size_t gpr_bytes = saved_gprs.size() * 8;
+                for (size_t j = 0; j < saved_fprs.size(); ++j) {
+                    uint8_t dreg = static_cast<uint8_t>(64 + (static_cast<uint8_t>(saved_fprs[j]) - 8));
+                    uint64_t fpr_factored = (cfa_offset >= (16 + gpr_bytes + (j + 1) * 8))
+                        ? (cfa_offset - (16 + gpr_bytes + j * 8)) / 8
+                        : (saved_gprs.size() + j + 2);
+                    eh_frame_sec.emit8(elf::DW_CFA_offset_extended);
+                    emit_uleb128(eh_frame_sec, dreg);
+                    emit_uleb128(eh_frame_sec, fpr_factored);
                 }
             } else {
                 // Call Frame Instructions:
@@ -177,7 +194,7 @@ void ElfCfiBuilder::build_eh_frame(
                 auto saved_gprs = X64FrameLayout::get_saved_callee_gprs(fn.frame_info);
                 for (size_t i = 0; i < saved_gprs.size(); ++i) {
                     uint8_t dreg = to_dwarf_gpr(saved_gprs[i]);
-                    uint8_t factored = static_cast<uint8_t>(i + 1); // [rbp - (i+1)*8]
+                    uint8_t factored = static_cast<uint8_t>(i + 3); // [rbp - (i+1)*8]
                     eh_frame_sec.emit8(elf::DW_CFA_offset | dreg);
                     eh_frame_sec.emit8(factored);
                 }

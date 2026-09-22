@@ -232,8 +232,11 @@ bool PeepholeOptimizer::simplify_arithmetic(LirBlock& block) {
             if (inst.uses.size() >= 2 && inst.uses[0].is_preg() && inst.defs[0].preg_val != inst.uses[0].preg_val) {
                 inst.opcode = (inst.opcode == LirOpcode::Add32 ? LirOpcode::Mov32 : LirOpcode::Mov);
                 inst.uses.pop_back();
-            } else {
+            } else if (!are_flags_live_after(block, it)) {
                 it = block.instructions.erase(it);
+            } else {
+                ++it;
+                continue;
             }
             stats_.arithmetic_simplified++;
             changed = true;
@@ -247,8 +250,11 @@ bool PeepholeOptimizer::simplify_arithmetic(LirBlock& block) {
             if (inst.uses.size() >= 2 && inst.uses[0].is_preg() && inst.defs[0].preg_val != inst.uses[0].preg_val) {
                 inst.opcode = (inst.opcode == LirOpcode::Sub32 ? LirOpcode::Mov32 : LirOpcode::Mov);
                 inst.uses.pop_back();
-            } else {
+            } else if (!are_flags_live_after(block, it)) {
                 it = block.instructions.erase(it);
+            } else {
+                ++it;
+                continue;
             }
             stats_.arithmetic_simplified++;
             changed = true;

@@ -21,6 +21,9 @@ void AArch64Encoder::emit_add_sub_imm(bool is_64, bool is_sub, bool set_flags, G
         uint32_t inst = base | (1u << 22) | ((imm >> 12) << 10) | (reg_code(src) << 5) | reg_code(dst);
         buffer_.emit_inst(inst);
     } else {
+        if (set_flags && (dst == GPR::XZR || reg_code(dst) == 31)) {
+            throw std::invalid_argument("AArch64Encoder: flag-setting add/sub immediate cannot be split with XZR destination");
+        }
         // Materialize in scratch register (XZR is not usable, but if immediate is large we can split)
         // Split into high and low:
         uint32_t low = imm & 0xFFFu;

@@ -255,13 +255,14 @@ void CoffUnwindBuilder::build_unwind_info(
 
             // 5. Saved callee-saved XMMs
             auto saved_xmms = X64FrameLayout::get_saved_callee_xmms(fn.frame_info);
-            size_t gpr_bytes = saved_gprs.size() * 8;
+            size_t gpr_bytes = (saved_gprs.size() * 8 + 15) & ~size_t(15);
             for (size_t i = 0; i < saved_xmms.size(); ++i) {
                 XMM x = saved_xmms[i];
                 int32_t disp_from_rbp = static_cast<int32_t>(gpr_bytes + (i + 1) * 16);
                 int32_t disp_from_rsp = static_cast<int32_t>(frame_sz - disp_from_rbp);
-                disp_from_rbp <= 127 ? (cur_offset = static_cast<uint8_t>(cur_offset + 5))
-                                     : (cur_offset = static_cast<uint8_t>(cur_offset + 8));
+                bool is_ext = (static_cast<uint8_t>(x) >= 8);
+                disp_from_rbp <= 127 ? (cur_offset = static_cast<uint8_t>(cur_offset + (is_ext ? 5 : 4)))
+                                     : (cur_offset = static_cast<uint8_t>(cur_offset + (is_ext ? 8 : 7)));
 
                 UnwindOpSlot op;
                 op.code_offset = cur_offset;

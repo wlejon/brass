@@ -163,6 +163,7 @@ add_executable(brass_unit_tests
     unit/test_gpu_kernels_quant.cpp
     unit/test_phase1_concurrency.cpp
     unit/test_phase2_mir_opt.cpp
+    unit/test_phase3_target_codegen.cpp
 )
 
 target_include_directories(brass_unit_tests

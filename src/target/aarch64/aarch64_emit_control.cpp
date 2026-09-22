@@ -199,7 +199,7 @@ void AArch64EmitContext::emit_parallel_copy(const LirInst& inst) {
             bool is_fpr = (m0.dst.is_preg() && m0.dst.preg_val.is_xmm()) ||
                           (m0.src.is_preg() && m0.src.preg_val.is_xmm()) ||
                           (m0.dst.size == 16);
-            PReg scratch = is_fpr ? PReg::aarch64_fpr(FPR::V31) : PReg::aarch64_gpr(GPR::X16);
+            PReg scratch = is_fpr ? PReg::aarch64_fpr(FPR::V31) : PReg::aarch64_gpr(GPR::X15);
             uint8_t sz = m0.dst.size;
 
             emit_move(LirOperand::preg(scratch, sz), m0.dst);
