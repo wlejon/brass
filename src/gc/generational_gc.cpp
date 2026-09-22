@@ -226,7 +226,8 @@ uintptr_t GenerationalGC::allocate(size_t size, uint64_t pointer_mask, uint32_t 
 }
 
 void GenerationalGC::write_barrier(uintptr_t obj_addr, uintptr_t val) noexcept {
-    if (is_old(obj_addr) && is_young(val)) {
+    uintptr_t ptr_val = val & 0x0000FFFFFFFFFFFFULL;
+    if (is_old(obj_addr) && (is_young(val) || is_young(ptr_val))) {
         card_table_.mark_card(obj_addr);
     }
 }
@@ -316,6 +317,15 @@ void GenerationalGC::minor_collect(std::vector<uintptr_t*>& extra_roots) {
         uintptr_t card_start = card_table_.card_address(card_idx);
         uintptr_t card_end = card_start + CardTable::CARD_SIZE;
 
+        auto check_and_add_slot = [&](uintptr_t* slot) {
+            if (*slot == 0) return;
+            uintptr_t val = *slot;
+            uintptr_t ptr = val & 0x0000FFFFFFFFFFFFULL;
+            if (is_scavenge_source(val) || is_scavenge_source(ptr)) {
+                card_roots.push_back(slot);
+            }
+        };
+
         // Binary search for tenured objects overlapping this card
         auto it = std::lower_bound(tenured_objects_.begin(), tenured_objects_.end(), card_start);
         if (it != tenured_objects_.begin()) {
@@ -327,9 +337,7 @@ void GenerationalGC::minor_collect(std::vector<uintptr_t*>& extra_roots) {
                 for (size_t f = 0; f < num_fields; ++f) {
                     if (f < 64 && (prev_hdr->pointer_mask & (1ULL << f))) {
                         auto* slot = reinterpret_cast<uintptr_t*>(*prev_it + f * 8);
-                        if (*slot != 0 && is_scavenge_source(*slot)) {
-                            card_roots.push_back(slot);
-                        }
+                        check_and_add_slot(slot);
                     }
                 }
             }
@@ -342,9 +350,7 @@ void GenerationalGC::minor_collect(std::vector<uintptr_t*>& extra_roots) {
             for (size_t f = 0; f < num_fields; ++f) {
                 if (f < 64 && (hdr->pointer_mask & (1ULL << f))) {
                     auto* slot = reinterpret_cast<uintptr_t*>(*it + f * 8);
-                    if (*slot != 0 && is_scavenge_source(*slot)) {
-                        card_roots.push_back(slot);
-                    }
+                    check_and_add_slot(slot);
                 }
             }
         }
@@ -354,18 +360,27 @@ void GenerationalGC::minor_collect(std::vector<uintptr_t*>& extra_roots) {
     std::sort(card_roots.begin(), card_roots.end());
     card_roots.erase(std::unique(card_roots.begin(), card_roots.end()), card_roots.end());
 
+    auto evacuate_slot = [&](uintptr_t* slot) {
+        if (!slot || *slot == 0) return;
+        uintptr_t val = *slot;
+        uintptr_t tag = val & 0xFFFF000000000000ULL;
+        uintptr_t ptr = val & 0x0000FFFFFFFFFFFFULL;
+        if (is_scavenge_source(val)) {
+            *slot = evacuate_young_object(val);
+        } else if (tag != 0 && is_scavenge_source(ptr)) {
+            uintptr_t new_addr = evacuate_young_object(ptr);
+            *slot = tag | (new_addr & 0x0000FFFFFFFFFFFFULL);
+        }
+    };
+
     // 2. Evacuate objects referenced by stack/thread roots
     for (uintptr_t* root_slot : all_roots) {
-        if (root_slot && *root_slot != 0 && is_scavenge_source(*root_slot)) {
-            *root_slot = evacuate_young_object(*root_slot);
-        }
+        evacuate_slot(root_slot);
     }
 
     // 3. Evacuate objects referenced by dirty card roots
     for (uintptr_t* card_root : card_roots) {
-        if (card_root && *card_root != 0 && is_scavenge_source(*card_root)) {
-            *card_root = evacuate_young_object(*card_root);
-        }
+        evacuate_slot(card_root);
     }
 
     // 4. Cheney breadth-first scan of survivor_to and promoted tenured objects
@@ -383,9 +398,7 @@ void GenerationalGC::minor_collect(std::vector<uintptr_t*>& extra_roots) {
             for (size_t f = 0; f < num_fields; ++f) {
                 if (f < 64 && (hdr->pointer_mask & (1ULL << f))) {
                     auto* slot = reinterpret_cast<uintptr_t*>(payload + f * 8);
-                    if (*slot != 0 && is_scavenge_source(*slot)) {
-                        *slot = evacuate_young_object(*slot);
-                    }
+                    evacuate_slot(slot);
                 }
             }
         } else if (tenured_scan < tenured_free_) {
@@ -399,11 +412,13 @@ void GenerationalGC::minor_collect(std::vector<uintptr_t*>& extra_roots) {
             for (size_t f = 0; f < num_fields; ++f) {
                 if (f < 64 && (hdr->pointer_mask & (1ULL << f))) {
                     auto* slot = reinterpret_cast<uintptr_t*>(payload + f * 8);
-                    if (*slot != 0 && is_scavenge_source(*slot)) {
-                        *slot = evacuate_young_object(*slot);
-                    }
-                    if (*slot != 0 && is_young(*slot)) {
-                        points_to_young = true;
+                    evacuate_slot(slot);
+                    if (*slot != 0) {
+                        uintptr_t cur_val = *slot;
+                        uintptr_t cur_ptr = cur_val & 0x0000FFFFFFFFFFFFULL;
+                        if (is_young(cur_val) || is_young(cur_ptr)) {
+                            points_to_young = true;
+                        }
                     }
                 }
             }
@@ -428,9 +443,12 @@ void GenerationalGC::minor_collect(std::vector<uintptr_t*>& extra_roots) {
                 for (size_t f = 0; f < num_fields; ++f) {
                     if (f < 64 && (prev_hdr->pointer_mask & (1ULL << f))) {
                         uintptr_t child = *reinterpret_cast<const uintptr_t*>(*prev_it + f * 8);
-                        if (child != 0 && is_young(child)) {
-                            still_dirty = true;
-                            break;
+                        if (child != 0) {
+                            uintptr_t ptr_child = child & 0x0000FFFFFFFFFFFFULL;
+                            if (is_young(child) || is_young(ptr_child)) {
+                                still_dirty = true;
+                                break;
+                            }
                         }
                     }
                 }
@@ -445,9 +463,12 @@ void GenerationalGC::minor_collect(std::vector<uintptr_t*>& extra_roots) {
                 for (size_t f = 0; f < num_fields; ++f) {
                     if (f < 64 && (hdr->pointer_mask & (1ULL << f))) {
                         uintptr_t child = *reinterpret_cast<const uintptr_t*>(*it + f * 8);
-                        if (child != 0 && is_young(child)) {
-                            still_dirty = true;
-                            break;
+                        if (child != 0) {
+                            uintptr_t ptr_child = child & 0x0000FFFFFFFFFFFFULL;
+                            if (is_young(child) || is_young(ptr_child)) {
+                                still_dirty = true;
+                                break;
+                            }
                         }
                     }
                 }
@@ -521,11 +542,22 @@ void GenerationalGC::major_collect(std::vector<uintptr_t*>& extra_roots) {
         return final_payload;
     };
 
+    auto evacuate_slot_major = [&](uintptr_t* slot) {
+        if (!slot || *slot == 0) return;
+        uintptr_t val = *slot;
+        uintptr_t tag = val & 0xFFFF000000000000ULL;
+        uintptr_t ptr = val & 0x0000FFFFFFFFFFFFULL;
+        if (is_valid_object(val)) {
+            *slot = evacuate_to_tenured(val);
+        } else if (tag != 0 && is_valid_object(ptr)) {
+            uintptr_t new_addr = evacuate_to_tenured(ptr);
+            *slot = tag | (new_addr & 0x0000FFFFFFFFFFFFULL);
+        }
+    };
+
     // 1. Evacuate from all roots
     for (uintptr_t* root_slot : all_roots) {
-        if (root_slot && *root_slot != 0) {
-            *root_slot = evacuate_to_tenured(*root_slot);
-        }
+        evacuate_slot_major(root_slot);
     }
 
     // 2. Cheney scan within new_tenured
@@ -539,9 +571,7 @@ void GenerationalGC::major_collect(std::vector<uintptr_t*>& extra_roots) {
         for (size_t f = 0; f < num_fields; ++f) {
             if (f < 64 && (hdr->pointer_mask & (1ULL << f))) {
                 auto* slot = reinterpret_cast<uintptr_t*>(obj_pos + sizeof(GenGcHeader) + f * 8);
-                if (*slot != 0 && is_valid_object(*slot)) {
-                    *slot = evacuate_to_tenured(*slot);
-                }
+                evacuate_slot_major(slot);
             }
         }
     }
@@ -627,8 +657,13 @@ RuntimeValue GenerationalGC::read_memory(uintptr_t base, int32_t offset, Type t)
         return RuntimeValue::from_v256(t, bytes);
     }
     if (t.is_float()) {
-        double d = *reinterpret_cast<const double*>(target);
-        return RuntimeValue::from_f64(d);
+        if (t.size_in_bytes() == 4) {
+            float f = *reinterpret_cast<const float*>(target);
+            return RuntimeValue::from_f32(f);
+        } else {
+            double d = *reinterpret_cast<const double*>(target);
+            return RuntimeValue::from_f64(d);
+        }
     }
     if (t.size_in_bytes() == 4) {
         int32_t v = *reinterpret_cast<const int32_t*>(target);
@@ -647,7 +682,11 @@ void GenerationalGC::write_memory(uintptr_t base, int32_t offset, Type t, Runtim
     } else if (t.is_v256()) {
         std::memcpy(reinterpret_cast<void*>(target), val.vec_bytes(), 32);
     } else if (t.is_float()) {
-        *reinterpret_cast<double*>(target) = val.as_f64();
+        if (t.size_in_bytes() == 4) {
+            *reinterpret_cast<float*>(target) = val.as_f32();
+        } else {
+            *reinterpret_cast<double*>(target) = val.as_f64();
+        }
     } else if (t.size_in_bytes() == 4) {
         *reinterpret_cast<int32_t*>(target) = val.as_i32();
     } else {

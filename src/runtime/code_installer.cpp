@@ -15,6 +15,7 @@
 #include <brass/il_translator/il_translator.hpp>
 #include <brass/mir/speculative_inliner.hpp>
 #include <brass/runtime/type_feedback.hpp>
+#include <brass/runtime/multi_tier_pipeline.hpp>
 #include <stdexcept>
 #include <iostream>
 
@@ -503,6 +504,13 @@ CodeInstallResult CodeInstaller::install_tier2(
     // Compile and link in executable memory
     if (!jit->compile_and_load(*module)) {
         return {false, nullptr, "JIT compilation or relocation failed", 0};
+    }
+
+    if (MultiTierPipeline::instance().is_initialized()) {
+        for (const auto& fn_map : jit->stack_maps().functions()) {
+            MultiTierPipeline::instance().active_stack_maps().add_function(fn_map);
+        }
+        brass_set_active_stack_maps(&MultiTierPipeline::instance().active_stack_maps());
     }
 
     // 3. Mark memory executable (PAGE_EXECUTE_READ via OS protection)

@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <iosfwd>
 #include <memory>
+#include <mutex>
 
 namespace brass {
 class Module;
@@ -166,7 +167,8 @@ private:
     TieringRegistry() = default;
     TieringConfig config_;
     const Module* active_module_ = nullptr;
-    std::unordered_map<std::string, TieringFeedback> feedback_map_;
+    mutable std::mutex mutex_;
+    std::unordered_map<std::string, std::unique_ptr<TieringFeedback>> feedback_map_;
 };
 
 } // namespace brass::runtime

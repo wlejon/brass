@@ -173,7 +173,8 @@ BRASS_WEAK void brass_gc_write_barrier(uintptr_t obj, uintptr_t val) {
     auto* gen_gc = brass::brass_get_active_generational_gc();
     if (!gen_gc) return;
     if (!gen_gc->is_old(obj)) return;
-    if (!gen_gc->is_young(val)) return;
+    uintptr_t ptr_val = val & 0x0000FFFFFFFFFFFFULL;
+    if (!gen_gc->is_young(val) && !gen_gc->is_young(ptr_val)) return;
     gen_gc->card_table().mark_card(obj);
 }
 
@@ -253,7 +254,8 @@ BRASS_WEAK void brass_gc_write_barrier(uintptr_t obj, uintptr_t val) {
     auto* gen_gc = brass::brass_get_active_generational_gc();
     if (!gen_gc) return;
     if (!gen_gc->is_old(obj)) return;
-    if (!gen_gc->is_young(val)) return;
+    uintptr_t ptr_val = val & 0x0000FFFFFFFFFFFFULL;
+    if (!gen_gc->is_young(val) && !gen_gc->is_young(ptr_val)) return;
     gen_gc->card_table().mark_card(obj);
 }
 

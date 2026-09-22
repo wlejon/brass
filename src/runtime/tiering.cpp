@@ -127,23 +127,28 @@ TieringRegistry& TieringRegistry::instance() {
 
 TieringFeedback& TieringRegistry::get_feedback(std::string_view fn_name) {
     std::string key(fn_name);
+    std::lock_guard<std::mutex> lock(mutex_);
     auto it = feedback_map_.find(key);
     if (it == feedback_map_.end()) {
-        auto [inserted, _] = feedback_map_.emplace(key, TieringFeedback(fn_name, config_));
-        return inserted->second;
+        auto fb = std::make_unique<TieringFeedback>(fn_name, config_);
+        auto* ptr = fb.get();
+        feedback_map_.emplace(std::move(key), std::move(fb));
+        return *ptr;
     }
-    return it->second;
+    return *it->second;
 }
 
 const TieringFeedback* TieringRegistry::find_feedback(std::string_view fn_name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     auto it = feedback_map_.find(std::string(fn_name));
     if (it != feedback_map_.end()) {
-        return &it->second;
+        return it->second.get();
     }
     return nullptr;
 }
 
 void TieringRegistry::clear() {
+    std::lock_guard<std::mutex> lock(mutex_);
     feedback_map_.clear();
 }
 
@@ -179,12 +184,14 @@ bool TieringRegistry::enqueue_compilation(
 }
 
 void TieringRegistry::dump_stats(std::ostream& os) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     os << "=== Tiering Feedback Statistics ===\n";
     if (feedback_map_.empty()) {
         os << "  (No function profiles recorded)\n";
         return;
     }
-    for (const auto& [fn_name, fb] : feedback_map_) {
+    for (const auto& [fn_name, fb_ptr] : feedback_map_) {
+        const auto& fb = *fb_ptr;
         os << "Function: " << fn_name << "\n";
         os << "  Current Tier:      " << fb.current_tier() << "\n";
         os << "  Invocations:       " << fb.invocation_count() << " (Threshold: "
