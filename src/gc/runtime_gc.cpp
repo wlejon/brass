@@ -134,6 +134,71 @@ uintptr_t brass_runtime_gc_alloc(
     return gc->allocate(size, pointer_mask, type_tag, roots);
 }
 
+void brass_runtime_gc_safepoint(
+    GenerationalGC* gc,
+    const ModuleStackMap& stack_maps,
+    uintptr_t rbp,
+    uintptr_t return_ip
+) {
+    if (!gc) return;
+
+    uintptr_t cur_rbp = rbp;
+    uintptr_t cur_ip = return_ip;
+
+    if (cur_rbp == 0 || cur_ip == 0) {
+        get_caller_frame(cur_rbp, cur_ip);
+    }
+
+    std::vector<uintptr_t*> roots;
+    if (cur_rbp != 0 && cur_ip != 0) {
+        brass_stack_walk(cur_rbp, cur_ip, stack_maps, [](void** slot, void* user_data) {
+            auto* vec = static_cast<std::vector<uintptr_t*>*>(user_data);
+            if (slot != nullptr && *slot != nullptr) {
+                vec->push_back(reinterpret_cast<uintptr_t*>(slot));
+            }
+        }, &roots);
+    }
+
+    gc->collect(roots);
+}
+
+uintptr_t brass_runtime_gc_alloc(
+    GenerationalGC* gc,
+    const ModuleStackMap& stack_maps,
+    size_t size,
+    uint64_t pointer_mask,
+    uint32_t type_tag,
+    uintptr_t rbp,
+    uintptr_t return_ip
+) {
+    if (!gc) {
+        throw std::runtime_error("GenerationalGC pointer is null in brass_runtime_gc_alloc");
+    }
+
+    if (gc->can_allocate_fast(size)) {
+        return gc->allocate(size, pointer_mask, type_tag);
+    }
+
+    uintptr_t cur_rbp = rbp;
+    uintptr_t cur_ip = return_ip;
+
+    if (cur_rbp == 0 || cur_ip == 0) {
+        get_caller_frame(cur_rbp, cur_ip);
+    }
+
+    std::vector<uintptr_t*> roots;
+    if (cur_rbp != 0 && cur_ip != 0) {
+        brass_stack_walk(cur_rbp, cur_ip, stack_maps, [](void** slot, void* user_data) {
+            auto* vec = static_cast<std::vector<uintptr_t*>*>(user_data);
+            if (slot != nullptr && *slot != nullptr) {
+                vec->push_back(reinterpret_cast<uintptr_t*>(slot));
+            }
+        }, &roots);
+    }
+
+    return gc->allocate(size, pointer_mask, type_tag, roots);
+}
+
 } // namespace brass
 
 #if defined(_MSC_VER)
@@ -142,7 +207,12 @@ extern "C" {
 
 void brass_runtime_gc_safepoint_bridge(uintptr_t caller_rbp, uintptr_t caller_ip) {
     if (auto* gen_gc = brass::brass_get_active_generational_gc()) {
-        gen_gc->collect();
+        const auto* maps = brass::brass_get_active_stack_maps();
+        if (maps) {
+            brass::brass_runtime_gc_safepoint(gen_gc, *maps, caller_rbp, caller_ip);
+        } else {
+            gen_gc->collect();
+        }
         return;
     }
     auto* gc = brass::brass_get_active_gc();
@@ -153,7 +223,14 @@ void brass_runtime_gc_safepoint_bridge(uintptr_t caller_rbp, uintptr_t caller_ip
 
 uintptr_t brass_runtime_gc_alloc_bridge(size_t size, uint64_t pointer_mask, uint32_t type_tag, uintptr_t caller_rbp, uintptr_t caller_ip) {
     if (auto* gen_gc = brass::brass_get_active_generational_gc()) {
-        return gen_gc->allocate(size, pointer_mask, type_tag);
+        if (gen_gc->can_allocate_fast(size)) {
+            return gen_gc->allocate(size, pointer_mask, type_tag);
+        }
+        const auto* maps = brass::brass_get_active_stack_maps();
+        if (!maps) {
+            return gen_gc->allocate(size, pointer_mask, type_tag);
+        }
+        return brass::brass_runtime_gc_alloc(gen_gc, *maps, size, pointer_mask, type_tag, caller_rbp, caller_ip);
     }
     auto* gc = brass::brass_get_active_gc();
     if (!gc) {
@@ -194,24 +271,39 @@ uintptr_t brass_gc_heap_base() {
 extern "C" {
 
 void brass_gc_safepoint() {
+    void* frame = __builtin_frame_address(0);
+    uintptr_t caller_rbp = frame ? *reinterpret_cast<uintptr_t*>(frame) : 0;
+    uintptr_t caller_ip = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
+
     if (auto* gen_gc = brass::brass_get_active_generational_gc()) {
-        gen_gc->collect();
+        const auto* maps = brass::brass_get_active_stack_maps();
+        if (maps) {
+            brass::brass_runtime_gc_safepoint(gen_gc, *maps, caller_rbp, caller_ip);
+        } else {
+            gen_gc->collect();
+        }
         return;
     }
     auto* gc = brass::brass_get_active_gc();
     const auto* maps = brass::brass_get_active_stack_maps();
     if (!gc || !maps) return;
 
-    void* frame = __builtin_frame_address(0);
-    uintptr_t caller_rbp = frame ? *reinterpret_cast<uintptr_t*>(frame) : 0;
-    uintptr_t caller_ip = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
-
     brass::brass_runtime_gc_safepoint(gc, *maps, caller_rbp, caller_ip);
 }
 
 uintptr_t brass_gc_alloc(size_t size, uint64_t pointer_mask, uint32_t type_tag) {
     if (auto* gen_gc = brass::brass_get_active_generational_gc()) {
-        return gen_gc->allocate(size, pointer_mask, type_tag);
+        if (gen_gc->can_allocate_fast(size)) {
+            return gen_gc->allocate(size, pointer_mask, type_tag);
+        }
+        const auto* maps = brass::brass_get_active_stack_maps();
+        if (!maps) {
+            return gen_gc->allocate(size, pointer_mask, type_tag);
+        }
+        void* frame = __builtin_frame_address(0);
+        uintptr_t caller_rbp = frame ? *reinterpret_cast<uintptr_t*>(frame) : 0;
+        uintptr_t caller_ip = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
+        return brass::brass_runtime_gc_alloc(gen_gc, *maps, size, pointer_mask, type_tag, caller_rbp, caller_ip);
     }
     auto* gc = brass::brass_get_active_gc();
     if (!gc) {
@@ -233,17 +325,23 @@ uintptr_t brass_gc_alloc(size_t size, uint64_t pointer_mask, uint32_t type_tag) 
 }
 
 void brass_gc_collect() {
+    void* frame = __builtin_frame_address(0);
+    uintptr_t caller_rbp = frame ? *reinterpret_cast<uintptr_t*>(frame) : 0;
+    uintptr_t caller_ip = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
+
     if (auto* gen_gc = brass::brass_get_active_generational_gc()) {
-        gen_gc->collect();
+        const auto* maps = brass::brass_get_active_stack_maps();
+        if (maps) {
+            brass::brass_runtime_gc_safepoint(gen_gc, *maps, caller_rbp, caller_ip);
+        } else {
+            gen_gc->collect();
+        }
         return;
     }
     auto* gc = brass::brass_get_active_gc();
     const auto* maps = brass::brass_get_active_stack_maps();
     if (!gc) return;
     if (maps) {
-        void* frame = __builtin_frame_address(0);
-        uintptr_t caller_rbp = frame ? *reinterpret_cast<uintptr_t*>(frame) : 0;
-        uintptr_t caller_ip = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
         brass::brass_runtime_gc_safepoint(gc, *maps, caller_rbp, caller_ip);
     } else {
         gc->collect();

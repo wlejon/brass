@@ -26,9 +26,26 @@ void brass_runtime_gc_safepoint(
     uintptr_t return_ip = 0
 );
 
+void brass_runtime_gc_safepoint(
+    GenerationalGC* gc,
+    const ModuleStackMap& stack_maps,
+    uintptr_t rbp = 0,
+    uintptr_t return_ip = 0
+);
+
 // Explicit allocation with moving Cheney collection and stack walking if needed
 uintptr_t brass_runtime_gc_alloc(
     MiniCheneyGC* gc,
+    const ModuleStackMap& stack_maps,
+    size_t size,
+    uint64_t pointer_mask = 0,
+    uint32_t type_tag = 0,
+    uintptr_t rbp = 0,
+    uintptr_t return_ip = 0
+);
+
+uintptr_t brass_runtime_gc_alloc(
+    GenerationalGC* gc,
     const ModuleStackMap& stack_maps,
     size_t size,
     uint64_t pointer_mask = 0,

@@ -82,6 +82,7 @@ void register_active_coro_frame(BrassCoroFrame* frame);
 void unregister_active_coro_frame(BrassCoroFrame* frame);
 bool is_active_coro_frame(uintptr_t frame);
 void visit_active_coro_frames(const std::function<void(uintptr_t*)>& visitor);
+void append_active_coro_roots(std::vector<uintptr_t*>& roots);
 void set_coro_symbol_resolver(void* (*resolver)(const char*));
 
 // Bronze IL Iterator & Async Helpers

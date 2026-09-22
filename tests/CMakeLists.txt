@@ -170,6 +170,7 @@ add_executable(brass_unit_tests
     unit/test_backend_hardening.cpp
     unit/test_aarch64_backend_hardening.cpp
     unit/test_gc_concurrency_safety.cpp
+    unit/test_gc_runtime_hardening.cpp
 )
 
 target_include_directories(brass_unit_tests

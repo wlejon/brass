@@ -1,5 +1,6 @@
 #include <brass/embedding/host_gc.hpp>
 #include <brass/gc/tlab.hpp>
+#include <brass/runtime/coroutine.hpp>
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
@@ -293,6 +294,15 @@ void HostGC::collect(
         }
     }
     for (auto* ptr_root : extra_ptr_roots) {
+        if (ptr_root && *ptr_root && is_address_in_active_space(*ptr_root)) {
+            *ptr_root = evacuate_object(*ptr_root, to_free_ptr);
+        }
+    }
+
+    // 3.5. Relocate active coroutine roots
+    std::vector<uintptr_t*> coro_roots;
+    runtime::append_active_coro_roots(coro_roots);
+    for (auto* ptr_root : coro_roots) {
         if (ptr_root && *ptr_root && is_address_in_active_space(*ptr_root)) {
             *ptr_root = evacuate_object(*ptr_root, to_free_ptr);
         }

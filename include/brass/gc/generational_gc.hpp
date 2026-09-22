@@ -24,6 +24,13 @@ struct GenGcHeader {
     uint8_t generation;           // GEN_YOUNG = 0, GEN_OLD = 1
     uint16_t reserved16;          // Alignment / flags
     uint32_t reserved32;          // 8-byte header alignment padding (total 32 bytes)
+
+    [[nodiscard]] bool is_field_pointer(size_t i) const noexcept {
+        if (i < 63) {
+            return (pointer_mask & (1ULL << i)) != 0;
+        }
+        return (pointer_mask & (1ULL << 63)) != 0;
+    }
 };
 
 class GenerationalGC {

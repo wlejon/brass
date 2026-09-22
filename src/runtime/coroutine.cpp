@@ -1,5 +1,7 @@
 #include <brass/runtime/coroutine.hpp>
 #include <brass/gc/runtime_gc.hpp>
+#include <brass/gc/generational_gc.hpp>
+#include <brass/embedding/host_gc.hpp>
 #include <brass/runtime/object.hpp>
 #include <brass/embedding/nanbox.hpp>
 #include <algorithm>
@@ -109,10 +111,18 @@ bool is_active_coro_frame(uintptr_t frame) {
 
 void visit_active_coro_frames(const std::function<void(uintptr_t*)>& visitor) {
     for (auto*& frame : g_active_coro_frames) {
-        if (frame) {
+        if (frame && !frame->is_done) {
             uintptr_t addr = reinterpret_cast<uintptr_t>(frame);
             visitor(&addr);
             frame = reinterpret_cast<BrassCoroFrame*>(addr);
+        }
+    }
+}
+
+void append_active_coro_roots(std::vector<uintptr_t*>& roots) {
+    for (auto*& frame : g_active_coro_frames) {
+        if (frame && !frame->is_done) {
+            roots.push_back(reinterpret_cast<uintptr_t*>(&frame));
         }
     }
 }
@@ -134,14 +144,32 @@ uintptr_t brass_coro_create(void* fn_ptr, uint32_t slot_count, uint64_t pointer_
     size_t extra_slots = (slot_count > 1) ? (slot_count - 1) : 0;
     size_t total_size = sizeof(BrassCoroFrame) + extra_slots * sizeof(uint64_t);
 
-    MiniCheneyGC* gc = brass::brass_get_active_gc();
+    constexpr size_t slot_shift = CORO_OFFSET_SLOTS / sizeof(uint64_t);
+    uint64_t frame_mask = (pointer_mask << slot_shift);
+    if (pointer_mask & (1ULL << 63)) {
+        frame_mask |= (1ULL << 63);
+    }
+
     BrassCoroFrame* frame = nullptr;
 
-    if (gc != nullptr) {
-        uintptr_t payload = gc->allocate(total_size, pointer_mask, TYPE_TAG_CORO_FRAME);
+    GenerationalGC* gen_gc = brass::brass_get_active_generational_gc();
+    if (gen_gc != nullptr) {
+        uintptr_t payload = gen_gc->allocate(total_size, frame_mask, TYPE_TAG_CORO_FRAME);
         frame = reinterpret_cast<BrassCoroFrame*>(payload);
     } else {
-        frame = static_cast<BrassCoroFrame*>(std::calloc(1, total_size));
+        HostGC* host_gc = brass::get_active_host_gc();
+        if (host_gc != nullptr) {
+            uintptr_t payload = host_gc->allocate(total_size, frame_mask, TYPE_TAG_CORO_FRAME);
+            frame = reinterpret_cast<BrassCoroFrame*>(payload);
+        } else {
+            MiniCheneyGC* gc = brass::brass_get_active_gc();
+            if (gc != nullptr) {
+                uintptr_t payload = gc->allocate(total_size, frame_mask, TYPE_TAG_CORO_FRAME);
+                frame = reinterpret_cast<BrassCoroFrame*>(payload);
+            } else {
+                frame = static_cast<BrassCoroFrame*>(std::calloc(1, total_size));
+            }
+        }
     }
 
     if (!frame) return 0;
@@ -163,6 +191,7 @@ uint64_t brass_coro_resume(uintptr_t coro_frame, uint64_t input_val) {
     BrassCoroFrame* frame = reinterpret_cast<BrassCoroFrame*>(coro_frame);
 
     if (frame->is_done != 0) {
+        unregister_active_coro_frame(frame);
         return frame->yielded_val;
     }
 
@@ -173,6 +202,9 @@ uint64_t brass_coro_resume(uintptr_t coro_frame, uint64_t input_val) {
         auto fn = reinterpret_cast<CoroFn>(frame->fn_ptr);
         uint64_t result = fn(frame);
         frame->yielded_val = result;
+        if (frame->is_done != 0) {
+            unregister_active_coro_frame(frame);
+        }
         return result;
     }
 

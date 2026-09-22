@@ -478,6 +478,10 @@ static bool in_mask(uint32_t mask, uint8_t code) noexcept {
 }
 
 bool LinearScanAllocator::try_allocate_free_reg(LiveInterval& interval) {
+    if (interval.vreg.is_gcref && interval.spans_call) {
+        return false;
+    }
+
     bool is_gpr = interval.vreg.is_gpr();
     const auto& pool = is_gpr ? available_gprs_ : available_xmms_;
 
@@ -617,6 +621,12 @@ bool LinearScanAllocator::try_allocate_free_reg(LiveInterval& interval) {
 }
 
 void LinearScanAllocator::allocate_blocked_reg(LiveInterval& interval) {
+    if (interval.vreg.is_gcref && interval.spans_call) {
+        interval.assigned_spill_slot = allocate_spill_slot(true, interval.vreg.size);
+        interval.assigned_preg = PReg{};
+        return;
+    }
+
     bool is_gpr = interval.vreg.is_gpr();
     const auto& pool = is_gpr ? available_gprs_ : available_xmms_;
     const uint32_t hard_blocked = get_hard_blocked_regs(interval);

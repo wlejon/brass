@@ -98,12 +98,40 @@ bool WriteBarrierElimination::is_allocation_inst(const Instruction* inst) const 
 
     if (inst->is_call()) {
         std::string_view callee = inst->symbol();
-        if (callee == "brass_gc_alloc" ||
-            callee == "bronze_create_object" ||
+        if (callee == "brass_gc_alloc") {
+            // Direct tenured allocation check: allocations with total size > 256KB
+            // bypass nursery allocation and are allocated directly into tenured space.
+            if (inst->operand_count() >= 1) {
+                const Value* sz_val = inst->operand(0);
+                if (sz_val && sz_val->is_instruction()) {
+                    const Instruction* def = sz_val->defining_instruction();
+                    if (def && (def->opcode() == Opcode::iconst_i64 || def->opcode() == Opcode::iconst_i32)) {
+                        int64_t sz = def->opcode() == Opcode::iconst_i64 ? def->imm_i64() : def->imm_i32();
+                        if (sz < 0 || static_cast<size_t>(sz) + 32 > (256 * 1024)) {
+                            return false;
+                        }
+                    }
+                }
+            }
+            return true;
+        }
+        if (callee == "bronze_create_object" ||
             callee == "bronze_create_array" ||
             callee == "bronze_env_create" ||
             callee == "bronze_create_func" ||
             callee == "bronze_create_async_machine") {
+            if (callee == "bronze_create_array" && inst->operand_count() >= 1) {
+                const Value* cap_val = inst->operand(0);
+                if (cap_val && cap_val->is_instruction()) {
+                    const Instruction* def = cap_val->defining_instruction();
+                    if (def && (def->opcode() == Opcode::iconst_i64 || def->opcode() == Opcode::iconst_i32)) {
+                        int64_t cap = def->opcode() == Opcode::iconst_i64 ? def->imm_i64() : def->imm_i32();
+                        if (cap < 0 || static_cast<size_t>(cap) * 8 + 32 > (256 * 1024)) {
+                            return false;
+                        }
+                    }
+                }
+            }
             return true;
         }
     }

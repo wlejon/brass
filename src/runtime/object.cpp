@@ -111,21 +111,39 @@ void DynamicObject::ensure_out_of_line_capacity(size_t needed_cap, HostGC* gc) {
     size_t new_cap = std::max(needed_cap, static_cast<size_t>(out_of_line_capacity * 2));
     if (new_cap < 8) new_cap = 8;
 
-    uintptr_t new_buf_addr = allocate_buffer(new_cap, TYPE_TAG_OOL_BUFFER, gc);
-    auto* new_slots = reinterpret_cast<HostValue*>(new_buf_addr + sizeof(DynamicObjectBuffer));
+    uintptr_t self_addr = reinterpret_cast<uintptr_t>(this);
+    uintptr_t old_buf = out_of_line_slots;
 
-    if (out_of_line_slots != 0) {
-        const auto* old_slots = reinterpret_cast<const HostValue*>(out_of_line_slots + sizeof(DynamicObjectBuffer));
-        for (uint32_t i = 0; i < out_of_line_capacity; ++i) {
-            new_slots[i] = old_slots[i];
-        }
-        if (gc == nullptr) {
-            free_buffer_non_gc(out_of_line_slots);
+    if (gc != nullptr) {
+        gc->register_root(&self_addr);
+        if (old_buf != 0) {
+            gc->register_root(&old_buf);
         }
     }
 
-    out_of_line_slots = new_buf_addr;
-    out_of_line_capacity = static_cast<uint32_t>(new_cap);
+    uintptr_t new_buf_addr = allocate_buffer(new_cap, TYPE_TAG_OOL_BUFFER, gc);
+    auto* self = reinterpret_cast<DynamicObject*>(self_addr);
+    auto* new_slots = reinterpret_cast<HostValue*>(new_buf_addr + sizeof(DynamicObjectBuffer));
+
+    if (old_buf != 0) {
+        const auto* old_slots = reinterpret_cast<const HostValue*>(old_buf + sizeof(DynamicObjectBuffer));
+        for (uint32_t i = 0; i < self->out_of_line_capacity; ++i) {
+            new_slots[i] = old_slots[i];
+        }
+        if (gc == nullptr) {
+            free_buffer_non_gc(old_buf);
+        }
+    }
+
+    self->out_of_line_slots = new_buf_addr;
+    self->out_of_line_capacity = static_cast<uint32_t>(new_cap);
+
+    if (gc != nullptr) {
+        if (old_buf != 0) {
+            gc->unregister_root(&old_buf);
+        }
+        gc->unregister_root(&self_addr);
+    }
 }
 
 void DynamicObject::ensure_element_capacity(size_t needed_cap, HostGC* gc) {
@@ -134,21 +152,39 @@ void DynamicObject::ensure_element_capacity(size_t needed_cap, HostGC* gc) {
     size_t new_cap = std::max(needed_cap, static_cast<size_t>(element_capacity * 2));
     if (new_cap < 8) new_cap = 8;
 
-    uintptr_t new_buf_addr = allocate_buffer(new_cap, TYPE_TAG_ELEMENT_BUFFER, gc);
-    auto* new_slots = reinterpret_cast<HostValue*>(new_buf_addr + sizeof(DynamicObjectBuffer));
+    uintptr_t self_addr = reinterpret_cast<uintptr_t>(this);
+    uintptr_t old_buf = elements;
 
-    if (elements != 0) {
-        const auto* old_slots = reinterpret_cast<const HostValue*>(elements + sizeof(DynamicObjectBuffer));
-        for (uint32_t i = 0; i < element_capacity; ++i) {
-            new_slots[i] = old_slots[i];
-        }
-        if (gc == nullptr) {
-            free_buffer_non_gc(elements);
+    if (gc != nullptr) {
+        gc->register_root(&self_addr);
+        if (old_buf != 0) {
+            gc->register_root(&old_buf);
         }
     }
 
-    elements = new_buf_addr;
-    element_capacity = static_cast<uint32_t>(new_cap);
+    uintptr_t new_buf_addr = allocate_buffer(new_cap, TYPE_TAG_ELEMENT_BUFFER, gc);
+    auto* self = reinterpret_cast<DynamicObject*>(self_addr);
+    auto* new_slots = reinterpret_cast<HostValue*>(new_buf_addr + sizeof(DynamicObjectBuffer));
+
+    if (old_buf != 0) {
+        const auto* old_slots = reinterpret_cast<const HostValue*>(old_buf + sizeof(DynamicObjectBuffer));
+        for (uint32_t i = 0; i < self->element_capacity; ++i) {
+            new_slots[i] = old_slots[i];
+        }
+        if (gc == nullptr) {
+            free_buffer_non_gc(old_buf);
+        }
+    }
+
+    self->elements = new_buf_addr;
+    self->element_capacity = static_cast<uint32_t>(new_cap);
+
+    if (gc != nullptr) {
+        if (old_buf != 0) {
+            gc->unregister_root(&old_buf);
+        }
+        gc->unregister_root(&self_addr);
+    }
 }
 
 HostValue DynamicObject::get_slot(uint32_t slot_index) const noexcept {
@@ -169,9 +205,19 @@ void DynamicObject::set_slot(uint32_t slot_index, HostValue value, HostGC* gc) {
         return;
     }
     uint32_t ool_idx = slot_index - inline_capacity;
+    uintptr_t self_addr = reinterpret_cast<uintptr_t>(this);
+    if (gc != nullptr) {
+        gc->register_root(&self_addr);
+        gc->register_root(&value);
+    }
     ensure_out_of_line_capacity(ool_idx + 1, gc);
-    auto* slots = reinterpret_cast<HostValue*>(out_of_line_slots + sizeof(DynamicObjectBuffer));
+    auto* self = reinterpret_cast<DynamicObject*>(self_addr);
+    auto* slots = reinterpret_cast<HostValue*>(self->out_of_line_slots + sizeof(DynamicObjectBuffer));
     slots[ool_idx] = value;
+    if (gc != nullptr) {
+        gc->unregister_root(&value);
+        gc->unregister_root(&self_addr);
+    }
 }
 
 HostValue DynamicObject::get_property(std::string_view name) const {
@@ -275,11 +321,21 @@ HostValue DynamicObject::get_element(int64_t index) const noexcept {
 void DynamicObject::set_element(int64_t index, HostValue value, HostGC* gc) {
     if (index < 0) return;
     uint32_t uidx = static_cast<uint32_t>(index);
+    uintptr_t self_addr = reinterpret_cast<uintptr_t>(this);
+    if (gc != nullptr) {
+        gc->register_root(&self_addr);
+        gc->register_root(&value);
+    }
     ensure_element_capacity(uidx + 1, gc);
-    auto* slots = reinterpret_cast<HostValue*>(elements + sizeof(DynamicObjectBuffer));
+    auto* self = reinterpret_cast<DynamicObject*>(self_addr);
+    auto* slots = reinterpret_cast<HostValue*>(self->elements + sizeof(DynamicObjectBuffer));
     slots[uidx] = value;
-    if (uidx + 1 > element_count) {
-        element_count = uidx + 1;
+    if (uidx + 1 > self->element_count) {
+        self->element_count = uidx + 1;
+    }
+    if (gc != nullptr) {
+        gc->unregister_root(&value);
+        gc->unregister_root(&self_addr);
     }
 }
 
@@ -360,18 +416,65 @@ uint64_t brass_dynamic_object_get_prop_sym(uint64_t obj_raw, uint32_t symbol_id)
 }
 
 void brass_dynamic_object_set_prop_str(uint64_t obj_raw, const char* name, uint64_t val_raw) {
-    if (!name) return;
-    auto* obj = unpack_dynamic_object_bridge(obj_raw);
-    if (!obj) return;
+    if (!name || obj_raw == 0) return;
     HostGC* gc = get_active_host_gc();
-    obj->set_property(name, HostValue(val_raw), ShapeRegistry::global(), gc);
+    HostValue hv_obj(obj_raw);
+    HostValue hv_val(val_raw);
+    uintptr_t raw_ptr = hv_obj.is_gcref() ? 0 : obj_raw;
+
+    if (gc != nullptr) {
+        if (hv_obj.is_gcref()) {
+            gc->register_root(&hv_obj);
+        } else {
+            gc->register_root(&raw_ptr);
+        }
+        gc->register_root(&hv_val);
+    }
+
+    auto* obj = hv_obj.is_gcref() ? hv_obj.as_gcref_ptr<DynamicObject>() : unpack_dynamic_object_bridge(raw_ptr);
+    if (obj) {
+        obj->set_property(name, hv_val, ShapeRegistry::global(), gc);
+    }
+
+    if (gc != nullptr) {
+        gc->unregister_root(&hv_val);
+        if (hv_obj.is_gcref()) {
+            gc->unregister_root(&hv_obj);
+        } else {
+            gc->unregister_root(&raw_ptr);
+        }
+    }
 }
 
 void brass_dynamic_object_set_prop_sym(uint64_t obj_raw, uint32_t symbol_id, uint64_t val_raw) {
-    auto* obj = unpack_dynamic_object_bridge(obj_raw);
-    if (!obj) return;
+    if (obj_raw == 0) return;
     HostGC* gc = get_active_host_gc();
-    obj->set_property(symbol_id, HostValue(val_raw), ShapeRegistry::global(), gc);
+    HostValue hv_obj(obj_raw);
+    HostValue hv_val(val_raw);
+    uintptr_t raw_ptr = hv_obj.is_gcref() ? 0 : obj_raw;
+
+    if (gc != nullptr) {
+        if (hv_obj.is_gcref()) {
+            gc->register_root(&hv_obj);
+        } else {
+            gc->register_root(&raw_ptr);
+        }
+        gc->register_root(&hv_val);
+    }
+
+    auto* obj = hv_obj.is_gcref() ? hv_obj.as_gcref_ptr<DynamicObject>() : unpack_dynamic_object_bridge(raw_ptr);
+    if (obj) {
+        obj->set_property(symbol_id, hv_val, ShapeRegistry::global(), gc);
+    }
+
+    if (gc != nullptr) {
+        gc->unregister_root(&hv_val);
+        if (hv_obj.is_gcref()) {
+            gc->unregister_root(&hv_obj);
+        } else {
+            gc->unregister_root(&raw_ptr);
+        }
+    }
 }
 
 uint64_t brass_dynamic_object_get_elem(uint64_t obj_raw, int64_t index) {
@@ -381,10 +484,34 @@ uint64_t brass_dynamic_object_get_elem(uint64_t obj_raw, int64_t index) {
 }
 
 void brass_dynamic_object_set_elem(uint64_t obj_raw, int64_t index, uint64_t val_raw) {
-    auto* obj = unpack_dynamic_object_bridge(obj_raw);
-    if (!obj) return;
+    if (obj_raw == 0) return;
     HostGC* gc = get_active_host_gc();
-    obj->set_element(index, HostValue(val_raw), gc);
+    HostValue hv_obj(obj_raw);
+    HostValue hv_val(val_raw);
+    uintptr_t raw_ptr = hv_obj.is_gcref() ? 0 : obj_raw;
+
+    if (gc != nullptr) {
+        if (hv_obj.is_gcref()) {
+            gc->register_root(&hv_obj);
+        } else {
+            gc->register_root(&raw_ptr);
+        }
+        gc->register_root(&hv_val);
+    }
+
+    auto* obj = hv_obj.is_gcref() ? hv_obj.as_gcref_ptr<DynamicObject>() : unpack_dynamic_object_bridge(raw_ptr);
+    if (obj) {
+        obj->set_element(index, hv_val, gc);
+    }
+
+    if (gc != nullptr) {
+        gc->unregister_root(&hv_val);
+        if (hv_obj.is_gcref()) {
+            gc->unregister_root(&hv_obj);
+        } else {
+            gc->unregister_root(&raw_ptr);
+        }
+    }
 }
 
 } // extern "C"

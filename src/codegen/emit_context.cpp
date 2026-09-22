@@ -9,7 +9,7 @@ namespace brass::codegen {
 using namespace brass::x64;
 
 EmitContext::EmitContext(const LirFunction& fn, const Target& target)
-    : fn_(fn), target_(target), enc_(buffer_) {}
+    : fn_(fn), target_(target), frame_(fn.frame), enc_(buffer_) {}
 
 GPR EmitContext::to_gpr(const LirOperand& op) const {
     if (op.is_preg() && op.preg_val.is_gpr()) {
@@ -26,8 +26,8 @@ XMM EmitContext::to_xmm(const LirOperand& op) const {
 }
 
 MemAddress EmitContext::to_mem_address(const LirOperand& op) const {
-    if (op.is_spill_slot()) return X64FrameLayout::spill_slot_address(op.spill_slot, fn_.frame);
-    if (op.is_local_slot()) return X64FrameLayout::local_frame_address(op.local_offset, fn_.frame);
+    if (op.is_spill_slot()) return X64FrameLayout::spill_slot_address(op.spill_slot, frame_);
+    if (op.is_local_slot()) return X64FrameLayout::local_frame_address(op.local_offset, frame_);
     if (op.is_mem()) {
         const auto& m = op.mem_val;
         GPR base = m.base_preg.is_valid() ? m.base_preg.as_gpr() : GPR::None;
@@ -51,10 +51,30 @@ CompilationResult EmitContext::compile() {
     safepoints_.clear();
     stack_map_records_.clear();
     block_labels_.clear();
+    callee_gpr_to_slot_.clear();
+    frame_ = fn_.frame;
+
+    // 0. Allocate designated frame spill slots for unspilled callee-saved GPRs holding live GCRefs
+    for (const auto& block : fn_.blocks) {
+        for (const auto& inst : block->instructions) {
+            if (inst->is_call() || inst->opcode == LirOpcode::Safepoint) {
+                for (const auto& v : inst->live_gcrefs) {
+                    const auto& info = fn_.get_vreg_info(v);
+                    if (!info.is_spilled && info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
+                        uint8_t code = info.assigned_preg.code;
+                        if (callee_gpr_to_slot_.find(code) == callee_gpr_to_slot_.end()) {
+                            int32_t slot = static_cast<int32_t>(frame_.num_spill_slots++);
+                            frame_.spill_slot_is_gcref.push_back(true);
+                            callee_gpr_to_slot_[code] = slot;
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // 1. Compute frame layout
-    codegen::FrameInfo mutable_frame = fn_.frame;
-    X64FrameLayout::compute_layout(mutable_frame, fn_.calling_conv);
+    X64FrameLayout::compute_layout(frame_, fn_.calling_conv);
 
     // 2. Create labels for all blocks
     for (const auto& block : fn_.blocks) {
@@ -62,7 +82,7 @@ CompilationResult EmitContext::compile() {
     }
 
     // 3. Emit prologue at entry
-    X64FrameLayout::emit_prologue(enc_, mutable_frame, fn_.calling_conv);
+    X64FrameLayout::emit_prologue(enc_, frame_, fn_.calling_conv);
 
     // 4. Emit blocks
     for (size_t b_idx = 0; b_idx < fn_.blocks.size(); ++b_idx) {
@@ -149,7 +169,7 @@ CompilationResult EmitContext::compile() {
         result.osr_entry_offset = buffer_.size();
 
         // Secondary prologue: establishes native stack frame
-        X64FrameLayout::emit_prologue(enc_, mutable_frame, fn_.calling_conv);
+        X64FrameLayout::emit_prologue(enc_, frame_, fn_.calling_conv);
 
         // Standard calling convention: 1st argument (OsrMigrationFrame*)
         // On Win64: RCX; on SysV: RDI
@@ -181,7 +201,7 @@ CompilationResult EmitContext::compile() {
                     }
                 }
             } else if (info.is_spilled && info.assigned_spill_slot >= 0) {
-                MemAddress stack_addr = X64FrameLayout::spill_slot_address(info.assigned_spill_slot, mutable_frame);
+                MemAddress stack_addr = X64FrameLayout::spill_slot_address(info.assigned_spill_slot, frame_);
                 if (vr.is_xmm()) {
                     enc_.movq(XMM::XMM4, ptr(GPR::R10, slot_offset));
                     enc_.movsd(stack_addr, XMM::XMM4);
@@ -220,10 +240,8 @@ CompilationResult EmitContext::compile() {
     // 6. Build exception table
     result.exception_table.set_function_name(std::string(fn_.name));
     result.exception_table.set_code_size(static_cast<uint32_t>(result.code_buffer.size()));
-    codegen::FrameInfo fn_frame = fn_.frame;
-    x64::X64FrameLayout::compute_layout(fn_frame, fn_.calling_conv);
-    result.exception_table.set_frame_size(static_cast<uint32_t>(fn_frame.total_frame_size));
-    result.exception_table.set_saved_callee_gprs(fn_frame.saved_callee_gprs);
+    result.exception_table.set_frame_size(static_cast<uint32_t>(frame_.total_frame_size));
+    result.exception_table.set_saved_callee_gprs(frame_.saved_callee_gprs);
 
     for (const auto& scope : pending_exception_scopes_) {
         auto it = result.block_offsets.find(scope.unwind_block_id);
@@ -240,232 +258,6 @@ CompilationResult EmitContext::compile() {
 }
 
 
-
-
-
-void EmitContext::emit_parallel_copy(const LirInst& inst) {
-    size_t n = inst.defs.size();
-    if (n == 0 || n != inst.uses.size()) return;
-
-    struct Move {
-        LirOperand dst;
-        LirOperand src;
-        bool done = false;
-    };
-
-    std::vector<Move> moves;
-    for (size_t i = 0; i < n; ++i) {
-        if (inst.defs[i].is_preg() && inst.uses[i].is_preg() &&
-            inst.defs[i].preg_val == inst.uses[i].preg_val) {
-            continue; // Skip self moves
-        }
-        if (inst.defs[i].is_spill_slot() && inst.uses[i].is_spill_slot() &&
-            inst.defs[i].spill_slot == inst.uses[i].spill_slot) {
-            continue; // Skip self moves
-        }
-        moves.push_back({inst.defs[i], inst.uses[i], false});
-    }
-
-    auto emit_move = [&](const LirOperand& dst, const LirOperand& src) {
-        if (dst.is_preg() && src.is_preg() && dst.preg_val == src.preg_val) return;
-        if (dst.is_spill_slot() && src.is_spill_slot() && dst.spill_slot == src.spill_slot) return;
-        if (dst.is_preg()) {
-            if (dst.preg_val.is_gpr()) {
-                GPR dst_gpr = dst.preg_val.as_gpr();
-                if (src.is_preg()) {
-                    GPR src_gpr = src.preg_val.as_gpr();
-                    if (dst.size == 4 && src.size == 4) enc_.mov32(dst_gpr, src_gpr);
-                    else enc_.mov(dst_gpr, src_gpr);
-                } else if (src.is_imm_int()) {
-                    if (dst.size == 4) enc_.mov32(dst_gpr, static_cast<uint32_t>(src.imm_int));
-                    else enc_.mov(dst_gpr, src.imm_int);
-                } else {
-                    if (dst.size == 4) enc_.mov32(dst_gpr, to_mem_address(src));
-                    else enc_.mov(dst_gpr, to_mem_address(src));
-                }
-            } else {
-                XMM dst_xmm = dst.preg_val.as_xmm();
-                if (dst.size == 32 || src.size == 32) {
-                    if (src.is_preg()) enc_.vmovaps(dst_xmm, src.preg_val.as_xmm());
-                    else enc_.vmovups(dst_xmm, to_mem_address(src));
-                } else if (dst.size == 16 || src.size == 16) {
-                    if (src.is_preg()) enc_.movaps(dst_xmm, src.preg_val.as_xmm());
-                    else enc_.movups(dst_xmm, to_mem_address(src));
-                } else if (dst.size == 4 && src.size == 4) {
-                    if (src.is_preg()) enc_.movss(dst_xmm, src.preg_val.as_xmm());
-                    else enc_.movss(dst_xmm, to_mem_address(src));
-                } else {
-                    if (src.is_preg()) enc_.movsd(dst_xmm, src.preg_val.as_xmm());
-                    else enc_.movsd(dst_xmm, to_mem_address(src));
-                }
-            }
-        } else {
-            MemAddress dst_mem = to_mem_address(dst);
-            if (src.is_preg()) {
-                if (src.preg_val.is_gpr()) {
-                    if (src.size == 4) enc_.mov32(dst_mem, src.preg_val.as_gpr());
-                    else enc_.mov(dst_mem, src.preg_val.as_gpr());
-                } else {
-                    if (dst.size == 32 || src.size == 32) {
-                        enc_.vmovups(dst_mem, src.preg_val.as_xmm());
-                    } else if (dst.size == 16 || src.size == 16) {
-                        enc_.movups(dst_mem, src.preg_val.as_xmm());
-                    } else if (dst.size == 4 && src.size == 4) {
-                        enc_.movss(dst_mem, src.preg_val.as_xmm());
-                    } else {
-                        enc_.movsd(dst_mem, src.preg_val.as_xmm());
-                    }
-                }
-            } else if (src.is_imm_int()) {
-                if (dst.size == 4) enc_.mov32(dst_mem, static_cast<int32_t>(src.imm_int));
-                else enc_.mov(dst_mem, static_cast<int32_t>(src.imm_int));
-            } else {
-                // Memory-to-memory move using scratch register
-                MemAddress src_mem = to_mem_address(src);
-                if (dst.size == 32 || src.size == 32) {
-                    enc_.vmovups(XMM::XMM15, src_mem);
-                    enc_.vmovups(dst_mem, XMM::XMM15);
-                } else if (dst.size == 16 || src.size == 16) {
-                    enc_.movups(XMM::XMM15, src_mem);
-                    enc_.movups(dst_mem, XMM::XMM15);
-                } else if (dst.size == 4 && src.size == 4) {
-                    enc_.mov32(GPR::R11, src_mem);
-                    enc_.mov32(dst_mem, GPR::R11);
-                } else {
-                    enc_.mov(GPR::R11, src_mem);
-                    enc_.mov(dst_mem, GPR::R11);
-                }
-            }
-        }
-    };
-
-    auto peel_acyclic = [&]() -> bool {
-        bool progress = false;
-        for (auto& m : moves) {
-            if (m.done) continue;
-            bool dst_used = false;
-            for (const auto& other : moves) {
-                if (other.done) continue;
-                if (m.dst.is_preg() && other.src.is_preg() &&
-                    m.dst.preg_val == other.src.preg_val) {
-                    dst_used = true;
-                    break;
-                }
-                if (m.dst.is_spill_slot() && other.src.is_spill_slot() &&
-                    m.dst.spill_slot == other.src.spill_slot) {
-                    dst_used = true;
-                    break;
-                }
-            }
-            if (!dst_used) {
-                emit_move(m.dst, m.src);
-                m.done = true;
-                progress = true;
-            }
-        }
-        return progress;
-    };
-
-    while (true) {
-        while (peel_acyclic()) {}
-
-        size_t start_idx = SIZE_MAX;
-        for (size_t i = 0; i < moves.size(); ++i) {
-            if (!moves[i].done) {
-                start_idx = i;
-                break;
-            }
-        }
-        if (start_idx == SIZE_MAX) break;
-
-        // Trace permutation cycle
-        std::vector<size_t> cycle;
-        size_t curr = start_idx;
-        while (true) {
-            cycle.push_back(curr);
-            size_t next_idx = SIZE_MAX;
-            for (size_t i = 0; i < moves.size(); ++i) {
-                if (!moves[i].done) {
-                    bool match = false;
-                    if (moves[i].dst.is_preg() && moves[curr].src.is_preg() &&
-                        moves[i].dst.preg_val == moves[curr].src.preg_val) {
-                        match = true;
-                    } else if (moves[i].dst.is_spill_slot() && moves[curr].src.is_spill_slot() &&
-                               moves[i].dst.spill_slot == moves[curr].src.spill_slot) {
-                        match = true;
-                    }
-                    if (match) {
-                        next_idx = i;
-                        break;
-                    }
-                }
-            }
-            if (next_idx == SIZE_MAX || next_idx == start_idx) {
-                break;
-            }
-            bool already_in_cycle = false;
-            for (size_t c : cycle) {
-                if (c == next_idx) {
-                    already_in_cycle = true;
-                    break;
-                }
-            }
-            if (already_in_cycle) break;
-            curr = next_idx;
-        }
-
-        if (cycle.size() == 2) {
-            size_t idx0 = cycle[0];
-            size_t idx1 = cycle[1];
-            auto& m0 = moves[idx0];
-            auto& m1 = moves[idx1];
-
-            if (m0.dst.is_preg() && m0.dst.preg_val.is_gpr() &&
-                m1.dst.is_preg() && m1.dst.preg_val.is_gpr() &&
-                m0.src.is_preg() && m0.src.preg_val.is_gpr() &&
-                m1.src.is_preg() && m1.src.preg_val.is_gpr()) {
-                GPR r0 = m0.dst.preg_val.as_gpr();
-                GPR r1 = m1.dst.preg_val.as_gpr();
-                if (m0.dst.size == 4 && m1.dst.size == 4) {
-                    enc_.xchg32(r0, r1);
-                } else {
-                    enc_.xchg(r0, r1);
-                }
-                m0.done = true;
-                m1.done = true;
-            } else {
-                bool is_xmm = (m0.dst.is_preg() && m0.dst.preg_val.is_xmm()) ||
-                              (m1.dst.is_preg() && m1.dst.preg_val.is_xmm()) ||
-                              (m0.src.is_preg() && m0.src.preg_val.is_xmm()) ||
-                              (m1.src.is_preg() && m1.src.preg_val.is_xmm()) ||
-                              (m0.dst.size == 16 || m0.dst.size == 32);
-                PReg scratch = is_xmm ? PReg::xmm(XMM::XMM15) : PReg::gpr(GPR::R11);
-                uint8_t sz = m0.dst.size;
-                emit_move(LirOperand::preg(scratch, sz), m0.src);
-                emit_move(m1.dst, m0.dst);
-                emit_move(m0.dst, LirOperand::preg(scratch, sz));
-                m0.done = true;
-                m1.done = true;
-            }
-        } else if (!cycle.empty()) {
-            size_t idx0 = cycle[0];
-            auto& m0 = moves[idx0];
-            bool is_xmm = (m0.dst.is_preg() && m0.dst.preg_val.is_xmm()) ||
-                          (m0.src.is_preg() && m0.src.preg_val.is_xmm()) ||
-                          (m0.dst.size == 16 || m0.dst.size == 32);
-            PReg scratch = is_xmm ? PReg::xmm(XMM::XMM15) : PReg::gpr(GPR::R11);
-            uint8_t sz = m0.dst.size;
-
-            emit_move(LirOperand::preg(scratch, sz), m0.dst);
-            size_t last_idx = cycle.back();
-            moves[last_idx].src = LirOperand::preg(scratch, sz);
-        } else {
-            emit_move(moves[start_idx].dst, moves[start_idx].src);
-            moves[start_idx].done = true;
-        }
-    }
-}
-
 void EmitContext::emit_control_instruction(const LirInst& inst) {
     switch (inst.opcode) {
         case LirOpcode::Jmp:
@@ -475,6 +267,16 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
             enc_.j(inst.condition, block_labels_[inst.uses[0].label_id]);
             break;
         case LirOpcode::Call: {
+            for (const auto& v : inst.live_gcrefs) {
+                const auto& info = fn_.get_vreg_info(v);
+                if (!info.is_spilled && info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
+                    auto it = callee_gpr_to_slot_.find(info.assigned_preg.code);
+                    if (it != callee_gpr_to_slot_.end()) {
+                        enc_.mov(X64FrameLayout::spill_slot_address(it->second, frame_), info.assigned_preg.as_gpr());
+                    }
+                }
+            }
+
             size_t call_start = buffer_.size();
             std::string callee = inst.callee_symbol;
             if (callee.empty()) {
@@ -508,65 +310,91 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
             }
             size_t return_offset = buffer_.size();
 
+            for (const auto& v : inst.live_gcrefs) {
+                const auto& info = fn_.get_vreg_info(v);
+                if (!info.is_spilled && info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
+                    auto it = callee_gpr_to_slot_.find(info.assigned_preg.code);
+                    if (it != callee_gpr_to_slot_.end()) {
+                        enc_.mov(info.assigned_preg.as_gpr(), X64FrameLayout::spill_slot_address(it->second, frame_));
+                    }
+                }
+            }
+
             if (inst.is_invoke && inst.unwind_block_id != UINT32_MAX) {
                 pending_exception_scopes_.push_back({call_start, return_offset, inst.unwind_block_id});
             }
 
-            codegen::FrameInfo mutable_frame = fn_.frame;
-            X64FrameLayout::compute_layout(mutable_frame, fn_.calling_conv);
-
             StackMapRecord map_rec;
             map_rec.instruction_offset = static_cast<uint32_t>(return_offset);
-            map_rec.frame_size = static_cast<uint32_t>(mutable_frame.total_frame_size);
+            map_rec.frame_size = static_cast<uint32_t>(frame_.total_frame_size);
             map_rec.safepoint_id = inst.safepoint_id;
 
             for (const auto& v : inst.live_gcrefs) {
                 const auto& info = fn_.get_vreg_info(v);
                 if (info.is_spilled) {
-                    int32_t offset = mutable_frame.spill_slot_offset(info.assigned_spill_slot);
+                    int32_t offset = frame_.spill_slot_offset(info.assigned_spill_slot);
                     map_rec.add_root(StackMapRootLocation::frame_slot(offset));
                 } else if (info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
-                    MemAddress addr = X64FrameLayout::callee_gpr_address(info.assigned_preg.as_gpr(), mutable_frame);
-                    map_rec.add_root(StackMapRootLocation::callee_saved(addr.disp, info.assigned_preg));
+                    auto it = callee_gpr_to_slot_.find(info.assigned_preg.code);
+                    int32_t slot = (it != callee_gpr_to_slot_.end()) ? it->second : 0;
+                    int32_t offset = frame_.spill_slot_offset(slot);
+                    map_rec.add_root(StackMapRootLocation::callee_saved(offset, info.assigned_preg));
                 }
             }
             stack_map_records_.push_back(std::move(map_rec));
             break;
         }
         case LirOpcode::CallIndirect: {
+            for (const auto& v : inst.live_gcrefs) {
+                const auto& info = fn_.get_vreg_info(v);
+                if (!info.is_spilled && info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
+                    auto it = callee_gpr_to_slot_.find(info.assigned_preg.code);
+                    if (it != callee_gpr_to_slot_.end()) {
+                        enc_.mov(X64FrameLayout::spill_slot_address(it->second, frame_), info.assigned_preg.as_gpr());
+                    }
+                }
+            }
+
             size_t call_start = buffer_.size();
             enc_.call(to_gpr(inst.uses.back()));
             size_t return_offset = buffer_.size();
+
+            for (const auto& v : inst.live_gcrefs) {
+                const auto& info = fn_.get_vreg_info(v);
+                if (!info.is_spilled && info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
+                    auto it = callee_gpr_to_slot_.find(info.assigned_preg.code);
+                    if (it != callee_gpr_to_slot_.end()) {
+                        enc_.mov(info.assigned_preg.as_gpr(), X64FrameLayout::spill_slot_address(it->second, frame_));
+                    }
+                }
+            }
 
             if (inst.is_invoke && inst.unwind_block_id != UINT32_MAX) {
                 pending_exception_scopes_.push_back({call_start, return_offset, inst.unwind_block_id});
             }
 
-            codegen::FrameInfo mutable_frame = fn_.frame;
-            X64FrameLayout::compute_layout(mutable_frame, fn_.calling_conv);
-
             StackMapRecord map_rec;
             map_rec.instruction_offset = static_cast<uint32_t>(return_offset);
-            map_rec.frame_size = static_cast<uint32_t>(mutable_frame.total_frame_size);
+            map_rec.frame_size = static_cast<uint32_t>(frame_.total_frame_size);
             map_rec.safepoint_id = inst.safepoint_id;
 
             for (const auto& v : inst.live_gcrefs) {
                 const auto& info = fn_.get_vreg_info(v);
                 if (info.is_spilled) {
-                    int32_t offset = mutable_frame.spill_slot_offset(info.assigned_spill_slot);
+                    int32_t offset = frame_.spill_slot_offset(info.assigned_spill_slot);
                     map_rec.add_root(StackMapRootLocation::frame_slot(offset));
                 } else if (info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
-                    MemAddress addr = X64FrameLayout::callee_gpr_address(info.assigned_preg.as_gpr(), mutable_frame);
-                    map_rec.add_root(StackMapRootLocation::callee_saved(addr.disp, info.assigned_preg));
+                    auto it = callee_gpr_to_slot_.find(info.assigned_preg.code);
+                    int32_t slot = (it != callee_gpr_to_slot_.end()) ? it->second : 0;
+                    int32_t offset = frame_.spill_slot_offset(slot);
+                    map_rec.add_root(StackMapRootLocation::callee_saved(offset, info.assigned_preg));
                 }
             }
             stack_map_records_.push_back(std::move(map_rec));
             break;
         }
         case LirOpcode::Ret: {
-            codegen::FrameInfo mutable_frame = fn_.frame;
-            X64FrameLayout::compute_layout(mutable_frame, fn_.calling_conv);
-            X64FrameLayout::emit_epilogue(enc_, mutable_frame, fn_.calling_conv);
+            X64FrameLayout::emit_epilogue(enc_, frame_, fn_.calling_conv);
             break;
         }
         case LirOpcode::Push: enc_.push(to_gpr(inst.uses[0])); break;
@@ -576,11 +404,28 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
             else enc_.lea(to_gpr(inst.defs[0]), to_mem_address(inst.uses[0]));
             break;
         case LirOpcode::Safepoint: {
+            for (const auto& v : inst.live_gcrefs) {
+                const auto& info = fn_.get_vreg_info(v);
+                if (!info.is_spilled && info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
+                    auto it = callee_gpr_to_slot_.find(info.assigned_preg.code);
+                    if (it != callee_gpr_to_slot_.end()) {
+                        enc_.mov(X64FrameLayout::spill_slot_address(it->second, frame_), info.assigned_preg.as_gpr());
+                    }
+                }
+            }
+
             enc_.call("brass_gc_safepoint");
             size_t return_offset = buffer_.size();
 
-            codegen::FrameInfo mutable_frame = fn_.frame;
-            X64FrameLayout::compute_layout(mutable_frame, fn_.calling_conv);
+            for (const auto& v : inst.live_gcrefs) {
+                const auto& info = fn_.get_vreg_info(v);
+                if (!info.is_spilled && info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
+                    auto it = callee_gpr_to_slot_.find(info.assigned_preg.code);
+                    if (it != callee_gpr_to_slot_.end()) {
+                        enc_.mov(info.assigned_preg.as_gpr(), X64FrameLayout::spill_slot_address(it->second, frame_));
+                    }
+                }
+            }
 
             SafepointRecord rec;
             rec.code_offset = return_offset;
@@ -588,19 +433,21 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
 
             StackMapRecord map_rec;
             map_rec.instruction_offset = static_cast<uint32_t>(return_offset);
-            map_rec.frame_size = static_cast<uint32_t>(mutable_frame.total_frame_size);
+            map_rec.frame_size = static_cast<uint32_t>(frame_.total_frame_size);
             map_rec.safepoint_id = inst.safepoint_id;
 
             for (const auto& v : inst.live_gcrefs) {
                 const auto& info = fn_.get_vreg_info(v);
                 if (info.is_spilled) {
-                    int32_t offset = mutable_frame.spill_slot_offset(info.assigned_spill_slot);
+                    int32_t offset = frame_.spill_slot_offset(info.assigned_spill_slot);
                     rec.live_gcref_spill_offsets.push_back(offset);
                     map_rec.add_root(StackMapRootLocation::frame_slot(offset));
                 } else if (info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
                     rec.live_gcref_registers.push_back(info.assigned_preg.as_gpr());
-                    MemAddress addr = X64FrameLayout::callee_gpr_address(info.assigned_preg.as_gpr(), mutable_frame);
-                    map_rec.add_root(StackMapRootLocation::callee_saved(addr.disp, info.assigned_preg));
+                    auto it = callee_gpr_to_slot_.find(info.assigned_preg.code);
+                    int32_t slot = (it != callee_gpr_to_slot_.end()) ? it->second : 0;
+                    int32_t offset = frame_.spill_slot_offset(slot);
+                    map_rec.add_root(StackMapRootLocation::callee_saved(offset, info.assigned_preg));
                 }
             }
             safepoints_.push_back(std::move(rec));

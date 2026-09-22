@@ -1,4 +1,5 @@
 #include <brass/gc/generational_gc.hpp>
+#include <brass/runtime/coroutine.hpp>
 #include <algorithm>
 #include <cstring>
 #include <cassert>
@@ -287,6 +288,7 @@ uintptr_t GenerationalGC::evacuate_young_object(uintptr_t obj_addr) {
 
 void GenerationalGC::gather_all_roots(std::vector<uintptr_t*>& roots, std::vector<uintptr_t*>& extra_roots) {
     roots.insert(roots.end(), registered_roots_.begin(), registered_roots_.end());
+    runtime::append_active_coro_roots(roots);
     roots.insert(roots.end(), extra_roots.begin(), extra_roots.end());
     if (root_provider_) {
         root_provider_(roots);
@@ -326,29 +328,32 @@ void GenerationalGC::minor_collect(std::vector<uintptr_t*>& extra_roots) {
             }
         };
 
-        // Binary search for tenured objects overlapping this card
+        // Multi-card tenured objects scan:
+        // Check tenured objects starting before card_start that extend into or past card_start
         auto it = std::lower_bound(tenured_objects_.begin(), tenured_objects_.end(), card_start);
         if (it != tenured_objects_.begin()) {
-            auto prev_it = it - 1;
-            const auto* prev_hdr = get_header(*prev_it);
-            if (prev_hdr && (*prev_it + prev_hdr->size) > card_start) {
-                // Preceding object overlaps card
-                size_t num_fields = prev_hdr->size / 8;
-                for (size_t f = 0; f < num_fields; ++f) {
-                    if (f < 64 && (prev_hdr->pointer_mask & (1ULL << f))) {
-                        auto* slot = reinterpret_cast<uintptr_t*>(*prev_it + f * 8);
-                        check_and_add_slot(slot);
+            auto prev_it = it;
+            while (prev_it != tenured_objects_.begin()) {
+                --prev_it;
+                const auto* prev_hdr = get_header(*prev_it);
+                if (prev_hdr && (*prev_it + prev_hdr->size) > card_start) {
+                    size_t num_fields = prev_hdr->size / 8;
+                    for (size_t f = 0; f < num_fields; ++f) {
+                        if (prev_hdr->is_field_pointer(f)) {
+                            auto* slot = reinterpret_cast<uintptr_t*>(*prev_it + f * 8);
+                            check_and_add_slot(slot);
+                        }
                     }
                 }
             }
         }
 
-        for (; it != tenured_objects_.end() && *it < card_end; ++it) {
+        for (; it != tenured_objects_.end() && (*it - sizeof(GenGcHeader)) < card_end; ++it) {
             const auto* hdr = get_header(*it);
             if (!hdr) continue;
             size_t num_fields = hdr->size / 8;
             for (size_t f = 0; f < num_fields; ++f) {
-                if (f < 64 && (hdr->pointer_mask & (1ULL << f))) {
+                if (hdr->is_field_pointer(f)) {
                     auto* slot = reinterpret_cast<uintptr_t*>(*it + f * 8);
                     check_and_add_slot(slot);
                 }
@@ -396,7 +401,7 @@ void GenerationalGC::minor_collect(std::vector<uintptr_t*>& extra_roots) {
 
             size_t num_fields = hdr->size / 8;
             for (size_t f = 0; f < num_fields; ++f) {
-                if (f < 64 && (hdr->pointer_mask & (1ULL << f))) {
+                if (hdr->is_field_pointer(f)) {
                     auto* slot = reinterpret_cast<uintptr_t*>(payload + f * 8);
                     evacuate_slot(slot);
                 }
@@ -410,7 +415,7 @@ void GenerationalGC::minor_collect(std::vector<uintptr_t*>& extra_roots) {
             size_t num_fields = hdr->size / 8;
             bool points_to_young = false;
             for (size_t f = 0; f < num_fields; ++f) {
-                if (f < 64 && (hdr->pointer_mask & (1ULL << f))) {
+                if (hdr->is_field_pointer(f)) {
                     auto* slot = reinterpret_cast<uintptr_t*>(payload + f * 8);
                     evacuate_slot(slot);
                     if (*slot != 0) {
@@ -436,32 +441,36 @@ void GenerationalGC::minor_collect(std::vector<uintptr_t*>& extra_roots) {
 
         auto it = std::lower_bound(tenured_objects_.begin(), tenured_objects_.end(), card_start);
         if (it != tenured_objects_.begin()) {
-            auto prev_it = it - 1;
-            const auto* prev_hdr = get_header(*prev_it);
-            if (prev_hdr && (*prev_it + prev_hdr->size) > card_start) {
-                size_t num_fields = prev_hdr->size / 8;
-                for (size_t f = 0; f < num_fields; ++f) {
-                    if (f < 64 && (prev_hdr->pointer_mask & (1ULL << f))) {
-                        uintptr_t child = *reinterpret_cast<const uintptr_t*>(*prev_it + f * 8);
-                        if (child != 0) {
-                            uintptr_t ptr_child = child & 0x0000FFFFFFFFFFFFULL;
-                            if (is_young(child) || is_young(ptr_child)) {
-                                still_dirty = true;
-                                break;
+            auto prev_it = it;
+            while (prev_it != tenured_objects_.begin()) {
+                --prev_it;
+                const auto* prev_hdr = get_header(*prev_it);
+                if (prev_hdr && (*prev_it + prev_hdr->size) > card_start) {
+                    size_t num_fields = prev_hdr->size / 8;
+                    for (size_t f = 0; f < num_fields; ++f) {
+                        if (prev_hdr->is_field_pointer(f)) {
+                            uintptr_t child = *reinterpret_cast<const uintptr_t*>(*prev_it + f * 8);
+                            if (child != 0) {
+                                uintptr_t ptr_child = child & 0x0000FFFFFFFFFFFFULL;
+                                if (is_young(child) || is_young(ptr_child)) {
+                                    still_dirty = true;
+                                    break;
+                                }
                             }
                         }
                     }
+                    if (still_dirty) break;
                 }
             }
         }
 
         if (!still_dirty) {
-            for (; it != tenured_objects_.end() && *it < card_end; ++it) {
+            for (; it != tenured_objects_.end() && (*it - sizeof(GenGcHeader)) < card_end; ++it) {
                 const auto* hdr = get_header(*it);
                 if (!hdr) continue;
                 size_t num_fields = hdr->size / 8;
                 for (size_t f = 0; f < num_fields; ++f) {
-                    if (f < 64 && (hdr->pointer_mask & (1ULL << f))) {
+                    if (hdr->is_field_pointer(f)) {
                         uintptr_t child = *reinterpret_cast<const uintptr_t*>(*it + f * 8);
                         if (child != 0) {
                             uintptr_t ptr_child = child & 0x0000FFFFFFFFFFFFULL;
@@ -569,7 +578,7 @@ void GenerationalGC::major_collect(std::vector<uintptr_t*>& extra_roots) {
 
         size_t num_fields = hdr->size / 8;
         for (size_t f = 0; f < num_fields; ++f) {
-            if (f < 64 && (hdr->pointer_mask & (1ULL << f))) {
+            if (hdr->is_field_pointer(f)) {
                 auto* slot = reinterpret_cast<uintptr_t*>(obj_pos + sizeof(GenGcHeader) + f * 8);
                 evacuate_slot_major(slot);
             }

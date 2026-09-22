@@ -1,4 +1,5 @@
 #include <brass/gc/mini_cheney.hpp>
+#include <brass/runtime/coroutine.hpp>
 #include <algorithm>
 #include <cstring>
 #include <iostream>
@@ -54,6 +55,7 @@ void MiniCheneyGC::gather_all_roots(std::vector<uintptr_t*>& roots) {
     for (uintptr_t* r : registered_roots_) {
         roots.push_back(r);
     }
+    runtime::append_active_coro_roots(roots);
     if (root_provider_) {
         root_provider_(roots);
     }

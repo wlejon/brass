@@ -432,13 +432,13 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                 case Opcode::write_barrier: {
                     RuntimeValue obj = frame.get_value(inst->operand(0));
                     RuntimeValue val = frame.get_value(inst->operand(1));
-                    uintptr_t obj_addr = obj.raw_bits();
-                    uintptr_t val_addr = val.raw_bits();
+                    uintptr_t obj_addr = obj.raw_bits() & 0x0000FFFFFFFFFFFFULL;
+                    uintptr_t val_addr = val.raw_bits() & 0x0000FFFFFFFFFFFFULL;
                     GenerationalGC* gen = gen_gc_;
                     if (!gen) {
                         gen = brass_get_active_generational_gc();
                     }
-                    if (gen) {
+                    if (gen && obj_addr != 0) {
                         if (gen->is_old(obj_addr) && gen->is_young(val_addr)) {
                             gen->card_table().mark_card(obj_addr);
                         }

@@ -47,11 +47,13 @@ public:
 private:
     const LirFunction& fn_;
     Target target_;
+    codegen::FrameInfo frame_;
     x64::CodeBuffer buffer_;
     x64::X64Encoder enc_;
     std::vector<SafepointRecord> safepoints_;
     std::vector<StackMapRecord> stack_map_records_;
     std::unordered_map<uint32_t, x64::Label> block_labels_;
+    std::unordered_map<uint8_t, int32_t> callee_gpr_to_slot_;
     std::vector<runtime::PatchSite> patch_sites_;
 
     struct PendingExceptionScope {
