@@ -373,6 +373,9 @@ uint32_t LinearScanAllocator::get_hard_blocked_regs(const LiveInterval& interval
     const auto& pool = is_gpr ? available_gprs_ : available_xmms_;
 
     uint32_t blocked = 0;
+    if (is_gpr) {
+        blocked |= fn_.reserved_gprs;
+    }
     auto block = [&blocked](PReg reg) { blocked |= (1u << reg.code); };
 
     if (interval.spans_call) {

@@ -181,11 +181,10 @@ void PropertyLoweringHelper::lower_prop_set(
 static void extract_object_pointer(Builder& b, Value* obj, Value*& obj_ptr, Value*& is_valid_obj) {
     Value* tag = b.build_and(obj, b.build_iconst_i64(static_cast<int64_t>(0xFFFF000000000000ULL)));
     Value* is_gcref = b.build_eq(tag, b.build_iconst_i64(static_cast<int64_t>(0x7FFD000000000000ULL)));
-    Value* is_bronze = b.build_eq(tag, b.build_iconst_i64(static_cast<int64_t>(0xFFF1000000000000ULL)));
     Value* is_zero_tag = b.build_eq(tag, b.build_iconst_i64(0));
     Value* is_non_null = b.build_ne(obj, b.build_iconst_i64(0));
     Value* is_raw = b.build_and(is_zero_tag, is_non_null);
-    Value* is_tagged = b.build_or(is_gcref, is_bronze);
+    Value* is_tagged = is_gcref;
     is_valid_obj = b.build_or(is_tagged, is_raw);
     obj_ptr = b.build_and(obj, b.build_iconst_i64(static_cast<int64_t>(0x0000FFFFFFFFFFFFULL)));
 }

@@ -127,6 +127,7 @@ Function* clone_function(const Function& src, Module& dst_mod) {
 std::unique_ptr<Module> clone_module(const Module& src) {
     auto dst = std::make_unique<Module>(src.name());
     dst->set_allow_fp_reassociation(src.allow_fp_reassociation());
+    dst->set_pinned_tls_register(src.pinned_tls_register());
     for (std::string_view sym : src.external_symbols()) dst->add_external_symbol(sym);
     for (const Function* fn : src.functions()) if (fn) clone_function(*fn, *dst);
     return dst;

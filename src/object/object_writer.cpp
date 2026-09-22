@@ -135,6 +135,7 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
         if (enable_mir_opts_ && !mod.has_loop_optimizations()) {
             opt_mod = std::make_unique<Module>(mod.name());
             opt_mod->set_allow_fp_reassociation(mod.allow_fp_reassociation());
+            opt_mod->set_pinned_tls_register(mod.pinned_tls_register());
             for (std::string_view sym : mod.external_symbols()) {
                 opt_mod->add_external_symbol(sym);
             }
