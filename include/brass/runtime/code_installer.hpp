@@ -120,14 +120,28 @@ public:
     void register_handle(std::unique_ptr<FunctionHandle> handle);
     void clear();
 
+    // Handles are keyed by name and outlive the MIR they were registered
+    // with; a later Function allocated at a dead one's address would
+    // otherwise match `mir_function() == &fn` and be routed to the dead
+    // function's native code. Detaches every handle from `mod`'s functions
+    // (native entries stay: other code may still call them by name).
+    void forget_module(const Module& mod);
+
     size_t size() const;
     std::vector<FunctionHandle*> all_handles() const;
+
+    ~FunctionDispatchTable();
 
 private:
     FunctionDispatchTable() = default;
     mutable std::mutex mutex_;
     std::unordered_map<std::string, std::unique_ptr<FunctionHandle>> handles_;
 };
+
+// Called by ~Module: drops every runtime registry's raw pointer into `mod`
+// (dispatch-table handles, the tiering registry's active module) so none of
+// them can dangle or alias a later module allocated at the same address.
+void forget_module(const Module& mod) noexcept;
 
 struct CodeInstallResult {
     bool success = false;

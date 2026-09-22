@@ -16,12 +16,14 @@ class Module {
 public:
     Module() noexcept = default;
     explicit Module(std::string_view name);
-    ~Module() = default;
+    ~Module();
 
     Module(const Module&) = delete;
     Module& operator=(const Module&) = delete;
     Module(Module&&) noexcept = default;
-    Module& operator=(Module&&) noexcept = default;
+    // Not defaulted: the functions being replaced must leave the runtime
+    // registries first, as in the destructor.
+    Module& operator=(Module&& other) noexcept;
 
     std::string_view name() const noexcept { return name_; }
     void set_name(std::string_view name);

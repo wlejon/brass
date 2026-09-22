@@ -19,6 +19,7 @@
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <stdexcept>
 #include <iostream>
+#include <unordered_set>
 
 extern "C" void brass_pgo_inc(uint32_t);
 
@@ -388,9 +389,44 @@ RuntimeValue FunctionHandle::call(FastInterpreter& interp, const std::vector<Run
 // FunctionDispatchTable Implementation
 // ============================================================================
 
+namespace {
+// Lets ~Module skip the table when it was never built or is already gone
+// (a static Module can outlive the function-local static table).
+std::atomic<bool> g_dispatch_table_alive{false};
+} // namespace
+
 FunctionDispatchTable& FunctionDispatchTable::instance() {
     static FunctionDispatchTable table;
+    g_dispatch_table_alive.store(true, std::memory_order_release);
     return table;
+}
+
+FunctionDispatchTable::~FunctionDispatchTable() {
+    g_dispatch_table_alive.store(false, std::memory_order_release);
+}
+
+void FunctionDispatchTable::forget_module(const Module& mod) {
+    const auto& fns = mod.functions();
+    if (fns.empty()) return;
+    std::unordered_set<const Function*> dying(fns.begin(), fns.end());
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& [_, handle] : handles_) {
+        if (handle && dying.count(handle->mir_function()) != 0) {
+            handle->set_mir_function(nullptr);
+        }
+    }
+}
+
+void forget_module(const Module& mod) noexcept {
+    try {
+        if (g_dispatch_table_alive.load(std::memory_order_acquire)) {
+            FunctionDispatchTable::instance().forget_module(mod);
+        }
+        TieringRegistry::forget_module(&mod);
+    } catch (...) {
+        // Allocation failure while building the lookup set: leaving a stale
+        // pointer behind beats throwing out of a destructor.
+    }
 }
 
 FunctionHandle* FunctionDispatchTable::get_or_create(std::string_view name, const Function* fn) {

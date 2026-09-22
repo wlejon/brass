@@ -3,6 +3,7 @@
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/type_feedback.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
+#include <atomic>
 #include <ostream>
 #include <iomanip>
 
@@ -132,9 +133,25 @@ bool TieringFeedback::should_osr(uint32_t loop_header_id) const noexcept {
     return loop_backedges(loop_header_id) >= config_.backedge_osr_threshold;
 }
 
+namespace {
+// Guards forget_module against a registry never built or already destroyed.
+std::atomic<bool> g_tiering_registry_alive{false};
+} // namespace
+
 TieringRegistry& TieringRegistry::instance() {
     static TieringRegistry registry;
+    g_tiering_registry_alive.store(true, std::memory_order_release);
     return registry;
+}
+
+TieringRegistry::~TieringRegistry() {
+    g_tiering_registry_alive.store(false, std::memory_order_release);
+}
+
+void TieringRegistry::forget_module(const Module* mod) noexcept {
+    if (!g_tiering_registry_alive.load(std::memory_order_acquire)) return;
+    TieringRegistry& reg = instance();
+    if (reg.active_module_ == mod) reg.active_module_ = nullptr;
 }
 
 TieringFeedback& TieringRegistry::get_feedback(std::string_view fn_name) {

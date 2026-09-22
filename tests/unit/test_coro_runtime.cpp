@@ -5,6 +5,10 @@
 #include <brass/mir/verifier.hpp>
 #include <brass/runtime/coroutine.hpp>
 #include <brass/gc/mini_cheney.hpp>
+#include <brass/codegen/baseline_jit.hpp>
+#include <brass/runtime/code_installer.hpp>
+#include <brass/vm/fast_interpreter.hpp>
+#include <memory>
 
 using namespace brass;
 
@@ -59,6 +63,98 @@ TEST_CASE("Coroutine Runtime - JIT Generator Execution") {
     CHECK(brass_coro_is_done(frame_addr) == 1);
 
     brass_coro_destroy(frame_addr);
+}
+
+namespace {
+
+// Yields 10, then 30, then returns 50 — after CoroTransformPass, whose entry
+// dispatches on the frame's i32 state_id.
+std::unique_ptr<Module> build_fib_step_module(std::string_view fn_name) {
+    auto mod = std::make_unique<Module>("fib_step_mod");
+    Builder b(*mod);
+    Function* fn = mod->create_function(fn_name, Type::i64(), {Type::gcref()});
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    b.position_at_end(entry);
+    b.add_block_param(entry, Type::gcref());
+
+    Value* v1 = b.build_iconst_i64(10);
+    b.build_coro_suspend(v1, 1, Type::i64());
+    Value* v2 = b.build_add(v1, b.build_iconst_i64(20));
+    b.build_coro_suspend(v2, 2, Type::i64());
+    Value* v3 = b.build_add(v2, b.build_iconst_i64(20));
+    b.build_ret(v3);
+
+    CoroTransformPass pass;
+    REQUIRE(pass.run_on_module(*mod));
+    DiagnosticReporter diag;
+    REQUIRE(verify_module(*mod, &diag));
+    return mod;
+}
+
+void step_fib_in_fast_interpreter(FastInterpreter& interp, const Function& fn) {
+    uintptr_t c_frame = brass_coro_create(nullptr, 16, 0);
+    REQUIRE(c_frame != 0);
+    auto* f_ptr = reinterpret_cast<runtime::BrassCoroFrame*>(c_frame);
+
+    RuntimeValue o1 = interp.run(fn, {RuntimeValue::from_ptr(c_frame)});
+    CHECK_EQ(o1.as_u64(), 10u);
+    CHECK_EQ(f_ptr->is_done, 0u);
+    RuntimeValue o2 = interp.run(fn, {RuntimeValue::from_ptr(c_frame)});
+    CHECK_EQ(o2.as_u64(), 30u);
+    CHECK_EQ(f_ptr->is_done, 0u);
+    RuntimeValue o3 = interp.run(fn, {RuntimeValue::from_ptr(c_frame)});
+    CHECK_EQ(o3.as_u64(), 50u);
+    CHECK_EQ(f_ptr->is_done, 1u);
+
+    brass_coro_destroy(c_frame);
+}
+
+} // namespace
+
+TEST_CASE("Coroutine Runtime - Baseline JIT resumes a transformed coroutine on every frame") {
+    // The baseline switch on the i32 state_id used to read the whole 8-byte
+    // slot, so whether a resume reached its state depended on stack garbage:
+    // runs repeated the first yield. Several frames make a lucky pass unlikely.
+    auto mod = build_fib_step_module("fib_step_baseline");
+    codegen::BaselineJitCompiler compiler(Target::host());
+    auto compiled = compiler.compile_module(*mod);
+    REQUIRE(compiled.size() == 1);
+    void* entry = compiled[0].entry_point();
+    REQUIRE(entry != nullptr);
+
+    for (int round = 0; round < 4; ++round) {
+        uintptr_t frame = brass_coro_create(entry, 16, 0);
+        REQUIRE(frame != 0);
+        CHECK_EQ(brass_coro_resume(frame, 0), 10u);
+        CHECK_EQ(brass_coro_resume(frame, 0), 30u);
+        CHECK_EQ(brass_coro_resume(frame, 0), 50u);
+        CHECK_EQ(brass_coro_is_done(frame), 1u);
+        brass_coro_destroy(frame);
+    }
+}
+
+TEST_CASE("Coroutine Runtime - FastInterpreter ignores a destroyed module's dispatch handle") {
+    // A baseline-compiled module registers its functions by name in the global
+    // dispatch table. Once the module dies, a new Function allocated at the same
+    // address must not match `handle->mir_function() == &fn`, or
+    // FastInterpreter::run silently runs the dead module's native code.
+    const char* name = "fib_step_aba";
+    {
+        auto dead = build_fib_step_module(name);
+        codegen::BaselineJitCompiler compiler(Target::host());
+        auto compiled = compiler.compile_module(*dead);
+        auto* handle = runtime::FunctionDispatchTable::instance().find(name);
+        REQUIRE(handle != nullptr);
+        CHECK(handle->mir_function() == dead->get_function(name));
+    }
+    auto* handle = runtime::FunctionDispatchTable::instance().find(name);
+    REQUIRE(handle != nullptr);
+    CHECK(handle->mir_function() == nullptr);
+
+    auto live = build_fib_step_module(name);
+    FastInterpreter interp;
+    step_fib_in_fast_interpreter(interp, *live->get_function(name));
 }
 
 TEST_CASE("Coroutine Runtime - Cheney Moving GC Active Frame Tracking") {

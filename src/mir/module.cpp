@@ -1,10 +1,35 @@
 #include <brass/mir/module.hpp>
+#include <brass/runtime/code_installer.hpp>
 #include <algorithm>
 
 namespace brass {
 
 Module::Module(std::string_view name)
     : arena_(), string_pool_(), name_(string_pool_.intern(name)) {}
+
+Module::~Module() {
+    // Runtime registries hold raw pointers into this module; drop them before
+    // the arena frees the functions, so a new module reusing the addresses is
+    // never mistaken for this one.
+    runtime::forget_module(*this);
+}
+
+Module& Module::operator=(Module&& other) noexcept {
+    if (this == &other) return *this;
+    runtime::forget_module(*this);
+    arena_ = std::move(other.arena_);
+    string_pool_ = std::move(other.string_pool_);
+    name_ = other.name_;
+    functions_ = std::move(other.functions_);
+    function_map_ = std::move(other.function_map_);
+    external_symbols_ = std::move(other.external_symbols_);
+    allocation_functions_ = std::move(other.allocation_functions_);
+    allow_fp_reassociation_ = other.allow_fp_reassociation_;
+    pinned_tls_register_ = other.pinned_tls_register_;
+    has_loop_optimizations_ = other.has_loop_optimizations_;
+    debug_context_ = std::move(other.debug_context_);
+    return *this;
+}
 
 void Module::set_name(std::string_view name) {
     name_ = string_pool_.intern(name);

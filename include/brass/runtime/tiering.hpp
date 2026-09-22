@@ -180,6 +180,12 @@ public:
     void set_active_module(const Module* mod) noexcept { active_module_ = mod; }
     const Module* active_module() const noexcept { return active_module_; }
 
+    // Clears the active module if it is `mod` (which is being destroyed).
+    // Static and a no-op once the registry is gone, so a Module destroyed
+    // during static teardown never touches a dead registry.
+    static void forget_module(const Module* mod) noexcept;
+    ~TieringRegistry();
+
     bool on_invocation_threshold_reached(std::string_view fn_name);
     bool enqueue_compilation(
         std::string_view fn_name,

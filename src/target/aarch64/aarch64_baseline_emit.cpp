@@ -420,13 +420,25 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
                     break;
                 }
                 case Opcode::switch_: {
-                    enc.ldr(GPR::X0, emitter.slot_addr(inst.operand(0)));
+                    // A narrow value owns only the low bytes of its 8-byte
+                    // slot (str32 on store), so the rest is stale stack.
+                    // Zero-extend exactly its width and mask each case to
+                    // match, or the dispatch reads garbage.
+                    const size_t cond_bytes = inst.operand(0)->type().size_in_bytes();
+                    const MemAddress cond_slot = emitter.slot_addr(inst.operand(0));
+                    if (cond_bytes == 1) enc.ldrb(GPR::X0, cond_slot);
+                    else if (cond_bytes == 2) enc.ldrh(GPR::X0, cond_slot);
+                    else if (cond_bytes == 4) enc.ldr32(GPR::X0, cond_slot);
+                    else enc.ldr(GPR::X0, cond_slot);
+                    const uint64_t case_mask = cond_bytes < 8
+                        ? (uint64_t{1} << (cond_bytes * 8)) - 1
+                        : ~uint64_t{0};
                     std::vector<Label> case_labels;
                     case_labels.reserve(inst.switch_cases().size());
                     for (const auto& sc : inst.switch_cases()) {
                         Label case_body = buffer.create_label();
                         case_labels.push_back(case_body);
-                        enc.mov(GPR::X1, static_cast<uint64_t>(sc.value));
+                        enc.mov(GPR::X1, static_cast<uint64_t>(sc.value) & case_mask);
                         enc.cmp(GPR::X0, GPR::X1);
                         enc.b(Condition::EQ, case_body);
                     }

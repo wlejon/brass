@@ -11,6 +11,7 @@
 #include <brass/core/string_pool.hpp>
 #include <brass/il_translator/il_translator.hpp>
 #include <brass/pgo/instrument.hpp>
+#include <cstdint>
 #include <cstring>
 #include <cmath>
 #include <stdexcept>
@@ -437,13 +438,35 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
                     break;
                 }
                 case Opcode::switch_: {
-                    enc.mov(GPR::RAX, slot_addr(inst.operand(0)));
+                    // A narrow value owns only the low bytes of its 8-byte
+                    // slot (loads and stores of it are mov32/mov8), so the
+                    // rest is stale stack. Zero-extend exactly its width and
+                    // compare at that width, or the dispatch reads garbage.
+                    const Type cond_ty = inst.operand(0)->type();
+                    const size_t cond_bytes = cond_ty.size_in_bytes();
+                    if (cond_bytes == 1) enc.movzx8(GPR::RAX, slot_addr(inst.operand(0)));
+                    else if (cond_bytes == 2) enc.movzx16(GPR::RAX, slot_addr(inst.operand(0)));
+                    else if (cond_bytes == 4) enc.mov32(GPR::RAX, slot_addr(inst.operand(0)));
+                    else enc.mov(GPR::RAX, slot_addr(inst.operand(0)));
                     std::vector<Label> case_labels;
                     case_labels.reserve(inst.switch_cases().size());
                     for (const auto& sc : inst.switch_cases()) {
                         Label case_body = buffer.create_label();
                         case_labels.push_back(case_body);
-                        enc.cmp(GPR::RAX, static_cast<int32_t>(sc.value));
+                        if (cond_bytes < 8) {
+                            // Mask the case to the condition's width so a
+                            // negative case matches its zero-extended bits.
+                            const uint64_t mask = (uint64_t{1} << (cond_bytes * 8)) - 1;
+                            enc.cmp32(GPR::RAX, static_cast<int32_t>(static_cast<uint32_t>(
+                                static_cast<uint64_t>(sc.value) & mask)));
+                        } else if (sc.value >= INT32_MIN && sc.value <= INT32_MAX) {
+                            enc.cmp(GPR::RAX, static_cast<int32_t>(sc.value));
+                        } else {
+                            // cmp's imm32 is sign-extended; a wider case
+                            // needs a register.
+                            enc.movabs(GPR::RCX, static_cast<uint64_t>(sc.value));
+                            enc.cmp(GPR::RAX, GPR::RCX);
+                        }
                         enc.je(case_body);
                     }
                     // Default

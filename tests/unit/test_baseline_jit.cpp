@@ -210,6 +210,106 @@ TEST_CASE("Baseline JIT - Direct recursion (Fibonacci)") {
     CHECK_EQ(fn_ptr(10), 55);
 }
 
+namespace {
+
+// Leaves 0xFF in the stack region the next call's frame will occupy, so a
+// read of a slot's unwritten upper bytes sees garbage instead of lucky zeros.
+#if defined(_MSC_VER) && !defined(__clang__)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+void dirty_stack() {
+    volatile uint8_t junk[4096];
+    for (size_t i = 0; i < sizeof(junk); ++i) junk[i] = 0xFF;
+}
+
+} // namespace
+
+TEST_CASE("Baseline JIT - Switch on a narrow value dispatches on its width only") {
+    // An i32 load writes only the low 4 bytes of its 8-byte slot; the switch
+    // used to compare all 8, so dispatch depended on stale stack contents
+    // (it broke CoroTransformPass's state_id dispatch after the first resume).
+    Module mod;
+    Function* fn = mod.create_function("sel32", Type::i64(), {Type::ptr()});
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    BasicBlock* one = b.create_block("one");
+    BasicBlock* neg = b.create_block("neg");
+    BasicBlock* big = b.create_block("big");
+    BasicBlock* dflt = b.create_block("dflt");
+    fn->append_block(one);
+    fn->append_block(neg);
+    fn->append_block(big);
+    fn->append_block(dflt);
+
+    Value* p = b.add_block_param(entry, Type::ptr());
+    Value* x = b.build_load(Type::i32(), p, 0);
+    b.build_switch(x, dflt, {SwitchCase(1, one), SwitchCase(-1, neg), SwitchCase(70000, big)});
+    b.position_at_end(one);
+    b.build_ret(b.build_iconst_i64(11));
+    b.position_at_end(neg);
+    b.build_ret(b.build_iconst_i64(22));
+    b.position_at_end(big);
+    b.build_ret(b.build_iconst_i64(33));
+    b.position_at_end(dflt);
+    b.build_ret(b.build_iconst_i64(99));
+
+    fn->rebuild_cfg_predecessors();
+    REQUIRE(verify_function(*fn));
+
+    BaselineJitCompiler compiler;
+    BaselineCompiledFunction compiled = compiler.compile(*fn);
+    REQUIRE(compiled.is_valid());
+    auto fn_ptr = compiled.get_function_ptr<int64_t(*)(int32_t*)>();
+    REQUIRE(fn_ptr != nullptr);
+
+    auto run = [&](int32_t v) {
+        dirty_stack();
+        return fn_ptr(&v);
+    };
+    CHECK_EQ(run(1), 11);
+    CHECK_EQ(run(-1), 22);
+    CHECK_EQ(run(70000), 33);
+    CHECK_EQ(run(0), 99);
+    CHECK_EQ(run(2), 99);
+}
+
+TEST_CASE("Baseline JIT - Switch on i64 matches cases wider than imm32") {
+    // cmp's imm32 is sign-extended, so a case outside int32 needs a register;
+    // truncating it would match the wrong value.
+    Module mod;
+    Function* fn = mod.create_function("sel64", Type::i64(), {Type::i64()});
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    BasicBlock* wide = b.create_block("wide");
+    BasicBlock* dflt = b.create_block("dflt");
+    fn->append_block(wide);
+    fn->append_block(dflt);
+
+    Value* x = b.add_block_param(entry, Type::i64());
+    const int64_t wide_case = (int64_t{1} << 32) + 5;
+    b.build_switch(x, dflt, {SwitchCase(wide_case, wide)});
+    b.position_at_end(wide);
+    b.build_ret(b.build_iconst_i64(1));
+    b.position_at_end(dflt);
+    b.build_ret(b.build_iconst_i64(0));
+
+    fn->rebuild_cfg_predecessors();
+    REQUIRE(verify_function(*fn));
+
+    BaselineJitCompiler compiler;
+    BaselineCompiledFunction compiled = compiler.compile(*fn);
+    REQUIRE(compiled.is_valid());
+    auto fn_ptr = compiled.get_function_ptr<int64_t(*)(int64_t)>();
+    REQUIRE(fn_ptr != nullptr);
+
+    CHECK_EQ(fn_ptr(wide_case), 1);
+    CHECK_EQ(fn_ptr(5), 0);
+}
+
 TEST_CASE("Baseline JIT - Compilation throughput benchmark") {
     Module mod;
     Function* fn = mod.create_function("bench_fn", Type::i64(), {Type::i64(), Type::i64()});
