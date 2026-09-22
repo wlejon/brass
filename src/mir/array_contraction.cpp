@@ -1,14 +1,11 @@
 #include <brass/mir/array_contraction.hpp>
 #include <brass/mir/loop_fusion.hpp>
 #include <brass/mir/opcodes.hpp>
-#include <brass/mir/builder.hpp>
-#include <brass/mir/verifier.hpp>
 #include <brass/mir/escape_analysis.hpp>
+#include <brass/mir/range_analysis.hpp>
 #include <sstream>
-#include <unordered_map>
 #include <unordered_set>
 #include <vector>
-#include <algorithm>
 
 namespace brass {
 
@@ -24,7 +21,7 @@ std::string ArrayContractionStats::format_report() const {
 
 namespace {
 
-static void replace_all_uses(Function& fn, Value* old_val, Value* new_val) {
+void replace_all_uses(Function& fn, Value* old_val, Value* new_val) {
     if (!old_val || !new_val || old_val == new_val) return;
     for (BasicBlock* bb : fn.blocks()) {
         if (!bb) continue;
@@ -33,119 +30,205 @@ static void replace_all_uses(Function& fn, Value* old_val, Value* new_val) {
             for (size_t i = 0; i < inst->operand_count(); ++i) {
                 if (inst->operand(i) == old_val) inst->set_operand(i, new_val);
             }
-            for (size_t i = 0; i < inst->branch_target().args.size(); ++i) {
-                if (inst->branch_target().args[i] == old_val) inst->branch_target().args[i] = new_val;
-            }
-            for (size_t i = 0; i < inst->true_target().args.size(); ++i) {
-                if (inst->true_target().args[i] == old_val) inst->true_target().args[i] = new_val;
-            }
-            for (size_t i = 0; i < inst->false_target().args.size(); ++i) {
-                if (inst->false_target().args[i] == old_val) inst->false_target().args[i] = new_val;
-            }
-            for (size_t i = 0; i < inst->default_target().args.size(); ++i) {
-                if (inst->default_target().args[i] == old_val) inst->default_target().args[i] = new_val;
-            }
-            for (auto& sc : inst->switch_cases()) {
-                for (size_t i = 0; i < sc.target.args.size(); ++i) {
-                    if (sc.target.args[i] == old_val) sc.target.args[i] = new_val;
+            auto patch = [&](BranchTarget& bt) {
+                for (Value*& arg : bt.args) {
+                    if (arg == old_val) arg = new_val;
                 }
+            };
+            patch(inst->branch_target());
+            patch(inst->true_target());
+            patch(inst->false_target());
+            for (auto& sc : inst->switch_cases()) patch(sc.target);
+            for (Value*& sv : inst->state_map()) {
+                if (sv == old_val) sv = new_val;
             }
         }
     }
 }
 
-static Value* unwrap_boxed_val(Value* val) {
-    while (val && val->is_instruction()) {
-        Instruction* def = val->defining_instruction();
-        if (!def) break;
-        if (def->opcode() == Opcode::call && def->symbol() == "box_f64" && def->operand_count() >= 1) {
-            val = def->operand(0);
-            continue;
-        }
-        if ((def->opcode() == Opcode::bitcast_i64_f64 || def->opcode() == Opcode::bitcast_f64_i64) && def->operand_count() >= 1) {
-            val = def->operand(0);
-            continue;
-        }
-        break;
-    }
-    return val;
+// Two kinds of buffer are contracted. A raw buffer (malloc, the GC
+// allocator) is read and written with load_indexed / store_indexed, and a
+// load returns the bytes the last store to the same address wrote. A bronze
+// array is read and written through the runtime's element calls, and a read
+// returns the last value written at the same index only while that index is
+// a plain in-range element index: the runtime drops writes at negative
+// indices and truncates huge ones, so any other index could read something
+// else.
+enum class BufferKind { Raw, BronzeArray };
+
+bool is_elem_set(const Instruction* inst) {
+    return inst->opcode() == Opcode::call && inst->symbol() == "bronze_elem_set" && inst->operand_count() >= 3;
 }
 
-static Value* unwrap_boxed_index(Value* val) {
-    while (val && val->is_instruction()) {
-        Instruction* def = val->defining_instruction();
-        if (!def) break;
-        if (def->opcode() == Opcode::call && def->symbol() == "box_f64" && def->operand_count() >= 1) {
-            val = def->operand(0);
-            continue;
-        }
-        if ((def->opcode() == Opcode::bitcast_i64_f64 || def->opcode() == Opcode::bitcast_f64_i64 ||
-             def->opcode() == Opcode::sitofp_f64_i64 || def->opcode() == Opcode::sitofp_f64_i32 ||
-             def->opcode() == Opcode::fptosi_i64 || def->opcode() == Opcode::fptosi_i32 ||
-             def->opcode() == Opcode::sext_i64 || def->opcode() == Opcode::zext_i64) && def->operand_count() >= 1) {
-            val = def->operand(0);
-            continue;
-        }
-        break;
-    }
-    return val;
+bool is_elem_get(const Instruction* inst) {
+    return inst->opcode() == Opcode::call && inst->symbol() == "bronze_elem_get" && inst->operand_count() == 2;
 }
 
-static bool are_indices_congruent(Value* idx1, Value* idx2, Value* iv_param = nullptr) {
-    if (!idx1 || !idx2) return false;
-    if (idx1 == idx2) return true;
-    Value* u1 = unwrap_boxed_index(idx1);
-    Value* u2 = unwrap_boxed_index(idx2);
-    if (u1 == u2) return true;
-    if (iv_param && (u1 == iv_param || idx1 == iv_param) && (u2 == iv_param || idx2 == iv_param)) {
-        return true;
-    }
-    return false;
-}
+struct Access {
+    Instruction* inst = nullptr;
+    bool is_store = false;
+};
 
-static bool does_array_escape(const Function& fn, const LoopInfo& loop, const Value* alloc_val) {
-    if (!alloc_val) return true;
-
-    for (const BasicBlock* bb : fn.blocks()) {
+// Every use of the buffer, if every use is one contraction can account for:
+// element reads and writes inside the loop that address the buffer itself
+// (never store it or pass it on), and write barriers on it. Any other use —
+// another call, a branch argument, a select, a return, deopt state — lets the
+// buffer be observed outside the accesses being contracted.
+bool collect_accesses(const Function& fn, const LoopInfo& loop, const Value* buf, BufferKind kind,
+                      std::vector<Access>& accesses, std::vector<Instruction*>& barriers) {
+    for (BasicBlock* bb : fn.blocks()) {
         if (!bb) continue;
-        for (const Instruction* inst : *bb) {
+        for (Instruction* inst : *bb) {
             if (!inst) continue;
-            Opcode op = inst->opcode();
-
-            // Return with alloc_val escapes
-            if (op == Opcode::ret) {
-                if (inst->operand_count() > 0 && inst->operand(0) == alloc_val) return true;
+            bool uses_as_address = inst->operand_count() > 0 && inst->operand(0) == buf;
+            for (size_t i = 1; i < inst->operand_count(); ++i) {
+                if (inst->operand(i) == buf) return false;
             }
+            auto passes = [&](const BranchTarget& bt) {
+                for (const Value* a : bt.args) if (a == buf) return true;
+                return false;
+            };
+            if (passes(inst->branch_target()) || passes(inst->true_target()) || passes(inst->false_target())) return false;
+            for (const auto& sc : inst->switch_cases()) if (passes(sc.target)) return false;
+            for (const Value* sv : inst->state_map()) if (sv == buf) return false;
+            if (!uses_as_address) continue;
 
-            // Storing alloc_val into memory escapes
-            if (op == Opcode::store && inst->operand(1) == alloc_val) return true;
-            if (op == Opcode::store_indexed && inst->operand(2) == alloc_val) return true;
-
-            // Passing alloc_val to a function call
-            if (is_call(op)) {
-                std::string_view sym = inst->symbol();
-                bool is_allowed = (sym == "bronze_elem_get" || sym == "bronze_elem_set" ||
-                                   sym == "bronze_prop_set" || sym == "bronze_prop_get" ||
-                                   sym == "write_barrier");
-                if (!is_allowed) {
-                    for (size_t i = 0; i < inst->operand_count(); ++i) {
-                        if (inst->operand(i) == alloc_val) return true;
-                    }
-                } else if (sym == "bronze_elem_get" || sym == "bronze_elem_set") {
-                    if (!loop.contains(bb)) {
-                        for (size_t i = 0; i < inst->operand_count(); ++i) {
-                            if (inst->operand(i) == alloc_val) return true;
-                        }
-                    }
-                }
-            } else if (op == Opcode::load_indexed || op == Opcode::store_indexed) {
-                if (!loop.contains(bb) && inst->operand_count() > 0 && inst->operand(0) == alloc_val) {
-                    return true;
-                }
+            const Opcode op = inst->opcode();
+            if (op == Opcode::write_barrier) {
+                barriers.push_back(inst);
+                continue;
+            }
+            if (!loop.contains(bb)) return false;
+            if (kind == BufferKind::Raw && (op == Opcode::store_indexed || op == Opcode::load_indexed)) {
+                accesses.push_back({inst, op == Opcode::store_indexed});
+            } else if (kind == BufferKind::BronzeArray && (is_elem_set(inst) || is_elem_get(inst))) {
+                accesses.push_back({inst, is_elem_set(inst)});
+            } else {
+                return false;
             }
         }
     }
-    return false;
+    return true;
+}
+
+bool index_is_plain_element(const Value* idx, const BasicBlock* bb, const RangeAnalysis& ra) {
+    if (!idx || (idx->type() != Type::i64() && idx->type() != Type::i32())) return false;
+    ValueRange r = ra.get_range_at(idx, bb);
+    return !r.is_empty() && r.min_val >= 0 && r.max_val < INT32_MAX;
+}
+
+// Whether `store` writes exactly what `load` then reads.
+bool same_location(const Instruction* store, const Instruction* load, BufferKind kind) {
+    if (store->operand(1) != load->operand(1)) return false;
+    if (kind == BufferKind::Raw) {
+        return store->scale() == load->scale() && store->offset() == load->offset() &&
+               store->memory_type() == load->memory_type() && store->operand(2)->type() == load->type();
+    }
+    return store->operand(2)->type() == load->type();
+}
+
+// A load whose result is immediately unboxed can take the unboxed value
+// directly when the forwarded value is the matching box.
+void forward_through_unbox(Function& fn, Value* loaded, Value* stored) {
+    if (!stored || !stored->is_instruction()) return;
+    const Instruction* sdef = stored->defining_instruction();
+    if (!sdef || sdef->operand_count() < 1) return;
+    for (BasicBlock* bb : fn.blocks()) {
+        if (!bb) continue;
+        for (Instruction* inst : *bb) {
+            if (!inst || inst->operand_count() < 1 || inst->operand(0) != loaded || !inst->result()) continue;
+            const bool unbox_call = inst->opcode() == Opcode::call && inst->symbol() == "unbox_f64" &&
+                                    sdef->opcode() == Opcode::call && sdef->symbol() == "box_f64";
+            const bool bit_roundtrip = inst->opcode() == Opcode::bitcast_f64_i64 &&
+                                       sdef->opcode() == Opcode::bitcast_i64_f64;
+            if ((unbox_call || bit_roundtrip) && sdef->operand(0)->type() == inst->type()) {
+                replace_all_uses(fn, inst->result(), sdef->operand(0));
+            }
+        }
+    }
+}
+
+bool contract_buffer(Function& fn, const LoopInfo& loop, Instruction* alloc_inst, BufferKind kind,
+                     const RangeAnalysis& ra, const ArrayContractionOptions& options) {
+    Value* buf = alloc_inst->result();
+    if (!buf) return false;
+
+    std::vector<Access> accesses;
+    std::vector<Instruction*> barriers;
+    if (!collect_accesses(fn, loop, buf, kind, accesses, barriers)) return false;
+
+    bool has_store = false;
+    bool has_load = false;
+    for (const Access& a : accesses) {
+        (a.is_store ? has_store : has_load) = true;
+        if (kind == BufferKind::BronzeArray && !index_is_plain_element(a.inst->operand(1), a.inst->parent(), ra)) {
+            return false;
+        }
+    }
+    if (!has_store || !has_load) return false;
+
+    // Every read must be answered by the last write to the buffer before it
+    // in its own block; a write in between at an index not proven equal
+    // could have replaced the value.
+    std::unordered_set<const Instruction*> buffer_accesses;
+    for (const Access& a : accesses) buffer_accesses.insert(a.inst);
+    std::vector<std::pair<Instruction*, Value*>> forwards;
+    for (const Access& a : accesses) {
+        if (a.is_store) continue;
+        Instruction* last_store = nullptr;
+        for (Instruction* prev = a.inst->prev(); prev; prev = prev->prev()) {
+            if (buffer_accesses.count(prev) && (prev->opcode() == Opcode::store_indexed || is_elem_set(prev))) {
+                last_store = prev;
+                break;
+            }
+        }
+        if (!last_store || !same_location(last_store, a.inst, kind)) return false;
+        forwards.emplace_back(a.inst, last_store->operand(2));
+    }
+
+    for (auto& [load, value] : forwards) {
+        Value* loaded = load->result();
+        if (loaded) {
+            forward_through_unbox(fn, loaded, value);
+            replace_all_uses(fn, loaded, value);
+        }
+        load->parent()->remove_instruction(load);
+        if (options.stats) options.stats->loads_eliminated++;
+    }
+    for (const Access& a : accesses) {
+        if (!a.is_store) continue;
+        a.inst->parent()->remove_instruction(a.inst);
+        if (options.stats) options.stats->stores_eliminated++;
+    }
+    for (Instruction* wb : barriers) wb->parent()->remove_instruction(wb);
+    alloc_inst->parent()->remove_instruction(alloc_inst);
+    if (options.stats) {
+        options.stats->allocations_eliminated++;
+        options.stats->arrays_contracted++;
+    }
+    return true;
+}
+
+bool contract_in_loop(Function& fn, const LoopInfo& loop, const RangeAnalysis& ra,
+                      const ArrayContractionOptions& options) {
+    std::vector<std::pair<Instruction*, BufferKind>> candidates;
+    for (BasicBlock* bb : fn.blocks()) {
+        if (!bb) continue;
+        for (Instruction* inst : *bb) {
+            if (!inst || inst->opcode() != Opcode::call || !inst->result()) continue;
+            if (inst->symbol() == "bronze_create_array") {
+                candidates.emplace_back(inst, BufferKind::BronzeArray);
+            } else if (is_allocation_callee(inst->symbol())) {
+                candidates.emplace_back(inst, BufferKind::Raw);
+            }
+        }
+    }
+
+    bool any = false;
+    for (auto& [alloc_inst, kind] : candidates) {
+        any |= contract_buffer(fn, loop, alloc_inst, kind, ra, options);
+    }
+    return any;
 }
 
 } // namespace
@@ -157,156 +240,8 @@ bool contract_arrays_in_loop(
     const ArrayContractionOptions& options
 ) {
     (void)dom;
-    bool any_contracted = false;
-
-    // 1. Identify allocation instructions whose result is used in this loop
-    std::vector<Instruction*> alloc_insts;
-    for (BasicBlock* bb : fn.blocks()) {
-        if (!bb) continue;
-        for (Instruction* inst : *bb) {
-            if (!inst) continue;
-            Opcode op = inst->opcode();
-            if (op == Opcode::call && (is_allocation_callee(inst->symbol()) || inst->symbol() == "bronze_create_array")) {
-                if (inst->result() && !does_array_escape(fn, loop, inst->result())) {
-                    alloc_insts.push_back(inst);
-                }
-            }
-        }
-    }
-
-    for (Instruction* alloc_inst : alloc_insts) {
-        Value* alloc_val = alloc_inst->result();
-        if (!alloc_val) continue;
-
-        // Check stores and loads in the loop
-        struct StoreInfo {
-            Instruction* inst = nullptr;
-            Value* index = nullptr;
-            Value* value = nullptr;
-        };
-        struct LoadInfo {
-            Instruction* inst = nullptr;
-            Value* index = nullptr;
-        };
-
-        std::vector<StoreInfo> stores;
-        std::vector<LoadInfo> loads;
-
-        for (BasicBlock* bb : loop.blocks()) {
-            if (!bb) continue;
-            for (Instruction* inst : *bb) {
-                if (!inst) continue;
-                Opcode op = inst->opcode();
-
-                if (op == Opcode::store_indexed && inst->operand(0) == alloc_val) {
-                    stores.push_back({inst, inst->operand(1), inst->operand(2)});
-                } else if (op == Opcode::load_indexed && inst->operand(0) == alloc_val) {
-                    loads.push_back({inst, inst->operand(1)});
-                } else if (op == Opcode::call && inst->symbol() == "bronze_elem_set" && inst->operand(0) == alloc_val) {
-                    stores.push_back({inst, inst->operand(1), inst->operand(2)});
-                } else if (op == Opcode::call && inst->symbol() == "bronze_elem_get" && inst->operand(0) == alloc_val) {
-                    loads.push_back({inst, inst->operand(1)});
-                }
-            }
-        }
-
-        if (stores.empty() || loads.empty()) continue;
-
-        // Check if all loads have a dominating congruent store
-        bool all_loads_matched = true;
-        std::vector<std::pair<Instruction*, Value*>> load_replacements;
-
-        for (const auto& ld : loads) {
-            Instruction* matching_store = nullptr;
-            Value* forwarded_val = nullptr;
-
-            // Search backward in the same block for the most recent matching store
-            for (auto it = stores.rbegin(); it != stores.rend(); ++it) {
-                const auto& st = *it;
-                if (st.inst->parent() == ld.inst->parent()) {
-                    // Check order in same block
-                    bool store_before_load = false;
-                    for (Instruction* cur = st.inst->next(); cur != nullptr; cur = cur->next()) {
-                        if (cur == ld.inst) {
-                            store_before_load = true;
-                            break;
-                        }
-                    }
-                    if (store_before_load && are_indices_congruent(st.index, ld.index)) {
-                        matching_store = st.inst;
-                        forwarded_val = st.value;
-                        break;
-                    }
-                }
-            }
-
-            if (matching_store && forwarded_val) {
-                load_replacements.push_back({ld.inst, forwarded_val});
-            } else {
-                all_loads_matched = false;
-                break;
-            }
-        }
-
-        if (!all_loads_matched || load_replacements.empty()) continue;
-
-        // 2. Perform contraction:
-        // Replace all loaded values with the forwarded stored values
-        for (auto& [ld_inst, fwd_val] : load_replacements) {
-            Value* ld_res = ld_inst->result();
-            if (ld_res) {
-                // If ld_res is immediately unboxed and fwd_val was boxed, simplify directly
-                for (BasicBlock* bb : loop.blocks()) {
-                    if (!bb) continue;
-                    for (Instruction* inst : *bb) {
-                        if (!inst) continue;
-                        if ((inst->opcode() == Opcode::bitcast_f64_i64 || (inst->opcode() == Opcode::call && inst->symbol() == "unbox_f64")) &&
-                            inst->operand_count() > 0 && inst->operand(0) == ld_res) {
-                            Value* raw_fwd = unwrap_boxed_val(fwd_val);
-                            replace_all_uses(fn, inst->result(), raw_fwd);
-                        }
-                    }
-                }
-                replace_all_uses(fn, ld_res, fwd_val);
-            }
-            ld_inst->parent()->remove_instruction(ld_inst);
-            if (options.stats) options.stats->loads_eliminated++;
-        }
-
-        // 3. Remove now-dead stores to alloc_val
-        for (const auto& st : stores) {
-            st.inst->parent()->remove_instruction(st.inst);
-            if (options.stats) options.stats->stores_eliminated++;
-        }
-
-        // 4. Remove any remaining initialization/property sets or write barriers for alloc_val
-        for (BasicBlock* bb : fn.blocks()) {
-            if (!bb) continue;
-            std::vector<Instruction*> to_remove;
-            for (Instruction* inst : *bb) {
-                if (!inst) continue;
-                Opcode op = inst->opcode();
-                if (op == Opcode::write_barrier && inst->operand_count() > 0 && inst->operand(0) == alloc_val) {
-                    to_remove.push_back(inst);
-                } else if (op == Opcode::call && inst->symbol() == "bronze_prop_set" && inst->operand_count() > 0 && inst->operand(0) == alloc_val) {
-                    to_remove.push_back(inst);
-                }
-            }
-            for (Instruction* inst : to_remove) {
-                bb->remove_instruction(inst);
-            }
-        }
-
-        // 5. Remove the allocation instruction itself
-        if (alloc_inst->parent()) {
-            alloc_inst->parent()->remove_instruction(alloc_inst);
-            if (options.stats) options.stats->allocations_eliminated++;
-            if (options.stats) options.stats->arrays_contracted++;
-            any_contracted = true;
-        }
-    }
-
-    return any_contracted;
+    RangeAnalysis ra(fn);
+    return contract_in_loop(fn, loop, ra, options);
 }
 
 bool array_contraction_pass(
@@ -316,18 +251,19 @@ bool array_contraction_pass(
 ) {
     bool changed = false;
 
-    // First, check if there are adjacent loops where loop 1 produces a buffer and loop 2 consumes it
-    // Attempting loop fusion on them enables array contraction
+    // Fusing a loop that fills a buffer with the loop that drains it puts
+    // each write next to its read, which is what contraction needs.
     LoopFusionOptions fusion_opts;
     loop_fusion_pass(fn, dom, fusion_opts);
 
     fn.rebuild_cfg_predecessors();
     DominatorTree current_dom(fn);
     LoopAnalysis la(fn, current_dom);
+    RangeAnalysis ra(fn, current_dom, la);
 
     for (LoopInfo* loop : la.post_order_loops()) {
         if (!loop) continue;
-        if (contract_arrays_in_loop(fn, *loop, current_dom, options)) {
+        if (contract_in_loop(fn, *loop, ra, options)) {
             changed = true;
         }
     }

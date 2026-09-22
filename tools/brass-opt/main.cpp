@@ -792,7 +792,7 @@ int main(int argc, char** argv) {
         if (enable_bce) {
             brass::RangeAnalysisOptions bce_opts;
             bce_opts.enable_bce = true;
-            bce_opts.enable_hoisting = true;
+            bce_opts.enable_implied_checks = true;
             bce_opts.dump_stats = dump_range_stats;
             bce_opts.stats = &range_stats;
             brass::run_bounds_check_elimination(*mod, bce_opts);

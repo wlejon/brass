@@ -171,7 +171,7 @@ bool run_dse_pass(Function& fn, const AliasAnalysis& aa, GvnStats* stats) {
                     }
                 }
             } else if (op == Opcode::guard || op == Opcode::throw_ || op == Opcode::osr_entry ||
-                       op == Opcode::resume_point || op == Opcode::coro_suspend || op == Opcode::resume) {
+                       op == Opcode::resume_point || is_coro_op(op) || op == Opcode::resume) {
                 pending.clear();
             } else if (op == Opcode::ret || op == Opcode::safepoint) {
                 for (auto it = pending.begin(); it != pending.end(); ) {

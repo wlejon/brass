@@ -526,7 +526,7 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
         if (options_.enable_bce) {
             RangeAnalysisOptions bce_opts;
             bce_opts.enable_bce = true;
-            bce_opts.enable_hoisting = true;
+            bce_opts.enable_implied_checks = true;
             bce_opts.dump_stats = options_.dump_range_stats;
             bce_opts.stats = options_.range_stats_collector;
             run_bounds_check_elimination(*mod, bce_opts);

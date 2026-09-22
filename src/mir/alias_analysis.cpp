@@ -35,31 +35,69 @@ bool get_const_integer_val(const Value* val, int64_t& out_c) {
     return false;
 }
 
-bool are_incompatible_memory_types(Type t1, Type t2) noexcept {
-    if (t1.is_void() || t2.is_void()) return false;
-    if (t1 == t2) return false;
+// MIR memory is untyped: the same bytes may be read as i32, i64, f64, a
+// pointer or a GC reference (bronze reads a header word both as i32 and as
+// i64). The access type therefore says how many bytes an access touches and
+// nothing about which bytes; it never proves two accesses disjoint on its own.
+// 0 means the size is unknown.
+uint64_t access_size(Type t) noexcept {
+    return t.is_void() ? 0 : static_cast<uint64_t>(t.size_in_bytes());
+}
 
-    // Pointer vs GC reference heap disambiguation
-    if ((t1.is_gcref() && t2.is_pointer()) || (t1.is_pointer() && t2.is_gcref())) {
-        return true;
+// One memory access in address form: `base + offset + index * scale`, over
+// `size` bytes. `index` is null when the address has no variable part.
+struct Access {
+    const Value* ptr = nullptr;
+    int64_t offset = 0;
+    const Value* index = nullptr;
+    int64_t scale = 0;
+    uint64_t size = 0;
+};
+
+bool is_memory_reader(Opcode op) noexcept {
+    return op == Opcode::load || op == Opcode::load_indexed || op == Opcode::vload ||
+           is_call(op) || is_coro_op(op);
+}
+
+bool is_memory_writer(Opcode op) noexcept {
+    return op == Opcode::store || op == Opcode::store_indexed || op == Opcode::vstore ||
+           is_call(op) || is_coro_op(op);
+}
+
+bool is_plain_access(Opcode op) noexcept {
+    return op == Opcode::load || op == Opcode::load_indexed || op == Opcode::vload ||
+           op == Opcode::store || op == Opcode::store_indexed || op == Opcode::vstore;
+}
+
+Access describe(const Instruction* inst) {
+    Access a;
+    a.ptr = inst->operand(0);
+    a.offset = inst->offset();
+    a.size = access_size(inst->memory_type());
+    Opcode op = inst->opcode();
+    if (op == Opcode::load_indexed || op == Opcode::store_indexed) {
+        const Value* idx = inst->operand(1);
+        const int64_t scale = static_cast<int64_t>(inst->scale());
+        int64_t c = 0;
+        if (get_const_integer_val(idx, c)) {
+            a.offset += c * scale;
+        } else {
+            a.index = idx;
+            a.scale = scale;
+        }
     }
+    return a;
+}
 
-    // Floating-point vs Integer / Reference
-    if ((t1.is_float() && !t2.is_float()) || (!t1.is_float() && t2.is_float())) {
-        return true;
+// Same-base comparison of two byte ranges at known start offsets.
+AliasResult compare_ranges(int64_t off1, uint64_t size1, int64_t off2, uint64_t size2) noexcept {
+    if (off1 == off2) return AliasResult::MustAlias;
+    if (size1 != 0 && size2 != 0) {
+        if (off1 + static_cast<int64_t>(size1) <= off2 || off2 + static_cast<int64_t>(size2) <= off1) {
+            return AliasResult::NoAlias;
+        }
     }
-
-    // Vector vs Scalar
-    if (t1.is_vector() != t2.is_vector()) {
-        return true;
-    }
-
-    // Different sized scalars
-    if (t1.size_in_bytes() != t2.size_in_bytes()) {
-        return true;
-    }
-
-    return false;
+    return AliasResult::MayAlias;
 }
 
 } // namespace
@@ -150,15 +188,9 @@ bool AliasAnalysis::is_distinct_allocation(const Value* base1, const Value* base
 }
 
 bool AliasAnalysis::is_non_escaping(const Value* base) const {
-    if (!base) return false;
-    if (base->is_instruction()) {
-        const Instruction* inst = base->defining_instruction();
-        if (inst && inst->opcode() == Opcode::alloca_) {
-            const EscapeAnalysis* ea = escape_analysis();
-            if (!ea) return true;
-            return ea->get_escape_state(base) == EscapeState::NoEscape;
-        }
-    }
+    // Only a fresh allocation has an identity escape analysis can vouch for;
+    // a select, block parameter or loaded pointer may name any object.
+    if (!base || !is_allocation(base)) return false;
     const EscapeAnalysis* ea = escape_analysis();
     if (!ea) return false;
     return ea->get_escape_state(base) == EscapeState::NoEscape;
@@ -196,202 +228,105 @@ AliasResult AliasAnalysis::alias(const Value* ptr1, int32_t off1, const Value* p
     return alias(ptr1, off1, Type::void_type(), ptr2, off2, Type::void_type());
 }
 
+bool AliasAnalysis::are_distinct_objects(const Value* ptr1, const Value* ptr2) const {
+    auto separated = [&](const Value* b1, const Value* b2) {
+        if (!b1 || !b2 || b1 == b2) return false;
+        if (is_distinct_allocation(b1, b2)) return true;
+        if (is_non_escaping(b1) && is_global_or_external_arg(b2)) return true;
+        if (is_non_escaping(b2) && is_global_or_external_arg(b1)) return true;
+        return false;
+    };
+
+    int64_t ignored1 = 0;
+    int64_t ignored2 = 0;
+    if (separated(get_underlying_base(ptr1, ignored1), get_underlying_base(ptr2, ignored2))) return true;
+
+    // Pointer arithmetic by a variable amount stays inside the object it
+    // started from, so the objects the two addresses were derived from decide.
+    auto origin = [](const Value* ptr) -> const Value* {
+        const Value* cur = ptr;
+        while (cur && cur->is_instruction()) {
+            const Instruction* inst = cur->defining_instruction();
+            if (!inst) break;
+            auto is_addr = [](const Value* v) { return v && v->type().is_pointer_or_gcref(); };
+            if (inst->opcode() == Opcode::add) {
+                if (is_addr(inst->operand(0))) { cur = inst->operand(0); continue; }
+                if (is_addr(inst->operand(1))) { cur = inst->operand(1); continue; }
+            } else if (inst->opcode() == Opcode::sub) {
+                if (is_addr(inst->operand(0))) { cur = inst->operand(0); continue; }
+            }
+            break;
+        }
+        return cur;
+    };
+    return separated(origin(ptr1), origin(ptr2));
+}
+
 AliasResult AliasAnalysis::alias(
     const Value* ptr1, int32_t off1, Type type1,
     const Value* ptr2, int32_t off2, Type type2
 ) const {
     if (!ptr1 || !ptr2) return AliasResult::MayAlias;
 
-    // 1. Pointer vs GC reference heap disambiguation
-    bool is_gc1 = ptr1->type().is_gcref();
-    bool is_gc2 = ptr2->type().is_gcref();
-    if (is_gc1 != is_gc2) {
-        return AliasResult::NoAlias;
-    }
-
-    // 2. Extract underlying base allocations and accumulated constant offsets
     int64_t accum1 = 0;
     int64_t accum2 = 0;
     const Value* base1 = get_underlying_base(ptr1, accum1);
     const Value* base2 = get_underlying_base(ptr2, accum2);
 
-    if (base1 && base2) {
-        // Base heap type check
-        if (base1->type().is_gcref() != base2->type().is_gcref()) {
-            return AliasResult::NoAlias;
-        }
-
-        int64_t total_off1 = static_cast<int64_t>(off1) + accum1;
-        int64_t total_off2 = static_cast<int64_t>(off2) + accum2;
-
-        if (base1 == base2) {
-            if (total_off1 == total_off2 && type1 == type2) {
-                return AliasResult::MustAlias;
-            }
-            // Same base pointer with provably distinct constant byte offsets
-            uint32_t sz1 = type1.is_void() ? 4U : static_cast<uint32_t>(type1.size_in_bytes());
-            uint32_t sz2 = type2.is_void() ? 4U : static_cast<uint32_t>(type2.size_in_bytes());
-            if (sz1 == 0) sz1 = 4U;
-            if (sz2 == 0) sz2 = 4U;
-
-            if (total_off1 + sz1 <= total_off2 || total_off2 + sz2 <= total_off1) {
-                return AliasResult::NoAlias;
-            }
-            if (total_off1 == total_off2) {
-                return AliasResult::MustAlias;
-            }
-            return AliasResult::MayAlias;
-        }
-
-        // Type-based alias disambiguation (incompatible memory types) for distinct bases
-        if (are_incompatible_memory_types(type1, type2)) {
-            return AliasResult::NoAlias;
-        }
-
-        // Distinct base allocations -> NoAlias
-        if (is_distinct_allocation(base1, base2)) {
-            return AliasResult::NoAlias;
-        }
-
-        // A non-escaping allocation does not alias globals or external arguments
-        if (is_non_escaping(base1) && is_global_or_external_arg(base2)) {
-            return AliasResult::NoAlias;
-        }
-        if (is_non_escaping(base2) && is_global_or_external_arg(base1)) {
-            return AliasResult::NoAlias;
-        }
+    if (base1 && base1 == base2) {
+        return compare_ranges(static_cast<int64_t>(off1) + accum1, access_size(type1),
+                              static_cast<int64_t>(off2) + accum2, access_size(type2));
     }
 
-    // 4. Check origin base allocations through arbitrary pointer arithmetic
-    auto get_origin_alloc = [](const Value* ptr) -> const Value* {
-        const Value* cur = ptr;
-        while (cur && cur->is_instruction()) {
-            const Instruction* inst = cur->defining_instruction();
-            if (!inst) break;
-            if (inst->opcode() == Opcode::add) {
-                if (inst->operand(0) && (inst->operand(0)->type().is_pointer() || inst->operand(0)->type().is_gcref())) {
-                    cur = inst->operand(0);
-                    continue;
-                } else if (inst->operand(1) && (inst->operand(1)->type().is_pointer() || inst->operand(1)->type().is_gcref())) {
-                    cur = inst->operand(1);
-                    continue;
-                }
-            } else if (inst->opcode() == Opcode::sub) {
-                if (inst->operand(0) && (inst->operand(0)->type().is_pointer() || inst->operand(0)->type().is_gcref())) {
-                    cur = inst->operand(0);
-                    continue;
-                }
-            }
-            break;
-        }
-        return cur;
-    };
-
-    const Value* orig1 = get_origin_alloc(ptr1);
-    const Value* orig2 = get_origin_alloc(ptr2);
-    if (orig1 && orig2 && orig1 != orig2) {
-        if (is_distinct_allocation(orig1, orig2)) {
-            return AliasResult::NoAlias;
-        }
-        if (is_non_escaping(orig1) && is_global_or_external_arg(orig2)) {
-            return AliasResult::NoAlias;
-        }
-        if (is_non_escaping(orig2) && is_global_or_external_arg(orig1)) {
-            return AliasResult::NoAlias;
-        }
-    }
-
-    return AliasResult::MayAlias;
+    return are_distinct_objects(ptr1, ptr2) ? AliasResult::NoAlias : AliasResult::MayAlias;
 }
 
 bool AliasAnalysis::can_clobber(const Instruction* write_inst, const Instruction* read_inst) const {
     if (!write_inst || !read_inst) return false;
 
-    Opcode w_op = write_inst->opcode();
-    bool writes_mem = (w_op == Opcode::store || w_op == Opcode::store_indexed ||
-                       w_op == Opcode::vstore || is_call(w_op));
-    if (!writes_mem) return false;
-
-    Opcode r_op = read_inst->opcode();
-    bool reads_mem = (r_op == Opcode::load || r_op == Opcode::load_indexed ||
-                      r_op == Opcode::vload || is_call(r_op));
-    if (!reads_mem) return false;
+    const Opcode w_op = write_inst->opcode();
+    const Opcode r_op = read_inst->opcode();
+    if (!is_memory_writer(w_op) || !is_memory_reader(r_op)) return false;
 
     if (is_call(w_op)) {
-        // Check if read is from a non-escaping allocation not passed to this call
-        if (r_op == Opcode::load || r_op == Opcode::load_indexed || r_op == Opcode::vload) {
-            const Value* r_ptr = read_inst->operand(0);
-            int64_t dummy = 0;
-            const Value* r_base = get_underlying_base(r_ptr, dummy);
+        // A call cannot reach an allocation whose address never left this
+        // function, unless the address is one of its own arguments.
+        if (is_plain_access(r_op)) {
+            int64_t ignored = 0;
+            const Value* r_base = get_underlying_base(read_inst->operand(0), ignored);
             if (is_non_escaping(r_base)) {
-                bool passed_as_arg = false;
                 for (const Value* op : write_inst->operands()) {
                     int64_t op_off = 0;
-                    if (get_underlying_base(op, op_off) == r_base) {
-                        passed_as_arg = true;
-                        break;
-                    }
+                    if (get_underlying_base(op, op_off) == r_base) return true;
                 }
-                if (!passed_as_arg) {
-                    return false;
-                }
+                return false;
             }
         }
         return true;
     }
 
-    // Direct store vs load
-    if (w_op == Opcode::store || w_op == Opcode::vstore) {
-        if (r_op == Opcode::load || r_op == Opcode::vload) {
-            const Value* w_ptr = write_inst->operand(0);
-            int32_t w_off = write_inst->offset();
-            Type w_type = write_inst->memory_type();
+    if (!is_plain_access(w_op) || !is_plain_access(r_op)) return true;
 
-            const Value* r_ptr = read_inst->operand(0);
-            int32_t r_off = read_inst->offset();
-            Type r_type = read_inst->memory_type();
+    const Access w = describe(write_inst);
+    const Access r = describe(read_inst);
 
-            AliasResult res = alias(w_ptr, w_off, w_type, r_ptr, r_off, r_type);
-            return res != AliasResult::NoAlias;
+    // Without a variable part, or with the same variable index scaled the
+    // same way (which moves both addresses together), the constant parts of
+    // two addresses off one base decide.
+    const bool same_variable_part = w.index == r.index && (!w.index || w.scale == r.scale);
+    if (same_variable_part) {
+        int64_t acc_w = 0;
+        int64_t acc_r = 0;
+        const Value* bw = get_underlying_base(w.ptr, acc_w);
+        const Value* br = get_underlying_base(r.ptr, acc_r);
+        if (bw && bw == br) {
+            return compare_ranges(w.offset + acc_w, w.size, r.offset + acc_r, r.size) != AliasResult::NoAlias;
         }
-
-        if (r_op == Opcode::load_indexed) {
-            AliasResult res = alias(write_inst->operand(0), write_inst->offset(),
-                                    read_inst->operand(0), read_inst->offset());
-            return res != AliasResult::NoAlias;
-        }
-        return true;
     }
 
-    // Store indexed vs loads
-    if (w_op == Opcode::store_indexed) {
-        if (r_op == Opcode::load || r_op == Opcode::vload) {
-            AliasResult res = alias(write_inst->operand(0), write_inst->offset(),
-                                    read_inst->operand(0), read_inst->offset());
-            return res != AliasResult::NoAlias;
-        }
-
-        if (r_op == Opcode::load_indexed) {
-            AliasResult base_res = alias(write_inst->operand(0), 0, read_inst->operand(0), 0);
-            if (base_res == AliasResult::NoAlias) return false;
-
-            if (write_inst->operand(0) == read_inst->operand(0) &&
-                write_inst->operand(1) == read_inst->operand(1) &&
-                write_inst->scale() == read_inst->scale()) {
-                int64_t off_w = write_inst->offset();
-                int64_t off_r = read_inst->offset();
-                uint32_t sz_w = write_inst->memory_type().is_void() ? 4U : static_cast<uint32_t>(write_inst->memory_type().size_in_bytes());
-                uint32_t sz_r = read_inst->memory_type().is_void() ? 4U : static_cast<uint32_t>(read_inst->memory_type().size_in_bytes());
-                if (sz_w == 0) sz_w = 4U;
-                if (sz_r == 0) sz_r = 4U;
-                return std::max(off_w, off_r) < std::min(off_w + sz_w, off_r + sz_r);
-            }
-            return true;
-        }
-        return true;
-    }
-
-    return true;
+    // A variable index can reach any byte of the object; only distinct
+    // objects keep the accesses apart.
+    return !are_distinct_objects(w.ptr, r.ptr);
 }
 
 } // namespace brass

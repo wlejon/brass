@@ -3,8 +3,9 @@
 #include <brass/mir/cfg_simplify.hpp>
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/loop_analysis.hpp>
-#include <brass/runtime/deopt.hpp>
-#include <unordered_set>
+#include <cstdint>
+#include <optional>
+#include <unordered_map>
 #include <vector>
 
 namespace brass {
@@ -20,23 +21,15 @@ void replace_all_uses(Function& fn, Value* old_val, Value* new_val) {
             for (size_t i = 0; i < inst->operand_count(); ++i) {
                 if (inst->operand(i) == old_val) inst->set_operand(i, new_val);
             }
-            for (size_t i = 0; i < inst->branch_target().args.size(); ++i) {
-                if (inst->branch_target().args[i] == old_val) inst->branch_target().args[i] = new_val;
-            }
-            for (size_t i = 0; i < inst->true_target().args.size(); ++i) {
-                if (inst->true_target().args[i] == old_val) inst->true_target().args[i] = new_val;
-            }
-            for (size_t i = 0; i < inst->false_target().args.size(); ++i) {
-                if (inst->false_target().args[i] == old_val) inst->false_target().args[i] = new_val;
-            }
-            for (size_t i = 0; i < inst->default_target().args.size(); ++i) {
-                if (inst->default_target().args[i] == old_val) inst->default_target().args[i] = new_val;
-            }
-            for (auto& sc : inst->switch_cases()) {
-                for (size_t i = 0; i < sc.target.args.size(); ++i) {
-                    if (sc.target.args[i] == old_val) sc.target.args[i] = new_val;
+            auto patch = [&](BranchTarget& bt) {
+                for (Value*& arg : bt.args) {
+                    if (arg == old_val) arg = new_val;
                 }
-            }
+            };
+            patch(inst->branch_target());
+            patch(inst->true_target());
+            patch(inst->false_target());
+            for (auto& sc : inst->switch_cases()) patch(sc.target);
             for (size_t i = 0; i < inst->state_map().size(); ++i) {
                 if (inst->state_map()[i] == old_val) inst->state_map()[i] = new_val;
             }
@@ -44,39 +37,24 @@ void replace_all_uses(Function& fn, Value* old_val, Value* new_val) {
     }
 }
 
-size_t count_uses(const Function& fn, const Value* val) {
-    if (!val) return 0;
-    size_t count = 0;
+std::unordered_map<const Value*, size_t> count_all_uses(const Function& fn) {
+    std::unordered_map<const Value*, size_t> counts;
     for (const BasicBlock* bb : fn.blocks()) {
         if (!bb) continue;
         for (const Instruction* inst : *bb) {
             if (!inst) continue;
-            for (size_t i = 0; i < inst->operand_count(); ++i) {
-                if (inst->operand(i) == val) count++;
-            }
-            for (const Value* arg : inst->branch_target().args) {
-                if (arg == val) count++;
-            }
-            for (const Value* arg : inst->true_target().args) {
-                if (arg == val) count++;
-            }
-            for (const Value* arg : inst->false_target().args) {
-                if (arg == val) count++;
-            }
-            for (const Value* arg : inst->default_target().args) {
-                if (arg == val) count++;
-            }
-            for (const auto& sc : inst->switch_cases()) {
-                for (const Value* arg : sc.target.args) {
-                    if (arg == val) count++;
-                }
-            }
-            for (const Value* sv : inst->state_map()) {
-                if (sv == val) count++;
-            }
+            for (const Value* op : inst->operands()) if (op) counts[op]++;
+            auto count_target = [&](const BranchTarget& bt) {
+                for (const Value* arg : bt.args) if (arg) counts[arg]++;
+            };
+            count_target(inst->branch_target());
+            count_target(inst->true_target());
+            count_target(inst->false_target());
+            for (const auto& sc : inst->switch_cases()) count_target(sc.target);
+            for (const Value* sv : inst->state_map()) if (sv) counts[sv]++;
         }
     }
-    return count;
+    return counts;
 }
 
 Opcode invert_comparison_opcode(Opcode op) noexcept {
@@ -95,317 +73,186 @@ Opcode invert_comparison_opcode(Opcode op) noexcept {
     }
 }
 
-bool get_const_int(const Value* val, int64_t& out_val) {
-    if (!val || !val->is_instruction()) return false;
-    const Instruction* def = val->defining_instruction();
-    if (!def) return false;
-    if (def->opcode() == Opcode::iconst_i32 || def->opcode() == Opcode::patchable_const_i32) {
-        out_val = static_cast<int64_t>(def->imm_i32());
-        return true;
-    }
-    if (def->opcode() == Opcode::iconst_i64 || def->opcode() == Opcode::patchable_const_i64) {
-        out_val = def->imm_i64();
-        return true;
-    }
-    return false;
+bool is_int_value(const Value* v) noexcept {
+    return v && (v->type() == Type::i32() || v->type() == Type::i64());
 }
 
-Value* cast_to_i64(Builder& b, Value* v) {
-    if (!v) return nullptr;
-    if (v->type() == Type::i64()) return v;
-    if (v->type() == Type::i32()) {
-        int64_t c = 0;
-        if (get_const_int(v, c)) {
-            return b.build_iconst_i64(c);
-        }
-        return b.build_sext_i64(v);
-    }
-    return v;
+// An integer comparison `a op b`, as an instruction or as a fact known to hold.
+const Instruction* as_int_comparison(const Value* v) {
+    if (!v || !v->is_instruction()) return nullptr;
+    const Instruction* def = v->defining_instruction();
+    if (!def || !is_comparison(def->opcode()) || def->operand_count() != 2) return nullptr;
+    if (!is_int_value(def->operand(0)) || !is_int_value(def->operand(1))) return nullptr;
+    return def;
 }
 
-Value* clone_invariant_def_to_preheader(
-    Builder& b,
-    Value* v,
-    const LoopInfo& loop,
-    BasicBlock* preheader
-) {
-    if (!v) return nullptr;
-    if (loop.is_loop_invariant(v)) return v;
-
-    if (v->is_instruction()) {
-        Instruction* def = v->defining_instruction();
-        if (!def) return v;
-
-        if (def->opcode() == Opcode::zext_i64) {
-            Value* in_val = clone_invariant_def_to_preheader(b, def->operand(0), loop, preheader);
-            return b.build_zext_i64(in_val);
-        }
-        if (def->opcode() == Opcode::sext_i64) {
-            Value* in_val = clone_invariant_def_to_preheader(b, def->operand(0), loop, preheader);
-            return b.build_sext_i64(in_val);
-        }
-        if (def->opcode() == Opcode::load) {
-            Value* base = clone_invariant_def_to_preheader(b, def->operand(0), loop, preheader);
-            return b.build_load(def->type(), base, def->offset());
-        }
-        if (def->opcode() == Opcode::and_) {
-            Value* op0 = clone_invariant_def_to_preheader(b, def->operand(0), loop, preheader);
-            Value* op1 = clone_invariant_def_to_preheader(b, def->operand(1), loop, preheader);
-            return b.build_and(op0, op1);
-        }
-        if (def->opcode() == Opcode::ne) {
-            Value* op0 = clone_invariant_def_to_preheader(b, def->operand(0), loop, preheader);
-            Value* op1 = clone_invariant_def_to_preheader(b, def->operand(1), loop, preheader);
-            return b.build_ne(op0, op1);
-        }
-        if (def->opcode() == Opcode::eq) {
-            Value* op0 = clone_invariant_def_to_preheader(b, def->operand(0), loop, preheader);
-            Value* op1 = clone_invariant_def_to_preheader(b, def->operand(1), loop, preheader);
-            return b.build_eq(op0, op1);
-        }
-    }
-    return v;
+void fold_branch(Instruction* term, bool take_true) {
+    BranchTarget kept = take_true ? term->true_target() : term->false_target();
+    term->set_opcode(Opcode::br);
+    term->operands().clear();
+    term->true_target() = BranchTarget();
+    term->false_target() = BranchTarget();
+    term->set_branch_target(std::move(kept));
 }
 
-bool is_derived_from_iv(const Value* idx, const Value* iv) {
-    if (!idx || !iv) return false;
-    if (idx == iv) return true;
-    if (idx->is_instruction()) {
-        const Instruction* def = idx->defining_instruction();
-        if (def && (def->opcode() == Opcode::sext_i64 || def->opcode() == Opcode::zext_i64)) {
-            return is_derived_from_iv(def->operand(0), iv);
-        }
-        if (def && def->opcode() == Opcode::add) {
-            int64_t c = 0;
-            if (get_const_int(def->operand(1), c) && c >= 0) {
-                return is_derived_from_iv(def->operand(0), iv);
-            }
-            if (get_const_int(def->operand(0), c) && c >= 0) {
-                return is_derived_from_iv(def->operand(1), iv);
-            }
-        }
+// ---------------------------------------------------------------------------
+// Comparisons implied by a dominating comparison of the same two values.
+//
+// A predicate is the set of orderings {less, equal, greater} it accepts,
+// read in the signed or the unsigned order (eq and ne mean the same in both).
+// If every ordering the known fact allows is one the check accepts, the check
+// is true; if none is, it is false. Signed and unsigned orders only agree
+// when both values are non-negative, which range analysis must show first.
+
+constexpr uint8_t kLess = 1;
+constexpr uint8_t kEqual = 2;
+constexpr uint8_t kGreater = 4;
+
+enum class Order : uint8_t { Either, Signed, Unsigned };
+
+struct Predicate {
+    uint8_t accepts = 0;
+    Order order = Order::Either;
+};
+
+std::optional<Predicate> predicate_of(Opcode op) noexcept {
+    switch (op) {
+        case Opcode::eq:  return Predicate{kEqual, Order::Either};
+        case Opcode::ne:  return Predicate{kLess | kGreater, Order::Either};
+        case Opcode::slt: return Predicate{kLess, Order::Signed};
+        case Opcode::sle: return Predicate{kLess | kEqual, Order::Signed};
+        case Opcode::sgt: return Predicate{kGreater, Order::Signed};
+        case Opcode::sge: return Predicate{kGreater | kEqual, Order::Signed};
+        case Opcode::ult: return Predicate{kLess, Order::Unsigned};
+        case Opcode::ule: return Predicate{kLess | kEqual, Order::Unsigned};
+        case Opcode::ugt: return Predicate{kGreater, Order::Unsigned};
+        case Opcode::uge: return Predicate{kGreater | kEqual, Order::Unsigned};
+        default: return std::nullopt;
     }
-    return false;
 }
 
-bool is_invariant_load_or_val(const Value* len, const LoopInfo& loop) {
-    if (!len) return false;
-    if (loop.is_loop_invariant(len)) return true;
-    if (len->is_instruction()) {
-        const Instruction* def = len->defining_instruction();
-        if (!def) return false;
-        if (def->opcode() == Opcode::zext_i64 || def->opcode() == Opcode::sext_i64) {
-            return is_invariant_load_or_val(def->operand(0), loop);
-        }
-        if (def->opcode() == Opcode::load) {
-            const Value* base = def->operand(0);
-            return loop.is_loop_invariant(base);
-        }
-    }
-    return false;
+uint8_t swap_sides(uint8_t accepts) noexcept {
+    uint8_t out = accepts & kEqual;
+    if (accepts & kLess) out |= kGreater;
+    if (accepts & kGreater) out |= kLess;
+    return out;
 }
 
-bool hoist_loop_bounds_checks(
-    Function& fn,
-    Module& mod,
-    LoopAnalysis& loops,
-    const DominatorTree& dom,
-    const RangeAnalysisOptions& opts
-) {
-    (void)dom;
-    bool changed = false;
+struct Fact {
+    Opcode op;
+    const Value* lhs;
+    const Value* rhs;
+};
 
-    for (LoopInfo* loop : loops.post_order_loops()) {
-        if (!loop || loop->latches().size() != 1) continue;
-        BasicBlock* header = loop->header();
-        BasicBlock* latch = loop->latches()[0];
-        if (!header || !latch) continue;
+// What `fact` says about `check_op(x, y)`, if anything.
+std::optional<bool> implied_by(const Fact& fact, Opcode check_op, const Value* x, const Value* y, bool both_non_negative) {
+    auto known = predicate_of(fact.op);
+    auto check = predicate_of(check_op);
+    if (!known || !check) return std::nullopt;
+    uint8_t allowed = known->accepts;
+    if (fact.lhs == x && fact.rhs == y) {
+        // Same orientation.
+    } else if (fact.lhs == y && fact.rhs == x) {
+        allowed = swap_sides(allowed);
+    } else {
+        return std::nullopt;
+    }
+    if (known->order != Order::Either && check->order != Order::Either &&
+        known->order != check->order && !both_non_negative) {
+        return std::nullopt;
+    }
+    if ((allowed & ~check->accepts) == 0) return true;
+    if ((allowed & check->accepts) == 0) return false;
+    return std::nullopt;
+}
 
-        BasicBlock* preheader = loop->preheader();
-        if (!preheader) {
-            preheader = LoopAnalysis::ensure_preheader(fn, *loop);
-        }
-        if (!preheader) continue;
+// The facts that entering a block along an edge controlled by `cond` taking
+// its true (or false) side establishes.
+void collect_edge_facts(const Value* cond, bool on_true, std::vector<Fact>& out) {
+    if (!cond || !cond->is_instruction()) return;
+    const Instruction* def = cond->defining_instruction();
+    if (!def) return;
+    if (const Instruction* cmp = as_int_comparison(cond)) {
+        out.push_back(Fact{on_true ? cmp->opcode() : invert_comparison_opcode(cmp->opcode()),
+                           cmp->operand(0), cmp->operand(1)});
+        return;
+    }
+    // Comparisons yield 0 or 1, so `and` of them is non-zero only when both
+    // hold and `or` is zero only when both fail.
+    if (def->opcode() == Opcode::and_ && on_true) {
+        collect_edge_facts(def->operand(0), true, out);
+        collect_edge_facts(def->operand(1), true, out);
+    } else if (def->opcode() == Opcode::or_ && !on_true) {
+        collect_edge_facts(def->operand(0), false, out);
+        collect_edge_facts(def->operand(1), false, out);
+    }
+}
 
-        Instruction* ph_term = preheader->terminator();
-        Instruction* latch_term = latch->terminator();
-        Instruction* hdr_term = header->terminator();
-        if (!ph_term || !latch_term || !hdr_term || hdr_term->opcode() != Opcode::br_if) continue;
+class ImpliedCheckFolder {
+public:
+    ImpliedCheckFolder(Function& fn, Module& mod, const DominatorTree& dom, const RangeAnalysis& ra,
+                       const RangeAnalysisOptions& opts)
+        : fn_(fn), mod_(mod), dom_(dom), ra_(ra), opts_(opts) {}
 
-        BranchTarget* ph_bt = nullptr;
-        if (ph_term->opcode() == Opcode::br && ph_term->branch_target().block == header) {
-            ph_bt = &ph_term->branch_target();
-        } else if (ph_term->opcode() == Opcode::br_if) {
-            if (ph_term->true_target().block == header) ph_bt = &ph_term->true_target();
-            else if (ph_term->false_target().block == header) ph_bt = &ph_term->false_target();
-        }
-        if (!ph_bt || ph_bt->args.size() != header->param_count()) continue;
+    bool run() {
+        if (fn_.entry_block()) visit(fn_.entry_block());
+        return changed_;
+    }
 
-        BranchTarget* latch_bt = nullptr;
-        if (latch_term->opcode() == Opcode::br && latch_term->branch_target().block == header) {
-            latch_bt = &latch_term->branch_target();
-        }
-        if (!latch_bt || latch_bt->args.size() != header->param_count()) continue;
-
-        Value* cond = hdr_term->operand(0);
-        if (!cond || !cond->is_instruction()) continue;
-        Instruction* cmp = cond->defining_instruction();
-        if (!cmp || !is_comparison(cmp->opcode())) continue;
-
-        bool body_is_true = loop->contains(hdr_term->true_target().block);
-        bool body_is_false = loop->contains(hdr_term->false_target().block);
-        if (body_is_true == body_is_false) continue;
-
-        Opcode cmp_op = body_is_true ? cmp->opcode() : invert_comparison_opcode(cmp->opcode());
-        Value* cmp_lhs = cmp->operand(0);
-        Value* cmp_rhs = cmp->operand(1);
-
-        // Find primary induction variable
-        Value* primary_iv = nullptr;
-        Value* init_val = nullptr;
-        Value* limit_val = nullptr;
-
-        for (size_t i = 0; i < header->param_count(); ++i) {
-            Value* param = header->param(i);
-            if (param == cmp_lhs && loop->is_loop_invariant(cmp_rhs)) {
-                Value* step_v = latch_bt->args[i];
-                if (step_v && step_v->is_instruction()) {
-                    Instruction* sdef = step_v->defining_instruction();
-                    if (sdef && sdef->opcode() == Opcode::add) {
-                        Value* sop0 = sdef->operand(0);
-                        Value* sop1 = sdef->operand(1);
-                        Value* step_c_v = (sop0 == param) ? sop1 : ((sop1 == param) ? sop0 : nullptr);
-                        int64_t step_c = 0;
-                        if (step_c_v && get_const_int(step_c_v, step_c) && step_c > 0) {
-                            primary_iv = param;
-                            init_val = ph_bt->args[i];
-                            limit_val = cmp_rhs;
-                            break;
-                        }
-                    }
-                }
+private:
+    void visit(BasicBlock* bb) {
+        const size_t mark = facts_.size();
+        if (bb->predecessors().size() == 1) {
+            const BasicBlock* pred = bb->predecessors()[0];
+            const Instruction* term = pred ? pred->terminator() : nullptr;
+            if (term && term->opcode() == Opcode::br_if && term->true_target().block != term->false_target().block) {
+                collect_edge_facts(term->operand(0), term->true_target().block == bb, facts_);
             }
         }
 
-        if (!primary_iv || !init_val || !limit_val) continue;
+        if (facts_.size() > 0) fold_checks_in(bb);
 
-        // Search for hoistable bounds checks in the loop
-        for (BasicBlock* bb : loop->blocks()) {
-            if (!bb || bb == header) continue;
+        for (const BasicBlock* child : dom_.children(bb)) {
+            if (child) visit(const_cast<BasicBlock*>(child));
+        }
+        facts_.resize(mark);
+    }
 
-            Instruction* cur = bb->head();
-            while (cur) {
-                Instruction* next = cur->next();
-                if (cur->opcode() == Opcode::ult || cur->opcode() == Opcode::slt) {
-                    Value* idx = cur->operand(0);
-                    Value* len = cur->operand(1);
-
-                    if (is_derived_from_iv(idx, primary_iv) && is_invariant_load_or_val(len, *loop)) {
-                        // Found hoistable bounds check!
-                        Builder b(mod);
-                        b.position_before(ph_term);
-
-                        Value* hoisted_len = clone_invariant_def_to_preheader(b, len, *loop, preheader);
-                        Value* len_i64 = cast_to_i64(b, hoisted_len);
-                        Value* N_i64 = cast_to_i64(b, limit_val);
-                        Value* init_i64 = cast_to_i64(b, init_val);
-
-                        Value* check_upper = nullptr;
-                        if (cmp_op == Opcode::slt || cmp_op == Opcode::ult) {
-                            check_upper = b.build_ule(N_i64, len_i64);
-                        } else {
-                            check_upper = b.build_ult(N_i64, len_i64);
-                        }
-                        Value* check_lower = b.build_sge(init_i64, b.build_iconst_i64(0));
-                        Value* in_bounds = b.build_and(check_upper, check_lower);
-
-                        // Look for related fastpath checks in bb (e.g. elements != 0, obj_valid)
-                        Instruction* bb_term = bb->terminator();
-                        if (bb_term && bb_term->opcode() == Opcode::br_if) {
-                            Value* branch_cond = bb_term->operand(0);
-                            if (branch_cond && branch_cond->is_instruction()) {
-                                Instruction* bc_def = branch_cond->defining_instruction();
-                                if (bc_def && bc_def->opcode() == Opcode::and_) {
-                                    Value* other_check = (bc_def->operand(0) == cur->result()) ? bc_def->operand(1) :
-                                                         ((bc_def->operand(1) == cur->result()) ? bc_def->operand(0) : nullptr);
-                                    if (other_check && is_invariant_load_or_val(other_check, *loop)) {
-                                        Value* hoisted_other = clone_invariant_def_to_preheader(b, other_check, *loop, preheader);
-                                        in_bounds = b.build_and(in_bounds, hoisted_other);
-                                    }
-                                }
-                            }
-                        }
-
-                        // Also check preceding block for initial_guard (is_valid_obj && is_valid_idx)
-                        for (BasicBlock* pred : bb->predecessors()) {
-                            if (pred && loop->contains(pred)) {
-                                Instruction* pterm = pred->terminator();
-                                if (pterm && pterm->opcode() == Opcode::br_if && pterm->true_target().block == bb) {
-                                    Value* ig = pterm->operand(0);
-                                    if (ig && is_invariant_load_or_val(ig, *loop)) {
-                                        Value* hoisted_ig = clone_invariant_def_to_preheader(b, ig, *loop, preheader);
-                                        in_bounds = b.build_and(in_bounds, hoisted_ig);
-                                        // Hoist initial_guard branch into unconditional jump
-                                        pterm->set_opcode(Opcode::br);
-                                        pterm->set_branch_target(pterm->true_target());
-                                        pterm->operands().clear();
-                                        pterm->true_target() = BranchTarget();
-                                        pterm->false_target() = BranchTarget();
-                                    }
-                                }
-                            }
-                        }
-
-                        // Emit preheader guard with captured loop/preheader deopt state
-                        std::vector<Value*> deopt_state;
-                        if (ph_term) {
-                            for (Value* arg : ph_term->branch_target().args) {
-                                if (arg) {
-                                    deopt_state.push_back(arg);
-                                }
-                            }
-                            for (size_t i = 0; i < ph_term->operand_count(); ++i) {
-                                if (ph_term->operand(i)) {
-                                    deopt_state.push_back(ph_term->operand(i));
-                                }
-                            }
-                        }
-                        if (deopt_state.empty() && fn.entry_block()) {
-                            for (Value* p : fn.entry_block()->params()) {
-                                if (p) deopt_state.push_back(p);
-                            }
-                        }
-                        Instruction* guard_inst = b.build_guard(in_bounds, "@exit_stub", deopt_state);
-                        guard_inst->set_offset(static_cast<int32_t>(runtime::DeoptReason::BoundsCheckFailed));
-
-                        // Eliminate per-iteration bounds check inside loop
-                        b.position_before(cur);
-                        Value* true_v = b.build_iconst_i32(1);
-                        replace_all_uses(fn, cur->result(), true_v);
-
-                        if (bb_term && bb_term->opcode() == Opcode::br_if) {
-                            bb_term->set_opcode(Opcode::br);
-                            bb_term->set_branch_target(bb_term->true_target());
-                            bb_term->operands().clear();
-                            bb_term->true_target() = BranchTarget();
-                            bb_term->false_target() = BranchTarget();
-                        }
-
-                        if (opts.stats) {
-                            opts.stats->bounds_checks_hoisted++;
-                        }
-                        changed = true;
-                    }
-                }
-                cur = next;
+    void fold_checks_in(BasicBlock* bb) {
+        for (Instruction* cur = bb->head(); cur; cur = cur->next()) {
+            const Instruction* cmp = as_int_comparison(cur->result());
+            if (!cmp) continue;
+            const Value* x = cmp->operand(0);
+            const Value* y = cmp->operand(1);
+            const bool both_non_negative =
+                ra_.get_range_at(x, bb).min_val >= 0 && ra_.get_range_at(y, bb).min_val >= 0;
+            for (auto it = facts_.rbegin(); it != facts_.rend(); ++it) {
+                std::optional<bool> outcome = implied_by(*it, cmp->opcode(), x, y, both_non_negative);
+                if (!outcome) continue;
+                Builder b(mod_);
+                b.set_function(&fn_);
+                b.position_before(cur);
+                replace_all_uses(fn_, cur->result(), b.build_iconst_i32(*outcome ? 1 : 0));
+                if (opts_.stats) opts_.stats->checks_implied++;
+                changed_ = true;
+                break;
             }
         }
     }
 
-    return changed;
-}
+    Function& fn_;
+    Module& mod_;
+    const DominatorTree& dom_;
+    const RangeAnalysis& ra_;
+    const RangeAnalysisOptions& opts_;
+    std::vector<Fact> facts_;
+    bool changed_ = false;
+};
 
-bool eliminate_local_bounds_checks(
+// ---------------------------------------------------------------------------
+// Comparisons, guards and branches whose outcome value ranges decide.
+
+bool eliminate_range_decided_checks(
     Function& fn,
     Module& mod,
     const RangeAnalysis& ra,
@@ -420,82 +267,36 @@ bool eliminate_local_bounds_checks(
         while (cur) {
             Instruction* next = cur->next();
 
-            // Check 1: Redundant comparison (e.g. ult %idx, %len)
-            if (cur->opcode() == Opcode::ult || cur->opcode() == Opcode::slt) {
-                Value* idx = cur->operand(0);
-                Value* len = cur->operand(1);
-                ValueRange r_idx = ra.get_range_at(idx, bb);
-                ValueRange r_len = ra.get_range_at(len, bb);
-
-                if (r_idx.is_non_negative() && r_idx.max_val < r_len.min_val) {
-                    // Statically proven true!
+            if (as_int_comparison(cur->result())) {
+                // The comparison's own range at its block already accounts
+                // for signedness, widths and every dominating branch.
+                ValueRange r = ra.get_range_at(cur->result(), bb);
+                if (r.is_constant() && (r.min_val == 0 || r.min_val == 1)) {
                     Builder b(mod);
+                    b.set_function(&fn);
                     b.position_before(cur);
-                    Value* one = b.build_iconst_i32(1);
-                    replace_all_uses(fn, cur->result(), one);
-
-                    // If followed by br_if using this condition, simplify branch directly
-                    Instruction* term = bb->terminator();
-                    if (term && term->opcode() == Opcode::br_if && term->operand(0) == one) {
-                        term->set_opcode(Opcode::br);
-                        term->set_branch_target(term->true_target());
-                        term->operands().clear();
-                        term->true_target() = BranchTarget();
-                        term->false_target() = BranchTarget();
-                        if (opts.stats) opts.stats->branches_folded++;
-                    }
-
-                    if (opts.stats) opts.stats->bounds_checks_eliminated++;
-                    changed = true;
-                } else if (r_idx.max_val < 0 || (r_len.max_val < INT64_MAX && r_idx.min_val >= r_len.max_val)) {
-                    // Statically proven false!
-                    Builder b(mod);
-                    b.position_before(cur);
-                    Value* zero = b.build_iconst_i32(0);
-                    replace_all_uses(fn, cur->result(), zero);
+                    Value* folded = b.build_iconst_i32(static_cast<int32_t>(r.min_val));
+                    replace_all_uses(fn, cur->result(), folded);
 
                     Instruction* term = bb->terminator();
-                    if (term && term->opcode() == Opcode::br_if && term->operand(0) == zero) {
-                        term->set_opcode(Opcode::br);
-                        term->set_branch_target(term->false_target());
-                        term->operands().clear();
-                        term->true_target() = BranchTarget();
-                        term->false_target() = BranchTarget();
+                    if (term && term->opcode() == Opcode::br_if && term->operand(0) == folded) {
+                        fold_branch(term, r.min_val != 0);
                         if (opts.stats) opts.stats->branches_folded++;
                     }
-
                     if (opts.stats) opts.stats->bounds_checks_eliminated++;
                     changed = true;
                 }
-            }
-
-            // Check 2: Redundant Guard
-            else if (cur->opcode() == Opcode::guard) {
+            } else if (cur->opcode() == Opcode::guard) {
                 ValueRange r_cond = ra.get_range_at(cur->operand(0), bb);
                 if (r_cond.is_constant() && r_cond.min_val != 0) {
                     bb->remove_instruction(cur);
                     if (opts.stats) opts.stats->guards_eliminated++;
                     changed = true;
                 }
-            }
-
-            // Check 3: Redundant br_if
-            else if (cur->opcode() == Opcode::br_if) {
+            } else if (cur->opcode() == Opcode::br_if) {
                 ValueRange r_cond = ra.get_range_at(cur->operand(0), bb);
                 if (r_cond.is_constant()) {
-                    if (r_cond.min_val != 0) {
-                        cur->set_opcode(Opcode::br);
-                        cur->set_branch_target(cur->true_target());
-                        cur->operands().clear();
-                        cur->true_target() = BranchTarget();
-                        cur->false_target() = BranchTarget();
-                    } else {
-                        cur->set_opcode(Opcode::br);
-                        cur->set_branch_target(cur->false_target());
-                        cur->operands().clear();
-                        cur->true_target() = BranchTarget();
-                        cur->false_target() = BranchTarget();
-                    }
+                    fold_branch(cur, r_cond.min_val != 0);
                     if (opts.stats) opts.stats->branches_folded++;
                     changed = true;
                 }
@@ -508,61 +309,50 @@ bool eliminate_local_bounds_checks(
     return changed;
 }
 
+void remove_dead_pure_instructions(Function& fn) {
+    bool progress = true;
+    while (progress) {
+        progress = false;
+        auto uses = count_all_uses(fn);
+        for (BasicBlock* bb : fn.blocks()) {
+            if (!bb) continue;
+            Instruction* cur = bb->head();
+            while (cur) {
+                Instruction* next = cur->next();
+                if (!cur->has_side_effects() && cur->produces_value() && uses[cur->result()] == 0) {
+                    bb->remove_instruction(cur);
+                    progress = true;
+                }
+                cur = next;
+            }
+        }
+    }
+}
+
 } // namespace
 
 bool run_bounds_check_elimination(Function& fn, Module& mod, const RangeAnalysisOptions& opts) {
     if (fn.blocks().empty() || !fn.entry_block()) return false;
+    if (!opts.enable_bce && !opts.enable_implied_checks) return false;
+
+    fn.rebuild_cfg_predecessors();
+    DominatorTree dom(fn);
+    LoopAnalysis loops(fn, dom);
+    RangeAnalysis ra(fn, dom, loops);
+
     bool any_changed = false;
-
-    // Step 1: Loop Bounds Check Hoisting
-    if (opts.enable_hoisting) {
-        fn.rebuild_cfg_predecessors();
-        DominatorTree dom(fn);
-        LoopAnalysis loops(fn, dom);
-        bool hoisted = hoist_loop_bounds_checks(fn, mod, loops, dom, opts);
-        if (hoisted) {
-            any_changed = true;
-            fn.rebuild_cfg_predecessors();
-        }
+    if (opts.enable_implied_checks) {
+        any_changed |= ImpliedCheckFolder(fn, mod, dom, ra, opts).run();
     }
-
-    // Step 2: Local / Dominator-Based Bounds Check Elimination
     if (opts.enable_bce) {
-        fn.rebuild_cfg_predecessors();
-        DominatorTree dom(fn);
-        LoopAnalysis loops(fn, dom);
-        RangeAnalysis ra(fn, dom, loops);
-        bool local_elim = eliminate_local_bounds_checks(fn, mod, ra, opts);
-        if (local_elim) {
-            any_changed = true;
-            fn.rebuild_cfg_predecessors();
-        }
+        any_changed |= eliminate_range_decided_checks(fn, mod, ra, opts);
     }
 
     if (any_changed) {
         fn.rebuild_cfg_predecessors();
         cfg_simplify_function(fn);
         fn.rebuild_cfg_predecessors();
-
-        // Dead code elimination pass for unused constants/instructions
-        bool dce_progress = true;
-        while (dce_progress) {
-            dce_progress = false;
-            for (BasicBlock* bb : fn.blocks()) {
-                if (!bb) continue;
-                Instruction* cur = bb->head();
-                while (cur) {
-                    Instruction* next = cur->next();
-                    if (!cur->has_side_effects() && cur->produces_value()) {
-                        if (count_uses(fn, cur->result()) == 0) {
-                            bb->remove_instruction(cur);
-                            dce_progress = true;
-                        }
-                    }
-                    cur = next;
-                }
-            }
-        }
+        remove_dead_pure_instructions(fn);
         fn.rebuild_cfg_predecessors();
     }
 

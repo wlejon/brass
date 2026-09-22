@@ -52,6 +52,9 @@ public:
     const EscapeAnalysis* escape_analysis() const noexcept;
 
 private:
+    // True when the two addresses provably point into different objects.
+    bool are_distinct_objects(const Value* ptr1, const Value* ptr2) const;
+
     const Function* fn_ = nullptr;
     const EscapeAnalysis* external_ea_ = nullptr;
     std::unique_ptr<EscapeAnalysis> owned_ea_;

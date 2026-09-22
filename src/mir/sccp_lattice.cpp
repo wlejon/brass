@@ -1,10 +1,25 @@
 #include "sccp_lattice.hpp"
+#include "int_fold.hpp"
 #include <bit>
 #include <cmath>
 #include <limits>
 #include <cstring>
 
 namespace brass {
+
+namespace {
+
+// Integer lattice constants keep 32-bit values sign-extended, which is the
+// representation int_fold works in.
+int64_t int_bits(const LatticeValue& v) {
+    return v.type() == Type::i32() ? static_cast<int64_t>(v.as_i32()) : v.as_i64();
+}
+
+LatticeValue make_int(unsigned width, int64_t v) {
+    return width == 32 ? LatticeValue::make_i32(static_cast<int32_t>(v)) : LatticeValue::make_i64(v);
+}
+
+} // namespace
 
 LatticeValue evaluate_unary(Opcode op, Type res_type, const LatticeValue& val) {
     if (val.is_top()) {
@@ -15,71 +30,16 @@ LatticeValue evaluate_unary(Opcode op, Type res_type, const LatticeValue& val) {
     }
 
     switch (op) {
-        case Opcode::neg: {
-            if (res_type == Type::i32()) {
-                uint32_t u = static_cast<uint32_t>(val.as_i32());
-                return LatticeValue::make_i32(static_cast<int32_t>(0u - u));
-            }
-            if (res_type == Type::i64()) {
-                uint64_t u = static_cast<uint64_t>(val.as_i64());
-                return LatticeValue::make_i64(static_cast<int64_t>(0ULL - u));
-            }
-            if (res_type == Type::f32()) {
-                return LatticeValue::make_f32(-val.as_f32());
-            }
-            if (res_type == Type::f64()) {
-                return LatticeValue::make_f64(-val.as_f64());
-            }
-            break;
-        }
-
-        case Opcode::not_: {
-            if (res_type == Type::i32()) {
-                return LatticeValue::make_i32(~val.as_i32());
-            }
-            if (res_type == Type::i64()) {
-                return LatticeValue::make_i64(~val.as_i64());
-            }
-            break;
-        }
-
-        case Opcode::clz: {
-            if (res_type == Type::i32()) {
-                uint32_t u = static_cast<uint32_t>(val.as_i32());
-                int32_t c = (u == 0) ? 32 : static_cast<int32_t>(std::countl_zero(u));
-                return LatticeValue::make_i32(c);
-            }
-            if (res_type == Type::i64()) {
-                uint64_t u = static_cast<uint64_t>(val.as_i64());
-                int64_t c = (u == 0) ? 64 : static_cast<int64_t>(std::countl_zero(u));
-                return LatticeValue::make_i64(c);
-            }
-            break;
-        }
-
-        case Opcode::ctz: {
-            if (res_type == Type::i32()) {
-                uint32_t u = static_cast<uint32_t>(val.as_i32());
-                int32_t c = (u == 0) ? 32 : static_cast<int32_t>(std::countr_zero(u));
-                return LatticeValue::make_i32(c);
-            }
-            if (res_type == Type::i64()) {
-                uint64_t u = static_cast<uint64_t>(val.as_i64());
-                int64_t c = (u == 0) ? 64 : static_cast<int64_t>(std::countr_zero(u));
-                return LatticeValue::make_i64(c);
-            }
-            break;
-        }
-
+        case Opcode::neg:
+            if (res_type == Type::f32()) return LatticeValue::make_f32(-val.as_f32());
+            if (res_type == Type::f64()) return LatticeValue::make_f64(-val.as_f64());
+            [[fallthrough]];
+        case Opcode::not_:
+        case Opcode::clz:
+        case Opcode::ctz:
         case Opcode::popcnt: {
-            if (res_type == Type::i32()) {
-                uint32_t u = static_cast<uint32_t>(val.as_i32());
-                return LatticeValue::make_i32(static_cast<int32_t>(std::popcount(u)));
-            }
-            if (res_type == Type::i64()) {
-                uint64_t u = static_cast<uint64_t>(val.as_i64());
-                return LatticeValue::make_i64(static_cast<int64_t>(std::popcount(u)));
-            }
+            const unsigned width = (res_type == Type::i32() || res_type == Type::i64()) ? int_fold::width_of(res_type) : 0;
+            if (auto r = int_fold::unary(op, width, int_bits(val))) return make_int(width, *r);
             break;
         }
 
@@ -185,136 +145,12 @@ LatticeValue evaluate_binary(Opcode op, Type res_type, const LatticeValue& lhs, 
         return LatticeValue::make_bottom(res_type);
     }
 
+    // Integer operations evaluate at the operands' width; comparisons yield i32.
     Type op_type = (lhs.type() != Type::void_type()) ? lhs.type() : res_type;
-    if (op_type == Type::i32()) {
-        int32_t a = lhs.as_i32();
-        int32_t b = rhs.as_i32();
-        uint32_t ua = static_cast<uint32_t>(a);
-        uint32_t ub = static_cast<uint32_t>(b);
-
-        switch (op) {
-            case Opcode::add:
-                return LatticeValue::make_i32(static_cast<int32_t>(ua + ub));
-            case Opcode::sub:
-                return LatticeValue::make_i32(static_cast<int32_t>(ua - ub));
-            case Opcode::mul:
-                return LatticeValue::make_i32(static_cast<int32_t>(ua * ub));
-            case Opcode::sdiv:
-                if (b == 0 || (a == std::numeric_limits<int32_t>::min() && b == -1)) {
-                    return LatticeValue::make_bottom(res_type);
-                }
-                return LatticeValue::make_i32(a / b);
-            case Opcode::udiv:
-                if (ub == 0) return LatticeValue::make_bottom(res_type);
-                return LatticeValue::make_i32(static_cast<int32_t>(ua / ub));
-            case Opcode::smod:
-                if (b == 0 || (a == std::numeric_limits<int32_t>::min() && b == -1)) {
-                    return LatticeValue::make_bottom(res_type);
-                }
-                return LatticeValue::make_i32(a % b);
-            case Opcode::umod:
-                if (ub == 0) return LatticeValue::make_bottom(res_type);
-                return LatticeValue::make_i32(static_cast<int32_t>(ua % ub));
-            case Opcode::and_:
-                return LatticeValue::make_i32(a & b);
-            case Opcode::or_:
-                return LatticeValue::make_i32(a | b);
-            case Opcode::xor_:
-                return LatticeValue::make_i32(a ^ b);
-            case Opcode::shl:
-                return LatticeValue::make_i32(static_cast<int32_t>(ua << (ub & 31u)));
-            case Opcode::lshr:
-                return LatticeValue::make_i32(static_cast<int32_t>(ua >> (ub & 31u)));
-            case Opcode::ashr:
-                return LatticeValue::make_i32(a >> (ub & 31u));
-            case Opcode::eq:
-                return LatticeValue::make_i32(a == b ? 1 : 0);
-            case Opcode::ne:
-                return LatticeValue::make_i32(a != b ? 1 : 0);
-            case Opcode::slt:
-                return LatticeValue::make_i32(a < b ? 1 : 0);
-            case Opcode::sle:
-                return LatticeValue::make_i32(a <= b ? 1 : 0);
-            case Opcode::sgt:
-                return LatticeValue::make_i32(a > b ? 1 : 0);
-            case Opcode::sge:
-                return LatticeValue::make_i32(a >= b ? 1 : 0);
-            case Opcode::ult:
-                return LatticeValue::make_i32(ua < ub ? 1 : 0);
-            case Opcode::ule:
-                return LatticeValue::make_i32(ua <= ub ? 1 : 0);
-            case Opcode::ugt:
-                return LatticeValue::make_i32(ua > ub ? 1 : 0);
-            case Opcode::uge:
-                return LatticeValue::make_i32(ua >= ub ? 1 : 0);
-            default:
-                break;
-        }
-    } else {
-        // 64-bit integers or pointers
-        int64_t a = lhs.as_i64();
-        int64_t b = rhs.as_i64();
-        uint64_t ua = static_cast<uint64_t>(a);
-        uint64_t ub = static_cast<uint64_t>(b);
-
-        switch (op) {
-            case Opcode::add:
-                return LatticeValue::make_i64(static_cast<int64_t>(ua + ub));
-            case Opcode::sub:
-                return LatticeValue::make_i64(static_cast<int64_t>(ua - ub));
-            case Opcode::mul:
-                return LatticeValue::make_i64(static_cast<int64_t>(ua * ub));
-            case Opcode::sdiv:
-                if (b == 0 || (a == std::numeric_limits<int64_t>::min() && b == -1)) {
-                    return LatticeValue::make_bottom(res_type);
-                }
-                return LatticeValue::make_i64(a / b);
-            case Opcode::udiv:
-                if (ub == 0) return LatticeValue::make_bottom(res_type);
-                return LatticeValue::make_i64(static_cast<int64_t>(ua / ub));
-            case Opcode::smod:
-                if (b == 0 || (a == std::numeric_limits<int64_t>::min() && b == -1)) {
-                    return LatticeValue::make_bottom(res_type);
-                }
-                return LatticeValue::make_i64(a % b);
-            case Opcode::umod:
-                if (ub == 0) return LatticeValue::make_bottom(res_type);
-                return LatticeValue::make_i64(static_cast<int64_t>(ua % ub));
-            case Opcode::and_:
-                return LatticeValue::make_i64(a & b);
-            case Opcode::or_:
-                return LatticeValue::make_i64(a | b);
-            case Opcode::xor_:
-                return LatticeValue::make_i64(a ^ b);
-            case Opcode::shl:
-                return LatticeValue::make_i64(static_cast<int64_t>(ua << (ub & 63u)));
-            case Opcode::lshr:
-                return LatticeValue::make_i64(static_cast<int64_t>(ua >> (ub & 63u)));
-            case Opcode::ashr:
-                return LatticeValue::make_i64(a >> (ub & 63u));
-            case Opcode::eq:
-                return LatticeValue::make_i32(a == b ? 1 : 0);
-            case Opcode::ne:
-                return LatticeValue::make_i32(a != b ? 1 : 0);
-            case Opcode::slt:
-                return LatticeValue::make_i32(a < b ? 1 : 0);
-            case Opcode::sle:
-                return LatticeValue::make_i32(a <= b ? 1 : 0);
-            case Opcode::sgt:
-                return LatticeValue::make_i32(a > b ? 1 : 0);
-            case Opcode::sge:
-                return LatticeValue::make_i32(a >= b ? 1 : 0);
-            case Opcode::ult:
-                return LatticeValue::make_i32(ua < ub ? 1 : 0);
-            case Opcode::ule:
-                return LatticeValue::make_i32(ua <= ub ? 1 : 0);
-            case Opcode::ugt:
-                return LatticeValue::make_i32(ua > ub ? 1 : 0);
-            case Opcode::uge:
-                return LatticeValue::make_i32(ua >= ub ? 1 : 0);
-            default:
-                break;
-        }
+    const unsigned width = (op_type == Type::i32()) ? 32U : 64U;
+    if (auto r = int_fold::binary(op, width, int_bits(lhs), int_bits(rhs))) {
+        if (is_comparison(op)) return LatticeValue::make_i32(static_cast<int32_t>(*r));
+        return make_int(width, *r);
     }
 
     return LatticeValue::make_bottom(res_type);
@@ -330,13 +166,14 @@ LatticeValue evaluate_conversion(Opcode op, Type res_type, const LatticeValue& v
 
     switch (op) {
         case Opcode::sext_i64:
-            return LatticeValue::make_i64(static_cast<int64_t>(val.as_i32()));
-        case Opcode::zext_i64: {
-            uint64_t u = (val.type() == Type::i8()) ? static_cast<uint8_t>(val.as_i32()) : static_cast<uint64_t>(static_cast<uint32_t>(val.as_i32()));
-            return LatticeValue::make_i64(static_cast<int64_t>(u));
+        case Opcode::zext_i64:
+        case Opcode::trunc_i32: {
+            if (auto r = int_fold::convert(op, val.type(), int_bits(val))) {
+                return op == Opcode::trunc_i32 ? LatticeValue::make_i32(static_cast<int32_t>(*r))
+                                               : LatticeValue::make_i64(*r);
+            }
+            break;
         }
-        case Opcode::trunc_i32:
-            return LatticeValue::make_i32(static_cast<int32_t>(val.as_i64()));
         case Opcode::fptosi_i32: {
             double d = val.as_f64();
             if (std::isnan(d) || d < static_cast<double>(INT32_MIN) || d > static_cast<double>(INT32_MAX)) {

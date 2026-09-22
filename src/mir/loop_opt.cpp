@@ -23,11 +23,13 @@
 #include <brass/mir/branch_probability.hpp>
 #include <brass/mir/range_analysis.hpp>
 #include <brass/mir/bounds_check_elim.hpp>
+#include "int_fold.hpp"
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include <algorithm>
 #include <functional>
+#include <optional>
 #include <cstring>
 
 namespace brass {
@@ -36,6 +38,21 @@ bool ivsr_pass(Function& fn, LoopInfo& loop, DominatorTree& dom);
 void replace_all_uses(Function& fn, Value* old_val, Value* new_val);
 
 namespace {
+
+bool get_const_int(const Value* val, int64_t& out_val) {
+    if (!val || !val->is_instruction()) return false;
+    const Instruction* def = val->defining_instruction();
+    if (!def) return false;
+    if (def->opcode() == Opcode::iconst_i32) {
+        out_val = static_cast<int64_t>(def->imm_i32());
+        return true;
+    }
+    if (def->opcode() == Opcode::iconst_i64) {
+        out_val = def->imm_i64();
+        return true;
+    }
+    return false;
+}
 
 bool is_pure_instruction(const Instruction* inst) {
     if (!inst) return false;
@@ -54,33 +71,16 @@ bool is_pure_instruction(const Instruction* inst) {
         case Opcode::select: return true;
         case Opcode::call: return inst->symbol() == "bronze_tls_block_addr";
         case Opcode::sdiv: case Opcode::udiv: case Opcode::smod: case Opcode::umod: {
+            // LICM executes pure instructions speculatively, so a division is
+            // pure only when its constant divisor rules out every trap.
             if (inst->operand_count() < 2 || !inst->operand(1)) return false;
-            const Value* denom = inst->operand(1);
-            if (denom->is_instruction()) {
-                const Instruction* ddef = denom->defining_instruction();
-                if (ddef && (ddef->opcode() == Opcode::iconst_i32 || ddef->opcode() == Opcode::iconst_i64)) {
-                    return ddef->imm_i64() != 0;
-                }
-            }
-            return false;
+            int64_t divisor = 0;
+            if (!get_const_int(inst->operand(1), divisor)) return false;
+            const unsigned width = int_fold::width_of(inst->type());
+            return width != 0 && !int_fold::division_may_trap(op, width, divisor);
         }
         default: return false;
     }
-}
-
-bool get_const_int(const Value* val, int64_t& out_val) {
-    if (!val || !val->is_instruction()) return false;
-    const Instruction* def = val->defining_instruction();
-    if (!def) return false;
-    if (def->opcode() == Opcode::iconst_i32) {
-        out_val = static_cast<int64_t>(def->imm_i32());
-        return true;
-    }
-    if (def->opcode() == Opcode::iconst_i64) {
-        out_val = def->imm_i64();
-        return true;
-    }
-    return false;
 }
 
 } // namespace
@@ -140,6 +140,31 @@ std::unordered_map<const Value*, uint32_t> compute_use_counts(const Function& fn
     return counts;
 }
 
+// Drops parameter `p_i` of `bb` and the matching argument on every edge into
+// it, whatever kind of terminator the edge comes from.
+void remove_block_param(BasicBlock* bb, size_t p_i) {
+    auto& params = bb->params();
+    params.erase(params.begin() + static_cast<std::ptrdiff_t>(p_i));
+    for (size_t k = p_i; k < params.size(); ++k) {
+        params[k]->set_block_param(bb, static_cast<uint32_t>(k));
+    }
+    auto drop_arg = [&](BranchTarget& bt) {
+        if (bt.block == bb && p_i < bt.args.size()) {
+            bt.args.erase(bt.args.begin() + static_cast<std::ptrdiff_t>(p_i));
+        }
+    };
+    std::unordered_set<BasicBlock*> seen;
+    for (BasicBlock* pred : bb->predecessors()) {
+        if (!pred || !seen.insert(pred).second) continue;
+        Instruction* term = pred->terminator();
+        if (!term) continue;
+        drop_arg(term->branch_target());
+        drop_arg(term->true_target());
+        drop_arg(term->false_target());
+        for (auto& sc : term->switch_cases()) drop_arg(sc.target);
+    }
+}
+
 bool constant_folding_pass(Function& fn) {
     bool changed = false;
     Builder b(*fn.parent());
@@ -164,63 +189,42 @@ bool constant_folding_pass(Function& fn) {
                 bool has_c1 = get_const_int(op1, c1);
                 Type res_type = cur->type();
                 Value* replacement = nullptr;
+                // Identities below only hold for integer arithmetic, and only a
+                // result of the same type as the replacement may stand in for it.
+                const unsigned width = op0 ? int_fold::width_of(op0->type()) : 0;
+                const bool int_result = res_type == Type::i32() || res_type == Type::i64();
+                auto same_type = [&](const Value* v) { return v && v->type() == res_type; };
+                auto build_int = [&](int64_t v) -> Value* {
+                    b.position_before(cur);
+                    return (res_type == Type::i32()) ? b.build_iconst_i32(static_cast<int32_t>(v)) : b.build_iconst_i64(v);
+                };
 
                 if (has_c0 && has_c1) {
-                    int64_t result = 0;
-                    bool can_fold = true;
-                    switch (op) {
-                        case Opcode::add: result = c0 + c1; break;
-                        case Opcode::sub: result = c0 - c1; break;
-                        case Opcode::mul: result = c0 * c1; break;
-                        case Opcode::and_: result = c0 & c1; break;
-                        case Opcode::or_: result = c0 | c1; break;
-                        case Opcode::xor_: result = c0 ^ c1; break;
-                        case Opcode::shl: result = c0 << (c1 & 63); break;
-                        case Opcode::lshr: result = static_cast<int64_t>(static_cast<uint64_t>(c0) >> (c1 & 63)); break;
-                        case Opcode::ashr: result = c0 >> (c1 & 63); break;
-                        case Opcode::slt: result = (c0 < c1) ? 1 : 0; break;
-                        case Opcode::sle: result = (c0 <= c1) ? 1 : 0; break;
-                        case Opcode::sgt: result = (c0 > c1) ? 1 : 0; break;
-                        case Opcode::sge: result = (c0 >= c1) ? 1 : 0; break;
-                        case Opcode::ult: result = (static_cast<uint64_t>(c0) < static_cast<uint64_t>(c1)) ? 1 : 0; break;
-                        case Opcode::ule: result = (static_cast<uint64_t>(c0) <= static_cast<uint64_t>(c1)) ? 1 : 0; break;
-                        case Opcode::ugt: result = (static_cast<uint64_t>(c0) > static_cast<uint64_t>(c1)) ? 1 : 0; break;
-                        case Opcode::uge: result = (static_cast<uint64_t>(c0) >= static_cast<uint64_t>(c1)) ? 1 : 0; break;
-                        case Opcode::eq: result = (c0 == c1) ? 1 : 0; break;
-                        case Opcode::ne: result = (c0 != c1) ? 1 : 0; break;
-                        case Opcode::sdiv: if (c1 != 0) result = c0 / c1; else can_fold = false; break;
-                        case Opcode::udiv: if (c1 != 0) result = static_cast<int64_t>(static_cast<uint64_t>(c0) / static_cast<uint64_t>(c1)); else can_fold = false; break;
-                        case Opcode::smod: if (c1 != 0) result = c0 % c1; else can_fold = false; break;
-                        case Opcode::umod: if (c1 != 0) result = static_cast<int64_t>(static_cast<uint64_t>(c0) % static_cast<uint64_t>(c1)); else can_fold = false; break;
-                        default: can_fold = false; break;
+                    if (int_result && width != 0) {
+                        if (auto folded = int_fold::binary(op, width, c0, c1)) replacement = build_int(*folded);
                     }
-                    if (can_fold) {
-                        b.position_before(cur);
-                        replacement = (res_type == Type::i32()) ? b.build_iconst_i32(static_cast<int32_t>(result)) : b.build_iconst_i64(result);
+                } else if (has_c1 && width != 0) {
+                    if ((op == Opcode::add || op == Opcode::sub || op == Opcode::or_ || op == Opcode::xor_ ||
+                         op == Opcode::shl || op == Opcode::ashr || op == Opcode::lshr) && c1 == 0) {
+                        if (same_type(op0)) replacement = op0;
+                    } else if (op == Opcode::mul && c1 == 1) {
+                        if (same_type(op0)) replacement = op0;
+                    } else if (op == Opcode::mul && c1 == 0 && int_result) {
+                        replacement = build_int(0);
                     }
-                } else if (has_c1) {
-                    if (op == Opcode::add && c1 == 0) replacement = op0;
-                    else if (op == Opcode::sub && c1 == 0) replacement = op0;
-                    else if (op == Opcode::mul && c1 == 1) replacement = op0;
-                    else if (op == Opcode::mul && c1 == 0) {
-                        b.position_before(cur);
-                        replacement = (res_type == Type::i32()) ? b.build_iconst_i32(0) : b.build_iconst_i64(0);
-                    } else if ((op == Opcode::shl || op == Opcode::ashr || op == Opcode::lshr) && c1 == 0) replacement = op0;
-                    else if (op == Opcode::or_ && c1 == 0) replacement = op0;
-                    else if (op == Opcode::xor_ && c1 == 0) replacement = op0;
-                } else if (has_c0) {
-                    if (op == Opcode::add && c0 == 0) replacement = op1;
-                    else if (op == Opcode::mul && c0 == 1) replacement = op1;
-                    else if (op == Opcode::mul && c0 == 0) {
-                        b.position_before(cur);
-                        replacement = (res_type == Type::i32()) ? b.build_iconst_i32(0) : b.build_iconst_i64(0);
-                    } else if (op == Opcode::or_ && c0 == 0) replacement = op1;
-                    else if (op == Opcode::xor_ && c0 == 0) replacement = op1;
+                } else if (has_c0 && op1 && int_fold::width_of(op1->type()) != 0) {
+                    if ((op == Opcode::add || op == Opcode::or_ || op == Opcode::xor_) && c0 == 0) {
+                        if (same_type(op1)) replacement = op1;
+                    } else if (op == Opcode::mul && c0 == 1) {
+                        if (same_type(op1)) replacement = op1;
+                    } else if (op == Opcode::mul && c0 == 0 && int_result) {
+                        replacement = build_int(0);
+                    }
                 } else if (op0 == op1 && (op == Opcode::sub || op == Opcode::xor_)) {
-                    b.position_before(cur);
-                    if (res_type.is_integer()) {
-                        replacement = (res_type == Type::i32()) ? b.build_iconst_i32(0) : b.build_iconst_i64(0);
+                    if (int_result && width != 0) {
+                        replacement = build_int(0);
                     } else if (op == Opcode::sub && res_type == Type::f64() && fn.allow_fp_reassociation()) {
+                        b.position_before(cur);
                         replacement = b.build_fconst_f64(0.0);
                     }
                 }
@@ -235,10 +239,17 @@ bool constant_folding_pass(Function& fn) {
                 int64_t c0;
                 if (get_const_int(op0, c0)) {
                     Value* replacement = nullptr;
-                    b.position_before(cur);
-                    if (op == Opcode::sext_i64) replacement = b.build_iconst_i64(static_cast<int64_t>(static_cast<int32_t>(c0)));
-                    else if (op == Opcode::zext_i64) replacement = b.build_iconst_i64(static_cast<int64_t>((op0->type() == Type::i8()) ? static_cast<uint8_t>(c0) : static_cast<uint64_t>(static_cast<uint32_t>(c0))));
-                    else if (op == Opcode::trunc_i32) replacement = b.build_iconst_i32(static_cast<int32_t>(c0));
+                    std::optional<int64_t> folded;
+                    if (op == Opcode::sext_i64 || op == Opcode::zext_i64 || op == Opcode::trunc_i32) {
+                        folded = int_fold::convert(op, op0->type(), c0);
+                    } else if (cur->type() == Type::i32() || cur->type() == Type::i64()) {
+                        folded = int_fold::unary(op, int_fold::width_of(cur->type()), c0);
+                    }
+                    if (folded) {
+                        b.position_before(cur);
+                        replacement = (cur->type() == Type::i32()) ? b.build_iconst_i32(static_cast<int32_t>(*folded))
+                                                                   : b.build_iconst_i64(*folded);
+                    }
 
                     if (replacement) {
                         replace_all_uses(fn, cur->result(), replacement);
@@ -389,41 +400,7 @@ bool dead_code_elimination_pass(Function& fn) {
             while (p_i < bb->param_count()) {
                 Value* p = bb->param(p_i);
                 if (p && use_counts[p] == 0) {
-                    auto& params = bb->params();
-                    params.erase(params.begin() + static_cast<std::ptrdiff_t>(p_i));
-                    for (size_t k = p_i; k < params.size(); ++k) {
-                        params[k]->set_block_param(bb, static_cast<uint32_t>(k));
-                    }
-
-                    for (BasicBlock* pred : bb->predecessors()) {
-                        if (!pred) continue;
-                        Instruction* term = pred->terminator();
-                        if (!term) continue;
-                        if (term->opcode() == Opcode::br && term->branch_target().block == bb) {
-                            auto& args = term->branch_target().args;
-                            if (p_i < args.size()) args.erase(args.begin() + static_cast<std::ptrdiff_t>(p_i));
-                        } else if (term->opcode() == Opcode::br_if) {
-                            if (term->true_target().block == bb) {
-                                auto& args = term->true_target().args;
-                                if (p_i < args.size()) args.erase(args.begin() + static_cast<std::ptrdiff_t>(p_i));
-                            }
-                            if (term->false_target().block == bb) {
-                                auto& args = term->false_target().args;
-                                if (p_i < args.size()) args.erase(args.begin() + static_cast<std::ptrdiff_t>(p_i));
-                            }
-                        } else if (term->opcode() == Opcode::switch_) {
-                            if (term->default_target().block == bb) {
-                                auto& args = term->default_target().args;
-                                if (p_i < args.size()) args.erase(args.begin() + static_cast<std::ptrdiff_t>(p_i));
-                            }
-                            for (auto& sc : term->switch_cases()) {
-                                if (sc.target.block == bb) {
-                                    auto& args = sc.target.args;
-                                    if (p_i < args.size()) args.erase(args.begin() + static_cast<std::ptrdiff_t>(p_i));
-                                }
-                            }
-                        }
-                    }
+                    remove_block_param(bb, p_i);
                     progress = true;
                     changed = true;
                     use_counts = compute_use_counts(fn);
@@ -540,11 +517,11 @@ bool eliminate_dead_induction_cycles(Function& fn) {
                                 }
                             };
 
-                            if (inst->opcode() == Opcode::br) check_bt(inst->branch_target());
-                            else if (inst->opcode() == Opcode::br_if) {
-                                check_bt(inst->true_target());
-                                check_bt(inst->false_target());
-                            }
+                            // Every edge kind (br, br_if, switch, invoke) can carry the value.
+                            check_bt(inst->branch_target());
+                            check_bt(inst->true_target());
+                            check_bt(inst->false_target());
+                            for (const auto& sc : inst->switch_cases()) check_bt(sc.target);
                             if (!is_pure_cycle) break;
                         }
                         if (!is_pure_cycle) break;
@@ -556,30 +533,7 @@ bool eliminate_dead_induction_cycles(Function& fn) {
                     for (Instruction* inst : cycle_insts) {
                         if (inst && inst->parent()) inst->parent()->remove_instruction(inst);
                     }
-                    auto& params = bb->params();
-                    params.erase(params.begin() + static_cast<std::ptrdiff_t>(p_i));
-                    for (size_t k = p_i; k < params.size(); ++k) {
-                        params[k]->set_block_param(bb, static_cast<uint32_t>(k));
-                    }
-
-                    for (BasicBlock* pred : bb->predecessors()) {
-                        if (!pred) continue;
-                        Instruction* term = pred->terminator();
-                        if (!term) continue;
-                        if (term->opcode() == Opcode::br && term->branch_target().block == bb) {
-                            auto& args = term->branch_target().args;
-                            if (p_i < args.size()) args.erase(args.begin() + static_cast<std::ptrdiff_t>(p_i));
-                        } else if (term->opcode() == Opcode::br_if) {
-                            if (term->true_target().block == bb) {
-                                auto& args = term->true_target().args;
-                                if (p_i < args.size()) args.erase(args.begin() + static_cast<std::ptrdiff_t>(p_i));
-                            }
-                            if (term->false_target().block == bb) {
-                                auto& args = term->false_target().args;
-                                if (p_i < args.size()) args.erase(args.begin() + static_cast<std::ptrdiff_t>(p_i));
-                            }
-                        }
-                    }
+                    remove_block_param(bb, p_i);
                     progress = true;
                     changed = true;
                 } else {
@@ -756,7 +710,7 @@ bool optimize_function_loops(Function& fn, const LoopOptOptions& options) {
         fn.rebuild_cfg_predecessors();
         RangeAnalysisOptions bce_opts;
         bce_opts.enable_bce = true;
-        bce_opts.enable_hoisting = true;
+        bce_opts.enable_implied_checks = true;
         bce_opts.dump_stats = options.dump_range_stats;
         if (options.range_stats) {
             bce_opts.stats = options.range_stats;

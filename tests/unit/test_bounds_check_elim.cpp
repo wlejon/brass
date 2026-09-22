@@ -6,7 +6,6 @@
 #include <brass/mir/bounds_check_elim.hpp>
 #include <brass/mir/cfg_simplify.hpp>
 #include <brass/codegen/jit_exec.hpp>
-#include <brass/runtime/deopt.hpp>
 #include <vector>
 #include <numeric>
 
@@ -144,12 +143,23 @@ TEST_CASE("BCE - Redundant Guard Elimination") {
     CHECK(verify_function(*fn, &diag));
 }
 
-TEST_CASE("BCE - Loop Bounds Check Hoisting") {
-    Module mod("test_bce_loop_hoist");
-    Builder b(mod);
+namespace {
 
-    // Function: int64 sum_loop(int64* arr, int64 len, int64 N)
-    Function* fn = mod.create_function("sum_loop", Type::i64(), {Type::i64(), Type::i64(), Type::i64()});
+// int64 sum(int64* arr, int64 len, int64 n):
+//   for (i = 0; i < n; ++i) acc += (i <u bound) ? arr[i] : 0
+// where `bound` is either `n` itself (the check repeats the loop test) or the
+// independent `len` (nothing in the function relates it to `n`).
+struct SumLoop {
+    Function* fn = nullptr;
+    BasicBlock* loop_check = nullptr;
+    Instruction* check = nullptr;
+};
+
+SumLoop build_sum_loop(Module& mod, bool check_against_n) {
+    Builder b(mod);
+    SumLoop out;
+    Function* fn = mod.create_function("sum_array", Type::i64(), {Type::i64(), Type::i64(), Type::i64()});
+    out.fn = fn;
     b.set_function(fn);
 
     BasicBlock* entry = b.append_block("entry");
@@ -173,7 +183,6 @@ TEST_CASE("BCE - Loop Bounds Check Hoisting") {
     b.position_at_end(preheader);
     b.build_br(loop_hdr, {zero, zero});
 
-    // loop_hdr: (i, acc)
     fn->append_block(loop_hdr);
     b.position_at_end(loop_hdr);
     Value* i = b.add_block_param(loop_hdr, Type::i64());
@@ -181,182 +190,116 @@ TEST_CASE("BCE - Loop Bounds Check Hoisting") {
     Value* cond = b.build_slt(i, n);
     b.build_br_if(cond, loop_check, {}, exit_bb, {acc});
 
-    // loop_check: bounds check ult i, len
     fn->append_block(loop_check);
     b.position_at_end(loop_check);
-    Value* in_bounds = b.build_ult(i, len);
+    Value* in_bounds = b.build_ult(i, check_against_n ? n : len);
+    out.check = in_bounds->defining_instruction();
+    out.loop_check = loop_check;
     b.build_br_if(in_bounds, loop_fast, {}, loop_fallback, {});
 
-    // loop_fast: load arr[i] and add to acc
     fn->append_block(loop_fast);
     b.position_at_end(loop_fast);
     Value* elem = b.build_load_indexed(Type::i64(), arr, i, 8, 0);
     Value* next_acc_fast = b.build_add(acc, elem);
     b.build_br(latch, {next_acc_fast});
 
-    // loop_fallback: return fallback / dummy
     fn->append_block(loop_fallback);
     b.position_at_end(loop_fallback);
     b.build_br(latch, {acc});
 
-    // latch: i + 1 -> loop_hdr
     fn->append_block(latch);
     b.position_at_end(latch);
     Value* cur_acc = b.add_block_param(latch, Type::i64());
     Value* next_i = b.build_add(i, one);
     b.build_br(loop_hdr, {next_i, cur_acc});
 
-    // exit
     fn->append_block(exit_bb);
     b.position_at_end(exit_bb);
     Value* final_sum = b.add_block_param(exit_bb, Type::i64());
     b.build_ret(final_sum);
 
     fn->rebuild_cfg_predecessors();
+    return out;
+}
+
+size_t count_opcode(const Function& fn, Opcode op) {
+    size_t n = 0;
+    for (const BasicBlock* bb : fn.blocks()) {
+        for (const Instruction* inst : *bb) {
+            if (inst->opcode() == op) ++n;
+        }
+    }
+    return n;
+}
+
+} // namespace
+
+TEST_CASE("BCE - Loop check implied by the loop's own exit test is folded") {
+    Module mod("test_bce_implied");
+    SumLoop loop = build_sum_loop(mod, /*check_against_n=*/true);
 
     RangeAnalysisStats stats;
     RangeAnalysisOptions opts;
     opts.stats = &stats;
+    CHECK(run_bounds_check_elimination(*loop.fn, mod, opts));
+    CHECK(stats.checks_implied > 0);
 
-    bool changed = run_bounds_check_elimination(*fn, mod, opts);
-    CHECK(changed);
-    CHECK(stats.bounds_checks_hoisted > 0);
-
-    // Verify hoisted guard exists in loop preheader / entry
-    bool found_guard = false;
-    for (BasicBlock* bb : fn->blocks()) {
-        for (Instruction* inst : *bb) {
-            if (inst->opcode() == Opcode::guard) {
-                found_guard = true;
-                CHECK_EQ(inst->symbol(), "@exit_stub");
-                CHECK_EQ(inst->offset(), static_cast<int32_t>(runtime::DeoptReason::BoundsCheckFailed));
-                CHECK_EQ(inst->state_map().size(), size_t(2));
-                CHECK_EQ(inst->state_map()[0], zero);
-                CHECK_EQ(inst->state_map()[1], zero);
-            }
-        }
-    }
-    CHECK(found_guard);
-
-    // loop_fast is merged into loop_check by cfg_simplify, branching directly to latch
-    bool found_load = false;
-    for (Instruction* inst : *loop_check) {
-        if (inst->opcode() == Opcode::load_indexed) {
-            found_load = true;
-        }
-    }
-    CHECK(found_load);
-
-    Instruction* check_term = loop_check->terminator();
-    REQUIRE(check_term != nullptr);
-    CHECK_EQ(check_term->opcode(), Opcode::br);
-    // cfg_simplify collapses loop_fast and latch into loop_check, branching straight to loop_hdr
-    CHECK(check_term->branch_target().block == loop_hdr || check_term->branch_target().block == latch);
-
-    DiagnosticReporter diag;
-    CHECK(verify_function(*fn, &diag));
+    // `i <u n` inside a body entered on `i <s n` from i = 0 always holds: the
+    // fallback path is gone, and nothing was speculated to get there.
+    Instruction* term = loop.loop_check->terminator();
+    REQUIRE(term != nullptr);
+    CHECK_EQ(term->opcode(), Opcode::br);
+    CHECK_EQ(count_opcode(*loop.fn, Opcode::guard), size_t(0));
+    CHECK(verify_function(*loop.fn));
 }
 
-TEST_CASE("BCE - JIT Execution of Hoisted Bounds Checked Loop") {
-    Module mod("test_bce_jit");
-    Builder b(mod);
+TEST_CASE("BCE - Check against an unrelated bound is not folded or guarded") {
+    Module mod("test_bce_unrelated");
+    SumLoop loop = build_sum_loop(mod, /*check_against_n=*/false);
 
-    // Function: int64 sum_array(int64* arr, int64 len, int64 N)
-    Function* fn = mod.create_function("sum_array", Type::i64(), {Type::i64(), Type::i64(), Type::i64()});
-    b.set_function(fn);
+    RangeAnalysisStats stats;
+    RangeAnalysisOptions opts;
+    opts.stats = &stats;
+    run_bounds_check_elimination(*loop.fn, mod, opts);
 
-    BasicBlock* entry = b.append_block("entry");
-    Value* arr = b.add_block_param(entry, Type::i64());
-    Value* len = b.add_block_param(entry, Type::i64());
-    Value* n = b.add_block_param(entry, Type::i64());
+    // Nothing relates `len` to `n`, so the per-iteration check has to stay,
+    // and no deopt guard may stand in for it (AOT code has nowhere to go).
+    CHECK_EQ(stats.checks_implied, size_t(0));
+    CHECK_EQ(count_opcode(*loop.fn, Opcode::guard), size_t(0));
+    CHECK_EQ(count_opcode(*loop.fn, Opcode::ult), size_t(1));
+    Instruction* term = loop.loop_check->terminator();
+    REQUIRE(term != nullptr);
+    CHECK_EQ(term->opcode(), Opcode::br_if);
+    CHECK(verify_function(*loop.fn));
+}
 
-    BasicBlock* preheader = b.create_block("preheader");
-    BasicBlock* loop_hdr = b.create_block("loop_hdr");
-    BasicBlock* loop_check = b.create_block("loop_check");
-    BasicBlock* loop_fast = b.create_block("loop_fast");
-    BasicBlock* loop_fallback = b.create_block("loop_fallback");
-    BasicBlock* latch = b.create_block("latch");
-    BasicBlock* exit_bb = b.create_block("exit");
-
-    Value* zero = b.build_iconst_i64(0);
-    Value* one = b.build_iconst_i64(1);
-    b.build_br(preheader, {});
-
-    fn->append_block(preheader);
-    b.position_at_end(preheader);
-    b.build_br(loop_hdr, {zero, zero});
-
-    // loop_hdr: (i, acc)
-    fn->append_block(loop_hdr);
-    b.position_at_end(loop_hdr);
-    Value* i = b.add_block_param(loop_hdr, Type::i64());
-    Value* acc = b.add_block_param(loop_hdr, Type::i64());
-    Value* cond = b.build_slt(i, n);
-    b.build_br_if(cond, loop_check, {}, exit_bb, {acc});
-
-    // loop_check: bounds check ult i, len
-    fn->append_block(loop_check);
-    b.position_at_end(loop_check);
-    Value* in_bounds = b.build_ult(i, len);
-    b.build_br_if(in_bounds, loop_fast, {}, loop_fallback, {});
-
-    // loop_fast: load arr[i] and add to acc
-    fn->append_block(loop_fast);
-    b.position_at_end(loop_fast);
-    Value* elem = b.build_load_indexed(Type::i64(), arr, i, 8, 0);
-    Value* next_acc_fast = b.build_add(acc, elem);
-    b.build_br(latch, {next_acc_fast});
-
-    // loop_fallback: return acc
-    fn->append_block(loop_fallback);
-    b.position_at_end(loop_fallback);
-    b.build_br(latch, {acc});
-
-    // latch: i + 1 -> loop_hdr
-    fn->append_block(latch);
-    b.position_at_end(latch);
-    Value* cur_acc = b.add_block_param(latch, Type::i64());
-    Value* next_i = b.build_add(i, one);
-    b.build_br(loop_hdr, {next_i, cur_acc});
-
-    // exit
-    fn->append_block(exit_bb);
-    b.position_at_end(exit_bb);
-    Value* final_sum = b.add_block_param(exit_bb, Type::i64());
-    b.build_ret(final_sum);
-
-    fn->rebuild_cfg_predecessors();
-
-    // Optimize loop using LoopOptOptions with enable_bce = true
-    LoopOptOptions loop_opts;
-    loop_opts.enable_bce = true;
-    loop_opts.enable_unroll = false;
-    loop_opts.enable_vectorize = false;
-    bool changed = optimize_function_loops(*fn, loop_opts);
-    CHECK(changed);
-
-    DiagnosticReporter diag;
-    CHECK(verify_function(*fn, &diag));
-
-    // JIT compile and execute
-    codegen::JitExecutionEngine jit;
-    bool compiled = jit.compile_and_load(mod);
-    CHECK(compiled);
-
+TEST_CASE("BCE - JIT Execution of Bounds Checked Loops") {
+    std::vector<int64_t> data(100);
+    std::iota(data.begin(), data.end(), int64_t{1});
     using SumFn = int64_t(*)(const int64_t*, int64_t, int64_t);
-    auto sum_ptr = jit.get_function_ptr<SumFn>("sum_array");
-    REQUIRE(sum_ptr != nullptr);
 
-    std::vector<int64_t> test_data(100);
-    for (size_t idx = 0; idx < test_data.size(); ++idx) {
-        test_data[idx] = static_cast<int64_t>(idx + 1);
+    for (bool against_n : {true, false}) {
+        Module mod("test_bce_jit");
+        SumLoop loop = build_sum_loop(mod, against_n);
+
+        LoopOptOptions loop_opts;
+        loop_opts.enable_bce = true;
+        loop_opts.enable_unroll = false;
+        loop_opts.enable_vectorize = false;
+        optimize_function_loops(*loop.fn, loop_opts);
+        CHECK(verify_function(*loop.fn));
+
+        codegen::JitExecutionEngine jit;
+        REQUIRE(jit.compile_and_load(mod));
+        auto sum_ptr = jit.get_function_ptr<SumFn>("sum_array");
+        REQUIRE(sum_ptr != nullptr);
+
+        CHECK_EQ(sum_ptr(data.data(), 100, 100), int64_t{5050});
+        CHECK_EQ(sum_ptr(data.data(), 100, 50), int64_t{1275});
+        if (!against_n) {
+            // n beyond len: the elements past len fall back to 0 every time.
+            CHECK_EQ(sum_ptr(data.data(), 10, 100), int64_t{55});
+            CHECK_EQ(sum_ptr(data.data(), 0, 100), int64_t{0});
+        }
     }
-    int64_t expected_sum = 100 * 101 / 2; // 5050
-    int64_t actual_sum = sum_ptr(test_data.data(), 100, 100);
-    CHECK_EQ(actual_sum, expected_sum);
-
-    // Partial sum test
-    int64_t partial_expected = 50 * 51 / 2; // 1275
-    int64_t partial_actual = sum_ptr(test_data.data(), 100, 50);
-    CHECK_EQ(partial_actual, partial_expected);
 }

@@ -1,4 +1,5 @@
 #include "gvn_pre_dataflow.hpp"
+#include "int_fold.hpp"
 #include <brass/mir/opcodes.hpp>
 #include <algorithm>
 #include <cstring>
@@ -88,12 +89,17 @@ bool is_pre_candidate_op(const Instruction* inst) noexcept {
         case Opcode::udiv:
         case Opcode::smod:
         case Opcode::umod: {
+            // PRE may insert the division on a path that did not evaluate it,
+            // so only a constant divisor that rules out every trap qualifies.
             if (inst->operand_count() < 2 || !inst->operand(1)) return false;
             const Value* denom = inst->operand(1);
             if (denom->is_instruction()) {
                 const Instruction* ddef = denom->defining_instruction();
                 if (ddef && (ddef->opcode() == Opcode::iconst_i32 || ddef->opcode() == Opcode::iconst_i64)) {
-                    return ddef->imm_i64() != 0;
+                    const int64_t divisor = ddef->opcode() == Opcode::iconst_i32
+                        ? static_cast<int64_t>(ddef->imm_i32()) : ddef->imm_i64();
+                    const unsigned width = int_fold::width_of(inst->type());
+                    return width != 0 && !int_fold::division_may_trap(op, width, divisor);
                 }
             }
             return false;
@@ -200,7 +206,8 @@ void PreFunctionIndex::build(
             positions[inst] = Position{ordinal, index};
 
             const Opcode op = inst->opcode();
-            if (op == Opcode::store || op == Opcode::store_indexed || op == Opcode::vstore || is_call(op)) {
+            if (op == Opcode::store || op == Opcode::store_indexed || op == Opcode::vstore || is_call(op) ||
+                is_coro_op(op)) {
                 memory_writers.back().push_back(Writer{inst, index});
             }
             if (op == Opcode::store || op == Opcode::vstore) {

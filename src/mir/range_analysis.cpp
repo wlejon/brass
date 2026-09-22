@@ -76,6 +76,31 @@ bool get_const_int(const Value* val, int64_t& out_val) {
     return false;
 }
 
+// Ranges hold every value in its canonical int64 form (32-bit values
+// sign-extended). Interval arithmetic runs at 64 bits, so a 32-bit result that
+// leaves the 32-bit range has wrapped at run time: all that is then known is
+// that it is some 32-bit value. Clipping to the 32-bit range instead would
+// claim values that never occur.
+ValueRange fit_to_type(const ValueRange& r, Type t) noexcept {
+    if (r.is_empty()) return r;
+    if (t == Type::i32()) {
+        const ValueRange i32_range = ValueRange::range(INT32_MIN, INT32_MAX);
+        return r.is_subrange_of(i32_range) ? r : i32_range;
+    }
+    if (t == Type::i64()) return r;
+    // Other types (pointers, narrow integers whose representation passes do
+    // not agree on, floats) carry no integer facts.
+    return ValueRange::full();
+}
+
+ValueRange full_range_of(Type t) noexcept {
+    return t == Type::i32() ? ValueRange::range(INT32_MIN, INT32_MAX) : ValueRange::full();
+}
+
+bool is_int_value(const Value* v) noexcept {
+    return v && (v->type() == Type::i32() || v->type() == Type::i64());
+}
+
 Opcode invert_comparison_opcode(Opcode op) noexcept {
     switch (op) {
         case Opcode::slt: return Opcode::sge;
@@ -274,19 +299,17 @@ ValueRange RangeAnalysis::evaluate_instruction(
             ValueRange r1 = get_context_range(inst->operand(1), context_ranges);
             return ValueRange::xor_(r0, r1);
         }
-        case Opcode::shl: {
-            ValueRange r0 = get_context_range(inst->operand(0), context_ranges);
-            ValueRange r1 = get_context_range(inst->operand(1), context_ranges);
-            return ValueRange::shl(r0, r1);
-        }
-        case Opcode::lshr: {
-            ValueRange r0 = get_context_range(inst->operand(0), context_ranges);
-            ValueRange r1 = get_context_range(inst->operand(1), context_ranges);
-            return ValueRange::lshr(r0, r1);
-        }
+        case Opcode::shl:
+        case Opcode::lshr:
         case Opcode::ashr: {
             ValueRange r0 = get_context_range(inst->operand(0), context_ranges);
             ValueRange r1 = get_context_range(inst->operand(1), context_ranges);
+            // The hardware uses the shift amount modulo the operand width.
+            if (!r1.is_constant()) return full_range_of(inst->type());
+            const int64_t width_mask = inst->type() == Type::i32() ? 31 : 63;
+            r1 = ValueRange::constant(r1.min_val & width_mask);
+            if (op == Opcode::shl) return ValueRange::shl(r0, r1);
+            if (op == Opcode::lshr) return ValueRange::lshr(r0, r1);
             return ValueRange::ashr(r0, r1);
         }
         case Opcode::zext_i64: {
@@ -317,15 +340,17 @@ ValueRange RangeAnalysis::evaluate_instruction(
         case Opcode::ugt:
         case Opcode::sge:
         case Opcode::uge: {
+            // Only integer operands have ranges; float and pointer
+            // comparisons are merely known to yield 0 or 1.
+            if (!is_int_value(inst->operand(0)) || !is_int_value(inst->operand(1))) {
+                return ValueRange::range(0, 1);
+            }
             ValueRange r0 = get_context_range(inst->operand(0), context_ranges);
             ValueRange r1 = get_context_range(inst->operand(1), context_ranges);
             return evaluate_comparison(op, r0, r1);
         }
         default:
-            if (inst->type() == Type::i32()) {
-                return ValueRange::range(INT32_MIN, INT32_MAX);
-            }
-            return ValueRange::full();
+            return full_range_of(inst->type());
     }
 }
 
@@ -353,13 +378,6 @@ void RangeAnalysis::apply_branch_condition(
     if (!is_comparison(cdef->opcode())) return;
 
     Opcode op = is_true_edge ? cdef->opcode() : invert_comparison_opcode(cdef->opcode());
-    const Value* lhs = cdef->operand(0);
-    const Value* rhs = cdef->operand(1);
-    if (!lhs || !rhs) return;
-
-    ValueRange r_lhs = get_context_range(lhs, ranges);
-    ValueRange r_rhs = get_context_range(rhs, ranges);
-
     auto set_val_range = [&](const Value* val, const ValueRange& r) {
         int64_t c = 0;
         if (get_const_int(val, c)) return;
@@ -367,6 +385,16 @@ void RangeAnalysis::apply_branch_condition(
         rollback.emplace_back(val, it != ranges.end() ? std::optional<ValueRange>(it->second) : std::nullopt);
         ranges[val] = r;
     };
+
+    // A comparison yields 0 or 1, so the edge taken fixes its value.
+    set_val_range(cond, ValueRange::constant(is_true_edge ? 1 : 0));
+
+    const Value* lhs = cdef->operand(0);
+    const Value* rhs = cdef->operand(1);
+    if (!is_int_value(lhs) || !is_int_value(rhs)) return;
+
+    ValueRange r_lhs = get_context_range(lhs, ranges);
+    ValueRange r_rhs = get_context_range(rhs, ranges);
 
     switch (op) {
         case Opcode::slt: {
@@ -397,38 +425,40 @@ void RangeAnalysis::apply_branch_condition(
             set_val_range(rhs, r_rhs);
             break;
         }
+        // Unsigned order agrees with signed order only among non-negative
+        // values: a negative bound is a huge unsigned number and bounds
+        // nothing. So an unsigned fact says something only when the side
+        // doing the bounding is known non-negative.
         case Opcode::ult: {
-            if (r_rhs.max_val >= 0) {
+            if (r_rhs.min_val >= 0) {
                 r_lhs.intersect_with(ValueRange::range(0, sat_sub(r_rhs.max_val, 1)));
                 set_val_range(lhs, r_lhs);
+                r_rhs.intersect_with(ValueRange::range(1, INT64_MAX));
+                set_val_range(rhs, r_rhs);
             }
-            r_rhs.intersect_with(ValueRange::range(1, INT64_MAX));
-            set_val_range(rhs, r_rhs);
             break;
         }
         case Opcode::ule: {
-            if (r_rhs.max_val >= 0) {
+            if (r_rhs.min_val >= 0) {
                 r_lhs.intersect_with(ValueRange::range(0, r_rhs.max_val));
                 set_val_range(lhs, r_lhs);
             }
-            set_val_range(rhs, r_rhs);
             break;
         }
         case Opcode::ugt: {
-            if (r_lhs.max_val >= 0) {
+            if (r_lhs.min_val >= 0) {
                 r_rhs.intersect_with(ValueRange::range(0, sat_sub(r_lhs.max_val, 1)));
                 set_val_range(rhs, r_rhs);
+                r_lhs.intersect_with(ValueRange::range(1, INT64_MAX));
+                set_val_range(lhs, r_lhs);
             }
-            r_lhs.intersect_with(ValueRange::range(1, INT64_MAX));
-            set_val_range(lhs, r_lhs);
             break;
         }
         case Opcode::uge: {
-            if (r_lhs.max_val >= 0) {
+            if (r_lhs.min_val >= 0) {
                 r_rhs.intersect_with(ValueRange::range(0, r_lhs.max_val));
                 set_val_range(rhs, r_rhs);
             }
-            set_val_range(lhs, r_lhs);
             break;
         }
         case Opcode::eq: {
@@ -496,6 +526,9 @@ void RangeAnalysis::infer_loop_induction_variables(const LoopAnalysis& loops) {
             else if (ph_term->false_target().block == header) ph_bt = &ph_term->false_target();
         }
         if (!ph_bt || ph_bt->args.size() != header->param_count()) continue;
+        // Both edges of a br_if into the header could carry different values.
+        if (ph_term->opcode() == Opcode::br_if &&
+            ph_term->true_target().block == header && ph_term->false_target().block == header) continue;
 
         BranchTarget* latch_bt = nullptr;
         if (latch_term->opcode() == Opcode::br && latch_term->branch_target().block == header) {
@@ -503,10 +536,17 @@ void RangeAnalysis::infer_loop_induction_variables(const LoopAnalysis& loops) {
         }
         if (!latch_bt || latch_bt->args.size() != header->param_count()) continue;
 
+        bool body_is_true = loop->contains(hdr_term->true_target().block);
+        bool body_is_false = loop->contains(hdr_term->false_target().block);
+        if (body_is_true == body_is_false) continue;
+
         Value* cond = hdr_term->operand(0);
         if (!cond || !cond->is_instruction()) continue;
         Instruction* cmp = cond->defining_instruction();
         if (cmp && cmp->opcode() == Opcode::and_) {
+            // `a && b` holding says `a` holds; `a && b` failing says nothing
+            // about `a`, so only a body on the true edge learns from it.
+            if (!body_is_true) continue;
             if (cmp->operand(0) && cmp->operand(0)->is_instruction() && is_comparison(cmp->operand(0)->defining_instruction()->opcode())) {
                 cmp = cmp->operand(0)->defining_instruction();
             } else if (cmp->operand(1) && cmp->operand(1)->is_instruction() && is_comparison(cmp->operand(1)->defining_instruction()->opcode())) {
@@ -515,57 +555,57 @@ void RangeAnalysis::infer_loop_induction_variables(const LoopAnalysis& loops) {
         }
         if (!cmp || !is_comparison(cmp->opcode())) continue;
 
-        bool body_is_true = loop->contains(hdr_term->true_target().block);
-        bool body_is_false = loop->contains(hdr_term->false_target().block);
-        if (body_is_true == body_is_false) continue;
-
         Opcode cmp_op = body_is_true ? cmp->opcode() : invert_comparison_opcode(cmp->opcode());
         Value* cmp_lhs = cmp->operand(0);
         Value* cmp_rhs = cmp->operand(1);
+        if (!is_int_value(cmp_lhs) || !is_int_value(cmp_rhs)) continue;
 
         for (size_t i = 0; i < header->param_count(); ++i) {
             Value* param = header->param(i);
-            if (param == cmp_lhs && loop->is_loop_invariant(cmp_rhs)) {
-                Value* init_v = ph_bt->args[i];
-                Value* step_v = latch_bt->args[i];
-                if (step_v && step_v->is_instruction()) {
-                    Instruction* sdef = step_v->defining_instruction();
-                    if (sdef && sdef->opcode() == Opcode::add) {
-                        Value* sop0 = sdef->operand(0);
-                        Value* sop1 = sdef->operand(1);
-                        Value* step_c_v = (sop0 == param) ? sop1 : ((sop1 == param) ? sop0 : nullptr);
-                        int64_t step_c = 0;
-                        if (step_c_v && get_const_int(step_c_v, step_c) && step_c > 0) {
-                            ValueRange init_r = get_range(init_v);
-                            ValueRange lim_r = get_range(cmp_rhs);
-                            int64_t low = init_r.is_empty() ? 0 : init_r.min_val;
+            if (param != cmp_lhs || !loop->is_loop_invariant(cmp_rhs)) continue;
+            Value* init_v = ph_bt->args[i];
+            Value* step_v = latch_bt->args[i];
+            if (!step_v || !step_v->is_instruction()) continue;
+            Instruction* sdef = step_v->defining_instruction();
+            if (!sdef || sdef->opcode() != Opcode::add) continue;
+            Value* sop0 = sdef->operand(0);
+            Value* sop1 = sdef->operand(1);
+            Value* step_c_v = (sop0 == param) ? sop1 : ((sop1 == param) ? sop0 : nullptr);
+            int64_t step_c = 0;
+            if (!step_c_v || !get_const_int(step_c_v, step_c) || step_c <= 0) continue;
 
-                            if (cmp_op == Opcode::slt || cmp_op == Opcode::ult) {
-                                int64_t high = (lim_r.max_val < INT64_MAX) ? sat_sub(lim_r.max_val, 1) : INT64_MAX;
-                                ValueRange body_r = ValueRange::range(low, high);
-                                global_ranges_[param] = body_r;
-                                for (BasicBlock* lbb : loop->blocks()) {
-                                    if (lbb != header) {
-                                        block_ranges_[lbb][param] = body_r;
-                                    } else {
-                                        block_ranges_[header][param] = ValueRange::range(low, lim_r.max_val);
-                                    }
-                                }
-                            } else if (cmp_op == Opcode::sle || cmp_op == Opcode::ule) {
-                                int64_t high = lim_r.max_val;
-                                ValueRange body_r = ValueRange::range(low, high);
-                                global_ranges_[param] = body_r;
-                                for (BasicBlock* lbb : loop->blocks()) {
-                                    if (lbb != header) {
-                                        block_ranges_[lbb][param] = body_r;
-                                    } else {
-                                        block_ranges_[header][param] = ValueRange::range(low, sat_add(lim_r.max_val, 1));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+            const bool strict = cmp_op == Opcode::slt || cmp_op == Opcode::ult;
+            const bool non_strict = cmp_op == Opcode::sle || cmp_op == Opcode::ule;
+            if (!strict && !non_strict) continue;
+            const bool is_unsigned = cmp_op == Opcode::ult || cmp_op == Opcode::ule;
+
+            const ValueRange init_r = get_range(init_v);
+            const ValueRange lim_r = get_range(cmp_rhs);
+            if (init_r.is_empty() || lim_r.is_empty()) continue;
+            // Unsigned bounds agree with signed ones only for non-negative values.
+            if (is_unsigned && (init_r.min_val < 0 || lim_r.min_val < 0)) continue;
+
+            // Largest value the body sees, and the largest the step can then
+            // produce. If that step could wrap, the variable can come back
+            // around below its start and none of this holds.
+            const int64_t type_max = param->type() == Type::i32() ? INT32_MAX : INT64_MAX;
+            const int64_t body_max = strict ? sat_sub(lim_r.max_val, 1) : lim_r.max_val;
+            if (body_max > type_max - step_c) continue;
+            const int64_t after_step_max = body_max + step_c;
+
+            // Every value the header sees is the start value or one step past
+            // a value the body saw.
+            ValueRange header_r = ValueRange::range(init_r.min_val, std::max(init_r.max_val, after_step_max));
+            ValueRange body_r = ValueRange::range(init_r.min_val, body_max);
+
+            auto global_it = global_ranges_.find(param);
+            if (global_it != global_ranges_.end()) {
+                header_r.intersect_with(global_it->second);
+                body_r.intersect_with(global_it->second);
+            }
+            global_ranges_[param] = header_r;
+            for (BasicBlock* lbb : loop->blocks()) {
+                block_ranges_[lbb][param] = (lbb == header) ? header_r : body_r;
             }
         }
     }
@@ -595,7 +635,10 @@ void RangeAnalysis::visit_dominator_block(
     auto b_it = block_ranges_.find(bb);
     if (b_it != block_ranges_.end()) {
         for (const auto& [param_v, r] : b_it->second) {
-            set_range(param_v, r);
+            // Both the inherited range and the induction range hold here.
+            ValueRange refined = r;
+            refined.intersect_with(get_context_range(param_v, current_ranges));
+            set_range(param_v, refined);
         }
     }
 
@@ -616,10 +659,7 @@ void RangeAnalysis::visit_dominator_block(
     for (const Instruction* inst : *bb) {
         if (!inst) continue;
         if (inst->produces_value()) {
-            ValueRange r = evaluate_instruction(inst, current_ranges);
-            if (inst->type() == Type::i32()) {
-                r.intersect_with(ValueRange::range(INT32_MIN, INT32_MAX));
-            }
+            ValueRange r = fit_to_type(evaluate_instruction(inst, current_ranges), inst->type());
             set_range(inst->result(), r);
 
             auto it = global_ranges_.find(inst->result());
@@ -665,8 +705,23 @@ void RangeAnalysis::run_analysis(Function& fn, const DominatorTree& dom, const L
     block_deltas_.clear();
     pass3_initial_ranges_.clear();
 
-    // Pass 1: Forward evaluation of instructions and block parameters
-    for (size_t iter = 0; iter < 16; ++iter) {
+    // Pass 1: Forward evaluation of instructions and block parameters. The
+    // iteration starts optimistic, so its ranges are sound only once nothing
+    // changes. From the fifth round on, a range may only grow, and a bound
+    // that moves jumps straight to its type's limit, so every value settles
+    // within a few more rounds; should the cap still be hit, every range
+    // falls back to "anything of its type".
+    constexpr size_t kWidenAfter = 4;
+    constexpr size_t kMaxIterations = 64;
+    auto widen = [](ValueRange next, const ValueRange& prev, Type t) {
+        next.union_with(prev);
+        const ValueRange limits = full_range_of(t);
+        if (next.max_val > prev.max_val) next.max_val = limits.max_val;
+        if (next.min_val < prev.min_val) next.min_val = limits.min_val;
+        return next;
+    };
+    bool converged = false;
+    for (size_t iter = 0; iter < kMaxIterations; ++iter) {
         bool changed = false;
         for (const BasicBlock* bb : fn.blocks()) {
             if (!bb) continue;
@@ -702,35 +757,27 @@ void RangeAnalysis::run_analysis(Function& fn, const DominatorTree& dom, const L
                                 }
                             }
                         };
-                        if (term->opcode() == Opcode::br && term->branch_target().block == bb) {
-                            if (i < term->branch_target().args.size()) {
-                                add_arg(term->branch_target().args[i]);
-                            }
-                        } else if (term->opcode() == Opcode::br_if) {
-                            if (term->true_target().block == bb && i < term->true_target().args.size()) {
-                                add_arg(term->true_target().args[i]);
-                            }
-                            if (term->false_target().block == bb && i < term->false_target().args.size()) {
-                                add_arg(term->false_target().args[i]);
-                            }
-                        }
+                        // Any edge kind may pass the argument: br, br_if,
+                        // switch cases and default, invoke.
+                        auto from_target = [&](const BranchTarget& bt) {
+                            if (bt.block == bb && i < bt.args.size()) add_arg(bt.args[i]);
+                        };
+                        from_target(term->branch_target());
+                        from_target(term->true_target());
+                        from_target(term->false_target());
+                        for (const auto& sc : term->switch_cases()) from_target(sc.target);
                     }
-                    if (p->type() == Type::i32()) {
-                        param_r.intersect_with(ValueRange::range(INT32_MIN, INT32_MAX));
-                    }
+                    param_r = fit_to_type(param_r, p->type());
                     if (!param_r.is_empty()) {
                         auto it = global_ranges_.find(p);
                         if (it == global_ranges_.end() || it->second != param_r) {
-                            if (iter >= 4 && it != global_ranges_.end()) {
-                                if (param_r.max_val > it->second.max_val) {
-                                    param_r.max_val = (p->type() == Type::i32()) ? INT32_MAX : INT64_MAX;
-                                }
-                                if (param_r.min_val < it->second.min_val) {
-                                    param_r.min_val = (p->type() == Type::i32()) ? INT32_MIN : INT64_MIN;
-                                }
+                            if (iter >= kWidenAfter && it != global_ranges_.end()) {
+                                param_r = widen(param_r, it->second, p->type());
                             }
-                            global_ranges_[p] = param_r;
-                            changed = true;
+                            if (it == global_ranges_.end() || it->second != param_r) {
+                                global_ranges_[p] = param_r;
+                                changed = true;
+                            }
                         }
                     }
                 }
@@ -738,26 +785,28 @@ void RangeAnalysis::run_analysis(Function& fn, const DominatorTree& dom, const L
 
             for (const Instruction* inst : *bb) {
                 if (!inst || !inst->produces_value()) continue;
-                ValueRange r = evaluate_instruction(inst, global_ranges_);
-                if (inst->type() == Type::i32()) {
-                    r.intersect_with(ValueRange::range(INT32_MIN, INT32_MAX));
-                }
+                ValueRange r = fit_to_type(evaluate_instruction(inst, global_ranges_), inst->type());
                 auto it = global_ranges_.find(inst->result());
                 if (it == global_ranges_.end() || it->second != r) {
-                    if (iter >= 4 && it != global_ranges_.end()) {
-                        if (r.max_val > it->second.max_val) {
-                            r.max_val = (inst->type() == Type::i32()) ? INT32_MAX : INT64_MAX;
-                        }
-                        if (r.min_val < it->second.min_val) {
-                            r.min_val = (inst->type() == Type::i32()) ? INT32_MIN : INT64_MIN;
-                        }
+                    if (iter >= kWidenAfter && it != global_ranges_.end()) {
+                        r = widen(r, it->second, inst->type());
                     }
-                    global_ranges_[inst->result()] = r;
-                    changed = true;
+                    if (it == global_ranges_.end() || it->second != r) {
+                        global_ranges_[inst->result()] = r;
+                        changed = true;
+                    }
                 }
             }
         }
-        if (!changed) break;
+        if (!changed) {
+            converged = true;
+            break;
+        }
+    }
+    if (!converged) {
+        for (auto& [val, r] : global_ranges_) {
+            r = full_range_of(val->type());
+        }
     }
 
     // Pass 2: Loop induction variable inference

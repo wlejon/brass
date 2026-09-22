@@ -142,7 +142,7 @@ TEST_CASE("Array Contraction - Bronze Dynamic Object Arrays") {
     b.set_function(fn);
 
     BasicBlock* entry = b.append_block("entry");
-    Value* n = b.add_block_param(entry, Type::i64());
+    Value* n_arg = b.add_block_param(entry, Type::i64());
 
     BasicBlock* l1_hdr = b.create_block("l1_hdr");
     BasicBlock* l1_body = b.create_block("l1_body");
@@ -153,6 +153,9 @@ TEST_CASE("Array Contraction - Bronze Dynamic Object Arrays") {
     BasicBlock* l2_exit = b.create_block("l2_exit");
 
     b.position_at_end(entry);
+    // The runtime only reads back what it stored at plain element indices, so
+    // contraction needs the indices, and so the trip count, bounded.
+    Value* n = b.build_and(n_arg, b.build_iconst_i64(0xFFFF));
     Value* arr = b.build_call("bronze_create_array", Type::i64(), {n});
 
     Value* zero = b.build_iconst_i64(0);
