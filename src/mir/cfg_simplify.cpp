@@ -458,6 +458,10 @@ private:
                 // Remove P's terminator
                 P->remove_instruction(p_term);
 
+                // Copy S's successors BEFORE moving instructions from S,
+                // because S->successors() queries S's terminator which is removed below.
+                std::vector<BasicBlock*> s_successors = S->successors();
+
                 // Move all instructions from S to P
                 Instruction* cur = S->head();
                 while (cur) {
@@ -469,7 +473,7 @@ private:
                 }
 
                 // Update predecessor references in S's successors
-                for (BasicBlock* succ : S->successors()) {
+                for (BasicBlock* succ : s_successors) {
                     if (succ) {
                         for (BasicBlock*& pred_entry : succ->predecessors()) {
                             if (pred_entry == S) {

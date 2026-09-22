@@ -28,6 +28,8 @@ std::unique_ptr<Module> build_2d_scale_module(std::string_view name) {
     Value* N = b.add_block_param(entry, Type::i64());
     Value* M = b.add_block_param(entry, Type::i64());
     Value* factor = b.add_block_param(entry, Type::i64());
+    A->set_noalias(true);
+    B->set_noalias(true);
 
     BasicBlock* loop_i_hdr = b.create_block("loop_i_hdr");
     BasicBlock* loop_i_body = b.create_block("loop_i_body");
@@ -91,6 +93,8 @@ std::unique_ptr<Module> build_2d_transpose_module(std::string_view name) {
     Value* in_ptr = b.add_block_param(entry, Type::ptr());
     Value* out_ptr = b.add_block_param(entry, Type::ptr());
     Value* N = b.add_block_param(entry, Type::i64());
+    in_ptr->set_noalias(true);
+    out_ptr->set_noalias(true);
 
     BasicBlock* loop_i_hdr = b.create_block("loop_i_hdr");
     BasicBlock* loop_i_body = b.create_block("loop_i_body");
@@ -158,6 +162,9 @@ std::unique_ptr<Module> build_3d_matmul_module(std::string_view name) {
     Value* B = b.add_block_param(entry, Type::ptr());
     Value* C = b.add_block_param(entry, Type::ptr());
     Value* N = b.add_block_param(entry, Type::i64());
+    A->set_noalias(true);
+    B->set_noalias(true);
+    C->set_noalias(true);
 
     BasicBlock* loop_i_hdr = b.create_block("loop_i_hdr");
     BasicBlock* loop_i_body = b.create_block("loop_i_body");
@@ -491,6 +498,8 @@ TEST_CASE("Loop Tile - Inner Point Loop Auto-Vectorization Integration") {
     Value* out_ptr = b.add_block_param(entry, Type::ptr());
     Value* N = b.add_block_param(entry, Type::i64());
     Value* M = b.add_block_param(entry, Type::i64());
+    in_ptr->set_noalias(true);
+    out_ptr->set_noalias(true);
 
     BasicBlock* loop_i_hdr = b.create_block("loop_i_hdr");
     BasicBlock* loop_i_body = b.create_block("loop_i_body");

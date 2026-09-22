@@ -49,6 +49,9 @@ public:
         kind_ = ValueKind::BlockParam;
     }
 
+    bool is_noalias() const noexcept { return is_noalias_; }
+    void set_noalias(bool noalias = true) noexcept { is_noalias_ = noalias; }
+
 private:
     uint32_t id_ = 0;
     Type type_ = Type::void_type();
@@ -56,6 +59,7 @@ private:
     Instruction* def_inst_ = nullptr;
     BasicBlock* def_block_ = nullptr;
     uint32_t param_index_ = 0;
+    bool is_noalias_ = false;
 };
 
 struct BranchTarget {

@@ -30,6 +30,8 @@ std::unique_ptr<Module> build_diff_2d_scale(std::string_view mod_name, std::stri
     Value* N = b.add_block_param(entry, Type::i64());
     Value* M = b.add_block_param(entry, Type::i64());
     Value* factor = b.add_block_param(entry, Type::i64());
+    in_ptr->set_noalias(true);
+    out_ptr->set_noalias(true);
 
     BasicBlock* loop_i_hdr = b.create_block("loop_i_hdr");
     BasicBlock* loop_i_body = b.create_block("loop_i_body");
@@ -93,6 +95,8 @@ std::unique_ptr<Module> build_diff_2d_transpose(std::string_view mod_name, std::
     Value* in_ptr = b.add_block_param(entry, Type::ptr());
     Value* out_ptr = b.add_block_param(entry, Type::ptr());
     Value* N = b.add_block_param(entry, Type::i64());
+    in_ptr->set_noalias(true);
+    out_ptr->set_noalias(true);
 
     BasicBlock* loop_i_hdr = b.create_block("loop_i_hdr");
     BasicBlock* loop_i_body = b.create_block("loop_i_body");
@@ -160,6 +164,9 @@ std::unique_ptr<Module> build_diff_3d_matmul(std::string_view mod_name, std::str
     Value* B = b.add_block_param(entry, Type::ptr());
     Value* C = b.add_block_param(entry, Type::ptr());
     Value* N = b.add_block_param(entry, Type::i64());
+    A->set_noalias(true);
+    B->set_noalias(true);
+    C->set_noalias(true);
 
     BasicBlock* loop_i_hdr = b.create_block("loop_i_hdr");
     BasicBlock* loop_i_body = b.create_block("loop_i_body");

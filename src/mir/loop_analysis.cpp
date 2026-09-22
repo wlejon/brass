@@ -34,6 +34,7 @@ bool LoopInfo::is_loop_invariant(const Value* val) const noexcept {
     }
     if (val->is_instruction()) {
         const Instruction* def_inst = val->defining_instruction();
+        if (def_inst && is_constant(def_inst->opcode())) return true;
         return !def_inst || !contains(def_inst->parent());
     }
     return true;

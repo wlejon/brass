@@ -71,6 +71,8 @@ TEST_CASE("Alias Safety - Function Parameter Disambiguation Safety") {
     b.position_at_end(entry);
     Value* p1 = b.add_block_param(entry, Type::ptr());
     Value* p2 = b.add_block_param(entry, Type::ptr());
+    p1->set_noalias(true);
+    p2->set_noalias(true);
 
     // Local non-escaping allocation
     Value* local_alloc = b.build_alloca(32);

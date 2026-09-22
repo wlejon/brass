@@ -71,7 +71,9 @@ Value* SroaTransformer::get_or_create_zero_constant(Builder& b, BasicBlock* entr
         zero_val = b.build_iconst_i32(0);
     } else if (type.kind() == TypeKind::I64) {
         zero_val = b.build_iconst_i64(0);
-    } else if (type.kind() == TypeKind::F32 || type.kind() == TypeKind::F64) {
+    } else if (type.kind() == TypeKind::F32) {
+        zero_val = b.build_fconst_f32(0.0f);
+    } else if (type.kind() == TypeKind::F64) {
         zero_val = b.build_fconst_f64(0.0);
     } else {
         zero_val = b.build_iconst_i64(0);

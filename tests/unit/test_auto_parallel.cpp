@@ -22,6 +22,8 @@ TEST_CASE("Auto-Parallelization Pass: DOALL Vector Scale") {
     Value* out_arr = b.add_block_param(entry, Type::ptr());
     Value* factor = b.add_block_param(entry, Type::i64());
     Value* n = b.add_block_param(entry, Type::i64());
+    in_arr->set_noalias(true);
+    out_arr->set_noalias(true);
     b.position_at_end(entry);
 
     BasicBlock* hdr = b.create_block("loop_hdr");

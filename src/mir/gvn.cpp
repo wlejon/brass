@@ -170,6 +170,9 @@ bool run_dse_pass(Function& fn, const AliasAnalysis& aa, GvnStats* stats) {
                         ++it;
                     }
                 }
+            } else if (op == Opcode::guard || op == Opcode::throw_ || op == Opcode::osr_entry ||
+                       op == Opcode::resume_point || op == Opcode::coro_suspend || op == Opcode::resume) {
+                pending.clear();
             } else if (op == Opcode::ret || op == Opcode::safepoint) {
                 for (auto it = pending.begin(); it != pending.end(); ) {
                     int64_t dummy = 0;

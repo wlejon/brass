@@ -134,16 +134,10 @@ std::vector<SlpStoreBundle> find_slp_store_bundles(
                 }
             }
 
-            if (may_alias_or_barrier(scan, base, range_start, range_end, /*check_writes=*/false)) {
+            if (may_alias_or_barrier(scan, base, range_start, range_end, /*check_writes=*/true) ||
+                may_alias_or_barrier(scan, base, range_start, range_end, /*check_writes=*/false)) {
                 barrier_hit = true;
                 break;
-            }
-            if (scan->opcode() == Opcode::store && scan->operand(0) == base) {
-                int32_t off = scan->offset();
-                if (off >= range_start && off < range_end) {
-                    barrier_hit = true;
-                    break;
-                }
             }
 
             scan = scan->next();

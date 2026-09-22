@@ -68,7 +68,9 @@ Value* get_or_create_zero(Module& mod, Function& fn, Type type) {
         return b.build_iconst_i32(0);
     } else if (type.kind() == TypeKind::I64) {
         return b.build_iconst_i64(0);
-    } else if (type.kind() == TypeKind::F32 || type.kind() == TypeKind::F64) {
+    } else if (type.kind() == TypeKind::F32) {
+        return b.build_fconst_f32(0.0f);
+    } else if (type.kind() == TypeKind::F64) {
         return b.build_fconst_f64(0.0);
     }
     return b.build_iconst_i64(0);
@@ -215,7 +217,14 @@ bool AllocationSinkingPass::process_candidate(const Value* alloc_val,
         builder.position_at_end(mat_bb);
 
         // a. Re-emit allocation instruction
-        Value* mat_ptr = builder.build_call(alloc_inst->symbol(), alloc_inst->type(), alloc_inst->operands());
+        Value* mat_ptr = nullptr;
+        if (alloc_inst->opcode() == Opcode::alloca_) {
+            uint32_t size = static_cast<uint32_t>(alloc_inst->imm_i32());
+            uint32_t align = static_cast<uint32_t>(alloc_inst->offset() > 0 ? alloc_inst->offset() : 8);
+            mat_ptr = builder.build_alloca(size, align);
+        } else {
+            mat_ptr = builder.build_call(alloc_inst->symbol(), alloc_inst->type(), alloc_inst->operands());
+        }
         stats_.materialized_allocations++;
         stats_.materialization_edges++;
         edge_mat_map[U].push_back({mat_bb, mat_ptr});

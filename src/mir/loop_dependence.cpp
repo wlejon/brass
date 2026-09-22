@@ -188,7 +188,9 @@ void analyze_nest_memory_accesses(Function& fn, LoopNest& nest) {
 
                     int64_t extra_offset = 0;
                     parse_index_expr(inst->operand(1), nest, acc.terms, extra_offset);
-                    acc.const_offset = inst->offset() + static_cast<int32_t>(extra_offset);
+                    int32_t elem_sz = static_cast<int32_t>(acc.scale > 0 ? acc.scale : (acc.elem_type.is_void() ? 1 : acc.elem_type.size_in_bytes()));
+                    if (elem_sz <= 0) elem_sz = 1;
+                    acc.const_offset = inst->offset() + static_cast<int32_t>(extra_offset * elem_sz);
 
                     nest.memory_accesses().push_back(acc);
                 }
@@ -245,7 +247,8 @@ void compute_nest_dependences(Function& fn, LoopNest& nest) {
                                         (t1->symbolic_stride == t2->symbolic_stride);
                     if (match_stride) {
                         int32_t diff = a2.const_offset - a1.const_offset;
-                        int32_t elem_sz = static_cast<int32_t>(a1.scale > 0 ? a1.scale : 1);
+                        int32_t elem_sz = static_cast<int32_t>(a1.scale > 0 ? a1.scale : (a1.elem_type.is_void() ? 1 : a1.elem_type.size_in_bytes()));
+                        if (elem_sz <= 0) elem_sz = 1;
                         int32_t dist = diff / elem_sz;
                         dep.distances[l] = dist;
                         if (dist > 0) {

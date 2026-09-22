@@ -138,7 +138,12 @@ bool AliasAnalysis::is_distinct_allocation(const Value* base1, const Value* base
         if (base1->is_block_param() && base2->is_block_param() &&
             base1->defining_block() == entry && base2->defining_block() == entry &&
             base1 != base2) {
-            return true;
+            bool noalias1 = base1->is_noalias() || fn_->is_param_noalias(base1->param_index());
+            bool noalias2 = base2->is_noalias() || fn_->is_param_noalias(base2->param_index());
+            if (noalias1 || noalias2) {
+                return true;
+            }
+            return false;
         }
     }
     return false;
@@ -373,7 +378,13 @@ bool AliasAnalysis::can_clobber(const Instruction* write_inst, const Instruction
             if (write_inst->operand(0) == read_inst->operand(0) &&
                 write_inst->operand(1) == read_inst->operand(1) &&
                 write_inst->scale() == read_inst->scale()) {
-                return write_inst->offset() == read_inst->offset();
+                int64_t off_w = write_inst->offset();
+                int64_t off_r = read_inst->offset();
+                uint32_t sz_w = write_inst->memory_type().is_void() ? 4U : static_cast<uint32_t>(write_inst->memory_type().size_in_bytes());
+                uint32_t sz_r = read_inst->memory_type().is_void() ? 4U : static_cast<uint32_t>(read_inst->memory_type().size_in_bytes());
+                if (sz_w == 0) sz_w = 4U;
+                if (sz_r == 0) sz_r = 4U;
+                return std::max(off_w, off_r) < std::min(off_w + sz_w, off_r + sz_r);
             }
             return true;
         }

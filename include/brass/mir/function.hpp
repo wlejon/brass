@@ -30,6 +30,16 @@ public:
         return (idx < param_types_.size()) ? param_types_[idx] : Type::void_type();
     }
 
+    bool is_param_noalias(size_t idx) const noexcept {
+        return idx < param_noalias_.size() && param_noalias_[idx];
+    }
+    void set_param_noalias(size_t idx, bool noalias = true) {
+        if (idx >= param_noalias_.size()) {
+            param_noalias_.resize(idx + 1, false);
+        }
+        param_noalias_[idx] = noalias;
+    }
+
     Module* parent() const noexcept { return parent_; }
     void set_parent(Module* m) noexcept { parent_ = m; }
 
@@ -70,6 +80,7 @@ private:
     std::string_view name_;
     Type return_type_ = Type::void_type();
     std::vector<Type> param_types_;
+    std::vector<bool> param_noalias_;
 
     std::vector<BasicBlock*> blocks_;
     Module* parent_ = nullptr;

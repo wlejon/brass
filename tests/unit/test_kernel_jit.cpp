@@ -306,6 +306,8 @@ TEST_CASE("Kernel JIT - Parallel Chunk Execution") {
     Value* out_p = b.add_block_param(entry, Type::ptr());
     Value* factor = b.add_block_param(entry, Type::i64());
     Value* n_val = b.add_block_param(entry, Type::i64());
+    in_p->set_noalias(true);
+    out_p->set_noalias(true);
 
     BasicBlock* hdr = b.create_block("loop_hdr");
     BasicBlock* body = b.create_block("loop_body");

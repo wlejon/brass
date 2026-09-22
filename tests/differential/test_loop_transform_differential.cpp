@@ -31,6 +31,9 @@ std::unique_ptr<Module> build_fusion_kernel(std::string_view mod_name, std::stri
     Value* tmp_ptr = b.add_block_param(entry, Type::ptr());
     Value* out_ptr = b.add_block_param(entry, Type::ptr());
     Value* n = b.add_block_param(entry, Type::i64());
+    in_ptr->set_noalias(true);
+    tmp_ptr->set_noalias(true);
+    out_ptr->set_noalias(true);
 
     BasicBlock* l1_hdr = b.create_block("l1_hdr");
     BasicBlock* l1_body = b.create_block("l1_body");
@@ -205,6 +208,9 @@ std::unique_ptr<Module> build_distribution_kernel(std::string_view mod_name, std
     Value* out1_ptr = b.add_block_param(entry, Type::ptr());
     Value* out2_ptr = b.add_block_param(entry, Type::ptr());
     Value* n = b.add_block_param(entry, Type::i64());
+    in_ptr->set_noalias(true);
+    out1_ptr->set_noalias(true);
+    out2_ptr->set_noalias(true);
 
     BasicBlock* hdr = b.create_block("hdr");
     BasicBlock* body = b.create_block("body");

@@ -111,6 +111,9 @@ TEST_CASE("DOALL Loop Detection") {
     Value* c = b.add_block_param(entry, Type::ptr());
     Value* out = b.add_block_param(entry, Type::ptr());
     Value* n = b.add_block_param(entry, Type::i64());
+    a->set_noalias(true);
+    c->set_noalias(true);
+    out->set_noalias(true);
     b.position_at_end(entry);
 
     BasicBlock* hdr = b.create_block("loop_hdr");
