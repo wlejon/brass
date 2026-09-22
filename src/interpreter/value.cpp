@@ -253,6 +253,9 @@ RuntimeValue val_popcnt(RuntimeValue val) {
 }
 
 RuntimeValue val_eq(RuntimeValue lhs, RuntimeValue rhs) {
+    if (lhs.is_f32() || rhs.is_f32()) {
+        return RuntimeValue::from_i32(lhs.as_f32() == rhs.as_f32() ? 1 : 0);
+    }
     if (lhs.is_f64() || rhs.is_f64()) {
         return RuntimeValue::from_i32(lhs.as_f64() == rhs.as_f64() ? 1 : 0);
     }
@@ -263,6 +266,9 @@ RuntimeValue val_eq(RuntimeValue lhs, RuntimeValue rhs) {
 }
 
 RuntimeValue val_ne(RuntimeValue lhs, RuntimeValue rhs) {
+    if (lhs.is_f32() || rhs.is_f32()) {
+        return RuntimeValue::from_i32(lhs.as_f32() != rhs.as_f32() ? 1 : 0);
+    }
     if (lhs.is_f64() || rhs.is_f64()) {
         return RuntimeValue::from_i32(lhs.as_f64() != rhs.as_f64() ? 1 : 0);
     }
@@ -273,6 +279,9 @@ RuntimeValue val_ne(RuntimeValue lhs, RuntimeValue rhs) {
 }
 
 RuntimeValue val_slt(RuntimeValue lhs, RuntimeValue rhs) {
+    if (lhs.is_f32() || rhs.is_f32()) {
+        return RuntimeValue::from_i32(lhs.as_f32() < rhs.as_f32() ? 1 : 0);
+    }
     if (lhs.is_f64() || rhs.is_f64()) {
         return RuntimeValue::from_i32(lhs.as_f64() < rhs.as_f64() ? 1 : 0);
     }
@@ -290,6 +299,9 @@ RuntimeValue val_ult(RuntimeValue lhs, RuntimeValue rhs) {
 }
 
 RuntimeValue val_sle(RuntimeValue lhs, RuntimeValue rhs) {
+    if (lhs.is_f32() || rhs.is_f32()) {
+        return RuntimeValue::from_i32(lhs.as_f32() <= rhs.as_f32() ? 1 : 0);
+    }
     if (lhs.is_f64() || rhs.is_f64()) {
         return RuntimeValue::from_i32(lhs.as_f64() <= rhs.as_f64() ? 1 : 0);
     }
@@ -307,6 +319,9 @@ RuntimeValue val_ule(RuntimeValue lhs, RuntimeValue rhs) {
 }
 
 RuntimeValue val_sgt(RuntimeValue lhs, RuntimeValue rhs) {
+    if (lhs.is_f32() || rhs.is_f32()) {
+        return RuntimeValue::from_i32(lhs.as_f32() > rhs.as_f32() ? 1 : 0);
+    }
     if (lhs.is_f64() || rhs.is_f64()) {
         return RuntimeValue::from_i32(lhs.as_f64() > rhs.as_f64() ? 1 : 0);
     }
@@ -324,6 +339,9 @@ RuntimeValue val_ugt(RuntimeValue lhs, RuntimeValue rhs) {
 }
 
 RuntimeValue val_sge(RuntimeValue lhs, RuntimeValue rhs) {
+    if (lhs.is_f32() || rhs.is_f32()) {
+        return RuntimeValue::from_i32(lhs.as_f32() >= rhs.as_f32() ? 1 : 0);
+    }
     if (lhs.is_f64() || rhs.is_f64()) {
         return RuntimeValue::from_i32(lhs.as_f64() >= rhs.as_f64() ? 1 : 0);
     }

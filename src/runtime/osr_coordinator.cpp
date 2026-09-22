@@ -23,16 +23,18 @@ void OsrCoordinator::clear_cache() {
     osr_modules_.clear();
     osr_targets_.clear();
     loop_latches_.clear();
+    backedge_pairs_.clear();
 }
 
 bool OsrCoordinator::is_loop_backedge(const Function& fn, const BasicBlock* from_bb, const BasicBlock* to_bb) {
     if (!from_bb || !to_bb) return false;
 
     std::string fn_name(fn.name());
-    auto it = loop_latches_.find(fn_name);
-    if (it == loop_latches_.end()) {
+    auto it = backedge_pairs_.find(fn_name);
+    if (it == backedge_pairs_.end()) {
         const_cast<Function&>(fn).rebuild_cfg_predecessors();
         DominatorTree dom(fn);
+        auto& pairs = backedge_pairs_[fn_name];
         auto& latches = loop_latches_[fn_name];
         for (const BasicBlock* bb : fn.blocks()) {
             if (!bb || !dom.is_reachable(bb)) continue;
@@ -40,17 +42,16 @@ bool OsrCoordinator::is_loop_backedge(const Function& fn, const BasicBlock* from
                 if (!succ || !dom.is_reachable(succ)) continue;
                 if (dom.dominates(succ, bb)) {
                     latches.insert(bb);
+                    uint64_t edge_key = (static_cast<uint64_t>(bb->id()) << 32) | static_cast<uint64_t>(succ->id());
+                    pairs.insert(edge_key);
                 }
             }
         }
-        it = loop_latches_.find(fn_name);
+        it = backedge_pairs_.find(fn_name);
     }
 
-    if (it != loop_latches_.end() && it->second.find(from_bb) != it->second.end()) {
-        DominatorTree dom(fn);
-        return dom.dominates(to_bb, from_bb);
-    }
-    return false;
+    uint64_t edge_key = (static_cast<uint64_t>(from_bb->id()) << 32) | static_cast<uint64_t>(to_bb->id());
+    return it != backedge_pairs_.end() && it->second.find(edge_key) != it->second.end();
 }
 
 bool OsrCoordinator::try_osr_migration(

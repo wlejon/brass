@@ -80,6 +80,7 @@ private:
     std::unordered_map<std::string, std::unique_ptr<CompiledModule>> osr_modules_;
     std::unordered_map<std::string, OsrTarget> osr_targets_;
     std::unordered_map<std::string, std::unordered_set<const BasicBlock*>> loop_latches_;
+    std::unordered_map<std::string, std::unordered_set<uint64_t>> backedge_pairs_;
 };
 
 } // namespace brass::runtime

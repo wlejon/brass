@@ -4,6 +4,7 @@
 #include <brass/mir/function.hpp>
 #include <brass/mir/instruction.hpp>
 #include <vector>
+#include <deque>
 #include <cstdint>
 
 namespace brass {
@@ -49,10 +50,20 @@ public:
 
     const std::vector<RuntimeValue>& values() const noexcept { return values_; }
 
+    void* allocate(size_t size, size_t align = 16) {
+        if (align == 0) align = 16;
+        size_t total = size + align;
+        alloca_storage_.emplace_back(total, static_cast<uint8_t>(0));
+        uintptr_t addr = reinterpret_cast<uintptr_t>(alloca_storage_.back().data());
+        uintptr_t aligned_addr = (addr + align - 1) & ~(align - 1);
+        return reinterpret_cast<void*>(aligned_addr);
+    }
+
 private:
     const Function* function_ = nullptr;
     InterpreterFrame* caller_ = nullptr;
     std::vector<RuntimeValue> values_;
+    std::deque<std::vector<uint8_t>> alloca_storage_;
 };
 
 } // namespace brass

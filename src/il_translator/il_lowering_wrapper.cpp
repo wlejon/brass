@@ -101,13 +101,8 @@ bool IlLowering::emit_wrapper(const BronzeFunction& fn_ast, Module& mod, const s
 
     std::vector<Value*> loaded;
     for (size_t n = 0; n < named_count; ++n) {
-        Value* raw = nullptr;
-        if (needs_arguments) {
-            Value* idx = b.build_iconst_i32(static_cast<int32_t>(n));
-            raw = b.build_call("bronze_arg_at", Type::i64(), {val_argc, val_argv, idx});
-        } else {
-            raw = b.build_load(Type::i64(), val_argv, static_cast<int32_t>(n * 8));
-        }
+        Value* idx = b.build_iconst_i32(static_cast<int32_t>(n));
+        Value* raw = b.build_call("bronze_arg_at", Type::i64(), {val_argc, val_argv, idx});
         loaded.push_back(raw);
     }
 

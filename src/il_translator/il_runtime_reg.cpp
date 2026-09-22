@@ -328,6 +328,25 @@ void register_bronze_interpreter_symbols(void* interp_ptr) {
     interp->register_external_function("bronze_call_dynamic_2", [](Interpreter&, const std::vector<RuntimeValue>& a) {
         return RuntimeValue::from_i64(bronze_call_dynamic_2(a.size() > 0 ? a[0].as_i64() : 0, a.size() > 1 ? a[1].as_i64() : 0, a.size() > 2 ? a[2].as_i64() : 0, a.size() > 3 ? a[3].as_i64() : 0));
     });
+    interp->register_external_function("bronze_arg_at", [](Interpreter&, const std::vector<RuntimeValue>& a) {
+        if (a.size() < 3) return RuntimeValue::from_i64(static_cast<int64_t>(kUndefinedTag));
+        uint32_t argc = static_cast<uint32_t>(a[0].as_i32());
+        const int64_t* argv = reinterpret_cast<const int64_t*>(a[1].as_ptr());
+        uint32_t idx = static_cast<uint32_t>(a[2].as_i32());
+        return RuntimeValue::from_i64(bronze_arg_at(argc, argv, idx));
+    });
+    interp->register_external_function("bronze_gc_frame_push", [](Interpreter&, const std::vector<RuntimeValue>& a) {
+        uint32_t count = a.empty() ? 0 : static_cast<uint32_t>(a[0].as_i32());
+        return RuntimeValue::from_ptr(bronze_gc_frame_push(count));
+    });
+    interp->register_external_function("bronze_gc_frame_pop", [](Interpreter&, const std::vector<RuntimeValue>&) {
+        bronze_gc_frame_pop();
+        return RuntimeValue::from_void();
+    });
+    interp->register_external_function("bronze_stack_overflow", [](Interpreter&, const std::vector<RuntimeValue>&) {
+        bronze_stack_overflow();
+        return RuntimeValue::from_void();
+    });
 }
 
 void register_all_module_external_symbols(Module* mod, const std::string& entry_symbol) {

@@ -147,10 +147,9 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
         bool transitioned = false;
 
         for (Instruction* inst = cur_bb->head(); inst != nullptr; inst = inst->next()) {
-            if (max_instructions_ > 0 && ++total_instructions_executed_ > max_instructions_) {
+            total_instructions_executed_++;
+            if (max_instructions_ > 0 && total_instructions_executed_ > max_instructions_) {
                 throw InterpreterException("Maximum instruction execution count exceeded (" + std::to_string(max_instructions_) + ")");
-            } else {
-                total_instructions_executed_++;
             }
 
             switch (inst->opcode()) {
@@ -392,6 +391,14 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                     break;
                 }
 
+                case Opcode::alloca_: {
+                    int32_t size = inst->imm_i32();
+                    int32_t align = inst->offset();
+                    void* allocated_ptr = frame.allocate(static_cast<size_t>(size > 0 ? size : 0),
+                                                         static_cast<size_t>(align > 0 ? align : 16));
+                    frame.set_value(inst->result(), RuntimeValue::from_ptr(allocated_ptr));
+                    break;
+                }
                 case Opcode::load: {
                     RuntimeValue base = frame.get_value(inst->operand(0));
                     RuntimeValue res = gc_.read_memory(base.raw_bits(), inst->offset(), inst->type());
