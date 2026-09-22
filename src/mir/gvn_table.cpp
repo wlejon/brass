@@ -129,8 +129,10 @@ GvnExpression GvnExpression::from_instruction(const Instruction* inst) {
     if (op_count >= 2) expr.op1 = inst->operand(1);
     if (op_count >= 3) expr.op2 = inst->operand(2);
 
-    // Canonicalize commutative expressions
-    if (is_commutative_op(expr.opcode) && expr.op0 && expr.op1) {
+    // Canonicalize commutative expressions whose operands share a type; a
+    // ptr + i64 offset keeps its order.
+    if (is_commutative_op(expr.opcode) && expr.op0 && expr.op1 &&
+        expr.op0->type() == expr.op1->type()) {
         if (expr.op0->id() > expr.op1->id()) {
             std::swap(expr.op0, expr.op1);
         }

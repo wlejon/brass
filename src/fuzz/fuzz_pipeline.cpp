@@ -67,7 +67,9 @@ bool loop_eligible(const Function& fn) {
 }
 
 void for_each_loop_fn(Module& mod, const std::function<void(Function&)>& body) {
-    for (Function* fn : mod.functions()) {
+    // A snapshot: auto-parallelization adds kernel functions to the module.
+    const std::vector<Function*> fns = mod.functions();
+    for (Function* fn : fns) {
         if (fn && loop_eligible(*fn)) {
             fn->rebuild_cfg_predecessors();
             body(*fn);

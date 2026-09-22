@@ -47,7 +47,8 @@ Value* make_smart_mul(Builder& b, Type t, Value* val, int64_t mul_factor) {
     if (mul_factor == 0) return make_smart_const_int(b, t, 0);
     int64_t c;
     if (get_const_int(val, c)) {
-        return make_smart_const_int(b, t, c * mul_factor);
+        // MIR integer arithmetic wraps.
+        return make_smart_const_int(b, t, static_cast<int64_t>(static_cast<uint64_t>(c) * static_cast<uint64_t>(mul_factor)));
     }
     Value* factor_val = make_smart_const_int(b, t, mul_factor);
     return b.build_mul(val, factor_val);
@@ -58,7 +59,7 @@ Value* make_smart_add(Builder& b, Type t, Value* lhs, Value* rhs) {
     bool has_c0 = get_const_int(lhs, c0);
     bool has_c1 = get_const_int(rhs, c1);
     if (has_c0 && has_c1) {
-        return make_smart_const_int(b, t, c0 + c1);
+        return make_smart_const_int(b, t, static_cast<int64_t>(static_cast<uint64_t>(c0) + static_cast<uint64_t>(c1)));
     }
     if (has_c0 && c0 == 0) return rhs;
     if (has_c1 && c1 == 0) return lhs;
@@ -93,6 +94,34 @@ static bool value_depends_on_param(
         }
     }
     return false;
+}
+
+// Reads of `v` by instructions of `loop`, not counting arguments on the
+// header's exit edge (the exit sees the final value, which the unroller
+// recombines).
+static size_t in_loop_uses(const Value* v, const LoopInfo& loop, const BranchTarget* header_exit) {
+    size_t n = 0;
+    for (BasicBlock* bb : loop.blocks()) {
+        for (Instruction* inst : *bb) {
+            for (size_t i = 0; i < inst->operand_count(); ++i) {
+                if (inst->operand(i) == v) ++n;
+            }
+            auto count_args = [&](const BranchTarget& t) {
+                if (&t == header_exit) return;
+                n += static_cast<size_t>(std::count(t.args.begin(), t.args.end(), v));
+            };
+            switch (inst->opcode()) {
+                case Opcode::br: count_args(inst->branch_target()); break;
+                case Opcode::br_if: count_args(inst->true_target()); count_args(inst->false_target()); break;
+                case Opcode::switch_:
+                    count_args(inst->default_target());
+                    for (const SwitchCase& c : inst->switch_cases()) count_args(c.target);
+                    break;
+                default: break;
+            }
+        }
+    }
+    return n;
 }
 
 bool analyze_loop(
@@ -264,6 +293,20 @@ bool analyze_loop(
     }
 
     if (!found_primary_iv || !cla.limit_val) return false;
+
+    // An accumulator is only rewritten through its own update: jamming splits
+    // it into partial sums, and the serial chain is emitted apart from the
+    // rest of the body, so any other reader (another reduction's addend, a
+    // comparison, a store) would see the wrong value. The accumulator is read
+    // once (by its update) and the update once (by the latch).
+    const BranchTarget* header_exit = exit_on_false ? &hdr_term->false_target() : &hdr_term->true_target();
+    for (size_t red_i : cla.reduction_indices) {
+        const ParamAnalysis& pa = cla.params[red_i];
+        if (in_loop_uses(pa.header_param, loop, header_exit) != 1 ||
+            in_loop_uses(pa.update_inst->result(), loop, header_exit) != 1) {
+            return false;
+        }
+    }
 
     for (size_t i = 0; i < header->param_count(); ++i) {
         const ParamAnalysis& pa = cla.params[i];

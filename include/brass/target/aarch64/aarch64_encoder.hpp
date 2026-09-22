@@ -10,6 +10,9 @@
 
 namespace brass::aarch64 {
 
+// brk immediates for the program errors the backend detects itself.
+inline constexpr uint16_t kBrkIntegerDivideByZero = 0x0D0;
+
 class AArch64Encoder {
 public:
     explicit AArch64Encoder(CodeBuffer& buffer) noexcept : buffer_(buffer) {}
@@ -345,6 +348,10 @@ public:
 
     void nop();
     void brk(uint16_t imm = 0);
+    // cbnz reg, ok; brk #imm; ok: -- the guard in front of every integer
+    // division (sdiv/udiv return 0 for a zero divisor, where MIR defines
+    // division by zero as a program error, like the x64 #DE fault).
+    void brk_if_zero(GPR reg, bool is_64bit, uint16_t imm);
     void adr(GPR dst, Label target);
     void adrp(GPR dst, Label target);
 

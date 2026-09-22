@@ -65,9 +65,7 @@ void AArch64EmitContext::emit_mov_instruction(const LirInst& inst) {
             const auto& dst = inst.defs[0];
             const auto& src = inst.uses[0];
 
-            if (dst.is_preg() && src.is_preg() && dst.preg_val == src.preg_val) {
-                return;
-            }
+            // A self mov32 is kept: writing Wd zeroes the upper half of Xd.
 
             if (inst.is_patchable && dst.is_preg() && src.is_imm_int()) {
                 GPR dst_gpr = dst.preg_val.as_aarch64_gpr();

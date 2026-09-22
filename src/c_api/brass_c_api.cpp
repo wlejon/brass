@@ -322,6 +322,16 @@ BrassValue brass_function_get_param(BrassFunction fn, size_t index) {
     }
 }
 
+BrassStatus brass_function_set_param_noalias(BrassFunction fn, size_t index, int noalias) {
+    if (!fn || !fn->func) return BRASS_ERR_INVALID_ARGUMENT;
+    if (index >= fn->func->param_count() || !fn->func->param_type(index).is_pointer_or_gcref()) {
+        set_ctx_error(fn->ctx, "brass_function_set_param_noalias: parameter is not a pointer");
+        return BRASS_ERR_INVALID_ARGUMENT;
+    }
+    fn->func->set_param_noalias(index, noalias != 0);
+    return BRASS_OK;
+}
+
 /* Bronze IL Translation Bridge */
 BrassStatus brass_translate_bronze_il(BrassContext ctx, const char* il_text, size_t len, const BrassOptions* opts, BrassModule* out_mod) {
     if (!il_text || !out_mod) {

@@ -90,6 +90,9 @@ private:
     int32_t allocate_spill_slot(bool is_gcref, uint8_t size);
     int32_t allocate_spill_slot(bool is_gcref) { return allocate_spill_slot(is_gcref, 8); }
     void rewrite_instructions();
+    // Fill live_gcrefs of every call and safepoint with the gcref vregs live
+    // across it (live after the site and not defined by it).
+    void record_live_gcrefs();
 };
 
 void run_linear_scan_regalloc(

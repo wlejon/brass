@@ -65,18 +65,61 @@ void PtxISel::lower_mul(const brass::Instruction& inst) {
     emit(std::move(mul));
 }
 
+// Integer division and remainder follow MIR, not PTX: PTX leaves both the
+// result of a zero divisor and of signed MIN / -1 unspecified. A divisor
+// that is not a known non-zero constant is checked (zero traps, the program
+// error x64 faults on), and a signed one that may be -1 selects the wrapped
+// result (MIN / -1 == MIN via neg, MIN % -1 == 0).
+void PtxISel::lower_int_div_rem(const brass::Instruction& inst, Opcode op, Type t, bool is_unsigned) {
+    int64_t c = 0;
+    const bool known = const_int(inst.operand(1), &c);
+    Operand lhs = operand_of(inst.operand(0), op, 0, t, "operand 0");
+    if (known && c != 0 && (is_unsigned || c != -1)) {
+        emit(Inst::make(op, t).dst(result_reg(inst)).src(lhs).src(operand_of(inst.operand(1), op, 1, t, "operand 1")));
+        return;
+    }
+    Reg divisor = reg_of(inst.operand(1), "operand 1");
+    Reg zero = fn_->new_pred();
+    emit(Inst::make(Opcode::setp, t).cmp(CmpOp::eq).dst(zero).src(Operand::reg(divisor)).src(Operand::imm(0)));
+    emit(Inst::make(Opcode::trap).guard(zero));
+    if (is_unsigned) {
+        emit(Inst::make(op, t).dst(result_reg(inst)).src(lhs).src(Operand::reg(divisor)));
+        return;
+    }
+    Reg quotient = fn_->new_reg(reg_class_for(t));
+    emit(Inst::make(op, t).dst(quotient).src(lhs).src(Operand::reg(divisor)));
+    Reg minus_one = fn_->new_pred();
+    emit(Inst::make(Opcode::setp, t).cmp(CmpOp::eq).dst(minus_one).src(Operand::reg(divisor)).src(Operand::imm(-1)));
+    Operand wrapped = Operand::imm(0);
+    if (op == Opcode::div) {
+        Reg negated = fn_->new_reg(reg_class_for(t));
+        emit(Inst::make(Opcode::neg, t).dst(negated).src(Operand::reg(reg_of(inst.operand(0), "operand 0"))));
+        wrapped = Operand::reg(negated);
+    }
+    const Type bits = bit_type_for(inst.type());
+    emit(Inst::make(Opcode::selp, bits).dst(result_reg(inst)).src(wrapped).src(Operand::reg(quotient)).src(minus_one));
+}
+
 void PtxISel::lower_div(const brass::Instruction& inst, bool is_unsigned) {
     Type t = is_unsigned ? type_for(inst.type()) : signed_type_for(inst.type());
+    if (!is_float(t)) {
+        lower_int_div_rem(inst, Opcode::div, t, is_unsigned);
+        return;
+    }
     Inst div = Inst::make(Opcode::div, t)
                    .dst(result_reg(inst))
                    .src(operand_of(inst.operand(0), Opcode::div, 0, t, "operand 0"))
                    .src(operand_of(inst.operand(1), Opcode::div, 1, t, "operand 1"));
-    if (is_float(t)) div.rnd(Rounding::rn);
+    div.rnd(Rounding::rn);
     emit(std::move(div));
 }
 
 void PtxISel::lower_rem(const brass::Instruction& inst, bool is_unsigned) {
     Type t = is_unsigned ? type_for(inst.type()) : signed_type_for(inst.type());
+    if (!is_float(t)) {
+        lower_int_div_rem(inst, Opcode::rem, t, is_unsigned);
+        return;
+    }
     emit(Inst::make(Opcode::rem, t)
              .dst(result_reg(inst))
              .src(operand_of(inst.operand(0), Opcode::rem, 0, t, "operand 0"))

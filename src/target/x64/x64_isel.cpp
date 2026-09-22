@@ -102,6 +102,14 @@ void X64ISel::analyze_function(const Function& mir_fn) {
             for (const auto* arg : inst->false_target().args) {
                 if (arg) use_count_[arg]++;
             }
+            // Switch case arguments are uses too: without them a constant
+            // also folded into an ALU immediate looks fully folded, gets no
+            // register, and the case edge copies an unassigned value.
+            for (const auto& sc : inst->switch_cases()) {
+                for (const auto* arg : sc.target.args) {
+                    if (arg) use_count_[arg]++;
+                }
+            }
             for (const auto* sv : inst->state_map()) {
                 if (sv) use_count_[sv]++;
             }
@@ -109,6 +117,10 @@ void X64ISel::analyze_function(const Function& mir_fn) {
     }
 
     // 2. Identify fused comparisons in br_if and guard, and LEA fusions in add
+    // (add, operand) pairs where the add is lowered as one lea that
+    // computes the operand too, so the operand itself is skipped.
+    std::vector<std::pair<const Instruction*, const Instruction*>> lea_fusions;
+
     auto skip_operand_if_dead = [&](const Value* val) {
         if (val && val->is_instruction() && use_count_[val] == 1) {
             skipped_insts_.insert(val->defining_instruction());
@@ -121,7 +133,7 @@ void X64ISel::analyze_function(const Function& mir_fn) {
                 const Value* cond = inst->operand(0);
                 if (cond && cond->is_instruction()) {
                     const Instruction* def_inst = cond->defining_instruction();
-                    if (def_inst && def_inst->parent() == bb && is_comparison(def_inst->opcode())) {
+                    if (def_inst && def_inst->parent() == bb && comparison_fusible(*def_inst)) {
                         if (use_count_[cond] == 1) {
                             skipped_insts_.insert(def_inst);
                             if (def_inst->opcode() == Opcode::eq || def_inst->opcode() == Opcode::ne) {
@@ -153,6 +165,7 @@ void X64ISel::analyze_function(const Function& mir_fn) {
                             int64_t mult = m1.is_imm ? m1.val : (m0.is_imm ? m0.val : 0);
                             if (mult == 2 || mult == 3 || mult == 4 || mult == 5 || mult == 8 || mult == 9) {
                                 skipped_insts_.insert(def);
+                                lea_fusions.emplace_back(inst, def);
                                 if (m0.is_imm) skip_operand_if_dead(def->operand(0));
                                 if (m1.is_imm) skip_operand_if_dead(def->operand(1));
                             }
@@ -160,6 +173,7 @@ void X64ISel::analyze_function(const Function& mir_fn) {
                             ImmIntInfo s1 = get_imm_int_info(def->operand(1));
                             if (s1.is_imm && (s1.val == 1 || s1.val == 2 || s1.val == 3)) {
                                 skipped_insts_.insert(def);
+                                lea_fusions.emplace_back(inst, def);
                                 skip_operand_if_dead(def->operand(1));
                             }
                         } else if (def->opcode() == Opcode::add) {
@@ -167,6 +181,7 @@ void X64ISel::analyze_function(const Function& mir_fn) {
                             ImmIntInfo a1 = get_imm_int_info(def->operand(1));
                             if (!a0.is_imm && !a1.is_imm) {
                                 skipped_insts_.insert(def);
+                                lea_fusions.emplace_back(inst, def);
                             }
                         }
                     }
@@ -177,6 +192,23 @@ void X64ISel::analyze_function(const Function& mir_fn) {
 
     std::unordered_map<const Value*, uint32_t> folded_uses;
 
+    // A memory operation that folds its address computation reads only the
+    // address value itself without a register: that is the one use it
+    // folds. The instructions and constants further down the chain are used
+    // by the address instruction, not by the memory operation, so counting
+    // them once per memory operation would overcount their folded uses and
+    // leave a value that still has a real use without a register.
+    auto count_address_fold = [&](const MemFold& mf, std::initializer_list<const Value*> operands) {
+        for (const Value* op : operands) {
+            for (const auto* fi : mf.folded_instructions) {
+                if (fi && op && fi->result() == op) {
+                    folded_uses[op]++;
+                    break;
+                }
+            }
+        }
+    };
+
     // 3. Count folded uses in load/store/alu/branch/guard
     for (const auto* bb : mir_fn.blocks()) {
         for (const auto* inst : *bb) {
@@ -184,17 +216,13 @@ void X64ISel::analyze_function(const Function& mir_fn) {
 
             if (inst->opcode() == Opcode::load) {
                 MemFold mf = match_address(inst->operand(0), inst->offset());
-                for (const auto* fi : mf.folded_instructions) {
-                    if (fi && fi->result()) folded_uses[fi->result()]++;
-                }
+                count_address_fold(mf, {inst->operand(0)});
                 continue;
             }
 
             if (inst->opcode() == Opcode::store) {
                 MemFold mf = match_address(inst->operand(0), inst->offset());
-                for (const auto* fi : mf.folded_instructions) {
-                    if (fi && fi->result()) folded_uses[fi->result()]++;
-                }
+                count_address_fold(mf, {inst->operand(0)});
                 const Value* src = inst->operand(1);
                 ImmIntInfo imm_src = get_imm_int_info(src);
                 if (imm_src.is_imm && imm_src.fits_i32) {
@@ -205,17 +233,13 @@ void X64ISel::analyze_function(const Function& mir_fn) {
 
             if (inst->opcode() == Opcode::load_indexed) {
                 MemFold mf = match_indexed_address(inst->operand(0), inst->operand(1), scale_from_int(inst->scale()), inst->offset());
-                for (const auto* fi : mf.folded_instructions) {
-                    if (fi && fi->result()) folded_uses[fi->result()]++;
-                }
+                count_address_fold(mf, {inst->operand(0), inst->operand(1)});
                 continue;
             }
 
             if (inst->opcode() == Opcode::store_indexed) {
                 MemFold mf = match_indexed_address(inst->operand(0), inst->operand(1), scale_from_int(inst->scale()), inst->offset());
-                for (const auto* fi : mf.folded_instructions) {
-                    if (fi && fi->result()) folded_uses[fi->result()]++;
-                }
+                count_address_fold(mf, {inst->operand(0), inst->operand(1)});
                 const Value* src = inst->operand(2);
                 ImmIntInfo imm_src = get_imm_int_info(src);
                 if (imm_src.is_imm && imm_src.fits_i32) {
@@ -238,7 +262,8 @@ void X64ISel::analyze_function(const Function& mir_fn) {
                             folded_uses[rhs]++;
                         } else if (lhs_imm.is_imm && lhs_imm.fits_i32) {
                             folded_uses[lhs]++;
-                        } else if (rhs && rhs->is_instruction() && can_fuse_load(rhs->defining_instruction(), inst)) {
+                        } else if (!lhs->type().is_float() && rhs && rhs->is_instruction() &&
+                                   can_fuse_load(rhs->defining_instruction(), inst)) {
                             skipped_insts_.insert(rhs->defining_instruction());
                         }
                         continue;
@@ -246,12 +271,44 @@ void X64ISel::analyze_function(const Function& mir_fn) {
                 }
             }
 
+            // Division folds only a power-of-two divisor (lower_div_mod) and
+            // never a load; a shift folds any constant count but needs a
+            // register count in CL otherwise.
+            if (inst->opcode() == Opcode::udiv || inst->opcode() == Opcode::umod ||
+                inst->opcode() == Opcode::sdiv || inst->opcode() == Opcode::smod) {
+                const bool is_mod = inst->opcode() == Opcode::umod || inst->opcode() == Opcode::smod;
+                if (!inst->type().is_float() && divisor_folds(get_imm_int_info(inst->operand(1)), is_mod)) {
+                    folded_uses[inst->operand(1)]++;
+                }
+                continue;
+            }
+            if (inst->opcode() == Opcode::shl || inst->opcode() == Opcode::lshr || inst->opcode() == Opcode::ashr) {
+                if (get_imm_int_info(inst->operand(1)).is_imm) folded_uses[inst->operand(1)]++;
+                continue;
+            }
+            // Integer multiplication by a constant the lowering strength-
+            // reduces or encodes as an immediate reads the other operand
+            // from a register, so that operand's load cannot be fused. The
+            // choice of constant mirrors lower_binary_alu.
+            if (inst->opcode() == Opcode::mul && !inst->type().is_float() && !inst->type().is_vector()) {
+                ImmIntInfo imm0 = get_imm_int_info(inst->operand(0));
+                ImmIntInfo imm1 = get_imm_int_info(inst->operand(1));
+                const Value* imm_val = imm1.is_imm ? inst->operand(1) : (imm0.is_imm ? inst->operand(0) : nullptr);
+                const ImmIntInfo& imm = imm1.is_imm ? imm1 : imm0;
+                if (imm_val && mul_imm_folds(imm)) {
+                    folded_uses[imm_val]++;
+                } else if (can_fuse_load(inst->operand(1)->defining_instruction(), inst)) {
+                    skipped_insts_.insert(inst->operand(1)->defining_instruction());
+                } else if (can_fuse_load(inst->operand(0)->defining_instruction(), inst)) {
+                    skipped_insts_.insert(inst->operand(0)->defining_instruction());
+                }
+                continue;
+            }
+
             bool is_alu = false;
             switch (inst->opcode()) {
                 case Opcode::add: case Opcode::sub: case Opcode::mul:
                 case Opcode::and_: case Opcode::or_: case Opcode::xor_:
-                case Opcode::shl: case Opcode::lshr: case Opcode::ashr:
-                case Opcode::udiv: case Opcode::umod:
                 case Opcode::eq: case Opcode::ne:
                 case Opcode::slt: case Opcode::ult: case Opcode::sle: case Opcode::ule:
                 case Opcode::sgt: case Opcode::ugt: case Opcode::sge: case Opcode::uge:
@@ -271,9 +328,14 @@ void X64ISel::analyze_function(const Function& mir_fn) {
                                 inst->opcode() == Opcode::and_ || inst->opcode() == Opcode::or_ ||
                                 inst->opcode() == Opcode::xor_);
 
+                // Subtraction and integer comparison also take a constant
+                // first operand as an immediate (mov + sub, swapped cmp) and
+                // then read the second from a register, never from memory.
+                const bool imm0_foldable = is_comm || inst->opcode() == Opcode::sub || is_comparison(inst->opcode());
+
                 if (imm1.is_imm && imm1.fits_i32) {
                     folded_uses[op1]++;
-                } else if (is_comm && imm0.is_imm && imm0.fits_i32) {
+                } else if (imm0_foldable && imm0.is_imm && imm0.fits_i32) {
                     folded_uses[op0]++;
                 } else if (op1 && op1->is_instruction() && can_fuse_load(op1->defining_instruction(), inst)) {
                     skipped_insts_.insert(op1->defining_instruction());
@@ -292,6 +354,13 @@ void X64ISel::analyze_function(const Function& mir_fn) {
                 skipped_insts_.insert(val->defining_instruction());
             }
         }
+    }
+
+    // 5. An add that is not lowered itself (folded into a memory operand's
+    // address, whose register part is then the add's operand) computes no
+    // lea, so the operand it would have absorbed must be computed after all.
+    for (const auto& [user, fused] : lea_fusions) {
+        if (skipped_insts_.count(user)) skipped_insts_.erase(fused);
     }
 }
 
@@ -350,16 +419,39 @@ std::unique_ptr<LirFunction> X64ISel::lower(const Function& mir_fn) {
         lower_block(*bb);
     }
 
-    // 5. Connect CFG predecessors and successors
+    // 5. Connect the CFG. A MIR edge whose block arguments were lowered into
+    // an edge trampoline (linked while lowering) runs through that
+    // trampoline; a direct edge too would make the target's parameters look
+    // live, undefined, on every path into this block, and a gcref parameter
+    // would then be reported to the GC with whatever its home holds.
+    std::unordered_set<uint32_t> mir_block_ids;
+    for (const auto* bb : mir_fn.blocks()) mir_block_ids.insert(bb->id());
     for (size_t i = 0; i < mir_fn.blocks().size(); ++i) {
         const auto* mir_bb = mir_fn.blocks()[i];
         auto* lir_bb = lir_fn_->blocks[i].get();
 
-        for (const auto* pred : mir_bb->predecessors()) {
-            lir_bb->predecessors.push_back(lir_fn_->get_block_by_id(pred->id()));
-        }
+        auto jumps_directly_to = [&](uint32_t id) {
+            for (const auto& li : lir_bb->instructions) {
+                if (li->opcode != LirOpcode::Jmp && li->opcode != LirOpcode::Jcc) continue;
+                for (const auto& u : li->uses) {
+                    if (u.is_label() && u.label_id == id) return true;
+                }
+            }
+            return false;
+        };
+        auto reached_by_trampoline = [&](const LirBlock* target) {
+            for (const LirBlock* s : lir_bb->successors) {
+                if (mir_block_ids.count(s->id)) continue;
+                if (std::find(s->successors.begin(), s->successors.end(), target) != s->successors.end()) return true;
+            }
+            return false;
+        };
+
         for (const auto* succ : mir_bb->successors()) {
-            lir_bb->successors.push_back(lir_fn_->get_block_by_id(succ->id()));
+            LirBlock* succ_lir = lir_fn_->get_block_by_id(succ->id());
+            if (!succ_lir) continue;
+            if (reached_by_trampoline(succ_lir) && !jumps_directly_to(succ_lir->id)) continue;
+            link_blocks(*lir_bb, *succ_lir);
         }
     }
 
@@ -435,6 +527,10 @@ VReg X64ISel::get_vreg(const Value* val) const {
     if (it != val_to_vreg_.end()) {
         return it->second;
     }
+    // A value whose every use the analysis folded has no register. Lowering
+    // looks some operands up speculatively, so this is not an error here;
+    // an invalid register that reaches an emitted instruction is rejected
+    // by the register allocator's rewrite.
     return VReg{};
 }
 
@@ -586,29 +682,21 @@ void X64ISel::lower_branch_if(const Instruction& inst, LirBlock& lir_bb) {
     const auto& f_target = inst.false_target();
 
     const Instruction* cmp_inst = cond_val ? cond_val->defining_instruction() : nullptr;
-    bool is_fused_cmp = cmp_inst && cmp_inst->parent() == inst.parent() && is_comparison(cmp_inst->opcode());
+    // Only a comparison the analysis folded into this branch is recomputed
+    // here; any other is a value in a register like every other condition.
+    bool is_fused_cmp = cmp_inst && cmp_inst->parent() == inst.parent() && is_comparison(cmp_inst->opcode()) &&
+                        skipped_insts_.count(cmp_inst);
 
     Condition branch_cond = Condition::NE;
 
     if (is_fused_cmp) {
         Opcode cmp_op = cmp_inst->opcode();
-        auto [gpr_c, float_c] = get_comparison_conditions(cmp_op);
+        const Condition gpr_c = get_comparison_conditions(cmp_op).first;
         const Value* lhs = cmp_inst->operand(0);
         const Value* rhs = cmp_inst->operand(1);
 
         if (lhs->type().is_float()) {
-            branch_cond = float_c;
-            if (rhs && rhs->is_instruction() && can_fuse_load(rhs->defining_instruction(), &inst)) {
-                auto ucomi = std::make_unique<LirInst>(LirOpcode::Ucomisd);
-                ucomi->add_use(LirOperand::vreg(get_vreg(lhs), 8));
-                ucomi->add_use(get_load_mem_operand(rhs->defining_instruction()));
-                lir_bb.append_inst(std::move(ucomi));
-            } else {
-                auto ucomi = std::make_unique<LirInst>(LirOpcode::Ucomisd);
-                ucomi->add_use(LirOperand::vreg(get_vreg(lhs), 8));
-                ucomi->add_use(LirOperand::vreg(get_vreg(rhs), 8));
-                lir_bb.append_inst(std::move(ucomi));
-            }
+            append_fused_float_compare(*cmp_inst, lir_bb, branch_cond);
         } else {
             uint8_t sz = static_cast<uint8_t>(lhs->type().size_in_bytes());
             if (sz == 0) sz = 8;
@@ -759,6 +847,8 @@ void X64ISel::lower_branch_if(const Instruction& inst, LirBlock& lir_bb) {
         lir_bb.append_inst(std::move(jmp_t));
     } else {
         auto* false_trampoline = lir_fn_->create_block("br_if_false");
+        link_blocks(lir_bb, *false_trampoline);
+        if (auto* f_lir = lir_fn_->get_block_by_id(f_target.block->id())) link_blocks(*false_trampoline, *f_lir);
 
         auto jcc_inst = std::make_unique<LirInst>(LirOpcode::Jcc);
         jcc_inst->condition = invert(branch_cond);

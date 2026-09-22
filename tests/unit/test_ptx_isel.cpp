@@ -563,6 +563,50 @@ TEST_CASE("PTX ISel - unsigned div/rem/compare on i32 and i64") {
     CHECK_EQ(got[8], 0u);
 }
 
+TEST_CASE("PTX ISel - integer division follows MIR for zero and MIN / -1 divisors") {
+    Module mod("sdivs");
+    brass::Function* f = mod.create_function("sdivs", Type::void_type(), {Type::i32(), Type::i32(), Type::ptr()});
+    Builder b(mod);
+    b.set_function(f);
+    BasicBlock* e = b.append_block("entry");
+    b.position_at_end(e);
+    Value* x = b.add_block_param(e, Type::i32());
+    Value* y = b.add_block_param(e, Type::i32());
+    Value* out = b.add_block_param(e, Type::ptr());
+    b.build_store(Type::i32(), out, 0, b.build_sdiv(x, y));
+    b.build_store(Type::i32(), out, 4, b.build_smod(x, y));
+    b.build_store(Type::i32(), out, 8, b.build_sdiv(x, b.build_iconst_i32(7)));
+    b.build_ret_void();
+
+    lower_ok(*f);
+    std::string ptx = target::PtxTarget::emit_function(*f);
+    auto count = [&ptx](const std::string& needle) {
+        size_t n = 0;
+        for (size_t at = ptx.find(needle); at != std::string::npos; at = ptx.find(needle, at + 1)) ++n;
+        return n;
+    };
+    // A variable divisor is tested for zero (trap) and for -1 (the wrapped
+    // result is selected); the constant divisor 7 needs neither.
+    if (count("trap;") != 2) std::cerr << ptx;
+    CHECK_EQ(count("trap;"), size_t{2});
+    CHECK_EQ(count("setp.eq.s32"), size_t{4});
+    CHECK_EQ(count("neg.s32"), size_t{1});
+    CHECK_EQ(count("selp.b32"), size_t{2});
+    CHECK_EQ(count("div.s32"), size_t{2});
+    CHECK_EQ(count("rem.s32"), size_t{1});
+    if (ptxas_available()) CHECK(ptxas_assembles(ptx, "sm_70"));
+    if (!gpu_ready()) return;
+
+    int32_t xs = INT32_MIN, ys = -1;
+    CudaBuffer out_buf = CudaBuffer::alloc(12);
+    REQUIRE(out_buf.valid() && out_buf.zero());
+    void* po = out_buf.device_ptr();
+    auto got = run_kernel<int32_t>(ptx, "sdivs", {&xs, &ys, &po}, out_buf, 3);
+    CHECK_EQ(got[0], INT32_MIN);
+    CHECK_EQ(got[1], 0);
+    CHECK_EQ(got[2], INT32_MIN / 7);
+}
+
 // ---------------------------------------------------------------------------
 // Intrinsic table
 // ---------------------------------------------------------------------------

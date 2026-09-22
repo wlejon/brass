@@ -240,54 +240,33 @@ void AArch64EmitContext::emit_alu_instruction(const LirInst& inst) {
             break;
         }
 
-        case LirOpcode::Idiv: {
-            GPR dst = to_gpr(inst.defs[0]);
-            GPR src1 = (inst.uses.size() >= 2) ? to_gpr(inst.uses[0]) : dst;
-            const auto& src2 = inst.uses.back();
-            if (src2.is_preg()) {
-                enc_.sdiv(dst, src1, to_gpr(src2));
-            } else {
-                enc_.ldr(GPR::X16, ensure_accessible_mem(to_mem_address(src2)));
-                enc_.sdiv(dst, src1, GPR::X16);
-            }
-            break;
-        }
-
-        case LirOpcode::Idiv32: {
-            GPR dst = to_gpr(inst.defs[0]);
-            GPR src1 = (inst.uses.size() >= 2) ? to_gpr(inst.uses[0]) : dst;
-            const auto& src2 = inst.uses.back();
-            if (src2.is_preg()) {
-                enc_.sdiv32(dst, src1, to_gpr(src2));
-            } else {
-                enc_.ldr32(GPR::X16, ensure_accessible_mem(to_mem_address(src2)));
-                enc_.sdiv32(dst, src1, GPR::X16);
-            }
-            break;
-        }
-
-        case LirOpcode::Div: {
-            GPR dst = to_gpr(inst.defs[0]);
-            GPR src1 = (inst.uses.size() >= 2) ? to_gpr(inst.uses[0]) : dst;
-            const auto& src2 = inst.uses.back();
-            if (src2.is_preg()) {
-                enc_.udiv(dst, src1, to_gpr(src2));
-            } else {
-                enc_.ldr(GPR::X16, ensure_accessible_mem(to_mem_address(src2)));
-                enc_.udiv(dst, src1, GPR::X16);
-            }
-            break;
-        }
-
+        // MIR semantics: a zero divisor is a program error (trap, as x64's
+        // #DE), and signed MIN / -1 wraps to MIN, which sdiv already does
+        // (and msub then gives MIN % -1 == 0).
+        case LirOpcode::Idiv:
+        case LirOpcode::Idiv32:
+        case LirOpcode::Div:
         case LirOpcode::Div32: {
+            const bool wide = inst.opcode == LirOpcode::Idiv || inst.opcode == LirOpcode::Div;
+            const bool is_signed = inst.opcode == LirOpcode::Idiv || inst.opcode == LirOpcode::Idiv32;
             GPR dst = to_gpr(inst.defs[0]);
             GPR src1 = (inst.uses.size() >= 2) ? to_gpr(inst.uses[0]) : dst;
             const auto& src2 = inst.uses.back();
+            GPR divisor = GPR::X16;
             if (src2.is_preg()) {
-                enc_.udiv32(dst, src1, to_gpr(src2));
+                divisor = to_gpr(src2);
+            } else if (wide) {
+                enc_.ldr(GPR::X16, ensure_accessible_mem(to_mem_address(src2)));
             } else {
                 enc_.ldr32(GPR::X16, ensure_accessible_mem(to_mem_address(src2)));
-                enc_.udiv32(dst, src1, GPR::X16);
+            }
+            enc_.brk_if_zero(divisor, wide, kBrkIntegerDivideByZero);
+            if (is_signed) {
+                if (wide) enc_.sdiv(dst, src1, divisor);
+                else enc_.sdiv32(dst, src1, divisor);
+            } else {
+                if (wide) enc_.udiv(dst, src1, divisor);
+                else enc_.udiv32(dst, src1, divisor);
             }
             break;
         }

@@ -168,11 +168,13 @@ bool emit_baseline_aarch64_op(AArch64BaselineEmitter& emitter, const Instruction
             } else if (inst.type().is_i32()) {
                 enc.ldr32(GPR::X0, slot_addr(inst.operand(0)));
                 enc.ldr32(GPR::X1, slot_addr(inst.operand(1)));
+                enc.brk_if_zero(GPR::X1, false, kBrkIntegerDivideByZero);
                 enc.sdiv32(GPR::X0, GPR::X0, GPR::X1);
                 enc.str32(GPR::X0, slot_addr(inst.result()));
             } else {
                 enc.ldr(GPR::X0, slot_addr(inst.operand(0)));
                 enc.ldr(GPR::X1, slot_addr(inst.operand(1)));
+                enc.brk_if_zero(GPR::X1, true, kBrkIntegerDivideByZero);
                 enc.sdiv(GPR::X0, GPR::X0, GPR::X1);
                 enc.str(GPR::X0, slot_addr(inst.result()));
             }
@@ -189,12 +191,14 @@ bool emit_baseline_aarch64_op(AArch64BaselineEmitter& emitter, const Instruction
             } else if (inst.type().is_i32()) {
                 enc.ldr32(GPR::X0, slot_addr(inst.operand(0)));
                 enc.ldr32(GPR::X1, slot_addr(inst.operand(1)));
+                enc.brk_if_zero(GPR::X1, false, kBrkIntegerDivideByZero);
                 enc.sdiv32(GPR::X2, GPR::X0, GPR::X1);
                 enc.msub32(GPR::X0, GPR::X2, GPR::X1, GPR::X0);
                 enc.str32(GPR::X0, slot_addr(inst.result()));
             } else {
                 enc.ldr(GPR::X0, slot_addr(inst.operand(0)));
                 enc.ldr(GPR::X1, slot_addr(inst.operand(1)));
+                enc.brk_if_zero(GPR::X1, true, kBrkIntegerDivideByZero);
                 enc.sdiv(GPR::X2, GPR::X0, GPR::X1);
                 enc.msub(GPR::X0, GPR::X2, GPR::X1, GPR::X0);
                 enc.str(GPR::X0, slot_addr(inst.result()));
@@ -205,11 +209,13 @@ bool emit_baseline_aarch64_op(AArch64BaselineEmitter& emitter, const Instruction
             if (inst.type().is_i32()) {
                 enc.ldr32(GPR::X0, slot_addr(inst.operand(0)));
                 enc.ldr32(GPR::X1, slot_addr(inst.operand(1)));
+                enc.brk_if_zero(GPR::X1, false, kBrkIntegerDivideByZero);
                 enc.udiv32(GPR::X0, GPR::X0, GPR::X1);
                 enc.str32(GPR::X0, slot_addr(inst.result()));
             } else {
                 enc.ldr(GPR::X0, slot_addr(inst.operand(0)));
                 enc.ldr(GPR::X1, slot_addr(inst.operand(1)));
+                enc.brk_if_zero(GPR::X1, true, kBrkIntegerDivideByZero);
                 enc.udiv(GPR::X0, GPR::X0, GPR::X1);
                 enc.str(GPR::X0, slot_addr(inst.result()));
             }
@@ -219,12 +225,14 @@ bool emit_baseline_aarch64_op(AArch64BaselineEmitter& emitter, const Instruction
             if (inst.type().is_i32()) {
                 enc.ldr32(GPR::X0, slot_addr(inst.operand(0)));
                 enc.ldr32(GPR::X1, slot_addr(inst.operand(1)));
+                enc.brk_if_zero(GPR::X1, false, kBrkIntegerDivideByZero);
                 enc.udiv32(GPR::X2, GPR::X0, GPR::X1);
                 enc.msub32(GPR::X0, GPR::X2, GPR::X1, GPR::X0);
                 enc.str32(GPR::X0, slot_addr(inst.result()));
             } else {
                 enc.ldr(GPR::X0, slot_addr(inst.operand(0)));
                 enc.ldr(GPR::X1, slot_addr(inst.operand(1)));
+                enc.brk_if_zero(GPR::X1, true, kBrkIntegerDivideByZero);
                 enc.udiv(GPR::X2, GPR::X0, GPR::X1);
                 enc.msub(GPR::X0, GPR::X2, GPR::X1, GPR::X0);
                 enc.str(GPR::X0, slot_addr(inst.result()));

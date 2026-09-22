@@ -75,13 +75,9 @@ void X64ISel::lower_switch(const Instruction& inst, LirBlock& lir_bb) {
             lir_bb.append_inst(std::move(jcc));
         } else {
             auto* case_trampoline = lir_fn_->create_block("switch_case");
-            case_trampoline->predecessors.push_back(&lir_bb);
-            lir_bb.successors.push_back(case_trampoline);
+            link_blocks(lir_bb, *case_trampoline);
             auto* target_lir = lir_fn_->get_block_by_id(sc.target.block->id());
-            if (target_lir) {
-                case_trampoline->successors.push_back(target_lir);
-                target_lir->predecessors.push_back(case_trampoline);
-            }
+            if (target_lir) link_blocks(*case_trampoline, *target_lir);
 
             auto jcc = std::make_unique<LirInst>(LirOpcode::Jcc);
             jcc->condition = Condition::E;

@@ -411,8 +411,6 @@ TEST_CASE("Differential - 3D Matrix Multiplication Tiling Across Diverse Trip Co
         LoopTileOptions opts;
         opts.tile_size_i = 8;
         opts.tile_size_j = 8;
-        opts.tile_size_k = 8;
-        opts.enable_loop_interchange = false; // Standard 3D tiling preserves exact order
         bool changed = loop_tile_pass(*opt_fn, dom, opts);
         CHECK(changed);
 

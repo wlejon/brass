@@ -7,14 +7,14 @@
 
 namespace brass {
 
+// Tiling covers the outer two loops of a nest; loops nested deeper run whole
+// inside each (i, j) iteration, so iteration order within them is kept.
 struct LoopTileOptions {
     size_t tile_size_i = 16;
     size_t tile_size_j = 16;
-    size_t tile_size_k = 16;
-    bool enable_loop_interchange = true;
 };
 
-// Tile a specific loop nest (2D or 3D)
+// Tile a specific loop nest (its outer two levels)
 bool tile_loop_nest(
     Function& fn,
     LoopNest& nest,

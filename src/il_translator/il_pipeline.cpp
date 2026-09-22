@@ -30,7 +30,6 @@ PassPipelineOptions pass_pipeline_options(const TranslatorOptions& options) {
     l.enable_loop_tile = options.enable_loop_tile;
     l.tile_size_i = options.tile_size;
     l.tile_size_j = options.tile_size;
-    l.tile_size_k = options.tile_size;
     l.enable_sroa = options.enable_sroa;
     l.enable_gvn = options.enable_gvn;
     l.enable_sccp = options.enable_sccp;

@@ -461,6 +461,10 @@ TEST_CASE("Kernel JIT - C-API Bindings (Compile & Execute Pure-Compute Kernel)")
 
     BrassFunction fn = brass_function_create(mod, "c_fma_kernel", brass_type_void(), params, 5);
     REQUIRE(fn != nullptr);
+    // Without the promise that the four arrays are distinct, the store to
+    // `out` could feed a later iteration's loads and the loop is not DOALL.
+    for (size_t p = 0; p < 4; ++p) CHECK_EQ(brass_function_set_param_noalias(fn, p, 1), BRASS_OK);
+    CHECK_EQ(brass_function_set_param_noalias(fn, 4, 1), BRASS_ERR_INVALID_ARGUMENT);
 
     BrassBlock entry = brass_function_append_block(fn, "entry");
     BrassValue in_a = brass_block_add_param(entry, ptr_t);

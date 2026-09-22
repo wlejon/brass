@@ -567,6 +567,15 @@ VReg LirFunction::allocate_vreg(RegClass rc, uint8_t size, bool is_gcref) {
     return v;
 }
 
+void link_blocks(LirBlock& from, LirBlock& to) {
+    if (std::find(from.successors.begin(), from.successors.end(), &to) == from.successors.end()) {
+        from.successors.push_back(&to);
+    }
+    if (std::find(to.predecessors.begin(), to.predecessors.end(), &from) == to.predecessors.end()) {
+        to.predecessors.push_back(&from);
+    }
+}
+
 LirBlock* LirFunction::create_block_with_id(uint32_t id, std::string block_name) {
     if (id >= next_block_id_) {
         next_block_id_ = id + 1;

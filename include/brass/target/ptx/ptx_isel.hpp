@@ -104,6 +104,7 @@ private:
     void lower_mul(const brass::Instruction& inst);
     void lower_div(const brass::Instruction& inst, bool is_unsigned);
     void lower_rem(const brass::Instruction& inst, bool is_unsigned);
+    void lower_int_div_rem(const brass::Instruction& inst, Opcode op, Type t, bool is_unsigned);
     void lower_fma(const brass::Instruction& inst);
     void lower_neg(const brass::Instruction& inst);
     void lower_bitwise(const brass::Instruction& inst, Opcode op);

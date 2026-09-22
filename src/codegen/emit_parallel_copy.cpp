@@ -82,8 +82,19 @@ void EmitContext::emit_parallel_copy(const LirInst& inst) {
                     }
                 }
             } else if (src.is_imm_int()) {
-                if (dst.size == 4) enc_.mov32(dst_mem, static_cast<int32_t>(src.imm_int));
-                else enc_.mov(dst_mem, static_cast<int32_t>(src.imm_int));
+                if (dst.size == 4) {
+                    enc_.mov32(dst_mem, static_cast<int32_t>(src.imm_int));
+                } else if (src.imm_int >= INT32_MIN && src.imm_int <= INT32_MAX) {
+                    enc_.mov(dst_mem, static_cast<int32_t>(src.imm_int));
+                } else {
+                    // A store immediate is sign-extended from 32 bits, and
+                    // R11 may hold a cycle's saved value: store two halves.
+                    const uint64_t bits = static_cast<uint64_t>(src.imm_int);
+                    MemAddress hi = dst_mem;
+                    hi.disp += 4;
+                    enc_.mov32(dst_mem, static_cast<int32_t>(static_cast<uint32_t>(bits)));
+                    enc_.mov32(hi, static_cast<int32_t>(static_cast<uint32_t>(bits >> 32)));
+                }
             } else {
                 // Memory-to-memory move using scratch register
                 MemAddress src_mem = to_mem_address(src);
@@ -102,6 +113,13 @@ void EmitContext::emit_parallel_copy(const LirInst& inst) {
                 }
             }
         }
+    };
+
+    // A cycle's saved value must survive the moves that follow it, and a
+    // memory-to-memory move goes through R11 / XMM15; so the cycle keeps
+    // its value in the other reserved scratch register of the class.
+    auto cycle_scratch = [](bool is_xmm) {
+        return is_xmm ? PReg::xmm(XMM::XMM14) : PReg::gpr(GPR::R10);
     };
 
     auto peel_acyclic = [&]() -> bool {
@@ -204,7 +222,7 @@ void EmitContext::emit_parallel_copy(const LirInst& inst) {
                               (m0.src.is_preg() && m0.src.preg_val.is_xmm()) ||
                               (m1.src.is_preg() && m1.src.preg_val.is_xmm()) ||
                               (m0.dst.size == 16 || m0.dst.size == 32);
-                PReg scratch = is_xmm ? PReg::xmm(XMM::XMM15) : PReg::gpr(GPR::R11);
+                PReg scratch = cycle_scratch(is_xmm);
                 uint8_t sz = m0.dst.size;
                 emit_move(LirOperand::preg(scratch, sz), m0.src);
                 emit_move(m1.dst, m0.dst);
@@ -218,7 +236,7 @@ void EmitContext::emit_parallel_copy(const LirInst& inst) {
             bool is_xmm = (m0.dst.is_preg() && m0.dst.preg_val.is_xmm()) ||
                           (m0.src.is_preg() && m0.src.preg_val.is_xmm()) ||
                           (m0.dst.size == 16 || m0.dst.size == 32);
-            PReg scratch = is_xmm ? PReg::xmm(XMM::XMM15) : PReg::gpr(GPR::R11);
+            PReg scratch = cycle_scratch(is_xmm);
             uint8_t sz = m0.dst.size;
 
             emit_move(LirOperand::preg(scratch, sz), m0.dst);

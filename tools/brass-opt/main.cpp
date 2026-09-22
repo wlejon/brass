@@ -596,7 +596,6 @@ int main(int argc, char** argv) {
         loop_opts.stats = &loop_stats;
         loop_opts.tile_size_i = tile_size;
         loop_opts.tile_size_j = tile_size;
-        loop_opts.tile_size_k = tile_size;
         loop_opts.enable_avx2 = enable_avx2;
         loop_opts.enable_fma = enable_fma;
         loop_opts.vector_width = vector_width;

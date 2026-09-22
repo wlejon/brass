@@ -136,6 +136,64 @@ TEST_CASE("Diamond to Select - Optimization Pass Transformation") {
     CHECK_EQ(abs_diff_fn(7, 7), 0);
 }
 
+// Fuzz seed 3594: %s2 adds the running value of the other accumulator %s1.
+// Jamming split %s1 into partial sums, so %s2 summed partials instead of
+// prefix sums. An accumulator read by anything but its own update is not a
+// reduction; the loop must keep its answer.
+TEST_CASE("Loop Unrolling - an accumulator read by another reduction is not jammed") {
+    const char* text = R"(
+module @unroll_cross_reduction
+
+func @f(%n: i64) -> i64 {
+entry:
+  %zero = iconst.i64 0
+  %one = iconst.i64 1
+  %sh = iconst.i64 28
+  %k = iconst.i64 1099511628211
+  %init2 = iconst.i64 4398046511103
+  br hdr(%zero, %n, %init2)
+
+hdr(%i: i64, %s1: i64, %s2: i64):
+  %c = slt.i64 %i, %n
+  br_if %c, body, exit
+
+body:
+  %t = shl.i64 %i, %sh
+  %s1n = add.i64 %s1, %t
+  %s2n = add.i64 %s2, %s1
+  %in = add.i64 %i, %one
+  br hdr(%in, %s1n, %s2n)
+
+exit:
+  %m = mul.i64 %s1, %k
+  %r = xor.i64 %m, %s2
+  ret %r
+}
+)";
+    DiagnosticReporter diag;
+    auto mod = parse_module(text, &diag);
+    REQUIRE(mod != nullptr);
+    Function* fn = mod->get_function("f");
+    REQUIRE(fn != nullptr);
+
+    const std::vector<int64_t> inputs = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 13, 14};
+    std::vector<int64_t> expected;
+    {
+        Interpreter interp;
+        for (int64_t n : inputs) expected.push_back(interp.run(*fn, {RuntimeValue::from_i64(n)}).as_i64());
+    }
+
+    DominatorTree dom(*fn);
+    loop_unroll_pass(*fn, dom, LoopUnrollOptions{});
+    DiagnosticReporter vdiag;
+    REQUIRE(verify_module(*mod, &vdiag));
+
+    Interpreter interp;
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        CHECK_EQ(interp.run(*fn, {RuntimeValue::from_i64(inputs[i])}).as_i64(), expected[i]);
+    }
+}
+
 TEST_CASE("Loop Unrolling - Reduction Accumulator with Remainder Loops (i64 & f64)") {
     // 1. Integer reduction unrolling (default ON)
     {

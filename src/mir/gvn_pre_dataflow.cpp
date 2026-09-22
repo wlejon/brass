@@ -144,8 +144,11 @@ PreExpression PreExpression::from_instruction(
     if (op_count >= 2) expr.op1 = resolve(inst->operand(1));
     if (op_count >= 3) expr.op2 = resolve(inst->operand(2));
 
-    // Canonicalize commutative operations
-    if (is_pre_commutative_op(expr.opcode) && expr.op0 && expr.op1) {
+    // Canonicalize commutative operations. Operands of different types
+    // (ptr + i64 offset) keep their order: the expression is rebuilt from
+    // it when hoisted, and only the pointer may come first.
+    if (is_pre_commutative_op(expr.opcode) && expr.op0 && expr.op1 &&
+        expr.op0->type() == expr.op1->type()) {
         if (expr.op0->id() > expr.op1->id()) {
             std::swap(expr.op0, expr.op1);
         }
@@ -377,6 +380,12 @@ void PreDataflow::compute_local_info(const PreExpression& expr, const Instructio
                         expr.op0 != nullptr &&
                         aa_.alias(inst->operand(0), inst->offset(), inst->memory_type(),
                                   expr.op0, expr.offset, expr.memory_type) == AliasResult::MustAlias) {
+                        // The stored value is what the load reads from here
+                        // on, but it replaces the location's old value: the
+                        // block is not transparent and a load after the
+                        // store is not anticipated at the block's entry.
+                        memory_clobbered_before_eval = true;
+                        info.transp = false;
                         info.avail_loc = true;
                         info.avail_val = inst->operand(1);
                     } else {

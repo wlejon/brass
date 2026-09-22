@@ -78,6 +78,17 @@ struct ParallelLoopInfo {
     Value* limit_val = nullptr;
     int64_t step = 1;
     Opcode cmp_opcode = Opcode::slt;
+    // With step > 1 and a limit known only at run time, the parallel form is
+    // used when limit <= wrap_free_limit_max (signed for slt, unsigned for
+    // ult); otherwise the original loop runs.
+    bool needs_wrap_guard = false;
+    int64_t wrap_free_limit_max = 0;
+    // Header parameters passed back unchanged by the latch: their value is
+    // the preheader argument throughout.
+    std::vector<size_t> invariant_param_indices;
+    // Values defined before the loop that the loop reads (constants
+    // excluded); the kernel receives them through its context block.
+    std::vector<Value*> captured;
 
     // Cost model estimates
     bool has_const_trip_count = false;

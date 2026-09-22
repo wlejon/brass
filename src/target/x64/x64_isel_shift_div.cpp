@@ -4,6 +4,22 @@ namespace brass::x64 {
 
 using namespace brass::codegen;
 
+bool X64ISel::divisor_folds(const ImmIntInfo& divisor, bool is_mod) noexcept {
+    if (!divisor.is_imm || divisor.val <= 0) return false;
+    const uint64_t c = static_cast<uint64_t>(divisor.val);
+    if ((c & (c - 1)) != 0) return false;
+    // A remainder masks with C - 1 (unsigned) or ~(C - 1) (signed), which
+    // an and-immediate sign-extends from 32 bits: only 2^0 .. 2^31 fit.
+    return !is_mod || c <= (uint64_t{1} << 31);
+}
+
+bool X64ISel::mul_imm_folds(const ImmIntInfo& factor) noexcept {
+    if (!factor.is_imm) return false;
+    if (factor.fits_i32) return true;
+    const uint64_t c = static_cast<uint64_t>(factor.val);
+    return factor.val > 0 && (c & (c - 1)) == 0;
+}
+
 void X64ISel::lower_div_mod(
     const Instruction& inst,
     LirBlock& lir_bb,
@@ -17,9 +33,9 @@ void X64ISel::lower_div_mod(
     uint8_t sz = dst.size;
 
     ImmIntInfo imm1 = get_imm_int_info(op1_val);
-    if (imm1.is_imm && imm1.val > 0) {
+    if (divisor_folds(imm1, is_mod)) {
         uint64_t C = static_cast<uint64_t>(imm1.val);
-        if ((C & (C - 1)) == 0) {
+        {
             int k = 0;
             while ((1ULL << k) < C) k++;
             if (!is_signed) {

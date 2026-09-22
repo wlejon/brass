@@ -94,6 +94,76 @@ TEST_CASE("AArch64 Emit - Direct LirFunction Emission (Arithmetic & Logic)") {
     CHECK_EQ(last_inst, 0xD65F03C0u); // ret
 }
 
+namespace {
+
+// True when `seq` appears as consecutive instruction words in `code`.
+bool contains_words(const uint8_t* code, size_t size, const std::vector<uint32_t>& seq) {
+    for (size_t at = 0; at + seq.size() * 4 <= size; at += 4) {
+        bool hit = true;
+        for (size_t k = 0; k < seq.size() && hit; ++k) hit = read_u32_le(code + at + 4 * k) == seq[k];
+        if (hit) return true;
+    }
+    return false;
+}
+
+constexpr uint32_t kBrkDivZero = 0xD4200000u | (static_cast<uint32_t>(kBrkIntegerDivideByZero) << 5);
+
+} // namespace
+
+// MIR defines division by zero as a program error (x64 faults with #DE);
+// AArch64's sdiv/udiv would quietly return 0, so every division is guarded:
+// cbnz divisor, +8; brk #0xd0; div. (Signed MIN / -1 needs no guard: sdiv
+// already wraps to MIN, and msub turns that into MIN % -1 == 0.)
+TEST_CASE("AArch64 Emit - Integer division traps on a zero divisor") {
+    for (LirOpcode op : {LirOpcode::Idiv, LirOpcode::Idiv32, LirOpcode::Div, LirOpcode::Div32}) {
+        LirFunction fn;
+        fn.name = "div_guard";
+        fn.frame.total_frame_size = 16;
+        auto bb = std::make_unique<LirBlock>(0, "entry");
+        const uint8_t width = (op == LirOpcode::Idiv || op == LirOpcode::Div) ? 8 : 4;
+        auto div = std::make_unique<LirInst>(op);
+        div->add_def(LirOperand::preg_aarch64_gpr(GPR::X0, width));
+        div->add_use(LirOperand::preg_aarch64_gpr(GPR::X1, width));
+        div->add_use(LirOperand::preg_aarch64_gpr(GPR::X2, width));
+        bb->append_inst(std::move(div));
+        bb->append_inst(std::make_unique<LirInst>(LirOpcode::Ret));
+        fn.blocks.push_back(std::move(bb));
+
+        AArch64EmitContext emitter(fn, Target::aarch64_linux());
+        AArch64CompilationResult res = emitter.compile();
+        const bool wide = width == 8;
+        const bool is_signed = op == LirOpcode::Idiv || op == LirOpcode::Idiv32;
+        const uint32_t cbnz_x2 = (wide ? 0xB5000000u : 0x35000000u) | (2u << 5) | 2u;
+        const uint32_t div_x0_x1_x2 = (wide ? 0x9AC00800u : 0x1AC00800u) | (is_signed ? 0x400u : 0u) |
+                                      (2u << 16) | (1u << 5);
+        CHECK(contains_words(res.code_buffer.data(), res.code_buffer.size(), {cbnz_x2, kBrkDivZero, div_x0_x1_x2}));
+    }
+}
+
+TEST_CASE("AArch64 Baseline JIT - Integer division and remainder trap on a zero divisor") {
+    Module mod;
+    Function* fn = mod.create_function("div_rem", Type::i64(), {Type::i64(), Type::i64()});
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    Value* x = b.add_block_param(entry, Type::i64());
+    Value* y = b.add_block_param(entry, Type::i64());
+    Value* q = b.build_sdiv(x, y);
+    Value* r = b.build_umod(q, y);
+    b.build_ret(r);
+    fn->rebuild_cfg_predecessors();
+    REQUIRE(verify_function(*fn));
+
+    BaselineJitCompiler compiler(Target::aarch64_linux());
+    BaselineCompiledFunction compiled = compiler.compile(*fn);
+    REQUIRE(compiled.is_valid());
+    const auto* code = reinterpret_cast<const uint8_t*>(compiled.entry_point());
+    const uint32_t cbnz_x1 = 0xB5000000u | (2u << 5) | 1u;
+    // sdiv x0, x0, x1 and udiv x2, x0, x1 (the remainder's quotient).
+    CHECK(contains_words(code, compiled.code_size(), {cbnz_x1, kBrkDivZero, 0x9AC10C00u}));
+    CHECK(contains_words(code, compiled.code_size(), {cbnz_x1, kBrkDivZero, 0x9AC10802u}));
+}
+
 // =============================================================================
 // Test 2: Control Flow, Branches, and Relocations
 // =============================================================================

@@ -139,27 +139,12 @@ void X64ISel::lower_select(const Instruction& inst, LirBlock& lir_bb) {
 
     if (is_fused_cmp) {
         Opcode cmp_op = cmp_inst->opcode();
-        auto [gpr_c, float_c] = get_comparison_conditions(cmp_op);
+        const Condition gpr_c = get_comparison_conditions(cmp_op).first;
         const Value* lhs = cmp_inst->operand(0);
         const Value* rhs = cmp_inst->operand(1);
 
         if (lhs->type().is_float()) {
-            select_cond = float_c;
-            uint8_t cmp_sz = static_cast<uint8_t>(lhs->type().size_in_bytes());
-            if (cmp_sz == 0) cmp_sz = 4;
-            LirOpcode ucomi_op = (cmp_sz == 4) ? LirOpcode::Ucomiss : LirOpcode::Ucomisd;
-
-            if (rhs && rhs->is_instruction() && can_fuse_load(rhs->defining_instruction(), &inst)) {
-                auto ucomi = std::make_unique<LirInst>(ucomi_op);
-                ucomi->add_use(LirOperand::vreg(get_vreg(lhs), cmp_sz));
-                ucomi->add_use(get_load_mem_operand(rhs->defining_instruction()));
-                lir_bb.append_inst(std::move(ucomi));
-            } else {
-                auto ucomi = std::make_unique<LirInst>(ucomi_op);
-                ucomi->add_use(LirOperand::vreg(get_vreg(lhs), cmp_sz));
-                ucomi->add_use(LirOperand::vreg(get_vreg(rhs), cmp_sz));
-                lir_bb.append_inst(std::move(ucomi));
-            }
+            append_fused_float_compare(*cmp_inst, lir_bb, select_cond);
         } else {
             uint8_t cmp_sz = static_cast<uint8_t>(lhs->type().size_in_bytes());
             if (cmp_sz == 0) cmp_sz = 8;

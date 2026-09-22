@@ -1,4 +1,6 @@
 #include <brass/target/x64/x64_isel.hpp>
+#include <stdexcept>
+#include <string>
 
 namespace brass::x64 {
 
@@ -18,6 +20,42 @@ static constexpr Condition swap_relational_condition(Condition cond) noexcept {
         case Condition::AE:  return Condition::BE;
         default: return cond;
     }
+}
+
+bool X64ISel::fused_float_compare(Opcode cmp, Condition& cond, bool& swap_operands) noexcept {
+    switch (cmp) {
+        case Opcode::slt: cond = Condition::A;  swap_operands = true;  return true;
+        case Opcode::sle: cond = Condition::AE; swap_operands = true;  return true;
+        case Opcode::sgt: cond = Condition::A;  swap_operands = false; return true;
+        case Opcode::sge: cond = Condition::AE; swap_operands = false; return true;
+        default: return false;
+    }
+}
+
+bool X64ISel::comparison_fusible(const Instruction& cmp) noexcept {
+    if (!is_comparison(cmp.opcode()) || cmp.operand_count() < 2 || !cmp.operand(0)) return false;
+    const Type t = cmp.operand(0)->type();
+    if (t.is_vector()) return false;
+    if (!t.is_float()) return true;
+    Condition cond = Condition::None;
+    bool swap = false;
+    return fused_float_compare(cmp.opcode(), cond, swap);
+}
+
+void X64ISel::append_fused_float_compare(const Instruction& cmp, LirBlock& lir_bb, Condition& cond) {
+    bool swap = false;
+    if (!fused_float_compare(cmp.opcode(), cond, swap)) {
+        throw std::logic_error("x64 isel: floating-point " + std::string(opcode_name(cmp.opcode())) +
+                               " cannot be fused into its user");
+    }
+    const Value* a = swap ? cmp.operand(1) : cmp.operand(0);
+    const Value* b = swap ? cmp.operand(0) : cmp.operand(1);
+    uint8_t sz = static_cast<uint8_t>(cmp.operand(0)->type().size_in_bytes());
+    if (sz == 0) sz = 8;
+    auto ucomi = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Ucomiss : LirOpcode::Ucomisd);
+    ucomi->add_use(LirOperand::vreg(get_vreg(a), sz));
+    ucomi->add_use(LirOperand::vreg(get_vreg(b), sz));
+    lir_bb.append_inst(std::move(ucomi));
 }
 
 void X64ISel::lower_comparison(

@@ -481,6 +481,12 @@ public:
 
 std::string to_string(const LirBlock& block);
 
+// Records the CFG edge from -> to (once). Liveness runs over these edges, so
+// every block instruction selection creates (an edge trampoline carrying
+// block arguments, a deopt exit) must be linked to the blocks it connects,
+// or the values it reads are not live on the way there.
+void link_blocks(LirBlock& from, LirBlock& to);
+
 struct VRegInfo {
     VReg vreg;
     PReg assigned_preg;

@@ -102,9 +102,11 @@ bool PeepholeOptimizer::eliminate_redundant_moves(LirBlock& block) {
     auto it = block.instructions.begin();
     while (it != block.instructions.end()) {
         const auto& inst = **it;
+        // A GPR mov32 to itself is not a no-op: it zeroes the upper half,
+        // which is how trunc.i32 / zext.i64 are lowered.
         if (!is_protected(inst) &&
-            (inst.opcode == LirOpcode::Mov || inst.opcode == LirOpcode::Mov32 ||
-             inst.opcode == LirOpcode::Movsd || inst.opcode == LirOpcode::Movss) &&
+            (inst.opcode == LirOpcode::Mov || inst.opcode == LirOpcode::Movsd ||
+             inst.opcode == LirOpcode::Movss) &&
             inst.defs.size() >= 1 && inst.uses.size() >= 1 &&
             inst.defs[0].is_preg() && inst.uses[0].is_preg() &&
             inst.defs[0].preg_val == inst.uses[0].preg_val) {
@@ -164,11 +166,20 @@ bool PeepholeOptimizer::eliminate_load_after_store(LirBlock& block) {
             if (defines_register(candidate, store_src_reg)) {
                 break;
             }
-            if (candidate.defs.size() >= 1 && (candidate.defs[0].is_mem() || candidate.defs[0].is_spill_slot())) {
-                if (operands_equal(candidate.defs[0], store_loc) || candidate.defs[0].is_mem()) {
-                    break;
+            // The same operand text names another address once its base or
+            // index register is redefined.
+            if (store_loc.is_mem() &&
+                ((store_loc.mem_val.base_preg.is_valid() && defines_register(candidate, store_loc.mem_val.base_preg)) ||
+                 (store_loc.mem_val.index_preg.is_valid() && defines_register(candidate, store_loc.mem_val.index_preg)))) {
+                break;
+            }
+            bool writes_memory = false;
+            for (const auto& d : candidate.defs) {
+                if (d.is_mem() || (d.is_spill_slot() && (!store_loc.is_spill_slot() || d.spill_slot == store_loc.spill_slot))) {
+                    writes_memory = true;
                 }
             }
+            if (writes_memory) break;
         }
     }
     return changed;
@@ -199,7 +210,10 @@ bool PeepholeOptimizer::eliminate_dead_moves(LirBlock& block) {
             if (candidate.is_call() || candidate.is_branch() || candidate.is_terminator() || is_protected(candidate)) {
                 break;
             }
-            if (candidate.defs.size() >= 1 && candidate.defs[0].is_preg() && candidate.defs[0].preg_val == target_reg) {
+            // Only a full-width redefinition kills the value: an 8- or
+            // 16-bit write keeps the rest of the register.
+            if (candidate.defs.size() >= 1 && candidate.defs[0].is_preg() && candidate.defs[0].preg_val == target_reg &&
+                candidate.defs[0].size >= 4) {
                 is_dead = true;
                 break;
             }
@@ -415,6 +429,12 @@ bool PeepholeOptimizer::propagate_copies(LirBlock& block) {
 
             for (size_t u_idx = 0; u_idx < candidate.uses.size(); ++u_idx) {
                 if (!candidate.defs.empty() && candidate.defs[0].is_preg() && candidate.defs[0].preg_val == dst_reg) {
+                    continue;
+                }
+                // An operand pinned to its register (idiv's RAX, a shift's
+                // CL, a call argument) is read from that register whatever
+                // the operand says; renaming it would only hide the read.
+                if (u_idx < candidate.use_constraints.size() && candidate.use_constraints[u_idx].has_fixed_preg) {
                     continue;
                 }
                 if (candidate.uses[u_idx].is_preg() && candidate.uses[u_idx].preg_val == dst_reg &&

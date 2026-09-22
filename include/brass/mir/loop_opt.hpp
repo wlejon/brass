@@ -61,8 +61,6 @@ struct LoopOptOptions {
     bool dump_loop_transform_stats = false;
     size_t tile_size_i = 16;
     size_t tile_size_j = 16;
-    size_t tile_size_k = 16;
-    bool enable_loop_interchange = true;
     LoopUnswitchOptions unswitch_options;
     JumpThreadingOptions jump_threading_options;
     DemoteStats* demote_stats = nullptr;

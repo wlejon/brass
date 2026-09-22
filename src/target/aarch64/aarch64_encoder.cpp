@@ -859,6 +859,17 @@ void AArch64Encoder::brk(uint16_t imm) {
     buffer_.emit_inst(0xD4200000u | (static_cast<uint32_t>(imm) << 5));
 }
 
+void AArch64Encoder::brk_if_zero(GPR reg, bool is_64bit, uint16_t imm) {
+    Label ok = buffer_.create_label();
+    if (is_64bit) {
+        cbnz(reg, ok);
+    } else {
+        cbnz32(reg, ok);
+    }
+    brk(imm);
+    buffer_.bind(ok);
+}
+
 void AArch64Encoder::adr(GPR dst, Label target) {
     size_t patch_off = buffer_.size();
     if (buffer_.is_bound(target)) {

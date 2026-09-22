@@ -9,22 +9,9 @@ bool tile_loop_nest(
     const DominatorTree& dom,
     const LoopTileOptions& options
 ) {
-    if (!nest.is_tileable()) {
-        return false;
-    }
-
-    if (nest.depth() == 2) {
-        return transform_2d_loop_nest(fn, nest, dom, options);
-    }
-
-    if (nest.depth() == 3) {
-        if (nest.is_matrix_multiply()) {
-            return transform_3d_matmul_loop_nest(fn, nest, dom, options);
-        }
-        return transform_3d_generic_loop_nest(fn, nest, dom, options);
-    }
-
-    return false;
+    (void)dom;
+    if (nest.depth() < 2 || !nest.level(0).loop) return false;
+    return tile_2d_loop_nest(fn, *nest.level(0).loop, options);
 }
 
 bool tile_loop_nest(
@@ -40,17 +27,13 @@ bool loop_tile_pass(
     const DominatorTree& dom,
     const LoopTileOptions& options
 ) {
-    LoopNestAnalysis nest_analysis(fn, dom);
-
-    bool any_changed = false;
-    for (const auto& nest : nest_analysis.nests()) {
-        if (nest && tile_loop_nest(fn, *nest, dom, options)) {
-            any_changed = true;
-            break;
-        }
+    fn.rebuild_cfg_predecessors();
+    LoopAnalysis loops(fn, dom);
+    for (const auto& top : loops.top_level_loops()) {
+        // One nest per call: the transform changes the CFG under the analysis.
+        if (top && tile_2d_loop_nest(fn, *top, options)) return true;
     }
-
-    return any_changed;
+    return false;
 }
 
 bool loop_tile_pass(

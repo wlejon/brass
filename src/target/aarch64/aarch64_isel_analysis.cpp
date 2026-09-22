@@ -64,6 +64,12 @@ void AArch64ISel::analyze_function(const Function& mir_fn) {
             for (const auto* arg : inst->false_target().args) {
                 if (arg) use_count_[arg]++;
             }
+            // Switch case arguments are uses too (see the x64 selector).
+            for (const auto& sc : inst->switch_cases()) {
+                for (const auto* arg : sc.target.args) {
+                    if (arg) use_count_[arg]++;
+                }
+            }
             for (const auto* sv : inst->state_map()) {
                 if (sv) use_count_[sv]++;
             }

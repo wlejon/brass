@@ -45,8 +45,11 @@ inline bool is_fp_reduction(ReductionKind k) noexcept {
 
 inline int64_t combine_reduction_i64(ReductionKind kind, int64_t acc, int64_t val) noexcept {
     switch (kind) {
-        case ReductionKind::SumI64: return acc + val;
-        case ReductionKind::ProdI64: return acc * val;
+        // MIR integer arithmetic wraps; combine in unsigned to match it.
+        case ReductionKind::SumI64:
+            return static_cast<int64_t>(static_cast<uint64_t>(acc) + static_cast<uint64_t>(val));
+        case ReductionKind::ProdI64:
+            return static_cast<int64_t>(static_cast<uint64_t>(acc) * static_cast<uint64_t>(val));
         case ReductionKind::MinI64: return std::min(acc, val);
         case ReductionKind::MaxI64: return std::max(acc, val);
         default: return acc;

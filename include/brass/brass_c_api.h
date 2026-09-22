@@ -150,6 +150,10 @@ BRASS_API BrassBlock BRASS_CALL brass_function_append_block(BrassFunction fn, co
 BRASS_API BrassValue BRASS_CALL brass_block_add_param(BrassBlock blk, BrassType type);
 BRASS_API BrassValue BRASS_CALL brass_block_get_param(BrassBlock blk, size_t index);
 BRASS_API BrassValue BRASS_CALL brass_function_get_param(BrassFunction fn, size_t index);
+/* Promises that pointer parameter `index` is the only way the function
+ * reaches the object it points to (C `restrict`). Loop parallelization and
+ * tiling rely on it to tell arrays apart. */
+BRASS_API BrassStatus BRASS_CALL brass_function_set_param_noalias(BrassFunction fn, size_t index, int noalias);
 
 /* ========================================================================= */
 /* IR Builder                                                                */

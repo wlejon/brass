@@ -636,8 +636,6 @@ bool optimize_function_loops(Function& fn, const LoopOptOptions& options) {
         LoopTileOptions tile_opts;
         tile_opts.tile_size_i = options.tile_size_i;
         tile_opts.tile_size_j = options.tile_size_j;
-        tile_opts.tile_size_k = options.tile_size_k;
-        tile_opts.enable_loop_interchange = options.enable_loop_interchange;
         if (loop_tile_pass(fn, dom, tile_opts)) {
             any_changed = true;
             fn.rebuild_cfg_predecessors();
@@ -833,7 +831,9 @@ bool optimize_module_loops(Module& mod, const LoopOptOptions& options) {
     mod.set_has_loop_optimizations(true);
     LoopOptOptions mod_opts = options;
     if (mod.allow_fp_reassociation()) mod_opts.enable_fp_reassociation = true;
-    for (Function* fn : mod.functions()) {
+    // A snapshot: auto-parallelization adds kernel functions to the module.
+    const std::vector<Function*> fns = mod.functions();
+    for (Function* fn : fns) {
         if (fn && !fn->name().starts_with("__wrapper_")) changed |= optimize_function_loops(*fn, mod_opts);
     }
     return changed;
@@ -949,7 +949,9 @@ bool optimize_module(Module& mod, const LoopOptOptions& options) {
     mod.set_has_loop_optimizations(true);
     LoopOptOptions mod_opts = options;
     if (mod.allow_fp_reassociation()) mod_opts.enable_fp_reassociation = true;
-    for (Function* fn : mod.functions()) {
+    // A snapshot: auto-parallelization adds kernel functions to the module.
+    const std::vector<Function*> fns = mod.functions();
+    for (Function* fn : fns) {
         if (fn) changed |= optimize_function(*fn, mod_opts);
     }
     return changed;

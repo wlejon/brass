@@ -716,18 +716,17 @@ bool IrMutator::split_basic_blocks(Function& fn, FuzzRng& rng) {
     // Insert unconditional jump from bb to new_bb
     b.position_at_end(bb);
     b.build_br(new_bb);
+    Instruction* br_inst = bb->tail();
 
     fn.rebuild_cfg_predecessors();
 
     if (!verify_function(fn)) {
-        // Rollback
+        // Rollback: drop the jump first, so the moved instructions (and the
+        // original terminator) go back after the last kept instruction.
+        bb->remove_instruction(br_inst);
         for (Instruction* inst : to_move) {
             new_bb->remove_instruction(inst);
             bb->append_instruction(inst);
-        }
-        Instruction* br_inst = bb->tail();
-        if (br_inst && br_inst->opcode() == Opcode::br && br_inst->branch_target().block == new_bb) {
-            bb->remove_instruction(br_inst);
         }
         fn.remove_block(new_bb);
         fn.rebuild_cfg_predecessors();

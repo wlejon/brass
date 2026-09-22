@@ -151,7 +151,9 @@ add_executable(brass_unit_tests
     unit/test_bounds_check_elim.cpp
     unit/test_optimizer_soundness.cpp
     unit/test_optimizer_soundness_passes.cpp
+    unit/test_loop_parallel_tile_soundness.cpp
     unit/test_fuzz_pipelines.cpp
+    unit/test_jit_fuzz_regressions.cpp
     unit/test_type_feedback.cpp
     unit/test_speculative_inlining.cpp
     unit/test_baseline_jit.cpp

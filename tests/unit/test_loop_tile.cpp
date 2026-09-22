@@ -338,7 +338,7 @@ TEST_CASE("Loop Tile - 2D Matrix Copy, Transpose, and Scale") {
 }
 
 TEST_CASE("Loop Tile - 3D Matrix Multiplication Loop Nest Tiling (i, j, k)") {
-    // 1. Standard 3D Tiling (enable_loop_interchange = false)
+    // 1. Tiling (i, j); the k reduction runs whole inside each point.
     {
         auto mod = build_3d_matmul_module("test_matmul_standard");
         Function* fn = mod->get_function("matmul");
@@ -348,8 +348,6 @@ TEST_CASE("Loop Tile - 3D Matrix Multiplication Loop Nest Tiling (i, j, k)") {
         LoopTileOptions opts;
         opts.tile_size_i = 4;
         opts.tile_size_j = 4;
-        opts.tile_size_k = 4;
-        opts.enable_loop_interchange = false;
 
         bool changed = loop_tile_pass(*fn, dom, opts);
         CHECK(changed);
@@ -394,9 +392,11 @@ TEST_CASE("Loop Tile - 3D Matrix Multiplication Loop Nest Tiling (i, j, k)") {
         }
     }
 
-    // 2. Cache-Friendly Interchanged 3D Tiling (enable_loop_interchange = true)
+    // 2. The kernel stores C = sum, ignoring what C held: a tiling that
+    //    accumulates into C instead (as an i-k-j interchange did) is caught
+    //    by starting from a non-zero C.
     {
-        auto mod = build_3d_matmul_module("test_matmul_interchanged");
+        auto mod = build_3d_matmul_module("test_matmul_prior_c");
         Function* fn = mod->get_function("matmul");
         REQUIRE(fn != nullptr);
 
@@ -404,8 +404,6 @@ TEST_CASE("Loop Tile - 3D Matrix Multiplication Loop Nest Tiling (i, j, k)") {
         LoopTileOptions opts;
         opts.tile_size_i = 4;
         opts.tile_size_j = 4;
-        opts.tile_size_k = 4;
-        opts.enable_loop_interchange = true;
 
         bool changed = loop_tile_pass(*fn, dom, opts);
         CHECK(changed);
@@ -423,8 +421,8 @@ TEST_CASE("Loop Tile - 3D Matrix Multiplication Loop Nest Tiling (i, j, k)") {
         const int64_t N = 8;
         std::vector<int64_t> A(N * N, 2);
         std::vector<int64_t> B(N * N, 3);
-        std::vector<int64_t> C(N * N, 0);
-        std::vector<int64_t> C_interp2(N * N, 0);
+        std::vector<int64_t> C(N * N, 7);
+        std::vector<int64_t> C_interp2(N * N, 7);
 
         Interpreter interp2;
         interp2.run(*fn, {
@@ -456,8 +454,6 @@ TEST_CASE("Loop Tile - Non-Multiple Tile Bounds with Remainder Peeling (23x23, 3
         LoopTileOptions opts;
         opts.tile_size_i = 16;
         opts.tile_size_j = 16;
-        opts.tile_size_k = 16;
-        opts.enable_loop_interchange = false;
 
         bool changed = loop_tile_pass(*fn, dom, opts);
         CHECK(changed);

@@ -58,8 +58,30 @@ private:
         int32_t disp = 0;
         std::vector<const Instruction*> folded_instructions;
     };
+    // The memory operand for a matched address. Its base and index values
+    // must have registers: one without would silently drop out of the
+    // address, so that is a hard error.
+    codegen::LirOperand mem_operand(const MemFold& mf, uint8_t size) const;
 
     ImmIntInfo get_imm_int_info(const Value* val) const;
+    // True when lower_div_mod turns division by this constant into shifts
+    // and masks, so the divisor needs no register. The use analysis and the
+    // lowering must agree on this, or the divisor is left without one.
+    static bool divisor_folds(const ImmIntInfo& divisor, bool is_mod) noexcept;
+    // Likewise for integer multiplication by a constant (lower_binary_alu).
+    static bool mul_imm_folds(const ImmIntInfo& factor) noexcept;
+    // A floating-point comparison fused into a branch, select or guard is
+    // one ucomis and one flags condition. That is exact only for the ordered
+    // relations: a < b is ucomis(b, a) + A, a <= b is ucomis(b, a) + AE, and
+    // so on, all false on unordered operands. Equality needs the parity
+    // flag as well, so eq / ne (and the unsigned predicates) are not fused.
+    static bool fused_float_compare(Opcode cmp, Condition& cond, bool& swap_operands) noexcept;
+    // Whether analyze_function may fold this comparison into its single
+    // branch / select / guard user.
+    static bool comparison_fusible(const Instruction& cmp) noexcept;
+    // Emits the ucomis of a fused floating-point comparison and returns the
+    // condition that holds exactly when the comparison is true.
+    void append_fused_float_compare(const Instruction& cmp, codegen::LirBlock& lir_bb, Condition& cond);
     MemFold match_address(const Value* ptr, int32_t offset) const;
     MemFold match_indexed_address(const Value* base, const Value* index, Scale scale, int32_t offset) const;
     bool can_fuse_load(const Instruction* load_inst, const Instruction* user_inst) const;

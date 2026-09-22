@@ -207,22 +207,23 @@ void X64ISel::lower_safepoint(const Instruction& inst, LirBlock& lir_bb) {
 void X64ISel::lower_guard(const Instruction& inst, LirBlock& lir_bb) {
     const Value* cond_val = inst.operand(0);
     const Instruction* cmp_inst = cond_val ? cond_val->defining_instruction() : nullptr;
-    bool is_fused_cmp = cmp_inst && cmp_inst->parent() == inst.parent() && is_comparison(cmp_inst->opcode());
+    // Only a comparison the analysis folded into this guard is recomputed.
+    bool is_fused_cmp = cmp_inst && cmp_inst->parent() == inst.parent() && is_comparison(cmp_inst->opcode()) &&
+                        skipped_insts_.count(cmp_inst);
 
     Condition deopt_cond = Condition::E;
 
     if (is_fused_cmp) {
         Opcode cmp_op = cmp_inst->opcode();
-        auto [gpr_c, float_c] = get_comparison_conditions(cmp_op);
+        const Condition gpr_c = get_comparison_conditions(cmp_op).first;
         const Value* lhs = cmp_inst->operand(0);
         const Value* rhs = cmp_inst->operand(1);
 
         if (lhs->type().is_float()) {
-            deopt_cond = invert(float_c);
-            auto ucomi = std::make_unique<LirInst>(LirOpcode::Ucomisd);
-            ucomi->add_use(LirOperand::vreg(get_vreg(lhs), 8));
-            ucomi->add_use(LirOperand::vreg(get_vreg(rhs), 8));
-            lir_bb.append_inst(std::move(ucomi));
+            // Unordered operands make the comparison false: deoptimize.
+            Condition holds = Condition::None;
+            append_fused_float_compare(*cmp_inst, lir_bb, holds);
+            deopt_cond = invert(holds);
         } else {
             uint8_t sz = static_cast<uint8_t>(lhs->type().size_in_bytes());
             if (sz == 0) sz = 8;
@@ -305,6 +306,7 @@ void X64ISel::lower_guard(const Instruction& inst, LirBlock& lir_bb) {
     }
 
     auto* deopt_block = lir_fn_->create_block("guard_deopt");
+    link_blocks(lir_bb, *deopt_block);
 
     auto jcc_inst = std::make_unique<LirInst>(LirOpcode::Jcc);
     jcc_inst->condition = deopt_cond;

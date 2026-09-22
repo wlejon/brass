@@ -1,766 +1,325 @@
+// Tiling of the outer two loops of a nest, done in place:
+//
+//   for i in [i0, N):                 for it = i0; it < N; it = iend:
+//     pre(i)                            iend = min(it + Ti, N)
+//     for j in [j0, M):        ==>      for jt = j0; jt < M; jt = jend:
+//       body(i, j)                        jend = min(jt + Tj, M)
+//     post(i)                             for i in [it, iend):
+//                                           pre(i)
+//                                           for j in [jt, jend): body(i, j)
+//                                           post(i)
+//
+// The original loops keep their blocks; only their bounds and the outer
+// loop's exit change. That is exact when:
+//   - both loops count up by 1 under slt/ult with bounds fixed for the nest,
+//     carry nothing but their induction variable, and leave only through
+//     their header (so the inner loop runs at most once per outer iteration);
+//   - everything the outer loop does outside the inner loop, and both
+//     headers, is pure and cannot trap, so running it once per (i, tile)
+//     instead of once per i changes nothing;
+//   - the inner loop's body has no effect but plain loads and stores, and no
+//     two iterations whose order tiling swaps (i1 < i2 with j1 > j2) touch
+//     the same bytes where one of them writes.
+// Loops deeper in the nest run whole inside each (i, j) iteration.
+
 #include "loop_tile_transform.hpp"
+#include "ir_clone.hpp"
+#include "loop_affine.hpp"
+#include <brass/mir/alias_analysis.hpp>
 #include <brass/mir/opcodes.hpp>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
-#include <algorithm>
+#include <cstdlib>
+#include <limits>
+#include <string>
 
 namespace brass {
 
 namespace {
 
-Value* build_const_int(Builder& b, Type t, int64_t val) {
-    if (t == Type::i32()) {
-        return b.build_iconst_i32(static_cast<int32_t>(val));
-    }
-    return b.build_iconst_i64(val);
+struct CountedLoop {
+    LoopInfo* loop = nullptr;
+    BasicBlock* header = nullptr;
+    BasicBlock* preheader = nullptr;
+    Instruction* hdr_term = nullptr;
+    Value* iv = nullptr;
+    Value* init = nullptr;
+    Value* limit = nullptr;
+    Opcode pred = Opcode::slt;
+};
+
+bool available_for(const LoopInfo& nest, const Value* v) {
+    return affine::defined_outside(nest, v) || affine::is_plain_constant(v);
 }
 
-Value* build_min_bound(Builder& b, Value* a, Value* limit, Opcode cmp_op) {
-    Value* cmp = nullptr;
-    switch (cmp_op) {
-        case Opcode::slt: cmp = b.build_slt(a, limit); break;
-        case Opcode::ult: cmp = b.build_ult(a, limit); break;
-        case Opcode::sle: cmp = b.build_sle(a, limit); break;
-        case Opcode::ule: cmp = b.build_ule(a, limit); break;
-        default: cmp = b.build_slt(a, limit); break;
+// A loop `for (iv = init; iv pred limit; iv += 1)` with one entry and one
+// exit (the header's false edge), carrying nothing but iv.
+bool match_counted(LoopInfo& loop, const LoopInfo& nest, CountedLoop& out) {
+    BasicBlock* header = loop.header();
+    if (!header || loop.latches().size() != 1 || header->param_count() != 1) return false;
+    Instruction* latch_term = loop.latches()[0]->terminator();
+    if (!latch_term || latch_term->opcode() != Opcode::br || latch_term->branch_target().block != header) return false;
+
+    BasicBlock* preheader = nullptr;
+    for (BasicBlock* pred : header->predecessors()) {
+        if (!pred || loop.contains(pred)) continue;
+        if (preheader && preheader != pred) return false;
+        preheader = pred;
     }
-    return b.build_select(cmp, a, limit);
+    Instruction* ph_term = preheader ? preheader->terminator() : nullptr;
+    if (!ph_term || ph_term->opcode() != Opcode::br || ph_term->branch_target().block != header) return false;
+
+    Instruction* hdr_term = header->terminator();
+    if (!hdr_term || hdr_term->opcode() != Opcode::br_if) return false;
+    BasicBlock* exit = hdr_term->false_target().block;
+    if (!loop.contains(hdr_term->true_target().block) || !exit || loop.contains(exit)) return false;
+    for (BasicBlock* bb : loop.blocks()) {
+        for (BasicBlock* succ : bb->successors()) {
+            if (!loop.contains(succ) && !(bb == header && succ == exit)) return false;
+        }
+    }
+
+    Value* iv = header->param(0);
+    if (iv->type() != Type::i32() && iv->type() != Type::i64()) return false;
+    Value* cond = hdr_term->operand(0);
+    Instruction* cmp = cond && cond->is_instruction() ? cond->defining_instruction() : nullptr;
+    if (!cmp || cmp->parent() != header || (cmp->opcode() != Opcode::slt && cmp->opcode() != Opcode::ult) ||
+        cmp->operand(0) != iv || !available_for(nest, cmp->operand(1))) {
+        return false;
+    }
+
+    Value* next = latch_term->branch_target().args[0];
+    Instruction* inc = next && next->is_instruction() ? next->defining_instruction() : nullptr;
+    int64_t step = 0;
+    if (!inc || inc->opcode() != Opcode::add ||
+        !((inc->operand(0) == iv && affine::is_int_constant(inc->operand(1), step)) ||
+          (inc->operand(1) == iv && affine::is_int_constant(inc->operand(0), step))) ||
+        step != 1) {
+        return false;
+    }
+    Value* init = ph_term->branch_target().args[0];
+    if (!available_for(nest, init)) return false;
+
+    out.loop = &loop;
+    out.header = header;
+    out.preheader = preheader;
+    out.hdr_term = hdr_term;
+    out.iv = iv;
+    out.init = init;
+    out.limit = cmp->operand(1);
+    out.pred = cmp->opcode();
+    return true;
 }
 
-void clone_block_instructions(
-    Function& fn,
-    BasicBlock* src_bb,
-    BasicBlock* dst_bb,
-    std::unordered_map<const Value*, Value*>& val_map
-) {
-    if (!src_bb || !dst_bb) return;
+bool is_zero(const Value* v) {
+    int64_t c = 0;
+    return affine::is_int_constant(v, c) && c == 0;
+}
 
-    for (Instruction* inst = src_bb->head(); inst != nullptr; inst = inst->next()) {
-        if (inst->is_terminator()) break;
+// The coefficient `c * (limit of `loop`)` a row index needs for the address
+// to be (row * range + col) * c with col in [0, range).
+bool is_row_stride(const std::pair<const Value*, int64_t>& term, const CountedLoop& col, int64_t c) {
+    int64_t lim = 0;
+    if (affine::is_int_constant(col.limit, lim)) {
+        int64_t want = 0;
+        return term.first == nullptr && affine::checked_mul(c, lim, want) && term.second == want;
+    }
+    return term.first == col.limit && term.second == c;
+}
 
-        Instruction* cloned = fn.parent()->arena().make<Instruction>(inst->opcode(), inst->type());
-        cloned->set_imm_i64(inst->imm_i64());
-        cloned->set_imm_f64(inst->imm_f64());
-        cloned->set_scale(inst->scale());
-        cloned->set_offset(inst->offset());
-        cloned->set_memory_type(inst->memory_type());
-        if (!inst->symbol().empty()) {
-            cloned->set_symbol(fn.parent()->string_pool().intern(inst->symbol()));
+// True when the address differs between any two iterations (i1, j1) and
+// (i2, j2) with i1 != i2 and j1 != j2 by at least the access size: then the
+// iterations tiling reorders never touch the same bytes.
+bool distinct_on_swapped_pairs(const affine::Form& f, const CountedLoop& outer, const CountedLoop& inner) {
+    std::vector<std::pair<const Value*, int64_t>> ti, tj;
+    for (const auto& [key, coeff] : f.terms) {
+        if (key.first == outer.iv) ti.emplace_back(key.second, coeff);
+        else if (key.first == inner.iv) tj.emplace_back(key.second, coeff);
+        else return false;
+    }
+    if (ti.size() > 1 || tj.size() > 1 || (ti.empty() && tj.empty())) return false;
+    const int64_t size = static_cast<int64_t>(f.size);
+    auto unit = [size](const std::pair<const Value*, int64_t>& t) {
+        return t.first == nullptr && std::llabs(t.second) >= size;
+    };
+    if (tj.empty()) return unit(ti[0]);
+    if (ti.empty()) return unit(tj[0]);
+    // Row-major over (i, j), or column-major (j selects the row).
+    if (unit(tj[0]) && is_zero(inner.init) && is_row_stride(ti[0], inner, tj[0].second)) return true;
+    if (unit(ti[0]) && is_zero(outer.init) && is_row_stride(tj[0], outer, ti[0].second)) return true;
+    return false;
+}
+
+bool region_instruction_ok(const Instruction& inst) {
+    if (affine::is_pure_nontrapping(inst)) return true;
+    const Opcode op = inst.opcode();
+    return affine::is_plain_memory_access(op) || op == Opcode::br || op == Opcode::br_if || op == Opcode::switch_;
+}
+
+bool control_or_pure(const Instruction& inst) {
+    const Opcode op = inst.opcode();
+    return affine::is_pure_nontrapping(inst) || op == Opcode::br || op == Opcode::br_if || op == Opcode::switch_;
+}
+
+bool legal(Function& fn, const CountedLoop& outer, const CountedLoop& inner) {
+    LoopInfo& l0 = *outer.loop;
+    LoopInfo& l1 = *inner.loop;
+
+    for (BasicBlock* bb : l0.blocks()) {
+        const bool in_region = l1.contains(bb) && bb != inner.header;
+        for (Instruction* inst : *bb) {
+            if (in_region ? !region_instruction_ok(*inst) : !control_or_pure(*inst)) return false;
         }
+    }
 
-        for (Value* op : inst->operands()) {
-            if (!op) continue;
-            auto it = val_map.find(op);
-            cloned->add_operand(it != val_map.end() ? it->second : op);
+    // What leaves each loop must not depend on how its iterations were cut.
+    if (affine::used_outside(fn, l1, inner.iv)) return false;
+    for (Value* a : inner.hdr_term->false_target().args) {
+        if (!affine::defined_outside(l1, a) && !affine::is_plain_constant(a)) return false;
+    }
+    for (Instruction* inst : *inner.header) {
+        if (inst->result() && affine::used_outside(fn, l1, inst->result())) return false;
+    }
+    for (Value* a : outer.hdr_term->false_target().args) {
+        if (a != outer.iv && !available_for(l0, a)) return false;
+    }
+    for (Instruction* inst : *outer.header) {
+        if (inst->result() && affine::used_outside(fn, l0, inst->result())) return false;
+    }
+
+    const std::vector<const Value*> ivs = {outer.iv, inner.iv};
+    const affine::InvariantFn invariant = [&l0](const Value* v) { return affine::defined_outside(l0, v); };
+    std::vector<affine::Form> forms;
+    for (BasicBlock* bb : l1.blocks()) {
+        for (Instruction* inst : *bb) {
+            if (affine::is_plain_memory_access(inst->opcode())) forms.push_back(affine::address_form(*inst, ivs, invariant));
         }
-
-        if (inst->produces_value()) {
-            Value* res = fn.parent()->arena().make<Value>(
-                fn.next_value_id(), inst->type(), ValueKind::InstructionResult);
-            res->set_defining_instruction(cloned);
-            cloned->set_result(res);
-            val_map[inst->result()] = res;
+    }
+    AliasAnalysis aa(fn);
+    for (size_t a = 0; a < forms.size(); ++a) {
+        for (size_t b = a; b < forms.size(); ++b) {
+            if (!forms[a].is_store && !forms[b].is_store) continue;
+            if (affine::same_form(forms[a], forms[b]) && distinct_on_swapped_pairs(forms[a], outer, inner)) continue;
+            if (affine::distinct_objects(aa, forms[a].pointer, forms[b].pointer)) continue;
+            return false;
         }
+    }
+    return true;
+}
 
-        dst_bb->append_instruction(cloned);
+Value* available_value(Builder& b, const LoopInfo& nest, Value* v) {
+    if (affine::defined_outside(nest, v)) return v;
+    const Instruction* def = v->defining_instruction();
+    switch (def->opcode()) {
+        case Opcode::iconst_i32: return b.build_iconst_i32(def->imm_i32());
+        case Opcode::iconst_i64: return b.build_iconst_i64(def->imm_i64());
+        default: return b.build_fconst_f64(def->imm_f64());
     }
 }
 
-static void remove_nest_blocks(Function& fn, const LoopNest& nest, BasicBlock* preheader, BasicBlock* outer_exit_bb) {
-    std::unordered_set<BasicBlock*> to_remove;
-    for (size_t l = 0; l < nest.depth(); ++l) {
-        const auto& lvl = nest.level(l);
-        for (BasicBlock* bb : lvl.blocks) {
-            if (bb && bb != outer_exit_bb && bb != preheader) {
-                to_remove.insert(bb);
-            }
-        }
-        for (BasicBlock* bb : {lvl.header, lvl.body, lvl.latch, lvl.exit_bb}) {
-            if (bb && bb != outer_exit_bb && bb != preheader) {
-                to_remove.insert(bb);
-            }
-        }
-    }
-    if (nest.reduction_store_block() && nest.reduction_store_block() != outer_exit_bb && nest.reduction_store_block() != preheader) {
-        to_remove.insert(nest.reduction_store_block());
-    }
+Value* build_cmp(Builder& b, Opcode pred, Value* lhs, Value* rhs) {
+    return pred == Opcode::slt ? b.build_slt(lhs, rhs) : b.build_ult(lhs, rhs);
+}
 
-    for (BasicBlock* bb : to_remove) {
-        fn.remove_block(bb);
-    }
-    fn.rebuild_cfg_predecessors();
+// min(start + tile, limit) for start below limit, without overflowing:
+// the remaining distance limit - start is exact as an unsigned value.
+Value* build_tile_end(Builder& b, Value* start, Value* limit, Type t, int64_t tile) {
+    Value* tile_c = t == Type::i32() ? b.build_iconst_i32(static_cast<int32_t>(tile)) : b.build_iconst_i64(tile);
+    Value* remaining = b.build_sub(limit, start);
+    Value* more = b.build_ugt(remaining, tile_c);
+    return b.build_select(more, b.build_add(start, tile_c), limit);
+}
+
+bool tile_sizes_ok(const LoopTileOptions& options, Type ti, Type tj) {
+    auto fits = [](size_t s, Type t) {
+        const size_t max = t == Type::i32() ? static_cast<size_t>(std::numeric_limits<int32_t>::max())
+                                            : static_cast<size_t>(std::numeric_limits<int64_t>::max());
+        return s >= 2 && s <= max;
+    };
+    return fits(options.tile_size_i, ti) && fits(options.tile_size_j, tj);
 }
 
 } // namespace
 
-bool transform_2d_loop_nest(
-    Function& fn,
-    LoopNest& nest,
-    const DominatorTree& dom,
-    const LoopTileOptions& options
-) {
-    (void)dom;
-    if (nest.depth() < 2) return false;
+bool tile_2d_loop_nest(Function& fn, LoopInfo& outer_loop, const LoopTileOptions& options) {
+    if (outer_loop.sub_loops().size() != 1) return false;
+    LoopInfo& inner_loop = *outer_loop.sub_loops()[0];
+    if (outer_loop.header() && outer_loop.header()->name().find("_2dt") != std::string_view::npos) return false;
 
-    const auto& lvl0 = nest.level(0);
-    const auto& lvl1 = nest.level(1);
-    if (!lvl0.header || !lvl1.header) return false;
+    CountedLoop outer, inner;
+    if (!match_counted(outer_loop, outer_loop, outer) || !match_counted(inner_loop, outer_loop, inner)) return false;
+    if (!tile_sizes_ok(options, outer.iv->type(), inner.iv->type())) return false;
+    if (!legal(fn, outer, inner)) return false;
 
-    BasicBlock* preheader = lvl0.preheader;
-    if (!preheader && lvl0.loop) preheader = lvl0.loop->preheader();
-    if (!preheader && lvl0.loop) preheader = LoopAnalysis::ensure_preheader(fn, *lvl0.loop);
-    if (!preheader || !preheader->terminator()) return false;
-
-    Builder b(*fn.parent());
+    Module* mod = fn.parent();
+    if (!mod) return false;
+    Builder b(*mod);
     b.set_function(&fn);
 
-    std::string pfx = std::string(lvl0.header->name()) + "_2dt";
-    BasicBlock* tile_i_hdr = b.create_block(pfx + "_i_hdr");
-    BasicBlock* tile_i_body = b.create_block(pfx + "_i_body");
-    BasicBlock* tile_j_hdr = b.create_block(pfx + "_j_hdr");
-    BasicBlock* tile_j_body = b.create_block(pfx + "_j_body");
-    BasicBlock* point_i_hdr = b.create_block(pfx + "_pi_hdr");
-    BasicBlock* point_i_body = b.create_block(pfx + "_pi_body");
-    BasicBlock* point_j_hdr = b.create_block(pfx + "_pj_hdr");
-    BasicBlock* point_j_body = b.create_block(pfx + "_pj_body");
-    BasicBlock* point_i_latch = b.create_block(pfx + "_pi_latch");
-    BasicBlock* tile_j_latch = b.create_block(pfx + "_j_latch");
-    BasicBlock* tile_i_latch = b.create_block(pfx + "_i_latch");
+    const std::string pfx = std::string(outer.header->name()) + "_2dt";
+    BasicBlock* ti = ir::new_block(fn, pfx + "_i");
+    BasicBlock* ti_body = ir::new_block(fn, pfx + "_i_body");
+    BasicBlock* tj = ir::new_block(fn, pfx + "_j");
+    BasicBlock* tj_body = ir::new_block(fn, pfx + "_j_body");
+    BasicBlock* tj_latch = ir::new_block(fn, pfx + "_j_latch");
+    BasicBlock* ti_latch = ir::new_block(fn, pfx + "_i_latch");
+    const Type ty0 = outer.iv->type();
+    const Type ty1 = inner.iv->type();
+    Value* it = ir::new_block_param(fn, ti, ty0);
+    Value* jt = ir::new_block_param(fn, tj, ty1);
 
-    auto& fn_blocks = fn.blocks();
-    auto it = std::find(fn_blocks.begin(), fn_blocks.end(), lvl0.header);
-    std::vector<BasicBlock*> new_blocks = {
-        tile_i_hdr, tile_i_body, tile_j_hdr, tile_j_body,
-        point_i_hdr, point_i_body, point_j_hdr, point_j_body,
-        point_i_latch, tile_j_latch, tile_i_latch
-    };
-    fn_blocks.insert(it, new_blocks.begin(), new_blocks.end());
+    // Enter the tile loop instead of the outer header.
+    outer.preheader->terminator()->branch_target().block = ti;
 
-    tile_i_hdr->set_parent(&fn);
-    tile_i_body->set_parent(&fn);
-    tile_j_hdr->set_parent(&fn);
-    tile_j_body->set_parent(&fn);
-    point_i_hdr->set_parent(&fn);
-    point_i_body->set_parent(&fn);
-    point_j_hdr->set_parent(&fn);
-    point_j_body->set_parent(&fn);
-    point_i_latch->set_parent(&fn);
-    tile_j_latch->set_parent(&fn);
-    tile_i_latch->set_parent(&fn);
-
-    // 1. Preheader redirect to tile_i_hdr
-    Instruction* ph_term = preheader->terminator();
-    if (ph_term->opcode() == Opcode::br && ph_term->branch_target().block == lvl0.header) {
-        ph_term->branch_target().block = tile_i_hdr;
-    } else if (ph_term->opcode() == Opcode::br_if) {
-        if (ph_term->true_target().block == lvl0.header) ph_term->true_target().block = tile_i_hdr;
-        if (ph_term->false_target().block == lvl0.header) ph_term->false_target().block = tile_i_hdr;
+    // ti: it < N, else leave the nest the way the outer header did.
+    b.position_at_end(ti);
+    Value* n = available_value(b, *outer.loop, outer.limit);
+    BranchTarget exit_bt;
+    exit_bt.block = outer.hdr_term->false_target().block;
+    for (Value* a : outer.hdr_term->false_target().args) {
+        exit_bt.args.push_back(a == outer.iv ? it : available_value(b, *outer.loop, a));
     }
+    b.build_br_if(build_cmp(b, outer.pred, it, n), ti_body, {}, exit_bt.block, exit_bt.args);
 
-    // 2. tile_i_hdr
-    std::vector<Value*> tile_i_params;
-    Value* i_tile = nullptr;
-    for (size_t p = 0; p < lvl0.header->param_count(); ++p) {
-        Value* param = b.add_block_param(tile_i_hdr, lvl0.header->param(p)->type());
-        if (p == lvl0.iv_param_index) {
-            i_tile = param;
-        }
-        tile_i_params.push_back(param);
-    }
+    b.position_at_end(ti_body);
+    Value* iend = build_tile_end(b, it, n, ty0, static_cast<int64_t>(options.tile_size_i));
+    b.build_br(tj, {available_value(b, *outer.loop, inner.init)});
 
-    b.position_at_end(tile_i_hdr);
-    Value* cond_i = nullptr;
-    switch (lvl0.cmp_opcode) {
-        case Opcode::slt: cond_i = b.build_slt(i_tile, lvl0.limit_val); break;
-        case Opcode::ult: cond_i = b.build_ult(i_tile, lvl0.limit_val); break;
-        case Opcode::sle: cond_i = b.build_sle(i_tile, lvl0.limit_val); break;
-        case Opcode::ule: cond_i = b.build_ule(i_tile, lvl0.limit_val); break;
-        default: cond_i = b.build_slt(i_tile, lvl0.limit_val); break;
-    }
+    b.position_at_end(tj);
+    Value* m = available_value(b, *outer.loop, inner.limit);
+    b.build_br_if(build_cmp(b, inner.pred, jt, m), tj_body, {}, ti_latch, {});
 
-    Instruction* old_lvl0_term = lvl0.header->terminator();
-    const BranchTarget& old_exit_target = lvl0.exit_on_false ? old_lvl0_term->false_target() : old_lvl0_term->true_target();
-    std::vector<Value*> final_exit_args;
-    for (Value* arg : old_exit_target.args) {
-        if (arg && arg->is_block_param() && arg->defining_block() == lvl0.header) {
-            final_exit_args.push_back(tile_i_hdr->param(arg->param_index()));
-        } else {
-            final_exit_args.push_back(arg);
+    b.position_at_end(tj_body);
+    Value* jend = build_tile_end(b, jt, m, ty1, static_cast<int64_t>(options.tile_size_j));
+    b.build_br(outer.header, {it});
+
+    // The point loops run over the current tile.
+    b.position_before(outer.hdr_term);
+    outer.hdr_term->set_operand(0, build_cmp(b, outer.pred, outer.iv, iend));
+    BranchTarget to_tj_latch;
+    to_tj_latch.block = tj_latch;
+    outer.hdr_term->set_false_target(to_tj_latch);
+
+    inner.preheader->terminator()->branch_target().args[0] = jt;
+    b.position_before(inner.hdr_term);
+    inner.hdr_term->set_operand(0, build_cmp(b, inner.pred, inner.iv, jend));
+
+    b.position_at_end(tj_latch);
+    b.build_br(tj, {jend});
+    b.position_at_end(ti_latch);
+    b.build_br(ti, {iend});
+
+    // After the nest the outer induction variable is the tile loop's, which
+    // ends on the same value (N, or i0 when the loop never ran).
+    for (BasicBlock* bb : fn.blocks()) {
+        if (!bb || outer.loop->contains(bb) || bb == ti) continue;
+        for (Instruction* inst : *bb) {
+            affine::for_each_use_slot(*inst, [&](Value*& v) {
+                if (v == outer.iv) v = it;
+            });
         }
     }
-    b.build_br_if(cond_i, tile_i_body, {}, lvl0.exit_bb, final_exit_args);
 
-    // 3. tile_i_body: compute i_limit = min(i_tile + Ti, limit)
-    b.position_at_end(tile_i_body);
-    Value* ti_val = build_const_int(b, lvl0.iv_type, static_cast<int64_t>(options.tile_size_i));
-    Value* i_plus_ti = b.build_add(i_tile, ti_val);
-    Value* i_limit = build_min_bound(b, i_plus_ti, lvl0.limit_val, lvl0.cmp_opcode);
-
-    Value* zero_j = build_const_int(b, lvl1.iv_type, 0);
-    b.build_br(tile_j_hdr, {zero_j});
-
-    // 4. tile_j_hdr
-    b.position_at_end(tile_j_hdr);
-    Value* j_tile = b.add_block_param(tile_j_hdr, lvl1.iv_type);
-    Value* cond_j = nullptr;
-    switch (lvl1.cmp_opcode) {
-        case Opcode::slt: cond_j = b.build_slt(j_tile, lvl1.limit_val); break;
-        case Opcode::ult: cond_j = b.build_ult(j_tile, lvl1.limit_val); break;
-        case Opcode::sle: cond_j = b.build_sle(j_tile, lvl1.limit_val); break;
-        case Opcode::ule: cond_j = b.build_ule(j_tile, lvl1.limit_val); break;
-        default: cond_j = b.build_slt(j_tile, lvl1.limit_val); break;
-    }
-    b.build_br_if(cond_j, tile_j_body, {}, tile_i_latch, {});
-
-    // 5. tile_j_body: compute j_limit = min(j_tile + Tj, limit)
-    b.position_at_end(tile_j_body);
-    Value* tj_val = build_const_int(b, lvl1.iv_type, static_cast<int64_t>(options.tile_size_j));
-    Value* j_plus_tj = b.build_add(j_tile, tj_val);
-    Value* j_limit = build_min_bound(b, j_plus_tj, lvl1.limit_val, lvl1.cmp_opcode);
-    b.build_br(point_i_hdr, {i_tile});
-
-    // 6. point_i_hdr
-    b.position_at_end(point_i_hdr);
-    Value* i_point = b.add_block_param(point_i_hdr, lvl0.iv_type);
-    Value* cond_pi = b.build_slt(i_point, i_limit);
-    b.build_br_if(cond_pi, point_i_body, {}, tile_j_latch, {});
-
-    // 7. point_i_body
-    b.position_at_end(point_i_body);
-    std::unordered_map<const Value*, Value*> val_map;
-    val_map[lvl0.iv_param] = i_point;
-    clone_block_instructions(fn, lvl0.body, point_i_body, val_map);
-    b.build_br(point_j_hdr, {j_tile});
-
-    // 8. point_j_hdr
-    b.position_at_end(point_j_hdr);
-    Value* j_point = b.add_block_param(point_j_hdr, lvl1.iv_type);
-    Value* cond_pj = b.build_slt(j_point, j_limit);
-    b.build_br_if(cond_pj, point_j_body, {}, point_i_latch, {});
-
-    // 9. point_j_body
-    b.position_at_end(point_j_body);
-    val_map[lvl1.iv_param] = j_point;
-    clone_block_instructions(fn, lvl1.body, point_j_body, val_map);
-
-    Value* step_one_j = build_const_int(b, lvl1.iv_type, 1);
-    Value* next_jp = b.build_add(j_point, step_one_j);
-    b.build_br(point_j_hdr, {next_jp});
-
-    // 10. point_i_latch
-    b.position_at_end(point_i_latch);
-    Value* step_one_i = build_const_int(b, lvl0.iv_type, 1);
-    Value* next_ip = b.build_add(i_point, step_one_i);
-    b.build_br(point_i_hdr, {next_ip});
-
-    // 11. tile_j_latch
-    b.position_at_end(tile_j_latch);
-    Value* next_jt = b.build_add(j_tile, tj_val);
-    b.build_br(tile_j_hdr, {next_jt});
-
-    // 12. tile_i_latch
-    b.position_at_end(tile_i_latch);
-    Value* next_it = b.build_add(i_tile, ti_val);
-    b.build_br(tile_i_hdr, {next_it});
-
-    remove_nest_blocks(fn, nest, preheader, lvl0.exit_bb);
+    fn.rebuild_cfg_predecessors();
     return true;
-}
-
-static bool extract_matmul_arrays(
-    const LoopNest& nest,
-    Value*& base_a,
-    Value*& base_b,
-    Value*& base_c,
-    Type& elem_type,
-    uint8_t& scale
-) {
-    base_a = nullptr;
-    base_b = nullptr;
-    base_c = nullptr;
-    for (const auto& acc : nest.memory_accesses()) {
-        bool has_i = false;
-        bool has_j = false;
-        bool has_k = false;
-        for (const auto& t : acc.terms) {
-            if (t.level_index == 0) has_i = true;
-            if (t.level_index == 1) has_j = true;
-            if (t.level_index == 2) has_k = true;
-        }
-        if (!acc.is_store && has_i && has_k && !has_j) {
-            base_a = acc.base;
-            elem_type = acc.elem_type;
-            scale = acc.scale;
-        } else if (!acc.is_store && has_k && has_j && !has_i) {
-            base_b = acc.base;
-        } else if (acc.is_store && has_i && has_j && !has_k) {
-            base_c = acc.base;
-        }
-    }
-    return base_a != nullptr && base_b != nullptr && base_c != nullptr;
-}
-
-static bool transform_3d_matmul_interchanged(
-    Function& fn,
-    LoopNest& nest,
-    const DominatorTree& dom,
-    const LoopTileOptions& options
-) {
-    (void)dom;
-    Value* base_a = nullptr;
-    Value* base_b = nullptr;
-    Value* base_c = nullptr;
-    Type elem_type = Type::i64();
-    uint8_t scale = 8;
-    if (!extract_matmul_arrays(nest, base_a, base_b, base_c, elem_type, scale)) {
-        return false;
-    }
-
-    const auto& lvl0 = nest.level(0);
-    const auto& lvl1 = nest.level(1);
-    const auto& lvl2 = nest.level(2);
-    if (!lvl0.header || !lvl1.header || !lvl2.header) return false;
-
-    BasicBlock* preheader = lvl0.preheader;
-    if (!preheader && lvl0.loop) preheader = lvl0.loop->preheader();
-    if (!preheader && lvl0.loop) preheader = LoopAnalysis::ensure_preheader(fn, *lvl0.loop);
-    if (!preheader || !preheader->terminator()) return false;
-
-    Builder b(*fn.parent());
-    b.set_function(&fn);
-
-    std::string pfx = std::string(lvl0.header->name()) + "_3dti";
-
-    BasicBlock* tile_i_hdr = b.create_block(pfx + "_i_hdr");
-    BasicBlock* tile_i_body = b.create_block(pfx + "_i_body");
-    BasicBlock* tile_k_hdr = b.create_block(pfx + "_k_hdr");
-    BasicBlock* tile_k_body = b.create_block(pfx + "_k_body");
-    BasicBlock* tile_j_hdr = b.create_block(pfx + "_j_hdr");
-    BasicBlock* tile_j_body = b.create_block(pfx + "_j_body");
-    BasicBlock* point_i_hdr = b.create_block(pfx + "_pi_hdr");
-    BasicBlock* point_i_body = b.create_block(pfx + "_pi_body");
-    BasicBlock* point_k_hdr = b.create_block(pfx + "_pk_hdr");
-    BasicBlock* point_k_body = b.create_block(pfx + "_pk_body");
-    BasicBlock* point_j_hdr = b.create_block(pfx + "_pj_hdr");
-    BasicBlock* point_j_body = b.create_block(pfx + "_pj_body");
-    BasicBlock* point_k_latch = b.create_block(pfx + "_pk_latch");
-    BasicBlock* point_i_latch = b.create_block(pfx + "_pi_latch");
-    BasicBlock* tile_j_latch = b.create_block(pfx + "_j_latch");
-    BasicBlock* tile_k_latch = b.create_block(pfx + "_k_latch");
-    BasicBlock* tile_i_latch = b.create_block(pfx + "_i_latch");
-
-    auto& fn_blocks = fn.blocks();
-    auto it = std::find(fn_blocks.begin(), fn_blocks.end(), lvl0.header);
-    std::vector<BasicBlock*> new_blocks = {
-        tile_i_hdr, tile_i_body, tile_k_hdr, tile_k_body,
-        tile_j_hdr, tile_j_body, point_i_hdr, point_i_body,
-        point_k_hdr, point_k_body, point_j_hdr, point_j_body,
-        point_k_latch, point_i_latch, tile_j_latch, tile_k_latch,
-        tile_i_latch
-    };
-    fn_blocks.insert(it, new_blocks.begin(), new_blocks.end());
-
-    for (BasicBlock* nb : {tile_i_hdr, tile_i_body, tile_k_hdr, tile_k_body,
-                           tile_j_hdr, tile_j_body, point_i_hdr, point_i_body,
-                           point_k_hdr, point_k_body, point_j_hdr, point_j_body,
-                           point_k_latch, point_i_latch, tile_j_latch, tile_k_latch, tile_i_latch}) {
-        nb->set_parent(&fn);
-    }
-
-    // Preheader redirect
-    Instruction* ph_term = preheader->terminator();
-    if (ph_term->opcode() == Opcode::br && ph_term->branch_target().block == lvl0.header) {
-        ph_term->branch_target().block = tile_i_hdr;
-    } else if (ph_term->opcode() == Opcode::br_if) {
-        if (ph_term->true_target().block == lvl0.header) ph_term->true_target().block = tile_i_hdr;
-        if (ph_term->false_target().block == lvl0.header) ph_term->false_target().block = tile_i_hdr;
-    }
-
-    // tile_i_hdr
-    Value* i_tile = nullptr;
-    for (size_t p = 0; p < lvl0.header->param_count(); ++p) {
-        Value* param = b.add_block_param(tile_i_hdr, lvl0.header->param(p)->type());
-        if (p == lvl0.iv_param_index) i_tile = param;
-    }
-
-    b.position_at_end(tile_i_hdr);
-    Value* cond_i = b.build_slt(i_tile, lvl0.limit_val);
-    Instruction* old_lvl0_term = lvl0.header->terminator();
-    const BranchTarget& old_exit_target = lvl0.exit_on_false ? old_lvl0_term->false_target() : old_lvl0_term->true_target();
-    std::vector<Value*> exit_args;
-    for (Value* arg : old_exit_target.args) {
-        if (arg && arg->is_block_param() && arg->defining_block() == lvl0.header) {
-            exit_args.push_back(tile_i_hdr->param(arg->param_index()));
-        } else {
-            exit_args.push_back(arg);
-        }
-    }
-    b.build_br_if(cond_i, tile_i_body, {}, lvl0.exit_bb, exit_args);
-
-    // tile_i_body
-    b.position_at_end(tile_i_body);
-    Value* ti_val = build_const_int(b, lvl0.iv_type, static_cast<int64_t>(options.tile_size_i));
-    Value* i_plus_ti = b.build_add(i_tile, ti_val);
-    Value* i_limit = build_min_bound(b, i_plus_ti, lvl0.limit_val, lvl0.cmp_opcode);
-    Value* zero_k = build_const_int(b, lvl2.iv_type, 0);
-    b.build_br(tile_k_hdr, {zero_k});
-
-    // tile_k_hdr
-    b.position_at_end(tile_k_hdr);
-    Value* k_tile = b.add_block_param(tile_k_hdr, lvl2.iv_type);
-    Value* cond_k = b.build_slt(k_tile, lvl2.limit_val);
-    b.build_br_if(cond_k, tile_k_body, {}, tile_i_latch, {});
-
-    // tile_k_body
-    b.position_at_end(tile_k_body);
-    Value* tk_val = build_const_int(b, lvl2.iv_type, static_cast<int64_t>(options.tile_size_k));
-    Value* k_plus_tk = b.build_add(k_tile, tk_val);
-    Value* k_limit = build_min_bound(b, k_plus_tk, lvl2.limit_val, lvl2.cmp_opcode);
-    Value* zero_j = build_const_int(b, lvl1.iv_type, 0);
-    b.build_br(tile_j_hdr, {zero_j});
-
-    // tile_j_hdr
-    b.position_at_end(tile_j_hdr);
-    Value* j_tile = b.add_block_param(tile_j_hdr, lvl1.iv_type);
-    Value* cond_j = b.build_slt(j_tile, lvl1.limit_val);
-    b.build_br_if(cond_j, tile_j_body, {}, tile_k_latch, {});
-
-    // tile_j_body
-    b.position_at_end(tile_j_body);
-    Value* tj_val = build_const_int(b, lvl1.iv_type, static_cast<int64_t>(options.tile_size_j));
-    Value* j_plus_tj = b.build_add(j_tile, tj_val);
-    Value* j_limit = build_min_bound(b, j_plus_tj, lvl1.limit_val, lvl1.cmp_opcode);
-    b.build_br(point_i_hdr, {i_tile});
-
-    // point_i_hdr
-    b.position_at_end(point_i_hdr);
-    Value* i_point = b.add_block_param(point_i_hdr, lvl0.iv_type);
-    Value* cond_pi = b.build_slt(i_point, i_limit);
-    b.build_br_if(cond_pi, point_i_body, {}, tile_j_latch, {});
-
-    // point_i_body
-    b.position_at_end(point_i_body);
-    Value* row_a = b.build_mul(i_point, lvl2.limit_val);
-    Value* row_c = b.build_mul(i_point, lvl1.limit_val);
-    b.build_br(point_k_hdr, {k_tile});
-
-    // point_k_hdr
-    b.position_at_end(point_k_hdr);
-    Value* k_point = b.add_block_param(point_k_hdr, lvl2.iv_type);
-    Value* cond_pk = b.build_slt(k_point, k_limit);
-    b.build_br_if(cond_pk, point_k_body, {}, point_i_latch, {});
-
-    // point_k_body
-    b.position_at_end(point_k_body);
-    Value* idx_a = b.build_add(row_a, k_point);
-    Value* val_a = b.build_load_indexed(elem_type, base_a, idx_a, scale, 0);
-    Value* row_b = b.build_mul(k_point, lvl1.limit_val);
-    b.build_br(point_j_hdr, {j_tile});
-
-    // point_j_hdr
-    b.position_at_end(point_j_hdr);
-    Value* j_point = b.add_block_param(point_j_hdr, lvl1.iv_type);
-    Value* cond_pj = b.build_slt(j_point, j_limit);
-    b.build_br_if(cond_pj, point_j_body, {}, point_k_latch, {});
-
-    // point_j_body
-    b.position_at_end(point_j_body);
-    Value* idx_b = b.build_add(row_b, j_point);
-    Value* val_b = b.build_load_indexed(elem_type, base_b, idx_b, scale, 0);
-    Value* idx_c = b.build_add(row_c, j_point);
-    Value* val_c = b.build_load_indexed(elem_type, base_c, idx_c, scale, 0);
-    Value* term = b.build_mul(val_a, val_b);
-    Value* next_c = b.build_add(val_c, term);
-    b.build_store_indexed(elem_type, base_c, idx_c, scale, 0, next_c);
-
-    Value* step_one_j = build_const_int(b, lvl1.iv_type, 1);
-    Value* next_jp = b.build_add(j_point, step_one_j);
-    b.build_br(point_j_hdr, {next_jp});
-
-    // point_k_latch
-    b.position_at_end(point_k_latch);
-    Value* step_one_k = build_const_int(b, lvl2.iv_type, 1);
-    Value* next_kp = b.build_add(k_point, step_one_k);
-    b.build_br(point_k_hdr, {next_kp});
-
-    // point_i_latch
-    b.position_at_end(point_i_latch);
-    Value* step_one_i = build_const_int(b, lvl0.iv_type, 1);
-    Value* next_ip = b.build_add(i_point, step_one_i);
-    b.build_br(point_i_hdr, {next_ip});
-
-    // tile_j_latch
-    b.position_at_end(tile_j_latch);
-    Value* next_jt = b.build_add(j_tile, tj_val);
-    b.build_br(tile_j_hdr, {next_jt});
-
-    // tile_k_latch
-    b.position_at_end(tile_k_latch);
-    Value* next_kt = b.build_add(k_tile, tk_val);
-    b.build_br(tile_k_hdr, {next_kt});
-
-    // tile_i_latch
-    b.position_at_end(tile_i_latch);
-    Value* next_it = b.build_add(i_tile, ti_val);
-    b.build_br(tile_i_hdr, {next_it});
-
-    remove_nest_blocks(fn, nest, preheader, lvl0.exit_bb);
-    return true;
-}
-
-static bool transform_3d_matmul_standard(
-    Function& fn,
-    LoopNest& nest,
-    const DominatorTree& dom,
-    const LoopTileOptions& options
-) {
-    (void)dom;
-    const auto& lvl0 = nest.level(0);
-    const auto& lvl1 = nest.level(1);
-    const auto& lvl2 = nest.level(2);
-
-    BasicBlock* preheader = lvl0.preheader;
-    if (!preheader && lvl0.loop) preheader = lvl0.loop->preheader();
-    if (!preheader && lvl0.loop) preheader = LoopAnalysis::ensure_preheader(fn, *lvl0.loop);
-    if (!preheader || !preheader->terminator()) return false;
-
-    Builder b(*fn.parent());
-    b.set_function(&fn);
-
-    std::string pfx = std::string(lvl0.header->name()) + "_3dt";
-
-    BasicBlock* tile_i_hdr = b.create_block(pfx + "_i_hdr");
-    BasicBlock* tile_i_body = b.create_block(pfx + "_i_body");
-    BasicBlock* tile_j_hdr = b.create_block(pfx + "_j_hdr");
-    BasicBlock* tile_j_body = b.create_block(pfx + "_j_body");
-    BasicBlock* point_i_hdr = b.create_block(pfx + "_pi_hdr");
-    BasicBlock* point_i_body = b.create_block(pfx + "_pi_body");
-    BasicBlock* point_j_hdr = b.create_block(pfx + "_pj_hdr");
-    BasicBlock* point_j_body = b.create_block(pfx + "_pj_body");
-    BasicBlock* tile_k_hdr = b.create_block(pfx + "_k_hdr");
-    BasicBlock* tile_k_body = b.create_block(pfx + "_k_body");
-    BasicBlock* point_k_hdr = b.create_block(pfx + "_pk_hdr");
-    BasicBlock* point_k_body = b.create_block(pfx + "_pk_body");
-    BasicBlock* tile_k_latch = b.create_block(pfx + "_k_latch");
-    BasicBlock* point_j_store = b.create_block(pfx + "_pj_store");
-    BasicBlock* point_i_latch = b.create_block(pfx + "_pi_latch");
-    BasicBlock* tile_j_latch = b.create_block(pfx + "_j_latch");
-    BasicBlock* tile_i_latch = b.create_block(pfx + "_i_latch");
-
-    auto& fn_blocks = fn.blocks();
-    auto it = std::find(fn_blocks.begin(), fn_blocks.end(), lvl0.header);
-    std::vector<BasicBlock*> new_blocks = {
-        tile_i_hdr, tile_i_body, tile_j_hdr, tile_j_body,
-        point_i_hdr, point_i_body, point_j_hdr, point_j_body,
-        tile_k_hdr, tile_k_body, point_k_hdr, point_k_body,
-        tile_k_latch, point_j_store, point_i_latch, tile_j_latch,
-        tile_i_latch
-    };
-    fn_blocks.insert(it, new_blocks.begin(), new_blocks.end());
-
-    for (BasicBlock* nb : {tile_i_hdr, tile_i_body, tile_j_hdr, tile_j_body,
-                           point_i_hdr, point_i_body, point_j_hdr, point_j_body,
-                           tile_k_hdr, tile_k_body, point_k_hdr, point_k_body,
-                           tile_k_latch, point_j_store, point_i_latch, tile_j_latch, tile_i_latch}) {
-        nb->set_parent(&fn);
-    }
-
-    // 1. Preheader redirect
-    Instruction* ph_term = preheader->terminator();
-    if (ph_term->opcode() == Opcode::br && ph_term->branch_target().block == lvl0.header) {
-        ph_term->branch_target().block = tile_i_hdr;
-    } else if (ph_term->opcode() == Opcode::br_if) {
-        if (ph_term->true_target().block == lvl0.header) ph_term->true_target().block = tile_i_hdr;
-        if (ph_term->false_target().block == lvl0.header) ph_term->false_target().block = tile_i_hdr;
-    }
-
-    // 2. tile_i_hdr
-    Value* i_tile = nullptr;
-    for (size_t p = 0; p < lvl0.header->param_count(); ++p) {
-        Value* param = b.add_block_param(tile_i_hdr, lvl0.header->param(p)->type());
-        if (p == lvl0.iv_param_index) i_tile = param;
-    }
-
-    b.position_at_end(tile_i_hdr);
-    Value* cond_i = b.build_slt(i_tile, lvl0.limit_val);
-    Instruction* old_lvl0_term = lvl0.header->terminator();
-    const BranchTarget& old_exit_target = lvl0.exit_on_false ? old_lvl0_term->false_target() : old_lvl0_term->true_target();
-    std::vector<Value*> exit_args;
-    for (Value* arg : old_exit_target.args) {
-        if (arg && arg->is_block_param() && arg->defining_block() == lvl0.header) {
-            exit_args.push_back(tile_i_hdr->param(arg->param_index()));
-        } else {
-            exit_args.push_back(arg);
-        }
-    }
-    b.build_br_if(cond_i, tile_i_body, {}, lvl0.exit_bb, exit_args);
-
-    // 3. tile_i_body
-    b.position_at_end(tile_i_body);
-    Value* ti_val = build_const_int(b, lvl0.iv_type, static_cast<int64_t>(options.tile_size_i));
-    Value* i_plus_ti = b.build_add(i_tile, ti_val);
-    Value* i_limit = build_min_bound(b, i_plus_ti, lvl0.limit_val, lvl0.cmp_opcode);
-
-    Value* zero_j = build_const_int(b, lvl1.iv_type, 0);
-    b.build_br(tile_j_hdr, {zero_j});
-
-    // 4. tile_j_hdr
-    b.position_at_end(tile_j_hdr);
-    Value* j_tile = b.add_block_param(tile_j_hdr, lvl1.iv_type);
-    Value* cond_j = b.build_slt(j_tile, lvl1.limit_val);
-    b.build_br_if(cond_j, tile_j_body, {}, tile_i_latch, {});
-
-    // 5. tile_j_body
-    b.position_at_end(tile_j_body);
-    Value* tj_val = build_const_int(b, lvl1.iv_type, static_cast<int64_t>(options.tile_size_j));
-    Value* j_plus_tj = b.build_add(j_tile, tj_val);
-    Value* j_limit = build_min_bound(b, j_plus_tj, lvl1.limit_val, lvl1.cmp_opcode);
-    b.build_br(point_i_hdr, {i_tile});
-
-    // 6. point_i_hdr
-    b.position_at_end(point_i_hdr);
-    Value* i_point = b.add_block_param(point_i_hdr, lvl0.iv_type);
-    Value* cond_pi = b.build_slt(i_point, i_limit);
-    b.build_br_if(cond_pi, point_i_body, {}, tile_j_latch, {});
-
-    // 7. point_i_body
-    b.position_at_end(point_i_body);
-    std::unordered_map<const Value*, Value*> val_map;
-    val_map[lvl0.iv_param] = i_point;
-    clone_block_instructions(fn, lvl0.body, point_i_body, val_map);
-    b.build_br(point_j_hdr, {j_tile});
-
-    // 8. point_j_hdr
-    b.position_at_end(point_j_hdr);
-    Value* j_point = b.add_block_param(point_j_hdr, lvl1.iv_type);
-    Value* cond_pj = b.build_slt(j_point, j_limit);
-    b.build_br_if(cond_pj, point_j_body, {}, point_i_latch, {});
-
-    // 9. point_j_body
-    b.position_at_end(point_j_body);
-    val_map[lvl1.iv_param] = j_point;
-    clone_block_instructions(fn, lvl1.body, point_j_body, val_map);
-
-    Value* init_sum = nest.reduction_init();
-    if (!init_sum) {
-        init_sum = lvl2.header->param(lvl2.header->param_count() - 1)->type().is_float()
-            ? b.build_fconst_f64(0.0) : b.build_iconst_i64(0);
-    }
-    Value* zero_k = build_const_int(b, lvl2.iv_type, 0);
-    b.build_br(tile_k_hdr, {zero_k, init_sum});
-
-    // 10. tile_k_hdr(k_tile, sum_k)
-    b.position_at_end(tile_k_hdr);
-    Value* k_tile = b.add_block_param(tile_k_hdr, lvl2.iv_type);
-    Value* sum_k = b.add_block_param(tile_k_hdr, init_sum->type());
-    Value* cond_k = b.build_slt(k_tile, lvl2.limit_val);
-    b.build_br_if(cond_k, tile_k_body, {}, point_j_store, {sum_k});
-
-    // 11. tile_k_body
-    b.position_at_end(tile_k_body);
-    Value* tk_val = build_const_int(b, lvl2.iv_type, static_cast<int64_t>(options.tile_size_k));
-    Value* k_plus_tk = b.build_add(k_tile, tk_val);
-    Value* k_limit = build_min_bound(b, k_plus_tk, lvl2.limit_val, lvl2.cmp_opcode);
-    b.build_br(point_k_hdr, {k_tile, sum_k});
-
-    // 12. point_k_hdr(k_point, sum_p)
-    b.position_at_end(point_k_hdr);
-    Value* k_point = b.add_block_param(point_k_hdr, lvl2.iv_type);
-    Value* sum_p = b.add_block_param(point_k_hdr, init_sum->type());
-    Value* cond_pk = b.build_slt(k_point, k_limit);
-    b.build_br_if(cond_pk, point_k_body, {}, tile_k_latch, {sum_p});
-
-    // 13. point_k_body
-    b.position_at_end(point_k_body);
-    val_map[lvl2.iv_param] = k_point;
-
-    // In matmul, the reduction accumulator parameter in lvl2.header is mapped to sum_p
-    for (size_t p = 0; p < lvl2.header->param_count(); ++p) {
-        if (p != lvl2.iv_param_index) {
-            val_map[lvl2.header->param(p)] = sum_p;
-        }
-    }
-
-    clone_block_instructions(fn, lvl2.body, point_k_body, val_map);
-
-    Value* next_sum = nullptr;
-    if (nest.reduction_inst() && val_map.count(nest.reduction_inst()->result())) {
-        next_sum = val_map[nest.reduction_inst()->result()];
-    } else {
-        next_sum = sum_p;
-    }
-
-    Value* step_one_k = build_const_int(b, lvl2.iv_type, 1);
-    Value* next_kp = b.build_add(k_point, step_one_k);
-    b.build_br(point_k_hdr, {next_kp, next_sum});
-
-    // 14. tile_k_latch(sum_after_k)
-    b.position_at_end(tile_k_latch);
-    Value* sum_after_k = b.add_block_param(tile_k_latch, init_sum->type());
-    Value* next_kt = b.build_add(k_tile, tk_val);
-    b.build_br(tile_k_hdr, {next_kt, sum_after_k});
-
-    // 15. point_j_store(final_sum)
-    b.position_at_end(point_j_store);
-    Value* final_sum = b.add_block_param(point_j_store, init_sum->type());
-
-    if (nest.reduction_store_block()) {
-        if (nest.reduction_store_block()->param_count() > 0) {
-            val_map[nest.reduction_store_block()->param(0)] = final_sum;
-        }
-        clone_block_instructions(fn, nest.reduction_store_block(), point_j_store, val_map);
-    }
-
-    Value* step_one_j = build_const_int(b, lvl1.iv_type, 1);
-    Value* next_jp = b.build_add(j_point, step_one_j);
-    b.build_br(point_j_hdr, {next_jp});
-
-    // 16. point_i_latch
-    b.position_at_end(point_i_latch);
-    Value* step_one_i = build_const_int(b, lvl0.iv_type, 1);
-    Value* next_ip = b.build_add(i_point, step_one_i);
-    b.build_br(point_i_hdr, {next_ip});
-
-    // 17. tile_j_latch
-    b.position_at_end(tile_j_latch);
-    Value* next_jt = b.build_add(j_tile, tj_val);
-    b.build_br(tile_j_hdr, {next_jt});
-
-    // 18. tile_i_latch
-    b.position_at_end(tile_i_latch);
-    Value* next_it = b.build_add(i_tile, ti_val);
-    b.build_br(tile_i_hdr, {next_it});
-
-    remove_nest_blocks(fn, nest, preheader, lvl0.exit_bb);
-    return true;
-}
-
-bool transform_3d_matmul_loop_nest(
-    Function& fn,
-    LoopNest& nest,
-    const DominatorTree& dom,
-    const LoopTileOptions& options
-) {
-    if (options.enable_loop_interchange) {
-        if (transform_3d_matmul_interchanged(fn, nest, dom, options)) {
-            return true;
-        }
-    }
-    return transform_3d_matmul_standard(fn, nest, dom, options);
-}
-
-bool transform_3d_generic_loop_nest(
-    Function& fn,
-    LoopNest& nest,
-    const DominatorTree& dom,
-    const LoopTileOptions& options
-) {
-    if (nest.is_matrix_multiply()) {
-        return transform_3d_matmul_loop_nest(fn, nest, dom, options);
-    }
-    // For general 3D without reduction, tile the outer 2 dimensions
-    return transform_2d_loop_nest(fn, nest, dom, options);
 }
 
 } // namespace brass

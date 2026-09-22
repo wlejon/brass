@@ -314,47 +314,62 @@ void LinearScanAllocator::allocate() {
     fn_.frame.saved_callee_gprs = final_callee_gprs | fn_.forced_saved_gprs;
     fn_.frame.saved_callee_xmms = final_callee_xmms;
 
-    // 5. Record live GC references at all call sites and safepoints. A gcref
-    //    is live at a site when it has a definition before the site, a use at
-    //    or after it, and its interval covers it — so walk each gcref interval
-    //    once over just the sites between its first def and its last use, in
-    //    interval order so each site lists its gcrefs in that order.
-    std::vector<LirInst*> sites;  // in id order
-    for (const auto& block : fn_.blocks) {
-        for (auto& inst : block->instructions) {
-            if (inst->is_call() || inst->opcode == LirOpcode::Safepoint) {
-                inst->live_gcrefs.clear();
-                sites.push_back(inst.get());
-            }
-        }
-    }
-    for (const auto& interval : liveness_.intervals()) {
-        if (!interval.vreg.is_valid() || !interval.vreg.is_gcref) continue;
-        uint32_t first_def = UINT32_MAX;
-        uint32_t last_use = 0;
-        bool has_def = false, has_use = false;
-        for (const auto& pos : interval.use_positions) {
-            if (pos.is_def) {
-                has_def = true;
-                first_def = std::min(first_def, pos.inst_id);
-            } else {
-                has_use = true;
-                last_use = std::max(last_use, pos.inst_id);
-            }
-        }
-        if (!has_def || !has_use || first_def >= last_use) continue;
-        // Sites with first_def < id <= last_use.
-        auto it = std::upper_bound(sites.begin(), sites.end(), first_def,
-            [](uint32_t id, const LirInst* inst) { return id < inst->id; });
-        for (; it != sites.end() && (*it)->id <= last_use; ++it) {
-            if (interval.covers((*it)->id)) {
-                (*it)->live_gcrefs.push_back(interval.vreg);
-            }
-        }
-    }
+    // 5. Record live GC references at all call sites and safepoints.
+    record_live_gcrefs();
 
     // 6. Rewrite all instructions in the function
     rewrite_instructions();
+}
+
+void LinearScanAllocator::record_live_gcrefs() {
+    // Backward walk over each block from its live-out set: at a site the
+    // running set is exactly what is live after it. The site's own defs (a
+    // call's result) are not live across it and uses that end at the site
+    // (arguments) are not live after it. Interval position alone cannot
+    // answer this: blocks are not in dominance order, so a loop body placed
+    // after its exit would see the value's last use before the site.
+    const size_t num_vregs = fn_.vreg_table.size();
+    auto is_gcref = [&](VReg v) {
+        return v.is_valid() && v.id < num_vregs && fn_.vreg_table[v.id].vreg.is_gcref;
+    };
+    std::vector<uint32_t> gcref_ids;
+    for (uint32_t id = 0; id < num_vregs; ++id) {
+        if (is_gcref(fn_.vreg_table[id].vreg)) gcref_ids.push_back(id);
+    }
+    std::vector<char> live(num_vregs, 0);
+    for (const auto& block : fn_.blocks) {
+        for (uint32_t id : gcref_ids) live[id] = 0;
+        for (VReg v : liveness_.block_liveness(block.get()).live_out) {
+            if (is_gcref(v)) live[v.id] = 1;
+        }
+        for (auto it = block->instructions.rbegin(); it != block->instructions.rend(); ++it) {
+            LirInst& inst = **it;
+            if (inst.is_call() || inst.opcode == LirOpcode::Safepoint) {
+                inst.live_gcrefs.clear();
+                for (uint32_t id : gcref_ids) {
+                    if (live[id]) inst.live_gcrefs.push_back(fn_.vreg_table[id].vreg);
+                }
+            }
+            for (const auto& d : inst.defs) {
+                if (d.is_vreg() && is_gcref(d.vreg_val)) live[d.vreg_val.id] = 0;
+            }
+            auto mark_use = [&](VReg v) { if (is_gcref(v)) live[v.id] = 1; };
+            for (const auto& d : inst.defs) {
+                if (d.is_mem()) {
+                    mark_use(d.mem_val.base_vreg);
+                    mark_use(d.mem_val.index_vreg);
+                }
+            }
+            for (const auto& u : inst.uses) {
+                if (u.is_vreg()) {
+                    mark_use(u.vreg_val);
+                } else if (u.is_mem()) {
+                    mark_use(u.mem_val.base_vreg);
+                    mark_use(u.mem_val.index_vreg);
+                }
+            }
+        }
+    }
 }
 
 void LinearScanAllocator::expire_old_intervals(uint32_t current_start) {

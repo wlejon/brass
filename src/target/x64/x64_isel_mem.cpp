@@ -1,10 +1,28 @@
 #include <brass/target/x64/x64_isel.hpp>
 #include <cstring>
 #include <algorithm>
+#include <stdexcept>
+#include <string>
 
 namespace brass::x64 {
 
 using namespace brass::codegen;
+
+LirOperand X64ISel::mem_operand(const MemFold& mf, uint8_t size) const {
+    auto reg = [&](const Value* v, const char* role) {
+        VReg r = get_vreg(v);
+        if (v && !r.is_valid()) {
+            throw std::logic_error(std::string("x64 isel: address ") + role + " %" + std::to_string(v->id()) +
+                                   " has no register in " + std::string(mir_fn_ ? mir_fn_->name() : ""));
+        }
+        return r;
+    };
+    VReg base = reg(mf.base_val, "base");
+    if (mf.index_val) {
+        return LirOperand::mem(base, reg(mf.index_val, "index"), mf.scale, mf.disp, size);
+    }
+    return LirOperand::mem(base, mf.disp, size);
+}
 
 bool X64ISel::can_fuse_load(const Instruction* load_inst, const Instruction* user_inst) const {
     if (!load_inst || !user_inst) return false;
@@ -183,19 +201,10 @@ LirOperand X64ISel::get_load_mem_operand(const Instruction* load_inst) const {
     uint8_t sz = static_cast<uint8_t>(load_inst->type().size_in_bytes());
     if (sz == 0) sz = 8;
     if (load_inst->opcode() == Opcode::load) {
-        MemFold mf = match_address(load_inst->operand(0), load_inst->offset());
-        VReg base = get_vreg(mf.base_val);
-        if (mf.index_val) {
-            return LirOperand::mem(base, get_vreg(mf.index_val), mf.scale, mf.disp, sz);
-        }
-        return LirOperand::mem(base, mf.disp, sz);
+        return mem_operand(match_address(load_inst->operand(0), load_inst->offset()), sz);
     } else if (load_inst->opcode() == Opcode::load_indexed) {
-        MemFold mf = match_indexed_address(load_inst->operand(0), load_inst->operand(1), scale_from_int(load_inst->scale()), load_inst->offset());
-        VReg base = get_vreg(mf.base_val);
-        if (mf.index_val) {
-            return LirOperand::mem(base, get_vreg(mf.index_val), mf.scale, mf.disp, sz);
-        }
-        return LirOperand::mem(base, mf.disp, sz);
+        return mem_operand(match_indexed_address(load_inst->operand(0), load_inst->operand(1),
+                                                 scale_from_int(load_inst->scale()), load_inst->offset()), sz);
     }
     return LirOperand{};
 }
@@ -203,15 +212,7 @@ LirOperand X64ISel::get_load_mem_operand(const Instruction* load_inst) const {
 void X64ISel::lower_load(const Instruction& inst, LirBlock& lir_bb) {
     VReg dst = get_vreg(inst.result());
     uint8_t sz = dst.size;
-    MemFold mf = match_address(inst.operand(0), inst.offset());
-    VReg base_vreg = get_vreg(mf.base_val);
-    LirOperand mem_op;
-    if (mf.index_val) {
-        VReg idx_vreg = get_vreg(mf.index_val);
-        mem_op = LirOperand::mem(base_vreg, idx_vreg, mf.scale, mf.disp, sz);
-    } else {
-        mem_op = LirOperand::mem(base_vreg, mf.disp, sz);
-    }
+    const LirOperand mem_op = mem_operand(match_address(inst.operand(0), inst.offset()), sz);
 
     LirOpcode op = dst.is_xmm() ? (sz == 4 ? LirOpcode::Movss : LirOpcode::Movsd)
                                 : (sz == 1 ? LirOpcode::Movzx8 : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov));
@@ -227,15 +228,7 @@ void X64ISel::lower_store(const Instruction& inst, LirBlock& lir_bb) {
     ImmIntInfo imm_src = get_imm_int_info(src_val);
     uint8_t sz = static_cast<uint8_t>(src_val->type().size_in_bytes());
     if (sz == 0) sz = 8;
-    MemFold mf = match_address(inst.operand(0), inst.offset());
-    VReg base_vreg = get_vreg(mf.base_val);
-    LirOperand mem_op;
-    if (mf.index_val) {
-        VReg idx_vreg = get_vreg(mf.index_val);
-        mem_op = LirOperand::mem(base_vreg, idx_vreg, mf.scale, mf.disp, sz);
-    } else {
-        mem_op = LirOperand::mem(base_vreg, mf.disp, sz);
-    }
+    const LirOperand mem_op = mem_operand(match_address(inst.operand(0), inst.offset()), sz);
 
     bool is_xmm = src_val->type().is_float();
     if (!is_xmm && imm_src.is_imm && imm_src.fits_i32) {
@@ -258,15 +251,8 @@ void X64ISel::lower_store(const Instruction& inst, LirBlock& lir_bb) {
 void X64ISel::lower_load_indexed(const Instruction& inst, LirBlock& lir_bb) {
     VReg dst = get_vreg(inst.result());
     uint8_t sz = dst.size;
-    MemFold mf = match_indexed_address(inst.operand(0), inst.operand(1), scale_from_int(inst.scale()), inst.offset());
-    VReg base_vreg = get_vreg(mf.base_val);
-    LirOperand mem_op;
-    if (mf.index_val) {
-        VReg idx_vreg = get_vreg(mf.index_val);
-        mem_op = LirOperand::mem(base_vreg, idx_vreg, mf.scale, mf.disp, sz);
-    } else {
-        mem_op = LirOperand::mem(base_vreg, mf.disp, sz);
-    }
+    const LirOperand mem_op = mem_operand(
+        match_indexed_address(inst.operand(0), inst.operand(1), scale_from_int(inst.scale()), inst.offset()), sz);
 
     LirOpcode op = dst.is_xmm() ? (sz == 4 ? LirOpcode::Movss : LirOpcode::Movsd)
                                 : (sz == 1 ? LirOpcode::Movzx8 : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov));
@@ -282,15 +268,8 @@ void X64ISel::lower_store_indexed(const Instruction& inst, LirBlock& lir_bb) {
     ImmIntInfo imm_src = get_imm_int_info(src_val);
     uint8_t sz = static_cast<uint8_t>(src_val->type().size_in_bytes());
     if (sz == 0) sz = 8;
-    MemFold mf = match_indexed_address(inst.operand(0), inst.operand(1), scale_from_int(inst.scale()), inst.offset());
-    VReg base_vreg = get_vreg(mf.base_val);
-    LirOperand mem_op;
-    if (mf.index_val) {
-        VReg idx_vreg = get_vreg(mf.index_val);
-        mem_op = LirOperand::mem(base_vreg, idx_vreg, mf.scale, mf.disp, sz);
-    } else {
-        mem_op = LirOperand::mem(base_vreg, mf.disp, sz);
-    }
+    const LirOperand mem_op = mem_operand(
+        match_indexed_address(inst.operand(0), inst.operand(1), scale_from_int(inst.scale()), inst.offset()), sz);
 
     bool is_xmm = src_val->type().is_float();
     if (!is_xmm && imm_src.is_imm && imm_src.fits_i32) {

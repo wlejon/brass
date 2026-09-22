@@ -41,9 +41,7 @@ void EmitContext::emit_mov_instruction(const LirInst& inst) {
             const auto& dst = inst.defs[0];
             const auto& src = inst.uses[0];
 
-            if (dst.is_preg() && src.is_preg() && dst.preg_val == src.preg_val) {
-                return; // Skip self-moves
-            }
+            // A self mov32 is kept: it zeroes the register's upper half.
 
             if (inst.is_patchable && dst.is_preg() && src.is_imm_int()) {
                 GPR dst_gpr = dst.preg_val.as_gpr();

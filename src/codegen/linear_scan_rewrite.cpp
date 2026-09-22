@@ -105,8 +105,12 @@ void LinearScanAllocator::rewrite_instructions() {
 
     auto resolve_operand = [this](const LirOperand& op) -> LirOperand {
         if (op.is_vreg()) {
+            // A register operand the allocator gave no home would be
+            // emitted as an arbitrary frame address; that is a bug in the
+            // lowering or in liveness, never something to paper over.
             if (!op.vreg_val.is_valid() || op.vreg_val.id >= fn_.vreg_table.size()) {
-                return op;
+                throw std::logic_error("register allocation: operand has no virtual register in " +
+                                       std::string(fn_.name));
             }
             const VRegInfo& info = fn_.get_vreg_info(op.vreg_val);
             if (info.is_spilled) {
@@ -114,6 +118,8 @@ void LinearScanAllocator::rewrite_instructions() {
             } else if (info.assigned_preg.is_valid()) {
                 return LirOperand::preg(info.assigned_preg, op.size);
             }
+            throw std::logic_error("register allocation: v" + std::to_string(op.vreg_val.id) +
+                                   " was given neither a register nor a spill slot in " + std::string(fn_.name));
         } else if (op.is_mem()) {
             LirMem mem = op.mem_val;
             if (mem.base_vreg.is_valid() && mem.base_vreg.id < fn_.vreg_table.size()) {
@@ -206,11 +212,16 @@ void LinearScanAllocator::rewrite_instructions() {
             }
 
             // Rewrite defs and uses
-            for (size_t i = 0; i < inst->defs.size(); ++i) {
-                inst->defs[i] = resolve_operand(inst->defs[i]);
-            }
-            for (size_t i = 0; i < inst->uses.size(); ++i) {
-                inst->uses[i] = resolve_operand(inst->uses[i]);
+            try {
+                for (size_t i = 0; i < inst->defs.size(); ++i) {
+                    inst->defs[i] = resolve_operand(inst->defs[i]);
+                }
+                for (size_t i = 0; i < inst->uses.size(); ++i) {
+                    inst->uses[i] = resolve_operand(inst->uses[i]);
+                }
+            } catch (const std::logic_error& e) {
+                throw std::logic_error(std::string(e.what()) + " (instruction `" + to_string(*inst) +
+                                       "` in block " + block->name + ")");
             }
 
             if (inst->opcode == LirOpcode::Safepoint || inst->opcode == LirOpcode::ParallelCopy) {
@@ -257,9 +268,13 @@ void LinearScanAllocator::rewrite_instructions() {
                 load_scratch->add_use(inst->uses[0]);
                 rewritten.push_back(std::move(load_scratch));
 
-                auto store_scratch = std::make_unique<LirInst>(op);
-                store_scratch->add_def(inst->defs[0]);
-                store_scratch->add_use(LirOperand::preg(scratch, sz));
+                // The 32-bit load zero-extended the value; a spill slot gets
+                // all of it (see the spilled-def write-back below). A real
+                // memory destination keeps the instruction's width.
+                const bool widen = !is_xmm && sz == 4 && inst->defs[0].is_spill_slot();
+                auto store_scratch = std::make_unique<LirInst>(widen ? LirOpcode::Mov : op);
+                store_scratch->add_def(widen ? LirOperand::slot(inst->defs[0].spill_slot, 8) : inst->defs[0]);
+                store_scratch->add_use(LirOperand::preg(scratch, widen ? uint8_t{8} : sz));
                 rewritten.push_back(std::move(store_scratch));
                 continue;
             }
@@ -433,10 +448,15 @@ void LinearScanAllocator::rewrite_instructions() {
             // Write back to spill slot if def was spilled
             if (has_spill_def) {
                 uint8_t sz = original_spill_def.size;
+                // A 32-bit GPR operation zero-extends into the whole
+                // register, and the value it defines may be 64 bits wide
+                // (zext.i64 is a 32-bit move). Storing only the low half
+                // would leave the slot's upper half stale; store all of it.
+                if (!is_xmm_def && sz == 4) sz = 8;
                 LirOpcode store_op = is_xmm_def ? ((sz == 32) ? LirOpcode::Vmovups : ((sz == 16) ? LirOpcode::Movaps : ((sz == 4) ? LirOpcode::Movss : LirOpcode::Movsd)))
                                                 : ((sz == 4) ? LirOpcode::Mov32 : LirOpcode::Mov);
                 auto store_back = std::make_unique<LirInst>(store_op);
-                store_back->add_def(original_spill_def);
+                store_back->add_def(LirOperand::slot(original_spill_def.spill_slot, sz));
                 store_back->add_use(LirOperand::preg(def_scratch, sz));
                 rewritten.push_back(std::move(store_back));
             }

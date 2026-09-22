@@ -61,28 +61,42 @@ size_t run_seed_range(FuzzPipeline pipeline) {
 
 } // namespace
 
+namespace {
+
+void check_generated_program(uint64_t seed, const ProgramGeneratorOptions& options = {}) {
+    Module mod("fuzz_mod_" + std::to_string(seed));
+    ProgramGenerator gen(options);
+    REQUIRE(gen.generate(mod, "fuzz_fn", seed) != nullptr);
+    DiagnosticReporter diag;
+    const bool ok = verify_module(mod, &diag);
+    if (!ok) std::cerr << "seed " << seed << ": " << diag.format_all() << "\n";
+    REQUIRE(ok);
+
+    std::ostringstream text;
+    print_module(mod, text);
+    DiagnosticReporter pdiag;
+    auto back = parse_module(text.str(), &pdiag);
+    if (!back) std::cerr << "seed " << seed << ": " << pdiag.format_all() << "\n";
+    REQUIRE(back != nullptr);
+    REQUIRE(verify_module(*back, &pdiag));
+
+    std::ostringstream again;
+    print_module(*back, again);
+    CHECK(again.str() == text.str());
+}
+
+} // namespace
+
 TEST_CASE("Fuzz - generated programs verify and survive the text round trip") {
     for (uint64_t seed = kFirstSeed; seed < kFirstSeed + kPrograms; ++seed) {
-        Module mod("fuzz_mod_" + std::to_string(seed));
-        ProgramGenerator gen;
-        REQUIRE(gen.generate(mod, "fuzz_fn", seed) != nullptr);
-        DiagnosticReporter diag;
-        const bool ok = verify_module(mod, &diag);
-        if (!ok) std::cerr << "seed " << seed << ": " << diag.format_all() << "\n";
-        REQUIRE(ok);
-
-        std::ostringstream text;
-        print_module(mod, text);
-        DiagnosticReporter pdiag;
-        auto back = parse_module(text.str(), &pdiag);
-        if (!back) std::cerr << "seed " << seed << ": " << pdiag.format_all() << "\n";
-        REQUIRE(back != nullptr);
-        REQUIRE(verify_module(*back, &pdiag));
-
-        std::ostringstream again;
-        print_module(*back, again);
-        CHECK(again.str() == text.str());
+        check_generated_program(seed);
     }
+    // Seed 2381: a block split whose result failed verification was rolled
+    // back with its jump left in the middle of the block.
+    check_generated_program(2381);
+    ProgramGeneratorOptions small;
+    small.max_statements = 10;
+    check_generated_program(100336, small);
 }
 
 TEST_CASE("Fuzz - every optimization pass preserves the answer on a fixed seed range") {

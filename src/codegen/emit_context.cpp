@@ -43,7 +43,8 @@ MemAddress EmitContext::to_mem_address(const LirOperand& op) const {
             return ptr(GPR::RBP, m.disp);
         }
     }
-    return ptr(GPR::RBP, 0);
+    throw std::logic_error("x64 emission: operand of kind " + std::string(to_string(op.kind)) +
+                           " used as a memory address in " + fn_.name);
 }
 
 CompilationResult EmitContext::compile() {
