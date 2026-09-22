@@ -350,13 +350,14 @@ void run_compile_speed_benchmark(std::vector<BenchmarkResult>& results) {
     std::string mir_text = to_string(*initial_mod);
     size_t mir_bytes = mir_text.size();
 
+    const size_t reps = default_bench_repetitions();
     std::vector<double> parse_samples, verify_samples, codegen_samples, total_samples;
-    parse_samples.reserve(DEFAULT_BENCH_REPETITIONS);
-    verify_samples.reserve(DEFAULT_BENCH_REPETITIONS);
-    codegen_samples.reserve(DEFAULT_BENCH_REPETITIONS);
-    total_samples.reserve(DEFAULT_BENCH_REPETITIONS);
+    parse_samples.reserve(reps);
+    verify_samples.reserve(reps);
+    codegen_samples.reserve(reps);
+    total_samples.reserve(reps);
 
-    for (size_t r = 0; r < DEFAULT_BENCH_REPETITIONS; ++r) {
+    for (size_t r = 0; r < reps; ++r) {
         // 1. Benchmark: Parse MIR Text
         DiagnosticReporter parse_diag;
         sw.start();
@@ -445,7 +446,7 @@ void run_compile_speed_benchmark(std::vector<BenchmarkResult>& results) {
     res.key = "compile_speed";
     res.name = "Compile Speed (6k Fns)";
     res.iterations = target_functions;
-    res.repetitions = DEFAULT_BENCH_REPETITIONS;
+    res.repetitions = reps;
     res.native_ms = 0.0;
     res.native_scalar_ms = 0.0;
     res.brass_ms = total_ms;

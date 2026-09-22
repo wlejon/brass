@@ -171,7 +171,7 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
     // ------------------------------------------------------------------------
     {
         constexpr size_t N = 100000;
-        constexpr size_t iters = 100;
+        const size_t iters = is_debug_build() ? 10 : 100;
         std::vector<uint64_t> nanbox_data(N);
 
         // Populate dataset: 70% doubles, 20% boxed int32s, 10% fallbacks
@@ -219,7 +219,7 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
             };
         };
 
-        auto paired = measure_paired_multi_placement(DEFAULT_BENCH_REPETITIONS, run_native, make_jit_runner);
+        auto paired = measure_paired_multi_placement(default_bench_repetitions(), run_native, make_jit_runner);
 
         double native_res = run_native();
         auto test_jit = make_jit_runner(0);
@@ -239,7 +239,7 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
     // ------------------------------------------------------------------------
     {
         constexpr size_t N = 100000;
-        constexpr size_t iters = 100;
+        const size_t iters = is_debug_build() ? 10 : 100;
 
         struct TestObj {
             uint64_t shape;
@@ -291,7 +291,7 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
             };
         };
 
-        auto paired = measure_paired_multi_placement(DEFAULT_BENCH_REPETITIONS, run_native, make_jit_runner);
+        auto paired = measure_paired_multi_placement(default_bench_repetitions(), run_native, make_jit_runner);
 
         int64_t native_res = run_native();
         auto test_jit = make_jit_runner(0);
@@ -310,9 +310,9 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
     // (c) Patchable-call inline-cache loop
     // ------------------------------------------------------------------------
     {
-        constexpr int64_t phase1_iters = 1000000;
-        constexpr int64_t phase2_iters = 1000000;
-        constexpr size_t outer_rounds = 5;
+        const int64_t phase1_iters = is_debug_build() ? 100000 : 1000000;
+        const int64_t phase2_iters = is_debug_build() ? 100000 : 1000000;
+        const size_t outer_rounds = is_debug_build() ? 1 : 5;
 
         auto run_native = [phase1_iters, phase2_iters, outer_rounds]() {
             int64_t res = 0;
@@ -348,7 +348,7 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
             };
         };
 
-        auto paired = measure_paired_multi_placement(DEFAULT_BENCH_REPETITIONS, run_native, make_jit_runner);
+        auto paired = measure_paired_multi_placement(default_bench_repetitions(), run_native, make_jit_runner);
 
         int64_t native_res = run_native();
         auto test_jit = make_jit_runner(0);
@@ -367,8 +367,8 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
     // (d) Allocation loop building small linked objects under mini-Cheney GC
     // ------------------------------------------------------------------------
     {
-        constexpr int64_t num_nodes = 50000;
-        constexpr size_t gc_rounds = 30;
+        const int64_t num_nodes = is_debug_build() ? 10000 : 50000;
+        const size_t gc_rounds = is_debug_build() ? 5 : 30;
 
         // (a) Shadow-Stack Model
         ThreadShadowStack ss;
@@ -414,7 +414,7 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
             return res;
         };
 
-        auto paired = measure_paired_multi_placement(DEFAULT_BENCH_REPETITIONS, run_shadow, make_jit_runner);
+        auto paired = measure_paired_multi_placement(default_bench_repetitions(), run_shadow, make_jit_runner);
 
         int64_t shadow_res = run_shadow();
         auto test_jit = make_jit_runner(0);

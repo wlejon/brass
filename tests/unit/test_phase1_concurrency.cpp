@@ -265,21 +265,19 @@ TEST_CASE("Phase 1 - ParallelRuntime Algebraic Reduction Identity and Re-entranc
     std::vector<int64_t> results(4, 0);
     for (int t = 0; t < 4; ++t) {
         p_threads.emplace_back([&results, t]() {
-            int64_t sum = 0;
+            std::atomic<int64_t> sum{0};
             brass_parallel_for(
                 500,
                 32,
                 [](uint64_t s, uint64_t e, void* c) {
-                    auto* s_ptr = static_cast<int64_t*>(c);
-                    for (uint64_t k = s; k < e; ++k) {
-                        *s_ptr += 1;
-                    }
+                    auto* s_ptr = static_cast<std::atomic<int64_t>*>(c);
+                    s_ptr->fetch_add(static_cast<int64_t>(e - s), std::memory_order_relaxed);
                 },
                 &sum,
                 ReductionKind::None,
                 nullptr
             );
-            results[t] = sum;
+            results[t] = sum.load();
         });
     }
     for (auto& pt : p_threads) {

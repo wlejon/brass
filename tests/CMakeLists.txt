@@ -248,7 +248,7 @@ target_link_libraries(brass_benchmarks
 
 add_test(NAME benchmarks COMMAND brass_benchmarks)
 add_test(NAME performance_ratchet COMMAND brass_benchmarks --check-ratchet)
-set_tests_properties(benchmarks performance_ratchet PROPERTIES TIMEOUT 300 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(benchmarks performance_ratchet PROPERTIES TIMEOUT 600 RUN_SERIAL TRUE WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
 if(APPLE)
     add_custom_command(TARGET brass_benchmarks POST_BUILD

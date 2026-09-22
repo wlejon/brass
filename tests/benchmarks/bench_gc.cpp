@@ -132,7 +132,7 @@ std::unique_ptr<Module> build_gc_benchmark_module() {
 namespace brass::bench {
 
 void run_gc_benchmark(std::vector<BenchmarkResult>& results) {
-    size_t iters = 500000;
+    size_t iters = is_debug_build() ? 50000 : 500000;
 
     int64_t heap_obj0 = 10;
     int64_t heap_obj1 = 20;
@@ -156,13 +156,14 @@ void run_gc_benchmark(std::vector<BenchmarkResult>& results) {
     int64_t shadow_res = 0;
     int64_t brass_res = 0;
 
+    const size_t reps = default_bench_repetitions();
     std::vector<double> shadow_samples, brass_samples, speedup_samples;
-    shadow_samples.reserve(DEFAULT_BENCH_REPETITIONS);
-    brass_samples.reserve(DEFAULT_BENCH_REPETITIONS);
-    speedup_samples.reserve(DEFAULT_BENCH_REPETITIONS);
+    shadow_samples.reserve(reps);
+    brass_samples.reserve(reps);
+    speedup_samples.reserve(reps);
 
     Stopwatch sw;
-    for (size_t r = 0; r < DEFAULT_BENCH_REPETITIONS; ++r) {
+    for (size_t r = 0; r < reps; ++r) {
         sw.start();
         shadow_res = shadow_stack_gc_runner(
             &heap_obj0, &heap_obj1, &heap_obj2, &heap_obj3,
@@ -202,7 +203,7 @@ void run_gc_benchmark(std::vector<BenchmarkResult>& results) {
     res.key = "gc_model_speedup";
     res.name = "GC Stack-Map Model (vs Shadow-Stack)";
     res.iterations = iters;
-    res.repetitions = DEFAULT_BENCH_REPETITIONS;
+    res.repetitions = reps;
     res.native_ms = shadow_stats.median;
     res.native_min_ms = shadow_stats.min;
     res.native_max_ms = shadow_stats.max;
