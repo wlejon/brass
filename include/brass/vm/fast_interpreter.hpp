@@ -41,11 +41,15 @@ public:
     FastInterpreter(FastInterpreter&&) noexcept;
     FastInterpreter& operator=(FastInterpreter&&) noexcept;
 
+    // Active interpreter on current thread
+    static FastInterpreter* current() noexcept;
+    static void set_current(FastInterpreter* interp) noexcept;
+
     // Module management
-    void set_module(const Module* mod) noexcept { module_ = mod; }
+    void set_module(const Module* mod);
     const Module* module() const noexcept { return module_; }
 
-    void set_bytecode_module(const BytecodeModule* bmod) noexcept { bytecode_module_ = bmod; }
+    void set_bytecode_module(const BytecodeModule* bmod);
     const BytecodeModule* bytecode_module() const noexcept { return bytecode_module_; }
 
     // GC access
@@ -64,6 +68,11 @@ public:
     void register_external_function(std::string_view name, std::function<RuntimeValue(const std::vector<RuntimeValue>&)> fn);
     void register_external_function(std::string_view name, brass::HostFn fn);
     bool has_external_function(std::string_view name) const noexcept;
+
+    // External symbol registration (data and function pointers)
+    void register_external_symbol(std::string_view name, void* addr);
+    void* find_external_symbol(std::string_view name) const noexcept;
+    bool has_external_symbol(std::string_view name) const noexcept;
 
     // Function pointer registration
     void register_function_pointer(uintptr_t ptr, const Function* fn);
@@ -120,6 +129,9 @@ public:
     RuntimeValue current_exception() const noexcept { return current_exception_; }
     void set_current_exception(RuntimeValue val) noexcept { current_exception_ = val; }
 
+    void set_tls_block(uint64_t tls) noexcept { tls_block_ = tls; }
+    uint64_t tls_block() const noexcept { return tls_block_; }
+
     // Compilation cache management
     const BytecodeFunction* get_or_compile(const Function& fn);
     void clear_compile_cache() noexcept;
@@ -165,8 +177,10 @@ private:
     size_t max_call_depth_ = 10000;
     uint64_t max_instructions_ = 0;
     uint64_t total_instructions_executed_ = 0;
+    uint64_t tls_block_ = 0;
 
     std::unordered_map<std::string, FastHostFn> external_functions_;
+    std::unordered_map<std::string, void*> external_symbols_;
     std::unordered_map<uintptr_t, const Function*> function_pointers_;
     std::unordered_map<uintptr_t, const BytecodeFunction*> bytecode_function_pointers_;
     std::unordered_map<uintptr_t, FastHostFn> host_function_pointers_;

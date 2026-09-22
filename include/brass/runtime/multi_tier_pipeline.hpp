@@ -8,6 +8,7 @@
 #include <brass/mir/function.hpp>
 #include <brass/interpreter/value.hpp>
 #include <brass/gc/stack_map.hpp>
+#include <brass/vm/fast_interpreter.hpp>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -100,6 +101,9 @@ public:
     void reset_stats();
     void dump_stats(std::ostream& os) const;
 
+    void register_external_symbol(std::string_view name, void* addr);
+    void register_external_function(std::string_view name, FastHostFn fn);
+
     void register_baseline_compiled(std::shared_ptr<codegen::BaselineCompiledFunction> fn);
     std::shared_ptr<codegen::BaselineCompiledFunction> find_baseline_compiled(std::string_view name) const;
     void clear_baseline_cache();
@@ -117,6 +121,8 @@ private:
     ModuleStackMap active_stack_maps_;
 
     mutable std::mutex mutex_;
+    std::unordered_map<std::string, void*> external_symbols_;
+    std::unordered_map<std::string, FastHostFn> external_functions_;
     std::unordered_map<std::string, std::shared_ptr<codegen::BaselineCompiledFunction>> baseline_functions_;
     MultiTierStats stats_;
 

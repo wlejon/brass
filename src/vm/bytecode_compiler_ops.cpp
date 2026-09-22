@@ -158,6 +158,16 @@ void FunctionCompilerContext::lower_instruction(const Instruction& inst) {
             lower_vector(inst);
             break;
 
+        case Opcode::pinned_tls_read:
+            emit(BytecodeOp::pinned_tls_read, get_result_reg(inst), 0, 0);
+            break;
+        case Opcode::pinned_tls_write:
+            emit(BytecodeOp::pinned_tls_write, 0, get_reg(inst.operand(0)), 0);
+            break;
+        case Opcode::read_sp:
+            emit(BytecodeOp::read_sp, get_result_reg(inst), 0, 0);
+            break;
+
         default:
             emit(BytecodeOp::nop, 0, 0, 0);
             break;

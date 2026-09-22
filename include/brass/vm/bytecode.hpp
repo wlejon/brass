@@ -201,6 +201,9 @@ enum class BytecodeOp : uint8_t {
     guard,
     resume_point,
     osr_entry,
+    pinned_tls_read,
+    pinned_tls_write,
+    read_sp,
 
     // Exceptions & Coroutines
     throw_,

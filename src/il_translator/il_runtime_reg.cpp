@@ -369,6 +369,7 @@ void register_bronze_interpreter_symbols(void* interp_ptr) {
 void register_bronze_fast_interpreter_symbols(void* fast_interp_ptr) {
     if (!fast_interp_ptr) return;
     auto* interp = reinterpret_cast<FastInterpreter*>(fast_interp_ptr);
+    register_all_runtime_symbols_generic(*interp);
     interp->register_external_function("bronze_print_f64", [](FastInterpreter&, const std::vector<RuntimeValue>& args) {
         if (!args.empty()) bronze_print_f64(args[0].as_f64());
         return RuntimeValue::from_void();
@@ -415,6 +416,12 @@ void register_bronze_fast_interpreter_symbols(void* fast_interp_ptr) {
     interp->register_external_function("bronze_stack_overflow", [](FastInterpreter&, const std::vector<RuntimeValue>&) {
         bronze_stack_overflow();
         return RuntimeValue::from_void();
+    });
+    interp->register_external_function("bronze_tls_enter", [](FastInterpreter&, const std::vector<RuntimeValue>&) {
+        return RuntimeValue::from_ptr(reinterpret_cast<uintptr_t>(bronze_tls_enter()));
+    });
+    interp->register_external_function("bronze_tls_block_addr", [](FastInterpreter&, const std::vector<RuntimeValue>&) {
+        return RuntimeValue::from_ptr(reinterpret_cast<uintptr_t>(bronze_tls_block_addr()));
     });
     interp->register_external_function("bronze_register_value_cells", [](FastInterpreter&, const std::vector<RuntimeValue>& a) {
         if (a.size() >= 2) {

@@ -62,7 +62,8 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
     std::unordered_map<const Value*, int32_t> slot_map;
     std::unordered_map<const Instruction*, int32_t> alloca_offsets;
     std::vector<int32_t> gcref_slots;
-    int32_t current_offset = 0;
+    bool preserves_r13 = (fn.parent() && fn.parent()->pinned_tls_register());
+    int32_t current_offset = preserves_r13 ? 8 : 0;
 
     auto alloc_slot = [&](const Value* val) -> int32_t {
         if (!val) return 0;
@@ -127,6 +128,10 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
     enc.push(GPR::RBP);
     enc.mov(GPR::RBP, GPR::RSP);
     enc.sub(GPR::RSP, frame_size);
+
+    if (preserves_r13) {
+        enc.mov(MemAddress::base_disp(GPR::RBP, -8), GPR::R13);
+    }
 
     // Zero-initialize gcref slots for moving GC safety
     if (!gcref_slots.empty()) {
@@ -463,6 +468,9 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
                         } else {
                             enc.mov(GPR::RAX, slot_addr(rval));
                         }
+                    }
+                    if (preserves_r13) {
+                        enc.mov(GPR::R13, MemAddress::base_disp(GPR::RBP, -8));
                     }
                     enc.mov(GPR::RSP, GPR::RBP);
                     enc.pop(GPR::RBP);

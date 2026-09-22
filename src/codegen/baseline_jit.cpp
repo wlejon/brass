@@ -341,7 +341,8 @@ std::vector<BaselineCompiledFunction> BaselineJitCompiler::compile_module(const 
         runtime::FunctionDispatchTable::instance().get_or_create(fn->name(), fn);
     }
 
-    for (const auto* fn : mod.functions()) {
+    for (auto it = mod.functions().rbegin(); it != mod.functions().rend(); ++it) {
+        const auto* fn = *it;
         if (!fn) continue;
         results.push_back(compile(*fn, target));
         auto* handle = runtime::FunctionDispatchTable::instance().get_or_create(fn->name(), fn);

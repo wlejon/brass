@@ -64,6 +64,17 @@ void MultiTierPipeline::set_use_fast_interpreter(bool enable) noexcept {
     set_tier0_interpreter(enable ? Tier0Interpreter::Fast : Tier0Interpreter::Oracle);
 }
 
+void MultiTierPipeline::register_external_symbol(std::string_view name, void* addr) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    external_symbols_[std::string(name)] = addr;
+    baseline_compiler_.register_external_symbol(name, addr);
+}
+
+void MultiTierPipeline::register_external_function(std::string_view name, FastHostFn fn) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    external_functions_[std::string(name)] = std::move(fn);
+}
+
 void MultiTierPipeline::register_baseline_compiled(std::shared_ptr<codegen::BaselineCompiledFunction> fn) {
     if (!fn) return;
     std::lock_guard<std::mutex> lock(mutex_);
@@ -232,6 +243,15 @@ RuntimeValue MultiTierPipeline::execute(
         FastInterpreter fast_interp;
         fast_interp.set_module(&mod);
         il::register_bronze_fast_interpreter_symbols(&fast_interp);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (const auto& [sym, addr] : external_symbols_) {
+                fast_interp.register_external_symbol(sym, addr);
+            }
+            for (const auto& [name, fn_ptr] : external_functions_) {
+                fast_interp.register_external_function(name, fn_ptr);
+            }
+        }
         result = handle->call(fast_interp, args);
     } else {
         Interpreter interp;

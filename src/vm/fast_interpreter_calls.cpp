@@ -25,6 +25,41 @@ bool FastInterpreter::has_external_function(std::string_view name) const noexcep
     return external_functions_.find(std::string(name)) != external_functions_.end();
 }
 
+void FastInterpreter::register_external_symbol(std::string_view name, void* addr) {
+    external_symbols_[std::string(name)] = addr;
+}
+
+void* FastInterpreter::find_external_symbol(std::string_view name) const noexcept {
+    auto it = external_symbols_.find(std::string(name));
+    return it != external_symbols_.end() ? it->second : nullptr;
+}
+
+void FastInterpreter::set_module(const Module* mod) {
+    module_ = mod;
+    if (module_) {
+        for (const auto* fn : module_->functions()) {
+            if (fn) {
+                register_function_pointer(reinterpret_cast<uintptr_t>(fn), fn);
+            }
+        }
+    }
+}
+
+void FastInterpreter::set_bytecode_module(const BytecodeModule* bmod) {
+    bytecode_module_ = bmod;
+    if (bytecode_module_) {
+        for (const auto& fn : bytecode_module_->functions()) {
+            if (fn) {
+                register_function_pointer(reinterpret_cast<uintptr_t>(fn.get()), fn.get());
+            }
+        }
+    }
+}
+
+bool FastInterpreter::has_external_symbol(std::string_view name) const noexcept {
+    return external_symbols_.find(std::string(name)) != external_symbols_.end();
+}
+
 void FastInterpreter::register_function_pointer(uintptr_t ptr, const Function* fn) {
     function_pointers_[ptr] = fn;
 }
@@ -395,6 +430,12 @@ RuntimeValue FastInterpreter::run(const Module& mod, std::string_view entry_name
 RuntimeValue FastInterpreter::run(const Module& mod, std::string_view entry_name, const std::vector<RuntimeValue>& args) {
     module_ = &mod;
     const Function* fn = mod.get_function(entry_name);
+    if (!fn && entry_name != "main") {
+        fn = mod.get_function("main");
+    }
+    if (!fn && !mod.functions().empty()) {
+        fn = mod.functions().front();
+    }
     if (!fn) {
         throw InterpreterException("Entry function @" + std::string(entry_name) + " not found in module");
     }

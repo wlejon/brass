@@ -530,6 +530,19 @@ bool emit_baseline_x64_op(X64BaselineEmitter& emitter, const Instruction& inst) 
             return true;
         }
 
+        case Opcode::pinned_tls_read: {
+            enc.mov(slot_addr(inst.result()), GPR::R13);
+            return true;
+        }
+        case Opcode::pinned_tls_write: {
+            enc.mov(GPR::R13, slot_addr(inst.operand(0)));
+            return true;
+        }
+        case Opcode::read_sp: {
+            enc.mov(slot_addr(inst.result()), GPR::RSP);
+            return true;
+        }
+
         default:
             return false;
     }

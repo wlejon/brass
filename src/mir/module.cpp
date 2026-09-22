@@ -41,6 +41,14 @@ Function* Module::get_function(std::string_view name) const noexcept {
     return nullptr;
 }
 
+void Module::rename_function(Function* fn, std::string_view new_name) {
+    if (!fn) return;
+    function_map_.erase(fn->name());
+    std::string_view interned = string_pool_.intern(new_name);
+    fn->set_name(interned);
+    function_map_[interned] = fn;
+}
+
 void Module::add_external_symbol(std::string_view sym) {
     std::string_view interned_sym = string_pool_.intern(sym);
     if (!has_external_symbol(interned_sym)) {

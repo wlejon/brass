@@ -20,6 +20,16 @@ FastInterpreter::~FastInterpreter() = default;
 FastInterpreter::FastInterpreter(FastInterpreter&&) noexcept = default;
 FastInterpreter& FastInterpreter::operator=(FastInterpreter&&) noexcept = default;
 
+static thread_local FastInterpreter* s_current_fast_interp = nullptr;
+
+FastInterpreter* FastInterpreter::current() noexcept {
+    return s_current_fast_interp;
+}
+
+void FastInterpreter::set_current(FastInterpreter* interp) noexcept {
+    s_current_fast_interp = interp;
+}
+
 void FastInterpreter::clear_compile_cache() noexcept {
     compiled_functions_.clear();
 }
@@ -224,6 +234,7 @@ RuntimeValue FastInterpreter::execute_frame(FastFrame& frame) {
         TENTRY(ret); TENTRY(ret_void); TENTRY(switch_);
         TENTRY(call); TENTRY(call_indirect); TENTRY(patchable_call); TENTRY(func_addr);
         TENTRY(safepoint); TENTRY(write_barrier); TENTRY(guard); TENTRY(resume_point); TENTRY(osr_entry);
+        TENTRY(pinned_tls_read); TENTRY(pinned_tls_write); TENTRY(read_sp);
         TENTRY(throw_); TENTRY(invoke); TENTRY(landing_pad); TENTRY(resume);
         TENTRY(coro_create); TENTRY(coro_suspend); TENTRY(coro_resume); TENTRY(coro_destroy);
         TENTRY(vadd); TENTRY(vsub); TENTRY(vmul); TENTRY(vdiv); TENTRY(vfma); TENTRY(vneg);
@@ -775,6 +786,11 @@ loop_start:
                 if (bfn) {
                     fn_ptr = reinterpret_cast<uintptr_t>(bfn);
                     register_function_pointer(fn_ptr, bfn);
+                } else {
+                    void* ext_sym = find_external_symbol(sym);
+                    if (ext_sym) {
+                        fn_ptr = reinterpret_cast<uintptr_t>(ext_sym);
+                    }
                 }
             }
             registers[dst] = fn_ptr;
@@ -853,6 +869,41 @@ loop_start:
         }
 
         OP_CASE(osr_entry) {
+            pc++;
+            DISPATCH();
+        }
+
+        OP_CASE(pinned_tls_write) {
+            uint8_t src = decode_src1(inst);
+            tls_block_ = registers[src];
+            pc++;
+            DISPATCH();
+        }
+
+        OP_CASE(pinned_tls_read) {
+            uint8_t dst = decode_dst(inst);
+            if (tls_block_ == 0) {
+                void* sym = find_external_symbol("bronze_tls_enter");
+                if (sym) {
+                    auto fn_ptr = reinterpret_cast<void*(*)()>(sym);
+                    tls_block_ = reinterpret_cast<uint64_t>(fn_ptr());
+                } else {
+                    sym = find_external_symbol("bronze_tls_block_addr");
+                    if (sym) {
+                        auto fn_ptr = reinterpret_cast<void*(*)()>(sym);
+                        tls_block_ = reinterpret_cast<uint64_t>(fn_ptr());
+                    }
+                }
+            }
+            registers[dst] = tls_block_;
+            pc++;
+            DISPATCH();
+        }
+
+        OP_CASE(read_sp) {
+            uint8_t dst = decode_dst(inst);
+            char marker = 0;
+            registers[dst] = reinterpret_cast<uint64_t>(&marker);
             pc++;
             DISPATCH();
         }

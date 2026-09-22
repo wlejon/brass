@@ -40,6 +40,7 @@ public:
     std::vector<Function*>& functions() noexcept { return functions_; }
     size_t function_count() const noexcept { return functions_.size(); }
     Function* get_function(std::string_view name) const noexcept;
+    void rename_function(Function* fn, std::string_view new_name);
 
     void add_external_symbol(std::string_view sym);
     bool has_external_symbol(std::string_view sym) const noexcept;

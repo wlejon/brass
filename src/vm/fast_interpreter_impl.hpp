@@ -97,13 +97,17 @@ struct FastFrame {
 struct FrameGuard {
     FastInterpreter& interp;
     FastFrame& frame;
+    FastInterpreter* prev_interp{nullptr};
 
     FrameGuard(FastInterpreter& in, FastFrame& f) : interp(in), frame(f) {
+        prev_interp = FastInterpreter::current();
+        FastInterpreter::set_current(&in);
         frame.caller = interp.current_frame();
         interp.set_current_frame(&frame);
         interp.inc_call_depth();
     }
     ~FrameGuard() {
+        FastInterpreter::set_current(prev_interp);
         interp.set_current_frame(frame.caller);
         interp.dec_call_depth();
     }
