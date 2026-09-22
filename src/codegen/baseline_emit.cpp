@@ -438,8 +438,11 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
                 }
                 case Opcode::switch_: {
                     enc.mov(GPR::RAX, slot_addr(inst.operand(0)));
+                    std::vector<Label> case_labels;
+                    case_labels.reserve(inst.switch_cases().size());
                     for (const auto& sc : inst.switch_cases()) {
                         Label case_body = buffer.create_label();
+                        case_labels.push_back(case_body);
                         enc.cmp(GPR::RAX, static_cast<int32_t>(sc.value));
                         enc.je(case_body);
                     }
@@ -448,9 +451,10 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
                     enc.jmp(block_labels[inst.default_target().block->id()]);
 
                     // Cases
-                    for (const auto& sc : inst.switch_cases()) {
-                        emitter.copy_block_args(sc.target);
-                        enc.jmp(block_labels[sc.target.block->id()]);
+                    for (size_t i = 0; i < inst.switch_cases().size(); ++i) {
+                        buffer.bind(case_labels[i]);
+                        emitter.copy_block_args(inst.switch_cases()[i].target);
+                        enc.jmp(block_labels[inst.switch_cases()[i].target.block->id()]);
                     }
                     break;
                 }
