@@ -40,12 +40,17 @@ Requires CMake (>= 3.20), Ninja, and a C++20 compiler (GCC 12+, Clang 15+, or MS
 cmake -B build -G Ninja
 cmake --build build
 
-# Run unit tests & determinism ratchet
-ctest --test-dir build --output-on-failure
+# Run the correctness suite (unit + differential tests, one ctest per TEST_CASE)
+ctest --test-dir build --output-on-failure -L correctness
 
-# Run performance benchmark suite
-./build/tests/brass_benchmarks
+# Run the performance targets and ratchet (machine-dependent)
+ctest --test-dir build --output-on-failure -L perf
 ```
+
+Each `TEST_CASE` runs in its own process, so a crash fails only that test.
+To run tests in-process while iterating, call the binary directly:
+`./build/tests/brass_unit_tests --filter=<substring>` (or `--exact=<name>`,
+`--list`).
 
 GPU tests validate every emitted kernel with `ptxas` and execute it on a real
 device when a CUDA driver is present. They are skipped automatically otherwise,

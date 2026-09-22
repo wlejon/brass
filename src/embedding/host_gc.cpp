@@ -77,11 +77,16 @@ HostGC::HostGC(HostGC&& other) noexcept {
     registered_val_roots_ = std::move(other.registered_val_roots_);
     registered_ptr_roots_ = std::move(other.registered_ptr_roots_);
     registered_tlabs_ = std::move(other.registered_tlabs_);
+    other.registered_tlabs_.clear();
+    adopt_registered_tlabs(&other);
     root_provider_ = std::move(other.root_provider_);
 }
 
 HostGC& HostGC::operator=(HostGC&& other) noexcept {
     if (this != &other) {
+        // Our own TLABs would otherwise be dropped from the list while still
+        // naming us as owner.
+        reset_active_tlabs(true);
         std::scoped_lock lock(gc_mutex_, other.gc_mutex_);
         semispace_size_ = other.semispace_size_;
         from_space_ = std::move(other.from_space_);
@@ -95,9 +100,25 @@ HostGC& HostGC::operator=(HostGC&& other) noexcept {
         registered_val_roots_ = std::move(other.registered_val_roots_);
         registered_ptr_roots_ = std::move(other.registered_ptr_roots_);
         registered_tlabs_ = std::move(other.registered_tlabs_);
+        other.registered_tlabs_.clear();
+        adopt_registered_tlabs(&other);
         root_provider_ = std::move(other.root_provider_);
     }
     return *this;
+}
+
+// The TLABs moved over from `from` still name it as owner; `from` is about to
+// be destroyed or reused, so point them at the collector that now owns the
+// space they allocate from.
+void HostGC::adopt_registered_tlabs(HostGC* from) noexcept {
+    for (auto* tlab : registered_tlabs_) {
+        if (tlab && tlab->owner_gc == from) {
+            tlab->owner_gc = this;
+        }
+    }
+    if (g_active_host_gc == from) {
+        g_active_host_gc = this;
+    }
 }
 
 void HostGC::poison_space(uint8_t* space, size_t size) noexcept {

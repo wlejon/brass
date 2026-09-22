@@ -101,7 +101,8 @@ TEST_CASE("Frontend Hardening - CallDynamic with >16 Arguments Stages in GC Fram
 
     il::BronzeClosure closure;
     std::memset(&closure, 0, sizeof(closure));
-    std::strncpy(closure.fn_name, "sum18", sizeof(closure.fn_name) - 1);
+    static_assert(sizeof(closure.fn_name) > sizeof("sum18"));
+    std::memcpy(closure.fn_name, "sum18", sizeof("sum18"));
     closure.code_ptr = reinterpret_cast<void*>(+sum_18_fn);
     closure.env_box = 0;
     closure.param_count = 18;

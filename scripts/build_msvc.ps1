@@ -79,7 +79,7 @@ Invoke-MsvcCommand "cmake --build `"$BuildDir`" --config $BuildType"
 
 if ($RunTests) {
     Write-Host "[INFO] Running CTest suite..." -ForegroundColor Green
-    Invoke-MsvcCommand "ctest --test-dir `"$BuildDir`" --output-on-failure -C $BuildType"
+    Invoke-MsvcCommand "ctest --test-dir `"$BuildDir`" --output-on-failure -C $BuildType -L correctness"
 }
 
 Write-Host "======================================================================" -ForegroundColor Cyan

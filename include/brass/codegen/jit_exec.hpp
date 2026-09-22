@@ -125,6 +125,9 @@ struct alignas(16) X64Win64InvokeArgs {
 
 struct alignas(16) X64Win64InvokeResult {
     uint64_t rax = 0;
+    // Explicit, so the 16-byte slot below needs no compiler padding (MSVC
+    // warns C4324 on implicit alignment padding in consumers' /W4 builds).
+    uint64_t reserved = 0;
     alignas(16) uint8_t xmm0[16] = {0};
 };
 

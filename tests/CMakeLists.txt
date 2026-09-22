@@ -192,8 +192,31 @@ target_link_libraries(brass_unit_tests
         brass
 )
 
-add_test(NAME unit_tests COMMAND brass_unit_tests)
-set_tests_properties(unit_tests PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+# One ctest per TEST_CASE, discovered from the binary each time ctest starts
+# (see cmake/discover_unit_tests.cmake), so one crash cannot hide the rest.
+# The per-config file carries the binary's path; the include below picks the
+# file for the configuration ctest was asked to test.
+set(BRASS_UNIT_TEST_TIMEOUT 600 CACHE STRING "Per-test timeout (seconds) for brass unit tests")
+set(_brass_discovery_dir "${CMAKE_CURRENT_BINARY_DIR}/ctest_discovery")
+file(GENERATE
+    OUTPUT "${_brass_discovery_dir}/unit_tests_$<CONFIG>.cmake"
+    CONTENT "set(BRASS_TEST_EXE [==[$<TARGET_FILE:brass_unit_tests>]==])
+set(BRASS_TEST_WORKDIR [==[${CMAKE_SOURCE_DIR}]==])
+set(BRASS_TEST_TIMEOUT ${BRASS_UNIT_TEST_TIMEOUT})
+include([==[${CMAKE_CURRENT_SOURCE_DIR}/cmake/discover_unit_tests.cmake]==])
+")
+file(WRITE "${_brass_discovery_dir}/include.cmake"
+"if(CTEST_CONFIGURATION_TYPE)
+    set(_brass_cfg \"\${CTEST_CONFIGURATION_TYPE}\")
+else()
+    set(_brass_cfg [==[${CMAKE_BUILD_TYPE}]==])
+endif()
+include(\"${_brass_discovery_dir}/unit_tests_\${_brass_cfg}.cmake\" OPTIONAL RESULT_VARIABLE _brass_found)
+if(NOT _brass_found)
+    add_test(unit_tests.no_config \"unit_tests_\${_brass_cfg}.cmake-not-generated\")
+endif()
+")
+set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES "${_brass_discovery_dir}/include.cmake")
 
 if(APPLE)
     add_custom_command(TARGET brass_unit_tests POST_BUILD
@@ -201,6 +224,36 @@ if(APPLE)
         COMMENT "Ad-hoc code signing brass_unit_tests"
     )
 endif()
+
+# Consumers (bronze builds with MSVC /W4 /WX) compile brass's public headers
+# with their own warning flags, not brass's suppressions. This object library
+# includes every public header under consumer-style flags so a header warning
+# breaks brass's build before it breaks theirs.
+file(GLOB_RECURSE BRASS_PUBLIC_HEADERS CONFIGURE_DEPENDS
+    "${BRASS_INCLUDE_DIR}/*.hpp" "${BRASS_INCLUDE_DIR}/*.h")
+list(SORT BRASS_PUBLIC_HEADERS)
+set(_brass_header_check_src "")
+foreach(_hdr IN LISTS BRASS_PUBLIC_HEADERS)
+    file(RELATIVE_PATH _rel "${BRASS_INCLUDE_DIR}" "${_hdr}")
+    string(APPEND _brass_header_check_src "#include <${_rel}>\n")
+endforeach()
+string(APPEND _brass_header_check_src "int brass_public_headers_check_anchor = 0;\n")
+file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/public_headers_check.cpp"
+    CONTENT "${_brass_header_check_src}")
+add_library(brass_public_headers_check OBJECT "${CMAKE_CURRENT_BINARY_DIR}/public_headers_check.cpp")
+# Drop the directory-wide options (they carry brass's own /wd suppressions).
+set_target_properties(brass_public_headers_check PROPERTIES COMPILE_OPTIONS "")
+target_include_directories(brass_public_headers_check PRIVATE ${BRASS_INCLUDE_DIR})
+target_compile_features(brass_public_headers_check PRIVATE cxx_std_20)
+target_compile_definitions(brass_public_headers_check PRIVATE BRASS_HOST_BACKEND=$<BOOL:${BRASS_HOST_BACKEND}>)
+if(MSVC)
+    target_compile_options(brass_public_headers_check PRIVATE
+        /W4 /WX /EHsc /permissive- /Zc:__cplusplus /utf-8)
+else()
+    target_compile_options(brass_public_headers_check PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Werror)
+endif()
+add_dependencies(brass_unit_tests brass_public_headers_check)
 
 # Retrieve Git Commit SHA
 execute_process(
@@ -256,9 +309,13 @@ target_link_libraries(brass_benchmarks
         brass
 )
 
+# Performance targets, not correctness: labelled "perf" so correctness runs
+# (`ctest -L correctness`, as CI does) exclude them and a slow machine or a
+# perf regression reads as exactly that.
 add_test(NAME benchmarks COMMAND brass_benchmarks)
 add_test(NAME performance_ratchet COMMAND brass_benchmarks --check-ratchet)
-set_tests_properties(benchmarks performance_ratchet PROPERTIES TIMEOUT 600 RUN_SERIAL TRUE WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(benchmarks performance_ratchet PROPERTIES
+    TIMEOUT 600 RUN_SERIAL TRUE WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" LABELS "perf")
 
 if(APPLE)
     add_custom_command(TARGET brass_benchmarks POST_BUILD

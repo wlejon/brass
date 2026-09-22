@@ -457,12 +457,6 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
         return args[idx].as_f64();
     };
 
-    // Check if arguments or return value contain floats
-    bool has_float_arg = false;
-    for (const auto& a : args) {
-        if (a.is_f64() || a.is_f32()) has_float_arg = true;
-    }
-
     // 0 arguments
     if (args.empty()) {
         if (ret_type.is_void()) {

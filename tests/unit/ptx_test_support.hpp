@@ -50,10 +50,7 @@ inline std::string quiet(const std::string& cmd) {
 }
 
 inline std::filesystem::path scratch_path(const char* name) {
-    std::error_code ec;
-    std::filesystem::path dir = std::filesystem::temp_directory_path(ec);
-    if (ec) dir = std::filesystem::current_path();
-    return dir / name;
+    return brass::test::scratch_dir() / name;
 }
 
 inline bool ptxas_available() {

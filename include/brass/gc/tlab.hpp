@@ -15,6 +15,8 @@ struct ThreadLocalAllocBuffer {
     size_t default_size = 64 * 1024; // Default chunk refill size (64 KB)
 
     void init(HostGC* gc, size_t default_sz = 64 * 1024);
+    // Retires the buffer and leaves the owning collector's registry.
+    void detach();
     ~ThreadLocalAllocBuffer();
     void refill(size_t min_bytes);
     void reset();

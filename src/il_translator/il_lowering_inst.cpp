@@ -22,7 +22,6 @@ bool IlLowering::lower_instruction(
     uint32_t block_id,
     uint32_t* cont_counter
 ) {
-    Type res_type = lower_type(inst_ast.result_type);
     Value* res_val = nullptr;
 
     auto get_val_by_id = [&](uint32_t id) -> Value* {

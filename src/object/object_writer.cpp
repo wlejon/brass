@@ -472,6 +472,7 @@ void materialize_got_slots(ObjectFile& obj, std::string_view slot_section, Secti
     if (relax_got_loads(obj) == 0) return;
     // The slots go at the end of the section, after whatever it holds.
     Section& slots = obj.get_or_create_section(slot_section, kind, flags, 8);
+    if (slots.alignment < 8) slots.alignment = 8;
     const int32_t slots_index = obj.get_section_index(slot_section);
     std::unordered_map<std::string, std::string> slot_of;   // symbol -> slot symbol
     for (auto& sec : obj.sections) {

@@ -331,7 +331,7 @@ TEST_CASE("AOT Linker - Native Roundtrip Through an Import") {
     const std::string ext = Target::host().is_windows() ? ".dll" : ".dylib";
     const std::string provider_name = Target::host().is_windows() ? "aot_import_provider.dll"
                                                                   : "libaot_import_provider.dylib";
-    const std::filesystem::path dir = std::filesystem::temp_directory_path();
+    const std::filesystem::path dir = brass::test::scratch_dir();
     const std::filesystem::path provider_path = dir / provider_name;
     const std::filesystem::path consumer_path = dir / ("aot_import_consumer" + ext);
     std::error_code ec;

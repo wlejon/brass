@@ -62,7 +62,7 @@ if errorlevel 1 (
 )
 
 echo [INFO] Running CTest suite...
-ctest --test-dir "%BUILD_DIR%" --output-on-failure -C Release -R unit_tests
+ctest --test-dir "%BUILD_DIR%" --output-on-failure -C Release -L correctness
 if errorlevel 1 (
     echo [ERROR] Tests failed.
     exit /b 1

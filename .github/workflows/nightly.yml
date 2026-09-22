@@ -69,8 +69,10 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel 4
 
+      # The whole correctness suite (unit + differential), one ctest per
+      # TEST_CASE. Perf targets (label "perf") are not run on shared runners.
       - name: Test
-        run: ctest --test-dir build --output-on-failure -R unit_tests
+        run: ctest --test-dir build --output-on-failure -L correctness
 
       - name: Package
         shell: bash
@@ -152,7 +154,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
-          NOTES="Automated nightly build from \`${GITHUB_SHA::7}\` on $(date -u +%Y-%m-%d), verified against the full unit and differential test suite.
+          NOTES="Automated nightly build from \`${GITHUB_SHA::7}\` on $(date -u +%Y-%m-%d), verified against the unit and differential correctness suite (performance targets are not checked).
 
           Each package contains the Brass compiler CLI tools (\`brass-opt\`, \`brass-il\`, \`brass-fuzz\`), the static and shared libraries (\`libbrass\`), and the C-API / C++ SDK headers under \`include/\`."
           gh release create nightly \

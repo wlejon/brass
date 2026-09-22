@@ -1,5 +1,6 @@
 #pragma once
 
+#include "test_framework.hpp"
 #include <string>
 #include <vector>
 #include <filesystem>
@@ -53,13 +54,14 @@ public:
     }
 
     static std::filesystem::path temp_dir() {
-        auto p = std::filesystem::temp_directory_path() / "brass_msvc_tests";
+        auto p = scratch_dir() / "msvc";
         std::filesystem::create_directories(p);
         return p;
     }
 
     static int run_msvc_cmd(const std::string& cmd_line) {
-        auto runner_bat = temp_dir() / "msvc_runner.bat";
+        static int counter = 0;
+        auto runner_bat = temp_dir() / ("msvc_runner_" + std::to_string(counter++) + ".bat");
         runner_bat.make_preferred();
         std::string vcvars = find_vcvars64();
         {
@@ -67,10 +69,20 @@ public:
             if (!vcvars.empty()) {
                 ofs << "@call \"" << vcvars << "\" >nul 2>nul\n";
             }
+            // cl drops objects it isn't told where to put into the current
+            // directory, which is the source tree when run under ctest.
+            auto work = temp_dir();
+            work.make_preferred();
+            ofs << "@cd /d \"" << work.string() << "\"\n";
             ofs << "@" << cmd_line << "\n";
+            // Without an explicit exit, the batch's status is not reliably the
+            // last command's, and a failed link can come back as success.
+            ofs << "@exit /b %ERRORLEVEL%\n";
         }
         std::string invoke_cmd = "\"" + runner_bat.string() + "\"";
         int code = std::system(invoke_cmd.c_str());
+        std::error_code ec;
+        std::filesystem::remove(runner_bat, ec);
         if (code != 0) {
             std::cerr << "[MSVC Toolchain CMD FAILED (exit " << code << ")]: " << cmd_line << "\n";
         }

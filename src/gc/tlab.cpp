@@ -13,7 +13,14 @@ static uintptr_t s_fallback_zero = 0;
 
 } // namespace
 
+// A TLAB is in exactly one collector's registered list: the one in owner_gc.
+// HostGC relies on that to clear owner_gc on every TLAB still pointing at it
+// when it dies; a TLAB left in a stale list (or missing from its owner's list)
+// ends up dereferencing a dead collector or a dead thread's TLAB.
 void ThreadLocalAllocBuffer::init(HostGC* gc, size_t default_sz) {
+    if (owner_gc && owner_gc != gc) {
+        detach();
+    }
     owner_gc = gc;
     default_size = default_sz;
     top = 0;
@@ -24,11 +31,16 @@ void ThreadLocalAllocBuffer::init(HostGC* gc, size_t default_sz) {
     }
 }
 
-ThreadLocalAllocBuffer::~ThreadLocalAllocBuffer() {
+void ThreadLocalAllocBuffer::detach() {
     if (owner_gc) {
+        reset();
         owner_gc->unregister_tlab(this);
         owner_gc = nullptr;
     }
+}
+
+ThreadLocalAllocBuffer::~ThreadLocalAllocBuffer() {
+    detach();
 }
 
 void ThreadLocalAllocBuffer::refill(size_t min_bytes) {
@@ -93,10 +105,7 @@ ThreadLocalAllocBuffer* get_active_tlab() noexcept {
         g_active_tlab = &g_default_tlab;
     }
     if (g_active_tlab->owner_gc != current_gc) {
-        if (g_active_tlab->owner_gc) {
-            g_active_tlab->reset();
-        }
-        g_active_tlab->owner_gc = current_gc;
+        g_active_tlab->detach();
         if (current_gc) {
             g_active_tlab->init(current_gc);
         }

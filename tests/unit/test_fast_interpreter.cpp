@@ -484,7 +484,7 @@ TEST_CASE("Fast Interpreter - Execution Limits") {
     bool threw = false;
     try {
         interp.run(*fn);
-    } catch (const InterpreterException& ex) {
+    } catch (const InterpreterException&) {
         threw = true;
     }
     CHECK(threw);

@@ -41,8 +41,16 @@ uint32_t get_coff_section_characteristics(const Section& sec) {
         }
         if (has_flag(sec.flags, SectionFlags::Discardable)) {
             flags |= coff::IMAGE_SCN_MEM_DISCARDABLE;
+            flags |= coff::IMAGE_SCN_ALIGN_4BYTES;
+        } else {
+            // Loaded data carries 8-byte pointer slots and 16-byte constants;
+            // an in-section align_to() means nothing unless the linker places
+            // the section itself at that alignment. The field is log2(align)+1.
+            uint32_t align = sec.alignment < 4 ? 4 : (sec.alignment > 8192 ? 8192 : sec.alignment);
+            uint32_t log2 = 0;
+            while ((1u << (log2 + 1)) <= align) ++log2;
+            flags |= (log2 + 1) << 20;
         }
-        flags |= coff::IMAGE_SCN_ALIGN_4BYTES;
     }
     return flags;
 }
@@ -266,9 +274,26 @@ std::vector<uint8_t> CoffWriter::write() {
         write_u32(out, chars);
     }
 
-    // Patch inline addends into section data for COFF relocations
+    // Patch inline addends into section data for COFF relocations.
+    // Relocation addends follow the S + A - P convention (a rip-relative
+    // displacement at the end of its instruction carries A = -4), while an
+    // AMD64 REL32 is already measured from the end of its 4-byte field, so the
+    // inline value it needs is A + 4.
+    const bool rel32_from_field_end = !working_obj.target.is_aarch64();
     for (auto& sec : working_obj.sections) {
         for (const auto& r : sec.relocations) {
+            if (rel32_from_field_end &&
+                (r.kind == RelocKind::PCRel32 || r.kind == RelocKind::Plt32)) {
+                if (r.addend + 4 != 0 && r.offset + 4 <= sec.data.size()) {
+                    uint32_t current_val = 0;
+                    std::memcpy(&current_val, sec.data.data() + r.offset, sizeof(uint32_t));
+                    if (current_val == 0) {
+                        uint32_t inline_val = static_cast<uint32_t>(static_cast<int32_t>(r.addend + 4));
+                        std::memcpy(sec.data.data() + r.offset, &inline_val, sizeof(uint32_t));
+                    }
+                }
+                continue;
+            }
             if (r.addend != 0) {
                 if (r.kind == RelocKind::Addr32NB || r.kind == RelocKind::PCRel32 ||
                     r.kind == RelocKind::AdrPage21 ||

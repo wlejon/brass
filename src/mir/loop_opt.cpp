@@ -159,7 +159,7 @@ bool constant_folding_pass(Function& fn) {
             if (cur->operand_count() == 2) {
                 Value* op0 = cur->operand(0);
                 Value* op1 = cur->operand(1);
-                int64_t c0, c1;
+                int64_t c0 = 0, c1 = 0;
                 bool has_c0 = get_const_int(op0, c0);
                 bool has_c1 = get_const_int(op1, c1);
                 Type res_type = cur->type();

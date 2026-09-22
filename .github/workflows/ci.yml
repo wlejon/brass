@@ -73,5 +73,8 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel 4
 
+      # The whole correctness suite (unit + differential), one ctest per
+      # TEST_CASE. Perf targets (label "perf") are machine-dependent and not
+      # gated here.
       - name: Test
-        run: ctest --test-dir build --output-on-failure -R unit_tests
+        run: ctest --test-dir build --output-on-failure -L correctness

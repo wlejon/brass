@@ -215,7 +215,7 @@ TEST_CASE("Audio JIT - Soft clip tanh saturation matches reference") {
     std::vector<float> input(N);
     std::vector<float> output(N);
     for (int i = 0; i < N; ++i) {
-        input[i] = -5.0f + 0.1f * i;
+        input[i] = -5.0f + 0.1f * static_cast<float>(i);
     }
 
     fn_ptr(input.data(), output.data(), N);
@@ -317,7 +317,7 @@ TEST_CASE("Audio JIT - Biquad DF2T IIR filter matches C++ reference") {
     // Unit impulse followed by a sine burst
     in[0] = 1.0f;
     for (int i = 1; i < N; ++i) {
-        in[i] = 0.5f * std::sin(0.1f * i);
+        in[i] = 0.5f * std::sin(0.1f * static_cast<float>(i));
     }
 
     // Reference C++ implementation

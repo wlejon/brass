@@ -124,6 +124,7 @@ public:
 private:
     uintptr_t evacuate_object(uintptr_t obj_addr, size_t& to_free_ptr);
     void poison_space(uint8_t* space, size_t size) noexcept;
+    void adopt_registered_tlabs(HostGC* from) noexcept;
 
     size_t semispace_size_;
     std::vector<uint8_t> from_space_;

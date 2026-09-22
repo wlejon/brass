@@ -417,7 +417,7 @@ TEST_CASE("C-API - AOT Shared Library Compilation and Dynamic Load") {
         ".so";
 #endif
 
-    std::filesystem::path lib_path = std::filesystem::temp_directory_path() / ("test_c_api_shared_cube" + ext);
+    std::filesystem::path lib_path = brass::test::scratch_dir() / ("test_c_api_shared_cube" + ext);
     std::error_code ec;
     std::filesystem::remove(lib_path, ec);
 

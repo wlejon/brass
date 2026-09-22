@@ -54,7 +54,7 @@ static uintptr_t g_last_r2_old_addr = 0;
     return val * 7;
 }
 
-int64_t host_subroutine_gc_trigger(uintptr_t r1, uintptr_t r2) {
+[[maybe_unused]] int64_t host_subroutine_gc_trigger(uintptr_t r1, uintptr_t r2) {
     g_subroutine_call_count++;
     g_last_r1_old_addr = r1;
     g_last_r2_old_addr = r2;

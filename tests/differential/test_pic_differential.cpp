@@ -175,7 +175,7 @@ func accessProperty(%0: dynamic) -> f64 {
     double expected_vals[3] = {123.0, 456.0, 789.0};
 
     for (int i = 0; i < 3000; ++i) {
-        int idx = rng() % 3;
+        int idx = static_cast<int>(rng() % 3);
         double result = access_fn(reinterpret_cast<uint64_t>(arr[idx]));
         CHECK_EQ(result, expected_vals[idx]);
     }

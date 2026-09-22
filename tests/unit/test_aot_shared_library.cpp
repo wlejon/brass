@@ -299,7 +299,7 @@ TEST_CASE("AOT Linker - Roundtrip Native Execution with DynamicLibrary") {
     // Now test AOT Linker & native loading on Windows and macOS
     if (Target::host().is_windows() || Target::host().is_macos()) {
         std::string ext = Target::host().is_windows() ? ".dll" : ".dylib";
-        std::filesystem::path dll_path = std::filesystem::temp_directory_path() / ("test_aot_roundtrip_module" + ext);
+        std::filesystem::path dll_path = brass::test::scratch_dir() / ("test_aot_roundtrip_module" + ext);
         std::error_code ec;
         std::filesystem::remove(dll_path, ec);
 
@@ -372,7 +372,7 @@ TEST_CASE("AOT Linker - Selective Function Exports") {
 
     if (Target::host().is_windows() || Target::host().is_macos()) {
         std::string ext = Target::host().is_windows() ? ".dll" : ".dylib";
-        std::filesystem::path dll_path = std::filesystem::temp_directory_path() / ("test_aot_selective_exports" + ext);
+        std::filesystem::path dll_path = brass::test::scratch_dir() / ("test_aot_selective_exports" + ext);
         std::error_code ec;
         std::filesystem::remove(dll_path, ec);
 
@@ -458,7 +458,7 @@ TEST_CASE("DynamicLibrary - Error Handling on Non-Existent Files and Missing Sym
 
     if (Target::host().is_windows() || Target::host().is_macos()) {
         std::string ext = Target::host().is_windows() ? ".dll" : ".dylib";
-        std::filesystem::path dll_path = std::filesystem::temp_directory_path() / ("test_aot_err_handling" + ext);
+        std::filesystem::path dll_path = brass::test::scratch_dir() / ("test_aot_err_handling" + ext);
         std::error_code ec;
         std::filesystem::remove(dll_path, ec);
 

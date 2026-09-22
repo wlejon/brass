@@ -363,35 +363,9 @@ extern "C" BRASS_NOINLINE_NOFP void brass_throw_impl(
 
 extern "C" {
 
-#if (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(_M_X64))
-BRASS_NOINLINE_NOFP void brass_throw(HostValue val) {
-    SavedRegisters regs;
-    __asm__ volatile(
-        "movq %%r15, %0\n\t"
-        "movq %%r14, %1\n\t"
-        "movq %%r13, %2\n\t"
-        "movq %%r12, %3\n\t"
-        "movq %%rdi, %4\n\t"
-        "movq %%rsi, %5\n\t"
-        "movq %%rbx, %6\n\t"
-        : "=m"(regs.r15), "=m"(regs.r14), "=m"(regs.r13), "=m"(regs.r12),
-          "=m"(regs.rdi), "=m"(regs.rsi), "=m"(regs.rbx)
-        :
-        : "memory"
-    );
-    void* frame = __builtin_frame_address(0);
-    uintptr_t caller_rbp = 0;
-    uintptr_t caller_ip = 0;
-    if (frame) {
-        uintptr_t bt_rbp = *reinterpret_cast<uintptr_t*>(frame);
-        if (bt_rbp) {
-            caller_ip = *reinterpret_cast<uintptr_t*>(bt_rbp + 8);
-            caller_rbp = *reinterpret_cast<uintptr_t*>(bt_rbp);
-        }
-    }
-    brass_throw_impl(val, &regs, caller_rbp, caller_ip);
-}
-#elif (defined(__GNUC__) || defined(__clang__)) && (defined(__aarch64__) || defined(_M_ARM64))
+// x86-64 brass_throw / brass_rethrow are asm stubs: exception_throw_x64.cpp
+// (GCC/Clang) and gc_msvc_x64.asm (MSVC).
+#if (defined(__GNUC__) || defined(__clang__)) && (defined(__aarch64__) || defined(_M_ARM64))
 BRASS_NOINLINE_NOFP void brass_throw(HostValue val) {
     SavedRegisters regs;
     __asm__ volatile(
@@ -418,17 +392,19 @@ BRASS_NOINLINE_NOFP void brass_throw(HostValue val) {
     }
     brass_throw_impl(val, &regs, caller_fp, caller_ip);
 }
-#elif !defined(_MSC_VER)
+#elif !defined(__x86_64__) && !defined(_M_X64)
 [[noreturn]] void brass_throw(HostValue val) {
     SavedRegisters regs{};
     brass_throw_impl(val, &regs, 0, 0);
 }
 #endif
 
+#if !defined(__x86_64__) && !defined(_M_X64)
 [[noreturn]] void brass_rethrow() {
     HostValue val = brass_get_current_exception();
     brass_throw(val);
 }
+#endif
 
 } // extern "C"
 

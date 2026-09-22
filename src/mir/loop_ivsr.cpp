@@ -236,7 +236,7 @@ bool ivsr_pass(Function& fn, LoopInfo& loop, DominatorTree& dom) {
                 if (cur->opcode() == Opcode::mul && cur->produces_value()) {
                     Value* op0 = cur->operand(0);
                     Value* op1 = cur->operand(1);
-                    int64_t c0, c1;
+                    int64_t c0 = 0, c1 = 0;
                     bool has_c0 = get_const_int(op0, c0);
                     bool has_c1 = get_const_int(op1, c1);
                     if ((op0 == biv_param && has_c1 && c1 == sc_int) || (op1 == biv_param && has_c0 && c0 == sc_int)) {

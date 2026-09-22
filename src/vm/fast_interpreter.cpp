@@ -7,114 +7,6 @@
 
 namespace brass {
 
-FastInterpreter::FastInterpreter(size_t gc_semispace_size)
-    : gc_(gc_semispace_size) {
-    gc_.set_root_provider([this](std::vector<uintptr_t*>& roots) {
-        this->collect_all_roots(roots);
-    });
-    register_builtin_host_functions();
-}
-
-FastInterpreter::~FastInterpreter() = default;
-
-FastInterpreter::FastInterpreter(FastInterpreter&&) noexcept = default;
-FastInterpreter& FastInterpreter::operator=(FastInterpreter&&) noexcept = default;
-
-static thread_local FastInterpreter* s_current_fast_interp = nullptr;
-
-FastInterpreter* FastInterpreter::current() noexcept {
-    return s_current_fast_interp;
-}
-
-void FastInterpreter::set_current(FastInterpreter* interp) noexcept {
-    s_current_fast_interp = interp;
-}
-
-void FastInterpreter::clear_compile_cache() noexcept {
-    compiled_functions_.clear();
-}
-
-const BytecodeFunction* FastInterpreter::get_or_compile(const Function& fn) {
-    auto it = compiled_functions_.find(&fn);
-    if (it != compiled_functions_.end()) {
-        return it->second.get();
-    }
-    auto bfn = compiler_.compile(fn);
-    const BytecodeFunction* ptr = bfn.get();
-    compiled_functions_[&fn] = std::move(bfn);
-    return ptr;
-}
-
-void FastInterpreter::set_generational_gc(GenerationalGC* gc) noexcept {
-    gen_gc_ = gc;
-    if (gen_gc_) {
-        gen_gc_->set_root_provider([this](std::vector<uintptr_t*>& roots) {
-            this->collect_all_roots(roots);
-        });
-    }
-}
-
-uintptr_t FastInterpreter::allocate_gc(size_t size, uint64_t pointer_mask, uint32_t type_tag) {
-    std::vector<uintptr_t*> roots;
-    collect_all_roots(roots);
-    if (gen_gc_) {
-        return gen_gc_->allocate(size, pointer_mask, type_tag, roots);
-    }
-    return gc_.allocate(size, pointer_mask, type_tag, roots);
-}
-
-void FastInterpreter::collect_all_roots(std::vector<uintptr_t*>& roots) {
-    // 1. Walk active frames on the call stack
-    for (FastFrame* f = current_frame_; f != nullptr; f = f->caller) {
-        for (uint32_t i = 0; i < f->num_registers; ++i) {
-            if (f->registers[i] == 0) continue;
-            bool is_gc = false;
-            if (f->bfn && i < f->bfn->register_types.size()) {
-                is_gc = f->bfn->register_types[i].is_gcref();
-            }
-            if (!is_gc) {
-                uintptr_t val = static_cast<uintptr_t>(f->registers[i]);
-                is_gc = gc_.is_valid_object(val) || (gen_gc_ && gen_gc_->is_valid_object(val));
-            }
-            if (is_gc) {
-                roots.push_back(reinterpret_cast<uintptr_t*>(&f->registers[i]));
-            }
-        }
-    }
-
-    // 2. Scan suspended coroutines
-    for (auto& [handle, coro] : active_coros_) {
-        if (coro && !coro->is_done) {
-            for (size_t i = 0; i < coro->registers.size(); ++i) {
-                if (coro->registers[i] == 0) continue;
-                bool is_gc = false;
-                if (coro->bfn && i < coro->bfn->register_types.size()) {
-                    is_gc = coro->bfn->register_types[i].is_gcref();
-                }
-                if (!is_gc) {
-                    uintptr_t val = static_cast<uintptr_t>(coro->registers[i]);
-                    is_gc = gc_.is_valid_object(val) || (gen_gc_ && gen_gc_->is_valid_object(val));
-                }
-                if (is_gc) {
-                    roots.push_back(reinterpret_cast<uintptr_t*>(&coro->registers[i]));
-                }
-            }
-        }
-    }
-
-    // 3. Scan current_exception_ if gcref
-    if (current_exception_.is_gcref() && !current_exception_.is_null()) {
-        roots.push_back(reinterpret_cast<uintptr_t*>(&current_exception_.raw_bits_ref()));
-    }
-
-    // 4. Scan last_deopt_ state map if gcref
-    for (auto& val : last_deopt_.state_map) {
-        if (val.is_gcref() && !val.is_null()) {
-            roots.push_back(reinterpret_cast<uintptr_t*>(&val.raw_bits_ref()));
-        }
-    }
-}
-
 RuntimeValue FastInterpreter::resume(const Function& fn, uint32_t resume_id, const std::vector<RuntimeValue>& state_values) {
     if (fn.parent()) {
         module_ = fn.parent();
@@ -821,18 +713,22 @@ loop_start:
                 last_deopt_.state_map.clear();
                 last_deopt_.state_map.reserve(g.state_regs.size());
 
-                runtime::DeoptFrame df;
-                df.resume_id = g.resume_id;
-                df.exit_symbol = g.exit_stub;
-                df.reason = runtime::DeoptReason::Generic;
+                // Own scope: the resume path below leaves by computed goto,
+                // which would skip df's destructor.
+                {
+                    runtime::DeoptFrame df;
+                    df.resume_id = g.resume_id;
+                    df.exit_symbol = g.exit_stub;
+                    df.reason = runtime::DeoptReason::Generic;
 
-                for (uint8_t sreg : g.state_regs) {
-                    Type t = (sreg < fn.register_types.size()) ? fn.register_types[sreg] : Type::i64();
-                    RuntimeValue rv = RuntimeValue::from_bits(t, registers[sreg]);
-                    last_deopt_.state_map.push_back(rv);
-                    df.push_value(registers[sreg], t.is_gcref() ? runtime::DeoptValueKind::GcRef : runtime::DeoptValueKind::Int64);
+                    for (uint8_t sreg : g.state_regs) {
+                        Type t = (sreg < fn.register_types.size()) ? fn.register_types[sreg] : Type::i64();
+                        RuntimeValue rv = RuntimeValue::from_bits(t, registers[sreg]);
+                        last_deopt_.state_map.push_back(rv);
+                        df.push_value(registers[sreg], t.is_gcref() ? runtime::DeoptValueKind::GcRef : runtime::DeoptValueKind::Int64);
+                    }
+                    runtime::set_thread_deopt_frame(&df);
                 }
-                runtime::set_thread_deopt_frame(&df);
 
                 if (deopt_handler_) {
                     return deopt_handler_(*this, last_deopt_);
@@ -938,13 +834,16 @@ loop_start:
             uint8_t dst = decode_dst(inst);
             uint16_t cs_idx = decode_u16(inst);
             const auto& cs = fn.call_sites[cs_idx];
-            std::vector<RuntimeValue> args;
-            args.reserve(cs.arg_regs.size());
-            for (uint8_t ar : cs.arg_regs) {
-                args.push_back(RuntimeValue::from_bits(Type::i64(), registers[ar]));
+            // Own scope: DISPATCH() leaves by computed goto, which would skip
+            // the vector's destructor and leak it.
+            {
+                std::vector<RuntimeValue> args;
+                args.reserve(cs.arg_regs.size());
+                for (uint8_t ar : cs.arg_regs) {
+                    args.push_back(RuntimeValue::from_bits(Type::i64(), registers[ar]));
+                }
+                registers[dst] = coro_create(cs.callee, args);
             }
-            uintptr_t handle = coro_create(cs.callee, args);
-            registers[dst] = handle;
             pc++;
             DISPATCH();
         }

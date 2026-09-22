@@ -190,10 +190,7 @@ func compute_checksum(%0: f64, %1: f64) -> f64 {
     REQUIRE(res.module != nullptr);
 
 #if defined(_WIN32)
-    char temp_path_buf[MAX_PATH];
-    DWORD path_len = GetTempPathA(MAX_PATH, temp_path_buf);
-    REQUIRE(path_len > 0);
-    std::string base_dir = std::string(temp_path_buf) + "brass_bronze_aot_test";
+    std::string base_dir = (scratch_dir() / "bronze_aot_test").string();
     CreateDirectoryA(base_dir.c_str(), NULL);
 
     std::string obj_file = base_dir + "\\bronze_kernel.obj";
@@ -202,14 +199,31 @@ func compute_checksum(%0: f64, %1: f64) -> f64 {
     HostEngine engine;
     REQUIRE(engine.compile_to_object(*res.module, obj_file));
 
-    std::string link_cmd = "link.exe /NOLOGO /DLL /OUT:\"" + dll_file + "\" \"" + obj_file + "\" /NOENTRY";
-    int link_rc = std::system(link_cmd.c_str());
-    if (link_rc == 0) {
+    // Without an MSVC toolchain the object is still produced and checked
+    // above; with one, a failed link is a failure, not a skip.
+    if (MsvcToolchain::is_available()) {
+        // The translator also emits the Bronze-ABI wrapper, which calls into
+        // the runtime; these are the only runtime entry points it needs.
+        std::string stub_file = base_dir + "\\bronze_kernel_rt.cpp";
+        {
+            std::ofstream stub(stub_file);
+            stub << "#include <cstdint>\n#include <cstring>\n"
+                 << "extern \"C\" {\n"
+                 << "int64_t bronze_arg_at(uint32_t argc, const int64_t* argv, uint32_t i) {\n"
+                 << "    return (i < argc && argv) ? argv[i] : (int64_t)0xFFF6000000000000ULL;\n"
+                 << "}\n"
+                 << "double bronze_unbox_f64(int64_t v) { double d; std::memcpy(&d, &v, 8); return d; }\n"
+                 << "int64_t bronze_box_f64(double d) { int64_t v; std::memcpy(&v, &d, 8); return v; }\n"
+                 << "}\n";
+        }
+        std::string link_cmd = "cl.exe /nologo /LD /MD /O2 \"" + stub_file + "\" \"" + obj_file +
+                               "\" /Fe\"" + dll_file + "\" /link /EXPORT:compute_checksum";
+        REQUIRE_EQ(MsvcToolchain::run_msvc_cmd(link_cmd), 0);
         HMODULE hModule = LoadLibraryA(dll_file.c_str());
         REQUIRE(hModule != NULL);
 
         using ChecksumFn = double(*)(double, double);
-        auto fn = reinterpret_cast<ChecksumFn>(GetProcAddress(hModule, "compute_checksum"));
+        auto fn = reinterpret_cast<ChecksumFn>(reinterpret_cast<void*>(GetProcAddress(hModule, "compute_checksum")));
         REQUIRE(fn != nullptr);
 
         double result = fn(5.0, 7.0);
@@ -584,6 +598,9 @@ TEST_CASE("Bronze IL - 22-Program Live Corpus JIT and AOT Execution") {
             << "    void bronze_uncaught_exception() { }\n"
             << "    uint64_t bronze_pin_violation(uint32_t k, uint64_t b) { (void)k; (void)b; return 0; }\n"
             << "    void bronze_pin_check_array(uint32_t k, uint64_t b) { (void)k; (void)b; }\n"
+            << "    int64_t bronze_arg_at(uint32_t argc, const int64_t* argv, uint32_t index) {\n"
+            << "        return (index < argc && argv) ? argv[index] : (int64_t)0xFFF6000000000000ULL;\n"
+            << "    }\n"
             << "}\n";
         ofs.close();
 

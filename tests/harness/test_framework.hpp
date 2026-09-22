@@ -5,6 +5,14 @@
 #include <vector>
 #include <functional>
 #include <chrono>
+#include <set>
+#include <filesystem>
+#include <system_error>
+#if defined(_WIN32)
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 #include <sstream>
 #include <cmath>
 #include <cstdlib>
@@ -12,6 +20,48 @@
 #include <type_traits>
 
 namespace brass::test {
+
+// Per-process scratch directory for files a test writes (objects, DLLs,
+// PTX, generated sources). Tests run as separate, possibly concurrent
+// processes, so fixed names under the shared temp dir would race.
+// Removed after a fully passing run; kept after a failure for inspection.
+struct ScratchDir {
+    std::filesystem::path path;
+    bool created = false;
+};
+
+inline ScratchDir& scratch_state() {
+    static ScratchDir state;
+    return state;
+}
+
+inline std::filesystem::path scratch_dir() {
+    ScratchDir& s = scratch_state();
+    if (!s.created) {
+        std::error_code ec;
+        std::filesystem::path base = std::filesystem::temp_directory_path(ec);
+        if (ec) base = std::filesystem::current_path();
+#if defined(_WIN32)
+        auto pid = _getpid();
+#else
+        auto pid = getpid();
+#endif
+        s.path = base / "brass_tests" / std::to_string(pid);
+        std::filesystem::remove_all(s.path, ec);
+        std::filesystem::create_directories(s.path, ec);
+        s.created = true;
+    }
+    return s.path;
+}
+
+inline void remove_scratch_dir() {
+    ScratchDir& s = scratch_state();
+    if (s.created) {
+        std::error_code ec;
+        std::filesystem::remove_all(s.path, ec);
+        s.created = false;
+    }
+}
 
 struct TestFailure {
     std::string file;
@@ -49,13 +99,33 @@ public:
         current_test_ = tc;
     }
 
+    // --list        print every test name, one per line (ctest discovery)
+    // --exact=NAME  run only the test with exactly this name
+    // --filter=STR  run the tests whose name contains STR
+    // Selecting nothing is an error, so a renamed or compiled-out test cannot
+    // pass silently.
     int run_all(int argc, char** argv) {
         std::string filter;
+        std::string exact;
+        bool has_exact = false;
+        bool list = false;
         for (int i = 1; i < argc; ++i) {
             std::string arg = argv[i];
             if (arg.rfind("--filter=", 0) == 0) {
                 filter = arg.substr(9);
+            } else if (arg.rfind("--exact=", 0) == 0) {
+                exact = arg.substr(8);
+                has_exact = true;
+            } else if (arg == "--list") {
+                list = true;
+            } else {
+                std::cerr << "unknown argument: " << arg << "\n";
+                return 2;
             }
+        }
+
+        if (list) {
+            return list_tests();
         }
 
         int total = 0;
@@ -67,7 +137,8 @@ public:
         std::cout << "==================================================\n";
 
         for (auto& tc : tests_) {
-            if (!filter.empty() && tc.name.find(filter) == std::string::npos) {
+            if (has_exact ? tc.name != exact
+                          : (!filter.empty() && tc.name.find(filter) == std::string::npos)) {
                 continue;
             }
 
@@ -111,10 +182,38 @@ public:
         }
         std::cout << "\n==================================================\n";
 
+        if (total == 0) {
+            std::cerr << "no test matched the selection\n";
+            return 1;
+        }
+        if (failed == 0) {
+            remove_scratch_dir();
+        } else if (scratch_state().created) {
+            std::cout << "Scratch files kept in " << scratch_state().path.string() << "\n";
+        }
         return (failed == 0) ? 0 : 1;
     }
 
 private:
+    // Names are ctest identities, so they must be unique and must survive a
+    // round trip through a CMake list.
+    int list_tests() const {
+        std::set<std::string> seen;
+        int rc = 0;
+        for (const auto& tc : tests_) {
+            if (!seen.insert(tc.name).second) {
+                std::cerr << "duplicate test name: " << tc.name << " (" << tc.file << ":" << tc.line << ")\n";
+                rc = 2;
+            }
+            if (tc.name.find_first_of(";[]\\\"\n") != std::string::npos) {
+                std::cerr << "test name has a character ctest discovery cannot carry: " << tc.name << "\n";
+                rc = 2;
+            }
+            std::cout << tc.name << "\n";
+        }
+        return rc;
+    }
+
     std::vector<TestCase> tests_;
     TestCase* current_test_ = nullptr;
 };
