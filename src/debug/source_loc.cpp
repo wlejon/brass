@@ -1,4 +1,5 @@
 #include <brass/debug/source_loc.hpp>
+#include <stdexcept>
 
 namespace brass {
 
@@ -62,6 +63,13 @@ void DebugContext::clear() {
     files_.clear();
     file_to_id_.clear();
     inlined_scopes_.clear();
+}
+
+std::string debug_primary_file_name(const DebugContext& ctx, const std::string& module_name) {
+    if (ctx.file_count() > 0) return ctx.files().front();
+    if (!module_name.empty()) return module_name;
+    throw std::runtime_error(
+        "debug info: the module has no source file and no name to attribute its code to");
 }
 
 } // namespace brass

@@ -1,5 +1,7 @@
 #include <brass/debug/codeview_emitter.hpp>
 #include <algorithm>
+#include <map>
+#include <stdexcept>
 #include <unordered_map>
 #include <cstring>
 
@@ -51,7 +53,118 @@ void pad_to_4(std::vector<uint8_t>& buf) {
     }
 }
 
+// Builds the .debug$T records, deduplicating identical records.
+class TypeTableBuilder {
+public:
+    // Returns the type index of the record `body` (leaf kind + fields).
+    uint32_t intern(const std::vector<uint8_t>& body) {
+        auto it = index_of_.find(body);
+        if (it != index_of_.end()) return it->second;
+        // Record length (u16) excludes itself; records are padded to 4 bytes
+        // with LF_PAD bytes (0xF0 | bytes remaining).
+        size_t padded = body.size();
+        while ((padded + 2) % 4 != 0) ++padded;
+        if (padded > 0xFFFF) throw std::runtime_error("CodeView: type record too long");
+        write_u16(records_, static_cast<uint16_t>(padded));
+        records_.insert(records_.end(), body.begin(), body.end());
+        for (size_t rem = padded - body.size(); rem > 0; --rem) {
+            write_u8(records_, static_cast<uint8_t>(codeview::LF_PAD0 | rem));
+        }
+        uint32_t idx = next_index_++;
+        index_of_.emplace(body, idx);
+        return idx;
+    }
+
+    // The CodeView type index of a MIR value type.
+    uint32_t value_type(Type t) {
+        switch (t.kind()) {
+            case TypeKind::I8:    return codeview::T_INT1;
+            case TypeKind::I16:   return codeview::T_INT2;
+            case TypeKind::I32:   return codeview::T_INT4;
+            case TypeKind::I64:   return codeview::T_INT8;
+            case TypeKind::F32:   return codeview::T_REAL32;
+            case TypeKind::F64:   return codeview::T_REAL64;
+            case TypeKind::Ptr:
+            case TypeKind::GCRef: return codeview::T_64PVOID;
+            case TypeKind::Void:  return codeview::T_VOID;
+            default: break;
+        }
+        if (!t.is_vector()) {
+            throw std::runtime_error("CodeView: no type mapping for MIR type kind " +
+                                     std::to_string(static_cast<int>(t.kind())));
+        }
+        // A vector is an array of its lanes.
+        std::vector<uint8_t> body;
+        write_u16(body, codeview::LF_ARRAY);
+        write_u32(body, value_type(t.element_type()));
+        write_u32(body, codeview::T_UQUAD);
+        write_u16(body, static_cast<uint16_t>(t.size_in_bytes())); // numeric leaf < 0x8000
+        write_u8(body, 0);                                          // empty name
+        return intern(body);
+    }
+
+    uint32_t procedure(Type ret, const std::vector<Type>& params) {
+        if (params.size() > 0xFFFF) throw std::runtime_error("CodeView: too many parameters");
+        std::vector<uint8_t> args;
+        write_u16(args, codeview::LF_ARGLIST);
+        write_u32(args, static_cast<uint32_t>(params.size()));
+        for (Type p : params) {
+            if (p.is_void()) throw std::runtime_error("CodeView: void parameter type");
+            write_u32(args, value_type(p));
+        }
+        uint32_t arglist = intern(args);
+
+        std::vector<uint8_t> proc;
+        write_u16(proc, codeview::LF_PROCEDURE);
+        write_u32(proc, value_type(ret));
+        write_u8(proc, 0); // calling convention: near C
+        write_u8(proc, 0); // function options
+        write_u16(proc, static_cast<uint16_t>(params.size()));
+        write_u32(proc, arglist);
+        return intern(proc);
+    }
+
+    std::vector<uint8_t> take_records() { return std::move(records_); }
+
+private:
+    std::vector<uint8_t> records_;
+    std::map<std::vector<uint8_t>, uint32_t> index_of_;
+    uint32_t next_index_ = codeview::FIRST_TYPE_INDEX;
+};
+
+// A relocation of a 4-byte field (SECREL) and the 2-byte field after it
+// (SECTION) against a function's own symbol; the stored values stay 0.
+void add_code_ref_relocs(std::vector<object::ObjectRelocation>& relocs, size_t offset,
+                         const std::string& fn_symbol) {
+    object::ObjectRelocation r_off;
+    r_off.offset = offset;
+    r_off.kind = object::RelocKind::SecRel32;
+    r_off.symbol_name = fn_symbol;
+    r_off.addend = 0;
+    relocs.push_back(r_off);
+
+    object::ObjectRelocation r_seg;
+    r_seg.offset = offset + 4;
+    r_seg.kind = object::RelocKind::SecIdx;
+    r_seg.symbol_name = fn_symbol;
+    r_seg.addend = 0;
+    relocs.push_back(r_seg);
+}
+
 } // namespace
+
+CodeViewTypeTable CodeViewEmitter::build_type_table(
+    const std::vector<object::CompiledFunctionInfo>& functions
+) {
+    TypeTableBuilder builder;
+    CodeViewTypeTable table;
+    table.proc_types.reserve(functions.size());
+    for (const auto& fn : functions) {
+        table.proc_types.push_back(builder.procedure(fn.return_type, fn.param_types));
+    }
+    table.records = builder.take_records();
+    return table;
+}
 
 void CodeViewEmitter::emit_debug_s(
     const DebugContext& ctx,
@@ -78,15 +191,15 @@ void CodeViewEmitter::emit_debug_s(
         return off;
     };
 
-    std::vector<uint32_t> file_str_offsets;
-    if (ctx.file_count() > 0) {
-        file_str_offsets.resize(ctx.file_count() + 1, 0);
-        for (uint32_t i = 1; i <= ctx.file_count(); ++i) {
-            file_str_offsets[i] = get_or_add_str(ctx.get_file(i));
-        }
-    } else {
-        file_str_offsets.push_back(0);
-        file_str_offsets.push_back(get_or_add_str("source.js"));
+    // File ids are 1-based; with no registered source file, the one file is
+    // the module itself.
+    std::vector<std::string> file_names = ctx.files();
+    if (file_names.empty()) {
+        file_names.push_back(debug_primary_file_name(ctx, opts.module_name));
+    }
+    std::vector<uint32_t> file_str_offsets(file_names.size() + 1, 0);
+    for (size_t i = 0; i < file_names.size(); ++i) {
+        file_str_offsets[i + 1] = get_or_add_str(file_names[i]);
     }
 
     // Pre-intern function and variable names
@@ -108,11 +221,9 @@ void CodeViewEmitter::emit_debug_s(
     std::vector<uint8_t> chk_payload;
     std::unordered_map<uint32_t, uint32_t> file_chk_offsets;
 
-    size_t count_files = (ctx.file_count() > 0) ? ctx.file_count() : 1;
-    for (uint32_t i = 1; i <= count_files; ++i) {
+    for (uint32_t i = 1; i <= file_names.size(); ++i) {
         file_chk_offsets[i] = static_cast<uint32_t>(chk_payload.size());
-        uint32_t s_off = (i < file_str_offsets.size()) ? file_str_offsets[i] : file_str_offsets.back();
-        write_u32(chk_payload, s_off);
+        write_u32(chk_payload, file_str_offsets[i]);
         write_u8(chk_payload, 0); // Checksum length = 0
         write_u8(chk_payload, 0); // Checksum type = 0 (None)
         pad_to_4(chk_payload);
@@ -149,11 +260,12 @@ void CodeViewEmitter::emit_debug_s(
             if (!entries.empty() && entries.front().loc.file_id > 0) {
                 file_id = entries.front().loc.file_id;
             }
-            uint32_t chk_off = 0;
             auto chk_it = file_chk_offsets.find(file_id);
-            if (chk_it != file_chk_offsets.end()) {
-                chk_off = chk_it->second;
+            if (chk_it == file_chk_offsets.end()) {
+                throw std::runtime_error("CodeView: function '" + fn.name + "' refers to unknown file id " +
+                                         std::to_string(file_id));
             }
+            uint32_t chk_off = chk_it->second;
 
             uint32_t num_lines = static_cast<uint32_t>(entries.size());
             uint32_t block_size = 12 + num_lines * 8;
@@ -164,24 +276,14 @@ void CodeViewEmitter::emit_debug_s(
 
             size_t subsec_start = debug_s_sec.data.size();
 
-            // Relocations for Header: code_offset (SecRel32) and code_segment (SecIdx)
-            object::ObjectRelocation r_off;
-            r_off.offset = subsec_start + 0;
-            r_off.kind = object::RelocKind::SecRel32;
-            r_off.symbol_name = ".text";
-            r_off.addend = static_cast<int64_t>(fn.text_offset);
-            debug_s_sec.relocations.push_back(r_off);
-
-            object::ObjectRelocation r_seg;
-            r_seg.offset = subsec_start + 4;
-            r_seg.kind = object::RelocKind::SecIdx;
-            r_seg.symbol_name = ".text";
-            r_seg.addend = 0;
-            debug_s_sec.relocations.push_back(r_seg);
+            // Header code offset and segment, relocated against the function's
+            // own symbol. Readers key each line table by that symbol, so
+            // relocating every table against .text makes them collide.
+            add_code_ref_relocs(debug_s_sec.relocations, subsec_start, fn.name);
 
             // Header (12 bytes)
-            debug_s_sec.emit32(static_cast<uint32_t>(fn.text_offset));
-            debug_s_sec.emit16(0); // Segment index placeholder
+            debug_s_sec.emit32(0); // Code offset (relocated)
+            debug_s_sec.emit16(0); // Segment index (relocated)
             debug_s_sec.emit16(0); // Flags (no column info)
             debug_s_sec.emit32(static_cast<uint32_t>(fn.text_size));
 
@@ -205,8 +307,10 @@ void CodeViewEmitter::emit_debug_s(
     if (opts.emit_symbols && !functions.empty()) {
         std::vector<uint8_t> sym_payload;
         std::vector<object::ObjectRelocation> sym_relocs;
+        const std::vector<uint32_t> proc_types = build_type_table(functions).proc_types;
 
-        for (const auto& fn : functions) {
+        for (size_t fi = 0; fi < functions.size(); ++fi) {
+            const auto& fn = functions[fi];
             auto it = table_map.find(fn.name);
             const FunctionDebugTable* tbl = (it != table_map.end()) ? it->second : nullptr;
 
@@ -221,25 +325,11 @@ void CodeViewEmitter::emit_debug_s(
             write_u32(sym_payload, static_cast<uint32_t>(fn.text_size));
             write_u32(sym_payload, static_cast<uint32_t>(fn.prologue_size));
             write_u32(sym_payload, static_cast<uint32_t>(fn.text_size));
-            write_u32(sym_payload, 0x1001); // LF_PROCEDURE type index
+            write_u32(sym_payload, proc_types[fi]); // LF_PROCEDURE type index
 
-            // Relocations for proc codeOffset and codeSegment
-            object::ObjectRelocation r_proc_off;
-            r_proc_off.offset = sym_payload.size();
-            r_proc_off.kind = object::RelocKind::SecRel32;
-            r_proc_off.symbol_name = ".text";
-            r_proc_off.addend = static_cast<int64_t>(fn.text_offset);
-            sym_relocs.push_back(r_proc_off);
-
-            write_u32(sym_payload, static_cast<uint32_t>(fn.text_offset));
-
-            object::ObjectRelocation r_proc_seg;
-            r_proc_seg.offset = sym_payload.size();
-            r_proc_seg.kind = object::RelocKind::SecIdx;
-            r_proc_seg.symbol_name = ".text";
-            r_proc_seg.addend = 0;
-            sym_relocs.push_back(r_proc_seg);
-
+            // codeOffset and codeSegment, relocated against the function symbol
+            add_code_ref_relocs(sym_relocs, sym_payload.size(), fn.name);
+            write_u32(sym_payload, 0);
             write_u16(sym_payload, 0);
             write_u8(sym_payload, 0); // Flags
             write_str(sym_payload, fn.name);
@@ -262,10 +352,10 @@ void CodeViewEmitter::emit_debug_s(
                 }
             }
 
-            // End marker S_PROC_ID_END (0x114F)
+            // S_END closes the S_GPROC32 scope (S_PROC_ID_END pairs with S_GPROC32_ID)
             uint32_t proc_end_offset = static_cast<uint32_t>(sym_payload.size());
             write_u16(sym_payload, 2);
-            write_u16(sym_payload, codeview::S_PROC_ID_END);
+            write_u16(sym_payload, codeview::S_END);
             patch_u32(sym_payload, pend_offset, proc_end_offset);
         }
 
@@ -283,51 +373,13 @@ void CodeViewEmitter::emit_debug_s(
     }
 }
 
-void CodeViewEmitter::emit_debug_t(object::Section& debug_t_sec) {
+void CodeViewEmitter::emit_debug_t(
+    const std::vector<object::CompiledFunctionInfo>& functions,
+    object::Section& debug_t_sec
+) {
     debug_t_sec.emit32(codeview::CV_SIGNATURE_C13);
-
-    // Type Record 1: LF_ARGLIST (0x1201) at index 0x1000
-    debug_t_sec.emit16(6); // Record length (6 bytes: leaf 2, count 4)
-    debug_t_sec.emit16(codeview::LF_ARGLIST);
-    debug_t_sec.emit32(0); // Argument count = 0
-
-    // Type Record 2: LF_PROCEDURE (0x1008) at index 0x1001 (returns T_INT8)
-    debug_t_sec.emit16(14);
-    debug_t_sec.emit16(codeview::LF_PROCEDURE);
-    debug_t_sec.emit32(codeview::T_INT8); // Return type
-    debug_t_sec.emit8(0);                 // Calling convention (near C)
-    debug_t_sec.emit8(0);                 // Attributes
-    debug_t_sec.emit16(0);                // Parameter count
-    debug_t_sec.emit32(0x1000);           // ArgList type index
-
-    // Type Record 3: LF_PROCEDURE (0x1008) at index 0x1002 (returns T_REAL64)
-    debug_t_sec.emit16(14);
-    debug_t_sec.emit16(codeview::LF_PROCEDURE);
-    debug_t_sec.emit32(codeview::T_REAL64);
-    debug_t_sec.emit8(0);
-    debug_t_sec.emit8(0);
-    debug_t_sec.emit16(0);
-    debug_t_sec.emit32(0x1000);
-
-    // Type Record 4: LF_PROCEDURE (0x1008) at index 0x1003 (returns T_INT4)
-    debug_t_sec.emit16(14);
-    debug_t_sec.emit16(codeview::LF_PROCEDURE);
-    debug_t_sec.emit32(codeview::T_INT4);
-    debug_t_sec.emit8(0);
-    debug_t_sec.emit8(0);
-    debug_t_sec.emit16(0);
-    debug_t_sec.emit32(0x1000);
-
-    // Type Record 5: LF_PROCEDURE (0x1008) at index 0x1004 (returns T_64PVOID)
-    debug_t_sec.emit16(14);
-    debug_t_sec.emit16(codeview::LF_PROCEDURE);
-    debug_t_sec.emit32(codeview::T_64PVOID);
-    debug_t_sec.emit8(0);
-    debug_t_sec.emit8(0);
-    debug_t_sec.emit16(0);
-    debug_t_sec.emit32(0x1000);
-
-    debug_t_sec.align_to(4);
+    CodeViewTypeTable table = build_type_table(functions);
+    debug_t_sec.emit_bytes(table.records.data(), table.records.size());
 }
 
 void CodeViewEmitter::emit(object::ObjectFile& obj, const CodeViewOptions& opts) {
@@ -348,14 +400,24 @@ void CodeViewEmitter::emit(object::ObjectFile& obj, const CodeViewOptions& opts)
     auto* s_sec = obj.get_section(".debug$S");
     auto* t_sec = obj.get_section(".debug$T");
 
-    if (s_sec && t_sec) {
-        CodeViewOptions effective_opts = opts;
-        if (obj.target.is_aarch64()) {
-            effective_opts.is_aarch64 = true;
-        }
-        emit_debug_s(obj.debug_context, obj.debug_tables, obj.functions, *s_sec, effective_opts);
-        emit_debug_t(*t_sec);
+    if (!s_sec || !t_sec) {
+        throw std::runtime_error("CodeView: could not create .debug$S/.debug$T");
     }
+    for (const auto& fn : obj.functions) {
+        const object::ObjectSymbol* sym = obj.find_symbol(fn.name);
+        if (!sym || sym->section_index == object::SECTION_UNDEF) {
+            throw std::runtime_error("CodeView: function '" + fn.name + "' has no defined symbol to relocate against");
+        }
+    }
+    CodeViewOptions effective_opts = opts;
+    if (obj.target.is_aarch64()) {
+        effective_opts.is_aarch64 = true;
+    }
+    if (effective_opts.module_name.empty()) {
+        effective_opts.module_name = obj.module_name;
+    }
+    emit_debug_s(obj.debug_context, obj.debug_tables, obj.functions, *s_sec, effective_opts);
+    emit_debug_t(obj.functions, *t_sec);
 }
 
 } // namespace brass::debug

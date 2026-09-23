@@ -230,6 +230,8 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
             cfi.text_size = fn_size;
             cfi.prologue_size = prologue_sz;
             cfi.osr_entry_offset = res.osr_entry_offset;
+            cfi.return_type = fn->return_type();
+            cfi.param_types = fn->param_types();
             cfi.frame_info = lir->frame;
             aarch64::AArch64FrameLayout::compute_layout(cfi.frame_info, cc_);
             cfi.cc = cc_;
@@ -317,6 +319,8 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
             cfi.text_size = fn_size;
             cfi.prologue_size = prologue_sz;
             cfi.osr_entry_offset = res.osr_entry_offset;
+            cfi.return_type = fn->return_type();
+            cfi.param_types = fn->param_types();
             cfi.frame_info = lir->frame;
             x64::X64FrameLayout::compute_layout(cfi.frame_info, cc_);
             cfi.cc = cc_;
@@ -405,6 +409,7 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
 
     // Emit compact binary debug line section (.brass_dbg)
     obj.debug_context = mod.debug_context();
+    obj.module_name = std::string(mod.name());
     if (!obj.debug_tables.empty() && mod.debug_context().file_count() > 0) {
         std::vector<uint8_t> dbg_bytes = serialize_debug_section(mod.debug_context(), obj.debug_tables);
         if (!dbg_bytes.empty()) {

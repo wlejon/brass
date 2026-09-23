@@ -605,12 +605,12 @@ TEST_CASE("CodeView Hardening - ARM64 FP Register and S_GPROC32 pEnd Offset") {
                         // Register is at sym_off + 12
                         uint16_t reg = read_u16(p + sym_off + 12);
                         CHECK_EQ(reg, debug::codeview::CV_ARM64_FP);
-                    } else if (r_kind == debug::codeview::S_PROC_ID_END) {
+                    } else if (r_kind == debug::codeview::S_END) {
                         proc_end_offset = static_cast<uint32_t>(sym_off - off);
                     }
                     sym_off += 2 + r_len;
                 }
-                // Check pEnd matches S_PROC_ID_END offset
+                // Check pEnd matches the S_END offset
                 CHECK_EQ(gproc_pend, proc_end_offset);
                 CHECK(gproc_pend > 0u);
                 checked_arm64 = true;

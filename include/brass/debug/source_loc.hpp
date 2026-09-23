@@ -82,4 +82,9 @@ private:
     std::vector<InlinedScope> inlined_scopes_;
 };
 
+// The file name that object debug info (CodeView, DWARF) attributes a
+// module's code to: its first registered source file, or else the module
+// name. Throws std::runtime_error when neither is known.
+std::string debug_primary_file_name(const DebugContext& ctx, const std::string& module_name);
+
 } // namespace brass

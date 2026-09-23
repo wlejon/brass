@@ -92,6 +92,9 @@ struct DwarfOptions {
     std::string comp_dir = ".";
     std::string producer = "brass 1.0";
     Target target = Target::x64_linux();
+    // The file name used when the debug context has no source file
+    // (see debug_primary_file_name). DwarfEmitter::emit takes it from the object.
+    std::string module_name;
 };
 
 class DwarfLineEmitter {

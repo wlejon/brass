@@ -83,6 +83,13 @@ private:
     const ModuleStackMap* prev_maps_;
 };
 
+// A module parsed from a .mir file registers no source file of its own; name
+// the input as the source so object debug info attributes code to it.
+void register_debug_source(object::ObjectFile& obj, const std::string& input_file) {
+    if (obj.debug_context.file_count() > 0) return;
+    obj.debug_context.get_or_add_file(input_file == "-" || input_file.empty() ? "<stdin>" : input_file);
+}
+
 } // namespace
 
 bool execute_compile_object(const Module& mod, const CompileObjectOptions& opts) {
@@ -104,6 +111,7 @@ bool execute_compile_object(const Module& mod, const CompileObjectOptions& opts)
     sched_opts.enable_software_pipelining = opts.enable_software_pipeline;
 
     auto obj = object::compile_module_to_object(mod, target, sched_opts);
+    register_debug_source(obj, opts.input_file);
     std::vector<uint8_t> binary_data;
     const char* format_name = "ELF64";
     if (target.is_windows()) {
@@ -167,7 +175,8 @@ bool execute_emit_shared(const Module& mod, const EmitSharedOptions& opts) {
     link_opts.format = fmt;
     link_opts.export_all_functions = true;
 
-    const object::ObjectFile obj = object::compile_module_to_object(mod, target);
+    object::ObjectFile obj = object::compile_module_to_object(mod, target);
+    register_debug_source(obj, opts.input_file);
     std::string link_error;
     if (!target::AotLinker::link_to_file(obj, final_output, link_opts, &link_error)) {
         std::cerr << "Error: Could not link shared library to '" << final_output << "': "

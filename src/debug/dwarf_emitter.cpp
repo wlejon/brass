@@ -122,7 +122,7 @@ void DwarfLineEmitter::emit(
             encode_uleb128(line_sec.data, 0); // length = 0
         }
     } else {
-        write_string(line_sec.data, "source.js");
+        write_string(line_sec.data, debug_primary_file_name(ctx, opts_.module_name));
         encode_uleb128(line_sec.data, 1);
         encode_uleb128(line_sec.data, 0);
         encode_uleb128(line_sec.data, 0);
@@ -309,7 +309,7 @@ void DwarfInfoEmitter::emit(
 
     uint32_t producer_off = get_or_add_str(opts_.producer);
     uint32_t comp_dir_off = get_or_add_str(opts_.comp_dir.empty() ? "." : opts_.comp_dir);
-    std::string main_file = ctx.file_count() > 0 ? ctx.files()[0] : "source.js";
+    std::string main_file = debug_primary_file_name(ctx, opts_.module_name);
     uint32_t main_file_off = get_or_add_str(main_file);
 
     // 2. Setup .debug_abbrev
@@ -578,13 +578,18 @@ void DwarfEmitter::emit(object::ObjectFile& obj, const DwarfOptions& opts) {
         total_text_size = text_sec->data.size();
     }
 
+    DwarfOptions named_opts = opts;
+    if (named_opts.module_name.empty()) {
+        named_opts.module_name = obj.module_name;
+    }
+
     if (line_sec) {
-        DwarfLineEmitter line_emitter(opts);
+        DwarfLineEmitter line_emitter(named_opts);
         line_emitter.emit(obj.debug_context, obj.debug_tables, obj.functions, *line_sec);
     }
 
     if (info_sec && abbrev_sec && str_sec) {
-        DwarfOptions effective_opts = opts;
+        DwarfOptions effective_opts = named_opts;
         effective_opts.target = obj.target;
         DwarfInfoEmitter info_emitter(obj, effective_opts);
         info_emitter.emit(obj.debug_context, obj.debug_tables, obj.functions, *info_sec, *abbrev_sec, *str_sec, total_text_size);
