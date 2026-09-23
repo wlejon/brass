@@ -313,63 +313,98 @@ brass_call_jit_vec2_ret_i64 PROC
     ret
 brass_call_jit_vec2_ret_i64 ENDP
 
-brass_call_jit_v256_0 PROC
-    sub rsp, 40
+; The v256_* / v128_3 stubs return through an `out` pointer (rdx). rdx is
+; volatile in the Win64 ABI, so the JIT callee may clobber it: the pointer is
+; kept in callee-saved rbx across the call. push rbx + 32 bytes of shadow
+; space keeps rsp 16-byte aligned at the call; the 5th argument (a2) is then
+; at [rsp + 80].
+brass_call_jit_v256_0 PROC FRAME
+    push rbx
+    .pushreg rbx
+    sub rsp, 32
+    .allocstack 32
+    .endprolog
+    mov rbx, rdx
     mov rax, rcx
     call rax
-    vmovups ymmword ptr [rdx], ymm0
+    vmovups ymmword ptr [rbx], ymm0
     vzeroupper
-    add rsp, 40
+    add rsp, 32
+    pop rbx
     ret
 brass_call_jit_v256_0 ENDP
 
-brass_call_jit_v256_1 PROC
-    sub rsp, 40
+brass_call_jit_v256_1 PROC FRAME
+    push rbx
+    .pushreg rbx
+    sub rsp, 32
+    .allocstack 32
+    .endprolog
+    mov rbx, rdx
     mov rax, rcx
     vmovups ymm0, ymmword ptr [r8]
     call rax
-    vmovups ymmword ptr [rdx], ymm0
+    vmovups ymmword ptr [rbx], ymm0
     vzeroupper
-    add rsp, 40
+    add rsp, 32
+    pop rbx
     ret
 brass_call_jit_v256_1 ENDP
 
-brass_call_jit_v256_2 PROC
-    sub rsp, 40
+brass_call_jit_v256_2 PROC FRAME
+    push rbx
+    .pushreg rbx
+    sub rsp, 32
+    .allocstack 32
+    .endprolog
+    mov rbx, rdx
     mov rax, rcx
     vmovups ymm0, ymmword ptr [r8]
     vmovups ymm1, ymmword ptr [r9]
     call rax
-    vmovups ymmword ptr [rdx], ymm0
+    vmovups ymmword ptr [rbx], ymm0
     vzeroupper
-    add rsp, 40
+    add rsp, 32
+    pop rbx
     ret
 brass_call_jit_v256_2 ENDP
 
-brass_call_jit_v256_3 PROC
-    sub rsp, 48
+brass_call_jit_v256_3 PROC FRAME
+    push rbx
+    .pushreg rbx
+    sub rsp, 32
+    .allocstack 32
+    .endprolog
+    mov rbx, rdx
     mov rax, rcx
     vmovups ymm0, ymmword ptr [r8]
     vmovups ymm1, ymmword ptr [r9]
-    mov r10, qword ptr [rsp + 88]
+    mov r10, qword ptr [rsp + 80]
     vmovups ymm2, ymmword ptr [r10]
     call rax
-    vmovups ymmword ptr [rdx], ymm0
+    vmovups ymmword ptr [rbx], ymm0
     vzeroupper
-    add rsp, 48
+    add rsp, 32
+    pop rbx
     ret
 brass_call_jit_v256_3 ENDP
 
-brass_call_jit_v128_3 PROC
-    sub rsp, 48
+brass_call_jit_v128_3 PROC FRAME
+    push rbx
+    .pushreg rbx
+    sub rsp, 32
+    .allocstack 32
+    .endprolog
+    mov rbx, rdx
     mov rax, rcx
     movdqu xmm0, xmmword ptr [r8]
     movdqu xmm1, xmmword ptr [r9]
-    mov r10, qword ptr [rsp + 88]
+    mov r10, qword ptr [rsp + 80]
     movdqu xmm2, xmmword ptr [r10]
     call rax
-    movdqu xmmword ptr [rdx], xmm0
-    add rsp, 48
+    movdqu xmmword ptr [rbx], xmm0
+    add rsp, 32
+    pop rbx
     ret
 brass_call_jit_v128_3 ENDP
 
