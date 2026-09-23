@@ -230,8 +230,9 @@ void LinearScanAllocator::allocate() {
     for (auto* current : unhandled) {
         expire_old_intervals(current->start_id);
 
-        if (current->vreg.is_gcref && current->spans_call) {
-            current->assigned_spill_slot = allocate_spill_slot(true, current->vreg.size);
+        if (current->spans_call &&
+            (current->vreg.is_gcref || fpr_wider_than_callee_saved(current->vreg))) {
+            current->assigned_spill_slot = allocate_spill_slot(current->vreg.is_gcref, current->vreg.size);
             current->assigned_preg = PReg{};
             continue;
         }
@@ -383,6 +384,11 @@ void LinearScanAllocator::expire_old_intervals(uint32_t current_start) {
     }
 }
 
+bool LinearScanAllocator::fpr_wider_than_callee_saved(const VReg& vreg) const {
+    if (vreg.is_gpr()) return false;
+    return vreg.size > (cc_.target().is_aarch64() ? 8u : 16u);
+}
+
 uint32_t LinearScanAllocator::get_hard_blocked_regs(const LiveInterval& interval) const {
     bool is_gpr = interval.vreg.is_gpr();
     const auto& pool = is_gpr ? available_gprs_ : available_xmms_;
@@ -394,7 +400,7 @@ uint32_t LinearScanAllocator::get_hard_blocked_regs(const LiveInterval& interval
     auto block = [&blocked](PReg reg) { blocked |= (1u << reg.code); };
 
     if (interval.spans_call) {
-        if (interval.vreg.is_gcref) {
+        if (interval.vreg.is_gcref || fpr_wider_than_callee_saved(interval.vreg)) {
             for (const auto& reg : pool) {
                 block(reg);
             }
@@ -744,7 +750,15 @@ void LinearScanAllocator::allocate_blocked_reg(LiveInterval& interval) {
     }
 }
 
+// A value wider than 8 bytes takes 2 (16 bytes) or 4 (32 bytes) adjacent
+// 8-byte slots, and the slot index it is known by is the one whose address
+// is lowest, where the whole value is stored. x64 slots grow downward from
+// RBP (slot i at rbp - (i + 1) * 8), so that is the highest of the run;
+// AArch64 slots grow upward from FP (AArch64FrameLayout::spill_slot_address),
+// so it is the lowest. Getting this backwards stores a vector over the next
+// value's slot.
 int32_t LinearScanAllocator::allocate_spill_slot(bool is_gcref, uint8_t size) {
+    const bool slots_grow_up = cc_.target().is_aarch64();
     if (size == 32) {
         while ((next_spill_slot_ % 4) != 0) {
             next_spill_slot_++;
@@ -755,7 +769,7 @@ int32_t LinearScanAllocator::allocate_spill_slot(bool is_gcref, uint8_t size) {
         }
         next_spill_slot_ += 4;
         fn_.frame.num_spill_slots = next_spill_slot_;
-        int32_t slot = static_cast<int32_t>(next_spill_slot_ - 1);
+        int32_t slot = static_cast<int32_t>(slots_grow_up ? next_spill_slot_ - 4 : next_spill_slot_ - 1);
         return slot;
     }
     if (size == 16) {
@@ -767,7 +781,7 @@ int32_t LinearScanAllocator::allocate_spill_slot(bool is_gcref, uint8_t size) {
         fn_.frame.spill_slot_is_gcref.push_back(false);
         next_spill_slot_ += 2;
         fn_.frame.num_spill_slots = next_spill_slot_;
-        int32_t slot = static_cast<int32_t>(next_spill_slot_ - 1);
+        int32_t slot = static_cast<int32_t>(slots_grow_up ? next_spill_slot_ - 2 : next_spill_slot_ - 1);
         return slot;
     }
     int32_t slot = static_cast<int32_t>(next_spill_slot_++);

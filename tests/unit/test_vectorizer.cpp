@@ -485,3 +485,110 @@ TEST_CASE("Loop Vectorizer - storing the induction variable itself is not vector
     interp.run(*fn, {RuntimeValue::from_ptr(reinterpret_cast<uintptr_t>(out)), RuntimeValue::from_i64(11)});
     for (int64_t k = 0; k < 11; ++k) CHECK_EQ(out[k], k);
 }
+
+TEST_CASE("Loop Vectorizer - constants defined in the loop body are rematerialized") {
+    // out[i] = in[i] + 2.5, with the constant built inside the body: the
+    // vector body must not read it from the scalar body.
+    Module mod("vec_body_const");
+    Function* fn = mod.create_function("add_const", Type::void_type(), {Type::ptr(), Type::ptr(), Type::i64()});
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    Value* pin = b.add_block_param(entry, Type::ptr());
+    Value* pout = b.add_block_param(entry, Type::ptr());
+    Value* count = b.add_block_param(entry, Type::i64());
+    pin->set_noalias(true);
+    pout->set_noalias(true);
+    BasicBlock* loop_hdr = b.create_block("loop_hdr");
+    BasicBlock* loop_body = b.create_block("loop_body");
+    BasicBlock* exit_bb = b.create_block("exit");
+    Value* zero = b.build_iconst_i64(0);
+    b.build_br(loop_hdr, {zero});
+
+    fn->append_block(loop_hdr);
+    b.position_at_end(loop_hdr);
+    Value* i = b.add_block_param(loop_hdr, Type::i64());
+    b.build_br_if(b.build_slt(i, count), loop_body, exit_bb);
+
+    fn->append_block(loop_body);
+    b.position_at_end(loop_body);
+    Value* x = b.build_load_indexed(Type::f64(), pin, i, 8, 0);
+    Value* c = b.build_fconst_f64(2.5);
+    b.build_store_indexed(Type::f64(), pout, i, 8, 0, b.build_add(x, c));
+    Value* one = b.build_iconst_i64(1);
+    b.build_br(loop_hdr, {b.build_add(i, one)});
+
+    fn->append_block(exit_bb);
+    b.position_at_end(exit_bb);
+    b.build_ret_void();
+
+    fn->rebuild_cfg_predecessors();
+    DominatorTree dom(*fn);
+    LoopVectorizeOptions vec_opts;
+    CHECK(loop_vectorize_pass(*fn, dom, vec_opts));
+    DiagnosticReporter diag;
+    REQUIRE(verify_module(mod, &diag));
+
+    double in[9];
+    double out[9] = {};
+    for (int k = 0; k < 9; ++k) in[k] = k * 1.25;
+    Interpreter interp;
+    interp.run(*fn, {RuntimeValue::from_ptr(reinterpret_cast<uintptr_t>(in)),
+                     RuntimeValue::from_ptr(reinterpret_cast<uintptr_t>(out)), RuntimeValue::from_i64(9)});
+    for (int k = 0; k < 9; ++k) CHECK_EQ(out[k], k * 1.25 + 2.5);
+}
+
+TEST_CASE("Loop Vectorizer - storing the running accumulator is not vectorized") {
+    // acc += in[i]; out[i] = acc: the accumulator has no per-lane form, so a
+    // vector store of it would write partial sums.
+    Module mod("vec_prefix_sum");
+    Function* fn = mod.create_function("prefix", Type::i32(), {Type::ptr(), Type::ptr(), Type::i64()});
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    Value* pin = b.add_block_param(entry, Type::ptr());
+    Value* pout = b.add_block_param(entry, Type::ptr());
+    Value* count = b.add_block_param(entry, Type::i64());
+    pin->set_noalias(true);
+    pout->set_noalias(true);
+    BasicBlock* loop_hdr = b.create_block("loop_hdr");
+    BasicBlock* loop_body = b.create_block("loop_body");
+    BasicBlock* exit_bb = b.create_block("exit");
+    Value* zero = b.build_iconst_i64(0);
+    Value* zero32 = b.build_iconst_i32(0);
+    Value* one = b.build_iconst_i64(1);
+    b.build_br(loop_hdr, {zero, zero32});
+
+    fn->append_block(loop_hdr);
+    b.position_at_end(loop_hdr);
+    Value* i = b.add_block_param(loop_hdr, Type::i64());
+    Value* acc = b.add_block_param(loop_hdr, Type::i32());
+    b.build_br_if(b.build_slt(i, count), loop_body, {}, exit_bb, {});
+
+    fn->append_block(loop_body);
+    b.position_at_end(loop_body);
+    Value* x = b.build_load_indexed(Type::i32(), pin, i, 4, 0);
+    b.build_store_indexed(Type::i32(), pout, i, 4, 0, acc);
+    Value* acc2 = b.build_add(acc, x);
+    b.build_br(loop_hdr, {b.build_add(i, one), acc2});
+
+    fn->append_block(exit_bb);
+    b.position_at_end(exit_bb);
+    b.build_ret(acc);
+
+    fn->rebuild_cfg_predecessors();
+    DominatorTree dom(*fn);
+    LoopVectorizeOptions vec_opts;
+    CHECK(!loop_vectorize_pass(*fn, dom, vec_opts));
+    REQUIRE(verify_module(mod));
+
+    int32_t in[10];
+    int32_t out[10] = {};
+    for (int k = 0; k < 10; ++k) in[k] = k + 1;
+    Interpreter interp;
+    RuntimeValue r = interp.run(*fn, {RuntimeValue::from_ptr(reinterpret_cast<uintptr_t>(in)),
+                                      RuntimeValue::from_ptr(reinterpret_cast<uintptr_t>(out)),
+                                      RuntimeValue::from_i64(10)});
+    CHECK_EQ(r.as_i32(), 55);
+    for (int k = 0; k < 10; ++k) CHECK_EQ(out[k], k * (k + 1) / 2);
+}

@@ -50,6 +50,9 @@ private:
     std::unordered_map<const Value*, VRegPair> val_to_vreg_pair_;
     std::unordered_map<const Value*, uint32_t> use_count_;
     std::unordered_set<const Instruction*> skipped_insts_;
+    // LIR the selector may delete once selection is done if nothing reads
+    // what it defines (see eliminate_dead_materializations).
+    std::unordered_set<const codegen::LirInst*> elidable_insts_;
 
     struct ImmIntInfo {
         bool is_imm = false;
@@ -73,6 +76,8 @@ private:
     codegen::LirOperand get_load_mem_operand(const Instruction* load_inst) const;
     bool is_value_dead_after(const Function& mir_fn, const BasicBlock& bb, const Instruction* inst, const Value* val) const;
     void analyze_function(const Function& mir_fn);
+    bool is_elidable_materialization(const Instruction& inst) const;
+    void eliminate_dead_materializations();
 
     codegen::VReg get_or_alloc_vreg(const Value* val);
     codegen::VReg get_vreg(const Value* val) const;
@@ -88,6 +93,7 @@ private:
     void lower_shift(const Instruction& inst, codegen::LirBlock& lir_bb, codegen::LirOpcode op32, codegen::LirOpcode op64);
     void lower_comparison(const Instruction& inst, codegen::LirBlock& lir_bb, x64::Condition cond, x64::Condition float_cond);
     void lower_select(const Instruction& inst, codegen::LirBlock& lir_bb);
+    x64::Condition emit_fused_compare(const Instruction& cmp_inst, codegen::LirBlock& lir_bb);
     void lower_pinned_tls_read(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_pinned_tls_write(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_read_sp(const Instruction& inst, codegen::LirBlock& lir_bb);

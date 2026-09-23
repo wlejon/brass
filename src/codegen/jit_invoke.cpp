@@ -1,4 +1,5 @@
 #include <brass/codegen/jit_exec.hpp>
+#include "core/asm_symbol.hpp"
 #include <cstring>
 #include <stdexcept>
 #include <iostream>
@@ -813,63 +814,64 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
 namespace brass::codegen {
 
 #if defined(__GNUC__) || defined(__clang__)
-extern "C" __attribute__((naked)) void aarch64_invoke_thunk(
-    const AArch64InvokeArgs* args,
-    AArch64InvokeResult* result
-) {
-    __asm__ volatile(
-        "stp x29, x30, [sp, #-32]!\n\t"
-        "mov x29, sp\n\t"
-        "stp x19, x20, [sp, #16]\n\t"
-
-        "mov x19, x1\n\t"              // x19 = result
-        "mov x20, x0\n\t"              // x20 = args
-
-        // Allocate stack arguments if count > 0
-        "ldr x2, [x20, #200]\n\t"      // x2 = stack_word_count
-        "cbz x2, 1f\n\t"
-        "lsl x3, x2, #3\n\t"           // x3 = stack_word_count * 8
-        "sub sp, sp, x3\n\t"           // allocate 16-byte aligned stack
-        "ldr x1, [x20, #192]\n\t"      // x1 = stack_words
-        "mov x4, sp\n\t"               // x4 = sp
-        "2:\n\t"
-        "ldr x5, [x1], #8\n\t"
-        "str x5, [x4], #8\n\t"
-        "subs x2, x2, #1\n\t"
-        "b.ne 2b\n\t"
-
-        "1:\n\t"
-        // Load V0..V7
-        "add x1, x20, #64\n\t"
-        "ldp q0, q1, [x1, #0]\n\t"
-        "ldp q2, q3, [x1, #32]\n\t"
-        "ldp q4, q5, [x1, #64]\n\t"
-        "ldp q6, q7, [x1, #96]\n\t"
-
-        // Load target function address
-        "ldr x16, [x20, #208]\n\t"
-
-        // Load X0..X7
-        "ldp x0, x1, [x20, #0]\n\t"
-        "ldp x2, x3, [x20, #16]\n\t"
-        "ldp x4, x5, [x20, #32]\n\t"
-        "ldp x6, x7, [x20, #48]\n\t"
-
-        // Call target function
-        "blr x16\n\t"
-
-        // Store results
-        "str x0, [x19, #0]\n\t"
-        "str x1, [x19, #8]\n\t"
-        "str q0, [x19, #16]\n\t"
-
-        // Epilogue
-        "mov sp, x29\n\t"
-        "ldp x19, x20, [sp, #16]\n\t"
-        "ldp x29, x30, [sp], #32\n\t"
-        "ret\n\t"
-    );
-}
+// File-scope asm: GCC ignores __attribute__((naked)) on AArch64. The CFI lets
+// an unwinder walk from JIT code (whose frames are registered with it, see
+// jit_unwind_registry) through this thunk into its C++ caller.
+// partition_aarch64_invoke_args pads the stack words to an even count, so sp
+// stays 16-byte aligned.
+__asm__(
+    ".text\n"
+    BRASS_ASM_FN_BEGIN(aarch64_invoke_thunk)
+    "    .cfi_startproc\n"
+    "    stp x29, x30, [sp, #-32]!\n"
+    "    .cfi_def_cfa_offset 32\n"
+    "    .cfi_offset x29, -32\n"
+    "    .cfi_offset x30, -24\n"
+    "    mov x29, sp\n"
+    "    .cfi_def_cfa_register x29\n"
+    "    stp x19, x20, [sp, #16]\n"
+    "    .cfi_offset x19, -16\n"
+    "    .cfi_offset x20, -8\n"
+    "    mov x19, x1\n"                // x19 = result
+    "    mov x20, x0\n"                // x20 = args
+    "    ldr x2, [x20, #200]\n"        // stack_word_count
+    "    cbz x2, 1f\n"
+    "    lsl x3, x2, #3\n"
+    "    sub sp, sp, x3\n"
+    "    ldr x1, [x20, #192]\n"        // stack_words
+    "    mov x4, sp\n"
+    "2:\n"
+    "    ldr x5, [x1], #8\n"
+    "    str x5, [x4], #8\n"
+    "    subs x2, x2, #1\n"
+    "    b.ne 2b\n"
+    "1:\n"
+    "    add x1, x20, #64\n"           // v0..v7
+    "    ldp q0, q1, [x1, #0]\n"
+    "    ldp q2, q3, [x1, #32]\n"
+    "    ldp q4, q5, [x1, #64]\n"
+    "    ldp q6, q7, [x1, #96]\n"
+    "    ldr x16, [x20, #208]\n"       // target
+    "    ldp x0, x1, [x20, #0]\n"      // x0..x7
+    "    ldp x2, x3, [x20, #16]\n"
+    "    ldp x4, x5, [x20, #32]\n"
+    "    ldp x6, x7, [x20, #48]\n"
+    "    blr x16\n"
+    "    str x0, [x19, #0]\n"
+    "    str x1, [x19, #8]\n"
+    "    str q0, [x19, #16]\n"
+    "    mov sp, x29\n"
+    "    ldp x19, x20, [sp, #16]\n"
+    "    ldp x29, x30, [sp], #32\n"
+    "    .cfi_def_cfa sp, 0\n"
+    "    .cfi_restore x19\n"
+    "    .cfi_restore x20\n"
+    "    .cfi_restore x29\n"
+    "    .cfi_restore x30\n"
+    "    ret\n"
+    "    .cfi_endproc\n"
+    BRASS_ASM_FN_END(aarch64_invoke_thunk)
+);
 #endif
 
 RuntimeValue JitExecutionEngine::invoke(std::string_view name) {

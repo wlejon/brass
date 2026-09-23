@@ -119,7 +119,7 @@ void FastInterpreter::register_builtin_host_functions() {
     });
 }
 
-void FastInterpreter::handle_write_barrier(FastFrame& frame, uint8_t obj_reg, uint8_t val_reg) {
+void FastInterpreter::handle_write_barrier(FastFrame& frame, uint32_t obj_reg, uint32_t val_reg) {
     if (gen_gc_) {
         gen_gc_->write_barrier(frame.registers[obj_reg], frame.registers[val_reg]);
     }
@@ -131,194 +131,74 @@ void FastInterpreter::handle_safepoint(FastFrame& /*frame*/) {
     }
 }
 
-void FastInterpreter::execute_vector_op(FastFrame& frame, uint32_t inst) {
-    BytecodeOp op = decode_op(inst);
-    uint8_t dst = decode_dst(inst);
-    uint8_t src1 = decode_src1(inst);
-    uint8_t src2 = decode_src2(inst);
-    uint8_t* vregs = frame.ensure_vector_regs();
+// Vector instructions run through the reference interpreter's value
+// operations, typed by the registers' types, so every vector type (f32x4
+// through i64x4) has the oracle's lane semantics.
+void FastInterpreter::execute_vector_op(FastFrame& frame, BytecodeWord inst, const BytecodeWord* pc) {
+    const BytecodeOp op = decode_op(inst);
+    const uint32_t a = decode_a(inst);
+    const uint32_t b = decode_b(inst);
+    const uint32_t c = decode_c(inst);
+    const auto& types = frame.bfn->register_types;
+    auto type_of = [&](uint32_t r) {
+        if (r >= types.size()) {
+            throw InterpreterException("vector operand register " + std::to_string(r) + " out of range in " + frame.bfn->name);
+        }
+        return types[r];
+    };
+    auto val = [&](uint32_t r) { return fast_reg_value(frame, r); };
 
-    uint8_t* dst_bytes = vregs + dst * 32;
-    const uint8_t* s1_bytes = vregs + src1 * 32;
-    const uint8_t* s2_bytes = vregs + src2 * 32;
-
+    RuntimeValue out;
     switch (op) {
-        case BytecodeOp::vzero: {
-            std::memset(dst_bytes, 0, 32);
+        case BytecodeOp::vzero: out = val_vzero(type_of(a)); break;
+        case BytecodeOp::vbroadcast: out = val_vbroadcast(type_of(a), val(b)); break;
+        case BytecodeOp::vload:
+            out = gc_.read_memory(static_cast<uintptr_t>(frame.registers[b]), decode_imm24(inst), type_of(a));
             break;
-        }
-
-        case BytecodeOp::vbroadcast: {
-            uint64_t val = frame.registers[src1];
-            // Broadcast 32-bit float / int or 64-bit float / int
-            // Set all 8 32-bit lanes and 4 64-bit lanes
-            uint32_t w = static_cast<uint32_t>(val);
-            uint32_t* dst_u32 = reinterpret_cast<uint32_t*>(dst_bytes);
-            for (size_t i = 0; i < 8; ++i) dst_u32[i] = w;
-            break;
-        }
-
-        case BytecodeOp::vload: {
-            uintptr_t addr = static_cast<uintptr_t>(frame.registers[src1]);
-            std::memcpy(dst_bytes, reinterpret_cast<const void*>(addr), 32);
-            break;
-        }
-
-        case BytecodeOp::vstore: {
-            uintptr_t addr = static_cast<uintptr_t>(frame.registers[src1]);
-            std::memcpy(reinterpret_cast<void*>(addr), dst_bytes, 32);
-            break;
-        }
-
-        case BytecodeOp::vadd: {
-            // Default to 8 x float
-            const float* a = reinterpret_cast<const float*>(s1_bytes);
-            const float* b = reinterpret_cast<const float*>(s2_bytes);
-            float* out = reinterpret_cast<float*>(dst_bytes);
-            for (size_t i = 0; i < 8; ++i) out[i] = a[i] + b[i];
-            break;
-        }
-
-        case BytecodeOp::vsub: {
-            const float* a = reinterpret_cast<const float*>(s1_bytes);
-            const float* b = reinterpret_cast<const float*>(s2_bytes);
-            float* out = reinterpret_cast<float*>(dst_bytes);
-            for (size_t i = 0; i < 8; ++i) out[i] = a[i] - b[i];
-            break;
-        }
-
-        case BytecodeOp::vmul: {
-            const float* a = reinterpret_cast<const float*>(s1_bytes);
-            const float* b = reinterpret_cast<const float*>(s2_bytes);
-            float* out = reinterpret_cast<float*>(dst_bytes);
-            for (size_t i = 0; i < 8; ++i) out[i] = a[i] * b[i];
-            break;
-        }
-
-        case BytecodeOp::vdiv: {
-            const float* a = reinterpret_cast<const float*>(s1_bytes);
-            const float* b = reinterpret_cast<const float*>(s2_bytes);
-            float* out = reinterpret_cast<float*>(dst_bytes);
-            for (size_t i = 0; i < 8; ++i) out[i] = a[i] / b[i];
-            break;
-        }
-
-        case BytecodeOp::vfma: {
-            const float* a = reinterpret_cast<const float*>(s1_bytes);
-            const float* b = reinterpret_cast<const float*>(s2_bytes);
-            float* out = reinterpret_cast<float*>(dst_bytes);
-            for (size_t i = 0; i < 8; ++i) out[i] = std::fma(a[i], b[i], out[i]);
-            break;
-        }
-
-        case BytecodeOp::vneg: {
-            const float* a = reinterpret_cast<const float*>(s1_bytes);
-            float* out = reinterpret_cast<float*>(dst_bytes);
-            for (size_t i = 0; i < 8; ++i) out[i] = -a[i];
-            break;
-        }
-
-        case BytecodeOp::vmin: {
-            const float* a = reinterpret_cast<const float*>(s1_bytes);
-            const float* b = reinterpret_cast<const float*>(s2_bytes);
-            float* out = reinterpret_cast<float*>(dst_bytes);
-            for (size_t i = 0; i < 8; ++i) out[i] = std::fmin(a[i], b[i]);
-            break;
-        }
-
-        case BytecodeOp::vmax: {
-            const float* a = reinterpret_cast<const float*>(s1_bytes);
-            const float* b = reinterpret_cast<const float*>(s2_bytes);
-            float* out = reinterpret_cast<float*>(dst_bytes);
-            for (size_t i = 0; i < 8; ++i) out[i] = std::fmax(a[i], b[i]);
-            break;
-        }
-
-        case BytecodeOp::vsqrt: {
-            const float* a = reinterpret_cast<const float*>(s1_bytes);
-            float* out = reinterpret_cast<float*>(dst_bytes);
-            for (size_t i = 0; i < 8; ++i) out[i] = std::sqrt(a[i]);
-            break;
-        }
-
-        case BytecodeOp::vand: {
-            const uint64_t* a = reinterpret_cast<const uint64_t*>(s1_bytes);
-            const uint64_t* b = reinterpret_cast<const uint64_t*>(s2_bytes);
-            uint64_t* out = reinterpret_cast<uint64_t*>(dst_bytes);
-            for (size_t i = 0; i < 4; ++i) out[i] = a[i] & b[i];
-            break;
-        }
-
-        case BytecodeOp::vor: {
-            const uint64_t* a = reinterpret_cast<const uint64_t*>(s1_bytes);
-            const uint64_t* b = reinterpret_cast<const uint64_t*>(s2_bytes);
-            uint64_t* out = reinterpret_cast<uint64_t*>(dst_bytes);
-            for (size_t i = 0; i < 4; ++i) out[i] = a[i] | b[i];
-            break;
-        }
-
-        case BytecodeOp::vxor: {
-            const uint64_t* a = reinterpret_cast<const uint64_t*>(s1_bytes);
-            const uint64_t* b = reinterpret_cast<const uint64_t*>(s2_bytes);
-            uint64_t* out = reinterpret_cast<uint64_t*>(dst_bytes);
-            for (size_t i = 0; i < 4; ++i) out[i] = a[i] ^ b[i];
-            break;
-        }
-
-        case BytecodeOp::vnot: {
-            const uint64_t* a = reinterpret_cast<const uint64_t*>(s1_bytes);
-            uint64_t* out = reinterpret_cast<uint64_t*>(dst_bytes);
-            for (size_t i = 0; i < 4; ++i) out[i] = ~a[i];
-            break;
-        }
-
-        case BytecodeOp::vextract_lane: {
-            uint8_t lane = src2;
-            const uint32_t* in = reinterpret_cast<const uint32_t*>(s1_bytes);
-            frame.registers[dst] = (lane < 8) ? in[lane] : 0;
-            break;
-        }
-
-        case BytecodeOp::vinsert_lane: {
-            uint8_t lane = decode_src1(inst);
-            uint32_t val = static_cast<uint32_t>(frame.registers[src2]);
-            uint32_t* out = reinterpret_cast<uint32_t*>(dst_bytes);
-            if (lane < 8) out[lane] = val;
-            break;
-        }
-
-        case BytecodeOp::vshuffle: {
-            // Copy s1 to dst
-            std::memcpy(dst_bytes, s1_bytes, 32);
-            break;
-        }
-
+        case BytecodeOp::vstore:
+            gc_.write_memory(static_cast<uintptr_t>(frame.registers[b]), decode_imm24(inst), type_of(a), val(a));
+            return;
+        case BytecodeOp::vadd: out = val_vadd(val(b), val(c)); break;
+        case BytecodeOp::vsub: out = val_vsub(val(b), val(c)); break;
+        case BytecodeOp::vmul: out = val_vmul(val(b), val(c)); break;
+        case BytecodeOp::vdiv: out = val_vdiv(val(b), val(c)); break;
+        case BytecodeOp::vmin: out = val_vmin(val(b), val(c)); break;
+        case BytecodeOp::vmax: out = val_vmax(val(b), val(c)); break;
+        case BytecodeOp::vand: out = val_vand(val(b), val(c)); break;
+        case BytecodeOp::vor: out = val_vor(val(b), val(c)); break;
+        case BytecodeOp::vxor: out = val_vxor(val(b), val(c)); break;
+        // The destination already holds the addend.
+        case BytecodeOp::vfma: out = val_vfma(val(b), val(c), val(a)); break;
+        case BytecodeOp::vneg: out = val_vneg(val(b)); break;
+        case BytecodeOp::vsqrt: out = val_vsqrt(val(b)); break;
+        case BytecodeOp::vnot: out = val_vnot(val(b)); break;
+        case BytecodeOp::vextract_lane: out = val_vextract_lane(val(b), decode_d(inst)); break;
+        case BytecodeOp::vinsert_lane: out = val_vinsert_lane(val(b), val(c), decode_d(inst)); break;
+        // The shuffle mask is the next code word.
+        case BytecodeOp::vshuffle: out = val_vshuffle(val(b), val(c), static_cast<uint32_t>(pc[1])); break;
         default:
-            break;
+            throw InterpreterException("not a vector opcode: " + std::string(bytecode_op_name(op)));
     }
+    fast_set_reg(frame, a, out);
 }
 
 bool FastInterpreter::handle_osr_backedge(FastFrame& frame, uint32_t target_pc, RuntimeValue& out_res) {
-    if (!frame.mir_fn) return false;
-    const Function& fn = *frame.mir_fn;
-
-    runtime::TieringFeedback& fb = runtime::TieringRegistry::instance().get_or_create(fn.name());
-    fb.record_backedge();
-
-    if (!runtime::OsrCoordinator::instance().is_enabled()) {
+    runtime::TieringFeedback& fb = frame.info->tiering();
+    auto& coordinator = runtime::OsrCoordinator::instance();
+    const BytecodeFunction* bfn = frame.bfn;
+    // Below the threshold only the count matters; try_osr_migration counts
+    // the backedge itself once it is called.
+    if (!frame.mir_fn || !bfn || fb.backedge_count() + 1 < coordinator.threshold()) {
+        fb.record_backedge();
         return false;
     }
-
-    const BytecodeFunction* bfn = frame.bfn;
-    if (!bfn) return false;
-
     auto it = bfn->pc_block_map.find(target_pc);
     if (it == bfn->pc_block_map.end() || !it->second) {
+        fb.record_backedge();
         return false;
     }
-
     BasicBlock* loop_header = const_cast<BasicBlock*>(it->second);
-    return runtime::OsrCoordinator::instance().try_osr_migration(*this, fn, loop_header, frame, out_res);
+    return coordinator.try_osr_migration(*this, *frame.mir_fn, loop_header, frame, out_res);
 }
 
 } // namespace brass

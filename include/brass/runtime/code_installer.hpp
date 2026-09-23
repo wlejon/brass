@@ -95,6 +95,11 @@ public:
     RuntimeValue call(Interpreter& interp, const std::vector<RuntimeValue>& args = {});
     RuntimeValue call(FastInterpreter& interp, const std::vector<RuntimeValue>& args = {});
 
+    // Called when the dispatch table drops this handle: clears the entry
+    // point and MIR link and releases the compiled code's owners. The
+    // object itself stays alive for callers that cached a pointer to it.
+    void retire() noexcept;
+
 private:
     std::string name_;
     const Function* mir_function_ = nullptr;
@@ -134,8 +139,12 @@ public:
 
 private:
     FunctionDispatchTable() = default;
+    void retire_locked(std::unique_ptr<FunctionHandle> handle);
     mutable std::mutex mutex_;
     std::unordered_map<std::string, std::unique_ptr<FunctionHandle>> handles_;
+    // Handles dropped by clear() or replaced by register_handle(); callers
+    // may hold pointers resolved before registry_generation() moved.
+    std::vector<std::unique_ptr<FunctionHandle>> retired_;
 };
 
 // Called by ~Module: drops every runtime registry's raw pointer into `mod`

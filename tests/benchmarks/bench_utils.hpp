@@ -444,6 +444,12 @@ public:
             {"cheney_gc", 1.35},
             {"collatz", 1.20},
             {"compile_speed", 1000.00},
+            // FastInterpreter time over Oracle time (lower is better).
+            {"fast_interp_collatz_1000", 0.08},
+            {"fast_interp_fib_iter_40", 0.12},
+            {"fast_interp_fib_rec_22", 0.22},
+            {"fast_interp_matmul_32x32", 0.12},
+            {"fast_interp_prime_sieve_100k", 0.10},
             {"fib", 2.50},
             {"gc_model_speedup", 1.25},
             {"icache", 0.80},

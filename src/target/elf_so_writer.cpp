@@ -3,6 +3,7 @@
 #include "image_util.hpp"
 #include "import_plan.hpp"
 #include <brass/object/aarch64_reloc.hpp>
+#include <brass/object/elf_writer.hpp>
 #include <algorithm>
 #include <cstring>
 #include <string>
@@ -11,7 +12,8 @@
 //
 // Layout, offsets equal to virtual addresses throughout:
 //
-//   PT_LOAD R    headers, .hash, .dynsym, .dynstr, .rela.dyn
+//   PT_LOAD R    headers, .hash, .dynsym, .dynstr, .rela.dyn,
+//                .eh_frame_hdr (PT_GNU_EH_FRAME), .eh_frame
 //   PT_LOAD RX   .text, .plt
 //   PT_LOAD RW   .rodata, .got, .dynamic  | page |  .data
 //                `--------- PT_GNU_RELRO ---------'
@@ -76,8 +78,65 @@ struct DynSymEntry {
 };
 
 constexpr uint64_t PAGE_SIZE = 0x1000;
-constexpr uint64_t PHDR_COUNT = 7; // PHDR, LOAD R, LOAD RX, LOAD RW, DYNAMIC, GNU_RELRO, GNU_STACK
+// PHDR, LOAD R, LOAD RX, LOAD RW, DYNAMIC, GNU_RELRO, GNU_STACK, and
+// GNU_EH_FRAME when the image has unwind info.
+constexpr uint64_t BASE_PHDR_COUNT = 7;
 constexpr uint64_t PLT_STUB_SIZE = 16;
+
+// .eh_frame_hdr: version, eh_frame_ptr (pcrel sdata4), fde_count (udata4),
+// then a table of (initial location, FDE address) pairs, datarel sdata4 from
+// the header, sorted by location. The unwinder finds a module's FDEs through
+// PT_GNU_EH_FRAME, so without it the .eh_frame would never be consulted.
+std::vector<uint8_t> build_eh_frame_hdr(const std::vector<uint8_t>& eh_frame, uint64_t eh_frame_vaddr,
+                                        uint64_t hdr_vaddr, std::string& error) {
+    std::vector<std::pair<int64_t, int64_t>> table;   // (pc, fde) vaddrs
+    size_t p = 0;
+    while (p + 4 <= eh_frame.size()) {
+        const uint32_t len = read_u32(eh_frame, p);
+        if (len == 0) break;
+        if (len == 0xFFFFFFFFu || p + 4 + len > eh_frame.size()) {
+            error = "internal: malformed .eh_frame entry at offset " + std::to_string(p);
+            return {};
+        }
+        const uint32_t cie_id = read_u32(eh_frame, p + 4);
+        if (cie_id != 0) {
+            // pc_begin is pcrel sdata4 (the CIE's 'R' augmentation), already
+            // resolved against its own address.
+            const uint64_t field = eh_frame_vaddr + p + 8;
+            const int32_t rel = static_cast<int32_t>(read_u32(eh_frame, p + 8));
+            table.emplace_back(static_cast<int64_t>(field) + rel, static_cast<int64_t>(eh_frame_vaddr + p));
+        }
+        p += 4 + len;
+    }
+    std::sort(table.begin(), table.end());
+
+    std::vector<uint8_t> hdr;
+    write_u8(hdr, 1);      // version
+    write_u8(hdr, 0x1B);   // eh_frame_ptr: DW_EH_PE_pcrel | sdata4
+    write_u8(hdr, 0x03);   // fde_count: DW_EH_PE_udata4
+    write_u8(hdr, 0x3B);   // table: DW_EH_PE_datarel | sdata4
+    write_u32(hdr, static_cast<uint32_t>(static_cast<int32_t>(
+                       static_cast<int64_t>(eh_frame_vaddr) - static_cast<int64_t>(hdr_vaddr + 4))));
+    write_u32(hdr, static_cast<uint32_t>(table.size()));
+    const int64_t base = static_cast<int64_t>(hdr_vaddr);
+    for (const auto& [pc, fde] : table) {
+        write_u32(hdr, static_cast<uint32_t>(static_cast<int32_t>(pc - base)));
+        write_u32(hdr, static_cast<uint32_t>(static_cast<int32_t>(fde - base)));
+    }
+    return hdr;
+}
+
+size_t count_fdes(const std::vector<uint8_t>& eh_frame) {
+    size_t n = 0;
+    size_t p = 0;
+    while (p + 8 <= eh_frame.size()) {
+        const uint32_t len = read_u32(eh_frame, p);
+        if (len == 0 || len == 0xFFFFFFFFu) break;
+        if (read_u32(eh_frame, p + 4) != 0) ++n;
+        p += 4 + len;
+    }
+    return n;
+}
 
 } // namespace
 
@@ -95,6 +154,18 @@ std::vector<uint8_t> ElfSoWriter::write() {
     // Loads of the object's own symbols become `lea`s; what is left loads
     // an import's GOT slot.
     object::relax_got_loads(working_obj);
+
+    // DWARF CFI, so that a C++ exception thrown from a host callback unwinds
+    // through this module's frames.
+    if (!working_obj.functions.empty() && !working_obj.get_section(".eh_frame")) {
+        auto& eh = working_obj.get_or_create_section(
+            ".eh_frame", object::SectionKind::EhFrame,
+            object::SectionFlags::Read | object::SectionFlags::Alloc, 8);
+        object::ElfCfiBuilder::build_eh_frame(working_obj, eh);
+    }
+    const auto* eh_src = working_obj.get_section(".eh_frame");
+    const bool has_eh = eh_src != nullptr && !eh_src->data.empty();
+    const uint64_t phdr_count = BASE_PHDR_COUNT + (has_eh ? 1 : 0);
 
     // 1. Exports
     std::vector<std::string> export_names;
@@ -229,6 +300,15 @@ std::vector<uint8_t> ElfSoWriter::write() {
     const uint32_t dynstr_idx = add(".dynstr", elf64::SHT_STRTAB, elf64::SHF_ALLOC, 1, 0, std::move(dynstr_data));
     const uint32_t rela_idx = add(".rela.dyn", elf64::SHT_RELA, elf64::SHF_ALLOC, 8, 24,
                                   std::vector<uint8_t>(rela_count * 24, 0));
+    uint32_t eh_hdr_idx = 0;
+    uint32_t eh_idx = 0;
+    if (has_eh) {
+        eh_hdr_idx = add(".eh_frame_hdr", elf64::SHT_PROGBITS, elf64::SHF_ALLOC, 4, 0,
+                         std::vector<uint8_t>(12 + 8 * count_fdes(eh_src->data), 0));
+        eh_idx = add(".eh_frame", elf64::SHT_PROGBITS, elf64::SHF_ALLOC, 8, 0, eh_src->data);
+        sections[eh_idx].relocations = eh_src->relocations;
+        sections[eh_idx].source = ".eh_frame";
+    }
     const uint32_t text_idx = add(".text", elf64::SHT_PROGBITS, elf64::SHF_ALLOC | elf64::SHF_EXECINSTR, 16, 0, {});
     if (const auto* ts = working_obj.get_section(".text")) {
         sections[text_idx].data = ts->data;
@@ -268,7 +348,7 @@ std::vector<uint8_t> ElfSoWriter::write() {
     sections[dynamic_idx].sh_link = dynstr_idx;
 
     // 6. Layout: offset == vaddr, three loadable segments
-    uint64_t cur = 64 + PHDR_COUNT * 56;
+    uint64_t cur = 64 + phdr_count * 56;
     auto place = [&](uint32_t idx) {
         ElfShdr& s = sections[idx];
         cur = align_up(cur, s.sh_addralign);
@@ -281,6 +361,10 @@ std::vector<uint8_t> ElfSoWriter::write() {
     place(dynsym_idx);
     place(dynstr_idx);
     place(rela_idx);
+    if (has_eh) {
+        place(eh_hdr_idx);
+        place(eh_idx);
+    }
     const uint64_t seg_r_end = cur;
 
     cur = align_up(cur, page_size);
@@ -455,6 +539,17 @@ std::vector<uint8_t> ElfSoWriter::write() {
     }
     sections[rela_idx].data = std::move(rela_data);
 
+    // 7d. .eh_frame_hdr, from the relocated .eh_frame
+    if (has_eh) {
+        std::vector<uint8_t> hdr = build_eh_frame_hdr(sections[eh_idx].data, sections[eh_idx].sh_addr,
+                                                      sections[eh_hdr_idx].sh_addr, error_);
+        if (hdr.size() != sections[eh_hdr_idx].data.size()) {
+            if (error_.empty()) error_ = "internal: .eh_frame_hdr size changed during emission";
+            return {};
+        }
+        sections[eh_hdr_idx].data = std::move(hdr);
+    }
+
     // 8. .dynamic
     std::vector<uint8_t>& dyn_buf = sections[dynamic_idx].data;
     dyn_buf.clear();
@@ -519,7 +614,7 @@ std::vector<uint8_t> ElfSoWriter::write() {
     write_u32(out, 0);      // e_flags
     write_u16(out, 64);     // e_ehsize
     write_u16(out, 56);     // e_phentsize
-    write_u16(out, static_cast<uint16_t>(PHDR_COUNT));
+    write_u16(out, static_cast<uint16_t>(phdr_count));
     write_u16(out, 64);     // e_shentsize
     write_u16(out, static_cast<uint16_t>(sections.size()));
     write_u16(out, static_cast<uint16_t>(shstrtab_idx));
@@ -535,17 +630,28 @@ std::vector<uint8_t> ElfSoWriter::write() {
         write_u64(out, memsz);
         write_u64(out, align);
     };
-    write_phdr(elf64::PT_PHDR, elf64::PF_R, 64, 64, PHDR_COUNT * 56, PHDR_COUNT * 56, 8);
+    write_phdr(elf64::PT_PHDR, elf64::PF_R, 64, 64, phdr_count * 56, phdr_count * 56, 8);
     write_phdr(elf64::PT_LOAD, elf64::PF_R, 0, 0, seg_r_end, seg_r_end, page_size);
     write_phdr(elf64::PT_LOAD, elf64::PF_R | elf64::PF_X, seg_rx_start, seg_rx_start,
                seg_rx_end - seg_rx_start, seg_rx_end - seg_rx_start, page_size);
+    // PT_GNU_RELRO ends on a max-page boundary. Without .data behind it the
+    // file part of the writable segment stops short of that boundary, and a
+    // loader running with smaller pages than page_size (4K pages under a 64K
+    // AArch64 max page) would mprotect pages nothing maps: dlopen fails with
+    // "cannot apply additional memory protection after relocation". The
+    // segment's zero-filled tail covers the whole RELRO range.
+    const uint64_t seg_rw_mem_end = std::max(seg_rw_end, relro_end);
     write_phdr(elf64::PT_LOAD, elf64::PF_R | elf64::PF_W, seg_rw_start, seg_rw_start,
-               seg_rw_end - seg_rw_start, seg_rw_end - seg_rw_start, page_size);
+               seg_rw_end - seg_rw_start, seg_rw_mem_end - seg_rw_start, page_size);
     write_phdr(elf64::PT_DYNAMIC, elf64::PF_R | elf64::PF_W, sections[dynamic_idx].sh_offset,
                sections[dynamic_idx].sh_addr, sections[dynamic_idx].sh_size, sections[dynamic_idx].sh_size, 8);
     write_phdr(elf64::PT_GNU_RELRO, elf64::PF_R, seg_rw_start, seg_rw_start, relro_end - seg_rw_start,
                relro_end - seg_rw_start, 1);
     write_phdr(elf64::PT_GNU_STACK, elf64::PF_R | elf64::PF_W, 0, 0, 0, 0, 16);
+    if (has_eh) {
+        write_phdr(elf64::PT_GNU_EH_FRAME, elf64::PF_R, sections[eh_hdr_idx].sh_offset,
+                   sections[eh_hdr_idx].sh_addr, sections[eh_hdr_idx].sh_size, sections[eh_hdr_idx].sh_size, 4);
+    }
 
     for (size_t i = 1; i < sections.size(); ++i) {
         const auto& s = sections[i];

@@ -70,7 +70,7 @@ JitExecutionEngine::JitExecutionEngine(const Target& target)
     register_external_symbol("bronze_create_async_machine", reinterpret_cast<void*>(&runtime::bronze_create_async_machine));
     register_external_symbol("bronze_async_start", reinterpret_cast<void*>(&runtime::bronze_async_start));
     register_external_symbol("bronze_async_await", reinterpret_cast<void*>(&runtime::bronze_async_await));
-    register_external_symbol("brass_gc_write_barrier", reinterpret_cast<void*>(&brass_gc_write_barrier));
+    register_external_symbol("brass_gc_write_barrier", reinterpret_cast<void*>(&brass_default_gc_write_barrier));
     register_external_symbol("brass_gc_card_table_base", reinterpret_cast<void*>(&brass_gc_card_table_base));
     register_external_symbol("brass_gc_heap_base", reinterpret_cast<void*>(&brass_gc_heap_base));
     register_external_symbol("brass_parallel_for", reinterpret_cast<void*>(&brass_parallel_for));
@@ -110,7 +110,7 @@ JitExecutionEngine::JitExecutionEngine()
     register_external_symbol("bronze_create_async_machine", reinterpret_cast<void*>(&runtime::bronze_create_async_machine));
     register_external_symbol("bronze_async_start", reinterpret_cast<void*>(&runtime::bronze_async_start));
     register_external_symbol("bronze_async_await", reinterpret_cast<void*>(&runtime::bronze_async_await));
-    register_external_symbol("brass_gc_write_barrier", reinterpret_cast<void*>(&brass_gc_write_barrier));
+    register_external_symbol("brass_gc_write_barrier", reinterpret_cast<void*>(&brass_default_gc_write_barrier));
     register_external_symbol("brass_gc_card_table_base", reinterpret_cast<void*>(&brass_gc_card_table_base));
     register_external_symbol("brass_gc_heap_base", reinterpret_cast<void*>(&brass_gc_heap_base));
     register_external_symbol("brass_parallel_for", reinterpret_cast<void*>(&brass_parallel_for));
@@ -124,6 +124,7 @@ JitExecutionEngine::JitExecutionEngine()
 
 JitExecutionEngine::~JitExecutionEngine() {
     unregister_seh_tables();
+    unregister_eh_frame();
     for (uintptr_t fn_addr : registered_exception_fns_) {
         runtime::get_global_exception_registry().unregister_function_mapping(fn_addr);
     }
@@ -148,7 +149,9 @@ JitExecutionEngine::JitExecutionEngine(JitExecutionEngine&& other) noexcept
       pdata_table_(other.pdata_table_),
       pdata_count_(other.pdata_count_),
       code_base_(other.code_base_),
+      registered_fdes_(std::move(other.registered_fdes_)),
       sched_opts_(other.sched_opts_) {
+    other.registered_fdes_.clear();
     other.pdata_table_ = nullptr;
     other.pdata_count_ = 0;
     other.code_base_ = 0;
@@ -157,6 +160,9 @@ JitExecutionEngine::JitExecutionEngine(JitExecutionEngine&& other) noexcept
 JitExecutionEngine& JitExecutionEngine::operator=(JitExecutionEngine&& other) noexcept {
     if (this != &other) {
         unregister_seh_tables();
+        unregister_eh_frame();
+        registered_fdes_ = std::move(other.registered_fdes_);
+        other.registered_fdes_.clear();
         target_ = other.target_;
         code_mem_ = std::move(other.code_mem_);
         data_mem_ = std::move(other.data_mem_);
@@ -203,6 +209,7 @@ bool JitExecutionEngine::compile_and_load(const Module& mod, size_t code_padding
 
 bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_padding) {
     unregister_seh_tables();
+    unregister_eh_frame();
     symbol_table_.clear();
 
     object::ObjectFile working_obj = obj;
@@ -247,6 +254,18 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
                 object::CoffUnwindBuilder::build_unwind_info(working_obj, *pdata_sec, *xdata_sec);
             }
         }
+    } else if (!working_obj.functions.empty() && !working_obj.get_section(".eh_frame")) {
+        // DWARF CFI for every function, laid out with the data pages (its
+        // pc-relative FDE addresses are relocated like any other section)
+        // and handed to the unwinder below, so that a C++ exception thrown by
+        // a host function called from JIT code unwinds through the JIT frames.
+        auto& eh = working_obj.get_or_create_section(
+            ".eh_frame",
+            object::SectionKind::EhFrame,
+            object::SectionFlags::Read | object::SectionFlags::Alloc,
+            8
+        );
+        object::ElfCfiBuilder::build_eh_frame(working_obj, eh);
     }
 
     size_t page_sz = jit_system_page_size();
@@ -582,6 +601,11 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
     // Windows SEH Registration
     if (target_.is_windows()) {
         register_seh_tables(working_obj, module_base);
+    } else {
+        auto eh_it = symbol_table_.find(".eh_frame");
+        if (eh_it != symbol_table_.end() && eh_it->second) {
+            register_eh_frame(static_cast<uint8_t*>(eh_it->second));
+        }
     }
 
     // Register and relocate Stack Maps
@@ -640,8 +664,14 @@ void* JitExecutionEngine::get_symbol_address(std::string_view name) const {
     return nullptr;
 }
 
+// RtlAddFunctionTable takes the native RUNTIME_FUNCTION: 12 bytes on x64,
+// 8 on ARM64, matching the .pdata each target's builder emits.
+#if defined(_WIN32) && (defined(_M_X64) || defined(__x86_64__) || defined(_M_ARM64) || defined(__aarch64__))
+#define BRASS_JIT_SEH_REGISTRATION 1
+#endif
+
 void JitExecutionEngine::register_seh_tables(const object::ObjectFile& obj, uint8_t* base_ptr) {
-#if defined(_WIN32) && (defined(_M_X64) || defined(__x86_64__))
+#if defined(BRASS_JIT_SEH_REGISTRATION)
     unregister_seh_tables();
     int32_t pdata_idx = obj.get_section_index(".pdata");
     if (pdata_idx != object::SECTION_UNDEF) {
@@ -666,8 +696,59 @@ void JitExecutionEngine::register_seh_tables(const object::ObjectFile& obj, uint
 #endif
 }
 
+#if !defined(_WIN32)
+// The unwinder's dynamic registration interface (libgcc, and libunwind on
+// Apple platforms).
+extern "C" void __register_frame(void*);
+extern "C" void __deregister_frame(void*);
+#endif
+
+void JitExecutionEngine::register_eh_frame(uint8_t* eh_frame) {
+    unregister_eh_frame();
+#if !defined(_WIN32)
+    // Frames are only described to this process's unwinder when this process
+    // can run the code.
+    const Target host = Target::host();
+    if (target_.is_aarch64() != host.is_aarch64() || target_.is_windows()) return;
+#if defined(__APPLE__)
+    // Apple's libunwind registers a single FDE per call.
+    uint8_t* p = eh_frame;
+    for (;;) {
+        uint32_t len = 0;
+        std::memcpy(&len, p, 4);
+        if (len == 0) break;
+        if (len == 0xFFFFFFFFu) {
+            throw std::runtime_error("JIT .eh_frame uses a 64-bit length, which it never emits");
+        }
+        uint32_t cie_id = 0;
+        std::memcpy(&cie_id, p + 4, 4);
+        if (cie_id != 0) {
+            __register_frame(p);
+            registered_fdes_.push_back(p);
+        }
+        p += 4 + len;
+    }
+#else
+    // libgcc takes the whole zero-terminated section.
+    __register_frame(eh_frame);
+    registered_fdes_.push_back(eh_frame);
+#endif
+#else
+    (void)eh_frame;
+#endif
+}
+
+void JitExecutionEngine::unregister_eh_frame() {
+#if !defined(_WIN32)
+    for (auto it = registered_fdes_.rbegin(); it != registered_fdes_.rend(); ++it) {
+        __deregister_frame(*it);
+    }
+#endif
+    registered_fdes_.clear();
+}
+
 void JitExecutionEngine::unregister_seh_tables() {
-#if defined(_WIN32) && defined(_M_X64)
+#if defined(BRASS_JIT_SEH_REGISTRATION)
     if (pdata_table_) {
         RtlDeleteFunctionTable(reinterpret_cast<PRUNTIME_FUNCTION>(pdata_table_));
         pdata_table_ = nullptr;

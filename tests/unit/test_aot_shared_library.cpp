@@ -213,6 +213,17 @@ std::unique_ptr<Module> build_aot_roundtrip_module() {
     return mod;
 }
 
+// The images this host's loader takes: a DLL, a dylib or an ELF .so.
+bool host_loads_own_images() {
+    const Target host = Target::host();
+    return host.is_windows() || host.is_macos() || host.is_linux();
+}
+
+std::string host_library_ext() {
+    const Target host = Target::host();
+    return host.is_windows() ? ".dll" : (host.is_macos() ? ".dylib" : ".so");
+}
+
 } // namespace
 
 TEST_CASE("AOT Linker - Roundtrip Native Execution with DynamicLibrary") {
@@ -297,8 +308,8 @@ TEST_CASE("AOT Linker - Roundtrip Native Execution with DynamicLibrary") {
     }
 
     // Now test AOT Linker & native loading on Windows and macOS
-    if (Target::host().is_windows() || Target::host().is_macos()) {
-        std::string ext = Target::host().is_windows() ? ".dll" : ".dylib";
+    if (host_loads_own_images()) {
+        std::string ext = host_library_ext();
         std::filesystem::path dll_path = brass::test::scratch_dir() / ("test_aot_roundtrip_module" + ext);
         std::error_code ec;
         std::filesystem::remove(dll_path, ec);
@@ -370,8 +381,8 @@ TEST_CASE("AOT Linker - Selective Function Exports") {
     auto mod = build_aot_roundtrip_module();
     REQUIRE(mod != nullptr);
 
-    if (Target::host().is_windows() || Target::host().is_macos()) {
-        std::string ext = Target::host().is_windows() ? ".dll" : ".dylib";
+    if (host_loads_own_images()) {
+        std::string ext = host_library_ext();
         std::filesystem::path dll_path = brass::test::scratch_dir() / ("test_aot_selective_exports" + ext);
         std::error_code ec;
         std::filesystem::remove(dll_path, ec);
@@ -456,8 +467,8 @@ TEST_CASE("DynamicLibrary - Error Handling on Non-Existent Files and Missing Sym
     CHECK(lib_bad == nullptr);
     CHECK(!err.empty());
 
-    if (Target::host().is_windows() || Target::host().is_macos()) {
-        std::string ext = Target::host().is_windows() ? ".dll" : ".dylib";
+    if (host_loads_own_images()) {
+        std::string ext = host_library_ext();
         std::filesystem::path dll_path = brass::test::scratch_dir() / ("test_aot_err_handling" + ext);
         std::error_code ec;
         std::filesystem::remove(dll_path, ec);

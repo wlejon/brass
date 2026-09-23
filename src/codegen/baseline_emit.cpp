@@ -18,7 +18,7 @@
 #include <algorithm>
 #include <iostream>
 
-extern "C" void brass_tier1_record_invocation(const char* fn_name);
+extern "C" void brass_tier1_record_invocation_fb(void* feedback);
 
 namespace brass::codegen {
 
@@ -206,19 +206,17 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
         }
     }
 
-    // Record invocation hook
+    // Record invocation hook: the function's TieringFeedback is resolved
+    // now and baked in, so the call counts without a lock or name lookup
+    // (the registry retires, never frees, feedback objects).
     if (!fn.name().empty()) {
-        static std::unordered_map<std::string, std::string> name_cache;
-        std::string fn_name_copy(fn.name());
-        auto it_name = name_cache.try_emplace(fn_name_copy, fn_name_copy);
-        const char* name_cstr = it_name.first->second.c_str();
-
+        runtime::TieringFeedback* feedback = &runtime::TieringRegistry::instance().get_feedback(fn.name());
         if (target.is_windows()) {
-            enc.movabs(GPR::RCX, reinterpret_cast<uint64_t>(name_cstr));
+            enc.movabs(GPR::RCX, reinterpret_cast<uint64_t>(feedback));
         } else {
-            enc.movabs(GPR::RDI, reinterpret_cast<uint64_t>(name_cstr));
+            enc.movabs(GPR::RDI, reinterpret_cast<uint64_t>(feedback));
         }
-        void* hook_ptr = reinterpret_cast<void*>(&brass_tier1_record_invocation);
+        void* hook_ptr = reinterpret_cast<void*>(&brass_tier1_record_invocation_fb);
         enc.movabs(GPR::R11, reinterpret_cast<uint64_t>(hook_ptr));
         enc.call(GPR::R11);
     }

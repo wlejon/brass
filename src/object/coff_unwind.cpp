@@ -3,6 +3,8 @@
 #include <brass/target/aarch64/aarch64_frame.hpp>
 #include <vector>
 #include <algorithm>
+#include <stdexcept>
+#include <string>
 
 namespace brass::object {
 
@@ -17,6 +19,95 @@ struct UnwindOpSlot {
     int num_slots = 1; // 1, 2, or 3
 };
 
+// ARM64 unwind codes for a brass AArch64 frame, in the order the unwinder
+// applies them (the reverse of the prologue). AArch64FrameLayout lays a
+// frame out as
+//
+//   CFA - (total - outgoing)  FP, LR            <- x29
+//                             callee GPRs, callee FPRs, spills, locals
+//   SP                        outgoing arguments
+//
+// and saves the callee registers relative to x29 after setting it, which
+// no canonical (packed) prologue does. What is described is the equivalent
+//
+//   sub sp, sp, #(total - outgoing)     alloc
+//   stp x29, lr, [sp]                   save_fplr 0
+//   stp/str callee regs, [sp, #16 + ..] save_regp / save_reg / save_fregp / save_freg
+//   mov x29, sp                         set_fp
+//   sub sp, sp, #outgoing               alloc
+//
+// whose effect at every instruction of the body is the same: set_fp makes the
+// unwinder take SP from x29, so the register offsets stay small whatever the
+// size of the outgoing area. It is not the emitted prologue instruction for
+// instruction, so an unwind from inside the prologue or an epilogue (an
+// asynchronous fault there, not a call) is not described exactly.
+static std::vector<uint8_t> aarch64_unwind_codes(const codegen::FrameInfo& frame) {
+    std::vector<uint8_t> codes;
+    auto alloc = [&](uint64_t bytes) {
+        if (bytes == 0) return;
+        const uint64_t units = bytes / 16;
+        if (units < 32) {
+            codes.push_back(static_cast<uint8_t>(units));                        // alloc_s
+        } else if (units < 2048) {
+            codes.push_back(static_cast<uint8_t>(0xC0 | (units >> 8)));          // alloc_m
+            codes.push_back(static_cast<uint8_t>(units & 0xFF));
+        } else if (units < (uint64_t{1} << 24)) {
+            codes.push_back(0xE0);                                               // alloc_l
+            codes.push_back(static_cast<uint8_t>(units >> 16));
+            codes.push_back(static_cast<uint8_t>(units >> 8));
+            codes.push_back(static_cast<uint8_t>(units & 0xFF));
+        } else {
+            throw std::runtime_error("ARM64 unwind: a frame of " + std::to_string(bytes) +
+                                     " bytes exceeds what alloc_l can describe");
+        }
+    };
+    if (frame.is_leaf) {
+        codes.push_back(0xE4);   // end
+        return codes;
+    }
+    const uint64_t total = frame.total_frame_size;
+    const uint64_t outgoing = (frame.outgoing_arg_space + 15) & ~uint64_t{15};
+    if (total % 16 != 0 || outgoing > total || total - outgoing < 16) {
+        throw std::runtime_error("ARM64 unwind: frame layout is not 16-byte aligned around FP/LR");
+    }
+    auto saved_gprs = aarch64::AArch64FrameLayout::get_saved_callee_gprs(frame);
+    auto saved_fprs = aarch64::AArch64FrameLayout::get_saved_callee_fprs(frame);
+
+    alloc(outgoing);
+    codes.push_back(0xE1);   // set_fp
+
+    // Register saves, last first. Offsets from x29, in 8-byte units.
+    auto reg_codes = [&](auto& regs, size_t first_offset, int base, bool fp) {
+        std::vector<std::vector<uint8_t>> groups;
+        size_t i = 0;
+        while (i < regs.size()) {
+            const int r = static_cast<int>(regs[i]);
+            const uint32_t z = static_cast<uint32_t>((first_offset + i * 8) / 8);
+            if (z > 63) throw std::runtime_error("ARM64 unwind: callee save offset out of range");
+            const bool pair = i + 1 < regs.size() && static_cast<int>(regs[i + 1]) == r + 1;
+            const uint32_t x = static_cast<uint32_t>(r - base);
+            uint16_t code = 0;
+            if (fp) {
+                code = static_cast<uint16_t>((pair ? 0xD800u : 0xDC00u) | (x << 6) | z);   // save_fregp / save_freg
+            } else {
+                code = static_cast<uint16_t>((pair ? 0xC800u : 0xD000u) | (x << 6) | z);   // save_regp / save_reg
+            }
+            groups.push_back({static_cast<uint8_t>(code >> 8), static_cast<uint8_t>(code & 0xFF)});
+            i += pair ? 2 : 1;
+        }
+        for (auto it = groups.rbegin(); it != groups.rend(); ++it) {
+            codes.insert(codes.end(), it->begin(), it->end());
+        }
+    };
+    reg_codes(saved_fprs, 16 + saved_gprs.size() * 8, 8, true);
+    reg_codes(saved_gprs, 16, 19, false);
+
+    codes.push_back(0x40);   // save_fplr, [sp + 0]
+    alloc(total - outgoing);
+    codes.push_back(0xE4);   // end
+    return codes;
+}
+
 static void build_aarch64_unwind_info(ObjectFile& obj) {
     Section* pdata_sec = obj.get_section(".pdata");
     Section* xdata_sec = obj.get_section(".xdata");
@@ -24,70 +115,49 @@ static void build_aarch64_unwind_info(ObjectFile& obj) {
 
     for (const auto& fn : obj.functions) {
         bool has_ehandler = fn.exception_table.has_scopes();
-        auto saved_gprs = aarch64::AArch64FrameLayout::get_saved_callee_gprs(fn.frame_info);
-        auto saved_fprs = aarch64::AArch64FrameLayout::get_saved_callee_fprs(fn.frame_info);
-        size_t frame_sz = fn.frame_info.total_frame_size;
         size_t fn_len_words = fn.text_size / 4;
+        if (fn_len_words > 0x3FFFF) {
+            throw std::runtime_error("ARM64 unwind: function '" + fn.name + "' is longer than one .xdata record covers");
+        }
 
-        // On ARM64 Windows COFF SEH, .pdata entries are 8 bytes:
-        // Word 0: BeginAddress (Addr32NB to fn.name)
-        // Word 1: UnwindData (Packed unwind data if flag=01, or Addr32NB to .xdata if flag=00)
-        bool can_pack = !has_ehandler && (frame_sz <= 2032) && (fn_len_words <= 0x7FF);
-
-        if (can_pack) {
+        // .pdata entries are 8 bytes: BeginAddress, then either packed
+        // unwind data (low bits 01) or the RVA of an .xdata record (00).
+        //
+        // A leaf has no prologue at all, which the packed form says with
+        // every field but FunctionLength zero: no saved registers, CR 00
+        // (LR not saved), FrameSize 0. A framed function gets a full record:
+        // brass saves its callee registers above FP/LR, which no packed
+        // (canonical) prologue does.
+        if (fn.frame_info.is_leaf && !has_ehandler && fn_len_words <= 0x7FF) {
             pdata_sec->align_to(4);
             size_t pdata_offset = pdata_sec->data.size();
-
-            // Word 0: BeginAddress
-            pdata_sec->emit32(static_cast<uint32_t>(fn.text_offset));
+            pdata_sec->emit32(0);
             ObjectRelocation r0;
-            r0.offset = pdata_offset + 0;
+            r0.offset = pdata_offset;
             r0.kind = RelocKind::Addr32NB;
             r0.symbol_name = fn.name;
             r0.addend = 0;
             pdata_sec->relocations.push_back(std::move(r0));
-
-            // Word 1: Packed Unwind Data
-            uint32_t packed = 0x1u; // Flag = 01b
-            packed |= (static_cast<uint32_t>(fn_len_words & 0x7FF) << 2); // FunctionLength (11 bits)
-            packed |= (0x1u << 13); // Ret = 01b (canonical ret)
-            // H = bit 15 = 0
-            packed |= (static_cast<uint32_t>(saved_gprs.size() & 0xF) << 16); // RegI (4 bits)
-            packed |= (static_cast<uint32_t>(saved_fprs.size() & 0x7) << 20); // RegF (3 bits)
-            packed |= (static_cast<uint32_t>(fn.frame_info.is_leaf ? 0 : 1) << 23); // CR (2 bits, 01b = chained)
-            packed |= (static_cast<uint32_t>((frame_sz / 16) & 0x7F) << 25); // FrameSize (7 bits)
-
-            pdata_sec->emit32(packed);
+            pdata_sec->emit32(0x1u | (static_cast<uint32_t>(fn_len_words) << 2));
         } else {
-            // Full .xdata record
             xdata_sec->align_to(4);
             size_t xdata_offset = xdata_sec->data.size();
 
-            std::vector<uint8_t> unwind_codes;
-            if (fn.frame_info.is_leaf) {
-                unwind_codes.push_back(0xE6); // end
-            } else {
-                if (frame_sz <= 128) {
-                    uint8_t imm = static_cast<uint8_t>(frame_sz / 16);
-                    unwind_codes.push_back(0xC8 | ((imm > 0 ? imm - 1 : 0) & 0x07));
-                } else {
-                    uint8_t imm = static_cast<uint8_t>((frame_sz / 16) & 0x7F);
-                    unwind_codes.push_back(imm);
-                    unwind_codes.push_back(0xE1); // set_fp
-                }
-                unwind_codes.push_back(0xE6); // end
-            }
-
+            std::vector<uint8_t> unwind_codes = aarch64_unwind_codes(fn.frame_info);
             while (unwind_codes.size() % 4 != 0) {
-                unwind_codes.push_back(0xE6);
+                unwind_codes.push_back(0xE3);   // nop padding after end
             }
 
             uint32_t code_words = static_cast<uint32_t>(unwind_codes.size() / 4);
+            if (code_words > 31) {
+                throw std::runtime_error("ARM64 unwind: too many unwind codes for '" + fn.name + "'");
+            }
+            // FunctionLength, Vers 0, X, E 0 with no epilog scopes: the
+            // epilogues are not described, the body is.
             uint32_t header = static_cast<uint32_t>(fn_len_words & 0x3FFFF);
             if (has_ehandler) {
                 header |= (1u << 20); // X = 1
             }
-            header |= (1u << 21); // E = 1 (single epilogue)
             header |= ((code_words & 0x1Fu) << 27);
 
             xdata_sec->emit32(header);

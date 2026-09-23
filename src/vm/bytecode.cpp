@@ -10,9 +10,6 @@ std::string_view bytecode_op_name(BytecodeOp op) noexcept {
         case BytecodeOp::unreachable: return "unreachable";
 
         case BytecodeOp::iconst32: return "iconst32";
-        case BytecodeOp::iconst64: return "iconst64";
-        case BytecodeOp::fconst32: return "fconst32";
-        case BytecodeOp::fconst64: return "fconst64";
         case BytecodeOp::load_const: return "load_const";
         case BytecodeOp::patchable_const32: return "patchable_const32";
         case BytecodeOp::patchable_const64: return "patchable_const64";
@@ -158,8 +155,6 @@ std::string_view bytecode_op_name(BytecodeOp op) noexcept {
         case BytecodeOp::store32: return "store32";
         case BytecodeOp::store64: return "store64";
         case BytecodeOp::alloca_: return "alloca";
-        case BytecodeOp::load_indexed: return "load_indexed";
-        case BytecodeOp::store_indexed: return "store_indexed";
 
         case BytecodeOp::jump: return "jump";
         case BytecodeOp::jump_if: return "jump_if";
@@ -211,12 +206,41 @@ std::string_view bytecode_op_name(BytecodeOp op) noexcept {
         case BytecodeOp::vinsert_lane: return "vinsert_lane";
         case BytecodeOp::vshuffle: return "vshuffle";
         case BytecodeOp::vzero: return "vzero";
+
+        case BytecodeOp::vmov: return "vmov";
+        case BytecodeOp::index_addr: return "index_addr";
+        case BytecodeOp::br_eq_i32: return "br_eq_i32";
+        case BytecodeOp::br_ne_i32: return "br_ne_i32";
+        case BytecodeOp::br_slt_i32: return "br_slt_i32";
+        case BytecodeOp::br_sle_i32: return "br_sle_i32";
+        case BytecodeOp::br_ult_i32: return "br_ult_i32";
+        case BytecodeOp::br_ule_i32: return "br_ule_i32";
+        case BytecodeOp::br_eq_i64: return "br_eq_i64";
+        case BytecodeOp::br_ne_i64: return "br_ne_i64";
+        case BytecodeOp::br_slt_i64: return "br_slt_i64";
+        case BytecodeOp::br_sle_i64: return "br_sle_i64";
+        case BytecodeOp::br_ult_i64: return "br_ult_i64";
+        case BytecodeOp::br_ule_i64: return "br_ule_i64";
+        case BytecodeOp::add_imm_i32: return "add_imm_i32";
+        case BytecodeOp::add_imm_i64: return "add_imm_i64";
+        case BytecodeOp::op_count_: break;
     }
     return "unknown";
 }
 
+bool is_bytecode_cond_branch(BytecodeOp op) noexcept {
+    return op >= BytecodeOp::br_eq_i32 && op <= BytecodeOp::br_ule_i64;
+}
+
 bool is_bytecode_jump(BytecodeOp op) noexcept {
-    return op == BytecodeOp::jump || op == BytecodeOp::jump_if || op == BytecodeOp::jump_if_not;
+    return op == BytecodeOp::jump || op == BytecodeOp::jump_if || op == BytecodeOp::jump_if_not ||
+           is_bytecode_cond_branch(op);
+}
+
+int64_t bytecode_branch_target(BytecodeWord inst, size_t pc) noexcept {
+    BytecodeOp op = decode_op(inst);
+    int64_t off = is_bytecode_cond_branch(op) ? decode_imm24(inst) : decode_imm32(inst);
+    return static_cast<int64_t>(pc) + off;
 }
 
 bool is_bytecode_call(BytecodeOp op) noexcept {
@@ -226,8 +250,6 @@ bool is_bytecode_call(BytecodeOp op) noexcept {
 bool is_bytecode_terminator(BytecodeOp op) noexcept {
     switch (op) {
         case BytecodeOp::jump:
-        case BytecodeOp::jump_if:
-        case BytecodeOp::jump_if_not:
         case BytecodeOp::ret:
         case BytecodeOp::ret_void:
         case BytecodeOp::switch_:
@@ -285,6 +307,11 @@ uint32_t BytecodeFunction::add_switch_table(SwitchTable table) {
 uint32_t BytecodeFunction::add_guard(GuardInfo guard) {
     guards.push_back(std::move(guard));
     return static_cast<uint32_t>(guards.size() - 1);
+}
+
+uint32_t BytecodeFunction::add_patch_const(PatchConstSite site) {
+    patch_consts.push_back(std::move(site));
+    return static_cast<uint32_t>(patch_consts.size() - 1);
 }
 
 void BytecodeFunction::set_line_info(uint32_t pc, DebugLoc loc) {

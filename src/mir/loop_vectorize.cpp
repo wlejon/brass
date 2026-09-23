@@ -4,6 +4,7 @@
 #include <vector>
 #include <unordered_map>
 #include <algorithm>
+#include <stdexcept>
 
 namespace brass {
 
@@ -230,7 +231,18 @@ bool vectorize_loop(
         if (inst == step_inst || (next_iv && inst->result() == next_iv)) {
             continue;
         }
-        if (inst->opcode() == Opcode::iconst_i64 || inst->opcode() == Opcode::iconst_i32) {
+        // Constants are rematerialized: the scalar body does not dominate
+        // the vector body.
+        if (inst->opcode() == Opcode::iconst_i64) {
+            vec_map[inst->result()] = b.build_iconst_i64(inst->imm_i64());
+            continue;
+        }
+        if (inst->opcode() == Opcode::iconst_i32) {
+            vec_map[inst->result()] = b.build_iconst_i32(inst->imm_i32());
+            continue;
+        }
+        if (inst->opcode() == Opcode::fconst_f64) {
+            vec_map[inst->result()] = b.build_fconst_f64(inst->imm_f64());
             continue;
         }
 
@@ -242,11 +254,10 @@ bool vectorize_loop(
 
             Value* vec_val = vec_map[val_op];
             if (!vec_val) {
-                if (val_op->type() == vli.elem_type) {
-                    vec_val = b.build_vbroadcast(vli.vec_type, val_op);
-                } else {
-                    continue;
+                if (val_op->type() != vli.elem_type) {
+                    throw std::logic_error("loop_vectorize: reduction operand has no vector form");
                 }
+                vec_val = b.build_vbroadcast(vli.vec_type, val_op);
             } else if (vec_val->type() == vli.elem_type) {
                 vec_val = b.build_vbroadcast(vli.vec_type, vec_val);
             }
@@ -277,11 +288,10 @@ bool vectorize_loop(
             Value* val_to_store = inst->operand(2);
             Value* vec_val = vec_map[val_to_store];
             if (!vec_val) {
-                if (val_to_store->type() == vli.elem_type) {
-                    vec_val = b.build_vbroadcast(vli.vec_type, val_to_store);
-                } else {
-                    continue;
+                if (val_to_store->type() != vli.elem_type) {
+                    throw std::logic_error("loop_vectorize: stored value has no vector form");
                 }
+                vec_val = b.build_vbroadcast(vli.vec_type, val_to_store);
             } else if (vec_val->type() == vli.elem_type) {
                 vec_val = b.build_vbroadcast(vli.vec_type, vec_val);
             }
@@ -313,7 +323,7 @@ bool vectorize_loop(
                     can_vectorize = false;
                     break;
                 }
-            } else if (op->type() == vli.elem_type) {
+            } else if (op->type() == vli.elem_type && loop.is_loop_invariant(op)) {
                 vec_operands.push_back(b.build_vbroadcast(vli.vec_type, op));
             } else {
                 can_vectorize = false;

@@ -92,6 +92,14 @@ std::shared_ptr<codegen::BaselineCompiledFunction> FunctionHandle::baseline_func
     return baseline_function_;
 }
 
+void FunctionHandle::retire() noexcept {
+    set_native_entry(nullptr);
+    mir_function_ = nullptr;
+    std::lock_guard<std::mutex> lock(engine_mutex_);
+    jit_engine_.reset();
+    baseline_function_.reset();
+}
+
 RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) const {
     void* addr = native_entry();
     if (!addr) {
@@ -383,11 +391,20 @@ void FunctionDispatchTable::forget_module(const Module& mod) {
     if (fns.empty()) return;
     std::unordered_set<const Function*> dying(fns.begin(), fns.end());
     std::lock_guard<std::mutex> lock(mutex_);
+    bool changed = false;
     for (auto& [_, handle] : handles_) {
         if (handle && dying.count(handle->mir_function()) != 0) {
             handle->set_mir_function(nullptr);
+            changed = true;
         }
     }
+    if (changed) bump_registry_generation();
+}
+
+void FunctionDispatchTable::retire_locked(std::unique_ptr<FunctionHandle> handle) {
+    if (!handle) return;
+    handle->retire();
+    retired_.push_back(std::move(handle));
 }
 
 void forget_module(const Module& mod) noexcept {
@@ -396,6 +413,7 @@ void forget_module(const Module& mod) noexcept {
             FunctionDispatchTable::instance().forget_module(mod);
         }
         TieringRegistry::forget_module(&mod);
+        MultiTierPipeline::forget_module(&mod);
     } catch (...) {
         // Allocation failure while building the lookup set: leaving a stale
         // pointer behind beats throwing out of a destructor.
@@ -407,14 +425,16 @@ FunctionHandle* FunctionDispatchTable::get_or_create(std::string_view name, cons
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = handles_.find(key);
     if (it != handles_.end()) {
-        if (fn) {
+        if (fn && it->second->mir_function() != fn) {
             it->second->set_mir_function(fn);
+            bump_registry_generation();
         }
         return it->second.get();
     }
     auto handle = std::make_unique<FunctionHandle>(name, fn);
     auto* ptr = handle.get();
     handles_[key] = std::move(handle);
+    bump_registry_generation();
     return ptr;
 }
 
@@ -436,12 +456,17 @@ void FunctionDispatchTable::register_handle(std::unique_ptr<FunctionHandle> hand
     if (!handle) return;
     std::string key(handle->name());
     std::lock_guard<std::mutex> lock(mutex_);
-    handles_[key] = std::move(handle);
+    auto& slot = handles_[key];
+    retire_locked(std::move(slot));
+    slot = std::move(handle);
+    bump_registry_generation();
 }
 
 void FunctionDispatchTable::clear() {
     std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& [_, handle] : handles_) retire_locked(std::move(handle));
     handles_.clear();
+    bump_registry_generation();
 }
 
 size_t FunctionDispatchTable::size() const {

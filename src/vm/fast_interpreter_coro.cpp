@@ -39,7 +39,7 @@ uintptr_t FastInterpreter::coro_create(const BytecodeFunction* bfn, const std::v
 
 uintptr_t FastInterpreter::coro_create(const Function& fn, const std::vector<RuntimeValue>& args) {
     if (fn.parent()) {
-        module_ = fn.parent();
+        use_module(fn.parent());
     }
     const BytecodeFunction* bfn = get_or_compile(fn);
     std::vector<uint64_t> raw_args;
@@ -51,7 +51,7 @@ uintptr_t FastInterpreter::coro_create(const Function& fn, const std::vector<Run
 }
 
 uintptr_t FastInterpreter::coro_create(const Module& mod, std::string_view callee, const std::vector<RuntimeValue>& args) {
-    module_ = &mod;
+    use_module(&mod);
     const Function* fn = mod.get_function(callee);
     if (!fn) {
         throw InterpreterException("coro_create: callee function not found in module: " + std::string(callee));
@@ -82,7 +82,7 @@ uintptr_t FastInterpreter::coro_create(std::string_view callee, const std::vecto
     return coro_create(bfn, raw_args);
 }
 
-void FastInterpreter::coro_suspend(FastFrame& frame, uint8_t dst_reg, uint8_t yield_reg, uint32_t resume_id) {
+void FastInterpreter::coro_suspend(FastFrame& frame, uint32_t dst_reg, uint32_t yield_reg, uint32_t resume_id) {
     FastCoroState* coro = active_coro_frame_;
     if (!coro) {
         throw InterpreterException("coro_suspend called without active coroutine state");
@@ -91,12 +91,14 @@ void FastInterpreter::coro_suspend(FastFrame& frame, uint8_t dst_reg, uint8_t yi
     uint64_t yield_val = (yield_reg < frame.num_registers) ? frame.registers[yield_reg] : 0;
     coro->yielded_val = yield_val;
     coro->state_id = (resume_id != 0) ? resume_id : (coro->state_id + 1);
-    coro->resume_dst_reg = dst_reg;
-    coro->pc = frame.pc + 1;
+    coro->resume_dst_reg = dst_reg < frame.num_registers ? static_cast<BcReg>(dst_reg) : kNoReg;
+    // coro_suspend is two code words (the second is the resume id).
+    coro->pc = frame.pc + static_cast<uint32_t>(bytecode_inst_words(BytecodeOp::coro_suspend));
 
     coro->registers.assign(frame.registers, frame.registers + frame.num_registers);
     if (frame.vector_regs) {
-        coro->vector_storage = frame.vector_storage;
+        coro->vector_storage.assign(frame.vector_regs,
+                                    frame.vector_regs + static_cast<size_t>(frame.num_registers) * kFastVecBytes);
     }
 
     if (coro->c_frame) {
@@ -119,7 +121,7 @@ uint64_t FastInterpreter::coro_resume(uintptr_t handle, uint64_t input_val) {
         return coro ? coro->yielded_val : 0;
     }
 
-    if (coro->state_id != 0 && coro->resume_dst_reg < coro->registers.size()) {
+    if (coro->state_id != 0 && coro->resume_dst_reg != kNoReg && coro->resume_dst_reg < coro->registers.size()) {
         coro->registers[coro->resume_dst_reg] = input_val;
     }
     coro->resume_arg = input_val;
@@ -129,6 +131,8 @@ uint64_t FastInterpreter::coro_resume(uintptr_t handle, uint64_t input_val) {
 
     FastFrame coro_frame;
     coro_frame.bfn = coro->bfn;
+    coro_frame.info = &fn_info(*coro->bfn, coro->mir_fn);
+    coro_frame.mir_fn = coro_frame.info->mir_fn;
     coro_frame.registers = coro->registers.data();
     coro_frame.num_registers = static_cast<uint32_t>(coro->registers.size());
     coro_frame.pc = coro->pc;

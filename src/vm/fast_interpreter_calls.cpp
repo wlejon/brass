@@ -1,24 +1,81 @@
+// FastInterpreter calls: host / symbol / function-pointer registration,
+// call-site resolution (cached per site, re-resolved when the module,
+// symbols, patches or runtime registries change), the call paths to
+// bytecode, native and host callees, and the run / resume entry points.
+
 #include "fast_interpreter_impl.hpp"
 #include <brass/runtime/code_installer.hpp>
-#include <iostream>
 
 namespace brass {
 
+// One reusable argument vector per nesting level of host / native calls.
+struct ArgBufferScope {
+    FastInterpreter& interp;
+    std::vector<RuntimeValue>* buf = nullptr;
+
+    explicit ArgBufferScope(FastInterpreter& in) : interp(in) {
+        const size_t depth = interp.arg_buffer_depth_;
+        if (depth >= interp.arg_buffers_.size()) {
+            interp.arg_buffers_.push_back(std::make_unique<std::vector<RuntimeValue>>());
+        }
+        buf = interp.arg_buffers_[depth].get();
+        buf->clear();
+        ++interp.arg_buffer_depth_;
+    }
+    ~ArgBufferScope() { --interp.arg_buffer_depth_; }
+    ArgBufferScope(const ArgBufferScope&) = delete;
+    ArgBufferScope& operator=(const ArgBufferScope&) = delete;
+};
+
+void* FastAllocaArena::allocate_slow(size_t size, size_t align) {
+    const size_t need = size + align;
+    size_t next = chunks_.empty() ? 0 : cur_ + 1;
+    if (next < chunks_.size() && chunks_[next].size < need) {
+        // Chunks past the current one are unused (marks are LIFO), so a
+        // too-small one can be replaced.
+        chunks_[next] = Chunk{};
+    }
+    if (next >= chunks_.size() || !chunks_[next].data) {
+        Chunk c;
+        c.size = std::max(kChunkSize, need);
+        c.data = std::make_unique<uint8_t[]>(c.size);
+        if (next < chunks_.size()) {
+            chunks_[next] = std::move(c);
+        } else {
+            chunks_.push_back(std::move(c));
+        }
+    }
+    cur_ = next;
+    off_ = 0;
+    return allocate(size, align);
+}
+
+// ---------------------------------------------------------------------------
+// Registration
+// ---------------------------------------------------------------------------
+
 void FastInterpreter::register_external_function(std::string_view name, FastHostFn fn) {
     external_functions_[std::string(name)] = std::move(fn);
+    invalidate_call_caches();
 }
 
 void FastInterpreter::register_external_function(std::string_view name, std::function<RuntimeValue(const std::vector<RuntimeValue>&)> fn) {
-    external_functions_[std::string(name)] = [f = std::move(fn)](FastInterpreter&, const std::vector<RuntimeValue>& args) {
+    register_external_function(name, FastHostFn([f = std::move(fn)](FastInterpreter&, const std::vector<RuntimeValue>& args) {
         return f(args);
-    };
+    }));
 }
 
 void FastInterpreter::register_external_function(std::string_view name, brass::HostFn fn) {
-    external_functions_[std::string(name)] = [f = std::move(fn)](FastInterpreter&, const std::vector<RuntimeValue>& args) {
-        Interpreter dummy(1024 * 1024);
-        return f(dummy, args);
-    };
+    register_external_function(name, FastHostFn([f = std::move(fn)](FastInterpreter& self, const std::vector<RuntimeValue>& args) {
+        return f(self.host_adapter_interpreter(), args);
+    }));
+}
+
+Interpreter& FastInterpreter::host_adapter_interpreter() {
+    // brass::HostFn callbacks take an Interpreter; one is built on first
+    // use and shared by every such callback.
+    if (!host_adapter_) host_adapter_ = std::make_unique<Interpreter>(1024 * 1024);
+    return *host_adapter_;
 }
 
 bool FastInterpreter::has_external_function(std::string_view name) const noexcept {
@@ -34,55 +91,86 @@ void* FastInterpreter::find_external_symbol(std::string_view name) const noexcep
     return it != external_symbols_.end() ? it->second : nullptr;
 }
 
-void FastInterpreter::set_module(const Module* mod) {
+bool FastInterpreter::has_external_symbol(std::string_view name) const noexcept {
+    return external_symbols_.find(std::string(name)) != external_symbols_.end();
+}
+
+void FastInterpreter::retire_caches() {
+    for (auto& [fn, bfn] : compiled_functions_) retired_bytecode_.push_back(std::move(bfn));
+    compiled_functions_.clear();
+    for (auto& [bfn, info] : fn_infos_) retired_infos_.push_back(std::move(info));
+    fn_infos_.clear();
+    invalidate_call_caches();
+}
+
+void FastInterpreter::release_retired() noexcept {
+    // Running frames and suspended coroutines may point into retired code.
+    if (call_depth_ != 0 || !active_coros_.empty()) return;
+    retired_bytecode_.clear();
+    retired_infos_.clear();
+}
+
+void FastInterpreter::use_module(const Module* mod) {
+    if (mod == module_) return;
+    if (module_ != nullptr) retire_caches();
     module_ = mod;
+    invalidate_call_caches();
+}
+
+void FastInterpreter::set_module(const Module* mod) {
+    use_module(mod);
     if (module_) {
         for (const auto* fn : module_->functions()) {
-            if (fn) {
-                register_function_pointer(reinterpret_cast<uintptr_t>(fn), fn);
-            }
+            if (fn) register_function_pointer(reinterpret_cast<uintptr_t>(fn), fn);
         }
     }
 }
 
 void FastInterpreter::set_bytecode_module(const BytecodeModule* bmod) {
-    bytecode_module_ = bmod;
+    if (bmod != bytecode_module_) {
+        retire_caches();
+        bytecode_module_ = bmod;
+    }
     if (bytecode_module_) {
         for (const auto& fn : bytecode_module_->functions()) {
-            if (fn) {
-                register_function_pointer(reinterpret_cast<uintptr_t>(fn.get()), fn.get());
-            }
+            if (fn) register_function_pointer(reinterpret_cast<uintptr_t>(fn.get()), fn.get());
         }
     }
 }
 
-bool FastInterpreter::has_external_symbol(std::string_view name) const noexcept {
-    return external_symbols_.find(std::string(name)) != external_symbols_.end();
-}
-
 void FastInterpreter::register_function_pointer(uintptr_t ptr, const Function* fn) {
-    function_pointers_[ptr] = fn;
+    auto [it, inserted] = function_pointers_.try_emplace(ptr, fn);
+    if (!inserted) {
+        if (it->second == fn) return;
+        it->second = fn;
+    }
+    invalidate_call_caches();
 }
 
 void FastInterpreter::register_function_pointer(uintptr_t ptr, const BytecodeFunction* bfn) {
-    bytecode_function_pointers_[ptr] = bfn;
+    auto [it, inserted] = bytecode_function_pointers_.try_emplace(ptr, bfn);
+    if (!inserted) {
+        if (it->second == bfn) return;
+        it->second = bfn;
+    }
+    invalidate_call_caches();
 }
 
 void FastInterpreter::register_function_pointer(uintptr_t ptr, FastHostFn fn) {
     host_function_pointers_[ptr] = std::move(fn);
+    invalidate_call_caches();
 }
 
 void FastInterpreter::register_function_pointer(uintptr_t ptr, std::function<RuntimeValue(const std::vector<RuntimeValue>&)> fn) {
-    host_function_pointers_[ptr] = [f = std::move(fn)](FastInterpreter&, const std::vector<RuntimeValue>& args) {
+    register_function_pointer(ptr, FastHostFn([f = std::move(fn)](FastInterpreter&, const std::vector<RuntimeValue>& args) {
         return f(args);
-    };
+    }));
 }
 
 void FastInterpreter::register_function_pointer(uintptr_t ptr, brass::HostFn fn) {
-    host_function_pointers_[ptr] = [f = std::move(fn)](FastInterpreter&, const std::vector<RuntimeValue>& args) {
-        Interpreter dummy(1024 * 1024);
-        return f(dummy, args);
-    };
+    register_function_pointer(ptr, FastHostFn([f = std::move(fn)](FastInterpreter& self, const std::vector<RuntimeValue>& args) {
+        return f(self.host_adapter_interpreter(), args);
+    }));
 }
 
 const Function* FastInterpreter::find_function_by_pointer(uintptr_t ptr) const noexcept {
@@ -100,12 +188,14 @@ void FastInterpreter::patch_const(std::string_view symbol, int64_t val) {
 }
 
 int64_t FastInterpreter::get_patched_const(std::string_view symbol, int64_t default_val) const {
+    if (patched_consts_.empty()) return default_val;
     auto it = patched_consts_.find(std::string(symbol));
     return (it != patched_consts_.end()) ? it->second : default_val;
 }
 
 void FastInterpreter::patch_call(std::string_view site, std::string_view target) {
     patched_calls_[std::string(site)] = std::string(target);
+    invalidate_call_caches();
 }
 
 std::string_view FastInterpreter::get_patched_call(std::string_view site, std::string_view default_callee) const {
@@ -113,237 +203,206 @@ std::string_view FastInterpreter::get_patched_call(std::string_view site, std::s
     return (it != patched_calls_.end()) ? std::string_view(it->second) : default_callee;
 }
 
-RuntimeValue FastInterpreter::execute_call(FastFrame& frame, const CallSiteInfo& cs, BytecodeOp call_op) {
-    std::string_view callee_name = cs.callee;
-    if (call_op == BytecodeOp::patchable_call) {
-        std::string_view default_callee = cs.extra_symbol.empty() ? cs.callee : cs.extra_symbol;
-        callee_name = get_patched_call(cs.callee, default_callee);
+// ---------------------------------------------------------------------------
+// Call-site resolution
+// ---------------------------------------------------------------------------
+
+FastFnInfo& FastInterpreter::fn_info(const BytecodeFunction& bfn, const Function* mir_fn) {
+    auto it = fn_infos_.find(&bfn);
+    if (it != fn_infos_.end()) {
+        if (mir_fn && !it->second->mir_fn) it->second->mir_fn = mir_fn;
+        return *it->second;
     }
-
-    // 0. Check Tiering & Native entry in FunctionDispatchTable
-    auto* handle = runtime::FunctionDispatchTable::instance().find(callee_name);
-    if (handle && handle->has_native_entry()) {
-        const Function* mir_fn = handle->mir_function();
-        std::vector<RuntimeValue> call_args;
-        call_args.reserve(cs.arg_regs.size());
-        for (size_t i = 0; i < cs.arg_regs.size(); ++i) {
-            uint8_t src_r = cs.arg_regs[i];
-            uint64_t bits = frame.registers[src_r];
-            Type arg_ty = (mir_fn && i < mir_fn->param_count()) ? mir_fn->param_type(i) : Type::i64();
-            call_args.push_back(RuntimeValue::from_bits(arg_ty, bits));
-        }
-        RuntimeValue ret_val = handle->call_native(call_args);
-        if (cs.dst_reg != 255) {
-            frame.registers[cs.dst_reg] = ret_val.raw_bits();
-            if (ret_val.is_vector()) {
-                uint8_t* vregs = frame.ensure_vector_regs();
-                std::memcpy(vregs + cs.dst_reg * 32, ret_val.vec_bytes(), 32);
-            }
-        }
-        return ret_val;
+    auto info = std::make_unique<FastFnInfo>();
+    info->bfn = &bfn;
+    info->mir_fn = mir_fn ? mir_fn : (module_ ? module_->get_function(bfn.name) : nullptr);
+    info->num_regs = std::max<uint32_t>(bfn.num_registers, 1);
+    for (uint32_t i = 0; i < bfn.num_params && i < bfn.register_types.size(); ++i) {
+        if (bfn.register_types[i].is_vector()) info->has_vector_params = true;
     }
-
-    // 1. Check if it's a known bytecode function or can be compiled from MIR
-    const BytecodeFunction* target_bfn = nullptr;
-    if (bytecode_module_) {
-        target_bfn = bytecode_module_->get_function(callee_name);
-    }
-    if (!target_bfn && module_) {
-        const Function* mir_fn = module_->get_function(callee_name);
-        if (mir_fn) {
-            target_bfn = get_or_compile(*mir_fn);
-        }
-    }
-
-    if (target_bfn) {
-        auto& feedback = runtime::TieringRegistry::instance().get_or_create(callee_name);
-        feedback.record_invocation();
-
-        if (handle && handle->has_native_entry()) {
-            const Function* mir_fn = handle->mir_function();
-            std::vector<RuntimeValue> call_args;
-            call_args.reserve(cs.arg_regs.size());
-            for (size_t i = 0; i < cs.arg_regs.size(); ++i) {
-                uint8_t src_r = cs.arg_regs[i];
-                uint64_t bits = frame.registers[src_r];
-                Type arg_ty = (mir_fn && i < mir_fn->param_count()) ? mir_fn->param_type(i) : Type::i64();
-                call_args.push_back(RuntimeValue::from_bits(arg_ty, bits));
-            }
-            RuntimeValue ret_val = handle->call_native(call_args);
-            if (cs.dst_reg != 255) {
-                frame.registers[cs.dst_reg] = ret_val.raw_bits();
-                if (ret_val.is_vector()) {
-                    uint8_t* vregs = frame.ensure_vector_regs();
-                    std::memcpy(vregs + cs.dst_reg * 32, ret_val.vec_bytes(), 32);
-                }
-            }
-            return ret_val;
-        }
-
-        if (call_depth_ >= max_call_depth_) {
-            throw InterpreterException("Call stack depth limit exceeded (" + std::to_string(max_call_depth_) + ")");
-        }
-
-        uint32_t num_regs = std::max<uint32_t>(target_bfn->num_registers, 1);
-        uint64_t* callee_regs = static_cast<uint64_t*>(BRASS_ALLOCA(num_regs * sizeof(uint64_t)));
-        std::memset(callee_regs, 0, num_regs * sizeof(uint64_t));
-
-        FastFrame callee_frame;
-        callee_frame.bfn = target_bfn;
-        callee_frame.registers = callee_regs;
-        callee_frame.num_registers = num_regs;
-
-        for (size_t i = 0; i < cs.arg_regs.size() && i < num_regs; ++i) {
-            uint8_t src_r = cs.arg_regs[i];
-            callee_regs[i] = frame.registers[src_r];
-            if (frame.vector_regs) {
-                uint8_t* callee_vregs = callee_frame.ensure_vector_regs();
-                std::memcpy(callee_vregs + i * 32, frame.vector_regs + src_r * 32, 32);
-            }
-        }
-
-        FrameGuard guard(*this, callee_frame);
-        RuntimeValue ret_val = execute_frame(callee_frame);
-
-        if (cs.dst_reg != 255) {
-            frame.registers[cs.dst_reg] = ret_val.raw_bits();
-            if (ret_val.is_vector()) {
-                uint8_t* vregs = frame.ensure_vector_regs();
-                std::memcpy(vregs + cs.dst_reg * 32, ret_val.vec_bytes(), 32);
-            }
-        }
-        return ret_val;
-    }
-
-    // 2. Check external host functions
-    auto it = external_functions_.find(std::string(callee_name));
-    if (it != external_functions_.end()) {
-        const Function* mir_fn = module_ ? module_->get_function(callee_name) : nullptr;
-        std::vector<RuntimeValue> call_args;
-        call_args.reserve(cs.arg_regs.size());
-        for (size_t i = 0; i < cs.arg_regs.size(); ++i) {
-            uint8_t src_r = cs.arg_regs[i];
-            uint64_t bits = frame.registers[src_r];
-            Type arg_ty = Type::i64();
-            if (mir_fn && i < mir_fn->param_count()) {
-                arg_ty = mir_fn->param_type(i);
-            } else if (callee_name == "sqrt" || callee_name == "fabs" || callee_name == "floor" || callee_name == "ceil" || callee_name == "bronze_print_f64") {
-                arg_ty = Type::f64();
-            }
-            call_args.push_back(RuntimeValue::from_bits(arg_ty, bits));
-        }
-
-        RuntimeValue ret_val = it->second(*this, call_args);
-        if (cs.dst_reg != 255) {
-            frame.registers[cs.dst_reg] = ret_val.raw_bits();
-            if (ret_val.is_vector()) {
-                uint8_t* vregs = frame.ensure_vector_regs();
-                std::memcpy(vregs + cs.dst_reg * 32, ret_val.vec_bytes(), 32);
-            }
-        }
-        return ret_val;
-    }
-
-    throw InterpreterException("Call to undefined function: " + std::string(callee_name));
+    info->calls.resize(bfn.call_sites.size());
+    FastFnInfo& ref = *info;
+    fn_infos_.emplace(&bfn, std::move(info));
+    return ref;
 }
 
-RuntimeValue FastInterpreter::execute_call_indirect(FastFrame& frame, const CallSiteInfo& cs) {
-    uintptr_t ptr = static_cast<uintptr_t>(frame.registers[cs.callee_reg]);
-
-    // 1. Check bytecode function pointers
-    auto bfn_it = bytecode_function_pointers_.find(ptr);
-    if (bfn_it != bytecode_function_pointers_.end()) {
-        const BytecodeFunction* target_bfn = bfn_it->second;
-        if (call_depth_ >= max_call_depth_) {
-            throw InterpreterException("Call stack depth limit exceeded (" + std::to_string(max_call_depth_) + ")");
-        }
-        uint32_t num_regs = std::max<uint32_t>(target_bfn->num_registers, 1);
-        uint64_t* callee_regs = static_cast<uint64_t*>(BRASS_ALLOCA(num_regs * sizeof(uint64_t)));
-        std::memset(callee_regs, 0, num_regs * sizeof(uint64_t));
-
-        FastFrame callee_frame;
-        callee_frame.bfn = target_bfn;
-        callee_frame.registers = callee_regs;
-        callee_frame.num_registers = num_regs;
-
-        for (size_t i = 0; i < cs.arg_regs.size() && i < num_regs; ++i) {
-            uint8_t src_r = cs.arg_regs[i];
-            callee_regs[i] = frame.registers[src_r];
-            if (frame.vector_regs) {
-                uint8_t* callee_vregs = callee_frame.ensure_vector_regs();
-                std::memcpy(callee_vregs + i * 32, frame.vector_regs + src_r * 32, 32);
-            }
-        }
-
-        FrameGuard guard(*this, callee_frame);
-        RuntimeValue ret_val = execute_frame(callee_frame);
-        if (cs.dst_reg != 255) {
-            frame.registers[cs.dst_reg] = ret_val.raw_bits();
-            if (ret_val.is_vector()) {
-                uint8_t* vregs = frame.ensure_vector_regs();
-                std::memcpy(vregs + cs.dst_reg * 32, ret_val.vec_bytes(), 32);
-            }
-        }
-        return ret_val;
+void FastInterpreter::resolve_call_target(FastFnInfo& info, uint32_t cs_idx) {
+    const uint64_t gen = runtime::registry_generation();
+    const CallSiteInfo& cs = info.bfn->call_sites[cs_idx];
+    std::string_view name = cs.callee;
+    if (cs.patchable) {
+        name = get_patched_call(cs.callee, cs.extra_symbol.empty() ? std::string_view(cs.callee)
+                                                                   : std::string_view(cs.extra_symbol));
     }
 
-    // 2. Check MIR function pointers
-    auto fn_it = function_pointers_.find(ptr);
-    if (fn_it != function_pointers_.end()) {
-        const BytecodeFunction* target_bfn = get_or_compile(*fn_it->second);
-        if (call_depth_ >= max_call_depth_) {
-            throw InterpreterException("Call stack depth limit exceeded (" + std::to_string(max_call_depth_) + ")");
-        }
-        uint32_t num_regs = std::max<uint32_t>(target_bfn->num_registers, 1);
-        uint64_t* callee_regs = static_cast<uint64_t*>(BRASS_ALLOCA(num_regs * sizeof(uint64_t)));
-        std::memset(callee_regs, 0, num_regs * sizeof(uint64_t));
+    FastCallTarget t;
+    t.name = std::string(name);
+    const BytecodeFunction* bfn = bytecode_module_ ? bytecode_module_->get_function(name) : nullptr;
+    const Function* mir = module_ ? module_->get_function(name) : nullptr;
+    if (!bfn && mir) bfn = get_or_compile(*mir);
+    if (bfn) {
+        t.callee = &fn_info(*bfn, mir);
+        t.callee_mir = t.callee->mir_fn;
+    } else {
+        auto it = external_functions_.find(t.name);
+        if (it != external_functions_.end()) t.host = &it->second;
+    }
+    t.handle = runtime::FunctionDispatchTable::instance().find(name);
+    // A miss is never cached: the next call resolves again.
+    const bool found = t.callee || t.host || (t.handle && t.handle->native_entry());
+    t.epoch = found ? resolve_epoch_ : 0;
+    t.registry_gen = gen;
+    info.calls[cs_idx] = std::move(t);
+}
 
-        FastFrame callee_frame;
-        callee_frame.bfn = target_bfn;
-        callee_frame.registers = callee_regs;
-        callee_frame.num_registers = num_regs;
+void FastInterpreter::resolve_indirect_target(FastCallTarget& t, uintptr_t ptr) {
+    const uint64_t gen = runtime::registry_generation();
+    FastCallTarget r;
+    r.indirect_ptr = ptr;
+    if (auto it = bytecode_function_pointers_.find(ptr); it != bytecode_function_pointers_.end()) {
+        r.callee = &fn_info(*it->second);
+        r.name = it->second->name;
+    } else if (auto fit = function_pointers_.find(ptr); fit != function_pointers_.end()) {
+        const Function* f = fit->second;
+        r.callee = &fn_info(*get_or_compile(*f), f);
+        r.callee_mir = f;
+        r.name = std::string(f->name());
+        r.handle = runtime::FunctionDispatchTable::instance().find(f->name());
+    } else if (auto hit = host_function_pointers_.find(ptr); hit != host_function_pointers_.end()) {
+        r.host = &hit->second;
+    } else {
+        r.name = std::to_string(ptr);
+    }
+    r.epoch = (r.callee || r.host) ? resolve_epoch_ : 0;
+    r.registry_gen = gen;
+    t = std::move(r);
+}
 
-        for (size_t i = 0; i < cs.arg_regs.size() && i < num_regs; ++i) {
-            uint8_t src_r = cs.arg_regs[i];
-            callee_regs[i] = frame.registers[src_r];
-            if (frame.vector_regs) {
-                uint8_t* callee_vregs = callee_frame.ensure_vector_regs();
-                std::memcpy(callee_vregs + i * 32, frame.vector_regs + src_r * 32, 32);
-            }
-        }
+// ---------------------------------------------------------------------------
+// Call paths
+// ---------------------------------------------------------------------------
 
-        FrameGuard guard(*this, callee_frame);
-        RuntimeValue ret_val = execute_frame(callee_frame);
-        if (cs.dst_reg != 255) {
-            frame.registers[cs.dst_reg] = ret_val.raw_bits();
-            if (ret_val.is_vector()) {
-                uint8_t* vregs = frame.ensure_vector_regs();
-                std::memcpy(vregs + cs.dst_reg * 32, ret_val.vec_bytes(), 32);
-            }
+void FastInterpreter::execute_call(FastFrame& frame, uint32_t cs_idx) {
+    FastFnInfo& info = *frame.info;
+    FastCallTarget& t = info.calls[cs_idx];
+    if (BRASS_UNLIKELY(t.epoch != resolve_epoch_ || t.registry_gen != runtime::registry_generation())) {
+        resolve_call_target(info, cs_idx);
+    }
+    const CallSiteInfo& cs = frame.bfn->call_sites[cs_idx];
+    dispatch_call(t, frame, cs, cs.patchable ? "Patchable call to undefined function: " : "Call to undefined function: ");
+}
+
+void FastInterpreter::execute_call_indirect(FastFrame& frame, uint32_t cs_idx) {
+    FastFnInfo& info = *frame.info;
+    const CallSiteInfo& cs = frame.bfn->call_sites[cs_idx];
+    FastCallTarget& t = info.calls[cs_idx];
+    const uintptr_t ptr = static_cast<uintptr_t>(frame.registers[cs.callee_reg]);
+    if (BRASS_UNLIKELY(t.indirect_ptr != ptr || t.epoch != resolve_epoch_ ||
+                       t.registry_gen != runtime::registry_generation())) {
+        resolve_indirect_target(t, ptr);
+    }
+    dispatch_call(t, frame, cs, "Call indirect to unregistered target pointer: ");
+}
+
+void FastInterpreter::dispatch_call(FastCallTarget& t, FastFrame& frame, const CallSiteInfo& cs, const char* what) {
+    RuntimeValue result;
+    if (t.callee) {
+        // Native code installed for exactly this function runs instead.
+        runtime::FunctionHandle* h = t.handle;
+        if (h && t.callee_mir && h->mir_function() == t.callee_mir && h->native_entry()) {
+            result = call_native(*h, frame, cs);
+        } else {
+            result = call_bytecode(t, frame, cs);
         }
-        return ret_val;
+    } else if (t.handle && t.handle->native_entry()) {
+        result = call_native(*t.handle, frame, cs);
+    } else if (t.host) {
+        result = call_host(*t.host, frame, cs);
+    } else {
+        throw InterpreterException(what + t.name);
+    }
+    if (cs.dst_reg != kNoReg) fast_set_reg(frame, cs.dst_reg, result);
+}
+
+RuntimeValue FastInterpreter::call_host(const FastHostFn& fn, const FastFrame& frame, const CallSiteInfo& cs) {
+    ArgBufferScope scope(*this);
+    std::vector<RuntimeValue>& args = *scope.buf;
+    for (BcReg r : cs.arg_regs) args.push_back(fast_reg_value(frame, r));
+    return fn(*this, args);
+}
+
+RuntimeValue FastInterpreter::call_native(runtime::FunctionHandle& handle, const FastFrame& frame, const CallSiteInfo& cs) {
+    ArgBufferScope scope(*this);
+    std::vector<RuntimeValue>& args = *scope.buf;
+    for (BcReg r : cs.arg_regs) args.push_back(fast_reg_value(frame, r));
+    return handle.call_native(args);
+}
+
+RuntimeValue FastInterpreter::call_bytecode(FastCallTarget& t, FastFrame& caller, const CallSiteInfo& cs) {
+    FastFnInfo& callee = *t.callee;
+    callee.tiering().record_invocation();
+    // Reaching the tier-up threshold may have installed native code.
+    runtime::FunctionHandle* h = t.handle;
+    if (BRASS_UNLIKELY(h && t.callee_mir && h->mir_function() == t.callee_mir && h->native_entry())) {
+        return call_native(*h, caller, cs);
+    }
+    if (BRASS_UNLIKELY(call_depth_ >= max_call_depth_)) {
+        throw InterpreterException("Call stack depth limit exceeded (" + std::to_string(max_call_depth_) + ")");
+    }
+    if (BRASS_UNLIKELY(++total_instructions_executed_ > max_instructions_ && max_instructions_ > 0)) {
+        throw_instruction_limit();
     }
 
-    // 3. Check host function pointers
-    auto host_it = host_function_pointers_.find(ptr);
-    if (host_it != host_function_pointers_.end()) {
-        std::vector<RuntimeValue> call_args;
-        call_args.reserve(cs.arg_regs.size());
-        for (uint8_t src_r : cs.arg_regs) {
-            call_args.push_back(RuntimeValue::from_u64(frame.registers[src_r]));
-        }
-        RuntimeValue ret_val = host_it->second(*this, call_args);
-        if (cs.dst_reg != 255) {
-            frame.registers[cs.dst_reg] = ret_val.raw_bits();
-            if (ret_val.is_vector()) {
-                uint8_t* vregs = frame.ensure_vector_regs();
-                std::memcpy(vregs + cs.dst_reg * 32, ret_val.vec_bytes(), 32);
-            }
-        }
-        return ret_val;
-    }
+    const uint32_t n = callee.num_regs;
+    const FastAllocaArena::Mark mark = alloca_arena_->mark();
+    uint64_t* regs = static_cast<uint64_t*>(alloca_arena_->allocate(static_cast<size_t>(n) * sizeof(uint64_t), alignof(uint64_t)));
+    const size_t nargs = std::min<size_t>(cs.arg_regs.size(), n);
+    for (size_t i = 0; i < nargs; ++i) regs[i] = caller.registers[cs.arg_regs[i]];
 
-    throw InterpreterException("Call indirect to unregistered target pointer: " + std::to_string(ptr));
+    FastFrame frame;
+    frame.bfn = callee.bfn;
+    frame.mir_fn = callee.mir_fn;
+    frame.info = &callee;
+    frame.registers = regs;
+    frame.num_registers = n;
+    if (BRASS_UNLIKELY(callee.has_vector_params && caller.vector_regs)) {
+        for (size_t i = 0; i < nargs; ++i) {
+            if (!callee.bfn->register_types[i].is_vector()) continue;
+            std::memcpy(frame.ensure_vector_regs() + i * kFastVecBytes,
+                        caller.vector_regs + static_cast<size_t>(cs.arg_regs[i]) * kFastVecBytes, kFastVecBytes);
+        }
+    }
+    FrameGuard guard(*this, frame, mark);
+    return execute_frame(frame);
+}
+
+// ---------------------------------------------------------------------------
+// Entry points
+// ---------------------------------------------------------------------------
+
+RuntimeValue FastInterpreter::enter_frame(FastFnInfo& info, const std::vector<RuntimeValue>& args, uint32_t start_pc,
+                                          const std::vector<BcReg>* arg_regs) {
+    if (call_depth_ >= max_call_depth_) {
+        throw InterpreterException("Call stack depth limit exceeded (" + std::to_string(max_call_depth_) + ")");
+    }
+    const uint32_t n = info.num_regs;
+    const FastAllocaArena::Mark mark = alloca_arena_->mark();
+    uint64_t* regs = static_cast<uint64_t*>(alloca_arena_->allocate(static_cast<size_t>(n) * sizeof(uint64_t), alignof(uint64_t)));
+
+    FastFrame frame;
+    frame.bfn = info.bfn;
+    frame.mir_fn = info.mir_fn;
+    frame.info = &info;
+    frame.registers = regs;
+    frame.num_registers = n;
+    frame.pc = start_pc;
+    FrameGuard guard(*this, frame, mark);
+    for (size_t i = 0; i < args.size(); ++i) {
+        const uint32_t reg = arg_regs ? (i < arg_regs->size() ? (*arg_regs)[i] : kNoReg) : static_cast<uint32_t>(i);
+        if (reg >= n) continue;
+        fast_set_reg(frame, reg, args[i]);
+    }
+    return execute_frame(frame);
 }
 
 RuntimeValue FastInterpreter::run(const Function& fn) {
@@ -352,32 +411,26 @@ RuntimeValue FastInterpreter::run(const Function& fn) {
 
 RuntimeValue FastInterpreter::run(const Function& fn, const std::vector<RuntimeValue>& args) {
     if (fn.parent()) {
-        module_ = fn.parent();
+        use_module(fn.parent());
         if (!runtime::TieringRegistry::instance().active_module()) {
             runtime::TieringRegistry::instance().set_active_module(fn.parent());
         }
     }
+    release_retired();
 
     auto* handle = runtime::FunctionDispatchTable::instance().find(fn.name());
-    if (handle && handle->mir_function() == &fn) {
-        void* native_code = handle->native_entry();
-        if (native_code != nullptr) {
-            return handle->call_native(args);
-        }
-    }
-
-    auto& feedback = runtime::TieringRegistry::instance().get_or_create(fn.name());
-    feedback.record_invocation();
-
-    if (handle && handle->mir_function() == &fn) {
-        void* native_code = handle->native_entry();
-        if (native_code != nullptr) {
-            return handle->call_native(args);
-        }
+    if (handle && handle->mir_function() == &fn && handle->native_entry() != nullptr) {
+        return handle->call_native(args);
     }
 
     const BytecodeFunction* bfn = get_or_compile(fn);
-    return run(*bfn, args);
+    FastFnInfo& info = fn_info(*bfn, &fn);
+    info.tiering().record_invocation();
+
+    if (handle && handle->mir_function() == &fn && handle->native_entry() != nullptr) {
+        return handle->call_native(args);
+    }
+    return enter_frame(info, args, 0, nullptr);
 }
 
 RuntimeValue FastInterpreter::run(const BytecodeFunction& fn) {
@@ -385,26 +438,8 @@ RuntimeValue FastInterpreter::run(const BytecodeFunction& fn) {
 }
 
 RuntimeValue FastInterpreter::run(const BytecodeFunction& fn, const std::vector<RuntimeValue>& args) {
-    uint32_t num_regs = std::max<uint32_t>(fn.num_registers, 1);
-    uint64_t* registers = static_cast<uint64_t*>(BRASS_ALLOCA(num_regs * sizeof(uint64_t)));
-    std::memset(registers, 0, num_regs * sizeof(uint64_t));
-
-    FastFrame frame;
-    frame.bfn = &fn;
-    frame.mir_fn = module_ ? module_->get_function(fn.name) : nullptr;
-    frame.registers = registers;
-    frame.num_registers = num_regs;
-
-    for (size_t i = 0; i < args.size() && i < num_regs; ++i) {
-        registers[i] = args[i].raw_bits();
-        if (args[i].is_vector()) {
-            uint8_t* vregs = frame.ensure_vector_regs();
-            std::memcpy(vregs + i * 32, args[i].vec_bytes(), 32);
-        }
-    }
-
-    FrameGuard guard(*this, frame);
-    return execute_frame(frame);
+    release_retired();
+    return enter_frame(fn_info(fn), args, 0, nullptr);
 }
 
 RuntimeValue FastInterpreter::run(std::string_view fn_name) {
@@ -428,7 +463,7 @@ RuntimeValue FastInterpreter::run(const Module& mod, std::string_view entry_name
 }
 
 RuntimeValue FastInterpreter::run(const Module& mod, std::string_view entry_name, const std::vector<RuntimeValue>& args) {
-    module_ = &mod;
+    use_module(&mod);
     const Function* fn = mod.get_function(entry_name);
     if (!fn && entry_name != "main") {
         fn = mod.get_function("main");
@@ -440,6 +475,29 @@ RuntimeValue FastInterpreter::run(const Module& mod, std::string_view entry_name
         throw InterpreterException("Entry function @" + std::string(entry_name) + " not found in module");
     }
     return run(*fn, args);
+}
+
+RuntimeValue FastInterpreter::resume(const Function& fn, uint32_t resume_id, const std::vector<RuntimeValue>& state_values) {
+    if (fn.parent()) use_module(fn.parent());
+    const BytecodeFunction* bfn = get_or_compile(fn);
+    fn_info(*bfn, &fn);
+    return resume(*bfn, resume_id, state_values);
+}
+
+RuntimeValue FastInterpreter::resume(const BytecodeFunction& fn, uint32_t resume_id, const std::vector<RuntimeValue>& state_values) {
+    const ResumePointEntry* target = nullptr;
+    for (const auto& rp : fn.resume_points) {
+        if (rp.resume_id == resume_id) {
+            target = &rp;
+            break;
+        }
+    }
+    if (!target) {
+        throw InterpreterException("Resume target ID " + std::to_string(resume_id) + " not found in function " + fn.name);
+    }
+    release_retired();
+    return enter_frame(fn_info(fn), state_values, target->target_pc,
+                       target->param_regs.empty() ? nullptr : &target->param_regs);
 }
 
 } // namespace brass

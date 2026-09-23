@@ -227,18 +227,19 @@ void EmitContext::emit_sse_instruction(const LirInst& inst) {
             else enc_.roundsd(dst, to_mem_address(src), 0x00);
             break;
         }
-        case LirOpcode::Fabs32: {
-            XMM dst = to_xmm(inst.defs[0]);
-            enc_.mov32(GPR::R11, 0x7FFFFFFF);
-            enc_.movq(XMM::XMM15, GPR::R11);
-            enc_.andpd(dst, XMM::XMM15);
-            break;
-        }
+        case LirOpcode::Fabs32:
         case LirOpcode::Fabs64: {
             XMM dst = to_xmm(inst.defs[0]);
-            enc_.mov64(GPR::R11, 0x7FFFFFFFFFFFFFFFULL);
-            enc_.movq(XMM::XMM15, GPR::R11);
-            enc_.andpd(dst, XMM::XMM15);
+            // XMM15 is also the register allocator's scratch for a spilled
+            // definition: when the result is spilled, dst *is* XMM15, and
+            // building the mask there made `andpd xmm15, xmm15` return the
+            // mask itself (Linux x64 fuzz seeds 1103 and 2195). Fabs has no
+            // other operand, so XMM14, a use scratch, is free here.
+            const XMM mask = dst == XMM::XMM15 ? XMM::XMM14 : XMM::XMM15;
+            if (inst.opcode == LirOpcode::Fabs32) enc_.mov32(GPR::R11, 0x7FFFFFFF);
+            else enc_.mov64(GPR::R11, 0x7FFFFFFFFFFFFFFFULL);
+            enc_.movq(mask, GPR::R11);
+            enc_.andpd(dst, mask);
             break;
         }
         case LirOpcode::Minss: {

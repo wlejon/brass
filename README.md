@@ -52,6 +52,33 @@ To run tests in-process while iterating, call the binary directly:
 `./build/tests/brass_unit_tests --filter=<substring>` (or `--exact=<name>`,
 `--list`).
 
+### Linux and AArch64 execution
+
+`scripts/linux-tests.sh` builds brass for Linux and runs the correctness suite
+and the differential fuzzer there: natively on x86_64, and for aarch64 under
+qemu-user, so the AArch64 JIT's code is executed and checked against the
+interpreter the same way the x64 JIT's is. It needs no root: the first run
+fetches qemu-user-static and the aarch64 cross toolchain with
+`apt-get download` into `~/.cache/brass-aarch64` (Debian bookworm).
+
+```bash
+# From Windows, with WSL Debian installed; from Linux, drop "wsl -e"
+wsl -e bash scripts/linux-tests.sh            # setup, aarch64, then x86_64
+wsl -e bash scripts/linux-tests.sh a64        # aarch64 only: build, ctest, fuzz
+wsl -e bash scripts/linux-tests.sh fuzz-a64   # one step; see the script header
+wsl -e env FUZZ_SEEDS=4000 bash scripts/linux-tests.sh fuzz-a64
+```
+
+The aarch64 tree cross-builds with `cmake/toolchains/aarch64-linux-gnu.cmake`,
+which sets qemu as `CMAKE_CROSSCOMPILING_EMULATOR`, so test discovery and
+`ctest` run the aarch64 test binary transparently. A fuzz failure's
+reproducer replays with `brass-fuzz --repro=<file>`; `--dump-opt=<out>` writes
+the module after the pipeline, and `--unopt-only` then replays (or, with
+`--minimize=`, reduces) it comparing only the unoptimized JIT against the
+interpreter, so a code generation bug is chased without any pass running.
+Minimized reproducers can read memory the removed code used to initialize;
+narrowing by changing which value the original returns avoids that.
+
 GPU tests validate every emitted kernel with `ptxas` and execute it on a real
 device when a CUDA driver is present. They are skipped automatically otherwise,
 and the library itself has no link-time CUDA dependency.

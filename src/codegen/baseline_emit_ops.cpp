@@ -2,6 +2,7 @@
 #include <brass/gc/runtime_gc.hpp>
 #include <cstring>
 #include <cmath>
+#include <stdexcept>
 
 namespace brass::codegen {
 
@@ -524,7 +525,10 @@ bool emit_baseline_x64_op(X64BaselineEmitter& emitter, const Instruction& inst) 
         case Opcode::write_barrier: {
             enc.mov(GPR::RAX, slot_addr(inst.operand(0)));
             enc.mov(GPR::RCX, slot_addr(inst.operand(1)));
-            void* wb = reinterpret_cast<void*>(&brass_gc_write_barrier);
+            // Through the symbol table, so a host's barrier (bronze's) is the
+            // one called, as it is from optimized code.
+            void* wb = emitter.resolve_sym("brass_gc_write_barrier");
+            if (!wb) throw std::runtime_error("baseline JIT: brass_gc_write_barrier is not registered");
             enc.movabs(GPR::R11, reinterpret_cast<uint64_t>(wb));
             enc.call(GPR::R11);
             return true;

@@ -22,6 +22,7 @@ namespace elf64 {
     constexpr uint32_t PT_LOAD    = 1;
     constexpr uint32_t PT_DYNAMIC = 2;
     constexpr uint32_t PT_PHDR    = 6;
+    constexpr uint32_t PT_GNU_EH_FRAME = 0x6474e550;
     constexpr uint32_t PT_GNU_STACK = 0x6474e551;
     constexpr uint32_t PT_GNU_RELRO = 0x6474e552;
 

@@ -34,6 +34,18 @@ std::ostream& operator<<(std::ostream& os, Tier0Interpreter kind) {
     return os << to_string(kind);
 }
 
+namespace {
+std::atomic<uint64_t> g_registry_generation{1};
+} // namespace
+
+uint64_t registry_generation() noexcept {
+    return g_registry_generation.load(std::memory_order_acquire);
+}
+
+void bump_registry_generation() noexcept {
+    g_registry_generation.fetch_add(1, std::memory_order_acq_rel);
+}
+
 TieringFeedback::TieringFeedback(const TieringConfig& config)
     : config_(config) {}
 
@@ -41,11 +53,11 @@ TieringFeedback::TieringFeedback(std::string_view fn_name, const TieringConfig& 
     : fn_name_(fn_name), config_(config) {}
 
 uint64_t TieringFeedback::record_invocation() noexcept {
-    invocations_++;
-    if (invocations_ == config_.invocation_tier1_threshold) {
+    const uint64_t n = invocations_.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n == config_.invocation_tier1_threshold) {
         TieringRegistry::instance().on_invocation_threshold_reached(fn_name_);
     }
-    return invocations_;
+    return n;
 }
 
 TypeFeedbackVector* TieringFeedback::type_feedback_vector() {
@@ -57,36 +69,39 @@ const TypeFeedbackVector* TieringFeedback::type_feedback_vector() const {
 }
 
 uint64_t TieringFeedback::loop_backedges(uint32_t loop_header_id) const noexcept {
+    if (loop_header_id == 0) return unkeyed_backedges_.load(std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(maps_mutex_);
     auto it = loop_backedges_.find(loop_header_id);
-    if (it != loop_backedges_.end()) {
-        return it->second;
-    }
-    return 0;
+    return it != loop_backedges_.end() ? it->second : 0;
 }
 
 uint64_t TieringFeedback::record_backedge(uint32_t loop_header_id) noexcept {
-    total_backedges_++;
+    total_backedges_.fetch_add(1, std::memory_order_relaxed);
+    if (loop_header_id == 0) return unkeyed_backedges_.fetch_add(1, std::memory_order_relaxed) + 1;
+    std::lock_guard<std::mutex> lock(maps_mutex_);
     return ++loop_backedges_[loop_header_id];
 }
 
 uint32_t TieringFeedback::guard_deopt_count(uint32_t guard_site_id) const noexcept {
+    std::lock_guard<std::mutex> lock(maps_mutex_);
     auto it = guard_failures_.find(guard_site_id);
-    if (it != guard_failures_.end()) {
-        return it->second;
-    }
-    return 0;
+    return it != guard_failures_.end() ? it->second : 0;
 }
 
 void TieringFeedback::record_deopt(uint32_t guard_site_id) noexcept {
-    deopt_count_++;
-    guard_failures_[guard_site_id]++;
-    if (deopt_count_ >= config_.deopt_threshold * 2) {
-        trigger_bailout("Excessive deoptimizations (" + std::to_string(deopt_count_) + ")");
-    } else if (deopt_count_ >= config_.deopt_threshold) {
-        if (tier_ == TierLevel::Tier2_Optimized) {
-            tier_ = TierLevel::Tier1_Baseline;
-        } else if (tier_ == TierLevel::Tier1_Baseline) {
-            tier_ = TierLevel::Tier0_Interpreter;
+    const uint64_t n = deopt_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+    {
+        std::lock_guard<std::mutex> lock(maps_mutex_);
+        guard_failures_[guard_site_id]++;
+    }
+    if (n >= config_.deopt_threshold * 2) {
+        trigger_bailout("Excessive deoptimizations (" + std::to_string(n) + ")");
+    } else if (n >= config_.deopt_threshold) {
+        TierLevel t = current_tier();
+        if (t == TierLevel::Tier2_Optimized) {
+            set_tier(TierLevel::Tier1_Baseline);
+        } else if (t == TierLevel::Tier1_Baseline) {
+            set_tier(TierLevel::Tier0_Interpreter);
         }
     }
 }
@@ -95,10 +110,22 @@ bool TieringFeedback::is_speculation_invalid(uint32_t guard_site_id) const noexc
     if (guard_deopt_count(guard_site_id) >= config_.deopt_threshold) {
         return true;
     }
-    if (deopt_count_ >= config_.deopt_threshold * 4) {
-        return true;
+    return deopt_count() >= config_.deopt_threshold * 4;
+}
+
+std::unordered_map<uint32_t, uint64_t> TieringFeedback::loop_backedges_map() const {
+    std::unordered_map<uint32_t, uint64_t> out;
+    {
+        std::lock_guard<std::mutex> lock(maps_mutex_);
+        out = loop_backedges_;
     }
-    return false;
+    if (uint64_t n = unkeyed_backedges_.load(std::memory_order_relaxed)) out[0] = n;
+    return out;
+}
+
+std::unordered_map<uint32_t, uint32_t> TieringFeedback::guard_failures_map() const {
+    std::lock_guard<std::mutex> lock(maps_mutex_);
+    return guard_failures_;
 }
 
 void TieringFeedback::trigger_bailout(std::string_view reason) {
@@ -107,22 +134,28 @@ void TieringFeedback::trigger_bailout(std::string_view reason) {
 }
 
 void TieringFeedback::reset() noexcept {
-    invocations_ = 0;
-    total_backedges_ = 0;
-    deopt_count_ = 0;
-    loop_backedges_.clear();
-    guard_failures_.clear();
+    invocations_.store(0, std::memory_order_relaxed);
+    total_backedges_.store(0, std::memory_order_relaxed);
+    unkeyed_backedges_.store(0, std::memory_order_relaxed);
+    deopt_count_.store(0, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(maps_mutex_);
+        loop_backedges_.clear();
+        guard_failures_.clear();
+    }
     bailout_triggered_ = false;
     last_bailout_reason_.clear();
-    tier_ = TierLevel::Tier0_Interpreter;
+    set_tier(TierLevel::Tier0_Interpreter);
 }
 
 bool TieringFeedback::should_tier_up() const noexcept {
     if (bailout_triggered_) return false;
-    if (tier_ == TierLevel::Tier0_Interpreter && invocations_ >= config_.invocation_tier1_threshold) {
+    const TierLevel t = current_tier();
+    const uint64_t n = invocation_count();
+    if (t == TierLevel::Tier0_Interpreter && n >= config_.invocation_tier1_threshold) {
         return true;
     }
-    if (tier_ == TierLevel::Tier1_Baseline && invocations_ >= config_.invocation_tier2_threshold) {
+    if (t == TierLevel::Tier1_Baseline && n >= config_.invocation_tier2_threshold) {
         return true;
     }
     return false;
@@ -178,7 +211,11 @@ const TieringFeedback* TieringRegistry::find_feedback(std::string_view fn_name) 
 
 void TieringRegistry::clear() {
     std::lock_guard<std::mutex> lock(mutex_);
+    // Interpreters cache TieringFeedback pointers; retire rather than free
+    // them and bump the generation so the caches re-resolve.
+    for (auto& [name, fb] : feedback_map_) retired_.push_back(std::move(fb));
     feedback_map_.clear();
+    bump_registry_generation();
 }
 
 bool TieringRegistry::on_invocation_threshold_reached(std::string_view fn_name) {
@@ -232,15 +269,17 @@ void TieringRegistry::dump_stats(std::ostream& os) const {
         if (fb.is_bailout_set()) {
             os << "  Bail-out triggered: " << fb.last_bailout_reason() << "\n";
         }
-        if (!fb.loop_backedges_map().empty()) {
+        const auto loops = fb.loop_backedges_map();
+        if (!loops.empty()) {
             os << "  Loop Headers:\n";
-            for (const auto& [loop_id, cnt] : fb.loop_backedges_map()) {
+            for (const auto& [loop_id, cnt] : loops) {
                 os << "    [Loop Block " << loop_id << "]: " << cnt << " backedges\n";
             }
         }
-        if (!fb.guard_failures_map().empty()) {
+        const auto guards = fb.guard_failures_map();
+        if (!guards.empty()) {
             os << "  Failing Guards:\n";
-            for (const auto& [gid, cnt] : fb.guard_failures_map()) {
+            for (const auto& [gid, cnt] : guards) {
                 os << "    [Guard Site " << gid << "]: " << cnt << " deopts"
                    << (fb.is_speculation_invalid(gid) ? " (SPECULATION INVALID)" : "") << "\n";
             }

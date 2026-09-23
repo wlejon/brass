@@ -237,10 +237,16 @@ void EmitContext::emit_parallel_copy(const LirInst& inst) {
                           (m0.src.is_preg() && m0.src.preg_val.is_xmm()) ||
                           (m0.dst.size == 16 || m0.dst.size == 32);
             PReg scratch = cycle_scratch(is_xmm);
-            uint8_t sz = m0.dst.size;
-
-            emit_move(LirOperand::preg(scratch, sz), m0.dst);
+            // The scratch parks m0.dst's current value for the move that
+            // reads it (the last in the cycle), whose width can differ from
+            // m0's: an i32 edge argument and an i64 one swapping registers.
+            // A 32-bit park would drop the i64 value's upper half.
             size_t last_idx = cycle.back();
+            const uint8_t sz = std::max({m0.dst.size, moves[last_idx].src.size, moves[last_idx].dst.size});
+            LirOperand parked = m0.dst;
+            parked.size = sz;
+
+            emit_move(LirOperand::preg(scratch, sz), parked);
             moves[last_idx].src = LirOperand::preg(scratch, sz);
         } else {
             emit_move(moves[start_idx].dst, moves[start_idx].src);

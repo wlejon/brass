@@ -1,5 +1,6 @@
 #include <brass/target/aarch64/aarch64_isel.hpp>
 #include <brass/mir/instruction.hpp>
+#include <algorithm>
 
 namespace brass::aarch64 {
 
@@ -46,6 +47,18 @@ bool AArch64ISel::is_value_dead_after(
     return (uses_seen == total_uses);
 }
 
+// Which instructions the selector does not lower on their own.
+//
+// Only two kinds are skipped, and for both the one consumer that absorbs
+// them decides unconditionally, so this analysis cannot disagree with it:
+//   - a comparison (and an `and` it tests against zero) whose only use is
+//     the br_if / guard / select right after it in the same block;
+//   - an address `add` whose every use is a memory operation that folds it.
+// Constants and loads an instruction may fold as an operand are always
+// lowered; when the consumer did fold them their definitions are left
+// without uses, and eliminate_dead_materializations() deletes them after
+// selection. Predicting the consumer's choice here instead is how an operand
+// ended up with no register.
 void AArch64ISel::analyze_function(const Function& mir_fn) {
     use_count_.clear();
     skipped_insts_.clear();
@@ -103,122 +116,139 @@ void AArch64ISel::analyze_function(const Function& mir_fn) {
         }
     }
 
+    // An address computation folded into a memory operation is read by that
+    // operation through the folded operand only. Only the memory operation's
+    // own operands count: an instruction folded one level further down is
+    // still read by the (lowered or not) instruction between them.
     std::unordered_map<const Value*, uint32_t> folded_uses;
+    auto count_direct = [&](const MemFold& mf, std::initializer_list<const Value*> operands) {
+        for (const Value* op : operands) {
+            if (!op) continue;
+            for (const auto* fi : mf.folded_instructions) {
+                if (fi && fi->result() == op && fi->opcode() == Opcode::add) {
+                    folded_uses[op]++;
+                    break;
+                }
+            }
+        }
+    };
 
     for (const auto* bb : mir_fn.blocks()) {
         for (const auto* inst : *bb) {
             if (skipped_insts_.count(inst)) continue;
-
-            if (inst->opcode() == Opcode::load) {
-                MemFold mf = match_address(inst->operand(0), inst->offset());
-                for (const auto* fi : mf.folded_instructions) {
-                    if (fi && fi->result()) folded_uses[fi->result()]++;
-                }
-                continue;
-            }
-
-            if (inst->opcode() == Opcode::store) {
-                MemFold mf = match_address(inst->operand(0), inst->offset());
-                for (const auto* fi : mf.folded_instructions) {
-                    if (fi && fi->result()) folded_uses[fi->result()]++;
-                }
-                const Value* src = inst->operand(1);
-                ImmIntInfo imm_src = get_imm_int_info(src);
-                if (imm_src.is_imm && imm_src.fits_i32) {
-                    folded_uses[src]++;
-                }
-                continue;
-            }
-
-            if (inst->opcode() == Opcode::load_indexed) {
-                MemFold mf = match_indexed_address(inst->operand(0), inst->operand(1), x64::scale_from_int(inst->scale()), inst->offset());
-                for (const auto* fi : mf.folded_instructions) {
-                    if (fi && fi->result()) folded_uses[fi->result()]++;
-                }
-                continue;
-            }
-
-            if (inst->opcode() == Opcode::store_indexed) {
-                MemFold mf = match_indexed_address(inst->operand(0), inst->operand(1), x64::scale_from_int(inst->scale()), inst->offset());
-                for (const auto* fi : mf.folded_instructions) {
-                    if (fi && fi->result()) folded_uses[fi->result()]++;
-                }
-                const Value* src = inst->operand(2);
-                ImmIntInfo imm_src = get_imm_int_info(src);
-                if (imm_src.is_imm && imm_src.fits_i32) {
-                    folded_uses[src]++;
-                }
-                continue;
-            }
-
-            if (inst->opcode() == Opcode::br_if) {
-                const Value* cond = inst->operand(0);
-                if (cond && cond->is_instruction()) {
-                    const Instruction* def_inst = cond->defining_instruction();
-                    if (def_inst && def_inst->parent() == bb && is_comparison(def_inst->opcode()) && skipped_insts_.count(def_inst)) {
-                        const Value* lhs = def_inst->operand(0);
-                        const Value* rhs = def_inst->operand(1);
-                        ImmIntInfo rhs_imm = get_imm_int_info(rhs);
-                        ImmIntInfo lhs_imm = get_imm_int_info(lhs);
-
-                        if (rhs_imm.is_imm && rhs_imm.fits_i32) {
-                            folded_uses[rhs]++;
-                        } else if (lhs_imm.is_imm && lhs_imm.fits_i32) {
-                            folded_uses[lhs]++;
-                        } else if (rhs && rhs->is_instruction() && can_fuse_load(rhs->defining_instruction(), inst)) {
-                            skipped_insts_.insert(rhs->defining_instruction());
-                        }
-                        continue;
-                    }
-                }
-            }
-
-            bool is_alu = false;
             switch (inst->opcode()) {
-                case Opcode::add: case Opcode::sub: case Opcode::mul:
-                case Opcode::and_: case Opcode::or_: case Opcode::xor_:
-                case Opcode::shl: case Opcode::lshr: case Opcode::ashr:
-                case Opcode::udiv: case Opcode::umod:
-                case Opcode::eq: case Opcode::ne:
-                case Opcode::slt: case Opcode::ult: case Opcode::sle: case Opcode::ule:
-                case Opcode::sgt: case Opcode::ugt: case Opcode::sge: case Opcode::uge:
-                    is_alu = true;
+                case Opcode::load:
+                case Opcode::store:
+                    count_direct(match_address(inst->operand(0), inst->offset()), {inst->operand(0)});
+                    break;
+                case Opcode::load_indexed:
+                case Opcode::store_indexed:
+                    count_direct(match_indexed_address(inst->operand(0), inst->operand(1),
+                                                       x64::scale_from_int(inst->scale()), inst->offset()),
+                                 {inst->operand(0), inst->operand(1)});
                     break;
                 default:
                     break;
-            }
-
-            if (is_alu && inst->operand_count() >= 2) {
-                const Value* op0 = inst->operand(0);
-                const Value* op1 = inst->operand(1);
-                ImmIntInfo imm0 = get_imm_int_info(op0);
-                ImmIntInfo imm1 = get_imm_int_info(op1);
-
-                bool is_comm = (inst->opcode() == Opcode::add || inst->opcode() == Opcode::mul ||
-                                inst->opcode() == Opcode::and_ || inst->opcode() == Opcode::or_ ||
-                                inst->opcode() == Opcode::xor_);
-
-                if (imm1.is_imm && imm1.fits_i32) {
-                    folded_uses[op1]++;
-                } else if (is_comm && imm0.is_imm && imm0.fits_i32) {
-                    folded_uses[op0]++;
-                } else if (op1 && op1->is_instruction() && can_fuse_load(op1->defining_instruction(), inst)) {
-                    skipped_insts_.insert(op1->defining_instruction());
-                } else if (is_comm && op0 && op0->is_instruction() && can_fuse_load(op0->defining_instruction(), inst)) {
-                    skipped_insts_.insert(op0->defining_instruction());
-                }
             }
         }
     }
 
     for (const auto& [val, fold_count] : folded_uses) {
         auto it = use_count_.find(val);
-        if (it != use_count_.end() && it->second == fold_count) {
-            if (val->is_instruction()) {
-                skipped_insts_.insert(val->defining_instruction());
-            }
+        if (it != use_count_.end() && it->second == fold_count && val->is_instruction()) {
+            skipped_insts_.insert(val->defining_instruction());
         }
     }
+}
+
+bool AArch64ISel::is_elidable_materialization(const Instruction& inst) const {
+    switch (inst.opcode()) {
+        case Opcode::iconst_i32:
+        case Opcode::iconst_i64:
+            return true;
+        case Opcode::add:
+        case Opcode::shl:
+            // Pure integer arithmetic an address may have folded.
+            return !inst.type().is_float() && !inst.type().is_vector();
+        case Opcode::load:
+        case Opcode::load_indexed: {
+            // A load whose only consumer read it through a folded memory
+            // operand. A load with no consumer at all stays: it may be there
+            // for its fault.
+            auto it = use_count_.find(inst.result());
+            return it != use_count_.end() && it->second == 1;
+        }
+        default:
+            return false;
+    }
+}
+
+namespace {
+
+void note_vreg_use(std::unordered_map<uint32_t, uint32_t>& uses, const VReg& v) {
+    if (v.is_valid()) uses[v.id]++;
+}
+
+void note_operand_uses(std::unordered_map<uint32_t, uint32_t>& uses, const LirOperand& op) {
+    if (op.is_vreg()) note_vreg_use(uses, op.vreg_val);
+    if (op.is_mem()) {
+        note_vreg_use(uses, op.mem_val.base_vreg);
+        note_vreg_use(uses, op.mem_val.index_vreg);
+    }
+}
+
+} // namespace
+
+void AArch64ISel::eliminate_dead_materializations() {
+    if (elidable_insts_.empty()) return;
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        std::unordered_map<uint32_t, uint32_t> uses;
+        for (const auto& bb : lir_fn_->blocks) {
+            for (const auto& li : bb->instructions) {
+                if (!li) continue;
+                for (const auto& u : li->uses) note_operand_uses(uses, u);
+                // A memory destination reads its address registers.
+                for (const auto& d : li->defs) {
+                    if (d.is_mem()) note_operand_uses(uses, d);
+                }
+                for (const VReg& g : li->live_gcrefs) note_vreg_use(uses, g);
+            }
+        }
+        for (const VReg& v : lir_fn_->osr_entry.live_in_vregs) note_vreg_use(uses, v);
+
+        for (auto& bb : lir_fn_->blocks) {
+            auto& insts = bb->instructions;
+            for (auto& li : insts) {
+                if (!li || !elidable_insts_.count(li.get())) continue;
+                bool dead = !li->defs.empty();
+                for (const auto& d : li->defs) {
+                    if (!d.is_vreg()) {
+                        dead = false;
+                        break;
+                    }
+                    // Its own operands do not keep it alive (`eor v, v, v`).
+                    uint32_t own = 0;
+                    for (const auto& u : li->uses) {
+                        if (u.is_vreg() && u.vreg_val.id == d.vreg_val.id) own++;
+                    }
+                    auto it = uses.find(d.vreg_val.id);
+                    if (it != uses.end() && it->second > own) {
+                        dead = false;
+                        break;
+                    }
+                }
+                if (dead) {
+                    elidable_insts_.erase(li.get());
+                    li.reset();
+                    changed = true;
+                }
+            }
+            insts.erase(std::remove(insts.begin(), insts.end(), nullptr), insts.end());
+        }
+    }
+    elidable_insts_.clear();
 }
 
 } // namespace brass::aarch64

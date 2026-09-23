@@ -285,6 +285,52 @@ TEST_CASE("MIR Hardening - CFG Simplification Linear Block Merge Updates Success
     CHECK(!has_pred(T2, S));
 }
 
+TEST_CASE("MIR Hardening - CFG Simplification renumbers the parameters it keeps") {
+    // A loop header (%dead, %i): %dead is never read, so it is dropped and %i
+    // moves to index 0. Its recorded index stayed 1, and loop fusion, which
+    // reads the latch argument at param_index(), read past the argument list
+    // (a fault found by the AArch64 fuzz harness). The verifier now checks
+    // that every parameter records its block and index.
+    Module mod("test_cfg_param_index");
+    Function* fn = mod.create_function("f", Type::i64(), {Type::i64()});
+    Builder b(mod);
+    b.set_function(fn);
+
+    BasicBlock* entry = b.append_block("entry");
+    BasicBlock* hdr = b.append_block("hdr");
+    BasicBlock* body = b.append_block("body");
+    BasicBlock* exit = b.append_block("exit");
+
+    b.position_at_end(entry);
+    Value* n = b.add_block_param(entry, Type::i64());
+    Value* zero = b.build_iconst_i64(0);
+    b.build_br(hdr, {zero, zero});
+
+    b.position_at_end(hdr);
+    Value* dead = b.add_block_param(hdr, Type::i64());
+    Value* i = b.add_block_param(hdr, Type::i64());
+    b.build_br_if(b.build_slt(i, n), body, {}, exit, {});
+
+    b.position_at_end(body);
+    Value* next = b.build_add(i, b.build_iconst_i64(1));
+    b.build_br(hdr, {b.build_iconst_i64(7), next});
+
+    b.position_at_end(exit);
+    b.build_ret(i);
+
+    fn->rebuild_cfg_predecessors();
+    DiagnosticReporter diag;
+    REQUIRE(verify_module(mod, &diag));
+    (void)dead;
+
+    CfgSimplifyOptions opts;
+    CHECK(cfg_simplify_function(*fn, opts));
+    REQUIRE_EQ(hdr->param_count(), size_t{1});
+    CHECK(hdr->param(0) == i);
+    CHECK_EQ(i->param_index(), 0u);
+    CHECK(verify_module(mod, &diag));
+}
+
 // 6. Range Analysis: Wrapping Addition and Subtraction Degrade to Full Range
 TEST_CASE("MIR Hardening - Range Analysis Wrapping Addition Degrades To Full Range") {
     // 1. ValueRange addition overflow check

@@ -7,7 +7,7 @@
 namespace brass {
 
 FastInterpreter::FastInterpreter(size_t gc_semispace_size)
-    : gc_(gc_semispace_size) {
+    : gc_(gc_semispace_size), alloca_arena_(std::make_unique<FastAllocaArena>()) {
     gc_.set_root_provider([this](std::vector<uintptr_t*>& roots) {
         this->collect_all_roots(roots);
     });
@@ -30,7 +30,13 @@ void FastInterpreter::set_current(FastInterpreter* interp) noexcept {
 }
 
 void FastInterpreter::clear_compile_cache() noexcept {
-    compiled_functions_.clear();
+    try {
+        retire_caches();
+        release_retired();
+    } catch (...) {
+        // Out of memory while retiring: nothing was freed, so running
+        // frames stay valid; the caches are simply kept.
+    }
 }
 
 const BytecodeFunction* FastInterpreter::get_or_compile(const Function& fn) {
@@ -54,12 +60,12 @@ void FastInterpreter::set_generational_gc(GenerationalGC* gc) noexcept {
 }
 
 uintptr_t FastInterpreter::allocate_gc(size_t size, uint64_t pointer_mask, uint32_t type_tag) {
-    std::vector<uintptr_t*> roots;
-    collect_all_roots(roots);
+    // Roots come from the root provider installed in the constructor (and
+    // set_generational_gc), which the collector asks only when it collects.
     if (gen_gc_) {
-        return gen_gc_->allocate(size, pointer_mask, type_tag, roots);
+        return gen_gc_->allocate(size, pointer_mask, type_tag);
     }
-    return gc_.allocate(size, pointer_mask, type_tag, roots);
+    return gc_.allocate(size, pointer_mask, type_tag);
 }
 
 void FastInterpreter::collect_all_roots(std::vector<uintptr_t*>& roots) {

@@ -21,9 +21,15 @@ namespace brass {
 
 class GenerationalGC;
 class FastInterpreter;
+namespace runtime {
+class FunctionHandle;
+}
 
 struct FastFrame;
 struct FastCoroState;
+struct FastFnInfo;
+struct FastCallTarget;
+class FastAllocaArena;
 
 using FastHostFn = std::function<RuntimeValue(FastInterpreter& interp, const std::vector<RuntimeValue>& args)>;
 using FastDeoptHandler = std::function<RuntimeValue(FastInterpreter& interp, const DeoptResult& deopt)>;
@@ -108,7 +114,10 @@ public:
     RuntimeValue resume(const Function& fn, uint32_t resume_id, const std::vector<RuntimeValue>& state_values);
     RuntimeValue resume(const BytecodeFunction& fn, uint32_t resume_id, const std::vector<RuntimeValue>& state_values);
 
-    // Execution limits & diagnostics
+    // Execution limits & diagnostics. The instruction budget is charged per
+    // loop iteration (by the loop's length in bytecode) and per call, so
+    // instruction_count() approximates the instructions executed and a
+    // runaway loop or recursion hits the limit.
     void set_max_call_depth(size_t max_depth) noexcept { max_call_depth_ = max_depth; }
     size_t max_call_depth() const noexcept { return max_call_depth_; }
     void set_max_instructions(uint64_t max_insts) noexcept { max_instructions_ = max_insts; }
@@ -143,29 +152,57 @@ public:
     uintptr_t coro_create(std::string_view callee, const std::vector<RuntimeValue>& args = {});
     uint64_t coro_resume(uintptr_t handle, uint64_t input_val = 0);
     RuntimeValue coro_resume_val(uintptr_t handle, RuntimeValue input_val = RuntimeValue::from_i64(0));
-    void coro_suspend(FastFrame& frame, uint8_t dst_reg, uint8_t yield_reg, uint32_t resume_id);
+    void coro_suspend(FastFrame& frame, uint32_t dst_reg, uint32_t yield_reg, uint32_t resume_id);
     void coro_destroy(uintptr_t handle);
     bool coro_is_done(uintptr_t handle) const;
     FastCoroState* get_coro_state(uintptr_t handle);
 
     // Exception handling helpers
-    void handle_throw(FastFrame& frame, uint8_t reg, const uint32_t*& pc, const uint32_t* code_base);
-    void handle_invoke(FastFrame& frame, const CallSiteInfo& cs, const uint32_t*& pc, const uint32_t* code_base);
-    void handle_resume(FastFrame& frame, uint8_t reg);
+    void handle_throw(FastFrame& frame, uint32_t reg, const BytecodeWord*& pc, const BytecodeWord* code_base);
+    void handle_invoke(FastFrame& frame, uint32_t cs_idx, const BytecodeWord*& pc, const BytecodeWord* code_base);
+    void handle_resume(FastFrame& frame, uint32_t reg);
 
     // OSR backedge helper
     bool handle_osr_backedge(FastFrame& frame, uint32_t target_pc, RuntimeValue& out_res);
 
     // Internal execution helpers
     RuntimeValue execute_frame(FastFrame& frame);
-    RuntimeValue execute_call(FastFrame& frame, const CallSiteInfo& cs, BytecodeOp call_op);
-    RuntimeValue execute_call_indirect(FastFrame& frame, const CallSiteInfo& cs);
-    void execute_vector_op(FastFrame& frame, uint32_t inst);
-    void handle_write_barrier(FastFrame& frame, uint8_t obj_reg, uint8_t val_reg);
+    // Calls call site `cs_idx` of the frame's function (call, patchable_call,
+    // invoke) and writes the result register.
+    void execute_call(FastFrame& frame, uint32_t cs_idx);
+    void execute_call_indirect(FastFrame& frame, uint32_t cs_idx);
+    void execute_vector_op(FastFrame& frame, BytecodeWord inst, const BytecodeWord* pc);
+    void handle_write_barrier(FastFrame& frame, uint32_t obj_reg, uint32_t val_reg);
     void handle_safepoint(FastFrame& frame);
+
+    // Per-function runtime state (call-site caches, tiering counters) of a
+    // bytecode function this interpreter runs.
+    FastFnInfo& fn_info(const BytecodeFunction& bfn, const Function* mir_fn = nullptr);
 
 private:
     void register_builtin_host_functions();
+    // Drops every cached call-site resolution (module, symbol or patch
+    // changes).
+    void invalidate_call_caches() noexcept { ++resolve_epoch_; }
+    // Makes `mod` the current module. Switching modules retires the compile
+    // cache: a later Function at a dead one's address must not hit it.
+    void use_module(const Module* mod);
+    // Moves compiled code and per-function infos aside (kept alive for
+    // running frames) and invalidates every call-site cache.
+    void retire_caches();
+    void release_retired() noexcept;
+    void resolve_call_target(FastFnInfo& info, uint32_t cs_idx);
+    void resolve_indirect_target(FastCallTarget& t, uintptr_t ptr);
+    void dispatch_call(FastCallTarget& t, FastFrame& frame, const CallSiteInfo& cs, const char* what);
+    RuntimeValue call_host(const FastHostFn& fn, const FastFrame& frame, const CallSiteInfo& cs);
+    RuntimeValue call_native(runtime::FunctionHandle& handle, const FastFrame& frame, const CallSiteInfo& cs);
+    RuntimeValue call_bytecode(FastCallTarget& t, FastFrame& caller, const CallSiteInfo& cs);
+    // Runs `info`'s function from `start_pc` with args[i] in register
+    // (*arg_regs)[i], or in register i when arg_regs is null.
+    RuntimeValue enter_frame(FastFnInfo& info, const std::vector<RuntimeValue>& args, uint32_t start_pc,
+                             const std::vector<BcReg>* arg_regs);
+    Interpreter& host_adapter_interpreter();
+    [[noreturn]] void throw_instruction_limit() const;
 
     const Module* module_ = nullptr;
     const BytecodeModule* bytecode_module_ = nullptr;
@@ -189,6 +226,23 @@ private:
 
     std::unordered_map<const Function*, std::unique_ptr<BytecodeFunction>> compiled_functions_;
     BytecodeCompiler compiler_;
+    std::unordered_map<const BytecodeFunction*, std::unique_ptr<FastFnInfo>> fn_infos_;
+    uint64_t resolve_epoch_ = 1;
+    // Compiled code and infos dropped while frames may still use them;
+    // freed once no frame is active.
+    std::vector<std::unique_ptr<BytecodeFunction>> retired_bytecode_;
+    std::vector<std::unique_ptr<FastFnInfo>> retired_infos_;
+
+    // Argument vectors for host and native calls, one per nesting level so
+    // re-entrant calls never share one; reused across calls.
+    std::vector<std::unique_ptr<std::vector<RuntimeValue>>> arg_buffers_;
+    size_t arg_buffer_depth_ = 0;
+    friend struct ArgBufferScope;
+
+    // The Interpreter handed to brass::HostFn callbacks, built once.
+    std::unique_ptr<Interpreter> host_adapter_;
+    std::unique_ptr<FastAllocaArena> alloca_arena_;
+    friend struct FrameGuard;
 
     DeoptResult last_deopt_;
     FastDeoptHandler deopt_handler_;

@@ -21,11 +21,8 @@ enum class BytecodeOp : uint8_t {
     unreachable,
 
     // Constants
-    iconst32,
-    iconst64,
-    fconst32,
-    fconst64,
-    load_const,
+    iconst32,   // AI32 a <- zext(imm32): the i32 register form
+    load_const, // AI32 a <- constants[uimm32]
     patchable_const32,
     patchable_const64,
 
@@ -178,8 +175,6 @@ enum class BytecodeOp : uint8_t {
     store32,
     store64,
     alloca_,
-    load_indexed,
-    store_indexed,
 
     // Control Flow
     jump,
@@ -235,78 +230,100 @@ enum class BytecodeOp : uint8_t {
     vextract_lane,
     vinsert_lane,
     vshuffle,
-    vzero
+    vzero,
+
+    // Additions of the 64-bit encoding (see the format table below).
+    vmov,        // ABC   a <- b, scalar and 256-bit vector state
+    index_addr,  // ABCD  a <- b + c * d8
+    br_eq_i32,   // ABI24 if a == b goto pc + imm24 (and the rest: fused compare-branch)
+    br_ne_i32,
+    br_slt_i32,
+    br_sle_i32,
+    br_ult_i32,
+    br_ule_i32,
+    br_eq_i64,
+    br_ne_i64,
+    br_slt_i64,
+    br_sle_i64,
+    br_ult_i64,
+    br_ule_i64,
+    add_imm_i32, // ABI24 a <- b + imm24 (32-bit wrap)
+    add_imm_i64, // ABI24 a <- b + imm24
+
+    op_count_
 };
 
 std::string_view bytecode_op_name(BytecodeOp op) noexcept;
 bool is_bytecode_jump(BytecodeOp op) noexcept;
 bool is_bytecode_call(BytecodeOp op) noexcept;
 bool is_bytecode_terminator(BytecodeOp op) noexcept;
+bool is_bytecode_cond_branch(BytecodeOp op) noexcept;
 
-// Compact 32-bit instruction encoding:
-// Format ABC: [op: 8, dst: 8, src1: 8, src2: 8]
-// Format AD:  [op: 8, dst: 8, imm16: 16]
+// Register numbers. The instruction word carries 16-bit register fields, so
+// a function can use up to kMaxBytecodeRegisters registers after
+// allocation (the compiler reports an error past that). kNoReg marks an
+// absent register ("no result", "no input").
+using BcReg = uint16_t;
+inline constexpr BcReg kNoReg = 0xFFFF;
+inline constexpr uint32_t kMaxBytecodeRegisters = 0xFFFF;
 
-inline constexpr uint32_t encode_abc(BytecodeOp op, uint8_t dst, uint8_t src1, uint8_t src2) noexcept {
-    return static_cast<uint32_t>(op) |
-           (static_cast<uint32_t>(dst) << 8) |
-           (static_cast<uint32_t>(src1) << 16) |
-           (static_cast<uint32_t>(src2) << 24);
+// 64-bit instruction word. Every format keeps the opcode in bits 0-7 and
+// the first register in bits 8-23:
+//   ABC   [op:8][a:16][b:16 @24][c:16 @40][d:8 @56]
+//   AI32  [op:8][a:16][imm32 @32]            imm32 signed or unsigned per op
+//   ABI24 [op:8][a:16][b:16 @24][imm24 @40]  imm24 signed
+// Jump offsets are relative to the jumping instruction: AI32 for jump /
+// jump_if / jump_if_not, ABI24 for the fused compare-branches. Memory
+// offsets are ABI24 (a = value, b = base).
+using BytecodeWord = uint64_t;
+
+inline constexpr int32_t kImm24Min = -(1 << 23);
+inline constexpr int32_t kImm24Max = (1 << 23) - 1;
+inline constexpr bool fits_imm24(int64_t v) noexcept { return v >= kImm24Min && v <= kImm24Max; }
+
+inline constexpr BytecodeWord encode_abc(BytecodeOp op, uint32_t a, uint32_t b, uint32_t c, uint32_t d = 0) noexcept {
+    return static_cast<uint64_t>(op) |
+           (static_cast<uint64_t>(a & 0xFFFF) << 8) |
+           (static_cast<uint64_t>(b & 0xFFFF) << 24) |
+           (static_cast<uint64_t>(c & 0xFFFF) << 40) |
+           (static_cast<uint64_t>(d & 0xFF) << 56);
 }
 
-inline constexpr uint32_t encode_ad(BytecodeOp op, uint8_t dst, uint16_t imm16) noexcept {
-    return static_cast<uint32_t>(op) |
-           (static_cast<uint32_t>(dst) << 8) |
-           (static_cast<uint32_t>(imm16) << 16);
+inline constexpr BytecodeWord encode_ai(BytecodeOp op, uint32_t a, int32_t imm) noexcept {
+    return static_cast<uint64_t>(op) |
+           (static_cast<uint64_t>(a & 0xFFFF) << 8) |
+           (static_cast<uint64_t>(static_cast<uint32_t>(imm)) << 32);
 }
 
-inline constexpr uint32_t encode_ad(BytecodeOp op, uint8_t dst, int16_t simm16) noexcept {
-    return encode_ad(op, dst, static_cast<uint16_t>(simm16));
+inline constexpr BytecodeWord encode_abi(BytecodeOp op, uint32_t a, uint32_t b, int32_t imm24) noexcept {
+    return static_cast<uint64_t>(op) |
+           (static_cast<uint64_t>(a & 0xFFFF) << 8) |
+           (static_cast<uint64_t>(b & 0xFFFF) << 24) |
+           (static_cast<uint64_t>(static_cast<uint32_t>(imm24) & 0xFFFFFFu) << 40);
 }
 
-inline constexpr BytecodeOp decode_op(uint32_t inst) noexcept {
-    return static_cast<BytecodeOp>(inst & 0xFF);
+inline constexpr BytecodeOp decode_op(BytecodeWord inst) noexcept { return static_cast<BytecodeOp>(inst & 0xFF); }
+inline constexpr uint32_t decode_a(BytecodeWord inst) noexcept { return static_cast<uint32_t>((inst >> 8) & 0xFFFF); }
+inline constexpr uint32_t decode_b(BytecodeWord inst) noexcept { return static_cast<uint32_t>((inst >> 24) & 0xFFFF); }
+inline constexpr uint32_t decode_c(BytecodeWord inst) noexcept { return static_cast<uint32_t>((inst >> 40) & 0xFFFF); }
+inline constexpr uint32_t decode_d(BytecodeWord inst) noexcept { return static_cast<uint32_t>(inst >> 56); }
+inline constexpr int32_t decode_imm32(BytecodeWord inst) noexcept { return static_cast<int32_t>(static_cast<uint32_t>(inst >> 32)); }
+inline constexpr uint32_t decode_uimm32(BytecodeWord inst) noexcept { return static_cast<uint32_t>(inst >> 32); }
+inline constexpr int32_t decode_imm24(BytecodeWord inst) noexcept { return static_cast<int32_t>(static_cast<int64_t>(inst) >> 40); }
+
+// Operand-role names for the ABC fields.
+inline constexpr uint32_t decode_dst(BytecodeWord inst) noexcept { return decode_a(inst); }
+inline constexpr uint32_t decode_src1(BytecodeWord inst) noexcept { return decode_b(inst); }
+inline constexpr uint32_t decode_src2(BytecodeWord inst) noexcept { return decode_c(inst); }
+
+// Target pc of a jump or fused compare-branch at `pc`.
+int64_t bytecode_branch_target(BytecodeWord inst, size_t pc) noexcept;
+
+// Code words an instruction occupies: alloca_ (size), coro_suspend (resume
+// id) and vshuffle (mask) carry a second, raw data word.
+inline constexpr size_t bytecode_inst_words(BytecodeOp op) noexcept {
+    return (op == BytecodeOp::alloca_ || op == BytecodeOp::coro_suspend || op == BytecodeOp::vshuffle) ? 2 : 1;
 }
-
-inline constexpr uint8_t decode_dst(uint32_t inst) noexcept {
-    return static_cast<uint8_t>((inst >> 8) & 0xFF);
-}
-
-inline constexpr uint8_t decode_src1(uint32_t inst) noexcept {
-    return static_cast<uint8_t>((inst >> 16) & 0xFF);
-}
-
-inline constexpr uint8_t decode_src2(uint32_t inst) noexcept {
-    return static_cast<uint8_t>((inst >> 24) & 0xFF);
-}
-
-inline constexpr uint16_t decode_u16(uint32_t inst) noexcept {
-    return static_cast<uint16_t>((inst >> 16) & 0xFFFF);
-}
-
-inline constexpr int16_t decode_s16(uint32_t inst) noexcept {
-    return static_cast<int16_t>((inst >> 16) & 0xFFFF);
-}
-
-struct BytecodeInstruction {
-    uint32_t raw = 0;
-
-    constexpr BytecodeInstruction() noexcept = default;
-    constexpr explicit BytecodeInstruction(uint32_t r) noexcept : raw(r) {}
-    constexpr BytecodeInstruction(BytecodeOp op, uint8_t dst, uint8_t src1, uint8_t src2) noexcept
-        : raw(encode_abc(op, dst, src1, src2)) {}
-    constexpr BytecodeInstruction(BytecodeOp op, uint8_t dst, uint16_t imm16) noexcept
-        : raw(encode_ad(op, dst, imm16)) {}
-    constexpr BytecodeInstruction(BytecodeOp op, uint8_t dst, int16_t imm16) noexcept
-        : raw(encode_ad(op, dst, imm16)) {}
-
-    constexpr BytecodeOp op() const noexcept { return decode_op(raw); }
-    constexpr uint8_t dst() const noexcept { return decode_dst(raw); }
-    constexpr uint8_t src1() const noexcept { return decode_src1(raw); }
-    constexpr uint8_t src2() const noexcept { return decode_src2(raw); }
-    constexpr uint16_t u16() const noexcept { return decode_u16(raw); }
-    constexpr int16_t s16() const noexcept { return decode_s16(raw); }
-};
 
 struct ExceptionEntry {
     uint32_t start_pc = 0;
@@ -317,13 +334,13 @@ struct ExceptionEntry {
 struct ResumePointEntry {
     uint32_t resume_id = 0;
     uint32_t target_pc = 0;
-    std::vector<uint8_t> param_regs;
+    std::vector<BcReg> param_regs;
 };
 
 struct OsrEntry {
     uint32_t pc = 0;
     uint32_t loop_header_pc = 0;
-    std::vector<uint8_t> live_regs;
+    std::vector<BcReg> live_regs;
 };
 
 struct LineInfoEntry {
@@ -335,20 +352,28 @@ struct CallSiteInfo {
     std::string callee;
     std::string extra_symbol;
     uint32_t site_id = 0;
-    uint8_t dst_reg = 0;
-    uint8_t callee_reg = 0;
-    std::vector<uint8_t> arg_regs;
+    BcReg dst_reg = kNoReg;
+    BcReg callee_reg = kNoReg;
+    bool patchable = false; // patchable_call: the callee is looked up in patch_call()'s table
+    std::vector<BcReg> arg_regs;
 };
 
 struct SwitchTable {
-    int32_t default_offset = 0;
-    std::vector<std::pair<int64_t, int32_t>> cases; // (value, relative PC offset)
+    int32_t default_offset = 0;                     // absolute target pc
+    std::vector<std::pair<int64_t, int32_t>> cases; // (value, absolute target pc), sorted by value
+    bool is_i32 = false;                            // compare the low 32 bits, sign-extended
 };
 
 struct GuardInfo {
     uint32_t resume_id = 0;
     std::string exit_stub;
-    std::vector<uint8_t> state_regs;
+    std::vector<BcReg> state_regs;
+};
+
+// A patchable constant: the value patched under `symbol`, else the MIR default.
+struct PatchConstSite {
+    std::string symbol;
+    int64_t default_value = 0;
 };
 
 class BytecodeModule;
@@ -356,14 +381,17 @@ class BytecodeModule;
 class BytecodeFunction {
 public:
     std::string name;
-    std::vector<uint32_t> code;
+    std::vector<BytecodeWord> code;
     std::vector<uint64_t> constants;
     uint32_t num_registers = 0;
     uint32_t num_params = 0;
+    // SSA values before register allocation, for diagnostics.
+    uint32_t num_ssa_values = 0;
     Type return_type = Type::void_type();
     std::vector<Type> param_types;
+    // Every value sharing a register has the same type, so this is exact.
     std::vector<Type> register_types;
-    std::unordered_map<uint32_t, uint8_t> ssa_to_reg;
+    std::unordered_map<uint32_t, BcReg> ssa_to_reg;
     std::unordered_map<uint32_t, const BasicBlock*> pc_block_map;
     std::vector<ExceptionEntry> exception_table;
     std::vector<ResumePointEntry> resume_points;
@@ -374,6 +402,7 @@ public:
     std::vector<CallSiteInfo> call_sites;
     std::vector<SwitchTable> switch_tables;
     std::vector<GuardInfo> guards;
+    std::vector<PatchConstSite> patch_consts;
     std::vector<std::string> string_pool;
     BytecodeModule* parent = nullptr;
 
@@ -392,17 +421,9 @@ public:
     uint32_t add_call_site(CallSiteInfo info);
     uint32_t add_switch_table(SwitchTable table);
     uint32_t add_guard(GuardInfo guard);
+    uint32_t add_patch_const(PatchConstSite site);
 
-    void emit(uint32_t inst) { code.push_back(inst); }
-    void emit(BytecodeOp op, uint8_t dst, uint8_t src1, uint8_t src2) {
-        code.push_back(encode_abc(op, dst, src1, src2));
-    }
-    void emit(BytecodeOp op, uint8_t dst, uint16_t imm16) {
-        code.push_back(encode_ad(op, dst, imm16));
-    }
-    void emit(BytecodeOp op, uint8_t dst, int16_t imm16) {
-        code.push_back(encode_ad(op, dst, imm16));
-    }
+    void emit(BytecodeWord inst) { code.push_back(inst); }
 
     size_t current_pc() const noexcept { return code.size(); }
     void set_line_info(uint32_t pc, DebugLoc loc);

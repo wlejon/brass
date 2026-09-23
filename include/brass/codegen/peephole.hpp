@@ -43,6 +43,11 @@ private:
     static bool uses_register(const LirInst& inst, PReg reg) noexcept;
     static bool defines_register(const LirInst& inst, PReg reg) noexcept;
     static bool touches_memory(const LirInst& inst) noexcept;
+    // The registers the rewriter and emitters use behind the LIR's back
+    // (spill reloads, the spilled-def scratch, fabs masks, memory-to-memory
+    // moves). A value in one of them does not survive to a later
+    // instruction as far as the LIR can tell, so it is never forwarded.
+    bool is_reserved_scratch(PReg reg) const noexcept;
 };
 
 PeepholeStats run_lir_peephole_optimizations(LirFunction& fn);

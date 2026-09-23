@@ -1,5 +1,6 @@
 #include <brass/fuzz/diff_fuzzer.hpp>
 #include <brass/interpreter/interpreter.hpp>
+#include <brass/vm/fast_interpreter.hpp>
 #include <brass/codegen/jit_exec.hpp>
 #include <brass/mir/verifier.hpp>
 #include <brass/mir/loop_opt.hpp>
@@ -120,6 +121,55 @@ TierResult DiffFuzzer::run_tier0_interp(const Module& mod, std::string_view fn_n
     if (!run_with_watchdog(worker_task, options_.timeout_ms)) {
         res.status = ExecutionStatus::Timeout;
         res.fault_message = "Watchdog timeout exceeded in Interpreter";
+    } else {
+        res = std::move(*res_box);
+    }
+    res.duration_ms = elapsed_ms(t0);
+    return res;
+}
+
+TierResult DiffFuzzer::run_fast_interp(const Module& mod, std::string_view fn_name,
+                                       const std::vector<RuntimeValue>& args) {
+    TierResult res;
+    const auto t0 = std::chrono::steady_clock::now();
+
+    auto res_box = std::make_shared<TierResult>();
+    std::string fn_name_str(fn_name);
+
+    auto worker_task = [res_box, &mod, fn_name_str, args]() {
+        std::string fault;
+        bool prot_ok = run_protected([&]() {
+            FastInterpreter interp;
+            // Bytecode runs more instructions than MIR (parallel copies,
+            // address arithmetic), so its budget is a multiple of the
+            // reference interpreter's.
+            interp.set_max_instructions(16'000'000);
+            interp.register_external_function("brass_pgo_inc", [](FastInterpreter&, const std::vector<RuntimeValue>&) {
+                return RuntimeValue::from_void();
+            });
+            interp.register_external_function("fuzz_deopt_exit", [](FastInterpreter&, const std::vector<RuntimeValue>&) {
+                return RuntimeValue::from_void();
+            });
+            const Function* fn = mod.get_function(fn_name_str);
+            if (!fn) throw InterpreterException("Function @" + fn_name_str + " not found");
+            interp.set_module(&mod);
+            res_box->value = interp.run(*fn, args);
+            res_box->status = ExecutionStatus::Success;
+        }, fault);
+        if (!prot_ok) {
+            if (fault.find("Maximum instruction execution count exceeded") != std::string::npos) {
+                res_box->status = ExecutionStatus::Timeout;
+                res_box->fault_message = "Instruction execution limit exceeded in FastInterpreter";
+            } else {
+                res_box->status = ExecutionStatus::CrashOrFault;
+                res_box->fault_message = std::move(fault);
+            }
+        }
+    };
+
+    if (!run_with_watchdog(worker_task, options_.timeout_ms)) {
+        res.status = ExecutionStatus::Timeout;
+        res.fault_message = "Watchdog timeout exceeded in FastInterpreter";
     } else {
         res = std::move(*res_box);
     }
@@ -259,10 +309,13 @@ TierResult DiffFuzzer::run_tier2_jit_opt(const Module& mod, std::string_view fn_
 
 std::string DiffFuzzer::bisect_first_bad_step(const Module& mod, std::string_view fn_name,
                                               const std::vector<RuntimeValue>& args,
-                                              const TierResult& expected, bool use_jit) {
+                                              const TierResult& expected, char runner) {
+    // runner: 'i' interpreter, 'j' JIT, 'f' FastInterpreter.
     std::string bad;
     optimize(mod, [&](std::string_view step, const Module& cur) {
-        TierResult r = use_jit ? run_jit(cur, fn_name, args, "bisect") : run_tier0_interp(cur, fn_name, args);
+        TierResult r = runner == 'j' ? run_jit(cur, fn_name, args, "bisect")
+                     : runner == 'f' ? run_fast_interp(cur, fn_name, args)
+                                     : run_tier0_interp(cur, fn_name, args);
         if (tier_results_match(expected, r)) return true;
         bad = std::string(step);
         return false;
@@ -310,7 +363,7 @@ DiffResult DiffFuzzer::run_test(const Module& mod, std::string_view fn_name,
     const TierResult& expected = result.tier0_interp;
 
     OptimizeOutcome opt;
-    if (options_.tier2_jit_opt || options_.tier3_interp_opt) {
+    if (options_.tier2_jit_opt || options_.tier3_interp_opt || options_.tier5_fast_interp_opt) {
         opt = optimize(mod);
         if (!opt.module) {
             std::string cls = opt.status == ExecutionStatus::VerificationFailure ? "verify"
@@ -325,9 +378,30 @@ DiffResult DiffFuzzer::run_test(const Module& mod, std::string_view fn_name,
     if (options_.tier3_interp_opt) {
         result.tier3_interp_opt = run_tier0_interp(*opt.module, fn_name, args);
         if (!tier_results_match(expected, result.tier3_interp_opt)) {
-            std::string pass = options_.bisect ? bisect_first_bad_step(mod, fn_name, args, expected, false) : "?";
+            std::string pass = options_.bisect ? bisect_first_bad_step(mod, fn_name, args, expected, 'i') : "?";
             return fail("interp-opt:" + std::string(failure_kind(result.tier3_interp_opt)) + "@" + pass,
                         "Tier 3 (Interpreter on optimized) = " + describe(result.tier3_interp_opt) +
+                        ", Tier 0 (Interpreter) = " + describe(expected) + "; first differing step: " + pass,
+                        pass);
+        }
+    }
+
+    // The bytecode tier: its compiler and interpreter share no code with
+    // the reference interpreter, so a disagreement is a bytecode bug.
+    if (options_.tier4_fast_interp) {
+        result.tier4_fast = run_fast_interp(mod, fn_name, args);
+        if (!tier_results_match(expected, result.tier4_fast)) {
+            return fail("fast:" + std::string(failure_kind(result.tier4_fast)),
+                        "Tier 4 (FastInterpreter) = " + describe(result.tier4_fast) +
+                        ", Tier 0 (Interpreter) = " + describe(expected));
+        }
+    }
+    if (options_.tier5_fast_interp_opt && opt.module) {
+        result.tier5_fast_opt = run_fast_interp(*opt.module, fn_name, args);
+        if (!tier_results_match(expected, result.tier5_fast_opt)) {
+            std::string pass = options_.bisect ? bisect_first_bad_step(mod, fn_name, args, expected, 'f') : "?";
+            return fail("fast-opt:" + std::string(failure_kind(result.tier5_fast_opt)) + "@" + pass,
+                        "Tier 5 (FastInterpreter on optimized) = " + describe(result.tier5_fast_opt) +
                         ", Tier 0 (Interpreter) = " + describe(expected) + "; first differing step: " + pass,
                         pass);
         }
@@ -368,7 +442,7 @@ DiffResult DiffFuzzer::run_test(const Module& mod, std::string_view fn_name,
                             "Tier 2 (JIT opt) = " + describe(result.tier2_jit_opt) + ", then " + describe(again) +
                                 ", Tier 0 (Interpreter) = " + describe(expected));
             }
-            std::string pass = options_.bisect ? bisect_first_bad_step(mod, fn_name, args, expected, true) : "?";
+            std::string pass = options_.bisect ? bisect_first_bad_step(mod, fn_name, args, expected, 'j') : "?";
             return fail("jit-opt:" + std::string(failure_kind(result.tier2_jit_opt)) + "@" + pass,
                         "Tier 2 (JIT opt) = " + describe(result.tier2_jit_opt) +
                         ", Tier 0 (Interpreter) = " + describe(expected) + "; first differing step: " + pass,

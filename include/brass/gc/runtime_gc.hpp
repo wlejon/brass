@@ -62,7 +62,12 @@ extern "C" {
 void brass_gc_safepoint();
 uintptr_t brass_gc_alloc(size_t size, uint64_t pointer_mask, uint32_t type_tag);
 void brass_gc_collect();
-void brass_gc_write_barrier(uintptr_t obj, uintptr_t val);
+// brass's own generational-GC barrier. JIT symbol tables register it under
+// the name compiled code calls, "brass_gc_write_barrier", as a default a host
+// runtime overrides with its own barrier. It is deliberately NOT defined under
+// that name: a host runtime (bronze) defines `brass_gc_write_barrier` itself,
+// and two strong definitions collide when both are statically linked.
+void brass_default_gc_write_barrier(uintptr_t obj, uintptr_t val);
 uint8_t* brass_gc_card_table_base();
 uintptr_t brass_gc_heap_base();
 

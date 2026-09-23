@@ -1,4 +1,11 @@
+// The FastInterpreter dispatch loop: direct threading (computed goto) on
+// GCC/Clang, a switch elsewhere. Instructions are 64-bit words (see
+// bytecode.hpp); each handler decodes its fields straight from the word.
+// Calls, exceptions, coroutines and vectors leave the loop through the
+// helpers in the other fast_interpreter_*.cpp files.
+
 #include "fast_interpreter_impl.hpp"
+#include <brass/runtime/osr_coordinator.hpp>
 
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic push
@@ -7,82 +14,55 @@
 
 namespace brass {
 
-RuntimeValue FastInterpreter::resume(const Function& fn, uint32_t resume_id, const std::vector<RuntimeValue>& state_values) {
-    if (fn.parent()) {
-        module_ = fn.parent();
-    }
-    const BytecodeFunction* bfn = get_or_compile(fn);
-    return resume(*bfn, resume_id, state_values);
-}
-
-RuntimeValue FastInterpreter::resume(const BytecodeFunction& fn, uint32_t resume_id, const std::vector<RuntimeValue>& state_values) {
-    const ResumePointEntry* target_entry = nullptr;
-    for (const auto& rp : fn.resume_points) {
-        if (rp.resume_id == resume_id) {
-            target_entry = &rp;
-            break;
-        }
-    }
-    if (!target_entry) {
-        throw InterpreterException("Resume target ID " + std::to_string(resume_id) + " not found in function " + fn.name);
-    }
-
-    uint32_t num_regs = std::max<uint32_t>(fn.num_registers, 1);
-    uint64_t* registers = static_cast<uint64_t*>(BRASS_ALLOCA(num_regs * sizeof(uint64_t)));
-    std::memset(registers, 0, num_regs * sizeof(uint64_t));
-
-    FastFrame frame;
-    frame.bfn = &fn;
-    frame.mir_fn = module_ ? module_->get_function(fn.name) : nullptr;
-    frame.registers = registers;
-    frame.num_registers = num_regs;
-    frame.pc = target_entry->target_pc;
-
-    if (!target_entry->param_regs.empty()) {
-        for (size_t i = 0; i < state_values.size() && i < target_entry->param_regs.size(); ++i) {
-            uint8_t reg = target_entry->param_regs[i];
-            if (reg < num_regs) {
-                registers[reg] = state_values[i].raw_bits();
-                if (state_values[i].is_vector()) {
-                    uint8_t* vregs = frame.ensure_vector_regs();
-                    std::memcpy(vregs + reg * 32, state_values[i].vec_bytes(), 32);
-                }
-            }
-        }
-    } else {
-        for (size_t i = 0; i < state_values.size() && i < num_regs; ++i) {
-            registers[i] = state_values[i].raw_bits();
-            if (state_values[i].is_vector()) {
-                uint8_t* vregs = frame.ensure_vector_regs();
-                std::memcpy(vregs + i * 32, state_values[i].vec_bytes(), 32);
-            }
-        }
-    }
-
-    FrameGuard guard(*this, frame);
-    return execute_frame(frame);
+void FastInterpreter::throw_instruction_limit() const {
+    throw InterpreterException("Maximum instruction execution count exceeded (" + std::to_string(max_instructions_) + ")");
 }
 
 RuntimeValue FastInterpreter::execute_frame(FastFrame& frame) {
     const BytecodeFunction& fn = *frame.bfn;
-    const uint32_t* const code_base = fn.code.data();
+    const BytecodeWord* const code_base = fn.code.data();
     if (code_base == nullptr || fn.code.empty()) {
         return RuntimeValue::from_void();
     }
+    if (!frame.info) frame.info = &fn_info(fn, frame.mir_fn);
+    if (!frame.mir_fn) frame.mir_fn = frame.info->mir_fn;
 
-    const uint32_t* pc = code_base + frame.pc;
+    const BytecodeWord* pc = code_base + frame.pc;
     uint64_t* const registers = frame.registers;
-    uint32_t inst = *pc;
+    BytecodeWord inst = *pc;
+
+    // Loop bookkeeping happens at backward branches only: the instruction
+    // budget is charged by the loop's length, and the function's backedge
+    // counter (or the OSR coordinator, when enabled) is told.
+    const uint64_t insn_limit = max_instructions_ > 0 ? max_instructions_ : ~uint64_t{0};
+    const bool osr_on = frame.mir_fn != nullptr && runtime::OsrCoordinator::instance().is_enabled();
+    runtime::TieringFeedback* const feedback = &frame.info->tiering();
+
+#define RA registers[decode_a(inst)]
+#define RB registers[decode_b(inst)]
+#define RC registers[decode_c(inst)]
+
+#define BACKEDGE(off)                                                                         \
+    do {                                                                                      \
+        total_instructions_executed_ += static_cast<uint64_t>(-static_cast<int64_t>(off)) + 1; \
+        if (BRASS_UNLIKELY(total_instructions_executed_ > insn_limit)) throw_instruction_limit(); \
+        if (BRASS_UNLIKELY(osr_on)) {                                                         \
+            RuntimeValue osr_res_;                                                            \
+            const uint32_t target_pc_ = static_cast<uint32_t>((pc - code_base) + (off));      \
+            if (handle_osr_backedge(frame, target_pc_, osr_res_)) return osr_res_;            \
+        } else {                                                                              \
+            feedback->count_backedge_fast();                                                  \
+        }                                                                                     \
+    } while (0)
 
 #if defined(__GNUC__) || defined(__clang__)
 #define BRASS_DIRECT_THREADED 1
     static void* dispatch_table[256];
     static bool table_inited = false;
     if (BRASS_UNLIKELY(!table_inited)) {
-        for (size_t i = 0; i < 256; ++i) dispatch_table[i] = &&do_unreachable;
+        for (size_t i = 0; i < 256; ++i) dispatch_table[i] = &&do_invalid_op;
 #define TENTRY(op) dispatch_table[static_cast<size_t>(BytecodeOp::op)] = &&do_##op
-        TENTRY(nop); TENTRY(unreachable); TENTRY(iconst32); TENTRY(iconst64);
-        TENTRY(fconst32); TENTRY(fconst64); TENTRY(load_const);
+        TENTRY(nop); TENTRY(unreachable); TENTRY(iconst32); TENTRY(load_const);
         TENTRY(patchable_const32); TENTRY(patchable_const64);
         TENTRY(mov); TENTRY(mov_imm); TENTRY(sext64); TENTRY(zext64);
         TENTRY(trunc32); TENTRY(trunc8); TENTRY(fptosi32); TENTRY(fptosi64);
@@ -120,8 +100,7 @@ RuntimeValue FastInterpreter::execute_frame(FastFrame& frame) {
         TENTRY(gt_f32); TENTRY(gt_f64); TENTRY(sge_i32); TENTRY(sge_i64);
         TENTRY(uge_i32); TENTRY(uge_i64); TENTRY(ge_f32); TENTRY(ge_f64);
         TENTRY(select); TENTRY(load8); TENTRY(load16); TENTRY(load32); TENTRY(load64);
-        TENTRY(store8); TENTRY(store16); TENTRY(store32); TENTRY(store64);
-        TENTRY(alloca_); TENTRY(load_indexed); TENTRY(store_indexed);
+        TENTRY(store8); TENTRY(store16); TENTRY(store32); TENTRY(store64); TENTRY(alloca_);
         TENTRY(jump); TENTRY(jump_if); TENTRY(jump_if_not);
         TENTRY(ret); TENTRY(ret_void); TENTRY(switch_);
         TENTRY(call); TENTRY(call_indirect); TENTRY(patchable_call); TENTRY(func_addr);
@@ -133,783 +112,459 @@ RuntimeValue FastInterpreter::execute_frame(FastFrame& frame) {
         TENTRY(vmin); TENTRY(vmax); TENTRY(vsqrt); TENTRY(vand); TENTRY(vor); TENTRY(vxor);
         TENTRY(vnot); TENTRY(vload); TENTRY(vstore); TENTRY(vbroadcast);
         TENTRY(vextract_lane); TENTRY(vinsert_lane); TENTRY(vshuffle); TENTRY(vzero);
+        TENTRY(vmov); TENTRY(index_addr);
+        TENTRY(br_eq_i32); TENTRY(br_ne_i32); TENTRY(br_slt_i32); TENTRY(br_sle_i32);
+        TENTRY(br_ult_i32); TENTRY(br_ule_i32); TENTRY(br_eq_i64); TENTRY(br_ne_i64);
+        TENTRY(br_slt_i64); TENTRY(br_sle_i64); TENTRY(br_ult_i64); TENTRY(br_ule_i64);
+        TENTRY(add_imm_i32); TENTRY(add_imm_i64);
 #undef TENTRY
         table_inited = true;
     }
 
 #define OP_CASE(name) do_##name:
-#define DISPATCH() do { \
-    ++total_instructions_executed_; \
-    if (BRASS_UNLIKELY(max_instructions_ > 0 && total_instructions_executed_ > max_instructions_)) { \
-        throw InterpreterException("Maximum instruction execution count exceeded (" + std::to_string(max_instructions_) + ")"); \
-    } \
-    inst = *pc; \
-    goto *dispatch_table[inst & 0xFF]; \
-} while (0)
-
-    goto *dispatch_table[inst & 0xFF];
-
+#define DISPATCH() do { inst = *pc; goto *dispatch_table[inst & 0xFF]; } while (0)
+    DISPATCH();
 #else
 #define BRASS_DIRECT_THREADED 0
 #define OP_CASE(name) case BytecodeOp::name:
-#define DISPATCH() do { \
-    ++total_instructions_executed_; \
-    if (BRASS_UNLIKELY(max_instructions_ > 0 && total_instructions_executed_ > max_instructions_)) { \
-        throw InterpreterException("Maximum instruction execution count exceeded (" + std::to_string(max_instructions_) + ")"); \
-    } \
-    goto loop_start; \
-} while (0)
+#define DISPATCH() goto loop_start
 
 loop_start:
     inst = *pc;
     switch (decode_op(inst))
 #endif
     {
-        OP_CASE(nop) { pc++; DISPATCH(); }
+#define NEXT() do { ++pc; DISPATCH(); } while (0)
+#define JUMP_BY(off) do { const int32_t o_ = (off); if (o_ <= 0) BACKEDGE(o_); pc += o_; DISPATCH(); } while (0)
+#define UN(name, expr) OP_CASE(name) { const uint64_t x = RB; RA = (expr); NEXT(); }
+#define BIN(name, T, expr) OP_CASE(name) { const T a = static_cast<T>(RB); const T b = static_cast<T>(RC); RA = (expr); NEXT(); }
+#define BIN_F32(name, expr) OP_CASE(name) { const float a = get_f32(RB); const float b = get_f32(RC); RA = put_f32(expr); NEXT(); }
+#define BIN_F64(name, expr) OP_CASE(name) { const double a = get_f64(RB); const double b = get_f64(RC); RA = put_f64(expr); NEXT(); }
+#define CMP(name, T, op) OP_CASE(name) { RA = (static_cast<T>(RB) op static_cast<T>(RC)) ? 1 : 0; NEXT(); }
+#define CMP_F32(name, op) OP_CASE(name) { RA = (get_f32(RB) op get_f32(RC)) ? 1 : 0; NEXT(); }
+#define CMP_F64(name, op) OP_CASE(name) { RA = (get_f64(RB) op get_f64(RC)) ? 1 : 0; NEXT(); }
+#define BRANCH(name, T, op) OP_CASE(name) { if (static_cast<T>(RA) op static_cast<T>(RB)) JUMP_BY(decode_imm24(inst)); NEXT(); }
+#define LOAD(name, T) OP_CASE(name) { T v_; std::memcpy(&v_, reinterpret_cast<const void*>(RB + static_cast<int64_t>(decode_imm24(inst))), sizeof(T)); RA = static_cast<uint64_t>(v_); NEXT(); }
+#define STORE(name, T) OP_CASE(name) { const T v_ = static_cast<T>(RA); std::memcpy(reinterpret_cast<void*>(RB + static_cast<int64_t>(decode_imm24(inst))), &v_, sizeof(T)); NEXT(); }
+
+        OP_CASE(nop) { NEXT(); }
         OP_CASE(unreachable) { throw InterpreterException("Execution reached unreachable instruction"); }
 
-        OP_CASE(iconst32) { registers[decode_dst(inst)] = static_cast<uint64_t>(decode_u16(inst)); pc++; DISPATCH(); }
-        OP_CASE(iconst64) { registers[decode_dst(inst)] = static_cast<uint64_t>(decode_u16(inst)); pc++; DISPATCH(); }
-        OP_CASE(fconst32) { registers[decode_dst(inst)] = static_cast<uint64_t>(decode_u16(inst)); pc++; DISPATCH(); }
-        OP_CASE(fconst64) { registers[decode_dst(inst)] = static_cast<uint64_t>(decode_u16(inst)); pc++; DISPATCH(); }
-        OP_CASE(load_const) { registers[decode_dst(inst)] = fn.constants[decode_u16(inst)]; pc++; DISPATCH(); }
-
+        OP_CASE(iconst32) { RA = decode_uimm32(inst); NEXT(); }
+        OP_CASE(load_const) { RA = fn.constants[decode_uimm32(inst)]; NEXT(); }
         OP_CASE(patchable_const32) {
-            uint16_t s_idx = decode_u16(inst);
-            const std::string& sym = fn.string_pool[s_idx];
-            int64_t v = get_patched_const(sym, 0);
-            registers[decode_dst(inst)] = static_cast<uint64_t>(static_cast<uint32_t>(static_cast<int32_t>(v)));
-            pc++;
-            DISPATCH();
+            const PatchConstSite& site = fn.patch_consts[decode_uimm32(inst)];
+            RA = static_cast<uint32_t>(get_patched_const(site.symbol, site.default_value));
+            NEXT();
         }
-
         OP_CASE(patchable_const64) {
-            uint16_t s_idx = decode_u16(inst);
-            const std::string& sym = fn.string_pool[s_idx];
-            int64_t v = get_patched_const(sym, 0);
-            registers[decode_dst(inst)] = static_cast<uint64_t>(v);
-            pc++;
-            DISPATCH();
+            const PatchConstSite& site = fn.patch_consts[decode_uimm32(inst)];
+            RA = static_cast<uint64_t>(get_patched_const(site.symbol, site.default_value));
+            NEXT();
         }
 
-        OP_CASE(mov) { registers[decode_dst(inst)] = registers[decode_src1(inst)]; pc++; DISPATCH(); }
-        OP_CASE(mov_imm) { registers[decode_dst(inst)] = static_cast<uint64_t>(static_cast<int64_t>(decode_s16(inst))); pc++; DISPATCH(); }
-        OP_CASE(sext64) { registers[decode_dst(inst)] = static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(registers[decode_src1(inst)]))); pc++; DISPATCH(); }
-        OP_CASE(zext64) { registers[decode_dst(inst)] = static_cast<uint64_t>(static_cast<uint32_t>(registers[decode_src1(inst)])); pc++; DISPATCH(); }
-        OP_CASE(trunc32) { registers[decode_dst(inst)] = static_cast<uint64_t>(static_cast<uint32_t>(registers[decode_src1(inst)])); pc++; DISPATCH(); }
-        OP_CASE(trunc8) { registers[decode_dst(inst)] = static_cast<uint64_t>(static_cast<uint8_t>(registers[decode_src1(inst)])); pc++; DISPATCH(); }
-        OP_CASE(fptosi32) { registers[decode_dst(inst)] = static_cast<uint64_t>(static_cast<uint32_t>(static_cast<int32_t>(get_f64(registers[decode_src1(inst)])))); pc++; DISPATCH(); }
-        OP_CASE(fptosi64) { registers[decode_dst(inst)] = static_cast<uint64_t>(static_cast<int64_t>(get_f64(registers[decode_src1(inst)]))); pc++; DISPATCH(); }
-        OP_CASE(fptosi32_f32) { registers[decode_dst(inst)] = static_cast<uint64_t>(static_cast<uint32_t>(static_cast<int32_t>(get_f32(registers[decode_src1(inst)])))); pc++; DISPATCH(); }
-        OP_CASE(fptosi64_f32) { registers[decode_dst(inst)] = static_cast<uint64_t>(static_cast<int64_t>(get_f32(registers[decode_src1(inst)]))); pc++; DISPATCH(); }
-        OP_CASE(sitofp_f64) { registers[decode_dst(inst)] = put_f64(static_cast<double>(static_cast<int32_t>(registers[decode_src1(inst)]))); pc++; DISPATCH(); }
-        OP_CASE(sitofp_f32) { registers[decode_dst(inst)] = put_f32(static_cast<float>(static_cast<int32_t>(registers[decode_src1(inst)]))); pc++; DISPATCH(); }
-        OP_CASE(sitofp_f64_i64) { registers[decode_dst(inst)] = put_f64(static_cast<double>(static_cast<int64_t>(registers[decode_src1(inst)]))); pc++; DISPATCH(); }
-        OP_CASE(sitofp_f32_i64) { registers[decode_dst(inst)] = put_f32(static_cast<float>(static_cast<int64_t>(registers[decode_src1(inst)]))); pc++; DISPATCH(); }
-        OP_CASE(fptrunc_f32) { registers[decode_dst(inst)] = put_f32(static_cast<float>(get_f64(registers[decode_src1(inst)]))); pc++; DISPATCH(); }
-        OP_CASE(fpext_f64) { registers[decode_dst(inst)] = put_f64(static_cast<double>(get_f32(registers[decode_src1(inst)]))); pc++; DISPATCH(); }
-        OP_CASE(bitcast_i64_f64) { registers[decode_dst(inst)] = registers[decode_src1(inst)]; pc++; DISPATCH(); }
-        OP_CASE(bitcast_f64_i64) { registers[decode_dst(inst)] = registers[decode_src1(inst)]; pc++; DISPATCH(); }
+        OP_CASE(mov) { RA = RB; NEXT(); }
+        OP_CASE(vmov) {
+            RA = RB;
+            if (frame.vector_regs) {
+                std::memcpy(frame.vector_regs + static_cast<size_t>(decode_a(inst)) * kFastVecBytes,
+                            frame.vector_regs + static_cast<size_t>(decode_b(inst)) * kFastVecBytes, kFastVecBytes);
+            }
+            NEXT();
+        }
+        OP_CASE(mov_imm) { RA = static_cast<uint64_t>(static_cast<int64_t>(decode_imm32(inst))); NEXT(); }
 
-        OP_CASE(add_i32) { registers[decode_dst(inst)] = static_cast<uint32_t>(static_cast<uint32_t>(registers[decode_src1(inst)]) + static_cast<uint32_t>(registers[decode_src2(inst)])); pc++; DISPATCH(); }
-        OP_CASE(add_i64) { registers[decode_dst(inst)] = registers[decode_src1(inst)] + registers[decode_src2(inst)]; pc++; DISPATCH(); }
-        OP_CASE(sub_i32) { registers[decode_dst(inst)] = static_cast<uint32_t>(static_cast<uint32_t>(registers[decode_src1(inst)]) - static_cast<uint32_t>(registers[decode_src2(inst)])); pc++; DISPATCH(); }
-        OP_CASE(sub_i64) { registers[decode_dst(inst)] = registers[decode_src1(inst)] - registers[decode_src2(inst)]; pc++; DISPATCH(); }
-        OP_CASE(mul_i32) { registers[decode_dst(inst)] = static_cast<uint32_t>(static_cast<uint32_t>(registers[decode_src1(inst)]) * static_cast<uint32_t>(registers[decode_src2(inst)])); pc++; DISPATCH(); }
-        OP_CASE(mul_i64) { registers[decode_dst(inst)] = registers[decode_src1(inst)] * registers[decode_src2(inst)]; pc++; DISPATCH(); }
+        UN(sext64, static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(x))))
+        UN(zext64, static_cast<uint32_t>(x))
+        UN(trunc32, static_cast<uint32_t>(x))
+        UN(trunc8, static_cast<uint8_t>(x))
+        UN(fptosi32, static_cast<uint32_t>(static_cast<int32_t>(get_f64(x))))
+        UN(fptosi64, static_cast<uint64_t>(static_cast<int64_t>(get_f64(x))))
+        UN(fptosi32_f32, static_cast<uint32_t>(static_cast<int32_t>(get_f32(x))))
+        UN(fptosi64_f32, static_cast<uint64_t>(static_cast<int64_t>(get_f32(x))))
+        UN(sitofp_f64, put_f64(static_cast<double>(static_cast<int32_t>(x))))
+        UN(sitofp_f32, put_f32(static_cast<float>(static_cast<int32_t>(x))))
+        UN(sitofp_f64_i64, put_f64(static_cast<double>(static_cast<int64_t>(x))))
+        UN(sitofp_f32_i64, put_f32(static_cast<float>(static_cast<int64_t>(x))))
+        UN(fptrunc_f32, put_f32(static_cast<float>(get_f64(x))))
+        UN(fpext_f64, put_f64(static_cast<double>(get_f32(x))))
+        UN(bitcast_i64_f64, x)
+        UN(bitcast_f64_i64, x)
+
+        BIN(add_i32, uint32_t, static_cast<uint32_t>(a + b))
+        BIN(add_i64, uint64_t, a + b)
+        BIN(sub_i32, uint32_t, static_cast<uint32_t>(a - b))
+        BIN(sub_i64, uint64_t, a - b)
+        BIN(mul_i32, uint32_t, static_cast<uint32_t>(a * b))
+        BIN(mul_i64, uint64_t, a * b)
+        OP_CASE(add_imm_i32) { RA = static_cast<uint32_t>(static_cast<uint32_t>(RB) + static_cast<uint32_t>(decode_imm24(inst))); NEXT(); }
+        OP_CASE(add_imm_i64) { RA = RB + static_cast<uint64_t>(static_cast<int64_t>(decode_imm24(inst))); NEXT(); }
+        OP_CASE(index_addr) { RA = RB + RC * decode_d(inst); NEXT(); }
 
         OP_CASE(sdiv_i32) {
-            int32_t b = static_cast<int32_t>(registers[decode_src2(inst)]);
+            const int32_t b = static_cast<int32_t>(RC);
             if (BRASS_UNLIKELY(b == 0)) throw InterpreterException("Division by zero");
-            int32_t a = static_cast<int32_t>(registers[decode_src1(inst)]);
-            registers[decode_dst(inst)] = (BRASS_UNLIKELY(a == std::numeric_limits<int32_t>::min() && b == -1)) ? static_cast<uint32_t>(a) : static_cast<uint32_t>(a / b);
-            pc++;
-            DISPATCH();
+            const int32_t a = static_cast<int32_t>(RB);
+            RA = (BRASS_UNLIKELY(a == std::numeric_limits<int32_t>::min() && b == -1)) ? static_cast<uint32_t>(a) : static_cast<uint32_t>(a / b);
+            NEXT();
         }
-
         OP_CASE(sdiv_i64) {
-            int64_t b = static_cast<int64_t>(registers[decode_src2(inst)]);
+            const int64_t b = static_cast<int64_t>(RC);
             if (BRASS_UNLIKELY(b == 0)) throw InterpreterException("Division by zero");
-            int64_t a = static_cast<int64_t>(registers[decode_src1(inst)]);
-            registers[decode_dst(inst)] = (BRASS_UNLIKELY(a == std::numeric_limits<int64_t>::min() && b == -1)) ? static_cast<uint64_t>(a) : static_cast<uint64_t>(a / b);
-            pc++;
-            DISPATCH();
+            const int64_t a = static_cast<int64_t>(RB);
+            RA = (BRASS_UNLIKELY(a == std::numeric_limits<int64_t>::min() && b == -1)) ? static_cast<uint64_t>(a) : static_cast<uint64_t>(a / b);
+            NEXT();
         }
-
         OP_CASE(udiv_i32) {
-            uint32_t b = static_cast<uint32_t>(registers[decode_src2(inst)]);
+            const uint32_t b = static_cast<uint32_t>(RC);
             if (BRASS_UNLIKELY(b == 0)) throw InterpreterException("Division by zero");
-            registers[decode_dst(inst)] = static_cast<uint32_t>(registers[decode_src1(inst)]) / b;
-            pc++;
-            DISPATCH();
+            RA = static_cast<uint32_t>(RB) / b;
+            NEXT();
         }
-
         OP_CASE(udiv_i64) {
-            uint64_t b = registers[decode_src2(inst)];
+            const uint64_t b = RC;
             if (BRASS_UNLIKELY(b == 0)) throw InterpreterException("Division by zero");
-            registers[decode_dst(inst)] = registers[decode_src1(inst)] / b;
-            pc++;
-            DISPATCH();
+            RA = RB / b;
+            NEXT();
         }
-
         OP_CASE(smod_i32) {
-            int32_t b = static_cast<int32_t>(registers[decode_src2(inst)]);
+            const int32_t b = static_cast<int32_t>(RC);
             if (BRASS_UNLIKELY(b == 0)) throw InterpreterException("Modulo by zero");
-            int32_t a = static_cast<int32_t>(registers[decode_src1(inst)]);
-            registers[decode_dst(inst)] = (BRASS_UNLIKELY(a == std::numeric_limits<int32_t>::min() && b == -1)) ? 0 : static_cast<uint32_t>(a % b);
-            pc++;
-            DISPATCH();
+            const int32_t a = static_cast<int32_t>(RB);
+            RA = (BRASS_UNLIKELY(a == std::numeric_limits<int32_t>::min() && b == -1)) ? 0 : static_cast<uint32_t>(a % b);
+            NEXT();
         }
-
         OP_CASE(smod_i64) {
-            int64_t b = static_cast<int64_t>(registers[decode_src2(inst)]);
+            const int64_t b = static_cast<int64_t>(RC);
             if (BRASS_UNLIKELY(b == 0)) throw InterpreterException("Modulo by zero");
-            int64_t a = static_cast<int64_t>(registers[decode_src1(inst)]);
-            registers[decode_dst(inst)] = (BRASS_UNLIKELY(a == std::numeric_limits<int64_t>::min() && b == -1)) ? 0 : static_cast<uint64_t>(a % b);
-            pc++;
-            DISPATCH();
+            const int64_t a = static_cast<int64_t>(RB);
+            RA = (BRASS_UNLIKELY(a == std::numeric_limits<int64_t>::min() && b == -1)) ? 0 : static_cast<uint64_t>(a % b);
+            NEXT();
         }
-
         OP_CASE(umod_i32) {
-            uint32_t b = static_cast<uint32_t>(registers[decode_src2(inst)]);
+            const uint32_t b = static_cast<uint32_t>(RC);
             if (BRASS_UNLIKELY(b == 0)) throw InterpreterException("Modulo by zero");
-            registers[decode_dst(inst)] = static_cast<uint32_t>(registers[decode_src1(inst)]) % b;
-            pc++;
-            DISPATCH();
+            RA = static_cast<uint32_t>(RB) % b;
+            NEXT();
         }
-
         OP_CASE(umod_i64) {
-            uint64_t b = registers[decode_src2(inst)];
+            const uint64_t b = RC;
             if (BRASS_UNLIKELY(b == 0)) throw InterpreterException("Modulo by zero");
-            registers[decode_dst(inst)] = registers[decode_src1(inst)] % b;
-            pc++;
-            DISPATCH();
+            RA = RB % b;
+            NEXT();
         }
 
-        OP_CASE(neg_i32) { registers[decode_dst(inst)] = static_cast<uint32_t>(-static_cast<int32_t>(registers[decode_src1(inst)])); pc++; DISPATCH(); }
-        OP_CASE(neg_i64) { registers[decode_dst(inst)] = static_cast<uint64_t>(-static_cast<int64_t>(registers[decode_src1(inst)])); pc++; DISPATCH(); }
+        UN(neg_i32, static_cast<uint32_t>(0u - static_cast<uint32_t>(x)))
+        UN(neg_i64, 0ull - x)
 
-        OP_CASE(add_f32) { registers[decode_dst(inst)] = put_f32(get_f32(registers[decode_src1(inst)]) + get_f32(registers[decode_src2(inst)])); pc++; DISPATCH(); }
-        OP_CASE(add_f64) { registers[decode_dst(inst)] = put_f64(get_f64(registers[decode_src1(inst)]) + get_f64(registers[decode_src2(inst)])); pc++; DISPATCH(); }
-        OP_CASE(sub_f32) { registers[decode_dst(inst)] = put_f32(get_f32(registers[decode_src1(inst)]) - get_f32(registers[decode_src2(inst)])); pc++; DISPATCH(); }
-        OP_CASE(sub_f64) { registers[decode_dst(inst)] = put_f64(get_f64(registers[decode_src1(inst)]) - get_f64(registers[decode_src2(inst)])); pc++; DISPATCH(); }
-        OP_CASE(mul_f32) { registers[decode_dst(inst)] = put_f32(get_f32(registers[decode_src1(inst)]) * get_f32(registers[decode_src2(inst)])); pc++; DISPATCH(); }
-        OP_CASE(mul_f64) { registers[decode_dst(inst)] = put_f64(get_f64(registers[decode_src1(inst)]) * get_f64(registers[decode_src2(inst)])); pc++; DISPATCH(); }
-        OP_CASE(fdiv_f32) { registers[decode_dst(inst)] = put_f32(get_f32(registers[decode_src1(inst)]) / get_f32(registers[decode_src2(inst)])); pc++; DISPATCH(); }
-        OP_CASE(fdiv_f64) { registers[decode_dst(inst)] = put_f64(get_f64(registers[decode_src1(inst)]) / get_f64(registers[decode_src2(inst)])); pc++; DISPATCH(); }
-        OP_CASE(neg_f32) { registers[decode_dst(inst)] = put_f32(-get_f32(registers[decode_src1(inst)])); pc++; DISPATCH(); }
-        OP_CASE(neg_f64) { registers[decode_dst(inst)] = put_f64(-get_f64(registers[decode_src1(inst)])); pc++; DISPATCH(); }
-        OP_CASE(fma_f32) { registers[decode_dst(inst)] = put_f32(std::fma(get_f32(registers[decode_src1(inst)]), get_f32(registers[decode_src2(inst)]), get_f32(registers[decode_dst(inst)]))); pc++; DISPATCH(); }
-        OP_CASE(fma_f64) { registers[decode_dst(inst)] = put_f64(std::fma(get_f64(registers[decode_src1(inst)]), get_f64(registers[decode_src2(inst)]), get_f64(registers[decode_dst(inst)]))); pc++; DISPATCH(); }
-        OP_CASE(sqrt_f32) { registers[decode_dst(inst)] = put_f32(std::sqrt(get_f32(registers[decode_src1(inst)]))); pc++; DISPATCH(); }
-        OP_CASE(sqrt_f64) { registers[decode_dst(inst)] = put_f64(std::sqrt(get_f64(registers[decode_src1(inst)]))); pc++; DISPATCH(); }
-        OP_CASE(fabs_f32) { registers[decode_dst(inst)] = put_f32(std::fabs(get_f32(registers[decode_src1(inst)]))); pc++; DISPATCH(); }
-        OP_CASE(fabs_f64) { registers[decode_dst(inst)] = put_f64(std::fabs(get_f64(registers[decode_src1(inst)]))); pc++; DISPATCH(); }
-        OP_CASE(floor_f32) { registers[decode_dst(inst)] = put_f32(std::floor(get_f32(registers[decode_src1(inst)]))); pc++; DISPATCH(); }
-        OP_CASE(floor_f64) { registers[decode_dst(inst)] = put_f64(std::floor(get_f64(registers[decode_src1(inst)]))); pc++; DISPATCH(); }
-        OP_CASE(ceil_f32) { registers[decode_dst(inst)] = put_f32(std::ceil(get_f32(registers[decode_src1(inst)]))); pc++; DISPATCH(); }
-        OP_CASE(ceil_f64) { registers[decode_dst(inst)] = put_f64(std::ceil(get_f64(registers[decode_src1(inst)]))); pc++; DISPATCH(); }
-        OP_CASE(round_f32) { registers[decode_dst(inst)] = put_f32(std::round(get_f32(registers[decode_src1(inst)]))); pc++; DISPATCH(); }
-        OP_CASE(round_f64) { registers[decode_dst(inst)] = put_f64(std::round(get_f64(registers[decode_src1(inst)]))); pc++; DISPATCH(); }
-        OP_CASE(fmin_f32) { registers[decode_dst(inst)] = put_f32(std::fmin(get_f32(registers[decode_src1(inst)]), get_f32(registers[decode_src2(inst)]))); pc++; DISPATCH(); }
-        OP_CASE(fmin_f64) { registers[decode_dst(inst)] = put_f64(std::fmin(get_f64(registers[decode_src1(inst)]), get_f64(registers[decode_src2(inst)]))); pc++; DISPATCH(); }
-        OP_CASE(fmax_f32) { registers[decode_dst(inst)] = put_f32(std::fmax(get_f32(registers[decode_src1(inst)]), get_f32(registers[decode_src2(inst)]))); pc++; DISPATCH(); }
-        OP_CASE(fmax_f64) { registers[decode_dst(inst)] = put_f64(std::fmax(get_f64(registers[decode_src1(inst)]), get_f64(registers[decode_src2(inst)]))); pc++; DISPATCH(); }
+        BIN_F32(add_f32, a + b)
+        BIN_F64(add_f64, a + b)
+        BIN_F32(sub_f32, a - b)
+        BIN_F64(sub_f64, a - b)
+        BIN_F32(mul_f32, a * b)
+        BIN_F64(mul_f64, a * b)
+        BIN_F32(fdiv_f32, a / b)
+        BIN_F64(fdiv_f64, a / b)
+        UN(neg_f32, put_f32(-get_f32(x)))
+        UN(neg_f64, put_f64(-get_f64(x)))
+        // dst already holds the addend.
+        OP_CASE(fma_f32) { RA = put_f32(std::fma(get_f32(RB), get_f32(RC), get_f32(RA))); NEXT(); }
+        OP_CASE(fma_f64) { RA = put_f64(std::fma(get_f64(RB), get_f64(RC), get_f64(RA))); NEXT(); }
+        UN(sqrt_f32, put_f32(std::sqrt(get_f32(x))))
+        UN(sqrt_f64, put_f64(std::sqrt(get_f64(x))))
+        UN(fabs_f32, put_f32(std::fabs(get_f32(x))))
+        UN(fabs_f64, put_f64(std::fabs(get_f64(x))))
+        UN(floor_f32, put_f32(std::floor(get_f32(x))))
+        UN(floor_f64, put_f64(std::floor(get_f64(x))))
+        UN(ceil_f32, put_f32(std::ceil(get_f32(x))))
+        UN(ceil_f64, put_f64(std::ceil(get_f64(x))))
+        UN(round_f32, put_f32(std::round(get_f32(x))))
+        UN(round_f64, put_f64(std::round(get_f64(x))))
+        BIN_F32(fmin_f32, std::fmin(a, b))
+        BIN_F64(fmin_f64, std::fmin(a, b))
+        BIN_F32(fmax_f32, std::fmax(a, b))
+        BIN_F64(fmax_f64, std::fmax(a, b))
 
-        OP_CASE(sadd_overflow_i32) {
-            int32_t a = static_cast<int32_t>(registers[decode_src1(inst)]);
-            int32_t b = static_cast<int32_t>(registers[decode_src2(inst)]);
-            int64_t sum = static_cast<int64_t>(a) + static_cast<int64_t>(b);
-            registers[decode_dst(inst)] = (sum < INT32_MIN || sum > INT32_MAX) ? 1 : 0;
-            pc++;
-            DISPATCH();
-        }
-
-        OP_CASE(sadd_overflow_i64) {
-            int64_t a = static_cast<int64_t>(registers[decode_src1(inst)]);
-            int64_t b = static_cast<int64_t>(registers[decode_src2(inst)]);
-            registers[decode_dst(inst)] = ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b)) ? 1 : 0;
-            pc++;
-            DISPATCH();
-        }
-
-        OP_CASE(ssub_overflow_i32) {
-            int32_t a = static_cast<int32_t>(registers[decode_src1(inst)]);
-            int32_t b = static_cast<int32_t>(registers[decode_src2(inst)]);
-            int64_t diff = static_cast<int64_t>(a) - static_cast<int64_t>(b);
-            registers[decode_dst(inst)] = (diff < INT32_MIN || diff > INT32_MAX) ? 1 : 0;
-            pc++;
-            DISPATCH();
-        }
-
-        OP_CASE(ssub_overflow_i64) {
-            int64_t a = static_cast<int64_t>(registers[decode_src1(inst)]);
-            int64_t b = static_cast<int64_t>(registers[decode_src2(inst)]);
-            registers[decode_dst(inst)] = ((b < 0 && a > INT64_MAX + b) || (b > 0 && a < INT64_MIN + b)) ? 1 : 0;
-            pc++;
-            DISPATCH();
-        }
-
-        OP_CASE(smul_overflow_i32) {
-            int32_t a = static_cast<int32_t>(registers[decode_src1(inst)]);
-            int32_t b = static_cast<int32_t>(registers[decode_src2(inst)]);
-            int64_t prod = static_cast<int64_t>(a) * static_cast<int64_t>(b);
-            registers[decode_dst(inst)] = (prod < INT32_MIN || prod > INT32_MAX) ? 1 : 0;
-            pc++;
-            DISPATCH();
-        }
-
+        BIN(sadd_overflow_i32, int32_t, (static_cast<int64_t>(a) + b < INT32_MIN || static_cast<int64_t>(a) + b > INT32_MAX) ? 1 : 0)
+        BIN(ssub_overflow_i32, int32_t, (static_cast<int64_t>(a) - b < INT32_MIN || static_cast<int64_t>(a) - b > INT32_MAX) ? 1 : 0)
+        BIN(smul_overflow_i32, int32_t, (static_cast<int64_t>(a) * b < INT32_MIN || static_cast<int64_t>(a) * b > INT32_MAX) ? 1 : 0)
+        BIN(sadd_overflow_i64, int64_t, ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b)) ? 1 : 0)
+        BIN(ssub_overflow_i64, int64_t, ((b < 0 && a > INT64_MAX + b) || (b > 0 && a < INT64_MIN + b)) ? 1 : 0)
         OP_CASE(smul_overflow_i64) {
-            int64_t a = static_cast<int64_t>(registers[decode_src1(inst)]);
-            int64_t b = static_cast<int64_t>(registers[decode_src2(inst)]);
-#if defined(__GNUC__) || defined(__clang__)
             int64_t res = 0;
-            registers[decode_dst(inst)] = __builtin_mul_overflow(a, b, &res) ? 1 : 0;
-#else
-            if (a == 0 || b == 0) registers[decode_dst(inst)] = 0;
-            else if (a == -1 && b == INT64_MIN) registers[decode_dst(inst)] = 1;
-            else if (b == -1 && a == INT64_MIN) registers[decode_dst(inst)] = 1;
-            else if (a > 0 && b > 0 && a > INT64_MAX / b) registers[decode_dst(inst)] = 1;
-            else if (a > 0 && b < 0 && b < INT64_MIN / a) registers[decode_dst(inst)] = 1;
-            else if (a < 0 && b > 0 && a < INT64_MIN / b) registers[decode_dst(inst)] = 1;
-            else if (a < 0 && b < 0 && a < INT64_MAX / b) registers[decode_dst(inst)] = 1;
-            else registers[decode_dst(inst)] = 0;
-#endif
-            pc++;
-            DISPATCH();
+            RA = mul_overflows(static_cast<int64_t>(RB), static_cast<int64_t>(RC), res) ? 1 : 0;
+            NEXT();
         }
-
-        OP_CASE(uadd_overflow_i32) { registers[decode_dst(inst)] = (static_cast<uint32_t>(registers[decode_src1(inst)]) + static_cast<uint32_t>(registers[decode_src2(inst)]) < static_cast<uint32_t>(registers[decode_src1(inst)])) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(uadd_overflow_i64) { registers[decode_dst(inst)] = (registers[decode_src1(inst)] + registers[decode_src2(inst)] < registers[decode_src1(inst)]) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(usub_overflow_i32) { registers[decode_dst(inst)] = (static_cast<uint32_t>(registers[decode_src1(inst)]) < static_cast<uint32_t>(registers[decode_src2(inst)])) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(usub_overflow_i64) { registers[decode_dst(inst)] = (registers[decode_src1(inst)] < registers[decode_src2(inst)]) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(umul_overflow_i32) { registers[decode_dst(inst)] = (static_cast<uint64_t>(static_cast<uint32_t>(registers[decode_src1(inst)])) * static_cast<uint64_t>(static_cast<uint32_t>(registers[decode_src2(inst)])) > UINT32_MAX) ? 1 : 0; pc++; DISPATCH(); }
-
+        BIN(uadd_overflow_i32, uint32_t, static_cast<uint32_t>(a + b) < a ? 1 : 0)
+        BIN(uadd_overflow_i64, uint64_t, a + b < a ? 1 : 0)
+        BIN(usub_overflow_i32, uint32_t, a < b ? 1 : 0)
+        BIN(usub_overflow_i64, uint64_t, a < b ? 1 : 0)
+        BIN(umul_overflow_i32, uint64_t, (static_cast<uint32_t>(a) * static_cast<uint64_t>(static_cast<uint32_t>(b))) > UINT32_MAX ? 1 : 0)
         OP_CASE(umul_overflow_i64) {
-            uint64_t a = registers[decode_src1(inst)];
-            uint64_t b = registers[decode_src2(inst)];
-#if defined(__GNUC__) || defined(__clang__)
             uint64_t res = 0;
-            registers[decode_dst(inst)] = __builtin_mul_overflow(a, b, &res) ? 1 : 0;
-#else
-            if (a == 0 || b == 0) registers[decode_dst(inst)] = 0;
-            else registers[decode_dst(inst)] = ((a * b) / a != b) ? 1 : 0;
-#endif
-            pc++;
-            DISPATCH();
+            RA = mul_overflows(RB, RC, res) ? 1 : 0;
+            NEXT();
         }
 
-        OP_CASE(and_i32) { registers[decode_dst(inst)] = static_cast<uint32_t>(registers[decode_src1(inst)] & registers[decode_src2(inst)]); pc++; DISPATCH(); }
-        OP_CASE(and_i64) { registers[decode_dst(inst)] = registers[decode_src1(inst)] & registers[decode_src2(inst)]; pc++; DISPATCH(); }
-        OP_CASE(or_i32) { registers[decode_dst(inst)] = static_cast<uint32_t>(registers[decode_src1(inst)] | registers[decode_src2(inst)]); pc++; DISPATCH(); }
-        OP_CASE(or_i64) { registers[decode_dst(inst)] = registers[decode_src1(inst)] | registers[decode_src2(inst)]; pc++; DISPATCH(); }
-        OP_CASE(xor_i32) { registers[decode_dst(inst)] = static_cast<uint32_t>(registers[decode_src1(inst)] ^ registers[decode_src2(inst)]); pc++; DISPATCH(); }
-        OP_CASE(xor_i64) { registers[decode_dst(inst)] = registers[decode_src1(inst)] ^ registers[decode_src2(inst)]; pc++; DISPATCH(); }
-        OP_CASE(shl_i32) { registers[decode_dst(inst)] = static_cast<uint32_t>(static_cast<uint32_t>(registers[decode_src1(inst)]) << (registers[decode_src2(inst)] & 31)); pc++; DISPATCH(); }
-        OP_CASE(shl_i64) { registers[decode_dst(inst)] = registers[decode_src1(inst)] << (registers[decode_src2(inst)] & 63); pc++; DISPATCH(); }
-        OP_CASE(lshr_i32) { registers[decode_dst(inst)] = static_cast<uint32_t>(static_cast<uint32_t>(registers[decode_src1(inst)]) >> (registers[decode_src2(inst)] & 31)); pc++; DISPATCH(); }
-        OP_CASE(lshr_i64) { registers[decode_dst(inst)] = registers[decode_src1(inst)] >> (registers[decode_src2(inst)] & 63); pc++; DISPATCH(); }
-        OP_CASE(ashr_i32) { registers[decode_dst(inst)] = static_cast<uint32_t>(static_cast<int32_t>(registers[decode_src1(inst)]) >> (registers[decode_src2(inst)] & 31)); pc++; DISPATCH(); }
-        OP_CASE(ashr_i64) { registers[decode_dst(inst)] = static_cast<uint64_t>(static_cast<int64_t>(registers[decode_src1(inst)]) >> (registers[decode_src2(inst)] & 63)); pc++; DISPATCH(); }
-        OP_CASE(not_i32) { registers[decode_dst(inst)] = static_cast<uint32_t>(~static_cast<uint32_t>(registers[decode_src1(inst)])); pc++; DISPATCH(); }
-        OP_CASE(not_i64) { registers[decode_dst(inst)] = ~registers[decode_src1(inst)]; pc++; DISPATCH(); }
+        BIN(and_i32, uint64_t, static_cast<uint32_t>(a & b))
+        BIN(and_i64, uint64_t, a & b)
+        BIN(or_i32, uint64_t, static_cast<uint32_t>(a | b))
+        BIN(or_i64, uint64_t, a | b)
+        BIN(xor_i32, uint64_t, static_cast<uint32_t>(a ^ b))
+        BIN(xor_i64, uint64_t, a ^ b)
+        BIN(shl_i32, uint32_t, static_cast<uint32_t>(a << (b & 31)))
+        BIN(shl_i64, uint64_t, a << (b & 63))
+        BIN(lshr_i32, uint32_t, a >> (b & 31))
+        BIN(lshr_i64, uint64_t, a >> (b & 63))
+        BIN(ashr_i32, uint32_t, static_cast<uint32_t>(static_cast<int32_t>(a) >> (b & 31)))
+        BIN(ashr_i64, uint64_t, static_cast<uint64_t>(static_cast<int64_t>(a) >> (b & 63)))
+        UN(not_i32, static_cast<uint32_t>(~static_cast<uint32_t>(x)))
+        UN(not_i64, ~x)
+        UN(clz_i32, static_cast<uint64_t>(std::countl_zero(static_cast<uint32_t>(x))))
+        UN(clz_i64, static_cast<uint64_t>(std::countl_zero(x)))
+        UN(ctz_i32, static_cast<uint64_t>(std::countr_zero(static_cast<uint32_t>(x))))
+        UN(ctz_i64, static_cast<uint64_t>(std::countr_zero(x)))
+        UN(popcnt_i32, static_cast<uint64_t>(std::popcount(static_cast<uint32_t>(x))))
+        UN(popcnt_i64, static_cast<uint64_t>(std::popcount(x)))
 
-        OP_CASE(clz_i32) {
-            uint32_t val = static_cast<uint32_t>(registers[decode_src1(inst)]);
-            registers[decode_dst(inst)] = (val == 0) ? 32 : static_cast<uint32_t>(std::countl_zero(val));
-            pc++;
-            DISPATCH();
-        }
+        CMP(eq_i32, uint32_t, ==) CMP(eq_i64, uint64_t, ==) CMP_F32(eq_f32, ==) CMP_F64(eq_f64, ==)
+        CMP(ne_i32, uint32_t, !=) CMP(ne_i64, uint64_t, !=) CMP_F32(ne_f32, !=) CMP_F64(ne_f64, !=)
+        CMP(slt_i32, int32_t, <) CMP(slt_i64, int64_t, <) CMP(ult_i32, uint32_t, <) CMP(ult_i64, uint64_t, <)
+        CMP_F32(lt_f32, <) CMP_F64(lt_f64, <)
+        CMP(sle_i32, int32_t, <=) CMP(sle_i64, int64_t, <=) CMP(ule_i32, uint32_t, <=) CMP(ule_i64, uint64_t, <=)
+        CMP_F32(le_f32, <=) CMP_F64(le_f64, <=)
+        CMP(sgt_i32, int32_t, >) CMP(sgt_i64, int64_t, >) CMP(ugt_i32, uint32_t, >) CMP(ugt_i64, uint64_t, >)
+        CMP_F32(gt_f32, >) CMP_F64(gt_f64, >)
+        CMP(sge_i32, int32_t, >=) CMP(sge_i64, int64_t, >=) CMP(uge_i32, uint32_t, >=) CMP(uge_i64, uint64_t, >=)
+        CMP_F32(ge_f32, >=) CMP_F64(ge_f64, >=)
 
-        OP_CASE(clz_i64) {
-            uint64_t val = registers[decode_src1(inst)];
-            registers[decode_dst(inst)] = (val == 0) ? 64 : static_cast<uint64_t>(std::countl_zero(val));
-            pc++;
-            DISPATCH();
-        }
-
-        OP_CASE(ctz_i32) {
-            uint32_t val = static_cast<uint32_t>(registers[decode_src1(inst)]);
-            registers[decode_dst(inst)] = (val == 0) ? 32 : static_cast<uint32_t>(std::countr_zero(val));
-            pc++;
-            DISPATCH();
-        }
-
-        OP_CASE(ctz_i64) {
-            uint64_t val = registers[decode_src1(inst)];
-            registers[decode_dst(inst)] = (val == 0) ? 64 : static_cast<uint64_t>(std::countr_zero(val));
-            pc++;
-            DISPATCH();
-        }
-
-        OP_CASE(popcnt_i32) { registers[decode_dst(inst)] = static_cast<uint32_t>(std::popcount(static_cast<uint32_t>(registers[decode_src1(inst)]))); pc++; DISPATCH(); }
-        OP_CASE(popcnt_i64) { registers[decode_dst(inst)] = static_cast<uint64_t>(std::popcount(registers[decode_src1(inst)])); pc++; DISPATCH(); }
-
-        OP_CASE(eq_i32) { registers[decode_dst(inst)] = (static_cast<uint32_t>(registers[decode_src1(inst)]) == static_cast<uint32_t>(registers[decode_src2(inst)])) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(eq_i64) { registers[decode_dst(inst)] = (registers[decode_src1(inst)] == registers[decode_src2(inst)]) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(eq_f32) { registers[decode_dst(inst)] = (get_f32(registers[decode_src1(inst)]) == get_f32(registers[decode_src2(inst)])) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(eq_f64) { registers[decode_dst(inst)] = (get_f64(registers[decode_src1(inst)]) == get_f64(registers[decode_src2(inst)])) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(ne_i32) { registers[decode_dst(inst)] = (static_cast<uint32_t>(registers[decode_src1(inst)]) != static_cast<uint32_t>(registers[decode_src2(inst)])) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(ne_i64) { registers[decode_dst(inst)] = (registers[decode_src1(inst)] != registers[decode_src2(inst)]) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(ne_f32) { registers[decode_dst(inst)] = (get_f32(registers[decode_src1(inst)]) != get_f32(registers[decode_src2(inst)])) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(ne_f64) { registers[decode_dst(inst)] = (get_f64(registers[decode_src1(inst)]) != get_f64(registers[decode_src2(inst)])) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(slt_i32) { registers[decode_dst(inst)] = (static_cast<int32_t>(registers[decode_src1(inst)]) < static_cast<int32_t>(registers[decode_src2(inst)])) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(slt_i64) { registers[decode_dst(inst)] = (static_cast<int64_t>(registers[decode_src1(inst)]) < static_cast<int64_t>(registers[decode_src2(inst)])) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(ult_i32) { registers[decode_dst(inst)] = (static_cast<uint32_t>(registers[decode_src1(inst)]) < static_cast<uint32_t>(registers[decode_src2(inst)])) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(ult_i64) { registers[decode_dst(inst)] = (registers[decode_src1(inst)] < registers[decode_src2(inst)]) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(lt_f32) { registers[decode_dst(inst)] = (get_f32(registers[decode_src1(inst)]) < get_f32(registers[decode_src2(inst)])) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(lt_f64) { registers[decode_dst(inst)] = (get_f64(registers[decode_src1(inst)]) < get_f64(registers[decode_src2(inst)])) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(sle_i32) { registers[decode_dst(inst)] = (static_cast<int32_t>(registers[decode_src1(inst)]) <= static_cast<int32_t>(registers[decode_src2(inst)])) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(sle_i64) { registers[decode_dst(inst)] = (static_cast<int64_t>(registers[decode_src1(inst)]) <= static_cast<int64_t>(registers[decode_src2(inst)])) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(ule_i32) { registers[decode_dst(inst)] = (static_cast<uint32_t>(registers[decode_src1(inst)]) <= static_cast<uint32_t>(registers[decode_src2(inst)])) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(ule_i64) { registers[decode_dst(inst)] = (registers[decode_src1(inst)] <= registers[decode_src2(inst)]) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(le_f32) { registers[decode_dst(inst)] = (get_f32(registers[decode_src1(inst)]) <= get_f32(registers[decode_src2(inst)])) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(le_f64) { registers[decode_dst(inst)] = (get_f64(registers[decode_src1(inst)]) <= get_f64(registers[decode_src2(inst)])) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(sgt_i32) { registers[decode_dst(inst)] = (static_cast<int32_t>(registers[decode_src1(inst)]) > static_cast<int32_t>(registers[decode_src2(inst)])) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(sgt_i64) { registers[decode_dst(inst)] = (static_cast<int64_t>(registers[decode_src1(inst)]) > static_cast<int64_t>(registers[decode_src2(inst)])) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(ugt_i32) { registers[decode_dst(inst)] = (static_cast<uint32_t>(registers[decode_src1(inst)]) > static_cast<uint32_t>(registers[decode_src2(inst)])) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(ugt_i64) { registers[decode_dst(inst)] = (registers[decode_src1(inst)] > registers[decode_src2(inst)]) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(gt_f32) { registers[decode_dst(inst)] = (get_f32(registers[decode_src1(inst)]) > get_f32(registers[decode_src2(inst)])) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(gt_f64) { registers[decode_dst(inst)] = (get_f64(registers[decode_src1(inst)]) > get_f64(registers[decode_src2(inst)])) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(sge_i32) { registers[decode_dst(inst)] = (static_cast<int32_t>(registers[decode_src1(inst)]) >= static_cast<int32_t>(registers[decode_src2(inst)])) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(sge_i64) { registers[decode_dst(inst)] = (static_cast<int64_t>(registers[decode_src1(inst)]) >= static_cast<int64_t>(registers[decode_src2(inst)])) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(uge_i32) { registers[decode_dst(inst)] = (static_cast<uint32_t>(registers[decode_src1(inst)]) >= static_cast<uint32_t>(registers[decode_src2(inst)])) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(uge_i64) { registers[decode_dst(inst)] = (registers[decode_src1(inst)] >= registers[decode_src2(inst)]) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(ge_f32) { registers[decode_dst(inst)] = (get_f32(registers[decode_src1(inst)]) >= get_f32(registers[decode_src2(inst)])) ? 1 : 0; pc++; DISPATCH(); }
-        OP_CASE(ge_f64) { registers[decode_dst(inst)] = (get_f64(registers[decode_src1(inst)]) >= get_f64(registers[decode_src2(inst)])) ? 1 : 0; pc++; DISPATCH(); }
-
+        // dst already holds the false value; d = 1 moves vector state too.
         OP_CASE(select) {
-            if (registers[decode_src1(inst)] != 0) {
-                registers[decode_dst(inst)] = registers[decode_src2(inst)];
+            if (RB != 0) {
+                RA = RC;
+                if (decode_d(inst) != 0 && frame.vector_regs) {
+                    std::memcpy(frame.vector_regs + static_cast<size_t>(decode_a(inst)) * kFastVecBytes,
+                                frame.vector_regs + static_cast<size_t>(decode_c(inst)) * kFastVecBytes, kFastVecBytes);
+                }
             }
-            pc++;
-            DISPATCH();
+            NEXT();
         }
 
-        OP_CASE(load8) {
-            uintptr_t addr = static_cast<uintptr_t>(registers[decode_src1(inst)]) + decode_src2(inst);
-            registers[decode_dst(inst)] = *reinterpret_cast<const uint8_t*>(addr);
-            pc++;
-            DISPATCH();
-        }
-
-        OP_CASE(load16) {
-            uintptr_t addr = static_cast<uintptr_t>(registers[decode_src1(inst)]) + decode_src2(inst);
-            uint16_t val = 0;
-            std::memcpy(&val, reinterpret_cast<const void*>(addr), 2);
-            registers[decode_dst(inst)] = static_cast<uint64_t>(val);
-            pc++;
-            DISPATCH();
-        }
-
-        OP_CASE(load32) {
-            uintptr_t addr = static_cast<uintptr_t>(registers[decode_src1(inst)]) + decode_src2(inst);
-            uint32_t val = 0;
-            std::memcpy(&val, reinterpret_cast<const void*>(addr), 4);
-            registers[decode_dst(inst)] = static_cast<uint64_t>(val);
-            pc++;
-            DISPATCH();
-        }
-
-        OP_CASE(load64) {
-            uintptr_t addr = static_cast<uintptr_t>(registers[decode_src1(inst)]) + decode_src2(inst);
-            uint64_t val = 0;
-            std::memcpy(&val, reinterpret_cast<const void*>(addr), 8);
-            registers[decode_dst(inst)] = val;
-            pc++;
-            DISPATCH();
-        }
-
-        OP_CASE(store8) {
-            uintptr_t addr = static_cast<uintptr_t>(registers[decode_src1(inst)]) + decode_src2(inst);
-            *reinterpret_cast<uint8_t*>(addr) = static_cast<uint8_t>(registers[decode_dst(inst)]);
-            pc++;
-            DISPATCH();
-        }
-
-        OP_CASE(store16) {
-            uintptr_t addr = static_cast<uintptr_t>(registers[decode_src1(inst)]) + decode_src2(inst);
-            uint16_t val = static_cast<uint16_t>(registers[decode_dst(inst)]);
-            std::memcpy(reinterpret_cast<void*>(addr), &val, 2);
-            pc++;
-            DISPATCH();
-        }
-
-        OP_CASE(store32) {
-            uintptr_t addr = static_cast<uintptr_t>(registers[decode_src1(inst)]) + decode_src2(inst);
-            uint32_t val = static_cast<uint32_t>(registers[decode_dst(inst)]);
-            std::memcpy(reinterpret_cast<void*>(addr), &val, 4);
-            pc++;
-            DISPATCH();
-        }
-
-        OP_CASE(store64) {
-            uintptr_t addr = static_cast<uintptr_t>(registers[decode_src1(inst)]) + decode_src2(inst);
-            uint64_t val = registers[decode_dst(inst)];
-            std::memcpy(reinterpret_cast<void*>(addr), &val, 8);
-            pc++;
-            DISPATCH();
-        }
+        LOAD(load8, uint8_t)
+        LOAD(load16, uint16_t)
+        LOAD(load32, uint32_t)
+        LOAD(load64, uint64_t)
+        STORE(store8, uint8_t)
+        STORE(store16, uint16_t)
+        STORE(store32, uint32_t)
+        STORE(store64, uint64_t)
 
         OP_CASE(alloca_) {
-            uint16_t sz = decode_u16(inst);
-            void* mem = frame.allocate_alloca(sz, 16);
-            registers[decode_dst(inst)] = reinterpret_cast<uintptr_t>(mem);
-            pc++;
+            // The size is the next code word; the alignment is d.
+            const size_t size = static_cast<size_t>(pc[1]);
+            RA = reinterpret_cast<uintptr_t>(alloca_arena_->allocate(size, decode_d(inst)));
+            pc += 2;
             DISPATCH();
         }
 
-        OP_CASE(load_indexed) {
-            uintptr_t addr = static_cast<uintptr_t>(registers[decode_src1(inst)]) + registers[decode_src2(inst)];
-            uint64_t val = 0;
-            std::memcpy(&val, reinterpret_cast<const void*>(addr), 8);
-            registers[decode_dst(inst)] = val;
-            pc++;
-            DISPATCH();
-        }
+        OP_CASE(jump) { JUMP_BY(decode_imm32(inst)); }
+        OP_CASE(jump_if) { if (RA != 0) JUMP_BY(decode_imm32(inst)); NEXT(); }
+        OP_CASE(jump_if_not) { if (RA == 0) JUMP_BY(decode_imm32(inst)); NEXT(); }
 
-        OP_CASE(store_indexed) {
-            uintptr_t addr = static_cast<uintptr_t>(registers[decode_src1(inst)]) + registers[decode_src2(inst)];
-            uint64_t val = registers[decode_dst(inst)];
-            std::memcpy(reinterpret_cast<void*>(addr), &val, 8);
-            pc++;
-            DISPATCH();
-        }
-
-        OP_CASE(jump) {
-            int16_t off = decode_s16(inst);
-            if (off < 0) {
-                uint32_t target_pc = static_cast<uint32_t>(pc - code_base + off);
-                RuntimeValue osr_res;
-                if (handle_osr_backedge(frame, target_pc, osr_res)) {
-                    return osr_res;
-                }
-            }
-            pc += off;
-            DISPATCH();
-        }
-
-        OP_CASE(jump_if) {
-            if (registers[decode_dst(inst)] != 0) {
-                int16_t off = decode_s16(inst);
-                if (off < 0) {
-                    uint32_t target_pc = static_cast<uint32_t>(pc - code_base + off);
-                    RuntimeValue osr_res;
-                    if (handle_osr_backedge(frame, target_pc, osr_res)) {
-                        return osr_res;
-                    }
-                }
-                pc += off;
-            } else {
-                pc++;
-            }
-            DISPATCH();
-        }
-
-        OP_CASE(jump_if_not) {
-            if (registers[decode_dst(inst)] == 0) {
-                int16_t off = decode_s16(inst);
-                if (off < 0) {
-                    uint32_t target_pc = static_cast<uint32_t>(pc - code_base + off);
-                    RuntimeValue osr_res;
-                    if (handle_osr_backedge(frame, target_pc, osr_res)) {
-                        return osr_res;
-                    }
-                }
-                pc += off;
-            } else {
-                pc++;
-            }
-            DISPATCH();
-        }
+        BRANCH(br_eq_i32, uint32_t, ==) BRANCH(br_ne_i32, uint32_t, !=)
+        BRANCH(br_slt_i32, int32_t, <) BRANCH(br_sle_i32, int32_t, <=)
+        BRANCH(br_ult_i32, uint32_t, <) BRANCH(br_ule_i32, uint32_t, <=)
+        BRANCH(br_eq_i64, uint64_t, ==) BRANCH(br_ne_i64, uint64_t, !=)
+        BRANCH(br_slt_i64, int64_t, <) BRANCH(br_sle_i64, int64_t, <=)
+        BRANCH(br_ult_i64, uint64_t, <) BRANCH(br_ule_i64, uint64_t, <=)
 
         OP_CASE(ret) {
-            uint8_t ret_reg = decode_dst(inst);
-            return marshal_return_value(fn, registers[ret_reg], frame.vector_regs, ret_reg);
+            const uint32_t r = decode_a(inst);
+            return marshal_return_value(fn, registers[r], frame.vector_regs, r);
         }
-
-        OP_CASE(ret_void) {
-            return RuntimeValue::from_void();
-        }
+        OP_CASE(ret_void) { return RuntimeValue::from_void(); }
 
         OP_CASE(switch_) {
-            uint8_t cond_reg = decode_dst(inst);
-            uint16_t table_idx = decode_u16(inst);
-            const auto& table = fn.switch_tables[table_idx];
-            int64_t val = static_cast<int64_t>(registers[cond_reg]);
-            uint32_t target_pc = static_cast<uint32_t>(table.default_offset);
-            for (const auto& c : table.cases) {
-                if (c.first == val) {
-                    target_pc = static_cast<uint32_t>(c.second);
-                    break;
-                }
-            }
-            pc = code_base + target_pc;
-            DISPATCH();
+            const SwitchTable& table = fn.switch_tables[decode_uimm32(inst)];
+            const int64_t val = table.is_i32 ? static_cast<int64_t>(static_cast<int32_t>(RA)) : static_cast<int64_t>(RA);
+            int32_t target_pc = table.default_offset;
+            // Cases are sorted by value; the first of equal values wins.
+            auto it = std::lower_bound(table.cases.begin(), table.cases.end(), val,
+                                       [](const std::pair<int64_t, int32_t>& c, int64_t v) { return c.first < v; });
+            if (it != table.cases.end() && it->first == val) target_pc = it->second;
+            JUMP_BY(target_pc - static_cast<int32_t>(pc - code_base));
         }
 
         OP_CASE(call)
         OP_CASE(patchable_call) {
-            uint16_t cs_idx = decode_u16(inst);
-            const auto& cs = fn.call_sites[cs_idx];
-            execute_call(frame, cs, decode_op(inst));
-            pc++;
-            DISPATCH();
+            execute_call(frame, decode_uimm32(inst));
+            NEXT();
         }
-
         OP_CASE(call_indirect) {
-            uint16_t cs_idx = decode_u16(inst);
-            const auto& cs = fn.call_sites[cs_idx];
-            execute_call_indirect(frame, cs);
-            pc++;
-            DISPATCH();
+            execute_call_indirect(frame, decode_uimm32(inst));
+            NEXT();
         }
 
         OP_CASE(func_addr) {
-            uint8_t dst = decode_dst(inst);
-            uint16_t s_idx = decode_u16(inst);
-            const std::string& sym = fn.string_pool[s_idx];
+            const std::string& sym = fn.string_pool[decode_uimm32(inst)];
             const Function* target_fn = module_ ? module_->get_function(sym) : nullptr;
             uintptr_t fn_ptr = reinterpret_cast<uintptr_t>(target_fn);
             if (target_fn) {
                 register_function_pointer(fn_ptr, target_fn);
-            } else {
-                const BytecodeFunction* bfn = bytecode_module_ ? bytecode_module_->get_function(sym) : nullptr;
-                if (bfn) {
-                    fn_ptr = reinterpret_cast<uintptr_t>(bfn);
-                    register_function_pointer(fn_ptr, bfn);
-                } else {
-                    void* ext_sym = find_external_symbol(sym);
-                    if (ext_sym) {
-                        fn_ptr = reinterpret_cast<uintptr_t>(ext_sym);
-                    }
-                }
+            } else if (const BytecodeFunction* bfn = bytecode_module_ ? bytecode_module_->get_function(sym) : nullptr) {
+                fn_ptr = reinterpret_cast<uintptr_t>(bfn);
+                register_function_pointer(fn_ptr, bfn);
+            } else if (void* ext_sym = find_external_symbol(sym)) {
+                fn_ptr = reinterpret_cast<uintptr_t>(ext_sym);
             }
-            registers[dst] = fn_ptr;
-            pc++;
-            DISPATCH();
+            RA = fn_ptr;
+            NEXT();
         }
 
-        OP_CASE(safepoint) {
-            handle_safepoint(frame);
-            pc++;
-            DISPATCH();
-        }
-
-        OP_CASE(write_barrier) {
-            handle_write_barrier(frame, decode_src1(inst), decode_src2(inst));
-            pc++;
-            DISPATCH();
-        }
+        OP_CASE(safepoint) { handle_safepoint(frame); NEXT(); }
+        OP_CASE(write_barrier) { handle_write_barrier(frame, decode_b(inst), decode_c(inst)); NEXT(); }
 
         OP_CASE(guard) {
-            uint8_t cond_reg = decode_dst(inst);
-            if (BRASS_UNLIKELY(registers[cond_reg] == 0)) {
-                uint16_t g_idx = decode_u16(inst);
-                const auto& g = fn.guards[g_idx];
-                last_deopt_.deoptimized = true;
-                last_deopt_.exit_stub = g.exit_stub;
-                last_deopt_.resume_id = g.resume_id;
-                last_deopt_.state_map.clear();
-                last_deopt_.state_map.reserve(g.state_regs.size());
-
-                // Own scope: the resume path below leaves by computed goto,
-                // which would skip df's destructor.
-                {
-                    runtime::DeoptFrame df;
-                    df.resume_id = g.resume_id;
-                    df.exit_symbol = g.exit_stub;
-                    df.reason = runtime::DeoptReason::Generic;
-
-                    for (uint8_t sreg : g.state_regs) {
-                        Type t = (sreg < fn.register_types.size()) ? fn.register_types[sreg] : Type::i64();
-                        RuntimeValue rv = RuntimeValue::from_bits(t, registers[sreg]);
-                        last_deopt_.state_map.push_back(rv);
-                        df.push_value(registers[sreg], t.is_gcref() ? runtime::DeoptValueKind::GcRef : runtime::DeoptValueKind::Int64);
-                    }
-                    runtime::set_thread_deopt_frame(&df);
+            if (BRASS_LIKELY(RA != 0)) NEXT();
+            const GuardInfo& g = fn.guards[decode_uimm32(inst)];
+            last_deopt_.deoptimized = true;
+            last_deopt_.exit_stub = g.exit_stub;
+            last_deopt_.resume_id = g.resume_id;
+            last_deopt_.state_map.clear();
+            last_deopt_.state_map.reserve(g.state_regs.size());
+            // Own scope: the resume path below leaves by computed goto,
+            // which would skip df's destructor.
+            {
+                runtime::DeoptFrame df;
+                df.resume_id = g.resume_id;
+                df.exit_symbol = g.exit_stub;
+                df.reason = runtime::DeoptReason::Generic;
+                for (BcReg sreg : g.state_regs) {
+                    RuntimeValue rv = fast_reg_value(frame, sreg);
+                    last_deopt_.state_map.push_back(rv);
+                    df.push_value(registers[sreg], rv.is_gcref() ? runtime::DeoptValueKind::GcRef : runtime::DeoptValueKind::Int64);
                 }
-
-                if (deopt_handler_) {
-                    return deopt_handler_(*this, last_deopt_);
-                }
-
-                if (module_ && !g.exit_stub.empty()) {
-                    const Function* stub_fn = module_->get_function(g.exit_stub);
-                    if (stub_fn) {
-                        return run(*stub_fn, last_deopt_.state_map);
-                    }
-                }
-
-                for (const auto& rp : fn.resume_points) {
-                    if (rp.resume_id == g.resume_id) {
-                        if (!rp.param_regs.empty()) {
-                            for (size_t i = 0; i < last_deopt_.state_map.size() && i < rp.param_regs.size(); ++i) {
-                                registers[rp.param_regs[i]] = last_deopt_.state_map[i].raw_bits();
-                            }
-                        }
-                        pc = code_base + rp.target_pc;
-                        DISPATCH();
-                    }
-                }
-
-                throw DeoptException(last_deopt_);
+                runtime::set_thread_deopt_frame(&df);
             }
-            pc++;
-            DISPATCH();
+            if (deopt_handler_) {
+                return deopt_handler_(*this, last_deopt_);
+            }
+            if (module_ && !g.exit_stub.empty()) {
+                if (const Function* stub_fn = module_->get_function(g.exit_stub)) {
+                    return run(*stub_fn, last_deopt_.state_map);
+                }
+            }
+            for (const auto& rp : fn.resume_points) {
+                if (rp.resume_id != g.resume_id) continue;
+                for (size_t i = 0; i < last_deopt_.state_map.size() && i < rp.param_regs.size(); ++i) {
+                    fast_set_reg(frame, rp.param_regs[i], last_deopt_.state_map[i]);
+                }
+                JUMP_BY(static_cast<int32_t>(rp.target_pc) - static_cast<int32_t>(pc - code_base));
+            }
+            throw DeoptException(last_deopt_);
         }
 
-        OP_CASE(resume_point) {
-            pc++;
-            DISPATCH();
-        }
+        OP_CASE(resume_point) { NEXT(); }
+        OP_CASE(osr_entry) { NEXT(); }
 
-        OP_CASE(osr_entry) {
-            pc++;
-            DISPATCH();
-        }
-
-        OP_CASE(pinned_tls_write) {
-            uint8_t src = decode_src1(inst);
-            tls_block_ = registers[src];
-            pc++;
-            DISPATCH();
-        }
-
+        OP_CASE(pinned_tls_write) { tls_block_ = RB; NEXT(); }
         OP_CASE(pinned_tls_read) {
-            uint8_t dst = decode_dst(inst);
             if (tls_block_ == 0) {
                 void* sym = find_external_symbol("bronze_tls_enter");
-                if (sym) {
-                    auto fn_ptr = reinterpret_cast<void*(*)()>(sym);
-                    tls_block_ = reinterpret_cast<uint64_t>(fn_ptr());
-                } else {
-                    sym = find_external_symbol("bronze_tls_block_addr");
-                    if (sym) {
-                        auto fn_ptr = reinterpret_cast<void*(*)()>(sym);
-                        tls_block_ = reinterpret_cast<uint64_t>(fn_ptr());
-                    }
-                }
+                if (!sym) sym = find_external_symbol("bronze_tls_block_addr");
+                if (sym) tls_block_ = reinterpret_cast<uint64_t>(reinterpret_cast<void* (*)()>(sym)());
             }
-            registers[dst] = tls_block_;
-            pc++;
-            DISPATCH();
+            RA = tls_block_;
+            NEXT();
         }
-
         OP_CASE(read_sp) {
-            uint8_t dst = decode_dst(inst);
             char marker = 0;
-            registers[dst] = reinterpret_cast<uint64_t>(&marker);
-            pc++;
-            DISPATCH();
+            RA = reinterpret_cast<uint64_t>(&marker);
+            NEXT();
         }
 
         OP_CASE(throw_) {
-            uint8_t reg = decode_dst(inst);
-            handle_throw(frame, reg, pc, code_base);
+            handle_throw(frame, decode_a(inst), pc, code_base);
+            // A throw caught in this frame can loop without a backward
+            // branch, so it is charged too.
+            if (BRASS_UNLIKELY(++total_instructions_executed_ > insn_limit)) throw_instruction_limit();
             DISPATCH();
         }
-
         OP_CASE(invoke) {
-            uint16_t cs_idx = decode_u16(inst);
-            const auto& cs = fn.call_sites[cs_idx];
-            handle_invoke(frame, cs, pc, code_base);
+            handle_invoke(frame, decode_uimm32(inst), pc, code_base);
             DISPATCH();
         }
-
-        OP_CASE(landing_pad) {
-            registers[decode_dst(inst)] = current_exception_.raw_bits();
-            pc++;
-            DISPATCH();
-        }
-
-        OP_CASE(resume) {
-            uint8_t reg = decode_dst(inst);
-            handle_resume(frame, reg);
-            pc++;
-            DISPATCH();
-        }
+        OP_CASE(landing_pad) { RA = current_exception_.raw_bits(); NEXT(); }
+        OP_CASE(resume) { handle_resume(frame, decode_a(inst)); NEXT(); }
 
         OP_CASE(coro_create) {
-            uint8_t dst = decode_dst(inst);
-            uint16_t cs_idx = decode_u16(inst);
-            const auto& cs = fn.call_sites[cs_idx];
+            const CallSiteInfo& cs = fn.call_sites[decode_uimm32(inst)];
             // Own scope: DISPATCH() leaves by computed goto, which would skip
             // the vector's destructor and leak it.
             {
                 std::vector<RuntimeValue> args;
                 args.reserve(cs.arg_regs.size());
-                for (uint8_t ar : cs.arg_regs) {
-                    args.push_back(RuntimeValue::from_bits(Type::i64(), registers[ar]));
-                }
-                registers[dst] = coro_create(cs.callee, args);
+                for (BcReg ar : cs.arg_regs) args.push_back(fast_reg_value(frame, ar));
+                RA = coro_create(cs.callee, args);
             }
-            pc++;
-            DISPATCH();
+            NEXT();
         }
-
         OP_CASE(coro_suspend) {
-            uint8_t dst_reg = decode_dst(inst);
-            uint8_t yield_reg = decode_src1(inst);
-            uint32_t resume_id = decode_src2(inst);
+            // The resume id is the next code word.
             frame.pc = static_cast<uint32_t>(pc - code_base);
-            coro_suspend(frame, dst_reg, yield_reg, resume_id);
-            pc++;
+            coro_suspend(frame, decode_a(inst), decode_b(inst), static_cast<uint32_t>(pc[1]));
+            pc += 2;
             DISPATCH();
         }
-
         OP_CASE(coro_resume) {
-            uint8_t dst = decode_dst(inst);
-            uint8_t coro_reg = decode_src1(inst);
-            uint8_t input_reg = decode_src2(inst);
-            uintptr_t handle = registers[coro_reg];
-            uint64_t input_val = (input_reg != 255 && input_reg < frame.num_registers) ? registers[input_reg] : 0;
-            uint64_t res = coro_resume(handle, input_val);
-            registers[dst] = res;
-            pc++;
+            const uint32_t input_reg = decode_c(inst);
+            const uint64_t input_val = input_reg != kNoReg ? registers[input_reg] : 0;
+            RA = coro_resume(static_cast<uintptr_t>(RB), input_val);
+            NEXT();
+        }
+        OP_CASE(coro_destroy) { coro_destroy(static_cast<uintptr_t>(RB)); NEXT(); }
+
+        OP_CASE(vadd) OP_CASE(vsub) OP_CASE(vmul) OP_CASE(vdiv) OP_CASE(vfma) OP_CASE(vneg)
+        OP_CASE(vmin) OP_CASE(vmax) OP_CASE(vsqrt) OP_CASE(vand) OP_CASE(vor) OP_CASE(vxor)
+        OP_CASE(vnot) OP_CASE(vload) OP_CASE(vstore) OP_CASE(vbroadcast)
+        OP_CASE(vextract_lane) OP_CASE(vinsert_lane) OP_CASE(vzero) {
+            execute_vector_op(frame, inst, pc);
+            NEXT();
+        }
+        OP_CASE(vshuffle) {
+            execute_vector_op(frame, inst, pc);
+            pc += 2;
             DISPATCH();
         }
 
-        OP_CASE(coro_destroy) {
-            uint8_t coro_reg = decode_src1(inst);
-            uintptr_t handle = registers[coro_reg];
-            coro_destroy(handle);
-            pc++;
-            DISPATCH();
-        }
-
-        OP_CASE(vadd)
-        OP_CASE(vsub)
-        OP_CASE(vmul)
-        OP_CASE(vdiv)
-        OP_CASE(vfma)
-        OP_CASE(vneg)
-        OP_CASE(vmin)
-        OP_CASE(vmax)
-        OP_CASE(vsqrt)
-        OP_CASE(vand)
-        OP_CASE(vor)
-        OP_CASE(vxor)
-        OP_CASE(vnot)
-        OP_CASE(vload)
-        OP_CASE(vstore)
-        OP_CASE(vbroadcast)
-        OP_CASE(vextract_lane)
-        OP_CASE(vinsert_lane)
-        OP_CASE(vshuffle)
-        OP_CASE(vzero) {
-            execute_vector_op(frame, inst);
-            pc++;
-            DISPATCH();
-        }
-
-#if !BRASS_DIRECT_THREADED
+#if BRASS_DIRECT_THREADED
+    do_invalid_op:
+#else
         default:
-            throw InterpreterException("Unknown opcode in fast interpreter: " + std::to_string(static_cast<int>(decode_op(inst))));
 #endif
+            throw InterpreterException("Invalid opcode " + std::to_string(static_cast<int>(decode_op(inst))) +
+                                       " in bytecode function " + fn.name);
     }
-
     return RuntimeValue::from_void();
+
+#undef NEXT
+#undef JUMP_BY
+#undef UN
+#undef BIN
+#undef BIN_F32
+#undef BIN_F64
+#undef CMP
+#undef CMP_F32
+#undef CMP_F64
+#undef BRANCH
+#undef LOAD
+#undef STORE
+#undef OP_CASE
+#undef DISPATCH
+#undef BACKEDGE
+#undef RA
+#undef RB
+#undef RC
 }
 
 } // namespace brass

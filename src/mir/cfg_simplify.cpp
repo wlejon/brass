@@ -277,6 +277,13 @@ private:
                     }
                 }
                 bb->params() = std::move(new_params);
+                // A kept parameter after a removed one moves down: its
+                // recorded index must follow, or a pass that reads edge
+                // arguments by param_index() reads past them (loop fusion
+                // faulted on exactly that).
+                for (size_t k = 0; k < bb->param_count(); ++k) {
+                    bb->params()[k]->set_block_param(bb, static_cast<uint32_t>(k));
+                }
 
                 for (BasicBlock* pred : bb->predecessors()) {
                     Instruction* term = pred ? pred->terminator() : nullptr;

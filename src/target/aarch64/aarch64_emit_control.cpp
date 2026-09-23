@@ -1,5 +1,6 @@
 #include <brass/target/aarch64/aarch64_emit.hpp>
 #include <brass/runtime/deopt.hpp>
+#include <algorithm>
 #include <cassert>
 #include <stdexcept>
 #include <string>
@@ -199,11 +200,21 @@ void AArch64EmitContext::emit_parallel_copy(const LirInst& inst) {
             bool is_fpr = (m0.dst.is_preg() && m0.dst.preg_val.is_xmm()) ||
                           (m0.src.is_preg() && m0.src.preg_val.is_xmm()) ||
                           (m0.dst.size == 16);
-            PReg scratch = is_fpr ? PReg::aarch64_fpr(FPR::V31) : PReg::aarch64_gpr(GPR::X15);
-            uint8_t sz = m0.dst.size;
-
-            emit_move(LirOperand::preg(scratch, sz), m0.dst);
+            // The value parked here has to survive every move still to be
+            // emitted, and emit_move itself uses X15/X16/X17 and V31 for a
+            // memory-to-memory move (a 16-byte slot copy goes through V31).
+            // X14 (the def scratch) and V30 are free at a parallel copy.
+            PReg scratch = is_fpr ? PReg::aarch64_fpr(FPR::V30) : PReg::aarch64_gpr(GPR::X14);
+            // The scratch parks m0.dst's current value for the move that
+            // reads it (the last in the cycle), whose width can differ from
+            // m0's: an i32 edge argument and an i64 one swapping registers.
+            // A 32-bit park (`mov w14, w1`) drops the i64 value's upper half.
             size_t last_idx = cycle.back();
+            const uint8_t sz = std::max({m0.dst.size, moves[last_idx].src.size, moves[last_idx].dst.size});
+            LirOperand parked = m0.dst;
+            parked.size = sz;
+
+            emit_move(LirOperand::preg(scratch, sz), parked);
             moves[last_idx].src = LirOperand::preg(scratch, sz);
         } else {
             emit_move(moves[start_idx].dst, moves[start_idx].src);

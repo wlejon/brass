@@ -95,6 +95,8 @@ add_executable(brass_unit_tests
     unit/test_aarch64_relocs.cpp
     unit/test_aarch64_image_relocs.cpp
     unit/test_aarch64_branch_relax.cpp
+    unit/test_aarch64_execution_regressions.cpp
+    unit/test_jit_unwind.cpp
     unit/test_software_pipeline.cpp
     differential/test_sched_differential.cpp
     unit/test_source_loc.cpp
@@ -218,6 +220,7 @@ file(GENERATE
     CONTENT "set(BRASS_TEST_EXE [==[$<TARGET_FILE:brass_unit_tests>]==])
 set(BRASS_TEST_WORKDIR [==[${CMAKE_SOURCE_DIR}]==])
 set(BRASS_TEST_TIMEOUT ${BRASS_UNIT_TEST_TIMEOUT})
+set(BRASS_TEST_EMULATOR [==[${CMAKE_CROSSCOMPILING_EMULATOR}]==])
 include([==[${CMAKE_CURRENT_SOURCE_DIR}/cmake/discover_unit_tests.cmake]==])
 ")
 file(WRITE "${_brass_discovery_dir}/include.cmake"

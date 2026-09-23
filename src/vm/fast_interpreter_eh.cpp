@@ -31,14 +31,9 @@ const ExceptionEntry* find_exception_entry(const BytecodeFunction& fn, uint32_t 
 
 } // namespace
 
-void FastInterpreter::handle_throw(FastFrame& frame, uint8_t reg, const uint32_t*& pc, const uint32_t* code_base) {
+void FastInterpreter::handle_throw(FastFrame& frame, uint32_t reg, const BytecodeWord*& pc, const BytecodeWord* code_base) {
     const BytecodeFunction& fn = *frame.bfn;
-    Type reg_type = (reg < fn.register_types.size()) ? fn.register_types[reg] : Type::i64();
-    if (reg_type.is_gcref()) {
-        current_exception_ = RuntimeValue::from_gcref(frame.registers[reg]);
-    } else {
-        current_exception_ = RuntimeValue::from_bits(reg_type, frame.registers[reg]);
-    }
+    current_exception_ = fast_reg_value(frame, reg);
 
     uint32_t cur_pc = static_cast<uint32_t>(pc - code_base);
     const ExceptionEntry* ee = find_exception_entry(fn, cur_pc);
@@ -50,12 +45,12 @@ void FastInterpreter::handle_throw(FastFrame& frame, uint8_t reg, const uint32_t
     throw InterpreterThrownException(current_exception_);
 }
 
-void FastInterpreter::handle_invoke(FastFrame& frame, const CallSiteInfo& cs, const uint32_t*& pc, const uint32_t* code_base) {
+void FastInterpreter::handle_invoke(FastFrame& frame, uint32_t cs_idx, const BytecodeWord*& pc, const BytecodeWord* code_base) {
     const BytecodeFunction& fn = *frame.bfn;
     bool threw = false;
 
     try {
-        execute_call(frame, cs, BytecodeOp::call);
+        execute_call(frame, cs_idx);
     } catch (const InterpreterThrownException& ex) {
         threw = true;
         current_exception_ = ex.value();
@@ -77,15 +72,9 @@ void FastInterpreter::handle_invoke(FastFrame& frame, const CallSiteInfo& cs, co
     pc++;
 }
 
-void FastInterpreter::handle_resume(FastFrame& frame, uint8_t reg) {
-    if (reg != 255 && reg < frame.num_registers) {
-        const BytecodeFunction& fn = *frame.bfn;
-        Type reg_type = (reg < fn.register_types.size()) ? fn.register_types[reg] : Type::i64();
-        if (reg_type.is_gcref()) {
-            current_exception_ = RuntimeValue::from_gcref(frame.registers[reg]);
-        } else {
-            current_exception_ = RuntimeValue::from_bits(reg_type, frame.registers[reg]);
-        }
+void FastInterpreter::handle_resume(FastFrame& frame, uint32_t reg) {
+    if (reg != kNoReg && reg < frame.num_registers) {
+        current_exception_ = fast_reg_value(frame, reg);
     }
     throw InterpreterThrownException(current_exception_);
 }

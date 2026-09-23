@@ -87,8 +87,14 @@ public:
         FunctionHandle* handle = nullptr
     );
 
-    // Mutator notification on function invocation
+    // Mutator notification on function invocation. The feedback overload
+    // is the hot path (tier-1 code passes the pointer it was compiled
+    // with); the name overload looks the function up first.
     void on_invocation(std::string_view fn_name);
+    void on_invocation(TieringFeedback& fb);
+
+    // Called by ~Module: drops the Tier-0 interpreter kept for `mod`.
+    static void forget_module(const Module* mod) noexcept;
 
     // Multi-tier execution of an entry function in a module
     RuntimeValue execute(
@@ -110,10 +116,22 @@ public:
 
 private:
     MultiTierPipeline() = default;
-    ~MultiTierPipeline() = default;
+    ~MultiTierPipeline();
 
     MultiTierPipeline(const MultiTierPipeline&) = delete;
     MultiTierPipeline& operator=(const MultiTierPipeline&) = delete;
+
+    void tier_invocation(TieringFeedback& fb, std::string_view fn_name, FunctionHandle* handle);
+    void setup_fast_interpreter(FastInterpreter& interp, Module& mod);
+    // The Tier-0 interpreter kept across execute() calls on one module,
+    // rebuilt when the module or the registered symbols change.
+    FastInterpreter& persistent_fast_interpreter(Module& mod);
+
+    std::unique_ptr<FastInterpreter> fast_interp_;
+    const Module* fast_interp_module_ = nullptr;
+    uint64_t fast_interp_symbols_gen_ = 0;
+    uint64_t symbols_gen_ = 1;
+    std::atomic<bool> fast_interp_busy_{false};
 
     bool initialized_ = false;
     TieringConfig config_;

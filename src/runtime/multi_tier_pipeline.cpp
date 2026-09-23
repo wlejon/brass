@@ -13,11 +13,40 @@ extern "C" void brass_tier1_record_invocation(const char* fn_name) {
     brass::runtime::MultiTierPipeline::instance().on_invocation(fn_name);
 }
 
+// The x64 baseline tier's invocation hook: `feedback` is the function's
+// TieringFeedback, resolved when the code was compiled, so counting takes
+// no lock and hashes no name.
+extern "C" void brass_tier1_record_invocation_fb(void* feedback) {
+    if (!feedback) return;
+    if (!brass::runtime::MultiTierPipeline::instance().is_initialized()) return;
+    brass::runtime::MultiTierPipeline::instance().on_invocation(
+        *static_cast<brass::runtime::TieringFeedback*>(feedback));
+}
+
 namespace brass::runtime {
+
+namespace {
+// Lets ~Module skip the pipeline when it was never built or is gone.
+std::atomic<bool> g_pipeline_alive{false};
+} // namespace
 
 MultiTierPipeline& MultiTierPipeline::instance() {
     static MultiTierPipeline pipeline;
+    g_pipeline_alive.store(true, std::memory_order_release);
     return pipeline;
+}
+
+MultiTierPipeline::~MultiTierPipeline() {
+    g_pipeline_alive.store(false, std::memory_order_release);
+}
+
+void MultiTierPipeline::forget_module(const Module* mod) noexcept {
+    if (!g_pipeline_alive.load(std::memory_order_acquire)) return;
+    MultiTierPipeline& p = instance();
+    std::lock_guard<std::mutex> lock(p.mutex_);
+    if (p.fast_interp_module_ != mod) return;
+    p.fast_interp_module_ = nullptr;
+    if (!p.fast_interp_busy_.load(std::memory_order_acquire)) p.fast_interp_.reset();
 }
 
 void MultiTierPipeline::initialize(const TieringConfig& config) {
@@ -46,6 +75,10 @@ void MultiTierPipeline::shutdown() {
     }
     std::lock_guard<std::mutex> lock(mutex_);
     initialized_ = false;
+    if (!fast_interp_busy_.load(std::memory_order_acquire)) {
+        fast_interp_.reset();
+        fast_interp_module_ = nullptr;
+    }
 }
 
 void MultiTierPipeline::set_config(const TieringConfig& config) noexcept {
@@ -68,11 +101,13 @@ void MultiTierPipeline::register_external_symbol(std::string_view name, void* ad
     std::lock_guard<std::mutex> lock(mutex_);
     external_symbols_[std::string(name)] = addr;
     baseline_compiler_.register_external_symbol(name, addr);
+    ++symbols_gen_;
 }
 
 void MultiTierPipeline::register_external_function(std::string_view name, FastHostFn fn) {
     std::lock_guard<std::mutex> lock(mutex_);
     external_functions_[std::string(name)] = std::move(fn);
+    ++symbols_gen_;
 }
 
 void MultiTierPipeline::register_baseline_compiled(std::shared_ptr<codegen::BaselineCompiledFunction> fn) {
@@ -193,8 +228,14 @@ void MultiTierPipeline::on_invocation(std::string_view fn_name) {
     if (handle) {
         handle->record_call();
     }
+    tier_invocation(TieringRegistry::instance().get_feedback(fn_name), fn_name, handle);
+}
 
-    auto& fb = TieringRegistry::instance().get_feedback(fn_name);
+void MultiTierPipeline::on_invocation(TieringFeedback& fb) {
+    tier_invocation(fb, fb.function_name(), nullptr);
+}
+
+void MultiTierPipeline::tier_invocation(TieringFeedback& fb, std::string_view fn_name, FunctionHandle* handle) {
     TierLevel tier = fb.current_tier();
     uint64_t count = fb.record_invocation();
 
@@ -240,19 +281,27 @@ RuntimeValue MultiTierPipeline::execute(
     RuntimeValue result;
 
     if (config_.use_fast_interpreter()) {
-        FastInterpreter fast_interp;
-        fast_interp.set_module(&mod);
-        il::register_bronze_fast_interpreter_symbols(&fast_interp);
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            for (const auto& [sym, addr] : external_symbols_) {
-                fast_interp.register_external_symbol(sym, addr);
+        bool expected = false;
+        if (fast_interp_busy_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+            struct Release {
+                std::atomic<bool>& busy;
+                ~Release() { busy.store(false, std::memory_order_release); }
+            } release{fast_interp_busy_};
+            FastInterpreter& fast_interp = persistent_fast_interpreter(mod);
+            // Each execute starts with a fresh TLS block, as a new
+            // interpreter would.
+            fast_interp.set_tls_block(0);
+            result = handle->call(fast_interp, args);
+        } else {
+            // Re-entrant or concurrent execute: the kept interpreter is in
+            // use, so this one gets its own.
+            FastInterpreter fast_interp;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                setup_fast_interpreter(fast_interp, mod);
             }
-            for (const auto& [name, fn_ptr] : external_functions_) {
-                fast_interp.register_external_function(name, fn_ptr);
-            }
+            result = handle->call(fast_interp, args);
         }
-        result = handle->call(fast_interp, args);
     } else {
         Interpreter interp;
         il::register_bronze_interpreter_symbols(&interp);
@@ -264,6 +313,30 @@ RuntimeValue MultiTierPipeline::execute(
     }
 
     return result;
+}
+
+void MultiTierPipeline::setup_fast_interpreter(FastInterpreter& interp, Module& mod) {
+    interp.set_module(&mod);
+    il::register_bronze_fast_interpreter_symbols(&interp);
+    for (const auto& [sym, addr] : external_symbols_) {
+        interp.register_external_symbol(sym, addr);
+    }
+    for (const auto& [name, fn_ptr] : external_functions_) {
+        interp.register_external_function(name, fn_ptr);
+    }
+}
+
+FastInterpreter& MultiTierPipeline::persistent_fast_interpreter(Module& mod) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!fast_interp_ || fast_interp_module_ != &mod || fast_interp_symbols_gen_ != symbols_gen_) {
+        fast_interp_.reset();
+        auto interp = std::make_unique<FastInterpreter>();
+        setup_fast_interpreter(*interp, mod);
+        fast_interp_ = std::move(interp);
+        fast_interp_module_ = &mod;
+        fast_interp_symbols_gen_ = symbols_gen_;
+    }
+    return *fast_interp_;
 }
 
 MultiTierStats MultiTierPipeline::stats() const {

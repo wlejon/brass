@@ -320,17 +320,19 @@ TEST_CASE("Phase 3 - AArch64 DWARF CFI CFA Offset Adjustment and Callee FPRs") {
     // X19 is saved at FP + 16. CFA is FP + 64. Offset from CFA = 16 - 64 = -48. Factored = 48/8 = 6.
     CHECK_EQ(gpr_factored, uint64_t(6));
 
-    // Callee-saved FPRs V8 (dreg 64) and V9 (dreg 65) via DW_CFA_offset_extended
+    // Callee-saved FPRs V8 and V9 via DW_CFA_offset_extended. The AArch64
+    // DWARF register numbers of V0..V31 are 64..95, so V8 is 72 (64 would
+    // be V0, a register the unwinder does not restore).
     REQUIRE(*p == elf::DW_CFA_offset_extended); p++;
     uint64_t dreg_v8 = decode_uleb128(p, end);
-    CHECK_EQ(dreg_v8, uint64_t(64));
+    CHECK_EQ(dreg_v8, uint64_t(72));
     uint64_t v8_factored = decode_uleb128(p, end);
     // V8 is saved at FP + 24 (16 header + 8 for X19). Offset from CFA = 24 - 64 = -40. Factored = 40/8 = 5.
     CHECK_EQ(v8_factored, uint64_t(5));
 
     REQUIRE(*p == elf::DW_CFA_offset_extended); p++;
     uint64_t dreg_v9 = decode_uleb128(p, end);
-    CHECK_EQ(dreg_v9, uint64_t(65));
+    CHECK_EQ(dreg_v9, uint64_t(73));
     uint64_t v9_factored = decode_uleb128(p, end);
     // V9 is saved at FP + 32. Offset from CFA = 32 - 64 = -32. Factored = 32/8 = 4.
     CHECK_EQ(v9_factored, uint64_t(4));

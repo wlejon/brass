@@ -2,6 +2,7 @@
 #include <brass/mir/alias_analysis.hpp>
 #include <brass/mir/opcodes.hpp>
 #include <algorithm>
+#include <unordered_map>
 
 namespace brass {
 
@@ -67,6 +68,101 @@ bool vector_op_lowerable(Opcode op, Type elem, Type vec) {
         default:
             return false;
     }
+}
+
+// Opcodes the body transform emits a vector instruction for.
+bool transform_vectorizes(Opcode op) {
+    switch (op) {
+        case Opcode::add: case Opcode::sub: case Opcode::mul: case Opcode::sdiv: case Opcode::udiv:
+        case Opcode::neg: case Opcode::and_: case Opcode::or_: case Opcode::xor_: case Opcode::not_:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Replays vectorize_loop's body transform without building anything. Every
+// value a vector instruction consumes must be one the transform produces in
+// the vector body, or be defined outside the loop (it is then broadcast). A
+// value read straight from the scalar body would not dominate the vector
+// body, and a store or reduction whose value cannot be formed would be
+// dropped. The induction variable and the accumulator have no per-lane
+// form, so no vector instruction may consume them.
+bool transform_is_closed(const LoopInfo& loop,const VectorizableLoopInfo& vli, const Instruction* cmp_inst,
+                         const Instruction* step_inst, const Value* next_iv) {
+    const BasicBlock* header = vli.header;
+    const BasicBlock* body = vli.body;
+    // The vector header rebuilds only the exit compare; anything else in the
+    // header must be droppable (pure and non-trapping). Its results are loop
+    // values, which `usable` refuses below.
+    if (header != body) {
+        for (const Instruction* inst = header->head(); inst != nullptr; inst = inst->next()) {
+            if (inst->is_terminator() || inst == cmp_inst) continue;
+            switch (inst->opcode()) {
+                case Opcode::iconst_i32: case Opcode::iconst_i64: case Opcode::fconst_f64:
+                case Opcode::add: case Opcode::sub: case Opcode::mul: case Opcode::neg:
+                case Opcode::and_: case Opcode::or_: case Opcode::xor_: case Opcode::not_:
+                case Opcode::select:
+                    break;
+                default:
+                    if (!is_comparison(inst->opcode())) return false;
+            }
+        }
+    }
+    if (step_inst && step_inst->parent() != body) return false;
+    if (vli.has_reduction && vli.reduction_update_inst->parent() != body) return false;
+    for (const VectorizableMemOp& m : vli.mem_ops) {
+        if (m.elem_type != vli.elem_type) return false;
+    }
+
+    const Value* iv = header->param(vli.primary_iv_index);
+    const Value* acc = vli.has_reduction ? header->param(vli.reduction_param_index) : nullptr;
+    const Value* acc_next = vli.has_reduction ? vli.reduction_update_inst->result() : nullptr;
+
+    // Value -> type of its counterpart in the vector body.
+    std::unordered_map<const Value*, Type> mapped;
+    for (size_t i = 0; i < header->param_count(); ++i) {
+        const Value* p = header->param(i);
+        if (p != iv && p != acc) mapped.emplace(p, p->type());
+    }
+    auto usable = [&](const Value* op) {
+        if (!op || op == iv || op == acc || op == acc_next) return false;
+        auto it = mapped.find(op);
+        if (it == mapped.end()) {
+            return loop.is_loop_invariant(op) && op->type() == vli.elem_type;
+        }
+        return it->second == vli.vec_type || it->second == vli.elem_type;
+    };
+
+    for (const Instruction* inst = body->head(); inst != nullptr; inst = inst->next()) {
+        if (inst->is_terminator()) break;
+        if (inst == step_inst || (next_iv && inst->result() == next_iv)) continue;
+        const Opcode op = inst->opcode();
+        if (op == Opcode::iconst_i32 || op == Opcode::iconst_i64 || op == Opcode::fconst_f64) {
+            mapped.emplace(inst->result(), inst->type());
+            continue;
+        }
+        if (vli.has_reduction && inst == vli.reduction_update_inst) {
+            const Value* val_op = inst->operand(0) == acc ? inst->operand(1) : inst->operand(0);
+            if (!usable(val_op)) return false;
+            continue;
+        }
+        if (op == Opcode::load_indexed) {
+            mapped.emplace(inst->result(), vli.vec_type);
+            continue;
+        }
+        if (op == Opcode::store_indexed) {
+            if (!usable(inst->operand(2))) return false;
+            continue;
+        }
+        // Anything else stays scalar and unmapped unless it is element-typed
+        // arithmetic with usable operands.
+        if (!inst->produces_value() || inst->type() != vli.elem_type || !transform_vectorizes(op)) continue;
+        bool ok = true;
+        for (size_t i = 0; i < inst->operand_count(); ++i) ok = ok && usable(inst->operand(i));
+        if (ok) mapped.emplace(inst->result(), vli.vec_type);
+    }
+    return true;
 }
 
 } // namespace
@@ -427,6 +523,9 @@ bool analyze_vectorizable_loop(
 
     vli.alias_checks = std::move(alias_checks);
     vli.mem_ops = std::move(mem_ops);
+    if (!transform_is_closed(loop, vli, cmp_inst, primary_iv_step_inst, latch_bt->args[primary_iv_idx])) {
+        return false;
+    }
     vli.is_vectorizable = true;
     return true;
 }

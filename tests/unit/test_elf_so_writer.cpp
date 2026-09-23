@@ -92,7 +92,9 @@ TEST_CASE("ELF SO Writer - Header and Program Header Verification") {
     CHECK_EQ(e_version, uint32_t(elf64::EV_CURRENT));
     CHECK_EQ(e_phoff, 64ULL); // Right after Ehdr
     CHECK(e_shoff > 0);
-    CHECK_EQ(e_phnum, 7u); // PT_PHDR, PT_LOAD(R), PT_LOAD(RX), PT_LOAD(RW), PT_DYNAMIC, PT_GNU_RELRO, PT_GNU_STACK
+    // PT_PHDR, PT_LOAD(R), PT_LOAD(RX), PT_LOAD(RW), PT_DYNAMIC, PT_GNU_RELRO,
+    // PT_GNU_STACK, PT_GNU_EH_FRAME
+    CHECK_EQ(e_phnum, 8u);
     CHECK(e_shnum >= 7u);
 
     // 2. Program Headers (7 entries, 56 bytes each)

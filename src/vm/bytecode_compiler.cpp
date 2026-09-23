@@ -1,7 +1,8 @@
 #include "bytecode_compiler_impl.hpp"
 #include <brass/mir/module.hpp>
+#include <algorithm>
+#include <cstring>
 #include <stdexcept>
-#include <iostream>
 
 namespace brass {
 
@@ -16,156 +17,140 @@ std::unique_ptr<BytecodeModule> BytecodeCompiler::compile(const Module& mod) {
     return bmod;
 }
 
+namespace {
+
+// Use counts of every value, for compare-branch fusion.
+std::unordered_map<const Value*, uint32_t> count_uses(const detail::BlockLayout& layout) {
+    std::unordered_map<const Value*, uint32_t> uses;
+    for (const BasicBlock* bb : layout.order) {
+        for (const Instruction* inst : *bb) {
+            if (!inst) continue;
+            for (size_t i = 0; i < inst->operand_count(); ++i) {
+                if (inst->operand(i)) ++uses[inst->operand(i)];
+            }
+            for (const Value* v : inst->state_map()) {
+                if (v) ++uses[v];
+            }
+            for (const BranchTarget* t : detail::branch_targets_of(*inst)) {
+                for (const Value* v : t->args) {
+                    if (v) ++uses[v];
+                }
+            }
+        }
+    }
+    return uses;
+}
+
+} // namespace
+
 std::unique_ptr<BytecodeFunction> BytecodeCompiler::compile(const Function& fn) {
     auto bfn = std::make_unique<BytecodeFunction>(fn.name(), fn.return_type(), fn.param_types());
-    detail::FunctionCompilerContext ctx(fn, *bfn);
 
-    // Step 1: Assign Register Slots
+    // Step 1: register allocation over the emission order.
+    detail::BlockLayout layout = detail::build_block_layout(fn);
+    detail::RegisterAssignment regs = detail::allocate_bytecode_registers(fn, layout);
+
+    detail::FunctionCompilerContext ctx(fn, *bfn, layout, regs);
     const BasicBlock* entry = fn.entry_block();
-    uint32_t next_reg = 0;
+    bfn->num_params = static_cast<uint32_t>(entry ? entry->param_count() : fn.param_count());
+    bfn->num_ssa_values = regs.num_values;
+    bfn->register_types = regs.register_types;
+    ctx.scratch_reg = static_cast<BcReg>(regs.num_registers);
+    ctx.scratch_reg2 = static_cast<BcReg>(regs.num_registers + 1);
+    bfn->register_types.push_back(Type::i64());
+    bfn->register_types.push_back(Type::i64());
+    bfn->num_registers = regs.num_registers + 2;
+    for (const auto& [v, r] : regs.reg) bfn->ssa_to_reg[v->id()] = r;
 
-    if (entry) {
-        bfn->num_params = static_cast<uint32_t>(entry->param_count());
-        for (size_t i = 0; i < entry->param_count(); ++i) {
-            const Value* p = entry->param(i);
-            if (p) {
-                uint8_t r = static_cast<uint8_t>(next_reg++);
-                ctx.reg_map[p->id()] = r;
-                bfn->ssa_to_reg[p->id()] = r;
-            }
-        }
-    } else {
-        bfn->num_params = static_cast<uint32_t>(fn.param_count());
-        next_reg = bfn->num_params;
-    }
-
-    // Allocate for non-entry block parameters
-    for (const auto* bb : fn.blocks()) {
-        if (!bb || bb == entry) continue;
-        for (size_t i = 0; i < bb->param_count(); ++i) {
-            const Value* p = bb->param(i);
-            if (p) {
-                uint8_t r = static_cast<uint8_t>(next_reg++);
-                ctx.reg_map[p->id()] = r;
-                bfn->ssa_to_reg[p->id()] = r;
-            }
-        }
-    }
-
-    // Allocate for instruction results
-    for (const auto* bb : fn.blocks()) {
-        if (!bb) continue;
-        for (const auto* inst : *bb) {
-            if (inst && inst->produces_value() && inst->result()) {
-                uint8_t r = static_cast<uint8_t>(next_reg++);
-                ctx.reg_map[inst->result()->id()] = r;
-                bfn->ssa_to_reg[inst->result()->id()] = r;
-            }
-        }
-    }
-
-    // Reserve scratch registers for parallel copies and address calculations
-    ctx.scratch_reg = static_cast<uint8_t>(next_reg++);
-    ctx.scratch_reg2 = static_cast<uint8_t>(next_reg++);
-    bfn->num_registers = next_reg;
-
-    bfn->register_types.assign(next_reg, Type::i64());
-    if (entry) {
-        for (size_t i = 0; i < entry->param_count(); ++i) {
-            const Value* p = entry->param(i);
-            if (p) bfn->register_types[ctx.get_reg(p)] = p->type();
-        }
-    }
-    for (const auto* bb : fn.blocks()) {
-        if (!bb || bb == entry) continue;
-        for (size_t i = 0; i < bb->param_count(); ++i) {
-            const Value* p = bb->param(i);
-            if (p) bfn->register_types[ctx.get_reg(p)] = p->type();
-        }
-    }
-    for (const auto* bb : fn.blocks()) {
-        if (!bb) continue;
-        for (const auto* inst : *bb) {
-            if (inst && inst->produces_value() && inst->result()) {
-                bfn->register_types[ctx.get_reg(inst->result())] = inst->result()->type();
-            }
-        }
-    }
-
-    if (next_reg > 256) {
-        throw std::runtime_error("Function @" + std::string(fn.name()) +
-                                 " exceeds maximum 256 virtual registers (required " +
-                                 std::to_string(next_reg) + ")");
-    }
-
-    // Step 2: Linearize Blocks & Lower Instructions
-    for (const auto* bb : fn.blocks()) {
-        if (!bb) continue;
+    // Step 2: lower the blocks in layout order.
+    const auto uses = count_uses(layout);
+    for (size_t bi = 0; bi < layout.order.size(); ++bi) {
+        const BasicBlock* bb = layout.order[bi];
+        ctx.next_block = bi + 1 < layout.order.size() ? layout.order[bi + 1] : nullptr;
         uint32_t b_pc = static_cast<uint32_t>(bfn->current_pc());
         ctx.block_pc_map[bb] = b_pc;
         bfn->pc_block_map[b_pc] = bb;
+        // Falling off a block into its layout successor would be silent
+        // misexecution; malformed blocks are rejected.
+        if (!bb->terminator()) ctx.fail("block does not end in a terminator");
 
-        for (const auto* inst : *bb) {
+        for (const Instruction* inst : *bb) {
             if (!inst) continue;
+            if (inst->is_terminator() && inst != bb->tail()) ctx.fail("terminator in the middle of a block");
             if (inst->loc().is_valid()) {
                 bfn->set_line_info(static_cast<uint32_t>(bfn->current_pc()), inst->loc());
             }
-            ctx.lower_instruction(*inst);
-        }
-    }
-
-    // Step 3: Backpatch Relative Jump Offsets
-    for (const auto& fixup : ctx.jump_fixups) {
-        auto it = ctx.block_pc_map.find(fixup.target);
-        if (it == ctx.block_pc_map.end()) {
-            throw std::runtime_error("Jump fixup target block not found in PC map");
-        }
-        uint32_t target_pc = it->second;
-        int32_t rel_offset = static_cast<int32_t>(target_pc) - static_cast<int32_t>(fixup.inst_idx);
-        if (rel_offset < -32768 || rel_offset > 32767) {
-            throw std::runtime_error("Jump relative offset out of range: " + std::to_string(rel_offset));
-        }
-        bfn->code[fixup.inst_idx] = encode_ad(fixup.op, fixup.cond_reg, static_cast<int16_t>(rel_offset));
-    }
-
-    // Backpatch Switch Tables
-    for (const auto& sfixup : ctx.switch_fixups) {
-        auto it = ctx.block_pc_map.find(sfixup.target);
-        if (it == ctx.block_pc_map.end()) {
-            throw std::runtime_error("Switch fixup target block not found in PC map");
-        }
-        uint32_t target_pc = it->second;
-        // The table stores target_pc directly or relative to switch inst
-        if (sfixup.is_default) {
-            bfn->switch_tables[sfixup.table_idx].default_offset = static_cast<int32_t>(target_pc);
-        } else {
-            bfn->switch_tables[sfixup.table_idx].cases[sfixup.case_idx].second = static_cast<int32_t>(target_pc);
-        }
-    }
-
-    // Backpatch Exception Table Handlers
-    for (const auto& ef : ctx.exception_fixups) {
-        auto it = ctx.block_pc_map.find(ef.unwind_target);
-        if (it != ctx.block_pc_map.end()) {
-            bfn->exception_table[ef.ee_idx].handler_pc = it->second;
-        }
-    }
-
-    // Step 4: Resume Points Table
-    for (const auto& [resume_id, target_bb] : fn.resume_points()) {
-        auto it = ctx.block_pc_map.find(target_bb);
-        if (it != ctx.block_pc_map.end()) {
-            ResumePointEntry rpe;
-            rpe.resume_id = resume_id;
-            rpe.target_pc = it->second;
-            for (size_t p = 0; p < target_bb->param_count(); ++p) {
-                const Value* pv = target_bb->param(p);
-                if (pv) {
-                    rpe.param_regs.push_back(ctx.get_reg(pv));
+            // A comparison used only by the br_if right after it becomes
+            // part of that branch.
+            const Instruction* next = inst->next();
+            if (next && next->opcode() == Opcode::br_if && next->operand(0) == inst->result() &&
+                inst->result()) {
+                auto it = uses.find(inst->result());
+                if (it != uses.end() && it->second == 1 && ctx.can_fuse_compare_branch(*inst)) {
+                    ctx.fused_compare = inst;
+                    continue;
                 }
             }
-            bfn->resume_points.push_back(std::move(rpe));
+            ctx.lower_instruction(*inst);
         }
+        ctx.fused_compare = nullptr;
+    }
+
+    // Step 3: patch jump targets.
+    for (const auto& fixup : ctx.jump_fixups) {
+        auto it = ctx.block_pc_map.find(fixup.target);
+        if (it == ctx.block_pc_map.end()) ctx.fail("jump target block was never placed");
+        int64_t rel = static_cast<int64_t>(it->second) - static_cast<int64_t>(fixup.inst_idx);
+        BytecodeWord& w = bfn->code[fixup.inst_idx];
+        if (fixup.imm24) {
+            if (!fits_imm24(rel)) ctx.fail("compare-branch offset out of range: " + std::to_string(rel));
+            w = encode_abi(decode_op(w), decode_a(w), decode_b(w), static_cast<int32_t>(rel));
+        } else {
+            if (rel < INT32_MIN || rel > INT32_MAX) ctx.fail("jump offset out of range");
+            w = encode_ai(decode_op(w), decode_a(w), static_cast<int32_t>(rel));
+        }
+    }
+
+    for (const auto& sf : ctx.switch_fixups) {
+        int64_t target_pc = sf.trampoline_pc;
+        if (target_pc < 0) {
+            auto it = ctx.block_pc_map.find(sf.target);
+            if (it == ctx.block_pc_map.end()) ctx.fail("switch target block was never placed");
+            target_pc = it->second;
+        }
+        SwitchTable& table = bfn->switch_tables[sf.table_idx];
+        if (sf.is_default) {
+            table.default_offset = static_cast<int32_t>(target_pc);
+        } else {
+            table.cases[sf.case_idx].second = static_cast<int32_t>(target_pc);
+        }
+    }
+    for (SwitchTable& table : bfn->switch_tables) {
+        std::stable_sort(table.cases.begin(), table.cases.end(),
+                         [](const auto& a, const auto& b) { return a.first < b.first; });
+    }
+
+    for (const auto& ef : ctx.exception_fixups) {
+        int64_t handler = ef.trampoline_pc;
+        if (handler < 0) {
+            auto it = ctx.block_pc_map.find(ef.unwind_target);
+            if (it == ctx.block_pc_map.end()) ctx.fail("unwind block was never placed");
+            handler = it->second;
+        }
+        bfn->exception_table[ef.ee_idx].handler_pc = static_cast<uint32_t>(handler);
+    }
+
+    // Step 4: resume points.
+    for (const auto& [resume_id, target_bb] : fn.resume_points()) {
+        auto it = ctx.block_pc_map.find(target_bb);
+        if (it == ctx.block_pc_map.end()) continue;
+        ResumePointEntry rpe;
+        rpe.resume_id = resume_id;
+        rpe.target_pc = it->second;
+        for (size_t p = 0; p < target_bb->param_count(); ++p) {
+            if (const Value* pv = target_bb->param(p)) rpe.param_regs.push_back(ctx.get_reg(pv));
+        }
+        bfn->resume_points.push_back(std::move(rpe));
     }
 
     return bfn;
@@ -173,60 +158,24 @@ std::unique_ptr<BytecodeFunction> BytecodeCompiler::compile(const Function& fn) 
 
 namespace detail {
 
-void FunctionCompilerContext::emit_parallel_moves(const BranchTarget& target) {
-    if (target.args.empty()) return;
-    const BasicBlock* target_bb = target.block;
-    if (!target_bb) return;
+uint32_t FunctionCompilerContext::add_constant(uint64_t bits) {
+    auto [it, inserted] = constant_index.emplace(bits, static_cast<uint32_t>(out.constants.size()));
+    if (inserted) out.constants.push_back(bits);
+    return it->second;
+}
 
-    struct Move {
-        uint8_t src;
-        uint8_t dst;
-    };
-    std::vector<Move> moves;
-    moves.reserve(target.args.size());
+uint32_t FunctionCompilerContext::add_string(std::string_view s) {
+    auto [it, inserted] = string_index.emplace(std::string(s), static_cast<uint32_t>(out.string_pool.size()));
+    if (inserted) out.string_pool.emplace_back(s);
+    return it->second;
+}
 
-    for (size_t i = 0; i < target.args.size() && i < target_bb->param_count(); ++i) {
-        const Value* arg_val = target.args[i];
-        const Value* param_val = target_bb->param(i);
-        if (!arg_val || !param_val) continue;
-
-        uint8_t src = get_reg(arg_val);
-        uint8_t dst = get_reg(param_val);
-        if (src != dst) {
-            moves.push_back({src, dst});
-        }
-    }
-
-    while (!moves.empty()) {
-        // Step 1: Find a move whose dst is not a src of any other pending move
-        int free_idx = -1;
-        for (size_t i = 0; i < moves.size(); ++i) {
-            bool dst_is_src = false;
-            for (size_t j = 0; j < moves.size(); ++j) {
-                if (i != j && moves[i].dst == moves[j].src) {
-                    dst_is_src = true;
-                    break;
-                }
-            }
-            if (!dst_is_src) {
-                free_idx = static_cast<int>(i);
-                break;
-            }
-        }
-
-        if (free_idx != -1) {
-            emit(BytecodeOp::mov, moves[free_idx].dst, moves[free_idx].src, 0);
-            moves.erase(moves.begin() + free_idx);
-        } else {
-            // Cycle detected! Break it with scratch_reg
-            Move m = moves[0];
-            emit(BytecodeOp::mov, scratch_reg, m.src, 0);
-            for (auto& pending : moves) {
-                if (pending.src == m.src) {
-                    pending.src = scratch_reg;
-                }
-            }
-        }
+void FunctionCompilerContext::emit_const64(BcReg dst, uint64_t bits) {
+    int64_t v = static_cast<int64_t>(bits);
+    if (v >= INT32_MIN && v <= INT32_MAX) {
+        emit_ai(BytecodeOp::mov_imm, dst, static_cast<int32_t>(v));
+    } else {
+        emit_ai(BytecodeOp::load_const, dst, static_cast<int32_t>(add_constant(bits)));
     }
 }
 

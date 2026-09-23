@@ -137,6 +137,9 @@ bool Verifier::verify_function(const Function& fn) {
                 report_error(bb_prefix + "Block parameter " + std::to_string(i) + " is null.");
             } else if (param->type().is_void()) {
                 report_error(bb_prefix + "Block parameter " + std::to_string(i) + " cannot be void.");
+            } else if (!param->is_block_param() || param->defining_block() != bb || param->param_index() != i) {
+                report_error(bb_prefix + "Block parameter " + std::to_string(i) +
+                             " does not record this block and index as its definition.");
             }
         }
 
@@ -155,6 +158,12 @@ bool Verifier::verify_function(const Function& fn) {
                     const BasicBlock* def_bb = val->defining_block();
                     if (!def_bb) {
                         report_error(inst_prefix + desc + " block parameter has null defining block.");
+                    } else if (val->param_index() >= def_bb->param_count() ||
+                               def_bb->param(val->param_index()) != val) {
+                        // A pass dropped the parameter from its block but
+                        // left this use behind.
+                        report_error(inst_prefix + desc + " uses a parameter no longer on block '" +
+                                     std::string(def_bb->name()) + "'.");
                     } else if (dom.is_reachable(bb) && !dom.dominates(def_bb, bb)) {
                         report_error(inst_prefix + "SSA Dominance violation: " + desc +
                                      " block parameter of block '" + std::string(def_bb->name()) +

@@ -168,7 +168,8 @@ void ElfCfiBuilder::build_eh_frame(
                 auto saved_fprs = aarch64::AArch64FrameLayout::get_saved_callee_fprs(fn.frame_info);
                 size_t gpr_bytes = saved_gprs.size() * 8;
                 for (size_t j = 0; j < saved_fprs.size(); ++j) {
-                    uint8_t dreg = static_cast<uint8_t>(64 + (static_cast<uint8_t>(saved_fprs[j]) - 8));
+                    // AArch64 DWARF numbers V0..V31 as 64..95, so D8 is 72.
+                    uint8_t dreg = static_cast<uint8_t>(64 + static_cast<uint8_t>(saved_fprs[j]));
                     uint64_t fpr_factored = (cfa_offset >= (16 + gpr_bytes + (j + 1) * 8))
                         ? (cfa_offset - (16 + gpr_bytes + j * 8)) / 8
                         : (saved_gprs.size() + j + 2);

@@ -26,6 +26,7 @@ std::unique_ptr<LirFunction> AArch64ISel::lower(const Function& mir_fn) {
     mir_fn_ = &mir_fn;
     val_to_vreg_.clear();
     val_to_vreg_pair_.clear();
+    elidable_insts_.clear();
 
     lir_fn_->name = std::string(mir_fn.name());
     lir_fn_->return_type = mir_fn.return_type();
@@ -70,15 +71,41 @@ std::unique_ptr<LirFunction> AArch64ISel::lower(const Function& mir_fn) {
         lower_block(*bb);
     }
 
+    // Connect the CFG (as the x64 selector does). The edge blocks created
+    // while lowering (br_if / switch trampolines, guard deopt exits) were
+    // linked then. A MIR edge whose block arguments went through such a
+    // trampoline runs only through it: a direct edge too would make the
+    // target's parameters look live, undefined, on every path into this
+    // block, and a gcref parameter would be reported to the GC with whatever
+    // its home holds.
+    std::unordered_set<uint32_t> mir_block_ids;
+    for (const auto* bb : mir_fn.blocks()) mir_block_ids.insert(bb->id());
     for (size_t i = 0; i < mir_fn.blocks().size(); ++i) {
         const auto* mir_bb = mir_fn.blocks()[i];
         auto* lir_bb = lir_fn_->blocks[i].get();
 
-        for (const auto* pred : mir_bb->predecessors()) {
-            lir_bb->predecessors.push_back(lir_fn_->get_block_by_id(pred->id()));
-        }
+        auto jumps_directly_to = [&](uint32_t id) {
+            for (const auto& li : lir_bb->instructions) {
+                if (li->opcode != LirOpcode::Jmp && li->opcode != LirOpcode::Jcc) continue;
+                for (const auto& u : li->uses) {
+                    if (u.is_label() && u.label_id == id) return true;
+                }
+            }
+            return false;
+        };
+        auto reached_by_trampoline = [&](const LirBlock* target) {
+            for (const LirBlock* s : lir_bb->successors) {
+                if (mir_block_ids.count(s->id)) continue;
+                if (std::find(s->successors.begin(), s->successors.end(), target) != s->successors.end()) return true;
+            }
+            return false;
+        };
+
         for (const auto* succ : mir_bb->successors()) {
-            lir_bb->successors.push_back(lir_fn_->get_block_by_id(succ->id()));
+            LirBlock* succ_lir = lir_fn_->get_block_by_id(succ->id());
+            if (!succ_lir) continue;
+            if (reached_by_trampoline(succ_lir) && !jumps_directly_to(succ_lir->id)) continue;
+            link_blocks(*lir_bb, *succ_lir);
         }
     }
 
@@ -125,6 +152,7 @@ std::unique_ptr<LirFunction> AArch64ISel::lower(const Function& mir_fn) {
         }
     }
 
+    eliminate_dead_materializations();
     return lir;
 }
 
@@ -300,8 +328,10 @@ void AArch64ISel::lower_block(const BasicBlock& bb) {
         if (!skipped_insts_.count(inst)) {
             size_t before_count = lir_bb->instructions.size();
             lower_instruction(*inst, *lir_bb);
+            const bool elidable = is_elidable_materialization(*inst);
             for (size_t i = before_count; i < lir_bb->instructions.size(); ++i) {
                 if (lir_bb->instructions[i]) {
+                    if (elidable) elidable_insts_.insert(lir_bb->instructions[i].get());
                     if (!lir_bb->instructions[i]->loc.is_valid() && inst->loc().is_valid()) {
                         lir_bb->instructions[i]->loc = inst->loc();
                     }

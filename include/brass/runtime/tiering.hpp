@@ -5,8 +5,10 @@
 #include <string_view>
 #include <unordered_map>
 #include <iosfwd>
+#include <atomic>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 namespace brass {
 class Module;
@@ -64,15 +66,29 @@ struct TieringConfig {
 
 class FunctionHandle;
 
+// Bumped whenever a runtime registry drops or replaces entries that callers
+// may have cached pointers to (FunctionDispatchTable handles, TieringRegistry
+// feedback). A cache that recorded the generation it resolved under is
+// stale once this differs. Entries are retired, never freed, so a stale
+// pointer stays safe to read until it is re-resolved.
+uint64_t registry_generation() noexcept;
+void bump_registry_generation() noexcept;
+
+// Per-function tiering counters. Invocation and backedge counting is
+// lock-free: callers resolve the TieringFeedback once (by name, under the
+// registry lock) and then count through the pointer.
 class TieringFeedback {
 public:
     explicit TieringFeedback(const TieringConfig& config = TieringConfig{});
     explicit TieringFeedback(std::string_view fn_name, const TieringConfig& config = TieringConfig{});
 
+    TieringFeedback(const TieringFeedback&) = delete;
+    TieringFeedback& operator=(const TieringFeedback&) = delete;
+
     std::string_view function_name() const noexcept { return fn_name_; }
 
-    // Invocations
-    uint64_t invocation_count() const noexcept { return invocations_; }
+    // Invocations (exact under concurrency; fires the tier-up hook once).
+    uint64_t invocation_count() const noexcept { return invocations_.load(std::memory_order_relaxed); }
     uint64_t record_invocation() noexcept;
 
     // Type feedback vector
@@ -80,12 +96,19 @@ public:
     const TypeFeedbackVector* type_feedback_vector() const;
 
     // Loop Backedges
-    uint64_t backedge_count() const noexcept { return total_backedges_; }
+    uint64_t backedge_count() const noexcept { return total_backedges_.load(std::memory_order_relaxed); }
     uint64_t loop_backedges(uint32_t loop_header_id) const noexcept;
     uint64_t record_backedge(uint32_t loop_header_id = 0) noexcept;
+    // The interpreter's per-iteration count of backedge_count(): a relaxed
+    // load and store rather than a locked read-modify-write, so concurrent
+    // runs of one function may lose a few counts (it is a hotness
+    // heuristic, not an exact total).
+    void count_backedge_fast() noexcept {
+        total_backedges_.store(total_backedges_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+    }
 
     // Deoptimizations & Guard failure tracker (ratchet)
-    uint64_t deopt_count() const noexcept { return deopt_count_; }
+    uint64_t deopt_count() const noexcept { return deopt_count_.load(std::memory_order_relaxed); }
     uint32_t guard_deopt_count(uint32_t guard_site_id) const noexcept;
     void record_deopt(uint32_t guard_site_id = 0) noexcept;
     void record_deoptimization(uint32_t guard_site_id = 0) noexcept { record_deopt(guard_site_id); }
@@ -104,21 +127,21 @@ public:
     }
 
     // Tier state machine
-    TierLevel current_tier() const noexcept { return tier_; }
-    TierLevel tier_level() const noexcept { return tier_; }
-    void set_tier(TierLevel t) noexcept { tier_ = t; }
-    void set_tier_level(TierLevel t) noexcept { tier_ = t; }
+    TierLevel current_tier() const noexcept { return tier_.load(std::memory_order_acquire); }
+    TierLevel tier_level() const noexcept { return current_tier(); }
+    void set_tier(TierLevel t) noexcept { tier_.store(t, std::memory_order_release); }
+    void set_tier_level(TierLevel t) noexcept { set_tier(t); }
 
     bool should_tier_up() const noexcept;
     bool should_tier_up(uint64_t custom_threshold) const noexcept {
         if (bailout_triggered_) return false;
-        return invocations_ >= custom_threshold;
+        return invocation_count() >= custom_threshold;
     }
 
     bool should_osr(uint32_t loop_header_id) const noexcept;
     bool should_trigger_osr(uint64_t custom_threshold, uint32_t loop_header_id = 0) const noexcept {
         if (!config_.enable_osr || bailout_triggered_) return false;
-        return loop_backedges(loop_header_id) >= custom_threshold || total_backedges_ >= custom_threshold;
+        return loop_backedges(loop_header_id) >= custom_threshold || backedge_count() >= custom_threshold;
     }
 
     void reset() noexcept;
@@ -135,17 +158,21 @@ public:
     const TieringConfig& config() const noexcept { return config_; }
     void set_config(const TieringConfig& c) noexcept { config_ = c; }
 
-    // Direct access to maps for introspection
-    const std::unordered_map<uint32_t, uint64_t>& loop_backedges_map() const noexcept { return loop_backedges_; }
-    const std::unordered_map<uint32_t, uint32_t>& guard_failures_map() const noexcept { return guard_failures_; }
+    // Snapshots for introspection (backedges per loop header id; id 0 is
+    // the unkeyed count).
+    std::unordered_map<uint32_t, uint64_t> loop_backedges_map() const;
+    std::unordered_map<uint32_t, uint32_t> guard_failures_map() const;
 
 private:
     std::string fn_name_;
     TieringConfig config_;
-    TierLevel tier_ = TierLevel::Tier0_Interpreter;
-    uint64_t invocations_ = 0;
-    uint64_t total_backedges_ = 0;
-    uint64_t deopt_count_ = 0;
+    std::atomic<TierLevel> tier_{TierLevel::Tier0_Interpreter};
+    std::atomic<uint64_t> invocations_{0};
+    std::atomic<uint64_t> total_backedges_{0};
+    std::atomic<uint64_t> unkeyed_backedges_{0};
+    std::atomic<uint64_t> deopt_count_{0};
+    // Keyed backedges and guard failures are rare (OSR and deopt paths).
+    mutable std::mutex maps_mutex_;
     std::unordered_map<uint32_t, uint64_t> loop_backedges_;
     std::unordered_map<uint32_t, uint32_t> guard_failures_;
     bool bailout_triggered_ = false;
@@ -201,6 +228,8 @@ private:
     const Module* active_module_ = nullptr;
     mutable std::mutex mutex_;
     std::unordered_map<std::string, std::unique_ptr<TieringFeedback>> feedback_map_;
+    // Entries dropped by clear(): kept alive for pointers cached before it.
+    std::vector<std::unique_ptr<TieringFeedback>> retired_;
 };
 
 } // namespace brass::runtime

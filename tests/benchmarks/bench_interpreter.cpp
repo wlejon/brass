@@ -200,7 +200,6 @@ void print_interpreter_benchmark_summary(const std::vector<InterpBenchmarkMetric
 namespace brass::bench {
 
 void run_interpreter_benchmarks(std::vector<BenchmarkResult>& results, const RatchetManager& ratchet) {
-    (void)ratchet;
     std::vector<InterpBenchmarkMetric> metrics;
     metrics.reserve(5);
 
@@ -595,9 +594,11 @@ void run_interpreter_benchmarks(std::vector<BenchmarkResult>& results, const Rat
         res.repetitions = 1;
         res.native_ms = m.oracle_ms; // Oracle is baseline comparator
         res.brass_ms = m.fast_ms;
-        res.ratio = m.fast_vs_oracle_speedup;
-        res.target_ratio = 1.25;
-        res.passes_bar = (m.fast_vs_oracle_speedup >= 1.05);
+        // Ratcheted as FastInterpreter time over Oracle time: lower is
+        // better, like every other ratio the ratchet checks.
+        res.ratio = (m.oracle_ms > 0.0) ? (m.fast_ms / m.oracle_ms) : 1.0;
+        res.target_ratio = ratchet.get_ratio(res.key, 1.0);
+        res.passes_bar = res.ratio <= res.target_ratio;
         res.notes = std::to_string(m.fast_vs_oracle_speedup) + "x vs Oracle; " +
                     std::to_string(m.jit_vs_fast_speedup) + "x JIT/Fast";
         results.push_back(res);

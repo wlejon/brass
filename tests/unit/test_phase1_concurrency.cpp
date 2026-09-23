@@ -70,7 +70,9 @@ TEST_CASE("Phase 1 - Dynamic Patching 0xE9 Near Jump and Cache Line Safety") {
     *reinterpret_cast<int32_t*>(&jmp_code[1]) = 0;
 
     void* target_dest = &jmp_code[10];
-    bool patched = brass_patch_call(&jmp_code[0], target_dest);
+    // x64 encoding stated explicitly: brass_patch_call patches host code,
+    // and on an AArch64 host these bytes are not a branch.
+    bool patched = patch_call_site(CodeArch::X64, &jmp_code[0], target_dest);
     CHECK(patched);
     // Opcode must remain 0xE9, displacement must be written to bytes 1..4
     CHECK_EQ(jmp_code[0], 0xE9);

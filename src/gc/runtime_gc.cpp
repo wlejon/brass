@@ -8,16 +8,6 @@
 extern "C" uintptr_t brass_get_rbp();
 #endif
 
-// Weak so that an embedder can supply its own write barrier on ELF/Mach-O.
-// PE/COFF has no true weak symbols: under MinGW ld a weak definition inside a
-// static archive is not pulled in to satisfy a reference, which breaks every
-// link of libbrass.a. Emit a strong definition on Windows.
-#if (defined(__GNUC__) || defined(__clang__)) && !defined(_WIN32)
-#define BRASS_WEAK __attribute__((weak))
-#else
-#define BRASS_WEAK
-#endif
-
 namespace brass {
 
 namespace {
@@ -246,7 +236,7 @@ uintptr_t brass_runtime_gc_alloc_bridge(size_t size, uint64_t pointer_mask, uint
     return brass::brass_runtime_gc_alloc(gc, *maps, size, pointer_mask, type_tag, caller_rbp, caller_ip);
 }
 
-BRASS_WEAK void brass_gc_write_barrier(uintptr_t obj, uintptr_t val) {
+void brass_default_gc_write_barrier(uintptr_t obj, uintptr_t val) {
     auto* gen_gc = brass::brass_get_active_generational_gc();
     if (!gen_gc) return;
     if (!gen_gc->is_old(obj)) return;
@@ -348,7 +338,7 @@ void brass_gc_collect() {
     }
 }
 
-BRASS_WEAK void brass_gc_write_barrier(uintptr_t obj, uintptr_t val) {
+void brass_default_gc_write_barrier(uintptr_t obj, uintptr_t val) {
     auto* gen_gc = brass::brass_get_active_generational_gc();
     if (!gen_gc) return;
     if (!gen_gc->is_old(obj)) return;

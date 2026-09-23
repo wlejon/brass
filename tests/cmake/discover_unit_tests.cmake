@@ -6,6 +6,8 @@
 #   BRASS_TEST_EXE      the brass_unit_tests binary
 #   BRASS_TEST_WORKDIR  working directory the tests expect (the source root)
 #   BRASS_TEST_TIMEOUT  per-test timeout in seconds
+#   BRASS_TEST_EMULATOR CMAKE_CROSSCOMPILING_EMULATOR of a cross build (a
+#                       list, e.g. qemu-aarch64 -L <sysroot>), else empty
 
 if(NOT EXISTS "${BRASS_TEST_EXE}")
     # ctest reports a missing executable as a failed test, which is the
@@ -15,7 +17,7 @@ if(NOT EXISTS "${BRASS_TEST_EXE}")
 endif()
 
 execute_process(
-    COMMAND "${BRASS_TEST_EXE}" --list
+    COMMAND ${BRASS_TEST_EMULATOR} "${BRASS_TEST_EXE}" --list
     WORKING_DIRECTORY "${BRASS_TEST_WORKDIR}"
     OUTPUT_VARIABLE _brass_list
     ERROR_VARIABLE _brass_list_err
@@ -26,7 +28,7 @@ if(NOT _brass_list_rc EQUAL 0)
     # Re-run the listing as a test so the failure and its stderr show up in
     # the ctest report instead of the suite silently shrinking.
     message(WARNING "brass unit test discovery failed (${_brass_list_rc}): ${_brass_list_err}")
-    add_test(unit_tests.discovery "${BRASS_TEST_EXE}" --list)
+    add_test(unit_tests.discovery ${BRASS_TEST_EMULATOR} "${BRASS_TEST_EXE}" --list)
     set_tests_properties(unit_tests.discovery PROPERTIES
         WORKING_DIRECTORY "${BRASS_TEST_WORKDIR}"
         LABELS "correctness")
@@ -40,7 +42,7 @@ foreach(_brass_name IN LISTS _brass_names)
     if(_brass_name STREQUAL "")
         continue()
     endif()
-    add_test("${_brass_name}" "${BRASS_TEST_EXE}" "--exact=${_brass_name}")
+    add_test("${_brass_name}" ${BRASS_TEST_EMULATOR} "${BRASS_TEST_EXE}" "--exact=${_brass_name}")
     set_tests_properties("${_brass_name}" PROPERTIES
         WORKING_DIRECTORY "${BRASS_TEST_WORKDIR}"
         LABELS "correctness"

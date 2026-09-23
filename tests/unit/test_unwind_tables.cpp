@@ -131,6 +131,9 @@ TEST_CASE("Unwind Tables - COFF ARM64 Packed Unwind & .xdata EHANDLER") {
         uint32_t packed_word = 0;
         std::memcpy(&packed_word, pdata_sec->data.data() + 4, 4);
         CHECK_EQ(packed_word & 0x3, 0x1u); // Flag = 01 (packed unwind data)
+        // FunctionLength 1 instruction; RegF, RegI, H, CR and FrameSize all
+        // zero: no prologue.
+        CHECK_EQ(packed_word, 0x1u | (1u << 2));
     }
 
     // 2. Full .xdata with exception scopes (X=1)

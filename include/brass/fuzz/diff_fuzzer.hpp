@@ -39,6 +39,8 @@ struct DiffResult {
     TierResult tier1_jit_unopt;   // JIT, original module
     TierResult tier2_jit_opt;     // JIT, optimized module
     TierResult tier3_interp_opt;  // interpreter, optimized module
+    TierResult tier4_fast;        // FastInterpreter (bytecode), original module
+    TierResult tier5_fast_opt;    // FastInterpreter (bytecode), optimized module
     std::string mismatch_reason;
     // A stable grouping key for reports, e.g. "verify@jump_threading",
     // "interp-opt:mismatch@loop_fusion", "jit-unopt:fault".
@@ -61,6 +63,11 @@ struct DiffFuzzerOptions {
     // original: platform-independent, and it sees optimizer bugs that JIT
     // codegen happens to mask.
     bool tier3_interp_opt = true;
+    // The bytecode tier (BytecodeCompiler + FastInterpreter) on the original
+    // and on the optimized module: every program is checked interpreter vs
+    // FastInterpreter vs JIT.
+    bool tier4_fast_interp = true;
+    bool tier5_fast_interp_opt = true;
     FuzzPipeline pipeline = FuzzPipeline::AllPasses;
     // Pipeline steps left out (see run_fuzz_pipeline).
     std::vector<std::string> skip_passes;
@@ -96,6 +103,10 @@ public:
     /// Tier 0: reference interpreter.
     TierResult run_tier0_interp(const Module& mod, std::string_view fn_name,
                                 const std::vector<RuntimeValue>& args);
+
+    /// Tier 4/5: the bytecode tier (FastInterpreter).
+    TierResult run_fast_interp(const Module& mod, std::string_view fn_name,
+                               const std::vector<RuntimeValue>& args);
 
     /// Tier 1: native JIT, module as given.
     TierResult run_tier1_jit_unopt(const Module& mod, std::string_view fn_name,
@@ -137,7 +148,7 @@ private:
                        const std::vector<RuntimeValue>& args, std::string_view label);
     std::string bisect_first_bad_step(const Module& mod, std::string_view fn_name,
                                       const std::vector<RuntimeValue>& args,
-                                      const TierResult& expected, bool use_jit);
+                                      const TierResult& expected, char runner);
 };
 
 /// True when two tier results are the same answer.

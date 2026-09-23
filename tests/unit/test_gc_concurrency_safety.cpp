@@ -92,16 +92,16 @@ TEST_CASE("GC Concurrency Safety - Write barrier card marking with tagged young 
     gc.card_table().clean_all();
     CHECK(!gc.card_table().is_dirty_addr(old_obj));
 
-    // Test 4: Global C API brass_gc_write_barrier with Bronze tag marks card
-    brass_gc_write_barrier(old_obj, bronze_tagged_young);
+    // Test 4: brass's default barrier with Bronze tag marks card
+    brass_default_gc_write_barrier(old_obj, bronze_tagged_young);
     CHECK(gc.card_table().is_dirty_addr(old_obj));
 
     // Clean cards again
     gc.card_table().clean_all();
     CHECK(!gc.card_table().is_dirty_addr(old_obj));
 
-    // Test 5: Global C API brass_gc_write_barrier with Host tag marks card
-    brass_gc_write_barrier(old_obj, host_tagged_young);
+    // Test 5: brass's default barrier with Host tag marks card
+    brass_default_gc_write_barrier(old_obj, host_tagged_young);
     CHECK(gc.card_table().is_dirty_addr(old_obj));
 
     // Clean cards again

@@ -1,6 +1,7 @@
 #include <brass/runtime/patcher.hpp>
 #include <brass/codegen/jit_exec.hpp>
 #include <atomic>
+#include <cstring>
 #include <iostream>
 #include <mutex>
 
@@ -51,6 +52,16 @@ static inline void flush_code_cache(void* addr, size_t size) noexcept {
 
 template <typename T>
 static inline void atomic_store_release(T* ptr, T val) noexcept {
+    if (reinterpret_cast<uintptr_t>(ptr) % alignof(T) != 0) {
+        // An x64 rel32 field sits right after its opcode byte. x86 makes a
+        // store that stays inside one cache line atomic (callers check with
+        // is_cache_line_safe); atomic_ref requires natural alignment, and an
+        // AArch64 host (patching x64 code as data) faults on a misaligned
+        // release store. One plain store after a release fence.
+        std::atomic_thread_fence(std::memory_order_release);
+        std::memcpy(ptr, &val, sizeof(T));
+        return;
+    }
 #if defined(__cpp_lib_atomic_ref)
     std::atomic_ref<T> ref(*ptr);
     ref.store(val, std::memory_order_release);

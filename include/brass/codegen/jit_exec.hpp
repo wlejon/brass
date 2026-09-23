@@ -266,10 +266,15 @@ private:
     void* pdata_table_ = nullptr;
     size_t pdata_count_ = 0;
     uintptr_t code_base_ = 0;
+    // DWARF unwind registration (non-Windows): what __register_frame was
+    // given, the whole .eh_frame or, on Apple, each FDE.
+    std::vector<void*> registered_fdes_;
     SchedOptions sched_opts_;
 
     void register_seh_tables(const object::ObjectFile& obj, uint8_t* base_ptr);
     void unregister_seh_tables();
+    void register_eh_frame(uint8_t* eh_frame);
+    void unregister_eh_frame();
 };
 
 } // namespace brass::codegen

@@ -87,6 +87,10 @@ private:
     // Register masks over the interval's class (bit = PReg::code).
     uint32_t get_occupied_regs(const LiveInterval& interval) const;
     uint32_t get_hard_blocked_regs(const LiveInterval& interval) const;
+    // True for a vector value that no callee-saved register holds in full:
+    // AAPCS64 preserves only the low 64 bits of V8..V15, Win64 only the low
+    // 128 bits of XMM6..XMM15. Such a value is spilled across a call.
+    bool fpr_wider_than_callee_saved(const VReg& vreg) const;
     int32_t allocate_spill_slot(bool is_gcref, uint8_t size);
     int32_t allocate_spill_slot(bool is_gcref) { return allocate_spill_slot(is_gcref, 8); }
     void rewrite_instructions();

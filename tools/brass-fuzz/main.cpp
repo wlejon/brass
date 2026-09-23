@@ -22,6 +22,9 @@
 #include <climits>
 #include <cstdint>
 #include <filesystem>
+#if !defined(_WIN32)
+#include <sys/wait.h>
+#endif
 
 using namespace brass;
 using namespace brass::fuzz;
@@ -48,9 +51,16 @@ static void print_usage(const char* prog) {
               << "  --repro=<path>             Re-run a reproducer (reads its ARGS, PIPELINE and SKIP lines);\n"
               << "                             exits 0 on pass, 2 on failure, 3 on a failure other than\n"
               << "                             --expect-class=<class> when that is given\n"
-              << "  --repro-dir=<dir>          Directory for reproducer files (default: .)\n"
+              << "  --dump-opt=<path>          With --repro: write the module after the pipeline as a\n"
+              << "                             reproducer and exit (its JIT-unopt tier runs that code)\n"
+              << "  --repro-dir=<dir>         Directory for reproducer files (default: .)\n"
               << "  --chunk-size=<N>           Run the campaign as child processes of N programs each, so\n"
               << "                             a fault that kills the process loses one chunk only\n"
+              << "  --jit-only                 Compare only the JIT tiers against the interpreter (the\n"
+              << "                             interpreter-on-optimized and bytecode tiers are skipped)\n"
+              << "  --unopt-only               Compare only the unoptimized JIT against the interpreter;\n"
+              << "                             no pass runs, so a backend bug minimizes on its own\n"
+              << "  --no-fast-interp           Skip the bytecode (FastInterpreter) tiers\n"
               << "  --sandboxed                Enable OS process isolation & memory quota (Windows Job Objects)\n";
 }
 
@@ -107,11 +117,43 @@ std::string entry_name(const Module& mod) {
     return "fuzz_fn";
 }
 
+// std::system() returns the exit code on Windows and a wait status elsewhere.
+int system_exit_code(int rc) {
+#if defined(_WIN32)
+    return rc;
+#else
+    return (rc != -1 && WIFEXITED(rc)) ? WEXITSTATUS(rc) : -1;
+#endif
+}
+
+const char* null_device() {
+#if defined(_WIN32)
+    return "NUL";
+#else
+    return "/dev/null";
+#endif
+}
+
 bool read_file(const std::string& path, std::string& out) {
     std::ifstream file(path);
     if (!file.is_open()) return false;
     out.assign((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     return true;
+}
+
+// A std::system() line that re-runs this tool with `args`, stdout and
+// stderr going to `out` (a quoted path; empty discards them).
+std::string self_command(const std::string& self, const std::string& args, const std::string& out) {
+    const std::string child = "\"" + self + "\"" + args + " >" + (out.empty() ? null_device() : out) + " 2>&1";
+#if defined(_WIN32)
+    // cmd.exe strips the outer quote pair of a /c line that starts with one.
+    return "\"" + child + "\"";
+#else
+    // A cross build runs under an emulator (qemu-user without binfmt, see
+    // scripts/linux-tests.sh); the child has to be started through it too.
+    const char* exec_prefix = std::getenv("BRASS_FUZZ_EXEC_PREFIX");
+    return (exec_prefix && *exec_prefix ? std::string(exec_prefix) + " " : std::string()) + child;
+#endif
 }
 
 // Runs the campaign as child processes of `chunk` programs each. A codegen
@@ -142,9 +184,9 @@ int run_chunked(int argc, char** argv, uint64_t first_seed, uint32_t iterations,
         const uint32_t n = std::min(chunk, iterations - done);
         const uint64_t seed = first_seed + done;
         const std::string log = repro_dir + "/chunk_" + std::to_string(seed) + ".log";
-        const std::string cmd = "\"\"" + std::string(argv[0]) + "\"" + passthrough + " --seed=" +
-                                std::to_string(seed) + " --iterations=" + std::to_string(n) + " >\"" + log +
-                                "\" 2>&1\"";
+        const std::string cmd = self_command(argv[0], passthrough + " --seed=" + std::to_string(seed) +
+                                                          " --iterations=" + std::to_string(n),
+                                            "\"" + log + "\"");
         const int rc = std::system(cmd.c_str());
         std::string text;
         read_file(log, text);
@@ -246,6 +288,10 @@ int main(int argc, char** argv) {
     bool skip_given = false;
     std::vector<std::string> skip_passes;
     uint32_t chunk_size = 0;
+    bool jit_only = false;
+    bool unopt_only = false;
+    bool no_fast_interp = false;
+    std::string dump_opt_path;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -292,10 +338,18 @@ int main(int argc, char** argv) {
             minimize_path = arg.substr(11);
         } else if (arg.rfind("--repro=", 0) == 0) {
             repro_path = arg.substr(8);
+        } else if (arg.rfind("--dump-opt=", 0) == 0) {
+            dump_opt_path = arg.substr(11);
         } else if (arg.rfind("--repro-dir=", 0) == 0) {
             repro_dir = arg.substr(12);
         } else if (arg == "--sandboxed") {
             sandboxed = true;
+        } else if (arg == "--jit-only") {
+            jit_only = true;
+        } else if (arg == "--unopt-only") {
+            unopt_only = true;
+        } else if (arg == "--no-fast-interp") {
+            no_fast_interp = true;
         } else if (arg.rfind("--chunk-size=", 0) == 0) {
             chunk_size = static_cast<uint32_t>(std::stoul(arg.substr(13)));
         } else {
@@ -317,6 +371,24 @@ int main(int argc, char** argv) {
     diff_opts.pipeline = pipeline;
     diff_opts.bisect = bisect;
     diff_opts.skip_passes = skip_passes;
+    if (jit_only || no_fast_interp) {
+        diff_opts.tier4_fast_interp = false;
+        diff_opts.tier5_fast_interp_opt = false;
+    }
+    if (jit_only) {
+        // The interpreter tiers are target-independent; an emulated target
+        // (scripts/linux-tests.sh runs aarch64 under qemu) spends its time
+        // on the tiers that run its own machine code.
+        diff_opts.tier3_interp_opt = false;
+        diff_opts.tier4_fast_interp = false;
+        diff_opts.tier5_fast_interp_opt = false;
+    }
+    if (unopt_only) {
+        diff_opts.tier2_jit_opt = false;
+        diff_opts.tier3_interp_opt = false;
+        diff_opts.tier4_fast_interp = false;
+        diff_opts.tier5_fast_interp_opt = false;
+    }
 
     // Modes 1 and 2 work on an existing reproducer.
     const std::string& input_path = !repro_path.empty() ? repro_path : minimize_path;
@@ -342,6 +414,32 @@ int main(int argc, char** argv) {
         DiffFuzzer fuzzer(diff_opts);
         const std::string fn_name = entry_name(*mod);
 
+        if (!repro_path.empty() && !dump_opt_path.empty()) {
+            // The module after the pipeline, as a reproducer of its own: its
+            // unoptimized JIT tier then runs exactly the code the optimized
+            // tier ran, and a codegen bug minimizes without the passes.
+            OptimizeOutcome opt = fuzzer.optimize(*mod);
+            if (!opt.module) {
+                std::cerr << "Error: the pipeline did not produce a module (" << opt.pass << "): " << opt.message
+                          << "\n";
+                return 1;
+            }
+            std::ofstream out(dump_opt_path, std::ios::binary);
+            std::istringstream header_lines(source);
+            std::string line;
+            while (std::getline(header_lines, line)) {
+                if (line.rfind("; ARGS:", 0) == 0) out << line << "\n";
+            }
+            out << "; PIPELINE: " << pipeline_name(diff_opts.pipeline) << "\n"
+                << "; optimized by brass-fuzz --dump-opt from " << repro_path << "\n\n"
+                << to_string(*opt.module);
+            if (!out) {
+                std::cerr << "Error: could not write '" << dump_opt_path << "'\n";
+                return 1;
+            }
+            std::cout << "Wrote the optimized module to '" << dump_opt_path << "'\n";
+            return 0;
+        }
         if (!repro_path.empty()) {
             std::cout << "Replaying '" << repro_path << "' on '" << fn_name << "' with pipeline "
                       << pipeline_name(diff_opts.pipeline) << "...\n";
@@ -388,10 +486,15 @@ int main(int argc, char** argv) {
         const std::string self = argv[0];
         auto oracle = [&](const Module& m, std::string_view) -> bool {
             write_candidate(m, cand_path);
-            const std::string cmd = "\"\"" + self + "\" --repro=\"" + cand_path + "\" --expect-class=" +
-                                    target_class + " --timeout-ms=" + std::to_string(timeout_ms) +
-                                    (bisect ? "" : " --no-bisect") + " >NUL 2>&1\"";
-            return std::system(cmd.c_str()) == 2;
+            const std::string cmd = self_command(self, " --repro=\"" + cand_path + "\" --expect-class=" +
+                                                           target_class + " --timeout-ms=" +
+                                                           std::to_string(timeout_ms) +
+                                                           (bisect ? "" : " --no-bisect") +
+                                                           (jit_only ? " --jit-only" : "") +
+                                                           (unopt_only ? " --unopt-only" : "") +
+                                                           (no_fast_interp ? " --no-fast-interp" : ""),
+                                                 "");
+            return system_exit_code(std::system(cmd.c_str())) == 2;
         };
         if (!oracle(*mod, fn_name)) {
             std::cout << "Could not reduce: the reproducer does not fail with " << target_class << ".\n";

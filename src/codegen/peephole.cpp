@@ -90,6 +90,19 @@ bool PeepholeOptimizer::defines_register(const LirInst& inst, PReg reg) noexcept
     return false;
 }
 
+bool PeepholeOptimizer::is_reserved_scratch(PReg reg) const noexcept {
+    if (!reg.is_valid()) return false;
+    if (fn_.calling_conv.target().is_aarch64()) {
+        // X12, X13, X15 use scratches, X14 def scratch, X16/X17 emitter;
+        // V26, V28, V29 use, V27 def, V30/V31 emitter.
+        return reg.is_gpr() ? (reg.code >= 12 && reg.code <= 17) : (reg.code >= 26 && reg.code <= 31);
+    }
+    // R10, R11, R15 use scratches, R14 def scratch; XMM12-XMM14 use,
+    // XMM15 def (and the emitters' vector scratch).
+    return reg.is_gpr() ? (reg.code == 10 || reg.code == 11 || reg.code == 14 || reg.code == 15)
+                        : (reg.code >= 12 && reg.code <= 15);
+}
+
 bool PeepholeOptimizer::touches_memory(const LirInst& inst) noexcept {
     if (inst.is_call() || inst.opcode == LirOpcode::Safepoint) return true;
     for (const auto& d : inst.defs) {
@@ -138,6 +151,12 @@ bool PeepholeOptimizer::eliminate_load_after_store(LirBlock& block) {
 
         const LirOperand& store_loc = store_inst.defs[0];
         PReg store_src_reg = store_inst.uses[0].preg_val;
+        // A spilled definition is stored from the def scratch (XMM15 /
+        // R14 / V27 / X14), which the next fabs, memory-to-memory move or
+        // spilled def reuses without a LIR def: forwarding it to a later
+        // reload read a fabs mask instead of a 0.5 constant (Linux x64
+        // fuzz seeds 1103, 2195).
+        if (is_reserved_scratch(store_src_reg)) continue;
 
         for (size_t j = i + 1; j < block.instructions.size(); ++j) {
             auto& candidate = *block.instructions[j];
@@ -413,6 +432,7 @@ bool PeepholeOptimizer::propagate_copies(LirBlock& block) {
         PReg dst_reg = mov_inst.defs[0].preg_val;
         PReg src_reg = mov_inst.uses[0].preg_val;
         uint8_t sz = mov_inst.defs[0].size;
+        if (is_reserved_scratch(src_reg)) continue;  // see eliminate_load_after_store
 
         if (src_reg.is_gpr()) {
             if (fn_.calling_conv.target().is_aarch64()) {

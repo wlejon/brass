@@ -25,20 +25,35 @@ std::vector<FPR> AArch64FrameLayout::get_saved_callee_fprs(const codegen::FrameI
     return result;
 }
 
+namespace {
+
+// FP-relative offsets of the spill area and of the locals after it. Both
+// start 16-byte aligned (FP itself is): a 16-byte spill slot is then always
+// reachable by the scaled `ldr q` / `str q` offset, and a local keeps the
+// 16-byte alignment an alloca may ask for.
+size_t spill_area_offset(size_t num_gprs, size_t num_fprs) {
+    return (16 + num_gprs * 8 + num_fprs * 8 + 15) & ~size_t(15);
+}
+
+size_t local_area_offset(size_t num_gprs, size_t num_fprs, size_t num_spill_slots) {
+    return (spill_area_offset(num_gprs, num_fprs) + num_spill_slots * 8 + 15) & ~size_t(15);
+}
+
+} // namespace
+
 void AArch64FrameLayout::compute_layout(codegen::FrameInfo& frame, const CallingConvention& cc) {
     (void)cc;
     auto saved_gprs = get_saved_callee_gprs(frame);
     auto saved_fprs = get_saved_callee_fprs(frame);
 
-    size_t gpr_bytes = saved_gprs.size() * 8;
-    size_t fpr_bytes = saved_fprs.size() * 8;
-    size_t spill_bytes = frame.num_spill_slots * 8;
     size_t local_bytes = (frame.local_frame_bytes + 15) & ~size_t(15);
     frame.local_frame_bytes = local_bytes;
     size_t outgoing_bytes = (frame.outgoing_arg_space + 15) & ~size_t(15);
-    size_t header_bytes = 16; // FP (X29) + LR (X30)
 
-    size_t raw_total = header_bytes + gpr_bytes + fpr_bytes + spill_bytes + local_bytes + outgoing_bytes;
+    // FP/LR, callee GPRs, callee FPRs, spills, locals (see the *_address
+    // functions below), then the outgoing argument area under FP.
+    size_t raw_total = local_area_offset(saved_gprs.size(), saved_fprs.size(), frame.num_spill_slots) +
+                       local_bytes + outgoing_bytes;
     // Align total frame size to 16 bytes
     frame.total_frame_size = (raw_total + 15) & ~size_t(15);
     frame.is_leaf = (!frame.has_calls && frame.num_spill_slots == 0 && saved_gprs.empty() && saved_fprs.empty() && outgoing_bytes == 0 && local_bytes == 0);
@@ -72,7 +87,7 @@ MemAddress AArch64FrameLayout::callee_fpr_address(FPR reg, const codegen::FrameI
 MemAddress AArch64FrameLayout::spill_slot_address(int32_t slot_idx, const codegen::FrameInfo& frame) {
     auto saved_gprs = get_saved_callee_gprs(frame);
     auto saved_fprs = get_saved_callee_fprs(frame);
-    size_t base_offset = 16 + saved_gprs.size() * 8 + saved_fprs.size() * 8;
+    size_t base_offset = spill_area_offset(saved_gprs.size(), saved_fprs.size());
 
     int64_t disp = static_cast<int64_t>(base_offset + static_cast<size_t>(slot_idx) * 8);
     return ptr(GPR::FP, disp);
@@ -81,7 +96,7 @@ MemAddress AArch64FrameLayout::spill_slot_address(int32_t slot_idx, const codege
 MemAddress AArch64FrameLayout::local_frame_address(int32_t offset, const codegen::FrameInfo& frame) {
     auto saved_gprs = get_saved_callee_gprs(frame);
     auto saved_fprs = get_saved_callee_fprs(frame);
-    size_t base_offset = 16 + saved_gprs.size() * 8 + saved_fprs.size() * 8 + frame.num_spill_slots * 8;
+    size_t base_offset = local_area_offset(saved_gprs.size(), saved_fprs.size(), frame.num_spill_slots);
     int64_t disp = static_cast<int64_t>(base_offset) + offset;
     return ptr(GPR::FP, disp);
 }

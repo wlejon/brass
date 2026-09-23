@@ -176,18 +176,31 @@ void partition_x64_win64_invoke_args(
 
 #if defined(__x86_64__) || defined(_M_X64)
 #if defined(__GNUC__) || defined(__clang__)
+// DWARF CFI for the thunk's frame on ELF / Mach-O (the compiler opens the
+// FDE of a naked function as for any other), so that a C++ exception thrown
+// by a host function the JIT code called unwinds through it. MinGW describes
+// frames with SEH directives instead, and this thunk has no SEH info.
+#if defined(_WIN32)
+#define BRASS_THUNK_CFI(s) ""
+#else
+#define BRASS_THUNK_CFI(s) s
+#endif
 extern "C" __attribute__((naked)) void x64_sysv_invoke_thunk(
     const X64SysVInvokeArgs* args,
     X64SysVInvokeResult* result
 ) {
     __asm__ volatile(
         "pushq %rbp\n\t"
+        BRASS_THUNK_CFI(".cfi_def_cfa_offset 16\n\t.cfi_offset %rbp, -16\n\t")
         "movq %rsp, %rbp\n\t"
+        BRASS_THUNK_CFI(".cfi_def_cfa_register %rbp\n\t")
         "pushq %r12\n\t"
         "pushq %r13\n\t"
         "pushq %r14\n\t"
         "pushq %r15\n\t"
         "pushq %rbx\n\t"
+        BRASS_THUNK_CFI(".cfi_offset %r12, -24\n\t.cfi_offset %r13, -32\n\t.cfi_offset %r14, -40\n\t"
+                        ".cfi_offset %r15, -48\n\t.cfi_offset %rbx, -56\n\t")
 
         "movq %rdi, %r12\n\t"          // r12 = args
         "movq %rsi, %r13\n\t"          // r13 = result
@@ -256,9 +269,11 @@ extern "C" __attribute__((naked)) void x64_sysv_invoke_thunk(
         "popq %r13\n\t"
         "popq %r12\n\t"
         "popq %rbp\n\t"
+        BRASS_THUNK_CFI(".cfi_def_cfa %rsp, 8\n\t")
         "ret\n\t"
     );
 }
+#undef BRASS_THUNK_CFI
 #endif
 
 #if defined(_WIN32) && !defined(_MSC_VER) && (defined(__GNUC__) || defined(__clang__))

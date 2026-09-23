@@ -1,5 +1,6 @@
 #include <brass/target/macho_dylib_writer.hpp>
 #include <brass/object/macho_writer.hpp>
+#include <brass/object/elf_writer.hpp>
 #include <brass/object/aarch64_reloc.hpp>
 #include "image_file.hpp"
 #include "image_util.hpp"
@@ -12,7 +13,7 @@
 
 // A Mach-O dylib from one object file.
 //
-//   __TEXT        __text, __stubs
+//   __TEXT        __text, __stubs, __eh_frame
 //   __DATA_CONST  __got, __const          (SG_READ_ONLY: writable while dyld
 //                                          binds, read-only afterwards)
 //   __DATA        __data
@@ -37,6 +38,9 @@ constexpr uint32_t LC_UUID = 0x1b;
 constexpr uint32_t SG_READ_ONLY = 0x10;
 constexpr uint32_t S_NON_LAZY_SYMBOL_POINTERS = 0x6;
 constexpr uint32_t S_SYMBOL_STUBS = 0x8;
+// S_COALESCED | S_ATTR_NO_TOC | S_ATTR_STRIP_STATIC_SYMS | S_ATTR_LIVE_SUPPORT,
+// what ld64 gives __eh_frame.
+constexpr uint32_t S_EH_FRAME_FLAGS = 0x6800000Bu;
 
 std::string macho_name(const std::string& name) {
     if (name.empty() || name[0] == '_') return name;
@@ -103,6 +107,15 @@ std::vector<uint8_t> MachODylibWriter::write() {
     // words: dyld slides the image without writing into it.
     relax_got_loads(working_obj);
     const uint64_t base = options_.image_base;
+
+    // DWARF CFI in __TEXT,__eh_frame, which libunwind searches when there is
+    // no __unwind_info, so that a C++ exception thrown from a host callback
+    // unwinds through this image's frames.
+    if (!working_obj.functions.empty() && !working_obj.get_section(".eh_frame")) {
+        auto& eh = working_obj.get_or_create_section(
+            ".eh_frame", SectionKind::EhFrame, SectionFlags::Read | SectionFlags::Alloc, 8);
+        ElfCfiBuilder::build_eh_frame(working_obj, eh);
+    }
 
     // ---- the object's sections ---------------------------------------------
     const Section* text_sec = working_obj.get_section(".text");
@@ -197,6 +210,9 @@ std::vector<uint8_t> MachODylibWriter::write() {
         placed[stubs_idx].reserved1 = 0;           // first indirect symbol
         placed[stubs_idx].reserved2 = stub_size;
         placed[stubs_idx].data.assign(nimports * stub_size, 0);
+    }
+    if (const Section* eh_sec = working_obj.get_section(".eh_frame"); eh_sec && !eh_sec->data.empty()) {
+        add_section(text_seg, "__eh_frame", S_EH_FRAME_FLAGS, 3, eh_sec);
     }
     size_t got_idx = SIZE_MAX;
     if (nimports || has_const) {

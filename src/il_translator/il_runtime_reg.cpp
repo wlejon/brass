@@ -252,7 +252,7 @@ void register_all_runtime_symbols_generic(Engine& jit) {
 
     set_coro_symbol_resolver(&bronze_resolve_function);
 
-    reg("brass_gc_write_barrier", reinterpret_cast<void*>(&brass_gc_write_barrier));
+    reg("brass_gc_write_barrier", reinterpret_cast<void*>(&brass_default_gc_write_barrier));
     reg("brass_gc_card_table_base", reinterpret_cast<void*>(&brass_gc_card_table_base));
     reg("brass_gc_heap_base", reinterpret_cast<void*>(&brass_gc_heap_base));
     reg("bronze_create_async_machine", reinterpret_cast<void*>(&bronze_create_async_machine));
