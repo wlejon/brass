@@ -17,6 +17,10 @@
 #include <cstdint>
 #include <cstddef>
 
+namespace brass::runtime {
+class FunctionDispatchTable;
+}
+
 namespace brass::codegen {
 
 class BaselineCompiledFunction {
@@ -80,6 +84,13 @@ public:
     void register_external_symbol(std::string_view name, void* addr);
     void set_symbol_resolver(BaselineSymbolResolver resolver);
 
+    // The program whose handles resolve_symbol() falls back to and
+    // compile_module() publishes into. Null, the default, is the default
+    // program (FunctionDispatchTable::instance()). The table must outlive
+    // the compiler and every function it compiled.
+    void set_dispatch_table(runtime::FunctionDispatchTable* table);
+    runtime::FunctionDispatchTable& dispatch_table() const;
+
     // A direct call or func_addr whose symbol does not resolve at compile
     // time (x64) goes through a per-symbol stub that resolves on first call:
     // through register_external_symbol, the custom resolver or the dispatch
@@ -109,6 +120,7 @@ private:
     mutable std::mutex symbols_mutex_;
     std::unordered_map<std::string, void*> symbols_;
     BaselineSymbolResolver custom_resolver_;
+    runtime::FunctionDispatchTable* dispatch_table_ = nullptr; // under symbols_mutex_
     std::shared_ptr<LazySymbolTable> lazy_;
 };
 

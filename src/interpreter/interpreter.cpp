@@ -19,11 +19,15 @@ Interpreter::Interpreter(size_t gc_semispace_size)
     register_builtin_host_functions();
 }
 
+runtime::FunctionDispatchTable& Interpreter::dispatch_table() const noexcept {
+    return dispatch_table_ ? *dispatch_table_ : runtime::FunctionDispatchTable::instance();
+}
+
 RuntimeValue Interpreter::run(const Function& fn, const std::vector<RuntimeValue>& args) {
     if (fn.parent()) {
         module_ = fn.parent();
         runtime::TieringRegistry::instance().set_active_module(fn.parent());
-        runtime::FunctionDispatchTable::instance().get_or_create(fn.name(), &fn);
+        dispatch_table().get_or_create(fn.name(), &fn);
     }
     return execute_function(fn, args);
 }
@@ -92,7 +96,7 @@ RuntimeValue Interpreter::execute_function(const Function& fn, const std::vector
         runtime::TieringRegistry::instance().set_active_module(fn.parent());
     }
 
-    auto* handle = runtime::FunctionDispatchTable::instance().find(fn.name());
+    auto* handle = dispatch_table().find(fn.name());
     if (handle && handle->mir_function() == &fn) {
         void* native_code = handle->native_entry();
         if (native_code != nullptr) {
@@ -565,7 +569,7 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                     RuntimeValue call_res;
                     const Function* target_fn = module_ ? module_->get_function(callee) : nullptr;
                     if (target_fn) {
-                        runtime::FunctionDispatchTable::instance().get_or_create(callee, target_fn);
+                        dispatch_table().get_or_create(callee, target_fn);
                         call_res = execute_function(*target_fn, call_args);
                     } else {
                         auto it = external_functions_.find(std::string(callee));

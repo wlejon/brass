@@ -226,6 +226,15 @@ FastFnInfo& FastInterpreter::fn_info(const BytecodeFunction& bfn, const Function
     return ref;
 }
 
+void FastInterpreter::set_dispatch_table(runtime::FunctionDispatchTable* table) {
+    dispatch_table_ = table;
+    invalidate_call_caches();
+}
+
+runtime::FunctionDispatchTable& FastInterpreter::dispatch_table() const noexcept {
+    return dispatch_table_ ? *dispatch_table_ : runtime::FunctionDispatchTable::instance();
+}
+
 void FastInterpreter::resolve_call_target(FastFnInfo& info, uint32_t cs_idx) {
     const uint64_t gen = runtime::registry_generation();
     const CallSiteInfo& cs = info.bfn->call_sites[cs_idx];
@@ -247,7 +256,7 @@ void FastInterpreter::resolve_call_target(FastFnInfo& info, uint32_t cs_idx) {
         auto it = external_functions_.find(t.name);
         if (it != external_functions_.end()) t.host = &it->second;
     }
-    t.handle = runtime::FunctionDispatchTable::instance().find(name);
+    t.handle = dispatch_table().find(name);
     // A miss is never cached: the next call resolves again.
     const bool found = t.callee || t.host || (t.handle && t.handle->native_entry());
     t.epoch = found ? resolve_epoch_ : 0;
@@ -267,7 +276,7 @@ void FastInterpreter::resolve_indirect_target(FastCallTarget& t, uintptr_t ptr) 
         r.callee = &fn_info(*get_or_compile(*f), f);
         r.callee_mir = f;
         r.name = std::string(f->name());
-        r.handle = runtime::FunctionDispatchTable::instance().find(f->name());
+        r.handle = dispatch_table().find(f->name());
     } else if (auto hit = host_function_pointers_.find(ptr); hit != host_function_pointers_.end()) {
         r.host = &hit->second;
     } else {
@@ -418,7 +427,7 @@ RuntimeValue FastInterpreter::run(const Function& fn, const std::vector<RuntimeV
     }
     release_retired();
 
-    auto* handle = runtime::FunctionDispatchTable::instance().find(fn.name());
+    auto* handle = dispatch_table().find(fn.name());
     if (handle && handle->mir_function() == &fn && handle->native_entry() != nullptr) {
         return handle->call_native(args);
     }

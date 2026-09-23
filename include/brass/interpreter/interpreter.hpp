@@ -17,6 +17,10 @@
 
 namespace brass {
 
+namespace runtime {
+class FunctionDispatchTable;
+}
+
 class Interpreter;
 class GenerationalGC;
 
@@ -70,6 +74,12 @@ public:
     // Module management
     void set_module(const Module* mod) noexcept { module_ = mod; }
     const Module* module() const noexcept { return module_; }
+
+    // The program whose function handles calls are registered in and routed
+    // through; null (the default) is FunctionDispatchTable::instance(). The
+    // table must outlive every call made through it.
+    void set_dispatch_table(runtime::FunctionDispatchTable* table) noexcept { dispatch_table_ = table; }
+    runtime::FunctionDispatchTable& dispatch_table() const noexcept;
 
     // Garbage Collector access
     MiniCheneyGC& gc() noexcept { return gc_; }
@@ -132,6 +142,7 @@ private:
     void register_builtin_host_functions();
 
     const Module* module_ = nullptr;
+    runtime::FunctionDispatchTable* dispatch_table_ = nullptr;
     MiniCheneyGC gc_;
     GenerationalGC* gen_gc_ = nullptr;
 

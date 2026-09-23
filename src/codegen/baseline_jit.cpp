@@ -327,6 +327,16 @@ void BaselineJitCompiler::set_symbol_resolver(BaselineSymbolResolver resolver) {
     custom_resolver_ = std::move(resolver);
 }
 
+void BaselineJitCompiler::set_dispatch_table(runtime::FunctionDispatchTable* table) {
+    std::lock_guard<std::mutex> lock(symbols_mutex_);
+    dispatch_table_ = table;
+}
+
+runtime::FunctionDispatchTable& BaselineJitCompiler::dispatch_table() const {
+    std::lock_guard<std::mutex> lock(symbols_mutex_);
+    return dispatch_table_ ? *dispatch_table_ : runtime::FunctionDispatchTable::instance();
+}
+
 void* BaselineJitCompiler::lazy_stub(std::string_view name) {
     return lazy_->stub_for(name);
 }
@@ -345,7 +355,7 @@ void* BaselineJitCompiler::resolve_symbol(std::string_view name) const {
         void* ptr = custom(name);
         if (ptr) return ptr;
     }
-    auto* handle = runtime::FunctionDispatchTable::instance().find(name);
+    auto* handle = dispatch_table().find(name);
     if (handle && handle->native_entry()) {
         return handle->native_entry();
     }
@@ -364,16 +374,17 @@ std::vector<BaselineCompiledFunction> BaselineJitCompiler::compile_module(const 
     std::vector<BaselineCompiledFunction> results;
     results.reserve(mod.function_count());
 
+    runtime::FunctionDispatchTable& table = dispatch_table();
     for (const auto* fn : mod.functions()) {
         if (!fn) continue;
-        runtime::FunctionDispatchTable::instance().get_or_create(fn->name(), fn);
+        table.get_or_create(fn->name(), fn);
     }
 
     for (auto it = mod.functions().rbegin(); it != mod.functions().rend(); ++it) {
         const auto* fn = *it;
         if (!fn) continue;
         results.push_back(compile(*fn, target));
-        auto* handle = runtime::FunctionDispatchTable::instance().get_or_create(fn->name(), fn);
+        auto* handle = table.get_or_create(fn->name(), fn);
         handle->set_native_entry(results.back().entry_point());
         handle->set_tier(runtime::TierLevel::Tier1_Baseline);
         handle->set_baseline_function(std::make_shared<BaselineCompiledFunction>(results.back()));

@@ -127,9 +127,31 @@ private:
     std::vector<Type> param_types_;
 };
 
+// The function handles of one program, keyed by name within it.
+//
+// A default-constructed table is an owned, per-program table: two programs
+// may each have a function of the same name, and each routes calls to its
+// own. The table owns its handles and, through them, their compiled code
+// (baseline code, tier-2 engines, deopt resumers): destroying it retires
+// every handle, frees the code and moves registry_generation(), so
+// interpreters re-resolve instead of reusing a pointer into it. It must
+// outlive the modules its handles point into being destroyed (destroying a
+// module a live owned table still routes to is a fatal error), and it must
+// outlive every interpreter, compiler and installer given it.
+//
+// instance() is the default program: the process-wide table everything uses
+// unless given another. It keeps the old stopgap: ~Module detaches its
+// handles from the dying module's functions.
 class FunctionDispatchTable {
 public:
+    FunctionDispatchTable();
+    ~FunctionDispatchTable();
+
+    FunctionDispatchTable(const FunctionDispatchTable&) = delete;
+    FunctionDispatchTable& operator=(const FunctionDispatchTable&) = delete;
+
     static FunctionDispatchTable& instance();
+    bool is_default() const noexcept { return is_default_; }
 
     FunctionHandle* get_or_create(std::string_view name, const Function* fn = nullptr);
     FunctionHandle* find(std::string_view name) const;
@@ -137,21 +159,25 @@ public:
     void register_handle(std::unique_ptr<FunctionHandle> handle);
     void clear();
 
-    // Handles are keyed by name and outlive the MIR they were registered
-    // with; a later Function allocated at a dead one's address would
-    // otherwise match `mir_function() == &fn` and be routed to the dead
-    // function's native code. Detaches every handle from `mod`'s functions
-    // (native entries stay: other code may still call them by name).
+    // Default program only. Handles are keyed by name and outlive the MIR
+    // they were registered with; a later Function allocated at a dead one's
+    // address would otherwise match `mir_function() == &fn` and be routed to
+    // the dead function's native code. Detaches every handle from `mod`'s
+    // functions (native entries stay: other code may still call them by name).
     void forget_module(const Module& mod);
 
     size_t size() const;
     std::vector<FunctionHandle*> all_handles() const;
 
-    ~FunctionDispatchTable();
-
 private:
-    FunctionDispatchTable() = default;
+    struct DefaultTag {};
+    explicit FunctionDispatchTable(DefaultTag);
+    friend void forget_module(const Module& mod) noexcept;
+    // Name of a live handle routing into one of `mod`'s functions, or empty.
+    std::string handle_into(const Module& mod) const;
     void retire_locked(std::unique_ptr<FunctionHandle> handle);
+
+    const bool is_default_ = false;
     mutable std::mutex mutex_;
     std::unordered_map<std::string, std::unique_ptr<FunctionHandle>> handles_;
     // Handles dropped by clear() or replaced by register_handle(); callers
@@ -159,9 +185,13 @@ private:
     std::vector<std::unique_ptr<FunctionHandle>> retired_;
 };
 
-// Called by ~Module: drops every runtime registry's raw pointer into `mod`
-// (dispatch-table handles, the tiering registry's active module) so none of
-// them can dangle or alias a later module allocated at the same address.
+using DispatchTable = FunctionDispatchTable;
+
+// Called by ~Module: drops the default program's raw pointers into `mod`
+// (dispatch-table handles, the tiering registry's active module, the
+// pipeline's persistent interpreter) so none of them can dangle or alias a
+// later module allocated at the same address. A live owned table that still
+// routes a function to `mod` is a fatal error.
 void forget_module(const Module& mod) noexcept;
 
 // Whether every guard of `optimized` can deoptimize into `tier0` (the
@@ -178,9 +208,16 @@ struct CodeInstallResult {
     size_t code_size = 0;
 };
 
+// Installs tier-2 code into handles of one dispatch table (the default
+// program unless given another, which must outlive the installer): other
+// functions of the compiled module are published to that table's handles,
+// and the deopt continuation resumes in an interpreter routed through it.
 class CodeInstaller {
 public:
     explicit CodeInstaller(const Target& target = Target::host());
+    explicit CodeInstaller(FunctionDispatchTable& table, const Target& target = Target::host());
+
+    FunctionDispatchTable& dispatch_table() const noexcept { return *table_; }
     ~CodeInstaller() = default;
 
     CodeInstallResult install_tier2(
@@ -201,6 +238,7 @@ public:
 
 private:
     Target target_;
+    FunctionDispatchTable* table_;
     mutable std::mutex symbols_mutex_;
     std::unordered_map<std::string, void*> external_symbols_;
 };

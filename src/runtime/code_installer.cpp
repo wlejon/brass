@@ -11,6 +11,9 @@
 #include <brass/runtime/type_feedback.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/deopt.hpp>
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 #include <iostream>
 #include <unordered_set>
@@ -399,19 +402,71 @@ namespace {
 // Lets ~Module skip the table when it was never built or is already gone
 // (a static Module can outlive the function-local static table).
 std::atomic<bool> g_dispatch_table_alive{false};
+
+// The live owned tables, for ~Module's check. Never freed: modules destroyed
+// during static destruction still consult it.
+struct OwnedTables {
+    std::mutex mutex;
+    std::vector<const FunctionDispatchTable*> tables;
+};
+OwnedTables& owned_tables() {
+    static OwnedTables* t = new OwnedTables();
+    return *t;
+}
 } // namespace
 
+FunctionDispatchTable::FunctionDispatchTable() {
+    auto& reg = owned_tables();
+    std::lock_guard<std::mutex> lock(reg.mutex);
+    reg.tables.push_back(this);
+}
+
+FunctionDispatchTable::FunctionDispatchTable(DefaultTag) : is_default_(true) {}
+
 FunctionDispatchTable& FunctionDispatchTable::instance() {
-    static FunctionDispatchTable table;
+    static FunctionDispatchTable table{DefaultTag{}};
     g_dispatch_table_alive.store(true, std::memory_order_release);
     return table;
 }
 
 FunctionDispatchTable::~FunctionDispatchTable() {
-    g_dispatch_table_alive.store(false, std::memory_order_release);
+    if (is_default_) {
+        g_dispatch_table_alive.store(false, std::memory_order_release);
+        return;
+    }
+    {
+        auto& reg = owned_tables();
+        std::lock_guard<std::mutex> lock(reg.mutex);
+        auto& v = reg.tables;
+        v.erase(std::remove(v.begin(), v.end(), this), v.end());
+    }
+    // Release this program's code and deopt resumers, and make every
+    // interpreter's cached handle pointer stale before the memory goes.
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& [_, handle] : handles_) {
+        if (handle) handle->retire();
+    }
+    handles_.clear();
+    retired_.clear();
+    bump_registry_generation();
+}
+
+std::string FunctionDispatchTable::handle_into(const Module& mod) const {
+    const auto& fns = mod.functions();
+    if (fns.empty()) return {};
+    std::unordered_set<const Function*> dying(fns.begin(), fns.end());
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& [name, handle] : handles_) {
+        if (handle && dying.count(handle->mir_function()) != 0) return name;
+    }
+    return {};
 }
 
 void FunctionDispatchTable::forget_module(const Module& mod) {
+    if (!is_default_) {
+        throw std::logic_error("FunctionDispatchTable::forget_module: only the default program detaches "
+                               "modules; an owned table must be destroyed before its modules");
+    }
     const auto& fns = mod.functions();
     if (fns.empty()) return;
     std::unordered_set<const Function*> dying(fns.begin(), fns.end());
@@ -433,15 +488,30 @@ void FunctionDispatchTable::retire_locked(std::unique_ptr<FunctionHandle> handle
 }
 
 void forget_module(const Module& mod) noexcept {
+    std::string routed;
     try {
         if (g_dispatch_table_alive.load(std::memory_order_acquire)) {
             FunctionDispatchTable::instance().forget_module(mod);
         }
         TieringRegistry::forget_module(&mod);
         MultiTierPipeline::forget_module(&mod);
+        auto& reg = owned_tables();
+        std::lock_guard<std::mutex> lock(reg.mutex);
+        for (const FunctionDispatchTable* t : reg.tables) {
+            routed = t->handle_into(mod);
+            if (!routed.empty()) break;
+        }
     } catch (...) {
         // Allocation failure while building the lookup set: leaving a stale
         // pointer behind beats throwing out of a destructor.
+    }
+    if (!routed.empty()) {
+        std::fprintf(stderr,
+                     "brass: fatal: module '%s' destroyed while a live dispatch table still routes '%s' "
+                     "to it; destroy the table before its modules\n",
+                     std::string(mod.name()).c_str(), routed.c_str());
+        std::fflush(stderr);
+        std::abort();
     }
 }
 
@@ -514,7 +584,10 @@ std::vector<FunctionHandle*> FunctionDispatchTable::all_handles() const {
 // ============================================================================
 
 CodeInstaller::CodeInstaller(const Target& target)
-    : target_(target) {}
+    : target_(target), table_(&FunctionDispatchTable::instance()) {}
+
+CodeInstaller::CodeInstaller(FunctionDispatchTable& table, const Target& target)
+    : target_(target), table_(&table) {}
 
 void CodeInstaller::register_external_symbol(std::string_view name, void* address) {
     std::lock_guard<std::mutex> lock(symbols_mutex_);
@@ -606,10 +679,13 @@ CodeInstallResult CodeInstaller::install_tier2(
     // 5. Register the deopt continuation (a failed guard finishes the call
     //    in Tier 0), then store the engine lifetime holder and atomically
     //    publish the native entry point.
-    auto register_resumer = [](FunctionHandle& h, void* entry) {
+    // The resumer is unregistered when the handle retires, which the table
+    // does before it goes away, so capturing both raw is safe.
+    FunctionDispatchTable* table = table_;
+    auto register_resumer = [table](FunctionHandle& h, void* entry) {
         FunctionHandle* hp = &h;
-        register_deopt_resumer(entry, [hp](const DeoptFrame& frame) -> uint64_t {
-            return MultiTierPipeline::instance().resume_after_deopt(*hp, frame);
+        register_deopt_resumer(entry, [hp, table](const DeoptFrame& frame) -> uint64_t {
+            return MultiTierPipeline::instance().resume_after_deopt(*hp, frame, *table);
         });
         h.add_deopt_entry(entry);
     };
@@ -621,7 +697,7 @@ CodeInstallResult CodeInstaller::install_tier2(
     // Also update any other functions in the module if their handles exist in the dispatch table
     for (const Function* fn : module->functions()) {
         if (!fn || fn->name() == fn_name) continue;
-        FunctionHandle* other_handle = FunctionDispatchTable::instance().find(fn->name());
+        FunctionHandle* other_handle = table_->find(fn->name());
         if (other_handle && !other_handle->has_native_entry()) {
             void* other_ptr = jit->get_symbol_address(fn->name());
             std::string why;

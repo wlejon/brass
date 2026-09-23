@@ -23,6 +23,7 @@ class GenerationalGC;
 class FastInterpreter;
 namespace runtime {
 class FunctionHandle;
+class FunctionDispatchTable;
 }
 
 struct FastFrame;
@@ -57,6 +58,13 @@ public:
 
     void set_bytecode_module(const BytecodeModule* bmod);
     const BytecodeModule* bytecode_module() const noexcept { return bytecode_module_; }
+
+    // The program whose function handles calls are routed through (native
+    // code installed for a callee runs instead of its bytecode). Null, the
+    // default, is the default program (FunctionDispatchTable::instance()).
+    // The table must outlive every call made through it.
+    void set_dispatch_table(runtime::FunctionDispatchTable* table);
+    runtime::FunctionDispatchTable& dispatch_table() const noexcept;
 
     // GC access
     MiniCheneyGC& gc() noexcept { return gc_; }
@@ -206,6 +214,7 @@ private:
 
     const Module* module_ = nullptr;
     const BytecodeModule* bytecode_module_ = nullptr;
+    runtime::FunctionDispatchTable* dispatch_table_ = nullptr;
     MiniCheneyGC gc_;
     GenerationalGC* gen_gc_ = nullptr;
 

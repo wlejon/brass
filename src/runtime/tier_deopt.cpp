@@ -84,6 +84,11 @@ bool deopt_targets_valid(const Function& optimized, const Function* tier0, std::
 }
 
 uint64_t MultiTierPipeline::resume_after_deopt(FunctionHandle& handle, const DeoptFrame& frame) {
+    return resume_after_deopt(handle, frame, FunctionDispatchTable::instance());
+}
+
+uint64_t MultiTierPipeline::resume_after_deopt(FunctionHandle& handle, const DeoptFrame& frame,
+                                               FunctionDispatchTable& table) {
     const Function* fn = handle.mir_function();
     if (!fn) {
         deopt_fatal("optimized code of '" + std::string(handle.name()) + "' deoptimized but its MIR is gone");
@@ -129,6 +134,7 @@ uint64_t MultiTierPipeline::resume_after_deopt(FunctionHandle& handle, const Deo
     RuntimeValue result;
     if (config_.use_fast_interpreter()) {
         FastInterpreter interp;
+        interp.set_dispatch_table(&table);
         if (mod) {
             std::lock_guard<std::mutex> lock(mutex_);
             setup_fast_interpreter(interp, *mod);
@@ -137,6 +143,7 @@ uint64_t MultiTierPipeline::resume_after_deopt(FunctionHandle& handle, const Deo
     } else {
         // As execute() sets up the oracle interpreter.
         Interpreter interp;
+        interp.set_dispatch_table(&table);
         il::register_bronze_interpreter_symbols(&interp);
         result = stub ? interp.run(*stub, state) : interp.resume(*fn, frame.resume_id, state);
     }

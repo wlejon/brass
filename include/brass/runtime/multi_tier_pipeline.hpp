@@ -115,7 +115,10 @@ public:
     // the call in a fresh Tier-0 interpreter exactly as the interpreter's own
     // guard would. Returns the call's result bits. Inconsistent deopt state
     // is a fatal error: there is no correct value to return.
+    // The Tier-0 interpreter routes its calls through `table`, the program
+    // the handle belongs to.
     uint64_t resume_after_deopt(FunctionHandle& handle, const DeoptFrame& frame);
+    uint64_t resume_after_deopt(FunctionHandle& handle, const DeoptFrame& frame, FunctionDispatchTable& table);
     uint64_t tier2_deopts() const noexcept { return tier2_deopts_.load(std::memory_order_relaxed); }
     uint64_t tier2_invalidations() const noexcept { return tier2_invalidations_.load(std::memory_order_relaxed); }
 
