@@ -16,7 +16,6 @@
 #include <algorithm>
 #include <iostream>
 
-extern "C" void brass_tier1_record_invocation(const char* fn_name);
 extern "C" void brass_tier1_record_invocation_fb(void* feedback);
 
 namespace brass::codegen {
@@ -301,7 +300,6 @@ BaselineJitCompiler::BaselineJitCompiler(Target target)
     symbols_["brass_record_call_feedback"] = reinterpret_cast<void*>(&brass_record_call_feedback);
     symbols_["brass_record_property_feedback"] = reinterpret_cast<void*>(&brass_record_property_feedback);
     symbols_["brass_gc_write_barrier"] = reinterpret_cast<void*>(&brass_default_gc_write_barrier);
-    symbols_["brass_tier1_record_invocation"] = reinterpret_cast<void*>(&brass_tier1_record_invocation);
     symbols_["brass_tier1_record_invocation_fb"] = reinterpret_cast<void*>(&brass_tier1_record_invocation_fb);
     lazy_ = std::make_shared<LazySymbolTable>([this](std::string_view name) { return resolve_symbol(name); });
 }

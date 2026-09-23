@@ -24,6 +24,7 @@ runtime::FunctionDispatchTable& Interpreter::dispatch_table() const noexcept {
 }
 
 RuntimeValue Interpreter::run(const Function& fn, const std::vector<RuntimeValue>& args) {
+    runtime::ProgramScope program_scope(dispatch_table());
     if (fn.parent()) {
         module_ = fn.parent();
         dispatch_table().tiering().set_active_module(fn.parent());
@@ -599,7 +600,7 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                     RuntimeValue call_res;
                     auto fn_it = function_pointers_.find(callee_ptr);
                     if (fn_it != function_pointers_.end()) {
-                        runtime::FeedbackRegistry::instance()
+                        dispatch_table().tiering().type_feedback()
                             .get_or_create(fn.name())
                             .record_call_target(inst->site_id(), callee_ptr, fn_it->second->name());
                         call_res = execute_function(*fn_it->second, call_args);
@@ -716,10 +717,10 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                         frame.set_value(next_bb->param(i), target_args[i]);
                     }
 
-                    if (runtime::OsrCoordinator::instance().is_enabled() &&
-                        runtime::OsrCoordinator::instance().is_loop_backedge(fn, cur_bb, next_bb)) {
+                    if (dispatch_table().osr().is_enabled() &&
+                        dispatch_table().osr().is_loop_backedge(fn, cur_bb, next_bb)) {
                         RuntimeValue osr_res;
-                        if (runtime::OsrCoordinator::instance().try_osr_migration(*this, fn, next_bb, frame, osr_res)) {
+                        if (dispatch_table().osr().try_osr_migration(*this, fn, next_bb, frame, osr_res)) {
                             return osr_res;
                         }
                     }
@@ -748,10 +749,10 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                         frame.set_value(next_bb->param(i), target_args[i]);
                     }
 
-                    if (runtime::OsrCoordinator::instance().is_enabled() &&
-                        runtime::OsrCoordinator::instance().is_loop_backedge(fn, cur_bb, next_bb)) {
+                    if (dispatch_table().osr().is_enabled() &&
+                        dispatch_table().osr().is_loop_backedge(fn, cur_bb, next_bb)) {
                         RuntimeValue osr_res;
-                        if (runtime::OsrCoordinator::instance().try_osr_migration(*this, fn, next_bb, frame, osr_res)) {
+                        if (dispatch_table().osr().try_osr_migration(*this, fn, next_bb, frame, osr_res)) {
                             return osr_res;
                         }
                     }
@@ -787,10 +788,10 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                         frame.set_value(next_bb->param(i), target_args[i]);
                     }
 
-                    if (runtime::OsrCoordinator::instance().is_enabled() &&
-                        runtime::OsrCoordinator::instance().is_loop_backedge(fn, cur_bb, next_bb)) {
+                    if (dispatch_table().osr().is_enabled() &&
+                        dispatch_table().osr().is_loop_backedge(fn, cur_bb, next_bb)) {
                         RuntimeValue osr_res;
-                        if (runtime::OsrCoordinator::instance().try_osr_migration(*this, fn, next_bb, frame, osr_res)) {
+                        if (dispatch_table().osr().try_osr_migration(*this, fn, next_bb, frame, osr_res)) {
                             return osr_res;
                         }
                     }

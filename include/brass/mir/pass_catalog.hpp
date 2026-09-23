@@ -17,6 +17,10 @@
 // statistics sink); the enable_* switches are the pipeline's business, not
 // the factory's. A step whose options ask for cleanup (enable_dce) runs
 // scalar_cleanup or eliminate_dead_code on each function it changed.
+namespace brass::runtime {
+class FeedbackRegistry;
+}
+
 namespace brass {
 
 struct GvnPreStats;
@@ -70,9 +74,13 @@ PassStep ivsr(const LoopOptOptions& options);
 PassStep write_barrier_elim(bool dump_stats = false, std::ostream* report = nullptr);
 // Rewrites every patchable_call to a direct call (see InlinerOptions).
 PassStep devirtualize();
-// Feedback-driven devirtualization and inlining from the global
+// Feedback-driven devirtualization and inlining from the default program's
 // FeedbackRegistry.
 PassStep speculative_devirtualization(size_t max_callee_instruction_count = 120);
+// The same from `registry` (one program's type feedback), which must outlive
+// every run of the step.
+PassStep speculative_devirtualization(const runtime::FeedbackRegistry& registry,
+                                      size_t max_callee_instruction_count = 120);
 // Bottom-up inlining. Never devirtualizes: a pipeline that wants that runs
 // devirtualize() as its own step.
 PassStep inline_calls(const InlinerOptions& options);

@@ -58,7 +58,9 @@ void* bronze_resolve_function(const char* name) {
         void* ptr = g_active_jit->get_symbol_address(name);
         if (ptr) return ptr;
     }
-    auto* handle = runtime::FunctionDispatchTable::instance().find(name);
+    // The running program's handles (the default program's outside any
+    // ProgramScope).
+    auto* handle = runtime::current_program().find(name);
     if (handle) {
         return handle->native_entry();
     }

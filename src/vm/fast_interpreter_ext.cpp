@@ -1,6 +1,7 @@
 #include "fast_interpreter_impl.hpp"
 #include <brass/runtime/parallel_runtime.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
+#include <brass/runtime/code_installer.hpp>
 #include <cmath>
 
 namespace brass {
@@ -184,7 +185,7 @@ void FastInterpreter::execute_vector_op(FastFrame& frame, BytecodeWord inst, con
 
 bool FastInterpreter::handle_osr_backedge(FastFrame& frame, uint32_t target_pc, RuntimeValue& out_res) {
     runtime::TieringFeedback& fb = frame.info->tiering(dispatch_table_);
-    auto& coordinator = runtime::OsrCoordinator::instance();
+    auto& coordinator = dispatch_table().osr();
     const BytecodeFunction* bfn = frame.bfn;
     // Below the threshold only the count matters; try_osr_migration counts
     // the backedge itself once it is called.

@@ -6,6 +6,7 @@
 #include <brass/mir/osr.hpp>
 #include <brass/embedding/embedding.hpp>
 #include <cstring>
+#include <stdexcept>
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
 #elif defined(__aarch64__) || defined(_M_ARM64)
@@ -24,6 +25,21 @@ OsrCoordinator& OsrCoordinator::instance() {
 }
 
 OsrCoordinator::OsrCoordinator() = default;
+
+OsrCoordinator::OsrCoordinator(TieringRegistry& registry) : registry_(&registry) {
+    if (registry.is_default()) {
+        throw std::logic_error("OsrCoordinator: the default program's coordinator is OsrCoordinator::instance()");
+    }
+}
+
+TieringRegistry& OsrCoordinator::registry() const noexcept {
+    return registry_ ? *registry_ : TieringRegistry::instance();
+}
+
+void OsrCoordinator::set_threshold(uint64_t threshold) noexcept {
+    threshold_ = threshold;
+    registry().default_config().backedge_osr_threshold = threshold;
+}
 
 void OsrCoordinator::set_active_interpreter(Interpreter* interp) noexcept {
     t_active_interpreter = interp;
@@ -87,7 +103,7 @@ bool OsrCoordinator::try_osr_migration(
 ) {
     if (!enabled_ || !loop_header) return false;
 
-    TieringFeedback& feedback = TieringRegistry::instance().get_or_create(fn.name());
+    TieringFeedback& feedback = registry().get_or_create(fn.name());
     feedback.record_backedge();
 
     if (feedback.is_bailed_out() || !feedback.should_trigger_osr(threshold_)) {
@@ -154,7 +170,7 @@ bool OsrCoordinator::try_osr_migration(
     register_deopt_handler([&](const DeoptFrame& dframe) -> void* {
         deopt_occurred = true;
         total_native_deopts_++;
-        TieringFeedback& fb = TieringRegistry::instance().get_or_create(fn.name());
+        TieringFeedback& fb = registry().get_or_create(fn.name());
         fb.record_deoptimization();
         std::vector<RuntimeValue> state_vals = dframe.to_runtime_values();
         const Instruction* g_inst = nullptr;
@@ -258,7 +274,7 @@ bool OsrCoordinator::try_osr_migration(
 ) {
     if (!enabled_ || !loop_header) return false;
 
-    TieringFeedback& feedback = TieringRegistry::instance().get_or_create(fn.name());
+    TieringFeedback& feedback = registry().get_or_create(fn.name());
     feedback.record_backedge();
 
     if (feedback.is_bailed_out() || !feedback.should_trigger_osr(threshold_)) {
@@ -323,7 +339,7 @@ bool OsrCoordinator::try_osr_migration(
     register_deopt_handler([&](const DeoptFrame& dframe) -> void* {
         deopt_occurred = true;
         total_native_deopts_++;
-        TieringFeedback& fb = TieringRegistry::instance().get_or_create(fn.name());
+        TieringFeedback& fb = registry().get_or_create(fn.name());
         fb.record_deoptimization();
         std::vector<RuntimeValue> state_vals = dframe.to_runtime_values();
         const Instruction* g_inst = nullptr;
@@ -424,7 +440,7 @@ void* OsrCoordinator::handle_native_deopt(const DeoptFrame& deopt_frame) {
     Interpreter* cur_interp = t_active_interpreter;
     InterpreterFrame* cur_frame = t_active_frame;
     if (cur_fn) {
-        TieringFeedback& fb = TieringRegistry::instance().get_or_create(cur_fn->name());
+        TieringFeedback& fb = registry().get_or_create(cur_fn->name());
         fb.record_deoptimization();
     }
     if (cur_interp && cur_fn) {

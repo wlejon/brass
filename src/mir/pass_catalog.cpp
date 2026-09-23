@@ -342,6 +342,18 @@ PassStep speculative_devirtualization(size_t max_callee_instruction_count) {
     });
 }
 
+PassStep speculative_devirtualization(const runtime::FeedbackRegistry& registry,
+                                      size_t max_callee_instruction_count) {
+    const runtime::FeedbackRegistry* reg = &registry;
+    return module_step("speculative_devirt", [reg, max_callee_instruction_count](Module& mod) {
+        SpeculativeInlinerOptions o;
+        o.enable_inlining = true;
+        o.enable_polymorphic = true;
+        o.max_callee_instruction_count = max_callee_instruction_count;
+        return run_speculative_devirtualization(mod, *reg, o);
+    });
+}
+
 PassStep inline_calls(const InlinerOptions& options) {
     InlinerOptions o = options;
     o.enable_devirtualization = false;

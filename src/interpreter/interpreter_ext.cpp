@@ -2,6 +2,7 @@
 #include <brass/gc/generational_gc.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/runtime/parallel_runtime.hpp>
+#include <brass/runtime/code_installer.hpp>
 #include <iostream>
 #include <cmath>
 
@@ -188,6 +189,7 @@ RuntimeValue Interpreter::run(std::string_view fn_name) {
 }
 
 RuntimeValue Interpreter::run(std::string_view fn_name, const std::vector<RuntimeValue>& args) {
+    runtime::ProgramScope program_scope(dispatch_table());
     if (module_) {
         const Function* fn = module_->get_function(fn_name);
         if (fn) {
@@ -207,6 +209,7 @@ RuntimeValue Interpreter::run(const Module& mod, std::string_view entry_name) {
 }
 
 RuntimeValue Interpreter::run(const Module& mod, std::string_view entry_name, const std::vector<RuntimeValue>& args) {
+    runtime::ProgramScope program_scope(dispatch_table());
     module_ = &mod;
     const Function* fn = mod.get_function(entry_name);
     if (!fn) {

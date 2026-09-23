@@ -16,7 +16,7 @@
 #include <unordered_map>
 #include <vector>
 
-extern "C" void brass_tier1_record_invocation(const char* fn_name);
+extern "C" void brass_tier1_record_invocation_fb(void* feedback);
 
 namespace brass::aarch64 {
 
@@ -83,7 +83,8 @@ void AArch64BaselineEmitter::copy_block_args(const BranchTarget& target_branch) 
 codegen::BaselineCompiledFunction compile_baseline_aarch64(
     const Function& fn,
     Target target,
-    BaselineSymbolResolver resolver
+    BaselineSymbolResolver resolver,
+    runtime::TieringRegistry* tiering
 ) {
     (void)target;
     CodeBuffer buffer;
@@ -245,15 +246,16 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
         }
     }
 
-    // Record invocation hook
+    // Record-invocation hook: the function's TieringFeedback, from the
+    // registry of the program this code belongs to, is resolved now and
+    // baked in (the registry retires, never frees, feedback objects, and
+    // lives as long as the program that owns this code). The hook reaches
+    // the program's pipeline through it.
     if (!fn.name().empty()) {
-        static std::unordered_map<std::string, std::string> name_cache;
-        std::string fn_name_copy(fn.name());
-        auto it_name = name_cache.try_emplace(fn_name_copy, fn_name_copy);
-        const char* name_cstr = it_name.first->second.c_str();
-
-        enc.mov(GPR::X0, reinterpret_cast<uint64_t>(name_cstr));
-        void* hook_ptr = reinterpret_cast<void*>(&brass_tier1_record_invocation);
+        runtime::TieringRegistry& registry = tiering ? *tiering : runtime::TieringRegistry::instance();
+        runtime::TieringFeedback* feedback = &registry.get_feedback(fn.name());
+        enc.mov(GPR::X0, reinterpret_cast<uint64_t>(feedback));
+        void* hook_ptr = reinterpret_cast<void*>(&brass_tier1_record_invocation_fb);
         enc.mov(GPR::X16, reinterpret_cast<uint64_t>(hook_ptr));
         enc.blr(GPR::X16);
     }

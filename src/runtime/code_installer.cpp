@@ -11,6 +11,7 @@
 #include <brass/runtime/type_feedback.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/deopt.hpp>
+#include <brass/runtime/osr_coordinator.hpp>
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -25,12 +26,12 @@ namespace brass::runtime {
 namespace {
 
 // The tier-2 JIT pipeline: feedback-driven speculative devirtualization
-// (the global FeedbackRegistry), the scalar and CFG passes, the default
-// loop stage and write-barrier elimination.
-Pipeline tier2_pipeline() {
+// (from the type feedback of the program being compiled for), the scalar and
+// CFG passes, the default loop stage and write-barrier elimination.
+Pipeline tier2_pipeline(const FeedbackRegistry& feedback) {
     LoopOptOptions loop_opts;
     Pipeline p;
-    p.add(passes::speculative_devirtualization());
+    p.add(passes::speculative_devirtualization(feedback));
     p.add(passes::gvn());
     p.add(passes::gvn_pre());
     p.add(passes::sccp(true));
@@ -43,8 +44,8 @@ Pipeline tier2_pipeline() {
     return p;
 }
 
-bool run_tier2_optimization_pipeline(Module& mod, std::string& errors) {
-    run_pipeline(mod, tier2_pipeline());
+bool run_tier2_optimization_pipeline(Module& mod, const FeedbackRegistry& feedback, std::string& errors) {
+    run_pipeline(mod, tier2_pipeline(feedback));
     DiagnosticReporter diag;
     if (verify_module(mod, &diag)) return true;
     errors = diag.format_all();
@@ -417,7 +418,8 @@ OwnedTables& owned_tables() {
 
 FunctionDispatchTable::FunctionDispatchTable()
     : tiering_(std::make_unique<TieringRegistry>(*this)),
-      pipeline_(std::make_unique<MultiTierPipeline>(*this)) {
+      pipeline_(std::make_unique<MultiTierPipeline>(*this)),
+      osr_(std::make_unique<OsrCoordinator>(*tiering_)) {
     auto& reg = owned_tables();
     std::lock_guard<std::mutex> lock(reg.mutex);
     reg.tables.push_back(this);
@@ -437,6 +439,26 @@ TieringRegistry& FunctionDispatchTable::tiering() const noexcept {
 
 MultiTierPipeline& FunctionDispatchTable::pipeline() const noexcept {
     return pipeline_ ? *pipeline_ : MultiTierPipeline::instance();
+}
+
+OsrCoordinator& FunctionDispatchTable::osr() const noexcept {
+    return osr_ ? *osr_ : OsrCoordinator::instance();
+}
+
+namespace {
+thread_local FunctionDispatchTable* t_current_program = nullptr;
+} // namespace
+
+FunctionDispatchTable& current_program() noexcept {
+    return t_current_program ? *t_current_program : FunctionDispatchTable::instance();
+}
+
+ProgramScope::ProgramScope(FunctionDispatchTable& table) noexcept : prev_(t_current_program) {
+    t_current_program = &table;
+}
+
+ProgramScope::~ProgramScope() {
+    t_current_program = prev_;
 }
 
 TieringRegistry& tiering_of(FunctionDispatchTable* table) noexcept {
@@ -645,7 +667,7 @@ CodeInstallResult CodeInstaller::install_tier2(
     handle.set_signature(target_fn->return_type(), target_fn->param_types());
 
     // 1. Run full Tier-2 optimization passes
-    if (std::string errors; !run_tier2_optimization_pipeline(*module, errors)) {
+    if (std::string errors; !run_tier2_optimization_pipeline(*module, table_->tiering().type_feedback(), errors)) {
         return {false, nullptr, "Tier-2 optimization pipeline failed or invalidated module: " + errors, 0};
     }
 

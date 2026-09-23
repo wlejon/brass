@@ -6,6 +6,7 @@
 
 #include "fast_interpreter_impl.hpp"
 #include <brass/runtime/osr_coordinator.hpp>
+#include <brass/runtime/code_installer.hpp>
 
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic push
@@ -35,7 +36,7 @@ RuntimeValue FastInterpreter::execute_frame(FastFrame& frame) {
     // budget is charged by the loop's length, and the function's backedge
     // counter (or the OSR coordinator, when enabled) is told.
     const uint64_t insn_limit = max_instructions_ > 0 ? max_instructions_ : ~uint64_t{0};
-    const bool osr_on = frame.mir_fn != nullptr && runtime::OsrCoordinator::instance().is_enabled();
+    const bool osr_on = frame.mir_fn != nullptr && dispatch_table().osr().is_enabled();
     runtime::TieringFeedback* const feedback = &frame.info->tiering(dispatch_table_);
 
 #define RA registers[decode_a(inst)]

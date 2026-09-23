@@ -10,15 +10,7 @@
 #include <chrono>
 #include <stdexcept>
 
-// The name-keyed invocation hook (the aarch64 baseline tier's): it has no
-// program to go on, so it counts into the default program.
-extern "C" void brass_tier1_record_invocation(const char* fn_name) {
-    if (!fn_name) return;
-    if (!brass::runtime::MultiTierPipeline::instance().is_initialized()) return;
-    brass::runtime::MultiTierPipeline::instance().on_invocation(fn_name);
-}
-
-// The x64 baseline tier's invocation hook: `feedback` is the function's
+// The baseline tiers' (x64 and aarch64) invocation hook: `feedback` is the function's
 // TieringFeedback, resolved from its program's registry when the code was
 // compiled, so counting takes no lock, hashes no name, and reaches the
 // program's own pipeline through the feedback's registry.
@@ -357,6 +349,7 @@ RuntimeValue MultiTierPipeline::execute(
     std::string_view entry_fn,
     const std::vector<RuntimeValue>& args
 ) {
+    ProgramScope program_scope(*table_);
     tiering().set_active_module(&mod);
     for (const auto* fn : mod.functions()) {
         if (fn) {

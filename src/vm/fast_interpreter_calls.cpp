@@ -419,6 +419,7 @@ RuntimeValue FastInterpreter::run(const Function& fn) {
 }
 
 RuntimeValue FastInterpreter::run(const Function& fn, const std::vector<RuntimeValue>& args) {
+    runtime::ProgramScope program_scope(dispatch_table());
     if (fn.parent()) {
         use_module(fn.parent());
         if (!dispatch_table().tiering().active_module()) {
@@ -447,6 +448,7 @@ RuntimeValue FastInterpreter::run(const BytecodeFunction& fn) {
 }
 
 RuntimeValue FastInterpreter::run(const BytecodeFunction& fn, const std::vector<RuntimeValue>& args) {
+    runtime::ProgramScope program_scope(dispatch_table());
     release_retired();
     return enter_frame(fn_info(fn), args, 0, nullptr);
 }

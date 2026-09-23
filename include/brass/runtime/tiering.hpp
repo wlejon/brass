@@ -17,6 +17,7 @@ class Module;
 namespace brass::runtime {
 
 class TypeFeedbackVector;
+class FeedbackRegistry;
 
 enum class TierLevel : uint8_t {
     Tier0_Interpreter = 0,
@@ -213,6 +214,9 @@ public:
     bool is_default() const noexcept { return table_ == nullptr; }
     FunctionDispatchTable& dispatch_table() const noexcept;
     MultiTierPipeline& pipeline() const noexcept;
+    // The program's type feedback (call targets, property shapes):
+    // FeedbackRegistry::instance() for the default program, else owned here.
+    FeedbackRegistry& type_feedback() const noexcept;
 
     TieringFeedback& get_feedback(std::string_view fn_name);
     TieringFeedback& get_or_create(std::string_view fn_name) { return get_feedback(fn_name); }
@@ -256,8 +260,9 @@ public:
     void dump_stats(std::ostream& os) const;
 
 private:
-    TieringRegistry() = default;
+    TieringRegistry();
     FunctionDispatchTable* const table_ = nullptr; // null: the default program
+    std::unique_ptr<FeedbackRegistry> type_feedback_; // owned programs only
     TieringConfig config_;
     std::atomic<const Module*> active_module_{nullptr};
     mutable std::mutex mutex_;

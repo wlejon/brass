@@ -24,19 +24,33 @@ struct FastFrame;
 
 namespace brass::runtime {
 
+// On-stack replacement for one program: its enablement and threshold, its
+// compiled OSR stubs and loop analysis (keyed by function name within the
+// program), and the TieringRegistry its backedge and deopt counts go to.
+//
+// instance() is the default program's (counting into
+// TieringRegistry::instance()); an owned FunctionDispatchTable owns its own
+// (FunctionDispatchTable::osr()), and interpreters use their table's.
 class OsrCoordinator {
 public:
     static OsrCoordinator& instance();
+    // The coordinator of an owned program; `registry` (not the default
+    // program's) must outlive it.
+    explicit OsrCoordinator(TieringRegistry& registry);
+    ~OsrCoordinator() = default;
+
+    OsrCoordinator(const OsrCoordinator&) = delete;
+    OsrCoordinator& operator=(const OsrCoordinator&) = delete;
+
+    TieringRegistry& registry() const noexcept;
 
     // Configuration
     bool is_enabled() const noexcept { return enabled_; }
     void set_enabled(bool enabled) noexcept { enabled_ = enabled; }
 
     uint64_t threshold() const noexcept { return threshold_; }
-    void set_threshold(uint64_t threshold) noexcept {
-        threshold_ = threshold;
-        TieringRegistry::instance().default_config().backedge_osr_threshold = threshold;
-    }
+    // Also the program's default backedge OSR threshold.
+    void set_threshold(uint64_t threshold) noexcept;
 
     // Check whether an edge (from_bb -> to_bb) is a loop backedge for loop header `to_bb`
     bool is_loop_backedge(const Function& fn, const BasicBlock* from_bb, const BasicBlock* to_bb);
@@ -82,8 +96,8 @@ public:
 
 private:
     OsrCoordinator();
-    ~OsrCoordinator() = default;
 
+    TieringRegistry* const registry_ = nullptr; // null: the default program
     bool enabled_ = false;
     uint64_t threshold_ = BACKEDGE_OSR_THRESHOLD;
     std::atomic<uint64_t> total_osr_migrations_{0};

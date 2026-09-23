@@ -25,6 +25,8 @@ class BaselineCompiledFunction;
 
 namespace brass::runtime {
 
+class OsrCoordinator;
+
 class FunctionHandle {
 public:
     explicit FunctionHandle(std::string_view name, const Function* mir_fn = nullptr);
@@ -140,7 +142,9 @@ private:
 // outlive every interpreter, compiler and installer given it.
 //
 // A program's whole tiering state hangs off its table: tiering() holds its
-// feedback (invocation, backedge and deopt counts, bailouts) and pipeline()
+// feedback (invocation, backedge and deopt counts, bailouts, and through
+// tiering().type_feedback() its call-target and shape feedback), osr() its
+// OsrCoordinator (OSR stubs and enablement), and pipeline()
 // its MultiTierPipeline (tier-up, the persistent Tier-0 interpreter, baseline
 // code, tier-2 stack maps, and its own background compiler). Destroying an
 // owned table first stops its background compiler (queued compiles are
@@ -165,6 +169,9 @@ public:
 
     TieringRegistry& tiering() const noexcept;
     MultiTierPipeline& pipeline() const noexcept;
+    // The program's on-stack replacement (OsrCoordinator::instance() for
+    // the default program).
+    OsrCoordinator& osr() const noexcept;
 
     FunctionHandle* get_or_create(std::string_view name, const Function* fn = nullptr);
     FunctionHandle* find(std::string_view name) const;
@@ -195,6 +202,8 @@ private:
     // points at the registry, is destroyed first).
     std::unique_ptr<TieringRegistry> tiering_;
     std::unique_ptr<MultiTierPipeline> pipeline_;
+    // Holds OSR stubs counting into tiering_, so it is destroyed before it.
+    std::unique_ptr<OsrCoordinator> osr_;
     mutable std::mutex mutex_;
     std::unordered_map<std::string, std::unique_ptr<FunctionHandle>> handles_;
     // Handles dropped by clear() or replaced by register_handle(); callers
@@ -203,6 +212,26 @@ private:
 };
 
 using DispatchTable = FunctionDispatchTable;
+
+// The program this thread is running: the default program unless a
+// ProgramScope is open. MultiTierPipeline::execute and the interpreters' run
+// entry points open one for their table, so runtime helpers that native code
+// calls with only a name (the IL runtime's function resolver) reach the
+// running program's handles.
+FunctionDispatchTable& current_program() noexcept;
+
+// Makes `table` this thread's current_program() until destroyed (scopes
+// nest; the previous program is restored). `table` must outlive the scope.
+class ProgramScope {
+public:
+    explicit ProgramScope(FunctionDispatchTable& table) noexcept;
+    ~ProgramScope();
+    ProgramScope(const ProgramScope&) = delete;
+    ProgramScope& operator=(const ProgramScope&) = delete;
+
+private:
+    FunctionDispatchTable* prev_;
+};
 
 // Called by ~Module: drops the default program's raw pointers into `mod`
 // (dispatch-table handles, the tiering registry's active module, the

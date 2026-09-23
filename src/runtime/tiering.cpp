@@ -66,11 +66,11 @@ uint64_t TieringFeedback::record_invocation() noexcept {
 }
 
 TypeFeedbackVector* TieringFeedback::type_feedback_vector() {
-    return &FeedbackRegistry::instance().get_or_create(fn_name_);
+    return &registry().type_feedback().get_or_create(fn_name_);
 }
 
 const TypeFeedbackVector* TieringFeedback::type_feedback_vector() const {
-    return FeedbackRegistry::instance().find(fn_name_);
+    return registry().type_feedback().find(fn_name_);
 }
 
 uint64_t TieringFeedback::loop_backedges(uint32_t loop_header_id) const noexcept {
@@ -182,7 +182,14 @@ TieringRegistry& TieringRegistry::instance() {
     return registry;
 }
 
-TieringRegistry::TieringRegistry(FunctionDispatchTable& table) : table_(&table) {}
+TieringRegistry::TieringRegistry() = default;
+
+TieringRegistry::TieringRegistry(FunctionDispatchTable& table)
+    : table_(&table), type_feedback_(std::make_unique<FeedbackRegistry>()) {}
+
+FeedbackRegistry& TieringRegistry::type_feedback() const noexcept {
+    return type_feedback_ ? *type_feedback_ : FeedbackRegistry::instance();
+}
 
 TieringRegistry::~TieringRegistry() {
     if (is_default()) g_tiering_registry_alive.store(false, std::memory_order_release);

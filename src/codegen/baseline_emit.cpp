@@ -218,7 +218,7 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
     if (target.is_aarch64()) {
         return aarch64::compile_baseline_aarch64(fn, target, [this](std::string_view name) {
             return resolve_symbol(name);
-        });
+        }, &dispatch_table().tiering());
     }
 
     check_x64_baseline_supported(fn);

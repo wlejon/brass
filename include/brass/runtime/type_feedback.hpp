@@ -103,9 +103,17 @@ private:
     std::vector<FeedbackSlot> slots_;
 };
 
+// The type feedback of one program, keyed by function name within it.
+//
+// instance() is the default program's; an owned program's TieringRegistry
+// owns its own (TieringRegistry::type_feedback()), so same-named functions
+// of two programs record call targets and shapes independently.
 class FeedbackRegistry {
 public:
     static FeedbackRegistry& instance();
+    FeedbackRegistry() = default;
+    FeedbackRegistry(const FeedbackRegistry&) = delete;
+    FeedbackRegistry& operator=(const FeedbackRegistry&) = delete;
 
     TypeFeedbackVector& get_or_create(std::string_view fn_name);
     [[nodiscard]] const TypeFeedbackVector* find(std::string_view fn_name) const;
@@ -120,13 +128,15 @@ public:
     void dump_stats(std::ostream& os) const;
 
 private:
-    FeedbackRegistry() = default;
     mutable std::mutex mutex_;
     std::unordered_map<std::string, TypeFeedbackVector> tfv_map_;
 };
 
 } // namespace brass::runtime
 
+// The by-name bridges record into the default program's FeedbackRegistry
+// (they carry no program); per-program code records through
+// TieringRegistry::type_feedback().
 extern "C" {
 void brass_record_call_feedback(const char* fn_name, uint32_t site_id, uintptr_t target_addr, const char* target_name);
 void brass_record_property_feedback(const char* fn_name, uint32_t site_id, brass::runtime::Shape* shape, uint32_t slot_idx);
