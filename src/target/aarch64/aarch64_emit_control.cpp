@@ -453,6 +453,9 @@ void AArch64EmitContext::emit_control_instruction(const LirInst& inst) {
             uint32_t rid = inst.resume_id;
             uint32_t rsn = inst.deopt_reason == 0 ? 1 : inst.deopt_reason;
             uint32_t cnt = static_cast<uint32_t>(num_uses);
+            const bool has_exit_stub = !inst.exit_symbol.empty() && inst.exit_symbol != "@exit_stub" &&
+                                       inst.exit_symbol != "exit_stub";
+            if (has_exit_stub) rsn |= runtime::DeoptExitRecord::kReasonHasExitStub;
 
             // AAPCS64 parameter registers: X0, X1, X2, X3
             enc_.mov32(GPR::X0, rid);

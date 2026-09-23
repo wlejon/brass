@@ -9,6 +9,7 @@
 #include <string_view>
 #include <vector>
 #include <unordered_map>
+#include <utility>
 #include <initializer_list>
 
 namespace brass {
@@ -66,8 +67,21 @@ public:
     void add_allocation_function(std::string_view sym);
     bool is_allocation_function(std::string_view sym) const noexcept;
 
-    // Copies `src`'s external declarations and their roles, for a module
-    // built to optimize or compile code cloned out of `src`.
+    // Read-only data the module itself defines: symbol `sym` names a
+    // NUL-terminated copy of `text` the module owns. Every engine that loads
+    // the module defines it (object emission puts it in read-only data; the
+    // baseline JIT resolves it to the module's copy), so `func_addr @sym`
+    // needs no host registration. Redefining `sym` with other text throws.
+    void define_string_symbol(std::string_view sym, std::string_view text);
+    // The module's NUL-terminated copy for `sym`, or null if not defined here.
+    const char* string_symbol(std::string_view sym) const noexcept;
+    const std::vector<std::pair<std::string_view, std::string_view>>& string_symbols() const noexcept {
+        return string_symbols_;
+    }
+
+    // Copies `src`'s external declarations and their roles, and its string
+    // symbols, for a module built to optimize or compile code cloned out of
+    // `src`.
     void copy_declarations_from(const Module& src);
 
     bool allow_fp_reassociation() const noexcept { return allow_fp_reassociation_; }
@@ -97,6 +111,7 @@ private:
     std::vector<std::string_view> external_symbols_;
     // Bit i set: the symbol has role kAllSymbolRoles[i].
     std::unordered_map<std::string_view, uint32_t> symbol_roles_;
+    std::vector<std::pair<std::string_view, std::string_view>> string_symbols_; // (sym, text), both interned
     bool allow_fp_reassociation_ = false;
     bool pinned_tls_register_ = false;
     bool has_loop_optimizations_ = false;

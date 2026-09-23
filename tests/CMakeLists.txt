@@ -341,6 +341,33 @@ add_test(NAME performance_ratchet COMMAND brass_benchmarks --check-ratchet)
 set_tests_properties(benchmarks performance_ratchet PROPERTIES
     TIMEOUT 600 RUN_SERIAL TRUE WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" LABELS "perf")
 
+# brass-il end to end on the bronze corpus (tests/cmake/run_il_corpus.cmake).
+#   il_corpus.run.*: generators and async under --run, whose function-name
+#     data symbols once reached only a JIT active at translation time.
+#   il_corpus.bg.*: --enable-background-compile, which once died with a
+#     silent fail-fast (0xC0000409) on every program.
+if(BRASS_BUILD_TOOLS)
+    function(brass_il_corpus_test kind name)
+        string(REPLACE ";" "," _il_args "${ARGN}")
+        add_test(NAME "il_corpus.${kind}.${name}"
+            COMMAND ${CMAKE_COMMAND}
+                "-DBRASS_IL=$<TARGET_FILE:brass-il>"
+                "-DIL_FILE=${CMAKE_SOURCE_DIR}/tests/bronze_corpus/${name}.il"
+                "-DEXPECTED=${CMAKE_SOURCE_DIR}/tests/bronze_corpus/${name}.expected"
+                "-DIL_ARGS=${_il_args}"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/run_il_corpus.cmake")
+        set_tests_properties("il_corpus.${kind}.${name}" PROPERTIES
+            TIMEOUT 120 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" LABELS "correctness")
+    endfunction()
+    foreach(_name 27_generator_fibonacci 28_async_chain)
+        brass_il_corpus_test(run ${_name} --run)
+    endforeach()
+    foreach(_name 01_arithmetic 03_collatz 09_closures 14_array_loop 23_objects_basic
+                  25_try_catch_basic 27_generator_fibonacci 28_async_chain 34_background_tiering)
+        brass_il_corpus_test(bg ${_name} --run --enable-background-compile)
+    endforeach()
+endif()
+
 if(APPLE)
     add_custom_command(TARGET brass_benchmarks POST_BUILD
         COMMAND codesign -s - -f $<TARGET_FILE:brass_benchmarks>

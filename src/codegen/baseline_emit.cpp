@@ -228,8 +228,8 @@ void emit_control_op(X64BaselineEmitter& em, const Instruction& inst) {
 
 BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target target) {
     if (target.is_aarch64()) {
-        return aarch64::compile_baseline_aarch64(fn, target, [this](std::string_view name) {
-            return resolve_symbol(name);
+        return aarch64::compile_baseline_aarch64(fn, target, [this, &fn](std::string_view name) {
+            return resolve_symbol_in(fn, name);
         }, &dispatch_table().tiering());
     }
 
@@ -360,7 +360,7 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
 
     X64BaselineEmitter emitter{
         buffer, enc, target, fn, slot_map, alloca_offsets, block_labels, fn_stack_map,
-        [this](std::string_view name) { return resolve_symbol(name); },
+        [this, &fn](std::string_view name) { return resolve_symbol_in(fn, name); },
         frame_size, cc, fn_entry_label, gcref_slots, preserves_r13, lazy_.get()
     };
 

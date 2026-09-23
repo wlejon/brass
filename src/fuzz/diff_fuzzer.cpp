@@ -118,7 +118,7 @@ TierResult DiffFuzzer::run_tier0_interp(const Module& mod, std::string_view fn_n
         }
     };
 
-    if (!run_with_watchdog(worker_task, options_.timeout_ms)) {
+    if (!run_with_watchdog(worker_task, options_.timeout_ms, WatchdogPolicy::ExitOnTimeout, "Interpreter")) {
         res.status = ExecutionStatus::Timeout;
         res.fault_message = "Watchdog timeout exceeded in Interpreter";
     } else {
@@ -167,7 +167,7 @@ TierResult DiffFuzzer::run_fast_interp(const Module& mod, std::string_view fn_na
         }
     };
 
-    if (!run_with_watchdog(worker_task, options_.timeout_ms)) {
+    if (!run_with_watchdog(worker_task, options_.timeout_ms, WatchdogPolicy::ExitOnTimeout, "FastInterpreter")) {
         res.status = ExecutionStatus::Timeout;
         res.fault_message = "Watchdog timeout exceeded in FastInterpreter";
     } else {
@@ -221,7 +221,8 @@ TierResult DiffFuzzer::run_jit(const Module& mod, std::string_view fn_name,
         }
     };
 
-    if (!run_with_watchdog(worker_task, options_.timeout_ms)) {
+    if (!run_with_watchdog(worker_task, options_.timeout_ms, WatchdogPolicy::ExitOnTimeout,
+                           "JIT " + std::string(label))) {
         res.status = ExecutionStatus::Timeout;
         res.fault_message = "Watchdog timeout exceeded in JIT " + std::string(label);
     } else {
@@ -282,7 +283,8 @@ OptimizeOutcome DiffFuzzer::optimize(const Module& mod,
     };
 
     OptimizeOutcome out;
-    if (!run_with_watchdog(task, options_.pipeline_timeout_ms)) {
+    if (!run_with_watchdog(task, options_.pipeline_timeout_ms, WatchdogPolicy::ExitOnTimeout,
+                           "optimization pipeline")) {
         // The worker may still own the module; leave the state to it.
         std::lock_guard<std::mutex> lock(state->mtx);
         out.status = ExecutionStatus::Timeout;
@@ -327,6 +329,7 @@ std::string DiffFuzzer::bisect_first_bad_step(const Module& mod, std::string_vie
 
 DiffResult DiffFuzzer::run_test(const Module& mod, std::string_view fn_name,
                                 const std::vector<RuntimeValue>& args, uint64_t seed) {
+    set_watchdog_seed(seed);
     DiffResult result;
     auto fail = [&](std::string cls, std::string reason, std::string pass = {}) {
         result.passed = false;

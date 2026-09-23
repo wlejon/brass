@@ -198,6 +198,10 @@ struct DeoptExitRecord {
 
     static constexpr uint32_t kHasExitSymbol = 1u;
     static constexpr size_t kSlotsOffset = 24;
+    // Or'd into brass_deopt_exit(_typed)'s `reason` by code that calls an
+    // exit stub after it (the AArch64 guard exit): an unhandled deopt then
+    // resumes in the stub instead of being fatal.
+    static constexpr uint32_t kReasonHasExitStub = 0x80000000u;
 
     const uint64_t* slots() const noexcept {
         return reinterpret_cast<const uint64_t*>(reinterpret_cast<const uint8_t*>(this) + kSlotsOffset);

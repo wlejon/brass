@@ -24,7 +24,24 @@
 using namespace brass;
 using namespace brass::il;
 
+static int run_brass_il(int argc, char** argv);
+
+// An exception escaping main is std::terminate, which on MSVC is a silent
+// fail-fast (0xC0000409) that also drops buffered stdout. Report it instead.
 int main(int argc, char** argv) {
+    try {
+        return run_brass_il(argc, argv);
+    } catch (const std::exception& e) {
+        std::cout.flush();
+        std::cerr << "brass-il: fatal error: " << e.what() << "\n";
+    } catch (...) {
+        std::cout.flush();
+        std::cerr << "brass-il: fatal error: unknown exception\n";
+    }
+    return 1;
+}
+
+static int run_brass_il(int argc, char** argv) {
     if (argc < 2) {
         std::cerr << "Usage: brass-il <input.il> [--run] [--emit-mir] [--emit-shared <output.dll/so>] [-shared] [--inline] [--sroa] [--escape-analysis] [--partial-escape] [--sink-allocations] [--dump-pea-stats] [--gvn] [--no-gvn] [--enable-pre] [--enable-gvn-pre] [--no-pre] [--no-gvn-pre] [--dump-pre-stats] [--sccp] [--no-sccp] [--guard-elim] [--no-guard-elim] [--cfg-simplify] [--no-cfg-simplify] [--loop-unswitch] [--no-loop-unswitch] [--jump-threading] [--no-jump-threading] [--trace-layout] [--no-trace-layout] [--schedule-insns] [--no-schedule-insns] [--software-pipeline] [--alias-analysis] [--vectorize] [--slp] [--loop-tile] [--tile-size <N>] [--enable-pic] [--dump-ic-stats] [--inlined-fastpaths] [--no-inlined-fastpaths] [--tlab] [--no-tlab] [--demote-stats] [--pgo-instrument] [--pgo-use <file>] [--dump-branch-probabilities] [-o <output.obj>] [--no-opt] [--no-demote] [--reassoc] [--timed <N>]\n";
         return 1;
@@ -610,7 +627,11 @@ int main(int argc, char** argv) {
     }
 
     if (run_jit || (output_obj.empty() && output_shared.empty() && !emit_shared)) {
-        if (baseline_jit) {
+        // Background compilation upgrades baseline code to tier 2, so it
+        // runs on the baseline tier. (It used to run tier 0 in the reference
+        // Interpreter, which cannot call the native bronze runtime: every
+        // program threw "Call to undefined function" out of main.)
+        if (baseline_jit || enable_background_compile) {
             codegen::BaselineJitCompiler compiler;
             register_bronze_baseline_symbols(&compiler);
             compiler.register_external_symbol("brass_pgo_inc", reinterpret_cast<void*>(&brass_pgo_inc));
@@ -704,41 +725,6 @@ int main(int argc, char** argv) {
                 if (dump_jit_thread_stats) {
                     brass::runtime::BackgroundCompiler::instance().dump_stats(std::cout);
                 }
-            }
-            return 0;
-        }
-
-        if (enable_background_compile) {
-            brass::runtime::TieringRegistry::instance().set_background_compile_enabled(true);
-            brass::runtime::TieringRegistry::instance().set_jit_threads(jit_threads);
-            brass::runtime::BackgroundCompiler::instance().start(jit_threads);
-            brass::runtime::TieringRegistry::instance().set_active_module(res.module.get());
-            for (const Function* fn : res.module->functions()) {
-                if (fn) brass::runtime::FunctionDispatchTable::instance().get_or_create(fn->name(), fn);
-            }
-
-            Interpreter interp;
-            register_bronze_interpreter_symbols(&interp);
-            interp.register_external_function("brass_pgo_inc", [](Interpreter&, const std::vector<RuntimeValue>& args) {
-                if (!args.empty()) {
-                    uint32_t idx = args[0].is_i32() ? args[0].as_u32() : static_cast<uint32_t>(args[0].as_u64());
-                    brass_pgo_inc(idx);
-                }
-                return RuntimeValue::from_void();
-            });
-
-            Function* main_fn = res.module->get_function("main");
-            if (main_fn) {
-                interp.run(*main_fn, {});
-            }
-
-            brass::runtime::BackgroundCompiler::instance().wait_idle();
-
-            if (options.dump_tiering_stats) {
-                brass::runtime::TieringRegistry::instance().dump_stats(std::cout);
-            }
-            if (dump_jit_thread_stats) {
-                brass::runtime::BackgroundCompiler::instance().dump_stats(std::cout);
             }
             return 0;
         }

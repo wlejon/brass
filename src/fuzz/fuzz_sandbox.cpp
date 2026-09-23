@@ -7,6 +7,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
+#include <iostream>
 #include <thread>
 #include <mutex>
 #include <condition_variable>
@@ -209,7 +211,16 @@ struct WatchdogState {
     std::atomic<bool> finished{false};
 };
 
-bool DiffFuzzer::run_with_watchdog(const std::function<void()>& action, uint32_t timeout_ms) {
+namespace {
+std::atomic<uint64_t> s_watchdog_seed{0};
+} // namespace
+
+void DiffFuzzer::set_watchdog_seed(uint64_t seed) noexcept {
+    s_watchdog_seed.store(seed, std::memory_order_relaxed);
+}
+
+bool DiffFuzzer::run_with_watchdog(const std::function<void()>& action, uint32_t timeout_ms,
+                                   WatchdogPolicy policy, std::string_view what) {
     auto state = std::make_shared<WatchdogState>();
 
     std::thread worker([state, action]() {
@@ -224,11 +235,21 @@ bool DiffFuzzer::run_with_watchdog(const std::function<void()>& action, uint32_t
     });
 
     if (!completed) {
-#if defined(_WIN32)
-        TerminateThread(reinterpret_cast<HANDLE>(worker.native_handle()), 1);
-#endif
+        // Never TerminateThread: a thread killed mid-allocation or holding a
+        // lock leaves the process corrupt, which showed up as access
+        // violations in later, unrelated programs.
         worker.detach();
-        return false;
+        if (policy == WatchdogPolicy::AbandonOnTimeout) return false;
+        lock.unlock();
+        // The runaway thread still runs, on state this process would go on
+        // to reuse, so the process ends here. The line is in the format the
+        // chunked driver collects failure classes from.
+        std::cout << "[FAIL] Seed " << s_watchdog_seed.load(std::memory_order_relaxed)
+                  << " [Watchdog timeout]: " << (what.empty() ? std::string_view("action") : what)
+                  << " exceeded " << timeout_ms << " ms; its thread cannot be stopped safely, so this "
+                  << "fuzz process exits (remaining programs in the chunk are not run)" << std::endl;
+        std::cerr << std::flush;
+        std::_Exit(124);
     }
 
     if (worker.joinable()) {

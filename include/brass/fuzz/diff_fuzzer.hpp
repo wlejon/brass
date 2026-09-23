@@ -138,8 +138,30 @@ public:
     /// Protected execution runner that catches hardware faults / SEH exceptions.
     static bool run_protected(const std::function<void()>& action, std::string& fault_msg);
 
+    /// What run_with_watchdog does with an action that outlives its limit. A
+    /// thread cannot be stopped safely in-process (TerminateThread can leave
+    /// heap and lock state corrupt, and a still-running action writes into
+    /// state its caller has moved on from), so there is no "kill and go on".
+    enum class WatchdogPolicy {
+        // Report "[FAIL] Seed <current seed> [Watchdog timeout]" on stdout and
+        // end the process (exit code 124): a chunked campaign reports the
+        // chunk as crashed with that class. For actions that touch state the
+        // caller reuses: every fuzz tier.
+        ExitOnTimeout,
+        // Return false and leave the action running on a detached thread.
+        // Only for actions that own everything they touch.
+        AbandonOnTimeout,
+    };
+
     /// Watchdog runner that executes an action with a strict time limit.
-    static bool run_with_watchdog(const std::function<void()>& action, uint32_t timeout_ms);
+    /// Returns true if it finished in time. `what` names the action in the
+    /// ExitOnTimeout report.
+    static bool run_with_watchdog(const std::function<void()>& action, uint32_t timeout_ms,
+                                  WatchdogPolicy policy = WatchdogPolicy::AbandonOnTimeout,
+                                  std::string_view what = {});
+
+    /// The seed ExitOnTimeout reports; run_test sets it.
+    static void set_watchdog_seed(uint64_t seed) noexcept;
 
     /// Sandboxed process execution on Windows (using Windows Job Objects + Memory Limit + Process Timeout).
     static ExecutionStatus run_sandboxed_command(const std::string& command_line,

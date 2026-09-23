@@ -1,6 +1,8 @@
 #include <brass/mir/module.hpp>
 #include <brass/runtime/code_installer.hpp>
 #include <algorithm>
+#include <stdexcept>
+#include <string>
 
 namespace brass {
 
@@ -24,6 +26,7 @@ Module& Module::operator=(Module&& other) noexcept {
     function_map_ = std::move(other.function_map_);
     external_symbols_ = std::move(other.external_symbols_);
     symbol_roles_ = std::move(other.symbol_roles_);
+    string_symbols_ = std::move(other.string_symbols_);
     allow_fp_reassociation_ = other.allow_fp_reassociation_;
     pinned_tls_register_ = other.pinned_tls_register_;
     has_loop_optimizations_ = other.has_loop_optimizations_;
@@ -119,11 +122,33 @@ bool Module::is_allocation_function(std::string_view sym) const noexcept {
     return has_symbol_role(sym, SymbolRole::Allocator);
 }
 
+void Module::define_string_symbol(std::string_view sym, std::string_view text) {
+    for (const auto& [s, t] : string_symbols_) {
+        if (s != sym) continue;
+        if (t != text) {
+            throw std::logic_error("Module::define_string_symbol: '" + std::string(sym) +
+                                   "' is already defined with different text");
+        }
+        return;
+    }
+    // intern() stores a NUL after the text, so the copy is a C string. An
+    // empty string interns to a literal "", which is NUL-terminated too.
+    string_symbols_.emplace_back(string_pool_.intern(sym), string_pool_.intern(text));
+}
+
+const char* Module::string_symbol(std::string_view sym) const noexcept {
+    for (const auto& [s, t] : string_symbols_) {
+        if (s == sym) return t.data();
+    }
+    return nullptr;
+}
+
 void Module::copy_declarations_from(const Module& src) {
     for (std::string_view sym : src.external_symbols()) {
         add_external_symbol(sym);
         for (SymbolRole role : src.symbol_roles(sym)) add_symbol_role(sym, role);
     }
+    for (const auto& [sym, text] : src.string_symbols()) define_string_symbol(sym, text);
 }
 
 } // namespace brass

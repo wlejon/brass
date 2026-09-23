@@ -163,6 +163,9 @@ void brass_set_thread_deopt_frame(const brass::runtime::DeoptFrame* frame) {
 }
 
 void* brass_deopt_exit_typed(uint32_t resume_id, uint32_t reason, uint32_t count, const uint64_t* raw_slots, const uint8_t* raw_kinds) {
+    using brass::runtime::DeoptExitRecord;
+    const bool has_exit_stub = (reason & DeoptExitRecord::kReasonHasExitStub) != 0;
+    reason &= ~DeoptExitRecord::kReasonHasExitStub;
     auto* frame = brass::runtime::get_thread_deopt_frame();
     frame->clear();
     frame->resume_id = resume_id;
@@ -184,7 +187,12 @@ void* brass_deopt_exit_typed(uint32_t resume_id, uint32_t reason, uint32_t count
     if (handler) {
         return handler(*frame);
     }
-    return nullptr;
+    if (has_exit_stub) return nullptr; // the caller resumes in its exit stub
+    // Nothing can resume this frame: returning would hand the optimized
+    // code's caller a made-up 0.
+    std::fprintf(stderr, "brass_deopt_exit: guard failed (resume id %u, reason %u) with no deopt handler, "
+                         "resumer or exit stub to resume in\n", resume_id, reason);
+    std::abort();
 }
 
 void* brass_deopt_exit(uint32_t resume_id, uint32_t reason, uint32_t count, const uint64_t* raw_slots) {
@@ -223,15 +231,21 @@ const uint64_t* brass_deopt_exit_record(const brass::runtime::DeoptExitRecord* r
         t_deopt_result = result;
         return &t_deopt_result;
     }
+    const bool has_exit_symbol = (record->flags & DeoptExitRecord::kHasExitSymbol) != 0;
     auto handler = get_deopt_handler();
     if (handler) {
         void* r = handler(*frame);
-        if ((record->flags & DeoptExitRecord::kHasExitSymbol) == 0) {
+        if (!has_exit_symbol) {
             t_deopt_result = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(r));
             return &t_deopt_result;
         }
     }
-    return nullptr;
+    if (has_exit_symbol) return nullptr; // the caller resumes in its exit stub
+    // Nothing can resume this frame: returning null would make the optimized
+    // code return a made-up 0.
+    std::fprintf(stderr, "brass_deopt_exit_record: guard failed (resume id %u, reason %u) with no deopt handler, "
+                         "resumer or exit stub to resume in\n", record->resume_id, record->reason);
+    std::abort();
 }
 
 }

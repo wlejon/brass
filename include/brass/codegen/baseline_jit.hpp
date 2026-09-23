@@ -107,6 +107,9 @@ public:
     std::vector<BaselineCompiledFunction> compile_module(const Module& mod, Target target);
 
     void* resolve_symbol(std::string_view name) const;
+    // resolve_symbol, after the string data `fn`'s module defines itself
+    // (Module::define_string_symbol).
+    void* resolve_symbol_in(const Function& fn, std::string_view name) const;
 
     // Whether the x64 baseline tier compiles `op`. A function using an opcode
     // it does not is rejected at compile time: compile() throws

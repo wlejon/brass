@@ -68,10 +68,11 @@ bool lower_coro_instruction(
 
             std::string callee = lowering ? lowering->resolve_create_func_callee(inst_ast.callee_name) : inst_ast.callee_name;
             std::string fn_name_sym = lowering ? lowering->module_sym("__bronze_fn_name_" + callee) : ("__bronze_fn_name_" + callee);
-            const char* name_ptr = fn->parent()->string_pool().intern(callee).data();
-            if (auto* jit = get_active_jit()) {
-                jit->register_external_symbol(fn_name_sym, const_cast<char*>(name_ptr));
-            }
+            // Module-owned string data, so whichever engine loads the module
+            // later defines the symbol (it used to be registered only with
+            // the JIT active at translation time, and was unresolved in any
+            // other).
+            fn->parent()->define_string_symbol(fn_name_sym, callee);
             Value* fn_name_val = b.build_func_addr(fn_name_sym);
 
             res_val = b.build_call("bronze_create_async_machine", Type::i64(), {

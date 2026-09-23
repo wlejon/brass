@@ -416,7 +416,32 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
         }
     }
 
-
+    // The module's own string data (Module::define_string_symbol), so the
+    // symbols resolve in whatever loads this object, JIT or linker.
+    if (!mod.string_symbols().empty()) {
+        std::string ro_sec_name = target_.is_windows() ? ".rdata" : (target_.is_macos() ? "__const" : ".rodata");
+        Section& ro_sec = obj.get_or_create_section(
+            ro_sec_name,
+            SectionKind::RoData,
+            SectionFlags::Read | SectionFlags::Alloc,
+            16
+        );
+        int32_t ro_idx = obj.get_section_index(ro_sec_name);
+        for (const auto& [sym_name, text] : mod.string_symbols()) {
+            size_t offset = ro_sec.data.size();
+            std::vector<uint8_t> bytes(text.begin(), text.end());
+            bytes.push_back(0);
+            ro_sec.emit_bytes(bytes);
+            ObjectSymbol sym;
+            sym.name = std::string(sym_name);
+            sym.section_index = ro_idx;
+            sym.value = offset;
+            sym.size = bytes.size();
+            sym.binding = SymbolBinding::Local;
+            sym.type = SymbolType::Object;
+            obj.add_symbol(std::move(sym));
+        }
+    }
 
     // Add any referenced relocation symbol not yet registered
     for (const auto& sec : obj.sections) {

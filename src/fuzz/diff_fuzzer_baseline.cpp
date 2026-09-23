@@ -135,7 +135,7 @@ TierResult DiffFuzzer::run_baseline(const Module& mod, std::string_view fn_name,
         }
     };
 
-    if (!run_with_watchdog(worker_task, options_.timeout_ms)) {
+    if (!run_with_watchdog(worker_task, options_.timeout_ms, WatchdogPolicy::ExitOnTimeout, "baseline JIT")) {
         res.status = ExecutionStatus::Timeout;
         res.fault_message = "Watchdog timeout exceeded in the baseline JIT";
     } else {

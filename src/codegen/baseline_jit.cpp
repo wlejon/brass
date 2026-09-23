@@ -360,6 +360,13 @@ void* BaselineJitCompiler::resolve_symbol(std::string_view name) const {
     return nullptr;
 }
 
+void* BaselineJitCompiler::resolve_symbol_in(const Function& fn, std::string_view name) const {
+    if (const Module* mod = fn.parent()) {
+        if (const char* data = mod->string_symbol(name)) return const_cast<char*>(data);
+    }
+    return resolve_symbol(name);
+}
+
 BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn) {
     return compile(fn, target_);
 }
