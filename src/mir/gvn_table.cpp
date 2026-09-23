@@ -1,5 +1,6 @@
 #include "gvn_table.hpp"
 #include <brass/mir/gc_refs.hpp>
+#include <brass/mir/runtime_symbols.hpp>
 
 namespace brass {
 
@@ -30,7 +31,7 @@ bool is_pure_gvn_op(const Instruction* inst) noexcept {
     if (is_derived_gcref(inst->result())) return false;
     Opcode op = inst->opcode();
     if (op == Opcode::call) {
-        return inst->symbol() == "bronze_tls_block_addr";
+        return callee_has_role(*inst, SymbolRole::Pure);
     }
     switch (op) {
         case Opcode::iconst_i32:

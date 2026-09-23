@@ -4,6 +4,7 @@
 #include <brass/mir/verifier.hpp>
 #include <brass/mir/allocation_sinking.hpp>
 #include <brass/interpreter/interpreter.hpp>
+#include <iostream>
 
 using namespace brass;
 
@@ -292,4 +293,67 @@ TEST_CASE("Allocation Sinking - Multi-Field Loop Accumulator") {
     CHECK_EQ(res_ptr[0], 6);
     CHECK_EQ(res_ptr[1], 14);
     CHECK_EQ(res_ptr[2], 4);
+}
+
+// The object escapes on one arm only and is used after the arms merge: the
+// escaping arm materializes it, the other arm reaches the merge still
+// virtual. The merge's uses need one pointer from both arms - a block
+// parameter - not the materialization on the escaping arm, which does not
+// dominate them (fuzz seed 30004 on the legacy pipeline).
+TEST_CASE("Allocation Sinking - Object Materialized on One Arm Is Merged Through a Block Parameter") {
+    Module mod("test_sink_merge");
+    Builder b(mod);
+
+    Function* fn = mod.create_function("merge", Type::i64(), {Type::i32()});
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    BasicBlock* esc = b.append_block("esc");
+    BasicBlock* plain = b.append_block("plain");
+    BasicBlock* merge = b.append_block("merge");
+
+    Value* cond = b.add_block_param(entry, Type::i32());
+    b.position_at_end(entry);
+    Value* alloc = b.build_call("brass_gc_alloc", Type::gcref(),
+                                {b.build_iconst_i64(16), b.build_iconst_i64(0), b.build_iconst_i32(1)});
+    b.build_store(Type::i64(), alloc, 0, b.build_iconst_i64(40));
+    b.build_br_if(b.build_eq(cond, b.build_iconst_i32(0)), plain, esc);
+
+    b.position_at_end(esc);
+    b.build_call("sink", Type::void_type(), {alloc});
+    b.build_br(merge, {b.build_iconst_i64(40)});
+
+    b.position_at_end(plain);
+    Value* first = b.build_load(Type::i64(), alloc, 0);  // read while still virtual
+    b.build_br(merge, {first});
+
+    Value* seen = b.add_block_param(merge, Type::i64());
+    b.position_at_end(merge);
+    b.build_store(Type::i64(), alloc, 8, b.build_iconst_i64(2));
+    b.build_ret(b.build_add(seen, b.build_load(Type::i64(), alloc, 8)));
+
+    fn->rebuild_cfg_predecessors();
+    REQUIRE(verify_function(*fn));
+
+    AllocationSinkingOptions opts;
+    CHECK(sink_allocations(*fn, opts));
+    fn->rebuild_cfg_predecessors();
+    DiagnosticReporter diag;
+    const bool ok = verify_function(*fn, &diag);
+    if (!ok) std::cerr << diag.format_all() << "\n";
+    REQUIRE(ok);
+    CHECK_EQ(count_allocations_in_block(entry), 0ULL);
+    bool gcref_param = false;
+    for (size_t i = 0; i < merge->param_count(); ++i) gcref_param |= merge->param(i)->type() == Type::gcref();
+    CHECK(gcref_param);
+
+    Interpreter interp;
+    int sunk = 0;
+    interp.register_external_function("sink", [&](Interpreter&, const std::vector<RuntimeValue>&) {
+        ++sunk;
+        return RuntimeValue::from_i32(0);
+    });
+    CHECK_EQ(interp.run(*fn, {RuntimeValue::from_i32(0)}).as_i64(), 42);
+    CHECK_EQ(sunk, 0);
+    CHECK_EQ(interp.run(*fn, {RuntimeValue::from_i32(1)}).as_i64(), 42);
+    CHECK_EQ(sunk, 1);
 }

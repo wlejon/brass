@@ -1,14 +1,18 @@
 #include <brass/codegen/peephole.hpp>
-#include <brass/codegen/sched_dag.hpp>
+#include <brass/codegen/lir_flags.hpp>
 #include <brass/target/x64/x64_operands.hpp>
 #include <algorithm>
 
 namespace brass::codegen {
 
-static bool are_flags_live_after(const LirBlock& block, std::vector<std::unique_ptr<LirInst>>::const_iterator it) noexcept {
+// Whether a flag reader later in the block sees the flags as they stand
+// after `it`. The scan may stop only at a full definition: an instruction that
+// merely clobbers (x64 imul, shifts, bsr) leaves some flags as they were.
+static bool are_flags_live_after(const LirBlock& block, std::vector<std::unique_ptr<LirInst>>::const_iterator it,
+                                 Arch arch) noexcept {
     for (auto next = std::next(it); next != block.instructions.end(); ++next) {
-        if (instruction_uses_flags(**next)) return true;
-        if (instruction_defines_flags(**next)) return false;
+        if (lir_reads_flags(**next, arch)) return true;
+        if (lir_kills_flags(**next, arch)) return false;
     }
     return false;
 }
@@ -246,7 +250,7 @@ bool PeepholeOptimizer::simplify_arithmetic(LirBlock& block) {
             if (inst.uses.size() >= 2 && inst.uses[0].is_preg() && inst.defs[0].preg_val != inst.uses[0].preg_val) {
                 inst.opcode = (inst.opcode == LirOpcode::Add32 ? LirOpcode::Mov32 : LirOpcode::Mov);
                 inst.uses.pop_back();
-            } else if (!are_flags_live_after(block, it)) {
+            } else if (!are_flags_live_after(block, it, lir_arch(fn_))) {
                 it = block.instructions.erase(it);
             } else {
                 ++it;
@@ -264,7 +268,7 @@ bool PeepholeOptimizer::simplify_arithmetic(LirBlock& block) {
             if (inst.uses.size() >= 2 && inst.uses[0].is_preg() && inst.defs[0].preg_val != inst.uses[0].preg_val) {
                 inst.opcode = (inst.opcode == LirOpcode::Sub32 ? LirOpcode::Mov32 : LirOpcode::Mov);
                 inst.uses.pop_back();
-            } else if (!are_flags_live_after(block, it)) {
+            } else if (!are_flags_live_after(block, it, lir_arch(fn_))) {
                 it = block.instructions.erase(it);
             } else {
                 ++it;
@@ -294,7 +298,7 @@ bool PeepholeOptimizer::simplify_arithmetic(LirBlock& block) {
         if ((inst.opcode == LirOpcode::Mov || inst.opcode == LirOpcode::Mov32) &&
             inst.defs.size() == 1 && inst.defs[0].is_preg() && inst.defs[0].preg_val.is_gpr() &&
             inst.uses.size() == 1 && inst.uses[0].is_imm_int() && inst.uses[0].imm_int == 0) {
-            if (!are_flags_live_after(block, it)) {
+            if (!are_flags_live_after(block, it, lir_arch(fn_))) {
                 PReg reg = inst.defs[0].preg_val;
                 inst.opcode = LirOpcode::Xor32;
                 inst.defs = {LirOperand::preg(reg, 4)};
@@ -311,7 +315,7 @@ bool PeepholeOptimizer::simplify_arithmetic(LirBlock& block) {
         //    lea reg, [reg + disp]  -> add reg, disp
         if (inst.opcode == LirOpcode::Lea && inst.defs.size() == 1 && inst.defs[0].is_preg() &&
             inst.uses.size() == 1 && inst.uses[0].is_mem()) {
-            if (!are_flags_live_after(block, it)) {
+            if (!are_flags_live_after(block, it, lir_arch(fn_))) {
                 PReg dst_reg = inst.defs[0].preg_val;
                 uint8_t sz = inst.defs[0].size;
                 const auto& mem = inst.uses[0].mem_val;

@@ -1,494 +1,615 @@
 #include <brass/mir/allocation_sinking.hpp>
 #include <brass/mir/builder.hpp>
-#include <brass/mir/verifier.hpp>
+#include <brass/mir/dominators.hpp>
+#include <brass/mir/escape_analysis.hpp>
+#include <brass/mir/uses.hpp>
+#include "ir_clone.hpp"
 #include <algorithm>
-#include <queue>
+#include <map>
+#include <stdexcept>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+// Allocation sinking in four steps, for one allocation at a time:
+//
+//  1. Analysis. The object's "web" is the allocation's result plus every
+//     block parameter all of whose incoming values are in the web. A use of a
+//     web value is benign when it is a field load or store through it, or an
+//     edge argument into a web parameter; any other use (a call argument, a
+//     stored value, deopt state, an edge into a non-web parameter, a load or
+//     store of an unsupported shape) is an escape. Within the region the
+//     allocation dominates, a block is "escaped at entry" when any
+//     predecessor is escaped at exit, and escaped at exit when it is escaped
+//     at entry or contains an escape.
+//  2. Every edge from a block still virtual at exit into a block escaped at
+//     entry gets its own materialization block.
+//  3. Phi placement on the new CFG: field values need block parameters at the
+//     iterated dominance frontier of the blocks that define them, among the
+//     blocks virtual at entry; the materialized pointer needs one at the
+//     iterated dominance frontier of its definitions, among the blocks
+//     escaped at entry (a web parameter already is one).
+//  4. Renaming over the dominator tree: while virtual, loads read the current
+//     field value and stores set it; at the first escape of a block virtual
+//     at entry the allocation is re-emitted with every field stored into it;
+//     once escaped, web values are replaced by the current pointer.
 
 namespace brass {
 
 namespace {
 
-void for_each_branch_target(Instruction* term, auto&& fn) {
-    if (!term) return;
-    if (term->opcode() == Opcode::br) {
-        fn(term->branch_target());
-    } else if (term->opcode() == Opcode::br_if) {
-        fn(term->true_target());
-        fn(term->false_target());
-    } else if (term->opcode() == Opcode::switch_) {
-        fn(term->default_target());
-        for (auto& sc : term->switch_cases()) {
-            fn(sc.target);
-        }
-    } else if (term->opcode() == Opcode::invoke) {
-        fn(term->normal_target());
-        fn(term->unwind_target());
-    }
+constexpr size_t kMaxRounds = 8;
+
+bool is_scalar_field_type(Type t) {
+    return t == Type::i32() || t == Type::i64() || t == Type::f32() || t == Type::f64();
 }
 
-void replace_all_uses(Function& fn, Value* old_val, Value* new_val) {
-    if (!old_val || !new_val || old_val == new_val) return;
-    for (BasicBlock* bb : fn.blocks()) {
-        if (!bb) continue;
-        for (Instruction* inst : *bb) {
-            if (!inst) continue;
-            for (size_t i = 0; i < inst->operand_count(); ++i) {
-                if (inst->operand(i) == old_val) inst->set_operand(i, new_val);
-            }
-            for_each_branch_target(inst, [&](BranchTarget& bt) {
-                for (size_t i = 0; i < bt.args.size(); ++i) {
-                    if (bt.args[i] == old_val) bt.args[i] = new_val;
+Value* zero_of(Builder& b, Type t) {
+    if (t == Type::i32()) return b.build_iconst_i32(0);
+    if (t == Type::i64()) return b.build_iconst_i64(0);
+    if (t == Type::f32()) return b.build_fconst_f32(0.0f);
+    if (t == Type::f64()) return b.build_fconst_f64(0.0);
+    throw std::logic_error("allocation sinking: no zero constant for a field of this type");
+}
+
+class Sinker {
+public:
+    Sinker(Function& fn, Instruction* alloc, const AllocationSinkingOptions& options, PartialEscapeStats& stats)
+        : fn_(fn), alloc_(alloc), alloc_bb_(alloc->parent()), options_(options), stats_(stats) {}
+
+    bool run() {
+        if (!analyze()) return false;
+        transform();
+        return true;
+    }
+
+private:
+    // ---- analysis ------------------------------------------------------
+
+    bool in_region(const BasicBlock* bb) const { return region_.count(bb) != 0; }
+    bool in_web(const Value* v) const { return v && web_.count(v) != 0; }
+
+    // Every edge slot of every terminator, with the block it leaves.
+    template <typename F>
+    void for_each_edge_slot(F&& f) {
+        for (BasicBlock* bb : fn_.blocks()) {
+            if (!bb) continue;
+            Instruction* term = bb->terminator();
+            if (term) for_each_edge(*term, [&](BranchTarget& bt) { f(bb, *term, bt); });
+        }
+    }
+
+    void compute_web() {
+        const Value* obj = alloc_->result();
+        web_ = {obj};
+        // Grow: every parameter that receives a web value.
+        std::unordered_set<const Value*> params;
+        for (bool grew = true; grew;) {
+            grew = false;
+            for_each_edge_slot([&](BasicBlock*, Instruction&, BranchTarget& bt) {
+                for (size_t i = 0; i < bt.args.size() && i < bt.block->param_count(); ++i) {
+                    const Value* p = bt.block->param(i);
+                    if ((bt.args[i] == obj || params.count(bt.args[i])) && p->type() == obj->type() &&
+                        in_region(bt.block) && bt.block != alloc_bb_ && params.insert(p).second) {
+                        grew = true;
+                    }
                 }
             });
-            for (size_t i = 0; i < inst->state_map().size(); ++i) {
-                if (inst->state_map()[i] == old_val) inst->state_map()[i] = new_val;
-            }
         }
-    }
-}
-
-Value* get_or_create_zero(Module& mod, Function& fn, Type type) {
-    Builder b(mod);
-    b.set_function(&fn);
-    BasicBlock* entry = fn.entry_block();
-    Instruction* insert_pos = entry ? entry->head() : nullptr;
-    while (insert_pos && brass::is_constant(insert_pos->opcode())) {
-        insert_pos = insert_pos->next();
-    }
-    if (insert_pos) {
-        b.position_before(insert_pos);
-    } else if (entry) {
-        b.position_at_end(entry);
-    }
-
-    if (type.kind() == TypeKind::I32) {
-        return b.build_iconst_i32(0);
-    } else if (type.kind() == TypeKind::I64) {
-        return b.build_iconst_i64(0);
-    } else if (type.kind() == TypeKind::F32) {
-        return b.build_fconst_f32(0.0f);
-    } else if (type.kind() == TypeKind::F64) {
-        return b.build_fconst_f64(0.0);
-    }
-    return b.build_iconst_i64(0);
-}
-
-void replace_uses_in_block(BasicBlock* bb, const std::unordered_set<const Value*>& aliases, Value* new_val) {
-    if (!bb || !new_val) return;
-    for (Instruction* inst : *bb) {
-        if (!inst) continue;
-        for (size_t i = 0; i < inst->operand_count(); ++i) {
-            if (aliases.count(inst->operand(i)) > 0) {
-                inst->set_operand(i, new_val);
-            }
-        }
-        for_each_branch_target(inst, [&](BranchTarget& bt) {
-            for (size_t i = 0; i < bt.args.size(); ++i) {
-                if (aliases.count(bt.args[i]) > 0) {
-                    bt.args[i] = new_val;
+        // Shrink: a parameter stays only while every incoming value is in
+        // the web (the object on all paths, never "the object or another").
+        std::unordered_map<const Value*, bool> has_incoming;
+        for (bool shrank = true; shrank;) {
+            shrank = false;
+            has_incoming.clear();
+            std::vector<const Value*> drop;
+            for_each_edge_slot([&](BasicBlock*, Instruction&, BranchTarget& bt) {
+                for (size_t i = 0; i < bt.block->param_count(); ++i) {
+                    const Value* p = bt.block->param(i);
+                    if (!params.count(p)) continue;
+                    has_incoming[p] = true;
+                    const Value* a = i < bt.args.size() ? bt.args[i] : nullptr;
+                    if (a != obj && !params.count(a)) drop.push_back(p);
                 }
+            });
+            for (const Value* p : params) {
+                if (!has_incoming[p]) drop.push_back(p);
+            }
+            for (const Value* p : drop) shrank |= params.erase(p) != 0;
+        }
+        web_.insert(params.begin(), params.end());
+    }
+
+    bool field_shape(const Instruction& inst, int32_t& off, Type& type) const {
+        if (inst.opcode() == Opcode::load) {
+            type = inst.type();
+            if (inst.memory_type() != type) return false;
+        } else if (inst.opcode() == Opcode::store) {
+            if (!inst.operand(1) || in_web(inst.operand(1))) return false;
+            type = inst.operand(1)->type();
+            if (inst.memory_type() != type) return false;
+        } else {
+            return false;
+        }
+        off = inst.offset();
+        return inst.operand_count() >= 1 && in_web(inst.operand(0)) && off >= 0 && is_scalar_field_type(type);
+    }
+
+    void compute_fields() {
+        std::map<int32_t, Type> seen;
+        std::unordered_set<int32_t> bad;
+        for (BasicBlock* bb : fn_.blocks()) {
+            if (!bb) continue;
+            for (Instruction* inst : *bb) {
+                int32_t off = 0;
+                Type type = Type::void_type();
+                if (!field_shape(*inst, off, type)) continue;
+                auto [it, fresh] = seen.emplace(off, type);
+                if (!fresh && it->second != type) bad.insert(off);
+            }
+        }
+        // Overlapping fields cannot be separate scalars.
+        for (auto it = seen.begin(); it != seen.end(); ++it) {
+            auto next = std::next(it);
+            if (next == seen.end()) break;
+            if (static_cast<int64_t>(it->first) + static_cast<int64_t>(it->second.size_in_bytes()) > next->first) {
+                bad.insert(it->first);
+                bad.insert(next->first);
+            }
+        }
+        for (const auto& [off, type] : seen) {
+            if (!bad.count(off)) fields_.emplace(off, type);
+        }
+    }
+
+    bool is_field_load(const Instruction& inst) const {
+        int32_t off = 0;
+        Type type = Type::void_type();
+        if (inst.opcode() != Opcode::load || !field_shape(inst, off, type)) return false;
+        auto it = fields_.find(off);
+        return it != fields_.end() && it->second == type;
+    }
+
+    bool is_field_store(const Instruction& inst) const {
+        int32_t off = 0;
+        Type type = Type::void_type();
+        if (inst.opcode() != Opcode::store || !field_shape(inst, off, type)) return false;
+        auto it = fields_.find(off);
+        return it != fields_.end() && it->second == type;
+    }
+
+    // True when `inst` uses a web value in a way that needs the real object.
+    bool escapes_at(const Instruction& inst) const {
+        if (&inst == alloc_) return false;
+        const bool field_access = is_field_load(inst) || is_field_store(inst);
+        for (size_t i = 0; i < inst.operand_count(); ++i) {
+            if (in_web(inst.operand(i)) && !(i == 0 && field_access)) return true;
+        }
+        for (const Value* sv : inst.state_map()) {
+            if (in_web(sv)) return true;
+        }
+        bool escape = false;
+        for_each_edge(inst, [&](const BranchTarget& bt) {
+            for (size_t i = 0; i < bt.args.size(); ++i) {
+                if (!in_web(bt.args[i])) continue;
+                if (i >= bt.block->param_count() || !in_web(bt.block->param(i))) escape = true;
             }
         });
-        for (size_t i = 0; i < inst->state_map().size(); ++i) {
-            if (aliases.count(inst->state_map()[i]) > 0) {
-                inst->state_map()[i] = new_val;
+        return escape;
+    }
+
+    bool analyze() {
+        if (!alloc_bb_ || !alloc_->result()) return false;
+        fn_.rebuild_cfg_predecessors();
+        DominatorTree dom(fn_);
+        if (!dom.is_reachable(alloc_bb_)) return false;
+        for (BasicBlock* bb : fn_.blocks()) {
+            if (bb && dom.is_reachable(bb) && dom.dominates(alloc_bb_, bb)) region_.insert(bb);
+        }
+        // New block parameters need an argument on every incoming edge,
+        // including edges from unreachable code the renaming never visits.
+        for (const BasicBlock* bb : region_) {
+            if (bb == alloc_bb_) continue;
+            for (const BasicBlock* pred : bb->predecessors()) {
+                if (!dom.is_reachable(pred)) return false;
+            }
+        }
+        compute_web();
+        compute_fields();
+        if (fields_.size() > options_.max_fields) return false;
+
+        // A web value used where the dominator tree cannot reach it would be
+        // left dangling.
+        for (BasicBlock* bb : fn_.blocks()) {
+            if (!bb || in_region(bb)) continue;
+            for (Instruction* inst : *bb) {
+                bool uses_web = false;
+                for_each_use(*inst, [&](const Value* v) { uses_web |= in_web(v); });
+                if (uses_web) return false;
+            }
+        }
+
+        // First escape per block (after the allocation in its own block).
+        for (const BasicBlock* bb : region_) {
+            bool started = bb != alloc_bb_;
+            for (Instruction* inst : *bb) {
+                if (inst == alloc_) { started = true; continue; }
+                if (started && escapes_at(*inst)) {
+                    first_escape_[bb] = inst;
+                    break;
+                }
+            }
+        }
+        // Escaping in its own block is no better than where it is now.
+        if (first_escape_.count(alloc_bb_)) return false;
+
+        // Escape state: monotone forward dataflow over the region.
+        for (bool changed = true; changed;) {
+            changed = false;
+            for (const BasicBlock* bb : region_) {
+                if (bb == alloc_bb_) continue;
+                bool in = false;
+                for (const BasicBlock* pred : bb->predecessors()) {
+                    if (in_region(pred) && escaped_out(pred)) in = true;
+                }
+                if (in && !escaped_in_.count(bb)) {
+                    escaped_in_.insert(bb);
+                    changed = true;
+                }
+            }
+        }
+
+        // Worth doing only when the object dies unescaped on some path, or
+        // some field access happens while it is still virtual. (Never a
+        // loss: the object escapes at most once per allocation, so it is
+        // materialized at most as often as it was allocated.)
+        if (!dies_virtual() && !accessed_while_virtual()) return false;
+
+        // Edges that need their own materialization block.
+        for (BasicBlock* bb : fn_.blocks()) {
+            if (!bb || !in_region(bb) || escaped_out(bb)) continue;
+            Instruction* term = bb->terminator();
+            if (!term) continue;
+            bool needs = false;
+            for_each_edge(*term, [&](BranchTarget& bt) {
+                if (bt.block != alloc_bb_ && in_region(bt.block) && escaped_in_.count(bt.block)) needs = true;
+            });
+            if (!needs) continue;
+            // Only plain branches can be split; an invoke's edges cannot.
+            const Opcode op = term->opcode();
+            if (op != Opcode::br && op != Opcode::br_if && op != Opcode::switch_) return false;
+            mat_edge_blocks_.push_back(bb);
+        }
+        return true;
+    }
+
+    bool dies_virtual() const {
+        for (const BasicBlock* bb : region_) {
+            if (escaped_out(bb) || !bb->terminator()) continue;
+            if (bb->successors().empty()) return true;
+            for (const BasicBlock* succ : bb->successors()) {
+                if (!in_region(succ) || succ == alloc_bb_) return true;
+            }
+        }
+        return false;
+    }
+
+    // True when `bb` lies on a cycle of the region that does not pass
+    // through the allocation's block (it can run repeatedly per allocation).
+    bool on_region_cycle(const BasicBlock* bb) const {
+        const std::vector<BasicBlock*> succs = bb->successors();
+        std::vector<const BasicBlock*> work(succs.begin(), succs.end());
+        std::unordered_set<const BasicBlock*> seen;
+        while (!work.empty()) {
+            const BasicBlock* x = work.back();
+            work.pop_back();
+            if (x == bb) return true;
+            if (!in_region(x) || x == alloc_bb_ || !seen.insert(x).second) continue;
+            for (const BasicBlock* s : x->successors()) work.push_back(s);
+        }
+        return false;
+    }
+
+    // True when scalarization removes work: a field load while the object is
+    // virtual, or a field store that can run repeatedly while it is. (Stores
+    // that run once would only move to the materialization point.)
+    bool accessed_while_virtual() const {
+        for (const BasicBlock* bb : region_) {
+            if (escaped_in_.count(bb)) continue;
+            bool started = bb != alloc_bb_;
+            auto escape_it = first_escape_.find(bb);
+            const Instruction* first_escape = escape_it != first_escape_.end() ? escape_it->second : nullptr;
+            for (const Instruction* inst : *bb) {
+                if (inst == alloc_) { started = true; continue; }
+                if (!started) continue;
+                if (inst == first_escape) break;
+                if (is_field_load(*inst)) return true;
+                if (is_field_store(*inst) && bb != alloc_bb_ && on_region_cycle(bb)) return true;
+            }
+        }
+        return false;
+    }
+
+    bool escaped_out(const BasicBlock* bb) const {
+        return escaped_in_.count(bb) || first_escape_.count(bb) || mat_blocks_.count(bb);
+    }
+
+    // ---- transformation --------------------------------------------------
+
+    void split_escape_edges() {
+        for (BasicBlock* bb : mat_edge_blocks_) {
+            Instruction* term = bb->terminator();
+            for_each_edge(*term, [&](BranchTarget& bt) {
+                if (bt.block == alloc_bb_ || !in_region(bt.block) || !escaped_in_.count(bt.block)) return;
+                BasicBlock* mat = ir::new_block(fn_, "mat_pea_b" + std::to_string(bt.block->id()));
+                Builder b(*fn_.parent());
+                b.set_function(&fn_);
+                b.position_at_end(mat);
+                b.build_br(bt.block, bt.args);
+                bt.block = mat;
+                bt.args.clear();
+                mat_blocks_.insert(mat);
+                region_.insert(mat);
+                first_escape_[mat] = mat->terminator();
+                stats_.materialization_edges++;
+            });
+        }
+    }
+
+    // Iterated dominance frontier of `defs`, filtered by `keep`.
+    template <typename Keep>
+    std::unordered_set<BasicBlock*> idf(const std::vector<BasicBlock*>& defs, Keep&& keep) const {
+        std::unordered_set<BasicBlock*> out;
+        std::vector<BasicBlock*> work(defs.begin(), defs.end());
+        std::unordered_set<BasicBlock*> queued(defs.begin(), defs.end());
+        while (!work.empty()) {
+            BasicBlock* x = work.back();
+            work.pop_back();
+            auto it = df_.find(x);
+            if (it == df_.end()) continue;
+            for (BasicBlock* y : it->second) {
+                if (keep(y)) out.insert(y);
+                if (queued.insert(y).second) work.push_back(y);
+            }
+        }
+        return out;
+    }
+
+    void compute_frontiers(const DominatorTree& dom) {
+        for (BasicBlock* b : fn_.blocks()) {
+            if (!b || b->predecessors().size() < 2 || !dom.is_reachable(b)) continue;
+            const BasicBlock* idom_b = dom.immediate_dominator(b);
+            for (BasicBlock* pred : b->predecessors()) {
+                const BasicBlock* runner = pred;
+                while (runner && runner != idom_b && dom.is_reachable(runner)) {
+                    df_[runner].push_back(b);
+                    runner = dom.immediate_dominator(runner);
+                }
             }
         }
     }
-}
 
-void replace_uses_in_dom_subtree(const DominatorTree& dom, BasicBlock* root,
-                                const std::unordered_set<const Value*>& aliases, Value* new_val) {
-    if (!root || !new_val) return;
-    replace_uses_in_block(root, aliases, new_val);
-    for (const BasicBlock* child : dom.children(root)) {
-        replace_uses_in_dom_subtree(dom, const_cast<BasicBlock*>(child), aliases, new_val);
+    Value* web_param_of(const BasicBlock* bb) const {
+        for (Value* p : bb->params()) {
+            if (in_web(p)) return p;
+        }
+        return nullptr;
     }
-}
+
+    void place_params() {
+        auto virtual_merge = [&](BasicBlock* y) {
+            return in_region(y) && y != alloc_bb_ && !escaped_in_.count(y);
+        };
+        for (const auto& [off, type] : fields_) {
+            std::vector<BasicBlock*> defs = {alloc_bb_};
+            for (BasicBlock* bb : fn_.blocks()) {
+                if (!bb || !in_region(bb) || escaped_in_.count(bb)) continue;
+                for (Instruction* inst : *bb) {
+                    if (is_field_store(*inst) && inst->offset() == off) {
+                        defs.push_back(bb);
+                        break;
+                    }
+                }
+            }
+            for (BasicBlock* y : idf(defs, virtual_merge)) field_params_[y].emplace_back(off, nullptr);
+        }
+        for (auto& [y, list] : field_params_) {
+            std::sort(list.begin(), list.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+            for (auto& [off, param] : list) param = ir::new_block_param(fn_, y, fields_.at(off));
+        }
+
+        std::vector<BasicBlock*> ptr_defs;
+        for (BasicBlock* bb : fn_.blocks()) {
+            if (!bb || !in_region(bb)) continue;
+            const bool mat_here = !escaped_in_.count(bb) && first_escape_.count(bb);
+            if (mat_here || (escaped_in_.count(bb) && web_param_of(bb))) ptr_defs.push_back(bb);
+        }
+        auto escaped_merge = [&](BasicBlock* y) {
+            return in_region(y) && y != alloc_bb_ && escaped_in_.count(y) && !web_param_of(y);
+        };
+        for (BasicBlock* y : idf(ptr_defs, escaped_merge)) {
+            ptr_params_[y] = ir::new_block_param(fn_, y, alloc_->result()->type());
+        }
+    }
+
+    struct State {
+        std::map<int32_t, Value*> fields;
+        Value* ptr = nullptr;
+        bool is_virtual = false;
+    };
+
+    Value* materialize(Instruction* before, const State& st) {
+        ir::ValueMap values;
+        Instruction* copy = ir::clone_instruction(fn_, *alloc_, values, {});
+        before->parent()->insert_before(copy, before);
+        Builder b(*fn_.parent());
+        b.set_function(&fn_);
+        b.position_before(before);
+        for (const auto& [off, type] : fields_) {
+            b.build_store(type, copy->result(), off, st.fields.at(off));
+        }
+        stats_.materialized_allocations++;
+        return copy->result();
+    }
+
+    void rename_block(BasicBlock* bb, State& st) {
+        if (bb != alloc_bb_) {
+            st.is_virtual = !escaped_in_.count(bb);
+            if (st.is_virtual) {
+                auto it = field_params_.find(bb);
+                if (it != field_params_.end()) {
+                    for (const auto& [off, param] : it->second) st.fields[off] = param;
+                }
+            } else if (Value* wp = web_param_of(bb)) {
+                st.ptr = wp;
+            } else if (auto it = ptr_params_.find(bb); it != ptr_params_.end()) {
+                st.ptr = it->second;
+            }
+        }
+        std::vector<Instruction*> insts;
+        for (Instruction* inst : *bb) insts.push_back(inst);
+        auto escape_it = first_escape_.find(bb);
+        Instruction* first_escape = escape_it != first_escape_.end() ? escape_it->second : nullptr;
+        bool before_alloc = bb == alloc_bb_;
+        for (Instruction* inst : insts) {
+            if (before_alloc) {
+                if (inst != alloc_) continue;
+                before_alloc = false;
+                Builder b(*fn_.parent());
+                b.set_function(&fn_);
+                b.position_before(alloc_);
+                for (const auto& [off, type] : fields_) st.fields[off] = zero_of(b, type);
+                st.is_virtual = true;
+                dead_.push_back(alloc_);
+                continue;
+            }
+            if (st.is_virtual) {
+                if (inst == first_escape) {
+                    st.ptr = materialize(inst, st);
+                    st.is_virtual = false;
+                } else if (is_field_load(*inst)) {
+                    replace_all_uses(fn_, inst->result(), st.fields.at(inst->offset()));
+                    dead_.push_back(inst);
+                    stats_.scalarized_loads++;
+                    continue;
+                } else if (is_field_store(*inst)) {
+                    st.fields[inst->offset()] = inst->operand(1);
+                    dead_.push_back(inst);
+                    stats_.scalarized_stores++;
+                    continue;
+                }
+            }
+            if (!st.is_virtual) {
+                for_each_use_slot(*inst, [&](Value*& slot) {
+                    if (in_web(slot)) slot = st.ptr;
+                });
+            }
+        }
+        Instruction* term = bb->terminator();
+        if (!term) return;
+        for_each_edge(*term, [&](BranchTarget& bt) {
+            if (auto it = field_params_.find(bt.block); it != field_params_.end()) {
+                if (!st.is_virtual) throw std::logic_error("allocation sinking: escaped edge into a virtual block");
+                for (const auto& [off, param] : it->second) bt.args.push_back(st.fields.at(off));
+            }
+            if (ptr_params_.count(bt.block)) {
+                if (st.is_virtual || !st.ptr) throw std::logic_error("allocation sinking: no pointer on an escaped edge");
+                bt.args.push_back(st.ptr);
+            }
+        });
+    }
+
+    void transform() {
+        split_escape_edges();
+        fn_.rebuild_cfg_predecessors();
+        DominatorTree dom(fn_);
+        compute_frontiers(dom);
+        place_params();
+
+        // Renaming over the dominator tree, children seeing their parent's
+        // state at its end.
+        std::vector<std::pair<BasicBlock*, State>> work;
+        work.emplace_back(alloc_bb_, State{});
+        while (!work.empty()) {
+            auto [bb, st] = std::move(work.back());
+            work.pop_back();
+            rename_block(bb, st);
+            for (const BasicBlock* child : dom.children(bb)) {
+                if (in_region(child)) work.emplace_back(const_cast<BasicBlock*>(child), st);
+            }
+        }
+
+        for (Instruction* inst : dead_) {
+            if (inst->parent()) inst->parent()->remove_instruction(inst);
+        }
+        // Web parameters of blocks the object is virtual in carried nothing
+        // real; drop them with their incoming arguments.
+        for (BasicBlock* bb : fn_.blocks()) {
+            if (!bb || !in_region(bb) || escaped_in_.count(bb)) continue;
+            for (size_t i = bb->param_count(); i-- > 0;) {
+                if (in_web(bb->param(i))) remove_block_param(*bb, i);
+            }
+        }
+        fn_.rebuild_cfg_predecessors();
+        stats_.sunk_allocations++;
+        stats_.virtual_allocations++;
+    }
+
+    Function& fn_;
+    Instruction* alloc_;
+    BasicBlock* alloc_bb_;
+    const AllocationSinkingOptions& options_;
+    PartialEscapeStats& stats_;
+
+    std::unordered_set<const BasicBlock*> region_;
+    std::unordered_set<const Value*> web_;
+    std::map<int32_t, Type> fields_;
+    std::unordered_map<const BasicBlock*, Instruction*> first_escape_;
+    std::unordered_set<const BasicBlock*> escaped_in_;
+    std::vector<BasicBlock*> mat_edge_blocks_;
+    std::unordered_set<const BasicBlock*> mat_blocks_;
+    std::unordered_map<const BasicBlock*, std::vector<BasicBlock*>> df_;
+    std::unordered_map<BasicBlock*, std::vector<std::pair<int32_t, Value*>>> field_params_;
+    std::unordered_map<BasicBlock*, Value*> ptr_params_;
+    std::vector<Instruction*> dead_;
+};
 
 } // namespace
 
 AllocationSinkingPass::AllocationSinkingPass(Function& fn, const AllocationSinkingOptions& options)
     : fn_(fn), options_(options) {
-    if (options_.stats) {
-        stats_ = *options_.stats;
-    }
+    if (options_.stats) stats_ = *options_.stats;
+}
+
+bool AllocationSinkingPass::sink_one(Instruction* alloc) {
+    Sinker sinker(fn_, alloc, options_, stats_);
+    return sinker.run();
 }
 
 bool AllocationSinkingPass::run() {
+    // Coroutine state machines resume into blocks no edge names.
+    if (!fn_.resume_points().empty() || !fn_.entry_block()) return false;
     bool changed = false;
-    constexpr size_t max_rounds = 8;
-
-    for (size_t round = 0; round < max_rounds; ++round) {
-        fn_.rebuild_cfg_predecessors();
-        DominatorTree dom(fn_);
-        LoopAnalysis loops(fn_, dom);
-
-        PartialEscapeAnalysis pea(fn_);
-        const auto& candidates = pea.candidate_allocations();
-        if (candidates.empty()) {
-            break;
+    for (size_t round = 0; round < kMaxRounds; ++round) {
+        std::vector<Instruction*> allocs;
+        for (BasicBlock* bb : fn_.blocks()) {
+            if (!bb) continue;
+            for (Instruction* inst : *bb) {
+                if (inst->opcode() == Opcode::call && inst->result() && is_allocation_call(inst)) allocs.push_back(inst);
+            }
         }
-
         bool round_changed = false;
-        for (const Value* alloc_val : candidates) {
-            if (process_candidate(alloc_val, pea, dom)) {
-                round_changed = true;
-                changed = true;
-                break; // Re-analyze after transforming each candidate
-            }
+        for (Instruction* alloc : allocs) {
+            // Each transformation rewrites the CFG; the next allocation is
+            // analyzed afresh.
+            if (alloc->parent() && sink_one(alloc)) round_changed = true;
         }
-
-        if (!round_changed) {
-            break;
-        }
+        changed |= round_changed;
+        if (!round_changed) break;
     }
-
-    if (options_.stats) {
-        *options_.stats = stats_;
-    }
-
+    if (options_.stats) *options_.stats = stats_;
     return changed;
-}
-
-bool AllocationSinkingPass::process_candidate(const Value* alloc_val,
-                                              const PartialEscapeAnalysis& pea,
-                                              DominatorTree& dom) {
-    if (!alloc_val || !alloc_val->is_instruction()) return false;
-    Instruction* alloc_inst = alloc_val->defining_instruction();
-    if (!alloc_inst || !alloc_inst->parent()) return false;
-    BasicBlock* alloc_bb = alloc_inst->parent();
-
-    const auto& aliases = pea.get_aliases(alloc_val);
-    auto frontier = pea.get_materialization_frontier(alloc_val);
-
-    // 1. Gather all fields accessed and candidate memory instructions
-    std::map<int32_t, Type> fields;
-    std::vector<Instruction*> candidate_loads;
-    std::vector<Instruction*> candidate_stores;
-
-    for (BasicBlock* bb : fn_.blocks()) {
-        if (!bb) continue;
-        for (Instruction* inst : *bb) {
-            if (!inst || inst == alloc_inst) continue;
-
-            if (inst->opcode() == Opcode::load && aliases.count(inst->operand(0)) > 0) {
-                candidate_loads.push_back(inst);
-                fields[inst->offset()] = inst->type();
-            } else if (inst->opcode() == Opcode::store && aliases.count(inst->operand(0)) > 0) {
-                candidate_stores.push_back(inst);
-                Type st_t = inst->operand(1) ? inst->operand(1)->type() : inst->memory_type();
-                fields[inst->offset()] = st_t;
-            }
-        }
-    }
-
-    Builder builder(*fn_.parent());
-    builder.set_function(&fn_);
-
-    // 2. Identify virtual blocks
-    std::unordered_set<BasicBlock*> virtual_blocks;
-    for (BasicBlock* bb : fn_.blocks()) {
-        if (!bb) continue;
-        if (pea.get_block_state(bb, alloc_val) == ObjectState::Virtual) {
-            virtual_blocks.insert(bb);
-        }
-    }
-    virtual_blocks.insert(alloc_bb);
-
-    // 3. Materialization injection on escape edges
-    struct MatEdgeInfo {
-        BasicBlock* mat_bb;
-        Value* mat_ptr;
-    };
-    std::unordered_map<const BasicBlock*, std::vector<MatEdgeInfo>> edge_mat_map;
-
-    for (const CFGEdge& edge : frontier) {
-        BasicBlock* U = const_cast<BasicBlock*>(edge.from);
-        BasicBlock* V = const_cast<BasicBlock*>(edge.to);
-        if (!U || !V) continue;
-
-        std::string mat_name = "mat_pea_b" + std::to_string(V->id());
-        BasicBlock* mat_bb = builder.append_block(mat_name);
-
-        builder.position_at_end(mat_bb);
-
-        // a. Re-emit allocation instruction
-        Value* mat_ptr = nullptr;
-        if (alloc_inst->opcode() == Opcode::alloca_) {
-            uint32_t size = static_cast<uint32_t>(alloc_inst->imm_i32());
-            uint32_t align = static_cast<uint32_t>(alloc_inst->offset() > 0 ? alloc_inst->offset() : 8);
-            mat_ptr = builder.build_alloca(size, align);
-        } else {
-            mat_ptr = builder.build_call(alloc_inst->symbol(), alloc_inst->type(), alloc_inst->operands());
-        }
-        stats_.materialized_allocations++;
-        stats_.materialization_edges++;
-        edge_mat_map[U].push_back({mat_bb, mat_ptr});
-
-        // b. Rewire edge U -> V to U -> mat_bb -> V
-        Instruction* u_term = U->terminator();
-        std::vector<Value*> forwarded_args;
-
-        auto rewire = [&](BranchTarget& bt) {
-            if (bt.block == V) {
-                forwarded_args = bt.args;
-                for (size_t i = 0; i < forwarded_args.size(); ++i) {
-                    if (aliases.count(forwarded_args[i]) > 0) {
-                        forwarded_args[i] = mat_ptr;
-                    }
-                }
-                bt.block = mat_bb;
-                bt.args.clear();
-            }
-        };
-
-        if (u_term) {
-            if (u_term->opcode() == Opcode::br) {
-                rewire(u_term->branch_target());
-            } else if (u_term->opcode() == Opcode::br_if) {
-                rewire(u_term->true_target());
-                rewire(u_term->false_target());
-            } else if (u_term->opcode() == Opcode::switch_) {
-                rewire(u_term->default_target());
-                for (auto& sc : u_term->switch_cases()) {
-                    rewire(sc.target);
-                }
-            }
-        }
-
-        // In mat_bb: branch to V
-        builder.position_at_end(mat_bb);
-        builder.build_br(V, forwarded_args);
-
-        // Replace direct uses in V and its subtree
-        replace_uses_in_dom_subtree(dom, V, aliases, mat_ptr);
-    }
-
-    // 4. Scalarize loads and stores within the virtual region
-    // Dominance frontier computation for phi insertion
-    std::unordered_map<const BasicBlock*, std::vector<BasicBlock*>> df;
-    for (BasicBlock* b : fn_.blocks()) {
-        if (!b || b->predecessors().size() < 2) continue;
-        const BasicBlock* idom_b = dom.immediate_dominator(b);
-        for (BasicBlock* pred : b->predecessors()) {
-            const BasicBlock* runner = pred;
-            while (runner && runner != idom_b && dom.is_reachable(runner)) {
-                df[runner].push_back(b);
-                runner = dom.immediate_dominator(runner);
-            }
-        }
-    }
-
-    // Compute IDF for each field
-    struct FieldEntry {
-        int32_t offset;
-        Type type;
-    };
-    std::vector<FieldEntry> sorted_fields;
-    for (const auto& [off, type] : fields) {
-        sorted_fields.push_back({off, type});
-    }
-
-    std::unordered_map<BasicBlock*, std::vector<FieldEntry>> fields_for_block;
-    std::unordered_map<BasicBlock*, std::unordered_map<int32_t, Value*>> phi_params;
-
-    for (const FieldEntry& f : sorted_fields) {
-        std::vector<BasicBlock*> def_blocks;
-        def_blocks.push_back(alloc_bb);
-        for (Instruction* st : candidate_stores) {
-            if (st->offset() == f.offset && st->parent()) {
-                if (virtual_blocks.count(st->parent()) > 0) {
-                    def_blocks.push_back(st->parent());
-                }
-            }
-        }
-
-        std::unordered_set<BasicBlock*> idf_set;
-        std::vector<BasicBlock*> worklist(def_blocks.begin(), def_blocks.end());
-        std::unordered_set<BasicBlock*> in_worklist(def_blocks.begin(), def_blocks.end());
-
-        size_t w_i = 0;
-        while (w_i < worklist.size()) {
-            BasicBlock* b = worklist[w_i++];
-            auto it = df.find(b);
-            if (it != df.end()) {
-                for (BasicBlock* y : it->second) {
-                    if (y != alloc_bb && dom.dominates(alloc_bb, y) && virtual_blocks.count(y) > 0 && idf_set.insert(y).second) {
-                        if (in_worklist.insert(y).second) {
-                            worklist.push_back(y);
-                        }
-                    }
-                }
-            }
-        }
-
-        for (BasicBlock* b : idf_set) {
-            fields_for_block[b].push_back(f);
-        }
-    }
-
-    // Insert block parameters at merge points
-    for (auto& [b, flist] : fields_for_block) {
-        std::sort(flist.begin(), flist.end(), [](const FieldEntry& a, const FieldEntry& b_f) {
-            return a.offset < b_f.offset;
-        });
-        for (const FieldEntry& f : flist) {
-            Value* param = builder.add_block_param(b, f.type);
-            phi_params[b][f.offset] = param;
-        }
-    }
-
-    // 5. SSA renaming traversal on dominator tree
-    std::unordered_set<Instruction*> insts_to_remove;
-
-    auto scalarize_traversal = [&](auto& self, BasicBlock* bb,
-                                  std::unordered_map<int32_t, Value*> current_def) -> void {
-        if (!bb) return;
-
-        // Phi parameters at block entry
-        auto it_phi = phi_params.find(bb);
-        if (it_phi != phi_params.end()) {
-            for (const auto& [off, param_val] : it_phi->second) {
-                current_def[off] = param_val;
-            }
-        }
-
-        // Initial zero defs in alloc_bb
-        if (bb == alloc_bb) {
-            for (const FieldEntry& f : sorted_fields) {
-                if (current_def.find(f.offset) == current_def.end()) {
-                    current_def[f.offset] = get_or_create_zero(*fn_.parent(), fn_, f.type);
-                }
-            }
-        }
-
-        // Process instructions in bb
-        Instruction* cur = bb->head();
-        while (cur) {
-            Instruction* next = cur->next();
-
-            if (cur == alloc_inst) {
-                insts_to_remove.insert(cur);
-            } else if (cur->opcode() == Opcode::store && aliases.count(cur->operand(0)) > 0) {
-                current_def[cur->offset()] = cur->operand(1);
-                insts_to_remove.insert(cur);
-                stats_.scalarized_stores++;
-            } else if (cur->opcode() == Opcode::load && aliases.count(cur->operand(0)) > 0) {
-                int32_t off = cur->offset();
-                Value* loaded_val = current_def[off];
-                if (!loaded_val) {
-                    loaded_val = get_or_create_zero(*fn_.parent(), fn_, cur->type());
-                    current_def[off] = loaded_val;
-                }
-                replace_all_uses(fn_, cur->result(), loaded_val);
-                insts_to_remove.insert(cur);
-                stats_.scalarized_loads++;
-            }
-            cur = next;
-        }
-
-        // If bb has frontier edges to materialization blocks, emit stores into mat_ptr
-        auto it_m = edge_mat_map.find(bb);
-        if (it_m != edge_mat_map.end()) {
-            for (const auto& minfo : it_m->second) {
-                Instruction* term = minfo.mat_bb->terminator();
-                if (term) {
-                    builder.position_before(term);
-                } else {
-                    builder.position_at_end(minfo.mat_bb);
-                }
-                for (const FieldEntry& f : sorted_fields) {
-                    Value* outgoing = current_def[f.offset];
-                    if (!outgoing) {
-                        outgoing = get_or_create_zero(*fn_.parent(), fn_, f.type);
-                    }
-                    builder.build_store(f.type, minfo.mat_ptr, f.offset, outgoing);
-                }
-            }
-        }
-
-        // Update branch arguments to successors that have phi parameters
-        for (BasicBlock* succ : bb->successors()) {
-            if (!succ) continue;
-            auto it_f = fields_for_block.find(succ);
-            if (it_f == fields_for_block.end() || it_f->second.empty()) continue;
-
-            Instruction* term = bb->terminator();
-            if (!term) continue;
-
-            for (const FieldEntry& f : it_f->second) {
-                Value* outgoing = current_def[f.offset];
-                if (!outgoing) {
-                    outgoing = get_or_create_zero(*fn_.parent(), fn_, f.type);
-                }
-                for_each_branch_target(term, [&](BranchTarget& bt) {
-                    if (bt.block == succ) {
-                        bt.args.push_back(outgoing);
-                    }
-                });
-            }
-        }
-
-        // Recurse to dominator children in virtual_blocks
-        for (const BasicBlock* child : dom.children(bb)) {
-            BasicBlock* child_bb = const_cast<BasicBlock*>(child);
-            if (virtual_blocks.count(child_bb) > 0) {
-                self(self, child_bb, current_def);
-            }
-        }
-    };
-
-    std::unordered_map<int32_t, Value*> initial_defs;
-    scalarize_traversal(scalarize_traversal, alloc_bb, initial_defs);
-
-    // 6. Remove dead instructions
-    for (Instruction* inst : insts_to_remove) {
-        if (inst && inst->parent()) {
-            inst->parent()->remove_instruction(inst);
-        }
-    }
-    stats_.sunk_allocations++;
-    stats_.virtual_allocations++;
-
-    // 7. Remove dead alias block parameters
-    std::unordered_map<BasicBlock*, std::vector<uint32_t>> params_to_remove;
-    for (const Value* v : aliases) {
-        if (v && v->is_block_param()) {
-            BasicBlock* def_bb = v->defining_block();
-            if (def_bb && virtual_blocks.count(def_bb) > 0) {
-                params_to_remove[def_bb].push_back(v->param_index());
-            }
-        }
-    }
-
-    for (auto& [b, idxs] : params_to_remove) {
-        std::sort(idxs.begin(), idxs.end(), std::greater<uint32_t>());
-        for (uint32_t idx : idxs) {
-            if (idx < b->param_count()) {
-                b->params().erase(b->params().begin() + idx);
-                for (size_t k = idx; k < b->param_count(); ++k) {
-                    b->params()[k]->set_block_param(b, static_cast<uint32_t>(k));
-                }
-            }
-            for (BasicBlock* pred : fn_.blocks()) {
-                if (!pred) continue;
-                Instruction* term = pred->terminator();
-                if (!term) continue;
-                for_each_branch_target(term, [&](BranchTarget& bt) {
-                    if (bt.block == b && idx < bt.args.size()) {
-                        bt.args.erase(bt.args.begin() + idx);
-                    }
-                });
-            }
-        }
-    }
-
-    fn_.rebuild_cfg_predecessors();
-    return true;
 }
 
 bool sink_allocations(Function& fn, const AllocationSinkingOptions& options) {
@@ -499,9 +620,7 @@ bool sink_allocations(Function& fn, const AllocationSinkingOptions& options) {
 bool sink_allocations(Module& mod, const AllocationSinkingOptions& options) {
     bool changed = false;
     for (Function* fn : mod.functions()) {
-        if (fn) {
-            changed |= sink_allocations(*fn, options);
-        }
+        if (fn) changed |= sink_allocations(*fn, options);
     }
     return changed;
 }

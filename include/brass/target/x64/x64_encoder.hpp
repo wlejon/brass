@@ -480,6 +480,10 @@ public:
     void vminpd(XMM dst, XMM src1, const MemAddress& src2);
     void vmaxpd(XMM dst, XMM src1, XMM src2);
     void vmaxpd(XMM dst, XMM src1, const MemAddress& src2);
+    void vsqrtps(XMM dst, XMM src);
+    void vsqrtps(XMM dst, const MemAddress& src);
+    void vsqrtpd(XMM dst, XMM src);
+    void vsqrtpd(XMM dst, const MemAddress& src);
 
     // 256-bit Integer Arithmetic (i32x8 & i64x4)
     void vpaddd(XMM dst, XMM src1, XMM src2);
@@ -525,6 +529,11 @@ public:
     void vpbroadcastd(XMM dst, const MemAddress& src);
     void vpbroadcastq(XMM dst, XMM src);
     void vpbroadcastq(XMM dst, const MemAddress& src);
+
+    // 128-bit halves of a ymm (AVX): dst(xmm) = src(ymm)[imm & 1];
+    // dst(ymm) = src1(ymm) with half imm & 1 replaced by src2(xmm).
+    void vextractf128(XMM dst, XMM src, uint8_t imm);
+    void vinsertf128(XMM dst, XMM src1, XMM src2, uint8_t imm);
 
     // FMA3: Vector FMA (both 128-bit [is_256=false] and 256-bit [is_256=true])
     void vfmadd213ps(XMM dst, XMM src2, XMM src3, bool is_256 = false);

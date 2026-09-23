@@ -113,7 +113,7 @@ Function* outline_kernel(Function& fn, const ParallelLoopInfo& pli, const std::s
     b.position_before(k_entry->terminator());
     for (BasicBlock* bb : pli.loop->blocks()) {
         for (Instruction* inst : *bb) {
-            affine::for_each_use_slot(*inst, [&](Value*& v) {
+            for_each_use_slot(*inst, [&](Value*& v) {
                 if (v && affine::defined_outside(*pli.loop, v) && affine::is_plain_constant(v)) outside_value(b, vm, v);
             });
         }
@@ -282,7 +282,7 @@ bool transform_parallel_loop(Function& fn, ParallelLoopInfo& pli, const Parallel
     for (BasicBlock* bb : fn.blocks()) {
         if (!bb || pli.loop->contains(bb)) continue;
         for (Instruction* inst : *bb) {
-            affine::for_each_use_slot(*inst, [&](Value*& v) {
+            for_each_use_slot(*inst, [&](Value*& v) {
                 auto it = final_values.find(v);
                 if (it != final_values.end()) v = it->second;
             });

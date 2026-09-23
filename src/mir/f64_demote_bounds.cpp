@@ -1,6 +1,7 @@
 #include "f64_demote_internal.hpp"
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/opcodes.hpp>
+#include <brass/mir/runtime_symbols.hpp>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -114,7 +115,7 @@ public:
             case Opcode::smod:
                 return op(0).lo >= 0.0 && !op(1).contains_zero();
             case Opcode::call:
-                if (inst.symbol() == "bronze_f64_mod") return op(0).lo >= 0.0 && !op(1).contains_zero();
+                if (callee_has_role(inst, SymbolRole::FloatRem)) return op(0).lo >= 0.0 && !op(1).contains_zero();
                 return true;
             case Opcode::sdiv:
                 return !op(1).contains_zero() && (!op(0).contains_zero() || op(1).lo > 0.0);

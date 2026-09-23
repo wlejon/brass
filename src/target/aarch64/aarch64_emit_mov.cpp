@@ -133,13 +133,7 @@ void AArch64EmitContext::emit_mov_instruction(const LirInst& inst) {
         case LirOpcode::Movabs: {
             GPR dst_gpr = inst.defs[0].preg_val.as_aarch64_gpr();
             if (inst.uses[0].is_symbol()) {
-                const std::string& sym = inst.uses[0].symbol_name;
-                size_t off1 = buffer_.size();
-                buffer_.emit_inst(0x90000000u | reg_code(dst_gpr));
-                buffer_.add_relocation(off1, RelocationKind::Page21, sym);
-                size_t off2 = buffer_.size();
-                enc_.add(dst_gpr, dst_gpr, 0);
-                buffer_.add_relocation(off2, RelocationKind::PageOff12, sym);
+                enc_.load_symbol_address(dst_gpr, inst.uses[0].symbol_name);
             } else if (inst.is_patchable) {
                 // Ensure 8-byte natural alignment for the 64-bit literal at site_start + 8
                 if (((buffer_.size() + 8) % 8) != 0) {
@@ -219,7 +213,7 @@ void AArch64EmitContext::emit_mov_instruction(const LirInst& inst) {
         }
 
         default:
-            break;
+            throw_unsupported("aarch64 emit (mov)", to_string(inst.opcode));
     }
 }
 

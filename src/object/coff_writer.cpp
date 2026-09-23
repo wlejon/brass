@@ -1,7 +1,10 @@
 #include <brass/object/coff_writer.hpp>
 #include <brass/debug/codeview_emitter.hpp>
+#include <brass/object/aarch64_reloc.hpp>
 #include <fstream>
 #include <cstring>
+#include <stdexcept>
+#include <string>
 #include <unordered_map>
 
 namespace brass::object {
@@ -55,26 +58,53 @@ uint32_t get_coff_section_characteristics(const Section& sec) {
     return flags;
 }
 
+[[noreturn]] void bad_reloc(RelocKind kind, bool is_aarch64) {
+    throw std::runtime_error("COFF writer: relocation kind " + std::to_string(static_cast<int>(kind)) +
+                             " has no " + (is_aarch64 ? "ARM64" : "AMD64") + " COFF equivalent");
+}
+
 uint16_t to_coff_reloc_type(RelocKind kind, bool is_aarch64) {
     if (is_aarch64) {
         switch (kind) {
-            case RelocKind::Plt32:    return coff::IMAGE_REL_ARM64_BRANCH26;
-            case RelocKind::PCRel32:  return coff::IMAGE_REL_ARM64_PAGE21;
-            case RelocKind::AdrPage21: return coff::IMAGE_REL_ARM64_PAGE21;
-            case RelocKind::SecRel32: return coff::IMAGE_REL_ARM64_PAGEOFFSET_12A;
-            case RelocKind::Abs64:    return coff::IMAGE_REL_ARM64_ADDR64;
-            case RelocKind::Addr32NB: return coff::IMAGE_REL_ARM64_ADDR32NB;
-            case RelocKind::SecIdx:   return coff::IMAGE_REL_ARM64_SECTION;
-            case RelocKind::Abs32:    return coff::IMAGE_REL_ARM64_ADDR32;
-            case RelocKind::GotPCRel32: return coff::IMAGE_REL_ARM64_ADDR64;   // x64 only
+            case RelocKind::Plt32:       return coff::IMAGE_REL_ARM64_BRANCH26;
+            case RelocKind::PCRel32:     return coff::IMAGE_REL_ARM64_REL32;
+            case RelocKind::AdrPage21:   return coff::IMAGE_REL_ARM64_PAGE21;
+            // ADD takes the unscaled low 12 bits (12A); a load/store the low
+            // 12 bits scaled by its access size, which the linker reads from
+            // the instruction (12L).
+            case RelocKind::AddLo12:     return coff::IMAGE_REL_ARM64_PAGEOFFSET_12A;
+            case RelocKind::LdSt8Lo12:
+            case RelocKind::LdSt16Lo12:
+            case RelocKind::LdSt32Lo12:
+            case RelocKind::LdSt64Lo12:
+            case RelocKind::LdSt128Lo12: return coff::IMAGE_REL_ARM64_PAGEOFFSET_12L;
+            case RelocKind::SecRel32:    return coff::IMAGE_REL_ARM64_SECREL;
+            case RelocKind::Abs64:       return coff::IMAGE_REL_ARM64_ADDR64;
+            case RelocKind::Addr32NB:    return coff::IMAGE_REL_ARM64_ADDR32NB;
+            case RelocKind::SecIdx:      return coff::IMAGE_REL_ARM64_SECTION;
+            case RelocKind::Abs32:       return coff::IMAGE_REL_ARM64_ADDR32;
+            // COFF has no GOT: materialize_got_slots rewrites these first.
+            case RelocKind::GotPage21:
+            case RelocKind::GotLo12:
+            case RelocKind::GotPCRel32:
+                bad_reloc(kind, true);
         }
-        return coff::IMAGE_REL_ARM64_BRANCH26;
+        bad_reloc(kind, true);
     }
     switch (kind) {
+        case RelocKind::AdrPage21:
+        case RelocKind::AddLo12:
+        case RelocKind::LdSt8Lo12:
+        case RelocKind::LdSt16Lo12:
+        case RelocKind::LdSt32Lo12:
+        case RelocKind::LdSt64Lo12:
+        case RelocKind::LdSt128Lo12:
+        case RelocKind::GotPage21:
+        case RelocKind::GotLo12:
+        case RelocKind::GotPCRel32:   // none left after materialize_got_slots
+            bad_reloc(kind, false);
         case RelocKind::PCRel32:
         case RelocKind::Plt32:
-        case RelocKind::AdrPage21:
-        case RelocKind::GotPCRel32:   // none left after materialize_got_slots
             return coff::IMAGE_REL_AMD64_REL32;
         case RelocKind::Abs64:
             return coff::IMAGE_REL_AMD64_ADDR64;
@@ -282,6 +312,22 @@ std::vector<uint8_t> CoffWriter::write() {
     const bool rel32_from_field_end = !working_obj.target.is_aarch64();
     for (auto& sec : working_obj.sections) {
         for (const auto& r : sec.relocations) {
+            if (!rel32_from_field_end && (a64::is_instruction_kind(r.kind) || r.kind == RelocKind::Plt32)) {
+                // ARM64 COFF relocations carry the addend in the instruction's
+                // own immediate (ADRP: bytes; ADD: bytes; LDR/STR: scaled).
+                if (r.addend == 0) continue;
+                uint32_t inst = 0;
+                if (r.offset + 4 > sec.data.size()) {
+                    throw std::runtime_error("COFF writer: relocation outside section " + sec.name);
+                }
+                std::memcpy(&inst, sec.data.data() + r.offset, 4);
+                if (!a64::encode_implicit_addend(r.kind, inst, r.addend)) {
+                    throw std::runtime_error("COFF writer: addend " + std::to_string(r.addend) + " against '" +
+                                             r.symbol_name + "' does not fit the ARM64 instruction's immediate");
+                }
+                std::memcpy(sec.data.data() + r.offset, &inst, 4);
+                continue;
+            }
             if (rel32_from_field_end &&
                 (r.kind == RelocKind::PCRel32 || r.kind == RelocKind::Plt32)) {
                 if (r.addend + 4 != 0 && r.offset + 4 <= sec.data.size()) {
@@ -296,7 +342,6 @@ std::vector<uint8_t> CoffWriter::write() {
             }
             if (r.addend != 0) {
                 if (r.kind == RelocKind::Addr32NB || r.kind == RelocKind::PCRel32 ||
-                    r.kind == RelocKind::AdrPage21 ||
                     r.kind == RelocKind::SecRel32 || r.kind == RelocKind::Abs32) {
                     if (r.offset + 4 <= sec.data.size()) {
                         uint32_t current_val = 0;

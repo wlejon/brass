@@ -213,6 +213,9 @@ public:
     void cbz(GPR reg, Label target);
     void cbz32(GPR reg, Label target);
     void cbnz(GPR reg, Label target);
+    // Test bit `bit` (0..63) of `reg` and branch if zero / non-zero (+-32 KB).
+    void tbz(GPR reg, unsigned bit, Label target);
+    void tbnz(GPR reg, unsigned bit, Label target);
     void cbnz32(GPR reg, Label target);
 
     // =========================================================================
@@ -353,10 +356,21 @@ public:
     // division by zero as a program error, like the x64 #DE fault).
     void brk_if_zero(GPR reg, bool is_64bit, uint16_t imm);
     void adr(GPR dst, Label target);
-    void adrp(GPR dst, Label target);
+
+    // The address of `symbol`, through its GOT slot:
+    //   adrp dst, :got:symbol            (GotPage21)
+    //   ldr  dst, [dst, :got_lo12:symbol] (GotLo12)
+    // An image writer relaxes the pair to adrp + add for a symbol the image
+    // defines; an import is read from the slot the loader binds.
+    void load_symbol_address(GPR dst, const std::string& symbol);
 
 private:
     CodeBuffer& buffer_;
+
+    // B.cond / CBZ / CBNZ / TBZ / TBNZ to a label, relaxed to the long form
+    // (inverted short branch over `b target`) when the label is, or on an
+    // earlier emission pass turned out to be, out of the short range.
+    void emit_short_branch(uint32_t inst, FixupKind kind, Label target);
 
     void emit_add_sub_imm(bool is_64, bool is_sub, bool set_flags, GPR dst, GPR src, uint32_t imm);
     void emit_logical_imm(uint32_t opc, bool is_64, GPR dst, GPR src, uint64_t imm);

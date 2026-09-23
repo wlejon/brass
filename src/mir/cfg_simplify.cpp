@@ -1,5 +1,6 @@
 #include <brass/mir/cfg_simplify.hpp>
 #include <brass/mir/builder.hpp>
+#include <brass/mir/uses.hpp>
 #include <vector>
 #include <unordered_set>
 #include <algorithm>
@@ -10,142 +11,9 @@ namespace {
 
 void for_each_target_pointing_to(Instruction* term, BasicBlock* target_bb, auto&& fn) {
     if (!term || !target_bb) return;
-    if (term->opcode() == Opcode::br) {
-        if (term->branch_target().block == target_bb) {
-            fn(term->branch_target());
-        }
-    } else if (term->opcode() == Opcode::br_if) {
-        if (term->true_target().block == target_bb) {
-            fn(term->true_target());
-        }
-        if (term->false_target().block == target_bb) {
-            fn(term->false_target());
-        }
-    } else if (term->opcode() == Opcode::switch_) {
-        if (term->default_target().block == target_bb) {
-            fn(term->default_target());
-        }
-        for (auto& sc : term->switch_cases()) {
-            if (sc.target.block == target_bb) {
-                fn(sc.target);
-            }
-        }
-    } else if (term->opcode() == Opcode::invoke) {
-        if (term->normal_target().block == target_bb) {
-            fn(term->normal_target());
-        }
-        if (term->unwind_target().block == target_bb) {
-            fn(term->unwind_target());
-        }
-    }
-}
-
-size_t count_uses(const Function& fn, const Value* val) {
-    if (!val) return 0;
-    size_t count = 0;
-    for (const BasicBlock* bb : fn.blocks()) {
-        if (!bb) continue;
-        for (const Instruction* inst : *bb) {
-            if (!inst) continue;
-            for (size_t i = 0; i < inst->operand_count(); ++i) {
-                if (inst->operand(i) == val) count++;
-            }
-            if (inst->opcode() == Opcode::br) {
-                for (Value* arg : inst->branch_target().args) {
-                    if (arg == val) count++;
-                }
-            } else if (inst->opcode() == Opcode::br_if) {
-                for (Value* arg : inst->true_target().args) {
-                    if (arg == val) count++;
-                }
-                for (Value* arg : inst->false_target().args) {
-                    if (arg == val) count++;
-                }
-            } else if (inst->opcode() == Opcode::switch_) {
-                for (Value* arg : inst->default_target().args) {
-                    if (arg == val) count++;
-                }
-                for (const auto& sc : inst->switch_cases()) {
-                    for (Value* arg : sc.target.args) {
-                        if (arg == val) count++;
-                    }
-                }
-            } else if (inst->opcode() == Opcode::invoke) {
-                for (Value* arg : inst->normal_target().args) {
-                    if (arg == val) count++;
-                }
-                for (Value* arg : inst->unwind_target().args) {
-                    if (arg == val) count++;
-                }
-            }
-            for (Value* sv : inst->state_map()) {
-                if (sv == val) count++;
-            }
-        }
-    }
-    return count;
-}
-
-void replace_all_uses(Function& fn, Value* old_val, Value* new_val) {
-    if (!old_val || !new_val || old_val == new_val) return;
-    for (BasicBlock* bb : fn.blocks()) {
-        if (!bb) continue;
-        for (Instruction* inst : *bb) {
-            if (!inst) continue;
-            for (size_t i = 0; i < inst->operand_count(); ++i) {
-                if (inst->operand(i) == old_val) {
-                    inst->set_operand(i, new_val);
-                }
-            }
-            if (inst->opcode() == Opcode::br) {
-                for (size_t i = 0; i < inst->branch_target().args.size(); ++i) {
-                    if (inst->branch_target().args[i] == old_val) {
-                        inst->branch_target().args[i] = new_val;
-                    }
-                }
-            } else if (inst->opcode() == Opcode::br_if) {
-                for (size_t i = 0; i < inst->true_target().args.size(); ++i) {
-                    if (inst->true_target().args[i] == old_val) {
-                        inst->true_target().args[i] = new_val;
-                    }
-                }
-                for (size_t i = 0; i < inst->false_target().args.size(); ++i) {
-                    if (inst->false_target().args[i] == old_val) {
-                        inst->false_target().args[i] = new_val;
-                    }
-                }
-            } else if (inst->opcode() == Opcode::switch_) {
-                for (size_t i = 0; i < inst->default_target().args.size(); ++i) {
-                    if (inst->default_target().args[i] == old_val) {
-                        inst->default_target().args[i] = new_val;
-                    }
-                }
-                for (auto& sc : inst->switch_cases()) {
-                    for (size_t i = 0; i < sc.target.args.size(); ++i) {
-                        if (sc.target.args[i] == old_val) {
-                            sc.target.args[i] = new_val;
-                        }
-                    }
-                }
-            } else if (inst->opcode() == Opcode::invoke) {
-                for (size_t i = 0; i < inst->normal_target().args.size(); ++i) {
-                    if (inst->normal_target().args[i] == old_val) {
-                        inst->normal_target().args[i] = new_val;
-                    }
-                }
-                for (size_t i = 0; i < inst->unwind_target().args.size(); ++i) {
-                    if (inst->unwind_target().args[i] == old_val) {
-                        inst->unwind_target().args[i] = new_val;
-                    }
-                }
-            }
-            for (size_t i = 0; i < inst->state_map().size(); ++i) {
-                if (inst->state_map()[i] == old_val) {
-                    inst->state_map()[i] = new_val;
-                }
-            }
-        }
-    }
+    for_each_edge(*term, [&](BranchTarget& bt) {
+        if (bt.block == target_bb) fn(bt);
+    });
 }
 
 class CfgSimplifier {

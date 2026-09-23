@@ -210,6 +210,21 @@ int run_chunked(int argc, char** argv, uint64_t first_seed, uint32_t iterations,
     return (failed == 0 && lost == 0) ? 0 : 1;
 }
 
+// A --skip-pass name (or a reproducer's skip header) that names no step of
+// the pipeline is a typo or a stale name, not something to ignore.
+bool skips_are_known(FuzzPipeline pipeline, const std::vector<std::string>& skip) {
+    const std::vector<std::string> unknown = unknown_skip_names(pipeline, skip);
+    for (const std::string& name : unknown) {
+        std::cerr << "Error: pipeline '" << pipeline_name(pipeline) << "' has no step named '" << name << "'\n";
+    }
+    if (!unknown.empty()) {
+        std::cerr << "Steps:";
+        for (const std::string& step : fuzz_pipeline(pipeline).names()) std::cerr << " [" << step << "]";
+        std::cerr << "\n";
+    }
+    return unknown.empty();
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -323,6 +338,7 @@ int main(int argc, char** argv) {
         }
         if (!skip_given && header.has_skip) diff_opts.skip_passes = header.skip;
         diff_opts.save_reproducers = false;
+        if (!skips_are_known(diff_opts.pipeline, diff_opts.skip_passes)) return 1;
         DiffFuzzer fuzzer(diff_opts);
         const std::string fn_name = entry_name(*mod);
 
@@ -399,6 +415,7 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    if (!skips_are_known(pipeline, skip_passes)) return 1;
     if (chunk_size > 0) return run_chunked(argc, argv, initial_seed, iterations, chunk_size, repro_dir);
 
     // Mode 3: continuous differential fuzzing.

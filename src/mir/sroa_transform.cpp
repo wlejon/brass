@@ -1,4 +1,5 @@
 #include "sroa_transform.hpp"
+#include <brass/mir/uses.hpp>
 #include <algorithm>
 
 namespace brass {
@@ -6,42 +7,7 @@ namespace brass {
 namespace {
 
 void for_each_branch_target(Instruction* term, auto&& fn) {
-    if (!term) return;
-    if (term->opcode() == Opcode::br) {
-        fn(term->branch_target());
-    } else if (term->opcode() == Opcode::br_if) {
-        fn(term->true_target());
-        fn(term->false_target());
-    } else if (term->opcode() == Opcode::switch_) {
-        fn(term->default_target());
-        for (auto& sc : term->switch_cases()) {
-            fn(sc.target);
-        }
-    } else if (term->opcode() == Opcode::invoke) {
-        fn(term->normal_target());
-        fn(term->unwind_target());
-    }
-}
-
-void replace_all_uses(Function& fn, Value* old_val, Value* new_val) {
-    if (!old_val || !new_val || old_val == new_val) return;
-    for (BasicBlock* bb : fn.blocks()) {
-        if (!bb) continue;
-        for (Instruction* inst : *bb) {
-            if (!inst) continue;
-            for (size_t i = 0; i < inst->operand_count(); ++i) {
-                if (inst->operand(i) == old_val) inst->set_operand(i, new_val);
-            }
-            for_each_branch_target(inst, [&](BranchTarget& bt) {
-                for (size_t i = 0; i < bt.args.size(); ++i) {
-                    if (bt.args[i] == old_val) bt.args[i] = new_val;
-                }
-            });
-            for (size_t i = 0; i < inst->state_map().size(); ++i) {
-                if (inst->state_map()[i] == old_val) inst->state_map()[i] = new_val;
-            }
-        }
-    }
+    if (term) for_each_edge(*term, fn);
 }
 
 } // namespace

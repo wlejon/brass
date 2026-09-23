@@ -1,6 +1,7 @@
 #pragma once
 
 #include <brass/codegen/lir.hpp>
+#include <brass/target/target.hpp>
 #include <vector>
 #include <cstdint>
 #include <cstddef>
@@ -45,7 +46,9 @@ struct SchedNode {
 
 class SchedDAG {
 public:
-    explicit SchedDAG(LirBlock& block, bool is_pre_ra = true);
+    // `arch` is the target the block was selected for: what writes the
+    // condition flags differs (x64 `add` does, AArch64 `add` does not).
+    SchedDAG(LirBlock& block, Arch arch, bool is_pre_ra = true);
 
     void build();
 
@@ -59,6 +62,7 @@ public:
 
 private:
     LirBlock& block_;
+    Arch arch_;
     bool is_pre_ra_;
     std::vector<SchedNode> nodes_;
 
@@ -70,8 +74,6 @@ private:
 };
 
 uint32_t get_instruction_latency(const LirInst& inst);
-bool instruction_defines_flags(const LirInst& inst) noexcept;
-bool instruction_uses_flags(const LirInst& inst) noexcept;
 bool is_scheduling_barrier(const LirInst& inst) noexcept;
 
 } // namespace brass::codegen

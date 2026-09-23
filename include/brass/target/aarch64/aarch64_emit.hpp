@@ -79,6 +79,7 @@ private:
     };
     std::vector<PendingExceptionScope> pending_exception_scopes_;
 
+    AArch64CompilationResult compile_pass(const std::vector<uint32_t>& long_branch_sites);
     MemAddress to_mem_address(const codegen::LirOperand& op);
     MemAddress ensure_accessible_mem(const MemAddress& mem, GPR scratch = GPR::X16, int size_bytes = 8);
     GPR to_gpr(const codegen::LirOperand& op) const;

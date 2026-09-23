@@ -2,6 +2,7 @@
 #include <brass/codegen/jit_exec.hpp>
 #include <atomic>
 #include <iostream>
+#include <mutex>
 
 #if defined(_MSC_VER)
 #include <intrin.h>
@@ -61,6 +62,23 @@ static inline void atomic_store_release(T* ptr, T val) noexcept {
 #endif
 }
 
+// Every patch takes this lock for the whole flip-write-restore sequence. Two
+// patchers on the same page would otherwise race on its protection: on
+// Windows the second one's VirtualProtect records the first one's temporary
+// protection as the "old" one and restores it last, leaving the page
+// writable and executable for good; with mprotect the first one's restore
+// can land between the second one's flip and its write, which then faults.
+std::mutex& code_patch_mutex() {
+    static auto* m = new std::mutex();
+    return *m;
+}
+
+// Makes the pages of a live JIT code range writable for one patch. The page
+// keeps its execute permission while the patch is written: other threads may
+// be running code on it, and taking execute away would fault them. This
+// transient, lock-serialised window on the patched pages only is the one
+// place code is writable and executable; JIT memory is otherwise W^X (see
+// JitMemoryBlock). Callers hold code_patch_mutex().
 class ScopedCodeWrite {
 public:
     ScopedCodeWrite(void* addr, size_t size) {
@@ -68,12 +86,6 @@ public:
 #if defined(__APPLE__) && defined(__aarch64__)
         pthread_jit_write_protect_np(0);
         active_ = true;
-        writable_ = true;
-        return;
-#elif defined(__APPLE__) && defined(__x86_64__)
-        // On macOS (specifically x86_64 running under Rosetta 2), JIT memory is kept
-        // PROT_READ | PROT_WRITE | PROT_EXEC to prevent kernel SIGBUS faults caused by
-        // concurrent mprotect calls racing with translated instruction execution.
         writable_ = true;
         return;
 #endif
@@ -155,11 +167,70 @@ std::ostream& operator<<(std::ostream& os, PatchKind kind) {
 
 } // namespace brass::runtime
 
+namespace brass::runtime {
+
+namespace {
+
+// B/BL imm26: the whole instruction is rewritten (opcode kept).
+bool patch_aarch64_branch(void* call_site_addr, const void* new_target) {
+    if ((reinterpret_cast<uintptr_t>(call_site_addr) & 3) != 0) return false;
+    if (!is_cache_line_safe(call_site_addr, sizeof(uint32_t))) return false;
+    std::lock_guard<std::mutex> lock(code_patch_mutex());
+    const uint32_t current_inst = *reinterpret_cast<uint32_t*>(call_site_addr);
+    const uint32_t opcode = current_inst & 0xFC000000u;
+    if (opcode != 0x94000000u && opcode != 0x14000000u) return false;   // not BL / B
+    const int64_t disp = reinterpret_cast<intptr_t>(new_target) - reinterpret_cast<intptr_t>(call_site_addr);
+    if ((disp & 3) != 0) return false;
+    const int64_t disp_words = disp >> 2;
+    if (disp_words < -33554432 || disp_words > 33554431) return false; // +-128MB
+    const uint32_t new_inst = opcode | (static_cast<uint32_t>(disp_words) & 0x03FFFFFFu);
+    ScopedCodeWrite write_guard(call_site_addr, sizeof(uint32_t));
+    if (!write_guard.is_writable()) return false;
+    atomic_store_release(reinterpret_cast<uint32_t*>(call_site_addr), new_inst);
+    memory_fence();
+    flush_code_cache(call_site_addr, sizeof(uint32_t));
+    return true;
+}
+
+// CALL/JMP rel32 (E8 / E9): the displacement after the opcode byte.
+bool patch_x64_call(void* call_site_addr, const void* new_target) {
+    uint8_t* inst = static_cast<uint8_t*>(call_site_addr);
+    uint8_t* disp_ptr = inst + 1;
+    if (!is_cache_line_safe(disp_ptr, sizeof(int32_t))) return false;
+    std::lock_guard<std::mutex> lock(code_patch_mutex());
+    if (*inst != 0xE8 && *inst != 0xE9) return false;
+    const int64_t disp = reinterpret_cast<intptr_t>(new_target) - reinterpret_cast<intptr_t>(inst + 5);
+    if (disp < INT32_MIN || disp > INT32_MAX) return false;
+    ScopedCodeWrite write_guard(disp_ptr, sizeof(int32_t));
+    if (!write_guard.is_writable()) return false;
+    atomic_store_release(reinterpret_cast<int32_t*>(disp_ptr), static_cast<int32_t>(disp));
+    memory_fence();
+    flush_code_cache(disp_ptr, sizeof(int32_t));
+    return true;
+}
+
+} // namespace
+
+bool patch_call_site(CodeArch arch, void* call_site_addr, const void* new_target) {
+    if (!call_site_addr || !new_target) return false;
+    // The instruction set is the caller's to state: a byte pattern alone
+    // cannot tell an x64 call from an AArch64 branch (E8 xx xx 94 is both a
+    // plausible CALL and, read as a word, a BL).
+    switch (arch) {
+        case CodeArch::X64:     return patch_x64_call(call_site_addr, new_target);
+        case CodeArch::AArch64: return patch_aarch64_branch(call_site_addr, new_target);
+    }
+    return false;
+}
+
+} // namespace brass::runtime
+
 extern "C" {
 
 bool brass_patch_const32(void* code_addr, int32_t new_val) {
     if (!code_addr) return false;
     if (!brass::runtime::is_cache_line_safe(code_addr, sizeof(int32_t))) return false;
+    std::lock_guard<std::mutex> lock(code_patch_mutex());
     ScopedCodeWrite write_guard(code_addr, sizeof(int32_t));
     if (!write_guard.is_writable()) return false;
     auto* target_ptr = reinterpret_cast<int32_t*>(code_addr);
@@ -172,6 +243,7 @@ bool brass_patch_const32(void* code_addr, int32_t new_val) {
 bool brass_patch_const64(void* code_addr, int64_t new_val) {
     if (!code_addr) return false;
     if (!brass::runtime::is_cache_line_safe(code_addr, sizeof(int64_t))) return false;
+    std::lock_guard<std::mutex> lock(code_patch_mutex());
     ScopedCodeWrite write_guard(code_addr, sizeof(int64_t));
     if (!write_guard.is_writable()) return false;
     auto* target_ptr = reinterpret_cast<int64_t*>(code_addr);
@@ -182,60 +254,8 @@ bool brass_patch_const64(void* code_addr, int64_t new_val) {
 }
 
 bool brass_patch_call(void* call_site_addr, const void* new_target) {
-    if (!call_site_addr || !new_target) return false;
-
-    // Check ARM64 BL or B instruction
-    if ((reinterpret_cast<uintptr_t>(call_site_addr) & 3) == 0) {
-        uint32_t current_inst = *reinterpret_cast<uint32_t*>(call_site_addr);
-        if ((current_inst & 0xFC000000u) == 0x94000000u || (current_inst & 0xFC000000u) == 0x14000000u) {
-            if (!brass::runtime::is_cache_line_safe(call_site_addr, sizeof(uint32_t))) return false;
-            intptr_t site_int = reinterpret_cast<intptr_t>(call_site_addr);
-            intptr_t target_int = reinterpret_cast<intptr_t>(new_target);
-            int64_t disp = target_int - site_int;
-            if ((disp & 3) != 0) return false;
-            int64_t disp_words = disp >> 2;
-            if (disp_words < -33554432 || disp_words > 33554431) return false; // +-128MB
-            uint32_t opcode = current_inst & 0xFC000000u;
-            uint32_t new_inst = opcode | (static_cast<uint32_t>(disp_words) & 0x03FFFFFFu);
-            ScopedCodeWrite write_guard(call_site_addr, sizeof(uint32_t));
-            if (!write_guard.is_writable()) return false;
-            atomic_store_release(reinterpret_cast<uint32_t*>(call_site_addr), new_inst);
-            memory_fence();
-            flush_code_cache(call_site_addr, sizeof(uint32_t));
-            return true;
-        }
-    }
-
-    uint8_t* inst = static_cast<uint8_t*>(call_site_addr);
-
-    uint8_t* disp_ptr = inst;
-    uint8_t* next_ip = inst + 5;
-    if (*inst == 0xE8 || *inst == 0xE9) {
-        disp_ptr = inst + 1;
-        next_ip = inst + 5;
-    } else {
-        next_ip = inst + 4;
-    }
-
-    if (!brass::runtime::is_cache_line_safe(disp_ptr, sizeof(int32_t))) return false;
-
-    intptr_t target_int = reinterpret_cast<intptr_t>(new_target);
-    intptr_t next_ip_int = reinterpret_cast<intptr_t>(next_ip);
-    int64_t disp = static_cast<int64_t>(target_int - next_ip_int);
-
-    if (disp < INT32_MIN || disp > INT32_MAX) {
-        return false;
-    }
-
-    ScopedCodeWrite write_guard(disp_ptr, sizeof(int32_t));
-    if (!write_guard.is_writable()) return false;
-
-    int32_t disp32 = static_cast<int32_t>(disp);
-    auto* target_ptr = reinterpret_cast<int32_t*>(disp_ptr);
-    atomic_store_release(target_ptr, disp32);
-    memory_fence();
-    flush_code_cache(disp_ptr, sizeof(int32_t));
-    return true;
+    // In-process code is host code.
+    return brass::runtime::patch_call_site(brass::runtime::host_code_arch(), call_site_addr, new_target);
 }
 
 } // extern "C"
@@ -290,13 +310,13 @@ bool PatchRegistry::patch_const64(void* fn_base, std::string_view name, int64_t 
     return brass_patch_const64(imm_addr, new_val);
 }
 
-bool PatchRegistry::patch_call(void* fn_base, std::string_view name, const void* new_target) {
+bool PatchRegistry::patch_call(CodeArch arch, void* fn_base, std::string_view name, const void* new_target) {
     const auto* site = find_site(name);
     if (!site || site->kind != PatchKind::Call || !fn_base) {
         return false;
     }
     void* call_site = static_cast<uint8_t*>(fn_base) + site->code_offset;
-    return brass_patch_call(call_site, new_target);
+    return patch_call_site(arch, call_site, new_target);
 }
 
 } // namespace brass::runtime

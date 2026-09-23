@@ -10,6 +10,7 @@
 #include <brass/mir/alias_analysis.hpp>
 #include <brass/mir/instruction.hpp>
 #include <brass/mir/loop_analysis.hpp>
+#include <brass/mir/uses.hpp>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -65,10 +66,6 @@ bool defined_outside(const LoopInfo& loop, const Value* v) noexcept;
 bool is_int_constant(const Value* v, int64_t& out) noexcept;
 // iconst/fconst: a value that can be re-created anywhere by copying it.
 bool is_plain_constant(const Value* v) noexcept;
-
-// Visits every value slot an instruction reads: operands, deopt state and
-// the arguments of every outgoing edge, so the slot can be rewritten.
-void for_each_use_slot(Instruction& inst, const std::function<void(Value*&)>& f);
 
 // True when some instruction in a block outside `loop` reads `v`.
 bool used_outside(const Function& fn, const LoopInfo& loop, const Value* v);

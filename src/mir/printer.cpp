@@ -713,7 +713,7 @@ void print_module(const Module& mod, std::ostream& os) {
     if (!mod.external_symbols().empty()) {
         for (std::string_view sym : mod.external_symbols()) {
             os << "extern @" << sym;
-            if (mod.is_allocation_function(sym)) os << " allocator";
+            for (SymbolRole role : mod.symbol_roles(sym)) os << " " << symbol_role_name(role);
             os << "\n";
         }
         if (!mod.functions().empty()) {

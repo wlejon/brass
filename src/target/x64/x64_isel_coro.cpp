@@ -1,4 +1,5 @@
 #include <brass/target/x64/x64_isel.hpp>
+#include <brass/codegen/unsupported_operation.hpp>
 #include <brass/mir/module.hpp>
 #include <brass/runtime/coroutine.hpp>
 #include <algorithm>
@@ -205,7 +206,7 @@ void X64ISel::lower_coro(const Instruction& inst, LirBlock& lir_bb) {
         }
 
         default:
-            break;
+            codegen::throw_unsupported("x64 isel (coro)", opcode_name(inst.opcode()));
     }
 }
 

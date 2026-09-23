@@ -224,20 +224,20 @@ TEST_CASE("AArch64 ObjectWriter - Mach-O 64-bit Header and ARM64 Relocations") {
     Target target = Target::aarch64_macos();
     ObjectFile obj = compile_module_to_object(mod, target);
 
-    // Explicitly add synthetic relocations to check PCRel32 (PAGE21), SecRel32 (PAGEOFF12), Abs64 (UNSIGNED)
+    // Explicitly add synthetic relocations to check AdrPage21 (PAGE21), AddLo12 (PAGEOFF12), Abs64 (UNSIGNED)
     Section* text_sec = obj.get_section(".text");
     REQUIRE(text_sec != nullptr);
 
     ObjectRelocation r_page21;
     r_page21.offset = 4;
-    r_page21.kind = RelocKind::PCRel32;
+    r_page21.kind = RelocKind::AdrPage21;
     r_page21.symbol_name = "macho_callee";
     r_page21.addend = 0;
     text_sec->relocations.push_back(r_page21);
 
     ObjectRelocation r_pageoff12;
     r_pageoff12.offset = 8;
-    r_pageoff12.kind = RelocKind::SecRel32;
+    r_pageoff12.kind = RelocKind::AddLo12;
     r_pageoff12.symbol_name = "macho_callee";
     r_pageoff12.addend = 0;
     text_sec->relocations.push_back(r_pageoff12);
@@ -351,24 +351,30 @@ TEST_CASE("AArch64 ObjectWriter - COFF Header and ARM64 Relocations") {
     Target target = Target::aarch64_windows();
     ObjectFile obj = compile_module_to_object(mod, target);
 
-    // Add relocations for testing PAGE21, SECREL, ADDR64
+    // Add relocations for testing PAGE21, PAGEOFFSET_12A, SECREL, ADDR64
     Section* text_sec = obj.get_section(".text");
     REQUIRE(text_sec != nullptr);
 
     ObjectRelocation r_p21;
     r_p21.offset = 4;
-    r_p21.kind = RelocKind::PCRel32;
+    r_p21.kind = RelocKind::AdrPage21;
     r_p21.symbol_name = "coff_callee";
     text_sec->relocations.push_back(r_p21);
 
+    ObjectRelocation r_lo12;
+    r_lo12.offset = 8;
+    r_lo12.kind = RelocKind::AddLo12;
+    r_lo12.symbol_name = "coff_callee";
+    text_sec->relocations.push_back(r_lo12);
+
     ObjectRelocation r_sec;
-    r_sec.offset = 8;
+    r_sec.offset = 16;
     r_sec.kind = RelocKind::SecRel32;
     r_sec.symbol_name = "coff_callee";
     text_sec->relocations.push_back(r_sec);
 
     ObjectRelocation r_a64;
-    r_a64.offset = 12;
+    r_a64.offset = 24;
     r_a64.kind = RelocKind::Abs64;
     r_a64.symbol_name = "coff_callee";
     text_sec->relocations.push_back(r_a64);
@@ -387,6 +393,7 @@ TEST_CASE("AArch64 ObjectWriter - COFF Header and ARM64 Relocations") {
     bool found_branch26 = false;
     bool found_page21 = false;
     bool found_pageoffset = false;
+    bool found_secrel = false;
     bool found_addr64 = false;
 
     for (uint16_t i = 0; i < num_sec; ++i) {
@@ -408,6 +415,8 @@ TEST_CASE("AArch64 ObjectWriter - COFF Header and ARM64 Relocations") {
                         found_page21 = true;
                     } else if (r_type == coff::IMAGE_REL_ARM64_PAGEOFFSET_12A) {
                         found_pageoffset = true;
+                    } else if (r_type == coff::IMAGE_REL_ARM64_SECREL) {
+                        found_secrel = true;
                     } else if (r_type == coff::IMAGE_REL_ARM64_ADDR64) {
                         found_addr64 = true;
                     }
@@ -419,6 +428,7 @@ TEST_CASE("AArch64 ObjectWriter - COFF Header and ARM64 Relocations") {
     CHECK(found_branch26);
     CHECK(found_page21);
     CHECK(found_pageoffset);
+    CHECK(found_secrel);
     CHECK(found_addr64);
 }
 

@@ -3,6 +3,7 @@
 #include <brass/mir/instruction.hpp>
 #include <brass/mir/block.hpp>
 #include <brass/mir/loop_analysis.hpp>
+#include <brass/mir/runtime_symbols.hpp>
 #include "f64_demote_internal.hpp"
 #include <sstream>
 #include <iomanip>
@@ -159,9 +160,9 @@ void record_loop_stats(
                     } else if (op == Opcode::sdiv || op == Opcode::udiv) {
                         has_unproven_div = true;
                     } else if (op == Opcode::call) {
-                        if (inst->symbol() == "bronze_elem_get" || inst->symbol() == "bronze_elem_set" || inst->symbol() == "bronze_prop_set") {
+                        if (callee_has_role(*inst, SymbolRole::ArrayGet) || callee_has_role(*inst, SymbolRole::ArraySet)) {
                             has_dynamic_inst = true;
-                        } else if (inst->symbol() != "bronze_f64_mod") {
+                        } else if (!callee_has_role(*inst, SymbolRole::FloatRem)) {
                             has_call = true;
                         }
                     } else if (inst->type().is_pointer_or_gcref()) {

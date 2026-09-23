@@ -3,6 +3,7 @@
 #include <brass/mir/cfg_simplify.hpp>
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/loop_analysis.hpp>
+#include <brass/mir/uses.hpp>
 #include <cstdint>
 #include <optional>
 #include <unordered_map>
@@ -11,51 +12,6 @@
 namespace brass {
 
 namespace {
-
-void replace_all_uses(Function& fn, Value* old_val, Value* new_val) {
-    if (!old_val || !new_val || old_val == new_val) return;
-    for (BasicBlock* bb : fn.blocks()) {
-        if (!bb) continue;
-        for (Instruction* inst : *bb) {
-            if (!inst) continue;
-            for (size_t i = 0; i < inst->operand_count(); ++i) {
-                if (inst->operand(i) == old_val) inst->set_operand(i, new_val);
-            }
-            auto patch = [&](BranchTarget& bt) {
-                for (Value*& arg : bt.args) {
-                    if (arg == old_val) arg = new_val;
-                }
-            };
-            patch(inst->branch_target());
-            patch(inst->true_target());
-            patch(inst->false_target());
-            for (auto& sc : inst->switch_cases()) patch(sc.target);
-            for (size_t i = 0; i < inst->state_map().size(); ++i) {
-                if (inst->state_map()[i] == old_val) inst->state_map()[i] = new_val;
-            }
-        }
-    }
-}
-
-std::unordered_map<const Value*, size_t> count_all_uses(const Function& fn) {
-    std::unordered_map<const Value*, size_t> counts;
-    for (const BasicBlock* bb : fn.blocks()) {
-        if (!bb) continue;
-        for (const Instruction* inst : *bb) {
-            if (!inst) continue;
-            for (const Value* op : inst->operands()) if (op) counts[op]++;
-            auto count_target = [&](const BranchTarget& bt) {
-                for (const Value* arg : bt.args) if (arg) counts[arg]++;
-            };
-            count_target(inst->branch_target());
-            count_target(inst->true_target());
-            count_target(inst->false_target());
-            for (const auto& sc : inst->switch_cases()) count_target(sc.target);
-            for (const Value* sv : inst->state_map()) if (sv) counts[sv]++;
-        }
-    }
-    return counts;
-}
 
 Opcode invert_comparison_opcode(Opcode op) noexcept {
     switch (op) {
@@ -313,7 +269,7 @@ void remove_dead_pure_instructions(Function& fn) {
     bool progress = true;
     while (progress) {
         progress = false;
-        auto uses = count_all_uses(fn);
+        auto uses = compute_use_counts(fn);
         for (BasicBlock* bb : fn.blocks()) {
             if (!bb) continue;
             Instruction* cur = bb->head();

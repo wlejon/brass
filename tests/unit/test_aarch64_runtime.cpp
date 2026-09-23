@@ -30,7 +30,7 @@ TEST_CASE("AArch64 Runtime - Call Patching BL Instruction") {
     void* call_site = &code[0];
     const void* target = &code[100];
 
-    bool ok = brass_patch_call(call_site, target);
+    bool ok = patch_call_site(CodeArch::AArch64, call_site, target);
     CHECK(ok);
 
     uint32_t expected = 0x94000000u | 100u;
@@ -41,7 +41,7 @@ TEST_CASE("AArch64 Runtime - Call Patching BL Instruction") {
     void* call_site_back = &code[50];
     const void* target_back = &code[0];
 
-    bool ok_back = brass_patch_call(call_site_back, target_back);
+    bool ok_back = patch_call_site(CodeArch::AArch64, call_site_back, target_back);
     CHECK(ok_back);
 
     uint32_t expected_back = 0x94000000u | (static_cast<uint32_t>(-50) & 0x03FFFFFFu);
@@ -57,7 +57,7 @@ TEST_CASE("AArch64 Runtime - Call Patching B Instruction") {
     void* call_site = &code[10];
     const void* target = &code[266]; // +256 words = +1024 bytes
 
-    bool ok = brass_patch_call(call_site, target);
+    bool ok = patch_call_site(CodeArch::AArch64, call_site, target);
     CHECK(ok);
 
     uint32_t expected = 0x14000000u | 256u;
@@ -70,16 +70,16 @@ TEST_CASE("AArch64 Runtime - Call Patching Bounds and Alignment") {
 
     // 1. Unaligned target (disp not multiple of 4)
     const void* unaligned_target = reinterpret_cast<const void*>(reinterpret_cast<uintptr_t>(&code[0]) + 13);
-    CHECK(!brass_patch_call(&code[0], unaligned_target));
+    CHECK(!patch_call_site(CodeArch::AArch64, &code[0], unaligned_target));
 
     // 2. Out of range displacement (> +128MB or < -128MB)
     // 33554432 words = 134217728 bytes = 128MB
     intptr_t base_int = reinterpret_cast<intptr_t>(&code[0]);
     const void* too_far_forward = reinterpret_cast<const void*>(base_int + (33554432LL << 2));
-    CHECK(!brass_patch_call(&code[0], too_far_forward));
+    CHECK(!patch_call_site(CodeArch::AArch64, &code[0], too_far_forward));
 
     const void* too_far_backward = reinterpret_cast<const void*>(base_int + (-33554433LL << 2));
-    CHECK(!brass_patch_call(&code[0], too_far_backward));
+    CHECK(!patch_call_site(CodeArch::AArch64, &code[0], too_far_backward));
 }
 
 TEST_CASE("AArch64 Runtime - Const Patching With Cache Flush") {
@@ -112,7 +112,7 @@ TEST_CASE("AArch64 Runtime - Const Patching With Cache Flush") {
 
     alignas(4) uint32_t bl_inst = 0x94000000u;
     const void* target = reinterpret_cast<const void*>(reinterpret_cast<uintptr_t>(&bl_inst) + 80);
-    CHECK(registry.patch_call(&bl_inst, "site_bl", target));
+    CHECK(registry.patch_call(CodeArch::AArch64, &bl_inst, "site_bl", target));
     CHECK_EQ(bl_inst, 0x94000000u | 20u);
 }
 

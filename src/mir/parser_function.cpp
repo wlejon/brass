@@ -5,6 +5,9 @@
 #include "parser_impl.hpp"
 #include "parser_decode.hpp"
 
+#include <brass/mir/runtime_symbols.hpp>
+#include <optional>
+#include <string>
 #include <vector>
 
 namespace brass {
@@ -100,9 +103,15 @@ bool Parser::parse_extern_decl(Module& mod) {
     }
 
     mod.add_external_symbol(sym_name);
-    if (peek().is(TokenKind::Ident) && peek().text == "allocator") {
+    // Runtime-symbol roles (runtime_symbols.hpp), any number of them.
+    while (peek().is(TokenKind::Ident)) {
+        const std::optional<SymbolRole> role = parse_symbol_role(peek().text);
+        if (!role) {
+            error(peek().location, "Unknown runtime symbol role '" + std::string(peek().text) + "'");
+            return false;
+        }
         advance();
-        mod.add_allocation_function(sym_name);
+        mod.add_symbol_role(sym_name, *role);
     }
     return true;
 }

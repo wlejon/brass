@@ -438,3 +438,50 @@ TEST_CASE("Loop Vectorizer - Vector Reduction with Horizontal Sum") {
         CHECK(std::abs(jit_val.as_f32() - interp_val.as_f32()) < 1e-4f);
     }
 }
+
+// `a[i] = i` needs the lane vector [i, i+1, ...]; the vectorizer once stored
+// broadcast(i) to every lane (fuzz seed 100073, pipeline all).
+TEST_CASE("Loop Vectorizer - storing the induction variable itself is not vectorized") {
+    Module mod("vec_iv_store");
+    Function* fn = mod.create_function("iota", Type::void_type(), {Type::ptr(), Type::i64()});
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    Value* pa = b.add_block_param(entry, Type::ptr());
+    Value* count = b.add_block_param(entry, Type::i64());
+    BasicBlock* loop_hdr = b.create_block("loop_hdr");
+    BasicBlock* loop_body = b.create_block("loop_body");
+    BasicBlock* exit_bb = b.create_block("exit");
+    Value* zero = b.build_iconst_i64(0);
+    Value* one = b.build_iconst_i64(1);
+    b.build_br(loop_hdr, {zero});
+
+    fn->append_block(loop_hdr);
+    b.position_at_end(loop_hdr);
+    Value* i = b.add_block_param(loop_hdr, Type::i64());
+    b.build_br_if(b.build_slt(i, count), loop_body, exit_bb);
+
+    fn->append_block(loop_body);
+    b.position_at_end(loop_body);
+    b.build_store_indexed(Type::i64(), pa, i, 8, 0, i);
+    b.build_br(loop_hdr, {b.build_add(i, one)});
+
+    fn->append_block(exit_bb);
+    b.position_at_end(exit_bb);
+    b.build_ret_void();
+
+    fn->rebuild_cfg_predecessors();
+    for (uint32_t width : {128u, 256u}) {
+        DominatorTree dom(*fn);
+        LoopVectorizeOptions vec_opts;
+        vec_opts.vector_width = width;
+        vec_opts.enable_avx2 = width == 256;
+        CHECK(!loop_vectorize_pass(*fn, dom, vec_opts));
+    }
+    REQUIRE(verify_module(mod));
+
+    int64_t out[11] = {};
+    Interpreter interp;
+    interp.run(*fn, {RuntimeValue::from_ptr(reinterpret_cast<uintptr_t>(out)), RuntimeValue::from_i64(11)});
+    for (int64_t k = 0; k < 11; ++k) CHECK_EQ(out[k], k);
+}

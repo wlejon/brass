@@ -1,53 +1,11 @@
 #include <brass/mir/inline_transform.hpp>
 #include <brass/mir/module.hpp>
+#include <brass/mir/uses.hpp>
 #include <unordered_map>
 #include <string>
 #include <algorithm>
 
 namespace brass {
-
-namespace {
-
-void for_each_branch_target(Instruction* term, auto&& fn) {
-    if (!term) return;
-    if (term->opcode() == Opcode::br) {
-        fn(term->branch_target());
-    } else if (term->opcode() == Opcode::br_if) {
-        fn(term->true_target());
-        fn(term->false_target());
-    } else if (term->opcode() == Opcode::switch_) {
-        fn(term->default_target());
-        for (auto& sc : term->switch_cases()) {
-            fn(sc.target);
-        }
-    } else if (term->opcode() == Opcode::invoke) {
-        fn(term->normal_target());
-        fn(term->unwind_target());
-    }
-}
-
-void replace_all_uses_in_fn(Function& fn, Value* old_val, Value* new_val) {
-    if (!old_val || !new_val || old_val == new_val) return;
-    for (BasicBlock* bb : fn.blocks()) {
-        if (!bb) continue;
-        for (Instruction* inst : *bb) {
-            if (!inst) continue;
-            for (size_t i = 0; i < inst->operand_count(); ++i) {
-                if (inst->operand(i) == old_val) inst->set_operand(i, new_val);
-            }
-            for_each_branch_target(inst, [&](BranchTarget& bt) {
-                for (size_t i = 0; i < bt.args.size(); ++i) {
-                    if (bt.args[i] == old_val) bt.args[i] = new_val;
-                }
-            });
-            for (size_t i = 0; i < inst->state_map().size(); ++i) {
-                if (inst->state_map()[i] == old_val) inst->state_map()[i] = new_val;
-            }
-        }
-    }
-}
-
-} // namespace
 
 InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Function& callee, DebugContext* dbg_ctx) {
     InlineResult result;
@@ -375,21 +333,9 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
 
     // 10. Replace all uses of old_call_res with ret_param
     if (old_call_res && ret_param) {
-        replace_all_uses_in_fn(caller, old_call_res, ret_param);
-        for (Instruction* ti : *split_tail) {
-            if (!ti) continue;
-            for (size_t i = 0; i < ti->operand_count(); ++i) {
-                if (ti->operand(i) == old_call_res) ti->set_operand(i, ret_param);
-            }
-            for_each_branch_target(ti, [&](BranchTarget& bt) {
-                for (size_t i = 0; i < bt.args.size(); ++i) {
-                    if (bt.args[i] == old_call_res) bt.args[i] = ret_param;
-                }
-            });
-            for (size_t i = 0; i < ti->state_map().size(); ++i) {
-                if (ti->state_map()[i] == old_call_res) ti->state_map()[i] = ret_param;
-            }
-        }
+        replace_all_uses(caller, old_call_res, ret_param);
+        // The split tail may not be in the caller's block list yet.
+        replace_uses_in(*split_tail, old_call_res, ret_param);
     }
 
     // 11. Rebuild CFG predecessors

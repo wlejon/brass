@@ -312,7 +312,7 @@ bool tile_2d_loop_nest(Function& fn, LoopInfo& outer_loop, const LoopTileOptions
     for (BasicBlock* bb : fn.blocks()) {
         if (!bb || outer.loop->contains(bb) || bb == ti) continue;
         for (Instruction* inst : *bb) {
-            affine::for_each_use_slot(*inst, [&](Value*& v) {
+            for_each_use_slot(*inst, [&](Value*& v) {
                 if (v == outer.iv) v = it;
             });
         }

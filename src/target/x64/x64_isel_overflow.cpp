@@ -1,4 +1,5 @@
 #include <brass/target/x64/x64_isel.hpp>
+#include <brass/codegen/unsupported_operation.hpp>
 
 namespace brass::x64 {
 
@@ -194,7 +195,7 @@ void X64ISel::lower_overflow_check(const Instruction& inst, LirBlock& lir_bb) {
             cond = Condition::B;
             break;
         default:
-            break;
+            codegen::throw_unsupported("x64 isel (overflow)", opcode_name(op));
     }
 
     auto alu_inst = std::make_unique<LirInst>(alu_op);

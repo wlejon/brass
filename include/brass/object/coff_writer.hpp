@@ -43,8 +43,9 @@ namespace coff {
     constexpr uint16_t IMAGE_REL_ARM64_PAGEOFFSET_12A = 0x0006;
     constexpr uint16_t IMAGE_REL_ARM64_PAGEOFFSET_12L = 0x0007;
     constexpr uint16_t IMAGE_REL_ARM64_SECREL         = 0x0008;
-    constexpr uint16_t IMAGE_REL_ARM64_SECTION        = 0x000E;
-    constexpr uint16_t IMAGE_REL_ARM64_ADDR64         = 0x000E; // on arm64 coff
+    constexpr uint16_t IMAGE_REL_ARM64_SECTION        = 0x000D;
+    constexpr uint16_t IMAGE_REL_ARM64_ADDR64         = 0x000E;
+    constexpr uint16_t IMAGE_REL_ARM64_REL32          = 0x0011;
 
     constexpr uint8_t IMAGE_SYM_CLASS_EXTERNAL = 2;
     constexpr uint8_t IMAGE_SYM_CLASS_STATIC   = 3;

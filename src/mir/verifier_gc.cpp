@@ -2,6 +2,7 @@
 #include <brass/mir/block.hpp>
 #include <brass/mir/gc_refs.hpp>
 #include <brass/mir/opcodes.hpp>
+#include <brass/mir/runtime_symbols.hpp>
 #include <unordered_map>
 
 namespace brass {
@@ -48,8 +49,8 @@ bool may_trigger_gc(const Instruction& inst) noexcept {
     const Opcode op = inst.opcode();
     if (op == Opcode::safepoint || is_coro_op(op)) return true;
     if (!is_call(op)) return false;
-    // Reads the thread-local block pointer; never allocates.
-    return inst.symbol() != "bronze_tls_block_addr";
+    // A declared-pure runtime function never allocates.
+    return !callee_has_role(inst, SymbolRole::Pure);
 }
 
 void verify_derived_gcrefs(

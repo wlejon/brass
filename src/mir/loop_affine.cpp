@@ -263,24 +263,11 @@ bool defined_outside(const LoopInfo& loop, const Value* v) noexcept {
     return false;
 }
 
-void for_each_use_slot(Instruction& inst, const std::function<void(Value*&)>& f) {
-    for (Value*& v : inst.operands()) f(v);
-    for (Value*& v : inst.state_map()) f(v);
-    for (Value*& v : inst.branch_target().args) f(v);
-    for (Value*& v : inst.true_target().args) f(v);
-    for (Value*& v : inst.false_target().args) f(v);
-    for (SwitchCase& sc : inst.switch_cases()) {
-        for (Value*& v : sc.target.args) f(v);
-    }
-}
-
 bool used_outside(const Function& fn, const LoopInfo& loop, const Value* v) {
     for (BasicBlock* bb : fn.blocks()) {
         if (!bb || loop.contains(bb)) continue;
         for (Instruction* inst : *bb) {
-            bool hit = false;
-            for_each_use_slot(*inst, [&](Value*& u) { hit |= (u == v); });
-            if (hit) return true;
+            if (inst && uses_value(*inst, v)) return true;
         }
     }
     return false;

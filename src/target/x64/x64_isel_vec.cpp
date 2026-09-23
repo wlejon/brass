@@ -1,4 +1,5 @@
 #include <brass/target/x64/x64_isel.hpp>
+#include <brass/codegen/unsupported_operation.hpp>
 #include <brass/mir/instruction.hpp>
 
 namespace brass::x64 {
@@ -13,6 +14,49 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
             mov->add_use(LirOperand::vreg(src, 16));
             lir_bb.append_inst(std::move(mov));
         }
+    };
+    // dst(ymm) = op(a, b), three-operand VEX form.
+    auto emit_v256_binop = [&](LirOpcode op, VReg dst, VReg a, VReg b) {
+        auto binop = std::make_unique<LirInst>(op);
+        binop->add_def(LirOperand::vreg(dst, 32));
+        binop->add_use(LirOperand::vreg(a, 32));
+        binop->add_use(LirOperand::vreg(b, 32));
+        binop->mir_origin = &inst;
+        lir_bb.append_inst(std::move(binop));
+    };
+    // xmm = the high 128 bits of a ymm.
+    auto extract_high_half = [&](VReg ymm) {
+        VReg half = lir_fn_->allocate_vreg(RegClass::XMM, 16);
+        auto ex = std::make_unique<LirInst>(LirOpcode::Vextractf128);
+        ex->add_def(LirOperand::vreg(half, 16));
+        ex->add_use(LirOperand::vreg(ymm, 32));
+        ex->add_use(LirOperand::imm(1, 1));
+        lir_bb.append_inst(std::move(ex));
+        return half;
+    };
+    // A ymm of all-ones (shift_op == Nop) or of per-lane sign bits
+    // (all-ones shifted left by `shift` in each lane): built in an xmm with
+    // pcmpeqd [+ pslld/psllq], then its low lane broadcast across the ymm.
+    auto splat_mask_256 = [&](LirOpcode shift_op, int64_t shift, LirOpcode bcast_op) {
+        VReg m = lir_fn_->allocate_vreg(RegClass::XMM, 16);
+        auto cmp = std::make_unique<LirInst>(LirOpcode::Pcmpeqd);
+        cmp->add_def(LirOperand::vreg(m, 16));
+        cmp->add_use(LirOperand::vreg(m, 16));
+        cmp->add_use(LirOperand::vreg(m, 16));
+        lir_bb.append_inst(std::move(cmp));
+        if (shift_op != LirOpcode::Nop) {
+            auto sh = std::make_unique<LirInst>(shift_op);
+            sh->add_def(LirOperand::vreg(m, 16));
+            sh->add_use(LirOperand::vreg(m, 16));
+            sh->add_use(LirOperand::imm(shift, 1));
+            lir_bb.append_inst(std::move(sh));
+        }
+        VReg wide = lir_fn_->allocate_vreg(RegClass::XMM, 32);
+        auto bc = std::make_unique<LirInst>(bcast_op);
+        bc->add_def(LirOperand::vreg(wide, 32));
+        bc->add_use(LirOperand::vreg(m, 16));
+        lir_bb.append_inst(std::move(bc));
+        return wide;
     };
 
     switch (inst.opcode()) {
@@ -111,15 +155,20 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
                     if (t.kind() == TypeKind::F32x8) op = LirOpcode::Vmaxps;
                     else if (t.kind() == TypeKind::F64x4) op = LirOpcode::Vmaxpd;
                 }
-                if (op != LirOpcode::Nop) {
-                    auto binop = std::make_unique<LirInst>(op);
-                    binop->add_def(LirOperand::vreg(dst, 32));
-                    binop->add_use(LirOperand::vreg(v0, 32));
-                    binop->add_use(LirOperand::vreg(v1, 32));
-                    binop->mir_origin = &inst;
-                    lir_bb.append_inst(std::move(binop));
-                    break;
+                // No 256-bit instruction for this op/type pair (i64x4 vmul,
+                // integer vdiv, ...): an error, never the 128-bit path, which
+                // would compute on half the vector or not at all.
+                if (op == LirOpcode::Nop) {
+                    codegen::throw_unsupported("x64 isel (vector)",
+                                               std::string(opcode_name(inst.opcode())) + " " + brass::to_string(t));
                 }
+                auto binop = std::make_unique<LirInst>(op);
+                binop->add_def(LirOperand::vreg(dst, 32));
+                binop->add_use(LirOperand::vreg(v0, 32));
+                binop->add_use(LirOperand::vreg(v1, 32));
+                binop->mir_origin = &inst;
+                lir_bb.append_inst(std::move(binop));
+                break;
             }
 
             LirOpcode op = LirOpcode::Nop;
@@ -149,6 +198,12 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
                 else if (t.kind() == TypeKind::F64x2) op = LirOpcode::Maxpd;
                 else if (t.kind() == TypeKind::I32x4) op = LirOpcode::Pmaxsd;
             }
+            if (op == LirOpcode::Nop) {
+                // e.g. i64x2 vdiv / vmin: a Nop here used to leave the result
+                // equal to operand 0.
+                codegen::throw_unsupported("x64 isel (vector)",
+                                           std::string(opcode_name(inst.opcode())) + " " + brass::to_string(t));
+            }
 
             emit_movaps(dst, v0);
 
@@ -165,11 +220,20 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
             VReg dst = get_vreg(inst.result());
             VReg v0 = get_vreg(inst.operand(0));
             Type t = inst.type();
-            LirOpcode op = (t.kind() == TypeKind::F64x2) ? LirOpcode::Sqrtpd : LirOpcode::Sqrtps;
+            LirOpcode op = LirOpcode::Nop;
+            switch (t.kind()) {
+                case TypeKind::F32x4: op = LirOpcode::Sqrtps; break;
+                case TypeKind::F64x2: op = LirOpcode::Sqrtpd; break;
+                case TypeKind::F32x8: op = LirOpcode::Vsqrtps; break;
+                case TypeKind::F64x4: op = LirOpcode::Vsqrtpd; break;
+                default:
+                    codegen::throw_unsupported("x64 isel (vector)", "vsqrt " + brass::to_string(t));
+            }
+            const uint8_t sz = t.is_v256() ? 32 : 16;
 
             auto s = std::make_unique<LirInst>(op);
-            s->add_def(LirOperand::vreg(dst, 16));
-            s->add_use(LirOperand::vreg(v0, 16));
+            s->add_def(LirOperand::vreg(dst, sz));
+            s->add_use(LirOperand::vreg(v0, sz));
             s->mir_origin = &inst;
             lir_bb.append_inst(std::move(s));
             break;
@@ -214,6 +278,12 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
         case Opcode::vnot: {
             VReg dst = get_vreg(inst.result());
             VReg v0 = get_vreg(inst.operand(0));
+            if (inst.type().is_v256()) {
+                // x ^ all-ones, the ones widened from an xmm to a ymm.
+                VReg ones = splat_mask_256(LirOpcode::Nop, 0, LirOpcode::Vpbroadcastq);
+                emit_v256_binop(LirOpcode::Vpxor, dst, v0, ones);
+                break;
+            }
             VReg ones = lir_fn_->allocate_vreg(RegClass::XMM, 16);
 
             auto cmp = std::make_unique<LirInst>(LirOpcode::Pcmpeqd);
@@ -237,6 +307,34 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
             VReg dst = get_vreg(inst.result());
             VReg v0 = get_vreg(inst.operand(0));
             Type t = inst.type();
+
+            if (t.is_v256()) {
+                switch (t.kind()) {
+                    case TypeKind::F32x8:   // flip each sign bit
+                        emit_v256_binop(LirOpcode::Vxorps, dst, v0,
+                                        splat_mask_256(LirOpcode::Pslld, 31, LirOpcode::Vpbroadcastd));
+                        break;
+                    case TypeKind::F64x4:
+                        emit_v256_binop(LirOpcode::Vxorpd, dst, v0,
+                                        splat_mask_256(LirOpcode::Psllq, 63, LirOpcode::Vpbroadcastq));
+                        break;
+                    case TypeKind::I32x8:
+                    case TypeKind::I64x4: {   // 0 - x
+                        VReg zero = lir_fn_->allocate_vreg(RegClass::XMM, 32);
+                        auto z = std::make_unique<LirInst>(LirOpcode::Vpxor);
+                        z->add_def(LirOperand::vreg(zero, 32));
+                        z->add_use(LirOperand::vreg(zero, 32));
+                        z->add_use(LirOperand::vreg(zero, 32));
+                        lir_bb.append_inst(std::move(z));
+                        emit_v256_binop(t.kind() == TypeKind::I32x8 ? LirOpcode::Vpsubd : LirOpcode::Vpsubq,
+                                        dst, zero, v0);
+                        break;
+                    }
+                    default:
+                        codegen::throw_unsupported("x64 isel (vector)", "vneg " + brass::to_string(t));
+                }
+                break;
+            }
 
             if (t.kind() == TypeKind::F32x4) {
                 VReg mask = lir_fn_->allocate_vreg(RegClass::XMM, 16);
@@ -283,6 +381,9 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
                 xor_op->mir_origin = &inst;
                 lir_bb.append_inst(std::move(xor_op));
             } else {
+                if (t.kind() != TypeKind::I32x4 && t.kind() != TypeKind::I64x2) {
+                    codegen::throw_unsupported("x64 isel (vector)", "vneg " + brass::to_string(t));
+                }
                 auto zero = std::make_unique<LirInst>(LirOpcode::Xorps);
                 zero->add_def(LirOperand::vreg(dst, 16));
                 zero->add_use(LirOperand::vreg(dst, 16));
@@ -336,21 +437,32 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
             Type t = inst.type();
 
             if (t.is_v256()) {
-                LirOpcode bop = LirOpcode::Vbroadcastss;
-                uint8_t src_sz = 4;
-                if (t.kind() == TypeKind::F64x4) {
-                    bop = LirOpcode::Vbroadcastsd;
-                    src_sz = 8;
-                } else if (t.kind() == TypeKind::I32x8) {
-                    bop = LirOpcode::Vpbroadcastd;
-                    src_sz = 4;
-                } else if (t.kind() == TypeKind::I64x4) {
-                    bop = LirOpcode::Vpbroadcastq;
-                    src_sz = 8;
+                // VBROADCASTSS/SD and VPBROADCASTD/Q take an xmm (or memory)
+                // source, never a GPR: an integer scalar lives in a GPR, so it
+                // is moved into an xmm first.
+                LirOpcode bop = LirOpcode::Nop;
+                uint8_t src_sz = 0;
+                bool from_gpr = false;
+                switch (t.kind()) {
+                    case TypeKind::F32x8: bop = LirOpcode::Vbroadcastss; src_sz = 4; break;
+                    case TypeKind::F64x4: bop = LirOpcode::Vbroadcastsd; src_sz = 8; break;
+                    case TypeKind::I32x8: bop = LirOpcode::Vpbroadcastd; src_sz = 4; from_gpr = true; break;
+                    case TypeKind::I64x4: bop = LirOpcode::Vpbroadcastq; src_sz = 8; from_gpr = true; break;
+                    default:
+                        codegen::throw_unsupported("x64 isel (vector)", "vbroadcast to " + brass::to_string(t));
+                }
+                VReg bsrc = src;
+                if (from_gpr) {
+                    bsrc = lir_fn_->allocate_vreg(RegClass::XMM, 16);
+                    auto movd = std::make_unique<LirInst>(LirOpcode::Movd_xg);
+                    movd->add_def(LirOperand::vreg(bsrc, 16));
+                    movd->add_use(LirOperand::vreg(src, src_sz));
+                    lir_bb.append_inst(std::move(movd));
+                    src_sz = 16;
                 }
                 auto bcast = std::make_unique<LirInst>(bop);
                 bcast->add_def(LirOperand::vreg(dst, 32));
-                bcast->add_use(LirOperand::vreg(src, src_sz));
+                bcast->add_use(LirOperand::vreg(bsrc, src_sz));
                 bcast->mir_origin = &inst;
                 lir_bb.append_inst(std::move(bcast));
                 break;
@@ -399,6 +511,8 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
                 movddup->add_use(LirOperand::vreg(dst, 16));
                 movddup->mir_origin = &inst;
                 lir_bb.append_inst(std::move(movddup));
+            } else {
+                codegen::throw_unsupported("x64 isel (vector)", "vbroadcast to " + brass::to_string(t));
             }
             break;
         }
@@ -408,6 +522,20 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
             VReg src = get_vreg(inst.operand(0));
             uint32_t lane = inst.lane();
             Type src_t = inst.operand(0)->type();
+            if (lane >= src_t.vector_lanes()) {
+                codegen::throw_unsupported("x64 isel (vector)", "vextract_lane " + std::to_string(lane) +
+                                                                    " of " + brass::to_string(src_t));
+            }
+            if (src_t.is_v256()) {
+                // The SSE extracts see only the low 128 bits (the xmm view
+                // of the ymm): a lane in the high half is taken from that
+                // half after VEXTRACTF128.
+                const uint32_t half_lanes = src_t.vector_lanes() / 2;
+                if (lane >= half_lanes) {
+                    src = extract_high_half(src);
+                    lane -= half_lanes;
+                }
+            }
 
             if (src_t.kind() == TypeKind::F32x4 || src_t.kind() == TypeKind::F32x8) {
                 if (lane == 0) {
@@ -472,6 +600,8 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
                     pext->mir_origin = &inst;
                     lir_bb.append_inst(std::move(pext));
                 }
+            } else {
+                codegen::throw_unsupported("x64 isel (vector)", "vextract_lane of " + brass::to_string(src_t));
             }
             break;
         }
@@ -482,8 +612,36 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
             VReg val = get_vreg(inst.operand(1));
             uint32_t lane = inst.lane();
             Type t = inst.type();
+            if (lane >= t.vector_lanes()) {
+                codegen::throw_unsupported("x64 isel (vector)", "vinsert_lane " + std::to_string(lane) +
+                                                                    " of " + brass::to_string(t));
+            }
 
-            emit_movaps(dst, vec);
+            // 256-bit: insert into the 128-bit half holding the lane, then
+            // put that half back with VINSERTF128. `wide` is the final ymm.
+            VReg wide{};
+            uint32_t half = 0;
+            if (t.is_v256()) {
+                wide = dst;
+                const uint32_t half_lanes = t.vector_lanes() / 2;
+                half = lane / half_lanes;
+                lane %= half_lanes;
+                if (half == 1) {
+                    dst = extract_high_half(vec);
+                } else {
+                    dst = lir_fn_->allocate_vreg(RegClass::XMM, 16);
+                    auto lo = std::make_unique<LirInst>(LirOpcode::Movaps);
+                    lo->add_def(LirOperand::vreg(dst, 16));
+                    lo->add_use(LirOperand::vreg(vec, 16));
+                    lir_bb.append_inst(std::move(lo));
+                }
+                t = t.element_type().kind() == TypeKind::F32 ? Type::f32x4()
+                  : t.element_type().kind() == TypeKind::F64 ? Type::f64x2()
+                  : t.element_type().kind() == TypeKind::I32 ? Type::i32x4()
+                                                              : Type::i64x2();
+            } else {
+                emit_movaps(dst, vec);
+            }
 
             if (t.kind() == TypeKind::F32x4) {
                 auto ins = std::make_unique<LirInst>(LirOpcode::Insertps);
@@ -495,9 +653,14 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
                 lir_bb.append_inst(std::move(ins));
             } else if (t.kind() == TypeKind::F64x2) {
                 if (lane == 0) {
+                    // movsd xmm, xmm merges: lane 1 of dst survives. Say so
+                    // with a use of dst (the emitter reads uses[0]), or the
+                    // copy of the vector into dst is a dead def and lane 1
+                    // is whatever the register held.
                     auto movsd = std::make_unique<LirInst>(LirOpcode::Movsd);
                     movsd->add_def(LirOperand::vreg(dst, 8));
                     movsd->add_use(LirOperand::vreg(val, 8));
+                    movsd->add_use(LirOperand::vreg(dst, 16));
                     movsd->mir_origin = &inst;
                     lir_bb.append_inst(std::move(movsd));
                 } else {
@@ -525,6 +688,17 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
                 pinsr->add_use(LirOperand::imm(lane, 1));
                 pinsr->mir_origin = &inst;
                 lir_bb.append_inst(std::move(pinsr));
+            } else {
+                codegen::throw_unsupported("x64 isel (vector)", "vinsert_lane of " + brass::to_string(t));
+            }
+            if (wide.is_valid()) {
+                auto ins = std::make_unique<LirInst>(LirOpcode::Vinsertf128);
+                ins->add_def(LirOperand::vreg(wide, 32));
+                ins->add_use(LirOperand::vreg(vec, 32));
+                ins->add_use(LirOperand::vreg(dst, 16));
+                ins->add_use(LirOperand::imm(half, 1));
+                ins->mir_origin = &inst;
+                lir_bb.append_inst(std::move(ins));
             }
             break;
         }
@@ -565,6 +739,12 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
                     lir_bb.append_inst(std::move(shuf));
                 }
             } else {
+                // SHUFPD's two 1-bit selectors: 2-lane types only. A 256-bit
+                // shuffle has no lowering here (it used to shuffle the low
+                // 128 bits and leave the rest as operand 0).
+                if (t.kind() != TypeKind::F64x2 && t.kind() != TypeKind::I64x2) {
+                    codegen::throw_unsupported("x64 isel (vector)", "vshuffle " + brass::to_string(t));
+                }
                 emit_movaps(dst, v0);
                 auto shuf = std::make_unique<LirInst>(LirOpcode::Shufpd);
                 shuf->add_def(LirOperand::vreg(dst, 16));
@@ -604,6 +784,9 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
             VReg a = get_vreg(inst.operand(0));
             VReg b = get_vreg(inst.operand(1));
             VReg c = get_vreg(inst.operand(2));
+            if (!inst.type().element_type().is_float()) {
+                codegen::throw_unsupported("x64 isel (vector)", "vfma " + brass::to_string(inst.type()));
+            }
 
             if (dst != a) {
                 auto mov = std::make_unique<LirInst>(sz == 32 ? LirOpcode::Vmovaps : LirOpcode::Movaps);
@@ -652,7 +835,7 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
         }
 
         default:
-            break;
+            codegen::throw_unsupported("x64 isel (vector)", opcode_name(inst.opcode()));
     }
 }
 

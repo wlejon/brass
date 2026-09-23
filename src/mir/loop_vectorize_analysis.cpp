@@ -44,6 +44,31 @@ static bool is_supported_loop_arithmetic(Opcode op) {
     }
 }
 
+// Whether `op` on `elem` lanes has a vector lowering: x64 has no integer
+// vector division and no 64-bit lane multiply below AVX-512, and lowers
+// vector negate and not only at 128 bits; select, min, max and sqrt are not
+// vectorized by the transform.
+bool vector_op_lowerable(Opcode op, Type elem, Type vec) {
+    switch (op) {
+        case Opcode::add:
+        case Opcode::sub:
+        case Opcode::and_:
+        case Opcode::or_:
+        case Opcode::xor_:
+            return true;
+        case Opcode::mul:
+            return elem != Type::i64();
+        case Opcode::sdiv:
+        case Opcode::udiv:
+            return elem.is_float();
+        case Opcode::neg:
+        case Opcode::not_:
+            return !vec.is_v256();
+        default:
+            return false;
+    }
+}
+
 } // namespace
 
 bool analyze_vectorizable_loop(
@@ -233,6 +258,9 @@ bool analyze_vectorizable_loop(
             Value* index = inst->operand(1);
             if (!loop.is_loop_invariant(base)) return false;
             if (index != primary_iv_param) return false;
+            // `a[i] = i` needs the lane vector [i, i+1, ...], which the
+            // transform cannot build: it would store broadcast(i).
+            if (is_store && inst->operand(2) == primary_iv_param) return false;
 
             Type mem_t = inst->memory_type();
             uint8_t scale = inst->scale();
@@ -335,6 +363,15 @@ bool analyze_vectorizable_loop(
         }
     } else {
         return false;
+    }
+
+    // Every element-typed operation must have a vector form the transform
+    // emits and the backends lower for this vector type; one that does not
+    // would be left scalar or lowered to nothing.
+    for (Instruction* inst = body_bb->head(); inst != nullptr; inst = inst->next()) {
+        if (inst->is_terminator() || inst == primary_iv_step_inst || !inst->produces_value()) continue;
+        if (inst->type() != vli.elem_type || !is_supported_loop_arithmetic(inst->opcode())) continue;
+        if (!vector_op_lowerable(inst->opcode(), vli.elem_type, vli.vec_type)) return false;
     }
 
     // Ensure memory accesses do not alias without runtime checks or proven NoAlias

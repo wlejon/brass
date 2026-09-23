@@ -2,6 +2,7 @@
 
 #include <brass/mir/module.hpp>
 #include <brass/mir/function.hpp>
+#include <brass/mir/pass_manager.hpp>
 #include <memory>
 
 #include <brass/mir/loop_unswitch.hpp>
@@ -86,17 +87,27 @@ struct LoopOptOptions {
     RangeAnalysisStats* range_stats = nullptr;
 };
 
-// General optimization pipeline: SROA -> GVN (CSE + RLE + DSE) -> Loop Opt -> SLP Vectorizer
+// The loop stage, as a declared pipeline of the passes `options` enables, all
+// restricted to loop-eligible functions: f64 demotion, select formation,
+// [SROA, allocation sinking,] LICM + scalar cleanup, tiling, distribution,
+// fusion, array contraction, auto-parallelization, late BCE ("bce 2"), SLP,
+// loop vectorization, FMA, unrolling, IVSR, DCE, select formation again.
+Pipeline loop_pipeline(const LoopOptOptions& options);
+
+// The general function pipeline: SROA, GVN, SCCP, CFG simplification, loop
+// unswitching, jump threading and allocation sinking on every function, then
+// loop_pipeline (without a second SROA or sinking run).
+Pipeline function_pipeline(const LoopOptOptions& options);
+
+// Run function_pipeline on one function / every function of a module.
 bool optimize_function(Function& fn);
 bool optimize_function(Function& fn, const LoopOptOptions& options);
 
 bool optimize_module(Module& mod);
 bool optimize_module(Module& mod, const LoopOptOptions& options);
 
-// Optimize loops in a single function (LICM, IVSR, Constant Folding, DCE)
+// Run loop_pipeline on one function / every function of a module.
 bool optimize_function_loops(Function& fn, const LoopOptOptions& options = {});
-
-// Optimize loops in an entire module
 bool optimize_module_loops(Module& mod, const LoopOptOptions& options = {});
 
 // Helper to clone a function into a target module

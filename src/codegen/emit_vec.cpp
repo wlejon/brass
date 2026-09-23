@@ -176,6 +176,30 @@ void EmitContext::emit_vec_instruction(const LirInst& inst) {
 
         #undef EMIT_AVX2_BINOP
 
+        case LirOpcode::Vsqrtps:
+        case LirOpcode::Vsqrtpd: {
+            XMM dst = to_xmm(inst.defs[0]);
+            const auto& src = inst.uses.back();
+            const bool ps = inst.opcode == LirOpcode::Vsqrtps;
+            if (src.is_preg()) {
+                if (ps) enc_.vsqrtps(dst, to_xmm(src));
+                else enc_.vsqrtpd(dst, to_xmm(src));
+            } else {
+                if (ps) enc_.vsqrtps(dst, to_mem_address(src));
+                else enc_.vsqrtpd(dst, to_mem_address(src));
+            }
+            break;
+        }
+
+        case LirOpcode::Vextractf128:
+            enc_.vextractf128(to_xmm(inst.defs[0]), to_xmm(inst.uses[0]),
+                              static_cast<uint8_t>(inst.uses.back().imm_int));
+            break;
+        case LirOpcode::Vinsertf128:
+            enc_.vinsertf128(to_xmm(inst.defs[0]), to_xmm(inst.uses[0]), to_xmm(inst.uses[1]),
+                             static_cast<uint8_t>(inst.uses.back().imm_int));
+            break;
+
         #define EMIT_AVX2_BROADCAST(OpcodeEnum, EncMethod)                         \
         case LirOpcode::OpcodeEnum: {                                              \
             XMM dst = to_xmm(inst.defs[0]);                                        \
@@ -336,7 +360,7 @@ void EmitContext::emit_vec_instruction(const LirInst& inst) {
             break;
         }
         default:
-            break;
+            throw_unsupported("x64 emit (vector)", to_string(inst.opcode));
     }
 }
 

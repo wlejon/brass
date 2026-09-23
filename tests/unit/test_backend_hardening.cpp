@@ -5,6 +5,7 @@
 #include <brass/target/calling_conv.hpp>
 #include <brass/target/target.hpp>
 #include <brass/codegen/sched_dag.hpp>
+#include <brass/codegen/lir_flags.hpp>
 #include <brass/codegen/lir.hpp>
 #include <brass/codegen/live_range.hpp>
 #include <brass/codegen/linear_scan.hpp>
@@ -82,12 +83,12 @@ TEST_CASE("Backend Hardening - sched_dag flag safety for NOT instructions") {
     LirInst inst_add(LirOpcode::Add);
 
     // NOT in x86/x64 does not define flags
-    CHECK_FALSE(instruction_defines_flags(inst_not));
-    CHECK_FALSE(instruction_defines_flags(inst_not32));
+    CHECK_FALSE(lir_writes_flags(inst_not, Arch::x64));
+    CHECK_FALSE(lir_writes_flags(inst_not32, Arch::x64));
 
     // NEG and ADD do define flags
-    CHECK(instruction_defines_flags(inst_neg));
-    CHECK(instruction_defines_flags(inst_add));
+    CHECK(lir_kills_flags(inst_neg, Arch::x64));
+    CHECK(lir_kills_flags(inst_add, Arch::x64));
 }
 
 // =============================================================================

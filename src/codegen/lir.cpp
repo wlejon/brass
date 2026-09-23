@@ -195,6 +195,10 @@ std::string_view to_string(LirOpcode op) noexcept {
         case LirOpcode::Vdivpd: return "vdivpd";
         case LirOpcode::Vminpd: return "vminpd";
         case LirOpcode::Vmaxpd: return "vmaxpd";
+        case LirOpcode::Vsqrtps: return "vsqrtps";
+        case LirOpcode::Vsqrtpd: return "vsqrtpd";
+        case LirOpcode::Vextractf128: return "vextractf128";
+        case LirOpcode::Vinsertf128: return "vinsertf128";
         case LirOpcode::Vpaddd: return "vpaddd";
         case LirOpcode::Vpsubd: return "vpsubd";
         case LirOpcode::Vpmulld: return "vpmulld";

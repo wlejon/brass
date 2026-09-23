@@ -269,7 +269,8 @@ void EmitContext::emit_sse_instruction(const LirInst& inst) {
             else enc_.maxsd(dst, to_mem_address(src));
             break;
         }
-        default: break;
+        default:
+            throw_unsupported("x64 emit (sse)", to_string(inst.opcode));
     }
 }
 

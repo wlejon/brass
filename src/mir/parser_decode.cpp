@@ -6,6 +6,8 @@
 namespace brass {
 
 Type parse_type_from_string(std::string_view s) {
+    if (s == "i8") return Type::i8();
+    if (s == "i16") return Type::i16();
     if (s == "i32") return Type::i32();
     if (s == "i64") return Type::i64();
     if (s == "f32") return Type::f32();
@@ -53,6 +55,9 @@ bool decode_opcode_string(std::string_view str, Opcode& op, Type& type_suffix, T
     if (str == "resume_point") { op = Opcode::resume_point; return true; }
     if (str == "osr_entry") { op = Opcode::osr_entry; return true; }
     if (str == "safepoint") { op = Opcode::safepoint; return true; }
+    if (str == "pinned_tls_read") { op = Opcode::pinned_tls_read; return true; }
+    if (str == "pinned_tls_write") { op = Opcode::pinned_tls_write; return true; }
+    if (str == "read_sp") { op = Opcode::read_sp; return true; }
     if (str == "alloca") { op = Opcode::alloca_; return true; }
     if (str == "write_barrier") { op = Opcode::write_barrier; return true; }
     if (str == "unreachable") { op = Opcode::unreachable; return true; }
@@ -143,7 +148,12 @@ bool decode_opcode_string(std::string_view str, Opcode& op, Type& type_suffix, T
     // Conversions
     if (base == "sext") { op = Opcode::sext_i64; type_suffix = Type::i64(); return true; }
     if (base == "zext") { op = Opcode::zext_i64; type_suffix = Type::i64(); return true; }
-    if (base == "trunc") { op = Opcode::trunc_i32; type_suffix = Type::i32(); return true; }
+    if (base == "trunc") {
+        if (type_suffix == Type::i8()) { op = Opcode::trunc_i8; return true; }
+        op = Opcode::trunc_i32;
+        type_suffix = Type::i32();
+        return true;
+    }
     if (base == "fptosi") {
         if (type_suffix == Type::i64()) { op = Opcode::fptosi_i64; return true; }
         op = Opcode::fptosi_i32;

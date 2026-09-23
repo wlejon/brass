@@ -164,7 +164,7 @@ void EmitContext::emit_mov_instruction(const LirInst& inst) {
             break;
         }
         default:
-            break;
+            throw_unsupported("x64 emit (mov)", to_string(inst.opcode));
     }
 }
 
@@ -388,7 +388,7 @@ void EmitContext::emit_alu_instruction(const LirInst& inst) {
             else enc_.cmovcc(inst.condition, to_gpr(inst.defs[0]), to_gpr(inst.uses.back()));
             break;
         default:
-            break;
+            throw_unsupported("x64 emit (alu)", to_string(inst.opcode));
     }
 }
 

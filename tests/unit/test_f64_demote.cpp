@@ -14,6 +14,7 @@ using namespace brass::test;
 
 TEST_CASE("F64 Demote - Collatz Inner Loop Demotion & JIT Execution") {
     Module mod("test_collatz_demote");
+    mod.add_symbol_role("bronze_f64_mod", SymbolRole::FloatRem);
     Builder b(mod);
 
     Function* fn = mod.create_function("collatz", Type::f64(), {Type::f64()});
@@ -180,6 +181,7 @@ TEST_CASE("F64 Demote - Fib Iteration Demotion & Loop Unrolling") {
 
 TEST_CASE("F64 Demote - Prime Sieve and Count Demotion & JIT Execution") {
     Module mod("test_prime_demote");
+    mod.add_symbol_role("bronze_f64_mod", SymbolRole::FloatRem);
     Builder b(mod);
 
     Function* fn = mod.create_function("isPrime", Type::f64(), {Type::f64()});

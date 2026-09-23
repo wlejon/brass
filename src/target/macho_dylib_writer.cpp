@@ -1,5 +1,6 @@
 #include <brass/target/macho_dylib_writer.hpp>
 #include <brass/object/macho_writer.hpp>
+#include <brass/object/aarch64_reloc.hpp>
 #include "image_file.hpp"
 #include "image_util.hpp"
 #include "import_plan.hpp"
@@ -302,7 +303,7 @@ std::vector<uint8_t> MachODylibWriter::write() {
             uint64_t target = 0;
             const imports::Imported* imp = nullptr;
             const auto* sym = working_obj.find_symbol(r.symbol_name);
-            const bool got_load = r.kind == RelocKind::GotPCRel32;
+            const bool got_load = r.kind == RelocKind::GotPCRel32 || object::a64::is_got_kind(r.kind);
             if (sym && sym->section_index >= 0) {
                 if (!symbol_vaddr(*sym, target)) {
                     error_ = "relocation against '" + r.symbol_name + "' names a section that is not placed in the image";
@@ -340,30 +341,34 @@ std::vector<uint8_t> MachODylibWriter::write() {
                     rebases.push_back({p.segment, seg_off});
                 }
             } else if (!fits4) {
-                continue;
-            } else if (aarch64) {
+                error_ = "relocation against '" + r.symbol_name + "' lies outside " + p.source;
+                return {};
+            } else if (aarch64 && (r.kind == RelocKind::Plt32 || object::a64::is_instruction_kind(r.kind))) {
+                // B/BL, ADRP (Page(S + A) - Page(P)), ADD and the
+                // access-size-scaled LDR/STR offsets; a GOT pair reads the
+                // __got entry dyld binds.
+                if (got_load && r.addend != 0) {
+                    error_ = "GOT load of '" + r.symbol_name + "' carries an addend";
+                    return {};
+                }
                 uint32_t inst = read_u32(p.data, r.offset);
-                if (r.kind == RelocKind::Plt32) {
-                    const int64_t disp = static_cast<int64_t>(target) + r.addend - static_cast<int64_t>(at);
-                    inst = (inst & 0xFC000000u) | (static_cast<uint32_t>(disp >> 2) & 0x03FFFFFFu);
-                } else if (r.kind == RelocKind::PCRel32 || r.kind == RelocKind::AdrPage21) {
-                    inst = (inst & 0x9F00001Fu) | (aarch64_adrp(0, at, target) & 0x60FFFFE0u);
-                } else if (r.kind == RelocKind::SecRel32) {
-                    inst = (inst & 0xFFC003FFu) | (static_cast<uint32_t>(target & 0xFFFu) << 10);
-                } else if (r.kind == RelocKind::Abs32 || r.kind == RelocKind::Addr32NB) {
-                    inst = static_cast<uint32_t>(target + static_cast<uint64_t>(r.addend));
-                } else {
-                    continue;
+                const uint64_t value = target + static_cast<uint64_t>(r.addend);
+                const std::string err = object::a64::patch(r.kind, inst, at, value);
+                if (!err.empty()) {
+                    error_ = "relocation against '" + r.symbol_name + "' in " + p.source + ": " + err;
+                    return {};
                 }
                 patch_u32(p.data, r.offset, inst);
-            } else if (r.kind == RelocKind::PCRel32 || r.kind == RelocKind::Plt32 || got_load) {
+            } else if (r.kind == RelocKind::PCRel32 || (!aarch64 && (r.kind == RelocKind::Plt32 || got_load))) {
                 // disp = S + A - P, the addend carrying the instruction tail.
                 const int64_t disp = static_cast<int64_t>(target) + r.addend - static_cast<int64_t>(at);
                 patch_u32(p.data, r.offset, static_cast<uint32_t>(static_cast<int32_t>(disp)));
             } else if (r.kind == RelocKind::SecRel32) {
                 patch_u32(p.data, r.offset, static_cast<uint32_t>(static_cast<int64_t>(sym ? sym->value : 0) + r.addend));
-            } else if (r.kind == RelocKind::Abs32 || r.kind == RelocKind::Addr32NB) {
-                patch_u32(p.data, r.offset, static_cast<uint32_t>(target + static_cast<uint64_t>(r.addend)));
+            } else {
+                error_ = "relocation against '" + r.symbol_name + "' in " + p.source + " has a kind (" +
+                         std::to_string(static_cast<int>(r.kind)) + ") a dylib cannot resolve";
+                return {};
             }
         }
     }

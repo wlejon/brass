@@ -4,6 +4,7 @@
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/alias_analysis.hpp>
 #include <brass/mir/memory_ssa.hpp>
+#include <brass/mir/uses.hpp>
 #include "gvn_pre_dataflow.hpp"
 #include <algorithm>
 #include <cstring>
@@ -28,72 +29,6 @@ void GvnPreStats::dump(std::ostream& os) const {
 }
 
 namespace {
-
-void replace_all_uses(Function& fn, Value* old_val, Value* new_val) {
-    if (!old_val || !new_val || old_val == new_val) return;
-
-    for (BasicBlock* bb : fn.blocks()) {
-        if (!bb) continue;
-        for (Instruction* inst : *bb) {
-            if (!inst) continue;
-
-            for (size_t i = 0; i < inst->operand_count(); ++i) {
-                if (inst->operand(i) == old_val) {
-                    inst->set_operand(i, new_val);
-                }
-            }
-
-            if (inst->opcode() == Opcode::br) {
-                for (size_t i = 0; i < inst->branch_target().args.size(); ++i) {
-                    if (inst->branch_target().args[i] == old_val) {
-                        inst->branch_target().args[i] = new_val;
-                    }
-                }
-            } else if (inst->opcode() == Opcode::br_if) {
-                for (size_t i = 0; i < inst->true_target().args.size(); ++i) {
-                    if (inst->true_target().args[i] == old_val) {
-                        inst->true_target().args[i] = new_val;
-                    }
-                }
-                for (size_t i = 0; i < inst->false_target().args.size(); ++i) {
-                    if (inst->false_target().args[i] == old_val) {
-                        inst->false_target().args[i] = new_val;
-                    }
-                }
-            } else if (inst->opcode() == Opcode::switch_) {
-                for (size_t i = 0; i < inst->default_target().args.size(); ++i) {
-                    if (inst->default_target().args[i] == old_val) {
-                        inst->default_target().args[i] = new_val;
-                    }
-                }
-                for (auto& sc : inst->switch_cases()) {
-                    for (size_t i = 0; i < sc.target.args.size(); ++i) {
-                        if (sc.target.args[i] == old_val) {
-                            sc.target.args[i] = new_val;
-                        }
-                    }
-                }
-            } else if (inst->opcode() == Opcode::invoke) {
-                for (size_t i = 0; i < inst->normal_target().args.size(); ++i) {
-                    if (inst->normal_target().args[i] == old_val) {
-                        inst->normal_target().args[i] = new_val;
-                    }
-                }
-                for (size_t i = 0; i < inst->unwind_target().args.size(); ++i) {
-                    if (inst->unwind_target().args[i] == old_val) {
-                        inst->unwind_target().args[i] = new_val;
-                    }
-                }
-            }
-
-            for (size_t i = 0; i < inst->state_map().size(); ++i) {
-                if (inst->state_map()[i] == old_val) {
-                    inst->state_map()[i] = new_val;
-                }
-            }
-        }
-    }
-}
 
 void append_branch_arg_to_target(Instruction* term, BasicBlock* target_bb, Value* arg) {
     if (!term || !target_bb || !arg) return;

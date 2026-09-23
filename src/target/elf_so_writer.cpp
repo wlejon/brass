@@ -2,8 +2,10 @@
 #include "image_file.hpp"
 #include "image_util.hpp"
 #include "import_plan.hpp"
+#include <brass/object/aarch64_reloc.hpp>
 #include <algorithm>
 #include <cstring>
+#include <string>
 
 // An ELF64 shared object from one object file, with no lazy binding.
 //
@@ -374,7 +376,7 @@ std::vector<uint8_t> ElfSoWriter::write() {
             uint64_t target_vaddr = 0;
             const imports::Imported* imp = nullptr;
             const auto* sym = working_obj.find_symbol(r.symbol_name);
-            const bool got_load = r.kind == object::RelocKind::GotPCRel32;
+            const bool got_load = r.kind == object::RelocKind::GotPCRel32 || object::a64::is_got_kind(r.kind);
             if (sym && sym->section_index >= 0) {
                 const auto& src_sec = working_obj.sections[static_cast<size_t>(sym->section_index)];
                 const ElfShdr* placed = section_for(src_sec.name);
@@ -416,27 +418,34 @@ std::vector<uint8_t> ElfSoWriter::write() {
                              static_cast<int64_t>(unslid));
                 }
             } else if (!fits4) {
-                continue;
-            } else if (aarch64) {
+                error_ = "relocation against '" + r.symbol_name + "' lies outside " + sec.name;
+                return {};
+            } else if (aarch64 && (r.kind == object::RelocKind::Plt32 || object::a64::is_instruction_kind(r.kind))) {
+                // B/BL, ADRP (Page(S + A) - Page(P)), ADD and the
+                // access-size-scaled LDR/STR offsets; a GOT pair reads the
+                // import's GOT slot.
+                if (got_load && r.addend != 0) {
+                    error_ = "GOT load of '" + r.symbol_name + "' carries an addend";
+                    return {};
+                }
                 uint32_t inst = read_u32(sec.data, r.offset);
-                if (r.kind == object::RelocKind::Plt32) {
-                    const int64_t disp = static_cast<int64_t>(target_vaddr) + r.addend - static_cast<int64_t>(reloc_vaddr);
-                    inst = (inst & 0xFC000000u) | (static_cast<uint32_t>(disp >> 2) & 0x03FFFFFFu);
-                } else if (r.kind == object::RelocKind::PCRel32) {
-                    inst = (inst & 0x9F00001Fu) | (aarch64_adrp(0, reloc_vaddr, target_vaddr) & 0x60FFFFE0u);
-                } else if (r.kind == object::RelocKind::SecRel32) {
-                    inst = (inst & 0xFFC003FFu) | (static_cast<uint32_t>(target_vaddr & 0xFFFu) << 10);
-                } else if (r.kind == object::RelocKind::Abs32 || r.kind == object::RelocKind::Addr32NB) {
-                    inst = static_cast<uint32_t>(target_vaddr + static_cast<uint64_t>(r.addend));
-                } else {
-                    continue;
+                const uint64_t value = target_vaddr + static_cast<uint64_t>(r.addend);
+                const std::string err = object::a64::patch(r.kind, inst, reloc_vaddr, value);
+                if (!err.empty()) {
+                    error_ = "relocation against '" + r.symbol_name + "' in " + sec.name + ": " + err;
+                    return {};
                 }
                 patch_u32(sec.data, r.offset, inst);
-            } else if (r.kind == object::RelocKind::PCRel32 || r.kind == object::RelocKind::Plt32 || got_load) {
+            } else if (r.kind == object::RelocKind::PCRel32 ||
+                       (!aarch64 && (r.kind == object::RelocKind::Plt32 || got_load))) {
                 // disp = S + A - P, the addend carrying the instruction tail
                 // (-4 for a call, lea or GOT load) exactly as the JIT applies it.
                 const int64_t disp = static_cast<int64_t>(target_vaddr) + r.addend - static_cast<int64_t>(reloc_vaddr);
                 patch_u32(sec.data, r.offset, static_cast<uint32_t>(static_cast<int32_t>(disp)));
+            } else {
+                error_ = "relocation against '" + r.symbol_name + "' in " + sec.name + " has a kind (" +
+                         std::to_string(static_cast<int>(r.kind)) + ") a shared object cannot resolve";
+                return {};
             }
         }
     }

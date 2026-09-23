@@ -560,20 +560,48 @@ void AArch64Encoder::b(Label target) {
 }
 
 void AArch64Encoder::b(Condition cond, Label target) {
-    size_t patch_off = buffer_.size();
-    uint32_t base = 0x54000000u | static_cast<uint32_t>(cond);
-    if (buffer_.is_bound(target)) {
-        int64_t disp = static_cast<int64_t>(buffer_.label_offset(target)) - static_cast<int64_t>(patch_off);
-        int64_t wdisp = disp >> 2;
-        if (wdisp < -(1 << 18) || wdisp > ((1 << 18) - 1)) {
-            throw std::runtime_error("AArch64Encoder: Conditional branch target out of 19-bit range");
-        }
-        uint32_t imm19 = static_cast<uint32_t>(wdisp) & 0x0007FFFFu;
-        buffer_.emit_inst(base | (imm19 << 5));
-    } else {
-        buffer_.emit_inst(base);
-        buffer_.record_label_fixup(target, patch_off, FixupKind::CondBranch19);
+    if (cond == Condition::AL) {
+        b(target);
+        return;
     }
+    emit_short_branch(0x54000000u | static_cast<uint32_t>(cond), FixupKind::CondBranch19, target);
+}
+
+void AArch64Encoder::emit_short_branch(uint32_t inst, FixupKind kind, Label target) {
+    const int bits = (kind == FixupKind::TestBranch14) ? 14 : 19;
+    const int64_t lo = -(int64_t(1) << (bits - 1));
+    const int64_t hi = (int64_t(1) << (bits - 1)) - 1;
+    const uint32_t field = (1u << bits) - 1u;
+    const uint32_t site = buffer_.next_short_branch_site();
+
+    // The long form: the inverted condition skips the unconditional branch
+    // (+8 bytes, a 2-word displacement). B.cond inverts in bit 0 of the
+    // condition; CBZ/CBNZ and TBZ/TBNZ in bit 24.
+    auto emit_long = [&]() {
+        const uint32_t inverted = (kind == FixupKind::CondBranch19 && (inst & 0xFF000000u) == 0x54000000u)
+                                      ? (inst ^ 1u)
+                                      : (inst ^ (1u << 24));
+        buffer_.emit_inst(inverted | (2u << 5));
+        b(target);
+    };
+
+    const size_t patch_off = buffer_.size();
+    if (buffer_.is_bound(target)) {
+        const int64_t wdisp =
+            (static_cast<int64_t>(buffer_.label_offset(target)) - static_cast<int64_t>(patch_off)) >> 2;
+        if (wdisp < lo || wdisp > hi) {
+            emit_long();
+            return;
+        }
+        buffer_.emit_inst(inst | ((static_cast<uint32_t>(wdisp) & field) << 5));
+        return;
+    }
+    if (buffer_.is_long_branch_site(site)) {
+        emit_long();
+        return;
+    }
+    buffer_.emit_inst(inst);
+    buffer_.record_label_fixup(target, patch_off, kind, site);
 }
 
 void AArch64Encoder::bl(Label target) {
@@ -617,71 +645,44 @@ void AArch64Encoder::ret(GPR target) {
 }
 
 void AArch64Encoder::cbz(GPR reg, Label target) {
-    size_t patch_off = buffer_.size();
-    uint32_t base = 0xB4000000u | reg_code(reg);
-    if (buffer_.is_bound(target)) {
-        int64_t disp = static_cast<int64_t>(buffer_.label_offset(target)) - static_cast<int64_t>(patch_off);
-        int64_t wdisp = disp >> 2;
-        if (wdisp < -(1 << 18) || wdisp > ((1 << 18) - 1)) {
-            throw std::runtime_error("AArch64Encoder: Conditional branch target out of 19-bit range");
-        }
-        uint32_t imm19 = static_cast<uint32_t>(wdisp) & 0x0007FFFFu;
-        buffer_.emit_inst(base | (imm19 << 5));
-    } else {
-        buffer_.emit_inst(base);
-        buffer_.record_label_fixup(target, patch_off, FixupKind::CondBranch19);
-    }
+    emit_short_branch(0xB4000000u | reg_code(reg), FixupKind::CondBranch19, target);
 }
 
 void AArch64Encoder::cbz32(GPR reg, Label target) {
-    size_t patch_off = buffer_.size();
-    uint32_t base = 0x34000000u | reg_code(reg);
-    if (buffer_.is_bound(target)) {
-        int64_t disp = static_cast<int64_t>(buffer_.label_offset(target)) - static_cast<int64_t>(patch_off);
-        int64_t wdisp = disp >> 2;
-        if (wdisp < -(1 << 18) || wdisp > ((1 << 18) - 1)) {
-            throw std::runtime_error("AArch64Encoder: Conditional branch target out of 19-bit range");
-        }
-        uint32_t imm19 = static_cast<uint32_t>(wdisp) & 0x0007FFFFu;
-        buffer_.emit_inst(base | (imm19 << 5));
-    } else {
-        buffer_.emit_inst(base);
-        buffer_.record_label_fixup(target, patch_off, FixupKind::CondBranch19);
-    }
+    emit_short_branch(0x34000000u | reg_code(reg), FixupKind::CondBranch19, target);
 }
 
 void AArch64Encoder::cbnz(GPR reg, Label target) {
-    size_t patch_off = buffer_.size();
-    uint32_t base = 0xB5000000u | reg_code(reg);
-    if (buffer_.is_bound(target)) {
-        int64_t disp = static_cast<int64_t>(buffer_.label_offset(target)) - static_cast<int64_t>(patch_off);
-        int64_t wdisp = disp >> 2;
-        if (wdisp < -(1 << 18) || wdisp > ((1 << 18) - 1)) {
-            throw std::runtime_error("AArch64Encoder: Conditional branch target out of 19-bit range");
-        }
-        uint32_t imm19 = static_cast<uint32_t>(wdisp) & 0x0007FFFFu;
-        buffer_.emit_inst(base | (imm19 << 5));
-    } else {
-        buffer_.emit_inst(base);
-        buffer_.record_label_fixup(target, patch_off, FixupKind::CondBranch19);
-    }
+    emit_short_branch(0xB5000000u | reg_code(reg), FixupKind::CondBranch19, target);
 }
 
 void AArch64Encoder::cbnz32(GPR reg, Label target) {
-    size_t patch_off = buffer_.size();
-    uint32_t base = 0x35000000u | reg_code(reg);
-    if (buffer_.is_bound(target)) {
-        int64_t disp = static_cast<int64_t>(buffer_.label_offset(target)) - static_cast<int64_t>(patch_off);
-        int64_t wdisp = disp >> 2;
-        if (wdisp < -(1 << 18) || wdisp > ((1 << 18) - 1)) {
-            throw std::runtime_error("AArch64Encoder: Conditional branch target out of 19-bit range");
-        }
-        uint32_t imm19 = static_cast<uint32_t>(wdisp) & 0x0007FFFFu;
-        buffer_.emit_inst(base | (imm19 << 5));
-    } else {
-        buffer_.emit_inst(base);
-        buffer_.record_label_fixup(target, patch_off, FixupKind::CondBranch19);
-    }
+    emit_short_branch(0x35000000u | reg_code(reg), FixupKind::CondBranch19, target);
+}
+
+namespace {
+uint32_t test_branch_base(uint32_t op, GPR reg, unsigned bit) {
+    if (bit > 63) throw std::invalid_argument("AArch64Encoder: TBZ/TBNZ bit index out of range");
+    const uint32_t b5 = (bit >> 5) & 1u;
+    const uint32_t b40 = bit & 0x1Fu;
+    return op | (b5 << 31) | (b40 << 19) | reg_code(reg);
+}
+} // namespace
+
+void AArch64Encoder::tbz(GPR reg, unsigned bit, Label target) {
+    emit_short_branch(test_branch_base(0x36000000u, reg, bit), FixupKind::TestBranch14, target);
+}
+
+void AArch64Encoder::tbnz(GPR reg, unsigned bit, Label target) {
+    emit_short_branch(test_branch_base(0x37000000u, reg, bit), FixupKind::TestBranch14, target);
+}
+
+void AArch64Encoder::load_symbol_address(GPR dst, const std::string& symbol) {
+    const uint32_t rd = reg_code(dst);
+    buffer_.add_relocation(buffer_.size(), RelocationKind::GotPage21, symbol);
+    buffer_.emit_inst(0x90000000u | rd);                       // adrp dst, :got:symbol
+    buffer_.add_relocation(buffer_.size(), RelocationKind::GotLo12, symbol);
+    buffer_.emit_inst(0xF9400000u | (rd << 5) | rd);           // ldr dst, [dst, :got_lo12:symbol]
 }
 
 // =============================================================================
@@ -874,6 +875,9 @@ void AArch64Encoder::adr(GPR dst, Label target) {
     size_t patch_off = buffer_.size();
     if (buffer_.is_bound(target)) {
         int64_t disp = static_cast<int64_t>(buffer_.label_offset(target)) - static_cast<int64_t>(patch_off);
+        if (disp < -(1 << 20) || disp > ((1 << 20) - 1)) {
+            throw std::runtime_error("AArch64Encoder: ADR target out of 21-bit range");
+        }
         uint32_t imm21 = static_cast<uint32_t>(disp) & 0x001FFFFFu;
         uint32_t immlo = imm21 & 0x3u;
         uint32_t immhi = (imm21 >> 2) & 0x0007FFFFu;
@@ -881,22 +885,6 @@ void AArch64Encoder::adr(GPR dst, Label target) {
     } else {
         buffer_.emit_inst(0x10000000u | reg_code(dst));
         buffer_.record_label_fixup(target, patch_off, FixupKind::Adr21);
-    }
-}
-
-void AArch64Encoder::adrp(GPR dst, Label target) {
-    size_t patch_off = buffer_.size();
-    if (buffer_.is_bound(target)) {
-        int64_t target_page = static_cast<int64_t>(buffer_.label_offset(target)) >> 12;
-        int64_t curr_page = static_cast<int64_t>(patch_off) >> 12;
-        int64_t disp = target_page - curr_page;
-        uint32_t imm21 = static_cast<uint32_t>(disp) & 0x001FFFFFu;
-        uint32_t immlo = imm21 & 0x3u;
-        uint32_t immhi = (imm21 >> 2) & 0x0007FFFFu;
-        buffer_.emit_inst(0x90000000u | (immlo << 29) | (immhi << 5) | reg_code(dst));
-    } else {
-        buffer_.emit_inst(0x90000000u | reg_code(dst));
-        buffer_.record_label_fixup(target, patch_off, FixupKind::Adrp21);
     }
 }
 

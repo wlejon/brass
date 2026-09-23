@@ -1,4 +1,5 @@
 #include <brass/target/aarch64/aarch64_isel.hpp>
+#include <brass/codegen/unsupported_operation.hpp>
 
 namespace brass::aarch64 {
 
@@ -223,7 +224,7 @@ void AArch64ISel::lower_overflow_check(const Instruction& inst, LirBlock& lir_bb
             cond = LirCond::B; // Maps to CC (Carry Clear / Borrow) in to_aarch64_cond
             break;
         default:
-            break;
+            codegen::throw_unsupported("aarch64 isel (overflow)", opcode_name(op));
     }
 
     auto alu_inst = std::make_unique<LirInst>(alu_op);

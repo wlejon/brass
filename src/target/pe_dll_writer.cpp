@@ -1,5 +1,6 @@
 #include <brass/target/pe_dll_writer.hpp>
 #include <brass/object/coff_writer.hpp>
+#include <brass/object/aarch64_reloc.hpp>
 #include "image_file.hpp"
 #include "image_util.hpp"
 #include "pe_imports.hpp"
@@ -253,7 +254,7 @@ std::vector<uint8_t> PeDllWriter::write() {
         for (const auto& r : sec.relocations) {
             uint32_t target_rva = 0;
             const auto* sym = working_obj.find_symbol(r.symbol_name);
-            const bool got_load = r.kind == object::RelocKind::GotPCRel32;
+            const bool got_load = r.kind == object::RelocKind::GotPCRel32 || object::a64::is_got_kind(r.kind);
             if (sym && sym->section_index >= 0) {
                 const auto& src_sec = working_obj.sections[static_cast<size_t>(sym->section_index)];
                 PeSectionMeta* sm = find_meta(src_sec.name == ".rodata" ? ".rdata" : src_sec.name);
@@ -280,21 +281,35 @@ std::vector<uint8_t> PeDllWriter::write() {
             }
 
             const uint32_t reloc_rva = sec.rva + static_cast<uint32_t>(r.offset);
-            if (r.kind == object::RelocKind::PCRel32 || r.kind == object::RelocKind::Plt32 || got_load) {
-                if (r.offset + 4 > sec.data.size()) continue;
-                if (aarch64) {
-                    int64_t disp = static_cast<int64_t>(target_rva + r.addend) - static_cast<int64_t>(reloc_rva);
-                    int64_t disp_words = disp >> 2;
-                    uint32_t inst = read_u32(sec.data, r.offset);
-                    inst = (inst & 0xFC000000u) | (static_cast<uint32_t>(disp_words) & 0x03FFFFFFu);
-                    patch_u32(sec.data, r.offset, inst);
-                } else {
-                    // The addend already accounts for the instruction's tail
-                    // (-4 for a call/lea displacement), as the JIT applies it:
-                    // disp = S + A - P.
-                    int64_t disp = static_cast<int64_t>(target_rva) + r.addend - static_cast<int64_t>(reloc_rva);
-                    patch_u32(sec.data, r.offset, static_cast<uint32_t>(static_cast<int32_t>(disp)));
+            if (aarch64 && (r.kind == object::RelocKind::Plt32 || object::a64::is_instruction_kind(r.kind))) {
+                // B/BL, ADRP (page arithmetic: RVAs keep the page offsets of
+                // the VAs, the image base being 64 KB aligned), ADD and the
+                // access-size-scaled LDR/STR offsets. A GOT pair reads the
+                // import's IAT slot.
+                if (r.offset + 4 > sec.data.size()) {
+                    error_ = "relocation against '" + r.symbol_name + "' lies outside " + sec.name;
+                    return {};
                 }
+                if (got_load && r.addend != 0) {
+                    error_ = "GOT load of '" + r.symbol_name + "' carries an addend";
+                    return {};
+                }
+                uint32_t inst = read_u32(sec.data, r.offset);
+                const uint64_t value = static_cast<uint64_t>(static_cast<int64_t>(target_rva) + r.addend);
+                const std::string err = object::a64::patch(r.kind, inst, reloc_rva, value);
+                if (!err.empty()) {
+                    error_ = "relocation against '" + r.symbol_name + "' in " + sec.name + ": " + err;
+                    return {};
+                }
+                patch_u32(sec.data, r.offset, inst);
+            } else if (r.kind == object::RelocKind::PCRel32 ||
+                       (!aarch64 && (r.kind == object::RelocKind::Plt32 || got_load))) {
+                if (r.offset + 4 > sec.data.size()) continue;
+                // The addend already accounts for the instruction's tail
+                // (-4 for a call/lea displacement), as the JIT applies it:
+                // disp = S + A - P.
+                int64_t disp = static_cast<int64_t>(target_rva) + r.addend - static_cast<int64_t>(reloc_rva);
+                patch_u32(sec.data, r.offset, static_cast<uint32_t>(static_cast<int32_t>(disp)));
             } else if (r.kind == object::RelocKind::Addr32NB) {
                 if (r.offset + 4 <= sec.data.size()) {
                     patch_u32(sec.data, r.offset, static_cast<uint32_t>(target_rva + r.addend));
@@ -312,6 +327,11 @@ std::vector<uint8_t> PeDllWriter::write() {
                 if (r.offset + 4 <= sec.data.size()) {
                     patch_u32(sec.data, r.offset, static_cast<uint32_t>(options_.image_base + target_rva + static_cast<uint64_t>(r.addend)));
                 }
+            } else {
+                error_ = "relocation against '" + r.symbol_name + "' in " + sec.name + " has a kind (" +
+                         std::to_string(static_cast<int>(r.kind)) + ") a " + (aarch64 ? "ARM64" : "x64") +
+                         " PE image cannot resolve";
+                return {};
             }
         }
     }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <brass/object/reloc_kind.hpp>
 #include <brass/target/target.hpp>
 #include <brass/target/calling_conv.hpp>
 #include <brass/target/x64/code_buffer.hpp>
@@ -51,25 +52,6 @@ inline SectionFlags operator&(SectionFlags a, SectionFlags b) {
 inline bool has_flag(SectionFlags mask, SectionFlags flag) {
     return (static_cast<uint32_t>(mask) & static_cast<uint32_t>(flag)) != 0;
 }
-
-enum class RelocKind : uint8_t {
-    PCRel32,   // 32-bit PC-relative displacement
-    Abs64,     // 64-bit absolute VA
-    SecRel32,  // 32-bit section-relative offset
-    Addr32NB,  // 32-bit RVA without base (COFF .pdata / .xdata)
-    Plt32,     // 32-bit PLT displacement (ELF)
-    Abs32,     // 32-bit absolute VA (ELF)
-    SecIdx,    // 16-bit section index (COFF debug relocation IMAGE_REL_AMD64_SECTION)
-    // 32-bit PC-relative displacement to the slot holding the symbol's
-    // address (x64 `mov r64, [rip + disp32]`, addend -4): a GOT entry on
-    // ELF and Mach-O, an IAT entry on PE, a slot the JIT owns in-process.
-    // Every address a function materialises is emitted this way; the one
-    // against a symbol the same object defines is relaxed to a `lea` of the
-    // symbol before the image is laid out (relax_got_loads), so only
-    // imports go through a slot.
-    GotPCRel32,
-    AdrPage21, // AArch64 ADRP page-relative relocation (R_AARCH64_ADR_PREL_PG_HI21)
-};
 
 struct ObjectRelocation {
     size_t offset = 0;              // Offset in section data where relocation applies
@@ -237,7 +219,10 @@ ObjectFile compile_module_to_object(const Module& mod, const Target& target);
 // one of its sections) into `lea r64, [rip + symbol]` — the opcode byte
 // before the displacement goes from 8B to 8D, the relocation becomes a
 // PCRel32 with the same addend — and leaves the loads of undefined symbols
-// for the placer's GOT. Run by the image writers and the JIT loader on their
+// for the placer's GOT. On AArch64 the GotPage21 / GotLo12 pair of a defined
+// symbol becomes AdrPage21 / AddLo12, the `ldr x, [x, #lo12]` rewritten to
+// `add x, x, #lo12` (a GotLo12 on any other instruction throws: the object
+// is malformed). Run by the image writers on their
 // working copy, once the object is complete: a host may define data symbols
 // after code generation, and it is only then that "defined" is known. The
 // return value is the number of loads left, every one against an undefined
@@ -247,7 +232,8 @@ size_t relax_got_loads(ObjectFile& obj);
 // For an object that is going to a system linker without a GOT of its own
 // (COFF): after relax_got_loads, every remaining load takes an 8-byte slot
 // in `slot_section`, an Abs64 relocation binds the slot to its symbol, and
-// the load is rewritten as a PCRel32 against a local symbol at the slot.
+// the load is rewritten as a PCRel32 against a local symbol at the slot (on
+// AArch64: AdrPage21 + LdSt64Lo12 against it).
 // Distinct symbols get distinct slots; repeated loads share one.
 void materialize_got_slots(ObjectFile& obj, std::string_view slot_section, SectionKind kind,
                            SectionFlags flags);

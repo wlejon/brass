@@ -20,8 +20,15 @@ struct Label {
 enum class RelocationKind : uint8_t {
     Call26,      // 26-bit PC-relative call (BL)
     Jump26,      // 26-bit PC-relative jump (B)
-    Page21,      // 21-bit ADRP page
-    PageOff12,   // 12-bit ADD / LDR / STR page offset
+    Page21,      // ADRP: page of the symbol
+    AddLo12,     // ADD (immediate): low 12 bits of the address, unscaled
+    LdSt8Lo12,   // LDR/STR (unsigned immediate): low 12 bits, scaled by the access size
+    LdSt16Lo12,
+    LdSt32Lo12,
+    LdSt64Lo12,
+    LdSt128Lo12,
+    GotPage21,   // ADRP: page of the symbol's GOT slot
+    GotLo12,     // LDR Xt, [Xn, #imm]: the GOT slot's low 12 bits (scaled by 8)
     Abs64,       // 64-bit absolute address
 };
 
@@ -39,13 +46,15 @@ enum class FixupKind : uint8_t {
     CondBranch19, // 19-bit PC-relative word offset for B.cond, CBZ, CBNZ
     TestBranch14, // 14-bit PC-relative word offset for TBZ, TBNZ
     Adr21,        // 21-bit PC-relative byte offset for ADR
-    Adrp21,       // 21-bit PC-relative page offset for ADRP
 };
 
 struct LabelFixup {
     size_t patch_offset = 0;
     FixupKind kind = FixupKind::Branch26;
     uint32_t label_id = 0;
+    // Non-zero for a relaxable short branch (CondBranch19 / TestBranch14
+    // emitted through AArch64Encoder): the site's ordinal in the emission.
+    uint32_t branch_site = 0;
 };
 
 class CodeBuffer {
@@ -93,7 +102,21 @@ public:
     void bind(Label label);
     bool is_bound(Label label) const;
     size_t label_offset(Label label) const;
-    void record_label_fixup(Label label, size_t patch_offset, FixupKind kind);
+    void record_label_fixup(Label label, size_t patch_offset, FixupKind kind, uint32_t branch_site = 0);
+
+    // Short-branch relaxation. B.cond / CBZ / CBNZ reach +-1 MB and TBZ /
+    // TBNZ +-32 KB; a forward one whose label turns out to be further away
+    // cannot grow in place. Each such branch the encoder emits is a numbered
+    // site; bind() records the sites that did not fit (relax_requests) and
+    // leaves them unpatched, and the emitter then emits the whole function
+    // again with those sites in the long form (inverted short branch over an
+    // unconditional B). Emission is deterministic, so a site number names the
+    // same branch in every pass. A code buffer with outstanding requests
+    // holds wrong code: whoever emits into it must re-emit or refuse.
+    uint32_t next_short_branch_site() noexcept { return ++short_branch_sites_; }
+    bool is_long_branch_site(uint32_t site) const noexcept;
+    void add_long_branch_sites(const std::vector<uint32_t>& sites);
+    const std::vector<uint32_t>& relax_requests() const noexcept { return relax_requests_; }
 
     // Relocations
     void add_relocation(size_t offset, RelocationKind kind, std::string symbol_name, int64_t addend = 0);
@@ -120,6 +143,9 @@ private:
     std::vector<size_t> label_positions_;
     std::vector<LabelFixup> pending_fixups_;
     uint32_t next_label_id_ = 1;
+    uint32_t short_branch_sites_ = 0;
+    std::vector<uint32_t> long_branch_sites_;   // sorted
+    std::vector<uint32_t> relax_requests_;
 };
 
 std::string_view to_string(RelocationKind kind) noexcept;

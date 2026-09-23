@@ -631,7 +631,7 @@ void AArch64EmitContext::emit_vec_instruction(const LirInst& inst) {
         }
 
         default:
-            break;
+            throw_unsupported("aarch64 emit (vector)", to_string(inst.opcode));
     }
 }
 

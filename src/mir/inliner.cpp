@@ -13,6 +13,8 @@
 #include <brass/mir/verifier.hpp>
 #include <brass/mir/bounds_check_elim.hpp>
 #include <brass/mir/speculative_inliner.hpp>
+#include <brass/mir/pass_catalog.hpp>
+#include <cstdio>
 
 namespace brass {
 
@@ -263,45 +265,27 @@ bool optimize_module_ipo(Module& mod) {
     return optimize_module_ipo(mod, inline_opts, loop_opts);
 }
 
+Pipeline ipo_pipeline(const InlinerOptions& options) {
+    Pipeline p;
+    if (options.enable_devirtualization) p.add(passes::devirtualize());
+    if (options.enable_speculative_devirtualization) {
+        p.add(passes::speculative_devirtualization(options.max_callee_instruction_count));
+    }
+    p.add(passes::inline_calls(options));
+    if (options.enable_sroa) p.add(passes::sroa());
+    return p;
+}
+
 bool optimize_module_ipo(Module& mod, const InlinerOptions& inline_opts, const LoopOptOptions& loop_opts) {
-    bool changed = false;
-
-    auto check_ipo = [&](const char* step) {
-        if (!verify_module(mod)) {
-            std::fprintf(stderr, "[FATAL] Broken in IPO during: %s\n", step);
-            return false;
-        }
-        return true;
+    (void)loop_opts;
+    PassPipelineHooks hooks;
+    hooks.after_pass = [&mod](std::string_view step) {
+        if (verify_module(mod)) return true;
+        std::fprintf(stderr, "[FATAL] Broken in IPO during: %.*s\n", static_cast<int>(step.size()), step.data());
+        return false;
     };
-
-    // 1. Devirtualize monomorphic patchable_calls
-    if (inline_opts.enable_devirtualization) {
-        changed |= devirtualize_module(mod);
-        if (!check_ipo("devirtualize_module")) return false;
-    }
-
-    // 1b. Speculative Devirtualization & Inlining via Type Feedback Vector (TFV)
-    if (inline_opts.enable_speculative_devirtualization) {
-        SpeculativeInlinerOptions spec_opts;
-        spec_opts.enable_inlining = true;
-        spec_opts.enable_polymorphic = true;
-        spec_opts.max_callee_instruction_count = inline_opts.max_callee_instruction_count;
-        changed |= run_speculative_devirtualization(mod, spec_opts);
-        if (!check_ipo("run_speculative_devirtualization")) return false;
-    }
-
-    // 2. Inlining in bottom-up leaf-first order
-    changed |= inline_module(mod, inline_opts);
-    if (!check_ipo("inline_module")) return false;
-
-    // 2b. Escape Analysis & SROA pass
-    if (inline_opts.enable_sroa) {
-        SroaOptions sroa_opts;
-        changed |= sroa_module(mod, sroa_opts);
-        if (!check_ipo("sroa_module")) return false;
-    }
-
-    return changed;
+    const PipelineResult result = run_pipeline(mod, ipo_pipeline(inline_opts), hooks);
+    return result.completed && result.changed;
 }
 
 } // namespace brass

@@ -3,17 +3,23 @@
 #include <brass/mir/function.hpp>
 #include <brass/mir/module.hpp>
 #include <brass/mir/partial_escape.hpp>
-#include <brass/mir/dominators.hpp>
-#include <brass/mir/loop_analysis.hpp>
 
 namespace brass {
 
 struct AllocationSinkingOptions {
-    bool enable_scalarization = true;
-    bool enable_materialization = true;
+    // Most distinct fields an object may have and still be scalarized.
+    size_t max_fields = 32;
     PartialEscapeStats* stats = nullptr;
 };
 
+// Allocation sinking with scalar replacement. An allocation (a call its
+// module declares `allocator`, or one of brass's own allocators) whose object
+// does not escape on some path from it is removed: while the object is
+// "virtual" its field loads and stores become SSA values, and the allocation
+// is re-emitted - with the current field values stored into it - only where
+// the object first escapes. An object that escapes on one edge into a block
+// with other predecessors is materialized on that edge, and the pointer
+// reaches the block's uses through a block parameter.
 class AllocationSinkingPass {
 public:
     explicit AllocationSinkingPass(Function& fn, const AllocationSinkingOptions& options = {});
@@ -23,9 +29,7 @@ public:
     const PartialEscapeStats& stats() const noexcept { return stats_; }
 
 private:
-    bool process_candidate(const Value* alloc_val,
-                           const PartialEscapeAnalysis& pea,
-                           DominatorTree& dom);
+    bool sink_one(Instruction* alloc);
 
     Function& fn_;
     AllocationSinkingOptions options_;

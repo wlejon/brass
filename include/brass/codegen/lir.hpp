@@ -347,6 +347,10 @@ enum class LirOpcode : uint16_t {
     Vdivpd,
     Vminpd,
     Vmaxpd,
+    Vsqrtps,
+    Vsqrtpd,
+    Vextractf128,   // def xmm, uses: ymm, imm (half)
+    Vinsertf128,    // def ymm, uses: ymm, xmm, imm (half)
     Vpaddd,
     Vpsubd,
     Vpmulld,

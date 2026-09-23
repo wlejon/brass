@@ -508,6 +508,13 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
         }
     }
 
+    // The baseline tier emits in one pass; a short branch that did not reach
+    // its label would be left unpatched, so it is an error, not code.
+    if (!buffer.relax_requests().empty()) {
+        throw std::runtime_error("compile_baseline_aarch64: a conditional branch in " + std::string(fn.name()) +
+                                 " is out of range and the baseline tier does not relax branches");
+    }
+
     // Allocate executable memory and copy code
     size_t code_bytes = buffer.size();
     auto mem_block = std::make_shared<JitMemoryBlock>(code_bytes);
@@ -515,7 +522,9 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
         throw std::runtime_error("compile_baseline_aarch64: Failed to allocate executable memory for " + std::string(fn.name()));
     }
     std::memcpy(mem_block->data(), buffer.data(), code_bytes);
-    mem_block->make_executable_read_only();
+    if (!mem_block->make_executable_read_only()) {
+        throw std::runtime_error("compile_baseline_aarch64: could not make the code of " + std::string(fn.name()) + " executable");
+    }
 
     void* entry_ptr = mem_block->data();
     uintptr_t fn_address = reinterpret_cast<uintptr_t>(entry_ptr);

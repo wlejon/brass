@@ -495,7 +495,7 @@ void AArch64EmitContext::emit_fp_instruction(const LirInst& inst) {
         }
 
         default:
-            break;
+            throw_unsupported("aarch64 emit (fp)", to_string(inst.opcode));
     }
 }
 

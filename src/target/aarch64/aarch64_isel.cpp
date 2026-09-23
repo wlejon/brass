@@ -1,4 +1,5 @@
 #include <brass/target/aarch64/aarch64_isel.hpp>
+#include <brass/codegen/unsupported_operation.hpp>
 #include <brass/mir/module.hpp>
 #include <brass/mir/osr.hpp>
 #include <cstring>
@@ -816,8 +817,7 @@ void AArch64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
             break;
         }
         default:
-            assert(false && "Unhandled MIR opcode in AArch64 ISel");
-            throw std::runtime_error("Unhandled MIR opcode in AArch64 ISel: " + std::string(opcode_name(inst.opcode())));
+            throw_unsupported("aarch64 isel", opcode_name(inst.opcode()));
     }
 }
 

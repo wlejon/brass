@@ -4,6 +4,8 @@
 #include <cstring>
 #include <unordered_map>
 #include <algorithm>
+#include <stdexcept>
+#include <string>
 
 namespace brass::object {
 
@@ -48,20 +50,36 @@ void align_buf(std::vector<uint8_t>& buf, size_t align) {
     }
 }
 
+[[noreturn]] void bad_reloc(RelocKind kind, bool is_aarch64) {
+    throw std::runtime_error("ELF writer: relocation kind " + std::to_string(static_cast<int>(kind)) +
+                             " has no " + (is_aarch64 ? "AArch64" : "x86-64") + " ELF equivalent");
+}
+
 uint32_t to_elf_reloc_type(RelocKind kind, bool is_aarch64) {
     if (is_aarch64) {
         switch (kind) {
-            case RelocKind::Plt32:     return elf::R_AARCH64_CALL26;
-            case RelocKind::PCRel32:   return elf::R_AARCH64_PREL32;
-            case RelocKind::AdrPage21: return elf::R_AARCH64_ADR_PREL_PG_HI21;
-            case RelocKind::SecRel32:  return elf::R_AARCH64_ADD_ABS_LO12_NC;
-            case RelocKind::Abs64:     return elf::R_AARCH64_ABS64;
-            case RelocKind::Abs32:     return elf::R_AARCH64_ABS32;
-            case RelocKind::Addr32NB:  return elf::R_AARCH64_PREL32;
-            case RelocKind::SecIdx:    return elf::R_AARCH64_NONE;
-            case RelocKind::GotPCRel32: return elf::R_AARCH64_NONE;   // x64 only
+            case RelocKind::Plt32:       return elf::R_AARCH64_CALL26;
+            case RelocKind::PCRel32:     return elf::R_AARCH64_PREL32;
+            case RelocKind::AdrPage21:   return elf::R_AARCH64_ADR_PREL_PG_HI21;
+            case RelocKind::AddLo12:     return elf::R_AARCH64_ADD_ABS_LO12_NC;
+            case RelocKind::LdSt8Lo12:   return elf::R_AARCH64_LDST8_ABS_LO12_NC;
+            case RelocKind::LdSt16Lo12:  return elf::R_AARCH64_LDST16_ABS_LO12_NC;
+            case RelocKind::LdSt32Lo12:  return elf::R_AARCH64_LDST32_ABS_LO12_NC;
+            case RelocKind::LdSt64Lo12:  return elf::R_AARCH64_LDST64_ABS_LO12_NC;
+            case RelocKind::LdSt128Lo12: return elf::R_AARCH64_LDST128_ABS_LO12_NC;
+            case RelocKind::GotPage21:   return elf::R_AARCH64_ADR_GOT_PAGE;
+            case RelocKind::GotLo12:     return elf::R_AARCH64_LD64_GOT_LO12_NC;
+            case RelocKind::Abs64:       return elf::R_AARCH64_ABS64;
+            case RelocKind::Abs32:       return elf::R_AARCH64_ABS32;
+            // A section-relative offset (DWARF) is the target's offset within
+            // its section: a 32-bit absolute against the section symbol.
+            case RelocKind::SecRel32:    return elf::R_AARCH64_ABS32;
+            case RelocKind::Addr32NB:
+            case RelocKind::SecIdx:
+            case RelocKind::GotPCRel32:
+                bad_reloc(kind, true);
         }
-        return elf::R_AARCH64_PREL32;
+        bad_reloc(kind, true);
     }
     switch (kind) {
         case RelocKind::PCRel32: return elf::R_X86_64_PC32;
@@ -72,9 +90,18 @@ uint32_t to_elf_reloc_type(RelocKind kind, bool is_aarch64) {
         case RelocKind::SecRel32: return elf::R_X86_64_32;
         case RelocKind::SecIdx:   return elf::R_X86_64_NONE;
         case RelocKind::GotPCRel32: return elf::R_X86_64_REX_GOTPCRELX;
-        case RelocKind::AdrPage21: return elf::R_X86_64_PC32;
+        case RelocKind::AdrPage21:
+        case RelocKind::AddLo12:
+        case RelocKind::LdSt8Lo12:
+        case RelocKind::LdSt16Lo12:
+        case RelocKind::LdSt32Lo12:
+        case RelocKind::LdSt64Lo12:
+        case RelocKind::LdSt128Lo12:
+        case RelocKind::GotPage21:
+        case RelocKind::GotLo12:
+            bad_reloc(kind, false);
     }
-    return elf::R_X86_64_PC32;
+    bad_reloc(kind, false);
 }
 
 uint64_t to_elf_section_flags(const Section& sec) {
@@ -188,6 +215,18 @@ std::vector<uint8_t> ElfWriter::write() {
         uint32_t shndx = static_cast<uint32_t>(elf_sections.size());
         sec_name_to_shndx[sec.name] = shndx;
         elf_sections.push_back(std::move(s));
+    }
+
+    // An object without .note.GNU-stack makes GNU ld assume it needs an
+    // executable stack and mark the whole output PT_GNU_STACK RWX. The code
+    // never executes from the stack: an empty, non-executable note says so.
+    if (!working_obj.get_section(".note.GNU-stack")) {
+        ElfShdrEntry note;
+        note.name = ".note.GNU-stack";
+        note.sh_type = elf::SHT_PROGBITS;
+        note.sh_flags = 0;
+        note.sh_addralign = 1;
+        elf_sections.push_back(std::move(note));
     }
 
     // 2. Build Symbol Table (.symtab) and String Table (.strtab)

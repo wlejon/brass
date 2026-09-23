@@ -124,8 +124,8 @@ This document audits all optimization passes in Brass, specifying observable flo
 ---
 
 ### 2.11. Induction Variable Strength Reduction (`ivsr_pass`)
-- **Pass Type**: Counted loop induction optimization.
-- **Integer Behavior**: Transforms linear induction expressions ($v = i \times C + B$) into incremental additions across loop iterations in modular arithmetic.
+- **Pass Type**: Counted loop induction optimization (pipeline step `ivsr`, after `loop_vectorize` and `loop_unroll`, whose input form it would otherwise destroy).
+- **Integer Behavior**: Replaces scaled `i64` induction variables in `load_indexed`/`store_indexed` addresses ($i \times C$) with an incrementing byte offset, in modular arithmetic. Only raw-pointer or `i64` bases are rewritten (a `gcref` base would become a derived pointer live across the loop). The header's exit compare moves onto the scaled variable only when that is exact: `slt`/`sle`/`ult`/`ule` with constant, non-negative start and limit, a positive step, and no overflow of the scaled limit; otherwise the compare stays on `i`.
 - **Floating-Point Behavior**: **Untouched**: Float variables are strictly excluded from IVSR to prevent cumulative rounding drift.
 - **Flags**: Enabled by default via `LoopOptOptions::enable_ivsr = true`.
 
@@ -284,7 +284,7 @@ This document audits all optimization passes in Brass, specifying observable flo
 | **SCCP & Guard Elim** | `i32`, `i64`, `f32`, `f64` | Folds constants, true guards & safe float casts | ON | `LoopOptOptions::enable_sccp` |
 | **CFG Simplification** | Control flow | Merges blocks, removes dead code | ON | `LoopOptOptions::enable_cfg_simplify` |
 | **LICM** | All types | Hoists loop-invariant operations | ON | `LoopOptOptions::enable_licm` |
-| **IVSR** | `i32`, `i64` only | Bit-exact modular arithmetic | ON | `LoopOptOptions::enable_ivsr` |
+| **IVSR** | `i64` only | Bit-exact modular arithmetic | ON | `LoopOptOptions::enable_ivsr` |
 | **Diamond Select** | All types | Branchless select (`cmov`) | ON | `LoopOptOptions::enable_diamond_select` |
 | **Integer Unroll Jam** | `i32`, `i64` | Bit-exact 2's complement parallel split | ON | `LoopOptOptions::enable_unroll` |
 | **FP Unroll Jam** | `f32`, `f64` | Reassociates IEEE-754 additions | **OFF** (Strict) | `LoopOptOptions::enable_fp_reassociation` |

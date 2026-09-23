@@ -45,9 +45,13 @@ public:
     size_t size() const noexcept { return size_; }
     bool is_valid() const noexcept { return ptr_ != nullptr; }
 
-    void make_executable();
-    void make_executable_read_only(size_t code_size = 0);
-    void make_read_write();
+    // W^X: a block is allocated read-write; once the code is in place, the
+    // first `code_size` bytes (rounded up to pages; 0 = the whole block) are
+    // turned read-execute and registered as JIT code. There is no call that
+    // makes a page writable and executable at once. False if the OS refused.
+    [[nodiscard]] bool make_executable_read_only(size_t code_size = 0);
+    // Back to read-write (not executable) for rewriting the whole block.
+    [[nodiscard]] bool make_read_write();
     void reset();
 
 private:
@@ -78,6 +82,7 @@ private:
 };
 
 bool is_jit_code_address(const void* addr) noexcept;
+size_t jit_system_page_size() noexcept;
 
 struct alignas(16) AArch64InvokeArgs {
     uint64_t x[8] = {0};
@@ -191,7 +196,6 @@ public:
 
     const SchedOptions& sched_options() const noexcept { return sched_opts_; }
     void set_sched_options(const SchedOptions& opts) { sched_opts_ = opts; }
-    void make_executable_read_only(size_t code_size = 0) { code_mem_.make_executable_read_only(code_size); }
 
     // Function/symbol lookup
     void* get_symbol_address(std::string_view name) const;

@@ -2,8 +2,7 @@
 
 #include <brass/mir/module.hpp>
 #include <brass/mir/loop_opt.hpp>
-#include <functional>
-#include <string_view>
+#include <brass/mir/pass_manager.hpp>
 
 namespace brass {
 
@@ -11,7 +10,8 @@ struct GvnPreStats;
 struct RangeAnalysisStats;
 
 // The production module optimization sequence (the one the Bronze IL
-// translator runs): SROA -> optional IPO -> GVN -> GVN-PRE -> SCCP ->
+// translator runs): SROA -> optional IPO (speculative devirtualization,
+// inlining, SROA again) -> GVN -> GVN-PRE -> SCCP ->
 // CFG simplify -> loop unswitch -> jump threading -> CFG simplify -> BCE ->
 // loop pipeline -> write-barrier elimination. Keeping it in one place lets
 // tools (the differential fuzzer) run exactly what embedders ship.
@@ -38,15 +38,14 @@ struct PassPipelineOptions {
     LoopOptOptions loop;
 };
 
-struct PassPipelineHooks {
-    // Called with the pass name just before it runs.
-    std::function<void(std::string_view)> before_pass;
-    // Called with the pass name after it ran; returning false stops the
-    // pipeline (run_pass_pipeline then returns false).
-    std::function<bool(std::string_view)> after_pass;
-};
+// The sequence as a declared pipeline. Its loop stage is loop_pipeline()
+// without the loop-stage SROA (SROA already ran, and runs again after
+// inlining); BCE runs twice by design, "bce" before the loop stage and
+// "bce 2" inside it.
+Pipeline pass_pipeline(const PassPipelineOptions& options);
 
-// Runs the sequence on `mod`. Returns false only when a hook stopped it.
+// Runs pass_pipeline(options) on `mod`. Returns false only when a hook
+// stopped it.
 bool run_pass_pipeline(Module& mod, const PassPipelineOptions& options,
                        const PassPipelineHooks& hooks = {});
 

@@ -1,7 +1,11 @@
 #include <brass/object/macho_writer.hpp>
 #include <brass/object/elf_writer.hpp>
+#include <brass/object/aarch64_reloc.hpp>
 #include <fstream>
 #include <cstring>
+#include <stdexcept>
+#include <string>
+#include <utility>
 #include <unordered_map>
 #include <algorithm>
 #include <bit>
@@ -75,6 +79,7 @@ struct MachOSectionEntry {
     uint32_t offset = 0;
     uint32_t reloff = 0;
     uint32_t nreloc = 0;
+    std::vector<std::pair<int32_t, uint32_t>> encoded_relocs;   // r_address, r_info word
 };
 
 struct MachOSymbolEntry {
@@ -88,6 +93,120 @@ struct MachOSymbolEntry {
     SymbolType type = SymbolType::Function;
     SymbolBinding binding = SymbolBinding::Global;
 };
+
+uint32_t reloc_info(uint32_t symbolnum, uint32_t pcrel, uint32_t length, uint32_t is_extern, uint32_t type) {
+    return (symbolnum & 0x00FFFFFFu) | ((pcrel & 1u) << 24) | ((length & 3u) << 25) |
+           ((is_extern & 1u) << 27) | ((type & 0xFu) << 28);
+}
+
+[[noreturn]] void bad_reloc(const ObjectRelocation& r, const char* why) {
+    throw std::runtime_error("Mach-O writer: relocation against '" + r.symbol_name + "' (kind " +
+                             std::to_string(static_cast<int>(r.kind)) + "): " + why);
+}
+
+// Appends the relocation_info entries for `r` to `s.encoded_relocs`.
+void encode_macho_reloc(MachOSectionEntry& s, const ObjectRelocation& r, bool is_aarch64,
+                        const std::unordered_map<std::string, uint32_t>& sec_name_to_idx,
+                        const std::unordered_map<std::string, uint32_t>& sym_name_to_idx,
+                        const std::vector<MachOSymbolEntry>& all_symbols) {
+    uint32_t sym_idx = 0;
+    uint32_t r_extern = 1;
+    auto sec_it = sec_name_to_idx.find(r.symbol_name);
+    if (sec_it != sec_name_to_idx.end()) {
+        r_extern = 0;
+        sym_idx = sec_it->second + 1; // 1-based section number
+    } else {
+        auto it = sym_name_to_idx.find(r.symbol_name);
+        if (it != sym_name_to_idx.end()) {
+            sym_idx = it->second;
+        }
+    }
+    const int32_t r_address = static_cast<int32_t>(r.offset);
+
+    if (!is_aarch64) {
+        const bool is_func = r_extern && (sym_idx < all_symbols.size() && all_symbols[sym_idx].type == SymbolType::Function);
+        uint32_t r_pcrel = 0;
+        uint32_t r_length = 2;
+        uint32_t r_type = macho::X86_64_RELOC_BRANCH;
+        if (r.kind == RelocKind::PCRel32) {
+            r_pcrel = 1;
+            r_type = macho::X86_64_RELOC_SIGNED;
+        } else if (r.kind == RelocKind::Plt32) {
+            r_pcrel = 1;
+            r_type = is_func ? macho::X86_64_RELOC_BRANCH : macho::X86_64_RELOC_SIGNED;
+        } else if (r.kind == RelocKind::SecRel32) {
+            r_pcrel = 1;
+            r_type = macho::X86_64_RELOC_SIGNED;
+        } else if (r.kind == RelocKind::GotPCRel32) {
+            r_pcrel = 1;
+            r_type = macho::X86_64_RELOC_GOT_LOAD;
+        } else if (r.kind == RelocKind::Abs64) {
+            r_length = 3; // 8 bytes
+            r_type = macho::X86_64_RELOC_UNSIGNED;
+        } else if (r.kind == RelocKind::Abs32 || r.kind == RelocKind::Addr32NB) {
+            r_type = macho::X86_64_RELOC_UNSIGNED;
+        } else if (a64::is_instruction_kind(r.kind)) {
+            bad_reloc(r, "an AArch64 relocation in an x86-64 object");
+        }
+        s.encoded_relocs.emplace_back(r_address, reloc_info(sym_idx, r_pcrel, r_length, r_extern, r_type));
+        return;
+    }
+
+    // ARM64: the instruction relocations take their addend from a preceding
+    // ARM64_RELOC_ADDEND (24-bit signed, in r_symbolnum); UNSIGNED takes it
+    // from the bytes it relocates.
+    uint32_t r_type = 0;
+    uint32_t r_pcrel = 0;
+    uint32_t r_length = 2;
+    bool addend_entry = false;
+    switch (r.kind) {
+        case RelocKind::Plt32:
+            r_type = macho::ARM64_RELOC_BRANCH26; r_pcrel = 1; addend_entry = true; break;
+        case RelocKind::AdrPage21:
+            r_type = macho::ARM64_RELOC_PAGE21; r_pcrel = 1; addend_entry = true; break;
+        // ld64 reads the access size of a PAGEOFF12 from the instruction
+        // (ADD: unscaled; LDR/STR: scaled by the size it decodes).
+        case RelocKind::AddLo12:
+        case RelocKind::LdSt8Lo12:
+        case RelocKind::LdSt16Lo12:
+        case RelocKind::LdSt32Lo12:
+        case RelocKind::LdSt64Lo12:
+        case RelocKind::LdSt128Lo12:
+            r_type = macho::ARM64_RELOC_PAGEOFF12; addend_entry = true; break;
+        case RelocKind::GotPage21:
+            if (r.addend != 0) bad_reloc(r, "a GOT load cannot carry an addend");
+            r_type = macho::ARM64_RELOC_GOT_LOAD_PAGE21; r_pcrel = 1; break;
+        case RelocKind::GotLo12:
+            if (r.addend != 0) bad_reloc(r, "a GOT load cannot carry an addend");
+            r_type = macho::ARM64_RELOC_GOT_LOAD_PAGEOFF12; break;
+        case RelocKind::Abs64:
+        case RelocKind::Abs32: {
+            r_type = macho::ARM64_RELOC_UNSIGNED;
+            r_length = r.kind == RelocKind::Abs64 ? 3 : 2;
+            const size_t width = r.kind == RelocKind::Abs64 ? 8 : 4;
+            if (r.addend != 0) {
+                if (r.offset + width > s.data.size()) bad_reloc(r, "outside its section");
+                const uint64_t a = static_cast<uint64_t>(r.addend);
+                std::memcpy(s.data.data() + r.offset, &a, width);
+            }
+            break;
+        }
+        case RelocKind::PCRel32:
+        case RelocKind::SecRel32:
+        case RelocKind::Addr32NB:
+        case RelocKind::SecIdx:
+        case RelocKind::GotPCRel32:
+            bad_reloc(r, "no ARM64 Mach-O equivalent");
+    }
+    if (addend_entry && r.addend != 0) {
+        if (r.addend < -(int64_t(1) << 23) || r.addend >= (int64_t(1) << 23)) {
+            bad_reloc(r, "addend does not fit ARM64_RELOC_ADDEND's 24 bits");
+        }
+        s.encoded_relocs.emplace_back(
+            r_address, reloc_info(static_cast<uint32_t>(r.addend), 0, 2, 0, macho::ARM64_RELOC_ADDEND));
+    }
+    s.encoded_relocs.emplace_back(r_address, reloc_info(sym_idx, r_pcrel, r_length, r_extern, r_type));
+}
 
 } // namespace
 
@@ -332,12 +451,22 @@ std::vector<uint8_t> MachOWriter::write() {
         }
     }
 
+    // Encode the relocation_info entries (an ARM64 addend is a separate
+    // ARM64_RELOC_ADDEND entry in front of the one it modifies, so the count
+    // is only known once they are encoded).
+    const bool is_aarch64 = working_obj.target.is_aarch64();
+    for (auto& s : macho_sections) {
+        for (const auto& r : s.relocations) {
+            encode_macho_reloc(s, r, is_aarch64, sec_name_to_idx, sym_name_to_idx, all_symbols);
+        }
+    }
+
     // Relocations offset
     for (auto& s : macho_sections) {
-        if (!s.relocations.empty()) {
+        if (!s.encoded_relocs.empty()) {
             cur_file_offset = (cur_file_offset + 7) & ~7u;
             s.reloff = cur_file_offset;
-            s.nreloc = static_cast<uint32_t>(s.relocations.size());
+            s.nreloc = static_cast<uint32_t>(s.encoded_relocs.size());
             cur_file_offset += s.nreloc * 8; // 8 bytes per relocation_info
         } else {
             s.reloff = 0;
@@ -433,90 +562,9 @@ std::vector<uint8_t> MachOWriter::write() {
 
     // Write Relocations
     for (const auto& s : macho_sections) {
-        if (s.relocations.empty()) continue;
+        if (s.encoded_relocs.empty()) continue;
         align_buf(out, 8);
-        for (const auto& r : s.relocations) {
-            uint32_t sym_idx = 0;
-            uint32_t r_extern = 1;
-            auto sec_it = sec_name_to_idx.find(r.symbol_name);
-            if (sec_it != sec_name_to_idx.end()) {
-                r_extern = 0;
-                sym_idx = sec_it->second + 1; // 1-based section number
-            } else {
-                auto it = sym_name_to_idx.find(r.symbol_name);
-                if (it != sym_name_to_idx.end()) {
-                    sym_idx = it->second;
-                }
-            }
-
-            int32_t r_address = static_cast<int32_t>(r.offset);
-            uint32_t r_pcrel = 0;
-            uint32_t r_length = 2; // 4 bytes by default
-            uint32_t r_type = macho::X86_64_RELOC_BRANCH;
-
-            bool is_func = r_extern && (sym_idx < all_symbols.size() && all_symbols[sym_idx].type == SymbolType::Function);
-
-            bool is_aarch64 = working_obj.target.is_aarch64();
-            if (is_aarch64) {
-                if (r.kind == RelocKind::Plt32) {
-                    r_type = macho::ARM64_RELOC_BRANCH26;
-                    r_pcrel = 1;
-                    r_length = 2;
-                } else if (r.kind == RelocKind::PCRel32 || r.kind == RelocKind::AdrPage21) {
-                    r_type = macho::ARM64_RELOC_PAGE21;
-                    r_pcrel = 1;
-                    r_length = 2;
-                } else if (r.kind == RelocKind::SecRel32) {
-                    r_type = macho::ARM64_RELOC_PAGEOFF12;
-                    r_pcrel = 0;
-                    r_length = 2;
-                } else if (r.kind == RelocKind::Abs64) {
-                    r_type = macho::ARM64_RELOC_UNSIGNED;
-                    r_pcrel = 0;
-                    r_length = 3;
-                } else if (r.kind == RelocKind::Abs32 || r.kind == RelocKind::Addr32NB) {
-                    r_type = macho::ARM64_RELOC_UNSIGNED;
-                    r_pcrel = 0;
-                    r_length = 2;
-                } else {
-                    r_type = macho::ARM64_RELOC_UNSIGNED;
-                    r_pcrel = 0;
-                    r_length = 2;
-                }
-            } else {
-                if (r.kind == RelocKind::PCRel32) {
-                    r_pcrel = 1;
-                    r_length = 2;
-                    r_type = macho::X86_64_RELOC_SIGNED;
-                } else if (r.kind == RelocKind::Plt32) {
-                    r_pcrel = 1;
-                    r_length = 2;
-                    r_type = is_func ? macho::X86_64_RELOC_BRANCH : macho::X86_64_RELOC_SIGNED;
-                } else if (r.kind == RelocKind::SecRel32) {
-                    r_pcrel = 1;
-                    r_length = 2;
-                    r_type = macho::X86_64_RELOC_SIGNED;
-                } else if (r.kind == RelocKind::GotPCRel32) {
-                    r_pcrel = 1;
-                    r_length = 2;
-                    r_type = macho::X86_64_RELOC_GOT_LOAD;
-                } else if (r.kind == RelocKind::Abs64) {
-                    r_pcrel = 0;
-                    r_length = 3; // 8 bytes
-                    r_type = macho::X86_64_RELOC_UNSIGNED;
-                } else if (r.kind == RelocKind::Abs32 || r.kind == RelocKind::Addr32NB) {
-                    r_pcrel = 0;
-                    r_length = 2;
-                    r_type = macho::X86_64_RELOC_UNSIGNED;
-                }
-            }
-
-            uint32_t word2 = (sym_idx & 0x00FFFFFF)
-                           | ((r_pcrel & 0x1) << 24)
-                           | ((r_length & 0x3) << 25)
-                           | ((r_extern & 0x1) << 27)
-                           | ((r_type & 0xF) << 28);
-
+        for (const auto& [r_address, word2] : s.encoded_relocs) {
             write_u32(out, static_cast<uint32_t>(r_address));
             write_u32(out, word2);
         }

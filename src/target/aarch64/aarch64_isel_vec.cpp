@@ -1,4 +1,5 @@
 #include <brass/target/aarch64/aarch64_isel.hpp>
+#include <brass/codegen/unsupported_operation.hpp>
 #include <brass/mir/instruction.hpp>
 
 namespace brass::aarch64 {
@@ -910,7 +911,7 @@ void AArch64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& li
         }
 
         default:
-            break;
+            codegen::throw_unsupported("aarch64 isel (vector)", opcode_name(inst.opcode()));
     }
 }
 

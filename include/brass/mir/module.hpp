@@ -4,6 +4,7 @@
 #include <brass/core/string_pool.hpp>
 #include <brass/core/span.hpp>
 #include <brass/mir/function.hpp>
+#include <brass/mir/runtime_symbols.hpp>
 #include <brass/debug/source_loc.hpp>
 #include <string_view>
 #include <vector>
@@ -50,15 +51,24 @@ public:
         return external_symbols_;
     }
 
-    // Declares that calls to external `sym` return a fresh object no other
-    // pointer refers to, and touch no memory the caller can see. Alias and
-    // escape analysis rely on that promise, so only a frontend that owns the
-    // allocator's contract may make it. Printed as `extern @sym allocator`.
+    // The runtime-symbol registry (runtime_symbols.hpp). Declares external
+    // `sym` (if it is not yet) with `role`. Passes rely on the role's
+    // promise, so only a frontend that owns the function's contract may make
+    // it. Printed as `extern @sym role...`.
+    void add_symbol_role(std::string_view sym, SymbolRole role);
+    bool has_symbol_role(std::string_view sym, SymbolRole role) const noexcept;
+    // Every role declared on `sym`, in kAllSymbolRoles order.
+    std::vector<SymbolRole> symbol_roles(std::string_view sym) const;
+
+    // add_symbol_role(sym, SymbolRole::Allocator): calls to `sym` return a
+    // fresh object no other pointer refers to, and touch no memory the
+    // caller can see.
     void add_allocation_function(std::string_view sym);
     bool is_allocation_function(std::string_view sym) const noexcept;
-    const std::vector<std::string_view>& allocation_functions() const noexcept {
-        return allocation_functions_;
-    }
+
+    // Copies `src`'s external declarations and their roles, for a module
+    // built to optimize or compile code cloned out of `src`.
+    void copy_declarations_from(const Module& src);
 
     bool allow_fp_reassociation() const noexcept { return allow_fp_reassociation_; }
     void set_allow_fp_reassociation(bool allow) noexcept { allow_fp_reassociation_ = allow; }
@@ -85,7 +95,8 @@ private:
     std::vector<Function*> functions_;
     std::unordered_map<std::string_view, Function*> function_map_;
     std::vector<std::string_view> external_symbols_;
-    std::vector<std::string_view> allocation_functions_;
+    // Bit i set: the symbol has role kAllSymbolRoles[i].
+    std::unordered_map<std::string_view, uint32_t> symbol_roles_;
     bool allow_fp_reassociation_ = false;
     bool pinned_tls_register_ = false;
     bool has_loop_optimizations_ = false;

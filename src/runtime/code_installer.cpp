@@ -5,16 +5,9 @@
 #include <brass/vm/fast_interpreter.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/mir/loop_opt.hpp>
-#include <brass/mir/gvn.hpp>
-#include <brass/mir/gvn_pre.hpp>
-#include <brass/mir/sccp.hpp>
-#include <brass/mir/cfg_simplify.hpp>
-#include <brass/mir/loop_unswitch.hpp>
-#include <brass/mir/jump_threading.hpp>
-#include <brass/mir/write_barrier_elim.hpp>
+#include <brass/mir/pass_catalog.hpp>
 #include <brass/mir/verifier.hpp>
 #include <brass/il_translator/il_translator.hpp>
-#include <brass/mir/speculative_inliner.hpp>
 #include <brass/runtime/type_feedback.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <stdexcept>
@@ -27,47 +20,27 @@ namespace brass::runtime {
 
 namespace {
 
-bool run_tier2_optimization_pipeline(Module& mod) {
-    // 0. Feedback-Driven Speculative Devirtualization & Inlining from TFVs
-    SpeculativeInlinerOptions spec_opts;
-    spec_opts.enable_inlining = true;
-    spec_opts.enable_polymorphic = true;
-    run_speculative_devirtualization(mod, FeedbackRegistry::instance(), spec_opts);
-
-    // 1. Initial GVN & GVN-PRE
-    GvnOptions gvn_opts;
-    gvn_module(mod, gvn_opts);
-
-    GvnPreOptions pre_opts;
-    gvn_pre_module(mod, pre_opts);
-
-    // 2. SCCP & Speculation Guard Elimination
-    SccpOptions sccp_opts;
-    sccp_opts.enable_guard_elim = true;
-    sccp_module(mod, sccp_opts);
-
-    // 3. CFG Simplification
-    CfgSimplifyOptions cfg_opts;
-    cfg_simplify_module(mod, cfg_opts);
-
-    // 4. Loop Unswitching & SSA Jump Threading
-    unswitch_loops_in_module(mod);
-    jump_thread_module(mod);
-    cfg_simplify_module(mod, cfg_opts);
-
-    // 5. High-level Loop Optimizations (Vectorize, SLP, LICM, Contraction)
+// The tier-2 JIT pipeline: feedback-driven speculative devirtualization
+// (the global FeedbackRegistry), the scalar and CFG passes, the default
+// loop stage and write-barrier elimination.
+Pipeline tier2_pipeline() {
     LoopOptOptions loop_opts;
-    loop_opts.enable_vectorize = true;
-    loop_opts.enable_slp = true;
-    loop_opts.enable_licm = true;
-    loop_opts.enable_fp_reassociation = mod.allow_fp_reassociation();
-    optimize_module_loops(mod, loop_opts);
+    Pipeline p;
+    p.add(passes::speculative_devirtualization());
+    p.add(passes::gvn());
+    p.add(passes::gvn_pre());
+    p.add(passes::sccp(true));
+    p.add(passes::cfg_simplify());
+    p.add(passes::loop_unswitch(loop_opts, false));
+    p.add(passes::jump_threading(loop_opts, false));
+    p.add(passes::cfg_simplify("cfg_simplify 2"));
+    p.append(loop_pipeline(loop_opts));
+    p.add(passes::write_barrier_elim());
+    return p;
+}
 
-    // 6. Write Barrier Elimination
-    WriteBarrierElimination wbe(false);
-    wbe.run_on_module(mod);
-
-    // 7. Verification check
+bool run_tier2_optimization_pipeline(Module& mod) {
+    run_pipeline(mod, tier2_pipeline());
     DiagnosticReporter diag;
     return verify_module(mod, &diag);
 }
@@ -562,8 +535,8 @@ CodeInstallResult CodeInstaller::install_tier2(
         brass_set_active_stack_maps(&MultiTierPipeline::instance().active_stack_maps());
     }
 
-    // 3. Mark memory executable (PAGE_EXECUTE_READ via OS protection)
-    jit->make_executable_read_only();
+    // 3. load_object has already turned the code pages read-execute (W^X)
+    //    and left the data pages after them writable.
 
     // 4. Retrieve compiled entry point
     void* native_code_ptr = jit->get_symbol_address(fn_name);

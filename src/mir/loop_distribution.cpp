@@ -263,7 +263,7 @@ public:
             for (Instruction* inst : *info_.body) {
                 if (!inst || inst->is_terminator() || part2.count(inst)) continue;
                 bool uses_part2 = false;
-                ir::for_each_use(*inst, [&](Value* v) {
+                for_each_use(*inst, [&](Value* v) {
                     if (v && v->is_instruction() && part2.count(v->defining_instruction())) uses_part2 = true;
                 });
                 if (!uses_part2) continue;
@@ -298,14 +298,14 @@ public:
         std::unordered_set<const Instruction*> remat;
         for (const Instruction* inst : plan_.part2) {
             bool ok = true;
-            ir::for_each_use(*inst, [&](Value* v) {
+            for_each_use(*inst, [&](Value* v) {
                 if (ok && !provide(v, part2, part1_memory, aa, remat, 0)) ok = false;
             });
             if (!ok) return Reject::Illegal;
         }
         // The second loop steps its own copy of the induction variable.
         bool step_ok = true;
-        ir::for_each_use(*info_.iv_inc_inst, [&](Value* v) {
+        for_each_use(*info_.iv_inc_inst, [&](Value* v) {
             if (step_ok && !provide(v, part2, part1_memory, aa, remat, 0)) step_ok = false;
         });
         if (!step_ok) return Reject::Illegal;
@@ -345,7 +345,7 @@ private:
             const auto saved_remat = remat;
             const auto saved_reload = plan_.reload;
             bool ok = true;
-            ir::for_each_use(*def, [&](Value* op) {
+            for_each_use(*def, [&](Value* op) {
                 if (ok && !provide(op, part2, part1_memory, aa, remat, depth + 1)) ok = false;
             });
             if (ok) {

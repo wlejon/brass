@@ -3,12 +3,15 @@
 #include <brass/mir/verifier.hpp>
 #include <brass/mir/opcodes.hpp>
 #include <brass/mir/loop_analysis.hpp>
+#include <brass/mir/runtime_symbols.hpp>
+#include <brass/mir/uses.hpp>
 #include <cmath>
 #include <vector>
 #include <unordered_set>
 #include <unordered_map>
 #include <algorithm>
 #include <sstream>
+#include <stdexcept>
 #include <iomanip>
 
 #include "f64_demote_internal.hpp"
@@ -56,38 +59,6 @@ bool are_equivalent_values(const Value* a, const Value* b) noexcept {
     return false;
 }
 
-void replace_all_uses(Function& fn, Value* old_val, Value* new_val) {
-    if (!old_val || !new_val || old_val == new_val) return;
-    for (BasicBlock* bb : fn.blocks()) {
-        if (!bb) continue;
-        for (Instruction* inst : *bb) {
-            if (!inst) continue;
-            for (size_t i = 0; i < inst->operand_count(); ++i) {
-                if (inst->operand(i) == old_val) inst->set_operand(i, new_val);
-            }
-            for (size_t i = 0; i < inst->branch_target().args.size(); ++i) {
-                if (inst->branch_target().args[i] == old_val) inst->branch_target().args[i] = new_val;
-            }
-            for (size_t i = 0; i < inst->true_target().args.size(); ++i) {
-                if (inst->true_target().args[i] == old_val) inst->true_target().args[i] = new_val;
-            }
-            for (size_t i = 0; i < inst->false_target().args.size(); ++i) {
-                if (inst->false_target().args[i] == old_val) inst->false_target().args[i] = new_val;
-            }
-            for (size_t i = 0; i < inst->default_target().args.size(); ++i) {
-                if (inst->default_target().args[i] == old_val) inst->default_target().args[i] = new_val;
-            }
-            for (auto& sc : inst->switch_cases()) {
-                for (size_t i = 0; i < sc.target.args.size(); ++i) {
-                    if (sc.target.args[i] == old_val) sc.target.args[i] = new_val;
-                }
-            }
-            for (size_t i = 0; i < inst->state_map().size(); ++i) {
-                if (inst->state_map()[i] == old_val) inst->state_map()[i] = new_val;
-            }
-        }
-    }
-}
 
 bool is_proven_exact_div(
     const Instruction* div_inst,
@@ -153,7 +124,7 @@ bool is_proven_exact_div(
         if (mod_def->opcode() == Opcode::smod || mod_def->opcode() == Opcode::umod) {
             m_num = mod_def->operand(0);
             m_denom = mod_def->operand(1);
-        } else if (mod_def->opcode() == Opcode::call && mod_def->symbol() == "bronze_f64_mod") {
+        } else if (callee_has_role(*mod_def, SymbolRole::FloatRem)) {
             m_num = mod_def->operand(0);
             m_denom = mod_def->operand(1);
         }
@@ -197,7 +168,7 @@ bool is_unprofitable_loop(const LoopInfo* loop, const Function& fn) {
             Opcode op = inst->opcode();
             if (op == Opcode::sdiv || op == Opcode::udiv) {
                 has_div_in_loop = true;
-            } else if (op == Opcode::smod || op == Opcode::umod || (op == Opcode::call && inst->symbol() == "bronze_f64_mod")) {
+            } else if (op == Opcode::smod || op == Opcode::umod || (callee_has_role(*inst, SymbolRole::FloatRem))) {
                 if (inst->operand_count() >= 2) {
                     int64_t c = 0;
                     if (!get_const_int_or_f64_int(inst->operand(1), c)) {
@@ -264,7 +235,7 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
             } else if (inst->type() == Type::f64()) {
                 if (op == Opcode::add || op == Opcode::sub || op == Opcode::mul ||
                     op == Opcode::neg || op == Opcode::smod || op == Opcode::select ||
-                    (op == Opcode::call && inst->symbol() == "bronze_f64_mod") ||
+                    (callee_has_role(*inst, SymbolRole::FloatRem)) ||
                     (op == Opcode::sdiv && options.enable_exact_div)) {
                     exact_ints.insert(inst->result());
                 }
@@ -346,7 +317,7 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
                 } else if (op == Opcode::smod) {
                     still_exact = is_value_exact_int(inst->operand(0), exact_ints, entry_params) &&
                                   is_value_exact_int(inst->operand(1), exact_ints, entry_params);
-                } else if (op == Opcode::call && inst->symbol() == "bronze_f64_mod") {
+                } else if (callee_has_role(*inst, SymbolRole::FloatRem)) {
                     still_exact = is_value_exact_int(inst->operand(0), exact_ints, entry_params) &&
                                   is_value_exact_int(inst->operand(1), exact_ints, entry_params);
                 } else if (op == Opcode::sdiv) {
@@ -407,7 +378,7 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
     // Only demote values that are connected to loop headers in exact_ints, modulo, or proven exact division
     std::unordered_set<const Value*> relevant_demote;
 
-    // Seed roots: loop header parameters in exact_ints, bronze_f64_mod, proven sdiv
+    // Seed roots: loop header parameters in exact_ints, `frem` calls, proven sdiv
     for (LoopInfo* loop : loop_analysis.post_order_loops()) {
         if (!loop || !loop->header()) continue;
         BasicBlock* header = loop->header();
@@ -424,7 +395,7 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
         for (const Instruction* inst : *bb) {
             if (!inst) continue;
             Opcode op = inst->opcode();
-            if (op == Opcode::call && inst->symbol() == "bronze_f64_mod") {
+            if (callee_has_role(*inst, SymbolRole::FloatRem)) {
                 if (inst->result() && exact_ints.count(inst->result())) {
                     relevant_demote.insert(inst->result());
                 }
@@ -532,6 +503,19 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
     Builder b(*fn.parent());
     b.set_function(&fn);
 
+    // Every call argument that is an f64 now must still be one after the
+    // rewrite: whatever the callee is, it was typed to take the f64.
+    std::vector<std::pair<Instruction*, size_t>> f64_call_args;
+    for (BasicBlock* bb : fn.blocks()) {
+        if (!bb) continue;
+        for (Instruction* inst : *bb) {
+            if (!inst || !is_call(inst->opcode())) continue;
+            for (size_t i = 0; i < inst->operand_count(); ++i) {
+                if (inst->operand(i) && inst->operand(i)->type() == Type::f64()) f64_call_args.emplace_back(inst, i);
+            }
+        }
+    }
+
     // 5. Rewrite non-entry block parameters to i64
     for (BasicBlock* bb : fn.blocks()) {
         if (!bb || bb == fn.entry_block()) continue;
@@ -559,7 +543,7 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
                 if (op == Opcode::fconst_f64) {
                     inst->set_opcode(Opcode::iconst_i64);
                     inst->set_imm_i64(static_cast<int64_t>(inst->imm_f64()));
-                } else if (op == Opcode::call && inst->symbol() == "bronze_f64_mod") {
+                } else if (callee_has_role(*inst, SymbolRole::FloatRem)) {
                     int64_t denom_c = 0;
                     bool has_denom_c = get_const_int_or_f64_int(inst->operand(1), denom_c);
                     int64_t num_c = 0;
@@ -630,7 +614,20 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
         }
     }
 
-    // 7. Insert boundary conversions and fixup operand types
+    // 7. Insert boundary conversions and fixup operand types. Call arguments
+    // first: an argument demoted to i64 is converted back for the callee (a
+    // demoted `frem` call is no longer a call and is skipped).
+    for (const auto& [call, idx] : f64_call_args) {
+        if (!call->parent() || !is_call(call->opcode()) || idx >= call->operand_count()) continue;
+        Value* arg = call->operand(idx);
+        if (!arg || arg->type() == Type::f64()) continue;
+        if (arg->type() != Type::i64()) {
+            throw std::logic_error("f64_demote: a call argument was rewritten to a type other than i64");
+        }
+        b.position_before(call);
+        call->set_operand(idx, b.build_sitofp_f64_i64(arg));
+    }
+
     for (BasicBlock* bb : fn.blocks()) {
         if (!bb) continue;
         Instruction* inst = bb->head();
@@ -651,44 +648,6 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
                             b.position_before(inst);
                             Value* conv = b.build_fptosi_i64(ret_val);
                             inst->set_operand(0, conv);
-                        }
-                    }
-                }
-            } else if (op == Opcode::call) {
-                bool is_f64_builtin = (inst->symbol() == "bronze_print_f64" || inst->symbol() == "bronze_print_f64_err" ||
-                    inst->symbol() == "bronze_to_int32_f64" || inst->symbol() == "bronze_box_f64" ||
-                    inst->symbol() == "bronze_pow" || inst->symbol() == "bronze_f64_mod" ||
-                    inst->symbol() == "sin" || inst->symbol() == "cos" ||
-                    inst->symbol() == "sqrt" || inst->symbol() == "fabs" ||
-                    inst->symbol() == "floor" || inst->symbol() == "ceil" ||
-                    inst->symbol() == "trunc");
-                if (is_f64_builtin) {
-                    for (size_t i = 0; i < inst->operand_count(); ++i) {
-                        Value* arg = inst->operand(i);
-                        if (!arg) continue;
-                        if (arg->type() == Type::i64()) {
-                            b.position_before(inst);
-                            inst->set_operand(i, b.build_sitofp_f64_i64(arg));
-                        } else if (arg->type() == Type::i32()) {
-                            b.position_before(inst);
-                            inst->set_operand(i, b.build_sitofp_f64_i32(arg));
-                        }
-                    }
-                } else if (fn.parent()) {
-                    Function* callee = fn.parent()->get_function(inst->symbol());
-                    if (callee) {
-                        for (size_t i = 0; i < inst->operand_count() && i < callee->param_count(); ++i) {
-                            Value* arg = inst->operand(i);
-                            if (!arg) continue;
-                            if (callee->param_type(i) == Type::f64() && arg->type() == Type::i64()) {
-                                b.position_before(inst);
-                                Value* conv = b.build_sitofp_f64_i64(arg);
-                                inst->set_operand(i, conv);
-                            } else if (callee->param_type(i) == Type::i64() && arg->type() == Type::f64()) {
-                                b.position_before(inst);
-                                Value* conv = b.build_fptosi_i64(arg);
-                                inst->set_operand(i, conv);
-                            }
                         }
                     }
                 }

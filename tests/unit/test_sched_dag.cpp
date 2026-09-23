@@ -42,7 +42,7 @@ TEST_CASE("SchedDAG - RAW Data Dependence and Latencies") {
     idiv->add_use(LirOperand::preg_gpr(GPR::RBX, 8));
     bb->append_inst(std::move(idiv));
 
-    SchedDAG dag(*bb, false);
+    SchedDAG dag(*bb, Arch::x64, false);
     dag.build();
 
     CHECK_EQ(dag.size(), size_t(5));
@@ -99,7 +99,7 @@ TEST_CASE("SchedDAG - WAR Anti-dependence and WAW Output dependence") {
     m2->add_use(LirOperand::imm(100, 8));
     bb->append_inst(std::move(m2));
 
-    SchedDAG dag(*bb, false);
+    SchedDAG dag(*bb, Arch::x64, false);
     dag.build();
 
     CHECK_EQ(dag.size(), size_t(3));
@@ -161,7 +161,7 @@ TEST_CASE("SchedDAG - Memory Hazards and Disambiguation") {
     s4->add_use(LirOperand::preg_gpr(GPR::RDI, 8));
     bb->append_inst(std::move(s4));
 
-    SchedDAG dag(*bb, false);
+    SchedDAG dag(*bb, Arch::x64, false);
     dag.build();
 
     // Check MemRAW hazard between 0 and 1
@@ -222,7 +222,7 @@ TEST_CASE("SchedDAG - Scheduling Barriers") {
     auto r3 = std::make_unique<LirInst>(LirOpcode::Ret);
     bb->append_inst(std::move(r3));
 
-    SchedDAG dag(*bb, false);
+    SchedDAG dag(*bb, Arch::x64, false);
     dag.build();
 
     // Check barrier edge from Store to Call
@@ -286,7 +286,7 @@ TEST_CASE("SchedDAG - Critical Path Height and Depth") {
     a3->add_use(LirOperand::preg_gpr(GPR::RAX, 8));
     bb->append_inst(std::move(a3));
 
-    SchedDAG dag(*bb, false);
+    SchedDAG dag(*bb, Arch::x64, false);
     dag.build();
 
     // Node 0: depth 0, height 4 + 1 + 1 = 6

@@ -3,6 +3,7 @@
 #include <brass/mir/escape_analysis.hpp>
 #include <brass/mir/opcodes.hpp>
 #include <brass/mir/range_analysis.hpp>
+#include <brass/mir/runtime_symbols.hpp>
 #include "int_fold.hpp"
 #include "ir_clone.hpp"
 #include <cmath>
@@ -272,7 +273,7 @@ bool collect_bridge(const FusibleLoopInfo& l1, const FusibleLoopInfo& l2, std::v
 
 bool uses_any(const Instruction& inst, const std::unordered_set<const Value*>& defs) {
     bool found = false;
-    ir::for_each_use(inst, [&](Value* v) { if (defs.count(v)) found = true; });
+    for_each_use(inst, [&](Value* v) { if (defs.count(v)) found = true; });
     return found;
 }
 
@@ -288,27 +289,30 @@ struct MemAccess {
     bool bronze_element = false;
 };
 
-bool is_bronze_elem_call(const Instruction& inst) {
-    if (inst.opcode() != Opcode::call) return false;
-    return (inst.symbol() == "bronze_elem_get" && inst.operand_count() == 2) ||
-           (inst.symbol() == "bronze_elem_set" && inst.operand_count() >= 3);
+bool is_elem_set_call(const Instruction& inst) {
+    return callee_has_role(inst, SymbolRole::ArraySet) && inst.operand_count() >= 3;
 }
 
-// A `bronze_create_array` result used only as the receiver of element calls
-// and write barriers: no other code can reach its elements or give it
-// accessors, so its element calls act as plain reads and writes of their
-// slot. Array contraction relies on the same property.
+bool is_bronze_elem_call(const Instruction& inst) {
+    return (callee_has_role(inst, SymbolRole::ArrayGet) && inst.operand_count() == 2) ||
+           is_elem_set_call(inst);
+}
+
+// A runtime array (a declared `array_new` result) used only as the receiver
+// of element calls and write barriers: no other code can reach its elements
+// or give it accessors, so its element calls act as plain reads and writes
+// of their slot. Array contraction relies on the same property.
 bool is_private_bronze_array(const Function& fn, const Value* arr) {
     if (!arr || !arr->is_instruction()) return false;
     const Instruction* def = arr->defining_instruction();
-    if (!def || def->opcode() != Opcode::call || def->symbol() != "bronze_create_array") return false;
+    if (!def || !callee_has_role(*def, SymbolRole::ArrayNew)) return false;
     for (const BasicBlock* bb : fn.blocks()) {
         if (!bb) continue;
         for (const Instruction* inst : *bb) {
             bool as_receiver = inst->operand_count() > 0 && inst->operand(0) == arr &&
                                (is_bronze_elem_call(*inst) || inst->opcode() == Opcode::write_barrier);
             bool other_use = false;
-            ir::for_each_use(*inst, [&](Value* v) { if (v == arr) other_use = true; });
+            for_each_use(*inst, [&](Value* v) { if (v == arr) other_use = true; });
             for (size_t i = 1; i < inst->operand_count(); ++i) {
                 if (inst->operand(i) == arr) as_receiver = false;
             }
@@ -384,7 +388,7 @@ bool effects_reorderable(const Function& fn, const LoopInfo& loop, const RangeAn
                 acc.index = inst->operand(1);
                 acc.scale = 8;
                 acc.size = 8;
-                acc.is_store = inst->symbol() == "bronze_elem_set";
+                acc.is_store = is_elem_set_call(*inst);
                 acc.bronze_element = true;
                 accesses.push_back(acc);
                 continue;
@@ -489,9 +493,7 @@ void remap_uses(Instruction& inst, const std::unordered_map<const Value*, Value*
         auto it = repl.find(v);
         if (it != repl.end()) v = it->second;
     };
-    for (Value*& op : inst.operands()) sub(op);
-    for (Value*& sv : inst.state_map()) sub(sv);
-    ir::for_each_target(inst, [&](BranchTarget& t) { for (Value*& a : t.args) sub(a); });
+    for_each_use_slot(inst, sub);
 }
 
 void move_before(BasicBlock* from, BasicBlock* to, Instruction* before,

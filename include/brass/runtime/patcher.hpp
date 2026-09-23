@@ -49,11 +49,31 @@ inline bool is_cache_line_safe(const void* addr, size_t size) noexcept {
     return (start / 64) == (end / 64);
 }
 
+// The instruction set of the code a call site lives in.
+enum class CodeArch : uint8_t { X64, AArch64 };
+
+constexpr CodeArch host_code_arch() noexcept {
+#if defined(__aarch64__) || defined(_M_ARM64)
+    return CodeArch::AArch64;
+#else
+    return CodeArch::X64;
+#endif
+}
+
+// Retargets the call at `call_site_addr` (x64: the E8/E9 opcode byte;
+// AArch64: the BL/B word) to `new_target`. The architecture is stated, not
+// guessed from the bytes. False if the site is not a call of that
+// architecture, the target is out of reach, or the page cannot be written.
+// Patches are serialised: concurrent patchers never race on a page's
+// protection.
+bool patch_call_site(CodeArch arch, void* call_site_addr, const void* new_target);
+
 } // namespace brass::runtime
 
 extern "C" {
     bool brass_patch_const32(void* code_addr, int32_t new_val);
     bool brass_patch_const64(void* code_addr, int64_t new_val);
+    // patch_call_site for host code (the JIT's own, in this process).
     bool brass_patch_call(void* call_site_addr, const void* new_target);
 }
 
@@ -74,7 +94,7 @@ public:
 
     bool patch_const32(void* fn_base, std::string_view name, int32_t new_val);
     bool patch_const64(void* fn_base, std::string_view name, int64_t new_val);
-    bool patch_call(void* fn_base, std::string_view name, const void* new_target);
+    bool patch_call(CodeArch arch, void* fn_base, std::string_view name, const void* new_target);
 
     const std::vector<PatchSite>& sites() const noexcept { return sites_; }
     size_t size() const noexcept { return sites_.size(); }

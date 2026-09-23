@@ -26,8 +26,9 @@ struct SchedStats {
 };
 
 // Schedule instructions within a single basic block
-SchedStats schedule_block(LirBlock& block, const SchedOptions& opts);
-SchedStats schedule_block(LirBlock& block);
+// `arch` is the target the block was selected for (see SchedDAG).
+SchedStats schedule_block(LirBlock& block, Arch arch, const SchedOptions& opts);
+SchedStats schedule_block(LirBlock& block, Arch arch);
 
 // Schedule instructions across all blocks in a function
 SchedStats schedule_function(LirFunction& fn, const SchedOptions& opts);

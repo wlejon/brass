@@ -42,7 +42,7 @@ void for_each_iteration_use(const LoopInfo& loop, const std::function<void(Instr
                 for (Value*& v : inst->true_target().args) f(*inst, v);
                 continue;
             }
-            affine::for_each_use_slot(*inst, [&](Value*& u) { f(*inst, u); });
+            for_each_use_slot(*inst, [&](Value*& u) { f(*inst, u); });
         }
     }
 }

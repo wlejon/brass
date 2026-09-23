@@ -1,4 +1,5 @@
 #include <brass/codegen/instruction_scheduler.hpp>
+#include <brass/codegen/lir_flags.hpp>
 #include <algorithm>
 #include <unordered_map>
 #include <unordered_set>
@@ -112,7 +113,7 @@ static RegUsage get_instruction_reg_usage(const LirInst& inst, bool is_pre_ra) {
 
 } // namespace
 
-SchedStats schedule_block(LirBlock& block, const SchedOptions& opts) {
+SchedStats schedule_block(LirBlock& block, Arch arch, const SchedOptions& opts) {
     SchedStats stats;
     size_t inst_count = block.instructions.size();
     if (inst_count <= 1 || inst_count > opts.max_block_instructions) {
@@ -123,7 +124,7 @@ SchedStats schedule_block(LirBlock& block, const SchedOptions& opts) {
     if (is_pre_ra && !opts.enable_pre_ra) return stats;
     if (!is_pre_ra && !opts.enable_post_ra) return stats;
 
-    SchedDAG dag(block, is_pre_ra);
+    SchedDAG dag(block, arch, is_pre_ra);
     dag.build();
 
     size_t n = dag.size();
@@ -321,16 +322,17 @@ SchedStats schedule_block(LirBlock& block, const SchedOptions& opts) {
     return stats;
 }
 
-SchedStats schedule_block(LirBlock& block) {
+SchedStats schedule_block(LirBlock& block, Arch arch) {
     SchedOptions default_opts;
-    return schedule_block(block, default_opts);
+    return schedule_block(block, arch, default_opts);
 }
 
 SchedStats schedule_function(LirFunction& fn, const SchedOptions& opts) {
     SchedStats total_stats;
+    const Arch arch = lir_arch(fn);
     for (auto& block : fn.blocks) {
         if (block) {
-            SchedStats bs = schedule_block(*block, opts);
+            SchedStats bs = schedule_block(*block, arch, opts);
             total_stats.blocks_scheduled += bs.blocks_scheduled;
             total_stats.instructions_scheduled += bs.instructions_scheduled;
             total_stats.stalls_hidden += bs.stalls_hidden;

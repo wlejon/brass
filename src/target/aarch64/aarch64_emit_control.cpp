@@ -493,8 +493,7 @@ void AArch64EmitContext::emit_control_instruction(const LirInst& inst) {
         }
 
         default:
-            assert(false && "Unhandled LIR opcode in AArch64 control emit");
-            throw std::runtime_error("Unhandled LIR opcode in AArch64 control emit: " + std::to_string(static_cast<int>(inst.opcode)));
+            throw_unsupported("aarch64 emit (control)", to_string(inst.opcode));
     }
 }
 

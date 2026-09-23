@@ -11,7 +11,14 @@ std::string_view to_string(RelocationKind kind) noexcept {
     case RelocationKind::Call26:    return "Call26";
     case RelocationKind::Jump26:    return "Jump26";
     case RelocationKind::Page21:    return "Page21";
-    case RelocationKind::PageOff12: return "PageOff12";
+    case RelocationKind::AddLo12:   return "AddLo12";
+    case RelocationKind::LdSt8Lo12:   return "LdSt8Lo12";
+    case RelocationKind::LdSt16Lo12:  return "LdSt16Lo12";
+    case RelocationKind::LdSt32Lo12:  return "LdSt32Lo12";
+    case RelocationKind::LdSt64Lo12:  return "LdSt64Lo12";
+    case RelocationKind::LdSt128Lo12: return "LdSt128Lo12";
+    case RelocationKind::GotPage21: return "GotPage21";
+    case RelocationKind::GotLo12:   return "GotLo12";
     case RelocationKind::Abs64:     return "Abs64";
     default: return "unknown";
     }
@@ -23,7 +30,6 @@ std::string_view to_string(FixupKind kind) noexcept {
     case FixupKind::CondBranch19: return "CondBranch19";
     case FixupKind::TestBranch14: return "TestBranch14";
     case FixupKind::Adr21:        return "Adr21";
-    case FixupKind::Adrp21:       return "Adrp21";
     default: return "unknown";
     }
 }
@@ -114,7 +120,12 @@ void CodeBuffer::bind(Label label) {
                 // 19-bit word displacement (+/- 1MB)
                 int64_t word_disp = disp >> 2;
                 if (word_disp < -(1 << 18) || word_disp > ((1 << 18) - 1)) {
-                    throw std::runtime_error("CodeBuffer::bind: CondBranch19 displacement out of range");
+                    if (it->branch_site == 0) {
+                        throw std::runtime_error("CodeBuffer::bind: CondBranch19 displacement out of range");
+                    }
+                    relax_requests_.push_back(it->branch_site);
+                    it = pending_fixups_.erase(it);
+                    continue;
                 }
                 uint32_t imm19 = static_cast<uint32_t>(word_disp) & 0x0007FFFFu;
                 curr_inst = (curr_inst & ~(0x0007FFFFu << 5)) | (imm19 << 5);
@@ -123,7 +134,12 @@ void CodeBuffer::bind(Label label) {
                 // 14-bit word displacement (+/- 32KB)
                 int64_t word_disp = disp >> 2;
                 if (word_disp < -(1 << 13) || word_disp > ((1 << 13) - 1)) {
-                    throw std::runtime_error("CodeBuffer::bind: TestBranch14 displacement out of range");
+                    if (it->branch_site == 0) {
+                        throw std::runtime_error("CodeBuffer::bind: TestBranch14 displacement out of range");
+                    }
+                    relax_requests_.push_back(it->branch_site);
+                    it = pending_fixups_.erase(it);
+                    continue;
                 }
                 uint32_t imm14 = static_cast<uint32_t>(word_disp) & 0x00003FFFu;
                 curr_inst = (curr_inst & ~(0x00003FFFu << 5)) | (imm14 << 5);
@@ -166,14 +182,25 @@ size_t CodeBuffer::label_offset(Label label) const {
     return off;
 }
 
-void CodeBuffer::record_label_fixup(Label label, size_t patch_offset, FixupKind kind) {
+void CodeBuffer::record_label_fixup(Label label, size_t patch_offset, FixupKind kind, uint32_t branch_site) {
     if (!label.is_valid()) {
         throw std::invalid_argument("CodeBuffer::record_label_fixup: invalid label");
     }
     if (label.id >= label_positions_.size()) {
         label_positions_.resize(label.id + 1, static_cast<size_t>(-1));
     }
-    pending_fixups_.push_back(LabelFixup{ patch_offset, kind, label.id });
+    pending_fixups_.push_back(LabelFixup{ patch_offset, kind, label.id, branch_site });
+}
+
+bool CodeBuffer::is_long_branch_site(uint32_t site) const noexcept {
+    return std::binary_search(long_branch_sites_.begin(), long_branch_sites_.end(), site);
+}
+
+void CodeBuffer::add_long_branch_sites(const std::vector<uint32_t>& sites) {
+    long_branch_sites_.insert(long_branch_sites_.end(), sites.begin(), sites.end());
+    std::sort(long_branch_sites_.begin(), long_branch_sites_.end());
+    long_branch_sites_.erase(std::unique(long_branch_sites_.begin(), long_branch_sites_.end()),
+                             long_branch_sites_.end());
 }
 
 void CodeBuffer::add_relocation(size_t offset, RelocationKind kind, std::string symbol_name, int64_t addend) {
@@ -208,6 +235,9 @@ void CodeBuffer::clear() {
     label_positions_.clear();
     pending_fixups_.clear();
     next_label_id_ = 1;
+    short_branch_sites_ = 0;
+    long_branch_sites_.clear();
+    relax_requests_.clear();
 }
 
 } // namespace brass::aarch64

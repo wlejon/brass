@@ -3,6 +3,8 @@
 #include <brass/mir/opcodes.hpp>
 #include <brass/mir/escape_analysis.hpp>
 #include <brass/mir/range_analysis.hpp>
+#include <brass/mir/runtime_symbols.hpp>
+#include <brass/mir/uses.hpp>
 #include <sstream>
 #include <unordered_set>
 #include <vector>
@@ -21,47 +23,22 @@ std::string ArrayContractionStats::format_report() const {
 
 namespace {
 
-void replace_all_uses(Function& fn, Value* old_val, Value* new_val) {
-    if (!old_val || !new_val || old_val == new_val) return;
-    for (BasicBlock* bb : fn.blocks()) {
-        if (!bb) continue;
-        for (Instruction* inst : *bb) {
-            if (!inst) continue;
-            for (size_t i = 0; i < inst->operand_count(); ++i) {
-                if (inst->operand(i) == old_val) inst->set_operand(i, new_val);
-            }
-            auto patch = [&](BranchTarget& bt) {
-                for (Value*& arg : bt.args) {
-                    if (arg == old_val) arg = new_val;
-                }
-            };
-            patch(inst->branch_target());
-            patch(inst->true_target());
-            patch(inst->false_target());
-            for (auto& sc : inst->switch_cases()) patch(sc.target);
-            for (Value*& sv : inst->state_map()) {
-                if (sv == old_val) sv = new_val;
-            }
-        }
-    }
-}
-
 // Two kinds of buffer are contracted. A raw buffer (malloc, the GC
 // allocator) is read and written with load_indexed / store_indexed, and a
-// load returns the bytes the last store to the same address wrote. A bronze
-// array is read and written through the runtime's element calls, and a read
-// returns the last value written at the same index only while that index is
-// a plain in-range element index: the runtime drops writes at negative
-// indices and truncates huge ones, so any other index could read something
-// else.
-enum class BufferKind { Raw, BronzeArray };
+// load returns the bytes the last store to the same address wrote. A runtime
+// array (a declared `array_new`) is read and written through the runtime's
+// `array_get` / `array_set` calls, and a read returns the last value written
+// at the same index only while that index is a plain in-range element index:
+// the runtime drops writes at negative indices and truncates huge ones, so
+// any other index could read something else.
+enum class BufferKind { Raw, RuntimeArray };
 
 bool is_elem_set(const Instruction* inst) {
-    return inst->opcode() == Opcode::call && inst->symbol() == "bronze_elem_set" && inst->operand_count() >= 3;
+    return callee_has_role(*inst, SymbolRole::ArraySet) && inst->operand_count() >= 3;
 }
 
 bool is_elem_get(const Instruction* inst) {
-    return inst->opcode() == Opcode::call && inst->symbol() == "bronze_elem_get" && inst->operand_count() == 2;
+    return callee_has_role(*inst, SymbolRole::ArrayGet) && inst->operand_count() == 2;
 }
 
 struct Access {
@@ -101,7 +78,7 @@ bool collect_accesses(const Function& fn, const LoopInfo& loop, const Value* buf
             if (!loop.contains(bb)) return false;
             if (kind == BufferKind::Raw && (op == Opcode::store_indexed || op == Opcode::load_indexed)) {
                 accesses.push_back({inst, op == Opcode::store_indexed});
-            } else if (kind == BufferKind::BronzeArray && (is_elem_set(inst) || is_elem_get(inst))) {
+            } else if (kind == BufferKind::RuntimeArray && (is_elem_set(inst) || is_elem_get(inst))) {
                 accesses.push_back({inst, is_elem_set(inst)});
             } else {
                 return false;
@@ -161,7 +138,7 @@ bool contract_buffer(Function& fn, const LoopInfo& loop, Instruction* alloc_inst
     bool has_load = false;
     for (const Access& a : accesses) {
         (a.is_store ? has_store : has_load) = true;
-        if (kind == BufferKind::BronzeArray && !index_is_plain_element(a.inst->operand(1), a.inst->parent(), ra)) {
+        if (kind == BufferKind::RuntimeArray && !index_is_plain_element(a.inst->operand(1), a.inst->parent(), ra)) {
             return false;
         }
     }
@@ -216,8 +193,8 @@ bool contract_in_loop(Function& fn, const LoopInfo& loop, const RangeAnalysis& r
         if (!bb) continue;
         for (Instruction* inst : *bb) {
             if (!inst || inst->opcode() != Opcode::call || !inst->result()) continue;
-            if (inst->symbol() == "bronze_create_array") {
-                candidates.emplace_back(inst, BufferKind::BronzeArray);
+            if (callee_has_role(*inst, SymbolRole::ArrayNew)) {
+                candidates.emplace_back(inst, BufferKind::RuntimeArray);
             } else if (is_allocation_call(inst)) {
                 candidates.emplace_back(inst, BufferKind::Raw);
             }

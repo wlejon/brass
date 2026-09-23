@@ -53,11 +53,14 @@ bool inline_function(Function& fn, Module& mod, const InlinerOptions& options, c
 bool inline_module(Module& mod);
 bool inline_module(Module& mod, const InlinerOptions& options);
 
-// Interprocedural Optimization (IPO) Pipeline:
-// 1. Devirtualization (monomorphic patchable_call -> direct call)
-// 2. Inlining pass in bottom-up leaf-first order
-// 3. Constant folding, CSE, DCE
-// 4. Loop optimization & f64 demotion re-run
+// The interprocedural pipeline: devirtualization (when enabled), speculative
+// devirtualization (when enabled), bottom-up inlining, then SROA (when
+// enabled) over what inlining exposed.
+Pipeline ipo_pipeline(const InlinerOptions& options);
+
+// Runs ipo_pipeline, verifying the module after every step; returns false
+// when a step broke it (reported on stderr) or nothing changed. `loop_opts`
+// is unused and kept for source compatibility.
 bool optimize_module_ipo(Module& mod);
 bool optimize_module_ipo(Module& mod, const InlinerOptions& inline_opts, const LoopOptOptions& loop_opts);
 

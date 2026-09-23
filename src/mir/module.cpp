@@ -23,7 +23,7 @@ Module& Module::operator=(Module&& other) noexcept {
     functions_ = std::move(other.functions_);
     function_map_ = std::move(other.function_map_);
     external_symbols_ = std::move(other.external_symbols_);
-    allocation_functions_ = std::move(other.allocation_functions_);
+    symbol_roles_ = std::move(other.symbol_roles_);
     allow_fp_reassociation_ = other.allow_fp_reassociation_;
     pinned_tls_register_ = other.pinned_tls_register_;
     has_loop_optimizations_ = other.has_loop_optimizations_;
@@ -85,16 +85,45 @@ bool Module::has_external_symbol(std::string_view sym) const noexcept {
     return std::find(external_symbols_.begin(), external_symbols_.end(), sym) != external_symbols_.end();
 }
 
-void Module::add_allocation_function(std::string_view sym) {
+namespace {
+
+uint32_t role_bit(SymbolRole role) noexcept {
+    return uint32_t{1} << static_cast<uint32_t>(role);
+}
+
+} // namespace
+
+void Module::add_symbol_role(std::string_view sym, SymbolRole role) {
     add_external_symbol(sym);
-    std::string_view interned_sym = string_pool_.intern(sym);
-    if (!is_allocation_function(interned_sym)) {
-        allocation_functions_.push_back(interned_sym);
+    symbol_roles_[string_pool_.intern(sym)] |= role_bit(role);
+}
+
+bool Module::has_symbol_role(std::string_view sym, SymbolRole role) const noexcept {
+    auto it = symbol_roles_.find(sym);
+    return it != symbol_roles_.end() && (it->second & role_bit(role)) != 0;
+}
+
+std::vector<SymbolRole> Module::symbol_roles(std::string_view sym) const {
+    std::vector<SymbolRole> roles;
+    for (SymbolRole role : kAllSymbolRoles) {
+        if (has_symbol_role(sym, role)) roles.push_back(role);
     }
+    return roles;
+}
+
+void Module::add_allocation_function(std::string_view sym) {
+    add_symbol_role(sym, SymbolRole::Allocator);
 }
 
 bool Module::is_allocation_function(std::string_view sym) const noexcept {
-    return std::find(allocation_functions_.begin(), allocation_functions_.end(), sym) != allocation_functions_.end();
+    return has_symbol_role(sym, SymbolRole::Allocator);
+}
+
+void Module::copy_declarations_from(const Module& src) {
+    for (std::string_view sym : src.external_symbols()) {
+        add_external_symbol(sym);
+        for (SymbolRole role : src.symbol_roles(sym)) add_symbol_role(sym, role);
+    }
 }
 
 } // namespace brass

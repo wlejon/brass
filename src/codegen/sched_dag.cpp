@@ -1,4 +1,5 @@
 #include <brass/codegen/sched_dag.hpp>
+#include <brass/codegen/lir_flags.hpp>
 #include <algorithm>
 #include <unordered_map>
 #include <unordered_set>
@@ -16,52 +17,6 @@ std::string_view to_string(EdgeKind kind) noexcept {
         case EdgeKind::Barrier: return "Barrier";
     }
     return "Unknown";
-}
-
-bool instruction_defines_flags(const LirInst& inst) noexcept {
-    if (inst.is_call()) return true;
-    switch (inst.opcode) {
-        case LirOpcode::Cmp:
-        case LirOpcode::Cmp32:
-        case LirOpcode::Test:
-        case LirOpcode::Test32:
-        case LirOpcode::Add:
-        case LirOpcode::Add32:
-        case LirOpcode::Sub:
-        case LirOpcode::Sub32:
-        case LirOpcode::Imul:
-        case LirOpcode::Imul32:
-        case LirOpcode::And:
-        case LirOpcode::And32:
-        case LirOpcode::Or:
-        case LirOpcode::Or32:
-        case LirOpcode::Xor:
-        case LirOpcode::Xor32:
-        case LirOpcode::Neg:
-        case LirOpcode::Neg32:
-        case LirOpcode::Shl:
-        case LirOpcode::Shl32:
-        case LirOpcode::Shr:
-        case LirOpcode::Shr32:
-        case LirOpcode::Sar:
-        case LirOpcode::Sar32:
-        case LirOpcode::Ucomisd:
-        case LirOpcode::Ucomiss:
-            return true;
-        default:
-            return false;
-    }
-}
-
-bool instruction_uses_flags(const LirInst& inst) noexcept {
-    switch (inst.opcode) {
-        case LirOpcode::Jcc:
-        case LirOpcode::Setcc:
-        case LirOpcode::Cmovcc:
-            return true;
-        default:
-            return false;
-    }
 }
 
 bool is_scheduling_barrier(const LirInst& inst) noexcept {
@@ -226,6 +181,8 @@ uint32_t get_instruction_latency(const LirInst& inst) {
             return has_mem_load ? 16 : 13;
         case LirOpcode::Sqrtps:
         case LirOpcode::Sqrtpd:
+        case LirOpcode::Vsqrtps:
+        case LirOpcode::Vsqrtpd:
             return has_mem_load ? 17 : 14;
         case LirOpcode::Paddd:
         case LirOpcode::Psubd:
@@ -388,8 +345,8 @@ static bool may_memory_alias(const LirInst& a, const LirInst& b) {
     return false;
 }
 
-SchedDAG::SchedDAG(LirBlock& block, bool is_pre_ra)
-    : block_(block), is_pre_ra_(is_pre_ra) {}
+SchedDAG::SchedDAG(LirBlock& block, Arch arch, bool is_pre_ra)
+    : block_(block), arch_(arch), is_pre_ra_(is_pre_ra) {}
 
 void SchedDAG::build() {
     nodes_.clear();
@@ -592,13 +549,15 @@ void SchedDAG::build_register_dependencies() {
 
     for (uint32_t j = 0; j < n; ++j) {
         const auto& inst = *nodes_[j].inst;
-        if (instruction_uses_flags(inst)) {
+        // Every flag writer is ordered, full definition or partial clobber:
+        // moving a reader across either changes what it reads.
+        if (lir_reads_flags(inst, arch_)) {
             if (last_flag_def >= 0) {
                 add_edge(static_cast<uint32_t>(last_flag_def), j, EdgeKind::RAW, 1);
             }
             last_flag_uses.push_back(j);
         }
-        if (instruction_defines_flags(inst)) {
+        if (lir_writes_flags(inst, arch_)) {
             for (uint32_t u_node : last_flag_uses) {
                 if (u_node != j) {
                     add_edge(u_node, j, EdgeKind::WAR, 0);

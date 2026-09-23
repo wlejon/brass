@@ -60,8 +60,15 @@ namespace elf {
     constexpr uint32_t R_AARCH64_MOVW_UABS_G3     = 269;
     constexpr uint32_t R_AARCH64_ADR_PREL_PG_HI21 = 275;
     constexpr uint32_t R_AARCH64_ADD_ABS_LO12_NC  = 277;
+    constexpr uint32_t R_AARCH64_LDST8_ABS_LO12_NC = 278;
     constexpr uint32_t R_AARCH64_JUMP26           = 282;
     constexpr uint32_t R_AARCH64_CALL26           = 283;
+    constexpr uint32_t R_AARCH64_LDST16_ABS_LO12_NC = 284;
+    constexpr uint32_t R_AARCH64_LDST32_ABS_LO12_NC = 285;
+    constexpr uint32_t R_AARCH64_LDST64_ABS_LO12_NC = 286;
+    constexpr uint32_t R_AARCH64_LDST128_ABS_LO12_NC = 299;
+    constexpr uint32_t R_AARCH64_ADR_GOT_PAGE     = 311;
+    constexpr uint32_t R_AARCH64_LD64_GOT_LO12_NC = 312;
     constexpr uint32_t R_AARCH64_RELATIVE         = 1027;
 
     // DWARF CFI Call Frame Instructions

@@ -677,6 +677,15 @@ void register_all_module_external_symbols(Module* mod, const std::string& entry_
     for (const char* sym : kSymbols) {
         mod->add_external_symbol(sym);
     }
+    // The runtime contracts the optimizer relies on (runtime_symbols.hpp).
+    // bronze_tls_block_addr returns the calling thread's TLS block: no side
+    // effect, no GC, the same answer every time.
+    mod->add_symbol_role("bronze_tls_block_addr", SymbolRole::Pure);
+    mod->add_symbol_role("bronze_create_array", SymbolRole::ArrayNew);
+    mod->add_symbol_role("bronze_elem_get", SymbolRole::ArrayGet);
+    mod->add_symbol_role("bronze_elem_set", SymbolRole::ArraySet);
+    // JS `%` on numbers: fmod.
+    mod->add_symbol_role("bronze_f64_mod", SymbolRole::FloatRem);
     const std::string key_sym = (entry_symbol.empty() || entry_symbol == "main" || entry_symbol == "bronze_main")
                                     ? "bronze_main_key_constants"
                                     : (entry_symbol + "_key_constants");

@@ -539,7 +539,9 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
         throw std::runtime_error("BaselineJitCompiler: Failed to allocate executable memory for " + std::string(fn.name()));
     }
     std::memcpy(mem_block->data(), buffer.data(), code_bytes);
-    mem_block->make_executable_read_only();
+    if (!mem_block->make_executable_read_only()) {
+        throw std::runtime_error("BaselineJitCompiler: could not make the code of " + std::string(fn.name()) + " executable");
+    }
 
     void* entry_ptr = mem_block->data();
     uintptr_t fn_address = reinterpret_cast<uintptr_t>(entry_ptr);

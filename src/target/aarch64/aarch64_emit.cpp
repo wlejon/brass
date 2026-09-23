@@ -2,6 +2,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <cassert>
+#include <algorithm>
 
 namespace brass::aarch64 {
 
@@ -99,7 +100,31 @@ MemAddress AArch64EmitContext::ensure_accessible_mem(const MemAddress& mem, GPR 
 }
 
 AArch64CompilationResult AArch64EmitContext::compile() {
+    // Short branches whose label ends up out of reach are re-emitted in the
+    // long form on the next pass (CodeBuffer::relax_requests). Every pass
+    // turns at least one more site long and a long site never asks again, so
+    // this ends; in practice a function under 1 MB takes one pass.
+    std::vector<uint32_t> long_sites;
+    for (;;) {
+        AArch64CompilationResult result = compile_pass(long_sites);
+        const auto& requests = result.code_buffer.relax_requests();
+        if (requests.empty()) return result;
+        const size_t before = long_sites.size();
+        for (uint32_t site : requests) {
+            if (std::find(long_sites.begin(), long_sites.end(), site) == long_sites.end()) {
+                long_sites.push_back(site);
+            }
+        }
+        if (long_sites.size() == before) {
+            throw std::runtime_error("AArch64 emit: branch relaxation made no progress in '" + fn_.name + "'");
+        }
+    }
+}
+
+AArch64CompilationResult AArch64EmitContext::compile_pass(const std::vector<uint32_t>& long_branch_sites) {
     AArch64CompilationResult result;
+    buffer_ = CodeBuffer();
+    buffer_.add_long_branch_sites(long_branch_sites);
     safepoints_.clear();
     stack_map_records_.clear();
     block_labels_.clear();
@@ -511,8 +536,7 @@ void AArch64EmitContext::emit_instruction(const LirInst& inst, bool is_entry_blo
             break;
 
         default:
-            assert(false && "Unhandled LIR opcode in AArch64 emit");
-            throw std::runtime_error("Unhandled LIR opcode in AArch64 emit: " + std::to_string(static_cast<int>(inst.opcode)));
+            throw_unsupported("aarch64 emit", to_string(inst.opcode));
     }
 }
 

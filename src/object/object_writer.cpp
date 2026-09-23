@@ -1,4 +1,5 @@
 #include <brass/object/object_writer.hpp>
+#include <brass/object/aarch64_reloc.hpp>
 #include <brass/target/x64/x64_isel.hpp>
 #include <brass/target/aarch64/aarch64_isel.hpp>
 #include <brass/target/aarch64/aarch64_emit.hpp>
@@ -12,6 +13,7 @@
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/verifier.hpp>
 #include <algorithm>
+#include <cstring>
 #include <stdexcept>
 #include <iostream>
 #include <fstream>
@@ -271,12 +273,15 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
                     case aarch64::RelocationKind::Jump26:
                         obj_r.kind = RelocKind::Plt32;
                         break;
-                    case aarch64::RelocationKind::Page21:
-                        obj_r.kind = RelocKind::AdrPage21;
-                        break;
-                    case aarch64::RelocationKind::PageOff12:
-                        obj_r.kind = RelocKind::SecRel32;
-                        break;
+                    case aarch64::RelocationKind::Page21:      obj_r.kind = RelocKind::AdrPage21; break;
+                    case aarch64::RelocationKind::AddLo12:     obj_r.kind = RelocKind::AddLo12; break;
+                    case aarch64::RelocationKind::LdSt8Lo12:   obj_r.kind = RelocKind::LdSt8Lo12; break;
+                    case aarch64::RelocationKind::LdSt16Lo12:  obj_r.kind = RelocKind::LdSt16Lo12; break;
+                    case aarch64::RelocationKind::LdSt32Lo12:  obj_r.kind = RelocKind::LdSt32Lo12; break;
+                    case aarch64::RelocationKind::LdSt64Lo12:  obj_r.kind = RelocKind::LdSt64Lo12; break;
+                    case aarch64::RelocationKind::LdSt128Lo12: obj_r.kind = RelocKind::LdSt128Lo12; break;
+                    case aarch64::RelocationKind::GotPage21:   obj_r.kind = RelocKind::GotPage21; break;
+                    case aarch64::RelocationKind::GotLo12:     obj_r.kind = RelocKind::GotLo12; break;
                     case aarch64::RelocationKind::Abs64:
                         obj_r.kind = RelocKind::Abs64;
                         break;
@@ -461,6 +466,33 @@ size_t relax_got_loads(ObjectFile& obj) {
     size_t left = 0;
     for (auto& sec : obj.sections) {
         for (auto& r : sec.relocations) {
+            if (r.kind == RelocKind::GotPage21 || r.kind == RelocKind::GotLo12) {
+                // AArch64: both halves of a pair decide on the symbol alone,
+                // so they always agree. ADRP of the slot's page becomes ADRP
+                // of the symbol's; the slot load becomes an ADD.
+                if (!names_defined(obj, r.symbol_name)) {
+                    if (r.kind == RelocKind::GotLo12) ++left;
+                    continue;
+                }
+                if (r.kind == RelocKind::GotPage21) {
+                    r.kind = RelocKind::AdrPage21;
+                    continue;
+                }
+                if (r.offset + 4 > sec.data.size()) {
+                    throw std::runtime_error("relax_got_loads: GOT load of '" + r.symbol_name +
+                                             "' lies outside section " + sec.name);
+                }
+                uint32_t inst = 0;
+                std::memcpy(&inst, sec.data.data() + r.offset, 4);
+                if (!a64::relax_got_ldr_to_add(inst)) {
+                    throw std::runtime_error("relax_got_loads: GOT page-offset relocation against '" +
+                                             r.symbol_name + "' in " + sec.name +
+                                             " is not on an LDR Xt, [Xn, #imm]");
+                }
+                std::memcpy(sec.data.data() + r.offset, &inst, 4);
+                r.kind = RelocKind::AddLo12;
+                continue;
+            }
             if (r.kind != RelocKind::GotPCRel32) continue;
             // The opcode byte sits two before the displacement: REX, 8B,
             // ModRM(mod=00 reg=r rm=101), disp32.
@@ -488,7 +520,10 @@ void materialize_got_slots(ObjectFile& obj, std::string_view slot_section, Secti
     for (auto& sec : obj.sections) {
         if (&sec == &slots) continue;
         for (auto& r : sec.relocations) {
-            if (r.kind != RelocKind::GotPCRel32) continue;
+            if (r.kind != RelocKind::GotPCRel32 && r.kind != RelocKind::GotPage21 &&
+                r.kind != RelocKind::GotLo12) {
+                continue;
+            }
             auto it = slot_of.find(r.symbol_name);
             if (it == slot_of.end()) {
                 slots.align_to(8);
@@ -505,7 +540,11 @@ void materialize_got_slots(ObjectFile& obj, std::string_view slot_section, Secti
                 obj.add_symbol(std::move(slot_sym));
                 it = slot_of.emplace(r.symbol_name, r.symbol_name + "$got").first;
             }
-            r.kind = RelocKind::PCRel32;
+            // x64: the load's disp32 now addresses the slot. AArch64: ADRP of
+            // the slot's page, and the LDR X of the slot itself.
+            r.kind = r.kind == RelocKind::GotPage21 ? RelocKind::AdrPage21
+                   : r.kind == RelocKind::GotLo12   ? RelocKind::LdSt64Lo12
+                                                    : RelocKind::PCRel32;
             r.symbol_name = it->second;
         }
     }

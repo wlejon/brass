@@ -546,6 +546,10 @@ bb3:
 
 TEST_CASE("Soundness - array contraction keeps an array another call still reads") {
     auto mod = parse(R"(
+extern @bronze_create_array array_new
+extern @bronze_elem_set array_set
+extern @bronze_elem_get array_get
+
 func @f(%n: i64, %j: i64) -> i64 {
 bb0:
   %zero = iconst.i64 0
@@ -584,6 +588,10 @@ bb3(%r: i64):
 TEST_CASE("Soundness - array contraction does not forward past a write at another index") {
     // a[i] = 11; a[j] = 22; a[i] reads 22 when i == j.
     auto mod = parse(R"(
+extern @bronze_create_array array_new
+extern @bronze_elem_set array_set
+extern @bronze_elem_get array_get
+
 func @f(%n: i64, %j: i64) -> i64 {
 bb0:
   %zero = iconst.i64 0
@@ -621,6 +629,10 @@ bb3(%r: i64):
 
 TEST_CASE("Soundness - array contraction keeps an array that escapes through a select or block argument") {
     auto mod = parse(R"(
+extern @bronze_create_array array_new
+extern @bronze_elem_set array_set
+extern @bronze_elem_get array_get
+
 func @sel(%n: i64, %other: i64) -> i64 {
 bb0:
   %zero = iconst.i64 0
@@ -691,6 +703,10 @@ TEST_CASE("Soundness - array contraction needs indices proven to be plain elemen
     // A negative index is not an element: the write is dropped and the read
     // sees undefined, so the stored value must not be forwarded.
     auto mod = parse(R"(
+extern @bronze_create_array array_new
+extern @bronze_elem_set array_set
+extern @bronze_elem_get array_get
+
 func @f(%n: i64) -> i64 {
 bb0:
   %zero = iconst.i64 0

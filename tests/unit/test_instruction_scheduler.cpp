@@ -44,7 +44,7 @@ TEST_CASE("Scheduler - Load Hoisting and Latency Stall Hiding") {
 
     SchedOptions opts;
     opts.enable_post_ra = true;
-    SchedStats stats = schedule_block(*bb, opts);
+    SchedStats stats = schedule_block(*bb, Arch::x64, opts);
 
     CHECK_EQ(stats.blocks_scheduled, size_t(1));
     CHECK_EQ(bb->instructions.size(), size_t(5));
@@ -96,7 +96,7 @@ TEST_CASE("Scheduler - Division Latency Hiding") {
 
     SchedOptions opts;
     opts.enable_post_ra = true;
-    schedule_block(*bb, opts);
+    schedule_block(*bb, Arch::x64, opts);
 
     // Multiplier (Inst 0) scheduled first
     CHECK(bb->instructions[0]->opcode == LirOpcode::Imul);
@@ -146,7 +146,7 @@ TEST_CASE("Scheduler - Register Pressure Throttling") {
     SchedOptions opts;
     opts.enable_pre_ra = true;
     opts.gpr_pressure_threshold = 1; // Strict throttle
-    SchedStats stats = schedule_block(*bb, opts);
+    SchedStats stats = schedule_block(*bb, Arch::x64, opts);
 
     CHECK_EQ(stats.blocks_scheduled, size_t(1));
     CHECK(stats.pressure_throttles > 0);
@@ -183,7 +183,7 @@ TEST_CASE("Scheduler - Execution Port Multi-Issue Balancing") {
     SchedOptions opts;
     opts.enable_post_ra = true;
     opts.balance_issue_ports = true;
-    schedule_block(*bb, opts);
+    schedule_block(*bb, Arch::x64, opts);
 
     // Verify interleaving: consecutive instructions should balance load vs non-load
     bool first_is_load = bb->instructions[0]->uses[0].is_spill_slot();

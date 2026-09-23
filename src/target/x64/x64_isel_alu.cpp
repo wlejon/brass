@@ -1,4 +1,5 @@
 #include <brass/target/x64/x64_isel.hpp>
+#include <brass/codegen/unsupported_operation.hpp>
 #include <cstring>
 
 namespace brass::x64 {
@@ -565,13 +566,16 @@ void X64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
         case Opcode::ret:
             lower_return(inst, lir_bb);
             break;
-        case Opcode::unreachable:
-        default: {
+        case Opcode::unreachable: {
             auto lir_inst = std::make_unique<LirInst>(LirOpcode::Trap);
             lir_inst->mir_origin = &inst;
             lir_bb.append_inst(std::move(lir_inst));
             break;
         }
+        default:
+            // A MIR opcode with no x64 lowering is a compile error, not a
+            // trap planted in the generated code.
+            codegen::throw_unsupported("x64 isel", opcode_name(inst.opcode()));
     }
 }
 

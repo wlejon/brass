@@ -126,7 +126,7 @@ bool collect_escaping_defs(
         const bool in_region = Z == dest || dom.dominates(dest, Z);
         for (const Instruction* inst : *Z) {
             if (!inst) continue;
-            ir::for_each_use(*inst, [&](Value* v) {
+            for_each_use(*inst, [&](Value* v) {
                 if (!defs.count(v)) return;
                 if (!in_region) ok = false;
                 else if (seen.insert(v).second) escaping.push_back(v);
@@ -151,11 +151,7 @@ void replace_in_region(
         if (!Z || (Z != dest && !dom.dominates(dest, Z))) continue;
         for (Instruction* inst : *Z) {
             if (!inst) continue;
-            for (Value*& op : inst->operands()) sub(op);
-            for (Value*& sv : inst->state_map()) sub(sv);
-            ir::for_each_target(*inst, [&](BranchTarget& t) {
-                for (Value*& a : t.args) sub(a);
-            });
+            for_each_use_slot(*inst, sub);
         }
     }
 }

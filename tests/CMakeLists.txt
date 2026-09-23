@@ -90,6 +90,11 @@ add_executable(brass_unit_tests
     differential/test_pgo_differential.cpp
     unit/test_sched_dag.cpp
     unit/test_instruction_scheduler.cpp
+    unit/test_lir_flags.cpp
+    unit/test_backend_hard_errors.cpp
+    unit/test_aarch64_relocs.cpp
+    unit/test_aarch64_image_relocs.cpp
+    unit/test_aarch64_branch_relax.cpp
     unit/test_software_pipeline.cpp
     differential/test_sched_differential.cpp
     unit/test_source_loc.cpp
@@ -132,6 +137,7 @@ add_executable(brass_unit_tests
     unit/test_v256_mir.cpp
     unit/test_fma_opt.cpp
     differential/test_avx2_differential.cpp
+    differential/test_avx2_isel_regressions.cpp
     unit/test_background_compiler.cpp
     unit/test_atomic_code_install.cpp
     differential/test_async_jit_differential.cpp
@@ -153,6 +159,10 @@ add_executable(brass_unit_tests
     unit/test_optimizer_soundness_passes.cpp
     unit/test_loop_parallel_tile_soundness.cpp
     unit/test_fuzz_pipelines.cpp
+    unit/test_mir_roundtrip_all.cpp
+    unit/test_pass_manager.cpp
+    unit/test_mir_uses.cpp
+    unit/test_loop_ivsr.cpp
     unit/test_jit_fuzz_regressions.cpp
     unit/test_type_feedback.cpp
     unit/test_speculative_inlining.cpp

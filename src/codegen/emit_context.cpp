@@ -569,9 +569,7 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
             break;
         }
         default:
-            assert(false && "Unhandled LIR opcode in x64 control emit");
-            enc_.ud2();
-            break;
+            throw_unsupported("x64 emit (control)", to_string(inst.opcode));
     }
 }
 
@@ -740,6 +738,10 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
         case LirOpcode::Vdivpd:
         case LirOpcode::Vminpd:
         case LirOpcode::Vmaxpd:
+        case LirOpcode::Vsqrtps:
+        case LirOpcode::Vsqrtpd:
+        case LirOpcode::Vextractf128:
+        case LirOpcode::Vinsertf128:
         case LirOpcode::Vpaddd:
         case LirOpcode::Vpsubd:
         case LirOpcode::Vpmulld:
@@ -784,9 +786,9 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
             emit_control_instruction(inst);
             break;
         default:
-            assert(false && "Unhandled LIR opcode in x64 emit");
-            enc_.ud2();
-            break;
+            // No x64 encoding for this LIR opcode (e.g. the AArch64-only
+            // Adds/Subs): a compile error, not a ud2 in the output.
+            throw_unsupported("x64 emit", to_string(inst.opcode));
     }
 }
 

@@ -4,6 +4,7 @@
 #include <brass/target/x64/x64_encoder.hpp>
 #include <brass/target/x64/x64_frame.hpp>
 #include <brass/codegen/lir.hpp>
+#include <brass/codegen/unsupported_operation.hpp>
 #include <brass/gc/stack_map.hpp>
 #include <vector>
 #include <unordered_map>

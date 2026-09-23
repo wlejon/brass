@@ -107,6 +107,48 @@ DEFINE_VEX_OP(vdivpd, 0x5E, 1, 1, false)
 DEFINE_VEX_OP(vminpd, 0x5D, 1, 1, false)
 DEFINE_VEX_OP(vmaxpd, 0x5F, 1, 1, false)
 
+// VEX.256.66.0F3A.W0 19 /r ib: the ymm source is ModRM.reg, the xmm
+// destination ModRM.rm.
+void X64Encoder::vextractf128(XMM dst, XMM src, uint8_t imm) {
+    emit_vex(false, 3, 1, true, is_extended(src), false, is_extended(dst), 0);
+    buffer_.emit8(0x19);
+    emit_modrm(3, reg_code(src), reg_code(dst));
+    buffer_.emit8(static_cast<uint8_t>(imm & 1));
+}
+
+// VEX.256.66.0F3A.W0 18 /r ib: ymm1 (reg), ymm2 (vvvv), xmm3 (rm).
+void X64Encoder::vinsertf128(XMM dst, XMM src1, XMM src2, uint8_t imm) {
+    emit_vex(false, 3, 1, true, is_extended(dst), false, is_extended(src2), reg_id(src1));
+    buffer_.emit8(0x18);
+    emit_modrm(3, reg_code(dst), reg_code(src2));
+    buffer_.emit8(static_cast<uint8_t>(imm & 1));
+}
+
+// Unary 256-bit square roots: VEX.256.0F(.66) 51 /r, vvvv unused (1111).
+void X64Encoder::vsqrtps(XMM dst, XMM src) {
+    emit_vex(false, 1, 0, true, is_extended(dst), false, is_extended(src), 0);
+    buffer_.emit8(0x51);
+    emit_modrm(3, reg_code(dst), reg_code(src));
+}
+
+void X64Encoder::vsqrtps(XMM dst, const MemAddress& src) {
+    emit_vex(false, 1, 0, true, is_extended(dst), is_extended(src.index), is_extended(src.base), 0);
+    buffer_.emit8(0x51);
+    emit_mem_operand(reg_code(dst), src);
+}
+
+void X64Encoder::vsqrtpd(XMM dst, XMM src) {
+    emit_vex(false, 1, 1, true, is_extended(dst), false, is_extended(src), 0);
+    buffer_.emit8(0x51);
+    emit_modrm(3, reg_code(dst), reg_code(src));
+}
+
+void X64Encoder::vsqrtpd(XMM dst, const MemAddress& src) {
+    emit_vex(false, 1, 1, true, is_extended(dst), is_extended(src.index), is_extended(src.base), 0);
+    buffer_.emit8(0x51);
+    emit_mem_operand(reg_code(dst), src);
+}
+
 // Integer arithmetic (i32x8 & i64x4)
 DEFINE_VEX_OP(vpaddd, 0xFE, 1, 1, false)
 DEFINE_VEX_OP(vpsubd, 0xFA, 1, 1, false)

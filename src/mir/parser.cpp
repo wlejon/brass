@@ -131,6 +131,7 @@ namespace brass::mir_parser {
             case Opcode::sext_i64: { Value* v = parse_val(); if (!v) return false; res_val = b.build_sext_i64(v); break; }
             case Opcode::zext_i64: { Value* v = parse_val(); if (!v) return false; res_val = b.build_zext_i64(v); break; }
             case Opcode::trunc_i32: { Value* v = parse_val(); if (!v) return false; res_val = b.build_trunc_i32(v); break; }
+            case Opcode::trunc_i8: { Value* v = parse_val(); if (!v) return false; res_val = b.build_trunc_i8(v); break; }
             case Opcode::fptosi_i32: { Value* v = parse_val(); if (!v) return false; res_val = b.build_fptosi_i32(v); break; }
             case Opcode::fptosi_i64: { Value* v = parse_val(); if (!v) return false; res_val = b.build_fptosi_i64(v); break; }
             case Opcode::fptosi_i32_f32: { Value* v = parse_val(); if (!v) return false; res_val = b.build_fptosi_i32_f32(v); break; }
@@ -456,6 +457,23 @@ namespace brass::mir_parser {
                 break;
             }
 
+            case Opcode::pinned_tls_read: {
+                res_val = b.build_pinned_tls_read();
+                break;
+            }
+
+            case Opcode::read_sp: {
+                res_val = b.build_read_sp();
+                break;
+            }
+
+            case Opcode::pinned_tls_write: {
+                Value* addr = parse_val();
+                if (!addr) return false;
+                res_inst = b.build_pinned_tls_write(addr);
+                break;
+            }
+
             case Opcode::alloca_: {  // `alloca SIZE, ALIGN`, as the printer writes it
                 const int64_t size = peek().is(TokenKind::IntLiteral) ? advance().int_val : -1;
                 if (size < 0 || !match(TokenKind::Comma) || !peek().is(TokenKind::IntLiteral)) {
@@ -497,6 +515,26 @@ namespace brass::mir_parser {
                 }
                 uint32_t resume_id = static_cast<uint32_t>(advance().int_val);
                 b.build_resume_point(resume_id);
+                break;
+            }
+
+            case Opcode::osr_entry: {  // `osr_entry HEADER_ID [ %live, ... ]`
+                if (!peek().is(TokenKind::IntLiteral)) {
+                    error(peek().location, "Expected integer loop header id for osr_entry");
+                    return false;
+                }
+                const uint32_t header_id = static_cast<uint32_t>(advance().int_val);
+                std::vector<Value*> live_ins;
+                if (match(TokenKind::LBracket)) {
+                    while (!peek().is(TokenKind::RBracket) && !peek().is(TokenKind::Eof)) {
+                        Value* v = parse_val();
+                        if (!v) return false;
+                        live_ins.push_back(v);
+                        if (!peek().is(TokenKind::RBracket) && !expect(TokenKind::Comma, "','")) return false;
+                    }
+                    if (!expect(TokenKind::RBracket, "']'")) return false;
+                }
+                res_inst = b.build_osr_entry(header_id, Span<Value* const>(live_ins.data(), live_ins.size()));
                 break;
             }
 
@@ -658,6 +696,12 @@ namespace brass::mir_parser {
                         [this]() { return parse_symbol_name(); },
                         [this](SourceLocation loc, const std::string& msg) { error(loc, msg); }
                     };
+                    // The printer writes a void suspend / resume as the bare
+                    // name with no result; with a result the bare name is i64.
+                    if (!has_assignment && op_tok.text.find('.') == std::string_view::npos &&
+                        (op == Opcode::coro_suspend || op == Opcode::coro_resume)) {
+                        type_suffix = Type::void_type();
+                    }
                     if (!parse_coro_instruction(ctx, op, type_annotation, type_suffix, b, res_val, res_inst)) {
                         return false;
                     }

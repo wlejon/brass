@@ -77,8 +77,14 @@ bool parse_coro_instruction(
         }
 
         case Opcode::coro_suspend: {
-            Value* yield_val = ctx.parse_val();
-            if (!yield_val) return false;
+            // `0` in the yield slot is the printer's spelling of "no value".
+            Value* yield_val = nullptr;
+            if (ctx.peek().is(TokenKind::IntLiteral) && ctx.peek().int_val == 0) {
+                ctx.advance();
+            } else {
+                yield_val = ctx.parse_val();
+                if (!yield_val) return false;
+            }
 
             uint32_t state_id = 0;
             if (ctx.match(TokenKind::Comma)) {
@@ -92,8 +98,9 @@ bool parse_coro_instruction(
                 }
             }
 
-            Type ret_type = !type_annotation.is_void() ? type_annotation :
-                            (!type_suffix.is_void() ? type_suffix : Type::i64());
+            // decode_coro_opcode gives the bare name i64; the parser clears
+            // it for a void instruction (no result).
+            const Type ret_type = !type_annotation.is_void() ? type_annotation : type_suffix;
             res_val = b.build_coro_suspend(yield_val, state_id, ret_type);
             res_inst = res_val ? res_val->defining_instruction() : nullptr;
             return true;
@@ -109,8 +116,9 @@ bool parse_coro_instruction(
                 if (!input_val) return false;
             }
 
-            Type ret_type = !type_annotation.is_void() ? type_annotation :
-                            (!type_suffix.is_void() ? type_suffix : Type::i64());
+            // decode_coro_opcode gives the bare name i64; the parser clears
+            // it for a void instruction (no result).
+            const Type ret_type = !type_annotation.is_void() ? type_annotation : type_suffix;
             res_val = b.build_coro_resume(coro_val, input_val, ret_type);
             res_inst = res_val ? res_val->defining_instruction() : nullptr;
             return true;

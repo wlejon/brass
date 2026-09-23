@@ -437,10 +437,31 @@ TEST_CASE("AArch64 Backend Hardening - Backward Branch Bounds Checking") {
         std::vector<uint8_t> padding(1048576 + 4, 0);
         buf.emit_bytes(padding);
 
-        // Must throw std::runtime_error due to exceeding 19-bit branch range
-        CHECK_THROWS_AS(enc.b(Condition::EQ, target), std::runtime_error);
-        CHECK_THROWS_AS(enc.cbz(GPR::X0, target), std::runtime_error);
-        CHECK_THROWS_AS(enc.cbnz(GPR::X0, target), std::runtime_error);
+        // Out of the 19-bit range: relaxed to the inverted short branch over
+        // an unconditional B (never a silently truncated displacement).
+        auto word = [&](size_t off) {
+            uint32_t w = 0;
+            std::memcpy(&w, buf.data() + off, 4);
+            return w;
+        };
+        auto b_target = [&](size_t off) {
+            int64_t imm = static_cast<int64_t>(word(off) & 0x03FFFFFFu);
+            if (imm & (int64_t(1) << 25)) imm -= int64_t(1) << 26;
+            return static_cast<int64_t>(off) + imm * 4;
+        };
+        size_t at = buf.size();
+        enc.b(Condition::EQ, target);
+        CHECK_EQ(buf.size(), at + 8);
+        CHECK_EQ(word(at), 0x54000000u | (2u << 5) | 1u);         // b.ne +8
+        CHECK_EQ(b_target(at + 4), int64_t(0));                     // b target
+        at = buf.size();
+        enc.cbz(GPR::X0, target);
+        CHECK_EQ(word(at), 0xB5000000u | (2u << 5));                // cbnz x0, +8
+        CHECK_EQ(b_target(at + 4), int64_t(0));
+        at = buf.size();
+        enc.cbnz(GPR::X0, target);
+        CHECK_EQ(word(at), 0xB4000000u | (2u << 5));                // cbz x0, +8
+        CHECK_EQ(b_target(at + 4), int64_t(0));
     }
 
     // 3. Within 26-bit unconditional branch range

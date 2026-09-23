@@ -1,6 +1,7 @@
 #include <brass/codegen/jit_exec.hpp>
 #include <brass/object/coff_writer.hpp>
 #include <brass/object/elf_writer.hpp>
+#include <brass/object/aarch64_reloc.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/runtime/deopt.hpp>
 #include <brass/runtime/resume_table.hpp>
@@ -36,241 +37,6 @@
 #endif
 
 namespace brass::codegen {
-
-namespace {
-static std::vector<std::pair<uintptr_t, uintptr_t>>& jit_ranges() {
-    static auto* ranges = new std::vector<std::pair<uintptr_t, uintptr_t>>();
-    return *ranges;
-}
-
-static std::mutex& jit_ranges_mutex() {
-    static auto* m = new std::mutex();
-    return *m;
-}
-
-static size_t get_system_page_size() {
-#if defined(_WIN32)
-    SYSTEM_INFO si;
-    GetSystemInfo(&si);
-    return si.dwPageSize;
-#else
-    long sz = sysconf(_SC_PAGESIZE);
-    return (sz > 0) ? static_cast<size_t>(sz) : 4096;
-#endif
-}
-
-void register_jit_memory_range(void* ptr, size_t size) {
-    if (!ptr || size == 0) return;
-    std::lock_guard<std::mutex> lock(jit_ranges_mutex());
-    jit_ranges().push_back({reinterpret_cast<uintptr_t>(ptr), reinterpret_cast<uintptr_t>(ptr) + size});
-}
-
-void unregister_jit_memory_range(void* ptr) {
-    if (!ptr) return;
-    std::lock_guard<std::mutex> lock(jit_ranges_mutex());
-    uintptr_t p = reinterpret_cast<uintptr_t>(ptr);
-    auto& ranges = jit_ranges();
-    ranges.erase(
-        std::remove_if(ranges.begin(), ranges.end(),
-                       [p](const auto& range) { return range.first == p; }),
-        ranges.end());
-}
-} // namespace
-
-bool is_jit_code_address(const void* addr) noexcept {
-    if (!addr) return false;
-    uintptr_t p = reinterpret_cast<uintptr_t>(addr);
-    std::lock_guard<std::mutex> lock(jit_ranges_mutex());
-    for (const auto& [start, end] : jit_ranges()) {
-        if (p >= start && p < end) return true;
-    }
-    return false;
-}
-
-JitMemoryBlock::JitMemoryBlock(size_t size) {
-    if (size == 0) return;
-    size_t page_sz = get_system_page_size();
-    size_t page_aligned = (size + page_sz - 1) & ~(page_sz - 1);
-#if defined(_WIN32)
-    ptr_ = static_cast<uint8_t*>(VirtualAlloc(nullptr, page_aligned, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
-#elif defined(__APPLE__) && defined(__aarch64__)
-    ptr_ = static_cast<uint8_t*>(mmap(nullptr, page_aligned, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS | MAP_JIT, -1, 0));
-    if (ptr_ == MAP_FAILED) {
-        ptr_ = nullptr;
-    } else {
-        pthread_jit_write_protect_np(0);
-    }
-#else
-    ptr_ = static_cast<uint8_t*>(mmap(nullptr, page_aligned, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
-    if (ptr_ == MAP_FAILED) ptr_ = nullptr;
-#endif
-    if (ptr_) size_ = page_aligned;
-}
-
-JitMemoryBlock::JitMemoryBlock(size_t code_size, size_t data_size) {
-#if defined(__APPLE__) && defined(__aarch64__)
-    // A MAP_JIT mapping is write-protected as a whole per thread once the
-    // code is sealed, so data pages cannot share it; the loader puts them in
-    // their own block beside this one.
-    *this = JitMemoryBlock(code_size);
-    (void)data_size;
-#else
-    size_t page_sz = get_system_page_size();
-    size_t code_pages = (code_size + page_sz - 1) & ~(page_sz - 1);
-    size_t data_pages = (data_size + page_sz - 1) & ~(page_sz - 1);
-    *this = JitMemoryBlock(code_pages + data_pages);
-#endif
-}
-
-JitMemoryBlock::~JitMemoryBlock() {
-    reset();
-}
-
-JitMemoryBlock::JitMemoryBlock(JitMemoryBlock&& other) noexcept
-    : ptr_(other.ptr_), size_(other.size_) {
-    other.ptr_ = nullptr;
-    other.size_ = 0;
-}
-
-JitMemoryBlock& JitMemoryBlock::operator=(JitMemoryBlock&& other) noexcept {
-    if (this != &other) {
-        reset();
-        ptr_ = other.ptr_;
-        size_ = other.size_;
-        other.ptr_ = nullptr;
-        other.size_ = 0;
-    }
-    return *this;
-}
-
-void JitMemoryBlock::reset() {
-    if (ptr_) {
-        unregister_jit_memory_range(ptr_);
-#if defined(_WIN32)
-        VirtualFree(ptr_, 0, MEM_RELEASE);
-#else
-        munmap(ptr_, size_);
-#endif
-        ptr_ = nullptr;
-        size_ = 0;
-    }
-}
-
-void JitMemoryBlock::make_executable() {
-    if (!ptr_) return;
-#if defined(_WIN32)
-    DWORD old_protect;
-    VirtualProtect(ptr_, size_, PAGE_EXECUTE_READWRITE, &old_protect);
-    FlushInstructionCache(GetCurrentProcess(), ptr_, size_);
-#elif defined(__APPLE__) && defined(__aarch64__)
-    pthread_jit_write_protect_np(1);
-    sys_dcache_flush(ptr_, size_);
-    sys_icache_invalidate(ptr_, size_);
-#elif defined(__APPLE__)
-    mprotect(ptr_, size_, PROT_READ | PROT_WRITE | PROT_EXEC);
-    __builtin___clear_cache(reinterpret_cast<char*>(ptr_), reinterpret_cast<char*>(ptr_ + size_));
-#else
-    mprotect(ptr_, size_, PROT_READ | PROT_WRITE | PROT_EXEC);
-    __builtin___clear_cache(reinterpret_cast<char*>(ptr_), reinterpret_cast<char*>(ptr_ + size_));
-#endif
-    register_jit_memory_range(ptr_, size_);
-}
-
-void JitMemoryBlock::make_executable_read_only(size_t code_size) {
-    if (!ptr_) return;
-#if defined(__APPLE__) && defined(__aarch64__)
-    pthread_jit_write_protect_np(1);
-    sys_dcache_flush(ptr_, size_);
-    sys_icache_invalidate(ptr_, size_);
-    register_jit_memory_range(ptr_, size_);
-    return;
-#elif defined(__APPLE__) && defined(__x86_64__)
-    // On macOS under Rosetta 2, keeping JIT memory RWX prevents SIGBUS crashes
-    // caused by concurrent mprotect permission flipping during in-flight thread execution.
-    make_executable();
-    return;
-#endif
-    size_t page_sz = get_system_page_size();
-    size_t protect_size = (code_size == 0) ? size_ : ((code_size + page_sz - 1) & ~(page_sz - 1));
-    if (protect_size > size_) protect_size = size_;
-#if defined(_WIN32)
-    DWORD old_protect;
-    VirtualProtect(ptr_, protect_size, PAGE_EXECUTE_READ, &old_protect);
-    FlushInstructionCache(GetCurrentProcess(), ptr_, protect_size);
-#else
-    mprotect(ptr_, protect_size, PROT_READ | PROT_EXEC);
-    __builtin___clear_cache(reinterpret_cast<char*>(ptr_), reinterpret_cast<char*>(ptr_ + protect_size));
-#endif
-    register_jit_memory_range(ptr_, protect_size);
-}
-
-void JitMemoryBlock::make_read_write() {
-#if defined(_WIN32)
-    if (ptr_) {
-        DWORD old_protect;
-        VirtualProtect(ptr_, size_, PAGE_READWRITE, &old_protect);
-    }
-#elif defined(__APPLE__) && defined(__aarch64__)
-    if (ptr_) {
-        pthread_jit_write_protect_np(0);
-    }
-#else
-    if (ptr_) {
-        mprotect(ptr_, size_, PROT_READ | PROT_WRITE);
-    }
-#endif
-}
-
-DataMemoryBlock::DataMemoryBlock(size_t size, void* address_hint) {
-    if (size == 0) return;
-    size_t page_sz = get_system_page_size();
-    size_t page_aligned = (size + page_sz - 1) & ~(page_sz - 1);
-#if defined(_WIN32)
-    ptr_ = static_cast<uint8_t*>(VirtualAlloc(address_hint, page_aligned, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
-    if (!ptr_ && address_hint) {
-        ptr_ = static_cast<uint8_t*>(VirtualAlloc(nullptr, page_aligned, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
-    }
-#else
-    ptr_ = static_cast<uint8_t*>(mmap(address_hint, page_aligned, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
-    if (ptr_ == MAP_FAILED) {
-        ptr_ = nullptr;
-    }
-#endif
-    if (ptr_) size_ = page_aligned;
-}
-
-DataMemoryBlock::~DataMemoryBlock() {
-    reset();
-}
-
-DataMemoryBlock::DataMemoryBlock(DataMemoryBlock&& other) noexcept
-    : ptr_(other.ptr_), size_(other.size_) {
-    other.ptr_ = nullptr;
-    other.size_ = 0;
-}
-
-DataMemoryBlock& DataMemoryBlock::operator=(DataMemoryBlock&& other) noexcept {
-    if (this != &other) {
-        reset();
-        ptr_ = other.ptr_;
-        size_ = other.size_;
-        other.ptr_ = nullptr;
-        other.size_ = 0;
-    }
-    return *this;
-}
-
-void DataMemoryBlock::reset() {
-    if (ptr_) {
-#if defined(_WIN32)
-        VirtualFree(ptr_, 0, MEM_RELEASE);
-#else
-        munmap(ptr_, size_);
-#endif
-        ptr_ = nullptr;
-        size_ = 0;
-    }
-}
 
 static void* brass_exit_stub(uint32_t, const uint64_t*) {
     return nullptr;
@@ -452,7 +218,9 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
         std::unordered_set<std::string> got_symbols;
         for (const auto& sec : working_obj.sections) {
             for (const auto& r : sec.relocations) {
-                if (r.kind == object::RelocKind::GotPCRel32) got_symbols.insert(r.symbol_name);
+                if (r.kind == object::RelocKind::GotPCRel32 || object::a64::is_got_kind(r.kind)) {
+                    got_symbols.insert(r.symbol_name);
+                }
             }
         }
         got_slots = got_symbols.size();
@@ -481,7 +249,7 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
         }
     }
 
-    size_t page_sz = get_system_page_size();
+    size_t page_sz = jit_system_page_size();
 
     // Compute memory size and section offsets:
     // 1. Executable code sections (.text) first
@@ -660,12 +428,18 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
                             }
                             if (tramp_addr) {
                                 disp = reinterpret_cast<int64_t>(tramp_addr) + r.addend - reinterpret_cast<int64_t>(patch_loc);
-                                disp_words = disp >> 2;
                             }
                         }
-                        uint32_t inst = *reinterpret_cast<uint32_t*>(patch_loc);
-                        uint32_t new_inst = (inst & 0xFC000000u) | (static_cast<uint32_t>(disp_words) & 0x03FFFFFFu);
-                        *reinterpret_cast<uint32_t*>(patch_loc) = new_inst;
+                        uint32_t inst = 0;
+                        std::memcpy(&inst, patch_loc, 4);
+                        const std::string err = object::a64::patch(
+                            object::RelocKind::Plt32, inst, reinterpret_cast<uint64_t>(patch_loc),
+                            reinterpret_cast<uint64_t>(patch_loc) + static_cast<uint64_t>(disp));
+                        if (!err.empty()) {
+                            std::cerr << "JIT Error: call to '" << r.symbol_name << "': " << err << "\n";
+                            return false;
+                        }
+                        std::memcpy(patch_loc, &inst, 4);
                     } else {
                         int64_t disp = reinterpret_cast<int64_t>(target_addr) + r.addend - reinterpret_cast<int64_t>(patch_loc);
                         if (disp < INT32_MIN || disp > INT32_MAX) {
@@ -690,24 +464,65 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
                                 disp = reinterpret_cast<int64_t>(tramp_addr) + r.addend - reinterpret_cast<int64_t>(patch_loc);
                             }
                         }
+                        if (disp < INT32_MIN || disp > INT32_MAX) {
+                            std::cerr << "JIT Error: call to '" << r.symbol_name
+                                      << "' is out of range and the trampoline area is full\n";
+                            return false;
+                        }
                         *reinterpret_cast<int32_t*>(patch_loc) = static_cast<int32_t>(disp);
                     }
                     break;
                 }
                 case object::RelocKind::AdrPage21:
-                case object::RelocKind::PCRel32: {
-                    if (target_.is_aarch64()) {
-                        int64_t page_diff = (reinterpret_cast<int64_t>(target_addr) >> 12) - (reinterpret_cast<int64_t>(patch_loc) >> 12);
-                        uint32_t inst = *reinterpret_cast<uint32_t*>(patch_loc);
-                        uint32_t imm21 = static_cast<uint32_t>(page_diff) & 0x1FFFFFu;
-                        uint32_t immlo = (imm21 & 0x3u) << 29;
-                        uint32_t immhi = ((imm21 >> 2) & 0x7FFFFu) << 5;
-                        uint32_t new_inst = (inst & 0x9F00001Fu) | immlo | immhi;
-                        *reinterpret_cast<uint32_t*>(patch_loc) = new_inst;
-                    } else {
-                        int64_t disp = reinterpret_cast<int64_t>(target_addr) + r.addend - reinterpret_cast<int64_t>(patch_loc);
-                        *reinterpret_cast<int32_t*>(patch_loc) = static_cast<int32_t>(disp);
+                case object::RelocKind::AddLo12:
+                case object::RelocKind::LdSt8Lo12:
+                case object::RelocKind::LdSt16Lo12:
+                case object::RelocKind::LdSt32Lo12:
+                case object::RelocKind::LdSt64Lo12:
+                case object::RelocKind::LdSt128Lo12:
+                case object::RelocKind::GotPage21:
+                case object::RelocKind::GotLo12: {
+                    // AArch64 instruction relocations. A GOT pair always goes
+                    // through a slot this engine owns in the code mapping:
+                    // the two halves are patched separately, so relaxing one
+                    // on a distance test the other did not see could split
+                    // the pair.
+                    uint64_t value = reinterpret_cast<uint64_t>(target_addr) + static_cast<uint64_t>(r.addend);
+                    if (object::a64::is_got_kind(r.kind)) {
+                        uint8_t* slot = nullptr;
+                        auto slot_it = got_slot_of.find(r.symbol_name);
+                        if (slot_it != got_slot_of.end()) {
+                            slot = slot_it->second;
+                        } else if (got_ptr && got_used < got_slots) {
+                            slot = got_ptr + got_used * 8;
+                            ++got_used;
+                            *reinterpret_cast<uint64_t*>(slot) = reinterpret_cast<uint64_t>(target_addr);
+                            got_slot_of[r.symbol_name] = slot;
+                        } else {
+                            std::cerr << "JIT Error: no GOT slot for '" << r.symbol_name << "'\n";
+                            return false;
+                        }
+                        value = reinterpret_cast<uint64_t>(slot);
                     }
+                    uint32_t inst = 0;
+                    std::memcpy(&inst, patch_loc, 4);
+                    const std::string err =
+                        object::a64::patch(r.kind, inst, reinterpret_cast<uint64_t>(patch_loc), value);
+                    if (!err.empty()) {
+                        std::cerr << "JIT Error: relocation against '" << r.symbol_name << "': " << err << "\n";
+                        return false;
+                    }
+                    std::memcpy(patch_loc, &inst, 4);
+                    break;
+                }
+                case object::RelocKind::PCRel32: {
+                    int64_t disp = reinterpret_cast<int64_t>(target_addr) + r.addend - reinterpret_cast<int64_t>(patch_loc);
+                    if (disp < INT32_MIN || disp > INT32_MAX) {
+                        std::cerr << "JIT Error: PC-relative reference to '" << r.symbol_name
+                                  << "' is out of 32-bit range\n";
+                        return false;
+                    }
+                    *reinterpret_cast<int32_t*>(patch_loc) = static_cast<int32_t>(disp);
                     break;
                 }
                 case object::RelocKind::Abs64: {
@@ -745,16 +560,7 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
                     *reinterpret_cast<int32_t*>(patch_loc) = static_cast<int32_t>(disp);
                     break;
                 }
-                case object::RelocKind::SecRel32: {
-                    if (target_.is_aarch64()) {
-                        uint32_t pageoff = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(target_addr) & 0xFFFu);
-                        uint32_t inst = *reinterpret_cast<uint32_t*>(patch_loc);
-                        uint32_t new_inst = (inst & 0xFFC003FFu) | ((pageoff & 0xFFFu) << 10);
-                        *reinterpret_cast<uint32_t*>(patch_loc) = new_inst;
-                        break;
-                    }
-                    [[fallthrough]];
-                }
+                case object::RelocKind::SecRel32:
                 case object::RelocKind::Addr32NB: {
                     uint32_t rva = static_cast<uint32_t>(reinterpret_cast<uint8_t*>(target_addr) - module_base + r.addend);
                     *reinterpret_cast<uint32_t*>(patch_loc) = rva;
@@ -813,8 +619,11 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
         }
     }
 
-    if (code_mem_.is_valid()) {
-        code_mem_.make_executable_read_only(code_pages_size);
+    // W^X: the code pages go from read-write to read-execute; the data pages
+    // after them stay read-write.
+    if (code_mem_.is_valid() && !code_mem_.make_executable_read_only(code_pages_size)) {
+        std::cerr << "JIT Error: could not make the code pages executable\n";
+        return false;
     }
     return true;
 }
@@ -906,7 +715,8 @@ bool JitExecutionEngine::patch_const64(std::string_view site_name, int64_t new_v
 
 bool JitExecutionEngine::patch_call(std::string_view site_name, const void* new_target) {
     if (!text_section_base_) return false;
-    bool ok = patch_sites_.patch_call(text_section_base_, site_name, new_target);
+    const runtime::CodeArch arch = target_.is_aarch64() ? runtime::CodeArch::AArch64 : runtime::CodeArch::X64;
+    bool ok = patch_sites_.patch_call(arch, text_section_base_, site_name, new_target);
 #if defined(_WIN32)
     if (ok && code_mem_.data()) {
         FlushInstructionCache(GetCurrentProcess(), code_mem_.data(), code_mem_.size());

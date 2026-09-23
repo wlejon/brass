@@ -1,4 +1,5 @@
 #include <brass/target/aarch64/aarch64_isel.hpp>
+#include <brass/codegen/unsupported_operation.hpp>
 
 namespace brass::aarch64 {
 
@@ -111,7 +112,7 @@ void AArch64ISel::lower_fp_instruction(const Instruction& inst, LirBlock& lir_bb
             break;
         }
         default:
-            break;
+            codegen::throw_unsupported("aarch64 isel (fp)", opcode_name(inst.opcode()));
     }
 }
 

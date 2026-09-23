@@ -137,6 +137,10 @@ TEST_CASE("Array Contraction - Eliminate Buffer and Verify 0 Cheney GC Allocatio
 
 TEST_CASE("Array Contraction - Bronze Dynamic Object Arrays") {
     Module mod("test_contraction_bronze");
+    // The runtime's array contract, as the Bronze frontend declares it.
+    mod.add_symbol_role("bronze_create_array", SymbolRole::ArrayNew);
+    mod.add_symbol_role("bronze_elem_set", SymbolRole::ArraySet);
+    mod.add_symbol_role("bronze_elem_get", SymbolRole::ArrayGet);
     Builder b(mod);
 
     Function* fn = mod.create_function("bronze_map_reduce", Type::i64(), {Type::i64()});
