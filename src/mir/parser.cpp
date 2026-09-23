@@ -50,6 +50,7 @@ namespace brass::mir_parser {
                 // placeholder and let parse_function_decl re-parse this block
                 // once the rest is known (see parse_block_body).
                 if (forward_refs_ok_) {
+                    if (!saw_forward_ref_) forward_ref_name_ = name;
                     saw_forward_ref_ = true;
                     return &forward_placeholder_;
                 }

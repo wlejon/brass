@@ -337,6 +337,7 @@ Function* Parser::parse_function_decl(Module& mod) {
     struct DeferredBody {
         BasicBlock* bb;
         Lexer body_start;  // just after the block header's ':'
+        std::string waits_on;  // the first name the last parse could not resolve
     };
     std::vector<DeferredBody> deferred;
     forward_refs_ok_ = true;
@@ -392,38 +393,62 @@ Function* Parser::parse_function_decl(Module& mod) {
         const Lexer body_start = lexer_;
         const BlockParse r = parse_block_body(b, fn, bb, value_map, get_or_create_block);
         if (r == BlockParse::Failed) return nullptr;
-        if (r == BlockParse::Deferred) deferred.push_back({bb, body_start});
+        if (r == BlockParse::Deferred) deferred.push_back({bb, body_start, forward_ref_name_});
     }
 
     if (!expect(TokenKind::RBrace, "'}'")) return nullptr;
 
-    // Bodies that used a value defined by a block later in the text: parse
-    // them again, in text order, until a pass defines nothing new. Whether
-    // each definition dominates its uses is the verifier's business.
+    // Bodies that used a value defined by a block later in the text. Each
+    // waits on the first name it could not resolve and is parsed again once
+    // that name is bound, so a body is re-parsed at most once per forward
+    // name it uses (not once per block of the function). Whether each
+    // definition dominates its uses is the verifier's business.
     if (!deferred.empty()) {
         const Lexer after_fn = lexer_;
-        bool progress = true;
-        while (!deferred.empty() && progress) {
-            progress = false;
-            std::vector<DeferredBody> still;
-            for (const DeferredBody& d : deferred) {
-                lexer_ = d.body_start;
-                const BlockParse r = parse_block_body(b, fn, d.bb, value_map, get_or_create_block);
-                if (r == BlockParse::Failed) return nullptr;
-                if (r == BlockParse::Deferred) {
-                    still.push_back(d);
-                } else {
-                    progress = true;
-                }
+        std::vector<size_t> ready;
+        std::unordered_map<std::string, std::vector<size_t>> waiting;
+        std::vector<bool> done(deferred.size(), false);
+        // Queue body i if the name it stalled on is bound by now, else park
+        // it under that name.
+        auto wait_or_ready = [&](size_t i, const std::string& name) {
+            if (value_map.count(name)) {
+                ready.push_back(i);
+            } else {
+                waiting[name].push_back(i);
             }
-            deferred = std::move(still);
+        };
+        for (size_t i = 0; i < deferred.size(); ++i) {
+            wait_or_ready(i, deferred[i].waits_on);
         }
-        if (!deferred.empty()) {
+        while (!ready.empty()) {
+            const size_t i = ready.back();
+            ready.pop_back();
+            lexer_ = deferred[i].body_start;
+            const BlockParse r = parse_block_body(b, fn, deferred[i].bb, value_map, get_or_create_block);
+            if (r == BlockParse::Failed) return nullptr;
+            if (r == BlockParse::Deferred) {
+                deferred[i].waits_on = forward_ref_name_;
+                wait_or_ready(i, deferred[i].waits_on);
+                continue;
+            }
+            done[i] = true;
+            for (const auto& binding : block_bindings_) {
+                auto w = waiting.find(binding.first);
+                if (w == waiting.end()) continue;
+                ready.insert(ready.end(), w->second.begin(), w->second.end());
+                waiting.erase(w);
+            }
+        }
+        size_t first_stuck = deferred.size();
+        for (size_t i = 0; i < deferred.size(); ++i) {
+            if (!done[i]) { first_stuck = i; break; }
+        }
+        if (first_stuck != deferred.size()) {
             // A name no block defines: parse the first such body once more
             // with forward references off, which reports it.
             forward_refs_ok_ = false;
-            lexer_ = deferred.front().body_start;
-            (void)parse_block_body(b, fn, deferred.front().bb, value_map, get_or_create_block);
+            lexer_ = deferred[first_stuck].body_start;
+            (void)parse_block_body(b, fn, deferred[first_stuck].bb, value_map, get_or_create_block);
             if (!has_error_) {
                 error(lexer_.current_location(), "Use of undefined value");
             }

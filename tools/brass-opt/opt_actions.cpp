@@ -1,4 +1,5 @@
 #include "opt_actions.hpp"
+#include "native_fault.hpp"
 #include <brass/brass.hpp>
 #include <brass/codegen/jit_exec.hpp>
 #include <brass/codegen/baseline_jit.hpp>
@@ -240,7 +241,11 @@ bool execute_run_function(Module& mod, const RunFunctionOptions& opts) {
 
         try {
             NativeGcScope gc_scope(opts.gc_stress, &baseline_maps);
-            RuntimeValue result = handle->call_native(run_args);
+            RuntimeValue result;
+            if (const char* fault = call_catching_arith_faults([&] { result = handle->call_native(run_args); })) {
+                std::cerr << "Baseline JIT Execution error: " << fault << "\n";
+                return false;
+            }
             if (!fn->return_type().is_void()) {
                 std::cout << result << "\n";
             }
@@ -282,7 +287,11 @@ bool execute_run_function(Module& mod, const RunFunctionOptions& opts) {
 
         try {
             NativeGcScope gc_scope(opts.gc_stress, &jit.stack_maps());
-            RuntimeValue result = jit.invoke(opts.run_fn, run_args);
+            RuntimeValue result;
+            if (const char* fault = call_catching_arith_faults([&] { result = jit.invoke(opts.run_fn, run_args); })) {
+                std::cerr << "JIT Execution error: " << fault << "\n";
+                return false;
+            }
             if (!fn->return_type().is_void()) {
                 std::cout << result << "\n";
             }
@@ -318,7 +327,12 @@ bool execute_run_function(Module& mod, const RunFunctionOptions& opts) {
     }
 
     try {
-        RuntimeValue result = interp.run(mod, opts.run_fn, run_args);
+        // Tier-up can run JIT code on this thread.
+        RuntimeValue result;
+        if (const char* fault = call_catching_arith_faults([&] { result = interp.run(mod, opts.run_fn, run_args); })) {
+            std::cerr << "Runtime error during execution: " << fault << "\n";
+            return false;
+        }
         if (!fn->return_type().is_void()) {
             std::cout << result << "\n";
         }

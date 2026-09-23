@@ -2,6 +2,7 @@
 
 add_executable(brass-opt
     brass-opt/main.cpp
+    brass-opt/native_fault.cpp
     brass-opt/opt_actions.cpp
     brass-opt/opt_cli.cpp
     brass-opt/opt_pipeline.cpp

@@ -110,8 +110,10 @@ bool decode_opcode_string(std::string_view str, Opcode& op, Type& type_suffix, T
     if (str == "fptrunc.f32.f64" || str == "fptrunc_f32_f64") { op = Opcode::fptrunc_f32_f64; type_suffix = Type::f32(); return true; }
     if (str == "fpext.f64.f32" || str == "fpext_f64_f32") { op = Opcode::fpext_f64_f32; type_suffix = Type::f64(); return true; }
 
-    if (str == "bitcast.i64.f64" || str == "bitcast_i64_f64") { op = Opcode::bitcast_i64_f64; type_suffix = Type::i64(); return true; }
-    if (str == "bitcast.f64.i64" || str == "bitcast_f64_i64") { op = Opcode::bitcast_f64_i64; type_suffix = Type::f64(); return true; }
+    // The bare `bitcast.i64` / `bitcast.f64` (docs/mir_reference.md) name
+    // only the result: each has exactly one source type.
+    if (str == "bitcast.i64.f64" || str == "bitcast_i64_f64" || str == "bitcast.i64") { op = Opcode::bitcast_i64_f64; type_suffix = Type::i64(); return true; }
+    if (str == "bitcast.f64.i64" || str == "bitcast_f64_i64" || str == "bitcast.f64") { op = Opcode::bitcast_f64_i64; type_suffix = Type::f64(); return true; }
 
     if (str == "fma.f32" || str == "fma_f32") { op = Opcode::fma_f32; type_suffix = Type::f32(); return true; }
     if (str == "fma.f64" || str == "fma_f64") { op = Opcode::fma_f64; type_suffix = Type::f64(); return true; }

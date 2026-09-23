@@ -80,19 +80,33 @@ void DominatorTree::build(const Function& fn) {
     std::vector<int> post_order;
     std::vector<int> rpo_num(n, 0);
 
-    auto dfs = [&](auto& self, int u) -> void {
-        dfs_visited[u] = true;
-        for (const BasicBlock* succ : reachable_blocks_[u]->successors()) {
-            if (!succ) continue;
-            auto it = block_idx_.find(succ);
-            if (it != block_idx_.end() && !dfs_visited[it->second]) {
-                self(self, it->second);
-            }
-        }
-        post_order.push_back(u);
+    // An explicit stack, not recursion: a chain of many thousands of blocks
+    // overflowed the native stack.
+    struct Frame {
+        int u;
+        std::vector<BasicBlock*> succs;
+        size_t next;
     };
-
-    dfs(dfs, block_idx_[entry_block_]);
+    std::vector<Frame> stack;
+    const int entry = block_idx_[entry_block_];
+    dfs_visited[entry] = true;
+    stack.push_back({entry, reachable_blocks_[entry]->successors(), 0});
+    while (!stack.empty()) {
+        Frame& f = stack.back();
+        if (f.next == f.succs.size()) {
+            post_order.push_back(f.u);
+            stack.pop_back();
+            continue;
+        }
+        const BasicBlock* succ = f.succs[f.next++];
+        if (!succ) continue;
+        auto it = block_idx_.find(succ);
+        if (it != block_idx_.end() && !dfs_visited[it->second]) {
+            const int v = it->second;
+            dfs_visited[v] = true;
+            stack.push_back({v, reachable_blocks_[v]->successors(), 0});
+        }
+    }
 
     int rpo_count = n;
     for (int u : post_order) {

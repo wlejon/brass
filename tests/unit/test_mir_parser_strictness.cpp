@@ -1,11 +1,13 @@
 // Textual MIR edge cases from bug sweep 6: integer literals that do not fit
 // their field, switch case values outside the condition's type, the bare
 // `sitofp.f64` on an i64, and uses that textually precede a dominating
-// definition.
+// definition. From bug sweep 7: long forward-reference chains parse in
+// linear time, and every opcode spelling docs/mir_reference.md lists parses.
 
 #include "test_framework.hpp"
 #include <brass/brass.hpp>
 
+#include <chrono>
 #include <sstream>
 #include <string>
 
@@ -263,4 +265,99 @@ TEST_CASE("MIR parser: forward references still reject undefined names, dominanc
                           "bb2:\n  %5 = iconst.i64 7\n  ret %5\n}\n", errors);
     REQUIRE(mod != nullptr);
     CHECK_FALSE(verifies(*mod));
+}
+
+TEST_CASE("MIR parser: a long chain of forward references parses in linear time") {
+    // Control flows bb0 -> bbN -> ... -> bb1, and block k uses %v{k+1} from
+    // the block after it in the text. Re-parsing to a fixpoint in text order
+    // resolved one block per pass: O(N^2) block parses, about a minute at
+    // N = 4000.
+    constexpr int kBlocks = 20000;
+    std::string text = "func @chain(%0: i64) -> i64 {\nbb0:\n  br bb" + std::to_string(kBlocks) + "\n";
+    for (int k = 1; k <= kBlocks; ++k) {
+        const std::string ks = std::to_string(k);
+        text += "bb" + ks + ":\n";
+        text += k == kBlocks ? "  %v" + ks + " = add.i64 %0, %0\n"
+                             : "  %v" + ks + " = add.i64 %v" + std::to_string(k + 1) + ", %0\n";
+        text += k == 1 ? std::string("  ret %v1\n") : "  br bb" + std::to_string(k - 1) + "\n";
+    }
+    text += "}\n";
+
+    std::string errors;
+    const auto start = std::chrono::steady_clock::now();
+    auto mod = parse_text(text, errors);
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    REQUIRE(mod != nullptr);
+    CHECK(seconds < 10.0);
+    CHECK(verifies(*mod, &errors));
+
+    Interpreter interp;
+    interp.set_module(mod.get());
+    RuntimeValue r = interp.run(*mod->get_function("chain"), {RuntimeValue::from_i64(1)});
+    CHECK_EQ(r.as_i64(), int64_t{kBlocks + 1});
+}
+
+TEST_CASE("MIR parser: a deferred block waits on each forward name in turn") {
+    // bb1 first waits on %a (bb3), then on %b, which bb2 can only define
+    // once %c (bb4) is known.
+    const char* text =
+        "func @f(%0: i64) -> i64 {\n"
+        "bb0:\n  br bb4\n"
+        "bb1:\n  %r = add.i64 %a, %b\n  ret %r\n"
+        "bb2:\n  %b = mul.i64 %c, %a\n  br bb1\n"
+        "bb3:\n  %a = add.i64 %c, %0\n  br bb2\n"
+        "bb4:\n  %c = add.i64 %0, %0\n  br bb3\n"
+        "}\n";
+    std::string errors;
+    auto mod = parse_text(text, errors);
+    REQUIRE(mod != nullptr);
+    CHECK(verifies(*mod, &errors));
+    Interpreter interp;
+    interp.set_module(mod.get());
+    RuntimeValue r = interp.run(*mod->get_function("f"), {RuntimeValue::from_i64(2)});
+    // c = 4, a = 6, b = 24, r = 30
+    CHECK_EQ(r.as_i64(), int64_t{30});
+
+    // A name still undefined after the others resolve is reported by name.
+    CHECK(parse_fails_with("func @f(%0: i64) -> i64 {\nbb0:\n  br bb2\n"
+                           "bb1:\n  %r = add.i64 %a, %zz\n  ret %r\n"
+                           "bb2:\n  %a = add.i64 %0, %0\n  br bb1\n}\n",
+                           "Use of undefined value: '%zz'"));
+}
+
+TEST_CASE("MIR parser: the documented bitcast and float division spellings parse") {
+    // docs/mir_reference.md: `bitcast.i64 <f64>`, `bitcast.f64 <i64>`, and
+    // `sdiv.f64` / `sdiv.f32` as float division; the printer's
+    // `bitcast.i64.f64` / `bitcast.f64.i64` parse as well.
+    std::string errors;
+    auto mod = parse_text("func @f(%0: i64) -> i64 {\nbb0:\n"
+                          "  %1 = bitcast.f64 %0\n  %2 = bitcast.i64 %1\n"
+                          "  %3 = bitcast.f64.i64 %2\n  %4 = bitcast.i64.f64 %3\n"
+                          "  ret %4\n}\n"
+                          "func @g(%0: f64, %1: f64) -> f64 {\nbb0:\n"
+                          "  %2 = sdiv.f64 %0, %1\n"
+                          "  %3 = fptrunc.f32.f64 %0\n  %4 = fptrunc.f32.f64 %1\n"
+                          "  %5 = sdiv.f32 %3, %4\n  %6 = fpext.f64.f32 %5\n"
+                          "  %7 = add.f64 %2, %6\n  ret %7\n}\n", errors);
+    REQUIRE(mod != nullptr);
+    CHECK(verifies(*mod, &errors));
+    const Instruction* inst = first_inst(*mod, "f");
+    REQUIRE(inst != nullptr);
+    CHECK(inst->opcode() == Opcode::bitcast_f64_i64);
+    CHECK(inst->next()->opcode() == Opcode::bitcast_i64_f64);
+    CHECK(inst->next()->next()->opcode() == Opcode::bitcast_f64_i64);
+    CHECK(inst->next()->next()->next()->opcode() == Opcode::bitcast_i64_f64);
+
+    Interpreter interp;
+    interp.set_module(mod.get());
+    RuntimeValue r = interp.run(*mod->get_function("f"), {RuntimeValue::from_i64(0x400921FB54442D18)});
+    CHECK_EQ(r.as_i64(), int64_t{0x400921FB54442D18});
+    RuntimeValue q = interp.run(*mod->get_function("g"), {RuntimeValue::from_f64(7.0), RuntimeValue::from_f64(2.0)});
+    CHECK_EQ(q.as_f64(), 7.0);
+
+    // The printer's form parses back to itself.
+    const std::string printed = print(*mod);
+    auto again = parse_text(printed, errors);
+    REQUIRE(again != nullptr);
+    CHECK_EQ(print(*again), printed);
 }

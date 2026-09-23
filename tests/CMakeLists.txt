@@ -444,6 +444,28 @@ if(BRASS_BUILD_TOOLS)
         set_tests_properties("brass_opt_cli.coro_args.${_mode}" PROPERTIES
             TIMEOUT 60 PASS_REGULAR_EXPRESSION "^1011026[\r\n]" LABELS "correctness")
     endforeach()
+    # brass_opt_cli.div_zero.*: an integer division by zero is an error and
+    # exit code 1 in every engine. JIT code carries no zero check; the #DE
+    # it raised was unhandled and killed brass-opt with 0xC0000094 and no
+    # message.
+    foreach(_fn sdiv64 umod32)
+        foreach(_mode interp jit baseline)
+            set(_flags "")
+            if(_mode STREQUAL "jit")
+                set(_flags ",--jit")
+            elseif(_mode STREQUAL "baseline")
+                set(_flags ",--baseline-jit")
+            endif()
+            add_test(NAME "brass_opt_cli.div_zero.${_fn}.${_mode}"
+                COMMAND ${CMAKE_COMMAND}
+                    "-DCMD=$<TARGET_FILE:brass-opt>,${CMAKE_CURRENT_SOURCE_DIR}/cli/div_zero.mir,-r,${_fn},--args,7,0${_flags}"
+                    "-DEXIT_CODE=1"
+                    "-DSTDERR_RE=([Dd]ivision|Modulo) by zero"
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/run_expect_error.cmake")
+            set_tests_properties("brass_opt_cli.div_zero.${_fn}.${_mode}" PROPERTIES
+                TIMEOUT 60 LABELS "correctness")
+        endforeach()
+    endforeach()
     # aot_coff.eh: exceptions in AOT COFF code on Win64. brass-opt -c makes
     # an object from tests/aot/eh_aot.mir, MSVC links it with a C host and
     # brass.lib, and every result must match the interpreter and the JIT:

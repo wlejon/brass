@@ -66,14 +66,15 @@ Integer literals must fit the field they fill, or the parser reports "out of ran
 - `fptosi.i32 <val:f64>` -> `i32`
 - `fptosi.i64 <val:f64>` -> `i64`
 - `sitofp.f64 <val:i32|i64>` -> `f64` (the bare form takes its source width from the operand; `sitofp.f64.i32` / `sitofp.f64.i64` name it explicitly; `sitofp.f32` likewise)
-- `bitcast.i64 <val:f64>` -> `i64`
-- `bitcast.f64 <val:i64>` -> `f64`
+- `bitcast.i64 <val:f64>` -> `i64` (also spelled `bitcast.i64.f64`, as the printer writes it)
+- `bitcast.f64 <val:i64>` -> `f64` (also spelled `bitcast.f64.i64`, as the printer writes it)
 
 ### Arithmetic, Logic & Bitwise
 - `add.<type> <lhs>, <rhs>`, `sub.<type> <lhs>, <rhs>`, `mul.<type> <lhs>, <rhs>` (`i32`, `i64`, `f64`)
 - `fma.f32 <a:f32>, <b:f32>, <c:f32>` -> `f32` ($a \times b + c$)
 - `fma.f64 <a:f64>, <b:f64>, <c:f64>` -> `f64` ($a \times b + c$)
 - `sdiv.<type> <lhs>, <rhs>`, `udiv.<type> <lhs>, <rhs>`, `smod.<type> <lhs>, <rhs>`, `umod.<type> <lhs>, <rhs>` (`i32`, `i64`)
+- `sdiv.f64 <lhs>, <rhs>`, `sdiv.f32 <lhs>, <rhs>`: floating-point division (there is no separate `fdiv`)
 - `neg.<type> <val>` (`i32`, `i64`, `f64`)
 - `and.<type> <lhs>, <rhs>`, `or.<type> <lhs>, <rhs>`, `xor.<type> <lhs>, <rhs>` (`i32`, `i64`)
 - `shl.<type> <lhs>, <rhs>`, `lshr.<type> <lhs>, <rhs>`, `ashr.<type> <lhs>, <rhs>`, `not.<type> <val>` (`i32`, `i64`)

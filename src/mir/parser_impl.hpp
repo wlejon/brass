@@ -115,11 +115,14 @@ private:
     Lexer lexer_;
     // Forward references inside a function body: while forward_refs_ok_,
     // parse_val resolves an unknown name to forward_placeholder_ and sets
-    // saw_forward_ref_ instead of reporting it. block_bindings_ holds the
-    // names the current block body bound, with the value each one had
-    // before, so a deferred body can be rolled back.
+    // saw_forward_ref_ instead of reporting it; forward_ref_name_ is the
+    // first such name in the body, which the body waits on before it is
+    // parsed again. block_bindings_ holds the names the current block body
+    // bound, with the value each one had before, so a deferred body can be
+    // rolled back.
     bool forward_refs_ok_ = false;
     bool saw_forward_ref_ = false;
+    std::string forward_ref_name_;
     Value forward_placeholder_{0, Type::i64(), ValueKind::InstructionResult};
     std::vector<std::pair<std::string, Value*>> block_bindings_;
     // Unescaped `@"..."` names; a deque so views handed out stay valid.
