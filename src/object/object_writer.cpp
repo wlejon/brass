@@ -475,9 +475,13 @@ ObjectFile compile_module_to_object(const Module& mod, const Target& target) {
 
 namespace {
 
-bool names_defined(const ObjectFile& obj, std::string_view name) {
+// `local_only`: the symbol must also be non-preemptible (local binding, or a
+// section), as a relocatable object for a system linker needs.
+bool names_defined(const ObjectFile& obj, std::string_view name, bool local_only) {
     if (const auto* sym = obj.find_symbol(name)) {
-        if (sym->section_index >= 0) return true;
+        if (sym->section_index >= 0 && (!local_only || sym->binding == SymbolBinding::Local)) {
+            return true;
+        }
     }
     for (const auto& sec : obj.sections) {
         if (sec.name == name) return true;
@@ -487,7 +491,7 @@ bool names_defined(const ObjectFile& obj, std::string_view name) {
 
 } // namespace
 
-size_t relax_got_loads(ObjectFile& obj) {
+size_t relax_got_loads(ObjectFile& obj, bool local_only) {
     size_t left = 0;
     for (auto& sec : obj.sections) {
         for (auto& r : sec.relocations) {
@@ -495,7 +499,7 @@ size_t relax_got_loads(ObjectFile& obj) {
                 // AArch64: both halves of a pair decide on the symbol alone,
                 // so they always agree. ADRP of the slot's page becomes ADRP
                 // of the symbol's; the slot load becomes an ADD.
-                if (!names_defined(obj, r.symbol_name)) {
+                if (!names_defined(obj, r.symbol_name, local_only)) {
                     if (r.kind == RelocKind::GotLo12) ++left;
                     continue;
                 }
@@ -523,7 +527,7 @@ size_t relax_got_loads(ObjectFile& obj) {
             // ModRM(mod=00 reg=r rm=101), disp32.
             const bool is_mov = r.offset >= 2 && r.offset + 4 <= sec.data.size() &&
                                 sec.data[r.offset - 2] == 0x8B;
-            if (!is_mov || !names_defined(obj, r.symbol_name)) {
+            if (!is_mov || !names_defined(obj, r.symbol_name, local_only)) {
                 ++left;
                 continue;
             }

@@ -74,7 +74,8 @@ void add_reloc(ObjectFile& obj, std::string_view sec, size_t off, RelocKind kind
     s->relocations.push_back({off, kind, std::move(sym), addend, 0});
 }
 
-void add_data_symbol(ObjectFile& obj, const std::string& name, size_t bytes) {
+void add_data_symbol(ObjectFile& obj, const std::string& name, size_t bytes,
+                     SymbolBinding binding = SymbolBinding::Global) {
     Section& data = obj.get_or_create_section(".data", SectionKind::Data,
                                               SectionFlags::Read | SectionFlags::Write | SectionFlags::Alloc, 16);
     data.align_to(16);
@@ -84,6 +85,7 @@ void add_data_symbol(ObjectFile& obj, const std::string& name, size_t bytes) {
     sym.value = data.data.size();
     sym.size = bytes;
     sym.type = SymbolType::Object;
+    sym.binding = binding;
     obj.add_symbol(sym);
     for (size_t i = 0; i < bytes; ++i) data.emit8(0);
 }
@@ -274,10 +276,25 @@ TEST_CASE("AArch64 reloc - ELF object: one relocation type per instruction form,
     CHECK(gnu_stack);
 }
 
-TEST_CASE("AArch64 reloc - ELF object: GOT pair against a defined symbol relaxes to ADRP + ADD") {
+TEST_CASE("AArch64 reloc - ELF object: GOT pair against a defined global symbol stays a GOT pair") {
+    // A global symbol is preemptible in a shared library, where ADRP of it
+    // does not link; the system linker relaxes the GOT pair when it can.
     size_t base = 0;
     ObjectFile obj = object_with_code(Target::aarch64_linux(), {kAdrpX0, 0xF9400800u /* ldr x0, [x0, #16] */}, base);
-    add_data_symbol(obj, "local_data", 16);
+    add_data_symbol(obj, "global_data", 16);
+    add_reloc(obj, ".text", base + 0, RelocKind::GotPage21, "global_data");
+    add_reloc(obj, ".text", base + 4, RelocKind::GotLo12, "global_data");
+
+    std::vector<uint8_t> f = emit_elf_object(obj);
+    auto relocs = elf_text_relocs(f);
+    CHECK_EQ(type_at(relocs, base + 0), elf::R_AARCH64_ADR_GOT_PAGE);
+    CHECK_EQ(type_at(relocs, base + 4), elf::R_AARCH64_LD64_GOT_LO12_NC);
+}
+
+TEST_CASE("AArch64 reloc - ELF object: GOT pair against a defined local symbol relaxes to ADRP + ADD") {
+    size_t base = 0;
+    ObjectFile obj = object_with_code(Target::aarch64_linux(), {kAdrpX0, 0xF9400800u /* ldr x0, [x0, #16] */}, base);
+    add_data_symbol(obj, "local_data", 16, SymbolBinding::Local);
     add_reloc(obj, ".text", base + 0, RelocKind::GotPage21, "local_data");
     add_reloc(obj, ".text", base + 4, RelocKind::GotLo12, "local_data");
 
@@ -298,7 +315,7 @@ TEST_CASE("AArch64 reloc - ELF object: GOT pair against a defined symbol relaxes
     // A GOT page-offset relocation on anything but an LDR X is malformed.
     size_t base2 = 0;
     ObjectFile bad = object_with_code(Target::aarch64_linux(), {kAdrpX0, kAddX0}, base2);
-    add_data_symbol(bad, "local_data", 16);
+    add_data_symbol(bad, "local_data", 16, SymbolBinding::Local);
     add_reloc(bad, ".text", base2 + 4, RelocKind::GotLo12, "local_data");
     bool threw = false;
     try {

@@ -6,6 +6,7 @@
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/object/coff_writer.hpp>
 #include <brass/object/elf_writer.hpp>
+#include <brass/object/macho_writer.hpp>
 #include <brass/object/object_writer.hpp>
 #include <brass/target/aot_linker.hpp>
 #include <brass/runtime/inline_cache.hpp>
@@ -16,6 +17,9 @@
 #include <brass/pgo/instrument.hpp>
 #include <brass/il_translator/il_translator.hpp>
 #include <brass/runtime/parallel_runtime.hpp>
+#include <brass/gc/mini_cheney.hpp>
+#include <brass/gc/runtime_gc.hpp>
+#include <brass/gc/stack_map.hpp>
 #include <iostream>
 #include <fstream>
 
@@ -54,6 +58,31 @@ RuntimeValue parse_arg_for_type(Type type, const std::string& arg_str) {
     return RuntimeValue::from_i64(std::stoll(arg_str, nullptr, 0));
 }
 
+// Native runs allocate through brass_gc_alloc, which needs an active
+// collector and the running code's stack maps. Installs both for the
+// lifetime of the guard; --gc-stress collects on every allocation.
+class NativeGcScope {
+public:
+    NativeGcScope(bool stress, const ModuleStackMap* maps)
+        : gc_(kHeapBytes), prev_gc_(brass_get_active_gc()), prev_maps_(brass_get_active_stack_maps()) {
+        gc_.set_stress_mode(stress);
+        brass_set_active_gc(&gc_);
+        brass_set_active_stack_maps(maps);
+    }
+    ~NativeGcScope() {
+        brass_set_active_gc(prev_gc_);
+        brass_set_active_stack_maps(prev_maps_);
+    }
+    NativeGcScope(const NativeGcScope&) = delete;
+    NativeGcScope& operator=(const NativeGcScope&) = delete;
+
+private:
+    static constexpr size_t kHeapBytes = 16 * 1024 * 1024;
+    MiniCheneyGC gc_;
+    MiniCheneyGC* prev_gc_;
+    const ModuleStackMap* prev_maps_;
+};
+
 } // namespace
 
 bool execute_compile_object(const Module& mod, const CompileObjectOptions& opts) {
@@ -62,6 +91,11 @@ bool execute_compile_object(const Module& mod, const CompileObjectOptions& opts)
         target = Target::x64_windows();
     } else if (opts.obj_format == "elf") {
         target = Target::x64_linux();
+    } else if (opts.obj_format == "macho") {
+        target = Target::x64_macos();
+    } else if (!opts.obj_format.empty()) {
+        std::cerr << "Error: unknown object format '" << opts.obj_format << "'\n";
+        return false;
     }
 
     codegen::SchedOptions sched_opts;
@@ -71,8 +105,13 @@ bool execute_compile_object(const Module& mod, const CompileObjectOptions& opts)
 
     auto obj = object::compile_module_to_object(mod, target, sched_opts);
     std::vector<uint8_t> binary_data;
-    if (target.is_windows() || opts.obj_format == "coff") {
+    const char* format_name = "ELF64";
+    if (target.is_windows()) {
         binary_data = object::emit_coff_object(obj);
+        format_name = "COFF";
+    } else if (target.is_macos()) {
+        binary_data = object::emit_macho_object(obj);
+        format_name = "Mach-O";
     } else {
         binary_data = object::emit_elf_object(obj);
     }
@@ -94,7 +133,7 @@ bool execute_compile_object(const Module& mod, const CompileObjectOptions& opts)
     }
 
     std::cout << "Successfully emitted object file '" << out_file << "' ("
-              << binary_data.size() << " bytes, " << (target.is_windows() ? "COFF" : "ELF64") << ")\n";
+              << binary_data.size() << " bytes, " << format_name << ")\n";
     return true;
 }
 
@@ -107,6 +146,10 @@ bool execute_emit_shared(const Module& mod, const EmitSharedOptions& opts) {
     } else if (opts.obj_format == "elf") {
         target = Target::x64_linux();
         fmt = target::OutputFormat::LinuxElfSo;
+    } else if (!opts.obj_format.empty()) {
+        std::cerr << "Error: --emit-shared does not support --format '" << opts.obj_format
+                  << "' (supported: coff, elf)\n";
+        return false;
     }
 
     std::string final_output = opts.shared_output_file.empty() ? opts.output_file : opts.shared_output_file;
@@ -171,8 +214,11 @@ bool execute_run_function(Module& mod, const RunFunctionOptions& opts) {
         baseline.register_external_symbol("brass_parallel_alloc_context", reinterpret_cast<void*>(&brass_parallel_alloc_context));
         baseline.register_external_symbol("brass_parallel_free_context", reinterpret_cast<void*>(&brass_parallel_free_context));
 
+        ModuleStackMap baseline_maps;
         try {
-            baseline.compile_module(mod);
+            for (const auto& compiled : baseline.compile_module(mod)) {
+                baseline_maps.add_function(compiled.stack_map());
+            }
         } catch (const std::exception& ex) {
             std::cerr << "Baseline JIT Error: " << ex.what() << "\n";
             return false;
@@ -184,6 +230,7 @@ bool execute_run_function(Module& mod, const RunFunctionOptions& opts) {
         }
 
         try {
+            NativeGcScope gc_scope(opts.gc_stress, &baseline_maps);
             RuntimeValue result = handle->call_native(run_args);
             if (!fn->return_type().is_void()) {
                 std::cout << result << "\n";
@@ -220,6 +267,7 @@ bool execute_run_function(Module& mod, const RunFunctionOptions& opts) {
         }
 
         try {
+            NativeGcScope gc_scope(opts.gc_stress, &jit.stack_maps());
             RuntimeValue result = jit.invoke(opts.run_fn, run_args);
             if (!fn->return_type().is_void()) {
                 std::cout << result << "\n";

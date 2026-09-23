@@ -44,7 +44,10 @@ LoopOptOptions all_loop_options() {
     o.enable_vectorize = true;
     o.enable_avx2 = host_has_avx2();
     o.vector_width = o.enable_avx2 ? 256u : 0u;
-    o.enable_fma = true;
+    // FMA contraction is off in every differential pipeline: it changes FP
+    // results by design (one rounding instead of two), and the reference
+    // interpreter evaluates the uncontracted program.
+    o.enable_fma = false;
     o.enable_sroa = false;  // the module stage runs it
     o.enable_partial_escape = true;
     o.enable_allocation_sinking = true;
@@ -81,7 +84,9 @@ Pipeline all_passes_pipeline() {
 }
 
 Pipeline bronze_pipeline() {
-    return pass_pipeline(il::pass_pipeline_options(il::bronze_translator_options()));
+    il::TranslatorOptions options = il::bronze_translator_options();
+    options.enable_fma = false;  // see all_loop_options
+    return pass_pipeline(il::pass_pipeline_options(options));
 }
 
 // The fuzzer's original sequence: GVN-PRE, WBE, then optimize_module's
@@ -99,7 +104,7 @@ Pipeline legacy_pipeline() {
     o.enable_slp = true;
     o.enable_vectorize = true;
     o.enable_avx2 = host_has_avx2();
-    o.enable_fma = true;
+    o.enable_fma = false;  // see all_loop_options
     o.enable_partial_escape = true;
     o.enable_allocation_sinking = true;
     o.enable_loop_fusion = true;

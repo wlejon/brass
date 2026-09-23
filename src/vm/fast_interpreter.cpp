@@ -546,7 +546,7 @@ loop_start:
             throw InterpreterException("Invalid opcode " + std::to_string(static_cast<int>(decode_op(inst))) +
                                        " in bytecode function " + fn.name);
     }
-    return RuntimeValue::from_void();
+    // Unreachable: every handler dispatches onward, returns, or throws.
 
 #undef NEXT
 #undef JUMP_BY

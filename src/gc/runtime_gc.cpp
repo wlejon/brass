@@ -2,6 +2,7 @@
 #include <iostream>
 #include <vector>
 #include <stdexcept>
+#include <cstdlib>
 
 #if defined(_MSC_VER)
 #include <intrin.h>
@@ -31,6 +32,25 @@ inline void get_caller_frame(uintptr_t& caller_rbp, uintptr_t& caller_ip) noexce
     caller_rbp = 0;
     caller_ip = 0;
 #endif
+}
+
+// Native allocation entry points are called from JIT frames, where a C++
+// exception cannot be relied on to unwind; a missing collector or missing
+// stack maps is an embedding bug, so it stops the process with a message.
+[[noreturn]] void gc_fatal_no_gc() {
+    std::cerr << "brass: fatal: brass_gc_alloc called with no active GC; the embedder must "
+              << "install one (brass_set_active_gc or brass_set_active_generational_gc) "
+              << "before running code that allocates\n";
+    std::cerr.flush();
+    std::abort();
+}
+
+[[noreturn]] void gc_fatal_no_maps(const char* op) {
+    std::cerr << "brass: fatal: " << op << " needs a collection but no stack maps are active, "
+              << "so live gcrefs in native frames cannot be found; call "
+              << "brass_set_active_stack_maps with the running code's maps\n";
+    std::cerr.flush();
+    std::abort();
 }
 
 } // namespace
@@ -200,11 +220,10 @@ extern "C" {
 
 void brass_runtime_gc_safepoint_bridge(uintptr_t caller_rbp, uintptr_t caller_ip) {
     if (auto* gen_gc = brass::brass_get_active_generational_gc()) {
-        const auto* maps = brass::brass_get_active_stack_maps();
-        if (maps) {
+        // A safepoint is an opportunity, not a demand: without stack maps the
+        // native frames' roots are unknown, so collecting here would be unsafe.
+        if (const auto* maps = brass::brass_get_active_stack_maps()) {
             brass::brass_runtime_gc_safepoint(gen_gc, *maps, caller_rbp, caller_ip);
-        } else {
-            gen_gc->collect();
         }
         return;
     }
@@ -220,22 +239,16 @@ uintptr_t brass_runtime_gc_alloc_bridge(size_t size, uint64_t pointer_mask, uint
             return gen_gc->allocate(size, pointer_mask, type_tag);
         }
         const auto* maps = brass::brass_get_active_stack_maps();
-        if (!maps) {
-            return gen_gc->allocate(size, pointer_mask, type_tag);
-        }
+        if (!maps) brass::gc_fatal_no_maps("brass_gc_alloc");
         return brass::brass_runtime_gc_alloc(gen_gc, *maps, size, pointer_mask, type_tag, caller_rbp, caller_ip);
     }
     auto* gc = brass::brass_get_active_gc();
-    if (!gc) {
-        return 0;
-    }
+    if (!gc) brass::gc_fatal_no_gc();
     if (gc->can_allocate_fast(size)) {
         return gc->allocate(size, pointer_mask, type_tag);
     }
     const auto* maps = brass::brass_get_active_stack_maps();
-    if (!maps) {
-        return gc->allocate(size, pointer_mask, type_tag);
-    }
+    if (!maps) brass::gc_fatal_no_maps("brass_gc_alloc");
     return brass::brass_runtime_gc_alloc(gc, *maps, size, pointer_mask, type_tag, caller_rbp, caller_ip);
 }
 
@@ -268,20 +281,16 @@ void brass_gc_safepoint() {
     uintptr_t caller_rbp = frame ? *reinterpret_cast<uintptr_t*>(frame) : 0;
     uintptr_t caller_ip = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
 
+    // Without stack maps the native frames' roots are unknown: skip.
+    const auto* maps = brass::brass_get_active_stack_maps();
+    if (!maps) return;
     if (auto* gen_gc = brass::brass_get_active_generational_gc()) {
-        const auto* maps = brass::brass_get_active_stack_maps();
-        if (maps) {
-            brass::brass_runtime_gc_safepoint(gen_gc, *maps, caller_rbp, caller_ip);
-        } else {
-            gen_gc->collect();
-        }
+        brass::brass_runtime_gc_safepoint(gen_gc, *maps, caller_rbp, caller_ip);
         return;
     }
-    auto* gc = brass::brass_get_active_gc();
-    const auto* maps = brass::brass_get_active_stack_maps();
-    if (!gc || !maps) return;
-
-    brass::brass_runtime_gc_safepoint(gc, *maps, caller_rbp, caller_ip);
+    if (auto* gc = brass::brass_get_active_gc()) {
+        brass::brass_runtime_gc_safepoint(gc, *maps, caller_rbp, caller_ip);
+    }
 }
 
 uintptr_t brass_gc_alloc(size_t size, uint64_t pointer_mask, uint32_t type_tag) {
@@ -290,25 +299,19 @@ uintptr_t brass_gc_alloc(size_t size, uint64_t pointer_mask, uint32_t type_tag) 
             return gen_gc->allocate(size, pointer_mask, type_tag);
         }
         const auto* maps = brass::brass_get_active_stack_maps();
-        if (!maps) {
-            return gen_gc->allocate(size, pointer_mask, type_tag);
-        }
+        if (!maps) brass::gc_fatal_no_maps("brass_gc_alloc");
         void* frame = __builtin_frame_address(0);
         uintptr_t caller_rbp = frame ? *reinterpret_cast<uintptr_t*>(frame) : 0;
         uintptr_t caller_ip = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
         return brass::brass_runtime_gc_alloc(gen_gc, *maps, size, pointer_mask, type_tag, caller_rbp, caller_ip);
     }
     auto* gc = brass::brass_get_active_gc();
-    if (!gc) {
-        return 0;
-    }
+    if (!gc) brass::gc_fatal_no_gc();
     if (gc->can_allocate_fast(size)) {
         return gc->allocate(size, pointer_mask, type_tag);
     }
     const auto* maps = brass::brass_get_active_stack_maps();
-    if (!maps) {
-        return gc->allocate(size, pointer_mask, type_tag);
-    }
+    if (!maps) brass::gc_fatal_no_maps("brass_gc_alloc");
 
     void* frame = __builtin_frame_address(0);
     uintptr_t caller_rbp = frame ? *reinterpret_cast<uintptr_t*>(frame) : 0;
@@ -322,22 +325,14 @@ void brass_gc_collect() {
     uintptr_t caller_rbp = frame ? *reinterpret_cast<uintptr_t*>(frame) : 0;
     uintptr_t caller_ip = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
 
-    if (auto* gen_gc = brass::brass_get_active_generational_gc()) {
-        const auto* maps = brass::brass_get_active_stack_maps();
-        if (maps) {
-            brass::brass_runtime_gc_safepoint(gen_gc, *maps, caller_rbp, caller_ip);
-        } else {
-            gen_gc->collect();
-        }
-        return;
-    }
-    auto* gc = brass::brass_get_active_gc();
+    // Same as a safepoint (the MSVC stub routes both through one bridge):
+    // without stack maps the native frames' roots are unknown, so skip.
     const auto* maps = brass::brass_get_active_stack_maps();
-    if (!gc) return;
-    if (maps) {
+    if (!maps) return;
+    if (auto* gen_gc = brass::brass_get_active_generational_gc()) {
+        brass::brass_runtime_gc_safepoint(gen_gc, *maps, caller_rbp, caller_ip);
+    } else if (auto* gc = brass::brass_get_active_gc()) {
         brass::brass_runtime_gc_safepoint(gc, *maps, caller_rbp, caller_ip);
-    } else {
-        gc->collect();
     }
 }
 

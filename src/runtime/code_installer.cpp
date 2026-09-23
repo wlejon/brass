@@ -142,7 +142,9 @@ RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) 
 
     [[maybe_unused]] const std::vector<Type>* ptypes = param_types_.empty() ? nullptr : &param_types_;
 
-#if defined(__x86_64__) || defined(_M_X64)
+    // Each supported host calls through an ABI-exact thunk; the baseline and
+    // cast-based fallbacks below are compiled only for any other host.
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(_WIN32) || defined(__GNUC__) || defined(__clang__))
 #if defined(_WIN32)
     codegen::X64Win64InvokeArgs invoke_args;
     std::vector<uint64_t> stack_words;
@@ -214,8 +216,7 @@ RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) 
     }
     return RuntimeValue::from_i64(static_cast<int64_t>(result.rax));
 #endif
-#elif defined(__aarch64__) || defined(_M_ARM64)
-#if defined(__GNUC__) || defined(__clang__)
+#elif (defined(__aarch64__) || defined(_M_ARM64)) && (defined(__GNUC__) || defined(__clang__))
     codegen::AArch64InvokeArgs invoke_args;
     std::vector<uint64_t> stack_words;
     codegen::partition_aarch64_invoke_args(args, ptypes, addr, invoke_args, stack_words);
@@ -250,9 +251,7 @@ RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) 
         return RuntimeValue::from_gcref(static_cast<uintptr_t>(result.x0));
     }
     return RuntimeValue::from_i64(static_cast<int64_t>(result.x0));
-#endif
-#endif
-
+#else
     auto baseline = baseline_function();
     if (baseline) {
         return baseline->invoke(args);
@@ -369,6 +368,7 @@ RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) 
     }
 
     throw std::runtime_error("FunctionHandle::call_native: unsupported direct signature for " + name_);
+#endif
 }
 
 RuntimeValue FunctionHandle::call(Interpreter& interp, const std::vector<RuntimeValue>& args) {

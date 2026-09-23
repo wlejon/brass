@@ -226,8 +226,11 @@ ObjectFile compile_module_to_object(const Module& mod, const Target& target);
 // working copy, once the object is complete: a host may define data symbols
 // after code generation, and it is only then that "defined" is known. The
 // return value is the number of loads left, every one against an undefined
-// symbol.
-size_t relax_got_loads(ObjectFile& obj);
+// symbol. With `local_only`, only loads of local (non-preemptible) symbols
+// are relaxed: a relocatable ELF object keeps GOT loads of its global
+// symbols, which a shared-library link may preempt, and lets the system
+// linker relax them (REX_GOTPCRELX) when it can.
+size_t relax_got_loads(ObjectFile& obj, bool local_only = false);
 
 // For an object that is going to a system linker without a GOT of its own
 // (COFF): after relax_got_loads, every remaining load takes an 8-byte slot

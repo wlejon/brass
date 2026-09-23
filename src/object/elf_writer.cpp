@@ -155,10 +155,11 @@ ElfWriter::ElfWriter(const ObjectFile& obj)
 
 std::vector<uint8_t> ElfWriter::write() {
     ObjectFile working_obj = obj_;
-    // Loads of the object's own symbols become `lea`s here; the linker
-    // could relax them itself (REX_GOTPCRELX), and it still binds the
-    // loads of the undefined ones through its GOT.
-    relax_got_loads(working_obj);
+    // Loads of the object's local symbols become `lea`s here. Its global
+    // symbols are preemptible in a shared library, where a PC32 against them
+    // is not linkable: those stay GOT loads (REX_GOTPCRELX / ADR_GOT_PAGE),
+    // which the system linker relaxes itself when the symbol binds locally.
+    relax_got_loads(working_obj, /*local_only=*/true);
 
     // Generate SysV DWARF .eh_frame
     if (!working_obj.functions.empty()) {

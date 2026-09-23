@@ -17,7 +17,8 @@ void print_usage(std::ostream& os, const char* prog) {
        << "  --check-roundtrip     Assert byte-identical parse(print(x)) roundtrip\n"
        << "  --print-pipeline      Print the optimization steps the other flags select, then exit\n"
        << "  -c, --compile         Compile MIR module to relocatable object file (.obj/.o)\n"
-       << "  --format <coff|elf>   Object file format for --compile (default: host format)\n"
+       << "  --format <coff|elf|macho> Object file format for --compile (default: host format;\n"
+       << "                        --emit-shared supports coff and elf only)\n"
        << "  --emit-shared <file>  Compile MIR module directly to shared library (.dll/.so)\n"
        << "  -shared               Compile MIR module directly to shared library (.dll/.so)\n"
        << "  --jit                 Use in-memory JIT execution engine for --run\n"
@@ -220,6 +221,10 @@ ParseOutcome parse_command_line(int argc, char** argv, OptCli& cli, std::ostream
             } else if (take_value("--pgo-use", arg, argc, argv, i, v)) {
                 cli.pgo_use_file = v;
             } else if (take_value("--format", arg, argc, argv, i, v)) {
+                if (v != "coff" && v != "elf" && v != "macho") {
+                    err << "Error: unknown --format '" << v << "' (expected coff, elf or macho)\n";
+                    return ParseOutcome::ExitError;
+                }
                 cli.obj_format = v;
             } else if (take_value("--emit-source-map", arg, argc, argv, i, v)) {
                 cli.emit_source_map_file = v;

@@ -51,7 +51,9 @@ RuntimeValue BaselineCompiledFunction::invoke(const std::vector<RuntimeValue>& a
 
     [[maybe_unused]] const std::vector<Type>* ptypes = param_types_.empty() ? nullptr : &param_types_;
 
-#if defined(__x86_64__) || defined(_M_X64)
+    // Each supported host calls through an ABI-exact thunk; the generic
+    // cast-based fallback below is compiled only for any other host.
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(_WIN32) || defined(__GNUC__) || defined(__clang__))
 #if defined(_WIN32)
     X64Win64InvokeArgs invoke_args;
     std::vector<uint64_t> stack_words;
@@ -103,8 +105,7 @@ RuntimeValue BaselineCompiledFunction::invoke(const std::vector<RuntimeValue>& a
     if (return_type_.is_gcref()) return RuntimeValue::from_gcref(static_cast<uintptr_t>(result.rax));
     return RuntimeValue::from_i64(static_cast<int64_t>(result.rax));
 #endif
-#elif defined(__aarch64__) || defined(_M_ARM64)
-#if defined(__GNUC__) || defined(__clang__)
+#elif (defined(__aarch64__) || defined(_M_ARM64)) && (defined(__GNUC__) || defined(__clang__))
     AArch64InvokeArgs invoke_args;
     std::vector<uint64_t> stack_words;
     partition_aarch64_invoke_args(args, ptypes, addr, invoke_args, stack_words);
@@ -129,9 +130,7 @@ RuntimeValue BaselineCompiledFunction::invoke(const std::vector<RuntimeValue>& a
     if (return_type_.is_pointer()) return RuntimeValue::from_ptr(static_cast<uintptr_t>(result.x0));
     if (return_type_.is_gcref()) return RuntimeValue::from_gcref(static_cast<uintptr_t>(result.x0));
     return RuntimeValue::from_i64(static_cast<int64_t>(result.x0));
-#endif
-#endif
-
+#else
     auto get_i64 = [&](size_t idx) -> int64_t {
         if (idx >= args.size()) return 0;
         return args[idx].as_i64();
@@ -284,6 +283,7 @@ RuntimeValue BaselineCompiledFunction::invoke(const std::vector<RuntimeValue>& a
 
     throw std::runtime_error("BaselineCompiledFunction::invoke: unsupported argument count " +
                              std::to_string(args.size()) + " for " + name_);
+#endif
 }
 
 // ============================================================================

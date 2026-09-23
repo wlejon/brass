@@ -69,13 +69,14 @@ TEST_CASE("Hard errors - x64 emitter rejects LIR it has no encoding for") {
 }
 
 TEST_CASE("Hard errors - UnsupportedOperation is a runtime_error naming stage and operation") {
+    bool caught = false;
     try {
         throw_unsupported("aarch64 isel", "fancy_op");
     } catch (const std::runtime_error& e) {
         CHECK_EQ(std::string(e.what()), std::string("aarch64 isel: unsupported operation 'fancy_op'"));
-        return;
+        caught = true;
     }
-    CHECK(false);
+    CHECK(caught);
 }
 
 // =============================================================================
