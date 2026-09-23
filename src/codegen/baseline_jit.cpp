@@ -363,6 +363,16 @@ void* BaselineJitCompiler::resolve_symbol(std::string_view name) const {
 void* BaselineJitCompiler::resolve_symbol_in(const Function& fn, std::string_view name) const {
     if (const Module* mod = fn.parent()) {
         if (const char* data = mod->string_symbol(name)) return const_cast<char*>(data);
+        // A function the module defines shadows a registered symbol of the
+        // same name (a program function called `sqrt` is not libm's), as in
+        // tier 2's linker. Bound directly once this module's copy is
+        // compiled; until then through the lazy stub, which compile_module
+        // points at the module's copy when it installs it.
+        if (const Function* def = mod->get_function(name); def && def->block_count() > 0) {
+            runtime::FunctionHandle* handle = dispatch_table().find(name);
+            if (handle && handle->mir_function() == def) return handle->native_entry();
+            return nullptr;
+        }
     }
     return resolve_symbol(name);
 }
@@ -403,6 +413,9 @@ std::vector<BaselineCompiledFunction> BaselineJitCompiler::compile_module(const 
         handle->set_native_entry(results.back().entry_point());
         handle->set_tier(runtime::TierLevel::Tier1_Baseline);
         handle->set_baseline_function(std::make_shared<BaselineCompiledFunction>(results.back()));
+        // Callers compiled before this function reach it through its stub,
+        // which must not fall back to a registered symbol of the same name.
+        lazy_->define(fn->name(), results.back().entry_point());
     }
 
     return results;

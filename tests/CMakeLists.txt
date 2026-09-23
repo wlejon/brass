@@ -173,6 +173,7 @@ add_executable(brass_unit_tests
     unit/test_baseline_jit_opcodes.cpp
     unit/test_baseline_jit_vector.cpp
     unit/test_baseline_lazy_symbols.cpp
+    unit/test_baseline_frame.cpp
     unit/test_baseline_unwind.cpp
     unit/test_program_dispatch.cpp
     unit/test_program_runtime_state.cpp
@@ -366,6 +367,12 @@ if(BRASS_BUILD_TOOLS)
     # --baseline-jit: every symbol these reference links (they once trapped
     # at run time on a call to an unresolved name symbol).
     foreach(_name 27_generator_fibonacci 28_async_chain)
+        brass_il_corpus_test(baseline ${_name} --baseline-jit)
+    endforeach()
+    # 21_quat_norm: its own `sqrt` once bound to the registered libm sqrt
+    # (NaN). 06_ackermann: one stack slot per SSA value once overflowed the
+    # native stack at depth ~4k.
+    foreach(_name 21_quat_norm 06_ackermann)
         brass_il_corpus_test(baseline ${_name} --baseline-jit)
     endforeach()
     foreach(_name 01_arithmetic 03_collatz 09_closures 14_array_loop 23_objects_basic

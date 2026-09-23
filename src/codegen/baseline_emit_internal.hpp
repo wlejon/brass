@@ -43,6 +43,18 @@ bool bl_vectors_in_registers(const Target& target, const CallingConvention& cc,
 void check_x64_baseline_vector_inst(const Function& fn, const Instruction& inst, const Target& target,
                                     const CallingConvention& cc);
 
+// The frame below the saved RBP (baseline_frame.cpp): each value's slot and
+// each alloca's buffer as a positive offset down from RBP, the GC-ref slots
+// (stack-map roots), and the bytes used, starting after `start_offset`.
+// Values whose live ranges do not overlap share a slot.
+struct BaselineFrameLayout {
+    std::unordered_map<const Value*, int32_t> slot_map;
+    std::unordered_map<const Instruction*, int32_t> alloca_offsets;
+    std::vector<int32_t> gcref_slots;
+    int32_t size = 0;
+};
+BaselineFrameLayout layout_baseline_frame(const Function& fn, int32_t start_offset);
+
 struct X64BaselineEmitter {
     CodeBuffer& buffer;
     X64Encoder& enc;

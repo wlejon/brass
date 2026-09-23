@@ -20,6 +20,7 @@
 #include <chrono>
 #include <algorithm>
 #include <iomanip>
+#include "stack_guard.hpp"
 
 using namespace brass;
 using namespace brass::il;
@@ -29,6 +30,7 @@ static int run_brass_il(int argc, char** argv);
 // An exception escaping main is std::terminate, which on MSVC is a silent
 // fail-fast (0xC0000409) that also drops buffered stdout. Report it instead.
 int main(int argc, char** argv) {
+    brass_il_install_stack_overflow_guard();
     try {
         return run_brass_il(argc, argv);
     } catch (const std::exception& e) {

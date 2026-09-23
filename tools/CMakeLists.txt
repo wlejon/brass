@@ -20,6 +20,7 @@ target_link_libraries(brass-opt
 
 add_executable(brass-il
     brass-il/main.cpp
+    brass-il/stack_guard.cpp
 )
 
 target_include_directories(brass-il

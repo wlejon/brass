@@ -192,6 +192,57 @@ no:
     runtime::FunctionDispatchTable::instance().forget_module(*mod);
 }
 
+namespace {
+int64_t ls_host_shadowed(int64_t) { return -1; }
+} // namespace
+
+TEST_CASE("Baseline lazy symbols - a module function shadows a registered symbol of its name") {
+    // The shape of bronze's `function sqrt(x)` beside the registered libm
+    // `sqrt`: a direct call must reach the module's function, whether the
+    // callee was compiled before the caller (direct call) or after it
+    // (through the stub), as tier 2's linker resolves it. compile_module
+    // goes last to first: @ls_sh_caller_late is compiled before its callee
+    // (stub), @ls_sh_caller_early after its callee (direct call).
+    auto mod = parse_or_fail(R"(module @shadow
+func @ls_sh_callee_first(%0: i64) -> i64 {
+entry:
+  %c2 = iconst.i64 2
+  %r = mul.i64 %0, %c2
+  ret %r
+}
+func @ls_sh_caller_late(%0: i64) -> i64 {
+entry:
+  %r = call.i64 @ls_sh_callee_first(%0)
+  ret %r
+}
+func @ls_sh_caller_early(%0: i64) -> i64 {
+entry:
+  %r = call.i64 @ls_sh_callee_last(%0)
+  ret %r
+}
+func @ls_sh_callee_last(%0: i64) -> i64 {
+entry:
+  %c3 = iconst.i64 3
+  %r = mul.i64 %0, %c3
+  ret %r
+}
+)");
+    BaselineJitCompiler compiler;
+    compiler.register_external_symbol("ls_sh_callee_first", reinterpret_cast<void*>(&ls_host_shadowed));
+    compiler.register_external_symbol("ls_sh_callee_last", reinterpret_cast<void*>(&ls_host_shadowed));
+    auto fns = compiler.compile_module(*mod);
+    I64Fn late = nullptr, early = nullptr;
+    for (const auto& f : fns) {
+        if (f.name() == "ls_sh_caller_late") late = f.get_function_ptr<I64Fn>();
+        if (f.name() == "ls_sh_caller_early") early = f.get_function_ptr<I64Fn>();
+    }
+    REQUIRE(late != nullptr);
+    REQUIRE(early != nullptr);
+    CHECK_EQ(late(21), int64_t{42});
+    CHECK_EQ(early(5), int64_t{15});
+    runtime::FunctionDispatchTable::instance().forget_module(*mod);
+}
+
 TEST_CASE("Baseline lazy symbols - a call still unresolved at run time is a hard error") {
     auto callers = parse_or_fail(kCallers);
     auto callee_mod = parse_or_fail(kCallee);

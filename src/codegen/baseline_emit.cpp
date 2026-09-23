@@ -239,46 +239,15 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
     CodeBuffer buffer;
     X64Encoder enc(buffer);
 
-    // 1. Assign deterministic stack frame slots [rbp - offset]
-    std::unordered_map<const Value*, int32_t> slot_map;
-    std::unordered_map<const Instruction*, int32_t> alloca_offsets;
-    std::vector<int32_t> gcref_slots;
+    // 1. Stack frame slots [rbp - offset], shared between values whose live
+    //    ranges do not overlap (baseline_frame.cpp).
     bool preserves_r13 = (fn.parent() && fn.parent()->pinned_tls_register());
-    int32_t current_offset = preserves_r13 ? 8 : 0;
+    BaselineFrameLayout layout = layout_baseline_frame(fn, preserves_r13 ? 8 : 0);
+    const auto& slot_map = layout.slot_map;
+    const auto& alloca_offsets = layout.alloca_offsets;
+    const auto& gcref_slots = layout.gcref_slots;
 
-    auto alloc_slot = [&](const Value* val) -> int32_t {
-        if (!val) return 0;
-        auto it = slot_map.find(val);
-        if (it != slot_map.end()) return it->second;
-        if (bl_is_v128(val->type())) {
-            // 16 bytes at a 16-byte-aligned address (RBP is 16-byte aligned).
-            current_offset = ((current_offset + 15) & ~15) + 16;
-        } else {
-            current_offset += 8;
-        }
-        slot_map[val] = current_offset;
-        if (val->type().is_gcref()) gcref_slots.push_back(current_offset);
-        return current_offset;
-    };
-
-    for (const auto* bb : fn.blocks()) {
-        if (!bb) continue;
-        for (const auto* param : bb->params()) alloc_slot(param);
-        for (const auto* inst : *bb) {
-            if (!inst) continue;
-            if (inst->opcode() == Opcode::alloca_) {
-                int32_t buf_size = inst->imm_i32();
-                int32_t align = inst->offset() > 0 ? inst->offset() : 16;
-                if (align < 16) align = 16;
-                current_offset = (current_offset + align - 1) & ~(align - 1);
-                current_offset += buf_size;
-                alloca_offsets[inst] = current_offset;
-            }
-            if (inst->produces_value()) alloc_slot(inst->result());
-        }
-    }
-
-    int32_t frame_size = (current_offset + 15) & ~15;
+    int32_t frame_size = (layout.size + 15) & ~15;
     if (target.is_windows()) frame_size += 32; // shadow space for outgoing calls
     frame_size = (frame_size + 15) & ~15;
     if (frame_size == 0) frame_size = 16;
@@ -315,7 +284,7 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
         static constexpr XMM kWinXmms[4] = {XMM::XMM0, XMM::XMM1, XMM::XMM2, XMM::XMM3};
         for (size_t i = 0; i < entry_bb->param_count(); ++i) {
             const Value* param = entry_bb->param(i);
-            MemAddress dst = slot_off_addr(slot_map[param]);
+            MemAddress dst = slot_off_addr(slot_map.at(param));
             const bool is_vec = bl_is_v128(param->type());
             const bool is_flt = bl_in_xmm(param->type());
             auto from_stack = [&](int32_t caller_off) {
