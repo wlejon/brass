@@ -13,9 +13,17 @@ namespace brass {
 
 namespace {
 
-static MiniCheneyGC* g_active_gc = nullptr;
-static GenerationalGC* g_active_gen_gc = nullptr;
-static const ModuleStackMap* g_active_stack_maps = nullptr;
+// The collector and stack maps of the code running on THIS thread. Per thread
+// because what they describe is: a collector's roots are the frames of the
+// thread that allocates, and the maps are the maps of the code on that
+// thread's stack. Process-wide, a second thread installing its program's maps
+// (or an OSR bridge swapping in an interpreter's heap) retargeted every other
+// thread's safepoints at frames they do not have. Parallel loop bodies, the
+// one place brass runs generated code on a thread that did not install
+// these, neither allocate nor call (loop_parallel_analysis.cpp).
+thread_local MiniCheneyGC* g_active_gc = nullptr;
+thread_local GenerationalGC* g_active_gen_gc = nullptr;
+thread_local const ModuleStackMap* g_active_stack_maps = nullptr;
 
 inline void get_caller_frame(uintptr_t& caller_rbp, uintptr_t& caller_ip) noexcept {
 #if defined(_MSC_VER) && !defined(__clang__)
