@@ -1,6 +1,18 @@
 #include "parser_vec.hpp"
+#include "parser_decode.hpp"
 
 namespace brass {
+
+// Consumes the IntLiteral at the cursor into `out` when it fits [lo, hi].
+static bool take_vec_int(ParserVecContext& ctx, int64_t lo, int64_t hi, std::string_view what, int64_t& out) {
+    Token tok = ctx.advance();
+    std::string err;
+    if (!int_literal_in_range(tok, lo, hi, 0, what, out, err)) {
+        ctx.error(tok.location, err);
+        return false;
+    }
+    return true;
+}
 
 static Type parse_type_str(std::string_view s) {
     if (s == "i32") return Type::i32();
@@ -170,7 +182,9 @@ bool parse_vector_instruction(
                     ctx.error(ctx.peek().location, "Expected integer offset for vload");
                     return false;
                 }
-                offset = static_cast<int32_t>(ctx.advance().int_val);
+                int64_t v = 0;
+                if (!take_vec_int(ctx, INT32_MIN, INT32_MAX, "a 32-bit offset", v)) return false;
+                offset = static_cast<int32_t>(v);
             }
             Type vt = mem_type.is_vector() ? mem_type :
                       (type_annotation.is_vector() ? type_annotation :
@@ -187,7 +201,9 @@ bool parse_vector_instruction(
             int32_t offset = 0;
             Value* val = nullptr;
             if (ctx.peek().is(TokenKind::IntLiteral)) {
-                offset = static_cast<int32_t>(ctx.advance().int_val);
+                int64_t v = 0;
+                if (!take_vec_int(ctx, INT32_MIN, INT32_MAX, "a 32-bit offset", v)) return false;
+                offset = static_cast<int32_t>(v);
                 if (!ctx.expect(TokenKind::Comma, "','")) return false;
                 val = ctx.parse_val();
             } else {
@@ -219,8 +235,9 @@ bool parse_vector_instruction(
                 ctx.error(ctx.peek().location, "Expected integer lane index for vextract_lane");
                 return false;
             }
-            uint32_t lane = static_cast<uint32_t>(ctx.advance().int_val);
-            res_val = b.build_vextract_lane(vec, lane);
+            int64_t lane = 0;
+            if (!take_vec_int(ctx, 0, UINT32_MAX, "a lane index", lane)) return false;
+            res_val = b.build_vextract_lane(vec, static_cast<uint32_t>(lane));
             if (type_annotation != Type::void_type() && res_val) {
                 res_val->set_type(type_annotation);
                 if (res_val->defining_instruction()) res_val->defining_instruction()->set_type(type_annotation);
@@ -239,8 +256,9 @@ bool parse_vector_instruction(
                 ctx.error(ctx.peek().location, "Expected integer lane index for vinsert_lane");
                 return false;
             }
-            uint32_t lane = static_cast<uint32_t>(ctx.advance().int_val);
-            res_val = b.build_vinsert_lane(vec, scalar, lane);
+            int64_t lane = 0;
+            if (!take_vec_int(ctx, 0, UINT32_MAX, "a lane index", lane)) return false;
+            res_val = b.build_vinsert_lane(vec, scalar, static_cast<uint32_t>(lane));
             Type vt = type_annotation.is_vector() ? type_annotation :
                       (vec ? vec->type() : Type::f32x4());
             if (res_val) {
@@ -261,8 +279,9 @@ bool parse_vector_instruction(
                 ctx.error(ctx.peek().location, "Expected integer mask for vshuffle");
                 return false;
             }
-            uint32_t mask = static_cast<uint32_t>(ctx.advance().int_val);
-            res_val = b.build_vshuffle(v1, v2, mask);
+            int64_t mask = 0;
+            if (!take_vec_int(ctx, 0, UINT32_MAX, "a shuffle mask", mask)) return false;
+            res_val = b.build_vshuffle(v1, v2, static_cast<uint32_t>(mask));
             Type vt = type_annotation.is_vector() ? type_annotation :
                       (v1 ? v1->type() : Type::f32x4());
             if (res_val) {

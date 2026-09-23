@@ -26,6 +26,36 @@ Type parse_type_from_string(std::string_view s) {
     return Type::void_type();
 }
 
+bool int_literal_in_range(const Token& tok, int64_t lo, int64_t hi, unsigned hex_bits,
+                          std::string_view what, int64_t& out, std::string& err) {
+    if (!tok.int_overflow) {
+        const uint64_t mag = tok.int_magnitude;
+        if (tok.int_negative) {
+            // -mag >= lo, with mag <= 2^63 guaranteed by the lexer.
+            const uint64_t lo_mag = lo < 0 ? uint64_t{0} - static_cast<uint64_t>(lo) : 0;
+            if (mag == 0 || (lo < 0 && mag <= lo_mag)) {
+                out = static_cast<int64_t>(uint64_t{0} - mag);
+                if (out >= lo) return true;
+            }
+        } else {
+            if (hi >= 0 && mag <= static_cast<uint64_t>(hi) && static_cast<int64_t>(mag) >= lo) {
+                out = static_cast<int64_t>(mag);
+                return true;
+            }
+            if (tok.int_hex && hex_bits > 0 && hex_bits <= 64 &&
+                (hex_bits == 64 || mag < (uint64_t{1} << hex_bits))) {
+                // Sign-extend the hex_bits-wide bit pattern.
+                const unsigned shift = 64 - hex_bits;
+                out = static_cast<int64_t>(mag << shift) >> shift;
+                if (out >= lo && out <= hi) return true;
+            }
+        }
+    }
+    err = "Integer literal '" + std::string(tok.text) + "' out of range for " + std::string(what) +
+          " (expected " + std::to_string(lo) + ".." + std::to_string(hi) + ")";
+    return false;
+}
+
 bool is_identifier_or_keyword(TokenKind k) noexcept {
     return k == TokenKind::Ident || (k >= TokenKind::Kw_func && k <= TokenKind::Kw_i64x4);
 }

@@ -44,7 +44,7 @@ Brass MIR provides scalar, pointer, reference, and fixed-width SIMD vector types
 
 - **Block Structured CFG**: A function body consists of one or more basic blocks (`bb0`, `bb1`, etc.).
 - **Block Parameters**: Block arguments replace Phi nodes. Every branch to a target block passes values matching that block's parameter types.
-- **Strict Dominance**: Values are defined once and must dominate all uses.
+- **Strict Dominance**: Values are defined once and must dominate all uses. In the text, a use may appear before its definition when the defining block comes later in the file (the parser resolves such forward references after reading the whole function); a use before its definition within one block, or a name no block defines, is a parse error. Dominance itself is checked by the verifier.
 - **Explicit Terminators**: Every basic block must end in a single terminator instruction (`br`, `br_if`, `switch`, `ret`, `unreachable`, `throw`, `invoke`, `resume`).
 - **Exception Unwinding**: Call sites that may throw use `invoke`, specifying both a normal successor block and an unwind landing pad block.
 
@@ -53,6 +53,8 @@ Brass MIR provides scalar, pointer, reference, and fixed-width SIMD vector types
 ## 3. Instruction Set Summary
 
 ### Constants & Conversions
+
+Integer literals must fit the field they fill, or the parser reports "out of range": `iconst.i32` and 32-bit offsets take [-2^31, 2^31-1], `iconst.i64` takes [-2^63, 2^63-1], and a `switch` case value must fit the condition's type (the verifier checks the same, and rejects duplicate case values). Decimal literals are written signed, as the printer writes them (`iconst.i32 4294967295` is an error; write `-1`); for `iconst`, `patchable_const` and `switch` cases a hex literal may spell the value's bit pattern (`iconst.i32 0xFFFFFFFF` is -1).
 - `iconst.i32 <imm32>` -> `i32`
 - `iconst.i64 <imm64>` -> `i64`
 - `fconst.f64 <imm64>` -> `f64`
@@ -63,7 +65,7 @@ Brass MIR provides scalar, pointer, reference, and fixed-width SIMD vector types
 - `trunc.i32 <val:i64>` -> `i32`
 - `fptosi.i32 <val:f64>` -> `i32`
 - `fptosi.i64 <val:f64>` -> `i64`
-- `sitofp.f64 <val:i32|i64>` -> `f64`
+- `sitofp.f64 <val:i32|i64>` -> `f64` (the bare form takes its source width from the operand; `sitofp.f64.i32` / `sitofp.f64.i64` name it explicitly; `sitofp.f32` likewise)
 - `bitcast.i64 <val:f64>` -> `i64`
 - `bitcast.f64 <val:i64>` -> `f64`
 

@@ -153,7 +153,7 @@ public:
     }
 
     BitSet& operator&=(const BitSet& other) {
-        size_t common = std::min(words_.size(), other.words_.size());
+        size_t common = (std::min)(words_.size(), other.words_.size());
         for (size_t i = 0; i < common; ++i) {
             words_[i] &= other.words_[i];
         }
@@ -167,7 +167,7 @@ public:
         if (other.num_bits_ > num_bits_) {
             resize(other.num_bits_);
         }
-        size_t common = std::min(words_.size(), other.words_.size());
+        size_t common = (std::min)(words_.size(), other.words_.size());
         for (size_t i = 0; i < common; ++i) {
             words_[i] |= other.words_[i];
         }
@@ -179,7 +179,7 @@ public:
         if (other.num_bits_ > num_bits_) {
             resize(other.num_bits_);
         }
-        size_t common = std::min(words_.size(), other.words_.size());
+        size_t common = (std::min)(words_.size(), other.words_.size());
         for (size_t i = 0; i < common; ++i) {
             words_[i] ^= other.words_[i];
         }
@@ -199,7 +199,7 @@ public:
     // Set difference: this & ~other
     BitSet difference(const BitSet& other) const {
         BitSet res = *this;
-        size_t common = std::min(res.words_.size(), other.words_.size());
+        size_t common = (std::min)(res.words_.size(), other.words_.size());
         for (size_t i = 0; i < common; ++i) {
             res.words_[i] &= ~other.words_[i];
         }

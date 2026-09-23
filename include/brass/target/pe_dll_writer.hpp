@@ -6,6 +6,9 @@
 #include <vector>
 #include <cstdint>
 
+// The constants below share their names with <winnt.h> macros.
+#include <brass/core/winnt_macros_push.inc>
+
 namespace brass::target {
 
 namespace pe {
@@ -73,3 +76,5 @@ private:
 };
 
 } // namespace brass::target
+
+#include <brass/core/winnt_macros_pop.inc>

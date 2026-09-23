@@ -239,7 +239,8 @@ bool Parser::parse_resume_table(Function* fn, const BlockLookup& get_or_create_b
             error(peek().location, "Expected resume point integer ID, got '" + std::string(peek().text) + "'");
             return false;
         }
-        uint32_t resume_id = static_cast<uint32_t>(advance().int_val);
+        uint32_t resume_id = 0;
+        if (!take_unsigned(UINT32_MAX, "a resume point id", resume_id)) return false;
         if (!expect(TokenKind::Arrow, "'->'")) return false;
 
         if (!is_identifier_or_keyword(peek().kind)) {
@@ -333,6 +334,12 @@ Function* Parser::parse_function_decl(Module& mod) {
     };
 
     bool is_entry = true;
+    struct DeferredBody {
+        BasicBlock* bb;
+        Lexer body_start;  // just after the block header's ':'
+    };
+    std::vector<DeferredBody> deferred;
+    forward_refs_ok_ = true;
 
     while (!peek().is(TokenKind::RBrace) && !peek().is(TokenKind::Eof)) {
         if (peek().is(TokenKind::Kw_resume_table)) {
@@ -382,23 +389,86 @@ Function* Parser::parse_function_decl(Module& mod) {
         if (!expect(TokenKind::Colon, "':'")) return nullptr;
         is_entry = false;
 
-        // Parse instructions in this block
-        while (!peek().is(TokenKind::RBrace) && !peek().is(TokenKind::Kw_resume_table) && !peek().is(TokenKind::Eof)) {
-            // Check if next token is start of another block
-            if (is_identifier_or_keyword(peek().kind) && lexer_.is_block_header_ahead()) {
-                break;
-            }
-
-            if (!parse_instruction(b, fn, value_map, get_or_create_block)) {
-                return nullptr;
-            }
-        }
+        const Lexer body_start = lexer_;
+        const BlockParse r = parse_block_body(b, fn, bb, value_map, get_or_create_block);
+        if (r == BlockParse::Failed) return nullptr;
+        if (r == BlockParse::Deferred) deferred.push_back({bb, body_start});
     }
 
     if (!expect(TokenKind::RBrace, "'}'")) return nullptr;
 
+    // Bodies that used a value defined by a block later in the text: parse
+    // them again, in text order, until a pass defines nothing new. Whether
+    // each definition dominates its uses is the verifier's business.
+    if (!deferred.empty()) {
+        const Lexer after_fn = lexer_;
+        bool progress = true;
+        while (!deferred.empty() && progress) {
+            progress = false;
+            std::vector<DeferredBody> still;
+            for (const DeferredBody& d : deferred) {
+                lexer_ = d.body_start;
+                const BlockParse r = parse_block_body(b, fn, d.bb, value_map, get_or_create_block);
+                if (r == BlockParse::Failed) return nullptr;
+                if (r == BlockParse::Deferred) {
+                    still.push_back(d);
+                } else {
+                    progress = true;
+                }
+            }
+            deferred = std::move(still);
+        }
+        if (!deferred.empty()) {
+            // A name no block defines: parse the first such body once more
+            // with forward references off, which reports it.
+            forward_refs_ok_ = false;
+            lexer_ = deferred.front().body_start;
+            (void)parse_block_body(b, fn, deferred.front().bb, value_map, get_or_create_block);
+            if (!has_error_) {
+                error(lexer_.current_location(), "Use of undefined value");
+            }
+            return nullptr;
+        }
+        lexer_ = after_fn;
+    }
+    forward_refs_ok_ = false;
+
     fn->rebuild_cfg_predecessors();
     return fn;
+}
+
+Parser::BlockParse Parser::parse_block_body(Builder& b, Function* fn, BasicBlock* bb, ValueMap& value_map,
+                                            const BlockLookup& get_or_create_block) {
+    Instruction* const start_tail = bb->tail();
+    const uint32_t start_value_id = fn->current_next_value_id();
+    block_bindings_.clear();
+    saw_forward_ref_ = false;
+    b.position_at_end(bb);
+
+    while (!peek().is(TokenKind::RBrace) && !peek().is(TokenKind::Kw_resume_table) && !peek().is(TokenKind::Eof)) {
+        // Check if next token is start of another block
+        if (is_identifier_or_keyword(peek().kind) && lexer_.is_block_header_ahead()) {
+            break;
+        }
+        if (!parse_instruction(b, fn, value_map, get_or_create_block)) {
+            return BlockParse::Failed;
+        }
+    }
+    if (!saw_forward_ref_) return BlockParse::Done;
+
+    // Roll back: nothing built from the placeholder may survive.
+    while (bb->tail() != start_tail) {
+        bb->remove_instruction(bb->tail());
+    }
+    for (auto it = block_bindings_.rbegin(); it != block_bindings_.rend(); ++it) {
+        if (it->second) {
+            value_map[it->first] = it->second;
+        } else {
+            value_map.erase(it->first);
+        }
+    }
+    fn->set_next_value_id(start_value_id);
+    return BlockParse::Deferred;
 }
 
 } // namespace mir_parser

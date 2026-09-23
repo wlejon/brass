@@ -42,10 +42,18 @@ namespace brass::mir_parser {
                 error(peek().location, "Expected value identifier (e.g. '%0'), got '" + std::string(peek().text) + "'");
                 return nullptr;
             }
-            std::string name = std::string(advance().text);
+            const Token name_tok = advance();
+            std::string name = std::string(name_tok.text);
             auto it = value_map.find(name);
             if (it == value_map.end()) {
-                error(peek().location, "Use of undefined value: '" + name + "'");
+                // Possibly defined by a block later in the text: stand in a
+                // placeholder and let parse_function_decl re-parse this block
+                // once the rest is known (see parse_block_body).
+                if (forward_refs_ok_) {
+                    saw_forward_ref_ = true;
+                    return &forward_placeholder_;
+                }
+                error(name_tok.location, "Use of undefined value: '" + name + "'");
                 return nullptr;
             }
             return it->second;
@@ -85,7 +93,9 @@ namespace brass::mir_parser {
                     error(peek().location, std::string("Expected integer literal for ") + (is32 ? "iconst.i32" : "iconst.i64"));
                     return false;
                 }
-                const int64_t val = advance().int_val;
+                const unsigned bits = is32 ? 32 : 64;
+                int64_t val = 0;
+                if (!take_int(signed_min_of(bits), signed_max_of(bits), bits, is32 ? "i32" : "i64", val)) return false;
                 res_val = is32 ? b.build_iconst_i32(static_cast<int32_t>(val)) : b.build_iconst_i64(val);
                 break;
             }
@@ -94,8 +104,18 @@ namespace brass::mir_parser {
                     error(peek().location, "Expected float literal for fconst");
                     return false;
                 }
-                Token tok = advance();
-                double val = tok.is(TokenKind::FloatLiteral) ? tok.float_val : static_cast<double>(tok.int_val);
+                double val = 0.0;
+                if (peek().is(TokenKind::FloatLiteral)) {
+                    val = advance().float_val;
+                } else {
+                    Token tok = advance();
+                    if (tok.int_overflow) {
+                        error(tok.location, "Integer literal '" + std::string(tok.text) + "' out of range for fconst");
+                        return false;
+                    }
+                    val = static_cast<double>(tok.int_magnitude);
+                    if (tok.int_negative) val = -val;
+                }
                 if (type_suffix == Type::f32()) {
                     res_val = b.build_fconst_f32(static_cast<float>(val));
                 } else {
@@ -111,8 +131,9 @@ namespace brass::mir_parser {
                     error(peek().location, "Expected integer literal for patchable_const.i32");
                     return false;
                 }
-                int32_t val = static_cast<int32_t>(advance().int_val);
-                res_val = b.build_patchable_const_i32(sym, val);
+                int64_t val = 0;
+                if (!take_int(INT32_MIN, INT32_MAX, 32, "i32", val)) return false;
+                res_val = b.build_patchable_const_i32(sym, static_cast<int32_t>(val));
                 break;
             }
             case Opcode::patchable_const_i64: {
@@ -123,7 +144,8 @@ namespace brass::mir_parser {
                     error(peek().location, "Expected integer literal for patchable_const.i64");
                     return false;
                 }
-                int64_t val = advance().int_val;
+                int64_t val = 0;
+                if (!take_int(INT64_MIN, INT64_MAX, 64, "i64", val)) return false;
                 res_val = b.build_patchable_const_i64(sym, val);
                 break;
             }
@@ -136,9 +158,22 @@ namespace brass::mir_parser {
             case Opcode::fptosi_i64: { Value* v = parse_val(); if (!v) return false; res_val = b.build_fptosi_i64(v); break; }
             case Opcode::fptosi_i32_f32: { Value* v = parse_val(); if (!v) return false; res_val = b.build_fptosi_i32_f32(v); break; }
             case Opcode::fptosi_i64_f32: { Value* v = parse_val(); if (!v) return false; res_val = b.build_fptosi_i64_f32(v); break; }
-            case Opcode::sitofp_f64_i32: { Value* v = parse_val(); if (!v) return false; res_val = b.build_sitofp_f64_i32(v); break; }
+            // The bare `sitofp.f64` / `sitofp.f32` (docs/mir_reference.md)
+            // take their source width from the operand: an i64 picks the
+            // .i64 form. An explicit source suffix is kept as written.
+            case Opcode::sitofp_f64_i32: {
+                Value* v = parse_val(); if (!v) return false;
+                res_val = (op_tok.text == "sitofp.f64" && v->type() == Type::i64()) ? b.build_sitofp_f64_i64(v)
+                                                                                     : b.build_sitofp_f64_i32(v);
+                break;
+            }
             case Opcode::sitofp_f64_i64: { Value* v = parse_val(); if (!v) return false; res_val = b.build_sitofp_f64_i64(v); break; }
-            case Opcode::sitofp_f32_i32: { Value* v = parse_val(); if (!v) return false; res_val = b.build_sitofp_f32_i32(v); break; }
+            case Opcode::sitofp_f32_i32: {
+                Value* v = parse_val(); if (!v) return false;
+                res_val = (op_tok.text == "sitofp.f32" && v->type() == Type::i64()) ? b.build_sitofp_f32_i64(v)
+                                                                                     : b.build_sitofp_f32_i32(v);
+                break;
+            }
             case Opcode::sitofp_f32_i64: { Value* v = parse_val(); if (!v) return false; res_val = b.build_sitofp_f32_i64(v); break; }
             case Opcode::fptrunc_f32_f64: { Value* v = parse_val(); if (!v) return false; res_val = b.build_fptrunc_f32_f64(v); break; }
             case Opcode::fpext_f64_f32: { Value* v = parse_val(); if (!v) return false; res_val = b.build_fpext_f64_f32(v); break; }
@@ -282,7 +317,7 @@ namespace brass::mir_parser {
                         error(peek().location, "Expected integer offset for load");
                         return false;
                     }
-                    offset = static_cast<int32_t>(advance().int_val);
+                    if (!take_offset(offset)) return false;
                 }
                 if (mem_type.is_void()) {
                     mem_type = Type::i32();
@@ -299,7 +334,7 @@ namespace brass::mir_parser {
                 Value* val = nullptr;
 
                 if (peek().is(TokenKind::IntLiteral)) {
-                    offset = static_cast<int32_t>(advance().int_val);
+                    if (!take_offset(offset)) return false;
                     if (!expect(TokenKind::Comma, "','")) return false;
                     val = parse_val();
                 } else {
@@ -323,14 +358,15 @@ namespace brass::mir_parser {
                     error(peek().location, "Expected integer scale (1, 2, 4, 8) for load_indexed");
                     return false;
                 }
-                uint8_t scale = static_cast<uint8_t>(advance().int_val);
+                uint8_t scale = 0;
+                if (!take_unsigned(UINT8_MAX, "an index scale", scale)) return false;
                 int32_t offset = 0;
                 if (match(TokenKind::Comma)) {
                     if (!peek().is(TokenKind::IntLiteral)) {
                         error(peek().location, "Expected integer offset for load_indexed");
                         return false;
                     }
-                    offset = static_cast<int32_t>(advance().int_val);
+                    if (!take_offset(offset)) return false;
                 }
                 if (mem_type.is_void()) {
                     mem_type = Type::i64();
@@ -348,13 +384,14 @@ namespace brass::mir_parser {
                     error(peek().location, "Expected integer scale (1, 2, 4, 8) for store_indexed");
                     return false;
                 }
-                uint8_t scale = static_cast<uint8_t>(advance().int_val);
+                uint8_t scale = 0;
+                if (!take_unsigned(UINT8_MAX, "an index scale", scale)) return false;
                 if (!expect(TokenKind::Comma, "','")) return false;
 
                 int32_t offset = 0;
                 Value* val = nullptr;
                 if (peek().is(TokenKind::IntLiteral)) {
-                    offset = static_cast<int32_t>(advance().int_val);
+                    if (!take_offset(offset)) return false;
                     if (!expect(TokenKind::Comma, "','")) return false;
                     val = parse_val();
                 } else {
@@ -475,12 +512,20 @@ namespace brass::mir_parser {
             }
 
             case Opcode::alloca_: {  // `alloca SIZE, ALIGN`, as the printer writes it
-                const int64_t size = peek().is(TokenKind::IntLiteral) ? advance().int_val : -1;
-                if (size < 0 || !match(TokenKind::Comma) || !peek().is(TokenKind::IntLiteral)) {
+                // Both are held as int32 (imm_i32 / offset) and printed signed.
+                if (!peek().is(TokenKind::IntLiteral)) {
                     error(peek().location, "Expected 'alloca SIZE, ALIGN'");
                     return false;
                 }
-                res_val = b.build_alloca(static_cast<uint32_t>(size), static_cast<uint32_t>(advance().int_val));
+                uint32_t size = 0;
+                if (!take_unsigned(INT32_MAX, "an alloca size", size)) return false;
+                if (!match(TokenKind::Comma) || !peek().is(TokenKind::IntLiteral)) {
+                    error(peek().location, "Expected 'alloca SIZE, ALIGN'");
+                    return false;
+                }
+                uint32_t align = 0;
+                if (!take_unsigned(INT32_MAX, "an alloca alignment", align)) return false;
+                res_val = b.build_alloca(size, align);
                 break;
             }
 
@@ -513,7 +558,8 @@ namespace brass::mir_parser {
                     error(peek().location, "Expected integer literal for resume_point ID");
                     return false;
                 }
-                uint32_t resume_id = static_cast<uint32_t>(advance().int_val);
+                uint32_t resume_id = 0;
+                if (!take_unsigned(UINT32_MAX, "a resume point id", resume_id)) return false;
                 b.build_resume_point(resume_id);
                 break;
             }
@@ -523,7 +569,8 @@ namespace brass::mir_parser {
                     error(peek().location, "Expected integer loop header id for osr_entry");
                     return false;
                 }
-                const uint32_t header_id = static_cast<uint32_t>(advance().int_val);
+                uint32_t header_id = 0;
+                if (!take_unsigned(UINT32_MAX, "a loop header id", header_id)) return false;
                 std::vector<Value*> live_ins;
                 if (match(TokenKind::LBracket)) {
                     while (!peek().is(TokenKind::RBracket) && !peek().is(TokenKind::Eof)) {
@@ -580,7 +627,14 @@ namespace brass::mir_parser {
                         error(peek().location, "Expected integer case value");
                         return false;
                     }
-                    int64_t case_val = advance().int_val;
+                    // A case value must fit the condition's type, as the
+                    // verifier requires; a hex literal may spell its bits.
+                    const Type cond_t = cond->type();
+                    const unsigned bits = cond_t == Type::i8() ? 8 : cond_t == Type::i16() ? 16
+                                        : cond_t == Type::i32() ? 32 : 64;
+                    const std::string what = "switch." + std::string(cond_t.name()) + " case";
+                    int64_t case_val = 0;
+                    if (!take_int(signed_min_of(bits), signed_max_of(bits), bits, what, case_val)) return false;
                     if (!expect(TokenKind::Colon, "':'")) return false;
                     BranchTarget case_target;
                     if (!parse_branch_target(case_target)) return false;
@@ -713,6 +767,8 @@ namespace brass::mir_parser {
         }
 
         if (has_assignment && res_val) {
+            auto prev = value_map.find(result_name);
+            block_bindings_.emplace_back(result_name, prev == value_map.end() ? nullptr : prev->second);
             value_map[result_name] = res_val;
         }
 

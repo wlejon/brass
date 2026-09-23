@@ -79,7 +79,7 @@ bool parse_coro_instruction(
         case Opcode::coro_suspend: {
             // `0` in the yield slot is the printer's spelling of "no value".
             Value* yield_val = nullptr;
-            if (ctx.peek().is(TokenKind::IntLiteral) && ctx.peek().int_val == 0) {
+            if (ctx.peek().is(TokenKind::IntLiteral) && !ctx.peek().int_overflow && ctx.peek().int_magnitude == 0) {
                 ctx.advance();
             } else {
                 yield_val = ctx.parse_val();
@@ -91,7 +91,13 @@ bool parse_coro_instruction(
                 Token num_tok = ctx.peek();
                 if (num_tok.is(TokenKind::IntLiteral)) {
                     ctx.advance();
-                    state_id = static_cast<uint32_t>(num_tok.int_val);
+                    int64_t v = 0;
+                    std::string err;
+                    if (!int_literal_in_range(num_tok, 0, UINT32_MAX, 0, "a coroutine state id", v, err)) {
+                        ctx.error(num_tok.location, err);
+                        return false;
+                    }
+                    state_id = static_cast<uint32_t>(v);
                 } else {
                     ctx.error(num_tok.location, "Expected state ID integer after comma in coro_suspend");
                     return false;

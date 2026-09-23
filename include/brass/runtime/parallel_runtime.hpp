@@ -50,8 +50,8 @@ inline int64_t combine_reduction_i64(ReductionKind kind, int64_t acc, int64_t va
             return static_cast<int64_t>(static_cast<uint64_t>(acc) + static_cast<uint64_t>(val));
         case ReductionKind::ProdI64:
             return static_cast<int64_t>(static_cast<uint64_t>(acc) * static_cast<uint64_t>(val));
-        case ReductionKind::MinI64: return std::min(acc, val);
-        case ReductionKind::MaxI64: return std::max(acc, val);
+        case ReductionKind::MinI64: return (std::min)(acc, val);
+        case ReductionKind::MaxI64: return (std::max)(acc, val);
         default: return acc;
     }
 }
@@ -60,8 +60,8 @@ inline double combine_reduction_f64(ReductionKind kind, double acc, double val) 
     switch (kind) {
         case ReductionKind::SumF64: return acc + val;
         case ReductionKind::ProdF64: return acc * val;
-        case ReductionKind::MinF64: return std::min(acc, val);
-        case ReductionKind::MaxF64: return std::max(acc, val);
+        case ReductionKind::MinF64: return (std::min)(acc, val);
+        case ReductionKind::MaxF64: return (std::max)(acc, val);
         default: return acc;
     }
 }

@@ -7,6 +7,7 @@ add_executable(brass_unit_tests
     unit/test_mir_builder.cpp
     unit/test_mir_verifier.cpp
     unit/test_mir_printer_parser.cpp
+    unit/test_mir_parser_strictness.cpp
     unit/test_mir_loop_opt.cpp
     unit/test_mini_cheney.cpp
     unit/test_interpreter.cpp
@@ -228,6 +229,18 @@ if(TARGET brass_shared)
     add_dependencies(brass_unit_tests brass_shared)
     target_compile_definitions(brass_unit_tests PRIVATE
         BRASS_TEST_SHARED_LIB="$<TARGET_FILE:brass_shared>")
+endif()
+
+# brass_windows_h_first: <brass/brass.hpp> compiles after <windows.h>
+# (without NOMINMAX); it once failed on the COFF/PE writers' IMAGE_*
+# constants and on std::min / std::max.
+if(WIN32)
+    add_executable(brass_windows_h_first unit/windows_h_first.cpp)
+    target_include_directories(brass_windows_h_first PRIVATE ${BRASS_INCLUDE_DIR})
+    target_link_libraries(brass_windows_h_first PRIVATE brass)
+    add_test(NAME brass_windows_h_first COMMAND brass_windows_h_first)
+    set_tests_properties(brass_windows_h_first PROPERTIES
+        TIMEOUT 60 PASS_REGULAR_EXPRESSION "^OK[\r\n]" LABELS "correctness")
 endif()
 
 # One ctest per TEST_CASE, discovered from the binary each time ctest starts

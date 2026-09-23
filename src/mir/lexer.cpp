@@ -2,6 +2,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <cmath>
+#include <cstdint>
 #include <string>
 #include <ostream>
 
@@ -398,10 +399,35 @@ Token Lexer::scan_number_or_minus() {
         double fval = std::strtod(str.c_str(), &endptr);
         return Token{TokenKind::FloatLiteral, text, loc, 0, fval};
     } else {
-        char* endptr = nullptr;
-        int base = is_hex ? 16 : 10;
-        int64_t ival = std::strtoll(str.c_str(), &endptr, base);
-        return Token{TokenKind::IntLiteral, text, loc, ival, static_cast<double>(ival)};
+        // Accumulate the magnitude digit by digit so an overflowing literal
+        // is flagged rather than saturated (strtoll clamps to INT64_MAX).
+        const bool negative = !str.empty() && str[0] == '-';
+        size_t digits = negative ? 1 : 0;
+        if (is_hex) digits += 2;
+        const uint64_t base = is_hex ? 16 : 10;
+        uint64_t mag = 0;
+        bool overflow = false;
+        for (size_t i = digits; i < str.size(); ++i) {
+            const char c = str[i];
+            uint64_t d = 0;
+            if (c >= '0' && c <= '9') d = static_cast<uint64_t>(c - '0');
+            else if (c >= 'a' && c <= 'f') d = static_cast<uint64_t>(c - 'a' + 10);
+            else d = static_cast<uint64_t>(c - 'A' + 10);
+            if (mag > (UINT64_MAX - d) / base) {
+                overflow = true;
+                break;
+            }
+            mag = mag * base + d;
+        }
+        // The most negative literal is -2^63.
+        if (negative && mag > (uint64_t{1} << 63)) overflow = true;
+        const int64_t ival = overflow ? 0 : static_cast<int64_t>(negative ? (uint64_t{0} - mag) : mag);
+        Token tok{TokenKind::IntLiteral, text, loc, ival, static_cast<double>(ival)};
+        tok.int_magnitude = mag;
+        tok.int_negative = negative;
+        tok.int_hex = is_hex;
+        tok.int_overflow = overflow;
+        return tok;
     }
 }
 

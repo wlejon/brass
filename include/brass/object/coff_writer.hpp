@@ -6,6 +6,9 @@
 #include <string_view>
 #include <cstdint>
 
+// The constants below share their names with <winnt.h> macros.
+#include <brass/core/winnt_macros_push.inc>
+
 namespace brass::object {
 
 namespace coff {
@@ -86,3 +89,5 @@ private:
 std::vector<uint8_t> emit_coff_object(const ObjectFile& obj);
 
 } // namespace brass::object
+
+#include <brass/core/winnt_macros_pop.inc>

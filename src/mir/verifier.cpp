@@ -823,6 +823,27 @@ bool Verifier::verify_function(const Function& fn) {
                     for (size_t c_i = 0; c_i < cases.size(); ++c_i) {
                         check_target(cases[c_i].target, "case " + std::to_string(cases[c_i].value));
                     }
+                    // Every engine must agree on which case a value takes: a
+                    // case outside the condition's signed range would match
+                    // in the JITs (low bits only) but never in the
+                    // interpreter, and a duplicate is ambiguous.
+                    if (inst->operand_count() == 1 && inst->operand(0) && inst->operand(0)->type().is_integer()) {
+                        const Type ct = inst->operand(0)->type();
+                        const unsigned bits = ct == Type::i8() ? 8u : ct == Type::i16() ? 16u : ct == Type::i32() ? 32u : 64u;
+                        const int64_t lo = bits >= 64 ? INT64_MIN : -(int64_t{1} << (bits - 1));
+                        const int64_t hi = bits >= 64 ? INT64_MAX : (int64_t{1} << (bits - 1)) - 1;
+                        std::unordered_set<int64_t> seen;
+                        for (const SwitchCase& sc : cases) {
+                            if (sc.value < lo || sc.value > hi) {
+                                report_error(inst_prefix + "switch case value " + std::to_string(sc.value) +
+                                             " does not fit the " + std::string(ct.name()) + " condition.");
+                            }
+                            if (!seen.insert(sc.value).second) {
+                                report_error(inst_prefix + "switch has duplicate case value " +
+                                             std::to_string(sc.value) + ".");
+                            }
+                        }
+                    }
                     break;
                 }
 

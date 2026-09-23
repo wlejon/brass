@@ -1,0 +1,147 @@
+// No include guard, and not a standalone header (hence .inc): included
+// before each block of declarations it protects, paired with
+// <brass/core/winnt_macros_pop.inc> after it.
+//
+// <winnt.h> (pulled in by <windows.h>) defines the PE/COFF constant names
+// that brass's object and PE writers declare in their own namespaces
+// (IMAGE_SCN_MEM_READ, IMAGE_REL_AMD64_REL32, ...) as macros, which would
+// turn `constexpr uint32_t IMAGE_SCN_MEM_READ = ...` into
+// `constexpr uint32_t 0x40000000 = ...`. Save and drop each macro here; the
+// pop file restores them, so a host that includes <windows.h> before
+// <brass/brass.hpp> keeps its Windows definitions. Between the two files
+// the names refer to brass's constants.
+
+#pragma push_macro("IMAGE_DIRECTORY_ENTRY_BASERELOC")
+#undef IMAGE_DIRECTORY_ENTRY_BASERELOC
+#pragma push_macro("IMAGE_DIRECTORY_ENTRY_EXCEPTION")
+#undef IMAGE_DIRECTORY_ENTRY_EXCEPTION
+#pragma push_macro("IMAGE_DIRECTORY_ENTRY_EXPORT")
+#undef IMAGE_DIRECTORY_ENTRY_EXPORT
+#pragma push_macro("IMAGE_DIRECTORY_ENTRY_IAT")
+#undef IMAGE_DIRECTORY_ENTRY_IAT
+#pragma push_macro("IMAGE_DIRECTORY_ENTRY_IMPORT")
+#undef IMAGE_DIRECTORY_ENTRY_IMPORT
+#pragma push_macro("IMAGE_DIRECTORY_ENTRY_RESOURCE")
+#undef IMAGE_DIRECTORY_ENTRY_RESOURCE
+#pragma push_macro("IMAGE_DIRECTORY_ENTRY_SECURITY")
+#undef IMAGE_DIRECTORY_ENTRY_SECURITY
+#pragma push_macro("IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE")
+#undef IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE
+#pragma push_macro("IMAGE_DLLCHARACTERISTICS_HIGH_ENTROPY_VA")
+#undef IMAGE_DLLCHARACTERISTICS_HIGH_ENTROPY_VA
+#pragma push_macro("IMAGE_DLLCHARACTERISTICS_NX_COMPAT")
+#undef IMAGE_DLLCHARACTERISTICS_NX_COMPAT
+#pragma push_macro("IMAGE_DOS_SIGNATURE")
+#undef IMAGE_DOS_SIGNATURE
+#pragma push_macro("IMAGE_FILE_DLL")
+#undef IMAGE_FILE_DLL
+#pragma push_macro("IMAGE_FILE_EXECUTABLE_IMAGE")
+#undef IMAGE_FILE_EXECUTABLE_IMAGE
+#pragma push_macro("IMAGE_FILE_LARGE_ADDRESS_AWARE")
+#undef IMAGE_FILE_LARGE_ADDRESS_AWARE
+#pragma push_macro("IMAGE_FILE_MACHINE_AMD64")
+#undef IMAGE_FILE_MACHINE_AMD64
+#pragma push_macro("IMAGE_FILE_MACHINE_ARM64")
+#undef IMAGE_FILE_MACHINE_ARM64
+#pragma push_macro("IMAGE_FILE_RELOCS_STRIPPED")
+#undef IMAGE_FILE_RELOCS_STRIPPED
+#pragma push_macro("IMAGE_NT_OPTIONAL_HDR64_MAGIC")
+#undef IMAGE_NT_OPTIONAL_HDR64_MAGIC
+#pragma push_macro("IMAGE_NT_SIGNATURE")
+#undef IMAGE_NT_SIGNATURE
+#pragma push_macro("IMAGE_REL_AMD64_ABSOLUTE")
+#undef IMAGE_REL_AMD64_ABSOLUTE
+#pragma push_macro("IMAGE_REL_AMD64_ADDR32")
+#undef IMAGE_REL_AMD64_ADDR32
+#pragma push_macro("IMAGE_REL_AMD64_ADDR32NB")
+#undef IMAGE_REL_AMD64_ADDR32NB
+#pragma push_macro("IMAGE_REL_AMD64_ADDR64")
+#undef IMAGE_REL_AMD64_ADDR64
+#pragma push_macro("IMAGE_REL_AMD64_REL32")
+#undef IMAGE_REL_AMD64_REL32
+#pragma push_macro("IMAGE_REL_AMD64_SECREL")
+#undef IMAGE_REL_AMD64_SECREL
+#pragma push_macro("IMAGE_REL_AMD64_SECTION")
+#undef IMAGE_REL_AMD64_SECTION
+#pragma push_macro("IMAGE_REL_ARM64_ABSOLUTE")
+#undef IMAGE_REL_ARM64_ABSOLUTE
+#pragma push_macro("IMAGE_REL_ARM64_ADDR32")
+#undef IMAGE_REL_ARM64_ADDR32
+#pragma push_macro("IMAGE_REL_ARM64_ADDR32NB")
+#undef IMAGE_REL_ARM64_ADDR32NB
+#pragma push_macro("IMAGE_REL_ARM64_ADDR64")
+#undef IMAGE_REL_ARM64_ADDR64
+#pragma push_macro("IMAGE_REL_ARM64_BRANCH26")
+#undef IMAGE_REL_ARM64_BRANCH26
+#pragma push_macro("IMAGE_REL_ARM64_PAGE21")
+#undef IMAGE_REL_ARM64_PAGE21
+#pragma push_macro("IMAGE_REL_ARM64_PAGEOFFSET_12A")
+#undef IMAGE_REL_ARM64_PAGEOFFSET_12A
+#pragma push_macro("IMAGE_REL_ARM64_PAGEOFFSET_12L")
+#undef IMAGE_REL_ARM64_PAGEOFFSET_12L
+#pragma push_macro("IMAGE_REL_ARM64_REL32")
+#undef IMAGE_REL_ARM64_REL32
+#pragma push_macro("IMAGE_REL_ARM64_SECREL")
+#undef IMAGE_REL_ARM64_SECREL
+#pragma push_macro("IMAGE_REL_ARM64_SECTION")
+#undef IMAGE_REL_ARM64_SECTION
+#pragma push_macro("IMAGE_REL_BASED_ABSOLUTE")
+#undef IMAGE_REL_BASED_ABSOLUTE
+#pragma push_macro("IMAGE_REL_BASED_DIR64")
+#undef IMAGE_REL_BASED_DIR64
+#pragma push_macro("IMAGE_REL_BASED_HIGHLOW")
+#undef IMAGE_REL_BASED_HIGHLOW
+#pragma push_macro("IMAGE_SCN_ALIGN_16BYTES")
+#undef IMAGE_SCN_ALIGN_16BYTES
+#pragma push_macro("IMAGE_SCN_ALIGN_1BYTES")
+#undef IMAGE_SCN_ALIGN_1BYTES
+#pragma push_macro("IMAGE_SCN_ALIGN_2BYTES")
+#undef IMAGE_SCN_ALIGN_2BYTES
+#pragma push_macro("IMAGE_SCN_ALIGN_4BYTES")
+#undef IMAGE_SCN_ALIGN_4BYTES
+#pragma push_macro("IMAGE_SCN_ALIGN_8BYTES")
+#undef IMAGE_SCN_ALIGN_8BYTES
+#pragma push_macro("IMAGE_SCN_CNT_CODE")
+#undef IMAGE_SCN_CNT_CODE
+#pragma push_macro("IMAGE_SCN_CNT_INITIALIZED_DATA")
+#undef IMAGE_SCN_CNT_INITIALIZED_DATA
+#pragma push_macro("IMAGE_SCN_CNT_UNINITIALIZED_DATA")
+#undef IMAGE_SCN_CNT_UNINITIALIZED_DATA
+#pragma push_macro("IMAGE_SCN_LNK_NRELOC_OVFL")
+#undef IMAGE_SCN_LNK_NRELOC_OVFL
+#pragma push_macro("IMAGE_SCN_MEM_DISCARDABLE")
+#undef IMAGE_SCN_MEM_DISCARDABLE
+#pragma push_macro("IMAGE_SCN_MEM_EXECUTE")
+#undef IMAGE_SCN_MEM_EXECUTE
+#pragma push_macro("IMAGE_SCN_MEM_READ")
+#undef IMAGE_SCN_MEM_READ
+#pragma push_macro("IMAGE_SCN_MEM_WRITE")
+#undef IMAGE_SCN_MEM_WRITE
+#pragma push_macro("IMAGE_SUBSYSTEM_WINDOWS_CUI")
+#undef IMAGE_SUBSYSTEM_WINDOWS_CUI
+#pragma push_macro("IMAGE_SUBSYSTEM_WINDOWS_GUI")
+#undef IMAGE_SUBSYSTEM_WINDOWS_GUI
+#pragma push_macro("IMAGE_SYM_CLASS_EXTERNAL")
+#undef IMAGE_SYM_CLASS_EXTERNAL
+#pragma push_macro("IMAGE_SYM_CLASS_STATIC")
+#undef IMAGE_SYM_CLASS_STATIC
+#pragma push_macro("IMAGE_SYM_DTYPE_FUNCTION")
+#undef IMAGE_SYM_DTYPE_FUNCTION
+#pragma push_macro("UWOP_ALLOC_LARGE")
+#undef UWOP_ALLOC_LARGE
+#pragma push_macro("UWOP_ALLOC_SMALL")
+#undef UWOP_ALLOC_SMALL
+#pragma push_macro("UWOP_PUSH_MACHFRAME")
+#undef UWOP_PUSH_MACHFRAME
+#pragma push_macro("UWOP_PUSH_NONVOL")
+#undef UWOP_PUSH_NONVOL
+#pragma push_macro("UWOP_SAVE_NONVOL")
+#undef UWOP_SAVE_NONVOL
+#pragma push_macro("UWOP_SAVE_NONVOL_FAR")
+#undef UWOP_SAVE_NONVOL_FAR
+#pragma push_macro("UWOP_SAVE_XMM128")
+#undef UWOP_SAVE_XMM128
+#pragma push_macro("UWOP_SAVE_XMM128_FAR")
+#undef UWOP_SAVE_XMM128_FAR
+#pragma push_macro("UWOP_SET_FPREG")
+#undef UWOP_SET_FPREG

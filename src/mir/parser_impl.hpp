@@ -9,11 +9,15 @@
 #include <brass/mir/lexer.hpp>
 #include <brass/mir/builder.hpp>
 
+#include "parser_decode.hpp"
+
 #include <deque>
 #include <functional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace brass::mir_parser {
 
@@ -58,6 +62,35 @@ private:
         }
     }
 
+    // Consumes the IntLiteral at the cursor (callers check the kind) into
+    // `out` when it fits [lo, hi]; see int_literal_in_range.
+    bool take_int(int64_t lo, int64_t hi, unsigned hex_bits, std::string_view what, int64_t& out) {
+        Token tok = advance();
+        std::string err;
+        if (!int_literal_in_range(tok, lo, hi, hex_bits, what, out, err)) {
+            error(tok.location, std::move(err));
+            return false;
+        }
+        return true;
+    }
+
+    // A signed 32-bit memory offset.
+    bool take_offset(int32_t& out) {
+        int64_t v = 0;
+        if (!take_int(INT32_MIN, INT32_MAX, 0, "a 32-bit offset", v)) return false;
+        out = static_cast<int32_t>(v);
+        return true;
+    }
+
+    // An unsigned immediate held in [0, hi].
+    template <typename T>
+    bool take_unsigned(int64_t hi, std::string_view what, T& out) {
+        int64_t v = 0;
+        if (!take_int(0, hi, 0, what, v)) return false;
+        out = static_cast<T>(v);
+        return true;
+    }
+
     // parser_function.cpp
     Type parse_type();
     std::string_view parse_symbol_name();
@@ -71,7 +104,24 @@ private:
     // parser.cpp: one instruction into the builder's current block.
     bool parse_instruction(Builder& b, Function* fn, ValueMap& value_map, const BlockLookup& get_or_create_block);
 
+    // parser_function.cpp: the instructions of `bb` up to the next block
+    // header. Deferred: the body used a name no block parsed so far defines;
+    // its instructions and bindings were rolled back so the caller can parse
+    // it again (from a saved lexer) once more blocks are known.
+    enum class BlockParse { Done, Deferred, Failed };
+    BlockParse parse_block_body(Builder& b, Function* fn, BasicBlock* bb, ValueMap& value_map,
+                                const BlockLookup& get_or_create_block);
+
     Lexer lexer_;
+    // Forward references inside a function body: while forward_refs_ok_,
+    // parse_val resolves an unknown name to forward_placeholder_ and sets
+    // saw_forward_ref_ instead of reporting it. block_bindings_ holds the
+    // names the current block body bound, with the value each one had
+    // before, so a deferred body can be rolled back.
+    bool forward_refs_ok_ = false;
+    bool saw_forward_ref_ = false;
+    Value forward_placeholder_{0, Type::i64(), ValueKind::InstructionResult};
+    std::vector<std::pair<std::string, Value*>> block_bindings_;
     // Unescaped `@"..."` names; a deque so views handed out stay valid.
     std::deque<std::string> quoted_symbols_;
     DiagnosticReporter* diag_ = nullptr;

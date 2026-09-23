@@ -26,7 +26,7 @@ public:
         if (!ssa_val) return;
         uint32_t id = ssa_val->id();
         if (id >= values_.size()) {
-            values_.resize(std::max(static_cast<size_t>(id + 32), values_.size() * 2));
+            values_.resize((std::max)(static_cast<size_t>(id + 32), values_.size() * 2));
         }
         values_[id] = val;
     }

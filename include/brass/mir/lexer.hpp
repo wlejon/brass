@@ -75,6 +75,14 @@ struct Token {
     SourceLocation location;
     int64_t int_val = 0;
     double float_val = 0.0;
+    // IntLiteral only: the literal's magnitude and sign as written. int_val
+    // is the two's complement wrap of that value and is meaningful only when
+    // the parser's range check for the field accepts the literal; int_overflow
+    // marks a literal outside [-2^63, 2^64 - 1], which no field accepts.
+    uint64_t int_magnitude = 0;
+    bool int_negative = false;
+    bool int_hex = false;
+    bool int_overflow = false;
 
     bool is(TokenKind k) const noexcept { return kind == k; }
     bool is_not(TokenKind k) const noexcept { return kind != k; }

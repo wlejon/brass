@@ -37,8 +37,8 @@ struct ValueRange {
             max_val = 0;
             return;
         }
-        min_val = std::max(min_val, other.min_val);
-        max_val = std::min(max_val, other.max_val);
+        min_val = (std::max)(min_val, other.min_val);
+        max_val = (std::min)(max_val, other.max_val);
     }
 
     void union_with(const ValueRange& other) noexcept {
@@ -47,8 +47,8 @@ struct ValueRange {
             *this = other;
             return;
         }
-        min_val = std::min(min_val, other.min_val);
-        max_val = std::max(max_val, other.max_val);
+        min_val = (std::min)(min_val, other.min_val);
+        max_val = (std::max)(max_val, other.max_val);
     }
 
     [[nodiscard]] bool is_subrange_of(const ValueRange& other) const noexcept {
