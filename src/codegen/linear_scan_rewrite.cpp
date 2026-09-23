@@ -373,10 +373,11 @@ void LinearScanAllocator::rewrite_instructions() {
 
             std::vector<PReg> assigned_use_scratches;
 
-            // An x64 guard exit copies each state value from wherever it
-            // lives (its spill slot is frame-pointer relative), so spilled
-            // state needs no scratch: any number of values can be spilled.
-            const bool uses_read_from_memory = !is_aarch64 && inst->opcode == LirOpcode::GuardExit;
+            // A guard exit (x64 and AArch64 alike) copies each state value
+            // from wherever it lives (its spill slot is frame-pointer
+            // relative), so spilled state needs no scratch: any number of
+            // values can be spilled.
+            const bool uses_read_from_memory = inst->opcode == LirOpcode::GuardExit;
 
             for (size_t i = 0; i < inst->uses.size(); ++i) {
                 if (inst->uses[i].is_spill_slot() && !uses_read_from_memory) {

@@ -92,6 +92,7 @@ private:
     void emit_vec_instruction(const codegen::LirInst& inst);
     void emit_parallel_copy(const codegen::LirInst& inst);
     void emit_control_instruction(const codegen::LirInst& inst);
+    void emit_guard_exit(const codegen::LirInst& inst);
 };
 
 AArch64CompilationResult compile_lir_to_aarch64(const codegen::LirFunction& fn, const Target& target);

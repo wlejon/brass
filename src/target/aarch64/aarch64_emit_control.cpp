@@ -417,94 +417,9 @@ void AArch64EmitContext::emit_control_instruction(const LirInst& inst) {
             break;
         }
 
-        case LirOpcode::GuardExit: {
-            size_t num_uses = inst.uses.size();
-            size_t slots_bytes = num_uses * 8;
-            size_t total_alloc = (slots_bytes + 15) & ~size_t(15);
-
-            if (total_alloc > 0) enc_.sub(GPR::SP, GPR::SP, static_cast<uint32_t>(total_alloc));
-
-            for (size_t i = 0; i < num_uses; ++i) {
-                const auto& op = inst.uses[i];
-                int64_t slot_offset = static_cast<int64_t>(i * 8);
-
-                if (op.is_preg()) {
-                    if (op.preg_val.is_gpr()) {
-                        GPR src_gpr = op.preg_val.as_aarch64_gpr();
-                        if (op.size == 4) {
-                            enc_.sxtw(GPR::X16, src_gpr);
-                            enc_.str(GPR::X16, ptr(GPR::SP, slot_offset));
-                        } else {
-                            enc_.str(src_gpr, ptr(GPR::SP, slot_offset));
-                        }
-                    } else if (op.preg_val.is_xmm()) {
-                        enc_.str(op.preg_val.as_aarch64_fpr(), ptr(GPR::SP, slot_offset));
-                    }
-                } else if (op.is_spill_slot() || op.is_mem() || op.is_local_slot()) {
-                    MemAddress src_mem = ensure_accessible_mem(to_mem_address(op));
-                    enc_.ldr(GPR::X16, src_mem);
-                    enc_.str(GPR::X16, ptr(GPR::SP, slot_offset));
-                } else if (op.is_imm_int()) {
-                    enc_.mov(GPR::X16, static_cast<uint64_t>(op.imm_int));
-                    enc_.str(GPR::X16, ptr(GPR::SP, slot_offset));
-                }
-            }
-
-            uint32_t rid = inst.resume_id;
-            uint32_t rsn = inst.deopt_reason == 0 ? 1 : inst.deopt_reason;
-            uint32_t cnt = static_cast<uint32_t>(num_uses);
-            const bool has_exit_stub = !inst.exit_symbol.empty() && inst.exit_symbol != "@exit_stub" &&
-                                       inst.exit_symbol != "exit_stub";
-            if (has_exit_stub) rsn |= runtime::DeoptExitRecord::kReasonHasExitStub;
-
-            // AAPCS64 parameter registers: X0, X1, X2, X3
-            enc_.mov32(GPR::X0, rid);
-            enc_.mov32(GPR::X1, rsn);
-            enc_.mov32(GPR::X2, cnt);
-            if (num_uses > 0) enc_.mov(GPR::X3, GPR::SP);
-            else enc_.mov(GPR::X3, GPR::XZR);
-
-            enc_.bl("brass_deopt_exit");
-
-            if (!inst.exit_symbol.empty() && inst.exit_symbol != "@exit_stub" && inst.exit_symbol != "exit_stub") {
-                if (total_alloc > 0) enc_.add(GPR::SP, GPR::SP, static_cast<uint32_t>(total_alloc));
-                enc_.bl("brass_get_thread_deopt_slots");
-                // X0 now holds the deopt frame's slot array
-                enc_.mov(GPR::X1, GPR::X0);
-                enc_.mov32(GPR::X0, rid);
-                enc_.bl(inst.exit_symbol);
-
-                if (fn_.return_type.kind() == TypeKind::F64) {
-                    enc_.fmov_from_gpr(FPR::V0, GPR::X0);
-                } else if (fn_.return_type.kind() == TypeKind::F32) {
-                    enc_.fmov_from_gpr32(FPR::V0, GPR::X0);
-                } else if (fn_.return_type.is_v128()) {
-                    enc_.fmov_from_gpr(FPR::V0, GPR::X0);
-                }
-
-                AArch64FrameLayout::emit_epilogue(enc_, frame_, fn_.calling_conv);
-            } else {
-                if (total_alloc > 0) enc_.add(GPR::SP, GPR::SP, static_cast<uint32_t>(total_alloc));
-                if (inst.deopt_reason == static_cast<uint32_t>(runtime::DeoptReason::BoundsCheckFailed)) {
-                    // Out-of-bounds guards must not silently exit returning uninitialized garbage.
-                    // If brass_deopt_exit returned null (unhandled deopt), trap with brk(0).
-                    Label handle_ok = buffer_.create_label();
-                    enc_.cbnz(GPR::X0, handle_ok);
-                    enc_.brk(0);
-                    buffer_.bind(handle_ok);
-                }
-                if (fn_.return_type.kind() == TypeKind::F64) {
-                    enc_.fmov_from_gpr(FPR::V0, GPR::X0);
-                } else if (fn_.return_type.kind() == TypeKind::F32) {
-                    enc_.fmov_from_gpr32(FPR::V0, GPR::X0);
-                } else if (fn_.return_type.is_v128()) {
-                    enc_.fmov_from_gpr(FPR::V0, GPR::X0);
-                }
-
-                AArch64FrameLayout::emit_epilogue(enc_, frame_, fn_.calling_conv);
-            }
+        case LirOpcode::GuardExit:
+            emit_guard_exit(inst);
             break;
-        }
 
         default:
             throw_unsupported("aarch64 emit (control)", to_string(inst.opcode));
