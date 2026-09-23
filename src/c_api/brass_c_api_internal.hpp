@@ -45,15 +45,24 @@ struct BrassFunction_T {
     brass::Module* mod = nullptr;
 };
 
+// Lifetime: the context owns every function, block and value handle. Every
+// other object that remembers the context (module, builder, JIT engine, kernel
+// JIT, kernel function) holds a reference on it, so objects can be destroyed
+// in any order. brass_context_destroy drops the caller's reference; the
+// context is freed when the last dependent object is destroyed.
 struct BrassContext_T {
     std::string last_error;
     std::vector<std::unique_ptr<BrassValue_T>> values;
     std::vector<std::unique_ptr<BrassBlock_T>> blocks;
     std::vector<std::unique_ptr<BrassFunction_T>> functions;
     std::vector<BrassBuilder_T*> builders;
+    size_t dependents = 0;
+    bool destroyed = false;
 
-    BrassValue wrap_value(brass::Value* v, brass::Module* m = nullptr) {
-        if (!v) return nullptr;
+    // Every value handle is owned by exactly one module: invalidation on
+    // module destroy matches on the owner, never on "unknown".
+    BrassValue wrap_value(brass::Value* v, brass::Module* m) {
+        if (!v || !m) return nullptr;
         auto bv = std::make_unique<BrassValue_T>();
         bv->ctx = this;
         bv->val = v;
@@ -63,20 +72,20 @@ struct BrassContext_T {
         return ptr;
     }
 
-    BrassBlock wrap_block(brass::BasicBlock* bb, brass::Function* fn, brass::Module* m = nullptr) {
-        if (!bb) return nullptr;
+    BrassBlock wrap_block(brass::BasicBlock* bb, brass::Function* fn, brass::Module* m) {
+        if (!bb || !fn || !m) return nullptr;
         auto blk = std::make_unique<BrassBlock_T>();
         blk->ctx = this;
         blk->block = bb;
         blk->func = fn;
-        blk->mod = m ? m : (fn ? fn->parent() : nullptr);
+        blk->mod = m;
         BrassBlock ptr = blk.get();
         blocks.push_back(std::move(blk));
         return ptr;
     }
 
     BrassFunction wrap_function(brass::Function* fn, brass::Module* m) {
-        if (!fn) return nullptr;
+        if (!fn || !m) return nullptr;
         auto f = std::make_unique<BrassFunction_T>();
         f->ctx = this;
         f->func = fn;
@@ -98,33 +107,37 @@ struct BrassBuilder_T {
     BrassContext ctx = nullptr;
     brass::Builder builder;
     brass::Function* func = nullptr;
-    const brass::Module* mod = nullptr;
+    brass::Module* mod = nullptr;
     bool is_valid = true;
 };
 
 inline void BrassContext_T::invalidate_module_handles(const brass::Module* m) {
     if (!m) return;
     for (auto& f : functions) {
-        if (f && (f->mod == m || (f->func && f->func->parent() == m))) {
+        if (f && f->mod == m) {
             f->func = nullptr;
             f->mod = nullptr;
         }
     }
     for (auto& blk : blocks) {
-        if (blk && (blk->mod == m || (blk->func && (blk->func->parent() == m || blk->func->parent() == nullptr)))) {
+        if (blk && blk->mod == m) {
             blk->block = nullptr;
             blk->func = nullptr;
             blk->mod = nullptr;
         }
     }
     for (auto& v : values) {
-        if (v && (v->mod == m || !v->mod)) {
+        if (v && v->mod == m) {
             v->val = nullptr;
             v->mod = nullptr;
         }
     }
     for (auto* b : builders) {
-        if (b && (b->mod == m || !b->mod)) {
+        if (b && b->mod == m) {
+            // The inner builder points into the module being freed; drop
+            // its function and insertion point so nothing can reach them.
+            b->builder.position_at_end(nullptr);
+            b->builder.set_function(nullptr);
             b->func = nullptr;
             b->mod = nullptr;
             b->is_valid = false;
@@ -132,15 +145,32 @@ inline void BrassContext_T::invalidate_module_handles(const brass::Module* m) {
     }
 }
 
+inline void ctx_retain(BrassContext ctx) {
+    if (ctx) ++ctx->dependents;
+}
+
+inline void ctx_release(BrassContext ctx) {
+    if (!ctx) return;
+    if (ctx->dependents > 0) --ctx->dependents;
+    if (ctx->destroyed && ctx->dependents == 0) delete ctx;
+}
+
+// A compiled module owns its own execution engine: its code and symbol table
+// are independent of every other module compiled by the same BrassJitEngine,
+// and brass_compiled_module_destroy frees them.
 struct BrassCompiledModule_T {
     BrassContext ctx = nullptr;
     std::string module_name;
     BrassJitEngine jit = nullptr;
+    std::unique_ptr<brass::codegen::JitExecutionEngine> engine; // null once destroyed
+    std::vector<std::string> function_names;
 };
 
 struct BrassJitEngine_T {
     BrassContext ctx = nullptr;
-    std::unique_ptr<brass::codegen::JitExecutionEngine> engine;
+    // Host symbols registered through brass_jit_register_symbol, applied (in
+    // order) to every module compiled afterwards.
+    std::vector<std::pair<std::string, void*>> external_symbols;
     std::vector<std::unique_ptr<BrassCompiledModule_T>> compiled_modules;
 };
 

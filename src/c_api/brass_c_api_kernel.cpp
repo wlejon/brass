@@ -84,6 +84,7 @@ BrassKernelJit brass_kernel_jit_create(BrassContext ctx, const BrassKernelOption
             kopts = opts->opts;
         }
         kj->jit = std::make_unique<codegen::KernelJit>(kopts, Target::host());
+        ctx_retain(ctx);
         return kj;
     } catch (const std::exception& e) {
         set_ctx_exception(ctx, "brass_kernel_jit_create", e);
@@ -92,7 +93,10 @@ BrassKernelJit brass_kernel_jit_create(BrassContext ctx, const BrassKernelOption
 }
 
 void brass_kernel_jit_destroy(BrassKernelJit kj) {
+    if (!kj) return;
+    BrassContext ctx = kj->ctx;
     delete kj;
+    ctx_release(ctx);
 }
 
 void brass_kernel_jit_set_parallel_workers(BrassKernelJit kj, uint32_t workers) {
@@ -137,6 +141,7 @@ BrassKernelFunction brass_kernel_jit_compile(BrassKernelJit kj, BrassModule mod,
         auto* res = new BrassKernelFunction_T();
         res->ctx = kj->ctx;
         res->kfn = std::move(kfn);
+        ctx_retain(res->ctx);
         return res;
     } catch (const std::exception& e) {
         set_ctx_exception(kj->ctx, "brass_kernel_jit_compile", e);
@@ -155,6 +160,7 @@ BrassKernelFunction brass_kernel_jit_compile_function(BrassKernelJit kj, BrassFu
         auto* res = new BrassKernelFunction_T();
         res->ctx = kj->ctx;
         res->kfn = std::move(kfn);
+        ctx_retain(res->ctx);
         return res;
     } catch (const std::exception& e) {
         set_ctx_exception(kj->ctx, "brass_kernel_jit_compile_function", e);
@@ -179,7 +185,10 @@ size_t brass_kernel_function_get_code_size(BrassKernelFunction kfn) {
 }
 
 void brass_kernel_function_destroy(BrassKernelFunction kfn) {
+    if (!kfn) return;
+    BrassContext ctx = kfn->ctx;
     delete kfn;
+    ctx_release(ctx);
 }
 
 /* Polyhedral Loop Dependence Analysis */

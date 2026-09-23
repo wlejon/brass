@@ -158,6 +158,7 @@ add_executable(brass_unit_tests
     unit/test_fuzz_sandbox.cpp
     unit/test_delta_reducer.cpp
     unit/test_c_api.cpp
+    unit/test_c_api_lifetime.cpp
     unit/test_native_cabi.cpp
     unit/test_range_analysis.cpp
     unit/test_bounds_check_elim.cpp
@@ -220,6 +221,13 @@ target_link_libraries(brass_unit_tests
     PRIVATE
         brass
 )
+
+# test_c_api_lifetime.cpp checks the shared library's C exports.
+if(TARGET brass_shared)
+    add_dependencies(brass_unit_tests brass_shared)
+    target_compile_definitions(brass_unit_tests PRIVATE
+        BRASS_TEST_SHARED_LIB="$<TARGET_FILE:brass_shared>")
+endif()
 
 # One ctest per TEST_CASE, discovered from the binary each time ctest starts
 # (see cmake/discover_unit_tests.cmake), so one crash cannot hide the rest.

@@ -13,24 +13,33 @@ extern "C" {
 #define BRASS_VERSION_MINOR 0
 #define BRASS_VERSION_PATCH 0
 
-/* Platform export macros */
-#if defined(_WIN32) || defined(__CYGWIN__)
-  #if defined(BRASS_BUILD_SHARED)
-    #define BRASS_API __declspec(dllexport)
-  #elif defined(BRASS_SHARED)
-    #define BRASS_API __declspec(dllimport)
-  #else
-    #define BRASS_API
-  #endif
-  #define BRASS_CALL __cdecl
-#else
-  #if defined(BRASS_BUILD_SHARED)
-    #define BRASS_API __attribute__((visibility("default")))
-  #else
-    #define BRASS_API
-  #endif
-  #define BRASS_CALL
-#endif
+/* Platform export macros (BRASS_API, BRASS_CALL) */
+#include <brass/brass_export.h>
+
+/* Object lifetime
+ *
+ * Every object returned by a *_create function, by brass_translate_bronze_il,
+ * or by brass_kernel_jit_compile* must be released with its matching
+ * *_destroy function. Destroy calls may come in any order:
+ *
+ *  - brass_context_destroy releases the caller's reference to the context.
+ *    The context itself stays alive until every module, builder, JIT engine,
+ *    kernel JIT and kernel function created from it has been destroyed, so
+ *    destroying those afterwards is safe. Do not pass the context to any
+ *    other function after destroying it.
+ *  - Function, block and value handles are owned by the context and are
+ *    never destroyed individually. They die with their module: once
+ *    brass_module_destroy runs, handles from that module (and builders
+ *    working on it) are invalid, and every call using them fails with an
+ *    error in brass_context_get_last_error. Handles from other modules are
+ *    unaffected.
+ *  - Compiled modules are owned by their JIT engine and freed by
+ *    brass_jit_destroy. brass_compiled_module_destroy frees the module's
+ *    code; later lookups through that handle fail with an error.
+ *
+ * Builder and JIT calls report misuse (NULL or invalidated handles, handles
+ * from another module, an unpositioned builder) by returning NULL or an
+ * error status and setting the context's last error. */
 
 /* Status codes */
 typedef enum BrassStatus {
@@ -189,10 +198,13 @@ BRASS_API BrassValue BRASS_CALL brass_build_cmp(BrassBuilder b, BrassCmpOp op, B
 /* Control Flow */
 BRASS_API BrassStatus BRASS_CALL brass_build_br(BrassBuilder b, BrassBlock target, const BrassValue* args, size_t arg_count);
 BRASS_API BrassStatus BRASS_CALL brass_build_br_if(BrassBuilder b, BrassValue cond, BrassBlock true_target, const BrassValue* true_args, size_t true_arg_count, BrassBlock false_target, const BrassValue* false_args, size_t false_arg_count);
+/* val == NULL emits `ret void` and is accepted only in a void function; a
+ * non-NULL val must have the function's return type. */
 BRASS_API BrassStatus BRASS_CALL brass_build_ret(BrassBuilder b, BrassValue val);
 BRASS_API BrassStatus BRASS_CALL brass_build_unreachable(BrassBuilder b);
 
 /* Calls & Function Pointers */
+/* A call with a void return type is emitted and returns NULL. */
 BRASS_API BrassValue BRASS_CALL brass_build_call(BrassBuilder b, const char* callee, BrassType return_type, const BrassValue* args, size_t arg_count);
 BRASS_API BrassValue BRASS_CALL brass_build_func_addr(BrassBuilder b, const char* name);
 
@@ -226,6 +238,14 @@ BRASS_API BrassStatus BRASS_CALL brass_translate_bronze_il(BrassContext ctx, con
 /* ========================================================================= */
 /* JIT Execution Engine                                                      */
 /* ========================================================================= */
+/* Each compiled module has its own code and symbols. A function name may be
+ * defined by only one live compiled module of an engine: compiling a module
+ * that defines a name already defined by a live compiled module (including
+ * compiling the same module twice) fails. Destroying a compiled module
+ * releases its names. brass_compiled_module_get_symbol looks only in its own
+ * module; brass_jit_get_function_address searches all live modules.
+ * Symbols registered with brass_jit_register_symbol apply to modules
+ * compiled afterwards. */
 BRASS_API BrassJitEngine BRASS_CALL brass_jit_create(BrassContext ctx);
 BRASS_API void BRASS_CALL brass_jit_destroy(BrassJitEngine jit);
 BRASS_API BrassStatus BRASS_CALL brass_jit_register_symbol(BrassJitEngine jit, const char* name, void* address);

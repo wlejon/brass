@@ -123,8 +123,10 @@ BrassContext brass_context_create(void) {
 }
 
 void brass_context_destroy(BrassContext ctx) {
+    if (!ctx || ctx->destroyed) return;
     try {
-        delete ctx;
+        ctx->destroyed = true;
+        if (ctx->dependents == 0) delete ctx;
     } catch (...) {
     }
 }
@@ -145,6 +147,7 @@ BrassModule brass_module_create(BrassContext ctx, const char* name) {
         auto* mod = new BrassModule_T();
         mod->ctx = ctx;
         mod->mod = std::make_unique<Module>(name ? name : "module");
+        ctx_retain(ctx);
         return mod;
     } catch (const std::exception& e) {
         set_ctx_exception(ctx, "brass_module_create", e);
@@ -157,13 +160,15 @@ BrassModule brass_module_create(BrassContext ctx, const char* name) {
 
 void brass_module_destroy(BrassModule mod) {
     if (!mod) return;
+    BrassContext ctx = mod->ctx;
     try {
-        if (mod->ctx && mod->mod) {
-            mod->ctx->invalidate_module_handles(mod->mod.get());
+        if (ctx && mod->mod) {
+            ctx->invalidate_module_handles(mod->mod.get());
         }
         delete mod;
     } catch (...) {
     }
+    ctx_release(ctx);
 }
 
 void brass_module_add_external_symbol(BrassModule mod, const char* name) {
@@ -369,6 +374,7 @@ BrassStatus brass_translate_bronze_il(BrassContext ctx, const char* il_text, siz
         auto* mod = new BrassModule_T();
         mod->ctx = ctx;
         mod->mod = std::move(res.module);
+        ctx_retain(ctx);
         *out_mod = mod;
         return BRASS_OK;
     } catch (const std::exception& e) {
@@ -387,8 +393,7 @@ BrassJitEngine brass_jit_create(BrassContext ctx) {
     try {
         auto* jit = new BrassJitEngine_T();
         jit->ctx = ctx;
-        jit->engine = std::make_unique<codegen::JitExecutionEngine>(Target::host());
-        il::register_bronze_runtime_symbols(jit->engine.get());
+        ctx_retain(ctx);
         return jit;
     } catch (const std::exception& e) {
         set_ctx_exception(ctx, "brass_jit_create", e);
@@ -397,13 +402,16 @@ BrassJitEngine brass_jit_create(BrassContext ctx) {
 }
 
 void brass_jit_destroy(BrassJitEngine jit) {
+    if (!jit) return;
+    BrassContext ctx = jit->ctx;
     delete jit;
+    ctx_release(ctx);
 }
 
 BrassStatus brass_jit_register_symbol(BrassJitEngine jit, const char* name, void* address) {
-    if (!jit || !jit->engine || !name) return BRASS_ERR_INVALID_ARGUMENT;
+    if (!jit || !name) return BRASS_ERR_INVALID_ARGUMENT;
     try {
-        jit->engine->register_external_symbol(name, address);
+        jit->external_symbols.emplace_back(name, address);
         return BRASS_OK;
     } catch (const std::exception& e) {
         set_ctx_exception(jit->ctx, "brass_jit_register_symbol", e);
@@ -412,13 +420,43 @@ BrassStatus brass_jit_register_symbol(BrassJitEngine jit, const char* name, void
 }
 
 BrassCompiledModule brass_jit_compile_module(BrassJitEngine jit, BrassModule mod) {
-    if (!jit || !jit->engine || !mod || !mod->mod) return nullptr;
+    if (!jit || !mod || !mod->mod) {
+        if (jit) set_ctx_error(jit->ctx, "brass_jit_compile_module: null or destroyed module");
+        return nullptr;
+    }
     try {
+        // Function symbols are unique across the live modules of one engine:
+        // a second definition (including compiling the same module again
+        // while its first compilation is alive) is an error, not a shadow.
+        std::vector<std::string> names;
+        for (auto* fn : mod->mod->functions()) {
+            if (!fn || fn->block_count() == 0) continue;
+            std::string name(fn->name());
+            for (const auto& live : jit->compiled_modules) {
+                if (!live->engine) continue;
+                for (const auto& other : live->function_names) {
+                    if (other == name) {
+                        set_ctx_error(jit->ctx, "brass_jit_compile_module: function '" + name +
+                            "' of module '" + std::string(mod->mod->name()) +
+                            "' is already defined by compiled module '" + live->module_name +
+                            "' in this JIT engine");
+                        return nullptr;
+                    }
+                }
+            }
+            names.push_back(std::move(name));
+        }
+
         for (auto* fn : mod->mod->functions()) {
             if (fn) fn->rebuild_cfg_predecessors();
         }
 
-        bool ok = jit->engine->compile_and_load(*mod->mod);
+        auto engine = std::make_unique<codegen::JitExecutionEngine>(Target::host());
+        il::register_bronze_runtime_symbols(engine.get());
+        for (const auto& [sym, addr] : jit->external_symbols) {
+            engine->register_external_symbol(sym, addr);
+        }
+        bool ok = engine->compile_and_load(*mod->mod);
         if (!ok) {
             set_ctx_error(jit->ctx, "JIT compilation and loading failed");
             return nullptr;
@@ -428,6 +466,8 @@ BrassCompiledModule brass_jit_compile_module(BrassJitEngine jit, BrassModule mod
         cmod->ctx = jit->ctx;
         cmod->module_name = std::string(mod->mod->name());
         cmod->jit = jit;
+        cmod->engine = std::move(engine);
+        cmod->function_names = std::move(names);
         BrassCompiledModule ptr = cmod.get();
         jit->compiled_modules.push_back(std::move(cmod));
         return ptr;
@@ -438,22 +478,37 @@ BrassCompiledModule brass_jit_compile_module(BrassJitEngine jit, BrassModule mod
 }
 
 void* brass_jit_get_function_address(BrassJitEngine jit, const char* name) {
-    if (!jit || !jit->engine || !name) return nullptr;
+    if (!jit || !name) return nullptr;
     try {
-        return jit->engine->get_symbol_address(name);
+        for (const auto& cmod : jit->compiled_modules) {
+            if (!cmod->engine) continue;
+            for (const auto& fn_name : cmod->function_names) {
+                if (fn_name == name) return cmod->engine->get_symbol_address(name);
+            }
+        }
+        return nullptr;
     } catch (...) {
         return nullptr;
     }
 }
 
 void brass_compiled_module_destroy(BrassCompiledModule mod) {
-    (void)mod;
+    // The handle itself stays owned by its JIT engine (freed with it), so a
+    // later lookup through it is a reported error rather than a dangling read.
+    if (!mod) return;
+    mod->engine.reset();
+    mod->function_names.clear();
 }
 
 void* brass_compiled_module_get_symbol(BrassCompiledModule mod, const char* name) {
-    if (!mod || !mod->jit) return nullptr;
+    if (!mod || !name) return nullptr;
+    if (!mod->engine) {
+        set_ctx_error(mod->ctx, "brass_compiled_module_get_symbol: compiled module '" +
+            mod->module_name + "' has been destroyed");
+        return nullptr;
+    }
     try {
-        return brass_jit_get_function_address(mod->jit, name);
+        return mod->engine->get_symbol_address(name);
     } catch (...) {
         return nullptr;
     }

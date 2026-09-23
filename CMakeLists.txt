@@ -194,7 +194,11 @@ if(BRASS_IS_TOP_LEVEL)
             RUNTIME DESTINATION bin
         )
     endif()
-    install(FILES ${BRASS_INCLUDE_DIR}/brass/brass_c_api.h DESTINATION include/brass)
+    install(FILES
+        ${BRASS_INCLUDE_DIR}/brass/brass_c_api.h
+        ${BRASS_INCLUDE_DIR}/brass/brass_export.h
+        DESTINATION include/brass)
+    install(FILES ${BRASS_INCLUDE_DIR}/brass/embedding/brass_c_api.h DESTINATION include/brass/embedding)
 endif()
 
 # Tools
