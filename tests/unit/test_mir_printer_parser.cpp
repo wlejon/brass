@@ -365,6 +365,110 @@ TEST_CASE("Roundtrip Golden 8: Multi-function module with extern declarations") 
     test_roundtrip(text);
 }
 
+TEST_CASE("Roundtrip Golden 9: module/function/parameter attributes, string data and symbol roles") {
+    std::string text = "module @attrs_module\n\n"
+                       "attributes fp_reassociation pinned_tls_register loop_optimizations\n\n"
+                       "string @greeting \"hi \\\"there\\\" \\\\ \\x0a\\x00end\\xff\"\n"
+                       "string @empty \"\"\n"
+                       "extern @fn_name_table data\n"
+                       "extern @gc_alloc allocator\n"
+                       "extern @hash pure\n\n"
+                       "func @kernel(%0: ptr noalias, %1: ptr noalias, %2: i64) -> ptr fp_reassociation {\n"
+                       "bb0:\n"
+                       "  %3 = load.f64 %0\n"
+                       "  %4 = load.f64 %1\n"
+                       "  %5 = add.f64 %3, %4\n"
+                       "  store.f64 %0, %5\n"
+                       "  %6 = func_addr @greeting\n"
+                       "  ret %6\n"
+                       "}\n\n"
+                       "func @plain(%0: ptr, %1: ptr noalias) -> void {\n"
+                       "bb0:\n"
+                       "  ret\n"
+                       "}\n";
+    test_roundtrip(text);
+
+    auto mod = parse_module(text);
+    REQUIRE(mod != nullptr);
+    CHECK(mod->allow_fp_reassociation());
+    CHECK(mod->pinned_tls_register());
+    CHECK(mod->has_loop_optimizations());
+    const char* greeting = mod->string_symbol("greeting");
+    REQUIRE(greeting != nullptr);
+    static const char kGreeting[] = "hi \"there\" \\ \n\0end\xff";
+    const std::string expect_greeting(kGreeting, sizeof(kGreeting) - 1);
+    REQUIRE(mod->string_symbols().size() == 2u);
+    CHECK_EQ(std::string(mod->string_symbols()[0].second), expect_greeting);
+    CHECK(mod->string_symbol("empty") != nullptr);
+    CHECK(mod->has_symbol_role("fn_name_table", SymbolRole::Data));
+    CHECK(mod->has_symbol_role("gc_alloc", SymbolRole::Allocator));
+    CHECK(mod->has_symbol_role("hash", SymbolRole::Pure));
+    const Function* kernel = mod->get_function("kernel");
+    REQUIRE(kernel != nullptr);
+    CHECK(kernel->allow_fp_reassociation());
+    CHECK(kernel->is_param_noalias(0));
+    CHECK(kernel->is_param_noalias(1));
+    CHECK(!kernel->is_param_noalias(2));
+    const Function* plain = mod->get_function("plain");
+    REQUIRE(plain != nullptr);
+    CHECK(!plain->allow_fp_reassociation());
+    CHECK(!plain->is_param_noalias(0));
+    CHECK(plain->is_param_noalias(1));
+}
+
+TEST_CASE("Roundtrip: programmatic attributes, string symbols and roles survive print-parse-print") {
+    Module mod("built");
+    mod.define_string_symbol("__bronze_fn_name_f", "f$coro");
+    mod.add_symbol_role("__bronze_fn_name_g", SymbolRole::Data);
+    mod.add_symbol_role("alloc", SymbolRole::Allocator);
+    mod.add_symbol_role("alloc", SymbolRole::Pure);
+    Function* fn = mod.create_function("f", Type::i64(), {Type::ptr(), Type::ptr()});
+    fn->set_param_noalias(1);
+    fn->set_allow_fp_reassociation(true);
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* entry = b.create_block("bb0");
+    fn->append_block(entry);
+    b.position_at_end(entry);
+    b.add_block_param(entry, Type::ptr());
+    b.add_block_param(entry, Type::ptr());
+    b.build_ret(b.build_iconst_i64(7));
+
+    const std::string printed1 = to_string(mod);
+    DiagnosticReporter diag;
+    auto reparsed = parse_module(printed1, &diag);
+    if (!reparsed) std::cerr << diag.format_all() << "\n" << printed1 << "\n";
+    REQUIRE(reparsed != nullptr);
+    CHECK_EQ(to_string(*reparsed), printed1);
+    CHECK_EQ(std::string(reparsed->string_symbol("__bronze_fn_name_f")), std::string("f$coro"));
+    CHECK(reparsed->has_symbol_role("__bronze_fn_name_g", SymbolRole::Data));
+    CHECK(reparsed->has_symbol_role("alloc", SymbolRole::Allocator));
+    CHECK(reparsed->has_symbol_role("alloc", SymbolRole::Pure));
+    const Function* rf = reparsed->get_function("f");
+    REQUIRE(rf != nullptr);
+    CHECK(rf->allow_fp_reassociation());
+    CHECK(!rf->is_param_noalias(0));
+    CHECK(rf->is_param_noalias(1));
+}
+
+TEST_CASE("Parser rejects unknown attributes and malformed string data") {
+    const char* bad[] = {
+        "attributes fast_math\n",
+        "func @f(%0: ptr restrict) -> void {\nbb0:\n  ret\n}\n",
+        "func @f() -> void inline {\nbb0:\n  ret\n}\n",
+        "string @s \"bad \\q escape\"\n",
+        "string @s \"short \\x4\"\n",
+        "string @s 42\n",
+        "string @s \"a\"\nstring @s \"b\"\n",
+    };
+    for (const char* src : bad) {
+        DiagnosticReporter diag;
+        auto mod = parse_module(src, &diag);
+        CHECK(mod == nullptr);
+        CHECK(diag.has_errors());
+    }
+}
+
 TEST_CASE("Parser negative error cases with actionable diagnostics") {
     // 1. Bad top-level syntax
     {

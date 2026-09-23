@@ -26,7 +26,6 @@ struct InlinerOptions {
     bool enable_speculative_devirtualization = false;
     bool enable_loop_priority = true;
     bool enable_sroa = true;
-    bool enable_gvn = true;
     const pgo::ProfileData* profile_data = nullptr;
     bool enable_pgo = true;
     bool only_inline_leaf_functions = false;

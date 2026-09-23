@@ -68,6 +68,28 @@ void X64ISel::lower_call(const Instruction& inst, LirBlock& lir_bb) {
         const auto* arg_val = inst.operand(start_arg + i);
         VReg arg_vreg = get_vreg(arg_val);
         Type t = arg_val->type();
+        if (t.is_vector()) {
+            // Vectors travel in XMM registers, matching the tier-2 entry,
+            // the baseline JIT and the invoke thunks: by position on Win64
+            // (XMM0-3), the next free XMM register on SysV. No tier has a
+            // stack layout for vector arguments, so one that would land on
+            // the stack is a compile error.
+            const uint8_t vsz = static_cast<uint8_t>(t.size_in_bytes());
+            XMM xreg;
+            if (cc_.kind() == CallingConvKind::Win64) {
+                if (i >= 4) throw_unsupported("x64 isel (call)", "vector argument passed on the stack");
+                xreg = static_cast<XMM>(i);
+            } else {
+                if (xmm_idx >= cc_.num_arg_xmms()) throw_unsupported("x64 isel (call)", "vector argument passed on the stack");
+                xreg = cc_.arg_xmm(xmm_idx++);
+            }
+            auto mov_arg = std::make_unique<LirInst>(vsz == 32 ? LirOpcode::Vmovaps : LirOpcode::Movaps);
+            mov_arg->add_def(LirOperand::preg_xmm(xreg, vsz), FixedConstraint::xmm(xreg));
+            mov_arg->add_use(LirOperand::vreg(arg_vreg, vsz));
+            call_lir->add_use(LirOperand::preg_xmm(xreg, vsz), FixedConstraint::xmm(xreg));
+            lir_bb.append_inst(std::move(mov_arg));
+            continue;
+        }
         uint8_t sz = (t.size_in_bytes() == 4) ? 4 : 8;
         LirOpcode mov_op = t.is_float() ? (sz == 4 ? LirOpcode::Movss : LirOpcode::Movsd) : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
 
@@ -160,7 +182,7 @@ void X64ISel::lower_call(const Instruction& inst, LirBlock& lir_bb) {
     Type ret_t = inst.type();
     if (!ret_t.is_void()) {
         uint8_t ret_sz = static_cast<uint8_t>(ret_t.size_in_bytes());
-        if (ret_t.is_float()) {
+        if (ret_t.is_float() || ret_t.is_vector()) {
             call_lir->add_def(LirOperand::preg_xmm(XMM::XMM0, ret_sz), FixedConstraint::xmm(XMM::XMM0));
         } else {
             call_lir->add_def(LirOperand::preg_gpr(GPR::RAX, ret_sz), FixedConstraint::gpr(GPR::RAX));
@@ -173,7 +195,12 @@ void X64ISel::lower_call(const Instruction& inst, LirBlock& lir_bb) {
     if (inst.produces_value()) {
         VReg dst = get_vreg(inst.result());
         uint8_t ret_sz = static_cast<uint8_t>(ret_t.size_in_bytes());
-        if (ret_t.is_float()) {
+        if (ret_t.is_vector()) {
+            auto mov_ret = std::make_unique<LirInst>(ret_sz == 32 ? LirOpcode::Vmovaps : LirOpcode::Movaps);
+            mov_ret->add_def(LirOperand::vreg(dst, ret_sz));
+            mov_ret->add_use(LirOperand::preg_xmm(XMM::XMM0, ret_sz), FixedConstraint::xmm(XMM::XMM0));
+            lir_bb.append_inst(std::move(mov_ret));
+        } else if (ret_t.is_float()) {
             auto mov_ret = std::make_unique<LirInst>(ret_sz == 4 ? LirOpcode::Movss : LirOpcode::Movsd);
             mov_ret->add_def(LirOperand::vreg(dst, ret_sz));
             mov_ret->add_use(LirOperand::preg_xmm(XMM::XMM0, ret_sz), FixedConstraint::xmm(XMM::XMM0));

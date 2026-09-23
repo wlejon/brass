@@ -1,4 +1,5 @@
 #include <brass/target/x64/x64_isel.hpp>
+#include <brass/codegen/unsupported_operation.hpp>
 #include <brass/mir/module.hpp>
 #include <brass/mir/osr.hpp>
 #include <cstring>
@@ -561,6 +562,7 @@ void X64ISel::lower_entry_parameters(const Function& mir_fn) {
                     pcopy->add_use(LirOperand::preg_gpr(greg, sz), FixedConstraint::gpr(greg));
                 }
             } else {
+                if (t.is_vector()) throw_unsupported("x64 isel (entry)", "vector parameter passed on the stack");
                 int32_t disp = static_cast<int32_t>(48 + (i - 4) * 8);
                 lir_fn_->frame.has_stack_args = true;
                 pcopy->add_def(LirOperand::vreg(param_vreg, sz));
@@ -573,6 +575,7 @@ void X64ISel::lower_entry_parameters(const Function& mir_fn) {
                     pcopy->add_def(LirOperand::vreg(param_vreg, sz));
                     pcopy->add_use(LirOperand::preg_xmm(xreg, sz), FixedConstraint::xmm(xreg));
                 } else {
+                    if (t.is_vector()) throw_unsupported("x64 isel (entry)", "vector parameter passed on the stack");
                     size_t stack_idx = (xmm_idx - cc_.num_arg_xmms()) + (gpr_idx > cc_.num_arg_gprs() ? (gpr_idx - cc_.num_arg_gprs()) : 0);
                     int32_t disp = static_cast<int32_t>(16 + stack_idx * 8);
                     lir_fn_->frame.has_stack_args = true;

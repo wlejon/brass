@@ -62,6 +62,8 @@ private:
     std::string_view parse_symbol_name();
     bool parse_module_decl(Module& mod);
     bool parse_extern_decl(Module& mod);
+    bool parse_module_attributes(Module& mod);
+    bool parse_string_decl(Module& mod);
     Function* parse_function_decl(Module& mod);
     bool parse_resume_table(Function* fn, const BlockLookup& get_or_create_block);
 

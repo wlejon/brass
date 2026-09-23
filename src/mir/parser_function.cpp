@@ -7,12 +7,23 @@
 
 #include <brass/mir/runtime_symbols.hpp>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace brass {
 
 namespace mir_parser {
+
+namespace {
+
+// The top-level directives spelled as plain identifiers. Attribute and role
+// lists end at one (the lexer does not see line ends).
+bool is_top_level_directive(const Token& tok) {
+    return tok.is(TokenKind::Ident) && (tok.text == "attributes" || tok.text == "string");
+}
+
+} // namespace
 
 bool Parser::parse_module(Module& mod) {
     while (!peek().is(TokenKind::Eof)) {
@@ -22,6 +33,10 @@ bool Parser::parse_module(Module& mod) {
             if (!parse_extern_decl(mod)) return false;
         } else if (peek().is(TokenKind::Kw_func)) {
             if (!parse_function_decl(mod)) return false;
+        } else if (peek().is(TokenKind::Ident) && peek().text == "attributes") {
+            if (!parse_module_attributes(mod)) return false;
+        } else if (peek().is(TokenKind::Ident) && peek().text == "string") {
+            if (!parse_string_decl(mod)) return false;
         } else {
             error(peek().location, "Unexpected top-level token: '" + std::string(peek().text) + "'");
             return false;
@@ -104,7 +119,7 @@ bool Parser::parse_extern_decl(Module& mod) {
 
     mod.add_external_symbol(sym_name);
     // Runtime-symbol roles (runtime_symbols.hpp), any number of them.
-    while (peek().is(TokenKind::Ident)) {
+    while (peek().is(TokenKind::Ident) && !is_top_level_directive(peek())) {
         const std::optional<SymbolRole> role = parse_symbol_role(peek().text);
         if (!role) {
             error(peek().location, "Unknown runtime symbol role '" + std::string(peek().text) + "'");
@@ -112,6 +127,90 @@ bool Parser::parse_extern_decl(Module& mod) {
         }
         advance();
         mod.add_symbol_role(sym_name, *role);
+    }
+    return true;
+}
+
+// `attributes fp_reassociation pinned_tls_register loop_optimizations`:
+// module attributes.
+bool Parser::parse_module_attributes(Module& mod) {
+    advance(); // consume 'attributes'
+    while (peek().is(TokenKind::Ident) && !is_top_level_directive(peek())) {
+        const std::string_view attr = peek().text;
+        if (attr == "fp_reassociation") {
+            mod.set_allow_fp_reassociation(true);
+        } else if (attr == "pinned_tls_register") {
+            mod.set_pinned_tls_register(true);
+        } else if (attr == "loop_optimizations") {
+            mod.set_has_loop_optimizations(true);
+        } else {
+            error(peek().location, "Unknown module attribute '" + std::string(attr) + "'");
+            return false;
+        }
+        advance();
+    }
+    return true;
+}
+
+namespace {
+
+int hex_digit(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+// Reverses the printer's quoting: `\\`, `\"`, `\xHH`. Anything else after a
+// backslash, or a missing closing quote, is an error.
+std::optional<std::string> unquote_mir_string(std::string_view lit) {
+    if (lit.size() < 2 || lit.front() != '"' || lit.back() != '"') return std::nullopt;
+    std::string out;
+    for (size_t i = 1; i + 1 < lit.size(); ++i) {
+        const char c = lit[i];
+        if (c != '\\') {
+            out += c;
+            continue;
+        }
+        if (i + 2 >= lit.size()) return std::nullopt;
+        const char e = lit[++i];
+        if (e == '\\' || e == '"') {
+            out += e;
+        } else if (e == 'x') {
+            if (i + 3 >= lit.size()) return std::nullopt;
+            const int hi = hex_digit(lit[i + 1]), lo = hex_digit(lit[i + 2]);
+            if (hi < 0 || lo < 0) return std::nullopt;
+            out += static_cast<char>(hi * 16 + lo);
+            i += 2;
+        } else {
+            return std::nullopt;
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+// `string @sym "text"`: module-owned string data (Module::define_string_symbol).
+bool Parser::parse_string_decl(Module& mod) {
+    advance(); // consume 'string'
+    std::string_view sym_name = parse_symbol_name();
+    if (has_error_) return false;
+    if (!peek().is(TokenKind::StringLiteral)) {
+        error(peek().location, "Expected string literal, got '" + std::string(peek().text) + "'");
+        return false;
+    }
+    const Token lit = advance();
+    const std::optional<std::string> text = unquote_mir_string(lit.text);
+    if (!text) {
+        error(lit.location, "Malformed string literal " + std::string(lit.text));
+        return false;
+    }
+    try {
+        mod.define_string_symbol(sym_name, *text);
+    } catch (const std::logic_error& e) {
+        error(lit.location, e.what());
+        return false;
     }
     return true;
 }
@@ -148,6 +247,7 @@ Function* Parser::parse_function_decl(Module& mod) {
 
     std::vector<Type> param_types;
     std::vector<std::string> param_names;
+    std::vector<bool> param_noalias;
 
     while (!peek().is(TokenKind::RParen) && !peek().is(TokenKind::Eof)) {
         if (!peek().is(TokenKind::ValueIdent)) {
@@ -161,6 +261,17 @@ Function* Parser::parse_function_decl(Module& mod) {
 
         param_names.push_back(std::move(p_name));
         param_types.push_back(p_type);
+        // Parameter attributes.
+        bool noalias = false;
+        while (peek().is(TokenKind::Ident)) {
+            if (peek().text != "noalias") {
+                error(peek().location, "Unknown parameter attribute '" + std::string(peek().text) + "'");
+                return nullptr;
+            }
+            advance();
+            noalias = true;
+        }
+        param_noalias.push_back(noalias);
 
         if (!peek().is(TokenKind::RParen)) {
             if (!expect(TokenKind::Comma, "','")) return nullptr;
@@ -173,9 +284,24 @@ Function* Parser::parse_function_decl(Module& mod) {
     Type ret_type = parse_type();
     if (has_error_) return nullptr;
 
+    // Function attributes.
+    bool fp_reassociation = false;
+    while (peek().is(TokenKind::Ident)) {
+        if (peek().text != "fp_reassociation") {
+            error(peek().location, "Unknown function attribute '" + std::string(peek().text) + "'");
+            return nullptr;
+        }
+        advance();
+        fp_reassociation = true;
+    }
+
     if (!expect(TokenKind::LBrace, "'{'")) return nullptr;
 
     Function* fn = mod.create_function(fn_name, ret_type, param_types);
+    fn->set_allow_fp_reassociation(fp_reassociation);
+    for (size_t i = 0; i < param_noalias.size(); ++i) {
+        if (param_noalias[i]) fn->set_param_noalias(i);
+    }
     Builder b(mod);
     b.set_function(fn);
 

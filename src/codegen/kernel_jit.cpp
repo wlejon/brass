@@ -247,9 +247,7 @@ KernelFunction KernelJit::compile(Module& mod, std::string_view entry_name) {
     Module working_mod(mod.name());
     working_mod.set_allow_fp_reassociation(mod.allow_fp_reassociation() || options_.enable_fp_reassociation);
 
-    for (std::string_view sym : mod.external_symbols()) {
-        working_mod.add_external_symbol(sym);
-    }
+    working_mod.copy_declarations_from(mod);
 
     for (const auto* fn : mod.functions()) {
         if (fn) {

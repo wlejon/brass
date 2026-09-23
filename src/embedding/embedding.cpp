@@ -180,9 +180,7 @@ std::unique_ptr<CompiledModule> HostEngine::compile(Module& mod) {
 std::unique_ptr<CompiledModule> HostEngine::compile_with_osr(const Module& mod, std::string_view fn_name, uint32_t loop_header_id) {
     Module osr_mod(mod.name());
     osr_mod.set_allow_fp_reassociation(mod.allow_fp_reassociation());
-    for (std::string_view sym : mod.external_symbols()) {
-        osr_mod.add_external_symbol(sym);
-    }
+    osr_mod.copy_declarations_from(mod);
     for (const auto* f : mod.functions()) {
         Function* cloned = clone_function(*f, osr_mod);
         if (cloned->name() == fn_name) {

@@ -139,9 +139,9 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
             opt_mod = std::make_unique<Module>(mod.name());
             opt_mod->set_allow_fp_reassociation(mod.allow_fp_reassociation());
             opt_mod->set_pinned_tls_register(mod.pinned_tls_register());
-            for (std::string_view sym : mod.external_symbols()) {
-                opt_mod->add_external_symbol(sym);
-            }
+            // Externs with their roles (passes rely on them: a Pure or
+            // Allocator callee, Data symbols) and the module's string data.
+            opt_mod->copy_declarations_from(mod);
             Function* opt_fn = clone_function(*fn, *opt_mod);
             // The optimizer's guarantees hold only for well-formed input;
             // IR the verifier rejects is lowered as given, unoptimized.

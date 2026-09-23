@@ -22,6 +22,27 @@ std::string format_float(double val) {
     return s;
 }
 
+// A MIR string literal: `\\`, `\"` and every byte outside printable ASCII
+// as `\xHH`, which the parser's unescape reverses exactly.
+std::string quote_mir_string(std::string_view text) {
+    static const char* digits = "0123456789abcdef";
+    std::string s = "\"";
+    for (unsigned char c : text) {
+        if (c == '\\' || c == '"') {
+            s += '\\';
+            s += static_cast<char>(c);
+        } else if (c < 0x20 || c >= 0x7f) {
+            s += "\\x";
+            s += digits[c >> 4];
+            s += digits[c & 15];
+        } else {
+            s += static_cast<char>(c);
+        }
+    }
+    s += '"';
+    return s;
+}
+
 class FunctionPrinter {
 public:
     FunctionPrinter(const Function& fn, std::ostream& os) : fn_(fn), os_(os) {
@@ -36,14 +57,19 @@ public:
             for (size_t i = 0; i < entry->param_count(); ++i) {
                 if (i > 0) os_ << ", ";
                 os_ << value_name(entry->param(i)) << ": " << entry->param(i)->type().name();
+                if (fn_.is_param_noalias(i)) os_ << " noalias";
             }
         } else {
             for (size_t i = 0; i < fn_.param_count(); ++i) {
                 if (i > 0) os_ << ", ";
                 os_ << "%" << i << ": " << fn_.param_type(i).name();
+                if (fn_.is_param_noalias(i)) os_ << " noalias";
             }
         }
-        os_ << ") -> " << fn_.return_type().name() << " {\n";
+        os_ << ") -> " << fn_.return_type().name();
+        // Function attributes.
+        if (fn_.allow_fp_reassociation()) os_ << " fp_reassociation";
+        os_ << " {\n";
 
         // Print basic blocks
         for (size_t b_idx = 0; b_idx < fn_.block_count(); ++b_idx) {
@@ -710,15 +736,27 @@ void print_module(const Module& mod, std::ostream& os) {
         os << "module @" << mod.name() << "\n\n";
     }
 
-    if (!mod.external_symbols().empty()) {
-        for (std::string_view sym : mod.external_symbols()) {
-            os << "extern @" << sym;
-            for (SymbolRole role : mod.symbol_roles(sym)) os << " " << symbol_role_name(role);
-            os << "\n";
-        }
-        if (!mod.functions().empty()) {
-            os << "\n";
-        }
+    // Module attributes.
+    if (mod.allow_fp_reassociation() || mod.pinned_tls_register() || mod.has_loop_optimizations()) {
+        os << "attributes";
+        if (mod.allow_fp_reassociation()) os << " fp_reassociation";
+        if (mod.pinned_tls_register()) os << " pinned_tls_register";
+        if (mod.has_loop_optimizations()) os << " loop_optimizations";
+        os << "\n\n";
+    }
+
+    // Module-owned string data (Module::define_string_symbol).
+    for (const auto& [sym, text] : mod.string_symbols()) {
+        os << "string @" << sym << " " << quote_mir_string(text) << "\n";
+    }
+
+    for (std::string_view sym : mod.external_symbols()) {
+        os << "extern @" << sym;
+        for (SymbolRole role : mod.symbol_roles(sym)) os << " " << symbol_role_name(role);
+        os << "\n";
+    }
+    if ((!mod.external_symbols().empty() || !mod.string_symbols().empty()) && !mod.functions().empty()) {
+        os << "\n";
     }
 
     for (size_t i = 0; i < mod.function_count(); ++i) {
