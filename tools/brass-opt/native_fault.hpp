@@ -4,6 +4,8 @@
 // killing the process with an unhandled 0xC0000094 / SIGFPE and no
 // diagnostic. MIR leaves integer division by zero undefined, so generated
 // code carries no zero check; the fault is caught around the native call.
+// AArch64 code, which cannot fault on a division, traps a zero divisor with
+// a dedicated brk that is reported the same way.
 
 namespace brass {
 
