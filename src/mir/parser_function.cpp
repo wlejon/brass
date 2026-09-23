@@ -75,14 +75,27 @@ Type Parser::parse_type() {
     return Type::void_type();
 }
 
+namespace {
+std::optional<std::string> unquote_mir_string(std::string_view lit);
+} // namespace
+
 std::string_view Parser::parse_symbol_name() {
     if (!peek().is(TokenKind::SymbolIdent)) {
         error(peek().location, "Expected symbol identifier (starting with '@'), got '" + std::string(peek().text) + "'");
         return "";
     }
-    std::string_view sym = advance().text;
+    const Token tok = advance();
+    std::string_view sym = tok.text;
     if (sym.starts_with('@')) {
         sym = sym.substr(1);
+    }
+    if (sym.starts_with('"')) {
+        std::optional<std::string> name = unquote_mir_string(sym);
+        if (!name || name->empty()) {
+            error(tok.location, "Malformed quoted symbol " + std::string(tok.text));
+            return "";
+        }
+        return quoted_symbols_.emplace_back(std::move(*name));
     }
     return sym;
 }

@@ -227,6 +227,21 @@ Token Lexer::scan_symbol_identifier() {
     size_t start = cursor_;
     advance(); // Consume '@'
 
+    // Quoted form `@"..."` for names outside the bare charset; the token
+    // text keeps the quotes and the parser unescapes it.
+    if (!is_at_end() && peek() == '"') {
+        advance(); // opening quote
+        while (!is_at_end() && peek() != '"') {
+            if (peek() == '\\') advance();
+            if (!is_at_end()) advance();
+        }
+        if (is_at_end()) {
+            return Token{TokenKind::Invalid, source_.substr(start, cursor_ - start), loc, 0, 0.0};
+        }
+        advance(); // closing quote
+        return Token{TokenKind::SymbolIdent, source_.substr(start, cursor_ - start), loc, 0, 0.0};
+    }
+
     while (!is_at_end()) {
         char c = peek();
         if (std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '.' || c == '-') {

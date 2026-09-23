@@ -262,14 +262,18 @@ struct BronzeDummyGcFrame {
     uint64_t slots[1];
 };
 
+// A fixed reservation: JIT code holds frame pointers (and frames link to
+// each other) for as long as the frames are live, so the storage can never
+// move. Overflowing it is a hard error, not a reallocation.
 struct DummyShadowStack {
+    static constexpr size_t kWords = 4 * 1024 * 1024; // 32 MB per thread
     std::vector<uint64_t> storage;
     size_t top = 0;
     BronzeDummyGcFrame* frame_top = nullptr;
 
     void ensure_init() {
         if (storage.empty()) {
-            storage.resize(4 * 1024 * 1024, 0xFFF6000000000000ULL);
+            storage.resize(kWords, 0xFFF6000000000000ULL);
         }
     }
 };
@@ -279,7 +283,9 @@ BRONZE_WEAK void* bronze_gc_frame_push(uint32_t count) {
     g_dummy_shadow_stack.ensure_init();
     size_t required = sizeof(BronzeDummyGcFrame) / sizeof(uint64_t) + (count > 1 ? count - 1 : 0);
     if (g_dummy_shadow_stack.top + required > g_dummy_shadow_stack.storage.size()) {
-        g_dummy_shadow_stack.storage.resize(g_dummy_shadow_stack.storage.size() * 2, 0xFFF6000000000000ULL);
+        std::cerr << "fatal: bronze mock GC shadow stack overflow (" << DummyShadowStack::kWords
+                  << " words; pushing a " << count << "-slot frame)\n";
+        std::abort();
     }
     auto* frame = reinterpret_cast<BronzeDummyGcFrame*>(&g_dummy_shadow_stack.storage[g_dummy_shadow_stack.top]);
     g_dummy_shadow_stack.top += required;

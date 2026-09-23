@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <charconv>
+#include <cctype>
 
 namespace brass {
 
@@ -43,6 +44,19 @@ std::string quote_mir_string(std::string_view text) {
     return s;
 }
 
+// `@name` when the name fits the lexer's bare symbol charset
+// ([A-Za-z0-9_.-]), otherwise the quoted form `@"..."`.
+std::string sym_ref(std::string_view name) {
+    bool bare = !name.empty();
+    for (unsigned char c : name) {
+        if (!(std::isalnum(c) || c == '_' || c == '.' || c == '-')) {
+            bare = false;
+            break;
+        }
+    }
+    return bare ? "@" + std::string(name) : "@" + quote_mir_string(name);
+}
+
 class FunctionPrinter {
 public:
     FunctionPrinter(const Function& fn, std::ostream& os) : fn_(fn), os_(os) {
@@ -51,7 +65,7 @@ public:
 
     void print() {
         // Function signature: func @name(%0: i32, %1: ptr) -> ret_type {
-        os_ << "func @" << fn_.name() << "(";
+        os_ << "func " << sym_ref(fn_.name()) << "(";
         const BasicBlock* entry = fn_.entry_block();
         if (entry && entry->param_count() == fn_.param_count()) {
             for (size_t i = 0; i < entry->param_count(); ++i) {
@@ -144,10 +158,10 @@ public:
                 }
                 break;
             case Opcode::patchable_const_i32:
-                os_ << "patchable_const.i32 @" << inst.symbol() << ", " << inst.imm_i32();
+                os_ << "patchable_const.i32 " << sym_ref(inst.symbol()) << ", " << inst.imm_i32();
                 break;
             case Opcode::patchable_const_i64:
-                os_ << "patchable_const.i64 @" << inst.symbol() << ", " << inst.imm_i64();
+                os_ << "patchable_const.i64 " << sym_ref(inst.symbol()) << ", " << inst.imm_i64();
                 break;
 
             case Opcode::sext_i64:
@@ -315,7 +329,7 @@ public:
                 } else {
                     os_ << "call ";
                 }
-                os_ << "@" << inst.symbol() << "(";
+                os_ << sym_ref(inst.symbol()) << "(";
                 for (size_t i = 0; i < inst.operand_count(); ++i) {
                     if (i > 0) os_ << ", ";
                     os_ << value_name(inst.operand(i));
@@ -324,7 +338,7 @@ public:
                 break;
 
             case Opcode::func_addr:
-                os_ << "func_addr @" << inst.symbol();
+                os_ << "func_addr " << sym_ref(inst.symbol());
                 break;
 
             case Opcode::call_indirect:
@@ -347,7 +361,7 @@ public:
                 } else {
                     os_ << "patchable_call ";
                 }
-                os_ << "@" << inst.symbol() << ", @" << inst.extra_symbol() << "(";
+                os_ << sym_ref(inst.symbol()) << ", " << sym_ref(inst.extra_symbol()) << "(";
                 for (size_t i = 0; i < inst.operand_count(); ++i) {
                     if (i > 0) os_ << ", ";
                     os_ << value_name(inst.operand(i));
@@ -360,7 +374,7 @@ public:
                 break;
 
             case Opcode::guard:
-                os_ << "guard " << value_name(inst.operand(0)) << ", @" << inst.symbol();
+                os_ << "guard " << value_name(inst.operand(0)) << ", " << sym_ref(inst.symbol());
                 if (!inst.state_map().empty()) {
                     os_ << ", [";
                     for (size_t i = 0; i < inst.state_map().size(); ++i) {
@@ -420,7 +434,7 @@ public:
                 } else {
                     os_ << "invoke ";
                 }
-                os_ << "@" << inst.symbol() << "(";
+                os_ << sym_ref(inst.symbol()) << "(";
                 for (size_t i = 0; i < inst.operand_count(); ++i) {
                     if (i > 0) os_ << ", ";
                     os_ << value_name(inst.operand(i));
@@ -445,7 +459,7 @@ public:
                 break;
 
             case Opcode::coro_create: {
-                os_ << "coro_create @" << inst.symbol() << "(";
+                os_ << "coro_create " << sym_ref(inst.symbol()) << "(";
                 for (size_t i = 0; i < inst.operand_count(); ++i) {
                     if (i > 0) os_ << ", ";
                     os_ << value_name(inst.operand(i));
@@ -733,7 +747,7 @@ std::string to_string(const Instruction& inst) {
 
 void print_module(const Module& mod, std::ostream& os) {
     if (!mod.name().empty()) {
-        os << "module @" << mod.name() << "\n\n";
+        os << "module " << sym_ref(mod.name()) << "\n\n";
     }
 
     // Module attributes.
@@ -747,11 +761,11 @@ void print_module(const Module& mod, std::ostream& os) {
 
     // Module-owned string data (Module::define_string_symbol).
     for (const auto& [sym, text] : mod.string_symbols()) {
-        os << "string @" << sym << " " << quote_mir_string(text) << "\n";
+        os << "string " << sym_ref(sym) << " " << quote_mir_string(text) << "\n";
     }
 
     for (std::string_view sym : mod.external_symbols()) {
-        os << "extern @" << sym;
+        os << "extern " << sym_ref(sym);
         for (SymbolRole role : mod.symbol_roles(sym)) os << " " << symbol_role_name(role);
         os << "\n";
     }

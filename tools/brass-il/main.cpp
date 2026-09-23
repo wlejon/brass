@@ -13,6 +13,8 @@
 #include <brass/codegen/baseline_jit.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/mir/speculative_inliner.hpp>
+#include <brass/object/object_writer.hpp>
+#include <brass/target/aot_linker.hpp>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -619,10 +621,39 @@ static int run_brass_il(int argc, char** argv) {
             std::string base = (dot_pos != std::string::npos) ? input_file.substr(0, dot_pos) : input_file;
             out_path = base + (Target::host().is_windows() ? ".dll" : ".so");
         }
+        const object::ObjectFile obj = object::compile_module_to_object(*res.module, Target::host());
+        // A bronze program calls the bronze runtime and addresses host-owned
+        // module data (key map, value cells, IC tables). brass-il has no
+        // library to import those from, and a data symbol cannot be a PE
+        // thunk import, so the image could never load: refuse up front.
+        std::vector<std::string> unresolved;
+        for (const auto& sec : obj.sections) {
+            for (const auto& r : sec.relocations) {
+                const object::ObjectSymbol* s = obj.find_symbol(r.symbol_name);
+                if (s && s->section_index == object::SECTION_UNDEF &&
+                    std::find(unresolved.begin(), unresolved.end(), r.symbol_name) == unresolved.end()) {
+                    unresolved.push_back(r.symbol_name);
+                }
+            }
+        }
+        if (!unresolved.empty()) {
+            std::cerr << "Error: --emit-shared cannot link this program into a standalone library: it references "
+                      << unresolved.size() << " symbol(s) the module does not define (";
+            for (size_t i = 0; i < unresolved.size() && i < 5; ++i) {
+                std::cerr << (i ? ", " : "") << "'" << unresolved[i] << "'";
+            }
+            std::cerr << (unresolved.size() > 5 ? ", ..." : "") << ").\n"
+                      << "  These come from the bronze runtime and its host-provided module data, and brass-il "
+                         "has no import library for them.\n"
+                      << "  Emit an object with -o and link it against the bronze runtime instead.\n";
+            return 1;
+        }
         target::LinkerOptions link_opts;
         link_opts.export_all_functions = true;
-        if (!target::AotLinker::link_to_file(*res.module, out_path, Target::host(), link_opts)) {
-            std::cerr << "Error: Failed to link shared library: " << out_path << "\n";
+        std::string link_error;
+        if (!target::AotLinker::link_to_file(obj, out_path, link_opts, &link_error)) {
+            std::cerr << "Error: Failed to link shared library '" << out_path << "': "
+                      << (link_error.empty() ? "unknown linker error" : link_error) << "\n";
             return 1;
         }
         std::cout << "[brass-il] Successfully wrote shared library to: " << out_path << "\n";
@@ -645,8 +676,12 @@ static int run_brass_il(int argc, char** argv) {
                 brass::runtime::TieringRegistry::instance().set_active_module(res.module.get());
             }
 
-            auto compiled_fns = compiler.compile_module(*res.module);
-            (void)compiled_fns;
+            try {
+                compiler.compile_module(*res.module);
+            } catch (const std::exception& ex) {
+                std::cerr << "Error: baseline JIT compilation failed: " << ex.what() << "\n";
+                return 1;
+            }
 
             Function* main_fn = res.module->get_function("main");
             if (main_fn) {

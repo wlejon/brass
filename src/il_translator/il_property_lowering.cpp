@@ -13,6 +13,24 @@ namespace brass::il {
 
 static std::atomic<uint32_t> g_global_auto_site_id{1000000};
 
+// The address of `prop_name` as a NUL-terminated string the module itself
+// owns (Module::define_string_symbol), so printed MIR and AOT images carry
+// the name. (It was once a translator string-pool pointer baked in as an
+// i64 constant: valid only inside the translating process.) The symbol takes
+// the module's suffix, as `key_map_sym` does, so linked modules stay apart.
+static Value* prop_name_addr(Builder& b, std::string_view prop_name, const std::string& key_map_sym) {
+    constexpr std::string_view kKeyMapBase = "__bronze_key_map";
+    std::string sym = "__bronze_pname";
+    if (key_map_sym.size() > kKeyMapBase.size() && key_map_sym.starts_with(kKeyMapBase)) {
+        sym += key_map_sym.substr(kKeyMapBase.size());
+    }
+    sym += ':';
+    sym += prop_name;
+    Module* mod = b.current_block()->parent()->parent();
+    mod->define_string_symbol(sym, prop_name);
+    return b.build_func_addr(sym);
+}
+
 Value* PropertyLoweringHelper::ic_site(Builder& b, uint32_t ic_index) {
     if (ic_index >= ic_site_count_) return nullptr;
     Value* table = b.build_func_addr(ic_table_sym_);
@@ -41,9 +59,7 @@ Value* PropertyLoweringHelper::lower_prop_get(
         return b.build_call("bronze_prop_get", Type::i64(), {obj, sym_val, entry});
     }
 
-    Module* mod = b.current_block()->parent()->parent();
-    const char* interned = mod->string_pool().intern(prop_name).data();
-    Value* name_val = b.build_iconst_i64(static_cast<int64_t>(reinterpret_cast<uintptr_t>(interned)));
+    Value* name_val = prop_name_addr(b, prop_name, key_map_sym_);
     Value* sym_val = b.build_iconst_i32(static_cast<int32_t>(symbol_id));
 
     if (enable_pic_) {
@@ -163,9 +179,7 @@ void PropertyLoweringHelper::lower_prop_set(
         return;
     }
 
-    Module* mod = b.current_block()->parent()->parent();
-    const char* interned = mod->string_pool().intern(prop_name).data();
-    Value* name_val = b.build_iconst_i64(static_cast<int64_t>(reinterpret_cast<uintptr_t>(interned)));
+    Value* name_val = prop_name_addr(b, prop_name, key_map_sym_);
     Value* sym_val = b.build_iconst_i32(static_cast<int32_t>(symbol_id));
 
     if (enable_pic_) {
@@ -537,9 +551,7 @@ void PropertyLoweringHelper::lower_method_def(
         Value* sym_val = b.build_iconst_i32(static_cast<int32_t>(symbol_id));
         b.build_call("bronze_method_def", Type::void_type(), {obj, sym_val, closure});
     } else {
-        Module* mod = b.current_block()->parent()->parent();
-        const char* interned = mod->string_pool().intern(prop_name).data();
-        Value* name_val = b.build_iconst_i64(static_cast<int64_t>(reinterpret_cast<uintptr_t>(interned)));
+        Value* name_val = prop_name_addr(b, prop_name, key_map_sym_);
         b.build_call("brass_dynamic_object_set_prop_str", Type::void_type(), {obj, name_val, closure});
     }
 }

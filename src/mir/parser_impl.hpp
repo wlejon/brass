@@ -9,6 +9,7 @@
 #include <brass/mir/lexer.hpp>
 #include <brass/mir/builder.hpp>
 
+#include <deque>
 #include <functional>
 #include <string>
 #include <string_view>
@@ -71,6 +72,8 @@ private:
     bool parse_instruction(Builder& b, Function* fn, ValueMap& value_map, const BlockLookup& get_or_create_block);
 
     Lexer lexer_;
+    // Unescaped `@"..."` names; a deque so views handed out stay valid.
+    std::deque<std::string> quoted_symbols_;
     DiagnosticReporter* diag_ = nullptr;
     std::string_view filename_;
     bool has_error_ = false;

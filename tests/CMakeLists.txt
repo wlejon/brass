@@ -390,6 +390,23 @@ if(BRASS_BUILD_TOOLS)
         get_filename_component(_name "${_il}" NAME_WE)
         brass_il_corpus_test(sched ${_name} --run --schedule-insns)
     endforeach()
+    # mir_roundtrip.*: every corpus program's --emit-mir text parses back
+    # byte-identically and runs standalone in brass-opt (baseline and tier 2)
+    # with the expected output. Names such as `f$leaf` or a module path once
+    # failed to parse, and property names were translator-process pointers.
+    foreach(_il ${_sched_corpus})
+        get_filename_component(_name "${_il}" NAME_WE)
+        add_test(NAME "mir_roundtrip.${_name}"
+            COMMAND ${CMAKE_COMMAND}
+                "-DBRASS_IL=$<TARGET_FILE:brass-il>"
+                "-DBRASS_OPT=$<TARGET_FILE:brass-opt>"
+                "-DIL_FILE=${_il}"
+                "-DEXPECTED=${CMAKE_SOURCE_DIR}/tests/bronze_corpus/${_name}.expected"
+                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/mir_roundtrip"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/run_mir_roundtrip.cmake")
+        set_tests_properties("mir_roundtrip.${_name}" PROPERTIES
+            TIMEOUT 120 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" LABELS "correctness")
+    endforeach()
 endif()
 
 if(APPLE)

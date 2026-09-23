@@ -124,8 +124,11 @@ bool execute_emit_shared(const Module& mod, const EmitSharedOptions& opts) {
     link_opts.format = fmt;
     link_opts.export_all_functions = true;
 
-    if (!target::AotLinker::link_to_file(mod, final_output, target, link_opts)) {
-        std::cerr << "Error: Could not link shared library to '" << final_output << "'\n";
+    const object::ObjectFile obj = object::compile_module_to_object(mod, target);
+    std::string link_error;
+    if (!target::AotLinker::link_to_file(obj, final_output, link_opts, &link_error)) {
+        std::cerr << "Error: Could not link shared library to '" << final_output << "': "
+                  << (link_error.empty() ? "unknown linker error" : link_error) << "\n";
         return false;
     }
 
@@ -168,7 +171,12 @@ bool execute_run_function(Module& mod, const RunFunctionOptions& opts) {
         baseline.register_external_symbol("brass_parallel_alloc_context", reinterpret_cast<void*>(&brass_parallel_alloc_context));
         baseline.register_external_symbol("brass_parallel_free_context", reinterpret_cast<void*>(&brass_parallel_free_context));
 
-        auto compiled_fns = baseline.compile_module(mod);
+        try {
+            baseline.compile_module(mod);
+        } catch (const std::exception& ex) {
+            std::cerr << "Baseline JIT Error: " << ex.what() << "\n";
+            return false;
+        }
         auto* handle = runtime::FunctionDispatchTable::instance().find(opts.run_fn);
         if (!handle || !handle->has_native_entry()) {
             std::cerr << "Error: Baseline JIT compilation failed for '" << opts.run_fn << "'\n";
