@@ -32,11 +32,16 @@ enum class SymbolRole : uint8_t {
     ArraySet,
     // `frem`: (f64, f64) -> f64, the remainder with C fmod semantics.
     FloatRem,
+    // `data`: names data, not code. `func_addr @sym` must be the data's own
+    // address, so an engine that cannot resolve it when it compiles the
+    // reference rejects the function (a lazy-link call stub is code).
+    Data,
 };
 
 inline constexpr SymbolRole kAllSymbolRoles[] = {
     SymbolRole::Allocator, SymbolRole::Pure, SymbolRole::ArrayNew,
     SymbolRole::ArrayGet, SymbolRole::ArraySet, SymbolRole::FloatRem,
+    SymbolRole::Data,
 };
 
 // The keyword the printer writes and the parser reads for `role`.

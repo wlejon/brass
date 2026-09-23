@@ -3,6 +3,7 @@
 #include <brass/target/aarch64/code_buffer.hpp>
 #include <brass/target/calling_conv.hpp>
 #include <brass/gc/runtime_gc.hpp>
+#include <brass/mir/gc_refs.hpp>
 #include <brass/runtime/tiering.hpp>
 #include <brass/runtime/type_feedback.hpp>
 #include <brass/runtime/code_installer.hpp>
@@ -108,7 +109,9 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
         int32_t slot_off = current_offset;
         current_offset += size;
         slot_map[val] = slot_off;
-        if (val->type().is_gcref()) {
+        // A derived gcref points inside an object and is never live across a
+        // GC point (verifier_gc.cpp), so it is not a root.
+        if (val->type().is_gcref() && !is_derived_gcref(val)) {
             gcref_slots.push_back(slot_off);
         }
         return slot_off;

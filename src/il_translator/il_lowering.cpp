@@ -169,6 +169,33 @@ static bool functions_are_identical(const BronzeFunction& a, const BronzeFunctio
     return true;
 }
 
+// The symbols whose address the translator takes as data rather than code:
+// the module tables (`__bronze_*`, defined by the host's object writer or
+// registered with the JIT), the key manifest and the runtime's root shape.
+static bool is_translator_data_symbol(std::string_view sym) {
+    constexpr std::string_view key_constants = "_key_constants";
+    return sym.starts_with("__bronze_") || sym == "brass_root_shape" ||
+           (sym.size() > key_constants.size() && sym.ends_with(key_constants));
+}
+
+// Declares every data symbol a func_addr in `mod` names as `data`
+// (runtime_symbols.hpp), so no engine binds it to a call stub.
+static void declare_data_symbols(Module& mod) {
+    std::vector<std::string> syms;
+    for (const Function* fn : mod.functions()) {
+        if (!fn) continue;
+        for (const BasicBlock* bb : fn->blocks()) {
+            if (!bb) continue;
+            for (const Instruction* inst : *bb) {
+                if (!inst || inst->opcode() != Opcode::func_addr) continue;
+                const std::string_view sym = inst->symbol();
+                if (is_translator_data_symbol(sym) && !mod.string_symbol(sym)) syms.emplace_back(sym);
+            }
+        }
+    }
+    for (const std::string& sym : syms) mod.add_symbol_role(sym, SymbolRole::Data);
+}
+
 std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
     auto mod = std::make_unique<Module>(ast.name);
     mod->set_allow_fp_reassociation(options_.allow_fp_reassociation);
@@ -403,6 +430,8 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
             }
         }
     }
+
+    declare_data_symbols(*mod);
 
     // 3. Verify module
     if (!verify_module(*mod, diag_)) {

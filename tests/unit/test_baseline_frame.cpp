@@ -9,6 +9,8 @@
 #include <brass/mir/parser.hpp>
 #include <brass/mir/verifier.hpp>
 #include <brass/codegen/baseline_jit.hpp>
+#include <brass/fuzz/diff_fuzzer.hpp>
+#include <brass/fuzz/program_generator.hpp>
 #include <brass/runtime/code_installer.hpp>
 #include <iostream>
 #include <memory>
@@ -123,6 +125,92 @@ loop(%i: i64, %acc: i64):
     };
     for (int64_t a : {1, 2, 5, 40}) {
         for (int64_t b : {-3, 0, 11}) CHECK_EQ(fn(a, b), expected(a, b));
+    }
+}
+
+namespace {
+
+// %obj is live around a loop with a safepoint; %p = %obj + 8 is an interior
+// pointer defined and used inside the loop body. `derived_across` moves the
+// load of %p after the safepoint, which the verifier rejects.
+std::string derived_source(bool derived_across) {
+    std::string s = R"(module @m
+func @bl_fr_derived(%0: i64) -> i64 {
+entry:
+  %sz = iconst.i64 64
+  %z = iconst.i64 0
+  %kind = iconst.i32 2
+  %obj = call.gcref @brass_gc_alloc(%sz, %z, %kind)
+  br loop(%z, %z)
+loop(%i: i64, %acc: i64):
+  %c8 = iconst.i64 8
+  %p = add.gcref %obj, %c8
+)";
+    if (derived_across) s += "  safepoint\n  %v = load.i32 %p\n";
+    else s += "  %v = load.i32 %p\n  safepoint\n";
+    s += R"(  %w = zext.i64 %v
+  %acc2 = add.i64 %acc, %w
+  %one = iconst.i64 1
+  %n = add.i64 %i, %one
+  %more = slt.i64 %n, %0
+  br_if %more, loop(%n, %acc2), done
+done:
+  ret %acc2
+}
+)";
+    return s;
+}
+
+} // namespace
+
+// Fuzz seeds 18 and 20049 (brass-fuzz --baseline): the derived pointer's
+// slot was a stack-map root, so a collection at the loop safepoint read an
+// object header from inside the object and threw from evacuate_object.
+TEST_CASE("Baseline frame - a derived gcref is not a stack-map root") {
+    auto mod = parse_or_fail(derived_source(false));
+    BaselineJitCompiler compiler;
+    auto compiled = compiler.compile(*mod->get_function("bl_fr_derived"));
+    REQUIRE(compiled.is_valid());
+    REQUIRE(!compiled.stack_map().records.empty());
+    // One gcref slot: %obj. %p is not rooted.
+    for (const auto& rec : compiled.stack_map().records) CHECK_EQ(rec.roots.size(), size_t{1});
+}
+
+TEST_CASE("Baseline frame - a derived gcref live across a GC point is rejected") {
+    DiagnosticReporter diag;
+    auto mod = parse_module(derived_source(true), &diag);
+    REQUIRE(mod != nullptr);
+    BaselineJitCompiler compiler;
+    std::string message;
+    try {
+        (void)compiler.compile(*mod->get_function("bl_fr_derived"));
+    } catch (const std::exception& e) {
+        message = e.what();
+    }
+    CHECK(message.find("derived gcref live across a GC point") != std::string::npos);
+}
+
+TEST_CASE("Baseline frame - fuzz seeds with derived gcrefs across loop safepoints") {
+    struct Seed { uint64_t seed; uint32_t max_statements; };
+    for (const Seed s : {Seed{18, 36}, Seed{20049, 120}}) {
+        fuzz::DiffFuzzerOptions opts;
+        opts.save_reproducers = false;
+        opts.tier6_baseline = true;
+        opts.timeout_ms = 5000;
+        fuzz::DiffFuzzer fuzzer(opts);
+        fuzz::ProgramGeneratorOptions gen_opts;
+        gen_opts.max_statements = s.max_statements;
+        fuzz::ProgramGenerator gen(gen_opts);
+        Module mod("fuzz_mod_" + std::to_string(s.seed));
+        REQUIRE(gen.generate(mod, "fuzz_fn", s.seed) != nullptr);
+        const std::vector<RuntimeValue> args = {
+            RuntimeValue::from_i64(static_cast<int64_t>(s.seed % 100)),
+            RuntimeValue::from_i64(static_cast<int64_t>((s.seed >> 8) % 100)),
+        };
+        fuzz::DiffResult r = fuzzer.run_test(mod, "fuzz_fn", args, s.seed);
+        if (!r.passed) std::cerr << "seed " << s.seed << ": " << r.failure_class << " " << r.mismatch_reason << "\n";
+        CHECK(r.passed);
+        CHECK_FALSE(r.baseline_rejected);
     }
 }
 

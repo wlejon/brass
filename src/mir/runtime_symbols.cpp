@@ -11,6 +11,7 @@ std::string_view symbol_role_name(SymbolRole role) noexcept {
         case SymbolRole::ArrayGet: return "array_get";
         case SymbolRole::ArraySet: return "array_set";
         case SymbolRole::FloatRem: return "frem";
+        case SymbolRole::Data: return "data";
     }
     return "unknown";
 }

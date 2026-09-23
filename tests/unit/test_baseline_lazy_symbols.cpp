@@ -10,6 +10,8 @@
 #include <brass/codegen/lazy_symbols.hpp>
 #include <brass/fuzz/diff_fuzzer.hpp>
 #include <brass/runtime/code_installer.hpp>
+#include <brass/runtime/multi_tier_pipeline.hpp>
+#include <brass/runtime/tiering.hpp>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -306,6 +308,99 @@ TEST_CASE("Baseline lazy symbols - stubs outlive the compiler and fail cleanly")
     I64Fn fn = direct.get_function_ptr<I64Fn>();
     CHECK(!fuzz::DiffFuzzer::run_protected([fn] { (void)fn(1); }, fault));
     CHECK_EQ(LazySymbolTable::last_unresolved_symbol(), std::string("ls_callee"));
+}
+
+namespace {
+int64_t ls_data_cell = 1234;
+int64_t ls_host_tier_shadowed(int64_t) { return -1; }
+} // namespace
+
+TEST_CASE("Baseline lazy symbols - func_addr of a data symbol is the data, never a stub") {
+    // The shape of the IL translator's `func_addr @__bronze_source_text_N`:
+    // a symbol declared `data` whose address is read as data.
+    const char* src = R"(module @data
+extern @ls_data_sym data
+func @ls_data_addr() -> ptr {
+entry:
+  %p = func_addr @ls_data_sym
+  ret %p
+}
+)";
+    auto mod = parse_or_fail(src);
+    REQUIRE(mod->has_symbol_role("ls_data_sym", SymbolRole::Data));
+
+    // Unresolved at compile time: rejected, not bound to a call stub.
+    {
+        BaselineJitCompiler compiler;
+        std::string error;
+        try {
+            (void)compiler.compile(*mod->get_function("ls_data_addr"));
+        } catch (const std::exception& e) {
+            error = e.what();
+        }
+        CHECK(error.find("data symbol ls_data_sym") != std::string::npos);
+        CHECK(compiler.lazy_symbols()->resolved_target("ls_data_sym") == nullptr);
+    }
+
+    // Registered: the data's own address.
+    BaselineJitCompiler compiler;
+    compiler.register_external_symbol("ls_data_sym", &ls_data_cell);
+    auto compiled = compiler.compile(*mod->get_function("ls_data_addr"));
+    void* addr = compiled.get_function_ptr<PtrFn>()();
+    CHECK(addr == static_cast<void*>(&ls_data_cell));
+    CHECK_EQ(*static_cast<int64_t*>(addr), int64_t{1234});
+
+    // Module-owned string data resolves to the module's copy.
+    auto str_mod = parse_or_fail(R"(module @strdata
+func @ls_str_addr() -> ptr {
+entry:
+  %p = func_addr @ls_str_sym
+  ret %p
+}
+)");
+    str_mod->define_string_symbol("ls_str_sym", "hello");
+    auto str_fn = compiler.compile(*str_mod->get_function("ls_str_addr"));
+    const char* text = static_cast<const char*>(str_fn.get_function_ptr<PtrFn>()());
+    CHECK(text == str_mod->string_symbol("ls_str_sym"));
+    CHECK_EQ(std::string(text), std::string("hello"));
+}
+
+TEST_CASE("Baseline lazy symbols - a module function shadows a registered symbol on the tier-up path") {
+    // MultiTierPipeline compiles one function at a time. The caller is
+    // compiled before its callee, so it calls through the stub, which must
+    // reach the module's @ls_tu_callee, not the registered host function of
+    // the same name (registered before and after the caller is compiled).
+    auto mod = parse_or_fail(R"(module @tierup
+func @ls_tu_caller(%0: i64) -> i64 {
+entry:
+  %r = call.i64 @ls_tu_callee(%0)
+  ret %r
+}
+func @ls_tu_callee(%0: i64) -> i64 {
+entry:
+  %c5 = iconst.i64 5
+  %r = mul.i64 %0, %c5
+  ret %r
+}
+)");
+    runtime::TieringConfig config;
+    config.enable_background_compile = false;
+    auto& pipeline = runtime::MultiTierPipeline::instance();
+    pipeline.initialize(config);
+    runtime::TieringRegistry::instance().set_active_module(mod.get());
+    pipeline.register_external_symbol("ls_tu_callee", reinterpret_cast<void*>(&ls_host_tier_shadowed));
+
+    REQUIRE(pipeline.compile_and_install_tier1("ls_tu_caller", mod->get_function("ls_tu_caller")));
+    pipeline.register_external_symbol("ls_tu_callee", reinterpret_cast<void*>(&ls_host_tier_shadowed));
+    REQUIRE(pipeline.compile_and_install_tier1("ls_tu_callee", mod->get_function("ls_tu_callee")));
+
+    auto caller = pipeline.find_baseline_compiled("ls_tu_caller");
+    REQUIRE(caller != nullptr);
+    CHECK_EQ(caller->get_function_ptr<I64Fn>()(7), int64_t{35});
+
+    pipeline.shutdown();
+    runtime::TieringRegistry::instance().set_active_module(nullptr);
+    runtime::FunctionDispatchTable::instance().forget_module(*mod);
 }
 
 #endif

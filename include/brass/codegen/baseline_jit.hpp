@@ -14,6 +14,7 @@
 #include <memory>
 #include <functional>
 #include <unordered_map>
+#include <unordered_set>
 #include <cstdint>
 #include <cstddef>
 
@@ -119,8 +120,21 @@ public:
 
     void* resolve_symbol(std::string_view name) const;
     // resolve_symbol, after the string data `fn`'s module defines itself
-    // (Module::define_string_symbol).
+    // (Module::define_string_symbol) and the functions it defines: a module
+    // function shadows a registered symbol of its name. One not compiled yet
+    // resolves to null (a stub); compile_module points the stub at the
+    // module's copy when it installs it. With set_module_functions_shadow,
+    // the name is also claimed for the module: its stub resolves only through
+    // the dispatch table, never to a registered symbol, whenever the function
+    // is compiled (a tier-up that compiles one function at a time).
     void* resolve_symbol_in(const Function& fn, std::string_view name) const;
+
+    // For a host whose registered symbols are all outside the program (the
+    // tiering pipeline: runtime and libm functions) and whose program
+    // functions reach native code only through the dispatch table. Off by
+    // default: a host may register the code of a module function under its
+    // own name (compiled by itself or another tier).
+    void set_module_functions_shadow(bool shadow);
 
     // Whether the x64 baseline tier compiles `op`. A function using an opcode
     // it does not is rejected at compile time: compile() throws
@@ -135,7 +149,15 @@ private:
     std::unordered_map<std::string, void*> symbols_;
     BaselineSymbolResolver custom_resolver_;
     runtime::FunctionDispatchTable* dispatch_table_ = nullptr; // under symbols_mutex_
+    // Names a stub was made for on behalf of a module that defines the
+    // function (resolve_symbol_in); under symbols_mutex_.
+    mutable std::unordered_set<std::string> module_owned_;
+    bool module_functions_shadow_ = false; // under symbols_mutex_
     std::shared_ptr<LazySymbolTable> lazy_;
+
+    // The lazy stubs' resolver: a module-owned name through the dispatch
+    // table only, any other through resolve_symbol.
+    void* resolve_lazy(std::string_view name) const;
 };
 
 } // namespace brass::codegen

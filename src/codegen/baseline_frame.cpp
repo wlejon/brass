@@ -12,7 +12,16 @@
 // which is outside their range), 128-bit vectors (16-byte slots) and, apart
 // from each other, GC references (every GC-ref slot is a stack-map root, so
 // it must never hold a non-reference).
+//
+// A derived gcref (add/sub on a gcref: an interior pointer) is not a root:
+// the collector would read an object header at its address. Like tier 2,
+// which never has one live at a GC point, the baseline relies on the
+// verifier's rule that a derived gcref is block-local and dead at every GC
+// point (verifier_gc.cpp), so it lives in an ordinary slot. The layout
+// checks that rule on the ranges it computes and rejects a function that
+// breaks it.
 #include "baseline_emit_internal.hpp"
+#include <brass/mir/gc_refs.hpp>
 #include <algorithm>
 #include <functional>
 #include <unordered_set>
@@ -92,12 +101,15 @@ BaselineFrameLayout layout_baseline_frame(const Function& fn, int32_t start_offs
         }
     }
 
+    // Whether a value's slot is a stack-map root.
+    auto rooted = [](const Value* v) { return v->type().is_gcref() && !is_derived_gcref(v); };
+
     auto dedicated = [&](const Value* v) {
         if (layout.slot_map.count(v)) return;
         if (bl_is_v128(v->type())) offset = ((offset + 15) & ~15) + 16;
         else offset += 8;
         layout.slot_map[v] = offset;
-        if (v->type().is_gcref()) layout.gcref_slots.push_back(offset);
+        if (rooted(v)) layout.gcref_slots.push_back(offset);
     };
 
     // Positions: block b spans [begin[b], end[b]]; its k-th instruction is
@@ -105,14 +117,18 @@ BaselineFrameLayout layout_baseline_frame(const Function& fn, int32_t start_offs
     std::vector<size_t> begin(blocks.size()), end(blocks.size());
     std::vector<std::vector<const BasicBlock*>> succs(blocks.size());
     std::vector<std::unordered_set<const Value*>> gen(blocks.size()), kill(blocks.size());
+    // The instruction at each position (null at block boundaries).
+    std::vector<const Instruction*> at_pos;
     size_t pos = 0;
     for (size_t b = 0; b < blocks.size(); ++b) {
         const BasicBlock* bb = blocks[b];
         begin[b] = pos++;
+        at_pos.push_back(nullptr);
         for (const auto* param : bb->params()) kill[b].insert(param);
         for (const auto* inst : *bb) {
             if (!inst) continue;
             ++pos;
+            at_pos.push_back(inst);
             for_each_use(fn, *inst, [&](const Value* v) {
                 if (!kill[b].count(v)) gen[b].insert(v);
             });
@@ -122,6 +138,7 @@ BaselineFrameLayout layout_baseline_frame(const Function& fn, int32_t start_offs
             if (inst->produces_value() && inst->result()) kill[b].insert(inst->result());
         }
         end[b] = pos++;
+        at_pos.push_back(nullptr);
     }
 
     std::vector<std::unordered_set<const Value*>> live_in(blocks.size()), live_out(blocks.size());
@@ -180,6 +197,23 @@ BaselineFrameLayout layout_baseline_frame(const Function& fn, int32_t start_offs
         }
     }
 
+    // A derived gcref sits in an unrooted slot, so the collector would not
+    // move it: it must be dead at every GC point and at every block boundary.
+    for (const auto& [v, r] : ranges) {
+        if (!v->type().is_gcref() || rooted(v)) continue;
+        for (size_t p = r.start; p <= r.end; ++p) {
+            const Instruction* inst = at_pos[p];
+            if (!inst) {
+                throw_unsupported(kX64BaselineStage, "derived gcref live across a block boundary in " +
+                                                         std::string(fn.name()));
+            }
+            if (p != r.start && p != r.end && may_trigger_gc(*inst)) {
+                throw_unsupported(kX64BaselineStage, "derived gcref live across a GC point in " +
+                                                         std::string(fn.name()));
+            }
+        }
+    }
+
     // Linear scan. A slot is reused only by a range starting strictly after
     // its previous owner's last use, so an instruction's result never shares
     // a slot with one of its own operands.
@@ -202,7 +236,7 @@ BaselineFrameLayout layout_baseline_frame(const Function& fn, int32_t start_offs
                 ++i;
             }
         }
-        const bool gcref = r.val->type().is_gcref();
+        const bool gcref = rooted(r.val);
         auto& pool = gcref ? free_gcref : free_plain;
         int32_t slot;
         if (!pool.empty()) {

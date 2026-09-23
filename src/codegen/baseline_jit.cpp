@@ -301,7 +301,7 @@ BaselineJitCompiler::BaselineJitCompiler(Target target)
     symbols_["brass_record_property_feedback"] = reinterpret_cast<void*>(&brass_record_property_feedback);
     symbols_["brass_gc_write_barrier"] = reinterpret_cast<void*>(&brass_default_gc_write_barrier);
     symbols_["brass_tier1_record_invocation_fb"] = reinterpret_cast<void*>(&brass_tier1_record_invocation_fb);
-    lazy_ = std::make_shared<LazySymbolTable>([this](std::string_view name) { return resolve_symbol(name); });
+    lazy_ = std::make_shared<LazySymbolTable>([this](std::string_view name) { return resolve_lazy(name); });
 }
 
 BaselineJitCompiler::~BaselineJitCompiler() {
@@ -314,6 +314,8 @@ void BaselineJitCompiler::register_external_symbol(std::string_view name, void* 
     {
         std::lock_guard<std::mutex> lock(symbols_mutex_);
         symbols_[std::string(name)] = addr;
+        // A module function of this name owns its stub.
+        if (module_owned_.count(std::string(name))) return;
     }
     // Outside symbols_mutex_: the table resolves through resolve_symbol
     // while holding its own lock.
@@ -370,11 +372,40 @@ void* BaselineJitCompiler::resolve_symbol_in(const Function& fn, std::string_vie
         // points at the module's copy when it installs it.
         if (const Function* def = mod->get_function(name); def && def->block_count() > 0) {
             runtime::FunctionHandle* handle = dispatch_table().find(name);
-            if (handle && handle->mir_function() == def) return handle->native_entry();
+            if (handle && handle->mir_function() == def && handle->native_entry()) return handle->native_entry();
+            // Not compiled yet (compile_module installs it later, or the
+            // tiering layer compiles it one function at a time): the stub,
+            // which with shadowing on must not resolve to a registered
+            // symbol of this name.
+            bool claimed = false;
+            {
+                std::lock_guard<std::mutex> lock(symbols_mutex_);
+                if (module_functions_shadow_) claimed = module_owned_.emplace(name).second;
+            }
+            // A stub a registered symbol already filled is re-armed.
+            // Outside symbols_mutex_ (lock order: table, then symbols).
+            if (claimed && lazy_->resolved_target(name)) lazy_->define(name, nullptr);
             return nullptr;
         }
     }
     return resolve_symbol(name);
+}
+
+void* BaselineJitCompiler::resolve_lazy(std::string_view name) const {
+    bool owned = false;
+    {
+        std::lock_guard<std::mutex> lock(symbols_mutex_);
+        owned = module_owned_.count(std::string(name)) != 0;
+    }
+    // Both take symbols_mutex_ themselves.
+    if (!owned) return resolve_symbol(name);
+    runtime::FunctionHandle* handle = dispatch_table().find(name);
+    return handle ? handle->native_entry() : nullptr;
+}
+
+void BaselineJitCompiler::set_module_functions_shadow(bool shadow) {
+    std::lock_guard<std::mutex> lock(symbols_mutex_);
+    module_functions_shadow_ = shadow;
 }
 
 BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn) {
