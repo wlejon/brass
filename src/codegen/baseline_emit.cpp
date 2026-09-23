@@ -21,7 +21,8 @@ namespace brass::codegen {
 using namespace brass::x64;
 
 bool BaselineJitCompiler::x64_supports_opcode(Opcode op) noexcept {
-    if (is_vector_op(op)) return false;
+    // Vector opcodes are compiled for 128-bit types; the pre-scan rejects
+    // 256-bit vectors and the few type / operand combinations it does not.
     switch (op) {
         // Exceptions: the interpreter tier propagates MIR exceptions as C++
         // exceptions and native tiers as a frame-chain unwind; a baseline
@@ -49,15 +50,23 @@ namespace {
 // Rejects, before any code is emitted, a function the x64 baseline tier does
 // not compile. The tiering layer catches UnsupportedOperation and leaves the
 // function in the interpreter.
-void check_x64_baseline_supported(const Function& fn) {
+void check_x64_baseline_supported(const Function& fn, const Target& target, const CallingConvention& cc) {
+    // 128-bit vectors are compiled; 256-bit ones are not.
     auto check_type = [&](Type t, std::string_view what) {
-        if (t.is_vector()) {
+        if (t.is_v256()) {
             throw_unsupported(kX64BaselineStage,
-                std::string("vector-typed ") + std::string(what) + " in " + std::string(fn.name()));
+                std::string("256-bit vector ") + std::string(what) + " in " + std::string(fn.name()));
         }
     };
     check_type(fn.return_type(), "return");
     for (Type t : fn.param_types()) check_type(t, "parameter");
+    if (const BasicBlock* entry = fn.entry_block()) {
+        std::vector<Type> types;
+        for (const auto* p : entry->params()) types.push_back(p->type());
+        if (!bl_vectors_in_registers(target, cc, types)) {
+            throw_unsupported(kX64BaselineStage, "vector parameter passed on the stack in " + std::string(fn.name()));
+        }
+    }
     for (const auto* bb : fn.blocks()) {
         if (!bb) continue;
         for (const auto* p : bb->params()) check_type(p->type(), "block parameter");
@@ -71,6 +80,7 @@ void check_x64_baseline_supported(const Function& fn) {
             for (size_t i = 0; i < inst->operand_count(); ++i) {
                 if (inst->operand(i)) check_type(inst->operand(i)->type(), "operand");
             }
+            check_x64_baseline_vector_inst(fn, *inst, target, cc);
             if (op == Opcode::guard) {
                 const Module* mod = fn.parent();
                 bool has_stub = mod && !inst->symbol().empty() && mod->get_function(inst->symbol());
@@ -185,7 +195,9 @@ void emit_control_op(X64BaselineEmitter& em, const Instruction& inst) {
         case Opcode::ret: {
             if (inst.operand_count() > 0 && inst.operand(0) != nullptr) {
                 const Value* rval = inst.operand(0);
-                if (rval->type().is_float()) {
+                if (bl_is_v128(rval->type())) {
+                    enc.movups(XMM::XMM0, em.slot_addr(rval));
+                } else if (rval->type().is_float()) {
                     if (bl_is_f32(rval->type())) enc.movss(XMM::XMM0, em.slot_addr(rval));
                     else enc.movsd(XMM::XMM0, em.slot_addr(rval));
                 } else {
@@ -221,11 +233,11 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
         }, &dispatch_table().tiering());
     }
 
-    check_x64_baseline_supported(fn);
+    CallingConvention cc = CallingConvention::for_target(target);
+    check_x64_baseline_supported(fn, target, cc);
 
     CodeBuffer buffer;
     X64Encoder enc(buffer);
-    CallingConvention cc = CallingConvention::for_target(target);
 
     // 1. Assign deterministic stack frame slots [rbp - offset]
     std::unordered_map<const Value*, int32_t> slot_map;
@@ -238,7 +250,12 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
         if (!val) return 0;
         auto it = slot_map.find(val);
         if (it != slot_map.end()) return it->second;
-        current_offset += 8;
+        if (bl_is_v128(val->type())) {
+            // 16 bytes at a 16-byte-aligned address (RBP is 16-byte aligned).
+            current_offset = ((current_offset + 15) & ~15) + 16;
+        } else {
+            current_offset += 8;
+        }
         slot_map[val] = current_offset;
         if (val->type().is_gcref()) gcref_slots.push_back(current_offset);
         return current_offset;
@@ -291,20 +308,27 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
         for (size_t i = 0; i < entry_bb->param_count(); ++i) {
             const Value* param = entry_bb->param(i);
             MemAddress dst = slot_off_addr(slot_map[param]);
-            bool is_flt = param->type().is_float();
+            const bool is_vec = bl_is_v128(param->type());
+            const bool is_flt = bl_in_xmm(param->type());
             auto from_stack = [&](int32_t caller_off) {
+                // The pre-scan admitted no vector on the stack.
+                if (is_vec) throw_unsupported(kX64BaselineStage, "vector parameter on the stack");
                 enc.mov(GPR::RAX, MemAddress::base_disp(GPR::RBP, caller_off));
                 enc.mov(dst, GPR::RAX);
             };
+            auto from_xmm = [&](XMM x) {
+                if (is_vec) enc.movups(dst, x);
+                else enc.movsd(dst, x);
+            };
             if (target.is_windows()) {
                 if (i < 4) {
-                    if (is_flt) enc.movsd(dst, kWinXmms[i]);
+                    if (is_flt) from_xmm(kWinXmms[i]);
                     else enc.mov(dst, kWinGprs[i]);
                 } else {
                     from_stack(static_cast<int32_t>(16 + 32 + (i - 4) * 8));
                 }
             } else if (is_flt) {
-                if (xmm_idx < cc.arg_xmms().size()) enc.movsd(dst, cc.arg_xmms()[xmm_idx++]);
+                if (xmm_idx < cc.arg_xmms().size()) from_xmm(cc.arg_xmms()[xmm_idx++]);
                 else from_stack(static_cast<int32_t>(16 + stack_idx++ * 8));
             } else {
                 if (gpr_idx < cc.arg_gprs().size()) enc.mov(dst, cc.arg_gprs()[gpr_idx++]);
@@ -347,6 +371,7 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
         for (const auto* inst_ptr : *bb) {
             if (!inst_ptr) continue;
             const Instruction& inst = *inst_ptr;
+            if (emit_baseline_x64_vec_op(emitter, inst)) continue;
             if (emit_baseline_x64_op(emitter, inst)) continue;
             if (emit_baseline_x64_fp_op(emitter, inst)) continue;
             emit_control_op(emitter, inst);

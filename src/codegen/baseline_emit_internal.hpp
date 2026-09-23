@@ -19,8 +19,28 @@ inline constexpr std::string_view kX64BaselineStage = "x64 baseline";
 //   - an I8/I16/I32 value lives in the low 4 bytes of its slot and is
 //     operated on at 32 bits (the interpreter models all three as i32);
 //   - an F32 lives in the low 4 bytes, an F64 / I64 / Ptr / GCRef in all 8.
+//   - a 128-bit vector owns a 16-byte, 16-byte-aligned slot. 256-bit
+//     vectors are not compiled by this tier.
 inline bool bl_is_int32(Type t) { return t.is_integer() && t.size_in_bytes() <= 4; }
 inline bool bl_is_f32(Type t) { return t.kind() == TypeKind::F32; }
+inline bool bl_is_v128(Type t) { return t.is_v128(); }
+// Passed in an XMM register: floats and 128-bit vectors.
+inline bool bl_in_xmm(Type t) { return t.is_float() || t.is_v128(); }
+
+// True when every 128-bit vector among `types`, laid out as the arguments
+// of a brass x64 call, travels in an XMM register: Win64 gives argument i
+// XMMi for i < 4, SysV the next free argument XMM. That is where tier 2's
+// entry and the invoke thunks put a vector; a vector on the stack has no
+// layout all tiers agree on, so this tier rejects it.
+bool bl_vectors_in_registers(const Target& target, const CallingConvention& cc,
+                             const std::vector<Type>& types);
+
+// Rejects (UnsupportedOperation) an instruction whose vector use this tier
+// does not compile: every vector opcode is checked, and a vector-typed
+// operand or result of any other opcode is allowed only for select, the
+// memory accesses, calls and ret.
+void check_x64_baseline_vector_inst(const Function& fn, const Instruction& inst, const Target& target,
+                                    const CallingConvention& cc);
 
 struct X64BaselineEmitter {
     CodeBuffer& buffer;
@@ -48,6 +68,12 @@ struct X64BaselineEmitter {
             throw_unsupported(kX64BaselineStage, "operand with no frame slot in " + std::string(fn.name()));
         }
         return MemAddress::base_disp(GPR::RBP, -it->second);
+    }
+
+    // Byte `byte` of a (vector) value's slot.
+    MemAddress slot_addr_at(const Value* val, int32_t byte) const {
+        MemAddress base = slot_addr(val);
+        return MemAddress::base_disp(GPR::RBP, base.disp + byte);
     }
 
     MemAddress slot_off_addr(int32_t off) const {
@@ -84,5 +110,7 @@ struct X64BaselineEmitter {
 // Each returns true if it handled the opcode.
 bool emit_baseline_x64_op(X64BaselineEmitter& emitter, const Instruction& inst);
 bool emit_baseline_x64_fp_op(X64BaselineEmitter& emitter, const Instruction& inst);
+// Vector opcodes, and select / loads / stores / ret of a vector value.
+bool emit_baseline_x64_vec_op(X64BaselineEmitter& emitter, const Instruction& inst);
 
 } // namespace brass::codegen

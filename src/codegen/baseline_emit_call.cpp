@@ -30,14 +30,24 @@ void X64BaselineEmitter::copy_block_args(const BranchTarget& target_branch) {
     size_t count = std::min(target_branch.args.size(), params.size());
     // Through the machine stack, so a parallel copy whose sources are also
     // destinations reads every source before any destination is written.
+    // A 128-bit vector goes as two words, high first.
     for (size_t j = 0; j < count; ++j) {
-        enc.mov(GPR::RAX, slot_addr(target_branch.args[j]));
+        const Value* arg = target_branch.args[j];
+        if (bl_is_v128(params[j]->type())) {
+            enc.mov(GPR::RAX, slot_addr_at(arg, 8));
+            enc.push(GPR::RAX);
+        }
+        enc.mov(GPR::RAX, slot_addr(arg));
         enc.push(GPR::RAX);
     }
     for (size_t j = 0; j < count; ++j) {
         size_t idx = count - 1 - j;
         enc.pop(GPR::RAX);
         enc.mov(slot_addr(params[idx]), GPR::RAX);
+        if (bl_is_v128(params[idx]->type())) {
+            enc.pop(GPR::RAX);
+            enc.mov(slot_addr_at(params[idx], 8), GPR::RAX);
+        }
     }
 }
 
@@ -90,7 +100,7 @@ void X64BaselineEmitter::emit_call(std::string_view symbol, const Value* indirec
     // Stack arguments needed.
     size_t gpr_idx = 0, xmm_idx = 0, stack_args = 0;
     for (size_t i = 0; i < num_args; ++i) {
-        bool is_flt = args[i]->type().is_float();
+        bool is_flt = bl_in_xmm(args[i]->type());
         if (win) {
             if (i >= 4) stack_args++;
         } else if (is_flt) {
@@ -112,21 +122,28 @@ void X64BaselineEmitter::emit_call(std::string_view symbol, const Value* indirec
     xmm_idx = 0;
     size_t cur_stack_arg = 0;
     auto push_stack = [&](const Value* arg, int32_t disp) {
+        // The pre-scan admitted no vector argument on the stack.
+        if (bl_is_v128(arg->type())) throw_unsupported(kX64BaselineStage, "vector argument on the stack");
         enc.mov(GPR::RAX, slot_addr(arg));
         enc.mov(MemAddress::base_disp(GPR::RSP, disp), GPR::RAX);
     };
+    // A 128-bit vector travels whole in its XMM register.
+    auto load_xmm = [&](XMM x, const Value* arg) {
+        if (bl_is_v128(arg->type())) enc.movups(x, slot_addr(arg));
+        else enc.movsd(x, slot_addr(arg));
+    };
     for (size_t i = 0; i < num_args; ++i) {
         const Value* arg = args[i];
-        bool is_flt = arg->type().is_float();
+        bool is_flt = bl_in_xmm(arg->type());
         if (win) {
             if (i < 4) {
-                if (is_flt) enc.movsd(kWinXmms[i], slot_addr(arg));
+                if (is_flt) load_xmm(kWinXmms[i], arg);
                 else load_gpr(kWinGprs[i], arg);
             } else {
                 push_stack(arg, static_cast<int32_t>(32 + (i - 4) * 8));
             }
         } else if (is_flt) {
-            if (xmm_idx < cc.arg_xmms().size()) enc.movsd(cc.arg_xmms()[xmm_idx++], slot_addr(arg));
+            if (xmm_idx < cc.arg_xmms().size()) load_xmm(cc.arg_xmms()[xmm_idx++], arg);
             else push_stack(arg, static_cast<int32_t>(cur_stack_arg++ * 8));
         } else {
             if (gpr_idx < cc.arg_gprs().size()) load_gpr(cc.arg_gprs()[gpr_idx++], arg);
@@ -148,7 +165,9 @@ void X64BaselineEmitter::emit_call(std::string_view symbol, const Value* indirec
 
     if (result) {
         Type rt = result->type();
-        if (rt.is_float()) {
+        if (bl_is_v128(rt)) {
+            enc.movups(slot_addr(result), XMM::XMM0);
+        } else if (rt.is_float()) {
             if (bl_is_f32(rt)) enc.movss(slot_addr(result), XMM::XMM0);
             else enc.movsd(slot_addr(result), XMM::XMM0);
         } else {

@@ -171,6 +171,7 @@ add_executable(brass_unit_tests
     unit/test_speculative_inlining.cpp
     unit/test_baseline_jit.cpp
     unit/test_baseline_jit_opcodes.cpp
+    unit/test_baseline_jit_vector.cpp
     unit/test_baseline_lazy_symbols.cpp
     unit/test_program_dispatch.cpp
     unit/test_program_runtime_state.cpp
