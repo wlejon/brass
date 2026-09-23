@@ -334,7 +334,7 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
     X64BaselineEmitter emitter{
         buffer, enc, target, fn, slot_map, alloca_offsets, block_labels, fn_stack_map,
         [this](std::string_view name) { return resolve_symbol(name); },
-        frame_size, cc, fn_entry_label, gcref_slots, preserves_r13
+        frame_size, cc, fn_entry_label, gcref_slots, preserves_r13, lazy_.get()
     };
 
     // 5. Code for each block
@@ -365,8 +365,10 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
     fn_stack_map.function_address = reinterpret_cast<uintptr_t>(entry_ptr);
     fn_stack_map.code_size = static_cast<uint32_t>(code_bytes);
 
-    return BaselineCompiledFunction(
+    BaselineCompiledFunction compiled(
         fn.name(), fn.return_type(), fn.param_types(), mem_block, entry_ptr, code_bytes, std::move(fn_stack_map));
+    if (emitter.uses_lazy_stubs) compiled.set_link_keepalive(lazy_);
+    return compiled;
 }
 
 } // namespace brass::codegen

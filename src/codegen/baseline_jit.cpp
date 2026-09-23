@@ -303,20 +303,46 @@ BaselineJitCompiler::BaselineJitCompiler(Target target)
     symbols_["brass_gc_write_barrier"] = reinterpret_cast<void*>(&brass_default_gc_write_barrier);
     symbols_["brass_tier1_record_invocation"] = reinterpret_cast<void*>(&brass_tier1_record_invocation);
     symbols_["brass_tier1_record_invocation_fb"] = reinterpret_cast<void*>(&brass_tier1_record_invocation_fb);
+    lazy_ = std::make_shared<LazySymbolTable>([this](std::string_view name) { return resolve_symbol(name); });
+}
+
+BaselineJitCompiler::~BaselineJitCompiler() {
+    // Compiled code may outlive the compiler; its stubs then resolve nothing
+    // new (register_external_symbol is gone with it).
+    lazy_->detach();
 }
 
 void BaselineJitCompiler::register_external_symbol(std::string_view name, void* addr) {
-    symbols_[std::string(name)] = addr;
+    {
+        std::lock_guard<std::mutex> lock(symbols_mutex_);
+        symbols_[std::string(name)] = addr;
+    }
+    // Outside symbols_mutex_: the table resolves through resolve_symbol
+    // while holding its own lock.
+    lazy_->define(name, addr);
+}
+
+void BaselineJitCompiler::set_symbol_resolver(BaselineSymbolResolver resolver) {
+    std::lock_guard<std::mutex> lock(symbols_mutex_);
+    custom_resolver_ = std::move(resolver);
+}
+
+void* BaselineJitCompiler::lazy_stub(std::string_view name) {
+    return lazy_->stub_for(name);
 }
 
 void* BaselineJitCompiler::resolve_symbol(std::string_view name) const {
-    std::string key(name);
-    auto it = symbols_.find(key);
-    if (it != symbols_.end()) {
-        return it->second;
+    BaselineSymbolResolver custom;
+    {
+        std::lock_guard<std::mutex> lock(symbols_mutex_);
+        auto it = symbols_.find(std::string(name));
+        if (it != symbols_.end()) {
+            return it->second;
+        }
+        custom = custom_resolver_;
     }
-    if (custom_resolver_) {
-        void* ptr = custom_resolver_(name);
+    if (custom) {
+        void* ptr = custom(name);
         if (ptr) return ptr;
     }
     auto* handle = runtime::FunctionDispatchTable::instance().find(name);

@@ -37,6 +37,10 @@ struct X64BaselineEmitter {
     Label fn_entry_label;
     const std::vector<int32_t>& gcref_slots;
     bool preserves_r13 = false;
+    // Stubs for symbols unresolved at compile time; set when one is used, so
+    // the compiled function keeps the table alive.
+    LazySymbolTable* lazy = nullptr;
+    bool uses_lazy_stubs = false;
 
     MemAddress slot_addr(const Value* val) const {
         auto it = slot_map.find(val);
@@ -53,6 +57,8 @@ struct X64BaselineEmitter {
     Label block_label(const BasicBlock* bb) const { return block_labels.at(bb->id()); }
 
     void* resolve_sym(std::string_view name) const;
+    // The symbol's address if it resolves now, else its lazy-link stub.
+    void* resolve_or_stub(std::string_view name);
     void copy_block_args(const BranchTarget& target_branch);
 
     // mov r11, fn; call r11 — for runtime helpers taking register args.
@@ -68,7 +74,7 @@ struct X64BaselineEmitter {
     // Emits the epilogue and `ret`, the value already in RAX / XMM0.
     void emit_return();
     // A call with the platform C convention to `symbol` (resolved, or through
-    // the dispatch table) or to the pointer in `indirect`; the result, if
+    // its lazy-link stub) or to the pointer in `indirect`; the result, if
     // any, goes to `result`'s slot.
     void emit_call(std::string_view symbol, const Value* indirect,
                    const std::vector<const Value*>& args, const Value* result,

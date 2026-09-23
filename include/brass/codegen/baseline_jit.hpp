@@ -6,6 +6,8 @@
 #include <brass/interpreter/value.hpp>
 #include <brass/gc/stack_map.hpp>
 #include <brass/codegen/jit_exec.hpp>
+#include <brass/codegen/lazy_symbols.hpp>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -38,6 +40,8 @@ public:
     const FunctionStackMap& stack_map() const noexcept { return stack_map_; }
     FunctionStackMap& stack_map() noexcept { return stack_map_; }
     std::shared_ptr<JitMemoryBlock> memory() const noexcept { return memory_; }
+    // Keeps the lazy-link stubs the code calls through alive with it.
+    void set_link_keepalive(std::shared_ptr<const void> keepalive) { link_keepalive_ = std::move(keepalive); }
     bool is_valid() const noexcept { return entry_point_ != nullptr; }
 
     template <typename FuncPtr>
@@ -55,6 +59,7 @@ private:
     void* entry_point_ = nullptr;
     size_t code_size_ = 0;
     FunctionStackMap stack_map_;
+    std::shared_ptr<const void> link_keepalive_;
 };
 
 using BaselineSymbolResolver = std::function<void*(std::string_view)>;
@@ -62,13 +67,28 @@ using BaselineSymbolResolver = std::function<void*(std::string_view)>;
 class BaselineJitCompiler {
 public:
     explicit BaselineJitCompiler(Target target = Target::host());
-    ~BaselineJitCompiler() = default;
+    ~BaselineJitCompiler();
+
+    BaselineJitCompiler(const BaselineJitCompiler&) = delete;
+    BaselineJitCompiler& operator=(const BaselineJitCompiler&) = delete;
 
     const Target& target() const noexcept { return target_; }
     void set_target(const Target& target) noexcept { target_ = target; }
 
+    // Also fills the lazy-link cell of `name` if compiled code already
+    // references it (see below).
     void register_external_symbol(std::string_view name, void* addr);
-    void set_symbol_resolver(BaselineSymbolResolver resolver) { custom_resolver_ = std::move(resolver); }
+    void set_symbol_resolver(BaselineSymbolResolver resolver);
+
+    // A direct call or func_addr whose symbol does not resolve at compile
+    // time (x64) goes through a per-symbol stub that resolves on first call:
+    // through register_external_symbol, the custom resolver or the dispatch
+    // table, whichever has it by then. func_addr yields the stub, a stable,
+    // callable address. A call that finds the symbol still unresolved is a
+    // hard error (reported, then ud2), never a call through null. The stubs
+    // stay alive as long as any function compiled against them.
+    void* lazy_stub(std::string_view name);
+    const std::shared_ptr<LazySymbolTable>& lazy_symbols() const noexcept { return lazy_; }
 
     BaselineCompiledFunction compile(const Function& fn);
     BaselineCompiledFunction compile(const Function& fn, Target target);
@@ -86,8 +106,10 @@ public:
 
 private:
     Target target_;
+    mutable std::mutex symbols_mutex_;
     std::unordered_map<std::string, void*> symbols_;
     BaselineSymbolResolver custom_resolver_;
+    std::shared_ptr<LazySymbolTable> lazy_;
 };
 
 } // namespace brass::codegen

@@ -15,6 +15,15 @@ void* X64BaselineEmitter::resolve_sym(std::string_view name) const {
     return nullptr;
 }
 
+void* X64BaselineEmitter::resolve_or_stub(std::string_view name) {
+    if (void* addr = resolve_sym(name)) return addr;
+    if (!lazy) {
+        throw_unsupported(kX64BaselineStage, "unresolved symbol " + std::string(name) + " with no lazy-link table");
+    }
+    uses_lazy_stubs = true;
+    return lazy->stub_for(name);
+}
+
 void X64BaselineEmitter::copy_block_args(const BranchTarget& target_branch) {
     if (!target_branch.block || target_branch.args.empty()) return;
     const auto& params = target_branch.block->params();
@@ -129,13 +138,8 @@ void X64BaselineEmitter::emit_call(std::string_view symbol, const Value* indirec
         enc.call(GPR::R11);
     } else if (symbol == fn.name()) {
         enc.call(fn_entry_label);
-    } else if (void* sym_addr = resolve_sym(symbol)) {
-        call_abs(sym_addr);
     } else {
-        auto* handle = runtime::FunctionDispatchTable::instance().get_or_create(symbol);
-        enc.movabs(GPR::R11, reinterpret_cast<uint64_t>(handle->native_entry_ptr()));
-        enc.mov(GPR::R11, MemAddress::base_disp(GPR::R11, 0));
-        enc.call(GPR::R11);
+        call_abs(resolve_or_stub(symbol));
     }
 
     // Keyed by the return address, so recorded before the stack is popped.

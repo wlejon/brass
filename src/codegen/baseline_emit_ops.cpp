@@ -146,10 +146,9 @@ bool emit_baseline_x64_op(X64BaselineEmitter& emitter, const Instruction& inst) 
             enc.mov(slot_addr(inst.result()), GPR::RAX);
             return true;
         case Opcode::func_addr: {
-            void* addr = emitter.resolve_sym(inst.symbol());
-            if (!addr) {
-                throw_unsupported(kX64BaselineStage, "func_addr of unresolved symbol " + std::string(inst.symbol()));
-            }
+            // Unresolved now: the lazy-link stub, callable before the target
+            // is registered and the same address after.
+            void* addr = emitter.resolve_or_stub(inst.symbol());
             enc.movabs(GPR::RAX, reinterpret_cast<uint64_t>(addr));
             enc.mov(slot_addr(inst.result()), GPR::RAX);
             return true;
