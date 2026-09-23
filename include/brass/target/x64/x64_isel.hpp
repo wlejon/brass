@@ -114,6 +114,7 @@ private:
     void lower_invoke(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_throw(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_resume(const Instruction& inst, codegen::LirBlock& lir_bb);
+    void append_noreturn_trap(codegen::LirBlock& lir_bb);
     void lower_landing_pad(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_branch(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_branch_if(const Instruction& inst, codegen::LirBlock& lir_bb);

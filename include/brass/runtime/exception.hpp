@@ -178,7 +178,25 @@ extern "C" {
 }
 
 // 7. Win64 SEH scope table emitter and personality routine
-void emit_win64_seh_scope_table(object::Section& xdata_sec, const FunctionExceptionTable& table);
+//
+// The scope table follows the handler RVA in a function's .xdata; each
+// begin/end/landing-pad entry is an ADDR32NB relocation against fn_symbol.
+void emit_win64_seh_scope_table(object::Section& xdata_sec, const FunctionExceptionTable& table,
+                                std::string_view fn_symbol);
+
+// SEH exception code of a brass throw raised through the OS dispatcher
+// (customer bit set, "BRS"); ExceptionInformation[0] holds the value bits.
+inline constexpr uint32_t BRASS_SEH_EXCEPTION_CODE = 0xE0425253u;
+
+// Landing pad for a frame at return address control_pc, from a scope table
+// (handler_data, image-relative) or, with no table, from the JIT registry.
+// Returns the absolute pad address, or 0 when the frame has no scope there.
+uint64_t brass_seh_find_landing_pad(uint64_t control_pc, uint64_t image_base, const void* handler_data) noexcept;
+
+// Raises val as a Win64 SEH exception when some frame the OS unwinder can see
+// has a brass landing pad for it; does not return then. Returns false (and
+// raises nothing) when no such frame exists, or off Win64.
+bool brass_seh_raise(HostValue val);
 
 extern "C" int brass_seh_personality(
     void* ExceptionRecord,

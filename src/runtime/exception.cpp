@@ -327,7 +327,12 @@ extern "C" BRASS_NOINLINE_NOFP void brass_throw_impl(
         cur_ip = next_ip;
     }
 
-    // Fallback if unhandled by Brass landing pad
+    // Frames the registry does not know (AOT objects, brass-built DLLs, or
+    // JIT code above a host frame) are found through their .pdata/.xdata by
+    // the OS unwinder; this does not return when one of them has a pad.
+    brass_seh_raise(val);
+
+    // No landing pad anywhere: the host sees a C++ exception.
     throw BrassException(val);
 }
 

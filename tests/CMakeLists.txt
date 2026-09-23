@@ -422,6 +422,34 @@ if(BRASS_BUILD_TOOLS)
         set_tests_properties("brass_opt_cli.coro_args.${_mode}" PROPERTIES
             TIMEOUT 60 PASS_REGULAR_EXPRESSION "^1011026[\r\n]" LABELS "correctness")
     endforeach()
+    # aot_coff.eh: exceptions in AOT COFF code on Win64. brass-opt -c makes
+    # an object from tests/aot/eh_aot.mir, MSVC links it with a C host and
+    # brass.lib, and every result must match the interpreter and the JIT:
+    # throw to a landing pad, rethrow from a pad, resume, and values live
+    # into a pad across a frame that uses callee-saved registers. The first
+    # throw once ended the process silently (unrelocated scope tables, a
+    # personality that never unwound, and a throw that only searched JIT
+    # code).
+    if(MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64")
+        set(_eh_aot_obj "${CMAKE_CURRENT_BINARY_DIR}/aot/eh_aot.obj")
+        add_custom_command(
+            OUTPUT "${_eh_aot_obj}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/aot"
+            COMMAND brass-opt "${CMAKE_CURRENT_SOURCE_DIR}/aot/eh_aot.mir" -c -o "${_eh_aot_obj}"
+            DEPENDS brass-opt "${CMAKE_CURRENT_SOURCE_DIR}/aot/eh_aot.mir"
+            COMMENT "brass-opt -c eh_aot.mir"
+            VERBATIM)
+        set_source_files_properties("${_eh_aot_obj}" PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+        add_executable(brass_aot_eh_host aot/eh_aot_host.c "${_eh_aot_obj}")
+        target_link_libraries(brass_aot_eh_host PRIVATE brass)
+        add_test(NAME aot_coff.eh
+            COMMAND ${CMAKE_COMMAND}
+                "-DHOST_EXE=$<TARGET_FILE:brass_aot_eh_host>"
+                "-DBRASS_OPT=$<TARGET_FILE:brass-opt>"
+                "-DMIR=${CMAKE_CURRENT_SOURCE_DIR}/aot/eh_aot.mir"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/run_aot_eh.cmake")
+        set_tests_properties(aot_coff.eh PROPERTIES TIMEOUT 300 LABELS "correctness")
+    endif()
 endif()
 
 if(APPLE)

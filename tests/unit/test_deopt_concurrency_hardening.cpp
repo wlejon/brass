@@ -30,21 +30,6 @@ using namespace brass;
 using namespace brass::runtime;
 using namespace brass::codegen;
 
-namespace {
-
-struct Win64DispatcherContextLayout {
-    uint64_t ControlPc;
-    uint64_t ImageBase;
-    void* FunctionEntry;
-    uint64_t EstablisherFrame;
-    uint64_t TargetIp;
-    void* ContextRecord;
-    void* LanguageHandler;
-    void* HandlerData;
-};
-
-} // namespace
-
 // ============================================================================
 // Deliverable 6.a: GCRef Preservation Surviving Moving GC Scavenge
 // ============================================================================
@@ -368,45 +353,57 @@ TEST_CASE("Deopt Hardening - Win64 SEH Personality Landing Pad Identification") 
     table.add_scope(0x40, 0x60, 0x200);
 
     object::Section xdata;
-    emit_win64_seh_scope_table(xdata, table);
+    emit_win64_seh_scope_table(xdata, table, "test_seh_fn");
     REQUIRE(!xdata.data.empty());
 
-    Win64DispatcherContextLayout dc{};
-    dc.ImageBase = 0x10000;
-    dc.HandlerData = xdata.data.data();
+    // Every begin/end/pad entry is image-relative: an ADDR32NB relocation
+    // against the function whose addend is the function-relative offset.
+    const uint32_t expected_offsets[] = {0x10, 0x30, 0x100, 0x40, 0x60, 0x200};
+    REQUIRE_EQ(xdata.relocations.size(), 6u);
+    for (size_t i = 0; i < 6; ++i) {
+        const auto& r = xdata.relocations[i];
+        CHECK(r.kind == object::RelocKind::Addr32NB);
+        CHECK_EQ(r.symbol_name, "test_seh_fn");
+        CHECK_EQ(r.offset, 4 + i * 4);
+        CHECK_EQ(r.addend, static_cast<int64_t>(expected_offsets[i]));
+    }
+    {
+        object::Section unnamed;
+        bool threw = false;
+        try {
+            emit_win64_seh_scope_table(unnamed, table, "");
+        } catch (const std::runtime_error&) {
+            threw = true;
+        }
+        CHECK(threw);
+    }
 
-    // 1. IP within Scope 0: [0x10, 0x30) -> Landing pad 0x100
-    dc.ControlPc = 0x10020;
-    int res0 = brass_seh_personality(nullptr, nullptr, nullptr, &dc);
-    CHECK_EQ(res0, 0); // Target identified
-    CHECK_EQ(dc.TargetIp, 0x10000 + 0x100);
+    // With the function linked at RVA 0 the relocated table equals the raw
+    // one, so ImageBase 0x10000 puts the scopes at 0x10010.. and so on.
+    const uint64_t image_base = 0x10000;
+    const void* handler_data = xdata.data.data();
 
-    // 2. IP within Scope 1: [0x40, 0x60) -> Landing pad 0x200
-    dc.ControlPc = 0x10050;
-    int res1 = brass_seh_personality(nullptr, nullptr, nullptr, &dc);
-    CHECK_EQ(res1, 0);
-    CHECK_EQ(dc.TargetIp, 0x10000 + 0x200);
+    // 1. Return address within Scope 0: [0x10, 0x30) -> Landing pad 0x100
+    CHECK_EQ(brass_seh_find_landing_pad(0x10020, image_base, handler_data), 0x10000 + 0x100);
 
-    // 3. IP outside any scope: 0x10035
-    dc.ControlPc = 0x10035;
-    dc.TargetIp = 0;
-    int res_none = brass_seh_personality(nullptr, nullptr, nullptr, &dc);
-    CHECK_EQ(res_none, 1); // ExceptionContinueSearch
-    CHECK_EQ(dc.TargetIp, 0u);
+    // 2. Return address within Scope 1: [0x40, 0x60) -> Landing pad 0x200
+    CHECK_EQ(brass_seh_find_landing_pad(0x10050, image_base, handler_data), 0x10000 + 0x200);
+
+    // 3. Outside any scope: 0x10035 (the call at 0x10034)
+    CHECK_EQ(brass_seh_find_landing_pad(0x10035, image_base, handler_data), 0u);
+
+    // A return address just past a scope's end belongs to the call inside it.
+    CHECK_EQ(brass_seh_find_landing_pad(0x10030, image_base, handler_data), 0x10000 + 0x100);
+
+    // The personality claims nothing that is not a brass exception.
+    CHECK_EQ(brass_seh_personality(nullptr, nullptr, nullptr, nullptr), 1);
 
     // 4. Fallback to global registry when HandlerData is null
     FunctionExceptionTable table_global("global_seh_fn", 0x5000, 0x6000);
     table_global.add_scope(0x15, 0x35, 0x350);
     get_global_exception_registry().register_function_mapping(0x5000, 0x1000, table_global);
 
-    Win64DispatcherContextLayout dc_global{};
-    dc_global.ImageBase = 0;
-    dc_global.HandlerData = nullptr;
-    dc_global.ControlPc = 0x5020;
-
-    int res_global = brass_seh_personality(nullptr, nullptr, nullptr, &dc_global);
-    CHECK_EQ(res_global, 0);
-    CHECK_EQ(dc_global.TargetIp, 0x5000 + 0x350);
+    CHECK_EQ(brass_seh_find_landing_pad(0x5020, 0, nullptr), 0x5000 + 0x350);
 
     get_global_exception_registry().unregister_function_mapping(0x5000);
 }

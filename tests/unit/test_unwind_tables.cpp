@@ -40,7 +40,7 @@ TEST_CASE("Unwind Tables - Win64 SEH Scope Table Emitter") {
     table.add_scope(0x40, 0x60, 0xC0);
 
     Section xdata;
-    emit_win64_seh_scope_table(xdata, table);
+    emit_win64_seh_scope_table(xdata, table, "win64_fn");
 
     // DWORD count = 2
     // then 2 scopes of 3 DWORDs = 6 DWORDs. Total = 7 * 4 = 28 bytes.

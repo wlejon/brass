@@ -27,6 +27,15 @@ void X64ISel::lower_throw(const Instruction& inst, LirBlock& lir_bb) {
     finish_call(*call_lir, Type::void_type());
     call_lir->mir_origin = &inst;
     lir_bb.append_inst(std::move(call_lir));
+    append_noreturn_trap(lir_bb);
+}
+
+// brass_throw / brass_rethrow never return. The trap after the call keeps
+// the call's return address inside the function even when the call is its
+// last instruction: the Win64 unwinder looks the frame up by that address in
+// .pdata, and one byte past the function's end belongs to no function.
+void X64ISel::append_noreturn_trap(LirBlock& lir_bb) {
+    lir_bb.append_inst(std::make_unique<LirInst>(LirOpcode::Trap));
 }
 
 void X64ISel::lower_resume(const Instruction& inst, LirBlock& lir_bb) {
@@ -43,6 +52,7 @@ void X64ISel::lower_resume(const Instruction& inst, LirBlock& lir_bb) {
         finish_call(*call_lir, Type::void_type());
         call_lir->mir_origin = &inst;
         lir_bb.append_inst(std::move(call_lir));
+        append_noreturn_trap(lir_bb);
     }
 }
 

@@ -183,7 +183,7 @@ static void build_aarch64_unwind_info(ObjectFile& obj) {
                 r.addend = 0;
                 xdata_sec->relocations.push_back(std::move(r));
 
-                runtime::emit_win64_seh_scope_table(*xdata_sec, fn.exception_table);
+                runtime::emit_win64_seh_scope_table(*xdata_sec, fn.exception_table, fn.name);
             }
 
             // Emit RUNTIME_FUNCTION in .pdata (8 bytes for ARM64)
@@ -400,7 +400,7 @@ void CoffUnwindBuilder::build_unwind_info(
             r.addend = 0;
             xdata_sec->relocations.push_back(std::move(r));
 
-            runtime::emit_win64_seh_scope_table(*xdata_sec, fn.exception_table);
+            runtime::emit_win64_seh_scope_table(*xdata_sec, fn.exception_table, fn.name);
         }
 
         // Emit RUNTIME_FUNCTION in .pdata (12 bytes)
