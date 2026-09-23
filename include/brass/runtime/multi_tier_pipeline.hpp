@@ -77,8 +77,12 @@ public:
     ModuleStackMap& active_stack_maps() noexcept { return active_stack_maps_; }
     const ModuleStackMap& active_stack_maps() const noexcept { return active_stack_maps_; }
 
-    // Synchronous Tier 1 compilation (< 5 microseconds on mutator thread)
+    // Synchronous Tier 1 compilation (< 5 microseconds on mutator thread).
+    // Returns false, leaving the function in the interpreter, when the
+    // baseline compiler rejects it (codegen::UnsupportedOperation); a rejected
+    // function is not retried until clear_baseline_cache().
     bool compile_and_install_tier1(std::string_view fn_name, const Function* fn = nullptr);
+    bool is_baseline_rejected(std::string_view fn_name) const;
 
     // Enqueue Tier 2 background optimization
     bool enqueue_tier2(
@@ -146,6 +150,7 @@ private:
 
     mutable std::mutex compiling_mutex_;
     std::unordered_set<std::string> in_progress_compilations_;
+    std::unordered_set<std::string> baseline_rejected_; // under compiling_mutex_
 };
 
 } // namespace brass::runtime

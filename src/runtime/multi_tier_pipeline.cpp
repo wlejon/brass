@@ -3,6 +3,7 @@
 #include <brass/vm/fast_interpreter.hpp>
 #include <brass/il_translator/il_translator.hpp>
 #include <brass/gc/runtime_gc.hpp>
+#include <brass/codegen/unsupported_operation.hpp>
 #include <iostream>
 #include <iomanip>
 #include <chrono>
@@ -134,7 +135,13 @@ void MultiTierPipeline::clear_baseline_cache() {
     {
         std::lock_guard<std::mutex> c_lock(compiling_mutex_);
         in_progress_compilations_.clear();
+        baseline_rejected_.clear();
     }
+}
+
+bool MultiTierPipeline::is_baseline_rejected(std::string_view fn_name) const {
+    std::lock_guard<std::mutex> lock(compiling_mutex_);
+    return baseline_rejected_.count(std::string(fn_name)) != 0;
 }
 
 bool MultiTierPipeline::compile_and_install_tier1(std::string_view fn_name, const Function* fn) {
@@ -144,7 +151,8 @@ bool MultiTierPipeline::compile_and_install_tier1(std::string_view fn_name, cons
 
     {
         std::lock_guard<std::mutex> lock(compiling_mutex_);
-        if (in_progress_compilations_.find(std::string(fn_name)) != in_progress_compilations_.end()) {
+        if (in_progress_compilations_.find(std::string(fn_name)) != in_progress_compilations_.end() ||
+            baseline_rejected_.count(std::string(fn_name))) {
             return false;
         }
         in_progress_compilations_.emplace(std::string(fn_name));
@@ -177,7 +185,16 @@ bool MultiTierPipeline::compile_and_install_tier1(std::string_view fn_name, cons
     handle->set_signature(fn->return_type(), fn->param_types());
 
     auto start = std::chrono::high_resolution_clock::now();
-    codegen::BaselineCompiledFunction compiled = baseline_compiler_.compile(*fn, Target::host());
+    codegen::BaselineCompiledFunction compiled;
+    try {
+        compiled = baseline_compiler_.compile(*fn, Target::host());
+    } catch (const codegen::UnsupportedOperation&) {
+        // The baseline tier does not compile this function (an opcode it
+        // rejects, e.g. exceptions or coroutines): it stays in Tier 0.
+        std::lock_guard<std::mutex> lock(compiling_mutex_);
+        baseline_rejected_.emplace(fn_name);
+        return false;
+    }
     auto end = std::chrono::high_resolution_clock::now();
     auto elapsed_us = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(end - start).count());
 

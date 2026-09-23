@@ -77,6 +77,13 @@ public:
 
     void* resolve_symbol(std::string_view name) const;
 
+    // Whether the x64 baseline tier compiles `op`. A function using an opcode
+    // it does not is rejected at compile time: compile() throws
+    // UnsupportedOperation (stage "x64 baseline") and the tiering layer keeps
+    // the function in the interpreter. The same exception rejects a function
+    // with vector-typed values and a guard with no exit stub or resume target.
+    static bool x64_supports_opcode(Opcode op) noexcept;
+
 private:
     Target target_;
     std::unordered_map<std::string, void*> symbols_;

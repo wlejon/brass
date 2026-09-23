@@ -1,6 +1,7 @@
 #pragma once
 
 #include <brass/codegen/baseline_jit.hpp>
+#include <brass/codegen/unsupported_operation.hpp>
 #include <brass/target/x64/x64_encoder.hpp>
 #include <brass/target/calling_conv.hpp>
 #include <unordered_map>
@@ -10,6 +11,16 @@
 namespace brass::codegen {
 
 using namespace brass::x64;
+
+// The stage name every x64 baseline rejection carries (UnsupportedOperation).
+inline constexpr std::string_view kX64BaselineStage = "x64 baseline";
+
+// Slot conventions of the x64 baseline tier:
+//   - an I8/I16/I32 value lives in the low 4 bytes of its slot and is
+//     operated on at 32 bits (the interpreter models all three as i32);
+//   - an F32 lives in the low 4 bytes, an F64 / I64 / Ptr / GCRef in all 8.
+inline bool bl_is_int32(Type t) { return t.is_integer() && t.size_in_bytes() <= 4; }
+inline bool bl_is_f32(Type t) { return t.kind() == TypeKind::F32; }
 
 struct X64BaselineEmitter {
     CodeBuffer& buffer;
@@ -22,22 +33,50 @@ struct X64BaselineEmitter {
     FunctionStackMap& fn_stack_map;
     BaselineSymbolResolver resolver;
     int32_t frame_size = 0;
+    CallingConvention cc;
+    Label fn_entry_label;
+    const std::vector<int32_t>& gcref_slots;
+    bool preserves_r13 = false;
 
     MemAddress slot_addr(const Value* val) const {
         auto it = slot_map.find(val);
-        int32_t off = (it != slot_map.end()) ? it->second : 0;
-        return MemAddress::base_disp(GPR::RBP, -off);
+        if (it == slot_map.end()) {
+            throw_unsupported(kX64BaselineStage, "operand with no frame slot in " + std::string(fn.name()));
+        }
+        return MemAddress::base_disp(GPR::RBP, -it->second);
     }
 
     MemAddress slot_off_addr(int32_t off) const {
         return MemAddress::base_disp(GPR::RBP, -off);
     }
 
+    Label block_label(const BasicBlock* bb) const { return block_labels.at(bb->id()); }
+
     void* resolve_sym(std::string_view name) const;
     void copy_block_args(const BranchTarget& target_branch);
+
+    // mov r11, fn; call r11 — for runtime helpers taking register args.
+    void call_abs(const void* fn_ptr);
+    // Records a stack map for the return address just emitted.
+    void record_safepoint(uint32_t site_id);
+    // Loads a value's slot into a GPR at the value's width (zero-extended
+    // for 32-bit values) and stores one back.
+    void load_gpr(GPR dst, const Value* v);
+    void store_gpr(const Value* v, GPR src);
+    // Loads a condition (any integer width) and sets ZF = (cond == 0).
+    void test_cond(const Value* cond);
+    // Emits the epilogue and `ret`, the value already in RAX / XMM0.
+    void emit_return();
+    // A call with the platform C convention to `symbol` (resolved, or through
+    // the dispatch table) or to the pointer in `indirect`; the result, if
+    // any, goes to `result`'s slot.
+    void emit_call(std::string_view symbol, const Value* indirect,
+                   const std::vector<const Value*>& args, const Value* result,
+                   uint32_t site_id);
 };
 
-// Returns true if the opcode was handled.
+// Each returns true if it handled the opcode.
 bool emit_baseline_x64_op(X64BaselineEmitter& emitter, const Instruction& inst);
+bool emit_baseline_x64_fp_op(X64BaselineEmitter& emitter, const Instruction& inst);
 
 } // namespace brass::codegen

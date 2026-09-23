@@ -41,6 +41,11 @@ struct DiffResult {
     TierResult tier3_interp_opt;  // interpreter, optimized module
     TierResult tier4_fast;        // FastInterpreter (bytecode), original module
     TierResult tier5_fast_opt;    // FastInterpreter (bytecode), optimized module
+    TierResult tier6_baseline;    // x64 baseline JIT, original module
+    // The baseline tier rejected the program at compile time (an opcode it
+    // does not compile); its result is not compared, and its fault_message
+    // names the rejected operation.
+    bool baseline_rejected = false;
     std::string mismatch_reason;
     // A stable grouping key for reports, e.g. "verify@jump_threading",
     // "interp-opt:mismatch@loop_fusion", "jit-unopt:fault".
@@ -68,6 +73,9 @@ struct DiffFuzzerOptions {
     // FastInterpreter vs JIT.
     bool tier4_fast_interp = true;
     bool tier5_fast_interp_opt = true;
+    // The x64 baseline JIT (the tiering layer's Tier 1) on the original
+    // module. A program it rejects at compile time is skipped, not failed.
+    bool tier6_baseline = false;
     FuzzPipeline pipeline = FuzzPipeline::AllPasses;
     // Pipeline steps left out (see run_fuzz_pipeline).
     std::vector<std::string> skip_passes;
@@ -115,6 +123,11 @@ public:
     /// Tier 2: native JIT after the configured optimization pipeline.
     TierResult run_tier2_jit_opt(const Module& mod, std::string_view fn_name,
                                  const std::vector<RuntimeValue>& args);
+
+    /// Tier 6: the x64 baseline JIT, module as given. `rejected` is set when
+    /// the baseline compiler rejects a function (codegen::UnsupportedOperation).
+    TierResult run_baseline(const Module& mod, std::string_view fn_name,
+                            const std::vector<RuntimeValue>& args, bool& rejected);
 
     /// Runs the configured pipeline on a copy of `mod`, verifying after every
     /// step. `after_step`, when set, is called after each verified step with

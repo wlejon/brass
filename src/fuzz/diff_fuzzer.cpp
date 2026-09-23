@@ -421,6 +421,15 @@ DiffResult DiffFuzzer::run_test(const Module& mod, std::string_view fn_name,
         }
     }
 
+    if (options_.tier6_baseline) {
+        result.tier6_baseline = run_baseline(mod, fn_name, args, result.baseline_rejected);
+        if (!result.baseline_rejected && !tier_results_match(expected, result.tier6_baseline)) {
+            return fail("baseline:" + std::string(failure_kind(result.tier6_baseline)),
+                        "Tier 6 (baseline JIT) = " + describe(result.tier6_baseline) +
+                            ", Tier 0 (Interpreter) = " + describe(expected));
+        }
+    }
+
     if (options_.tier2_jit_opt) {
         result.tier2_jit_opt = run_jit(*opt.module, fn_name, args, "optimized");
         if (!tier_results_match(expected, result.tier2_jit_opt)) {

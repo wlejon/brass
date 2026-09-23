@@ -61,6 +61,9 @@ static void print_usage(const char* prog) {
               << "  --unopt-only               Compare only the unoptimized JIT against the interpreter;\n"
               << "                             no pass runs, so a backend bug minimizes on its own\n"
               << "  --no-fast-interp           Skip the bytecode (FastInterpreter) tiers\n"
+              << "  --baseline                 Also run the x64 baseline JIT (Tier 1) on the original\n"
+              << "                             module; programs it rejects at compile time are counted\n"
+              << "                             and skipped\n"
               << "  --sandboxed                Enable OS process isolation & memory quota (Windows Job Objects)\n";
 }
 
@@ -291,6 +294,7 @@ int main(int argc, char** argv) {
     bool jit_only = false;
     bool unopt_only = false;
     bool no_fast_interp = false;
+    bool baseline = false;
     std::string dump_opt_path;
 
     for (int i = 1; i < argc; ++i) {
@@ -350,6 +354,8 @@ int main(int argc, char** argv) {
             unopt_only = true;
         } else if (arg == "--no-fast-interp") {
             no_fast_interp = true;
+        } else if (arg == "--baseline") {
+            baseline = true;
         } else if (arg.rfind("--chunk-size=", 0) == 0) {
             chunk_size = static_cast<uint32_t>(std::stoul(arg.substr(13)));
         } else {
@@ -371,6 +377,7 @@ int main(int argc, char** argv) {
     diff_opts.pipeline = pipeline;
     diff_opts.bisect = bisect;
     diff_opts.skip_passes = skip_passes;
+    diff_opts.tier6_baseline = baseline;
     if (jit_only || no_fast_interp) {
         diff_opts.tier4_fast_interp = false;
         diff_opts.tier5_fast_interp_opt = false;
@@ -492,7 +499,8 @@ int main(int argc, char** argv) {
                                                            (bisect ? "" : " --no-bisect") +
                                                            (jit_only ? " --jit-only" : "") +
                                                            (unopt_only ? " --unopt-only" : "") +
-                                                           (no_fast_interp ? " --no-fast-interp" : ""),
+                                                           (no_fast_interp ? " --no-fast-interp" : "") +
+                                                           (baseline ? " --baseline" : ""),
                                                  "");
             return system_exit_code(std::system(cmd.c_str())) == 2;
         };
@@ -531,6 +539,8 @@ int main(int argc, char** argv) {
     DiffFuzzer fuzzer(diff_opts);
 
     uint32_t pass_count = 0;
+    uint32_t baseline_rejected_count = 0;
+    std::map<std::string, uint32_t> baseline_reject_reasons;
     uint32_t fail_count = 0;
     struct ClassInfo {
         uint32_t count = 0;
@@ -591,6 +601,10 @@ int main(int argc, char** argv) {
         };
 
         DiffResult res = fuzzer.run_test(mod, "fuzz_fn", args, seed);
+        if (res.baseline_rejected) {
+            baseline_rejected_count++;
+            baseline_reject_reasons[res.tier6_baseline.fault_message]++;
+        }
         if (res.passed) {
             pass_count++;
             continue;
@@ -644,6 +658,13 @@ int main(int argc, char** argv) {
               << " Execution rate     : " << std::setprecision(1) << rate << " tests/sec\n"
               << " Edge coverage      : " << covered_edges.size() << " unique CFG edges\n"
               << " Opcode coverage    : " << covered_opcodes.size() << " unique MIR opcodes\n";
+    if (baseline) {
+        std::cout << " Baseline rejected  : " << baseline_rejected_count
+                  << " (compile-time rejection; not compared)\n";
+        for (const auto& [why, n] : baseline_reject_reasons) {
+            std::cout << "   " << std::setw(6) << n << "  " << why << "\n";
+        }
+    }
     if (!classes.empty()) {
         std::cout << " Failure classes    :\n";
         for (const auto& [name, info] : classes) {
