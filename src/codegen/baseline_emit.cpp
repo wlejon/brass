@@ -288,11 +288,19 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
     Label fn_entry_label = buffer.create_label();
     buffer.bind(fn_entry_label);
 
-    // 2. Prologue
+    // 2. Prologue (described to the unwinder: baseline_unwind.cpp)
+    X64BaselinePrologue prologue;
+    prologue.frame_size = frame_size;
     enc.push(GPR::RBP);
+    prologue.push_end = static_cast<uint32_t>(buffer.size());
     enc.mov(GPR::RBP, GPR::RSP);
+    prologue.mov_end = static_cast<uint32_t>(buffer.size());
     enc.sub(GPR::RSP, frame_size);
-    if (preserves_r13) enc.mov(MemAddress::base_disp(GPR::RBP, -8), GPR::R13);
+    prologue.alloc_end = static_cast<uint32_t>(buffer.size());
+    if (preserves_r13) {
+        enc.mov(MemAddress::base_disp(GPR::RBP, -8), GPR::R13);
+        prologue.r13_save_end = static_cast<uint32_t>(buffer.size());
+    }
 
     // Zero the gcref slots so a GC before their first store sees null.
     if (!gcref_slots.empty()) {
@@ -378,15 +386,28 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
         }
     }
 
-    // Executable memory
+    // Executable memory: the code, then (when this process runs it) the
+    // unwind data that lets a C++ exception from a helper unwind through
+    // the frame.
     size_t code_bytes = buffer.size();
-    auto mem_block = std::make_shared<JitMemoryBlock>(code_bytes);
+    std::vector<uint8_t> image(buffer.data(), buffer.data() + code_bytes);
+    const Target host = Target::host();
+    const bool runs_here = host.is_x64() && host.is_windows() == target.is_windows();
+    size_t unwind_off = 0;
+    if (runs_here) {
+        unwind_off = append_x64_baseline_unwind(image, prologue, static_cast<uint32_t>(code_bytes),
+                                                target.is_windows());
+    }
+    auto mem_block = std::make_shared<JitMemoryBlock>(image.size());
     if (!mem_block->is_valid()) {
         throw std::runtime_error("BaselineJitCompiler: Failed to allocate executable memory for " + std::string(fn.name()));
     }
-    std::memcpy(mem_block->data(), buffer.data(), code_bytes);
+    std::memcpy(mem_block->data(), image.data(), image.size());
     if (!mem_block->make_executable_read_only()) {
         throw std::runtime_error("BaselineJitCompiler: could not make the code of " + std::string(fn.name()) + " executable");
+    }
+    if (runs_here && !mem_block->register_unwind_info(unwind_off, 1)) {
+        throw std::runtime_error("BaselineJitCompiler: the unwinder refused the unwind data of " + std::string(fn.name()));
     }
 
     void* entry_ptr = mem_block->data();
@@ -396,6 +417,7 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
     BaselineCompiledFunction compiled(
         fn.name(), fn.return_type(), fn.param_types(), mem_block, entry_ptr, code_bytes, std::move(fn_stack_map));
     if (emitter.uses_lazy_stubs) compiled.set_link_keepalive(lazy_);
+    compiled.set_lazy_call_symbols(std::move(emitter.lazy_call_symbols));
     return compiled;
 }
 

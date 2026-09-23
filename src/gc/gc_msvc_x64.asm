@@ -11,10 +11,14 @@ brass_get_rbp PROC
 brass_get_rbp ENDP
 
 ; void brass_gc_safepoint()
-brass_gc_safepoint PROC
+brass_gc_safepoint PROC FRAME
     push rbp
+    .pushreg rbp
     mov rbp, rsp
+    .setframe rbp, 0
     sub rsp, 32
+    .allocstack 32
+    .endprolog
     mov rcx, qword ptr [rbp]
     mov rdx, qword ptr [rbp + 8]
     call brass_runtime_gc_safepoint_bridge
@@ -24,10 +28,14 @@ brass_gc_safepoint PROC
 brass_gc_safepoint ENDP
 
 ; uintptr_t brass_gc_alloc(size_t size, uint64_t pointer_mask, uint32_t type_tag)
-brass_gc_alloc PROC
+brass_gc_alloc PROC FRAME
     push rbp
+    .pushreg rbp
     mov rbp, rsp
+    .setframe rbp, 0
     sub rsp, 48
+    .allocstack 48
+    .endprolog
     ; rcx = size
     ; rdx = pointer_mask
     ; r8  = type_tag
@@ -43,10 +51,14 @@ brass_gc_alloc PROC
 brass_gc_alloc ENDP
 
 ; void brass_gc_collect()
-brass_gc_collect PROC
+brass_gc_collect PROC FRAME
     push rbp
+    .pushreg rbp
     mov rbp, rsp
+    .setframe rbp, 0
     sub rsp, 32
+    .allocstack 32
+    .endprolog
     mov rcx, qword ptr [rbp]
     mov rdx, qword ptr [rbp + 8]
     call brass_runtime_gc_safepoint_bridge
@@ -60,10 +72,14 @@ EXTERN host_gc_alloc_bridge: PROC
 EXTERN host_gc_alloc_nanbox_bridge: PROC
 
 ; void host_gc_safepoint()
-host_gc_safepoint PROC
+host_gc_safepoint PROC FRAME
     push rbp
+    .pushreg rbp
     mov rbp, rsp
+    .setframe rbp, 0
     sub rsp, 32
+    .allocstack 32
+    .endprolog
     mov rcx, qword ptr [rbp]
     mov rdx, qword ptr [rbp + 8]
     call host_gc_safepoint_bridge
@@ -73,10 +89,14 @@ host_gc_safepoint PROC
 host_gc_safepoint ENDP
 
 ; uintptr_t host_gc_alloc(size_t size, uint64_t pointer_mask, uint32_t type_tag)
-host_gc_alloc PROC
+host_gc_alloc PROC FRAME
     push rbp
+    .pushreg rbp
     mov rbp, rsp
+    .setframe rbp, 0
     sub rsp, 48
+    .allocstack 48
+    .endprolog
     ; rcx = size
     ; rdx = pointer_mask
     ; r8  = type_tag
@@ -92,10 +112,14 @@ host_gc_alloc PROC
 host_gc_alloc ENDP
 
 ; uint64_t host_gc_alloc_nanbox(size_t size, uint64_t pointer_mask, uint32_t type_tag)
-host_gc_alloc_nanbox PROC
+host_gc_alloc_nanbox PROC FRAME
     push rbp
+    .pushreg rbp
     mov rbp, rsp
+    .setframe rbp, 0
     sub rsp, 48
+    .allocstack 48
+    .endprolog
     ; rcx = size
     ; rdx = pointer_mask
     ; r8  = type_tag
@@ -111,10 +135,14 @@ host_gc_alloc_nanbox PROC
 host_gc_alloc_nanbox ENDP
 
 ; void host_gc_collect()
-host_gc_collect PROC
+host_gc_collect PROC FRAME
     push rbp
+    .pushreg rbp
     mov rbp, rsp
+    .setframe rbp, 0
     sub rsp, 32
+    .allocstack 32
+    .endprolog
     mov rcx, qword ptr [rbp]
     mov rdx, qword ptr [rbp + 8]
     call host_gc_safepoint_bridge
@@ -187,8 +215,10 @@ brass_jump_to_landing_pad_msvc ENDP
 
 ; --- MSVC x64 JIT calling bridge routines for SIMD vector arguments ---
 
-brass_call_jit_int_vec_ret_vec PROC
+brass_call_jit_int_vec_ret_vec PROC FRAME
     sub rsp, 40
+    .allocstack 40
+    .endprolog
     mov rax, rcx
     mov rcx, rdx
     movdqu xmm1, xmmword ptr [r8]
@@ -197,8 +227,10 @@ brass_call_jit_int_vec_ret_vec PROC
     ret
 brass_call_jit_int_vec_ret_vec ENDP
 
-brass_call_jit_int_vec_ret_void PROC
+brass_call_jit_int_vec_ret_void PROC FRAME
     sub rsp, 40
+    .allocstack 40
+    .endprolog
     mov rax, rcx
     mov rcx, rdx
     movdqu xmm1, xmmword ptr [r8]
@@ -207,8 +239,10 @@ brass_call_jit_int_vec_ret_void PROC
     ret
 brass_call_jit_int_vec_ret_void ENDP
 
-brass_call_jit_int_vec_ret_i64 PROC
+brass_call_jit_int_vec_ret_i64 PROC FRAME
     sub rsp, 40
+    .allocstack 40
+    .endprolog
     mov rax, rcx
     mov rcx, rdx
     movdqu xmm1, xmmword ptr [r8]
@@ -217,8 +251,10 @@ brass_call_jit_int_vec_ret_i64 PROC
     ret
 brass_call_jit_int_vec_ret_i64 ENDP
 
-brass_call_jit_vec_int_ret_vec PROC
+brass_call_jit_vec_int_ret_vec PROC FRAME
     sub rsp, 40
+    .allocstack 40
+    .endprolog
     mov rax, rcx
     movdqu xmm0, xmmword ptr [rdx]
     mov rdx, r8
@@ -227,8 +263,10 @@ brass_call_jit_vec_int_ret_vec PROC
     ret
 brass_call_jit_vec_int_ret_vec ENDP
 
-brass_call_jit_vec_int_ret_void PROC
+brass_call_jit_vec_int_ret_void PROC FRAME
     sub rsp, 40
+    .allocstack 40
+    .endprolog
     mov rax, rcx
     movdqu xmm0, xmmword ptr [rdx]
     mov rdx, r8
@@ -237,8 +275,10 @@ brass_call_jit_vec_int_ret_void PROC
     ret
 brass_call_jit_vec_int_ret_void ENDP
 
-brass_call_jit_vec_int_ret_i64 PROC
+brass_call_jit_vec_int_ret_i64 PROC FRAME
     sub rsp, 40
+    .allocstack 40
+    .endprolog
     mov rax, rcx
     movdqu xmm0, xmmword ptr [rdx]
     mov rdx, r8
@@ -247,8 +287,10 @@ brass_call_jit_vec_int_ret_i64 PROC
     ret
 brass_call_jit_vec_int_ret_i64 ENDP
 
-brass_call_jit_vec1_ret_vec PROC
+brass_call_jit_vec1_ret_vec PROC FRAME
     sub rsp, 40
+    .allocstack 40
+    .endprolog
     mov rax, rcx
     movdqu xmm0, xmmword ptr [rdx]
     call rax
@@ -256,8 +298,10 @@ brass_call_jit_vec1_ret_vec PROC
     ret
 brass_call_jit_vec1_ret_vec ENDP
 
-brass_call_jit_vec1_ret_f32 PROC
+brass_call_jit_vec1_ret_f32 PROC FRAME
     sub rsp, 40
+    .allocstack 40
+    .endprolog
     mov rax, rcx
     movdqu xmm0, xmmword ptr [rdx]
     call rax
@@ -265,8 +309,10 @@ brass_call_jit_vec1_ret_f32 PROC
     ret
 brass_call_jit_vec1_ret_f32 ENDP
 
-brass_call_jit_vec1_ret_f64 PROC
+brass_call_jit_vec1_ret_f64 PROC FRAME
     sub rsp, 40
+    .allocstack 40
+    .endprolog
     mov rax, rcx
     movdqu xmm0, xmmword ptr [rdx]
     call rax
@@ -274,8 +320,10 @@ brass_call_jit_vec1_ret_f64 PROC
     ret
 brass_call_jit_vec1_ret_f64 ENDP
 
-brass_call_jit_vec1_ret_i64 PROC
+brass_call_jit_vec1_ret_i64 PROC FRAME
     sub rsp, 40
+    .allocstack 40
+    .endprolog
     mov rax, rcx
     movdqu xmm0, xmmword ptr [rdx]
     call rax
@@ -283,8 +331,10 @@ brass_call_jit_vec1_ret_i64 PROC
     ret
 brass_call_jit_vec1_ret_i64 ENDP
 
-brass_call_jit_vec2_ret_vec PROC
+brass_call_jit_vec2_ret_vec PROC FRAME
     sub rsp, 40
+    .allocstack 40
+    .endprolog
     mov rax, rcx
     movdqu xmm0, xmmword ptr [rdx]
     movdqu xmm1, xmmword ptr [r8]
@@ -293,8 +343,10 @@ brass_call_jit_vec2_ret_vec PROC
     ret
 brass_call_jit_vec2_ret_vec ENDP
 
-brass_call_jit_vec2_ret_f32 PROC
+brass_call_jit_vec2_ret_f32 PROC FRAME
     sub rsp, 40
+    .allocstack 40
+    .endprolog
     mov rax, rcx
     movdqu xmm0, xmmword ptr [rdx]
     movdqu xmm1, xmmword ptr [r8]
@@ -303,8 +355,10 @@ brass_call_jit_vec2_ret_f32 PROC
     ret
 brass_call_jit_vec2_ret_f32 ENDP
 
-brass_call_jit_vec2_ret_i64 PROC
+brass_call_jit_vec2_ret_i64 PROC FRAME
     sub rsp, 40
+    .allocstack 40
+    .endprolog
     mov rax, rcx
     movdqu xmm0, xmmword ptr [rdx]
     movdqu xmm1, xmmword ptr [r8]
@@ -411,24 +465,39 @@ brass_call_jit_v128_3 ENDP
 ; void x64_win64_invoke_thunk(const X64Win64InvokeArgs* args, X64Win64InvokeResult* result)
 ; rcx = args
 ; rdx = result
-x64_win64_invoke_thunk PROC
+; Unwind data describes the frame, so a C++ exception thrown below the called
+; JIT code unwinds through here: RBP (the saved-RBP slot, as a frame chain
+; expects) is set after the pushes and the 8-byte pad, the last prolog step,
+; because the argument area below it is sized at run time.
+x64_win64_invoke_thunk PROC FRAME
     push rbp
-    mov rbp, rsp
+    .pushreg rbp
     push rbx
+    .pushreg rbx
     push rsi
+    .pushreg rsi
     push rdi
+    .pushreg rdi
     push r12
+    .pushreg r12
     push r13
+    .pushreg r13
+    sub rsp, 8
+    .allocstack 8
+    lea rbp, [rsp + 48]
+    .setframe rbp, 48
+    .endprolog
 
     mov r12, rcx
     mov r13, rdx
 
+    ; RSP is 16-byte aligned here; keep it so with an even word count.
     mov rcx, qword ptr [r12 + 104] ; stack_word_count
     lea rax, [rcx + 4]             ; 4 + stack_word_count
     test rax, 1
-    jnz alloc_odd
+    jz alloc_even
     inc rax
-alloc_odd:
+alloc_even:
     shl rax, 3
     sub rsp, rax
 

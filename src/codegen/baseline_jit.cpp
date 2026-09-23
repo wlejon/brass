@@ -389,6 +389,16 @@ std::vector<BaselineCompiledFunction> BaselineJitCompiler::compile_module(const 
         const auto* fn = *it;
         if (!fn) continue;
         results.push_back(compile(*fn, target));
+        // The module is the whole program: a callee that is not one of its
+        // functions (installed by this loop) and does not resolve now has
+        // nothing left to resolve it. Rejected here rather than trapping
+        // when the call runs.
+        for (const std::string& sym : results.back().lazy_call_symbols()) {
+            if (mod.get_function(sym) || resolve_symbol_in(*fn, sym)) continue;
+            throw std::runtime_error("BaselineJitCompiler: function '" + std::string(fn->name()) +
+                                     "' references symbol '" + sym +
+                                     "', which is neither a function of its module nor a registered symbol");
+        }
         auto* handle = table.get_or_create(fn->name(), fn);
         handle->set_native_entry(results.back().entry_point());
         handle->set_tier(runtime::TierLevel::Tier1_Baseline);

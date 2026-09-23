@@ -5,6 +5,7 @@
 #include <brass/target/x64/x64_encoder.hpp>
 #include <brass/target/calling_conv.hpp>
 #include <unordered_map>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -61,6 +62,9 @@ struct X64BaselineEmitter {
     // the compiled function keeps the table alive.
     LazySymbolTable* lazy = nullptr;
     bool uses_lazy_stubs = false;
+    // The direct-call targets that got a stub, each once. (A func_addr stub
+    // is not listed: its address may be taken and never called.)
+    std::vector<std::string> lazy_call_symbols;
 
     MemAddress slot_addr(const Value* val) const {
         auto it = slot_map.find(val);
@@ -106,6 +110,23 @@ struct X64BaselineEmitter {
                    const std::vector<const Value*>& args, const Value* result,
                    uint32_t site_id);
 };
+
+// Code offsets just past each step of the fixed prologue
+// `push rbp ; mov rbp, rsp ; sub rsp, frame_size ; [mov [rbp-8], r13]`
+// (r13_save_end is 0 when R13 is not saved).
+struct X64BaselinePrologue {
+    uint32_t push_end = 0;
+    uint32_t mov_end = 0;
+    uint32_t alloc_end = 0;
+    uint32_t r13_save_end = 0;
+    int32_t frame_size = 0;
+};
+
+// Appends unwind data for the function in image[0, code_size) - Win64
+// UNWIND_INFO + RUNTIME_FUNCTION, or a DWARF .eh_frame elsewhere - and
+// returns the offset to pass to JitMemoryBlock::register_unwind_info.
+size_t append_x64_baseline_unwind(std::vector<uint8_t>& image, const X64BaselinePrologue& prologue,
+                                  uint32_t code_size, bool windows);
 
 // Each returns true if it handled the opcode.
 bool emit_baseline_x64_op(X64BaselineEmitter& emitter, const Instruction& inst);

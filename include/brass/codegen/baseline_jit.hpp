@@ -46,6 +46,10 @@ public:
     std::shared_ptr<JitMemoryBlock> memory() const noexcept { return memory_; }
     // Keeps the lazy-link stubs the code calls through alive with it.
     void set_link_keepalive(std::shared_ptr<const void> keepalive) { link_keepalive_ = std::move(keepalive); }
+    // The symbols the code calls directly through a lazy-link stub because
+    // they did not resolve when it was compiled.
+    const std::vector<std::string>& lazy_call_symbols() const noexcept { return lazy_call_symbols_; }
+    void set_lazy_call_symbols(std::vector<std::string> names) { lazy_call_symbols_ = std::move(names); }
     bool is_valid() const noexcept { return entry_point_ != nullptr; }
 
     template <typename FuncPtr>
@@ -64,6 +68,7 @@ private:
     size_t code_size_ = 0;
     FunctionStackMap stack_map_;
     std::shared_ptr<const void> link_keepalive_;
+    std::vector<std::string> lazy_call_symbols_;
 };
 
 using BaselineSymbolResolver = std::function<void*(std::string_view)>;
@@ -103,6 +108,12 @@ public:
 
     BaselineCompiledFunction compile(const Function& fn);
     BaselineCompiledFunction compile(const Function& fn, Target target);
+    // Compiles and publishes every function of `mod`, which is taken to be
+    // the whole program: a direct call whose callee is neither a function of
+    // `mod` nor resolvable once the module's symbols are in is a hard error
+    // (std::runtime_error naming it) instead of a lazy stub that could only
+    // trap. compile() of a single function keeps linking such a callee
+    // lazily, and a func_addr stays lazy in both.
     std::vector<BaselineCompiledFunction> compile_module(const Module& mod);
     std::vector<BaselineCompiledFunction> compile_module(const Module& mod, Target target);
 

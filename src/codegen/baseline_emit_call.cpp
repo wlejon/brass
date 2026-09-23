@@ -156,7 +156,14 @@ void X64BaselineEmitter::emit_call(std::string_view symbol, const Value* indirec
     } else if (symbol == fn.name()) {
         enc.call(fn_entry_label);
     } else {
-        call_abs(resolve_or_stub(symbol));
+        void* target_addr = resolve_sym(symbol);
+        if (!target_addr) {
+            target_addr = resolve_or_stub(symbol);
+            if (std::find(lazy_call_symbols.begin(), lazy_call_symbols.end(), symbol) == lazy_call_symbols.end()) {
+                lazy_call_symbols.emplace_back(symbol);
+            }
+        }
+        call_abs(target_addr);
     }
 
     // Keyed by the return address, so recorded before the stack is popped.

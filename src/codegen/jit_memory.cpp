@@ -7,6 +7,7 @@
 // either writable or executable, never both.)
 #include <brass/codegen/jit_exec.hpp>
 #include <algorithm>
+#include <cstring>
 #include <mutex>
 #include <vector>
 
@@ -25,6 +26,10 @@
 #include <pthread.h>
 #include <libkern/OSCacheControl.h>
 #endif
+// The unwinder's dynamic registration interface (libgcc, and libunwind on
+// Apple platforms).
+extern "C" void __register_frame(void*);
+extern "C" void __deregister_frame(void*);
 #endif
 
 namespace brass::codegen {
@@ -119,9 +124,10 @@ JitMemoryBlock::~JitMemoryBlock() {
 }
 
 JitMemoryBlock::JitMemoryBlock(JitMemoryBlock&& other) noexcept
-    : ptr_(other.ptr_), size_(other.size_) {
+    : ptr_(other.ptr_), size_(other.size_), unwind_table_(other.unwind_table_) {
     other.ptr_ = nullptr;
     other.size_ = 0;
+    other.unwind_table_ = nullptr;
 }
 
 JitMemoryBlock& JitMemoryBlock::operator=(JitMemoryBlock&& other) noexcept {
@@ -129,13 +135,55 @@ JitMemoryBlock& JitMemoryBlock::operator=(JitMemoryBlock&& other) noexcept {
         reset();
         ptr_ = other.ptr_;
         size_ = other.size_;
+        unwind_table_ = other.unwind_table_;
         other.ptr_ = nullptr;
         other.size_ = 0;
+        other.unwind_table_ = nullptr;
     }
     return *this;
 }
 
+bool JitMemoryBlock::register_unwind_info(size_t offset, uint32_t count) {
+    if (!ptr_ || unwind_table_ || offset >= size_) return false;
+    uint8_t* table = ptr_ + offset;
+#if defined(_WIN32) && (defined(_M_X64) || defined(__x86_64__) || defined(_M_ARM64) || defined(__aarch64__))
+    if (count == 0 || offset + size_t{count} * sizeof(RUNTIME_FUNCTION) > size_) return false;
+    if (!RtlAddFunctionTable(reinterpret_cast<PRUNTIME_FUNCTION>(table), count,
+                             static_cast<DWORD64>(reinterpret_cast<uintptr_t>(ptr_)))) {
+        return false;
+    }
+    unwind_table_ = table;
+    return true;
+#elif !defined(_WIN32)
+    (void)count;
+#if defined(__APPLE__)
+    // Apple's libunwind takes one FDE per call: the first after the CIE.
+    uint32_t cie_len = 0;
+    std::memcpy(&cie_len, table, 4);
+    table += 4 + cie_len;
+#endif
+    __register_frame(table);
+    unwind_table_ = table;
+    return true;
+#else
+    (void)table;
+    (void)count;
+    return false;
+#endif
+}
+
+void JitMemoryBlock::unregister_unwind_info() noexcept {
+    if (!unwind_table_) return;
+#if defined(_WIN32) && (defined(_M_X64) || defined(__x86_64__) || defined(_M_ARM64) || defined(__aarch64__))
+    RtlDeleteFunctionTable(reinterpret_cast<PRUNTIME_FUNCTION>(unwind_table_));
+#elif !defined(_WIN32)
+    __deregister_frame(unwind_table_);
+#endif
+    unwind_table_ = nullptr;
+}
+
 void JitMemoryBlock::reset() {
+    unregister_unwind_info();
     if (ptr_) {
         unregister_jit_memory_range(ptr_);
 #if defined(_WIN32)

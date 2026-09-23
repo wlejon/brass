@@ -214,6 +214,35 @@ TEST_CASE("Baseline lazy symbols - a call still unresolved at run time is a hard
     CHECK_EQ(direct.get_function_ptr<I64Fn>()(0), int64_t{4});
 }
 
+TEST_CASE("Baseline lazy symbols - compile_module rejects a symbol nothing resolves") {
+    // The module is the whole program: @ls_callee is not one of its
+    // functions and nobody registered it, so no stub could ever resolve.
+    auto callers = parse_or_fail(kCallers);
+    BaselineJitCompiler compiler;
+    std::string error;
+    try {
+        (void)compiler.compile_module(*callers);
+    } catch (const std::runtime_error& e) {
+        error = e.what();
+    }
+    CHECK(error.find("'ls_callee'") != std::string::npos);
+    runtime::FunctionDispatchTable::instance().forget_module(*callers);
+
+    // Registered before compile_module: linked, and it runs.
+    auto callee_mod = parse_or_fail(kCallee);
+    BaselineJitCompiler linked;
+    auto callee = linked.compile(*callee_mod->get_function("ls_callee"));
+    linked.register_external_symbol("ls_callee", callee.entry_point());
+    auto fns = linked.compile_module(*callers);
+    I64Fn direct = nullptr;
+    for (const auto& f : fns) {
+        if (f.name() == "ls_direct") direct = f.get_function_ptr<I64Fn>();
+    }
+    REQUIRE(direct != nullptr);
+    CHECK_EQ(direct(2), int64_t{22});
+    runtime::FunctionDispatchTable::instance().forget_module(*callers);
+}
+
 TEST_CASE("Baseline lazy symbols - stubs outlive the compiler and fail cleanly") {
     auto callers = parse_or_fail(kCallers);
     BaselineCompiledFunction direct;

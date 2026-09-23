@@ -54,9 +54,20 @@ public:
     [[nodiscard]] bool make_read_write();
     void reset();
 
+    // Describes code in this block to the process's unwinder, so a C++
+    // exception thrown by a callee unwinds through its frames. At `offset`
+    // lies, on Windows, an array of `count` RUNTIME_FUNCTIONs whose RVAs are
+    // relative to data(); elsewhere a zero-terminated .eh_frame (`count` is
+    // ignored). At most one registration per block; it is undone before the
+    // memory is freed. False if the unwinder refused it.
+    [[nodiscard]] bool register_unwind_info(size_t offset, uint32_t count);
+
 private:
+    void unregister_unwind_info() noexcept;
+
     uint8_t* ptr_ = nullptr;
     size_t size_ = 0;
+    void* unwind_table_ = nullptr; // what register_unwind_info registered
 };
 
 class DataMemoryBlock {
