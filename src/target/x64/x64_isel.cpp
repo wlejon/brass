@@ -121,6 +121,9 @@ void X64ISel::analyze_function(const Function& mir_fn) {
     // (add, operand) pairs where the add is lowered as one lea that
     // computes the operand too, so the operand itself is skipped.
     std::vector<std::pair<const Instruction*, const Instruction*>> lea_fusions;
+    // The register parts (base, index) of every folded memory address
+    // (step 3): each must end up with a register.
+    std::vector<const Value*> address_regs;
 
     auto skip_operand_if_dead = [&](const Value* val) {
         if (val && val->is_instruction() && use_count_[val] == 1) {
@@ -200,6 +203,8 @@ void X64ISel::analyze_function(const Function& mir_fn) {
     // them once per memory operation would overcount their folded uses and
     // leave a value that still has a real use without a register.
     auto count_address_fold = [&](const MemFold& mf, std::initializer_list<const Value*> operands) {
+        address_regs.push_back(mf.base_val);
+        address_regs.push_back(mf.index_val);
         for (const Value* op : operands) {
             for (const auto* fi : mf.folded_instructions) {
                 if (fi && op && fi->result() == op) {
@@ -362,6 +367,20 @@ void X64ISel::analyze_function(const Function& mir_fn) {
     // lea, so the operand it would have absorbed must be computed after all.
     for (const auto& [user, fused] : lea_fusions) {
         if (skipped_insts_.count(user)) skipped_insts_.erase(fused);
+    }
+    // 6. A folded address reads its base and index from registers, even when
+    // they are operands of an add the address absorbed. Such an operand may
+    // be a single-use load that step 3 fused into that add as its memory
+    // operand (`load [(load tls.deltas) + (load slot)*8]`): whether or not
+    // the add is still emitted, the address reads the value itself, so the
+    // load has to produce a register after all. At worst the add reads the
+    // same memory a second time.
+    for (const Value* v : address_regs) {
+        if (!v || !v->is_instruction()) continue;
+        const Instruction* def = v->defining_instruction();
+        if (def && (def->opcode() == Opcode::load || def->opcode() == Opcode::load_indexed)) {
+            skipped_insts_.erase(def);
+        }
     }
 }
 
