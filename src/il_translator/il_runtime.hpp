@@ -21,6 +21,10 @@ constexpr uint64_t kUndefinedTag = 0xFFF6000000000000ULL;
 // there moves the ABI stamp, so a mismatch here fails at load, not silently.
 constexpr int32_t kBronzeTlsExceptionCellOff = 8;
 constexpr int32_t kBronzeTlsStackLimitOff = 248;
+// The thread's module-delta array (bronze_abi_tls.h `module_deltas`),
+// indexed by a module's slot cell: what `TranslatorOptions::
+// per_thread_module_data` adds to every module-data address.
+constexpr int32_t kBronzeTlsModuleDeltasOff = 256;
 constexpr uint64_t kBronzeNoExceptionBits = 0xFFF7000000000000ULL;
 // One inline-cache SITE in the module's `__bronze_ic_table`
 // (BRONZE_ABI_IC_SITE_SIZE: BRONZE_ABI_IC_WAYS entries of

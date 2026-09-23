@@ -103,6 +103,31 @@ Value* IlLowering::get_key_id(Builder& b, uint32_t key_idx) {
     return b.build_load(Type::i32(), map_addr, static_cast<int32_t>(key_idx * sizeof(uint32_t)));
 }
 
+// tls->module_deltas[*__bronze_module_slot]: the thread's delta for this
+// module, valid once the thread has run the module's entry (which registered
+// it). Three loads, the first two independent.
+Value* IlLowering::load_module_delta(Builder& b) {
+    Module* mod = b.current_block()->parent()->parent();
+    Value* tls = (mod && mod->pinned_tls_register())
+                     ? b.build_pinned_tls_read()
+                     : b.build_call("bronze_tls_block_addr", Type::i64(), {});
+    Value* deltas = b.build_load(Type::i64(), tls, kBronzeTlsModuleDeltasOff);
+    Value* slot = b.build_load(Type::i64(), b.build_func_addr(module_sym("__bronze_module_slot")), 0);
+    Value* entry = b.build_add(deltas, b.build_shl(slot, b.build_iconst_i64(3)));
+    return b.build_load(Type::i64(), entry, 0);
+}
+
+Value* IlLowering::module_delta(Builder& b) {
+    if (current_module_delta_) return current_module_delta_;
+    return load_module_delta(b);
+}
+
+Value* IlLowering::module_data_addr(Builder& b, const std::string& base) {
+    Value* addr = b.build_func_addr(module_sym(base));
+    if (!options_.per_thread_module_data) return addr;
+    return b.build_add(addr, module_delta(b));
+}
+
 uint32_t IlLowering::find_key_constant(const std::string& name) const {
     for (size_t i = 0; i < options_.key_constants.size(); ++i) {
         if (options_.key_constants[i] == name) return static_cast<uint32_t>(i);
@@ -113,7 +138,7 @@ uint32_t IlLowering::find_key_constant(const std::string& name) const {
 Value* IlLowering::get_val_by_id(uint32_t id, Builder& b, const std::unordered_map<uint32_t, Value*>& val_map) {
     Value* result = nullptr;
     if (module_env_regs_.count(id)) {
-        Value* env_addr = b.build_func_addr(module_sym("__bronze_module_env"));
+        Value* env_addr = module_data_addr(b, "__bronze_module_env");
         result = b.build_load(Type::i64(), env_addr, 0);
     } else if (current_fn_frame_ptr_ != nullptr) {
         auto it = current_fn_slot_of_.find(id);
@@ -206,6 +231,13 @@ std::unique_ptr<Module> IlLowering::lower_module(const BronzeModuleAST& ast) {
     register_all_module_external_symbols(mod.get(), options_.entry_symbol);
     prop_lowering_.set_key_map_sym(module_sym("__bronze_key_map"));
     prop_lowering_.set_ic_table(module_sym("__bronze_ic_table"), options_.ic_site_count);
+    if (options_.per_thread_module_data) {
+        prop_lowering_.set_module_delta_fn([this](Builder& b) { return module_delta(b); });
+        mod->add_external_symbol("bronze_module_instance");
+        mod->add_external_symbol(module_sym("__bronze_module_slot"));
+        mod->add_external_symbol(module_sym("__bronze_instance"));
+        mod->add_external_symbol(module_sym("__bronze_instance_end"));
+    }
 
     current_ast_ = &ast;
 
@@ -474,6 +506,7 @@ bool IlLowering::lower_function(const BronzeFunction& fn_ast, Module& mod, const
     current_fn_slot_of_.clear();
     create_func_counter_.clear();
     current_fn_frame_ptr_ = nullptr;
+    current_module_delta_ = nullptr;
     method_argv_slot_ = 0;
     uint32_t total_slots = 0;
 
@@ -606,6 +639,23 @@ bool IlLowering::lower_function(const BronzeFunction& fn_ast, Module& mod, const
             stack_check_overflow_bb_ = overflow_bb;
             stack_check_body_bb_ = body_bb;
         }
+        if (options_.per_thread_module_data) {
+            // The module's per-thread data (TranslatorOptions::
+            // per_thread_module_data). The entry registers this thread's
+            // instance before anything can touch a table; every other
+            // function reads the delta once here, and an unused one is dead
+            // code the optimizer drops. A coroutine body reloads it per use.
+            Value* delta = nullptr;
+            if (fn_name == "main") {
+                delta = b.build_call("bronze_module_instance", Type::i64(), {
+                    b.build_func_addr(module_sym("__bronze_module_slot")),
+                    b.build_func_addr(module_sym("__bronze_instance")),
+                    b.build_func_addr(module_sym("__bronze_instance_end"))});
+            } else if (!is_coro_fn) {
+                delta = load_module_delta(b);
+            }
+            if (!is_coro_fn) current_module_delta_ = delta;
+        }
         if (total_slots > 0) {
             current_fn_frame_ptr_ = b.build_call("bronze_gc_frame_push", Type::ptr(),
                                                 {b.build_iconst_i32(static_cast<int32_t>(total_slots))});
@@ -620,10 +670,10 @@ bool IlLowering::lower_function(const BronzeFunction& fn_ast, Module& mod, const
         }
 
         if (fn_name == "main") {
-            Value* env_addr = b.build_func_addr(module_sym("__bronze_module_env"));
+            Value* env_addr = module_data_addr(b, "__bronze_module_env");
             Value* count_val = b.build_iconst_i64(1);
             b.build_call("bronze_register_value_cells", Type::void_type(), {env_addr, count_val});
-            Value* tpl_addr = b.build_func_addr(module_sym("__bronze_template_cells"));
+            Value* tpl_addr = module_data_addr(b, "__bronze_template_cells");
             const size_t tpl_count = std::max<size_t>(1024, static_cast<size_t>(options_.template_site_count) + 128);
             Value* tpl_cells_count = b.build_iconst_i64(static_cast<int64_t>(tpl_count));
             b.build_call("bronze_register_value_cells", Type::void_type(), {tpl_addr, tpl_cells_count});
@@ -639,7 +689,7 @@ bool IlLowering::lower_function(const BronzeFunction& fn_ast, Module& mod, const
             // a heap Value in module data — and only registration keeps it
             // current across a collection.
             if (options_.ic_site_count > 0 && !options_.method_ic_sites.empty()) {
-                Value* table_addr = b.build_func_addr(module_sym("__bronze_ic_table"));
+                Value* table_addr = module_data_addr(b, "__bronze_ic_table");
                 Value* sites_addr = b.build_func_addr(module_sym("__bronze_method_ic_sites"));
                 Value* site_count = b.build_iconst_i64(static_cast<int64_t>(options_.method_ic_sites.size()));
                 b.build_call("bronze_register_method_ic_cells", Type::void_type(), {table_addr, sites_addr, site_count});

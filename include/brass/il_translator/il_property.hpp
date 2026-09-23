@@ -32,6 +32,12 @@ public:
     }
     [[nodiscard]] uint32_t ic_site_count() const noexcept { return ic_site_count_; }
 
+    // With per-thread module data (TranslatorOptions::per_thread_module_data)
+    // the table's address is the symbol plus the calling thread's delta,
+    // which the owner of the function being lowered supplies; unset, the
+    // symbol's own address is the table.
+    void set_module_delta_fn(std::function<Value*(Builder&)> fn) { module_delta_fn_ = std::move(fn); }
+
     // The address of site `ic_index`'s way 0 — what the bronze helpers take
     // as their BRONZE_ABI_MU64 operand — or null when the index names no site
     // in this module's table (kNoIcIndex, or a module compiled without one).
@@ -148,6 +154,7 @@ private:
     std::string key_map_sym_ = "__bronze_key_map";
     std::string ic_table_sym_ = "__bronze_ic_table";
     uint32_t ic_site_count_ = 0;
+    std::function<Value*(Builder&)> module_delta_fn_;
 };
 
 } // namespace brass::il

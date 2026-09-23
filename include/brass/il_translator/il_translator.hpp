@@ -136,6 +136,19 @@ struct TranslatorOptions {
     uint32_t ic_site_count = 0;
     std::vector<uint32_t> method_ic_sites;
     uint32_t template_site_count = 0;
+    // Address the module's WRITABLE tables — `__bronze_module_env`,
+    // `__bronze_template_cells`, `__bronze_ic_table`, and the embedder's own
+    // (global cache, native imports) — per THREAD rather than per image, so
+    // one image can run on several threads, each with its own heap. The
+    // embedder lays those tables out as one contiguous run of the module's
+    // data between `__bronze_instance` and `__bronze_instance_end`, with a
+    // u64 slot cell `__bronze_module_slot` outside it (all module-suffixed).
+    // The entry calls `bronze_module_instance(slot, begin, end)` first and
+    // gets the calling thread's delta back; every other function loads its
+    // delta from the thread's array (kBronzeTlsModuleDeltasOff) at the slot
+    // the cell names. A table's address is then `symbol + delta`. Off (the
+    // default, and every standalone brass test) keeps the plain addresses.
+    bool per_thread_module_data = false;
     struct SourceFileMeta {
         uint32_t text_len = 0;
         uint32_t entry_count = 0;

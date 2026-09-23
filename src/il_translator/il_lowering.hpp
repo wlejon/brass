@@ -43,6 +43,14 @@ public:
         }
         return base + "_" + options_.entry_symbol;
     }
+    // The calling thread's address of one of the module's WRITABLE tables
+    // (`base` unsuffixed): the symbol itself, or — with per-thread module
+    // data — the symbol plus this thread's delta
+    // (TranslatorOptions::per_thread_module_data).
+    Value* module_data_addr(Builder& b, const std::string& base);
+    // This thread's delta for the module being lowered: the value the
+    // function computed once at entry, or a fresh load where it has none.
+    Value* module_delta(Builder& b);
 
 private:
     bool lower_function(const BronzeFunction& fn_ast, Module& mod, const std::string& fn_name);
@@ -69,6 +77,12 @@ private:
     std::unordered_map<uint32_t, uint32_t> current_fn_slot_of_;
     Value* current_fn_frame_ptr_ = nullptr;
     uint32_t method_argv_slot_ = 0;
+    // The function's per-thread module-data delta, computed at its entry;
+    // null in a coroutine body (a value held across a suspension is the
+    // coroutine transform's to carry, and a reload is three loads) and
+    // before the entry computed it.
+    Value* current_module_delta_ = nullptr;
+    Value* load_module_delta(Builder& b);
     // The stack-limit check the function was given at entry (pinned-register
     // mode), kept so a body that turned out to call nothing can drop it.
     BasicBlock* stack_check_entry_bb_ = nullptr;

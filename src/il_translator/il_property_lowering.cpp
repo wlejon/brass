@@ -34,6 +34,7 @@ static Value* prop_name_addr(Builder& b, std::string_view prop_name, const std::
 Value* PropertyLoweringHelper::ic_site(Builder& b, uint32_t ic_index) {
     if (ic_index >= ic_site_count_) return nullptr;
     Value* table = b.build_func_addr(ic_table_sym_);
+    if (module_delta_fn_) table = b.build_add(table, module_delta_fn_(b));
     if (ic_index == 0) return table;
     const uint64_t byte_offset = static_cast<uint64_t>(ic_index) * kBronzeIcSiteSize;
     return b.build_add(table, b.build_iconst_i64(static_cast<int64_t>(byte_offset)));
