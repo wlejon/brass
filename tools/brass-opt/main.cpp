@@ -1,4 +1,5 @@
 #include <brass/brass.hpp>
+#include <brass/mir/coro_transform.hpp>
 #include <brass/runtime/type_feedback.hpp>
 #include "opt_actions.hpp"
 #include "opt_cli.hpp"
@@ -57,6 +58,11 @@ std::unique_ptr<brass::Module> load_module(const std::string& input_file) {
         std::cerr << diag.format_all();
         return nullptr;
     }
+    // Coroutine bodies execute only in lowered form in every tier, and the
+    // optimizer expects them lowered, so lower them first (as the IL
+    // translator does).
+    brass::CoroTransformPass().run_on_module(*mod);
+    if (!verified(*mod, "coroutine lowering")) return nullptr;
     return mod;
 }
 

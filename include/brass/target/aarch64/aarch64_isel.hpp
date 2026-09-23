@@ -31,6 +31,10 @@ public:
     void set_osr_target(const OsrTarget* target) noexcept { osr_target_ = target; }
     const OsrTarget* osr_target() const noexcept { return osr_target_; }
 
+    // The module coro_create callees are looked up in, when the function
+    // being lowered is a clone in a scratch module (default: its parent).
+    void set_callee_module(const Module* mod) noexcept { callee_module_ = mod; }
+
     const Target& target() const noexcept { return target_; }
     const CallingConvention& calling_conv() const noexcept { return cc_; }
 
@@ -38,6 +42,7 @@ private:
     Target target_;
     CallingConvention cc_;
     const OsrTarget* osr_target_ = nullptr;
+    const Module* callee_module_ = nullptr;
 
     struct VRegPair {
         codegen::VReg lo;

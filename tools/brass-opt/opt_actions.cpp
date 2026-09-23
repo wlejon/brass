@@ -261,8 +261,13 @@ bool execute_run_function(Module& mod, const RunFunctionOptions& opts) {
         jit.register_external_symbol("brass_parallel_reduce_f64", reinterpret_cast<void*>(&brass_parallel_reduce_f64));
         jit.register_external_symbol("brass_parallel_alloc_context", reinterpret_cast<void*>(&brass_parallel_alloc_context));
         jit.register_external_symbol("brass_parallel_free_context", reinterpret_cast<void*>(&brass_parallel_free_context));
-        if (!jit.compile_and_load(mod)) {
-            std::cerr << "Error: JIT compilation/loading failed for module '" << mod.name() << "'\n";
+        try {
+            if (!jit.compile_and_load(mod)) {
+                std::cerr << "Error: JIT compilation/loading failed for module '" << mod.name() << "'\n";
+                return false;
+            }
+        } catch (const std::exception& ex) {
+            std::cerr << "Error: JIT compilation failed: " << ex.what() << "\n";
             return false;
         }
 

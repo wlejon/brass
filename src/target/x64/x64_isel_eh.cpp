@@ -24,6 +24,7 @@ void X64ISel::lower_throw(const Instruction& inst, LirBlock& lir_bb) {
     call_lir->callee_symbol = "brass_throw";
     call_lir->add_use(LirOperand::preg_gpr(arg0, sz), FixedConstraint::gpr(arg0));
     call_lir->add_use(LirOperand::symbol("brass_throw"));
+    finish_call(*call_lir, Type::void_type());
     call_lir->mir_origin = &inst;
     lir_bb.append_inst(std::move(call_lir));
 }
@@ -39,6 +40,7 @@ void X64ISel::lower_resume(const Instruction& inst, LirBlock& lir_bb) {
         auto call_lir = std::make_unique<LirInst>(LirOpcode::Call);
         call_lir->callee_symbol = "brass_rethrow";
         call_lir->add_use(LirOperand::symbol("brass_rethrow"));
+        finish_call(*call_lir, Type::void_type());
         call_lir->mir_origin = &inst;
         lir_bb.append_inst(std::move(call_lir));
     }
@@ -146,6 +148,7 @@ void X64ISel::lower_invoke(const Instruction& inst, LirBlock& lir_bb) {
     }
 
     call_lir->add_use(LirOperand::symbol(std::string(inst.symbol())));
+    finish_call(*call_lir, inst.type());
     call_lir->mir_origin = &inst;
     lir_bb.append_inst(std::move(call_lir));
 

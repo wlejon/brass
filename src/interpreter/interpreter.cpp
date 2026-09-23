@@ -840,18 +840,14 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                 }
 
                 case Opcode::coro_suspend: {
-                    interp_coro_suspend(*inst, frame, cur_bb);
-                    break;
+                    interp_coro_suspend(*inst, frame);
                 }
 
                 case Opcode::coro_resume: {
                     RuntimeValue res = interp_coro_resume(
-                        *inst, frame, module_,
+                        *inst, frame,
                         [this](const Function& f, const std::vector<RuntimeValue>& a) {
                             return execute_function(f, a);
-                        },
-                        [this](const Function& f, BasicBlock* bb, const std::vector<RuntimeValue>& a) {
-                            return execute_function_from_block(f, bb, a);
                         }
                     );
                     if (inst->result()) {

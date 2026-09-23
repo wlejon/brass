@@ -1,6 +1,7 @@
 #include "opt_cli.hpp"
 #include <brass/brass.hpp>
 #include <brass/runtime/tiering.hpp>
+#include <cctype>
 #include <ostream>
 #include <stdexcept>
 #include <string_view>
@@ -240,7 +241,13 @@ ParseOutcome parse_command_line(int argc, char** argv, OptCli& cli, std::ostream
                 cli.emit_shared = true;
                 if (i + 1 < argc && argv[i + 1][0] != '-') cli.shared_output_file = argv[++i];
             } else if (arg == "--args") {
-                while (i + 1 < argc && argv[i + 1][0] != '-') cli.run_arg_strings.push_back(argv[++i]);
+                // A value is anything not starting with '-', or a negative
+                // number ("-5", "-.5", "-1.5e3"); other '-' tokens are options.
+                auto is_value = [](const char* s) {
+                    return s[0] != '-' || std::isdigit(static_cast<unsigned char>(s[1])) ||
+                           (s[1] == '.' && std::isdigit(static_cast<unsigned char>(s[2])));
+                };
+                while (i + 1 < argc && is_value(argv[i + 1])) cli.run_arg_strings.push_back(argv[++i]);
             } else if (arg == "-o") {
                 if (i + 1 >= argc) {
                     err << "Error: -o requires an output file argument\n";

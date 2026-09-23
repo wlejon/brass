@@ -30,6 +30,10 @@ public:
     void set_osr_target(const OsrTarget* target) noexcept { osr_target_ = target; }
     const OsrTarget* osr_target() const noexcept { return osr_target_; }
 
+    // The module coro_create callees are looked up in, when the function
+    // being lowered is a clone in a scratch module (default: its parent).
+    void set_callee_module(const Module* mod) noexcept { callee_module_ = mod; }
+
     const Target& target() const noexcept { return target_; }
     const CallingConvention& calling_conv() const noexcept { return cc_; }
 
@@ -37,6 +41,7 @@ private:
     Target target_;
     CallingConvention cc_;
     const OsrTarget* osr_target_ = nullptr;
+    const Module* callee_module_ = nullptr;
 
     codegen::LirFunction* lir_fn_ = nullptr;
     const Function* mir_fn_ = nullptr;
@@ -102,6 +107,10 @@ private:
     void lower_comparison(const Instruction& inst, codegen::LirBlock& lir_bb, Condition cond, Condition float_cond);
     void lower_select(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_call(const Instruction& inst, codegen::LirBlock& lir_bb);
+    // Marks `call` as clobbering the caller-saved registers and defining the
+    // return register (RAX, or XMM0 for float/vector) for a non-void `ret_t`.
+    // Every Call the isel emits goes through this.
+    void finish_call(codegen::LirInst& call, Type ret_t) const;
     void lower_invoke(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_throw(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_resume(const Instruction& inst, codegen::LirBlock& lir_bb);

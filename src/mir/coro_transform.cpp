@@ -121,7 +121,7 @@ std::unordered_set<BasicBlock*> compute_non_dominated_blocks(BasicBlock* entry_b
 
 } // namespace
 
-bool CoroTransformPass::run_on_function(Function& fn) {
+bool CoroTransformPass::run_on_function(Function& fn, bool force) {
     if (fn.blocks().empty()) return false;
     BasicBlock* orig_entry = fn.entry_block();
     if (!orig_entry || orig_entry->name() == "bb_coro_entry") return false;
@@ -144,7 +144,7 @@ bool CoroTransformPass::run_on_function(Function& fn) {
         }
     }
 
-    if (suspends.empty()) return false;
+    if (suspends.empty() && !force) return false;
 
     if (options_.stats) {
         options_.stats->coroutines_transformed++;
@@ -172,12 +172,14 @@ bool CoroTransformPass::run_on_function(Function& fn) {
         for (size_t i = 1; i < orig_params.size(); ++i) {
             orig_params[i]->set_block_param(orig_entry, static_cast<uint32_t>(i));
         }
-        auto pts = fn.param_types();
-        pts.insert(pts.begin(), Type::gcref());
-        fn.set_param_types(std::move(pts));
     } else {
         orig_frame_val = orig_params[0];
     }
+    // Every other original parameter is a coroutine argument: coro_create
+    // stores argument i in frame slot i, and the lowered body takes only the
+    // frame.
+    const uint32_t arg_count = static_cast<uint32_t>(orig_params.size() - 1);
+    fn.set_param_types({orig_frame_val->type()});
 
     // 3. Compute live SSA variables across suspends
     std::unordered_map<BasicBlock*, std::unordered_set<Value*>> def_map;
@@ -255,7 +257,7 @@ bool CoroTransformPass::run_on_function(Function& fn) {
 
     // 4. Slot allocation
     std::unordered_map<Value*, uint32_t> slot_map;
-    uint32_t next_slot = options_.first_slot_index;
+    uint32_t next_slot = std::max(options_.first_slot_index, arg_count);
 
     for (auto& sp : suspends) {
         for (Value* v : sp.live_values) {
@@ -281,8 +283,12 @@ bool CoroTransformPass::run_on_function(Function& fn) {
     Instruction* sw_inst = arena.make<Instruction>(Opcode::switch_, Type::void_type());
     sw_inst->add_operand(ld_state->result());
     BranchTarget def_target(orig_entry);
-    if (orig_entry->param_count() > 0) {
-        def_target.args.push_back(global_frame_param);
+    def_target.args.push_back(global_frame_param);
+    for (uint32_t i = 0; i < arg_count; ++i) {
+        Instruction* ld_arg = make_load(fn, arena, orig_params[i + 1]->type(), global_frame_param,
+                                        static_cast<int32_t>(runtime::CORO_OFFSET_SLOTS + i * 8));
+        entry_bb->append_instruction(ld_arg);
+        def_target.args.push_back(ld_arg->result());
     }
     sw_inst->set_default_target(def_target);
 
@@ -304,7 +310,12 @@ bool CoroTransformPass::run_on_function(Function& fn) {
     entry_bb->append_instruction(sw_inst);
     std::unordered_set<Instruction*> suspend_rets;
 
-    for (auto& sp : suspends) {
+    // Split from the last suspend backwards: a later suspend in the tail of
+    // an earlier one must get its spill stores (and its resume block) before
+    // the earlier split rewrites the tail's uses to that split's reloads, so
+    // the stores see the reloads too and no reload outlives its block.
+    for (auto it = suspends.rbegin(); it != suspends.rend(); ++it) {
+        SuspendPoint& sp = *it;
         Instruction* susp = sp.inst;
         BasicBlock* cur_bb = susp->parent();
         BasicBlock* resume_bb = sp.resume_bb;
@@ -419,13 +430,54 @@ bool CoroTransformPass::run_on_function(Function& fn) {
 }
 
 bool CoroTransformPass::run_on_module(Module& mod) {
+    // Every coro_create target is a coroutine body, suspends or not.
+    std::unordered_set<std::string_view> coro_targets;
+    for (Function* fn : mod.functions()) {
+        if (!fn) continue;
+        for (BasicBlock* bb : fn->blocks()) {
+            for (Instruction* inst : *bb) {
+                if (inst->opcode() == Opcode::coro_create) coro_targets.insert(inst->symbol());
+            }
+        }
+    }
+
     bool changed = false;
     for (Function* fn : mod.functions()) {
-        if (fn && run_on_function(*fn)) {
+        if (!fn) continue;
+        if (run_on_function(*fn, coro_targets.count(fn->name()) != 0)) {
             changed = true;
         }
     }
     return changed;
+}
+
+bool is_lowered_coro_body(const Function& fn) {
+    if (fn.param_count() != 1 || !fn.param_type(0).is_pointer_or_gcref()) return false;
+    for (const BasicBlock* bb : fn.blocks()) {
+        for (const Instruction* inst : *bb) {
+            if (inst->opcode() == Opcode::coro_suspend) return false;
+        }
+    }
+    return true;
+}
+
+CoroFrameLayout compute_coro_frame_layout(const Function& fn) {
+    CoroFrameLayout layout;
+    const BasicBlock* entry = fn.entry_block();
+    const Value* frame = (entry && entry->param_count() > 0) ? entry->param(0) : nullptr;
+    for (const BasicBlock* bb : fn.blocks()) {
+        for (const Instruction* inst : *bb) {
+            if (inst->opcode() != Opcode::store && inst->opcode() != Opcode::load) continue;
+            if (!frame || inst->operand(0) != frame || inst->offset() < runtime::CORO_OFFSET_SLOTS) continue;
+            uint32_t slot = static_cast<uint32_t>((inst->offset() - runtime::CORO_OFFSET_SLOTS) / 8);
+            layout.slot_count = std::max(layout.slot_count, slot + 1);
+            if (inst->memory_type().is_pointer_or_gcref() && slot < 64) {
+                layout.pointer_mask |= (1ULL << slot);
+            }
+        }
+    }
+    layout.slot_count = std::max(layout.slot_count, 1U);
+    return layout;
 }
 
 } // namespace brass

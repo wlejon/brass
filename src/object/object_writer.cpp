@@ -164,9 +164,11 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
         std::unique_ptr<codegen::LirFunction> lir;
         if (target_.is_aarch64()) {
             aarch64::AArch64ISel isel(target_, cc_);
+            isel.set_callee_module(&mod);
             lir = isel.lower(*fn_to_lower);
         } else {
             x64::X64ISel isel(target_, cc_);
+            isel.set_callee_module(&mod);
             lir = isel.lower(*fn_to_lower);
         }
         if (!lir) continue;

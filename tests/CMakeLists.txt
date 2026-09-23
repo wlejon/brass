@@ -131,6 +131,7 @@ add_executable(brass_unit_tests
     unit/test_osr_runtime.cpp
     differential/test_osr_differential.cpp
     differential/test_osr_regressions.cpp
+    differential/test_eh_coro_regressions.cpp
     unit/test_critical_edge.cpp
     unit/test_gvn_pre.cpp
     differential/test_gvn_pre_differential.cpp
@@ -407,6 +408,19 @@ if(BRASS_BUILD_TOOLS)
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/run_mir_roundtrip.cmake")
         set_tests_properties("mir_roundtrip.${_name}" PROPERTIES
             TIMEOUT 120 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" LABELS "correctness")
+    endforeach()
+    # brass_opt_cli.coro_args.*: brass-opt lowers coroutines before running
+    # them (an unlowered body once yielded 1, 0, 0), and --args takes a
+    # negative number (it was rejected as an unknown option).
+    foreach(_mode interp jit)
+        set(_flags "")
+        if(_mode STREQUAL "jit")
+            set(_flags "--jit")
+        endif()
+        add_test(NAME "brass_opt_cli.coro_args.${_mode}"
+            COMMAND brass-opt "${CMAKE_CURRENT_SOURCE_DIR}/cli/coro_args.mir" -r main --args -5 ${_flags})
+        set_tests_properties("brass_opt_cli.coro_args.${_mode}" PROPERTIES
+            TIMEOUT 60 PASS_REGULAR_EXPRESSION "^1011026[\r\n]" LABELS "correctness")
     endforeach()
 endif()
 

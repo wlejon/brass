@@ -1,5 +1,7 @@
 #include "test_framework.hpp"
 #include <brass/codegen/lir.hpp>
+#include <brass/codegen/unsupported_operation.hpp>
+#include <brass/runtime/coroutine.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/module.hpp>
 #include <brass/mir/verifier.hpp>
@@ -489,9 +491,17 @@ TEST_CASE("AArch64 ISEL - Overflow Checks") {
 // 10. Exception Handling and Coroutines
 TEST_CASE("AArch64 ISEL - Exception Handling and Coroutines") {
     Module mod;
-    Function* fn = mod.create_function("test_eh_coro", Type::i64(), {Type::i64()});
-
     Builder b(mod);
+
+    // A lowered coroutine body (frame parameter only), as coro_create requires.
+    Function* body = mod.create_function("coro_func", Type::i64(), {Type::gcref()});
+    b.set_function(body);
+    BasicBlock* body_entry = b.append_block("entry");
+    b.add_block_param(body_entry, Type::gcref());
+    b.build_ret(b.build_iconst_i64(1));
+    body->rebuild_cfg_predecessors();
+
+    Function* fn = mod.create_function("test_eh_coro", Type::i64(), {Type::i64()});
     b.set_function(fn);
 
     BasicBlock* entry = b.append_block("entry");
@@ -499,10 +509,9 @@ TEST_CASE("AArch64 ISEL - Exception Handling and Coroutines") {
 
     Value* coro = b.build_coro_create("coro_func", {val});
     Value* resumed = b.build_coro_resume(coro, val);
-    Value* suspended = b.build_coro_suspend(resumed, 1);
     b.build_coro_destroy(coro);
 
-    b.build_ret(suspended);
+    b.build_ret(resumed);
 
     fn->rebuild_cfg_predecessors();
     CHECK(verify_function(*fn));
@@ -512,14 +521,37 @@ TEST_CASE("AArch64 ISEL - Exception Handling and Coroutines") {
     CHECK(lir != nullptr);
 
     int call_count = 0;
+    int arg_stores = 0;
     for (const auto& inst : lir->blocks[0]->instructions) {
         if (inst->opcode == LirOpcode::Call) {
             call_count++;
             // Each call should use X0 for first arg or return
             CHECK_EQ(inst->clobbered_gprs, 0x0007FFFFu);
         }
+        // The coroutine argument is stored into frame slot 0.
+        if (inst->opcode == LirOpcode::Mov && !inst->defs.empty() && inst->defs[0].is_mem() &&
+            inst->defs[0].mem_val.disp ==static_cast<int32_t>(runtime::CORO_OFFSET_SLOTS)) {
+            arg_stores++;
+        }
     }
     CHECK(call_count >= 3); // coro_create, coro_resume, coro_destroy
+    CHECK_EQ(arg_stores, 1);
+
+    // An unlowered body (still holding coro_suspend) is a hard isel error.
+    Function* raw = mod.create_function("raw_coro", Type::i64(), {Type::i64()});
+    b.set_function(raw);
+    BasicBlock* raw_entry = b.append_block("entry");
+    Value* raw_val = b.add_block_param(raw_entry, Type::i64());
+    b.build_ret(b.build_coro_suspend(raw_val, 1));
+    raw->rebuild_cfg_predecessors();
+    AArch64ISel raw_isel(Target::aarch64_linux(), CallingConvention::aapcs64());
+    bool threw = false;
+    try {
+        (void)raw_isel.lower(*raw);
+    } catch (const UnsupportedOperation&) {
+        threw = true;
+    }
+    CHECK(threw);
 }
 
 // 11. 128-bit Vector SIMD Operations

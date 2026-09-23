@@ -39,6 +39,18 @@ static constexpr Condition swap_relational_condition(Condition cond) noexcept {
     }
 }
 
+void X64ISel::finish_call(LirInst& call, Type ret_t) const {
+    call.clobbered_gprs = cc_.caller_saved_gpr_mask();
+    call.clobbered_xmms = cc_.caller_saved_xmm_mask();
+    if (ret_t.is_void()) return;
+    uint8_t ret_sz = static_cast<uint8_t>(ret_t.size_in_bytes());
+    if (ret_t.is_float() || ret_t.is_vector()) {
+        call.add_def(LirOperand::preg_xmm(XMM::XMM0, ret_sz), FixedConstraint::xmm(XMM::XMM0));
+    } else {
+        call.add_def(LirOperand::preg_gpr(GPR::RAX, ret_sz), FixedConstraint::gpr(GPR::RAX));
+    }
+}
+
 void X64ISel::lower_call(const Instruction& inst, LirBlock& lir_bb) {
     size_t num_args = inst.operand_count();
     size_t start_arg = 0;
@@ -176,18 +188,8 @@ void X64ISel::lower_call(const Instruction& inst, LirBlock& lir_bb) {
         call_lir->add_use(LirOperand::symbol(callee_name));
     }
 
-    call_lir->clobbered_gprs = cc_.caller_saved_gpr_mask();
-    call_lir->clobbered_xmms = cc_.caller_saved_xmm_mask();
-
     Type ret_t = inst.type();
-    if (!ret_t.is_void()) {
-        uint8_t ret_sz = static_cast<uint8_t>(ret_t.size_in_bytes());
-        if (ret_t.is_float() || ret_t.is_vector()) {
-            call_lir->add_def(LirOperand::preg_xmm(XMM::XMM0, ret_sz), FixedConstraint::xmm(XMM::XMM0));
-        } else {
-            call_lir->add_def(LirOperand::preg_gpr(GPR::RAX, ret_sz), FixedConstraint::gpr(GPR::RAX));
-        }
-    }
+    finish_call(*call_lir, ret_t);
 
     call_lir->mir_origin = &inst;
     lir_bb.append_inst(std::move(call_lir));
