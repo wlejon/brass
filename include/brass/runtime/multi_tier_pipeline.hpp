@@ -9,6 +9,7 @@
 #include <brass/interpreter/value.hpp>
 #include <brass/gc/stack_map.hpp>
 #include <brass/vm/fast_interpreter.hpp>
+#include <brass/runtime/deopt.hpp>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -107,6 +108,17 @@ public:
         const std::vector<RuntimeValue>& args = {}
     );
 
+    // Deopt continuation of tier-2 code (the resumer CodeInstaller
+    // registers): rebuilds the failed guard's state as typed values, records
+    // the failure, invalidates the optimized code once the guard site is
+    // judged mis-speculated (bailing out of tier 2 for good), and finishes
+    // the call in a fresh Tier-0 interpreter exactly as the interpreter's own
+    // guard would. Returns the call's result bits. Inconsistent deopt state
+    // is a fatal error: there is no correct value to return.
+    uint64_t resume_after_deopt(FunctionHandle& handle, const DeoptFrame& frame);
+    uint64_t tier2_deopts() const noexcept { return tier2_deopts_.load(std::memory_order_relaxed); }
+    uint64_t tier2_invalidations() const noexcept { return tier2_invalidations_.load(std::memory_order_relaxed); }
+
     MultiTierStats stats() const;
     void reset_stats();
     void dump_stats(std::ostream& os) const;
@@ -147,6 +159,8 @@ private:
     std::unordered_map<std::string, FastHostFn> external_functions_;
     std::unordered_map<std::string, std::shared_ptr<codegen::BaselineCompiledFunction>> baseline_functions_;
     MultiTierStats stats_;
+    std::atomic<uint64_t> tier2_deopts_{0};
+    std::atomic<uint64_t> tier2_invalidations_{0};
 
     mutable std::mutex compiling_mutex_;
     std::unordered_set<std::string> in_progress_compilations_;

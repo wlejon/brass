@@ -100,6 +100,16 @@ public:
     // object itself stays alive for callers that cached a pointer to it.
     void retire() noexcept;
 
+    // Drops the optimized (tier-2) code after its speculation failed too
+    // often: the entry falls back to the baseline code, or to the
+    // interpreter. The engine is kept alive (frames of it may still be on
+    // some stack, including the caller's). No-op without tier-2 code.
+    void invalidate_optimized();
+    size_t retired_engine_count() const;
+
+    // Tier-2 entry points whose deopt resumer this handle registered.
+    void add_deopt_entry(void* entry);
+
 private:
     std::string name_;
     const Function* mir_function_ = nullptr;
@@ -110,6 +120,8 @@ private:
     mutable std::mutex engine_mutex_;
     std::shared_ptr<codegen::JitExecutionEngine> jit_engine_;
     std::shared_ptr<codegen::BaselineCompiledFunction> baseline_function_;
+    std::vector<std::shared_ptr<codegen::JitExecutionEngine>> retired_engines_;
+    std::vector<void*> deopt_entries_;
 
     Type return_type_ = Type::void_type();
     std::vector<Type> param_types_;
@@ -151,6 +163,13 @@ private:
 // (dispatch-table handles, the tiering registry's active module) so none of
 // them can dangle or alias a later module allocated at the same address.
 void forget_module(const Module& mod) noexcept;
+
+// Whether every guard of `optimized` can deoptimize into `tier0` (the
+// function the lower tiers run): a guard with the same resume id and state
+// map size, whose exit stub names a function of tier0's module or whose
+// resume id has a resume target — the exits the interpreter takes. On
+// false, `why` names the first guard that cannot.
+bool deopt_targets_valid(const Function& optimized, const Function* tier0, std::string& why);
 
 struct CodeInstallResult {
     bool success = false;

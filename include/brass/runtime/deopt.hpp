@@ -120,53 +120,52 @@ struct DeoptValue {
     constexpr bool operator!=(const DeoptValue& other) const noexcept = default;
 };
 
+// The materialized state of a failed guard. The state map has no size limit:
+// `slots` and `kinds` grow with it (`count` always equals their size).
 class DeoptFrame {
 public:
-    static constexpr size_t kMaxSlots = 64;
-
     uint32_t resume_id = 0;
     DeoptReason reason = DeoptReason::Generic;
     void* target_fn = nullptr;
+    // Entry point of the optimized code that deoptimized (null when the
+    // frame came from an interpreter or an old-style exit).
+    void* code_entry = nullptr;
     std::string exit_symbol;
     size_t count = 0;
-    std::array<uint64_t, kMaxSlots> slots{};
-    std::array<DeoptValueKind, kMaxSlots> kinds{};
+    std::vector<uint64_t> slots;
+    std::vector<DeoptValueKind> kinds;
 
-    DeoptFrame() noexcept {
-        slots.fill(0);
-        kinds.fill(DeoptValueKind::Int64);
-    }
+    DeoptFrame() = default;
 
     void clear() noexcept {
         resume_id = 0;
         reason = DeoptReason::None;
         target_fn = nullptr;
+        code_entry = nullptr;
         exit_symbol.clear();
         count = 0;
-        slots.fill(0);
-        kinds.fill(DeoptValueKind::Int64);
+        slots.clear();
+        kinds.clear();
     }
 
-    void push_value(uint64_t val, DeoptValueKind kind = DeoptValueKind::Int64) noexcept {
-        if (count < kMaxSlots) {
-            slots[count] = val;
-            kinds[count] = kind;
-            count++;
-        }
+    void push_value(uint64_t val, DeoptValueKind kind = DeoptValueKind::Int64) {
+        slots.push_back(val);
+        kinds.push_back(kind);
+        count = slots.size();
     }
 
-    void push_deopt_value(const DeoptValue& dv) noexcept {
+    void push_deopt_value(const DeoptValue& dv) {
         push_value(dv.raw, dv.kind);
     }
 
-    void set_value(size_t idx, const DeoptValue& dv) noexcept {
-        if (idx < kMaxSlots) {
-            slots[idx] = dv.raw;
-            kinds[idx] = dv.kind;
-            if (idx >= count) {
-                count = idx + 1;
-            }
+    void set_value(size_t idx, const DeoptValue& dv) {
+        if (idx >= slots.size()) {
+            slots.resize(idx + 1, 0);
+            kinds.resize(idx + 1, DeoptValueKind::Int64);
         }
+        slots[idx] = dv.raw;
+        kinds[idx] = dv.kind;
+        count = slots.size();
     }
 
     DeoptValue get_value(size_t idx) const noexcept {
@@ -187,13 +186,44 @@ public:
 
     std::vector<RuntimeValue> to_runtime_values() const;
 };
+
+// What optimized x64 code builds on its stack when a guard fails: this
+// header, then `count` 8-byte slots, then `count` DeoptValueKind bytes.
+struct DeoptExitRecord {
+    void* code_entry;
+    uint32_t resume_id;
+    uint32_t reason;
+    uint32_t count;
+    uint32_t flags;
+
+    static constexpr uint32_t kHasExitSymbol = 1u;
+    static constexpr size_t kSlotsOffset = 24;
+
+    const uint64_t* slots() const noexcept {
+        return reinterpret_cast<const uint64_t*>(reinterpret_cast<const uint8_t*>(this) + kSlotsOffset);
+    }
+    const uint8_t* kinds() const noexcept {
+        return reinterpret_cast<const uint8_t*>(slots() + count);
+    }
+};
+static_assert(sizeof(DeoptExitRecord) == DeoptExitRecord::kSlotsOffset, "DeoptExitRecord header layout");
+static_assert(offsetof(DeoptExitRecord, code_entry) == 0 && offsetof(DeoptExitRecord, resume_id) == 8 &&
+              offsetof(DeoptExitRecord, reason) == 12 && offsetof(DeoptExitRecord, count) == 16 &&
+              offsetof(DeoptExitRecord, flags) == 20, "DeoptExitRecord field offsets are baked into JIT code");
 } // namespace brass::runtime
 
 extern "C" {
     brass::runtime::DeoptFrame* brass_get_thread_deopt_frame();
+    // Slot storage of this thread's deopt frame (what exit stubs receive).
+    const uint64_t* brass_get_thread_deopt_slots();
     void brass_set_thread_deopt_frame(const brass::runtime::DeoptFrame* frame);
     void* brass_deopt_exit(uint32_t resume_id, uint32_t reason, uint32_t count, const uint64_t* raw_slots);
     void* brass_deopt_exit_typed(uint32_t resume_id, uint32_t reason, uint32_t count, const uint64_t* raw_slots, const uint8_t* raw_kinds);
+    // Deopt entry of optimized x64 code. Publishes the thread deopt frame and
+    // returns a pointer to the 8-byte result the optimized frame must return
+    // when the deopt was handled (a registered resumer for `code_entry`, or a
+    // registered handler when the guard has no exit symbol); null otherwise.
+    const uint64_t* brass_deopt_exit_record(const brass::runtime::DeoptExitRecord* record);
 }
 
 namespace brass::runtime {
@@ -209,5 +239,14 @@ DeoptFrame* get_thread_deopt_frame() noexcept;
 void set_thread_deopt_frame(const DeoptFrame* frame) noexcept;
 void register_deopt_handler(DeoptHandlerFn handler);
 DeoptHandlerFn get_deopt_handler();
+
+// Per-code deopt continuation: given the materialized frame, finishes the
+// function in a lower tier and returns its result bits. Registered by the
+// tier-2 installer for each entry point it publishes; takes precedence over
+// the process-wide handler.
+using DeoptResumerFn = std::function<uint64_t(const DeoptFrame&)>;
+void register_deopt_resumer(void* code_entry, DeoptResumerFn resumer);
+void unregister_deopt_resumer(void* code_entry);
+bool has_deopt_resumer(void* code_entry);
 
 } // namespace brass::runtime

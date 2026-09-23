@@ -1,4 +1,6 @@
 #include <brass/target/x64/x64_isel.hpp>
+#include <brass/codegen/unsupported_operation.hpp>
+#include <brass/runtime/deopt.hpp>
 #include <algorithm>
 
 namespace brass::x64 {
@@ -321,11 +323,35 @@ void X64ISel::lower_guard(const Instruction& inst, LirBlock& lir_bb) {
         exit_inst->exit_symbol = std::string(inst.symbol());
     }
 
+    // Every state value keeps its position (the resume side maps them by
+    // index) and its kind, so the lower tier rebuilds exactly typed values.
+    exit_inst->deopt_kinds.reserve(inst.state_map().size());
     for (const auto* val : inst.state_map()) {
-        if (val) {
-            VReg vr = get_vreg(val);
-            exit_inst->add_use(LirOperand::vreg(vr, vr.size));
+        if (!val) {
+            exit_inst->add_use(LirOperand::imm(0, 8));
+            exit_inst->deopt_kinds.push_back(static_cast<uint8_t>(runtime::DeoptValueKind::Int64));
+            continue;
         }
+        const Type t = val->type();
+        runtime::DeoptValueKind kind;
+        if (t.is_vector()) {
+            codegen::throw_unsupported("x64 isel (guard)", "vector value in a guard state map");
+        } else if (t.kind() == TypeKind::F64) {
+            kind = runtime::DeoptValueKind::Float64;
+        } else if (t.kind() == TypeKind::F32) {
+            kind = runtime::DeoptValueKind::Float32;
+        } else if (t.is_gcref()) {
+            kind = runtime::DeoptValueKind::GcRef;
+        } else if (t.is_pointer()) {
+            kind = runtime::DeoptValueKind::Pointer;
+        } else if (t.kind() == TypeKind::I64) {
+            kind = runtime::DeoptValueKind::Int64;
+        } else {
+            kind = runtime::DeoptValueKind::Int32;
+        }
+        VReg vr = get_vreg(val);
+        exit_inst->add_use(LirOperand::vreg(vr, vr.size));
+        exit_inst->deopt_kinds.push_back(static_cast<uint8_t>(kind));
     }
     deopt_block->append_inst(std::move(exit_inst));
 }

@@ -10,6 +10,7 @@
 #include <brass/il_translator/il_translator.hpp>
 #include <brass/runtime/type_feedback.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
+#include <brass/runtime/deopt.hpp>
 #include <stdexcept>
 #include <iostream>
 #include <unordered_set>
@@ -39,10 +40,12 @@ Pipeline tier2_pipeline() {
     return p;
 }
 
-bool run_tier2_optimization_pipeline(Module& mod) {
+bool run_tier2_optimization_pipeline(Module& mod, std::string& errors) {
     run_pipeline(mod, tier2_pipeline());
     DiagnosticReporter diag;
-    return verify_module(mod, &diag);
+    if (verify_module(mod, &diag)) return true;
+    errors = diag.format_all();
+    return false;
 }
 
 } // namespace
@@ -96,8 +99,30 @@ void FunctionHandle::retire() noexcept {
     set_native_entry(nullptr);
     mir_function_ = nullptr;
     std::lock_guard<std::mutex> lock(engine_mutex_);
+    for (void* entry : deopt_entries_) unregister_deopt_resumer(entry);
+    deopt_entries_.clear();
     jit_engine_.reset();
     baseline_function_.reset();
+}
+
+void FunctionHandle::invalidate_optimized() {
+    std::lock_guard<std::mutex> lock(engine_mutex_);
+    if (!jit_engine_ || tier() != TierLevel::Tier2_Optimized) return;
+    retired_engines_.push_back(std::move(jit_engine_));
+    jit_engine_.reset();
+    void* lower = baseline_function_ ? baseline_function_->entry_point() : nullptr;
+    set_native_entry(lower);
+    set_tier(lower ? TierLevel::Tier1_Baseline : TierLevel::Tier0_Interpreter);
+}
+
+size_t FunctionHandle::retired_engine_count() const {
+    std::lock_guard<std::mutex> lock(engine_mutex_);
+    return retired_engines_.size();
+}
+
+void FunctionHandle::add_deopt_entry(void* entry) {
+    std::lock_guard<std::mutex> lock(engine_mutex_);
+    deopt_entries_.push_back(entry);
 }
 
 RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) const {
@@ -525,8 +550,17 @@ CodeInstallResult CodeInstaller::install_tier2(
     handle.set_signature(target_fn->return_type(), target_fn->param_types());
 
     // 1. Run full Tier-2 optimization passes
-    if (!run_tier2_optimization_pipeline(*module)) {
-        return {false, nullptr, "Tier-2 optimization pipeline failed or invalidated module", 0};
+    if (std::string errors; !run_tier2_optimization_pipeline(*module, errors)) {
+        return {false, nullptr, "Tier-2 optimization pipeline failed or invalidated module: " + errors, 0};
+    }
+
+    // Every guard of the optimized code must have somewhere to deoptimize
+    // to in the function the lower tiers run.
+    {
+        std::string why;
+        if (!deopt_targets_valid(*target_fn, handle.mir_function(), why)) {
+            return {false, nullptr, "Tier-2 code for '" + std::string(fn_name) + "' cannot deoptimize: " + why, 0};
+        }
     }
 
     // 2. Machine code generation and relocation
@@ -569,7 +603,17 @@ CodeInstallResult CodeInstaller::install_tier2(
         return {false, nullptr, "Compiled symbol address not found for " + std::string(fn_name), 0};
     }
 
-    // 5. Store engine lifetime holder and atomically publish native entry point
+    // 5. Register the deopt continuation (a failed guard finishes the call
+    //    in Tier 0), then store the engine lifetime holder and atomically
+    //    publish the native entry point.
+    auto register_resumer = [](FunctionHandle& h, void* entry) {
+        FunctionHandle* hp = &h;
+        register_deopt_resumer(entry, [hp](const DeoptFrame& frame) -> uint64_t {
+            return MultiTierPipeline::instance().resume_after_deopt(*hp, frame);
+        });
+        h.add_deopt_entry(entry);
+    };
+    register_resumer(handle, native_code_ptr);
     handle.set_jit_engine(jit);
     handle.set_native_entry(native_code_ptr);
     handle.set_tier(TierLevel::Tier2_Optimized);
@@ -580,7 +624,9 @@ CodeInstallResult CodeInstaller::install_tier2(
         FunctionHandle* other_handle = FunctionDispatchTable::instance().find(fn->name());
         if (other_handle && !other_handle->has_native_entry()) {
             void* other_ptr = jit->get_symbol_address(fn->name());
-            if (other_ptr) {
+            std::string why;
+            if (other_ptr && deopt_targets_valid(*fn, other_handle->mir_function(), why)) {
+                register_resumer(*other_handle, other_ptr);
                 other_handle->set_jit_engine(jit);
                 other_handle->set_native_entry(other_ptr);
                 other_handle->set_tier(TierLevel::Tier2_Optimized);

@@ -1,6 +1,11 @@
 #include <brass/runtime/deopt.hpp>
 #include <ostream>
 #include <mutex>
+#include <memory>
+#include <stdexcept>
+#include <unordered_map>
+#include <cstdio>
+#include <cstdlib>
 
 namespace brass::runtime {
 
@@ -113,6 +118,38 @@ DeoptHandlerFn get_deopt_handler() {
     return g_deopt_handler;
 }
 
+namespace {
+std::mutex g_resumer_mutex;
+std::unordered_map<void*, std::shared_ptr<const DeoptResumerFn>>& resumers() {
+    static auto* map = new std::unordered_map<void*, std::shared_ptr<const DeoptResumerFn>>();
+    return *map;
+}
+std::shared_ptr<const DeoptResumerFn> find_resumer(void* code_entry) {
+    if (!code_entry) return nullptr;
+    std::lock_guard<std::mutex> lock(g_resumer_mutex);
+    auto it = resumers().find(code_entry);
+    return it != resumers().end() ? it->second : nullptr;
+}
+thread_local uint64_t t_deopt_result = 0;
+} // namespace
+
+void register_deopt_resumer(void* code_entry, DeoptResumerFn resumer) {
+    if (!code_entry || !resumer) {
+        throw std::invalid_argument("register_deopt_resumer: null code entry or resumer");
+    }
+    std::lock_guard<std::mutex> lock(g_resumer_mutex);
+    resumers()[code_entry] = std::make_shared<const DeoptResumerFn>(std::move(resumer));
+}
+
+void unregister_deopt_resumer(void* code_entry) {
+    std::lock_guard<std::mutex> lock(g_resumer_mutex);
+    resumers().erase(code_entry);
+}
+
+bool has_deopt_resumer(void* code_entry) {
+    return find_resumer(code_entry) != nullptr;
+}
+
 } // namespace brass::runtime
 
 extern "C" {
@@ -130,18 +167,18 @@ void* brass_deopt_exit_typed(uint32_t resume_id, uint32_t reason, uint32_t count
     frame->clear();
     frame->resume_id = resume_id;
     frame->reason = static_cast<brass::runtime::DeoptReason>(reason);
-    frame->count = (count > brass::runtime::DeoptFrame::kMaxSlots) ? brass::runtime::DeoptFrame::kMaxSlots : count;
-
-    if (raw_slots) {
-        for (size_t i = 0; i < frame->count; ++i) {
-            frame->slots[i] = raw_slots[i];
-            if (raw_kinds) {
-                frame->kinds[i] = static_cast<brass::runtime::DeoptValueKind>(raw_kinds[i]);
-            } else {
-                frame->kinds[i] = brass::runtime::DeoptValueKind::Int64;
-            }
+    if (count > 0 && !raw_slots) {
+        std::fprintf(stderr, "brass_deopt_exit: %u state values but no slot buffer\n", count);
+        std::abort();
+    }
+    frame->slots.assign(raw_slots, raw_slots + count);
+    frame->kinds.resize(count, brass::runtime::DeoptValueKind::Int64);
+    if (raw_kinds) {
+        for (size_t i = 0; i < count; ++i) {
+            frame->kinds[i] = static_cast<brass::runtime::DeoptValueKind>(raw_kinds[i]);
         }
     }
+    frame->count = count;
 
     auto handler = brass::runtime::get_deopt_handler();
     if (handler) {
@@ -152,6 +189,49 @@ void* brass_deopt_exit_typed(uint32_t resume_id, uint32_t reason, uint32_t count
 
 void* brass_deopt_exit(uint32_t resume_id, uint32_t reason, uint32_t count, const uint64_t* raw_slots) {
     return brass_deopt_exit_typed(resume_id, reason, count, raw_slots, nullptr);
+}
+
+const uint64_t* brass_get_thread_deopt_slots() {
+    return brass::runtime::get_thread_deopt_frame()->slots.data();
+}
+
+const uint64_t* brass_deopt_exit_record(const brass::runtime::DeoptExitRecord* record) {
+    using namespace brass::runtime;
+    if (!record) {
+        std::fprintf(stderr, "brass_deopt_exit_record: null record\n");
+        std::abort();
+    }
+    auto* frame = get_thread_deopt_frame();
+    frame->clear();
+    frame->resume_id = record->resume_id;
+    frame->reason = static_cast<DeoptReason>(record->reason);
+    frame->code_entry = record->code_entry;
+    const uint64_t* slots = record->slots();
+    const uint8_t* kinds = record->kinds();
+    frame->slots.assign(slots, slots + record->count);
+    frame->kinds.resize(record->count);
+    for (uint32_t i = 0; i < record->count; ++i) {
+        frame->kinds[i] = static_cast<DeoptValueKind>(kinds[i]);
+    }
+    frame->count = record->count;
+
+    if (auto resumer = find_resumer(record->code_entry)) {
+        // The resumer may run code that deoptimizes again and overwrites the
+        // thread frame: it works on a copy.
+        DeoptFrame snapshot = *frame;
+        uint64_t result = (*resumer)(snapshot);
+        t_deopt_result = result;
+        return &t_deopt_result;
+    }
+    auto handler = get_deopt_handler();
+    if (handler) {
+        void* r = handler(*frame);
+        if ((record->flags & DeoptExitRecord::kHasExitSymbol) == 0) {
+            t_deopt_result = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(r));
+            return &t_deopt_result;
+        }
+    }
+    return nullptr;
 }
 
 }

@@ -52,14 +52,22 @@ struct DeoptValue {
 
 class DeoptFrame {
 public:
-    static constexpr size_t kMaxSlots = 64;
     uint32_t resume_id = 0;
     DeoptReason reason = DeoptReason::Generic;
     void* target_fn = nullptr;
-    size_t count = 0;
-    std::array<uint64_t, kMaxSlots> slots;
-    std::array<DeoptValueKind, kMaxSlots> kinds;
+    void* code_entry = nullptr;          // optimized code that deoptimized
+    size_t count = 0;                    // no limit
+    std::vector<uint64_t> slots;
+    std::vector<DeoptValueKind> kinds;
 };
+
+// x64 optimized code builds a DeoptExitRecord (header + slots + kinds) on
+// its stack and calls brass_deopt_exit_record. Tier-2 code installed by
+// CodeInstaller has a registered resumer: the failed guard's state is
+// rebuilt as typed values and the call finishes in Tier 0 (exit stub
+// function, else resume target, as the interpreter's guard does). After
+// deopt_threshold failures at one guard the optimized code is invalidated
+// and the function bails out of tier 2.
 
 // Thread-local accessors
 DeoptFrame* brass_get_thread_deopt_frame();

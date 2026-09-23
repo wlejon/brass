@@ -145,6 +145,7 @@ static std::unique_ptr<LirInst> clone_instruction(
     dst->resume_id = src.resume_id;
     dst->deopt_reason = src.deopt_reason;
     dst->exit_symbol = src.exit_symbol;
+    dst->deopt_kinds = src.deopt_kinds;
     dst->is_patchable = src.is_patchable;
     dst->patch_symbol = src.patch_symbol;
     dst->callee_symbol = src.callee_symbol;

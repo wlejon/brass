@@ -51,6 +51,8 @@ JitExecutionEngine::JitExecutionEngine(const Target& target)
     register_external_symbol("brass_gc_collect", reinterpret_cast<void*>(&brass_gc_collect));
     register_external_symbol("brass_runtime_gc_safepoint", reinterpret_cast<void*>(&brass_gc_safepoint));
     register_external_symbol("brass_deopt_exit", reinterpret_cast<void*>(&brass_deopt_exit));
+    register_external_symbol("brass_deopt_exit_record", reinterpret_cast<void*>(&brass_deopt_exit_record));
+    register_external_symbol("brass_get_thread_deopt_slots", reinterpret_cast<void*>(&brass_get_thread_deopt_slots));
     register_external_symbol("brass_get_thread_deopt_frame", reinterpret_cast<void*>(&brass_get_thread_deopt_frame));
     register_external_symbol("brass_set_thread_deopt_frame", reinterpret_cast<void*>(&brass_set_thread_deopt_frame));
     register_external_symbol("brass_patch_const32", reinterpret_cast<void*>(&brass_patch_const32));
@@ -91,6 +93,8 @@ JitExecutionEngine::JitExecutionEngine()
     register_external_symbol("brass_gc_collect", reinterpret_cast<void*>(&brass_gc_collect));
     register_external_symbol("brass_runtime_gc_safepoint", reinterpret_cast<void*>(&brass_gc_safepoint));
     register_external_symbol("brass_deopt_exit", reinterpret_cast<void*>(&brass_deopt_exit));
+    register_external_symbol("brass_deopt_exit_record", reinterpret_cast<void*>(&brass_deopt_exit_record));
+    register_external_symbol("brass_get_thread_deopt_slots", reinterpret_cast<void*>(&brass_get_thread_deopt_slots));
     register_external_symbol("brass_get_thread_deopt_frame", reinterpret_cast<void*>(&brass_get_thread_deopt_frame));
     register_external_symbol("brass_set_thread_deopt_frame", reinterpret_cast<void*>(&brass_set_thread_deopt_frame));
     register_external_symbol("brass_patch_const32", reinterpret_cast<void*>(&brass_patch_const32));

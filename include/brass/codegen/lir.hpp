@@ -438,6 +438,8 @@ public:
     uint32_t resume_id = 0;
     uint32_t deopt_reason = 0;
     std::string exit_symbol;
+    // GuardExit: one runtime::DeoptValueKind per use, in use order.
+    std::vector<uint8_t> deopt_kinds;
     bool is_patchable = false;
     std::string patch_symbol;
     std::string callee_symbol;

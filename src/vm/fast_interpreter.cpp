@@ -442,7 +442,7 @@ loop_start:
                 for (BcReg sreg : g.state_regs) {
                     RuntimeValue rv = fast_reg_value(frame, sreg);
                     last_deopt_.state_map.push_back(rv);
-                    df.push_value(registers[sreg], rv.is_gcref() ? runtime::DeoptValueKind::GcRef : runtime::DeoptValueKind::Int64);
+                    df.push_value(registers[sreg], runtime::DeoptValue::from_runtime_value(rv).kind);
                 }
                 runtime::set_thread_deopt_frame(&df);
             }

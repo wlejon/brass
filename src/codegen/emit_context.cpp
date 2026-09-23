@@ -3,6 +3,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <cassert>
+#include <cstring>
 
 namespace brass::codegen {
 
@@ -456,16 +457,37 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
             break;
         }
         case LirOpcode::GuardExit: {
+            // Builds a runtime::DeoptExitRecord on the stack (header, 8-byte
+            // slots, kind bytes; no size limit) and calls
+            // brass_deopt_exit_record with its address.
             size_t num_uses = inst.uses.size();
-            size_t slots_bytes = num_uses * 8;
+            if (inst.deopt_kinds.size() != num_uses) {
+                throw_unsupported("x64 emit (guard exit)", "state map without per-value kinds");
+            }
+            const bool has_exit_symbol = !inst.exit_symbol.empty() && inst.exit_symbol != "@exit_stub" &&
+                                         inst.exit_symbol != "exit_stub";
+            const size_t header_bytes = runtime::DeoptExitRecord::kSlotsOffset;
+            const size_t slots_bytes = num_uses * 8;
+            const size_t kinds_bytes = (num_uses + 7) & ~size_t(7);
             size_t shadow_space = (fn_.calling_conv.kind() == CallingConvKind::Win64 ? 32 : 0);
-            size_t total_alloc = ((slots_bytes + shadow_space + 15) & ~size_t(15));
-            if (total_alloc < 32 && fn_.calling_conv.kind() == CallingConvKind::Win64) {
-                total_alloc = 32;
+            size_t total_alloc = ((shadow_space + header_bytes + slots_bytes + kinds_bytes + 15) & ~size_t(15));
+            if (total_alloc > 0x7FFF0000u) {
+                throw_unsupported("x64 emit (guard exit)", "deopt state map too large for one frame");
             }
 
-            if (total_alloc > 0) enc_.sub(GPR::RSP, static_cast<int32_t>(total_alloc));
-            int32_t slots_disp = static_cast<int32_t>(shadow_space);
+            // Allocate page by page so a large record touches every guard page
+            // in order (Windows commits stack lazily).
+            constexpr size_t kPage = 4096;
+            size_t remaining = total_alloc;
+            while (remaining > kPage) {
+                enc_.sub(GPR::RSP, static_cast<int32_t>(kPage));
+                enc_.mov(ptr(GPR::RSP, 0), GPR::R11);
+                remaining -= kPage;
+            }
+            if (remaining > 0) enc_.sub(GPR::RSP, static_cast<int32_t>(remaining));
+            const int32_t rec_disp = static_cast<int32_t>(shadow_space);
+            const int32_t slots_disp = rec_disp + static_cast<int32_t>(header_bytes);
+            const int32_t kinds_disp = slots_disp + static_cast<int32_t>(slots_bytes);
 
             for (size_t i = 0; i < num_uses; ++i) {
                 const auto& op = inst.uses[i];
@@ -490,82 +512,92 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
                 } else if (op.is_imm_int()) {
                     enc_.mov(GPR::R11, op.imm_int);
                     enc_.mov(ptr(GPR::RSP, slot_offset), GPR::R11);
+                } else if (op.is_imm_float()) {
+                    uint64_t bits = 0;
+                    if (op.size == 4) {
+                        float f = static_cast<float>(op.imm_float);
+                        uint32_t b32 = 0;
+                        std::memcpy(&b32, &f, sizeof(b32));
+                        bits = b32;
+                    } else {
+                        std::memcpy(&bits, &op.imm_float, sizeof(bits));
+                    }
+                    enc_.mov(GPR::R11, static_cast<int64_t>(bits));
+                    enc_.mov(ptr(GPR::RSP, slot_offset), GPR::R11);
+                } else {
+                    throw_unsupported("x64 emit (guard exit)",
+                                      std::string("state value operand of kind ") + std::string(to_string(op.kind)));
                 }
+            }
+            // Kind bytes, eight per store.
+            for (size_t i = 0; i < num_uses; i += 8) {
+                uint64_t packed = 0;
+                for (size_t j = 0; j < 8 && i + j < num_uses; ++j) {
+                    packed |= static_cast<uint64_t>(inst.deopt_kinds[i + j]) << (8 * j);
+                }
+                enc_.mov(GPR::R11, static_cast<int64_t>(packed));
+                enc_.mov(ptr(GPR::RSP, kinds_disp + static_cast<int32_t>(i)), GPR::R11);
             }
 
             uint32_t rid = inst.resume_id;
             uint32_t rsn = inst.deopt_reason == 0 ? 1 : inst.deopt_reason;
             uint32_t cnt = static_cast<uint32_t>(num_uses);
+            uint32_t flags = has_exit_symbol ? runtime::DeoptExitRecord::kHasExitSymbol : 0u;
 
-            if (fn_.calling_conv.kind() == CallingConvKind::Win64) {
-                enc_.mov32(GPR::RCX, rid);
-                enc_.mov32(GPR::RDX, rsn);
-                enc_.mov32(GPR::R8, cnt);
-                if (num_uses > 0) enc_.lea(GPR::R9, ptr(GPR::RSP, slots_disp));
-                else enc_.xor32(GPR::R9, GPR::R9);
-            } else {
-                enc_.mov32(GPR::RDI, rid);
-                enc_.mov32(GPR::RSI, rsn);
-                enc_.mov32(GPR::RDX, cnt);
-                if (num_uses > 0) enc_.lea(GPR::RCX, ptr(GPR::RSP, slots_disp));
-                else enc_.xor32(GPR::RCX, GPR::RCX);
-            }
+            // Header: code_entry (this function's own entry), resume id,
+            // reason, count, flags.
+            enc_.lea(GPR::R11, fn_.name);
+            enc_.mov(ptr(GPR::RSP, rec_disp + 0), GPR::R11);
+            enc_.mov(GPR::R11, static_cast<int64_t>((static_cast<uint64_t>(rsn) << 32) | rid));
+            enc_.mov(ptr(GPR::RSP, rec_disp + 8), GPR::R11);
+            enc_.mov(GPR::R11, static_cast<int64_t>((static_cast<uint64_t>(flags) << 32) | cnt));
+            enc_.mov(ptr(GPR::RSP, rec_disp + 16), GPR::R11);
 
-            enc_.call("brass_deopt_exit");
+            const GPR arg0 = (fn_.calling_conv.kind() == CallingConvKind::Win64) ? GPR::RCX : GPR::RDI;
+            enc_.lea(arg0, ptr(GPR::RSP, rec_disp));
+            enc_.call("brass_deopt_exit_record");
+            enc_.add(GPR::RSP, static_cast<int32_t>(total_alloc));
 
-            if (!inst.exit_symbol.empty() && inst.exit_symbol != "@exit_stub" && inst.exit_symbol != "exit_stub") {
-                if (total_alloc > 0) enc_.add(GPR::RSP, static_cast<int32_t>(total_alloc));
-                size_t shadow2 = (fn_.calling_conv.kind() == CallingConvKind::Win64 ? 32 : 0);
+            auto emit_return_rax = [&]() {
+                if (fn_.return_type.kind() == TypeKind::F64) {
+                    enc_.movq(XMM::XMM0, GPR::RAX);
+                } else if (fn_.return_type.kind() == TypeKind::F32) {
+                    enc_.movd(XMM::XMM0, GPR::RAX);
+                } else if (fn_.return_type.is_v128()) {
+                    enc_.movq(XMM::XMM0, GPR::RAX);
+                }
+                codegen::FrameInfo mutable_frame = fn_.frame;
+                X64FrameLayout::compute_layout(mutable_frame, fn_.calling_conv);
+                X64FrameLayout::emit_epilogue(enc_, mutable_frame, fn_.calling_conv);
+            };
+
+            // Handled: RAX points at the lower tier's result for this frame.
+            Label unhandled = buffer_.create_label();
+            enc_.test(GPR::RAX, GPR::RAX);
+            enc_.j(Condition::E, unhandled);
+            enc_.mov(GPR::RAX, ptr(GPR::RAX, 0));
+            emit_return_rax();
+            buffer_.bind(unhandled);
+
+            if (has_exit_symbol) {
+                // Generic-twin ABI: exit(resume_id, slots).
+                const size_t shadow2 = (fn_.calling_conv.kind() == CallingConvKind::Win64 ? 32 : 0);
                 if (shadow2 > 0) enc_.sub(GPR::RSP, static_cast<int32_t>(shadow2));
-                enc_.call("brass_get_thread_deopt_frame");
-                if (shadow2 > 0) enc_.add(GPR::RSP, static_cast<int32_t>(shadow2));
-
+                enc_.call("brass_get_thread_deopt_slots");
                 if (fn_.calling_conv.kind() == CallingConvKind::Win64) {
-                    enc_.lea(GPR::RDX, ptr(GPR::RAX, static_cast<int32_t>(offsetof(runtime::DeoptFrame, slots))));
+                    enc_.mov(GPR::RDX, GPR::RAX);
                     enc_.mov32(GPR::RCX, rid);
-                    enc_.sub(GPR::RSP, 32);
-                    enc_.call(inst.exit_symbol);
-                    enc_.add(GPR::RSP, 32);
                 } else {
-                    enc_.lea(GPR::RSI, ptr(GPR::RAX, static_cast<int32_t>(offsetof(runtime::DeoptFrame, slots))));
+                    enc_.mov(GPR::RSI, GPR::RAX);
                     enc_.mov32(GPR::RDI, rid);
-                    enc_.call(inst.exit_symbol);
                 }
-
-                if (fn_.return_type.kind() == TypeKind::F64) {
-                    enc_.movq(XMM::XMM0, GPR::RAX);
-                } else if (fn_.return_type.kind() == TypeKind::F32) {
-                    enc_.movd(XMM::XMM0, GPR::RAX);
-                } else if (fn_.return_type.is_v128()) {
-                    enc_.movq(XMM::XMM0, GPR::RAX);
-                }
-
-                codegen::FrameInfo mutable_frame = fn_.frame;
-                X64FrameLayout::compute_layout(mutable_frame, fn_.calling_conv);
-                X64FrameLayout::emit_epilogue(enc_, mutable_frame, fn_.calling_conv);
-            } else {
-                if (total_alloc > 0) enc_.add(GPR::RSP, static_cast<int32_t>(total_alloc));
-                if (inst.deopt_reason == static_cast<uint32_t>(runtime::DeoptReason::BoundsCheckFailed)) {
-                    // Out-of-bounds guards must not silently exit returning uninitialized garbage.
-                    // If brass_deopt_exit returned null (unhandled deopt), trap with ud2.
-                    enc_.test(GPR::RAX, GPR::RAX);
-                    Label handle_ok = buffer_.create_label();
-                    enc_.j(Condition::NE, handle_ok);
-                    enc_.ud2();
-                    buffer_.bind(handle_ok);
-                }
-                if (fn_.return_type.kind() == TypeKind::F64) {
-                    enc_.movq(XMM::XMM0, GPR::RAX);
-                } else if (fn_.return_type.kind() == TypeKind::F32) {
-                    enc_.movd(XMM::XMM0, GPR::RAX);
-                } else if (fn_.return_type.is_v128()) {
-                    enc_.movq(XMM::XMM0, GPR::RAX);
-                }
-
-                codegen::FrameInfo mutable_frame = fn_.frame;
-                X64FrameLayout::compute_layout(mutable_frame, fn_.calling_conv);
-                X64FrameLayout::emit_epilogue(enc_, mutable_frame, fn_.calling_conv);
+                enc_.call(inst.exit_symbol);
+                if (shadow2 > 0) enc_.add(GPR::RSP, static_cast<int32_t>(shadow2));
+            } else if (inst.deopt_reason == static_cast<uint32_t>(runtime::DeoptReason::BoundsCheckFailed)) {
+                // An out-of-bounds guard nobody resumes must not return garbage.
+                enc_.ud2();
             }
+            emit_return_rax();
             break;
         }
         default:

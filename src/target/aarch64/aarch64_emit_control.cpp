@@ -465,9 +465,9 @@ void AArch64EmitContext::emit_control_instruction(const LirInst& inst) {
 
             if (!inst.exit_symbol.empty() && inst.exit_symbol != "@exit_stub" && inst.exit_symbol != "exit_stub") {
                 if (total_alloc > 0) enc_.add(GPR::SP, GPR::SP, static_cast<uint32_t>(total_alloc));
-                enc_.bl("brass_get_thread_deopt_frame");
-                // X0 now holds DeoptFrame*
-                enc_.add(GPR::X1, GPR::X0, static_cast<uint32_t>(offsetof(runtime::DeoptFrame, slots)));
+                enc_.bl("brass_get_thread_deopt_slots");
+                // X0 now holds the deopt frame's slot array
+                enc_.mov(GPR::X1, GPR::X0);
                 enc_.mov32(GPR::X0, rid);
                 enc_.bl(inst.exit_symbol);
 
