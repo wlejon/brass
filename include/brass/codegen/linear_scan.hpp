@@ -80,6 +80,7 @@ private:
     void init_register_pools();
     void build_coalesce_hints();
     void build_constraint_index();
+    void compute_held_pregs(const LirBlock& block, std::vector<InstConstraints>& out) const;
     InstConstraints constraint_or(size_t lo, size_t hi) const noexcept;
     void expire_old_intervals(uint32_t current_start);
     bool try_allocate_free_reg(LiveInterval& interval);

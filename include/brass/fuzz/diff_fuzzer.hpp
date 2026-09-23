@@ -179,8 +179,11 @@ public:
 private:
     DiffFuzzerOptions options_;
 
+    // `schedule` runs the pre- and post-RA instruction schedulers, as
+    // brass-opt's JIT and AOT paths do by default; the optimized tier uses
+    // them so the unoptimized tier checks scheduled code against unscheduled.
     TierResult run_jit(const Module& mod, std::string_view fn_name,
-                       const std::vector<RuntimeValue>& args, std::string_view label);
+                       const std::vector<RuntimeValue>& args, std::string_view label, bool schedule);
     std::string bisect_first_bad_step(const Module& mod, std::string_view fn_name,
                                       const std::vector<RuntimeValue>& args,
                                       const TierResult& expected, char runner);

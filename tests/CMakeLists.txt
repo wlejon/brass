@@ -25,6 +25,7 @@ add_executable(brass_unit_tests
     unit/test_x64_encoder.cpp
     unit/test_lir_isel.cpp
     unit/test_linear_scan.cpp
+    unit/test_regalloc_held_pregs.cpp
     unit/test_peephole.cpp
     unit/test_x64_codegen.cpp
     unit/test_coff_writer.cpp
@@ -379,6 +380,15 @@ if(BRASS_BUILD_TOOLS)
     foreach(_name 01_arithmetic 03_collatz 09_closures 14_array_loop 23_objects_basic
                   25_try_catch_basic 27_generator_fibonacci 28_async_chain 34_background_tiering)
         brass_il_corpus_test(bg ${_name} --run --enable-background-compile)
+    endforeach()
+    # il_corpus.sched.*: tier 2 with the pre- and post-RA schedulers, as
+    # brass-opt --jit runs by default (brass-il leaves them off). The
+    # scheduler once moved constant materialization between a call and the
+    # copy out of RAX, and the allocator gave the constant's temp RAX.
+    file(GLOB _sched_corpus CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/tests/bronze_corpus/*.il")
+    foreach(_il ${_sched_corpus})
+        get_filename_component(_name "${_il}" NAME_WE)
+        brass_il_corpus_test(sched ${_name} --run --schedule-insns)
     endforeach()
 endif()
 

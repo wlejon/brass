@@ -146,10 +146,14 @@ void LinearScanAllocator::build_constraint_index() {
     };
 
     std::vector<InstConstraints> words;
+    std::vector<InstConstraints> held;
     // Instruction ids are assigned in block order by the liveness analysis, so
     // walking the blocks yields the instructions already sorted by id.
     for (const auto& block : fn_.blocks) {
+        compute_held_pregs(*block, held);
+        size_t idx_in_block = 0;
         for (const auto& inst : block->instructions) {
+            const InstConstraints& h = held[idx_in_block++];
             uint32_t pinned_gprs = 0, pinned_xmms = 0;
             for (size_t i = 0; i < inst->defs.size(); ++i) {
                 pinned_by(inst->defs[i], i < inst->def_constraints.size() ? &inst->def_constraints[i] : nullptr,
@@ -159,11 +163,16 @@ void LinearScanAllocator::build_constraint_index() {
                 pinned_by(inst->uses[i], i < inst->use_constraints.size() ? &inst->use_constraints[i] : nullptr,
                           pinned_gprs, pinned_xmms);
             }
-            if (inst->clobbered_gprs != 0 || inst->clobbered_xmms != 0 || pinned_gprs != 0 || pinned_xmms != 0) {
+            // A register held across the instruction blocks every interval
+            // covering it, like a clobber: no interval's own fixed position
+            // there may take it, since that would overwrite the held value.
+            const uint32_t blocked_gprs = inst->clobbered_gprs | h.clobbered_gprs;
+            const uint32_t blocked_xmms = inst->clobbered_xmms | h.clobbered_xmms;
+            if (blocked_gprs != 0 || blocked_xmms != 0 || pinned_gprs != 0 || pinned_xmms != 0) {
                 constrained_ids_.push_back(inst->id);
                 words.push_back(InstConstraints{
-                    inst->clobbered_gprs,
-                    inst->clobbered_xmms,
+                    blocked_gprs,
+                    blocked_xmms,
                     pinned_gprs,
                     pinned_xmms
                 });
@@ -183,6 +192,79 @@ void LinearScanAllocator::build_constraint_index() {
             level[i] = prev[i] | prev[i + span / 2];
         }
         constraint_or_.push_back(std::move(level));
+    }
+}
+
+// A physical-register operand is a point constraint only at the instruction
+// naming it, but the value it carries lives from the instruction that writes
+// the register to the last one that reads it: a call's result in RAX until
+// the copy out of it, an argument in RCX from its move to the call, a
+// dividend in RAX/RDX until the divide. Instruction selection emits those
+// pairs adjacent, but the pre-RA scheduler may move independent instructions
+// between them, and an interval assigned the register there overwrites the
+// value. For each instruction of the block, out[i].clobbered_* receives the
+// physical registers held across it (written before it, read after it).
+// Only a write in the block opens a value: the registers read at a block's
+// start (the entry block's incoming arguments) are read by its first
+// instruction, a ParallelCopy.
+void LinearScanAllocator::compute_held_pregs(const LirBlock& block, std::vector<InstConstraints>& out) const {
+    const size_t n = block.instructions.size();
+    out.assign(n, InstConstraints{});    // Per register (class, code): index of the instruction whose write opened
+    // the current value (kNone = no value), and the last index already marked.
+    constexpr int kNone = -1;
+    int open_def[2][32];
+    int marked_to[2][32];
+    for (int c = 0; c < 2; ++c) {
+        for (int r = 0; r < 32; ++r) {
+            open_def[c][r] = kNone;
+            marked_to[c][r] = kNone;
+        }
+    }
+    auto cls = [](const PReg& p) { return p.reg_class == RegClass::GPR ? 0 : 1; };
+    // xor r, r (zeroing RDX before an unsigned divide) names r as a use but
+    // does not read its value.
+    auto is_zeroing_idiom = [](const LirInst& inst) {
+        switch (inst.opcode) {
+            case LirOpcode::Xor: case LirOpcode::Xor32: case LirOpcode::Xorpd:
+            case LirOpcode::Xorps: case LirOpcode::Pxor:
+                break;
+            default:
+                return false;
+        }
+        return inst.uses.size() == 2 && inst.uses[0].is_preg() && inst.uses[1].is_preg() &&
+               inst.uses[0].preg_val == inst.uses[1].preg_val;
+    };
+    for (size_t i = 0; i < n; ++i) {
+        const LirInst& inst = *block.instructions[i];
+        const bool reads_pregs = !is_zeroing_idiom(inst);
+        for (const auto& u : inst.uses) {
+            if (!reads_pregs) break;
+            if (!u.is_preg() || !u.preg_val.is_valid() || u.preg_val.code >= 32) continue;
+            const int c = cls(u.preg_val);
+            const int r = u.preg_val.code;
+            if (open_def[c][r] == kNone) continue;
+            const int from = std::max(open_def[c][r], marked_to[c][r]) + 1;
+            for (int k = from; k < static_cast<int>(i); ++k) {
+                (c == 0 ? out[k].clobbered_gprs : out[k].clobbered_xmms) |= (1u << r);
+            }
+            marked_to[c][r] = std::max(marked_to[c][r], static_cast<int>(i));
+        }
+        for (const auto& d : inst.defs) {
+            if (!d.is_preg() || !d.preg_val.is_valid() || d.preg_val.code >= 32) continue;
+            // An 8- or 16-bit write keeps the rest of the register, so the
+            // value it merges into stays open.
+            if (d.size < 4 && open_def[cls(d.preg_val)][d.preg_val.code] != kNone) continue;
+            open_def[cls(d.preg_val)][d.preg_val.code] = static_cast<int>(i);
+            marked_to[cls(d.preg_val)][d.preg_val.code] = static_cast<int>(i);
+        }
+        // A clobber ends whatever value the register held; nothing written
+        // before it can be read after it.
+        for (int r = 0; r < 32; ++r) {
+            const bool gpr_clob = (inst.clobbered_gprs >> r) & 1u;
+            const bool xmm_clob = (inst.clobbered_xmms >> r) & 1u;
+            if (gpr_clob && open_def[0][r] != static_cast<int>(i)) open_def[0][r] = kNone;
+            if (xmm_clob && open_def[1][r] != static_cast<int>(i)) open_def[1][r] = kNone;
+        }
     }
 }
 

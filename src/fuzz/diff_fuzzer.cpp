@@ -178,7 +178,7 @@ TierResult DiffFuzzer::run_fast_interp(const Module& mod, std::string_view fn_na
 }
 
 TierResult DiffFuzzer::run_jit(const Module& mod, std::string_view fn_name,
-                               const std::vector<RuntimeValue>& args, std::string_view label) {
+                               const std::vector<RuntimeValue>& args, std::string_view label, bool schedule) {
     TierResult res;
     const auto t0 = std::chrono::steady_clock::now();
 
@@ -189,7 +189,10 @@ TierResult DiffFuzzer::run_jit(const Module& mod, std::string_view fn_name,
 
     bool compiled = false;
     std::string compile_fault;
-    const bool compile_ok = run_protected([&]() { compiled = jit->compile_and_load(mod); }, compile_fault);
+    codegen::SchedOptions sched;
+    sched.enable_pre_ra = schedule;
+    sched.enable_post_ra = schedule;
+    const bool compile_ok = run_protected([&]() { compiled = jit->compile_and_load(mod, 0, sched); }, compile_fault);
     if (!compile_ok || !compiled) {
         res.status = ExecutionStatus::CompilationFailure;
         res.fault_message = "JIT " + std::string(label) + " compilation failed" +
@@ -234,7 +237,7 @@ TierResult DiffFuzzer::run_jit(const Module& mod, std::string_view fn_name,
 
 TierResult DiffFuzzer::run_tier1_jit_unopt(const Module& mod, std::string_view fn_name,
                                           const std::vector<RuntimeValue>& args) {
-    return run_jit(mod, fn_name, args, "unoptimized");
+    return run_jit(mod, fn_name, args, "unoptimized", false);
 }
 
 OptimizeOutcome DiffFuzzer::optimize(const Module& mod,
@@ -306,7 +309,7 @@ TierResult DiffFuzzer::run_tier2_jit_opt(const Module& mod, std::string_view fn_
         res.fault_message = opt.message;
         return res;
     }
-    return run_jit(*opt.module, fn_name, args, "optimized");
+    return run_jit(*opt.module, fn_name, args, "optimized", true);
 }
 
 std::string DiffFuzzer::bisect_first_bad_step(const Module& mod, std::string_view fn_name,
@@ -315,7 +318,7 @@ std::string DiffFuzzer::bisect_first_bad_step(const Module& mod, std::string_vie
     // runner: 'i' interpreter, 'j' JIT, 'f' FastInterpreter.
     std::string bad;
     optimize(mod, [&](std::string_view step, const Module& cur) {
-        TierResult r = runner == 'j' ? run_jit(cur, fn_name, args, "bisect")
+        TierResult r = runner == 'j' ? run_jit(cur, fn_name, args, "bisect", true)
                      : runner == 'f' ? run_fast_interp(cur, fn_name, args)
                                      : run_tier0_interp(cur, fn_name, args);
         if (tier_results_match(expected, r)) return true;
@@ -434,7 +437,7 @@ DiffResult DiffFuzzer::run_test(const Module& mod, std::string_view fn_name,
     }
 
     if (options_.tier2_jit_opt) {
-        result.tier2_jit_opt = run_jit(*opt.module, fn_name, args, "optimized");
+        result.tier2_jit_opt = run_jit(*opt.module, fn_name, args, "optimized", true);
         if (!tier_results_match(expected, result.tier2_jit_opt)) {
             // Bisecting re-runs the JIT after every step, which only names
             // the right pass when the answers are reproducible. A program
@@ -448,7 +451,7 @@ DiffResult DiffFuzzer::run_test(const Module& mod, std::string_view fn_name,
                                     ", Tier 0 (Interpreter) = " + describe(expected));
                 }
             }
-            const TierResult again = run_jit(*opt.module, fn_name, args, "optimized");
+            const TierResult again = run_jit(*opt.module, fn_name, args, "optimized", true);
             if (!tier_results_match(result.tier2_jit_opt, again)) {
                 return fail("jit-opt-flaky:" + std::string(failure_kind(result.tier2_jit_opt)),
                             "Tier 2 (JIT opt) = " + describe(result.tier2_jit_opt) + ", then " + describe(again) +

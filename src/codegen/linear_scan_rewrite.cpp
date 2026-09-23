@@ -9,6 +9,26 @@
 
 namespace brass::codegen {
 
+// Registers the x64 emitter uses inside an instruction beyond its operands:
+// a memory-to-memory move goes through R11 (GPR) or XMM15 (SSE and vector),
+// and Fabs builds its mask in R11 and XMM15 (XMM14 when the result is XMM15).
+// Recorded as clobbers, so the post-RA scheduler and the peephole pass see
+// them: a spill reload into R11 that the scheduler once hoisted above a
+// Fabs64 was overwritten by the mask before its use.
+static void note_x64_emitter_scratch(LirInst& inst) {
+    using namespace brass::x64;
+    auto in_memory = [](const LirOperand& op) { return op.is_mem() || op.is_spill_slot(); };
+    if (inst.opcode == LirOpcode::Fabs32 || inst.opcode == LirOpcode::Fabs64) {
+        inst.clobbered_gprs |= reg_mask(GPR::R11);
+        inst.clobbered_xmms |= reg_mask(XMM::XMM14) | reg_mask(XMM::XMM15);
+        return;
+    }
+    if (!inst.defs.empty() && !inst.uses.empty() && in_memory(inst.defs[0]) && in_memory(inst.uses[0])) {
+        inst.clobbered_gprs |= reg_mask(GPR::R11);
+        inst.clobbered_xmms |= reg_mask(XMM::XMM15);
+    }
+}
+
 static bool is_xmm_opcode(LirOpcode op) {
     switch (op) {
         case LirOpcode::Movsd:
@@ -448,6 +468,7 @@ void LinearScanAllocator::rewrite_instructions() {
                 }
             }
 
+            if (!is_aarch64) note_x64_emitter_scratch(*inst);
             rewritten.push_back(std::move(inst));
 
             // Write back to spill slot if def was spilled

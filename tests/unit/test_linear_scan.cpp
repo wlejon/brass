@@ -554,3 +554,103 @@ TEST_CASE("Linear Scan - XMM 3 Spilled Operands Distinct Scratch Registers") {
     CHECK(used_pregs[1] != used_pregs[2]);
     CHECK(used_pregs[0] != used_pregs[2]);
 }
+
+// A physical register written by one instruction and read by a later one
+// holds its value across the instructions between them (the pre-RA
+// scheduler puts independent work there: a call result in RAX before the
+// copy out of it, an argument in RCX before the call). No interval covering
+// that gap may take the register.
+TEST_CASE("Linear Scan - physical register held between its write and read") {
+    for (GPR held : {GPR::RAX, GPR::RCX, GPR::RDX}) {
+        LirFunction fn;
+        fn.name = "test_held_preg";
+        fn.calling_conv = CallingConvention::win64();
+        LirBlock* entry = fn.create_block("entry");
+
+        auto def_held = std::make_unique<LirInst>(LirOpcode::Mov);
+        def_held->add_def(LirOperand::preg_gpr(held, 8), FixedConstraint::gpr(held));
+        def_held->add_use(LirOperand::imm(1));
+        entry->append_inst(std::move(def_held));
+
+        VReg t = fn.allocate_vreg(RegClass::GPR, 8);
+        auto mabs = std::make_unique<LirInst>(LirOpcode::Movabs);
+        mabs->add_def(LirOperand::vreg(t));
+        mabs->add_use(LirOperand::imm(int64_t{4617315517961601024}, 8));
+        entry->append_inst(std::move(mabs));
+
+        VReg u = fn.allocate_vreg(RegClass::GPR, 8);
+        auto add = std::make_unique<LirInst>(LirOpcode::Add);
+        add->add_def(LirOperand::vreg(u));
+        add->add_use(LirOperand::vreg(t));
+        add->add_use(LirOperand::imm(3));
+        entry->append_inst(std::move(add));
+
+        VReg v = fn.allocate_vreg(RegClass::GPR, 8);
+        auto copy_out = std::make_unique<LirInst>(LirOpcode::Mov);
+        copy_out->add_def(LirOperand::vreg(v));
+        copy_out->add_use(LirOperand::preg_gpr(held, 8), FixedConstraint::gpr(held));
+        entry->append_inst(std::move(copy_out));
+
+        VReg w = fn.allocate_vreg(RegClass::GPR, 8);
+        auto sum = std::make_unique<LirInst>(LirOpcode::Add);
+        sum->add_def(LirOperand::vreg(w));
+        sum->add_use(LirOperand::vreg(v));
+        sum->add_use(LirOperand::vreg(u));
+        entry->append_inst(std::move(sum));
+
+        auto ret_inst = std::make_unique<LirInst>(LirOpcode::Ret);
+        ret_inst->add_use(LirOperand::vreg(w));
+        entry->append_inst(std::move(ret_inst));
+
+        LivenessAnalysis liveness(fn);
+        liveness.run();
+        LinearScanAllocator regalloc(fn, liveness, fn.calling_conv);
+        regalloc.allocate();
+
+        for (VReg gap : {t, u}) {
+            const PReg p = fn.get_vreg_info(gap).assigned_preg;
+            REQUIRE(p.is_valid());
+            CHECK(p != PReg::gpr(held));
+        }
+    }
+}
+
+// The emitter builds Fabs's mask in R11 and XMM15/XMM14. Unless the rewritten
+// instruction records them as clobbers, the post-RA scheduler hoists a spill
+// reload into R11 above it and the reload is lost (fuzz seed 2914).
+TEST_CASE("Linear Scan - Fabs records the emitter's scratch registers as clobbers") {
+    LirFunction fn;
+    fn.name = "test_fabs_scratch";
+    fn.calling_conv = CallingConvention::win64();
+    LirBlock* entry = fn.create_block("entry");
+
+    VReg x = fn.allocate_vreg(RegClass::XMM, 8);
+    auto def = std::make_unique<LirInst>(LirOpcode::Xorpd);
+    def->add_def(LirOperand::vreg(x));
+    def->add_use(LirOperand::vreg(x));
+    def->add_use(LirOperand::vreg(x));
+    entry->append_inst(std::move(def));
+
+    auto fabs = std::make_unique<LirInst>(LirOpcode::Fabs64);
+    fabs->add_def(LirOperand::vreg(x));
+    fabs->add_use(LirOperand::vreg(x));
+    entry->append_inst(std::move(fabs));
+
+    auto ret_inst = std::make_unique<LirInst>(LirOpcode::Ret);
+    ret_inst->add_use(LirOperand::vreg(x));
+    entry->append_inst(std::move(ret_inst));
+
+    LivenessAnalysis liveness(fn);
+    liveness.run();
+    LinearScanAllocator regalloc(fn, liveness, fn.calling_conv);
+    regalloc.allocate();
+
+    const LirInst* rewritten = nullptr;
+    for (const auto& inst : entry->instructions) {
+        if (inst->opcode == LirOpcode::Fabs64) rewritten = inst.get();
+    }
+    REQUIRE(rewritten != nullptr);
+    CHECK_NE(rewritten->clobbered_gprs & reg_mask(GPR::R11), 0u);
+    CHECK_NE(rewritten->clobbered_xmms & reg_mask(XMM::XMM15), 0u);
+    CHECK_NE(rewritten->clobbered_xmms & reg_mask(XMM::XMM14), 0u);
+}

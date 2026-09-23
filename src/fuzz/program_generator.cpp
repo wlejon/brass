@@ -15,6 +15,7 @@
 #include "program_generator_impl.hpp"
 #include <brass/mir/verifier.hpp>
 #include <algorithm>
+#include <iterator>
 #include <limits>
 
 namespace brass::fuzz {
@@ -616,6 +617,12 @@ void GenState::stmt_call() {
             const Buffer& buf = *eligible[rng_.pick_index(eligible.size())];
             Value* i = operand(Type::i64());
             Value* r = b_.build_call(buf_helpers_[rng_.pick_index(buf_helpers_.size())], Type::i64(), {buf.base, i});
+            if (rng_.coin_flip(0.35)) {
+                // A float constant's bits stored while the result is still
+                // in RAX: the temp that materializes it once got RAX.
+                Value* bits = float_const_bits_after_call();
+                b_.build_store_indexed(Type::i64(), buf.base, konst(Type::i64(), rng_.range_i64(0, 3)), 8, bits);
+            }
             add_value(r);
             mix(r);
             return;
@@ -628,8 +635,18 @@ void GenState::stmt_call() {
     Value* x = operand(Type::i64());
     Value* y = operand(Type::i64());
     Value* r = b_.build_call(helpers_[rng_.pick_index(helpers_.size())], Type::i64(), {x, y});
+    if (rng_.coin_flip(0.35)) mix(float_const_bits_after_call());
     add_value(r);
     mix(r);
+}
+
+// The bits of a non-zero f64 constant, which x64 materializes through a GPR
+// temp (movabs; movq). Emitted between a call and the first use of its
+// result, the temp is live while the result is held in RAX.
+Value* GenState::float_const_bits_after_call() {
+    static constexpr double kConsts[] = {5.0, -2.5, 0.1, 1e300, 3.141592653589793};
+    Value* k = b_.build_fconst_f64(kConsts[rng_.pick_index(std::size(kConsts))]);
+    return b_.build_bitcast_i64_f64(k);
 }
 
 void GenState::stmt_f64() {

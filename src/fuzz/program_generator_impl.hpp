@@ -77,6 +77,7 @@ public:
     void stmt_phi_consts(int depth);
     void stmt_loop(int depth);
     void stmt_call();
+    Value* float_const_bits_after_call();
     void stmt_f64();
     void stmt_vector();
 
