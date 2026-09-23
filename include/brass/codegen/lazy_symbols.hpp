@@ -1,10 +1,14 @@
 #pragma once
 
-// Lazy linking for the x64 baseline tier. A call or func_addr whose symbol
-// is not resolvable when the caller is compiled (a sibling the host compiles
+// Lazy linking for the baseline tier. A call or func_addr whose symbol is
+// not resolvable when the caller is compiled (a sibling the host compiles
 // and registers later) goes through a per-symbol stub:
 //
-//     stub:  movabs r11, &cell ; jmp [r11]
+//     x64:     movabs r11, &cell ; jmp [r11]
+//     AArch64: ldr x17, =&cell ; ldr x16, [x17] ; br x16
+//
+// (the AArch64 baseline uses stubs for func_addr only; its direct calls
+// load the callee's dispatch-table entry at run time).
 //
 // The cell starts out pointing at a shared resolver thunk. The first call
 // through the stub resolves the symbol (register_external_symbol, the
@@ -15,7 +19,7 @@
 // The stub's address is what func_addr yields: stable and callable before
 // the target exists. A call through a symbol that is still unresolved when
 // it runs is a hard error: the name goes to stderr and to
-// last_unresolved_symbol(), and the thunk executes ud2 - never a call
+// last_unresolved_symbol(), and the thunk traps (ud2 / brk) - never a call
 // through null.
 #include <atomic>
 #include <cstddef>
@@ -34,7 +38,7 @@ class JitMemoryBlock;
 class LazySymbolTable;
 
 struct LazySymbolCell {
-    // Read by the stub's `jmp [r11]`: must stay the first member.
+    // Read by the stub's `jmp [r11]` / `ldr x16, [x17]`: must stay the first member.
     std::atomic<void*> target{nullptr};
     LazySymbolTable* table = nullptr;
     std::string name;
@@ -78,7 +82,12 @@ public:
 
 private:
     struct Chunk;
+#if defined(__aarch64__) || defined(_M_ARM64)
+    // ldr x17, =cell ; ldr x16, [x17] ; br x16 ; brk ; .quad cell
+    static constexpr size_t kStubSize = 24;
+#else
     static constexpr size_t kStubSize = 16;
+#endif
     static constexpr size_t kStubsPerChunk = 256;
 
     mutable std::mutex mutex_;

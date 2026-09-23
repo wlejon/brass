@@ -1,6 +1,7 @@
-// Lazy linking stubs for the x64 baseline tier (see lazy_symbols.hpp).
+// Lazy linking stubs for the baseline tier (see lazy_symbols.hpp).
 #include <brass/codegen/lazy_symbols.hpp>
 #include <brass/codegen/jit_exec.hpp>
+#include <brass/target/aarch64/aarch64_encoder.hpp>
 #include <brass/target/x64/x64_encoder.hpp>
 #include <cstdio>
 #include <cstring>
@@ -83,6 +84,82 @@ void* build_resolver_thunk() {
     return block->data();
 }
 
+void write_stub(uint8_t* p, const LazySymbolCell& cell) {
+    const uint64_t cell_addr = reinterpret_cast<uint64_t>(&cell);
+    p[0] = 0x49; p[1] = 0xBB;                 // movabs r11, imm64
+    std::memcpy(p + 2, &cell_addr, 8);
+    p[10] = 0x41; p[11] = 0xFF; p[12] = 0x23; // jmp qword [r11]
+    p[13] = 0xCC; p[14] = 0xCC; p[15] = 0xCC;
+}
+
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#define BRASS_LAZY_STUBS_SUPPORTED 1
+
+// Entered with x17 = the cell, the caller's arguments in x0-x8 / q0-q7 and
+// on the stack, and lr = the caller's return address. Saves every argument
+// register, asks brass_lazy_symbol_resolve for the target, restores them
+// and tail-jumps to the target (through x16, free at a call boundary), or
+// executes brk if there is none.
+void* build_resolver_thunk() {
+    using namespace brass::aarch64;
+    CodeBuffer buffer;
+    AArch64Encoder enc(buffer);
+    Label trap = buffer.create_label();
+    constexpr int32_t kQOffset = 80;                 // x0-x8 (72 bytes), padded
+    constexpr int32_t kAlloc = kQOffset + 8 * 16;    // q0-q7
+    enc.stp(GPR::FP, GPR::LR, pre_idx(GPR::SP, -16));
+    enc.mov(GPR::FP, GPR::SP);
+    enc.sub(GPR::SP, GPR::SP, static_cast<uint32_t>(kAlloc));
+    for (int i = 0; i < 8; i += 2) {
+        enc.stp(static_cast<GPR>(i), static_cast<GPR>(i + 1), ptr(GPR::SP, i * 8));
+    }
+    enc.str(GPR::X8, ptr(GPR::SP, 64));
+    for (int i = 0; i < 8; ++i) {
+        enc.str_q(static_cast<FPR>(i), ptr(GPR::SP, kQOffset + i * 16));
+    }
+    enc.mov(GPR::X0, GPR::X17);
+    enc.mov(GPR::X16, reinterpret_cast<uint64_t>(reinterpret_cast<void*>(&brass_lazy_symbol_resolve)));
+    enc.blr(GPR::X16);
+    enc.mov(GPR::X16, GPR::X0);
+    for (int i = 0; i < 8; ++i) {
+        enc.ldr_q(static_cast<FPR>(i), ptr(GPR::SP, kQOffset + i * 16));
+    }
+    enc.ldr(GPR::X8, ptr(GPR::SP, 64));
+    for (int i = 0; i < 8; i += 2) {
+        enc.ldp(static_cast<GPR>(i), static_cast<GPR>(i + 1), ptr(GPR::SP, i * 8));
+    }
+    enc.mov(GPR::SP, GPR::FP);
+    enc.ldp(GPR::FP, GPR::LR, post_idx(GPR::SP, 16));
+    enc.cbz(GPR::X16, trap);
+    enc.br(GPR::X16);
+    buffer.bind(trap);
+    enc.brk(1);
+
+    // Process lifetime: cells of every table point here until resolved.
+    auto* block = new JitMemoryBlock(buffer.size());
+    if (!block->is_valid()) throw std::runtime_error("lazy symbols: cannot allocate the resolver thunk");
+    std::memcpy(block->data(), buffer.data(), buffer.size());
+    if (!block->make_executable_read_only()) {
+        throw std::runtime_error("lazy symbols: cannot make the resolver thunk executable");
+    }
+    return block->data();
+}
+
+//     ldr x17, 16f ; ldr x16, [x17] ; br x16 ; brk #0 ; 16: .quad &cell
+void write_stub(uint8_t* p, const LazySymbolCell& cell) {
+    const uint64_t cell_addr = reinterpret_cast<uint64_t>(&cell);
+    const uint32_t code[4] = {
+        0x58000000u | (4u << 5) | 17u,             // ldr x17, #16 (literal)
+        0xF9400000u | (17u << 5) | 16u,            // ldr x16, [x17]
+        0xD61F0000u | (16u << 5),                  // br x16
+        0xD4200000u,                               // brk #0
+    };
+    std::memcpy(p, code, sizeof(code));
+    std::memcpy(p + sizeof(code), &cell_addr, 8);
+}
+#endif
+
+#if defined(BRASS_LAZY_STUBS_SUPPORTED)
 void* resolver_thunk() {
     static void* thunk = build_resolver_thunk();
     return thunk;
@@ -116,12 +193,7 @@ void* LazySymbolTable::stub_for(std::string_view name) {
             LazySymbolCell& cell = chunk->cells[i];
             cell.table = this;
             cell.target.store(thunk, std::memory_order_relaxed);
-            uint8_t* p = chunk->code.data() + i * kStubSize;
-            const uint64_t cell_addr = reinterpret_cast<uint64_t>(&cell);
-            p[0] = 0x49; p[1] = 0xBB;                 // movabs r11, imm64
-            std::memcpy(p + 2, &cell_addr, 8);
-            p[10] = 0x41; p[11] = 0xFF; p[12] = 0x23; // jmp qword [r11]
-            p[13] = 0xCC; p[14] = 0xCC; p[15] = 0xCC;
+            write_stub(chunk->code.data() + i * kStubSize, cell);
         }
         if (!chunk->code.make_executable_read_only()) {
             throw std::runtime_error("lazy symbols: cannot make stub memory executable");
@@ -138,7 +210,7 @@ void* LazySymbolTable::stub_for(std::string_view name) {
     return stub;
 #else
     (void)name;
-    throw std::runtime_error("lazy symbols: x64 stubs need an x64 host");
+    throw std::runtime_error("lazy symbols: stubs need an x64 or AArch64 host");
 #endif
 }
 

@@ -40,7 +40,13 @@ bool emit_baseline_aarch64_op(AArch64BaselineEmitter& emitter, const Instruction
             return true;
         }
         case Opcode::func_addr: {
-            void* addr = emitter.resolve_sym(inst.symbol());
+            // Unresolved now (a sibling compiled later): the lazy-link stub,
+            // callable before the target is registered. A data symbol (the
+            // module's own string, or one declared `data`) has no stub.
+            const Module* mod = emitter.fn.parent();
+            const bool data = mod && (mod->string_symbol(inst.symbol()) ||
+                                      mod->has_symbol_role(inst.symbol(), SymbolRole::Data));
+            void* addr = data ? emitter.resolve_sym(inst.symbol()) : emitter.resolve_or_stub(inst.symbol());
             enc.mov(GPR::X0, reinterpret_cast<uint64_t>(addr));
             enc.str(GPR::X0, slot_addr(inst.result()));
             return true;

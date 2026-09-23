@@ -65,6 +65,13 @@ void* AArch64BaselineEmitter::resolve_sym(std::string_view name) const {
     return nullptr;
 }
 
+void* AArch64BaselineEmitter::resolve_or_stub(std::string_view name) {
+    if (void* addr = resolve_sym(name)) return addr;
+    if (!lazy) return nullptr;
+    uses_lazy_stubs = true;
+    return lazy->stub_for(name);
+}
+
 void AArch64BaselineEmitter::copy_block_args(const BranchTarget& target_branch) {
     if (!target_branch.block || target_branch.args.empty()) return;
     const auto& params = target_branch.block->params();
@@ -85,7 +92,8 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
     const Function& fn,
     Target target,
     BaselineSymbolResolver resolver,
-    runtime::TieringRegistry* tiering
+    runtime::TieringRegistry* tiering,
+    std::shared_ptr<codegen::LazySymbolTable> lazy
 ) {
     (void)target;
     CodeBuffer buffer;
@@ -180,7 +188,8 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
         block_labels,
         fn_stack_map,
         resolver,
-        frame_size
+        frame_size,
+        std::move(lazy)
     };
 
     // Zero-initialize gcref slots for moving GC safety
@@ -536,7 +545,7 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
     fn_stack_map.function_address = fn_address;
     fn_stack_map.code_size = static_cast<uint32_t>(code_bytes);
 
-    return BaselineCompiledFunction(
+    BaselineCompiledFunction compiled(
         fn.name(),
         fn.return_type(),
         fn.param_types(),
@@ -545,6 +554,8 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
         code_bytes,
         std::move(fn_stack_map)
     );
+    if (emitter.uses_lazy_stubs) compiled.set_link_keepalive(emitter.lazy);
+    return compiled;
 }
 
 } // namespace brass::aarch64
