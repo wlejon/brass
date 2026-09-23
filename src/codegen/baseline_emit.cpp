@@ -313,10 +313,13 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
         }
     }
 
-    // Record-invocation hook: the function's TieringFeedback is resolved now
-    // and baked in (the registry retires, never frees, feedback objects).
+    // Record-invocation hook: the function's TieringFeedback, from the
+    // registry of the program this compiler publishes into, is resolved now
+    // and baked in (the registry retires, never frees, feedback objects, and
+    // lives as long as the program that owns this code). The hook reaches
+    // the program's pipeline through it.
     if (!fn.name().empty()) {
-        runtime::TieringFeedback* feedback = &runtime::TieringRegistry::instance().get_feedback(fn.name());
+        runtime::TieringFeedback* feedback = &dispatch_table().tiering().get_feedback(fn.name());
         enc.movabs(target.is_windows() ? GPR::RCX : GPR::RDI, reinterpret_cast<uint64_t>(feedback));
         enc.movabs(GPR::R11, reinterpret_cast<uint64_t>(reinterpret_cast<void*>(&brass_tier1_record_invocation_fb)));
         enc.call(GPR::R11);

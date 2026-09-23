@@ -84,11 +84,17 @@ bool deopt_targets_valid(const Function& optimized, const Function* tier0, std::
 }
 
 uint64_t MultiTierPipeline::resume_after_deopt(FunctionHandle& handle, const DeoptFrame& frame) {
-    return resume_after_deopt(handle, frame, FunctionDispatchTable::instance());
+    return resume_after_deopt(handle, frame, *table_);
 }
 
 uint64_t MultiTierPipeline::resume_after_deopt(FunctionHandle& handle, const DeoptFrame& frame,
                                                FunctionDispatchTable& table) {
+    if (&table != table_) {
+        // The deopt counts and the Tier-0 config are this pipeline's
+        // program's; resuming another program's code here would mix them.
+        deopt_fatal("tier-2 code of '" + std::string(handle.name()) +
+                    "' deoptimized into the pipeline of a different program");
+    }
     const Function* fn = handle.mir_function();
     if (!fn) {
         deopt_fatal("optimized code of '" + std::string(handle.name()) + "' deoptimized but its MIR is gone");
@@ -111,7 +117,7 @@ uint64_t MultiTierPipeline::resume_after_deopt(FunctionHandle& handle, const Deo
     }
 
     tier2_deopts_.fetch_add(1, std::memory_order_relaxed);
-    TieringFeedback& fb = TieringRegistry::instance().get_feedback(handle.name());
+    TieringFeedback& fb = table.tiering().get_feedback(handle.name());
     fb.record_deopt(frame.resume_id);
     if (handle.tier() == TierLevel::Tier2_Optimized && fb.is_speculation_invalid(frame.resume_id)) {
         // The speculation is wrong for this program: stop entering the

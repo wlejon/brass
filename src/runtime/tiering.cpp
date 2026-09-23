@@ -49,13 +49,18 @@ void bump_registry_generation() noexcept {
 TieringFeedback::TieringFeedback(const TieringConfig& config)
     : config_(config) {}
 
-TieringFeedback::TieringFeedback(std::string_view fn_name, const TieringConfig& config)
-    : fn_name_(fn_name), config_(config) {}
+TieringFeedback::TieringFeedback(std::string_view fn_name, const TieringConfig& config,
+                                 TieringRegistry* registry)
+    : fn_name_(fn_name), registry_(registry), config_(config) {}
+
+TieringRegistry& TieringFeedback::registry() const noexcept {
+    return registry_ ? *registry_ : TieringRegistry::instance();
+}
 
 uint64_t TieringFeedback::record_invocation() noexcept {
     const uint64_t n = invocations_.fetch_add(1, std::memory_order_relaxed) + 1;
     if (n == config_.invocation_tier1_threshold) {
-        TieringRegistry::instance().on_invocation_threshold_reached(fn_name_);
+        registry().on_invocation_threshold_reached(fn_name_);
     }
     return n;
 }
@@ -177,14 +182,28 @@ TieringRegistry& TieringRegistry::instance() {
     return registry;
 }
 
+TieringRegistry::TieringRegistry(FunctionDispatchTable& table) : table_(&table) {}
+
 TieringRegistry::~TieringRegistry() {
-    g_tiering_registry_alive.store(false, std::memory_order_release);
+    if (is_default()) g_tiering_registry_alive.store(false, std::memory_order_release);
+}
+
+FunctionDispatchTable& TieringRegistry::dispatch_table() const noexcept {
+    return table_ ? *table_ : FunctionDispatchTable::instance();
+}
+
+MultiTierPipeline& TieringRegistry::pipeline() const noexcept {
+    return dispatch_table().pipeline();
 }
 
 void TieringRegistry::forget_module(const Module* mod) noexcept {
     if (!g_tiering_registry_alive.load(std::memory_order_acquire)) return;
-    TieringRegistry& reg = instance();
-    if (reg.active_module_ == mod) reg.active_module_ = nullptr;
+    instance().forget(mod);
+}
+
+void TieringRegistry::forget(const Module* mod) noexcept {
+    const Module* expected = mod;
+    active_module_.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel);
 }
 
 TieringFeedback& TieringRegistry::get_feedback(std::string_view fn_name) {
@@ -192,7 +211,7 @@ TieringFeedback& TieringRegistry::get_feedback(std::string_view fn_name) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = feedback_map_.find(key);
     if (it == feedback_map_.end()) {
-        auto fb = std::make_unique<TieringFeedback>(fn_name, config_);
+        auto fb = std::make_unique<TieringFeedback>(fn_name, config_, this);
         auto* ptr = fb.get();
         feedback_map_.emplace(std::move(key), std::move(fb));
         return *ptr;
@@ -219,13 +238,14 @@ void TieringRegistry::clear() {
 }
 
 bool TieringRegistry::on_invocation_threshold_reached(std::string_view fn_name) {
-    if (MultiTierPipeline::instance().is_initialized()) {
-        return MultiTierPipeline::instance().compile_and_install_tier1(fn_name);
+    MultiTierPipeline& p = pipeline();
+    if (p.is_initialized()) {
+        return p.compile_and_install_tier1(fn_name);
     }
     if (!config_.enable_background_compile) {
         return false;
     }
-    return enqueue_compilation(fn_name, active_module_);
+    return enqueue_compilation(fn_name, active_module());
 }
 
 bool TieringRegistry::enqueue_compilation(
@@ -233,14 +253,14 @@ bool TieringRegistry::enqueue_compilation(
     const Module* mod,
     FunctionHandle* handle
 ) {
-    const Module* target_mod = mod ? mod : active_module_;
+    const Module* target_mod = mod ? mod : active_module();
     if (!target_mod) {
         return false;
     }
     if (!handle) {
-        handle = FunctionDispatchTable::instance().get_or_create(fn_name);
+        handle = dispatch_table().get_or_create(fn_name);
     }
-    return BackgroundCompiler::instance().enqueue(
+    return pipeline().background_compiler().enqueue(
         fn_name,
         *target_mod,
         handle,
@@ -287,7 +307,7 @@ void TieringRegistry::dump_stats(std::ostream& os) const {
     }
     os << "====================================\n";
     if (config_.enable_background_compile) {
-        BackgroundCompiler::instance().dump_stats(os);
+        pipeline().background_compiler().dump_stats(os);
     }
 }
 

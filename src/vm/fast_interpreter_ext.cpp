@@ -183,7 +183,7 @@ void FastInterpreter::execute_vector_op(FastFrame& frame, BytecodeWord inst, con
 }
 
 bool FastInterpreter::handle_osr_backedge(FastFrame& frame, uint32_t target_pc, RuntimeValue& out_res) {
-    runtime::TieringFeedback& fb = frame.info->tiering();
+    runtime::TieringFeedback& fb = frame.info->tiering(dispatch_table_);
     auto& coordinator = runtime::OsrCoordinator::instance();
     const BytecodeFunction* bfn = frame.bfn;
     // Below the threshold only the count matters; try_osr_migration counts

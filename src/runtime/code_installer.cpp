@@ -407,7 +407,7 @@ std::atomic<bool> g_dispatch_table_alive{false};
 // during static destruction still consult it.
 struct OwnedTables {
     std::mutex mutex;
-    std::vector<const FunctionDispatchTable*> tables;
+    std::vector<FunctionDispatchTable*> tables;
 };
 OwnedTables& owned_tables() {
     static OwnedTables* t = new OwnedTables();
@@ -415,7 +415,9 @@ OwnedTables& owned_tables() {
 }
 } // namespace
 
-FunctionDispatchTable::FunctionDispatchTable() {
+FunctionDispatchTable::FunctionDispatchTable()
+    : tiering_(std::make_unique<TieringRegistry>(*this)),
+      pipeline_(std::make_unique<MultiTierPipeline>(*this)) {
     auto& reg = owned_tables();
     std::lock_guard<std::mutex> lock(reg.mutex);
     reg.tables.push_back(this);
@@ -429,6 +431,18 @@ FunctionDispatchTable& FunctionDispatchTable::instance() {
     return table;
 }
 
+TieringRegistry& FunctionDispatchTable::tiering() const noexcept {
+    return tiering_ ? *tiering_ : TieringRegistry::instance();
+}
+
+MultiTierPipeline& FunctionDispatchTable::pipeline() const noexcept {
+    return pipeline_ ? *pipeline_ : MultiTierPipeline::instance();
+}
+
+TieringRegistry& tiering_of(FunctionDispatchTable* table) noexcept {
+    return table ? table->tiering() : TieringRegistry::instance();
+}
+
 FunctionDispatchTable::~FunctionDispatchTable() {
     if (is_default_) {
         g_dispatch_table_alive.store(false, std::memory_order_release);
@@ -440,6 +454,11 @@ FunctionDispatchTable::~FunctionDispatchTable() {
         auto& v = reg.tables;
         v.erase(std::remove(v.begin(), v.end(), this), v.end());
     }
+    // Stop compiling for this program while its handles are still live (an
+    // in-flight tier-2 compile installs into them and publishes its stack
+    // maps here; queued ones are dropped), then drop its stack maps and
+    // baseline code.
+    pipeline_->release_program();
     // Release this program's code and deopt resumers, and make every
     // interpreter's cached handle pointer stale before the memory goes.
     std::lock_guard<std::mutex> lock(mutex_);
@@ -497,9 +516,12 @@ void forget_module(const Module& mod) noexcept {
         MultiTierPipeline::forget_module(&mod);
         auto& reg = owned_tables();
         std::lock_guard<std::mutex> lock(reg.mutex);
-        for (const FunctionDispatchTable* t : reg.tables) {
-            routed = t->handle_into(mod);
-            if (!routed.empty()) break;
+        for (FunctionDispatchTable* t : reg.tables) {
+            // A program may name `mod` as its active module or keep a
+            // Tier-0 interpreter on it without routing a handle into it.
+            t->tiering().forget(&mod);
+            t->pipeline().forget(&mod);
+            if (routed.empty()) routed = t->handle_into(mod);
         }
     } catch (...) {
         // Allocation failure while building the lookup set: leaving a stale
@@ -660,11 +682,11 @@ CodeInstallResult CodeInstaller::install_tier2(
         return {false, nullptr, "JIT compilation or relocation failed", 0};
     }
 
-    if (MultiTierPipeline::instance().is_initialized()) {
-        for (const auto& fn_map : jit->stack_maps().functions()) {
-            MultiTierPipeline::instance().active_stack_maps().add_function(fn_map);
-        }
-        brass_set_active_stack_maps(&MultiTierPipeline::instance().active_stack_maps());
+    // The stack maps belong to the program: its pipeline drops them when
+    // the program is destroyed.
+    MultiTierPipeline& program_pipeline = table_->pipeline();
+    if (program_pipeline.is_initialized()) {
+        program_pipeline.add_stack_maps(jit->stack_maps());
     }
 
     // 3. load_object has already turned the code pages read-execute (W^X)
@@ -685,7 +707,7 @@ CodeInstallResult CodeInstaller::install_tier2(
     auto register_resumer = [table](FunctionHandle& h, void* entry) {
         FunctionHandle* hp = &h;
         register_deopt_resumer(entry, [hp, table](const DeoptFrame& frame) -> uint64_t {
-            return MultiTierPipeline::instance().resume_after_deopt(*hp, frame, *table);
+            return table->pipeline().resume_after_deopt(*hp, frame, *table);
         });
         h.add_deopt_entry(entry);
     };

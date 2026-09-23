@@ -65,6 +65,13 @@ struct TieringConfig {
 };
 
 class FunctionHandle;
+class FunctionDispatchTable;
+class MultiTierPipeline;
+class TieringRegistry;
+
+// The tiering registry of `table`'s program; null is the default program
+// (TieringRegistry::instance()).
+TieringRegistry& tiering_of(FunctionDispatchTable* table) noexcept;
 
 // Bumped whenever a runtime registry drops or replaces entries that callers
 // may have cached pointers to (FunctionDispatchTable handles, TieringRegistry
@@ -77,15 +84,22 @@ void bump_registry_generation() noexcept;
 // Per-function tiering counters. Invocation and backedge counting is
 // lock-free: callers resolve the TieringFeedback once (by name, under the
 // registry lock) and then count through the pointer.
+//
+// A feedback knows the registry (the program) it belongs to, so code that
+// holds only the pointer (tier-1 code bakes it in) reaches that program's
+// pipeline without a by-name lookup. A free-standing feedback (no registry)
+// belongs to the default program.
 class TieringFeedback {
 public:
     explicit TieringFeedback(const TieringConfig& config = TieringConfig{});
-    explicit TieringFeedback(std::string_view fn_name, const TieringConfig& config = TieringConfig{});
+    explicit TieringFeedback(std::string_view fn_name, const TieringConfig& config = TieringConfig{},
+                             TieringRegistry* registry = nullptr);
 
     TieringFeedback(const TieringFeedback&) = delete;
     TieringFeedback& operator=(const TieringFeedback&) = delete;
 
     std::string_view function_name() const noexcept { return fn_name_; }
+    TieringRegistry& registry() const noexcept;
 
     // Invocations (exact under concurrency; fires the tier-up hook once).
     uint64_t invocation_count() const noexcept { return invocations_.load(std::memory_order_relaxed); }
@@ -165,6 +179,7 @@ public:
 
 private:
     std::string fn_name_;
+    TieringRegistry* registry_ = nullptr;
     TieringConfig config_;
     std::atomic<TierLevel> tier_{TierLevel::Tier0_Interpreter};
     std::atomic<uint64_t> invocations_{0};
@@ -179,9 +194,25 @@ private:
     std::string last_bailout_reason_;
 };
 
+// The tiering feedback of one program, keyed by function name within it.
+//
+// instance() is the default program's; an owned FunctionDispatchTable owns
+// its own (FunctionDispatchTable::tiering()), so same-named functions of two
+// programs count invocations, deopts and bailouts independently. Threshold
+// crossings go to the program's pipeline (dispatch_table().pipeline()).
 class TieringRegistry {
 public:
     static TieringRegistry& instance();
+    // The registry of an owned program; `table` must outlive it (the table
+    // owns it).
+    explicit TieringRegistry(FunctionDispatchTable& table);
+
+    TieringRegistry(const TieringRegistry&) = delete;
+    TieringRegistry& operator=(const TieringRegistry&) = delete;
+
+    bool is_default() const noexcept { return table_ == nullptr; }
+    FunctionDispatchTable& dispatch_table() const noexcept;
+    MultiTierPipeline& pipeline() const noexcept;
 
     TieringFeedback& get_feedback(std::string_view fn_name);
     TieringFeedback& get_or_create(std::string_view fn_name) { return get_feedback(fn_name); }
@@ -211,6 +242,8 @@ public:
     // Static and a no-op once the registry is gone, so a Module destroyed
     // during static teardown never touches a dead registry.
     static void forget_module(const Module* mod) noexcept;
+    // This registry's part of forget_module.
+    void forget(const Module* mod) noexcept;
     ~TieringRegistry();
 
     bool on_invocation_threshold_reached(std::string_view fn_name);
@@ -224,8 +257,9 @@ public:
 
 private:
     TieringRegistry() = default;
+    FunctionDispatchTable* const table_ = nullptr; // null: the default program
     TieringConfig config_;
-    const Module* active_module_ = nullptr;
+    std::atomic<const Module*> active_module_{nullptr};
     mutable std::mutex mutex_;
     std::unordered_map<std::string, std::unique_ptr<TieringFeedback>> feedback_map_;
     // Entries dropped by clear(): kept alive for pointers cached before it.

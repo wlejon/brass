@@ -36,7 +36,7 @@ RuntimeValue FastInterpreter::execute_frame(FastFrame& frame) {
     // counter (or the OSR coordinator, when enabled) is told.
     const uint64_t insn_limit = max_instructions_ > 0 ? max_instructions_ : ~uint64_t{0};
     const bool osr_on = frame.mir_fn != nullptr && runtime::OsrCoordinator::instance().is_enabled();
-    runtime::TieringFeedback* const feedback = &frame.info->tiering();
+    runtime::TieringFeedback* const feedback = &frame.info->tiering(dispatch_table_);
 
 #define RA registers[decode_a(inst)]
 #define RB registers[decode_b(inst)]

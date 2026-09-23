@@ -62,6 +62,9 @@ struct CompileTask {
 struct BackgroundCompilerConfig {
     size_t num_threads = 2;
     Target target = Target::host();
+    // The program whose handles compiled code is installed into; null is
+    // the default program. Must outlive the compiler.
+    FunctionDispatchTable* table = nullptr;
 };
 
 struct BackgroundCompilerStats {
@@ -86,6 +89,8 @@ public:
     // Lifecycle
     void start(size_t num_threads);
     void stop();
+    // Drops every queued (not yet started) task; returns how many.
+    size_t cancel_pending();
     bool is_running() const noexcept;
     void wait_idle();
     bool wait_for_function(std::string_view fn_name, std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));

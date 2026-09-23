@@ -349,7 +349,7 @@ RuntimeValue FastInterpreter::call_native(runtime::FunctionHandle& handle, const
 
 RuntimeValue FastInterpreter::call_bytecode(FastCallTarget& t, FastFrame& caller, const CallSiteInfo& cs) {
     FastFnInfo& callee = *t.callee;
-    callee.tiering().record_invocation();
+    callee.tiering(dispatch_table_).record_invocation();
     // Reaching the tier-up threshold may have installed native code.
     runtime::FunctionHandle* h = t.handle;
     if (BRASS_UNLIKELY(h && t.callee_mir && h->mir_function() == t.callee_mir && h->native_entry())) {
@@ -421,8 +421,8 @@ RuntimeValue FastInterpreter::run(const Function& fn) {
 RuntimeValue FastInterpreter::run(const Function& fn, const std::vector<RuntimeValue>& args) {
     if (fn.parent()) {
         use_module(fn.parent());
-        if (!runtime::TieringRegistry::instance().active_module()) {
-            runtime::TieringRegistry::instance().set_active_module(fn.parent());
+        if (!dispatch_table().tiering().active_module()) {
+            dispatch_table().tiering().set_active_module(fn.parent());
         }
     }
     release_retired();
@@ -434,7 +434,7 @@ RuntimeValue FastInterpreter::run(const Function& fn, const std::vector<RuntimeV
 
     const BytecodeFunction* bfn = get_or_compile(fn);
     FastFnInfo& info = fn_info(*bfn, &fn);
-    info.tiering().record_invocation();
+    info.tiering(dispatch_table_).record_invocation();
 
     if (handle && handle->mir_function() == &fn && handle->native_entry() != nullptr) {
         return handle->call_native(args);

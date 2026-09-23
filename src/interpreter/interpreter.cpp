@@ -26,7 +26,7 @@ runtime::FunctionDispatchTable& Interpreter::dispatch_table() const noexcept {
 RuntimeValue Interpreter::run(const Function& fn, const std::vector<RuntimeValue>& args) {
     if (fn.parent()) {
         module_ = fn.parent();
-        runtime::TieringRegistry::instance().set_active_module(fn.parent());
+        dispatch_table().tiering().set_active_module(fn.parent());
         dispatch_table().get_or_create(fn.name(), &fn);
     }
     return execute_function(fn, args);
@@ -92,8 +92,8 @@ RuntimeValue Interpreter::resume_with_frame(const Function& fn, uint32_t resume_
 }
 
 RuntimeValue Interpreter::execute_function(const Function& fn, const std::vector<RuntimeValue>& args) {
-    if (fn.parent() && !runtime::TieringRegistry::instance().active_module()) {
-        runtime::TieringRegistry::instance().set_active_module(fn.parent());
+    if (fn.parent() && !dispatch_table().tiering().active_module()) {
+        dispatch_table().tiering().set_active_module(fn.parent());
     }
 
     auto* handle = dispatch_table().find(fn.name());
@@ -104,7 +104,7 @@ RuntimeValue Interpreter::execute_function(const Function& fn, const std::vector
         }
     }
 
-    auto& feedback = runtime::TieringRegistry::instance().get_or_create(fn.name());
+    auto& feedback = dispatch_table().tiering().get_or_create(fn.name());
     feedback.record_invocation();
 
     if (handle && handle->mir_function() == &fn) {

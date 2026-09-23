@@ -40,7 +40,8 @@ BackgroundCompiler::BackgroundCompiler(size_t num_threads)
     : BackgroundCompiler(BackgroundCompilerConfig{num_threads, Target::host()}) {}
 
 BackgroundCompiler::BackgroundCompiler(const BackgroundCompilerConfig& config)
-    : config_(config), installer_(config.target) {
+    : config_(config),
+      installer_(config.table ? *config.table : FunctionDispatchTable::instance(), config.target) {
     if (config_.num_threads > 0) {
         start(config_.num_threads);
     }
@@ -91,6 +92,23 @@ void BackgroundCompiler::stop() {
     active_names_.clear();
     statuses_.clear();
     busy_workers_ = 0;
+}
+
+size_t BackgroundCompiler::cancel_pending() {
+    size_t dropped = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        while (!queue_.empty()) {
+            const std::string& name = queue_.top().function_name;
+            active_names_.erase(name);
+            statuses_.erase(name);
+            queue_.pop();
+            ++dropped;
+        }
+    }
+    cv_fn_done_.notify_all();
+    cv_idle_.notify_all();
+    return dropped;
 }
 
 bool BackgroundCompiler::is_running() const noexcept {
@@ -159,7 +177,7 @@ bool BackgroundCompiler::enqueue(
     }
 
     if (!handle) {
-        handle = FunctionDispatchTable::instance().get_or_create(fn_name);
+        handle = installer_.dispatch_table().get_or_create(fn_name);
     }
 
     // If native entry is already installed, no need to compile

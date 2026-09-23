@@ -84,13 +84,19 @@ struct FastFnInfo {
     bool has_vector_params = false;
     runtime::TieringFeedback* feedback = nullptr;
     uint64_t feedback_gen = 0;
+    // The program the feedback was resolved in (null: the default program).
+    runtime::FunctionDispatchTable* feedback_table = nullptr;
     std::vector<FastCallTarget> calls;
 
-    runtime::TieringFeedback& tiering() {
+    // The function's feedback in `table`'s program (the owning interpreter's
+    // dispatch table), re-resolved when the interpreter is pointed at
+    // another program or a registry moves.
+    runtime::TieringFeedback& tiering(runtime::FunctionDispatchTable* table) {
         const uint64_t gen = runtime::registry_generation();
-        if (BRASS_UNLIKELY(feedback == nullptr || feedback_gen != gen)) {
-            feedback = &runtime::TieringRegistry::instance().get_or_create(bfn->name);
+        if (BRASS_UNLIKELY(feedback == nullptr || feedback_gen != gen || feedback_table != table)) {
+            feedback = &runtime::tiering_of(table).get_or_create(bfn->name);
             feedback_gen = gen;
+            feedback_table = table;
         }
         return *feedback;
     }

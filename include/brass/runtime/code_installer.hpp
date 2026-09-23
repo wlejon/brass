@@ -139,9 +139,19 @@ private:
 // module a live owned table still routes to is a fatal error), and it must
 // outlive every interpreter, compiler and installer given it.
 //
+// A program's whole tiering state hangs off its table: tiering() holds its
+// feedback (invocation, backedge and deopt counts, bailouts) and pipeline()
+// its MultiTierPipeline (tier-up, the persistent Tier-0 interpreter, baseline
+// code, tier-2 stack maps, and its own background compiler). Destroying an
+// owned table first stops its background compiler (queued compiles are
+// dropped, an in-flight one finishes into the still-live handles), then
+// drops its stack maps and code, then its feedback.
+//
 // instance() is the default program: the process-wide table everything uses
-// unless given another. It keeps the old stopgap: ~Module detaches its
-// handles from the dying module's functions.
+// unless given another. Its tiering() and pipeline() are
+// TieringRegistry::instance() and MultiTierPipeline::instance(). It keeps
+// the old stopgap: ~Module detaches its handles from the dying module's
+// functions.
 class FunctionDispatchTable {
 public:
     FunctionDispatchTable();
@@ -152,6 +162,9 @@ public:
 
     static FunctionDispatchTable& instance();
     bool is_default() const noexcept { return is_default_; }
+
+    TieringRegistry& tiering() const noexcept;
+    MultiTierPipeline& pipeline() const noexcept;
 
     FunctionHandle* get_or_create(std::string_view name, const Function* fn = nullptr);
     FunctionHandle* find(std::string_view name) const;
@@ -178,6 +191,10 @@ private:
     void retire_locked(std::unique_ptr<FunctionHandle> handle);
 
     const bool is_default_ = false;
+    // Owned programs only (declared in this order so the pipeline, which
+    // points at the registry, is destroyed first).
+    std::unique_ptr<TieringRegistry> tiering_;
+    std::unique_ptr<MultiTierPipeline> pipeline_;
     mutable std::mutex mutex_;
     std::unordered_map<std::string, std::unique_ptr<FunctionHandle>> handles_;
     // Handles dropped by clear() or replaced by register_handle(); callers

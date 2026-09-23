@@ -4,10 +4,14 @@
 #include <brass/il_translator/il_translator.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/codegen/unsupported_operation.hpp>
+#include <algorithm>
 #include <iostream>
 #include <iomanip>
 #include <chrono>
+#include <stdexcept>
 
+// The name-keyed invocation hook (the aarch64 baseline tier's): it has no
+// program to go on, so it counts into the default program.
 extern "C" void brass_tier1_record_invocation(const char* fn_name) {
     if (!fn_name) return;
     if (!brass::runtime::MultiTierPipeline::instance().is_initialized()) return;
@@ -15,13 +19,15 @@ extern "C" void brass_tier1_record_invocation(const char* fn_name) {
 }
 
 // The x64 baseline tier's invocation hook: `feedback` is the function's
-// TieringFeedback, resolved when the code was compiled, so counting takes
-// no lock and hashes no name.
+// TieringFeedback, resolved from its program's registry when the code was
+// compiled, so counting takes no lock, hashes no name, and reaches the
+// program's own pipeline through the feedback's registry.
 extern "C" void brass_tier1_record_invocation_fb(void* feedback) {
     if (!feedback) return;
-    if (!brass::runtime::MultiTierPipeline::instance().is_initialized()) return;
-    brass::runtime::MultiTierPipeline::instance().on_invocation(
-        *static_cast<brass::runtime::TieringFeedback*>(feedback));
+    auto& fb = *static_cast<brass::runtime::TieringFeedback*>(feedback);
+    brass::runtime::MultiTierPipeline& pipeline = fb.registry().pipeline();
+    if (!pipeline.is_initialized()) return;
+    pipeline.on_invocation(fb);
 }
 
 namespace brass::runtime {
@@ -32,22 +38,91 @@ std::atomic<bool> g_pipeline_alive{false};
 } // namespace
 
 MultiTierPipeline& MultiTierPipeline::instance() {
-    static MultiTierPipeline pipeline;
+    static MultiTierPipeline pipeline{DefaultTag{}};
     g_pipeline_alive.store(true, std::memory_order_release);
     return pipeline;
 }
 
+MultiTierPipeline::MultiTierPipeline(DefaultTag)
+    : table_(&FunctionDispatchTable::instance()), is_default_(true) {}
+
+MultiTierPipeline::MultiTierPipeline(FunctionDispatchTable& table)
+    : table_(&table), is_default_(false) {
+    if (table.is_default()) {
+        throw std::logic_error("MultiTierPipeline: the default program's pipeline is MultiTierPipeline::instance()");
+    }
+    baseline_compiler_.set_dispatch_table(&table);
+}
+
 MultiTierPipeline::~MultiTierPipeline() {
-    g_pipeline_alive.store(false, std::memory_order_release);
+    if (is_default_) {
+        g_pipeline_alive.store(false, std::memory_order_release);
+        return;
+    }
+    release_program();
+}
+
+TieringRegistry& MultiTierPipeline::tiering() const noexcept {
+    return table_->tiering();
+}
+
+BackgroundCompiler& MultiTierPipeline::background_compiler() {
+    if (is_default_) return BackgroundCompiler::instance();
+    std::lock_guard<std::mutex> lock(bg_mutex_);
+    if (!bg_) {
+        BackgroundCompilerConfig cfg;
+        cfg.num_threads = std::max<size_t>(config_.jit_threads, 1);
+        cfg.table = table_;
+        bg_ = std::make_unique<BackgroundCompiler>(cfg);
+    }
+    return *bg_;
+}
+
+void MultiTierPipeline::release_program() {
+    if (is_default_) {
+        throw std::logic_error("MultiTierPipeline::release_program: the default program is never released");
+    }
+    {
+        // Drops the queued compiles, then joins the workers: an in-flight
+        // compile finishes installing into the program's still-live handles.
+        std::lock_guard<std::mutex> lock(bg_mutex_);
+        if (bg_) {
+            bg_->cancel_pending();
+            bg_->stop();
+        }
+    }
+    clear_baseline_cache();
+    std::lock_guard<std::mutex> lock(mutex_);
+    initialized_ = false;
+    if (brass_get_active_stack_maps() == &active_stack_maps_) {
+        // Hand the GC back to the default program's maps, not a dead pointer.
+        const bool default_live = g_pipeline_alive.load(std::memory_order_acquire) && instance().is_initialized();
+        brass_set_active_stack_maps(default_live ? &instance().active_stack_maps_ : nullptr);
+    }
+    if (!fast_interp_busy_.load(std::memory_order_acquire)) {
+        fast_interp_.reset();
+        fast_interp_module_ = nullptr;
+    }
+}
+
+void MultiTierPipeline::add_stack_maps(const ModuleStackMap& maps) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& fn_map : maps.functions()) {
+        active_stack_maps_.add_function(fn_map);
+    }
+    brass_set_active_stack_maps(&active_stack_maps_);
 }
 
 void MultiTierPipeline::forget_module(const Module* mod) noexcept {
     if (!g_pipeline_alive.load(std::memory_order_acquire)) return;
-    MultiTierPipeline& p = instance();
-    std::lock_guard<std::mutex> lock(p.mutex_);
-    if (p.fast_interp_module_ != mod) return;
-    p.fast_interp_module_ = nullptr;
-    if (!p.fast_interp_busy_.load(std::memory_order_acquire)) p.fast_interp_.reset();
+    instance().forget(mod);
+}
+
+void MultiTierPipeline::forget(const Module* mod) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (fast_interp_module_ != mod) return;
+    fast_interp_module_ = nullptr;
+    if (!fast_interp_busy_.load(std::memory_order_acquire)) fast_interp_.reset();
 }
 
 void MultiTierPipeline::initialize(const TieringConfig& config) {
@@ -55,11 +130,12 @@ void MultiTierPipeline::initialize(const TieringConfig& config) {
     config_ = config;
     initialized_ = true;
 
-    TieringRegistry::instance().set_default_config(config_);
+    tiering().set_default_config(config_);
 
     // Setup symbol resolution on baseline compiler
-    baseline_compiler_.set_symbol_resolver([](std::string_view name) -> void* {
-        auto* handle = FunctionDispatchTable::instance().find(name);
+    FunctionDispatchTable* table = table_;
+    baseline_compiler_.set_symbol_resolver([table](std::string_view name) -> void* {
+        auto* handle = table->find(name);
         if (handle && handle->native_entry()) {
             return handle->native_entry();
         }
@@ -71,8 +147,11 @@ void MultiTierPipeline::initialize(const TieringConfig& config) {
 
 void MultiTierPipeline::shutdown() {
     clear_baseline_cache();
-    if (BackgroundCompiler::instance().is_running()) {
-        BackgroundCompiler::instance().stop();
+    if (is_default_) {
+        if (BackgroundCompiler::instance().is_running()) BackgroundCompiler::instance().stop();
+    } else {
+        std::lock_guard<std::mutex> lock(bg_mutex_);
+        if (bg_) bg_->stop();
     }
     std::lock_guard<std::mutex> lock(mutex_);
     initialized_ = false;
@@ -85,13 +164,13 @@ void MultiTierPipeline::shutdown() {
 void MultiTierPipeline::set_config(const TieringConfig& config) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     config_ = config;
-    TieringRegistry::instance().set_default_config(config_);
+    tiering().set_default_config(config_);
 }
 
 void MultiTierPipeline::set_tier0_interpreter(Tier0Interpreter kind) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     config_.tier0_interpreter = kind;
-    TieringRegistry::instance().set_default_config(config_);
+    tiering().set_default_config(config_);
 }
 
 void MultiTierPipeline::set_use_fast_interpreter(bool enable) noexcept {
@@ -168,12 +247,12 @@ bool MultiTierPipeline::compile_and_install_tier1(std::string_view fn_name, cons
         }
     } guard{compiling_mutex_, in_progress_compilations_, std::string(fn_name)};
 
-    FunctionHandle* handle = FunctionDispatchTable::instance().get_or_create(fn_name, fn);
+    FunctionHandle* handle = table_->get_or_create(fn_name, fn);
     if (!fn) {
         fn = handle->mir_function();
     }
     if (!fn) {
-        const Module* active_mod = TieringRegistry::instance().active_module();
+        const Module* active_mod = tiering().active_module();
         if (active_mod) {
             fn = active_mod->get_function(fn_name);
         }
@@ -205,7 +284,7 @@ bool MultiTierPipeline::compile_and_install_tier1(std::string_view fn_name, cons
     handle->set_native_entry(compiled_ptr->entry_point());
     handle->set_tier(TierLevel::Tier1_Baseline);
 
-    auto& fb = TieringRegistry::instance().get_feedback(fn_name);
+    auto& fb = tiering().get_feedback(fn_name);
     fb.set_tier(TierLevel::Tier1_Baseline);
 
     stats_.tier1_compilations.fetch_add(1, std::memory_order_relaxed);
@@ -219,14 +298,14 @@ bool MultiTierPipeline::enqueue_tier2(
     const Module* mod,
     FunctionHandle* handle
 ) {
-    const Module* target_mod = mod ? mod : TieringRegistry::instance().active_module();
+    const Module* target_mod = mod ? mod : tiering().active_module();
     if (!target_mod) return false;
     if (!handle) {
-        handle = FunctionDispatchTable::instance().get_or_create(fn_name);
+        handle = table_->get_or_create(fn_name);
     }
     if (!handle) return false;
 
-    bool enqueued = BackgroundCompiler::instance().enqueue(
+    bool enqueued = background_compiler().enqueue(
         fn_name,
         *target_mod,
         handle,
@@ -241,11 +320,11 @@ bool MultiTierPipeline::enqueue_tier2(
 }
 
 void MultiTierPipeline::on_invocation(std::string_view fn_name) {
-    auto* handle = FunctionDispatchTable::instance().find(fn_name);
+    auto* handle = table_->find(fn_name);
     if (handle) {
         handle->record_call();
     }
-    tier_invocation(TieringRegistry::instance().get_feedback(fn_name), fn_name, handle);
+    tier_invocation(tiering().get_feedback(fn_name), fn_name, handle);
 }
 
 void MultiTierPipeline::on_invocation(TieringFeedback& fb) {
@@ -264,8 +343,8 @@ void MultiTierPipeline::tier_invocation(TieringFeedback& fb, std::string_view fn
     } else if (tier == TierLevel::Tier1_Baseline) {
         stats_.tier1_invocations.fetch_add(1, std::memory_order_relaxed);
         if (count >= config_.invocation_tier2_threshold && !fb.is_bailout_set()) {
-            if (config_.enable_background_compile || TieringRegistry::instance().is_background_compile_enabled()) {
-                enqueue_tier2(fn_name, TieringRegistry::instance().active_module(), handle);
+            if (config_.enable_background_compile || tiering().is_background_compile_enabled()) {
+                enqueue_tier2(fn_name, tiering().active_module(), handle);
             }
         }
     } else if (tier == TierLevel::Tier2_Optimized) {
@@ -278,15 +357,15 @@ RuntimeValue MultiTierPipeline::execute(
     std::string_view entry_fn,
     const std::vector<RuntimeValue>& args
 ) {
-    TieringRegistry::instance().set_active_module(&mod);
+    tiering().set_active_module(&mod);
     for (const auto* fn : mod.functions()) {
         if (fn) {
-            FunctionDispatchTable::instance().get_or_create(fn->name(), fn);
+            table_->get_or_create(fn->name(), fn);
         }
     }
 
     if (config_.enable_background_compile) {
-        BackgroundCompiler::instance().start(config_.jit_threads);
+        background_compiler().start(config_.jit_threads);
     }
 
     auto* fn = mod.get_function(entry_fn);
@@ -294,7 +373,7 @@ RuntimeValue MultiTierPipeline::execute(
         throw std::runtime_error("MultiTierPipeline::execute: function '" + std::string(entry_fn) + "' not found");
     }
 
-    auto* handle = FunctionDispatchTable::instance().get_or_create(entry_fn, fn);
+    auto* handle = table_->get_or_create(entry_fn, fn);
     RuntimeValue result;
 
     if (config_.use_fast_interpreter()) {
@@ -321,18 +400,20 @@ RuntimeValue MultiTierPipeline::execute(
         }
     } else {
         Interpreter interp;
+        interp.set_dispatch_table(table_);
         il::register_bronze_interpreter_symbols(&interp);
         result = handle->call(interp, args);
     }
 
     if (config_.enable_background_compile) {
-        BackgroundCompiler::instance().wait_idle();
+        background_compiler().wait_idle();
     }
 
     return result;
 }
 
 void MultiTierPipeline::setup_fast_interpreter(FastInterpreter& interp, Module& mod) {
+    interp.set_dispatch_table(table_);
     interp.set_module(&mod);
     il::register_bronze_fast_interpreter_symbols(&interp);
     for (const auto& [sym, addr] : external_symbols_) {
@@ -392,7 +473,7 @@ void MultiTierPipeline::dump_stats(std::ostream& os) const {
     os << "  Tier 2 (Optimized JIT) Compilations: " << t2_comps << "\n";
     os << "  Tier 2 (Optimized JIT) Invocations:  " << t2_invs << "\n";
     os << "=================================================\n";
-    TieringRegistry::instance().dump_stats(os);
+    tiering().dump_stats(os);
 }
 
 } // namespace brass::runtime

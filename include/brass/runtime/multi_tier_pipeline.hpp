@@ -53,9 +53,21 @@ struct MultiTierStats {
     }
 };
 
+// The tiering driver of one program. instance() is the default program's;
+// an owned FunctionDispatchTable owns its own (FunctionDispatchTable::
+// pipeline()), which counts into that table's TieringRegistry, compiles
+// into its handles (with its own background compiler), and keeps its own
+// baseline code, tier-2 stack maps and Tier-0 interpreter.
 class MultiTierPipeline {
 public:
     static MultiTierPipeline& instance();
+    // The pipeline of an owned program; `table` owns it.
+    explicit MultiTierPipeline(FunctionDispatchTable& table);
+    ~MultiTierPipeline();
+
+    bool is_default() const noexcept { return is_default_; }
+    FunctionDispatchTable& dispatch_table() const noexcept { return *table_; }
+    TieringRegistry& tiering() const noexcept;
 
     void initialize(const TieringConfig& config = TieringConfig{});
     void shutdown();
@@ -73,10 +85,21 @@ public:
     codegen::BaselineJitCompiler& baseline_compiler() noexcept { return baseline_compiler_; }
     const codegen::BaselineJitCompiler& baseline_compiler() const noexcept { return baseline_compiler_; }
 
-    BackgroundCompiler& background_compiler() noexcept { return BackgroundCompiler::instance(); }
+    // The default program's is BackgroundCompiler::instance(); an owned
+    // program's is its own, created on first use and stopped with it.
+    BackgroundCompiler& background_compiler();
 
+    // This program's code stack maps (baseline and tier-2). While the
+    // pipeline is initialized they are the GC's active maps; destroying the
+    // program drops them (and the GC's pointer to them).
     ModuleStackMap& active_stack_maps() noexcept { return active_stack_maps_; }
     const ModuleStackMap& active_stack_maps() const noexcept { return active_stack_maps_; }
+    void add_stack_maps(const ModuleStackMap& maps);
+
+    // Called by an owned table's destructor before it retires its handles:
+    // stops and drains this program's background compiler, and drops its
+    // baseline code, stack maps and Tier-0 interpreter.
+    void release_program();
 
     // Synchronous Tier 1 compilation (< 5 microseconds on mutator thread).
     // Returns false, leaving the function in the interpreter, when the
@@ -98,8 +121,10 @@ public:
     void on_invocation(std::string_view fn_name);
     void on_invocation(TieringFeedback& fb);
 
-    // Called by ~Module: drops the Tier-0 interpreter kept for `mod`.
+    // Called by ~Module: drops the Tier-0 interpreter kept for `mod` (the
+    // default program's; forget() is one pipeline's part).
     static void forget_module(const Module* mod) noexcept;
+    void forget(const Module* mod) noexcept;
 
     // Multi-tier execution of an entry function in a module
     RuntimeValue execute(
@@ -133,18 +158,23 @@ public:
     std::shared_ptr<codegen::BaselineCompiledFunction> find_baseline_compiled(std::string_view name) const;
     void clear_baseline_cache();
 
-private:
-    MultiTierPipeline() = default;
-    ~MultiTierPipeline();
-
     MultiTierPipeline(const MultiTierPipeline&) = delete;
     MultiTierPipeline& operator=(const MultiTierPipeline&) = delete;
+
+private:
+    struct DefaultTag {};
+    explicit MultiTierPipeline(DefaultTag);
 
     void tier_invocation(TieringFeedback& fb, std::string_view fn_name, FunctionHandle* handle);
     void setup_fast_interpreter(FastInterpreter& interp, Module& mod);
     // The Tier-0 interpreter kept across execute() calls on one module,
     // rebuilt when the module or the registered symbols change.
     FastInterpreter& persistent_fast_interpreter(Module& mod);
+
+    FunctionDispatchTable* const table_;
+    const bool is_default_;
+    std::mutex bg_mutex_;
+    std::unique_ptr<BackgroundCompiler> bg_; // owned programs, under bg_mutex_
 
     std::unique_ptr<FastInterpreter> fast_interp_;
     const Module* fast_interp_module_ = nullptr;
