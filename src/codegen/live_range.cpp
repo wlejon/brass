@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <bit>
+#include <deque>
+#include <unordered_set>
 
 namespace brass::codegen {
 
@@ -256,12 +258,28 @@ void LivenessAnalysis::compute_global_liveness() {
         }
     }
 
-    bool changed = true;
-    while (changed) {
-        changed = false;
-
-        for (auto it = fn_.blocks.rbegin(); it != fn_.blocks.rend(); ++it) {
-            const auto* block = it->get();
+    // A worklist rather than whole-function sweeps until nothing changes:
+    // each sweep carries liveness out of only one more loop level, so nested
+    // loops took a sweep per level (2000 nested loops ran for minutes). A
+    // block is revisited only when a successor's live-in grew.
+    // Predecessors come from the successor lists, the edges the equations
+    // below read, so the worklist cannot miss one.
+    std::unordered_map<const LirBlock*, std::vector<const LirBlock*>> preds;
+    for (const auto& block : fn_.blocks) {
+        for (const auto* succ : block->successors) preds[succ].push_back(block.get());
+    }
+    std::deque<const LirBlock*> worklist;
+    std::unordered_set<const LirBlock*> queued;
+    for (auto it = fn_.blocks.rbegin(); it != fn_.blocks.rend(); ++it) {
+        worklist.push_back(it->get());
+        queued.insert(it->get());
+    }
+    while (!worklist.empty()) {
+        const LirBlock* block = worklist.front();
+        worklist.pop_front();
+        queued.erase(block);
+        bool changed = false;
+        {
             auto& out_vec = live_out_bv[block];
             auto& in_vec = live_in_bv[block];
             const auto& def_vec = defs_bv[block];
@@ -281,6 +299,12 @@ void LivenessAnalysis::compute_global_liveness() {
                     changed = true;
                 }
             }
+        }
+        if (!changed) continue;
+        auto found = preds.find(block);
+        if (found == preds.end()) continue;
+        for (const auto* pred : found->second) {
+            if (queued.insert(pred).second) worklist.push_back(pred);
         }
     }
 

@@ -66,10 +66,53 @@ bool is_pure_instruction(const Instruction* inst) {
     }
 }
 
-void replace_and_remove(Function& fn, BasicBlock* bb, Instruction* inst, Value* replacement) {
-    replace_all_uses(fn, inst->result(), replacement);
-    bb->remove_instruction(inst);
-}
+// Replace-all-uses deferred to one sweep. MIR keeps no use lists, so an
+// eager replace_all_uses walks the whole function for every fold, which made
+// folding an n-deep chain quadratic. A pass records each replacement here,
+// renames the operands of every instruction it visits before looking at it,
+// and applies the rest in one sweep at the end. Removed instructions stay
+// allocated in the function, so a recorded pointer is never reused.
+class PendingReplacements {
+public:
+    Value* resolve(Value* v) {
+        Value* root = v;
+        for (auto it = map_.find(root); it != map_.end(); it = map_.find(root)) root = it->second;
+        while (v != root) {  // path compression
+            auto it = map_.find(v);
+            Value* next = it->second;
+            it->second = root;
+            v = next;
+        }
+        return root;
+    }
+
+    void remap(Instruction& inst) {
+        if (map_.empty()) return;
+        for_each_use_slot(inst, [&](Value*& slot) {
+            if (slot) slot = resolve(slot);
+        });
+    }
+
+    void replace_and_remove(BasicBlock* bb, Instruction* inst, Value* replacement) {
+        Value* target = resolve(replacement);
+        if (target != inst->result()) map_[inst->result()] = target;
+        bb->remove_instruction(inst);
+    }
+
+    void apply(Function& fn) {
+        if (map_.empty()) return;
+        for (BasicBlock* bb : fn.blocks()) {
+            if (!bb) continue;
+            for (Instruction* inst : *bb) {
+                if (inst) remap(*inst);
+            }
+        }
+        map_.clear();
+    }
+
+private:
+    std::unordered_map<const Value*, Value*> map_;
+};
 
 // The key two pure instructions share exactly when they compute the same
 // value: opcode, type, immediate, callee and every operand.
@@ -180,12 +223,14 @@ bool fold_constants(Function& fn) {
     bool changed = false;
     Builder b(*fn.parent());
     b.set_function(&fn);
+    PendingReplacements pending;
 
     for (BasicBlock* bb : fn.blocks()) {
         if (!bb) continue;
         Instruction* cur = bb->head();
         while (cur) {
             Instruction* next = cur->next();
+            pending.remap(*cur);
             if (!is_pure_instruction(cur) || !cur->produces_value()) {
                 cur = next;
                 continue;
@@ -267,12 +312,13 @@ bool fold_constants(Function& fn) {
                 }
             }
             if (replacement) {
-                replace_and_remove(fn, bb, cur, replacement);
+                pending.replace_and_remove(bb, cur, replacement);
                 changed = true;
             }
             cur = next;
         }
     }
+    pending.apply(fn);
     return changed;
 }
 
@@ -282,6 +328,7 @@ bool dominator_cse(Function& fn) {
     DominatorTree dom(fn);
     bool changed = false;
     std::unordered_map<ExprKey, Value*, ExprKeyHash> expr_map;
+    PendingReplacements pending;
 
     // An explicit stack: a deep dominator tree must not overflow the C++ one.
     struct Frame {
@@ -303,11 +350,12 @@ bool dominator_cse(Function& fn) {
         Instruction* cur = bb->head();
         while (cur) {
             Instruction* next = cur->next();
+            pending.remap(*cur);
             if (is_pure_instruction(cur) && cur->produces_value()) {
                 if (std::optional<ExprKey> key = expr_key(cur)) {
                     auto it = expr_map.find(*key);
                     if (it != expr_map.end()) {
-                        replace_and_remove(fn, bb, cur, it->second);
+                        pending.replace_and_remove(bb, cur, it->second);
                         changed = true;
                     } else {
                         expr_map.emplace(*key, cur->result());
@@ -323,6 +371,7 @@ bool dominator_cse(Function& fn) {
             if (*it) stack.push_back({const_cast<BasicBlock*>(*it), {}, false});
         }
     }
+    pending.apply(fn);
     return changed;
 }
 
@@ -332,20 +381,28 @@ bool eliminate_dead_code(Function& fn) {
     while (progress) {
         progress = false;
         auto use_counts = compute_use_counts(fn);
-        for (BasicBlock* bb : fn.blocks()) {
+        // Backwards, releasing a removed instruction's operands, so a dead
+        // chain goes in one sweep rather than one link per round.
+        const auto& blocks = fn.blocks();
+        for (auto bit = blocks.rbegin(); bit != blocks.rend(); ++bit) {
+            BasicBlock* bb = *bit;
             if (!bb) continue;
-            Instruction* cur = bb->head();
+            Instruction* cur = bb->tail();
             while (cur) {
-                Instruction* next = cur->next();
+                Instruction* prev = cur->prev();
                 if (!cur->has_side_effects() && cur->produces_value()) {
                     Value* res = cur->result();
                     if (!res || use_counts[res] == 0) {
+                        for_each_use(*cur, [&](const Value* v) {
+                            auto it = use_counts.find(v);
+                            if (it != use_counts.end() && it->second > 0) --it->second;
+                        });
                         bb->remove_instruction(cur);
                         progress = true;
                         changed = true;
                     }
                 }
-                cur = next;
+                cur = prev;
             }
         }
 
@@ -374,6 +431,21 @@ bool eliminate_dead_induction_cycles(Function& fn) {
     bool progress = true;
     while (progress) {
         progress = false;
+        // The instructions that mention each value, built once per round:
+        // scanning the whole function for every parameter was quadratic.
+        // An instruction removed during the round keeps its entries and is
+        // skipped by its null parent.
+        std::unordered_map<const Value*, std::vector<Instruction*>> users;
+        for (BasicBlock* u_bb : fn.blocks()) {
+            if (!u_bb) continue;
+            for (Instruction* inst : *u_bb) {
+                if (!inst) continue;
+                for_each_use(*inst, [&](const Value* v) {
+                    auto& list = users[v];
+                    if (list.empty() || list.back() != inst) list.push_back(inst);
+                });
+            }
+        }
         for (BasicBlock* bb : fn.blocks()) {
             if (!bb || bb == fn.entry_block()) continue;
             size_t p_i = 0;
@@ -391,10 +463,11 @@ bool eliminate_dead_induction_cycles(Function& fn) {
                 while (!worklist.empty() && is_pure_cycle) {
                     Value* cur_v = worklist.back();
                     worklist.pop_back();
-                    for (BasicBlock* u_bb : fn.blocks()) {
-                        if (!u_bb || !is_pure_cycle) continue;
-                        for (Instruction* inst : *u_bb) {
-                            if (!inst) continue;
+                    auto found = users.find(cur_v);
+                    if (found == users.end()) continue;
+                    {
+                        for (Instruction* inst : found->second) {
+                            if (!inst || !inst->parent()) continue;
                             for (Value* sv : inst->state_map()) {
                                 if (sv == cur_v) is_pure_cycle = false;
                             }

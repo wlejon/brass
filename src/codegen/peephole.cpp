@@ -5,16 +5,32 @@
 
 namespace brass::codegen {
 
+// How far a forward scan looks past the instruction it is trying to rewrite.
+// Unbounded scans made the pass quadratic in block length (a 100000-deep add
+// chain in one block took most of a minute); a scan that reaches the window
+// gives up as though it had met a barrier, which only forgoes the rewrite.
+static constexpr size_t kScanWindow = 128;
+
 // Whether a flag reader later in the block sees the flags as they stand
 // after `it`. The scan may stop only at a full definition: an instruction that
 // merely clobbers (x64 imul, shifts, bsr) leaves some flags as they were.
+// Past the scan window the flags count as live.
 static bool are_flags_live_after(const LirBlock& block, std::vector<std::unique_ptr<LirInst>>::const_iterator it,
                                  Arch arch) noexcept {
+    size_t scanned = 0;
     for (auto next = std::next(it); next != block.instructions.end(); ++next) {
+        if (!*next) continue;
+        if (++scanned > kScanWindow) return true;
         if (lir_reads_flags(**next, arch)) return true;
         if (lir_kills_flags(**next, arch)) return false;
     }
     return false;
+}
+
+// Instructions a sub-pass removes are reset to null in place and dropped
+// here in one sweep, rather than erased one by one.
+static void compact_block(LirBlock& block) {
+    std::erase_if(block.instructions, [](const std::unique_ptr<LirInst>& inst) { return !inst; });
 }
 
 PeepholeOptimizer::PeepholeOptimizer(LirFunction& fn)
@@ -116,9 +132,8 @@ bool PeepholeOptimizer::touches_memory(const LirInst& inst) noexcept {
 
 bool PeepholeOptimizer::eliminate_redundant_moves(LirBlock& block) {
     bool changed = false;
-    auto it = block.instructions.begin();
-    while (it != block.instructions.end()) {
-        const auto& inst = **it;
+    for (auto& slot : block.instructions) {
+        const auto& inst = *slot;
         // A GPR mov32 to itself is not a no-op: it zeroes the upper half,
         // which is how trunc.i32 / zext.i64 are lowered.
         if (!is_protected(inst) &&
@@ -127,19 +142,21 @@ bool PeepholeOptimizer::eliminate_redundant_moves(LirBlock& block) {
             inst.defs.size() >= 1 && inst.uses.size() >= 1 &&
             inst.defs[0].is_preg() && inst.uses[0].is_preg() &&
             inst.defs[0].preg_val == inst.uses[0].preg_val) {
-            it = block.instructions.erase(it);
+            slot.reset();
             stats_.redundant_moves_eliminated++;
             changed = true;
-        } else {
-            ++it;
         }
     }
+    if (changed) compact_block(block);
     return changed;
 }
 
 bool PeepholeOptimizer::eliminate_load_after_store(LirBlock& block) {
     bool changed = false;
-    for (size_t i = 0; i < block.instructions.size(); ++i) {
+    bool removed = false;
+    const size_t n = block.instructions.size();
+    for (size_t i = 0; i < n; ++i) {
+        if (!block.instructions[i]) continue;
         const auto& store_inst = *block.instructions[i];
         if (is_protected(store_inst)) continue;
 
@@ -158,7 +175,10 @@ bool PeepholeOptimizer::eliminate_load_after_store(LirBlock& block) {
         // fuzz seeds 1103, 2195).
         if (is_reserved_scratch(store_src_reg)) continue;
 
-        for (size_t j = i + 1; j < block.instructions.size(); ++j) {
+        size_t scanned = 0;
+        for (size_t j = i + 1; j < n; ++j) {
+            if (!block.instructions[j]) continue;
+            if (++scanned > kScanWindow) break;
             auto& candidate = *block.instructions[j];
             if (is_protected(candidate)) break;
             if (candidate.is_call() || candidate.is_branch() || candidate.is_terminator()) break;
@@ -171,10 +191,10 @@ bool PeepholeOptimizer::eliminate_load_after_store(LirBlock& block) {
                 PReg load_dst_reg = candidate.defs[0].preg_val;
                 if (load_dst_reg == store_src_reg) {
                     // Exact redundant load: mov [loc], r; ...; mov r, [loc]
-                    block.instructions.erase(block.instructions.begin() + static_cast<ptrdiff_t>(j));
+                    block.instructions[j].reset();
                     stats_.load_after_store_eliminated++;
                     changed = true;
-                    --j;
+                    removed = true;
                     continue;
                 } else {
                     // Forwarding: mov [loc], r1; ...; mov r2, [loc] -> mov r2, r1
@@ -205,12 +225,14 @@ bool PeepholeOptimizer::eliminate_load_after_store(LirBlock& block) {
             if (writes_memory) break;
         }
     }
+    if (removed) compact_block(block);
     return changed;
 }
 
 bool PeepholeOptimizer::eliminate_dead_moves(LirBlock& block) {
     bool changed = false;
-    for (size_t i = 0; i < block.instructions.size(); ++i) {
+    const size_t n = block.instructions.size();
+    for (size_t i = 0; i < n; ++i) {
         const auto& inst = *block.instructions[i];
         if (is_protected(inst)) continue;
 
@@ -225,7 +247,7 @@ bool PeepholeOptimizer::eliminate_dead_moves(LirBlock& block) {
         PReg target_reg = inst.defs[0].preg_val;
         bool is_dead = false;
 
-        for (size_t j = i + 1; j < block.instructions.size(); ++j) {
+        for (size_t j = i + 1; j < n && j - i <= kScanWindow; ++j) {
             const auto& candidate = *block.instructions[j];
             if (uses_register(candidate, target_reg)) {
                 break;
@@ -243,17 +265,18 @@ bool PeepholeOptimizer::eliminate_dead_moves(LirBlock& block) {
         }
 
         if (is_dead) {
-            block.instructions.erase(block.instructions.begin() + static_cast<ptrdiff_t>(i));
+            block.instructions[i].reset();
             stats_.dead_moves_eliminated++;
             changed = true;
-            --i;
         }
     }
+    if (changed) compact_block(block);
     return changed;
 }
 
 bool PeepholeOptimizer::simplify_arithmetic(LirBlock& block) {
     bool changed = false;
+    bool removed = false;
     auto it = block.instructions.begin();
     while (it != block.instructions.end()) {
         auto& inst = **it;
@@ -270,7 +293,9 @@ bool PeepholeOptimizer::simplify_arithmetic(LirBlock& block) {
                 inst.opcode = (inst.opcode == LirOpcode::Add32 ? LirOpcode::Mov32 : LirOpcode::Mov);
                 inst.uses.pop_back();
             } else if (!are_flags_live_after(block, it, lir_arch(fn_))) {
-                it = block.instructions.erase(it);
+                it->reset();
+                ++it;
+                removed = true;
             } else {
                 ++it;
                 continue;
@@ -288,7 +313,9 @@ bool PeepholeOptimizer::simplify_arithmetic(LirBlock& block) {
                 inst.opcode = (inst.opcode == LirOpcode::Sub32 ? LirOpcode::Mov32 : LirOpcode::Mov);
                 inst.uses.pop_back();
             } else if (!are_flags_live_after(block, it, lir_arch(fn_))) {
-                it = block.instructions.erase(it);
+                it->reset();
+                ++it;
+                removed = true;
             } else {
                 ++it;
                 continue;
@@ -306,7 +333,9 @@ bool PeepholeOptimizer::simplify_arithmetic(LirBlock& block) {
                 inst.opcode = (inst.opcode == LirOpcode::Imul32 ? LirOpcode::Mov32 : LirOpcode::Mov);
                 inst.uses.pop_back();
             } else {
-                it = block.instructions.erase(it);
+                it->reset();
+                ++it;
+                removed = true;
             }
             stats_.arithmetic_simplified++;
             changed = true;
@@ -366,6 +395,7 @@ bool PeepholeOptimizer::simplify_arithmetic(LirBlock& block) {
 
         ++it;
     }
+    if (removed) compact_block(block);
     return changed;
 }
 
@@ -442,7 +472,7 @@ bool PeepholeOptimizer::propagate_copies(LirBlock& block) {
             }
         }
 
-        for (size_t j = i + 1; j < block.instructions.size(); ++j) {
+        for (size_t j = i + 1; j < block.instructions.size() && j - i <= kScanWindow; ++j) {
             auto& candidate = *block.instructions[j];
             if (is_protected(candidate)) break;
             if (candidate.is_call() || candidate.is_branch() || candidate.is_terminator()) break;

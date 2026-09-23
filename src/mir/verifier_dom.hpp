@@ -32,17 +32,12 @@ public:
             return false;
         }
 
-        int curr = it_b->second;
-        int target = it_a->second;
-        int entry = block_idx_.at(entry_block_);
-
-        while (curr != -1 && curr != entry) {
-            curr = idom_[curr];
-            if (curr == target) {
-                return true;
-            }
-        }
-        return false;
+        // a dominates b exactly when b's dominator-tree interval nests in
+        // a's. Walking b's idom chain instead was O(depth) per query and
+        // quadratic on deeply nested control flow.
+        const int ia = it_a->second;
+        const int ib = it_b->second;
+        return tin_[ia] <= tin_[ib] && tout_[ib] <= tout_[ia];
     }
 
 private:
@@ -171,12 +166,38 @@ private:
                 }
             }
         }
+
+        // 4. Entry and exit times of an iterative walk of the dominator
+        // tree, so dominates() is a constant-time interval test.
+        std::vector<std::vector<int>> children(n);
+        for (int b = 0; b < n; ++b) {
+            if (b != entry_idx && idom_[b] != -1) children[idom_[b]].push_back(b);
+        }
+        tin_.assign(n, -1);
+        tout_.assign(n, -1);
+        int clock = 0;
+        std::vector<std::pair<int, size_t>> walk;
+        walk.push_back({entry_idx, 0});
+        tin_[entry_idx] = clock++;
+        while (!walk.empty()) {
+            auto& [u, next] = walk.back();
+            if (next == children[u].size()) {
+                tout_[u] = clock++;
+                walk.pop_back();
+                continue;
+            }
+            const int v = children[u][next++];
+            tin_[v] = clock++;
+            walk.push_back({v, 0});
+        }
     }
 
     const BasicBlock* entry_block_ = nullptr;
     std::unordered_set<const BasicBlock*> reachable_;
     std::unordered_map<const BasicBlock*, int> block_idx_;
     std::vector<int> idom_;
+    std::vector<int> tin_;
+    std::vector<int> tout_;
 };
 
 } // namespace brass

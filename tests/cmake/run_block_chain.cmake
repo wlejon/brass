@@ -11,7 +11,8 @@
 #              ordered   the same CFG, blocks written in execution order
 #              ifs       N nested if/else diamonds (dominator tree ~2N deep)
 #              loops     N nested loops, each running once
-#   N          the number of blocks / nesting levels
+#              expr      one block holding an N-deep add chain
+#   N          the number of blocks / nesting levels / chain links
 #   FLAGS      extra brass-opt flags, comma-separated (e.g. "--jit")
 
 if(NOT DEFINED BRASS_OPT OR NOT DEFINED OUT_DIR OR NOT DEFINED SHAPE OR NOT DEFINED N)
@@ -51,6 +52,23 @@ if(SHAPE STREQUAL "reversed" OR SHAPE STREQUAL "ordered")
             emit("  br bb${_prev}")
         endif()
     endforeach()
+    math(EXPR _expected "(${N} + 1) * ${_arg}")
+elseif(SHAPE STREQUAL "expr")
+    # One block: v_1 = x + x, v_k = v_{k-1} + x. The result is (N + 1) * x.
+    # Links go into a short chunk that is flushed every 1000 lines: appending
+    # each to the whole text copies it, and at this length that dominates.
+    set(_chunk "  %v1 = add.i64 %0, %0\n")
+    set(_prev 1)
+    foreach(_k RANGE 2 ${N})
+        string(APPEND _chunk "  %v${_k} = add.i64 %v${_prev}, %0\n")
+        set(_prev ${_k})
+        if(_k MATCHES "000$")
+            string(APPEND _text "${_chunk}")
+            set(_chunk "")
+        endif()
+    endforeach()
+    string(APPEND _text "${_chunk}")
+    emit("  ret %v${N}")
     math(EXPR _expected "(${N} + 1) * ${_arg}")
 elseif(SHAPE STREQUAL "ifs")
     # t_k tests x > k and nests into t_{k+1}; the join j_k adds 1. With

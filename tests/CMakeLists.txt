@@ -483,6 +483,26 @@ if(BRASS_BUILD_TOOLS)
         set_tests_properties("brass_opt_cli.block_chain.${_shape}.jit" PROPERTIES
             TIMEOUT 120 LABELS "correctness")
     endforeach()
+    # brass_opt_cli.compile_scaling.*: compile time must stay near-linear in
+    # function size. The LIR peephole rescanned to the end of the block from
+    # every move (an 80000-deep add chain in one block took most of a
+    # minute), and MIR folding replaced each folded value's uses by walking
+    # the whole function. Each case takes a few seconds; the timeout is the
+    # check.
+    foreach(_case "expr;80000" "loops;1000" "ifs;5000")
+        list(GET _case 0 _shape)
+        list(GET _case 1 _n)
+        add_test(NAME "brass_opt_cli.compile_scaling.${_shape}.jit"
+            COMMAND ${CMAKE_COMMAND}
+                "-DBRASS_OPT=$<TARGET_FILE:brass-opt>"
+                "-DOUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/compile_scaling"
+                "-DSHAPE=${_shape}"
+                "-DN=${_n}"
+                "-DFLAGS=--jit"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/run_block_chain.cmake")
+        set_tests_properties("brass_opt_cli.compile_scaling.${_shape}.jit" PROPERTIES
+            TIMEOUT 60 LABELS "correctness")
+    endforeach()
     # aot_coff.eh: exceptions in AOT COFF code on Win64. brass-opt -c makes
     # an object from tests/aot/eh_aot.mir, MSVC links it with a C host and
     # brass.lib, and every result must match the interpreter and the JIT:
