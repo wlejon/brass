@@ -104,7 +104,10 @@ public:
     // Synchronous Tier 1 compilation (< 5 microseconds on mutator thread).
     // Returns false, leaving the function in the interpreter, when the
     // baseline compiler rejects it (codegen::UnsupportedOperation); a rejected
-    // function is not retried until clear_baseline_cache().
+    // function is not retried until clear_baseline_cache(). The module
+    // functions it calls that have no native entry yet are compiled first:
+    // when one of them is rejected, so is this function, since its code
+    // could not call it.
     bool compile_and_install_tier1(std::string_view fn_name, const Function* fn = nullptr);
     bool is_baseline_rejected(std::string_view fn_name) const;
 
@@ -166,6 +169,11 @@ private:
     explicit MultiTierPipeline(DefaultTag);
 
     void tier_invocation(TieringFeedback& fb, std::string_view fn_name, FunctionHandle* handle);
+    // Tier-1 code reaches a module function with no native entry through a
+    // lazy stub that resolves to the callee's native entry: compiles every
+    // such callee of `compiled` before `fn` is installed.
+    enum class CalleeLink { Ready, Pending, Rejected };
+    CalleeLink link_tier1_callees(const Function& fn, const codegen::BaselineCompiledFunction& compiled);
     void setup_fast_interpreter(FastInterpreter& interp, Module& mod);
     // The Tier-0 interpreter kept across execute() calls on one module,
     // rebuilt when the module or the registered symbols change.

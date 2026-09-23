@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <chrono>
 #include <stdexcept>
+#include <vector>
 
 // The baseline tiers' (x64 and aarch64) invocation hook: `feedback` is the function's
 // TieringFeedback, resolved from its program's registry when the code was
@@ -27,6 +28,15 @@ namespace brass::runtime {
 namespace {
 // Lets ~Module skip the pipeline when it was never built or is gone.
 std::atomic<bool> g_pipeline_alive{false};
+
+// The functions this thread is compiling for Tier 1, innermost last: a
+// callee among them (a call cycle) is installed before its caller's code
+// can run on this thread.
+struct Tier1CompileFrame {
+    const MultiTierPipeline* pipeline;
+    std::string_view name;
+};
+thread_local std::vector<Tier1CompileFrame> t_tier1_compiling;
 } // namespace
 
 MultiTierPipeline& MultiTierPipeline::instance() {
@@ -274,6 +284,25 @@ bool MultiTierPipeline::compile_and_install_tier1(std::string_view fn_name, cons
     auto end = std::chrono::high_resolution_clock::now();
     auto elapsed_us = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(end - start).count());
 
+    // A callee that has never run has no native entry, and the lazy stub
+    // the code calls it through would trap: it is compiled now. The code is
+    // not installed while a callee cannot be compiled.
+    t_tier1_compiling.push_back({this, guard.name});
+    CalleeLink link;
+    try {
+        link = link_tier1_callees(*fn, compiled);
+    } catch (...) {
+        t_tier1_compiling.pop_back();
+        throw;
+    }
+    t_tier1_compiling.pop_back();
+    if (link == CalleeLink::Rejected) {
+        std::lock_guard<std::mutex> lock(compiling_mutex_);
+        baseline_rejected_.emplace(fn_name);
+        return false;
+    }
+    if (link == CalleeLink::Pending) return false;
+
     auto compiled_ptr = std::make_shared<codegen::BaselineCompiledFunction>(std::move(compiled));
     register_baseline_compiled(compiled_ptr);
 
@@ -288,6 +317,26 @@ bool MultiTierPipeline::compile_and_install_tier1(std::string_view fn_name, cons
     stats_.total_tier1_compile_time_us.fetch_add(elapsed_us, std::memory_order_relaxed);
 
     return true;
+}
+
+MultiTierPipeline::CalleeLink MultiTierPipeline::link_tier1_callees(
+    const Function& fn, const codegen::BaselineCompiledFunction& compiled) {
+    const Module* mod = fn.parent() ? fn.parent() : tiering().active_module();
+    CalleeLink result = CalleeLink::Ready;
+    for (const std::string& sym : compiled.lazy_call_symbols()) {
+        // Anything else is a host symbol, bound when it is registered.
+        const Function* def = mod ? mod->get_function(sym) : nullptr;
+        if (!def || def->block_count() == 0) continue;
+        if (FunctionHandle* h = table_->find(sym); h && h->native_entry()) continue;
+        const bool on_stack = std::any_of(t_tier1_compiling.begin(), t_tier1_compiling.end(),
+            [&](const Tier1CompileFrame& f) { return f.pipeline == this && f.name == sym; });
+        if (on_stack) continue;
+        if (compile_and_install_tier1(sym, def)) continue;
+        if (is_baseline_rejected(sym)) return CalleeLink::Rejected;
+        // Compiling on another thread: this function tiers up later.
+        result = CalleeLink::Pending;
+    }
+    return result;
 }
 
 bool MultiTierPipeline::enqueue_tier2(
