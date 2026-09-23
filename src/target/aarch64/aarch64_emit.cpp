@@ -231,11 +231,24 @@ AArch64CompilationResult AArch64EmitContext::compile_pass(const std::vector<uint
         // AAPCS64 1st argument (OsrMigrationFrame*) is X0
         enc_.mov(GPR::X16, GPR::X0);
 
+        // Only values live at the loop header are loaded: a migrated value with
+        // no live range there (a constant folded to an immediate, a value only
+        // used before the loop) keeps a stale location that may alias a
+        // loop-carried value, and writing it would clobber that value.
+        if (fn_.osr_entry.live_at_header.size() != fn_.osr_entry.live_in_vregs.size()) {
+            throw std::logic_error("OSR entry for " + std::string(fn_.name) +
+                                   ": live-at-header set was not computed by register allocation");
+        }
         for (size_t i = 0; i < fn_.osr_entry.live_in_vregs.size(); ++i) {
+            if (!fn_.osr_entry.live_at_header[i]) continue;
             VReg vr = fn_.osr_entry.live_in_vregs[i];
             const VRegInfo& info = fn_.get_vreg_info(vr);
             int32_t slot_offset = static_cast<int32_t>(16 + i * 16);
 
+            if (!info.is_spilled && !info.assigned_preg.is_valid()) {
+                throw std::logic_error("OSR entry for " + std::string(fn_.name) + ": v" +
+                                       std::to_string(vr.id) + " is live at the loop header but has no location");
+            }
             if (!info.is_spilled && info.assigned_preg.is_valid()) {
                 PReg preg = info.assigned_preg;
                 if (preg.is_gpr()) {

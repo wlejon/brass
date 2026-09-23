@@ -5,6 +5,7 @@
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/osr.hpp>
 #include <brass/embedding/embedding.hpp>
+#include <brass/gc/runtime_gc.hpp>
 #include <cstring>
 #include <stdexcept>
 #if defined(__x86_64__) || defined(_M_X64)
@@ -14,6 +15,42 @@
 #endif
 
 namespace brass::runtime {
+
+namespace {
+
+// Bridges an interpreter's heap to the native runtime for the duration of an
+// OSR call. OSR code allocates through brass_gc_alloc and polls
+// brass_gc_safepoint, which use the process-wide active GC and stack maps.
+// Pointing them at the interpreter's collector (the one its own allocations
+// use) and at the OSR module's stack maps makes native allocations land in the
+// same heap as the migrated gcrefs. A collection then roots both the native
+// frames (stack-walked through the stack maps) and the interpreter frames
+// (the collector's root provider, installed by the interpreter).
+class NativeGcBridge {
+public:
+    NativeGcBridge(MiniCheneyGC* gc, GenerationalGC* gen_gc, const ModuleStackMap* maps) noexcept
+        : prev_gc_(brass_get_active_gc()),
+          prev_gen_gc_(brass_get_active_generational_gc()),
+          prev_maps_(brass_get_active_stack_maps()) {
+        brass_set_active_gc(gc);
+        brass_set_active_generational_gc(gen_gc);
+        brass_set_active_stack_maps(maps);
+    }
+    ~NativeGcBridge() {
+        brass_set_active_gc(prev_gc_);
+        brass_set_active_generational_gc(prev_gen_gc_);
+        brass_set_active_stack_maps(prev_maps_);
+    }
+    NativeGcBridge(const NativeGcBridge&) = delete;
+    NativeGcBridge& operator=(const NativeGcBridge&) = delete;
+
+private:
+    MiniCheneyGC* prev_gc_;
+    GenerationalGC* prev_gen_gc_;
+    const ModuleStackMap* prev_maps_;
+};
+
+} // namespace
 
 static thread_local brass::Interpreter* t_active_interpreter = nullptr;
 static thread_local const brass::Function* t_active_fn = nullptr;
@@ -209,6 +246,11 @@ bool OsrCoordinator::try_osr_migration(
         }
     } guard{prev_handler, prev_interp, prev_fn, prev_frame};
 
+    // The reference interpreter allocates only from its semispace collector
+    // (its generational GC, when set, is used for write barriers alone), so
+    // native allocations must not go to a generational heap either.
+    NativeGcBridge gc_bridge(&interp.gc(), nullptr, &comp_mod->stack_maps());
+
     // Invoke specialized OSR entry stub
     Type ret_t = fn.return_type();
     if (ret_t.is_void()) {
@@ -371,6 +413,10 @@ bool OsrCoordinator::try_osr_migration(
             register_deopt_handler(prev);
         }
     } guard{prev_handler};
+
+    // Native allocations go where FastInterpreter::allocate_gc sends them: its
+    // generational GC when set, else its semispace collector.
+    NativeGcBridge gc_bridge(&interp.gc(), interp.generational_gc(), &comp_mod->stack_maps());
 
     // Invoke specialized OSR entry stub
     Type ret_t = fn.return_type();

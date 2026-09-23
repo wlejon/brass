@@ -110,6 +110,13 @@ void MiniCheneyGC::collect() {
     collect(roots);
 }
 
+void MiniCheneyGC::collect_with_extra_roots(std::vector<uintptr_t*>& extra_roots) {
+    std::vector<uintptr_t*> roots;
+    gather_all_roots(roots);
+    roots.insert(roots.end(), extra_roots.begin(), extra_roots.end());
+    collect(roots);
+}
+
 void MiniCheneyGC::collect(std::vector<uintptr_t*>& roots) {
     size_t scan_ptr = 0;
     size_t to_free_ptr = 0;

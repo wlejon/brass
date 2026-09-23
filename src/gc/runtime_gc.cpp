@@ -84,7 +84,10 @@ void brass_runtime_gc_safepoint(
         }, &roots);
     }
 
-    gc->collect(roots);
+    // The native frames' slots are not the only roots: an interpreter that
+    // migrated into this code (OSR) holds gcrefs in its frames, reported by
+    // the collector's root provider. Allocation already includes them.
+    gc->collect_with_extra_roots(roots);
 }
 
 uintptr_t brass_runtime_gc_alloc(

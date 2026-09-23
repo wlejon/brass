@@ -520,6 +520,12 @@ struct LirOsrEntry {
     uint32_t loop_header_id = 0;
     std::vector<VReg> live_in_vregs;
     std::vector<uint32_t> slot_indices;
+    // Parallel to live_in_vregs, filled by register allocation: 1 when the
+    // vreg is live on entry to the loop header, so the OSR prologue must load
+    // it into its allocated location. 0 for values with no live range there
+    // (constants folded to immediates, values only used before the loop):
+    // their stale location may alias a loop-carried value.
+    std::vector<uint8_t> live_at_header;
 };
 
 class LirFunction {

@@ -40,6 +40,9 @@ public:
     // Garbage Collection
     void collect();
     void collect(std::vector<uintptr_t*>& roots);
+    // Collect with `extra_roots` (e.g. stack-walked native slots) on top of
+    // the registered roots and the root provider's.
+    void collect_with_extra_roots(std::vector<uintptr_t*>& extra_roots);
 
     // Root management
     void register_root(uintptr_t* root_slot);
