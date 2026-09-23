@@ -12,6 +12,9 @@ namespace brass {
 class LoopInfo {
 public:
     explicit LoopInfo(BasicBlock* header) : header_(header) {}
+    ~LoopInfo();
+    LoopInfo(const LoopInfo&) = delete;
+    LoopInfo& operator=(const LoopInfo&) = delete;
 
     BasicBlock* header() const noexcept { return header_; }
     BasicBlock* preheader() const noexcept { return preheader_; }

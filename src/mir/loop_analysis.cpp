@@ -17,6 +17,19 @@ void LoopInfo::add_block(BasicBlock* bb) {
     }
 }
 
+LoopInfo::~LoopInfo() {
+    // Detach the nest level by level: letting each unique_ptr destroy its
+    // sub-loops would recurse once per nesting level.
+    std::vector<std::unique_ptr<LoopInfo>> pending = std::move(sub_loops_);
+    while (!pending.empty()) {
+        std::unique_ptr<LoopInfo> loop = std::move(pending.back());
+        pending.pop_back();
+        if (!loop) continue;
+        for (auto& sub : loop->sub_loops_) pending.push_back(std::move(sub));
+        loop->sub_loops_.clear();
+    }
+}
+
 bool LoopInfo::contains(const BasicBlock* bb) const noexcept {
     if (!bb) return false;
     return block_set_.find(bb) != block_set_.end();
@@ -168,16 +181,21 @@ void LoopAnalysis::discover_loops(Function& fn, const DominatorTree& dom) {
 std::vector<LoopInfo*> LoopAnalysis::post_order_loops() const {
     std::vector<LoopInfo*> result;
 
-    auto collect_post_order = [&](auto& self, LoopInfo* loop) -> void {
-        if (!loop) return;
-        for (const auto& sub : loop->sub_loops()) {
-            self(self, sub.get());
-        }
-        result.push_back(loop);
-    };
-
+    // An explicit stack: loops can nest as deeply as the function has blocks.
+    std::vector<std::pair<LoopInfo*, size_t>> stack;
     for (const auto& top : top_level_loops_) {
-        collect_post_order(collect_post_order, top.get());
+        if (!top) continue;
+        stack.push_back({top.get(), 0});
+        while (!stack.empty()) {
+            auto& [loop, next] = stack.back();
+            if (next == loop->sub_loops().size()) {
+                result.push_back(loop);
+                stack.pop_back();
+                continue;
+            }
+            LoopInfo* sub = loop->sub_loops()[next++].get();
+            if (sub) stack.push_back({sub, 0});
+        }
     }
 
     return result;

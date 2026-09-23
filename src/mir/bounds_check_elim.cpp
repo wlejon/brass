@@ -151,13 +151,23 @@ public:
         : fn_(fn), mod_(mod), dom_(dom), ra_(ra), opts_(opts) {}
 
     bool run() {
-        if (fn_.entry_block()) visit(fn_.entry_block());
+        // Each open block's facts_ height on entry; leaving it drops its facts.
+        std::vector<size_t> marks;
+        walk_dominator_tree(
+            dom_, fn_.entry_block(),
+            [&](const BasicBlock* bb) {
+                marks.push_back(facts_.size());
+                visit(const_cast<BasicBlock*>(bb));
+            },
+            [&](const BasicBlock*) {
+                facts_.resize(marks.back());
+                marks.pop_back();
+            });
         return changed_;
     }
 
 private:
     void visit(BasicBlock* bb) {
-        const size_t mark = facts_.size();
         if (bb->predecessors().size() == 1) {
             const BasicBlock* pred = bb->predecessors()[0];
             const Instruction* term = pred ? pred->terminator() : nullptr;
@@ -167,11 +177,6 @@ private:
         }
 
         if (facts_.size() > 0) fold_checks_in(bb);
-
-        for (const BasicBlock* child : dom_.children(bb)) {
-            if (child) visit(const_cast<BasicBlock*>(child));
-        }
-        facts_.resize(mark);
     }
 
     void fold_checks_in(BasicBlock* bb) {

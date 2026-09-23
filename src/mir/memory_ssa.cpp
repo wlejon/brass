@@ -180,13 +180,14 @@ void MemorySSA::build() {
     std::vector<MemoryAccess*> version_stack;
     version_stack.push_back(live_on_entry_.get());
 
-    auto rename_block = [&](auto& self, const BasicBlock* bb) -> void {
-        size_t pushed_count = 0;
+    // Each open block's version_stack height on entry; leaving it pops back to that.
+    std::vector<size_t> version_marks;
+    auto rename_block = [&](const BasicBlock* bb) -> void {
+        version_marks.push_back(version_stack.size());
 
         auto phi_it = block_to_phi_.find(bb);
         if (phi_it != block_to_phi_.end()) {
             version_stack.push_back(phi_it->second);
-            pushed_count++;
         }
 
         for (Instruction* inst : *const_cast<BasicBlock*>(bb)) {
@@ -205,7 +206,6 @@ void MemorySSA::build() {
                 auto def = std::make_unique<MemoryDef>(next_access_id_++, const_cast<BasicBlock*>(bb), inst, current_def);
                 inst_to_access_[inst] = def.get();
                 version_stack.push_back(def.get());
-                pushed_count++;
                 all_accesses_.push_back(std::move(def));
             } else if (is_call(op) || is_coro_op(op)) {
                 // Coroutine operations run the coroutine body, which may write anything.
@@ -214,7 +214,6 @@ void MemorySSA::build() {
                     auto def = std::make_unique<MemoryDef>(next_access_id_++, const_cast<BasicBlock*>(bb), inst, current_def);
                     inst_to_access_[inst] = def.get();
                     version_stack.push_back(def.get());
-                    pushed_count++;
                     all_accesses_.push_back(std::move(def));
                 }
             }
@@ -228,21 +227,14 @@ void MemorySSA::build() {
                 succ_phi_it->second->add_incoming(const_cast<BasicBlock*>(bb), version_stack.back());
             }
         }
-
-        // Recurse to dominated children in the DominatorTree
-        for (const BasicBlock* child : dom_->children(bb)) {
-            if (child) {
-                self(self, child);
-            }
-        }
-
-        // Pop versions pushed by this block
-        for (size_t i = 0; i < pushed_count; ++i) {
-            version_stack.pop_back();
-        }
     };
 
-    rename_block(rename_block, entry);
+    // Dominated children are renamed between a block's entry and its leave,
+    // which pops the versions the block pushed.
+    walk_dominator_tree(*dom_, entry, rename_block, [&](const BasicBlock*) {
+        version_stack.resize(version_marks.back());
+        version_marks.pop_back();
+    });
 
     // Fill in default LiveOnEntry for any unvisited phi predecessors
     for (auto& [b, phi] : block_to_phi_) {

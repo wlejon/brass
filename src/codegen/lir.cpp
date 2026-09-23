@@ -642,27 +642,40 @@ void LirFunction::sort_blocks_rpo() {
     std::vector<LirBlock*> entry_po;
     entry_po.reserve(blocks.size());
 
-    auto dfs = [&](auto& self, LirBlock* b, std::vector<LirBlock*>& po) -> void {
-        auto it = block_idx.find(b);
-        if (it == block_idx.end() || visited[it->second]) return;
-        visited[it->second] = true;
-        for (LirBlock* succ : b->successors) {
-            if (succ) self(self, succ, po);
+    // An explicit stack, not recursion: a chain of many thousands of blocks
+    // overflowed the native stack.
+    std::vector<std::pair<LirBlock*, size_t>> stack;
+    auto dfs = [&](LirBlock* root, std::vector<LirBlock*>& po) {
+        auto enter = [&](LirBlock* b) {
+            auto it = block_idx.find(b);
+            if (it == block_idx.end() || visited[it->second]) return;
+            visited[it->second] = true;
+            stack.push_back({b, 0});
+        };
+        enter(root);
+        while (!stack.empty()) {
+            auto& [b, next] = stack.back();
+            if (next == b->successors.size()) {
+                po.push_back(b);
+                stack.pop_back();
+                continue;
+            }
+            LirBlock* succ = b->successors[next++];
+            if (succ) enter(succ);
         }
-        po.push_back(b);
     };
 
-    dfs(dfs, entry, entry_po);
+    dfs(entry, entry_po);
     std::reverse(entry_po.begin(), entry_po.end());
 
     std::vector<LirBlock*> other_po;
     for (const auto& entry_pair : resume_entries) {
         LirBlock* rb = get_block_by_id(entry_pair.second);
-        if (rb) dfs(dfs, rb, other_po);
+        if (rb) dfs(rb, other_po);
     }
 
     for (const auto& b : blocks) {
-        if (b) dfs(dfs, b.get(), other_po);
+        if (b) dfs(b.get(), other_po);
     }
 
     std::reverse(other_po.begin(), other_po.end());

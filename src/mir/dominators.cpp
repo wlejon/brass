@@ -185,16 +185,21 @@ void DominatorTree::build(const Function& fn) {
     dfs_out_.assign(n, 0);
     int timer = 0;
 
-    auto dfs_dom = [&](auto& self, int u) -> void {
-        dfs_in_[u] = ++timer;
-        for (const BasicBlock* child : dom_children_[u]) {
-            int child_idx = block_idx_.at(child);
-            self(self, child_idx);
+    // An explicit stack: the tree is as deep as the longest dominance chain.
+    std::vector<std::pair<int, size_t>> dom_stack;
+    dfs_in_[entry_idx] = ++timer;
+    dom_stack.push_back({entry_idx, 0});
+    while (!dom_stack.empty()) {
+        auto& [u, next] = dom_stack.back();
+        if (next == dom_children_[u].size()) {
+            dfs_out_[u] = ++timer;
+            dom_stack.pop_back();
+            continue;
         }
-        dfs_out_[u] = ++timer;
-    };
-
-    dfs_dom(dfs_dom, entry_idx);
+        const int child_idx = block_idx_.at(dom_children_[u][next++]);
+        dfs_in_[child_idx] = ++timer;
+        dom_stack.push_back({child_idx, 0});
+    }
 }
 
 } // namespace brass

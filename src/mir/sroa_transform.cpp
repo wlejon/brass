@@ -366,8 +366,13 @@ bool SroaTransformer::process_candidate(const Value* alloc_val, const EscapeAnal
     std::unordered_set<Instruction*> insts_to_remove;
     BasicBlock* entry_bb = fn_.entry_block();
 
-    auto rename_traversal = [&](auto& self, BasicBlock* bb, std::unordered_map<int32_t, Value*> current_def) -> void {
-        if (!bb) return;
+    // defs_stack.back() is the reaching definitions at the end of the innermost
+    // open block; each dominator-tree child starts from a copy of its parent's.
+    std::vector<std::unordered_map<int32_t, Value*>> defs_stack;
+    defs_stack.emplace_back();
+    auto rename_block = [&](const BasicBlock* cbb) -> void {
+        BasicBlock* bb = const_cast<BasicBlock*>(cbb);
+        std::unordered_map<int32_t, Value*> current_def = defs_stack.back();
 
         // Phi parameters at block entry
         auto it_phi = phi_params.find(bb);
@@ -438,14 +443,10 @@ bool SroaTransformer::process_candidate(const Value* alloc_val, const EscapeAnal
             }
         }
 
-        // Recurse to dominator children
-        for (const BasicBlock* child : dom.children(bb)) {
-            self(self, const_cast<BasicBlock*>(child), current_def);
-        }
+        defs_stack.push_back(std::move(current_def));
     };
 
-    std::unordered_map<int32_t, Value*> initial_defs;
-    rename_traversal(rename_traversal, entry_bb, initial_defs);
+    walk_dominator_tree(dom, entry_bb, rename_block, [&](const BasicBlock*) { defs_stack.pop_back(); });
 
     // 7. Remove dead instructions
     for (Instruction* inst : insts_to_remove) {

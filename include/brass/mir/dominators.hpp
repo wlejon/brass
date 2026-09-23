@@ -31,4 +31,30 @@ private:
     std::vector<const BasicBlock*> empty_children_;
 };
 
+// Walks the dominator subtree rooted at `root` depth-first with an explicit
+// stack (the tree is as deep as the longest dominance chain, which can be
+// every block of the function). enter(bb) runs before bb's children, in the
+// order children() lists them; leave(bb) runs after all of them.
+template <typename Enter, typename Leave>
+void walk_dominator_tree(const DominatorTree& dom, const BasicBlock* root, Enter&& enter, Leave&& leave) {
+    if (!root) return;
+    std::vector<std::pair<const BasicBlock*, size_t>> stack;
+    enter(root);
+    stack.push_back({root, 0});
+    while (!stack.empty()) {
+        const BasicBlock* bb = stack.back().first;
+        const std::vector<const BasicBlock*>& kids = dom.children(bb);
+        size_t& next = stack.back().second;
+        if (next == kids.size()) {
+            stack.pop_back();
+            leave(bb);
+            continue;
+        }
+        const BasicBlock* child = kids[next++];
+        if (!child) continue;
+        enter(child);
+        stack.push_back({child, 0});
+    }
+}
+
 } // namespace brass

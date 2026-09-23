@@ -242,7 +242,7 @@ bool gvn_function(Function& fn, const GvnOptions& options) {
             return root;
         };
 
-        auto visit_block = [&](auto& self, const BasicBlock* bb) -> void {
+        auto visit_block = [&](const BasicBlock* bb) -> void {
             table.enter_scope();
 
             Instruction* cur = const_cast<BasicBlock*>(bb)->head();
@@ -334,17 +334,9 @@ bool gvn_function(Function& fn, const GvnOptions& options) {
 
                 cur = next;
             }
-
-            for (const BasicBlock* child : dom.children(bb)) {
-                if (child) {
-                    self(self, child);
-                }
-            }
-
-            table.exit_scope();
         };
 
-        visit_block(visit_block, entry);
+        walk_dominator_tree(dom, entry, visit_block, [&](const BasicBlock*) { table.exit_scope(); });
 
         for (Instruction* inst : to_remove) {
             if (inst && inst->parent()) {

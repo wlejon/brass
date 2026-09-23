@@ -93,26 +93,44 @@ void Function::sort_blocks_rpo() {
     std::vector<BasicBlock*> entry_po;
     entry_po.reserve(blocks_.size());
 
-    auto dfs = [&](auto& self, BasicBlock* bb, std::vector<BasicBlock*>& po) -> void {
-        auto it = block_idx.find(bb);
-        if (it == block_idx.end() || visited[it->second]) return;
-        visited[it->second] = true;
-        for (BasicBlock* succ : bb->successors()) {
-            if (succ) self(self, succ, po);
+    // An explicit stack, not recursion: a chain of many thousands of blocks
+    // overflowed the native stack.
+    struct Frame {
+        BasicBlock* bb;
+        std::vector<BasicBlock*> succs;
+        size_t next;
+    };
+    std::vector<Frame> stack;
+    auto dfs = [&](BasicBlock* root, std::vector<BasicBlock*>& po) {
+        auto enter = [&](BasicBlock* bb) {
+            auto it = block_idx.find(bb);
+            if (it == block_idx.end() || visited[it->second]) return;
+            visited[it->second] = true;
+            stack.push_back({bb, bb->successors(), 0});
+        };
+        enter(root);
+        while (!stack.empty()) {
+            Frame& f = stack.back();
+            if (f.next == f.succs.size()) {
+                po.push_back(f.bb);
+                stack.pop_back();
+                continue;
+            }
+            BasicBlock* succ = f.succs[f.next++];
+            if (succ) enter(succ);
         }
-        po.push_back(bb);
     };
 
-    dfs(dfs, entry, entry_po);
+    dfs(entry, entry_po);
     std::reverse(entry_po.begin(), entry_po.end());
 
     std::vector<BasicBlock*> other_po;
     for (const auto& rp : resume_points_) {
-        if (rp.second) dfs(dfs, rp.second, other_po);
+        if (rp.second) dfs(rp.second, other_po);
     }
 
     for (BasicBlock* bb : blocks_) {
-        if (bb) dfs(dfs, bb, other_po);
+        if (bb) dfs(bb, other_po);
     }
 
     std::reverse(other_po.begin(), other_po.end());
