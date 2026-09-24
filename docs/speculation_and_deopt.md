@@ -98,7 +98,7 @@ In the C++ API:
 twin->add_resume_point(0, bb_resume_0);
 ```
 
-The compiler records function resume offsets in `ResumeTableRegistry`. The `JitExecutionEngine` can invoke `engine.resume("generic_twin", resume_id, args)` directly at the native interior entry point.
+The compiler records function resume offsets in `ResumeTableRegistry` (`engine.get_resume_target_address(fn, resume_id)`). A resume block is entered only by a guard exit (see "Guard exits" in `mir_reference.md`); a function's entry never dispatches on its arguments, so `%resume_id` above is an ordinary parameter and calling `generic_twin(0, buf)` runs `bb0`.
 
 ---
 

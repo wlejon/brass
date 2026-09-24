@@ -826,21 +826,6 @@ bool JitExecutionEngine::patch_call(std::string_view site_name, std::string_view
     return patch_call(site_name, target_addr);
 }
 
-RuntimeValue JitExecutionEngine::resume(std::string_view name, uint32_t resume_id) {
-    std::vector<RuntimeValue> empty_args;
-    return resume(name, resume_id, empty_args);
-}
-
-RuntimeValue JitExecutionEngine::resume(std::string_view name, uint32_t resume_id, const std::vector<RuntimeValue>& args) {
-    std::vector<RuntimeValue> full_args;
-    full_args.reserve(args.size() + 1);
-    full_args.push_back(RuntimeValue::from_i32(static_cast<int32_t>(resume_id)));
-    for (const auto& a : args) {
-        full_args.push_back(a);
-    }
-    return invoke(name, full_args);
-}
-
 size_t JitExecutionEngine::get_osr_entry_offset(std::string_view fn_name) const {
     auto it = osr_entry_offsets_.find(std::string(fn_name));
     if (it != osr_entry_offsets_.end()) {

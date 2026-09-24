@@ -137,7 +137,7 @@ TEST_CASE("Differential - Interior Resume Point Execution") {
     REQUIRE(engine.compile_and_load(mod));
 
     uint64_t full_state[3] = {0, 0, 7};
-    uint64_t resume_state[3] = {5, 35, 7}; // Resuming at step 5 with accumulated sum 35
+    uint64_t resume_state[3] = {5, 100, 7}; // Entering bb_res_0 with it would give 100 + 5 * 7 = 135
 
     // Standard invocation: full loop executes 10 iterations -> 70
     RuntimeValue standard_interp = interp.run(*fn, {RuntimeValue::from_i32(999), RuntimeValue::from_ptr(reinterpret_cast<uintptr_t>(full_state))});
@@ -145,9 +145,11 @@ TEST_CASE("Differential - Interior Resume Point Execution") {
     CHECK_EQ(standard_interp.as_i64(), 70);
     CHECK_EQ(standard_jit.as_i64(), 70);
 
-    // Direct resume at entry 0: loop resumes from i=5..9 with acc=35 -> 70
+    // A first argument equal to resume id 0 still enters at the entry block
+    // (the loop runs i=0..9 with acc=0 -> 70); tier 2 once dispatched on it
+    // into bb_res_0.
     RuntimeValue resume_interp = interp.run(*fn, {RuntimeValue::from_i32(0), RuntimeValue::from_ptr(reinterpret_cast<uintptr_t>(resume_state))});
-    RuntimeValue resume_jit = engine.resume("loop_twin", 0, {RuntimeValue::from_ptr(reinterpret_cast<uintptr_t>(resume_state))});
+    RuntimeValue resume_jit = engine.invoke("loop_twin", {RuntimeValue::from_i32(0), RuntimeValue::from_ptr(reinterpret_cast<uintptr_t>(resume_state))});
     CHECK_EQ(resume_interp.as_i64(), 70);
     CHECK_EQ(resume_jit.as_i64(), 70);
 }

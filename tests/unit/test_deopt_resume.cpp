@@ -265,10 +265,14 @@ TEST_CASE("Speculation - Native JIT Deoptimization into Generic Twin at Interior
     RuntimeValue deopt_val = engine.invoke("spec_opt", {RuntimeValue::from_i64(5), RuntimeValue::from_i64(6), RuntimeValue::from_i32(0)});
     CHECK_EQ(deopt_val.as_i64(), 22);
 
-    // 3. Directly resume twin at entry 1 with state buffer
+    // 3. Calling the twin with a first argument equal to a resume id runs its
+    //    entry block, as in the interpreter: tier 2 once dispatched on an i32
+    //    parameter 0 into the resume table and returned 50 - 20 = 30 here.
     uint64_t manual_state[2] = {50, 20};
-    RuntimeValue res1_val = engine.resume("generic_twin", 1, {RuntimeValue::from_ptr(reinterpret_cast<uintptr_t>(manual_state))});
-    CHECK_EQ(res1_val.as_i64(), 30); // 50 - 20 = 30
+    const std::vector<RuntimeValue> twin_args = {RuntimeValue::from_i32(1), RuntimeValue::from_ptr(reinterpret_cast<uintptr_t>(manual_state))};
+    Interpreter interp;
+    CHECK_EQ(interp.run(*twin, twin_args).as_i64(), 0);
+    CHECK_EQ(engine.invoke("generic_twin", twin_args).as_i64(), 0);
 }
 
 TEST_CASE("Speculation - Multiple Guards and Interior Resume Points") {

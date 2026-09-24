@@ -480,7 +480,12 @@ if(BRASS_BUILD_TOOLS)
     # and stub_f64 returned 0.5 under --jit (RAX overwrote the stub's XMM0).
     # Standalone tier 2 (--jit) has no lower tier to continue a resume block
     # in, so osr_resume is a fatal error there by design and is not run.
+    # param0_dispatch: a guard that never fails, in a function whose first
+    # parameter is i32 and which has a resume table; tier 2 returned the
+    # resume block's 7777 for f(0, 1000) (its entry dispatched on %k).
     set(_guard_cases
+        "param0_dispatch|f|0,1000|499500|interp baseline jit osr jit_osr"
+        "param0_dispatch|f|5,1000|504500|interp baseline jit osr jit_osr"
         "osr_resume|f|1000|11175150|interp baseline osr"
         "osr_stub|f|1000|11175150|interp baseline jit osr jit_osr"
         "osr_both|main|1000|111751501|interp baseline jit osr jit_osr"

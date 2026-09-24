@@ -1,0 +1,42 @@
+module @guard_param0_dispatch
+
+; A function whose first parameter is i32 and which has a resume table. The
+; guard never fails, so neither the exit stub nor the resume block may run;
+; the call must not be steered by %k, even when %k equals the resume id (0).
+; f(0, 1000) = 499500, f(5, 1000) = 504500 (the sum of i + k for i < 1000).
+func @stub(%acc: i64, %i: i64) -> i64 {
+bb0:
+  %r = iconst.i64 -1
+  ret %r
+}
+
+func @f(%k: i32, %n: i64) -> i64 {
+bb0:
+  %z = iconst.i64 0
+  %k64 = sext.i64 %k
+  br bb1(%z, %z)
+
+bb1(%i: i64, %acc: i64):
+  %c = slt %i, %n
+  br_if %c, bb2, bb3(%acc)
+
+bb2:
+  %ok = sge %i, %z
+  guard %ok, @stub, [%acc, %i]
+  %t = add %i, %k64
+  %acc2 = add %acc, %t
+  %one = iconst.i64 1
+  %in = add %i, %one
+  br bb1(%in, %acc2)
+
+bb3(%r: i64):
+  ret %r
+
+bres(%a: i64, %j: i64):
+  %bad = iconst.i64 7777
+  ret %bad
+
+resume_table {
+  entry 0 -> bres
+}
+}

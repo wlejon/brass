@@ -259,8 +259,6 @@ public:
     // Dynamic invocation helper using RuntimeValue
     RuntimeValue invoke(std::string_view name, const std::vector<RuntimeValue>& args);
     RuntimeValue invoke(std::string_view name);
-    RuntimeValue resume(std::string_view name, uint32_t resume_id);
-    RuntimeValue resume(std::string_view name, uint32_t resume_id, const std::vector<RuntimeValue>& args);
 
 private:
     Target target_;

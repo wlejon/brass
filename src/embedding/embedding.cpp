@@ -106,13 +106,6 @@ RuntimeValue CompiledModule::invoke(std::string_view name, const std::vector<Run
     return jit_engine_->invoke(name, args);
 }
 
-RuntimeValue CompiledModule::resume(std::string_view name, uint32_t resume_id, const std::vector<RuntimeValue>& args) {
-    if (!jit_engine_) {
-        throw std::runtime_error("CompiledModule::resume: engine is null");
-    }
-    return jit_engine_->resume(name, resume_id, args);
-}
-
 HostEngine::HostEngine()
     : options_{Target::host(), true, false} {
 }

@@ -619,25 +619,9 @@ void X64ISel::lower_entry_parameters(const Function& mir_fn) {
         }
     }
     lir_entry->append_inst(std::move(pcopy));
-
-    // Emit resume point prologue dispatcher after parameters have been saved
-    if (!mir_fn.resume_points().empty() && entry->param_count() > 0 && entry->param(0)->type() == Type::i32()) {
-        const auto* param0 = entry->param(0);
-        VReg param0_vreg = get_vreg(param0);
-        for (const auto& rp : mir_fn.resume_points()) {
-            if (rp.second) {
-                auto cmp_inst = std::make_unique<LirInst>(LirOpcode::Cmp32);
-                cmp_inst->add_use(LirOperand::vreg(param0_vreg, 4));
-                cmp_inst->add_use(LirOperand::imm(static_cast<int32_t>(rp.first), 4));
-                lir_entry->append_inst(std::move(cmp_inst));
-
-                auto jcc_inst = std::make_unique<LirInst>(LirOpcode::Jcc);
-                jcc_inst->condition = Condition::E;
-                jcc_inst->add_use(LirOperand::label(rp.second->id()));
-                lir_entry->append_inst(std::move(jcc_inst));
-            }
-        }
-    }
+    // No resume dispatch on entry: a resume block is reached only through
+    // the resume table (docs/mir_reference.md, "Guard exits"), never by
+    // matching an ordinary argument against a resume id.
 }
 
 void X64ISel::lower_block(const BasicBlock& bb) {

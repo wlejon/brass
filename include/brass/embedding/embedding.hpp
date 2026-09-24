@@ -90,7 +90,6 @@ public:
 
     // Dynamic invocation helper
     RuntimeValue invoke(std::string_view name, const std::vector<RuntimeValue>& args = {});
-    RuntimeValue resume(std::string_view name, uint32_t resume_id, const std::vector<RuntimeValue>& args = {});
 
     // Access underlying JIT engine
     codegen::JitExecutionEngine* jit_engine() noexcept { return jit_engine_.get(); }
