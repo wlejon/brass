@@ -46,6 +46,9 @@ struct CompileTask {
     CompilePriority priority = CompilePriority::Normal;
     CompileStatus status = CompileStatus::Pending;
     FunctionHandle* handle = nullptr;
+    // What the handles were bound to when module_copy was taken: the code
+    // is published only to handles still bound to these.
+    Tier2Bindings bindings;
     std::string error_message;
     std::chrono::high_resolution_clock::time_point enqueue_time;
     std::chrono::high_resolution_clock::time_point finish_time;
@@ -133,6 +136,10 @@ public:
 
 private:
     void worker_loop(size_t worker_id);
+    // `bindings` null: captured from the handles now (module_copy has no
+    // source to check the siblings against).
+    bool enqueue_copy(std::string_view fn_name, std::unique_ptr<Module> module_copy, FunctionHandle* handle,
+                      CompilePriority priority, TierLevel target_tier, const Tier2Bindings* bindings);
 
     BackgroundCompilerConfig config_;
     CodeInstaller installer_;

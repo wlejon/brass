@@ -155,6 +155,12 @@ void FunctionHandle::mark_tier2_rejected() {
     tier2_rejected_fn_ = mir_function();
 }
 
+void FunctionHandle::mark_tier2_rejected(const Function* fn) {
+    std::lock_guard<std::mutex> lock(engine_mutex_);
+    tier2_rejected_ = true;
+    tier2_rejected_fn_ = fn;
+}
+
 bool FunctionHandle::tier2_rejected() const {
     std::lock_guard<std::mutex> lock(engine_mutex_);
     return tier2_rejected_ && tier2_rejected_fn_ == mir_function();
@@ -724,11 +730,12 @@ CodeInstallResult CodeInstaller::install_tier2(
     const Module& module,
     std::string_view fn_name
 ) {
+    Tier2Bindings bindings = capture_tier2_bindings(handle, module, fn_name, &module);
     auto mod_copy = clone_module(module);
     if (!mod_copy) {
         return {false, nullptr, "Failed to clone module for Tier-2 compilation", 0};
     }
-    return install_tier2(handle, std::move(mod_copy), fn_name);
+    return install_tier2(handle, std::move(mod_copy), fn_name, bindings);
 }
 
 CodeInstallResult CodeInstaller::install_tier2(
@@ -739,24 +746,59 @@ CodeInstallResult CodeInstaller::install_tier2(
     if (!module) {
         return {false, nullptr, "Module is null", 0};
     }
+    Tier2Bindings bindings = capture_tier2_bindings(handle, *module, fn_name, nullptr);
+    return install_tier2(handle, std::move(module), fn_name, bindings);
+}
+
+Tier2Bindings CodeInstaller::capture_tier2_bindings(const FunctionHandle& handle, const Module& module,
+                                                     std::string_view fn_name, const Module* source) const {
+    Tier2Bindings b;
+    b.target = handle.mir_function();
+    for (const Function* fn : module.functions()) {
+        if (!fn || fn->name() == fn_name) continue;
+        const FunctionHandle* other = table_->find(fn->name());
+        if (!other) continue;
+        const Function* other_fn = other->mir_function();
+        if (source && other_fn != source->get_function(fn->name())) continue;
+        b.siblings.emplace(std::string(fn->name()), other_fn);
+    }
+    return b;
+}
+
+CodeInstallResult CodeInstaller::install_tier2(
+    FunctionHandle& handle,
+    std::unique_ptr<Module> module,
+    std::string_view fn_name,
+    const Tier2Bindings& bindings
+) {
+    if (!module) {
+        return {false, nullptr, "Module is null", 0};
+    }
+
+    // The Function the handle was bound to when the module was cloned: the
+    // code is validated against it, its frames deoptimize into it, and it is
+    // published only if the handle is still bound to it when compilation
+    // finishes.
+    const Function* bound = bindings.target;
+
+    // Compile errors are results, never exceptions: a background worker
+    // and the invocation hook in native code both call this. A rejected
+    // Function is not tried again by automatic tier-up (a handle rebound
+    // since stays eligible).
+    auto reject = [&](std::string msg) {
+        handle.mark_tier2_rejected(bound);
+        return CodeInstallResult{false, nullptr, std::move(msg), 0};
+    };
 
     Function* target_fn = module->get_function(fn_name);
     if (!target_fn) {
         return {false, nullptr, "Function '" + std::string(fn_name) + "' not found in module", 0};
     }
-
-    // The Function the handle runs now: the code is validated against it,
-    // its frames deoptimize into it, and it is published only if the handle
-    // is still bound to it when compilation finishes.
-    const Function* bound = handle.mir_function();
-
-    // Compile errors are results, never exceptions: a background worker
-    // and the invocation hook in native code both call this. A rejected
-    // Function is not tried again by automatic tier-up.
-    auto reject = [&](std::string msg) {
-        handle.mark_tier2_rejected();
-        return CodeInstallResult{false, nullptr, std::move(msg), 0};
-    };
+    // Rebound while the task was queued: the code could never be published.
+    if (handle.mir_function() != bound) {
+        return {false, nullptr,
+                "handle '" + std::string(handle.name()) + "' was rebound before Tier-2 compilation started", 0};
+    }
 
     std::shared_ptr<codegen::JitExecutionEngine> jit;
     try {
@@ -861,13 +903,16 @@ CodeInstallResult CodeInstaller::install_tier2(
     }
     table_->tiering().get_feedback(handle.name()).set_tier(TierLevel::Tier2_Optimized);
 
-    // Also update any other functions in the module if their handles exist in the dispatch table
+    // Also publish the module's other functions to their handles, each only
+    // while it is bound to the Function recorded when the module was cloned.
     for (const Function* fn : module->functions()) {
         if (!fn || fn->name() == fn_name) continue;
+        auto recorded = bindings.siblings.find(std::string(fn->name()));
+        if (recorded == bindings.siblings.end()) continue;
         FunctionHandle* other_handle = table_->find(fn->name());
-        if (other_handle && !other_handle->has_native_entry()) {
+        if (other_handle && !other_handle->has_native_entry() && other_handle->mir_function() == recorded->second) {
             void* other_ptr = jit->get_symbol_address(fn->name());
-            const Function* other_fn = other_handle->mir_function();
+            const Function* other_fn = recorded->second;
             std::string why;
             if (other_ptr && deopt_targets_valid(*fn, other_fn, why)) {
                 register_resumer(*other_handle, other_ptr, other_fn);

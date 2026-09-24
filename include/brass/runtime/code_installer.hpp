@@ -111,6 +111,9 @@ public:
     // a failed pass, a guard with no deopt target): automatic tier-up does
     // not try it again until the handle is bound to another Function.
     void mark_tier2_rejected();
+    // Tier 2 rejected `fn`, the Function a compile was taken from: the
+    // handle stays eligible if it has since been bound to another one.
+    void mark_tier2_rejected(const Function* fn);
     bool tier2_rejected() const;
 
     void set_baseline_function(std::shared_ptr<codegen::BaselineCompiledFunction> compiled);
@@ -327,6 +330,17 @@ void forget_module(const Module& mod) noexcept;
 // false, `why` names the first guard that cannot.
 bool deopt_targets_valid(const Function& optimized, const Function* tier0, std::string& why);
 
+// The Functions the handles were bound to when a module was cloned for a
+// tier-2 compile. The code is validated and published against these, and its
+// frames deoptimize into them, never into whatever a handle is bound to when
+// the compile finishes: a handle rebound in between is not published to.
+struct Tier2Bindings {
+    const Function* target = nullptr;
+    // Other functions of the module whose handles may receive the compiled
+    // code, by name. A name absent here is never published.
+    std::unordered_map<std::string, const Function*> siblings;
+};
+
 struct CodeInstallResult {
     bool success = false;
     void* entry_point = nullptr;
@@ -352,11 +366,29 @@ public:
         std::string_view fn_name
     );
 
+    // `module` is a clone the caller just took: the handles' bindings are
+    // captured now, with no source module to check the siblings against.
     CodeInstallResult install_tier2(
         FunctionHandle& handle,
         std::unique_ptr<Module> module,
         std::string_view fn_name
     );
+
+    // Compiles `module` (a clone) against the bindings captured when it was
+    // taken (capture_tier2_bindings).
+    CodeInstallResult install_tier2(
+        FunctionHandle& handle,
+        std::unique_ptr<Module> module,
+        std::string_view fn_name,
+        const Tier2Bindings& bindings
+    );
+
+    // Records what `handle` and the handles of `module`'s other functions
+    // are bound to now. With `source` (the module being cloned), a sibling
+    // is recorded only if its handle is bound to source's Function of that
+    // name: code compiled from one Function is never published for another.
+    Tier2Bindings capture_tier2_bindings(const FunctionHandle& handle, const Module& module,
+                                         std::string_view fn_name, const Module* source) const;
 
     void register_external_symbol(std::string_view name, void* address);
 

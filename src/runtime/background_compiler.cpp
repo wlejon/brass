@@ -150,9 +150,14 @@ bool BackgroundCompiler::enqueue(
         stats_.tasks_deduplicated++;
         return false;
     }
+    // The bindings are captured before the clone is taken: a handle rebound
+    // after this point is not published to, one rebound before it is not
+    // compiled for the old module.
+    if (!handle) handle = installer_.dispatch_table().get_or_create(fn_name);
+    const Tier2Bindings bindings = installer_.capture_tier2_bindings(*handle, module, fn_name, &module);
     auto mod_copy = clone_module(module);
     if (!mod_copy) return false;
-    return enqueue(fn_name, std::move(mod_copy), handle, priority, target_tier);
+    return enqueue_copy(fn_name, std::move(mod_copy), handle, priority, target_tier, &bindings);
 }
 
 bool BackgroundCompiler::tier2_candidate(const FunctionHandle& handle) {
@@ -172,6 +177,12 @@ bool BackgroundCompiler::enqueue(
     CompilePriority priority,
     TierLevel target_tier
 ) {
+    return enqueue_copy(fn_name, std::move(module_copy), handle, priority, target_tier, nullptr);
+}
+
+bool BackgroundCompiler::enqueue_copy(std::string_view fn_name, std::unique_ptr<Module> module_copy,
+                                      FunctionHandle* handle, CompilePriority priority, TierLevel target_tier,
+                                      const Tier2Bindings* bindings) {
     if (!module_copy) return false;
     std::string key(fn_name);
 
@@ -211,6 +222,8 @@ bool BackgroundCompiler::enqueue(
     task.priority = priority;
     task.status = CompileStatus::Pending;
     task.handle = handle;
+    task.bindings = bindings ? *bindings
+                             : installer_.capture_tier2_bindings(*handle, *task.module_copy, key, nullptr);
     task.enqueue_time = std::chrono::high_resolution_clock::now();
 
     queue_.push(std::move(task));
@@ -294,13 +307,14 @@ void BackgroundCompiler::worker_loop(size_t /*worker_id*/) {
         // on its lower tier rather than terminating the process.
         CodeInstallResult res;
         try {
-            res = installer_.install_tier2(*task.handle, std::move(task.module_copy), task.function_name);
+            res = installer_.install_tier2(*task.handle, std::move(task.module_copy), task.function_name,
+                                           task.bindings);
         } catch (const std::exception& e) {
             res = {false, nullptr, std::string("Tier-2 compilation threw: ") + e.what(), 0};
-            task.handle->mark_tier2_rejected();
+            task.handle->mark_tier2_rejected(task.bindings.target);
         } catch (...) {
             res = {false, nullptr, "Tier-2 compilation threw a non-standard exception", 0};
-            task.handle->mark_tier2_rejected();
+            task.handle->mark_tier2_rejected(task.bindings.target);
         }
         auto t1 = std::chrono::high_resolution_clock::now();
         uint64_t dur_us = static_cast<uint64_t>(
