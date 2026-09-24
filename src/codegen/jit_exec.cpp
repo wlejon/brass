@@ -128,13 +128,9 @@ JitExecutionEngine::JitExecutionEngine()
 }
 
 JitExecutionEngine::~JitExecutionEngine() {
-    stack_map_registration_.reset();
-    unregister_seh_tables();
-    unregister_eh_frame();
-    for (uintptr_t fn_addr : registered_exception_fns_) {
-        runtime::get_global_exception_registry().unregister_function_mapping(fn_addr);
-    }
-    registered_exception_fns_.clear();
+    // Members are destroyed in reverse order, which would free the code
+    // before regs_; the registrations must go first.
+    regs_.release();
     if (brass_get_active_stack_maps() == &stack_maps_) {
         brass_set_active_stack_maps(nullptr);
     }
@@ -143,52 +139,46 @@ JitExecutionEngine::~JitExecutionEngine() {
     }
 }
 
-JitExecutionEngine::JitExecutionEngine(JitExecutionEngine&& other) noexcept
-    : target_(other.target_),
-      code_mem_(std::move(other.code_mem_)),
-      data_mem_(std::move(other.data_mem_)),
-      symbol_table_(std::move(other.symbol_table_)),
-      external_symbols_(std::move(other.external_symbols_)),
-      function_signatures_(std::move(other.function_signatures_)),
-      stack_maps_(std::move(other.stack_maps_)),
-      stack_map_registration_(std::move(other.stack_map_registration_)),
-      osr_entry_offsets_(std::move(other.osr_entry_offsets_)),
-      pdata_table_(other.pdata_table_),
-      pdata_count_(other.pdata_count_),
-      code_base_(other.code_base_),
-      registered_fdes_(std::move(other.registered_fdes_)),
-      sched_opts_(other.sched_opts_) {
-    other.registered_fdes_.clear();
-    other.pdata_table_ = nullptr;
-    other.pdata_count_ = 0;
-    other.code_base_ = 0;
-}
+// Every member moves as itself: the memory blocks and regs_ transfer
+// ownership and leave the source empty, and regs_, declared ahead of the
+// memory blocks, drops the target's old registrations before its old code is
+// freed. A moved-from engine owns no code, registrations or symbols.
+JitExecutionEngine::JitExecutionEngine(JitExecutionEngine&& other) noexcept = default;
+JitExecutionEngine& JitExecutionEngine::operator=(JitExecutionEngine&& other) noexcept = default;
 
-JitExecutionEngine& JitExecutionEngine::operator=(JitExecutionEngine&& other) noexcept {
+JitExecutionEngine::LoadRegistrations::LoadRegistrations(LoadRegistrations&& other) noexcept
+    : stack_maps(std::move(other.stack_maps)),
+      exception_fns(std::exchange(other.exception_fns, {})),
+      pdata_table(std::exchange(other.pdata_table, nullptr)),
+      pdata_count(std::exchange(other.pdata_count, 0)),
+      code_base(std::exchange(other.code_base, 0)),
+      fdes(std::exchange(other.fdes, {})),
+      text_base(std::exchange(other.text_base, nullptr)) {}
+
+JitExecutionEngine::LoadRegistrations&
+JitExecutionEngine::LoadRegistrations::operator=(LoadRegistrations&& other) noexcept {
     if (this != &other) {
-        unregister_seh_tables();
-        unregister_eh_frame();
-        // Before this engine's code is freed.
-        stack_map_registration_ = std::move(other.stack_map_registration_);
-        registered_fdes_ = std::move(other.registered_fdes_);
-        other.registered_fdes_.clear();
-        target_ = other.target_;
-        code_mem_ = std::move(other.code_mem_);
-        data_mem_ = std::move(other.data_mem_);
-        symbol_table_ = std::move(other.symbol_table_);
-        external_symbols_ = std::move(other.external_symbols_);
-        function_signatures_ = std::move(other.function_signatures_);
-        stack_maps_ = std::move(other.stack_maps_);
-        osr_entry_offsets_ = std::move(other.osr_entry_offsets_);
-        pdata_table_ = other.pdata_table_;
-        pdata_count_ = other.pdata_count_;
-        code_base_ = other.code_base_;
-        sched_opts_ = other.sched_opts_;
-        other.pdata_table_ = nullptr;
-        other.pdata_count_ = 0;
-        other.code_base_ = 0;
+        release();
+        stack_maps = std::move(other.stack_maps);
+        exception_fns = std::exchange(other.exception_fns, {});
+        pdata_table = std::exchange(other.pdata_table, nullptr);
+        pdata_count = std::exchange(other.pdata_count, 0);
+        code_base = std::exchange(other.code_base, 0);
+        fdes = std::exchange(other.fdes, {});
+        text_base = std::exchange(other.text_base, nullptr);
     }
     return *this;
+}
+
+void JitExecutionEngine::LoadRegistrations::release() noexcept {
+    stack_maps.reset();
+    release_seh_tables();
+    release_eh_frame();
+    for (uintptr_t fn_addr : exception_fns) {
+        runtime::get_global_exception_registry().unregister_function_mapping(fn_addr);
+    }
+    exception_fns.clear();
+    text_base = nullptr;
 }
 
 void JitExecutionEngine::register_external_symbol(std::string_view name, void* address) {
@@ -217,11 +207,16 @@ bool JitExecutionEngine::compile_and_load(const Module& mod, size_t code_padding
 }
 
 bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_padding) {
-    // Before the previous code can be freed and its addresses reused.
-    stack_map_registration_.reset();
-    unregister_seh_tables();
-    unregister_eh_frame();
+    // Before the previous code can be freed and its addresses reused. The
+    // previous load's tables go too, so that a failed load leaves none that
+    // describe freed code.
+    regs_.release();
     symbol_table_.clear();
+    osr_entry_offsets_.clear();
+    stack_maps_ = ModuleStackMap{};
+    resume_tables_.clear();
+    patch_sites_.clear();
+    exception_tables_.clear();
 
     object::ObjectFile working_obj = obj;
     // Every GOT load whose symbol turns out to be within reach of the code
@@ -623,36 +618,36 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
     stack_maps_ = working_obj.stack_maps;
     int32_t text_idx = working_obj.get_section_index(".text");
     if (text_idx >= 0 && sec_bases[text_idx]) {
-        text_section_base_ = sec_bases[text_idx];
-        uintptr_t text_base = reinterpret_cast<uintptr_t>(text_section_base_);
+        regs_.text_base = sec_bases[text_idx];
+        uintptr_t text_base = reinterpret_cast<uintptr_t>(regs_.text_base);
         stack_maps_.relocate(text_base);
         for (const auto& fn : working_obj.functions) {
             uintptr_t fn_addr = reinterpret_cast<uintptr_t>(sec_bases[text_idx] + fn.text_offset);
             stack_maps_.register_function_address(fn.name, fn_addr, static_cast<uint32_t>(fn.text_size));
         }
     } else {
-        text_section_base_ = module_base;
+        regs_.text_base = module_base;
     }
     // Loading code does not touch any thread's active maps (an OSR compile
     // would retarget the compiling thread's GC at the OSR module alone): the
     // code registry makes the maps found wherever the code runs.
-    stack_map_registration_ = register_code_stack_maps(stack_maps_);
+    regs_.stack_maps = register_code_stack_maps(stack_maps_);
 
     // Register Resume Tables and Patch Sites
     resume_tables_ = working_obj.resume_tables;
     patch_sites_ = working_obj.patch_sites;
     exception_tables_ = working_obj.exception_tables;
 
-    if (text_section_base_) {
+    if (regs_.text_base) {
         for (const auto& fn : working_obj.functions) {
             if (fn.text_size > 0) {
-                uintptr_t fn_addr = reinterpret_cast<uintptr_t>(text_section_base_) + fn.text_offset;
+                uintptr_t fn_addr = reinterpret_cast<uintptr_t>(regs_.text_base) + fn.text_offset;
                 runtime::get_global_exception_registry().register_function_mapping(
                     fn_addr,
                     fn.text_size,
                     fn.exception_table
                 );
-                registered_exception_fns_.push_back(fn_addr);
+                regs_.exception_fns.push_back(fn_addr);
             }
         }
     }
@@ -686,20 +681,20 @@ void* JitExecutionEngine::get_symbol_address(std::string_view name) const {
 
 void JitExecutionEngine::register_seh_tables(const object::ObjectFile& obj, uint8_t* base_ptr) {
 #if defined(BRASS_JIT_SEH_REGISTRATION)
-    unregister_seh_tables();
+    regs_.release_seh_tables();
     int32_t pdata_idx = obj.get_section_index(".pdata");
     if (pdata_idx != object::SECTION_UNDEF) {
         const auto& pdata_sec = obj.sections[pdata_idx];
         if (!pdata_sec.data.empty()) {
             auto it = symbol_table_.find(".pdata");
             if (it != symbol_table_.end()) {
-                pdata_table_ = it->second;
-                pdata_count_ = pdata_sec.data.size() / sizeof(RUNTIME_FUNCTION);
-                code_base_ = reinterpret_cast<uintptr_t>(base_ptr);
+                regs_.pdata_table = it->second;
+                regs_.pdata_count = pdata_sec.data.size() / sizeof(RUNTIME_FUNCTION);
+                regs_.code_base = reinterpret_cast<uintptr_t>(base_ptr);
                 RtlAddFunctionTable(
-                    reinterpret_cast<PRUNTIME_FUNCTION>(pdata_table_),
-                    static_cast<DWORD>(pdata_count_),
-                    static_cast<DWORD64>(code_base_)
+                    reinterpret_cast<PRUNTIME_FUNCTION>(regs_.pdata_table),
+                    static_cast<DWORD>(regs_.pdata_count),
+                    static_cast<DWORD64>(regs_.code_base)
                 );
             }
         }
@@ -718,7 +713,7 @@ extern "C" void __deregister_frame(void*);
 #endif
 
 void JitExecutionEngine::register_eh_frame(uint8_t* eh_frame) {
-    unregister_eh_frame();
+    regs_.release_eh_frame();
 #if !defined(_WIN32)
     // Frames are only described to this process's unwinder when this process
     // can run the code.
@@ -738,38 +733,38 @@ void JitExecutionEngine::register_eh_frame(uint8_t* eh_frame) {
         std::memcpy(&cie_id, p + 4, 4);
         if (cie_id != 0) {
             __register_frame(p);
-            registered_fdes_.push_back(p);
+            regs_.fdes.push_back(p);
         }
         p += 4 + len;
     }
 #else
     // libgcc takes the whole zero-terminated section.
     __register_frame(eh_frame);
-    registered_fdes_.push_back(eh_frame);
+    regs_.fdes.push_back(eh_frame);
 #endif
 #else
     (void)eh_frame;
 #endif
 }
 
-void JitExecutionEngine::unregister_eh_frame() {
+void JitExecutionEngine::LoadRegistrations::release_eh_frame() noexcept {
 #if !defined(_WIN32)
-    for (auto it = registered_fdes_.rbegin(); it != registered_fdes_.rend(); ++it) {
+    for (auto it = fdes.rbegin(); it != fdes.rend(); ++it) {
         __deregister_frame(*it);
     }
 #endif
-    registered_fdes_.clear();
+    fdes.clear();
 }
 
-void JitExecutionEngine::unregister_seh_tables() {
+void JitExecutionEngine::LoadRegistrations::release_seh_tables() noexcept {
 #if defined(BRASS_JIT_SEH_REGISTRATION)
-    if (pdata_table_) {
-        RtlDeleteFunctionTable(reinterpret_cast<PRUNTIME_FUNCTION>(pdata_table_));
-        pdata_table_ = nullptr;
-        pdata_count_ = 0;
-        code_base_ = 0;
+    if (pdata_table) {
+        RtlDeleteFunctionTable(reinterpret_cast<PRUNTIME_FUNCTION>(pdata_table));
     }
 #endif
+    pdata_table = nullptr;
+    pdata_count = 0;
+    code_base = 0;
 }
 
 
@@ -787,8 +782,8 @@ void* JitExecutionEngine::get_resume_target_address(std::string_view fn_name, ui
 }
 
 bool JitExecutionEngine::patch_const32(std::string_view site_name, int32_t new_val) {
-    if (!text_section_base_) return false;
-    bool ok = patch_sites_.patch_const32(text_section_base_, site_name, new_val);
+    if (!regs_.text_base) return false;
+    bool ok = patch_sites_.patch_const32(regs_.text_base, site_name, new_val);
 #if defined(_WIN32)
     if (ok && code_mem_.data()) {
         FlushInstructionCache(GetCurrentProcess(), code_mem_.data(), code_mem_.size());
@@ -798,8 +793,8 @@ bool JitExecutionEngine::patch_const32(std::string_view site_name, int32_t new_v
 }
 
 bool JitExecutionEngine::patch_const64(std::string_view site_name, int64_t new_val) {
-    if (!text_section_base_) return false;
-    bool ok = patch_sites_.patch_const64(text_section_base_, site_name, new_val);
+    if (!regs_.text_base) return false;
+    bool ok = patch_sites_.patch_const64(regs_.text_base, site_name, new_val);
 #if defined(_WIN32)
     if (ok && code_mem_.data()) {
         FlushInstructionCache(GetCurrentProcess(), code_mem_.data(), code_mem_.size());
@@ -809,9 +804,9 @@ bool JitExecutionEngine::patch_const64(std::string_view site_name, int64_t new_v
 }
 
 bool JitExecutionEngine::patch_call(std::string_view site_name, const void* new_target) {
-    if (!text_section_base_) return false;
+    if (!regs_.text_base) return false;
     const runtime::CodeArch arch = target_.is_aarch64() ? runtime::CodeArch::AArch64 : runtime::CodeArch::X64;
-    bool ok = patch_sites_.patch_call(arch, text_section_base_, site_name, new_target);
+    bool ok = patch_sites_.patch_call(arch, regs_.text_base, site_name, new_target);
 #if defined(_WIN32)
     if (ok && code_mem_.data()) {
         FlushInstructionCache(GetCurrentProcess(), code_mem_.data(), code_mem_.size());

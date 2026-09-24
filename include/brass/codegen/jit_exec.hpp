@@ -278,7 +278,43 @@ public:
     RuntimeValue invoke(std::string_view name);
 
 private:
+    // Everything a load registers outside this engine against the loaded
+    // code's addresses, and the pointer into that code the patching API
+    // writes through. Owned by exactly one engine: a move transfers it and
+    // leaves the source empty, and it is released once, before the code it
+    // describes is freed.
+    class LoadRegistrations {
+    public:
+        LoadRegistrations() = default;
+        ~LoadRegistrations() { release(); }
+        LoadRegistrations(const LoadRegistrations&) = delete;
+        LoadRegistrations& operator=(const LoadRegistrations&) = delete;
+        LoadRegistrations(LoadRegistrations&& other) noexcept;
+        LoadRegistrations& operator=(LoadRegistrations&& other) noexcept;
+
+        // Drops every registration and the text base.
+        void release() noexcept;
+        void release_seh_tables() noexcept;
+        void release_eh_frame() noexcept;
+
+        // The loaded code's entry in the code stack-map registry.
+        std::shared_ptr<const void> stack_maps;
+        // Function starts mapped in the global exception registry.
+        std::vector<uintptr_t> exception_fns;
+        // Windows SEH registration.
+        void* pdata_table = nullptr;
+        size_t pdata_count = 0;
+        uintptr_t code_base = 0;
+        // DWARF unwind registration (non-Windows): what __register_frame was
+        // given, the whole .eh_frame or, on Apple, each FDE.
+        std::vector<void*> fdes;
+        uint8_t* text_base = nullptr;
+    };
+
     Target target_;
+    // Declared before the memory blocks: the defaulted move assignment
+    // releases this engine's registrations before its code is freed.
+    LoadRegistrations regs_;
     JitMemoryBlock code_mem_;
     DataMemoryBlock data_mem_;
 
@@ -286,27 +322,14 @@ private:
     std::unordered_map<std::string, void*> external_symbols_;
     std::unordered_map<std::string, std::pair<Type, std::vector<Type>>> function_signatures_;
     ModuleStackMap stack_maps_;
-    // The loaded code's entry in the code stack-map registry.
-    std::shared_ptr<const void> stack_map_registration_;
     runtime::ResumeTableRegistry resume_tables_;
     runtime::PatchRegistry patch_sites_;
     std::unordered_map<std::string, size_t> osr_entry_offsets_;
     runtime::ExceptionTableRegistry exception_tables_;
-    std::vector<uintptr_t> registered_exception_fns_;
-    uint8_t* text_section_base_ = nullptr;
-    // Windows SEH registration tracking
-    void* pdata_table_ = nullptr;
-    size_t pdata_count_ = 0;
-    uintptr_t code_base_ = 0;
-    // DWARF unwind registration (non-Windows): what __register_frame was
-    // given, the whole .eh_frame or, on Apple, each FDE.
-    std::vector<void*> registered_fdes_;
     SchedOptions sched_opts_;
 
     void register_seh_tables(const object::ObjectFile& obj, uint8_t* base_ptr);
-    void unregister_seh_tables();
     void register_eh_frame(uint8_t* eh_frame);
-    void unregister_eh_frame();
 };
 
 } // namespace brass::codegen
