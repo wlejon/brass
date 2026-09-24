@@ -62,6 +62,9 @@ void FastInterpreter::set_generational_gc(GenerationalGC* gc) noexcept {
 uintptr_t FastInterpreter::allocate_gc(size_t size, uint64_t pointer_mask, uint32_t type_tag) {
     // Roots come from the root provider installed in the constructor (and
     // set_generational_gc), which the collector asks only when it collects.
+    // A host heap takes the allocation instead, and finds these frames'
+    // roots through collect_all_roots itself.
+    if (host_heap()) return host_heap_allocate(size, pointer_mask, type_tag);
     if (gen_gc_) {
         return gen_gc_->allocate(size, pointer_mask, type_tag);
     }

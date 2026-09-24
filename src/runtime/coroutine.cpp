@@ -1,6 +1,7 @@
 #include <brass/runtime/coroutine.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/gc/generational_gc.hpp>
+#include <brass/gc/host_heap.hpp>
 #include <brass/embedding/host_gc.hpp>
 #include <brass/embedding/nanbox.hpp>
 #include <algorithm>
@@ -145,7 +146,13 @@ uintptr_t brass_coro_create(void* fn_ptr, uint32_t slot_count, uint64_t pointer_
     BrassCoroFrame* frame = nullptr;
 
     GenerationalGC* gen_gc = brass::brass_get_active_generational_gc();
-    if (gen_gc != nullptr) {
+    if (brass::host_heap() != nullptr) {
+        // The frame is an object of the host's heap; its slots are traced
+        // through frame_mask like any other, and while suspended it is also
+        // a root through the active-frame registry below.
+        frame = reinterpret_cast<BrassCoroFrame*>(
+            brass::host_heap_allocate(total_size, frame_mask, TYPE_TAG_CORO_FRAME));
+    } else if (gen_gc != nullptr) {
         uintptr_t payload = gen_gc->allocate(total_size, frame_mask, TYPE_TAG_CORO_FRAME);
         frame = reinterpret_cast<BrassCoroFrame*>(payload);
     } else {

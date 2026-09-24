@@ -6,7 +6,6 @@
 #include <brass/gc/stack_walker.hpp>
 #include <brass/gc/stack_map.hpp>
 #include <brass/runtime/coroutine.hpp>
-#include <brass/runtime/object.hpp>
 #include <brass/embedding/host_gc.hpp>
 #include <brass/embedding/nanbox.hpp>
 #include <brass/mir/builder.hpp>
@@ -158,52 +157,6 @@ TEST_CASE("Hardening - Suspended Coroutines Rooting and Lifecycle Across Collect
 
     gen_gc.unregister_root(&coro_root);
     brass_set_active_generational_gc(nullptr);
-}
-
-TEST_CASE("Hardening - DynamicObject Buffer Growth and Interior Pointer Safety") {
-    HostGC host_gc(256 * 1024);
-    set_active_host_gc(&host_gc);
-
-    // Create dynamic object
-    DynamicObject* obj = DynamicObject::create(&host_gc);
-    REQUIRE(obj != nullptr);
-
-    // Set properties beyond inline capacity (which is 4)
-    ShapeRegistry reg;
-    for (size_t i = 0; i < 20; ++i) {
-        std::string prop_name = "prop_" + std::to_string(i);
-        obj->set_property(prop_name, HostValue::from_int32(static_cast<int32_t>(i * 10)), reg, &host_gc);
-    }
-
-    // Verify all properties are preserved
-    for (size_t i = 0; i < 20; ++i) {
-        std::string prop_name = "prop_" + std::to_string(i);
-        HostValue val = obj->get_property(prop_name);
-        CHECK_EQ(val.as_int32(), static_cast<int32_t>(i * 10));
-    }
-
-    // Set array elements beyond initial capacity (8)
-    for (int64_t i = 0; i < 30; ++i) {
-        obj->set_element(i, HostValue::from_int32(static_cast<int32_t>(i * 100)), &host_gc);
-    }
-
-    // Verify all elements are preserved
-    for (int64_t i = 0; i < 30; ++i) {
-        HostValue val = obj->get_element(i);
-        CHECK_EQ(val.as_int32(), static_cast<int32_t>(i * 100));
-    }
-
-    // Test C API bridge with HostGC rooting
-    uint64_t obj_handle = HostValue::from_gcref(obj).raw();
-    brass_dynamic_object_set_prop_str(obj_handle, "str_prop", HostValue::from_int32(999).raw());
-    uint64_t res_val = brass_dynamic_object_get_prop_str(obj_handle, "str_prop");
-    CHECK_EQ(HostValue(res_val).as_int32(), 999);
-
-    brass_dynamic_object_set_elem(obj_handle, 50, HostValue::from_int32(888).raw());
-    uint64_t elem_val = brass_dynamic_object_get_elem(obj_handle, 50);
-    CHECK_EQ(HostValue(elem_val).as_int32(), 888);
-
-    set_active_host_gc(nullptr);
 }
 
 TEST_CASE("Hardening - Card Table Multi-Card Object Scanning") {

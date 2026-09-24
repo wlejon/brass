@@ -1,5 +1,4 @@
 #include <brass/runtime/type_feedback.hpp>
-#include <brass/runtime/shape.hpp>
 #include <iostream>
 #include <iomanip>
 
@@ -89,7 +88,7 @@ void TypeFeedbackVector::record_call_target(
 
 void TypeFeedbackVector::record_property_shape(
     uint32_t site_id,
-    Shape* shape,
+    HostShapeId shape,
     uint32_t slot_idx
 ) {
     FeedbackSlot& slot = get_or_create_slot(site_id, FeedbackSlotKind::Property);
@@ -97,7 +96,7 @@ void TypeFeedbackVector::record_property_shape(
     slot.slot_index = slot_idx;
 
     if (shape) {
-        for (const auto* s : slot.observed_shapes) {
+        for (HostShapeId s : slot.observed_shapes) {
             if (s == shape) {
                 return;
             }
@@ -213,7 +212,7 @@ void brass_record_call_feedback(
 void brass_record_property_feedback(
     const char* fn_name,
     uint32_t site_id,
-    brass::runtime::Shape* shape,
+    brass::runtime::HostShapeId shape,
     uint32_t slot_idx
 ) {
     if (!fn_name) return;

@@ -4,9 +4,6 @@
 #include <brass/gc/tlab.hpp>
 #include <brass/embedding/host_gc.hpp>
 #include <brass/runtime/deopt.hpp>
-#include <brass/runtime/shape.hpp>
-#include <brass/runtime/object.hpp>
-#include <brass/runtime/inline_cache.hpp>
 #include <brass/runtime/patcher.hpp>
 #include <brass/runtime/exception.hpp>
 #include <brass/interpreter/interpreter.hpp>
@@ -154,120 +151,6 @@ TEST_CASE("Deopt Hardening - JIT Deopt Exit Reloads Float Registers (F64 & F32)"
     CHECK(std::abs(res_f32.as_f32() - kExpectedF32) < 1e-4f);
 
     register_deopt_handler(nullptr);
-}
-
-// ============================================================================
-// Deliverable 6.c: Multi-threaded Concurrent Shape Transitions and Lookups
-// ============================================================================
-TEST_CASE("Deopt Hardening - Concurrent Shape Transitions and Lookups") {
-    ShapeRegistry registry;
-    Shape* root = registry.get_root_shape();
-    REQUIRE(root != nullptr);
-
-    // Pre-populate shared base properties
-    Shape* base = registry.transition_to(root, "shared_base_0");
-    base = registry.transition_to(base, "shared_base_1");
-    base = registry.transition_to(base, "shared_base_2");
-
-    constexpr int kNumThreads = 8;
-    constexpr int kOpsPerThread = 200;
-    std::atomic<bool> start_flag{false};
-    std::atomic<size_t> total_transitions{0};
-    std::vector<std::thread> threads;
-    threads.reserve(kNumThreads);
-
-    for (int t = 0; t < kNumThreads; ++t) {
-        threads.emplace_back([&, t]() {
-            while (!start_flag.load(std::memory_order_acquire)) {
-                std::this_thread::yield();
-            }
-
-            Shape* cur = base;
-            for (int i = 0; i < kOpsPerThread; ++i) {
-                // Concurrent property lookup
-                auto slot_opt = cur->find_slot("shared_base_1");
-                (void)slot_opt;
-
-                // Concurrent transition lookup
-                auto trans = cur->find_transition("shared_base_2");
-                (void)trans;
-
-                // Concurrent transition creation
-                std::string prop = "th_" + std::to_string(t) + "_p_" + std::to_string(i);
-                cur = registry.transition_to(cur, prop);
-                total_transitions.fetch_add(1, std::memory_order_relaxed);
-
-                // Read transitions map
-                const auto& m = cur->string_transitions();
-                (void)m;
-            }
-        });
-    }
-
-    start_flag.store(true, std::memory_order_release);
-    for (auto& th : threads) {
-        th.join();
-    }
-
-    CHECK_EQ(total_transitions.load(), static_cast<size_t>(kNumThreads * kOpsPerThread));
-    CHECK(registry.shape_count() >= static_cast<size_t>(kNumThreads * kOpsPerThread));
-}
-
-// ============================================================================
-// Deliverable 6.d: Monomorphic IC Slot Patching and Property Validation
-// ============================================================================
-TEST_CASE("Deopt Hardening - Monomorphic IC Slot Patching and Property Validation") {
-    ShapeRegistry registry;
-    Shape* root = registry.get_root_shape();
-
-    // Shape 1: {target_prop} -> slot 0
-    Shape* shape1 = registry.transition_to(root, "target_prop");
-    REQUIRE(shape1 != nullptr);
-    CHECK_EQ(shape1->find_slot("target_prop").value(), 0u);
-
-    // Shape 2: {other1, other2, target_prop} -> slot 2
-    Shape* s2_tmp = registry.transition_to(registry.transition_to(root, "other1"), "other2");
-    Shape* shape2 = registry.transition_to(s2_tmp, "target_prop");
-    REQUIRE(shape2 != nullptr);
-    CHECK_EQ(shape2->find_slot("target_prop").value(), 2u);
-
-    // Shape 3: {unrelated1, unrelated2} -> missing target_prop!
-    Shape* shape3 = registry.transition_to(registry.transition_to(root, "unrelated1"), "unrelated2");
-    REQUIRE(shape3 != nullptr);
-    CHECK(!shape3->find_slot("target_prop").has_value());
-
-    InlineCache ic(88, "target_prop", 0, /*is_load=*/true);
-    int64_t shape_patch_dest = 0;
-    int32_t slot_patch_dest = -1;
-    ic.set_patch_point(&shape_patch_dest);
-    ic.set_slot_patch_point(&slot_patch_dest);
-
-    constexpr int32_t kBaseOffset = static_cast<int32_t>(offsetof(DynamicObject, inline_slots));
-
-    // Case 1: Patch with shape1 (slot 0)
-    bool ok1 = patch_monomorphic_ic(ic, shape1, 0);
-    CHECK(ok1);
-    CHECK_EQ(shape_patch_dest, reinterpret_cast<int64_t>(shape1));
-    CHECK_EQ(slot_patch_dest, kBaseOffset + 0); // slot 0 offset
-
-    // Case 2: Patch with shape2 (slot 2)
-    // Note: Pass a dummy slot = 999 to verify patch_monomorphic_ic extracts the true slot from shape2
-    bool ok2 = patch_monomorphic_ic(ic, shape2, 999);
-    CHECK(ok2);
-    CHECK_EQ(shape_patch_dest, reinterpret_cast<int64_t>(shape2));
-    CHECK_EQ(slot_patch_dest, kBaseOffset + 16); // slot 2 * 8 = 16 offset
-
-    // Case 3: Patch with shape3 (does not contain target_prop!)
-    shape_patch_dest = 0xAA;
-    slot_patch_dest = 0x55;
-    bool ok3 = patch_monomorphic_ic(ic, shape3, 0);
-    CHECK(!ok3); // Must fail validation!
-    CHECK_EQ(shape_patch_dest, 0xAA); // Unmodified
-    CHECK_EQ(slot_patch_dest, 0x55);  // Unmodified
-
-    // Case 4: Null shape validation
-    bool ok4 = patch_monomorphic_ic(ic, nullptr, 0);
-    CHECK(!ok4);
 }
 
 // ============================================================================

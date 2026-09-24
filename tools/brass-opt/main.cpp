@@ -139,7 +139,6 @@ int emit(const OptCli& cli, brass::Module& mod) {
         o.osr_threshold = cli.osr_threshold;
         o.enable_schedule_insns = cli.enable_schedule_insns;
         o.enable_software_pipeline = cli.enable_software_pipeline;
-        o.dump_ic_stats = cli.dump_ic_stats;
         o.dump_tiering_stats = cli.dump_tiering_stats;
         o.enable_background_compile = cli.enable_background_compile;
         o.jit_threads = cli.jit_threads;

@@ -95,6 +95,10 @@ void FastInterpreter::register_builtin_host_functions() {
     });
 
     register_external_function("brass_gc_collect", [](FastInterpreter& interp, const std::vector<RuntimeValue>&) -> RuntimeValue {
+        if (auto* host = host_heap()) {
+            host->collect();
+            return RuntimeValue::from_void();
+        }
         interp.gc().collect();
         return RuntimeValue::from_void();
     });

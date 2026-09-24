@@ -1,11 +1,19 @@
 #include "test_framework.hpp"
 #include <brass/runtime/type_feedback.hpp>
-#include <brass/runtime/shape.hpp>
 #include <sstream>
 
 using namespace brass;
 using namespace brass::runtime;
 using namespace brass::test;
+
+namespace {
+// Stand-ins for a host's hidden classes: brass only records and compares a
+// shape's identity, so any distinct addresses do.
+struct FakeShape { int id; };
+FakeShape g_shape_x{1};
+FakeShape g_shape_xy{2};
+FakeShape g_shape_root{0};
+} // namespace
 
 TEST_CASE("TypeFeedback - Recording call targets and monomorphic, polymorphic, megamorphic transitions") {
     TypeFeedbackVector tfv("test_func");
@@ -69,10 +77,8 @@ TEST_CASE("TypeFeedback - Recording call targets and monomorphic, polymorphic, m
 TEST_CASE("TypeFeedback - Property shape recording and transitions") {
     TypeFeedbackVector tfv("prop_test");
 
-    ShapeRegistry shape_reg;
-    Shape* root = shape_reg.get_root_shape();
-    Shape* s1 = shape_reg.transition_to(root, "x");
-    Shape* s2 = shape_reg.transition_to(s1, "y");
+    HostShapeId s1 = &g_shape_x;
+    HostShapeId s2 = &g_shape_xy;
 
     // Record shape s1 at site_id 10
     tfv.record_property_shape(10, s1, 0);
@@ -117,9 +123,7 @@ TEST_CASE("TypeFeedback - FeedbackRegistry singleton and C bridge functions") {
     CHECK_EQ(slot->get_monomorphic_target()->target_name, "target_xyz");
 
     // Test property C bridge
-    ShapeRegistry shape_reg;
-    Shape* root = shape_reg.get_root_shape();
-    brass_record_property_feedback("test_bridge_fn", 99, root, 4);
+    brass_record_property_feedback("test_bridge_fn", 99, &g_shape_root, 4);
     const auto* prop_slot = tfv->find_slot(99);
     REQUIRE(prop_slot != nullptr);
     CHECK_EQ(prop_slot->kind, FeedbackSlotKind::Property);

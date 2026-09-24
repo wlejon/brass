@@ -71,7 +71,6 @@ void print_usage(std::ostream& os, const char* prog) {
        << "  --pgo-use=<file>      Load profile data (.bprof) for profile-guided optimization\n"
        << "  --dump-branch-probabilities Dump block frequencies and edge branch probabilities\n"
        << "  --enable-pic          Enable Polymorphic Inline Caching for dynamic property accesses\n"
-       << "  --dump-ic-stats       Dump Inline Cache hit/miss and state statistics\n"
        << "  --enable-osr          Enable On-Stack Replacement (OSR) in interpreter\n"
        << "  --osr-threshold=<N>   Loop backedge threshold for OSR migration (default: 100)\n"
        << "  --dump-tiering-stats  Dump tiering feedback and OSR statistics\n"
@@ -152,7 +151,6 @@ bool apply_flag(std::string_view arg, OptCli& cli) {
         {{"--dump-parallel-stats"}, {&OptCli::dump_parallel_stats}},
         {{"--enable-pic"}, {&OptCli::enable_pic}},
         {{"--no-pic"}, {&OptCli::enable_pic}, false},
-        {{"--dump-ic-stats"}, {&OptCli::dump_ic_stats}},
         {{"-c", "--compile"}, {&OptCli::compile_object}},
         {{"-shared"}, {&OptCli::emit_shared}},
         {{"--jit"}, {&OptCli::use_jit}},

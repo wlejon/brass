@@ -5,8 +5,6 @@
 #include <brass/runtime/tiering.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/code_installer.hpp>
-#include <brass/runtime/shape.hpp>
-#include <brass/runtime/object.hpp>
 #include <brass/runtime/coroutine.hpp>
 #include <brass/mir/coro_transform.hpp>
 #include <brass/mir/verifier.hpp>
@@ -496,26 +494,24 @@ TEST_CASE("Differential - FastInterpreter vs Oracle: Closures and Environments")
 }
 
 // ============================================================================
-// 4. Shapes and Property Access Differential Verification
+// 4. Host Object Property Access Differential Verification
 // ============================================================================
 
-TEST_CASE("Differential - FastInterpreter vs Oracle: Shapes and Inline Caches") {
-    ShapeRegistry registry;
-    Shape* root = registry.get_root_shape();
+namespace {
+// A host's object, as brass sees one: opaque memory whose layout the host
+// owns. Its "shape" word is only there to show brass never needs to read it.
+struct HostObject {
+    const void* shape;
+    int64_t x;
+    int64_t y;
+    int64_t z;
+};
+} // namespace
 
-    Shape* s_x = registry.transition_to(root, "x");
-    Shape* s_xy = registry.transition_to(s_x, "y");
-    Shape* s_xyz = registry.transition_to(s_xy, "z");
-
-    DynamicObject* obj = DynamicObject::create(nullptr, root);
-    obj->set_property("x", HostValue::from_i32(10), registry);
-    obj->set_property("y", HostValue::from_i32(20), registry);
-    obj->set_property("z", HostValue::from_i32(30), registry);
-
-    CHECK_EQ(obj->shape, s_xyz);
-    CHECK_EQ(obj->get_property("x").as_i32(), 10);
-    CHECK_EQ(obj->get_property("y").as_i32(), 20);
-    CHECK_EQ(obj->get_property("z").as_i32(), 30);
+TEST_CASE("Differential - FastInterpreter vs Oracle: Host Object Property Access") {
+    static const int kShapeXyz = 0;
+    HostObject host_obj{&kShapeXyz, 10, 20, 30};
+    HostObject* obj = &host_obj;
 
     // Module accessing properties through host object functions
     Module mod("diff_shapes");
@@ -538,16 +534,13 @@ TEST_CASE("Differential - FastInterpreter vs Oracle: Shapes and Inline Caches") 
 
     auto setup_props = [](auto& interp) {
         brass::HostFn fn_x = [](Interpreter&, const std::vector<RuntimeValue>& args) -> RuntimeValue {
-            auto* o = reinterpret_cast<DynamicObject*>(args[0].as_ptr());
-            return RuntimeValue::from_i64(o->get_property("x").as_i32());
+            return RuntimeValue::from_i64(reinterpret_cast<const HostObject*>(args[0].as_ptr())->x);
         };
         brass::HostFn fn_y = [](Interpreter&, const std::vector<RuntimeValue>& args) -> RuntimeValue {
-            auto* o = reinterpret_cast<DynamicObject*>(args[0].as_ptr());
-            return RuntimeValue::from_i64(o->get_property("y").as_i32());
+            return RuntimeValue::from_i64(reinterpret_cast<const HostObject*>(args[0].as_ptr())->y);
         };
         brass::HostFn fn_z = [](Interpreter&, const std::vector<RuntimeValue>& args) -> RuntimeValue {
-            auto* o = reinterpret_cast<DynamicObject*>(args[0].as_ptr());
-            return RuntimeValue::from_i64(o->get_property("z").as_i32());
+            return RuntimeValue::from_i64(reinterpret_cast<const HostObject*>(args[0].as_ptr())->z);
         };
         interp.register_external_function("brass_get_prop_x", fn_x);
         interp.register_external_function("brass_get_prop_y", fn_y);
@@ -565,8 +558,6 @@ TEST_CASE("Differential - FastInterpreter vs Oracle: Shapes and Inline Caches") 
     CHECK_EQ(o_res.as_i64(), 60);
     CHECK_EQ(f_res.as_i64(), 60);
     CHECK_EQ(o_res.as_i64(), f_res.as_i64());
-
-    DynamicObject::destroy_non_gc(obj);
 }
 
 // ============================================================================

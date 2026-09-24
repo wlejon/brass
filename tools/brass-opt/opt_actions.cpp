@@ -10,7 +10,6 @@
 #include <brass/object/macho_writer.hpp>
 #include <brass/object/object_writer.hpp>
 #include <brass/target/aot_linker.hpp>
-#include <brass/runtime/inline_cache.hpp>
 #include <brass/runtime/tiering.hpp>
 #include <brass/runtime/background_compiler.hpp>
 #include <brass/runtime/code_installer.hpp>
@@ -291,9 +290,6 @@ bool execute_run_function(Module& mod, const RunFunctionOptions& opts) {
             }
             if (!fn->return_type().is_void()) {
                 std::cout << result << "\n";
-            }
-            if (opts.dump_ic_stats) {
-                runtime::ICRegistry::global().dump_stats(std::cout);
             }
         } catch (const std::exception& ex) {
             std::cerr << "JIT Execution error: " << ex.what() << "\n";

@@ -1,6 +1,7 @@
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/gc/generational_gc.hpp>
 #include <brass/gc/runtime_gc.hpp>
+#include <brass/gc/host_heap.hpp>
 #include <brass/runtime/parallel_runtime.hpp>
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
@@ -106,6 +107,10 @@ void Interpreter::register_builtin_host_functions() {
     });
 
     register_external_function("brass_gc_collect", [](Interpreter& interp, const std::vector<RuntimeValue>&) -> RuntimeValue {
+        if (auto* host = host_heap()) {
+            host->collect();
+            return RuntimeValue::from_void();
+        }
         interp.gc().collect();
         return RuntimeValue::from_void();
     });
@@ -138,6 +143,7 @@ void Interpreter::collect_all_roots(std::vector<uintptr_t*>& roots) {
 }
 
 uintptr_t Interpreter::allocate_gc(size_t size, uint64_t pointer_mask, uint32_t type_tag) {
+    if (host_heap()) return host_heap_allocate(size, pointer_mask, type_tag);
     std::vector<uintptr_t*> roots;
     collect_all_roots(roots);
     return gc_.allocate(size, pointer_mask, type_tag, roots);

@@ -36,7 +36,6 @@ struct RunFunctionOptions {
     uint64_t osr_threshold = 100;
     bool enable_schedule_insns = true;
     bool enable_software_pipeline = false;
-    bool dump_ic_stats = false;
     bool dump_tiering_stats = false;
     bool enable_background_compile = false;
     size_t jit_threads = 2;

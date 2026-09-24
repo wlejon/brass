@@ -11,7 +11,12 @@
 
 namespace brass::runtime {
 
-class Shape;
+// The identity of an object layout as the host's object model defines it
+// (a hidden-class pointer, a shape id cast to a pointer, ...). brass records
+// and compares these; it never dereferences one. What a shape means — which
+// slot holds a property, where the slot lives — is the host's; property
+// feedback carries the slot word the host reported alongside.
+using HostShapeId = const void*;
 
 enum class FeedbackSlotKind : uint8_t {
     Call,
@@ -53,7 +58,7 @@ struct FeedbackSlot {
     }
 
     // For properties
-    std::vector<Shape*> observed_shapes;
+    std::vector<HostShapeId> observed_shapes;
     uint32_t slot_index = 0;
 
     [[nodiscard]] bool is_property_monomorphic() const noexcept {
@@ -68,7 +73,7 @@ struct FeedbackSlot {
         return observed_shapes.size() > 4;
     }
 
-    [[nodiscard]] const Shape* get_monomorphic_shape() const noexcept {
+    [[nodiscard]] HostShapeId get_monomorphic_shape() const noexcept {
         return observed_shapes.size() == 1 ? observed_shapes[0] : nullptr;
     }
 };
@@ -91,7 +96,7 @@ public:
     FeedbackSlot& get_or_create_slot(uint32_t site_id, FeedbackSlotKind kind);
 
     void record_call_target(uint32_t site_id, uintptr_t target_addr, std::string_view target_name);
-    void record_property_shape(uint32_t site_id, Shape* shape, uint32_t slot_idx);
+    void record_property_shape(uint32_t site_id, HostShapeId shape, uint32_t slot_idx);
 
     [[nodiscard]] size_t slot_count() const noexcept { return slots_.size(); }
     void clear() noexcept { slots_.clear(); }
@@ -139,5 +144,5 @@ private:
 // TieringRegistry::type_feedback().
 extern "C" {
 void brass_record_call_feedback(const char* fn_name, uint32_t site_id, uintptr_t target_addr, const char* target_name);
-void brass_record_property_feedback(const char* fn_name, uint32_t site_id, brass::runtime::Shape* shape, uint32_t slot_idx);
+void brass_record_property_feedback(const char* fn_name, uint32_t site_id, brass::runtime::HostShapeId shape, uint32_t slot_idx);
 }

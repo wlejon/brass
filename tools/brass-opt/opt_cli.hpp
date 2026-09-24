@@ -76,7 +76,6 @@ struct OptCli {
     bool enable_schedule_insns = true;
     bool enable_software_pipeline = false;
     bool enable_pic = true;
-    bool dump_ic_stats = false;
     bool enable_osr = false;
     uint64_t osr_threshold = 0;
     bool dump_tiering_stats = false;

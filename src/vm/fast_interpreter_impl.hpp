@@ -3,6 +3,7 @@
 #include <brass/vm/fast_interpreter.hpp>
 #include <brass/gc/generational_gc.hpp>
 #include <brass/gc/runtime_gc.hpp>
+#include <brass/gc/host_heap.hpp>
 #include <brass/runtime/coroutine.hpp>
 #include <brass/runtime/deopt.hpp>
 #include <brass/runtime/tiering.hpp>

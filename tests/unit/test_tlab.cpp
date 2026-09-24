@@ -2,8 +2,6 @@
 #include <brass/brass.hpp>
 #include <brass/gc/tlab.hpp>
 #include <brass/embedding/host_gc.hpp>
-#include <brass/runtime/object.hpp>
-#include <brass/runtime/shape.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/module.hpp>
 #include <brass/mir/function.hpp>
@@ -14,6 +12,15 @@
 
 using namespace brass;
 using namespace brass::runtime;
+
+namespace {
+// A host object of 13 words: word 2 a pointer to another object, words
+// 3..10 tagged slots that may hold one, word 12 a pointer too. The layout
+// the TLAB tests allocate; its meaning is theirs alone.
+constexpr size_t kObjBytes = 104;
+constexpr uint64_t kObjMask = (1ULL << 2) | (0xFFULL << 3) | (1ULL << 12);
+constexpr uint32_t kObjTag = 100;
+} // namespace
 
 TEST_CASE("TLAB - Direct bump allocation and object initialization") {
     HostGC gc(128 * 1024);
@@ -28,9 +35,9 @@ TEST_CASE("TLAB - Direct bump allocation and object initialization") {
     CHECK_EQ(tlab.total_allocated, 0ULL);
 
     // Initial allocation triggers refill
-    constexpr size_t PAYLOAD = sizeof(DynamicObject); // 104 bytes
-    constexpr uint64_t MASK = DynamicObject::POINTER_MASK;
-    constexpr uint32_t TAG = DynamicObject::TYPE_TAG_DYNAMIC_OBJECT;
+    constexpr size_t PAYLOAD = kObjBytes; // 104 bytes
+    constexpr uint64_t MASK = kObjMask;
+    constexpr uint32_t TAG = kObjTag;
 
     uintptr_t obj1 = tlab.allocate_fast(PAYLOAD, MASK, TAG);
     REQUIRE(obj1 != 0);
@@ -75,7 +82,7 @@ TEST_CASE("TLAB - Exhaustion and automatic refill") {
     constexpr size_t NUM_OBJS = 20;
 
     for (size_t i = 0; i < NUM_OBJS; ++i) {
-        uintptr_t obj = tlab.allocate_fast(sizeof(DynamicObject), DynamicObject::POINTER_MASK, DynamicObject::TYPE_TAG_DYNAMIC_OBJECT);
+        uintptr_t obj = tlab.allocate_fast(kObjBytes, kObjMask, kObjTag);
         REQUIRE(obj != 0);
         CHECK(gc.is_valid_object(obj));
         allocated_objs.push_back(obj);
@@ -89,7 +96,7 @@ TEST_CASE("TLAB - Exhaustion and automatic refill") {
         const HostGcHeader* hdr = gc.get_header(obj);
         REQUIRE(hdr != nullptr);
         CHECK_EQ(hdr->size, 104U);
-        CHECK_EQ(hdr->type_tag, DynamicObject::TYPE_TAG_DYNAMIC_OBJECT);
+        CHECK_EQ(hdr->type_tag, kObjTag);
     }
 
     set_active_tlab(nullptr);
@@ -105,12 +112,12 @@ TEST_CASE("TLAB - Collection during TLAB retirement and object evacuation") {
     set_active_tlab(&tlab);
 
     // Allocate parent and child in TLAB
-    uintptr_t parent = tlab.allocate_fast(sizeof(DynamicObject), DynamicObject::POINTER_MASK, DynamicObject::TYPE_TAG_DYNAMIC_OBJECT);
-    uintptr_t child = tlab.allocate_fast(sizeof(DynamicObject), DynamicObject::POINTER_MASK, DynamicObject::TYPE_TAG_DYNAMIC_OBJECT);
+    uintptr_t parent = tlab.allocate_fast(kObjBytes, kObjMask, kObjTag);
+    uintptr_t child = tlab.allocate_fast(kObjBytes, kObjMask, kObjTag);
     REQUIRE(parent != 0);
     REQUIRE(child != 0);
 
-    // Field 2 (out_of_line_slots) in parent points to child (bit 2 in DynamicObject::POINTER_MASK)
+    // Field 2 (out_of_line_slots) in parent points to child (bit 2 in kObjMask)
     gc.write_field(parent, 2, child);
     // Write marker in child field 3
     gc.write_field(child, 3, 0xCAFEBABE12345678ULL);
@@ -140,7 +147,7 @@ TEST_CASE("TLAB - Collection during TLAB retirement and object evacuation") {
     CHECK_EQ(gc.read_field(new_child, 3), 0xCAFEBABE12345678ULL);
 
     // Subsequent allocation in TLAB works in new active semispace
-    uintptr_t after_gc = tlab.allocate_fast(sizeof(DynamicObject), DynamicObject::POINTER_MASK, DynamicObject::TYPE_TAG_DYNAMIC_OBJECT);
+    uintptr_t after_gc = tlab.allocate_fast(kObjBytes, kObjMask, kObjTag);
     REQUIRE(after_gc != 0);
     CHECK(gc.is_valid_object(after_gc));
 
@@ -159,7 +166,7 @@ TEST_CASE("TLAB - Stress mode compliance") {
     set_active_tlab(&tlab);
 
     // In stress mode, allocate_fast must return 0 to force out-of-line GC
-    uintptr_t obj = tlab.allocate_fast(sizeof(DynamicObject), DynamicObject::POINTER_MASK, DynamicObject::TYPE_TAG_DYNAMIC_OBJECT);
+    uintptr_t obj = tlab.allocate_fast(kObjBytes, kObjMask, kObjTag);
     CHECK_EQ(obj, 0ULL);
     CHECK_EQ(tlab.top, 0ULL);
     CHECK_EQ(tlab.end, 0ULL);
@@ -171,7 +178,7 @@ TEST_CASE("TLAB - Stress mode compliance") {
 
     // host_gc_alloc runs and forces collection on each call in stress mode
     size_t col_before = gc.collection_count();
-    uintptr_t direct_obj = host_gc_alloc(sizeof(DynamicObject), DynamicObject::POINTER_MASK, DynamicObject::TYPE_TAG_DYNAMIC_OBJECT);
+    uintptr_t direct_obj = host_gc_alloc(kObjBytes, kObjMask, kObjTag);
     REQUIRE(direct_obj != 0);
     CHECK(gc.is_valid_object(direct_obj));
     CHECK_EQ(gc.collection_count(), col_before + 1);
