@@ -8,6 +8,7 @@
 #include <vector>
 #include <array>
 #include <functional>
+#include <exception>
 #include <iosfwd>
 #include <cstring>
 
@@ -246,6 +247,23 @@ void set_thread_deopt_frame(const DeoptFrame* frame) noexcept;
 // call) restores the previous one when the scope ends.
 void register_deopt_handler(DeoptHandlerFn handler);
 DeoptHandlerFn get_deopt_handler();
+
+// Called by a deopt handler, before it returns, when the failing code is not
+// its own (an OSR call's handler seeing a guard of code outside its module).
+// The deopt entry then does what it does with no handler installed: the
+// native code takes its exit stub, and a guard with none aborts. The
+// handler's return value is ignored.
+void deopt_handler_decline() noexcept;
+
+// Called by a deopt handler whose Tier-0 continuation threw a MIR exception
+// (`value`, its raw bits) that must reach the native frames above the
+// deoptimized one as a native throw would: once the handler returns, the
+// deopt entry raises `value` as a brass exception to the first landing pad in
+// the native frames between the deoptimized frame (not included) and
+// `stack_limit` (the address of a local of the C++ frame that called the
+// native code). If none of them has one, `fallback` (the Tier-0 exception)
+// is rethrown unchanged. The handler's return value is ignored.
+void deopt_handler_throw_native(uint64_t value, uintptr_t stack_limit, std::exception_ptr fallback) noexcept;
 
 // Per-code deopt continuation: given the materialized frame, finishes the
 // function in a lower tier and returns its result bits. Registered by the

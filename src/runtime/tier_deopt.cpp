@@ -80,6 +80,25 @@ bool deopt_targets_valid(const Function& optimized, const Function* tier0, std::
                       " values, Tier-0 guard has " + std::to_string(g->state_map().size());
                 return false;
             }
+            // The resume id names the same guard: the same exit, and state
+            // values the Tier-0 guard reads as the types the optimized code
+            // wrote (a value retyped by optimization, say f64 demoted to i64,
+            // would be rebuilt from the wrong bits).
+            if (g->symbol() != inst->symbol()) {
+                why = site + " exits to '" + std::string(inst->symbol()) + "' but the Tier-0 guard exits to '" +
+                      std::string(g->symbol()) + "'";
+                return false;
+            }
+            for (size_t i = 0; i < g->state_map().size(); ++i) {
+                const Value* ov = inst->state_map()[i];
+                const Value* tv = g->state_map()[i];
+                if (!ov || !tv) continue;
+                if (ov->type() != tv->type()) {
+                    why = site + " state value " + std::to_string(i) + " is " + std::string(ov->type().name()) +
+                          " but the Tier-0 guard's is " + std::string(tv->type().name());
+                    return false;
+                }
+            }
             if (!exit_stub_of(*tier0, *g) && !tier0->get_resume_target(g->resume_id())) {
                 why = site + " has neither an exit stub function nor a resume target";
                 return false;

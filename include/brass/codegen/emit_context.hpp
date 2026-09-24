@@ -19,6 +19,16 @@
 
 namespace brass::codegen {
 
+// Code (function-relative [begin, end)) that runs with RSP `bytes` below
+// the frame the prologue built: a guard exit's deopt record. The unwind
+// info describes it with a chained entry, so a stack walk or exception
+// dispatch passing through a call made there finds the caller's frame.
+struct StackAdjustRegion {
+    uint32_t begin = 0;
+    uint32_t end = 0;
+    uint32_t bytes = 0;
+};
+
 struct SafepointRecord {
     size_t code_offset = 0;
     uint32_t safepoint_id = 0;
@@ -37,6 +47,7 @@ struct CompilationResult {
     std::vector<runtime::PatchSite> patch_sites;
     FunctionDebugTable debug_table;
     runtime::FunctionExceptionTable exception_table;
+    std::vector<StackAdjustRegion> stack_adjust_regions;
 };
 
 class EmitContext {
@@ -52,6 +63,7 @@ private:
     x64::CodeBuffer buffer_;
     x64::X64Encoder enc_;
     std::vector<SafepointRecord> safepoints_;
+    std::vector<StackAdjustRegion> stack_adjust_regions_;
     std::vector<StackMapRecord> stack_map_records_;
     std::unordered_map<uint32_t, x64::Label> block_labels_;
     std::unordered_map<uint8_t, int32_t> callee_gpr_to_slot_;

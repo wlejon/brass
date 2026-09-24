@@ -403,36 +403,74 @@ void CoffUnwindBuilder::build_unwind_info(
             runtime::emit_win64_seh_scope_table(*xdata_sec, fn.exception_table, fn.name);
         }
 
-        // Emit RUNTIME_FUNCTION in .pdata (12 bytes)
+        // A RUNTIME_FUNCTION (12 bytes): [begin, end) of this function, and
+        // its UNWIND_INFO; into .pdata, or into a chained UNWIND_INFO.
+        auto emit_runtime_function = [&](Section& sec, uint32_t begin, uint32_t end, size_t info_offset) {
+            size_t off = sec.data.size();
+            const int64_t addends[3] = {begin, end, static_cast<int64_t>(info_offset)};
+            for (int k = 0; k < 3; ++k) {
+                sec.emit32(static_cast<uint32_t>(addends[k]));
+                ObjectRelocation r;
+                r.offset = off + static_cast<size_t>(k) * 4;
+                r.kind = RelocKind::Addr32NB;
+                r.symbol_name = k < 2 ? fn.name : std::string(".xdata");
+                r.addend = addends[k];
+                sec.relocations.push_back(std::move(r));
+            }
+        };
+
+        // Guard exits run with RSP below the prologue's frame. Each gets a
+        // chained entry that undoes that allocation and then the primary's
+        // prologue; the code between them gets a chained entry with no codes
+        // of its own (the primary entry's prologue offsets would misread it).
+        const auto& regions = fn.stack_adjust_regions;
+        const uint32_t fn_end = static_cast<uint32_t>(fn.text_size);
+        const uint32_t primary_end = regions.empty() ? fn_end : regions.front().begin;
+        auto emit_chained_info = [&](uint32_t alloc_bytes) {
+            xdata_sec->align_to(4);
+            size_t off = xdata_sec->data.size();
+            std::vector<uint16_t> codes;
+            if (alloc_bytes > 0) {
+                if (alloc_bytes % 8 != 0) {
+                    throw std::runtime_error("x64 unwind: guard exit allocation of '" + fn.name + "' is not 8-aligned");
+                }
+                if (alloc_bytes <= 128) {
+                    codes.push_back(static_cast<uint16_t>((coff::UWOP_ALLOC_SMALL << 8) |
+                                                          (((alloc_bytes - 8) / 8) << 12)));
+                } else if (alloc_bytes <= 512 * 1024 - 8) {
+                    codes.push_back(static_cast<uint16_t>(coff::UWOP_ALLOC_LARGE << 8));
+                    codes.push_back(static_cast<uint16_t>(alloc_bytes / 8));
+                } else {
+                    codes.push_back(static_cast<uint16_t>((coff::UWOP_ALLOC_LARGE << 8) | (1u << 12)));
+                    codes.push_back(static_cast<uint16_t>(alloc_bytes & 0xFFFF));
+                    codes.push_back(static_cast<uint16_t>(alloc_bytes >> 16));
+                }
+            }
+            xdata_sec->emit8(static_cast<uint8_t>(0x01 | (0x04 << 3))); // Version 1, UNW_FLAG_CHAININFO
+            xdata_sec->emit8(0);                                        // no prologue: every code applies
+            xdata_sec->emit8(static_cast<uint8_t>(codes.size()));
+            xdata_sec->emit8(0);
+            for (uint16_t c : codes) xdata_sec->emit16(c);
+            if (codes.size() % 2 != 0) xdata_sec->emit16(0);
+            emit_runtime_function(*xdata_sec, 0, primary_end, xdata_offset);
+            return off;
+        };
+
         pdata_sec->align_to(4);
-        size_t pdata_offset = pdata_sec->data.size();
-
-        // 1. BeginAddress
-        pdata_sec->emit32(0);
-        ObjectRelocation r0;
-        r0.offset = pdata_offset + 0;
-        r0.kind = RelocKind::Addr32NB;
-        r0.symbol_name = fn.name;
-        r0.addend = 0;
-        pdata_sec->relocations.push_back(std::move(r0));
-
-        // 2. EndAddress
-        pdata_sec->emit32(static_cast<uint32_t>(fn.text_size));
-        ObjectRelocation r1;
-        r1.offset = pdata_offset + 4;
-        r1.kind = RelocKind::Addr32NB;
-        r1.symbol_name = fn.name;
-        r1.addend = static_cast<int64_t>(fn.text_size);
-        pdata_sec->relocations.push_back(std::move(r1));
-
-        // 3. UnwindInfoAddress
-        pdata_sec->emit32(static_cast<uint32_t>(xdata_offset));
-        ObjectRelocation r2;
-        r2.offset = pdata_offset + 8;
-        r2.kind = RelocKind::Addr32NB;
-        r2.symbol_name = ".xdata";
-        r2.addend = static_cast<int64_t>(xdata_offset);
-        pdata_sec->relocations.push_back(std::move(r2));
+        emit_runtime_function(*pdata_sec, 0, primary_end, xdata_offset);
+        uint32_t cursor = primary_end;
+        for (size_t i = 0; i < regions.size(); ++i) {
+            const auto& reg = regions[i];
+            if (reg.begin < cursor || reg.end < reg.begin || reg.end > fn_end) {
+                throw std::runtime_error("x64 unwind: guard exit regions of '" + fn.name + "' overlap or are out of order");
+            }
+            if (reg.begin > cursor) emit_runtime_function(*pdata_sec, cursor, reg.begin, emit_chained_info(0));
+            if (reg.end > reg.begin) emit_runtime_function(*pdata_sec, reg.begin, reg.end, emit_chained_info(reg.bytes));
+            cursor = reg.end;
+        }
+        if (cursor < fn_end && !regions.empty()) {
+            emit_runtime_function(*pdata_sec, cursor, fn_end, emit_chained_info(0));
+        }
     }
 }
 

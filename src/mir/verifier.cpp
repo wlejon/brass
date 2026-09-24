@@ -12,6 +12,25 @@
 
 namespace brass {
 
+namespace {
+
+// Whether some guard of `fn` without an exit-stub function resumes in a
+// resume_table block of its id.
+bool guards_resume_in_table(const Function& fn) {
+    for (const BasicBlock* bb : fn.blocks()) {
+        if (!bb) continue;
+        for (const Instruction* inst : *const_cast<BasicBlock*>(bb)) {
+            if (inst && inst->opcode() == Opcode::guard && !fn.guard_exit_stub(*inst) &&
+                fn.get_resume_target(inst->resume_id())) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+} // namespace
+
 void Verifier::report_error(std::string msg) {
     has_error_ = true;
     if (diag_) {
@@ -749,6 +768,19 @@ bool Verifier::verify_function(const Function& fn) {
                                 }
                             }
                         }
+                    } else if (guards_resume_in_table(fn)) {
+                        // The function resumes its guards in resume_table
+                        // blocks, but not this one: Tier 0 would have nowhere
+                        // to go when it fails (text MIR written when every
+                        // guard had id 0 and shared `entry 0`). A function
+                        // none of whose guards has a resume target is
+                        // optimizer-level IR that passes and tests build; it
+                        // is left alone.
+                        report_error(inst_prefix + "Guard (resume id " + std::to_string(inst->resume_id()) +
+                                     ") has neither an exit stub (no function '@" + std::string(inst->symbol()) +
+                                     "') nor a resume target (no resume_table entry " +
+                                     std::to_string(inst->resume_id()) + "). Guards resuming at one block need " +
+                                     "a resume_table entry per resume id.");
                     }
                     break;
                 }

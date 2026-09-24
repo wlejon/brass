@@ -251,6 +251,7 @@ CompilationResult EmitContext::compile() {
         }
     }
     result.patch_sites = std::move(patch_sites_);
+    result.stack_adjust_regions = std::move(stack_adjust_regions_);
 
     // 6. Build exception table
     result.exception_table.set_function_name(std::string(fn_.name));
@@ -553,6 +554,9 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
                 remaining -= kPage;
             }
             if (remaining > 0) enc_.sub(GPR::RSP, static_cast<int32_t>(remaining));
+            // Up to the end of this exit, the calls below run with RSP
+            // total_alloc under the prologue's frame (the unwind info says so).
+            const size_t adjust_begin = buffer_.size();
             const int32_t rec_disp = static_cast<int32_t>(shadow_space);
             const int32_t slots_disp = rec_disp + static_cast<int32_t>(header_bytes);
             const int32_t kinds_disp = slots_disp + static_cast<int32_t>(slots_bytes);
@@ -660,6 +664,9 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
                 // without an exit stub: never reached.
                 enc_.ud2();
             }
+            stack_adjust_regions_.push_back({static_cast<uint32_t>(adjust_begin),
+                                             static_cast<uint32_t>(buffer_.size()),
+                                             static_cast<uint32_t>(total_alloc)});
             break;
         }
         default:

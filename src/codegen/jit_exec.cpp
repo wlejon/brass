@@ -548,8 +548,33 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
                 }
                 case object::RelocKind::SecRel32:
                 case object::RelocKind::Addr32NB: {
-                    uint32_t rva = static_cast<uint32_t>(reinterpret_cast<uint8_t*>(target_addr) - module_base + r.addend);
-                    *reinterpret_cast<uint32_t*>(patch_loc) = rva;
+                    int64_t rva = reinterpret_cast<int64_t>(target_addr) + r.addend - reinterpret_cast<int64_t>(module_base);
+                    if (r.kind == object::RelocKind::Addr32NB && (rva < 0 || rva > int64_t(UINT32_MAX)) &&
+                        target_.is_x64() && r.addend == 0) {
+                        // An image-relative reference to host code outside
+                        // the JIT image (the SEH personality in .xdata): it
+                        // goes through a jump thunk inside the image. Truncated,
+                        // it sent the OS dispatcher to a wrong address.
+                        void* tramp_addr = nullptr;
+                        if (auto tramp_it = trampolines.find(r.symbol_name); tramp_it != trampolines.end()) {
+                            tramp_addr = tramp_it->second;
+                        } else if (trampoline_ptr && trampoline_used + 16 <= trampoline_capacity) {
+                            uint8_t* t = trampoline_ptr + trampoline_used;
+                            trampoline_used += 16;
+                            t[0] = 0xFF; t[1] = 0x25;
+                            t[2] = 0x00; t[3] = 0x00; t[4] = 0x00; t[5] = 0x00;
+                            *reinterpret_cast<uint64_t*>(t + 6) = reinterpret_cast<uint64_t>(target_addr);
+                            trampolines[r.symbol_name] = t;
+                            tramp_addr = t;
+                        }
+                        if (tramp_addr) rva = reinterpret_cast<int64_t>(tramp_addr) - reinterpret_cast<int64_t>(module_base);
+                    }
+                    if (r.kind == object::RelocKind::Addr32NB && (rva < 0 || rva > int64_t(UINT32_MAX))) {
+                        std::cerr << "JIT Error: image-relative reference to '" << r.symbol_name
+                                  << "' is outside the JIT image's 4 GB range\n";
+                        return false;
+                    }
+                    *reinterpret_cast<uint32_t*>(patch_loc) = static_cast<uint32_t>(rva);
                     break;
                 }
                 case object::RelocKind::Abs32: {

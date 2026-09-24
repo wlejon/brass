@@ -24,6 +24,7 @@
 #include <windows.h>
 #endif
 
+#include <cstring>
 #include <stdexcept>
 #include <string>
 
@@ -141,13 +142,30 @@ extern "C" int brass_seh_personality(
     return ExceptionContinueSearch; // unreachable
 }
 
+// Whether a frame's language handler is brass_seh_personality: directly, or
+// (x64 JIT code beyond 4 GB of it) through the JIT image's jump thunk
+// `jmp qword ptr [rip+0]; <address>` (jit_exec.cpp).
+static bool is_brass_handler(PEXCEPTION_ROUTINE handler) noexcept {
+    const void* personality = reinterpret_cast<const void*>(&brass_seh_personality);
+    if (!handler) return false;
+    if (reinterpret_cast<const void*>(handler) == personality) return true;
+#if defined(_M_X64) || defined(__x86_64__)
+    const auto* t = reinterpret_cast<const uint8_t*>(handler);
+    if (t[0] == 0xFF && t[1] == 0x25 && t[2] == 0 && t[3] == 0 && t[4] == 0 && t[5] == 0) {
+        uint64_t target = 0;
+        std::memcpy(&target, t + 6, sizeof(target));
+        return target == reinterpret_cast<uint64_t>(personality);
+    }
+#endif
+    return false;
+}
+
 // Search pass run before raising: is there a brass landing pad anywhere up
 // the stack, as the OS unwinder sees it? Walks the same .pdata/.xdata the
 // dispatcher will, so a hit here is a hit there.
 static bool seh_pad_exists() noexcept {
     CONTEXT ctx;
     RtlCaptureContext(&ctx);
-    const void* personality = reinterpret_cast<const void*>(&brass_seh_personality);
     for (int depth = 0; depth < 100000; ++depth) {
 #if defined(_M_ARM64) || defined(__aarch64__)
         DWORD64 pc = ctx.Pc;
@@ -161,7 +179,7 @@ static bool seh_pad_exists() noexcept {
         PVOID handler_data = nullptr;
         DWORD64 establisher = 0;
         PEXCEPTION_ROUTINE handler = RtlVirtualUnwind(UNW_FLAG_EHANDLER, image_base, pc, fe, &ctx,
-                                                      &handler_data, &establisher, nullptr);        if (handler && reinterpret_cast<const void*>(handler) == personality &&
+                                                      &handler_data, &establisher, nullptr);        if (is_brass_handler(handler) &&
             brass_seh_find_landing_pad(pc, image_base, handler_data) != 0) {
             return true;
         }
@@ -177,7 +195,72 @@ bool brass_seh_raise(HostValue val) {
     return false; // unreachable
 }
 
+bool brass_seh_raise_above(HostValue val, const void* deopted_entry, uintptr_t stack_limit) {
+    if (!deopted_entry) return false;
+    // The walk the dispatcher will make: the frames up to the deoptimized
+    // one are C++ frames (no brass pads) and the deoptimized frame's call
+    // into the deopt entry lies in no invoke scope, so the first pad found
+    // above it is the one the dispatcher lands in.
+    CONTEXT ctx;
+    RtlCaptureContext(&ctx);
+    bool past_deopted = false;
+    for (int depth = 0; depth < 100000; ++depth) {
+#if defined(_M_ARM64) || defined(__aarch64__)
+        DWORD64 pc = ctx.Pc;
 #else
+        DWORD64 pc = ctx.Rip;
+#endif
+        if (pc == 0) return false;
+        DWORD64 image_base = 0;
+        PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(pc, &image_base, nullptr);
+        if (!fe) return false;
+        // The function's start: a guard exit's pc lies in a chained entry
+        // (coff_unwind.cpp), which names the function's primary entry.
+        DWORD64 fn_begin = image_base + fe->BeginAddress;
+#if defined(_M_X64) || defined(__x86_64__)
+        for (const RUNTIME_FUNCTION* e = fe;;) {
+            const uint8_t* ui = reinterpret_cast<const uint8_t*>(image_base + e->UnwindData);
+            if (((ui[0] >> 3) & UNW_FLAG_CHAININFO) == 0) {
+                fn_begin = image_base + e->BeginAddress;
+                break;
+            }
+            const size_t slots = (static_cast<size_t>(ui[2]) + 1) & ~size_t(1);
+            e = reinterpret_cast<const RUNTIME_FUNCTION*>(ui + 4 + 2 * slots);
+        }
+#endif
+        const bool is_deopted = !past_deopted &&
+            fn_begin == static_cast<DWORD64>(reinterpret_cast<uintptr_t>(deopted_entry));
+        PVOID handler_data = nullptr;
+        DWORD64 establisher = 0;
+        PEXCEPTION_ROUTINE handler = RtlVirtualUnwind(UNW_FLAG_EHANDLER, image_base, pc, fe, &ctx,
+                                                      &handler_data, &establisher, nullptr);
+        if (is_deopted) {
+            // Its own pads belong to the code the Tier-0 continuation ran.
+            if (is_brass_handler(handler) &&
+                brass_seh_find_landing_pad(pc, image_base, handler_data) != 0) {
+                return false;
+            }
+            past_deopted = true;
+            continue;
+        }
+        if (!past_deopted) continue;
+        if (establisher >= stack_limit) return false;
+        if (is_brass_handler(handler) &&
+            brass_seh_find_landing_pad(pc, image_base, handler_data) != 0) {
+            ULONG_PTR info[1] = { static_cast<ULONG_PTR>(val.raw()) };
+            RaiseException(BRASS_SEH_EXCEPTION_CODE, EXCEPTION_NONCONTINUABLE, 1, info);
+            __fastfail(FAST_FAIL_INVALID_ARG);
+        }
+    }
+    return false;
+}
+
+#else
+
+bool brass_seh_raise_above(HostValue, const void*, uintptr_t) {
+    return false;
+}
+
 
 // No OS unwinder calls this off Windows; it exists so objects referencing it
 // link, and it never claims a frame.

@@ -144,6 +144,9 @@ struct CompiledFunctionInfo {
     runtime::FunctionResumeTable resume_table;
     std::vector<runtime::PatchSite> patch_sites;
     runtime::FunctionExceptionTable exception_table;
+    // x64: code that runs with RSP below the prologue's frame (guard exits),
+    // in ascending order; described by chained unwind entries.
+    std::vector<codegen::StackAdjustRegion> stack_adjust_regions;
 };
 
 struct ObjectFile {

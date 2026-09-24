@@ -75,22 +75,47 @@ std::vector<RuntimeValue> guard_state_values(const Function& fn, const DeoptFram
 // the OSR code calls the module's own copies of its callees, which have no
 // resumer: `osr_fn` for its own code, another function of its module for
 // that function's copy. Anything else (no code entry, code of another
-// module) cannot be resumed here, and resuming the OSR'd function in its
-// place would give a wrong result: a hard error.
-const Function& deopt_owner(const CompiledModule& osr_mod, const Function& osr_fn, const DeoptFrame& dframe) {
+// module, such as a module the host compiled and calls through a pointer) is
+// not this call's to resume: null, and the handler passes it on
+// (decline_foreign_deopt).
+const Function* deopt_owner(const CompiledModule& osr_mod, const Function& osr_fn, const DeoptFrame& dframe) {
     if (dframe.code_entry) {
-        if (osr_mod.get_symbol_address(osr_fn.name()) == dframe.code_entry) return osr_fn;
+        if (osr_mod.get_symbol_address(osr_fn.name()) == dframe.code_entry) return &osr_fn;
         if (const Module* mod = osr_fn.parent()) {
             for (const Function* f : mod->functions()) {
                 if (f && !f->blocks().empty() && osr_mod.get_symbol_address(f->name()) == dframe.code_entry) {
-                    return *f;
+                    return f;
                 }
             }
         }
     }
-    throw InterpreterException("A guard (resume id " + std::to_string(dframe.resume_id) +
-                               ") failed during the OSR call of '" + std::string(osr_fn.name()) +
-                               "' in code that is not a function of its OSR module");
+    return nullptr;
+}
+
+// A guard failure of code outside the OSR module: the handler the OSR call
+// replaced (an outer OSR call's) gets it, else the deopt entry does what it
+// does with no handler (the code's own exit stub).
+void* decline_foreign_deopt(const DeoptHandlerFn& prev, const DeoptFrame& dframe) {
+    if (prev) return prev(dframe);
+    deopt_handler_decline();
+    return nullptr;
+}
+
+// Runs a callee's Tier-0 continuation for OSR code. A MIR exception it throws
+// must reach the OSR code's landing pads as a native throw does (a C++
+// exception unwinding into them is not one): the deopt entry raises it to
+// the first pad above the callee's frame and below `stack_limit`, or rethrows
+// it when there is none.
+template <typename Run>
+RuntimeValue run_callee_continuation(uintptr_t stack_limit, Run&& run) {
+    try {
+        return run();
+    } catch (const InterpreterThrownException& ex) {
+        deopt_handler_throw_native(ex.value().raw_bits(), stack_limit, std::current_exception());
+    } catch (const BrassException& ex) {
+        deopt_handler_throw_native(ex.value().raw(), stack_limit, std::current_exception());
+    }
+    return RuntimeValue();
 }
 
 // Whether a guard of `fn` failing in its OSR code may come from an inner
@@ -286,15 +311,21 @@ bool OsrCoordinator::try_osr_migration(
     bool deopt_occurred = false;
     RuntimeValue deopt_res;
 
+    // Every native frame of this OSR call lies below this frame's locals.
+    const uintptr_t osr_stack_limit = reinterpret_cast<uintptr_t>(&mig_frame);
     auto prev_handler = get_deopt_handler();
     register_deopt_handler([&](const DeoptFrame& dframe) -> void* {
-        const Function& owner = deopt_owner(*comp_mod, fn, dframe);
+        const Function* owner_p = deopt_owner(*comp_mod, fn, dframe);
+        if (!owner_p) return decline_foreign_deopt(prev_handler, dframe);
+        const Function& owner = *owner_p;
         total_native_deopts_++;
         registry().get_or_create(owner.name()).record_deoptimization();
         if (&owner != &fn) {
             // A callee's copy: finish that call in Tier 0 and hand its
             // result back to the OSR code, which carries on.
-            RuntimeValue r = interp.resume_after_guard(owner, dframe.resume_id, guard_state_values(owner, dframe), nullptr);
+            RuntimeValue r = run_callee_continuation(osr_stack_limit, [&] {
+                return interp.resume_after_guard(owner, dframe.resume_id, guard_state_values(owner, dframe), nullptr);
+            });
             return reinterpret_cast<void*>(r.as_u64());
         }
         deopt_occurred = true;
@@ -450,12 +481,16 @@ bool OsrCoordinator::try_osr_migration(
     bool deopt_occurred = false;
     RuntimeValue deopt_res;
 
+    // Every native frame of this OSR call lies below this frame's locals.
+    const uintptr_t osr_stack_limit = reinterpret_cast<uintptr_t>(&mig_frame);
     auto prev_handler = get_deopt_handler();
     register_deopt_handler([&](const DeoptFrame& dframe) -> void* {
         // A callee's copy in the OSR module finishes that call in Tier 0 and
         // hands its result back to the OSR code, which carries on; the OSR'd
         // function's own failure finishes the whole OSR call.
-        const Function& owner = deopt_owner(*comp_mod, fn, dframe);
+        const Function* owner_p = deopt_owner(*comp_mod, fn, dframe);
+        if (!owner_p) return decline_foreign_deopt(prev_handler, dframe);
+        const Function& owner = *owner_p;
         total_native_deopts_++;
         registry().get_or_create(owner.name()).record_deoptimization();
         // The exits the interpreter's guard takes, in its order.
@@ -465,12 +500,13 @@ bool OsrCoordinator::try_osr_migration(
                                        " in function " + std::string(owner.name()));
         }
         std::vector<RuntimeValue> state_vals = guard_state_values(owner, dframe);
-        RuntimeValue r;
-        if (const Function* stub = owner.guard_exit_stub(*g_inst)) {
-            r = interp.run(*stub, state_vals);
-        } else {
-            r = interp.resume(owner, dframe.resume_id, state_vals);
-        }
+        auto finish = [&] {
+            if (const Function* stub = owner.guard_exit_stub(*g_inst)) return interp.run(*stub, state_vals);
+            return interp.resume(owner, dframe.resume_id, state_vals);
+        };
+        // The OSR'd function's own continuation ran its handlers in Tier 0:
+        // what it throws leaves the OSR call.
+        RuntimeValue r = &owner == &fn ? finish() : run_callee_continuation(osr_stack_limit, finish);
         if (&owner == &fn) {
             deopt_occurred = true;
             deopt_res = r;

@@ -1,5 +1,6 @@
 #include <brass/runtime/deopt.hpp>
 #include <brass/gc/native_frames.hpp>
+#include <brass/runtime/exception.hpp>
 #include <ostream>
 #include <mutex>
 #include <memory>
@@ -134,7 +135,63 @@ std::shared_ptr<const DeoptResumerFn> find_resumer(void* code_entry) {
     return it != resumers().end() ? it->second : nullptr;
 }
 thread_local uint64_t t_deopt_result = 0;
+
+// What the handler asked for besides its result (deopt_handler_decline,
+// deopt_handler_throw_native). Reset before each handler call and taken
+// right after it: a deopt nested in the handler's Tier-0 run completes, and
+// takes its own outcome, before the handler sets one.
+struct HandlerOutcome {
+    bool declined = false;
+    bool throw_native = false;
+    uint64_t value = 0;
+    uintptr_t stack_limit = 0;
+    std::exception_ptr fallback;
+};
+thread_local HandlerOutcome t_handler_outcome;
+
+// Runs the handler with the deoptimized native frames (from caller_rbp /
+// caller_ip, the deopt entry's caller, upward) recorded as GC roots: the
+// handler may run Tier 0, which may collect (native_frames.hpp).
+void* call_deopt_handler(const DeoptHandlerFn& handler, const DeoptFrame& frame, uintptr_t caller_rbp,
+                         uintptr_t caller_ip, HandlerOutcome& outcome) {
+    t_handler_outcome = HandlerOutcome{};
+    void* r = nullptr;
+    {
+        brass::NativeFramesScope native_frames(caller_rbp, caller_ip);
+        r = handler(frame);
+    }
+    outcome = std::move(t_handler_outcome);
+    t_handler_outcome = HandlerOutcome{};
+    return r;
+}
+
+// A handler's request to throw natively, after every scope of the deopt
+// entry has ended: raised to a landing pad in the native frames above the
+// deoptimized one, else the Tier-0 exception is rethrown.
+[[noreturn]] void throw_for_handler(HandlerOutcome& outcome, const void* code_entry) {
+    const HostValue val(outcome.value);
+    brass_set_current_exception(val);
+    brass_seh_raise_above(val, code_entry, outcome.stack_limit);
+    std::exception_ptr ep = std::move(outcome.fallback);
+    outcome = HandlerOutcome{};
+    if (!ep) {
+        std::fprintf(stderr, "brass: deopt handler asked for a native throw with no Tier-0 exception\n");
+        std::abort();
+    }
+    std::rethrow_exception(ep);
+}
 } // namespace
+
+void deopt_handler_decline() noexcept {
+    t_handler_outcome.declined = true;
+}
+
+void deopt_handler_throw_native(uint64_t value, uintptr_t stack_limit, std::exception_ptr fallback) noexcept {
+    t_handler_outcome.throw_native = true;
+    t_handler_outcome.value = value;
+    t_handler_outcome.stack_limit = stack_limit;
+    t_handler_outcome.fallback = std::move(fallback);
+}
 
 void register_deopt_resumer(void* code_entry, DeoptResumerFn resumer) {
     if (!code_entry || !resumer) {
@@ -186,14 +243,14 @@ void* brass_deopt_exit_typed(uint32_t resume_id, uint32_t reason, uint32_t count
     }
     frame->count = count;
 
-    auto handler = brass::runtime::get_deopt_handler();
-    if (handler) {
-        // The handler may run Tier 0, which may collect: the native frames
-        // that deoptimized, and their native callers, are roots meanwhile.
+    if (auto handler = brass::runtime::get_deopt_handler()) {
         uintptr_t caller_rbp = 0, caller_ip = 0;
         brass::brass_capture_caller_frame(caller_rbp, caller_ip);
-        brass::NativeFramesScope native_frames(caller_rbp, caller_ip);
-        return handler(*frame);
+        brass::runtime::HandlerOutcome outcome;
+        void* r = brass::runtime::call_deopt_handler(handler, *frame, caller_rbp, caller_ip, outcome);
+        if (outcome.throw_native) brass::runtime::throw_for_handler(outcome, frame->code_entry);
+        // A declining handler leaves the frame to the no-handler path below.
+        if (!outcome.declined) return r;
     }
     if (has_exit_stub) return nullptr; // the caller resumes in its exit stub
     // Nothing can resume this frame: returning would hand the optimized
@@ -236,9 +293,9 @@ const uint64_t* brass_deopt_exit_record(const brass::runtime::DeoptExitRecord* r
     // roots meanwhile (native_frames.hpp).
     uintptr_t caller_rbp = 0, caller_ip = 0;
     brass::brass_capture_caller_frame(caller_rbp, caller_ip);
-    brass::NativeFramesScope native_frames(caller_rbp, caller_ip);
 
     if (auto resumer = find_resumer(record->code_entry)) {
+        brass::NativeFramesScope native_frames(caller_rbp, caller_ip);
         // The resumer may run code that deoptimizes again and overwrites the
         // thread frame: it works on a copy.
         DeoptFrame snapshot = *frame;
@@ -250,10 +307,15 @@ const uint64_t* brass_deopt_exit_record(const brass::runtime::DeoptExitRecord* r
     if (auto handler = get_deopt_handler()) {
         // The handler finishes the call the way the interpreter's guard does
         // (exit stub, else resume target); running the exit stub again here
-        // would run the rest of the function twice.
-        void* r = handler(*frame);
-        t_deopt_result = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(r));
-        return &t_deopt_result;
+        // would run the rest of the function twice. It may decline code that
+        // is not its own: then the no-handler path below applies.
+        HandlerOutcome outcome;
+        void* r = call_deopt_handler(handler, *frame, caller_rbp, caller_ip, outcome);
+        if (outcome.throw_native) throw_for_handler(outcome, record->code_entry);
+        if (!outcome.declined) {
+            t_deopt_result = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(r));
+            return &t_deopt_result;
+        }
     }
     if (has_exit_symbol) return nullptr; // the caller calls its exit stub with the state values
     // Nothing can resume this frame: returning null would make the optimized

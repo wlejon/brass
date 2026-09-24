@@ -324,6 +324,7 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
             cfi.frame_info = lir->frame;
             x64::X64FrameLayout::compute_layout(cfi.frame_info, cc_);
             cfi.cc = cc_;
+            cfi.stack_adjust_regions = std::move(res.stack_adjust_regions);
             cfi.safepoints = std::move(res.safepoints);
             cfi.stack_map = std::move(res.stack_map);
             cfi.stack_map.code_offset = static_cast<uint32_t>(fn_offset);

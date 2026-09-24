@@ -198,6 +198,15 @@ uint64_t brass_seh_find_landing_pad(uint64_t control_pc, uint64_t image_base, co
 // raises nothing) when no such frame exists, or off Win64.
 bool brass_seh_raise(HostValue val);
 
+// As brass_seh_raise, for a throw on behalf of a deoptimized native frame:
+// only frames above the frame of the function starting at `deopted_entry`
+// (the first such frame up the stack; it and everything below it are
+// skipped) and below `stack_limit` count. Raises when the first frame there
+// with a landing pad for its call site is found; returns false (raising
+// nothing) when that range has none, when the deoptimized frame is not on
+// the stack, or off Win64.
+bool brass_seh_raise_above(HostValue val, const void* deopted_entry, uintptr_t stack_limit);
+
 extern "C" int brass_seh_personality(
     void* ExceptionRecord,
     void* EstablisherFrame,
