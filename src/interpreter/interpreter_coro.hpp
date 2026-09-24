@@ -10,12 +10,12 @@ namespace brass {
 // the body takes the frame, dispatches on its state_id and keeps is_done.
 // Handles are gcrefs: the frame is a heap object a collection may move.
 RuntimeValue interp_coro_create(const Instruction& inst, InterpreterFrame& frame, const Module* mod);
-// Runs a lowered body of `mod` in this interpreter; a frame generated code
-// created (its fn_ptr a native address) runs through brass_coro_resume.
+// Runs a frame's MIR body (CORO_FLAG_MIR_BODY, any module) through
+// `exec_fn`, which runs it in its own module; a frame generated code created
+// (its fn_ptr a native address) runs through brass_coro_resume.
 RuntimeValue interp_coro_resume(
     const Instruction& inst,
     InterpreterFrame& frame,
-    const Module* mod,
     const std::function<RuntimeValue(const Function&, const std::vector<RuntimeValue>&)>& exec_fn
 );
 void interp_coro_destroy(const Instruction& inst, InterpreterFrame& frame);

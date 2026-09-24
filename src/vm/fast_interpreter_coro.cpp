@@ -35,8 +35,8 @@ uintptr_t FastInterpreter::coro_create_lowered(const Function& fn, const std::ve
 
     // No generated frame: this interpreter's roots reach the heap through
     // its scope and provider.
-    const uintptr_t frame_addr = brass_coro_create_at(
-        const_cast<void*>(static_cast<const void*>(&fn)), slot_count, layout.pointer_mask, 0, 0);
+    // Its body is MIR (CORO_FLAG_MIR_BODY), which every tier can resume.
+    const uintptr_t frame_addr = runtime::create_mir_coro_frame(fn, slot_count, layout.pointer_mask);
     auto* cf = reinterpret_cast<runtime::BrassCoroFrame*>(frame_addr);
     if (!cf) {
         throw InterpreterException("coro_create: frame allocation failed");
@@ -52,21 +52,15 @@ uintptr_t FastInterpreter::coro_create_lowered(const Function& fn, const std::ve
         }
         slot += coro_slot_count(a.type());
     }
-    lowered_coro_fns_[&fn] = &fn;
     return frame_addr;
 }
 
-const Function* FastInterpreter::lowered_coro_body(const void* fn_ptr) const {
-    if (!fn_ptr) return nullptr;
-    auto it = lowered_coro_fns_.find(fn_ptr);
-    if (it != lowered_coro_fns_.end()) return it->second;
-    // A frame the Interpreter created for a function of the current module.
-    if (module_) {
-        for (const Function* f : module_->functions()) {
-            if (static_cast<const void*>(f) == fn_ptr) return is_lowered_coro_body(*f) ? f : nullptr;
-        }
+const Function* FastInterpreter::lowered_coro_body(uintptr_t handle) const {
+    const Function* body = runtime::mir_coro_body(reinterpret_cast<const runtime::BrassCoroFrame*>(handle));    if (body && !is_lowered_coro_body(*body)) {
+        throw InterpreterException("coro_resume: coroutine body " + std::string(body->name()) +
+                                   " has not been lowered by CoroTransformPass");
     }
-    return nullptr;
+    return body;
 }
 
 uint64_t FastInterpreter::coro_resume_lowered(uintptr_t handle, uint64_t input_val) {
@@ -74,7 +68,9 @@ uint64_t FastInterpreter::coro_resume_lowered(uintptr_t handle, uint64_t input_v
     if (cf->is_done) {
         return cf->yielded_val;
     }
-    const Function* body = lowered_coro_body(cf->fn_ptr);
+    // A MIR body (an interpreter created the frame, in any module) runs
+    // here, in its own module (call_from_native); generated code's natively.
+    const Function* body = lowered_coro_body(handle);
     if (!body) {
         if (!cf->fn_ptr) {
             throw InterpreterException("coro_resume: coroutine frame has no body");
@@ -273,7 +269,7 @@ RuntimeValue FastInterpreter::coro_resume_val(uintptr_t handle, RuntimeValue inp
     // the frame).
     const Function* body = nullptr;
     if (handle != 0 && active_coros_.find(handle) == active_coros_.end()) {
-        body = lowered_coro_body(reinterpret_cast<const runtime::BrassCoroFrame*>(handle)->fn_ptr);
+        body = lowered_coro_body(handle);
     }
     uint64_t ret = coro_resume(handle, input_val.raw_bits());
     if (body) {

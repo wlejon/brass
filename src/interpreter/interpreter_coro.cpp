@@ -24,17 +24,6 @@ const Function& lowered_coro_target(std::string_view callee, const Module* mod) 
     return *target_fn;
 }
 
-// A frame's fn_ptr is the Function* of the lowered body when an interpreter
-// created it, a native code address when generated code did. Only a body of
-// the current module is recognized; anything else runs natively.
-const Function* interpreted_coro_body(const void* fn_ptr, const Module* mod) {
-    if (!fn_ptr || !mod) return nullptr;
-    for (const Function* f : mod->functions()) {
-        if (static_cast<const void*>(f) == fn_ptr) return is_lowered_coro_body(*f) ? f : nullptr;
-    }
-    return nullptr;
-}
-
 // The coroutine handle operand. The verifier also accepts ptr and i64
 // handles; the frame is still a movable heap object, so the operand's value
 // becomes a gcref in this frame, where the root walk reports and updates it.
@@ -63,12 +52,8 @@ RuntimeValue interp_coro_create(const Instruction& inst, InterpreterFrame& frame
 
     // No generated frame: this interpreter's roots reach the heap through
     // its scope and provider.
-    uintptr_t frame_addr = brass_coro_create_at(
-        reinterpret_cast<void*>(const_cast<Function*>(&target_fn)),
-        slot_count,
-        layout.pointer_mask,
-        0, 0
-    );
+    // Its body is MIR (CORO_FLAG_MIR_BODY), which every tier can resume.
+    uintptr_t frame_addr = runtime::create_mir_coro_frame(target_fn, slot_count, layout.pointer_mask);
     auto* frame_ptr = reinterpret_cast<runtime::BrassCoroFrame*>(frame_addr);
     if (!frame_ptr) {
         throw InterpreterException("coro_create: frame allocation failed");
@@ -101,7 +86,6 @@ void interp_coro_suspend(const Instruction& inst, InterpreterFrame& frame) {
 RuntimeValue interp_coro_resume(
     const Instruction& inst,
     InterpreterFrame& frame,
-    const Module* mod,
     const std::function<RuntimeValue(const Function&, const std::vector<RuntimeValue>&)>& exec_fn
 ) {
     uintptr_t frame_addr = coro_handle(inst, frame, "coro_resume", /*allow_null=*/false);
@@ -115,14 +99,19 @@ RuntimeValue interp_coro_resume(
         : RuntimeValue::from_i64(0);
     const uint64_t input_bits = static_cast<uint64_t>(input_val.raw_bits());
 
-    const Function* body = interpreted_coro_body(frame_ptr->fn_ptr, mod);
-    if (!body) {
+    // A MIR body (an interpreter created the frame, in any module) runs
+    // here; generated code's body runs natively.
+    const Function* body = runtime::mir_coro_body(frame_ptr);    if (!body) {
         if (!frame_ptr->fn_ptr) {
             throw InterpreterException("coro_resume: coroutine frame has no body");
         }
         // Generated code's frame: run it natively. It roots the frame
         // itself; this frame's gcref operand is updated by the root walk.
         return RuntimeValue::from_bits(inst.type(), brass_coro_resume(frame_addr, input_bits));
+    }
+    if (!is_lowered_coro_body(*body)) {
+        throw InterpreterException("coro_resume: coroutine body " + std::string(body->name()) +
+                                   " has not been lowered by CoroTransformPass");
     }
     frame_ptr->resume_arg = input_bits;
 

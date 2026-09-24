@@ -176,6 +176,10 @@ public:
     RuntimeValue call_from_native(const Function& fn, const std::vector<RuntimeValue>& args) {
         return execute_function(fn, args);
     }
+    // As call_from_native, with `fn`'s own module current for the call (a
+    // coroutine body of another module resolves its callees there); the
+    // frames below keep running in theirs.
+    RuntimeValue call_in_own_module(const Function& fn, const std::vector<RuntimeValue>& args);
     // Finishes, on this thread's native stack, a call whose guard
     // `resume_id` failed in native code that this interpreter's frames
     // called (resume_after_guard, without a frame): the continuation's

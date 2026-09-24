@@ -154,6 +154,16 @@ RuntimeValue Interpreter::resume_from_native(const Function& fn, uint32_t resume
     return resume_after_guard(fn, resume_id, state_values, nullptr);
 }
 
+RuntimeValue Interpreter::call_in_own_module(const Function& fn, const std::vector<RuntimeValue>& args) {
+    struct ModuleRestore {
+        const Module*& slot;
+        const Module* saved;
+        ~ModuleRestore() { slot = saved; }
+    } restore{module_, module_};
+    if (fn.parent()) module_ = fn.parent();
+    return execute_function(fn, args);
+}
+
 void Interpreter::collect_all_roots(std::vector<uintptr_t*>& roots) {
     for (InterpreterFrame* f = current_frame_; f != nullptr; f = f->caller()) {
         f->collect_roots(roots);

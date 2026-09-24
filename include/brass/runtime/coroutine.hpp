@@ -8,18 +8,47 @@
 #include <vector>
 #include <string_view>
 
+namespace brass {
+class Function;
+}
+
 namespace brass::runtime {
 
 struct BrassCoroFrame {
     uint32_t state_id;      // 0 = initial, 1..N = suspend states, ~0U = done
     uint32_t is_done;       // 1 if finished, 0 if active/suspended
-    void* fn_ptr;           // Pointer to coroutine state machine function
+    void* fn_ptr;           // The body: see CORO_FLAG_MIR_BODY
     uint64_t yielded_val;   // Last yielded value
     uint64_t resume_arg;    // Input value passed into resume
     uint32_t slot_count;    // Total slots allocated
-    uint32_t flags;         // Additional flags
+    uint32_t flags;         // CORO_FLAG_*
     uint64_t slots[1];      // Spilled SSA slots (flexible / variable sized)
 };
+
+// A frame's body is one of two kinds, and every tier resumes either:
+//  - flag clear: fn_ptr is generated code, `uint64_t (*)(BrassCoroFrame*)`
+//    (a frame generated code created);
+//  - flag set: fn_ptr is the `const Function*` of a lowered MIR body (a
+//    frame an interpreter created). brass_coro_resume runs it in Tier 0
+//    (resume_mir_coro_body); an interpreter runs it itself.
+// A frame with neither (fn_ptr null) has no body any tier can run.
+static constexpr uint32_t CORO_FLAG_MIR_BODY = 1u;
+
+inline const Function* mir_coro_body(const BrassCoroFrame* frame) noexcept {
+    return (frame->flags & CORO_FLAG_MIR_BODY) ? static_cast<const Function*>(frame->fn_ptr) : nullptr;
+}
+
+// Creates a frame whose body is the lowered MIR function `body` (no
+// generated frame calls this: an interpreter's roots reach the heap
+// through its own scope and provider).
+uintptr_t create_mir_coro_frame(const Function& body, uint32_t slot_count, uint64_t pointer_mask);
+
+// Runs one step of a MIR-bodied frame on this thread, in the innermost
+// interpreter running here (Interpreter, then FastInterpreter), else in a
+// fresh Interpreter allocating from the thread's active heap. `frame_addr`
+// must be a root of the caller: a collection the body triggers updates it.
+// Returns the body's result bits (brass_coro_resume stores them).
+uint64_t resume_mir_coro_body(uintptr_t& frame_addr);
 
 static constexpr size_t CORO_FRAME_HEADER_SIZE = 40; // 5 * 8 bytes
 static constexpr uint32_t TYPE_TAG_CORO_FRAME  = 200;

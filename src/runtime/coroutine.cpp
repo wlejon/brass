@@ -247,31 +247,44 @@ uint64_t brass_coro_resume(uintptr_t coro_frame, uint64_t input_val) {
 
     frame->resume_arg = input_val;
 
-    if (frame->fn_ptr != nullptr) {
-        using CoroFn = uint64_t (*)(BrassCoroFrame*);
-        auto fn = reinterpret_cast<CoroFn>(frame->fn_ptr);
-        // The body is generated code and may collect. The generated frames
-        // that called this function hold gcrefs across the call: record them
-        // (native_frames.hpp), since a walk from the body cannot rely on
-        // following frame pointers through this C++ frame everywhere. The
-        // frame itself may move; `frame` is a root so the writes below reach
-        // the live copy. (A C++ caller has no generated frame to record; its
-        // captured frame reports nothing.)
-        uintptr_t caller_rbp = 0, caller_ip = 0;
-        const bool have_caller = brass_capture_caller_frame(caller_rbp, caller_ip);
-        NativeFramesScope native_frames(have_caller ? caller_rbp : 0, have_caller ? caller_ip : 0);
-        ThreadRootsScope frame_root([](void* ctx, std::vector<uintptr_t*>& roots) {
-            roots.push_back(static_cast<uintptr_t*>(ctx));
-        }, &frame);
-        uint64_t result = fn(frame);
-        frame->yielded_val = result;
-        if (frame->is_done != 0) {
-            unregister_active_coro_frame(frame);
-        }
-        return result;
+    if (frame->fn_ptr == nullptr) {
+        // Not a jump into non-code: nothing can run this frame. (A
+        // FastInterpreter's unlowered coroutine keeps its state in that
+        // interpreter; only it resumes the handle.)
+        std::fprintf(stderr, "brass: fatal: brass_coro_resume of coroutine frame %p, which has no body "
+                             "(a FastInterpreter coroutine of a body not lowered by CoroTransformPass "
+                             "is resumed only by that interpreter)\n",
+                     static_cast<void*>(frame));
+        std::fflush(stderr);
+        std::abort();
     }
 
-    return 0;
+    // The body (generated code, or a MIR body run in Tier 0) may collect.
+    // The generated frames that called this function hold gcrefs across the
+    // call: record them (native_frames.hpp), since a walk from the body
+    // cannot rely on following frame pointers through this C++ frame
+    // everywhere. The frame itself may move; `coro_frame` is a root so the
+    // writes below reach the live copy. (A C++ caller has no generated frame
+    // to record; its captured frame reports nothing.)
+    uintptr_t caller_rbp = 0, caller_ip = 0;
+    const bool have_caller = brass_capture_caller_frame(caller_rbp, caller_ip);
+    NativeFramesScope native_frames(have_caller ? caller_rbp : 0, have_caller ? caller_ip : 0);
+    ThreadRootsScope frame_root([](void* ctx, std::vector<uintptr_t*>& roots) {
+        roots.push_back(static_cast<uintptr_t*>(ctx));
+    }, &coro_frame);
+    uint64_t result;
+    if (mir_coro_body(frame) != nullptr) {
+        result = resume_mir_coro_body(coro_frame);
+    } else {
+        using CoroFn = uint64_t (*)(BrassCoroFrame*);
+        result = reinterpret_cast<CoroFn>(frame->fn_ptr)(frame);
+    }
+    frame = reinterpret_cast<BrassCoroFrame*>(coro_frame);
+    frame->yielded_val = result;
+    if (frame->is_done != 0) {
+        unregister_active_coro_frame(frame);
+    }
+    return result;
 }
 
 uint32_t brass_coro_is_done(uintptr_t coro_frame) {
