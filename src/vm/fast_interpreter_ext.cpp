@@ -131,8 +131,8 @@ void FastInterpreter::handle_write_barrier(FastFrame& frame, uint32_t obj_reg, u
 }
 
 void FastInterpreter::handle_safepoint(FastFrame& /*frame*/) {
-    if (gc_.stress_mode()) {
-        gc_.collect();
+    if (gc().stress_mode()) {
+        gc().collect();
     }
 }
 
@@ -158,10 +158,10 @@ void FastInterpreter::execute_vector_op(FastFrame& frame, BytecodeWord inst, con
         case BytecodeOp::vzero: out = val_vzero(type_of(a)); break;
         case BytecodeOp::vbroadcast: out = val_vbroadcast(type_of(a), val(b)); break;
         case BytecodeOp::vload:
-            out = gc_.read_memory(static_cast<uintptr_t>(frame.registers[b]), decode_imm24(inst), type_of(a));
+            out = gc().read_memory(static_cast<uintptr_t>(frame.registers[b]), decode_imm24(inst), type_of(a));
             break;
         case BytecodeOp::vstore:
-            gc_.write_memory(static_cast<uintptr_t>(frame.registers[b]), decode_imm24(inst), type_of(a), val(a));
+            gc().write_memory(static_cast<uintptr_t>(frame.registers[b]), decode_imm24(inst), type_of(a), val(a));
             return;
         case BytecodeOp::vadd: out = val_vadd(val(b), val(c)); break;
         case BytecodeOp::vsub: out = val_vsub(val(b), val(c)); break;

@@ -11,6 +11,7 @@
 #include <string_view>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <mutex>
 #include <cstdint>
 
@@ -37,7 +38,7 @@ public:
 
     std::string_view name() const noexcept { return name_; }
 
-    const Function* mir_function() const noexcept { return mir_function_; }
+    const Function* mir_function() const noexcept { return mir_function_.load(std::memory_order_acquire); }
     void set_mir_function(const Function* fn) noexcept;
     // Detaches the handle from its function, which is being destroyed
     // (FunctionDispatchTable::forget_module). Its native code stays callable
@@ -98,8 +99,18 @@ public:
     void set_baseline_function(std::shared_ptr<codegen::BaselineCompiledFunction> compiled);
     std::shared_ptr<codegen::BaselineCompiledFunction> baseline_function() const;
 
-    Type return_type() const noexcept { return return_type_; }
-    const std::vector<Type>& param_types() const noexcept { return param_types_; }
+    // The signature of the code the handle routes to. It is an immutable
+    // snapshot, replaced (never modified) under the handle's lock together
+    // with the entry point it describes: a call reads both at once and
+    // finishes with the types of the code it entered, however the handle
+    // is rebound meanwhile.
+    struct Signature {
+        Type ret = Type::void_type();
+        std::vector<Type> params;
+    };
+    std::shared_ptr<const Signature> signature() const;
+    Type return_type() const { return signature()->ret; }
+    std::vector<Type> param_types() const { return signature()->params; }
     void set_signature(Type ret, std::vector<Type> params);
 
     template <typename FuncPtr>
@@ -124,12 +135,23 @@ public:
     void invalidate_optimized();
     size_t retired_engine_count() const;
 
-    // Tier-2 entry points whose deopt resumer this handle registered.
-    void add_deopt_entry(void* entry);
+    // Tier-2 entry points whose deopt resumer this handle registered, each
+    // with the Function it was compiled from (the one its frames resume
+    // in). Rebinding keeps them registered: the code stays alive for frames
+    // still running it.
+    void add_deopt_entry(void* entry, const Function* compiled_from);
+    // The Function the tier-2 code at `entry` was compiled from, or null if
+    // its module has been destroyed (forget_deopt_functions) or `entry` is
+    // not this handle's.
+    const Function* deopt_function(void* entry) const;
+    // Forgets every deopt entry's Function in `dying` (a module being
+    // destroyed): a later deopt of that code is a fatal error.
+    void forget_deopt_functions(const std::unordered_set<const Function*>& dying);
 
 private:
+    void set_mir_function_locked(const Function* fn);
     std::string name_;
-    const Function* mir_function_ = nullptr;
+    std::atomic<const Function*> mir_function_{nullptr};
     std::atomic<void*> native_entry_{nullptr};
     std::atomic<TierLevel> tier_{TierLevel::Tier0_Interpreter};
     std::atomic<uint64_t> invocation_count_{0};
@@ -140,11 +162,14 @@ private:
     std::vector<std::shared_ptr<codegen::JitExecutionEngine>> retired_engines_;
     // Baseline code of functions the handle was rebound away from.
     std::vector<std::shared_ptr<codegen::BaselineCompiledFunction>> retired_baselines_;
-    std::vector<void*> deopt_entries_;
+    struct DeoptEntry {
+        void* entry;
+        const Function* compiled_from;
+    };
+    std::vector<DeoptEntry> deopt_entries_;
     bool mir_detached_ = false;
 
-    Type return_type_ = Type::void_type();
-    std::vector<Type> param_types_;
+    std::shared_ptr<const Signature> sig_ = std::make_shared<const Signature>(); // under engine_mutex_
 };
 
 // The function handles of one program, keyed by name within it.
@@ -222,6 +247,9 @@ private:
     friend void forget_module(const Module& mod) noexcept;
     // Name of a live handle routing into one of `mod`'s functions, or empty.
     std::string handle_into(const Module& mod) const;
+    // Every handle forgets the Functions of `mod` its retained tier-2 code
+    // would resume in (FunctionHandle::forget_deopt_functions).
+    void forget_deopt_functions(const Module& mod);
     void retire_locked(std::unique_ptr<FunctionHandle> handle);
 
     const bool is_default_ = false;

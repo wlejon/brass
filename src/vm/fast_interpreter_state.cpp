@@ -68,7 +68,7 @@ uintptr_t FastInterpreter::allocate_gc(size_t size, uint64_t pointer_mask, uint3
     if (gen_gc_) {
         return gen_gc_->allocate(size, pointer_mask, type_tag);
     }
-    return gc_.allocate(size, pointer_mask, type_tag);
+    return gc().allocate(size, pointer_mask, type_tag);
 }
 
 void FastInterpreter::collect_all_roots(std::vector<uintptr_t*>& roots) {
@@ -82,7 +82,7 @@ void FastInterpreter::collect_all_roots(std::vector<uintptr_t*>& roots) {
             }
             if (!is_gc) {
                 uintptr_t val = static_cast<uintptr_t>(f->registers[i]);
-                is_gc = gc_.is_valid_object(val) || (gen_gc_ && gen_gc_->is_valid_object(val));
+                is_gc = gc().is_valid_object(val) || (gen_gc_ && gen_gc_->is_valid_object(val));
             }
             if (is_gc) {
                 roots.push_back(reinterpret_cast<uintptr_t*>(&f->registers[i]));
@@ -101,7 +101,7 @@ void FastInterpreter::collect_all_roots(std::vector<uintptr_t*>& roots) {
                 }
                 if (!is_gc) {
                     uintptr_t val = static_cast<uintptr_t>(coro->registers[i]);
-                    is_gc = gc_.is_valid_object(val) || (gen_gc_ && gen_gc_->is_valid_object(val));
+                    is_gc = gc().is_valid_object(val) || (gen_gc_ && gen_gc_->is_valid_object(val));
                 }
                 if (is_gc) {
                     roots.push_back(reinterpret_cast<uintptr_t*>(&coro->registers[i]));

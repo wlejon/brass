@@ -194,6 +194,11 @@ public:
     // the handle belongs to.
     uint64_t resume_after_deopt(FunctionHandle& handle, const DeoptFrame& frame);
     uint64_t resume_after_deopt(FunctionHandle& handle, const DeoptFrame& frame, FunctionDispatchTable& table);
+    // As above, for code compiled from `compiled_from`, which the handle
+    // may since have been rebound away from (FunctionHandle::
+    // rebind_mir_function): the call finishes in `compiled_from`.
+    uint64_t resume_after_deopt(FunctionHandle& handle, const DeoptFrame& frame, FunctionDispatchTable& table,
+                                const Function& compiled_from);
     uint64_t tier2_deopts() const noexcept { return tier2_deopts_.load(std::memory_order_relaxed); }
     uint64_t tier2_invalidations() const noexcept { return tier2_invalidations_.load(std::memory_order_relaxed); }
 

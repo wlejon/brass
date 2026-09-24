@@ -92,16 +92,27 @@ uint64_t MultiTierPipeline::resume_after_deopt(FunctionHandle& handle, const Deo
 
 uint64_t MultiTierPipeline::resume_after_deopt(FunctionHandle& handle, const DeoptFrame& frame,
                                                FunctionDispatchTable& table) {
+    const Function* fn = handle.mir_function();
+    if (!fn) {
+        deopt_fatal("optimized code of '" + std::string(handle.name()) + "' deoptimized but its MIR is gone");
+    }
+    return resume_after_deopt(handle, frame, table, *fn);
+}
+
+uint64_t MultiTierPipeline::resume_after_deopt(FunctionHandle& handle, const DeoptFrame& frame,
+                                               FunctionDispatchTable& table, const Function& compiled_from) {
     if (&table != table_) {
         // The deopt counts and the Tier-0 config are this pipeline's
         // program's; resuming another program's code here would mix them.
         deopt_fatal("tier-2 code of '" + std::string(handle.name()) +
                     "' deoptimized into the pipeline of a different program");
     }
-    const Function* fn = handle.mir_function();
-    if (!fn) {
-        deopt_fatal("optimized code of '" + std::string(handle.name()) + "' deoptimized but its MIR is gone");
-    }
+    const Function* fn = &compiled_from;
+    // The handle may have been rebound to another Function since this code
+    // was compiled (rebind_mir_function keeps the code for frames still
+    // running it): the frame resumes in the Function it was compiled from,
+    // and its failures say nothing about the handle's current code.
+    const bool current_code = handle.mir_function() == fn;
     const std::string fname(fn->name());
     const Instruction* guard = find_guard(*fn, frame.resume_id);
     if (!guard) {
@@ -121,8 +132,8 @@ uint64_t MultiTierPipeline::resume_after_deopt(FunctionHandle& handle, const Deo
 
     tier2_deopts_.fetch_add(1, std::memory_order_relaxed);
     TieringFeedback& fb = table.tiering().get_feedback(handle.name());
-    fb.record_deopt(frame.resume_id);
-    if (handle.tier() == TierLevel::Tier2_Optimized && fb.is_speculation_invalid(frame.resume_id)) {
+    if (current_code) fb.record_deopt(frame.resume_id);
+    if (current_code && handle.tier() == TierLevel::Tier2_Optimized && fb.is_speculation_invalid(frame.resume_id)) {
         // The speculation is wrong for this program: stop entering the
         // optimized code and never recompile it (tier 2 has no
         // non-speculating variant to fall back to).
@@ -148,6 +159,11 @@ uint64_t MultiTierPipeline::resume_after_deopt(FunctionHandle& handle, const Deo
         RuntimeValue result = active->resume_from_native(*fn, frame.resume_id, state);
         return result.is_void() ? 0 : result.raw_bits();
     }
+    FastInterpreter* active_fast = FastInterpreter::current();
+    if (active_fast && &active_fast->dispatch_table() == &table) {
+        RuntimeValue result = active_fast->resume_from_native(*fn, frame.resume_id, state);
+        return result.is_void() ? 0 : result.raw_bits();
+    }
     // Otherwise (a host entered the native code) a fresh interpreter
     // finishes the call in the thread's active GC (run_fresh_tier0).
     RuntimeValue result = stub ? run_fresh_tier0(table, stub, state)
@@ -171,6 +187,11 @@ RuntimeValue MultiTierPipeline::run_fresh_tier0(FunctionDispatchTable& table, co
         }
         return r;
     };
+    // Either interpreter allocates from the thread's active GC, whose
+    // objects the native code and its caller hold, and its frames are that
+    // GC's roots while it runs: a collection native code it calls triggers
+    // updates them.
+    MiniCheneyGC* shared = brass_get_active_gc();
     if (config_.use_fast_interpreter()) {
         FastInterpreter interp;
         interp.set_dispatch_table(&table);
@@ -178,16 +199,20 @@ RuntimeValue MultiTierPipeline::run_fresh_tier0(FunctionDispatchTable& table, co
             std::lock_guard<std::mutex> lock(mutex_);
             setup_fast_interpreter(interp, *mod);
         }
-        return check_result(fn ? interp.run(*fn, args) : interp.resume(*resume_fn, resume_id, args), interp.gc());
+        std::optional<ThreadRootsScope> roots;
+        if (shared) {
+            interp.borrow_gc(shared);
+            roots.emplace([](void* ctx, std::vector<uintptr_t*>& out) {
+                static_cast<FastInterpreter*>(ctx)->collect_all_roots(out);
+            }, &interp);
+        }
+        RuntimeValue r = fn ? interp.run(*fn, args) : interp.resume(*resume_fn, resume_id, args);
+        return shared ? r : check_result(r, interp.gc());
     }
     // As execute() sets up the oracle interpreter.
     Interpreter interp;
     interp.set_dispatch_table(&table);
     install_host_symbols(interp);
-    // It allocates from the thread's active GC, whose objects the native
-    // code and its caller hold, and its frames are that GC's roots while it
-    // runs: a collection native code it calls triggers updates them.
-    MiniCheneyGC* shared = brass_get_active_gc();
     std::optional<ThreadRootsScope> roots;
     if (shared) {
         interp.borrow_gc(shared);

@@ -60,23 +60,28 @@ bool run_tier2_optimization_pipeline(Module& mod, const FeedbackRegistry& feedba
 
 FunctionHandle::FunctionHandle(std::string_view name, const Function* mir_fn)
     : name_(name), mir_function_(mir_fn) {
-    if (mir_fn) {
-        return_type_ = mir_fn->return_type();
-        param_types_ = mir_fn->param_types();
-    }
+    if (mir_fn) sig_ = std::make_shared<const Signature>(Signature{mir_fn->return_type(), mir_fn->param_types()});
+}
+
+void FunctionHandle::set_mir_function_locked(const Function* fn) {
+    mir_function_.store(fn, std::memory_order_release);
+    if (fn) sig_ = std::make_shared<const Signature>(Signature{fn->return_type(), fn->param_types()});
 }
 
 void FunctionHandle::set_mir_function(const Function* fn) noexcept {
-    mir_function_ = fn;
-    if (fn) {
-        return_type_ = fn->return_type();
-        param_types_ = fn->param_types();
-    }
+    std::lock_guard<std::mutex> lock(engine_mutex_);
+    set_mir_function_locked(fn);
 }
 
 void FunctionHandle::detach_mir_function() noexcept {
-    set_mir_function(nullptr);
+    std::lock_guard<std::mutex> lock(engine_mutex_);
+    set_mir_function_locked(nullptr);
     mir_detached_ = true;
+}
+
+std::shared_ptr<const FunctionHandle::Signature> FunctionHandle::signature() const {
+    std::lock_guard<std::mutex> lock(engine_mutex_);
+    return sig_;
 }
 
 bool FunctionHandle::rebind_mir_function(const Function* fn) {
@@ -86,21 +91,22 @@ bool FunctionHandle::rebind_mir_function(const Function* fn) {
     // code between the two stores.
     set_native_entry(nullptr);
     set_tier(TierLevel::Tier0_Interpreter);
-    // A deopt of the old tier-2 code would resume in `fn`'s guards.
-    for (void* entry : deopt_entries_) unregister_deopt_resumer(entry);
-    deopt_entries_.clear();
+    // The old tier-2 code's deopt resumers stay registered for frames still
+    // running it: each resumes in the Function the code was compiled from
+    // (deopt_entries_), not in `fn`.
     if (jit_engine_) retired_engines_.push_back(std::move(jit_engine_));
     jit_engine_.reset();
     if (baseline_function_) retired_baselines_.push_back(std::move(baseline_function_));
     baseline_function_.reset();
-    set_mir_function(fn);
+    set_mir_function_locked(fn);
     mir_detached_ = false;
     return had_code;
 }
 
 void FunctionHandle::set_signature(Type ret, std::vector<Type> params) {
-    return_type_ = ret;
-    param_types_ = std::move(params);
+    auto sig = std::make_shared<const Signature>(Signature{ret, std::move(params)});
+    std::lock_guard<std::mutex> lock(engine_mutex_);
+    sig_ = std::move(sig);
 }
 
 void FunctionHandle::set_jit_engine(std::shared_ptr<codegen::JitExecutionEngine> engine) {
@@ -138,9 +144,9 @@ std::shared_ptr<codegen::BaselineCompiledFunction> FunctionHandle::baseline_func
 
 void FunctionHandle::retire() noexcept {
     set_native_entry(nullptr);
-    mir_function_ = nullptr;
+    mir_function_.store(nullptr, std::memory_order_release);
     std::lock_guard<std::mutex> lock(engine_mutex_);
-    for (void* entry : deopt_entries_) unregister_deopt_resumer(entry);
+    for (const DeoptEntry& d : deopt_entries_) unregister_deopt_resumer(d.entry);
     deopt_entries_.clear();
     jit_engine_.reset();
     baseline_function_.reset();
@@ -161,23 +167,51 @@ size_t FunctionHandle::retired_engine_count() const {
     return retired_engines_.size();
 }
 
-void FunctionHandle::add_deopt_entry(void* entry) {
+void FunctionHandle::add_deopt_entry(void* entry, const Function* compiled_from) {
     std::lock_guard<std::mutex> lock(engine_mutex_);
-    deopt_entries_.push_back(entry);
+    deopt_entries_.push_back({entry, compiled_from});
+}
+
+const Function* FunctionHandle::deopt_function(void* entry) const {
+    std::lock_guard<std::mutex> lock(engine_mutex_);
+    // The latest registration of `entry` wins (an address can be reused
+    // only after its engine is gone, which a retained entry never is).
+    for (auto it = deopt_entries_.rbegin(); it != deopt_entries_.rend(); ++it) {
+        if (it->entry == entry) return it->compiled_from;
+    }
+    return nullptr;
+}
+
+void FunctionHandle::forget_deopt_functions(const std::unordered_set<const Function*>& dying) {
+    std::lock_guard<std::mutex> lock(engine_mutex_);
+    for (DeoptEntry& d : deopt_entries_) {
+        if (dying.count(d.compiled_from) != 0) d.compiled_from = nullptr;
+    }
 }
 
 RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) const {
-    void* addr = native_entry();
+    // The entry, its owner and its signature are read together: a rebind
+    // (which unpublishes the entry and replaces the signature under the
+    // same lock) cannot pair this call's code with another's types.
+    void* addr = nullptr;
+    std::shared_ptr<codegen::JitExecutionEngine> engine;
+    std::shared_ptr<const Signature> sig;
+    {
+        std::lock_guard<std::mutex> lock(engine_mutex_);
+        addr = native_entry();
+        engine = jit_engine_;
+        sig = sig_;
+    }
     if (!addr) {
         throw std::runtime_error("FunctionHandle::call_native: native entry is null for " + name_);
     }
 
-    auto engine = jit_engine();
     if (engine) {
         return engine->invoke(name_, args);
     }
 
-    [[maybe_unused]] const std::vector<Type>* ptypes = param_types_.empty() ? nullptr : &param_types_;
+    const Type ret_type = sig->ret;
+    [[maybe_unused]] const std::vector<Type>* ptypes = sig->params.empty() ? nullptr : &sig->params;
 
     // Each supported host calls through an ABI-exact thunk; the baseline and
     // cast-based fallbacks below are compiled only for any other host.
@@ -190,7 +224,7 @@ RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) 
     codegen::X64Win64InvokeResult result;
     codegen::x64_win64_invoke_thunk(&invoke_args, &result);
 
-    return codegen::native_return_value(return_type_, result.rax, result.xmm0);
+    return codegen::native_return_value(ret_type, result.rax, result.xmm0);
 #elif defined(__GNUC__) || defined(__clang__)
     codegen::X64SysVInvokeArgs invoke_args;
     std::vector<uint64_t> stack_words;
@@ -199,7 +233,7 @@ RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) 
     codegen::X64SysVInvokeResult result;
     codegen::x64_sysv_invoke_thunk(&invoke_args, &result);
 
-    return codegen::native_return_value(return_type_, result.rax, result.xmm0);
+    return codegen::native_return_value(ret_type, result.rax, result.xmm0);
 #endif
 #elif (defined(__aarch64__) || defined(_M_ARM64)) && (defined(__GNUC__) || defined(__clang__))
     codegen::AArch64InvokeArgs invoke_args;
@@ -208,7 +242,7 @@ RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) 
 
     codegen::AArch64InvokeResult result;
     codegen::aarch64_invoke_thunk(&invoke_args, &result);
-    return codegen::aarch64_invoke_result_value(return_type_, result);
+    return codegen::aarch64_invoke_result_value(ret_type, result);
 #else
     auto baseline = baseline_function();
     if (baseline) {
@@ -217,17 +251,17 @@ RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) 
 
     // Direct invocation fallback for common signatures when engine pointer is omitted (e.g. unit tests)
     if (args.empty()) {
-        if (return_type_.is_void()) {
+        if (ret_type.is_void()) {
             reinterpret_cast<void(*)()>(addr)();
             return RuntimeValue::from_void();
-        } else if (return_type_.is_float()) {
-            if (return_type_.kind() == TypeKind::F32) {
+        } else if (ret_type.is_float()) {
+            if (ret_type.kind() == TypeKind::F32) {
                 float r = reinterpret_cast<float(*)()>(addr)();
                 return RuntimeValue::from_f32(r);
             }
             double r = reinterpret_cast<double(*)()>(addr)();
             return RuntimeValue::from_f64(r);
-        } else if (return_type_.kind() == TypeKind::I32) {
+        } else if (ret_type.kind() == TypeKind::I32) {
             int32_t r = reinterpret_cast<int32_t(*)()>(addr)();
             return RuntimeValue::from_i32(r);
         } else {
@@ -253,10 +287,10 @@ RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) 
         bool f0 = is_float_val(args[0]);
         if (f0) {
             double a0 = get_f64(0);
-            if (return_type_.is_void()) {
+            if (ret_type.is_void()) {
                 reinterpret_cast<void(*)(double)>(addr)(a0);
                 return RuntimeValue::from_void();
-            } else if (return_type_.is_float()) {
+            } else if (ret_type.is_float()) {
                 double r = reinterpret_cast<double(*)(double)>(addr)(a0);
                 return RuntimeValue::from_f64(r);
             } else {
@@ -265,10 +299,10 @@ RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) 
             }
         } else {
             int64_t a0 = get_i64(0);
-            if (return_type_.is_void()) {
+            if (ret_type.is_void()) {
                 reinterpret_cast<void(*)(int64_t)>(addr)(a0);
                 return RuntimeValue::from_void();
-            } else if (return_type_.is_float()) {
+            } else if (ret_type.is_float()) {
                 double r = reinterpret_cast<double(*)(int64_t)>(addr)(a0);
                 return RuntimeValue::from_f64(r);
             } else {
@@ -282,10 +316,10 @@ RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) 
         bool f0 = is_float_val(args[0]), f1 = is_float_val(args[1]);
         if (f0 && f1) {
             double a0 = get_f64(0), a1 = get_f64(1);
-            if (return_type_.is_void()) {
+            if (ret_type.is_void()) {
                 reinterpret_cast<void(*)(double, double)>(addr)(a0, a1);
                 return RuntimeValue::from_void();
-            } else if (return_type_.is_float()) {
+            } else if (ret_type.is_float()) {
                 double r = reinterpret_cast<double(*)(double, double)>(addr)(a0, a1);
                 return RuntimeValue::from_f64(r);
             } else {
@@ -294,7 +328,7 @@ RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) 
             }
         } else if (f0 && !f1) {
             double a0 = get_f64(0); int64_t a1 = get_i64(1);
-            if (return_type_.is_float()) {
+            if (ret_type.is_float()) {
                 double r = reinterpret_cast<double(*)(double, int64_t)>(addr)(a0, a1);
                 return RuntimeValue::from_f64(r);
             } else {
@@ -303,7 +337,7 @@ RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) 
             }
         } else if (!f0 && f1) {
             int64_t a0 = get_i64(0); double a1 = get_f64(1);
-            if (return_type_.is_float()) {
+            if (ret_type.is_float()) {
                 double r = reinterpret_cast<double(*)(int64_t, double)>(addr)(a0, a1);
                 return RuntimeValue::from_f64(r);
             } else {
@@ -312,10 +346,10 @@ RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) 
             }
         } else {
             int64_t a0 = get_i64(0), a1 = get_i64(1);
-            if (return_type_.is_void()) {
+            if (ret_type.is_void()) {
                 reinterpret_cast<void(*)(int64_t, int64_t)>(addr)(a0, a1);
                 return RuntimeValue::from_void();
-            } else if (return_type_.is_float()) {
+            } else if (ret_type.is_float()) {
                 double r = reinterpret_cast<double(*)(int64_t, int64_t)>(addr)(a0, a1);
                 return RuntimeValue::from_f64(r);
             } else {
@@ -472,12 +506,24 @@ void FunctionDispatchTable::forget_module(const Module& mod) {
     std::lock_guard<std::mutex> lock(mutex_);
     bool changed = false;
     for (auto& [_, handle] : handles_) {
-        if (handle && dying.count(handle->mir_function()) != 0) {
+        if (!handle) continue;
+        handle->forget_deopt_functions(dying);
+        if (dying.count(handle->mir_function()) != 0) {
             handle->detach_mir_function();
             changed = true;
         }
     }
     if (changed) bump_registry_generation();
+}
+
+void FunctionDispatchTable::forget_deopt_functions(const Module& mod) {
+    const auto& fns = mod.functions();
+    if (fns.empty()) return;
+    std::unordered_set<const Function*> dying(fns.begin(), fns.end());
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& [_, handle] : handles_) {
+        if (handle) handle->forget_deopt_functions(dying);
+    }
 }
 
 void FunctionDispatchTable::retire_locked(std::unique_ptr<FunctionHandle> handle) {
@@ -501,6 +547,9 @@ void forget_module(const Module& mod) noexcept {
             // Tier-0 interpreter on it without routing a handle into it.
             t->tiering().forget(&mod);
             t->pipeline().forget(&mod);
+            // Tier-2 code a handle was rebound away from may still deopt:
+            // it must not resume in a dead Function.
+            t->forget_deopt_functions(mod);
             if (routed.empty()) routed = t->handle_into(mod);
         }
     } catch (...) {
@@ -723,12 +772,24 @@ CodeInstallResult CodeInstaller::install_tier2(
     // The resumer is unregistered when the handle retires, which the table
     // does before it goes away, so capturing both raw is safe.
     FunctionDispatchTable* table = table_;
+    // A frame resumes in the Function the code was compiled from (its
+    // guards were validated against it), even after the handle is rebound
+    // to another one; once that Function's module is destroyed the deopt is
+    // a fatal error.
     auto register_resumer = [table](FunctionHandle& h, void* entry) {
         FunctionHandle* hp = &h;
-        register_deopt_resumer(entry, [hp, table](const DeoptFrame& frame) -> uint64_t {
-            return table->pipeline().resume_after_deopt(*hp, frame, *table);
+        register_deopt_resumer(entry, [hp, table, entry](const DeoptFrame& frame) -> uint64_t {
+            const Function* compiled_from = hp->deopt_function(entry);
+            if (!compiled_from) {
+                std::fprintf(stderr, "brass: fatal deoptimization error: tier-2 code of '%s' deoptimized but the "
+                                     "Function it was compiled from is gone\n",
+                             std::string(hp->name()).c_str());
+                std::fflush(stderr);
+                std::abort();
+            }
+            return table->pipeline().resume_after_deopt(*hp, frame, *table, *compiled_from);
         });
-        h.add_deopt_entry(entry);
+        h.add_deopt_entry(entry, h.mir_function());
     };
     // A func_addr in this code yields the engine's own copy of a module
     // function: Tier 0 maps it back to the function by name.

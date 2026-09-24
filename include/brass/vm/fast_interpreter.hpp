@@ -66,9 +66,14 @@ public:
     void set_dispatch_table(runtime::FunctionDispatchTable* table);
     runtime::FunctionDispatchTable& dispatch_table() const noexcept;
 
-    // GC access
-    MiniCheneyGC& gc() noexcept { return gc_; }
-    const MiniCheneyGC& gc() const noexcept { return gc_; }
+    // GC access: the heap this interpreter allocates from, its own unless
+    // it borrows one.
+    MiniCheneyGC& gc() noexcept { return borrowed_gc_ ? *borrowed_gc_ : gc_; }
+    const MiniCheneyGC& gc() const noexcept { return borrowed_gc_ ? *borrowed_gc_ : gc_; }
+    // Allocates from `heap` (null: its own) instead. The caller keeps this
+    // interpreter's frames among `heap`'s roots while it runs (its root
+    // provider only knows the heap owner's), e.g. with a ThreadRootsScope.
+    void borrow_gc(MiniCheneyGC* heap) noexcept { borrowed_gc_ = heap; }
 
     void set_generational_gc(GenerationalGC* gc) noexcept;
     GenerationalGC* generational_gc() noexcept { return gen_gc_; }
@@ -123,6 +128,16 @@ public:
     // Resume execution
     RuntimeValue resume(const Function& fn, uint32_t resume_id, const std::vector<RuntimeValue>& state_values);
     RuntimeValue resume(const BytecodeFunction& fn, uint32_t resume_id, const std::vector<RuntimeValue>& state_values);
+    // Run on this thread's native stack by native code this interpreter's
+    // frames called (as Interpreter::call_from_native and
+    // resume_from_native): the new frames sit above theirs, so they
+    // allocate in this heap and their gcrefs are this GC's roots. The
+    // frames below keep running in their module.
+    RuntimeValue call_from_native(const Function& fn, const std::vector<RuntimeValue>& args);
+    RuntimeValue resume_from_native(const Function& fn, uint32_t resume_id,
+                                    const std::vector<RuntimeValue>& state_values);
+    // Makes `mod` current again after a call_from_native/resume_from_native.
+    void restore_module_after_native(const Module* mod);
 
     // Execution limits & diagnostics. The instruction budget is charged per
     // loop iteration (by the loop's length in bytecode) and per call, so
@@ -218,6 +233,7 @@ private:
     const BytecodeModule* bytecode_module_ = nullptr;
     runtime::FunctionDispatchTable* dispatch_table_ = nullptr;
     MiniCheneyGC gc_;
+    MiniCheneyGC* borrowed_gc_ = nullptr;
     GenerationalGC* gen_gc_ = nullptr;
 
     FastFrame* current_frame_ = nullptr;

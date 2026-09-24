@@ -532,4 +532,43 @@ RuntimeValue FastInterpreter::resume(const BytecodeFunction& fn, uint32_t resume
                        target->param_regs.empty() ? nullptr : &target->param_regs);
 }
 
+namespace {
+// Switching to the callee's module retires the compile caches (kept alive
+// for the running frames); the frames below resolve calls in theirs again
+// once it returns.
+struct FastModuleRestore {
+    FastInterpreter& interp;
+    const Module* saved;
+    ~FastModuleRestore() { interp.restore_module_after_native(saved); }
+};
+} // namespace
+
+void FastInterpreter::restore_module_after_native(const Module* mod) { use_module(mod); }
+
+RuntimeValue FastInterpreter::call_from_native(const Function& fn, const std::vector<RuntimeValue>& args) {
+    FastModuleRestore restore{*this, module_};
+    if (fn.parent()) use_module(fn.parent());
+    const BytecodeFunction* bfn = get_or_compile(fn);
+    return enter_frame(fn_info(*bfn, &fn), args, 0, nullptr);
+}
+
+RuntimeValue FastInterpreter::resume_from_native(const Function& fn, uint32_t resume_id,
+                                                 const std::vector<RuntimeValue>& state_values) {
+    FastModuleRestore restore{*this, module_};
+    // The exits the guard takes, in its order (Interpreter::
+    // resume_after_guard): the exit stub, whose result is the function's,
+    // else the resume target.
+    const Instruction* guard = fn.find_guard(resume_id);
+    if (!guard) {
+        throw InterpreterException("No guard with resume id " + std::to_string(resume_id) + " in function " +
+                                   std::string(fn.name()));
+    }
+    if (const Function* stub = fn.guard_exit_stub(*guard)) return run(*stub, state_values);
+    if (!fn.get_resume_target(resume_id)) {
+        throw InterpreterException("Guard " + std::to_string(resume_id) + " in function " + std::string(fn.name()) +
+                                   " has neither an exit stub nor a resume target");
+    }
+    return resume(fn, resume_id, state_values);
+}
+
 } // namespace brass

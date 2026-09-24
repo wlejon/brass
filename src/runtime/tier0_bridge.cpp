@@ -11,6 +11,7 @@
 #include <brass/runtime/code_installer.hpp>
 #include <brass/codegen/baseline_jit.hpp>
 #include <brass/interpreter/interpreter.hpp>
+#include <brass/vm/fast_interpreter.hpp>
 #include <brass/gc/native_frames.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/module.hpp>
@@ -132,9 +133,9 @@ uint64_t MultiTierPipeline::call_tier0_from_native(std::string_view name, const 
     args.reserve(count);
     for (size_t i = 0; i < count; ++i) args.push_back(materialize(fn->param_type(i), bits[i]));
     // Re-enter the interpreter whose code called into native code on this
-    // thread, if it runs this program: the callee then shares its heap and
-    // state as a Tier-0 call would. Otherwise (a host called native code
-    // directly, or Tier 0 is the fast interpreter) a fresh one runs it,
+    // thread (Interpreter or FastInterpreter), if it runs this program: the
+    // callee then shares its heap and state as a Tier-0 call would.
+    // Otherwise (a host called native code directly) a fresh one runs it,
     // allocating from the thread's active GC (run_fresh_tier0).
     // Either way an exception it throws (a MIR throw, or a Tier-0 error)
     // propagates as a C++ exception: baseline frames carry unwind data, so
@@ -142,8 +143,15 @@ uint64_t MultiTierPipeline::call_tier0_from_native(std::string_view name, const 
     // invoke or host catch above them. Baseline code has no handlers of its
     // own (the tier rejects exception ops), so none is skipped.
     Interpreter* active = Interpreter::active_on_thread();
-    RuntimeValue r = active && &active->dispatch_table() == table_ ? active->call_from_native(*fn, args)
-                                                                   : run_fresh_tier0(*table_, fn, args);
+    FastInterpreter* active_fast = FastInterpreter::current();
+    RuntimeValue r;
+    if (active && &active->dispatch_table() == table_) {
+        r = active->call_from_native(*fn, args);
+    } else if (active_fast && &active_fast->dispatch_table() == table_) {
+        r = active_fast->call_from_native(*fn, args);
+    } else {
+        r = run_fresh_tier0(*table_, fn, args);
+    }
     return r.is_void() ? 0 : r.raw_bits();
 }
 
