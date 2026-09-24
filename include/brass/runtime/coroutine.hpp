@@ -63,13 +63,33 @@ static constexpr int32_t CORO_OFFSET_SLOT_COUNT = 32;
 static constexpr int32_t CORO_OFFSET_FLAGS      = 36;
 static constexpr int32_t CORO_OFFSET_SLOTS      = 40;
 
+// A counted reference to a registered coroutine frame, for holders outside
+// any heap (the microtask queue, a Promise's waiters). It follows the frame
+// when a collection moves it, notes when the frame finishes or is destroyed,
+// and notes when the frame's heap is torn down: using it then is a hard error
+// (std::logic_error), never a read or write of the dead heap's memory.
+struct CoroFrameCell;
+using CoroFrameRef = std::shared_ptr<CoroFrameCell>;
+
+// The reference to `frame`, a live frame. A finished frame (no longer
+// registered) yields a reference that resolves to nullptr. Throws
+// std::logic_error for a frame no registry knows that is not finished, and
+// for the address of a frame whose heap was torn down.
+CoroFrameRef coro_frame_ref(BrassCoroFrame* frame);
+// The frame's current address, or nullptr once it finished or was destroyed.
+// Throws std::logic_error when the frame's heap was torn down.
+BrassCoroFrame* resolve_coro_frame_ref(const CoroFrameRef& ref);
+
 // Microtask Queue for async/await scheduling
 class MicrotaskQueue {
 public:
     using Task = std::function<void()>;
 
     void enqueue(Task task);
+    // Resumes the frame when the queue runs, unless it finished by then. A
+    // frame whose heap was torn down in between is a hard error at run_all.
     void enqueue_coro(BrassCoroFrame* frame, uint64_t input_val);
+    void enqueue_coro(CoroFrameRef frame, uint64_t input_val);
     void run_all();
     bool empty() const noexcept { return tasks_.empty(); }
     size_t size() const noexcept { return tasks_.size(); }
@@ -104,7 +124,7 @@ private:
     PromiseState state_ = PromiseState::Pending;
     uint64_t value_ = 0;
     std::vector<std::function<void(uint64_t)>> callbacks_;
-    std::vector<BrassCoroFrame*> awaiting_frames_;
+    std::vector<CoroFrameRef> awaiting_frames_;
 };
 
 // Suspended coroutine frames are roots of the heap they were allocated in.
@@ -112,10 +132,27 @@ private:
 // HostGC each hold one; the installed HostHeap's frames share one, as do
 // frames allocated outside any heap), and a heap's entries go with it. A
 // frame leaves its registry when it finishes, when its body throws, or on
-// brass_coro_destroy. The registries are shared by all threads under one
-// lock; a heap's collection updates its own entries in place.
+// brass_coro_destroy. The set of registries is guarded by one lock, and each
+// registry's entries by its own: a heap's collection updates its entries in
+// place while it holds a CoroRootsLock on its registry, so a thread that
+// looks through the registries (unregister, is_active_coro_frame) never reads
+// an entry a collection is writing. Lock order: the set, then a registry;
+// a collection holding its registry's lock takes no other.
 class CoroFrameRegistry;
 std::shared_ptr<CoroFrameRegistry> make_coro_frame_registry();
+
+// Held by a heap's collection from gathering its coroutine roots
+// (append_active_coro_roots) until the last root slot is updated.
+class CoroRootsLock {
+public:
+    explicit CoroRootsLock(CoroFrameRegistry& registry);
+    ~CoroRootsLock();
+    CoroRootsLock(const CoroRootsLock&) = delete;
+    CoroRootsLock& operator=(const CoroRootsLock&) = delete;
+
+private:
+    CoroFrameRegistry* registry_;
+};
 
 // Registers `frame` in the registry of the heap the thread allocates
 // coroutine frames from (allocate_coro_frame's choice, coroutine.cpp).
@@ -124,9 +161,13 @@ void unregister_active_coro_frame(BrassCoroFrame* frame);
 bool is_active_coro_frame(uintptr_t frame);
 // Every registry's unfinished frames.
 void visit_active_coro_frames(const std::function<void(uintptr_t*)>& visitor);
-// The unfinished frames of one heap, as root slots its collection updates.
+// The unfinished frames of one heap, as root slots its collection updates
+// (under a CoroRootsLock on `registry`, held until the slots are updated).
 void append_active_coro_roots(CoroFrameRegistry& registry, std::vector<uintptr_t*>& roots);
 // The same for the installed HostHeap's frames (brass_enumerate_thread_roots).
+// The host's collector updates these slots after this returns, outside the
+// registry's lock: a host collecting its heap on one thread while another
+// thread unregisters one of its frames must serialize the two itself.
 void append_host_heap_coro_roots(std::vector<uintptr_t*>& roots);
 
 // A body that throws is finished, as a generator that threw is: its frame is
@@ -153,5 +194,8 @@ uint64_t brass_coro_resume(uintptr_t coro_frame, uint64_t input_val);
 // caller's landing pads see it.
 uint64_t brass_coro_resume_from_generated(uintptr_t coro_frame, uint64_t input_val);
 uint32_t brass_coro_is_done(uintptr_t coro_frame);
+// Marks a registered frame finished and unregisters it. A handle no registry
+// knows (a frame already finished, or one whose heap was torn down) is not
+// written through.
 void brass_coro_destroy(uintptr_t coro_frame);
 }

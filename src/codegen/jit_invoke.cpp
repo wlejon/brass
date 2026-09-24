@@ -378,11 +378,23 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
     partition_aarch64_invoke_args(args, param_types, addr, invoke_args, stack_words);
 
     AArch64InvokeResult result;
-    GeneratedCodeEntryScope entry;  // walks need not unwind the host's stack
+    // As on x64 (Windows ARM64 included): a native throw's pad search stops
+    // here (entry_boundary, exception_win64.cpp) and leaves as a C++
+    // exception into this frame's callers; walks need not unwind the host's
+    // stack.
+    GeneratedCodeEntryScope entry;
 #if defined(__GNUC__) || defined(__clang__)
     aarch64_invoke_thunk(&invoke_args, &result);
-#endif
     return aarch64_invoke_result_value(ret_type, result);
+#else
+    // The thunk is GCC/Clang asm (clang-cl builds it on Windows ARM64);
+    // never return a result no call produced.
+    (void)invoke_args;
+    (void)result;
+    (void)ret_type;
+    throw std::runtime_error("JitExecutionEngine::invoke on AArch64 needs the GCC/Clang invoke thunk "
+                             "(build with clang-cl on Windows ARM64)");
+#endif
 }
 
 } // namespace brass::codegen

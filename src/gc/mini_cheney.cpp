@@ -84,6 +84,7 @@ uintptr_t MiniCheneyGC::allocate(size_t size, uint64_t pointer_mask, uint32_t ty
     }
 
     if (stress_mode_ || free_ptr_ + total_size > semispace_size_) {
+        runtime::CoroRootsLock coro_lock(coro_frames()); // until the coroutine roots are updated
         std::vector<uintptr_t*> all_roots;
         gather_all_roots(all_roots);
         for (uintptr_t* r : extra_roots) {
@@ -114,12 +115,14 @@ uintptr_t MiniCheneyGC::allocate(size_t size, uint64_t pointer_mask, uint32_t ty
 }
 
 void MiniCheneyGC::collect() {
+    runtime::CoroRootsLock coro_lock(coro_frames()); // until the coroutine roots are updated
     std::vector<uintptr_t*> roots;
     gather_all_roots(roots);
     collect(roots);
 }
 
 void MiniCheneyGC::collect_with_extra_roots(std::vector<uintptr_t*>& extra_roots) {
+    runtime::CoroRootsLock coro_lock(coro_frames()); // until the coroutine roots are updated
     std::vector<uintptr_t*> roots;
     gather_all_roots(roots);
     roots.insert(roots.end(), extra_roots.begin(), extra_roots.end());

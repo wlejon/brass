@@ -296,6 +296,12 @@ RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) 
     const Type ret_type = sig->ret;
     [[maybe_unused]] const std::vector<Type>* ptypes = sig->params.empty() ? nullptr : &sig->params;
 
+    // Every path below enters generated code from C++ (the thunks on each
+    // host, Windows ARM64 included, and the cast-based fallback): a native
+    // throw's pad search stops here, and stack walks need not unwind the
+    // host's stack.
+    GeneratedCodeEntryScope entry;
+
     // Each supported host calls through an ABI-exact thunk; the baseline and
     // cast-based fallbacks below are compiled only for any other host.
 #if (defined(__x86_64__) || defined(_M_X64)) && (defined(_WIN32) || defined(__GNUC__) || defined(__clang__))
@@ -305,7 +311,6 @@ RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) 
     codegen::partition_x64_win64_invoke_args(args, ptypes, addr, invoke_args, stack_words);
 
     codegen::X64Win64InvokeResult result;
-    GeneratedCodeEntryScope entry;  // walks need not unwind the host's stack
     codegen::x64_win64_invoke_thunk(&invoke_args, &result);
 
     return codegen::native_return_value(ret_type, result.rax, result.xmm0);

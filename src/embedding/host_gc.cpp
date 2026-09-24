@@ -322,12 +322,16 @@ void HostGC::collect(
         }
     }
 
-    // 3.5. Relocate active coroutine roots
-    std::vector<uintptr_t*> coro_roots;
-    runtime::append_active_coro_roots(coro_frames(), coro_roots);
-    for (auto* ptr_root : coro_roots) {
-        if (ptr_root && *ptr_root && is_address_in_active_space(*ptr_root)) {
-            *ptr_root = evacuate_object(*ptr_root, to_free_ptr);
+    // 3.5. Relocate active coroutine roots (their slots are read and
+    // written under the registry's lock)
+    {
+        runtime::CoroRootsLock coro_lock(coro_frames());
+        std::vector<uintptr_t*> coro_roots;
+        runtime::append_active_coro_roots(coro_frames(), coro_roots);
+        for (auto* ptr_root : coro_roots) {
+            if (ptr_root && *ptr_root && is_address_in_active_space(*ptr_root)) {
+                *ptr_root = evacuate_object(*ptr_root, to_free_ptr);
+            }
         }
     }
 

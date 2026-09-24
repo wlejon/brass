@@ -319,6 +319,7 @@ void GenerationalGC::minor_collect() {
 }
 
 void GenerationalGC::minor_collect(std::vector<uintptr_t*>& extra_roots) {
+    runtime::CoroRootsLock coro_lock(coro_frames()); // until the coroutine roots are updated
     std::vector<uintptr_t*> all_roots;
     gather_all_roots(all_roots, extra_roots);
 
@@ -527,6 +528,7 @@ void GenerationalGC::major_collect() {
 }
 
 void GenerationalGC::major_collect(std::vector<uintptr_t*>& extra_roots) {
+    runtime::CoroRootsLock coro_lock(coro_frames()); // until the coroutine roots are updated
     std::vector<uintptr_t*> all_roots;
     gather_all_roots(all_roots, extra_roots);
 

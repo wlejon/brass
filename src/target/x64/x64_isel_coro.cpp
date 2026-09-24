@@ -118,10 +118,13 @@ void X64ISel::lower_coro(const Instruction& inst, LirBlock& lir_bb) {
             }
 
             auto call_lir = std::make_unique<LirInst>(LirOpcode::Call);
-            call_lir->callee_symbol = "brass_coro_resume";
+            // The entry for generated callers: a throw from the body is
+            // raised again natively, so this function's pads see it (JIT and
+            // AOT link the same symbol).
+            call_lir->callee_symbol = "brass_coro_resume_from_generated";
             call_lir->add_use(LirOperand::preg_gpr(arg0, 8), FixedConstraint::gpr(arg0));
             call_lir->add_use(LirOperand::preg_gpr(arg1, 8), FixedConstraint::gpr(arg1));
-            call_lir->add_use(LirOperand::symbol("brass_coro_resume"));
+            call_lir->add_use(LirOperand::symbol("brass_coro_resume_from_generated"));
             finish_call(*call_lir, Type::i64());
             call_lir->mir_origin = &inst;
             lir_bb.append_inst(std::move(call_lir));

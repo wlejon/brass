@@ -164,8 +164,43 @@ RuntimeValue Interpreter::call_in_own_module(const Function& fn, const std::vect
     return execute_function(fn, args);
 }
 
-RuntimeValue retype_exception_value(RuntimeValue v, Type t) noexcept {
-    if (t.is_void() || t.is_vector() || v.is_vector()) return v;
+namespace {
+
+// Bits a scalar type occupies (0 for void and vectors).
+unsigned scalar_bits(Type t) noexcept {
+    switch (t.kind()) {
+        case TypeKind::I8: return 8;
+        case TypeKind::I16: return 16;
+        case TypeKind::I32:
+        case TypeKind::F32: return 32;
+        case TypeKind::I64:
+        case TypeKind::F64:
+        case TypeKind::Ptr:
+        case TypeKind::GCRef: return 64;
+        default: return 0;
+    }
+}
+
+} // namespace
+
+RuntimeValue retype_exception_value(RuntimeValue v, Type t) {
+    if (t.is_void()) return v;
+    const Type from = v.type();
+    if (from == t) return v;
+    // i64 is the carrier of bare bits, as the return register is in the
+    // native tiers: a native throw arrives as i64 and a pad of any scalar
+    // type says what the bits are, and an i64 pad takes any scalar's bits.
+    // Otherwise a value is reinterpreted only at its own width (f64/ptr/gcref,
+    // i32/f32). Anything else (another width, a vector for a scalar or the
+    // reverse) is a pad that cannot hold what was thrown.
+    const unsigned from_bits = scalar_bits(from);
+    const unsigned to_bits = scalar_bits(t);
+    const bool legal = to_bits != 0 && from_bits != 0 &&
+                       (from.is_i64() || t.is_i64() || from_bits == to_bits);
+    if (!legal) {
+        throw InterpreterException("landing_pad." + to_string(t) + " caught a thrown " + to_string(from) +
+                                   " value: the pad's type cannot hold it");
+    }
     uint64_t bits = v.raw_bits();
     switch (t.kind()) {
         case TypeKind::I8: bits &= 0xFFull; break;

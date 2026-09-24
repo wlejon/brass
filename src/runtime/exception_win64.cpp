@@ -175,7 +175,23 @@ static uintptr_t entry_boundary() noexcept {
     const uintptr_t sp = reinterpret_cast<uintptr_t>(&here);
     for (const GeneratedCodeEntryScope* s = brass_innermost_entry_scope(); s; s = s->outer()) {
         const uintptr_t a = s->address();
-        if (a >= sp && a >= low && a < high) return a;
+        if (a >= sp && a >= low && a < high) {
+            // Callers stop at the first frame whose establisher is >= the
+            // returned value. On x64 a frame's establisher is its own stack
+            // pointer after the prolog, below the scope for every frame the
+            // entering C++ frame called. On ARM64 it is the stack pointer at
+            // the frame's entry, i.e. the caller's SP at the call: for the
+            // generated frame the entering C++ frame called directly, that is
+            // the C++ frame's SP, which may equal the scope's address when
+            // the scope is its lowest local. Only frames whose establisher
+            // lies strictly above the scope (the entering frame and its
+            // callers) are past the boundary there.
+#if defined(_M_ARM64) || defined(__aarch64__)
+            return a + 1;
+#else
+            return a;
+#endif
+        }
     }
     return UINTPTR_MAX;
 }

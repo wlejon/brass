@@ -1,4 +1,5 @@
 #include <brass/runtime/parallel_runtime.hpp>
+#include <brass/gc/native_frames.hpp>
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
@@ -121,6 +122,8 @@ void ParallelRuntime::worker_loop(uint32_t worker_id) {
 }
 
 void ParallelRuntime::execute_work(uint32_t worker_id) {
+    // A worker thread enters the (generated) kernel from C++ here.
+    GeneratedCodeEntryScope entry;
     t_current_worker_id = worker_id;
     ParallelChunk chunk;
 
@@ -186,6 +189,11 @@ void ParallelRuntime::parallel_for(
     void* red_target
 ) {
     if (trip_count == 0 || !kernel) return;
+
+    // The kernel is generated code entered from this C++ frame (here, and
+    // in execute_work on this thread): a native throw's pad search stops
+    // here and leaves as a C++ exception, which unwinds this frame's guards.
+    GeneratedCodeEntryScope entry;
 
     // Nested or worker-thread fallback
     if (t_nesting_depth > 0 || t_is_worker_thread) {

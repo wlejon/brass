@@ -53,6 +53,12 @@ RuntimeValue BaselineCompiledFunction::invoke(const std::vector<RuntimeValue>& a
 
     [[maybe_unused]] const std::vector<Type>* ptypes = param_types_.empty() ? nullptr : &param_types_;
 
+    // Every path below enters generated code from C++ (the thunks on each
+    // host, Windows ARM64 included, and the cast-based fallback): a native
+    // throw's pad search stops here, and stack walks need not unwind the
+    // host's stack.
+    GeneratedCodeEntryScope entry;
+
     // Each supported host calls through an ABI-exact thunk; the generic
     // cast-based fallback below is compiled only for any other host.
 #if (defined(__x86_64__) || defined(_M_X64)) && (defined(_WIN32) || defined(__GNUC__) || defined(__clang__))
@@ -62,7 +68,6 @@ RuntimeValue BaselineCompiledFunction::invoke(const std::vector<RuntimeValue>& a
     partition_x64_win64_invoke_args(args, ptypes, addr, invoke_args, stack_words);
 
     X64Win64InvokeResult result;
-    GeneratedCodeEntryScope entry;  // walks need not unwind the host's stack
     x64_win64_invoke_thunk(&invoke_args, &result);
 
     return native_return_value(return_type_, result.rax, result.xmm0);

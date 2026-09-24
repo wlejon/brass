@@ -13,6 +13,7 @@
 #include <cstring>
 #include <list>
 #include <mutex>
+#include <stdexcept>
 #include <unordered_set>
 
 #if defined(_MSC_VER)
@@ -27,8 +28,9 @@ namespace {
 
 static MicrotaskQueue g_microtask_queue;
 
-// Every live registry, under one lock (leaked: heaps may die during static
-// destruction). Recursive: a visitor may register frames.
+// The set of live registries, and every CoroFrameCell's state and owner
+// (leaked: heaps may die during static destruction). Recursive: a visitor
+// may register frames.
 std::recursive_mutex& registries_mutex() {
     static auto* m = new std::recursive_mutex();
     return *m;
@@ -40,8 +42,19 @@ std::vector<CoroFrameRegistry*>& live_registries() {
 
 } // namespace
 
-// One heap's frames. List nodes do not move, so a collection may update an
-// entry through the slot it was handed while other heaps' registries change.
+// One registered frame. `addr` is the root slot a collection of the owning
+// heap updates (under the registry's lock); `state` and `owner` are guarded
+// by registries_mutex(). Holders outside the heap (CoroFrameRef) keep the
+// cell alive after it leaves its registry.
+struct CoroFrameCell {
+    enum class State : uint8_t { Live, Finished, HeapGone };
+    uintptr_t addr = 0;
+    CoroFrameRegistry* owner = nullptr;
+    State state = State::Live;
+};
+
+// One heap's frames. Cells do not move, so a collection may update an entry
+// through the slot it was handed while other heaps' registries change.
 class CoroFrameRegistry {
 public:
     CoroFrameRegistry() {
@@ -52,16 +65,34 @@ public:
         std::lock_guard<std::recursive_mutex> lock(registries_mutex());
         auto& all = live_registries();
         all.erase(std::remove(all.begin(), all.end(), this), all.end());
+        // The heap's memory goes with it: a frame still registered here is
+        // unfinished, and every reference to it is now stale.
+        std::lock_guard<std::recursive_mutex> own(mutex);
+        for (auto& cell : frames) {
+            cell->state = CoroFrameCell::State::HeapGone;
+            cell->owner = nullptr;
+        }
+        frames.clear();
     }
     CoroFrameRegistry(const CoroFrameRegistry&) = delete;
     CoroFrameRegistry& operator=(const CoroFrameRegistry&) = delete;
 
-    // Guarded by registries_mutex().
-    std::list<BrassCoroFrame*> frames;
+    // Guards `frames` and every cell's `addr`. Held by the heap's collection
+    // for as long as it updates root slots (CoroRootsLock).
+    std::recursive_mutex mutex;
+    std::list<std::shared_ptr<CoroFrameCell>> frames;
 };
 
 std::shared_ptr<CoroFrameRegistry> make_coro_frame_registry() {
     return std::make_shared<CoroFrameRegistry>();
+}
+
+CoroRootsLock::CoroRootsLock(CoroFrameRegistry& registry) : registry_(&registry) {
+    registry_->mutex.lock();
+}
+
+CoroRootsLock::~CoroRootsLock() {
+    registry_->mutex.unlock();
 }
 
 namespace {
@@ -87,11 +118,38 @@ CoroFrameRegistry& current_coro_registry() {
     return unmanaged_frames();
 }
 
-bool erase_from(CoroFrameRegistry& r, BrassCoroFrame* frame) {
-    auto it = std::find(r.frames.begin(), r.frames.end(), frame);
-    if (it == r.frames.end()) return false;
-    r.frames.erase(it);
-    return true;
+// The cell of `frame` in `r`, or null. Caller holds registries_mutex().
+std::shared_ptr<CoroFrameCell> find_in(CoroFrameRegistry& r, uintptr_t frame) {
+    std::lock_guard<std::recursive_mutex> own(r.mutex);
+    for (auto& cell : r.frames) {
+        if (cell->addr == frame) return cell;
+    }
+    return nullptr;
+}
+
+// Caller holds registries_mutex().
+bool erase_from(CoroFrameRegistry& r, uintptr_t frame) {
+    std::lock_guard<std::recursive_mutex> own(r.mutex);
+    for (auto it = r.frames.begin(); it != r.frames.end(); ++it) {
+        if ((*it)->addr == frame) {
+            (*it)->state = CoroFrameCell::State::Finished;
+            (*it)->owner = nullptr;
+            r.frames.erase(it);
+            return true;
+        }
+    }
+    return false;
+}
+
+// The cell of a registered frame, the thread's own heap first. Caller holds
+// registries_mutex().
+std::shared_ptr<CoroFrameCell> find_registered(CoroFrameRegistry& mine, uintptr_t frame) {
+    if (auto cell = find_in(mine, frame)) return cell;
+    for (CoroFrameRegistry* r : live_registries()) {
+        if (r == &mine) continue;
+        if (auto cell = find_in(*r, frame)) return cell;
+    }
+    return nullptr;
 }
 
 } // namespace
@@ -104,11 +162,51 @@ void MicrotaskQueue::enqueue(Task task) {
     tasks_.push_back(std::move(task));
 }
 
+CoroFrameRef coro_frame_ref(BrassCoroFrame* frame) {
+    if (!frame) return nullptr;
+    const uintptr_t addr = reinterpret_cast<uintptr_t>(frame);
+    CoroFrameRegistry& mine = current_coro_registry(); // may create it: before the lock
+    std::lock_guard<std::recursive_mutex> lock(registries_mutex());
+    if (auto cell = find_registered(mine, addr)) return cell;
+    // Every unregistered frame is finished (it finished, threw, or was
+    // destroyed); anything else is not a coroutine frame.
+    if (frame->is_done == 0) {
+        throw std::logic_error("coroutine frame reference: not a registered coroutine frame");
+    }
+    auto done = std::make_shared<CoroFrameCell>();
+    done->addr = addr;
+    done->state = CoroFrameCell::State::Finished;
+    return done;
+}
+
+BrassCoroFrame* resolve_coro_frame_ref(const CoroFrameRef& ref) {
+    if (!ref) return nullptr;
+    std::lock_guard<std::recursive_mutex> lock(registries_mutex());
+    switch (ref->state) {
+        case CoroFrameCell::State::Finished:
+            return nullptr;
+        case CoroFrameCell::State::HeapGone:
+            throw std::logic_error("coroutine frame reference: the frame's heap was torn down while it "
+                                   "was unfinished (a stale coroutine handle)");
+        case CoroFrameCell::State::Live:
+            break;
+    }
+    std::lock_guard<std::recursive_mutex> own(ref->owner->mutex);
+    auto* frame = reinterpret_cast<BrassCoroFrame*>(ref->addr);
+    return frame->is_done ? nullptr : frame;
+}
+
 void MicrotaskQueue::enqueue_coro(BrassCoroFrame* frame, uint64_t input_val) {
     if (!frame) return;
-    tasks_.push_back([frame, input_val]() {
-        if (!frame->is_done) {
-            brass_coro_resume(reinterpret_cast<uintptr_t>(frame), input_val);
+    enqueue_coro(coro_frame_ref(frame), input_val);
+}
+
+void MicrotaskQueue::enqueue_coro(CoroFrameRef frame, uint64_t input_val) {
+    if (!frame) return;
+    tasks_.push_back([frame = std::move(frame), input_val]() {
+        // The frame's address now: a collection may have moved it.
+        if (BrassCoroFrame* live = resolve_coro_frame_ref(frame)) {
+            brass_coro_resume(reinterpret_cast<uintptr_t>(live), input_val);
         }
     });
 }
@@ -134,12 +232,13 @@ void Promise::fulfill(uint64_t val) {
     }
     callbacks_.clear();
 
-    for (auto* frame : awaiting_frames_) {
-        if (frame && !frame->is_done) {
-            get_global_microtask_queue().enqueue_coro(frame, val);
-        }
-    }
+    // Each waiter is resolved when the queue runs it (a finished one is
+    // skipped there, one whose heap died is a hard error there).
+    auto waiters = std::move(awaiting_frames_);
     awaiting_frames_.clear();
+    for (auto& frame : waiters) {
+        get_global_microtask_queue().enqueue_coro(std::move(frame), val);
+    }
 }
 
 void Promise::reject(uint64_t reason) {
@@ -161,26 +260,32 @@ void Promise::await_in(BrassCoroFrame* frame) {
     if (state_ == PromiseState::Fulfilled) {
         get_global_microtask_queue().enqueue_coro(frame, value_);
     } else if (state_ == PromiseState::Pending) {
-        awaiting_frames_.push_back(frame);
+        awaiting_frames_.push_back(coro_frame_ref(frame));
     }
 }
 
 void register_active_coro_frame(BrassCoroFrame* frame) {
     if (!frame) return;
+    const uintptr_t addr = reinterpret_cast<uintptr_t>(frame);
     CoroFrameRegistry& r = current_coro_registry(); // may create it: before the lock
+    auto cell = std::make_shared<CoroFrameCell>();
+    cell->addr = addr;
+    cell->owner = &r;
     std::lock_guard<std::recursive_mutex> lock(registries_mutex());
-    r.frames.push_back(frame);
+    std::lock_guard<std::recursive_mutex> own(r.mutex);
+    r.frames.push_back(std::move(cell));
 }
 
 void unregister_active_coro_frame(BrassCoroFrame* frame) {
     if (!frame) return;
-    // The thread's own heap first: other heaps' entries are updated by their
-    // collections without the lock.
-    CoroFrameRegistry& mine = current_coro_registry();
+    const uintptr_t addr = reinterpret_cast<uintptr_t>(frame);
+    // The thread's own heap first. Another heap's entries are read under
+    // that registry's lock, which its collection holds while it updates them.
+    CoroFrameRegistry& mine = current_coro_registry(); // may create it: before the lock
     std::lock_guard<std::recursive_mutex> lock(registries_mutex());
-    if (erase_from(mine, frame)) return;
+    if (erase_from(mine, addr)) return;
     for (CoroFrameRegistry* r : live_registries()) {
-        if (r != &mine && erase_from(*r, frame)) return;
+        if (r != &mine && erase_from(*r, addr)) return;
     }
 }
 
@@ -188,9 +293,7 @@ bool is_active_coro_frame(uintptr_t frame) {
     if (!frame) return false;
     std::lock_guard<std::recursive_mutex> lock(registries_mutex());
     for (CoroFrameRegistry* r : live_registries()) {
-        for (BrassCoroFrame* f : r->frames) {
-            if (reinterpret_cast<uintptr_t>(f) == frame) return true;
-        }
+        if (find_in(*r, frame)) return true;
     }
     return false;
 }
@@ -198,21 +301,22 @@ bool is_active_coro_frame(uintptr_t frame) {
 void visit_active_coro_frames(const std::function<void(uintptr_t*)>& visitor) {
     std::lock_guard<std::recursive_mutex> lock(registries_mutex());
     for (CoroFrameRegistry* r : live_registries()) {
-        for (auto*& frame : r->frames) {
+        std::lock_guard<std::recursive_mutex> own(r->mutex);
+        for (auto& cell : r->frames) {
+            auto* frame = reinterpret_cast<BrassCoroFrame*>(cell->addr);
             if (frame && !frame->is_done) {
-                uintptr_t addr = reinterpret_cast<uintptr_t>(frame);
-                visitor(&addr);
-                frame = reinterpret_cast<BrassCoroFrame*>(addr);
+                visitor(&cell->addr);
             }
         }
     }
 }
 
 void append_active_coro_roots(CoroFrameRegistry& registry, std::vector<uintptr_t*>& roots) {
-    std::lock_guard<std::recursive_mutex> lock(registries_mutex());
-    for (auto*& frame : registry.frames) {
+    std::lock_guard<std::recursive_mutex> own(registry.mutex);
+    for (auto& cell : registry.frames) {
+        auto* frame = reinterpret_cast<BrassCoroFrame*>(cell->addr);
         if (frame && !frame->is_done) {
-            roots.push_back(reinterpret_cast<uintptr_t*>(&frame));
+            roots.push_back(&cell->addr);
         }
     }
 }
@@ -440,9 +544,18 @@ uint32_t brass_coro_is_done(uintptr_t coro_frame) {
 
 void brass_coro_destroy(uintptr_t coro_frame) {
     if (!coro_frame) return;
-    BrassCoroFrame* frame = reinterpret_cast<BrassCoroFrame*>(coro_frame);
-    frame->is_done = 1;
-    unregister_active_coro_frame(frame);
+    // Only a registered frame is written: that is the one kind known to be
+    // live. Every frame leaves its registry finished (is_done set), so an
+    // unregistered handle is either already done or names memory that is no
+    // longer a frame (its heap was torn down): nothing to write either way.
+    CoroFrameRegistry& mine = current_coro_registry(); // may create it: before the lock
+    std::lock_guard<std::recursive_mutex> lock(registries_mutex());
+    auto cell = find_registered(mine, coro_frame);
+    if (!cell) return;
+    CoroFrameRegistry* owner = cell->owner;
+    std::lock_guard<std::recursive_mutex> own(owner->mutex);
+    reinterpret_cast<BrassCoroFrame*>(coro_frame)->is_done = 1;
+    erase_from(*owner, coro_frame);
 }
 
 } // extern "C"

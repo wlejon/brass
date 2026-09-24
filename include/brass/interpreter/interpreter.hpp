@@ -50,8 +50,11 @@ private:
 
 // The exception value a landing pad of type `t` receives: a value a native
 // callee threw is bare bits (i64-kind), which the pad's type reinterprets (an
-// integer narrower than 64 bits keeps its low bits). A vector keeps its value.
-RuntimeValue retype_exception_value(RuntimeValue v, Type t) noexcept;
+// integer narrower than 64 bits keeps its low bits). A typed value is
+// reinterpreted only at its own width (i64/f64/ptr/gcref, i32/f32); a pad
+// whose type cannot hold the thrown value (another width, a vector for a
+// scalar or the reverse) is a hard error: InterpreterException.
+RuntimeValue retype_exception_value(RuntimeValue v, Type t);
 
 class InterpreterThrownException : public std::exception {
 public:
