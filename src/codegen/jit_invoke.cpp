@@ -34,7 +34,8 @@ void partition_aarch64_invoke_args(
 
     for (size_t i = 0; i < args.size(); ++i) {
         const auto& arg = args[i];
-        const Type t = (param_types && i < param_types->size()) ? (*param_types)[i] : arg.type();
+        const Type* pt = (param_types && i < param_types->size()) ? &(*param_types)[i] : nullptr;
+        const Type t = pt ? *pt : arg.type();
         const bool is_fpr = t.is_float() || t.is_vector();
 
         auto push_stack = [&](const uint8_t* bytes, size_t sz, size_t align, size_t slot) {
@@ -67,14 +68,15 @@ void partition_aarch64_invoke_args(
         if (arg.is_vector()) {
             std::memcpy(bytes, arg.v128_bytes(), 16);
             sz = 16;
-        } else if (t.kind() == TypeKind::F32 || arg.is_f32()) {
-            const float f = arg.is_f32() ? arg.as_f32() : static_cast<float>(arg.as_f64());
-            std::memcpy(bytes, &f, sizeof(float));
         } else if (t.is_float()) {
-            const double d = arg.as_f64();
-            std::memcpy(bytes, &d, sizeof(double));
+            // Converted to the parameter's width (an f64 value for an f32
+            // parameter, and the reverse).
+            const uint64_t w = native_float_arg_bits(arg, &t);
+            std::memcpy(bytes, &w, sizeof(w));
         } else {
-            const uint64_t v = arg.as_u64();
+            // Masked to the parameter's width; a float value for an integer
+            // parameter is an error.
+            const uint64_t v = native_int_arg_bits(arg, pt);
             std::memcpy(bytes, &v, sizeof(v));
         }
 
@@ -100,7 +102,6 @@ void partition_aarch64_invoke_args(
 }
 
 RuntimeValue aarch64_invoke_result_value(Type ret_type, const AArch64InvokeResult& result) {
-    if (ret_type.is_void()) return RuntimeValue::from_void();
     if (ret_type.is_v256()) {
         // V0 then V1 (aarch64_isel_branch.cpp).
         alignas(16) uint8_t b[32];
@@ -108,365 +109,23 @@ RuntimeValue aarch64_invoke_result_value(Type ret_type, const AArch64InvokeResul
         std::memcpy(b + 16, result.q1, 16);
         return RuntimeValue::from_v256(ret_type, b);
     }
-    if (ret_type.is_vector()) return RuntimeValue::from_v128(ret_type, result.q0);
-    if (ret_type.is_float()) {
-        if (ret_type.kind() == TypeKind::F32) {
-            float f = 0.0f;
-            std::memcpy(&f, result.q0, sizeof(float));
-            return RuntimeValue::from_f32(f);
-        }
-        double d = 0.0;
-        std::memcpy(&d, result.q0, sizeof(double));
-        return RuntimeValue::from_f64(d);
-    }
-    if (ret_type.kind() == TypeKind::I32) return RuntimeValue::from_i32(static_cast<int32_t>(result.x0));
-    if (ret_type.is_pointer()) return RuntimeValue::from_ptr(static_cast<uintptr_t>(result.x0));
-    if (ret_type.is_gcref()) return RuntimeValue::from_gcref(static_cast<uintptr_t>(result.x0));
-    return RuntimeValue::from_i64(static_cast<int64_t>(result.x0));
+    // Every other type converts as on x64: X0 or the low bits of V0, narrow
+    // integers sign-extended from their width.
+    return native_return_value(ret_type, result.x0, result.q0);
 }
 
 } // namespace brass::codegen
 
 #if defined(__x86_64__) || defined(_M_X64)
-#include <immintrin.h>
 
 namespace brass::codegen {
 
-#if defined(__GNUC__) || defined(__clang__)
-inline __m128 call_jit_vec1_ret_vec(void* addr, __m128 a0) {
-    register __m128 r_xmm0 asm("xmm0") = a0;
-    register __m128 res asm("xmm0");
-    asm volatile(
-        "subq $32, %%rsp\n\t"
-        "call *%1\n\t"
-        "addq $32, %%rsp"
-        : "=x"(res)
-        : "r"(addr), "x"(r_xmm0)
-        : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
-    );
-    return res;
-}
-
-inline float call_jit_vec1_ret_f32(void* addr, __m128 a0) {
-    register __m128 r_xmm0 asm("xmm0") = a0;
-    register float res asm("xmm0");
-    asm volatile(
-        "subq $32, %%rsp\n\t"
-        "call *%1\n\t"
-        "addq $32, %%rsp"
-        : "=x"(res)
-        : "r"(addr), "x"(r_xmm0)
-        : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
-    );
-    return res;
-}
-
-inline double call_jit_vec1_ret_f64(void* addr, __m128 a0) {
-    register __m128 r_xmm0 asm("xmm0") = a0;
-    register double res asm("xmm0");
-    asm volatile(
-        "subq $32, %%rsp\n\t"
-        "call *%1\n\t"
-        "addq $32, %%rsp"
-        : "=x"(res)
-        : "r"(addr), "x"(r_xmm0)
-        : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
-    );
-    return res;
-}
-
-inline int64_t call_jit_vec1_ret_i64(void* addr, __m128 a0) {
-    register __m128 r_xmm0 asm("xmm0") = a0;
-    register int64_t res asm("rax");
-    asm volatile(
-        "subq $32, %%rsp\n\t"
-        "call *%1\n\t"
-        "addq $32, %%rsp"
-        : "=r"(res)
-        : "r"(addr), "x"(r_xmm0)
-        : "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
-    );
-    return res;
-}
-
-inline __m128 call_jit_vec2_ret_vec(void* addr, __m128 a0, __m128 a1) {
-    register __m128 r_xmm0 asm("xmm0") = a0;
-    register __m128 r_xmm1 asm("xmm1") = a1;
-    register __m128 res asm("xmm0");
-    asm volatile(
-        "subq $32, %%rsp\n\t"
-        "call *%1\n\t"
-        "addq $32, %%rsp"
-        : "=x"(res)
-        : "r"(addr), "x"(r_xmm0), "x"(r_xmm1)
-        : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
-    );
-    return res;
-}
-
-inline float call_jit_vec2_ret_f32(void* addr, __m128 a0, __m128 a1) {
-    register __m128 r_xmm0 asm("xmm0") = a0;
-    register __m128 r_xmm1 asm("xmm1") = a1;
-    register float res asm("xmm0");
-    asm volatile(
-        "subq $32, %%rsp\n\t"
-        "call *%1\n\t"
-        "addq $32, %%rsp"
-        : "=x"(res)
-        : "r"(addr), "x"(r_xmm0), "x"(r_xmm1)
-        : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
-    );
-    return res;
-}
-
-inline int64_t call_jit_vec2_ret_i64(void* addr, __m128 a0, __m128 a1) {
-    register __m128 r_xmm0 asm("xmm0") = a0;
-    register __m128 r_xmm1 asm("xmm1") = a1;
-    register int64_t res asm("rax");
-    asm volatile(
-        "subq $32, %%rsp\n\t"
-        "call *%1\n\t"
-        "addq $32, %%rsp"
-        : "=r"(res)
-        : "r"(addr), "x"(r_xmm0), "x"(r_xmm1)
-        : "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
-    );
-    return res;
-}
-
-#if defined(_WIN32)
-inline void call_jit_vec_int_ret_void(void* addr, __m128 a0, int64_t a1) {
-    register __m128 r_xmm0 asm("xmm0") = a0;
-    register int64_t r_rdx asm("rdx") = a1;
-    asm volatile(
-        "subq $32, %%rsp\n\t"
-        "call *%0\n\t"
-        "addq $32, %%rsp"
-        :
-        : "r"(addr), "x"(r_xmm0), "r"(r_rdx)
-        : "rax", "rcx", "r8", "r9", "r10", "r11", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
-    );
-}
-
-inline __m128 call_jit_vec_int_ret_vec(void* addr, __m128 a0, int64_t a1) {
-    register __m128 r_xmm0 asm("xmm0") = a0;
-    register int64_t r_rdx asm("rdx") = a1;
-    register __m128 res asm("xmm0");
-    asm volatile(
-        "subq $32, %%rsp\n\t"
-        "call *%1\n\t"
-        "addq $32, %%rsp"
-        : "=x"(res)
-        : "r"(addr), "x"(r_xmm0), "r"(r_rdx)
-        : "rax", "rcx", "r8", "r9", "r10", "r11", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
-    );
-    return res;
-}
-
-inline int64_t call_jit_vec_int_ret_i64(void* addr, __m128 a0, int64_t a1) {
-    register __m128 r_xmm0 asm("xmm0") = a0;
-    register int64_t r_rdx asm("rdx") = a1;
-    register int64_t res asm("rax");
-    asm volatile(
-        "subq $32, %%rsp\n\t"
-        "call *%1\n\t"
-        "addq $32, %%rsp"
-        : "=r"(res)
-        : "r"(addr), "x"(r_xmm0), "r"(r_rdx)
-        : "rcx", "r8", "r9", "r10", "r11", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
-    );
-    return res;
-}
-
-inline void call_jit_int_vec_ret_void(void* addr, int64_t a0, __m128 a1) {
-    register int64_t r_rcx asm("rcx") = a0;
-    register __m128 r_xmm1 asm("xmm1") = a1;
-    asm volatile(
-        "subq $32, %%rsp\n\t"
-        "call *%0\n\t"
-        "addq $32, %%rsp"
-        :
-        : "r"(addr), "r"(r_rcx), "x"(r_xmm1)
-        : "rax", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
-    );
-}
-
-inline __m128 call_jit_int_vec_ret_vec(void* addr, int64_t a0, __m128 a1) {
-    register int64_t r_rcx asm("rcx") = a0;
-    register __m128 r_xmm1 asm("xmm1") = a1;
-    register __m128 res asm("xmm0");
-    asm volatile(
-        "subq $32, %%rsp\n\t"
-        "call *%1\n\t"
-        "addq $32, %%rsp"
-        : "=x"(res)
-        : "r"(addr), "r"(r_rcx), "x"(r_xmm1)
-        : "rax", "rdx", "r8", "r9", "r10", "r11", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
-    );
-    return res;
-}
-
-inline int64_t call_jit_int_vec_ret_i64(void* addr, int64_t a0, __m128 a1) {
-    register int64_t r_rcx asm("rcx") = a0;
-    register __m128 r_xmm1 asm("xmm1") = a1;
-    register int64_t res asm("rax");
-    asm volatile(
-        "subq $32, %%rsp\n\t"
-        "call *%1\n\t"
-        "addq $32, %%rsp"
-        : "=r"(res)
-        : "r"(addr), "r"(r_rcx), "x"(r_xmm1)
-        : "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
-    );
-    return res;
-}
-#else // SysV AMD64 (macOS, Linux)
-inline void call_jit_vec_int_ret_void(void* addr, __m128 a0, int64_t a1) {
-    register __m128 r_xmm0 asm("xmm0") = a0;
-    register int64_t r_rdi asm("rdi") = a1;
-    asm volatile(
-        "subq $32, %%rsp\n\t"
-        "call *%0\n\t"
-        "addq $32, %%rsp"
-        :
-        : "r"(addr), "x"(r_xmm0), "r"(r_rdi)
-        : "rax", "rcx", "rdx", "rsi", "r8", "r9", "r10", "r11", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
-    );
-}
-
-inline __m128 call_jit_vec_int_ret_vec(void* addr, __m128 a0, int64_t a1) {
-    register __m128 r_xmm0 asm("xmm0") = a0;
-    register int64_t r_rdi asm("rdi") = a1;
-    register __m128 res asm("xmm0");
-    asm volatile(
-        "subq $32, %%rsp\n\t"
-        "call *%1\n\t"
-        "addq $32, %%rsp"
-        : "=x"(res)
-        : "r"(addr), "x"(r_xmm0), "r"(r_rdi)
-        : "rax", "rcx", "rdx", "rsi", "r8", "r9", "r10", "r11", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
-    );
-    return res;
-}
-
-inline int64_t call_jit_vec_int_ret_i64(void* addr, __m128 a0, int64_t a1) {
-    register __m128 r_xmm0 asm("xmm0") = a0;
-    register int64_t r_rdi asm("rdi") = a1;
-    register int64_t res asm("rax");
-    asm volatile(
-        "subq $32, %%rsp\n\t"
-        "call *%1\n\t"
-        "addq $32, %%rsp"
-        : "=r"(res)
-        : "r"(addr), "x"(r_xmm0), "r"(r_rdi)
-        : "rcx", "rdx", "rsi", "r8", "r9", "r10", "r11", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
-    );
-    return res;
-}
-
-inline void call_jit_int_vec_ret_void(void* addr, int64_t a0, __m128 a1) {
-    register int64_t r_rdi asm("rdi") = a0;
-    register __m128 r_xmm0 asm("xmm0") = a1;
-    asm volatile(
-        "subq $32, %%rsp\n\t"
-        "call *%0\n\t"
-        "addq $32, %%rsp"
-        :
-        : "r"(addr), "r"(r_rdi), "x"(r_xmm0)
-        : "rax", "rcx", "rdx", "rsi", "r8", "r9", "r10", "r11", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
-    );
-}
-
-inline __m128 call_jit_int_vec_ret_vec(void* addr, int64_t a0, __m128 a1) {
-    register int64_t r_rdi asm("rdi") = a0;
-    register __m128 r_xmm0 asm("xmm0") = a1;
-    register __m128 res asm("xmm0");
-    asm volatile(
-        "subq $32, %%rsp\n\t"
-        "call *%1\n\t"
-        "addq $32, %%rsp"
-        : "=x"(res)
-        : "r"(addr), "r"(r_rdi), "x"(r_xmm0)
-        : "rax", "rcx", "rdx", "rsi", "r8", "r9", "r10", "r11", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
-    );
-    return res;
-}
-
-inline int64_t call_jit_int_vec_ret_i64(void* addr, int64_t a0, __m128 a1) {
-    register int64_t r_rdi asm("rdi") = a0;
-    register __m128 r_xmm0 asm("xmm0") = a1;
-    register int64_t res asm("rax");
-    asm volatile(
-        "subq $32, %%rsp\n\t"
-        "call *%1\n\t"
-        "addq $32, %%rsp"
-        : "=r"(res)
-        : "r"(addr), "r"(r_rdi), "x"(r_xmm0)
-        : "rcx", "rdx", "rsi", "r8", "r9", "r10", "r11", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
-    );
-    return res;
-}
-#endif
-#else
+#if !(defined(__GNUC__) || defined(__clang__))
 extern "C" {
-__m128 brass_call_jit_int_vec_ret_vec(void* addr, int64_t a0, const __m128* a1);
-void brass_call_jit_int_vec_ret_void(void* addr, int64_t a0, const __m128* a1);
-int64_t brass_call_jit_int_vec_ret_i64(void* addr, int64_t a0, const __m128* a1);
-__m128 brass_call_jit_vec_int_ret_vec(void* addr, const __m128* a0, int64_t a1);
-void brass_call_jit_vec_int_ret_void(void* addr, const __m128* a0, int64_t a1);
-int64_t brass_call_jit_vec_int_ret_i64(void* addr, const __m128* a0, int64_t a1);
-__m128 brass_call_jit_vec1_ret_vec(void* addr, const __m128* a0);
-float brass_call_jit_vec1_ret_f32(void* addr, const __m128* a0);
-double brass_call_jit_vec1_ret_f64(void* addr, const __m128* a0);
-int64_t brass_call_jit_vec1_ret_i64(void* addr, const __m128* a0);
-__m128 brass_call_jit_vec2_ret_vec(void* addr, const __m128* a0, const __m128* a1);
-float brass_call_jit_vec2_ret_f32(void* addr, const __m128* a0, const __m128* a1);
-int64_t brass_call_jit_vec2_ret_i64(void* addr, const __m128* a0, const __m128* a1);
 void brass_call_jit_v256_0(void* addr, uint8_t* out);
 void brass_call_jit_v256_1(void* addr, uint8_t* out, const uint8_t* a0);
 void brass_call_jit_v256_2(void* addr, uint8_t* out, const uint8_t* a0, const uint8_t* a1);
 void brass_call_jit_v256_3(void* addr, uint8_t* out, const uint8_t* a0, const uint8_t* a1, const uint8_t* a2);
-void brass_call_jit_v128_3(void* addr, uint8_t* out, const uint8_t* a0, const uint8_t* a1, const uint8_t* a2);
-}
-
-inline __m128 call_jit_vec1_ret_vec(void* addr, __m128 a0) {
-    return brass_call_jit_vec1_ret_vec(addr, &a0);
-}
-inline float call_jit_vec1_ret_f32(void* addr, __m128 a0) {
-    return brass_call_jit_vec1_ret_f32(addr, &a0);
-}
-inline double call_jit_vec1_ret_f64(void* addr, __m128 a0) {
-    return brass_call_jit_vec1_ret_f64(addr, &a0);
-}
-inline int64_t call_jit_vec1_ret_i64(void* addr, __m128 a0) {
-    return brass_call_jit_vec1_ret_i64(addr, &a0);
-}
-inline __m128 call_jit_vec2_ret_vec(void* addr, __m128 a0, __m128 a1) {
-    return brass_call_jit_vec2_ret_vec(addr, &a0, &a1);
-}
-inline float call_jit_vec2_ret_f32(void* addr, __m128 a0, __m128 a1) {
-    return brass_call_jit_vec2_ret_f32(addr, &a0, &a1);
-}
-inline int64_t call_jit_vec2_ret_i64(void* addr, __m128 a0, __m128 a1) {
-    return brass_call_jit_vec2_ret_i64(addr, &a0, &a1);
-}
-inline void call_jit_vec_int_ret_void(void* addr, __m128 a0, int64_t a1) {
-    brass_call_jit_vec_int_ret_void(addr, &a0, a1);
-}
-inline __m128 call_jit_vec_int_ret_vec(void* addr, __m128 a0, int64_t a1) {
-    return brass_call_jit_vec_int_ret_vec(addr, &a0, a1);
-}
-inline int64_t call_jit_vec_int_ret_i64(void* addr, __m128 a0, int64_t a1) {
-    return brass_call_jit_vec_int_ret_i64(addr, &a0, a1);
-}
-inline void call_jit_int_vec_ret_void(void* addr, int64_t a0, __m128 a1) {
-    brass_call_jit_int_vec_ret_void(addr, a0, &a1);
-}
-inline __m128 call_jit_int_vec_ret_vec(void* addr, int64_t a0, __m128 a1) {
-    return brass_call_jit_int_vec_ret_vec(addr, a0, &a1);
-}
-inline int64_t call_jit_int_vec_ret_i64(void* addr, int64_t a0, __m128 a1) {
-    return brass_call_jit_int_vec_ret_i64(addr, a0, &a1);
 }
 #endif
 
@@ -474,6 +133,84 @@ extern "C" void x64_sysv_invoke_thunk(
     const X64SysVInvokeArgs* args,
     X64SysVInvokeResult* result
 );
+
+namespace {
+
+// A 256-bit vector result comes back in YMM0, which the invoke thunks do not
+// capture. Such a function is called here with its (at most three) 256-bit
+// vector arguments in YMM0..YMM2, and the result stored to `out`.
+void call_jit_v256(void* addr, const std::vector<RuntimeValue>& args, uint8_t* out) {
+#if defined(__GNUC__) || defined(__clang__)
+    switch (args.size()) {
+        case 0:
+            asm volatile(
+                "subq $40, %%rsp\n\t"
+                "call *%1\n\t"
+                "vmovups %%ymm0, (%0)\n\t"
+                "vzeroupper\n\t"
+                "addq $40, %%rsp\n\t"
+                :
+                : "r"(out), "r"(addr)
+                : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
+            );
+            return;
+        case 1:
+            asm volatile(
+                "subq $40, %%rsp\n\t"
+                "vmovups (%2), %%ymm0\n\t"
+                "call *%1\n\t"
+                "vmovups %%ymm0, (%0)\n\t"
+                "vzeroupper\n\t"
+                "addq $40, %%rsp\n\t"
+                :
+                : "r"(out), "r"(addr), "r"(args[0].vec_bytes())
+                : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
+            );
+            return;
+        case 2:
+            asm volatile(
+                "subq $40, %%rsp\n\t"
+                "vmovups (%2), %%ymm0\n\t"
+                "vmovups (%3), %%ymm1\n\t"
+                "call *%1\n\t"
+                "vmovups %%ymm0, (%0)\n\t"
+                "vzeroupper\n\t"
+                "addq $40, %%rsp\n\t"
+                :
+                : "r"(out), "r"(addr), "r"(args[0].vec_bytes()), "r"(args[1].vec_bytes())
+                : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
+            );
+            return;
+        case 3:
+            asm volatile(
+                "subq $40, %%rsp\n\t"
+                "vmovups (%2), %%ymm0\n\t"
+                "vmovups (%3), %%ymm1\n\t"
+                "vmovups (%4), %%ymm2\n\t"
+                "call *%1\n\t"
+                "vmovups %%ymm0, (%0)\n\t"
+                "vzeroupper\n\t"
+                "addq $40, %%rsp\n\t"
+                :
+                : "r"(out), "r"(addr), "r"(args[0].vec_bytes()), "r"(args[1].vec_bytes()), "r"(args[2].vec_bytes())
+                : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
+            );
+            return;
+    }
+#else
+    switch (args.size()) {
+        case 0: brass_call_jit_v256_0(addr, out); return;
+        case 1: brass_call_jit_v256_1(addr, out, args[0].vec_bytes()); return;
+        case 2: brass_call_jit_v256_2(addr, out, args[0].vec_bytes(), args[1].vec_bytes()); return;
+        case 3:
+            brass_call_jit_v256_3(addr, out, args[0].vec_bytes(), args[1].vec_bytes(), args[2].vec_bytes());
+            return;
+    }
+#endif
+    throw std::runtime_error("JIT Error: a 256-bit vector result takes at most three arguments");
+}
+
+} // namespace
 
 RuntimeValue JitExecutionEngine::invoke(std::string_view name) {
     return invoke(name, {});
@@ -486,324 +223,36 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
     }
 
     Type ret_type = Type::i64();
+    const std::vector<Type>* param_types = nullptr;
     auto sig_it = function_signatures_.find(std::string(name));
     if (sig_it != function_signatures_.end()) {
         ret_type = sig_it->second.first;
-    }
-
-    // Helper lambdas to extract typed values
-    auto get_int = [&](size_t idx) -> int64_t {
-        if (idx >= args.size()) return 0;
-        return args[idx].as_i64();
-    };
-
-    auto get_float = [&](size_t idx) -> double {
-        if (idx >= args.size()) return 0.0;
-        return args[idx].as_f64();
-    };
-
-    // 0 arguments
-    if (args.empty()) {
-        if (ret_type.is_void()) {
-            reinterpret_cast<void(*)()>(addr)();
-            return RuntimeValue::from_void();
-        } else if (ret_type.is_vector()) {
-            if (ret_type.is_v256()) {
-                alignas(32) uint8_t b[32];
-#if defined(__GNUC__) || defined(__clang__)
-                asm volatile(
-                    "subq $40, %%rsp\n\t"
-                    "call *%1\n\t"
-                    "vmovups %%ymm0, (%0)\n\t"
-                    "vzeroupper\n\t"
-                    "addq $40, %%rsp\n\t"
-                    :
-                    : "r"(b), "r"(addr)
-                    : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
-                );
-#else
-                brass_call_jit_v256_0(addr, b);
-#endif
-                return RuntimeValue::from_v256(ret_type, b);
-            }
-            __m128 r = reinterpret_cast<__m128(*)()>(addr)();
-            alignas(16) uint8_t b[16];
-            std::memcpy(b, &r, 16);
-            return RuntimeValue::from_v128(ret_type, b);
-        } else if (ret_type.is_float()) {
-            if (ret_type.kind() == TypeKind::F32) {
-                float r = reinterpret_cast<float(*)()>(addr)();
-                return RuntimeValue::from_f32(r);
-            }
-            double r = reinterpret_cast<double(*)()>(addr)();
-            return RuntimeValue::from_f64(r);
-        } else if (ret_type.kind() == TypeKind::I32) {
-            int32_t r = reinterpret_cast<int32_t(*)()>(addr)();
-            return RuntimeValue::from_i32(r);
-        } else {
-            int64_t r = reinterpret_cast<int64_t(*)()>(addr)();
-            return RuntimeValue::from_i64(r);
-        }
-    }
-
-    // 1 argument
-    if (args.size() == 1) {
-        if (args[0].is_v256()) {
-            if (ret_type.is_v256()) {
-                alignas(32) uint8_t b[32];
-#if defined(__GNUC__) || defined(__clang__)
-                asm volatile(
-                    "subq $40, %%rsp\n\t"
-                    "vmovups (%2), %%ymm0\n\t"
-                    "call *%1\n\t"
-                    "vmovups %%ymm0, (%0)\n\t"
-                    "vzeroupper\n\t"
-                    "addq $40, %%rsp\n\t"
-                    :
-                    : "r"(b), "r"(addr), "r"(args[0].vec_bytes())
-                    : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
-                );
-#else
-                brass_call_jit_v256_1(addr, b, args[0].vec_bytes());
-#endif
-                return RuntimeValue::from_v256(ret_type, b);
-            }
-        }
-        if (args[0].is_vector()) {
-            __m128 a0;
-            std::memcpy(&a0, args[0].v128_bytes(), 16);
-            if (ret_type.is_vector()) {
-                __m128 r = call_jit_vec1_ret_vec(addr, a0);
-                alignas(16) uint8_t b[16];
-                std::memcpy(b, &r, 16);
-                return RuntimeValue::from_v128(ret_type, b);
-            } else if (ret_type.is_float()) {
-                if (ret_type.kind() == TypeKind::F32) {
-                    float r = call_jit_vec1_ret_f32(addr, a0);
-                    return RuntimeValue::from_f32(r);
-                }
-                double r = call_jit_vec1_ret_f64(addr, a0);
-                return RuntimeValue::from_f64(r);
-            } else {
-                int64_t r = call_jit_vec1_ret_i64(addr, a0);
-                if (ret_type.kind() == TypeKind::I32) return RuntimeValue::from_i32(static_cast<int32_t>(r));
-                return RuntimeValue::from_i64(r);
-            }
-        } else if (args[0].is_f64() || args[0].is_f32()) {
-            if (ret_type.is_float()) {
-                if (ret_type.kind() == TypeKind::F32) {
-                    float r = reinterpret_cast<float(*)(double)>(addr)(get_float(0));
-                    return RuntimeValue::from_f32(r);
-                }
-                double r = reinterpret_cast<double(*)(double)>(addr)(get_float(0));
-                return RuntimeValue::from_f64(r);
-            } else {
-                int64_t r = reinterpret_cast<int64_t(*)(double)>(addr)(get_float(0));
-                return RuntimeValue::from_i64(r);
-            }
-        } else {
-            if (ret_type.is_vector()) {
-                __m128 r = reinterpret_cast<__m128(*)(int64_t)>(addr)(get_int(0));
-                alignas(16) uint8_t b[16];
-                std::memcpy(b, &r, 16);
-                return RuntimeValue::from_v128(ret_type, b);
-            } else if (ret_type.is_float()) {
-                if (ret_type.kind() == TypeKind::F32) {
-                    float r = reinterpret_cast<float(*)(int64_t)>(addr)(get_int(0));
-                    return RuntimeValue::from_f32(r);
-                }
-                double r = reinterpret_cast<double(*)(int64_t)>(addr)(get_int(0));
-                return RuntimeValue::from_f64(r);
-            } else {
-                int64_t r = reinterpret_cast<int64_t(*)(int64_t)>(addr)(get_int(0));
-                return RuntimeValue::from_i64(r);
-            }
-        }
-    }
-
-    // 2 arguments
-    if (args.size() == 2) {
-        if (args[0].is_v256() && args[1].is_v256()) {
-            if (ret_type.is_v256()) {
-                alignas(32) uint8_t b[32];
-#if defined(__GNUC__) || defined(__clang__)
-                asm volatile(
-                    "subq $40, %%rsp\n\t"
-                    "vmovups (%2), %%ymm0\n\t"
-                    "vmovups (%3), %%ymm1\n\t"
-                    "call *%1\n\t"
-                    "vmovups %%ymm0, (%0)\n\t"
-                    "vzeroupper\n\t"
-                    "addq $40, %%rsp\n\t"
-                    :
-                    : "r"(b), "r"(addr), "r"(args[0].vec_bytes()), "r"(args[1].vec_bytes())
-                    : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
-                );
-#else
-                brass_call_jit_v256_2(addr, b, args[0].vec_bytes(), args[1].vec_bytes());
-#endif
-                return RuntimeValue::from_v256(ret_type, b);
-            }
-        }
-        if (args[0].is_vector() && args[1].is_vector()) {
-            __m128 a0, a1;
-            std::memcpy(&a0, args[0].v128_bytes(), 16);
-            std::memcpy(&a1, args[1].v128_bytes(), 16);
-            if (ret_type.is_vector()) {
-                __m128 r = call_jit_vec2_ret_vec(addr, a0, a1);
-                alignas(16) uint8_t b[16];
-                std::memcpy(b, &r, 16);
-                return RuntimeValue::from_v128(ret_type, b);
-            } else if (ret_type.is_float()) {
-                if (ret_type.kind() == TypeKind::F32) {
-                    float r = call_jit_vec2_ret_f32(addr, a0, a1);
-                    return RuntimeValue::from_f32(r);
-                }
-                double r = reinterpret_cast<double(*)(__m128, __m128)>(addr)(a0, a1);
-                return RuntimeValue::from_f64(r);
-            } else {
-                int64_t r = call_jit_vec2_ret_i64(addr, a0, a1);
-                return RuntimeValue::from_i64(r);
-            }
-        } else if (args[0].is_vector() && !args[1].is_vector()) {
-            __m128 a0;
-            std::memcpy(&a0, args[0].v128_bytes(), 16);
-            if (ret_type.is_void()) {
-                call_jit_vec_int_ret_void(addr, a0, get_int(1));
-                return RuntimeValue::from_void();
-            } else if (ret_type.is_vector()) {
-                __m128 r = call_jit_vec_int_ret_vec(addr, a0, get_int(1));
-                alignas(16) uint8_t b[16];
-                std::memcpy(b, &r, 16);
-                return RuntimeValue::from_v128(ret_type, b);
-            } else {
-                int64_t r = call_jit_vec_int_ret_i64(addr, a0, get_int(1));
-                return RuntimeValue::from_i64(r);
-            }
-        } else if (!args[0].is_vector() && args[1].is_vector()) {
-            __m128 a1;
-            std::memcpy(&a1, args[1].v128_bytes(), 16);
-            if (ret_type.is_void()) {
-                call_jit_int_vec_ret_void(addr, get_int(0), a1);
-                return RuntimeValue::from_void();
-            } else if (ret_type.is_vector()) {
-                __m128 r = call_jit_int_vec_ret_vec(addr, get_int(0), a1);
-                alignas(16) uint8_t b[16];
-                std::memcpy(b, &r, 16);
-                return RuntimeValue::from_v128(ret_type, b);
-            } else {
-                int64_t r = call_jit_int_vec_ret_i64(addr, get_int(0), a1);
-                return RuntimeValue::from_i64(r);
-            }
-        } else if ((args[0].is_f64() || args[0].is_f32()) && (args[1].is_f64() || args[1].is_f32())) {
-            if (ret_type.is_float()) {
-                if (ret_type.kind() == TypeKind::F32) {
-                    float r = reinterpret_cast<float(*)(double, double)>(addr)(get_float(0), get_float(1));
-                    return RuntimeValue::from_f32(r);
-                }
-                double r = reinterpret_cast<double(*)(double, double)>(addr)(get_float(0), get_float(1));
-                return RuntimeValue::from_f64(r);
-            } else {
-                int64_t r = reinterpret_cast<int64_t(*)(double, double)>(addr)(get_float(0), get_float(1));
-                return RuntimeValue::from_i64(r);
-            }
-        } else if (!args[0].is_f64() && !args[0].is_f32() && !args[1].is_f64() && !args[1].is_f32()) {
-            if (ret_type.is_vector()) {
-                __m128 r = reinterpret_cast<__m128(*)(int64_t, int64_t)>(addr)(get_int(0), get_int(1));
-                alignas(16) uint8_t b[16];
-                std::memcpy(b, &r, 16);
-                return RuntimeValue::from_v128(ret_type, b);
-            } else if (ret_type.is_float()) {
-                if (ret_type.kind() == TypeKind::F32) {
-                    float r = reinterpret_cast<float(*)(int64_t, int64_t)>(addr)(get_int(0), get_int(1));
-                    return RuntimeValue::from_f32(r);
-                }
-                double r = reinterpret_cast<double(*)(int64_t, int64_t)>(addr)(get_int(0), get_int(1));
-                return RuntimeValue::from_f64(r);
-            } else {
-                int64_t r = reinterpret_cast<int64_t(*)(int64_t, int64_t)>(addr)(get_int(0), get_int(1));
-                return RuntimeValue::from_i64(r);
-            }
-        }
-    }
-
-    // 3 arguments
-    if (args.size() == 3) {
-        if (args[0].is_v256() && args[1].is_v256() && args[2].is_v256()) {
-            if (ret_type.is_v256()) {
-                alignas(32) uint8_t b[32];
-#if defined(__GNUC__) || defined(__clang__)
-                asm volatile(
-                    "subq $40, %%rsp\n\t"
-                    "vmovups (%2), %%ymm0\n\t"
-                    "vmovups (%3), %%ymm1\n\t"
-                    "vmovups (%4), %%ymm2\n\t"
-                    "call *%1\n\t"
-                    "vmovups %%ymm0, (%0)\n\t"
-                    "vzeroupper\n\t"
-                    "addq $40, %%rsp\n\t"
-                    :
-                    : "r"(b), "r"(addr), "r"(args[0].vec_bytes()), "r"(args[1].vec_bytes()), "r"(args[2].vec_bytes())
-                    : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
-                );
-#else
-                brass_call_jit_v256_3(addr, b, args[0].vec_bytes(), args[1].vec_bytes(), args[2].vec_bytes());
-#endif
-                return RuntimeValue::from_v256(ret_type, b);
-            }
-        }
-        if (args[0].is_v128() && args[1].is_v128() && args[2].is_v128()) {
-            if (ret_type.is_v128()) {
-                alignas(16) uint8_t b[16];
-#if defined(__GNUC__) || defined(__clang__)
-                asm volatile(
-                    "subq $40, %%rsp\n\t"
-                    "movups (%2), %%xmm0\n\t"
-                    "movups (%3), %%xmm1\n\t"
-                    "movups (%4), %%xmm2\n\t"
-                    "call *%1\n\t"
-                    "movups %%xmm0, (%0)\n\t"
-                    "addq $40, %%rsp\n\t"
-                    :
-                    : "r"(b), "r"(addr), "r"(args[0].v128_bytes()), "r"(args[1].v128_bytes()), "r"(args[2].v128_bytes())
-                    : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory"
-                );
-#else
-                brass_call_jit_v128_3(addr, b, args[0].v128_bytes(), args[1].v128_bytes(), args[2].v128_bytes());
-#endif
-                return RuntimeValue::from_v128(ret_type, b);
-            }
-        }
-        if ((args[0].is_f32() || args[0].is_f64()) && (args[1].is_f32() || args[1].is_f64()) && (args[2].is_f32() || args[2].is_f64())) {
-            if (ret_type.kind() == TypeKind::F32) {
-                float r = reinterpret_cast<float(*)(float, float, float)>(addr)(args[0].as_f32(), args[1].as_f32(), args[2].as_f32());
-                return RuntimeValue::from_f32(r);
-            } else {
-                double r = reinterpret_cast<double(*)(double, double, double)>(addr)(args[0].as_f64(), args[1].as_f64(), args[2].as_f64());
-                return RuntimeValue::from_f64(r);
-            }
-        }
-        if (args[0].is_f64() && args[1].is_f64() && !args[2].is_f64()) {
-            if (ret_type.is_float()) {
-                if (ret_type.kind() == TypeKind::F32) {
-                    float r = reinterpret_cast<float(*)(double, double, int64_t)>(addr)(get_float(0), get_float(1), get_int(2));
-                    return RuntimeValue::from_f32(r);
-                }
-                double r = reinterpret_cast<double(*)(double, double, int64_t)>(addr)(get_float(0), get_float(1), get_int(2));
-                return RuntimeValue::from_f64(r);
-            } else {
-                int64_t r = reinterpret_cast<int64_t(*)(double, double, int64_t)>(addr)(get_float(0), get_float(1), get_int(2));
-                return RuntimeValue::from_i64(r);
-            }
-        }
-    }
-
-    // 3 or more arguments: support arbitrary counts, stack passing, and mixed integer/float signatures
-    const std::vector<Type>* param_types = nullptr;
-    if (sig_it != function_signatures_.end()) {
         param_types = &sig_it->second.second;
     }
 
+    bool any_v256 = false;
+    bool all_v256 = true;
+    for (size_t i = 0; i < args.size(); ++i) {
+        bool v256 = args[i].is_v256() || (param_types && i < param_types->size() && (*param_types)[i].is_v256());
+        any_v256 = any_v256 || v256;
+        all_v256 = all_v256 && v256;
+    }
+    if (ret_type.is_v256()) {
+        if (!all_v256 || args.size() > 3) {
+            throw std::runtime_error("JIT Error: '" + std::string(name) + "' returns " + to_string(ret_type) +
+                                     "; invoke takes such a function only with at most three 256-bit vector arguments");
+        }
+        alignas(32) uint8_t b[32];
+        call_jit_v256(addr, args, b);
+        return RuntimeValue::from_v256(ret_type, b);
+    }
+    if (any_v256) {
+        throw std::runtime_error("JIT Error: '" + std::string(name) +
+                                 "' takes a 256-bit vector argument; invoke takes one only for a 256-bit vector result");
+    }
+
+    // Every other signature, of any arity: the thunk passes the arguments by
+    // parameter type and captures RAX and XMM0, converted once below.
 #if defined(_WIN32)
     X64Win64InvokeArgs invoke_args;
     std::vector<uint64_t> stack_words;
@@ -822,33 +271,7 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
 #endif
 #endif
 
-    if (ret_type.is_void()) {
-        return RuntimeValue::from_void();
-    }
-    if (ret_type.is_vector()) {
-        return RuntimeValue::from_v128(ret_type, result.xmm0);
-    }
-    if (ret_type.is_float()) {
-        if (ret_type.kind() == TypeKind::F32) {
-            float f = 0.0f;
-            std::memcpy(&f, result.xmm0, sizeof(float));
-            return RuntimeValue::from_f32(f);
-        } else {
-            double d = 0.0;
-            std::memcpy(&d, result.xmm0, sizeof(double));
-            return RuntimeValue::from_f64(d);
-        }
-    }
-    if (ret_type.kind() == TypeKind::I32) {
-        return RuntimeValue::from_i32(static_cast<int32_t>(result.rax));
-    }
-    if (ret_type.is_pointer()) {
-        return RuntimeValue::from_ptr(static_cast<uintptr_t>(result.rax));
-    }
-    if (ret_type.is_gcref()) {
-        return RuntimeValue::from_gcref(static_cast<uintptr_t>(result.rax));
-    }
-    return RuntimeValue::from_i64(static_cast<int64_t>(result.rax));
+    return native_return_value(ret_type, result.rax, result.xmm0);
 }
 
 } // namespace brass::codegen
@@ -967,4 +390,3 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
 } // namespace brass::codegen
 
 #endif
-

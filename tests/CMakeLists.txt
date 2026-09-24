@@ -180,6 +180,7 @@ add_executable(brass_unit_tests
     unit/test_baseline_jit_opcodes.cpp
     unit/test_baseline_jit_vector.cpp
     unit/test_tier2_vector_calls.cpp
+    unit/test_invoke_return_types.cpp
     unit/test_baseline_lazy_symbols.cpp
     unit/test_tier1_cold_callees.cpp
     unit/test_baseline_frame.cpp
@@ -518,6 +519,36 @@ if(BRASS_BUILD_TOOLS)
             set(_name "brass_opt_cli.guard.${_file}.${_fn}.${_arg_tag}.${_mode}")
             add_test(NAME "${_name}"
                 COMMAND brass-opt "${CMAKE_CURRENT_SOURCE_DIR}/cli/guard_${_file}.mir" -r ${_fn} --args ${_arg_list} ${_flags})
+            set_tests_properties("${_name}" PROPERTIES
+                TIMEOUT 60 PASS_REGULAR_EXPRESSION "^${_want}[\r\n]" LABELS "correctness")
+        endforeach()
+    endforeach()
+    # brass_opt_cli.ret_i32.*: a negative i32 result prints as a negative
+    # number in every engine. Tier-2 invoke zero-extended an i32 result into
+    # an i64 when the function had one or two arguments (neg(5) printed
+    # 4293967301), also when an exit stub produced it.
+    set(_ret_i32_cases
+        "neg|5|-999995"
+        "guarded|5,1|-999995"
+        "guarded|5,0|-999995"
+        "loop|1000,150|-999550")
+    foreach(_case IN LISTS _ret_i32_cases)
+        string(REPLACE "|" ";" _parts "${_case}")
+        list(GET _parts 0 _fn)
+        list(GET _parts 1 _args)
+        list(GET _parts 2 _want)
+        string(REPLACE "," ";" _arg_list "${_args}")
+        string(REPLACE "," "_" _arg_tag "${_args}")
+        foreach(_mode interp baseline jit)
+            set(_flags "")
+            if(_mode STREQUAL "jit")
+                set(_flags "--jit")
+            elseif(_mode STREQUAL "baseline")
+                set(_flags "--baseline-jit")
+            endif()
+            set(_name "brass_opt_cli.ret_i32.${_fn}.${_arg_tag}.${_mode}")
+            add_test(NAME "${_name}"
+                COMMAND brass-opt "${CMAKE_CURRENT_SOURCE_DIR}/cli/ret_i32.mir" -r ${_fn} --args ${_arg_list} ${_flags})
             set_tests_properties("${_name}" PROPERTIES
                 TIMEOUT 60 PASS_REGULAR_EXPRESSION "^${_want}[\r\n]" LABELS "correctness")
         endforeach()

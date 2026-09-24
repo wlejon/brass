@@ -153,33 +153,7 @@ RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) 
     codegen::X64Win64InvokeResult result;
     codegen::x64_win64_invoke_thunk(&invoke_args, &result);
 
-    if (return_type_.is_void()) {
-        return RuntimeValue::from_void();
-    }
-    if (return_type_.is_vector()) {
-        return RuntimeValue::from_v128(return_type_, result.xmm0);
-    }
-    if (return_type_.is_float()) {
-        if (return_type_.kind() == TypeKind::F32) {
-            float f = 0.0f;
-            std::memcpy(&f, result.xmm0, sizeof(float));
-            return RuntimeValue::from_f32(f);
-        } else {
-            double d = 0.0;
-            std::memcpy(&d, result.xmm0, sizeof(double));
-            return RuntimeValue::from_f64(d);
-        }
-    }
-    if (return_type_.kind() == TypeKind::I32) {
-        return RuntimeValue::from_i32(static_cast<int32_t>(result.rax));
-    }
-    if (return_type_.is_pointer()) {
-        return RuntimeValue::from_ptr(static_cast<uintptr_t>(result.rax));
-    }
-    if (return_type_.is_gcref()) {
-        return RuntimeValue::from_gcref(static_cast<uintptr_t>(result.rax));
-    }
-    return RuntimeValue::from_i64(static_cast<int64_t>(result.rax));
+    return codegen::native_return_value(return_type_, result.rax, result.xmm0);
 #elif defined(__GNUC__) || defined(__clang__)
     codegen::X64SysVInvokeArgs invoke_args;
     std::vector<uint64_t> stack_words;
@@ -188,33 +162,7 @@ RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) 
     codegen::X64SysVInvokeResult result;
     codegen::x64_sysv_invoke_thunk(&invoke_args, &result);
 
-    if (return_type_.is_void()) {
-        return RuntimeValue::from_void();
-    }
-    if (return_type_.is_vector()) {
-        return RuntimeValue::from_v128(return_type_, result.xmm0);
-    }
-    if (return_type_.is_float()) {
-        if (return_type_.kind() == TypeKind::F32) {
-            float f = 0.0f;
-            std::memcpy(&f, result.xmm0, sizeof(float));
-            return RuntimeValue::from_f32(f);
-        } else {
-            double d = 0.0;
-            std::memcpy(&d, result.xmm0, sizeof(double));
-            return RuntimeValue::from_f64(d);
-        }
-    }
-    if (return_type_.kind() == TypeKind::I32) {
-        return RuntimeValue::from_i32(static_cast<int32_t>(result.rax));
-    }
-    if (return_type_.is_pointer()) {
-        return RuntimeValue::from_ptr(static_cast<uintptr_t>(result.rax));
-    }
-    if (return_type_.is_gcref()) {
-        return RuntimeValue::from_gcref(static_cast<uintptr_t>(result.rax));
-    }
-    return RuntimeValue::from_i64(static_cast<int64_t>(result.rax));
+    return codegen::native_return_value(return_type_, result.rax, result.xmm0);
 #endif
 #elif (defined(__aarch64__) || defined(_M_ARM64)) && (defined(__GNUC__) || defined(__clang__))
     codegen::AArch64InvokeArgs invoke_args;

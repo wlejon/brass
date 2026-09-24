@@ -1,0 +1,60 @@
+module @ret_i32
+
+; Negative i32 results, called from brass-opt -r. Tier-2 invoke returned
+; them zero-extended into an i64 (neg(5) printed 4293967301, not -999995),
+; also when an exit stub produced the result.
+
+func @neg(%x: i64) -> i32 {
+bb0:
+  %t = trunc.i32 %x
+  %k = iconst.i32 1000000
+  %r = sub %t, %k
+  ret %r
+}
+
+func @pass_stub(%a: i32) -> i32 {
+bb0:
+  ret %a
+}
+
+; guarded(x, 1): the guard passes; guarded(x, 0): pass_stub gives the result.
+func @guarded(%x: i64, %c: i32) -> i32 {
+bb0:
+  %t = trunc.i32 %x
+  %k = iconst.i32 1000000
+  %r = sub %t, %k
+  guard %c, @pass_stub, [%r]
+  ret %r
+}
+
+func @loop_stub(%acc: i32, %i: i64) -> i32 {
+bb0:
+  %k = iconst.i32 1000000
+  %r = sub %acc, %k
+  ret %r
+}
+
+; loop(n, lim): the guard fails at i = lim, and loop_stub(3 * lim, lim) is
+; the result.
+func @loop(%n: i64, %lim: i64) -> i32 {
+bb0:
+  %z = iconst.i64 0
+  %iz = iconst.i32 0
+  br bb1(%z, %iz)
+
+bb1(%i: i64, %acc: i32):
+  %c = slt %i, %n
+  br_if %c, bb2, bb3(%acc)
+
+bb2:
+  %ok = slt %i, %lim
+  guard %ok, @loop_stub, [%acc, %i]
+  %one = iconst.i64 1
+  %t = iconst.i32 3
+  %acc2 = add %acc, %t
+  %in = add %i, %one
+  br bb1(%in, %acc2)
+
+bb3(%r: i32):
+  ret %r
+}

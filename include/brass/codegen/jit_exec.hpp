@@ -167,6 +167,23 @@ void partition_x64_win64_invoke_args(
     std::vector<uint64_t>& stack_words
 );
 
+// The register image of an argument for a parameter of type `param` (null
+// when the signature is unknown: the argument's own kind decides). An
+// integer narrower than 64 bits is zero-extended from its declared width, so
+// no bits of a wider RuntimeValue reach the callee; an i64 parameter given
+// an i32 value gets it sign-extended. A float is converted to the
+// parameter's width and its bits placed in the low lanes.
+uint64_t native_int_arg_bits(const RuntimeValue& arg, const Type* param);
+uint64_t native_float_arg_bits(const RuntimeValue& arg, const Type* param);
+
+// The RuntimeValue a native function returning `ret` produced, read from the
+// return registers the invoke thunks capture: `gpr` (RAX / X0) and `vec`
+// (the 16 bytes of XMM0 / Q0). Every invoke path converts its result here,
+// once. An integer narrower than 64 bits is taken from the low bits of `gpr`
+// and sign-extended, whatever the callee left above them. A 256-bit vector
+// does not fit `vec` and is an error.
+RuntimeValue native_return_value(Type ret, uint64_t gpr, const uint8_t* vec);
+
 #if defined(__x86_64__) || defined(_M_X64)
 #if defined(__GNUC__) || defined(__clang__)
 extern "C" void x64_sysv_invoke_thunk(

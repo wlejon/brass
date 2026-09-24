@@ -1,9 +1,77 @@
 #include <brass/codegen/jit_exec.hpp>
 #include <cstring>
 #include <cstdint>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace brass::codegen {
+
+uint64_t native_int_arg_bits(const RuntimeValue& arg, const Type* param) {
+    if (param) {
+        if (arg.is_f32() || arg.is_f64() || arg.is_vector()) {
+            throw std::runtime_error("invoke: a " + to_string(arg.type()) +
+                                     " argument for a " + to_string(*param) + " parameter");
+        }
+        switch (param->kind()) {
+            case TypeKind::I8: return static_cast<uint8_t>(arg.as_u64());
+            case TypeKind::I16: return static_cast<uint16_t>(arg.as_u64());
+            case TypeKind::I32: return static_cast<uint32_t>(arg.as_u64());
+            case TypeKind::I64: return static_cast<uint64_t>(arg.as_i64());
+            default: break;
+        }
+    }
+    if (arg.is_i32()) return static_cast<uint64_t>(static_cast<uint32_t>(arg.as_i32()));
+    if (arg.is_i64()) return static_cast<uint64_t>(arg.as_i64());
+    if (arg.is_ptr()) return static_cast<uint64_t>(arg.as_ptr());
+    if (arg.is_gcref()) return static_cast<uint64_t>(arg.as_gcref());
+    return arg.raw_bits();
+}
+
+uint64_t native_float_arg_bits(const RuntimeValue& arg, const Type* param) {
+    bool f32 = param ? param->kind() == TypeKind::F32 : arg.is_f32();
+    uint64_t bits = 0;
+    if (f32) {
+        float f = arg.as_f32();
+        std::memcpy(&bits, &f, sizeof(float));
+    } else {
+        double d = arg.as_f64();
+        std::memcpy(&bits, &d, sizeof(double));
+    }
+    return bits;
+}
+
+RuntimeValue native_return_value(Type ret, uint64_t gpr, const uint8_t* vec) {
+    switch (ret.kind()) {
+        case TypeKind::Void: return RuntimeValue::from_void();
+        case TypeKind::I8: return RuntimeValue::from_i32(static_cast<int32_t>(static_cast<int8_t>(gpr)));
+        case TypeKind::I16: return RuntimeValue::from_i32(static_cast<int32_t>(static_cast<int16_t>(gpr)));
+        case TypeKind::I32: return RuntimeValue::from_i32(static_cast<int32_t>(gpr));
+        case TypeKind::I64: return RuntimeValue::from_i64(static_cast<int64_t>(gpr));
+        case TypeKind::F32: {
+            float f = 0.0f;
+            std::memcpy(&f, vec, sizeof(float));
+            return RuntimeValue::from_f32(f);
+        }
+        case TypeKind::F64: {
+            double d = 0.0;
+            std::memcpy(&d, vec, sizeof(double));
+            return RuntimeValue::from_f64(d);
+        }
+        case TypeKind::Ptr: return RuntimeValue::from_ptr(static_cast<uintptr_t>(gpr));
+        case TypeKind::GCRef: return RuntimeValue::from_gcref(static_cast<uintptr_t>(gpr));
+        case TypeKind::F32x4:
+        case TypeKind::F64x2:
+        case TypeKind::I32x4:
+        case TypeKind::I64x2: return RuntimeValue::from_v128(ret, vec);
+        case TypeKind::F32x8:
+        case TypeKind::F64x4:
+        case TypeKind::I32x8:
+        case TypeKind::I64x4: break;
+    }
+    throw std::runtime_error("invoke: a " + to_string(ret) +
+                             " result does not fit the invoke thunk's return registers");
+}
 
 void partition_x64_sysv_invoke_args(
     const std::vector<RuntimeValue>& args,
@@ -21,16 +89,9 @@ void partition_x64_sysv_invoke_args(
 
     for (size_t i = 0; i < args.size(); ++i) {
         const auto& arg = args[i];
-        bool is_float = false;
-        bool is_vec = false;
-        if (param_types && i < param_types->size()) {
-            const Type& pt = (*param_types)[i];
-            is_float = pt.is_float();
-            is_vec = pt.is_vector();
-        } else {
-            is_float = arg.is_f32() || arg.is_f64();
-            is_vec = arg.is_vector();
-        }
+        const Type* pt = (param_types && i < param_types->size()) ? &(*param_types)[i] : nullptr;
+        bool is_float = pt ? pt->is_float() : (arg.is_f32() || arg.is_f64());
+        bool is_vec = pt ? pt->is_vector() : arg.is_vector();
 
         if (is_vec) {
             if (xmm_idx < 8) {
@@ -43,35 +104,15 @@ void partition_x64_sysv_invoke_args(
                 stack_words.push_back(words[1]);
             }
         } else if (is_float) {
+            uint64_t w = native_float_arg_bits(arg, pt);
             if (xmm_idx < 8) {
-                if (arg.is_f32()) {
-                    float f = arg.as_f32();
-                    std::memcpy(out_args.xmm[xmm_idx], &f, sizeof(float));
-                } else {
-                    double d = arg.as_f64();
-                    std::memcpy(out_args.xmm[xmm_idx], &d, sizeof(double));
-                }
+                std::memcpy(out_args.xmm[xmm_idx], &w, sizeof(w));
                 xmm_idx++;
             } else {
-                if (arg.is_f32()) {
-                    float f = arg.as_f32();
-                    uint64_t w = 0;
-                    std::memcpy(&w, &f, sizeof(float));
-                    stack_words.push_back(w);
-                } else {
-                    double d = arg.as_f64();
-                    uint64_t w = 0;
-                    std::memcpy(&w, &d, sizeof(double));
-                    stack_words.push_back(w);
-                }
+                stack_words.push_back(w);
             }
         } else {
-            uint64_t val = 0;
-            if (arg.is_i32()) val = static_cast<uint64_t>(static_cast<uint32_t>(arg.as_i32()));
-            else if (arg.is_i64()) val = static_cast<uint64_t>(arg.as_i64());
-            else if (arg.is_ptr()) val = static_cast<uint64_t>(arg.as_ptr());
-            else if (arg.is_gcref()) val = static_cast<uint64_t>(arg.as_gcref());
-            else val = arg.raw_bits();
+            uint64_t val = native_int_arg_bits(arg, pt);
 
             if (gpr_idx < 6) {
                 out_args.gpr[gpr_idx] = val;
@@ -101,42 +142,19 @@ void partition_x64_win64_invoke_args(
 
     for (size_t i = 0; i < args.size(); ++i) {
         const auto& arg = args[i];
-        bool is_float = false;
-        bool is_vec = false;
-        if (param_types && i < param_types->size()) {
-            const Type& pt = (*param_types)[i];
-            is_float = pt.is_float();
-            is_vec = pt.is_vector();
-        } else {
-            is_float = arg.is_f32() || arg.is_f64();
-            is_vec = arg.is_vector();
-        }
+        const Type* pt = (param_types && i < param_types->size()) ? &(*param_types)[i] : nullptr;
+        bool is_float = pt ? pt->is_float() : (arg.is_f32() || arg.is_f64());
+        bool is_vec = pt ? pt->is_vector() : arg.is_vector();
 
         if (i < 4) {
             if (is_vec) {
                 std::memcpy(out_args.xmm[i], arg.v128_bytes(), 16);
             } else if (is_float) {
-                if (arg.is_f32()) {
-                    float f = arg.as_f32();
-                    std::memcpy(out_args.xmm[i], &f, sizeof(float));
-                    uint64_t bits = 0;
-                    std::memcpy(&bits, &f, sizeof(float));
-                    out_args.gpr[i] = bits;
-                } else {
-                    double d = arg.as_f64();
-                    std::memcpy(out_args.xmm[i], &d, sizeof(double));
-                    uint64_t bits = 0;
-                    std::memcpy(&bits, &d, sizeof(double));
-                    out_args.gpr[i] = bits;
-                }
+                uint64_t bits = native_float_arg_bits(arg, pt);
+                std::memcpy(out_args.xmm[i], &bits, sizeof(bits));
+                out_args.gpr[i] = bits;
             } else {
-                uint64_t val = 0;
-                if (arg.is_i32()) val = static_cast<uint64_t>(static_cast<uint32_t>(arg.as_i32()));
-                else if (arg.is_i64()) val = static_cast<uint64_t>(arg.as_i64());
-                else if (arg.is_ptr()) val = static_cast<uint64_t>(arg.as_ptr());
-                else if (arg.is_gcref()) val = static_cast<uint64_t>(arg.as_gcref());
-                else val = arg.raw_bits();
-                out_args.gpr[i] = val;
+                out_args.gpr[i] = native_int_arg_bits(arg, pt);
             }
         } else {
             if (is_vec) {
@@ -145,25 +163,9 @@ void partition_x64_win64_invoke_args(
                 stack_words.push_back(words[0]);
                 stack_words.push_back(words[1]);
             } else if (is_float) {
-                if (arg.is_f32()) {
-                    float f = arg.as_f32();
-                    uint64_t w = 0;
-                    std::memcpy(&w, &f, sizeof(float));
-                    stack_words.push_back(w);
-                } else {
-                    double d = arg.as_f64();
-                    uint64_t w = 0;
-                    std::memcpy(&w, &d, sizeof(double));
-                    stack_words.push_back(w);
-                }
+                stack_words.push_back(native_float_arg_bits(arg, pt));
             } else {
-                uint64_t val = 0;
-                if (arg.is_i32()) val = static_cast<uint64_t>(static_cast<uint32_t>(arg.as_i32()));
-                else if (arg.is_i64()) val = static_cast<uint64_t>(arg.as_i64());
-                else if (arg.is_ptr()) val = static_cast<uint64_t>(arg.as_ptr());
-                else if (arg.is_gcref()) val = static_cast<uint64_t>(arg.as_gcref());
-                else val = arg.raw_bits();
-                stack_words.push_back(val);
+                stack_words.push_back(native_int_arg_bits(arg, pt));
             }
         }
     }
