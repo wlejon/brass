@@ -4,11 +4,128 @@
 #include <brass/mir/uses.hpp>
 #include <algorithm>
 #include <vector>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace brass {
 
 namespace {
+
+// A resume id no guard and no resume_table entry of `fn` uses.
+uint32_t fresh_resume_id(const Function& fn) {
+    uint32_t id = fn.next_guard_resume_id();
+    for (const auto& rp : fn.resume_points()) {
+        if (rp.first >= id) id = rp.first + 1;
+    }
+    return id;
+}
+
+// The values live just after `call` (its own result excluded), ordered by
+// id: the ones the code after it reads, in its block or any block it
+// reaches, defined before it.
+std::vector<Value*> values_live_after(Function& fn, const Instruction* call) {
+    // Per block: the values it reads before (or without) defining them.
+    std::unordered_map<const BasicBlock*, std::unordered_set<Value*>> upward;
+    std::unordered_map<const BasicBlock*, std::unordered_set<const Value*>> defs;
+    for (BasicBlock* bb : fn.blocks()) {
+        if (!bb) continue;
+        auto& d = defs[bb];
+        for (const Value* p : bb->params()) d.insert(p);
+        auto& up = upward[bb];
+        for (Instruction* inst : *bb) {
+            if (!inst) continue;
+            for_each_use(*inst, [&](Value* v) {
+                if (!d.count(v)) up.insert(v);
+            });
+            if (inst->result()) d.insert(inst->result());
+        }
+    }
+    // live_in(B) = upward(B) + (live_out(B) - defs(B)), to a fixed point.
+    std::unordered_map<const BasicBlock*, std::unordered_set<Value*>> live_in;
+    auto successors_of = [](BasicBlock* bb) {
+        std::vector<BasicBlock*> succ;
+        for (Instruction* inst : *bb) {
+            if (!inst) continue;
+            for_each_edge(*inst, [&](BranchTarget& bt) { succ.push_back(bt.block); });
+        }
+        return succ;
+    };
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (auto it = fn.blocks().rbegin(); it != fn.blocks().rend(); ++it) {
+            BasicBlock* bb = *it;
+            if (!bb) continue;
+            auto& in = live_in[bb];
+            const size_t before = in.size();
+            for (Value* v : upward[bb]) in.insert(v);
+            for (BasicBlock* s : successors_of(bb)) {
+                for (Value* v : live_in[s]) {
+                    if (!defs[bb].count(v)) in.insert(v);
+                }
+            }
+            if (in.size() != before) changed = true;
+        }
+    }
+    // Within the call's block: what the instructions after the call read,
+    // plus what its successors need, less what those instructions define.
+    BasicBlock* bb = call->parent();
+    std::unordered_set<Value*> live;
+    std::unordered_set<const Value*> later_defs;
+    bool after = false;
+    for (Instruction* inst : *bb) {
+        if (!inst) continue;
+        if (inst == call) { after = true; continue; }
+        if (!after) continue;
+        for_each_use(*inst, [&](Value* v) {
+            if (!later_defs.count(v)) live.insert(v);
+        });
+        if (inst->result()) later_defs.insert(inst->result());
+    }
+    for (BasicBlock* s : successors_of(bb)) {
+        for (Value* v : live_in[s]) {
+            if (!later_defs.count(v)) live.insert(v);
+        }
+    }
+    live.erase(call->result());
+    std::vector<Value*> out(live.begin(), live.end());
+    std::sort(out.begin(), out.end(), [](const Value* a, const Value* b) { return a->id() < b->id(); });
+    return out;
+}
+
+// Moves everything after `inst` into a new block that follows its block,
+// which then ends in `br` to it. A result of `inst` reaches the new block
+// as its parameter, which replaces every other use of the result.
+BasicBlock* split_after(Function& fn, Module& mod, Instruction* inst) {
+    BasicBlock* bb = inst->parent();
+    BasicBlock* cont = mod.arena().make<BasicBlock>(
+        fn.next_block_id(), mod.string_pool().intern(std::string(bb->name()) + ".spec_cont"));
+    cont->set_parent(&fn);
+    std::vector<Instruction*> tail;
+    for (Instruction* cur = inst->next(); cur; cur = cur->next()) tail.push_back(cur);
+    for (Instruction* ti : tail) {
+        bb->remove_instruction(ti);
+        cont->append_instruction(ti);
+    }
+    auto it = std::find(fn.blocks().begin(), fn.blocks().end(), bb);
+    if (it != fn.blocks().end()) {
+        fn.blocks().insert(it + 1, cont);
+    } else {
+        fn.append_block(cont);
+    }
+    std::vector<Value*> args;
+    if (Value* res = inst->result()) {
+        Value* p = mod.arena().make<Value>(fn.next_value_id(), res->type(), ValueKind::BlockParam);
+        cont->add_param(p);
+        replace_all_uses(fn, res, p);
+        args.push_back(res);
+    }
+    Instruction* br = mod.arena().make<Instruction>(Opcode::br, Type::void_type());
+    br->set_loc(inst->loc());
+    br->set_branch_target(BranchTarget(cont, std::move(args)));
+    bb->append_instruction(br);
+    return cont;
+}
 
 bool devirtualize_monomorphic_call(
     Function& fn,
@@ -36,6 +153,10 @@ bool devirtualize_monomorphic_call(
         size_t call_args_count = call_inst->operand_count() - 1;
         if (callee_fn->param_count() != call_args_count) return false;
         if (callee_fn->return_type() != call_inst->type()) return false;
+        // The guard resumes at a block of this function; a function named
+        // by its label would be called as an exit stub instead.
+        const std::string deopt_label = opts.deopt_stub_prefix.empty() ? "@deopt_slow_call" : opts.deopt_stub_prefix;
+        if (mod.get_function(deopt_label)) return false;
 
         Value* callee_val = call_inst->operand(0);
 
@@ -58,20 +179,62 @@ bool devirtualize_monomorphic_call(
         cond_inst->set_result(cond_res);
         cur_bb->insert_before(cond_inst, call_inst);
 
-        // 3. guard %cond, @deopt_slow_call
+        // 3. guard %cond, @deopt_slow_call, [callee, args..., live...], id N
+        //    A failing guard resumes at its own resume_table block (a label
+        //    that names no function is not an exit stub), which makes the
+        //    original indirect call and continues after it. Its state is the
+        //    callee and the arguments (the block's parameters, by position)
+        //    and every value live after the call, so a Tier-0 resume that
+        //    rebuilds the frame from the state alone has all it reads.
         Instruction* guard_inst = mod.arena().make<Instruction>(Opcode::guard, Type::void_type());
         guard_inst->add_operand(cond_res);
         guard_inst->set_loc(call_inst->loc());
-        std::string deopt_label = opts.deopt_stub_prefix.empty() ? "@deopt_slow_call" : opts.deopt_stub_prefix;
         guard_inst->set_symbol(mod.string_pool().intern(deopt_label));
-        for (Value* sv : call_inst->state_map()) {
-            guard_inst->add_state_value(sv);
+        std::vector<Value*> state;
+        auto add_state = [&](Value* v) {
+            if (v && std::find(state.begin(), state.end(), v) == state.end()) state.push_back(v);
+        };
+        for (size_t i = 0; i < call_inst->operand_count(); ++i) {
+            // Positional: slow's parameter i is state value i.
+            state.push_back(call_inst->operand(i));
         }
-        for (size_t i = 1; i < call_inst->operand_count(); ++i) {
-            guard_inst->add_state_value(call_inst->operand(i));
-        }
-        guard_inst->set_resume_id(fn.next_guard_resume_id());
+        for (Value* sv : call_inst->state_map()) add_state(sv);
+        for (Value* sv : values_live_after(fn, call_inst)) add_state(sv);
+        for (Value* sv : state) guard_inst->add_state_value(sv);
+        const uint32_t resume_id = fresh_resume_id(fn);
+        guard_inst->set_resume_id(resume_id);
         cur_bb->insert_before(guard_inst, call_inst);
+
+        // The resume block: slow(%callee, %args...) makes the original call.
+        BasicBlock* cont = split_after(fn, mod, call_inst);
+        BasicBlock* slow = mod.arena().make<BasicBlock>(
+            fn.next_block_id(), mod.string_pool().intern(std::string(cur_bb->name()) + ".spec_slow"));
+        slow->set_parent(&fn);
+        Instruction* slow_call = mod.arena().make<Instruction>(Opcode::call_indirect, call_inst->type());
+        slow_call->set_site_id(UINT32_MAX);
+        slow_call->set_loc(call_inst->loc());
+        for (size_t i = 0; i < call_inst->operand_count(); ++i) {
+            Value* src = call_inst->operand(i);
+            Value* p = mod.arena().make<Value>(fn.next_value_id(), src->type(), ValueKind::BlockParam);
+            slow->add_param(p);
+            slow_call->add_operand(p);
+        }
+        for (Value* sv : call_inst->state_map()) slow_call->add_state_value(sv);
+        std::vector<Value*> slow_args;
+        if (call_inst->produces_value()) {
+            Value* r = mod.arena().make<Value>(fn.next_value_id(), call_inst->type(), ValueKind::InstructionResult);
+            r->set_defining_instruction(slow_call);
+            slow_call->set_result(r);
+            slow_args.push_back(r);
+        }
+        slow->append_instruction(slow_call);
+        Instruction* slow_br = mod.arena().make<Instruction>(Opcode::br, Type::void_type());
+        slow_br->set_loc(call_inst->loc());
+        slow_br->set_branch_target(BranchTarget(cont, std::move(slow_args)));
+        slow->append_instruction(slow_br);
+        fn.append_block(slow);
+        fn.add_resume_point(resume_id, slow);
+        fn.rebuild_cfg_predecessors();
 
         // 4. Convert call_indirect to direct call
         call_inst->set_opcode(Opcode::call);

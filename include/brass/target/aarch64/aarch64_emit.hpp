@@ -93,6 +93,7 @@ private:
     void emit_parallel_copy(const codegen::LirInst& inst);
     void emit_control_instruction(const codegen::LirInst& inst);
     void emit_guard_exit(const codegen::LirInst& inst);
+    void move_sp_for_guard_exit(bool allocate, size_t bytes);
 };
 
 AArch64CompilationResult compile_lir_to_aarch64(const codegen::LirFunction& fn, const Target& target);

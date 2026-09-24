@@ -312,9 +312,11 @@ void AArch64ISel::lower_block(const BasicBlock& bb) {
     for (const auto* inst : bb) {
         if (!skipped_insts_.count(inst)) {
             size_t before_count = lir_bb->instructions.size();
-            const auto widened = widen_narrow_operands(*inst, *lir_bb);
-            lower_instruction(*inst, *lir_bb);
-            restore_narrow_operands(widened);
+            if (!lower_narrow_width_op(*inst, *lir_bb)) {
+                const auto widened = widen_narrow_operands(*inst, *lir_bb);
+                lower_instruction(*inst, *lir_bb);
+                restore_narrow_operands(widened);
+            }
             const bool elidable = is_elidable_materialization(*inst);
             for (size_t i = before_count; i < lir_bb->instructions.size(); ++i) {
                 if (lir_bb->instructions[i]) {

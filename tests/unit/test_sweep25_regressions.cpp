@@ -150,14 +150,25 @@ no:
 }
 )";
 
+// @f is a function tier 2 refuses (a guard in a function returning a vector:
+// a lower tier's result comes back through one 64-bit word) and tier 1
+// compiles. It was clz.i8 until tier 2 learned the narrow widths.
 const char* kClz8 = R"(module @s25_clz
-func @f(%x: i64) -> i64 {
+func @f(%x: i64) -> i32x4 {
 b0:
   %t = trunc_i32 %x
-  %a = trunc.i8 %t
-  %c = clz.i8 %a
-  %z = zext_i64 %c
-  ret %z
+  %v: i32x4 = vbroadcast.i32x4 %t
+  %lim = iconst.i64 1000000
+  %ok = slt %x, %lim
+  guard %ok, @slow_path, [%x], id 0
+  ret %v
+slow(%sx: i64):
+  %t2 = trunc_i32 %sx
+  %v2: i32x4 = vbroadcast.i32x4 %t2
+  ret %v2
+resume_table {
+  entry 0 -> slow
+}
 }
 func @main(%n: i64) -> i64 {
 b0:
@@ -166,7 +177,9 @@ b0:
   %k = iconst.i64 0x10
   br loop(%z, %z)
 loop(%i: i64, %acc: i64):
-  %r = call.i64 @f(%k)
+  %rv: i32x4 = call.i32x4 @f(%k)
+  %e: i32 = vextract_lane %rv, 0
+  %r = sext_i64 %e
   %acc2 = add %acc, %r
   %i2 = add %i, %one
   %c = slt %i2, %n

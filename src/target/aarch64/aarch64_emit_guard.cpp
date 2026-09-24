@@ -9,6 +9,24 @@ namespace brass::aarch64 {
 
 using namespace brass::codegen;
 
+// SP -= bytes (allocate) or SP += bytes (release) in one instruction that
+// writes SP: an immediate add/sub encodes 12 bits, optionally shifted by 12,
+// and a larger amount is formed in X16 first (a split immediate would move
+// SP twice, the first time to a height no unwind info describes). X16 is
+// free here: it carries no value across either end of the record.
+void AArch64EmitContext::move_sp_for_guard_exit(bool allocate, size_t bytes) {
+    const uint32_t imm = static_cast<uint32_t>(bytes);
+    const bool single = imm <= 4095 || ((imm & 0xFFFu) == 0 && (imm >> 12) <= 4095);
+    if (single) {
+        if (allocate) enc_.sub(GPR::SP, GPR::SP, imm);
+        else enc_.add(GPR::SP, GPR::SP, imm);
+        return;
+    }
+    if (allocate) enc_.sub(GPR::X16, GPR::SP, imm);
+    else enc_.add(GPR::X16, GPR::SP, imm);
+    enc_.add(GPR::SP, GPR::X16, 0u);
+}
+
 // Builds a runtime::DeoptExitRecord on the stack (header, 8-byte slots, kind
 // bytes; no size limit) and calls brass_deopt_exit_record with its address,
 // exactly as the x64 guard exit does. Spilled state values are read straight
@@ -31,16 +49,17 @@ void AArch64EmitContext::emit_guard_exit(const LirInst& inst) {
         throw_unsupported("aarch64 emit (guard exit)", "deopt state map too large for one frame");
     }
 
-    // Allocate page by page, touching each page in order, so a large record
-    // never skips a stack guard page.
+    // Touch every page of a large record in order before moving SP (the
+    // stack is committed lazily behind a guard page), like __chkstk: each
+    // probe addresses its page through X16, and SP moves once, by one
+    // instruction, so the unwind info (the prologue's frame until the
+    // allocation, this exit's after it) is exact at every instruction.
     constexpr size_t kPage = 4096;
-    size_t remaining = total_alloc;
-    while (remaining > kPage) {
-        enc_.sub(GPR::SP, GPR::SP, static_cast<uint32_t>(kPage));
-        enc_.str(GPR::XZR, ptr(GPR::SP, 0));
-        remaining -= kPage;
+    for (size_t off = kPage; off < total_alloc; off += kPage) {
+        enc_.sub(GPR::X16, GPR::SP, static_cast<uint32_t>(off));
+        enc_.str(GPR::XZR, ptr(GPR::X16, 0));
     }
-    if (remaining > 0) enc_.sub(GPR::SP, GPR::SP, static_cast<uint32_t>(remaining));
+    move_sp_for_guard_exit(true, total_alloc);
 
     // The record sits at SP. Offsets past the scaled 12-bit range go through X17.
     auto record_mem = [&](size_t off) -> MemAddress {
@@ -137,7 +156,7 @@ void AArch64EmitContext::emit_guard_exit(const LirInst& inst) {
     // Handled: X0 points at the lower tier's result bits for this frame.
     Label unhandled = buffer_.create_label();
     enc_.cbz(GPR::X0, unhandled);
-    enc_.add(GPR::SP, GPR::SP, static_cast<uint32_t>(total_alloc));
+    move_sp_for_guard_exit(false, total_alloc);
     enc_.ldr(GPR::X0, ptr(GPR::X0, 0));
     if (fn_.return_type.kind() == TypeKind::F64) {
         enc_.fmov_from_gpr(FPR::V0, GPR::X0);
@@ -160,7 +179,7 @@ void AArch64EmitContext::emit_guard_exit(const LirInst& inst) {
             }
         }
         enc_.bl(inst.exit_symbol);
-        enc_.add(GPR::SP, GPR::SP, static_cast<uint32_t>(total_alloc));
+        move_sp_for_guard_exit(false, total_alloc);
         AArch64FrameLayout::emit_epilogue(enc_, frame_, fn_.calling_conv);
     } else {
         // brass_deopt_exit_record aborts when nothing resumes a guard

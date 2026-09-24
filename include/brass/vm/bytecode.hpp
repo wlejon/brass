@@ -338,6 +338,10 @@ struct ResumePointEntry {
     uint32_t resume_id = 0;
     uint32_t target_pc = 0;
     std::vector<BcReg> param_regs;
+    // The registers of the state-map values of the guard with this id
+    // (none without one): a resume from native code rebuilds them from the
+    // deopt state, value i from state value i, as the interpreter does.
+    std::vector<BcReg> state_regs;
 };
 
 struct OsrEntry {

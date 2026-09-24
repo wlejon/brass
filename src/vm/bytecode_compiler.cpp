@@ -150,6 +150,9 @@ std::unique_ptr<BytecodeFunction> BytecodeCompiler::compile(const Function& fn) 
         for (size_t p = 0; p < target_bb->param_count(); ++p) {
             if (const Value* pv = target_bb->param(p)) rpe.param_regs.push_back(ctx.get_reg(pv));
         }
+        if (const Instruction* g = fn.find_guard(resume_id)) {
+            for (const Value* sv : g->state_map()) rpe.state_regs.push_back(sv ? ctx.get_reg(sv) : kNoReg);
+        }
         bfn->resume_points.push_back(std::move(rpe));
     }
 

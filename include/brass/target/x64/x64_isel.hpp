@@ -92,6 +92,9 @@ private:
     std::vector<std::pair<const Value*, codegen::VReg>> widen_narrow_operands(const Instruction& inst,
                                                                               codegen::LirBlock& lir_bb);
     void restore_narrow_operands(const std::vector<std::pair<const Value*, codegen::VReg>>& saved);
+    // Lowers clz / ctz and the overflow checks on i8 / i16 operands, whose
+    // results depend on the width itself. Returns false for anything else.
+    bool lower_narrow_width_op(const Instruction& inst, codegen::LirBlock& lir_bb);
     // Emits the ucomis of a fused floating-point comparison and returns the
     // condition that holds exactly when the comparison is true.
     void append_fused_float_compare(const Instruction& cmp, codegen::LirBlock& lir_bb, Condition& cond);

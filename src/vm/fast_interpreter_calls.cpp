@@ -528,6 +528,21 @@ RuntimeValue FastInterpreter::resume(const BytecodeFunction& fn, uint32_t resume
         throw InterpreterException("Resume target ID " + std::to_string(resume_id) + " not found in function " + fn.name);
     }
     release_retired();
+    if (!target->state_regs.empty()) {
+        // A guard's resume: its state-map values and the block's parameters
+        // both take state value i (Interpreter::resume_with_frame).
+        std::vector<RuntimeValue> vals;
+        std::vector<BcReg> regs;
+        for (size_t i = 0; i < state_values.size(); ++i) {
+            vals.push_back(state_values[i]);
+            regs.push_back(i < target->state_regs.size() ? target->state_regs[i] : kNoReg);
+        }
+        for (size_t i = 0; i < state_values.size() && i < target->param_regs.size(); ++i) {
+            vals.push_back(state_values[i]);
+            regs.push_back(target->param_regs[i]);
+        }
+        return enter_frame(fn_info(fn), vals, target->target_pc, &regs);
+    }
     return enter_frame(fn_info(fn), state_values, target->target_pc,
                        target->param_regs.empty() ? nullptr : &target->param_regs);
 }

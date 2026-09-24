@@ -11,10 +11,19 @@ using namespace brass::test;
 
 namespace {
 
-size_t count_opcodes_in_fn(const Function& fn, Opcode op) {
+bool is_resume_target(const Function& fn, const BasicBlock* bb) {
+    for (const auto& rp : fn.resume_points()) {
+        if (rp.second == bb) return true;
+    }
+    return false;
+}
+
+// Counts `op` on the speculated path: a guard's resume block (the slow path
+// a failing guard continues on) is counted only when `in_resume_blocks`.
+size_t count_opcodes_in_fn(const Function& fn, Opcode op, bool in_resume_blocks = false) {
     size_t c = 0;
     for (const BasicBlock* bb : fn.blocks()) {
-        if (!bb) continue;
+        if (!bb || is_resume_target(fn, bb) != in_resume_blocks) continue;
         for (const Instruction* inst : *bb) {
             if (inst && inst->opcode() == op) {
                 c++;
@@ -80,6 +89,8 @@ TEST_CASE("SpeculativeInlining - Monomorphic call devirtualization with direct c
     // - Has guard
     // - Has direct call @target_fn
     CHECK_EQ(count_opcodes_in_fn(*caller_fn, Opcode::call_indirect), 0ULL);
+    // The guard's resume block makes the original indirect call.
+    CHECK_EQ(count_opcodes_in_fn(*caller_fn, Opcode::call_indirect, true), 1ULL);
     CHECK_EQ(count_opcodes_in_fn(*caller_fn, Opcode::func_addr), 1ULL);
     CHECK_EQ(count_opcodes_in_fn(*caller_fn, Opcode::eq), 1ULL);
     CHECK_EQ(count_opcodes_in_fn(*caller_fn, Opcode::guard), 1ULL);
@@ -154,6 +165,7 @@ TEST_CASE("SpeculativeInlining - Monomorphic speculative inlining of callee body
     // - Guard is present
     // - Mul and Add from small_leaf are embedded directly
     CHECK_EQ(count_opcodes_in_fn(*caller, Opcode::call_indirect), 0ULL);
+    CHECK_EQ(count_opcodes_in_fn(*caller, Opcode::call_indirect, true), 1ULL);
     CHECK_EQ(count_opcodes_in_fn(*caller, Opcode::call), 0ULL);
     CHECK_EQ(count_opcodes_in_fn(*caller, Opcode::guard), 1ULL);
     CHECK_EQ(count_opcodes_in_fn(*caller, Opcode::mul), 1ULL);

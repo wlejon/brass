@@ -104,11 +104,6 @@ bool is_flag_op(const std::string& op) {
 bool is_unary_op(const std::string& op) {
     return op == "neg" || op == "not" || op == "popcnt" || op == "clz" || op == "ctz";
 }
-// Ops whose result depends on the width itself, which tier 2 refuses on
-// narrow operands (a compile-time error, never a wrong answer).
-bool tier2_refuses(const std::string& op) {
-    return op == "clz" || op == "ctz" || op.find("_overflow") != std::string::npos;
-}
 
 // The N-bit value (x1 + x2) mod 2^N as %<name>: i8 by trunc.i8, i16 by a
 // load.i16 of the i32 stored in the alloca %p.
@@ -212,7 +207,9 @@ const int64_t kInputs[][2] = {{0, 0},   {1, 0},     {-1, 0},    {127, 0},  {-128
                               {-0x8000, 0}, {0x1234, 0xf00}, {0xfff9, 0}, {0x18000, 0x8001}};
 
 void check_op(const std::string& op, unsigned bits) {
-    Runner r(op_module(op, bits), !tier2_refuses(op));
+    // Every op compiles on every tier, clz / ctz and the overflow checks,
+    // whose results depend on the width itself, among them.
+    Runner r(op_module(op, bits));
     int bad = 0;
     for (const auto& x : kInputs) {
         for (const auto& y : kInputs) {

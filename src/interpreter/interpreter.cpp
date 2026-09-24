@@ -42,6 +42,12 @@ RuntimeValue Interpreter::resume(const Function& fn, uint32_t resume_id, const s
     if (!target_bb) {
         throw InterpreterException("Resume target ID " + std::to_string(resume_id) + " not found in function " + std::string(fn.name()));
     }
+    if (fn.find_guard(resume_id)) {
+        // A guard's resume rebuilds its state-map values as well as the
+        // block's parameters: the code after the resume block reads them.
+        InterpreterFrame frame(&fn, current_frame_);
+        return resume_with_frame(fn, resume_id, state_values, frame);
+    }
     return execute_function_from_block(fn, target_bb, state_values);
 }
 

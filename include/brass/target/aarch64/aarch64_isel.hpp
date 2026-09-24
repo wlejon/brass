@@ -97,6 +97,9 @@ private:
     std::vector<std::pair<const Value*, codegen::VReg>> widen_narrow_operands(const Instruction& inst,
                                                                               codegen::LirBlock& lir_bb);
     void restore_narrow_operands(const std::vector<std::pair<const Value*, codegen::VReg>>& saved);
+    // Lowers clz / ctz and the overflow checks on i8 / i16 operands, whose
+    // results depend on the width itself. Returns false for anything else.
+    bool lower_narrow_width_op(const Instruction& inst, codegen::LirBlock& lir_bb);
 
     void lower_binary_alu(const Instruction& inst, codegen::LirBlock& lir_bb, codegen::LirOpcode op32, codegen::LirOpcode op64, codegen::LirOpcode op_f64, codegen::LirOpcode op_f32);
     void lower_div_mod(const Instruction& inst, codegen::LirBlock& lir_bb, bool is_signed, bool is_mod);
