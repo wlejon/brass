@@ -1,16 +1,25 @@
 #include <brass/mir/coro_transform.hpp>
 #include <brass/mir/builder.hpp>
+#include <brass/mir/dominators.hpp>
 #include <brass/mir/instruction.hpp>
+#include <brass/mir/uses.hpp>
 #include <brass/runtime/coroutine.hpp>
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
 #include <algorithm>
+#include <stdexcept>
 #include <string>
 
 namespace brass {
 
 namespace {
+
+// A frame slot's pointer bit is bit (slot + 5) of the frame object's header
+// mask (the slots follow five header words), and bit 63 of that mask means
+// "every field from 63 on". A gcref slot past this one cannot be described
+// precisely.
+constexpr uint32_t kMaxPointerSlot = 63 - static_cast<uint32_t>(runtime::CORO_OFFSET_SLOTS / 8) - 1;
 
 struct SuspendPoint {
     Instruction* inst = nullptr;
@@ -18,7 +27,6 @@ struct SuspendPoint {
     uint32_t state_id = 0;
     Value* yield_val = nullptr;
     BasicBlock* resume_bb = nullptr;
-    std::vector<Value*> live_values;
 };
 
 Value* make_val(Function& fn, Arena& arena, Type type, ValueKind kind = ValueKind::InstructionResult) {
@@ -34,94 +42,64 @@ Instruction* make_store(Arena& arena, Value* base, int32_t offset, Value* val) {
     return inst;
 }
 
-Instruction* make_load(Function& fn, Arena& arena, Type type, Value* base, int32_t offset) {
+// A load whose result is `res` (a fresh value when null).
+Instruction* make_load(Function& fn, Arena& arena, Type type, Value* base, int32_t offset, Value* res = nullptr) {
     Instruction* inst = arena.make<Instruction>(Opcode::load, type);
     inst->add_operand(base);
     inst->set_offset(offset);
     inst->set_memory_type(type);
-    Value* res = make_val(fn, arena, type);
+    if (!res) res = make_val(fn, arena, type);
     inst->set_result(res);
     res->set_defining_instruction(inst);
     return inst;
 }
 
-void replace_uses_in_region(
-    BasicBlock* start_bb,
-    Value* old_val,
-    Value* new_val,
-    const std::unordered_set<BasicBlock*>& stop_bbs
-) {
-    if (!old_val || !new_val || old_val == new_val) return;
-    std::unordered_set<BasicBlock*> visited;
-    std::vector<BasicBlock*> worklist = {start_bb};
-    visited.insert(start_bb);
-
-    while (!worklist.empty()) {
-        BasicBlock* bb = worklist.back();
-        worklist.pop_back();
-
-        for (Instruction* inst : *bb) {
-            if (inst == new_val->defining_instruction()) continue;
-            for (size_t i = 0; i < inst->operand_count(); ++i) {
-                if (inst->operand(i) == old_val) {
-                    inst->set_operand(i, new_val);
-                }
-            }
-            if (inst->opcode() == Opcode::switch_) {
-                for (auto& sc : inst->switch_cases()) {
-                    for (auto& arg : sc.target.args) {
-                        if (arg == old_val) arg = new_val;
-                    }
-                }
-                for (auto& arg : inst->default_target().args) {
-                    if (arg == old_val) arg = new_val;
-                }
-            }
-            if (inst->opcode() == Opcode::br) {
-                for (auto& arg : inst->branch_target().args) {
-                    if (arg == old_val) arg = new_val;
-                }
-            } else if (inst->opcode() == Opcode::br_if) {
-                for (auto& arg : inst->true_target().args) {
-                    if (arg == old_val) arg = new_val;
-                }
-                for (auto& arg : inst->false_target().args) {
-                    if (arg == old_val) arg = new_val;
-                }
-            }
-        }
-
-        for (BasicBlock* succ : bb->successors()) {
-            if (stop_bbs.find(succ) == stop_bbs.end() && visited.find(succ) == visited.end()) {
-                visited.insert(succ);
-                worklist.push_back(succ);
-            }
-        }
-    }
+Instruction* make_i32(Function& fn, Arena& arena, int64_t imm) {
+    Instruction* c = arena.make<Instruction>(Opcode::iconst_i32, Type::i32());
+    c->set_imm_i64(imm);
+    Value* v = make_val(fn, arena, Type::i32());
+    c->set_result(v);
+    v->set_defining_instruction(c);
+    return c;
 }
 
-std::unordered_set<BasicBlock*> compute_non_dominated_blocks(BasicBlock* entry_bb, BasicBlock* dom_bb) {
-    std::unordered_set<BasicBlock*> reachable;
-    std::vector<BasicBlock*> q;
-    if (entry_bb && entry_bb != dom_bb) {
-        reachable.insert(entry_bb);
-        q.push_back(entry_bb);
+int32_t slot_offset(uint32_t slot) {
+    return static_cast<int32_t>(runtime::CORO_OFFSET_SLOTS + slot * 8);
+}
+
+BasicBlock* def_block_of(const Value* v) {
+    if (v->is_block_param()) return v->defining_block();
+    Instruction* d = v->defining_instruction();
+    return d ? d->parent() : nullptr;
+}
+
+bool block_uses(BasicBlock* bb, const Value* v) {
+    for (Instruction* inst : *bb) {
+        if (uses_value(*inst, v)) return true;
     }
-    while (!q.empty()) {
-        BasicBlock* curr = q.back();
-        q.pop_back();
-        for (BasicBlock* succ : curr->successors()) {
-            if (succ && succ != dom_bb && reachable.insert(succ).second) {
-                q.push_back(succ);
-            }
-        }
-    }
-    return reachable;
+    return false;
+}
+
+std::string fn_desc(const Function& fn) {
+    return "coroutine lowering of @" + std::string(fn.name()) + ": ";
 }
 
 } // namespace
 
-bool CoroTransformPass::run_on_function(Function& fn, bool force) {
+// The lowered body runs once per resume, entering at bb_coro_entry, which
+// dispatches on the frame's state to the original entry or to the resume
+// block of the suspend that paused it. A value live across a suspend
+// therefore reaches its uses from a different invocation than the one that
+// defined it; such a value lives in a frame slot:
+// - it is stored to its slot where it is defined (a coroutine argument is
+//   already in its argument slot, put there by coro_create), so the slot
+//   always holds its latest definition, as SSA's dominance guarantees for
+//   any use;
+// - every block that uses it and is not dominated by its definition in the
+//   lowered CFG (a resume block, or a merge point such as a loop header that
+//   a resume path re-enters) reloads it from the slot on entry.
+// Blocks the definition dominates keep the register value.
+bool CoroTransformPass::run_on_function(Function& fn, bool force, int64_t create_arg_count) {
     if (fn.blocks().empty()) return false;
     BasicBlock* orig_entry = fn.entry_block();
     if (!orig_entry || orig_entry->name() == "bb_coro_entry") return false;
@@ -165,7 +143,21 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force) {
     std::vector<Value*>& orig_params = orig_entry->params();
     Value* orig_frame_val = nullptr;
 
-    if (orig_params.empty() || !orig_params[0]->type().is_pointer_or_gcref()) {
+    // A coroutine whose first argument is a gcref must not have that
+    // argument taken for the frame: coro_create's argument count decides.
+    bool has_frame_param = !orig_params.empty() && orig_params[0]->type().is_pointer_or_gcref();
+    if (create_arg_count >= 0) {
+        const auto n = static_cast<int64_t>(orig_params.size());
+        if (n == create_arg_count) {
+            has_frame_param = false;
+        } else if (n == create_arg_count + 1 && has_frame_param) {
+            has_frame_param = true;
+        } else {
+            throw std::logic_error(fn_desc(fn) + "coro_create passes " + std::to_string(create_arg_count) +
+                                   " argument(s) to a body with " + std::to_string(n) + " parameter(s)");
+        }
+    }
+    if (!has_frame_param) {
         orig_frame_val = make_val(fn, arena, Type::gcref(), ValueKind::BlockParam);
         orig_params.insert(orig_params.begin(), orig_frame_val);
         orig_frame_val->set_block_param(orig_entry, 0);
@@ -181,24 +173,20 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force) {
     const uint32_t arg_count = static_cast<uint32_t>(orig_params.size() - 1);
     fn.set_param_types({orig_frame_val->type()});
 
-    // 3. Compute live SSA variables across suspends
+    // 3. Liveness over the original CFG. A use is any value slot of an
+    // instruction: operands, deopt state and the arguments of every edge.
     std::unordered_map<BasicBlock*, std::unordered_set<Value*>> def_map;
     std::unordered_map<BasicBlock*, std::unordered_set<Value*>> use_map;
 
     for (BasicBlock* bb : fn.blocks()) {
-        for (Value* p : bb->params()) {
-            def_map[bb].insert(p);
-        }
+        auto& defs = def_map[bb];
+        auto& uses = use_map[bb];
+        for (Value* p : bb->params()) defs.insert(p);
         for (Instruction* inst : *bb) {
-            for (size_t i = 0; i < inst->operand_count(); ++i) {
-                Value* op = inst->operand(i);
-                if (op && def_map[bb].find(op) == def_map[bb].end()) {
-                    use_map[bb].insert(op);
-                }
-            }
-            if (inst->result()) {
-                def_map[bb].insert(inst->result());
-            }
+            for_each_use(*inst, [&](Value* op) {
+                if (defs.find(op) == defs.end()) uses.insert(op);
+            });
+            if (inst->result()) defs.insert(inst->result());
         }
     }
 
@@ -231,40 +219,45 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force) {
         }
     }
 
-    // Backward pass inside each block containing suspend
+    // Values live just after each suspend: they cross it.
+    std::unordered_set<Value*> crossing;
     for (auto& sp : suspends) {
         std::unordered_set<Value*> cur_live = live_out[sp.block];
-        Instruction* inst = sp.block->tail();
-        while (inst && inst != sp.inst) {
-            if (inst->result()) {
-                cur_live.erase(inst->result());
-            }
-            for (size_t i = 0; i < inst->operand_count(); ++i) {
-                if (inst->operand(i)) cur_live.insert(inst->operand(i));
-            }
-            inst = inst->prev();
+        for (Instruction* inst = sp.block->tail(); inst && inst != sp.inst; inst = inst->prev()) {
+            if (inst->result()) cur_live.erase(inst->result());
+            for_each_use(*inst, [&](Value* op) { cur_live.insert(op); });
         }
-
+        if (sp.inst->result()) cur_live.erase(sp.inst->result());
         cur_live.erase(orig_frame_val);
-        if (sp.inst->result()) {
-            cur_live.erase(sp.inst->result());
-        }
-
-        for (Value* v : cur_live) {
-            sp.live_values.push_back(v);
-        }
+        crossing.insert(cur_live.begin(), cur_live.end());
     }
 
-    // 4. Slot allocation
+    // 4. Slot allocation. Arguments keep their argument slots; every other
+    // crossing value gets its own slot, gcrefs first so they stay within
+    // the frame's precise pointer mask. Sorted by id for a stable layout.
     std::unordered_map<Value*, uint32_t> slot_map;
+    std::vector<Value*> spilled;
+    for (uint32_t i = 0; i < arg_count; ++i) {
+        if (crossing.count(orig_params[i + 1])) slot_map[orig_params[i + 1]] = i;
+    }
+    for (Value* v : crossing) {
+        if (!slot_map.count(v)) spilled.push_back(v);
+    }
+    std::sort(spilled.begin(), spilled.end(), [](const Value* a, const Value* b) {
+        const bool ga = a->type().is_pointer_or_gcref(), gb = b->type().is_pointer_or_gcref();
+        if (ga != gb) return ga;
+        return a->id() < b->id();
+    });
     uint32_t next_slot = std::max(options_.first_slot_index, arg_count);
-
-    for (auto& sp : suspends) {
-        for (Value* v : sp.live_values) {
-            if (slot_map.find(v) == slot_map.end()) {
-                slot_map[v] = next_slot++;
-                if (options_.stats) options_.stats->variables_spilled++;
-            }
+    for (Value* v : spilled) {
+        slot_map[v] = next_slot++;
+        if (options_.stats) options_.stats->variables_spilled++;
+    }
+    for (const auto& [v, slot] : slot_map) {
+        if (v->type().is_pointer_or_gcref() && slot > kMaxPointerSlot) {
+            throw std::logic_error(fn_desc(fn) + "a gcref live across a suspend needs frame slot " +
+                                   std::to_string(slot) + ", past the last slot the frame's pointer mask covers (" +
+                                   std::to_string(kMaxPointerSlot) + ")");
         }
     }
 
@@ -285,15 +278,13 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force) {
     BranchTarget def_target(orig_entry);
     def_target.args.push_back(global_frame_param);
     for (uint32_t i = 0; i < arg_count; ++i) {
-        Instruction* ld_arg = make_load(fn, arena, orig_params[i + 1]->type(), global_frame_param,
-                                        static_cast<int32_t>(runtime::CORO_OFFSET_SLOTS + i * 8));
+        Instruction* ld_arg = make_load(fn, arena, orig_params[i + 1]->type(), global_frame_param, slot_offset(i));
         entry_bb->append_instruction(ld_arg);
         def_target.args.push_back(ld_arg->result());
     }
     sw_inst->set_default_target(def_target);
 
     // 6. Split basic blocks at each coro_suspend
-    std::unordered_set<BasicBlock*> resume_bbs_set;
     for (auto& sp : suspends) {
         std::string res_name = "bb_resume_" + std::to_string(sp.state_id);
         std::string_view res_name_view = fn.parent()
@@ -302,7 +293,6 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force) {
         BasicBlock* resume_bb = arena.make<BasicBlock>(fn.next_block_id(), res_name_view);
         fn.append_block(resume_bb);
         sp.resume_bb = resume_bb;
-        resume_bbs_set.insert(resume_bb);
 
         sw_inst->add_switch_case(static_cast<int64_t>(sp.state_id), resume_bb);
         fn.add_resume_point(sp.state_id, resume_bb);
@@ -310,12 +300,7 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force) {
     entry_bb->append_instruction(sw_inst);
     std::unordered_set<Instruction*> suspend_rets;
 
-    // Split from the last suspend backwards: a later suspend in the tail of
-    // an earlier one must get its spill stores (and its resume block) before
-    // the earlier split rewrites the tail's uses to that split's reloads, so
-    // the stores see the reloads too and no reload outlives its block.
-    for (auto it = suspends.rbegin(); it != suspends.rend(); ++it) {
-        SuspendPoint& sp = *it;
+    for (auto& sp : suspends) {
         Instruction* susp = sp.inst;
         BasicBlock* cur_bb = susp->parent();
         BasicBlock* resume_bb = sp.resume_bb;
@@ -329,114 +314,117 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force) {
             mover = nxt;
         }
 
-        // Before susp: store live values to frame
-        for (Value* v : sp.live_values) {
-            uint32_t slot = slot_map[v];
-            int32_t offset = static_cast<int32_t>(runtime::CORO_OFFSET_SLOTS + slot * 8);
-            Instruction* st = make_store(arena, global_frame_param, offset, v);
-            cur_bb->insert_before(st, susp);
-        }
-
-        // Store state_id
-        Instruction* state_c = arena.make<Instruction>(Opcode::iconst_i32, Type::i32());
-        state_c->set_imm_i64(sp.state_id);
-        Value* state_c_val = make_val(fn, arena, Type::i32());
-        state_c->set_result(state_c_val);
-        state_c_val->set_defining_instruction(state_c);
+        Instruction* state_c = make_i32(fn, arena, sp.state_id);
         cur_bb->insert_before(state_c, susp);
-
-        Instruction* st_state = make_store(arena, global_frame_param, runtime::CORO_OFFSET_STATE_ID, state_c_val);
-        cur_bb->insert_before(st_state, susp);
-
-        // Store yield_val
+        cur_bb->insert_before(make_store(arena, global_frame_param, runtime::CORO_OFFSET_STATE_ID,
+                                         state_c->result()), susp);
         if (sp.yield_val) {
-            Instruction* st_yield = make_store(arena, global_frame_param, runtime::CORO_OFFSET_YIELD_VAL, sp.yield_val);
-            cur_bb->insert_before(st_yield, susp);
+            cur_bb->insert_before(make_store(arena, global_frame_param, runtime::CORO_OFFSET_YIELD_VAL,
+                                             sp.yield_val), susp);
         }
 
         // Replace susp with ret
         Instruction* ret_inst = arena.make<Instruction>(Opcode::ret, Type::void_type());
-        if (sp.yield_val) {
-            ret_inst->add_operand(sp.yield_val);
-        }
+        if (sp.yield_val) ret_inst->add_operand(sp.yield_val);
         cur_bb->insert_before(ret_inst, susp);
         suspend_rets.insert(ret_inst);
         cur_bb->remove_instruction(susp);
 
-        std::unordered_set<BasicBlock*> stop_bbs = compute_non_dominated_blocks(entry_bb, resume_bb);
-        stop_bbs.insert(orig_entry);
-        for (BasicBlock* rbb : resume_bbs_set) {
-            if (rbb != resume_bb) stop_bbs.insert(rbb);
-        }
-
-        // Inside resume_bb: load resume_arg if needed
-        if (susp->result()) {
-            Value* orig_res = susp->result();
-            Instruction* ld_arg = make_load(fn, arena, orig_res->type(), global_frame_param, runtime::CORO_OFFSET_RESUME_ARG);
+        // The suspend's result becomes the resume block's load of the
+        // resume argument: the same value, now defined there.
+        if (Value* orig_res = susp->result()) {
+            Instruction* ld_arg = make_load(fn, arena, orig_res->type(), global_frame_param,
+                                            runtime::CORO_OFFSET_RESUME_ARG, orig_res);
             resume_bb->prepend_instruction(ld_arg);
-
-            replace_uses_in_region(resume_bb, orig_res, ld_arg->result(), stop_bbs);
-        }
-
-        // Inside resume_bb: restore live values
-        for (Value* v : sp.live_values) {
-            uint32_t slot = slot_map[v];
-            int32_t offset = static_cast<int32_t>(runtime::CORO_OFFSET_SLOTS + slot * 8);
-            Instruction* ld_v = make_load(fn, arena, v->type(), global_frame_param, offset);
-            resume_bb->prepend_instruction(ld_v);
-
-            replace_uses_in_region(resume_bb, v, ld_v->result(), stop_bbs);
         }
     }
 
-    // 7. Update return instructions to mark is_done = 1 and state_id = ~0U
+    // 7. Store each spilled value to its slot where it is defined.
+    for (Value* v : spilled) {
+        Instruction* st = make_store(arena, global_frame_param, slot_offset(slot_map[v]), v);
+        if (v->is_block_param()) {
+            v->defining_block()->prepend_instruction(st);
+            continue;
+        }
+        Instruction* d = v->defining_instruction();
+        if (!d || !d->parent()) {
+            throw std::logic_error(fn_desc(fn) + "a value live across a suspend has no definition");
+        }
+        if (d->is_terminator()) {
+            throw std::logic_error(fn_desc(fn) + "the result of a terminator (" +
+                                   std::string(opcode_name(d->opcode())) +
+                                   ") is live across a suspend, which is not supported");
+        }
+        d->parent()->insert_after(st, d);
+    }
+
+    // 8. Update return instructions to mark is_done = 1 and state_id = ~0U
     for (BasicBlock* bb : fn.blocks()) {
         if (bb == entry_bb) continue;
         Instruction* term = bb->terminator();
         if (term && term->opcode() == Opcode::ret && suspend_rets.find(term) == suspend_rets.end()) {
-            Instruction* c_one = arena.make<Instruction>(Opcode::iconst_i32, Type::i32());
-            c_one->set_imm_i64(1);
-            Value* one_val = make_val(fn, arena, Type::i32());
-            c_one->set_result(one_val);
-            one_val->set_defining_instruction(c_one);
+            Instruction* c_one = make_i32(fn, arena, 1);
             bb->insert_before(c_one, term);
+            bb->insert_before(make_store(arena, global_frame_param, runtime::CORO_OFFSET_IS_DONE,
+                                         c_one->result()), term);
 
-            Instruction* st_done = make_store(arena, global_frame_param, runtime::CORO_OFFSET_IS_DONE, one_val);
-            bb->insert_before(st_done, term);
-
-            Instruction* c_term_state = arena.make<Instruction>(Opcode::iconst_i32, Type::i32());
-            c_term_state->set_imm_i64(static_cast<int64_t>(0xFFFFFFFF));
-            Value* term_state_val = make_val(fn, arena, Type::i32());
-            c_term_state->set_result(term_state_val);
-            term_state_val->set_defining_instruction(c_term_state);
+            Instruction* c_term_state = make_i32(fn, arena, static_cast<int64_t>(0xFFFFFFFF));
             bb->insert_before(c_term_state, term);
-
-            Instruction* st_tstate = make_store(arena, global_frame_param, runtime::CORO_OFFSET_STATE_ID, term_state_val);
-            bb->insert_before(st_tstate, term);
+            bb->insert_before(make_store(arena, global_frame_param, runtime::CORO_OFFSET_STATE_ID,
+                                         c_term_state->result()), term);
 
             if (term->operand_count() > 0 && term->operand(0)) {
-                Instruction* st_y = make_store(arena, global_frame_param, runtime::CORO_OFFSET_YIELD_VAL, term->operand(0));
-                bb->insert_before(st_y, term);
+                bb->insert_before(make_store(arena, global_frame_param, runtime::CORO_OFFSET_YIELD_VAL,
+                                             term->operand(0)), term);
             }
         }
     }
 
     if (orig_frame_val != global_frame_param) {
-        replace_uses_in_region(orig_entry, orig_frame_val, global_frame_param, {});
+        for (BasicBlock* bb : fn.blocks()) {
+            if (bb != entry_bb) replace_uses_in(*bb, orig_frame_val, global_frame_param);
+        }
     }
 
     fn.rebuild_cfg_predecessors();
+
+    // 9. Reload each crossing value on entry to every block that uses it
+    // and that its definition does not dominate in the lowered CFG.
+    DominatorTree dom(fn);
+    for (const auto& [v, slot] : slot_map) {
+        BasicBlock* def_bb = def_block_of(v);
+        if (!def_bb) {
+            throw std::logic_error(fn_desc(fn) + "a value live across a suspend has no defining block");
+        }
+        for (BasicBlock* bb : fn.blocks()) {
+            if (bb == def_bb || bb == entry_bb) continue;
+            if (dom.is_reachable(bb) && dom.dominates(def_bb, bb)) continue;
+            if (!block_uses(bb, v)) continue;
+            Instruction* ld = make_load(fn, arena, v->type(), global_frame_param, slot_offset(slot));
+            bb->prepend_instruction(ld);
+            replace_uses_in(*bb, v, ld->result());
+        }
+    }
+
     return true;
 }
 
 bool CoroTransformPass::run_on_module(Module& mod) {
-    // Every coro_create target is a coroutine body, suspends or not.
-    std::unordered_set<std::string_view> coro_targets;
+    // Every coro_create target is a coroutine body, suspends or not; every
+    // coro_create of one body passes the same number of arguments.
+    std::unordered_map<std::string_view, int64_t> coro_targets;
     for (Function* fn : mod.functions()) {
         if (!fn) continue;
         for (BasicBlock* bb : fn->blocks()) {
             for (Instruction* inst : *bb) {
-                if (inst->opcode() == Opcode::coro_create) coro_targets.insert(inst->symbol());
+                if (inst->opcode() != Opcode::coro_create) continue;
+                const auto n = static_cast<int64_t>(inst->operand_count());
+                auto [it, fresh] = coro_targets.emplace(inst->symbol(), n);
+                if (!fresh && it->second != n) {
+                    throw std::logic_error("coroutine lowering: coro_create @" + std::string(inst->symbol()) +
+                                           " is passed both " + std::to_string(it->second) + " and " +
+                                           std::to_string(n) + " arguments");
+                }
             }
         }
     }
@@ -444,7 +432,9 @@ bool CoroTransformPass::run_on_module(Module& mod) {
     bool changed = false;
     for (Function* fn : mod.functions()) {
         if (!fn) continue;
-        if (run_on_function(*fn, coro_targets.count(fn->name()) != 0)) {
+        auto it = coro_targets.find(fn->name());
+        const bool target = it != coro_targets.end();
+        if (run_on_function(*fn, target, target ? it->second : -1)) {
             changed = true;
         }
     }
@@ -471,7 +461,12 @@ CoroFrameLayout compute_coro_frame_layout(const Function& fn) {
             if (!frame || inst->operand(0) != frame || inst->offset() < runtime::CORO_OFFSET_SLOTS) continue;
             uint32_t slot = static_cast<uint32_t>((inst->offset() - runtime::CORO_OFFSET_SLOTS) / 8);
             layout.slot_count = std::max(layout.slot_count, slot + 1);
-            if (inst->memory_type().is_pointer_or_gcref() && slot < 64) {
+            if (inst->memory_type().is_pointer_or_gcref()) {
+                if (slot > kMaxPointerSlot) {
+                    throw std::logic_error("coroutine frame of @" + std::string(fn.name()) + ": gcref slot " +
+                                           std::to_string(slot) + " is past the last slot the frame's pointer "
+                                           "mask covers (" + std::to_string(kMaxPointerSlot) + ")");
+                }
                 layout.pointer_mask |= (1ULL << slot);
             }
         }

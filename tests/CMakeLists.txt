@@ -121,6 +121,7 @@ add_executable(brass_unit_tests
     differential/test_exception_differential.cpp
     unit/test_coro_mir.cpp
     unit/test_coro_transform.cpp
+    unit/test_coro_live_across_suspend.cpp
     unit/test_coro_runtime.cpp
     differential/test_coro_differential.cpp
     unit/test_partial_escape.cpp

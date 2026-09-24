@@ -48,7 +48,16 @@ public:
 
     // `force` lowers `fn` even when it has no `coro_suspend` (a coroutine
     // body that runs to completion on its first resume).
-    bool run_on_function(Function& fn, bool force = false);
+    //
+    // `create_arg_count` is the number of arguments the module's
+    // `coro_create @fn(...)` pass (run_on_module supplies it). With it, the
+    // body's parameters are exactly those arguments when the counts match,
+    // or a leading pointer/gcref frame parameter followed by them when the
+    // body has one more; anything else is a std::logic_error. Without it
+    // (-1: no coro_create names `fn`), a leading pointer/gcref parameter is
+    // taken to be the frame, as bodies built with an explicit frame
+    // parameter declare it.
+    bool run_on_function(Function& fn, bool force = false, int64_t create_arg_count = -1);
     bool run_on_module(Module& mod);
 
     const CoroTransformOptions& options() const noexcept { return options_; }
