@@ -502,12 +502,12 @@ bool MultiTierPipeline::enqueue_tier2(
     const Module* mod,
     FunctionHandle* handle
 ) {
-    const Module* target_mod = mod ? mod : tiering().active_module();
-    if (!target_mod) return false;
     if (!handle) {
         handle = table_->get_or_create(fn_name);
     }
     if (!handle) return false;
+    const Module* target_mod = mod ? mod : tiering().tier2_source_module(handle);
+    if (!target_mod) return false;
 
     bool enqueued = background_compiler().enqueue(
         fn_name,
@@ -524,10 +524,10 @@ bool MultiTierPipeline::enqueue_tier2(
 }
 
 bool MultiTierPipeline::compile_tier2_now(std::string_view fn_name, FunctionHandle* handle) {
-    const Module* mod = tiering().active_module();
-    if (!mod) return false;
     if (!handle) handle = table_->find(fn_name);
     if (!handle || !BackgroundCompiler::tier2_candidate(*handle)) return false;
+    const Module* mod = tiering().tier2_source_module(handle);
+    if (!mod) return false;
     const std::string key(fn_name);
     {
         std::lock_guard<std::mutex> lock(compiling_mutex_);
@@ -581,7 +581,7 @@ void MultiTierPipeline::tier_invocation(TieringFeedback& fb, std::string_view fn
         stats_.tier1_invocations.fetch_add(1, std::memory_order_relaxed);
         if (count >= config_.invocation_tier2_threshold && !fb.is_bailout_set()) {
             if (config_.enable_background_compile || tiering().is_background_compile_enabled()) {
-                enqueue_tier2(fn_name, tiering().active_module(), handle);
+                enqueue_tier2(fn_name, nullptr, handle);
             } else {
                 compile_tier2_now(fn_name, handle);
             }

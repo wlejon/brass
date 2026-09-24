@@ -158,16 +158,19 @@ public:
         tier1_install_hook_ = std::move(hook);
     }
 
-    // Enqueue Tier 2 background optimization
+    // Enqueue Tier 2 background optimization. Without `mod`, compiles from
+    // tiering().tier2_source_module(handle). False (nothing queued) if the
+    // handle is bound to a Function that is not mod's of that name.
     bool enqueue_tier2(
         std::string_view fn_name,
         const Module* mod = nullptr,
         FunctionHandle* handle = nullptr
     );
     // Tier 2 on the calling thread (tier-up with background compile off):
-    // compiles `fn_name` from the active module and installs it over its
-    // tier-1 code. False if it is not a tier-2 candidate, is being compiled
-    // already, or tier 2 rejected it (it then stays on its lower tier and
+    // compiles `fn_name` from tiering().tier2_source_module(handle) and
+    // installs it over its tier-1 code. False if it is not a tier-2
+    // candidate, is being compiled already, is bound to a Function that is
+    // not that module's, or tier 2 rejected it (it then stays on its lower tier and
     // is not tried again). Never throws.
     bool compile_tier2_now(std::string_view fn_name, FunctionHandle* handle = nullptr);
 

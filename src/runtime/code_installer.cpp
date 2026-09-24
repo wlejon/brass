@@ -725,12 +725,21 @@ void CodeInstaller::register_external_symbol(std::string_view name, void* addres
     external_symbols_[std::string(name)] = address;
 }
 
+static CodeInstallResult foreign_target(const FunctionHandle& handle, std::string_view fn_name,
+                                        const Module& module) {
+    return {false, nullptr,
+            "handle '" + std::string(handle.name()) + "' is not bound to function '" + std::string(fn_name) +
+                "' of the module compiled for it ('" + std::string(module.name()) + "')",
+            0};
+}
+
 CodeInstallResult CodeInstaller::install_tier2(
     FunctionHandle& handle,
     const Module& module,
     std::string_view fn_name
 ) {
     Tier2Bindings bindings = capture_tier2_bindings(handle, module, fn_name, &module);
+    if (bindings.target_foreign) return foreign_target(handle, fn_name, module);
     auto mod_copy = clone_module(module);
     if (!mod_copy) {
         return {false, nullptr, "Failed to clone module for Tier-2 compilation", 0};
@@ -754,6 +763,10 @@ Tier2Bindings CodeInstaller::capture_tier2_bindings(const FunctionHandle& handle
                                                      std::string_view fn_name, const Module* source) const {
     Tier2Bindings b;
     b.target = handle.mir_function();
+    if (const Function* t = b.target) {
+        const Module* owner = t->parent();
+        b.target_foreign = source ? t != source->get_function(fn_name)
+                                  : t->name() != fn_name || !owner || owner->name() != module.name();    }
     for (const Function* fn : module.functions()) {
         if (!fn || fn->name() == fn_name) continue;
         const FunctionHandle* other = table_->find(fn->name());
@@ -794,6 +807,9 @@ CodeInstallResult CodeInstaller::install_tier2(
     if (!target_fn) {
         return {false, nullptr, "Function '" + std::string(fn_name) + "' not found in module", 0};
     }
+    // Bound to another module's Function: never compiled for it, nor held
+    // against it.
+    if (bindings.target_foreign) return foreign_target(handle, fn_name, *module);
     // Rebound while the task was queued: the code could never be published.
     if (handle.mir_function() != bound) {
         return {false, nullptr,

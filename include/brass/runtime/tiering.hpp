@@ -252,6 +252,10 @@ public:
 
     void set_active_module(const Module* mod) noexcept { active_module_ = mod; }
     const Module* active_module() const noexcept { return active_module_; }
+    // The module tier 2 compiles `handle`'s function from: the one owning
+    // the Function it is bound to (a host may bind handles to a module other
+    // than the active one), else the active module.
+    const Module* tier2_source_module(const FunctionHandle* handle) const noexcept;
 
     // Clears the active module if it is `mod` (which is being destroyed).
     // Static and a no-op once the registry is gone, so a Module destroyed

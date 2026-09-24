@@ -155,6 +155,8 @@ bool BackgroundCompiler::enqueue(
     // compiled for the old module.
     if (!handle) handle = installer_.dispatch_table().get_or_create(fn_name);
     const Tier2Bindings bindings = installer_.capture_tier2_bindings(*handle, module, fn_name, &module);
+    // Bound to another module's Function: this module's code is not its.
+    if (bindings.target_foreign) return false;
     auto mod_copy = clone_module(module);
     if (!mod_copy) return false;
     return enqueue_copy(fn_name, std::move(mod_copy), handle, priority, target_tier, &bindings);
@@ -210,6 +212,9 @@ bool BackgroundCompiler::enqueue_copy(std::string_view fn_name, std::unique_ptr<
     }
 
     if (!tier2_candidate(*handle)) return false;
+    Tier2Bindings captured =
+        bindings ? *bindings : installer_.capture_tier2_bindings(*handle, *module_copy, key, nullptr);
+    if (captured.target_foreign) return false;
 
     active_names_.insert(key);
     statuses_[key] = CompileStatus::Pending;
@@ -222,8 +227,7 @@ bool BackgroundCompiler::enqueue_copy(std::string_view fn_name, std::unique_ptr<
     task.priority = priority;
     task.status = CompileStatus::Pending;
     task.handle = handle;
-    task.bindings = bindings ? *bindings
-                             : installer_.capture_tier2_bindings(*handle, *task.module_copy, key, nullptr);
+    task.bindings = std::move(captured);
     task.enqueue_time = std::chrono::high_resolution_clock::now();
 
     queue_.push(std::move(task));

@@ -272,7 +272,14 @@ bool TieringRegistry::on_invocation_threshold_reached(std::string_view fn_name) 
     if (!config_.enable_background_compile) {
         return false;
     }
-    return enqueue_compilation(fn_name, active_module());
+    return enqueue_compilation(fn_name);
+}
+
+const Module* TieringRegistry::tier2_source_module(const FunctionHandle* handle) const noexcept {
+    if (handle) {
+        if (const Function* fn = handle->mir_function(); fn && fn->parent()) return fn->parent();
+    }
+    return active_module();
 }
 
 bool TieringRegistry::tier1_retry_possible(std::string_view fn_name) const {
@@ -285,12 +292,12 @@ bool TieringRegistry::enqueue_compilation(
     const Module* mod,
     FunctionHandle* handle
 ) {
-    const Module* target_mod = mod ? mod : active_module();
-    if (!target_mod) {
-        return false;
-    }
     if (!handle) {
         handle = dispatch_table().get_or_create(fn_name);
+    }
+    const Module* target_mod = mod ? mod : tier2_source_module(handle);
+    if (!target_mod) {
+        return false;
     }
     return pipeline().background_compiler().enqueue(
         fn_name,

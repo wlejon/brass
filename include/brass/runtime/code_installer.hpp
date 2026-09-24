@@ -336,6 +336,11 @@ bool deopt_targets_valid(const Function& optimized, const Function* tier0, std::
 // the compile finishes: a handle rebound in between is not published to.
 struct Tier2Bindings {
     const Function* target = nullptr;
+    // The handle was bound to a Function other than the compiled module's
+    // one of that name: its code would run and deoptimize as another
+    // function, so the install is refused before compiling (and the handle
+    // is not marked rejected, its own Function was never tried).
+    bool target_foreign = false;
     // Other functions of the module whose handles may receive the compiled
     // code, by name. A name absent here is never published.
     std::unordered_map<std::string, const Function*> siblings;
@@ -367,7 +372,10 @@ public:
     );
 
     // `module` is a clone the caller just took: the handles' bindings are
-    // captured now, with no source module to check the siblings against.
+    // captured now, with no source module to check the bindings against.
+    // A bound handle is refused only when its Function's name or module
+    // name differs from the clone's: a handle bound to another module of
+    // the same name is not caught, so prefer the overload taking the source.
     CodeInstallResult install_tier2(
         FunctionHandle& handle,
         std::unique_ptr<Module> module,
@@ -387,6 +395,10 @@ public:
     // are bound to now. With `source` (the module being cloned), a sibling
     // is recorded only if its handle is bound to source's Function of that
     // name: code compiled from one Function is never published for another.
+    // A bound `handle` whose Function is not source's of `fn_name` (without
+    // source: whose name or module name is not the clone's) is recorded as
+    // target_foreign, and install_tier2 then refuses it. An unbound handle
+    // is never foreign.
     Tier2Bindings capture_tier2_bindings(const FunctionHandle& handle, const Module& module,
                                          std::string_view fn_name, const Module* source) const;
 
