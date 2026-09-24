@@ -47,11 +47,41 @@ public:
 
 namespace {
 
+// std::atomic<std::shared_ptr> is C++20, but libc++ (every Xcode through at
+// least 16.4) does not ship it. Its stand-in there is the shared_ptr overloads
+// of std::atomic_load / std::atomic_store: deprecated in C++20 for exactly this
+// class template, and the same guarantee.
+template <typename T>
+class AtomicSharedPtr {
+public:
+    explicit AtomicSharedPtr(std::shared_ptr<T> p) : p_(std::move(p)) {}
+#if defined(__cpp_lib_atomic_shared_ptr)
+    std::shared_ptr<T> load(std::memory_order o) const noexcept { return p_.load(o); }
+    void store(std::shared_ptr<T> p, std::memory_order o) noexcept { p_.store(std::move(p), o); }
+
+private:
+    std::atomic<std::shared_ptr<T>> p_;
+#else
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+    std::shared_ptr<T> load(std::memory_order o) const noexcept { return std::atomic_load_explicit(&p_, o); }
+    void store(std::shared_ptr<T> p, std::memory_order o) noexcept { std::atomic_store_explicit(&p_, std::move(p), o); }
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+
+private:
+    std::shared_ptr<T> p_;
+#endif
+};
+
 struct Registry {
     std::mutex write_mutex; // serializes writers; readers only load `current`
     size_t live_entries = 0;
     size_t dead_entries = 0; // still indexed by a segment
-    std::atomic<std::shared_ptr<const CodeStackMapSnapshot>> current{
+    AtomicSharedPtr<const CodeStackMapSnapshot> current{
         std::make_shared<const CodeStackMapSnapshot>()};
 };
 
