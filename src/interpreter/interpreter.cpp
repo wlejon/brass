@@ -860,7 +860,7 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
 
                 case Opcode::coro_resume: {
                     RuntimeValue res = interp_coro_resume(
-                        *inst, frame,
+                        *inst, frame, module_,
                         [this](const Function& f, const std::vector<RuntimeValue>& a) {
                             return execute_function(f, a);
                         }

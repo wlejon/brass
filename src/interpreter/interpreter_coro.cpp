@@ -24,6 +24,36 @@ const Function& lowered_coro_target(std::string_view callee, const Module* mod) 
     return *target_fn;
 }
 
+// A frame's fn_ptr is the Function* of the lowered body when an interpreter
+// created it, a native code address when generated code did. Only a body of
+// the current module is recognized; anything else runs natively.
+const Function* interpreted_coro_body(const void* fn_ptr, const Module* mod) {
+    if (!fn_ptr || !mod) return nullptr;
+    for (const Function* f : mod->functions()) {
+        if (static_cast<const void*>(f) == fn_ptr) return is_lowered_coro_body(*f) ? f : nullptr;
+    }
+    return nullptr;
+}
+
+// The coroutine handle operand. The verifier also accepts ptr and i64
+// handles; the frame is still a movable heap object, so the operand's value
+// becomes a gcref in this frame, where the root walk reports and updates it.
+uintptr_t coro_handle(const Instruction& inst, InterpreterFrame& frame, const char* op, bool allow_null) {
+    RuntimeValue v = frame.get_value(inst.operand(0));
+    if (v.is_vector()) {
+        throw InterpreterException(std::string(op) + ": coroutine handle is a vector value");
+    }
+    const uintptr_t handle = static_cast<uintptr_t>(v.raw_bits());
+    if (handle == 0) {
+        if (allow_null) return 0;
+        throw InterpreterException(std::string(op) + " of a null coroutine frame");
+    }
+    if (!v.is_gcref()) {
+        frame.set_value(inst.operand(0), RuntimeValue::from_gcref(handle));
+    }
+    return handle;
+}
+
 } // namespace
 
 RuntimeValue interp_coro_create(const Instruction& inst, InterpreterFrame& frame, const Module* mod) {
@@ -56,7 +86,9 @@ RuntimeValue interp_coro_create(const Instruction& inst, InterpreterFrame& frame
         }
         slot += coro_slot_count(t);
     }
-    return RuntimeValue::from_ptr(frame_addr);
+    // The frame is a heap object that a collection may move: a gcref, so
+    // this frame's roots report it (the builder types the result gcref).
+    return RuntimeValue::from_gcref(frame_addr);
 }
 
 void interp_coro_suspend(const Instruction& inst, InterpreterFrame& frame) {
@@ -69,34 +101,48 @@ void interp_coro_suspend(const Instruction& inst, InterpreterFrame& frame) {
 RuntimeValue interp_coro_resume(
     const Instruction& inst,
     InterpreterFrame& frame,
+    const Module* mod,
     const std::function<RuntimeValue(const Function&, const std::vector<RuntimeValue>&)>& exec_fn
 ) {
-    RuntimeValue coro_val = frame.get_value(inst.operand(0));
-    uintptr_t frame_addr = coro_val.as_ptr();
+    uintptr_t frame_addr = coro_handle(inst, frame, "coro_resume", /*allow_null=*/false);
     auto* frame_ptr = reinterpret_cast<runtime::BrassCoroFrame*>(frame_addr);
-    if (!frame_ptr) {
-        throw InterpreterException("coro_resume of a null coroutine frame");
-    }
     if (frame_ptr->is_done) {
-        return RuntimeValue::from_i64(static_cast<int64_t>(frame_ptr->yielded_val));
+        return RuntimeValue::from_bits(inst.type(), frame_ptr->yielded_val);
     }
 
     RuntimeValue input_val = (inst.operand_count() > 1 && inst.operand(1))
         ? frame.get_value(inst.operand(1))
         : RuntimeValue::from_i64(0);
-    frame_ptr->resume_arg = static_cast<uint64_t>(input_val.raw_bits());
+    const uint64_t input_bits = static_cast<uint64_t>(input_val.raw_bits());
+
+    const Function* body = interpreted_coro_body(frame_ptr->fn_ptr, mod);
+    if (!body) {
+        if (!frame_ptr->fn_ptr) {
+            throw InterpreterException("coro_resume: coroutine frame has no body");
+        }
+        // Generated code's frame: run it natively. It roots the frame
+        // itself; this frame's gcref operand is updated by the root walk.
+        return RuntimeValue::from_bits(inst.type(), brass_coro_resume(frame_addr, input_bits));
+    }
+    frame_ptr->resume_arg = input_bits;
 
     // The lowered body dispatches on state_id and maintains is_done itself,
-    // exactly as brass_coro_resume runs it natively.
-    const auto* target_fn = reinterpret_cast<const Function*>(frame_ptr->fn_ptr);
-    RuntimeValue yielded_res = exec_fn(*target_fn, {RuntimeValue::from_ptr(frame_addr)});
+    // exactly as brass_coro_resume runs it natively. It may collect and move
+    // the frame: the argument is a gcref (the body's frame parameter is
+    // one), and the operand here is a root, so it is re-read afterwards.
+    RuntimeValue yielded_res = exec_fn(*body, {RuntimeValue::from_gcref(frame_addr)});
+    frame_addr = static_cast<uintptr_t>(frame.get_value(inst.operand(0)).raw_bits());
+    frame_ptr = reinterpret_cast<runtime::BrassCoroFrame*>(frame_addr);
     frame_ptr->yielded_val = static_cast<uint64_t>(yielded_res.raw_bits());
+    if (frame_ptr->is_done) {
+        runtime::unregister_active_coro_frame(frame_ptr);
+    }
     return yielded_res;
 }
 
 void interp_coro_destroy(const Instruction& inst, InterpreterFrame& frame) {
-    RuntimeValue coro_val = frame.get_value(inst.operand(0));
-    brass_coro_destroy(coro_val.as_ptr());
+    // Any frame, interpreted or generated: done, and no longer a root.
+    brass_coro_destroy(coro_handle(inst, frame, "coro_destroy", /*allow_null=*/true));
 }
 
 } // namespace brass
