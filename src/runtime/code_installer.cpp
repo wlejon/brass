@@ -128,6 +128,38 @@ void FunctionHandle::set_jit_engine(std::shared_ptr<codegen::JitExecutionEngine>
     jit_engine_ = std::move(engine);
 }
 
+bool FunctionHandle::publish_optimized(std::shared_ptr<codegen::JitExecutionEngine> engine, void* entry,
+                                       const Function* compiled_from, Type ret, std::vector<Type> params,
+                                       bool require_no_entry) {
+    auto sig = std::make_shared<const Signature>(Signature{ret, std::move(params)});
+    std::lock_guard<std::mutex> lock(engine_mutex_);
+    const bool stale = retired_ || mir_detached_ || mir_function() != compiled_from ||
+                       (require_no_entry && native_entry() != nullptr);
+    if (stale) {
+        if (engine && engine != jit_engine_) retired_engines_.push_back(std::move(engine));
+        return false;
+    }
+    if (jit_engine_ && jit_engine_ != engine) retired_engines_.push_back(std::move(jit_engine_));
+    jit_engine_ = std::move(engine);
+    // The baseline code stays with the handle: invalidate_optimized falls
+    // back to it, and tier-1 callers may be bound to its entry.
+    sig_ = std::move(sig);
+    set_native_entry(entry);
+    set_tier(TierLevel::Tier2_Optimized);
+    return true;
+}
+
+void FunctionHandle::mark_tier2_rejected() {
+    std::lock_guard<std::mutex> lock(engine_mutex_);
+    tier2_rejected_ = true;
+    tier2_rejected_fn_ = mir_function();
+}
+
+bool FunctionHandle::tier2_rejected() const {
+    std::lock_guard<std::mutex> lock(engine_mutex_);
+    return tier2_rejected_ && tier2_rejected_fn_ == mir_function();
+}
+
 std::shared_ptr<codegen::JitExecutionEngine> FunctionHandle::jit_engine() const {
     std::lock_guard<std::mutex> lock(engine_mutex_);
     return jit_engine_;
@@ -147,6 +179,7 @@ void FunctionHandle::retire() noexcept {
     set_native_entry(nullptr);
     mir_function_.store(nullptr, std::memory_order_release);
     std::lock_guard<std::mutex> lock(engine_mutex_);
+    retired_ = true;
     for (const DeoptEntry& d : deopt_entries_) unregister_deopt_resumer(d.entry);
     deopt_entries_.clear();
     jit_engine_.reset();
@@ -712,24 +745,37 @@ CodeInstallResult CodeInstaller::install_tier2(
         return {false, nullptr, "Function '" + std::string(fn_name) + "' not found in module", 0};
     }
 
-    handle.set_signature(target_fn->return_type(), target_fn->param_types());
+    // The Function the handle runs now: the code is validated against it,
+    // its frames deoptimize into it, and it is published only if the handle
+    // is still bound to it when compilation finishes.
+    const Function* bound = handle.mir_function();
 
+    // Compile errors are results, never exceptions: a background worker
+    // and the invocation hook in native code both call this. A rejected
+    // Function is not tried again by automatic tier-up.
+    auto reject = [&](std::string msg) {
+        handle.mark_tier2_rejected();
+        return CodeInstallResult{false, nullptr, std::move(msg), 0};
+    };
+
+    std::shared_ptr<codegen::JitExecutionEngine> jit;
+    try {
     // 1. Run full Tier-2 optimization passes
     if (std::string errors; !run_tier2_optimization_pipeline(*module, table_->tiering().type_feedback(), errors)) {
-        return {false, nullptr, "Tier-2 optimization pipeline failed or invalidated module: " + errors, 0};
+        return reject("Tier-2 optimization pipeline failed or invalidated module: " + errors);
     }
 
     // Every guard of the optimized code must have somewhere to deoptimize
     // to in the function the lower tiers run.
     {
         std::string why;
-        if (!deopt_targets_valid(*target_fn, handle.mir_function(), why)) {
-            return {false, nullptr, "Tier-2 code for '" + std::string(fn_name) + "' cannot deoptimize: " + why, 0};
+        if (!deopt_targets_valid(*target_fn, bound, why)) {
+            return reject("Tier-2 code for '" + std::string(fn_name) + "' cannot deoptimize: " + why);
         }
     }
 
     // 2. Machine code generation and relocation
-    auto jit = std::make_shared<codegen::JitExecutionEngine>(target_);
+    jit = std::make_shared<codegen::JitExecutionEngine>(target_);
 
     // Register essential GC and runtime bridge symbols
     jit->register_external_symbol("brass_gc_safepoint", reinterpret_cast<void*>(&brass_gc_safepoint));
@@ -749,7 +795,10 @@ CodeInstallResult CodeInstaller::install_tier2(
 
     // Compile and link in executable memory
     if (!jit->compile_and_load(*module)) {
-        return {false, nullptr, "JIT compilation or relocation failed", 0};
+        return reject("JIT compilation or relocation failed");
+    }
+    } catch (const std::exception& e) {
+        return reject("Tier-2 compilation of '" + std::string(fn_name) + "' failed: " + e.what());
     }
 
     // The stack maps belong to the program: its pipeline drops them when
@@ -778,7 +827,7 @@ CodeInstallResult CodeInstaller::install_tier2(
     // guards were validated against it), even after the handle is rebound
     // to another one; once that Function's module is destroyed the deopt is
     // a fatal error.
-    auto register_resumer = [table](FunctionHandle& h, void* entry) {
+    auto register_resumer = [table](FunctionHandle& h, void* entry, const Function* compiled_from_fn) {
         FunctionHandle* hp = &h;
         register_deopt_resumer(entry, [hp, table, entry](const DeoptFrame& frame) -> uint64_t {
             const Function* compiled_from = hp->deopt_function(entry);
@@ -791,7 +840,7 @@ CodeInstallResult CodeInstaller::install_tier2(
             }
             return table->pipeline().resume_after_deopt(*hp, frame, *table, *compiled_from);
         });
-        h.add_deopt_entry(entry, h.mir_function());
+        h.add_deopt_entry(entry, compiled_from_fn);
     };
     // A func_addr in this code yields the engine's own copy of a module
     // function: Tier 0 maps it back to the function by name.
@@ -799,10 +848,18 @@ CodeInstallResult CodeInstaller::install_tier2(
         if (!fn || fn->block_count() == 0) continue;
         if (void* addr = jit->get_symbol_address(fn->name())) table_->register_code_address(addr, fn->name());
     }
-    register_resumer(handle, native_code_ptr);
-    handle.set_jit_engine(jit);
-    handle.set_native_entry(native_code_ptr);
-    handle.set_tier(TierLevel::Tier2_Optimized);
+    // The resumer is registered before the entry is published (a guard can
+    // fail on the first call). If the handle was rebound, detached or
+    // retired while this compiled, nothing is published: the code is
+    // unreachable and kept alive with the handle.
+    register_resumer(handle, native_code_ptr, bound);
+    if (!handle.publish_optimized(jit, native_code_ptr, bound, target_fn->return_type(), target_fn->param_types(),
+                                  /*require_no_entry=*/false)) {
+        return {false, nullptr,
+                "handle '" + std::string(handle.name()) + "' was rebound, detached or retired during Tier-2 compilation",
+                0};
+    }
+    table_->tiering().get_feedback(handle.name()).set_tier(TierLevel::Tier2_Optimized);
 
     // Also update any other functions in the module if their handles exist in the dispatch table
     for (const Function* fn : module->functions()) {
@@ -810,12 +867,12 @@ CodeInstallResult CodeInstaller::install_tier2(
         FunctionHandle* other_handle = table_->find(fn->name());
         if (other_handle && !other_handle->has_native_entry()) {
             void* other_ptr = jit->get_symbol_address(fn->name());
+            const Function* other_fn = other_handle->mir_function();
             std::string why;
-            if (other_ptr && deopt_targets_valid(*fn, other_handle->mir_function(), why)) {
-                register_resumer(*other_handle, other_ptr);
-                other_handle->set_jit_engine(jit);
-                other_handle->set_native_entry(other_ptr);
-                other_handle->set_tier(TierLevel::Tier2_Optimized);
+            if (other_ptr && deopt_targets_valid(*fn, other_fn, why)) {
+                register_resumer(*other_handle, other_ptr, other_fn);
+                other_handle->publish_optimized(jit, other_ptr, other_fn, fn->return_type(), fn->param_types(),
+                                                /*require_no_entry=*/true);
             }
         }
     }

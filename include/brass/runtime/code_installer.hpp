@@ -96,6 +96,23 @@ public:
     void set_jit_engine(std::shared_ptr<codegen::JitExecutionEngine> engine);
     std::shared_ptr<codegen::JitExecutionEngine> jit_engine() const;
 
+    // Atomically publishes tier-2 code at `entry`, owned by `engine`, that
+    // was compiled while the handle was bound to `compiled_from`: engine,
+    // signature, entry and tier change together under the handle's lock.
+    // Refused (returns false; `engine` is retired, not freed, since its
+    // deopt resumer is already registered) when the handle was rebound,
+    // detached or retired since, or, with `require_no_entry`, has native
+    // code. Code it replaces (tier-1 or older tier-2) is retired as
+    // set_jit_engine does: its callers may be bound to it.
+    bool publish_optimized(std::shared_ptr<codegen::JitExecutionEngine> engine, void* entry,
+                           const Function* compiled_from, Type ret, std::vector<Type> params,
+                           bool require_no_entry);
+    // Tier 2 rejected the handle's current Function (UnsupportedOperation,
+    // a failed pass, a guard with no deopt target): automatic tier-up does
+    // not try it again until the handle is bound to another Function.
+    void mark_tier2_rejected();
+    bool tier2_rejected() const;
+
     void set_baseline_function(std::shared_ptr<codegen::BaselineCompiledFunction> compiled);
     std::shared_ptr<codegen::BaselineCompiledFunction> baseline_function() const;
 
@@ -168,6 +185,9 @@ private:
     };
     std::vector<DeoptEntry> deopt_entries_;
     bool mir_detached_ = false;
+    bool retired_ = false;               // under engine_mutex_
+    bool tier2_rejected_ = false;        // under engine_mutex_
+    const Function* tier2_rejected_fn_ = nullptr; // under engine_mutex_
 
     std::shared_ptr<const Signature> sig_ = std::make_shared<const Signature>(); // under engine_mutex_
 };

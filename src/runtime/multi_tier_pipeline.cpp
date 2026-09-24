@@ -523,6 +523,39 @@ bool MultiTierPipeline::enqueue_tier2(
     return enqueued;
 }
 
+bool MultiTierPipeline::compile_tier2_now(std::string_view fn_name, FunctionHandle* handle) {
+    const Module* mod = tiering().active_module();
+    if (!mod) return false;
+    if (!handle) handle = table_->find(fn_name);
+    if (!handle || !BackgroundCompiler::tier2_candidate(*handle)) return false;
+    const std::string key(fn_name);
+    {
+        std::lock_guard<std::mutex> lock(compiling_mutex_);
+        if (!tier2_in_progress_.insert(key).second) return false;
+    }
+    struct Release {
+        MultiTierPipeline& p;
+        const std::string& key;
+        ~Release() {
+            std::lock_guard<std::mutex> lock(p.compiling_mutex_);
+            p.tier2_in_progress_.erase(key);
+        }
+    } release{*this, key};
+    // Called from the tier-1 invocation hook, inside native code: nothing
+    // may be thrown through it. install_tier2 reports compile errors as a
+    // result; anything else (a failed clone) rejects the function too.
+    CodeInstallResult res;
+    try {
+        CodeInstaller installer(*table_);
+        res = installer.install_tier2(*handle, *mod, fn_name);
+    } catch (const std::exception&) {
+        handle->mark_tier2_rejected();
+        return false;
+    }
+    if (res.success) stats_.tier2_compilations.fetch_add(1, std::memory_order_relaxed);
+    return res.success;
+}
+
 void MultiTierPipeline::on_invocation(std::string_view fn_name) {
     auto* handle = table_->find(fn_name);
     if (handle) {
@@ -549,6 +582,8 @@ void MultiTierPipeline::tier_invocation(TieringFeedback& fb, std::string_view fn
         if (count >= config_.invocation_tier2_threshold && !fb.is_bailout_set()) {
             if (config_.enable_background_compile || tiering().is_background_compile_enabled()) {
                 enqueue_tier2(fn_name, tiering().active_module(), handle);
+            } else {
+                compile_tier2_now(fn_name, handle);
             }
         }
     } else if (tier == TierLevel::Tier2_Optimized) {

@@ -142,9 +142,27 @@ bool BackgroundCompiler::enqueue(
     CompilePriority priority,
     TierLevel target_tier
 ) {
+    // The cheap refusals first: the invocation hook calls this on every
+    // call past the threshold until the code is replaced.
+    if (handle && !tier2_candidate(*handle)) return false;
+    if (is_queued_or_compiling(fn_name)) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stats_.tasks_deduplicated++;
+        return false;
+    }
     auto mod_copy = clone_module(module);
     if (!mod_copy) return false;
     return enqueue(fn_name, std::move(mod_copy), handle, priority, target_tier);
+}
+
+bool BackgroundCompiler::tier2_candidate(const FunctionHandle& handle) {
+    // Tier 0 without native code, or Tier 1 (whose baseline entry tier 2
+    // replaces). Tier-2 code, or native code installed some other way, is
+    // not recompiled, nor is a Function tier 2 already rejected.
+    const TierLevel t = handle.tier();
+    if (t == TierLevel::Tier2_Optimized) return false;
+    if (handle.has_native_entry() && t != TierLevel::Tier1_Baseline) return false;
+    return !handle.tier2_rejected();
 }
 
 bool BackgroundCompiler::enqueue(
@@ -180,10 +198,7 @@ bool BackgroundCompiler::enqueue(
         handle = installer_.dispatch_table().get_or_create(fn_name);
     }
 
-    // If native entry is already installed, no need to compile
-    if (handle->has_native_entry()) {
-        return false;
-    }
+    if (!tier2_candidate(*handle)) return false;
 
     active_names_.insert(key);
     statuses_[key] = CompileStatus::Pending;
@@ -274,11 +289,19 @@ void BackgroundCompiler::worker_loop(size_t /*worker_id*/) {
 
         // Compilation executes outside the mutex
         auto t0 = std::chrono::high_resolution_clock::now();
-        CodeInstallResult res = installer_.install_tier2(
-            *task.handle,
-            std::move(task.module_copy),
-            task.function_name
-        );
+        // install_tier2 reports compile errors as results; anything still
+        // thrown (bad_alloc, a bug) fails this task and leaves the function
+        // on its lower tier rather than terminating the process.
+        CodeInstallResult res;
+        try {
+            res = installer_.install_tier2(*task.handle, std::move(task.module_copy), task.function_name);
+        } catch (const std::exception& e) {
+            res = {false, nullptr, std::string("Tier-2 compilation threw: ") + e.what(), 0};
+            task.handle->mark_tier2_rejected();
+        } catch (...) {
+            res = {false, nullptr, "Tier-2 compilation threw a non-standard exception", 0};
+            task.handle->mark_tier2_rejected();
+        }
         auto t1 = std::chrono::high_resolution_clock::now();
         uint64_t dur_us = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count()

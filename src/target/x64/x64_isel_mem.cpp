@@ -31,6 +31,11 @@ bool X64ISel::can_fuse_load(const Instruction* load_inst, const Instruction* use
     }
     const Value* res = load_inst->result();
     if (!res) return false;
+    // A load moves exactly its type's bits (docs/semantics.md, "Narrow
+    // integers"). An i8 / i16 operation is encoded 32 or 64 bits wide, so a
+    // fused narrow load would read past the value; it is never fused, and
+    // gets a register through a movzx load that widen_narrow_operands uses.
+    if (res->type() == Type::i8() || res->type() == Type::i16()) return false;
     auto it = use_count_.find(res);
     if (it == use_count_.end() || it->second != 1) {
         return false;

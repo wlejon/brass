@@ -14,6 +14,8 @@ bool AArch64ISel::can_fuse_load(const Instruction* load_inst, const Instruction*
     }
     const Value* res = load_inst->result();
     if (!res) return false;
+    // As on x64: an i8 / i16 load is never fused into a wider operation.
+    if (res->type() == Type::i8() || res->type() == Type::i16()) return false;
     auto it = use_count_.find(res);
     if (it == use_count_.end() || it->second != 1) {
         return false;

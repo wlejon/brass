@@ -164,6 +164,12 @@ public:
         const Module* mod = nullptr,
         FunctionHandle* handle = nullptr
     );
+    // Tier 2 on the calling thread (tier-up with background compile off):
+    // compiles `fn_name` from the active module and installs it over its
+    // tier-1 code. False if it is not a tier-2 candidate, is being compiled
+    // already, or tier 2 rejected it (it then stays on its lower tier and
+    // is not tried again). Never throws.
+    bool compile_tier2_now(std::string_view fn_name, FunctionHandle* handle = nullptr);
 
     // Mutator notification on function invocation. The feedback overload
     // is the hot path (tier-1 code passes the pointer it was compiled
@@ -278,6 +284,7 @@ private:
     mutable std::mutex compiling_mutex_;
     std::unordered_set<std::string> in_progress_compilations_;
     std::unordered_set<std::string> baseline_rejected_; // under compiling_mutex_
+    std::unordered_set<std::string> tier2_in_progress_; // under compiling_mutex_
     // Native-to-Tier-0 bridges by function name (tier0_bridge.cpp); kept
     // for the pipeline's lifetime, since lazy stubs point into them.
     std::mutex bridges_mutex_;

@@ -127,6 +127,10 @@ public:
     CodeInstaller& installer() noexcept { return installer_; }
     const CodeInstaller& installer() const noexcept { return installer_; }
 
+    // Whether `handle` may be compiled to tier 2: it runs in Tier 0 without
+    // native code or in Tier 1, and tier 2 has not rejected its Function.
+    static bool tier2_candidate(const FunctionHandle& handle);
+
 private:
     void worker_loop(size_t worker_id);
 
