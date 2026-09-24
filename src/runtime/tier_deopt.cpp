@@ -7,8 +7,11 @@
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/vm/fast_interpreter.hpp>
 #include <brass/runtime/host_symbols.hpp>
+#include <brass/gc/native_frames.hpp>
+#include <brass/gc/runtime_gc.hpp>
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
 #include <string>
 
 namespace brass::runtime {
@@ -136,6 +139,17 @@ uint64_t MultiTierPipeline::resume_after_deopt(FunctionHandle& handle, const Deo
         deopt_fatal("guard " + std::to_string(frame.resume_id) + " of '" + fname +
                     "' has neither an exit stub nor a resume target");
     }
+    // Resume in the interpreter whose frames called into this native code,
+    // if it runs this program, as a native-to-Tier-0 call re-enters it
+    // (call_tier0_from_native): the continuation then allocates in its
+    // heap, and the gcrefs it holds are that GC's roots.
+    Interpreter* active = Interpreter::active_on_thread();
+    if (active && &active->dispatch_table() == &table) {
+        RuntimeValue result = active->resume_from_native(*fn, frame.resume_id, state);
+        return result.is_void() ? 0 : result.raw_bits();
+    }
+    // Otherwise (a host entered the native code) a fresh interpreter
+    // finishes the call in the thread's active GC (run_fresh_tier0).
     RuntimeValue result = stub ? run_fresh_tier0(table, stub, state)
                                : run_fresh_tier0(table, nullptr, state, fn, frame.resume_id);
     return result.is_void() ? 0 : result.raw_bits();
@@ -146,6 +160,17 @@ RuntimeValue MultiTierPipeline::run_fresh_tier0(FunctionDispatchTable& table, co
                                                 uint32_t resume_id) {
     const Function* owner = fn ? fn : resume_fn;
     Module* mod = owner ? owner->parent() : nullptr;
+    const std::string where(owner ? owner->name() : std::string_view("?"));
+    // The fresh interpreter's heap dies when it returns: a gcref result
+    // into it would dangle.
+    auto check_result = [&](RuntimeValue r, const MiniCheneyGC& private_heap) {
+        if (r.is_gcref() && private_heap.is_address_in_active_space(r.raw_bits())) {
+            deopt_fatal("'" + where + "' finished in a fresh Tier-0 interpreter and returned a gcref into its "
+                        "private heap; install an active GC on the thread (brass_set_active_gc) or enter the "
+                        "native code from the Tier-0 interpreter");
+        }
+        return r;
+    };
     if (config_.use_fast_interpreter()) {
         FastInterpreter interp;
         interp.set_dispatch_table(&table);
@@ -153,13 +178,25 @@ RuntimeValue MultiTierPipeline::run_fresh_tier0(FunctionDispatchTable& table, co
             std::lock_guard<std::mutex> lock(mutex_);
             setup_fast_interpreter(interp, *mod);
         }
-        return fn ? interp.run(*fn, args) : interp.resume(*resume_fn, resume_id, args);
+        return check_result(fn ? interp.run(*fn, args) : interp.resume(*resume_fn, resume_id, args), interp.gc());
     }
     // As execute() sets up the oracle interpreter.
     Interpreter interp;
     interp.set_dispatch_table(&table);
     install_host_symbols(interp);
-    return fn ? interp.run(*fn, args) : interp.resume(*resume_fn, resume_id, args);
+    // It allocates from the thread's active GC, whose objects the native
+    // code and its caller hold, and its frames are that GC's roots while it
+    // runs: a collection native code it calls triggers updates them.
+    MiniCheneyGC* shared = brass_get_active_gc();
+    std::optional<ThreadRootsScope> roots;
+    if (shared) {
+        interp.borrow_gc(shared);
+        roots.emplace([](void* ctx, std::vector<uintptr_t*>& out) {
+            static_cast<Interpreter*>(ctx)->collect_all_roots(out);
+        }, &interp);
+    }
+    RuntimeValue r = fn ? interp.run(*fn, args) : interp.resume(*resume_fn, resume_id, args);
+    return shared ? r : check_result(r, interp.gc());
 }
 
 } // namespace brass::runtime

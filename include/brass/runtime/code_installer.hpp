@@ -39,6 +39,18 @@ public:
 
     const Function* mir_function() const noexcept { return mir_function_; }
     void set_mir_function(const Function* fn) noexcept;
+    // Detaches the handle from its function, which is being destroyed
+    // (FunctionDispatchTable::forget_module). Its native code stays callable
+    // but no longer implements any live Function.
+    void detach_mir_function() noexcept;
+    bool mir_detached() const noexcept { return mir_detached_; }
+    // Binds the handle to `fn`, a different Function than the one its
+    // native code was compiled from: that code does not implement `fn`, so
+    // it is retired (kept alive, as invalidate_optimized does: native
+    // callers may be bound to it, and frames of it may be on some stack)
+    // and the handle drops back to Tier 0. Returns whether any code was
+    // retired.
+    bool rebind_mir_function(const Function* fn);
 
     // Atomic acquire/release native entry point swapping
     void* native_entry() const noexcept {
@@ -126,7 +138,10 @@ private:
     std::shared_ptr<codegen::JitExecutionEngine> jit_engine_;
     std::shared_ptr<codegen::BaselineCompiledFunction> baseline_function_;
     std::vector<std::shared_ptr<codegen::JitExecutionEngine>> retired_engines_;
+    // Baseline code of functions the handle was rebound away from.
+    std::vector<std::shared_ptr<codegen::BaselineCompiledFunction>> retired_baselines_;
     std::vector<void*> deopt_entries_;
+    bool mir_detached_ = false;
 
     Type return_type_ = Type::void_type();
     std::vector<Type> param_types_;

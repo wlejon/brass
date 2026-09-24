@@ -435,14 +435,14 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                 }
                 case Opcode::load: {
                     RuntimeValue base = frame.get_value(inst->operand(0));
-                    RuntimeValue res = gc_.read_memory(base.raw_bits(), inst->offset(), inst->type());
+                    RuntimeValue res = gc().read_memory(base.raw_bits(), inst->offset(), inst->type());
                     frame.set_value(inst->result(), res);
                     break;
                 }
                 case Opcode::store: {
                     RuntimeValue base = frame.get_value(inst->operand(0));
                     RuntimeValue val = frame.get_value(inst->operand(1));
-                    gc_.write_memory(base.raw_bits(), inst->offset(), inst->memory_type(), val);
+                    gc().write_memory(base.raw_bits(), inst->offset(), inst->memory_type(), val);
                     break;
                 }
                 case Opcode::load_indexed: {
@@ -450,7 +450,7 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                     RuntimeValue idx = frame.get_value(inst->operand(1));
                     int64_t idx_val = idx.is_i32() ? idx.as_i32() : idx.as_i64();
                     int32_t effective_offset = static_cast<int32_t>(idx_val * inst->scale()) + inst->offset();
-                    RuntimeValue res = gc_.read_memory(base.raw_bits(), effective_offset, inst->type());
+                    RuntimeValue res = gc().read_memory(base.raw_bits(), effective_offset, inst->type());
                     frame.set_value(inst->result(), res);
                     break;
                 }
@@ -460,7 +460,7 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                     RuntimeValue val = frame.get_value(inst->operand(2));
                     int64_t idx_val = idx.is_i32() ? idx.as_i32() : idx.as_i64();
                     int32_t effective_offset = static_cast<int32_t>(idx_val * inst->scale()) + inst->offset();
-                    gc_.write_memory(base.raw_bits(), effective_offset, inst->memory_type(), val);
+                    gc().write_memory(base.raw_bits(), effective_offset, inst->memory_type(), val);
                     break;
                 }
                 case Opcode::write_barrier: {
@@ -534,14 +534,14 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                 }
                 case Opcode::vload: {
                     RuntimeValue base = frame.get_value(inst->operand(0));
-                    RuntimeValue res = gc_.read_memory(base.raw_bits(), inst->offset(), inst->type());
+                    RuntimeValue res = gc().read_memory(base.raw_bits(), inst->offset(), inst->type());
                     frame.set_value(inst->result(), res);
                     break;
                 }
                 case Opcode::vstore: {
                     RuntimeValue base = frame.get_value(inst->operand(0));
                     RuntimeValue val = frame.get_value(inst->operand(1));
-                    gc_.write_memory(base.raw_bits(), inst->offset(), inst->memory_type(), val);
+                    gc().write_memory(base.raw_bits(), inst->offset(), inst->memory_type(), val);
                     break;
                 }
                 case Opcode::vbroadcast: {
@@ -664,8 +664,8 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                 }
 
                 case Opcode::safepoint: {
-                    if (gc_.stress_mode()) {
-                        gc_.collect();
+                    if (gc().stress_mode()) {
+                        gc().collect();
                     }
                     break;
                 }

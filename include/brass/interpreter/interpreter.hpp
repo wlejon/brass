@@ -81,9 +81,14 @@ public:
     void set_dispatch_table(runtime::FunctionDispatchTable* table) noexcept { dispatch_table_ = table; }
     runtime::FunctionDispatchTable& dispatch_table() const noexcept;
 
-    // Garbage Collector access
-    MiniCheneyGC& gc() noexcept { return gc_; }
-    const MiniCheneyGC& gc() const noexcept { return gc_; }
+    // Garbage Collector access: the heap this interpreter allocates from,
+    // its own unless it borrows one.
+    MiniCheneyGC& gc() noexcept { return borrowed_gc_ ? *borrowed_gc_ : gc_; }
+    const MiniCheneyGC& gc() const noexcept { return borrowed_gc_ ? *borrowed_gc_ : gc_; }
+    // Allocates from `heap` (null: its own) instead. The caller keeps this
+    // interpreter's frames among `heap`'s roots while it runs (its root
+    // provider only knows the heap owner's), e.g. with a ThreadRootsScope.
+    void borrow_gc(MiniCheneyGC* heap) noexcept { borrowed_gc_ = heap; }
 
     void set_generational_gc(GenerationalGC* gc) noexcept { gen_gc_ = gc; }
     GenerationalGC* generational_gc() noexcept { return gen_gc_; }
@@ -158,6 +163,13 @@ public:
     RuntimeValue call_from_native(const Function& fn, const std::vector<RuntimeValue>& args) {
         return execute_function(fn, args);
     }
+    // Finishes, on this thread's native stack, a call whose guard
+    // `resume_id` failed in native code that this interpreter's frames
+    // called (resume_after_guard, without a frame): the continuation's
+    // frames sit above them, so it allocates in this heap and its gcrefs
+    // are this GC's roots.
+    RuntimeValue resume_from_native(const Function& fn, uint32_t resume_id,
+                                    const std::vector<RuntimeValue>& state_values);
 
 private:
     struct ActiveScope {
@@ -174,6 +186,7 @@ private:
     const Module* module_ = nullptr;
     runtime::FunctionDispatchTable* dispatch_table_ = nullptr;
     MiniCheneyGC gc_;
+    MiniCheneyGC* borrowed_gc_ = nullptr;
     GenerationalGC* gen_gc_ = nullptr;
 
     InterpreterFrame* current_frame_ = nullptr;

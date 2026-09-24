@@ -136,6 +136,18 @@ void Interpreter::register_builtin_host_functions() {
     });
 }
 
+RuntimeValue Interpreter::resume_from_native(const Function& fn, uint32_t resume_id,
+                                             const std::vector<RuntimeValue>& state_values) {
+    // resume_after_guard points module_ at fn's module; the frames below
+    // keep running in theirs.
+    struct ModuleRestore {
+        const Module*& slot;
+        const Module* saved;
+        ~ModuleRestore() { slot = saved; }
+    } restore{module_, module_};
+    return resume_after_guard(fn, resume_id, state_values, nullptr);
+}
+
 void Interpreter::collect_all_roots(std::vector<uintptr_t*>& roots) {
     for (InterpreterFrame* f = current_frame_; f != nullptr; f = f->caller()) {
         f->collect_roots(roots);
@@ -146,7 +158,7 @@ uintptr_t Interpreter::allocate_gc(size_t size, uint64_t pointer_mask, uint32_t 
     if (host_heap()) return host_heap_allocate(size, pointer_mask, type_tag);
     std::vector<uintptr_t*> roots;
     collect_all_roots(roots);
-    return gc_.allocate(size, pointer_mask, type_tag, roots);
+    return gc().allocate(size, pointer_mask, type_tag, roots);
 }
 
 void Interpreter::register_external_function(std::string_view name, HostFn fn) {

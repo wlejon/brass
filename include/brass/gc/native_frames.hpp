@@ -46,7 +46,29 @@ private:
     friend void brass_append_native_frame_roots(std::vector<uintptr_t*>& roots);
 };
 
-// The gcref slots of every recorded run of native frames on this thread.
+// Records, for its lifetime, roots that every collection on this thread
+// must update although the collector's own root provider does not know
+// them: the frames of an interpreter that allocates from a heap it does not
+// own (a fresh Tier-0 interpreter finishing a deoptimization or a
+// native-to-Tier-0 call in the thread's active GC). Nests as
+// NativeFramesScope does.
+class ThreadRootsScope {
+public:
+    using Provider = void (*)(void* ctx, std::vector<uintptr_t*>& roots);
+    ThreadRootsScope(Provider provider, void* ctx) noexcept;
+    ~ThreadRootsScope();
+    ThreadRootsScope(const ThreadRootsScope&) = delete;
+    ThreadRootsScope& operator=(const ThreadRootsScope&) = delete;
+
+private:
+    Provider provider_;
+    void* ctx_;
+    ThreadRootsScope* prev_;
+    friend void brass_append_native_frame_roots(std::vector<uintptr_t*>& roots);
+};
+
+// The gcref slots of every recorded run of native frames on this thread,
+// and the roots of every ThreadRootsScope.
 void brass_append_native_frame_roots(std::vector<uintptr_t*>& roots);
 
 } // namespace brass

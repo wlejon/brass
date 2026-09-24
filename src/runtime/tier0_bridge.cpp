@@ -134,7 +134,8 @@ uint64_t MultiTierPipeline::call_tier0_from_native(std::string_view name, const 
     // Re-enter the interpreter whose code called into native code on this
     // thread, if it runs this program: the callee then shares its heap and
     // state as a Tier-0 call would. Otherwise (a host called native code
-    // directly, or Tier 0 is the fast interpreter) a fresh one runs it.
+    // directly, or Tier 0 is the fast interpreter) a fresh one runs it,
+    // allocating from the thread's active GC (run_fresh_tier0).
     // Either way an exception it throws (a MIR throw, or a Tier-0 error)
     // propagates as a C++ exception: baseline frames carry unwind data, so
     // it unwinds through the bridge and its native callers to the Tier-0

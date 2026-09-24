@@ -26,6 +26,7 @@ namespace brass {
 namespace {
 
 thread_local NativeFramesScope* t_native_frames = nullptr;
+thread_local ThreadRootsScope* t_thread_roots = nullptr;
 
 #if defined(_WIN32) && defined(_M_X64)
 // One frame up from `ctx`, by the function's unwind data (a leaf function
@@ -84,7 +85,24 @@ NativeFramesScope::~NativeFramesScope() {
     t_native_frames = prev_;
 }
 
+ThreadRootsScope::ThreadRootsScope(Provider provider, void* ctx) noexcept
+    : provider_(provider), ctx_(ctx), prev_(t_thread_roots) {
+    t_thread_roots = this;
+}
+
+ThreadRootsScope::~ThreadRootsScope() {
+    if (t_thread_roots != this) {
+        std::fprintf(stderr, "brass: fatal: thread root scopes destroyed out of order\n");
+        std::fflush(stderr);
+        std::abort();
+    }
+    t_thread_roots = prev_;
+}
+
 void brass_append_native_frame_roots(std::vector<uintptr_t*>& roots) {
+    for (const ThreadRootsScope* s = t_thread_roots; s != nullptr; s = s->prev_) {
+        if (s->provider_) s->provider_(s->ctx_, roots);
+    }
     if (!t_native_frames) return;
     // The code registry describes every frame of code brass loaded; the
     // thread's installed maps add code registered elsewhere.

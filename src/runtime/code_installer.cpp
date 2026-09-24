@@ -74,6 +74,30 @@ void FunctionHandle::set_mir_function(const Function* fn) noexcept {
     }
 }
 
+void FunctionHandle::detach_mir_function() noexcept {
+    set_mir_function(nullptr);
+    mir_detached_ = true;
+}
+
+bool FunctionHandle::rebind_mir_function(const Function* fn) {
+    std::lock_guard<std::mutex> lock(engine_mutex_);
+    const bool had_code = native_entry() != nullptr || jit_engine_ || baseline_function_;
+    // Unpublish first: an interpreter matching `fn` must not reach the old
+    // code between the two stores.
+    set_native_entry(nullptr);
+    set_tier(TierLevel::Tier0_Interpreter);
+    // A deopt of the old tier-2 code would resume in `fn`'s guards.
+    for (void* entry : deopt_entries_) unregister_deopt_resumer(entry);
+    deopt_entries_.clear();
+    if (jit_engine_) retired_engines_.push_back(std::move(jit_engine_));
+    jit_engine_.reset();
+    if (baseline_function_) retired_baselines_.push_back(std::move(baseline_function_));
+    baseline_function_.reset();
+    set_mir_function(fn);
+    mir_detached_ = false;
+    return had_code;
+}
+
 void FunctionHandle::set_signature(Type ret, std::vector<Type> params) {
     return_type_ = ret;
     param_types_ = std::move(params);
@@ -449,7 +473,7 @@ void FunctionDispatchTable::forget_module(const Module& mod) {
     bool changed = false;
     for (auto& [_, handle] : handles_) {
         if (handle && dying.count(handle->mir_function()) != 0) {
-            handle->set_mir_function(nullptr);
+            handle->detach_mir_function();
             changed = true;
         }
     }
@@ -495,19 +519,41 @@ void forget_module(const Module& mod) noexcept {
 
 FunctionHandle* FunctionDispatchTable::get_or_create(std::string_view name, const Function* fn) {
     std::string key(name);
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = handles_.find(key);
-    if (it != handles_.end()) {
-        if (fn && it->second->mir_function() != fn) {
-            it->second->set_mir_function(fn);
+    FunctionHandle* ptr = nullptr;
+    bool retired_code = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = handles_.find(key);
+        if (it != handles_.end()) {
+            FunctionHandle& h = *it->second;
+            if (fn && h.mir_function() != fn) {
+                // A handle is keyed by name, so another function of that
+                // name (a second module, or a module that replaced a
+                // destroyed one) takes it over. Code compiled from the
+                // function it was bound to is not this one's: retire it.
+                // A handle never bound (a host installed code by name
+                // first) keeps its code.
+                if (h.mir_function() || h.mir_detached()) {
+                    retired_code = h.rebind_mir_function(fn);
+                } else {
+                    h.set_mir_function(fn);
+                }
+                bump_registry_generation();
+            }
+            ptr = &h;
+        } else {
+            auto handle = std::make_unique<FunctionHandle>(name, fn);
+            ptr = handle.get();
+            handles_[key] = std::move(handle);
             bump_registry_generation();
         }
-        return it->second.get();
     }
-    auto handle = std::make_unique<FunctionHandle>(name, fn);
-    auto* ptr = handle.get();
-    handles_[key] = std::move(handle);
-    bump_registry_generation();
+    // The lazy stub, the program's pointer to the function, still jumps to
+    // the retired code: re-arm it so it compiles `fn` on its next call.
+    if (retired_code) {
+        const auto& lazy = pipeline().baseline_compiler().lazy_symbols();
+        if (lazy && lazy->resolved_target(name)) lazy->define(name, nullptr);
+    }
     return ptr;
 }
 
