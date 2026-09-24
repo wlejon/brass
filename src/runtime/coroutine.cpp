@@ -2,9 +2,11 @@
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/gc/generational_gc.hpp>
 #include <brass/gc/host_heap.hpp>
+#include <brass/gc/native_frames.hpp>
 #include <brass/embedding/host_gc.hpp>
 #include <brass/embedding/nanbox.hpp>
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <unordered_set>
@@ -131,10 +133,21 @@ namespace {
 // The coroutine frame, from the thread's heap. A collection this allocation
 // triggers must update the gcref slots of the generated frames from
 // (caller_fp, caller_ip) upward, as brass_gc_alloc's does: the caller holds
-// gcrefs across brass_coro_create. Both 0, or a caller no stack maps
-// describe (an interpreter, C++), has no generated frame to report; the
-// heap's other roots (interpreter scopes and providers, native frames under
-// re-entered Tier-0 code, suspended coroutines) are gathered as always.
+// gcrefs across brass_coro_create. Both 0 (an interpreter, whose roots reach
+// the heap through its scope and provider) has no generated frame to report;
+// the heap's other roots (interpreter scopes and providers, native frames
+// under re-entered Tier-0 code, suspended coroutines) are gathered as always.
+// A caller frame that no stack maps describe cannot have its gcrefs found:
+// a collection there is fatal, as it is for brass_gc_alloc.
+[[noreturn]] void coro_fatal_no_maps() {
+    std::fprintf(stderr, "brass: fatal: brass_coro_create needs a collection but no stack maps are "
+                         "active and the calling code has none registered, so live gcrefs in native "
+                         "frames cannot be found; call brass_set_active_stack_maps with the running "
+                         "code's maps\n");
+    std::fflush(stderr);
+    std::abort();
+}
+
 uintptr_t allocate_coro_frame(size_t total_size, uint64_t frame_mask,
                               uintptr_t caller_fp, uintptr_t caller_ip) {
     if (brass::host_heap() != nullptr) {
@@ -144,10 +157,11 @@ uintptr_t allocate_coro_frame(size_t total_size, uint64_t frame_mask,
         return brass::host_heap_allocate(total_size, frame_mask, TYPE_TAG_CORO_FRAME,
                                          caller_fp, caller_ip);
     }
-    const ModuleStackMap* maps = (caller_fp != 0 && caller_ip != 0)
-        ? brass::brass_stack_maps_for_caller(caller_ip) : nullptr;
+    const bool has_caller = caller_fp != 0 && caller_ip != 0;
+    const ModuleStackMap* maps = has_caller ? brass::brass_stack_maps_for_caller(caller_ip) : nullptr;
     if (GenerationalGC* gen_gc = brass::brass_get_active_generational_gc()) {
-        if (maps && !gen_gc->can_allocate_fast(total_size)) {
+        if (!gen_gc->can_allocate_fast(total_size) && has_caller) {
+            if (!maps) coro_fatal_no_maps();
             return brass::brass_runtime_gc_alloc(gen_gc, *maps, total_size, frame_mask,
                                                  TYPE_TAG_CORO_FRAME, caller_fp, caller_ip);
         }
@@ -163,7 +177,8 @@ uintptr_t allocate_coro_frame(size_t total_size, uint64_t frame_mask,
         return host_gc->allocate(total_size, frame_mask, TYPE_TAG_CORO_FRAME);
     }
     if (MiniCheneyGC* gc = brass::brass_get_active_gc()) {
-        if (maps && !gc->can_allocate_fast(total_size)) {
+        if (!gc->can_allocate_fast(total_size) && has_caller) {
+            if (!maps) coro_fatal_no_maps();
             return brass::brass_runtime_gc_alloc(gc, *maps, total_size, frame_mask,
                                                  TYPE_TAG_CORO_FRAME, caller_fp, caller_ip);
         }
@@ -235,6 +250,19 @@ uint64_t brass_coro_resume(uintptr_t coro_frame, uint64_t input_val) {
     if (frame->fn_ptr != nullptr) {
         using CoroFn = uint64_t (*)(BrassCoroFrame*);
         auto fn = reinterpret_cast<CoroFn>(frame->fn_ptr);
+        // The body is generated code and may collect. The generated frames
+        // that called this function hold gcrefs across the call: record them
+        // (native_frames.hpp), since a walk from the body cannot rely on
+        // following frame pointers through this C++ frame everywhere. The
+        // frame itself may move; `frame` is a root so the writes below reach
+        // the live copy. (A C++ caller has no generated frame to record; its
+        // captured frame reports nothing.)
+        uintptr_t caller_rbp = 0, caller_ip = 0;
+        const bool have_caller = brass_capture_caller_frame(caller_rbp, caller_ip);
+        NativeFramesScope native_frames(have_caller ? caller_rbp : 0, have_caller ? caller_ip : 0);
+        ThreadRootsScope frame_root([](void* ctx, std::vector<uintptr_t*>& roots) {
+            roots.push_back(static_cast<uintptr_t*>(ctx));
+        }, &frame);
         uint64_t result = fn(frame);
         frame->yielded_val = result;
         if (frame->is_done != 0) {

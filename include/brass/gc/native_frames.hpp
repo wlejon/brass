@@ -14,10 +14,18 @@
 // (MiniCheneyGC, GenerationalGC) then walks each recorded run of native
 // frames with the code stack maps and reports their gcref slots as roots.
 //
-// A walk starts at the recorded frame and follows the frame-pointer chain
-// upward as a safepoint walk does; a slot reported twice (a run also
-// reached by a safepoint's own walk) is harmless, since a copying collector
-// leaves a root that already points at to-space unchanged.
+// A walk starts at the recorded frame and goes upward as a safepoint walk
+// does; a slot reported twice (a run also reached by a safepoint's own walk)
+// is harmless, since a copying collector leaves a root that already points
+// at to-space unchanged.
+//
+// Generated code that calls a C++ function which calls generated code back
+// (brass_coro_resume, or a host function registered as an external symbol)
+// needs no scope on Windows x64: the walk unwinds through compiled frames
+// with their unwind data. Elsewhere compiled code may omit frame pointers
+// and the walk cannot cross it, so such a C++ function must record its
+// generated caller with brass_capture_caller_frame and a NativeFramesScope
+// around the call back; brass does so for every such call it makes.
 
 #include <cstdint>
 #include <vector>

@@ -11,9 +11,31 @@
 #endif
 #include <windows.h>
 #endif
+#include "win_unwind.hpp"
 
 namespace brass {
 
+// The walk visits (rbp, ip) pairs: ip is the return address into a frame
+// and rbp is the frame pointer that frame held when it made the call.
+// Generated code always keeps a frame-pointer chain, so for a generated
+// frame the next pair is ([rbp], [rbp + 8]).
+//
+// Compiled (C++) code need not keep one: MSVC uses rbp as an ordinary
+// register or as a frame pointer at an arbitrary offset. When a generated
+// frame's return address leads into compiled code (a generated frame called
+// a C++ function that called generated code back: brass_coro_resume, a host
+// function), [rbp] and [rbp + 8] say nothing about the frames above. On
+// Windows x64 the walk then unwinds through the compiled frames with their
+// unwind data until it returns to generated code, and resumes the chain
+// there; a compiled frame's slots are never reported.
+//
+// Elsewhere, compiled frames may omit the frame pointer, and nothing
+// describes them to the walk: it follows [rbp] regardless, which is right
+// only for code built with frame pointers. Every transition brass makes from
+// generated code through C++ back into generated or interpreted code records
+// the generated caller with a NativeFramesScope, which starts a walk of its
+// own at that frame; a host function that calls generated or interpreted
+// code from generated code must do the same (native_frames.hpp).
 size_t brass_stack_walk(
     uintptr_t top_rbp,
     uintptr_t top_return_ip,
@@ -24,8 +46,12 @@ size_t brass_stack_walk(
     size_t frame_count = 0;
     uintptr_t cur_rbp = top_rbp;
     uintptr_t cur_return_ip = top_return_ip;
+    // The frame pointer of the generated frame whose [rbp + 8] held
+    // cur_return_ip; 0 for the top pair, whose stack position is unknown.
+    uintptr_t callee_rbp = 0;
 
     constexpr size_t MAX_FRAMES = 1024;
+    constexpr size_t MAX_STEPS = 64 * 1024;
 
     const auto registered = code_stack_map_snapshot();
 
@@ -39,22 +65,61 @@ size_t brass_stack_walk(
     }
 #endif
 
-    while (cur_rbp != 0 && cur_return_ip != 0 && frame_count < MAX_FRAMES) {
+    // The registry holds the maps of all code brass loaded; the given maps
+    // add code registered elsewhere (an embedder's own images).
+    auto find_map = [&](uintptr_t ip) -> const FunctionStackMap* {
+        const FunctionStackMap* m = find_code_stack_map(registered.get(), ip);
+        if (m == nullptr && !stack_maps.indexed_by_code_registry()) {
+            m = stack_maps.find_function_by_ip(ip);
+        }
+        return m;
+    };
+
+    size_t steps = 0;
+    while (cur_return_ip != 0 && frame_count < MAX_FRAMES && steps++ < MAX_STEPS) {
+        const FunctionStackMap* fn_map = find_map(cur_return_ip);
+
+#if defined(_WIN32) && defined(_M_X64)
+        if (fn_map == nullptr && detail::win64_ip_in_image(cur_return_ip)) {
+            // A compiled frame: cur_rbp is only the value its rbp register
+            // held. Its stack pointer at the call is just above the return
+            // address, which sits at callee_rbp + 8.
+            if (callee_rbp == 0) {
+                break;  // the walk started in compiled code: no stack position
+            }
+            CONTEXT ctx{};
+            ctx.Rip = cur_return_ip;
+            ctx.Rsp = callee_rbp + 16;
+            ctx.Rbp = cur_rbp;
+            bool reached_generated = false;
+            while (steps++ < MAX_STEPS) {
+                const DWORD64 prev_rsp = ctx.Rsp;
+                if (!detail::win64_unwind_one(ctx)) break;  // base of the stack
+                if (ctx.Rsp <= prev_rsp || ctx.Rsp < stack_low || ctx.Rsp > stack_high) break;
+                if (find_map(ctx.Rip) != nullptr || !detail::win64_ip_in_image(ctx.Rip)) {
+                    reached_generated = true;
+                    break;
+                }
+            }
+            if (!reached_generated) break;
+            // The generated frame's rbp lies at or above its stack pointer.
+            if (ctx.Rbp < ctx.Rsp) break;
+            cur_rbp = static_cast<uintptr_t>(ctx.Rbp);
+            cur_return_ip = static_cast<uintptr_t>(ctx.Rip);
+            callee_rbp = 0;
+            continue;
+        }
+#endif
+
+        if (cur_rbp == 0 || (cur_rbp % 8) != 0) {
+            break;
+        }
 #if defined(_WIN32)
         if (cur_rbp < stack_low || cur_rbp + 16 > stack_high) {
             break;
         }
 #endif
-        if ((cur_rbp % 8) != 0) {
-            break;
-        }
 
-        // The registry holds the maps of all code brass loaded; the given maps
-        // add code registered elsewhere (an embedder's own images).
-        const FunctionStackMap* fn_map = find_code_stack_map(registered.get(), cur_return_ip);
-        if (fn_map == nullptr && !stack_maps.indexed_by_code_registry()) {
-            fn_map = stack_maps.find_function_by_ip(cur_return_ip);
-        }
         if (fn_map != nullptr) {
             const StackMapRecord* rec = fn_map->find_record_by_ip(cur_return_ip);
             if (rec != nullptr) {
@@ -69,24 +134,28 @@ size_t brass_stack_walk(
             }
         }
 
-#if defined(_WIN32)
-        if (cur_rbp + sizeof(uintptr_t) * 2 > stack_high) {
-            break;
-        }
-#endif
-
         uintptr_t next_rbp = *reinterpret_cast<const uintptr_t*>(cur_rbp);
         uintptr_t next_return_ip = *reinterpret_cast<const uintptr_t*>(cur_rbp + 8);
 
-        if (next_rbp <= cur_rbp || (next_rbp % 8) != 0) {
-            break;
-        }
-#if defined(_WIN32)
-        if (next_rbp < stack_low || next_rbp + 16 > stack_high) {
-            break;
-        }
+#if defined(_WIN32) && defined(_M_X64)
+        // A compiled caller's rbp is any value; the unwind above checks it.
+        const bool next_checked_by_unwind =
+            find_map(next_return_ip) == nullptr && detail::win64_ip_in_image(next_return_ip);
+#else
+        const bool next_checked_by_unwind = false;
 #endif
+        if (!next_checked_by_unwind) {
+            if (next_rbp <= cur_rbp || (next_rbp % 8) != 0) {
+                break;
+            }
+#if defined(_WIN32)
+            if (next_rbp < stack_low || next_rbp + 16 > stack_high) {
+                break;
+            }
+#endif
+        }
 
+        callee_rbp = cur_rbp;
         cur_rbp = next_rbp;
         cur_return_ip = next_return_ip;
     }

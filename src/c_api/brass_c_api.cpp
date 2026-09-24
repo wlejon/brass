@@ -177,6 +177,8 @@ void brass_module_add_external_symbol(BrassModule mod, const char* name) {
         mod->mod->add_external_symbol(name);
     } catch (const std::exception& e) {
         set_ctx_exception(mod->ctx, "brass_module_add_external_symbol", e);
+    } catch (...) {
+        set_ctx_error(mod->ctx, "Unknown exception in brass_module_add_external_symbol");
     }
 }
 
@@ -240,12 +242,17 @@ BrassStatus brass_module_print_mir(BrassModule mod, char** out_str) {
     } catch (const std::exception& e) {
         set_ctx_exception(mod->ctx, "brass_module_print_mir", e);
         return BRASS_ERR_GENERIC;
+    } catch (...) {
+        set_ctx_error(mod->ctx, "Unknown exception in brass_module_print_mir");
+        return BRASS_ERR_GENERIC;
     }
 }
 
 /* Function & CFG */
 BrassFunction brass_function_create(BrassModule mod, const char* name, BrassType ret_type, const BrassType* param_types, size_t param_count) {
-    if (!mod || !mod->mod || !name) return nullptr;
+    // A module made without a context has nothing to own the handle: fail
+    // before the function is added to the module.
+    if (!mod || !mod->mod || !mod->ctx || !name) return nullptr;
     try {
         std::vector<Type> params;
         params.reserve(param_count);
@@ -255,9 +262,12 @@ BrassFunction brass_function_create(BrassModule mod, const char* name, BrassType
 
         Type rt = ret_type ? ret_type->type : Type::void_type();
         Function* fn = mod->mod->create_function(name, rt, params);
-        return mod->ctx ? mod->ctx->wrap_function(fn, mod->mod.get()) : nullptr;
+        return mod->ctx->wrap_function(fn, mod->mod.get());
     } catch (const std::exception& e) {
         set_ctx_exception(mod->ctx, "brass_function_create", e);
+        return nullptr;
+    } catch (...) {
+        set_ctx_error(mod->ctx, "Unknown exception in brass_function_create");
         return nullptr;
     }
 }

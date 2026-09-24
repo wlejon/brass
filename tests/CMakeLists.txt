@@ -113,6 +113,7 @@ add_executable(brass_unit_tests
     unit/test_host_heap.cpp
     unit/test_heap_roots_regressions.cpp
     unit/test_gc_sweep19_regressions.cpp
+    unit/test_gc_sweep20_regressions.cpp
     unit/test_exceptions_mir.cpp
     unit/test_unwind_tables.cpp
     unit/test_exception_dispatch.cpp

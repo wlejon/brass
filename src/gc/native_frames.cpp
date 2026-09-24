@@ -14,6 +14,7 @@
 #endif
 #include <windows.h>
 #endif
+#include "win_unwind.hpp"
 
 #if defined(_MSC_VER)
 #define BRASS_NATIVE_FRAMES_NOINLINE __declspec(noinline)
@@ -29,21 +30,7 @@ thread_local NativeFramesScope* t_native_frames = nullptr;
 thread_local ThreadRootsScope* t_thread_roots = nullptr;
 
 #if defined(_WIN32) && defined(_M_X64)
-// One frame up from `ctx`, by the function's unwind data (a leaf function
-// has none: its return address is at the stack pointer).
-bool unwind_one(CONTEXT& ctx) noexcept {
-    DWORD64 image_base = 0;
-    PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(ctx.Rip, &image_base, nullptr);
-    if (!fe) {
-        ctx.Rip = *reinterpret_cast<const DWORD64*>(ctx.Rsp);
-        ctx.Rsp += 8;
-    } else {
-        void* handler_data = nullptr;
-        DWORD64 establisher = 0;
-        RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, ctx.Rip, fe, &ctx, &handler_data, &establisher, nullptr);
-    }
-    return ctx.Rip != 0;
-}
+using detail::win64_unwind_one;
 #endif
 
 } // namespace
@@ -57,7 +44,7 @@ BRASS_NATIVE_FRAMES_NOINLINE bool brass_capture_caller_frame(uintptr_t& rbp, uin
     // as each function saved it, whatever MSVC code used it for since.
     CONTEXT ctx;
     RtlCaptureContext(&ctx);
-    if (!unwind_one(ctx) || !unwind_one(ctx)) return false;
+    if (!win64_unwind_one(ctx) || !win64_unwind_one(ctx)) return false;
     rbp = static_cast<uintptr_t>(ctx.Rbp);
     ip = static_cast<uintptr_t>(ctx.Rip);
 #elif defined(__GNUC__) || defined(__clang__)
