@@ -33,8 +33,11 @@ Value* make_val(Function& fn, Arena& arena, Type type, ValueKind kind = ValueKin
     return arena.make<Value>(fn.next_value_id(), type, kind);
 }
 
+// Vector values move through the frame with vload/vstore, which every tier
+// lowers to a full-width unaligned access; scalars use load/store.
 Instruction* make_store(Arena& arena, Value* base, int32_t offset, Value* val) {
-    Instruction* inst = arena.make<Instruction>(Opcode::store, Type::void_type());
+    const Opcode op = val->type().is_vector() ? Opcode::vstore : Opcode::store;
+    Instruction* inst = arena.make<Instruction>(op, Type::void_type());
     inst->add_operand(base);
     inst->add_operand(val);
     inst->set_offset(offset);
@@ -44,7 +47,7 @@ Instruction* make_store(Arena& arena, Value* base, int32_t offset, Value* val) {
 
 // A load whose result is `res` (a fresh value when null).
 Instruction* make_load(Function& fn, Arena& arena, Type type, Value* base, int32_t offset, Value* res = nullptr) {
-    Instruction* inst = arena.make<Instruction>(Opcode::load, type);
+    Instruction* inst = arena.make<Instruction>(type.is_vector() ? Opcode::vload : Opcode::load, type);
     inst->add_operand(base);
     inst->set_offset(offset);
     inst->set_memory_type(type);
@@ -123,6 +126,30 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force, int64_t create
     }
 
     if (suspends.empty() && !force) return false;
+
+    // The yielded value, the resume argument and the return value travel
+    // through the frame header's 8-byte yield/resume fields.
+    for (const auto& sp : suspends) {
+        if (sp.yield_val && sp.yield_val->type().size_in_bytes() > 8) {
+            throw std::logic_error(fn_desc(fn) + "a coro_suspend yields a " +
+                                   std::to_string(sp.yield_val->type().size_in_bytes()) +
+                                   "-byte value; yielded values must fit the frame's 8-byte yield field");
+        }
+        if (sp.inst->result() && sp.inst->result()->type().size_in_bytes() > 8) {
+            throw std::logic_error(fn_desc(fn) + "a coro_suspend result is " +
+                                   std::to_string(sp.inst->result()->type().size_in_bytes()) +
+                                   " bytes; resume arguments must fit the frame's 8-byte resume field");
+        }
+    }
+    for (BasicBlock* bb : fn.blocks()) {
+        Instruction* term = bb->terminator();
+        if (term && term->opcode() == Opcode::ret && term->operand_count() > 0 && term->operand(0) &&
+            term->operand(0)->type().size_in_bytes() > 8) {
+            throw std::logic_error(fn_desc(fn) + "returns a " +
+                                   std::to_string(term->operand(0)->type().size_in_bytes()) +
+                                   "-byte value; a coroutine's return value must fit the frame's 8-byte yield field");
+        }
+    }
 
     if (options_.stats) {
         options_.stats->coroutines_transformed++;
@@ -235,10 +262,15 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force, int64_t create
     // 4. Slot allocation. Arguments keep their argument slots; every other
     // crossing value gets its own slot, gcrefs first so they stay within
     // the frame's precise pointer mask. Sorted by id for a stable layout.
+    // A value wider than 8 bytes spans consecutive slots (coro_slot_count).
     std::unordered_map<Value*, uint32_t> slot_map;
     std::vector<Value*> spilled;
+    std::vector<uint32_t> arg_slot(arg_count);
+    uint32_t arg_slot_end = 0;
     for (uint32_t i = 0; i < arg_count; ++i) {
-        if (crossing.count(orig_params[i + 1])) slot_map[orig_params[i + 1]] = i;
+        arg_slot[i] = arg_slot_end;
+        arg_slot_end += coro_slot_count(orig_params[i + 1]->type());
+        if (crossing.count(orig_params[i + 1])) slot_map[orig_params[i + 1]] = arg_slot[i];
     }
     for (Value* v : crossing) {
         if (!slot_map.count(v)) spilled.push_back(v);
@@ -248,9 +280,10 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force, int64_t create
         if (ga != gb) return ga;
         return a->id() < b->id();
     });
-    uint32_t next_slot = std::max(options_.first_slot_index, arg_count);
+    uint32_t next_slot = std::max(options_.first_slot_index, arg_slot_end);
     for (Value* v : spilled) {
-        slot_map[v] = next_slot++;
+        slot_map[v] = next_slot;
+        next_slot += coro_slot_count(v->type());
         if (options_.stats) options_.stats->variables_spilled++;
     }
     for (const auto& [v, slot] : slot_map) {
@@ -278,7 +311,7 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force, int64_t create
     BranchTarget def_target(orig_entry);
     def_target.args.push_back(global_frame_param);
     for (uint32_t i = 0; i < arg_count; ++i) {
-        Instruction* ld_arg = make_load(fn, arena, orig_params[i + 1]->type(), global_frame_param, slot_offset(i));
+        Instruction* ld_arg = make_load(fn, arena, orig_params[i + 1]->type(), global_frame_param, slot_offset(arg_slot[i]));
         entry_bb->append_instruction(ld_arg);
         def_target.args.push_back(ld_arg->result());
     }
@@ -451,16 +484,28 @@ bool is_lowered_coro_body(const Function& fn) {
     return true;
 }
 
+uint32_t coro_slot_count(Type t) {
+    const size_t bytes = t.size_in_bytes();
+    return bytes <= 8 ? 1U : static_cast<uint32_t>((bytes + 7) / 8);
+}
+
+uint32_t coro_create_slot_count(const Instruction& create) {
+    uint32_t n = 0;
+    for (size_t i = 0; i < create.operand_count(); ++i) n += coro_slot_count(create.operand(i)->type());
+    return n;
+}
+
 CoroFrameLayout compute_coro_frame_layout(const Function& fn) {
     CoroFrameLayout layout;
     const BasicBlock* entry = fn.entry_block();
     const Value* frame = (entry && entry->param_count() > 0) ? entry->param(0) : nullptr;
     for (const BasicBlock* bb : fn.blocks()) {
         for (const Instruction* inst : *bb) {
-            if (inst->opcode() != Opcode::store && inst->opcode() != Opcode::load) continue;
+            const Opcode op = inst->opcode();
+            if (op != Opcode::store && op != Opcode::load && op != Opcode::vstore && op != Opcode::vload) continue;
             if (!frame || inst->operand(0) != frame || inst->offset() < runtime::CORO_OFFSET_SLOTS) continue;
             uint32_t slot = static_cast<uint32_t>((inst->offset() - runtime::CORO_OFFSET_SLOTS) / 8);
-            layout.slot_count = std::max(layout.slot_count, slot + 1);
+            layout.slot_count = std::max(layout.slot_count, slot + coro_slot_count(inst->memory_type()));
             if (inst->memory_type().is_pointer_or_gcref()) {
                 if (slot > kMaxPointerSlot) {
                     throw std::logic_error("coroutine frame of @" + std::string(fn.name()) + ": gcref slot " +

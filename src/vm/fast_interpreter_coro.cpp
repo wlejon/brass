@@ -4,6 +4,24 @@
 
 namespace brass {
 
+namespace {
+
+// This path hands arguments over as 8-byte register words; a vector
+// argument does not fit one, so it is an error rather than a truncation.
+std::vector<uint64_t> coro_raw_args(const std::vector<RuntimeValue>& args) {
+    std::vector<uint64_t> raw_args;
+    raw_args.reserve(args.size());
+    for (const auto& a : args) {
+        if (a.is_vector()) {
+            throw InterpreterException("FastInterpreter coro_create: vector arguments are not supported");
+        }
+        raw_args.push_back(a.raw_bits());
+    }
+    return raw_args;
+}
+
+} // namespace
+
 uintptr_t FastInterpreter::coro_create(const BytecodeFunction* bfn, const std::vector<uint64_t>& args) {
     if (!bfn) return 0;
 
@@ -44,12 +62,7 @@ uintptr_t FastInterpreter::coro_create(const Function& fn, const std::vector<Run
         use_module(fn.parent());
     }
     const BytecodeFunction* bfn = get_or_compile(fn);
-    std::vector<uint64_t> raw_args;
-    raw_args.reserve(args.size());
-    for (const auto& a : args) {
-        raw_args.push_back(a.raw_bits());
-    }
-    return coro_create(bfn, raw_args);
+    return coro_create(bfn, coro_raw_args(args));
 }
 
 uintptr_t FastInterpreter::coro_create(const Module& mod, std::string_view callee, const std::vector<RuntimeValue>& args) {
@@ -75,13 +88,7 @@ uintptr_t FastInterpreter::coro_create(std::string_view callee, const std::vecto
     if (!bfn) {
         throw InterpreterException("coro_create: callee function not found: " + std::string(callee));
     }
-
-    std::vector<uint64_t> raw_args;
-    raw_args.reserve(args.size());
-    for (const auto& a : args) {
-        raw_args.push_back(a.raw_bits());
-    }
-    return coro_create(bfn, raw_args);
+    return coro_create(bfn, coro_raw_args(args));
 }
 
 void FastInterpreter::coro_suspend(FastFrame& frame, uint32_t dst_reg, uint32_t yield_reg, uint32_t resume_id) {

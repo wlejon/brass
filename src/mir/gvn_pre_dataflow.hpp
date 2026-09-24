@@ -13,7 +13,7 @@
 
 namespace brass {
 
-bool is_pre_commutative_op(Opcode op) noexcept;
+bool is_pre_commutative_op(Opcode op, Type type) noexcept;
 bool is_pre_candidate_op(const Instruction* inst) noexcept;
 
 struct PreExpression {

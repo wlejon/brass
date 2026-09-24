@@ -1,5 +1,6 @@
 #include "gvn_pre_dataflow.hpp"
 #include "int_fold.hpp"
+#include "gvn_table.hpp"
 #include <brass/mir/opcodes.hpp>
 #include <brass/mir/gc_refs.hpp>
 #include <algorithm>
@@ -7,24 +8,8 @@
 
 namespace brass {
 
-bool is_pre_commutative_op(Opcode op) noexcept {
-    switch (op) {
-        case Opcode::add:
-        case Opcode::mul:
-        case Opcode::and_:
-        case Opcode::or_:
-        case Opcode::xor_:
-        case Opcode::eq:
-        case Opcode::ne:
-        case Opcode::vadd:
-        case Opcode::vmul:
-        case Opcode::vand:
-        case Opcode::vor:
-        case Opcode::vxor:
-            return true;
-        default:
-            return false;
-    }
+bool is_pre_commutative_op(Opcode op, Type type) noexcept {
+    return is_commutative_op(op, type);
 }
 
 bool is_pre_candidate_op(const Instruction* inst) noexcept {
@@ -147,7 +132,7 @@ PreExpression PreExpression::from_instruction(
     // Canonicalize commutative operations. Operands of different types
     // (ptr + i64 offset) keep their order: the expression is rebuilt from
     // it when hoisted, and only the pointer may come first.
-    if (is_pre_commutative_op(expr.opcode) && expr.op0 && expr.op1 &&
+    if (is_pre_commutative_op(expr.opcode, expr.type) && expr.op0 && expr.op1 &&
         expr.op0->type() == expr.op1->type()) {
         if (expr.op0->id() > expr.op1->id()) {
             std::swap(expr.op0, expr.op1);

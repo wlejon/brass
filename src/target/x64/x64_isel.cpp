@@ -330,7 +330,12 @@ void X64ISel::analyze_function(const Function& mir_fn) {
                 ImmIntInfo imm0 = get_imm_int_info(op0);
                 ImmIntInfo imm1 = get_imm_int_info(op1);
 
-                bool is_comm = (inst->opcode() == Opcode::add || inst->opcode() == Opcode::mul ||
+                // Float add/mul keep src0 first (the lhs NaN wins), as
+                // lower_binary_alu does: only their rhs load may be fused.
+                const bool float_arith = inst->type().is_float() &&
+                                         (inst->opcode() == Opcode::add || inst->opcode() == Opcode::mul);
+                bool is_comm = !float_arith &&
+                               (inst->opcode() == Opcode::add || inst->opcode() == Opcode::mul ||
                                 inst->opcode() == Opcode::and_ || inst->opcode() == Opcode::or_ ||
                                 inst->opcode() == Opcode::xor_);
 

@@ -12,7 +12,9 @@
 namespace brass {
 
 bool is_pure_gvn_op(const Instruction* inst) noexcept;
-bool is_commutative_op(Opcode op) noexcept;
+// True when `op` producing `type` may have its two operands swapped: float
+// (and float-lane) add/mul may not, since the lhs NaN wins.
+bool is_commutative_op(Opcode op, Type type) noexcept;
 
 struct GvnExpression {
     Opcode opcode = Opcode::unreachable;

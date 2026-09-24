@@ -4,17 +4,22 @@
 
 namespace brass {
 
-bool is_commutative_op(Opcode op) noexcept {
+bool is_commutative_op(Opcode op, Type type) noexcept {
     switch (op) {
+        // Float add/mul are not commutative: when both operands are NaN the
+        // lhs NaN's payload wins (float_arith.hpp, docs/semantics.md).
         case Opcode::add:
         case Opcode::mul:
+        case Opcode::vadd:
+        case Opcode::vmul: {
+            const Type lane = type.is_vector() ? type.element_type() : type;
+            return !lane.is_float();
+        }
         case Opcode::and_:
         case Opcode::or_:
         case Opcode::xor_:
         case Opcode::eq:
         case Opcode::ne:
-        case Opcode::vadd:
-        case Opcode::vmul:
         case Opcode::vand:
         case Opcode::vor:
         case Opcode::vxor:
@@ -132,7 +137,7 @@ GvnExpression GvnExpression::from_instruction(const Instruction* inst) {
 
     // Canonicalize commutative expressions whose operands share a type; a
     // ptr + i64 offset keeps its order.
-    if (is_commutative_op(expr.opcode) && expr.op0 && expr.op1 &&
+    if (is_commutative_op(expr.opcode, expr.type) && expr.op0 && expr.op1 &&
         expr.op0->type() == expr.op1->type()) {
         if (expr.op0->id() > expr.op1->id()) {
             std::swap(expr.op0, expr.op1);

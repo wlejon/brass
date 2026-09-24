@@ -614,13 +614,24 @@ void X64ISel::lower_binary_alu(
             lir_bb.append_inst(std::move(alu_inst));
         };
 
-        bool is_comm = (inst.opcode() == Opcode::add || inst.opcode() == Opcode::mul || inst.opcode() == Opcode::xor_);
+        // addsd/mulsd return the destination (first) operand's NaN when both
+        // are NaN, which is the MIR lhs-NaN rule only while src0 stays
+        // first: float add/mul are not commutative here.
+        bool is_comm = (inst.opcode() == Opcode::xor_);
         if (op1_val && op1_val->is_instruction() && can_fuse_load(op1_val->defining_instruction(), &inst)) {
             emit_float_alu(src0, get_load_mem_operand(op1_val->defining_instruction()));
         } else if (is_comm && op0_val && op0_val->is_instruction() && can_fuse_load(op0_val->defining_instruction(), &inst)) {
             emit_float_alu(src1, get_load_mem_operand(op0_val->defining_instruction()));
         } else if (is_comm && dst == src1) {
             emit_float_alu(src1, LirOperand::vreg(src0, sz));
+        } else if (dst == src1 && dst != src0) {
+            // dst = src0 would clobber src1 before it is read.
+            VReg tmp = lir_fn_->allocate_vreg(RegClass::XMM, sz);
+            auto mov_tmp = std::make_unique<LirInst>(mov_op);
+            mov_tmp->add_def(LirOperand::vreg(tmp, sz));
+            mov_tmp->add_use(LirOperand::vreg(src1, sz));
+            lir_bb.append_inst(std::move(mov_tmp));
+            emit_float_alu(src0, LirOperand::vreg(tmp, sz));
         } else {
             emit_float_alu(src0, LirOperand::vreg(src1, sz));
         }

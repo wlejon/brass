@@ -3,6 +3,7 @@
 #include <brass/mir/function.hpp>
 #include <brass/mir/module.hpp>
 #include <algorithm>
+#include <cstring>
 
 namespace brass {
 
@@ -28,7 +29,7 @@ const Function& lowered_coro_target(std::string_view callee, const Module* mod) 
 RuntimeValue interp_coro_create(const Instruction& inst, InterpreterFrame& frame, const Module* mod) {
     const Function& target_fn = lowered_coro_target(inst.symbol(), mod);
     CoroFrameLayout layout = compute_coro_frame_layout(target_fn);
-    uint32_t slot_count = std::max(layout.slot_count, static_cast<uint32_t>(inst.operand_count()));
+    uint32_t slot_count = std::max(layout.slot_count, coro_create_slot_count(inst));
 
     // No generated frame: this interpreter's roots reach the heap through
     // its scope and provider.
@@ -42,9 +43,18 @@ RuntimeValue interp_coro_create(const Instruction& inst, InterpreterFrame& frame
     if (!frame_ptr) {
         throw InterpreterException("coro_create: frame allocation failed");
     }
-    // Argument i lives in frame slot i (the lowered body loads it from there).
+    // Arguments fill consecutive slots, a vector spanning coro_slot_count
+    // of them (the lowered body loads each from there).
+    uint32_t slot = 0;
     for (size_t i = 0; i < inst.operand_count(); ++i) {
-        frame_ptr->slots[i] = static_cast<uint64_t>(frame.get_value(inst.operand(i)).raw_bits());
+        const Type t = inst.operand(i)->type();
+        const RuntimeValue v = frame.get_value(inst.operand(i));
+        if (t.is_vector()) {
+            std::memcpy(&frame_ptr->slots[slot], v.vec_bytes(), t.size_in_bytes());
+        } else {
+            frame_ptr->slots[slot] = static_cast<uint64_t>(v.raw_bits());
+        }
+        slot += coro_slot_count(t);
     }
     return RuntimeValue::from_ptr(frame_addr);
 }

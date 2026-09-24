@@ -31,12 +31,24 @@ bool is_lowered_coro_body(const Function& fn);
 // The frame slots a lowered body loads/stores through its frame parameter.
 CoroFrameLayout compute_coro_frame_layout(const Function& fn);
 
+// Frame slots are 8 bytes; a value of type `t` occupies this many
+// consecutive ones (2 for a v128, 4 for a v256). Frame accesses of vector
+// slots are unaligned full-width loads/stores.
+uint32_t coro_slot_count(Type t);
+
+// Slots `coro_create`'s arguments fill: argument i starts at the sum of
+// coro_slot_count over arguments 0..i-1.
+uint32_t coro_create_slot_count(const Instruction& create);
+
 // Coroutine State Machine Transformation Pass
 // Transforms coroutine bodies (functions containing `coro_suspend`, and every
 // `coro_create` target in the module) into stackless resumable state machines
 // that take only the frame:
-// - `coro_create @f(a0, ..., an)` puts argument i in frame slot i; the body
-//   loads its original parameters from those slots on entry
+// - `coro_create @f(a0, ..., an)` puts its arguments in consecutive frame
+//   slots (coro_slot_count each); the body loads its original parameters
+//   from those slots on entry
+// - yielded, resume and return values must fit 8 bytes (std::logic_error
+//   otherwise; the verifier rejects wide coro_suspend/coro_resume values)
 // - Live SSA values across suspends are spilled to GC-tracked frame slots
 //   (after the argument slots)
 // - Resume blocks are created and entry dispatch switch is injected

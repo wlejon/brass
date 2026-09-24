@@ -143,9 +143,10 @@ struct ExprKeyHash {
     }
 };
 
-bool is_commutative(Opcode op) {
-    return op == Opcode::add || op == Opcode::mul || op == Opcode::and_ ||
-           op == Opcode::or_ || op == Opcode::xor_ || op == Opcode::eq || op == Opcode::ne;
+// Float add/mul keep their operand order: the lhs NaN wins.
+bool is_commutative(Opcode op, Type type) {
+    if (op == Opcode::add || op == Opcode::mul) return !type.is_float();
+    return op == Opcode::and_ || op == Opcode::or_ || op == Opcode::xor_ || op == Opcode::eq || op == Opcode::ne;
 }
 
 // Builds the CSE key of `inst`; nullopt when the key could not tell it apart
@@ -165,7 +166,7 @@ std::optional<ExprKey> expr_key(const Instruction* inst) {
     if (inst->operand_count() >= 1) key.op0 = inst->operand(0);
     if (inst->operand_count() >= 2) key.op1 = inst->operand(1);
     if (inst->operand_count() >= 3) key.op2 = inst->operand(2);
-    if (is_commutative(key.op) && std::less<const Value*>()(key.op1, key.op0)) std::swap(key.op0, key.op1);
+    if (is_commutative(key.op, key.type) &&std::less<const Value*>()(key.op1, key.op0)) std::swap(key.op0, key.op1);
     return key;
 }
 

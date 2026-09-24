@@ -34,7 +34,12 @@ bool verify_coro_instruction(
                     report_error(inst_prefix + "coro_suspend yielded operand is null.");
                 } else if (op->type().is_void()) {
                     report_error(inst_prefix + "coro_suspend yielded operand cannot be void.");
+                } else if (op->type().size_in_bytes() > 8) {
+                    report_error(inst_prefix + "coro_suspend yielded operand must fit the frame's 8-byte yield field.");
                 }
+            }
+            if (inst->result() && inst->result()->type().size_in_bytes() > 8) {
+                report_error(inst_prefix + "coro_suspend result must fit the frame's 8-byte resume field.");
             }
             return true;
         }
@@ -53,8 +58,13 @@ bool verify_coro_instruction(
                     const Value* op1 = inst->operand(1);
                     if (op1 && op1->type().is_void()) {
                         report_error(inst_prefix + "coro_resume input argument cannot be void.");
+                    } else if (op1 && op1->type().size_in_bytes() > 8) {
+                        report_error(inst_prefix + "coro_resume input argument must fit the frame's 8-byte resume field.");
                     }
                 }
+            }
+            if (inst->result() && inst->result()->type().size_in_bytes() > 8) {
+                report_error(inst_prefix + "coro_resume result must fit the frame's 8-byte yield field.");
             }
             return true;
         }

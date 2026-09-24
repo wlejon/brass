@@ -36,7 +36,7 @@ void X64ISel::lower_coro(const Instruction& inst, LirBlock& lir_bb) {
                 throw_unsupported("x64 isel (coro)", "coro_create without a result");
             }
             CoroFrameLayout layout = compute_coro_frame_layout(*callee_fn);
-            uint32_t slot_count = std::max(layout.slot_count, static_cast<uint32_t>(inst.operand_count()));
+            uint32_t slot_count = std::max(layout.slot_count, coro_create_slot_count(inst));
 
             auto mov_fn = std::make_unique<LirInst>(LirOpcode::Movabs);
             mov_fn->add_def(LirOperand::preg_gpr(arg0, 8), FixedConstraint::gpr(arg0));
@@ -69,19 +69,27 @@ void X64ISel::lower_coro(const Instruction& inst, LirBlock& lir_bb) {
             mov_res->add_use(LirOperand::preg_gpr(GPR::RAX, 8), FixedConstraint::gpr(GPR::RAX));
             lir_bb.append_inst(std::move(mov_res));
 
+            // Arguments fill consecutive slots; a vector spans
+            // coro_slot_count of them (unaligned full-width store).
+            uint32_t slot = 0;
             for (size_t i = 0; i < inst.operand_count(); ++i) {
                 VReg arg_v = get_vreg(inst.operand(i));
                 uint8_t sz = arg_v.size;
                 LirOpcode op;
                 if (arg_v.is_xmm()) {
-                    if (sz != 4 && sz != 8) throw_unsupported("x64 isel (coro)", "coro_create vector argument");
-                    op = (sz == 4) ? LirOpcode::Movss : LirOpcode::Movsd;
+                    if (sz == 16) op = LirOpcode::Movups;
+                    else if (sz == 32) op = LirOpcode::Vmovups;
+                    else if (sz == 4 || sz == 8) op = (sz == 4) ? LirOpcode::Movss : LirOpcode::Movsd;
+                    else throw_unsupported("x64 isel (coro)", "coro_create argument of " + std::to_string(sz) + " bytes");
                 } else {
                     if (sz != 4 && sz != 8) throw_unsupported("x64 isel (coro)", "coro_create argument narrower than 32 bits");
                     op = (sz == 4) ? LirOpcode::Mov32 : LirOpcode::Mov;
                 }
+                const uint32_t slots = coro_slot_count(inst.operand(i)->type());
+                if (slots * 8 < sz) throw_unsupported("x64 isel (coro)", "coro_create argument wider than its frame slots");
                 auto st = std::make_unique<LirInst>(op);
-                st->add_def(LirOperand::mem(dst, static_cast<int32_t>(runtime::CORO_OFFSET_SLOTS + i * 8), sz));
+                st->add_def(LirOperand::mem(dst, static_cast<int32_t>(runtime::CORO_OFFSET_SLOTS + slot * 8), sz));
+                slot += slots;
                 st->add_use(LirOperand::vreg(arg_v, sz));
                 st->mir_origin = &inst;
                 lir_bb.append_inst(std::move(st));
