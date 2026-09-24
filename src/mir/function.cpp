@@ -73,6 +73,21 @@ const Instruction* Function::find_guard(uint32_t resume_id) const noexcept {
     return nullptr;
 }
 
+uint32_t Function::next_guard_resume_id() const noexcept {
+    bool any = false;
+    uint32_t max_id = 0;
+    for (const auto* bb : blocks_) {
+        if (!bb) continue;
+        for (const auto* inst : *bb) {
+            if (inst && inst->opcode() == Opcode::guard) {
+                any = true;
+                if (inst->resume_id() > max_id) max_id = inst->resume_id();
+            }
+        }
+    }
+    return any ? max_id + 1 : 0;
+}
+
 const Function* Function::guard_exit_stub(const Instruction& guard) const noexcept {
     if (!parent_ || guard.symbol().empty()) return nullptr;
     return parent_->get_function(guard.symbol());

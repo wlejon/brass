@@ -67,6 +67,10 @@ public:
 
     // The first guard of this function with `resume_id`, or null.
     const Instruction* find_guard(uint32_t resume_id) const noexcept;
+    // The resume id a new guard of this function gets: one past the largest
+    // id of its guards, 0 when it has none. A resume id names one Tier-0
+    // guard; tier-2 deopt finds the guard to resume at by it.
+    uint32_t next_guard_resume_id() const noexcept;
     // A guard's exit stub: the function of this function's module named by
     // the guard's exit label, or null when the label names none (it is then
     // only a label). Called as stub(state values...); its result is this

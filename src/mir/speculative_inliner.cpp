@@ -70,6 +70,7 @@ bool devirtualize_monomorphic_call(
         for (size_t i = 1; i < call_inst->operand_count(); ++i) {
             guard_inst->add_state_value(call_inst->operand(i));
         }
+        guard_inst->set_resume_id(fn.next_guard_resume_id());
         cur_bb->insert_before(guard_inst, call_inst);
 
         // 4. Convert call_indirect to direct call

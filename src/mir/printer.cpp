@@ -57,6 +57,28 @@ std::string sym_ref(std::string_view name) {
     return bare ? "@" + std::string(name) : "@" + quote_mir_string(name);
 }
 
+// The resume id the parser gives `guard` when its text has no `id`: one past
+// the largest id of the guards printed before it in its function, 0 for the
+// first. A guard without a function prints its id unless it is 0.
+uint32_t implicit_guard_id(const Instruction& guard) {
+    const BasicBlock* own = guard.parent();
+    const Function* fn = own ? own->parent() : nullptr;
+    if (!fn) return 0;
+    bool any = false;
+    uint32_t max_id = 0;
+    for (const BasicBlock* bb : fn->blocks()) {
+        if (!bb) continue;
+        for (const Instruction* inst : *const_cast<BasicBlock*>(bb)) {
+            if (inst == &guard) return any ? max_id + 1 : 0;
+            if (inst && inst->opcode() == Opcode::guard) {
+                any = true;
+                if (inst->resume_id() > max_id) max_id = inst->resume_id();
+            }
+        }
+    }
+    return 0;
+}
+
 class FunctionPrinter {
 public:
     FunctionPrinter(const Function& fn, std::ostream& os) : fn_(fn), os_(os) {
@@ -383,6 +405,7 @@ public:
                     }
                     os_ << "]";
                 }
+                if (inst.resume_id() != implicit_guard_id(inst)) os_ << ", id " << inst.resume_id();
                 break;
 
             case Opcode::resume_point:

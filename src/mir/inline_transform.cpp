@@ -19,6 +19,17 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
     // Check parameter count
     if (call_inst->operand_count() != callee.param_count()) return result;
 
+    // A guard deopts the function it is in: its exit stub's result is that
+    // function's result and its resume id names that function's Tier-0
+    // guard. Copied into the caller it would finish the caller with the
+    // callee's exit, so callees with guards are not inlined.
+    for (const BasicBlock* bb : callee.blocks()) {
+        if (!bb) continue;
+        for (const Instruction* inst : *const_cast<BasicBlock*>(bb)) {
+            if (inst && inst->opcode() == Opcode::guard) return result;
+        }
+    }
+
     // At an invoke site every way the callee can raise must end at the
     // invoke's handler. Plain calls are rewritten into invokes below; a
     // throw, a resume, or any other kind of call would unwind straight past

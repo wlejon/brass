@@ -536,9 +536,14 @@ namespace brass::mir_parser {
                 std::string_view exit_stub = parse_symbol_name();
                 if (has_error_) return false;
 
+                // `guard COND, @EXIT [, [STATE...]] [, id N]`. Without `id` the
+                // guard gets the next free resume id of its function.
                 std::vector<Value*> state_map;
-                if (match(TokenKind::Comma)) {
-                    if (!expect(TokenKind::LBracket, "'['")) return false;
+                bool has_id = false;
+                uint32_t id = 0;
+                bool more = match(TokenKind::Comma);
+                if (more && peek().is(TokenKind::LBracket)) {
+                    advance();
                     while (!peek().is(TokenKind::RBracket) && !peek().is(TokenKind::Eof)) {
                         Value* sv = parse_val();
                         if (!sv) return false;
@@ -549,8 +554,19 @@ namespace brass::mir_parser {
                         }
                     }
                     if (!expect(TokenKind::RBracket, "']'")) return false;
+                    more = match(TokenKind::Comma);
                 }
-                b.build_guard(cond, exit_stub, state_map);
+                if (more) {
+                    if (!(is_identifier_or_keyword(peek().kind) && peek().text == "id")) {
+                        error(peek().location, "Expected '[' or 'id' after ',' in guard");
+                        return false;
+                    }
+                    advance();
+                    if (!take_unsigned(UINT32_MAX, "a guard resume id", id)) return false;
+                    has_id = true;
+                }
+                Instruction* g = b.build_guard(cond, exit_stub, state_map);
+                if (has_id) g->set_resume_id(id);
                 break;
             }
 

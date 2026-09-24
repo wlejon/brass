@@ -8,6 +8,8 @@
 #include <brass/gc/runtime_gc.hpp>
 #include <cstring>
 #include <stdexcept>
+#include <unordered_set>
+#include <vector>
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
 #elif defined(__aarch64__) || defined(_M_ARM64)
@@ -66,6 +68,65 @@ std::vector<RuntimeValue> guard_state_values(const Function& fn, const DeoptFram
         }
     }
     return vals;
+}
+
+// The function whose code a guard failure seen by an OSR call's deopt
+// handler came from. The OSR module is the whole module compiled again, so
+// the OSR code calls the module's own copies of its callees, which have no
+// resumer: `osr_fn` for its own code, another function of its module for
+// that function's copy. Anything else (no code entry, code of another
+// module) cannot be resumed here, and resuming the OSR'd function in its
+// place would give a wrong result: a hard error.
+const Function& deopt_owner(const CompiledModule& osr_mod, const Function& osr_fn, const DeoptFrame& dframe) {
+    if (dframe.code_entry) {
+        if (osr_mod.get_symbol_address(osr_fn.name()) == dframe.code_entry) return osr_fn;
+        if (const Module* mod = osr_fn.parent()) {
+            for (const Function* f : mod->functions()) {
+                if (f && !f->blocks().empty() && osr_mod.get_symbol_address(f->name()) == dframe.code_entry) {
+                    return *f;
+                }
+            }
+        }
+    }
+    throw InterpreterException("A guard (resume id " + std::to_string(dframe.resume_id) +
+                               ") failed during the OSR call of '" + std::string(osr_fn.name()) +
+                               "' in code that is not a function of its OSR module");
+}
+
+// Whether a guard of `fn` failing in its OSR code may come from an inner
+// activation of `fn` rather than the OSR'd one: `fn` has a guard and its OSR
+// code may call `fn` again (a call path back to it, or a call it cannot see
+// through). The deopt record names only the code that failed, not which
+// activation, so such a function is not OSR'd: resuming the OSR'd frame for
+// an inner call's failure would finish the wrong activation.
+bool osr_guard_frame_ambiguous(const Function& fn) {
+    const Module* mod = fn.parent();
+    if (!mod) return true;
+    bool has_guard = false;
+    for (const BasicBlock* bb : fn.blocks()) {
+        if (!bb) continue;
+        for (const Instruction* inst : *const_cast<BasicBlock*>(bb)) {
+            if (inst && inst->opcode() == Opcode::guard) has_guard = true;
+        }
+    }
+    if (!has_guard) return false;
+    std::vector<const Function*> work{&fn};
+    std::unordered_set<const Function*> seen{&fn};
+    while (!work.empty()) {
+        const Function* cur = work.back();
+        work.pop_back();
+        for (const BasicBlock* bb : cur->blocks()) {
+            if (!bb) continue;
+            for (const Instruction* inst : *const_cast<BasicBlock*>(bb)) {
+                if (!inst || !inst->is_call()) continue;
+                if (inst->opcode() != Opcode::call && inst->opcode() != Opcode::invoke) return true;
+                const Function* callee = mod->get_function(inst->symbol());
+                if (callee == &fn) return true;
+                if (callee && !callee->blocks().empty() && seen.insert(callee).second) work.push_back(callee);
+            }
+        }
+    }
+    return false;
 }
 
 } // namespace
@@ -177,6 +238,10 @@ bool OsrCoordinator::try_osr_migration(
             comp_mod = mod_it->second.get();
         } else {
             if (!fn.parent()) return false;
+            if (osr_guard_frame_ambiguous(fn)) {
+                feedback.record_bailout("OSR refused: a guard failure could be an inner activation's");
+                return false;
+            }
             HostEngine engine;
             auto compiled = engine.compile_with_osr(*fn.parent(), fn.name(), loop_header->id());
             if (!compiled) {
@@ -223,10 +288,16 @@ bool OsrCoordinator::try_osr_migration(
 
     auto prev_handler = get_deopt_handler();
     register_deopt_handler([&](const DeoptFrame& dframe) -> void* {
-        deopt_occurred = true;
+        const Function& owner = deopt_owner(*comp_mod, fn, dframe);
         total_native_deopts_++;
-        TieringFeedback& fb = registry().get_or_create(fn.name());
-        fb.record_deoptimization();
+        registry().get_or_create(owner.name()).record_deoptimization();
+        if (&owner != &fn) {
+            // A callee's copy: finish that call in Tier 0 and hand its
+            // result back to the OSR code, which carries on.
+            RuntimeValue r = interp.resume_after_guard(owner, dframe.resume_id, guard_state_values(owner, dframe), nullptr);
+            return reinterpret_cast<void*>(r.as_u64());
+        }
+        deopt_occurred = true;
         deopt_res = interp.resume_after_guard(fn, dframe.resume_id, guard_state_values(fn, dframe), &frame);
         return reinterpret_cast<void*>(deopt_res.as_u64());
     });
@@ -333,6 +404,10 @@ bool OsrCoordinator::try_osr_migration(
             comp_mod = mod_it->second.get();
         } else {
             if (!fn.parent()) return false;
+            if (osr_guard_frame_ambiguous(fn)) {
+                feedback.record_bailout("OSR refused: a guard failure could be an inner activation's");
+                return false;
+            }
             HostEngine engine;
             auto compiled = engine.compile_with_osr(*fn.parent(), fn.name(), loop_header->id());
             if (!compiled) {
@@ -377,23 +452,30 @@ bool OsrCoordinator::try_osr_migration(
 
     auto prev_handler = get_deopt_handler();
     register_deopt_handler([&](const DeoptFrame& dframe) -> void* {
-        deopt_occurred = true;
+        // A callee's copy in the OSR module finishes that call in Tier 0 and
+        // hands its result back to the OSR code, which carries on; the OSR'd
+        // function's own failure finishes the whole OSR call.
+        const Function& owner = deopt_owner(*comp_mod, fn, dframe);
         total_native_deopts_++;
-        TieringFeedback& fb = registry().get_or_create(fn.name());
-        fb.record_deoptimization();
+        registry().get_or_create(owner.name()).record_deoptimization();
         // The exits the interpreter's guard takes, in its order.
-        const Instruction* g_inst = fn.find_guard(dframe.resume_id);
+        const Instruction* g_inst = owner.find_guard(dframe.resume_id);
         if (!g_inst) {
             throw InterpreterException("No guard with resume id " + std::to_string(dframe.resume_id) +
-                                       " in function " + std::string(fn.name()));
+                                       " in function " + std::string(owner.name()));
         }
-        std::vector<RuntimeValue> state_vals = guard_state_values(fn, dframe);
-        if (const Function* stub = fn.guard_exit_stub(*g_inst)) {
-            deopt_res = interp.run(*stub, state_vals);
+        std::vector<RuntimeValue> state_vals = guard_state_values(owner, dframe);
+        RuntimeValue r;
+        if (const Function* stub = owner.guard_exit_stub(*g_inst)) {
+            r = interp.run(*stub, state_vals);
         } else {
-            deopt_res = interp.resume(fn, dframe.resume_id, state_vals);
+            r = interp.resume(owner, dframe.resume_id, state_vals);
         }
-        return reinterpret_cast<void*>(deopt_res.as_u64());
+        if (&owner == &fn) {
+            deopt_occurred = true;
+            deopt_res = r;
+        }
+        return reinterpret_cast<void*>(r.as_u64());
     });
 
     struct HandlerScopeGuard {

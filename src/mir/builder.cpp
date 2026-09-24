@@ -718,6 +718,10 @@ Instruction* Builder::build_guard(Value* cond, std::string_view exit_label, Span
     for (size_t i = 0; i < state_values.size(); ++i) {
         inst->add_state_value(state_values[i]);
     }
+    // Every guard of a function gets its own resume id; tier-2 deopt finds
+    // the guard that failed by it.
+    const Function* fn = block_ && block_->parent() ? block_->parent() : function_;
+    if (fn) inst->set_resume_id(fn->next_guard_resume_id());
     insert(inst);
     return inst;
 }
