@@ -371,11 +371,11 @@ void AArch64Encoder::rev16(GPR dst, GPR src) {
 }
 
 void AArch64Encoder::sxtb(GPR dst, GPR src) {
-    buffer_.emit_inst(0x13001C00u | (reg_code(src) << 5) | reg_code(dst));
+    buffer_.emit_inst(0x93401C00u | (reg_code(src) << 5) | reg_code(dst));
 }
 
 void AArch64Encoder::sxth(GPR dst, GPR src) {
-    buffer_.emit_inst(0x13003C00u | (reg_code(src) << 5) | reg_code(dst));
+    buffer_.emit_inst(0x93403C00u | (reg_code(src) << 5) | reg_code(dst));
 }
 
 void AArch64Encoder::sxtw(GPR dst, GPR src) {

@@ -31,6 +31,7 @@
 #include <windows.h>
 #else
 #include <sys/mman.h>
+#include <unistd.h>
 #endif
 
 using namespace brass;
@@ -55,13 +56,16 @@ uint8_t* page_end() {
     REQUIRE(base != nullptr);
     DWORD old = 0;
     REQUIRE(VirtualProtect(base + 4096, 4096, PAGE_NOACCESS, &old));
+    return base + 4096;
 #else
-    void* m = mmap(nullptr, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    long ps = sysconf(_SC_PAGESIZE);
+    size_t page_sz = ps > 0 ? static_cast<size_t>(ps) : 4096;
+    void* m = mmap(nullptr, 2 * page_sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     REQUIRE(m != MAP_FAILED);
     auto* base = static_cast<uint8_t*>(m);
-    REQUIRE(mprotect(base + 4096, 4096, PROT_NONE) == 0);
+    REQUIRE(mprotect(base + page_sz, page_sz, PROT_NONE) == 0);
+    return base + page_sz; // leaked: a handful of pages per test run
 #endif
-    return base + 4096; // leaked: a handful of pages per test run
 }
 
 int64_t oracle(Module& mod, const char* fn, std::vector<RuntimeValue> args) {

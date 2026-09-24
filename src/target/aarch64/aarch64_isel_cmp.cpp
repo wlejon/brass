@@ -130,7 +130,7 @@ void AArch64ISel::lower_comparison(
         }
     } else {
         uint8_t sz = static_cast<uint8_t>(op0_val->type().size_in_bytes());
-        if (sz == 0) sz = 8;
+        if (sz == 0 || op0.size == 8 || op1.size == 8) sz = 8;
         LirCond final_cond = cond;
 
         ImmIntInfo imm1 = get_imm_int_info(op1_val);
@@ -193,7 +193,7 @@ void AArch64ISel::lower_branch_if(const Instruction& inst, LirBlock& lir_bb) {
     const auto& f_target = inst.false_target();
 
     const Instruction* cmp_inst = cond_val ? cond_val->defining_instruction() : nullptr;
-    bool is_fused_cmp = cmp_inst && cmp_inst->parent() == inst.parent() && is_comparison(cmp_inst->opcode());
+    bool is_fused_cmp = cmp_inst && cmp_inst->parent() == inst.parent() && is_comparison(cmp_inst->opcode()) && skipped_insts_.count(cmp_inst);
 
     LirCond branch_cond = LirCond::NE;
 

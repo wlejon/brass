@@ -263,7 +263,7 @@ void AArch64ISel::lower_guard(const Instruction& inst, LirBlock& lir_bb) {
     }
     const Value* cond_val = inst.operand(0);
     const Instruction* cmp_inst = cond_val ? cond_val->defining_instruction() : nullptr;
-    bool is_fused_cmp = cmp_inst && cmp_inst->parent() == inst.parent() && is_comparison(cmp_inst->opcode());
+    bool is_fused_cmp = cmp_inst && cmp_inst->parent() == inst.parent() && is_comparison(cmp_inst->opcode()) && skipped_insts_.count(cmp_inst);
 
     LirCond deopt_cond = LirCond::E;
 

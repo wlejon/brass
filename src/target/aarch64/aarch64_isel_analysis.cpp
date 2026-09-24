@@ -95,7 +95,7 @@ void AArch64ISel::analyze_function(const Function& mir_fn) {
                 const Value* cond = inst->operand(0);
                 if (cond && cond->is_instruction()) {
                     const Instruction* def_inst = cond->defining_instruction();
-                    if (def_inst && def_inst->parent() == bb && is_comparison(def_inst->opcode())) {
+                    if (def_inst && def_inst->parent() == bb && is_comparison(def_inst->opcode()) && !narrow_compare(*def_inst)) {
                         if (use_count_[cond] == 1) {
                             skipped_insts_.insert(def_inst);
                             if (def_inst->opcode() == Opcode::eq || def_inst->opcode() == Opcode::ne) {

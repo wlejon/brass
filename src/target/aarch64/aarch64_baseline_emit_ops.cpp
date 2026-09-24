@@ -150,6 +150,8 @@ void emit_overflow(AArch64BaselineEmitter& em, const Instruction& inst) {
 } // namespace
 
 bool emit_baseline_aarch64_op(AArch64BaselineEmitter& emitter, const Instruction& inst) {
+    if (emit_baseline_aarch64_narrow(emitter, inst)) return true;
+
     auto& enc = emitter.enc;
     const Opcode op = inst.opcode();
 
@@ -207,11 +209,14 @@ bool emit_baseline_aarch64_op(AArch64BaselineEmitter& emitter, const Instruction
 
         // Integer conversions (as the interpreter: narrow values are i32s)
         case Opcode::sext_i64:
-            enc.ldrsw(GPR::X0, emitter.slot_addr(inst.operand(0), 4));
+            if (inst.operand(0)->type() == Type::i8()) enc.ldrsb(GPR::X0, emitter.slot_addr(inst.operand(0), 1));
+            else if (inst.operand(0)->type() == Type::i16()) enc.ldrsh(GPR::X0, emitter.slot_addr(inst.operand(0), 2));
+            else enc.ldrsw(GPR::X0, emitter.slot_addr(inst.operand(0), 4));
             enc.str(GPR::X0, emitter.slot_addr(inst.result(), 8));
             return true;
         case Opcode::zext_i64:
             if (inst.operand(0)->type() == Type::i8()) enc.ldrb(GPR::X0, emitter.slot_addr(inst.operand(0), 1));
+            else if (inst.operand(0)->type() == Type::i16()) enc.ldrh(GPR::X0, emitter.slot_addr(inst.operand(0), 2));
             else enc.ldr32(GPR::X0, emitter.slot_addr(inst.operand(0), 4));
             enc.str(GPR::X0, emitter.slot_addr(inst.result(), 8));
             return true;

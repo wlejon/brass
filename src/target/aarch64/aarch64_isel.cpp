@@ -312,7 +312,9 @@ void AArch64ISel::lower_block(const BasicBlock& bb) {
     for (const auto* inst : bb) {
         if (!skipped_insts_.count(inst)) {
             size_t before_count = lir_bb->instructions.size();
+            const auto widened = widen_narrow_operands(*inst, *lir_bb);
             lower_instruction(*inst, *lir_bb);
+            restore_narrow_operands(widened);
             const bool elidable = is_elidable_materialization(*inst);
             for (size_t i = before_count; i < lir_bb->instructions.size(); ++i) {
                 if (lir_bb->instructions[i]) {
@@ -513,11 +515,25 @@ void AArch64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
         case Opcode::sext_i64: {
             VReg dst = get_vreg(inst.result());
             VReg src = get_vreg(inst.operand(0));
-            auto lir_inst = std::make_unique<LirInst>(LirOpcode::Movsxd);
-            lir_inst->add_def(LirOperand::vreg(dst, 8));
-            lir_inst->add_use(LirOperand::vreg(src, 4));
-            lir_inst->mir_origin = &inst;
-            lir_bb.append_inst(std::move(lir_inst));
+            if (inst.operand(0)->type() == Type::i8()) {
+                auto lir_inst = std::make_unique<LirInst>(LirOpcode::Movsx8);
+                lir_inst->add_def(LirOperand::vreg(dst, 8));
+                lir_inst->add_use(LirOperand::vreg(src, 1));
+                lir_inst->mir_origin = &inst;
+                lir_bb.append_inst(std::move(lir_inst));
+            } else if (inst.operand(0)->type() == Type::i16()) {
+                auto lir_inst = std::make_unique<LirInst>(LirOpcode::Movsx16);
+                lir_inst->add_def(LirOperand::vreg(dst, 8));
+                lir_inst->add_use(LirOperand::vreg(src, 2));
+                lir_inst->mir_origin = &inst;
+                lir_bb.append_inst(std::move(lir_inst));
+            } else {
+                auto lir_inst = std::make_unique<LirInst>(LirOpcode::Movsxd);
+                lir_inst->add_def(LirOperand::vreg(dst, 8));
+                lir_inst->add_use(LirOperand::vreg(src, 4));
+                lir_inst->mir_origin = &inst;
+                lir_bb.append_inst(std::move(lir_inst));
+            }
             break;
         }
 
@@ -528,6 +544,12 @@ void AArch64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
                 auto lir_inst = std::make_unique<LirInst>(LirOpcode::Movzx8);
                 lir_inst->add_def(LirOperand::vreg(dst, 4));
                 lir_inst->add_use(LirOperand::vreg(src, 1));
+                lir_inst->mir_origin = &inst;
+                lir_bb.append_inst(std::move(lir_inst));
+            } else if (inst.operand(0)->type() == Type::i16()) {
+                auto lir_inst = std::make_unique<LirInst>(LirOpcode::Movzx16);
+                lir_inst->add_def(LirOperand::vreg(dst, 4));
+                lir_inst->add_use(LirOperand::vreg(src, 2));
                 lir_inst->mir_origin = &inst;
                 lir_bb.append_inst(std::move(lir_inst));
             } else {

@@ -108,6 +108,7 @@ uint32_t a64_baseline_outgoing_bytes(const Function& fn, const Target& target);
 uint32_t a64_baseline_copy_bytes(const Function& fn);
 
 // Each returns true if it handled the opcode.
+bool emit_baseline_aarch64_narrow(AArch64BaselineEmitter& emitter, const Instruction& inst);
 bool emit_baseline_aarch64_op(AArch64BaselineEmitter& emitter, const Instruction& inst);
 bool emit_baseline_aarch64_fp_op(AArch64BaselineEmitter& emitter, const Instruction& inst);
 bool emit_baseline_aarch64_vec_op(AArch64BaselineEmitter& emitter, const Instruction& inst);

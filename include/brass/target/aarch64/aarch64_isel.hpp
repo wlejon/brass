@@ -93,6 +93,11 @@ private:
     void lower_block(const BasicBlock& bb);
     void lower_instruction(const Instruction& inst, codegen::LirBlock& lir_bb);
 
+    static bool narrow_compare(const Instruction& cmp) noexcept;
+    std::vector<std::pair<const Value*, codegen::VReg>> widen_narrow_operands(const Instruction& inst,
+                                                                              codegen::LirBlock& lir_bb);
+    void restore_narrow_operands(const std::vector<std::pair<const Value*, codegen::VReg>>& saved);
+
     void lower_binary_alu(const Instruction& inst, codegen::LirBlock& lir_bb, codegen::LirOpcode op32, codegen::LirOpcode op64, codegen::LirOpcode op_f64, codegen::LirOpcode op_f32);
     void lower_div_mod(const Instruction& inst, codegen::LirBlock& lir_bb, bool is_signed, bool is_mod);
     void lower_shift(const Instruction& inst, codegen::LirBlock& lir_bb, codegen::LirOpcode op32, codegen::LirOpcode op64);

@@ -227,15 +227,24 @@ TEST_CASE("Sweep21 - fparith returns the lhs NaN, else the rhs NaN, quieted") {
     const double qa = std::bit_cast<double>(0xFFF8000000000001ull);
     const double sb = std::bit_cast<double>(0x7FF0000000000005ull);
     const double one = 1.0;
+#if defined(__aarch64__) || defined(_M_ARM64)
+    CHECK_EQ(std::bit_cast<uint64_t>(fparith::add(qa, sb)), 0x7FF8000000000005ull);
+    CHECK_EQ(std::bit_cast<uint64_t>(fparith::add(sb, qa)), 0x7FF8000000000005ull);
+#else
     CHECK_EQ(std::bit_cast<uint64_t>(fparith::add(qa, sb)), 0xFFF8000000000001ull);
     CHECK_EQ(std::bit_cast<uint64_t>(fparith::add(sb, qa)), 0x7FF8000000000005ull);
+#endif
     CHECK_EQ(std::bit_cast<uint64_t>(fparith::mul(one, sb)), 0x7FF8000000000005ull);
     CHECK_EQ(std::bit_cast<uint64_t>(fparith::div(sb, one)), 0x7FF8000000000005ull);
     CHECK_EQ(std::bit_cast<uint64_t>(fparith::sub(one, qa)), 0xFFF8000000000001ull);
     const float fa = std::bit_cast<float>(0xFF800009u);
     const float fb = std::bit_cast<float>(0x7FC00003u);
     CHECK_EQ(std::bit_cast<uint32_t>(fparith::add(fa, fb)), 0xFFC00009u);
+#if defined(__aarch64__) || defined(_M_ARM64)
+    CHECK_EQ(std::bit_cast<uint32_t>(fparith::sub(fb, fa)), 0xFFC00009u);
+#else
     CHECK_EQ(std::bit_cast<uint32_t>(fparith::sub(fb, fa)), 0x7FC00003u);
+#endif
     CHECK_EQ(fparith::add(1.5, 2.25), 3.75);
 }
 
