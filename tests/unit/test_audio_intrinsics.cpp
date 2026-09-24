@@ -28,7 +28,6 @@ TEST_CASE("Audio JIT - Scoped FTZ/DAZ mode prevents subnormal traps") {
 }
 
 TEST_CASE("Audio JIT - Fast pitch and exp2 approximation accuracy") {
-    if (!Target::host().is_x64()) { std::cout << "  [SKIP] on non-x86 host\n"; return; }
 
     Module mod("audio_exp2_mod");
     Function* fn = mod.create_function("exp2_kernel", Type::void_type(), {
@@ -96,7 +95,6 @@ TEST_CASE("Audio JIT - Fast pitch and exp2 approximation accuracy") {
 }
 
 TEST_CASE("Audio JIT - Oscillator sin and cos normalized waveform accuracy") {
-    if (!Target::host().is_x64()) { std::cout << "  [SKIP] on non-x86 host\n"; return; }
 
     Module mod("audio_sincos_mod");
     Function* fn = mod.create_function("sincos_kernel", Type::void_type(), {
@@ -165,7 +163,6 @@ TEST_CASE("Audio JIT - Oscillator sin and cos normalized waveform accuracy") {
 }
 
 TEST_CASE("Audio JIT - Soft clip tanh saturation matches reference") {
-    if (!Target::host().is_x64()) { std::cout << "  [SKIP] on non-x86 host\n"; return; }
 
     Module mod("audio_softclip_mod");
     Function* fn = mod.create_function("softclip_kernel", Type::void_type(), {
@@ -227,7 +224,6 @@ TEST_CASE("Audio JIT - Soft clip tanh saturation matches reference") {
 }
 
 TEST_CASE("Audio JIT - Biquad DF2T IIR filter matches C++ reference") {
-    if (!Target::host().is_x64()) { std::cout << "  [SKIP] on non-x86 host\n"; return; }
 
     Module mod("audio_biquad_mod");
     Function* fn = mod.create_function("biquad_kernel", Type::void_type(), {
@@ -339,7 +335,6 @@ TEST_CASE("Audio JIT - Biquad DF2T IIR filter matches C++ reference") {
 }
 
 TEST_CASE("Audio JIT - Stereo interleaved SIMD shuffling and deinterleaving") {
-    if (!Target::host().is_x64()) { std::cout << "  [SKIP] on non-x86 host\n"; return; }
 
     Module mod("audio_stereo_shuffle_mod");
     Function* fn = mod.create_function("stereo_roundtrip_kernel", Type::void_type(), {
@@ -390,7 +385,6 @@ TEST_CASE("Audio JIT - Stereo interleaved SIMD shuffling and deinterleaving") {
 }
 
 TEST_CASE("Audio JIT - Real-time compile preset compile speed") {
-    if (!Target::host().is_x64()) { std::cout << "  [SKIP] on non-x86 host\n"; return; }
 
     Module mod("audio_speed_mod");
     Function* fn = mod.create_function("simple_gain_kernel", Type::void_type(), {

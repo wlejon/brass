@@ -284,7 +284,6 @@ TEST_CASE("Fused GEMV PTX Generation") {
 }
 
 TEST_CASE("ML Fusion - FusedGemvQ8_0 and FusedGemvQ4_K CPU JIT") {
-    if (!Target::host().is_x64()) { std::cout << "  [SKIP] AVX2 not supported on non-x86 host\n"; return; }
     MlFusionCompiler compiler;
 
     // 1. Q8_0 CPU GEMV JIT

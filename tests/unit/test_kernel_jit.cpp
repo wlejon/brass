@@ -16,7 +16,6 @@ using namespace brass::codegen;
 #define CHECK_NEAR(a, b, eps) CHECK(std::abs((a) - (b)) <= (eps))
 
 TEST_CASE("Kernel JIT - AVX2 v256 Fused Multiply-Add Vector Loop") {
-    if (!Target::host().is_x64()) { std::cout << "  [SKIP] AVX2 not supported on non-x86 host\n"; return; }
     Module mod("fma_vec_module");
     mod.set_allow_fp_reassociation(true);
 
@@ -120,7 +119,6 @@ TEST_CASE("Kernel JIT - AVX2 v256 Fused Multiply-Add Vector Loop") {
 }
 
 TEST_CASE("Kernel JIT - Fused Activation Loop (ReLU with Bias Add)") {
-    if (!Target::host().is_x64()) { std::cout << "  [SKIP] AVX2 not supported on non-x86 host\n"; return; }
     Module mod("relu_bias_module");
 
     // Signature: relu_bias_kernel(const float* in, const float* bias, float* out, int64_t n) -> void
@@ -435,7 +433,6 @@ TEST_CASE("Kernel JIT - Polyhedral Loop Dependence Analysis") {
 }
 
 TEST_CASE("Kernel JIT - C-API Bindings (Compile & Execute Pure-Compute Kernel)") {
-    if (!Target::host().is_x64()) { std::cout << "  [SKIP] AVX2 not supported on non-x86 host\n"; return; }
     BrassContext ctx = brass_context_create();
     REQUIRE(ctx != nullptr);
 
