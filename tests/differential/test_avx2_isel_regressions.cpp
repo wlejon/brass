@@ -90,7 +90,7 @@ void build_lane_shuffle(Module& mod, std::string_view name, Type vec) {
 
 bool skip_no_v256_backend() {
     if (!Target::host().is_x64() && !Target::host().is_aarch64()) {
-        std::cout << "  [SKIP] AVX2 not supported on non-x86 host\n";
+        std::cout << "  [SKIP] no 256-bit vector backend on this host\n";
         return true;
     }
     return false;
