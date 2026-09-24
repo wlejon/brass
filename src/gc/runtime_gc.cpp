@@ -1,6 +1,11 @@
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/gc/code_stack_maps.hpp>
 #include <brass/gc/host_heap.hpp>
+#include <brass/gc/native_frames.hpp>
+#include <brass/gc/stack_walker.hpp>
+#include <brass/interpreter/interpreter.hpp>
+#include <brass/runtime/coroutine.hpp>
+#include <brass/vm/fast_interpreter.hpp>
 #include <iostream>
 #include <vector>
 #include <stdexcept>
@@ -243,6 +248,23 @@ uintptr_t brass_runtime_gc_alloc(
     return gc->allocate(size, pointer_mask, type_tag, roots);
 }
 
+void brass_enumerate_thread_roots(uintptr_t caller_fp, uintptr_t caller_ip, std::vector<uintptr_t*>& roots) {
+    if (caller_fp != 0 && caller_ip != 0) {
+        if (const auto* maps = walk_maps(caller_ip)) {
+            brass_stack_walk(caller_fp, caller_ip, *maps, [](void** slot, void* user_data) {
+                auto* vec = static_cast<std::vector<uintptr_t*>*>(user_data);
+                if (slot != nullptr && *slot != nullptr) {
+                    vec->push_back(reinterpret_cast<uintptr_t*>(slot));
+                }
+            }, &roots);
+        }
+    }
+    brass_append_native_frame_roots(roots);
+    runtime::append_active_coro_roots(roots);
+    if (Interpreter* interp = Interpreter::active_on_thread()) interp->collect_all_roots(roots);
+    if (FastInterpreter* fast = FastInterpreter::current()) fast->collect_all_roots(roots);
+}
+
 } // namespace brass
 
 #if defined(_MSC_VER)
@@ -251,7 +273,7 @@ extern "C" {
 
 void brass_runtime_gc_safepoint_bridge(uintptr_t caller_rbp, uintptr_t caller_ip) {
     if (auto* host = brass::host_heap()) {
-        host->safepoint();
+        host->safepoint_at(caller_rbp, caller_ip);
         return;
     }
     if (auto* gen_gc = brass::brass_get_active_generational_gc()) {
@@ -321,7 +343,7 @@ void brass_gc_safepoint() {
     uintptr_t caller_ip = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
 
     if (auto* host = brass::host_heap()) {
-        host->safepoint();
+        host->safepoint_at(caller_rbp, caller_ip);
         return;
     }
     // Without stack maps the native frames' roots are unknown: skip.
@@ -373,7 +395,7 @@ void brass_gc_collect() {
     // Same as a safepoint (the MSVC stub routes both through one bridge):
     // without stack maps the native frames' roots are unknown, so skip.
     if (auto* host = brass::host_heap()) {
-        host->safepoint();
+        host->safepoint_at(caller_rbp, caller_ip);
         return;
     }
     const auto* maps = brass::walk_maps(caller_ip);

@@ -45,8 +45,11 @@ public:
 
     FastInterpreter(const FastInterpreter&) = delete;
     FastInterpreter& operator=(const FastInterpreter&) = delete;
-    FastInterpreter(FastInterpreter&&) noexcept;
-    FastInterpreter& operator=(FastInterpreter&&) noexcept;
+    // Not movable: its heap's root provider (and a generational GC's, see
+    // set_generational_gc) captures `this`, as do the thread's current
+    // interpreter and running frames. Hold one through a unique_ptr to move it.
+    FastInterpreter(FastInterpreter&&) = delete;
+    FastInterpreter& operator=(FastInterpreter&&) = delete;
 
     // Active interpreter on current thread
     static FastInterpreter* current() noexcept;
@@ -76,6 +79,11 @@ public:
     void borrow_gc(MiniCheneyGC* heap) noexcept { borrowed_gc_ = heap; }
 
     void set_generational_gc(GenerationalGC* gc) noexcept;
+    // Allocates from, and collects (brass_gc_collect), the generational
+    // `heap` (null: stop) as set_generational_gc does, but leaves `heap`'s
+    // root provider alone: as with borrow_gc, the caller keeps this
+    // interpreter's frames among `heap`'s roots (a ThreadRootsScope).
+    void borrow_generational_gc(GenerationalGC* heap) noexcept { gen_gc_ = heap; }
     GenerationalGC* generational_gc() noexcept { return gen_gc_; }
     const GenerationalGC* generational_gc() const noexcept { return gen_gc_; }
 

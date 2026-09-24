@@ -68,8 +68,11 @@ public:
 
     Interpreter(const Interpreter&) = delete;
     Interpreter& operator=(const Interpreter&) = delete;
-    Interpreter(Interpreter&&) noexcept = default;
-    Interpreter& operator=(Interpreter&&) noexcept = default;
+    // Not movable: its heap's root provider captures `this`, as do the
+    // thread's active interpreter and running frames. Hold one through a
+    // unique_ptr to move it.
+    Interpreter(Interpreter&&) = delete;
+    Interpreter& operator=(Interpreter&&) = delete;
 
     // Module management
     void set_module(const Module* mod) noexcept { module_ = mod; }
@@ -91,6 +94,16 @@ public:
     void borrow_gc(MiniCheneyGC* heap) noexcept { borrowed_gc_ = heap; }
 
     void set_generational_gc(GenerationalGC* gc) noexcept { gen_gc_ = gc; }
+    // Allocates from, and collects (brass_gc_collect), the generational
+    // `heap` (null: stop) instead of gc(); also its write barrier. As with
+    // borrow_gc, the caller keeps this interpreter's frames among `heap`'s
+    // roots while it runs (a ThreadRootsScope); `heap`'s root provider is
+    // left alone.
+    void borrow_generational_gc(GenerationalGC* heap) noexcept {
+        borrowed_gen_gc_ = heap;
+        gen_gc_ = heap;
+    }
+    GenerationalGC* borrowed_generational_gc() noexcept { return borrowed_gen_gc_; }
     GenerationalGC* generational_gc() noexcept { return gen_gc_; }
     const GenerationalGC* generational_gc() const noexcept { return gen_gc_; }
 
@@ -188,6 +201,7 @@ private:
     MiniCheneyGC gc_;
     MiniCheneyGC* borrowed_gc_ = nullptr;
     GenerationalGC* gen_gc_ = nullptr;
+    GenerationalGC* borrowed_gen_gc_ = nullptr;
 
     InterpreterFrame* current_frame_ = nullptr;
     size_t call_depth_ = 0;

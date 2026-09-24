@@ -99,6 +99,11 @@ void FastInterpreter::register_builtin_host_functions() {
             host->collect();
             return RuntimeValue::from_void();
         }
+        // The heap allocate_gc allocates from.
+        if (GenerationalGC* gen = interp.generational_gc()) {
+            gen->collect();
+            return RuntimeValue::from_void();
+        }
         interp.gc().collect();
         return RuntimeValue::from_void();
     });

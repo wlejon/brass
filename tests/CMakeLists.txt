@@ -111,6 +111,7 @@ add_executable(brass_unit_tests
     differential/test_debug_differential.cpp
     unit/test_tlab.cpp
     unit/test_host_heap.cpp
+    unit/test_heap_roots_regressions.cpp
     unit/test_exceptions_mir.cpp
     unit/test_unwind_tables.cpp
     unit/test_exception_dispatch.cpp

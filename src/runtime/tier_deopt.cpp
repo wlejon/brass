@@ -9,7 +9,10 @@
 #include <brass/runtime/host_symbols.hpp>
 #include <brass/gc/native_frames.hpp>
 #include <brass/gc/runtime_gc.hpp>
+#include <brass/gc/generational_gc.hpp>
+#include <brass/gc/host_heap.hpp>
 #include <cstdio>
+#include <type_traits>
 #include <cstdlib>
 #include <optional>
 #include <string>
@@ -182,16 +185,33 @@ RuntimeValue MultiTierPipeline::run_fresh_tier0(FunctionDispatchTable& table, co
     auto check_result = [&](RuntimeValue r, const MiniCheneyGC& private_heap) {
         if (r.is_gcref() && private_heap.is_address_in_active_space(r.raw_bits())) {
             deopt_fatal("'" + where + "' finished in a fresh Tier-0 interpreter and returned a gcref into its "
-                        "private heap; install an active GC on the thread (brass_set_active_gc) or enter the "
-                        "native code from the Tier-0 interpreter");
+                        "private heap; install a heap for the thread (set_host_heap, "
+                        "brass_set_active_generational_gc or brass_set_active_gc) or enter the native code "
+                        "from the Tier-0 interpreter");
         }
         return r;
     };
-    // Either interpreter allocates from the thread's active GC, whose
-    // objects the native code and its caller hold, and its frames are that
-    // GC's roots while it runs: a collection native code it calls triggers
-    // updates them.
-    MiniCheneyGC* shared = brass_get_active_gc();
+    // Either interpreter allocates from the heap native code on this thread
+    // allocates from (brass_gc_alloc's order: a host heap, the active
+    // generational GC, the active MiniCheneyGC), whose objects the native
+    // code and its caller hold. Its frames are published as thread roots
+    // whatever the heap (brass_append_native_frame_roots, which brass's
+    // collectors call and brass_enumerate_thread_roots reports to a host
+    // heap), so a collection that code triggers updates them.
+    HostHeap* host = host_heap();
+    GenerationalGC* gen = host ? nullptr : brass_get_active_generational_gc();
+    MiniCheneyGC* mini = (host || gen) ? nullptr : brass_get_active_gc();
+    const bool shared = host || gen || mini;
+    auto run = [&](auto& interp) {
+        using Interp = std::remove_reference_t<decltype(interp)>;
+        if (gen) interp.borrow_generational_gc(gen);
+        if (mini) interp.borrow_gc(mini);
+        ThreadRootsScope roots([](void* ctx, std::vector<uintptr_t*>& out) {
+            static_cast<Interp*>(ctx)->collect_all_roots(out);
+        }, &interp);
+        RuntimeValue r = fn ? interp.run(*fn, args) : interp.resume(*resume_fn, resume_id, args);
+        return shared ? r : check_result(r, interp.gc());
+    };
     if (config_.use_fast_interpreter()) {
         FastInterpreter interp;
         interp.set_dispatch_table(&table);
@@ -199,29 +219,13 @@ RuntimeValue MultiTierPipeline::run_fresh_tier0(FunctionDispatchTable& table, co
             std::lock_guard<std::mutex> lock(mutex_);
             setup_fast_interpreter(interp, *mod);
         }
-        std::optional<ThreadRootsScope> roots;
-        if (shared) {
-            interp.borrow_gc(shared);
-            roots.emplace([](void* ctx, std::vector<uintptr_t*>& out) {
-                static_cast<FastInterpreter*>(ctx)->collect_all_roots(out);
-            }, &interp);
-        }
-        RuntimeValue r = fn ? interp.run(*fn, args) : interp.resume(*resume_fn, resume_id, args);
-        return shared ? r : check_result(r, interp.gc());
+        return run(interp);
     }
     // As execute() sets up the oracle interpreter.
     Interpreter interp;
     interp.set_dispatch_table(&table);
     install_host_symbols(interp);
-    std::optional<ThreadRootsScope> roots;
-    if (shared) {
-        interp.borrow_gc(shared);
-        roots.emplace([](void* ctx, std::vector<uintptr_t*>& out) {
-            static_cast<Interpreter*>(ctx)->collect_all_roots(out);
-        }, &interp);
-    }
-    RuntimeValue r = fn ? interp.run(*fn, args) : interp.resume(*resume_fn, resume_id, args);
-    return shared ? r : check_result(r, interp.gc());
+    return run(interp);
 }
 
 } // namespace brass::runtime

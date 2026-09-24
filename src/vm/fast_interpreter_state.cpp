@@ -16,9 +16,6 @@ FastInterpreter::FastInterpreter(size_t gc_semispace_size)
 
 FastInterpreter::~FastInterpreter() = default;
 
-FastInterpreter::FastInterpreter(FastInterpreter&&) noexcept = default;
-FastInterpreter& FastInterpreter::operator=(FastInterpreter&&) noexcept = default;
-
 static thread_local FastInterpreter* s_current_fast_interp = nullptr;
 
 FastInterpreter* FastInterpreter::current() noexcept {

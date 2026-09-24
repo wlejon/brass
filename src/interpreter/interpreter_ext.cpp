@@ -111,6 +111,12 @@ void Interpreter::register_builtin_host_functions() {
             host->collect();
             return RuntimeValue::from_void();
         }
+        if (GenerationalGC* gen = interp.borrowed_generational_gc()) {
+            std::vector<uintptr_t*> roots;
+            interp.collect_all_roots(roots);
+            gen->collect(roots);
+            return RuntimeValue::from_void();
+        }
         interp.gc().collect();
         return RuntimeValue::from_void();
     });
@@ -158,6 +164,7 @@ uintptr_t Interpreter::allocate_gc(size_t size, uint64_t pointer_mask, uint32_t 
     if (host_heap()) return host_heap_allocate(size, pointer_mask, type_tag);
     std::vector<uintptr_t*> roots;
     collect_all_roots(roots);
+    if (borrowed_gen_gc_) return borrowed_gen_gc_->allocate(size, pointer_mask, type_tag, roots);
     return gc().allocate(size, pointer_mask, type_tag, roots);
 }
 

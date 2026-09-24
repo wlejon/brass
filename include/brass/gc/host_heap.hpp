@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace brass {
 
@@ -15,8 +16,9 @@ namespace brass {
 // `brass_gc_alloc` from generated code (every tier), the interpreters'
 // allocations, and coroutine frames. Safepoints in generated code — and
 // `brass_gc_collect` from generated code, which on every target has always
-// been a safepoint — reach safepoint(); an interpreter's explicit
-// collection reaches collect(). brass's own heaps (MiniCheneyGC, GenerationalGC,
+// been a safepoint — reach safepoint_at() (by default safepoint()); an
+// interpreter's explicit collection reaches collect(). A collecting host
+// finds brass's roots on the thread with brass_enumerate_thread_roots. brass's own heaps (MiniCheneyGC, GenerationalGC,
 // HostGC) are then never consulted; they remain the default for an
 // embedder that brings no heap.
 //
@@ -43,7 +45,40 @@ public:
 
     // A safepoint: an opportunity to collect, never a demand.
     virtual void safepoint() {}
+
+    // A safepoint (or brass_gc_collect) reached from generated code, with
+    // the generated frame that reached it: its frame pointer and the return
+    // address into it (either 0 if unknown). brass calls this, never
+    // safepoint() directly; the default forwards to safepoint(). A host that
+    // collects here passes both to brass_enumerate_thread_roots to find the
+    // gcrefs of the generated frames on the stack.
+    virtual void safepoint_at(uintptr_t caller_fp, uintptr_t caller_ip) {
+        (void)caller_fp;
+        (void)caller_ip;
+        safepoint();
+    }
 };
+
+// Every gcref slot brass knows on the calling thread, appended to `roots`,
+// for a host heap's collection (from allocate(), collect() or
+// safepoint_at()). A slot may be reported more than once; each holds a
+// gcref (or a tagged value whose low 48 bits are one) the host must keep
+// alive and, if it moves the object, update in place. Reports:
+//   - the generated (JIT, baseline) frames from (caller_fp, caller_ip)
+//     upward, through the code stack maps: pass what safepoint_at received.
+//     With either 0 (a collection from allocate() or collect()) none are
+//     walked from here;
+//   - every run of native frames below re-entered Tier-0 code
+//     (NativeFramesScope), and every ThreadRootsScope, which includes the
+//     frames of the fresh Tier-0 interpreters a deoptimization or a
+//     native-to-Tier-0 call starts;
+//   - suspended coroutine frames;
+//   - the frames of the innermost running Interpreter and FastInterpreter
+//     on the thread. An outer interpreter hidden under an inner one of the
+//     same kind is not reached: a host that runs nested interpreters also
+//     reports their collect_all_roots() itself.
+// Roots the host registered on its own heap are its own business.
+void brass_enumerate_thread_roots(uintptr_t caller_fp, uintptr_t caller_ip, std::vector<uintptr_t*>& roots);
 
 // Process-wide, not owned; the heap must outlive all code running while it
 // is installed, and installing nullptr removes it. Like HostSymbolProvider,
