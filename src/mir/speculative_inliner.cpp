@@ -633,4 +633,51 @@ bool run_speculative_devirtualization(
     return run_speculative_devirtualization(mod, runtime::FeedbackRegistry::instance(), opts);
 }
 
+bool lower_guards_to_local_branch(Function& fn, Module& mod, uint32_t resume_id) {
+    BasicBlock* target = fn.get_resume_target(resume_id);
+    if (!target) return false;
+    std::vector<Instruction*> guards;
+    for (BasicBlock* bb : fn.blocks()) {
+        if (!bb) continue;
+        for (Instruction* inst : *bb) {
+            if (!inst || inst->opcode() != Opcode::guard || inst->resume_id() != resume_id) continue;
+            if (fn.guard_exit_stub(*inst) || inst->operand_count() < 1 ||
+                inst->state_map().size() < target->param_count()) {
+                return false;
+            }
+            guards.push_back(inst);
+        }
+    }
+    for (Instruction* guard : guards) {
+        BasicBlock* bb = guard->parent();
+        // The code after the guard runs when it holds.
+        BasicBlock* rest = mod.arena().make<BasicBlock>(
+            fn.next_block_id(), mod.string_pool().intern(std::string(bb->name()) + ".guard_ok"));
+        rest->set_parent(&fn);
+        std::vector<Instruction*> tail;
+        for (Instruction* cur = guard->next(); cur; cur = cur->next()) tail.push_back(cur);
+        for (Instruction* ti : tail) {
+            bb->remove_instruction(ti);
+            rest->append_instruction(ti);
+        }
+        auto it = std::find(fn.blocks().begin(), fn.blocks().end(), bb);
+        fn.blocks().insert(it + 1, rest);
+
+        // A failing guard enters its resume block with the leading state
+        // values, as the interpreters' guard does.
+        std::vector<Value*> args(guard->state_map().begin(),
+                                 guard->state_map().begin() + static_cast<std::ptrdiff_t>(target->param_count()));
+        Instruction* br = mod.arena().make<Instruction>(Opcode::br_if, Type::void_type());
+        br->add_operand(guard->operand(0));
+        br->set_loc(guard->loc());
+        br->set_true_target(BranchTarget(rest, {}));
+        br->set_false_target(BranchTarget(target, std::move(args)));
+        bb->remove_instruction(guard);
+        bb->append_instruction(br);
+    }
+    fn.remove_resume_point(resume_id);
+    fn.rebuild_cfg_predecessors();
+    return true;
+}
+
 } // namespace brass

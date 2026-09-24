@@ -54,6 +54,10 @@ void Function::add_resume_point(uint32_t resume_id, BasicBlock* target) {
     resume_points_.push_back({resume_id, target});
 }
 
+void Function::remove_resume_point(uint32_t resume_id) {
+    std::erase_if(resume_points_, [resume_id](const auto& entry) { return entry.first == resume_id; });
+}
+
 BasicBlock* Function::get_resume_target(uint32_t resume_id) const noexcept {
     for (const auto& entry : resume_points_) {
         if (entry.first == resume_id) {

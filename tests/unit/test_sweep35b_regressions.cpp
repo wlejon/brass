@@ -10,6 +10,9 @@
 // 3. The AArch64 guard exit probed a large deopt record by moving SP one
 //    page at a time, so SP sat at heights no unwind info describes. It now
 //    probes below SP through X16 and moves SP once.
+// 4. Tier 2 refused code with a speculative-inliner guard: no Tier-0 guard
+//    matched it. Such a guard resumes in the optimized function itself, so
+//    the installer now lowers it to a branch to its resume block.
 #include "test_framework.hpp"
 #include <brass/codegen/jit_exec.hpp>
 #include <brass/codegen/lir.hpp>
@@ -20,7 +23,9 @@
 #include <brass/mir/printer.hpp>
 #include <brass/mir/speculative_inliner.hpp>
 #include <brass/mir/verifier.hpp>
+#include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/deopt.hpp>
+#include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/type_feedback.hpp>
 #include <brass/target/aarch64/aarch64_emit.hpp>
 #include <brass/target/aarch64/aarch64_isel.hpp>
@@ -399,4 +404,140 @@ TEST_CASE("Sweep35b - the AArch64 guard exit probes a large record without movin
     }
     CHECK_EQ(sp_writes, 1u);
     CHECK(sp_write_at > probes[1]);
+}
+
+namespace {
+
+const char* kSpecTier2 = R"(module @s35b_t2spec
+func @expected_fn(%a: i64) -> i64 {
+b0:
+  %c = iconst.i64 10
+  %r = add %a, %c
+  ret %r
+}
+func @unexpected_fn(%a: i64) -> i64 {
+b0:
+  %c = iconst.i64 100
+  %r = mul %a, %c
+  ret %r
+}
+func @caller(%fp: ptr, %x: i64) -> i64 {
+b0:
+  %seven = iconst.i64 7
+  %k = mul %x, %seven
+  %r = call_indirect.i64 %fp(%x)
+  %s = add %r, %k
+  ret %s
+}
+)";
+
+size_t count_op(const Function& fn, Opcode op) {
+    size_t n = 0;
+    for (const BasicBlock* bb : fn.blocks()) {
+        for (const Instruction* inst : *const_cast<BasicBlock*>(bb)) {
+            if (inst && inst->opcode() == op) ++n;
+        }
+    }
+    return n;
+}
+
+} // namespace
+
+TEST_CASE("Sweep35b - a speculative guard lowers to a branch to its resume block") {
+    SpecCase c;
+    const uint32_t id = c.guard()->resume_id();
+    REQUIRE(lower_guards_to_local_branch(*c.caller, c.mod, id));
+    DiagnosticReporter diag;
+    const bool ok = verify_function(*c.caller, &diag);
+    if (!ok) std::cerr << diag.format_all() << "\n";
+    REQUIRE(ok);
+    CHECK_EQ(count_op(*c.caller, Opcode::guard), 0u);
+    CHECK(c.caller->get_resume_target(id) == nullptr);
+    CHECK_EQ(count_op(*c.caller, Opcode::call_indirect), 1u);
+
+    // The interpreter takes the branch as it took the guard.
+    Interpreter interp;
+    const uintptr_t exp_ptr = interp.function_address(*c.expected_fn);
+    const uintptr_t unexp_ptr = interp.function_address(*c.unexpected_fn);
+    CHECK_EQ(interp.run(c.mod, "caller", {RuntimeValue::from_ptr(exp_ptr), RuntimeValue::from_i64(5)}).as_i64(),
+             15 + 35);
+    CHECK_EQ(interp.run(c.mod, "caller", {RuntimeValue::from_ptr(unexp_ptr), RuntimeValue::from_i64(5)}).as_i64(),
+             500 + 35);
+
+    // Tier 2 compiles it with no guard exit, on either target.
+    JitExecutionEngine jit;
+    REQUIRE(jit.compile_and_load(c.mod));
+    using CallerFn = int64_t (*)(void*, int64_t);
+    auto native = reinterpret_cast<CallerFn>(jit.get_symbol_address("caller"));
+    REQUIRE(native != nullptr);
+    CHECK_EQ(native(jit.get_symbol_address("expected_fn"), 6), 16 + 42);
+    CHECK_EQ(native(jit.get_symbol_address("unexpected_fn"), 6), 600 + 42);
+
+    aarch64::AArch64ISel isel(Target::aarch64_linux(), CallingConvention::aapcs64());
+    std::unique_ptr<LirFunction> lir = isel.lower(*c.caller);
+    REQUIRE(lir != nullptr);
+    for (const auto& bb : lir->blocks) {
+        for (const auto& inst : bb->instructions) {
+            if (inst) CHECK(inst->opcode != LirOpcode::GuardExit);
+        }
+    }
+    CHECK(lir->resume_entries.empty());
+}
+
+TEST_CASE("Sweep35b - tier 2 installs speculatively inlined code whose guard passes and fails natively") {
+    auto mod = parse_ok(kSpecTier2);
+    FunctionDispatchTable prog;
+    prog.tiering().type_feedback().get_or_create("caller").record_call_target(1, 0, "expected_fn");
+
+    // The tier-2 pipeline's speculation fires on this feedback: a guard
+    // Tier 0 does not have.
+    {
+        auto copy = parse_ok(kSpecTier2);
+        SpeculativeInlinerOptions opts;
+        opts.enable_inlining = true;
+        REQUIRE(run_speculative_devirtualization(*copy, prog.tiering().type_feedback(), opts));
+        const Function* spec = copy->get_function("caller");
+        REQUIRE_EQ(count_op(*spec, Opcode::guard), 1u);
+        CHECK_EQ(count_op(*mod->get_function("caller"), Opcode::guard), 0u);
+    }
+
+    FunctionHandle* h = prog.get_or_create("caller", mod->get_function("caller"));
+    CodeInstaller installer(prog);
+    CodeInstallResult res = installer.install_tier2(*h, *mod, "caller");
+    if (!res.success) std::cerr << res.error_message << "\n";
+    REQUIRE(res.success);
+    CHECK(!h->tier2_rejected());
+    CHECK(h->tier() == TierLevel::Tier2_Optimized);
+    REQUIRE(h->jit_engine() != nullptr);
+
+    // The pointers the tier-2 code's own func_addr yields: @expected_fn's
+    // passes the guard, @unexpected_fn's fails it and makes the call.
+    void* exp_native = h->jit_engine()->get_symbol_address("expected_fn");
+    void* unexp_native = h->jit_engine()->get_symbol_address("unexpected_fn");
+    REQUIRE(exp_native != nullptr);
+    REQUIRE(unexp_native != nullptr);
+    auto native = h->get_function_ptr<int64_t (*)(void*, int64_t)>();
+    REQUIRE(native != nullptr);
+
+    Interpreter interp;
+    interp.set_module(mod.get());
+    const uintptr_t exp_ptr = interp.function_address(*mod->get_function("expected_fn"));
+    const uintptr_t unexp_ptr = interp.function_address(*mod->get_function("unexpected_fn"));
+    const uint64_t deopts0 = prog.pipeline().tier2_deopts();
+    for (int64_t x : {int64_t{0}, int64_t{5}, int64_t{-3}, int64_t{1} << 40}) {
+        const int64_t want_pass =
+            interp.run(*mod->get_function("caller"), {RuntimeValue::from_ptr(exp_ptr), RuntimeValue::from_i64(x)})
+                .as_i64();
+        const int64_t want_fail =
+            interp.run(*mod->get_function("caller"), {RuntimeValue::from_ptr(unexp_ptr), RuntimeValue::from_i64(x)})
+                .as_i64();
+        CHECK_EQ(want_pass, x + 10 + 7 * x);
+        CHECK_EQ(want_fail, x * 100 + 7 * x);
+        CHECK_EQ(native(exp_native, x), want_pass);
+        CHECK_EQ(native(unexp_native, x), want_fail);
+    }
+    // A failing guard branched inside the tier-2 code: nothing deoptimized,
+    // and the code is still installed.
+    CHECK_EQ(prog.pipeline().tier2_deopts(), deopts0);
+    CHECK(h->tier() == TierLevel::Tier2_Optimized);
 }

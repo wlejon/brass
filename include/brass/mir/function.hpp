@@ -60,6 +60,7 @@ public:
     BasicBlock* get_block_by_id(uint32_t id) const noexcept;
 
     void add_resume_point(uint32_t resume_id, BasicBlock* target);
+    void remove_resume_point(uint32_t resume_id);
     BasicBlock* get_resume_target(uint32_t resume_id) const noexcept;
     const std::vector<std::pair<uint32_t, BasicBlock*>>& resume_points() const noexcept {
         return resume_points_;

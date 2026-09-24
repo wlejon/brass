@@ -40,4 +40,15 @@ bool run_speculative_devirtualization(
     const SpeculativeInlinerOptions& opts = {}
 );
 
+// Rewrites every guard of `fn` with resume id `resume_id` as the branch its
+// failure takes in the interpreters: `br_if %cond, <rest of its block>,
+// target(state values...)`, where target is the id's resume_table block of
+// `fn` (parameter i takes state value i), then drops that resume_table
+// entry. For guards that resume in their own function (the speculative
+// inliner's), whose failure needs no deoptimization. Returns false, changing
+// nothing, when a guard with the id has an exit stub or the id names no
+// resume_table block; the caller verifies the result (the resume block's
+// code must now be dominated by what it reads).
+bool lower_guards_to_local_branch(Function& fn, Module& mod, uint32_t resume_id);
+
 } // namespace brass

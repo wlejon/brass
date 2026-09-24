@@ -7,6 +7,7 @@
 #include <brass/gc/native_frames.hpp>
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/pass_catalog.hpp>
+#include <brass/mir/speculative_inliner.hpp>
 #include <brass/mir/verifier.hpp>
 #include <brass/runtime/host_symbols.hpp>
 #include <brass/runtime/type_feedback.hpp>
@@ -50,6 +51,38 @@ bool run_tier2_optimization_pipeline(Module& mod, const FeedbackRegistry& feedba
     DiagnosticReporter diag;
     if (verify_module(mod, &diag)) return true;
     errors = diag.format_all();
+    return false;
+}
+
+// A guard of the optimized code that matches no guard of the Tier-0
+// function (`tier0`, null when there is none) but resumes at a resume_table
+// block of the optimized function itself (the speculative inliner's, whose
+// block makes the original call) has nowhere to deoptimize to, and needs
+// nowhere: it becomes the branch to that block its failure takes in the
+// interpreters. Guards Tier 0 knows keep deoptimizing into it. Returns false
+// with `why` set when a lowered function no longer verifies.
+bool lower_local_resume_guards(Module& mod, Function& optimized, const Function* tier0, std::string& why) {
+    std::vector<uint32_t> ids;
+    for (const BasicBlock* bb : optimized.blocks()) {
+        if (!bb) continue;
+        for (const Instruction* inst : *const_cast<BasicBlock*>(bb)) {
+            if (!inst || inst->opcode() != Opcode::guard) continue;
+            const uint32_t id = inst->resume_id();
+            if (tier0 && tier0->find_guard(id)) continue;
+            if (optimized.guard_exit_stub(*inst) || !optimized.get_resume_target(id)) continue;
+            if (std::find(ids.begin(), ids.end(), id) == ids.end()) ids.push_back(id);
+        }
+    }
+    if (ids.empty()) return true;
+    for (uint32_t id : ids) {
+        if (!lower_guards_to_local_branch(optimized, mod, id)) {
+            why = "guard (resume id " + std::to_string(id) + ") could not branch to its resume block";
+            return false;
+        }
+    }
+    DiagnosticReporter diag;
+    if (verify_function(optimized, &diag)) return true;
+    why = "guards branching to their resume blocks left invalid MIR: " + diag.format_all();
     return false;
 }
 
@@ -821,6 +854,23 @@ CodeInstallResult CodeInstaller::install_tier2(
     // 1. Run full Tier-2 optimization passes
     if (std::string errors; !run_tier2_optimization_pipeline(*module, table_->tiering().type_feedback(), errors)) {
         return reject("Tier-2 optimization pipeline failed or invalidated module: " + errors);
+    }
+
+    // Guards that resume in the optimized function itself branch there.
+    // Each function is compared with the Tier-0 function its code would
+    // deoptimize into (none for one never published: no deopt resumer is
+    // registered for its code, so a guard of it can only branch).
+    for (Function* fn : module->functions()) {
+        if (!fn || fn->block_count() == 0) continue;
+        const Function* tier0 = nullptr;
+        if (fn == target_fn) {
+            tier0 = bound;
+        } else if (auto rec = bindings.siblings.find(std::string(fn->name())); rec != bindings.siblings.end()) {
+            tier0 = rec->second;
+        }
+        if (std::string why; !lower_local_resume_guards(*module, *fn, tier0, why)) {
+            return reject("Tier-2 code for '" + std::string(fn->name()) + "': " + why);
+        }
     }
 
     // Every guard of the optimized code must have somewhere to deoptimize
