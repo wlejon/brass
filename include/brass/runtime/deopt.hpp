@@ -262,7 +262,9 @@ void deopt_handler_decline() noexcept;
 // the native frames between the deoptimized frame (not included) and
 // `stack_limit` (the address of a local of the C++ frame that called the
 // native code). If none of them has one, `fallback` (the Tier-0 exception)
-// is rethrown unchanged. The handler's return value is ignored.
+// is rethrown unchanged. The handler's return value is ignored. A deopt
+// resumer (below) may call it the same way; `stack_limit` UINTPTR_MAX
+// searches every native frame above, as a native throw does.
 void deopt_handler_throw_native(uint64_t value, uintptr_t stack_limit, std::exception_ptr fallback) noexcept;
 
 // Per-code deopt continuation: given the materialized frame, finishes the

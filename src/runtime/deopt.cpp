@@ -295,11 +295,21 @@ const uint64_t* brass_deopt_exit_record(const brass::runtime::DeoptExitRecord* r
     brass::brass_capture_caller_frame(caller_rbp, caller_ip);
 
     if (auto resumer = find_resumer(record->code_entry)) {
-        brass::NativeFramesScope native_frames(caller_rbp, caller_ip);
-        // The resumer may run code that deoptimizes again and overwrites the
-        // thread frame: it works on a copy.
-        DeoptFrame snapshot = *frame;
-        uint64_t result = (*resumer)(snapshot);
+        // Like a handler, a resumer whose Tier-0 continuation threw asks for
+        // a native throw (deopt_handler_throw_native), raised once every
+        // scope here has ended.
+        t_handler_outcome = HandlerOutcome{};
+        uint64_t result = 0;
+        {
+            brass::NativeFramesScope native_frames(caller_rbp, caller_ip);
+            // The resumer may run code that deoptimizes again and overwrites
+            // the thread frame: it works on a copy.
+            DeoptFrame snapshot = *frame;
+            result = (*resumer)(snapshot);
+        }
+        HandlerOutcome outcome = std::move(t_handler_outcome);
+        t_handler_outcome = HandlerOutcome{};
+        if (outcome.throw_native) throw_for_handler(outcome, record->code_entry);
         t_deopt_result = result;
         return &t_deopt_result;
     }

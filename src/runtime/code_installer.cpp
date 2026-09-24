@@ -896,7 +896,17 @@ CodeInstallResult CodeInstaller::install_tier2(
                 std::fflush(stderr);
                 std::abort();
             }
-            return table->pipeline().resume_after_deopt(*hp, frame, *table, *compiled_from);
+            // A MIR exception the Tier-0 continuation throws must reach the
+            // native callers' landing pads (an `invoke` in tier-2 code) as a
+            // native throw does; a C++ exception passes them by.
+            try {
+                return table->pipeline().resume_after_deopt(*hp, frame, *table, *compiled_from);
+            } catch (const InterpreterThrownException& ex) {
+                deopt_handler_throw_native(ex.value().raw_bits(), UINTPTR_MAX, std::current_exception());
+            } catch (const BrassException& ex) {
+                deopt_handler_throw_native(ex.value().raw(), UINTPTR_MAX, std::current_exception());
+            }
+            return 0;
         });
         h.add_deopt_entry(entry, compiled_from_fn);
     };

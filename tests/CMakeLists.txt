@@ -123,6 +123,7 @@ add_executable(brass_unit_tests
     unit/test_sweep27_regressions.cpp
     unit/test_sweep29_regressions.cpp
     unit/test_sweep30_regressions.cpp
+    unit/test_sweep31_regressions.cpp
     unit/test_interp_coro_regressions.cpp
     unit/test_coro_mir_frames.cpp
     unit/test_exceptions_mir.cpp
