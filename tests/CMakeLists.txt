@@ -99,6 +99,7 @@ add_executable(brass_unit_tests
     unit/test_aarch64_image_relocs.cpp
     unit/test_aarch64_branch_relax.cpp
     unit/test_aarch64_execution_regressions.cpp
+    unit/test_stack_args_tiers.cpp
     unit/test_jit_unwind.cpp
     unit/test_software_pipeline.cpp
     differential/test_sched_differential.cpp

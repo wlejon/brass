@@ -99,7 +99,7 @@ void write_stub(uint8_t* p, const LazySymbolCell& cell) {
 // on the stack, and lr = the caller's return address. Saves every argument
 // register, asks brass_lazy_symbol_resolve for the target, restores them
 // and tail-jumps to the target (through x16, free at a call boundary), or
-// executes brk if there is none.
+// executes udf (SIGILL, as x64's ud2) if there is none.
 void* build_resolver_thunk() {
     using namespace brass::aarch64;
     CodeBuffer buffer;
@@ -133,7 +133,9 @@ void* build_resolver_thunk() {
     enc.cbz(GPR::X16, trap);
     enc.br(GPR::X16);
     buffer.bind(trap);
-    enc.brk(1);
+    // udf #0: an illegal instruction, as x64's ud2, so an unresolved call
+    // is reported the same way on both.
+    buffer.emit_inst(0x00000000u);
 
     // Process lifetime: cells of every table point here until resolved.
     auto* block = new JitMemoryBlock(buffer.size());

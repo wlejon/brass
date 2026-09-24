@@ -1,5 +1,6 @@
 #include <brass/codegen/jit_exec.hpp>
 #include "core/asm_symbol.hpp"
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 #include <iostream>
@@ -17,65 +18,62 @@ void partition_aarch64_invoke_args(
     out_args.target_fn = target_fn;
     stack_words.clear();
 
+    // The stack half of the convention every AArch64 tier reads (the tier-2
+    // entry in aarch64_isel.cpp, the baseline in aarch64_baseline_emit_call.cpp):
+    // an 8-byte slot per value (16, 16-aligned, for a vector), or on Apple
+    // the value's natural size and alignment.
+#if defined(__APPLE__)
+    constexpr bool apple = true;
+#else
+    constexpr bool apple = false;
+#endif
+    std::vector<uint8_t> stack;
+
     size_t gpr_idx = 0;
     size_t fpr_idx = 0;
 
     for (size_t i = 0; i < args.size(); ++i) {
         const auto& arg = args[i];
-        bool is_fpr = false;
-        if (param_types && i < param_types->size()) {
-            const Type& pt = (*param_types)[i];
-            is_fpr = pt.is_float() || pt.is_vector();
+        const Type t = (param_types && i < param_types->size()) ? (*param_types)[i] : arg.type();
+        const bool is_fpr = t.is_float() || t.is_vector();
+
+        // The value's bytes, little-endian, at its size.
+        uint8_t bytes[16] = {0};
+        size_t sz = t.size_in_bytes();
+        if (sz == 0 || sz > 16) sz = 8;
+        if (arg.is_vector()) {
+            std::memcpy(bytes, arg.v128_bytes(), 16);
+            sz = 16;
+        } else if (t.kind() == TypeKind::F32 || arg.is_f32()) {
+            const float f = arg.is_f32() ? arg.as_f32() : static_cast<float>(arg.as_f64());
+            std::memcpy(bytes, &f, sizeof(float));
+        } else if (t.is_float()) {
+            const double d = arg.as_f64();
+            std::memcpy(bytes, &d, sizeof(double));
         } else {
-            is_fpr = arg.is_f32() || arg.is_f64() || arg.is_vector();
+            const uint64_t v = arg.as_u64();
+            std::memcpy(bytes, &v, sizeof(v));
         }
 
-        if (is_fpr) {
-            if (fpr_idx < 8) {
-                if (arg.is_vector()) {
-                    std::memcpy(out_args.v[fpr_idx], arg.v128_bytes(), 16);
-                } else if (arg.is_f32()) {
-                    float f = arg.as_f32();
-                    std::memcpy(out_args.v[fpr_idx], &f, sizeof(float));
-                } else {
-                    double d = arg.as_f64();
-                    std::memcpy(out_args.v[fpr_idx], &d, sizeof(double));
-                }
-                fpr_idx++;
-            } else {
-                if (arg.is_vector()) {
-                    if ((stack_words.size() % 2) != 0) {
-                        stack_words.push_back(0); // 16-byte alignment padding
-                    }
-                    uint64_t words[2] = {0, 0};
-                    std::memcpy(words, arg.v128_bytes(), 16);
-                    stack_words.push_back(words[0]);
-                    stack_words.push_back(words[1]);
-                } else if (arg.is_f32()) {
-                    float f = arg.as_f32();
-                    uint64_t w = 0;
-                    std::memcpy(&w, &f, sizeof(float));
-                    stack_words.push_back(w);
-                } else {
-                    double d = arg.as_f64();
-                    uint64_t w = 0;
-                    std::memcpy(&w, &d, sizeof(double));
-                    stack_words.push_back(w);
-                }
-            }
-        } else {
-            uint64_t val = arg.as_u64();
-            if (gpr_idx < 8) {
-                out_args.x[gpr_idx++] = val;
-            } else {
-                stack_words.push_back(val);
-            }
+        if (is_fpr && fpr_idx < 8) {
+            std::memcpy(out_args.v[fpr_idx++], bytes, arg.is_vector() ? 16 : 8);
+            continue;
         }
+        if (!is_fpr && gpr_idx < 8) {
+            std::memcpy(&out_args.x[gpr_idx++], bytes, 8);
+            continue;
+        }
+        const size_t align = apple ? std::min<size_t>(sz, 16) : (sz >= 16 ? 16 : 8);
+        const size_t slot = apple ? sz : (sz >= 16 ? 16 : 8);
+        const size_t at = (stack.size() + align - 1) & ~(align - 1);
+        stack.resize(at + slot, 0);
+        std::memcpy(stack.data() + at, bytes, std::min(sz, slot));
     }
 
-    if ((stack_words.size() % 2) != 0) {
-        stack_words.push_back(0); // 16-byte stack alignment
-    }
+    // Whole words, an even number of them: 16-byte stack alignment.
+    stack.resize((stack.size() + 15) & ~size_t(15), 0);
+    stack_words.resize(stack.size() / 8);
+    if (!stack.empty()) std::memcpy(stack_words.data(), stack.data(), stack.size());
 
     out_args.stack_words = stack_words.empty() ? nullptr : stack_words.data();
     out_args.stack_word_count = stack_words.size();

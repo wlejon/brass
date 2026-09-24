@@ -693,6 +693,9 @@ void AArch64Encoder::emit_load_store_imm(bool is_load, uint8_t size_bytes, bool 
     uint32_t rn = reg_code(mem.base);
     uint32_t rt = reg_code(reg);
     int64_t off = mem.offset;
+    // opc: 00 store, 01 load, 10 sign-extending load to 64 bits (LDRSB /
+    // LDRSH / LDRSW) - the same field in every addressing mode.
+    const uint32_t opc = is_load ? ((is_signed && size_bytes < 8) ? 2u : 1u) : 0u;
 
     // Handle register offset
     if (mem.mode == AddrMode::RegOffset && mem.has_index()) {
@@ -700,7 +703,6 @@ void AArch64Encoder::emit_load_store_imm(bool is_load, uint8_t size_bytes, bool 
         uint32_t ext = static_cast<uint32_t>(mem.extend);
         uint32_t s = (mem.shift > 0) ? 1u : 0u;
         uint32_t size_code = 0;
-        uint32_t opc = is_load ? 1u : 0u;
 
         switch (size_bytes) {
         case 8: size_code = 3; break;
@@ -724,7 +726,6 @@ void AArch64Encoder::emit_load_store_imm(bool is_load, uint8_t size_bytes, bool 
         uint32_t simm9 = static_cast<uint32_t>(off) & 0x1FFu;
         uint32_t idx_mode = mem.is_pre_indexed() ? 3u : 1u; // 3 = pre, 1 = post
         uint32_t size_code = (size_bytes == 8) ? 3u : ((size_bytes == 4) ? 2u : ((size_bytes == 2) ? 1u : 0u));
-        uint32_t opc = is_load ? 1u : 0u;
         uint32_t inst = (size_code << 30) | (7u << 27) | (opc << 22) |
                         (simm9 << 12) | (idx_mode << 10) | (rn << 5) | rt;
         buffer_.emit_inst(inst);
@@ -735,14 +736,6 @@ void AArch64Encoder::emit_load_store_imm(bool is_load, uint8_t size_bytes, bool 
     if (off >= 0 && (off % size_bytes == 0) && (off / size_bytes <= 4095)) {
         uint32_t imm12 = static_cast<uint32_t>(off / size_bytes) & 0xFFFu;
         uint32_t size_code = (size_bytes == 8) ? 3u : ((size_bytes == 4) ? 2u : ((size_bytes == 2) ? 1u : 0u));
-        uint32_t opc = 0;
-        if (is_load) {
-            if (is_signed && size_bytes < 8) {
-                opc = 2u; // signed load
-            } else {
-                opc = 1u;
-            }
-        }
         uint32_t inst = (size_code << 30) | (7u << 27) | (1u << 24) | (opc << 22) |
                         (imm12 << 10) | (rn << 5) | rt;
         buffer_.emit_inst(inst);
@@ -750,7 +743,6 @@ void AArch64Encoder::emit_load_store_imm(bool is_load, uint8_t size_bytes, bool 
         // Unscaled LDUR/STUR
         uint32_t simm9 = static_cast<uint32_t>(off) & 0x1FFu;
         uint32_t size_code = (size_bytes == 8) ? 3u : ((size_bytes == 4) ? 2u : ((size_bytes == 2) ? 1u : 0u));
-        uint32_t opc = is_load ? 1u : 0u;
         uint32_t inst = (size_code << 30) | (7u << 27) | (opc << 22) |
                         (simm9 << 12) | (rn << 5) | rt;
         buffer_.emit_inst(inst);

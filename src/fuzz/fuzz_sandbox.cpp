@@ -15,6 +15,8 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <cstdint>
+#include <cstring>
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -34,6 +36,7 @@
 #include <sys/wait.h>
 #include <sys/resource.h>
 #include <sys/time.h>
+#include <sys/ucontext.h>
 #endif
 
 namespace brass::fuzz {
@@ -55,6 +58,7 @@ std::string_view status_name(ExecutionStatus status) noexcept {
 static thread_local bool s_in_protected = false;
 alignas(16) static thread_local CONTEXT s_recovery_context;
 static thread_local DWORD s_fault_code = 0;
+static thread_local uintptr_t s_fault_pc = 0;
 static thread_local volatile bool s_fault_occurred = false;
 
 static bool is_recoverable_fault(DWORD code) {
@@ -68,7 +72,12 @@ static bool is_recoverable_fault(DWORD code) {
            code == EXCEPTION_FLT_DIVIDE_BY_ZERO ||
            code == EXCEPTION_DATATYPE_MISALIGNMENT ||
            code == EXCEPTION_ARRAY_BOUNDS_EXCEEDED ||
-           code == EXCEPTION_IN_PAGE_ERROR;
+           code == EXCEPTION_IN_PAGE_ERROR ||
+#if defined(_M_ARM64)
+           // AArch64 code traps with brk (a division by zero, unreachable).
+           code == EXCEPTION_BREAKPOINT ||
+#endif
+           false;
 }
 
 static LONG WINAPI FuzzVectoredHandler(EXCEPTION_POINTERS* ep) {
@@ -77,6 +86,7 @@ static LONG WINAPI FuzzVectoredHandler(EXCEPTION_POINTERS* ep) {
         if (is_recoverable_fault(code)) {
             s_in_protected = false;
             s_fault_code = code;
+            s_fault_pc = reinterpret_cast<uintptr_t>(ep->ExceptionRecord->ExceptionAddress);
             s_fault_occurred = true;
             *ep->ContextRecord = s_recovery_context;
             return EXCEPTION_CONTINUE_EXECUTION;
@@ -101,19 +111,39 @@ static void format_win_fault(DWORD code, std::string& out_msg) {
     else if (code == EXCEPTION_ILLEGAL_INSTRUCTION) ss << " (Illegal Instruction)";
     else if (code == EXCEPTION_PRIV_INSTRUCTION) ss << " (Privileged Instruction)";
     else if (code == EXCEPTION_FLT_DIVIDE_BY_ZERO) ss << " (Float Divide by Zero)";
+    else if (code == EXCEPTION_BREAKPOINT) {
+        // The backend's divide-by-zero guard is `brk #0xd0`, reported as
+        // x64 reports its #DE.
+        uint32_t word = 0;
+        if (s_fault_pc != 0 && (s_fault_pc & 3u) == 0) std::memcpy(&word, reinterpret_cast<const void*>(s_fault_pc), sizeof(word));
+        ss << (word == (0xD4200000u | (0x0D0u << 5)) ? " (Integer Divide by Zero, brk)" : " (Breakpoint)");
+    }
     out_msg = ss.str();
 }
 #else
 static thread_local sigjmp_buf s_posix_recovery_env;
 static thread_local volatile sig_atomic_t s_posix_in_protected = 0;
 static thread_local volatile sig_atomic_t s_posix_fault_sig = 0;
+static thread_local volatile uintptr_t s_posix_fault_pc = 0;
+
+// The faulting instruction's address, where the platform exposes it.
+static uintptr_t posix_fault_pc(void* ctx) {
+#if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))
+    return static_cast<uintptr_t>(static_cast<ucontext_t*>(ctx)->uc_mcontext->__ss.__pc);
+#elif defined(__linux__) && defined(__aarch64__)
+    return static_cast<uintptr_t>(static_cast<ucontext_t*>(ctx)->uc_mcontext.pc);
+#else
+    (void)ctx;
+    return 0;
+#endif
+}
 
 static void posix_fuzz_sig_handler(int sig, siginfo_t* info, void* ctx) {
     (void)info;
-    (void)ctx;
     if (s_posix_in_protected) {
         s_posix_in_protected = 0;
         s_posix_fault_sig = sig;
+        s_posix_fault_pc = ctx ? posix_fault_pc(ctx) : 0;
         siglongjmp(s_posix_recovery_env, 1);
     }
     struct sigaction sa;
@@ -136,6 +166,9 @@ static void ensure_posix_signal_handler_installed() {
         sigaction(SIGSEGV, &sa, nullptr);
         sigaction(SIGBUS, &sa, nullptr);
         sigaction(SIGILL, &sa, nullptr);
+        // AArch64 code traps with brk (a division by zero, unreachable):
+        // SIGTRAP is its SIGFPE / SIGILL.
+        sigaction(SIGTRAP, &sa, nullptr);
     });
 }
 
@@ -146,6 +179,17 @@ static void format_posix_fault(int sig, std::string& out_msg) {
     else if (sig == SIGSEGV) ss << "Segmentation Fault (SIGSEGV)";
     else if (sig == SIGBUS) ss << "Bus Error (SIGBUS)";
     else if (sig == SIGILL) ss << "Illegal Instruction (SIGILL)";
+    else if (sig == SIGTRAP) {
+        // AArch64 has no divide fault: the backend guards every integer
+        // division with `brk #kBrkIntegerDivideByZero`, reported here as x64
+        // reports its #DE.
+        uint32_t word = 0;
+        const uintptr_t pc = s_posix_fault_pc;
+        if (pc != 0 && (pc & 3u) == 0) std::memcpy(&word, reinterpret_cast<const void*>(pc), sizeof(word));
+        constexpr uint32_t kBrkDivZero = 0xD4200000u | (0x0D0u << 5);
+        if (word == kBrkDivZero) ss << "Integer Divide by Zero (SIGTRAP, brk)";
+        else ss << "Breakpoint (SIGTRAP)";
+    }
     else ss << "Signal " << sig;
     out_msg = ss.str();
 }
@@ -414,6 +458,9 @@ ExecutionStatus DiffFuzzer::run_sandboxed_command(const std::string& command_lin
             return ExecutionStatus::CrashOrFault;
         } else if (sig == SIGILL) {
             out_log = "Hardware fault: STATUS_ILLEGAL_INSTRUCTION (SIGILL)";
+            return ExecutionStatus::CrashOrFault;
+        } else if (sig == SIGTRAP) {
+            out_log = "Hardware fault: STATUS_BREAKPOINT (SIGTRAP)";
             return ExecutionStatus::CrashOrFault;
         } else {
             out_log = "Process terminated by signal " + std::to_string(sig);

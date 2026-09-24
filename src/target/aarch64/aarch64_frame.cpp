@@ -102,6 +102,9 @@ MemAddress AArch64FrameLayout::local_frame_address(int32_t offset, const codegen
 }
 
 MemAddress AArch64FrameLayout::incoming_arg_address(int32_t caller_stack_offset, const codegen::FrameInfo& frame) {
+    // A leaf sets up no frame: FP is still the caller's and SP still points
+    // at the caller's outgoing arguments.
+    if (frame.is_leaf) return ptr(GPR::SP, caller_stack_offset);
     size_t outgoing_bytes = (frame.outgoing_arg_space + 15) & ~size_t(15);
     int64_t disp = static_cast<int64_t>(frame.total_frame_size - outgoing_bytes) + caller_stack_offset;
     return ptr(GPR::FP, disp);
