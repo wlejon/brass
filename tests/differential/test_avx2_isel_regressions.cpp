@@ -17,6 +17,8 @@
 //  - a 256-bit op with no 256-bit instruction (i64x4 vmul, integer vdiv)
 //    fell through to the 128-bit path with no opcode: the result was
 //    silently operand 0. It is now a compile error.
+// They run on AArch64 too, where a 256-bit value is a pair of V registers;
+// there an f64 lane-0 insert was a scalar fmov that cleared lane 1.
 
 using namespace brass;
 using namespace brass::test;
@@ -86,8 +88,8 @@ void build_lane_shuffle(Module& mod, std::string_view name, Type vec) {
     REQUIRE(verify_function(*fn));
 }
 
-bool skip_non_x64() {
-    if (!Target::host().is_x64()) {
+bool skip_no_v256_backend() {
+    if (!Target::host().is_x64() && !Target::host().is_aarch64()) {
         std::cout << "  [SKIP] AVX2 not supported on non-x86 host\n";
         return true;
     }
@@ -97,7 +99,7 @@ bool skip_non_x64() {
 } // namespace
 
 TEST_CASE("AVX2 ISel regression - integer vbroadcast goes through an xmm") {
-    if (skip_non_x64()) return;
+    if (skip_no_v256_backend()) return;
     Module mod("avx2_bcast");
     build_broadcast_add(mod, "i32x8_bcast", Type::i32x8(), Type::i32());
     build_broadcast_add(mod, "i64x4_bcast", Type::i64x4(), Type::i64());
@@ -111,7 +113,7 @@ TEST_CASE("AVX2 ISel regression - integer vbroadcast goes through an xmm") {
 }
 
 TEST_CASE("AVX2 ISel regression - lane extract / insert reach the high 128 bits") {
-    if (skip_non_x64()) return;
+    if (skip_no_v256_backend()) return;
     Module mod("avx2_lanes");
     build_lane_shuffle(mod, "i32x8_lanes", Type::i32x8());
     build_lane_shuffle(mod, "i64x4_lanes", Type::i64x4());
@@ -144,7 +146,7 @@ TEST_CASE("AVX2 ISel regression - lane extract / insert reach the high 128 bits"
 }
 
 TEST_CASE("AVX2 ISel regression - vneg / vnot / vsqrt act on all 256 bits") {
-    if (skip_non_x64()) return;
+    if (skip_no_v256_backend()) return;
     Module mod("avx2_unary");
     build_unary(mod, "f32x8_neg", Type::f32x8(), Opcode::vneg);
     build_unary(mod, "f64x4_neg", Type::f64x4(), Opcode::vneg);
@@ -174,7 +176,7 @@ TEST_CASE("AVX2 ISel regression - vneg / vnot / vsqrt act on all 256 bits") {
 }
 
 TEST_CASE("AVX2 ISel regression - a 256-bit op with no instruction is a compile error") {
-    if (skip_non_x64()) return;
+    if (skip_no_v256_backend()) return;
     struct Case { const char* name; Type type; Opcode op; };
     const Case cases[] = {
         {"i64x4_mul", Type::i64x4(), Opcode::vmul},

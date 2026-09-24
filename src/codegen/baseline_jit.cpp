@@ -112,24 +112,7 @@ RuntimeValue BaselineCompiledFunction::invoke(const std::vector<RuntimeValue>& a
 
     AArch64InvokeResult result;
     aarch64_invoke_thunk(&invoke_args, &result);
-
-    if (return_type_.is_void()) return RuntimeValue::from_void();
-    if (return_type_.is_vector()) return RuntimeValue::from_v128(return_type_, result.q0);
-    if (return_type_.is_float()) {
-        if (return_type_.kind() == TypeKind::F32) {
-            float f = 0.0f;
-            std::memcpy(&f, result.q0, sizeof(float));
-            return RuntimeValue::from_f32(f);
-        } else {
-            double d = 0.0;
-            std::memcpy(&d, result.q0, sizeof(double));
-            return RuntimeValue::from_f64(d);
-        }
-    }
-    if (return_type_.kind() == TypeKind::I32) return RuntimeValue::from_i32(static_cast<int32_t>(result.x0));
-    if (return_type_.is_pointer()) return RuntimeValue::from_ptr(static_cast<uintptr_t>(result.x0));
-    if (return_type_.is_gcref()) return RuntimeValue::from_gcref(static_cast<uintptr_t>(result.x0));
-    return RuntimeValue::from_i64(static_cast<int64_t>(result.x0));
+    return aarch64_invoke_result_value(return_type_, result);
 #else
     auto get_i64 = [&](size_t idx) -> int64_t {
         if (idx >= args.size()) return 0;

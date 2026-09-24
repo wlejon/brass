@@ -37,6 +37,29 @@ void partition_aarch64_invoke_args(
         const Type t = (param_types && i < param_types->size()) ? (*param_types)[i] : arg.type();
         const bool is_fpr = t.is_float() || t.is_vector();
 
+        auto push_stack = [&](const uint8_t* bytes, size_t sz, size_t align, size_t slot) {
+            const size_t at = (stack.size() + align - 1) & ~(align - 1);
+            stack.resize(at + slot, 0);
+            std::memcpy(stack.data() + at, bytes, std::min(sz, slot));
+        };
+
+        // A 256-bit vector is two 128-bit halves: two V registers, or the
+        // last V register and the stack, or 32 bytes of stack
+        // (aarch64_isel.cpp).
+        if (t.is_v256() || arg.is_v256()) {
+            const uint8_t* b = static_cast<const uint8_t*>(arg.v128_bytes());
+            if (fpr_idx + 1 < 8) {
+                std::memcpy(out_args.v[fpr_idx++], b, 16);
+                std::memcpy(out_args.v[fpr_idx++], b + 16, 16);
+            } else if (fpr_idx < 8) {
+                std::memcpy(out_args.v[fpr_idx++], b, 16);
+                push_stack(b + 16, 16, 16, 16);
+            } else {
+                push_stack(b, 32, 16, 32);
+            }
+            continue;
+        }
+
         // The value's bytes, little-endian, at its size.
         uint8_t bytes[16] = {0};
         size_t sz = t.size_in_bytes();
@@ -63,11 +86,8 @@ void partition_aarch64_invoke_args(
             std::memcpy(&out_args.x[gpr_idx++], bytes, 8);
             continue;
         }
-        const size_t align = apple ? std::min<size_t>(sz, 16) : (sz >= 16 ? 16 : 8);
-        const size_t slot = apple ? sz : (sz >= 16 ? 16 : 8);
-        const size_t at = (stack.size() + align - 1) & ~(align - 1);
-        stack.resize(at + slot, 0);
-        std::memcpy(stack.data() + at, bytes, std::min(sz, slot));
+        push_stack(bytes, sz, apple ? std::min<size_t>(sz, 16) : (sz >= 16 ? 16 : 8),
+                   apple ? sz : (sz >= 16 ? 16 : 8));
     }
 
     // Whole words, an even number of them: 16-byte stack alignment.
@@ -77,6 +97,32 @@ void partition_aarch64_invoke_args(
 
     out_args.stack_words = stack_words.empty() ? nullptr : stack_words.data();
     out_args.stack_word_count = stack_words.size();
+}
+
+RuntimeValue aarch64_invoke_result_value(Type ret_type, const AArch64InvokeResult& result) {
+    if (ret_type.is_void()) return RuntimeValue::from_void();
+    if (ret_type.is_v256()) {
+        // V0 then V1 (aarch64_isel_branch.cpp).
+        alignas(16) uint8_t b[32];
+        std::memcpy(b, result.q0, 16);
+        std::memcpy(b + 16, result.q1, 16);
+        return RuntimeValue::from_v256(ret_type, b);
+    }
+    if (ret_type.is_vector()) return RuntimeValue::from_v128(ret_type, result.q0);
+    if (ret_type.is_float()) {
+        if (ret_type.kind() == TypeKind::F32) {
+            float f = 0.0f;
+            std::memcpy(&f, result.q0, sizeof(float));
+            return RuntimeValue::from_f32(f);
+        }
+        double d = 0.0;
+        std::memcpy(&d, result.q0, sizeof(double));
+        return RuntimeValue::from_f64(d);
+    }
+    if (ret_type.kind() == TypeKind::I32) return RuntimeValue::from_i32(static_cast<int32_t>(result.x0));
+    if (ret_type.is_pointer()) return RuntimeValue::from_ptr(static_cast<uintptr_t>(result.x0));
+    if (ret_type.is_gcref()) return RuntimeValue::from_gcref(static_cast<uintptr_t>(result.x0));
+    return RuntimeValue::from_i64(static_cast<int64_t>(result.x0));
 }
 
 } // namespace brass::codegen
@@ -858,6 +904,7 @@ __asm__(
     "    str x0, [x19, #0]\n"
     "    str x1, [x19, #8]\n"
     "    str q0, [x19, #16]\n"
+    "    str q1, [x19, #32]\n"
     "    mov sp, x29\n"
     "    ldp x19, x20, [sp, #16]\n"
     "    ldp x29, x30, [sp], #32\n"
@@ -898,34 +945,7 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
 #if defined(__GNUC__) || defined(__clang__)
     aarch64_invoke_thunk(&invoke_args, &result);
 #endif
-
-    if (ret_type.is_void()) {
-        return RuntimeValue::from_void();
-    }
-    if (ret_type.is_vector()) {
-        return RuntimeValue::from_v128(ret_type, result.q0);
-    }
-    if (ret_type.is_float()) {
-        if (ret_type.kind() == TypeKind::F32) {
-            float f = 0.0f;
-            std::memcpy(&f, result.q0, sizeof(float));
-            return RuntimeValue::from_f32(f);
-        } else {
-            double d = 0.0;
-            std::memcpy(&d, result.q0, sizeof(double));
-            return RuntimeValue::from_f64(d);
-        }
-    }
-    if (ret_type.kind() == TypeKind::I32) {
-        return RuntimeValue::from_i32(static_cast<int32_t>(result.x0));
-    }
-    if (ret_type.is_pointer()) {
-        return RuntimeValue::from_ptr(static_cast<uintptr_t>(result.x0));
-    }
-    if (ret_type.is_gcref()) {
-        return RuntimeValue::from_gcref(static_cast<uintptr_t>(result.x0));
-    }
-    return RuntimeValue::from_i64(static_cast<int64_t>(result.x0));
+    return aarch64_invoke_result_value(ret_type, result);
 }
 
 } // namespace brass::codegen

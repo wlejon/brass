@@ -304,7 +304,7 @@ bb0:
     CHECK_EQ(interp.run(*mod, "d64", {i64(min64), i64(-1)}).as_i64(), min64);
     CHECK_EQ(interp.run(*mod, "d32", {i32(min32), i32(-1)}).as_i32(), min32);
 
-    if (Target::host().is_x64()) {
+    if (Target::host().is_x64() || Target::host().is_aarch64()) {
         codegen::BaselineJitCompiler baseline;
         auto compiled = baseline.compile_module(*mod);
         for (const auto& cf : compiled) {

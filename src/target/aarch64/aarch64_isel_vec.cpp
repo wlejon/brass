@@ -628,11 +628,14 @@ void AArch64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& li
                         lir_bb.append_inst(std::move(ins));
                     } else if (t.kind() == TypeKind::F64x4) {
                         if (lane == 0) {
-                            auto movsd = std::make_unique<LirInst>(LirOpcode::Movsd);
-                            movsd->add_def(LirOperand::vreg(dst.lo, 8));
-                            movsd->add_use(LirOperand::vreg(val, 8));
-                            movsd->mir_origin = &inst;
-                            lir_bb.append_inst(std::move(movsd));
+                            // {val[0], dst.lo[1]}: a scalar fmov would clear lane 1.
+                            auto shuf = std::make_unique<LirInst>(LirOpcode::Shufpd);
+                            shuf->add_def(LirOperand::vreg(dst.lo, 16));
+                            shuf->add_use(LirOperand::vreg(val, 16));
+                            shuf->add_use(LirOperand::vreg(dst.lo, 16));
+                            shuf->add_use(LirOperand::imm(0x02, 1));
+                            shuf->mir_origin = &inst;
+                            lir_bb.append_inst(std::move(shuf));
                         } else {
                             auto shuf = std::make_unique<LirInst>(LirOpcode::Shufpd);
                             shuf->add_def(LirOperand::vreg(dst.lo, 16));
@@ -673,11 +676,14 @@ void AArch64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& li
                         lir_bb.append_inst(std::move(ins));
                     } else if (t.kind() == TypeKind::F64x4) {
                         if (adj_lane == 0) {
-                            auto movsd = std::make_unique<LirInst>(LirOpcode::Movsd);
-                            movsd->add_def(LirOperand::vreg(dst.hi, 8));
-                            movsd->add_use(LirOperand::vreg(val, 8));
-                            movsd->mir_origin = &inst;
-                            lir_bb.append_inst(std::move(movsd));
+                            // {val[0], dst.hi[1]}: a scalar fmov would clear lane 1.
+                            auto shuf = std::make_unique<LirInst>(LirOpcode::Shufpd);
+                            shuf->add_def(LirOperand::vreg(dst.hi, 16));
+                            shuf->add_use(LirOperand::vreg(val, 16));
+                            shuf->add_use(LirOperand::vreg(dst.hi, 16));
+                            shuf->add_use(LirOperand::imm(0x02, 1));
+                            shuf->mir_origin = &inst;
+                            lir_bb.append_inst(std::move(shuf));
                         } else {
                             auto shuf = std::make_unique<LirInst>(LirOpcode::Shufpd);
                             shuf->add_def(LirOperand::vreg(dst.hi, 16));
@@ -723,11 +729,14 @@ void AArch64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& li
                 lir_bb.append_inst(std::move(ins));
             } else if (t.kind() == TypeKind::F64x2) {
                 if (lane == 0) {
-                    auto movsd = std::make_unique<LirInst>(LirOpcode::Movsd);
-                    movsd->add_def(LirOperand::vreg(dst, 8));
-                    movsd->add_use(LirOperand::vreg(val, 8));
-                    movsd->mir_origin = &inst;
-                    lir_bb.append_inst(std::move(movsd));
+                    // {val[0], dst[1]}: a scalar fmov would clear lane 1.
+                    auto shuf = std::make_unique<LirInst>(LirOpcode::Shufpd);
+                    shuf->add_def(LirOperand::vreg(dst, 16));
+                    shuf->add_use(LirOperand::vreg(val, 16));
+                    shuf->add_use(LirOperand::vreg(dst, 16));
+                    shuf->add_use(LirOperand::imm(0x02, 1));
+                    shuf->mir_origin = &inst;
+                    lir_bb.append_inst(std::move(shuf));
                 } else {
                     auto shuf = std::make_unique<LirInst>(LirOpcode::Shufpd);
                     shuf->add_def(LirOperand::vreg(dst, 16));

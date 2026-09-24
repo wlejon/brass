@@ -107,7 +107,11 @@ struct alignas(16) AArch64InvokeResult {
     uint64_t x0 = 0;
     uint64_t x1 = 0;
     alignas(16) uint8_t q0[16] = {0};
+    alignas(16) uint8_t q1[16] = {0};   // the high half of a 256-bit vector result
 };
+
+// The value `result` holds for a function returning `ret_type`.
+RuntimeValue aarch64_invoke_result_value(Type ret_type, const AArch64InvokeResult& result);
 
 void partition_aarch64_invoke_args(
     const std::vector<RuntimeValue>& args,
