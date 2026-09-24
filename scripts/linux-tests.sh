@@ -102,13 +102,14 @@ cmd_build_a64() {
     configure "$A64_BUILD" \
         -DCMAKE_TOOLCHAIN_FILE="$SRC/cmake/toolchains/aarch64-linux-gnu.cmake" \
         -DBRASS_XROOT="$XROOT"
-    cmake --build "$A64_BUILD" --target brass_unit_tests brass-fuzz -j "$(nproc)"
+    # brass-opt: the brass_opt_cli.* correctness tests run it.
+    cmake --build "$A64_BUILD" --target brass_unit_tests brass-fuzz brass-opt -j "$(nproc)"
 }
 
 cmd_build_x64() {
     log "building x86_64 ($X64_BUILD)"
     configure "$X64_BUILD"
-    cmake --build "$X64_BUILD" --target brass_unit_tests brass-fuzz -j "$(nproc)"
+    cmake --build "$X64_BUILD" --target brass_unit_tests brass-fuzz brass-opt -j "$(nproc)"
 }
 
 run_ctest() { # <build-dir>
