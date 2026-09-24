@@ -1,5 +1,6 @@
 #include "sccp_lattice.hpp"
 #include "int_fold.hpp"
+#include <brass/interpreter/float_arith.hpp>
 #include <bit>
 #include <cmath>
 #include <limits>
@@ -115,10 +116,11 @@ LatticeValue evaluate_binary(Opcode op, Type res_type, const LatticeValue& lhs, 
             float f1 = lhs.as_f32();
             float f2 = rhs.as_f32();
             switch (op) {
-                case Opcode::add: return LatticeValue::make_f32(f1 + f2);
-                case Opcode::sub: return LatticeValue::make_f32(f1 - f2);
-                case Opcode::mul: return LatticeValue::make_f32(f1 * f2);
-                case Opcode::sdiv: return LatticeValue::make_f32(f1 / f2);
+                // fparith pins the NaN operand every tier returns.
+                case Opcode::add: return LatticeValue::make_f32(fparith::add(f1, f2));
+                case Opcode::sub: return LatticeValue::make_f32(fparith::sub(f1, f2));
+                case Opcode::mul: return LatticeValue::make_f32(fparith::mul(f1, f2));
+                case Opcode::sdiv: return LatticeValue::make_f32(fparith::div(f1, f2));
                 case Opcode::fmin_f32: return LatticeValue::make_f32(std::fmin(f1, f2));
                 case Opcode::fmax_f32: return LatticeValue::make_f32(std::fmax(f1, f2));
                 case Opcode::eq: return LatticeValue::make_i32(f1 == f2 ? 1 : 0);
@@ -133,10 +135,10 @@ LatticeValue evaluate_binary(Opcode op, Type res_type, const LatticeValue& lhs, 
             double d1 = lhs.as_f64();
             double d2 = rhs.as_f64();
             switch (op) {
-                case Opcode::add: return LatticeValue::make_f64(d1 + d2);
-                case Opcode::sub: return LatticeValue::make_f64(d1 - d2);
-                case Opcode::mul: return LatticeValue::make_f64(d1 * d2);
-                case Opcode::sdiv: return LatticeValue::make_f64(d1 / d2);
+                case Opcode::add: return LatticeValue::make_f64(fparith::add(d1, d2));
+                case Opcode::sub: return LatticeValue::make_f64(fparith::sub(d1, d2));
+                case Opcode::mul: return LatticeValue::make_f64(fparith::mul(d1, d2));
+                case Opcode::sdiv: return LatticeValue::make_f64(fparith::div(d1, d2));
                 case Opcode::fmin_f64: return LatticeValue::make_f64(std::fmin(d1, d2));
                 case Opcode::fmax_f64: return LatticeValue::make_f64(std::fmax(d1, d2));
                 case Opcode::eq: return LatticeValue::make_i32(d1 == d2 ? 1 : 0);

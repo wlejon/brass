@@ -1,5 +1,6 @@
 #include <brass/codegen/jit_exec.hpp>
 #include <brass/runtime/host_symbols.hpp>
+#include <brass/gc/native_frames.hpp>
 #include "core/asm_symbol.hpp"
 #include <algorithm>
 #include <cstring>
@@ -261,6 +262,7 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
     partition_x64_win64_invoke_args(args, param_types, addr, invoke_args, stack_words);
 
     X64Win64InvokeResult result;
+    GeneratedCodeEntryScope entry;  // walks need not unwind the host's stack
     x64_win64_invoke_thunk(&invoke_args, &result);
 #else
     X64SysVInvokeArgs invoke_args;

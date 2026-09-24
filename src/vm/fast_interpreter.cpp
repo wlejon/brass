@@ -5,6 +5,7 @@
 // helpers in the other fast_interpreter_*.cpp files.
 
 #include "fast_interpreter_impl.hpp"
+#include <brass/interpreter/float_arith.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/host_symbols.hpp>
@@ -259,14 +260,15 @@ loop_start:
         UN(neg_i32, static_cast<uint32_t>(0u - static_cast<uint32_t>(x)))
         UN(neg_i64, 0ull - x)
 
-        BIN_F32(add_f32, a + b)
-        BIN_F64(add_f64, a + b)
-        BIN_F32(sub_f32, a - b)
-        BIN_F64(sub_f64, a - b)
-        BIN_F32(mul_f32, a * b)
-        BIN_F64(mul_f64, a * b)
-        BIN_F32(fdiv_f32, a / b)
-        BIN_F64(fdiv_f64, a / b)
+        // fparith pins the NaN operand every tier returns (float_arith.hpp).
+        BIN_F32(add_f32, fparith::add(a, b))
+        BIN_F64(add_f64, fparith::add(a, b))
+        BIN_F32(sub_f32, fparith::sub(a, b))
+        BIN_F64(sub_f64, fparith::sub(a, b))
+        BIN_F32(mul_f32, fparith::mul(a, b))
+        BIN_F64(mul_f64, fparith::mul(a, b))
+        BIN_F32(fdiv_f32, fparith::div(a, b))
+        BIN_F64(fdiv_f64, fparith::div(a, b))
         UN(neg_f32, put_f32(-get_f32(x)))
         UN(neg_f64, put_f64(-get_f64(x)))
         // dst already holds the addend.

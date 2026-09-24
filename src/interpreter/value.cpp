@@ -1,4 +1,5 @@
 #include <brass/interpreter/value.hpp>
+#include <brass/interpreter/float_arith.hpp>
 #include <iostream>
 #include <sstream>
 #include <iomanip>
@@ -10,10 +11,10 @@ namespace brass {
 
 RuntimeValue val_add(RuntimeValue lhs, RuntimeValue rhs) {
     if (lhs.is_f64() || rhs.is_f64()) {
-        return RuntimeValue::from_f64(lhs.as_f64() + rhs.as_f64());
+        return RuntimeValue::from_f64(fparith::add(lhs.as_f64(), rhs.as_f64()));
     }
     if (lhs.is_f32() || rhs.is_f32()) {
-        return RuntimeValue::from_f32(lhs.as_f32() + rhs.as_f32());
+        return RuntimeValue::from_f32(fparith::add(lhs.as_f32(), rhs.as_f32()));
     }
     if (lhs.is_ptr() || lhs.is_gcref()) {
         uint64_t a = lhs.raw_bits();
@@ -34,10 +35,10 @@ RuntimeValue val_add(RuntimeValue lhs, RuntimeValue rhs) {
 
 RuntimeValue val_sub(RuntimeValue lhs, RuntimeValue rhs) {
     if (lhs.is_f64() || rhs.is_f64()) {
-        return RuntimeValue::from_f64(lhs.as_f64() - rhs.as_f64());
+        return RuntimeValue::from_f64(fparith::sub(lhs.as_f64(), rhs.as_f64()));
     }
     if (lhs.is_f32() || rhs.is_f32()) {
-        return RuntimeValue::from_f32(lhs.as_f32() - rhs.as_f32());
+        return RuntimeValue::from_f32(fparith::sub(lhs.as_f32(), rhs.as_f32()));
     }
     if (lhs.is_ptr() || lhs.is_gcref()) {
         uint64_t a = lhs.raw_bits();
@@ -58,10 +59,10 @@ RuntimeValue val_sub(RuntimeValue lhs, RuntimeValue rhs) {
 
 RuntimeValue val_mul(RuntimeValue lhs, RuntimeValue rhs) {
     if (lhs.is_f64() || rhs.is_f64()) {
-        return RuntimeValue::from_f64(lhs.as_f64() * rhs.as_f64());
+        return RuntimeValue::from_f64(fparith::mul(lhs.as_f64(), rhs.as_f64()));
     }
     if (lhs.is_f32() || rhs.is_f32()) {
-        return RuntimeValue::from_f32(lhs.as_f32() * rhs.as_f32());
+        return RuntimeValue::from_f32(fparith::mul(lhs.as_f32(), rhs.as_f32()));
     }
     if (lhs.is_i32() && rhs.is_i32()) {
         uint32_t a = lhs.as_u32();
@@ -75,10 +76,10 @@ RuntimeValue val_mul(RuntimeValue lhs, RuntimeValue rhs) {
 
 RuntimeValue val_sdiv(RuntimeValue lhs, RuntimeValue rhs) {
     if (lhs.is_f64() || rhs.is_f64()) {
-        return RuntimeValue::from_f64(lhs.as_f64() / rhs.as_f64());
+        return RuntimeValue::from_f64(fparith::div(lhs.as_f64(), rhs.as_f64()));
     }
     if (lhs.is_f32() || rhs.is_f32()) {
-        return RuntimeValue::from_f32(lhs.as_f32() / rhs.as_f32());
+        return RuntimeValue::from_f32(fparith::div(lhs.as_f32(), rhs.as_f32()));
     }
     if (lhs.is_i32() && rhs.is_i32()) {
         int32_t b = rhs.as_i32();

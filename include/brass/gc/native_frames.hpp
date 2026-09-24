@@ -75,6 +75,43 @@ private:
     friend void brass_append_native_frame_roots(std::vector<uintptr_t*>& roots);
 };
 
+// Marks, for its lifetime, a place where compiled (C++) code calls generated
+// code: brass's invoke paths hold one around the call, and a host that calls
+// a generated function pointer should too. On Windows x64, a walk that
+// leaves the outermost generated frame for compiled code unwinds through it
+// looking for generated frames further down, which on a plain host stack
+// means every frame to the thread's base. The frames beneath a live scope
+// cannot change while it lives, so the first walk that unwinds past it
+// records what it found beneath (the next generated frame, or none), and
+// every later walk stops there with that answer: a collection's cost stops
+// depending on the host's stack depth. The record is always the result of a
+// real unwind, so a scope anywhere is safe; without one a walk still unwinds
+// to the base. Scopes nest; destroy them in reverse order (RAII).
+class GeneratedCodeEntryScope {
+public:
+    GeneratedCodeEntryScope() noexcept;
+    ~GeneratedCodeEntryScope();
+    GeneratedCodeEntryScope(const GeneratedCodeEntryScope&) = delete;
+    GeneratedCodeEntryScope& operator=(const GeneratedCodeEntryScope&) = delete;
+
+    // Walk-internal (stack_walker.cpp).
+    enum class Beneath : uint8_t { Unknown, Nothing, Generated };
+    struct Memo {
+        Beneath beneath = Beneath::Unknown;
+        const void* maps = nullptr;  // the stack maps the answer was found with
+        uintptr_t rsp = 0, rbp = 0, ip = 0;  // the generated frame found
+    };
+    Memo memo;
+    GeneratedCodeEntryScope* outer() const noexcept { return prev_; }
+    uintptr_t address() const noexcept { return reinterpret_cast<uintptr_t>(this); }
+
+private:
+    GeneratedCodeEntryScope* prev_;
+};
+
+// The innermost live GeneratedCodeEntryScope on this thread, or nullptr.
+GeneratedCodeEntryScope* brass_innermost_entry_scope() noexcept;
+
 // The gcref slots of every recorded run of native frames on this thread,
 // and the roots of every ThreadRootsScope.
 void brass_append_native_frame_roots(std::vector<uintptr_t*>& roots);

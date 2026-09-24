@@ -1,5 +1,6 @@
 #include <brass/gc/stack_walker.hpp>
 #include <brass/gc/code_stack_maps.hpp>
+#include <brass/gc/native_frames.hpp>
 #include <iostream>
 
 #if defined(_WIN32)
@@ -27,7 +28,10 @@ namespace brass {
 // function), [rbp] and [rbp + 8] say nothing about the frames above. On
 // Windows x64 the walk then unwinds through the compiled frames with their
 // unwind data until it returns to generated code, and resumes the chain
-// there; a compiled frame's slots are never reported.
+// there; a compiled frame's slots are never reported. Beneath the outermost
+// generated frame lies the host's stack, which only a
+// GeneratedCodeEntryScope keeps that unwind from crossing to the thread's
+// base on every walk (native_frames.hpp).
 //
 // Elsewhere, compiled frames may omit the frame pointer, and nothing
 // describes them to the walk: it follows [rbp] regardless, which is right
@@ -36,12 +40,29 @@ namespace brass {
 // the generated caller with a NativeFramesScope, which starts a walk of its
 // own at that frame; a host function that calls generated or interpreted
 // code from generated code must do the same (native_frames.hpp).
+namespace {
+thread_local size_t t_unwind_steps = 0;
+} // namespace
+
+size_t brass_stack_walk_unwind_steps() noexcept { return t_unwind_steps; }
+
 size_t brass_stack_walk(
     uintptr_t top_rbp,
     uintptr_t top_return_ip,
     const ModuleStackMap& stack_maps,
     brass_root_visitor_fn visitor,
     void* user_data
+) {
+    return brass_stack_walk_bounded(top_rbp, top_return_ip, stack_maps, visitor, user_data, UINTPTR_MAX);
+}
+
+size_t brass_stack_walk_bounded(
+    uintptr_t top_rbp,
+    uintptr_t top_return_ip,
+    const ModuleStackMap& stack_maps,
+    brass_root_visitor_fn visitor,
+    void* user_data,
+    uintptr_t stop_at
 ) {
     size_t frame_count = 0;
     uintptr_t cur_rbp = top_rbp;
@@ -76,6 +97,71 @@ size_t brass_stack_walk(
     };
 
     size_t steps = 0;
+
+#if defined(_WIN32) && defined(_M_X64)
+    // Unwinds ctx, a compiled frame, up to the next generated frame. Entry
+    // scopes (native_frames.hpp) the unwind passes answer for the frames
+    // beneath them, or learn the answer this unwind finds.
+    enum class UnwindResult { Generated, Nothing, GaveUp };
+    GeneratedCodeEntryScope* entry = brass_innermost_entry_scope();
+    auto unwind_to_generated = [&](CONTEXT& ctx) -> UnwindResult {
+        constexpr size_t MAX_PENDING = 16;
+        GeneratedCodeEntryScope* pending[MAX_PENDING];
+        size_t npending = 0;
+        auto on_this_stack = [&](const GeneratedCodeEntryScope* e) {
+            return e->address() >= stack_low && e->address() < stack_high;
+        };
+        while (entry && (!on_this_stack(entry) || entry->address() < ctx.Rsp)) entry = entry->outer();
+        UnwindResult result = UnwindResult::GaveUp;
+        while (steps++ < MAX_STEPS) {
+            const DWORD64 prev_rsp = ctx.Rsp;
+            ++t_unwind_steps;
+            if (!detail::win64_unwind_one(ctx)) {  // base of the stack
+                result = UnwindResult::Nothing;
+                break;
+            }
+            if (ctx.Rsp <= prev_rsp || ctx.Rsp < stack_low || ctx.Rsp > stack_high) break;
+            if (ctx.Rsp >= stop_at) break;
+            bool answered = false;
+            while (entry && ctx.Rsp > entry->address()) {
+                GeneratedCodeEntryScope::Memo& m = entry->memo;
+                if (on_this_stack(entry) && m.beneath != GeneratedCodeEntryScope::Beneath::Unknown &&
+                    m.maps == &stack_maps) {
+                    if (m.beneath == GeneratedCodeEntryScope::Beneath::Generated) {
+                        ctx.Rsp = m.rsp;
+                        ctx.Rbp = m.rbp;
+                        ctx.Rip = m.ip;
+                        result = UnwindResult::Generated;
+                    } else {
+                        result = UnwindResult::Nothing;
+                    }
+                    answered = true;
+                    break;
+                }
+                if (on_this_stack(entry) && npending < MAX_PENDING) pending[npending++] = entry;
+                entry = entry->outer();
+            }
+            if (answered) break;
+            if (find_map(ctx.Rip) != nullptr || !detail::win64_ip_in_image(ctx.Rip)) {
+                result = UnwindResult::Generated;
+                break;
+            }
+        }
+        if (result != UnwindResult::GaveUp) {
+            for (size_t i = 0; i < npending; ++i) {
+                GeneratedCodeEntryScope::Memo& m = pending[i]->memo;
+                m.beneath = result == UnwindResult::Generated ? GeneratedCodeEntryScope::Beneath::Generated
+                                                              : GeneratedCodeEntryScope::Beneath::Nothing;
+                m.maps = &stack_maps;
+                m.rsp = static_cast<uintptr_t>(ctx.Rsp);
+                m.rbp = static_cast<uintptr_t>(ctx.Rbp);
+                m.ip = static_cast<uintptr_t>(ctx.Rip);
+            }
+        }
+        return result;
+    };
+#endif
+
     while (cur_return_ip != 0 && frame_count < MAX_FRAMES && steps++ < MAX_STEPS) {
         const FunctionStackMap* fn_map = find_map(cur_return_ip);
 
@@ -91,17 +177,10 @@ size_t brass_stack_walk(
             ctx.Rip = cur_return_ip;
             ctx.Rsp = callee_rbp + 16;
             ctx.Rbp = cur_rbp;
-            bool reached_generated = false;
-            while (steps++ < MAX_STEPS) {
-                const DWORD64 prev_rsp = ctx.Rsp;
-                if (!detail::win64_unwind_one(ctx)) break;  // base of the stack
-                if (ctx.Rsp <= prev_rsp || ctx.Rsp < stack_low || ctx.Rsp > stack_high) break;
-                if (find_map(ctx.Rip) != nullptr || !detail::win64_ip_in_image(ctx.Rip)) {
-                    reached_generated = true;
-                    break;
-                }
-            }
-            if (!reached_generated) break;
+            if (ctx.Rsp >= stop_at) break;
+            const UnwindResult res = unwind_to_generated(ctx);
+            if (res != UnwindResult::Generated) break;
+            if (ctx.Rsp >= stop_at) break;
             // The generated frame's rbp lies at or above its stack pointer.
             if (ctx.Rbp < ctx.Rsp) break;
             cur_rbp = static_cast<uintptr_t>(ctx.Rbp);
@@ -111,7 +190,7 @@ size_t brass_stack_walk(
         }
 #endif
 
-        if (cur_rbp == 0 || (cur_rbp % 8) != 0) {
+        if (cur_rbp == 0 || (cur_rbp % 8) != 0 || cur_rbp >= stop_at) {
             break;
         }
 #if defined(_WIN32)

@@ -28,6 +28,7 @@ namespace {
 
 thread_local NativeFramesScope* t_native_frames = nullptr;
 thread_local ThreadRootsScope* t_thread_roots = nullptr;
+thread_local GeneratedCodeEntryScope* t_entry_scopes = nullptr;
 
 #if defined(_WIN32) && defined(_M_X64)
 using detail::win64_unwind_one;
@@ -86,6 +87,21 @@ ThreadRootsScope::~ThreadRootsScope() {
     t_thread_roots = prev_;
 }
 
+GeneratedCodeEntryScope::GeneratedCodeEntryScope() noexcept : prev_(t_entry_scopes) {
+    t_entry_scopes = this;
+}
+
+GeneratedCodeEntryScope::~GeneratedCodeEntryScope() {
+    if (t_entry_scopes != this) {
+        std::fprintf(stderr, "brass: fatal: generated-code entry scopes destroyed out of order\n");
+        std::fflush(stderr);
+        std::abort();
+    }
+    t_entry_scopes = prev_;
+}
+
+GeneratedCodeEntryScope* brass_innermost_entry_scope() noexcept { return t_entry_scopes; }
+
 void brass_append_native_frame_roots(std::vector<uintptr_t*>& roots) {
     for (const ThreadRootsScope* s = t_thread_roots; s != nullptr; s = s->prev_) {
         if (s->provider_) s->provider_(s->ctx_, roots);
@@ -100,12 +116,26 @@ void brass_append_native_frame_roots(std::vector<uintptr_t*>& roots) {
     }();
     const ModuleStackMap* installed = brass_get_active_stack_maps();
     const ModuleStackMap& maps = installed ? *installed : *registry_only;
+    // Each run's walk stops where the next outer run whose walk covers the
+    // frames from there on begins: one that starts at a generated frame (on
+    // Windows x64, a return address outside every image). Unbounded, N
+    // nested runs would each walk everything below them: O(N^2) per
+    // collection. Elsewhere a run cannot be told apart, and walks unbounded.
+    std::vector<const NativeFramesScope*> runs;
     for (const NativeFramesScope* s = t_native_frames; s != nullptr; s = s->prev_) {
-        if (s->rbp_ == 0 || s->ip_ == 0) continue;
-        brass_stack_walk(s->rbp_, s->ip_, maps, [](void** slot, void* user_data) {
+        if (s->rbp_ != 0 && s->ip_ != 0) runs.push_back(s);
+    }
+    uintptr_t cover = UINTPTR_MAX;  // start of the innermost covering run outside the current one
+    for (size_t i = runs.size(); i-- > 0;) {
+        const NativeFramesScope* s = runs[i];
+        const uintptr_t stop_at = cover > s->rbp_ ? cover : UINTPTR_MAX;
+        brass_stack_walk_bounded(s->rbp_, s->ip_, maps, [](void** slot, void* user_data) {
             auto* vec = static_cast<std::vector<uintptr_t*>*>(user_data);
             if (slot != nullptr && *slot != nullptr) vec->push_back(reinterpret_cast<uintptr_t*>(slot));
-        }, &roots);
+        }, &roots, stop_at);
+#if defined(_WIN32) && defined(_M_X64)
+        if (!detail::win64_ip_in_image(s->ip_)) cover = s->rbp_;
+#endif
     }
 }
 

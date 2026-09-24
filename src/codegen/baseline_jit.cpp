@@ -4,6 +4,7 @@
 #include <brass/target/calling_conv.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/gc/code_stack_maps.hpp>
+#include <brass/gc/native_frames.hpp>
 #include <brass/runtime/tiering.hpp>
 #include <brass/runtime/type_feedback.hpp>
 #include <brass/runtime/code_installer.hpp>
@@ -61,6 +62,7 @@ RuntimeValue BaselineCompiledFunction::invoke(const std::vector<RuntimeValue>& a
     partition_x64_win64_invoke_args(args, ptypes, addr, invoke_args, stack_words);
 
     X64Win64InvokeResult result;
+    GeneratedCodeEntryScope entry;  // walks need not unwind the host's stack
     x64_win64_invoke_thunk(&invoke_args, &result);
 
     return native_return_value(return_type_, result.rax, result.xmm0);

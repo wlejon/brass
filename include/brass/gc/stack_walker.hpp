@@ -27,6 +27,24 @@ size_t brass_stack_walk(
     void* user_data
 );
 
+// As above, but stops before any frame at or above the stack address
+// stop_at: a walk whose frames from there on another walk of the same
+// collection covers (native_frames.cpp bounds each recorded run by the next
+// outer one this way).
+size_t brass_stack_walk_bounded(
+    uintptr_t top_rbp,
+    uintptr_t top_return_ip,
+    const ModuleStackMap& stack_maps,
+    brass_root_visitor_fn visitor,
+    void* user_data,
+    uintptr_t stop_at
+);
+
+// The number of compiled (C++) frames the walks on this thread have unwound
+// through so far, a diagnostic for tests: a collection's count must not grow
+// with the depth of the host's stack under a GeneratedCodeEntryScope.
+size_t brass_stack_walk_unwind_steps() noexcept;
+
 // C++ std::function overload for convenience
 size_t brass_stack_walk(
     uintptr_t top_rbp,

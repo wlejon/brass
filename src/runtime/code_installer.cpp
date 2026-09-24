@@ -4,6 +4,7 @@
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/vm/fast_interpreter.hpp>
 #include <brass/gc/runtime_gc.hpp>
+#include <brass/gc/native_frames.hpp>
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/pass_catalog.hpp>
 #include <brass/mir/verifier.hpp>
@@ -222,6 +223,7 @@ RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) 
     codegen::partition_x64_win64_invoke_args(args, ptypes, addr, invoke_args, stack_words);
 
     codegen::X64Win64InvokeResult result;
+    GeneratedCodeEntryScope entry;  // walks need not unwind the host's stack
     codegen::x64_win64_invoke_thunk(&invoke_args, &result);
 
     return codegen::native_return_value(ret_type, result.rax, result.xmm0);
