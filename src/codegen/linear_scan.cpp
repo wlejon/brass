@@ -637,10 +637,20 @@ bool LinearScanAllocator::try_allocate_free_reg(LiveInterval& interval) {
     }
 
     // 1.5. Try Fixed Physical Register Hints
+    //
+    // Only a register the allocator could have picked anyway: a copy from the
+    // stack pointer (`read_sp`) hints its destination at SP, and a value that
+    // lives in SP is not a value. AArch64's register 31 is SP only to the few
+    // encodings that say so and XZR to every other one, so `cmp` against a
+    // vreg allocated there compared against zero.
+    auto in_pool = [&pool](PReg reg) {
+        return std::any_of(pool.begin(), pool.end(), [&](const PReg& p) { return p.code == reg.code; });
+    };
     auto fixed_hint_it = fixed_preg_hints_.find(interval.vreg.id);
     if (fixed_hint_it != fixed_preg_hints_.end()) {
         for (PReg hint_reg : fixed_hint_it->second) {
-            if (hint_reg.is_valid() && hint_reg.reg_class == interval.vreg.reg_class && hint_reg.code < 32) {
+            if (hint_reg.is_valid() && hint_reg.reg_class == interval.vreg.reg_class && hint_reg.code < 32 &&
+                in_pool(hint_reg)) {
                 if (!in_mask(occupied_regs, hint_reg.code)) {
                     bool is_callee = check_is_callee(hint_reg);
                     if (!interval.spans_call || is_callee) {

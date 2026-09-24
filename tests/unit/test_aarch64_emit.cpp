@@ -476,6 +476,58 @@ TEST_CASE("AArch64 Baseline JIT - Compilation and Code Structure") {
 }
 
 // =============================================================================
+// read_sp: the stack-limit check every bronze prologue makes (sp below the
+// thread's limit -> RangeError)
+// =============================================================================
+namespace {
+
+// f(limit) = read_sp < limit ? 1 : 0
+Function* build_sp_below(Module& mod, const char* name) {
+    Function* fn = mod.create_function(name, Type::i64(), {Type::i64()});
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    Value* limit = b.add_block_param(entry, Type::i64());
+    Value* sp = b.build_read_sp();
+    Value* below = b.build_ult(sp, limit);
+    BasicBlock* yes = b.append_block("yes");
+    BasicBlock* no = b.append_block("no");
+    b.position_at_end(entry);
+    b.build_br_if(below, yes, no);
+    b.position_at_end(yes);
+    b.build_ret(b.build_iconst_i64(1));
+    b.position_at_end(no);
+    b.build_ret(b.build_iconst_i64(0));
+    fn->rebuild_cfg_predecessors();
+    return fn;
+}
+
+bool any_word(const uint8_t* code, size_t size, uint32_t mask, uint32_t value) {
+    for (size_t i = 0; i + 4 <= size; i += 4) {
+        if ((read_u32_le(code + i) & mask) == value) return true;
+    }
+    return false;
+}
+
+// add xN, sp, #0 (`mov xN, sp`) and the shifted-register `cmp xzr, xM`
+// (subs xzr, xzr, xM): register 31 is XZR there, never SP.
+constexpr uint32_t kMovFromSpMask = 0xFFFFFFE0u, kMovFromSp = 0x910003E0u;
+constexpr uint32_t kCmpXzrMask = 0xFFE0FFFFu, kCmpXzr = 0xEB0003FFu;
+
+} // namespace
+
+TEST_CASE("AArch64 Emit - read_sp is copied out of SP, never allocated in register 31") {
+    Module mod("sp_below");
+    Function* fn = build_sp_below(mod, "sp_below");
+    REQUIRE(verify_function(*fn));
+    ObjectFile obj = compile_module_to_object(mod, Target::aarch64_macos());
+    const auto* text = obj.get_section(".text");
+    REQUIRE(text != nullptr);
+    CHECK(any_word(text->data.data(), text->data.size(), kMovFromSpMask, kMovFromSp));
+    CHECK(!any_word(text->data.data(), text->data.size(), kCmpXzrMask, kCmpXzr));
+}
+
+// =============================================================================
 // Test 7: AArch64 Baseline JIT - Loop Execution (CFG with Parameters)
 // =============================================================================
 TEST_CASE("AArch64 Baseline JIT - Loop Structure and Block Args") {
