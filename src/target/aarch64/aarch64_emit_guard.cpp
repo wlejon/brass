@@ -3,6 +3,7 @@
 #include <brass/runtime/deopt.hpp>
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace brass::aarch64 {
 
@@ -18,8 +19,8 @@ void AArch64EmitContext::emit_guard_exit(const LirInst& inst) {
     if (inst.deopt_kinds.size() != num_uses) {
         throw_unsupported("aarch64 emit (guard exit)", "state map without per-value kinds");
     }
-    const bool has_exit_symbol = !inst.exit_symbol.empty() && inst.exit_symbol != "@exit_stub" &&
-                                 inst.exit_symbol != "exit_stub";
+    // Isel names an exit symbol only for a guard with an exit stub.
+    const bool has_exit_symbol = !inst.exit_symbol.empty();
     const size_t header_bytes = runtime::DeoptExitRecord::kSlotsOffset;
     const size_t slots_bytes = num_uses * 8;
     const size_t kinds_bytes = (num_uses + 7) & ~size_t(7);
@@ -110,39 +111,62 @@ void AArch64EmitContext::emit_guard_exit(const LirInst& inst) {
     enc_.mov(GPR::X16, (static_cast<uint64_t>(flags) << 32) | cnt);
     enc_.str(GPR::X16, ptr(GPR::SP, 16));
 
+    // Exit stub arguments (AAPCS64 registers only; the verifier matched the
+    // stub's parameters to the state values, so each kind picks its class).
+    struct ArgReg {
+        bool is_float;
+        uint8_t reg;
+    };
+    std::vector<ArgReg> stub_args;
+    if (has_exit_symbol) {
+        uint8_t gprs = 0, fprs = 0;
+        for (size_t i = 0; i < num_uses; ++i) {
+            const auto kind = static_cast<runtime::DeoptValueKind>(inst.deopt_kinds[i]);
+            const bool is_float = kind == runtime::DeoptValueKind::Float32 || kind == runtime::DeoptValueKind::Float64;
+            uint8_t& used = is_float ? fprs : gprs;
+            if (used >= 8) {
+                throw_unsupported("aarch64 emit (guard exit)", "exit stub with stack-passed arguments");
+            }
+            stub_args.push_back({is_float, used++});
+        }
+    }
+
     enc_.mov(GPR::X0, GPR::SP);
     enc_.bl("brass_deopt_exit_record");
-    enc_.add(GPR::SP, GPR::SP, static_cast<uint32_t>(total_alloc));
 
-    auto emit_return_x0 = [&]() {
-        if (fn_.return_type.kind() == TypeKind::F64) {
-            enc_.fmov_from_gpr(FPR::V0, GPR::X0);
-        } else if (fn_.return_type.kind() == TypeKind::F32) {
-            enc_.fmov_from_gpr32(FPR::V0, GPR::X0);
-        } else if (fn_.return_type.is_v128()) {
-            enc_.fmov_from_gpr(FPR::V0, GPR::X0);
-        }
-        AArch64FrameLayout::emit_epilogue(enc_, frame_, fn_.calling_conv);
-    };
-
-    // Handled: X0 points at the lower tier's result for this frame.
+    // Handled: X0 points at the lower tier's result bits for this frame.
     Label unhandled = buffer_.create_label();
     enc_.cbz(GPR::X0, unhandled);
+    enc_.add(GPR::SP, GPR::SP, static_cast<uint32_t>(total_alloc));
     enc_.ldr(GPR::X0, ptr(GPR::X0, 0));
-    emit_return_x0();
+    if (fn_.return_type.kind() == TypeKind::F64) {
+        enc_.fmov_from_gpr(FPR::V0, GPR::X0);
+    } else if (fn_.return_type.kind() == TypeKind::F32) {
+        enc_.fmov_from_gpr32(FPR::V0, GPR::X0);
+    }
+    AArch64FrameLayout::emit_epilogue(enc_, frame_, fn_.calling_conv);
     buffer_.bind(unhandled);
 
     if (has_exit_symbol) {
-        // Generic-twin ABI: exit(resume_id, slots).
-        enc_.bl("brass_get_thread_deopt_slots");
-        enc_.mov(GPR::X1, GPR::X0);
-        enc_.mov32(GPR::X0, rid);
+        // No handler or resumer: the exit stub finishes the call, called as
+        // stub(state values...) with the values read back from the record
+        // (still at SP). Its return registers are the function's.
+        for (size_t i = 0; i < num_uses; ++i) {
+            const MemAddress src = record_mem(header_bytes + i * 8);
+            if (stub_args[i].is_float) {
+                enc_.ldr(static_cast<FPR>(stub_args[i].reg), src);
+            } else {
+                enc_.ldr(static_cast<GPR>(stub_args[i].reg), src);
+            }
+        }
         enc_.bl(inst.exit_symbol);
-    } else if (inst.deopt_reason == static_cast<uint32_t>(runtime::DeoptReason::BoundsCheckFailed)) {
-        // An out-of-bounds guard nobody resumes must not return garbage.
+        enc_.add(GPR::SP, GPR::SP, static_cast<uint32_t>(total_alloc));
+        AArch64FrameLayout::emit_epilogue(enc_, frame_, fn_.calling_conv);
+    } else {
+        // brass_deopt_exit_record aborts when nothing resumes a guard
+        // without an exit stub: never reached.
         enc_.brk(0);
     }
-    emit_return_x0();
 }
 
 } // namespace brass::aarch64

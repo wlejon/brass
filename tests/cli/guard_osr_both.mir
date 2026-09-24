@@ -1,0 +1,66 @@
+module @guard_osr_both
+
+; A guard with both an exit stub and a resume target: the exit stub is taken
+; and the resume target is not. Each exit counts itself in *p (stub +1,
+; resume block +100), so an exit taken twice, or the wrong one, shows.
+; main(1000) = 11175150 * 10 + 1 = 111751501.
+func @stub(%acc: i64, %i: i64, %p: ptr) -> i64 {
+bb0:
+  %c = load.i64 %p, 0
+  %one = iconst.i64 1
+  %c1 = add %c, %one
+  store.i64 %p, 0, %c1
+  %k = iconst.i64 1000
+  %m = mul %acc, %k
+  %r = add %m, %i
+  ret %r
+}
+
+func @f(%n: i64, %p: ptr) -> i64 {
+bb0:
+  %z = iconst.i64 0
+  br bb1(%z, %z)
+
+bb1(%i: i64, %acc: i64):
+  %c = slt %i, %n
+  br_if %c, bb2, bb3(%acc)
+
+bb2:
+  %lim = iconst.i64 150
+  %ok = slt %i, %lim
+  guard %ok, @stub, [%acc, %i, %p]
+  %acc2 = add %acc, %i
+  %one = iconst.i64 1
+  %in = add %i, %one
+  br bb1(%in, %acc2)
+
+bb3(%r: i64):
+  ret %r
+
+bres(%a: i64, %j: i64, %q: ptr):
+  %rc = load.i64 %q, 0
+  %hundred = iconst.i64 100
+  %rc1 = add %rc, %hundred
+  store.i64 %q, 0, %rc1
+  %k = iconst.i64 1000
+  %m = mul %a, %k
+  %rr = add %m, %j
+  ret %rr
+
+resume_table {
+  entry 0 -> bres
+}
+}
+
+func @main(%n: i64) -> i64 {
+bb0:
+  %p = alloca 8, 8
+  %z = iconst.i64 0
+  store.i64 %p, 0, %z
+  %r = call.i64 @f(%n, %p)
+  %c = load.i64 %p, 0
+  %ten = iconst.i64 10
+  %r10 = mul %r, %ten
+  %out = add %r10, %c
+  ret %out
+}

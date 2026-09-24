@@ -2,6 +2,7 @@
 
 #include <brass/mir/types.hpp>
 #include <brass/mir/block.hpp>
+#include <string>
 #include <string_view>
 #include <vector>
 #include <cstdint>
@@ -63,6 +64,18 @@ public:
     const std::vector<std::pair<uint32_t, BasicBlock*>>& resume_points() const noexcept {
         return resume_points_;
     }
+
+    // The first guard of this function with `resume_id`, or null.
+    const Instruction* find_guard(uint32_t resume_id) const noexcept;
+    // A guard's exit stub: the function of this function's module named by
+    // the guard's exit label, or null when the label names none (it is then
+    // only a label). Called as stub(state values...); its result is this
+    // function's result. See "Guard exits" in docs/mir_reference.md.
+    const Function* guard_exit_stub(const Instruction& guard) const noexcept;
+    // Whether `stub` has the exit-stub signature for `guard` of this
+    // function: one parameter per state value, of its type, and this
+    // function's return type. When not, `why` says what differs.
+    bool guard_exit_stub_matches(const Instruction& guard, const Function& stub, std::string& why) const;
 
     bool allow_fp_reassociation() const noexcept { return allow_fp_reassociation_; }
     void set_allow_fp_reassociation(bool allow) noexcept { allow_fp_reassociation_ = allow; }

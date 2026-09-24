@@ -121,6 +121,10 @@ public:
     // Resume execution at a generic twin resume point
     RuntimeValue resume(const Function& fn, uint32_t resume_id, const std::vector<RuntimeValue>& state_values);
     RuntimeValue resume_with_frame(const Function& fn, uint32_t resume_id, const std::vector<RuntimeValue>& state_values, InterpreterFrame& frame);
+    // Finishes a call whose guard `resume_id` failed in native code, the way
+    // the interpreter's own guard does: the exit stub if the guard has one,
+    // else the resume target (in `frame` when given). Neither is an error.
+    RuntimeValue resume_after_guard(const Function& fn, uint32_t resume_id, const std::vector<RuntimeValue>& state_values, InterpreterFrame* frame);
 
     // Execution limits & diagnostics
     void set_max_call_depth(size_t max_depth) noexcept { max_call_depth_ = max_depth; }

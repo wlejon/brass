@@ -469,6 +469,74 @@ if(BRASS_BUILD_TOOLS)
                 TIMEOUT 60 LABELS "correctness")
         endforeach()
     endforeach()
+    # brass_opt_cli.guard.*: guard exits give the interpreter's answer in
+    # every engine (docs/mir_reference.md, "Guard exits"). An exit stub is
+    # called as stub(state values...) and its result, float or integer, is
+    # the function's; a resume block's parameter i takes state value i; a
+    # guard with both takes the stub, once. osr_resume returned 0 under OSR
+    # (the resume block's parameters were filled past the state values),
+    # osr_stub failed under OSR ("Resume target ID 0 not found") and returned
+    # garbage under --jit (tier 2 called the stub as stub(resume_id, slots)),
+    # and stub_f64 returned 0.5 under --jit (RAX overwrote the stub's XMM0).
+    # Standalone tier 2 (--jit) has no lower tier to continue a resume block
+    # in, so osr_resume is a fatal error there by design and is not run.
+    set(_guard_cases
+        "osr_resume|f|1000|11175150|interp baseline osr"
+        "osr_stub|f|1000|11175150|interp baseline jit osr jit_osr"
+        "osr_both|main|1000|111751501|interp baseline jit osr jit_osr"
+        "stub_f64|spec|3.0,0|4[.]5|interp baseline jit osr jit_osr"
+        "stub_f64|spec|3.0,1|8[.]0|interp baseline jit osr jit_osr"
+        "stub_many|spec|3,0|148978294|interp baseline jit osr jit_osr"
+        "stub_many|spec|3,1|13|interp baseline jit osr jit_osr")
+    foreach(_case IN LISTS _guard_cases)
+        string(REPLACE "|" ";" _parts "${_case}")
+        list(GET _parts 0 _file)
+        list(GET _parts 1 _fn)
+        list(GET _parts 2 _args)
+        list(GET _parts 3 _want)
+        list(GET _parts 4 _modes)
+        string(REPLACE "," ";" _arg_list "${_args}")
+        string(REPLACE "," "_" _arg_tag "${_args}")
+        string(REPLACE " " ";" _modes "${_modes}")
+        foreach(_mode IN LISTS _modes)
+            set(_flags "")
+            if(_mode STREQUAL "jit")
+                set(_flags "--jit")
+            elseif(_mode STREQUAL "baseline")
+                set(_flags "--baseline-jit")
+            elseif(_mode STREQUAL "osr")
+                # The interpreter enters the hot loop's tier-2 code through OSR.
+                set(_flags "--enable-osr;--osr-threshold=10")
+            elseif(_mode STREQUAL "jit_osr")
+                set(_flags "--jit;--enable-osr;--osr-threshold=10")
+            endif()
+            set(_name "brass_opt_cli.guard.${_file}.${_fn}.${_arg_tag}.${_mode}")
+            add_test(NAME "${_name}"
+                COMMAND brass-opt "${CMAKE_CURRENT_SOURCE_DIR}/cli/guard_${_file}.mir" -r ${_fn} --args ${_arg_list} ${_flags})
+            set_tests_properties("${_name}" PROPERTIES
+                TIMEOUT 60 PASS_REGULAR_EXPRESSION "^${_want}[\r\n]" LABELS "correctness")
+        endforeach()
+    endforeach()
+    # brass_opt_cli.guard.stub_twin_abi.*: an exit stub whose signature is
+    # not stub(state values...) (here the old generic-twin (resume_id, slots))
+    # is rejected by the verifier in every engine. It dereferenced a null
+    # pointer in the interpreter and crashed the baseline JIT.
+    foreach(_mode interp baseline jit)
+        set(_flags "")
+        if(_mode STREQUAL "jit")
+            set(_flags ",--jit")
+        elseif(_mode STREQUAL "baseline")
+            set(_flags ",--baseline-jit")
+        endif()
+        add_test(NAME "brass_opt_cli.guard.stub_twin_abi.${_mode}"
+            COMMAND ${CMAKE_COMMAND}
+                "-DCMD=$<TARGET_FILE:brass-opt>,${CMAKE_CURRENT_SOURCE_DIR}/cli/guard_stub_twin_abi.mir,-r,spec,--args,3,0${_flags}"
+                "-DEXIT_CODE=1"
+                "-DSTDERR_RE=exit stub 'twin' takes 2 parameters but the guard has 1 state values"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/run_expect_error.cmake")
+        set_tests_properties("brass_opt_cli.guard.stub_twin_abi.${_mode}" PROPERTIES
+            TIMEOUT 60 LABELS "correctness")
+    endforeach()
     # brass_opt_cli.block_chain.*: a function of 20000 blocks chained in
     # reverse text order (bb0 -> bbN -> ... -> bb1), run through the tier-2
     # JIT. CFG walks, dominator-tree walks and loop-nest walks recursed once

@@ -53,24 +53,13 @@ RuntimeValue Interpreter::resume_with_frame(const Function& fn, uint32_t resume_
         throw InterpreterException("Resume target ID " + std::to_string(resume_id) + " not found in function " + std::string(fn.name()));
     }
 
-    const Instruction* guard_inst = nullptr;
-    for (const auto* bb : fn.blocks()) {
-        if (!bb) continue;
-        for (const auto* inst : *bb) {
-            if (inst && inst->opcode() == Opcode::guard && inst->resume_id() == resume_id) {
-                guard_inst = inst;
-                break;
-            }
-        }
-        if (guard_inst) break;
-    }
-
-    size_t val_idx = 0;
-    if (guard_inst) {
-        for (size_t i = 0; i < guard_inst->state_map().size() && val_idx < state_values.size(); ++i, ++val_idx) {
+    // Both the guard's state-map values and the resume block's parameters
+    // take state value i at position i, as the forward guard path does.
+    if (const Instruction* guard_inst = fn.find_guard(resume_id)) {
+        for (size_t i = 0; i < guard_inst->state_map().size() && i < state_values.size(); ++i) {
             const Value* sv = guard_inst->state_map()[i];
             if (sv) {
-                RuntimeValue rv = state_values[val_idx];
+                RuntimeValue rv = state_values[i];
                 if (sv->type().is_gcref() && !rv.is_gcref()) {
                     rv = RuntimeValue::from_gcref(rv.as_u64());
                 }
@@ -78,10 +67,16 @@ RuntimeValue Interpreter::resume_with_frame(const Function& fn, uint32_t resume_
             }
         }
     }
-    for (size_t p = 0; p < target_bb->param_count() && val_idx < state_values.size(); ++p, ++val_idx) {
+    if (target_bb->param_count() > state_values.size()) {
+        throw InterpreterException("Resume target of guard " + std::to_string(resume_id) + " in function " +
+                                   std::string(fn.name()) + " has " + std::to_string(target_bb->param_count()) +
+                                   " parameters but the deopt state has " + std::to_string(state_values.size()) +
+                                   " values");
+    }
+    for (size_t p = 0; p < target_bb->param_count(); ++p) {
         const Value* pv = target_bb->param(p);
         if (pv) {
-            RuntimeValue rv = state_values[val_idx];
+            RuntimeValue rv = state_values[p];
             if (pv->type().is_gcref() && !rv.is_gcref()) {
                 rv = RuntimeValue::from_gcref(rv.as_u64());
             }
@@ -90,6 +85,26 @@ RuntimeValue Interpreter::resume_with_frame(const Function& fn, uint32_t resume_
     }
 
     return execute_function_from_block(fn, target_bb, {}, &frame);
+}
+
+RuntimeValue Interpreter::resume_after_guard(const Function& fn, uint32_t resume_id,
+                                             const std::vector<RuntimeValue>& state_values, InterpreterFrame* frame) {
+    // The exits the forward guard takes, in its order: the exit stub, whose
+    // result is the function's, else the resume target.
+    const Instruction* guard = fn.find_guard(resume_id);
+    if (!guard) {
+        throw InterpreterException("No guard with resume id " + std::to_string(resume_id) + " in function " +
+                                   std::string(fn.name()));
+    }
+    if (const Function* stub = fn.guard_exit_stub(*guard)) {
+        if (fn.parent()) module_ = fn.parent();
+        return execute_function(*stub, state_values);
+    }
+    if (!fn.get_resume_target(resume_id)) {
+        throw InterpreterException("Guard " + std::to_string(resume_id) + " in function " + std::string(fn.name()) +
+                                   " has neither an exit stub nor a resume target");
+    }
+    return frame ? resume_with_frame(fn, resume_id, state_values, *frame) : resume(fn, resume_id, state_values);
 }
 
 RuntimeValue Interpreter::execute_function(const Function& fn, const std::vector<RuntimeValue>& args) {

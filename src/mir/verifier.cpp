@@ -725,6 +725,31 @@ bool Verifier::verify_function(const Function& fn) {
                     if (inst->symbol().empty()) {
                         report_error(inst_prefix + "Guard requires non-empty exit label.");
                     }
+                    // Exit stub: stub(state values...) -> the function's type.
+                    // Resume target (used only without a stub): parameter i
+                    // takes state value i.
+                    std::string why;
+                    if (const Function* stub = fn.guard_exit_stub(*inst)) {
+                        if (!fn.guard_exit_stub_matches(*inst, *stub, why)) {
+                            report_error(inst_prefix + "Guard " + why + ".");
+                        }
+                    } else if (const BasicBlock* rt = fn.get_resume_target(inst->resume_id())) {
+                        const auto& state = inst->state_map();
+                        if (rt->param_count() > state.size()) {
+                            report_error(inst_prefix + "Guard resume target '" + std::string(rt->name()) + "' has " +
+                                         std::to_string(rt->param_count()) + " parameters but the guard has " +
+                                         std::to_string(state.size()) + " state values.");
+                        } else {
+                            for (size_t p = 0; p < rt->param_count(); ++p) {
+                                if (state[p] && rt->param(p) && state[p]->type() != rt->param(p)->type()) {
+                                    report_error(inst_prefix + "Guard resume target parameter " + std::to_string(p) +
+                                                 " is " + std::string(rt->param(p)->type().name()) +
+                                                 " but state value " + std::to_string(p) + " is " +
+                                                 std::string(state[p]->type().name()) + ".");
+                                }
+                            }
+                        }
+                    }
                     break;
                 }
 

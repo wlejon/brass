@@ -196,41 +196,33 @@ void generate_fuzz_gc(Module& mod, std::string_view fn_name, uint64_t seed) {
 
 void generate_fuzz_speculation(Module& mod, std::string_view fn_name, uint64_t seed) {
     (void)seed;
-    std::string twin_name = std::string(fn_name) + "_twin";
-    Function* twin = mod.create_function(twin_name, Type::i64(), {Type::i32(), Type::ptr()});
+    // One exit stub per guard, each called as stub(state values...).
+    const std::string exit0_name = std::string(fn_name) + "_exit0";
+    const std::string exit1_name = std::string(fn_name) + "_exit1";
     {
+        // Guard 0's exit: state [a, b], returns a + b
+        Function* exit0 = mod.create_function(exit0_name, Type::i64(), {Type::i64(), Type::i64()});
         Builder tb(mod);
-        tb.set_function(twin);
+        tb.set_function(exit0);
         BasicBlock* tb0 = tb.append_block("bb0");
-        BasicBlock* tb_res0 = tb.append_block("bb_res_0");
-        BasicBlock* tb_res1 = tb.append_block("bb_res_1");
-
-        twin->add_resume_point(0, tb_res0);
-        twin->add_resume_point(1, tb_res1);
-
         tb.position_at_end(tb0);
-        tb.add_block_param(tb0, Type::i32());
-        tb.add_block_param(tb0, Type::ptr());
-        tb.build_ret(tb.build_iconst_i64(0));
-
-        // Resume 0: load state [a, b], return a + b
-        tb.position_at_end(tb_res0);
-        Value* ptr_param0 = twin->entry_block()->param(1);
-        Value* x0 = tb.build_load(Type::i64(), ptr_param0, 0);
-        Value* y0 = tb.build_load(Type::i64(), ptr_param0, 8);
-        Value* sum0 = tb.build_add(x0, y0);
-        tb.build_ret(sum0);
-
-        // Resume 1: load state [a, b], return (a + 10) * b
-        tb.position_at_end(tb_res1);
-        Value* ptr_param1 = twin->entry_block()->param(1);
-        Value* x1 = tb.build_load(Type::i64(), ptr_param1, 0);
-        Value* y1 = tb.build_load(Type::i64(), ptr_param1, 8);
+        Value* x0 = tb.add_block_param(tb0, Type::i64());
+        Value* y0 = tb.add_block_param(tb0, Type::i64());
+        tb.build_ret(tb.build_add(x0, y0));
+        exit0->rebuild_cfg_predecessors();
+    }
+    {
+        // Guard 1's exit: state [a, b], returns (a + 10) * b
+        Function* exit1 = mod.create_function(exit1_name, Type::i64(), {Type::i64(), Type::i64()});
+        Builder tb(mod);
+        tb.set_function(exit1);
+        BasicBlock* tb0 = tb.append_block("bb0");
+        tb.position_at_end(tb0);
+        Value* x1 = tb.add_block_param(tb0, Type::i64());
+        Value* y1 = tb.add_block_param(tb0, Type::i64());
         Value* add_x = tb.build_add(x1, tb.build_iconst_i64(10));
-        Value* mul1 = tb.build_mul(add_x, y1);
-        tb.build_ret(mul1);
-
-        twin->rebuild_cfg_predecessors();
+        tb.build_ret(tb.build_mul(add_x, y1));
+        exit1->rebuild_cfg_predecessors();
     }
 
     Function* spec = mod.create_function(fn_name, Type::i64(), {Type::i64(), Type::i64(), Type::i32()});
@@ -244,13 +236,13 @@ void generate_fuzz_speculation(Module& mod, std::string_view fn_name, uint64_t s
         Value* stype = sb.add_block_param(sb_entry, Type::i32());
 
         // Guard 1: stype != 0 -> if false, deopt to twin at resume 0
-        Instruction* g0 = sb.build_guard(stype, twin_name, {sa, sb_param});
+        Instruction* g0 = sb.build_guard(stype, exit0_name, {sa, sb_param});
         g0->set_resume_id(0);
 
         // Guard 2: check secondary condition
         Value* c10 = sb.build_iconst_i64(1000);
         Value* cond2 = sb.build_slt(sa, c10);
-        Instruction* g1 = sb.build_guard(cond2, twin_name, {sa, sb_param});
+        Instruction* g1 = sb.build_guard(cond2, exit1_name, {sa, sb_param});
         g1->set_resume_id(1);
 
         Value* smul = sb.build_mul(sa, sb_param);

@@ -1,0 +1,22 @@
+module @guard_stub_twin_abi
+
+; An exit stub with the old generic-twin signature (resume id, slot
+; buffer) instead of one parameter per state value: the verifier rejects it
+; in every engine.
+func @twin(%rid: i32, %buf: ptr) -> i64 {
+bb0:
+  %a = load.i64 %buf, 0
+  %h = iconst.i64 1000
+  %r = add %a, %h
+  ret %r
+}
+
+func @spec(%x: i64, %c: i32) -> i64 {
+bb0:
+  %one = iconst.i64 1
+  %y = add %x, %one
+  guard %c, @twin, [%y]
+  %two = iconst.i64 2
+  %z = mul %y, %two
+  ret %z
+}

@@ -1,0 +1,58 @@
+module @guard_stub_many
+
+; An exit stub is called as stub(state values...). Nine state values of three
+; types: past the argument registers of both x64 conventions (Win64 passes
+; five on the stack, SysV one), with floats interleaved.
+func @stub(%a: i64, %b: f64, %k: i32, %d: i64, %e: f64, %f: i64, %g: i64, %m: i32, %n: i64) -> i64 {
+bb0:
+  %c10 = iconst.i64 10
+  %c100 = iconst.i64 100
+  %c1k = iconst.i64 1000
+  %c10k = iconst.i64 10000
+  %c100k = iconst.i64 100000
+  %c1m = iconst.i64 1000000
+  %c10m = iconst.i64 10000000
+  %d10 = mul %d, %c10
+  %f100 = mul %f, %c100
+  %g1k = mul %g, %c1k
+  %n10k = mul %n, %c10k
+  %kx = sext.i64 %k
+  %k100k = mul %kx, %c100k
+  %mx = sext.i64 %m
+  %m1m = mul %mx, %c1m
+  %be = add %b, %e
+  %four = fconst.f64 4.0
+  %be4 = mul %be, %four
+  %bei = fptosi.i64 %be4
+  %be10m = mul %bei, %c10m
+  %s1 = add %a, %d10
+  %s2 = add %s1, %f100
+  %s3 = add %s2, %g1k
+  %s4 = add %s3, %n10k
+  %s5 = add %s4, %k100k
+  %s6 = add %s5, %m1m
+  %s7 = add %s6, %be10m
+  ret %s7
+}
+
+func @spec(%x: i64, %c: i32) -> i64 {
+bb0:
+  %one = iconst.i64 1
+  %a = add %x, %one
+  %xf = sitofp.f64 %x
+  %h = fconst.f64 0.5
+  %b = mul %xf, %h
+  %k = iconst.i32 7
+  %three = iconst.i64 3
+  %d = mul %x, %three
+  %e = fconst.f64 2.25
+  %f = sub %x, %one
+  %i5 = iconst.i64 5
+  %g = add %x, %i5
+  %m = iconst.i32 -2
+  %i9 = iconst.i64 9
+  %n = mul %x, %i9
+  guard %c, @stub, [%a, %b, %k, %d, %e, %f, %g, %m, %n]
+  %r = add %a, %d
+  ret %r
+}

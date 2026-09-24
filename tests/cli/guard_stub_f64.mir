@@ -1,0 +1,20 @@
+module @guard_stub_f64
+
+; An exit stub returning f64: its XMM0 result is the function's.
+; spec(3.0, 1) = 8.0 (guard passes); spec(3.0, 0) = stub(4.0) = 4.5.
+func @stub(%y: f64) -> f64 {
+bb0:
+  %h = fconst.f64 0.5
+  %r = add %y, %h
+  ret %r
+}
+
+func @spec(%x: f64, %c: i32) -> f64 {
+bb0:
+  %one = fconst.f64 1.0
+  %y = add %x, %one
+  guard %c, @stub, [%y]
+  %two = fconst.f64 2.0
+  %z = mul %y, %two
+  ret %z
+}

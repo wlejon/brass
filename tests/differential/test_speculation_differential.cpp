@@ -8,38 +8,18 @@ using namespace brass::codegen;
 TEST_CASE("Differential - Guard Fast Path & Slow Path Exit") {
     Module mod("diff_guard_mod");
 
-    // Twin fallback function:
-    // func @twin_fallback(%resume_id: i32, %buf: ptr) -> i64
-    // resume_table {
-    //   entry 0 -> bb_res_0
-    // }
-    // bb0:
-    //   ret 0
-    // bb_res_0:
-    //   %x = load.i64 %buf, 0
-    //   %y = load.i64 %buf, 8
-    //   %res = add %x, %y
-    //   ret %res
-    Function* twin = mod.create_function("twin_fallback", Type::i64(), {Type::i32(), Type::ptr()});
-    Builder tb(*twin);
-    BasicBlock* tb0 = tb.append_block("bb0");
-    BasicBlock* tb_res = tb.append_block("bb_res_0");
-    twin->add_resume_point(0, tb_res);
-
-    tb.position_at_end(tb0);
-    tb.add_param(Type::i32());
-    tb.add_param(Type::ptr());
-    tb.build_ret(tb.build_iconst_i64(0));
-
-    tb.position_at_end(tb_res);
-    Value* x = tb.build_load(Type::i64(), twin->entry_block()->param(1), 0);
-    Value* y = tb.build_load(Type::i64(), twin->entry_block()->param(1), 8);
-    Value* sum = tb.build_add(x, y);
-    tb.build_ret(sum);
+    // Exit stub, called as stub(state values...):
+    // func @spec_fallback(%x: i64, %y: i64) -> i64 { ret x + y }
+    Function* fallback = mod.create_function("spec_fallback", Type::i64(), {Type::i64(), Type::i64()});
+    Builder tb(*fallback);
+    tb.position_at_end(tb.append_block("bb0"));
+    Value* x = tb.add_param(Type::i64());
+    Value* y = tb.add_param(Type::i64());
+    tb.build_ret(tb.build_add(x, y));
 
     // Speculative function:
     // func @spec_fn(%a: i64, %b: i64, %type_tag: i32) -> i64
-    //   guard %type_tag, @twin_fallback, [%a, %b]
+    //   guard %type_tag, @spec_fallback, [%a, %b]
     //   %mul = mul %a, %b
     //   ret %mul
     Function* spec = mod.create_function("spec_fn", Type::i64(), {Type::i64(), Type::i64(), Type::i32()});
@@ -50,7 +30,7 @@ TEST_CASE("Differential - Guard Fast Path & Slow Path Exit") {
     Value* sb_param = sb.add_param(Type::i64());
     Value* stype = sb.add_param(Type::i32());
 
-    Instruction* g = sb.build_guard(stype, "twin_fallback", {sa, sb_param});
+    Instruction* g = sb.build_guard(stype, "spec_fallback", {sa, sb_param});
     g->set_resume_id(0);
     Value* smul = sb.build_mul(sa, sb_param);
     sb.build_ret(smul);
@@ -73,18 +53,11 @@ TEST_CASE("Differential - Guard Fast Path & Slow Path Exit") {
         }
     }
 
-    // Case 2: type_tag = 0 (Slow path: deopt into twin at resume_id=0 -> a + b)
+    // Case 2: type_tag = 0 (Slow path: exit through @spec_fallback(a, b) -> a + b)
+    interp.set_module(&mod);
     for (int64_t a = 10; a <= 15; ++a) {
         for (int64_t b = 20; b <= 25; ++b) {
             std::vector<RuntimeValue> args = {RuntimeValue::from_i64(a), RuntimeValue::from_i64(b), RuntimeValue::from_i32(0)};
-
-            // For interpreter, custom deopt handler or twin function resolution
-            interp.set_module(&mod);
-            interp.set_deopt_handler([&](Interpreter& i, const DeoptResult& d) -> RuntimeValue {
-                const Function* t_fn = mod.get_function("twin_fallback");
-                uint64_t buf[2] = {static_cast<uint64_t>(d.state_map[0].as_i64()), static_cast<uint64_t>(d.state_map[1].as_i64())};
-                return i.resume(*t_fn, d.resume_id, {RuntimeValue::from_i32(static_cast<int32_t>(d.resume_id)), RuntimeValue::from_ptr(reinterpret_cast<uintptr_t>(buf))});
-            });
 
             RuntimeValue interp_res = interp.run(*spec, args);
             RuntimeValue jit_res = engine.invoke("spec_fn", args);

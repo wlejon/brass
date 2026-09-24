@@ -234,15 +234,15 @@ const uint64_t* brass_deopt_exit_record(const brass::runtime::DeoptExitRecord* r
         return &t_deopt_result;
     }
     const bool has_exit_symbol = (record->flags & DeoptExitRecord::kHasExitSymbol) != 0;
-    auto handler = get_deopt_handler();
-    if (handler) {
+    if (auto handler = get_deopt_handler()) {
+        // The handler finishes the call the way the interpreter's guard does
+        // (exit stub, else resume target); running the exit stub again here
+        // would run the rest of the function twice.
         void* r = handler(*frame);
-        if (!has_exit_symbol) {
-            t_deopt_result = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(r));
-            return &t_deopt_result;
-        }
+        t_deopt_result = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(r));
+        return &t_deopt_result;
     }
-    if (has_exit_symbol) return nullptr; // the caller resumes in its exit stub
+    if (has_exit_symbol) return nullptr; // the caller calls its exit stub with the state values
     // Nothing can resume this frame: returning null would make the optimized
     // code return a made-up 0.
     std::fprintf(stderr, "brass_deopt_exit_record: guard failed (resume id %u, reason %u) with no deopt handler, "

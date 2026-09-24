@@ -18,19 +18,9 @@ TEST_CASE("Differential Fuzzer - Speculation Guards and Mid-Loop Deoptimization"
         generate_fuzz_speculation(mod, fn_name, seed);
 
         Interpreter interp;
+        // Both the interpreter and the JIT exit a failed guard through its
+        // exit stub, called as stub(state values...).
         interp.set_module(&mod);
-        interp.set_deopt_handler([&](Interpreter& i, const DeoptResult& d) -> RuntimeValue {
-            const Function* t_fn = mod.get_function(d.exit_stub);
-            if (!t_fn) return RuntimeValue::from_i64(-1);
-            uint64_t buf[2] = {
-                static_cast<uint64_t>(d.state_map[0].as_i64()),
-                static_cast<uint64_t>(d.state_map[1].as_i64())
-            };
-            return i.resume(*t_fn, d.resume_id, {
-                RuntimeValue::from_i32(static_cast<int32_t>(d.resume_id)),
-                RuntimeValue::from_ptr(reinterpret_cast<uintptr_t>(buf))
-            });
-        });
 
         codegen::JitExecutionEngine jit(Target::host());
         bool ok = jit.compile_and_load(mod);

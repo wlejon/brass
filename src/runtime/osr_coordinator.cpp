@@ -53,6 +53,21 @@ private:
     const ModuleStackMap* prev_maps_;
 };
 
+// A native deopt frame's state values as the interpreter holds them, gcref
+// values tagged as such.
+std::vector<RuntimeValue> guard_state_values(const Function& fn, const DeoptFrame& dframe) {
+    std::vector<RuntimeValue> vals = dframe.to_runtime_values();
+    if (const Instruction* g = fn.find_guard(dframe.resume_id)) {
+        for (size_t i = 0; i < g->state_map().size() && i < vals.size(); ++i) {
+            const Value* sv = g->state_map()[i];
+            if (sv && sv->type().is_gcref() && !vals[i].is_gcref()) {
+                vals[i] = RuntimeValue::from_gcref(vals[i].as_u64());
+            }
+        }
+    }
+    return vals;
+}
+
 } // namespace
 
 static thread_local brass::Interpreter* t_active_interpreter = nullptr;
@@ -212,27 +227,7 @@ bool OsrCoordinator::try_osr_migration(
         total_native_deopts_++;
         TieringFeedback& fb = registry().get_or_create(fn.name());
         fb.record_deoptimization();
-        std::vector<RuntimeValue> state_vals = dframe.to_runtime_values();
-        const Instruction* g_inst = nullptr;
-        for (const auto* bb : fn.blocks()) {
-            if (!bb) continue;
-            for (const auto* inst : *bb) {
-                if (inst && inst->opcode() == Opcode::guard && inst->resume_id() == dframe.resume_id) {
-                    g_inst = inst;
-                    break;
-                }
-            }
-            if (g_inst) break;
-        }
-        if (g_inst) {
-            for (size_t i = 0; i < g_inst->state_map().size() && i < state_vals.size(); ++i) {
-                const Value* sv = g_inst->state_map()[i];
-                if (sv && sv->type().is_gcref() && !state_vals[i].is_gcref()) {
-                    state_vals[i] = RuntimeValue::from_gcref(state_vals[i].as_u64());
-                }
-            }
-        }
-        deopt_res = interp.resume_with_frame(fn, dframe.resume_id, state_vals, frame);
+        deopt_res = interp.resume_after_guard(fn, dframe.resume_id, guard_state_values(fn, dframe), &frame);
         return reinterpret_cast<void*>(deopt_res.as_u64());
     });
 
@@ -386,27 +381,18 @@ bool OsrCoordinator::try_osr_migration(
         total_native_deopts_++;
         TieringFeedback& fb = registry().get_or_create(fn.name());
         fb.record_deoptimization();
-        std::vector<RuntimeValue> state_vals = dframe.to_runtime_values();
-        const Instruction* g_inst = nullptr;
-        for (const auto* bb : fn.blocks()) {
-            if (!bb) continue;
-            for (const auto* inst : *bb) {
-                if (inst && inst->opcode() == Opcode::guard && inst->resume_id() == dframe.resume_id) {
-                    g_inst = inst;
-                    break;
-                }
-            }
-            if (g_inst) break;
+        // The exits the interpreter's guard takes, in its order.
+        const Instruction* g_inst = fn.find_guard(dframe.resume_id);
+        if (!g_inst) {
+            throw InterpreterException("No guard with resume id " + std::to_string(dframe.resume_id) +
+                                       " in function " + std::string(fn.name()));
         }
-        if (g_inst) {
-            for (size_t i = 0; i < g_inst->state_map().size() && i < state_vals.size(); ++i) {
-                const Value* sv = g_inst->state_map()[i];
-                if (sv && sv->type().is_gcref() && !state_vals[i].is_gcref()) {
-                    state_vals[i] = RuntimeValue::from_gcref(state_vals[i].as_u64());
-                }
-            }
+        std::vector<RuntimeValue> state_vals = guard_state_values(fn, dframe);
+        if (const Function* stub = fn.guard_exit_stub(*g_inst)) {
+            deopt_res = interp.run(*stub, state_vals);
+        } else {
+            deopt_res = interp.resume(fn, dframe.resume_id, state_vals);
         }
-        deopt_res = interp.resume(fn, dframe.resume_id, state_vals);
         return reinterpret_cast<void*>(deopt_res.as_u64());
     });
 
@@ -493,32 +479,8 @@ void* OsrCoordinator::handle_native_deopt(const DeoptFrame& deopt_frame) {
         fb.record_deoptimization();
     }
     if (cur_interp && cur_fn) {
-        std::vector<RuntimeValue> state_vals = deopt_frame.to_runtime_values();
-        const Instruction* g_inst = nullptr;
-        for (const auto* bb : cur_fn->blocks()) {
-            if (!bb) continue;
-            for (const auto* inst : *bb) {
-                if (inst && inst->opcode() == Opcode::guard && inst->resume_id() == deopt_frame.resume_id) {
-                    g_inst = inst;
-                    break;
-                }
-            }
-            if (g_inst) break;
-        }
-        if (g_inst) {
-            for (size_t i = 0; i < g_inst->state_map().size() && i < state_vals.size(); ++i) {
-                const Value* sv = g_inst->state_map()[i];
-                if (sv && sv->type().is_gcref() && !state_vals[i].is_gcref()) {
-                    state_vals[i] = RuntimeValue::from_gcref(state_vals[i].as_u64());
-                }
-            }
-        }
-        RuntimeValue res;
-        if (cur_frame) {
-            res = cur_interp->resume_with_frame(*cur_fn, deopt_frame.resume_id, state_vals, *cur_frame);
-        } else {
-            res = cur_interp->resume(*cur_fn, deopt_frame.resume_id, state_vals);
-        }
+        RuntimeValue res = cur_interp->resume_after_guard(*cur_fn, deopt_frame.resume_id,
+                                                          guard_state_values(*cur_fn, deopt_frame), cur_frame);
         return reinterpret_cast<void*>(res.as_u64());
     }
     return nullptr;

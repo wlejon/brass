@@ -273,6 +273,61 @@ CompilationResult EmitContext::compile() {
 }
 
 
+void EmitContext::emit_exit_stub_call(const LirInst& inst, int32_t slots_disp, size_t record_alloc) {
+    // The verifier matched the stub's parameters to the state values, so
+    // each value's kind picks its argument class. Slots hold a float in its
+    // low bits and a narrow integer sign-extended.
+    const bool win64 = fn_.calling_conv.kind() == CallingConvKind::Win64;
+    static constexpr GPR kWinGpr[] = {GPR::RCX, GPR::RDX, GPR::R8, GPR::R9};
+    static constexpr GPR kSysvGpr[] = {GPR::RDI, GPR::RSI, GPR::RDX, GPR::RCX, GPR::R8, GPR::R9};
+    static constexpr XMM kXmm[] = {XMM::XMM0, XMM::XMM1, XMM::XMM2, XMM::XMM3,
+                                   XMM::XMM4, XMM::XMM5, XMM::XMM6, XMM::XMM7};
+    struct ArgLoc {
+        bool is_float;
+        int reg;    // register index, or -1 for a stack argument
+        int stack;  // stack argument index
+    };
+    const size_t n = inst.deopt_kinds.size();
+    std::vector<ArgLoc> locs(n);
+    size_t gpr_used = 0, xmm_used = 0, stack_used = 0;
+    for (size_t i = 0; i < n; ++i) {
+        const auto kind = static_cast<runtime::DeoptValueKind>(inst.deopt_kinds[i]);
+        const bool is_float = kind == runtime::DeoptValueKind::Float32 || kind == runtime::DeoptValueKind::Float64;
+        ArgLoc loc{is_float, -1, -1};
+        if (win64) {
+            if (i < 4) loc.reg = static_cast<int>(i);
+        } else if (is_float) {
+            if (xmm_used < 8) loc.reg = static_cast<int>(xmm_used++);
+        } else {
+            if (gpr_used < 6) loc.reg = static_cast<int>(gpr_used++);
+        }
+        if (loc.reg < 0) loc.stack = static_cast<int>(stack_used++);
+        locs[i] = loc;
+    }
+
+    // Outgoing area below the record: shadow space and stack arguments. With
+    // none, Win64's shadow space is the record's own bottom 32 bytes.
+    const size_t shadow = win64 ? 32 : 0;
+    const size_t extra = stack_used == 0 ? 0 : ((shadow + stack_used * 8 + 15) & ~size_t(15));
+    if (extra > 0) enc_.sub(GPR::RSP, static_cast<int32_t>(extra));
+    auto slot = [&](size_t i) { return ptr(GPR::RSP, static_cast<int32_t>(extra) + slots_disp + static_cast<int32_t>(i * 8)); };
+    for (size_t i = 0; i < n; ++i) {
+        if (locs[i].stack < 0) continue;
+        enc_.mov(GPR::R11, slot(i));
+        enc_.mov(ptr(GPR::RSP, static_cast<int32_t>(shadow) + locs[i].stack * 8), GPR::R11);
+    }
+    for (size_t i = 0; i < n; ++i) {
+        if (locs[i].reg < 0) continue;
+        if (locs[i].is_float) {
+            enc_.movsd(kXmm[locs[i].reg], slot(i));
+        } else {
+            enc_.mov(win64 ? kWinGpr[locs[i].reg] : kSysvGpr[locs[i].reg], slot(i));
+        }
+    }
+    enc_.call(inst.exit_symbol);
+    enc_.add(GPR::RSP, static_cast<int32_t>(extra + record_alloc));
+}
+
 void EmitContext::emit_control_instruction(const LirInst& inst) {
     switch (inst.opcode) {
         case LirOpcode::Jmp:
@@ -477,8 +532,8 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
             if (inst.deopt_kinds.size() != num_uses) {
                 throw_unsupported("x64 emit (guard exit)", "state map without per-value kinds");
             }
-            const bool has_exit_symbol = !inst.exit_symbol.empty() && inst.exit_symbol != "@exit_stub" &&
-                                         inst.exit_symbol != "exit_stub";
+            // Isel names an exit symbol only for a guard with an exit stub.
+            const bool has_exit_symbol = !inst.exit_symbol.empty();
             const size_t header_bytes = runtime::DeoptExitRecord::kSlotsOffset;
             const size_t slots_bytes = num_uses * 8;
             const size_t kinds_bytes = (num_uses + 7) & ~size_t(7);
@@ -569,48 +624,42 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
             const GPR arg0 = (fn_.calling_conv.kind() == CallingConvKind::Win64) ? GPR::RCX : GPR::RDI;
             enc_.lea(arg0, ptr(GPR::RSP, rec_disp));
             enc_.call("brass_deopt_exit_record");
-            enc_.add(GPR::RSP, static_cast<int32_t>(total_alloc));
 
-            auto emit_return_rax = [&]() {
-                if (fn_.return_type.kind() == TypeKind::F64) {
-                    enc_.movq(XMM::XMM0, GPR::RAX);
-                } else if (fn_.return_type.kind() == TypeKind::F32) {
-                    enc_.movd(XMM::XMM0, GPR::RAX);
-                } else if (fn_.return_type.is_v128()) {
-                    enc_.movq(XMM::XMM0, GPR::RAX);
-                }
+            auto emit_epilogue = [&]() {
                 codegen::FrameInfo mutable_frame = fn_.frame;
                 X64FrameLayout::compute_layout(mutable_frame, fn_.calling_conv);
                 X64FrameLayout::emit_epilogue(enc_, mutable_frame, fn_.calling_conv);
             };
+            // RAX points at the lower tier's result bits for this frame.
+            auto emit_return_rax_result = [&]() {
+                enc_.mov(GPR::RAX, ptr(GPR::RAX, 0));
+                if (fn_.return_type.kind() == TypeKind::F64) {
+                    enc_.movq(XMM::XMM0, GPR::RAX);
+                } else if (fn_.return_type.kind() == TypeKind::F32) {
+                    enc_.movd(XMM::XMM0, GPR::RAX);
+                }
+                emit_epilogue();
+            };
 
-            // Handled: RAX points at the lower tier's result for this frame.
             Label unhandled = buffer_.create_label();
             enc_.test(GPR::RAX, GPR::RAX);
             enc_.j(Condition::E, unhandled);
-            enc_.mov(GPR::RAX, ptr(GPR::RAX, 0));
-            emit_return_rax();
+            enc_.add(GPR::RSP, static_cast<int32_t>(total_alloc));
+            emit_return_rax_result();
             buffer_.bind(unhandled);
 
             if (has_exit_symbol) {
-                // Generic-twin ABI: exit(resume_id, slots).
-                const size_t shadow2 = (fn_.calling_conv.kind() == CallingConvKind::Win64 ? 32 : 0);
-                if (shadow2 > 0) enc_.sub(GPR::RSP, static_cast<int32_t>(shadow2));
-                enc_.call("brass_get_thread_deopt_slots");
-                if (fn_.calling_conv.kind() == CallingConvKind::Win64) {
-                    enc_.mov(GPR::RDX, GPR::RAX);
-                    enc_.mov32(GPR::RCX, rid);
-                } else {
-                    enc_.mov(GPR::RSI, GPR::RAX);
-                    enc_.mov32(GPR::RDI, rid);
-                }
-                enc_.call(inst.exit_symbol);
-                if (shadow2 > 0) enc_.add(GPR::RSP, static_cast<int32_t>(shadow2));
-            } else if (inst.deopt_reason == static_cast<uint32_t>(runtime::DeoptReason::BoundsCheckFailed)) {
-                // An out-of-bounds guard nobody resumes must not return garbage.
+                // No handler or resumer: the exit stub finishes the call,
+                // called as stub(state values...) with the values read back
+                // from the record, which is still on the stack. Its return
+                // registers are the function's.
+                emit_exit_stub_call(inst, slots_disp, total_alloc);
+                emit_epilogue();
+            } else {
+                // brass_deopt_exit_record aborts when nothing resumes a guard
+                // without an exit stub: never reached.
                 enc_.ud2();
             }
-            emit_return_rax();
             break;
         }
         default:

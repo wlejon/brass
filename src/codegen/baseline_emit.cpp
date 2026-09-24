@@ -82,9 +82,12 @@ void check_x64_baseline_supported(const Function& fn, const Target& target, cons
             }
             check_x64_baseline_vector_inst(fn, *inst, target, cc);
             if (op == Opcode::guard) {
-                const Module* mod = fn.parent();
-                bool has_stub = mod && !inst->symbol().empty() && mod->get_function(inst->symbol());
-                if (!has_stub && !fn.get_resume_target(inst->resume_id())) {
+                const Function* stub = fn.guard_exit_stub(*inst);
+                std::string why;
+                if (stub && !fn.guard_exit_stub_matches(*inst, *stub, why)) {
+                    throw_unsupported(kX64BaselineStage, why);
+                }
+                if (!stub && !fn.get_resume_target(inst->resume_id())) {
                     throw_unsupported(kX64BaselineStage, "guard with no exit stub or resume target");
                 }
             }
@@ -98,9 +101,8 @@ void emit_guard(X64BaselineEmitter& em, const Instruction& inst) {
     em.enc.jne(cont);
 
     // Guard failed: the same exits the interpreter takes, in its order.
-    const Module* mod = em.fn.parent();
     std::vector<const Value*> state(inst.state_map().begin(), inst.state_map().end());
-    if (mod && !inst.symbol().empty() && mod->get_function(inst.symbol())) {
+    if (em.fn.guard_exit_stub(inst)) {
         // The exit stub finishes the function: its result is ours.
         em.emit_call(inst.symbol(), nullptr, state, nullptr, inst.site_id());
         em.emit_return();

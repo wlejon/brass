@@ -1,6 +1,7 @@
 #include "test_framework.hpp"
 #include <brass/brass.hpp>
 #include <iostream>
+#include <utility>
 
 using namespace brass;
 using namespace brass::runtime;
@@ -226,9 +227,18 @@ TEST_CASE("Speculation - Native JIT Deoptimization into Generic Twin at Interior
     Value* diff = tb.build_sub(w0, w1);
     tb.build_ret(diff);
 
+    // Exit stub of spec_opt's guard, called as stub(state values...):
+    // func @spec_exit(%x: i64, %y: i64) -> i64 { ret (x + y) * 2 }
+    Function* exit_fn = mod.create_function("spec_exit", Type::i64(), {Type::i64(), Type::i64()});
+    Builder eb(*exit_fn);
+    eb.position_at_end(eb.append_block("entry"));
+    Value* ex = eb.add_param(Type::i64());
+    Value* ey = eb.add_param(Type::i64());
+    eb.build_ret(eb.build_mul(eb.build_add(ex, ey), eb.build_iconst_i64(2)));
+
     // Speculatively optimized function:
     // func @spec_opt(%x: i64, %y: i64, %cond: i32) -> i64
-    //   guard %cond, @generic_twin, [%x, %y]  (with resume_id = 0)
+    //   guard %cond, @spec_exit, [%x, %y]  (with resume_id = 0)
     //   %fast_res = mul %x, %y
     //   ret %fast_res
     Function* opt_fn = mod.create_function("spec_opt", Type::i64(), {Type::i64(), Type::i64(), Type::i32()});
@@ -239,7 +249,7 @@ TEST_CASE("Speculation - Native JIT Deoptimization into Generic Twin at Interior
     Value* y = ob.add_param(Type::i64());
     Value* cond = ob.add_param(Type::i32());
 
-    Instruction* g = ob.build_guard(cond, "generic_twin", {x, y});
+    Instruction* g = ob.build_guard(cond, "spec_exit", {x, y});
     g->set_resume_id(0);
     Value* fast_res = ob.build_mul(x, y);
     ob.build_ret(fast_res);
@@ -251,8 +261,7 @@ TEST_CASE("Speculation - Native JIT Deoptimization into Generic Twin at Interior
     RuntimeValue fast_val = engine.invoke("spec_opt", {RuntimeValue::from_i64(5), RuntimeValue::from_i64(6), RuntimeValue::from_i32(1)});
     CHECK_EQ(fast_val.as_i64(), 30);
 
-    // 2. Guard fails (cond = 0): deopts into @generic_twin at resume point 0
-    // State [5, 6] captured -> generic_twin at bb_resume_0 computes (5 + 6) * 2 = 22
+    // 2. Guard fails (cond = 0): exits through @spec_exit(5, 6) = (5 + 6) * 2 = 22
     RuntimeValue deopt_val = engine.invoke("spec_opt", {RuntimeValue::from_i64(5), RuntimeValue::from_i64(6), RuntimeValue::from_i32(0)});
     CHECK_EQ(deopt_val.as_i64(), 22);
 
@@ -265,36 +274,17 @@ TEST_CASE("Speculation - Native JIT Deoptimization into Generic Twin at Interior
 TEST_CASE("Speculation - Multiple Guards and Interior Resume Points") {
     Module mod("multi_guard_mod");
 
-    // Generic twin function:
-    // func @twin_multi(%resume_id: i32, %buf: ptr) -> i64
-    // resume_table {
-    //   entry 10 -> bb_res_10
-    //   entry 20 -> bb_res_20
-    // }
-    Function* twin = mod.create_function("twin_multi", Type::i64(), {Type::i32(), Type::ptr()});
-    Builder tb(*twin);
-
-    BasicBlock* tb_0 = tb.append_block("bb0");
-    BasicBlock* tb_10 = tb.append_block("bb_res_10");
-    BasicBlock* tb_20 = tb.append_block("bb_res_20");
-
-    twin->add_resume_point(10, tb_10);
-    twin->add_resume_point(20, tb_20);
-
-    tb.position_at_end(tb_0);
-    tb.add_param(Type::i32());
-    tb.add_param(Type::ptr());
-    tb.build_ret(tb.build_iconst_i64(0));
-
-    tb.position_at_end(tb_10);
-    Value* a10 = tb.build_load(Type::i64(), twin->entry_block()->param(1), 0);
-    Value* r10 = tb.build_add(a10, tb.build_iconst_i64(1000));
-    tb.build_ret(r10);
-
-    tb.position_at_end(tb_20);
-    Value* a20 = tb.build_load(Type::i64(), twin->entry_block()->param(1), 0);
-    Value* r20 = tb.build_add(a20, tb.build_iconst_i64(2000));
-    tb.build_ret(r20);
+    // One exit stub per guard, each called as stub(state values...):
+    // func @exit_10(%v: i64) -> i64 { ret v + 1000 }
+    // func @exit_20(%v: i64) -> i64 { ret v + 2000 }
+    const std::pair<const char*, int64_t> stubs[] = {{"exit_10", 1000}, {"exit_20", 2000}};
+    for (const auto& [name, add] : stubs) {
+        Function* stub = mod.create_function(name, Type::i64(), {Type::i64()});
+        Builder sb(*stub);
+        sb.position_at_end(sb.append_block("entry"));
+        Value* v = sb.add_param(Type::i64());
+        sb.build_ret(sb.build_add(v, sb.build_iconst_i64(add)));
+    }
 
     // Optimized function with 2 guards:
     // func @multi_guard(%val: i64, %g1: i32, %g2: i32) -> i64
@@ -306,12 +296,12 @@ TEST_CASE("Speculation - Multiple Guards and Interior Resume Points") {
     Value* g1 = ob.add_param(Type::i32());
     Value* g2 = ob.add_param(Type::i32());
 
-    Instruction* guard1 = ob.build_guard(g1, "twin_multi", {val});
+    Instruction* guard1 = ob.build_guard(g1, "exit_10", {val});
     guard1->set_resume_id(10);
 
     Value* step1 = ob.build_add(val, ob.build_iconst_i64(5));
 
-    Instruction* guard2 = ob.build_guard(g2, "twin_multi", {step1});
+    Instruction* guard2 = ob.build_guard(g2, "exit_20", {step1});
     guard2->set_resume_id(20);
 
     Value* step2 = ob.build_add(step1, ob.build_iconst_i64(10));

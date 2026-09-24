@@ -1,4 +1,6 @@
 #include <brass/mir/function.hpp>
+#include <brass/mir/module.hpp>
+#include <brass/mir/instruction.hpp>
 #include <algorithm>
 #include <unordered_map>
 
@@ -59,6 +61,45 @@ BasicBlock* Function::get_resume_target(uint32_t resume_id) const noexcept {
         }
     }
     return nullptr;
+}
+
+const Instruction* Function::find_guard(uint32_t resume_id) const noexcept {
+    for (const auto* bb : blocks_) {
+        if (!bb) continue;
+        for (const auto* inst : *bb) {
+            if (inst && inst->opcode() == Opcode::guard && inst->resume_id() == resume_id) return inst;
+        }
+    }
+    return nullptr;
+}
+
+const Function* Function::guard_exit_stub(const Instruction& guard) const noexcept {
+    if (!parent_ || guard.symbol().empty()) return nullptr;
+    return parent_->get_function(guard.symbol());
+}
+
+bool Function::guard_exit_stub_matches(const Instruction& guard, const Function& stub, std::string& why) const {
+    const auto& state = guard.state_map();
+    const auto& params = stub.param_types();
+    const std::string who = "exit stub '" + std::string(stub.name()) + "'";
+    if (params.size() != state.size()) {
+        why = who + " takes " + std::to_string(params.size()) + " parameters but the guard has " +
+              std::to_string(state.size()) + " state values (it is called as stub(state values...))";
+        return false;
+    }
+    for (size_t i = 0; i < state.size(); ++i) {
+        if (state[i] && state[i]->type() != params[i]) {
+            why = who + " parameter " + std::to_string(i) + " is " + std::string(params[i].name()) +
+                  " but state value " + std::to_string(i) + " is " + std::string(state[i]->type().name());
+            return false;
+        }
+    }
+    if (stub.return_type() != return_type_) {
+        why = who + " returns " + std::string(stub.return_type().name()) + " but '" + std::string(name_) +
+              "' returns " + std::string(return_type_.name()) + " (the stub's result is the function's)";
+        return false;
+    }
+    return true;
 }
 
 void Function::rebuild_cfg_predecessors() {

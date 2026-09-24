@@ -1,0 +1,34 @@
+module @guard_osr_stub
+
+; A guard with an exit stub and no resume target. It fails at i = 150; the
+; stub is called as stub(state values...) and its result is f's.
+; f(1000) = 11175 * 1000 + 150 = 11175150.
+func @stub(%acc: i64, %i: i64) -> i64 {
+bb0:
+  %k = iconst.i64 1000
+  %m = mul %acc, %k
+  %r = add %m, %i
+  ret %r
+}
+
+func @f(%n: i64) -> i64 {
+bb0:
+  %z = iconst.i64 0
+  br bb1(%z, %z)
+
+bb1(%i: i64, %acc: i64):
+  %c = slt %i, %n
+  br_if %c, bb2, bb3(%acc)
+
+bb2:
+  %lim = iconst.i64 150
+  %ok = slt %i, %lim
+  guard %ok, @stub, [%acc, %i]
+  %acc2 = add %acc, %i
+  %one = iconst.i64 1
+  %in = add %i, %one
+  br bb1(%in, %acc2)
+
+bb3(%r: i64):
+  ret %r
+}

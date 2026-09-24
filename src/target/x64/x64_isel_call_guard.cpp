@@ -1,6 +1,7 @@
 #include <brass/target/x64/x64_isel.hpp>
 #include <brass/codegen/unsupported_operation.hpp>
 #include <brass/runtime/deopt.hpp>
+#include <brass/mir/module.hpp>
 #include <algorithm>
 
 namespace brass::x64 {
@@ -236,6 +237,10 @@ void X64ISel::lower_safepoint(const Instruction& inst, LirBlock& lir_bb) {
 }
 
 void X64ISel::lower_guard(const Instruction& inst, LirBlock& lir_bb) {
+    if (mir_fn_ && mir_fn_->return_type().is_vector()) {
+        // A lower tier's result comes back through one 64-bit word.
+        codegen::throw_unsupported("x64 isel (guard)", "guard in a function returning a vector");
+    }
     const Value* cond_val = inst.operand(0);
     const Instruction* cmp_inst = cond_val ? cond_val->defining_instruction() : nullptr;
     // Only a comparison the analysis folded into this guard is recomputed.
@@ -348,7 +353,17 @@ void X64ISel::lower_guard(const Instruction& inst, LirBlock& lir_bb) {
     auto exit_inst = std::make_unique<LirInst>(LirOpcode::GuardExit);
     exit_inst->resume_id = inst.resume_id();
     exit_inst->deopt_reason = inst.offset() != 0 ? static_cast<uint32_t>(inst.offset()) : 1;
-    if (inst.symbol() != "@exit_stub" && inst.symbol() != "exit_stub") {
+    // Only a label that names a function of the module is an exit stub.
+    // The function may be an optimized clone in a module of its own: its
+    // callees, the stub among them, are in the callee module.
+    const Function* stub = callee_module_ && !inst.symbol().empty() ? callee_module_->get_function(inst.symbol())
+                           : mir_fn_                                ? mir_fn_->guard_exit_stub(inst)
+                                                                    : nullptr;
+    if (stub) {
+        std::string why;
+        if (!mir_fn_->guard_exit_stub_matches(inst, *stub, why)) {
+            codegen::throw_unsupported("x64 isel (guard)", why);
+        }
         exit_inst->exit_symbol = std::string(inst.symbol());
     }
 

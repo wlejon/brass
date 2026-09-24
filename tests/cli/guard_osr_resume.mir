@@ -1,0 +1,37 @@
+module @guard_osr_resume
+
+; A guard with a resume target and no exit stub (@exit_stub names no
+; function). It fails at i = 150, after the loop has been entered through
+; OSR; the resume block's parameters take the state values by position.
+; f(1000) = 11175 * 1000 + 150 = 11175150.
+func @f(%n: i64) -> i64 {
+bb0:
+  %z = iconst.i64 0
+  br bb1(%z, %z)
+
+bb1(%i: i64, %acc: i64):
+  %c = slt %i, %n
+  br_if %c, bb2, bb3(%acc)
+
+bb2:
+  %lim = iconst.i64 150
+  %ok = slt %i, %lim
+  guard %ok, @exit_stub, [%acc, %i]
+  %acc2 = add %acc, %i
+  %one = iconst.i64 1
+  %in = add %i, %one
+  br bb1(%in, %acc2)
+
+bb3(%r: i64):
+  ret %r
+
+bres(%a: i64, %j: i64):
+  %k = iconst.i64 1000
+  %m = mul %a, %k
+  %rr = add %m, %j
+  ret %rr
+
+resume_table {
+  entry 0 -> bres
+}
+}

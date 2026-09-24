@@ -75,6 +75,10 @@ private:
     void emit_vec_instruction(const LirInst& inst);
     void emit_parallel_copy(const LirInst& inst);
     void emit_control_instruction(const LirInst& inst);
+    // Guard exit with no handler or resumer: calls the exit stub as
+    // stub(state values...) from the deopt record at [rsp + slots_disp] and
+    // releases the record's `record_alloc` bytes.
+    void emit_exit_stub_call(const LirInst& inst, int32_t slots_disp, size_t record_alloc);
 };
 
 CompilationResult compile_lir_to_x64(const LirFunction& fn, const Target& target);
