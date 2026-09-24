@@ -180,7 +180,7 @@ void AArch64BaselineEmitter::record_safepoint(uint32_t site_id) {
 }
 
 void AArch64BaselineEmitter::emit_return() {
-    if (preserves_tls) enc.ldr(GPR::X28, ptr(GPR::FP, -8));
+    if (preserves_tls) enc.ldr(GPR::X28, ptr(GPR::FP, -16));
     enc.mov(GPR::SP, GPR::FP);
     enc.ldp(GPR::FP, GPR::LR, post_idx(GPR::SP, 16));
     enc.ret();

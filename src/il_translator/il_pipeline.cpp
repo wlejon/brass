@@ -98,6 +98,11 @@ TranslatorOptions bronze_translator_options() {
     }
     options.enable_fma = true;
 #endif
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    // NEON is 128 bits wide and FMA is part of the base ISA (as bronze's
+    // brass_backend.cpp sets for an AArch64 target).
+    options.vector_width = 128;
+    options.enable_fma = true;
 #endif
     return options;
 }

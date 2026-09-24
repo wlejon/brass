@@ -202,6 +202,8 @@ struct Pass {
     uint32_t stp_end = 0;
     uint32_t mov_end = 0;
     uint32_t tls_save_end = 0;
+    uint32_t prologue_end = 0;
+    uint32_t alloc_bytes = 0;
     bool uses_lazy_stubs = false;
     std::vector<std::string> lazy_call_symbols;
 };
@@ -219,7 +221,9 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
 
     // 1. Frame: slots, the parallel-copy area and the outgoing arguments.
     const bool preserves_tls = fn.parent() && fn.parent()->pinned_tls_register();
-    const BaselineFrameLayout layout = layout_baseline_frame(fn, preserves_tls ? 8 : 0, kA64BaselineStage);
+    // The pinned-TLS register is pushed right below the frame record, at
+    // fp - 16, so the slots start after it.
+    const BaselineFrameLayout layout = layout_baseline_frame(fn, preserves_tls ? 16 : 0, kA64BaselineStage);
     const int32_t out_bytes = static_cast<int32_t>(a64_baseline_outgoing_bytes(fn, target));
     const int32_t copy_bytes = static_cast<int32_t>(a64_baseline_copy_bytes(fn));
     const int32_t slot_bytes = (layout.size + 15) & ~15;
@@ -246,11 +250,15 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
         pass.stp_end = static_cast<uint32_t>(buffer.size());
         enc.mov(GPR::FP, GPR::SP);
         pass.mov_end = static_cast<uint32_t>(buffer.size());
-        if (frame_bytes > 0) enc.sub(GPR::SP, GPR::SP, static_cast<uint32_t>(frame_bytes));
+        int32_t alloc_bytes = frame_bytes;
         if (preserves_tls) {
-            enc.str(kPinnedTlsGpr, ptr(GPR::FP, -8));
+            enc.str(kPinnedTlsGpr, pre_idx(GPR::SP, -16));
             pass.tls_save_end = static_cast<uint32_t>(buffer.size());
+            alloc_bytes -= 16;
         }
+        if (alloc_bytes > 0) enc.sub(GPR::SP, GPR::SP, static_cast<uint32_t>(alloc_bytes));
+        pass.alloc_bytes = static_cast<uint32_t>(alloc_bytes);
+        pass.prologue_end = static_cast<uint32_t>(buffer.size());
 
         std::unordered_map<uint32_t, Label> block_labels;
         for (const auto* bb : fn.blocks()) {
@@ -343,17 +351,21 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
 
     // Executable memory: the code, then (when this process runs it) the
     // unwind data that lets a C++ exception from a helper unwind through
-    // the frame. Windows on Arm would take .pdata / .xdata, which this tier
-    // does not write: there a helper's exception does not cross baseline
-    // frames.
+    // the frame: .xdata + RUNTIME_FUNCTION on Windows, .eh_frame elsewhere.
     const size_t code_bytes = pass.buffer.size();
     std::vector<uint8_t> image(pass.buffer.data(), pass.buffer.data() + code_bytes);
     const Target host = Target::host();
-    const bool runs_here = host.is_aarch64() && !host.is_windows() && !target.is_windows();
+    const bool runs_here = host.is_aarch64() && host.is_windows() == target.is_windows();
+    A64BaselinePrologue prologue;
+    prologue.stp_end = pass.stp_end;
+    prologue.mov_end = pass.mov_end;
+    prologue.tls_save_end = pass.tls_save_end;
+    prologue.alloc_bytes = pass.alloc_bytes;
     size_t unwind_off = 0;
     if (runs_here) {
-        unwind_off = append_aarch64_baseline_eh_frame(image, static_cast<uint32_t>(code_bytes), pass.stp_end,
-                                                      pass.mov_end, pass.tls_save_end);
+        unwind_off = target.is_windows()
+            ? append_aarch64_baseline_win_unwind(image, static_cast<uint32_t>(code_bytes), prologue)
+            : append_aarch64_baseline_eh_frame(image, static_cast<uint32_t>(code_bytes), prologue);
     }
     auto mem_block = std::make_shared<JitMemoryBlock>(image.size());
     if (!mem_block->is_valid()) {

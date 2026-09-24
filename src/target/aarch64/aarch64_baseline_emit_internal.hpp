@@ -11,8 +11,8 @@
 //   fp + 16 ...          incoming stack arguments
 //   fp + 8               lr
 //   fp                   caller's fp
+//   [fp - 16             the caller's pinned-TLS register, when saved]
 //   fp - off             the value / alloca slot at layout offset `off`
-//   [fp - 8              the caller's pinned-TLS register, when saved]
 //   sp + out_bytes ...   the parallel-copy area (copy_block_args)
 //   sp                   outgoing stack arguments
 //
@@ -116,9 +116,26 @@ bool emit_baseline_aarch64_vec_op(AArch64BaselineEmitter& emitter, const Instruc
 // check_x64_baseline_vector_inst).
 void check_aarch64_baseline_vector_inst(const Instruction& inst, const Target& target);
 
-// DWARF .eh_frame (CIE, one FDE, terminator) for the fixed prologue,
-// appended to `image` after the code; returns the CIE's offset.
+// The fixed prologue, as code offsets just past each step:
+//
+//   stp x29, x30, [sp, #-16]!   stp_end
+//   mov x29, sp                 mov_end
+//   [str x28, [sp, #-16]!]      tls_save_end (0 when the register is not saved)
+//   [sub sp, sp, #alloc_bytes]
+struct A64BaselinePrologue {
+    uint32_t stp_end = 0;
+    uint32_t mov_end = 0;
+    uint32_t tls_save_end = 0;
+    uint32_t alloc_bytes = 0;
+};
+
+// Unwind data for the prologue, appended to `image` after the code; each
+// returns the offset to pass to JitMemoryBlock::register_unwind_info. DWARF
+// .eh_frame (CIE, one FDE, terminator), or Windows ARM64 .xdata followed by
+// its RUNTIME_FUNCTION.
 size_t append_aarch64_baseline_eh_frame(std::vector<uint8_t>& image, uint32_t code_size,
-                                        uint32_t stp_end, uint32_t mov_end, uint32_t tls_save_end);
+                                        const A64BaselinePrologue& prologue);
+size_t append_aarch64_baseline_win_unwind(std::vector<uint8_t>& image, uint32_t code_size,
+                                          const A64BaselinePrologue& prologue);
 
 } // namespace brass::aarch64

@@ -543,3 +543,42 @@ TEST_CASE("AArch64 Backend Hardening - ElfSoWriter 64KB Page Alignment") {
         }
     }
 }
+
+// The AArch64 baseline's Windows unwind data (it registers it only on
+// Windows on Arm, so its bytes are checked here, on any host): an .xdata
+// record whose codes undo the fixed prologue - alloc, the pinned-TLS
+// save_reg_x, set_fp, save_fplr_x - and the 8-byte RUNTIME_FUNCTION after it.
+#include "../../src/target/aarch64/aarch64_baseline_emit_internal.hpp"
+
+TEST_CASE("AArch64 Backend Hardening - Baseline JIT Windows unwind records") {
+    auto u32 = [](const std::vector<uint8_t>& b, size_t at) { return read_u32_le(b.data() + at); };
+    {
+        std::vector<uint8_t> image(100, 0);   // 25 instructions of code
+        A64BaselinePrologue p;
+        p.stp_end = 4;
+        p.mov_end = 8;
+        p.tls_save_end = 12;
+        p.alloc_bytes = 480;
+        const size_t rf = append_aarch64_baseline_win_unwind(image, 100, p);
+        // .xdata at 100: FunctionLength 25, two code words.
+        CHECK_EQ(u32(image, 100), 25u | (2u << 27));
+        const std::vector<uint8_t> codes(image.begin() + 104, image.begin() + 112);
+        CHECK(codes == (std::vector<uint8_t>{0x1E, 0xD5, 0x21, 0xE1, 0x81, 0xE4, 0xE3, 0xE3}));
+        CHECK_EQ(rf, size_t{112});
+        CHECK_EQ(u32(image, rf), 0u);         // BeginAddress: the code
+        CHECK_EQ(u32(image, rf + 4), 100u);   // the .xdata record's RVA
+    }
+    {
+        // A large frame (alloc_l: 4376 16-byte units), no pinned TLS.
+        std::vector<uint8_t> image(64, 0);
+        A64BaselinePrologue p;
+        p.stp_end = 4;
+        p.mov_end = 8;
+        p.alloc_bytes = 70016;
+        const size_t rf = append_aarch64_baseline_win_unwind(image, 64, p);
+        CHECK_EQ(u32(image, 64), 16u | (2u << 27));
+        const std::vector<uint8_t> codes(image.begin() + 68, image.begin() + 76);
+        CHECK(codes == (std::vector<uint8_t>{0xE0, 0x00, 0x11, 0x18, 0xE1, 0x81, 0xE4, 0xE3}));
+        CHECK_EQ(u32(image, rf + 4), 64u);
+    }
+}
