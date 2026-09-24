@@ -738,8 +738,60 @@ void GenerationalGC::reset() {
 }
 
 runtime::CoroFrameRegistry& GenerationalGC::coro_frames() {
-    if (!coro_frames_) coro_frames_ = runtime::make_coro_frame_registry();
+    if (!coro_frames_) {
+        coro_frames_ = runtime::make_coro_frame_registry([this](uintptr_t a) { return holds_coro_frame(a); });
+    }
     return *coro_frames_;
+}
+
+bool GenerationalGC::holds_coro_frame(uintptr_t addr) const noexcept {
+    if ((addr & 7) != 0) return false;
+    const GenGcHeader* hdr = get_header(addr);
+    return hdr != nullptr && hdr->type_tag == runtime::TYPE_TAG_CORO_FRAME;
+}
+
+GenerationalGC::GenerationalGC(GenerationalGC&& other) noexcept
+    : nursery_size_(other.nursery_size_),
+      survivor_size_(other.survivor_size_),
+      tenured_size_(other.tenured_size_),
+      tenuring_threshold_(other.tenuring_threshold_) {
+    *this = std::move(other);
+}
+
+GenerationalGC& GenerationalGC::operator=(GenerationalGC&& other) noexcept {
+    if (this != &other) {
+        nursery_size_ = other.nursery_size_;
+        survivor_size_ = other.survivor_size_;
+        tenured_size_ = other.tenured_size_;
+        tenuring_threshold_ = other.tenuring_threshold_;
+        heap_data_ = std::move(other.heap_data_);
+        heap_base_ = other.heap_base_;
+        nursery_offset_ = other.nursery_offset_;
+        survivor_a_offset_ = other.survivor_a_offset_;
+        survivor_b_offset_ = other.survivor_b_offset_;
+        tenured_offset_ = other.tenured_offset_;
+        nursery_free_ = other.nursery_free_;
+        survivor_from_offset_ = other.survivor_from_offset_;
+        survivor_to_offset_ = other.survivor_to_offset_;
+        survivor_from_free_ = other.survivor_from_free_;
+        survivor_to_free_ = other.survivor_to_free_;
+        tenured_free_ = other.tenured_free_;
+        tenured_objects_ = std::move(other.tenured_objects_);
+        card_table_ = std::move(other.card_table_);
+        stress_mode_ = other.stress_mode_;
+        minor_collection_count_ = other.minor_collection_count_;
+        major_collection_count_ = other.major_collection_count_;
+        total_allocations_ = other.total_allocations_;
+        total_allocated_bytes_ = other.total_allocated_bytes_;
+        promoted_bytes_ = other.promoted_bytes_;
+        registered_roots_ = std::move(other.registered_roots_);
+        root_provider_ = std::move(other.root_provider_);
+        coro_frames_ = std::move(other.coro_frames_);
+        if (coro_frames_) {
+            runtime::set_coro_frame_registry_holds(*coro_frames_, [this](uintptr_t a) { return holds_coro_frame(a); });
+        }
+    }
+    return *this;
 }
 
 } // namespace brass

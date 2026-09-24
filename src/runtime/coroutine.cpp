@@ -57,7 +57,7 @@ struct CoroFrameCell {
 // through the slot it was handed while other heaps' registries change.
 class CoroFrameRegistry {
 public:
-    CoroFrameRegistry() {
+    explicit CoroFrameRegistry(CoroFrameHolds h) : holds(std::move(h)) {
         std::lock_guard<std::recursive_mutex> lock(registries_mutex());
         live_registries().push_back(this);
     }
@@ -81,10 +81,20 @@ public:
     // for as long as it updates root slots (CoroRootsLock).
     std::recursive_mutex mutex;
     std::list<std::shared_ptr<CoroFrameCell>> frames;
+    // Whether the heap holds a frame at an address (coroutine.hpp). Guarded
+    // by `mutex`.
+    CoroFrameHolds holds;
 };
 
-std::shared_ptr<CoroFrameRegistry> make_coro_frame_registry() {
-    return std::make_shared<CoroFrameRegistry>();
+std::shared_ptr<CoroFrameRegistry> make_coro_frame_registry(CoroFrameHolds holds) {
+    if (!holds) throw std::logic_error("make_coro_frame_registry: a heap's registry needs its holds predicate");
+    return std::make_shared<CoroFrameRegistry>(std::move(holds));
+}
+
+void set_coro_frame_registry_holds(CoroFrameRegistry& registry, CoroFrameHolds holds) {
+    if (!holds) throw std::logic_error("set_coro_frame_registry_holds: a heap's registry needs its holds predicate");
+    std::lock_guard<std::recursive_mutex> own(registry.mutex);
+    registry.holds = std::move(holds);
 }
 
 CoroRootsLock::CoroRootsLock(CoroFrameRegistry& registry) : registry_(&registry) {
@@ -100,12 +110,47 @@ namespace {
 // The installed HostHeap's frames, and frames allocated outside any heap
 // (never collected, so never reported as roots).
 CoroFrameRegistry& host_heap_frames() {
-    static auto* r = new CoroFrameRegistry();
+    static auto* r = new CoroFrameRegistry([](uintptr_t addr) {
+        const HostHeap* heap = brass::host_heap();
+        return heap != nullptr && heap->contains(addr);
+    });
     return *r;
 }
+// Every frame allocated outside any heap: they are never freed, so an
+// address here stays a frame. Guarded by unmanaged_frames()' lock.
+std::unordered_set<uintptr_t>& unmanaged_frame_addrs() {
+    static auto* s = new std::unordered_set<uintptr_t>();
+    return *s;
+}
 CoroFrameRegistry& unmanaged_frames() {
-    static auto* r = new CoroFrameRegistry();
+    static auto* r = new CoroFrameRegistry([](uintptr_t addr) {
+        return unmanaged_frame_addrs().count(addr) != 0;
+    });
     return *r;
+}
+
+// The frame `handle` names, once some live heap is known to hold it (its
+// registry's `holds`); otherwise a hard error, before any access through it.
+BrassCoroFrame* checked_coro_frame(uintptr_t handle, const char* what) {
+    std::lock_guard<std::recursive_mutex> lock(registries_mutex());
+    for (CoroFrameRegistry* r : live_registries()) {
+        std::lock_guard<std::recursive_mutex> own(r->mutex);
+        if (r->holds(handle)) return reinterpret_cast<BrassCoroFrame*>(handle);
+    }
+    // A registered frame is unfinished and live wherever it is (a HostHeap
+    // that cannot answer `contains` still has its registered frames).
+    for (CoroFrameRegistry* r : live_registries()) {
+        std::lock_guard<std::recursive_mutex> own(r->mutex);
+        for (auto& cell : r->frames) {
+            if (cell->addr == handle) return reinterpret_cast<BrassCoroFrame*>(handle);
+        }
+    }
+    char msg[256];
+    std::snprintf(msg, sizeof msg,
+                  "%s: coroutine handle %p names no frame a live heap holds (a stale handle: its heap "
+                  "was torn down, a collection moved the frame, or it is not a coroutine frame)",
+                  what, reinterpret_cast<void*>(handle));
+    throw std::logic_error(msg);
 }
 
 // The registry of the heap allocate_coro_frame allocates from on this thread
@@ -170,7 +215,7 @@ CoroFrameRef coro_frame_ref(BrassCoroFrame* frame) {
     if (auto cell = find_registered(mine, addr)) return cell;
     // Every unregistered frame is finished (it finished, threw, or was
     // destroyed); anything else is not a coroutine frame.
-    if (frame->is_done == 0) {
+    if (checked_coro_frame(addr, "coroutine frame reference")->is_done == 0) {
         throw std::logic_error("coroutine frame reference: not a registered coroutine frame");
     }
     auto done = std::make_shared<CoroFrameCell>();
@@ -322,7 +367,21 @@ void append_active_coro_roots(CoroFrameRegistry& registry, std::vector<uintptr_t
 }
 
 void append_host_heap_coro_roots(std::vector<uintptr_t*>& roots) {
+    // The host updates these slots after this returns: only while its
+    // collection holds the registry's lock may it be handed them.
+    if (!brass::in_host_heap_collection()) {
+        throw std::logic_error("brass_enumerate_thread_roots: called outside a HostHeapCollectionScope; a host's "
+                               "collection holds one until it has updated the slots reported");
+    }
     append_active_coro_roots(host_heap_frames(), roots);
+}
+
+void lock_host_heap_coro_roots() {
+    host_heap_frames().mutex.lock();
+}
+
+void unlock_host_heap_coro_roots() noexcept {
+    host_heap_frames().mutex.unlock();
 }
 
 void finish_thrown_coro_frame(BrassCoroFrame* frame) noexcept {
@@ -389,7 +448,13 @@ uintptr_t allocate_coro_frame(size_t total_size, uint64_t frame_mask,
         }
         return gc->allocate(total_size, frame_mask, TYPE_TAG_CORO_FRAME);
     }
-    return reinterpret_cast<uintptr_t>(std::calloc(1, total_size));
+    const uintptr_t frame = reinterpret_cast<uintptr_t>(std::calloc(1, total_size));
+    if (frame) {
+        CoroFrameRegistry& r = unmanaged_frames();
+        std::lock_guard<std::recursive_mutex> own(r.mutex);
+        unmanaged_frame_addrs().insert(frame);
+    }
+    return frame;
 }
 
 } // namespace
@@ -431,7 +496,7 @@ uintptr_t brass_coro_create_at(void* fn_ptr, uint32_t slot_count, uint64_t point
 
 // Generated code calls brass_coro_create with no frame argument, so it takes
 // its caller's frame as brass_gc_alloc does. MSVC: the stub in
-// gc_msvc_x64.asm, which calls brass_coro_create_at.
+// gc_msvc_x64.asm / gc_msvc_arm64.asm, which calls brass_coro_create_at.
 #if !defined(_MSC_VER)
 uintptr_t brass_coro_create(void* fn_ptr, uint32_t slot_count, uint64_t pointer_mask) {
     void* frame = __builtin_frame_address(0);
@@ -449,7 +514,7 @@ namespace {
 uint64_t coro_resume_impl(uintptr_t coro_frame, uint64_t input_val, bool have_caller, uintptr_t caller_rbp,
                           uintptr_t caller_ip) {
     if (!coro_frame) return 0;
-    BrassCoroFrame* frame = reinterpret_cast<BrassCoroFrame*>(coro_frame);
+    BrassCoroFrame* frame = checked_coro_frame(coro_frame, "brass_coro_resume");
 
     if (frame->is_done != 0) {
         unregister_active_coro_frame(frame);
@@ -538,20 +603,21 @@ BRASS_CORO_NOINLINE uint64_t brass_coro_resume_from_generated(uintptr_t coro_fra
 
 uint32_t brass_coro_is_done(uintptr_t coro_frame) {
     if (!coro_frame) return 1;
-    BrassCoroFrame* frame = reinterpret_cast<BrassCoroFrame*>(coro_frame);
-    return frame->is_done;
+    return checked_coro_frame(coro_frame, "brass_coro_is_done")->is_done;
 }
 
 void brass_coro_destroy(uintptr_t coro_frame) {
     if (!coro_frame) return;
-    // Only a registered frame is written: that is the one kind known to be
-    // live. Every frame leaves its registry finished (is_done set), so an
-    // unregistered handle is either already done or names memory that is no
-    // longer a frame (its heap was torn down): nothing to write either way.
+    // Only a registered frame is written. Every frame leaves its registry
+    // finished (is_done set), so an unregistered handle a live heap holds is
+    // already done; one no live heap holds is stale (a hard error).
     CoroFrameRegistry& mine = current_coro_registry(); // may create it: before the lock
     std::lock_guard<std::recursive_mutex> lock(registries_mutex());
     auto cell = find_registered(mine, coro_frame);
-    if (!cell) return;
+    if (!cell) {
+        (void)checked_coro_frame(coro_frame, "brass_coro_destroy");
+        return;
+    }
     CoroFrameRegistry* owner = cell->owner;
     std::lock_guard<std::recursive_mutex> own(owner->mutex);
     reinterpret_cast<BrassCoroFrame*>(coro_frame)->is_done = 1;

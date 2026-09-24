@@ -209,12 +209,11 @@ extern "C" void x64_win64_invoke_thunk(
 #endif
 
 #if defined(__aarch64__) || defined(_M_ARM64)
-#if defined(__GNUC__) || defined(__clang__)
+// codegen/jit_invoke.cpp (GCC/Clang), gc/gc_msvc_arm64.asm (MSVC).
 extern "C" void aarch64_invoke_thunk(
     const AArch64InvokeArgs* args,
     AArch64InvokeResult* result
 );
-#endif
 #endif
 
 class JitExecutionEngine {

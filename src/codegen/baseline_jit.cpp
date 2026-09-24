@@ -81,7 +81,7 @@ RuntimeValue BaselineCompiledFunction::invoke(const std::vector<RuntimeValue>& a
 
     return native_return_value(return_type_, result.rax, result.xmm0);
 #endif
-#elif (defined(__aarch64__) || defined(_M_ARM64)) && (defined(__GNUC__) || defined(__clang__))
+#elif defined(__aarch64__) || defined(_M_ARM64)
     AArch64InvokeArgs invoke_args;
     std::vector<uint64_t> stack_words;
     partition_aarch64_invoke_args(args, ptypes, addr, invoke_args, stack_words);

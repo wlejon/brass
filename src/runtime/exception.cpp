@@ -189,9 +189,10 @@ __attribute__((naked)) void brass_jump_to_landing_pad(
     );
 }
 #endif
-#elif (defined(__GNUC__) || defined(__clang__)) && (defined(__aarch64__) || defined(_M_ARM64))
+#elif (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER) && (defined(__aarch64__) || defined(_M_ARM64))
 // Defined in exception_throw_aarch64.cpp.
 #elif defined(_MSC_VER)
+// The stub is in gc/gc_msvc_x64.asm or gc/gc_msvc_arm64.asm (same arguments).
 [[noreturn]] void brass_jump_to_landing_pad(
     void* landing_pad_ip,
     void* target_rbp,
@@ -339,10 +340,9 @@ extern "C" BRASS_NOINLINE_NOFP void brass_throw_impl(
 extern "C" {
 
 // brass_throw / brass_rethrow are asm stubs on x86-64 (exception_throw_x64.cpp
-// for GCC/Clang, gc_msvc_x64.asm for MSVC) and on AArch64 with GCC/Clang
-// (exception_throw_aarch64.cpp).
-#if !(defined(__x86_64__) || defined(_M_X64)) && \
-    !((defined(__GNUC__) || defined(__clang__)) && (defined(__aarch64__) || defined(_M_ARM64)))
+// for GCC/Clang, gc_msvc_x64.asm for MSVC) and on AArch64
+// (exception_throw_aarch64.cpp for GCC/Clang, gc_msvc_arm64.asm for MSVC).
+#if !(defined(__x86_64__) || defined(_M_X64)) && !(defined(__aarch64__) || defined(_M_ARM64))
 [[noreturn]] void brass_throw(HostValue val) {
     SavedRegisters regs{};
     brass_throw_impl(val, &regs, 0, 0);

@@ -103,9 +103,16 @@ list(APPEND BRASS_SOURCES
 )
 list(REMOVE_DUPLICATES BRASS_SOURCES)
 
+# The entry, throw and invoke stubs of an MSVC build (cl or clang-cl) are
+# assembly; GCC/Clang builds define them as file-scope asm in C++.
 if(MSVC)
-    enable_language(ASM_MASM)
-    list(APPEND BRASS_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/gc/gc_msvc_x64.asm")
+    if(CMAKE_CXX_COMPILER_ARCHITECTURE_ID MATCHES "^(ARM64|arm64)$")
+        enable_language(ASM_MARMASM)
+        list(APPEND BRASS_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/gc/gc_msvc_arm64.asm")
+    else()
+        enable_language(ASM_MASM)
+        list(APPEND BRASS_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/gc/gc_msvc_x64.asm")
+    endif()
 endif()
 
 add_library(brass STATIC ${BRASS_SOURCES})

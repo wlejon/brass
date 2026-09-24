@@ -154,6 +154,7 @@ private:
         *slot = (v & ~0x0000FFFFFFFFFFFFULL) | copy(p);
     }
     void collect_now(uintptr_t fp, uintptr_t ip) {
+        HostHeapCollectionScope collecting; // until the last slot is updated
         std::vector<uintptr_t*> roots;
         brass_enumerate_thread_roots(fp, ip, roots);
         ttop_ = 0;

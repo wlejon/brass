@@ -153,6 +153,7 @@ private:
         *slot = (v & ~0x0000FFFFFFFFFFFFULL) | copy(p);
     }
     void collect_now(uintptr_t fp, uintptr_t ip) {
+        HostHeapCollectionScope collecting; // until the last slot is updated
         std::vector<uintptr_t*> roots;
         brass_enumerate_thread_roots(fp, ip, roots);
         // Copies start at a different offset each time, so an object that
@@ -173,12 +174,27 @@ private:
         for (size_t i = 0; i < kCap / 8; ++i) fw[i] = 0xDEADBEEFDEADBEEFULL;
         std::swap(from_, to_);
         top_ = ttop_;
+        base_ = start;
         ++collections;
     }
+
+public:
+    // An object start in the current space (the walk brass relies on to
+    // check a finished coroutine frame's handle).
+    bool contains(uintptr_t addr) const override {
+        for (size_t at = base_; at < top_;) {
+            const uint64_t* hd = reinterpret_cast<const uint64_t*>(from_ + at);
+            if (reinterpret_cast<uintptr_t>(hd + 3) == addr) return true;
+            at += 24 + ((hd[0] + 7) & ~uint64_t(7));
+        }
+        return false;
+    }
+
+private:
     std::vector<uint8_t> a_, b_;
     uint8_t* from_;
     uint8_t* to_;
-    size_t top_ = 0, ttop_ = 0;
+    size_t top_ = 0, ttop_ = 0, base_ = 0;
     int allocs_ = 0;
 };
 

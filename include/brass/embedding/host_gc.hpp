@@ -14,6 +14,7 @@
 
 namespace brass::runtime {
 class CoroFrameRegistry;
+using CoroFrameHolds = std::function<bool(uintptr_t addr)>; // as coroutine.hpp
 }
 
 namespace brass {
@@ -130,6 +131,8 @@ public:
     runtime::CoroFrameRegistry& coro_frames();
 
 private:
+    // coro_frames()' predicate (coroutine.hpp), bound to this collector.
+    runtime::CoroFrameHolds coro_frame_holds();
     uintptr_t evacuate_object(uintptr_t obj_addr, size_t& to_free_ptr);
     void poison_space(uint8_t* space, size_t size) noexcept;
     void adopt_registered_tlabs(HostGC* from) noexcept;

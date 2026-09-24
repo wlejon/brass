@@ -12,11 +12,18 @@
 #include <brass/runtime/exception.hpp>
 #include "core/asm_symbol.hpp"
 
-#if (defined(__GNUC__) || defined(__clang__)) && (defined(__aarch64__) || defined(_M_ARM64))
+#if defined(__aarch64__) || defined(_M_ARM64)
 
+// brass_rethrow fetches the pending exception here (every AArch64 build: the
+// MSVC stubs in gc/gc_msvc_arm64.asm call it too).
 extern "C" uint64_t brass_current_exception_bits() noexcept {
     return brass::runtime::brass_get_current_exception().raw();
 }
+
+#endif
+
+// An MSVC build (cl or clang-cl) takes these stubs from gc/gc_msvc_arm64.asm.
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER) && (defined(__aarch64__) || defined(_M_ARM64))
 
 #if defined(__APPLE__)
 #define BRASS_A64_CALL(name) "_" #name

@@ -138,8 +138,26 @@ private:
 // looks through the registries (unregister, is_active_coro_frame) never reads
 // an entry a collection is writing. Lock order: the set, then a registry;
 // a collection holding its registry's lock takes no other.
+//
+// A raw frame handle (brass_coro_resume, brass_coro_is_done,
+// brass_coro_destroy) is checked before anything reads or writes through it:
+// it must name a frame some live heap holds, as that heap's `holds` predicate
+// answers (an object of its current space with the coroutine frame type tag;
+// frames allocated outside any heap are never freed and are recorded). A
+// handle into a heap that was torn down, into the space a collection left, or
+// to memory that is no coroutine frame is a hard error (std::logic_error),
+// never a read of that memory. The check needs no record of retired
+// addresses: a frame a collection moved to memory a torn-down heap once used
+// is held by its live heap and passes. (A stale handle that happens to equal
+// the address of another heap's live frame names that frame: it is memory a
+// live heap owns, and the handle's holder broke the rooting contract.)
 class CoroFrameRegistry;
-std::shared_ptr<CoroFrameRegistry> make_coro_frame_registry();
+// Whether `addr` is the address of a coroutine frame the owning heap holds
+// now. Called under the registry's lock, which the heap's collection holds.
+using CoroFrameHolds = std::function<bool(uintptr_t addr)>;
+std::shared_ptr<CoroFrameRegistry> make_coro_frame_registry(CoroFrameHolds holds);
+// The heap that owns `registry` moved (HostGC's move operations).
+void set_coro_frame_registry_holds(CoroFrameRegistry& registry, CoroFrameHolds holds);
 
 // Held by a heap's collection from gathering its coroutine roots
 // (append_active_coro_roots) until the last root slot is updated.
@@ -165,10 +183,14 @@ void visit_active_coro_frames(const std::function<void(uintptr_t*)>& visitor);
 // (under a CoroRootsLock on `registry`, held until the slots are updated).
 void append_active_coro_roots(CoroFrameRegistry& registry, std::vector<uintptr_t*>& roots);
 // The same for the installed HostHeap's frames (brass_enumerate_thread_roots).
-// The host's collector updates these slots after this returns, outside the
-// registry's lock: a host collecting its heap on one thread while another
-// thread unregisters one of its frames must serialize the two itself.
+// The host's collector updates these slots after this returns, so the
+// registry's lock is held by a HostHeapCollectionScope (host_heap.hpp) the
+// collector opens around both; with none open on the calling thread this is
+// a hard error (std::logic_error).
 void append_host_heap_coro_roots(std::vector<uintptr_t*>& roots);
+// The lock a HostHeapCollectionScope holds: the HostHeap frames' registry.
+void lock_host_heap_coro_roots();
+void unlock_host_heap_coro_roots() noexcept;
 
 // A body that throws is finished, as a generator that threw is: its frame is
 // done (a later resume returns 0 without running it) and no longer a root.
@@ -194,8 +216,9 @@ uint64_t brass_coro_resume(uintptr_t coro_frame, uint64_t input_val);
 // caller's landing pads see it.
 uint64_t brass_coro_resume_from_generated(uintptr_t coro_frame, uint64_t input_val);
 uint32_t brass_coro_is_done(uintptr_t coro_frame);
-// Marks a registered frame finished and unregisters it. A handle no registry
-// knows (a frame already finished, or one whose heap was torn down) is not
-// written through.
+// Marks a registered frame finished and unregisters it; a finished frame is
+// left as it is. A handle no live heap holds (its heap was torn down, or it
+// is no coroutine frame) is a hard error and is not written through, as for
+// brass_coro_resume and brass_coro_is_done.
 void brass_coro_destroy(uintptr_t coro_frame);
 }

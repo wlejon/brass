@@ -58,8 +58,10 @@ public:
 
     GenerationalGC(const GenerationalGC&) = delete;
     GenerationalGC& operator=(const GenerationalGC&) = delete;
-    GenerationalGC(GenerationalGC&&) noexcept = default;
-    GenerationalGC& operator=(GenerationalGC&&) noexcept = default;
+    // Member-wise, then the coroutine registry's predicate is bound to the
+    // heap's new home (it asks this object whether it holds a frame).
+    GenerationalGC(GenerationalGC&& other) noexcept;
+    GenerationalGC& operator=(GenerationalGC&& other) noexcept;
 
     // Allocation
     uintptr_t allocate(size_t size, uint64_t pointer_mask = 0, uint32_t type_tag = 0);
@@ -150,6 +152,8 @@ private:
     void scan_object_fields(uintptr_t obj_addr, GenGcHeader* hdr);
     void gather_all_roots(std::vector<uintptr_t*>& roots, std::vector<uintptr_t*>& extra_roots);
     void poison_range(uint8_t* start, size_t size) noexcept;
+    // coro_frames()' predicate, bound to this object.
+    bool holds_coro_frame(uintptr_t addr) const noexcept;
 
     size_t nursery_size_;
     size_t survivor_size_;

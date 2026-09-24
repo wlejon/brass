@@ -70,7 +70,37 @@ public:
         (void)caller_ip;
         safepoint();
     }
+
+    // Whether `addr` is the payload address allocate_at() returned for an
+    // object the heap holds now (not freed, not left behind by a move).
+    // brass asks it before reading a coroutine frame through a raw handle
+    // (brass_coro_resume, brass_coro_is_done, brass_coro_destroy) that is not
+    // a registered unfinished frame. A heap that cannot tell answers false,
+    // the default: such a handle is then a hard error, never a read of
+    // memory that may be gone.
+    virtual bool contains(uintptr_t addr) const {
+        (void)addr;
+        return false;
+    }
 };
+
+// Held by a host's collection from brass_enumerate_thread_roots until it has
+// updated the last slot that call reported. Some of those slots are brass's
+// records of suspended coroutine frames, which other threads read (and
+// unregister) under the same lock; the scope makes them wait for the
+// collection instead of reading a slot it is writing. Open it once the other
+// mutators are stopped (a thread waiting on it is not at a safepoint), and
+// collect on the thread that opened it. Nests on one thread.
+class HostHeapCollectionScope {
+public:
+    HostHeapCollectionScope();
+    ~HostHeapCollectionScope();
+    HostHeapCollectionScope(const HostHeapCollectionScope&) = delete;
+    HostHeapCollectionScope& operator=(const HostHeapCollectionScope&) = delete;
+};
+
+// Whether the calling thread holds a HostHeapCollectionScope.
+bool in_host_heap_collection() noexcept;
 
 // Every gcref slot brass knows on the calling thread, appended to `roots`,
 // for a host heap's collection (from allocate_at(), collect() or
@@ -91,6 +121,8 @@ public:
 //     same kind is not reached: a host that runs nested interpreters also
 //     reports their collect_all_roots() itself.
 // Roots the host registered on its own heap are its own business.
+// The caller holds a HostHeapCollectionScope until it has updated the slots;
+// calling this without one is a hard error (std::logic_error).
 void brass_enumerate_thread_roots(uintptr_t caller_fp, uintptr_t caller_ip, std::vector<uintptr_t*>& roots);
 
 // Process-wide, not owned; the heap must outlive all code running while it

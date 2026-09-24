@@ -34,8 +34,10 @@ public:
 
     MiniCheneyGC(const MiniCheneyGC&) = delete;
     MiniCheneyGC& operator=(const MiniCheneyGC&) = delete;
-    MiniCheneyGC(MiniCheneyGC&&) noexcept = default;
-    MiniCheneyGC& operator=(MiniCheneyGC&&) noexcept = default;
+    // Member-wise, then the coroutine registry's predicate is bound to the
+    // heap's new home (it asks this object whether it holds a frame).
+    MiniCheneyGC(MiniCheneyGC&& other) noexcept;
+    MiniCheneyGC& operator=(MiniCheneyGC&& other) noexcept;
 
     // Allocation
     uintptr_t allocate(size_t size, uint64_t pointer_mask = 0, uint32_t type_tag = 0);
@@ -102,6 +104,8 @@ private:
     uintptr_t evacuate_object(uintptr_t obj_addr, size_t& to_free_ptr);
     void poison_space(uint8_t* space, size_t size) noexcept;
     void gather_all_roots(std::vector<uintptr_t*>& roots);
+    // coro_frames()' predicate, bound to this object.
+    bool holds_coro_frame(uintptr_t addr) const noexcept;
 
     size_t semispace_size_;
     std::vector<uint8_t> from_space_;

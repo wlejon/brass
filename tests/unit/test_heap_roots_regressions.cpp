@@ -137,6 +137,7 @@ public:
         thread_roots_naming = 0;
         for (uintptr_t* s : roots) if (s && *s == watched) ++thread_roots_naming;
         roots.clear();
+        HostHeapCollectionScope collecting;
         brass_enumerate_thread_roots(fp, ip, roots);
         enumerated_naming = 0;
         for (uintptr_t* s : roots) if (s && *s == watched) ++enumerated_naming;

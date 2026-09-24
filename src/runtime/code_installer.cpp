@@ -324,7 +324,7 @@ RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) 
 
     return codegen::native_return_value(ret_type, result.rax, result.xmm0);
 #endif
-#elif (defined(__aarch64__) || defined(_M_ARM64)) && (defined(__GNUC__) || defined(__clang__))
+#elif defined(__aarch64__) || defined(_M_ARM64)
     codegen::AArch64InvokeArgs invoke_args;
     std::vector<uint64_t> stack_words;
     codegen::partition_aarch64_invoke_args(args, ptypes, addr, invoke_args, stack_words);

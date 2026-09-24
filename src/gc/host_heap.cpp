@@ -1,4 +1,5 @@
 #include <brass/gc/host_heap.hpp>
+#include <brass/runtime/coroutine.hpp>
 
 #include <atomic>
 #include <cstdio>
@@ -8,7 +9,22 @@ namespace brass {
 
 namespace {
 std::atomic<HostHeap*> g_host_heap{nullptr};
+thread_local int t_host_collection_depth = 0;
 } // namespace
+
+HostHeapCollectionScope::HostHeapCollectionScope() {
+    runtime::lock_host_heap_coro_roots();
+    ++t_host_collection_depth;
+}
+
+HostHeapCollectionScope::~HostHeapCollectionScope() {
+    --t_host_collection_depth;
+    runtime::unlock_host_heap_coro_roots();
+}
+
+bool in_host_heap_collection() noexcept {
+    return t_host_collection_depth > 0;
+}
 
 void set_host_heap(HostHeap* heap) noexcept {
     g_host_heap.store(heap, std::memory_order_release);

@@ -81,6 +81,7 @@ HostGC::HostGC(HostGC&& other) noexcept {
     adopt_registered_tlabs(&other);
     root_provider_ = std::move(other.root_provider_);
     coro_frames_ = std::move(other.coro_frames_);
+    if (coro_frames_) runtime::set_coro_frame_registry_holds(*coro_frames_, coro_frame_holds());
 }
 
 HostGC& HostGC::operator=(HostGC&& other) noexcept {
@@ -105,6 +106,7 @@ HostGC& HostGC::operator=(HostGC&& other) noexcept {
         adopt_registered_tlabs(&other);
         root_provider_ = std::move(other.root_provider_);
         coro_frames_ = std::move(other.coro_frames_);
+        if (coro_frames_) runtime::set_coro_frame_registry_holds(*coro_frames_, coro_frame_holds());
     }
     return *this;
 }
@@ -476,8 +478,18 @@ void HostGC::reset() {
 
 runtime::CoroFrameRegistry& HostGC::coro_frames() {
     std::lock_guard<std::recursive_mutex> lock(gc_mutex_);
-    if (!coro_frames_) coro_frames_ = runtime::make_coro_frame_registry();
+    if (!coro_frames_) coro_frames_ = runtime::make_coro_frame_registry(coro_frame_holds());
     return *coro_frames_;
+}
+
+runtime::CoroFrameHolds HostGC::coro_frame_holds() {
+    return [this](uintptr_t addr) {
+        if ((addr & 7) != 0) return false;
+        const uintptr_t base = reinterpret_cast<uintptr_t>(from_space_.data());
+        if (addr >= base + free_ptr_.load(std::memory_order_acquire)) return false;
+        const HostGcHeader* hdr = get_header(addr);
+        return hdr != nullptr && hdr->type_tag == runtime::TYPE_TAG_CORO_FRAME;
+    };
 }
 
 bool HostGC::allocate_tlab(size_t min_bytes, size_t preferred_size, uintptr_t& out_top, uintptr_t& out_end) {

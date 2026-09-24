@@ -17,6 +17,47 @@ MiniCheneyGC::MiniCheneyGC(size_t semispace_size)
     poison_space(to_space_.data(), semispace_size_);
 }
 
+MiniCheneyGC::MiniCheneyGC(MiniCheneyGC&& other) noexcept
+    : semispace_size_(other.semispace_size_),
+      from_space_(std::move(other.from_space_)),
+      to_space_(std::move(other.to_space_)),
+      free_ptr_(other.free_ptr_),
+      stress_mode_(other.stress_mode_),
+      collection_count_(other.collection_count_),
+      total_allocations_(other.total_allocations_),
+      total_allocated_bytes_(other.total_allocated_bytes_),
+      registered_roots_(std::move(other.registered_roots_)),
+      root_provider_(std::move(other.root_provider_)),
+      coro_frames_(std::move(other.coro_frames_)) {
+    if (coro_frames_) {
+        runtime::set_coro_frame_registry_holds(*coro_frames_, [this](uintptr_t a) { return holds_coro_frame(a); });
+    }
+}
+
+MiniCheneyGC& MiniCheneyGC::operator=(MiniCheneyGC&& other) noexcept {
+    if (this != &other) {
+        semispace_size_ = other.semispace_size_;
+        from_space_ = std::move(other.from_space_);
+        to_space_ = std::move(other.to_space_);
+        free_ptr_ = other.free_ptr_;
+        stress_mode_ = other.stress_mode_;
+        collection_count_ = other.collection_count_;
+        total_allocations_ = other.total_allocations_;
+        total_allocated_bytes_ = other.total_allocated_bytes_;
+        registered_roots_ = std::move(other.registered_roots_);
+        root_provider_ = std::move(other.root_provider_);
+        coro_frames_ = std::move(other.coro_frames_);
+        if (coro_frames_) {
+            runtime::set_coro_frame_registry_holds(*coro_frames_, [this](uintptr_t a) { return holds_coro_frame(a); });
+        }
+    }
+    return *this;
+}
+
+bool MiniCheneyGC::holds_coro_frame(uintptr_t addr) const noexcept {
+    return is_valid_object(addr) && get_header(addr)->type_tag == runtime::TYPE_TAG_CORO_FRAME;
+}
+
 void MiniCheneyGC::poison_space(uint8_t* space, size_t size) noexcept {
     uint64_t* p64 = reinterpret_cast<uint64_t*>(space);
     size_t count = size / sizeof(uint64_t);
@@ -37,7 +78,9 @@ void MiniCheneyGC::reset() {
 }
 
 runtime::CoroFrameRegistry& MiniCheneyGC::coro_frames() {
-    if (!coro_frames_) coro_frames_ = runtime::make_coro_frame_registry();
+    if (!coro_frames_) {
+        coro_frames_ = runtime::make_coro_frame_registry([this](uintptr_t a) { return holds_coro_frame(a); });
+    }
     return *coro_frames_;
 }
 
