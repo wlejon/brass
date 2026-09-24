@@ -80,6 +80,7 @@ HostGC::HostGC(HostGC&& other) noexcept {
     other.registered_tlabs_.clear();
     adopt_registered_tlabs(&other);
     root_provider_ = std::move(other.root_provider_);
+    coro_frames_ = std::move(other.coro_frames_);
 }
 
 HostGC& HostGC::operator=(HostGC&& other) noexcept {
@@ -103,6 +104,7 @@ HostGC& HostGC::operator=(HostGC&& other) noexcept {
         other.registered_tlabs_.clear();
         adopt_registered_tlabs(&other);
         root_provider_ = std::move(other.root_provider_);
+        coro_frames_ = std::move(other.coro_frames_);
     }
     return *this;
 }
@@ -322,7 +324,7 @@ void HostGC::collect(
 
     // 3.5. Relocate active coroutine roots
     std::vector<uintptr_t*> coro_roots;
-    runtime::append_active_coro_roots(coro_roots);
+    runtime::append_active_coro_roots(coro_frames(), coro_roots);
     for (auto* ptr_root : coro_roots) {
         if (ptr_root && *ptr_root && is_address_in_active_space(*ptr_root)) {
             *ptr_root = evacuate_object(*ptr_root, to_free_ptr);
@@ -465,6 +467,13 @@ void HostGC::reset() {
     registered_ptr_roots_.clear();
     poison_space(from_space_.data(), semispace_size_);
     poison_space(to_space_.data(), semispace_size_);
+    coro_frames_.reset(); // its frames are gone with the heap's contents
+}
+
+runtime::CoroFrameRegistry& HostGC::coro_frames() {
+    std::lock_guard<std::recursive_mutex> lock(gc_mutex_);
+    if (!coro_frames_) coro_frames_ = runtime::make_coro_frame_registry();
+    return *coro_frames_;
 }
 
 bool HostGC::allocate_tlab(size_t min_bytes, size_t preferred_size, uintptr_t& out_top, uintptr_t& out_end) {

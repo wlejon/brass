@@ -296,7 +296,7 @@ uintptr_t GenerationalGC::evacuate_young_object(uintptr_t obj_addr) {
 
 void GenerationalGC::gather_all_roots(std::vector<uintptr_t*>& roots, std::vector<uintptr_t*>& extra_roots) {
     roots.insert(roots.end(), registered_roots_.begin(), registered_roots_.end());
-    runtime::append_active_coro_roots(roots);
+    runtime::append_active_coro_roots(coro_frames(), roots);
     // Native frames under re-entered Tier-0 code (native_frames.hpp).
     brass_append_native_frame_roots(roots);
     roots.insert(roots.end(), extra_roots.begin(), extra_roots.end());
@@ -732,6 +732,12 @@ void GenerationalGC::reset() {
     total_allocations_ = 0;
     total_allocated_bytes_ = 0;
     promoted_bytes_ = 0;
+    coro_frames_.reset(); // its frames are gone with the heap's contents
+}
+
+runtime::CoroFrameRegistry& GenerationalGC::coro_frames() {
+    if (!coro_frames_) coro_frames_ = runtime::make_coro_frame_registry();
+    return *coro_frames_;
 }
 
 } // namespace brass

@@ -9,6 +9,10 @@
 #include <memory>
 #include <stdexcept>
 
+namespace brass::runtime {
+class CoroFrameRegistry;
+}
+
 namespace brass {
 
 struct GcHeader {
@@ -86,6 +90,10 @@ public:
     // Reset heap
     void reset();
 
+    // The coroutine frames allocated here (coroutine.hpp): roots of this
+    // heap's collections, dropped with it.
+    runtime::CoroFrameRegistry& coro_frames();
+
 private:
     // Checks that [base + offset, + size) lies inside one live object. `base`
     // is either an object start or a derived pointer into an object's
@@ -107,6 +115,7 @@ private:
 
     std::vector<uintptr_t*> registered_roots_;
     RootProvider root_provider_;
+    std::shared_ptr<runtime::CoroFrameRegistry> coro_frames_;
 };
 
 } // namespace brass

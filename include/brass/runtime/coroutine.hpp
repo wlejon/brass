@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <vector>
 #include <string_view>
 
@@ -106,12 +107,33 @@ private:
     std::vector<BrassCoroFrame*> awaiting_frames_;
 };
 
-// Root tracking for Cheney moving GC
+// Suspended coroutine frames are roots of the heap they were allocated in.
+// Each heap owns a registry of its frames (MiniCheneyGC, GenerationalGC and
+// HostGC each hold one; the installed HostHeap's frames share one, as do
+// frames allocated outside any heap), and a heap's entries go with it. A
+// frame leaves its registry when it finishes, when its body throws, or on
+// brass_coro_destroy. The registries are shared by all threads under one
+// lock; a heap's collection updates its own entries in place.
+class CoroFrameRegistry;
+std::shared_ptr<CoroFrameRegistry> make_coro_frame_registry();
+
+// Registers `frame` in the registry of the heap the thread allocates
+// coroutine frames from (allocate_coro_frame's choice, coroutine.cpp).
 void register_active_coro_frame(BrassCoroFrame* frame);
 void unregister_active_coro_frame(BrassCoroFrame* frame);
 bool is_active_coro_frame(uintptr_t frame);
+// Every registry's unfinished frames.
 void visit_active_coro_frames(const std::function<void(uintptr_t*)>& visitor);
-void append_active_coro_roots(std::vector<uintptr_t*>& roots);
+// The unfinished frames of one heap, as root slots its collection updates.
+void append_active_coro_roots(CoroFrameRegistry& registry, std::vector<uintptr_t*>& roots);
+// The same for the installed HostHeap's frames (brass_enumerate_thread_roots).
+void append_host_heap_coro_roots(std::vector<uintptr_t*>& roots);
+
+// A body that throws is finished, as a generator that threw is: its frame is
+// done (a later resume returns 0 without running it) and no longer a root.
+// Every resume path (brass_coro_resume, both interpreters) calls this while
+// the exception passes.
+void finish_thrown_coro_frame(BrassCoroFrame* frame) noexcept;
 
 } // namespace brass::runtime
 

@@ -11,6 +11,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <list>
+#include <mutex>
 #include <unordered_set>
 
 #if defined(_MSC_VER)
@@ -24,7 +26,73 @@ namespace brass::runtime {
 namespace {
 
 static MicrotaskQueue g_microtask_queue;
-static std::vector<BrassCoroFrame*> g_active_coro_frames;
+
+// Every live registry, under one lock (leaked: heaps may die during static
+// destruction). Recursive: a visitor may register frames.
+std::recursive_mutex& registries_mutex() {
+    static auto* m = new std::recursive_mutex();
+    return *m;
+}
+std::vector<CoroFrameRegistry*>& live_registries() {
+    static auto* v = new std::vector<CoroFrameRegistry*>();
+    return *v;
+}
+
+} // namespace
+
+// One heap's frames. List nodes do not move, so a collection may update an
+// entry through the slot it was handed while other heaps' registries change.
+class CoroFrameRegistry {
+public:
+    CoroFrameRegistry() {
+        std::lock_guard<std::recursive_mutex> lock(registries_mutex());
+        live_registries().push_back(this);
+    }
+    ~CoroFrameRegistry() {
+        std::lock_guard<std::recursive_mutex> lock(registries_mutex());
+        auto& all = live_registries();
+        all.erase(std::remove(all.begin(), all.end(), this), all.end());
+    }
+    CoroFrameRegistry(const CoroFrameRegistry&) = delete;
+    CoroFrameRegistry& operator=(const CoroFrameRegistry&) = delete;
+
+    // Guarded by registries_mutex().
+    std::list<BrassCoroFrame*> frames;
+};
+
+std::shared_ptr<CoroFrameRegistry> make_coro_frame_registry() {
+    return std::make_shared<CoroFrameRegistry>();
+}
+
+namespace {
+
+// The installed HostHeap's frames, and frames allocated outside any heap
+// (never collected, so never reported as roots).
+CoroFrameRegistry& host_heap_frames() {
+    static auto* r = new CoroFrameRegistry();
+    return *r;
+}
+CoroFrameRegistry& unmanaged_frames() {
+    static auto* r = new CoroFrameRegistry();
+    return *r;
+}
+
+// The registry of the heap allocate_coro_frame allocates from on this thread
+// (the same order of choice).
+CoroFrameRegistry& current_coro_registry() {
+    if (brass::host_heap() != nullptr) return host_heap_frames();
+    if (GenerationalGC* gen_gc = brass::brass_get_active_generational_gc()) return gen_gc->coro_frames();
+    if (HostGC* host_gc = brass::get_active_host_gc()) return host_gc->coro_frames();
+    if (MiniCheneyGC* gc = brass::brass_get_active_gc()) return gc->coro_frames();
+    return unmanaged_frames();
+}
+
+bool erase_from(CoroFrameRegistry& r, BrassCoroFrame* frame) {
+    auto it = std::find(r.frames.begin(), r.frames.end(), frame);
+    if (it == r.frames.end()) return false;
+    r.frames.erase(it);
+    return true;
+}
 
 } // namespace
 
@@ -99,41 +167,66 @@ void Promise::await_in(BrassCoroFrame* frame) {
 
 void register_active_coro_frame(BrassCoroFrame* frame) {
     if (!frame) return;
-    g_active_coro_frames.push_back(frame);
+    CoroFrameRegistry& r = current_coro_registry(); // may create it: before the lock
+    std::lock_guard<std::recursive_mutex> lock(registries_mutex());
+    r.frames.push_back(frame);
 }
 
 void unregister_active_coro_frame(BrassCoroFrame* frame) {
     if (!frame) return;
-    auto it = std::find(g_active_coro_frames.begin(), g_active_coro_frames.end(), frame);
-    if (it != g_active_coro_frames.end()) {
-        g_active_coro_frames.erase(it);
+    // The thread's own heap first: other heaps' entries are updated by their
+    // collections without the lock.
+    CoroFrameRegistry& mine = current_coro_registry();
+    std::lock_guard<std::recursive_mutex> lock(registries_mutex());
+    if (erase_from(mine, frame)) return;
+    for (CoroFrameRegistry* r : live_registries()) {
+        if (r != &mine && erase_from(*r, frame)) return;
     }
 }
 
 bool is_active_coro_frame(uintptr_t frame) {
     if (!frame) return false;
-    for (auto* f : g_active_coro_frames) {
-        if (reinterpret_cast<uintptr_t>(f) == frame) return true;
+    std::lock_guard<std::recursive_mutex> lock(registries_mutex());
+    for (CoroFrameRegistry* r : live_registries()) {
+        for (BrassCoroFrame* f : r->frames) {
+            if (reinterpret_cast<uintptr_t>(f) == frame) return true;
+        }
     }
     return false;
 }
 
 void visit_active_coro_frames(const std::function<void(uintptr_t*)>& visitor) {
-    for (auto*& frame : g_active_coro_frames) {
-        if (frame && !frame->is_done) {
-            uintptr_t addr = reinterpret_cast<uintptr_t>(frame);
-            visitor(&addr);
-            frame = reinterpret_cast<BrassCoroFrame*>(addr);
+    std::lock_guard<std::recursive_mutex> lock(registries_mutex());
+    for (CoroFrameRegistry* r : live_registries()) {
+        for (auto*& frame : r->frames) {
+            if (frame && !frame->is_done) {
+                uintptr_t addr = reinterpret_cast<uintptr_t>(frame);
+                visitor(&addr);
+                frame = reinterpret_cast<BrassCoroFrame*>(addr);
+            }
         }
     }
 }
 
-void append_active_coro_roots(std::vector<uintptr_t*>& roots) {
-    for (auto*& frame : g_active_coro_frames) {
+void append_active_coro_roots(CoroFrameRegistry& registry, std::vector<uintptr_t*>& roots) {
+    std::lock_guard<std::recursive_mutex> lock(registries_mutex());
+    for (auto*& frame : registry.frames) {
         if (frame && !frame->is_done) {
             roots.push_back(reinterpret_cast<uintptr_t*>(&frame));
         }
     }
+}
+
+void append_host_heap_coro_roots(std::vector<uintptr_t*>& roots) {
+    append_active_coro_roots(host_heap_frames(), roots);
+}
+
+void finish_thrown_coro_frame(BrassCoroFrame* frame) noexcept {
+    if (!frame) return;
+    frame->is_done = 1;
+    frame->state_id = ~0U;
+    frame->yielded_val = 0;
+    unregister_active_coro_frame(frame);
 }
 
 namespace {
@@ -285,16 +378,22 @@ uint64_t coro_resume_impl(uintptr_t coro_frame, uint64_t input_val, bool have_ca
         roots.push_back(static_cast<uintptr_t*>(ctx));
     }, &coro_frame);
     uint64_t result;
-    if (mir_coro_body(frame) != nullptr) {
-        result = resume_mir_coro_body(coro_frame);
-    } else {
-        // A native body is generated code entered from this C++ frame: a
-        // throw in it searches for pads no further than here and leaves as
-        // a C++ exception, which unwinds the scopes above (an SEH exception
-        // raised past this frame would skip their destructors, /EHs).
-        GeneratedCodeEntryScope entry;
-        using CoroFn = uint64_t (*)(BrassCoroFrame*);
-        result = reinterpret_cast<CoroFn>(frame->fn_ptr)(frame);
+    try {
+        if (mir_coro_body(frame) != nullptr) {
+            result = resume_mir_coro_body(coro_frame);
+        } else {
+            // A native body is generated code entered from this C++ frame: a
+            // throw in it searches for pads no further than here and leaves as
+            // a C++ exception, which unwinds the scopes above (an SEH exception
+            // raised past this frame would skip their destructors, /EHs).
+            GeneratedCodeEntryScope entry;
+            using CoroFn = uint64_t (*)(BrassCoroFrame*);
+            result = reinterpret_cast<CoroFn>(frame->fn_ptr)(frame);
+        }
+    } catch (...) {
+        // `coro_frame` is still a root here: it names the live copy.
+        finish_thrown_coro_frame(reinterpret_cast<BrassCoroFrame*>(coro_frame));
+        throw;
     }
     frame = reinterpret_cast<BrassCoroFrame*>(coro_frame);
     frame->yielded_val = result;

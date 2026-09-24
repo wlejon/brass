@@ -264,7 +264,7 @@ void brass_enumerate_thread_roots(uintptr_t caller_fp, uintptr_t caller_ip, std:
         }
     }
     brass_append_native_frame_roots(roots);
-    runtime::append_active_coro_roots(roots);
+    runtime::append_host_heap_coro_roots(roots);
     if (Interpreter* interp = Interpreter::active_on_thread()) interp->collect_all_roots(roots);
     if (FastInterpreter* fast = FastInterpreter::current()) fast->collect_all_roots(roots);
 }

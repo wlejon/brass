@@ -5,10 +5,13 @@
 // baseline-compiled function of the same signature that passes its
 // arguments as raw bits to a host entry, which runs the function in Tier 0
 // (re-entering the interpreter that called into native code) and returns
-// the result's bits. An exception it throws unwinds through the native
-// frames to the Tier-0 or host handler above them.
+// the result's bits. An exception it throws is raised again natively from
+// the bridge's host entry, so the landing pads of its native callers see it;
+// with none below the innermost generated-code entry it continues to the
+// Tier-0 or host handler above them as a C++ exception.
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/code_installer.hpp>
+#include <brass/runtime/exception.hpp>
 #include <brass/codegen/baseline_jit.hpp>
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/vm/fast_interpreter.hpp>
@@ -22,6 +25,12 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#if defined(_MSC_VER)
+#define BRASS_BRIDGE_NOINLINE __declspec(noinline)
+#else
+#define BRASS_BRIDGE_NOINLINE __attribute__((noinline))
+#endif
 
 namespace brass::runtime {
 
@@ -48,16 +57,49 @@ using Bits = uint64_t;
 // The native frames that called the bridge (its baseline body, then the
 // caller holding live gcrefs across the call) are recorded for the time
 // Tier 0 runs: a collection the callee triggers starts in the interpreter
-// and would not otherwise see them (native_frames.hpp).
+// and would not otherwise see them (native_frames.hpp). Every scope lives
+// in this frame, so an exception leaving it has already destroyed them.
+BRASS_BRIDGE_NOINLINE uint64_t bridge_run(Tier0Bridge* ctx, uintptr_t caller_rbp, uintptr_t caller_ip,
+                                          const uint64_t* bits, size_t count) {
+    NativeFramesScope native_frames(caller_rbp, caller_ip);
+    return ctx->pipeline->call_tier0_from_native(ctx->name, bits, count);
+}
+
+// A MIR throw leaving Tier 0, raised again natively for the native callers'
+// landing pads (which see only native throws: the personality ignores C++
+// exceptions), from a frame that holds nothing to unwind. With no pad below
+// the innermost generated-code entry it continues as the C++ exception it
+// was, to the Tier-0 invoke or host catch above.
+[[noreturn]] BRASS_BRIDGE_NOINLINE void bridge_reraise(bool from_tier0, RuntimeValue tier0_value, HostValue bits) {
+    brass_set_current_exception(bits);
+    brass_seh_raise(bits); // does not return when a pad catches it
+    if (from_tier0) throw InterpreterThrownException(tier0_value);
+    throw BrassException(bits);
+}
+
 template <size_t... I>
 uint64_t bridge_entry(Tier0Bridge* ctx, Bits<I>... args) {
     uintptr_t caller_rbp = 0, caller_ip = 0;
     if (!brass_capture_caller_frame(caller_rbp, caller_ip)) {
         bridge_fatal("cannot find the native frame that called '" + ctx->name + "'");
     }
-    NativeFramesScope native_frames(caller_rbp, caller_ip);
     const uint64_t bits[] = {args..., 0};
-    return ctx->pipeline->call_tier0_from_native(ctx->name, bits, sizeof...(I));
+    bool from_tier0 = false;
+    RuntimeValue tier0_value;
+    HostValue pending{};
+    try {
+        return bridge_run(ctx, caller_rbp, caller_ip, bits, sizeof...(I));
+    } catch (const InterpreterThrownException& ex) {
+        // The value keeps its type for a Tier-0 catch; a native pad gets
+        // its bits and types them itself.
+        from_tier0 = true;
+        tier0_value = ex.value();
+        pending = HostValue::from_raw(tier0_value.raw_bits());
+    } catch (const BrassException& ex) {
+        // A native throw the Tier-0 code did not catch.
+        pending = ex.value();
+    }
+    bridge_reraise(from_tier0, tier0_value, pending);
 }
 
 template <size_t... I>
@@ -137,11 +179,15 @@ uint64_t MultiTierPipeline::call_tier0_from_native(std::string_view name, const 
     // callee then shares its heap and state as a Tier-0 call would.
     // Otherwise (a host called native code directly) a fresh one runs it,
     // allocating from the thread's active GC (run_fresh_tier0).
-    // Either way an exception it throws (a MIR throw, or a Tier-0 error)
-    // propagates as a C++ exception: baseline frames carry unwind data, so
-    // it unwinds through the bridge and its native callers to the Tier-0
-    // invoke or host catch above them. Baseline code has no handlers of its
-    // own (the tier rejects exception ops), so none is skipped.
+    // Either way an exception it throws leaves here as a C++ exception. A
+    // MIR throw (InterpreterThrownException, or a native callee's uncaught
+    // BrassException) is raised again natively by bridge_entry, since the
+    // bridge's native callers include tier-2 code whose landing pads see
+    // only native throws; it continues as a C++ exception when no pad is
+    // found below the innermost generated-code entry. A Tier-0 error
+    // (InterpreterException) propagates as a C++ exception directly:
+    // baseline frames carry unwind data, so it unwinds through the bridge
+    // and its native callers to the Tier-0 or host catch above them.
     Interpreter* active = Interpreter::active_on_thread();
     FastInterpreter* active_fast = FastInterpreter::current();
     RuntimeValue r;

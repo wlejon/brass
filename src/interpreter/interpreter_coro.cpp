@@ -119,7 +119,15 @@ RuntimeValue interp_coro_resume(
     // exactly as brass_coro_resume runs it natively. It may collect and move
     // the frame: the argument is a gcref (the body's frame parameter is
     // one), and the operand here is a root, so it is re-read afterwards.
-    RuntimeValue yielded_res = exec_fn(*body, {RuntimeValue::from_gcref(frame_addr)});
+    RuntimeValue yielded_res;
+    try {
+        yielded_res = exec_fn(*body, {RuntimeValue::from_gcref(frame_addr)});
+    } catch (...) {
+        // A body that throws is finished (brass_coro_resume does the same).
+        runtime::finish_thrown_coro_frame(reinterpret_cast<runtime::BrassCoroFrame*>(
+            static_cast<uintptr_t>(frame.get_value(inst.operand(0)).raw_bits())));
+        throw;
+    }
     frame_addr = static_cast<uintptr_t>(frame.get_value(inst.operand(0)).raw_bits());
     frame_ptr = reinterpret_cast<runtime::BrassCoroFrame*>(frame_addr);
     frame_ptr->yielded_val = static_cast<uint64_t>(yielded_res.raw_bits());

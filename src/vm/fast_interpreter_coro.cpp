@@ -85,7 +85,14 @@ uint64_t FastInterpreter::coro_resume_lowered(uintptr_t handle, uint64_t input_v
     ThreadRootsScope frame_root([](void* ctx, std::vector<uintptr_t*>& roots) {
         roots.push_back(static_cast<uintptr_t*>(ctx));
     }, &handle);
-    const RuntimeValue r = call_from_native(*body, {RuntimeValue::from_ptr(handle)});
+    RuntimeValue r;
+    try {
+        r = call_from_native(*body, {RuntimeValue::from_ptr(handle)});
+    } catch (...) {
+        // A body that throws is finished (brass_coro_resume does the same).
+        runtime::finish_thrown_coro_frame(reinterpret_cast<runtime::BrassCoroFrame*>(handle));
+        throw;
+    }
     cf = reinterpret_cast<runtime::BrassCoroFrame*>(handle);
     cf->yielded_val = static_cast<uint64_t>(r.raw_bits());
     if (cf->is_done) {
@@ -259,7 +266,11 @@ uint64_t FastInterpreter::coro_resume(uintptr_t handle, uint64_t input_val) {
         }
         return coro->yielded_val;
     } catch (...) {
+        // A body that throws is finished, as a lowered one is.
         active_coro_frame_ = prev_active;
+        coro->is_done = true;
+        coro->yielded_val = 0;
+        runtime::finish_thrown_coro_frame(coro->c_frame);
         throw;
     }
 }

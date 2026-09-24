@@ -33,6 +33,12 @@ void MiniCheneyGC::reset() {
     std::fill(from_space_.begin(), from_space_.end(), uint8_t(0));
     poison_space(to_space_.data(), semispace_size_);
     registered_roots_.clear();
+    coro_frames_.reset(); // its frames are gone with the heap's contents
+}
+
+runtime::CoroFrameRegistry& MiniCheneyGC::coro_frames() {
+    if (!coro_frames_) coro_frames_ = runtime::make_coro_frame_registry();
+    return *coro_frames_;
 }
 
 void MiniCheneyGC::register_root(uintptr_t* root_slot) {
@@ -56,7 +62,7 @@ void MiniCheneyGC::gather_all_roots(std::vector<uintptr_t*>& roots) {
     for (uintptr_t* r : registered_roots_) {
         roots.push_back(r);
     }
-    runtime::append_active_coro_roots(roots);
+    runtime::append_active_coro_roots(coro_frames(), roots);
     // Native frames under re-entered Tier-0 code (native_frames.hpp).
     brass_append_native_frame_roots(roots);
     if (root_provider_) {

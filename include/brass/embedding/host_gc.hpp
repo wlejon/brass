@@ -12,6 +12,10 @@
 #include <atomic>
 #include <mutex>
 
+namespace brass::runtime {
+class CoroFrameRegistry;
+}
+
 namespace brass {
 
 struct ThreadLocalAllocBuffer;
@@ -121,6 +125,10 @@ public:
     // Reset heap
     void reset();
 
+    // The coroutine frames allocated here (coroutine.hpp): roots of this
+    // heap's collections, dropped with it.
+    runtime::CoroFrameRegistry& coro_frames();
+
 private:
     uintptr_t evacuate_object(uintptr_t obj_addr, size_t& to_free_ptr);
     void poison_space(uint8_t* space, size_t size) noexcept;
@@ -141,6 +149,7 @@ private:
     std::vector<uintptr_t*> registered_ptr_roots_;
     std::vector<ThreadLocalAllocBuffer*> registered_tlabs_;
     RootProvider root_provider_;
+    std::shared_ptr<runtime::CoroFrameRegistry> coro_frames_;
 
     mutable std::recursive_mutex gc_mutex_;
 };

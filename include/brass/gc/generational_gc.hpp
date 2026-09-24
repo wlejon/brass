@@ -10,6 +10,10 @@
 #include <memory>
 #include <stdexcept>
 
+namespace brass::runtime {
+class CoroFrameRegistry;
+}
+
 namespace brass {
 
 static constexpr uint8_t GEN_YOUNG = 0;
@@ -132,6 +136,10 @@ public:
     // Reset heap to empty state
     void reset();
 
+    // The coroutine frames allocated here (coroutine.hpp): roots of this
+    // heap's collections, dropped with it.
+    runtime::CoroFrameRegistry& coro_frames();
+
 private:
     void init_heap();
     uintptr_t allocate_nursery(size_t aligned_size, uint64_t pointer_mask, uint32_t type_tag);
@@ -176,6 +184,7 @@ private:
 
     std::vector<uintptr_t*> registered_roots_;
     RootProvider root_provider_;
+    std::shared_ptr<runtime::CoroFrameRegistry> coro_frames_;
 };
 
 } // namespace brass
