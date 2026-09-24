@@ -20,7 +20,7 @@ namespace brass::codegen {
 
 using namespace brass::x64;
 
-bool BaselineJitCompiler::x64_supports_opcode(Opcode op) noexcept {
+bool BaselineJitCompiler::supports_opcode(Opcode op) noexcept {
     // Vector opcodes are compiled for 128-bit types; the pre-scan rejects
     // 256-bit vectors and the few type / operand combinations it does not.
     switch (op) {
@@ -73,7 +73,7 @@ void check_x64_baseline_supported(const Function& fn, const Target& target, cons
         for (const auto* inst : *bb) {
             if (!inst) continue;
             Opcode op = inst->opcode();
-            if (!BaselineJitCompiler::x64_supports_opcode(op)) {
+            if (!BaselineJitCompiler::supports_opcode(op)) {
                 throw_unsupported(kX64BaselineStage, opcode_name(op));
             }
             if (inst->produces_value()) check_type(inst->type(), "value");
@@ -242,7 +242,7 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
     // 1. Stack frame slots [rbp - offset], shared between values whose live
     //    ranges do not overlap (baseline_frame.cpp).
     bool preserves_r13 = (fn.parent() && fn.parent()->pinned_tls_register());
-    BaselineFrameLayout layout = layout_baseline_frame(fn, preserves_r13 ? 8 : 0);
+    BaselineFrameLayout layout = layout_baseline_frame(fn, preserves_r13 ? 8 : 0, kX64BaselineStage);
     const auto& slot_map = layout.slot_map;
     const auto& alloca_offsets = layout.alloca_offsets;
     const auto& gcref_slots = layout.gcref_slots;

@@ -8,6 +8,7 @@
 #include <brass/mir/module.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/verifier.hpp>
+#include <brass/mir/parser.hpp>
 #include <brass/object/object_writer.hpp>
 #include <brass/object/elf_writer.hpp>
 #include <brass/object/coff_writer.hpp>
@@ -108,52 +109,28 @@ TEST_CASE("AArch64 Backend Hardening - SP Manipulation Extended Register Encodin
 // =============================================================================
 
 TEST_CASE("AArch64 Backend Hardening - Baseline JIT Frame Size Clamping and Large Frame Emission") {
-    // Case 1: Frame size <= 504 bytes (frame_size = 496 bytes: 16 header + 472 alloca + 8 result = 496).
-    // Valid for pre-indexed STP and post-indexed LDP within 7-bit signed scaled imm [-512, 504].
-    {
-        Module mod("test_clamp_496");
-        Function* fn = mod.create_function("fn_496", Type::void_type(), {});
-        Builder b(mod);
-        b.set_function(fn);
-        b.append_block("entry");
-        b.build_alloca(472, 16);
-        b.build_ret_void();
-        fn->rebuild_cfg_predecessors();
-        REQUIRE(verify_function(*fn));
+    // The baseline frame is a standard AAPCS64 frame record whatever its
+    // size: stp fp, lr, [sp, #-16]! ; mov fp, sp ; sub sp, sp, #frame, and
+    // mov sp, fp ; ldp fp, lr, [sp], #16 ; ret. Frames past the 504-byte stp
+    // reach, the 4095-byte add/sub immediate and the 256-byte ldur reach
+    // all run: the function writes its argument at the far end of its
+    // alloca and reads it back.
+    for (int32_t size : {472, 488, 504, 4984, 70000}) {
+        const std::string src = "module @m\nfunc @fn_frame(%0: i64) -> i64 {\nentry:\n  %buf = alloca " +
+                                std::to_string(size) + ", 16\n  store.i64 %buf, " + std::to_string(size - 8) +
+                                ", %0\n  store.i64 %buf, 0, %0\n  %a = load.i64 %buf, " + std::to_string(size - 8) +
+                                "\n  %b = load.i64 %buf, 0\n  %r = add.i64 %a, %b\n  ret %r\n}\n";
+        DiagnosticReporter diag;
+        auto mod = parse_module(src, &diag);
+        REQUIRE(mod != nullptr);
+        REQUIRE(verify_module(*mod));
 
-        auto compiled = compile_baseline_aarch64(*fn, Target::aarch64_linux());
+        auto compiled = compile_baseline_aarch64(*mod->get_function("fn_frame"), Target::host());
         REQUIRE(compiled.is_valid());
         const uint8_t* code = static_cast<const uint8_t*>(compiled.entry_point());
-        // Prologue: stp fp, lr, [sp, #-496]! -> 0xA9A17BFD
-        uint32_t first_inst = read_u32_le(code);
-        CHECK_EQ(first_inst, 0xA9A17BFDu);
-    }
+        CHECK_EQ(read_u32_le(code), 0xA9BF7BFDu);     // stp fp, lr, [sp, #-16]!
+        CHECK_EQ(read_u32_le(code + 4), 0x910003FDu); // mov fp, sp
 
-    // Case 2: Exact boundary frame_size = 512 bytes (16 header + 488 alloca + 8 result = 512 bytes).
-    // Clamped to frame_size <= 504, avoiding LDP post-index immediate +512 overflow.
-    // Emits separate SUB/ADD SP instead.
-    {
-        Module mod("test_clamp_512");
-        Function* fn = mod.create_function("fn_512", Type::void_type(), {});
-        Builder b(mod);
-        b.set_function(fn);
-        b.append_block("entry");
-        b.build_alloca(488, 16);
-        b.build_ret_void();
-        fn->rebuild_cfg_predecessors();
-        REQUIRE(verify_function(*fn));
-
-        auto compiled = compile_baseline_aarch64(*fn, Target::aarch64_linux());
-        REQUIRE(compiled.is_valid());
-        const uint8_t* code = static_cast<const uint8_t*>(compiled.entry_point());
-
-        // Prologue
-        uint32_t inst0 = read_u32_le(code);
-        uint32_t inst1 = read_u32_le(code + 4);
-        CHECK_EQ(inst0, 0xD10803FFu); // sub sp, sp, #512
-        CHECK_EQ(inst1, 0xA9007BFDu); // stp fp, lr, [sp, #0]
-
-        // Epilogue before ret (0xD65F03C0)
         size_t ret_idx = 0;
         for (size_t i = 0; i + 4 <= compiled.code_size(); i += 4) {
             if (read_u32_le(code + i) == 0xD65F03C0u) {
@@ -162,48 +139,14 @@ TEST_CASE("AArch64 Backend Hardening - Baseline JIT Frame Size Clamping and Larg
             }
         }
         REQUIRE(ret_idx >= 8);
-        uint32_t ldp_inst = read_u32_le(code + ret_idx - 8);
-        uint32_t add_inst = read_u32_le(code + ret_idx - 4);
-        CHECK_EQ(ldp_inst, 0xA9407BFDu); // ldp fp, lr, [sp, #0]
-        CHECK_EQ(add_inst, 0x910803FFu); // add sp, sp, #512
-    }
+        CHECK_EQ(read_u32_le(code + ret_idx - 8), 0x910003BFu); // mov sp, fp
+        CHECK_EQ(read_u32_le(code + ret_idx - 4), 0xA8C17BFDu); // ldp fp, lr, [sp], #16
 
-    // Case 3: Large frame > 4095 bytes (frame_size = 5008 bytes).
-    // Materializes size into X16 and uses extended register format SUB/ADD SP.
-    {
-        Module mod("test_large_frame");
-        Function* fn = mod.create_function("fn_large", Type::void_type(), {});
-        Builder b(mod);
-        b.set_function(fn);
-        b.append_block("entry");
-        b.build_alloca(4984, 16);
-        b.build_ret_void();
-        fn->rebuild_cfg_predecessors();
-        REQUIRE(verify_function(*fn));
-
-        auto compiled = compile_baseline_aarch64(*fn, Target::aarch64_linux());
-        REQUIRE(compiled.is_valid());
-        const uint8_t* code = static_cast<const uint8_t*>(compiled.entry_point());
-
-        // Prologue must use sub sp, sp, x16 (0xCB3063FF)
-        bool found_sub_sp = false;
-        for (size_t i = 0; i < 24 && i + 4 <= compiled.code_size(); i += 4) {
-            if (read_u32_le(code + i) == 0xCB3063FFu) {
-                found_sub_sp = true;
-                break;
-            }
-        }
-        CHECK(found_sub_sp);
-
-        // Epilogue must use add sp, sp, x16 (0x8B3063FF)
-        bool found_add_sp = false;
-        for (size_t i = 0; i + 4 <= compiled.code_size(); i += 4) {
-            if (read_u32_le(code + i) == 0x8B3063FFu) {
-                found_add_sp = true;
-                break;
-            }
-        }
-        CHECK(found_add_sp);
+#if defined(__aarch64__) || defined(_M_ARM64)
+        auto fn = compiled.get_function_ptr<int64_t (*)(int64_t)>();
+        CHECK_EQ(fn(21), int64_t{42});
+        CHECK_EQ(fn(-5), int64_t{-10});
+#endif
     }
 }
 

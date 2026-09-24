@@ -159,8 +159,8 @@ TEST_CASE("AArch64 Baseline JIT - Integer division and remainder trap on a zero 
     REQUIRE(compiled.is_valid());
     const auto* code = reinterpret_cast<const uint8_t*>(compiled.entry_point());
     const uint32_t cbnz_x1 = 0xB5000000u | (2u << 5) | 1u;
-    // sdiv x0, x0, x1 and udiv x2, x0, x1 (the remainder's quotient).
-    CHECK(contains_words(code, compiled.code_size(), {cbnz_x1, kBrkDivZero, 0x9AC10C00u}));
+    // sdiv x2, x0, x1 and udiv x2, x0, x1 (the remainder's quotient).
+    CHECK(contains_words(code, compiled.code_size(), {cbnz_x1, kBrkDivZero, 0x9AC10C02u}));
     CHECK(contains_words(code, compiled.code_size(), {cbnz_x1, kBrkDivZero, 0x9AC10802u}));
 }
 
@@ -663,8 +663,8 @@ TEST_CASE("AArch64 Baseline JIT - GC Roots and Stack Map Generation") {
         // At least one GC root from ref_param
         CHECK_EQ(rec.roots.size(), size_t(1));
         const auto& root = rec.roots[0];
-        // Location should be a positive frame slot relative to FP
+        // A frame slot below FP (the frame record is at FP)
         CHECK(root.kind == StackMapRootKind::FrameSlot);
-        CHECK(root.offset_from_rbp > 0);
+        CHECK(root.offset_from_rbp < 0);
     }
 }

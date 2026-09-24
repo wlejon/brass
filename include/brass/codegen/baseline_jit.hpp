@@ -136,12 +136,15 @@ public:
     // own name (compiled by itself or another tier).
     void set_module_functions_shadow(bool shadow);
 
-    // Whether the x64 baseline tier compiles `op`. A function using an opcode
-    // it does not is rejected at compile time: compile() throws
-    // UnsupportedOperation (stage "x64 baseline") and the tiering layer keeps
-    // the function in the interpreter. The same exception rejects a function
-    // with vector-typed values and a guard with no exit stub or resume target.
-    static bool x64_supports_opcode(Opcode op) noexcept;
+    // Whether the baseline tier compiles `op`, on x64 and AArch64 alike. A
+    // function using an opcode it does not is rejected at compile time:
+    // compile() throws UnsupportedOperation (stage "x64 baseline" or
+    // "aarch64 baseline") and the tiering layer keeps the function in the
+    // interpreter. The same exception rejects a function with vector-typed
+    // values the tier does not compile and a guard with no exit stub or
+    // resume target.
+    static bool supports_opcode(Opcode op) noexcept;
+    static bool x64_supports_opcode(Opcode op) noexcept { return supports_opcode(op); }
 
 private:
     Target target_;

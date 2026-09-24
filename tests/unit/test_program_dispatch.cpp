@@ -23,7 +23,7 @@ using namespace brass;
 using namespace brass::runtime;
 using namespace brass::codegen;
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64)
 
 namespace {
 

@@ -21,7 +21,7 @@
 using namespace brass;
 using namespace brass::runtime;
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64)
 
 namespace {
 
@@ -200,7 +200,7 @@ rec:
 }
 
 TEST_CASE("Tier-1 cold callees - a callee the baseline tier rejects keeps its caller in Tier 0") {
-    // @tc_rej uses an opcode the x64 baseline tier does not compile.
+    // @tc_rej uses an opcode the baseline tier does not compile.
     auto mod = parse_or_fail(R"(module @rej
 func @tc_rej(%n: i64) -> i64 {
 b0:

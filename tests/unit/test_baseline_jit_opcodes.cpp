@@ -1,4 +1,4 @@
-// x64 baseline JIT opcode coverage: every MIR opcode is either compiled or
+// Baseline JIT opcode coverage (x64 and AArch64): every MIR opcode is either compiled or
 // rejected at compile time, and what is compiled agrees with the interpreter.
 #include "test_framework.hpp"
 #include <brass/mir/module.hpp>
@@ -21,7 +21,14 @@ using namespace brass;
 using namespace brass::codegen;
 using namespace brass::runtime;
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64)
+
+// The stage name of the host's baseline tier.
+#if defined(__aarch64__) || defined(_M_ARM64)
+constexpr const char* kHostBaselineStage = "aarch64 baseline";
+#else
+constexpr const char* kHostBaselineStage = "x64 baseline";
+#endif
 
 namespace {
 
@@ -127,7 +134,7 @@ TEST_CASE("Baseline JIT opcodes - every opcode is compiled or deliberately rejec
         const bool deliberately_rejected =
             is_coro_op(op) || op == Opcode::throw_ || op == Opcode::invoke ||
             op == Opcode::landing_pad || op == Opcode::resume;
-        CHECK_EQ(BaselineJitCompiler::x64_supports_opcode(op), !deliberately_rejected);
+        CHECK_EQ(BaselineJitCompiler::supports_opcode(op), !deliberately_rejected);
         (deliberately_rejected ? rejected : supported)++;
     }
     // 4 coroutine and 4 exception opcodes.
@@ -160,7 +167,7 @@ entry:
             (void)compiler.compile(*f);
         } catch (const UnsupportedOperation& e) {
             threw = true;
-            CHECK_EQ(e.stage(), std::string("x64 baseline"));
+            CHECK_EQ(e.stage(), std::string(kHostBaselineStage));
         }
         CHECK(threw);
     }

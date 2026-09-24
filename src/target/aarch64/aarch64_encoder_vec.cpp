@@ -125,4 +125,44 @@ void AArch64Encoder::uaddlv_h(FPR dst, FPR src) {
     buffer_.emit_inst(0x2E303800u | (reg_code(src) << 5) | reg_code(dst));
 }
 
+void AArch64Encoder::vec_fcmgt_4s(FPR dst, FPR src1, FPR src2) {
+    buffer_.emit_inst(0x6EA0E400u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_fcmgt_2d(FPR dst, FPR src1, FPR src2) {
+    buffer_.emit_inst(0x6EE0E400u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_cmgt_4s(FPR dst, FPR src1, FPR src2) {
+    buffer_.emit_inst(0x4EA03400u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_cmgt_2d(FPR dst, FPR src1, FPR src2) {
+    buffer_.emit_inst(0x4EE03400u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_bsl(FPR dst, FPR src1, FPR src2) {
+    buffer_.emit_inst(0x6E601C00u | (reg_code(src2) << 16) | (reg_code(src1) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_not(FPR dst, FPR src) {
+    buffer_.emit_inst(0x6E205800u | (reg_code(src) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_neg_4s(FPR dst, FPR src) {
+    buffer_.emit_inst(0x6EA0B800u | (reg_code(src) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_neg_2d(FPR dst, FPR src) {
+    buffer_.emit_inst(0x6EE0B800u | (reg_code(src) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_dup_4s(FPR dst, GPR src) {
+    buffer_.emit_inst(0x4E040C00u | (reg_code(src) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::vec_dup_2d(FPR dst, GPR src) {
+    buffer_.emit_inst(0x4E080C00u | (reg_code(src) << 5) | reg_code(dst));
+}
+
 } // namespace brass::aarch64

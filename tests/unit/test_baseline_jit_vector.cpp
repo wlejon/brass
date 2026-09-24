@@ -1,4 +1,4 @@
-// x64 baseline JIT, 128-bit vectors: every vector opcode, vector select /
+// Baseline JIT (x64 and AArch64), 128-bit vectors: every vector opcode, vector select /
 // loads / stores / block parameters, and vector calls between baseline
 // functions and into tier 2, checked against the interpreter.
 #include "test_framework.hpp"
@@ -19,7 +19,14 @@
 using namespace brass;
 using namespace brass::codegen;
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64)
+
+// The stage name of the host's baseline tier.
+#if defined(__aarch64__) || defined(_M_ARM64)
+constexpr const char* kHostBaselineStage = "aarch64 baseline";
+#else
+constexpr const char* kHostBaselineStage = "x64 baseline";
+#endif
 
 namespace {
 
@@ -368,7 +375,7 @@ entry:
             (void)compiler.compile(*f);
         } catch (const UnsupportedOperation& e) {
             threw = true;
-            CHECK_EQ(e.stage(), std::string("x64 baseline"));
+            CHECK_EQ(e.stage(), std::string(kHostBaselineStage));
         }
         CHECK(threw);
     }

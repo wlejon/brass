@@ -1,4 +1,4 @@
-// x64 baseline JIT lazy linking: a call or func_addr whose symbol is not
+// Baseline JIT lazy linking (x64 and AArch64): a call or func_addr whose symbol is not
 // resolvable at compile time goes through a stub that resolves when the
 // symbol is registered later, and is a hard error (not a null call) if it is
 // still unresolved when it runs.
@@ -19,7 +19,7 @@
 using namespace brass;
 using namespace brass::codegen;
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64)
 
 namespace {
 

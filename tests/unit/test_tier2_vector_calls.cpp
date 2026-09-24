@@ -1,9 +1,10 @@
-// x64 tier 2, vector calls: vector arguments and results travel in XMM
-// registers (by position on Win64, the next free XMM on SysV), the same
-// convention as the tier-2 entry, the baseline JIT and the invoke thunks.
-// Tier 2 calling tier 2 and tier 2 calling baseline code are checked
-// against the interpreter; a vector that would go on the stack is a
-// compile error.
+// Tier 2, vector calls: vector arguments and results travel in XMM
+// registers on x64 (by position on Win64, the next free XMM on SysV) and in
+// V0-V7 on AArch64, the same convention as the tier-2 entry, the baseline
+// JIT and the invoke thunks. Tier 2 calling tier 2 and tier 2 calling
+// baseline code are checked against the interpreter. On x64 a vector that
+// would go on the stack is a compile error; AArch64 passes it on the stack,
+// 16-byte aligned, as AAPCS64 does.
 #include "test_framework.hpp"
 #include <brass/mir/module.hpp>
 #include <brass/mir/parser.hpp>
@@ -22,7 +23,7 @@
 using namespace brass;
 using namespace brass::codegen;
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64)
 
 namespace {
 
@@ -175,6 +176,7 @@ TEST_CASE("Tier-2 vectors - tier 2 calls baseline code with vector arguments and
     CHECK_EQ(diff_t2v(jit, *ref, "t2v_i32_caller", pairs(i32x4_samples())), 0);
 }
 
+#if defined(__x86_64__) || defined(_M_X64)
 TEST_CASE("Tier-2 vectors - a vector argument or parameter on the stack is a compile error") {
     // A fifth argument is on the stack on Win64, the ninth on SysV.
     const char* sources[] = {
@@ -206,5 +208,33 @@ entry:
         CHECK(threw);
     }
 }
+#else
+TEST_CASE("Tier-2 vectors - vector arguments and parameters past V7 travel on the stack") {
+    // The ninth and tenth vectors are on the stack, between two scalars.
+    const char* src = R"(module @m
+func @t2v_stack_param(%0: f32x4, %1: f32x4, %2: f32x4, %3: f32x4, %4: f32x4, %5: f32x4, %6: f32x4, %7: f32x4, %8: f32x4, %9: i64, %10: f32x4) -> f32x4 {
+entry:
+  %f = sitofp_f64_i64 %9
+  %s = fptrunc_f32_f64 %f
+  %b: f32x4 = vbroadcast.f32x4 %s
+  %m: f32x4 = vmul %8, %b
+  %r: f32x4 = vsub %m, %10
+  ret %r
+}
+func @t2v_stack_caller(%0: f32x4, %1: f32x4) -> f32x4 {
+entry:
+  %k = iconst.i64 3
+  %r: f32x4 = call.f32x4 @t2v_stack_param(%0, %0, %0, %0, %0, %0, %0, %0, %1, %k, %0)
+  ret %r
+}
+)";
+    auto mod = parse_t2v(src);
+    JitExecutionEngine jit(Target::host());
+    REQUIRE(jit.compile_and_load(*mod));
+    std::vector<RuntimeValue> fs = {RuntimeValue::from_f32x4(1.5f, -2.0f, 0.25f, 8.0f),
+                                    RuntimeValue::from_f32x4(-0.0f, 3.0f, 100.0f, -7.5f)};
+    CHECK_EQ(diff_t2v(jit, *mod, "t2v_stack_caller", pairs(fs)), 0);
+}
+#endif
 
 #endif

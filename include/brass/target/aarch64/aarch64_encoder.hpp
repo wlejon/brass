@@ -345,6 +345,22 @@ public:
     void cnt_8b(FPR dst, FPR src);
     void uaddlv_h(FPR dst, FPR src);
 
+    // Lane masks and selection: FCMGT / CMGT set a lane to all ones where
+    // src1 > src2 (signed for CMGT, false for an unordered pair for FCMGT);
+    // BSL keeps dst's lane mask and takes src1 where it is set, src2 where
+    // it is clear.
+    void vec_fcmgt_4s(FPR dst, FPR src1, FPR src2);
+    void vec_fcmgt_2d(FPR dst, FPR src1, FPR src2);
+    void vec_cmgt_4s(FPR dst, FPR src1, FPR src2);
+    void vec_cmgt_2d(FPR dst, FPR src1, FPR src2);
+    void vec_bsl(FPR dst, FPR src1, FPR src2);
+    void vec_not(FPR dst, FPR src);
+    void vec_neg_4s(FPR dst, FPR src);
+    void vec_neg_2d(FPR dst, FPR src);
+    // DUP Vd.4S, Wn / DUP Vd.2D, Xn: every lane a copy of the GPR's bits.
+    void vec_dup_4s(FPR dst, GPR src);
+    void vec_dup_2d(FPR dst, GPR src);
+
     // =========================================================================
     // System & Miscellaneous
     // =========================================================================

@@ -1,4 +1,4 @@
-// x64 baseline JIT unwind data: a C++ exception thrown by a helper that
+// Baseline JIT unwind data (x64 and AArch64): a C++ exception thrown by a helper that
 // baseline code calls unwinds through the baseline frames (and the invoke
 // thunk) to a C++ catch in the host. Without registered unwind data the
 // process dies with an unhandled 0xE06D7363 instead.
@@ -16,7 +16,7 @@
 using namespace brass;
 using namespace brass::codegen;
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64)
 
 namespace {
 

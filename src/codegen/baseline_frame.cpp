@@ -1,4 +1,4 @@
-// x64 baseline tier: frame layout. Every value lives in a stack slot, but
+// Baseline tier (x64 and AArch64): frame layout. Every value lives in a stack slot, but
 // values whose live ranges do not overlap share one, so a frame holds about
 // as many slots as the function has values live at once rather than one per
 // SSA value (deep recursion through baseline code needs small frames).
@@ -20,7 +20,10 @@
 // point (verifier_gc.cpp), so it lives in an ordinary slot. The layout
 // checks that rule on the ranges it computes and rejects a function that
 // breaks it.
-#include "baseline_emit_internal.hpp"
+#include "baseline_frame.hpp"
+#include <brass/codegen/unsupported_operation.hpp>
+#include <brass/mir/module.hpp>
+#include <string>
 #include <brass/mir/gc_refs.hpp>
 #include <algorithm>
 #include <functional>
@@ -77,7 +80,7 @@ void for_each_use(const Function& fn, const Instruction& inst, F&& use) {
 
 } // namespace
 
-BaselineFrameLayout layout_baseline_frame(const Function& fn, int32_t start_offset) {
+BaselineFrameLayout layout_baseline_frame(const Function& fn, int32_t start_offset, std::string_view stage) {
     BaselineFrameLayout layout;
     int32_t offset = start_offset;
 
@@ -204,11 +207,11 @@ BaselineFrameLayout layout_baseline_frame(const Function& fn, int32_t start_offs
         for (size_t p = r.start; p <= r.end; ++p) {
             const Instruction* inst = at_pos[p];
             if (!inst) {
-                throw_unsupported(kX64BaselineStage, "derived gcref live across a block boundary in " +
+                throw_unsupported(stage, "derived gcref live across a block boundary in " +
                                                          std::string(fn.name()));
             }
             if (p != r.start && p != r.end && may_trigger_gc(*inst)) {
-                throw_unsupported(kX64BaselineStage, "derived gcref live across a GC point in " +
+                throw_unsupported(stage, "derived gcref live across a GC point in " +
                                                          std::string(fn.name()));
             }
         }

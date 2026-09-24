@@ -1,4 +1,4 @@
-// x64 baseline frame layout: values whose live ranges do not overlap share a
+// Baseline frame layout (x64 and AArch64): values whose live ranges do not overlap share a
 // slot, so a frame is sized by the values live at once, not by the SSA value
 // count (a deep recursion through baseline code once overflowed the native
 // stack where tier 2 did not). The sharing must keep every value that is
@@ -19,7 +19,7 @@
 using namespace brass;
 using namespace brass::codegen;
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64)
 
 namespace {
 
