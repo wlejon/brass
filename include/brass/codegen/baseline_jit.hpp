@@ -51,6 +51,10 @@ public:
     // they did not resolve when it was compiled.
     const std::vector<std::string>& lazy_call_symbols() const noexcept { return lazy_call_symbols_; }
     void set_lazy_call_symbols(std::vector<std::string> names) { lazy_call_symbols_ = std::move(names); }
+    // The symbols whose address (func_addr) the code takes as a lazy-link
+    // stub because they did not resolve when it was compiled.
+    const std::vector<std::string>& lazy_addr_symbols() const noexcept { return lazy_addr_symbols_; }
+    void set_lazy_addr_symbols(std::vector<std::string> names) { lazy_addr_symbols_ = std::move(names); }
     bool is_valid() const noexcept { return entry_point_ != nullptr; }
 
     template <typename FuncPtr>
@@ -70,6 +74,7 @@ private:
     FunctionStackMap stack_map_;
     std::shared_ptr<const void> link_keepalive_;
     std::vector<std::string> lazy_call_symbols_;
+    std::vector<std::string> lazy_addr_symbols_;
     // The code's entry in the code stack-map registry, shared by the copies
     // of this function. Last, so it goes before the code memory does.
     std::shared_ptr<const void> stack_map_registration_;
@@ -92,6 +97,11 @@ public:
     // references it (see below).
     void register_external_symbol(std::string_view name, void* addr);
     void set_symbol_resolver(BaselineSymbolResolver resolver);
+    // Called by a lazy stub of a module function (one whose address code
+    // took) that has no native entry when first called through: compiles
+    // and installs it, returning its entry, or null when it cannot be.
+    // Runs on the calling thread, outside the stub table's lock.
+    void set_on_demand_compiler(BaselineSymbolResolver compile);
 
     // The program whose handles resolve_symbol() falls back to and
     // compile_module() publishes into. Null, the default, is the default
@@ -148,12 +158,16 @@ public:
     // resume target.
     static bool supports_opcode(Opcode op) noexcept;
     static bool x64_supports_opcode(Opcode op) noexcept { return supports_opcode(op); }
+    // compile()'s up-front check alone, without compiling: false when it
+    // would reject `fn` before emitting code. (Emission may still reject.)
+    bool passes_prescan(const Function& fn, Target target) const;
 
 private:
     Target target_;
     mutable std::mutex symbols_mutex_;
     std::unordered_map<std::string, void*> symbols_;
     BaselineSymbolResolver custom_resolver_;
+    BaselineSymbolResolver on_demand_compiler_; // under symbols_mutex_
     runtime::FunctionDispatchTable* dispatch_table_ = nullptr; // under symbols_mutex_
     // Names a stub was made for on behalf of a module that defines the
     // function (resolve_symbol_in); under symbols_mutex_.

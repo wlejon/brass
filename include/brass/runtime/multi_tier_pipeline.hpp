@@ -19,13 +19,16 @@
 #include <atomic>
 #include <iosfwd>
 #include <cstdint>
+#include <deque>
 #include <functional>
+#include <optional>
 #include <vector>
 
 namespace brass::runtime {
 
 namespace detail {
-struct Tier1Deferred;
+enum class Tier1Link;
+struct Tier1Node;
 } // namespace detail
 
 struct MultiTierStats {
@@ -128,6 +131,13 @@ public:
     void set_tier1_compile_hook(std::function<void(std::string_view)> hook) {
         tier1_compile_hook_ = std::move(hook);
     }
+    // Testing only: called with each function's name as its Tier 1 code is
+    // installed, after the code is registered (find_baseline_compiled) and
+    // its stubs filled, before its native entry is published. Set before
+    // compiles start.
+    void set_tier1_install_hook(std::function<void(std::string_view)> hook) {
+        tier1_install_hook_ = std::move(hook);
+    }
 
     // Enqueue Tier 2 background optimization
     bool enqueue_tier2(
@@ -188,14 +198,22 @@ private:
 
     void tier_invocation(TieringFeedback& fb, std::string_view fn_name, FunctionHandle* handle);
     // Tier-1 code reaches a module function with no native entry through a
-    // lazy stub that resolves to the callee's native entry: compiles every
-    // such callee of `compiled` before `fn` is installed.
-    enum class CalleeLink { Ready, Pending, Rejected };
-    CalleeLink link_tier1_callees(const Function& fn, const codegen::BaselineCompiledFunction& compiled);
+    // lazy stub that resolves to the callee's native entry. Claims `name`
+    // (in progress) and compiles it into a node appended to `nodes`, whose
+    // callees are those functions (std::nullopt); or returns why it has
+    // nothing to compile: Ready when its native entry is published,
+    // Pending or Rejected.
+    std::optional<detail::Tier1Link> open_tier1_node(std::string_view name, const Function* fn,
+                                                     std::deque<detail::Tier1Node>& nodes);
     // A call cycle's functions are installed together once all of them
-    // compile (install), or none is (drop).
-    void install_tier1_group(std::vector<detail::Tier1Deferred>& group);
-    void drop_tier1_group(std::vector<detail::Tier1Deferred>& group);
+    // and everything they reach compile (install), or none is (release).
+    // Their claims are released only after every entry is published.
+    void install_tier1_group(const std::vector<detail::Tier1Node*>& group);
+    void release_tier1_claims(const std::vector<detail::Tier1Node*>& group, bool rejected);
+    // A func_addr target's lazy stub, first called with no native entry:
+    // compiles and installs it (waiting out another thread's compile of
+    // it), returning its entry, or null when the baseline tier rejects it.
+    void* compile_tier1_on_demand(std::string_view name);
     void setup_fast_interpreter(FastInterpreter& interp, Module& mod);
     // The Tier-0 interpreter kept across execute() calls on one module,
     // rebuilt when the module or the registered symbols change.
@@ -228,8 +246,9 @@ private:
     mutable std::mutex compiling_mutex_;
     std::unordered_set<std::string> in_progress_compilations_;
     std::unordered_set<std::string> baseline_rejected_; // under compiling_mutex_
-    // Testing only (set_tier1_compile_hook).
+    // Testing only (set_tier1_compile_hook, set_tier1_install_hook).
     std::function<void(std::string_view)> tier1_compile_hook_;
+    std::function<void(std::string_view)> tier1_install_hook_;
 };
 
 } // namespace brass::runtime

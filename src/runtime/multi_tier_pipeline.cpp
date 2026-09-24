@@ -8,7 +8,9 @@
 #include <iostream>
 #include <iomanip>
 #include <chrono>
+#include <cstdio>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 // The baseline tiers' (x64 and aarch64) invocation hook: `feedback` is the function's
@@ -26,35 +28,42 @@ extern "C" void brass_tier1_record_invocation_fb(void* feedback) {
 namespace brass::runtime {
 
 namespace detail {
-// Code compiled for Tier 1 whose install waits for a function further up
-// the compile stack (it calls that function through a lazy stub).
-struct Tier1Deferred {
+// Whether a function's Tier-1 code can be installed: Ready once everything
+// it reaches through lazy stubs has a published native entry (or is
+// installed with it), Pending while something it needs is being compiled
+// on another thread, Rejected when something it needs never compiles.
+enum class Tier1Link { Ready, Pending, Rejected };
+
+inline Tier1Link worse(Tier1Link a, Tier1Link b) {
+    return static_cast<int>(a) >= static_cast<int>(b) ? a : b;
+}
+
+// A function this thread has claimed (it is in in_progress_compilations_
+// while `claimed`) and compiled for Tier 1, not yet installed: a vertex of
+// the link graph, whose edges are the module functions its code reaches
+// through lazy stubs. The graph is walked with Tarjan's algorithm on an
+// explicit stack, so a long chain of cold callees takes no native stack.
+struct Tier1Node {
     std::string name;
-    FunctionHandle* handle;
+    FunctionHandle* handle = nullptr;
     std::shared_ptr<codegen::BaselineCompiledFunction> code;
-    uint64_t elapsed_us;
+    uint64_t elapsed_us = 0;
+    std::vector<std::pair<std::string, const Function*>> callees;
+    size_t next_callee = 0;
+    size_t index = 0;
+    size_t low = 0;
+    bool on_stack = false;
+    bool claimed = true;
+    Tier1Link link = Tier1Link::Ready;
 };
 } // namespace detail
 
 namespace {
-using detail::Tier1Deferred;
+using detail::Tier1Link;
+using detail::Tier1Node;
 
 // Lets ~Module skip the pipeline when it was never built or is gone.
 std::atomic<bool> g_pipeline_alive{false};
-
-// The functions this thread is compiling for Tier 1, innermost last. A
-// callee that is one of them (a call cycle) has no native entry yet: code
-// calling it depends on that frame, and is installed with it (in its
-// `group`) or not at all, so no installed code calls a function that may
-// still be rejected. `depends_on` is the outermost frame this frame's code
-// depends on, its own index when none.
-struct Tier1CompileFrame {
-    const MultiTierPipeline* pipeline;
-    std::string_view name;
-    size_t depends_on;
-    std::vector<Tier1Deferred> group;
-};
-thread_local std::vector<Tier1CompileFrame> t_tier1_compiling;
 } // namespace
 
 MultiTierPipeline& MultiTierPipeline::instance() {
@@ -170,6 +179,9 @@ void MultiTierPipeline::initialize(const TieringConfig& config) {
         }
         return nullptr;
     });
+    baseline_compiler_.set_on_demand_compiler([this](std::string_view name) {
+        return compile_tier1_on_demand(name);
+    });
 
     brass_set_active_stack_maps(&active_stack_maps_);
 }
@@ -253,21 +265,104 @@ bool MultiTierPipeline::is_baseline_rejected(std::string_view fn_name) const {
 }
 
 bool MultiTierPipeline::compile_and_install_tier1(std::string_view fn_name, const Function* fn) {
-    if (find_baseline_compiled(fn_name)) {
-        return true;
-    }
+    // A callee that has never run has no native entry, and the lazy stub
+    // code calls it through would trap: every module function the code
+    // reaches through a stub (a call, or a func_addr) is compiled first,
+    // and so on through their callees. Tarjan's algorithm over that graph
+    // finds its call cycles; each is installed as a whole, once every
+    // function it reaches is installed, or not at all.
+    std::deque<Tier1Node> nodes;
+    std::unordered_map<std::string, size_t> by_name;
+    std::vector<size_t> dfs;
+    std::vector<size_t> scc;
+    size_t next_index = 0;
 
-    {
-        std::lock_guard<std::mutex> lock(compiling_mutex_);
-        if (in_progress_compilations_.find(std::string(fn_name)) != in_progress_compilations_.end() ||
-            baseline_rejected_.count(std::string(fn_name))) {
-            return false;
+    // Claims left by an exception (or a failed SCC not yet released).
+    struct ReleaseClaims {
+        MultiTierPipeline& self;
+        std::deque<Tier1Node>& nodes;
+        ~ReleaseClaims() {
+            std::vector<Tier1Node*> left;
+            for (auto& n : nodes) {
+                if (n.claimed) left.push_back(&n);
+            }
+            if (!left.empty()) self.release_tier1_claims(left, false);
         }
-        in_progress_compilations_.emplace(std::string(fn_name));
-    }
+    } release_claims{*this, nodes};
 
-    // A function whose install is deferred to an outer frame's group stays
-    // in progress until the group is installed or dropped.
+    auto visit = [&](std::string_view name, const Function* def) -> std::optional<Tier1Link> {
+        std::optional<Tier1Link> opened = open_tier1_node(name, def, nodes);
+        if (opened) return opened;
+        const size_t v = nodes.size() - 1;
+        by_name.emplace(nodes[v].name, v);
+        nodes[v].index = nodes[v].low = next_index++;
+        nodes[v].on_stack = true;
+        scc.push_back(v);
+        dfs.push_back(v);
+        return std::nullopt;
+    };
+
+    if (std::optional<Tier1Link> link = visit(fn_name, fn)) return *link == Tier1Link::Ready;
+
+    while (!dfs.empty()) {
+        const size_t v = dfs.back();
+        if (nodes[v].next_callee < nodes[v].callees.size()) {
+            const auto& [sym, def] = nodes[v].callees[nodes[v].next_callee++];
+            if (auto it = by_name.find(sym); it != by_name.end()) {
+                const Tier1Node& w = nodes[it->second];
+                // On the stack: the same call cycle. Otherwise a finished
+                // one, installed or failed.
+                if (w.on_stack) nodes[v].low = std::min(nodes[v].low, w.index);
+                else nodes[v].link = detail::worse(nodes[v].link, w.link);
+                continue;
+            }
+            if (std::optional<Tier1Link> link = visit(sym, def)) {
+                nodes[v].link = detail::worse(nodes[v].link, *link);
+            }
+            continue;
+        }
+        dfs.pop_back();
+        if (nodes[v].low == nodes[v].index) {
+            // `v` roots a call cycle (or is alone): every function outside
+            // it that it reaches is finished.
+            std::vector<Tier1Node*> group;
+            Tier1Link link = Tier1Link::Ready;
+            size_t w;
+            do {
+                w = scc.back();
+                scc.pop_back();
+                nodes[w].on_stack = false;
+                link = detail::worse(link, nodes[w].link);
+                group.push_back(&nodes[w]);
+            } while (w != v);
+            for (Tier1Node* n : group) n->link = link;
+            // The root (last) is the member reached first: the one tiering
+            // asked for, for the outermost cycle.
+            if (link == Tier1Link::Ready) install_tier1_group(group);
+            else release_tier1_claims(group, link == Tier1Link::Rejected);
+        }
+        if (!dfs.empty()) {
+            const size_t u = dfs.back();
+            nodes[u].low = std::min(nodes[u].low, nodes[v].low);
+            nodes[u].link = detail::worse(nodes[u].link, nodes[v].link);
+        }
+    }
+    return nodes.front().link == Tier1Link::Ready;
+}
+
+std::optional<detail::Tier1Link> MultiTierPipeline::open_tier1_node(std::string_view name, const Function* fn,
+                                                                    std::deque<detail::Tier1Node>& nodes) {
+    FunctionHandle* handle = table_->get_or_create(name, fn);
+    {
+        // Under compiling_mutex_, which an install releases its claims
+        // under only after publishing every native entry: a function
+        // neither claimed nor published is not compiled anywhere.
+        std::lock_guard<std::mutex> lock(compiling_mutex_);
+        if (handle->native_entry()) return Tier1Link::Ready;
+        if (baseline_rejected_.count(std::string(name))) return Tier1Link::Rejected;
+        // Compiling on another thread: what needs it tiers up later.
+        if (!in_progress_compilations_.emplace(std::string(name)).second) return Tier1Link::Pending;
+    }
     struct InProgressGuard {
         std::mutex& mtx;
         std::unordered_set<std::string>& set;
@@ -278,22 +373,21 @@ bool MultiTierPipeline::compile_and_install_tier1(std::string_view fn_name, cons
             std::lock_guard<std::mutex> lock(mtx);
             set.erase(name);
         }
-    } guard{compiling_mutex_, in_progress_compilations_, std::string(fn_name)};
+    } guard{compiling_mutex_, in_progress_compilations_, std::string(name)};
 
-    if (tier1_compile_hook_) tier1_compile_hook_(fn_name);
+    if (tier1_compile_hook_) tier1_compile_hook_(name);
 
-    FunctionHandle* handle = table_->get_or_create(fn_name, fn);
     if (!fn) {
         fn = handle->mir_function();
     }
     if (!fn) {
         const Module* active_mod = tiering().active_module();
         if (active_mod) {
-            fn = active_mod->get_function(fn_name);
+            fn = active_mod->get_function(name);
         }
     }
     if (!fn) {
-        return false;
+        return Tier1Link::Pending;
     }
 
     handle->set_signature(fn->return_type(), fn->param_types());
@@ -306,112 +400,99 @@ bool MultiTierPipeline::compile_and_install_tier1(std::string_view fn_name, cons
         // The baseline tier does not compile this function (an opcode it
         // rejects, e.g. exceptions or coroutines): it stays in Tier 0.
         std::lock_guard<std::mutex> lock(compiling_mutex_);
-        baseline_rejected_.emplace(fn_name);
-        return false;
+        baseline_rejected_.emplace(name);
+        return Tier1Link::Rejected;
     }
     auto end = std::chrono::high_resolution_clock::now();
-    auto elapsed_us = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(end - start).count());
 
-    // A callee that has never run has no native entry, and the lazy stub
-    // the code calls it through would trap: it is compiled now. The code is
-    // not installed while a callee cannot be compiled.
-    const size_t depth = t_tier1_compiling.size();
-    t_tier1_compiling.push_back({this, guard.name, depth, {}});
-    CalleeLink link;
-    try {
-        link = link_tier1_callees(*fn, compiled);
-    } catch (...) {
-        Tier1CompileFrame frame = std::move(t_tier1_compiling.back());
-        t_tier1_compiling.pop_back();
-        drop_tier1_group(frame.group);
-        throw;
-    }
-    Tier1CompileFrame frame = std::move(t_tier1_compiling.back());
-    t_tier1_compiling.pop_back();
-    if (link != CalleeLink::Ready) {
-        // Nothing that calls this function through a stub is installed.
-        drop_tier1_group(frame.group);
-        if (link == CalleeLink::Rejected) {
-            std::lock_guard<std::mutex> lock(compiling_mutex_);
-            baseline_rejected_.emplace(fn_name);
-        }
-        return false;
-    }
-
-    auto compiled_ptr = std::make_shared<codegen::BaselineCompiledFunction>(std::move(compiled));
-    if (frame.depends_on < depth) {
-        // Calls a function an outer frame is still compiling, which may yet
-        // be rejected: installed with that frame's group, or dropped with it.
-        Tier1CompileFrame& outer = t_tier1_compiling[frame.depends_on];
-        for (auto& d : frame.group) outer.group.push_back(std::move(d));
-        outer.group.push_back({guard.name, handle, std::move(compiled_ptr), elapsed_us});
-        guard.handed_off = true;
-        Tier1CompileFrame& parent = t_tier1_compiling.back();
-        parent.depends_on = std::min(parent.depends_on, frame.depends_on);
-        return true;
-    }
-    frame.group.push_back({guard.name, handle, std::move(compiled_ptr), elapsed_us});
-    install_tier1_group(frame.group);
-    return true;
-}
-
-void MultiTierPipeline::install_tier1_group(std::vector<detail::Tier1Deferred>& group) {
-    // The group's code calls within the group through lazy stubs. Every
-    // member's maps are registered and every stub filled before any member
-    // becomes reachable through its handle, so no call can reach a stub of
-    // a member not yet installed.
-    for (auto& d : group) register_baseline_compiled(d.code);
-    for (auto& d : group) baseline_compiler_.lazy_symbols()->define(d.name, d.code->entry_point());
-    // The outermost (last) member is the one tiering asked for: last.
-    for (auto& d : group) {
-        d.handle->set_baseline_function(d.code);
-        d.handle->set_native_entry(d.code->entry_point());
-        d.handle->set_tier(TierLevel::Tier1_Baseline);
-        tiering().get_feedback(d.name).set_tier(TierLevel::Tier1_Baseline);
-        stats_.tier1_compilations.fetch_add(1, std::memory_order_relaxed);
-        stats_.total_tier1_compile_time_us.fetch_add(d.elapsed_us, std::memory_order_relaxed);
-    }
-    std::lock_guard<std::mutex> lock(compiling_mutex_);
-    // The last member's own guard releases it.
-    for (size_t i = 0; i + 1 < group.size(); ++i) in_progress_compilations_.erase(group[i].name);
-}
-
-void MultiTierPipeline::drop_tier1_group(std::vector<detail::Tier1Deferred>& group) {
-    // Left in Tier 0, to be compiled again when next asked for.
-    std::lock_guard<std::mutex> lock(compiling_mutex_);
-    for (const auto& d : group) in_progress_compilations_.erase(d.name);
-    group.clear();
-}
-
-MultiTierPipeline::CalleeLink MultiTierPipeline::link_tier1_callees(
-    const Function& fn, const codegen::BaselineCompiledFunction& compiled) {
-    const Module* mod = fn.parent() ? fn.parent() : tiering().active_module();
-    CalleeLink result = CalleeLink::Ready;
+    Tier1Node node;
+    node.name = std::string(name);
+    node.handle = handle;
+    node.elapsed_us = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(end - start).count());
+    const Module* mod = fn->parent() ? fn->parent() : tiering().active_module();
     for (const std::string& sym : compiled.lazy_call_symbols()) {
         // Anything else is a host symbol, bound when it is registered.
         const Function* def = mod ? mod->get_function(sym) : nullptr;
         if (!def || def->block_count() == 0) continue;
-        if (FunctionHandle* h = table_->find(sym); h && h->native_entry()) continue;
-        // A function this thread is compiling, or has compiled into a
-        // frame's group: this code depends on that frame.
-        bool on_stack = false;
-        for (size_t i = 0; i < t_tier1_compiling.size() && !on_stack; ++i) {
-            const Tier1CompileFrame& f = t_tier1_compiling[i];
-            if (f.pipeline != this) continue;
-            on_stack = f.name == sym || std::any_of(f.group.begin(), f.group.end(),
-                                                    [&](const Tier1Deferred& d) { return d.name == sym; });
-            if (on_stack) {
-                size_t& dep = t_tier1_compiling.back().depends_on;
-                dep = std::min(dep, i);
-            }
-        }
-        if (on_stack) continue;
-        if (compile_and_install_tier1(sym, def)) continue;
-        if (is_baseline_rejected(sym)) return CalleeLink::Rejected;
-        // Compiling on another thread: this function tiers up later.
-        result = CalleeLink::Pending;
+        node.callees.emplace_back(sym, def);
     }
-    return result;
+    // A function whose address the code takes is compiled when first
+    // called through it (compile_tier1_on_demand), not now: code may take
+    // many addresses it never calls. One the baseline tier is known to
+    // reject could not be, so neither is this code.
+    for (const std::string& sym : compiled.lazy_addr_symbols()) {
+        const Function* def = mod ? mod->get_function(sym) : nullptr;
+        if (!def || def->block_count() == 0) continue;
+        // The stub finds it (and its MIR) through its handle.
+        if (table_->get_or_create(sym, def)->native_entry()) continue;
+        if (is_baseline_rejected(sym) || !baseline_compiler_.passes_prescan(*def, Target::host())) {
+            node.link = Tier1Link::Rejected;
+        }
+    }
+    node.code = std::make_shared<codegen::BaselineCompiledFunction>(std::move(compiled));
+    nodes.push_back(std::move(node));
+    guard.handed_off = true;
+    return std::nullopt;
+}
+
+void* MultiTierPipeline::compile_tier1_on_demand(std::string_view name) {
+    FunctionHandle* handle = table_->find(name);
+    if (!handle) return nullptr;
+    for (;;) {
+        if (void* entry = handle->native_entry()) return entry;
+        if (compile_and_install_tier1(name)) continue;
+        if (is_baseline_rejected(name)) {
+            std::fprintf(stderr,
+                         "brass: '%s' is called through its address from Tier-1 code, and the baseline tier "
+                         "rejects it (or a function it calls)\n",
+                         std::string(name).c_str());
+            std::fflush(stderr);
+            return nullptr;
+        }
+        // It, or a function it calls, is being compiled on another thread,
+        // which publishes it or gives it up without waiting on this one.
+        std::this_thread::yield();
+    }
+}
+
+void MultiTierPipeline::install_tier1_group(const std::vector<detail::Tier1Node*>& group) {
+    // The group's code calls within the group through lazy stubs. Every
+    // member's maps are registered and every stub filled before any member
+    // becomes reachable through its handle, so no call can reach a stub of
+    // a member not yet installed.
+    for (const Tier1Node* d : group) register_baseline_compiled(d->code);
+    for (const Tier1Node* d : group) baseline_compiler_.lazy_symbols()->define(d->name, d->code->entry_point());
+    if (tier1_install_hook_) {
+        for (const Tier1Node* d : group) tier1_install_hook_(d->name);
+    }
+    for (const Tier1Node* d : group) {
+        d->handle->set_baseline_function(d->code);
+        d->handle->set_native_entry(d->code->entry_point());
+        d->handle->set_tier(TierLevel::Tier1_Baseline);
+        tiering().get_feedback(d->name).set_tier(TierLevel::Tier1_Baseline);
+        stats_.tier1_compilations.fetch_add(1, std::memory_order_relaxed);
+        stats_.total_tier1_compile_time_us.fetch_add(d->elapsed_us, std::memory_order_relaxed);
+    }
+    // Only now, with every entry published: until then another thread's
+    // tier-up that needs a member finds it in progress and waits, rather
+    // than installing code whose stub to it cannot resolve yet.
+    std::lock_guard<std::mutex> lock(compiling_mutex_);
+    for (Tier1Node* d : group) {
+        in_progress_compilations_.erase(d->name);
+        d->claimed = false;
+    }
+}
+
+void MultiTierPipeline::release_tier1_claims(const std::vector<detail::Tier1Node*>& group, bool rejected) {
+    // Left in Tier 0: compiled again when next asked for, unless something
+    // it needs was rejected, which it then is too, since its code could
+    // not call that.
+    std::lock_guard<std::mutex> lock(compiling_mutex_);
+    for (Tier1Node* d : group) {
+        if (rejected) baseline_rejected_.emplace(d->name);
+        in_progress_compilations_.erase(d->name);
+        d->claimed = false;
+    }
 }
 
 bool MultiTierPipeline::enqueue_tier2(

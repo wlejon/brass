@@ -280,6 +280,11 @@ void BaselineJitCompiler::set_symbol_resolver(BaselineSymbolResolver resolver) {
     custom_resolver_ = std::move(resolver);
 }
 
+void BaselineJitCompiler::set_on_demand_compiler(BaselineSymbolResolver compile) {
+    std::lock_guard<std::mutex> lock(symbols_mutex_);
+    on_demand_compiler_ = std::move(compile);
+}
+
 void BaselineJitCompiler::set_dispatch_table(runtime::FunctionDispatchTable* table) {
     std::lock_guard<std::mutex> lock(symbols_mutex_);
     dispatch_table_ = table;
@@ -346,14 +351,19 @@ void* BaselineJitCompiler::resolve_symbol_in(const Function& fn, std::string_vie
 
 void* BaselineJitCompiler::resolve_lazy(std::string_view name) const {
     bool owned = false;
+    BaselineSymbolResolver on_demand;
     {
         std::lock_guard<std::mutex> lock(symbols_mutex_);
         owned = module_owned_.count(std::string(name)) != 0;
+        on_demand = on_demand_compiler_;
     }
     // Both take symbols_mutex_ themselves.
     if (!owned) return resolve_symbol(name);
     runtime::FunctionHandle* handle = dispatch_table().find(name);
-    return handle ? handle->native_entry() : nullptr;
+    if (handle && handle->native_entry()) return handle->native_entry();
+    // Only a func_addr target is reached cold: a direct callee is
+    // installed before its caller.
+    return handle && on_demand ? on_demand(name) : nullptr;
 }
 
 void BaselineJitCompiler::set_module_functions_shadow(bool shadow) {
@@ -387,7 +397,10 @@ std::vector<BaselineCompiledFunction> BaselineJitCompiler::compile_module(const 
         // functions (installed by this loop) and does not resolve now has
         // nothing left to resolve it. Rejected here rather than trapping
         // when the call runs.
-        for (const std::string& sym : results.back().lazy_call_symbols()) {
+        std::vector<std::string> linked = results.back().lazy_call_symbols();
+        const auto& addrs = results.back().lazy_addr_symbols();
+        linked.insert(linked.end(), addrs.begin(), addrs.end());
+        for (const std::string& sym : linked) {
             if (mod.get_function(sym) || resolve_symbol_in(*fn, sym)) continue;
             throw std::runtime_error("BaselineJitCompiler: function '" + std::string(fn->name()) +
                                      "' references symbol '" + sym +

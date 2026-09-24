@@ -56,9 +56,11 @@ struct X64BaselineEmitter {
     // the compiled function keeps the table alive.
     LazySymbolTable* lazy = nullptr;
     bool uses_lazy_stubs = false;
-    // The direct-call targets that got a stub, each once. (A func_addr stub
-    // is not listed: its address may be taken and never called.)
+    // The direct-call targets that got a stub, each once.
     std::vector<std::string> lazy_call_symbols;
+    // The func_addr targets that got a stub, each once: their address may
+    // be taken and never called, so they are resolved on first call.
+    std::vector<std::string> lazy_addr_symbols;
 
     MemAddress slot_addr(const Value* val) const {
         auto it = slot_map.find(val);

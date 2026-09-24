@@ -184,6 +184,7 @@ add_executable(brass_unit_tests
     unit/test_invoke_return_types.cpp
     unit/test_baseline_lazy_symbols.cpp
     unit/test_tier1_cold_callees.cpp
+    unit/test_tier1_link_order.cpp
     unit/test_baseline_frame.cpp
     unit/test_baseline_unwind.cpp
     unit/test_program_dispatch.cpp

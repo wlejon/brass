@@ -2,6 +2,7 @@
 // arithmetic, comparisons of floats and float conversions are in
 // baseline_emit_fp.cpp. Slot conventions: baseline_emit_internal.hpp.
 #include "baseline_emit_internal.hpp"
+#include <algorithm>
 #include <cstring>
 
 namespace brass::codegen {
@@ -161,8 +162,15 @@ bool emit_baseline_x64_op(X64BaselineEmitter& emitter, const Instruction& inst) 
                                                              ", which does not resolve, in " +
                                                              std::string(emitter.fn.name()));
                 }
-            } else {
+            } else if (!(addr = emitter.resolve_sym(inst.symbol()))) {
+                // A module function's stub compiles it on first call
+                // (MultiTierPipeline::compile_tier1_on_demand); a host
+                // symbol must be registered by then.
                 addr = emitter.resolve_or_stub(inst.symbol());
+                auto& syms = emitter.lazy_addr_symbols;
+                if (std::find(syms.begin(), syms.end(), inst.symbol()) == syms.end()) {
+                    syms.emplace_back(inst.symbol());
+                }
             }
             enc.movabs(GPR::RAX, reinterpret_cast<uint64_t>(addr));
             enc.mov(slot_addr(inst.result()), GPR::RAX);

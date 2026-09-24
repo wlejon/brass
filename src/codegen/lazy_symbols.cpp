@@ -251,10 +251,19 @@ void* LazySymbolTable::resolved_target(std::string_view name) const {
 void* LazySymbolTable::resolve(LazySymbolCell& cell) {
 #if defined(BRASS_LAZY_STUBS_SUPPORTED)
     {
+        Resolver resolver;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            void* current = cell.target.load(std::memory_order_acquire);
+            if (current != resolver_thunk()) return current;  // resolved meanwhile
+            resolver = resolver_;
+        }
+        // Outside the lock: resolving may compile the target, which makes
+        // stubs of its own.
+        void* addr = resolver ? resolver(cell.name) : nullptr;
         std::lock_guard<std::mutex> lock(mutex_);
         void* current = cell.target.load(std::memory_order_acquire);
-        if (current != resolver_thunk()) return current;  // resolved meanwhile
-        void* addr = resolver_ ? resolver_(cell.name) : nullptr;
+        if (current != resolver_thunk()) return current;
         auto it = by_name_.find(cell.name);
         if (addr && it != by_name_.end() && addr == it->second.second) addr = nullptr;
         if (addr) {

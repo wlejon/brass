@@ -1,5 +1,6 @@
 #include "baseline_emit_internal.hpp"
 #include <brass/codegen/baseline_jit.hpp>
+#include <brass/codegen/unsupported_operation.hpp>
 #include <brass/target/aarch64/aarch64_baseline_emit.hpp>
 #include <brass/target/x64/x64_encoder.hpp>
 #include <brass/target/calling_conv.hpp>
@@ -228,6 +229,16 @@ void emit_control_op(X64BaselineEmitter& em, const Instruction& inst) {
 
 } // namespace
 
+bool BaselineJitCompiler::passes_prescan(const Function& fn, Target target) const {
+    if (target.is_aarch64()) return true;
+    try {
+        check_x64_baseline_supported(fn, target, CallingConvention::for_target(target));
+    } catch (const UnsupportedOperation&) {
+        return false;
+    }
+    return true;
+}
+
 BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target target) {
     if (target.is_aarch64()) {
         return aarch64::compile_baseline_aarch64(fn, target, [this, &fn](std::string_view name) {
@@ -389,6 +400,7 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
         fn.name(), fn.return_type(), fn.param_types(), mem_block, entry_ptr, code_bytes, std::move(fn_stack_map));
     if (emitter.uses_lazy_stubs) compiled.set_link_keepalive(lazy_);
     compiled.set_lazy_call_symbols(std::move(emitter.lazy_call_symbols));
+    compiled.set_lazy_addr_symbols(std::move(emitter.lazy_addr_symbols));
     return compiled;
 }
 
