@@ -24,6 +24,22 @@ void EmitContext::emit_mov_instruction(const LirInst& inst) {
                 } else {
                     enc_.mov(dst_gpr, to_mem_address(src));
                 }
+            } else if (dst.is_mem() && (dst.size == 1 || dst.size == 2)) {
+                // An i8 / i16 store writes exactly its width (never the
+                // register's full 8 bytes over the neighbouring bytes).
+                MemAddress dst_mem = to_mem_address(dst);
+                GPR s = GPR::R11;
+                if (src.is_preg()) {
+                    s = src.preg_val.as_gpr();
+                } else if (src.is_imm_int()) {
+                    if (dst.size == 1) enc_.mov8(dst_mem, static_cast<uint8_t>(src.imm_int));
+                    else enc_.mov16(dst_mem, static_cast<uint16_t>(src.imm_int));
+                    break;
+                } else {
+                    enc_.mov(GPR::R11, to_mem_address(src));
+                }
+                if (dst.size == 1) enc_.mov8(dst_mem, s);
+                else enc_.mov16(dst_mem, s);
             } else {
                 MemAddress dst_mem = to_mem_address(dst);
                 if (src.is_preg()) {
@@ -73,6 +89,10 @@ void EmitContext::emit_mov_instruction(const LirInst& inst) {
                     enc_.mov32(dst_gpr, to_mem_address(src));
                 }
             } else {
+                if (dst.is_mem() && (dst.size == 1 || dst.size == 2)) {
+                    throw std::logic_error("x64 emission: mov32 into a " + std::to_string(dst.size) +
+                                           "-byte memory operand in " + fn_.name);
+                }
                 MemAddress dst_mem = to_mem_address(dst);
                 if (src.is_preg()) {
                     enc_.mov32(dst_mem, src.preg_val.as_gpr());

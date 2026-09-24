@@ -21,6 +21,9 @@ std::string_view bytecode_op_name(BytecodeOp op) noexcept {
         case BytecodeOp::zext64: return "zext64";
         case BytecodeOp::trunc32: return "trunc32";
         case BytecodeOp::trunc8: return "trunc8";
+        case BytecodeOp::trunc16: return "trunc16";
+        case BytecodeOp::sext8: return "sext8";
+        case BytecodeOp::sext16: return "sext16";
         case BytecodeOp::fptosi32: return "fptosi32";
         case BytecodeOp::fptosi64: return "fptosi64";
         case BytecodeOp::fptosi32_f32: return "fptosi32_f32";

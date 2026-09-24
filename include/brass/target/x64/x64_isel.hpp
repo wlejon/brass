@@ -84,6 +84,14 @@ private:
     // Whether analyze_function may fold this comparison into its single
     // branch / select / guard user.
     static bool comparison_fusible(const Instruction& cmp) noexcept;
+    // i8 / i16 operands (x64_isel_narrow.cpp): a comparison of narrow
+    // values, and the sign / zero extension of the narrow operands an
+    // instruction reads through, swapped into val_to_vreg_ while it is
+    // lowered and swapped back after.
+    static bool narrow_compare(const Instruction& cmp) noexcept;
+    std::vector<std::pair<const Value*, codegen::VReg>> widen_narrow_operands(const Instruction& inst,
+                                                                              codegen::LirBlock& lir_bb);
+    void restore_narrow_operands(const std::vector<std::pair<const Value*, codegen::VReg>>& saved);
     // Emits the ucomis of a fused floating-point comparison and returns the
     // condition that holds exactly when the comparison is true.
     void append_fused_float_compare(const Instruction& cmp, codegen::LirBlock& lir_bb, Condition& cond);

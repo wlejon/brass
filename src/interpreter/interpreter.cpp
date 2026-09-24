@@ -1,4 +1,5 @@
 #include <brass/interpreter/interpreter.hpp>
+#include <brass/interpreter/narrow_int.hpp>
 #include <brass/gc/generational_gc.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include "interpreter_coro.hpp"
@@ -185,6 +186,7 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
             if (max_instructions_ > 0 && total_instructions_executed_ > max_instructions_) {
                 throw InterpreterException("Maximum instruction execution count exceeded (" + std::to_string(max_instructions_) + ")");
             }
+            if (interp_narrow_step(*inst, frame)) continue;
 
             switch (inst->opcode()) {
                 case Opcode::iconst_i32: {
@@ -780,6 +782,8 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                 case Opcode::switch_: {
                     RuntimeValue cond = frame.get_value(inst->operand(0));
                     int64_t cond_val = cond.is_i32() ? static_cast<int64_t>(cond.as_i32()) : cond.as_i64();
+                    // Narrow case values are signed: compare the condition's low bits, sign-extended.
+                    if (const unsigned nb = narrow_int_bits(inst->operand(0)->type())) cond_val = narrow_sext(cond.raw_bits(), nb);
                     const BranchTarget* selected_target = &inst->default_target();
                     for (const auto& sc : inst->switch_cases()) {
                         if (sc.value == cond_val) {

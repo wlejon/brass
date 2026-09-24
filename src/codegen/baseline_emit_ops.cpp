@@ -122,6 +122,7 @@ bool emit_baseline_x64_op(X64BaselineEmitter& emitter, const Instruction& inst) 
         op != Opcode::call && op != Opcode::call_indirect && op != Opcode::patchable_call) {
         return false; // baseline_emit_fp.cpp
     }
+    if (emit_baseline_x64_narrow(emitter, inst)) return true;
 
     // Integer binary op at the result's width: RAX = op0 <op> op1.
     auto binop = [&](auto op32, auto op64) {

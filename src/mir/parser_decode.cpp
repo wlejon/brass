@@ -178,10 +178,18 @@ bool decode_opcode_string(std::string_view str, Opcode& op, Type& type_suffix, T
     }
 
     // Conversions
-    if (base == "sext") { op = Opcode::sext_i64; type_suffix = Type::i64(); return true; }
-    if (base == "zext") { op = Opcode::zext_i64; type_suffix = Type::i64(); return true; }
+    // MIR has sext / zext to i64 only, and trunc to i32 or i8 only: any other
+    // width (sext.i8, trunc.i16, ...) is not an opcode, rather than a quiet
+    // alias of the i64 / i32 form.
+    if (base == "sext" || base == "zext") {
+        if (!type_suffix.is_void() && type_suffix != Type::i64()) return false;
+        op = base == "sext" ? Opcode::sext_i64 : Opcode::zext_i64;
+        type_suffix = Type::i64();
+        return true;
+    }
     if (base == "trunc") {
         if (type_suffix == Type::i8()) { op = Opcode::trunc_i8; return true; }
+        if (!type_suffix.is_void() && type_suffix != Type::i32()) return false;
         op = Opcode::trunc_i32;
         type_suffix = Type::i32();
         return true;

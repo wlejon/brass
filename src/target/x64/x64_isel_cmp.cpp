@@ -36,6 +36,9 @@ bool X64ISel::comparison_fusible(const Instruction& cmp) noexcept {
     if (!is_comparison(cmp.opcode()) || cmp.operand_count() < 2 || !cmp.operand(0)) return false;
     const Type t = cmp.operand(0)->type();
     if (t.is_vector()) return false;
+    // A narrow comparison widens its operands first (x64_isel_narrow.cpp),
+    // which only the unfused lowering does.
+    if (narrow_compare(cmp)) return false;
     if (!t.is_float()) return true;
     Condition cond = Condition::None;
     bool swap = false;

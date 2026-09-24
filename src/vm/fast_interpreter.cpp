@@ -68,7 +68,8 @@ RuntimeValue FastInterpreter::execute_frame(FastFrame& frame) {
         TENTRY(nop); TENTRY(unreachable); TENTRY(iconst32); TENTRY(load_const);
         TENTRY(patchable_const32); TENTRY(patchable_const64);
         TENTRY(mov); TENTRY(mov_imm); TENTRY(sext64); TENTRY(zext64);
-        TENTRY(trunc32); TENTRY(trunc8); TENTRY(fptosi32); TENTRY(fptosi64);
+        TENTRY(trunc32); TENTRY(trunc8); TENTRY(trunc16); TENTRY(sext8); TENTRY(sext16);
+        TENTRY(fptosi32); TENTRY(fptosi64);
         TENTRY(fptosi32_f32); TENTRY(fptosi64_f32); TENTRY(sitofp_f64);
         TENTRY(sitofp_f32); TENTRY(sitofp_f64_i64); TENTRY(sitofp_f32_i64);
         TENTRY(fptrunc_f32); TENTRY(fpext_f64); TENTRY(bitcast_i64_f64); TENTRY(bitcast_f64_i64);
@@ -181,6 +182,9 @@ loop_start:
         UN(zext64, static_cast<uint32_t>(x))
         UN(trunc32, static_cast<uint32_t>(x))
         UN(trunc8, static_cast<uint8_t>(x))
+        UN(trunc16, static_cast<uint16_t>(x))
+        UN(sext8, static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(x))))
+        UN(sext16, static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(x))))
         UN(fptosi32, static_cast<uint32_t>(static_cast<int32_t>(get_f64(x))))
         UN(fptosi64, static_cast<uint64_t>(static_cast<int64_t>(get_f64(x))))
         UN(fptosi32_f32, static_cast<uint32_t>(static_cast<int32_t>(get_f32(x))))

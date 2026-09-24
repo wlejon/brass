@@ -307,7 +307,17 @@ RuntimeValue MiniCheneyGC::read_memory(uintptr_t base, int32_t offset, Type t) c
     size_t access_size = t.size_in_bytes();
     check_access(base, offset, access_size, "read_memory");
 
-    if (access_size == 4) {
+    // i8 / i16 loads read exactly their width, zero-extended into the
+    // register form (see docs/semantics.md, narrow integers).
+    if (access_size == 1) {
+        uint8_t v8 = 0;
+        std::memcpy(&v8, reinterpret_cast<const void*>(effective_addr), 1);
+        return RuntimeValue::from_bits(t, static_cast<uint64_t>(v8));
+    } else if (access_size == 2) {
+        uint16_t v16 = 0;
+        std::memcpy(&v16, reinterpret_cast<const void*>(effective_addr), 2);
+        return RuntimeValue::from_bits(t, static_cast<uint64_t>(v16));
+    } else if (access_size == 4) {
         uint32_t val32 = 0;
         std::memcpy(&val32, reinterpret_cast<const void*>(effective_addr), 4);
         return RuntimeValue::from_bits(t, static_cast<uint64_t>(val32));
@@ -337,7 +347,14 @@ void MiniCheneyGC::write_memory(uintptr_t base, int32_t offset, Type t, RuntimeV
     size_t access_size = t.size_in_bytes();
     check_access(base, offset, access_size, "write_memory");
 
-    if (access_size == 4) {
+    // i8 / i16 stores write exactly their width: the low bits of the value.
+    if (access_size == 1) {
+        const uint8_t v8 = static_cast<uint8_t>(val.raw_bits());
+        std::memcpy(reinterpret_cast<void*>(effective_addr), &v8, 1);
+    } else if (access_size == 2) {
+        const uint16_t v16 = static_cast<uint16_t>(val.raw_bits());
+        std::memcpy(reinterpret_cast<void*>(effective_addr), &v16, 2);
+    } else if (access_size == 4) {
         uint32_t val32 = static_cast<uint32_t>(val.raw_bits() & 0xFFFFFFFFULL);
         std::memcpy(reinterpret_cast<void*>(effective_addr), &val32, 4);
     } else if (access_size == 8) {

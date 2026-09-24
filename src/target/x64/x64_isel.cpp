@@ -636,7 +636,9 @@ void X64ISel::lower_block(const BasicBlock& bb) {
     for (const auto* inst : bb) {
         if (!skipped_insts_.count(inst)) {
             size_t before_count = lir_bb->instructions.size();
+            const auto widened = widen_narrow_operands(*inst, *lir_bb);
             lower_instruction(*inst, *lir_bb);
+            restore_narrow_operands(widened);
             for (size_t i = before_count; i < lir_bb->instructions.size(); ++i) {
                 if (lir_bb->instructions[i]) {
                     if (!lir_bb->instructions[i]->loc.is_valid() && inst->loc().is_valid()) {

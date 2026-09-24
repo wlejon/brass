@@ -98,6 +98,14 @@ public:
     // instruction.
     uint32_t emit_edge(const BranchTarget& target);
 
+    // Defined in bytecode_compiler_narrow.cpp (docs/semantics.md, narrow
+    // integers). `v` in `scratch` sign- or zero-extended from its i8 / i16
+    // width, or v's own register when v is not narrow.
+    BcReg widen_narrow(const Value* v, bool sign, BcReg scratch);
+    // Lowers an integer instruction on i8 / i16 operands; false when
+    // `inst` is not one.
+    bool lower_narrow_int(const Instruction& inst);
+
     // Defined in bytecode_compiler_ops.cpp
     void lower_instruction(const Instruction& inst);
     void lower_constant(const Instruction& inst);

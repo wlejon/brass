@@ -8,9 +8,10 @@ namespace brass::detail {
 
 namespace {
 
+// i8 / i16 comparisons are not fused: they compare widened operands
+// (bytecode_compiler_narrow.cpp), which only the unfused lowering makes.
 bool is_int_compare_type(Type t) {
-    return t == Type::i32() || t == Type::i64() || t == Type::i16() || t == Type::i8() || t.is_pointer() ||
-           t.is_gcref();
+    return t == Type::i32() || t == Type::i64() || t.is_pointer() || t.is_gcref();
 }
 
 struct FusedBranch {
@@ -220,6 +221,8 @@ void FunctionCompilerContext::lower_br_if(const Instruction& inst) {
 void FunctionCompilerContext::lower_switch(const Instruction& inst) {
     BcReg cond_reg = get_reg(inst.operand(0));
     Type ct = inst.operand(0)->type();
+    // Narrow case values are signed: switch on the condition sign-extended.
+    cond_reg = widen_narrow(inst.operand(0), true, scratch_reg);
     SwitchTable st;
     st.is_i32 = ct == Type::i32() || ct == Type::i16() || ct == Type::i8();
     size_t t_idx = out.switch_tables.size();

@@ -35,6 +35,9 @@ enum class BytecodeOp : uint8_t {
     zext64,
     trunc32,
     trunc8,
+    trunc16,  // AB a <- zext(b & 0xffff)
+    sext8,    // AB a <- zext32(sext(b & 0xff)): an i8 read as a signed i32
+    sext16,   // AB a <- zext32(sext(b & 0xffff))
     fptosi32,
     fptosi64,
     fptosi32_f32,

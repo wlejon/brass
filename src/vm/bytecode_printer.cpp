@@ -36,7 +36,8 @@ void print_call_site(std::ostream& os, const BytecodeFunction& fn, uint32_t idx)
 bool is_unary(BytecodeOp op) {
     switch (op) {
         case BytecodeOp::mov: case BytecodeOp::vmov: case BytecodeOp::sext64: case BytecodeOp::zext64:
-        case BytecodeOp::trunc32: case BytecodeOp::trunc8: case BytecodeOp::fptosi32: case BytecodeOp::fptosi64:
+        case BytecodeOp::trunc32: case BytecodeOp::trunc8: case BytecodeOp::trunc16:
+        case BytecodeOp::sext8: case BytecodeOp::sext16: case BytecodeOp::fptosi32: case BytecodeOp::fptosi64:
         case BytecodeOp::fptosi32_f32: case BytecodeOp::fptosi64_f32: case BytecodeOp::sitofp_f64:
         case BytecodeOp::sitofp_f32: case BytecodeOp::sitofp_f64_i64: case BytecodeOp::sitofp_f32_i64:
         case BytecodeOp::fptrunc_f32: case BytecodeOp::fpext_f64: case BytecodeOp::bitcast_i64_f64:

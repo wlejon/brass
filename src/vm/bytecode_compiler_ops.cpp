@@ -179,6 +179,7 @@ void FunctionCompilerContext::lower_conversion(const Instruction& inst) {
 }
 
 void FunctionCompilerContext::lower_arithmetic(const Instruction& inst) {
+    if (lower_narrow_int(inst)) return;
     BcReg dst = get_result_reg(inst);
     // Overflow checks are typed by their operands, the rest by the result.
     Type ty = inst.operand_count() > 0 && inst.operand(0) ? inst.operand(0)->type() : inst.type();
@@ -247,6 +248,7 @@ void FunctionCompilerContext::lower_arithmetic(const Instruction& inst) {
 }
 
 void FunctionCompilerContext::lower_bitwise(const Instruction& inst) {
+    if (lower_narrow_int(inst)) return;
     BcReg dst = get_result_reg(inst);
     const bool is_i32 = is_narrow_int(inst.operand(0)->type());
     auto pick = [&](BytecodeOp i32, BytecodeOp i64) { return is_i32 ? i32 : i64; };
@@ -273,6 +275,7 @@ void FunctionCompilerContext::lower_bitwise(const Instruction& inst) {
 }
 
 void FunctionCompilerContext::lower_comparison(const Instruction& inst) {
+    if (inst.opcode() != Opcode::select && lower_narrow_int(inst)) return;
     BcReg dst = get_result_reg(inst);
 
     if (inst.opcode() == Opcode::select) {

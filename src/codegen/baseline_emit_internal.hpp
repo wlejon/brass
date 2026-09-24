@@ -129,6 +129,9 @@ size_t append_x64_baseline_unwind(std::vector<uint8_t>& image, const X64Baseline
 
 // Each returns true if it handled the opcode.
 bool emit_baseline_x64_op(X64BaselineEmitter& emitter, const Instruction& inst);
+// Integer operations on i8 / i16 operands (baseline_emit_narrow.cpp); false
+// when `inst` is not one.
+bool emit_baseline_x64_narrow(X64BaselineEmitter& emitter, const Instruction& inst);
 bool emit_baseline_x64_fp_op(X64BaselineEmitter& emitter, const Instruction& inst);
 // Vector opcodes, and select / loads / stores / ret of a vector value.
 bool emit_baseline_x64_vec_op(X64BaselineEmitter& emitter, const Instruction& inst);
