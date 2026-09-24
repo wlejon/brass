@@ -40,4 +40,62 @@ bool run_pass_pipeline(Module& mod, const PassPipelineOptions& options,
     return run_pipeline(mod, pass_pipeline(options), hooks).completed;
 }
 
+PassPipelineOptions production_pass_pipeline_options() {
+    PassPipelineOptions p;
+    p.enable_sroa = true;
+    p.enable_inlining = false;
+    p.enable_speculative_inlining = false;
+    p.inline_leaf_only = true;
+    p.enable_gvn = true;
+    p.enable_gvn_pre = true;
+    p.enable_sccp = true;
+    p.enable_guard_elim = true;
+    p.enable_cfg_simplify = true;
+    p.enable_loop_unswitch = true;
+    p.enable_jump_threading = true;
+    p.enable_bce = true;
+    p.enable_wbe = true;
+
+    LoopOptOptions& l = p.loop;
+    l.enable_fp_reassociation = false;
+    l.enable_f64_demote = true;
+    l.enable_vectorize = true;
+    l.enable_slp = true;
+    l.enable_loop_tile = true;
+    l.tile_size_i = 16;
+    l.tile_size_j = 16;
+    l.enable_sroa = true;
+    l.enable_gvn = true;
+    l.enable_sccp = true;
+    l.enable_guard_elim = true;
+    l.enable_cfg_simplify = true;
+    l.enable_loop_unswitch = true;
+    l.enable_jump_threading = true;
+    l.enable_trace_layout = true;
+    l.enable_partial_escape = true;
+    l.enable_allocation_sinking = true;
+    l.enable_loop_fusion = true;
+    l.enable_loop_distribution = true;
+    l.enable_array_contraction = true;
+    l.enable_parallel_loops = false;
+    l.parallel_threshold = 1000;
+    l.parallel_workers = 0;
+    l.enable_bce = true;
+    // The vector width follows what the CPU running it supports.
+#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__GNUC__) || defined(__clang__)
+    if (__builtin_cpu_supports("avx2")) {
+        l.enable_avx2 = true;
+        l.vector_width = 256;
+    }
+    l.enable_fma = true;
+#endif
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    // NEON is 128 bits wide and FMA is part of the base ISA.
+    l.vector_width = 128;
+    l.enable_fma = true;
+#endif
+    return p;
+}
+
 } // namespace brass

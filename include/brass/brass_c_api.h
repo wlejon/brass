@@ -18,8 +18,8 @@ extern "C" {
 
 /* Object lifetime
  *
- * Every object returned by a *_create function, by brass_translate_bronze_il,
- * or by brass_kernel_jit_compile* must be released with its matching
+ * Every object returned by a *_create function or by
+ * brass_kernel_jit_compile* must be released with its matching
  * *_destroy function. Destroy calls may come in any order:
  *
  *  - brass_context_destroy releases the caller's reference to the context.
@@ -229,11 +229,6 @@ BRASS_API BrassValue BRASS_CALL brass_build_vbroadcast(BrassBuilder b, BrassType
 BRASS_API BrassValue BRASS_CALL brass_build_vextract_lane(BrassBuilder b, BrassValue vec_val, uint32_t lane);
 BRASS_API BrassValue BRASS_CALL brass_build_vinsert_lane(BrassBuilder b, BrassValue vec_val, BrassValue scalar_val, uint32_t lane);
 BRASS_API BrassValue BRASS_CALL brass_build_vzero(BrassBuilder b, BrassType vec_type);
-
-/* ========================================================================= */
-/* Bronze IL Translation Bridge                                              */
-/* ========================================================================= */
-BRASS_API BrassStatus BRASS_CALL brass_translate_bronze_il(BrassContext ctx, const char* il_text, size_t len, const BrassOptions* opts, BrassModule* out_mod);
 
 /* ========================================================================= */
 /* JIT Execution Engine                                                      */

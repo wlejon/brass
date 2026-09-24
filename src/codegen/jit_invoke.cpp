@@ -1,4 +1,5 @@
 #include <brass/codegen/jit_exec.hpp>
+#include <brass/runtime/host_symbols.hpp>
 #include "core/asm_symbol.hpp"
 #include <algorithm>
 #include <cstring>
@@ -16,6 +17,7 @@ void partition_aarch64_invoke_args(
 ) {
     out_args = AArch64InvokeArgs{};
     out_args.target_fn = target_fn;
+    out_args.pinned_tls = runtime::host_pinned_tls_block();
     stack_words.clear();
 
     // The stack half of the convention every AArch64 tier reads (the tier-2
@@ -290,15 +292,17 @@ __asm__(
     ".text\n"
     BRASS_ASM_FN_BEGIN(aarch64_invoke_thunk)
     "    .cfi_startproc\n"
-    "    stp x29, x30, [sp, #-32]!\n"
-    "    .cfi_def_cfa_offset 32\n"
-    "    .cfi_offset x29, -32\n"
-    "    .cfi_offset x30, -24\n"
+    "    stp x29, x30, [sp, #-48]!\n"
+    "    .cfi_def_cfa_offset 48\n"
+    "    .cfi_offset x29, -48\n"
+    "    .cfi_offset x30, -40\n"
     "    mov x29, sp\n"
     "    .cfi_def_cfa_register x29\n"
     "    stp x19, x20, [sp, #16]\n"
-    "    .cfi_offset x19, -16\n"
-    "    .cfi_offset x20, -8\n"
+    "    .cfi_offset x19, -32\n"
+    "    .cfi_offset x20, -24\n"
+    "    str x28, [sp, #32]\n"
+    "    .cfi_offset x28, -16\n"
     "    mov x19, x1\n"                // x19 = result
     "    mov x20, x0\n"                // x20 = args
     "    ldr x2, [x20, #200]\n"        // stack_word_count
@@ -319,6 +323,7 @@ __asm__(
     "    ldp q4, q5, [x1, #64]\n"
     "    ldp q6, q7, [x1, #96]\n"
     "    ldr x16, [x20, #208]\n"       // target
+    "    ldr x28, [x20, #216]\n"       // pinned TLS block
     "    ldp x0, x1, [x20, #0]\n"      // x0..x7
     "    ldp x2, x3, [x20, #16]\n"
     "    ldp x4, x5, [x20, #32]\n"
@@ -329,9 +334,11 @@ __asm__(
     "    str q0, [x19, #16]\n"
     "    str q1, [x19, #32]\n"
     "    mov sp, x29\n"
+    "    ldr x28, [sp, #32]\n"
     "    ldp x19, x20, [sp, #16]\n"
-    "    ldp x29, x30, [sp], #32\n"
+    "    ldp x29, x30, [sp], #48\n"
     "    .cfi_def_cfa sp, 0\n"
+    "    .cfi_restore x28\n"
     "    .cfi_restore x19\n"
     "    .cfi_restore x20\n"
     "    .cfi_restore x29\n"

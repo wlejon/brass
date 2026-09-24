@@ -8,7 +8,7 @@
 #include <brass/mir/instruction.hpp>
 #include <brass/codegen/jit_exec.hpp>
 #include <brass/codegen/kernel_jit.hpp>
-#include <brass/il_translator/il_translator.hpp>
+#include <brass/runtime/host_symbols.hpp>
 #include <brass/object/object_writer.hpp>
 #include <brass/object/coff_writer.hpp>
 #include <brass/object/elf_writer.hpp>

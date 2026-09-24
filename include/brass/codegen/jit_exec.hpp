@@ -95,12 +95,17 @@ private:
 bool is_jit_code_address(const void* addr) noexcept;
 size_t jit_system_page_size() noexcept;
 
+// Each thunk's argument block. `pinned_tls` is loaded into the pinned TLS
+// register (X28 / R13) for the call; the partition functions fill it from
+// runtime::host_pinned_tls_block(). The thunks read these fields at fixed
+// offsets, so the layouts are asserted below.
 struct alignas(16) AArch64InvokeArgs {
     uint64_t x[8] = {0};
     alignas(16) uint8_t v[8][16] = {{0}};
     const uint64_t* stack_words = nullptr;
     uint64_t stack_word_count = 0;
     void* target_fn = nullptr;
+    void* pinned_tls = nullptr;
 };
 
 struct alignas(16) AArch64InvokeResult {
@@ -127,6 +132,7 @@ struct alignas(16) X64SysVInvokeArgs {
     const uint64_t* stack_words = nullptr;
     uint64_t stack_word_count = 0;
     void* target_fn = nullptr;
+    void* pinned_tls = nullptr;
 };
 
 struct alignas(16) X64SysVInvokeResult {
@@ -141,7 +147,12 @@ struct alignas(16) X64Win64InvokeArgs {
     const uint64_t* stack_words = nullptr;
     uint64_t stack_word_count = 0;
     void* target_fn = nullptr;
+    void* pinned_tls = nullptr;
 };
+
+static_assert(offsetof(AArch64InvokeArgs, pinned_tls) == 216, "aarch64_invoke_thunk reads pinned_tls at 216");
+static_assert(offsetof(X64SysVInvokeArgs, pinned_tls) == 200, "x64_sysv_invoke_thunk reads pinned_tls at 200");
+static_assert(offsetof(X64Win64InvokeArgs, pinned_tls) == 120, "x64_win64_invoke_thunk reads pinned_tls at 120");
 
 struct alignas(16) X64Win64InvokeResult {
     uint64_t rax = 0;

@@ -348,7 +348,7 @@ bool emit_baseline_aarch64_op(AArch64BaselineEmitter& emitter, const Instruction
             return true;
         case Opcode::write_barrier: {
             // brass_gc_write_barrier(obj, val), through the symbol table so
-            // a host's barrier (bronze's) is the one called, as it is from
+            // a host's barrier, when it has one, is the one called, as it is from
             // optimized code.
             void* wb = emitter.resolve_sym("brass_gc_write_barrier");
             if (!wb) throw_unsupported(kA64BaselineStage, "write_barrier: brass_gc_write_barrier is not registered");

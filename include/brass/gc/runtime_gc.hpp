@@ -65,7 +65,7 @@ void brass_gc_collect();
 // brass's own generational-GC barrier. JIT symbol tables register it under
 // the name compiled code calls, "brass_gc_write_barrier", as a default a host
 // runtime overrides with its own barrier. It is deliberately NOT defined under
-// that name: a host runtime (bronze) defines `brass_gc_write_barrier` itself,
+// that name: a host runtime may define `brass_gc_write_barrier` itself,
 // and two strong definitions collide when both are statically linked.
 void brass_default_gc_write_barrier(uintptr_t obj, uintptr_t val);
 uint8_t* brass_gc_card_table_base();

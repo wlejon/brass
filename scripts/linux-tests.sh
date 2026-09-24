@@ -11,7 +11,7 @@
 #                  without root (apt-get download + dpkg -x) into $BRASS_XROOT
 #   build-a64      configure + build the aarch64 tree ($BRASS_A64_BUILD)
 #   test-a64       ctest -L correctness on the aarch64 tree, under qemu
-#   fuzz-a64       differential fuzzer (bronze + all pipelines) under qemu
+#   fuzz-a64       differential fuzzer (production + all pipelines) under qemu
 #   build-x64      configure + build the native Linux x86_64 tree
 #   test-x64       ctest -L correctness on the x86_64 tree
 #   fuzz-x64       differential fuzzer natively on Linux x86_64
@@ -129,7 +129,7 @@ run_fuzz() { # <build-dir> <runner prefix...>
     local per=$(( (FUZZ_SEEDS + jobs - 1) / jobs ))
     local rc=0 pipeline j
     rm -rf "$dir/fuzz"
-    for pipeline in bronze all; do
+    for pipeline in production all; do
         log "fuzz $pipeline: $FUZZ_SEEDS seeds from $FUZZ_FIRST_SEED in $jobs processes"
         local pids=()
         for (( j = 0; j < jobs; j++ )); do

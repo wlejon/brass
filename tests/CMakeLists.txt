@@ -62,8 +62,6 @@ add_executable(brass_unit_tests
     unit/test_mir_alias_safety.cpp
     unit/test_il_expressibility.cpp
     differential/test_embedding_differential.cpp
-    unit/test_bronze_il_translator.cpp
-    differential/test_fuzz_closures_gc.cpp
     differential/test_fuzz_js_loops.cpp
     unit/test_f64_demote.cpp
     unit/test_inliner.cpp
@@ -111,8 +109,6 @@ add_executable(brass_unit_tests
     differential/test_debug_differential.cpp
     unit/test_shapes.cpp
     unit/test_inline_cache.cpp
-    unit/test_property_lowering.cpp
-    unit/test_inlined_fastpaths.cpp
     unit/test_tlab.cpp
     differential/test_pic_differential.cpp
     unit/test_exceptions_mir.cpp
@@ -163,7 +159,6 @@ add_executable(brass_unit_tests
     unit/test_delta_reducer.cpp
     unit/test_c_api.cpp
     unit/test_c_api_lifetime.cpp
-    unit/test_native_cabi.cpp
     unit/test_range_analysis.cpp
     unit/test_bounds_check_elim.cpp
     unit/test_optimizer_soundness.cpp
@@ -376,68 +371,7 @@ add_test(NAME performance_ratchet COMMAND brass_benchmarks --check-ratchet)
 set_tests_properties(benchmarks performance_ratchet PROPERTIES
     TIMEOUT 600 RUN_SERIAL TRUE WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" LABELS "perf")
 
-# brass-il end to end on the bronze corpus (tests/cmake/run_il_corpus.cmake).
-#   il_corpus.run.*: generators and async under --run, whose function-name
-#     data symbols once reached only a JIT active at translation time.
-#   il_corpus.bg.*: --enable-background-compile, which once died with a
-#     silent fail-fast (0xC0000409) on every program.
 if(BRASS_BUILD_TOOLS)
-    function(brass_il_corpus_test kind name)
-        string(REPLACE ";" "," _il_args "${ARGN}")
-        add_test(NAME "il_corpus.${kind}.${name}"
-            COMMAND ${CMAKE_COMMAND}
-                "-DBRASS_IL=$<TARGET_FILE:brass-il>"
-                "-DIL_FILE=${CMAKE_SOURCE_DIR}/tests/bronze_corpus/${name}.il"
-                "-DEXPECTED=${CMAKE_SOURCE_DIR}/tests/bronze_corpus/${name}.expected"
-                "-DIL_ARGS=${_il_args}"
-                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/run_il_corpus.cmake")
-        set_tests_properties("il_corpus.${kind}.${name}" PROPERTIES
-            TIMEOUT 120 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" LABELS "correctness")
-    endfunction()
-    foreach(_name 27_generator_fibonacci 28_async_chain)
-        brass_il_corpus_test(run ${_name} --run)
-    endforeach()
-    # --baseline-jit: every symbol these reference links (they once trapped
-    # at run time on a call to an unresolved name symbol).
-    foreach(_name 27_generator_fibonacci 28_async_chain)
-        brass_il_corpus_test(baseline ${_name} --baseline-jit)
-    endforeach()
-    # 21_quat_norm: its own `sqrt` once bound to the registered libm sqrt
-    # (NaN). 06_ackermann: one stack slot per SSA value once overflowed the
-    # native stack at depth ~4k.
-    foreach(_name 21_quat_norm 06_ackermann)
-        brass_il_corpus_test(baseline ${_name} --baseline-jit)
-    endforeach()
-    foreach(_name 01_arithmetic 03_collatz 09_closures 14_array_loop 23_objects_basic
-                  25_try_catch_basic 27_generator_fibonacci 28_async_chain 34_background_tiering)
-        brass_il_corpus_test(bg ${_name} --run --enable-background-compile)
-    endforeach()
-    # il_corpus.sched.*: tier 2 with the pre- and post-RA schedulers, as
-    # brass-opt --jit runs by default (brass-il leaves them off). The
-    # scheduler once moved constant materialization between a call and the
-    # copy out of RAX, and the allocator gave the constant's temp RAX.
-    file(GLOB _sched_corpus CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/tests/bronze_corpus/*.il")
-    foreach(_il ${_sched_corpus})
-        get_filename_component(_name "${_il}" NAME_WE)
-        brass_il_corpus_test(sched ${_name} --run --schedule-insns)
-    endforeach()
-    # mir_roundtrip.*: every corpus program's --emit-mir text parses back
-    # byte-identically and runs standalone in brass-opt (baseline and tier 2)
-    # with the expected output. Names such as `f$leaf` or a module path once
-    # failed to parse, and property names were translator-process pointers.
-    foreach(_il ${_sched_corpus})
-        get_filename_component(_name "${_il}" NAME_WE)
-        add_test(NAME "mir_roundtrip.${_name}"
-            COMMAND ${CMAKE_COMMAND}
-                "-DBRASS_IL=$<TARGET_FILE:brass-il>"
-                "-DBRASS_OPT=$<TARGET_FILE:brass-opt>"
-                "-DIL_FILE=${_il}"
-                "-DEXPECTED=${CMAKE_SOURCE_DIR}/tests/bronze_corpus/${_name}.expected"
-                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/mir_roundtrip"
-                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/run_mir_roundtrip.cmake")
-        set_tests_properties("mir_roundtrip.${_name}" PROPERTIES
-            TIMEOUT 120 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" LABELS "correctness")
-    endforeach()
     # brass_opt_cli.coro_args.*: brass-opt lowers coroutines before running
     # them (an unlowered body once yielded 1, 0, 0), and --args takes a
     # negative number (it was rejected as an unknown option).

@@ -4,8 +4,6 @@
 #include <brass/embedding/host_gc.hpp>
 #include <brass/runtime/object.hpp>
 #include <brass/runtime/shape.hpp>
-#include <brass/il_translator/il_alloc_lowering.hpp>
-#include <brass/il_translator/il_translator.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/module.hpp>
 #include <brass/mir/function.hpp>
@@ -15,7 +13,6 @@
 #include <string>
 
 using namespace brass;
-using namespace brass::il;
 using namespace brass::runtime;
 
 TEST_CASE("TLAB - Direct bump allocation and object initialization") {
@@ -183,136 +180,3 @@ TEST_CASE("TLAB - Stress mode compliance") {
     set_active_host_gc(nullptr);
 }
 
-TEST_CASE("TLAB - Inlined SSA Diamond Generation in AllocLoweringHelper") {
-    Module mod("test_alloc_lowering");
-    Function* fn = mod.create_function("test_create_obj", Type::i64(), {});
-    Builder b(mod);
-    b.set_function(fn);
-
-    BasicBlock* b0 = b.append_block("entry");
-    b.position_at_end(b0);
-
-    AllocLoweringHelper helper(/*enable_tlab=*/true);
-    CHECK(helper.enable_tlab());
-
-    Value* obj = helper.lower_create_object(b);
-    b.build_ret(obj);
-
-    bool has_top_load = false;
-    bool has_end_load = false;
-    bool has_ule = false;
-    bool has_fallback_call = false;
-
-    for (BasicBlock* bb : fn->blocks()) {
-        for (Instruction* inst : *bb) {
-            if (inst->opcode() == Opcode::func_addr || inst->opcode() == Opcode::call) {
-                if (inst->symbol() == "brass_tlab_top" || inst->symbol() == "brass_current_thread_tlab_top") has_top_load = true;
-                if (inst->symbol() == "brass_tlab_end" || inst->symbol() == "brass_current_thread_tlab_end") has_end_load = true;
-            }
-            if (inst->opcode() == Opcode::ule) {
-                has_ule = true;
-            }
-            if (inst->opcode() == Opcode::call) {
-                if (inst->symbol() == "bronze_create_object") has_fallback_call = true;
-            }
-        }
-    }
-
-    CHECK(has_top_load);
-    CHECK(has_end_load);
-    CHECK(has_ule);
-    CHECK(has_fallback_call);
-}
-
-TEST_CASE("TLAB - Bronze TLS SSA Diamond Generation in AllocLoweringHelper") {
-    Module mod("test_alloc_lowering_bronze");
-    Function* fn = mod.create_function("test_create_obj_bronze", Type::i64(), {});
-    Builder b(mod);
-    b.set_function(fn);
-
-    BasicBlock* b0 = b.append_block("entry");
-    b.position_at_end(b0);
-
-    AllocLoweringHelper helper(/*enable_tlab=*/true, AllocLoweringHelper::Model::BronzeTLS);
-    CHECK(helper.enable_tlab());
-    CHECK(helper.model() == AllocLoweringHelper::Model::BronzeTLS);
-
-    Value* obj = helper.lower_create_object(b);
-    b.build_ret(obj);
-
-    bool has_tls_call = false;
-    bool has_cursor_load = false;
-    bool has_limit_load = false;
-    bool has_shape_load = false;
-    bool has_fallback_call = false;
-
-    for (BasicBlock* bb : fn->blocks()) {
-        for (Instruction* inst : *bb) {
-            if (inst->opcode() == Opcode::call) {
-                if (inst->symbol() == "bronze_tls_block_addr") has_tls_call = true;
-                if (inst->symbol() == "bronze_create_object") has_fallback_call = true;
-            }
-            if (inst->opcode() == Opcode::load) {
-                if (inst->offset() == 24) has_cursor_load = true;
-                if (inst->offset() == 32) has_limit_load = true;
-                if (inst->offset() == 40) has_shape_load = true;
-            }
-        }
-    }
-
-    CHECK(has_tls_call);
-    CHECK(has_cursor_load);
-    CHECK(has_limit_load);
-    CHECK(has_shape_load);
-    CHECK(has_fallback_call);
-}
-
-TEST_CASE("TLAB - JIT execution with inlined TLAB allocations") {
-    std::string il_src = R"(
-module test_tlab_jit.js
-
-func main() -> f64 {
-  b0:
-    %0: dynamic = create.array 4
-    %1: dynamic = create.object
-    %2: f64 = const.f64 42
-    %3: dynamic = box.f64 %2
-    prop.set %1, "val", %3
-    %4: dynamic = prop.get %1, "val"
-    %5: f64 = unbox.f64 %4
-    ret %5
-}
-)";
-
-    TranslatorOptions opts;
-    opts.enable_tlab = true;
-    opts.enable_optimizations = true;
-
-    DiagnosticReporter diag;
-    TranslationResult res = translate_bronze_il(il_src, opts, &diag);
-    REQUIRE(res.success);
-    REQUIRE(res.module != nullptr);
-
-    HostGC gc(1024 * 1024);
-    set_active_host_gc(&gc);
-
-    // Ensure active TLAB is bound to this GC
-    auto* tlab = get_active_tlab();
-    REQUIRE(tlab != nullptr);
-    tlab->init(&gc);
-
-    codegen::JitExecutionEngine jit(Target::host());
-    register_bronze_runtime_symbols(&jit);
-    REQUIRE(jit.compile_and_load(*res.module));
-
-    auto fn_ptr = jit.get_function_ptr<double(*)()>("main");
-    REQUIRE(fn_ptr != nullptr);
-    double r = fn_ptr();
-    CHECK_EQ(r, 42.0);
-
-    // Verify allocations took place via TLAB
-    CHECK(tlab->total_allocated > 0);
-
-    tlab->reset();
-    set_active_host_gc(nullptr);
-}

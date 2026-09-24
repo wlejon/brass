@@ -319,7 +319,7 @@ x64_win64_invoke_thunk PROC FRAME
     .endprolog
 
     mov r12, rcx
-    mov r13, rdx
+    mov rbx, rdx                   ; result (r13 is the pinned TLS register)
 
     ; RSP is 16-byte aligned here; keep it so with an even word count.
     mov rcx, qword ptr [r12 + 104] ; stack_word_count
@@ -349,10 +349,11 @@ skip_stack_copy:
     mov r9,  qword ptr [r12 + 24]
 
     mov r11, qword ptr [r12 + 112]
+    mov r13, qword ptr [r12 + 120] ; args->pinned_tls
     call r11
 
-    mov qword ptr [r13], rax
-    movdqu xmmword ptr [r13 + 16], xmm0
+    mov qword ptr [rbx], rax
+    movdqu xmmword ptr [rbx + 16], xmm0
 
     lea rsp, [rbp - 40]
     pop r13

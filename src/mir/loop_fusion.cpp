@@ -284,16 +284,16 @@ struct MemAccess {
     int32_t offset = 0;
     size_t size = 0;
     bool is_store = false;
-    // An element access of a fresh bronze array, addressed only through the
+    // An element access of a fresh runtime array, addressed only through the
     // runtime's element calls.
-    bool bronze_element = false;
+    bool runtime_element = false;
 };
 
 bool is_elem_set_call(const Instruction& inst) {
     return callee_has_role(inst, SymbolRole::ArraySet) && inst.operand_count() >= 3;
 }
 
-bool is_bronze_elem_call(const Instruction& inst) {
+bool is_runtime_elem_call(const Instruction& inst) {
     return (callee_has_role(inst, SymbolRole::ArrayGet) && inst.operand_count() == 2) ||
            is_elem_set_call(inst);
 }
@@ -302,7 +302,7 @@ bool is_bronze_elem_call(const Instruction& inst) {
 // of element calls and write barriers: no other code can reach its elements
 // or give it accessors, so its element calls act as plain reads and writes
 // of their slot. Array contraction relies on the same property.
-bool is_private_bronze_array(const Function& fn, const Value* arr) {
+bool is_private_runtime_array(const Function& fn, const Value* arr) {
     if (!arr || !arr->is_instruction()) return false;
     const Instruction* def = arr->defining_instruction();
     if (!def || !callee_has_role(*def, SymbolRole::ArrayNew)) return false;
@@ -310,7 +310,7 @@ bool is_private_bronze_array(const Function& fn, const Value* arr) {
         if (!bb) continue;
         for (const Instruction* inst : *bb) {
             bool as_receiver = inst->operand_count() > 0 && inst->operand(0) == arr &&
-                               (is_bronze_elem_call(*inst) || inst->opcode() == Opcode::write_barrier);
+                               (is_runtime_elem_call(*inst) || inst->opcode() == Opcode::write_barrier);
             bool other_use = false;
             for_each_use(*inst, [&](Value* v) { if (v == arr) other_use = true; });
             for (size_t i = 1; i < inst->operand_count(); ++i) {
@@ -377,10 +377,10 @@ bool effects_reorderable(const Function& fn, const LoopInfo& loop, const RangeAn
                 accesses.push_back(acc);
                 continue;
             }
-            if (is_bronze_elem_call(*inst)) {
+            if (is_runtime_elem_call(*inst)) {
                 // Any other element call may run accessors or reach a
                 // shared array, and so does not commute with anything.
-                if (!is_private_bronze_array(fn, inst->operand(0)) ||
+                if (!is_private_runtime_array(fn, inst->operand(0)) ||
                     !is_plain_element_index(inst->operand(1), bb, ra)) {
                     return false;
                 }
@@ -389,7 +389,7 @@ bool effects_reorderable(const Function& fn, const LoopInfo& loop, const RangeAn
                 acc.scale = 8;
                 acc.size = 8;
                 acc.is_store = is_elem_set_call(*inst);
-                acc.bronze_element = true;
+                acc.runtime_element = true;
                 accesses.push_back(acc);
                 continue;
             }
@@ -410,11 +410,11 @@ bool accesses_commute(const MemAccess& a, const MemAccess& b, const FusibleLoopI
                       const FusibleLoopInfo& l2, const AliasAnalysis& aa) {
     if (!a.is_store && !b.is_store) return true;
     if (!a.base || !b.base) return false;
-    // A private bronze array is reachable only through its own element
+    // A private runtime array is reachable only through its own element
     // calls, so it is disjoint from every other access.
-    if ((a.bronze_element || b.bronze_element) && a.base != b.base) return true;
-    if (a.bronze_element != b.bronze_element) return true;
-    if (!a.bronze_element && aa.alias(a.base, b.base) == AliasResult::NoAlias) return true;
+    if ((a.runtime_element || b.runtime_element) && a.base != b.base) return true;
+    if (a.runtime_element != b.runtime_element) return true;
+    if (!a.runtime_element && aa.alias(a.base, b.base) == AliasResult::NoAlias) return true;
     // Element i of the same buffer on both sides: the fused loop touches it
     // in iteration i only, loop 1 first, exactly as the original order did.
     return a.index == l1.iv_param && b.index == l2.iv_param && a.base == b.base &&

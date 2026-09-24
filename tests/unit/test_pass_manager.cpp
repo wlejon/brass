@@ -5,7 +5,7 @@
 
 #include "test_framework.hpp"
 #include <brass/brass.hpp>
-#include <brass/il_translator/il_pipeline.hpp>
+#include <brass/mir/pass_pipeline.hpp>
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/mir/inliner.hpp>
 #include <brass/mir/loop_opt.hpp>
@@ -210,11 +210,11 @@ TEST_CASE("Pass manager - filters, follow-ups and hooks") {
 }
 
 TEST_CASE("Pass manager - the declared pipelines have no accidental repeats") {
-    // Production (Bronze configuration, inlining on): SROA runs before and
-    // after inlining, never again in the loop stage; BCE runs early and late.
-    il::TranslatorOptions t = il::bronze_translator_options();
+    // Production (inlining on): SROA runs before and after inlining, never
+    // again in the loop stage; BCE runs early and late.
+    PassPipelineOptions t = production_pass_pipeline_options();
     t.enable_inlining = true;
-    const std::vector<std::string> prod = pass_pipeline(il::pass_pipeline_options(t)).names();
+    const std::vector<std::string> prod = pass_pipeline(t).names();
     CHECK_EQ(std::count(prod.begin(), prod.end(), "sroa"), 1);
     CHECK_EQ(std::count(prod.begin(), prod.end(), "sroa 2"), 1);
     CHECK(index_of(prod, "inline") < index_of(prod, "sroa 2"));
@@ -271,7 +271,7 @@ TEST_CASE("Pass manager - production pipeline vectorizes a bronze-shaped loop") 
     const int64_t expected = run_main(*mod, 13, 100);
     CHECK_EQ(expected, 78 + 1300);
 
-    PassPipelineOptions opts = il::pass_pipeline_options(il::bronze_translator_options());
+    PassPipelineOptions opts = production_pass_pipeline_options();
     opts.loop.enable_avx2 = true;  // the transform is target-independent
     opts.loop.vector_width = 256;
     run_pipeline(*mod, pass_pipeline(opts));

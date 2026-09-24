@@ -3,8 +3,6 @@
 #include <brass/codegen/baseline_jit.hpp>
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
-#include <brass/il_translator/il_translator.hpp>
-#include "../../src/il_translator/il_runtime.hpp"
 #include <cstdint>
 #include <vector>
 
@@ -118,78 +116,6 @@ TEST_CASE("Frontend & Interp Safety - dynamic call >16 args with alloca buffer")
     RuntimeValue res = compiled.invoke({});
     // sum of 1..18 = 18 * 19 / 2 = 171
     CHECK_EQ(res.as_i64(), 171);
-}
-
-// 3. ABI wrapper bounds check: calling a function expecting 4 arguments with 1 argument returns kUndefinedTag
-TEST_CASE("Frontend & Interp Safety - ABI wrapper bounds checking") {
-    // Check bronze_arg_at directly
-    int64_t argv[1] = { 42 };
-    CHECK_EQ(il::bronze_arg_at(1, argv, 0), 42);
-    CHECK_EQ(static_cast<uint64_t>(il::bronze_arg_at(1, argv, 1)), il::kUndefinedTag);
-    CHECK_EQ(static_cast<uint64_t>(il::bronze_arg_at(1, argv, 2)), il::kUndefinedTag);
-    CHECK_EQ(static_cast<uint64_t>(il::bronze_arg_at(1, argv, 3)), il::kUndefinedTag);
-    CHECK_EQ(static_cast<uint64_t>(il::bronze_arg_at(0, nullptr, 0)), il::kUndefinedTag);
-
-    // End-to-end wrapper test via Bronze IL translator
-    const char* il_source = R"(
-module test_bounds_check.js
-
-func expectFour(%0: dynamic, %1: dynamic, %2: dynamic, %3: dynamic) -> dynamic export {
-  b0:
-    ret %1
-}
-
-func expectFirst(%0: dynamic, %1: dynamic, %2: dynamic, %3: dynamic) -> dynamic export {
-  b0:
-    ret %0
-}
-)";
-
-    il::TranslatorOptions opts;
-    il::FunctionMeta meta;
-    meta.needs_env = false;
-    meta.needs_this = false;
-    meta.first_source_param = 0;
-    opts.function_meta["expectFour"] = meta;
-    opts.function_meta["expectFirst"] = meta;
-
-    DiagnosticReporter diag;
-    il::TranslationResult t_res = il::translate_bronze_il(il_source, opts, &diag);
-    CHECK(t_res.success);
-    CHECK(t_res.module != nullptr);
-    if (!t_res.success || !t_res.module) {
-        return;
-    }
-
-    Function* wfn_b = t_res.module->get_function("__wrapper_expectFour");
-    CHECK(wfn_b != nullptr);
-    Function* wfn_a = t_res.module->get_function("__wrapper_expectFirst");
-    CHECK(wfn_a != nullptr);
-    if (!wfn_b || !wfn_a) {
-        return;
-    }
-
-    Interpreter interp;
-    interp.set_module(t_res.module.get());
-    il::register_bronze_interpreter_symbols(&interp);
-
-    int64_t single_arg = 999;
-    // Call wrapper with argc = 1, argv = &single_arg
-    // Wrapper signature: (env: i64, this: i64, argc: i32, argv: ptr)
-    std::vector<RuntimeValue> wrap_args = {
-        RuntimeValue::from_i64(0),
-        RuntimeValue::from_i64(0),
-        RuntimeValue::from_i32(1),
-        RuntimeValue::from_ptr(&single_arg)
-    };
-
-    // expectFour returns %b (index 1), which was not passed -> must return kUndefinedTag
-    RuntimeValue res_b = interp.run(*wfn_b, wrap_args);
-    CHECK_EQ(res_b.as_u64(), il::kUndefinedTag);
-
-    // expectFirst returns %a (index 0), which was passed as 999 -> must return 999
-    RuntimeValue res_a = interp.run(*wfn_a, wrap_args);
-    CHECK_EQ(res_a.as_i64(), 999);
 }
 
 // 4. Interpreter instruction limit: execute exactly N instructions with max_instructions = N without double counting

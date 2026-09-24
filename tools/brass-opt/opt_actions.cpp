@@ -16,7 +16,6 @@
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
 #include <brass/pgo/instrument.hpp>
-#include <brass/il_translator/il_translator.hpp>
 #include <brass/runtime/parallel_runtime.hpp>
 #include <brass/gc/mini_cheney.hpp>
 #include <brass/gc/runtime_gc.hpp>
@@ -214,7 +213,6 @@ bool execute_run_function(Module& mod, const RunFunctionOptions& opts) {
 
     if (opts.use_baseline_jit) {
         codegen::BaselineJitCompiler baseline(Target::host());
-        il::register_bronze_baseline_symbols(&baseline);
         baseline.register_external_symbol("brass_pgo_inc", reinterpret_cast<void*>(&brass_pgo_inc));
         baseline.register_external_symbol("brass_parallel_for", reinterpret_cast<void*>(&brass_parallel_for));
         baseline.register_external_symbol("brass_set_parallel_workers", reinterpret_cast<void*>(&brass_set_parallel_workers));
@@ -266,7 +264,6 @@ bool execute_run_function(Module& mod, const RunFunctionOptions& opts) {
         sched_opts.enable_post_ra = opts.enable_schedule_insns;
         sched_opts.enable_software_pipelining = opts.enable_software_pipeline;
         jit.set_sched_options(sched_opts);
-        il::register_bronze_runtime_symbols(&jit);
         jit.register_external_symbol("brass_pgo_inc", reinterpret_cast<void*>(&brass_pgo_inc));
         jit.register_external_symbol("brass_parallel_for", reinterpret_cast<void*>(&brass_parallel_for));
         jit.register_external_symbol("brass_set_parallel_workers", reinterpret_cast<void*>(&brass_set_parallel_workers));

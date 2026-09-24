@@ -7,6 +7,7 @@
 #include "fast_interpreter_impl.hpp"
 #include <brass/runtime/osr_coordinator.hpp>
 #include <brass/runtime/code_installer.hpp>
+#include <brass/runtime/host_symbols.hpp>
 
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic push
@@ -470,10 +471,10 @@ loop_start:
 
         OP_CASE(pinned_tls_write) { tls_block_ = RB; NEXT(); }
         OP_CASE(pinned_tls_read) {
+            // Unwritten: the host's block for this thread, the one its
+            // module entry would otherwise have loaded.
             if (tls_block_ == 0) {
-                void* sym = find_external_symbol("bronze_tls_enter");
-                if (!sym) sym = find_external_symbol("bronze_tls_block_addr");
-                if (sym) tls_block_ = reinterpret_cast<uint64_t>(reinterpret_cast<void* (*)()>(sym)());
+                tls_block_ = reinterpret_cast<uint64_t>(runtime::host_pinned_tls_block());
             }
             RA = tls_block_;
             NEXT();

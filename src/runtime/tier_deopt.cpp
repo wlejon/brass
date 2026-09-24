@@ -6,7 +6,7 @@
 #include <brass/runtime/deopt.hpp>
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/vm/fast_interpreter.hpp>
-#include <brass/il_translator/il_translator.hpp>
+#include <brass/runtime/host_symbols.hpp>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -158,7 +158,7 @@ RuntimeValue MultiTierPipeline::run_fresh_tier0(FunctionDispatchTable& table, co
     // As execute() sets up the oracle interpreter.
     Interpreter interp;
     interp.set_dispatch_table(&table);
-    il::register_bronze_interpreter_symbols(&interp);
+    install_host_symbols(interp);
     return fn ? interp.run(*fn, args) : interp.resume(*resume_fn, resume_id, args);
 }
 

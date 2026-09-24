@@ -14,9 +14,9 @@ enum class FuzzPipeline : uint8_t {
     // Every module-level optimization pass in src/mir, each enabled and run
     // as its own named step so a broken module is pinned to one pass.
     AllPasses,
-    // Exactly the production pipeline (run_pass_pipeline) under the
-    // configuration Bronze compiles with.
-    Bronze,
+    // Exactly the production pipeline (run_pass_pipeline) under
+    // production_pass_pipeline_options().
+    Production,
     // The fuzzer's original fixed sequence: GVN-PRE, WBE, then
     // optimize_module's function pipeline.
     Legacy,

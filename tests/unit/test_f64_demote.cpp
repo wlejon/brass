@@ -4,17 +4,21 @@
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/verifier.hpp>
 #include <brass/mir/builder.hpp>
-#include <brass/il_translator/il_translator.hpp>
+#include <brass/codegen/jit_exec.hpp>
 #include <cmath>
 #include <vector>
 
 using namespace brass;
-using namespace brass::il;
 using namespace brass::test;
+
+namespace {
+// The host's float remainder (a SymbolRole::FloatRem helper).
+double host_f64_mod(double a, double b) { return std::fmod(a, b); }
+}
 
 TEST_CASE("F64 Demote - Collatz Inner Loop Demotion & JIT Execution") {
     Module mod("test_collatz_demote");
-    mod.add_symbol_role("bronze_f64_mod", SymbolRole::FloatRem);
+    mod.add_symbol_role("host_f64_mod", SymbolRole::FloatRem);
     Builder b(mod);
 
     Function* fn = mod.create_function("collatz", Type::f64(), {Type::f64()});
@@ -44,7 +48,7 @@ TEST_CASE("F64 Demote - Collatz Inner Loop Demotion & JIT Execution") {
     fn->append_block(b2);
     b.position_at_end(b2);
     Value* two_f = b.build_fconst_f64(2.0);
-    Value* mod_val = b.build_call("bronze_f64_mod", Type::f64(), {n, two_f});
+    Value* mod_val = b.build_call("host_f64_mod", Type::f64(), {n, two_f});
     Value* is_even = b.build_eq(mod_val, zero_f);
     b.build_br_if(is_even, b4, {}, b5, {});
 
@@ -101,7 +105,7 @@ TEST_CASE("F64 Demote - Collatz Inner Loop Demotion & JIT Execution") {
     REQUIRE(verify_function(*fn, &diag));
 
     codegen::JitExecutionEngine jit(Target::host());
-    il::register_bronze_runtime_symbols(&jit);
+    jit.register_external_symbol("host_f64_mod", reinterpret_cast<void*>(&host_f64_mod));
     REQUIRE(jit.compile_and_load(mod));
 
     auto collatz_fn = jit.get_function_ptr<double(*)(double)>("collatz");
@@ -181,7 +185,7 @@ TEST_CASE("F64 Demote - Fib Iteration Demotion & Loop Unrolling") {
 
 TEST_CASE("F64 Demote - Prime Sieve and Count Demotion & JIT Execution") {
     Module mod("test_prime_demote");
-    mod.add_symbol_role("bronze_f64_mod", SymbolRole::FloatRem);
+    mod.add_symbol_role("host_f64_mod", SymbolRole::FloatRem);
     Builder b(mod);
 
     Function* fn = mod.create_function("isPrime", Type::f64(), {Type::f64()});
@@ -219,7 +223,7 @@ TEST_CASE("F64 Demote - Prime Sieve and Count Demotion & JIT Execution") {
 
     fn->append_block(b_body);
     b.position_at_end(b_body);
-    Value* rem = b.build_call("bronze_f64_mod", Type::f64(), {n, p});
+    Value* rem = b.build_call("host_f64_mod", Type::f64(), {n, p});
     Value* is_div = b.build_eq(rem, b.build_fconst_f64(0.0));
     b.build_br_if(is_div, b_div, {}, b_next, {});
 
@@ -250,7 +254,7 @@ TEST_CASE("F64 Demote - Prime Sieve and Count Demotion & JIT Execution") {
     CHECK_EQ(stats.refusal_counts[DemoteRefusalReason::Unprofitable], 1u);
 
     codegen::JitExecutionEngine jit(Target::host());
-    il::register_bronze_runtime_symbols(&jit);
+    jit.register_external_symbol("host_f64_mod", reinterpret_cast<void*>(&host_f64_mod));
     REQUIRE(jit.compile_and_load(mod));
 
     auto is_prime_fn = jit.get_function_ptr<double(*)(double)>("isPrime");

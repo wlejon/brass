@@ -2,7 +2,6 @@
 #include <brass/brass.hpp>
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/vm/fast_interpreter.hpp>
-#include <brass/il_translator/il_translator.hpp>
 #include <brass/runtime/tiering.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/code_installer.hpp>
@@ -29,19 +28,12 @@ namespace {
 void assert_oracle_vs_fast(
     const Module& mod,
     std::string_view fn_name,
-    const std::vector<RuntimeValue>& args,
-    bool register_bronze = false
+    const std::vector<RuntimeValue>& args
 ) {
     Interpreter oracle;
-    if (register_bronze) {
-        il::register_bronze_interpreter_symbols(&oracle);
-    }
     RuntimeValue o_res = oracle.run(mod, fn_name, args);
 
     FastInterpreter fast;
-    if (register_bronze) {
-        il::register_bronze_fast_interpreter_symbols(&fast);
-    }
     RuntimeValue f_res = fast.run(mod, fn_name, args);
 
     if (o_res.is_f64()) {

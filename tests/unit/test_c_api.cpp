@@ -126,22 +126,11 @@ TEST_CASE("C-API - Error Handling and Context Diagnostics") {
     BrassStatus s1 = brass_module_verify(nullptr, nullptr, 0);
     CHECK_EQ(s1, BRASS_ERR_INVALID_ARGUMENT);
 
-    // 2. Syntax Error in Bronze IL Translation
-    const char* malformed_il = "module syntax_error\nfunc %%% bad token {{{";
-    BrassModule bad_mod = nullptr;
-    BrassStatus s2 = brass_translate_bronze_il(ctx, malformed_il, std::strlen(malformed_il), nullptr, &bad_mod);
-    CHECK_EQ(s2, BRASS_ERR_TRANSLATION_FAILED);
-    CHECK(bad_mod == nullptr);
-
-    const char* last_err = brass_context_get_last_error(ctx);
-    CHECK(last_err != nullptr);
-    CHECK(std::strlen(last_err) > 0);
-
-    // 3. User-defined Error Injection
+    // 2. User-defined Error Injection
     brass_context_set_error(ctx, "custom embedder error description");
     CHECK_EQ(std::strcmp(brass_context_get_last_error(ctx), "custom embedder error description"), 0);
 
-    // 4. Invalid AOT Arguments
+    // 3. Invalid AOT Arguments
     void* dummy_bytes = nullptr;
     size_t dummy_size = 0;
     BrassStatus s3 = brass_compile_to_object(nullptr, 0, &dummy_bytes, &dummy_size);
@@ -150,59 +139,6 @@ TEST_CASE("C-API - Error Handling and Context Diagnostics") {
     BrassStatus s4 = brass_compile_to_shared_lib(nullptr, nullptr, nullptr);
     CHECK_EQ(s4, BRASS_ERR_INVALID_ARGUMENT);
 
-    brass_context_destroy(ctx);
-}
-
-TEST_CASE("C-API - Bronze IL Translation and JIT Execution") {
-    BrassContext ctx = brass_context_create();
-    REQUIRE(ctx != nullptr);
-
-    const char* bronze_source = R"(
-module test_c_api_bronze.js
-
-func calc_poly(%0: f64, %1: f64) -> f64 {
-  b0:
-    %2: f64 = mul %0, %0
-    %3: f64 = mul %1, %1
-    %4: f64 = add %2, %3
-    %5: f64 = const.f64 10.5
-    %6: f64 = add %4, %5
-    ret %6
-}
-)";
-
-    BrassOptions* opts = brass_options_create();
-    brass_options_set_optimize(opts, 1);
-
-    BrassModule mod = nullptr;
-    BrassStatus tr_status = brass_translate_bronze_il(ctx, bronze_source, std::strlen(bronze_source), opts, &mod);
-    CHECK_EQ(tr_status, BRASS_OK);
-    REQUIRE(mod != nullptr);
-
-    brass_options_destroy(opts);
-
-    BrassJitEngine jit = brass_jit_create(ctx);
-    REQUIRE(jit != nullptr);
-
-    BrassCompiledModule cmod = brass_jit_compile_module(jit, mod);
-    REQUIRE(cmod != nullptr);
-
-    void* fn_addr = brass_jit_get_function_address(jit, "calc_poly");
-    REQUIRE(fn_addr != nullptr);
-
-    using PolyFn = double (*)(double, double);
-    auto poly_fn = reinterpret_cast<PolyFn>(fn_addr);
-
-    // 3^2 + 4^2 + 10.5 = 9 + 16 + 10.5 = 35.5
-    double val1 = poly_fn(3.0, 4.0);
-    CHECK(std::abs(val1 - 35.5) < 1e-9);
-
-    // 2^2 + 5^2 + 10.5 = 4 + 25 + 10.5 = 39.5
-    double val2 = poly_fn(2.0, 5.0);
-    CHECK(std::abs(val2 - 39.5) < 1e-9);
-
-    brass_jit_destroy(jit);
-    brass_module_destroy(mod);
     brass_context_destroy(ctx);
 }
 

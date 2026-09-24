@@ -11,9 +11,8 @@ namespace brass::target {
 // never guessed and an unresolved reference is never left pointing at zero.
 //
 // `library` is spelled the way the OS loader wants it: a DLL file name on
-// Windows (`bronze_runtime_shared.dll`), a soname on ELF
-// (`libbronze_runtime_shared.so`), an install name on Mach-O
-// (`@rpath/libbronze_runtime_shared.dylib`).
+// Windows (`host_runtime.dll`), a soname on ELF (`libhost_runtime.so`),
+// an install name on Mach-O (`@rpath/libhost_runtime.dylib`).
 struct ImportLibrary {
     std::string library;
     std::vector<std::string> symbols;

@@ -92,7 +92,7 @@ void FunctionDebugTable::add_line_entry(uint32_t code_offset, DebugLoc loc) {
         } else if (!line_entries_.empty() && line_entries_.back().loc == loc) {
             // A run of instructions on one location needs one entry: every
             // consumer (resolve_offset, the CodeView and DWARF line programs,
-            // bronze's pc tables) maps an offset to the entry at or before
+            // an embedder's pc tables) maps an offset to the entry at or before
             // it, so an entry restating its predecessor's location changes no
             // answer and only grows the table. The emitter records a location
             // per instruction; without this the table was one entry per

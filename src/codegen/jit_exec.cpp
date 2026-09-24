@@ -11,7 +11,6 @@
 #include <brass/runtime/coroutine.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/parallel_runtime.hpp>
-#include "../il_translator/il_runtime.hpp"
 #include <algorithm>
 #include <mutex>
 #include <vector>
@@ -43,88 +42,53 @@ static void* brass_exit_stub(uint32_t, const uint64_t*) {
     return nullptr;
 }
 
+// brass's own runtime entry points, which every engine resolves without the
+// embedder's help: GC, deoptimization, patching, exceptions, coroutines and
+// the parallel runtime. A host's helpers are the host's to register.
+static void register_brass_runtime_symbols(JitExecutionEngine& e) {
+    e.register_external_symbol("@exit_stub", reinterpret_cast<void*>(&brass_exit_stub));
+    e.register_external_symbol("exit_stub", reinterpret_cast<void*>(&brass_exit_stub));
+    e.register_external_symbol("brass_gc_alloc", reinterpret_cast<void*>(&brass_gc_alloc));
+    e.register_external_symbol("brass_gc_safepoint", reinterpret_cast<void*>(&brass_gc_safepoint));
+    e.register_external_symbol("brass_gc_collect", reinterpret_cast<void*>(&brass_gc_collect));
+    e.register_external_symbol("brass_runtime_gc_safepoint", reinterpret_cast<void*>(&brass_gc_safepoint));
+    e.register_external_symbol("brass_deopt_exit", reinterpret_cast<void*>(&brass_deopt_exit));
+    e.register_external_symbol("brass_deopt_exit_record", reinterpret_cast<void*>(&brass_deopt_exit_record));
+    e.register_external_symbol("brass_get_thread_deopt_slots", reinterpret_cast<void*>(&brass_get_thread_deopt_slots));
+    e.register_external_symbol("brass_get_thread_deopt_frame", reinterpret_cast<void*>(&brass_get_thread_deopt_frame));
+    e.register_external_symbol("brass_set_thread_deopt_frame", reinterpret_cast<void*>(&brass_set_thread_deopt_frame));
+    e.register_external_symbol("brass_patch_const32", reinterpret_cast<void*>(&brass_patch_const32));
+    e.register_external_symbol("brass_patch_const64", reinterpret_cast<void*>(&brass_patch_const64));
+    e.register_external_symbol("brass_patch_call", reinterpret_cast<void*>(&brass_patch_call));
+    e.register_external_symbol("brass_throw", reinterpret_cast<void*>(&runtime::brass_throw));
+    e.register_external_symbol("brass_rethrow", reinterpret_cast<void*>(&runtime::brass_rethrow));
+#if defined(_WIN32)
+    e.register_external_symbol("brass_seh_personality", reinterpret_cast<void*>(&runtime::brass_seh_personality));
+#endif
+    e.register_external_symbol("brass_coro_create", reinterpret_cast<void*>(&brass_coro_create));
+    e.register_external_symbol("brass_coro_resume", reinterpret_cast<void*>(&brass_coro_resume));
+    e.register_external_symbol("brass_coro_is_done", reinterpret_cast<void*>(&brass_coro_is_done));
+    e.register_external_symbol("brass_coro_destroy", reinterpret_cast<void*>(&brass_coro_destroy));
+    e.register_external_symbol("brass_gc_write_barrier", reinterpret_cast<void*>(&brass_default_gc_write_barrier));
+    e.register_external_symbol("brass_gc_card_table_base", reinterpret_cast<void*>(&brass_gc_card_table_base));
+    e.register_external_symbol("brass_gc_heap_base", reinterpret_cast<void*>(&brass_gc_heap_base));
+    e.register_external_symbol("brass_parallel_for", reinterpret_cast<void*>(&brass_parallel_for));
+    e.register_external_symbol("brass_set_parallel_workers", reinterpret_cast<void*>(&brass_set_parallel_workers));
+    e.register_external_symbol("brass_get_parallel_workers", reinterpret_cast<void*>(&brass_get_parallel_workers));
+    e.register_external_symbol("brass_parallel_reduce_i64", reinterpret_cast<void*>(&brass_parallel_reduce_i64));
+    e.register_external_symbol("brass_parallel_reduce_f64", reinterpret_cast<void*>(&brass_parallel_reduce_f64));
+    e.register_external_symbol("brass_parallel_alloc_context", reinterpret_cast<void*>(&brass_parallel_alloc_context));
+    e.register_external_symbol("brass_parallel_free_context", reinterpret_cast<void*>(&brass_parallel_free_context));
+}
+
 JitExecutionEngine::JitExecutionEngine(const Target& target)
     : target_(target) {
-    register_external_symbol("@exit_stub", reinterpret_cast<void*>(&brass_exit_stub));
-    register_external_symbol("exit_stub", reinterpret_cast<void*>(&brass_exit_stub));
-    register_external_symbol("brass_gc_alloc", reinterpret_cast<void*>(&brass_gc_alloc));
-    register_external_symbol("brass_gc_safepoint", reinterpret_cast<void*>(&brass_gc_safepoint));
-    register_external_symbol("brass_gc_collect", reinterpret_cast<void*>(&brass_gc_collect));
-    register_external_symbol("brass_runtime_gc_safepoint", reinterpret_cast<void*>(&brass_gc_safepoint));
-    register_external_symbol("brass_deopt_exit", reinterpret_cast<void*>(&brass_deopt_exit));
-    register_external_symbol("brass_deopt_exit_record", reinterpret_cast<void*>(&brass_deopt_exit_record));
-    register_external_symbol("brass_get_thread_deopt_slots", reinterpret_cast<void*>(&brass_get_thread_deopt_slots));
-    register_external_symbol("brass_get_thread_deopt_frame", reinterpret_cast<void*>(&brass_get_thread_deopt_frame));
-    register_external_symbol("brass_set_thread_deopt_frame", reinterpret_cast<void*>(&brass_set_thread_deopt_frame));
-    register_external_symbol("brass_patch_const32", reinterpret_cast<void*>(&brass_patch_const32));
-    register_external_symbol("brass_patch_const64", reinterpret_cast<void*>(&brass_patch_const64));
-    register_external_symbol("brass_patch_call", reinterpret_cast<void*>(&brass_patch_call));
-    register_external_symbol("brass_throw", reinterpret_cast<void*>(&runtime::brass_throw));
-    register_external_symbol("brass_rethrow", reinterpret_cast<void*>(&runtime::brass_rethrow));
-#if defined(_WIN32)
-    register_external_symbol("brass_seh_personality", reinterpret_cast<void*>(&runtime::brass_seh_personality));
-#endif
-    register_external_symbol("brass_coro_create", reinterpret_cast<void*>(&brass_coro_create));
-    register_external_symbol("brass_coro_resume", reinterpret_cast<void*>(&brass_coro_resume));
-    register_external_symbol("brass_coro_is_done", reinterpret_cast<void*>(&brass_coro_is_done));
-    register_external_symbol("brass_coro_destroy", reinterpret_cast<void*>(&brass_coro_destroy));
-    register_external_symbol("bronze_iter_open", reinterpret_cast<void*>(&runtime::bronze_iter_open));
-    register_external_symbol("bronze_iter_step", reinterpret_cast<void*>(&runtime::bronze_iter_step));
-    register_external_symbol("bronze_create_async_machine", reinterpret_cast<void*>(&runtime::bronze_create_async_machine));
-    register_external_symbol("bronze_async_start", reinterpret_cast<void*>(&runtime::bronze_async_start));
-    register_external_symbol("bronze_async_await", reinterpret_cast<void*>(&runtime::bronze_async_await));
-    register_external_symbol("brass_gc_write_barrier", reinterpret_cast<void*>(&brass_default_gc_write_barrier));
-    register_external_symbol("brass_gc_card_table_base", reinterpret_cast<void*>(&brass_gc_card_table_base));
-    register_external_symbol("brass_gc_heap_base", reinterpret_cast<void*>(&brass_gc_heap_base));
-    register_external_symbol("brass_parallel_for", reinterpret_cast<void*>(&brass_parallel_for));
-    register_external_symbol("brass_set_parallel_workers", reinterpret_cast<void*>(&brass_set_parallel_workers));
-    register_external_symbol("brass_get_parallel_workers", reinterpret_cast<void*>(&brass_get_parallel_workers));
-    register_external_symbol("brass_parallel_reduce_i64", reinterpret_cast<void*>(&brass_parallel_reduce_i64));
-    register_external_symbol("brass_parallel_reduce_f64", reinterpret_cast<void*>(&brass_parallel_reduce_f64));
-    register_external_symbol("brass_parallel_alloc_context", reinterpret_cast<void*>(&brass_parallel_alloc_context));
-    register_external_symbol("brass_parallel_free_context", reinterpret_cast<void*>(&brass_parallel_free_context));
+    register_brass_runtime_symbols(*this);
 }
 
 JitExecutionEngine::JitExecutionEngine()
     : target_(Target::host()) {
-    register_external_symbol("@exit_stub", reinterpret_cast<void*>(&brass_exit_stub));
-    register_external_symbol("exit_stub", reinterpret_cast<void*>(&brass_exit_stub));
-    register_external_symbol("brass_gc_alloc", reinterpret_cast<void*>(&brass_gc_alloc));
-    register_external_symbol("brass_gc_safepoint", reinterpret_cast<void*>(&brass_gc_safepoint));
-    register_external_symbol("brass_gc_collect", reinterpret_cast<void*>(&brass_gc_collect));
-    register_external_symbol("brass_runtime_gc_safepoint", reinterpret_cast<void*>(&brass_gc_safepoint));
-    register_external_symbol("brass_deopt_exit", reinterpret_cast<void*>(&brass_deopt_exit));
-    register_external_symbol("brass_deopt_exit_record", reinterpret_cast<void*>(&brass_deopt_exit_record));
-    register_external_symbol("brass_get_thread_deopt_slots", reinterpret_cast<void*>(&brass_get_thread_deopt_slots));
-    register_external_symbol("brass_get_thread_deopt_frame", reinterpret_cast<void*>(&brass_get_thread_deopt_frame));
-    register_external_symbol("brass_set_thread_deopt_frame", reinterpret_cast<void*>(&brass_set_thread_deopt_frame));
-    register_external_symbol("brass_patch_const32", reinterpret_cast<void*>(&brass_patch_const32));
-    register_external_symbol("brass_patch_const64", reinterpret_cast<void*>(&brass_patch_const64));
-    register_external_symbol("brass_patch_call", reinterpret_cast<void*>(&brass_patch_call));
-    register_external_symbol("brass_throw", reinterpret_cast<void*>(&runtime::brass_throw));
-    register_external_symbol("brass_rethrow", reinterpret_cast<void*>(&runtime::brass_rethrow));
-#if defined(_WIN32)
-    register_external_symbol("brass_seh_personality", reinterpret_cast<void*>(&runtime::brass_seh_personality));
-#endif
-    register_external_symbol("brass_coro_create", reinterpret_cast<void*>(&brass_coro_create));
-    register_external_symbol("brass_coro_resume", reinterpret_cast<void*>(&brass_coro_resume));
-    register_external_symbol("brass_coro_is_done", reinterpret_cast<void*>(&brass_coro_is_done));
-    register_external_symbol("brass_coro_destroy", reinterpret_cast<void*>(&brass_coro_destroy));
-    register_external_symbol("bronze_iter_open", reinterpret_cast<void*>(&runtime::bronze_iter_open));
-    register_external_symbol("bronze_iter_step", reinterpret_cast<void*>(&runtime::bronze_iter_step));
-    register_external_symbol("bronze_create_async_machine", reinterpret_cast<void*>(&runtime::bronze_create_async_machine));
-    register_external_symbol("bronze_async_start", reinterpret_cast<void*>(&runtime::bronze_async_start));
-    register_external_symbol("bronze_async_await", reinterpret_cast<void*>(&runtime::bronze_async_await));
-    register_external_symbol("brass_gc_write_barrier", reinterpret_cast<void*>(&brass_default_gc_write_barrier));
-    register_external_symbol("brass_gc_card_table_base", reinterpret_cast<void*>(&brass_gc_card_table_base));
-    register_external_symbol("brass_gc_heap_base", reinterpret_cast<void*>(&brass_gc_heap_base));
-    register_external_symbol("brass_parallel_for", reinterpret_cast<void*>(&brass_parallel_for));
-    register_external_symbol("brass_set_parallel_workers", reinterpret_cast<void*>(&brass_set_parallel_workers));
-    register_external_symbol("brass_get_parallel_workers", reinterpret_cast<void*>(&brass_get_parallel_workers));
-    register_external_symbol("brass_parallel_reduce_i64", reinterpret_cast<void*>(&brass_parallel_reduce_i64));
-    register_external_symbol("brass_parallel_reduce_f64", reinterpret_cast<void*>(&brass_parallel_reduce_f64));
-    register_external_symbol("brass_parallel_alloc_context", reinterpret_cast<void*>(&brass_parallel_alloc_context));
-    register_external_symbol("brass_parallel_free_context", reinterpret_cast<void*>(&brass_parallel_free_context));
+    register_brass_runtime_symbols(*this);
 }
 
 JitExecutionEngine::~JitExecutionEngine() {
@@ -133,9 +97,6 @@ JitExecutionEngine::~JitExecutionEngine() {
     regs_.release();
     if (brass_get_active_stack_maps() == &stack_maps_) {
         brass_set_active_stack_maps(nullptr);
-    }
-    if (il::get_active_jit() == this) {
-        il::unregister_all_runtime_symbols();
     }
 }
 

@@ -87,7 +87,6 @@ jobs:
 
           # CLI tools
           cp "build/tools/brass-opt$EXE" "dist/$PKG/bin/"
-          cp "build/tools/brass-il$EXE" "dist/$PKG/bin/"
           cp "build/tools/brass-fuzz$EXE" "dist/$PKG/bin/"
 
           # Static and shared libraries
@@ -116,7 +115,6 @@ jobs:
           cd "$RUNNER_TEMP"
           if [ "$RUNNER_OS" = "Windows" ]; then EXE=".exe"; else EXE=""; fi
           "$PKGDIR/bin/brass-opt$EXE" --help
-          "$PKGDIR/bin/brass-il$EXE" --help
           "$PKGDIR/bin/brass-fuzz$EXE" --help
 
       - name: Zip
@@ -156,7 +154,7 @@ jobs:
           gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
           NOTES="Automated nightly build from \`${GITHUB_SHA::7}\` on $(date -u +%Y-%m-%d), verified against the unit and differential correctness suite (performance targets are not checked).
 
-          Each package contains the Brass compiler CLI tools (\`brass-opt\`, \`brass-il\`, \`brass-fuzz\`), the static and shared libraries (\`libbrass\`), and the C-API / C++ SDK headers under \`include/\`."
+          Each package contains the Brass compiler CLI tools (\`brass-opt\`, \`brass-fuzz\`), the static and shared libraries (\`libbrass\`), and the C-API / C++ SDK headers under \`include/\`."
           gh release create nightly \
             --target "$GITHUB_SHA" \
             --title "Nightly ($(date -u +%Y-%m-%d))" \

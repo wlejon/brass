@@ -2,7 +2,6 @@
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/gc/generational_gc.hpp>
 #include <brass/embedding/host_gc.hpp>
-#include <brass/runtime/object.hpp>
 #include <brass/embedding/nanbox.hpp>
 #include <algorithm>
 #include <cstdlib>
@@ -15,7 +14,6 @@ namespace {
 
 static MicrotaskQueue g_microtask_queue;
 static std::vector<BrassCoroFrame*> g_active_coro_frames;
-static ShapeRegistry g_iter_shape_registry;
 
 } // namespace
 
@@ -127,12 +125,6 @@ void append_active_coro_roots(std::vector<uintptr_t*>& roots) {
     }
 }
 
-static void* (*g_coro_symbol_resolver)(const char*) = nullptr;
-
-void set_coro_symbol_resolver(void* (*resolver)(const char*)) {
-    g_coro_symbol_resolver = resolver;
-}
-
 } // namespace brass::runtime
 
 extern "C" {
@@ -225,69 +217,3 @@ void brass_coro_destroy(uintptr_t coro_frame) {
 }
 
 } // extern "C"
-
-namespace brass::runtime {
-
-uint64_t bronze_iter_open(uint64_t gen_or_obj) {
-    // Returns the iterator handle (coroutine frame or generator object)
-    return gen_or_obj;
-}
-
-uint64_t bronze_iter_step(uint64_t iter_handle) {
-    if (!iter_handle) return HostValue::undefined_val().raw();
-
-    uint64_t yielded = brass_coro_resume(iter_handle, 0);
-    uint32_t done = brass_coro_is_done(iter_handle);
-
-    DynamicObject* obj = DynamicObject::create();
-    if (!obj) {
-        return yielded;
-    }
-
-    obj->set_property("value", HostValue(yielded), g_iter_shape_registry);
-    obj->set_property("done", HostValue::from_bool(done != 0), g_iter_shape_registry);
-
-    return HostValue::from_gcref(reinterpret_cast<uintptr_t>(obj)).raw();
-}
-
-uint64_t bronze_create_async_machine(void* fn_ptr, uint32_t slot_count, uint64_t pointer_mask, uint64_t env) {
-    void* actual_fn = fn_ptr;
-    if (g_coro_symbol_resolver && fn_ptr) {
-        void* res = g_coro_symbol_resolver(reinterpret_cast<const char*>(fn_ptr));
-        if (res) actual_fn = res;
-    }
-    uintptr_t frame_addr = brass_coro_create(actual_fn, std::max(slot_count, 1U), pointer_mask);
-    if (!frame_addr) return 0;
-
-    BrassCoroFrame* frame = reinterpret_cast<BrassCoroFrame*>(frame_addr);
-    frame->slots[0] = env;
-
-    return static_cast<uint64_t>(frame_addr);
-}
-
-uint64_t bronze_async_start(uint64_t coro_frame, uint64_t arg) {
-    if (!coro_frame) return 0;
-    uint64_t res = brass_coro_resume(coro_frame, arg);
-    get_global_microtask_queue().run_all();
-
-    BrassCoroFrame* frame = reinterpret_cast<BrassCoroFrame*>(coro_frame);
-    if (frame) {
-        if (frame->is_done && frame->yielded_val != 0) {
-            return frame->yielded_val;
-        }
-        if (frame->yielded_val == 0 && res != 0) {
-            frame->yielded_val = res;
-            frame->is_done = 1;
-        }
-    }
-    return res;
-}
-
-uint64_t bronze_async_await(uint64_t coro_frame, uint64_t val) {
-    if (!coro_frame) return val;
-    BrassCoroFrame* frame = reinterpret_cast<BrassCoroFrame*>(coro_frame);
-    get_global_microtask_queue().enqueue_coro(frame, val);
-    return val;
-}
-
-} // namespace brass::runtime

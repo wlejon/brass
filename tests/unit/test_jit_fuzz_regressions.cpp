@@ -36,7 +36,7 @@ bool all_tiers_agree(const std::string& source, const std::vector<ArgPair>& arg_
         return false;
     }
     DiffFuzzerOptions opts;
-    opts.pipeline = FuzzPipeline::Bronze;
+    opts.pipeline = FuzzPipeline::Production;
     opts.save_reproducers = false;
     opts.bisect = false;
     opts.timeout_ms = 3000;

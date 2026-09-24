@@ -92,9 +92,9 @@ void EmitContext::emit_mov_instruction(const LirInst& inst) {
                 // a `movabs` would be a relocation inside .text, which
                 // dyld refuses and ld.so takes only under DT_TEXTREL. The
                 // GOT load is position independent for every symbol;
-                // whether the symbol is defined in this module (bronze
-                // defines its data symbols after brass has emitted the
-                // code that names them) is settled where the object is
+                // whether the symbol is defined in this module (an
+                // embedder may define its data symbols after brass has
+                // emitted the code that names them) is settled where the object is
                 // placed, which relaxes the defined ones to a `lea`.
                 enc_.mov_got(dst_gpr, inst.uses[0].symbol_name);
             } else if (inst.is_patchable) {

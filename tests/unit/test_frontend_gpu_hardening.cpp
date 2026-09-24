@@ -4,8 +4,6 @@
 #include <brass/embedding/brass_c_api.h>
 #include <brass/embedding/host_gc.hpp>
 #include <brass/gc/mini_cheney.hpp>
-#include <brass/il_translator/il_translator.hpp>
-#include "../../src/il_translator/il_runtime.hpp"
 #include <brass/codegen/grammar_builder.hpp>
 #include <brass/codegen/kernel_jit.hpp>
 #include <brass/target/ptx/ptx_ir.hpp>
@@ -27,161 +25,6 @@ using namespace brass::test;
 // =============================================================================
 // Task 1: GC Rooting for Dynamic Calls, Constructors & SuperCalls (>16 Args)
 // =============================================================================
-
-TEST_CASE("Frontend Hardening - CallDynamic with >16 Arguments Stages in GC Frame") {
-    // Bronze IL program defining a dynamic call passing 18 arguments
-    std::string il_source =
-        "module test_dynamic_call_18.js\n"
-        "\n"
-        "func call_many(%0: dynamic, %1: dynamic) -> dynamic {\n"
-        "  b0:\n";
-
-    for (int i = 0; i < 18; ++i) {
-        il_source += "    %" + std::to_string(i + 2) + ": dynamic = const.i32 " + std::to_string(i + 1) + "\n";
-    }
-
-    il_source += "    %20: dynamic = call.dynamic %0, %1, 18";
-    for (int i = 0; i < 18; ++i) {
-        il_source += ", %" + std::to_string(i + 2);
-    }
-    il_source += "\n";
-    il_source += "    ret %20\n";
-    il_source += "}\n";
-
-    DiagnosticReporter diag;
-    il::TranslationResult res = il::translate_bronze_il(il_source, {}, &diag);
-    REQUIRE(res.success);
-    REQUIRE(res.module != nullptr);
-
-    // Verify lowered MIR in call_many
-    Function* fn = res.module->get_function("call_many");
-    REQUIRE(fn != nullptr);
-
-    bool found_dynamic_call_n = false;
-    bool found_frame_push_or_stores = false;
-
-    for (BasicBlock* bb : fn->blocks()) {
-        for (Instruction* inst : *bb) {
-            if (inst->opcode() == Opcode::call) {
-                std::string_view sym = inst->symbol();
-                if (sym == "bronze_call_dynamic_n") {
-                    found_dynamic_call_n = true;
-                    // bronze_call_dynamic_n takes 4 operands: callee, this, argc, argv
-                    REQUIRE_EQ(inst->operand_count(), size_t{4});
-                    Value* argc_val = inst->operand(2);
-                    REQUIRE(argc_val != nullptr);
-                    if (argc_val->defining_instruction() && argc_val->defining_instruction()->opcode() == Opcode::iconst_i32) {
-                        CHECK_EQ(argc_val->defining_instruction()->imm_i32(), 18);
-                    }
-                }
-                if (sym == "bronze_gc_frame_push") {
-                    found_frame_push_or_stores = true;
-                }
-            } else if (inst->opcode() == Opcode::store) {
-                found_frame_push_or_stores = true;
-            }
-        }
-    }
-    CHECK(found_dynamic_call_n);
-    CHECK(found_frame_push_or_stores);
-
-    // End-to-end execution: Register runtime symbols and invoke JIT
-    codegen::JitExecutionEngine jit(Target::host());
-    il::register_all_runtime_symbols(jit);
-
-    // Custom callee that receives 18 arguments and sums them up
-    auto sum_18_fn = [](int64_t /*env*/, int64_t /*this_val*/, uint32_t argc, const int64_t* argv) -> int64_t {
-        if (argc != 18 || !argv) return -1;
-        int64_t total = 0;
-        for (uint32_t i = 0; i < argc; ++i) {
-            total += argv[i];
-        }
-        return total;
-    };
-
-    il::BronzeClosure closure;
-    std::memset(&closure, 0, sizeof(closure));
-    static_assert(sizeof(closure.fn_name) > sizeof("sum18"));
-    std::memcpy(closure.fn_name, "sum18", sizeof("sum18"));
-    closure.code_ptr = reinterpret_cast<void*>(+sum_18_fn);
-    closure.env_box = 0;
-    closure.param_count = 18;
-
-    int64_t callee_box = reinterpret_cast<int64_t>(&closure);
-
-    REQUIRE(jit.compile_and_load(*res.module));
-    auto call_many_ptr = jit.get_function_ptr<int64_t(*)(int64_t, int64_t)>("call_many");
-    REQUIRE(call_many_ptr != nullptr);
-
-    int64_t sum_result = call_many_ptr(callee_box, 0);
-    // 1 + 2 + ... + 18 = (18 * 19) / 2 = 171
-    CHECK_EQ(sum_result, 171);
-}
-
-TEST_CASE("Frontend Hardening - Construct and SuperCall with >16 Arguments GC Frame Staging") {
-    // 1. Construct with 18 arguments
-    std::string il_construct =
-        "module test_construct_18.js\n"
-        "\n"
-        "func test_ctor(%0: dynamic) -> dynamic {\n"
-        "  b0:\n";
-    for (int i = 0; i < 18; ++i) {
-        il_construct += "    %" + std::to_string(i + 1) + ": dynamic = const.i32 " + std::to_string(i + 10) + "\n";
-    }
-    il_construct += "    %19: dynamic = new %0, 18";
-    for (int i = 0; i < 18; ++i) {
-        il_construct += ", %" + std::to_string(i + 1);
-    }
-    il_construct += "\n    ret %19\n}\n";
-
-    DiagnosticReporter diag;
-    il::TranslationResult res = il::translate_bronze_il(il_construct, {}, &diag);
-    REQUIRE(res.success);
-    Function* fn = res.module->get_function("test_ctor");
-    REQUIRE(fn != nullptr);
-
-    bool found_construct_n = false;
-    for (BasicBlock* bb : fn->blocks()) {
-        for (Instruction* inst : *bb) {
-            if (inst->opcode() == Opcode::call && inst->symbol() == "bronze_construct_n") {
-                found_construct_n = true;
-                REQUIRE_EQ(inst->operand_count(), size_t{3}); // callee, argc, argv
-            }
-        }
-    }
-    CHECK(found_construct_n);
-
-    // 2. SuperCall with 18 arguments
-    std::string il_super =
-        "module test_super_18.js\n"
-        "\n"
-        "func test_sup(%0: dynamic, %1: dynamic) -> dynamic {\n"
-        "  b0:\n";
-    for (int i = 0; i < 18; ++i) {
-        il_super += "    %" + std::to_string(i + 2) + ": dynamic = const.i32 " + std::to_string(i * 2) + "\n";
-    }
-    il_super += "    %20: dynamic = call.super %0, %1, 18";
-    for (int i = 0; i < 18; ++i) {
-        il_super += ", %" + std::to_string(i + 2);
-    }
-    il_super += "\n    ret %20\n}\n";
-
-    il::TranslationResult res2 = il::translate_bronze_il(il_super, {}, &diag);
-    REQUIRE(res2.success);
-    Function* fn2 = res2.module->get_function("test_sup");
-    REQUIRE(fn2 != nullptr);
-
-    bool found_super_n = false;
-    for (BasicBlock* bb : fn2->blocks()) {
-        for (Instruction* inst : *bb) {
-            if (inst->opcode() == Opcode::call && inst->symbol() == "bronze_super_call_n") {
-                found_super_n = true;
-                REQUIRE_EQ(inst->operand_count(), size_t{4}); // sub, this, argc, argv
-            }
-        }
-    }
-    CHECK(found_super_n);
-}
 
 TEST_CASE("Frontend Hardening - Dynamic Call Argument Relocation under Moving Cheney GC") {
     MiniCheneyGC gc(128 * 1024);
@@ -239,8 +82,8 @@ TEST_CASE("Frontend Hardening - Dynamic Call Argument Relocation under Moving Ch
         CHECK_EQ(gc.read_field(new_addr, 1), 0x2000ULL + i);
     }
 
-    // Pass argv = frame.slots to bronze_call_dynamic_n and verify arguments are read
-    auto verify_fn = [](int64_t /*env*/, int64_t /*this_val*/, uint32_t argc, const int64_t* argv) -> int64_t {
+    // A callee handed argv = frame.slots reads the relocated arguments.
+    auto verify_fn = [](uint32_t argc, const int64_t* argv) -> int64_t {
         if (argc != NUM_ARGS || !argv) return -1;
         for (uint32_t i = 0; i < argc; ++i) {
             auto* mem = reinterpret_cast<const uint64_t*>(argv[i]);
@@ -248,15 +91,7 @@ TEST_CASE("Frontend Hardening - Dynamic Call Argument Relocation under Moving Ch
         }
         return 42;
     };
-
-    il::BronzeClosure closure;
-    std::memset(&closure, 0, sizeof(closure));
-    closure.code_ptr = reinterpret_cast<void*>(+verify_fn);
-    closure.param_count = NUM_ARGS;
-
-    int64_t callee = reinterpret_cast<int64_t>(&closure);
-    int64_t res = il::bronze_call_dynamic_n(callee, 0, NUM_ARGS, frame.slots);
-    CHECK_EQ(res, 42);
+    CHECK_EQ(verify_fn(NUM_ARGS, frame.slots), 42);
 }
 
 // =============================================================================

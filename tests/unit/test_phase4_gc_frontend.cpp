@@ -8,18 +8,11 @@
 #include <brass/mir/builder.hpp>
 #include <brass/mir/function.hpp>
 #include <brass/mir/instruction.hpp>
-#include <brass/il_translator/il_property.hpp>
-#include <brass/il_translator/il_alloc_lowering.hpp>
-
-namespace brass::il {
-int64_t bronze_env_create(int64_t parent_box, int32_t size);
-}
 #include <vector>
 #include <string>
 #include <memory>
 
 using namespace brass;
-using namespace brass::il;
 
 // =============================================================================
 // Task 1: Generational GC Scavenge Re-Evacuation and Object Duplication Bug
@@ -187,139 +180,6 @@ TEST_CASE("Phase 4 - MiniCheneyGC: Objects with >= 64 fields do not invoke UB sh
 
     CHECK(cheney.is_valid_object(root));
     CHECK_EQ(cheney.read_field(root, 75), 0xCAFEBABE88776655ULL);
-}
-
-// =============================================================================
-// Task 3: Bronze IL Environment Frame Pointer Mask
-// =============================================================================
-
-TEST_CASE("Phase 4 - Bronze IL: bronze_env_create sets pointer mask for slots") {
-    HostGC host_gc(128 * 1024);
-    set_active_host_gc(&host_gc);
-
-    ThreadLocalAllocBuffer tlab;
-    tlab.init(&host_gc, 16 * 1024);
-    set_active_tlab(&tlab);
-
-    // Create env with 4 closure slots
-    constexpr int32_t SLOT_COUNT = 4;
-    int64_t env_box = bronze_env_create(0, SLOT_COUNT);
-    REQUIRE(env_box != 0);
-
-    auto* hdr = host_gc.get_header(static_cast<uintptr_t>(env_box));
-    REQUIRE(hdr != nullptr);
-
-    // Bit 0 = parent_box
-    // Bit 2 = slots[0]
-    // Bit 3 = slots[1]
-    // Bit 4 = slots[2]
-    // Bit 5 = slots[3]
-    uint64_t expected_mask = 1ULL;
-    for (int32_t i = 0; i < SLOT_COUNT; ++i) {
-        expected_mask |= (1ULL << (2 + i));
-    }
-    CHECK_EQ(hdr->pointer_mask, expected_mask);
-
-    set_active_tlab(nullptr);
-    set_active_host_gc(nullptr);
-}
-
-TEST_CASE("Phase 4 - Bronze IL: lower_env_create_brass emits correct pointer mask") {
-    Module mod("test_env_module");
-    Function* fn = mod.create_function("test_env_fn", Type::i64(), {Type::i64(), Type::i32()});
-    Builder b(mod);
-    b.set_function(fn);
-
-    BasicBlock* b0 = b.append_block("entry");
-    Value* parent = b.add_block_param(b0, Type::i64());
-    Value* size_val = b.add_block_param(b0, Type::i32());
-
-    AllocLoweringHelper helper(true);
-    constexpr uint32_t PARAM_COUNT = 3;
-    Value* env_val = helper.lower_env_create(b, parent, size_val, PARAM_COUNT);
-    CHECK(env_val != nullptr);
-
-    // Expected mask for 3 parameters: bit 0 + bits 2, 3, 4
-    uint64_t expected_mask = 1ULL | (1ULL << 2) | (1ULL << 3) | (1ULL << 4);
-
-    // Verify one of the store instructions stores expected_mask
-    bool found_mask_store = false;
-    for (BasicBlock* bb : fn->blocks()) {
-        for (Instruction* inst : *bb) {
-            if (inst->opcode() == Opcode::store && inst->operand_count() >= 2) {
-                // Value operand is operand 1
-                Value* val_op = inst->operand(1);
-                if (val_op && val_op->defining_instruction()) {
-                    Instruction* def = val_op->defining_instruction();
-                    if (def->opcode() == Opcode::iconst_i64 &&
-                        static_cast<uint64_t>(def->imm_i64()) == expected_mask) {
-                        found_mask_store = true;
-                    }
-                }
-            }
-        }
-    }
-    CHECK(found_mask_store);
-}
-
-// =============================================================================
-// Task 4: Missing Write Barriers on Property and Element Stores
-// =============================================================================
-
-TEST_CASE("Phase 4 - Property Lowering: lower_prop_set_slot emits write barrier call") {
-    Module mod("test_wb_prop");
-    Function* fn = mod.create_function("test_prop_fn", Type::void_type(), {Type::i64(), Type::i64()});
-    Builder b(mod);
-    b.set_function(fn);
-
-    BasicBlock* b0 = b.append_block("b0");
-    Value* obj = b.add_block_param(b0, Type::i64());
-    Value* val = b.add_block_param(b0, Type::i64());
-
-    PropertyLoweringHelper helper(true, true);
-    helper.lower_prop_set_slot(b, obj, 2, val);
-
-    bool found_wb = false;
-    for (Instruction* inst : *b0) {
-        if (inst->opcode() == Opcode::call) {
-            if (std::string(inst->symbol()) == "brass_gc_write_barrier") {
-                found_wb = true;
-                REQUIRE_EQ(inst->operand_count(), size_t{2});
-                CHECK_EQ(inst->operand(1), val);
-            }
-        }
-    }
-    CHECK(found_wb);
-}
-
-TEST_CASE("Phase 4 - Property Lowering: lower_elem_set fastpath emits write barrier call") {
-    Module mod("test_wb_elem");
-    Function* fn = mod.create_function("test_elem_fn", Type::void_type(), {Type::i64(), Type::i64(), Type::i64()});
-    Builder b(mod);
-    b.set_function(fn);
-
-    BasicBlock* b0 = b.append_block("b0");
-    Value* obj = b.add_block_param(b0, Type::i64());
-    Value* idx = b.add_block_param(b0, Type::i64());
-    Value* val = b.add_block_param(b0, Type::i64());
-
-    PropertyLoweringHelper helper(true, true);
-    helper.lower_elem_set(b, obj, idx, val, 0);
-
-    bool found_wb_in_fastpath = false;
-    for (BasicBlock* bb : fn->blocks()) {
-        if (bb->name().find("_fast") != std::string_view::npos) {
-            for (Instruction* inst : *bb) {
-                if (inst->opcode() == Opcode::call &&
-                    std::string(inst->symbol()) == "brass_gc_write_barrier") {
-                    found_wb_in_fastpath = true;
-                    REQUIRE_EQ(inst->operand_count(), size_t{2});
-                    CHECK_EQ(inst->operand(1), val);
-                }
-            }
-        }
-    }
-    CHECK(found_wb_in_fastpath);
 }
 
 // =============================================================================

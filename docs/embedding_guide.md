@@ -6,7 +6,6 @@ The public C-ABI (`<brass/brass_c_api.h>`) and embedder SDK (`libbrass`) allow C
 - In-memory JIT code generation and dynamic function pointer execution.
 - SSA IR construction with basic blocks, instructions, and block parameters.
 - External host symbol registration and interop.
-- Bronze textual IL translation and execution.
 - Relocatable object file emission in memory (`COFF`, `ELF64`, `Mach-O`).
 - Standalone shared library linking (`.dll`, `.so`, `.dylib`) without external linkers.
 
@@ -192,58 +191,7 @@ void run_with_host_symbol(void) {
 
 ---
 
-## 4. Bronze IL Translation Bridge
-
-Embedders targeting high-level dynamic languages can pass textual Bronze IL directly to `brass_translate_bronze_il` for automated lowering, SSA construction, and optimization.
-
-```c
-#include <brass/brass_c_api.h>
-#include <stdio.h>
-#include <string.h>
-
-void compile_bronze_il_snippet(void) {
-    BrassContext ctx = brass_context_create();
-
-    const char* il_text =
-        "module math_ops.js\n"
-        "func hypot_sq(%0: f64, %1: f64) -> f64 {\n"
-        "  b0:\n"
-        "    %2: f64 = mul %0, %0\n"
-        "    %3: f64 = mul %1, %1\n"
-        "    %4: f64 = add %2, %3\n"
-        "    ret %4\n"
-        "}\n";
-
-    BrassOptions* opts = brass_options_create();
-    brass_options_set_optimize(opts, 1);
-
-    BrassModule mod = NULL;
-    BrassStatus s = brass_translate_bronze_il(ctx, il_text, strlen(il_text), opts, &mod);
-    if (s != BRASS_OK) {
-        fprintf(stderr, "Translation failed: %s\n", brass_context_get_last_error(ctx));
-        brass_options_destroy(opts);
-        brass_context_destroy(ctx);
-        return;
-    }
-    brass_options_destroy(opts);
-
-    // Compile and execute
-    BrassJitEngine jit = brass_jit_create(ctx);
-    brass_jit_compile_module(jit, mod);
-
-    typedef double (*HypotFn)(double, double);
-    HypotFn fn = (HypotFn)brass_jit_get_function_address(jit, "hypot_sq");
-    printf("hypot_sq(3.0, 4.0) = %f\n", fn(3.0, 4.0)); // 25.0
-
-    brass_jit_destroy(jit);
-    brass_module_destroy(mod);
-    brass_context_destroy(ctx);
-}
-```
-
----
-
-## 5. In-Memory AOT Object File Emission
+## 4. In-Memory AOT Object File Emission
 
 Brass can compile modules ahead-of-time directly into memory buffers without writing temporary files to disk.
 
@@ -274,7 +222,7 @@ void emit_relocatable_object(BrassModule mod) {
 
 ---
 
-## 6. Standalone AOT Shared Library Linking
+## 5. Standalone AOT Shared Library Linking
 
 Brass embeds standalone PE DLL, ELF `.so`, and Mach-O `.dylib` linkers that link emitted objects directly into shared libraries without requiring `link.exe`, `ld`, or `lld`.
 
@@ -299,7 +247,7 @@ void compile_to_dll(BrassModule mod, const char* out_path) {
 
 ---
 
-## 7. Error Handling Model
+## 6. Error Handling Model
 
 Every C-ABI boundary function is guarded against null pointers, invalid arguments, and C++ exceptions:
 1. Functions returning `BrassStatus` return `BRASS_OK` (0) on success, or negative `BRASS_ERR_*` codes on failure.
@@ -309,7 +257,7 @@ Every C-ABI boundary function is guarded against null pointers, invalid argument
 
 ---
 
-## 8. CMake Integration
+## 7. CMake Integration
 
 To integrate `libbrass` into a CMake project:
 

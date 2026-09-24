@@ -5,7 +5,6 @@
 #include <brass/runtime/tiering.hpp>
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
-#include <brass/il_translator/il_property.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/module.hpp>
 #include <brass/mir/function.hpp>
@@ -18,7 +17,6 @@
 
 using namespace brass;
 using namespace brass::runtime;
-using namespace brass::il;
 
 namespace {
 
@@ -404,30 +402,4 @@ TEST_CASE("GC Concurrency Safety - Tier 2 stack map registration in MultiTierPip
     CHECK(brass_get_active_stack_maps() == &pipeline.active_stack_maps());
 
     pipeline.shutdown();
-}
-
-// ============================================================================
-// 6. Object Model Harmonization in Property Lowering Helper
-// ============================================================================
-
-TEST_CASE("GC Concurrency Safety - Property Lowering Helper handles Bronze and Host object models") {
-    Module mod("test_prop_lowering_harmonization");
-    Function* fn = mod.create_function("prop_fn", Type::i64(), {Type::i64(), Type::i64()});
-    Builder b(mod);
-    b.set_function(fn);
-
-    BasicBlock* b0 = b.append_block("entry");
-    Value* obj = b.add_block_param(b0, Type::i64());
-    Value* val = b.add_block_param(b0, Type::i64());
-
-    // PIC helper with inlining enabled
-    PropertyLoweringHelper helper(true, true);
-    helper.lower_prop_set(b, obj, "field1", 1, val, 0, 0, 201);
-    Value* get_res = helper.lower_prop_get(b, obj, "field1", 1, 202);
-    REQUIRE(get_res != nullptr);
-
-    b.build_ret(get_res);
-
-    // Check that instructions were emitted and valid
-    CHECK(!b0->is_empty());
 }

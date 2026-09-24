@@ -9,8 +9,8 @@ namespace brass {
 struct GvnPreStats;
 struct RangeAnalysisStats;
 
-// The production module optimization sequence (the one the Bronze IL
-// translator runs): SROA -> optional IPO (speculative devirtualization,
+// The production module optimization sequence (the one a front end runs on
+// the modules it ships): SROA -> optional IPO (speculative devirtualization,
 // inlining, SROA again) -> GVN -> GVN-PRE -> SCCP ->
 // CFG simplify -> loop unswitch -> jump threading -> CFG simplify -> BCE ->
 // loop pipeline -> write-barrier elimination. Keeping it in one place lets
@@ -43,6 +43,13 @@ struct PassPipelineOptions {
 // inlining); BCE runs twice by design, "bce" before the loop stage and
 // "bce 2" inside it.
 Pipeline pass_pipeline(const PassPipelineOptions& options);
+
+// The fully optimizing configuration of the sequence, for the host CPU:
+// every function and loop transform a shipping front end turns on, with the
+// vector width and FMA the machine running it supports. It leaves inlining,
+// parallel loops and every stats collector off. Tools (the differential
+// fuzzer) use it to exercise what production code goes through.
+PassPipelineOptions production_pass_pipeline_options();
 
 // Runs pass_pipeline(options) on `mod`. Returns false only when a hook
 // stopped it.

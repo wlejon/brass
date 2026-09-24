@@ -9,7 +9,6 @@
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/core/string_pool.hpp>
-#include <brass/il_translator/il_translator.hpp>
 #include <brass/pgo/instrument.hpp>
 #include <cstring>
 #include <cmath>

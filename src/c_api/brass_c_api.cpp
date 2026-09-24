@@ -337,57 +337,6 @@ BrassStatus brass_function_set_param_noalias(BrassFunction fn, size_t index, int
     return BRASS_OK;
 }
 
-/* Bronze IL Translation Bridge */
-BrassStatus brass_translate_bronze_il(BrassContext ctx, const char* il_text, size_t len, const BrassOptions* opts, BrassModule* out_mod) {
-    if (!il_text || !out_mod) {
-        set_ctx_error(ctx, "Invalid null arguments to brass_translate_bronze_il");
-        return BRASS_ERR_INVALID_ARGUMENT;
-    }
-
-    try {
-        std::string_view text = (len == 0 || len == static_cast<size_t>(-1)) ? std::string_view(il_text) : std::string_view(il_text, len);
-        il::TranslatorOptions trans_opts;
-        if (opts) {
-            trans_opts.enable_optimizations = (opts->enable_optimizations != 0);
-            trans_opts.allow_fp_reassociation = (opts->allow_fp_reassociation != 0);
-            if (opts->vector_width > 0) {
-                trans_opts.vector_width = static_cast<uint32_t>(opts->vector_width);
-            }
-        }
-
-        DiagnosticReporter diag;
-        il::TranslationResult res = il::translate_bronze_il(text, trans_opts, &diag);
-        if (!res.success || !res.module) {
-            std::string err = res.error_message;
-            if (err.empty()) {
-                for (const auto& d : diag.diagnostics()) {
-                    if (!err.empty()) err += "\n";
-                    err += d.message;
-                }
-            }
-            if (err.empty()) err = "Bronze IL translation syntax/lowering error";
-            set_ctx_error(ctx, err);
-            *out_mod = nullptr;
-            return BRASS_ERR_TRANSLATION_FAILED;
-        }
-
-        auto* mod = new BrassModule_T();
-        mod->ctx = ctx;
-        mod->mod = std::move(res.module);
-        ctx_retain(ctx);
-        *out_mod = mod;
-        return BRASS_OK;
-    } catch (const std::exception& e) {
-        set_ctx_exception(ctx, "brass_translate_bronze_il", e);
-        *out_mod = nullptr;
-        return BRASS_ERR_TRANSLATION_FAILED;
-    } catch (...) {
-        set_ctx_error(ctx, "Unknown exception in brass_translate_bronze_il");
-        *out_mod = nullptr;
-        return BRASS_ERR_TRANSLATION_FAILED;
-    }
-}
-
 /* JIT Execution Engine */
 BrassJitEngine brass_jit_create(BrassContext ctx) {
     try {
@@ -452,7 +401,7 @@ BrassCompiledModule brass_jit_compile_module(BrassJitEngine jit, BrassModule mod
         }
 
         auto engine = std::make_unique<codegen::JitExecutionEngine>(Target::host());
-        il::register_bronze_runtime_symbols(engine.get());
+        runtime::install_host_symbols(*engine);
         for (const auto& [sym, addr] : jit->external_symbols) {
             engine->register_external_symbol(sym, addr);
         }

@@ -7,7 +7,7 @@
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/pass_catalog.hpp>
 #include <brass/mir/verifier.hpp>
-#include <brass/il_translator/il_translator.hpp>
+#include <brass/runtime/host_symbols.hpp>
 #include <brass/runtime/type_feedback.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/deopt.hpp>
@@ -628,7 +628,7 @@ CodeInstallResult CodeInstaller::install_tier2(
     jit->register_external_symbol("brass_pgo_inc", reinterpret_cast<void*>(&brass_pgo_inc));
     jit->register_external_symbol("brass_record_call_feedback", reinterpret_cast<void*>(&brass_record_call_feedback));
     jit->register_external_symbol("brass_record_property_feedback", reinterpret_cast<void*>(&brass_record_property_feedback));
-    il::register_bronze_runtime_symbols(jit.get());
+    install_host_symbols(*jit);
 
     {
         std::lock_guard<std::mutex> lock(symbols_mutex_);

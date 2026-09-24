@@ -1,4 +1,5 @@
 #include <brass/codegen/jit_exec.hpp>
+#include <brass/runtime/host_symbols.hpp>
 #include <cstring>
 #include <cstdint>
 #include <stdexcept>
@@ -82,6 +83,7 @@ void partition_x64_sysv_invoke_args(
 ) {
     out_args = X64SysVInvokeArgs{};
     out_args.target_fn = target_fn;
+    out_args.pinned_tls = runtime::host_pinned_tls_block();
     stack_words.clear();
 
     size_t gpr_idx = 0;
@@ -138,6 +140,7 @@ void partition_x64_win64_invoke_args(
 ) {
     out_args = X64Win64InvokeArgs{};
     out_args.target_fn = target_fn;
+    out_args.pinned_tls = runtime::host_pinned_tls_block();
     stack_words.clear();
 
     for (size_t i = 0; i < args.size(); ++i) {
@@ -205,7 +208,7 @@ extern "C" __attribute__((naked)) void x64_sysv_invoke_thunk(
                         ".cfi_offset %r15, -48\n\t.cfi_offset %rbx, -56\n\t")
 
         "movq %rdi, %r12\n\t"          // r12 = args
-        "movq %rsi, %r13\n\t"          // r13 = result
+        "movq %rsi, %rbx\n\t"          // rbx = result (r13 is the pinned TLS register)
 
         // 16-byte align rsp before allocating arguments
         "andq $-16, %rsp\n\t"
@@ -241,8 +244,9 @@ extern "C" __attribute__((naked)) void x64_sysv_invoke_thunk(
         "movdqa 144(%r12), %xmm6\n\t"
         "movdqa 160(%r12), %xmm7\n\t"
 
-        // Load target function address into r11
+        // Load target function address into r11, the pinned TLS block into r13
         "movq 192(%r12), %r11\n\t"
+        "movq 200(%r12), %r13\n\t"
 
         // AL = 8 (number of vector registers used for varargs / SysV ABI)
         "movb $8, %al\n\t"
@@ -259,9 +263,9 @@ extern "C" __attribute__((naked)) void x64_sysv_invoke_thunk(
         "call *%r11\n\t"
 
         // Store return values
-        "movq %rax, 0(%r13)\n\t"
-        "movq %rdx, 8(%r13)\n\t"
-        "movdqa %xmm0, 16(%r13)\n\t"
+        "movq %rax, 0(%rbx)\n\t"
+        "movq %rdx, 8(%rbx)\n\t"
+        "movdqa %xmm0, 16(%rbx)\n\t"
 
         // Epilogue
         "leaq -40(%rbp), %rsp\n\t"
@@ -293,7 +297,7 @@ extern "C" __attribute__((naked)) void x64_win64_invoke_thunk(
         "pushq %r13\n\t"
 
         "movq %rcx, %r12\n\t"
-        "movq %rdx, %r13\n\t"
+        "movq %rdx, %rbx\n\t"          // rbx = result (r13 is the pinned TLS register)
 
         "movq 104(%r12), %rcx\n\t"
         "leaq 4(%rcx), %rax\n\t"
@@ -322,10 +326,11 @@ extern "C" __attribute__((naked)) void x64_win64_invoke_thunk(
         "movq 24(%r12), %r9\n\t"
 
         "movq 112(%r12), %r11\n\t"
+        "movq 120(%r12), %r13\n\t"
         "call *%r11\n\t"
 
-        "movq %rax, 0(%r13)\n\t"
-        "movdqu %xmm0, 16(%r13)\n\t"
+        "movq %rax, 0(%rbx)\n\t"
+        "movdqu %xmm0, 16(%rbx)\n\t"
 
         "leaq -40(%rbp), %rsp\n\t"
         "popq %r13\n\t"

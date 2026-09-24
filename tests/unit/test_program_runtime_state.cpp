@@ -12,7 +12,6 @@
 #include <brass/target/aarch64/aarch64_baseline_emit.hpp>
 #include <brass/target/aarch64/aarch64_encoder.hpp>
 #include <brass/target/aarch64/code_buffer.hpp>
-#include "../../src/il_translator/il_runtime.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <string>
@@ -154,7 +153,16 @@ TEST_CASE("Program runtime state - OSR coordinators are per program") {
     CHECK(TieringRegistry::instance().find_feedback("prs_sum") == nullptr);
 }
 
-TEST_CASE("Program runtime state - the IL runtime resolves functions in the running program") {
+namespace {
+// A host runtime's by-name function lookup: the running program's handles
+// (the default program's outside any ProgramScope).
+void* resolve_in_running_program(const char* name) {
+    auto* handle = current_program().find(name);
+    return handle ? handle->native_entry() : nullptr;
+}
+}
+
+TEST_CASE("Program runtime state - a host resolves functions in the running program") {
     Module mod("prs_il_mod"); // outlives the programs that route into it
     FunctionDispatchTable prog_a;
     FunctionDispatchTable prog_b;
@@ -164,16 +172,16 @@ TEST_CASE("Program runtime state - the IL runtime resolves functions in the runn
     prog_b.get_or_create("prs_il_fn")->set_native_entry(&marker_b);
 
     CHECK(&current_program() == &FunctionDispatchTable::instance());
-    CHECK(il::bronze_resolve_function("prs_il_fn") == nullptr);
+    CHECK(resolve_in_running_program("prs_il_fn") == nullptr);
     {
         ProgramScope scope_a(prog_a);
         CHECK(&current_program() == &prog_a);
-        CHECK(il::bronze_resolve_function("prs_il_fn") == &marker_a);
+        CHECK(resolve_in_running_program("prs_il_fn") == &marker_a);
         {
             ProgramScope scope_b(prog_b);
-            CHECK(il::bronze_resolve_function("prs_il_fn") == &marker_b);
+            CHECK(resolve_in_running_program("prs_il_fn") == &marker_b);
         }
-        CHECK(il::bronze_resolve_function("prs_il_fn") == &marker_a);
+        CHECK(resolve_in_running_program("prs_il_fn") == &marker_a);
     }
     CHECK(&current_program() == &FunctionDispatchTable::instance());
 
@@ -188,7 +196,7 @@ TEST_CASE("Program runtime state - the IL runtime resolves functions in the runn
     interp.set_module(&mod);
     void* seen = nullptr;
     interp.register_external_function("prs_probe", [&](Interpreter&, const std::vector<RuntimeValue>&) {
-        seen = il::bronze_resolve_function("prs_il_fn");
+        seen = resolve_in_running_program("prs_il_fn");
         return RuntimeValue::from_i64(1);
     });
     CHECK_EQ(interp.run(*fn, {}).as_i64(), int64_t{1});

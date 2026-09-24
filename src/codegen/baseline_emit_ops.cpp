@@ -327,7 +327,7 @@ bool emit_baseline_x64_op(X64BaselineEmitter& emitter, const Instruction& inst) 
             return true;
         case Opcode::write_barrier: {
             // brass_gc_write_barrier(obj, val) in the C convention, through
-            // the symbol table so a host's barrier (bronze's) is the one
+            // the symbol table so a host's barrier, when it has one, is the one
             // called, as it is from optimized code.
             void* wb = emitter.resolve_sym("brass_gc_write_barrier");
             if (!wb) throw_unsupported(kX64BaselineStage, "write_barrier: brass_gc_write_barrier is not registered");

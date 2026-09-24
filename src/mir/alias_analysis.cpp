@@ -36,8 +36,8 @@ bool get_const_integer_val(const Value* val, int64_t& out_c) {
 }
 
 // MIR memory is untyped: the same bytes may be read as i32, i64, f64, a
-// pointer or a GC reference (bronze reads a header word both as i32 and as
-// i64). The access type therefore says how many bytes an access touches and
+// pointer or a GC reference (a runtime may read one header word both as i32
+// and as i64). The access type therefore says how many bytes an access touches and
 // nothing about which bytes; it never proves two accesses disjoint on its own.
 // 0 means the size is unknown.
 uint64_t access_size(Type t) noexcept {

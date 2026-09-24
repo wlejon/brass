@@ -3,7 +3,6 @@
 #include <brass/runtime/shape.hpp>
 #include <brass/runtime/object.hpp>
 #include <brass/runtime/inline_cache.hpp>
-#include <brass/il_translator/il_translator.hpp>
 #include <brass/codegen/jit_exec.hpp>
 #include <random>
 #include <vector>
@@ -13,7 +12,6 @@
 
 using namespace brass;
 using namespace brass::runtime;
-using namespace brass::il;
 
 // Reference property lookup for differential verification
 static HostValue reference_get_prop(const DynamicObject* obj, const std::string& name) {
@@ -124,63 +122,4 @@ TEST_CASE("Differential PIC - Monomorphic, Polymorphic, and Megamorphic IC vs Re
     for (auto* obj : objects) {
         DynamicObject::destroy_non_gc(obj);
     }
-}
-
-TEST_CASE("Differential PIC - Bronze IL JIT Execution vs Reference") {
-    const char* il_code = R"(
-module pic_diff.js
-
-func accessProperty(%0: dynamic) -> f64 {
-  b0:
-    %1: dynamic = prop.get %0, "count"
-    %2: f64 = unbox.f64 %1
-    ret %2
-}
-)";
-
-    TranslatorOptions opts;
-    opts.enable_pic = true;
-    DiagnosticReporter diag;
-    TranslationResult res = translate_bronze_il(il_code, opts, &diag);
-    REQUIRE(res.success);
-    REQUIRE(res.module != nullptr);
-
-    codegen::JitExecutionEngine jit(Target::host());
-    register_bronze_runtime_symbols(&jit);
-    REQUIRE(jit.compile_and_load(*res.module));
-
-    auto access_fn = jit.get_function_ptr<double(*)(uint64_t)>("accessProperty");
-    REQUIRE(access_fn != nullptr);
-
-    ShapeRegistry registry;
-    Shape* root = registry.get_root_shape();
-
-    // 3 distinct shapes all containing "count"
-    Shape* shape1 = registry.transition_to(root, "count");
-    Shape* shape2 = registry.transition_to(registry.transition_to(root, "dummy1"), "count");
-    Shape* shape3 = registry.transition_to(registry.transition_to(registry.transition_to(root, "dummy1"), "dummy2"), "count");
-
-    DynamicObject* o1 = DynamicObject::create(nullptr, shape1);
-    o1->set_slot(0, HostValue::from_double(123.0));
-
-    DynamicObject* o2 = DynamicObject::create(nullptr, shape2);
-    o2->set_slot(1, HostValue::from_double(456.0));
-
-    DynamicObject* o3 = DynamicObject::create(nullptr, shape3);
-    o3->set_slot(2, HostValue::from_double(789.0));
-
-    // Warm up IC site through JIT
-    std::mt19937 rng(999);
-    DynamicObject* arr[3] = {o1, o2, o3};
-    double expected_vals[3] = {123.0, 456.0, 789.0};
-
-    for (int i = 0; i < 3000; ++i) {
-        int idx = static_cast<int>(rng() % 3);
-        double result = access_fn(reinterpret_cast<uint64_t>(arr[idx]));
-        CHECK_EQ(result, expected_vals[idx]);
-    }
-
-    DynamicObject::destroy_non_gc(o1);
-    DynamicObject::destroy_non_gc(o2);
-    DynamicObject::destroy_non_gc(o3);
 }

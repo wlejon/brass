@@ -83,14 +83,6 @@ void unregister_active_coro_frame(BrassCoroFrame* frame);
 bool is_active_coro_frame(uintptr_t frame);
 void visit_active_coro_frames(const std::function<void(uintptr_t*)>& visitor);
 void append_active_coro_roots(std::vector<uintptr_t*>& roots);
-void set_coro_symbol_resolver(void* (*resolver)(const char*));
-
-// Bronze IL Iterator & Async Helpers
-uint64_t bronze_iter_open(uint64_t gen_or_obj);
-uint64_t bronze_iter_step(uint64_t iter_handle);
-uint64_t bronze_create_async_machine(void* fn_ptr, uint32_t slot_count, uint64_t pointer_mask, uint64_t env);
-uint64_t bronze_async_start(uint64_t coro_frame, uint64_t arg);
-uint64_t bronze_async_await(uint64_t coro_frame, uint64_t val);
 
 } // namespace brass::runtime
 

@@ -37,7 +37,7 @@ static void print_usage(const char* prog) {
               << "  --iterations=<N>           Number of programs to generate and run (default: 50)\n"
               << "  --seed=<N>                 First seed; program i uses seed+i (default: current time)\n"
               << "  --timeout-ms=<N>           Execution timeout per tier in milliseconds (default: 500)\n"
-              << "  --pipeline=all|bronze|legacy\n"
+              << "  --pipeline=all|production|legacy\n"
               << "                             Optimizer run by the optimized tiers (default: all)\n"
               << "  --generator=structured|legacy\n"
               << "                             Program generator (default: structured)\n"
@@ -314,7 +314,7 @@ int main(int argc, char** argv) {
             timeout_ms = static_cast<uint32_t>(std::stoul(arg.substr(13)));
         } else if (arg.rfind("--pipeline=", 0) == 0) {
             if (!parse_pipeline(arg.substr(11), pipeline)) {
-                std::cerr << "Unknown pipeline '" << arg.substr(11) << "' (expected all, bronze or legacy)\n";
+                std::cerr << "Unknown pipeline '" << arg.substr(11) << "' (expected all, production or legacy)\n";
                 return 1;
             }
             pipeline_given = true;

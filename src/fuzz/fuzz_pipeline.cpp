@@ -1,5 +1,4 @@
 #include <brass/fuzz/fuzz_pipeline.hpp>
-#include <brass/il_translator/il_pipeline.hpp>
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/pass_catalog.hpp>
 
@@ -8,7 +7,7 @@ namespace brass::fuzz {
 std::string_view pipeline_name(FuzzPipeline pipeline) noexcept {
     switch (pipeline) {
         case FuzzPipeline::AllPasses: return "all";
-        case FuzzPipeline::Bronze: return "bronze";
+        case FuzzPipeline::Production: return "production";
         case FuzzPipeline::Legacy: return "legacy";
     }
     return "unknown";
@@ -16,7 +15,7 @@ std::string_view pipeline_name(FuzzPipeline pipeline) noexcept {
 
 bool parse_pipeline(std::string_view text, FuzzPipeline& out) noexcept {
     if (text == "all") { out = FuzzPipeline::AllPasses; return true; }
-    if (text == "bronze") { out = FuzzPipeline::Bronze; return true; }
+    if (text == "production") { out = FuzzPipeline::Production; return true; }
     if (text == "legacy") { out = FuzzPipeline::Legacy; return true; }
     return false;
 }
@@ -83,10 +82,10 @@ Pipeline all_passes_pipeline() {
     return p;
 }
 
-Pipeline bronze_pipeline() {
-    il::TranslatorOptions options = il::bronze_translator_options();
-    options.enable_fma = false;  // see all_loop_options
-    return pass_pipeline(il::pass_pipeline_options(options));
+Pipeline production_pipeline() {
+    PassPipelineOptions options = production_pass_pipeline_options();
+    options.loop.enable_fma = false;  // see all_loop_options
+    return pass_pipeline(options);
 }
 
 // The fuzzer's original sequence: GVN-PRE, WBE, then optimize_module's
@@ -122,7 +121,7 @@ Pipeline legacy_pipeline() {
 Pipeline fuzz_pipeline(FuzzPipeline pipeline) {
     switch (pipeline) {
         case FuzzPipeline::AllPasses: return all_passes_pipeline();
-        case FuzzPipeline::Bronze: return bronze_pipeline();
+        case FuzzPipeline::Production: return production_pipeline();
         case FuzzPipeline::Legacy: return legacy_pipeline();
     }
     return {};

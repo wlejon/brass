@@ -71,7 +71,7 @@ endif()
 #
 # Brass supports native machine code generation for x86_64 and AArch64.
 # BRASS_HOST_BACKEND is a CACHE INTERNAL so it is visible from any directory
-# of a build that add_subdirectory()s brass, however deep (bro -> bronze -> brass),
+# of a build that add_subdirectory()s brass, however deep (an app -> its JS engine -> brass),
 # and the macro of the same name is on the target so C++ can ask too.
 if(APPLE AND CMAKE_OSX_ARCHITECTURES)
     set(_brass_target_arch "${CMAKE_OSX_ARCHITECTURES}")

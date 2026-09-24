@@ -1,7 +1,7 @@
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/vm/fast_interpreter.hpp>
-#include <brass/il_translator/il_translator.hpp>
+#include <brass/runtime/host_symbols.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/codegen/unsupported_operation.hpp>
 #include <algorithm>
@@ -182,6 +182,10 @@ void MultiTierPipeline::initialize(const TieringConfig& config) {
     baseline_compiler_.set_on_demand_compiler([this](std::string_view name) {
         return compile_tier1_on_demand(name);
     });
+    // The host's symbols, then the pipeline's own over them, as every other
+    // engine the pipeline makes gets them.
+    install_host_symbols(baseline_compiler_);
+    for (const auto& [name, addr] : external_symbols_) baseline_compiler_.register_external_symbol(name, addr);
 
     brass_set_active_stack_maps(&active_stack_maps_);
 }
@@ -602,7 +606,7 @@ RuntimeValue MultiTierPipeline::execute(
     } else {
         Interpreter interp;
         interp.set_dispatch_table(table_);
-        il::register_bronze_interpreter_symbols(&interp);
+        install_host_symbols(interp);
         result = handle->call(interp, args);
     }
 
@@ -616,7 +620,7 @@ RuntimeValue MultiTierPipeline::execute(
 void MultiTierPipeline::setup_fast_interpreter(FastInterpreter& interp, Module& mod) {
     interp.set_dispatch_table(table_);
     interp.set_module(&mod);
-    il::register_bronze_fast_interpreter_symbols(&interp);
+    install_host_symbols(interp);
     for (const auto& [sym, addr] : external_symbols_) {
         interp.register_external_symbol(sym, addr);
     }

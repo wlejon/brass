@@ -103,8 +103,8 @@ TEST_CASE("Fuzz - every optimization pass preserves the answer on a fixed seed r
     CHECK_EQ(run_seed_range(FuzzPipeline::AllPasses), size_t{0});
 }
 
-TEST_CASE("Fuzz - the Bronze pipeline preserves the answer on a fixed seed range") {
-    CHECK_EQ(run_seed_range(FuzzPipeline::Bronze), size_t{0});
+TEST_CASE("Fuzz - the production pipeline preserves the answer on a fixed seed range") {
+    CHECK_EQ(run_seed_range(FuzzPipeline::Production), size_t{0});
 }
 
 // optimize_module's function pipeline (with GVN-PRE and WBE ahead of it).
@@ -114,7 +114,7 @@ TEST_CASE("Fuzz - the legacy optimize_module pipeline preserves the answer on a 
 }
 
 TEST_CASE("Fuzz - every pipeline step name is unique and skip names are checked") {
-    for (FuzzPipeline p : {FuzzPipeline::AllPasses, FuzzPipeline::Bronze, FuzzPipeline::Legacy}) {
+    for (FuzzPipeline p : {FuzzPipeline::AllPasses, FuzzPipeline::Production, FuzzPipeline::Legacy}) {
         const std::vector<std::string> names = fuzz_pipeline(p).names();
         CHECK(!names.empty());
         CHECK(unknown_skip_names(p, {"cfg_simplify", "no_such_pass"}) == std::vector<std::string>{"no_such_pass"});
