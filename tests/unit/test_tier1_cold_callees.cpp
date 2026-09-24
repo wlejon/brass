@@ -12,10 +12,13 @@
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/tiering.hpp>
+#include <condition_variable>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace brass;
@@ -235,6 +238,198 @@ done:
     FunctionHandle* h = prog.find("tc_rf");
     REQUIRE(h != nullptr);
     CHECK(h->native_entry() == nullptr);
+}
+
+TEST_CASE("Tier-1 cold callees - a call cycle whose root is rejected installs none of it") {
+    // @tc_cf calls @tc_cg and @tc_crej (rejected); @tc_cg calls @tc_cf.
+    // Tiering @tc_cf compiles @tc_cg first, whose code calls @tc_cf through
+    // a stub. @tc_cf is then rejected, so @tc_cg must not be installed: it
+    // used to be, and its first call trapped on the stub.
+    auto mod = parse_or_fail(R"(module @cyrej
+func @tc_crej(%n: i64) -> i64 {
+b0:
+  %v = vzero.f64x4
+  %one = iconst.i64 1
+  %r = add.i64 %n, %one
+  ret %r
+}
+func @tc_cf(%n: i64) -> i64 {
+entry:
+  %z = iconst.i64 0
+  %done = sle.i64 %n, %z
+  br_if %done, base, rec
+rec:
+  %c1 = iconst.i64 1
+  %m = sub.i64 %n, %c1
+  %r = call.i64 @tc_cg(%m)
+  ret %r
+base:
+  %r0 = call.i64 @tc_crej(%n)
+  ret %r0
+}
+func @tc_cg(%n: i64) -> i64 {
+entry:
+  %r = call.i64 @tc_cf(%n)
+  %t = iconst.i64 10
+  %s = add.i64 %r, %t
+  ret %s
+}
+)");
+    FunctionDispatchTable prog;
+    prog.pipeline().initialize(tier1_at_two(false));
+    Interpreter interp;
+    interp.set_dispatch_table(&prog);
+    interp.set_module(mod.get());
+    Function* f = mod->get_function("tc_cf");
+    Function* g = mod->get_function("tc_cg");
+    for (int64_t n : {3, 3, 3, 3, 5, 0, 7}) {
+        CHECK_EQ(interp.run(*f, {RuntimeValue::from_i64(n)}).as_i64(), 10 * n + 1);
+    }
+    // @tc_cg tiers up on its own count too, and is rejected as a caller of
+    // a rejected function.
+    for (int64_t n : {2, 4, 6}) {
+        CHECK_EQ(interp.run(*g, {RuntimeValue::from_i64(n)}).as_i64(), 10 * n + 11);
+    }
+    CHECK(prog.pipeline().is_baseline_rejected("tc_cf"));
+    CHECK(prog.pipeline().is_baseline_rejected("tc_cg"));
+    for (const char* name : {"tc_cf", "tc_cg"}) {
+        FunctionHandle* h = prog.find(name);
+        REQUIRE(h != nullptr);
+        CHECK(h->native_entry() == nullptr);
+        CHECK_EQ(h->tier(), TierLevel::Tier0_Interpreter);
+    }
+}
+
+TEST_CASE("Tier-1 cold callees - a cycle nested in a longer chain is installed whole") {
+    // @tc_na -> @tc_nb -> @tc_nc -> @tc_nb (a cycle below the root) and
+    // @tc_nc -> @tc_na (back to the root). All compile: all are installed.
+    auto mod = parse_or_fail(R"(module @nested
+func @tc_na(%n: i64) -> i64 {
+entry:
+  %z = iconst.i64 0
+  %done = sle.i64 %n, %z
+  br_if %done, base, rec
+rec:
+  %c1 = iconst.i64 1
+  %m = sub.i64 %n, %c1
+  %r = call.i64 @tc_nb(%m)
+  ret %r
+base:
+  ret %z
+}
+func @tc_nb(%n: i64) -> i64 {
+entry:
+  %r = call.i64 @tc_nc(%n)
+  %one = iconst.i64 1
+  %s = add.i64 %r, %one
+  ret %s
+}
+func @tc_nc(%n: i64) -> i64 {
+entry:
+  %lowbit = iconst.i64 1
+  %odd = and.i64 %n, %lowbit
+  %z = iconst.i64 0
+  %even = eq.i64 %odd, %z
+  br_if %even, viaa, viab
+viaa:
+  %ra = call.i64 @tc_na(%n)
+  ret %ra
+viab:
+  %c1 = iconst.i64 1
+  %m = sub.i64 %n, %c1
+  %rb = call.i64 @tc_nb(%m)
+  ret %rb
+}
+)");
+    FunctionDispatchTable prog;
+    prog.pipeline().initialize(tier1_at_two(false));
+    Interpreter interp;
+    interp.set_dispatch_table(&prog);
+    interp.set_module(mod.get());
+    Function* a = mod->get_function("tc_na");
+    // Reference results from a program that never tiers up.
+    std::vector<int64_t> expected;
+    {
+        FunctionDispatchTable ref;
+        TieringConfig cfg = tier1_at_two(false);
+        cfg.invocation_tier1_threshold = 1000000;
+        ref.pipeline().initialize(cfg);
+        Interpreter ri;
+        ri.set_dispatch_table(&ref);
+        ri.set_module(mod.get());
+        for (int64_t n = 0; n < 8; ++n) expected.push_back(ri.run(*a, {RuntimeValue::from_i64(n)}).as_i64());
+    }
+    for (int round = 0; round < 3; ++round) {
+        for (int64_t n = 0; n < 8; ++n) {
+            CHECK_EQ(interp.run(*a, {RuntimeValue::from_i64(n)}).as_i64(), expected[static_cast<size_t>(n)]);
+        }
+    }
+    for (const char* name : {"tc_na", "tc_nb", "tc_nc"}) {
+        FunctionHandle* h = prog.find(name);
+        REQUIRE(h != nullptr);
+        CHECK(h->native_entry() != nullptr);
+    }
+}
+
+TEST_CASE("Tier-1 cold callees - an attempt pending on another thread's compile is retried") {
+    // @tc_pw's tier-up needs @tc_pleaf, which another thread is compiling
+    // (held there by the compile hook): the attempt at the threshold cannot
+    // finish. It used to be the only one, leaving @tc_pw in Tier 0 for good.
+    auto mod = parse_or_fail(R"(module @pending
+func @tc_pleaf(%n: i64) -> i64 {
+b0:
+  %one = iconst.i64 1
+  %r = add.i64 %n, %one
+  ret %r
+}
+func @tc_pw(%x: i64) -> i64 {
+entry:
+  %s = call.i64 @tc_pleaf(%x)
+  %s2 = add.i64 %s, %x
+  ret %s2
+}
+)");
+    FunctionDispatchTable prog;
+    prog.pipeline().initialize(tier1_at_two(false));
+    std::mutex m;
+    std::condition_variable cv;
+    bool entered = false;
+    bool released = false;
+    prog.pipeline().set_tier1_compile_hook([&](std::string_view name) {
+        if (name != "tc_pleaf") return;
+        std::unique_lock<std::mutex> lock(m);
+        entered = true;
+        cv.notify_all();
+        cv.wait(lock, [&] { return released; });
+    });
+    std::thread other([&] {
+        CHECK(prog.pipeline().compile_and_install_tier1("tc_pleaf", mod->get_function("tc_pleaf")));
+    });
+    {
+        std::unique_lock<std::mutex> lock(m);
+        cv.wait(lock, [&] { return entered; });
+    }
+    Interpreter interp;
+    interp.set_dispatch_table(&prog);
+    interp.set_module(mod.get());
+    Function* w = mod->get_function("tc_pw");
+    auto run = [&](int64_t x) { CHECK_EQ(interp.run(*w, {RuntimeValue::from_i64(x)}).as_i64(), 2 * x + 1); };
+    run(1);
+    run(2); // the threshold: @tc_pleaf is in progress on the other thread
+    FunctionHandle* h = prog.find("tc_pw");
+    REQUIRE(h != nullptr);
+    CHECK(h->native_entry() == nullptr);
+    CHECK(!prog.pipeline().is_baseline_rejected("tc_pw"));
+    {
+        std::lock_guard<std::mutex> lock(m);
+        released = true;
+    }
+    cv.notify_all();
+    other.join();
+    for (int64_t x = 3; x < 10; ++x) run(x);
+    CHECK(h->native_entry() != nullptr);
+    CHECK_EQ(h->tier(), TierLevel::Tier1_Baseline);
+    CHECK(prog.tiering().get_feedback("tc_pw").tier1_retries() >= 1);
 }
 
 #endif

@@ -102,9 +102,14 @@ public:
     std::string_view function_name() const noexcept { return fn_name_; }
     TieringRegistry& registry() const noexcept;
 
-    // Invocations (exact under concurrency; fires the tier-up hook once).
+    // Invocations (exact under concurrency). Fires the tier-up hook when the
+    // count reaches the Tier 1 threshold; an attempt that cannot finish yet
+    // (a callee compiling on another thread) is retried with exponential
+    // backoff, at no cost to the calls in between beyond one compare.
     uint64_t invocation_count() const noexcept { return invocations_.load(std::memory_order_relaxed); }
     uint64_t record_invocation() noexcept;
+    // Tier 1 attempts made after the first (introspection).
+    uint32_t tier1_retries() const noexcept { return tier1_retries_.load(std::memory_order_relaxed); }
 
     // Type feedback vector
     TypeFeedbackVector* type_feedback_vector();
@@ -179,11 +184,17 @@ public:
     std::unordered_map<uint32_t, uint32_t> guard_failures_map() const;
 
 private:
+    void attempt_tier1(uint64_t n) noexcept;
+
     std::string fn_name_;
     TieringRegistry* registry_ = nullptr;
     TieringConfig config_;
     std::atomic<TierLevel> tier_{TierLevel::Tier0_Interpreter};
     std::atomic<uint64_t> invocations_{0};
+    // The invocation count at which a Tier 1 attempt that could not finish
+    // is retried (UINT64_MAX: none wanted), and how many retries were made.
+    std::atomic<uint64_t> tier1_retry_at_{UINT64_MAX};
+    std::atomic<uint32_t> tier1_retries_{0};
     std::atomic<uint64_t> total_backedges_{0};
     std::atomic<uint64_t> unkeyed_backedges_{0};
     std::atomic<uint64_t> deopt_count_{0};
@@ -251,6 +262,10 @@ public:
     ~TieringRegistry();
 
     bool on_invocation_threshold_reached(std::string_view fn_name);
+    // After on_invocation_threshold_reached returned false: whether asking
+    // again later can succeed (the pipeline compiles synchronously and has
+    // not rejected the function).
+    bool tier1_retry_possible(std::string_view fn_name) const;
     bool enqueue_compilation(
         std::string_view fn_name,
         const Module* mod = nullptr,

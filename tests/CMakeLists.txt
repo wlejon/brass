@@ -33,6 +33,7 @@ add_executable(brass_unit_tests
     unit/test_elf_writer.cpp
     unit/test_macho_writer.cpp
     unit/test_stack_map.cpp
+    unit/test_code_stack_maps.cpp
     unit/test_stack_walker.cpp
     unit/test_deopt_resume.cpp
     unit/test_deopt_complete.cpp

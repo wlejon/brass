@@ -3,6 +3,7 @@
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/type_feedback.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
+#include <algorithm>
 #include <atomic>
 #include <ostream>
 #include <iomanip>
@@ -59,10 +60,27 @@ TieringRegistry& TieringFeedback::registry() const noexcept {
 
 uint64_t TieringFeedback::record_invocation() noexcept {
     const uint64_t n = invocations_.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (n == config_.invocation_tier1_threshold) {
-        registry().on_invocation_threshold_reached(fn_name_);
+    if (n == config_.invocation_tier1_threshold || n >= tier1_retry_at_.load(std::memory_order_relaxed)) {
+        attempt_tier1(n);
     }
     return n;
+}
+
+void TieringFeedback::attempt_tier1(uint64_t n) noexcept {
+    if (n != config_.invocation_tier1_threshold) {
+        // A retry: one caller claims it.
+        uint64_t at = tier1_retry_at_.load(std::memory_order_relaxed);
+        if (n < at || !tier1_retry_at_.compare_exchange_strong(at, UINT64_MAX, std::memory_order_acq_rel)) return;
+        tier1_retries_.fetch_add(1, std::memory_order_relaxed);
+    }
+    TieringRegistry& reg = registry();
+    if (reg.on_invocation_threshold_reached(fn_name_)) return;
+    if (current_tier() != TierLevel::Tier0_Interpreter || bailout_triggered_) return;
+    if (!reg.tier1_retry_possible(fn_name_)) return;
+    // Not finished (a function it needs is compiling on another thread):
+    // asked again after 1, 2, 4, ... more calls.
+    const uint32_t shift = std::min<uint32_t>(tier1_retries_.load(std::memory_order_relaxed), 20);
+    tier1_retry_at_.store(n + (uint64_t{1} << shift), std::memory_order_relaxed);
 }
 
 TypeFeedbackVector* TieringFeedback::type_feedback_vector() {
@@ -143,6 +161,8 @@ void TieringFeedback::reset() noexcept {
     total_backedges_.store(0, std::memory_order_relaxed);
     unkeyed_backedges_.store(0, std::memory_order_relaxed);
     deopt_count_.store(0, std::memory_order_relaxed);
+    tier1_retry_at_.store(UINT64_MAX, std::memory_order_relaxed);
+    tier1_retries_.store(0, std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lock(maps_mutex_);
         loop_backedges_.clear();
@@ -253,6 +273,11 @@ bool TieringRegistry::on_invocation_threshold_reached(std::string_view fn_name) 
         return false;
     }
     return enqueue_compilation(fn_name, active_module());
+}
+
+bool TieringRegistry::tier1_retry_possible(std::string_view fn_name) const {
+    MultiTierPipeline& p = pipeline();
+    return p.is_initialized() && !p.is_baseline_rejected(fn_name);
 }
 
 bool TieringRegistry::enqueue_compilation(

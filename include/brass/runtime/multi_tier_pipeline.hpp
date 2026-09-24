@@ -19,8 +19,14 @@
 #include <atomic>
 #include <iosfwd>
 #include <cstdint>
+#include <functional>
+#include <vector>
 
 namespace brass::runtime {
+
+namespace detail {
+struct Tier1Deferred;
+} // namespace detail
 
 struct MultiTierStats {
     std::atomic<uint64_t> tier0_invocations{0};
@@ -108,8 +114,20 @@ public:
     // functions it calls that have no native entry yet are compiled first:
     // when one of them is rejected, so is this function, since its code
     // could not call it.
+    //
+    // A call cycle among such callees is installed as a whole, once every
+    // function of it compiles: when one of them is rejected, none is.
+    // Returns false too while a function it needs is being compiled on
+    // another thread; tiering then asks again later.
     bool compile_and_install_tier1(std::string_view fn_name, const Function* fn = nullptr);
     bool is_baseline_rejected(std::string_view fn_name) const;
+
+    // Testing only: called with each function's name as a Tier 1 compile of
+    // it starts (on the compiling thread, while it counts as in progress).
+    // Set before compiles start.
+    void set_tier1_compile_hook(std::function<void(std::string_view)> hook) {
+        tier1_compile_hook_ = std::move(hook);
+    }
 
     // Enqueue Tier 2 background optimization
     bool enqueue_tier2(
@@ -174,6 +192,10 @@ private:
     // such callee of `compiled` before `fn` is installed.
     enum class CalleeLink { Ready, Pending, Rejected };
     CalleeLink link_tier1_callees(const Function& fn, const codegen::BaselineCompiledFunction& compiled);
+    // A call cycle's functions are installed together once all of them
+    // compile (install), or none is (drop).
+    void install_tier1_group(std::vector<detail::Tier1Deferred>& group);
+    void drop_tier1_group(std::vector<detail::Tier1Deferred>& group);
     void setup_fast_interpreter(FastInterpreter& interp, Module& mod);
     // The Tier-0 interpreter kept across execute() calls on one module,
     // rebuilt when the module or the registered symbols change.
@@ -206,6 +228,8 @@ private:
     mutable std::mutex compiling_mutex_;
     std::unordered_set<std::string> in_progress_compilations_;
     std::unordered_set<std::string> baseline_rejected_; // under compiling_mutex_
+    // Testing only (set_tier1_compile_hook).
+    std::function<void(std::string_view)> tier1_compile_hook_;
 };
 
 } // namespace brass::runtime
