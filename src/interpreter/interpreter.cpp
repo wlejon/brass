@@ -846,6 +846,9 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                 }
 
                 case Opcode::landing_pad: {
+                    // A native callee's throw arrives as bare bits: the pad's
+                    // type says what they are (a gcref is then a root).
+                    current_exception_ = retype_exception_value(current_exception_, inst->type());
                     frame.set_value(inst->result(), current_exception_);
                     break;
                 }

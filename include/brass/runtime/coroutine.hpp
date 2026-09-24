@@ -123,7 +123,13 @@ uintptr_t brass_coro_create(void* fn_ptr, uint32_t slot_count, uint64_t pointer_
 // address into it (both 0: none, e.g. an interpreter's call).
 uintptr_t brass_coro_create_at(void* fn_ptr, uint32_t slot_count, uint64_t pointer_mask,
                                uintptr_t caller_fp, uintptr_t caller_ip);
+// Resumes the frame from C++: an exception the body throws leaves as a C++
+// exception.
 uint64_t brass_coro_resume(uintptr_t coro_frame, uint64_t input_val);
+// The same, for a generated caller (the JIT binds "brass_coro_resume" here):
+// an exception the body throws is raised again natively (brass_throw), so the
+// caller's landing pads see it.
+uint64_t brass_coro_resume_from_generated(uintptr_t coro_frame, uint64_t input_val);
 uint32_t brass_coro_is_done(uintptr_t coro_frame);
 void brass_coro_destroy(uintptr_t coro_frame);
 }

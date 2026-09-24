@@ -5,11 +5,19 @@
 #include <brass/gc/native_frames.hpp>
 #include <brass/embedding/host_gc.hpp>
 #include <brass/embedding/nanbox.hpp>
+#include <brass/interpreter/interpreter.hpp>
+#include <brass/runtime/exception.hpp>
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <unordered_set>
+
+#if defined(_MSC_VER)
+#define BRASS_CORO_NOINLINE __declspec(noinline)
+#else
+#define BRASS_CORO_NOINLINE __attribute__((noinline))
+#endif
 
 namespace brass::runtime {
 
@@ -236,7 +244,13 @@ uintptr_t brass_coro_create(void* fn_ptr, uint32_t slot_count, uint64_t pointer_
 }
 #endif
 
-uint64_t brass_coro_resume(uintptr_t coro_frame, uint64_t input_val) {
+namespace {
+
+// The body of both resume entries; `caller_*` name the frame that called the
+// entry (brass_capture_caller_frame, taken there). Every scope it opens lives
+// in this frame, so an exception leaving it has already destroyed them.
+uint64_t coro_resume_impl(uintptr_t coro_frame, uint64_t input_val, bool have_caller, uintptr_t caller_rbp,
+                          uintptr_t caller_ip) {
     if (!coro_frame) return 0;
     BrassCoroFrame* frame = reinterpret_cast<BrassCoroFrame*>(coro_frame);
 
@@ -266,8 +280,6 @@ uint64_t brass_coro_resume(uintptr_t coro_frame, uint64_t input_val) {
     // everywhere. The frame itself may move; `coro_frame` is a root so the
     // writes below reach the live copy. (A C++ caller has no generated frame
     // to record; its captured frame reports nothing.)
-    uintptr_t caller_rbp = 0, caller_ip = 0;
-    const bool have_caller = brass_capture_caller_frame(caller_rbp, caller_ip);
     NativeFramesScope native_frames(have_caller ? caller_rbp : 0, have_caller ? caller_ip : 0);
     ThreadRootsScope frame_root([](void* ctx, std::vector<uintptr_t*>& roots) {
         roots.push_back(static_cast<uintptr_t*>(ctx));
@@ -276,6 +288,11 @@ uint64_t brass_coro_resume(uintptr_t coro_frame, uint64_t input_val) {
     if (mir_coro_body(frame) != nullptr) {
         result = resume_mir_coro_body(coro_frame);
     } else {
+        // A native body is generated code entered from this C++ frame: a
+        // throw in it searches for pads no further than here and leaves as
+        // a C++ exception, which unwinds the scopes above (an SEH exception
+        // raised past this frame would skip their destructors, /EHs).
+        GeneratedCodeEntryScope entry;
         using CoroFn = uint64_t (*)(BrassCoroFrame*);
         result = reinterpret_cast<CoroFn>(frame->fn_ptr)(frame);
     }
@@ -285,6 +302,35 @@ uint64_t brass_coro_resume(uintptr_t coro_frame, uint64_t input_val) {
         unregister_active_coro_frame(frame);
     }
     return result;
+}
+
+} // namespace
+
+// The C++ entry (hosts, interpreters, the microtask queue): an exception the
+// body throws reaches the caller as a C++ exception.
+BRASS_CORO_NOINLINE uint64_t brass_coro_resume(uintptr_t coro_frame, uint64_t input_val) {
+    uintptr_t caller_rbp = 0, caller_ip = 0;
+    const bool have_caller = brass_capture_caller_frame(caller_rbp, caller_ip);
+    return coro_resume_impl(coro_frame, input_val, have_caller, caller_rbp, caller_ip);
+}
+
+// The entry generated code calls (the JIT's "brass_coro_resume"). Its caller's
+// landing pads see only native throws (the personality ignores C++
+// exceptions), so an exception the body throws is caught here, once
+// coro_resume_impl's scopes are gone, and raised again natively from this
+// frame, which holds nothing to unwind.
+BRASS_CORO_NOINLINE uint64_t brass_coro_resume_from_generated(uintptr_t coro_frame, uint64_t input_val) {
+    uintptr_t caller_rbp = 0, caller_ip = 0;
+    const bool have_caller = brass_capture_caller_frame(caller_rbp, caller_ip);
+    HostValue pending{};
+    try {
+        return coro_resume_impl(coro_frame, input_val, have_caller, caller_rbp, caller_ip);
+    } catch (const BrassException& ex) {
+        pending = ex.value();
+    } catch (const InterpreterThrownException& ex) {
+        pending = HostValue::from_raw(ex.value().raw_bits());
+    }
+    brass_throw(pending);
 }
 
 uint32_t brass_coro_is_done(uintptr_t coro_frame) {

@@ -164,9 +164,27 @@ RuntimeValue Interpreter::call_in_own_module(const Function& fn, const std::vect
     return execute_function(fn, args);
 }
 
+RuntimeValue retype_exception_value(RuntimeValue v, Type t) noexcept {
+    if (t.is_void() || t.is_vector() || v.is_vector()) return v;
+    uint64_t bits = v.raw_bits();
+    switch (t.kind()) {
+        case TypeKind::I8: bits &= 0xFFull; break;
+        case TypeKind::I16: bits &= 0xFFFFull; break;
+        case TypeKind::I32:
+        case TypeKind::F32: bits &= 0xFFFFFFFFull; break;
+        default: break;
+    }
+    return RuntimeValue::from_bits(t, bits);
+}
+
 void Interpreter::collect_all_roots(std::vector<uintptr_t*>& roots) {
     for (InterpreterFrame* f = current_frame_; f != nullptr; f = f->caller()) {
         f->collect_roots(roots);
+    }
+    // The value in flight between a throw and its pad (a pad retypes a
+    // native callee's throw to gcref: then it moves with its object).
+    if (current_exception_.is_gcref() && !current_exception_.is_null()) {
+        roots.push_back(reinterpret_cast<uintptr_t*>(&current_exception_.raw_bits_ref()));
     }
 }
 

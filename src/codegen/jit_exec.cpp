@@ -66,7 +66,9 @@ static void register_brass_runtime_symbols(JitExecutionEngine& e) {
     e.register_external_symbol("brass_seh_personality", reinterpret_cast<void*>(&runtime::brass_seh_personality));
 #endif
     e.register_external_symbol("brass_coro_create", reinterpret_cast<void*>(&brass_coro_create));
-    e.register_external_symbol("brass_coro_resume", reinterpret_cast<void*>(&brass_coro_resume));
+    e.register_external_symbol("brass_coro_resume", reinterpret_cast<void*>(&brass_coro_resume_from_generated));
+    e.register_external_symbol("brass_coro_resume_from_generated",
+                               reinterpret_cast<void*>(&brass_coro_resume_from_generated));
     e.register_external_symbol("brass_coro_is_done", reinterpret_cast<void*>(&brass_coro_is_done));
     e.register_external_symbol("brass_coro_destroy", reinterpret_cast<void*>(&brass_coro_destroy));
     e.register_external_symbol("brass_gc_write_barrier", reinterpret_cast<void*>(&brass_default_gc_write_barrier));

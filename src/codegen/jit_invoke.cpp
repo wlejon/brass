@@ -246,6 +246,10 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
                                      "; invoke takes such a function only with at most three 256-bit vector arguments");
         }
         alignas(32) uint8_t b[32];
+        // Every call into generated code from here holds an entry scope: a
+        // native throw's pad search stops at it (exception_win64.cpp) and
+        // leaves as a C++ exception into this frame's callers.
+        GeneratedCodeEntryScope entry;
         call_jit_v256(addr, args, b);
         return RuntimeValue::from_v256(ret_type, b);
     }
@@ -256,13 +260,13 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
 
     // Every other signature, of any arity: the thunk passes the arguments by
     // parameter type and captures RAX and XMM0, converted once below.
+    GeneratedCodeEntryScope entry;  // walks need not unwind the host's stack
 #if defined(_WIN32)
     X64Win64InvokeArgs invoke_args;
     std::vector<uint64_t> stack_words;
     partition_x64_win64_invoke_args(args, param_types, addr, invoke_args, stack_words);
 
     X64Win64InvokeResult result;
-    GeneratedCodeEntryScope entry;  // walks need not unwind the host's stack
     x64_win64_invoke_thunk(&invoke_args, &result);
 #else
     X64SysVInvokeArgs invoke_args;
@@ -374,6 +378,7 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
     partition_aarch64_invoke_args(args, param_types, addr, invoke_args, stack_words);
 
     AArch64InvokeResult result;
+    GeneratedCodeEntryScope entry;  // walks need not unwind the host's stack
 #if defined(__GNUC__) || defined(__clang__)
     aarch64_invoke_thunk(&invoke_args, &result);
 #endif

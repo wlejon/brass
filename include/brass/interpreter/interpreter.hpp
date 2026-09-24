@@ -48,6 +48,11 @@ private:
     DeoptResult result_;
 };
 
+// The exception value a landing pad of type `t` receives: a value a native
+// callee threw is bare bits (i64-kind), which the pad's type reinterprets (an
+// integer narrower than 64 bits keeps its low bits). A vector keeps its value.
+RuntimeValue retype_exception_value(RuntimeValue v, Type t) noexcept;
+
 class InterpreterThrownException : public std::exception {
 public:
     explicit InterpreterThrownException(RuntimeValue val) : value_(val) {}

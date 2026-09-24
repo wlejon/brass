@@ -1,4 +1,5 @@
 #include <brass/target/aarch64/aarch64_isel.hpp>
+#include <brass/codegen/unsupported_operation.hpp>
 #include <algorithm>
 
 namespace brass::aarch64 {
@@ -12,10 +13,21 @@ void AArch64ISel::lower_throw(const Instruction& inst, LirBlock& lir_bb) {
 
     lir_fn_->frame.has_calls = true;
 
-    auto mov_arg = std::make_unique<LirInst>(LirOpcode::Mov);
-    mov_arg->add_def(LirOperand::preg_aarch64_gpr(GPR::X0, sz), FixedConstraint::aarch64_gpr(GPR::X0));
-    mov_arg->add_use(LirOperand::vreg(val_v, sz));
-    lir_bb.append_inst(std::move(mov_arg));
+    const Type vt = val->type();
+    if (vt.is_vector()) codegen::throw_unsupported("aarch64 isel (throw)", "a vector exception value");
+    if (vt.is_float()) {
+        // The value's bits, from its FP register (an f32's zero-extended).
+        const uint8_t fsz = vt.kind() == TypeKind::F32 ? 4 : 8;
+        auto mov_arg = std::make_unique<LirInst>(LirOpcode::Movd_gx);
+        mov_arg->add_def(LirOperand::preg_aarch64_gpr(GPR::X0, fsz), FixedConstraint::aarch64_gpr(GPR::X0));
+        mov_arg->add_use(LirOperand::vreg(val_v, fsz));
+        lir_bb.append_inst(std::move(mov_arg));
+    } else {
+        auto mov_arg = std::make_unique<LirInst>(LirOpcode::Mov);
+        mov_arg->add_def(LirOperand::preg_aarch64_gpr(GPR::X0, sz), FixedConstraint::aarch64_gpr(GPR::X0));
+        mov_arg->add_use(LirOperand::vreg(val_v, sz));
+        lir_bb.append_inst(std::move(mov_arg));
+    }
 
     auto call_lir = std::make_unique<LirInst>(LirOpcode::Call);
     call_lir->callee_symbol = "brass_throw";
@@ -47,6 +59,17 @@ void AArch64ISel::lower_landing_pad(const Instruction& inst, LirBlock& lir_bb) {
     if (inst.type() != Type::void_type() && inst.result()) {
         VReg dst_v = get_vreg(inst.result());
         uint8_t sz = dst_v.size;
+        if (inst.type().is_vector()) codegen::throw_unsupported("aarch64 isel (landing_pad)", "a vector exception value");
+        if (inst.type().is_float()) {
+            // The thrown bits arrive in X0; a float lives in an FP register.
+            const uint8_t fsz = inst.type().kind() == TypeKind::F32 ? 4 : 8;
+            auto mov_inst = std::make_unique<LirInst>(LirOpcode::Movd_xg);
+            mov_inst->add_def(LirOperand::vreg(dst_v, fsz));
+            mov_inst->add_use(LirOperand::preg_aarch64_gpr(GPR::X0, fsz), FixedConstraint::aarch64_gpr(GPR::X0));
+            mov_inst->mir_origin = &inst;
+            lir_bb.append_inst(std::move(mov_inst));
+            return;
+        }
         auto mov_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
         mov_inst->add_def(LirOperand::vreg(dst_v, sz));
         mov_inst->add_use(LirOperand::preg_aarch64_gpr(GPR::X0, sz), FixedConstraint::aarch64_gpr(GPR::X0));
