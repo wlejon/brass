@@ -12,6 +12,7 @@
 
 #include <brass/runtime/exception.hpp>
 #include <brass/object/object_writer.hpp>
+#include <brass/gc/native_frames.hpp>
 
 #if defined(_WIN32) && (defined(_M_X64) || defined(__x86_64__) || defined(_M_ARM64) || defined(__aarch64__))
 #define BRASS_WIN64_SEH 1
@@ -160,10 +161,31 @@ static bool is_brass_handler(PEXCEPTION_ROUTINE handler) noexcept {
     return false;
 }
 
-// Search pass run before raising: is there a brass landing pad anywhere up
-// the stack, as the OS unwinder sees it? Walks the same .pdata/.xdata the
-// dispatcher will, so a hit here is a hit there.
+// The innermost point where generated code was entered from C++ (the
+// innermost GeneratedCodeEntryScope on this stack, native_frames.hpp), or
+// UINTPTR_MAX when there is none. A pad in a frame at or above it must never
+// be raised to: the C++ frames between (Tier 0, host callbacks) are /EHs, so
+// an SEH exception would pass their catch blocks and destructors by. A throw
+// with no pad below it leaves as a C++ exception instead, which unwinds the
+// native frames below it (.pdata) into the C++ frame that entered them.
+static uintptr_t entry_boundary() noexcept {
+    ULONG_PTR low = 0, high = 0;
+    GetCurrentThreadStackLimits(&low, &high);
+    volatile char here = 0;
+    const uintptr_t sp = reinterpret_cast<uintptr_t>(&here);
+    for (const GeneratedCodeEntryScope* s = brass_innermost_entry_scope(); s; s = s->outer()) {
+        const uintptr_t a = s->address();
+        if (a >= sp && a >= low && a < high) return a;
+    }
+    return UINTPTR_MAX;
+}
+
+// Search pass run before raising: is there a brass landing pad up the stack
+// below the innermost generated-code entry, as the OS unwinder sees it?
+// Walks the same .pdata/.xdata the dispatcher will, so a hit here is a hit
+// there (the dispatcher stops at the first pad, which is at or below it).
 static bool seh_pad_exists() noexcept {
+    const uintptr_t boundary = entry_boundary();
     CONTEXT ctx;
     RtlCaptureContext(&ctx);
     for (int depth = 0; depth < 100000; ++depth) {
@@ -179,7 +201,9 @@ static bool seh_pad_exists() noexcept {
         PVOID handler_data = nullptr;
         DWORD64 establisher = 0;
         PEXCEPTION_ROUTINE handler = RtlVirtualUnwind(UNW_FLAG_EHANDLER, image_base, pc, fe, &ctx,
-                                                      &handler_data, &establisher, nullptr);        if (is_brass_handler(handler) &&
+                                                      &handler_data, &establisher, nullptr);
+        if (establisher >= boundary) return false;
+        if (is_brass_handler(handler) &&
             brass_seh_find_landing_pad(pc, image_base, handler_data) != 0) {
             return true;
         }
@@ -197,6 +221,9 @@ bool brass_seh_raise(HostValue val) {
 
 bool brass_seh_raise_above(HostValue val, const void* deopted_entry, uintptr_t stack_limit) {
     if (!deopted_entry) return false;
+    // Never past the innermost generated-code entry (entry_boundary).
+    const uintptr_t boundary = entry_boundary();
+    if (boundary < stack_limit) stack_limit = boundary;
     // The walk the dispatcher will make: the frames up to the deoptimized
     // one are C++ frames (no brass pads) and the deoptimized frame's call
     // into the deopt entry lies in no invoke scope, so the first pad found

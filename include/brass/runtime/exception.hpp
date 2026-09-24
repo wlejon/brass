@@ -195,7 +195,10 @@ uint64_t brass_seh_find_landing_pad(uint64_t control_pc, uint64_t image_base, co
 
 // Raises val as a Win64 SEH exception when some frame the OS unwinder can see
 // has a brass landing pad for it; does not return then. Returns false (and
-// raises nothing) when no such frame exists, or off Win64.
+// raises nothing) when no such frame exists, or off Win64. Only frames below
+// the innermost generated-code entry (GeneratedCodeEntryScope) count, here
+// and in brass_seh_raise_above: the C++ frames above it would not see an SEH
+// exception, so the caller throws a C++ exception instead.
 bool brass_seh_raise(HostValue val);
 
 // As brass_seh_raise, for a throw on behalf of a deoptimized native frame:

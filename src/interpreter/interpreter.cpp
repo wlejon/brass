@@ -905,6 +905,9 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                     } catch (const InterpreterThrownException& ex) {
                         threw = true;
                         current_exception_ = ex.value();
+                    } catch (const runtime::BrassException& be) {  // a native callee's throw
+                        threw = true;
+                        current_exception_ = RuntimeValue::from_bits(Type::i64(), be.value().raw());
                     }
 
                     if (!threw) {

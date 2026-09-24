@@ -6,6 +6,7 @@
 #include <brass/mir/osr.hpp>
 #include <brass/embedding/embedding.hpp>
 #include <brass/gc/runtime_gc.hpp>
+#include <brass/gc/native_frames.hpp>
 #include <cstring>
 #include <stdexcept>
 #include <unordered_set>
@@ -351,6 +352,10 @@ bool OsrCoordinator::try_osr_migration(
     // native allocations must not go to a generational heap either.
     NativeGcBridge gc_bridge(&interp.gc(), nullptr, &comp_mod->stack_maps());
 
+    // The OSR code is entered from C++: a native throw's pad search stops
+    // here (exception_win64.cpp) and leaves as a C++ exception instead.
+    GeneratedCodeEntryScope entry;
+
     // Invoke specialized OSR entry stub
     Type ret_t = fn.return_type();
     if (ret_t.is_void()) {
@@ -524,6 +529,10 @@ bool OsrCoordinator::try_osr_migration(
     // Native allocations go where FastInterpreter::allocate_gc sends them: its
     // generational GC when set, else its semispace collector.
     NativeGcBridge gc_bridge(&interp.gc(), interp.generational_gc(), &comp_mod->stack_maps());
+
+    // The OSR code is entered from C++: a native throw's pad search stops
+    // here (exception_win64.cpp) and leaves as a C++ exception instead.
+    GeneratedCodeEntryScope entry;
 
     // Invoke specialized OSR entry stub
     Type ret_t = fn.return_type();
