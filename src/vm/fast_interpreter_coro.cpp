@@ -1,19 +1,24 @@
 #include "fast_interpreter_impl.hpp"
 #include <brass/runtime/coroutine.hpp>
+#include <brass/mir/coro_transform.hpp>
+#include <brass/gc/native_frames.hpp>
 #include <algorithm>
+#include <cstring>
 
 namespace brass {
 
 namespace {
 
-// This path hands arguments over as 8-byte register words; a vector
-// argument does not fit one, so it is an error rather than a truncation.
+// The unlowered path hands arguments over as 8-byte register words; a
+// vector argument does not fit one, so it is an error rather than a
+// truncation. (Lowered bodies take vectors: their frame slots are sized.)
 std::vector<uint64_t> coro_raw_args(const std::vector<RuntimeValue>& args) {
     std::vector<uint64_t> raw_args;
     raw_args.reserve(args.size());
     for (const auto& a : args) {
         if (a.is_vector()) {
-            throw InterpreterException("FastInterpreter coro_create: vector arguments are not supported");
+            throw InterpreterException("FastInterpreter coro_create: vector arguments to a coroutine body "
+                                       "not lowered by CoroTransformPass are not supported");
         }
         raw_args.push_back(a.raw_bits());
     }
@@ -21,6 +26,77 @@ std::vector<uint64_t> coro_raw_args(const std::vector<RuntimeValue>& args) {
 }
 
 } // namespace
+
+uintptr_t FastInterpreter::coro_create_lowered(const Function& fn, const std::vector<RuntimeValue>& args) {
+    const CoroFrameLayout layout = compute_coro_frame_layout(fn);
+    uint32_t arg_slots = 0;
+    for (const RuntimeValue& a : args) arg_slots += coro_slot_count(a.type());
+    const uint32_t slot_count = std::max(layout.slot_count, arg_slots);
+
+    // No generated frame: this interpreter's roots reach the heap through
+    // its scope and provider.
+    const uintptr_t frame_addr = brass_coro_create_at(
+        const_cast<void*>(static_cast<const void*>(&fn)), slot_count, layout.pointer_mask, 0, 0);
+    auto* cf = reinterpret_cast<runtime::BrassCoroFrame*>(frame_addr);
+    if (!cf) {
+        throw InterpreterException("coro_create: frame allocation failed");
+    }
+    // Arguments fill consecutive slots, a vector spanning coro_slot_count of
+    // them, where the lowered body loads each.
+    uint32_t slot = 0;
+    for (const RuntimeValue& a : args) {
+        if (a.is_vector()) {
+            std::memcpy(&cf->slots[slot], a.vec_bytes(), a.is_v256() ? 32 : 16);
+        } else {
+            cf->slots[slot] = static_cast<uint64_t>(a.raw_bits());
+        }
+        slot += coro_slot_count(a.type());
+    }
+    lowered_coro_fns_[&fn] = &fn;
+    return frame_addr;
+}
+
+const Function* FastInterpreter::lowered_coro_body(const void* fn_ptr) const {
+    if (!fn_ptr) return nullptr;
+    auto it = lowered_coro_fns_.find(fn_ptr);
+    if (it != lowered_coro_fns_.end()) return it->second;
+    // A frame the Interpreter created for a function of the current module.
+    if (module_) {
+        for (const Function* f : module_->functions()) {
+            if (static_cast<const void*>(f) == fn_ptr) return is_lowered_coro_body(*f) ? f : nullptr;
+        }
+    }
+    return nullptr;
+}
+
+uint64_t FastInterpreter::coro_resume_lowered(uintptr_t handle, uint64_t input_val) {
+    auto* cf = reinterpret_cast<runtime::BrassCoroFrame*>(handle);
+    if (cf->is_done) {
+        return cf->yielded_val;
+    }
+    const Function* body = lowered_coro_body(cf->fn_ptr);
+    if (!body) {
+        if (!cf->fn_ptr) {
+            throw InterpreterException("coro_resume: coroutine frame has no body");
+        }
+        // Generated code's frame: run it natively.
+        return brass_coro_resume(handle, input_val);
+    }
+    cf->resume_arg = input_val;
+    // The body dispatches on state_id and maintains is_done itself. It may
+    // collect and move the frame; `handle` is a root so the writes below
+    // reach the live copy.
+    ThreadRootsScope frame_root([](void* ctx, std::vector<uintptr_t*>& roots) {
+        roots.push_back(static_cast<uintptr_t*>(ctx));
+    }, &handle);
+    const RuntimeValue r = call_from_native(*body, {RuntimeValue::from_ptr(handle)});
+    cf = reinterpret_cast<runtime::BrassCoroFrame*>(handle);
+    cf->yielded_val = static_cast<uint64_t>(r.raw_bits());
+    if (cf->is_done) {
+        runtime::unregister_active_coro_frame(cf);
+    }
+    return cf->yielded_val;
+}
 
 uintptr_t FastInterpreter::coro_create(const BytecodeFunction* bfn, const std::vector<uint64_t>& args) {
     if (!bfn) return 0;
@@ -61,6 +137,9 @@ uintptr_t FastInterpreter::coro_create(const Function& fn, const std::vector<Run
     if (fn.parent()) {
         use_module(fn.parent());
     }
+    if (is_lowered_coro_body(fn)) {
+        return coro_create_lowered(fn, args);
+    }
     const BytecodeFunction* bfn = get_or_compile(fn);
     return coro_create(bfn, coro_raw_args(args));
 }
@@ -75,6 +154,12 @@ uintptr_t FastInterpreter::coro_create(const Module& mod, std::string_view calle
 }
 
 uintptr_t FastInterpreter::coro_create(std::string_view callee, const std::vector<RuntimeValue>& args) {
+    if (module_) {
+        const Function* fn = module_->get_function(callee);
+        if (fn && is_lowered_coro_body(*fn)) {
+            return coro_create_lowered(*fn, args);
+        }
+    }
     const BytecodeFunction* bfn = nullptr;
     if (bytecode_module_) {
         bfn = bytecode_module_->get_function(callee);
@@ -122,7 +207,10 @@ void FastInterpreter::coro_suspend(FastFrame& frame, uint32_t dst_reg, uint32_t 
 uint64_t FastInterpreter::coro_resume(uintptr_t handle, uint64_t input_val) {
     auto it = active_coros_.find(handle);
     if (it == active_coros_.end()) {
-        return 0;
+        if (handle == 0) {
+            throw InterpreterException("coro_resume of a null coroutine frame");
+        }
+        return coro_resume_lowered(handle, input_val);
     }
 
     FastCoroState* coro = it->second.get();
@@ -181,7 +269,16 @@ uint64_t FastInterpreter::coro_resume(uintptr_t handle, uint64_t input_val) {
 }
 
 RuntimeValue FastInterpreter::coro_resume_val(uintptr_t handle, RuntimeValue input_val) {
+    // A lowered body's result type, read before the resume (which may move
+    // the frame).
+    const Function* body = nullptr;
+    if (handle != 0 && active_coros_.find(handle) == active_coros_.end()) {
+        body = lowered_coro_body(reinterpret_cast<const runtime::BrassCoroFrame*>(handle)->fn_ptr);
+    }
     uint64_t ret = coro_resume(handle, input_val.raw_bits());
+    if (body) {
+        return RuntimeValue::from_bits(body->return_type(), ret);
+    }
     auto it = active_coros_.find(handle);
     if (it != active_coros_.end() && it->second && it->second->bfn) {
         return RuntimeValue::from_bits(it->second->bfn->return_type, ret);
@@ -197,7 +294,11 @@ void FastInterpreter::coro_destroy(uintptr_t handle) {
             brass_coro_destroy(reinterpret_cast<uintptr_t>(it->second->c_frame));
         }
         active_coros_.erase(it);
+        return;
     }
+    // A lowered coroutine's frame (or generated code's): done, and no
+    // longer a root.
+    brass_coro_destroy(handle);
 }
 
 bool FastInterpreter::coro_is_done(uintptr_t handle) const {

@@ -1,4 +1,5 @@
 #include <brass/interpreter/value.hpp>
+#include <brass/interpreter/float_arith.hpp>
 #include <cmath>
 #include <algorithm>
 #include <cstring>
@@ -6,21 +7,39 @@
 
 namespace brass {
 
+namespace {
+
+// Float-lane add/sub/mul/div through fparith, so every lane follows the
+// lhs-NaN rule the JIT tiers produce (float_arith.hpp). Sets `out` and
+// returns true when `lhs` is a float vector.
+template <template <typename> class Op>
+bool float_lane_binop(RuntimeValue lhs, RuntimeValue rhs, RuntimeValue& out) {
+    if (lhs.is_f32x4() || lhs.is_f32x8()) {
+        const size_t n = lhs.is_f32x4() ? 4 : 8;
+        float r[8] = {};
+        for (size_t i = 0; i < n; ++i) r[i] = Op<float>{}(lhs.f32_lane(i), rhs.f32_lane(i));
+        out = n == 4 ? RuntimeValue::from_f32x4(r[0], r[1], r[2], r[3]) : RuntimeValue::from_f32x8(r);
+        return true;
+    }
+    if (lhs.is_f64x2() || lhs.is_f64x4()) {
+        const size_t n = lhs.is_f64x2() ? 2 : 4;
+        double r[4] = {};
+        for (size_t i = 0; i < n; ++i) r[i] = Op<double>{}(lhs.f64_lane(i), rhs.f64_lane(i));
+        out = n == 2 ? RuntimeValue::from_f64x2(r[0], r[1]) : RuntimeValue::from_f64x4(r);
+        return true;
+    }
+    return false;
+}
+
+template <typename T> struct FAdd { T operator()(T a, T b) const noexcept { return fparith::add(a, b); } };
+template <typename T> struct FSub { T operator()(T a, T b) const noexcept { return fparith::sub(a, b); } };
+template <typename T> struct FMul { T operator()(T a, T b) const noexcept { return fparith::mul(a, b); } };
+template <typename T> struct FDiv { T operator()(T a, T b) const noexcept { return fparith::div(a, b); } };
+
+} // namespace
+
 RuntimeValue val_vadd(RuntimeValue lhs, RuntimeValue rhs) {
-    if (lhs.is_f32x4()) {
-        return RuntimeValue::from_f32x4(
-            lhs.f32_lane(0) + rhs.f32_lane(0),
-            lhs.f32_lane(1) + rhs.f32_lane(1),
-            lhs.f32_lane(2) + rhs.f32_lane(2),
-            lhs.f32_lane(3) + rhs.f32_lane(3)
-        );
-    }
-    if (lhs.is_f64x2()) {
-        return RuntimeValue::from_f64x2(
-            lhs.f64_lane(0) + rhs.f64_lane(0),
-            lhs.f64_lane(1) + rhs.f64_lane(1)
-        );
-    }
+    if (RuntimeValue r; float_lane_binop<FAdd>(lhs, rhs, r)) return r;
     if (lhs.is_i32x4()) {
         return RuntimeValue::from_i32x4(
             static_cast<int32_t>(static_cast<uint32_t>(lhs.i32_lane(0)) + static_cast<uint32_t>(rhs.i32_lane(0))),
@@ -33,26 +52,6 @@ RuntimeValue val_vadd(RuntimeValue lhs, RuntimeValue rhs) {
         return RuntimeValue::from_i64x2(
             static_cast<int64_t>(static_cast<uint64_t>(lhs.i64_lane(0)) + static_cast<uint64_t>(rhs.i64_lane(0))),
             static_cast<int64_t>(static_cast<uint64_t>(lhs.i64_lane(1)) + static_cast<uint64_t>(rhs.i64_lane(1)))
-        );
-    }
-    if (lhs.is_f32x8()) {
-        return RuntimeValue::from_f32x8(
-            lhs.f32_lane(0) + rhs.f32_lane(0),
-            lhs.f32_lane(1) + rhs.f32_lane(1),
-            lhs.f32_lane(2) + rhs.f32_lane(2),
-            lhs.f32_lane(3) + rhs.f32_lane(3),
-            lhs.f32_lane(4) + rhs.f32_lane(4),
-            lhs.f32_lane(5) + rhs.f32_lane(5),
-            lhs.f32_lane(6) + rhs.f32_lane(6),
-            lhs.f32_lane(7) + rhs.f32_lane(7)
-        );
-    }
-    if (lhs.is_f64x4()) {
-        return RuntimeValue::from_f64x4(
-            lhs.f64_lane(0) + rhs.f64_lane(0),
-            lhs.f64_lane(1) + rhs.f64_lane(1),
-            lhs.f64_lane(2) + rhs.f64_lane(2),
-            lhs.f64_lane(3) + rhs.f64_lane(3)
         );
     }
     if (lhs.is_i32x8()) {
@@ -79,20 +78,7 @@ RuntimeValue val_vadd(RuntimeValue lhs, RuntimeValue rhs) {
 }
 
 RuntimeValue val_vsub(RuntimeValue lhs, RuntimeValue rhs) {
-    if (lhs.is_f32x4()) {
-        return RuntimeValue::from_f32x4(
-            lhs.f32_lane(0) - rhs.f32_lane(0),
-            lhs.f32_lane(1) - rhs.f32_lane(1),
-            lhs.f32_lane(2) - rhs.f32_lane(2),
-            lhs.f32_lane(3) - rhs.f32_lane(3)
-        );
-    }
-    if (lhs.is_f64x2()) {
-        return RuntimeValue::from_f64x2(
-            lhs.f64_lane(0) - rhs.f64_lane(0),
-            lhs.f64_lane(1) - rhs.f64_lane(1)
-        );
-    }
+    if (RuntimeValue r; float_lane_binop<FSub>(lhs, rhs, r)) return r;
     if (lhs.is_i32x4()) {
         return RuntimeValue::from_i32x4(
             static_cast<int32_t>(static_cast<uint32_t>(lhs.i32_lane(0)) - static_cast<uint32_t>(rhs.i32_lane(0))),
@@ -105,26 +91,6 @@ RuntimeValue val_vsub(RuntimeValue lhs, RuntimeValue rhs) {
         return RuntimeValue::from_i64x2(
             static_cast<int64_t>(static_cast<uint64_t>(lhs.i64_lane(0)) - static_cast<uint64_t>(rhs.i64_lane(0))),
             static_cast<int64_t>(static_cast<uint64_t>(lhs.i64_lane(1)) - static_cast<uint64_t>(rhs.i64_lane(1)))
-        );
-    }
-    if (lhs.is_f32x8()) {
-        return RuntimeValue::from_f32x8(
-            lhs.f32_lane(0) - rhs.f32_lane(0),
-            lhs.f32_lane(1) - rhs.f32_lane(1),
-            lhs.f32_lane(2) - rhs.f32_lane(2),
-            lhs.f32_lane(3) - rhs.f32_lane(3),
-            lhs.f32_lane(4) - rhs.f32_lane(4),
-            lhs.f32_lane(5) - rhs.f32_lane(5),
-            lhs.f32_lane(6) - rhs.f32_lane(6),
-            lhs.f32_lane(7) - rhs.f32_lane(7)
-        );
-    }
-    if (lhs.is_f64x4()) {
-        return RuntimeValue::from_f64x4(
-            lhs.f64_lane(0) - rhs.f64_lane(0),
-            lhs.f64_lane(1) - rhs.f64_lane(1),
-            lhs.f64_lane(2) - rhs.f64_lane(2),
-            lhs.f64_lane(3) - rhs.f64_lane(3)
         );
     }
     if (lhs.is_i32x8()) {
@@ -151,20 +117,7 @@ RuntimeValue val_vsub(RuntimeValue lhs, RuntimeValue rhs) {
 }
 
 RuntimeValue val_vmul(RuntimeValue lhs, RuntimeValue rhs) {
-    if (lhs.is_f32x4()) {
-        return RuntimeValue::from_f32x4(
-            lhs.f32_lane(0) * rhs.f32_lane(0),
-            lhs.f32_lane(1) * rhs.f32_lane(1),
-            lhs.f32_lane(2) * rhs.f32_lane(2),
-            lhs.f32_lane(3) * rhs.f32_lane(3)
-        );
-    }
-    if (lhs.is_f64x2()) {
-        return RuntimeValue::from_f64x2(
-            lhs.f64_lane(0) * rhs.f64_lane(0),
-            lhs.f64_lane(1) * rhs.f64_lane(1)
-        );
-    }
+    if (RuntimeValue r; float_lane_binop<FMul>(lhs, rhs, r)) return r;
     if (lhs.is_i32x4()) {
         return RuntimeValue::from_i32x4(
             static_cast<int32_t>(static_cast<uint32_t>(lhs.i32_lane(0)) * static_cast<uint32_t>(rhs.i32_lane(0))),
@@ -177,26 +130,6 @@ RuntimeValue val_vmul(RuntimeValue lhs, RuntimeValue rhs) {
         return RuntimeValue::from_i64x2(
             static_cast<int64_t>(static_cast<uint64_t>(lhs.i64_lane(0)) * static_cast<uint64_t>(rhs.i64_lane(0))),
             static_cast<int64_t>(static_cast<uint64_t>(lhs.i64_lane(1)) * static_cast<uint64_t>(rhs.i64_lane(1)))
-        );
-    }
-    if (lhs.is_f32x8()) {
-        return RuntimeValue::from_f32x8(
-            lhs.f32_lane(0) * rhs.f32_lane(0),
-            lhs.f32_lane(1) * rhs.f32_lane(1),
-            lhs.f32_lane(2) * rhs.f32_lane(2),
-            lhs.f32_lane(3) * rhs.f32_lane(3),
-            lhs.f32_lane(4) * rhs.f32_lane(4),
-            lhs.f32_lane(5) * rhs.f32_lane(5),
-            lhs.f32_lane(6) * rhs.f32_lane(6),
-            lhs.f32_lane(7) * rhs.f32_lane(7)
-        );
-    }
-    if (lhs.is_f64x4()) {
-        return RuntimeValue::from_f64x4(
-            lhs.f64_lane(0) * rhs.f64_lane(0),
-            lhs.f64_lane(1) * rhs.f64_lane(1),
-            lhs.f64_lane(2) * rhs.f64_lane(2),
-            lhs.f64_lane(3) * rhs.f64_lane(3)
         );
     }
     if (lhs.is_i32x8()) {
@@ -223,20 +156,7 @@ RuntimeValue val_vmul(RuntimeValue lhs, RuntimeValue rhs) {
 }
 
 RuntimeValue val_vdiv(RuntimeValue lhs, RuntimeValue rhs) {
-    if (lhs.is_f32x4()) {
-        return RuntimeValue::from_f32x4(
-            lhs.f32_lane(0) / rhs.f32_lane(0),
-            lhs.f32_lane(1) / rhs.f32_lane(1),
-            lhs.f32_lane(2) / rhs.f32_lane(2),
-            lhs.f32_lane(3) / rhs.f32_lane(3)
-        );
-    }
-    if (lhs.is_f64x2()) {
-        return RuntimeValue::from_f64x2(
-            lhs.f64_lane(0) / rhs.f64_lane(0),
-            lhs.f64_lane(1) / rhs.f64_lane(1)
-        );
-    }
+    if (RuntimeValue r; float_lane_binop<FDiv>(lhs, rhs, r)) return r;
     if (lhs.is_i32x4()) {
         auto sdiv32 = [](int32_t a, int32_t b) -> int32_t {
             if (b == 0) return 0;
@@ -259,26 +179,6 @@ RuntimeValue val_vdiv(RuntimeValue lhs, RuntimeValue rhs) {
         return RuntimeValue::from_i64x2(
             sdiv64(lhs.i64_lane(0), rhs.i64_lane(0)),
             sdiv64(lhs.i64_lane(1), rhs.i64_lane(1))
-        );
-    }
-    if (lhs.is_f32x8()) {
-        return RuntimeValue::from_f32x8(
-            lhs.f32_lane(0) / rhs.f32_lane(0),
-            lhs.f32_lane(1) / rhs.f32_lane(1),
-            lhs.f32_lane(2) / rhs.f32_lane(2),
-            lhs.f32_lane(3) / rhs.f32_lane(3),
-            lhs.f32_lane(4) / rhs.f32_lane(4),
-            lhs.f32_lane(5) / rhs.f32_lane(5),
-            lhs.f32_lane(6) / rhs.f32_lane(6),
-            lhs.f32_lane(7) / rhs.f32_lane(7)
-        );
-    }
-    if (lhs.is_f64x4()) {
-        return RuntimeValue::from_f64x4(
-            lhs.f64_lane(0) / rhs.f64_lane(0),
-            lhs.f64_lane(1) / rhs.f64_lane(1),
-            lhs.f64_lane(2) / rhs.f64_lane(2),
-            lhs.f64_lane(3) / rhs.f64_lane(3)
         );
     }
     if (lhs.is_i32x8()) {

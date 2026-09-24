@@ -283,8 +283,20 @@ private:
     FastDeoptHandler deopt_handler_;
     RuntimeValue current_exception_;
 
+    // Lowered coroutine bodies (CoroTransformPass) run as on every other
+    // tier: the handle is the BrassCoroFrame, arguments fill its slots
+    // (coro_slot_count each) and each resume calls the body with the frame.
+    // The frame's fn_ptr is the body's Function, as the Interpreter's is.
+    // active_coros_ holds only the unlowered, register-snapshot coroutines
+    // this interpreter also runs.
+    uintptr_t coro_create_lowered(const Function& fn, const std::vector<RuntimeValue>& args);
+    uint64_t coro_resume_lowered(uintptr_t frame, uint64_t input_val);
+    // The lowered body a frame's fn_ptr names, or null (generated code).
+    const Function* lowered_coro_body(const void* fn_ptr) const;
+
     std::unordered_map<uintptr_t, std::unique_ptr<FastCoroState>> active_coros_;
     FastCoroState* active_coro_frame_ = nullptr;
+    std::unordered_map<const void*, const Function*> lowered_coro_fns_;
 };
 
 } // namespace brass

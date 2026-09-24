@@ -158,8 +158,8 @@ b0:
 }
 )";
 
-// Swapped-operand float add/mul: CSE must not merge them. (Scalar only: the
-// reference interpreter's float-vector lanes do not yet follow the NaN rule.)
+// Swapped-operand float add/mul: CSE must not merge them. (Float-vector
+// lanes: test_sweep23_regressions.cpp.)
 const char* kSwapNan = R"(module @n1
 func @fuzz_fn(%a: i64, %b: i64) -> i64 {
 b0:
