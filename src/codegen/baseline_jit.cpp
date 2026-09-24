@@ -3,6 +3,7 @@
 #include <brass/target/x64/x64_encoder.hpp>
 #include <brass/target/calling_conv.hpp>
 #include <brass/gc/runtime_gc.hpp>
+#include <brass/gc/code_stack_maps.hpp>
 #include <brass/runtime/tiering.hpp>
 #include <brass/runtime/type_feedback.hpp>
 #include <brass/runtime/code_installer.hpp>
@@ -40,7 +41,8 @@ BaselineCompiledFunction::BaselineCompiledFunction(
     memory_(std::move(memory)),
     entry_point_(entry_point),
     code_size_(code_size),
-    stack_map_(std::move(stack_map)) {}
+    stack_map_(std::move(stack_map)),
+    stack_map_registration_(register_code_stack_map(stack_map_)) {}
 
 RuntimeValue BaselineCompiledFunction::invoke(const std::vector<RuntimeValue>& args) const {
     if (!entry_point_) {

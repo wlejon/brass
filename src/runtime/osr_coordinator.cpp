@@ -20,12 +20,15 @@ namespace {
 
 // Bridges an interpreter's heap to the native runtime for the duration of an
 // OSR call. OSR code allocates through brass_gc_alloc and polls
-// brass_gc_safepoint, which use the process-wide active GC and stack maps.
+// brass_gc_safepoint, which use the thread's active GC and stack maps.
 // Pointing them at the interpreter's collector (the one its own allocations
 // use) and at the OSR module's stack maps makes native allocations land in the
 // same heap as the migrated gcrefs. A collection then roots both the native
-// frames (stack-walked through the stack maps) and the interpreter frames
-// (the collector's root provider, installed by the interpreter).
+// frames (stack-walked through the code stack-map registry, which also holds
+// the maps of tier-1 and tier-2 code the OSR code calls) and the interpreter
+// frames (the collector's root provider, installed by the interpreter). Both
+// are restored on exit, so code that runs later on this thread finds the
+// maps it found before.
 class NativeGcBridge {
 public:
     NativeGcBridge(MiniCheneyGC* gc, GenerationalGC* gen_gc, const ModuleStackMap* maps) noexcept

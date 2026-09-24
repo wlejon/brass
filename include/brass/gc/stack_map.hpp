@@ -97,8 +97,16 @@ public:
     bool empty() const noexcept { return functions_.empty(); }
     void clear() noexcept { functions_.clear(); }
 
+    // An aggregate whose every function's code registers its own maps in the
+    // code registry (code_stack_maps.hpp), and which may be added to while
+    // other threads walk their stacks: a stack walk resolves frames through
+    // the registry only and never reads it.
+    void set_indexed_by_code_registry(bool v) noexcept { indexed_by_code_registry_ = v; }
+    bool indexed_by_code_registry() const noexcept { return indexed_by_code_registry_; }
+
 private:
     std::vector<FunctionStackMap> functions_;
+    bool indexed_by_code_registry_ = false;
 };
 
 // Binary serialization format

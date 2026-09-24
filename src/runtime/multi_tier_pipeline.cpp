@@ -47,6 +47,9 @@ MultiTierPipeline& MultiTierPipeline::instance() {
 
 MultiTierPipeline::MultiTierPipeline(DefaultTag)
     : table_(&FunctionDispatchTable::instance()), is_default_(true) {
+    // Every map added here is of code that registered its own (baseline
+    // functions, tier-2 modules), and threads walk while it grows.
+    active_stack_maps_.set_indexed_by_code_registry(true);
     // Registered symbols are the host's; program functions are installed in
     // the dispatch table one at a time, and shadow a symbol of their name.
     baseline_compiler_.set_module_functions_shadow(true);
@@ -57,6 +60,7 @@ MultiTierPipeline::MultiTierPipeline(FunctionDispatchTable& table)
     if (table.is_default()) {
         throw std::logic_error("MultiTierPipeline: the default program's pipeline is MultiTierPipeline::instance()");
     }
+    active_stack_maps_.set_indexed_by_code_registry(true);
     baseline_compiler_.set_dispatch_table(&table);
     baseline_compiler_.set_module_functions_shadow(true);
 }

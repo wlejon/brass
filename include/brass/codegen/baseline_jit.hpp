@@ -70,6 +70,9 @@ private:
     FunctionStackMap stack_map_;
     std::shared_ptr<const void> link_keepalive_;
     std::vector<std::string> lazy_call_symbols_;
+    // The code's entry in the code stack-map registry, shared by the copies
+    // of this function. Last, so it goes before the code memory does.
+    std::shared_ptr<const void> stack_map_registration_;
 };
 
 using BaselineSymbolResolver = std::function<void*(std::string_view)>;

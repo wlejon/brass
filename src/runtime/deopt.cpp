@@ -93,8 +93,12 @@ std::vector<RuntimeValue> DeoptFrame::to_runtime_values() const {
 }
 
 static thread_local DeoptFrame g_thread_deopt_frame;
-static DeoptHandlerFn g_deopt_handler = nullptr;
-static std::mutex g_deopt_handler_mutex;
+// Per thread: a handler resumes the frames of the code running on the thread
+// that installed it (an OSR call's handler resumes that call's interpreter
+// frame). Process-wide, concurrent OSR calls on two threads replaced and
+// restored each other's handlers, resuming one thread's guard failure in the
+// other thread's interpreter frame, or in one that had already returned.
+static thread_local DeoptHandlerFn g_deopt_handler = nullptr;
 
 DeoptFrame* get_thread_deopt_frame() noexcept {
     return &g_thread_deopt_frame;
@@ -109,12 +113,10 @@ void set_thread_deopt_frame(const DeoptFrame* frame) noexcept {
 }
 
 void register_deopt_handler(DeoptHandlerFn handler) {
-    std::lock_guard<std::mutex> lock(g_deopt_handler_mutex);
     g_deopt_handler = std::move(handler);
 }
 
 DeoptHandlerFn get_deopt_handler() {
-    std::lock_guard<std::mutex> lock(g_deopt_handler_mutex);
     return g_deopt_handler;
 }
 

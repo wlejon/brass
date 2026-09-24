@@ -1,4 +1,5 @@
 #include <brass/gc/runtime_gc.hpp>
+#include <brass/gc/code_stack_maps.hpp>
 #include <iostream>
 #include <vector>
 #include <stdexcept>
@@ -20,7 +21,10 @@ namespace {
 // (or an OSR bridge swapping in an interpreter's heap) retargeted every other
 // thread's safepoints at frames they do not have. Parallel loop bodies, the
 // one place brass runs generated code on a thread that did not install
-// these, neither allocate nor call (loop_parallel_analysis.cpp).
+// these, neither allocate nor call (loop_parallel_analysis.cpp). The maps
+// installed here only add to the code registry (code_stack_maps.hpp), through
+// which a stack walk finds the maps of all code brass loaded, so frames of a
+// tier or program other than the installed one still have their roots.
 thread_local MiniCheneyGC* g_active_gc = nullptr;
 thread_local GenerationalGC* g_active_gen_gc = nullptr;
 thread_local const ModuleStackMap* g_active_stack_maps = nullptr;
@@ -54,11 +58,29 @@ inline void get_caller_frame(uintptr_t& caller_rbp, uintptr_t& caller_ip) noexce
 }
 
 [[noreturn]] void gc_fatal_no_maps(const char* op) {
-    std::cerr << "brass: fatal: " << op << " needs a collection but no stack maps are active, "
-              << "so live gcrefs in native frames cannot be found; call "
-              << "brass_set_active_stack_maps with the running code's maps\n";
+    std::cerr << "brass: fatal: " << op << " needs a collection but no stack maps are active "
+              << "and the calling code has none registered, so live gcrefs in native frames "
+              << "cannot be found; call brass_set_active_stack_maps with the running code's maps\n";
     std::cerr.flush();
     std::abort();
+}
+
+// The maps a collection requested from caller_ip walks this thread's native
+// frames with. The stack walk resolves every frame of code brass loaded
+// through the code registry, whatever the thread has installed; the maps the
+// thread installed add code registered elsewhere. A thread that installed
+// none walks with the registry alone, provided the code asking is registered
+// code: then its frames, and the brass frames under it, have maps. Null when
+// nothing describes the caller's frame.
+const ModuleStackMap* walk_maps(uintptr_t caller_ip) noexcept {
+    if (g_active_stack_maps) return g_active_stack_maps;
+    static const ModuleStackMap* const registry_only = [] {
+        auto* m = new ModuleStackMap();
+        m->set_indexed_by_code_registry(true);
+        return m;
+    }();
+    if (caller_ip != 0 && code_stack_maps_cover(caller_ip)) return registry_only;
+    return nullptr;
 }
 
 } // namespace
@@ -230,14 +252,15 @@ void brass_runtime_gc_safepoint_bridge(uintptr_t caller_rbp, uintptr_t caller_ip
     if (auto* gen_gc = brass::brass_get_active_generational_gc()) {
         // A safepoint is an opportunity, not a demand: without stack maps the
         // native frames' roots are unknown, so collecting here would be unsafe.
-        if (const auto* maps = brass::brass_get_active_stack_maps()) {
+        if (const auto* maps = brass::walk_maps(caller_ip)) {
             brass::brass_runtime_gc_safepoint(gen_gc, *maps, caller_rbp, caller_ip);
         }
         return;
     }
     auto* gc = brass::brass_get_active_gc();
-    const auto* maps = brass::brass_get_active_stack_maps();
-    if (!gc || !maps) return;
+    if (!gc) return;
+    const auto* maps = brass::walk_maps(caller_ip);
+    if (!maps) return;
     brass::brass_runtime_gc_safepoint(gc, *maps, caller_rbp, caller_ip);
 }
 
@@ -246,7 +269,7 @@ uintptr_t brass_runtime_gc_alloc_bridge(size_t size, uint64_t pointer_mask, uint
         if (gen_gc->can_allocate_fast(size)) {
             return gen_gc->allocate(size, pointer_mask, type_tag);
         }
-        const auto* maps = brass::brass_get_active_stack_maps();
+        const auto* maps = brass::walk_maps(caller_ip);
         if (!maps) brass::gc_fatal_no_maps("brass_gc_alloc");
         return brass::brass_runtime_gc_alloc(gen_gc, *maps, size, pointer_mask, type_tag, caller_rbp, caller_ip);
     }
@@ -255,7 +278,7 @@ uintptr_t brass_runtime_gc_alloc_bridge(size_t size, uint64_t pointer_mask, uint
     if (gc->can_allocate_fast(size)) {
         return gc->allocate(size, pointer_mask, type_tag);
     }
-    const auto* maps = brass::brass_get_active_stack_maps();
+    const auto* maps = brass::walk_maps(caller_ip);
     if (!maps) brass::gc_fatal_no_maps("brass_gc_alloc");
     return brass::brass_runtime_gc_alloc(gc, *maps, size, pointer_mask, type_tag, caller_rbp, caller_ip);
 }
@@ -290,7 +313,7 @@ void brass_gc_safepoint() {
     uintptr_t caller_ip = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
 
     // Without stack maps the native frames' roots are unknown: skip.
-    const auto* maps = brass::brass_get_active_stack_maps();
+    const auto* maps = brass::walk_maps(caller_ip);
     if (!maps) return;
     if (auto* gen_gc = brass::brass_get_active_generational_gc()) {
         brass::brass_runtime_gc_safepoint(gen_gc, *maps, caller_rbp, caller_ip);
@@ -306,11 +329,11 @@ uintptr_t brass_gc_alloc(size_t size, uint64_t pointer_mask, uint32_t type_tag) 
         if (gen_gc->can_allocate_fast(size)) {
             return gen_gc->allocate(size, pointer_mask, type_tag);
         }
-        const auto* maps = brass::brass_get_active_stack_maps();
-        if (!maps) brass::gc_fatal_no_maps("brass_gc_alloc");
         void* frame = __builtin_frame_address(0);
         uintptr_t caller_rbp = frame ? *reinterpret_cast<uintptr_t*>(frame) : 0;
         uintptr_t caller_ip = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
+        const auto* maps = brass::walk_maps(caller_ip);
+        if (!maps) brass::gc_fatal_no_maps("brass_gc_alloc");
         return brass::brass_runtime_gc_alloc(gen_gc, *maps, size, pointer_mask, type_tag, caller_rbp, caller_ip);
     }
     auto* gc = brass::brass_get_active_gc();
@@ -318,12 +341,11 @@ uintptr_t brass_gc_alloc(size_t size, uint64_t pointer_mask, uint32_t type_tag) 
     if (gc->can_allocate_fast(size)) {
         return gc->allocate(size, pointer_mask, type_tag);
     }
-    const auto* maps = brass::brass_get_active_stack_maps();
-    if (!maps) brass::gc_fatal_no_maps("brass_gc_alloc");
-
     void* frame = __builtin_frame_address(0);
     uintptr_t caller_rbp = frame ? *reinterpret_cast<uintptr_t*>(frame) : 0;
     uintptr_t caller_ip = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
+    const auto* maps = brass::walk_maps(caller_ip);
+    if (!maps) brass::gc_fatal_no_maps("brass_gc_alloc");
 
     return brass::brass_runtime_gc_alloc(gc, *maps, size, pointer_mask, type_tag, caller_rbp, caller_ip);
 }
@@ -335,7 +357,7 @@ void brass_gc_collect() {
 
     // Same as a safepoint (the MSVC stub routes both through one bridge):
     // without stack maps the native frames' roots are unknown, so skip.
-    const auto* maps = brass::brass_get_active_stack_maps();
+    const auto* maps = brass::walk_maps(caller_ip);
     if (!maps) return;
     if (auto* gen_gc = brass::brass_get_active_generational_gc()) {
         brass::brass_runtime_gc_safepoint(gen_gc, *maps, caller_rbp, caller_ip);

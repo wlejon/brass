@@ -241,13 +241,16 @@ using DeoptHandlerFn = std::function<void*(const DeoptFrame&)>;
 
 DeoptFrame* get_thread_deopt_frame() noexcept;
 void set_thread_deopt_frame(const DeoptFrame* frame) noexcept;
+// The calling thread's deopt handler: it handles guard failures of code
+// running on this thread only. Whoever installs one for a scope (an OSR
+// call) restores the previous one when the scope ends.
 void register_deopt_handler(DeoptHandlerFn handler);
 DeoptHandlerFn get_deopt_handler();
 
 // Per-code deopt continuation: given the materialized frame, finishes the
 // function in a lower tier and returns its result bits. Registered by the
 // tier-2 installer for each entry point it publishes; takes precedence over
-// the process-wide handler.
+// the thread's handler.
 using DeoptResumerFn = std::function<uint64_t(const DeoptFrame&)>;
 void register_deopt_resumer(void* code_entry, DeoptResumerFn resumer);
 void unregister_deopt_resumer(void* code_entry);

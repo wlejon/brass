@@ -1,4 +1,5 @@
 #include <brass/gc/stack_walker.hpp>
+#include <brass/gc/code_stack_maps.hpp>
 #include <iostream>
 
 #if defined(_WIN32)
@@ -26,6 +27,8 @@ size_t brass_stack_walk(
 
     constexpr size_t MAX_FRAMES = 1024;
 
+    const auto registered = code_stack_map_snapshot();
+
 #if defined(_WIN32)
     uintptr_t stack_low = 0;
     uintptr_t stack_high = UINTPTR_MAX;
@@ -46,7 +49,12 @@ size_t brass_stack_walk(
             break;
         }
 
-        const FunctionStackMap* fn_map = stack_maps.find_function_by_ip(cur_return_ip);
+        // The registry holds the maps of all code brass loaded; the given maps
+        // add code registered elsewhere (an embedder's own images).
+        const FunctionStackMap* fn_map = find_code_stack_map(registered.get(), cur_return_ip);
+        if (fn_map == nullptr && !stack_maps.indexed_by_code_registry()) {
+            fn_map = stack_maps.find_function_by_ip(cur_return_ip);
+        }
         if (fn_map != nullptr) {
             const StackMapRecord* rec = fn_map->find_record_by_ip(cur_return_ip);
             if (rec != nullptr) {

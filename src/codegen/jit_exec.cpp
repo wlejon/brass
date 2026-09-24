@@ -3,6 +3,7 @@
 #include <brass/object/elf_writer.hpp>
 #include <brass/object/aarch64_reloc.hpp>
 #include <brass/gc/runtime_gc.hpp>
+#include <brass/gc/code_stack_maps.hpp>
 #include <brass/runtime/deopt.hpp>
 #include <brass/runtime/resume_table.hpp>
 #include <brass/runtime/patcher.hpp>
@@ -127,6 +128,7 @@ JitExecutionEngine::JitExecutionEngine()
 }
 
 JitExecutionEngine::~JitExecutionEngine() {
+    stack_map_registration_.reset();
     unregister_seh_tables();
     unregister_eh_frame();
     for (uintptr_t fn_addr : registered_exception_fns_) {
@@ -149,6 +151,7 @@ JitExecutionEngine::JitExecutionEngine(JitExecutionEngine&& other) noexcept
       external_symbols_(std::move(other.external_symbols_)),
       function_signatures_(std::move(other.function_signatures_)),
       stack_maps_(std::move(other.stack_maps_)),
+      stack_map_registration_(std::move(other.stack_map_registration_)),
       osr_entry_offsets_(std::move(other.osr_entry_offsets_)),
       pdata_table_(other.pdata_table_),
       pdata_count_(other.pdata_count_),
@@ -165,6 +168,8 @@ JitExecutionEngine& JitExecutionEngine::operator=(JitExecutionEngine&& other) no
     if (this != &other) {
         unregister_seh_tables();
         unregister_eh_frame();
+        // Before this engine's code is freed.
+        stack_map_registration_ = std::move(other.stack_map_registration_);
         registered_fdes_ = std::move(other.registered_fdes_);
         other.registered_fdes_.clear();
         target_ = other.target_;
@@ -212,6 +217,8 @@ bool JitExecutionEngine::compile_and_load(const Module& mod, size_t code_padding
 }
 
 bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_padding) {
+    // Before the previous code can be freed and its addresses reused.
+    stack_map_registration_.reset();
     unregister_seh_tables();
     unregister_eh_frame();
     symbol_table_.clear();
@@ -626,7 +633,10 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
     } else {
         text_section_base_ = module_base;
     }
-    brass_set_active_stack_maps(&stack_maps_);
+    // Loading code does not touch any thread's active maps (an OSR compile
+    // would retarget the compiling thread's GC at the OSR module alone): the
+    // code registry makes the maps found wherever the code runs.
+    stack_map_registration_ = register_code_stack_maps(stack_maps_);
 
     // Register Resume Tables and Patch Sites
     resume_tables_ = working_obj.resume_tables;

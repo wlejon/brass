@@ -271,6 +271,8 @@ private:
     std::unordered_map<std::string, void*> external_symbols_;
     std::unordered_map<std::string, std::pair<Type, std::vector<Type>>> function_signatures_;
     ModuleStackMap stack_maps_;
+    // The loaded code's entry in the code stack-map registry.
+    std::shared_ptr<const void> stack_map_registration_;
     runtime::ResumeTableRegistry resume_tables_;
     runtime::PatchRegistry patch_sites_;
     std::unordered_map<std::string, size_t> osr_entry_offsets_;
