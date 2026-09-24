@@ -2,17 +2,24 @@
 //
 // 1. A speculative-inliner guard resumed nowhere: its resume id matched no
 //    guard or resume point, so a failing guard threw (Tier 0) or had no
-//    state to resume with. It now resumes at a resume_table block of its
-//    own that makes the original indirect call, and its state holds the
-//    callee, the arguments and every value live after the call.
+//    state to resume with. The identity check is now a br_if to a slow
+//    block of the same function that makes the original indirect call: the
+//    CFG shows the slow path to every later pass (a resume_table block,
+//    unreachable from the entry, let GVN make the code after the call read
+//    a value only the fast path computes), and no deoptimization is needed.
+//    Both interpreters' frameless resume from a guard also rebuilds the
+//    guard's state-map values, not only the resume block's parameters.
 // 2. Tier 2 refused clz / ctz and the overflow checks on i8 / i16 operands
 //    (x64 and AArch64 isel). They are now lowered at the narrow width.
 // 3. The AArch64 guard exit probed a large deopt record by moving SP one
 //    page at a time, so SP sat at heights no unwind info describes. It now
 //    probes below SP through X16 and moves SP once.
-// 4. Tier 2 refused code with a speculative-inliner guard: no Tier-0 guard
-//    matched it. Such a guard resumes in the optimized function itself, so
-//    the installer now lowers it to a branch to its resume block.
+// 4. Tier 2 refused code with a speculative-inliner guard (no Tier-0 guard
+//    matched it); with a branch there is nothing to refuse.
+// 5. func_addr in tier-2 code yielded the engine's own copy of a function,
+//    so a pointer made in Tier 0 or Tier 1 (the function's module stub)
+//    never passed a tier-2 speculative identity check. Tier 2's func_addr
+//    now yields the same stub.
 #include "test_framework.hpp"
 #include <brass/codegen/jit_exec.hpp>
 #include <brass/codegen/lir.hpp>
@@ -20,12 +27,15 @@
 #include <brass/mir/builder.hpp>
 #include <brass/mir/module.hpp>
 #include <brass/mir/parser.hpp>
+#include <brass/mir/pass_catalog.hpp>
+#include <brass/mir/pass_manager.hpp>
 #include <brass/mir/printer.hpp>
 #include <brass/mir/speculative_inliner.hpp>
 #include <brass/mir/verifier.hpp>
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/deopt.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
+#include <brass/runtime/tiering.hpp>
 #include <brass/runtime/type_feedback.hpp>
 #include <brass/target/aarch64/aarch64_emit.hpp>
 #include <brass/target/aarch64/aarch64_isel.hpp>
@@ -99,18 +109,19 @@ struct SpecCase {
         REQUIRE(ok);
     }
 
-    const Instruction* guard() const {
-        const Instruction* g = nullptr;
+    // The only instruction of `op` in the caller.
+    const Instruction* only(Opcode op) const {
+        const Instruction* found = nullptr;
         for (const BasicBlock* bb : caller->blocks()) {
             for (const Instruction* inst : *const_cast<BasicBlock*>(bb)) {
-                if (inst && inst->opcode() == Opcode::guard) {
-                    REQUIRE(g == nullptr);
-                    g = inst;
+                if (inst && inst->opcode() == op) {
+                    REQUIRE(found == nullptr);
+                    found = inst;
                 }
             }
         }
-        REQUIRE(g != nullptr);
-        return g;
+        REQUIRE(found != nullptr);
+        return found;
     }
 };
 
@@ -237,28 +248,106 @@ bool writes_sp(uint32_t w) {
     return (add_sub_imm || add_sub_ext) && (w & 31u) == 31u;
 }
 
-} // namespace
-
-TEST_CASE("Sweep35b - a speculative guard has its own id and a resume target that makes the original call") {
-    SpecCase c;
-    const Instruction* g = c.guard();
-    // Its id names this guard and a block of the function.
-    CHECK(c.caller->find_guard(g->resume_id()) == g);
-    const BasicBlock* slow = c.caller->get_resume_target(g->resume_id());
-    REQUIRE(slow != nullptr);
-    CHECK(c.caller->guard_exit_stub(*g) == nullptr);
-    // The block's parameters take the callee and the argument; the state
-    // also carries %k, which the code after the call reads.
-    REQUIRE(slow->param_count() == 2);
-    REQUIRE(g->state_map().size() >= 3);
-    CHECK(g->state_map()[0] == c.fp);
-    CHECK(g->state_map()[1] == c.x);
-    bool has_k = false;
-    for (const Value* v : g->state_map()) has_k = has_k || v == c.k;
-    CHECK(has_k);
+size_t count_op(const Function& fn, Opcode op) {
+    size_t n = 0;
+    for (const BasicBlock* bb : fn.blocks()) {
+        for (const Instruction* inst : *const_cast<BasicBlock*>(bb)) {
+            if (inst && inst->opcode() == op) ++n;
+        }
+    }
+    return n;
 }
 
-TEST_CASE("Sweep35b - a failing speculative guard finishes the call in Tier 0") {
+// The site id of fn's only call_indirect.
+uint32_t call_site(const Function& fn) {
+    uint32_t site = UINT32_MAX;
+    for (const BasicBlock* bb : fn.blocks()) {
+        for (const Instruction* inst : *const_cast<BasicBlock*>(bb)) {
+            if (inst && inst->opcode() == Opcode::call_indirect) {
+                REQUIRE(site == UINT32_MAX);
+                site = inst->site_id();
+            }
+        }
+    }
+    REQUIRE(site != UINT32_MAX);
+    return site;
+}
+
+// A guard whose resume block's successor reads %k, a state value that is
+// not one of the block's parameters.
+const char* kGuardResume = R"(module @s35b_resume
+func @f(%x: i64) -> i64 {
+b0:
+  %seven = iconst.i64 7
+  %k = mul %x, %seven
+  %lim = iconst.i64 100
+  %ok = slt %x, %lim
+  guard %ok, @s35b_slow_path, [%x, %k], id 0
+  br done(%x)
+slow(%sx: i64):
+  br done(%sx)
+done(%v: i64):
+  %s = add %v, %k
+  ret %s
+resume_table {
+  entry 0 -> slow
+}
+}
+)";
+
+// caller(fp, x) = fp(x) + (x + 10); expected_fn computes the same x + 10.
+const char* kSpecGvn = R"(module @s35b_gvn
+func @expected_fn(%a: i64) -> i64 {
+b0:
+  %c = iconst.i64 10
+  %r = add %a, %c
+  ret %r
+}
+func @unexpected_fn(%a: i64) -> i64 {
+b0:
+  %c = iconst.i64 100
+  %r = mul %a, %c
+  ret %r
+}
+func @caller(%fp: ptr, %x: i64) -> i64 {
+b0:
+  %r = call_indirect.i64 %fp(%x)
+  %ten = iconst.i64 10
+  %t = add %x, %ten
+  %s = add %r, %t
+  ret %s
+}
+)";
+
+} // namespace
+
+TEST_CASE("Sweep35b - a speculative identity check branches to a slow path that makes the original call") {
+    SpecCase c;
+    // No guard and no resume point: nothing to deoptimize to.
+    CHECK_EQ(count_op(*c.caller, Opcode::guard), 0u);
+    CHECK(c.caller->resume_points().empty());
+    // br_if (fp == func_addr @expected_fn): the slow target makes the
+    // original call on the original callee and argument.
+    const Instruction* eq = c.only(Opcode::eq);
+    CHECK(eq->operand(0) == c.fp);
+    REQUIRE(eq->operand(1)->defining_instruction() != nullptr);
+    CHECK(eq->operand(1)->defining_instruction()->opcode() == Opcode::func_addr);
+    CHECK_EQ(std::string(eq->operand(1)->defining_instruction()->symbol()), std::string("expected_fn"));
+    const Instruction* br = c.only(Opcode::br_if);
+    CHECK(br->operand(0) == eq->result());
+    const Instruction* slow_call = c.only(Opcode::call_indirect);
+    CHECK(slow_call->parent() == br->false_target().block);
+    REQUIRE(slow_call->operand_count() == 2);
+    CHECK(slow_call->operand(0) == c.fp);
+    CHECK(slow_call->operand(1) == c.x);
+    // Every block is reachable from the entry: the slow path is ordinary CFG.
+    c.caller->rebuild_cfg_predecessors();
+    for (const BasicBlock* bb : c.caller->blocks()) {
+        if (bb != c.caller->entry_block()) CHECK(!bb->predecessors().empty());
+    }
+}
+
+TEST_CASE("Sweep35b - a failing speculative identity check finishes the call in both interpreters") {
     SpecCase c;
     Interpreter interp;
     const uintptr_t exp_ptr = interp.function_address(*c.expected_fn);
@@ -268,37 +357,83 @@ TEST_CASE("Sweep35b - a failing speculative guard finishes the call in Tier 0") 
     CHECK_EQ(fast.as_i64(), 15 + 35);
     CHECK(!interp.last_deopt().deoptimized);
 
-    // No deopt handler: the guard resumes at its block (it used to throw).
+    // No deopt handler needed: the slow path makes the call (it used to throw).
     RuntimeValue slow = interp.run(c.mod, "caller", {RuntimeValue::from_ptr(unexp_ptr), RuntimeValue::from_i64(5)});
-    CHECK(interp.last_deopt().deoptimized);
+    CHECK(!interp.last_deopt().deoptimized);
     CHECK_EQ(slow.as_i64(), 500 + 35);
+
+    FastInterpreter fi;
+    const uintptr_t fexp = fi.function_address(*c.expected_fn);
+    const uintptr_t funexp = fi.function_address(*c.unexpected_fn);
+    CHECK_EQ(fi.run(c.mod, "caller", {RuntimeValue::from_ptr(fexp), RuntimeValue::from_i64(6)}).as_i64(), 16 + 42);
+    CHECK_EQ(fi.run(c.mod, "caller", {RuntimeValue::from_ptr(funexp), RuntimeValue::from_i64(6)}).as_i64(),
+             600 + 42);
+    CHECK(!fi.last_deopt().deoptimized);
 }
 
-TEST_CASE("Sweep35b - a speculative guard's deopt state alone resumes the call") {
+TEST_CASE("Sweep35b - a guard's frameless resume rebuilds its state-map values") {
     // What a native deopt does: a fresh frame built from the guard's state.
-    SpecCase c;
-    const Instruction* g = c.guard();
+    // The code after the resume block reads %k, a state value that is not
+    // one of the block's parameters.
+    auto mod = parse_ok(kGuardResume);
+    const Function* f = mod->get_function("f");
+    REQUIRE(f != nullptr);
+    const std::vector<RuntimeValue> state = {RuntimeValue::from_i64(500), RuntimeValue::from_i64(42)};
     Interpreter interp;
-    const uintptr_t unexp_ptr = interp.function_address(*c.unexpected_fn);
-    std::unordered_map<const Value*, RuntimeValue> known = {
-        {c.fp, RuntimeValue::from_ptr(unexp_ptr)},
-        {c.x, RuntimeValue::from_i64(6)},
-        {c.k, RuntimeValue::from_i64(42)},
-    };
-    std::vector<RuntimeValue> state;
-    for (const Value* v : g->state_map()) {
-        auto it = known.find(v);
-        REQUIRE(it != known.end());
-        state.push_back(it->second);
-    }
-    RuntimeValue r = interp.resume_after_guard(*c.caller, g->resume_id(), state, nullptr);
-    CHECK_EQ(r.as_i64(), 600 + 42);
+    interp.set_module(mod.get());
+    CHECK_EQ(interp.resume_after_guard(*f, 0, state, nullptr).as_i64(), 500 + 42);
+    // Sanity: run normally, the guard holds.
+    CHECK_EQ(interp.run(*f, {RuntimeValue::from_i64(6)}).as_i64(), 6 + 42);
 
     // The FastInterpreter's resume rebuilds the same registers.
     FastInterpreter fi;
-    state[0] = RuntimeValue::from_ptr(fi.function_address(*c.unexpected_fn));
-    RuntimeValue rf = fi.resume_from_native(*c.caller, g->resume_id(), state);
-    CHECK_EQ(rf.as_i64(), 600 + 42);
+    CHECK_EQ(fi.resume_from_native(*f, 0, state).as_i64(), 500 + 42);
+}
+
+TEST_CASE("Sweep35b - GVN cannot make the code after a speculated call read a fast-path value") {
+    // caller(fp, x) = fp(x) + (x + 10), speculated on expected_fn(a) = a + 10
+    // and inlined. With the slow path hidden behind a guard's resume block
+    // (unreachable from the entry), the inlined `x + 10` dominated the code
+    // after the call, GVN replaced that code's `x + 10` with it, and a
+    // failing guard resumed into code reading a value never computed.
+    auto mod = parse_ok(kSpecGvn);
+    Function* caller = mod->get_function("caller");
+    TypeFeedbackVector tfv("caller");
+    tfv.record_call_target(call_site(*caller), 0, "expected_fn");
+    SpeculativeInlinerOptions opts;
+    opts.enable_inlining = true;
+    REQUIRE(run_speculative_devirtualization(*caller, *mod, &tfv, opts));
+    REQUIRE_EQ(count_op(*caller, Opcode::call), 0u);  // inlined
+
+    Pipeline p;
+    p.add(passes::gvn(FunctionFilter::All));
+    p.add(passes::gvn_pre(nullptr, FunctionFilter::All));
+    p.add(passes::sccp(true, FunctionFilter::All));
+    p.add(passes::cfg_simplify("cfg_simplify", FunctionFilter::All));
+    run_pipeline(*mod, p);
+    DiagnosticReporter diag;
+    const bool ok = verify_module(*mod, &diag);
+    if (!ok) std::cerr << diag.format_all() << "\n";
+    REQUIRE(ok);
+    CHECK_EQ(count_op(*caller, Opcode::call_indirect), 1u);
+
+    Interpreter interp;
+    const uintptr_t exp_ptr = interp.function_address(*mod->get_function("expected_fn"));
+    const uintptr_t unexp_ptr = interp.function_address(*mod->get_function("unexpected_fn"));
+    FastInterpreter fi;
+    const uintptr_t fexp = fi.function_address(*mod->get_function("expected_fn"));
+    const uintptr_t funexp = fi.function_address(*mod->get_function("unexpected_fn"));
+    for (int64_t x : {int64_t{0}, int64_t{3}, int64_t{-7}}) {
+        CHECK_EQ(interp.run(*mod, "caller", {RuntimeValue::from_ptr(exp_ptr), RuntimeValue::from_i64(x)}).as_i64(),
+                 (x + 10) + (x + 10));
+        CHECK_EQ(interp.run(*mod, "caller", {RuntimeValue::from_ptr(unexp_ptr), RuntimeValue::from_i64(x)}).as_i64(),
+                 x * 100 + (x + 10));
+        CHECK(!interp.last_deopt().deoptimized);
+        CHECK_EQ(fi.run(*mod, "caller", {RuntimeValue::from_ptr(fexp), RuntimeValue::from_i64(x)}).as_i64(),
+                 (x + 10) + (x + 10));
+        CHECK_EQ(fi.run(*mod, "caller", {RuntimeValue::from_ptr(funexp), RuntimeValue::from_i64(x)}).as_i64(),
+                 x * 100 + (x + 10));
+    }
 }
 
 TEST_CASE("Sweep35b - tier 2 computes narrow clz, ctz and overflow checks at their width") {
@@ -429,41 +564,26 @@ b0:
   %s = add %r, %k
   ret %s
 }
+func @get_exp() -> ptr {
+b0:
+  %p = func_addr @expected_fn
+  ret %p
+}
 )";
 
-size_t count_op(const Function& fn, Opcode op) {
-    size_t n = 0;
-    for (const BasicBlock* bb : fn.blocks()) {
-        for (const Instruction* inst : *const_cast<BasicBlock*>(bb)) {
-            if (inst && inst->opcode() == op) ++n;
-        }
-    }
-    return n;
+TieringConfig no_tierup() {
+    TieringConfig cfg;
+    cfg.invocation_tier1_threshold = 1000000;
+    cfg.invocation_tier2_threshold = 1000000000;
+    cfg.enable_background_compile = false;
+    cfg.set_use_fast_interpreter(false);
+    return cfg;
 }
 
 } // namespace
 
-TEST_CASE("Sweep35b - a speculative guard lowers to a branch to its resume block") {
+TEST_CASE("Sweep35b - tier 2 compiles a speculated call with no guard exit") {
     SpecCase c;
-    const uint32_t id = c.guard()->resume_id();
-    REQUIRE(lower_guards_to_local_branch(*c.caller, c.mod, id));
-    DiagnosticReporter diag;
-    const bool ok = verify_function(*c.caller, &diag);
-    if (!ok) std::cerr << diag.format_all() << "\n";
-    REQUIRE(ok);
-    CHECK_EQ(count_op(*c.caller, Opcode::guard), 0u);
-    CHECK(c.caller->get_resume_target(id) == nullptr);
-    CHECK_EQ(count_op(*c.caller, Opcode::call_indirect), 1u);
-
-    // The interpreter takes the branch as it took the guard.
-    Interpreter interp;
-    const uintptr_t exp_ptr = interp.function_address(*c.expected_fn);
-    const uintptr_t unexp_ptr = interp.function_address(*c.unexpected_fn);
-    CHECK_EQ(interp.run(c.mod, "caller", {RuntimeValue::from_ptr(exp_ptr), RuntimeValue::from_i64(5)}).as_i64(),
-             15 + 35);
-    CHECK_EQ(interp.run(c.mod, "caller", {RuntimeValue::from_ptr(unexp_ptr), RuntimeValue::from_i64(5)}).as_i64(),
-             500 + 35);
-
     // Tier 2 compiles it with no guard exit, on either target.
     JitExecutionEngine jit;
     REQUIRE(jit.compile_and_load(c.mod));
@@ -484,21 +604,22 @@ TEST_CASE("Sweep35b - a speculative guard lowers to a branch to its resume block
     CHECK(lir->resume_entries.empty());
 }
 
-TEST_CASE("Sweep35b - tier 2 installs speculatively inlined code whose guard passes and fails natively") {
+TEST_CASE("Sweep35b - tier 2 installs speculatively inlined code whose identity check passes and fails natively") {
     auto mod = parse_ok(kSpecTier2);
     FunctionDispatchTable prog;
     prog.tiering().type_feedback().get_or_create("caller").record_call_target(1, 0, "expected_fn");
 
-    // The tier-2 pipeline's speculation fires on this feedback: a guard
-    // Tier 0 does not have.
+    // The tier-2 pipeline's speculation fires on this feedback: an identity
+    // check branching to a slow call, no guard.
     {
         auto copy = parse_ok(kSpecTier2);
         SpeculativeInlinerOptions opts;
         opts.enable_inlining = true;
         REQUIRE(run_speculative_devirtualization(*copy, prog.tiering().type_feedback(), opts));
         const Function* spec = copy->get_function("caller");
-        REQUIRE_EQ(count_op(*spec, Opcode::guard), 1u);
-        CHECK_EQ(count_op(*mod->get_function("caller"), Opcode::guard), 0u);
+        REQUIRE_EQ(count_op(*spec, Opcode::func_addr), 1u);
+        CHECK_EQ(count_op(*spec, Opcode::call_indirect), 1u);
+        CHECK_EQ(count_op(*spec, Opcode::guard), 0u);
     }
 
     FunctionHandle* h = prog.get_or_create("caller", mod->get_function("caller"));
@@ -510,8 +631,9 @@ TEST_CASE("Sweep35b - tier 2 installs speculatively inlined code whose guard pas
     CHECK(h->tier() == TierLevel::Tier2_Optimized);
     REQUIRE(h->jit_engine() != nullptr);
 
-    // The pointers the tier-2 code's own func_addr yields: @expected_fn's
-    // passes the guard, @unexpected_fn's fails it and makes the call.
+    // The pointers the tier-2 code's own func_addr yields in a program whose
+    // pipeline is not initialized (the engine's copies): @expected_fn's
+    // passes the check, @unexpected_fn's fails it and makes the call.
     void* exp_native = h->jit_engine()->get_symbol_address("expected_fn");
     void* unexp_native = h->jit_engine()->get_symbol_address("unexpected_fn");
     REQUIRE(exp_native != nullptr);
@@ -536,8 +658,57 @@ TEST_CASE("Sweep35b - tier 2 installs speculatively inlined code whose guard pas
         CHECK_EQ(native(exp_native, x), want_pass);
         CHECK_EQ(native(unexp_native, x), want_fail);
     }
-    // A failing guard branched inside the tier-2 code: nothing deoptimized,
+    // A failing check branched inside the tier-2 code: nothing deoptimized,
     // and the code is still installed.
     CHECK_EQ(prog.pipeline().tier2_deopts(), deopts0);
     CHECK(h->tier() == TierLevel::Tier2_Optimized);
+}
+
+TEST_CASE("Sweep35b - a Tier-0 function pointer takes the tier-2 speculative fast path") {
+    auto mod = parse_ok(kSpecTier2);
+    FunctionDispatchTable prog;
+    prog.pipeline().initialize(no_tierup());
+    Interpreter interp;
+    interp.set_dispatch_table(&prog);
+    interp.set_module(mod.get());
+    const Function* expected_fn = mod->get_function("expected_fn");
+    const Function* unexpected_fn = mod->get_function("unexpected_fn");
+    const Function* caller = mod->get_function("caller");
+
+    // The pointers Tier 0 makes (the functions' module stubs).
+    const uintptr_t exp_ptr = interp.function_address(*expected_fn);
+    const uintptr_t unexp_ptr = interp.function_address(*unexpected_fn);
+    // The callees run in Tier 1, which counts their invocations: a call
+    // through a pointer reaches them, the inlined fast path does not.
+    REQUIRE(prog.pipeline().compile_and_install_tier1("expected_fn", expected_fn));
+    REQUIRE(prog.pipeline().compile_and_install_tier1("unexpected_fn", unexpected_fn));
+    FunctionHandle* get = prog.get_or_create("get_exp", mod->get_function("get_exp"));
+
+    prog.tiering().type_feedback().get_or_create("caller").record_call_target(call_site(*caller), 0, "expected_fn");
+    FunctionHandle* h = prog.get_or_create("caller", caller);
+    CodeInstaller installer(prog);
+    CodeInstallResult res = installer.install_tier2(*h, *mod, "caller");
+    if (!res.success) std::cerr << res.error_message << "\n";
+    REQUIRE(res.success);
+    REQUIRE(h->tier() == TierLevel::Tier2_Optimized);
+    auto native = h->get_function_ptr<int64_t (*)(void*, int64_t)>();
+    REQUIRE(native != nullptr);
+
+    // func_addr in tier-2 code yields the pointer Tier 0 made.
+    REQUIRE(get->native_entry() != nullptr);
+    CHECK_EQ(reinterpret_cast<uintptr_t>(get->get_function_ptr<void* (*)()>()()), exp_ptr);
+
+    TieringFeedback& exp_fb = prog.tiering().get_feedback("expected_fn");
+    TieringFeedback& unexp_fb = prog.tiering().get_feedback("unexpected_fn");
+    const uint64_t exp0 = exp_fb.invocation_count();
+    const uint64_t unexp0 = unexp_fb.invocation_count();
+    for (int64_t x : {int64_t{0}, int64_t{5}, int64_t{-3}, int64_t{1} << 40}) {
+        CHECK_EQ(native(reinterpret_cast<void*>(exp_ptr), x), x + 10 + 7 * x);
+        CHECK_EQ(native(reinterpret_cast<void*>(unexp_ptr), x), x * 100 + 7 * x);
+    }
+    // The Tier-0 pointer to @expected_fn passed the check every time (the
+    // inlined body ran, the function was never called); the one to
+    // @unexpected_fn failed it and was called through its stub.
+    CHECK_EQ(exp_fb.invocation_count(), exp0);
+    CHECK_EQ(unexp_fb.invocation_count(), unexp0 + 4);
 }

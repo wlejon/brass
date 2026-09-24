@@ -7,7 +7,6 @@
 #include <brass/gc/native_frames.hpp>
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/pass_catalog.hpp>
-#include <brass/mir/speculative_inliner.hpp>
 #include <brass/mir/verifier.hpp>
 #include <brass/runtime/host_symbols.hpp>
 #include <brass/runtime/type_feedback.hpp>
@@ -54,36 +53,47 @@ bool run_tier2_optimization_pipeline(Module& mod, const FeedbackRegistry& feedba
     return false;
 }
 
-// A guard of the optimized code that matches no guard of the Tier-0
-// function (`tier0`, null when there is none) but resumes at a resume_table
-// block of the optimized function itself (the speculative inliner's, whose
-// block makes the original call) has nowhere to deoptimize to, and needs
-// nowhere: it becomes the branch to that block its failure takes in the
-// interpreters. Guards Tier 0 knows keep deoptimizing into it. Returns false
-// with `why` set when a lowered function no longer verifies.
-bool lower_local_resume_guards(Module& mod, Function& optimized, const Function* tier0, std::string& why) {
-    std::vector<uint32_t> ids;
-    for (const BasicBlock* bb : optimized.blocks()) {
-        if (!bb) continue;
-        for (const Instruction* inst : *const_cast<BasicBlock*>(bb)) {
-            if (!inst || inst->opcode() != Opcode::guard) continue;
-            const uint32_t id = inst->resume_id();
-            if (tier0 && tier0->find_guard(id)) continue;
-            if (optimized.guard_exit_stub(*inst) || !optimized.get_resume_target(id)) continue;
-            if (std::find(ids.begin(), ids.end(), id) == ids.end()) ids.push_back(id);
+// The prefix of the symbol a canonicalized func_addr links against.
+constexpr std::string_view kCanonicalFnPtrPrefix = "brass.fn_ptr:";
+
+// Makes every func_addr of `mod` that names `fn_name` or a sibling (a
+// function whose handle is bound to the Function this code was compiled
+// from) yield the program's one address of that function, its module
+// function stub, which is what func_addr yields in Tier 0 and Tier 1: a
+// pointer is then equal to every other tier's pointer to the same function
+// (a speculative identity check on it holds whichever tier made it), where
+// the engine's own copy of the function would not be. The stub reaches the
+// handle's current code, compiling it on demand. Each such func_addr links
+// against an external symbol of `jit` bound to the stub.
+void canonicalize_function_addresses(Module& mod, std::string_view fn_name, const Tier2Bindings& bindings,
+                                     MultiTierPipeline& pipeline, codegen::JitExecutionEngine& jit) {
+    std::unordered_map<std::string, std::string> canonical;  // name -> symbol
+    auto symbol_for = [&](std::string_view name) -> const std::string* {
+        const std::string key(name);
+        if (auto it = canonical.find(key); it != canonical.end()) return &it->second;
+        const Function* def = mod.get_function(name);
+        if (!def || def->block_count() == 0) return nullptr;
+        const bool known = name == fn_name ? bindings.target != nullptr : bindings.siblings.count(key) != 0;
+        if (!known) return nullptr;
+        // No Function: the handle exists and keeps what it is bound to.
+        void* stub = pipeline.function_address(name, nullptr);
+        if (!stub) return nullptr;
+        std::string sym = std::string(kCanonicalFnPtrPrefix) + key;
+        jit.register_external_symbol(sym, stub);
+        return &canonical.emplace(key, std::move(sym)).first->second;
+    };
+    for (Function* fn : mod.functions()) {
+        if (!fn) continue;
+        for (BasicBlock* bb : fn->blocks()) {
+            if (!bb) continue;
+            for (Instruction* inst : *bb) {
+                if (!inst || inst->opcode() != Opcode::func_addr) continue;
+                if (const std::string* sym = symbol_for(inst->symbol())) {
+                    inst->set_symbol(mod.string_pool().intern(*sym));
+                }
+            }
         }
     }
-    if (ids.empty()) return true;
-    for (uint32_t id : ids) {
-        if (!lower_guards_to_local_branch(optimized, mod, id)) {
-            why = "guard (resume id " + std::to_string(id) + ") could not branch to its resume block";
-            return false;
-        }
-    }
-    DiagnosticReporter diag;
-    if (verify_function(optimized, &diag)) return true;
-    why = "guards branching to their resume blocks left invalid MIR: " + diag.format_all();
-    return false;
 }
 
 } // namespace
@@ -856,23 +866,6 @@ CodeInstallResult CodeInstaller::install_tier2(
         return reject("Tier-2 optimization pipeline failed or invalidated module: " + errors);
     }
 
-    // Guards that resume in the optimized function itself branch there.
-    // Each function is compared with the Tier-0 function its code would
-    // deoptimize into (none for one never published: no deopt resumer is
-    // registered for its code, so a guard of it can only branch).
-    for (Function* fn : module->functions()) {
-        if (!fn || fn->block_count() == 0) continue;
-        const Function* tier0 = nullptr;
-        if (fn == target_fn) {
-            tier0 = bound;
-        } else if (auto rec = bindings.siblings.find(std::string(fn->name())); rec != bindings.siblings.end()) {
-            tier0 = rec->second;
-        }
-        if (std::string why; !lower_local_resume_guards(*module, *fn, tier0, why)) {
-            return reject("Tier-2 code for '" + std::string(fn->name()) + "': " + why);
-        }
-    }
-
     // Every guard of the optimized code must have somewhere to deoptimize
     // to in the function the lower tiers run.
     {
@@ -899,6 +892,13 @@ CodeInstallResult CodeInstaller::install_tier2(
         for (const auto& [name, addr] : external_symbols_) {
             jit->register_external_symbol(name, addr);
         }
+    }
+
+    // Function pointers this code makes are the ones the lower tiers make.
+    // Only in a program whose pipeline runs them: its stubs compile a
+    // function with no native entry on demand.
+    if (table_->pipeline().is_initialized()) {
+        canonicalize_function_addresses(*module, fn_name, bindings, table_->pipeline(), *jit);
     }
 
     // Compile and link in executable memory
@@ -960,8 +960,10 @@ CodeInstallResult CodeInstaller::install_tier2(
         });
         h.add_deopt_entry(entry, compiled_from_fn);
     };
-    // A func_addr in this code yields the engine's own copy of a module
-    // function: Tier 0 maps it back to the function by name.
+    // A func_addr in this code that is not canonicalized (a function no
+    // handle knows, or a program whose pipeline is not initialized) yields
+    // the engine's own copy of a module function: Tier 0 maps it back to the
+    // function by name.
     for (const Function* fn : module->functions()) {
         if (!fn || fn->block_count() == 0) continue;
         if (void* addr = jit->get_symbol_address(fn->name())) table_->register_code_address(addr, fn->name());

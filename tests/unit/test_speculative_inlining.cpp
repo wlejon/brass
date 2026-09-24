@@ -11,19 +11,18 @@ using namespace brass::test;
 
 namespace {
 
-bool is_resume_target(const Function& fn, const BasicBlock* bb) {
-    for (const auto& rp : fn.resume_points()) {
-        if (rp.second == bb) return true;
-    }
-    return false;
+// The block a failed identity check branches to, which makes the original
+// indirect call.
+bool is_slow_path(const BasicBlock* bb) {
+    return std::string_view(bb->name()).ends_with(".spec_slow");
 }
 
-// Counts `op` on the speculated path: a guard's resume block (the slow path
-// a failing guard continues on) is counted only when `in_resume_blocks`.
-size_t count_opcodes_in_fn(const Function& fn, Opcode op, bool in_resume_blocks = false) {
+// Counts `op` on the speculated path: the slow path's block is counted
+// only when `in_slow_path`.
+size_t count_opcodes_in_fn(const Function& fn, Opcode op, bool in_slow_path = false) {
     size_t c = 0;
     for (const BasicBlock* bb : fn.blocks()) {
-        if (!bb || is_resume_target(fn, bb) != in_resume_blocks) continue;
+        if (!bb || is_slow_path(bb) != in_slow_path) continue;
         for (const Instruction* inst : *bb) {
             if (inst && inst->opcode() == op) {
                 c++;
@@ -86,14 +85,16 @@ TEST_CASE("SpeculativeInlining - Monomorphic call devirtualization with direct c
     // - No call_indirect
     // - Has func_addr @target_fn
     // - Has eq
-    // - Has guard
+    // - Branches on it (no guard: a mismatch takes the slow path)
     // - Has direct call @target_fn
     CHECK_EQ(count_opcodes_in_fn(*caller_fn, Opcode::call_indirect), 0ULL);
-    // The guard's resume block makes the original indirect call.
+    // The slow path makes the original indirect call.
     CHECK_EQ(count_opcodes_in_fn(*caller_fn, Opcode::call_indirect, true), 1ULL);
     CHECK_EQ(count_opcodes_in_fn(*caller_fn, Opcode::func_addr), 1ULL);
     CHECK_EQ(count_opcodes_in_fn(*caller_fn, Opcode::eq), 1ULL);
-    CHECK_EQ(count_opcodes_in_fn(*caller_fn, Opcode::guard), 1ULL);
+    CHECK_EQ(count_opcodes_in_fn(*caller_fn, Opcode::br_if), 1ULL);
+    CHECK_EQ(count_opcodes_in_fn(*caller_fn, Opcode::guard), 0ULL);
+    CHECK(caller_fn->resume_points().empty());
     CHECK_EQ(count_opcodes_in_fn(*caller_fn, Opcode::call), 1ULL);
 
     // Verify execution via Interpreter
@@ -162,12 +163,13 @@ TEST_CASE("SpeculativeInlining - Monomorphic speculative inlining of callee body
     // The call should be completely inlined!
     // - No call_indirect
     // - No direct call
-    // - Guard is present
+    // - The identity check branches (no guard)
     // - Mul and Add from small_leaf are embedded directly
     CHECK_EQ(count_opcodes_in_fn(*caller, Opcode::call_indirect), 0ULL);
     CHECK_EQ(count_opcodes_in_fn(*caller, Opcode::call_indirect, true), 1ULL);
     CHECK_EQ(count_opcodes_in_fn(*caller, Opcode::call), 0ULL);
-    CHECK_EQ(count_opcodes_in_fn(*caller, Opcode::guard), 1ULL);
+    CHECK_EQ(count_opcodes_in_fn(*caller, Opcode::br_if), 1ULL);
+    CHECK_EQ(count_opcodes_in_fn(*caller, Opcode::guard), 0ULL);
     CHECK_EQ(count_opcodes_in_fn(*caller, Opcode::mul), 1ULL);
     CHECK_EQ(count_opcodes_in_fn(*caller, Opcode::add), 1ULL);
 
@@ -235,7 +237,6 @@ TEST_CASE("SpeculativeInlining - Deoptimization fallback on unexpected function 
 
     SpeculativeInlinerOptions opts;
     opts.enable_inlining = true;
-    opts.deopt_stub_prefix = "@deopt_slow_call";
     bool changed = run_speculative_devirtualization(*caller, mod, &tfv, opts);
     CHECK(changed);
     CHECK(verify_function(*caller));
@@ -253,9 +254,12 @@ TEST_CASE("SpeculativeInlining - Deoptimization fallback on unexpected function 
     CHECK_EQ(res_fast.as_i64(), 15);
     CHECK(!interp.last_deopt().deoptimized);
 
-    // 2. Invocation with unexpected pointer -> guard fails and deopts
-    interp.set_deopt_handler([](Interpreter&, const DeoptResult& deopt) -> RuntimeValue {
-        REQUIRE_EQ(deopt.exit_stub, "@deopt_slow_call");
+    // 2. Invocation with unexpected pointer -> the check fails and the slow
+    //    path makes the original indirect call: the real callee's result,
+    //    no deoptimization (a deopt handler would be a wrong answer).
+    bool handler_ran = false;
+    interp.set_deopt_handler([&handler_ran](Interpreter&, const DeoptResult&) -> RuntimeValue {
+        handler_ran = true;
         return RuntimeValue::from_i64(9999);
     });
 
@@ -264,9 +268,9 @@ TEST_CASE("SpeculativeInlining - Deoptimization fallback on unexpected function 
         "caller_deopt",
         {RuntimeValue::from_ptr(unexp_ptr), RuntimeValue::from_i64(5)}
     );
-    CHECK_EQ(res_slow.as_i64(), 9999);
-    CHECK(interp.last_deopt().deoptimized);
-    CHECK_EQ(interp.last_deopt().exit_stub, "@deopt_slow_call");
+    CHECK_EQ(res_slow.as_i64(), 500);
+    CHECK(!handler_ran);
+    CHECK(!interp.last_deopt().deoptimized);
 }
 
 TEST_CASE("SpeculativeInlining - Polymorphic 2-target call splitting dispatch diamond") {
