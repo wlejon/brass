@@ -11,6 +11,7 @@
 #include <brass/runtime/code_installer.hpp>
 #include <brass/codegen/baseline_jit.hpp>
 #include <brass/interpreter/interpreter.hpp>
+#include <brass/gc/native_frames.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/module.hpp>
 #include <cstdio>
@@ -43,8 +44,17 @@ struct Tier0Bridge {
 template <size_t I>
 using Bits = uint64_t;
 
+// The native frames that called the bridge (its baseline body, then the
+// caller holding live gcrefs across the call) are recorded for the time
+// Tier 0 runs: a collection the callee triggers starts in the interpreter
+// and would not otherwise see them (native_frames.hpp).
 template <size_t... I>
 uint64_t bridge_entry(Tier0Bridge* ctx, Bits<I>... args) {
+    uintptr_t caller_rbp = 0, caller_ip = 0;
+    if (!brass_capture_caller_frame(caller_rbp, caller_ip)) {
+        bridge_fatal("cannot find the native frame that called '" + ctx->name + "'");
+    }
+    NativeFramesScope native_frames(caller_rbp, caller_ip);
     const uint64_t bits[] = {args..., 0};
     return ctx->pipeline->call_tier0_from_native(ctx->name, bits, sizeof...(I));
 }

@@ -221,6 +221,10 @@ private:
     // Handles dropped by clear() or replaced by register_handle(); callers
     // may hold pointers resolved before registry_generation() moved.
     std::vector<std::unique_ptr<FunctionHandle>> retired_;
+    // Keyed by address, so re-registering one (every func_addr of a stub)
+    // adds nothing; one entry per stub plus one per function of each tier-2
+    // engine installed, retired ones included (they stay alive, see
+    // FunctionHandle::set_jit_engine). clear() empties it.
     std::unordered_map<const void*, std::string> code_addresses_; // under mutex_
 };
 

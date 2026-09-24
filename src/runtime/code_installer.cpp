@@ -84,7 +84,15 @@ void FunctionHandle::set_jit_engine(std::shared_ptr<codegen::JitExecutionEngine>
     // The engine being replaced is retired, never dropped: code compiled
     // while it was installed (a tier-1 caller binds a callee's native entry
     // directly) and frames on some stack may still run it, and its deopt
-    // resumers and stack maps stay registered for them.
+    // resumers and stack maps stay registered for them. Nothing tracks
+    // which code or frames still reach a retired engine (no epoch or
+    // quiescence point exists), so none is ever freed while the handle
+    // lives: retired_engines_ holds one engine per install_tier2 over
+    // installed code and per invalidate_optimized, for the handle's
+    // lifetime, and the table's reverse address map keeps one entry per
+    // function of each (FunctionDispatchTable::register_code_address).
+    // Automatic re-tiering never reinstalls (a deopted function bails
+    // out), so only a host calling install_tier2 repeatedly grows these.
     if (jit_engine_ && jit_engine_ != engine) retired_engines_.push_back(std::move(jit_engine_));
     jit_engine_ = std::move(engine);
 }
@@ -531,6 +539,11 @@ void FunctionDispatchTable::clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto& [_, handle] : handles_) retire_locked(std::move(handle));
     handles_.clear();
+    // The reverse table names functions of the program just cleared: a
+    // stale address would map back to a same-named function of the next
+    // one. Lazy stubs re-register on every func_addr, tier-2 code on
+    // install, so the live program's addresses come back as it runs.
+    code_addresses_.clear();
     bump_registry_generation();
 }
 

@@ -1,5 +1,6 @@
 #include <brass/gc/mini_cheney.hpp>
 #include <brass/runtime/coroutine.hpp>
+#include <brass/gc/native_frames.hpp>
 #include <algorithm>
 #include <cstring>
 #include <iostream>
@@ -56,6 +57,8 @@ void MiniCheneyGC::gather_all_roots(std::vector<uintptr_t*>& roots) {
         roots.push_back(r);
     }
     runtime::append_active_coro_roots(roots);
+    // Native frames under re-entered Tier-0 code (native_frames.hpp).
+    brass_append_native_frame_roots(roots);
     if (root_provider_) {
         root_provider_(roots);
     }

@@ -1,6 +1,7 @@
 #include <brass/gc/generational_gc.hpp>
 #include <brass/gc/gc_limits.hpp>
 #include <brass/runtime/coroutine.hpp>
+#include <brass/gc/native_frames.hpp>
 #include <algorithm>
 #include <cstring>
 #include <cassert>
@@ -296,6 +297,8 @@ uintptr_t GenerationalGC::evacuate_young_object(uintptr_t obj_addr) {
 void GenerationalGC::gather_all_roots(std::vector<uintptr_t*>& roots, std::vector<uintptr_t*>& extra_roots) {
     roots.insert(roots.end(), registered_roots_.begin(), registered_roots_.end());
     runtime::append_active_coro_roots(roots);
+    // Native frames under re-entered Tier-0 code (native_frames.hpp).
+    brass_append_native_frame_roots(roots);
     roots.insert(roots.end(), extra_roots.begin(), extra_roots.end());
     if (root_provider_) {
         root_provider_(roots);

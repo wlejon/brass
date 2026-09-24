@@ -1,4 +1,5 @@
 #include <brass/runtime/deopt.hpp>
+#include <brass/gc/native_frames.hpp>
 #include <ostream>
 #include <mutex>
 #include <memory>
@@ -187,6 +188,11 @@ void* brass_deopt_exit_typed(uint32_t resume_id, uint32_t reason, uint32_t count
 
     auto handler = brass::runtime::get_deopt_handler();
     if (handler) {
+        // The handler may run Tier 0, which may collect: the native frames
+        // that deoptimized, and their native callers, are roots meanwhile.
+        uintptr_t caller_rbp = 0, caller_ip = 0;
+        brass::brass_capture_caller_frame(caller_rbp, caller_ip);
+        brass::NativeFramesScope native_frames(caller_rbp, caller_ip);
         return handler(*frame);
     }
     if (has_exit_stub) return nullptr; // the caller resumes in its exit stub
@@ -224,6 +230,13 @@ const uint64_t* brass_deopt_exit_record(const brass::runtime::DeoptExitRecord* r
         frame->kinds[i] = static_cast<DeoptValueKind>(kinds[i]);
     }
     frame->count = record->count;
+
+    // A resumer or handler finishes the call in Tier 0, which may collect:
+    // the native frames that deoptimized, and their native callers, are
+    // roots meanwhile (native_frames.hpp).
+    uintptr_t caller_rbp = 0, caller_ip = 0;
+    brass::brass_capture_caller_frame(caller_rbp, caller_ip);
+    brass::NativeFramesScope native_frames(caller_rbp, caller_ip);
 
     if (auto resumer = find_resumer(record->code_entry)) {
         // The resumer may run code that deoptimizes again and overwrites the
