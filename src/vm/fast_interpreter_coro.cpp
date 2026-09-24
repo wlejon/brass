@@ -19,7 +19,9 @@ uintptr_t FastInterpreter::coro_create(const BytecodeFunction* bfn, const std::v
         coro->registers[i] = args[i];
     }
 
-    uintptr_t c_frame_addr = brass_coro_create(nullptr, std::max<uint32_t>(num_regs, 16), 0);
+    // No generated frame: this interpreter's roots reach the heap through
+    // its scope and provider.
+    uintptr_t c_frame_addr = brass_coro_create_at(nullptr, std::max<uint32_t>(num_regs, 16), 0, 0, 0);
     auto* cf = reinterpret_cast<runtime::BrassCoroFrame*>(c_frame_addr);
     if (cf) {
         cf->state_id = 0;

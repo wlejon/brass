@@ -2,6 +2,7 @@
 
 EXTERN brass_runtime_gc_safepoint_bridge: PROC
 EXTERN brass_runtime_gc_alloc_bridge: PROC
+EXTERN brass_coro_create_at: PROC
 EXTERN brass_throw_impl: PROC
 EXTERN brass_current_exception_bits: PROC
 
@@ -49,6 +50,31 @@ brass_gc_alloc PROC FRAME
     pop rbp
     ret
 brass_gc_alloc ENDP
+
+; uintptr_t brass_coro_create(void* fn_ptr, uint32_t slot_count, uint64_t pointer_mask)
+; Generated code's coroutine-frame allocation: as brass_gc_alloc, passes the
+; calling frame so a collection it triggers updates that frame's gcrefs.
+brass_coro_create PROC FRAME
+    push rbp
+    .pushreg rbp
+    mov rbp, rsp
+    .setframe rbp, 0
+    sub rsp, 48
+    .allocstack 48
+    .endprolog
+    ; rcx = fn_ptr
+    ; edx = slot_count
+    ; r8  = pointer_mask
+    ; r9  = caller_rbp
+    mov r9, qword ptr [rbp]
+    ; [rsp + 32] = caller_ip
+    mov rax, qword ptr [rbp + 8]
+    mov qword ptr [rsp + 32], rax
+    call brass_coro_create_at
+    add rsp, 48
+    pop rbp
+    ret
+brass_coro_create ENDP
 
 ; void brass_gc_collect()
 brass_gc_collect PROC FRAME

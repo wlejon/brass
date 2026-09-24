@@ -30,10 +30,13 @@ RuntimeValue interp_coro_create(const Instruction& inst, InterpreterFrame& frame
     CoroFrameLayout layout = compute_coro_frame_layout(target_fn);
     uint32_t slot_count = std::max(layout.slot_count, static_cast<uint32_t>(inst.operand_count()));
 
-    uintptr_t frame_addr = brass_coro_create(
+    // No generated frame: this interpreter's roots reach the heap through
+    // its scope and provider.
+    uintptr_t frame_addr = brass_coro_create_at(
         reinterpret_cast<void*>(const_cast<Function*>(&target_fn)),
         slot_count,
-        layout.pointer_mask
+        layout.pointer_mask,
+        0, 0
     );
     auto* frame_ptr = reinterpret_cast<runtime::BrassCoroFrame*>(frame_addr);
     if (!frame_ptr) {

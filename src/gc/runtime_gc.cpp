@@ -115,6 +115,10 @@ const ModuleStackMap* brass_get_active_stack_maps() noexcept {
     return g_active_stack_maps;
 }
 
+const ModuleStackMap* brass_stack_maps_for_caller(uintptr_t caller_ip) noexcept {
+    return walk_maps(caller_ip);
+}
+
 void brass_runtime_gc_safepoint(
     MiniCheneyGC* gc,
     const ModuleStackMap& stack_maps,

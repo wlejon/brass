@@ -18,6 +18,12 @@ GenerationalGC* brass_get_active_generational_gc() noexcept;
 void brass_set_active_stack_maps(const ModuleStackMap* maps) noexcept;
 const ModuleStackMap* brass_get_active_stack_maps() noexcept;
 
+// The maps a collection requested by the code returning to `caller_ip`
+// walks this thread's generated frames with: the thread's active maps, else
+// the code registry when it covers `caller_ip`. Null when nothing describes
+// the caller's frame (it is not generated code brass knows).
+const ModuleStackMap* brass_stack_maps_for_caller(uintptr_t caller_ip) noexcept;
+
 // Explicit safepoint trigger with passed RBP / return IP (or automatic detection if 0)
 void brass_runtime_gc_safepoint(
     MiniCheneyGC* gc,

@@ -87,7 +87,13 @@ void append_active_coro_roots(std::vector<uintptr_t*>& roots);
 } // namespace brass::runtime
 
 extern "C" {
+// The entry generated code calls: allocates the frame with the calling
+// frame's gcrefs among a collection's roots (as brass_gc_alloc).
 uintptr_t brass_coro_create(void* fn_ptr, uint32_t slot_count, uint64_t pointer_mask);
+// The same with the generated frame named: its frame pointer and the return
+// address into it (both 0: none, e.g. an interpreter's call).
+uintptr_t brass_coro_create_at(void* fn_ptr, uint32_t slot_count, uint64_t pointer_mask,
+                               uintptr_t caller_fp, uintptr_t caller_ip);
 uint64_t brass_coro_resume(uintptr_t coro_frame, uint64_t input_val);
 uint32_t brass_coro_is_done(uintptr_t coro_frame);
 void brass_coro_destroy(uintptr_t coro_frame);

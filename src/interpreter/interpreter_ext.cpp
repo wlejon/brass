@@ -111,10 +111,10 @@ void Interpreter::register_builtin_host_functions() {
             host->collect();
             return RuntimeValue::from_void();
         }
+        // A borrowed heap sees this interpreter's frames through the
+        // borrower's ThreadRootsScope (borrow_generational_gc).
         if (GenerationalGC* gen = interp.borrowed_generational_gc()) {
-            std::vector<uintptr_t*> roots;
-            interp.collect_all_roots(roots);
-            gen->collect(roots);
+            gen->collect();
             return RuntimeValue::from_void();
         }
         interp.gc().collect();
@@ -162,10 +162,10 @@ void Interpreter::collect_all_roots(std::vector<uintptr_t*>& roots) {
 
 uintptr_t Interpreter::allocate_gc(size_t size, uint64_t pointer_mask, uint32_t type_tag) {
     if (host_heap()) return host_heap_allocate(size, pointer_mask, type_tag);
-    std::vector<uintptr_t*> roots;
-    collect_all_roots(roots);
-    if (borrowed_gen_gc_) return borrowed_gen_gc_->allocate(size, pointer_mask, type_tag, roots);
-    return gc().allocate(size, pointer_mask, type_tag, roots);
+    // A borrowed heap sees this interpreter's frames through the borrower's
+    // ThreadRootsScope, its own heap through its root provider.
+    if (borrowed_gen_gc_) return borrowed_gen_gc_->allocate(size, pointer_mask, type_tag);
+    return gc().allocate(size, pointer_mask, type_tag);
 }
 
 void Interpreter::register_external_function(std::string_view name, HostFn fn) {

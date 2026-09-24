@@ -126,6 +126,54 @@ void append_active_coro_roots(std::vector<uintptr_t*>& roots) {
     }
 }
 
+namespace {
+
+// The coroutine frame, from the thread's heap. A collection this allocation
+// triggers must update the gcref slots of the generated frames from
+// (caller_fp, caller_ip) upward, as brass_gc_alloc's does: the caller holds
+// gcrefs across brass_coro_create. Both 0, or a caller no stack maps
+// describe (an interpreter, C++), has no generated frame to report; the
+// heap's other roots (interpreter scopes and providers, native frames under
+// re-entered Tier-0 code, suspended coroutines) are gathered as always.
+uintptr_t allocate_coro_frame(size_t total_size, uint64_t frame_mask,
+                              uintptr_t caller_fp, uintptr_t caller_ip) {
+    if (brass::host_heap() != nullptr) {
+        // The frame is an object of the host's heap; its slots are traced
+        // through frame_mask like any other, and while suspended it is also
+        // a root through the active-frame registry.
+        return brass::host_heap_allocate(total_size, frame_mask, TYPE_TAG_CORO_FRAME,
+                                         caller_fp, caller_ip);
+    }
+    const ModuleStackMap* maps = (caller_fp != 0 && caller_ip != 0)
+        ? brass::brass_stack_maps_for_caller(caller_ip) : nullptr;
+    if (GenerationalGC* gen_gc = brass::brass_get_active_generational_gc()) {
+        if (maps && !gen_gc->can_allocate_fast(total_size)) {
+            return brass::brass_runtime_gc_alloc(gen_gc, *maps, total_size, frame_mask,
+                                                 TYPE_TAG_CORO_FRAME, caller_fp, caller_ip);
+        }
+        return gen_gc->allocate(total_size, frame_mask, TYPE_TAG_CORO_FRAME);
+    }
+    if (HostGC* host_gc = brass::get_active_host_gc()) {
+        // As host_gc_alloc_bridge: collect with the caller's frames first.
+        if (caller_fp != 0 && caller_ip != 0 && !host_gc->can_allocate_fast(total_size)) {
+            std::vector<uintptr_t*> ptr_roots;
+            std::vector<HostValue*> val_roots;
+            host_gc->collect(ptr_roots, val_roots, caller_fp, caller_ip);
+        }
+        return host_gc->allocate(total_size, frame_mask, TYPE_TAG_CORO_FRAME);
+    }
+    if (MiniCheneyGC* gc = brass::brass_get_active_gc()) {
+        if (maps && !gc->can_allocate_fast(total_size)) {
+            return brass::brass_runtime_gc_alloc(gc, *maps, total_size, frame_mask,
+                                                 TYPE_TAG_CORO_FRAME, caller_fp, caller_ip);
+        }
+        return gc->allocate(total_size, frame_mask, TYPE_TAG_CORO_FRAME);
+    }
+    return reinterpret_cast<uintptr_t>(std::calloc(1, total_size));
+}
+
+} // namespace
+
 } // namespace brass::runtime
 
 extern "C" {
@@ -133,7 +181,8 @@ extern "C" {
 using namespace brass;
 using namespace brass::runtime;
 
-uintptr_t brass_coro_create(void* fn_ptr, uint32_t slot_count, uint64_t pointer_mask) {
+uintptr_t brass_coro_create_at(void* fn_ptr, uint32_t slot_count, uint64_t pointer_mask,
+                               uintptr_t caller_fp, uintptr_t caller_ip) {
     size_t extra_slots = (slot_count > 1) ? (slot_count - 1) : 0;
     size_t total_size = sizeof(BrassCoroFrame) + extra_slots * sizeof(uint64_t);
 
@@ -143,33 +192,8 @@ uintptr_t brass_coro_create(void* fn_ptr, uint32_t slot_count, uint64_t pointer_
         frame_mask |= (1ULL << 63);
     }
 
-    BrassCoroFrame* frame = nullptr;
-
-    GenerationalGC* gen_gc = brass::brass_get_active_generational_gc();
-    if (brass::host_heap() != nullptr) {
-        // The frame is an object of the host's heap; its slots are traced
-        // through frame_mask like any other, and while suspended it is also
-        // a root through the active-frame registry below.
-        frame = reinterpret_cast<BrassCoroFrame*>(
-            brass::host_heap_allocate(total_size, frame_mask, TYPE_TAG_CORO_FRAME));
-    } else if (gen_gc != nullptr) {
-        uintptr_t payload = gen_gc->allocate(total_size, frame_mask, TYPE_TAG_CORO_FRAME);
-        frame = reinterpret_cast<BrassCoroFrame*>(payload);
-    } else {
-        HostGC* host_gc = brass::get_active_host_gc();
-        if (host_gc != nullptr) {
-            uintptr_t payload = host_gc->allocate(total_size, frame_mask, TYPE_TAG_CORO_FRAME);
-            frame = reinterpret_cast<BrassCoroFrame*>(payload);
-        } else {
-            MiniCheneyGC* gc = brass::brass_get_active_gc();
-            if (gc != nullptr) {
-                uintptr_t payload = gc->allocate(total_size, frame_mask, TYPE_TAG_CORO_FRAME);
-                frame = reinterpret_cast<BrassCoroFrame*>(payload);
-            } else {
-                frame = static_cast<BrassCoroFrame*>(std::calloc(1, total_size));
-            }
-        }
-    }
+    auto* frame = reinterpret_cast<BrassCoroFrame*>(
+        allocate_coro_frame(total_size, frame_mask, caller_fp, caller_ip));
 
     if (!frame) return 0;
 
@@ -184,6 +208,18 @@ uintptr_t brass_coro_create(void* fn_ptr, uint32_t slot_count, uint64_t pointer_
     register_active_coro_frame(frame);
     return reinterpret_cast<uintptr_t>(frame);
 }
+
+// Generated code calls brass_coro_create with no frame argument, so it takes
+// its caller's frame as brass_gc_alloc does. MSVC: the stub in
+// gc_msvc_x64.asm, which calls brass_coro_create_at.
+#if !defined(_MSC_VER)
+uintptr_t brass_coro_create(void* fn_ptr, uint32_t slot_count, uint64_t pointer_mask) {
+    void* frame = __builtin_frame_address(0);
+    uintptr_t caller_fp = frame ? *reinterpret_cast<uintptr_t*>(frame) : 0;
+    uintptr_t caller_ip = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
+    return brass_coro_create_at(fn_ptr, slot_count, pointer_mask, caller_fp, caller_ip);
+}
+#endif
 
 uint64_t brass_coro_resume(uintptr_t coro_frame, uint64_t input_val) {
     if (!coro_frame) return 0;

@@ -303,6 +303,14 @@ void GenerationalGC::gather_all_roots(std::vector<uintptr_t*>& roots, std::vecto
     if (root_provider_) {
         root_provider_(roots);
     }
+    // A slot may be reported more than once (brass_enumerate_thread_roots'
+    // contract: an interpreter's frames come from its ThreadRootsScope and
+    // from whoever passes them as extra roots). A major collection is not
+    // idempotent per slot: its final addresses lie in the tenured range it
+    // evacuates from, so a second visit would take an updated slot for an
+    // old object. Each slot is visited once.
+    std::sort(roots.begin(), roots.end());
+    roots.erase(std::unique(roots.begin(), roots.end()), roots.end());
 }
 
 void GenerationalGC::minor_collect() {
