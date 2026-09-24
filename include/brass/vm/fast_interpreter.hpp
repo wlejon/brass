@@ -95,6 +95,8 @@ public:
     void register_function_pointer(uintptr_t ptr, std::function<RuntimeValue(const std::vector<RuntimeValue>&)> fn);
     void register_function_pointer(uintptr_t ptr, brass::HostFn fn);
     const Function* find_function_by_pointer(uintptr_t ptr) const noexcept;
+    // As Interpreter::function_address: the program's one pointer to `fn`.
+    uintptr_t function_address(const Function& fn);
     const BytecodeFunction* find_bytecode_function_by_pointer(uintptr_t ptr) const noexcept;
 
     // Dynamic patching

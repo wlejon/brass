@@ -77,6 +77,9 @@ public:
         return ++invocation_count_;
     }
 
+    // Installs `engine` as the handle's tier-2 code owner. An engine it
+    // replaces is retired (kept alive with the handle, as
+    // invalidate_optimized does): native callers may have bound its entry.
     void set_jit_engine(std::shared_ptr<codegen::JitExecutionEngine> engine);
     std::shared_ptr<codegen::JitExecutionEngine> jit_engine() const;
 
@@ -189,6 +192,15 @@ public:
     size_t size() const;
     std::vector<FunctionHandle*> all_handles() const;
 
+    // A program function pointer is a code address: canonically the
+    // function's lazy stub (MultiTierPipeline::function_address), which every
+    // tier's func_addr yields, or an address tier-2 code took of its own
+    // copy. Each is registered here with the function's name, so Tier 0 can
+    // map a pointer native code made back to the function it calls.
+    void register_code_address(const void* addr, std::string_view name);
+    // The function registered at `addr`, or "" if none.
+    std::string function_name_at(const void* addr) const;
+
 private:
     struct DefaultTag {};
     explicit FunctionDispatchTable(DefaultTag);
@@ -209,6 +221,7 @@ private:
     // Handles dropped by clear() or replaced by register_handle(); callers
     // may hold pointers resolved before registry_generation() moved.
     std::vector<std::unique_ptr<FunctionHandle>> retired_;
+    std::unordered_map<const void*, std::string> code_addresses_; // under mutex_
 };
 
 using DispatchTable = FunctionDispatchTable;

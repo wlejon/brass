@@ -61,6 +61,9 @@ struct X64BaselineEmitter {
     // The func_addr targets that got a stub, each once: their address may
     // be taken and never called, so they are resolved on first call.
     std::vector<std::string> lazy_addr_symbols;
+    // func_addr of a module function: its canonical address
+    // (BaselineJitCompiler::function_address_in), or null.
+    BaselineSymbolResolver function_address;
 
     MemAddress slot_addr(const Value* val) const {
         auto it = slot_map.find(val);

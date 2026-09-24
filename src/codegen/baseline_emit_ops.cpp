@@ -155,7 +155,16 @@ bool emit_baseline_x64_op(X64BaselineEmitter& emitter, const Instruction& inst) 
             const bool data = mod && (mod->string_symbol(inst.symbol()) ||
                                       mod->has_symbol_role(inst.symbol(), SymbolRole::Data));
             void* addr = nullptr;
-            if (data) {
+            if (!data && emitter.function_address && (addr = emitter.function_address(inst.symbol()))) {
+                // A program function: its canonical stub, the pointer every
+                // tier yields. It compiles the function on first call, or
+                // bridges into Tier 0 when the baseline tier rejects it.
+                emitter.uses_lazy_stubs = true;
+                auto& syms = emitter.lazy_addr_symbols;
+                if (std::find(syms.begin(), syms.end(), inst.symbol()) == syms.end()) {
+                    syms.emplace_back(inst.symbol());
+                }
+            } else if (data) {
                 addr = emitter.resolve_sym(inst.symbol());
                 if (!addr) {
                     throw_unsupported(kX64BaselineStage, "func_addr of data symbol " + std::string(inst.symbol()) +

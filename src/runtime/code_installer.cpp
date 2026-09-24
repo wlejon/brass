@@ -81,6 +81,11 @@ void FunctionHandle::set_signature(Type ret, std::vector<Type> params) {
 
 void FunctionHandle::set_jit_engine(std::shared_ptr<codegen::JitExecutionEngine> engine) {
     std::lock_guard<std::mutex> lock(engine_mutex_);
+    // The engine being replaced is retired, never dropped: code compiled
+    // while it was installed (a tier-1 caller binds a callee's native entry
+    // directly) and frames on some stack may still run it, and its deopt
+    // resumers and stack maps stay registered for them.
+    if (jit_engine_ && jit_engine_ != engine) retired_engines_.push_back(std::move(jit_engine_));
     jit_engine_ = std::move(engine);
 }
 
@@ -529,6 +534,18 @@ void FunctionDispatchTable::clear() {
     bump_registry_generation();
 }
 
+void FunctionDispatchTable::register_code_address(const void* addr, std::string_view name) {
+    if (!addr) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    code_addresses_[addr] = std::string(name);
+}
+
+std::string FunctionDispatchTable::function_name_at(const void* addr) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = code_addresses_.find(addr);
+    return it != code_addresses_.end() ? it->second : std::string();
+}
+
 size_t FunctionDispatchTable::size() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return handles_.size();
@@ -654,6 +671,12 @@ CodeInstallResult CodeInstaller::install_tier2(
         });
         h.add_deopt_entry(entry);
     };
+    // A func_addr in this code yields the engine's own copy of a module
+    // function: Tier 0 maps it back to the function by name.
+    for (const Function* fn : module->functions()) {
+        if (!fn || fn->block_count() == 0) continue;
+        if (void* addr = jit->get_symbol_address(fn->name())) table_->register_code_address(addr, fn->name());
+    }
     register_resumer(handle, native_code_ptr);
     handle.set_jit_engine(jit);
     handle.set_native_entry(native_code_ptr);

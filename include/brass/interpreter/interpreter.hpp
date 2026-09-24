@@ -98,6 +98,14 @@ public:
     void register_function_pointer(uintptr_t ptr, const Function* fn);
     void register_function_pointer(uintptr_t ptr, HostFn fn);
     const Function* find_function_by_pointer(uintptr_t ptr) const noexcept;
+    // The program's one pointer to `fn`, what func_addr yields: the code
+    // address every tier uses (MultiTierPipeline::function_address) for a
+    // function with a body, else the Function's own address.
+    uintptr_t function_address(const Function& fn);
+    // The function a call_indirect through `ptr` runs: one registered with
+    // register_function_pointer, or the program function at a code address
+    // (FunctionDispatchTable::function_name_at). Null if neither.
+    const Function* function_at(uintptr_t ptr);
 
     // Dynamic patching
     void patch_const(std::string_view symbol, int64_t val);
@@ -140,7 +148,25 @@ public:
     RuntimeValue current_exception() const noexcept { return current_exception_; }
     void set_current_exception(RuntimeValue val) noexcept { current_exception_ = val; }
 
+    // The innermost interpreter running a frame on this thread, or null.
+    // Native code it called (a native-to-Tier-0 bridge) re-enters it, so the
+    // callee shares its heap and a MIR exception unwinds to its handlers.
+    static Interpreter* active_on_thread() noexcept;
+    // Runs `fn` as a call from native code on this thread (Tier 0, or its
+    // native entry if it has one). A MIR exception propagates as
+    // InterpreterThrownException.
+    RuntimeValue call_from_native(const Function& fn, const std::vector<RuntimeValue>& args) {
+        return execute_function(fn, args);
+    }
+
 private:
+    struct ActiveScope {
+        explicit ActiveScope(Interpreter* interp) noexcept;
+        ~ActiveScope();
+        ActiveScope(const ActiveScope&) = delete;
+        ActiveScope& operator=(const ActiveScope&) = delete;
+        Interpreter* prev;
+    };
     RuntimeValue execute_function(const Function& fn, const std::vector<RuntimeValue>& args);
     RuntimeValue execute_function_from_block(const Function& fn, BasicBlock* start_block, const std::vector<RuntimeValue>& block_args, InterpreterFrame* existing_frame = nullptr);
     void register_builtin_host_functions();

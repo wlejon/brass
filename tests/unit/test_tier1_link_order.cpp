@@ -271,10 +271,13 @@ b0:
 }
 
 TEST_CASE("Tier-1 link order - func_addr of a function the baseline tier rejects") {
-    // @fr_t throws, which the baseline tier does not compile: code taking
-    // its address could not call it, so it stays in Tier 0 too.
+    // @fr_t throws, which the baseline tier does not compile, and takes an
+    // f32, which a native-to-Tier-0 bridge does not pass: code taking its
+    // address could not call it, so it stays in Tier 0 too. (One with a
+    // bridgeable signature is called through the bridge instead:
+    // test_function_pointer_tiers.cpp.)
     auto mod = parse_or_fail(R"(module @fptr_rej
-func @fr_t(%n: i64) -> i64 {
+func @fr_t(%n: i64, %x: f32) -> i64 {
 b0:
   throw %n
 }

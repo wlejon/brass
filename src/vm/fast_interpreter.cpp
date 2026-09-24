@@ -411,7 +411,7 @@ loop_start:
             const Function* target_fn = module_ ? module_->get_function(sym) : nullptr;
             uintptr_t fn_ptr = reinterpret_cast<uintptr_t>(target_fn);
             if (target_fn) {
-                register_function_pointer(fn_ptr, target_fn);
+                fn_ptr = function_address(*target_fn);
             } else if (const BytecodeFunction* bfn = bytecode_module_ ? bytecode_module_->get_function(sym) : nullptr) {
                 fn_ptr = reinterpret_cast<uintptr_t>(bfn);
                 register_function_pointer(fn_ptr, bfn);

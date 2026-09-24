@@ -108,6 +108,7 @@ RuntimeValue Interpreter::resume_after_guard(const Function& fn, uint32_t resume
 }
 
 RuntimeValue Interpreter::execute_function(const Function& fn, const std::vector<RuntimeValue>& args) {
+    ActiveScope active(this); // also over a call into native code
     if (fn.parent() && !dispatch_table().tiering().active_module()) {
         dispatch_table().tiering().set_active_module(fn.parent());
     }
@@ -141,6 +142,7 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
     if (call_depth_ + 1 > max_call_depth_) {
         throw InterpreterException("Maximum interpreter call depth exceeded (" + std::to_string(max_call_depth_) + ")");
     }
+    ActiveScope active(this);
 
     InterpreterFrame local_frame(&fn, current_frame_);
     InterpreterFrame& frame = existing_frame ? *existing_frame : local_frame;
@@ -566,10 +568,7 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                 case Opcode::func_addr: {
                     std::string_view callee = inst->symbol();
                     const Function* target_fn = module_ ? module_->get_function(callee) : nullptr;
-                    uintptr_t fn_ptr = reinterpret_cast<uintptr_t>(target_fn);
-                    if (target_fn) {
-                        register_function_pointer(fn_ptr, target_fn);
-                    }
+                    uintptr_t fn_ptr = target_fn ? function_address(*target_fn) : 0;
                     frame.set_value(inst->result(), RuntimeValue::from_ptr(fn_ptr));
                     break;
                 }
@@ -613,12 +612,13 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                     }
 
                     RuntimeValue call_res;
-                    auto fn_it = function_pointers_.find(callee_ptr);
-                    if (fn_it != function_pointers_.end()) {
+                    if (const Function* target_fn = function_at(callee_ptr)) {
+                        // Keyed on the program's pointer to the target, whatever
+                        // address of it this one is.
                         dispatch_table().tiering().type_feedback()
                             .get_or_create(fn.name())
-                            .record_call_target(inst->site_id(), callee_ptr, fn_it->second->name());
-                        call_res = execute_function(*fn_it->second, call_args);
+                            .record_call_target(inst->site_id(), function_address(*target_fn), target_fn->name());
+                        call_res = execute_function(*target_fn, call_args);
                     } else {
                         auto host_it = host_function_pointers_.find(callee_ptr);
                         if (host_it != host_function_pointers_.end()) {

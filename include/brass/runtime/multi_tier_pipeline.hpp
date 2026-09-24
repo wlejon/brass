@@ -125,6 +125,25 @@ public:
     bool compile_and_install_tier1(std::string_view fn_name, const Function* fn = nullptr);
     bool is_baseline_rejected(std::string_view fn_name) const;
 
+    // The program's one function-pointer representation: the address every
+    // tier's func_addr of program function `name` (MIR `fn`) yields, and
+    // what type feedback keys call targets on. It is the function's lazy
+    // stub, callable from native code in any tier: the first call through
+    // it compiles the function to Tier 1, or, when the baseline tier
+    // rejects it, binds a native-to-Tier-0 bridge (tier0_bridge.cpp).
+    // Registered in the dispatch table, so Tier 0 maps it back.
+    void* function_address(std::string_view name, const Function* fn);
+    // Whether a native-to-Tier-0 bridge can call `fn`: at most
+    // kTier0BridgeMaxParams parameters, each and the result an integer,
+    // pointer or f64 (or a void result). `why` says why not.
+    static constexpr size_t kTier0BridgeMaxParams = 8;
+    static bool tier0_bridge_supported(const Function& fn, std::string* why = nullptr);
+    // Called by a bridge: runs `name` in Tier 0 with the raw argument bits,
+    // returning the result's bits. It re-enters the interpreter active on
+    // this thread when that one runs this program (a fresh one otherwise),
+    // and an exception it throws unwinds through the native callers.
+    uint64_t call_tier0_from_native(std::string_view name, const uint64_t* bits, size_t count);
+
     // Testing only: called with each function's name as a Tier 1 compile of
     // it starts (on the compiling thread, while it counts as in progress).
     // Set before compiles start.
@@ -214,6 +233,14 @@ private:
     // compiles and installs it (waiting out another thread's compile of
     // it), returning its entry, or null when the baseline tier rejects it.
     void* compile_tier1_on_demand(std::string_view name);
+    // The native entry of `name`'s native-to-Tier-0 bridge, built on first
+    // use; null (after reporting why) when its signature has none.
+    void* tier0_bridge(std::string_view name);
+    // Runs `fn` (or, with `resume_fn`, resumes it at `resume_id`) in a
+    // fresh Tier-0 interpreter of this pipeline's kind routing through `table`.
+    RuntimeValue run_fresh_tier0(FunctionDispatchTable& table, const Function* fn,
+                                 const std::vector<RuntimeValue>& args, const Function* resume_fn = nullptr,
+                                 uint32_t resume_id = 0);
     void setup_fast_interpreter(FastInterpreter& interp, Module& mod);
     // The Tier-0 interpreter kept across execute() calls on one module,
     // rebuilt when the module or the registered symbols change.
@@ -246,6 +273,10 @@ private:
     mutable std::mutex compiling_mutex_;
     std::unordered_set<std::string> in_progress_compilations_;
     std::unordered_set<std::string> baseline_rejected_; // under compiling_mutex_
+    // Native-to-Tier-0 bridges by function name (tier0_bridge.cpp); kept
+    // for the pipeline's lifetime, since lazy stubs point into them.
+    std::mutex bridges_mutex_;
+    std::unordered_map<std::string, std::shared_ptr<void>> tier0_bridges_;
     // Testing only (set_tier1_compile_hook, set_tier1_install_hook).
     std::function<void(std::string_view)> tier1_compile_hook_;
     std::function<void(std::string_view)> tier1_install_hook_;

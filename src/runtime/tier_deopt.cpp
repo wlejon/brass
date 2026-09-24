@@ -136,8 +136,16 @@ uint64_t MultiTierPipeline::resume_after_deopt(FunctionHandle& handle, const Deo
         deopt_fatal("guard " + std::to_string(frame.resume_id) + " of '" + fname +
                     "' has neither an exit stub nor a resume target");
     }
-    Module* mod = fn->parent();
-    RuntimeValue result;
+    RuntimeValue result = stub ? run_fresh_tier0(table, stub, state)
+                               : run_fresh_tier0(table, nullptr, state, fn, frame.resume_id);
+    return result.is_void() ? 0 : result.raw_bits();
+}
+
+RuntimeValue MultiTierPipeline::run_fresh_tier0(FunctionDispatchTable& table, const Function* fn,
+                                                const std::vector<RuntimeValue>& args, const Function* resume_fn,
+                                                uint32_t resume_id) {
+    const Function* owner = fn ? fn : resume_fn;
+    Module* mod = owner ? owner->parent() : nullptr;
     if (config_.use_fast_interpreter()) {
         FastInterpreter interp;
         interp.set_dispatch_table(&table);
@@ -145,15 +153,13 @@ uint64_t MultiTierPipeline::resume_after_deopt(FunctionHandle& handle, const Deo
             std::lock_guard<std::mutex> lock(mutex_);
             setup_fast_interpreter(interp, *mod);
         }
-        result = stub ? interp.run(*stub, state) : interp.resume(*fn, frame.resume_id, state);
-    } else {
-        // As execute() sets up the oracle interpreter.
-        Interpreter interp;
-        interp.set_dispatch_table(&table);
-        il::register_bronze_interpreter_symbols(&interp);
-        result = stub ? interp.run(*stub, state) : interp.resume(*fn, frame.resume_id, state);
+        return fn ? interp.run(*fn, args) : interp.resume(*resume_fn, resume_id, args);
     }
-    return result.is_void() ? 0 : result.raw_bits();
+    // As execute() sets up the oracle interpreter.
+    Interpreter interp;
+    interp.set_dispatch_table(&table);
+    il::register_bronze_interpreter_symbols(&interp);
+    return fn ? interp.run(*fn, args) : interp.resume(*resume_fn, resume_id, args);
 }
 
 } // namespace brass::runtime

@@ -3,6 +3,7 @@
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/runtime/parallel_runtime.hpp>
 #include <brass/runtime/code_installer.hpp>
+#include <brass/runtime/multi_tier_pipeline.hpp>
 #include <iostream>
 #include <cmath>
 
@@ -11,7 +12,16 @@ namespace brass {
 namespace {
 thread_local void* s_interp_red_target = nullptr;
 thread_local runtime::ReductionKind s_interp_red_kind = runtime::ReductionKind::None;
+thread_local Interpreter* s_active_interp = nullptr;
 } // namespace
+
+Interpreter::ActiveScope::ActiveScope(Interpreter* interp) noexcept : prev(s_active_interp) {
+    s_active_interp = interp;
+}
+
+Interpreter::ActiveScope::~ActiveScope() { s_active_interp = prev; }
+
+Interpreter* Interpreter::active_on_thread() noexcept { return s_active_interp; }
 
 void Interpreter::register_builtin_host_functions() {
     register_external_function("brass_parallel_alloc_context", [](Interpreter&, const std::vector<RuntimeValue>& args) -> RuntimeValue {
@@ -152,6 +162,28 @@ void Interpreter::register_function_pointer(uintptr_t ptr, HostFn fn) {
 const Function* Interpreter::find_function_by_pointer(uintptr_t ptr) const noexcept {
     auto it = function_pointers_.find(ptr);
     return it != function_pointers_.end() ? it->second : nullptr;
+}
+
+uintptr_t Interpreter::function_address(const Function& fn) {
+    if (fn.block_count() == 0) {
+        uintptr_t ptr = reinterpret_cast<uintptr_t>(&fn);
+        register_function_pointer(ptr, &fn);
+        return ptr;
+    }
+    uintptr_t ptr = reinterpret_cast<uintptr_t>(dispatch_table().pipeline().function_address(fn.name(), &fn));
+    function_pointers_[ptr] = &fn;
+    return ptr;
+}
+
+const Function* Interpreter::function_at(uintptr_t ptr) {
+    if (auto it = function_pointers_.find(ptr); it != function_pointers_.end()) return it->second;
+    const std::string name = dispatch_table().function_name_at(reinterpret_cast<const void*>(ptr));
+    if (name.empty()) return nullptr;
+    const Function* fn = nullptr;
+    if (runtime::FunctionHandle* handle = dispatch_table().find(name)) fn = handle->mir_function();
+    if (!fn && module_) fn = module_->get_function(name);
+    if (fn) function_pointers_[ptr] = fn;
+    return fn;
 }
 
 void Interpreter::patch_const(std::string_view symbol, int64_t val) {

@@ -353,6 +353,7 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
         [this, &fn](std::string_view name) { return resolve_symbol_in(fn, name); },
         frame_size, cc, fn_entry_label, gcref_slots, preserves_r13, lazy_.get()
     };
+    emitter.function_address = [this, &fn](std::string_view name) { return function_address_in(fn, name); };
 
     // 5. Code for each block
     for (const auto* bb : fn.blocks()) {

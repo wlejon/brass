@@ -5,6 +5,7 @@
 
 #include "fast_interpreter_impl.hpp"
 #include <brass/runtime/code_installer.hpp>
+#include <brass/runtime/multi_tier_pipeline.hpp>
 
 namespace brass {
 
@@ -147,6 +148,15 @@ void FastInterpreter::register_function_pointer(uintptr_t ptr, const Function* f
     invalidate_call_caches();
 }
 
+uintptr_t FastInterpreter::function_address(const Function& fn) {
+    uintptr_t ptr = reinterpret_cast<uintptr_t>(&fn);
+    if (fn.block_count() > 0) {
+        ptr = reinterpret_cast<uintptr_t>(dispatch_table().pipeline().function_address(fn.name(), &fn));
+    }
+    register_function_pointer(ptr, &fn);
+    return ptr;
+}
+
 void FastInterpreter::register_function_pointer(uintptr_t ptr, const BytecodeFunction* bfn) {
     auto [it, inserted] = bytecode_function_pointers_.try_emplace(ptr, bfn);
     if (!inserted) {
@@ -268,6 +278,17 @@ void FastInterpreter::resolve_indirect_target(FastCallTarget& t, uintptr_t ptr) 
     const uint64_t gen = runtime::registry_generation();
     FastCallTarget r;
     r.indirect_ptr = ptr;
+    if (!function_pointers_.count(ptr) && !bytecode_function_pointers_.count(ptr) &&
+        !host_function_pointers_.count(ptr)) {
+        // A code address native code made of a program function.
+        const std::string name = dispatch_table().function_name_at(reinterpret_cast<const void*>(ptr));
+        const Function* f = nullptr;
+        if (!name.empty()) {
+            if (runtime::FunctionHandle* h = dispatch_table().find(name)) f = h->mir_function();
+            if (!f && module_) f = module_->get_function(name);
+        }
+        if (f) function_pointers_.emplace(ptr, f);
+    }
     if (auto it = bytecode_function_pointers_.find(ptr); it != bytecode_function_pointers_.end()) {
         r.callee = &fn_info(*it->second);
         r.name = it->second->name;

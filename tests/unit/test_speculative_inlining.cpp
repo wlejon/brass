@@ -87,8 +87,9 @@ TEST_CASE("SpeculativeInlining - Monomorphic call devirtualization with direct c
 
     // Verify execution via Interpreter
     Interpreter interp;
-    uintptr_t fn_ptr = reinterpret_cast<uintptr_t>(target_fn);
-    interp.register_function_pointer(fn_ptr, target_fn);
+    // The program's pointer to it, what func_addr (the guard's expected
+    // value) yields.
+    uintptr_t fn_ptr = interp.function_address(*target_fn);
 
     RuntimeValue result = interp.run(
         mod,
@@ -160,8 +161,7 @@ TEST_CASE("SpeculativeInlining - Monomorphic speculative inlining of callee body
 
     // Execute via Interpreter
     Interpreter interp;
-    uintptr_t leaf_ptr = reinterpret_cast<uintptr_t>(small_leaf);
-    interp.register_function_pointer(leaf_ptr, small_leaf);
+    uintptr_t leaf_ptr = interp.function_address(*small_leaf);
 
     RuntimeValue result = interp.run(
         mod,
@@ -229,10 +229,8 @@ TEST_CASE("SpeculativeInlining - Deoptimization fallback on unexpected function 
     CHECK(verify_function(*caller));
 
     Interpreter interp;
-    uintptr_t exp_ptr = reinterpret_cast<uintptr_t>(expected_fn);
-    uintptr_t unexp_ptr = reinterpret_cast<uintptr_t>(unexpected_fn);
-    interp.register_function_pointer(exp_ptr, expected_fn);
-    interp.register_function_pointer(unexp_ptr, unexpected_fn);
+    uintptr_t exp_ptr = interp.function_address(*expected_fn);
+    uintptr_t unexp_ptr = interp.function_address(*unexpected_fn);
 
     // 1. Invocation with expected pointer -> guard succeeds
     RuntimeValue res_fast = interp.run(

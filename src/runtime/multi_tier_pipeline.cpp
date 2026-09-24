@@ -418,14 +418,17 @@ std::optional<detail::Tier1Link> MultiTierPipeline::open_tier1_node(std::string_
     }
     // A function whose address the code takes is compiled when first
     // called through it (compile_tier1_on_demand), not now: code may take
-    // many addresses it never calls. One the baseline tier is known to
-    // reject could not be, so neither is this code.
+    // many addresses it never calls. One the baseline tier rejects is
+    // called through a native-to-Tier-0 bridge; code taking the address of
+    // one that has no bridge either is rejected too, since its pointer
+    // could only trap.
     for (const std::string& sym : compiled.lazy_addr_symbols()) {
         const Function* def = mod ? mod->get_function(sym) : nullptr;
         if (!def || def->block_count() == 0) continue;
         // The stub finds it (and its MIR) through its handle.
         if (table_->get_or_create(sym, def)->native_entry()) continue;
-        if (is_baseline_rejected(sym) || !baseline_compiler_.passes_prescan(*def, Target::host())) {
+        if ((is_baseline_rejected(sym) || !baseline_compiler_.passes_prescan(*def, Target::host())) &&
+            !tier0_bridge_supported(*def)) {
             node.link = Tier1Link::Rejected;
         }
     }
@@ -441,14 +444,9 @@ void* MultiTierPipeline::compile_tier1_on_demand(std::string_view name) {
     for (;;) {
         if (void* entry = handle->native_entry()) return entry;
         if (compile_and_install_tier1(name)) continue;
-        if (is_baseline_rejected(name)) {
-            std::fprintf(stderr,
-                         "brass: '%s' is called through its address from Tier-1 code, and the baseline tier "
-                         "rejects it (or a function it calls)\n",
-                         std::string(name).c_str());
-            std::fflush(stderr);
-            return nullptr;
-        }
+        // The baseline tier rejects it (or a function it calls): the call
+        // runs it in Tier 0.
+        if (is_baseline_rejected(name)) return tier0_bridge(name);
         // It, or a function it calls, is being compiled on another thread,
         // which publishes it or gives it up without waiting on this one.
         std::this_thread::yield();

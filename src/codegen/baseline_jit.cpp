@@ -299,6 +299,34 @@ void* BaselineJitCompiler::lazy_stub(std::string_view name) {
     return lazy_->stub_for(name);
 }
 
+void* BaselineJitCompiler::module_function_stub(std::string_view name) {
+    bool claimed = false;
+    {
+        std::lock_guard<std::mutex> lock(symbols_mutex_);
+        claimed = module_owned_.emplace(name).second;
+    }
+    // A stub a registered symbol already filled is re-armed (lock order:
+    // table, then symbols), as resolve_symbol_in does.
+    if (claimed && lazy_->resolved_target(name)) lazy_->define(name, nullptr);
+    void* stub = lazy_->stub_for(name);
+    dispatch_table().register_code_address(stub, name);
+    return stub;
+}
+
+void* BaselineJitCompiler::function_address_in(const Function& fn, std::string_view name) {
+    const Module* mod = fn.parent();
+    if (!mod) return nullptr;
+    const Function* def = mod->get_function(name);
+    if (!def || def->block_count() == 0) return nullptr;
+    {
+        std::lock_guard<std::mutex> lock(symbols_mutex_);
+        if (!module_functions_shadow_) return nullptr;
+    }
+    // Its handle carries the MIR the stub compiles (or bridges) on demand.
+    dispatch_table().get_or_create(name, def);
+    return module_function_stub(name);
+}
+
 void* BaselineJitCompiler::resolve_symbol(std::string_view name) const {
     BaselineSymbolResolver custom;
     {

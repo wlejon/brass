@@ -118,6 +118,17 @@ public:
     // hard error (reported, then ud2), never a call through null. The stubs
     // stay alive as long as any function compiled against them.
     void* lazy_stub(std::string_view name);
+    // The one address of program function `name` that every tier uses as
+    // its function pointer: its lazy stub, claimed for the program (it
+    // resolves through the dispatch table and compiles the function on
+    // first call, never to a registered symbol of the name) and registered
+    // in the dispatch table (register_code_address).
+    void* module_function_stub(std::string_view name);
+    // What func_addr of `name` in `fn` yields when it names a function of
+    // fn's module with a body and module functions are shadowed
+    // (set_module_functions_shadow): module_function_stub(name). Null
+    // otherwise (the symbol resolves as any other).
+    void* function_address_in(const Function& fn, std::string_view name);
     const std::shared_ptr<LazySymbolTable>& lazy_symbols() const noexcept { return lazy_; }
 
     BaselineCompiledFunction compile(const Function& fn);
