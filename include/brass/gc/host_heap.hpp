@@ -40,6 +40,19 @@ public:
     // cannot unwind a C++ exception.
     virtual uintptr_t allocate(size_t size, uint64_t pointer_mask, uint32_t type_tag) = 0;
 
+    // allocate() with the frame that asked for the object: from generated
+    // code, its frame pointer and the return address into it; from an
+    // interpreter or the runtime, both 0. brass calls this, never allocate()
+    // directly; the default forwards to allocate(). A host that collects
+    // while allocating passes both to brass_enumerate_thread_roots to find
+    // the gcrefs of the generated frames on the stack.
+    virtual uintptr_t allocate_at(size_t size, uint64_t pointer_mask, uint32_t type_tag,
+                                  uintptr_t caller_fp, uintptr_t caller_ip) {
+        (void)caller_fp;
+        (void)caller_ip;
+        return allocate(size, pointer_mask, type_tag);
+    }
+
     // A collection an interpreter asked for explicitly (its brass_gc_collect).
     virtual void collect() {}
 
@@ -60,14 +73,14 @@ public:
 };
 
 // Every gcref slot brass knows on the calling thread, appended to `roots`,
-// for a host heap's collection (from allocate(), collect() or
+// for a host heap's collection (from allocate_at(), collect() or
 // safepoint_at()). A slot may be reported more than once; each holds a
 // gcref (or a tagged value whose low 48 bits are one) the host must keep
 // alive and, if it moves the object, update in place. Reports:
 //   - the generated (JIT, baseline) frames from (caller_fp, caller_ip)
-//     upward, through the code stack maps: pass what safepoint_at received.
-//     With either 0 (a collection from allocate() or collect()) none are
-//     walked from here;
+//     upward, through the code stack maps: pass what allocate_at or
+//     safepoint_at received. With either 0 (an allocation from an
+//     interpreter, or collect()) none are walked from here;
 //   - every run of native frames below re-entered Tier-0 code
 //     (NativeFramesScope), and every ThreadRootsScope, which includes the
 //     frames of the fresh Tier-0 interpreters a deoptimization or a
@@ -87,8 +100,10 @@ void brass_enumerate_thread_roots(uintptr_t caller_fp, uintptr_t caller_ip, std:
 void set_host_heap(HostHeap* heap) noexcept;
 HostHeap* host_heap() noexcept;
 
-// host_heap()->allocate(), aborting with a message on a 0 answer. Only
-// meaningful with a heap installed.
-uintptr_t host_heap_allocate(size_t size, uint64_t pointer_mask, uint32_t type_tag);
+// host_heap()->allocate_at(), aborting with a message on a 0 answer. Only
+// meaningful with a heap installed. Generated code's allocations pass the
+// calling frame; others leave both 0.
+uintptr_t host_heap_allocate(size_t size, uint64_t pointer_mask, uint32_t type_tag,
+                             uintptr_t caller_fp = 0, uintptr_t caller_ip = 0);
 
 } // namespace brass

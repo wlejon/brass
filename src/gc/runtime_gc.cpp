@@ -293,7 +293,7 @@ void brass_runtime_gc_safepoint_bridge(uintptr_t caller_rbp, uintptr_t caller_ip
 
 uintptr_t brass_runtime_gc_alloc_bridge(size_t size, uint64_t pointer_mask, uint32_t type_tag, uintptr_t caller_rbp, uintptr_t caller_ip) {
     if (brass::host_heap()) {
-        return brass::host_heap_allocate(size, pointer_mask, type_tag);
+        return brass::host_heap_allocate(size, pointer_mask, type_tag, caller_rbp, caller_ip);
     }
     if (auto* gen_gc = brass::brass_get_active_generational_gc()) {
         if (gen_gc->can_allocate_fast(size)) {
@@ -360,7 +360,10 @@ void brass_gc_safepoint() {
 
 uintptr_t brass_gc_alloc(size_t size, uint64_t pointer_mask, uint32_t type_tag) {
     if (brass::host_heap()) {
-        return brass::host_heap_allocate(size, pointer_mask, type_tag);
+        void* frame = __builtin_frame_address(0);
+        uintptr_t caller_rbp = frame ? *reinterpret_cast<uintptr_t*>(frame) : 0;
+        uintptr_t caller_ip = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
+        return brass::host_heap_allocate(size, pointer_mask, type_tag, caller_rbp, caller_ip);
     }
     if (auto* gen_gc = brass::brass_get_active_generational_gc()) {
         if (gen_gc->can_allocate_fast(size)) {

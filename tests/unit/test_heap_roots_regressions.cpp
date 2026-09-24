@@ -91,6 +91,19 @@ b0:
   %v = load.i64 %o, 16
   ret %v
 }
+func @keepa() -> i64 {
+b0:
+  %sz = iconst.i64 48
+  %z = iconst.i64 0
+  %kind = iconst.i32 2
+  %o = call.gcref @brass_gc_alloc(%sz, %z, %kind)
+  %k = iconst.i64 42
+  store.i64 %o, 16, %k
+  %p = call.gcref @brass_gc_alloc(%sz, %z, %kind)
+  store.i64 %p, 16, %k
+  %v = load.i64 %o, 16
+  ret %v
+}
 )";
 
 FunctionHandle* install2(FunctionDispatchTable& prog, Module& mod, const char* name) {
@@ -235,5 +248,35 @@ TEST_CASE("Sweep17 - a host heap's safepoint gets the JIT frame and can enumerat
     CHECK_EQ(fn(), 42);
     REQUIRE_EQ(heap.collects, 1);
     CHECK_EQ(heap.framed_safepoints, 1);
+    CHECK(heap.enumerated_naming >= 1u);
+}
+
+TEST_CASE("Sweep18 - a host heap's allocation from generated code gets the JIT frame and can enumerate its roots") {
+    auto mod = parse_ok(kDeopt);
+    RootCountHeap heap;
+    codegen::JitExecutionEngine jit(Target::host());
+    REQUIRE(jit.compile_and_load(*mod));
+    auto fn = jit.get_function_ptr<int64_t (*)()>("keepa");
+    REQUIRE(fn != nullptr);
+    // Watches @keepa's first object and, at its second allocation (where a
+    // host may collect), asks brass for the roots from the frame it gets.
+    struct Watch final : HostHeap {
+        RootCountHeap& inner;
+        int allocations = 0;
+        int framed = 0;
+        explicit Watch(RootCountHeap& h) : inner(h) {}
+        uintptr_t allocate(size_t s, uint64_t m, uint32_t t) override { return inner.allocate(s, m, t); }
+        uintptr_t allocate_at(size_t s, uint64_t m, uint32_t t, uintptr_t fp, uintptr_t ip) override {
+            if (fp != 0 && ip != 0) ++framed;
+            if (++allocations == 2) inner.count(fp, ip);
+            const uintptr_t p = inner.allocate(s, m, t);
+            if (allocations == 1) inner.watched = p;
+            return p;
+        }
+    } watch(heap);
+    HeapScope scope(&watch);
+    CHECK_EQ(fn(), 42);
+    CHECK_EQ(watch.allocations, 2);
+    CHECK_EQ(watch.framed, 2);
     CHECK(heap.enumerated_naming >= 1u);
 }
