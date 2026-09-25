@@ -1,5 +1,6 @@
 #include "test_framework.hpp"
 #include <brass/runtime/parallel_runtime.hpp>
+#include <atomic>
 #include <vector>
 #include <numeric>
 #include <algorithm>
@@ -182,4 +183,26 @@ TEST_CASE("Parallel Context Allocation and Free") {
     void* ptr = brass_parallel_alloc_context(128);
     CHECK(ptr != nullptr);
     brass_parallel_free_context(ptr);
+}
+
+static void count_kernel(uint64_t start, uint64_t end, void* context) {
+    static_cast<std::atomic<uint64_t>*>(context)->fetch_add(end - start, std::memory_order_relaxed);
+}
+
+// A dispatch published its generation without the workers' mutex, so a
+// worker between its predicate check and its wait could miss the notify,
+// sleep through the dispatch without counting itself out, and hang the
+// master's wait for good. Many tiny dispatches make that window likely; a
+// hang fails the test by its timeout. Restarting the workers in between
+// checks that a late-starting worker neither runs nor misses a dispatch.
+TEST_CASE("brass_parallel_for - back-to-back tiny dispatches all complete") {
+    ParallelRuntime rt(8);
+    for (int round = 0; round < 4; ++round) {
+        for (int i = 0; i < 5000; ++i) {
+            std::atomic<uint64_t> total{0};
+            rt.parallel_for(64, 1, count_kernel, &total, ReductionKind::None, nullptr);
+            REQUIRE_EQ(total.load(), 64u);
+        }
+        rt.set_num_workers(round % 2 == 0 ? 4 : 8);
+    }
 }

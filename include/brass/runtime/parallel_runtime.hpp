@@ -154,7 +154,7 @@ public:
 private:
     void start_workers(uint32_t count);
     void stop_workers();
-    void worker_loop(uint32_t worker_id);
+    void worker_loop(uint32_t worker_id, uint32_t start_generation);
     void execute_work(uint32_t worker_id);
 
     uint32_t num_workers_ = 0;

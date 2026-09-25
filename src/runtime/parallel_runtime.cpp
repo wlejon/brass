@@ -79,13 +79,22 @@ void ParallelRuntime::start_workers(uint32_t count) {
     stop_flag_.store(false, std::memory_order_relaxed);
     workers_.clear();
     // Worker 0 is always the master thread. Background threads are 1 .. count-1.
+    // Each waits for the generation after this one: a thread that starts
+    // late must neither run a dispatch that finished before it existed nor
+    // miss one made meanwhile.
+    const uint32_t gen = task_generation_.load(std::memory_order_acquire);
     for (uint32_t i = 1; i < count; ++i) {
-        workers_.emplace_back(&ParallelRuntime::worker_loop, this, i);
+        workers_.emplace_back(&ParallelRuntime::worker_loop, this, i, gen);
     }
 }
 
 void ParallelRuntime::stop_workers() {
-    stop_flag_.store(true, std::memory_order_release);
+    {
+        // Under the mutex, or a worker between its predicate check and its
+        // wait misses the notify and the join below never returns.
+        std::lock_guard<std::mutex> lock(cv_mtx_);
+        stop_flag_.store(true, std::memory_order_release);
+    }
     task_cv_.notify_all();
     for (auto& t : workers_) {
         if (t.joinable()) {
@@ -95,10 +104,10 @@ void ParallelRuntime::stop_workers() {
     workers_.clear();
 }
 
-void ParallelRuntime::worker_loop(uint32_t worker_id) {
+void ParallelRuntime::worker_loop(uint32_t worker_id, uint32_t start_generation) {
     t_current_worker_id = worker_id;
     t_is_worker_thread = true;
-    uint32_t last_gen = 0;
+    uint32_t last_gen = start_generation;
 
     while (true) {
         {
@@ -289,8 +298,15 @@ void ParallelRuntime::parallel_for(
     current_kernel_ = kernel;
     current_context_ = context;
     current_reduction_ = reduction;
-    active_tasks_.store(num_workers_, std::memory_order_release);
-    task_generation_.fetch_add(1, std::memory_order_acq_rel);
+    {
+        // Under the mutex the workers wait with: a worker that has checked
+        // the generation but not yet blocked would otherwise miss the
+        // notify, sleep through this dispatch without counting itself out,
+        // and leave the wait below hanging.
+        std::lock_guard<std::mutex> lock(cv_mtx_);
+        active_tasks_.store(num_workers_, std::memory_order_release);
+        task_generation_.fetch_add(1, std::memory_order_acq_rel);
+    }
 
     // Wake up background workers
     task_cv_.notify_all();
