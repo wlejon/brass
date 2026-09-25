@@ -140,9 +140,12 @@ WalkCost run_walk(int depth, Entry how) {
 
 } // namespace
 
-#if defined(_WIN32) && defined(_M_X64)
+#if (defined(_WIN32) && defined(_M_X64)) || (defined(__APPLE__) && defined(__aarch64__))
 // Only the first walk under an entry scope unwinds the host's stack; the
 // rest stop at the scope. Unwind steps, not time, so the test cannot flake.
+// Windows x64 unwinds with unwind data; Apple arm64 follows the
+// frame-pointer chain every function keeps (a step is one host frame).
+// Elsewhere host frames may have no frame record to follow.
 TEST_CASE("Sweep21 - a collection's unwind does not grow with the host's stack depth") {
     for (Entry how : {Entry::RawWithScope, Entry::EngineInvoke}) {
         const WalkCost shallow = run_walk(0, how);

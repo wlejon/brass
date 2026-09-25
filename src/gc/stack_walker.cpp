@@ -40,6 +40,14 @@ namespace brass {
 // the generated caller with a NativeFramesScope, which starts a walk of its
 // own at that frame; a host function that calls generated or interpreted
 // code from generated code must do the same (native_frames.hpp).
+//
+// There the chain beneath the outermost generated frame is the host's
+// stack, followed to its base on every walk. A GeneratedCodeEntryScope
+// bounds that as on Windows: the first walk that follows the chain past a
+// scope (the first pair whose frame pointer lies beneath it) records the
+// next generated pair it reaches beneath, or that the chain ended, and
+// later walks take that answer. An unwind step here is one compiled frame
+// followed.
 namespace {
 thread_local size_t t_unwind_steps = 0;
 } // namespace
@@ -69,7 +77,7 @@ size_t brass_stack_walk_bounded(
     uintptr_t cur_return_ip = top_return_ip;
     // The frame pointer of the generated frame whose [rbp + 8] held
     // cur_return_ip; 0 for the top pair, whose stack position is unknown.
-    uintptr_t callee_rbp = 0;
+    [[maybe_unused]] uintptr_t callee_rbp = 0;
 
     constexpr size_t MAX_FRAMES = 1024;
     constexpr size_t MAX_STEPS = 64 * 1024;
@@ -97,6 +105,30 @@ size_t brass_stack_walk_bounded(
     };
 
     size_t steps = 0;
+
+#if !(defined(_WIN32) && defined(_M_X64))
+    // Entry scopes the walk passes (above): the innermost one not yet
+    // passed, and the passed ones waiting for the answer beneath them. A
+    // scope above the first pair lies in a frame the walk does not visit.
+    using Beneath = GeneratedCodeEntryScope::Beneath;
+    GeneratedCodeEntryScope* entry = brass_innermost_entry_scope();
+    while (entry && entry->address() < top_rbp) entry = entry->outer();
+    constexpr size_t MAX_PENDING = 16;
+    GeneratedCodeEntryScope* pending[MAX_PENDING];
+    size_t npending = 0;
+    auto settle = [&](Beneath beneath, uintptr_t rbp, uintptr_t ip) {
+        for (size_t i = 0; i < npending; ++i) {
+            GeneratedCodeEntryScope::Memo& m = pending[i]->memo;
+            m.beneath = beneath;
+            m.maps = &stack_maps;
+            m.rsp = 0;
+            m.rbp = rbp;
+            m.ip = ip;
+        }
+        npending = 0;
+    };
+    bool chain_ended = false;
+#endif
 
 #if defined(_WIN32) && defined(_M_X64)
     // Unwinds ctx, a compiled frame, up to the next generated frame. Entry
@@ -190,12 +222,53 @@ size_t brass_stack_walk_bounded(
         }
 #endif
 
-        if (cur_rbp == 0 || (cur_rbp % 8) != 0 || cur_rbp >= stop_at) {
+        if (cur_rbp == 0 || (cur_rbp % 8) != 0) {
+#if !(defined(_WIN32) && defined(_M_X64))
+            chain_ended = true;
+#endif
+            break;
+        }
+        if (cur_rbp >= stop_at) {
             break;
         }
 #if defined(_WIN32)
         if (cur_rbp < stack_low || cur_rbp + 16 > stack_high) {
             break;
+        }
+#endif
+
+#if !(defined(_WIN32) && defined(_M_X64))
+        if (fn_map != nullptr) {
+            // The answer for the scopes passed since the last generated
+            // pair. A scope this pair passes lies in a frame without a
+            // frame record: no answer for it.
+            settle(Beneath::Generated, cur_rbp, cur_return_ip);
+            while (entry && cur_rbp > entry->address()) entry = entry->outer();
+        } else {
+            ++t_unwind_steps;
+            const GeneratedCodeEntryScope::Memo* answer = nullptr;
+            while (entry && cur_rbp > entry->address()) {
+                GeneratedCodeEntryScope* passed = entry;
+                entry = entry->outer();
+                if (passed->memo.beneath != Beneath::Unknown && passed->memo.maps == &stack_maps) {
+                    answer = &passed->memo;
+                    break;
+                }
+                if (npending < MAX_PENDING) pending[npending++] = passed;
+            }
+            if (answer != nullptr) {
+                if (answer->beneath == Beneath::Nothing) {
+                    chain_ended = true;
+                    break;
+                }
+                // The scopes between here and the answer lie above it.
+                cur_rbp = answer->rbp;
+                cur_return_ip = answer->ip;
+                callee_rbp = 0;
+                settle(Beneath::Generated, cur_rbp, cur_return_ip);
+                while (entry && entry->address() < cur_rbp) entry = entry->outer();
+                continue;
+            }
         }
 #endif
 
@@ -225,6 +298,9 @@ size_t brass_stack_walk_bounded(
 #endif
         if (!next_checked_by_unwind) {
             if (next_rbp <= cur_rbp || (next_rbp % 8) != 0) {
+#if !(defined(_WIN32) && defined(_M_X64))
+                chain_ended = true;
+#endif
                 break;
             }
 #if defined(_WIN32)
@@ -239,6 +315,10 @@ size_t brass_stack_walk_bounded(
         cur_return_ip = next_return_ip;
     }
 
+#if !(defined(_WIN32) && defined(_M_X64))
+    // Not when a limit stopped the walk: the chain may go on.
+    if (chain_ended || cur_return_ip == 0) settle(Beneath::Nothing, 0, 0);
+#endif
     return frame_count;
 }
 

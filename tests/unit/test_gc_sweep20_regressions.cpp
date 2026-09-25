@@ -239,9 +239,11 @@ TEST_CASE("Sweep20 - host callback with a NativeFramesScope keeps the generated 
     CHECK(minors > 0);
 }
 
-#if defined(_WIN32) && defined(_M_X64)
-// Without a scope, the walk must unwind through the host function's frame
-// (Windows x64 only; elsewhere the host must record the transition).
+#if (defined(_WIN32) && defined(_M_X64)) || (defined(__APPLE__) && defined(__aarch64__))
+// Without a scope, the walk must get through the host function's frame: on
+// Windows x64 with its unwind data, on Apple arm64 along the frame-pointer
+// chain every function keeps. Elsewhere compiled code may omit frame
+// pointers and the host must record the transition.
 TEST_CASE("Sweep20 - host callback without a scope keeps the generated caller's gcrefs") {
     size_t minors = 0;
     CHECK_EQ(run_cb(CbMode::Plain, &minors), 42);
