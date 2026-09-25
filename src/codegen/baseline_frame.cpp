@@ -101,18 +101,31 @@ BaselineFrameLayout layout_baseline_frame(const Function& fn, int32_t start_offs
             offset = (offset + align - 1) & ~(align - 1);
             offset += inst->imm_i32();
             layout.alloca_offsets[inst] = offset;
+            if (inst->memory_type().is_tagged()) {
+                // The buffer spans [fp - offset, fp - offset + size).
+                for (int32_t w = 0; w + 8 <= inst->imm_i32(); w += 8) layout.tagged_slots.push_back(offset - w);
+            }
         }
     }
 
-    // Whether a value's slot is a stack-map root.
-    auto rooted = [](const Value* v) { return v->type().is_gcref() && !is_derived_gcref(v); };
+    // The root kind of a value's slot.
+    enum class Root { None, GcRef, Tagged };
+    auto root_of = [](const Value* v) {
+        if (v->type().is_tagged()) return Root::Tagged;
+        return v->type().is_gcref() && !is_derived_gcref(v) ? Root::GcRef : Root::None;
+    };
+    auto rooted = [&](const Value* v) { return root_of(v) == Root::GcRef; };
+    auto add_root_slot = [&](Root kind, int32_t slot) {
+        if (kind == Root::GcRef) layout.gcref_slots.push_back(slot);
+        else if (kind == Root::Tagged) layout.tagged_slots.push_back(slot);
+    };
 
     auto dedicated = [&](const Value* v) {
         if (layout.slot_map.count(v)) return;
         if (bl_is_v128(v->type())) offset = ((offset + 15) & ~15) + 16;
         else offset += 8;
         layout.slot_map[v] = offset;
-        if (rooted(v)) layout.gcref_slots.push_back(offset);
+        add_root_slot(root_of(v), offset);
     };
 
     // Positions: block b spans [begin[b], end[b]]; its k-th instruction is
@@ -226,21 +239,21 @@ BaselineFrameLayout layout_baseline_frame(const Function& fn, int32_t start_offs
     std::sort(order.begin(), order.end(), [](const Range& a, const Range& b) {
         return a.start != b.start ? a.start < b.start : a.val->id() < b.val->id();
     });
-    struct Active { size_t end; int32_t slot; bool gcref; };
+    struct Active { size_t end; int32_t slot; Root kind; };
     std::vector<Active> active;
-    std::vector<int32_t> free_plain, free_gcref;
+    std::vector<int32_t> free_slots[3];  // by Root
     for (const Range& r : order) {
         for (size_t i = 0; i < active.size();) {
             if (active[i].end < r.start) {
-                (active[i].gcref ? free_gcref : free_plain).push_back(active[i].slot);
+                free_slots[static_cast<size_t>(active[i].kind)].push_back(active[i].slot);
                 active[i] = active.back();
                 active.pop_back();
             } else {
                 ++i;
             }
         }
-        const bool gcref = rooted(r.val);
-        auto& pool = gcref ? free_gcref : free_plain;
+        const Root kind = root_of(r.val);
+        auto& pool = free_slots[static_cast<size_t>(kind)];
         int32_t slot;
         if (!pool.empty()) {
             slot = pool.back();
@@ -248,10 +261,10 @@ BaselineFrameLayout layout_baseline_frame(const Function& fn, int32_t start_offs
         } else {
             offset += 8;
             slot = offset;
-            if (gcref) layout.gcref_slots.push_back(slot);
+            add_root_slot(kind, slot);
         }
         layout.slot_map[r.val] = slot;
-        active.push_back({r.end, slot, gcref});
+        active.push_back({r.end, slot, kind});
     }
 
     layout.size = offset;

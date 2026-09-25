@@ -102,6 +102,8 @@ private:
     void lower_pinned_tls_read(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_pinned_tls_write(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_read_sp(const Instruction& inst, codegen::LirBlock& lir_bb);
+    // bitcast_i64_tagged / bitcast_tagged_i64: a 64-bit register move.
+    void lower_tagged_bitcast(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_call(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_invoke(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_throw(const Instruction& inst, codegen::LirBlock& lir_bb);

@@ -131,6 +131,8 @@ bool emit_baseline_aarch64_fp_op(AArch64BaselineEmitter& em, const Instruction& 
         }
         case Opcode::bitcast_i64_f64:
         case Opcode::bitcast_f64_i64:
+        case Opcode::bitcast_i64_tagged:
+        case Opcode::bitcast_tagged_i64:
             enc.ldr(GPR::X0, em.slot_addr(inst.operand(0), 8));
             enc.str(GPR::X0, em.slot_addr(inst.result(), 8));
             return true;

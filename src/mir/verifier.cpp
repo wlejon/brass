@@ -583,6 +583,7 @@ bool Verifier::verify_function(const Function& fn) {
                     if (!inst->type().is_pointer_or_gcref() && inst->type() != Type::i64()) {
                         report_error(inst_prefix + "Alloca result type must be ptr or i64.");
                     }
+                    verify_tagged_alloca(*inst, inst_prefix, [this](const std::string& msg) { report_error(msg); });
                     break;
                 }
 
@@ -929,6 +930,8 @@ bool Verifier::verify_function(const Function& fn) {
                         verify_vector_instruction(inst, inst_prefix, [this](const std::string& msg) { report_error(msg); });
                     } else if (is_coro_op(inst->opcode())) {
                         verify_coro_instruction(inst, bb, inst_prefix, [this](const std::string& msg) { report_error(msg); });
+                    } else if (verify_tagged_bitcast(*inst, inst_prefix, [this](const std::string& msg) { report_error(msg); })) {
+                    } else if (verify_keep_alive(*inst, inst_prefix, [this](const std::string& msg) { report_error(msg); })) {
                     } else if (!verify_exception_instruction(inst, bb, inst_prefix, [this](const std::string& msg) { report_error(msg); })) {
                         report_error(inst_prefix + "Unhandled or invalid instruction opcode: " + std::string(opcode_name(inst->opcode())));
                     }

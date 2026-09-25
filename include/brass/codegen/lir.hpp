@@ -31,7 +31,10 @@ struct VReg {
     uint32_t id = kInvalid;
     RegClass reg_class = RegClass::GPR;
     uint8_t size = 8; // in bytes: 4 or 8
+    // A GC root while live: a gcref, or a tagged value (then is_tagged too).
+    // Both are rooted the same way; the stack map records which it is.
     bool is_gcref = false;
+    bool is_tagged = false;
 
     constexpr bool is_valid() const noexcept { return id != kInvalid; }
     constexpr bool is_gpr() const noexcept { return reg_class == RegClass::GPR; }
@@ -183,6 +186,8 @@ std::string to_string(const LirOperand& op);
 
 enum class LirOpcode : uint16_t {
     Nop,
+    // MIR keep_alive: uses its operand and emits nothing.
+    KeepAlive,
     // Moves
     Mov,
     Mov32,
@@ -504,6 +509,9 @@ struct VRegInfo {
 struct FrameInfo {
     size_t num_spill_slots = 0;
     size_t local_frame_bytes = 0;
+    // The `alloca.tagged` buffers in the local area, as (offset, bytes): each
+    // word is zeroed in the prologue and is a root at every GC point.
+    std::vector<std::pair<uint32_t, uint32_t>> tagged_locals;
     std::vector<bool> spill_slot_is_gcref;
     uint32_t saved_callee_gprs = 0;
     uint32_t saved_callee_xmms = 0;
@@ -534,7 +542,7 @@ public:
 
     LirFunction() = default;
 
-    VReg allocate_vreg(RegClass rc, uint8_t size, bool is_gcref = false);
+    VReg allocate_vreg(RegClass rc, uint8_t size, bool is_gcref = false, bool is_tagged = false);
     LirBlock* create_block(std::string name = "");
     LirBlock* create_block_with_id(uint32_t id, std::string name = "");
     LirBlock* entry_block() const { return blocks.empty() ? nullptr : blocks.front().get(); }

@@ -86,6 +86,7 @@ public:
             case TypeKind::F64:   return codeview::T_REAL64;
             case TypeKind::Ptr:
             case TypeKind::GCRef: return codeview::T_64PVOID;
+            case TypeKind::Tagged: return codeview::T_UQUAD;
             case TypeKind::Void:  return codeview::T_VOID;
             default: break;
         }

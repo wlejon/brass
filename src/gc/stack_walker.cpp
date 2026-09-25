@@ -64,13 +64,21 @@ size_t brass_stack_walk(
     return brass_stack_walk_bounded(top_rbp, top_return_ip, stack_maps, visitor, user_data, UINTPTR_MAX);
 }
 
-size_t brass_stack_walk_bounded(
+namespace {
+
+// The walk. `start` (Windows x64 only), when given, is the context of a
+// compiled frame on this thread's stack: the walk unwinds from it to the
+// first generated frame and starts there instead of at (top_rbp,
+// top_return_ip). Every step moves strictly toward the stack's base, so the
+// walk ends without a frame limit.
+size_t walk_stack(
     uintptr_t top_rbp,
     uintptr_t top_return_ip,
     const ModuleStackMap& stack_maps,
     brass_root_visitor_fn visitor,
     void* user_data,
-    uintptr_t stop_at
+    uintptr_t stop_at,
+    [[maybe_unused]] const void* start
 ) {
     size_t frame_count = 0;
     uintptr_t cur_rbp = top_rbp;
@@ -78,9 +86,6 @@ size_t brass_stack_walk_bounded(
     // The frame pointer of the generated frame whose [rbp + 8] held
     // cur_return_ip; 0 for the top pair, whose stack position is unknown.
     [[maybe_unused]] uintptr_t callee_rbp = 0;
-
-    constexpr size_t MAX_FRAMES = 1024;
-    constexpr size_t MAX_STEPS = 64 * 1024;
 
     const auto registered = code_stack_map_snapshot();
 
@@ -103,8 +108,6 @@ size_t brass_stack_walk_bounded(
         }
         return m;
     };
-
-    size_t steps = 0;
 
 #if !(defined(_WIN32) && defined(_M_X64))
     // Entry scopes the walk passes (above): the innermost one not yet
@@ -145,7 +148,7 @@ size_t brass_stack_walk_bounded(
         };
         while (entry && (!on_this_stack(entry) || entry->address() < ctx.Rsp)) entry = entry->outer();
         UnwindResult result = UnwindResult::GaveUp;
-        while (steps++ < MAX_STEPS) {
+        for (;;) {
             const DWORD64 prev_rsp = ctx.Rsp;
             ++t_unwind_steps;
             if (!detail::win64_unwind_one(ctx)) {  // base of the stack
@@ -192,9 +195,19 @@ size_t brass_stack_walk_bounded(
         }
         return result;
     };
+
+    if (start != nullptr) {
+        CONTEXT ctx = *static_cast<const CONTEXT*>(start);
+        if (find_map(ctx.Rip) == nullptr) {
+            if (unwind_to_generated(ctx) != UnwindResult::Generated) return 0;
+        }
+        if (ctx.Rsp >= stop_at || ctx.Rbp < ctx.Rsp) return 0;
+        cur_rbp = static_cast<uintptr_t>(ctx.Rbp);
+        cur_return_ip = static_cast<uintptr_t>(ctx.Rip);
+    }
 #endif
 
-    while (cur_return_ip != 0 && frame_count < MAX_FRAMES && steps++ < MAX_STEPS) {
+    while (cur_return_ip != 0) {
         const FunctionStackMap* fn_map = find_map(cur_return_ip);
 
 #if defined(_WIN32) && defined(_M_X64)
@@ -316,10 +329,47 @@ size_t brass_stack_walk_bounded(
     }
 
 #if !(defined(_WIN32) && defined(_M_X64))
-    // Not when a limit stopped the walk: the chain may go on.
+    // Not when stop_at ended the walk: the chain may go on.
     if (chain_ended || cur_return_ip == 0) settle(Beneath::Nothing, 0, 0);
 #endif
     return frame_count;
+}
+
+} // namespace
+
+size_t brass_stack_walk_bounded(
+    uintptr_t top_rbp,
+    uintptr_t top_return_ip,
+    const ModuleStackMap& stack_maps,
+    brass_root_visitor_fn visitor,
+    void* user_data,
+    uintptr_t stop_at
+) {
+    return walk_stack(top_rbp, top_return_ip, stack_maps, visitor, user_data, stop_at, nullptr);
+}
+
+#if defined(_MSC_VER)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+size_t brass_stack_walk_from_here(
+    const ModuleStackMap& stack_maps,
+    brass_root_visitor_fn visitor,
+    void* user_data
+) {
+#if defined(_WIN32) && defined(_M_X64)
+    CONTEXT ctx{};
+    RtlCaptureContext(&ctx);
+    return walk_stack(0, 0, stack_maps, visitor, user_data, UINTPTR_MAX, &ctx);
+#else
+    // This frame's record: the caller's frame pointer, then the return
+    // address into it. The compiled frames up to the first generated one
+    // are followed by their frame pointers.
+    const auto* fp = static_cast<const uintptr_t*>(__builtin_frame_address(0));
+    if (fp == nullptr) return 0;
+    return walk_stack(fp[0], fp[1], stack_maps, visitor, user_data, UINTPTR_MAX, nullptr);
+#endif
 }
 
 size_t brass_stack_walk(

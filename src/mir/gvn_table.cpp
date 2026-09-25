@@ -51,6 +51,9 @@ bool is_pure_gvn_op(const Instruction* inst) noexcept {
         case Opcode::sitofp_f64_i64:
         case Opcode::bitcast_i64_f64:
         case Opcode::bitcast_f64_i64:
+        // Boxing merges (a dominating box is a root the GC keeps current);
+        // bitcast_i64_tagged never does (gc_refs.hpp).
+        case Opcode::bitcast_tagged_i64:
         case Opcode::add:
         case Opcode::sub:
         case Opcode::mul:

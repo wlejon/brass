@@ -381,7 +381,11 @@ loop_start:
         OP_CASE(alloca_) {
             // The size is the next code word; the alignment is d.
             const size_t size = static_cast<size_t>(pc[1]);
-            RA = reinterpret_cast<uintptr_t>(alloca_arena_->allocate(size, decode_d(inst)));
+            void* buf = alloca_arena_->allocate(size, decode_d(inst));
+            if (decode_b(inst) != 0) {
+                tagged_allocas_.push_back({static_cast<uint64_t*>(buf), static_cast<uint32_t>(size / 8)});
+            }
+            RA = reinterpret_cast<uintptr_t>(buf);
             pc += 2;
             DISPATCH();
         }

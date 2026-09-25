@@ -276,7 +276,8 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force, int64_t create
         if (!slot_map.count(v)) spilled.push_back(v);
     }
     std::sort(spilled.begin(), spilled.end(), [](const Value* a, const Value* b) {
-        const bool ga = a->type().is_pointer_or_gcref(), gb = b->type().is_pointer_or_gcref();
+        const bool ga = a->type().is_pointer_or_gcref() || a->type().is_tagged();
+        const bool gb = b->type().is_pointer_or_gcref() || b->type().is_tagged();
         if (ga != gb) return ga;
         return a->id() < b->id();
     });
@@ -287,7 +288,7 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force, int64_t create
         if (options_.stats) options_.stats->variables_spilled++;
     }
     for (const auto& [v, slot] : slot_map) {
-        if (v->type().is_pointer_or_gcref() && slot > kMaxPointerSlot) {
+        if ((v->type().is_pointer_or_gcref() || v->type().is_tagged()) && slot > kMaxPointerSlot) {
             throw std::logic_error(fn_desc(fn) + "a gcref live across a suspend needs frame slot " +
                                    std::to_string(slot) + ", past the last slot the frame's pointer mask covers (" +
                                    std::to_string(kMaxPointerSlot) + ")");
@@ -506,7 +507,7 @@ CoroFrameLayout compute_coro_frame_layout(const Function& fn) {
             if (!frame || inst->operand(0) != frame || inst->offset() < runtime::CORO_OFFSET_SLOTS) continue;
             uint32_t slot = static_cast<uint32_t>((inst->offset() - runtime::CORO_OFFSET_SLOTS) / 8);
             layout.slot_count = std::max(layout.slot_count, slot + coro_slot_count(inst->memory_type()));
-            if (inst->memory_type().is_pointer_or_gcref()) {
+            if (inst->memory_type().is_pointer_or_gcref() || inst->memory_type().is_tagged()) {
                 if (slot > kMaxPointerSlot) {
                     throw std::logic_error("coroutine frame of @" + std::string(fn.name()) + ": gcref slot " +
                                            std::to_string(slot) + " is past the last slot the frame's pointer "

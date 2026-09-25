@@ -64,6 +64,9 @@ void X64BaselineEmitter::record_safepoint(uint32_t site_id) {
     for (int32_t off : gcref_slots) {
         rec.add_root(StackMapRootLocation::frame_slot(-off));
     }
+    for (int32_t off : tagged_slots) {
+        rec.add_root(StackMapRootLocation::frame_slot(-off, StackMapValueKind::Tagged));
+    }
     fn_stack_map.add_record(std::move(rec));
 }
 

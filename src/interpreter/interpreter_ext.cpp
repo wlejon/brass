@@ -204,7 +204,8 @@ unsigned scalar_bits(Type t) noexcept {
         case TypeKind::I64:
         case TypeKind::F64:
         case TypeKind::Ptr:
-        case TypeKind::GCRef: return 64;
+        case TypeKind::GCRef:
+        case TypeKind::Tagged: return 64;
         default: return 0;
     }
 }
@@ -246,7 +247,7 @@ void Interpreter::collect_all_roots(std::vector<uintptr_t*>& roots) {
     }
     // The value in flight between a throw and its pad (a pad retypes a
     // native callee's throw to gcref: then it moves with its object).
-    if (current_exception_.is_gcref() && !current_exception_.is_null()) {
+    if (current_exception_.is_gc_root() && !current_exception_.is_null()) {
         roots.push_back(reinterpret_cast<uintptr_t*>(&current_exception_.raw_bits_ref()));
     }
 }

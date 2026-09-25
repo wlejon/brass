@@ -33,6 +33,7 @@ enum class TokenKind : uint16_t {
     Kw_f64,
     Kw_ptr,
     Kw_gcref,
+    Kw_tagged,
     Kw_void,
     Kw_f32x4,
     Kw_f64x2,

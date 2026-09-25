@@ -180,10 +180,13 @@ public:
     FastFrame* current_frame() noexcept { return current_frame_; }
     const FastFrame* current_frame() const noexcept { return current_frame_; }
     void set_current_frame(FastFrame* frame) noexcept { current_frame_ = frame; }
-    // The slots of this interpreter's gcref-typed registers (frames and
-    // suspended coroutines), its exception in flight and its last deopt state.
+    // The slots of this interpreter's gcref- and tagged-typed registers
+    // (frames and suspended coroutines), its `alloca.tagged` words, its
+    // exception in flight and its last deopt state.
     void collect_all_roots(std::vector<uintptr_t*>& roots);
-    // The nonzero registers without a gcref type, which may still hold a
+    // As collect_all_roots, the gcrefs and the tagged values apart.
+    void collect_typed_roots(std::vector<uintptr_t*>& gcrefs, std::vector<uintptr_t*>& tagged);
+    // The nonzero registers of no reference type, which may still hold a
     // reference a host or native callee returned untyped.
     void collect_untyped_registers(std::vector<uintptr_t*>& slots);
 
@@ -269,8 +272,9 @@ private:
     runtime::FunctionDispatchTable* dispatch_table_ = nullptr;
     void attach_heap(gc::Heap* heap);
     void detach_heap() noexcept;
-    // fn(slot, typed_gcref) for every nonzero register of the running frames
-    // and suspended coroutines.
+    // fn(slot, kind) for every nonzero register of the running frames and
+    // suspended coroutines, with the root kind its type gives it.
+    enum class RegisterRootKind : uint8_t { None, GcRef, Tagged };
     template <typename Fn>
     void for_each_register(Fn&& fn);
     std::unique_ptr<gc::Heap> own_heap_;
@@ -310,6 +314,9 @@ private:
     // The Interpreter handed to brass::HostFn callbacks, built once.
     std::unique_ptr<Interpreter> host_adapter_;
     std::unique_ptr<FastAllocaArena> alloca_arena_;
+    // The `alloca.tagged` buffers of the active frames (start, words), in
+    // allocation order: a frame drops its own on exit (FrameGuard).
+    std::vector<std::pair<uint64_t*, uint32_t>> tagged_allocas_;
     friend struct FrameGuard;
 
     DeoptResult last_deopt_;

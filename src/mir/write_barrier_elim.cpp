@@ -32,7 +32,7 @@ bool constant_integer(const Value* val, int64_t& out) noexcept {
 bool non_pointer_value(const Value* val, int depth) noexcept {
     if (!val) return true;
     const Type t = val->type();
-    if (t.is_gcref() || t.is_pointer()) return false;
+    if (t.is_gc_root() || t.is_pointer()) return false;
     // Floats, vectors, 32-bit and narrower integers never hold a 64-bit
     // heap address, and a comparison result is 0 or 1.
     if (t.is_float() || t.is_vector() || t.is_void()) return true;

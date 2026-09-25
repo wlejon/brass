@@ -109,4 +109,55 @@ void verify_derived_gcrefs(
     }
 }
 
+bool verify_tagged_bitcast(
+    const Instruction& inst,
+    const std::string& prefix,
+    const std::function<void(const std::string&)>& report_error
+) {
+    Type from, to;
+    switch (inst.opcode()) {
+        case Opcode::bitcast_i64_tagged: from = Type::tagged(); to = Type::i64(); break;
+        case Opcode::bitcast_tagged_i64: from = Type::i64(); to = Type::tagged(); break;
+        default: return false;
+    }
+    if (inst.operand_count() != 1 || !inst.operand(0) || inst.operand(0)->type() != from) {
+        report_error(prefix + "Requires 1 " + std::string(from.name()) + " operand.");
+    }
+    if (inst.type() != to) {
+        report_error(prefix + "Result type must be " + std::string(to.name()) + ".");
+    }
+    return true;
+}
+
+bool verify_keep_alive(
+    const Instruction& inst,
+    const std::string& prefix,
+    const std::function<void(const std::string&)>& report_error
+) {
+    if (inst.opcode() != Opcode::keep_alive) return false;
+    if (inst.operand_count() != 1 || !inst.operand(0)) {
+        report_error(prefix + "keep_alive requires 1 operand.");
+    }
+    if (!inst.type().is_void() || inst.result()) {
+        report_error(prefix + "keep_alive produces no value.");
+    }
+    return true;
+}
+
+void verify_tagged_alloca(
+    const Instruction& inst,
+    const std::string& prefix,
+    const std::function<void(const std::string&)>& report_error
+) {
+    const Type mt = inst.memory_type();
+    if (mt.is_void()) return;
+    if (!mt.is_tagged()) {
+        report_error(prefix + "Alloca element type must be tagged, got " + std::string(mt.name()) + ".");
+        return;
+    }
+    if (inst.imm_i32() <= 0 || inst.imm_i32() % 8 != 0 || inst.offset() % 8 != 0) {
+        report_error(prefix + "alloca.tagged needs a positive whole number of 8-byte words, 8-aligned.");
+    }
+}
+
 } // namespace brass

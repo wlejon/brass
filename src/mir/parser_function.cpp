@@ -61,6 +61,7 @@ Type Parser::parse_type() {
     if (tok.is(TokenKind::Kw_f64)) { advance(); return Type::f64(); }
     if (tok.is(TokenKind::Kw_ptr)) { advance(); return Type::ptr(); }
     if (tok.is(TokenKind::Kw_gcref)) { advance(); return Type::gcref(); }
+    if (tok.is(TokenKind::Kw_tagged)) { advance(); return Type::tagged(); }
     if (tok.is(TokenKind::Kw_void)) { advance(); return Type::void_type(); }
     if (tok.is(TokenKind::Kw_f32x4)) { advance(); return Type::f32x4(); }
     if (tok.is(TokenKind::Kw_f64x2)) { advance(); return Type::f64x2(); }
@@ -71,7 +72,7 @@ Type Parser::parse_type() {
     if (tok.is(TokenKind::Kw_i32x8)) { advance(); return Type::i32x8(); }
     if (tok.is(TokenKind::Kw_i64x4)) { advance(); return Type::i64x4(); }
 
-    error(tok.location, "Expected type (i32, i64, f32, f64, ptr, gcref, void, f32x4, f64x2, i32x4, i64x2, f32x8, f64x4, i32x8, i64x4), got '" + std::string(tok.text) + "'");
+    error(tok.location, "Expected type (i32, i64, f32, f64, ptr, gcref, tagged, void, f32x4, f64x2, i32x4, i64x2, f32x8, f64x4, i32x8, i64x4), got '" + std::string(tok.text) + "'");
     return Type::void_type();
 }
 

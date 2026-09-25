@@ -27,7 +27,8 @@ enum class RuntimeValueKind : uint8_t {
     F32x8,
     F64x4,
     I32x8,
-    I64x4
+    I64x4,
+    Tagged
 };
 
 #if defined(_MSC_VER)
@@ -96,6 +97,13 @@ public:
         RuntimeValue v;
         v.kind_ = RuntimeValueKind::GCRef;
         v.raw_bits_ = static_cast<uint64_t>(val);
+        return v;
+    }
+
+    static constexpr RuntimeValue from_tagged(uint64_t bits) noexcept {
+        RuntimeValue v;
+        v.kind_ = RuntimeValueKind::Tagged;
+        v.raw_bits_ = bits;
         return v;
     }
 
@@ -237,6 +245,7 @@ public:
             case TypeKind::F64: v.kind_ = RuntimeValueKind::F64; break;
             case TypeKind::Ptr: v.kind_ = RuntimeValueKind::Ptr; break;
             case TypeKind::GCRef: v.kind_ = RuntimeValueKind::GCRef; break;
+            case TypeKind::Tagged: v.kind_ = RuntimeValueKind::Tagged; break;
             case TypeKind::Void: v.kind_ = RuntimeValueKind::Void; break;
             case TypeKind::F32x4: v.kind_ = RuntimeValueKind::F32x4; std::memcpy(v.vec_bytes_, &bits, 8); break;
             case TypeKind::F64x2: v.kind_ = RuntimeValueKind::F64x2; std::memcpy(v.vec_bytes_, &bits, 8); break;
@@ -260,6 +269,7 @@ public:
             case RuntimeValueKind::F64: return Type::f64();
             case RuntimeValueKind::Ptr: return Type::ptr();
             case RuntimeValueKind::GCRef: return Type::gcref();
+            case RuntimeValueKind::Tagged: return Type::tagged();
             case RuntimeValueKind::Void: return Type::void_type();
             case RuntimeValueKind::F32x4: return Type::f32x4();
             case RuntimeValueKind::F64x2: return Type::f64x2();
@@ -280,6 +290,9 @@ public:
     constexpr bool is_f64() const noexcept { return kind_ == RuntimeValueKind::F64; }
     constexpr bool is_ptr() const noexcept { return kind_ == RuntimeValueKind::Ptr; }
     constexpr bool is_gcref() const noexcept { return kind_ == RuntimeValueKind::GCRef; }
+    constexpr bool is_tagged() const noexcept { return kind_ == RuntimeValueKind::Tagged; }
+    // A gcref or a tagged value: a word the collector must see and may update.
+    constexpr bool is_gc_root() const noexcept { return is_gcref() || is_tagged(); }
     constexpr bool is_integer() const noexcept { return is_i32() || is_i64(); }
     constexpr bool is_pointer_or_gcref() const noexcept { return is_ptr() || is_gcref(); }
     constexpr bool is_vector() const noexcept {

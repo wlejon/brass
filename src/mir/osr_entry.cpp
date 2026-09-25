@@ -186,7 +186,8 @@ Function* build_osr_entry_function(const OsrEntryPlan& plan, Module& dst, std::s
                                       : v->defining_instruction() ? v->defining_instruction()->parent()
                                                                   : nullptr;
         if (def_block && in_region.count(def_block) && !plan.live_ins[i].rematerialize) {
-            Value* slot = b.build_alloca(8, 8);
+            // A tagged value's slot is a root, as its value is.
+            Value* slot = v->type().is_tagged() ? b.build_alloca_tagged(1) : b.build_alloca(8, 8);
             b.build_store(v->type(), slot, 0, incoming[i].second);
             slots.emplace(v, slot);
         } else {

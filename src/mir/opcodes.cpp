@@ -27,6 +27,8 @@ std::string_view opcode_name(Opcode op) noexcept {
         case Opcode::fpext_f64_f32: return "fpext_f64_f32";
         case Opcode::bitcast_i64_f64: return "bitcast_i64_f64";
         case Opcode::bitcast_f64_i64: return "bitcast_f64_i64";
+        case Opcode::bitcast_i64_tagged: return "bitcast_i64_tagged";
+        case Opcode::bitcast_tagged_i64: return "bitcast_tagged_i64";
 
         case Opcode::add: return "add";
         case Opcode::sub: return "sub";
@@ -98,6 +100,7 @@ std::string_view opcode_name(Opcode op) noexcept {
         case Opcode::call_indirect: return "call_indirect";
         case Opcode::patchable_call: return "patchable_call";
         case Opcode::safepoint: return "safepoint";
+        case Opcode::keep_alive: return "keep_alive";
         case Opcode::func_addr: return "func_addr";
 
         case Opcode::guard: return "guard";
@@ -362,6 +365,7 @@ bool has_side_effects(Opcode op) noexcept {
         case Opcode::pinned_tls_write:
         case Opcode::read_sp:
         case Opcode::safepoint:
+        case Opcode::keep_alive:
         case Opcode::guard:
         case Opcode::resume_point:
         case Opcode::landing_pad:

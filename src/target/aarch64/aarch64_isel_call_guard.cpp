@@ -323,6 +323,8 @@ void AArch64ISel::lower_guard(const Instruction& inst, LirBlock& lir_bb) {
             kind = runtime::DeoptValueKind::Float32;
         } else if (t.is_gcref()) {
             kind = runtime::DeoptValueKind::GcRef;
+        } else if (t.is_tagged()) {
+            kind = runtime::DeoptValueKind::Tagged;
         } else if (t.is_pointer()) {
             kind = runtime::DeoptValueKind::Pointer;
         } else if (t.kind() == TypeKind::I64) {

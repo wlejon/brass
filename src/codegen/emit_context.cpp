@@ -85,6 +85,7 @@ CompilationResult EmitContext::compile() {
 
     // 3. Emit prologue at entry
     X64FrameLayout::emit_prologue(enc_, frame_, fn_.calling_conv);
+    zero_tagged_locals();
 
     // 4. Emit blocks
     for (size_t b_idx = 0; b_idx < fn_.blocks.size(); ++b_idx) {
@@ -287,6 +288,68 @@ void EmitContext::emit_exit_stub_call(const LirInst& inst, int32_t slots_disp) {
     enc_.call(inst.exit_symbol);
 }
 
+void EmitContext::spill_callee_saved_roots(const LirInst& inst) {
+    for (const auto& v : inst.live_gcrefs) {
+        const auto& info = fn_.get_vreg_info(v);
+        if (!info.is_spilled && info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
+            auto it = callee_gpr_to_slot_.find(info.assigned_preg.code);
+            if (it != callee_gpr_to_slot_.end()) {
+                enc_.mov(X64FrameLayout::spill_slot_address(it->second, frame_), info.assigned_preg.as_gpr());
+            }
+        }
+    }
+}
+
+void EmitContext::reload_callee_saved_roots(const LirInst& inst) {
+    for (const auto& v : inst.live_gcrefs) {
+        const auto& info = fn_.get_vreg_info(v);
+        if (!info.is_spilled && info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
+            auto it = callee_gpr_to_slot_.find(info.assigned_preg.code);
+            if (it != callee_gpr_to_slot_.end()) {
+                enc_.mov(info.assigned_preg.as_gpr(), X64FrameLayout::spill_slot_address(it->second, frame_));
+            }
+        }
+    }
+}
+
+void EmitContext::record_gc_point(const LirInst& inst, size_t return_offset, SafepointRecord* sp) {
+    StackMapRecord map_rec;
+    map_rec.instruction_offset = static_cast<uint32_t>(return_offset);
+    map_rec.frame_size = static_cast<uint32_t>(frame_.total_frame_size);
+    map_rec.safepoint_id = inst.safepoint_id;
+
+    for (const auto& v : inst.live_gcrefs) {
+        const auto& info = fn_.get_vreg_info(v);
+        const StackMapValueKind value = StackMapRootLocation::value_kind_of(info.vreg);
+        if (info.is_spilled) {
+            int32_t offset = frame_.spill_slot_offset(info.assigned_spill_slot);
+            if (sp) sp->live_gcref_spill_offsets.push_back(offset);
+            map_rec.add_root(StackMapRootLocation::frame_slot(offset, value));
+        } else if (info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
+            if (sp) sp->live_gcref_registers.push_back(info.assigned_preg.as_gpr());
+            auto it = callee_gpr_to_slot_.find(info.assigned_preg.code);
+            int32_t slot = (it != callee_gpr_to_slot_.end()) ? it->second : 0;
+            int32_t offset = frame_.spill_slot_offset(slot);
+            map_rec.add_root(StackMapRootLocation::callee_saved(offset, info.assigned_preg, value));
+        }
+    }
+    for (const auto& [start, bytes] : frame_.tagged_locals) {
+        for (uint32_t off = 0; off + 8 <= bytes; off += 8) {
+            const int32_t disp = X64FrameLayout::local_frame_address(static_cast<int32_t>(start + off), frame_).disp;
+            map_rec.add_root(StackMapRootLocation::frame_slot(disp, StackMapValueKind::Tagged));
+        }
+    }
+    stack_map_records_.push_back(std::move(map_rec));
+}
+
+void EmitContext::zero_tagged_locals() {
+    for (const auto& [start, bytes] : frame_.tagged_locals) {
+        for (uint32_t off = 0; off + 8 <= bytes; off += 8) {
+            enc_.mov(X64FrameLayout::local_frame_address(static_cast<int32_t>(start + off), frame_), int32_t{0});
+        }
+    }
+}
+
 void EmitContext::emit_control_instruction(const LirInst& inst) {
     switch (inst.opcode) {
         case LirOpcode::Jmp:
@@ -296,15 +359,7 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
             enc_.j(inst.condition, block_labels_[inst.uses[0].label_id]);
             break;
         case LirOpcode::Call: {
-            for (const auto& v : inst.live_gcrefs) {
-                const auto& info = fn_.get_vreg_info(v);
-                if (!info.is_spilled && info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
-                    auto it = callee_gpr_to_slot_.find(info.assigned_preg.code);
-                    if (it != callee_gpr_to_slot_.end()) {
-                        enc_.mov(X64FrameLayout::spill_slot_address(it->second, frame_), info.assigned_preg.as_gpr());
-                    }
-                }
-            }
+            spill_callee_saved_roots(inst);
 
             size_t call_start = buffer_.size();
             std::string callee = inst.callee_symbol;
@@ -338,88 +393,25 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
                 enc_.call(callee);
             }
             size_t return_offset = buffer_.size();
-
-            for (const auto& v : inst.live_gcrefs) {
-                const auto& info = fn_.get_vreg_info(v);
-                if (!info.is_spilled && info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
-                    auto it = callee_gpr_to_slot_.find(info.assigned_preg.code);
-                    if (it != callee_gpr_to_slot_.end()) {
-                        enc_.mov(info.assigned_preg.as_gpr(), X64FrameLayout::spill_slot_address(it->second, frame_));
-                    }
-                }
-            }
+            reload_callee_saved_roots(inst);
 
             if (inst.is_invoke && inst.unwind_block_id != UINT32_MAX) {
                 pending_exception_scopes_.push_back({call_start, return_offset, inst.unwind_block_id});
             }
-
-            StackMapRecord map_rec;
-            map_rec.instruction_offset = static_cast<uint32_t>(return_offset);
-            map_rec.frame_size = static_cast<uint32_t>(frame_.total_frame_size);
-            map_rec.safepoint_id = inst.safepoint_id;
-
-            for (const auto& v : inst.live_gcrefs) {
-                const auto& info = fn_.get_vreg_info(v);
-                if (info.is_spilled) {
-                    int32_t offset = frame_.spill_slot_offset(info.assigned_spill_slot);
-                    map_rec.add_root(StackMapRootLocation::frame_slot(offset));
-                } else if (info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
-                    auto it = callee_gpr_to_slot_.find(info.assigned_preg.code);
-                    int32_t slot = (it != callee_gpr_to_slot_.end()) ? it->second : 0;
-                    int32_t offset = frame_.spill_slot_offset(slot);
-                    map_rec.add_root(StackMapRootLocation::callee_saved(offset, info.assigned_preg));
-                }
-            }
-            stack_map_records_.push_back(std::move(map_rec));
+            record_gc_point(inst, return_offset, nullptr);
             break;
         }
         case LirOpcode::CallIndirect: {
-            for (const auto& v : inst.live_gcrefs) {
-                const auto& info = fn_.get_vreg_info(v);
-                if (!info.is_spilled && info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
-                    auto it = callee_gpr_to_slot_.find(info.assigned_preg.code);
-                    if (it != callee_gpr_to_slot_.end()) {
-                        enc_.mov(X64FrameLayout::spill_slot_address(it->second, frame_), info.assigned_preg.as_gpr());
-                    }
-                }
-            }
-
+            spill_callee_saved_roots(inst);
             size_t call_start = buffer_.size();
             enc_.call(to_gpr(inst.uses.back()));
             size_t return_offset = buffer_.size();
-
-            for (const auto& v : inst.live_gcrefs) {
-                const auto& info = fn_.get_vreg_info(v);
-                if (!info.is_spilled && info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
-                    auto it = callee_gpr_to_slot_.find(info.assigned_preg.code);
-                    if (it != callee_gpr_to_slot_.end()) {
-                        enc_.mov(info.assigned_preg.as_gpr(), X64FrameLayout::spill_slot_address(it->second, frame_));
-                    }
-                }
-            }
+            reload_callee_saved_roots(inst);
 
             if (inst.is_invoke && inst.unwind_block_id != UINT32_MAX) {
                 pending_exception_scopes_.push_back({call_start, return_offset, inst.unwind_block_id});
             }
-
-            StackMapRecord map_rec;
-            map_rec.instruction_offset = static_cast<uint32_t>(return_offset);
-            map_rec.frame_size = static_cast<uint32_t>(frame_.total_frame_size);
-            map_rec.safepoint_id = inst.safepoint_id;
-
-            for (const auto& v : inst.live_gcrefs) {
-                const auto& info = fn_.get_vreg_info(v);
-                if (info.is_spilled) {
-                    int32_t offset = frame_.spill_slot_offset(info.assigned_spill_slot);
-                    map_rec.add_root(StackMapRootLocation::frame_slot(offset));
-                } else if (info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
-                    auto it = callee_gpr_to_slot_.find(info.assigned_preg.code);
-                    int32_t slot = (it != callee_gpr_to_slot_.end()) ? it->second : 0;
-                    int32_t offset = frame_.spill_slot_offset(slot);
-                    map_rec.add_root(StackMapRootLocation::callee_saved(offset, info.assigned_preg));
-                }
-            }
-            stack_map_records_.push_back(std::move(map_rec));
+            record_gc_point(inst, return_offset, nullptr);
             break;
         }
         case LirOpcode::Ret: {
@@ -433,54 +425,16 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
             else enc_.lea(to_gpr(inst.defs[0]), to_mem_address(inst.uses[0]));
             break;
         case LirOpcode::Safepoint: {
-            for (const auto& v : inst.live_gcrefs) {
-                const auto& info = fn_.get_vreg_info(v);
-                if (!info.is_spilled && info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
-                    auto it = callee_gpr_to_slot_.find(info.assigned_preg.code);
-                    if (it != callee_gpr_to_slot_.end()) {
-                        enc_.mov(X64FrameLayout::spill_slot_address(it->second, frame_), info.assigned_preg.as_gpr());
-                    }
-                }
-            }
-
+            spill_callee_saved_roots(inst);
             enc_.call("brass_gc_safepoint");
             size_t return_offset = buffer_.size();
-
-            for (const auto& v : inst.live_gcrefs) {
-                const auto& info = fn_.get_vreg_info(v);
-                if (!info.is_spilled && info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
-                    auto it = callee_gpr_to_slot_.find(info.assigned_preg.code);
-                    if (it != callee_gpr_to_slot_.end()) {
-                        enc_.mov(info.assigned_preg.as_gpr(), X64FrameLayout::spill_slot_address(it->second, frame_));
-                    }
-                }
-            }
+            reload_callee_saved_roots(inst);
 
             SafepointRecord rec;
             rec.code_offset = return_offset;
             rec.safepoint_id = inst.safepoint_id;
-
-            StackMapRecord map_rec;
-            map_rec.instruction_offset = static_cast<uint32_t>(return_offset);
-            map_rec.frame_size = static_cast<uint32_t>(frame_.total_frame_size);
-            map_rec.safepoint_id = inst.safepoint_id;
-
-            for (const auto& v : inst.live_gcrefs) {
-                const auto& info = fn_.get_vreg_info(v);
-                if (info.is_spilled) {
-                    int32_t offset = frame_.spill_slot_offset(info.assigned_spill_slot);
-                    rec.live_gcref_spill_offsets.push_back(offset);
-                    map_rec.add_root(StackMapRootLocation::frame_slot(offset));
-                } else if (info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
-                    rec.live_gcref_registers.push_back(info.assigned_preg.as_gpr());
-                    auto it = callee_gpr_to_slot_.find(info.assigned_preg.code);
-                    int32_t slot = (it != callee_gpr_to_slot_.end()) ? it->second : 0;
-                    int32_t offset = frame_.spill_slot_offset(slot);
-                    map_rec.add_root(StackMapRootLocation::callee_saved(offset, info.assigned_preg));
-                }
-            }
+            record_gc_point(inst, return_offset, &rec);
             safepoints_.push_back(std::move(rec));
-            stack_map_records_.push_back(std::move(map_rec));
             break;
         }
         case LirOpcode::GuardExit: {
@@ -658,6 +612,8 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
     switch (inst.opcode) {
         case LirOpcode::Nop:
             enc_.nop();
+            break;
+        case LirOpcode::KeepAlive:
             break;
         case LirOpcode::Trap:
             enc_.ud2();

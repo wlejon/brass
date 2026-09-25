@@ -38,14 +38,18 @@ thread_local const ModuleStackMap* g_active_stack_maps = nullptr;
 
 // The maps a collection requested from caller_ip walks this thread's
 // generated frames with (brass_stack_maps_for_caller).
-const ModuleStackMap* walk_maps(uintptr_t caller_ip) noexcept {
-    if (g_active_stack_maps) return g_active_stack_maps;
+const ModuleStackMap* registry_only_maps() noexcept {
     static const ModuleStackMap* const registry_only = [] {
         auto* m = new ModuleStackMap();
         m->set_indexed_by_code_registry(true);
         return m;
     }();
-    if (caller_ip != 0 && code_stack_maps_cover(caller_ip)) return registry_only;
+    return registry_only;
+}
+
+const ModuleStackMap* walk_maps(uintptr_t caller_ip) noexcept {
+    if (g_active_stack_maps) return g_active_stack_maps;
+    if (caller_ip != 0 && code_stack_maps_cover(caller_ip)) return registry_only_maps();
     return nullptr;
 }
 
@@ -74,6 +78,11 @@ void brass_append_generated_frame_roots(uintptr_t caller_fp, uintptr_t caller_ip
     const auto* maps = walk_maps(caller_ip);
     if (!maps) return;
     brass_stack_walk(caller_fp, caller_ip, *maps, &push_slot, &roots);
+}
+
+void brass_append_stack_roots_from_here(std::vector<uintptr_t*>& roots) {
+    const ModuleStackMap* maps = g_active_stack_maps ? g_active_stack_maps : registry_only_maps();
+    brass_stack_walk_from_here(*maps, &push_slot, &roots);
 }
 
 } // namespace brass

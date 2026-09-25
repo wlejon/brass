@@ -45,6 +45,12 @@ void FunctionCompilerContext::lower_instruction(const Instruction& inst) {
             lower_conversion(inst);
             break;
 
+        // The bits move unchanged; only the register's type (which the root
+        // scan reads) differs.
+        case Opcode::bitcast_i64_tagged: case Opcode::bitcast_tagged_i64:
+            emit(BytecodeOp::mov, get_result_reg(inst), get_reg(inst.operand(0)));
+            break;
+
         case Opcode::add: case Opcode::sub: case Opcode::mul: case Opcode::sdiv: case Opcode::udiv:
         case Opcode::smod: case Opcode::umod: case Opcode::neg:
         case Opcode::sadd_overflow: case Opcode::ssub_overflow: case Opcode::smul_overflow:
@@ -81,7 +87,7 @@ void FunctionCompilerContext::lower_instruction(const Instruction& inst) {
             lower_terminator(inst);
             break;
 
-        case Opcode::safepoint: case Opcode::guard: case Opcode::resume_point:
+        case Opcode::safepoint: case Opcode::guard: case Opcode::resume_point: case Opcode::keep_alive:
             lower_runtime_gc(inst);
             break;
 
@@ -355,7 +361,9 @@ void FunctionCompilerContext::lower_memory(const Instruction& inst) {
             int32_t align = inst.offset();
             if (align <= 0) align = 16;
             if (align > 255 || (align & (align - 1)) != 0) fail("alloca alignment " + std::to_string(align));
-            emit(BytecodeOp::alloca_, dst, 0, 0, static_cast<uint32_t>(align));
+            // b = 1: an `alloca.tagged` buffer, whose words are roots while
+            // the frame lives.
+            emit(BytecodeOp::alloca_, dst, inst.memory_type().is_tagged() ? 1u : 0u, 0, static_cast<uint32_t>(align));
             // The size is the next code word (read by the interpreter).
             out.emit(static_cast<BytecodeWord>(static_cast<uint32_t>(size > 0 ? size : 0)));
             break;
@@ -467,6 +475,10 @@ void FunctionCompilerContext::lower_runtime_gc(const Instruction& inst) {
         }
         case Opcode::resume_point:
             emit(BytecodeOp::resume_point, 0);
+            break;
+        case Opcode::keep_alive:
+            // No code: the register allocator counts the operand as used
+            // here, so its register (and the root it is) lasts this long.
             break;
         default:
             fail("not a runtime operation");

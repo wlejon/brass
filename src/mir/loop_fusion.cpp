@@ -109,6 +109,7 @@ bool is_movable(const Instruction* inst) {
         case Opcode::load_indexed:
         case Opcode::vload:
         case Opcode::alloca_:
+        case Opcode::bitcast_i64_tagged:
         case Opcode::landing_pad:
             return false;
         case Opcode::sdiv:

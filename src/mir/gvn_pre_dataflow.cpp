@@ -30,6 +30,7 @@ bool is_pre_candidate_op(const Instruction* inst) noexcept {
         case Opcode::sitofp_f64_i64:
         case Opcode::bitcast_i64_f64:
         case Opcode::bitcast_f64_i64:
+        case Opcode::bitcast_tagged_i64:
         case Opcode::add:
         case Opcode::sub:
         case Opcode::mul:

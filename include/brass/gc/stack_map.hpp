@@ -20,25 +20,44 @@ enum class StackMapRootKind : uint8_t {
 std::string_view to_string(StackMapRootKind kind) noexcept;
 std::ostream& operator<<(std::ostream& os, StackMapRootKind kind);
 
+// What the root's word holds: a gcref (an object's address) or a tagged
+// value (a word whose low 48 bits are an object's address when its high 16
+// bits are one of the heap's reference tags, and which is otherwise not a
+// reference). The collector visits both through Tracer::visit, which checks
+// the tag and rewrites only the low 48 bits.
+enum class StackMapValueKind : uint8_t {
+    GcRef = 0,
+    Tagged = 1
+};
+
 struct StackMapRootLocation {
     StackMapRootKind kind = StackMapRootKind::FrameSlot;
     int32_t offset_from_rbp = 0; // Relative to RBP (e.g. -24)
     codegen::PReg reg;           // Callee-saved physical register (if applicable)
+    StackMapValueKind value = StackMapValueKind::GcRef;
 
-    static StackMapRootLocation frame_slot(int32_t offset) noexcept {
+    static StackMapRootLocation frame_slot(int32_t offset,
+                                           StackMapValueKind value = StackMapValueKind::GcRef) noexcept {
         StackMapRootLocation loc;
         loc.kind = StackMapRootKind::FrameSlot;
         loc.offset_from_rbp = offset;
         loc.reg = codegen::PReg();
+        loc.value = value;
         return loc;
     }
 
-    static StackMapRootLocation callee_saved(int32_t offset, codegen::PReg r) noexcept {
+    static StackMapRootLocation callee_saved(int32_t offset, codegen::PReg r,
+                                             StackMapValueKind value = StackMapValueKind::GcRef) noexcept {
         StackMapRootLocation loc;
         loc.kind = StackMapRootKind::CalleeSavedReg;
         loc.offset_from_rbp = offset;
         loc.reg = r;
+        loc.value = value;
         return loc;
+    }
+
+    static StackMapValueKind value_kind_of(const codegen::VReg& v) noexcept {
+        return v.is_tagged ? StackMapValueKind::Tagged : StackMapValueKind::GcRef;
     }
 
     bool operator==(const StackMapRootLocation& other) const noexcept = default;
@@ -54,7 +73,7 @@ struct StackMapRecord {
 
     void add_root(StackMapRootLocation loc) {
         for (const auto& r : roots) {
-            if (r == loc) return;
+            if (r.kind == loc.kind && r.offset_from_rbp == loc.offset_from_rbp && r.reg == loc.reg) return;
         }
         roots.push_back(loc);
     }
@@ -70,8 +89,11 @@ struct FunctionStackMap {
     uint32_t code_offset = 0;       // Offset in .text section
     uint32_t code_size = 0;         // Function size in bytes
     std::vector<StackMapRecord> records;
+    // Set by sort_records: lookups then binary-search the records.
+    bool records_sorted = false;
 
     const StackMapRecord* find_record_by_offset(uint32_t call_offset) const noexcept;
+    void sort_records();
     const StackMapRecord* find_record_by_ip(uintptr_t return_ip) const noexcept;
 
     void add_record(StackMapRecord rec) {
@@ -112,6 +134,8 @@ private:
 // Binary serialization format
 // Magic: 0x4D435342 ("BSCM")
 // Version: 1
+// Each root is 8 bytes: int32 rbp offset, then the location kind, register
+// class, register code and value kind (StackMapValueKind) as bytes.
 constexpr uint32_t STACK_MAP_MAGIC = 0x4D435342;
 constexpr uint32_t STACK_MAP_VERSION = 1;
 

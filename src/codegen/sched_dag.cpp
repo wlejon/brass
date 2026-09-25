@@ -60,6 +60,8 @@ uint32_t get_instruction_latency(const LirInst& inst) {
     bool has_mem_load = instruction_reads_memory(inst);
 
     switch (inst.opcode) {
+        case LirOpcode::KeepAlive:
+            return 0;
         case LirOpcode::Nop:
             return 1;
         case LirOpcode::Mov:

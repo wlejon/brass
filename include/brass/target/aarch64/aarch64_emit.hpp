@@ -91,6 +91,11 @@ private:
     void emit_vec_instruction(const codegen::LirInst& inst);
     void emit_parallel_copy(const codegen::LirInst& inst);
     void emit_control_instruction(const codegen::LirInst& inst);
+    // The stack map record of a GC point (a call or safepoint): every live
+    // root, and every word of every `alloca.tagged` buffer.
+    void record_gc_point(const codegen::LirInst& inst, size_t return_offset, codegen::SafepointRecord* sp);
+    // Zeroes the `alloca.tagged` buffers (after the prologue).
+    void zero_tagged_locals();
     void emit_guard_exit(const codegen::LirInst& inst);
     void move_sp_for_guard_exit(bool allocate, size_t bytes);
 };

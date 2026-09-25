@@ -93,6 +93,7 @@ Type type_for(brass::Type t) noexcept {
         case TypeKind::F64:   return Type::f64;
         case TypeKind::Ptr:   return Type::u64;
         case TypeKind::GCRef: return Type::u64;
+        case TypeKind::Tagged: return Type::u64;
         case TypeKind::Void:  return Type::none;
         case TypeKind::F32x4: case TypeKind::F32x8: return Type::f32;
         case TypeKind::F64x2: case TypeKind::F64x4: return Type::f64;

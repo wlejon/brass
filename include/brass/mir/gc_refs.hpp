@@ -17,6 +17,12 @@
 //     stored value, or an operand of a GC point.
 // Passes rematerialize the computation next to its use instead of hoisting,
 // sinking, merging or forwarding it. See docs/gc_contract.md.
+//
+// `bitcast_i64_tagged` reads the bits of a tagged value, which for a
+// reference name where its object is now. No pass hoists it, merges it with
+// another, or carries it across a GC point in place of a fresh one: it is
+// absent from every pure-instruction list, so LICM, CSE, GVN and PRE leave
+// it where the frontend put it.
 namespace brass {
 
 // True for a value whose computation matches the definition above.

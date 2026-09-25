@@ -18,6 +18,7 @@ Brass MIR provides scalar, pointer, reference, and fixed-width SIMD vector types
 | `f64` | 8 | XMM / FPR | 64-bit IEEE-754 double-precision floating point |
 | `ptr` | 8 | GPR | Raw unmanaged machine pointer (not traced by GC) |
 | `gcref` | 8 | GPR | Managed object reference (participates in regalloc, recorded in stack maps) |
+| `tagged` | 8 | GPR | A word that is a managed reference only when its high 16 bits are one of the heap's reference tags (a NaN-boxed value). It is recorded in stack maps as a tagged root, and the collector keeps the tag when it moves the object. Its only uses are the two tagged bitcasts, a store's value, a call argument, a return, a block argument or deopt state; arithmetic goes through `bitcast.i64.tagged` |
 | `void` | 0 | None | Void return type for functions |
 
 ### 128-Bit SIMD Vector Types (`v128`)
@@ -68,6 +69,8 @@ Integer literals must fit the field they fill, or the parser reports "out of ran
 - `sitofp.f64 <val:i32|i64>` -> `f64` (the bare form takes its source width from the operand; `sitofp.f64.i32` / `sitofp.f64.i64` name it explicitly; `sitofp.f32` likewise)
 - `bitcast.i64 <val:f64>` -> `i64` (also spelled `bitcast.i64.f64`, as the printer writes it)
 - `bitcast.f64 <val:i64>` -> `f64` (also spelled `bitcast.f64.i64`, as the printer writes it)
+- `bitcast.tagged.i64 <val:i64>` -> `tagged` (box: the bits become a value the collector tracks; pure)
+- `bitcast.i64.tagged <val:tagged>` -> `i64` (unbox: the bits as they are now. It is not pure, because a GC point between two unboxes can move the object, so it is never merged or hoisted across one)
 
 ### Arithmetic, Logic & Bitwise
 - `add.<type> <lhs>, <rhs>`, `sub.<type> <lhs>, <rhs>`, `mul.<type> <lhs>, <rhs>` (`i32`, `i64`, `f64`)
@@ -92,6 +95,7 @@ Integer literals must fit the field they fill, or the parser reports "out of ran
 - `load_indexed.<type> <base>, <index:i64>, <scale:1|2|4|8> [, <offset:i32>]` -> `<type>`
 - `store_indexed.<type> <base>, <index:i64>, <scale:1|2|4|8> [, <offset:i32>], <val>`
 - `write_barrier <obj:gcref>, <val:gcref>` (marks generational card table for old-to-young references)
+- `alloca.tagged <size>, <align>` -> `ptr` (a frame block of `size / 8` words, zeroed on entry. Every word is a tagged root at each GC point in the function, so values stored into it stay current across collections)
 
 ### Function Calls, Addresses & Safepoints
 - `call.<type> @fn_symbol(<args...>)` -> `<type>`
@@ -99,6 +103,7 @@ Integer literals must fit the field they fill, or the parser reports "out of ran
 - `patchable_call.<type> @patch_sym, @default_target(<args...>)` -> `<type>`
 - `func_addr @fn_symbol` -> `ptr`
 - `safepoint`
+- `keep_alive <val>` (emits no code. It is a use of `val`, so `val` stays live up to this point, and a `gcref` or `tagged` value stays a root at every GC point before it. A frontend places one after the last point at which something derived from the object, such as a raw pointer into memory it owns, is still in use)
 
 ### Speculation & Deoptimization
 - `guard <cond:i32>, @exit_stub [, [<val1>, <val2>, ...]]`

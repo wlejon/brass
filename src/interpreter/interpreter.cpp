@@ -71,8 +71,8 @@ RuntimeValue Interpreter::resume_with_frame(const Function& fn, uint32_t resume_
             const Value* sv = guard_inst->state_map()[i];
             if (sv) {
                 RuntimeValue rv = state_values[i];
-                if (sv->type().is_gcref() && !rv.is_gcref()) {
-                    rv = RuntimeValue::from_gcref(rv.as_u64());
+                if (sv->type().is_gc_root() && rv.type() != sv->type()) {
+                    rv = RuntimeValue::from_bits(sv->type(), rv.as_u64());
                 }
                 frame.set_value(sv, rv);
             }
@@ -88,8 +88,8 @@ RuntimeValue Interpreter::resume_with_frame(const Function& fn, uint32_t resume_
         const Value* pv = target_bb->param(p);
         if (pv) {
             RuntimeValue rv = state_values[p];
-            if (pv->type().is_gcref() && !rv.is_gcref()) {
-                rv = RuntimeValue::from_gcref(rv.as_u64());
+            if (pv->type().is_gc_root() && rv.type() != pv->type()) {
+                rv = RuntimeValue::from_bits(pv->type(), rv.as_u64());
             }
             frame.set_value(pv, rv);
         }
@@ -265,6 +265,12 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                     frame.set_value(inst->result(), val_bitcast_f64_i64(frame.get_value(inst->operand(0))));
                     break;
                 }
+                case Opcode::bitcast_i64_tagged:
+                    frame.set_value(inst->result(), RuntimeValue::from_i64(static_cast<int64_t>(frame.get_value(inst->operand(0)).raw_bits())));
+                    break;
+                case Opcode::bitcast_tagged_i64:
+                    frame.set_value(inst->result(), RuntimeValue::from_tagged(frame.get_value(inst->operand(0)).raw_bits()));
+                    break;
 
                 case Opcode::add: {
                     frame.set_value(inst->result(), val_add(frame.get_value(inst->operand(0)), frame.get_value(inst->operand(1))));
@@ -441,7 +447,8 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                     int32_t size = inst->imm_i32();
                     int32_t align = inst->offset();
                     void* allocated_ptr = frame.allocate(static_cast<size_t>(size > 0 ? size : 0),
-                                                         static_cast<size_t>(align > 0 ? align : 16));
+                                                         static_cast<size_t>(align > 0 ? align : 16),
+                                                         inst->memory_type().is_tagged());
                     frame.set_value(inst->result(), RuntimeValue::from_ptr(allocated_ptr));
                     break;
                 }
@@ -711,8 +718,10 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                     break;
                 }
 
-                case Opcode::resume_point: {
-                    // Metadata marker: no-op during forward execution
+                case Opcode::resume_point:
+                case Opcode::keep_alive: {
+                    // No-ops in forward execution: a metadata marker, and a
+                    // use whose only effect is the frame keeping its operand.
                     break;
                 }
 

@@ -51,6 +51,8 @@ RuntimeValue parse_arg_for_type(Type type, const std::string& arg_str) {
             return RuntimeValue::from_ptr(static_cast<uintptr_t>(std::stoull(arg_str, nullptr, 0)));
         case TypeKind::GCRef:
             return RuntimeValue::from_gcref(static_cast<uintptr_t>(std::stoull(arg_str, nullptr, 0)));
+        case TypeKind::Tagged:
+            return RuntimeValue::from_tagged(std::stoull(arg_str, nullptr, 0));
         case TypeKind::Void:
             return RuntimeValue::from_void();
         default:

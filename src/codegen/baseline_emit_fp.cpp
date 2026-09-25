@@ -154,6 +154,8 @@ bool emit_baseline_x64_fp_op(X64BaselineEmitter& em, const Instruction& inst) {
         }
         case Opcode::bitcast_i64_f64:
         case Opcode::bitcast_f64_i64:
+        case Opcode::bitcast_i64_tagged:
+        case Opcode::bitcast_tagged_i64:
             enc.mov(GPR::RAX, em.slot_addr(inst.operand(0)));
             enc.mov(em.slot_addr(inst.result()), GPR::RAX);
             return true;

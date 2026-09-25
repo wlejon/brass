@@ -36,7 +36,8 @@ enum class DeoptValueKind : uint8_t {
     Pointer = 3,
     GcRef = 4,
     Float32 = 5,
-    Boolean = 6
+    Boolean = 6,
+    Tagged = 7
 };
 
 std::string_view to_string(DeoptValueKind kind) noexcept;
@@ -75,6 +76,10 @@ struct DeoptValue {
 
     static constexpr DeoptValue gcref(uintptr_t v) noexcept {
         return DeoptValue(DeoptValueKind::GcRef, static_cast<uint64_t>(v));
+    }
+
+    static constexpr DeoptValue tagged(uint64_t bits) noexcept {
+        return DeoptValue(DeoptValueKind::Tagged, bits);
     }
 
     static constexpr DeoptValue boolean(bool v) noexcept {

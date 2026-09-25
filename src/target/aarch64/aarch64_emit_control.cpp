@@ -223,6 +223,43 @@ void AArch64EmitContext::emit_parallel_copy(const LirInst& inst) {
     }
 }
 
+void AArch64EmitContext::record_gc_point(const LirInst& inst, size_t return_offset, SafepointRecord* sp) {
+    StackMapRecord map_rec;
+    map_rec.instruction_offset = static_cast<uint32_t>(return_offset);
+    map_rec.frame_size = static_cast<uint32_t>(frame_.total_frame_size);
+    map_rec.safepoint_id = inst.safepoint_id;
+
+    for (const auto& v : inst.live_gcrefs) {
+        const auto& info = fn_.get_vreg_info(v);
+        const StackMapValueKind value = StackMapRootLocation::value_kind_of(info.vreg);
+        if (info.is_spilled) {
+            int32_t offset = static_cast<int32_t>(AArch64FrameLayout::spill_slot_address(info.assigned_spill_slot, frame_).offset);
+            if (sp) sp->live_gcref_spill_offsets.push_back(offset);
+            map_rec.add_root(StackMapRootLocation::frame_slot(offset, value));
+        } else if (info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
+            if (sp) sp->live_gcref_registers.push_back(static_cast<x64::GPR>(info.assigned_preg.code));
+            int32_t offset = static_cast<int32_t>(AArch64FrameLayout::callee_gpr_address(info.assigned_preg.as_aarch64_gpr(), frame_).offset);
+            map_rec.add_root(StackMapRootLocation::callee_saved(offset, info.assigned_preg, value));
+        }
+    }
+    for (const auto& [start, bytes] : frame_.tagged_locals) {
+        for (uint32_t off = 0; off + 8 <= bytes; off += 8) {
+            const auto disp = AArch64FrameLayout::local_frame_address(static_cast<int32_t>(start + off), frame_).offset;
+            map_rec.add_root(StackMapRootLocation::frame_slot(static_cast<int32_t>(disp), StackMapValueKind::Tagged));
+        }
+    }
+    stack_map_records_.push_back(std::move(map_rec));
+}
+
+void AArch64EmitContext::zero_tagged_locals() {
+    for (const auto& [start, bytes] : frame_.tagged_locals) {
+        for (uint32_t off = 0; off + 8 <= bytes; off += 8) {
+            const MemAddress mem = AArch64FrameLayout::local_frame_address(static_cast<int32_t>(start + off), frame_);
+            enc_.str(GPR::XZR, ensure_accessible_mem(mem, GPR::X16, 8));
+        }
+    }
+}
+
 void AArch64EmitContext::emit_control_instruction(const LirInst& inst) {
     switch (inst.opcode) {
         case LirOpcode::Jmp:
@@ -257,23 +294,7 @@ void AArch64EmitContext::emit_control_instruction(const LirInst& inst) {
             if (inst.is_invoke && inst.unwind_block_id != UINT32_MAX) {
                 pending_exception_scopes_.push_back({call_start, return_offset, inst.unwind_block_id});
             }
-
-            StackMapRecord map_rec;
-            map_rec.instruction_offset = static_cast<uint32_t>(return_offset);
-            map_rec.frame_size = static_cast<uint32_t>(frame_.total_frame_size);
-            map_rec.safepoint_id = inst.safepoint_id;
-
-            for (const auto& v : inst.live_gcrefs) {
-                const auto& info = fn_.get_vreg_info(v);
-                if (info.is_spilled) {
-                    int32_t offset = static_cast<int32_t>(AArch64FrameLayout::spill_slot_address(info.assigned_spill_slot, frame_).offset);
-                    map_rec.add_root(StackMapRootLocation::frame_slot(offset));
-                } else if (info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
-                    int32_t offset = static_cast<int32_t>(AArch64FrameLayout::callee_gpr_address(info.assigned_preg.as_aarch64_gpr(), frame_).offset);
-                    map_rec.add_root(StackMapRootLocation::callee_saved(offset, info.assigned_preg));
-                }
-            }
-            stack_map_records_.push_back(std::move(map_rec));
+            record_gc_point(inst, return_offset, nullptr);
             break;
         }
 
@@ -285,23 +306,7 @@ void AArch64EmitContext::emit_control_instruction(const LirInst& inst) {
             if (inst.is_invoke && inst.unwind_block_id != UINT32_MAX) {
                 pending_exception_scopes_.push_back({call_start, return_offset, inst.unwind_block_id});
             }
-
-            StackMapRecord map_rec;
-            map_rec.instruction_offset = static_cast<uint32_t>(return_offset);
-            map_rec.frame_size = static_cast<uint32_t>(frame_.total_frame_size);
-            map_rec.safepoint_id = inst.safepoint_id;
-
-            for (const auto& v : inst.live_gcrefs) {
-                const auto& info = fn_.get_vreg_info(v);
-                if (info.is_spilled) {
-                    int32_t offset = static_cast<int32_t>(AArch64FrameLayout::spill_slot_address(info.assigned_spill_slot, frame_).offset);
-                    map_rec.add_root(StackMapRootLocation::frame_slot(offset));
-                } else if (info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
-                    int32_t offset = static_cast<int32_t>(AArch64FrameLayout::callee_gpr_address(info.assigned_preg.as_aarch64_gpr(), frame_).offset);
-                    map_rec.add_root(StackMapRootLocation::callee_saved(offset, info.assigned_preg));
-                }
-            }
-            stack_map_records_.push_back(std::move(map_rec));
+            record_gc_point(inst, return_offset, nullptr);
             break;
         }
 
@@ -394,26 +399,8 @@ void AArch64EmitContext::emit_control_instruction(const LirInst& inst) {
             SafepointRecord rec;
             rec.code_offset = return_offset;
             rec.safepoint_id = inst.safepoint_id;
-
-            StackMapRecord map_rec;
-            map_rec.instruction_offset = static_cast<uint32_t>(return_offset);
-            map_rec.frame_size = static_cast<uint32_t>(frame_.total_frame_size);
-            map_rec.safepoint_id = inst.safepoint_id;
-
-            for (const auto& v : inst.live_gcrefs) {
-                const auto& info = fn_.get_vreg_info(v);
-                if (info.is_spilled) {
-                    int32_t offset = static_cast<int32_t>(AArch64FrameLayout::spill_slot_address(info.assigned_spill_slot, frame_).offset);
-                    rec.live_gcref_spill_offsets.push_back(offset);
-                    map_rec.add_root(StackMapRootLocation::frame_slot(offset));
-                } else if (info.assigned_preg.is_valid() && info.assigned_preg.is_gpr()) {
-                    rec.live_gcref_registers.push_back(static_cast<x64::GPR>(info.assigned_preg.code));
-                    int32_t offset = static_cast<int32_t>(AArch64FrameLayout::callee_gpr_address(info.assigned_preg.as_aarch64_gpr(), frame_).offset);
-                    map_rec.add_root(StackMapRootLocation::callee_saved(offset, info.assigned_preg));
-                }
-            }
+            record_gc_point(inst, return_offset, &rec);
             safepoints_.push_back(std::move(rec));
-            stack_map_records_.push_back(std::move(map_rec));
             break;
         }
 

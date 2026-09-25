@@ -25,7 +25,14 @@ enum class TypeKind : uint8_t {
     F32x8,
     F64x4,
     I32x8,
-    I64x4
+    I64x4,
+    // A 64-bit word that may or may not be a reference into the GC heap: a
+    // NaN-boxed value. It is a reference exactly when its high 16 bits are
+    // one of the heap's reference tags (gc::HeapConfig::reference_tags) and
+    // its low 48 bits name an object; the collector then rewrites the low 48
+    // bits when the object moves and keeps the tag. Stack maps describe it
+    // wherever it is live across a GC point, as they do a gcref.
+    Tagged
 };
 
 class Type {
@@ -41,6 +48,7 @@ public:
     static constexpr Type f64() noexcept { return Type(TypeKind::F64); }
     static constexpr Type ptr() noexcept { return Type(TypeKind::Ptr); }
     static constexpr Type gcref() noexcept { return Type(TypeKind::GCRef); }
+    static constexpr Type tagged() noexcept { return Type(TypeKind::Tagged); }
     static constexpr Type void_type() noexcept { return Type(TypeKind::Void); }
 
     static constexpr Type f32x4() noexcept { return Type(TypeKind::F32x4); }
@@ -64,7 +72,8 @@ public:
             case TypeKind::I64:
             case TypeKind::F64:
             case TypeKind::Ptr:
-            case TypeKind::GCRef: return 8;
+            case TypeKind::GCRef:
+            case TypeKind::Tagged: return 8;
             case TypeKind::Void: return 0;
             case TypeKind::F32x4:
             case TypeKind::F64x2:
@@ -116,6 +125,16 @@ public:
 
     constexpr bool is_pointer_or_gcref() const noexcept {
         return is_pointer() || is_gcref();
+    }
+
+    constexpr bool is_tagged() const noexcept {
+        return kind_ == TypeKind::Tagged;
+    }
+
+    // A value the collector must find wherever it is live across a GC point:
+    // a gcref (a raw reference) or a tagged value.
+    constexpr bool is_gc_root() const noexcept {
+        return is_gcref() || is_tagged();
     }
 
     constexpr bool is_void() const noexcept {

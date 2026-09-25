@@ -44,7 +44,7 @@ bool is_pure_instruction(const Instruction* inst) {
         case Opcode::iconst_i32: case Opcode::iconst_i64: case Opcode::fconst_f64:
         case Opcode::sext_i64: case Opcode::zext_i64: case Opcode::trunc_i32:
         case Opcode::fptosi_i32: case Opcode::fptosi_i64: case Opcode::sitofp_f64_i32: case Opcode::sitofp_f64_i64:
-        case Opcode::bitcast_i64_f64: case Opcode::bitcast_f64_i64:
+        case Opcode::bitcast_i64_f64: case Opcode::bitcast_f64_i64: case Opcode::bitcast_tagged_i64:
         case Opcode::add: case Opcode::sub: case Opcode::mul: case Opcode::neg:
         case Opcode::and_: case Opcode::or_: case Opcode::xor_:
         case Opcode::shl: case Opcode::lshr: case Opcode::ashr: case Opcode::not_:

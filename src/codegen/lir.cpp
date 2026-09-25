@@ -36,6 +36,7 @@ std::string_view to_string(LirOperandKind kind) noexcept {
 std::string_view to_string(LirOpcode op) noexcept {
     switch (op) {
         case LirOpcode::Nop: return "nop";
+        case LirOpcode::KeepAlive: return "keep_alive";
         case LirOpcode::Mov: return "mov";
         case LirOpcode::Mov32: return "mov32";
         case LirOpcode::Movabs: return "movabs";
@@ -562,9 +563,9 @@ int32_t FrameInfo::spill_slot_offset(int32_t slot_idx) const noexcept {
     return -(callee_offset + static_cast<int32_t>((slot_idx + 1) * 8));
 }
 
-VReg LirFunction::allocate_vreg(RegClass rc, uint8_t size, bool is_gcref) {
+VReg LirFunction::allocate_vreg(RegClass rc, uint8_t size, bool is_gcref, bool is_tagged) {
     uint32_t id = static_cast<uint32_t>(vreg_table.size());
-    VReg v{id, rc, size, is_gcref};
+    VReg v{id, rc, size, is_gcref || is_tagged, is_tagged};
     VRegInfo info;
     info.vreg = v;
     vreg_table.push_back(info);

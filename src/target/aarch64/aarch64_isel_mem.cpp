@@ -349,6 +349,9 @@ void AArch64ISel::lower_alloca(const Instruction& inst, LirBlock& lir_bb) {
     size_t cur = lir_fn_->frame.local_frame_bytes;
     size_t aligned_cur = (cur + align - 1) & ~size_t(align - 1);
     lir_fn_->frame.local_frame_bytes = aligned_cur + size;
+    if (inst.memory_type().is_tagged()) {
+        lir_fn_->frame.tagged_locals.emplace_back(static_cast<uint32_t>(aligned_cur), size);
+    }
 
     VReg dst = get_or_alloc_vreg(inst.result());
     auto lea_inst = std::make_unique<LirInst>(LirOpcode::Lea);

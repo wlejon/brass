@@ -180,6 +180,8 @@ namespace brass::mir_parser {
             case Opcode::fpext_f64_f32: { Value* v = parse_val(); if (!v) return false; res_val = b.build_fpext_f64_f32(v); break; }
             case Opcode::bitcast_i64_f64: { Value* v = parse_val(); if (!v) return false; res_val = b.build_bitcast_i64_f64(v); break; }
             case Opcode::bitcast_f64_i64: { Value* v = parse_val(); if (!v) return false; res_val = b.build_bitcast_f64_i64(v); break; }
+            case Opcode::bitcast_i64_tagged: { Value* v = parse_val(); if (!v) return false; res_val = b.build_bitcast_i64_tagged(v); break; }
+            case Opcode::bitcast_tagged_i64: { Value* v = parse_val(); if (!v) return false; res_val = b.build_bitcast_tagged_i64(v); break; }
 
             case Opcode::add:
             case Opcode::sub:
@@ -494,6 +496,12 @@ namespace brass::mir_parser {
                 b.build_safepoint();
                 break;
             }
+            case Opcode::keep_alive: {
+                Value* v = parse_val();
+                if (!v) return false;
+                b.build_keep_alive(v);
+                break;
+            }
 
             case Opcode::pinned_tls_read: {
                 res_val = b.build_pinned_tls_read();
@@ -527,6 +535,8 @@ namespace brass::mir_parser {
                 uint32_t align = 0;
                 if (!take_unsigned(INT32_MAX, "an alloca alignment", align)) return false;
                 res_val = b.build_alloca(size, align);
+                // `alloca.tagged SIZE, ALIGN`: a buffer of tagged words.
+                if (mem_type.is_tagged()) res_val->defining_instruction()->set_memory_type(mem_type);
                 break;
             }
 

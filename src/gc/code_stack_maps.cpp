@@ -242,7 +242,10 @@ std::shared_ptr<const void> register_code_stack_maps(const ModuleStackMap& maps)
     data->maps.reserve(maps.size());
     for (const auto& fn : maps.functions()) {
         uintptr_t b = 0, e = 0;
-        if (code_range(fn, b, e)) data->maps.push_back(fn);
+        if (code_range(fn, b, e)) {
+            data->maps.push_back(fn);
+            data->maps.back().sort_records();
+        }
     }
     if (data->maps.empty()) return nullptr;
     return publish(std::move(data));
@@ -253,6 +256,7 @@ std::shared_ptr<const void> register_code_stack_map(const FunctionStackMap& map)
     if (!code_range(map, b, e)) return nullptr;
     auto data = std::make_shared<RegistrationData>();
     data->maps.push_back(map);
+    data->maps.back().sort_records();
     return publish(std::move(data));
 }
 

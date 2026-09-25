@@ -203,6 +203,7 @@ add_executable(brass_unit_tests
     unit/test_tier1_link_order.cpp
     unit/test_function_pointer_tiers.cpp
     unit/test_gc_native_frames.cpp
+    unit/test_gc_tagged_roots.cpp
     unit/test_baseline_frame.cpp
     unit/test_baseline_unwind.cpp
     unit/test_program_dispatch.cpp

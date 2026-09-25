@@ -27,10 +27,14 @@ namespace {
 void visit_fast_interpreter_roots(gc::Tracer& tracer, void* context) {
     auto* interp = static_cast<FastInterpreter*>(context);
     std::vector<uintptr_t*> roots;
-    interp->collect_all_roots(roots);
+    std::vector<uintptr_t*> tagged;
+    interp->collect_typed_roots(roots, tagged);
     // A gcref register keeps whatever its frame computed last, a derived
     // gcref included: it is kept as an offset into its object.
     for (uintptr_t* slot : roots) tracer.visit_derived(reinterpret_cast<uint64_t*>(slot));
+    // A tagged register or `alloca.tagged` word is a reference exactly when
+    // its tag says so.
+    for (uintptr_t* slot : tagged) tracer.visit(reinterpret_cast<uint64_t*>(slot));
     // A register without a type may hold a reference (a value a host or
     // native callee returned untyped): kept when it names an object.
     roots.clear();
@@ -116,45 +120,56 @@ uintptr_t FastInterpreter::allocate_gc(size_t size, uint64_t pointer_mask, uint3
 }
 
 void FastInterpreter::collect_all_roots(std::vector<uintptr_t*>& roots) {
-    for_each_register([&roots](uint64_t* slot, bool typed_gcref) {
-        if (typed_gcref) roots.push_back(reinterpret_cast<uintptr_t*>(slot));
+    collect_typed_roots(roots, roots);
+}
+
+void FastInterpreter::collect_typed_roots(std::vector<uintptr_t*>& gcrefs, std::vector<uintptr_t*>& tagged) {
+    for_each_register([&](uint64_t* slot, RegisterRootKind kind) {
+        if (kind == RegisterRootKind::GcRef) gcrefs.push_back(reinterpret_cast<uintptr_t*>(slot));
+        else if (kind == RegisterRootKind::Tagged) tagged.push_back(reinterpret_cast<uintptr_t*>(slot));
     });
-
-    // 3. Scan current_exception_ if gcref
-    if (current_exception_.is_gcref() && !current_exception_.is_null()) {
-        roots.push_back(reinterpret_cast<uintptr_t*>(&current_exception_.raw_bits_ref()));
-    }
-
-    // 4. Scan last_deopt_ state map if gcref
-    for (auto& val : last_deopt_.state_map) {
-        if (val.is_gcref() && !val.is_null()) {
-            roots.push_back(reinterpret_cast<uintptr_t*>(&val.raw_bits_ref()));
+    for (const auto& [words, count] : tagged_allocas_) {
+        for (uint32_t i = 0; i < count; ++i) {
+            if (words[i] != 0) tagged.push_back(reinterpret_cast<uintptr_t*>(&words[i]));
         }
     }
+
+    auto add_value = [&](RuntimeValue& val) {
+        if (val.is_null()) return;
+        if (val.is_gcref()) gcrefs.push_back(reinterpret_cast<uintptr_t*>(&val.raw_bits_ref()));
+        else if (val.is_tagged()) tagged.push_back(reinterpret_cast<uintptr_t*>(&val.raw_bits_ref()));
+    };
+    add_value(current_exception_);
+    for (auto& val : last_deopt_.state_map) add_value(val);
 }
 
 void FastInterpreter::collect_untyped_registers(std::vector<uintptr_t*>& slots) {
-    for_each_register([&slots](uint64_t* slot, bool typed_gcref) {
-        if (!typed_gcref) slots.push_back(reinterpret_cast<uintptr_t*>(slot));
+    for_each_register([&slots](uint64_t* slot, RegisterRootKind kind) {
+        if (kind == RegisterRootKind::None) slots.push_back(reinterpret_cast<uintptr_t*>(slot));
     });
 }
 
 template <typename Fn>
 void FastInterpreter::for_each_register(Fn&& fn) {
+    auto kind_of = [](const BytecodeFunction* bfn, size_t i) {
+        if (!bfn || i >= bfn->register_types.size()) return RegisterRootKind::None;
+        const Type t = bfn->register_types[i];
+        if (t.is_gcref()) return RegisterRootKind::GcRef;
+        if (t.is_tagged()) return RegisterRootKind::Tagged;
+        return RegisterRootKind::None;
+    };
     // The active frames on the call stack, then the suspended coroutines.
     for (FastFrame* f = current_frame_; f != nullptr; f = f->caller) {
-        const size_t typed = f->bfn ? f->bfn->register_types.size() : 0;
         for (uint32_t i = 0; i < f->num_registers; ++i) {
             if (f->registers[i] == 0) continue;
-            fn(&f->registers[i], i < typed && f->bfn->register_types[i].is_gcref());
+            fn(&f->registers[i], kind_of(f->bfn, i));
         }
     }
     for (auto& [handle, coro] : active_coros_) {
         if (!coro || coro->is_done) continue;
-        const size_t typed = coro->bfn ? coro->bfn->register_types.size() : 0;
         for (size_t i = 0; i < coro->registers.size(); ++i) {
             if (coro->registers[i] == 0) continue;
-            fn(&coro->registers[i], i < typed && coro->bfn->register_types[i].is_gcref());
+            fn(&coro->registers[i], kind_of(coro->bfn, i));
         }
     }
 }

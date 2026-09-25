@@ -86,6 +86,16 @@ private:
     void emit_vec_instruction(const LirInst& inst);
     void emit_parallel_copy(const LirInst& inst);
     void emit_control_instruction(const LirInst& inst);
+    // The GC points (calls, safepoints): the callee-saved registers holding
+    // live roots go to their designated slots before the call and come back
+    // after it; the record at return_offset lists every live root (and
+    // `sp`, for a safepoint, where each one is), plus every word of every
+    // `alloca.tagged` buffer.
+    void spill_callee_saved_roots(const LirInst& inst);
+    void reload_callee_saved_roots(const LirInst& inst);
+    void record_gc_point(const LirInst& inst, size_t return_offset, SafepointRecord* sp);
+    // Zeroes the `alloca.tagged` buffers (after the prologue).
+    void zero_tagged_locals();
     // Guard exit with no handler or resumer: calls the exit stub as
     // stub(state values...) from the deopt record at [rsp + slots_disp]. The
     // stack arguments use the outgoing area the guard exit allocated below

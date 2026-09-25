@@ -40,22 +40,31 @@ public:
         return RuntimeValue::from_void();
     }
 
+    // Every gcref- and tagged-typed value the frame holds, and every word of
+    // its `alloca.tagged` buffers.
     void collect_roots(std::vector<uintptr_t*>& roots) {
         for (size_t i = 0; i < values_.size(); ++i) {
-            if (values_[i].is_gcref() && !values_[i].is_null()) {
+            if (values_[i].is_gc_root() && !values_[i].is_null()) {
                 roots.push_back(reinterpret_cast<uintptr_t*>(&values_[i].raw_bits_ref()));
+            }
+        }
+        for (const auto& [words, count] : tagged_allocas_) {
+            for (size_t i = 0; i < count; ++i) {
+                if (words[i] != 0) roots.push_back(reinterpret_cast<uintptr_t*>(&words[i]));
             }
         }
     }
 
     const std::vector<RuntimeValue>& values() const noexcept { return values_; }
 
-    void* allocate(size_t size, size_t align = 16) {
+    // Zero-filled. A `tagged` buffer's words are roots while the frame lives.
+    void* allocate(size_t size, size_t align = 16, bool tagged = false) {
         if (align == 0) align = 16;
         size_t total = size + align;
         alloca_storage_.emplace_back(total, static_cast<uint8_t>(0));
         uintptr_t addr = reinterpret_cast<uintptr_t>(alloca_storage_.back().data());
         uintptr_t aligned_addr = (addr + align - 1) & ~(align - 1);
+        if (tagged) tagged_allocas_.push_back({reinterpret_cast<uint64_t*>(aligned_addr), size / 8});
         return reinterpret_cast<void*>(aligned_addr);
     }
 
@@ -64,6 +73,7 @@ private:
     InterpreterFrame* caller_ = nullptr;
     std::vector<RuntimeValue> values_;
     std::deque<std::vector<uint8_t>> alloca_storage_;
+    std::vector<std::pair<uint64_t*, size_t>> tagged_allocas_;
 };
 
 } // namespace brass

@@ -506,9 +506,7 @@ VReg X64ISel::get_or_alloc_vreg(const Value* val) {
     RegClass rc = (t.is_float() || t.is_vector()) ? RegClass::XMM : RegClass::GPR;
     uint8_t sz = static_cast<uint8_t>(t.size_in_bytes());
     if (sz == 0) sz = 8;
-    bool is_gc = t.is_gcref();
-
-    VReg v = lir_fn_->allocate_vreg(rc, sz, is_gc);
+    VReg v = lir_fn_->allocate_vreg(rc, sz, t.is_gcref(), t.is_tagged());
     val_to_vreg_[val] = v;
     return v;
 }

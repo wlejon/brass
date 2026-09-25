@@ -51,6 +51,7 @@ struct X64BaselineEmitter {
     CallingConvention cc;
     Label fn_entry_label;
     const std::vector<int32_t>& gcref_slots;
+    const std::vector<int32_t>& tagged_slots;
     bool preserves_r13 = false;
     // Stubs for symbols unresolved at compile time; set when one is used, so
     // the compiled function keeps the table alive.

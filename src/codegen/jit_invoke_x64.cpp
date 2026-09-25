@@ -61,6 +61,7 @@ RuntimeValue native_return_value(Type ret, uint64_t gpr, const uint8_t* vec) {
         }
         case TypeKind::Ptr: return RuntimeValue::from_ptr(static_cast<uintptr_t>(gpr));
         case TypeKind::GCRef: return RuntimeValue::from_gcref(static_cast<uintptr_t>(gpr));
+        case TypeKind::Tagged: return RuntimeValue::from_tagged(gpr);
         case TypeKind::F32x4:
         case TypeKind::F64x2:
         case TypeKind::I32x4:

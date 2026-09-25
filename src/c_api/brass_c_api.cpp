@@ -39,6 +39,7 @@ BrassType get_type_handle(Type t) {
         case TypeKind::F64: return &s_type_f64;
         case TypeKind::Ptr: return &s_type_ptr;
         case TypeKind::GCRef: return &s_type_dynamic;
+        case TypeKind::Tagged: return &s_type_dynamic;
         case TypeKind::F32x4: return &s_type_v128_f32;
         case TypeKind::F64x2: return &s_type_v128_f64;
         case TypeKind::I32x4: return &s_type_v128_i32;

@@ -182,11 +182,12 @@ struct FrameGuard {
     FastInterpreter* prev_interp{nullptr};
     gc::Heap* prev_heap{nullptr};
     FastAllocaArena::Mark alloca_mark;
+    size_t tagged_mark;
 
     // `mark` is the arena position before the frame's register file was
     // allocated; everything the frame allocates is released on exit.
     FrameGuard(FastInterpreter& in, FastFrame& f, FastAllocaArena::Mark mark)
-        : interp(in), frame(f), alloca_mark(mark) {
+        : interp(in), frame(f), alloca_mark(mark), tagged_mark(in.tagged_allocas_.size()) {
         prev_interp = FastInterpreter::current();
         FastInterpreter::set_current(&in);
         prev_heap = gc::Heap::current();
@@ -201,6 +202,7 @@ struct FrameGuard {
     FrameGuard(FastInterpreter& in, FastFrame& f) : FrameGuard(in, f, in.alloca_arena_->mark()) {}
     ~FrameGuard() {
         interp.alloca_arena_->release(alloca_mark);
+        interp.tagged_allocas_.resize(tagged_mark);
         FastInterpreter::thread_frame_top() = frame.thread_prev;
         FastInterpreter::set_current(prev_interp);
         gc::Heap::set_current(prev_heap);
@@ -264,7 +266,6 @@ inline RuntimeValue fast_reg_value(const FastFrame& frame, uint32_t reg) {
         if (!bytes) return RuntimeValue::from_bits(t, frame.registers[reg]);
         return t.is_v128() ? RuntimeValue::from_v128(t, bytes) : RuntimeValue::from_v256(t, bytes);
     }
-    if (t.is_gcref()) return RuntimeValue::from_gcref(static_cast<uintptr_t>(frame.registers[reg]));
     return RuntimeValue::from_bits(t, frame.registers[reg]);
 }
 

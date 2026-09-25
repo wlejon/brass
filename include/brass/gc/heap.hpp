@@ -90,6 +90,14 @@ struct HeapConfig {
     // pointers and small numbers in its slots and registers are never taken
     // for references.
     std::vector<uint16_t> reference_tags;
+    // A collection host code starts (allocate, collect, safepoint without a
+    // generated caller) also walks the calling thread's stack for generated
+    // frames and visits their stack-map roots, as one started from generated
+    // code through brass_gc_alloc does. For a host whose generated code calls
+    // host functions that allocate on this heap. The walk passes over the
+    // compiled frames on the way by their unwind data on Windows x64 and by
+    // their frame pointers elsewhere, where that code must keep them.
+    bool walk_stack_on_host_collection = false;
     // BRASS_GC_STRESS (minor|full|alternate|1), BRASS_GC_VERIFY=1,
     // BRASS_GC_POISON=1, BRASS_GC_LOG=1 and BRASS_GC_MARK_THREADS=n override
     // the fields above when set.

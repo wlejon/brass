@@ -145,6 +145,7 @@ size_t print_operands(std::ostream& os, const BytecodeFunction& fn, size_t pc) {
             break;
         case BytecodeOp::alloca_:
             os << " " << reg_name(a) << ", size=" << next << ", align=" << decode_d(w);
+            if (b != 0) os << ", tagged";
             break;
         case BytecodeOp::coro_suspend:
             os << " " << reg_name(a) << ", " << reg_name(b) << ", resume_id=" << next;

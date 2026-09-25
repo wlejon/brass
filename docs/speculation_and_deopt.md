@@ -46,7 +46,7 @@ enum class DeoptReason : uint32_t {
 };
 
 struct DeoptValue {
-    DeoptValueKind kind; // Int32, Int64, Float64, Pointer, GcRef
+    DeoptValueKind kind; // Int32, Int64, Float64, Pointer, GcRef, Float32, Boolean, Tagged
     uint64_t raw;
 };
 

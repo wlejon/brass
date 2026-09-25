@@ -390,6 +390,9 @@ void X64ISel::lower_alloca(const Instruction& inst, LirBlock& lir_bb) {
     size_t cur = lir_fn_->frame.local_frame_bytes;
     size_t aligned_cur = (cur + align - 1) & ~size_t(align - 1);
     lir_fn_->frame.local_frame_bytes = aligned_cur + size;
+    if (inst.memory_type().is_tagged()) {
+        lir_fn_->frame.tagged_locals.emplace_back(static_cast<uint32_t>(aligned_cur), size);
+    }
 
     VReg dst = get_or_alloc_vreg(inst.result());
     auto lea_inst = std::make_unique<LirInst>(LirOpcode::Lea);
@@ -397,6 +400,16 @@ void X64ISel::lower_alloca(const Instruction& inst, LirBlock& lir_bb) {
     lea_inst->add_use(LirOperand::local_slot(static_cast<int32_t>(aligned_cur), 8));
     lea_inst->mir_origin = &inst;
     lir_bb.append_inst(std::move(lea_inst));
+}
+
+void X64ISel::lower_tagged_bitcast(const Instruction& inst, LirBlock& lir_bb) {
+    VReg src = get_or_alloc_vreg(inst.operand(0));
+    VReg dst = get_or_alloc_vreg(inst.result());
+    auto mov = std::make_unique<LirInst>(LirOpcode::Mov);
+    mov->add_def(LirOperand::vreg(dst, 8));
+    mov->add_use(LirOperand::vreg(src, 8));
+    mov->mir_origin = &inst;
+    lir_bb.append_inst(std::move(mov));
 }
 
 } // namespace brass::x64

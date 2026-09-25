@@ -118,6 +118,7 @@ std::ostream& operator<<(std::ostream& os, const StackMapRootLocation& loc) {
     if (loc.kind == StackMapRootKind::CalleeSavedReg) {
         os << ", reg=" << static_cast<int>(loc.reg.code);
     }
+    if (loc.value == StackMapValueKind::Tagged) os << ", tagged";
     return os << ")";
 }
 
@@ -125,7 +126,19 @@ std::ostream& operator<<(std::ostream& os, const StackMapRecord& rec) {
     return os << "StackMapRecord(offset=" << rec.instruction_offset << ", roots=" << rec.roots.size() << ")";
 }
 
+void FunctionStackMap::sort_records() {
+    std::stable_sort(records.begin(), records.end(), [](const StackMapRecord& a, const StackMapRecord& b) {
+        return a.instruction_offset < b.instruction_offset;
+    });
+    records_sorted = true;
+}
+
 const StackMapRecord* FunctionStackMap::find_record_by_offset(uint32_t call_offset) const noexcept {
+    if (records_sorted) {
+        auto it = std::lower_bound(records.begin(), records.end(), call_offset,
+                                   [](const StackMapRecord& r, uint32_t off) { return r.instruction_offset < off; });
+        return it != records.end() && it->instruction_offset == call_offset ? &*it : nullptr;
+    }
     for (const auto& rec : records) {
         if (rec.instruction_offset == call_offset) {
             return &rec;
@@ -252,7 +265,7 @@ std::vector<uint8_t> encode_stack_maps(const ModuleStackMap& stack_maps) {
                 write_u8(out, static_cast<uint8_t>(root.kind));
                 write_u8(out, static_cast<uint8_t>(root.reg.reg_class));
                 write_u8(out, root.reg.code);
-                write_u8(out, 0); // reserved
+                write_u8(out, static_cast<uint8_t>(root.value));
             }
         }
     }
@@ -310,15 +323,17 @@ bool decode_stack_maps_into(std::span<const uint8_t> data, ModuleStackMap& out, 
             for (uint32_t k = 0; k < root_count; ++k) {
                 StackMapRootLocation root;
                 if (!reader.read_i32(root.offset_from_rbp)) return false;
-                uint8_t kind = 0, reg_class = 0, reg_code = 0, res = 0;
+                uint8_t kind = 0, reg_class = 0, reg_code = 0, value = 0;
                 if (!reader.read_u8(kind)) return false;
                 if (!reader.read_u8(reg_class)) return false;
                 if (!reader.read_u8(reg_code)) return false;
-                if (!reader.read_u8(res)) return false;
+                if (!reader.read_u8(value)) return false;
+                if (kind > 1 || value > 1) return false;
 
                 root.kind = static_cast<StackMapRootKind>(kind);
                 root.reg.reg_class = static_cast<codegen::RegClass>(reg_class);
                 root.reg.code = reg_code;
+                root.value = static_cast<StackMapValueKind>(value);
                 rec.roots.push_back(root);
             }
 

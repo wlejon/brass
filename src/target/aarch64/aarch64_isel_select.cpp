@@ -35,6 +35,16 @@ void AArch64ISel::lower_read_sp(const Instruction& inst, LirBlock& lir_bb) {
     lir_bb.append_inst(std::move(mov));
 }
 
+void AArch64ISel::lower_tagged_bitcast(const Instruction& inst, LirBlock& lir_bb) {
+    VReg src = get_or_alloc_vreg(inst.operand(0));
+    VReg dst = get_or_alloc_vreg(inst.result());
+    auto mov = std::make_unique<LirInst>(LirOpcode::Mov);
+    mov->add_def(LirOperand::vreg(dst, 8));
+    mov->add_use(LirOperand::vreg(src, 8));
+    mov->mir_origin = &inst;
+    lir_bb.append_inst(std::move(mov));
+}
+
 void AArch64ISel::lower_select(const Instruction& inst, LirBlock& lir_bb) {
     const Value* cond_val = inst.operand(0);
     const Value* true_val = inst.operand(1);

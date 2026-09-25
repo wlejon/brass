@@ -11,6 +11,8 @@ This document covers the compiled-code contract first (how references live in re
 ### 1.1. Registers and Spill Slots
 A `gcref` value lives in a general-purpose register while no GC point intervenes. The linear scan allocator (`LinearScanAllocator`) gives every `gcref` interval that spans a call or a `safepoint` a dedicated frame spill slot instead of a register (`get_hard_blocked_regs` blocks every physical register for it). Frame slots that hold `gcref` values are zeroed in the prologue, so a collection that runs before a slot is written sees a null reference rather than stale stack contents. Each call site and safepoint records the `gcref` virtual registers live across it (`live_gcrefs`), which become the stack map record for its return address.
 
+A `tagged` value follows the same rules as a `gcref`: it gets a zeroed spill slot across GC points, and it is recorded at every GC point where it is live. A tagged value is a 64-bit word that is a reference only when its high 16 bits are one of the heap's reference tags (`HeapConfig::reference_tags`). In that case its low 48 bits are the object's address. The collector visits it through `Tracer::visit`, which checks the tag, leaves a non-reference word alone, and rewrites only the low 48 bits of a reference, so the tag survives a move. `alloca.tagged` memory is zeroed in the prologue, and each of its words is a root at every GC point in the function. A value is a root only while it is live, so an object whose last use has passed can be collected even if the code is still using a raw pointer it handed out. `keep_alive %v` extends `%v`'s liveness to the point where it appears, without emitting code. Tagged values have the same roots in the interpreters (register types and tagged allocas), the baseline JIT (`tagged_slots`), tier 2 (register allocation, callee-saved spills, deopt state) and OSR (tagged live-ins).
+
 ### 1.2. Derived References
 A *derived* reference is a `gcref` that may point inside an object rather than at its start: the result of `add` or `sub` on a `gcref`, or a `select` between values at least one of which is derived. Stack maps record every live `gcref` as an object start, so MIR restricts where derived references may live, and the verifier (`verify_derived_gcrefs`) enforces it:
 
@@ -31,16 +33,19 @@ Function: uint32 name_length, name bytes, uint64 code_offset, uint32 code_size, 
 Record:   uint32 instruction_offset (return IP - function base), uint32 frame_size,
           uint32 safepoint_id, uint32 root_count
 Root:     int32 offset_from_fp, uint8 kind (0 FrameSlot, 1 CalleeSaved), uint8 reg_class,
-          uint8 reg_code, uint8 reserved
+          uint8 reg_code, uint8 value (0 GcRef, 1 Tagged)
 ```
 
-Every module brass loads registers its maps with the code registry (`code_stack_maps.hpp`). `brass_stack_walk` walks frame-pointer chains from a (frame pointer, return address) pair: for each frame whose return address a map describes, it visits `fp + offset_from_fp` for each root, then moves to the caller frame. It checks alignment, monotonic growth and the thread's stack bounds, and stops after 1,024 frames.
+The decoder rejects any other `value` byte. Records are sorted by instruction offset and looked up by binary search.
+
+Every module brass loads registers its maps with the code registry (`code_stack_maps.hpp`). `brass_stack_walk` walks frame-pointer chains from a (frame pointer, return address) pair: for each frame whose return address a map describes, it visits `fp + offset_from_fp` for each root, then moves to the caller frame. It checks alignment, monotonic growth and the thread's stack bounds, and walks the whole chain with no frame limit.
 
 ### 1.4. Roots of a Collection
 A collection's roots are:
 
 - the slots registered with `Heap::add_root`, and every root source (`add_root_source`): each interpreter registers one for its frames, a host runtime registers its handle tables and module/global cells;
 - the generated frames above the runtime call that started the collection (`brass_gc_alloc`, `brass_gc_safepoint`, `brass_gc_collect`, `brass_coro_create`), walked through the stack maps from the caller frame the call captured;
+- with `HeapConfig::walk_stack_on_host_collection`, a collection started from host code (`Heap::allocate` or `Heap::collect` called by C++ with no captured generated frame) walks the native stack from its own frame (`brass_append_stack_roots_from_here`), visiting every generated frame a stack map describes. On Windows x64 it steps through the C++ frames by their unwind data. Elsewhere it follows the frame-pointer chain, so every C++ frame between a generated frame and the collection must keep its frame pointer (`-fno-omit-frame-pointer`);
 - generated frames below re-entered interpreter code, recorded by `NativeFramesScope` (`native_frames.hpp`) at every native-to-interpreter transition brass makes;
 - the suspended coroutine frames the heap allocated (`Heap::coro_frames()`).
 

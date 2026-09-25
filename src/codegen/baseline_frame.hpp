@@ -24,15 +24,19 @@ inline bool bl_is_f32(Type t) { return t.kind() == TypeKind::F32; }
 inline bool bl_is_v128(Type t) { return t.is_v128(); }
 
 // The frame below the frame pointer (baseline_frame.cpp): each value's slot
-// and each alloca's buffer as a positive offset down from it, the GC-ref
-// slots (stack-map roots), and the bytes used, starting after
-// `start_offset`. Values whose live ranges do not overlap share a slot.
+// and each alloca's buffer as a positive offset down from it, the stack-map
+// roots (the gcref slots, and the tagged slots: those of tagged values and
+// each word of each `alloca.tagged` buffer; all zeroed by the prologue and
+// listed at every GC point), and the bytes used, starting after
+// `start_offset`. Values whose live ranges do not overlap share a slot, a
+// gcref only with gcrefs and a tagged value only with tagged values.
 // A function the layout cannot place is rejected (UnsupportedOperation)
 // under `stage`.
 struct BaselineFrameLayout {
     std::unordered_map<const Value*, int32_t> slot_map;
     std::unordered_map<const Instruction*, int32_t> alloca_offsets;
     std::vector<int32_t> gcref_slots;
+    std::vector<int32_t> tagged_slots;
     int32_t size = 0;
 };
 BaselineFrameLayout layout_baseline_frame(const Function& fn, int32_t start_offset, std::string_view stage);

@@ -14,6 +14,7 @@ Type parse_type_from_string(std::string_view s) {
     if (s == "f64") return Type::f64();
     if (s == "ptr") return Type::ptr();
     if (s == "gcref") return Type::gcref();
+    if (s == "tagged") return Type::tagged();
     if (s == "void") return Type::void_type();
     if (s == "f32x4") return Type::f32x4();
     if (s == "f64x2") return Type::f64x2();
@@ -84,10 +85,12 @@ bool decode_opcode_string(std::string_view str, Opcode& op, Type& type_suffix, T
     if (str == "guard") { op = Opcode::guard; return true; }
     if (str == "resume_point") { op = Opcode::resume_point; return true; }
     if (str == "safepoint") { op = Opcode::safepoint; return true; }
+    if (str == "keep_alive") { op = Opcode::keep_alive; return true; }
     if (str == "pinned_tls_read") { op = Opcode::pinned_tls_read; return true; }
     if (str == "pinned_tls_write") { op = Opcode::pinned_tls_write; return true; }
     if (str == "read_sp") { op = Opcode::read_sp; return true; }
     if (str == "alloca") { op = Opcode::alloca_; return true; }
+    if (str == "alloca.tagged") { op = Opcode::alloca_; mem_type = Type::tagged(); return true; }
     if (str == "write_barrier") { op = Opcode::write_barrier; return true; }
     if (str == "unreachable") { op = Opcode::unreachable; return true; }
     if (str == "call") { op = Opcode::call; return true; }
@@ -113,6 +116,8 @@ bool decode_opcode_string(std::string_view str, Opcode& op, Type& type_suffix, T
     // only the result: each has exactly one source type.
     if (str == "bitcast.i64.f64" || str == "bitcast_i64_f64" || str == "bitcast.i64") { op = Opcode::bitcast_i64_f64; type_suffix = Type::i64(); return true; }
     if (str == "bitcast.f64.i64" || str == "bitcast_f64_i64" || str == "bitcast.f64") { op = Opcode::bitcast_f64_i64; type_suffix = Type::f64(); return true; }
+    if (str == "bitcast.i64.tagged" || str == "bitcast_i64_tagged") { op = Opcode::bitcast_i64_tagged; type_suffix = Type::i64(); return true; }
+    if (str == "bitcast.tagged.i64" || str == "bitcast_tagged_i64" || str == "bitcast.tagged") { op = Opcode::bitcast_tagged_i64; type_suffix = Type::tagged(); return true; }
 
     if (str == "fma.f32" || str == "fma_f32") { op = Opcode::fma_f32; type_suffix = Type::f32(); return true; }
     if (str == "fma.f64" || str == "fma_f64") { op = Opcode::fma_f64; type_suffix = Type::f64(); return true; }
@@ -144,7 +149,8 @@ bool decode_opcode_string(std::string_view str, Opcode& op, Type& type_suffix, T
         if (underscore_pos != std::string_view::npos) {
             std::string_view potential_suffix = str.substr(underscore_pos + 1);
             if (potential_suffix == "i32" || potential_suffix == "i64" || potential_suffix == "f64" ||
-                potential_suffix == "ptr" || potential_suffix == "gcref" || potential_suffix == "void") {
+                potential_suffix == "ptr" || potential_suffix == "gcref" || potential_suffix == "tagged" ||
+                potential_suffix == "void") {
                 base = str.substr(0, underscore_pos);
                 suffix = potential_suffix;
             }

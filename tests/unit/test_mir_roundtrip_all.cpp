@@ -153,6 +153,16 @@ resume_table {
 }
 }
 
+func @tagged(%0: tagged, %1: i64) -> tagged {
+bb0:
+  %2 = alloca.tagged 16, 8
+  %3 = bitcast.i64.tagged %0
+  %4 = bitcast.tagged.i64 %1
+  store.i64 %2, %3
+  keep_alive %0
+  ret %4
+}
+
 func @exceptions(%0: i64) -> i64 {
 bb0:
   %1 = invoke.i64 @rt_plain(%0), bb1(%0), bb2

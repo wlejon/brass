@@ -218,7 +218,9 @@ void emit_control_op(X64BaselineEmitter& em, const Instruction& inst) {
             emit_guard(em, inst);
             return;
         case Opcode::resume_point:
-            // A metadata marker: a no-op in forward execution.
+        case Opcode::keep_alive:
+            // A metadata marker, and a use of a value whose slot is already
+            // a root for the whole frame: no-ops in forward execution.
             return;
         default:
             // The pre-scan admitted it, so an emitter is missing: a bug.
@@ -285,10 +287,11 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
         prologue.r13_save_end = static_cast<uint32_t>(buffer.size());
     }
 
-    // Zero the gcref slots so a GC before their first store sees null.
-    if (!gcref_slots.empty()) {
+    // Zero the root slots so a GC before their first store sees null.
+    if (!gcref_slots.empty() || !layout.tagged_slots.empty()) {
         enc.xor_(GPR::RAX, GPR::RAX);
         for (int32_t off : gcref_slots) enc.mov(slot_off_addr(off), GPR::RAX);
+        for (int32_t off : layout.tagged_slots) enc.mov(slot_off_addr(off), GPR::RAX);
     }
 
     // 3. Incoming parameters into the entry block's parameter slots
@@ -352,7 +355,7 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
     X64BaselineEmitter emitter{
         buffer, enc, target, fn, slot_map, alloca_offsets, block_labels, fn_stack_map,
         [this, &fn](std::string_view name) { return resolve_symbol_in(fn, name); },
-        frame_size, cc, fn_entry_label, gcref_slots, preserves_r13, lazy_.get()
+        frame_size, cc, fn_entry_label, gcref_slots, layout.tagged_slots, preserves_r13, lazy_.get()
     };
     emitter.function_address = [this, &fn](std::string_view name) { return function_address_in(fn, name); };
 

@@ -222,7 +222,11 @@ void visit_roots(HeapState& s, Tracer& t) {
     // each registered frame's is_done, and once a frame has been evacuated
     // its old copy holds the forwarding address there instead.
     std::vector<uintptr_t*> slots;
-    brass_append_generated_frame_roots(s.mutator_fp, s.mutator_ip, slots);
+    if (s.mutator_fp != 0) {
+        brass_append_generated_frame_roots(s.mutator_fp, s.mutator_ip, slots);
+    } else if (s.config.walk_stack_on_host_collection) {
+        brass_append_stack_roots_from_here(slots);
+    }
     brass_append_native_frame_roots(slots);
     if (s.coro_frames) runtime::append_active_coro_roots(*s.coro_frames, slots);
 

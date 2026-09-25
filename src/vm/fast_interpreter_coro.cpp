@@ -38,7 +38,7 @@ uintptr_t FastInterpreter::coro_create_lowered(const Function& fn, const std::ve
     // own until they are stored in the frame.
     std::vector<uint64_t> refs;
     for (const RuntimeValue& a : args) {
-        if (a.is_gcref()) refs.push_back(static_cast<uint64_t>(a.raw_bits()));
+        if (a.is_gc_root()) refs.push_back(static_cast<uint64_t>(a.raw_bits()));
     }
     ThreadRootsScope keep_refs([](void* ctx, std::vector<uintptr_t*>& roots) {
         for (uint64_t& r : *static_cast<std::vector<uint64_t>*>(ctx)) {
@@ -61,7 +61,7 @@ uintptr_t FastInterpreter::coro_create_lowered(const Function& fn, const std::ve
     for (const RuntimeValue& a : args) {
         if (a.is_vector()) {
             std::memcpy(&cf->slots[slot], a.vec_bytes(), a.is_v256() ? 32 : 16);
-        } else if (a.is_gcref()) {
+        } else if (a.is_gc_root()) {
             cf->slots[slot] = refs[ref++];
         } else {
             cf->slots[slot] = static_cast<uint64_t>(a.raw_bits());

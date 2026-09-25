@@ -38,6 +38,7 @@ std::string_view to_string(DeoptValueKind kind) noexcept {
         case DeoptValueKind::Float64: return "Float64";
         case DeoptValueKind::Pointer: return "Pointer";
         case DeoptValueKind::GcRef: return "GcRef";
+        case DeoptValueKind::Tagged: return "Tagged";
         case DeoptValueKind::Boolean: return "Boolean";
         default: return "Unknown";
     }
@@ -61,6 +62,8 @@ RuntimeValue DeoptValue::to_runtime_value() const {
             return RuntimeValue::from_ptr(as_ptr());
         case DeoptValueKind::GcRef:
             return RuntimeValue::from_gcref(as_gcref());
+        case DeoptValueKind::Tagged:
+            return RuntimeValue::from_tagged(raw);
         case DeoptValueKind::Boolean:
             return RuntimeValue::from_i32(as_bool() ? 1 : 0);
         default:
@@ -81,6 +84,8 @@ DeoptValue DeoptValue::from_runtime_value(const RuntimeValue& rv) {
         return DeoptValue::ptr(rv.as_ptr());
     } else if (rv.is_gcref()) {
         return DeoptValue::gcref(rv.as_gcref());
+    } else if (rv.is_tagged()) {
+        return DeoptValue::tagged(rv.raw_bits());
     }
     return DeoptValue::i64(0);
 }

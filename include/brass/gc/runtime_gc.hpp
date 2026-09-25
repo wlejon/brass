@@ -24,11 +24,16 @@ const ModuleStackMap* brass_get_active_stack_maps() noexcept;
 // the caller's frame (it is not generated code brass knows).
 const ModuleStackMap* brass_stack_maps_for_caller(uintptr_t caller_ip) noexcept;
 
-// The gcref slots of the generated frames from (caller_fp, caller_ip)
-// upward, through the code stack maps; nothing when either is 0 or no maps
-// describe the caller.
+// The root slots (gcref and tagged) of the generated frames from
+// (caller_fp, caller_ip) upward, through the code stack maps; nothing when
+// either is 0 or no maps describe the caller.
 void brass_append_generated_frame_roots(uintptr_t caller_fp, uintptr_t caller_ip,
                                         std::vector<uintptr_t*>& roots);
+
+// The root slots of every generated frame on this thread's stack above the
+// caller (brass_stack_walk_from_here), through the thread's active maps and
+// the code registry.
+void brass_append_stack_roots_from_here(std::vector<uintptr_t*>& roots);
 
 } // namespace brass
 

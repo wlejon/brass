@@ -187,7 +187,9 @@ void emit_control_op(AArch64BaselineEmitter& em, const Instruction& inst) {
             emit_guard(em, inst);
             return;
         case Opcode::resume_point:
-            // A metadata marker: a no-op in forward execution.
+        case Opcode::keep_alive:
+            // A metadata marker, and a use of a value whose slot is already
+            // a root for the whole frame: no-ops in forward execution.
             return;
         default:
             // The pre-scan admitted it, so an emitter is missing: a bug.
@@ -274,8 +276,9 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
         };
         em.function_address = function_address;
 
-        // Zero the gcref slots so a GC before their first store sees null.
+        // Zero the root slots so a GC before their first store sees null.
         for (int32_t off : layout.gcref_slots) enc.str(GPR::XZR, em.off_addr(off, 8));
+        for (int32_t off : layout.tagged_slots) enc.str(GPR::XZR, em.off_addr(off, 8));
 
         // 3. Incoming parameters into the entry block's parameter slots.
         if (const BasicBlock* entry_bb = fn.entry_block()) {

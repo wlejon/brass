@@ -231,6 +231,12 @@ public:
             case Opcode::bitcast_f64_i64:
                 os_ << "bitcast.f64.i64 " << value_name(inst.operand(0));
                 break;
+            case Opcode::bitcast_i64_tagged:
+                os_ << "bitcast.i64.tagged " << value_name(inst.operand(0));
+                break;
+            case Opcode::bitcast_tagged_i64:
+                os_ << "bitcast.tagged.i64 " << value_name(inst.operand(0));
+                break;
 
             case Opcode::add:
             case Opcode::sub:
@@ -393,6 +399,10 @@ public:
 
             case Opcode::safepoint:
                 os_ << "safepoint";
+                break;
+
+            case Opcode::keep_alive:
+                os_ << "keep_alive " << value_name(inst.operand(0));
                 break;
 
             case Opcode::guard:
@@ -607,7 +617,8 @@ public:
                 break;
 
             case Opcode::alloca_:
-                os_ << "alloca " << inst.imm_i32() << ", " << inst.offset();
+                os_ << (inst.memory_type().is_tagged() ? "alloca.tagged " : "alloca ") << inst.imm_i32() << ", "
+                    << inst.offset();
                 break;
 
             case Opcode::pinned_tls_read:

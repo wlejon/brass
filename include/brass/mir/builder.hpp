@@ -67,6 +67,9 @@ public:
     Value* build_fpext_f64_f32(Value* val);
     Value* build_bitcast_i64_f64(Value* val);
     Value* build_bitcast_f64_i64(Value* val);
+    // The bits of a tagged value, and a tagged value from bits.
+    Value* build_bitcast_i64_tagged(Value* val);
+    Value* build_bitcast_tagged_i64(Value* val);
 
     // Arithmetic / Logic
     Value* build_add(Value* lhs, Value* rhs);
@@ -143,6 +146,9 @@ public:
 
     // Memory
     Value* build_alloca(uint32_t size, uint32_t align = 8);
+    // A frame buffer of `words` tagged words, each a GC root at every GC
+    // point of the function and zero until the function stores into it.
+    Value* build_alloca_tagged(uint32_t words);
     Value* build_load(Type type, Value* base);
     Value* build_load(Type type, Value* base, int32_t offset);
     Instruction* build_store(Type type, Value* base, int32_t offset, Value* val);
@@ -193,6 +199,8 @@ public:
     Value* build_patchable_call(std::string_view patch_symbol, std::string_view callee, Type return_type);
     Value* build_func_addr(std::string_view name);
     Instruction* build_safepoint();
+    // Keeps `val` live (and, for a gcref or tagged value, rooted) up to here.
+    Instruction* build_keep_alive(Value* val);
 
     // Speculation
     Instruction* build_guard(Value* cond, std::string_view exit_label, Span<Value* const> state_values);

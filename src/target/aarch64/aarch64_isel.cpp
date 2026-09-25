@@ -139,9 +139,7 @@ VReg AArch64ISel::get_or_alloc_vreg(const Value* val) {
     RegClass rc = (t.is_float() || t.is_vector()) ? RegClass::XMM : RegClass::GPR;
     uint8_t sz = static_cast<uint8_t>(t.size_in_bytes());
     if (sz == 0) sz = 8;
-    bool is_gc = t.is_gcref();
-
-    VReg v = lir_fn_->allocate_vreg(rc, sz, is_gc);
+    VReg v = lir_fn_->allocate_vreg(rc, sz, t.is_gcref(), t.is_tagged());
     val_to_vreg_[val] = v;
     return v;
 }
@@ -579,6 +577,10 @@ void AArch64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
         case Opcode::bitcast_f64_i64:
             lower_fp_instruction(inst, lir_bb);
             break;
+        case Opcode::bitcast_i64_tagged:
+        case Opcode::bitcast_tagged_i64:
+            lower_tagged_bitcast(inst, lir_bb);
+            break;
 
         case Opcode::add:
             lower_binary_alu(inst, lir_bb, LirOpcode::Add32, LirOpcode::Add, LirOpcode::Addsd, LirOpcode::Addss);
@@ -800,6 +802,16 @@ void AArch64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
             break;
         case Opcode::resume_point:
             break;
+        case Opcode::keep_alive: {
+            // A use with no code: the register allocator keeps the value's
+            // interval open to here, so every GC point before it records it.
+            auto use = std::make_unique<LirInst>(LirOpcode::KeepAlive);
+            const Value* v = inst.operand(0);
+            use->add_use(LirOperand::vreg(get_vreg(v), static_cast<uint8_t>(v->type().size_in_bytes())));
+            use->mir_origin = &inst;
+            lir_bb.append_inst(std::move(use));
+            break;
+        }
 
         case Opcode::br:
             lower_branch(inst, lir_bb);

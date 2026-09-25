@@ -244,7 +244,10 @@ void LinearScanAllocator::rewrite_instructions() {
                                        "` in block " + block->name + ")");
             }
 
-            if (inst->opcode == LirOpcode::Safepoint || inst->opcode == LirOpcode::ParallelCopy) {
+            // A keep_alive's use is satisfied wherever the value lives, a
+            // spill slot included, so it takes no reload.
+            if (inst->opcode == LirOpcode::Safepoint || inst->opcode == LirOpcode::ParallelCopy ||
+                inst->opcode == LirOpcode::KeepAlive) {
                 rewritten.push_back(std::move(inst));
                 continue;
             }

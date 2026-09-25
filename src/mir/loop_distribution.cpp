@@ -94,6 +94,7 @@ bool is_pure_computation(const Instruction& inst) {
         case Opcode::load_indexed:
         case Opcode::vload:
         case Opcode::alloca_:
+        case Opcode::bitcast_i64_tagged:
         case Opcode::landing_pad:
         case Opcode::safepoint:
         case Opcode::guard:

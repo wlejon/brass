@@ -57,7 +57,7 @@ FlagEffect x64_flag_effect(LirOpcode op) noexcept {
         case LirOpcode::GuardExit:
             return FlagEffect::Clobbers;
 
-        case LirOpcode::Nop:
+        case LirOpcode::Nop: case LirOpcode::KeepAlive:
         case LirOpcode::Mov: case LirOpcode::Mov32: case LirOpcode::Movabs:
         case LirOpcode::Movsx8: case LirOpcode::Movsx16: case LirOpcode::Movsxd:
         case LirOpcode::Movzx8: case LirOpcode::Movzx16:
@@ -169,7 +169,7 @@ FlagEffect aarch64_flag_effect(LirOpcode op) noexcept {
         case LirOpcode::Tzcnt: case LirOpcode::Tzcnt32:
         case LirOpcode::Bsr: case LirOpcode::Bsr32:
         case LirOpcode::Bsf: case LirOpcode::Bsf32:
-        case LirOpcode::Nop:
+        case LirOpcode::Nop: case LirOpcode::KeepAlive:
         case LirOpcode::Mov: case LirOpcode::Mov32: case LirOpcode::Movabs:
         case LirOpcode::Movsx8: case LirOpcode::Movsx16: case LirOpcode::Movsxd:
         case LirOpcode::Movzx8: case LirOpcode::Movzx16:

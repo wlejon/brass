@@ -31,6 +31,13 @@ enum class Opcode : uint16_t {
     fpext_f64_f32,
     bitcast_i64_f64,
     bitcast_f64_i64,
+    // The bits of a tagged value (tagged -> i64) and a tagged value from bits
+    // (i64 -> tagged). The first reads a snapshot: when the value is a
+    // reference, the bits name where the object was, so passes never move it
+    // earlier, merge it with another, or hoist it across a GC point
+    // (gc_refs.hpp).
+    bitcast_i64_tagged,
+    bitcast_tagged_i64,
 
     // Arithmetic / Logic
     add,
@@ -114,6 +121,9 @@ enum class Opcode : uint16_t {
     call_indirect,
     patchable_call,
     safepoint,
+    // keep_alive %v: a use of %v that does nothing. It keeps %v live, and so
+    // rooted if it is a gcref or tagged value, up to this point.
+    keep_alive,
     func_addr,
 
     // Speculation

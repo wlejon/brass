@@ -142,6 +142,7 @@ AArch64CompilationResult AArch64EmitContext::compile_pass(const std::vector<uint
 
     // 3. Emit prologue at entry
     AArch64FrameLayout::emit_prologue(enc_, frame_, fn_.calling_conv);
+    zero_tagged_locals();
 
     // 4. Emit blocks
     for (size_t b_idx = 0; b_idx < fn_.blocks.size(); ++b_idx) {
@@ -269,6 +270,8 @@ void AArch64EmitContext::emit_instruction(const LirInst& inst, bool is_entry_blo
     switch (inst.opcode) {
         case LirOpcode::Nop:
             enc_.nop();
+            break;
+        case LirOpcode::KeepAlive:
             break;
         case LirOpcode::Trap:
             enc_.brk(0);
