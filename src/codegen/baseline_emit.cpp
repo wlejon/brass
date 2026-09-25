@@ -243,7 +243,9 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
     if (target.is_aarch64()) {
         return aarch64::compile_baseline_aarch64(fn, target, [this, &fn](std::string_view name) {
             return resolve_symbol_in(fn, name);
-        }, &dispatch_table().tiering(), lazy_);
+        }, &dispatch_table().tiering(), lazy_, [this, &fn](std::string_view name) {
+            return function_address_in(fn, name);
+        });
     }
 
     CallingConvention cc = CallingConvention::for_target(target);

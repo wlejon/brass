@@ -3,6 +3,7 @@
 // aarch64_baseline_emit_fp.cpp. Slot conventions: codegen/baseline_frame.hpp.
 #include "aarch64_baseline_emit_internal.hpp"
 #include <brass/target/aarch64/aarch64_isel.hpp>
+#include <algorithm>
 #include <cstring>
 
 namespace brass::aarch64 {
@@ -192,15 +193,31 @@ bool emit_baseline_aarch64_op(AArch64BaselineEmitter& emitter, const Instruction
             const bool data = mod && (mod->string_symbol(inst.symbol()) ||
                                       mod->has_symbol_role(inst.symbol(), SymbolRole::Data));
             void* addr = nullptr;
-            if (data) {
+            auto note_addr_symbol = [&] {
+                auto& syms = emitter.lazy_addr_symbols;
+                if (std::find(syms.begin(), syms.end(), inst.symbol()) == syms.end()) {
+                    syms.emplace_back(inst.symbol());
+                }
+            };
+            if (!data && emitter.function_address && (addr = emitter.function_address(inst.symbol()))) {
+                // A program function: its canonical stub, the pointer every
+                // tier yields. It compiles the function on first call, or
+                // bridges into Tier 0 when the baseline tier rejects it.
+                emitter.uses_lazy_stubs = true;
+                note_addr_symbol();
+            } else if (data) {
                 addr = emitter.resolve_sym(inst.symbol());
                 if (!addr) {
                     throw_unsupported(kA64BaselineStage, "func_addr of data symbol " + std::string(inst.symbol()) +
                                                              ", which does not resolve, in " +
                                                              std::string(emitter.fn.name()));
                 }
-            } else {
+            } else if (!(addr = emitter.resolve_sym(inst.symbol()))) {
+                // A module function's stub compiles it on first call
+                // (MultiTierPipeline::compile_tier1_on_demand); a host
+                // symbol must be registered by then.
                 addr = emitter.resolve_or_stub(inst.symbol());
+                note_addr_symbol();
             }
             enc.mov(GPR::X0, reinterpret_cast<uint64_t>(addr));
             enc.str(GPR::X0, emitter.slot_addr(inst.result(), 8));

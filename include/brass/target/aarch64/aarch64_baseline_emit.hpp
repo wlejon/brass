@@ -20,13 +20,16 @@ using BaselineSymbolResolver = std::function<void*(std::string_view)>;
 // compile time and baked into the invocation hook, as the x64 baseline does.
 // `lazy` supplies the stub a func_addr yields for a symbol that does not
 // resolve at compile time (a sibling compiled later); the compiled function
-// keeps the table alive.
+// keeps the table alive. `function_address` gives a func_addr of a module
+// function its canonical address, the one every tier yields
+// (BaselineJitCompiler::function_address_in), or null.
 codegen::BaselineCompiledFunction compile_baseline_aarch64(
     const Function& fn,
     Target target,
     BaselineSymbolResolver resolver = nullptr,
     runtime::TieringRegistry* tiering = nullptr,
-    std::shared_ptr<codegen::LazySymbolTable> lazy = nullptr
+    std::shared_ptr<codegen::LazySymbolTable> lazy = nullptr,
+    BaselineSymbolResolver function_address = nullptr
 );
 
 } // namespace brass::aarch64

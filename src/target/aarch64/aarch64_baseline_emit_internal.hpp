@@ -71,6 +71,12 @@ struct AArch64BaselineEmitter {
     std::shared_ptr<codegen::LazySymbolTable> lazy;
     bool uses_lazy_stubs = false;
     std::vector<std::string> lazy_call_symbols;
+    // The func_addr targets that got a stub, each once: their address may
+    // be taken and never called, so they are resolved on first call.
+    std::vector<std::string> lazy_addr_symbols;
+    // func_addr of a module function: its canonical address
+    // (BaselineJitCompiler::function_address_in), or null.
+    BaselineSymbolResolver function_address;
 
     // The slot of a value / at a layout offset, for an access of `size`
     // bytes: [fp, #-off] when that encodes, [sp, #frame_bytes-off] when

@@ -206,6 +206,7 @@ struct Pass {
     uint32_t alloc_bytes = 0;
     bool uses_lazy_stubs = false;
     std::vector<std::string> lazy_call_symbols;
+    std::vector<std::string> lazy_addr_symbols;
 };
 
 } // namespace
@@ -215,7 +216,8 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
     Target target,
     BaselineSymbolResolver resolver,
     runtime::TieringRegistry* tiering,
-    std::shared_ptr<codegen::LazySymbolTable> lazy
+    std::shared_ptr<codegen::LazySymbolTable> lazy,
+    BaselineSymbolResolver function_address
 ) {
     check_supported(fn, target);
 
@@ -269,6 +271,7 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
             buffer, enc, target, fn, layout, block_labels, pass.stack_map, resolver,
             frame_bytes, out_bytes, fn_entry_label, preserves_tls, lazy
         };
+        em.function_address = function_address;
 
         // Zero the gcref slots so a GC before their first store sees null.
         for (int32_t off : layout.gcref_slots) enc.str(GPR::XZR, em.off_addr(off, 8));
@@ -332,6 +335,7 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
         }
         pass.uses_lazy_stubs = em.uses_lazy_stubs;
         pass.lazy_call_symbols = std::move(em.lazy_call_symbols);
+        pass.lazy_addr_symbols = std::move(em.lazy_addr_symbols);
         return pass;
     };
 
@@ -387,6 +391,7 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
         fn.name(), fn.return_type(), fn.param_types(), mem_block, entry_ptr, code_bytes, std::move(pass.stack_map));
     if (pass.uses_lazy_stubs) compiled.set_link_keepalive(lazy);
     compiled.set_lazy_call_symbols(std::move(pass.lazy_call_symbols));
+    compiled.set_lazy_addr_symbols(std::move(pass.lazy_addr_symbols));
     return compiled;
 }
 
