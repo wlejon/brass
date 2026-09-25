@@ -128,10 +128,16 @@ private:
     void infer_loop_induction_variables(const LoopAnalysis& loops);
     void propagate_path_sensitive(Function& fn, const DominatorTree& dom);
     void visit_dominator_block(
-        const BasicBlock* bb,
-        const BasicBlock* idom,
+        const BasicBlock* root,
+        const BasicBlock* root_idom,
         const DominatorTree& dom,
         std::unordered_map<const Value*, ValueRange>& current_ranges
+    );
+    void enter_dominator_block(
+        const BasicBlock* bb,
+        const BasicBlock* idom,
+        std::unordered_map<const Value*, ValueRange>& current_ranges,
+        std::vector<std::pair<const Value*, std::optional<ValueRange>>>& rollback
     );
     void apply_branch_condition(
         const Value* cond,

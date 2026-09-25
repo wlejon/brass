@@ -611,15 +611,47 @@ void RangeAnalysis::infer_loop_induction_variables(const LoopAnalysis& loops) {
     }
 }
 
+// The dominator tree below `root` in pre-order, each block's ranges in scope
+// while its subtree is visited and rolled back after. Iterative: the tree of
+// a long straight-line function is as deep as the function is long, and a
+// bundled library's top level overflowed the stack as a recursion.
 void RangeAnalysis::visit_dominator_block(
-    const BasicBlock* bb,
-    const BasicBlock* idom,
+    const BasicBlock* root,
+    const BasicBlock* root_idom,
     const DominatorTree& dom,
     std::unordered_map<const Value*, ValueRange>& current_ranges
 ) {
-    if (!bb) return;
+    using Rollback = std::vector<std::pair<const Value*, std::optional<ValueRange>>>;
+    std::vector<Rollback> rollbacks;
+    std::vector<const BasicBlock*> path;
+    walk_dominator_tree(
+        dom, root,
+        [&](const BasicBlock* bb) {
+            const BasicBlock* idom = path.empty() ? root_idom : path.back();
+            path.push_back(bb);
+            rollbacks.emplace_back();
+            enter_dominator_block(bb, idom, current_ranges, rollbacks.back());
+        },
+        [&](const BasicBlock*) {
+            Rollback& rollback = rollbacks.back();
+            for (auto it = rollback.rbegin(); it != rollback.rend(); ++it) {
+                if (it->second.has_value()) {
+                    current_ranges[it->first] = *it->second;
+                } else {
+                    current_ranges.erase(it->first);
+                }
+            }
+            rollbacks.pop_back();
+            path.pop_back();
+        });
+}
 
-    std::vector<std::pair<const Value*, std::optional<ValueRange>>> rollback;
+void RangeAnalysis::enter_dominator_block(
+    const BasicBlock* bb,
+    const BasicBlock* idom,
+    std::unordered_map<const Value*, ValueRange>& current_ranges,
+    std::vector<std::pair<const Value*, std::optional<ValueRange>>>& rollback
+) {
     auto set_range = [&](const Value* val, const ValueRange& r) {
         auto it = current_ranges.find(val);
         if (it != current_ranges.end()) {
@@ -681,20 +713,6 @@ void RangeAnalysis::visit_dominator_block(
         for (const auto& entry : rollback) {
             auto it = current_ranges.find(entry.first);
             if (it != current_ranges.end()) delta.changes.emplace_back(entry.first, it->second);
-        }
-    }
-
-    for (const BasicBlock* child : dom.children(bb)) {
-        if (child) {
-            visit_dominator_block(child, bb, dom, current_ranges);
-        }
-    }
-
-    for (auto it = rollback.rbegin(); it != rollback.rend(); ++it) {
-        if (it->second.has_value()) {
-            current_ranges[it->first] = *it->second;
-        } else {
-            current_ranges.erase(it->first);
         }
     }
 }
