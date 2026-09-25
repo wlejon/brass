@@ -117,11 +117,11 @@ A guard with an exit stub always takes the stub, even when it also has a resume 
 | Tier | Exit stub | Resume target only | Neither |
 |---|---|---|---|
 | Interpreter | calls `stub(v...)` | branches to the block | the installed deopt handler handles it; with no handler, `DeoptException` |
-| Baseline JIT (x64) | calls `stub(v...)` | branches to the block | compile error |
+| Baseline JIT (x64, AArch64) | calls `stub(v...)` | branches to the block | compile error |
 | Tier 2, with a pipeline resumer or deopt handler (OSR) | the lower tier finishes the call and takes the same exits as the interpreter, in the same order | the same | the resumer or handler handles it; with neither, a fatal error |
 | Tier 2, standalone (no resumer and no handler) | native call `stub(v...)`; the stub's return registers are the function's | fatal error: nothing can resume the frame | fatal error |
 
-Tier 2 rejects a guard in a function that returns a vector, because a lower tier returns its result as one 64-bit word. On AArch64, tier 2 passes stub arguments only in registers (x0-x7 and d0-d7), and a stub that needs stack arguments is a compile error. The AArch64 baseline JIT does not implement guard exits: a guard that fails there traps (`brk`).
+Tier 2 rejects a guard in a function that returns a vector, because a lower tier returns its result as one 64-bit word. On AArch64, tier 2 passes stub arguments only in registers (x0-x7 and d0-d7), and a stub that needs stack arguments is a compile error.
 
 ### Terminators
 - `br <target_block>(<args...>)`

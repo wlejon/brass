@@ -205,9 +205,11 @@ void emit_relocatable_object(BrassModule mod) {
 
     // Target formats:
     //   BRASS_OBJECT_AUTO  = 0 (Host platform)
-    //   BRASS_OBJECT_COFF  = 1 (Windows x64 COFF)
-    //   BRASS_OBJECT_ELF   = 2 (Linux x64 ELF)
-    //   BRASS_OBJECT_MACHO = 3 (macOS x64 Mach-O)
+    //   BRASS_OBJECT_COFF  = 1 (Windows COFF, host architecture)
+    //   BRASS_OBJECT_ELF   = 2 (Linux ELF, host architecture)
+    //   BRASS_OBJECT_MACHO = 3 (macOS Mach-O, host architecture)
+    //   BRASS_OBJECT_{COFF,ELF,MACHO}_AARCH64 = 4, 5, 6 and
+    //   BRASS_OBJECT_{COFF,ELF,MACHO}_X64     = 7, 8, 9 name the architecture
     BrassStatus s = brass_compile_to_object(mod, BRASS_OBJECT_ELF, &object_bytes, &object_size);
     if (s == BRASS_OK && object_bytes != NULL) {
         printf("Emitted %zu relocatable ELF bytes in memory.\n", object_size);
