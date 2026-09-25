@@ -230,9 +230,9 @@ void emit_control_op(X64BaselineEmitter& em, const Instruction& inst) {
 } // namespace
 
 bool BaselineJitCompiler::passes_prescan(const Function& fn, Target target) const {
-    if (target.is_aarch64()) return true;
     try {
-        check_x64_baseline_supported(fn, target, CallingConvention::for_target(target));
+        if (target.is_aarch64()) aarch64::check_aarch64_baseline_supported(fn, target);
+        else check_x64_baseline_supported(fn, target, CallingConvention::for_target(target));
     } catch (const UnsupportedOperation&) {
         return false;
     }

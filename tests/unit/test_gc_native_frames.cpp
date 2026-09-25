@@ -19,7 +19,7 @@
 using namespace brass;
 using namespace brass::runtime;
 
-#if defined(_M_X64) || defined(__x86_64__)
+#if defined(_M_X64) || defined(__x86_64__) || defined(__aarch64__) || defined(_M_ARM64)
 
 namespace {
 

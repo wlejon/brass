@@ -395,4 +395,6 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
     return compiled;
 }
 
+void check_aarch64_baseline_supported(const Function& fn, const Target& target) { check_supported(fn, target); }
+
 } // namespace brass::aarch64

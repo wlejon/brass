@@ -32,4 +32,9 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
     BaselineSymbolResolver function_address = nullptr
 );
 
+// Throws UnsupportedOperation, before any code is emitted, for a function
+// the AArch64 baseline tier does not compile (the check
+// compile_baseline_aarch64 makes first; BaselineJitCompiler::passes_prescan).
+void check_aarch64_baseline_supported(const Function& fn, const Target& target);
+
 } // namespace brass::aarch64
