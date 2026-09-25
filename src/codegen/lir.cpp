@@ -607,10 +607,23 @@ LirBlock* LirFunction::get_block_by_id(uint32_t id) const {
     if (id < blocks.size() && blocks[id] && blocks[id]->id == id) {
         return blocks[id].get();
     }
-    for (const auto& b : blocks) {
-        if (b && b->id == id) return b.get();
+    // Off the fast path the lookup was a scan of every block, and instruction
+    // selection asks once per edge: quadratic on a function whose MIR block
+    // ids are sparse, which every optimized function's are.
+    auto indexed = [&]() -> LirBlock* {
+        const auto it = block_index_.find(id);
+        if (it == block_index_.end()) return nullptr;
+        const size_t pos = it->second;
+        if (pos < blocks.size() && blocks[pos] && blocks[pos]->id == id) return blocks[pos].get();
+        return nullptr;
+    };
+    if (LirBlock* b = indexed()) return b;
+    block_index_.clear();
+    block_index_.reserve(blocks.size());
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        if (blocks[i]) block_index_.emplace(blocks[i]->id, i);
     }
-    return nullptr;
+    return indexed();
 }
 
 const VRegInfo& LirFunction::get_vreg_info(VReg v) const {

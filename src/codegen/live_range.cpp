@@ -2,9 +2,7 @@
 #include <sstream>
 #include <algorithm>
 #include <cmath>
-#include <bit>
-#include <deque>
-#include <unordered_set>
+#include <unordered_map>
 
 namespace brass::codegen {
 
@@ -228,114 +226,94 @@ void LivenessAnalysis::compute_local_liveness() {
     }
 }
 
+// The least solution of
+//     live_in(B)  = uses(B) ∪ (live_out(B) − defs(B))
+//     live_out(B) = ∪ live_in(S) over B's successors S
+// found one register at a time: from each block with an upward-exposed use,
+// walk predecessors backwards, marking the register live out of each and live
+// into each that does not define it, and stop where it is defined or already
+// marked. The work is the size of the answer. The textbook solver — a bit
+// vector per block over every register — is blocks x registers of memory and
+// of work, and a bundled library's top level (sixty thousand blocks, three
+// hundred thousand registers) needed gigabytes and minutes.
 void LivenessAnalysis::compute_global_liveness() {
     const size_t num_vregs = fn_.vreg_table.size();
-    const size_t num_words = (num_vregs + 63) / 64;
-    if (num_words == 0) return;
-
-    std::unordered_map<const LirBlock*, std::vector<uint64_t>> live_in_bv;
-    std::unordered_map<const LirBlock*, std::vector<uint64_t>> live_out_bv;
-    std::unordered_map<const LirBlock*, std::vector<uint64_t>> defs_bv;
-    std::unordered_map<const LirBlock*, std::vector<uint64_t>> uses_bv;
-
-    for (const auto& block : fn_.blocks) {
-        const auto* b = block.get();
-        const auto& bl = block_liveness_[b];
-        auto& d = defs_bv[b]; d.assign(num_words, 0);
-        auto& u = uses_bv[b]; u.assign(num_words, 0);
-        live_in_bv[b].assign(num_words, 0);
-        live_out_bv[b].assign(num_words, 0);
-
-        for (VReg v : bl.defs) {
-            if (v.is_valid() && v.id < num_vregs) {
-                d[v.id / 64] |= (1ULL << (v.id % 64));
-            }
-        }
-        for (VReg v : bl.uses) {
-            if (v.is_valid() && v.id < num_vregs) {
-                u[v.id / 64] |= (1ULL << (v.id % 64));
-            }
-        }
+    const size_t n = fn_.blocks.size();
+    std::vector<BlockLiveness*> info(n);
+    for (size_t i = 0; i < n; ++i) {
+        info[i] = &block_liveness_[fn_.blocks[i].get()];
+        info[i]->live_in.clear();
+        info[i]->live_out.clear();
     }
+    if (num_vregs == 0 || n == 0) return;
 
-    // A worklist rather than whole-function sweeps until nothing changes:
-    // each sweep carries liveness out of only one more loop level, so nested
-    // loops took a sweep per level (2000 nested loops ran for minutes). A
-    // block is revisited only when a successor's live-in grew.
+    std::unordered_map<const LirBlock*, uint32_t> index;
+    index.reserve(n);
+    for (size_t i = 0; i < n; ++i) index.emplace(fn_.blocks[i].get(), static_cast<uint32_t>(i));
+
     // Predecessors come from the successor lists, the edges the equations
-    // below read, so the worklist cannot miss one.
-    std::unordered_map<const LirBlock*, std::vector<const LirBlock*>> preds;
-    for (const auto& block : fn_.blocks) {
-        for (const auto* succ : block->successors) preds[succ].push_back(block.get());
-    }
-    std::deque<const LirBlock*> worklist;
-    std::unordered_set<const LirBlock*> queued;
-    for (auto it = fn_.blocks.rbegin(); it != fn_.blocks.rend(); ++it) {
-        worklist.push_back(it->get());
-        queued.insert(it->get());
-    }
-    while (!worklist.empty()) {
-        const LirBlock* block = worklist.front();
-        worklist.pop_front();
-        queued.erase(block);
-        bool changed = false;
-        {
-            auto& out_vec = live_out_bv[block];
-            auto& in_vec = live_in_bv[block];
-            const auto& def_vec = defs_bv[block];
-            const auto& use_vec = uses_bv[block];
-
-            for (const auto* succ : block->successors) {
-                const auto& succ_in = live_in_bv[succ];
-                for (size_t w = 0; w < num_words; ++w) {
-                    out_vec[w] |= succ_in[w];
-                }
-            }
-
-            for (size_t w = 0; w < num_words; ++w) {
-                uint64_t new_in = use_vec[w] | (out_vec[w] & ~def_vec[w]);
-                if (new_in != in_vec[w]) {
-                    in_vec[w] = new_in;
-                    changed = true;
-                }
+    // read, so the walk cannot miss one.
+    std::vector<std::vector<uint32_t>> preds(n);
+    for (size_t i = 0; i < n; ++i) {
+        for (const auto* succ : fn_.blocks[i]->successors) {
+            if (auto it = index.find(succ); it != index.end()) {
+                preds[it->second].push_back(static_cast<uint32_t>(i));
             }
         }
-        if (!changed) continue;
-        auto found = preds.find(block);
-        if (found == preds.end()) continue;
-        for (const auto* pred : found->second) {
-            if (queued.insert(pred).second) worklist.push_back(pred);
-        }
     }
 
-    for (const auto& block : fn_.blocks) {
-        const auto* b = block.get();
-        BlockLiveness& bl = block_liveness_[b];
-        bl.live_in.clear();
-        bl.live_out.clear();
-
-        const auto& in_vec = live_in_bv[b];
-        const auto& out_vec = live_out_bv[b];
-
-        for (size_t w = 0; w < num_words; ++w) {
-            uint64_t in_word = in_vec[w];
-            while (in_word != 0) {
-                int bit = std::countr_zero(in_word);
-                uint32_t vid = static_cast<uint32_t>(w * 64 + bit);
-                if (vid < num_vregs) {
-                    bl.live_in.push_back(fn_.vreg_table[vid].vreg);
-                }
-                in_word &= in_word - 1;
+    // Per register, the blocks using it upward-exposed and the blocks
+    // defining it: flat arrays indexed by per-register offsets.
+    auto bucket = [&](std::vector<VReg> BlockLiveness::*member, std::vector<uint32_t>& start,
+                      std::vector<uint32_t>& blocks) {
+        start.assign(num_vregs + 1, 0);
+        for (size_t i = 0; i < n; ++i) {
+            for (VReg v : info[i]->*member) {
+                if (v.is_valid() && v.id < num_vregs) ++start[v.id + 1];
             }
+        }
+        for (size_t v = 0; v < num_vregs; ++v) start[v + 1] += start[v];
+        blocks.resize(start[num_vregs]);
+        std::vector<uint32_t> fill(start.begin(), start.end() - 1);
+        for (size_t i = 0; i < n; ++i) {
+            for (VReg v : info[i]->*member) {
+                if (v.is_valid() && v.id < num_vregs) blocks[fill[v.id]++] = static_cast<uint32_t>(i);
+            }
+        }
+    };
+    std::vector<uint32_t> use_start, use_blocks, def_start, def_blocks;
+    bucket(&BlockLiveness::uses, use_start, use_blocks);
+    bucket(&BlockLiveness::defs, def_start, def_blocks);
 
-            uint64_t out_word = out_vec[w];
-            while (out_word != 0) {
-                int bit = std::countr_zero(out_word);
-                uint32_t vid = static_cast<uint32_t>(w * 64 + bit);
-                if (vid < num_vregs) {
-                    bl.live_out.push_back(fn_.vreg_table[vid].vreg);
+    // Stamped with the register's id + 1, so nothing is reset per register.
+    std::vector<uint32_t> def_mark(n, 0), in_mark(n, 0), out_mark(n, 0);
+    std::vector<uint32_t> worklist;
+    // Registers in id order, so every block's lists come out sorted by id.
+    for (uint32_t v = 0; v < num_vregs; ++v) {
+        if (use_start[v] == use_start[v + 1]) continue;
+        const uint32_t stamp = v + 1;
+        const VReg reg = fn_.vreg_table[v].vreg;
+        for (uint32_t k = def_start[v]; k < def_start[v + 1]; ++k) def_mark[def_blocks[k]] = stamp;
+        worklist.clear();
+        for (uint32_t k = use_start[v]; k < use_start[v + 1]; ++k) {
+            const uint32_t b = use_blocks[k];
+            if (in_mark[b] == stamp) continue;
+            in_mark[b] = stamp;
+            info[b]->live_in.push_back(reg);
+            worklist.push_back(b);
+        }
+        while (!worklist.empty()) {
+            const uint32_t b = worklist.back();
+            worklist.pop_back();
+            for (uint32_t p : preds[b]) {
+                if (out_mark[p] != stamp) {
+                    out_mark[p] = stamp;
+                    info[p]->live_out.push_back(reg);
                 }
-                out_word &= out_word - 1;
+                if (def_mark[p] == stamp || in_mark[p] == stamp) continue;
+                in_mark[p] = stamp;
+                info[p]->live_in.push_back(reg);
+                worklist.push_back(p);
             }
         }
     }
@@ -456,96 +434,145 @@ void LivenessAnalysis::compute_loop_depths() {
     size_t n = fn_.blocks.size();
     if (n == 0) return;
 
-    std::unordered_map<const LirBlock*, size_t> block_to_idx;
+    std::unordered_map<const LirBlock*, uint32_t> block_to_idx;
+    block_to_idx.reserve(n);
     for (size_t i = 0; i < n; ++i) {
-        block_to_idx[fn_.blocks[i].get()] = i;
+        block_to_idx[fn_.blocks[i].get()] = static_cast<uint32_t>(i);
         fn_.blocks[i]->loop_depth = 0;
     }
+    std::vector<std::vector<uint32_t>> preds(n), succs(n);
+    for (size_t i = 0; i < n; ++i) {
+        for (const auto* p : fn_.blocks[i]->predecessors) {
+            if (auto it = block_to_idx.find(p); it != block_to_idx.end()) preds[i].push_back(it->second);
+        }
+        for (const auto* s : fn_.blocks[i]->successors) {
+            if (auto it = block_to_idx.find(s); it != block_to_idx.end()) succs[i].push_back(it->second);
+        }
+    }
 
-    // Dominance analysis using iterative dataflow over one bitset per block:
-    // dom(entry) = {entry}; dom(b) = {b} ∪ ∩ dom(pred), a block without
-    // predecessors dominated by itself alone. Blocks unreachable from the
-    // entry (resume entries and what only they reach) take the maximal
-    // solution the iteration converges to, as they always have.
-    const size_t words = (n + 63) / 64;
-    const uint64_t last_mask = (n % 64 == 0) ? ~0ULL : ((1ULL << (n % 64)) - 1);
-    std::vector<uint64_t> dom(n * words, ~0ULL);
-    for (size_t i = 0; i < n; ++i) dom[i * words + words - 1] &= last_mask;
-    auto row = [&](size_t i) { return dom.data() + i * words; };
-    auto set_bit = [](uint64_t* r, size_t k) { r[k / 64] |= (1ULL << (k % 64)); };
-    auto test_bit = [](const uint64_t* r, size_t k) { return (r[k / 64] >> (k % 64)) & 1ULL; };
-    std::fill(row(0), row(0) + words, 0ULL);
-    set_bit(row(0), 0);
-
-    std::vector<uint64_t> new_dom(words);
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (size_t i = 1; i < n; ++i) {
-            const auto* blk = fn_.blocks[i].get();
-
-            if (blk->predecessors.empty()) {
-                std::fill(new_dom.begin(), new_dom.end(), 0ULL);
-            } else {
-                std::fill(new_dom.begin(), new_dom.end(), ~0ULL);
-                new_dom[words - 1] &= last_mask;
-                for (const auto* pred : blk->predecessors) {
-                    auto it = block_to_idx.find(pred);
-                    if (it != block_to_idx.end()) {
-                        const uint64_t* p = row(it->second);
-                        for (size_t w = 0; w < words; ++w) new_dom[w] &= p[w];
+    // Dominators. The roots are the entry and every block without
+    // predecessors (resume entries), each dominated by itself alone: a
+    // virtual root `n` above them all. Immediate dominators by the
+    // Cooper-Harvey-Kennedy iteration in reverse post-order, and a dominance
+    // question answered by the dominator tree's DFS intervals — a bit set of
+    // dominators per block is blocks² of memory and of work, which a
+    // sixty-thousand-block function cannot afford. A block no root reaches
+    // keeps what the maximal solution of the set equations gives it: every
+    // block dominates it.
+    const uint32_t root = static_cast<uint32_t>(n);
+    const uint32_t kNone = UINT32_MAX;
+    std::vector<uint32_t> rpo_num(n + 1, kNone);
+    std::vector<uint32_t> rpo;  // blocks, reverse post-order, root excluded
+    {
+        std::vector<uint32_t> post;
+        std::vector<uint8_t> seen(n, 0);
+        std::vector<std::pair<uint32_t, uint32_t>> stack;
+        auto dfs_from = [&](uint32_t start) {
+            if (seen[start]) return;
+            seen[start] = 1;
+            stack.push_back({start, 0});
+            while (!stack.empty()) {
+                auto& [b, k] = stack.back();
+                if (k < succs[b].size()) {
+                    const uint32_t s = succs[b][k++];
+                    if (!seen[s]) {
+                        seen[s] = 1;
+                        stack.push_back({s, 0});
                     }
+                } else {
+                    post.push_back(b);
+                    stack.pop_back();
                 }
             }
-            set_bit(new_dom.data(), i);
-
-            if (!std::equal(new_dom.begin(), new_dom.end(), row(i))) {
-                std::copy(new_dom.begin(), new_dom.end(), row(i));
+        };
+        // The root's successors, last first, so the entry is first in RPO.
+        for (size_t i = n; i-- > 1;) {
+            if (fn_.blocks[i]->predecessors.empty()) dfs_from(static_cast<uint32_t>(i));
+        }
+        dfs_from(0);
+        rpo.assign(post.rbegin(), post.rend());
+        rpo_num[root] = 0;
+        for (size_t k = 0; k < rpo.size(); ++k) rpo_num[rpo[k]] = static_cast<uint32_t>(k + 1);
+    }
+    auto is_root_child = [&](uint32_t b) { return b == 0 || fn_.blocks[b]->predecessors.empty(); };
+    std::vector<uint32_t> idom(n + 1, kNone);
+    idom[root] = root;
+    auto intersect = [&](uint32_t a, uint32_t b) {
+        while (a != b) {
+            while (rpo_num[a] > rpo_num[b]) a = idom[a];
+            while (rpo_num[b] > rpo_num[a]) b = idom[b];
+        }
+        return a;
+    };
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (uint32_t b : rpo) {
+            uint32_t d = is_root_child(b) ? root : kNone;
+            if (b != 0) {
+                for (uint32_t p : preds[b]) {
+                    if (idom[p] == kNone) continue;  // unprocessed or unreachable
+                    d = d == kNone ? p : intersect(p, d);
+                }
+            }
+            if (d != kNone && idom[b] != d) {
+                idom[b] = d;
                 changed = true;
             }
         }
     }
+    std::vector<uint32_t> pre(n + 1, 0), post_end(n + 1, 0);
+    {
+        std::vector<std::vector<uint32_t>> children(n + 1);
+        for (uint32_t b : rpo) {
+            if (idom[b] != kNone) children[idom[b]].push_back(b);
+        }
+        uint32_t clock = 0;
+        std::vector<std::pair<uint32_t, uint32_t>> stack{{root, 0}};
+        pre[root] = clock++;
+        while (!stack.empty()) {
+            auto& [b, k] = stack.back();
+            if (k < children[b].size()) {
+                const uint32_t c = children[b][k++];
+                pre[c] = clock++;
+                stack.push_back({c, 0});
+            } else {
+                post_end[b] = clock;
+                stack.pop_back();
+            }
+        }
+    }
+    auto reached = [&](uint32_t b) { return idom[b] != kNone; };
+    auto dominates = [&](uint32_t a, uint32_t b) {
+        if (!reached(b)) return true;
+        if (!reached(a)) return false;
+        return pre[a] <= pre[b] && pre[b] < post_end[a];
+    };
 
-    // Identify backedges and natural loops
-    for (size_t i = 0; i < n; ++i) {
-        const auto* blk = fn_.blocks[i].get();
-        for (const auto* succ : blk->successors) {
-            auto it = block_to_idx.find(succ);
-            if (it == block_to_idx.end()) continue;
-            size_t s_idx = it->second;
-
-            if (test_bit(row(i), s_idx)) {
-                // Backedge i -> s_idx
-                std::vector<bool> in_loop(n, false);
-                in_loop[s_idx] = true;
-                in_loop[i] = true;
-
-                std::vector<size_t> worklist;
-                if (i != s_idx) {
-                    worklist.push_back(i);
-                }
-
-                while (!worklist.empty()) {
-                    size_t curr = worklist.back();
-                    worklist.pop_back();
-
-                    const auto* curr_blk = fn_.blocks[curr].get();
-                    for (const auto* pred : curr_blk->predecessors) {
-                        auto p_it = block_to_idx.find(pred);
-                        if (p_it != block_to_idx.end()) {
-                            size_t p_idx = p_it->second;
-                            if (!in_loop[p_idx]) {
-                                in_loop[p_idx] = true;
-                                worklist.push_back(p_idx);
-                            }
-                        }
-                    }
-                }
-
-                for (size_t k = 0; k < n; ++k) {
-                    if (in_loop[k]) {
-                        fn_.blocks[k]->loop_depth++;
-                    }
+    // Identify backedges and natural loops. A loop's blocks are found by
+    // walking predecessors back from the latch to the header, marked with
+    // the loop's own stamp so nothing is cleared between loops.
+    std::vector<uint32_t> in_loop(n, 0);
+    uint32_t loop_stamp = 0;
+    std::vector<uint32_t> worklist;
+    for (uint32_t i = 0; i < n; ++i) {
+        for (uint32_t s_idx : succs[i]) {
+            if (!dominates(s_idx, i)) continue;
+            // Backedge i -> s_idx
+            ++loop_stamp;
+            in_loop[s_idx] = loop_stamp;
+            in_loop[i] = loop_stamp;
+            fn_.blocks[s_idx]->loop_depth++;
+            if (i != s_idx) fn_.blocks[i]->loop_depth++;
+            worklist.clear();
+            if (i != s_idx) worklist.push_back(i);
+            while (!worklist.empty()) {
+                const uint32_t curr = worklist.back();
+                worklist.pop_back();
+                for (uint32_t p_idx : preds[curr]) {
+                    if (in_loop[p_idx] == loop_stamp) continue;
+                    in_loop[p_idx] = loop_stamp;
+                    fn_.blocks[p_idx]->loop_depth++;
+                    worklist.push_back(p_idx);
                 }
             }
         }

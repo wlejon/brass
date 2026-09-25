@@ -13,6 +13,7 @@
 #include <string_view>
 #include <vector>
 #include <memory>
+#include <unordered_map>
 #include <iosfwd>
 
 namespace brass::codegen {
@@ -559,6 +560,11 @@ public:
 
 private:
     uint32_t next_block_id_ = 0;
+    // Block id -> position in `blocks`, for ids that are not their own
+    // position. `blocks` is public and reordered freely, so an entry is
+    // trusted only after checking the block at that position, and the whole
+    // index is rebuilt when one is stale.
+    mutable std::unordered_map<uint32_t, size_t> block_index_;
 };
 
 std::string to_string(const LirFunction& fn);

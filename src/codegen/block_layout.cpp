@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <vector>
 #include <algorithm>
+#include <queue>
 
 namespace brass::codegen {
 
@@ -164,6 +165,25 @@ void optimize_block_layout(LirFunction& fn, const BlockLayoutOptions& opts) {
         }
     }
 
+    // Every block that can start a trace, by its start score (a block's own
+    // property, so fixed up front), highest first and earliest first among
+    // equals; a block placed since it was queued is skipped when it surfaces.
+    // Rescanning every block for the best one at each trace's end was traces
+    // x blocks — quadratic in a function of many short if/else traces.
+    std::priority_queue<std::pair<int, int64_t>> trace_starts;
+    for (size_t i = 0; i < fn.blocks.size(); ++i) {
+        const auto& b = fn.blocks[i];
+        if (!b || cold_blocks.count(b->id)) continue;
+        int b_score = static_cast<int>(b->loop_depth) * 10;
+        if (opts.block_freq && opts.mir_function) {
+            const BasicBlock* mb = opts.mir_function->get_block_by_name(b->name);
+            if (mb) {
+                b_score += static_cast<int>(std::min<uint64_t>(1000, opts.block_freq->get_block_count(mb)));
+            }
+        }
+        trace_starts.push({b_score, -static_cast<int64_t>(i)});
+    }
+
     // Trace building loop for hot/regular blocks
     while (layout.size() < non_cold_count) {
         BlockBranchTargets bt = get_branch_targets(*curr);
@@ -220,22 +240,15 @@ void optimize_block_layout(LirFunction& fn, const BlockLayoutOptions& opts) {
             placed.insert(curr->id);
         } else {
             // End of current trace: pick best unplaced block to start new trace
+            // — the highest start score, the earliest block among equals.
             LirBlock* next_trace_start = nullptr;
-            int max_depth = -1;
-
-            for (const auto& b : fn.blocks) {
-                if (!b || placed.count(b->id) || cold_blocks.count(b->id)) continue;
-                int b_score = static_cast<int>(b->loop_depth) * 10;
-                if (opts.block_freq && opts.mir_function) {
-                    const BasicBlock* mb = opts.mir_function->get_block_by_name(b->name);
-                    if (mb) {
-                        b_score += static_cast<int>(std::min<uint64_t>(1000, opts.block_freq->get_block_count(mb)));
-                    }
+            while (!trace_starts.empty()) {
+                LirBlock* b = fn.blocks[static_cast<size_t>(-trace_starts.top().second)].get();
+                if (!placed.count(b->id)) {
+                    next_trace_start = b;
+                    break;
                 }
-                if (b_score > max_depth) {
-                    max_depth = b_score;
-                    next_trace_start = b.get();
-                }
+                trace_starts.pop();
             }
 
             if (next_trace_start) {
