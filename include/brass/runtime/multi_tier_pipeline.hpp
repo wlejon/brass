@@ -217,6 +217,11 @@ public:
 
     void register_external_symbol(std::string_view name, void* addr);
     void register_external_function(std::string_view name, FastHostFn fn);
+    // The symbols registered with this pipeline, into a Tier-2 engine
+    // compiling one of its program's functions (CodeInstaller::install_tier2),
+    // as every lower tier of the program gets them: a program's own data
+    // symbols (its module tables) resolve nowhere else.
+    void install_external_symbols(codegen::JitExecutionEngine& jit) const;
 
     void register_baseline_compiled(std::shared_ptr<codegen::BaselineCompiledFunction> fn);
     std::shared_ptr<codegen::BaselineCompiledFunction> find_baseline_compiled(std::string_view name) const;

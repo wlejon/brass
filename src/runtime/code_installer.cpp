@@ -891,12 +891,11 @@ CodeInstallResult CodeInstaller::install_tier2(
     jit->register_external_symbol("brass_record_call_feedback", reinterpret_cast<void*>(&brass_record_call_feedback));
     jit->register_external_symbol("brass_record_property_feedback", reinterpret_cast<void*>(&brass_record_property_feedback));
     install_host_symbols(*jit);
-
+    // The program's own symbols, then any given this installer.
+    table_->pipeline().install_external_symbols(*jit);
     {
         std::lock_guard<std::mutex> lock(symbols_mutex_);
-        for (const auto& [name, addr] : external_symbols_) {
-            jit->register_external_symbol(name, addr);
-        }
+        for (const auto& [name, addr] : external_symbols_) jit->register_external_symbol(name, addr);
     }
 
     // Function pointers this code makes are the ones the lower tiers make.

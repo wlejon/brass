@@ -229,6 +229,11 @@ void MultiTierPipeline::register_external_symbol(std::string_view name, void* ad
     ++symbols_gen_;
 }
 
+void MultiTierPipeline::install_external_symbols(codegen::JitExecutionEngine& jit) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& [name, addr] : external_symbols_) jit.register_external_symbol(name, addr);
+}
+
 void MultiTierPipeline::register_external_function(std::string_view name, FastHostFn fn) {
     std::lock_guard<std::mutex> lock(mutex_);
     external_functions_[std::string(name)] = std::move(fn);

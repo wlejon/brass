@@ -478,4 +478,45 @@ TEST_CASE("Program tiering - destroying a program drops its stack maps and backg
     prog.reset();
 }
 
+TEST_CASE("Program tiering - a program's registered data symbols reach its tier-2 code") {
+    // The shape of a host's per-program module tables: one data symbol name,
+    // registered with each program's pipeline at that program's own cell.
+    // A tier-2 compile for the program, synchronous or background, links
+    // against them as its lower tiers do.
+    auto mod = parse_or_fail(R"(module @pt_data
+extern @pt_data_cell data
+func @pt_data_read() -> i64 {
+entry:
+  %p = func_addr @pt_data_cell
+  %v = load.i64 %p, 0
+  ret %v
+}
+)");
+    int64_t cell_a = 111;
+    int64_t cell_b = 222;
+    FunctionDispatchTable prog_a;
+    FunctionDispatchTable prog_b;
+    TieringConfig cfg = tier1_config(1000000);
+    cfg.jit_threads = 1;
+    prog_a.pipeline().initialize(cfg);
+    prog_b.pipeline().initialize(cfg);
+    prog_a.pipeline().register_external_symbol("pt_data_cell", &cell_a);
+    prog_b.pipeline().register_external_symbol("pt_data_cell", &cell_b);
+    const Function* fn = mod->get_function("pt_data_read");
+
+    FunctionHandle* ha = prog_a.get_or_create("pt_data_read", fn);
+    CodeInstaller inst_a(prog_a);
+    CodeInstallResult ra = inst_a.install_tier2(*ha, *mod, "pt_data_read");
+    if (!ra.success) std::cerr << ra.error_message << "\n";
+    REQUIRE(ra.success);
+    REQUIRE(ha->native_entry() != nullptr);
+    CHECK_EQ(reinterpret_cast<int64_t (*)()>(ha->native_entry())(), 111);
+
+    FunctionHandle* hb = prog_b.get_or_create("pt_data_read", fn);
+    REQUIRE(prog_b.pipeline().enqueue_tier2("pt_data_read", mod.get(), hb));
+    prog_b.pipeline().background_compiler().wait_idle();
+    REQUIRE(hb->tier() == TierLevel::Tier2_Optimized);
+    CHECK_EQ(reinterpret_cast<int64_t (*)()>(hb->native_entry())(), 222);
+}
+
 #endif
