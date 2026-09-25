@@ -54,10 +54,18 @@ To run tests in-process while iterating, call the binary directly:
 
 ### Linux and AArch64 execution
 
-`scripts/linux-tests.sh` builds brass for Linux and runs the correctness suite
-and the differential fuzzer there: natively on x86_64, and for aarch64 under
+The AArch64 JIT runs natively on macOS arm64 (Apple Silicon): CI and the
+nightly build run the whole correctness suite on a `macos-15` arm64 runner,
+and the differential fuzzer runs there as on x64
+(`brass-fuzz --pipeline=all --seed=1 --iterations=1000`). Every test that
+needs a native tier runs on both architectures, apart from the few that
+exercise Windows x64 unwind data or need frame pointers only Apple's ABI
+guarantees; each says why.
+
+On Linux, `scripts/linux-tests.sh` builds brass and runs the correctness suite
+and the differential fuzzer: natively on x86_64, and for aarch64 under
 qemu-user, so the AArch64 JIT's code is executed and checked against the
-interpreter the same way the x64 JIT's is. It needs no root: the first run
+interpreter on AArch64 Linux as well. It needs no root: the first run
 fetches qemu-user-static and the aarch64 cross toolchain with
 `apt-get download` into `~/.cache/brass-aarch64` (Debian bookworm).
 
