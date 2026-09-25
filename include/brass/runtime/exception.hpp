@@ -193,12 +193,15 @@ inline constexpr uint32_t BRASS_SEH_EXCEPTION_CODE = 0xE0425253u;
 // Returns the absolute pad address, or 0 when the frame has no scope there.
 uint64_t brass_seh_find_landing_pad(uint64_t control_pc, uint64_t image_base, const void* handler_data) noexcept;
 
-// Raises val as a Win64 SEH exception when some frame the OS unwinder can see
-// has a brass landing pad for it; does not return then. Returns false (and
-// raises nothing) when no such frame exists, or off Win64. Only frames below
-// the innermost generated-code entry (GeneratedCodeEntryScope) count, here
-// and in brass_seh_raise_above: the C++ frames above it would not see an SEH
-// exception, so the caller throws a C++ exception instead.
+// Raises val to the first frame the OS unwinder can see that has a brass
+// landing pad for it; does not return then. On Win64 that is a Win64 SEH
+// exception; on other x86-64 and AArch64 hosts the DWARF unwinder finds the
+// frame and its pad is entered directly, abandoning the frames in between
+// (exception_raise_unwind.cpp), so callers raise from frames holding nothing
+// to unwind. Returns false (and raises nothing) when no such frame exists,
+// or on any other host. Only frames below the innermost generated-code entry
+// (GeneratedCodeEntryScope) count, here and in brass_seh_raise_above: the
+// C++ frames above it must see a C++ exception, which the caller throws.
 bool brass_seh_raise(HostValue val);
 
 // As brass_seh_raise, for a throw on behalf of a deoptimized native frame:
@@ -207,7 +210,7 @@ bool brass_seh_raise(HostValue val);
 // skipped) and below `stack_limit` count. Raises when the first frame there
 // with a landing pad for its call site is found; returns false (raising
 // nothing) when that range has none, when the deoptimized frame is not on
-// the stack, or off Win64.
+// the stack, or where brass_seh_raise cannot raise.
 bool brass_seh_raise_above(HostValue val, const void* deopted_entry, uintptr_t stack_limit);
 
 extern "C" int brass_seh_personality(

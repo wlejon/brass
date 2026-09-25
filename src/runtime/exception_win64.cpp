@@ -300,19 +300,11 @@ bool brass_seh_raise_above(HostValue val, const void* deopted_entry, uintptr_t s
 
 #else
 
-bool brass_seh_raise_above(HostValue, const void*, uintptr_t) {
-    return false;
-}
-
-
 // No OS unwinder calls this off Windows; it exists so objects referencing it
-// link, and it never claims a frame.
+// link, and it never claims a frame. brass_seh_raise and
+// brass_seh_raise_above are in exception_raise_unwind.cpp there.
 extern "C" int brass_seh_personality(void*, void*, void*, void*) {
     return 1; // ExceptionContinueSearch
-}
-
-bool brass_seh_raise(HostValue) {
-    return false;
 }
 
 #endif
