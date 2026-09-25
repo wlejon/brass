@@ -113,6 +113,7 @@ static size_t in_loop_uses(const Value* v, const LoopInfo& loop, const BranchTar
             switch (inst->opcode()) {
                 case Opcode::br: count_args(inst->branch_target()); break;
                 case Opcode::br_if: count_args(inst->true_target()); count_args(inst->false_target()); break;
+                case Opcode::invoke: count_args(inst->normal_target()); count_args(inst->unwind_target()); break;
                 case Opcode::switch_:
                     count_args(inst->default_target());
                     for (const SwitchCase& c : inst->switch_cases()) count_args(c.target);

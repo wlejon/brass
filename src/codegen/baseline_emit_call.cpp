@@ -96,7 +96,7 @@ void X64BaselineEmitter::emit_return() {
 
 void X64BaselineEmitter::emit_call(std::string_view symbol, const Value* indirect,
                                    const std::vector<const Value*>& args, const Value* result,
-                                   uint32_t site_id) {
+                                   uint32_t site_id, uint32_t* call_start, uint32_t* call_end) {
     const bool win = target.is_windows();
     const size_t num_args = args.size();
 
@@ -154,6 +154,7 @@ void X64BaselineEmitter::emit_call(std::string_view symbol, const Value* indirec
         }
     }
 
+    if (call_start) *call_start = static_cast<uint32_t>(buffer.size());
     if (indirect) {
         enc.call(GPR::R11);
     } else if (symbol == fn.name()) {
@@ -170,6 +171,7 @@ void X64BaselineEmitter::emit_call(std::string_view symbol, const Value* indirec
     }
 
     // Keyed by the return address, so recorded before the stack is popped.
+    if (call_end) *call_end = static_cast<uint32_t>(buffer.size());
     record_safepoint(site_id);
     if (call_stack_alloc > 0) enc.add(GPR::RSP, call_stack_alloc);
 

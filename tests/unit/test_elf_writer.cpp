@@ -239,3 +239,70 @@ TEST_CASE("ELF64 Writer - SysV DWARF CFI in .eh_frame") {
     CHECK_EQ(version, uint8_t(1));
     CHECK_EQ(std::string(aug), "zR");
 }
+
+TEST_CASE("ELF64 Writer - a function with landing pads names the personality and its LSDA") {
+    Module mod("test_elf_lsda");
+    Function* fn = mod.create_function("lsda_fn", Type::i64(), {Type::i64()});
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    Value* x = b.add_block_param(entry, Type::i64());
+    b.build_ret(b.build_add(x, b.build_iconst_i64(1)));
+    fn->rebuild_cfg_predecessors();
+    CHECK(verify_function(*fn));
+
+    for (Target target : {Target::x64_linux(), Target::aarch64_linux()}) {
+        ObjectFile obj = compile_module_to_object(mod, target);
+        REQUIRE(obj.functions.size() == 1);
+        obj.functions[0].exception_table.add_scope(0, static_cast<uint32_t>(obj.functions[0].text_size), 4);
+
+        Section& eh = obj.get_or_create_section(".eh_frame", SectionKind::EhFrame,
+                                                SectionFlags::Read | SectionFlags::Alloc, 8);
+        ElfCfiBuilder::build_eh_frame(obj, eh, /*with_personality=*/true);
+        const Section* eh_frame = obj.get_section(".eh_frame");
+        REQUIRE(eh_frame != nullptr);
+        const uint8_t* p = eh_frame->data.data();
+
+        // The plain CIE, then the one naming the personality.
+        CHECK_EQ(std::string(reinterpret_cast<const char*>(p + 9)), "zR");
+        const uint32_t first_len = read_u32(p);
+        const uint8_t* cie2 = p + 4 + first_len;
+        CHECK_EQ(read_u32(cie2 + 4), uint32_t(0));
+        CHECK_EQ(std::string(reinterpret_cast<const char*>(cie2 + 9)), "zPLR");
+
+        // The one FDE belongs to the second CIE and carries a 4-byte LSDA pointer.
+        const uint8_t* fde = cie2 + 4 + read_u32(cie2);
+        CHECK_EQ(read_u32(fde + 4), static_cast<uint32_t>((fde + 4) - cie2));
+        CHECK_EQ(fde[16], uint8_t(4));
+
+        const Section* lsda = obj.get_section(".gcc_except_table");
+        REQUIRE(lsda != nullptr);
+        CHECK_EQ(lsda->data[0], uint8_t(0xFF));  // LPStart omitted
+        CHECK_EQ(lsda->data[2], uint8_t(0x03));  // udata4 call sites
+
+        const Section* word = obj.get_section(".data.rel.ro.brass_personality");
+        REQUIRE(word != nullptr);
+        REQUIRE(word->relocations.size() == 1);
+        CHECK_EQ(word->relocations[0].symbol_name, std::string("brass_sysv_personality"));
+        CHECK(word->relocations[0].kind == RelocKind::Abs64);
+        CHECK(obj.find_symbol("brass_sysv_personality") != nullptr);
+
+        // The writer builds the same sections into the object file.
+        ObjectFile fresh = compile_module_to_object(mod, target);
+        fresh.functions[0].exception_table.add_scope(0, static_cast<uint32_t>(fresh.functions[0].text_size), 4);
+        std::vector<uint8_t> elf_bytes = emit_elf_object(fresh);
+        const uint8_t* ehdr = elf_bytes.data();
+        const uint64_t e_shoff = read_u64(ehdr + 40);
+        const uint16_t e_shnum = read_u16(ehdr + 60);
+        const uint16_t e_shstrndx = read_u16(ehdr + 62);
+        const char* shstrtab = reinterpret_cast<const char*>(ehdr + read_u64(ehdr + e_shoff + e_shstrndx * 64 + 24));
+        bool has_lsda = false, has_word = false;
+        for (uint16_t i = 0; i < e_shnum; ++i) {
+            const char* name = shstrtab + read_u32(ehdr + e_shoff + i * 64);
+            has_lsda = has_lsda || std::strcmp(name, ".gcc_except_table") == 0;
+            has_word = has_word || std::strcmp(name, ".data.rel.ro.brass_personality") == 0;
+        }
+        CHECK(has_lsda);
+        CHECK(has_word);
+    }
+}

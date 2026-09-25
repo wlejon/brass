@@ -25,14 +25,6 @@ bool BaselineJitCompiler::supports_opcode(Opcode op) noexcept {
     // Vector opcodes are compiled for 128-bit types; the pre-scan rejects
     // 256-bit vectors and the few type / operand combinations it does not.
     switch (op) {
-        // Exceptions: the interpreter tier propagates MIR exceptions as C++
-        // exceptions and native tiers as a frame-chain unwind; a baseline
-        // frame between the two has neither bridge, so a function that
-        // throws or catches stays in the interpreter.
-        case Opcode::throw_:
-        case Opcode::invoke:
-        case Opcode::landing_pad:
-        case Opcode::resume:
         // Coroutines: the interpreter's coroutine frames hold a MIR Function*
         // and resume by interpreting it, native tiers hold a code pointer;
         // a frame created in one tier cannot be resumed in the other.
@@ -217,6 +209,16 @@ void emit_control_op(X64BaselineEmitter& em, const Instruction& inst) {
         case Opcode::guard:
             emit_guard(em, inst);
             return;
+        case Opcode::invoke:
+            em.emit_invoke(inst);
+            return;
+        case Opcode::landing_pad:
+            em.emit_landing_pad(inst);
+            return;
+        case Opcode::throw_:
+        case Opcode::resume:
+            em.emit_raise(inst);
+            return;
         case Opcode::resume_point:
         case Opcode::keep_alive:
             // A metadata marker, and a use of a value whose slot is already
@@ -376,18 +378,20 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
             emit_control_op(emitter, inst);
         }
     }
+    emitter.emit_unwind_trampolines();
 
     // Executable memory: the code, then (when this process runs it) the
     // unwind data that lets a C++ exception from a helper unwind through
-    // the frame.
+    // the frame, and a throw land at its pads.
     size_t code_bytes = buffer.size();
+    const runtime::FunctionExceptionTable eh_table = baseline_exception_table(emitter, fn.name());
     std::vector<uint8_t> image(buffer.data(), buffer.data() + code_bytes);
     const Target host = Target::host();
     const bool runs_here = host.is_x64() && host.is_windows() == target.is_windows();
     size_t unwind_off = 0;
     if (runs_here) {
         unwind_off = append_x64_baseline_unwind(image, prologue, static_cast<uint32_t>(code_bytes),
-                                                target.is_windows());
+                                                target.is_windows(), eh_table);
     }
     auto mem_block = std::make_shared<JitMemoryBlock>(image.size());
     if (!mem_block->is_valid()) {
@@ -407,6 +411,15 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
 
     BaselineCompiledFunction compiled(
         fn.name(), fn.return_type(), fn.param_types(), mem_block, entry_ptr, code_bytes, std::move(fn_stack_map));
+    if (runs_here) {
+        // Every baseline function, pads or not: the frame walker steps
+        // through a registered frame to the pads beyond it.
+        const auto start = reinterpret_cast<uintptr_t>(entry_ptr);
+        runtime::get_global_exception_registry().register_function_mapping(start, code_bytes, eh_table);
+        compiled.set_eh_registration(std::shared_ptr<const void>(entry_ptr, [](const void* p) {
+            runtime::get_global_exception_registry().unregister_function_mapping(reinterpret_cast<uintptr_t>(p));
+        }));
+    }
     if (emitter.uses_lazy_stubs) compiled.set_link_keepalive(lazy_);
     compiled.set_lazy_call_symbols(std::move(emitter.lazy_call_symbols));
     compiled.set_lazy_addr_symbols(std::move(emitter.lazy_addr_symbols));

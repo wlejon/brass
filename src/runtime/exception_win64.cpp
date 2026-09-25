@@ -9,6 +9,11 @@
 // with RtlUnwindEx, which restores the frame's nonvolatile registers and
 // delivers the value in RAX (X0 on ARM64), exactly as the JIT walker's
 // brass_jump_to_landing_pad does.
+//
+// The personality lands a C++ `throw BrassException(v)` the same way: a
+// helper or host function that generated code called raises into the
+// generated caller's pad by throwing one, and the C++ frames between unwind
+// as they do for any C++ exception.
 
 #include <brass/runtime/exception.hpp>
 #include <brass/object/object_writer.hpp>
@@ -28,6 +33,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <typeinfo>
 
 namespace brass::runtime {
 
@@ -106,6 +112,68 @@ uint64_t brass_seh_find_landing_pad(uint64_t control_pc, uint64_t image_base, co
 
 #if defined(BRASS_WIN64_SEH)
 
+#if defined(_MSC_VER)
+
+namespace {
+
+// MSVC's C++ exception records (the ABI clang-cl shares): the exception code,
+// the magic numbers of ExceptionInformation[0], and the throw descriptors,
+// whose pointers are image-relative on 64-bit targets
+// (ExceptionInformation[3] is the image base).
+constexpr DWORD kMsvcCxxExceptionCode = 0xE06D7363u;  // 'msc' | 0xE0000000
+
+struct MsvcThrowInfo {
+    uint32_t attributes;
+    int32_t unwind;
+    int32_t forward_compat;
+    int32_t catchable_type_array;
+};
+
+struct MsvcCatchableType {
+    uint32_t properties;
+    int32_t type_descriptor;
+    int32_t mdisp;  // the offset of this base in the thrown object
+    int32_t pdisp;
+    int32_t vdisp;
+    int32_t size_or_offset;
+    int32_t copy_function;
+};
+
+struct MsvcTypeDescriptor {
+    const void* vftable;
+    void* spare;
+    char name[1];  // decorated, NUL-terminated: type_info::raw_name()
+};
+
+// The value of a C++ `throw BrassException(v)`, when `er` is one. The type is
+// matched by its decorated name, not by the throw descriptor's address: every
+// image that throws one (brass itself, a host, a front end's runtime DLL) has
+// its own descriptors.
+bool cxx_brass_exception_bits(const EXCEPTION_RECORD* er, uint64_t& bits) noexcept {
+    if (er->ExceptionCode != kMsvcCxxExceptionCode || er->NumberParameters < 4) return false;
+    const ULONG_PTR magic = er->ExceptionInformation[0];
+    if (magic != 0x19930520 && magic != 0x19930521 && magic != 0x19930522) return false;
+    const auto* object = reinterpret_cast<const char*>(er->ExceptionInformation[1]);
+    const auto* throw_info = reinterpret_cast<const MsvcThrowInfo*>(er->ExceptionInformation[2]);
+    const auto image = static_cast<uintptr_t>(er->ExceptionInformation[3]);
+    if (!object || !throw_info || !image || throw_info->catchable_type_array == 0) return false;
+    const auto* array = reinterpret_cast<const int32_t*>(image + static_cast<uint32_t>(throw_info->catchable_type_array));
+    const char* wanted = typeid(BrassException).raw_name();
+    for (int32_t i = 0; i < array[0]; ++i) {
+        const auto* ct = reinterpret_cast<const MsvcCatchableType*>(image + static_cast<uint32_t>(array[1 + i]));
+        const auto* td = reinterpret_cast<const MsvcTypeDescriptor*>(image + static_cast<uint32_t>(ct->type_descriptor));
+        if (std::strcmp(td->name, wanted) != 0) continue;
+        const auto* thrown = reinterpret_cast<const BrassException*>(object + ct->mdisp);
+        bits = thrown->value().raw();
+        return true;
+    }
+    return false;
+}
+
+} // namespace
+
+#endif
+
 extern "C" int brass_seh_personality(
     void* ExceptionRecord,
     void* EstablisherFrame,
@@ -116,16 +184,29 @@ extern "C" int brass_seh_personality(
     auto* er = static_cast<EXCEPTION_RECORD*>(ExceptionRecord);
     auto* dc = static_cast<DISPATCHER_CONTEXT*>(DispatcherContext);
     if (!er || !dc) return ExceptionContinueSearch;
-
-    // Only brass exceptions land in brass pads; everything else (C++
-    // exceptions from host callbacks, hardware faults) passes through, and
-    // the unwind pass needs nothing from us.
-    if (er->ExceptionCode != BRASS_SEH_EXCEPTION_CODE || er->NumberParameters < 1) {
-        return ExceptionContinueSearch;
-    }
     if (er->ExceptionFlags & EXCEPTION_UNWIND) {
         return ExceptionContinueSearch;
     }
+
+    // Brass pads catch brass values, raised either way: natively (a brass
+    // SEH exception) or as a C++ BrassException thrown by compiled code the
+    // generated code called. The C++ one unwinds the compiled frames it
+    // passes as any C++ exception does: RtlUnwindEx below runs their
+    // destructors. Everything else (other C++ exceptions, hardware faults)
+    // passes through, and the unwind pass needs nothing from us.
+    uint64_t bits = 0;
+    if (er->ExceptionCode == BRASS_SEH_EXCEPTION_CODE && er->NumberParameters >= 1) {
+        bits = static_cast<uint64_t>(er->ExceptionInformation[0]);
+    }
+#if defined(_MSC_VER)
+    else if (!cxx_brass_exception_bits(er, bits)) {
+        return ExceptionContinueSearch;
+    }
+#else
+    else {
+        return ExceptionContinueSearch;
+    }
+#endif
 
     uint64_t target = brass_seh_find_landing_pad(dc->ControlPc, dc->ImageBase, dc->HandlerData);
     if (!target) return ExceptionContinueSearch;
@@ -133,10 +214,11 @@ extern "C" int brass_seh_personality(
     // Unwind every frame above this one (running their termination
     // handlers) and resume at the pad in this frame with the thrown value in
     // the return register. RtlUnwindEx does not return.
+    brass_set_current_exception(HostValue::from_raw(bits));
     RtlUnwindEx(EstablisherFrame,
                 reinterpret_cast<PVOID>(target),
                 er,
-                reinterpret_cast<PVOID>(static_cast<uintptr_t>(er->ExceptionInformation[0])),
+                reinterpret_cast<PVOID>(static_cast<uintptr_t>(bits)),
                 dc->ContextRecord,
                 dc->HistoryTable);
     __fastfail(FAST_FAIL_INVALID_ARG);

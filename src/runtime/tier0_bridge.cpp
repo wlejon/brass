@@ -66,10 +66,10 @@ BRASS_BRIDGE_NOINLINE uint64_t bridge_run(Tier0Bridge* ctx, uintptr_t caller_rbp
 }
 
 // A MIR throw leaving Tier 0, raised again natively for the native callers'
-// landing pads (which see only native throws: the personality ignores C++
-// exceptions), from a frame that holds nothing to unwind. With no pad below
-// the innermost generated-code entry it continues as the C++ exception it
-// was, to the Tier-0 invoke or host catch above.
+// landing pads (an InterpreterThrownException is nothing the personalities
+// land), from a frame that holds nothing to unwind. With no pad below the
+// innermost generated-code entry it continues as the C++ exception it was,
+// to the Tier-0 invoke or host catch above.
 [[noreturn]] BRASS_BRIDGE_NOINLINE void bridge_reraise(bool from_tier0, RuntimeValue tier0_value, HostValue bits) {
     brass_set_current_exception(bits);
     brass_seh_raise(bits); // does not return when a pad catches it

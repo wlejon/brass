@@ -48,6 +48,7 @@ void for_each_target(const Function& fn, const Instruction& inst,
     switch (inst.opcode()) {
         case Opcode::br: visit(inst.branch_target()); break;
         case Opcode::br_if: visit(inst.true_target()); visit(inst.false_target()); break;
+        case Opcode::invoke: visit(inst.normal_target()); visit(inst.unwind_target()); break;
         case Opcode::switch_:
             visit(inst.default_target());
             for (const auto& sc : inst.switch_cases()) visit(sc.target);

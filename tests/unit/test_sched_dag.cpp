@@ -256,6 +256,42 @@ TEST_CASE("SchedDAG - Scheduling Barriers") {
     CHECK(edge_2_3);
 }
 
+TEST_CASE("SchedDAG - an invoke's call keeps register-only work on its own side") {
+    // A stack-slot address computed for the landing pad must be in its
+    // register when the call raises, and a def after the call must not
+    // overwrite a register the pad reads: neither may cross the call.
+    LirFunction fn;
+    LirBlock* bb = fn.create_block("entry");
+
+    auto lea = std::make_unique<LirInst>(LirOpcode::Lea);
+    lea->add_def(LirOperand::preg_gpr(GPR::R12, 8));
+    lea->add_use(LirOperand::slot(0, 8));
+    bb->append_inst(std::move(lea));
+
+    auto call = std::make_unique<LirInst>(LirOpcode::Call);
+    call->callee_symbol = "may_raise";
+    call->is_invoke = true;
+    call->unwind_block_id = 7;
+    bb->append_inst(std::move(call));
+
+    auto after = std::make_unique<LirInst>(LirOpcode::Mov);
+    after->add_def(LirOperand::preg_gpr(GPR::R13, 8));
+    after->add_use(LirOperand::imm(3, 8));
+    bb->append_inst(std::move(after));
+
+    SchedDAG dag(*bb, Arch::x64, false);
+    dag.build();
+
+    auto has_edge = [&](uint32_t from, uint32_t to) {
+        for (const auto& s : dag.node(from).succs) {
+            if (s.target_node == to) return true;
+        }
+        return false;
+    };
+    CHECK(has_edge(0, 1));
+    CHECK(has_edge(1, 2));
+}
+
 TEST_CASE("SchedDAG - Critical Path Height and Depth") {
     LirFunction fn;
     LirBlock* bb = fn.create_block("entry");

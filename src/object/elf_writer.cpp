@@ -171,7 +171,7 @@ std::vector<uint8_t> ElfWriter::write() {
         );
         Section* eh_frame_sec = working_obj.get_section(".eh_frame");
         if (eh_frame_sec) {
-            ElfCfiBuilder::build_eh_frame(working_obj, *eh_frame_sec);
+            ElfCfiBuilder::build_eh_frame(working_obj, *eh_frame_sec, /*with_personality=*/true);
         }
     }
 

@@ -1,4 +1,5 @@
 #include <brass/gc/native_frames.hpp>
+#include <brass/gc/native_unwind.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/gc/stack_map.hpp>
 #include <brass/gc/stack_walker.hpp>
@@ -48,6 +49,13 @@ BRASS_NATIVE_FRAMES_NOINLINE bool brass_capture_caller_frame(uintptr_t& rbp, uin
     if (!win64_unwind_one(ctx) || !win64_unwind_one(ctx)) return false;
     rbp = static_cast<uintptr_t>(ctx.Rbp);
     ip = static_cast<uintptr_t>(ctx.Rip);
+#elif defined(BRASS_NATIVE_UNWIND)
+    // The same two steps by the frames' CFI: the asking function, then the
+    // frame it was called from.
+    NativeUnwindFrame f;
+    if (!brass_capture_frame(f, 1)) return false;
+    rbp = f.fp;
+    ip = f.ip;
 #elif defined(__GNUC__) || defined(__clang__)
     // Frame-pointer chain: the asking function's frame record holds its
     // caller's frame pointer and the return address into it.
@@ -117,10 +125,11 @@ void brass_append_native_frame_roots(std::vector<uintptr_t*>& roots) {
     const ModuleStackMap* installed = brass_get_active_stack_maps();
     const ModuleStackMap& maps = installed ? *installed : *registry_only;
     // Each run's walk stops where the next outer run whose walk covers the
-    // frames from there on begins: one that starts at a generated frame (on
-    // Windows x64, a return address outside every image). Unbounded, N
-    // nested runs would each walk everything below them: O(N^2) per
-    // collection. Elsewhere a run cannot be told apart, and walks unbounded.
+    // frames from there on begins: one that starts at a generated frame (a
+    // return address outside every image). Unbounded, N nested runs would
+    // each walk everything below them: O(N^2) per collection. Where the walk
+    // cannot unwind compiled frames (Windows ARM64) a run cannot be told
+    // apart, and walks unbounded.
     std::vector<const NativeFramesScope*> runs;
     for (const NativeFramesScope* s = t_native_frames; s != nullptr; s = s->prev_) {
         if (s->rbp_ != 0 && s->ip_ != 0) runs.push_back(s);
@@ -135,6 +144,8 @@ void brass_append_native_frame_roots(std::vector<uintptr_t*>& roots) {
         }, &roots, stop_at);
 #if defined(_WIN32) && defined(_M_X64)
         if (!detail::win64_ip_in_image(s->ip_)) cover = s->rbp_;
+#elif defined(BRASS_NATIVE_UNWIND)
+        if (!brass_ip_in_image(s->ip_)) cover = s->rbp_;
 #endif
     }
 }

@@ -38,14 +38,14 @@ Root:     int32 offset_from_fp, uint8 kind (0 FrameSlot, 1 CalleeSaved), uint8 r
 
 The decoder rejects any other `value` byte. Records are sorted by instruction offset and looked up by binary search.
 
-Every module brass loads registers its maps with the code registry (`code_stack_maps.hpp`). `brass_stack_walk` walks frame-pointer chains from a (frame pointer, return address) pair: for each frame whose return address a map describes, it visits `fp + offset_from_fp` for each root, then moves to the caller frame. It checks alignment, monotonic growth and the thread's stack bounds, and walks the whole chain with no frame limit.
+Every module brass loads registers its maps with the code registry (`code_stack_maps.hpp`). `brass_stack_walk` walks frame-pointer chains from a (frame pointer, return address) pair: for each frame whose return address a map describes, it visits `fp + offset_from_fp` for each root, then moves to the caller frame. Generated code always keeps the chain. Where it leads into compiled (C++) code, which need not keep one, the walk steps through the compiled frames by their unwind information until it returns to generated code: the Win64 unwind data on Windows x64, and on the other x86-64 and AArch64 hosts their DWARF CFI (`native_unwind.hpp`: the `.eh_frame` of every loaded image and of generated code, which brass registers as it loads it; libunwind on Apple platforms). On Windows ARM64 it follows the chain through compiled frames too. It checks alignment, monotonic growth and the thread's stack bounds, and walks the whole chain with no frame limit.
 
 ### 1.4. Roots of a Collection
 A collection's roots are:
 
 - the slots registered with `Heap::add_root`, and every root source (`add_root_source`): each interpreter registers one for its frames, a host runtime registers its handle tables and module/global cells;
 - the generated frames above the runtime call that started the collection (`brass_gc_alloc`, `brass_gc_safepoint`, `brass_gc_collect`, `brass_coro_create`), walked through the stack maps from the caller frame the call captured;
-- with `HeapConfig::walk_stack_on_host_collection`, a collection started from host code (`Heap::allocate` or `Heap::collect` called by C++ with no captured generated frame) walks the native stack from its own frame (`brass_append_stack_roots_from_here`), visiting every generated frame a stack map describes. On Windows x64 it steps through the C++ frames by their unwind data. Elsewhere it follows the frame-pointer chain, so every C++ frame between a generated frame and the collection must keep its frame pointer (`-fno-omit-frame-pointer`);
+- with `HeapConfig::walk_stack_on_host_collection`, a collection started from host code (`Heap::allocate` or `Heap::collect` called by C++ with no captured generated frame) walks the native stack from its own frame (`brass_append_stack_roots_from_here`), visiting every generated frame a stack map describes. It steps through the C++ frames by their unwind information as above, so C++ code may omit frame pointers (on Windows ARM64, which MSVC never does there, it follows the chain);
 - generated frames below re-entered interpreter code, recorded by `NativeFramesScope` (`native_frames.hpp`) at every native-to-interpreter transition brass makes;
 - the suspended coroutine frames the heap allocated (`Heap::coro_frames()`).
 

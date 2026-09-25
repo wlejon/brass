@@ -21,11 +21,13 @@
 //
 // Generated code that calls a C++ function which calls generated code back
 // (brass_coro_resume, or a host function registered as an external symbol)
-// needs no scope on Windows x64: the walk unwinds through compiled frames
-// with their unwind data. Elsewhere compiled code may omit frame pointers
-// and the walk cannot cross it, so such a C++ function must record its
-// generated caller with brass_capture_caller_frame and a NativeFramesScope
-// around the call back; brass does so for every such call it makes.
+// needs no scope where the walk unwinds through compiled frames by their
+// unwind information: Windows x64 (its unwind data) and the other x86-64 and
+// AArch64 hosts (DWARF CFI, native_unwind.hpp). On Windows ARM64 the walk
+// follows frame pointers and cannot cross compiled code that omits them, so
+// such a C++ function must record its generated caller with
+// brass_capture_caller_frame and a NativeFramesScope around the call back;
+// brass does so for every such call it makes.
 
 #include <cstdint>
 #include <vector>
@@ -77,10 +79,11 @@ private:
 
 // Marks, for its lifetime, a place where compiled (C++) code calls generated
 // code: brass's invoke paths hold one around the call, and a host that calls
-// a generated function pointer should too. On Windows x64, a walk that
-// leaves the outermost generated frame for compiled code unwinds through it
-// looking for generated frames further down, which on a plain host stack
-// means every frame to the thread's base. The frames beneath a live scope
+// a generated function pointer should too. A walk that leaves the outermost
+// generated frame for compiled code unwinds (or, on Windows ARM64, follows
+// frame pointers) through it looking for generated frames further down,
+// which on a plain host stack means every frame to the thread's base. The
+// frames beneath a live scope
 // cannot change while it lives, so the first walk that unwinds past it
 // records what it found beneath (the next generated frame, or none), and
 // every later walk stops there with that answer: a collection's cost stops

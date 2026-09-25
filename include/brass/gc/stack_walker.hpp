@@ -41,10 +41,11 @@ size_t brass_stack_walk_bounded(
 );
 
 // Walks this thread's stack from the caller of this function: the compiled
-// (C++) frames up to the first generated frame are passed over (on Windows
-// x64 by their unwind data, elsewhere by their frame pointers, which that
-// code must then keep), and every generated frame from there on is visited
-// as brass_stack_walk visits it.
+// (C++) frames up to the first generated frame are passed over by their
+// unwind information (Win64 unwind data, or DWARF CFI: native_unwind.hpp;
+// on Windows ARM64 by their frame pointers, which that code must then keep),
+// and every generated frame from there on is visited as brass_stack_walk
+// visits it.
 size_t brass_stack_walk_from_here(
     const ModuleStackMap& stack_maps,
     brass_root_visitor_fn visitor,

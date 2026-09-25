@@ -620,11 +620,17 @@ void SchedDAG::build_barrier_dependencies() {
         }
     }
 
-    // 2. Full barriers (Safepoints and GuardExits require exact program state; cannot reorder across them)
+    // 2. Full barriers (Safepoints and GuardExits require exact program state; cannot reorder across them).
+    // An invoke's call is one too: its landing pad is entered from the call
+    // itself, so everything before it must be done when it raises (a value the
+    // pad reads, computed after the call, would be computed only on the normal
+    // path), and nothing after it may run first (a def moved above it could
+    // overwrite a register the pad reads).
     for (uint32_t i = 0; i < n; ++i) {
         if (nodes_[i].inst->opcode == LirOpcode::Safepoint ||
             nodes_[i].inst->opcode == LirOpcode::GuardExit ||
-            nodes_[i].inst->opcode == LirOpcode::ParallelCopy) {
+            nodes_[i].inst->opcode == LirOpcode::ParallelCopy ||
+            nodes_[i].inst->is_invoke) {
             for (uint32_t k = 0; k < i; ++k) {
                 add_edge(k, i, EdgeKind::Barrier, 1);
             }

@@ -56,7 +56,6 @@ else()
             -Wpedantic
             -Wconversion
             -Wno-unused-parameter
-            -fno-omit-frame-pointer
             $<$<CONFIG:Release>:-O3>
         )
         if(WIN32 OR MINGW)
@@ -149,7 +148,6 @@ else()
         -Wextra
         -Wpedantic
         -Wno-unused-parameter
-        -fno-omit-frame-pointer
     )
 endif()
 

@@ -34,12 +34,13 @@ using namespace brass::runtime;
 
 namespace {
 
-// @t0 has a `throw`, so the baseline tier rejects it and its lazy stub binds
-// the native-to-Tier-0 bridge. Tier-2 @outer invokes @hop (pad: +1000),
-// which calls @t0 through its address.
+// @t0 uses a vector type, so the baseline tier rejects it and its lazy stub
+// binds the native-to-Tier-0 bridge. Tier-2 @outer invokes @hop (pad:
+// +1000), which calls @t0 through its address.
 const char* kBridgeSrc = R"(module @s34a
 func @t0(%x: i64) -> i64 {
 b0:
+  %vz = vzero.f64x4
   %t = iconst.i64 1500
   %bad = eq.i64 %x, %t
   br_if %bad, thr, ok
@@ -97,6 +98,7 @@ done:
 }
 func @t0g(%x: i64) -> i64 {
 b0:
+  %vz = vzero.f64x4
   %n = iconst.i64 100000
   %c = call.i64 @churn(%n)
   %t2 = iconst.i64 1500
