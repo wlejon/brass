@@ -87,8 +87,10 @@ TEST_CASE("Sweep26 - a queued tier-2 task is not published to a handle rebound b
     // The failure is not held against B's Function.
     CHECK(!hf->tier2_rejected());
 
-    // B's own compile installs B's code.
+    // B's own compiles install B's code. A tier-up compiles its function
+    // with the ones it calls, and @f calls nothing: @g is queued for itself.
     REQUIRE(bc.enqueue("f", *B, hf));
+    REQUIRE(bc.enqueue("g", *B, hg));
     bc.wait_idle();
     REQUIRE(hf->has_native_entry());
     CHECK_EQ(call0(*hf), 2000);

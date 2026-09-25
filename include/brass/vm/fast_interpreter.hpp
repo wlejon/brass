@@ -32,6 +32,20 @@ struct FastFnInfo;
 struct FastCallTarget;
 class FastAllocaArena;
 
+// One frame a FastInterpreter is running on the calling thread
+// (FastInterpreter::for_each_frame_on_thread).
+struct InterpretedFrameInfo {
+    // Where the frame's record lives: on this thread's native stack, inside
+    // the interpreter's native frame that runs it, so its address orders it
+    // among the native frames of the same stack.
+    const void* frame_address = nullptr;
+    // The MIR function it runs (null for bytecode compiled without one).
+    const Function* function = nullptr;
+    // The source position of the instruction it is at: the call it is in
+    // for every frame but one that has not reached a call.
+    DebugLoc loc;
+};
+
 using FastHostFn = std::function<RuntimeValue(FastInterpreter& interp, const std::vector<RuntimeValue>& args)>;
 using FastDeoptHandler = std::function<RuntimeValue(FastInterpreter& interp, const DeoptResult& deopt)>;
 
@@ -54,6 +68,15 @@ public:
     // Active interpreter on current thread
     static FastInterpreter* current() noexcept;
     static void set_current(FastInterpreter* interp) noexcept;
+
+    // Visits every frame the FastInterpreters on the calling thread are
+    // running, of every interpreter (nested ones, and one entered again from
+    // native code), innermost first, until `visit` returns false. For a host
+    // walking its own stack, e.g. to report a stack trace.
+    static void for_each_frame_on_thread(const std::function<bool(const InterpretedFrameInfo&)>& visit);
+    // The innermost frame on this thread (the head of the chain the visit
+    // walks); maintained by the interpreter as frames are entered and left.
+    static FastFrame*& thread_frame_top() noexcept;
 
     // Module management
     void set_module(const Module* mod);
@@ -229,6 +252,10 @@ private:
     void dispatch_call(FastCallTarget& t, FastFrame& frame, const CallSiteInfo& cs, const char* what);
     RuntimeValue call_host(const FastHostFn& fn, const FastFrame& frame, const CallSiteInfo& cs);
     RuntimeValue call_native(runtime::FunctionHandle& handle, const FastFrame& frame, const CallSiteInfo& cs);
+    // call_indirect to native code that is no program function (a host
+    // function pointer the program loaded): called with the call site's
+    // argument and result types, as native code would call it.
+    RuntimeValue call_raw_native(uintptr_t ptr, const FastFrame& frame, const CallSiteInfo& cs);
     RuntimeValue call_bytecode(FastCallTarget& t, FastFrame& caller, const CallSiteInfo& cs);
     // Runs `info`'s function from `start_pc` with args[i] in register
     // (*arg_regs)[i], or in register i when arg_regs is null.

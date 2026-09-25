@@ -6,6 +6,7 @@
 #include <brass/interpreter/value.hpp>
 #include <brass/object/object_writer.hpp>
 #include <brass/gc/stack_map.hpp>
+#include <brass/debug/debug_section.hpp>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -275,6 +276,17 @@ public:
         return reinterpret_cast<FuncPtr>(get_symbol_address(name));
     }
 
+    // A function of the loaded code: where its code is and, when the object
+    // recorded them, where each source position begins in it (ascending
+    // offsets from `code`).
+    struct LoadedFunction {
+        std::string name;
+        const void* code = nullptr;
+        size_t size = 0;
+        std::vector<DebugLineEntry> lines;
+    };
+    const std::vector<LoadedFunction>& loaded_functions() const noexcept { return loaded_functions_; }
+
     // Stack map access
     const ModuleStackMap& stack_maps() const noexcept { return stack_maps_; }
     ModuleStackMap& stack_maps() noexcept { return stack_maps_; }
@@ -364,6 +376,7 @@ private:
     runtime::PatchRegistry patch_sites_;
     std::unordered_map<std::string, size_t> osr_entry_offsets_;
     runtime::ExceptionTableRegistry exception_tables_;
+    std::vector<LoadedFunction> loaded_functions_;
     SchedOptions sched_opts_;
 
     void register_seh_tables(const object::ObjectFile& obj, uint8_t* base_ptr);

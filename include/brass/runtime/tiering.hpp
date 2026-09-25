@@ -53,6 +53,12 @@ struct TieringConfig {
     bool enable_background_compile = false;
     size_t jit_threads = 2;
     Tier0Interpreter tier0_interpreter = Tier0Interpreter::Oracle;
+    // The highest tier the pipeline compiles a program function to. At
+    // Tier0_Interpreter nothing of the program is compiled: every function
+    // stays interpreted, and native code calling one through its address
+    // reaches it through a native-to-Tier-0 bridge. At Tier1_Baseline no
+    // function is optimized.
+    TierLevel max_tier = TierLevel::Tier2_Optimized;
 
     bool use_fast_interpreter() const noexcept {
         return tier0_interpreter == Tier0Interpreter::Fast;

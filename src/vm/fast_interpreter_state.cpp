@@ -26,6 +26,22 @@ void FastInterpreter::set_current(FastInterpreter* interp) noexcept {
     s_current_fast_interp = interp;
 }
 
+static thread_local FastFrame* s_thread_frame_top = nullptr;
+
+FastFrame*& FastInterpreter::thread_frame_top() noexcept {
+    return s_thread_frame_top;
+}
+
+void FastInterpreter::for_each_frame_on_thread(const std::function<bool(const InterpretedFrameInfo&)>& visit) {
+    for (const FastFrame* f = s_thread_frame_top; f; f = f->thread_prev) {
+        InterpretedFrameInfo info;
+        info.frame_address = f;
+        info.function = f->mir_fn;
+        if (f->bfn) info.loc = f->bfn->get_line_info(f->pc);
+        if (!visit(info)) return;
+    }
+}
+
 void FastInterpreter::clear_compile_cache() noexcept {
     try {
         retire_caches();

@@ -154,11 +154,11 @@ bool BackgroundCompiler::enqueue(
     // after this point is not published to, one rebound before it is not
     // compiled for the old module.
     if (!handle) handle = installer_.dispatch_table().get_or_create(fn_name);
-    const Tier2Bindings bindings = installer_.capture_tier2_bindings(*handle, module, fn_name, &module);
+    auto mod_copy = clone_for_tier2(installer_.dispatch_table(), module, fn_name);
+    if (!mod_copy) return false;
+    const Tier2Bindings bindings = installer_.capture_tier2_bindings(*handle, *mod_copy, fn_name, &module);
     // Bound to another module's Function: this module's code is not its.
     if (bindings.target_foreign) return false;
-    auto mod_copy = clone_module(module);
-    if (!mod_copy) return false;
     return enqueue_copy(fn_name, std::move(mod_copy), handle, priority, target_tier, &bindings);
 }
 

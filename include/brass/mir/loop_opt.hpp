@@ -4,6 +4,9 @@
 #include <brass/mir/function.hpp>
 #include <brass/mir/pass_manager.hpp>
 #include <memory>
+#include <string>
+#include <string_view>
+#include <vector>
 
 #include <brass/mir/loop_unswitch.hpp>
 #include <brass/mir/jump_threading.hpp>
@@ -115,5 +118,13 @@ Function* clone_function(const Function& src, Module& dst_mod);
 
 // Helper to clone an entire module
 std::unique_ptr<Module> clone_module(const Module& src);
+
+// The module a per-function tier-up compiles: src's declarations, `fn_name`
+// with the bodies of the module functions it names directly and of those
+// listed in `also` (its speculated call targets, say) for the optimizer to
+// inline, and every other module function those bodies name as an external
+// symbol, linked by name. Null when src has no such function.
+std::unique_ptr<Module> clone_function_module(const Module& src, std::string_view fn_name,
+                                              const std::vector<std::string>& also = {});
 
 } // namespace brass

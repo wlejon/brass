@@ -62,6 +62,20 @@ struct MultiTierStats {
     }
 };
 
+// Native code the pipeline installed for one program function, as its
+// CodeInstallObserver sees it.
+struct InstalledCode {
+    std::string_view name;
+    TierLevel tier = TierLevel::Tier1_Baseline;
+    const void* code = nullptr;
+    size_t size = 0;
+    // Where each source position begins, as ascending offsets from `code`.
+    const std::vector<DebugLineEntry>* lines = nullptr;
+};
+// Called as code is installed, before any call can reach it, on whichever
+// thread installs it (the mutator, or a background compiler's worker).
+using CodeInstallObserver = std::function<void(const InstalledCode&)>;
+
 // The tiering driver of one program. instance() is the default program's;
 // an owned FunctionDispatchTable owns its own (FunctionDispatchTable::
 // pipeline()), which counts into that table's TieringRegistry, compiles
@@ -97,6 +111,11 @@ public:
     // The default program's is BackgroundCompiler::instance(); an owned
     // program's is its own, created on first use and stopped with it.
     BackgroundCompiler& background_compiler();
+    // Drops the queued background compiles and joins the workers, once the
+    // one in flight has installed its code; the next tier-up starts them
+    // again. Nothing when no background compile was ever queued. For a host
+    // about to exit, whose program may still be tiering up.
+    void stop_background_compiles();
 
     // This program's code stack maps (baseline and tier-2). While the
     // pipeline is initialized they are the GC's active maps; destroying the
@@ -143,6 +162,15 @@ public:
     // this thread when that one runs this program (a fresh one otherwise),
     // and an exception it throws unwinds through the native callers.
     uint64_t call_tier0_from_native(std::string_view name, const uint64_t* bits, size_t count);
+
+    // Tells `observer` of every function's native code this program installs
+    // from now on (Tier 1 and Tier 2, not the native-to-Tier-0 bridges): a
+    // host that maps code addresses back to its functions, e.g. for stack
+    // traces. Set before the program runs.
+    void set_code_install_observer(CodeInstallObserver observer) { code_observer_ = std::move(observer); }
+    void notify_code_installed(const InstalledCode& code) const {
+        if (code_observer_) code_observer_(code);
+    }
 
     // Testing only: called with each function's name as a Tier 1 compile of
     // it starts (on the compiling thread, while it counts as in progress).
@@ -297,6 +325,7 @@ private:
     // for the pipeline's lifetime, since lazy stubs point into them.
     std::mutex bridges_mutex_;
     std::unordered_map<std::string, std::shared_ptr<void>> tier0_bridges_;
+    CodeInstallObserver code_observer_;
     // Testing only (set_tier1_compile_hook, set_tier1_install_hook).
     std::function<void(std::string_view)> tier1_compile_hook_;
     std::function<void(std::string_view)> tier1_install_hook_;

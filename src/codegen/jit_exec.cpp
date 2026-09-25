@@ -180,6 +180,7 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
     resume_tables_.clear();
     patch_sites_.clear();
     exception_tables_.clear();
+    loaded_functions_.clear();
 
     object::ObjectFile working_obj = obj;
     // Every GOT load whose symbol turns out to be within reach of the code
@@ -358,6 +359,8 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
         }
     }
     osr_entry_offsets_.clear();
+    std::unordered_map<std::string_view, const FunctionDebugTable*> debug_table_of;
+    for (const auto& dt : working_obj.debug_tables) debug_table_of.emplace(dt.function_name(), &dt);
     for (const auto& fn : working_obj.functions) {
         int32_t text_idx = working_obj.get_section_index(".text");
         if (text_idx >= 0 && sec_bases[text_idx]) {
@@ -365,6 +368,14 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
             if (fn.osr_entry_offset > 0) {
                 osr_entry_offsets_[fn.name] = fn.osr_entry_offset;
             }
+            LoadedFunction loaded;
+            loaded.name = fn.name;
+            loaded.code = sec_bases[text_idx] + fn.text_offset;
+            loaded.size = fn.text_size;
+            if (auto it = debug_table_of.find(fn.name); it != debug_table_of.end()) {
+                loaded.lines = it->second->line_entries();
+            }
+            loaded_functions_.push_back(std::move(loaded));
         }
     }
 

@@ -92,7 +92,52 @@ void canonicalize_function_addresses(Module& mod, std::string_view fn_name, cons
     }
 }
 
+// The program functions `mod` names but does not define
+// (clone_function_module), linked against their stubs: a call reaches
+// whatever code each has, as a call from any other tier does. An external
+// symbol the program has no function for is a host symbol and is left to
+// resolve as one.
+void link_declared_functions(const Module& mod, FunctionDispatchTable& table, codegen::JitExecutionEngine& jit) {
+    for (std::string_view name : mod.external_symbols()) {
+        if (mod.get_function(name)) continue;
+        const FunctionHandle* h = table.find(name);
+        const Function* def = h ? h->mir_function() : nullptr;
+        if (!def || def->block_count() == 0) continue;
+        if (void* stub = table.pipeline().function_address(name, nullptr)) {
+            jit.register_external_symbol(name, stub);
+        }
+    }
+}
+
 } // namespace
+
+std::unique_ptr<Module> clone_for_tier2(FunctionDispatchTable& table, const Module& module, std::string_view fn_name) {
+    // In a program whose pipeline runs it, the function alone: the rest of
+    // the program links through its stubs (link_declared_functions), so a
+    // tier-up costs one function's compile, not the program's. Without one
+    // there are no stubs to link to, and the whole module is compiled.
+    if (!table.pipeline().is_initialized()) return clone_module(module);
+    // The call targets its type feedback names (at most a polymorphic
+    // site's), with bodies, for speculative inlining.
+    std::vector<std::string> targets;
+    if (const TypeFeedbackVector* tfv = table.tiering().type_feedback().find(fn_name)) {
+        for (const FeedbackSlot& slot : tfv->slots()) {
+            if (slot.kind != FeedbackSlotKind::Call || slot.is_megamorphic()) continue;
+            for (const CallFeedback& t : slot.targets) targets.push_back(t.target_name);
+        }
+    }
+    auto copy = clone_function_module(module, fn_name, targets);
+    if (!copy) return copy;
+    // Each program function it names links to its handle's stub; one that
+    // has never been called has no handle yet, and gets it here, bound to
+    // its definition, as the program's first call to it would.
+    for (std::string_view name : copy->external_symbols()) {
+        if (copy->get_function(name)) continue;
+        const Function* def = module.get_function(name);
+        if (def && def->block_count() != 0 && !table.find(name)) table.get_or_create(name, def);
+    }
+    return copy;
+}
 
 // ============================================================================
 // FunctionDispatchTable Implementation
@@ -404,12 +449,12 @@ CodeInstallResult CodeInstaller::install_tier2(
     const Module& module,
     std::string_view fn_name
 ) {
-    Tier2Bindings bindings = capture_tier2_bindings(handle, module, fn_name, &module);
-    if (bindings.target_foreign) return foreign_target(handle, fn_name, module);
-    auto mod_copy = clone_module(module);
+    auto mod_copy = clone_for_tier2(*table_, module, fn_name);
     if (!mod_copy) {
-        return {false, nullptr, "Failed to clone module for Tier-2 compilation", 0};
+        return {false, nullptr, "Function '" + std::string(fn_name) + "' not found in module", 0};
     }
+    Tier2Bindings bindings = capture_tier2_bindings(handle, *mod_copy, fn_name, &module);
+    if (bindings.target_foreign) return foreign_target(handle, fn_name, module);
     return install_tier2(handle, std::move(mod_copy), fn_name, bindings);
 }
 
@@ -521,6 +566,7 @@ CodeInstallResult CodeInstaller::install_tier2(
     // function with no native entry on demand.
     if (table_->pipeline().is_initialized()) {
         canonicalize_function_addresses(*module, fn_name, bindings, table_->pipeline(), *jit);
+        link_declared_functions(*module, *table_, *jit);
     }
 
     // Compile and link in executable memory
@@ -536,6 +582,12 @@ CodeInstallResult CodeInstaller::install_tier2(
     MultiTierPipeline& program_pipeline = table_->pipeline();
     if (program_pipeline.is_initialized()) {
         program_pipeline.add_stack_maps(jit->stack_maps());
+    }
+    // The program's host learns of the code before anything can call it.
+    for (const auto& lf : jit->loaded_functions()) {
+        const Function* f = module->get_function(lf.name);
+        if (!f || f->block_count() == 0) continue;
+        program_pipeline.notify_code_installed({lf.name, TierLevel::Tier2_Optimized, lf.code, lf.size, &lf.lines});
     }
 
     // 3. load_object has already turned the code pages read-execute (W^X)
@@ -606,7 +658,8 @@ CodeInstallResult CodeInstaller::install_tier2(
     // Also publish the module's other functions to their handles, each only
     // while it is bound to the Function recorded when the module was cloned.
     for (const Function* fn : module->functions()) {
-        if (!fn || fn->name() == fn_name) continue;
+        // A declaration has no code here (its name links to its stub).
+        if (!fn || fn->name() == fn_name || fn->block_count() == 0) continue;
         auto recorded = bindings.siblings.find(std::string(fn->name()));
         if (recorded == bindings.siblings.end()) continue;
         FunctionHandle* other_handle = table_->find(fn->name());

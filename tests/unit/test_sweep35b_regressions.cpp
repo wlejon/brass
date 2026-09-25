@@ -695,6 +695,7 @@ TEST_CASE("Sweep35b - a Tier-0 function pointer takes the tier-2 speculative fas
     REQUIRE(native != nullptr);
 
     // func_addr in tier-2 code yields the pointer Tier 0 made.
+    REQUIRE(installer.install_tier2(*get, *mod, "get_exp").success);
     REQUIRE(get->native_entry() != nullptr);
     CHECK_EQ(reinterpret_cast<uintptr_t>(get->get_function_ptr<void* (*)()>()()), exp_ptr);
 

@@ -28,6 +28,14 @@ namespace brass::runtime {
 
 class OsrCoordinator;
 
+// Calls the native code at `addr` from C++ with the platform's calling
+// convention: `args` passed as `ptypes` (null: each argument's own kind
+// decides), the result read as `ret_type`. What an interpreter uses to call
+// native code it has no function for, and FunctionHandle::call_native.
+// Throws on a host without an invoke thunk.
+RuntimeValue invoke_native_address(void* addr, Type ret_type, const std::vector<Type>* ptypes,
+                                   const std::vector<RuntimeValue>& args);
+
 class FunctionHandle {
 public:
     explicit FunctionHandle(std::string_view name, const Function* mir_fn = nullptr);
@@ -345,6 +353,12 @@ struct Tier2Bindings {
     // code, by name. A name absent here is never published.
     std::unordered_map<std::string, const Function*> siblings;
 };
+
+// The module a tier-2 compile of `fn_name` for `table`'s program works on: in
+// a program whose pipeline runs it, the function alone
+// (clone_function_module), its other functions linked through their stubs;
+// otherwise a copy of the whole module.
+std::unique_ptr<Module> clone_for_tier2(FunctionDispatchTable& table, const Module& module, std::string_view fn_name);
 
 struct CodeInstallResult {
     bool success = false;

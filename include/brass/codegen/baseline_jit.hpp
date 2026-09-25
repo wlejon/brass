@@ -7,6 +7,7 @@
 #include <brass/gc/stack_map.hpp>
 #include <brass/codegen/jit_exec.hpp>
 #include <brass/codegen/lazy_symbols.hpp>
+#include <brass/debug/debug_section.hpp>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -55,6 +56,11 @@ public:
     // stub because they did not resolve when it was compiled.
     const std::vector<std::string>& lazy_addr_symbols() const noexcept { return lazy_addr_symbols_; }
     void set_lazy_addr_symbols(std::vector<std::string> names) { lazy_addr_symbols_ = std::move(names); }
+    // Where each instruction with a source position begins in the code,
+    // ascending by offset from entry_point(): a position holds until the
+    // next entry's offset.
+    const std::vector<DebugLineEntry>& line_table() const noexcept { return line_table_; }
+    void set_line_table(std::vector<DebugLineEntry> lines) { line_table_ = std::move(lines); }
     bool is_valid() const noexcept { return entry_point_ != nullptr; }
 
     template <typename FuncPtr>
@@ -75,6 +81,7 @@ private:
     std::shared_ptr<const void> link_keepalive_;
     std::vector<std::string> lazy_call_symbols_;
     std::vector<std::string> lazy_addr_symbols_;
+    std::vector<DebugLineEntry> line_table_;
     // The code's entry in the code stack-map registry, shared by the copies
     // of this function. Last, so it goes before the code memory does.
     std::shared_ptr<const void> stack_map_registration_;

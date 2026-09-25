@@ -357,13 +357,17 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
     };
     emitter.function_address = [this, &fn](std::string_view name) { return function_address_in(fn, name); };
 
-    // 5. Code for each block
+    // 5. Code for each block, noting where each source position begins
+    std::vector<DebugLineEntry> lines;
     for (const auto* bb : fn.blocks()) {
         if (!bb) continue;
         buffer.bind(block_labels[bb->id()]);
         for (const auto* inst_ptr : *bb) {
             if (!inst_ptr) continue;
             const Instruction& inst = *inst_ptr;
+            if (inst.loc().is_valid() && (lines.empty() || lines.back().loc != inst.loc())) {
+                lines.push_back({static_cast<uint32_t>(buffer.size()), inst.loc()});
+            }
             if (emit_baseline_x64_vec_op(emitter, inst)) continue;
             if (emit_baseline_x64_op(emitter, inst)) continue;
             if (emit_baseline_x64_fp_op(emitter, inst)) continue;
@@ -404,6 +408,7 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
     if (emitter.uses_lazy_stubs) compiled.set_link_keepalive(lazy_);
     compiled.set_lazy_call_symbols(std::move(emitter.lazy_call_symbols));
     compiled.set_lazy_addr_symbols(std::move(emitter.lazy_addr_symbols));
+    compiled.set_line_table(std::move(lines));
     return compiled;
 }
 

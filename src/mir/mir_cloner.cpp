@@ -5,7 +5,9 @@
 #include <brass/mir/instruction.hpp>
 #include <brass/core/arena.hpp>
 #include <brass/core/string_pool.hpp>
+#include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace brass {
@@ -122,6 +124,65 @@ Function* clone_function(const Function& src, Module& dst_mod) {
     dst_fn->set_allow_fp_reassociation(src.allow_fp_reassociation());
     dst_fn->rebuild_cfg_predecessors();
     return dst_fn;
+}
+
+std::unique_ptr<Module> clone_function_module(const Module& src, std::string_view fn_name,
+                                              const std::vector<std::string>& also) {
+    const Function* target = src.get_function(fn_name);
+    if (!target) return nullptr;
+    auto dst = std::make_unique<Module>(src.name());
+    dst->set_allow_fp_reassociation(src.allow_fp_reassociation());
+    dst->set_pinned_tls_register(src.pinned_tls_register());
+    dst->copy_declarations_from(src);
+
+    // The target, then the functions it names directly and those of `also`,
+    // with their bodies; and, for every body copied, the exit stubs its
+    // guards name, which a guard's code is compiled together with.
+    std::vector<const Function*> bodies{target};
+    std::unordered_set<const Function*> copied{target};
+    auto copy = [&](std::string_view name) {
+        if (name.empty()) return;
+        const Function* f = src.get_function(name);
+        if (f && f->block_count() != 0 && copied.insert(f).second) bodies.push_back(f);
+    };
+    for (const BasicBlock* bb : target->blocks()) {
+        if (!bb) continue;
+        for (const Instruction* inst : *bb) {
+            if (!inst) continue;
+            copy(inst->symbol());
+            copy(inst->extra_symbol());
+        }
+    }
+    for (const std::string& name : also) copy(name);
+    for (size_t i = 1; i < bodies.size(); ++i) {
+        for (const BasicBlock* bb : bodies[i]->blocks()) {
+            if (!bb) continue;
+            for (const Instruction* inst : *bb) {
+                if (inst && inst->opcode() == Opcode::guard) copy(inst->symbol());
+            }
+        }
+    }
+    for (const Function* f : bodies) clone_function(*f, *dst);
+
+    // Every other module function those bodies name becomes an external
+    // symbol of the copy, in the order it is first named.
+    std::unordered_set<const Function*> seen(copied);
+    auto note = [&](std::string_view sym) {
+        if (sym.empty()) return;
+        const Function* f = src.get_function(sym);
+        if (f && seen.insert(f).second) dst->add_external_symbol(f->name());
+    };
+    for (const Function* f : bodies) {
+        for (const BasicBlock* bb : f->blocks()) {
+            if (!bb) continue;
+            for (const Instruction* inst : *bb) {
+                if (!inst) continue;
+                note(inst->symbol());
+                note(inst->extra_symbol());
+            }
+        }
+    }
+    return dst;
 }
 
 std::unique_ptr<Module> clone_module(const Module& src) {

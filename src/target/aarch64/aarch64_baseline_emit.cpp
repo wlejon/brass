@@ -207,6 +207,8 @@ struct Pass {
     bool uses_lazy_stubs = false;
     std::vector<std::string> lazy_call_symbols;
     std::vector<std::string> lazy_addr_symbols;
+    // Where each source position begins (BaselineCompiledFunction::line_table).
+    std::vector<DebugLineEntry> lines;
 };
 
 } // namespace
@@ -327,6 +329,9 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
             for (const auto* inst_ptr : *bb) {
                 if (!inst_ptr) continue;
                 const Instruction& inst = *inst_ptr;
+                if (inst.loc().is_valid() && (pass.lines.empty() || pass.lines.back().loc != inst.loc())) {
+                    pass.lines.push_back({static_cast<uint32_t>(buffer.size()), inst.loc()});
+                }
                 if (emit_baseline_aarch64_vec_op(em, inst)) continue;
                 if (emit_baseline_aarch64_op(em, inst)) continue;
                 if (emit_baseline_aarch64_fp_op(em, inst)) continue;
@@ -392,6 +397,7 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
     if (pass.uses_lazy_stubs) compiled.set_link_keepalive(lazy);
     compiled.set_lazy_call_symbols(std::move(pass.lazy_call_symbols));
     compiled.set_lazy_addr_symbols(std::move(pass.lazy_addr_symbols));
+    compiled.set_line_table(std::move(pass.lines));
     return compiled;
 }
 

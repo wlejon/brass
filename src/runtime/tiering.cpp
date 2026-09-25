@@ -284,7 +284,8 @@ const Module* TieringRegistry::tier2_source_module(const FunctionHandle* handle)
 
 bool TieringRegistry::tier1_retry_possible(std::string_view fn_name) const {
     MultiTierPipeline& p = pipeline();
-    return p.is_initialized() && !p.is_baseline_rejected(fn_name);
+    return p.is_initialized() && p.config().max_tier >= TierLevel::Tier1_Baseline &&
+           !p.is_baseline_rejected(fn_name);
 }
 
 bool TieringRegistry::enqueue_compilation(

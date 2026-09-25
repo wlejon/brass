@@ -15,6 +15,12 @@
 #include <unordered_set>
 #include <vector>
 
+// The hosts with an ABI-exact invoke thunk (jit_exec.hpp).
+#if ((defined(__x86_64__) || defined(_M_X64)) && (defined(_WIN32) || defined(__GNUC__) || defined(__clang__))) || \
+    defined(__aarch64__) || defined(_M_ARM64)
+#define BRASS_NATIVE_INVOKE_THUNKS 1
+#endif
+
 namespace brass::runtime {
 
 // ============================================================================
@@ -191,6 +197,38 @@ void FunctionHandle::forget_deopt_functions(const std::unordered_set<const Funct
     }
 }
 
+RuntimeValue invoke_native_address(void* addr, Type ret_type, const std::vector<Type>* ptypes,
+                                   const std::vector<RuntimeValue>& args) {
+    // Every call enters generated code from C++: a native throw's pad search
+    // stops here, and stack walks need not unwind the host's stack.
+    GeneratedCodeEntryScope entry;
+#if defined(BRASS_NATIVE_INVOKE_THUNKS) && defined(_WIN32) && !(defined(__aarch64__) || defined(_M_ARM64))
+    codegen::X64Win64InvokeArgs invoke_args;
+    std::vector<uint64_t> stack_words;
+    codegen::partition_x64_win64_invoke_args(args, ptypes, addr, invoke_args, stack_words);
+    codegen::X64Win64InvokeResult result;
+    codegen::x64_win64_invoke_thunk(&invoke_args, &result);
+    return codegen::native_return_value(ret_type, result.rax, result.xmm0);
+#elif defined(BRASS_NATIVE_INVOKE_THUNKS) && (defined(__x86_64__) || defined(_M_X64))
+    codegen::X64SysVInvokeArgs invoke_args;
+    std::vector<uint64_t> stack_words;
+    codegen::partition_x64_sysv_invoke_args(args, ptypes, addr, invoke_args, stack_words);
+    codegen::X64SysVInvokeResult result;
+    codegen::x64_sysv_invoke_thunk(&invoke_args, &result);
+    return codegen::native_return_value(ret_type, result.rax, result.xmm0);
+#elif defined(BRASS_NATIVE_INVOKE_THUNKS)
+    codegen::AArch64InvokeArgs invoke_args;
+    std::vector<uint64_t> stack_words;
+    codegen::partition_aarch64_invoke_args(args, ptypes, addr, invoke_args, stack_words);
+    codegen::AArch64InvokeResult result;
+    codegen::aarch64_invoke_thunk(&invoke_args, &result);
+    return codegen::aarch64_invoke_result_value(ret_type, result);
+#else
+    (void)addr; (void)ret_type; (void)ptypes; (void)args;
+    throw std::runtime_error("invoke_native_address: this host has no native invoke thunk");
+#endif
+}
+
 RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) const {
     // The entry, its owner and its signature are read together: a rebind
     // (which unpublishes the entry and replaces the signature under the
@@ -215,43 +253,13 @@ RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) 
     const Type ret_type = sig->ret;
     [[maybe_unused]] const std::vector<Type>* ptypes = sig->params.empty() ? nullptr : &sig->params;
 
-    // Every path below enters generated code from C++ (the thunks on each
-    // host, Windows ARM64 included, and the cast-based fallback): a native
+#if defined(BRASS_NATIVE_INVOKE_THUNKS)
+    return invoke_native_address(addr, ret_type, ptypes, args);
+#else
+    // The cast-based fallback enters generated code from C++: a native
     // throw's pad search stops here, and stack walks need not unwind the
     // host's stack.
     GeneratedCodeEntryScope entry;
-
-    // Each supported host calls through an ABI-exact thunk; the baseline and
-    // cast-based fallbacks below are compiled only for any other host.
-#if (defined(__x86_64__) || defined(_M_X64)) && (defined(_WIN32) || defined(__GNUC__) || defined(__clang__))
-#if defined(_WIN32)
-    codegen::X64Win64InvokeArgs invoke_args;
-    std::vector<uint64_t> stack_words;
-    codegen::partition_x64_win64_invoke_args(args, ptypes, addr, invoke_args, stack_words);
-
-    codegen::X64Win64InvokeResult result;
-    codegen::x64_win64_invoke_thunk(&invoke_args, &result);
-
-    return codegen::native_return_value(ret_type, result.rax, result.xmm0);
-#elif defined(__GNUC__) || defined(__clang__)
-    codegen::X64SysVInvokeArgs invoke_args;
-    std::vector<uint64_t> stack_words;
-    codegen::partition_x64_sysv_invoke_args(args, ptypes, addr, invoke_args, stack_words);
-
-    codegen::X64SysVInvokeResult result;
-    codegen::x64_sysv_invoke_thunk(&invoke_args, &result);
-
-    return codegen::native_return_value(ret_type, result.rax, result.xmm0);
-#endif
-#elif defined(__aarch64__) || defined(_M_ARM64)
-    codegen::AArch64InvokeArgs invoke_args;
-    std::vector<uint64_t> stack_words;
-    codegen::partition_aarch64_invoke_args(args, ptypes, addr, invoke_args, stack_words);
-
-    codegen::AArch64InvokeResult result;
-    codegen::aarch64_invoke_thunk(&invoke_args, &result);
-    return codegen::aarch64_invoke_result_value(ret_type, result);
-#else
     auto baseline = baseline_function();
     if (baseline) {
         return baseline->invoke(args);

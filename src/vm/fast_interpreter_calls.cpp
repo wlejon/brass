@@ -302,8 +302,9 @@ void FastInterpreter::resolve_indirect_target(FastCallTarget& t, uintptr_t ptr) 
         r.host = &hit->second;
     } else {
         r.name = std::to_string(ptr);
+        r.raw_native = ptr != 0;
     }
-    r.epoch = (r.callee || r.host) ? resolve_epoch_ : 0;
+    r.epoch = (r.callee || r.host || r.raw_native) ? resolve_epoch_ : 0;
     r.registry_gen = gen;
     t = std::move(r);
 }
@@ -348,6 +349,8 @@ void FastInterpreter::dispatch_call(FastCallTarget& t, FastFrame& frame, const C
         result = call_native(*t.handle, frame, cs);
     } else if (t.host) {
         result = call_host(*t.host, frame, cs);
+    } else if (t.raw_native) {
+        result = call_raw_native(t.indirect_ptr, frame, cs);
     } else {
         throw InterpreterException(what + t.name);
     }
@@ -366,6 +369,20 @@ RuntimeValue FastInterpreter::call_native(runtime::FunctionHandle& handle, const
     std::vector<RuntimeValue>& args = *scope.buf;
     for (BcReg r : cs.arg_regs) args.push_back(fast_reg_value(frame, r));
     return handle.call_native(args);
+}
+
+RuntimeValue FastInterpreter::call_raw_native(uintptr_t ptr, const FastFrame& frame, const CallSiteInfo& cs) {
+    ArgBufferScope scope(*this);
+    std::vector<RuntimeValue>& args = *scope.buf;
+    std::vector<Type> types;
+    types.reserve(cs.arg_regs.size());
+    for (BcReg r : cs.arg_regs) {
+        args.push_back(fast_reg_value(frame, r));
+        types.push_back(frame.bfn->register_types[r]);
+    }
+    const Type ret = cs.dst_reg != kNoReg ? frame.bfn->register_types[cs.dst_reg] : Type::void_type();
+    return runtime::invoke_native_address(reinterpret_cast<void*>(ptr), ret, types.empty() ? nullptr : &types,
+                                          args);
 }
 
 RuntimeValue FastInterpreter::call_bytecode(FastCallTarget& t, FastFrame& caller, const CallSiteInfo& cs) {

@@ -73,6 +73,7 @@ struct FastCallTarget {
     runtime::FunctionHandle* handle = nullptr;
     const FastHostFn* host = nullptr;
     uintptr_t indirect_ptr = 0;              // call_indirect: the pointer resolved
+    bool raw_native = false;                 // indirect_ptr is native code of no program function
     std::string name;
 };
 
@@ -155,8 +156,13 @@ struct FastFrame {
     FastFnInfo* info = nullptr;
     uint64_t* registers = nullptr;
     uint32_t num_registers = 0;
+    // The entry pc until the frame runs; while it runs, the pc of the call
+    // it is in (stored by every call, so a stack walk sees where it is).
     uint32_t pc = 0;
     FastFrame* caller = nullptr;
+    // The frame that was innermost on this thread, of any interpreter, when
+    // this one was entered (FastInterpreter::for_each_frame_on_thread).
+    FastFrame* thread_prev = nullptr;
 
     // Vector state, kFastVecBytes per register, allocated on first use.
     uint8_t* vector_regs = nullptr;
@@ -185,11 +191,15 @@ struct FrameGuard {
         FastInterpreter::set_current(&in);
         frame.caller = interp.current_frame();
         interp.set_current_frame(&frame);
+        FastFrame*& top = FastInterpreter::thread_frame_top();
+        frame.thread_prev = top;
+        top = &frame;
         interp.inc_call_depth();
     }
     FrameGuard(FastInterpreter& in, FastFrame& f) : FrameGuard(in, f, in.alloca_arena_->mark()) {}
     ~FrameGuard() {
         interp.alloca_arena_->release(alloca_mark);
+        FastInterpreter::thread_frame_top() = frame.thread_prev;
         FastInterpreter::set_current(prev_interp);
         interp.set_current_frame(frame.caller);
         interp.dec_call_depth();

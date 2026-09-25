@@ -403,12 +403,16 @@ loop_start:
             JUMP_BY(target_pc - static_cast<int32_t>(pc - code_base));
         }
 
+        // Every call records where the frame is (FastFrame::pc): what a
+        // stack walk run by the callee reports for this frame.
         OP_CASE(call)
         OP_CASE(patchable_call) {
+            frame.pc = static_cast<uint32_t>(pc - code_base);
             execute_call(frame, decode_uimm32(inst));
             NEXT();
         }
         OP_CASE(call_indirect) {
+            frame.pc = static_cast<uint32_t>(pc - code_base);
             execute_call_indirect(frame, decode_uimm32(inst));
             NEXT();
         }
@@ -499,6 +503,7 @@ loop_start:
             DISPATCH();
         }
         OP_CASE(invoke) {
+            frame.pc = static_cast<uint32_t>(pc - code_base);
             handle_invoke(frame, decode_uimm32(inst), pc, code_base);
             DISPATCH();
         }

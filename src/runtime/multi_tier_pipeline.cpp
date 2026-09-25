@@ -116,6 +116,19 @@ BackgroundCompiler& MultiTierPipeline::background_compiler() {
     return *bg_;
 }
 
+void MultiTierPipeline::stop_background_compiles() {
+    BackgroundCompiler* bg = nullptr;
+    if (is_default_) {
+        bg = &BackgroundCompiler::instance();
+    } else {
+        std::lock_guard<std::mutex> lock(bg_mutex_);
+        bg = bg_.get();
+    }
+    if (!bg) return;
+    bg->cancel_pending();
+    bg->stop();
+}
+
 void MultiTierPipeline::release_program() {
     if (is_default_) {
         throw std::logic_error("MultiTierPipeline::release_program: the default program is never released");
@@ -274,6 +287,7 @@ bool MultiTierPipeline::is_baseline_rejected(std::string_view fn_name) const {
 }
 
 bool MultiTierPipeline::compile_and_install_tier1(std::string_view fn_name, const Function* fn) {
+    if (config_.max_tier < TierLevel::Tier1_Baseline) return false;
     // A callee that has never run has no native entry, and the lazy stub
     // code calls it through would trap: every module function the code
     // reaches through a stub (a call, or a func_addr) is compiled first,
@@ -450,6 +464,8 @@ std::optional<detail::Tier1Link> MultiTierPipeline::open_tier1_node(std::string_
 void* MultiTierPipeline::compile_tier1_on_demand(std::string_view name) {
     FunctionHandle* handle = table_->find(name);
     if (!handle) return nullptr;
+    // Nothing of the program is compiled: the call runs it in Tier 0.
+    if (config_.max_tier < TierLevel::Tier1_Baseline) return tier0_bridge(name);
     for (;;) {
         if (void* entry = handle->native_entry()) return entry;
         if (compile_and_install_tier1(name)) continue;
@@ -468,6 +484,10 @@ void MultiTierPipeline::install_tier1_group(const std::vector<detail::Tier1Node*
     // becomes reachable through its handle, so no call can reach a stub of
     // a member not yet installed.
     for (const Tier1Node* d : group) register_baseline_compiled(d->code);
+    for (const Tier1Node* d : group) {
+        notify_code_installed({d->name, TierLevel::Tier1_Baseline, d->code->entry_point(), d->code->code_size(),
+                               &d->code->line_table()});
+    }
     for (const Tier1Node* d : group) baseline_compiler_.lazy_symbols()->define(d->name, d->code->entry_point());
     if (tier1_install_hook_) {
         for (const Tier1Node* d : group) tier1_install_hook_(d->name);
@@ -507,6 +527,7 @@ bool MultiTierPipeline::enqueue_tier2(
     const Module* mod,
     FunctionHandle* handle
 ) {
+    if (config_.max_tier < TierLevel::Tier2_Optimized) return false;
     if (!handle) {
         handle = table_->get_or_create(fn_name);
     }
@@ -529,6 +550,7 @@ bool MultiTierPipeline::enqueue_tier2(
 }
 
 bool MultiTierPipeline::compile_tier2_now(std::string_view fn_name, FunctionHandle* handle) {
+    if (config_.max_tier < TierLevel::Tier2_Optimized) return false;
     if (!handle) handle = table_->find(fn_name);
     if (!handle || !BackgroundCompiler::tier2_candidate(*handle)) return false;
     const Module* mod = tiering().tier2_source_module(handle);
@@ -584,7 +606,8 @@ void MultiTierPipeline::tier_invocation(TieringFeedback& fb, std::string_view fn
         }
     } else if (tier == TierLevel::Tier1_Baseline) {
         stats_.tier1_invocations.fetch_add(1, std::memory_order_relaxed);
-        if (count >= config_.invocation_tier2_threshold && !fb.is_bailout_set()) {
+        if (count >= config_.invocation_tier2_threshold && !fb.is_bailout_set() &&
+            config_.max_tier >= TierLevel::Tier2_Optimized) {
             if (config_.enable_background_compile || tiering().is_background_compile_enabled()) {
                 enqueue_tier2(fn_name, nullptr, handle);
             } else {
@@ -607,10 +630,6 @@ RuntimeValue MultiTierPipeline::execute(
         if (fn) {
             table_->get_or_create(fn->name(), fn);
         }
-    }
-
-    if (config_.enable_background_compile) {
-        background_compiler().start(config_.jit_threads);
     }
 
     auto* fn = mod.get_function(entry_fn);
@@ -649,11 +668,10 @@ RuntimeValue MultiTierPipeline::execute(
         install_host_symbols(interp);
         result = handle->call(interp, args);
     }
-
-    if (config_.enable_background_compile) {
-        background_compiler().wait_idle();
-    }
-
+    // Background compiles still running finish on their own and install
+    // their code as they do (the background compiler starts its workers on
+    // the first one queued): the program's later calls, a host's callbacks
+    // into it, pick the code up.
     return result;
 }
 

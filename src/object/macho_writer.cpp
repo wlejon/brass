@@ -266,9 +266,21 @@ constexpr uint32_t kBuiltIosSdk = 0;
 #endif
 
 uint32_t env_version(const char* name) {
+#if defined(_MSC_VER)
+    // MSVC deprecates getenv (C4996, an error under /WX); _dupenv_s is its
+    // owned-copy equivalent.
+    char* owned = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&owned, &len, name) != 0 || !owned) return 0;
+    const std::string v(owned);
+    std::free(owned);
+    if (v.empty()) return 0;
+    return MachOBuildVersion::parse_version(v).value_or(0);
+#else
     const char* v = std::getenv(name);
     if (!v || !*v) return 0;
     return MachOBuildVersion::parse_version(v).value_or(0);
+#endif
 }
 
 } // namespace
