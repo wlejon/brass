@@ -4,6 +4,7 @@
 #include <cstring>
 #include <iostream>
 #include <mutex>
+#include <optional>
 
 #if defined(_MSC_VER)
 #include <intrin.h>
@@ -95,8 +96,9 @@ public:
     ScopedCodeWrite(void* addr, size_t size) {
         if (!addr || size == 0) return;
 #if defined(__APPLE__) && defined(__aarch64__)
-        pthread_jit_write_protect_np(0);
-        active_ = true;
+        // A nested window: a patch made while this thread is loading code
+        // leaves the load's window open when it closes its own.
+        jit_write_.emplace();
         writable_ = true;
         return;
 #endif
@@ -129,11 +131,7 @@ public:
     }
 
     ~ScopedCodeWrite() {
-#if defined(__APPLE__) && defined(__aarch64__)
-        if (active_) {
-            pthread_jit_write_protect_np(1);
-        }
-#else
+#if !(defined(__APPLE__) && defined(__aarch64__))
         if (!active_) return;
 #if defined(_WIN32)
         DWORD dummy = 0;
@@ -149,6 +147,9 @@ public:
 private:
     bool active_ = false;
     bool writable_ = false;
+#if defined(__APPLE__) && defined(__aarch64__)
+    std::optional<brass::codegen::JitWriteScope> jit_write_;
+#endif
 #if defined(_WIN32)
     void* addr_ = nullptr;
     size_t size_ = 0;

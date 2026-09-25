@@ -1,4 +1,5 @@
 #include "test_framework.hpp"
+#include <brass/brass.hpp>
 #include <brass/codegen/emit_context.hpp>
 #include <brass/codegen/jit_exec.hpp>
 #include <brass/codegen/lir.hpp>
@@ -185,4 +186,57 @@ TEST_CASE("W^X - sealed JIT code is read-execute, never writable and executable"
 #endif
     code[0] = 0xCC;  // writable again
     CHECK_EQ(code[0], uint8_t(0xCC));
+}
+
+TEST_CASE("W^X - a block freed while writable leaves no write window open") {
+    const int depth = jit_write_depth();
+    {
+        JitMemoryBlock block(jit_system_page_size());
+        REQUIRE(block.is_valid());
+        block.data()[0] = 0xC3;
+    }
+    CHECK_EQ(jit_write_depth(), depth);
+    {
+        JitMemoryBlock block(jit_system_page_size());
+        REQUIRE(block.is_valid());
+        REQUIRE(block.make_executable_read_only());
+        REQUIRE(block.make_read_write());
+    }
+    CHECK_EQ(jit_write_depth(), depth);
+}
+
+namespace {
+
+// func @name() -> i64, returning `value`, or the result of calling `callee`.
+void add_i64_function(Module& mod, const char* name, int64_t value, const char* callee = nullptr) {
+    Builder b(mod);
+    Function* fn = mod.create_function(name, Type::i64(), {});
+    b.set_function(fn);
+    b.position_at_end(b.append_block("entry"));
+    b.build_ret(callee ? b.build_call(callee, Type::i64()) : b.build_iconst_i64(value));
+    fn->rebuild_cfg_predecessors();
+}
+
+} // namespace
+
+// Apple Silicon: a load opens the thread's MAP_JIT write window. A load that
+// gave up after allocating (here an unresolved symbol) once left it open, so
+// the thread's next call into code loaded earlier faulted (SIGBUS, with pc ==
+// the fault address).
+TEST_CASE("W^X - a failed JIT load leaves the thread able to run JIT code") {
+    const int depth = jit_write_depth();
+    Module good("wx_good");
+    add_i64_function(good, "wx_answer", 42);
+    JitExecutionEngine jit;
+    REQUIRE(jit.compile_and_load(good));
+    auto fn = jit.get_function_ptr<int64_t (*)()>("wx_answer");
+    REQUIRE(fn != nullptr);
+    CHECK_EQ(fn(), int64_t(42));
+
+    Module bad("wx_bad");
+    add_i64_function(bad, "wx_caller", 0, "wx_symbol_nobody_defines");
+    JitExecutionEngine failed;
+    CHECK_FALSE(failed.compile_and_load(bad));
+    CHECK_EQ(jit_write_depth(), depth);
+    CHECK_EQ(fn(), int64_t(42));
 }

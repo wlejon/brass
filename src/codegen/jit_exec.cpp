@@ -302,6 +302,13 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
     } else {
         code_mem_.reset();
     }
+    // Every way out of the load closes the code's write window: a load that
+    // gives up (an unresolved symbol, a relocation out of range) must not
+    // leave this thread unable to run JIT code (Apple Silicon's MAP_JIT).
+    struct EndWriteOnExit {
+        JitMemoryBlock& block;
+        ~EndWriteOnExit() { block.end_write(); }
+    } end_write_on_exit{code_mem_};
 
     if (data_pages_size > 0 && code_mem_.is_valid() &&
         code_mem_.size() >= code_pages_size + data_pages_size) {

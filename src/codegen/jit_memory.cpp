@@ -61,7 +61,32 @@ void unregister_jit_memory_range(void* ptr) {
                        [p](const auto& range) { return range.first == p; }),
         ranges.end());
 }
+
+#if defined(__APPLE__) && defined(__aarch64__)
+#define BRASS_JIT_PER_THREAD_WX 1
+#endif
+
+// The calling thread's open write windows (JitWriteScope).
+thread_local int t_jit_write_depth = 0;
+
+void open_write_window() noexcept {
+#if defined(BRASS_JIT_PER_THREAD_WX)
+    if (t_jit_write_depth++ == 0) pthread_jit_write_protect_np(0);
+#endif
+}
+
+void close_write_window() noexcept {
+#if defined(BRASS_JIT_PER_THREAD_WX)
+    if (t_jit_write_depth > 0 && --t_jit_write_depth == 0) pthread_jit_write_protect_np(1);
+#endif
+}
 } // namespace
+
+JitWriteScope::JitWriteScope() noexcept { open_write_window(); }
+
+JitWriteScope::~JitWriteScope() { close_write_window(); }
+
+int jit_write_depth() noexcept { return t_jit_write_depth; }
 
 size_t jit_system_page_size() noexcept {
 #if defined(_WIN32)
@@ -95,7 +120,7 @@ JitMemoryBlock::JitMemoryBlock(size_t size) {
     if (ptr_ == MAP_FAILED) {
         ptr_ = nullptr;
     } else {
-        pthread_jit_write_protect_np(0);
+        begin_write();
     }
 #else
     ptr_ = static_cast<uint8_t*>(mmap(nullptr, page_aligned, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
@@ -124,10 +149,12 @@ JitMemoryBlock::~JitMemoryBlock() {
 }
 
 JitMemoryBlock::JitMemoryBlock(JitMemoryBlock&& other) noexcept
-    : ptr_(other.ptr_), size_(other.size_), unwind_table_(other.unwind_table_) {
+    : ptr_(other.ptr_), size_(other.size_), unwind_table_(other.unwind_table_),
+      write_owner_(other.write_owner_) {
     other.ptr_ = nullptr;
     other.size_ = 0;
     other.unwind_table_ = nullptr;
+    other.write_owner_ = nullptr;
 }
 
 JitMemoryBlock& JitMemoryBlock::operator=(JitMemoryBlock&& other) noexcept {
@@ -136,9 +163,11 @@ JitMemoryBlock& JitMemoryBlock::operator=(JitMemoryBlock&& other) noexcept {
         ptr_ = other.ptr_;
         size_ = other.size_;
         unwind_table_ = other.unwind_table_;
+        write_owner_ = other.write_owner_;
         other.ptr_ = nullptr;
         other.size_ = 0;
         other.unwind_table_ = nullptr;
+        other.write_owner_ = nullptr;
     }
     return *this;
 }
@@ -182,8 +211,25 @@ void JitMemoryBlock::unregister_unwind_info() noexcept {
     unwind_table_ = nullptr;
 }
 
+void JitMemoryBlock::begin_write() noexcept {
+#if defined(BRASS_JIT_PER_THREAD_WX)
+    if (write_owner_) return;
+    open_write_window();
+    write_owner_ = &t_jit_write_depth;
+#endif
+}
+
+void JitMemoryBlock::end_write() noexcept {
+    if (!write_owner_) return;
+    // A block moved to another thread cannot close its opener's window from
+    // here (the switch is per thread); the opener's own scope must.
+    if (write_owner_ == &t_jit_write_depth) close_write_window();
+    write_owner_ = nullptr;
+}
+
 void JitMemoryBlock::reset() {
     unregister_unwind_info();
+    end_write();
     if (ptr_) {
         unregister_jit_memory_range(ptr_);
 #if defined(_WIN32)
@@ -198,9 +244,9 @@ void JitMemoryBlock::reset() {
 
 bool JitMemoryBlock::make_executable_read_only(size_t code_size) {
     if (!ptr_) return false;
-#if defined(__APPLE__) && defined(__aarch64__)
+#if defined(BRASS_JIT_PER_THREAD_WX)
     (void)code_size;
-    pthread_jit_write_protect_np(1);
+    end_write();
     sys_dcache_flush(ptr_, size_);
     sys_icache_invalidate(ptr_, size_);
     register_jit_memory_range(ptr_, size_);
@@ -228,8 +274,8 @@ bool JitMemoryBlock::make_read_write() {
 #if defined(_WIN32)
     DWORD old_protect;
     return VirtualProtect(ptr_, size_, PAGE_READWRITE, &old_protect) != 0;
-#elif defined(__APPLE__) && defined(__aarch64__)
-    pthread_jit_write_protect_np(0);
+#elif defined(BRASS_JIT_PER_THREAD_WX)
+    begin_write();
     return true;
 #else
     return mprotect(ptr_, size_, PROT_READ | PROT_WRITE) == 0;

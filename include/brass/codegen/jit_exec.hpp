@@ -21,6 +21,24 @@ class MultiTierPipeline;
 
 namespace brass::codegen {
 
+// Apple Silicon: a MAP_JIT page is either writable or executable, switched
+// for the calling thread alone by pthread_jit_write_protect_np. A thread
+// with a write window open must not run any JIT code (it faults with pc ==
+// the fault address), so every window closes on every exit path. Windows
+// nest: a per-thread depth counts the open ones, the first opens writing and
+// the last one to close returns the thread to executing. Everywhere else
+// these are no-ops (W^X there is per page, by mprotect / VirtualProtect).
+class JitWriteScope {
+public:
+    JitWriteScope() noexcept;
+    ~JitWriteScope();
+    JitWriteScope(const JitWriteScope&) = delete;
+    JitWriteScope& operator=(const JitWriteScope&) = delete;
+};
+
+// The open write windows of the calling thread (always 0 off Apple Silicon).
+int jit_write_depth() noexcept;
+
 class JitMemoryBlock {
 public:
     JitMemoryBlock() = default;
@@ -52,6 +70,11 @@ public:
     [[nodiscard]] bool make_executable_read_only(size_t code_size = 0);
     // Back to read-write (not executable) for rewriting the whole block.
     [[nodiscard]] bool make_read_write();
+    // Closes the write window a fresh or make_read_write block holds open on
+    // the thread that opened it (Apple Silicon; a no-op elsewhere), without
+    // sealing the code: for a load that gives up half-way. Sealing, reset()
+    // and destruction close it too.
+    void end_write() noexcept;
     void reset();
 
     // Describes code in this block to the process's unwinder, so a C++
@@ -64,10 +87,14 @@ public:
 
 private:
     void unregister_unwind_info() noexcept;
+    void begin_write() noexcept;
 
     uint8_t* ptr_ = nullptr;
     size_t size_ = 0;
     void* unwind_table_ = nullptr; // what register_unwind_info registered
+    // The thread whose write window this block holds open (its depth
+    // counter), or null. Only that thread can close it.
+    int* write_owner_ = nullptr;
 };
 
 class DataMemoryBlock {
