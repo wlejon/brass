@@ -17,6 +17,7 @@
 #include <brass/mir/module.hpp>
 #include <brass/mir/parser.hpp>
 #include <brass/mir/verifier.hpp>
+#include <brass/runtime/compile_pool.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
 #include <brass/runtime/tiering.hpp>
@@ -185,7 +186,16 @@ int64_t run_case(Module& mod, const char* fname, std::vector<RuntimeValue> args,
         fi.register_function_pointer(reinterpret_cast<uintptr_t>(&s30_hostfn),
             std::function<RuntimeValue(const std::vector<RuntimeValue>&)>(
                 [](const std::vector<RuntimeValue>& a) { return RuntimeValue::from_i64(s30_hostfn(a[0].as_i64())); }));
-        got = fi.run(*mod.get_function(fname), args).as_i64();
+        if (osr) {
+            // The program's OSR code compiles in the background: a first
+            // run asks for it, the second enters it.
+            const int64_t first = fi.run(*mod.get_function(fname), args).as_i64();
+            CompilePool::shared().wait_owner(&prog.osr());
+            got = fi.run(*mod.get_function(fname), args).as_i64();
+            CHECK_EQ(first, got);
+        } else {
+            got = fi.run(*mod.get_function(fname), args).as_i64();
+        }
     } else {
         Interpreter in;
         in.set_dispatch_table(&prog);

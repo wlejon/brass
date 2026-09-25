@@ -32,7 +32,7 @@ std::ostream& operator<<(std::ostream& os, CompileStatus status) {
 }
 
 BackgroundCompiler& BackgroundCompiler::instance() {
-    static BackgroundCompiler s_instance(2);
+    static BackgroundCompiler s_instance(BackgroundCompilerConfig{0, Target::host(), nullptr, &CompilePool::shared()});
     return s_instance;
 }
 
@@ -41,85 +41,47 @@ BackgroundCompiler::BackgroundCompiler(size_t num_threads)
 
 BackgroundCompiler::BackgroundCompiler(const BackgroundCompilerConfig& config)
     : config_(config),
-      installer_(config.table ? *config.table : FunctionDispatchTable::instance(), config.target) {
-    if (config_.num_threads > 0) {
-        start(config_.num_threads);
-    }
-}
+      installer_(config.table ? *config.table : FunctionDispatchTable::instance(), config.target),
+      own_pool_(config.pool ? nullptr : std::make_unique<CompilePool>(config.num_threads)),
+      pool_(config.pool ? config.pool : own_pool_.get()) {}
 
 BackgroundCompiler::~BackgroundCompiler() {
     stop();
 }
 
 void BackgroundCompiler::start(size_t num_threads) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    if (running_) {
-        if (workers_.size() == num_threads) {
-            return;
-        }
-        lock.unlock();
-        stop();
-        lock.lock();
-    }
-
-    stopping_ = false;
-    running_ = true;
-    workers_.reserve(num_threads);
-    for (size_t i = 0; i < num_threads; ++i) {
-        workers_.emplace_back(&BackgroundCompiler::worker_loop, this, i);
-    }
+    if (own_pool_) own_pool_->start(num_threads);
 }
 
 void BackgroundCompiler::stop() {
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!running_) return;
-        stopping_ = true;
-    }
-    cv_work_.notify_all();
-
-    for (auto& t : workers_) {
-        if (t.joinable()) {
-            t.join();
-        }
-    }
-
-    std::lock_guard<std::mutex> lock(mutex_);
-    workers_.clear();
-    running_ = false;
-    stopping_ = false;
-    queue_ = std::priority_queue<CompileTask>();
-    active_names_.clear();
-    statuses_.clear();
-    busy_workers_ = 0;
+    cancel_pending();
+    pool_->wait_owner(this);
+    if (own_pool_) own_pool_->shutdown();
 }
 
 size_t BackgroundCompiler::cancel_pending() {
     size_t dropped = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        while (!queue_.empty()) {
-            const std::string& name = queue_.top().function_name;
+        dropped = pool_->cancel(this);
+        // A worker may already hold one of these: it finds its name gone
+        // and drops it (run_task).
+        for (const std::string& name : queued_names_) {
             active_names_.erase(name);
             statuses_.erase(name);
-            queue_.pop();
-            ++dropped;
         }
+        queued_names_.clear();
     }
     cv_fn_done_.notify_all();
-    cv_idle_.notify_all();
     return dropped;
 }
 
 bool BackgroundCompiler::is_running() const noexcept {
-    return running_.load(std::memory_order_relaxed);
+    return own_pool_ ? own_pool_->is_running() : true;
 }
 
 void BackgroundCompiler::wait_idle() {
-    std::unique_lock<std::mutex> lock(mutex_);
-    cv_idle_.wait(lock, [this]() {
-        return queue_.empty() && busy_workers_ == 0;
-    });
+    pool_->wait_owner(this);
 }
 
 bool BackgroundCompiler::wait_for_function(std::string_view fn_name, std::chrono::milliseconds timeout) {
@@ -189,19 +151,11 @@ bool BackgroundCompiler::enqueue_copy(std::string_view fn_name, std::unique_ptr<
     std::string key(fn_name);
 
     std::lock_guard<std::mutex> lock(mutex_);
-    if (stopping_) return false;
 
-    // 1. Ensure worker threads are started
-    if (!running_ && config_.num_threads > 0) {
-        stopping_ = false;
-        running_ = true;
-        workers_.reserve(config_.num_threads);
-        for (size_t i = 0; i < config_.num_threads; ++i) {
-            workers_.emplace_back(&BackgroundCompiler::worker_loop, this, i);
-        }
-    }
+    // A private pool stopped since its last task starts again.
+    if (own_pool_ && !own_pool_->is_running() && config_.num_threads > 0) own_pool_->start(config_.num_threads);
 
-    // 2. Request deduplication: if function is already queued or compiling, reject duplicate
+    // Request deduplication: if function is already queued or compiling, reject duplicate
     if (active_names_.contains(key)) {
         stats_.tasks_deduplicated++;
         return false;
@@ -216,24 +170,25 @@ bool BackgroundCompiler::enqueue_copy(std::string_view fn_name, std::unique_ptr<
         bindings ? *bindings : installer_.capture_tier2_bindings(*handle, *module_copy, key, nullptr);
     if (captured.target_foreign) return false;
 
+    auto task = std::make_shared<CompileTask>();
+    task->id = next_task_id_++;
+    task->function_name = key;
+    task->module_copy = std::move(module_copy);
+    task->target_tier = target_tier;
+    task->priority = priority;
+    task->status = CompileStatus::Pending;
+    task->handle = handle;
+    task->bindings = std::move(captured);
+    task->enqueue_time = std::chrono::high_resolution_clock::now();
+
+    // The pool calls back under its own lock only to queue; this lock is
+    // never taken by the pool, so holding it here is safe.
+    if (!pool_->submit(this, static_cast<uint8_t>(priority), [this, task] { run_task(*task); })) return false;
+
     active_names_.insert(key);
+    queued_names_.insert(key);
     statuses_[key] = CompileStatus::Pending;
-
-    CompileTask task;
-    task.id = next_task_id_++;
-    task.function_name = key;
-    task.module_copy = std::move(module_copy);
-    task.target_tier = target_tier;
-    task.priority = priority;
-    task.status = CompileStatus::Pending;
-    task.handle = handle;
-    task.bindings = std::move(captured);
-    task.enqueue_time = std::chrono::high_resolution_clock::now();
-
-    queue_.push(std::move(task));
     stats_.tasks_enqueued++;
-
-    cv_work_.notify_one();
     return true;
 }
 
@@ -252,13 +207,11 @@ CompileStatus BackgroundCompiler::get_task_status(std::string_view fn_name) cons
 }
 
 size_t BackgroundCompiler::queue_size() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return queue_.size();
+    return pool_->queued(this);
 }
 
 size_t BackgroundCompiler::active_workers() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return busy_workers_;
+    return pool_->running(this);
 }
 
 BackgroundCompilerStats BackgroundCompiler::stats() const {
@@ -284,70 +237,48 @@ void BackgroundCompiler::dump_stats(std::ostream& os) const {
        << "==========================================\n";
 }
 
-void BackgroundCompiler::worker_loop(size_t /*worker_id*/) {
-    while (true) {
-        CompileTask task;
-        {
-            std::unique_lock<std::mutex> lock(mutex_);
-            cv_work_.wait(lock, [this]() {
-                return stopping_ || !queue_.empty();
-            });
-
-            if (stopping_ && queue_.empty()) {
-                break;
-            }
-
-            task = std::move(const_cast<CompileTask&>(queue_.top()));
-            queue_.pop();
-            task.status = CompileStatus::Compiling;
-            statuses_[task.function_name] = CompileStatus::Compiling;
-            busy_workers_++;
-        }
-
-        // Compilation executes outside the mutex
-        auto t0 = std::chrono::high_resolution_clock::now();
-        // install_tier2 reports compile errors as results; anything still
-        // thrown (bad_alloc, a bug) fails this task and leaves the function
-        // on its lower tier rather than terminating the process.
-        CodeInstallResult res;
-        try {
-            res = installer_.install_tier2(*task.handle, std::move(task.module_copy), task.function_name,
-                                           task.bindings);
-        } catch (const std::exception& e) {
-            res = {false, nullptr, std::string("Tier-2 compilation threw: ") + e.what(), 0};
-            task.handle->mark_tier2_rejected(task.bindings.target);
-        } catch (...) {
-            res = {false, nullptr, "Tier-2 compilation threw a non-standard exception", 0};
-            task.handle->mark_tier2_rejected(task.bindings.target);
-        }
-        auto t1 = std::chrono::high_resolution_clock::now();
-        uint64_t dur_us = static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count()
-        );
-
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            busy_workers_--;
-            active_names_.erase(task.function_name);
-
-            if (res.success) {
-                task.status = CompileStatus::Completed;
-                statuses_[task.function_name] = CompileStatus::Completed;
-                stats_.tasks_completed++;
-            } else {
-                task.status = CompileStatus::Failed;
-                task.error_message = res.error_message;
-                statuses_[task.function_name] = CompileStatus::Failed;
-                stats_.tasks_failed++;
-            }
-            stats_.total_compile_time_us += dur_us;
-
-            cv_fn_done_.notify_all();
-            if (queue_.empty() && busy_workers_ == 0) {
-                cv_idle_.notify_all();
-            }
-        }
+void BackgroundCompiler::run_task(CompileTask& task) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // Cancelled after a worker took it from the pool's queue.
+        if (queued_names_.erase(task.function_name) == 0) return;
+        task.status = CompileStatus::Compiling;
+        statuses_[task.function_name] = CompileStatus::Compiling;
     }
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+    // install_tier2 reports compile errors as results; anything still
+    // thrown (bad_alloc, a bug) fails this task and leaves the function
+    // on its lower tier rather than terminating the process.
+    CodeInstallResult res;
+    try {
+        res = installer_.install_tier2(*task.handle, std::move(task.module_copy), task.function_name, task.bindings);
+    } catch (const std::exception& e) {
+        res = {false, nullptr, std::string("Tier-2 compilation threw: ") + e.what(), 0};
+        task.handle->mark_tier2_rejected(task.bindings.target);
+    } catch (...) {
+        res = {false, nullptr, "Tier-2 compilation threw a non-standard exception", 0};
+        task.handle->mark_tier2_rejected(task.bindings.target);
+    }
+    auto t1 = std::chrono::high_resolution_clock::now();
+    const auto dur_us = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        active_names_.erase(task.function_name);
+        if (res.success) {
+            task.status = CompileStatus::Completed;
+            statuses_[task.function_name] = CompileStatus::Completed;
+            stats_.tasks_completed++;
+        } else {
+            task.status = CompileStatus::Failed;
+            task.error_message = res.error_message;
+            statuses_[task.function_name] = CompileStatus::Failed;
+            stats_.tasks_failed++;
+        }
+        stats_.total_compile_time_us += dur_us;
+    }
+    cv_fn_done_.notify_all();
 }
 
 } // namespace brass::runtime

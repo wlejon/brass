@@ -127,4 +127,13 @@ std::unique_ptr<Module> clone_module(const Module& src);
 std::unique_ptr<Module> clone_function_module(const Module& src, std::string_view fn_name,
                                               const std::vector<std::string>& also = {});
 
+// What clone_function_module adds around its target, for code taken from
+// `blocks` (of a function of src): the bodies of the src functions they
+// name directly and of those in `also`, the exit stubs those bodies' guards
+// name, and every other src function any of them names, as an external
+// symbol. `exclude` is never copied (named, it is external), nor is a
+// function `dst` already defines.
+void clone_callee_closure(const Module& src, Module& dst, const std::vector<const BasicBlock*>& blocks,
+                          const std::vector<std::string>& also, const Function* exclude);
+
 } // namespace brass

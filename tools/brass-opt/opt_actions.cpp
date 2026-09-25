@@ -315,8 +315,8 @@ bool execute_run_function(Module& mod, const RunFunctionOptions& opts) {
     }
     if (opts.enable_background_compile) {
         runtime::TieringRegistry::instance().set_background_compile_enabled(true);
-        runtime::TieringRegistry::instance().set_jit_threads(opts.jit_threads);
-        runtime::BackgroundCompiler::instance().start(opts.jit_threads);
+        // The pool the default program's background compiler runs on.
+        runtime::CompilePool::shared().start(opts.jit_threads);
     }
 
     try {

@@ -196,6 +196,17 @@ bool FastInterpreter::handle_osr_backedge(FastFrame& frame, uint32_t target_pc, 
     runtime::TieringFeedback& fb = frame.info->tiering(dispatch_table_);
     auto& coordinator = dispatch_table().osr();
     const BytecodeFunction* bfn = frame.bfn;
+    if (coordinator.runs_program()) {
+        // Past the threshold, one backedge in 64 asks for the loop's OSR
+        // code (compiled in the background) and enters it once it is ready.
+        fb.count_backedge_fast();
+        const uint64_t n = fb.backedge_count();
+        if (!frame.mir_fn || !bfn || n < coordinator.threshold() || (n & 63) != 0) return false;
+        auto it = bfn->pc_block_map.find(target_pc);
+        if (it == bfn->pc_block_map.end() || !it->second) return false;
+        return coordinator.try_osr_migration(*this, *frame.mir_fn, const_cast<BasicBlock*>(it->second), frame,
+                                             out_res);
+    }
     // Below the threshold only the count matters; try_osr_migration counts
     // the backedge itself once it is called.
     if (!frame.mir_fn || !bfn || fb.backedge_count() + 1 < coordinator.threshold()) {

@@ -10,106 +10,14 @@
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/deopt.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
+#include "tier2_link.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
 #include <unordered_set>
 
-extern "C" void brass_pgo_inc(uint32_t);
-
 namespace brass::runtime {
-
-namespace {
-
-// The tier-2 JIT pipeline: feedback-driven speculative devirtualization
-// (from the type feedback of the program being compiled for), the scalar and
-// CFG passes, the default loop stage and write-barrier elimination.
-Pipeline tier2_pipeline(const FeedbackRegistry& feedback) {
-    LoopOptOptions loop_opts;
-    Pipeline p;
-    p.add(passes::speculative_devirtualization(feedback));
-    p.add(passes::gvn());
-    p.add(passes::gvn_pre());
-    p.add(passes::sccp(true));
-    p.add(passes::cfg_simplify());
-    p.add(passes::loop_unswitch(loop_opts, false));
-    p.add(passes::jump_threading(loop_opts, false));
-    p.add(passes::cfg_simplify("cfg_simplify 2"));
-    p.append(loop_pipeline(loop_opts));
-    p.add(passes::write_barrier_elim());
-    return p;
-}
-
-bool run_tier2_optimization_pipeline(Module& mod, const FeedbackRegistry& feedback, std::string& errors) {
-    run_pipeline(mod, tier2_pipeline(feedback));
-    DiagnosticReporter diag;
-    if (verify_module(mod, &diag)) return true;
-    errors = diag.format_all();
-    return false;
-}
-
-// The prefix of the symbol a canonicalized func_addr links against.
-constexpr std::string_view kCanonicalFnPtrPrefix = "brass.fn_ptr:";
-
-// Makes every func_addr of `mod` that names `fn_name` or a sibling (a
-// function whose handle is bound to the Function this code was compiled
-// from) yield the program's one address of that function, its module
-// function stub, which is what func_addr yields in Tier 0 and Tier 1: a
-// pointer is then equal to every other tier's pointer to the same function
-// (a speculative identity check on it holds whichever tier made it), where
-// the engine's own copy of the function would not be. The stub reaches the
-// handle's current code, compiling it on demand. Each such func_addr links
-// against an external symbol of `jit` bound to the stub.
-void canonicalize_function_addresses(Module& mod, std::string_view fn_name, const Tier2Bindings& bindings,
-                                     MultiTierPipeline& pipeline, codegen::JitExecutionEngine& jit) {
-    std::unordered_map<std::string, std::string> canonical;  // name -> symbol
-    auto symbol_for = [&](std::string_view name) -> const std::string* {
-        const std::string key(name);
-        if (auto it = canonical.find(key); it != canonical.end()) return &it->second;
-        const Function* def = mod.get_function(name);
-        if (!def || def->block_count() == 0) return nullptr;
-        const bool known = name == fn_name ? bindings.target != nullptr : bindings.siblings.count(key) != 0;
-        if (!known) return nullptr;
-        // No Function: the handle exists and keeps what it is bound to.
-        void* stub = pipeline.function_address(name, nullptr);
-        if (!stub) return nullptr;
-        std::string sym = std::string(kCanonicalFnPtrPrefix) + key;
-        jit.register_external_symbol(sym, stub);
-        return &canonical.emplace(key, std::move(sym)).first->second;
-    };
-    for (Function* fn : mod.functions()) {
-        if (!fn) continue;
-        for (BasicBlock* bb : fn->blocks()) {
-            if (!bb) continue;
-            for (Instruction* inst : *bb) {
-                if (!inst || inst->opcode() != Opcode::func_addr) continue;
-                if (const std::string* sym = symbol_for(inst->symbol())) {
-                    inst->set_symbol(mod.string_pool().intern(*sym));
-                }
-            }
-        }
-    }
-}
-
-// The program functions `mod` names but does not define
-// (clone_function_module), linked against their stubs: a call reaches
-// whatever code each has, as a call from any other tier does. An external
-// symbol the program has no function for is a host symbol and is left to
-// resolve as one.
-void link_declared_functions(const Module& mod, FunctionDispatchTable& table, codegen::JitExecutionEngine& jit) {
-    for (std::string_view name : mod.external_symbols()) {
-        if (mod.get_function(name)) continue;
-        const FunctionHandle* h = table.find(name);
-        const Function* def = h ? h->mir_function() : nullptr;
-        if (!def || def->block_count() == 0) continue;
-        if (void* stub = table.pipeline().function_address(name, nullptr)) {
-            jit.register_external_symbol(name, stub);
-        }
-    }
-}
-
-} // namespace
 
 std::unique_ptr<Module> clone_for_tier2(FunctionDispatchTable& table, const Module& module, std::string_view fn_name) {
     // In a program whose pipeline runs it, the function alone: the rest of
@@ -117,25 +25,12 @@ std::unique_ptr<Module> clone_for_tier2(FunctionDispatchTable& table, const Modu
     // tier-up costs one function's compile, not the program's. Without one
     // there are no stubs to link to, and the whole module is compiled.
     if (!table.pipeline().is_initialized()) return clone_module(module);
-    // The call targets its type feedback names (at most a polymorphic
-    // site's), with bodies, for speculative inlining.
-    std::vector<std::string> targets;
-    if (const TypeFeedbackVector* tfv = table.tiering().type_feedback().find(fn_name)) {
-        for (const FeedbackSlot& slot : tfv->slots()) {
-            if (slot.kind != FeedbackSlotKind::Call || slot.is_megamorphic()) continue;
-            for (const CallFeedback& t : slot.targets) targets.push_back(t.target_name);
-        }
-    }
-    auto copy = clone_function_module(module, fn_name, targets);
+    // The call targets its type feedback names, with bodies, for
+    // speculative inlining.
+    auto copy = clone_function_module(module, fn_name, detail::speculated_call_targets(table, fn_name));
     if (!copy) return copy;
-    // Each program function it names links to its handle's stub; one that
-    // has never been called has no handle yet, and gets it here, bound to
-    // its definition, as the program's first call to it would.
-    for (std::string_view name : copy->external_symbols()) {
-        if (copy->get_function(name)) continue;
-        const Function* def = module.get_function(name);
-        if (def && def->block_count() != 0 && !table.find(name)) table.get_or_create(name, def);
-    }
+    // Each program function it names links to its handle's stub.
+    detail::bind_declared_handles(table, *copy, module);
     return copy;
 }
 
@@ -223,7 +118,8 @@ FunctionDispatchTable::~FunctionDispatchTable() {
     // Stop compiling for this program while its handles are still live (an
     // in-flight tier-2 compile installs into them and publishes its stack
     // maps here; queued ones are dropped), then drop its stack maps and
-    // baseline code.
+    // baseline code. Its OSR compiles stop first: they install the same way.
+    osr_->release_program();
     pipeline_->release_program();
     // Release this program's code and deopt resumers, and make every
     // interpreter's cached handle pointer stale before the memory goes.
@@ -530,7 +426,7 @@ CodeInstallResult CodeInstaller::install_tier2(
     std::shared_ptr<codegen::JitExecutionEngine> jit;
     try {
     // 1. Run full Tier-2 optimization passes
-    if (std::string errors; !run_tier2_optimization_pipeline(*module, table_->tiering().type_feedback(), errors)) {
+    if (std::string errors; !detail::run_tier2_optimization_pipeline(*module, *table_, errors)) {
         return reject("Tier-2 optimization pipeline failed or invalidated module: " + errors);
     }
 
@@ -544,18 +440,9 @@ CodeInstallResult CodeInstaller::install_tier2(
     }
 
     // 2. Machine code generation and relocation
-    jit = std::make_shared<codegen::JitExecutionEngine>(target_);
-
-    // Register essential GC and runtime bridge symbols
-    jit->register_external_symbol("brass_gc_safepoint", reinterpret_cast<void*>(&brass_gc_safepoint));
-    jit->register_external_symbol("brass_gc_alloc", reinterpret_cast<void*>(&brass_gc_alloc));
-    jit->register_external_symbol("brass_gc_collect", reinterpret_cast<void*>(&brass_gc_collect));
-    jit->register_external_symbol("brass_pgo_inc", reinterpret_cast<void*>(&brass_pgo_inc));
-    jit->register_external_symbol("brass_record_call_feedback", reinterpret_cast<void*>(&brass_record_call_feedback));
-    jit->register_external_symbol("brass_record_property_feedback", reinterpret_cast<void*>(&brass_record_property_feedback));
-    install_host_symbols(*jit);
-    // The program's own symbols, then any given this installer.
-    table_->pipeline().install_external_symbols(*jit);
+    // The runtime's, the host's and the program's symbols, then any given
+    // this installer.
+    jit = detail::make_tier2_engine(*table_, target_);
     {
         std::lock_guard<std::mutex> lock(symbols_mutex_);
         for (const auto& [name, addr] : external_symbols_) jit->register_external_symbol(name, addr);
@@ -564,9 +451,15 @@ CodeInstallResult CodeInstaller::install_tier2(
     // Function pointers this code makes are the ones the lower tiers make.
     // Only in a program whose pipeline runs them: its stubs compile a
     // function with no native entry on demand.
+    // Only the function and its siblings (functions whose handles are bound
+    // to the Functions this code was compiled from) are known to be the
+    // program's.
     if (table_->pipeline().is_initialized()) {
-        canonicalize_function_addresses(*module, fn_name, bindings, table_->pipeline(), *jit);
-        link_declared_functions(*module, *table_, *jit);
+        auto known = [&](std::string_view name) {
+            return name == fn_name ? bindings.target != nullptr : bindings.siblings.count(std::string(name)) != 0;
+        };
+        detail::canonicalize_function_addresses(*module, known, table_->pipeline(), *jit);
+        detail::link_declared_functions(*module, *table_, *jit);
     }
 
     // Compile and link in executable memory
@@ -602,37 +495,12 @@ CodeInstallResult CodeInstaller::install_tier2(
     // 5. Register the deopt continuation (a failed guard finishes the call
     //    in Tier 0), then store the engine lifetime holder and atomically
     //    publish the native entry point.
-    // The resumer is unregistered when the handle retires, which the table
-    // does before it goes away, so capturing both raw is safe.
-    FunctionDispatchTable* table = table_;
     // A frame resumes in the Function the code was compiled from (its
     // guards were validated against it), even after the handle is rebound
     // to another one; once that Function's module is destroyed the deopt is
     // a fatal error.
-    auto register_resumer = [table](FunctionHandle& h, void* entry, const Function* compiled_from_fn) {
-        FunctionHandle* hp = &h;
-        register_deopt_resumer(entry, [hp, table, entry](const DeoptFrame& frame) -> uint64_t {
-            const Function* compiled_from = hp->deopt_function(entry);
-            if (!compiled_from) {
-                std::fprintf(stderr, "brass: fatal deoptimization error: tier-2 code of '%s' deoptimized but the "
-                                     "Function it was compiled from is gone\n",
-                             std::string(hp->name()).c_str());
-                std::fflush(stderr);
-                std::abort();
-            }
-            // A MIR exception the Tier-0 continuation throws must reach the
-            // native callers' landing pads (an `invoke` in tier-2 code) as a
-            // native throw does; a C++ exception passes them by.
-            try {
-                return table->pipeline().resume_after_deopt(*hp, frame, *table, *compiled_from);
-            } catch (const InterpreterThrownException& ex) {
-                deopt_handler_throw_native(ex.value().raw_bits(), UINTPTR_MAX, std::current_exception());
-            } catch (const BrassException& ex) {
-                deopt_handler_throw_native(ex.value().raw(), UINTPTR_MAX, std::current_exception());
-            }
-            return 0;
-        });
-        h.add_deopt_entry(entry, compiled_from_fn);
+    auto register_resumer = [this](FunctionHandle& h, void* entry, const Function* compiled_from_fn) {
+        detail::register_tier2_resumer(*table_, h, entry, compiled_from_fn);
     };
     // A func_addr in this code that is not canonicalized (a function no
     // handle knows, or a program whose pipeline is not initialized) yields

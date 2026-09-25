@@ -109,8 +109,8 @@ BackgroundCompiler& MultiTierPipeline::background_compiler() {
     std::lock_guard<std::mutex> lock(bg_mutex_);
     if (!bg_) {
         BackgroundCompilerConfig cfg;
-        cfg.num_threads = std::max<size_t>(config_.jit_threads, 1);
         cfg.table = table_;
+        cfg.pool = &CompilePool::shared();
         bg_ = std::make_unique<BackgroundCompiler>(cfg);
     }
     return *bg_;
@@ -245,6 +245,16 @@ void MultiTierPipeline::register_external_symbol(std::string_view name, void* ad
 void MultiTierPipeline::install_external_symbols(codegen::JitExecutionEngine& jit) const {
     std::lock_guard<std::mutex> lock(mutex_);
     for (const auto& [name, addr] : external_symbols_) jit.register_external_symbol(name, addr);
+}
+
+void MultiTierPipeline::set_tier2_passes(std::optional<PassPipelineOptions> passes) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    tier2_passes_ = std::move(passes);
+}
+
+std::optional<PassPipelineOptions> MultiTierPipeline::tier2_passes() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return tier2_passes_;
 }
 
 void MultiTierPipeline::register_external_function(std::string_view name, FastHostFn fn) {

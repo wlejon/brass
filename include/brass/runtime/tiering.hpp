@@ -50,8 +50,9 @@ struct TieringConfig {
     uint64_t backedge_osr_threshold = BACKEDGE_OSR_THRESHOLD;
     uint64_t deopt_threshold = DEOPT_THRESHOLD;
     bool enable_osr = true;
+    // Tier 2 compiles run on the process's CompilePool::shared(), sized for
+    // the machine, not on the mutator.
     bool enable_background_compile = false;
-    size_t jit_threads = 2;
     Tier0Interpreter tier0_interpreter = Tier0Interpreter::Oracle;
     // The highest tier the pipeline compiles a program function to. At
     // Tier0_Interpreter nothing of the program is compiled: every function
@@ -253,8 +254,6 @@ public:
     bool is_background_compile_enabled() const noexcept { return config_.enable_background_compile; }
     void set_background_compile_enabled(bool enabled) noexcept { config_.enable_background_compile = enabled; }
 
-    size_t jit_threads() const noexcept { return config_.jit_threads; }
-    void set_jit_threads(size_t threads) noexcept { config_.jit_threads = threads; }
 
     void set_active_module(const Module* mod) noexcept { active_module_ = mod; }
     const Module* active_module() const noexcept { return active_module_; }

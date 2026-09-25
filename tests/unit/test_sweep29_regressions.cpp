@@ -18,6 +18,7 @@
 #include <brass/mir/printer.hpp>
 #include <brass/mir/verifier.hpp>
 #include <brass/runtime/code_installer.hpp>
+#include <brass/runtime/compile_pool.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
 #include <brass/runtime/tiering.hpp>
@@ -138,6 +139,9 @@ done(%r: i64):
 }
 )";
 
+// sum_{i<1000} (i + 1) + sum_{1000<=i<2000} 7i
+constexpr int64_t kOsrWant = 10997000;
+
 int64_t run_osr_case(const char* fname, bool fast, uint64_t* osr_count) {
     auto mod = parse_ok(kOsrCallee);
     FunctionDispatchTable prog;
@@ -154,6 +158,10 @@ int64_t run_osr_case(const char* fname, bool fast, uint64_t* osr_count) {
         FastInterpreter fi;
         fi.set_dispatch_table(&prog);
         fi.set_module(mod.get());
+        // The program's OSR code compiles in the background: a first run
+        // asks for it, the second enters it.
+        CHECK_EQ(fi.run(*mod->get_function(fname), {RuntimeValue::from_i64(2000)}).as_i64(), kOsrWant);
+        CompilePool::shared().wait_owner(&prog.osr());
         got = fi.run(*mod->get_function(fname), {RuntimeValue::from_i64(2000)}).as_i64();
     } else {
         Interpreter in;
@@ -164,9 +172,6 @@ int64_t run_osr_case(const char* fname, bool fast, uint64_t* osr_count) {
     *osr_count = prog.osr().total_osr_migrations();
     return got;
 }
-
-// sum_{i<1000} (i + 1) + sum_{1000<=i<2000} 7i
-constexpr int64_t kOsrWant = 10997000;
 
 } // namespace
 

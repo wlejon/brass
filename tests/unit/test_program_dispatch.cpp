@@ -430,7 +430,6 @@ TEST_CASE("Program tiering - destroying a program drops its stack maps and backg
     prog.emplace();
     TieringConfig cfg = tier1_config(2);
     cfg.enable_background_compile = true;
-    cfg.jit_threads = 1;
     prog->pipeline().initialize(cfg);
     const ModuleStackMap* maps = &prog->pipeline().active_stack_maps();
     CHECK(brass_get_active_stack_maps() == maps);
@@ -497,7 +496,6 @@ entry:
     FunctionDispatchTable prog_a;
     FunctionDispatchTable prog_b;
     TieringConfig cfg = tier1_config(1000000);
-    cfg.jit_threads = 1;
     prog_a.pipeline().initialize(cfg);
     prog_b.pipeline().initialize(cfg);
     prog_a.pipeline().register_external_symbol("pt_data_cell", &cell_a);

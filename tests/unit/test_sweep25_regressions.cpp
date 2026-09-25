@@ -230,7 +230,6 @@ TieringConfig tierup_config(bool background) {
     cfg.invocation_tier1_threshold = 2;
     cfg.invocation_tier2_threshold = 5;
     cfg.enable_background_compile = background;
-    cfg.jit_threads = 1;
     return cfg;
 }
 

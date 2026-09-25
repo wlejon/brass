@@ -6,6 +6,7 @@
 #include <brass/codegen/baseline_jit.hpp>
 #include <brass/mir/module.hpp>
 #include <brass/mir/function.hpp>
+#include <brass/mir/pass_pipeline.hpp>
 #include <brass/interpreter/value.hpp>
 #include <brass/gc/stack_map.hpp>
 #include <brass/vm/fast_interpreter.hpp>
@@ -162,6 +163,17 @@ public:
     // this thread when that one runs this program (a fresh one otherwise),
     // and an exception it throws unwinds through the native callers.
     uint64_t call_tier0_from_native(std::string_view name, const uint64_t* bits, size_t count);
+
+    // The optimization passes tier 2 runs over the module of a hot
+    // function's closure (the function, the bodies it may inline, its exit
+    // stubs): speculative devirtualization from this program's type
+    // feedback, then pass_pipeline(passes). Unset, brass's own tier-2
+    // sequence. A front end whose program runs unoptimized in the lower
+    // tiers sets the pipeline it would otherwise run over the whole program
+    // ahead of time, so each function is optimized when, and only if, it
+    // gets hot. Set before the program runs.
+    void set_tier2_passes(std::optional<PassPipelineOptions> passes);
+    std::optional<PassPipelineOptions> tier2_passes() const;
 
     // Tells `observer` of every function's native code this program installs
     // from now on (Tier 1 and Tier 2, not the native-to-Tier-0 bridges): a
@@ -326,6 +338,7 @@ private:
     std::mutex bridges_mutex_;
     std::unordered_map<std::string, std::shared_ptr<void>> tier0_bridges_;
     CodeInstallObserver code_observer_;
+    std::optional<PassPipelineOptions> tier2_passes_; // under mutex_
     // Testing only (set_tier1_compile_hook, set_tier1_install_hook).
     std::function<void(std::string_view)> tier1_compile_hook_;
     std::function<void(std::string_view)> tier1_install_hook_;

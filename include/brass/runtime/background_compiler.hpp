@@ -4,6 +4,7 @@
 #include <brass/mir/module.hpp>
 #include <brass/runtime/tiering.hpp>
 #include <brass/runtime/code_installer.hpp>
+#include <brass/runtime/compile_pool.hpp>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -63,11 +64,17 @@ struct CompileTask {
 };
 
 struct BackgroundCompilerConfig {
+    // Threads of its own: a private CompilePool of this many workers.
+    // Ignored with `pool`.
     size_t num_threads = 2;
     Target target = Target::host();
     // The program whose handles compiled code is installed into; null is
     // the default program. Must outlive the compiler.
     FunctionDispatchTable* table = nullptr;
+    // Runs its tasks on this pool (a program's pipeline passes
+    // CompilePool::shared()) instead of threads of its own. Must outlive
+    // the compiler.
+    CompilePool* pool = nullptr;
 };
 
 struct BackgroundCompilerStats {
@@ -87,14 +94,20 @@ public:
     BackgroundCompiler(const BackgroundCompiler&) = delete;
     BackgroundCompiler& operator=(const BackgroundCompiler&) = delete;
 
+    // The default program's, on CompilePool::shared().
     static BackgroundCompiler& instance();
 
-    // Lifecycle
+    // Lifecycle. On a private pool, start() starts its workers (none
+    // running) and stop() drops the queued tasks, waits out the running
+    // ones and joins the workers; the next enqueue starts them again. On a
+    // shared pool the workers are the pool's: stop() drops this compiler's
+    // queued tasks and waits out its running ones, and start() does nothing.
     void start(size_t num_threads);
     void stop();
     // Drops every queued (not yet started) task; returns how many.
     size_t cancel_pending();
     bool is_running() const noexcept;
+    // Until none of this compiler's tasks is queued or running.
     void wait_idle();
     bool wait_for_function(std::string_view fn_name, std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
 
@@ -120,7 +133,10 @@ public:
     CompileStatus get_task_status(std::string_view fn_name) const;
     size_t queue_size() const;
     size_t active_workers() const;
-    size_t thread_count() const noexcept { return workers_.size(); }
+    // The pool's worker count (a lazily started shared pool: 0 until its
+    // first task).
+    size_t thread_count() const noexcept { return pool_->thread_count(); }
+    CompilePool& pool() const noexcept { return *pool_; }
 
     // Statistics
     BackgroundCompilerStats stats() const;
@@ -135,7 +151,8 @@ public:
     static bool tier2_candidate(const FunctionHandle& handle);
 
 private:
-    void worker_loop(size_t worker_id);
+    // Runs one task on a pool worker.
+    void run_task(CompileTask& task);
     // `bindings` null: captured from the handles now (module_copy has no
     // source to check the siblings against).
     bool enqueue_copy(std::string_view fn_name, std::unique_ptr<Module> module_copy, FunctionHandle* handle,
@@ -143,20 +160,17 @@ private:
 
     BackgroundCompilerConfig config_;
     CodeInstaller installer_;
+    std::unique_ptr<CompilePool> own_pool_;  // a standalone compiler's
+    CompilePool* pool_;
 
     mutable std::mutex mutex_;
-    std::condition_variable cv_work_;
-    std::condition_variable cv_idle_;
     std::condition_variable cv_fn_done_;
 
-    std::vector<std::thread> workers_;
-    std::priority_queue<CompileTask> queue_;
     std::unordered_set<std::string> active_names_;
+    // Queued and not yet started: cancel_pending forgets these, and a task
+    // whose name it forgot does not compile when a worker reaches it.
+    std::unordered_set<std::string> queued_names_;
     std::unordered_map<std::string, CompileStatus> statuses_;
-
-    std::atomic<bool> stopping_{false};
-    std::atomic<bool> running_{false};
-    size_t busy_workers_ = 0;
     uint64_t next_task_id_ = 1;
 
     BackgroundCompilerStats stats_;

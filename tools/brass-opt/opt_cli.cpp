@@ -75,7 +75,7 @@ void print_usage(std::ostream& os, const char* prog) {
        << "  --osr-threshold=<N>   Loop backedge threshold for OSR migration (default: 100)\n"
        << "  --dump-tiering-stats  Dump tiering feedback and OSR statistics\n"
        << "  --enable-background-compile Enable background JIT compiler worker threads\n"
-       << "  --jit-threads=<N>     Number of background JIT worker threads (default: 2)\n"
+       << "  --jit-threads=<N>     Worker threads of the compile pool (default: 2)\n"
        << "  --dump-jit-thread-stats Dump background JIT worker thread pool statistics\n"
        << "  -g, --debug-info, --emit-debug-info Preserve and emit debug information (DWARF/CodeView)\n"
        << "  --dump-debug-lines    Dump decoded source line mappings from debug table\n"

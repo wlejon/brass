@@ -37,7 +37,7 @@ public:
     // The coordinator of an owned program; `registry` (not the default
     // program's) must outlive it.
     explicit OsrCoordinator(TieringRegistry& registry);
-    ~OsrCoordinator() = default;
+    ~OsrCoordinator();
 
     OsrCoordinator(const OsrCoordinator&) = delete;
     OsrCoordinator& operator=(const OsrCoordinator&) = delete;
@@ -86,6 +86,18 @@ public:
 
     void clear_cache();
 
+    // Stops OSR for a program being destroyed (FunctionDispatchTable, before
+    // its handles retire): drops its queued OSR compiles and waits out the
+    // running ones, and later backedges migrate nowhere.
+    void release_program();
+    // Drops this program's queued OSR compiles and waits out the running
+    // ones; a loop whose compile was dropped asks again on a later backedge.
+    void stop_compiles();
+    // Whether OSR here is into the program's own code (a program whose
+    // MultiTierPipeline runs it), compiled in the background: a backedge
+    // then only polls for the code now and then (FastInterpreter).
+    bool runs_program() const noexcept;
+
     // Statistics
     uint64_t total_osr_migrations() const noexcept { return total_osr_migrations_.load(std::memory_order_relaxed); }
     uint64_t total_native_deopts() const noexcept { return total_native_deopts_.load(std::memory_order_relaxed); }
@@ -96,6 +108,23 @@ public:
 
 private:
     OsrCoordinator();
+
+    // OSR in a program whose MultiTierPipeline runs it (osr_program.cpp): a
+    // loop header of a function gets an OSR entry function of its own
+    // (osr_entry.hpp), compiled with the program's tier-2 passes on the
+    // shared CompilePool while the interpreter keeps running the loop; a
+    // later backedge to it, once it is ready, carries the frame's live
+    // values into it.
+    struct ProgramEntry;
+    bool try_program_osr(FastInterpreter& interp, const Function& fn, BasicBlock* loop_header, FastFrame& frame,
+                         RuntimeValue& out_result);
+    void request_program_osr(const Function& fn, const BasicBlock& header, const std::shared_ptr<ProgramEntry>& e);
+    void compile_program_osr(const Function& fn, Module& copy, ProgramEntry& e);
+    bool enter_program_osr(const Function& fn, FastFrame& frame, const ProgramEntry& e, RuntimeValue& out_result);
+
+    std::mutex program_mutex_;
+    bool program_released_ = false;
+    std::unordered_map<const BasicBlock*, std::shared_ptr<ProgramEntry>> program_entries_;
 
     TieringRegistry* const registry_ = nullptr; // null: the default program
     bool enabled_ = false;

@@ -420,6 +420,8 @@ bool OsrCoordinator::try_osr_migration(
     RuntimeValue& out_result
 ) {
     if (!enabled_ || !loop_header) return false;
+    // A program's own code: an OSR entry compiled in the background.
+    if (runs_program()) return try_program_osr(interp, fn, loop_header, frame, out_result);
 
     TieringFeedback& feedback = registry().get_or_create(fn.name());
     feedback.record_backedge();
