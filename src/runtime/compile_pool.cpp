@@ -4,7 +4,29 @@
 #include <cstdlib>
 #include <string>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace brass::runtime {
+
+bool process_exiting() noexcept {
+#if defined(_WIN32)
+    using ShutdownInProgress = BOOLEAN(NTAPI*)();
+    const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (!ntdll) return false;
+    const auto fn = reinterpret_cast<ShutdownInProgress>(GetProcAddress(ntdll, "RtlDllShutdownInProgress"));
+    return fn && fn();
+#else
+    return false;
+#endif
+}
 
 namespace {
 
@@ -90,6 +112,7 @@ bool CompilePool::submit(Owner owner, uint8_t priority, std::function<void()> jo
 }
 
 size_t CompilePool::cancel(Owner owner) {
+    if (process_exiting()) return 0;
     size_t dropped = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -107,6 +130,7 @@ bool CompilePool::owner_idle_locked(Owner owner) const {
 }
 
 void CompilePool::wait_owner(Owner owner) {
+    if (process_exiting()) return;
     std::unique_lock<std::mutex> lock(mutex_);
     cv_done_.wait(lock, [&] {
         // With no workers, queued jobs never run: only the running ones count.
@@ -116,6 +140,7 @@ void CompilePool::wait_owner(Owner owner) {
 }
 
 void CompilePool::wait_idle() {
+    if (process_exiting()) return;
     std::unique_lock<std::mutex> lock(mutex_);
     cv_done_.wait(lock, [&] { return busy_ == 0 && (queue_.empty() || workers_.empty()); });
 }
@@ -133,6 +158,7 @@ size_t CompilePool::running(Owner owner) const {
 }
 
 void CompilePool::shutdown() {
+    if (process_exiting()) return;
     std::vector<std::thread> workers;
     {
         std::lock_guard<std::mutex> lock(mutex_);

@@ -11,6 +11,13 @@
 
 namespace brass::runtime {
 
+// True while the process is exiting with its other threads already gone
+// (Windows loader shutdown, where DLL statics and atexit handlers run after
+// every worker was killed where it stood). A job a worker was running never
+// finishes and a lock it held is never released, so nothing may wait on
+// either: every wait below returns at once instead.
+bool process_exiting() noexcept;
+
 // Worker threads that run compile jobs (tier-2 tier-ups, OSR entries) off
 // the mutator. shared() is the process's one pool: every program's
 // background compiler submits to it, so a process running many programs

@@ -54,6 +54,7 @@ void BackgroundCompiler::start(size_t num_threads) {
 }
 
 void BackgroundCompiler::stop() {
+    if (process_exiting()) return;
     cancel_pending();
     pool_->wait_owner(this);
     if (own_pool_) own_pool_->shutdown();
