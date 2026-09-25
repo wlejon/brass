@@ -218,15 +218,6 @@ BasicBlock* LoopAnalysis::ensure_preheader(Function& fn, LoopInfo& loop) {
         return nullptr;
     }
 
-    // A header entered on an unwind edge is a landing pad, which must stay
-    // the invoke's direct target: no block can be put in front of it.
-    for (BasicBlock* pred : outside_preds) {
-        const Instruction* term = pred->terminator();
-        if (term && term->opcode() == Opcode::invoke && term->unwind_target().block == header) {
-            return nullptr;
-        }
-    }
-
     // If there is exactly 1 outside predecessor, check if it's already a dedicated preheader
     if (outside_preds.size() == 1) {
         BasicBlock* sole_pred = outside_preds[0];
@@ -279,17 +270,6 @@ BasicBlock* LoopAnalysis::ensure_preheader(Function& fn, LoopInfo& loop) {
             }
             if (term->false_target().block == header) {
                 term->false_target().block = preheader;
-            }
-        } else if (term->opcode() == Opcode::invoke) {
-            if (term->normal_target().block == header) {
-                term->normal_target().block = preheader;
-            }
-        } else if (term->opcode() == Opcode::switch_) {
-            if (term->default_target().block == header) {
-                term->default_target().block = preheader;
-            }
-            for (SwitchCase& c : term->switch_cases()) {
-                if (c.target.block == header) c.target.block = preheader;
             }
         }
     }

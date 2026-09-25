@@ -51,12 +51,6 @@ void check_supported(const Function& fn, const Target& target) {
             if (!BaselineJitCompiler::supports_opcode(op)) {
                 throw_unsupported(kA64BaselineStage, opcode_name(op));
             }
-            // Exceptions are compiled by the x64 tier only: here a function
-            // that throws or catches stays in the interpreter.
-            if (op == Opcode::throw_ || op == Opcode::invoke || op == Opcode::landing_pad ||
-                op == Opcode::resume) {
-                throw_unsupported(kA64BaselineStage, opcode_name(op));
-            }
             if (inst->produces_value()) check_type(inst->type(), "value");
             for (size_t i = 0; i < inst->operand_count(); ++i) {
                 if (inst->operand(i)) check_type(inst->operand(i)->type(), "operand");

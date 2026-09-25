@@ -132,9 +132,8 @@ bool split_critical_edges(Function& fn, CriticalEdgeStats* stats) {
                     }
                 }
 
-                // An edge into a landing pad stays whole (is_critical_edge):
-                // nothing was split, so it is no reason to scan again.
-                if (unique_preds.size() > 1 && split_critical_edge(fn, src, dst, stats) != nullptr) {
+                if (unique_preds.size() > 1) {
+                    split_critical_edge(fn, src, dst, stats);
                     changed = true;
                     any_changed = true;
                     break;

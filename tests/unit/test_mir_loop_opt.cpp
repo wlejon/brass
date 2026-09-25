@@ -8,7 +8,6 @@
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/loop_analysis.hpp>
-#include <brass/mir/parser.hpp>
 #include <vector>
 
 using namespace brass;
@@ -213,50 +212,4 @@ TEST_CASE("MIR Loop Opt - MatMul f64 Naive Optimization & JIT Execution") {
             CHECK(std::abs(val - expected) < 1e-9);
         }
     }
-}
-
-TEST_CASE("MIR Loop Opt - a loop entered on an invoke's normal edge gets a preheader that dominates it") {
-    // The only way into the loop is the invoke's normal edge; the preheader
-    // must take that edge, or code hoisted into it would not dominate the loop.
-    const char* src = R"(
-func @work(%0: i64) -> i64 {
-bb0:
-  ret %0
-}
-
-func @f(%0: i64) -> i64 {
-entry:
-  %1 = invoke.i64 @work(%0), loop, pad
-
-loop:
-  %2 = call.i64 @work(%1)
-  %3 = iconst.i64 0
-  %4 = sgt.i64 %2, %3
-  br_if %4, loop, done
-
-done:
-  ret %1
-
-pad:
-  %5 = landing_pad
-  ret %5
-}
-)";
-    DiagnosticReporter diag;
-    auto mod = parse_module(src, &diag);
-    REQUIRE(mod != nullptr);
-    Function* fn = mod->get_function("f");
-    REQUIRE(fn != nullptr);
-
-    DominatorTree dom(*fn);
-    LoopAnalysis loops(*fn, dom);
-    REQUIRE_EQ(loops.top_level_loops().size(), size_t{1});
-    LoopInfo& loop = *loops.top_level_loops()[0];
-    BasicBlock* ph = LoopAnalysis::ensure_preheader(*fn, loop);
-    REQUIRE(ph != nullptr);
-
-    CHECK_EQ(fn->entry_block()->terminator()->normal_target().block, ph);
-    DominatorTree after(*fn);
-    CHECK(after.dominates(ph, loop.header()));
-    CHECK(verify_function(*fn));
 }

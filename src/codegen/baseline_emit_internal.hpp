@@ -3,7 +3,6 @@
 #include <brass/codegen/baseline_jit.hpp>
 #include "baseline_frame.hpp"
 #include <brass/codegen/unsupported_operation.hpp>
-#include <brass/runtime/exception.hpp>
 #include <brass/target/x64/x64_encoder.hpp>
 #include <brass/target/calling_conv.hpp>
 #include <unordered_map>
@@ -67,18 +66,6 @@ struct X64BaselineEmitter {
     // (BaselineJitCompiler::function_address_in), or null.
     BaselineSymbolResolver function_address;
 
-    // The invoke call sites: [begin, end) holds the call, whose return
-    // address is `end`, and a throw out of it lands at `pad`.
-    struct EhScope {
-        uint32_t begin = 0;
-        uint32_t end = 0;
-        Label pad;
-    };
-    std::vector<EhScope> eh_scopes;
-    // An invoke whose unwind edge passes arguments lands on a trampoline of
-    // its own that copies them (emitted after the blocks), not on the pad.
-    std::vector<std::pair<Label, const Instruction*>> unwind_trampolines;
-
     MemAddress slot_addr(const Value* val) const {
         auto it = slot_map.find(val);
         if (it == slot_map.end()) {
@@ -118,25 +105,11 @@ struct X64BaselineEmitter {
     void emit_return();
     // A call with the platform C convention to `symbol` (resolved, or through
     // its lazy-link stub) or to the pointer in `indirect`; the result, if
-    // any, goes to `result`'s slot. `call_start` / `call_end`, when given,
-    // receive the offsets of the call instruction and of its return address.
+    // any, goes to `result`'s slot.
     void emit_call(std::string_view symbol, const Value* indirect,
                    const std::vector<const Value*>& args, const Value* result,
-                   uint32_t site_id, uint32_t* call_start = nullptr, uint32_t* call_end = nullptr);
-
-    // The exception opcodes: invoke, landing_pad, throw and resume.
-    void emit_invoke(const Instruction& inst);
-    void emit_landing_pad(const Instruction& inst);
-    void emit_raise(const Instruction& inst);
-    // The unwind trampolines the invokes asked for; after the last block.
-    void emit_unwind_trampolines();
+                   uint32_t site_id);
 };
-
-// The function's exception table for the brass frame walker and the Win64
-// scope table: every invoke's call and pad as code offsets, and the frame
-// the walker restores (RSP = RBP - frame_size, R13 at [RBP-8] when saved).
-runtime::FunctionExceptionTable baseline_exception_table(const X64BaselineEmitter& em,
-                                                         std::string_view name);
 
 // Code offsets just past each step of the fixed prologue
 // `push rbp ; mov rbp, rsp ; sub rsp, frame_size ; [mov [rbp-8], r13]`
@@ -151,13 +124,9 @@ struct X64BaselinePrologue {
 
 // Appends unwind data for the function in image[0, code_size) - Win64
 // UNWIND_INFO + RUNTIME_FUNCTION, or a DWARF .eh_frame elsewhere - and
-// returns the offset to pass to JitMemoryBlock::register_unwind_info. With
-// scopes in `eh`, the unwind data names brass's personality routine (through
-// a jump thunk in the image) and carries the scope table, so the OS unwinder
-// lands a brass value at the frame's pads.
+// returns the offset to pass to JitMemoryBlock::register_unwind_info.
 size_t append_x64_baseline_unwind(std::vector<uint8_t>& image, const X64BaselinePrologue& prologue,
-                                  uint32_t code_size, bool windows,
-                                  const runtime::FunctionExceptionTable& eh);
+                                  uint32_t code_size, bool windows);
 
 // Each returns true if it handled the opcode.
 bool emit_baseline_x64_op(X64BaselineEmitter& emitter, const Instruction& inst);

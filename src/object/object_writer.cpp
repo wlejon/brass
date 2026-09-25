@@ -382,7 +382,7 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
     }
 
     // Emit compact binary stack maps to .rdata / .rodata / __const section
-    if (emit_stack_map_symbol_ && !obj.stack_maps.empty()) {
+    if (!obj.stack_maps.empty()) {
         std::string ro_sec_name = target_.is_windows() ? ".rdata" : (target_.is_macos() ? "__const" : ".rodata");
         Section& ro_sec = obj.get_or_create_section(
             ro_sec_name,

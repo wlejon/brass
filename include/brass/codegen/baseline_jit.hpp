@@ -48,11 +48,6 @@ public:
     std::shared_ptr<JitMemoryBlock> memory() const noexcept { return memory_; }
     // Keeps the lazy-link stubs the code calls through alive with it.
     void set_link_keepalive(std::shared_ptr<const void> keepalive) { link_keepalive_ = std::move(keepalive); }
-    // The code's entry in the exception registry (runtime/exception.hpp),
-    // shared by the copies of this function and dropped before its memory.
-    void set_eh_registration(std::shared_ptr<const void> registration) {
-        eh_registration_ = std::move(registration);
-    }
     // The symbols the code calls directly through a lazy-link stub because
     // they did not resolve when it was compiled.
     const std::vector<std::string>& lazy_call_symbols() const noexcept { return lazy_call_symbols_; }
@@ -87,10 +82,8 @@ private:
     std::vector<std::string> lazy_call_symbols_;
     std::vector<std::string> lazy_addr_symbols_;
     std::vector<DebugLineEntry> line_table_;
-    // The code's entries in the code stack-map and exception registries,
-    // shared by the copies of this function. Last, so they go before the
-    // code memory does.
-    std::shared_ptr<const void> eh_registration_;
+    // The code's entry in the code stack-map registry, shared by the copies
+    // of this function. Last, so it goes before the code memory does.
     std::shared_ptr<const void> stack_map_registration_;
 };
 

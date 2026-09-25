@@ -128,51 +128,6 @@ loop(%i: i64, %acc: i64):
     }
 }
 
-TEST_CASE("Baseline frame - a value live across an invoke's normal edge keeps its slot") {
-    // @cont is laid out before @loop and reached only through the invoke, so
-    // %k (defined in entry, used only in @cont) is live through @loop solely
-    // by that edge; @loop's temporaries must not take its slot.
-    auto mod = parse_or_fail(R"(module @m
-func @bl_fr_invoke(%0: i64, %1: i64) -> i64 {
-entry:
-  %c0 = iconst.i64 0
-  %c7 = iconst.i64 7
-  %k = add.i64 %1, %c7
-  %z = eq.i64 %0, %c0
-  br_if %z, base, pre
-base:
-  ret %c0
-pre:
-  br loop(%c0, %c0)
-cont:
-  %u = add.i64 %k, %r0
-  %acc2 = add.i64 %acc, %u
-  %one = iconst.i64 1
-  %n = add.i64 %i, %one
-  %more = slt.i64 %n, %0
-  br_if %more, loop(%n, %acc2), done(%acc2)
-loop(%i: i64, %acc: i64):
-  %c3 = iconst.i64 3
-  %t1 = mul.i64 %i, %c3
-  %t2 = add.i64 %t1, %c3
-  %t3 = mul.i64 %t2, %t1
-  %r0 = invoke.i64 @bl_fr_invoke(%c0, %t3), cont, pad
-done(%a: i64):
-  ret %a
-pad:
-  %e = landing_pad
-  ret %e
-}
-)");
-    BaselineJitCompiler compiler;
-    auto compiled = compiler.compile(*mod->get_function("bl_fr_invoke"));
-    REQUIRE(compiled.is_valid());
-    auto fn = compiled.get_function_ptr<int64_t (*)(int64_t, int64_t)>();
-    for (int64_t a : {1, 3, 9}) {
-        for (int64_t b : {-2, 0, 5}) CHECK_EQ(fn(a, b), a * (b + 7));
-    }
-}
-
 namespace {
 
 // %obj is live around a loop with a safepoint; %p = %obj + 8 is an interior

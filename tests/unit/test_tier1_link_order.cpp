@@ -271,7 +271,7 @@ b0:
 }
 
 TEST_CASE("Tier-1 link order - func_addr of a function the baseline tier rejects") {
-    // @fr_t uses a vector type, which the baseline tier does not compile, and takes an
+    // @fr_t throws, which the baseline tier does not compile, and takes an
     // f32, which a native-to-Tier-0 bridge does not pass: code taking its
     // address could not call it, so it stays in Tier 0 too. (One with a
     // bridgeable signature is called through the bridge instead:
@@ -279,7 +279,6 @@ TEST_CASE("Tier-1 link order - func_addr of a function the baseline tier rejects
     auto mod = parse_or_fail(R"(module @fptr_rej
 func @fr_t(%n: i64, %x: f32) -> i64 {
 b0:
-  %v = vzero.f64x4
   throw %n
 }
 func @fr_main(%n: i64) -> ptr {

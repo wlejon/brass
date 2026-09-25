@@ -219,13 +219,11 @@ b0:
 }
 
 TEST_CASE("Function pointers - a bridged callee's exception reaches the Tier-0 and host handlers") {
-    // @ex_t throws and uses a vector type (so the baseline tier rejects it);
-    // Tier-1 @ex_main calls it through its address, from under a Tier-0
-    // invoke and from the host.
+    // @ex_t throws (so the baseline tier rejects it); Tier-1 @ex_main calls
+    // it through its address, from under a Tier-0 invoke and from the host.
     auto mod = parse_or_fail(R"(module @fpt_throw
 func @ex_t(%n: i64) -> i64 {
 entry:
-  %vz = vzero.f64x4
   %lim = iconst.i64 3
   %small = slt.i64 %n, %lim
   br_if %small, ok, bad
@@ -285,75 +283,6 @@ b2:
         }
     }
     CHECK(prog.pipeline().is_baseline_rejected("ex_t"));
-}
-
-TEST_CASE("Function pointers - a baseline callee's throw reaches the Tier-0 and host handlers") {
-    // As above with @bx_t compiled by the baseline tier: its native throw
-    // finds no native pad below the Tier-0 entry and leaves as a C++
-    // BrassException, which the Tier-0 invoke catches and the host sees.
-    auto mod = parse_or_fail(R"(module @fpt_bthrow
-func @bx_t(%n: i64) -> i64 {
-entry:
-  %lim = iconst.i64 3
-  %small = slt.i64 %n, %lim
-  br_if %small, ok, bad
-ok:
-  %c = iconst.i64 100
-  %r = add.i64 %n, %c
-  ret %r
-bad:
-  throw %n
-}
-func @bx_call(%p: ptr, %n: i64) -> i64 {
-b0:
-  %r = call_indirect.i64 %p(%n)
-  ret %r
-}
-func @bx_main(%n: i64) -> i64 {
-b0:
-  %p = func_addr @bx_t
-  %r = call.i64 @bx_call(%p, %n)
-  ret %r
-}
-func @bx_catch(%n: i64) -> i64 {
-b0:
-  %v = invoke.i64 @bx_main(%n), b1, b2
-b1:
-  ret %v
-b2:
-  %e = landing_pad
-  %k = iconst.i64 1000
-  %r = add.i64 %e, %k
-  ret %r
-}
-)");
-    FunctionDispatchTable prog;
-    prog.pipeline().initialize(no_tierup());
-    Interpreter interp;
-    interp.set_dispatch_table(&prog);
-    interp.set_module(mod.get());
-    REQUIRE(prog.pipeline().compile_and_install_tier1("bx_main", mod->get_function("bx_main")));
-    for (int round = 0; round < 3; ++round) {
-        for (int64_t n = 0; n < 6; ++n) {
-            CHECK_EQ(interp.run(*mod->get_function("bx_catch"), {RuntimeValue::from_i64(n)}).as_i64(),
-                     n < 3 ? n + 100 : n + 1000);
-            bool caught = false;
-            try {
-                CHECK_EQ(interp.run(*mod->get_function("bx_main"), {RuntimeValue::from_i64(n)}).as_i64(), n + 100);
-            } catch (const InterpreterThrownException& e) {
-                caught = true;
-                CHECK_EQ(e.value().as_i64(), n);
-            } catch (const runtime::BrassException& e) {
-                caught = true;
-                CHECK_EQ(static_cast<int64_t>(e.value().raw()), n);
-            }
-            CHECK_EQ(caught, n >= 3);
-        }
-    }
-    FunctionHandle* t = prog.find("bx_t");
-    REQUIRE(t != nullptr);
-    CHECK(t->native_entry() != nullptr);
-    CHECK(!prog.pipeline().is_baseline_rejected("bx_t"));
 }
 
 TEST_CASE("Tier-2 reinstall - replacing live tier-2 code keeps it for callers bound to it") {

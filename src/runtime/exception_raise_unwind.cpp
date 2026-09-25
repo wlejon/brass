@@ -1,10 +1,8 @@
 // brass_seh_raise / brass_seh_raise_above off Windows: the native raise of a
-// brass value to a landing pad of generated code: every throw on AArch64,
-// whose callee-saved d8-d15 the JIT frame walker (brass_throw_impl) does not
-// restore, and on x86-64 each throw the walker cannot place, e.g. because it
-// is made again from a C++ frame (the Tier-0 bridge's host entry, a coroutine
-// resume entry, a deopt handler's outcome) or passes a baseline frame on its
-// way.
+// brass value to a landing pad of generated code when the JIT frame walker
+// (brass_throw_impl) cannot place the throw, e.g. because the throw is made
+// again from a C++ frame (the Tier-0 bridge's host entry, a coroutine resume
+// entry, a deopt handler's outcome) or passes a baseline frame on its way.
 //
 // There is no OS dispatcher to raise through, so the search is the one
 // exception_win64.cpp makes with RtlVirtualUnwind, made with the process's
@@ -17,14 +15,7 @@
 // enters it. Only frames below the innermost generated-code entry
 // (GeneratedCodeEntryScope) count, as on Windows: the throw leaves as a C++
 // exception past it. The frames jumped over are abandoned without running
-// anything, so brass_seh_raise jumps only when no frame on the way is one
-// outside the registry whose FDE names an LSDA (a C++ frame with destructors,
-// or an AOT function with pads). Past such a frame it throws a C++
-// BrassException instead, which the C++ unwinder carries through those
-// frames and brass_sysv_personality lands at the first pad; with no
-// registered pad at all it returns false, and the caller's C++ throw reaches
-// an AOT function's pad the same way. brass_seh_raise_above runs on behalf of
-// deoptimized frames and always jumps.
+// anything, so callers raise from frames that hold nothing to unwind.
 
 #include <brass/runtime/exception.hpp>
 #include <brass/gc/native_frames.hpp>
@@ -52,7 +43,6 @@ struct NativeFrame {
     uintptr_t sp = 0;       // its stack pointer at that call; 0 if unknown
     uintptr_t fp = 0;
     uintptr_t fn_start = 0; // its function's start per the unwind info; 0 if unknown
-    bool has_lsda = false;  // its FDE names an LSDA: the frame has unwinding of its own
     SavedRegisters regs;
 };
 
@@ -115,10 +105,7 @@ void walk_native_frames(Visit&& visit) {
         if (unw_get_reg(&cur, UNW_REG_SP, &v) == 0) f.sp = static_cast<uintptr_t>(v);
         f.fp = static_cast<uintptr_t>(gpr(kFpReg));
         unw_proc_info_t info;
-        if (unw_get_proc_info(&cur, &info) == 0) {
-            f.fn_start = static_cast<uintptr_t>(info.start_ip);
-            f.has_lsda = info.lsda != 0;
-        }
+        if (unw_get_proc_info(&cur, &info) == 0) f.fn_start = static_cast<uintptr_t>(info.start_ip);
         restore_callee_saved(f.regs, gpr, [&cur](int reg) -> uint64_t {
             unw_fpreg_t d = 0;
             uint64_t bits = 0;
@@ -143,7 +130,6 @@ void walk_native_frames(Visit&& visit) {
         s->callee_cfa = static_cast<uintptr_t>(_Unwind_GetCFA(ctx));
         f.fp = static_cast<uintptr_t>(gpr(kFpReg));
         f.fn_start = reinterpret_cast<uintptr_t>(_Unwind_FindEnclosingFunction(reinterpret_cast<void*>(f.pc)));
-        f.has_lsda = _Unwind_GetLanguageSpecificData(ctx) != nullptr;
         // libgcc keeps the low 64 bits of v8-v15 (the callee-saved part) as
         // 8-byte registers, readable as general ones.
         restore_callee_saved(f.regs, gpr, gpr);
@@ -190,14 +176,6 @@ bool landing_pad_in(const NativeFrame& f, PadTarget& out) {
     return true;
 }
 
-// Whether the raise must stop short of `f` and leave the throw to the C++
-// unwinder: `f` is not registered generated code and its FDE names an LSDA,
-// so it has destructors to run (a C++ frame) or pads the registry does not
-// hold (an AOT object's), and brass_sysv_personality lands the throw there.
-bool needs_cxx_unwind(const NativeFrame& f) {
-    return f.has_lsda && get_global_exception_registry().find_function_by_pc(f.pc) == nullptr;
-}
-
 // Whether `f` is a frame of the function starting at `entry`, by its unwind
 // info or by the JIT registry's range for it.
 bool frame_of(const NativeFrame& f, const void* entry) {
@@ -214,17 +192,12 @@ bool brass_seh_raise(HostValue val) {
     const uintptr_t boundary = entry_boundary();
     PadTarget target;
     bool found = false;
-    bool blocked = false;  // a frame on the way needs the C++ unwinder
     walk_native_frames([&](const NativeFrame& f) {
         if (f.sp != 0 && f.sp >= boundary) return true;
         found = landing_pad_in(f, target);
-        if (!found && needs_cxx_unwind(f)) blocked = true;
         return found;
     });
     if (!found) return false;
-    // The pad is there, past frames that must unwind: the C++ unwinder takes
-    // the throw to it (brass_sysv_personality lands it).
-    if (blocked) throw BrassException(val);
     brass_set_current_exception(val);
     brass_jump_to_landing_pad(target.ip, target.fp, target.sp, val, target.regs);
 }

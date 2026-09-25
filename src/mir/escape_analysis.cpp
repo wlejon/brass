@@ -297,30 +297,6 @@ void EscapeAnalysis::run() {
                     break;
                 }
 
-                case Opcode::invoke: {
-                    // Its arguments publish as an unknown call's do, and its
-                    // two edges carry block arguments as a branch's do.
-                    for (size_t i = 0; i < inst->operand_count(); ++i) {
-                        const Value* op_val = inst->operand(i);
-                        if (op_val && is_pointer_like(op_val)) {
-                            CGNode* ref = graph_->get_or_create_ref_node(op_val);
-                            graph_->mark_escape_state(ref, EscapeState::GlobalEscape);
-                        }
-                    }
-                    for (const BranchTarget* target : {&inst->normal_target(), &inst->unwind_target()}) {
-                        if (!target->block) continue;
-                        for (size_t i = 0; i < target->args.size(); ++i) {
-                            const Value* arg = target->args[i];
-                            const Value* param = target->block->param(i);
-                            if (arg && param && is_pointer_like(arg) && is_pointer_like(param)) {
-                                graph_->add_deferred(graph_->get_or_create_ref_node(arg),
-                                                     graph_->get_or_create_ref_node(param));
-                            }
-                        }
-                    }
-                    break;
-                }
-
                 default: {
                     // Check if pointer is used in an unhandled instruction
                     for (size_t i = 0; i < inst->operand_count(); ++i) {
