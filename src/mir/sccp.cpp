@@ -32,54 +32,17 @@ struct PhiArgUse {
     size_t param_idx = 0;
 };
 
-Value* get_or_create_constant(Function& fn, const LatticeValue& lat) {
-    BasicBlock* entry = fn.entry_block();
-    if (!entry) return nullptr;
-
-    // Search existing constants in entry block
-    for (Instruction* inst : *entry) {
-        if (!inst) continue;
-        if (lat.type() == Type::i32() && inst->opcode() == Opcode::iconst_i32) {
-            if (inst->imm_i32() == lat.as_i32()) {
-                if (inst != entry->head()) {
-                    entry->remove_instruction(inst);
-                    entry->prepend_instruction(inst);
-                }
-                return inst->result();
-            }
-        } else if (lat.type() == Type::i64() && inst->opcode() == Opcode::iconst_i64) {
-            if (inst->imm_i64() == lat.as_i64()) {
-                if (inst != entry->head()) {
-                    entry->remove_instruction(inst);
-                    entry->prepend_instruction(inst);
-                }
-                return inst->result();
-            }
-        } else if (lat.type() == Type::f64() && inst->opcode() == Opcode::fconst_f64 && inst->type() == Type::f64()) {
-            double inst_f = inst->imm_f64();
-            double lat_f = lat.as_f64();
-            if (std::memcmp(&inst_f, &lat_f, sizeof(double)) == 0) {
-                if (inst != entry->head()) {
-                    entry->remove_instruction(inst);
-                    entry->prepend_instruction(inst);
-                }
-                return inst->result();
-            }
-        } else if (lat.type() == Type::f32() && inst->opcode() == Opcode::fconst_f64 && inst->type() == Type::f32()) {
-            float inst_f = static_cast<float>(inst->imm_f64());
-            float lat_f = lat.as_f32();
-            if (std::memcmp(&inst_f, &lat_f, sizeof(float)) == 0) {
-                if (inst != entry->head()) {
-                    entry->remove_instruction(inst);
-                    entry->prepend_instruction(inst);
-                }
-                return inst->result();
-            }
-        }
-    }
-
+// A constant for `lat`, built just before `at`: where the value it stands for
+// was defined, so it dominates exactly the uses that value did. Materializing
+// every folded constant in the entry block instead made each one live from
+// the entry to its use — on a bundled library's straight-line top level,
+// thousands of registers live across tens of thousands of blocks, which
+// liveness and register allocation pay for per block — and finding the
+// entry's existing copy was a scan of an entry block that kept growing.
+Value* make_constant(Function& fn, const LatticeValue& lat, Instruction* at) {
+    if (!at) return nullptr;
     Builder b(*fn.parent());
-    b.position_before(entry->head());
+    b.position_before(at);
     if (lat.type() == Type::i32()) {
         return b.build_iconst_i32(lat.as_i32());
     }
@@ -530,6 +493,15 @@ private:
         }
 
         // 3. Constant Value Propagation & Instruction Folding
+        //
+        // The uses are rewritten in ONE sweep at the end, from a map of every
+        // value folded here and in step 4. Rewriting them per folded value
+        // walked the whole function each time — folded values times
+        // instructions, which on a bundled library's fourteen-thousand-block
+        // top level was five seconds of this pass. A value folded here is
+        // removed at once; nothing between here and the sweep reads the uses
+        // of a removed instruction.
+        std::unordered_map<const Value*, Value*> replacements;
         for (BasicBlock* bb : fn_.blocks()) {
             if (!bb || executable_blocks_.find(bb) == executable_blocks_.end()) {
                 continue;
@@ -540,9 +512,9 @@ private:
                 if (cur->produces_value() && !is_constant(cur->opcode())) {
                     LatticeValue lat = get_lattice(cur->result());
                     if (lat.is_constant()) {
-                        Value* c_val = get_or_create_constant(fn_, lat);
+                        Value* c_val = make_constant(fn_, lat, cur);
                         if (c_val) {
-                            replace_all_uses(fn_, cur->result(), c_val);
+                            replacements[cur->result()] = c_val;
                             bb->remove_instruction(cur);
                             if (options_.stats) {
                                 options_.stats->constants_propagated++;
@@ -569,12 +541,31 @@ private:
                 if (!p) continue;
                 LatticeValue lat = get_lattice(p);
                 if (lat.is_constant()) {
-                    Value* c_val = get_or_create_constant(fn_, lat);
+                    // At the head of the parameter's own block, which
+                    // dominates every use of it, after the landing pad a
+                    // handler block has to open with.
+                    Instruction* at = bb->head();
+                    if (at && at->opcode() == Opcode::landing_pad) at = at->next();
+                    Value* c_val = make_constant(fn_, lat, at);
                     if (c_val) {
-                        replace_all_uses(fn_, p, c_val);
+                        replacements[p] = c_val;
                         if (options_.stats) options_.stats->constants_propagated++;
                         changed = true;
                     }
+                }
+            }
+        }
+
+        if (!replacements.empty()) {
+            for (BasicBlock* bb : fn_.blocks()) {
+                if (!bb) continue;
+                for (Instruction* inst : *bb) {
+                    if (!inst) continue;
+                    for_each_use_slot(*inst, [&](Value*& slot) {
+                        if (const auto it = replacements.find(slot); it != replacements.end()) {
+                            slot = it->second;
+                        }
+                    });
                 }
             }
         }

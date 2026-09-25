@@ -78,6 +78,61 @@ private:
     const CfgSimplifyOptions& options_;
     std::unordered_set<BasicBlock*> resume_targets_;
 
+    // Block parameters this step has replaced, and by what. The uses are
+    // rewritten in one sweep when the step ends (`apply_forwarding`) instead
+    // of a whole-function `replace_all_uses` per parameter, which made the
+    // pass parameters x instructions: seconds on a bundled library's
+    // fourteen-thousand-block top level. Until the sweep a use may still name
+    // a replaced parameter, so every value the step READS goes through
+    // `resolve`, which answers what the eager rewrite would have left there.
+    std::unordered_map<const Value*, Value*> forward_;
+    // Uses per value, as they stand with `forward_` applied: moved to the
+    // replacement when a parameter is forwarded, dropped with an edge
+    // argument. What `count_uses` over the whole function answered, without
+    // the walk.
+    std::unordered_map<const Value*, uint32_t> use_counts_;
+
+    Value* resolve(Value* v) const {
+        while (v) {
+            const auto it = forward_.find(v);
+            if (it == forward_.end()) break;
+            v = it->second;
+        }
+        return v;
+    }
+
+    void forward(Value* from, Value* to) {
+        to = resolve(to);
+        if (!from || !to || from == to) return;
+        forward_[from] = to;
+        auto moved = use_counts_.find(from);
+        if (moved != use_counts_.end()) {
+            use_counts_[to] += moved->second;
+            moved->second = 0;
+        }
+    }
+
+    void drop_use(Value* v) {
+        v = resolve(v);
+        if (!v) return;
+        auto it = use_counts_.find(v);
+        if (it != use_counts_.end() && it->second > 0) --it->second;
+    }
+
+    void apply_forwarding() {
+        if (forward_.empty()) return;
+        for (BasicBlock* bb : fn_.blocks()) {
+            if (!bb) continue;
+            for (Instruction* inst : *bb) {
+                if (!inst) continue;
+                for_each_use_slot(*inst, [&](Value*& slot) {
+                    if (slot) slot = resolve(slot);
+                });
+            }
+        }
+        forward_.clear();
+    }
+
     bool simplify_branches() {
         bool changed = false;
 
@@ -184,6 +239,14 @@ private:
 
     bool eliminate_dead_block_params() {
         bool changed = false;
+        use_counts_ = compute_use_counts(fn_);
+        struct Sweep {
+            CfgSimplifier& self;
+            ~Sweep() {
+                self.apply_forwarding();
+                self.use_counts_.clear();
+            }
+        } sweep{*this};
 
         for (BasicBlock* bb : fn_.blocks()) {
             if (!bb || bb == fn_.entry_block() || resume_targets_.find(bb) != resume_targets_.end()) {
@@ -216,7 +279,8 @@ private:
                         BranchTarget* bt = targets_to_bb.front();
                         if (bt->args.size() == bb->param_count()) {
                             for (size_t i = 0; i < bb->param_count(); ++i) {
-                                replace_all_uses(fn_, bb->param(i), bt->args[i]);
+                                drop_use(bt->args[i]);
+                                forward(bb->param(i), bt->args[i]);
                             }
                             bt->args.clear();
                             if (options_.stats) options_.stats->params_removed += bb->param_count();
@@ -234,7 +298,8 @@ private:
 
             for (size_t i = 0; i < bb->param_count(); ++i) {
                 Value* param = bb->param(i);
-                size_t use_count = count_uses(fn_, param);
+                const auto counted = use_counts_.find(param);
+                const size_t use_count = counted == use_counts_.end() ? 0 : counted->second;
                 if (use_count == 0) {
                     keep_param[i] = false;
                     any_param_removed = true;
@@ -248,9 +313,10 @@ private:
                     if (!term) { all_same = false; break; }
                     for_each_target_pointing_to(term, bb, [&](BranchTarget& bt) {
                         if (i < bt.args.size()) {
+                            Value* arg = resolve(bt.args[i]);
                             if (!common_val) {
-                                common_val = bt.args[i];
-                            } else if (common_val != bt.args[i]) {
+                                common_val = arg;
+                            } else if (common_val != arg) {
                                 all_same = false;
                             }
                         } else {
@@ -261,7 +327,7 @@ private:
                 }
 
                 if (all_same && common_val && common_val != param) {
-                    replace_all_uses(fn_, param, common_val);
+                    forward(param, common_val);
                     keep_param[i] = false;
                     any_param_removed = true;
                 }
@@ -293,6 +359,8 @@ private:
                         for (size_t i = 0; i < bt.args.size(); ++i) {
                             if (i < keep_param.size() && keep_param[i]) {
                                 new_args.push_back(bt.args[i]);
+                            } else {
+                                drop_use(bt.args[i]);
                             }
                         }
                         bt.args = std::move(new_args);
@@ -307,6 +375,10 @@ private:
 
     bool merge_linear_blocks() {
         bool changed = false;
+        struct Sweep {
+            CfgSimplifier& self;
+            ~Sweep() { self.apply_forwarding(); }
+        } sweep{*this};
 
         for (size_t i = 0; i < fn_.block_count(); ++i) {
             BasicBlock* P = fn_.blocks()[i];
@@ -325,7 +397,7 @@ private:
                 for (size_t p_i = 0; p_i < S->param_count(); ++p_i) {
                     Value* arg = (p_i < branch_args.size()) ? branch_args[p_i] : nullptr;
                     if (arg) {
-                        replace_all_uses(fn_, S->param(p_i), arg);
+                        forward(S->param(p_i), arg);
                     }
                 }
                 S->params().clear();
