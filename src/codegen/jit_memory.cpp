@@ -132,10 +132,26 @@ JitMemoryBlock::JitMemoryBlock(size_t size) {
 JitMemoryBlock::JitMemoryBlock(size_t code_size, size_t data_size) {
 #if defined(__APPLE__) && defined(__aarch64__)
     // A MAP_JIT mapping is write-protected as a whole per thread once the
-    // code is sealed, so data pages cannot share it; the loader puts them in
-    // their own block beside this one.
-    *this = JitMemoryBlock(code_size);
-    (void)data_size;
+    // code is sealed, so data pages cannot be MAP_JIT themselves. They still
+    // have to sit beside the code: .eh_frame's pc-relative FDE addresses are
+    // 32-bit, and a separately placed data block can land further than 2 GB
+    // from the code (it did, intermittently, in a GPU-heavy process). So the
+    // whole range is mapped MAP_JIT and the data tail is then replaced, in
+    // place, by an ordinary read-write mapping. If the kernel refuses the
+    // replacement, the tail is released and only the code pages remain;
+    // size() says so and the loader falls back to a separate data block.
+    size_t page_sz = jit_system_page_size();
+    size_t code_pages = (code_size + page_sz - 1) & ~(page_sz - 1);
+    size_t data_pages = (data_size + page_sz - 1) & ~(page_sz - 1);
+    *this = JitMemoryBlock(code_pages + data_pages);
+    if (ptr_ && data_pages > 0) {
+        void* tail = mmap(ptr_ + code_pages, data_pages, PROT_READ | PROT_WRITE,
+                          MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (tail != static_cast<void*>(ptr_ + code_pages)) {
+            if (tail == MAP_FAILED) munmap(ptr_ + code_pages, data_pages);
+            size_ = code_pages;
+        }
+    }
 #else
     size_t page_sz = jit_system_page_size();
     size_t code_pages = (code_size + page_sz - 1) & ~(page_sz - 1);
@@ -245,11 +261,15 @@ void JitMemoryBlock::reset() {
 bool JitMemoryBlock::make_executable_read_only(size_t code_size) {
     if (!ptr_) return false;
 #if defined(BRASS_JIT_PER_THREAD_WX)
-    (void)code_size;
+    // Only the code pages: a block from the two-size constructor carries
+    // ordinary data pages after them.
+    size_t page_sz = jit_system_page_size();
+    size_t code_bytes = (code_size == 0) ? size_ : ((code_size + page_sz - 1) & ~(page_sz - 1));
+    if (code_bytes > size_) code_bytes = size_;
     end_write();
-    sys_dcache_flush(ptr_, size_);
-    sys_icache_invalidate(ptr_, size_);
-    register_jit_memory_range(ptr_, size_);
+    sys_dcache_flush(ptr_, code_bytes);
+    sys_icache_invalidate(ptr_, code_bytes);
+    register_jit_memory_range(ptr_, code_bytes);
     return true;
 #else
     size_t page_sz = jit_system_page_size();
