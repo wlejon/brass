@@ -6,15 +6,63 @@
 
 namespace brass {
 
-FastInterpreter::FastInterpreter(size_t gc_semispace_size)
-    : gc_(gc_semispace_size), alloca_arena_(std::make_unique<FastAllocaArena>()) {
-    gc_.set_root_provider([this](std::vector<uintptr_t*>& roots) {
-        this->collect_all_roots(roots);
-    });
+FastInterpreter::FastInterpreter(gc::Heap* heap) : alloca_arena_(std::make_unique<FastAllocaArena>()) {
+    use_heap(heap ? heap : gc::Heap::current());
     register_builtin_host_functions();
 }
 
-FastInterpreter::~FastInterpreter() = default;
+FastInterpreter::FastInterpreter(const gc::HeapConfig& config)
+    : own_heap_(std::make_unique<gc::Heap>(config)), alloca_arena_(std::make_unique<FastAllocaArena>()) {
+    attach_heap(own_heap_.get());
+    register_builtin_host_functions();
+}
+
+FastInterpreter::~FastInterpreter() {
+    // The host adapter shares this heap; it goes first.
+    host_adapter_.reset();
+    detach_heap();
+}
+
+namespace {
+void visit_fast_interpreter_roots(gc::Tracer& tracer, void* context) {
+    auto* interp = static_cast<FastInterpreter*>(context);
+    std::vector<uintptr_t*> roots;
+    interp->collect_all_roots(roots);
+    // A gcref register keeps whatever its frame computed last, a derived
+    // gcref included: it is kept as an offset into its object.
+    for (uintptr_t* slot : roots) tracer.visit_derived(reinterpret_cast<uint64_t*>(slot));
+    // A register without a type may hold a reference (a value a host or
+    // native callee returned untyped): kept when it names an object.
+    roots.clear();
+    interp->collect_untyped_registers(roots);
+    for (uintptr_t* slot : roots) tracer.visit_conservative(reinterpret_cast<uint64_t*>(slot));
+}
+} // namespace
+
+void FastInterpreter::attach_heap(gc::Heap* heap) {
+    heap_ = heap;
+    root_source_ = heap_->add_root_source(&visit_fast_interpreter_roots, this);
+}
+
+void FastInterpreter::detach_heap() noexcept {
+    if (heap_) heap_->remove_root_source(root_source_);
+    heap_ = nullptr;
+    root_source_ = 0;
+}
+
+void FastInterpreter::use_heap(gc::Heap* heap) {
+    if (heap && heap == heap_) return;
+    if (!heap && own_heap_ && heap_ == own_heap_.get()) return;
+    detach_heap();
+    if (heap) {
+        own_heap_.reset();
+        attach_heap(heap);
+    } else {
+        if (!own_heap_) own_heap_ = std::make_unique<gc::Heap>();
+        attach_heap(own_heap_.get());
+    }
+    if (host_adapter_) host_adapter_->use_heap(heap_);
+}
 
 static thread_local FastInterpreter* s_current_fast_interp = nullptr;
 
@@ -63,65 +111,14 @@ const BytecodeFunction* FastInterpreter::get_or_compile(const Function& fn) {
     return ptr;
 }
 
-void FastInterpreter::set_generational_gc(GenerationalGC* gc) noexcept {
-    gen_gc_ = gc;
-    if (gen_gc_) {
-        gen_gc_->set_root_provider([this](std::vector<uintptr_t*>& roots) {
-            this->collect_all_roots(roots);
-        });
-    }
-}
-
 uintptr_t FastInterpreter::allocate_gc(size_t size, uint64_t pointer_mask, uint32_t type_tag) {
-    // Roots come from the root provider installed in the constructor (and
-    // set_generational_gc), which the collector asks only when it collects.
-    // A host heap takes the allocation instead, and finds these frames'
-    // roots through collect_all_roots itself.
-    if (host_heap()) return host_heap_allocate(size, pointer_mask, type_tag);
-    if (gen_gc_) {
-        return gen_gc_->allocate(size, pointer_mask, type_tag);
-    }
-    return gc().allocate(size, pointer_mask, type_tag);
+    return heap_->allocate_masked(size, pointer_mask, type_tag);
 }
 
 void FastInterpreter::collect_all_roots(std::vector<uintptr_t*>& roots) {
-    // 1. Walk active frames on the call stack
-    for (FastFrame* f = current_frame_; f != nullptr; f = f->caller) {
-        for (uint32_t i = 0; i < f->num_registers; ++i) {
-            if (f->registers[i] == 0) continue;
-            bool is_gc = false;
-            if (f->bfn && i < f->bfn->register_types.size()) {
-                is_gc = f->bfn->register_types[i].is_gcref();
-            }
-            if (!is_gc) {
-                uintptr_t val = static_cast<uintptr_t>(f->registers[i]);
-                is_gc = gc().is_valid_object(val) || (gen_gc_ && gen_gc_->is_valid_object(val));
-            }
-            if (is_gc) {
-                roots.push_back(reinterpret_cast<uintptr_t*>(&f->registers[i]));
-            }
-        }
-    }
-
-    // 2. Scan suspended coroutines
-    for (auto& [handle, coro] : active_coros_) {
-        if (coro && !coro->is_done) {
-            for (size_t i = 0; i < coro->registers.size(); ++i) {
-                if (coro->registers[i] == 0) continue;
-                bool is_gc = false;
-                if (coro->bfn && i < coro->bfn->register_types.size()) {
-                    is_gc = coro->bfn->register_types[i].is_gcref();
-                }
-                if (!is_gc) {
-                    uintptr_t val = static_cast<uintptr_t>(coro->registers[i]);
-                    is_gc = gc().is_valid_object(val) || (gen_gc_ && gen_gc_->is_valid_object(val));
-                }
-                if (is_gc) {
-                    roots.push_back(reinterpret_cast<uintptr_t*>(&coro->registers[i]));
-                }
-            }
-        }
-    }
+    for_each_register([&roots](uint64_t* slot, bool typed_gcref) {
+        if (typed_gcref) roots.push_back(reinterpret_cast<uintptr_t*>(slot));
+    });
 
     // 3. Scan current_exception_ if gcref
     if (current_exception_.is_gcref() && !current_exception_.is_null()) {
@@ -132,6 +129,32 @@ void FastInterpreter::collect_all_roots(std::vector<uintptr_t*>& roots) {
     for (auto& val : last_deopt_.state_map) {
         if (val.is_gcref() && !val.is_null()) {
             roots.push_back(reinterpret_cast<uintptr_t*>(&val.raw_bits_ref()));
+        }
+    }
+}
+
+void FastInterpreter::collect_untyped_registers(std::vector<uintptr_t*>& slots) {
+    for_each_register([&slots](uint64_t* slot, bool typed_gcref) {
+        if (!typed_gcref) slots.push_back(reinterpret_cast<uintptr_t*>(slot));
+    });
+}
+
+template <typename Fn>
+void FastInterpreter::for_each_register(Fn&& fn) {
+    // The active frames on the call stack, then the suspended coroutines.
+    for (FastFrame* f = current_frame_; f != nullptr; f = f->caller) {
+        const size_t typed = f->bfn ? f->bfn->register_types.size() : 0;
+        for (uint32_t i = 0; i < f->num_registers; ++i) {
+            if (f->registers[i] == 0) continue;
+            fn(&f->registers[i], i < typed && f->bfn->register_types[i].is_gcref());
+        }
+    }
+    for (auto& [handle, coro] : active_coros_) {
+        if (!coro || coro->is_done) continue;
+        const size_t typed = coro->bfn ? coro->bfn->register_types.size() : 0;
+        for (size_t i = 0; i < coro->registers.size(); ++i) {
+            if (coro->registers[i] == 0) continue;
+            fn(&coro->registers[i], i < typed && coro->bfn->register_types[i].is_gcref());
         }
     }
 }

@@ -198,7 +198,6 @@ enum class BytecodeOp : uint8_t {
     write_barrier,
     guard,
     resume_point,
-    osr_entry,
     pinned_tls_read,
     pinned_tls_write,
     read_sp,
@@ -344,12 +343,6 @@ struct ResumePointEntry {
     std::vector<BcReg> state_regs;
 };
 
-struct OsrEntry {
-    uint32_t pc = 0;
-    uint32_t loop_header_pc = 0;
-    std::vector<BcReg> live_regs;
-};
-
 struct LineInfoEntry {
     uint32_t pc = 0;
     DebugLoc loc;
@@ -402,7 +395,6 @@ public:
     std::unordered_map<uint32_t, const BasicBlock*> pc_block_map;
     std::vector<ExceptionEntry> exception_table;
     std::vector<ResumePointEntry> resume_points;
-    std::vector<OsrEntry> osr_entries;
     std::vector<LineInfoEntry> line_info_table;
 
     // Helper metadata

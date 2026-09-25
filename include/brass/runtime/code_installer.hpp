@@ -218,7 +218,7 @@ private:
 // A program's whole tiering state hangs off its table: tiering() holds its
 // feedback (invocation, backedge and deopt counts, bailouts, and through
 // tiering().type_feedback() its call-target and shape feedback), osr() its
-// OsrCoordinator (OSR stubs and enablement), and pipeline()
+// OsrCoordinator (OSR entries and enablement), and pipeline()
 // its MultiTierPipeline (tier-up, the persistent Tier-0 interpreter, baseline
 // code, tier-2 stack maps, and its own background compiler). Destroying an
 // owned table first stops its background compiler (queued compiles are
@@ -288,7 +288,7 @@ private:
     // points at the registry, is destroyed first).
     std::unique_ptr<TieringRegistry> tiering_;
     std::unique_ptr<MultiTierPipeline> pipeline_;
-    // Holds OSR stubs counting into tiering_, so it is destroyed before it.
+    // Holds OSR entries counting into tiering_, so it is destroyed before it.
     std::unique_ptr<OsrCoordinator> osr_;
     mutable std::mutex mutex_;
     std::unordered_map<std::string, std::unique_ptr<FunctionHandle>> handles_;

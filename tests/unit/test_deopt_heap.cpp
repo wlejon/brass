@@ -10,6 +10,7 @@
 #include "test_framework.hpp"
 #include <brass/brass.hpp>
 #include <brass/gc/runtime_gc.hpp>
+#include "gc_test_heap.hpp"
 #include <brass/mir/parser.hpp>
 #include <brass/mir/verifier.hpp>
 #include <brass/runtime/code_installer.hpp>
@@ -130,11 +131,7 @@ bool install_spec(FunctionDispatchTable& prog, Module& mod, const char* spec) {
     return res.success;
 }
 
-struct ActiveGc {
-    explicit ActiveGc(MiniCheneyGC* gc) noexcept : prev(brass_get_active_gc()) { brass_set_active_gc(gc); }
-    ~ActiveGc() { brass_set_active_gc(prev); }
-    MiniCheneyGC* prev;
-};
+using ActiveGc = gc::HeapScope;
 
 } // namespace
 
@@ -143,8 +140,8 @@ TEST_CASE("Deopt heap - a gcref the exit stub returns lives in the calling inter
     REQUIRE(mod != nullptr);
     FunctionDispatchTable prog;
     prog.pipeline().initialize(no_tierup());
-    Interpreter interp(4096);
-    ActiveGc active(&interp.gc());
+    Interpreter interp(test::small_heap_config());
+    ActiveGc active(interp.heap());
     interp.set_dispatch_table(&prog);
     interp.set_module(mod.get());
     REQUIRE(install_spec(prog, *mod, "dh_specb"));
@@ -152,8 +149,8 @@ TEST_CASE("Deopt heap - a gcref the exit stub returns lives in the calling inter
     const uint64_t deopts = prog.pipeline().tier2_deopts();
     RuntimeValue r = interp.run(*mod->get_function("dh_specb"), {RuntimeValue::from_i64(7), RuntimeValue::from_i32(0)});
     CHECK(prog.pipeline().tier2_deopts() == deopts + 1);
-    CHECK(interp.gc().is_address_in_active_space(r.raw_bits()));
-    CHECK_EQ(interp.gc().read_field(r.raw_bits(), 2), 7ull);
+    CHECK(interp.heap().is_valid_object(r.raw_bits()));
+    CHECK_EQ(gc::Heap::load(r.raw_bits(), 2), 7ull);
     for (int64_t x : {11, 22, 33}) {
         CHECK_EQ(interp.run(*mod->get_function("dh_mainb"), {RuntimeValue::from_i64(x)}).as_i64(), x);
     }
@@ -164,8 +161,9 @@ TEST_CASE("Deopt heap - outer gcrefs the deopt continuation holds are updated by
     REQUIRE(mod != nullptr);
     FunctionDispatchTable prog;
     prog.pipeline().initialize(no_tierup());
-    Interpreter interp(4096);
-    ActiveGc active(&interp.gc());
+    // A 64 KB eden: @dh_churn(1000)'s objects collect it.
+    Interpreter interp(test::small_heap_config());
+    ActiveGc active(interp.heap());
     interp.set_dispatch_table(&prog);
     interp.set_module(mod.get());
     REQUIRE(install_spec(prog, *mod, "dh_spec"));
@@ -174,7 +172,7 @@ TEST_CASE("Deopt heap - outer gcrefs the deopt continuation holds are updated by
     for (int64_t x : {1, 10, 100, 1000}) {
         CHECK_EQ(interp.run(*mod->get_function("dh_mainr"), {RuntimeValue::from_i64(x)}).as_i64(), 42);
     }
-    CHECK(interp.gc().collection_count() >= 1);
+    CHECK(interp.heap().collection_count() >= 1);
 }
 
 TEST_CASE("Deopt heap - entered from the host, the continuation allocates in the active GC") {
@@ -182,8 +180,8 @@ TEST_CASE("Deopt heap - entered from the host, the continuation allocates in the
     REQUIRE(mod != nullptr);
     FunctionDispatchTable prog;
     prog.pipeline().initialize(no_tierup());
-    MiniCheneyGC heap(64 * 1024);
-    ActiveGc active(&heap);
+    gc::Heap heap(test::small_heap_config());
+    ActiveGc active(heap);
     REQUIRE(install_spec(prog, *mod, "dh_specb"));
     FunctionHandle* h = prog.find("dh_specb");
     REQUIRE(h != nullptr && h->has_native_entry());
@@ -191,8 +189,8 @@ TEST_CASE("Deopt heap - entered from the host, the continuation allocates in the
     ProgramScope scope(prog);
     RuntimeValue r = h->call_native({RuntimeValue::from_i64(9), RuntimeValue::from_i32(0)});
     CHECK(prog.pipeline().tier2_deopts() >= 1);
-    CHECK(heap.is_address_in_active_space(r.raw_bits()));
-    CHECK_EQ(heap.read_field(r.raw_bits(), 2), 9ull);
+    CHECK(heap.is_valid_object(r.raw_bits()));
+    CHECK_EQ(gc::Heap::load(r.raw_bits(), 2), 9ull);
 }
 
 namespace {

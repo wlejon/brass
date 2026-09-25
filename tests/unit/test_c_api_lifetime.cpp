@@ -275,17 +275,18 @@ TEST_CASE("C-API lifetime - embedding and public C API are exported from the sha
     REQUIRE(lib != nullptr);
 
     static const char* const kNames[] = {
-        // include/brass/embedding/brass_c_api.h (all 47)
+        // include/brass/embedding/brass_c_api.h (all 48)
         "brass_engine_create", "brass_engine_destroy", "brass_engine_register_symbol",
-        "brass_engine_register_gc", "brass_embed_module_create", "brass_embed_module_destroy",
+        "brass_embed_module_create", "brass_embed_module_destroy",
         "brass_embed_module_add_external_symbol", "brass_engine_compile_module",
         "brass_embed_compiled_module_destroy", "brass_embed_compiled_module_get_symbol",
         "brass_compiled_module_patch_const32", "brass_compiled_module_patch_const64",
         "brass_compiled_module_patch_call", "brass_compiled_module_patch_call_target",
-        "brass_compiled_module_walk_stack", "brass_host_gc_create", "brass_host_gc_destroy",
-        "brass_host_gc_allocate", "brass_host_gc_allocate_value", "brass_host_gc_collect",
-        "brass_host_gc_safepoint", "brass_host_gc_set_stress_mode", "brass_host_gc_get_stress_mode",
-        "brass_host_gc_collection_count", "brass_host_gc_reset", "brass_value_from_f64",
+        "brass_compiled_module_walk_stack", "brass_heap_create", "brass_heap_destroy",
+        "brass_heap_bind", "brass_heap_allocate", "brass_heap_allocate_value", "brass_heap_collect",
+        "brass_heap_add_root", "brass_heap_remove_root", "brass_heap_write_barrier",
+        "brass_heap_set_stress", "brass_heap_get_stress", "brass_heap_collection_count",
+        "brass_value_from_f64",
         "brass_value_from_i32", "brass_value_from_bool", "brass_value_null", "brass_value_undefined",
         "brass_value_from_gcref", "brass_value_from_pointer", "brass_value_from_raw",
         "brass_value_is_f64", "brass_value_is_i32", "brass_value_is_bool", "brass_value_is_null",

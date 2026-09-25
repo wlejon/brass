@@ -4,7 +4,8 @@
 #include <brass/mir/builder.hpp>
 #include <brass/mir/verifier.hpp>
 #include <brass/embedding/embedding.hpp>
-#include <brass/embedding/host_gc.hpp>
+#include <brass/gc/heap.hpp>
+#include <brass/gc/runtime_gc.hpp>
 #include <brass/gc/stack_map.hpp>
 #include <brass/gc/stack_walker.hpp>
 #include <brass/runtime/patcher.hpp>
@@ -45,7 +46,7 @@ inline void get_aot_caller_frame(uintptr_t& caller_rbp, uintptr_t& caller_ip) no
 #endif
 }
 
-static HostGC* g_aot_test_gc = nullptr;
+static gc::Heap* g_aot_test_gc = nullptr;
 static int64_t g_subroutine_call_count = 0;
 static uintptr_t g_last_r1_old_addr = 0;
 static uintptr_t g_last_r2_old_addr = 0;
@@ -64,8 +65,9 @@ static uintptr_t g_last_r2_old_addr = 0;
         uintptr_t caller_ip = 0;
         get_aot_caller_frame(caller_rbp, caller_ip);
 
-        // Perform Cheney GC collection walking the AOT caller frame
-        g_aot_test_gc->collect(caller_rbp, caller_ip);
+        // A young collection (it moves every young object) walking the AOT
+        // caller frame through the thread's stack maps
+        g_aot_test_gc->collect_at(gc::CollectionKind::Minor, caller_rbp, caller_ip);
     }
 
     return 50;
@@ -77,8 +79,8 @@ TEST_CASE("Embedding API - HostEngine::compile_to_object AOT Parity with In-Memo
     HostEngine engine;
 
     Module mod("test_aot_parity_mod");
-    mod.add_external_symbol("host_gc_alloc");
-    mod.add_external_symbol("host_gc_safepoint");
+    mod.add_external_symbol("brass_gc_alloc");
+    mod.add_external_symbol("brass_gc_safepoint");
 
     // 1. Function with patchable call and constant
     Function* f_hook = mod.create_function("hook_default", Type::i64(), {Type::i64()});
@@ -155,18 +157,18 @@ TEST_CASE("Embedding API - End-to-End AOT Linking, Dynamic Patching, and Moving 
     // 1. Build Brass MIR Module:
     // hook_default(val: i64) -> i64 => val + 100
     // aot_gc_worker(val: i64, subroutine_fn: ptr) -> i64:
-    //   ref1 = host_gc_alloc(16, 0, 1)
+    //   ref1 = brass_gc_alloc(16, 0, 1)
     //   ref1[0] = val
     //   patched_res = patchable_call "aot_hook_site" @hook_default(val)
-    //   ref2 = host_gc_alloc(16, 0, 1)
+    //   ref2 = brass_gc_alloc(16, 0, 1)
     //   ref2[0] = patched_res
     //   sub_res = call_indirect subroutine_fn(ref1, ref2)  <-- GC collection triggers while ref1, ref2 are live!
     //   v1 = load ref1[0]
     //   v2 = load ref2[0]
     //   ret v1 + v2 + sub_res
     Module mod("brass_aot_e2e_mod");
-    mod.add_external_symbol("host_gc_alloc");
-    mod.add_external_symbol("host_gc_safepoint");
+    mod.add_external_symbol("brass_gc_alloc");
+    mod.add_external_symbol("brass_gc_safepoint");
 
     {
         Function* f_hook = mod.create_function("hook_default", Type::i64(), {Type::i64()});
@@ -208,14 +210,14 @@ TEST_CASE("Embedding API - End-to-End AOT Linking, Dynamic Patching, and Moving 
         Value* tag1 = b.build_iconst_i32(1);
 
         // Allocate ref1
-        Value* ref1 = b.build_call("host_gc_alloc", Type::gcref(), {sz16, mask0, tag1});
+        Value* ref1 = b.build_call("brass_gc_alloc", Type::gcref(), {sz16, mask0, tag1});
         b.build_store(Type::i64(), ref1, 0, val);
 
         // Patchable call site to hook_default
         Value* patched_res = b.build_patchable_call("aot_hook_site", "hook_default", Type::i64(), {val});
 
         // Allocate ref2
-        Value* ref2 = b.build_call("host_gc_alloc", Type::gcref(), {sz16, mask0, tag1});
+        Value* ref2 = b.build_call("brass_gc_alloc", Type::gcref(), {sz16, mask0, tag1});
         b.build_store(Type::i64(), ref2, 0, patched_res);
 
         // Call subroutine indirectly: ref1 and ref2 are live across this subroutine call!
@@ -277,21 +279,14 @@ TEST_CASE("Embedding API - End-to-End AOT Linking, Dynamic Patching, and Moving 
             << "        g_host_safepoint = safepoint_fn;\n"
             << "    }\n"
             << "\n"
-            << "    uintptr_t host_gc_alloc(size_t size, uint64_t pointer_mask, uint32_t type_tag) {\n"
+            << "    // The DLL does not link brass: the host supplies its runtime.\n"
+            << "    uintptr_t brass_gc_alloc(size_t size, uint64_t pointer_mask, uint32_t type_tag) {\n"
             << "        if (g_host_alloc) return g_host_alloc(size, pointer_mask, type_tag);\n"
             << "        return 0;\n"
             << "    }\n"
             << "\n"
-            << "    uintptr_t brass_gc_alloc(size_t size, uint64_t pointer_mask, uint32_t type_tag) {\n"
-            << "        return host_gc_alloc(size, pointer_mask, type_tag);\n"
-            << "    }\n"
-            << "\n"
-            << "    void host_gc_safepoint() {\n"
-            << "        if (g_host_safepoint) g_host_safepoint();\n"
-            << "    }\n"
-            << "\n"
             << "    void brass_gc_safepoint() {\n"
-            << "        host_gc_safepoint();\n"
+            << "        if (g_host_safepoint) g_host_safepoint();\n"
             << "    }\n"
             << "}\n";
     }
@@ -338,9 +333,11 @@ TEST_CASE("Embedding API - End-to-End AOT Linking, Dynamic Patching, and Moving 
     REQUIRE(p_hook_dll != nullptr);
     REQUIRE(p_stack_maps != nullptr);
 
-    // 6. Setup HostGC and attach decoded stack maps
-    HostGC host_gc(256 * 1024);
-    host_gc.set_stress_mode(false);
+    // 6. Set up the heap (freed memory poisoned) and install the decoded stack maps
+    gc::HeapConfig heap_config;
+    heap_config.read_environment = false;
+    heap_config.poison = true;
+    gc::Heap host_gc(heap_config);
     g_aot_test_gc = &host_gc;
 
     // Decode stack maps exported by the mapped DLL
@@ -354,15 +351,15 @@ TEST_CASE("Embedding API - End-to-End AOT Linking, Dynamic Patching, and Moving 
             decoded_maps.register_function_address(fn_info.name, reinterpret_cast<uintptr_t>(addr), static_cast<uint32_t>(fn_info.text_size));
         }
     }
-    host_gc.set_stack_maps(&decoded_maps);
+    const ModuleStackMap* previous_maps = brass_get_active_stack_maps();
+    brass_set_active_stack_maps(&decoded_maps);
 
-    // Connect host GC allocation callback to the DLL
+    // Connect host GC allocation callback to the DLL (no collection happens
+    // there: the eden is far larger than the test's allocations)
     auto my_alloc = [](size_t sz, uint64_t mask, uint32_t tag) -> uintptr_t {
-        return g_aot_test_gc->allocate(sz, mask, tag);
+        return g_aot_test_gc->allocate_masked(sz, mask, tag);
     };
-    auto my_safepoint = []() {
-        if (g_aot_test_gc) g_aot_test_gc->safepoint();
-    };
+    auto my_safepoint = []() {};
     p_set_callbacks(+my_alloc, +my_safepoint);
 
     // =========================================================================
@@ -380,9 +377,9 @@ TEST_CASE("Embedding API - End-to-End AOT Linking, Dynamic Patching, and Moving 
     CHECK_EQ(g_subroutine_call_count, 1LL);
     CHECK_EQ(host_gc.collection_count(), 1ULL);
 
-    // Verify old From-Space memory was poisoned
-    CHECK_EQ(*reinterpret_cast<uint64_t*>(g_last_r1_old_addr), HostGC::POISON_PATTERN);
-    CHECK_EQ(*reinterpret_cast<uint64_t*>(g_last_r2_old_addr), HostGC::POISON_PATTERN);
+    // Verify the evacuated copies were poisoned
+    CHECK_EQ(*reinterpret_cast<uint64_t*>(g_last_r1_old_addr), 0xDBDBDBDBDBDBDBDBULL);
+    CHECK_EQ(*reinterpret_cast<uint64_t*>(g_last_r2_old_addr), 0xDBDBDBDBDBDBDBDBULL);
 
     // =========================================================================
     // Phase 2: Dynamic In-Memory Patching of Mapped DLL Image to hook_v2 (*7)
@@ -451,6 +448,7 @@ TEST_CASE("Embedding API - End-to-End AOT Linking, Dynamic Patching, and Moving 
     CHECK_EQ(g_subroutine_call_count, 3LL);
     CHECK_EQ(host_gc.collection_count(), 3ULL);
 
+    brass_set_active_stack_maps(previous_maps);
     FreeLibrary(hDll);
     g_aot_test_gc = nullptr;
 }

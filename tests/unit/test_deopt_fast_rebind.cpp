@@ -12,6 +12,7 @@
 #include "test_framework.hpp"
 #include <brass/brass.hpp>
 #include <brass/gc/runtime_gc.hpp>
+#include "gc_test_heap.hpp"
 #include <brass/mir/parser.hpp>
 #include <brass/mir/verifier.hpp>
 #include <brass/runtime/code_installer.hpp>
@@ -123,11 +124,7 @@ bool install_spec(FunctionDispatchTable& prog, Module& mod, const char* spec) {
     return res.success;
 }
 
-struct ActiveGc {
-    explicit ActiveGc(MiniCheneyGC* gc) noexcept : prev(brass_get_active_gc()) { brass_set_active_gc(gc); }
-    ~ActiveGc() { brass_set_active_gc(prev); }
-    MiniCheneyGC* prev;
-};
+using ActiveGc = gc::HeapScope;
 
 } // namespace
 
@@ -136,16 +133,16 @@ TEST_CASE("Fast deopt - a gcref the exit stub returns lives in the running fast 
     REQUIRE(mod != nullptr);
     FunctionDispatchTable prog;
     prog.pipeline().initialize(no_tierup(true));
-    FastInterpreter interp(4096);
-    ActiveGc active(&interp.gc());
+    FastInterpreter interp(test::small_heap_config());
+    ActiveGc active(interp.heap());
     interp.set_dispatch_table(&prog);
     REQUIRE(install_spec(prog, *mod, "dfr_specb"));
 
     const uint64_t deopts = prog.pipeline().tier2_deopts();
     RuntimeValue r = interp.run(*mod->get_function("dfr_specb"), {RuntimeValue::from_i64(7), RuntimeValue::from_i32(0)});
     CHECK(prog.pipeline().tier2_deopts() == deopts + 1);
-    CHECK(interp.gc().is_address_in_active_space(r.raw_bits()));
-    CHECK_EQ(interp.gc().read_field(r.raw_bits(), 2), 7ull);
+    CHECK(interp.heap().is_valid_object(r.raw_bits()));
+    CHECK_EQ(gc::Heap::load(r.raw_bits(), 2), 7ull);
 }
 
 TEST_CASE("Fast deopt - outer gcrefs the continuation holds are updated by a collection") {
@@ -153,8 +150,9 @@ TEST_CASE("Fast deopt - outer gcrefs the continuation holds are updated by a col
     REQUIRE(mod != nullptr);
     FunctionDispatchTable prog;
     prog.pipeline().initialize(no_tierup(true));
-    FastInterpreter interp(4096);
-    ActiveGc active(&interp.gc());
+    // A 64 KB eden: @dfr_churn(1000)'s objects collect it.
+    FastInterpreter interp(test::small_heap_config());
+    ActiveGc active(interp.heap());
     interp.set_dispatch_table(&prog);
     REQUIRE(install_spec(prog, *mod, "dfr_spec"));
     REQUIRE(prog.pipeline().compile_and_install_tier1("dfr_churn", mod->get_function("dfr_churn")));
@@ -162,7 +160,7 @@ TEST_CASE("Fast deopt - outer gcrefs the continuation holds are updated by a col
     for (int64_t x : {1, 10, 100, 1000}) {
         CHECK_EQ(interp.run(*mod->get_function("dfr_mainr"), {RuntimeValue::from_i64(x)}).as_i64(), 42);
     }
-    CHECK(interp.gc().collection_count() >= 1);
+    CHECK(interp.heap().collection_count() >= 1);
 }
 
 TEST_CASE("Fast deopt - entered from the host, the continuation allocates in the active GC") {
@@ -170,8 +168,8 @@ TEST_CASE("Fast deopt - entered from the host, the continuation allocates in the
     REQUIRE(mod != nullptr);
     FunctionDispatchTable prog;
     prog.pipeline().initialize(no_tierup(true));
-    MiniCheneyGC heap(64 * 1024);
-    ActiveGc active(&heap);
+    gc::Heap heap(test::small_heap_config());
+    ActiveGc active(heap);
     REQUIRE(install_spec(prog, *mod, "dfr_specb"));
     FunctionHandle* h = prog.find("dfr_specb");
     REQUIRE(h != nullptr && h->has_native_entry());
@@ -179,8 +177,8 @@ TEST_CASE("Fast deopt - entered from the host, the continuation allocates in the
     ProgramScope scope(prog);
     RuntimeValue r = h->call_native({RuntimeValue::from_i64(9), RuntimeValue::from_i32(0)});
     CHECK(prog.pipeline().tier2_deopts() >= 1);
-    CHECK(heap.is_address_in_active_space(r.raw_bits()));
-    CHECK_EQ(heap.read_field(r.raw_bits(), 2), 9ull);
+    CHECK(heap.is_valid_object(r.raw_bits()));
+    CHECK_EQ(gc::Heap::load(r.raw_bits(), 2), 9ull);
 }
 
 TEST_CASE("Fast deopt - entered from the host, the continuation's frames are roots of the active GC") {
@@ -188,16 +186,16 @@ TEST_CASE("Fast deopt - entered from the host, the continuation's frames are roo
     REQUIRE(mod != nullptr);
     FunctionDispatchTable prog;
     prog.pipeline().initialize(no_tierup(true));
-    MiniCheneyGC heap(4096);
-    ActiveGc active(&heap);
+    gc::Heap heap(test::small_heap_config());
+    ActiveGc active(heap);
     REQUIRE(install_spec(prog, *mod, "dfr_spec"));
     REQUIRE(prog.pipeline().compile_and_install_tier1("dfr_churn", mod->get_function("dfr_churn")));
     FunctionHandle* h = prog.find("dfr_spec");
     REQUIRE(h != nullptr && h->has_native_entry());
 
     ProgramScope scope(prog);
-    const uintptr_t o = heap.allocate(48, 0, 2);
-    heap.write_field(o, 2, uint64_t{42});
+    const uintptr_t o = heap.allocate_masked(48, 0, 2);
+    heap.store(o, 2, uint64_t{42});
     const size_t before = heap.collection_count();
     RuntimeValue r = h->call_native({RuntimeValue::from_gcref(o), RuntimeValue::from_i64(1000), RuntimeValue::from_i32(0)});
     CHECK(heap.collection_count() > before);

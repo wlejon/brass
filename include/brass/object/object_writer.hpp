@@ -133,7 +133,6 @@ struct CompiledFunctionInfo {
     size_t text_offset = 0;
     size_t text_size = 0;
     size_t prologue_size = 0;
-    size_t osr_entry_offset = 0;
     // The MIR signature, for the procedure types in debug info.
     Type return_type = Type::void_type();
     std::vector<Type> param_types;

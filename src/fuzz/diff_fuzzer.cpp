@@ -6,7 +6,7 @@
 #include <brass/mir/loop_opt.hpp>
 #include <brass/runtime/parallel_runtime.hpp>
 #include <brass/pgo/instrument.hpp>
-#include <brass/gc/mini_cheney.hpp>
+#include <brass/gc/heap.hpp>
 #include <brass/gc/runtime_gc.hpp>
 
 #include <chrono>
@@ -205,13 +205,8 @@ TierResult DiffFuzzer::run_jit(const Module& mod, std::string_view fn_name,
     std::string fn_name_str(fn_name);
 
     auto worker_task = [jit, res_box, fn_name_str, args]() {
-        auto gc = std::make_unique<MiniCheneyGC>(256 * 1024);
-        MiniCheneyGC* old_gc = brass_get_active_gc();
-        brass_set_active_gc(gc.get());
-        struct GcGuard {
-            MiniCheneyGC* old;
-            ~GcGuard() { brass_set_active_gc(old); }
-        } guard{old_gc};
+        gc::Heap heap;
+        gc::HeapScope heap_scope(heap);
 
         std::string fault;
         bool prot_ok = run_protected([&]() {

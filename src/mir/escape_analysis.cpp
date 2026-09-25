@@ -20,7 +20,6 @@ std::ostream& operator<<(std::ostream& os, EscapeState state) {
 
 bool is_allocation_callee(std::string_view symbol) noexcept {
     return symbol == "brass_gc_alloc" ||
-           symbol == "host_gc_alloc" ||
            symbol == "malloc" ||
            symbol == "calloc";
 }

@@ -1,7 +1,7 @@
 #include "test_framework.hpp"
 #include <brass/runtime/multi_tier_pipeline.hpp>
-#include <brass/embedding/host_gc.hpp>
-#include <brass/gc/tlab.hpp>
+#include <brass/gc/gc_limits.hpp>
+#include <brass/gc/heap.hpp>
 #include <brass/interpreter/value.hpp>
 #include <brass/runtime/patcher.hpp>
 #include <brass/runtime/parallel_runtime.hpp>
@@ -137,70 +137,32 @@ TEST_CASE("Phase 1 - MultiTierPipeline Concurrency and Deadlock Prevention") {
     pipeline.shutdown();
 }
 
-TEST_CASE("Phase 1 - Thread-Safe TLAB Concurrent Refills") {
-    HostGC gc(1024 * 1024); // 1 MB semispace
-    constexpr int NUM_THREADS = 8;
-    constexpr int ALLOCS_PER_THREAD = 50;
-
-    struct BufferRange {
-        uintptr_t start;
-        uintptr_t end;
-    };
-    std::vector<std::vector<BufferRange>> thread_buffers(NUM_THREADS);
-
-    std::vector<std::thread> threads;
-    for (int t = 0; t < NUM_THREADS; ++t) {
-        threads.emplace_back([&gc, &thread_buffers, t]() {
-            ThreadLocalAllocBuffer tlab;
-            gc.register_tlab(&tlab);
-            for (int i = 0; i < ALLOCS_PER_THREAD; ++i) {
-                uintptr_t top = 0, end = 0;
-                if (gc.allocate_tlab(64, 256, top, end)) {
-                    thread_buffers[t].push_back({top, end});
-                    gc.retire_tlab(end, end);
-                }
-            }
-            gc.unregister_tlab(&tlab);
-        });
-    }
-    for (auto& t : threads) {
-        t.join();
-    }
-
-    // Verify no two concurrently active buffer allocations overlapped
-    std::vector<BufferRange> all_ranges;
-    for (const auto& tb : thread_buffers) {
-        all_ranges.insert(all_ranges.end(), tb.begin(), tb.end());
-    }
-    std::sort(all_ranges.begin(), all_ranges.end(), [](const BufferRange& a, const BufferRange& b) {
-        return a.start < b.start;
-    });
-
-    for (size_t i = 1; i < all_ranges.size(); ++i) {
-        CHECK(all_ranges[i].start >= all_ranges[i - 1].end);
-    }
-}
-
-TEST_CASE("Phase 1 - HostGC Stack Root Capture During Heap Exhaustion") {
-    // Small semispace (4 KB) so we quickly trigger collection on allocation
-    HostGC gc(4096);
-    CHECK_EQ(gc.collection_count(), 0);
+TEST_CASE("Phase 1 - Heap Root Capture During Eden Exhaustion") {
+    // The smallest eden (64 KB), so allocation quickly triggers collections.
+    gc::HeapConfig config;
+    config.eden_bytes = kMinEdenBytes;
+    config.read_environment = false;
+    gc::Heap heap(config);
+    heap.set_poison(true);
+    CHECK_EQ(heap.collection_count(), 0);
 
     // Register a root slot
-    uintptr_t root_obj = gc.allocate(32, 0, 1);
-    gc.write_field(root_obj, 0, 12345);
-    gc.register_root(&root_obj);
+    uint64_t root_obj = heap.allocate_masked(32, 0, 1);
+    heap.store(root_obj, 0, 12345);
+    heap.add_root(&root_obj);
+    const uint64_t original = root_obj;
 
-    // Allocate until heap exhausts and triggers collect(caller_rbp, caller_ip)
-    for (int i = 0; i < 200; ++i) {
-        gc.allocate(32, 0, 2);
+    // Allocate until eden fills and the allocation collects.
+    for (int i = 0; i < 5000; ++i) {
+        heap.allocate_masked(32, 0, 2);
     }
 
-    CHECK(gc.collection_count() > 0);
+    CHECK(heap.collection_count() > 0);
     // Root must have been relocated and not poisoned
-    CHECK(gc.is_valid_object(root_obj));
-    CHECK_EQ(gc.read_field(root_obj, 0), 12345);
-    gc.unregister_root(&root_obj);
+    CHECK(root_obj != original);
+    CHECK(heap.is_valid_object(root_obj));
+    CHECK_EQ(gc::Heap::load(root_obj, 0), 12345u);
+    heap.remove_root(&root_obj);
 }
 
 TEST_CASE("Phase 1 - ParallelRuntime Algebraic Reduction Identity and Re-entrancy") {

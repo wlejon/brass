@@ -1,8 +1,6 @@
 #include "test_framework.hpp"
 #include <brass/brass.hpp>
-#include <brass/gc/mini_cheney.hpp>
-#include <brass/gc/tlab.hpp>
-#include <brass/embedding/host_gc.hpp>
+#include <brass/gc/heap.hpp>
 #include <brass/runtime/deopt.hpp>
 #include <brass/runtime/patcher.hpp>
 #include <brass/runtime/exception.hpp>
@@ -31,13 +29,15 @@ using namespace brass::codegen;
 // Deliverable 6.a: GCRef Preservation Surviving Moving GC Scavenge
 // ============================================================================
 TEST_CASE("Deopt Hardening - GCRef in InterpreterFrame Survives GC Scavenge") {
-    MiniCheneyGC gc(128 * 1024);
+    gc::HeapConfig config;
+    config.read_environment = false;
+    gc::Heap gc(config);
 
-    // Allocate an object in Cheney semispace
-    uintptr_t orig_addr = gc.allocate(24, 0, 77);
+    // Allocate an object in the young generation
+    uintptr_t orig_addr = gc.allocate_masked(24, 0, 77);
     REQUIRE(orig_addr != 0);
-    gc.write_field(orig_addr, 0, 0xCAFEBABEDEADBEEFULL);
-    gc.write_field(orig_addr, 1, 0x1234567890ABCDEFULL);
+    gc.store(orig_addr, 0, 0xCAFEBABEDEADBEEFULL);
+    gc.store(orig_addr, 1, 0x1234567890ABCDEFULL);
 
     // 1. Create a DeoptFrame with GCRef kind
     DeoptFrame dframe;
@@ -70,7 +70,11 @@ TEST_CASE("Deopt Hardening - GCRef in InterpreterFrame Survives GC Scavenge") {
     CHECK_EQ(*roots[0], orig_addr);
 
     // 5. Trigger moving GC scavenge
-    gc.collect(roots);
+    const auto source = gc.add_root_source([&roots](gc::Tracer& tracer) {
+        for (uintptr_t* slot : roots) tracer.visit_ref(slot);
+    });
+    gc.collect(gc::CollectionKind::Minor);
+    gc.remove_root_source(source);
     CHECK_EQ(gc.collection_count(), 1u);
 
     // 6. Verify pointer was relocated
@@ -85,8 +89,8 @@ TEST_CASE("Deopt Hardening - GCRef in InterpreterFrame Survives GC Scavenge") {
     CHECK_EQ(updated_val.as_gcref(), relocated_addr);
 
     // 8. Data integrity in evacuated object
-    CHECK_EQ(gc.read_field(relocated_addr, 0), 0xCAFEBABEDEADBEEFULL);
-    CHECK_EQ(gc.read_field(relocated_addr, 1), 0x1234567890ABCDEFULL);
+    CHECK_EQ(gc::Heap::load(relocated_addr, 0), 0xCAFEBABEDEADBEEFULL);
+    CHECK_EQ(gc::Heap::load(relocated_addr, 1), 0x1234567890ABCDEFULL);
     (void)bb;
 }
 
@@ -151,80 +155,6 @@ TEST_CASE("Deopt Hardening - JIT Deopt Exit Reloads Float Registers (F64 & F32)"
     CHECK(std::abs(res_f32.as_f32() - kExpectedF32) < 1e-4f);
 
     register_deopt_handler(nullptr);
-}
-
-// ============================================================================
-// Deliverable 6.e: Multi-threaded Concurrent TLAB Allocations
-// ============================================================================
-TEST_CASE("Deopt Hardening - Concurrent TLAB Thread-Local Disjoint Buffers") {
-    HostGC gc(16 * 1024 * 1024);
-    set_active_host_gc(&gc);
-
-    constexpr int kNumThreads = 8;
-    constexpr int kAllocsPerThread = 50;
-
-    struct WorkerResult {
-        bool top_matches = false;
-        bool end_matches = false;
-        bool all_non_null = true;
-        std::vector<uintptr_t> allocs;
-    };
-
-    std::vector<WorkerResult> worker_results(kNumThreads);
-    std::atomic<bool> start_flag{false};
-    std::vector<std::thread> threads;
-    threads.reserve(kNumThreads);
-
-    for (int t = 0; t < kNumThreads; ++t) {
-        threads.emplace_back([&, t]() {
-            ThreadLocalAllocBuffer tlab;
-            tlab.init(&gc, 32 * 1024);
-            set_active_tlab(&tlab);
-
-            // Verify thread-local pointers point to this thread's tlab
-            worker_results[t].top_matches = (brass_current_thread_tlab_top() == &tlab.top);
-            worker_results[t].end_matches = (brass_current_thread_tlab_end() == &tlab.end);
-
-            while (!start_flag.load(std::memory_order_acquire)) {
-                std::this_thread::yield();
-            }
-
-            for (int i = 0; i < kAllocsPerThread; ++i) {
-                uintptr_t obj = tlab.allocate_fast(64, 0, 10);
-                if (obj == 0) {
-                    worker_results[t].all_non_null = false;
-                } else {
-                    worker_results[t].allocs.push_back(obj);
-                }
-            }
-
-            gc.unregister_tlab(&tlab);
-            set_active_tlab(nullptr);
-        });
-    }
-
-    start_flag.store(true, std::memory_order_release);
-    for (auto& th : threads) {
-        th.join();
-    }
-
-    set_active_host_gc(nullptr);
-
-    // Verify all thread checks in main thread
-    std::set<uintptr_t> all_ptrs;
-    for (int t = 0; t < kNumThreads; ++t) {
-        CHECK(worker_results[t].top_matches);
-        CHECK(worker_results[t].end_matches);
-        CHECK(worker_results[t].all_non_null);
-        CHECK_EQ(worker_results[t].allocs.size(), static_cast<size_t>(kAllocsPerThread));
-        for (uintptr_t ptr : worker_results[t].allocs) {
-            CHECK_EQ(ptr % 8, 0u); // 8-byte alignment for HostGC payload
-            CHECK(gc.is_valid_object(ptr));
-            auto [it, inserted] = all_ptrs.insert(ptr);
-            CHECK(inserted); // Disjointness
-        }
-    }
-    CHECK_EQ(all_ptrs.size(), static_cast<size_t>(kNumThreads * kAllocsPerThread));
 }
 
 // ============================================================================

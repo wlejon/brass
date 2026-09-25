@@ -26,7 +26,7 @@ enum class FunctionFilter : uint8_t {
     All,
     // Every function but the `__wrapper_*` ABI wrappers.
     NonWrapper,
-    // Not a coroutine state machine, an OSR entry or an ABI wrapper: the
+    // Not a coroutine state machine or an ABI wrapper: the
     // functions loop transforms may restructure (loop_eligible below).
     LoopEligible,
 };

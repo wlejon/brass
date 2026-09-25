@@ -229,7 +229,6 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
             cfi.text_offset = fn_offset;
             cfi.text_size = fn_size;
             cfi.prologue_size = prologue_sz;
-            cfi.osr_entry_offset = res.osr_entry_offset;
             cfi.return_type = fn->return_type();
             cfi.param_types = fn->param_types();
             cfi.frame_info = lir->frame;
@@ -318,7 +317,6 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
             cfi.text_offset = fn_offset;
             cfi.text_size = fn_size;
             cfi.prologue_size = prologue_sz;
-            cfi.osr_entry_offset = res.osr_entry_offset;
             cfi.return_type = fn->return_type();
             cfi.param_types = fn->param_types();
             cfi.frame_info = lir->frame;

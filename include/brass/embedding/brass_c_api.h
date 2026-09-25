@@ -14,7 +14,7 @@ extern "C" {
 typedef struct brass_engine_t brass_engine_t;
 typedef struct brass_compiled_module_t brass_compiled_module_t;
 typedef struct brass_module_t brass_module_t;
-typedef struct brass_gc_t brass_gc_t;
+typedef struct brass_heap_t brass_heap_t;
 
 // NaN-boxed 64-bit value representation
 typedef uint64_t brass_value_t;
@@ -26,7 +26,6 @@ typedef void (*brass_c_root_visitor_fn)(void** root_slot, void* user_data);
 BRASS_API brass_engine_t* BRASS_CALL brass_engine_create(void);
 BRASS_API void BRASS_CALL brass_engine_destroy(brass_engine_t* engine);
 BRASS_API void BRASS_CALL brass_engine_register_symbol(brass_engine_t* engine, const char* name, void* address);
-BRASS_API void BRASS_CALL brass_engine_register_gc(brass_engine_t* engine, brass_gc_t* gc);
 
 // Module Management
 BRASS_API brass_module_t* BRASS_CALL brass_embed_module_create(const char* name);
@@ -55,17 +54,33 @@ BRASS_API size_t BRASS_CALL brass_compiled_module_walk_stack(
     void* user_data
 );
 
-// Host Cheney GC C Interface
-BRASS_API brass_gc_t* BRASS_CALL brass_host_gc_create(size_t semispace_size);
-BRASS_API void BRASS_CALL brass_host_gc_destroy(brass_gc_t* gc);
-BRASS_API uintptr_t BRASS_CALL brass_host_gc_allocate(brass_gc_t* gc, size_t size, uint64_t pointer_mask, uint32_t type_tag);
-BRASS_API brass_value_t BRASS_CALL brass_host_gc_allocate_value(brass_gc_t* gc, size_t size, uint64_t pointer_mask, uint32_t type_tag);
-BRASS_API void BRASS_CALL brass_host_gc_collect(brass_gc_t* gc);
-BRASS_API void BRASS_CALL brass_host_gc_safepoint(brass_gc_t* gc, uintptr_t rbp, uintptr_t return_ip);
-BRASS_API void BRASS_CALL brass_host_gc_set_stress_mode(brass_gc_t* gc, int enable);
-BRASS_API int BRASS_CALL brass_host_gc_get_stress_mode(const brass_gc_t* gc);
-BRASS_API size_t BRASS_CALL brass_host_gc_collection_count(const brass_gc_t* gc);
-BRASS_API void BRASS_CALL brass_host_gc_reset(brass_gc_t* gc);
+// The garbage-collected heap (brass::gc::Heap; docs/gc_contract.md).
+// Compiled code allocates from the calling thread's bound heap. A word an
+// object's pointer mask marks is a reference when it is a raw address or a
+// NaN-boxed gcref value (brass_value_from_gcref).
+//
+// A heap with an eden of `young_bytes` (0: the default size).
+BRASS_API brass_heap_t* BRASS_CALL brass_heap_create(size_t young_bytes);
+BRASS_API void BRASS_CALL brass_heap_destroy(brass_heap_t* heap);
+// Binds `heap` (NULL: none) as the calling thread's heap, returning the one
+// bound before. Compiled code called on the thread allocates from it.
+BRASS_API brass_heap_t* BRASS_CALL brass_heap_bind(brass_heap_t* heap);
+// A zeroed object; 0 when the heap cannot hold it. May collect: every
+// reference the caller holds across the call must be a root.
+BRASS_API uintptr_t BRASS_CALL brass_heap_allocate(brass_heap_t* heap, size_t size, uint64_t pointer_mask, uint32_t type_tag);
+BRASS_API brass_value_t BRASS_CALL brass_heap_allocate_value(brass_heap_t* heap, size_t size, uint64_t pointer_mask, uint32_t type_tag);
+// A full collection (full != 0) or a young-generation one.
+BRASS_API void BRASS_CALL brass_heap_collect(brass_heap_t* heap, int full);
+// A slot outside the heap whose word every collection visits and updates.
+BRASS_API void BRASS_CALL brass_heap_add_root(brass_heap_t* heap, uint64_t* slot);
+BRASS_API void BRASS_CALL brass_heap_remove_root(brass_heap_t* heap, uint64_t* slot);
+// The barrier for a store of `value` into the object at `object`.
+BRASS_API void BRASS_CALL brass_heap_write_barrier(brass_heap_t* heap, uintptr_t object, uint64_t value);
+// Stress mode: 0 off, 1 a young collection at every allocation, 2 a full
+// one, 3 alternating.
+BRASS_API void BRASS_CALL brass_heap_set_stress(brass_heap_t* heap, int mode);
+BRASS_API int BRASS_CALL brass_heap_get_stress(const brass_heap_t* heap);
+BRASS_API size_t BRASS_CALL brass_heap_collection_count(const brass_heap_t* heap);
 
 // NaN-Box Value Construction
 BRASS_API brass_value_t BRASS_CALL brass_value_from_f64(double d);

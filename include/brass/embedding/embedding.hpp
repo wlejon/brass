@@ -9,7 +9,7 @@
 #include <brass/runtime/patcher.hpp>
 #include <brass/runtime/resume_table.hpp>
 #include <brass/embedding/nanbox.hpp>
-#include <brass/embedding/host_gc.hpp>
+#include <brass/gc/heap.hpp>
 
 #include <string>
 #include <string_view>
@@ -25,7 +25,6 @@ namespace brass {
 struct EngineOptions {
     Target target = Target::host();
     bool enable_optimizations = true;
-    bool enable_stress_gc = false;
 };
 
 class CompiledModule {
@@ -54,10 +53,6 @@ public:
     const runtime::ResumeTableRegistry& resume_tables() const noexcept;
     const runtime::FunctionResumeTable* get_resume_table(std::string_view fn_name) const noexcept;
     void* get_resume_target_address(std::string_view fn_name, uint32_t resume_id) const;
-
-    // OSR entry queries
-    size_t get_osr_entry_offset(std::string_view fn_name) const;
-    void* get_osr_entry_address(std::string_view fn_name) const;
 
     // Runtime patching
     const runtime::PatchRegistry& patch_sites() const noexcept;
@@ -114,13 +109,14 @@ public:
     // External host symbols registration
     void register_external_symbol(std::string_view name, void* address);
 
-    // Host GC attachment & automatic bridge registration
-    void register_host_gc(HostGC* gc);
+    // Compiled code allocates (brass_gc_alloc), collects and reaches its
+    // safepoints on the calling thread's current gc::Heap: bind one with a
+    // gc::HeapScope around calls into code that allocates. Its stack maps
+    // are registered with the code, so a collection finds its frames' roots.
 
     // In-memory compilation of MIR Module
     std::unique_ptr<CompiledModule> compile(const Module& mod);
     std::unique_ptr<CompiledModule> compile(Module& mod);
-    std::unique_ptr<CompiledModule> compile_with_osr(const Module& mod, std::string_view fn_name, uint32_t loop_header_id);
 
     // AOT compilation of MIR Module to Object File (.obj / .o)
     bool compile_to_object(const Module& mod, const std::string& output_path);
@@ -132,7 +128,6 @@ public:
 private:
     EngineOptions options_;
     std::unordered_map<std::string, void*> registered_symbols_;
-    HostGC* attached_gc_ = nullptr;
 };
 
 using EmbeddingEngine = HostEngine;

@@ -1,7 +1,7 @@
 #include "test_framework.hpp"
 #include <brass/brass.hpp>
 #include <brass/embedding/nanbox.hpp>
-#include <brass/embedding/host_gc.hpp>
+#include <brass/gc/heap.hpp>
 #include <brass/embedding/embedding.hpp>
 #include <brass/embedding/brass_c_api.h>
 #include <vector>
@@ -212,17 +212,20 @@ TEST_CASE("Embedding API - CompiledModule Runtime Patching and Stack Maps") {
     CHECK(!maps.functions().empty());
 }
 
-TEST_CASE("Embedding API - End-to-End Host Moving Cheney GC Proof with Root Relocation") {
-    // Setup HostGC in STRESS MODE (collects on every allocation and safepoint)
-    HostGC host_gc(256 * 1024);
-    host_gc.set_stress_mode(true);
+TEST_CASE("Embedding API - End-to-End Host Moving GC Proof with Root Relocation") {
+    // A heap in stress mode (a full collection, which moves every young
+    // object, at every allocation and safepoint), bound to the thread the
+    // compiled code runs on.
+    gc::Heap host_gc;
+    host_gc.set_stress(gc::StressMode::Full);
+    host_gc.set_poison(true);
+    gc::HeapScope bind(host_gc);
 
     HostEngine engine;
-    engine.register_host_gc(&host_gc);
 
     Module mod("moving_gc_host_proof");
-    mod.add_external_symbol("host_gc_alloc");
-    mod.add_external_symbol("host_gc_safepoint");
+    mod.add_external_symbol("brass_gc_alloc");
+    mod.add_external_symbol("brass_gc_safepoint");
 
     // Construct a binary tree of GC objects in JIT code:
     // struct Node { int64_t val; Node* left; Node* right; }
@@ -240,32 +243,32 @@ TEST_CASE("Embedding API - End-to-End Host Moving Cheney GC Proof with Root Relo
         Value* tag = b.build_iconst_i32(1);
 
         // Leaf 1: val = 100
-        Value* l1 = b.build_call("host_gc_alloc", Type::gcref(), {sz24, mask0, tag});
+        Value* l1 = b.build_call("brass_gc_alloc",Type::gcref(), {sz24, mask0, tag});
         b.build_store(Type::i64(), l1, 0, b.build_iconst_i64(100));
 
         // Leaf 2: val = 200
-        Value* l2 = b.build_call("host_gc_alloc", Type::gcref(), {sz24, mask0, tag});
+        Value* l2 = b.build_call("brass_gc_alloc",Type::gcref(), {sz24, mask0, tag});
         b.build_store(Type::i64(), l2, 0, b.build_iconst_i64(200));
 
         // Leaf 3: val = 300
-        Value* l3 = b.build_call("host_gc_alloc", Type::gcref(), {sz24, mask0, tag});
+        Value* l3 = b.build_call("brass_gc_alloc",Type::gcref(), {sz24, mask0, tag});
         b.build_store(Type::i64(), l3, 0, b.build_iconst_i64(300));
 
         // Leaf 4: val = 400
-        Value* l4 = b.build_call("host_gc_alloc", Type::gcref(), {sz24, mask0, tag});
+        Value* l4 = b.build_call("brass_gc_alloc",Type::gcref(), {sz24, mask0, tag});
         b.build_store(Type::i64(), l4, 0, b.build_iconst_i64(400));
 
         // Explicit Host Safepoint Trigger (relocates all leaves in stack frame)
         b.build_safepoint();
 
         // Branch 1: val = 10, left = l1, right = l2
-        Value* b1 = b.build_call("host_gc_alloc", Type::gcref(), {sz24, mask6, tag});
+        Value* b1 = b.build_call("brass_gc_alloc",Type::gcref(), {sz24, mask6, tag});
         b.build_store(Type::i64(), b1, 0, b.build_iconst_i64(10));
         b.build_store(Type::gcref(), b1, 8, l1);
         b.build_store(Type::gcref(), b1, 16, l2);
 
         // Branch 2: val = 20, left = l3, right = l4
-        Value* b2 = b.build_call("host_gc_alloc", Type::gcref(), {sz24, mask6, tag});
+        Value* b2 = b.build_call("brass_gc_alloc",Type::gcref(), {sz24, mask6, tag});
         b.build_store(Type::i64(), b2, 0, b.build_iconst_i64(20));
         b.build_store(Type::gcref(), b2, 8, l3);
         b.build_store(Type::gcref(), b2, 16, l4);
@@ -274,7 +277,7 @@ TEST_CASE("Embedding API - End-to-End Host Moving Cheney GC Proof with Root Relo
         b.build_safepoint();
 
         // Root Node: val = 1, left = b1, right = b2
-        Value* root = b.build_call("host_gc_alloc", Type::gcref(), {sz24, mask6, tag});
+        Value* root = b.build_call("brass_gc_alloc",Type::gcref(), {sz24, mask6, tag});
         b.build_store(Type::i64(), root, 0, b.build_iconst_i64(1));
         b.build_store(Type::gcref(), root, 8, b1);
         b.build_store(Type::gcref(), root, 16, b2);
@@ -330,18 +333,22 @@ TEST_CASE("Embedding API - End-to-End Host Moving Cheney GC Proof with Root Relo
 
     // Verify multiple collections occurred and live roots were relocated without corruption
     CHECK(host_gc.collection_count() >= 7ULL);
+    host_gc.set_stress(gc::StressMode::None);
 }
 
 TEST_CASE("Embedding API - C-Callable ABI Layer Verification") {
     brass_engine_t* engine = brass_engine_create();
     REQUIRE(engine != nullptr);
 
-    brass_gc_t* gc = brass_host_gc_create(128 * 1024);
+    brass_heap_t* gc = brass_heap_create(128 * 1024);
     REQUIRE(gc != nullptr);
-    brass_host_gc_set_stress_mode(gc, 1);
-    CHECK_EQ(brass_host_gc_get_stress_mode(gc), 1);
+    brass_heap_set_stress(gc, 1);
+    CHECK_EQ(brass_heap_get_stress(gc), 1);
+    brass_heap_set_stress(gc, 0);
+    CHECK_EQ(brass_heap_get_stress(gc), 0);
 
-    brass_engine_register_gc(engine, gc);
+    brass_heap_t* previous = brass_heap_bind(gc);
+    CHECK(previous == nullptr);
 
     // NaN-Box C API checks
     brass_value_t v_f64 = brass_value_from_f64(2.71828);
@@ -364,10 +371,13 @@ TEST_CASE("Embedding API - C-Callable ABI Layer Verification") {
     CHECK(brass_value_is_undefined(v_undef));
 
     // Allocate value in GC via C API
-    brass_value_t obj_val = brass_host_gc_allocate_value(gc, 16, 0, 1);
+    brass_value_t obj_val = brass_heap_allocate_value(gc, 16, 0, 1);
     CHECK(brass_value_is_gcref(obj_val));
     CHECK_NE(brass_value_as_gcref(obj_val), 0ULL);
+    CHECK(gc::Heap::current() != nullptr);
+    CHECK(gc::Heap::current()->is_valid_object(brass_value_as_gcref(obj_val)));
 
-    brass_host_gc_destroy(gc);
+    CHECK(brass_heap_bind(previous) == gc);
+    brass_heap_destroy(gc);
     brass_engine_destroy(engine);
 }

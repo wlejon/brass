@@ -7,8 +7,7 @@
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/vm/fast_interpreter.hpp>
 #include <brass/gc/runtime_gc.hpp>
-#include <brass/gc/generational_gc.hpp>
-#include <brass/gc/host_heap.hpp>
+#include <brass/gc/heap.hpp>
 #include <brass/gc/native_frames.hpp>
 #include <brass/mir/coro_transform.hpp>
 #include <brass/mir/function.hpp>
@@ -59,33 +58,30 @@ uint64_t resume_mir_coro_body(uintptr_t& frame_addr) {
     // A host resumed it with no interpreter running: a fresh one allocates
     // from the heap native code on this thread allocates from (as
     // MultiTierPipeline::run_fresh_tier0), whose objects the frame holds.
-    HostHeap* host = host_heap();
-    GenerationalGC* gen = host ? nullptr : brass_get_active_generational_gc();
-    MiniCheneyGC* mini = (host || gen) ? nullptr : brass_get_active_gc();
-    Interpreter interp;
+    Interpreter interp;  // the thread's current heap, else a private one
     // The host's symbols, as every interpreter brass sets up gets them
     // (run_fresh_tier0): a body calling a host external resolves it.
     install_host_symbols(interp);
-    if (gen) interp.borrow_generational_gc(gen);
-    if (mini) interp.borrow_gc(mini);
     ThreadRootsScope roots([](void* ctx, std::vector<uintptr_t*>& out) {
         static_cast<Interpreter*>(ctx)->collect_all_roots(out);
     }, &interp);
     const RuntimeValue r = interp.call_in_own_module(*body, {RuntimeValue::from_gcref(frame_addr)});
     // Without a shared heap the fresh interpreter's heap dies here: a gcref
     // into it, returned or kept in the frame, would dangle.
-    if (!(host || gen || mini)) {
-        const MiniCheneyGC& private_heap = interp.gc();
-        bool escapes = r.is_gcref() && private_heap.is_address_in_active_space(r.raw_bits());
+    if (interp.owns_heap()) {
+        const gc::Heap& private_heap = interp.heap();
+        auto inside = [&private_heap](uint64_t word) {
+            return private_heap.contains(static_cast<uintptr_t>(word & gc::kAddressMask));
+        };
+        bool escapes = r.is_gcref() && inside(r.raw_bits());
         const auto* frame = reinterpret_cast<const BrassCoroFrame*>(frame_addr);
         for (uint32_t i = 0; i < frame->slot_count && !escapes; ++i) {
-            escapes = private_heap.is_address_in_active_space(frame->slots[i]);
+            escapes = inside(frame->slots[i]);
         }
         if (escapes) {
             mir_coro_fatal("'" + std::string(body->name()) + "' ran in a fresh Tier-0 interpreter and kept a "
-                           "gcref into its private heap; install a heap for the thread (set_host_heap, "
-                           "brass_set_active_generational_gc or brass_set_active_gc) or resume the frame "
-                           "from an interpreter");
+                           "gcref into its private heap; bind a gc::Heap for the thread (gc::HeapScope) or "
+                           "resume the frame from an interpreter");
         }
     }
     return r.raw_bits();

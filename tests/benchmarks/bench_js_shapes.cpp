@@ -2,7 +2,7 @@
 #include "bench_js_shapes_modules.hpp"
 #include "bench_utils.hpp"
 #include <brass/brass.hpp>
-#include <brass/gc/mini_cheney.hpp>
+#include <brass/gc/heap.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <vector>
 #include <iostream>
@@ -134,13 +134,14 @@ int64_t shadow_stack_alloc_loop(int64_t num_nodes, ThreadShadowStack& ss) {
     frame.roots[0] = nullptr;
     ss.push(&frame, 1);
 
-    auto* gc = brass::brass_get_active_gc();
-    std::vector<uintptr_t*> roots(1);
+    // The shadow stack's slot is an explicit root of the thread's heap.
+    brass::gc::Heap* gc = brass::gc::Heap::current();
+    uint64_t* root_slot = reinterpret_cast<uint64_t*>(&frame.roots[0]);
+    gc->add_root(root_slot);
 
     for (int64_t i = 0; i < num_nodes; ++i) {
-        roots[0] = reinterpret_cast<uintptr_t*>(&frame.roots[0]);
         ClobberMemory();
-        uintptr_t node = gc->allocate(16, 2, 1, roots);
+        uintptr_t node = gc->allocate_masked(16, 2, 1);
         int64_t* val_ptr = reinterpret_cast<int64_t*>(node);
         *val_ptr = i + 1;
         uintptr_t* next_ptr = reinterpret_cast<uintptr_t*>(node + 8);
@@ -149,6 +150,7 @@ int64_t shadow_stack_alloc_loop(int64_t num_nodes, ThreadShadowStack& ss) {
         DoNotOptimize(frame.roots[0]);
         ClobberMemory();
     }
+    gc->remove_root(root_slot);
 
     int64_t sum = 0;
     uintptr_t cur = reinterpret_cast<uintptr_t>(frame.roots[0]);
@@ -364,15 +366,20 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
     }
 
     // ------------------------------------------------------------------------
-    // (d) Allocation loop building small linked objects under mini-Cheney GC
+    // (d) Allocation loop building small linked objects on a gc::Heap (the
+    // lists of earlier rounds are garbage the young collections reclaim)
     // ------------------------------------------------------------------------
     {
         const int64_t num_nodes = is_debug_build() ? 10000 : 50000;
         const size_t gc_rounds = is_debug_build() ? 5 : 30;
+        gc::HeapConfig heap_config;
+        heap_config.eden_bytes = size_t{8} << 20;
+        heap_config.survivor_bytes = size_t{2} << 20;
+        heap_config.read_environment = false;
 
         // (a) Shadow-Stack Model
         ThreadShadowStack ss;
-        MiniCheneyGC ss_gc(8 * 1024 * 1024);
+        gc::Heap ss_gc(heap_config);
 
         // (b) Brass Stack-Map Model
         auto mod = build_gc_alloc_loop_module();
@@ -386,28 +393,25 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
                 std::cerr << "FATAL: gc_alloc_runner function pointer is null!\n";
                 std::abort();
             }
-            auto gc = std::make_shared<MiniCheneyGC>(8 * 1024 * 1024);
+            auto gc = std::make_shared<gc::Heap>(heap_config);
             return [jit, gc, fn, num_nodes, gc_rounds]() {
-                brass_set_active_gc(gc.get());
+                gc::HeapScope bind(*gc);
                 brass_set_active_stack_maps(&jit->stack_maps());
                 int64_t res = 0;
                 for (size_t r = 0; r < gc_rounds; ++r) {
-                    gc->reset();
                     res = fn(num_nodes);
                     DoNotOptimize(res);
                 }
-                brass_set_active_gc(nullptr);
                 brass_set_active_stack_maps(nullptr);
                 return res;
             };
         };
 
         auto run_shadow = [&ss, &ss_gc, num_nodes, gc_rounds]() {
-            brass_set_active_gc(&ss_gc);
+            gc::HeapScope bind(ss_gc);
             brass_set_active_stack_maps(nullptr);
             int64_t res = 0;
             for (size_t r = 0; r < gc_rounds; ++r) {
-                ss_gc.reset();
                 res = shadow_stack_alloc_loop(num_nodes, ss);
                 DoNotOptimize(res);
             }
@@ -426,10 +430,9 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
             std::abort();
         }
 
-        results.push_back(make_paired_result("cheney_gc", "Linked Node Alloc (Cheney GC)", gc_rounds, paired, ratchet.get_ratio("cheney_gc", 1.35)));
+        results.push_back(make_paired_result("cheney_gc", "Linked Node Alloc (gc::Heap)", gc_rounds, paired, ratchet.get_ratio("cheney_gc", 1.35)));
         BenchmarkReporter::print_row(results.back());
 
-        brass_set_active_gc(nullptr);
         brass_set_active_stack_maps(nullptr);
     }
 }

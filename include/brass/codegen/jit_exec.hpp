@@ -296,10 +296,6 @@ public:
     const runtime::FunctionResumeTable* get_resume_table(std::string_view fn_name) const noexcept;
     void* get_resume_target_address(std::string_view fn_name, uint32_t resume_id) const;
 
-    // OSR entry offsets and addresses
-    size_t get_osr_entry_offset(std::string_view fn_name) const;
-    void* get_osr_entry_address(std::string_view fn_name) const;
-
     // Exception tables
     const runtime::ExceptionTableRegistry& exception_tables() const noexcept { return exception_tables_; }
 
@@ -374,7 +370,6 @@ private:
     ModuleStackMap stack_maps_;
     runtime::ResumeTableRegistry resume_tables_;
     runtime::PatchRegistry patch_sites_;
-    std::unordered_map<std::string, size_t> osr_entry_offsets_;
     runtime::ExceptionTableRegistry exception_tables_;
     std::vector<LoadedFunction> loaded_functions_;
     SchedOptions sched_opts_;

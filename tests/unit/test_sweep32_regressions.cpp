@@ -13,6 +13,7 @@
 // @g. @g throws 1500 (natively, or from its guard's Tier-0 continuation);
 // @mid's pad catches it and returns 2500.
 #include "test_framework.hpp"
+#include <brass/gc/heap.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/mir/module.hpp>
@@ -114,14 +115,6 @@ b0:
 enum class Mode { hnest, hnestctl, hnestnp };
 enum class Entry { interpreter, fast, host };
 
-struct ActiveGc {
-    explicit ActiveGc(MiniCheneyGC* gc) noexcept : prev(brass_get_active_gc()) { brass_set_active_gc(gc); }
-    ~ActiveGc() { brass_set_active_gc(prev); }
-    ActiveGc(const ActiveGc&) = delete;
-    ActiveGc& operator=(const ActiveGc&) = delete;
-    MiniCheneyGC* prev;
-};
-
 FunctionDispatchTable* g_prog = nullptr;
 Module* g_mod = nullptr;
 bool g_fast = false;
@@ -131,7 +124,7 @@ const char* g_mid = "mid";
 int64_t host_cb(int64_t x) {
     const Function& f = *g_mod->get_function(g_mid);
     if (g_fast) {
-        FastInterpreter fi(4096);
+        FastInterpreter fi;
         fi.set_dispatch_table(g_prog);
         fi.set_module(g_mod);
         return fi.run(f, {RuntimeValue::from_i64(x)}).as_i64();
@@ -189,21 +182,21 @@ void run_nested(Mode mode, Entry entry_kind) {
     g_mod = mod.get();
     g_fast = entry_kind == Entry::fast;
 
-    MiniCheneyGC heap(4096);
+    gc::Heap heap;
     auto run = [&](int64_t x) -> int64_t {
         std::vector<RuntimeValue> args{RuntimeValue::from_i64(x),
                                        RuntimeValue::from_ptr(reinterpret_cast<const void*>(&host_cb))};
         switch (entry_kind) {
             case Entry::host: {
-                ActiveGc a(&heap);
+                gc::HeapScope a(heap);
                 ProgramScope scope(prog);
                 FunctionHandle* h = prog.find(entry);
                 REQUIRE(h != nullptr);
                 return h->call_native(args).as_i64();
             }
             case Entry::fast: {
-                FastInterpreter fi(4096);
-                ActiveGc a(&fi.gc());
+                FastInterpreter fi;
+                gc::HeapScope a(fi.heap());
                 fi.set_dispatch_table(&prog);
                 fi.set_module(mod.get());
                 return fi.run(*mod->get_function(entry), args).as_i64();

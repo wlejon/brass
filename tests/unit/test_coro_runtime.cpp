@@ -4,7 +4,7 @@
 #include <brass/mir/coro_transform.hpp>
 #include <brass/mir/verifier.hpp>
 #include <brass/runtime/coroutine.hpp>
-#include <brass/gc/mini_cheney.hpp>
+#include <brass/gc/heap.hpp>
 #include <brass/codegen/baseline_jit.hpp>
 #include <brass/runtime/code_installer.hpp>
 #include <brass/vm/fast_interpreter.hpp>

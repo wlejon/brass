@@ -100,10 +100,9 @@ Integer literals must fit the field they fill, or the parser reports "out of ran
 - `func_addr @fn_symbol` -> `ptr`
 - `safepoint`
 
-### Speculation, Deoptimization & OSR
+### Speculation & Deoptimization
 - `guard <cond:i32>, @exit_stub [, [<val1>, <val2>, ...]]`
 - `resume_point <resume_id:i32>`
-- `osr_entry <imm64> [[<val1>, <val2>, ...]]`
 
 #### Guard exits
 
@@ -118,7 +117,7 @@ A guard with an exit stub always takes the stub, even when it also has a resume 
 |---|---|---|---|
 | Interpreter | calls `stub(v...)` | branches to the block | the installed deopt handler handles it; with no handler, `DeoptException` |
 | Baseline JIT (x64, AArch64) | calls `stub(v...)` | branches to the block | compile error |
-| Tier 2, with a pipeline resumer or deopt handler (OSR) | the lower tier finishes the call and takes the same exits as the interpreter, in the same order | the same | the resumer or handler handles it; with neither, a fatal error |
+| Tier 2, with a pipeline resumer or deopt handler (tier-up and OSR code) | the lower tier finishes the call and takes the same exits as the interpreter, in the same order | the same | the resumer or handler handles it; with neither, a fatal error |
 | Tier 2, standalone (no resumer and no handler) | native call `stub(v...)`; the stub's return registers are the function's | fatal error: nothing can resume the frame | fatal error |
 
 Tier 2 rejects a guard in a function that returns a vector, because a lower tier returns its result as one 64-bit word. Arguments past the registers go on the stack as for any call, on AArch64 as on x64.

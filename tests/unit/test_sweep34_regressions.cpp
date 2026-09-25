@@ -10,6 +10,7 @@
 //   heap's collection read it (drive, abandon). Each heap now owns its
 //   frames' registry, and a body that throws finishes its frame.
 #include "test_framework.hpp"
+#include "gc_test_heap.hpp"
 #include <brass/gc/native_frames.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/interpreter/interpreter.hpp>
@@ -127,11 +128,7 @@ bad:
 }
 )";
 
-struct ActiveGc {
-    explicit ActiveGc(MiniCheneyGC* gc) noexcept : prev(brass_get_active_gc()) { brass_set_active_gc(gc); }
-    ~ActiveGc() { brass_set_active_gc(prev); }
-    MiniCheneyGC* prev;
-};
+using ActiveGc = gc::HeapScope;
 
 std::unique_ptr<Module> parse_ok(const char* src) {
     DiagnosticReporter diag;
@@ -163,7 +160,8 @@ std::vector<int64_t> run_bridge(BridgeMode mode) {
     // Created after the install, which publishes the module's other
     // functions only to handles that already exist: these stay in Tier 0.
     for (const char* f : {"t0", "churn", "t0g", "main"}) prog.get_or_create(f, mod->get_function(f));
-    MiniCheneyGC heap(1 << 20);
+    // A 64 KB eden: @churn(100000) collects it many times.
+    gc::Heap heap(test::small_heap_config());
     ActiveGc active(&heap);
     const char* callee = g ? "t0g" : "t0";
     void* p = prog.pipeline().function_address(callee, mod->get_function(callee));
@@ -175,7 +173,7 @@ std::vector<int64_t> run_bridge(BridgeMode mode) {
                 Interpreter in;
                 in.set_dispatch_table(&prog);
                 in.set_module(mod.get());
-                ActiveGc interp_heap(&in.gc());
+                ActiveGc interp_heap(in.heap());
                 r = in.run(*mod->get_function("main"), {RuntimeValue::from_i64(x)}).as_i64();
             } else {
                 ProgramScope scope(prog);
@@ -279,13 +277,13 @@ int64_t run_then_collect_elsewhere(const char* first) {
     int64_t r = 0;
     {
         Interpreter in;
-        ActiveGc a(&in.gc());
+        ActiveGc a(in.heap());
         in.set_module(mod.get());
         r = in.run(*mod->get_function(first), {RuntimeValue::from_i64(1500)}).as_i64();
     }
     {
         Interpreter in;
-        ActiveGc a(&in.gc());
+        ActiveGc a(in.heap());
         in.set_module(mod.get());
         CHECK_EQ(in.run(*mod->get_function("churn"), {RuntimeValue::from_i64(100000)}).as_i64(), 100000);
         brass_gc_collect();
@@ -327,8 +325,8 @@ TEST_CASE("Sweep34 - a coroutine whose body threw is finished and unregistered")
         uintptr_t h = 0;
         bool threw = false;
         if (fast) {
-            FastInterpreter fi(1 << 20);
-            ActiveGc a(&fi.gc());
+            FastInterpreter fi(gc::HeapConfig{});
+            ActiveGc a(fi.heap());
             fi.set_module(mod.get());
             h = fi.coro_create(*mod, "bthrow", {RuntimeValue::from_i64(7)});
             CHECK_EQ(fi.coro_resume(h, 0), 7u);
@@ -344,7 +342,7 @@ TEST_CASE("Sweep34 - a coroutine whose body threw is finished and unregistered")
             // Finished: a resume does not run the body again.
             CHECK_EQ(fi.coro_resume(h, 0), 0u);
         } else {
-            MiniCheneyGC heap(1 << 20);
+            gc::Heap heap;
             ActiveGc a(&heap);
             h = create_mir_coro_frame(*mod->get_function("bthrow"), 2, 0);
             REQUIRE(h != 0);

@@ -1,7 +1,7 @@
 #include "test_framework.hpp"
 #include <brass/brass.hpp>
 #include <brass/embedding/nanbox.hpp>
-#include <brass/embedding/host_gc.hpp>
+#include <brass/gc/heap.hpp>
 #include <brass/embedding/embedding.hpp>
 #include <random>
 #include <vector>
@@ -51,16 +51,18 @@ TEST_CASE("Embedding Differential - NaN-Box Random Fuzz and Tag Invariant Stress
 }
 
 TEST_CASE("Embedding Differential - Deep Nested Frame GC Relocation") {
-    // Stress test deep stack frames with live GCRefs across recursive calls
-    HostGC host_gc(256 * 1024);
-    host_gc.set_stress_mode(true);
+    // Stress test deep stack frames with live GCRefs across recursive calls:
+    // a full (moving) collection at every allocation and safepoint.
+    gc::Heap host_gc;
+    host_gc.set_stress(gc::StressMode::Full);
+    host_gc.set_poison(true);
+    gc::HeapScope bind(host_gc);
 
     HostEngine engine;
-    engine.register_host_gc(&host_gc);
 
     Module mod("deep_stack_gc_mod");
-    mod.add_external_symbol("host_gc_alloc");
-    mod.add_external_symbol("host_gc_safepoint");
+    mod.add_external_symbol("brass_gc_alloc");
+    mod.add_external_symbol("brass_gc_safepoint");
 
     // helper_alloc(val: i64) -> gcref
     Function* fn_alloc = mod.create_function("helper_alloc", Type::gcref(), {Type::i64()});
@@ -74,7 +76,7 @@ TEST_CASE("Embedding Differential - Deep Nested Frame GC Relocation") {
         Value* sz = b.build_iconst_i64(16);
         Value* mask = b.build_iconst_i64(0);
         Value* tag = b.build_iconst_i32(1);
-        Value* obj = b.build_call("host_gc_alloc", Type::gcref(), {sz, mask, tag});
+        Value* obj = b.build_call("brass_gc_alloc",Type::gcref(), {sz, mask, tag});
         b.build_store(Type::i64(), obj, 0, v);
         b.build_safepoint();
         b.build_ret(obj);
@@ -138,16 +140,18 @@ TEST_CASE("Embedding Differential - Deep Nested Frame GC Relocation") {
     CHECK(host_gc.collection_count() >= 20ULL);
 }
 
-TEST_CASE("Embedding Differential - Dynamic Cyclic Graph with Moving Cheney GC") {
-    HostGC host_gc(256 * 1024);
-    host_gc.set_stress_mode(true);
+TEST_CASE("Embedding Differential - Dynamic Cyclic Graph with a Moving GC") {
+    // A full (moving) collection at every allocation and safepoint.
+    gc::Heap host_gc;
+    host_gc.set_stress(gc::StressMode::Full);
+    host_gc.set_poison(true);
+    gc::HeapScope bind(host_gc);
 
     HostEngine engine;
-    engine.register_host_gc(&host_gc);
 
     Module mod("cyclic_graph_mod");
-    mod.add_external_symbol("host_gc_alloc");
-    mod.add_external_symbol("host_gc_safepoint");
+    mod.add_external_symbol("brass_gc_alloc");
+    mod.add_external_symbol("brass_gc_safepoint");
 
     // Builds two mutually referencing nodes:
     // A -> B and B -> A
@@ -164,13 +168,17 @@ TEST_CASE("Embedding Differential - Dynamic Cyclic Graph with Moving Cheney GC")
         Value* mask2 = b.build_iconst_i64(2); // field 1 is gcref
         Value* tag = b.build_iconst_i32(1);
 
-        Value* nodeA = b.build_call("host_gc_alloc", Type::gcref(), {sz16, mask2, tag});
+        Value* nodeA = b.build_call("brass_gc_alloc",Type::gcref(), {sz16, mask2, tag});
         b.build_store(Type::i64(), nodeA, 0, vA);
 
-        Value* nodeB = b.build_call("host_gc_alloc", Type::gcref(), {sz16, mask2, tag});
+        Value* nodeB = b.build_call("brass_gc_alloc",Type::gcref(), {sz16, mask2, tag});
         b.build_store(Type::i64(), nodeB, 0, vB);
+        // Each store is barriered: nodeB's allocation promoted nodeA (a full
+        // collection), so A -> B is an old-to-young reference.
         b.build_store(Type::gcref(), nodeB, 8, nodeA); // B -> A
+        b.build_write_barrier(nodeB, nodeA);
         b.build_store(Type::gcref(), nodeA, 8, nodeB); // A -> B (cycle established)
+        b.build_write_barrier(nodeA, nodeB);
 
         // Explicit safepoints with cycle live
         b.build_safepoint();

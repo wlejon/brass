@@ -9,7 +9,7 @@
 #include <brass/mir/verifier.hpp>
 #include <brass/mir/coro_transform.hpp>
 #include <brass/gc/runtime_gc.hpp>
-#include <brass/gc/generational_gc.hpp>
+#include "gc_test_heap.hpp"
 #include <brass/gc/native_frames.hpp>
 #include <brass/codegen/jit_exec.hpp>
 #include <brass/brass_c_api.h>
@@ -38,12 +38,8 @@ std::unique_ptr<Module> parse_ok(const char* src) {
 
 using I64Fn = int64_t (*)(int64_t);
 
-// A generational heap whose 32 KB nursery the callee fills many times.
-struct GenHeap {
-    GenerationalGC gc{32 * 1024, 16 * 1024, 1 << 20, 2};
-    GenHeap() { brass_set_active_generational_gc(&gc); }
-    ~GenHeap() { brass_set_active_generational_gc(nullptr); }
-};
+// A heap whose 64 KB eden the callee fills many times, bound to the thread.
+using GenHeap = test::BoundHeap;
 
 // @cr holds %o across a coro_resume whose body allocates n objects.
 const char* kCr = R"(module @cr
@@ -90,7 +86,7 @@ int64_t run_cr(int64_t n, size_t* minors) {
     auto cr = reinterpret_cast<I64Fn>(jit.get_symbol_address("cr"));
     REQUIRE(cr != nullptr);
     const int64_t r = cr(n);
-    *minors = heap.gc.minor_collection_count();
+    *minors = heap.minor_collections();
     return r;
 }
 
@@ -204,7 +200,7 @@ int64_t run_cb(CbMode mode, size_t* minors) {
     REQUIRE(g_callback != nullptr);
     REQUIRE(f != nullptr);
     const int64_t r = f(2000);
-    *minors = heap.gc.minor_collection_count();
+    *minors = heap.minor_collections();
     g_callback = nullptr;
     return r;
 }
@@ -214,7 +210,9 @@ int64_t run_cb(CbMode mode, size_t* minors) {
 TEST_CASE("Sweep20 - coro_resume keeps its generated caller's gcrefs across a collection in the body") {
     size_t minors = 0;
     CHECK_EQ(run_cr(10, &minors), 42);
-    CHECK_EQ(minors, 0u);
+    // No collection for 10 frames, unless BRASS_GC_STRESS collects at each.
+    const bool env_stress = gc::Heap(test::small_heap_config()).stress() != gc::StressMode::None;
+    if (!env_stress) CHECK_EQ(minors, 0u);
     CHECK_EQ(run_cr(2000, &minors), 42);
     CHECK(minors > 0);
 }
@@ -230,7 +228,7 @@ TEST_CASE("Sweep20 - coro_resume of a body that collects and finishes, then resu
     auto runs = reinterpret_cast<I64Fn>(jit.get_symbol_address("runs"));
     REQUIRE(runs != nullptr);
     CHECK_EQ(runs(2000), 707);
-    CHECK(heap.gc.minor_collection_count() > 0);
+    CHECK(heap.minor_collections() > 0);
 }
 
 TEST_CASE("Sweep20 - host callback with a NativeFramesScope keeps the generated caller's gcrefs") {

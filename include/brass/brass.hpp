@@ -44,7 +44,7 @@
 #include <brass/mir/parser.hpp>
 
 #include <brass/interpreter/value.hpp>
-#include <brass/gc/mini_cheney.hpp>
+#include <brass/gc/heap.hpp>
 #include <brass/interpreter/frame.hpp>
 #include <brass/interpreter/interpreter.hpp>
 
@@ -78,10 +78,8 @@
 #include <brass/runtime/resume_table.hpp>
 #include <brass/runtime/patcher.hpp>
 #include <brass/runtime/host_symbols.hpp>
-#include <brass/gc/host_heap.hpp>
 
 #include <brass/embedding/nanbox.hpp>
-#include <brass/embedding/host_gc.hpp>
 #include <brass/embedding/embedding.hpp>
 #include <brass/embedding/brass_c_api.h>
 

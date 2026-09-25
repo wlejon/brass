@@ -95,14 +95,7 @@ bool Pipeline::contains(std::string_view name) const noexcept {
 }
 
 bool loop_eligible(const Function& fn) {
-    if (!fn.resume_points().empty() || fn.name().starts_with("__wrapper_")) return false;
-    for (const BasicBlock* bb : fn.blocks()) {
-        if (!bb) continue;
-        for (const Instruction* inst : *bb) {
-            if (inst && inst->opcode() == Opcode::osr_entry) return false;
-        }
-    }
-    return true;
+    return fn.resume_points().empty() && !fn.name().starts_with("__wrapper_");
 }
 
 PipelineResult run_pipeline(Module& mod, const Pipeline& pipeline, const PassPipelineHooks& hooks) {

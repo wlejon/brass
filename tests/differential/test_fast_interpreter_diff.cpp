@@ -9,8 +9,7 @@
 #include <brass/mir/coro_transform.hpp>
 #include <brass/mir/verifier.hpp>
 #include <brass/mir/builder.hpp>
-#include <brass/gc/mini_cheney.hpp>
-#include <brass/gc/generational_gc.hpp>
+#include <brass/gc/heap.hpp>
 #include "../benchmarks/bench_numeric_modules.hpp"
 #include <vector>
 #include <cmath>
@@ -716,42 +715,45 @@ TEST_CASE("Differential - FastInterpreter vs Oracle: Garbage Collection Roots") 
     fn->rebuild_cfg_predecessors();
 
     // 1. Oracle Interpreter
-    Interpreter oracle(128 * 1024);
-    uintptr_t o_obj = oracle.gc().allocate(24, 0, 7);
-    oracle.gc().write_field(o_obj, 0, 0x123456789ABCDEF0ULL);
+    // Each host function roots the object, runs a young (moving) collection
+    // on the interpreter's heap and reads the object where it moved.
+    auto scavenge = [](gc::Heap& heap, uintptr_t obj, uintptr_t& updated) {
+        uint64_t root = obj;
+        heap.add_root(&root);
+        heap.collect(gc::CollectionKind::Minor);
+        heap.remove_root(&root);
+        updated = static_cast<uintptr_t>(root);
+        return static_cast<int64_t>(gc::Heap::load(updated, 0));
+    };
+
+    Interpreter oracle(gc::HeapConfig{});
+    uintptr_t o_obj = oracle.heap().allocate_masked(24, 0, 7);
+    oracle.heap().store(o_obj, 0, 0x123456789ABCDEF0ULL);
     uintptr_t o_updated = 0;
 
     oracle.register_external_function("scavenge_and_check", [&](Interpreter& in, const std::vector<RuntimeValue>& args) -> RuntimeValue {
-        std::vector<uintptr_t*> roots;
-        uintptr_t root = o_obj;
-        roots.push_back(&root);
-        in.gc().collect(roots);
-        o_updated = root;
-        int64_t field = static_cast<int64_t>(in.gc().read_field(o_updated, 0));
+        const int64_t field = scavenge(in.heap(), o_obj, o_updated);
         return RuntimeValue::from_i64(field + args[0].as_i64());
     });
     RuntimeValue o_res = oracle.run(mod, "gc_root_runner", {RuntimeValue::from_i64(5)});
 
     // 2. FastInterpreter
-    FastInterpreter fast(128 * 1024);
-    uintptr_t f_obj = fast.gc().allocate(24, 0, 7);
-    fast.gc().write_field(f_obj, 0, 0x123456789ABCDEF0ULL);
+    FastInterpreter fast(gc::HeapConfig{});
+    uintptr_t f_obj = fast.heap().allocate_masked(24, 0, 7);
+    fast.heap().store(f_obj, 0, 0x123456789ABCDEF0ULL);
     uintptr_t f_updated = 0;
 
     fast.register_external_function("scavenge_and_check", [&](FastInterpreter& in, const std::vector<RuntimeValue>& args) -> RuntimeValue {
-        std::vector<uintptr_t*> roots;
-        uintptr_t root = f_obj;
-        roots.push_back(&root);
-        in.gc().collect(roots);
-        f_updated = root;
-        int64_t field = static_cast<int64_t>(in.gc().read_field(f_updated, 0));
+        const int64_t field = scavenge(in.heap(), f_obj, f_updated);
         return RuntimeValue::from_i64(field + args[0].as_i64());
     });
     RuntimeValue f_res = fast.run(mod, "gc_root_runner", {RuntimeValue::from_i64(5)});
 
     CHECK_EQ(o_res.as_i64(), f_res.as_i64());
-    CHECK(oracle.gc().is_valid_object(o_updated));
-    CHECK(fast.gc().is_valid_object(f_updated));
+    CHECK_NE(o_updated, o_obj);
+    CHECK_NE(f_updated, f_obj);
+    CHECK(oracle.heap().is_valid_object(o_updated));
+    CHECK(fast.heap().is_valid_object(f_updated));
 }
 
 // ============================================================================

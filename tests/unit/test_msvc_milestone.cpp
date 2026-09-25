@@ -5,7 +5,7 @@
 #include <brass/object/object_writer.hpp>
 #include <brass/object/coff_writer.hpp>
 #include <brass/codegen/jit_exec.hpp>
-#include <brass/gc/mini_cheney.hpp>
+#include <brass/gc/heap.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/gc/stack_walker.hpp>
 #include "test_framework.hpp"
@@ -684,10 +684,11 @@ TEST_CASE("MSVC Milestone (d) - Stack walker finds live gcrefs across Brass -> M
         REQUIRE(verify_function(*fn1));
     }
 
-    // 4. Run with Native JIT Execution & MiniCheney Moving GC
-    MiniCheneyGC gc(128 * 1024);
-    gc.set_stress_mode(false); // Clean explicit safepoints
-    brass_set_active_gc(&gc);
+    // 4. Run with Native JIT Execution & a moving collection at every
+    // allocation and safepoint (minor collections move every young object).
+    gc::Heap heap;
+    heap.set_stress(gc::StressMode::Minor);
+    gc::HeapScope heap_scope(heap);
 
     codegen::JitExecutionEngine jit(Target::host());
 
@@ -699,7 +700,7 @@ TEST_CASE("MSVC Milestone (d) - Stack walker finds live gcrefs across Brass -> M
     auto* f3_addr = jit.get_symbol_address("brass_frame3");
     REQUIRE(f3_addr != nullptr);
 
-    uint64_t initial_collections = gc.collection_count();
+    uint64_t initial_collections = heap.collection_count();
 
     // Invoke Frame 1: Frame 1 (1111) -> MSVC Frame 2 (+10000) -> Frame 3 (2222 + 10 = 2232)
     // Expected return: 1111 + 10000 + 2232 = 13343
@@ -709,9 +710,8 @@ TEST_CASE("MSVC Milestone (d) - Stack walker finds live gcrefs across Brass -> M
     });
 
     CHECK_EQ(res.as_i64(), 13343LL);
-    CHECK(gc.collection_count() > initial_collections);
+    CHECK(heap.collection_count() > initial_collections);
 
-    brass_set_active_gc(nullptr);
     brass_set_active_stack_maps(nullptr);
 
     FreeLibrary(hDll);

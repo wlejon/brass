@@ -95,8 +95,6 @@ private:
     int32_t allocate_spill_slot(bool is_gcref, uint8_t size);
     int32_t allocate_spill_slot(bool is_gcref) { return allocate_spill_slot(is_gcref, 8); }
     void rewrite_instructions();
-    // Fill fn_.osr_entry.live_at_header from the header's live-in set.
-    void mark_osr_live_ins();
     // Fill live_gcrefs of every call and safepoint with the gcref vregs live
     // across it (live after the site and not defined by it).
     void record_live_gcrefs();

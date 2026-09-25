@@ -102,7 +102,6 @@ std::string_view opcode_name(Opcode op) noexcept {
 
         case Opcode::guard: return "guard";
         case Opcode::resume_point: return "resume_point";
-        case Opcode::osr_entry: return "osr_entry";
 
         case Opcode::br: return "br";
         case Opcode::br_if: return "br_if";
@@ -349,10 +348,6 @@ bool is_coro_resume(Opcode op) noexcept {
     return op == Opcode::coro_resume;
 }
 
-bool is_osr_entry(Opcode op) noexcept {
-    return op == Opcode::osr_entry;
-}
-
 bool has_side_effects(Opcode op) noexcept {
     if (is_terminator(op)) return true;
     if (is_call(op)) return true;
@@ -369,7 +364,6 @@ bool has_side_effects(Opcode op) noexcept {
         case Opcode::safepoint:
         case Opcode::guard:
         case Opcode::resume_point:
-        case Opcode::osr_entry:
         case Opcode::landing_pad:
             return true;
         default:

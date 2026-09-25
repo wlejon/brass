@@ -1,7 +1,7 @@
 #include "test_framework.hpp"
 #include "diff_harness.hpp"
 #include "fuzz_generator.hpp"
-#include <brass/gc/mini_cheney.hpp>
+#include <brass/gc/heap.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <random>
 
@@ -22,15 +22,17 @@ TEST_CASE("Differential Fuzzer - Moving GC Roots Across Calls and Safepoints") {
         int64_t v2 = static_cast<int64_t>(rng() % 10000 + 1);
         std::vector<RuntimeValue> args = {RuntimeValue::from_i64(v1), RuntimeValue::from_i64(v2)};
 
-        // 1. Interpreter execution with Cheney GC stress mode
-        Interpreter interp(64 * 1024);
-        interp.gc().set_stress_mode(true);
+        // 1. Interpreter execution with a full (moving: every young object is
+        // promoted) collection at every allocation and safepoint. Full, not
+        // minor: the generated MIR has no write barriers.
+        Interpreter interp(gc::HeapConfig{});
+        interp.heap().set_stress(gc::StressMode::Full);
         RuntimeValue interp_res = interp.run(mod, fn_name, args);
 
-        // 2. Native JIT execution with Cheney GC stress mode and Stack Maps
-        MiniCheneyGC gc(64 * 1024);
-        gc.set_stress_mode(true);
-        brass_set_active_gc(&gc);
+        // 2. Native JIT execution under the same stress, through the stack maps
+        gc::Heap gc;
+        gc.set_stress(gc::StressMode::Full);
+        gc::HeapScope bind(gc);
 
         codegen::JitExecutionEngine jit(Target::host());
         bool ok = jit.compile_and_load(mod);
@@ -43,7 +45,6 @@ TEST_CASE("Differential Fuzzer - Moving GC Roots Across Calls and Safepoints") {
         CHECK_EQ(interp_res.as_i64(), jit_res.as_i64());
         CHECK(gc.collection_count() >= 1ULL);
 
-        brass_set_active_gc(nullptr);
         brass_set_active_stack_maps(nullptr);
     }
 }

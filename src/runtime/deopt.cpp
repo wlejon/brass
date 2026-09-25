@@ -96,10 +96,8 @@ std::vector<RuntimeValue> DeoptFrame::to_runtime_values() const {
 
 static thread_local DeoptFrame g_thread_deopt_frame;
 // Per thread: a handler resumes the frames of the code running on the thread
-// that installed it (an OSR call's handler resumes that call's interpreter
-// frame). Process-wide, concurrent OSR calls on two threads replaced and
-// restored each other's handlers, resuming one thread's guard failure in the
-// other thread's interpreter frame, or in one that had already returned.
+// that installed it, so handlers installed on two threads at once never see
+// each other's guard failures.
 static thread_local DeoptHandlerFn g_deopt_handler = nullptr;
 
 DeoptFrame* get_thread_deopt_frame() noexcept {

@@ -1,6 +1,7 @@
 // Regressions from bug sweep 17: interpreter moves, the heap a fresh Tier-0
 // interpreter (deoptimization, native-to-Tier-0 call) allocates from, and
-// the roots a host heap can see.
+// the roots a collection on the thread's heap sees (and a host runtime's
+// own collector could ask for through brass_enumerate_thread_roots).
 #include "test_framework.hpp"
 #include <brass/mir/module.hpp>
 #include <brass/mir/parser.hpp>
@@ -11,10 +12,10 @@
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/tiering.hpp>
 #include <brass/gc/runtime_gc.hpp>
-#include <brass/gc/generational_gc.hpp>
-#include <brass/gc/host_heap.hpp>
+#include <brass/gc/heap.hpp>
 #include <brass/gc/native_frames.hpp>
 #include <brass/codegen/jit_exec.hpp>
+#include <algorithm>
 #include <memory>
 #include <type_traits>
 #include <vector>
@@ -115,52 +116,40 @@ FunctionHandle* install2(FunctionDispatchTable& prog, Module& mod, const char* n
     return h;
 }
 
-// A host heap that does not move or free anything, but on every
-// collection asks brass for the thread's roots and counts the slots naming
-// the watched object.
-class RootCountHeap final : public HostHeap {
-public:
-    uintptr_t allocate(size_t size, uint64_t, uint32_t) override {
-        blocks_.push_back(std::make_unique<uint64_t[]>((size + 7) / 8 + 1));
-        return reinterpret_cast<uintptr_t>(blocks_.back().get());
-    }
-    void collect() override { count(0, 0); }
-    void safepoint_at(uintptr_t fp, uintptr_t ip) override {
-        if (fp != 0 && ip != 0) ++framed_safepoints;
-        count(fp, ip);
-    }
-
-    void count(uintptr_t fp, uintptr_t ip) {
-        ++collects;
-        std::vector<uintptr_t*> roots;
-        brass_append_native_frame_roots(roots);
-        thread_roots_naming = 0;
-        for (uintptr_t* s : roots) if (s && *s == watched) ++thread_roots_naming;
-        roots.clear();
-        HostHeapCollectionScope collecting;
-        brass_enumerate_thread_roots(fp, ip, roots);
-        enumerated_naming = 0;
-        for (uintptr_t* s : roots) if (s && *s == watched) ++enumerated_naming;
-    }
-
+// A heap bound to the thread whose freed memory is poisoned (a stale slot
+// reads 0xDB bytes), plus a root source that visits nothing but, at every
+// collection, asks brass for the thread's roots the way a host runtime's
+// own collector would, and counts the slots naming the watched object.
+struct RootCountHeap {
+    gc::Heap heap;
+    gc::HeapScope bind{heap};
+    gc::Heap::RootSourceId source = 0;
     uintptr_t watched = 0;
     size_t thread_roots_naming = 0;
     size_t enumerated_naming = 0;
     int collects = 0;
-    int framed_safepoints = 0;
 
-private:
-    std::vector<std::unique_ptr<uint64_t[]>> blocks_;
-};
+    RootCountHeap() {
+        heap.set_poison(true);
+        source = heap.add_root_source([this](gc::Tracer&) { count(); });
+    }
+    ~RootCountHeap() { heap.remove_root_source(source); }
 
-struct HeapScope {
-    explicit HeapScope(HostHeap* heap) { set_host_heap(heap); }
-    ~HeapScope() { set_host_heap(nullptr); }
-};
-
-struct GenScope {
-    explicit GenScope(GenerationalGC* gc) { brass_set_active_generational_gc(gc); }
-    ~GenScope() { brass_set_active_generational_gc(nullptr); }
+    // The most slots any one root pass saw: a verifying heap (BRASS_GC_VERIFY)
+    // runs the sources again after the object has moved, naming it no more.
+    void count() {
+        ++collects;
+        std::vector<uintptr_t*> roots;
+        brass_append_native_frame_roots(roots);
+        size_t naming = 0;
+        for (uintptr_t* s : roots) if (s && *s == watched) ++naming;
+        thread_roots_naming = std::max(thread_roots_naming, naming);
+        roots.clear();
+        brass_enumerate_thread_roots(0, 0, roots);
+        naming = 0;
+        for (uintptr_t* s : roots) if (s && *s == watched) ++naming;
+        enumerated_naming = std::max(enumerated_naming, naming);
+    }
 };
 
 void host_roots_case(bool fast) {
@@ -168,8 +157,8 @@ void host_roots_case(bool fast) {
     FunctionDispatchTable prog;
     prog.pipeline().initialize(no_tierup(fast));
     RootCountHeap heap;
-    HeapScope scope(&heap);
     FunctionHandle* h = install2(prog, *mod, "specc");
+    // The host's reference is not a root: only the frames holding %o are.
     const uintptr_t o = brass_gc_alloc(48, 0, 2);
     reinterpret_cast<int64_t*>(o)[2] = 42;
     heap.watched = o;
@@ -177,9 +166,9 @@ void host_roots_case(bool fast) {
                                      RuntimeValue::from_i32(0)});
     CHECK_EQ(r.as_i64(), 42);
     CHECK_EQ(prog.pipeline().tier2_deopts(), 1u);
-    REQUIRE_EQ(heap.collects, 1);
-    // The fresh interpreter's frame holding %o is a thread root although
-    // no MiniCheneyGC is active.
+    REQUIRE(heap.collects >= 1);
+    // The fresh interpreter's frame holding %o is a thread root, found both
+    // by the heap (the read above) and through the thread-root enumeration.
     CHECK(heap.thread_roots_naming >= 1u);
     CHECK(heap.enumerated_naming >= 1u);
 }
@@ -188,8 +177,8 @@ void generational_case(bool fast) {
     auto mod = parse_ok(kDeopt);
     FunctionDispatchTable prog;
     prog.pipeline().initialize(no_tierup(fast));
-    GenerationalGC g;
-    GenScope scope(&g);
+    gc::Heap g;
+    gc::HeapScope scope(g);
     FunctionHandle* h = install2(prog, *mod, "specb");
     for (int t : {1, 0}) {
         RuntimeValue r = h->call_native({RuntimeValue::from_i64(7), RuntimeValue::from_i32(t)});
@@ -209,75 +198,56 @@ TEST_CASE("Sweep17 - interpreters are not movable (their heap's root provider ca
     CHECK(!std::is_move_assignable_v<FastInterpreter>);
 }
 
-TEST_CASE("Sweep17 - deopt from host-called native code allocates in the active GenerationalGC (Interpreter)") {
+TEST_CASE("Sweep17 - deopt from host-called native code allocates in the thread's heap (Interpreter)") {
     generational_case(false);
 }
 
-TEST_CASE("Sweep17 - deopt from host-called native code allocates in the active GenerationalGC (FastInterpreter)") {
+TEST_CASE("Sweep17 - deopt from host-called native code allocates in the thread's heap (FastInterpreter)") {
     generational_case(true);
 }
 
-TEST_CASE("Sweep17 - a host heap sees the fresh Tier-0 interpreter's roots (Interpreter)") {
+TEST_CASE("Sweep17 - a collection sees the fresh Tier-0 interpreter's roots (Interpreter)") {
     host_roots_case(false);
 }
 
-TEST_CASE("Sweep17 - a host heap sees the fresh Tier-0 interpreter's roots (FastInterpreter)") {
+TEST_CASE("Sweep17 - a collection sees the fresh Tier-0 interpreter's roots (FastInterpreter)") {
     host_roots_case(true);
 }
 
-TEST_CASE("Sweep17 - a host heap's safepoint gets the JIT frame and can enumerate its roots") {
+// brass_gc_collect from generated code walks the JIT frame: the object
+// @keepj holds across it moves (a full collection promotes it) and the
+// frame's slot is updated, else the load reads poison.
+TEST_CASE("Sweep17 - a collection requested by generated code walks the JIT frame") {
     auto mod = parse_ok(kDeopt);
-    RootCountHeap heap;
-    HeapScope scope(&heap);
+    gc::Heap heap;
+    heap.set_poison(true);
+    gc::HeapScope scope(heap);
     codegen::JitExecutionEngine jit(Target::host());
     REQUIRE(jit.compile_and_load(*mod));
     auto fn = jit.get_function_ptr<int64_t (*)()>("keepj");
     REQUIRE(fn != nullptr);
-    // Watches the object @keepj allocates and holds across its collection.
-    struct Watch final : HostHeap {
-        RootCountHeap& inner;
-        explicit Watch(RootCountHeap& h) : inner(h) {}
-        uintptr_t allocate(size_t s, uint64_t m, uint32_t t) override {
-            const uintptr_t p = inner.allocate(s, m, t);
-            inner.watched = p;
-            return p;
-        }
-        void collect() override { inner.collect(); }
-        void safepoint_at(uintptr_t fp, uintptr_t ip) override { inner.safepoint_at(fp, ip); }
-    } watch(heap);
-    HeapScope inner_scope(&watch);
+    const uint64_t before = heap.stats().full_collections;
     CHECK_EQ(fn(), 42);
-    REQUIRE_EQ(heap.collects, 1);
-    CHECK_EQ(heap.framed_safepoints, 1);
-    CHECK(heap.enumerated_naming >= 1u);
+    CHECK(heap.stats().full_collections > before);
+    CHECK(heap.stats().promoted_bytes > 0);
 }
 
-TEST_CASE("Sweep18 - a host heap's allocation from generated code gets the JIT frame and can enumerate its roots") {
+// An allocation from generated code that collects walks the JIT frame: in
+// stress mode @keepa's second allocation collects while its first object
+// is live in the frame.
+TEST_CASE("Sweep18 - a collection in an allocation from generated code walks the JIT frame") {
     auto mod = parse_ok(kDeopt);
-    RootCountHeap heap;
+    gc::Heap heap;
+    heap.set_poison(true);
+    gc::HeapScope scope(heap);
     codegen::JitExecutionEngine jit(Target::host());
     REQUIRE(jit.compile_and_load(*mod));
     auto fn = jit.get_function_ptr<int64_t (*)()>("keepa");
     REQUIRE(fn != nullptr);
-    // Watches @keepa's first object and, at its second allocation (where a
-    // host may collect), asks brass for the roots from the frame it gets.
-    struct Watch final : HostHeap {
-        RootCountHeap& inner;
-        int allocations = 0;
-        int framed = 0;
-        explicit Watch(RootCountHeap& h) : inner(h) {}
-        uintptr_t allocate(size_t s, uint64_t m, uint32_t t) override { return inner.allocate(s, m, t); }
-        uintptr_t allocate_at(size_t s, uint64_t m, uint32_t t, uintptr_t fp, uintptr_t ip) override {
-            if (fp != 0 && ip != 0) ++framed;
-            if (++allocations == 2) inner.count(fp, ip);
-            const uintptr_t p = inner.allocate(s, m, t);
-            if (allocations == 1) inner.watched = p;
-            return p;
-        }
-    } watch(heap);
-    HeapScope scope(&watch);
-    CHECK_EQ(fn(), 42);
-    CHECK_EQ(watch.allocations, 2);
-    CHECK_EQ(watch.framed, 2);
-    CHECK(heap.enumerated_naming >= 1u);
+    heap.set_stress(gc::StressMode::Minor);
+    const uint64_t before = heap.collection_count();
+    const int64_t r = fn();
+    heap.set_stress(gc::StressMode::None);
+    CHECK_EQ(r, 42);
+    CHECK(heap.collection_count() >= before + 2);
 }

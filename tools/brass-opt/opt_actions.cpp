@@ -14,9 +14,11 @@
 #include <brass/runtime/background_compiler.hpp>
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
+#include <brass/runtime/compile_pool.hpp>
+#include <brass/vm/fast_interpreter.hpp>
 #include <brass/pgo/instrument.hpp>
 #include <brass/runtime/parallel_runtime.hpp>
-#include <brass/gc/mini_cheney.hpp>
+#include <brass/gc/heap.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/gc/stack_map.hpp>
 #include <iostream>
@@ -57,28 +59,23 @@ RuntimeValue parse_arg_for_type(Type type, const std::string& arg_str) {
     return RuntimeValue::from_i64(std::stoll(arg_str, nullptr, 0));
 }
 
-// Native runs allocate through brass_gc_alloc, which needs an active
-// collector and the running code's stack maps. Installs both for the
-// lifetime of the guard; --gc-stress collects on every allocation.
+// Native runs allocate through brass_gc_alloc, which needs the thread's heap
+// and the running code's stack maps. Installs both for the lifetime of the
+// guard; --gc-stress collects on every allocation.
 class NativeGcScope {
 public:
     NativeGcScope(bool stress, const ModuleStackMap* maps)
-        : gc_(kHeapBytes), prev_gc_(brass_get_active_gc()), prev_maps_(brass_get_active_stack_maps()) {
-        gc_.set_stress_mode(stress);
-        brass_set_active_gc(&gc_);
+        : heap_scope_(heap_), prev_maps_(brass_get_active_stack_maps()) {
+        if (stress) heap_.set_stress(gc::StressMode::Alternate);
         brass_set_active_stack_maps(maps);
     }
-    ~NativeGcScope() {
-        brass_set_active_gc(prev_gc_);
-        brass_set_active_stack_maps(prev_maps_);
-    }
+    ~NativeGcScope() { brass_set_active_stack_maps(prev_maps_); }
     NativeGcScope(const NativeGcScope&) = delete;
     NativeGcScope& operator=(const NativeGcScope&) = delete;
 
 private:
-    static constexpr size_t kHeapBytes = 16 * 1024 * 1024;
-    MiniCheneyGC gc_;
-    MiniCheneyGC* prev_gc_;
+    gc::Heap heap_;
+    gc::HeapScope heap_scope_;
     const ModuleStackMap* prev_maps_;
 };
 
@@ -87,6 +84,47 @@ private:
 void register_debug_source(object::ObjectFile& obj, const std::string& input_file) {
     if (obj.debug_context.file_count() > 0) return;
     obj.debug_context.get_or_add_file(input_file == "-" || input_file.empty() ? "<stdin>" : input_file);
+}
+
+// --enable-osr: the function runs in a program of its own whose pipeline
+// keeps it interpreted, with OSR after `osr_threshold` backedges. A first
+// run asks for the OSR code of the loops it runs hot; once that code is
+// compiled, the run whose result is printed enters it mid-loop.
+bool run_with_osr(const Function& fn, const std::vector<RuntimeValue>& args, const RunFunctionOptions& opts) {
+    runtime::FunctionDispatchTable program;
+    runtime::TieringConfig cfg;
+    cfg.invocation_tier1_threshold = UINT32_MAX;
+    cfg.invocation_tier2_threshold = UINT32_MAX;
+    cfg.enable_background_compile = false;
+    cfg.set_use_fast_interpreter(true);
+    program.pipeline().initialize(cfg);
+    program.osr().set_enabled(true);
+    program.osr().set_threshold(opts.osr_threshold);
+    FastInterpreter interp;
+    interp.set_dispatch_table(&program);
+    try {
+        RuntimeValue result;
+        const char* fault = call_catching_arith_faults([&] { result = interp.run(fn, args); });
+        if (!fault) {
+            runtime::CompilePool::shared().wait_owner(&program.osr());
+            fault = call_catching_arith_faults([&] { result = interp.run(fn, args); });
+        }
+        if (fault) {
+            std::cerr << "Runtime error during execution: " << fault << "\n";
+            return false;
+        }
+        if (!fn.return_type().is_void()) {
+            std::cout << result << "\n";
+        }
+        if (opts.dump_tiering_stats) {
+            program.tiering().dump_stats(std::cout);
+            std::cout << "OSR migrations: " << program.osr().total_osr_migrations() << "\n";
+        }
+    } catch (const std::exception& ex) {
+        std::cerr << "Runtime error during execution: " << ex.what() << "\n";
+        return false;
+    }
+    return true;
 }
 
 } // namespace
@@ -298,6 +336,8 @@ bool execute_run_function(Module& mod, const RunFunctionOptions& opts) {
         return true;
     }
 
+    if (opts.enable_osr) return run_with_osr(*fn, run_args, opts);
+
     Interpreter interp;
     interp.register_external_function("brass_pgo_inc", [](Interpreter&, const std::vector<RuntimeValue>& args) {
         if (!args.empty()) {
@@ -307,11 +347,7 @@ bool execute_run_function(Module& mod, const RunFunctionOptions& opts) {
         return RuntimeValue::from_void();
     });
     if (opts.gc_stress) {
-        interp.gc().set_stress_mode(true);
-    }
-    if (opts.enable_osr) {
-        runtime::OsrCoordinator::instance().set_enabled(true);
-        runtime::OsrCoordinator::instance().set_threshold(opts.osr_threshold);
+        interp.heap().set_stress(gc::StressMode::Alternate);
     }
     if (opts.enable_background_compile) {
         runtime::TieringRegistry::instance().set_background_compile_enabled(true);

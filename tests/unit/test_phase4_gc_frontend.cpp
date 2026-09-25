@@ -1,8 +1,5 @@
 #include "test_framework.hpp"
-#include <brass/gc/generational_gc.hpp>
-#include <brass/gc/mini_cheney.hpp>
-#include <brass/gc/tlab.hpp>
-#include <brass/embedding/host_gc.hpp>
+#include <brass/gc/heap.hpp>
 #include <brass/core/arena.hpp>
 #include <brass/mir/module.hpp>
 #include <brass/mir/builder.hpp>
@@ -14,53 +11,85 @@
 
 using namespace brass;
 
+namespace {
+
+// A heap that ignores BRASS_GC_* (these tests count collections).
+gc::HeapConfig plain_config() {
+    gc::HeapConfig config;
+    config.read_environment = false;
+    return config;
+}
+
+// Visits `slots` (duplicates included) as roots for the scope's lifetime.
+class SlotRoots {
+public:
+    SlotRoots(gc::Heap& heap, std::vector<uint64_t*> slots) : heap_(heap), slots_(std::move(slots)) {
+        id_ = heap_.add_root_source([this](gc::Tracer& tracer) {
+            for (uint64_t* slot : slots_) tracer.visit(slot);
+        });
+    }
+    ~SlotRoots() { heap_.remove_root_source(id_); }
+    SlotRoots(const SlotRoots&) = delete;
+    SlotRoots& operator=(const SlotRoots&) = delete;
+
+private:
+    gc::Heap& heap_;
+    std::vector<uint64_t*> slots_;
+    gc::Heap::RootSourceId id_ = 0;
+};
+
+} // namespace
+
 // =============================================================================
 // Task 1: Generational GC Scavenge Re-Evacuation and Object Duplication Bug
 // =============================================================================
 
-TEST_CASE("Phase 4 - Generational GC: is_scavenge_source correctly filters survivor_to") {
-    // 64 KB nursery, 32 KB survivor, 128 KB tenured
-    GenerationalGC gc(64 * 1024, 32 * 1024, 128 * 1024);
+TEST_CASE("Phase 4 - Generational GC: generation queries classify young, old and foreign addresses") {
+    gc::Heap gc(plain_config());
 
-    uintptr_t obj = gc.allocate(24, 0, 10);
+    uintptr_t obj = gc.allocate_masked(24, 0, 10);
     REQUIRE(obj != 0);
 
-    // Object is in nursery -> scavenge source
-    CHECK(gc.is_in_nursery(obj));
+    // A fresh small object is young (collected by a minor collection)
     CHECK(gc.is_young(obj));
-    CHECK(gc.is_scavenge_source(obj));
+    CHECK(!gc.is_old(obj));
+    CHECK(gc.contains(obj));
 
-    // Address in tenured is not a scavenge source
-    uintptr_t tenured = gc.allocate(100 * 1024, 0, 20); // Large alloc goes to tenured
+    // A large allocation goes straight to the old generation
+    uintptr_t tenured = gc.allocate_masked(100 * 1024, 0, 20);
     REQUIRE(tenured != 0);
-    CHECK(gc.is_in_tenured(tenured));
-    CHECK(!gc.is_scavenge_source(tenured));
+    CHECK(gc.is_old(tenured));
+    CHECK(!gc.is_young(tenured));
 
-    // Invalid address outside heap is not a scavenge source
-    CHECK(!gc.is_scavenge_source(0));
-    CHECK(!gc.is_scavenge_source(0x12345678));
+    // Addresses outside the heap are neither
+    CHECK(!gc.contains(0));
+    CHECK(!gc.is_young(0));
+    CHECK(!gc.is_old(0));
+    CHECK(!gc.contains(0x12345678));
+    CHECK(!gc.is_valid_object(0x12345678));
 }
 
 TEST_CASE("Phase 4 - Generational GC: Multiple and duplicate roots do not duplicate young objects") {
-    GenerationalGC gc(32 * 1024, 32 * 1024, 64 * 1024);
+    gc::Heap gc(plain_config());
 
     // Allocate young object with data
-    uintptr_t orig_obj = gc.allocate(24, 0, 42);
+    uintptr_t orig_obj = gc.allocate_masked(24, 0, 42);
     REQUIRE(orig_obj != 0);
-    gc.write_field(orig_obj, 0, 0x1122334455667788ULL);
-    gc.write_field(orig_obj, 1, 0x99AABBCCDDEEFF00ULL);
+    gc.store(orig_obj, 0, 0x1122334455667788ULL);
+    gc.store(orig_obj, 1, 0x99AABBCCDDEEFF00ULL);
 
     // Three root pointers pointing to the SAME object, plus a duplicate slot address
-    uintptr_t r1 = orig_obj;
-    uintptr_t r2 = orig_obj;
-    uintptr_t r3 = orig_obj;
-    std::vector<uintptr_t*> roots = { &r1, &r2, &r3, &r1 };
+    uint64_t r1 = orig_obj;
+    uint64_t r2 = orig_obj;
+    uint64_t r3 = orig_obj;
+    {
+        SlotRoots roots(gc, {&r1, &r2, &r3, &r1});
+        gc.collect(gc::CollectionKind::Minor);
+    }
 
-    gc.minor_collect(roots);
-
-    CHECK_EQ(gc.minor_collections(), 1ULL);
+    CHECK_EQ(gc.stats().minor_collections, 1ULL);
     CHECK(r1 != 0);
-    CHECK_NE(r1, orig_obj); // Evacuated from nursery
+    CHECK_NE(r1, orig_obj); // Evacuated from eden
 
     // All root slots must point to the identical evacuated object (identity preserved!)
     CHECK_EQ(r1, r2);
@@ -68,46 +97,48 @@ TEST_CASE("Phase 4 - Generational GC: Multiple and duplicate roots do not duplic
 
     // Verify object validity and payload integrity
     CHECK(gc.is_valid_object(r1));
-    CHECK(gc.is_in_survivor(r1));
-    CHECK_EQ(gc.read_field(r1, 0), 0x1122334455667788ULL);
-    CHECK_EQ(gc.read_field(r1, 1), 0x99AABBCCDDEEFF00ULL);
+    CHECK(gc.is_young(r1));
+    CHECK_EQ(gc::Heap::load(r1, 0), 0x1122334455667788ULL);
+    CHECK_EQ(gc::Heap::load(r1, 1), 0x99AABBCCDDEEFF00ULL);
 }
 
 TEST_CASE("Phase 4 - Generational GC: Card roots deduplication and tenured-to-young identity") {
-    GenerationalGC gc(32 * 1024, 32 * 1024, 128 * 1024);
+    gc::Heap gc(plain_config());
 
-    // Allocate a tenured object with pointer fields
-    uintptr_t tenured = gc.allocate(100 * 1024, 0x3ULL, 99); // large object -> tenured
+    // Allocate an old (large) object with pointer fields 0 and 1
+    uintptr_t tenured = gc.allocate_masked(100 * 1024, 0x3ULL, 99);
     REQUIRE(tenured != 0);
-    CHECK(gc.is_in_tenured(tenured));
+    CHECK(gc.is_old(tenured));
 
-    // Allocate a young object in nursery
-    uintptr_t young = gc.allocate(16, 0, 55);
+    // Allocate a young object
+    uintptr_t young = gc.allocate_masked(16, 0, 55);
     REQUIRE(young != 0);
-    CHECK(gc.is_in_nursery(young));
-    gc.write_field(young, 0, 0xABCDEF0123456789ULL);
+    CHECK(gc.is_young(young));
+    gc.store(young, 0, 0xABCDEF0123456789ULL);
 
-    // Tenured object fields 0 and 1 both point to young object
-    gc.write_field(tenured, 0, young);
-    gc.write_field(tenured, 1, young);
+    // Old object fields 0 and 1 both point to young object
+    gc.store(tenured, 0, young);
+    gc.store(tenured, 1, young);
 
     // Stack root also points to young object
-    uintptr_t stack_root = young;
-    std::vector<uintptr_t*> roots = { &stack_root };
+    uint64_t stack_root = young;
+    {
+        SlotRoots roots(gc, {&stack_root});
+        // Minor collection: processes both the root and the dirty cards
+        gc.collect(gc::CollectionKind::Minor);
+    }
 
-    // Minor scavenge: processes both stack roots and card roots
-    gc.minor_collect(roots);
-
-    CHECK_EQ(gc.minor_collections(), 1ULL);
+    CHECK_EQ(gc.stats().minor_collections, 1ULL);
     CHECK(gc.is_valid_object(stack_root));
-    CHECK(gc.is_in_survivor(stack_root));
+    CHECK(gc.is_young(stack_root));
+    CHECK_NE(stack_root, young);
 
-    // Both fields in tenured must point to the EXACT same object as stack_root
-    uintptr_t f0 = gc.read_field(tenured, 0);
-    uintptr_t f1 = gc.read_field(tenured, 1);
+    // Both fields in the old object must point to the EXACT same object as stack_root
+    uint64_t f0 = gc::Heap::load(tenured, 0);
+    uint64_t f1 = gc::Heap::load(tenured, 1);
     CHECK_EQ(f0, stack_root);
     CHECK_EQ(f1, stack_root);
-    CHECK_EQ(gc.read_field(f0, 0), 0xABCDEF0123456789ULL);
+    CHECK_EQ(gc::Heap::load(f0, 0), 0xABCDEF0123456789ULL);
 }
 
 // =============================================================================
@@ -119,67 +150,70 @@ TEST_CASE("Phase 4 - Generational GC: Objects with >= 64 fields do not invoke UB
     constexpr size_t NUM_FIELDS = 72;
     constexpr size_t OBJ_SIZE = NUM_FIELDS * sizeof(uint64_t);
 
-    GenerationalGC gc(64 * 1024, 32 * 1024, 128 * 1024);
+    gc::Heap gc(plain_config());
 
     // Pointer mask with bits 0 and 1 set
     uint64_t mask = 0x3ULL;
-    uintptr_t large_obj = gc.allocate(OBJ_SIZE, mask, 88);
+    uintptr_t large_obj = gc.allocate_masked(OBJ_SIZE, mask, 88);
     REQUIRE(large_obj != 0);
 
     // Allocate young child referenced by field 0
-    uintptr_t child = gc.allocate(16, 0, 77);
+    uintptr_t child = gc.allocate_masked(16, 0, 77);
     REQUIRE(child != 0);
-    gc.write_field(child, 0, 0x42424242ULL);
-    gc.write_field(large_obj, 0, child);
+    gc.store(child, 0, 0x42424242ULL);
+    gc.store(large_obj, 0, child);
 
-    // Write distinctive values to field beyond 64 (field 68 and 71)
-    gc.write_field(large_obj, 68, 0xDEADBEEFCAFE0068ULL);
-    gc.write_field(large_obj, 71, 0xDEADBEEFCAFE0071ULL);
+    // Write distinctive values to fields beyond 64 (field 68 and 71): not
+    // references under this mask, so a collection must copy them verbatim.
+    gc.store(large_obj, 68, 0xDEADBEEFCAFE0068ULL);
+    gc.store(large_obj, 71, 0xDEADBEEFCAFE0071ULL);
 
-    uintptr_t root = large_obj;
-    std::vector<uintptr_t*> roots = { &root };
+    uint64_t root = large_obj;
+    gc.add_root(&root);
 
-    // Minor scavenge - tests lines 370, 386 Cheney scan with f >= 64
-    gc.minor_collect(roots);
+    gc.collect(gc::CollectionKind::Minor);
 
-    CHECK_EQ(gc.minor_collections(), 1ULL);
+    CHECK_EQ(gc.stats().minor_collections, 1ULL);
     CHECK(gc.is_valid_object(root));
-    CHECK_EQ(gc.read_field(root, 68), 0xDEADBEEFCAFE0068ULL);
-    CHECK_EQ(gc.read_field(root, 71), 0xDEADBEEFCAFE0071ULL);
+    CHECK_EQ(gc::Heap::load(root, 68), 0xDEADBEEFCAFE0068ULL);
+    CHECK_EQ(gc::Heap::load(root, 71), 0xDEADBEEFCAFE0071ULL);
 
-    uintptr_t child_after = gc.read_field(root, 0);
+    uint64_t child_after = gc::Heap::load(root, 0);
     CHECK(gc.is_valid_object(child_after));
-    CHECK_EQ(gc.read_field(child_after, 0), 0x42424242ULL);
+    CHECK_EQ(gc::Heap::load(child_after, 0), 0x42424242ULL);
 
-    // Major collect - tests line 526 in Cheney scan within new_tenured with f >= 64
-    gc.major_collect(roots);
+    // A full collection promotes both
+    gc.collect(gc::CollectionKind::Full);
 
-    CHECK_EQ(gc.major_collections(), 1ULL);
+    CHECK_EQ(gc.stats().full_collections, 1ULL);
     CHECK(gc.is_valid_object(root));
-    CHECK(gc.is_in_tenured(root));
-    CHECK_EQ(gc.read_field(root, 68), 0xDEADBEEFCAFE0068ULL);
-    CHECK_EQ(gc.read_field(root, 71), 0xDEADBEEFCAFE0071ULL);
+    CHECK(gc.is_old(root));
+    CHECK_EQ(gc::Heap::load(root, 68), 0xDEADBEEFCAFE0068ULL);
+    CHECK_EQ(gc::Heap::load(root, 71), 0xDEADBEEFCAFE0071ULL);
+    CHECK(gc.is_old(gc::Heap::load(root, 0)));
+    CHECK_EQ(gc::Heap::load(gc::Heap::load(root, 0), 0), 0x42424242ULL);
+    gc.remove_root(&root);
 }
 
-TEST_CASE("Phase 4 - MiniCheneyGC: Objects with >= 64 fields do not invoke UB shift") {
+TEST_CASE("Phase 4 - Heap: Objects with >= 64 fields survive a full collection") {
     constexpr size_t NUM_FIELDS = 80;
     constexpr size_t OBJ_SIZE = NUM_FIELDS * sizeof(uint64_t);
 
-    MiniCheneyGC cheney(64 * 1024);
+    gc::Heap heap(plain_config());
 
-    uintptr_t large_obj = cheney.allocate(OBJ_SIZE, 0x1ULL);
+    uintptr_t large_obj = heap.allocate_masked(OBJ_SIZE, 0x1ULL, 0);
     REQUIRE(large_obj != 0);
 
-    cheney.write_field(large_obj, 0, 0);
-    cheney.write_field(large_obj, 75, 0xCAFEBABE88776655ULL);
+    heap.store(large_obj, 0, 0);
+    heap.store(large_obj, 75, 0xCAFEBABE88776655ULL);
 
-    uintptr_t root = large_obj;
-    std::vector<uintptr_t*> roots = { &root };
+    uint64_t root = large_obj;
+    heap.add_root(&root);
+    heap.collect(gc::CollectionKind::Full);
+    heap.remove_root(&root);
 
-    cheney.collect(roots);
-
-    CHECK(cheney.is_valid_object(root));
-    CHECK_EQ(cheney.read_field(root, 75), 0xCAFEBABE88776655ULL);
+    CHECK(heap.is_valid_object(root));
+    CHECK_EQ(gc::Heap::load(root, 75), 0xCAFEBABE88776655ULL);
 }
 
 // =============================================================================

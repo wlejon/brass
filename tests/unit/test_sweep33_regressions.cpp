@@ -17,6 +17,7 @@
 // - x64 `throw` of an f64 passed the value through a GPR move from an XMM
 //   vreg (garbage), and a float landing_pad read RAX into a GPR move.
 #include "test_framework.hpp"
+#include <brass/gc/heap.hpp>
 #include <brass/gc/native_frames.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/interpreter/interpreter.hpp>
@@ -226,13 +227,7 @@ bad:
 }
 )";
 
-struct ActiveGc {
-    explicit ActiveGc(MiniCheneyGC* gc) noexcept : prev(brass_get_active_gc()) { brass_set_active_gc(gc); }
-    ~ActiveGc() { brass_set_active_gc(prev); }
-    ActiveGc(const ActiveGc&) = delete;
-    ActiveGc& operator=(const ActiveGc&) = delete;
-    MiniCheneyGC* prev;
-};
+using ActiveGc = gc::HeapScope;
 
 std::unique_ptr<Module> parse_src() {
     DiagnosticReporter diag;
@@ -268,20 +263,20 @@ RuntimeValue run_t0(const char* callee, const char* entry, bool fast, int64_t x,
     std::vector<RuntimeValue> args{RuntimeValue::from_i64(x)};
     if (native_entry) {
         install(prog, *mod, entry);
-        MiniCheneyGC heap(1 << 20);
+        gc::Heap heap;
         ActiveGc a(&heap);
         ProgramScope scope(prog);
         return prog.find(entry)->call_native(args);
     }
     if (fast) {
-        FastInterpreter fi(1 << 20);
-        ActiveGc a(&fi.gc());
+        FastInterpreter fi(gc::HeapConfig{});
+        ActiveGc a(fi.heap());
         fi.set_dispatch_table(&prog);
         fi.set_module(mod.get());
         return fi.run(*mod->get_function(entry), args);
     }
     Interpreter in;
-    ActiveGc a(&in.gc());
+    ActiveGc a(in.heap());
     in.set_dispatch_table(&prog);
     in.set_module(mod.get());
     return in.run(*mod->get_function(entry), args);
@@ -332,7 +327,7 @@ void run_host_nested(HostMode mode) {
     g_prog = &prog;
     g_mod = mod.get();
     g_mode = mode;
-    MiniCheneyGC heap(1 << 20);
+    gc::Heap heap;
     ActiveGc a(&heap);
     auto run = [&](int64_t x) {
         ProgramScope scope(prog);
@@ -358,7 +353,7 @@ int64_t run_corog(const char* body) {
     init_prog(prog, false);
     install(prog, *mod, body);
     install(prog, *mod, "fcr");
-    MiniCheneyGC heap(1 << 20);
+    gc::Heap heap;
     ActiveGc a(&heap);
     uintptr_t f = brass_coro_create_at(prog.find(body)->native_entry(), 2, 0, 0, 0);
     int64_t r = 0;

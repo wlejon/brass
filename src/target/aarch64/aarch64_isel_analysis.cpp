@@ -216,7 +216,6 @@ void AArch64ISel::eliminate_dead_materializations() {
                 for (const VReg& g : li->live_gcrefs) note_vreg_use(uses, g);
             }
         }
-        for (const VReg& v : lir_fn_->osr_entry.live_in_vregs) note_vreg_use(uses, v);
 
         for (auto& bb : lir_fn_->blocks) {
             auto& insts = bb->instructions;

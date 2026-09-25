@@ -1,10 +1,10 @@
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/interpreter/narrow_int.hpp>
-#include <brass/gc/generational_gc.hpp>
+#include <brass/interpreter/memory_access.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include "interpreter_coro.hpp"
-#include <brass/runtime/osr_coordinator.hpp>
 #include <brass/runtime/code_installer.hpp>
+#include <brass/runtime/exception.hpp>
 #include <brass/runtime/tiering.hpp>
 #include <brass/runtime/type_feedback.hpp>
 #include <iostream>
@@ -12,13 +12,17 @@
 
 namespace brass {
 
-Interpreter::Interpreter(size_t gc_semispace_size)
-    : gc_(gc_semispace_size) {
-    gc_.set_root_provider([this](std::vector<uintptr_t*>& roots) {
-        this->collect_all_roots(roots);
-    });
+Interpreter::Interpreter(gc::Heap* heap) {
+    use_heap(heap ? heap : gc::Heap::current());
     register_builtin_host_functions();
 }
+
+Interpreter::Interpreter(const gc::HeapConfig& config) : own_heap_(std::make_unique<gc::Heap>(config)) {
+    attach_heap(own_heap_.get());
+    register_builtin_host_functions();
+}
+
+Interpreter::~Interpreter() { detach_heap(); }
 
 runtime::FunctionDispatchTable& Interpreter::dispatch_table() const noexcept {
     return dispatch_table_ ? *dispatch_table_ : runtime::FunctionDispatchTable::instance();
@@ -443,14 +447,14 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                 }
                 case Opcode::load: {
                     RuntimeValue base = frame.get_value(inst->operand(0));
-                    RuntimeValue res = gc().read_memory(base.raw_bits(), inst->offset(), inst->type());
+                    RuntimeValue res = read_memory(*heap_,base.raw_bits(), inst->offset(), inst->type());
                     frame.set_value(inst->result(), res);
                     break;
                 }
                 case Opcode::store: {
                     RuntimeValue base = frame.get_value(inst->operand(0));
                     RuntimeValue val = frame.get_value(inst->operand(1));
-                    gc().write_memory(base.raw_bits(), inst->offset(), inst->memory_type(), val);
+                    write_memory(*heap_,base.raw_bits(), inst->offset(), inst->memory_type(), val);
                     break;
                 }
                 case Opcode::load_indexed: {
@@ -458,7 +462,7 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                     RuntimeValue idx = frame.get_value(inst->operand(1));
                     int64_t idx_val = idx.is_i32() ? idx.as_i32() : idx.as_i64();
                     int32_t effective_offset = static_cast<int32_t>(idx_val * inst->scale()) + inst->offset();
-                    RuntimeValue res = gc().read_memory(base.raw_bits(), effective_offset, inst->type());
+                    RuntimeValue res = read_memory(*heap_,base.raw_bits(), effective_offset, inst->type());
                     frame.set_value(inst->result(), res);
                     break;
                 }
@@ -468,23 +472,14 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                     RuntimeValue val = frame.get_value(inst->operand(2));
                     int64_t idx_val = idx.is_i32() ? idx.as_i32() : idx.as_i64();
                     int32_t effective_offset = static_cast<int32_t>(idx_val * inst->scale()) + inst->offset();
-                    gc().write_memory(base.raw_bits(), effective_offset, inst->memory_type(), val);
+                    write_memory(*heap_,base.raw_bits(), effective_offset, inst->memory_type(), val);
                     break;
                 }
                 case Opcode::write_barrier: {
                     RuntimeValue obj = frame.get_value(inst->operand(0));
                     RuntimeValue val = frame.get_value(inst->operand(1));
-                    uintptr_t obj_addr = obj.raw_bits() & 0x0000FFFFFFFFFFFFULL;
-                    uintptr_t val_addr = val.raw_bits() & 0x0000FFFFFFFFFFFFULL;
-                    GenerationalGC* gen = gen_gc_;
-                    if (!gen) {
-                        gen = brass_get_active_generational_gc();
-                    }
-                    if (gen && obj_addr != 0) {
-                        if (gen->is_old(obj_addr) && gen->is_young(val_addr)) {
-                            gen->card_table().mark_card(obj_addr);
-                        }
-                    }
+                    heap_->write_barrier_interior(static_cast<uintptr_t>(obj.raw_bits() & gc::kAddressMask),
+                                                  val.raw_bits());
                     break;
                 }
 
@@ -542,14 +537,14 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                 }
                 case Opcode::vload: {
                     RuntimeValue base = frame.get_value(inst->operand(0));
-                    RuntimeValue res = gc().read_memory(base.raw_bits(), inst->offset(), inst->type());
+                    RuntimeValue res = read_memory(*heap_,base.raw_bits(), inst->offset(), inst->type());
                     frame.set_value(inst->result(), res);
                     break;
                 }
                 case Opcode::vstore: {
                     RuntimeValue base = frame.get_value(inst->operand(0));
                     RuntimeValue val = frame.get_value(inst->operand(1));
-                    gc().write_memory(base.raw_bits(), inst->offset(), inst->memory_type(), val);
+                    write_memory(*heap_,base.raw_bits(), inst->offset(), inst->memory_type(), val);
                     break;
                 }
                 case Opcode::vbroadcast: {
@@ -672,9 +667,7 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                 }
 
                 case Opcode::safepoint: {
-                    if (gc().stress_mode()) {
-                        gc().collect();
-                    }
+                    heap_->safepoint_at(0, 0);
                     break;
                 }
 
@@ -718,8 +711,7 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                     break;
                 }
 
-                case Opcode::resume_point:
-                case Opcode::osr_entry: {
+                case Opcode::resume_point: {
                     // Metadata marker: no-op during forward execution
                     break;
                 }
@@ -738,14 +730,6 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
 
                     for (size_t i = 0; i < next_bb->param_count() && i < target_args.size(); ++i) {
                         frame.set_value(next_bb->param(i), target_args[i]);
-                    }
-
-                    if (dispatch_table().osr().is_enabled() &&
-                        dispatch_table().osr().is_loop_backedge(fn, cur_bb, next_bb)) {
-                        RuntimeValue osr_res;
-                        if (dispatch_table().osr().try_osr_migration(*this, fn, next_bb, frame, osr_res)) {
-                            return osr_res;
-                        }
                     }
 
                     cur_bb = next_bb;
@@ -770,14 +754,6 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
 
                     for (size_t i = 0; i < next_bb->param_count() && i < target_args.size(); ++i) {
                         frame.set_value(next_bb->param(i), target_args[i]);
-                    }
-
-                    if (dispatch_table().osr().is_enabled() &&
-                        dispatch_table().osr().is_loop_backedge(fn, cur_bb, next_bb)) {
-                        RuntimeValue osr_res;
-                        if (dispatch_table().osr().try_osr_migration(*this, fn, next_bb, frame, osr_res)) {
-                            return osr_res;
-                        }
                     }
 
                     cur_bb = next_bb;
@@ -811,14 +787,6 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
 
                     for (size_t i = 0; i < next_bb->param_count() && i < target_args.size(); ++i) {
                         frame.set_value(next_bb->param(i), target_args[i]);
-                    }
-
-                    if (dispatch_table().osr().is_enabled() &&
-                        dispatch_table().osr().is_loop_backedge(fn, cur_bb, next_bb)) {
-                        RuntimeValue osr_res;
-                        if (dispatch_table().osr().try_osr_migration(*this, fn, next_bb, frame, osr_res)) {
-                            return osr_res;
-                        }
                     }
 
                     cur_bb = next_bb;

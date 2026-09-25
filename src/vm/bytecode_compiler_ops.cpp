@@ -81,7 +81,7 @@ void FunctionCompilerContext::lower_instruction(const Instruction& inst) {
             lower_terminator(inst);
             break;
 
-        case Opcode::safepoint: case Opcode::guard: case Opcode::resume_point: case Opcode::osr_entry:
+        case Opcode::safepoint: case Opcode::guard: case Opcode::resume_point:
             lower_runtime_gc(inst);
             break;
 
@@ -468,13 +468,6 @@ void FunctionCompilerContext::lower_runtime_gc(const Instruction& inst) {
         case Opcode::resume_point:
             emit(BytecodeOp::resume_point, 0);
             break;
-        case Opcode::osr_entry: {
-            OsrEntry oe;
-            oe.pc = static_cast<uint32_t>(out.current_pc());
-            out.osr_entries.push_back(std::move(oe));
-            emit(BytecodeOp::osr_entry, 0);
-            break;
-        }
         default:
             fail("not a runtime operation");
     }

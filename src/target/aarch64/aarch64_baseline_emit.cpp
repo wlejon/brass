@@ -187,8 +187,7 @@ void emit_control_op(AArch64BaselineEmitter& em, const Instruction& inst) {
             emit_guard(em, inst);
             return;
         case Opcode::resume_point:
-        case Opcode::osr_entry:
-            // Metadata markers: no-ops in forward execution.
+            // A metadata marker: a no-op in forward execution.
             return;
         default:
             // The pre-scan admitted it, so an emitter is missing: a bug.

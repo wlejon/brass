@@ -1,7 +1,6 @@
 #include <brass/target/aarch64/aarch64_isel.hpp>
 #include <brass/codegen/unsupported_operation.hpp>
 #include <brass/mir/module.hpp>
-#include <brass/mir/osr.hpp>
 #include <cstring>
 #include <stdexcept>
 #include <algorithm>
@@ -118,37 +117,6 @@ std::unique_ptr<LirFunction> AArch64ISel::lower(const Function& mir_fn) {
                 lir_entry->successors.push_back(target_lir);
                 target_lir->predecessors.push_back(lir_entry);
             }
-        }
-    }
-
-    if (osr_target_ && osr_target_->is_valid()) {
-        lir_fn_->osr_entry.enabled = true;
-        lir_fn_->osr_entry.loop_header_id = osr_target_->loop_header_id;
-        lir_fn_->osr_entry.live_in_vregs.clear();
-        lir_fn_->osr_entry.slot_indices.clear();
-        for (const Value* v : osr_target_->live_ins) {
-            if (v) {
-                VReg vr = get_or_alloc_vreg(v);
-                lir_fn_->osr_entry.live_in_vregs.push_back(vr);
-                lir_fn_->osr_entry.slot_indices.push_back(v->id());
-            }
-        }
-    } else {
-        for (const auto* bb : mir_fn.blocks()) {
-            for (const auto* inst : *bb) {
-                if (inst->opcode() == Opcode::osr_entry) {
-                    lir_fn_->osr_entry.enabled = true;
-                    lir_fn_->osr_entry.loop_header_id = static_cast<uint32_t>(inst->imm_i64());
-                    for (const auto* op : inst->operands()) {
-                        if (op) {
-                            lir_fn_->osr_entry.live_in_vregs.push_back(get_or_alloc_vreg(op));
-                            lir_fn_->osr_entry.slot_indices.push_back(op->id());
-                        }
-                    }
-                    break;
-                }
-            }
-            if (lir_fn_->osr_entry.enabled) break;
         }
     }
 
@@ -362,9 +330,6 @@ void AArch64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
         case Opcode::fma_f32:
         case Opcode::fma_f64:
             lower_vector_instruction(inst, lir_bb);
-            break;
-
-        case Opcode::osr_entry:
             break;
 
         case Opcode::iconst_i32: {

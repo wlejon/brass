@@ -6,12 +6,15 @@
 #include <brass/mir/builder.hpp>
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/runtime/code_installer.hpp>
+#include <brass/runtime/compile_pool.hpp>
+#include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
 #include <brass/runtime/tiering.hpp>
 #include <brass/runtime/type_feedback.hpp>
 #include <brass/target/aarch64/aarch64_baseline_emit.hpp>
 #include <brass/target/aarch64/aarch64_encoder.hpp>
 #include <brass/target/aarch64/code_buffer.hpp>
+#include <brass/vm/fast_interpreter.hpp>
 #include <algorithm>
 #include <cstdint>
 #include <string>
@@ -128,21 +131,33 @@ TEST_CASE("Program runtime state - OSR coordinators are per program") {
     CHECK_EQ(TieringRegistry::instance().default_config().backedge_osr_threshold, default_threshold);
     CHECK(!OsrCoordinator::instance().is_enabled());
 
-    // Both programs run a same-named loop; only A has OSR on.
+    // Both programs run a same-named loop on their pipelines' fast
+    // interpreter; only A has OSR on. A first run asks for A's OSR code, the
+    // second enters it.
     Function* fn_a = build_sum_loop(mod_a, "prs_sum");
     Function* fn_b = build_sum_loop(mod_b, "prs_sum");
+    TieringConfig cfg;
+    cfg.invocation_tier1_threshold = 1000000;
+    cfg.invocation_tier2_threshold = 1000000;
+    cfg.enable_background_compile = false;
+    cfg.set_use_fast_interpreter(true);
+    prog_a.pipeline().initialize(cfg);
+    prog_b.pipeline().initialize(cfg);
 
-    Interpreter interp_a;
+    FastInterpreter interp_a;
     interp_a.set_dispatch_table(&prog_a);
     interp_a.set_module(&mod_a);
-    Interpreter interp_b;
+    FastInterpreter interp_b;
     interp_b.set_dispatch_table(&prog_b);
     interp_b.set_module(&mod_b);
 
     const int64_t n = 500;
     const int64_t expected = (n - 1) * n / 2;
-    CHECK_EQ(interp_a.run(*fn_a, {RuntimeValue::from_i64(n)}).as_i64(), expected);
-    CHECK_EQ(interp_b.run(*fn_b, {RuntimeValue::from_i64(n)}).as_i64(), expected);
+    for (int run = 0; run < 2; ++run) {
+        CHECK_EQ(interp_a.run(*fn_a, {RuntimeValue::from_i64(n)}).as_i64(), expected);
+        CHECK_EQ(interp_b.run(*fn_b, {RuntimeValue::from_i64(n)}).as_i64(), expected);
+        CompilePool::shared().wait_owner(&prog_a.osr());
+    }
 
     CHECK(prog_a.osr().total_osr_migrations() > 0);
     CHECK_EQ(prog_b.osr().total_osr_migrations(), uint64_t{0});

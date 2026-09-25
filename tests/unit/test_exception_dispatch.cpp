@@ -2,7 +2,7 @@
 #include <brass/brass.hpp>
 #include <brass/runtime/exception.hpp>
 #include <brass/codegen/jit_exec.hpp>
-#include <brass/gc/mini_cheney.hpp>
+#include <brass/gc/heap.hpp>
 
 using namespace brass;
 using namespace brass::runtime;

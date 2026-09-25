@@ -2,8 +2,8 @@
 #include <brass/brass.hpp>
 #include <brass/brass_c_api.h>
 #include <brass/embedding/brass_c_api.h>
-#include <brass/embedding/host_gc.hpp>
-#include <brass/gc/mini_cheney.hpp>
+#include <brass/embedding/nanbox.hpp>
+#include <brass/gc/heap.hpp>
 #include <brass/codegen/grammar_builder.hpp>
 #include <brass/codegen/kernel_jit.hpp>
 #include <brass/target/ptx/ptx_ir.hpp>
@@ -26,19 +26,22 @@ using namespace brass::test;
 // Task 1: GC Rooting for Dynamic Calls, Constructors & SuperCalls (>16 Args)
 // =============================================================================
 
-TEST_CASE("Frontend Hardening - Dynamic Call Argument Relocation under Moving Cheney GC") {
-    MiniCheneyGC gc(128 * 1024);
+TEST_CASE("Frontend Hardening - Dynamic Call Argument Relocation under a Moving Collection") {
+    gc::HeapConfig config;
+    config.read_environment = false;
+    config.poison = true;
+    gc::Heap gc(config);
 
     constexpr size_t NUM_ARGS = 18;
     std::vector<uintptr_t> old_addrs(NUM_ARGS);
     std::vector<uintptr_t> roots(NUM_ARGS);
 
-    // Allocate 18 separate objects in Cheney semispace
+    // Allocate 18 separate young objects
     for (size_t i = 0; i < NUM_ARGS; ++i) {
-        uintptr_t obj = gc.allocate(16, 0, 100 + static_cast<uint32_t>(i));
+        uintptr_t obj = gc.allocate_masked(16, 0, 100 + static_cast<uint32_t>(i));
         REQUIRE(obj != 0);
-        gc.write_field(obj, 0, 0x1000ULL + i);
-        gc.write_field(obj, 1, 0x2000ULL + i);
+        gc.store(obj, 0, 0x1000ULL + i);
+        gc.store(obj, 1, 0x2000ULL + i);
         old_addrs[i] = obj;
         roots[i] = obj;
     }
@@ -55,31 +58,32 @@ TEST_CASE("Frontend Hardening - Dynamic Call Argument Relocation under Moving Ch
         frame.slots[i] = static_cast<int64_t>(roots[i]);
     }
 
-    // Prepare roots pointing directly into the frame slots
-    std::vector<uintptr_t*> gc_roots;
-    for (size_t i = 0; i < NUM_ARGS; ++i) {
-        gc_roots.push_back(reinterpret_cast<uintptr_t*>(&frame.slots[i]));
-    }
+    // Roots pointing directly into the frame slots
+    const auto source = gc.add_root_source([&frame](gc::Tracer& tracer) {
+        for (size_t i = 0; i < NUM_ARGS; ++i) tracer.visit(reinterpret_cast<uint64_t*>(&frame.slots[i]));
+    });
 
-    // Trigger moving Cheney GC collection
-    gc.collect(gc_roots);
+    // Trigger a moving (young-generation) collection
+    gc.collect(gc::CollectionKind::Minor);
+    gc.remove_root_source(source);
     CHECK_EQ(gc.collection_count(), 1ULL);
 
-    // Verify all 18 objects relocated to to-space and frame slots forwarded in-place
+    // Verify all 18 objects relocated and frame slots forwarded in-place
+    constexpr uint64_t kPoison = 0xDBDBDBDBDBDBDBDBULL;
     for (size_t i = 0; i < NUM_ARGS; ++i) {
         uintptr_t new_addr = static_cast<uintptr_t>(frame.slots[i]);
         CHECK_NE(new_addr, old_addrs[i]);
         CHECK(gc.is_valid_object(new_addr));
         CHECK(!gc.is_valid_object(old_addrs[i]));
 
-        // Old space poisoned
+        // The evacuated copies are poisoned
         const uint64_t* old_mem = reinterpret_cast<const uint64_t*>(old_addrs[i]);
-        CHECK_EQ(old_mem[0], MiniCheneyGC::POISON_PATTERN);
-        CHECK_EQ(old_mem[1], MiniCheneyGC::POISON_PATTERN);
+        CHECK_EQ(old_mem[0], kPoison);
+        CHECK_EQ(old_mem[1], kPoison);
 
-        // New space retains valid payload
-        CHECK_EQ(gc.read_field(new_addr, 0), 0x1000ULL + i);
-        CHECK_EQ(gc.read_field(new_addr, 1), 0x2000ULL + i);
+        // The copies retain the payload
+        CHECK_EQ(gc::Heap::load(new_addr, 0), 0x1000ULL + i);
+        CHECK_EQ(gc::Heap::load(new_addr, 1), 0x2000ULL + i);
     }
 
     // A callee handed argv = frame.slots reads the relocated arguments.
@@ -99,35 +103,46 @@ TEST_CASE("Frontend Hardening - Dynamic Call Argument Relocation under Moving Ch
 // =============================================================================
 
 TEST_CASE("C API Hardening - Exception Containment Across ABI Boundary") {
-    // 1. HostGC allocation exceeding semispace capacity throws in C++,
-    // but the C API function brass_host_gc_allocate catches it and returns 0.
-    brass_gc_t* gc = brass_host_gc_create(1024);
+    // 1. A heap with the smallest eden grows for objects larger than it: a
+    // large allocation succeeds and survives collections.
+    brass_heap_t* gc = brass_heap_create(1024);
     REQUIRE(gc != nullptr);
 
-    // Request size that exceeds 1024 bytes (e.g. 8192 bytes)
-    uintptr_t big_alloc = brass_host_gc_allocate(gc, 8192, 0, 1);
-    CHECK_EQ(big_alloc, 0u);
+    uint64_t big_alloc = brass_heap_allocate(gc, 128 * 1024, 0, 1);
+    REQUIRE(big_alloc != 0u);
+    reinterpret_cast<uint64_t*>(big_alloc)[16383] = 0x5151;
 
-    // brass_host_gc_allocate_value catches and returns null value
-    brass_value_t big_val = brass_host_gc_allocate_value(gc, 8192, 0, 1);
-    CHECK(HostValue::from_raw(big_val).is_null());
+    // A NaN-boxed gcref value is a reference too.
+    brass_value_t big_val = brass_heap_allocate_value(gc, 8192, 0, 1);
+    REQUIRE(HostValue::from_raw(big_val).is_gcref());
+    reinterpret_cast<uint64_t*>(brass_value_as_gcref(big_val))[0] = 0x7272;
+    brass_heap_add_root(gc, &big_alloc);
+    brass_heap_add_root(gc, &big_val);
 
-    // 2. Fill semispace and call brass_host_gc_collect without unhandled exceptions
-    brass_host_gc_collect(gc);
-    CHECK_EQ(brass_host_gc_collection_count(gc), 1u);
+    // 2. Collections contain their exceptions and keep the rooted objects
+    const size_t before = brass_heap_collection_count(gc);
+    brass_heap_collect(gc, 1);
+    brass_heap_collect(gc, 0);
+    CHECK(brass_heap_collection_count(gc) >= before + 2);
+    CHECK_EQ(reinterpret_cast<const uint64_t*>(big_alloc)[16383], 0x5151u);
+    REQUIRE(HostValue::from_raw(big_val).is_gcref());
+    CHECK_EQ(reinterpret_cast<const uint64_t*>(brass_value_as_gcref(big_val))[0], 0x7272u);
+    brass_heap_remove_root(gc, &big_alloc);
+    brass_heap_remove_root(gc, &big_val);
 
-    // 3. Reset and compiled module error containment
-    brass_host_gc_reset(gc);
+    // 3. Compiled module error containment
     CHECK_EQ(brass_compiled_module_patch_const32(nullptr, "test_site", 42), 0);
     CHECK_EQ(brass_compiled_module_patch_const64(nullptr, "test_site", 42), 0);
     CHECK_EQ(brass_compiled_module_patch_call(nullptr, "test_site", nullptr), 0);
     CHECK_EQ(brass_compiled_module_walk_stack(nullptr, 0, 0, nullptr, nullptr), 0u);
 
     // 4. Null checks and safety
-    brass_host_gc_collect(nullptr);
-    brass_host_gc_safepoint(nullptr, 0, 0);
-    CHECK_EQ(brass_host_gc_allocate(nullptr, 16, 0, 1), 0u);
-    brass_host_gc_destroy(gc);
+    brass_heap_collect(nullptr, 1);
+    CHECK_EQ(brass_heap_allocate(nullptr, 16, 0, 1), 0u);
+    CHECK(HostValue::from_raw(brass_heap_allocate_value(nullptr, 16, 0, 1)).is_null());
+    CHECK_EQ(brass_heap_collection_count(nullptr), 0u);
+    brass_heap_destroy(gc);
+    brass_heap_destroy(nullptr);
 }
 
 TEST_CASE("C API Hardening - Handle Invalidation on Module Destruction") {

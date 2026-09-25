@@ -14,15 +14,10 @@
 //   GeneratedCodeEntryScope.
 // - retype_exception_value reinterpreted a thrown value whose type a landing
 //   pad could not hold; that is now an InterpreterException.
-// - A host heap's collector updated the coroutine root slots
-//   brass_enumerate_thread_roots handed it with no lock held. It now holds a
-//   HostHeapCollectionScope (the registry's lock) until they are updated, and
-//   enumerating without one is a hard error.
 // - A raw frame handle whose heap was torn down was read (resume, is_done)
 //   through freed memory. A handle must now name a frame a live heap holds.
 #include "test_framework.hpp"
-#include <brass/gc/host_heap.hpp>
-#include <brass/gc/mini_cheney.hpp>
+#include <brass/gc/heap.hpp>
 #include <brass/gc/native_frames.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/interpreter/interpreter.hpp>
@@ -50,11 +45,7 @@ using namespace brass::runtime;
 
 namespace {
 
-struct ActiveGc {
-    explicit ActiveGc(MiniCheneyGC* gc) noexcept : prev(brass_get_active_gc()) { brass_set_active_gc(gc); }
-    ~ActiveGc() { brass_set_active_gc(prev); }
-    MiniCheneyGC* prev;
-};
+using ActiveGc = gc::HeapScope;
 
 std::unique_ptr<Module> lower(const char* src) {
     DiagnosticReporter diag;
@@ -117,7 +108,7 @@ TEST_CASE("Sweep35 - a queued coroutine whose heap was torn down is a hard error
     Promise p;
     uintptr_t f = 0;
     {
-        MiniCheneyGC heap(1 << 20);
+        gc::Heap heap;
         ActiveGc a(&heap);
         f = make_frame(*mod);
         REQUIRE(is_active_coro_frame(f));
@@ -149,7 +140,7 @@ TEST_CASE("Sweep35 - brass_coro_destroy writes only to a frame that is still reg
     for (unsigned char c : fake) CHECK_EQ(static_cast<unsigned>(c), 0xABu);
 
     // A live frame is finished and unregistered.
-    MiniCheneyGC heap(1 << 20);
+    gc::Heap heap;
     ActiveGc a(&heap);
     const uintptr_t f = make_frame(*mod);
     CoroFrameRef ref = coro_frame_ref(reinterpret_cast<BrassCoroFrame*>(f));
@@ -162,14 +153,14 @@ TEST_CASE("Sweep35 - brass_coro_destroy writes only to a frame that is still reg
 
 TEST_CASE("Sweep35 - a queued coroutine is resumed where a collection moved it") {
     auto mod = lower(kBodyMod);
-    MiniCheneyGC heap(1 << 20);
+    gc::Heap heap;
     ActiveGc a(&heap);
     const uintptr_t f = make_frame(*mod);
     CoroFrameRef ref = coro_frame_ref(reinterpret_cast<BrassCoroFrame*>(f));
     MicrotaskQueue q;
     q.enqueue_coro(reinterpret_cast<BrassCoroFrame*>(f), 10);
     q.enqueue_coro(reinterpret_cast<BrassCoroFrame*>(f), 20);
-    heap.collect();  // a semispace copy: the frame moves
+    heap.collect(gc::CollectionKind::Minor);  // the young frame is copied: it moves
     BrassCoroFrame* moved = resolve_coro_frame_ref(ref);
     REQUIRE(moved != nullptr);
     CHECK(reinterpret_cast<uintptr_t>(moved) != f);
@@ -189,7 +180,7 @@ TEST_CASE("Sweep35 - a queued coroutine is resumed where a collection moved it")
 
 TEST_CASE("Sweep35 - unregistering waits for another heap's collection to finish with its coroutine roots") {
     auto mod = lower(kBodyMod);
-    MiniCheneyGC heap(1 << 20);
+    gc::Heap heap;
     uintptr_t f = 0;
     {
         ActiveGc a(&heap);
@@ -359,81 +350,15 @@ TEST_CASE("Sweep35 - a landing pad whose type cannot hold the thrown value is a 
     CHECK(!rejects(RuntimeValue::from_f64(1.0), Type::gcref()));
 }
 
-namespace {
-
-// A host heap that never moves or frees, and can tell its objects.
-class ListHeap final : public HostHeap {
-public:
-    uintptr_t allocate(size_t size, uint64_t, uint32_t) override {
-        blocks_.push_back(std::make_unique<uint64_t[]>((size + 7) / 8 + 1));
-        return reinterpret_cast<uintptr_t>(blocks_.back().get());
-    }
-    bool contains(uintptr_t addr) const override {
-        for (const auto& b : blocks_) {
-            if (reinterpret_cast<uintptr_t>(b.get()) == addr) return true;
-        }
-        return false;
-    }
-
-private:
-    std::vector<std::unique_ptr<uint64_t[]>> blocks_;
-};
-
-struct InstalledHeap {
-    explicit InstalledHeap(HostHeap* heap) { set_host_heap(heap); }
-    ~InstalledHeap() { set_host_heap(nullptr); }
-};
-
-} // namespace
-
-TEST_CASE("Sweep35 - a host heap's collection holds its coroutine roots until it has updated them") {
-    auto mod = lower(kBodyMod);
-    ListHeap heap;
-    InstalledHeap installed(&heap);
-    const uintptr_t f = make_frame(*mod);
-    REQUIRE(is_active_coro_frame(f));
-
-    // Handed out only to a collection that holds the scope.
-    CHECK(!in_host_heap_collection());
-    CHECK(throws_logic_error([] {
-        std::vector<uintptr_t*> roots;
-        brass_enumerate_thread_roots(0, 0, roots);
-    }));
-
-    std::atomic<bool> done{false};
-    std::thread t;
-    {
-        HostHeapCollectionScope collecting;
-        CHECK(in_host_heap_collection());
-        std::vector<uintptr_t*> roots;
-        brass_enumerate_thread_roots(0, 0, roots);
-        uintptr_t* slot = nullptr;
-        for (uintptr_t* s : roots) {
-            if (s && *s == f) slot = s;
-        }
-        REQUIRE(slot != nullptr);
-        // Another thread unregistering the frame waits for the collection,
-        // which still writes the slot it was handed.
-        t = std::thread([&] {
-            unregister_active_coro_frame(reinterpret_cast<BrassCoroFrame*>(f));
-            done.store(true);
-        });
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        CHECK(!done.load());
-        *slot = f;  // the host's update (it does not move objects)
-    }
-    CHECK(!in_host_heap_collection());
-    t.join();
-    CHECK(done.load());
-    CHECK(!is_active_coro_frame(f));
-}
-
 TEST_CASE("Sweep35 - a raw coroutine handle whose heap was torn down is a hard error") {
     auto mod = lower(kBodyMod);
     uintptr_t unfinished = 0;
     uintptr_t finished = 0;
     {
-        MiniCheneyGC heap(1 << 20);
+        // The raw handles are not roots: no stress collection may move them.
+        gc::HeapConfig config;
+        config.read_environment = false;
+        gc::Heap heap(config);
         ActiveGc a(&heap);
         unfinished = make_frame(*mod);
         finished = make_frame(*mod);
@@ -455,39 +380,19 @@ TEST_CASE("Sweep35 - a raw coroutine handle whose heap was torn down is a hard e
 
 TEST_CASE("Sweep35 - a finished frame a collection moved is answered where it is, not where it was") {
     auto mod = lower(kBodyMod);
-    MiniCheneyGC heap(1 << 20);
+    gc::Heap heap;
     ActiveGc a(&heap);
-    uintptr_t f = make_frame(*mod);
-    heap.register_root(&f);
+    uint64_t f = make_frame(*mod);
+    heap.add_root(&f);
     CHECK_EQ(brass_coro_resume(f, 10), 5u);
     brass_coro_destroy(f);
     const uintptr_t old = f;
-    heap.collect();  // the finished frame is kept by the root and moves
+    heap.collect(gc::CollectionKind::Minor);  // the finished frame is kept by the root and moves
     REQUIRE(f != old);
     CHECK_EQ(brass_coro_is_done(f), 1u);
     CHECK_EQ(brass_coro_resume(f, 20), 5u);
     // The address it left is not a frame any more.
     CHECK(throws_logic_error([&] { (void)brass_coro_is_done(old); }));
     CHECK(throws_logic_error([&] { brass_coro_resume(old, 1); }));
-    heap.unregister_root(&f);
-}
-
-TEST_CASE("Sweep35 - a moved heap answers for its coroutine frames") {
-    auto mod = lower(kBodyMod);
-    auto src = std::make_unique<MiniCheneyGC>(1 << 20);
-    uintptr_t finished = 0;
-    uintptr_t live = 0;
-    {
-        ActiveGc a(src.get());
-        finished = make_frame(*mod);
-        live = make_frame(*mod);
-    }
-    brass_coro_destroy(finished);
-    MiniCheneyGC dst(std::move(*src));
-    src.reset();  // the registry now asks `dst`, never the object it left
-    CHECK_EQ(brass_coro_is_done(finished), 1u);
-    CHECK(is_active_coro_frame(live));
-    CHECK_EQ(brass_coro_is_done(live), 0u);
-    brass_coro_destroy(live);
-    CHECK_EQ(brass_coro_is_done(live), 1u);
+    heap.remove_root(&f);
 }

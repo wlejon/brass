@@ -8,10 +8,6 @@
 #include <unordered_map>
 #include <unordered_set>
 
-namespace brass {
-struct OsrTarget;
-}
-
 namespace brass::x64 {
 
 // The register a module with Module::pinned_tls_register() keeps its
@@ -27,9 +23,6 @@ public:
 
     std::unique_ptr<codegen::LirFunction> lower(const Function& mir_fn);
 
-    void set_osr_target(const OsrTarget* target) noexcept { osr_target_ = target; }
-    const OsrTarget* osr_target() const noexcept { return osr_target_; }
-
     // The module coro_create callees are looked up in, when the function
     // being lowered is a clone in a scratch module (default: its parent).
     void set_callee_module(const Module* mod) noexcept { callee_module_ = mod; }
@@ -40,7 +33,6 @@ public:
 private:
     Target target_;
     CallingConvention cc_;
-    const OsrTarget* osr_target_ = nullptr;
     const Module* callee_module_ = nullptr;
 
     codegen::LirFunction* lir_fn_ = nullptr;

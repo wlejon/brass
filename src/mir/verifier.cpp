@@ -786,7 +786,6 @@ bool Verifier::verify_function(const Function& fn) {
                 }
 
                 case Opcode::resume_point:
-                case Opcode::osr_entry:
                     break;
 
                 case Opcode::br: {

@@ -17,7 +17,7 @@
 #include <brass/vm/fast_interpreter.hpp>
 #include <brass/codegen/baseline_jit.hpp>
 #include <brass/codegen/jit_exec.hpp>
-#include <brass/gc/generational_gc.hpp>
+#include "gc_test_heap.hpp"
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/gc/native_frames.hpp>
 #include <brass/runtime/coroutine.hpp>
@@ -89,13 +89,25 @@ Run drive(Module& mod, const char* name, Tier tier, const std::vector<uint64_t>&
     const bool native = tier == Tier::Jit || tier == Tier::Baseline;
     if (native) REQUIRE(code != nullptr);
 
+    // The pointer-slot arguments are roots until they are in the frame: its
+    // allocation may collect (BRASS_GC_STRESS).
+    struct RootedArgs {
+        std::vector<uint64_t> words;
+        uint64_t mask;
+    } rooted{args, layout.pointer_mask};
+    ThreadRootsScope keep_args([](void* ctx, std::vector<uintptr_t*>& roots) {
+        auto* r = static_cast<RootedArgs*>(ctx);
+        for (size_t i = 0; i < r->words.size() && i < 64; ++i) {
+            if (((r->mask >> i) & 1) && r->words[i] != 0) roots.push_back(reinterpret_cast<uintptr_t*>(&r->words[i]));
+        }
+    }, &rooted);
     uintptr_t frame = brass_coro_create_at(native ? code : nullptr, slots, layout.pointer_mask, 0, 0);
     REQUIRE(frame != 0);
     ThreadRootsScope keep([](void* ctx, std::vector<uintptr_t*>& roots) {
         roots.push_back(static_cast<uintptr_t*>(ctx));
     }, &frame);
-    for (size_t i = 0; i < args.size(); ++i) {
-        reinterpret_cast<runtime::BrassCoroFrame*>(frame)->slots[i] = args[i];
+    for (size_t i = 0; i < rooted.words.size(); ++i) {
+        reinterpret_cast<runtime::BrassCoroFrame*>(frame)->slots[i] = rooted.words[i];
     }
 
     Interpreter interp;
@@ -235,11 +247,7 @@ b0:
 }
 )";
 
-struct GenHeap {
-    GenerationalGC gc{32 * 1024, 16 * 1024, 1 << 20, 2};
-    GenHeap() { brass_set_active_generational_gc(&gc); }
-    ~GenHeap() { brass_set_active_generational_gc(nullptr); }
-};
+using GenHeap = test::BoundHeap;
 
 } // namespace
 
@@ -267,7 +275,7 @@ TEST_CASE("Coro live values - a gcref argument and a loop-carried gcref survive 
     CHECK((layout.pointer_mask & 1u) != 0);  // the gcref argument's slot
     for (Tier t : kTiers) {
         GenHeap heap;
-        uintptr_t obj = heap.gc.allocate(48, 0, 2);
+        uintptr_t obj = heap->allocate_masked(48, 0, 2);
         REQUIRE(obj != 0);
         *reinterpret_cast<int64_t*>(obj + 16) = 40;
         const Run r = drive(*mod, "gcb", t, {obj, 3});
@@ -278,15 +286,15 @@ TEST_CASE("Coro live values - a gcref argument and a loop-carried gcref survive 
     // coro_create passing the gcref, from the interpreter and the JIT.
     {
         GenHeap heap;
-        uintptr_t obj = heap.gc.allocate(48, 0, 2);
+        uintptr_t obj = heap->allocate_masked(48, 0, 2);
         *reinterpret_cast<int64_t*>(obj + 16) = 40;
         Interpreter interp;
         interp.set_module(mod.get());
-        CHECK_EQ(interp.run(*mod->get_function("make"), {RuntimeValue::from_ptr(obj)}).as_i64(), 40414243);
+        CHECK_EQ(interp.run(*mod->get_function("make"), {RuntimeValue::from_gcref(obj)}).as_i64(), 40414243);
     }
     {
         GenHeap heap;
-        uintptr_t obj = heap.gc.allocate(48, 0, 2);
+        uintptr_t obj = heap->allocate_masked(48, 0, 2);
         *reinterpret_cast<int64_t*>(obj + 16) = 40;
         codegen::JitExecutionEngine jit;
         REQUIRE(jit.compile_and_load(*mod));
@@ -307,7 +315,7 @@ TEST_CASE("Coro live values - a collection while suspended moves the frame's gcr
     CHECK(pointer_slots >= 2);
     for (Tier t : kTiers) {
         GenHeap heap;
-        uintptr_t obj = heap.gc.allocate(48, 0, 2);
+        uintptr_t obj = heap->allocate_masked(48, 0, 2);
         REQUIRE(obj != 0);
         *reinterpret_cast<int64_t*>(obj + 16) = 40;
         ThreadRootsScope keep_obj([](void* ctx, std::vector<uintptr_t*>& roots) {
@@ -318,7 +326,7 @@ TEST_CASE("Coro live values - a collection while suspended moves the frame's gcr
         bool slots_ok = true;
         const Run r = drive(*mod, "gcb", t, {obj, 3}, [&](uintptr_t& frame) {
             const uintptr_t before = obj;
-            if (collections++ % 2 == 0) heap.gc.minor_collect(); else heap.gc.major_collect();
+            heap->collect(collections++ % 2 == 0 ? gc::CollectionKind::Minor : gc::CollectionKind::Full);
             if (obj != before) moved = true;
             // Scribble over the old copy: a stale slot reads garbage.
             if (obj != before) *reinterpret_cast<int64_t*>(before + 16) = -1;

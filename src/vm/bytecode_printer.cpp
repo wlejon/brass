@@ -72,7 +72,7 @@ size_t print_operands(std::ostream& os, const BytecodeFunction& fn, size_t pc) {
     }
     switch (op) {
         case BytecodeOp::nop: case BytecodeOp::unreachable: case BytecodeOp::ret_void:
-        case BytecodeOp::safepoint: case BytecodeOp::resume_point: case BytecodeOp::osr_entry:
+        case BytecodeOp::safepoint: case BytecodeOp::resume_point:
             break;
         case BytecodeOp::ret: case BytecodeOp::throw_: case BytecodeOp::resume: case BytecodeOp::landing_pad:
         case BytecodeOp::pinned_tls_read: case BytecodeOp::read_sp: case BytecodeOp::vzero:

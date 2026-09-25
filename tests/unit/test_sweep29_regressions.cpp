@@ -142,33 +142,25 @@ done(%r: i64):
 // sum_{i<1000} (i + 1) + sum_{1000<=i<2000} 7i
 constexpr int64_t kOsrWant = 10997000;
 
-int64_t run_osr_case(const char* fname, bool fast, uint64_t* osr_count) {
+int64_t run_osr_case(const char* fname, uint64_t* osr_count) {
     auto mod = parse_ok(kOsrCallee);
     FunctionDispatchTable prog;
     TieringConfig cfg;
     cfg.invocation_tier1_threshold = 1000000;
     cfg.invocation_tier2_threshold = 1000000000;
     cfg.enable_background_compile = false;
-    cfg.set_use_fast_interpreter(fast);
+    cfg.set_use_fast_interpreter(true);
     prog.pipeline().initialize(cfg);
     prog.osr().set_enabled(true);
     prog.osr().set_threshold(50);
-    int64_t got = 0;
-    if (fast) {
-        FastInterpreter fi;
-        fi.set_dispatch_table(&prog);
-        fi.set_module(mod.get());
-        // The program's OSR code compiles in the background: a first run
-        // asks for it, the second enters it.
-        CHECK_EQ(fi.run(*mod->get_function(fname), {RuntimeValue::from_i64(2000)}).as_i64(), kOsrWant);
-        CompilePool::shared().wait_owner(&prog.osr());
-        got = fi.run(*mod->get_function(fname), {RuntimeValue::from_i64(2000)}).as_i64();
-    } else {
-        Interpreter in;
-        in.set_dispatch_table(&prog);
-        in.set_module(mod.get());
-        got = in.run(*mod->get_function(fname), {RuntimeValue::from_i64(2000)}).as_i64();
-    }
+    FastInterpreter fi;
+    fi.set_dispatch_table(&prog);
+    fi.set_module(mod.get());
+    // The program's OSR code compiles in the background: a first run asks
+    // for it, the second enters it.
+    CHECK_EQ(fi.run(*mod->get_function(fname), {RuntimeValue::from_i64(2000)}).as_i64(), kOsrWant);
+    CompilePool::shared().wait_owner(&prog.osr());
+    const int64_t got = fi.run(*mod->get_function(fname), {RuntimeValue::from_i64(2000)}).as_i64();
     *osr_count = prog.osr().total_osr_migrations();
     return got;
 }
@@ -273,18 +265,10 @@ TEST_CASE("Sweep29 - tier-2 deopt at a function's second guard runs that guard's
     CHECK_EQ(in.run(*mod->get_function("h2"), {RuntimeValue::from_i64(120)}).as_i64(), 360);
 }
 
-TEST_CASE("Sweep29 - a callee's guard failing in OSR code resumes the callee (Interpreter)") {
+TEST_CASE("Sweep29 - a callee's guard failing in OSR code resumes the callee") {
     uint64_t osr = 0;
-    CHECK_EQ(run_osr_case("f", false, &osr), kOsrWant);
+    CHECK_EQ(run_osr_case("f", &osr), kOsrWant);
     CHECK(osr > 0);
-    CHECK_EQ(run_osr_case("f3", false, &osr), kOsrWant);
-    CHECK(osr > 0);
-}
-
-TEST_CASE("Sweep29 - a callee's guard failing in OSR code resumes the callee (FastInterpreter)") {
-    uint64_t osr = 0;
-    CHECK_EQ(run_osr_case("f", true, &osr), kOsrWant);
-    CHECK(osr > 0);
-    CHECK_EQ(run_osr_case("f3", true, &osr), kOsrWant);
+    CHECK_EQ(run_osr_case("f3", &osr), kOsrWant);
     CHECK(osr > 0);
 }

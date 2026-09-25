@@ -9,8 +9,7 @@
 #include <brass/runtime/host_symbols.hpp>
 #include <brass/gc/native_frames.hpp>
 #include <brass/gc/runtime_gc.hpp>
-#include <brass/gc/generational_gc.hpp>
-#include <brass/gc/host_heap.hpp>
+#include <brass/gc/heap.hpp>
 #include <cstdio>
 #include <type_traits>
 #include <cstdlib>
@@ -201,35 +200,26 @@ RuntimeValue MultiTierPipeline::run_fresh_tier0(FunctionDispatchTable& table, co
     const std::string where(owner ? owner->name() : std::string_view("?"));
     // The fresh interpreter's heap dies when it returns: a gcref result
     // into it would dangle.
-    auto check_result = [&](RuntimeValue r, const MiniCheneyGC& private_heap) {
-        if (r.is_gcref() && private_heap.is_address_in_active_space(r.raw_bits())) {
+    auto check_result = [&](RuntimeValue r, const gc::Heap& private_heap) {
+        if (r.is_gcref() && private_heap.contains(static_cast<uintptr_t>(r.raw_bits() & gc::kAddressMask))) {
             deopt_fatal("'" + where + "' finished in a fresh Tier-0 interpreter and returned a gcref into its "
-                        "private heap; install a heap for the thread (set_host_heap, "
-                        "brass_set_active_generational_gc or brass_set_active_gc) or enter the native code "
-                        "from the Tier-0 interpreter");
+                        "private heap; bind a gc::Heap for the thread (gc::HeapScope) or enter the native "
+                        "code from the Tier-0 interpreter");
         }
         return r;
     };
-    // Either interpreter allocates from the heap native code on this thread
-    // allocates from (brass_gc_alloc's order: a host heap, the active
-    // generational GC, the active MiniCheneyGC), whose objects the native
-    // code and its caller hold. Its frames are published as thread roots
-    // whatever the heap (brass_append_native_frame_roots, which brass's
-    // collectors call and brass_enumerate_thread_roots reports to a host
-    // heap), so a collection that code triggers updates them.
-    HostHeap* host = host_heap();
-    GenerationalGC* gen = host ? nullptr : brass_get_active_generational_gc();
-    MiniCheneyGC* mini = (host || gen) ? nullptr : brass_get_active_gc();
-    const bool shared = host || gen || mini;
+    // Either interpreter allocates from the thread's current heap, which the
+    // native code on this thread allocates from and whose objects it and its
+    // caller hold; its frames are that heap's roots. They are also published
+    // as thread roots (brass_append_native_frame_roots), for a host runtime's
+    // own collector (brass_enumerate_thread_roots).
     auto run = [&](auto& interp) {
         using Interp = std::remove_reference_t<decltype(interp)>;
-        if (gen) interp.borrow_generational_gc(gen);
-        if (mini) interp.borrow_gc(mini);
         ThreadRootsScope roots([](void* ctx, std::vector<uintptr_t*>& out) {
             static_cast<Interp*>(ctx)->collect_all_roots(out);
         }, &interp);
         RuntimeValue r = fn ? interp.run(*fn, args) : interp.resume(*resume_fn, resume_id, args);
-        return shared ? r : check_result(r, interp.gc());
+        return interp.owns_heap() ? check_result(r, interp.heap()) : r;
     };
     if (config_.use_fast_interpreter()) {
         FastInterpreter interp;

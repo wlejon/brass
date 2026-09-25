@@ -119,7 +119,6 @@ enum class Opcode : uint16_t {
     // Speculation
     guard,
     resume_point,
-    osr_entry,
 
     // Terminators
     br,
@@ -179,7 +178,6 @@ bool is_vector_op(Opcode op) noexcept;
 bool is_coro_op(Opcode op) noexcept;
 bool is_coro_suspend(Opcode op) noexcept;
 bool is_coro_resume(Opcode op) noexcept;
-bool is_osr_entry(Opcode op) noexcept;
 bool has_side_effects(Opcode op) noexcept;
 
 std::ostream& operator<<(std::ostream& os, Opcode op);

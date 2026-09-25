@@ -1,8 +1,8 @@
 ; MSVC Windows-ARM64 (armasm64) counterparts of gc_msvc_x64.asm: the entry
 ; stubs generated code calls that need their caller's frame, the throw
 ; stubs, the landing-pad jump and the JIT invoke thunk. The same routines
-; for GCC/Clang are C++ file-scope asm (coroutine.cpp, runtime_gc.cpp,
-; host_gc.cpp, runtime/exception_throw_aarch64.cpp, codegen/jit_invoke.cpp);
+; for GCC/Clang are C++ (coroutine.cpp, runtime_gc.cpp,
+; runtime/exception_throw_aarch64.cpp, codegen/jit_invoke.cpp);
 ; every build CMake treats as MSVC (cl or clang-cl) takes them from here.
 ;
 ; A frame stub pushes a frame record {x29, x30} and sets x29 to it, as the
@@ -26,9 +26,7 @@
         IMPORT  brass_coro_create_at
         IMPORT  brass_throw_impl
         IMPORT  brass_current_exception_bits
-        IMPORT  host_gc_safepoint_bridge
-        IMPORT  host_gc_alloc_bridge
-        IMPORT  host_gc_alloc_nanbox_bridge
+        IMPORT  brass_runtime_gc_collect_bridge
 
 ; .pdata and .xdata of a function whose whole prolog is
 ;     stp x29, x30, [sp, #-$Frame]!
@@ -125,73 +123,13 @@ brass_gc_collect PROC
         stp     x29, x30, [sp, #-16]!
         mov     x29, sp
         ldp     x0, x1, [x29]
-        bl      brass_runtime_gc_safepoint_bridge
+        bl      brass_runtime_gc_collect_bridge
 brass_gc_collect_epilog
         ldp     x29, x30, [sp], #16
         ret
 brass_gc_collect_end
         ENDP
         BRASS_FRAME_UNWIND brass_gc_collect, 16, 1
-
-; void host_gc_safepoint()
-        ALIGN   4
-        EXPORT  host_gc_safepoint
-host_gc_safepoint PROC
-        stp     x29, x30, [sp, #-16]!
-        mov     x29, sp
-        ldp     x0, x1, [x29]
-        bl      host_gc_safepoint_bridge
-host_gc_safepoint_epilog
-        ldp     x29, x30, [sp], #16
-        ret
-host_gc_safepoint_end
-        ENDP
-        BRASS_FRAME_UNWIND host_gc_safepoint, 16, 1
-
-; uintptr_t host_gc_alloc(size_t size, uint64_t pointer_mask, uint32_t type_tag)
-        ALIGN   4
-        EXPORT  host_gc_alloc
-host_gc_alloc PROC
-        stp     x29, x30, [sp, #-16]!
-        mov     x29, sp
-        ldp     x3, x4, [x29]
-        bl      host_gc_alloc_bridge
-host_gc_alloc_epilog
-        ldp     x29, x30, [sp], #16
-        ret
-host_gc_alloc_end
-        ENDP
-        BRASS_FRAME_UNWIND host_gc_alloc, 16, 1
-
-; uint64_t host_gc_alloc_nanbox(size_t size, uint64_t pointer_mask, uint32_t type_tag)
-        ALIGN   4
-        EXPORT  host_gc_alloc_nanbox
-host_gc_alloc_nanbox PROC
-        stp     x29, x30, [sp, #-16]!
-        mov     x29, sp
-        ldp     x3, x4, [x29]
-        bl      host_gc_alloc_nanbox_bridge
-host_gc_alloc_nanbox_epilog
-        ldp     x29, x30, [sp], #16
-        ret
-host_gc_alloc_nanbox_end
-        ENDP
-        BRASS_FRAME_UNWIND host_gc_alloc_nanbox, 16, 1
-
-; void host_gc_collect()
-        ALIGN   4
-        EXPORT  host_gc_collect
-host_gc_collect PROC
-        stp     x29, x30, [sp, #-16]!
-        mov     x29, sp
-        ldp     x0, x1, [x29]
-        bl      host_gc_safepoint_bridge
-host_gc_collect_epilog
-        ldp     x29, x30, [sp], #16
-        ret
-host_gc_collect_end
-        ENDP
-        BRASS_FRAME_UNWIND host_gc_collect, 16, 1
 
 ; void brass_throw(HostValue val)
 ; x0 = val. Frame record + SavedRegisters (runtime/exception.hpp: 7 x86-64

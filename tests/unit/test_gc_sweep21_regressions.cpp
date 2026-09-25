@@ -9,7 +9,7 @@
 #include <brass/mir/verifier.hpp>
 #include <brass/mir/coro_transform.hpp>
 #include <brass/gc/runtime_gc.hpp>
-#include <brass/gc/generational_gc.hpp>
+#include "gc_test_heap.hpp"
 #include <brass/gc/native_frames.hpp>
 #include <brass/gc/stack_walker.hpp>
 #include <brass/codegen/jit_exec.hpp>
@@ -43,11 +43,9 @@ std::unique_ptr<Module> parse_ok(const char* src) {
 
 using I64Fn = int64_t (*)(int64_t);
 
-struct GenHeap {
-    GenerationalGC gc{32 * 1024, 16 * 1024, 1 << 20, 2};
-    GenHeap() { brass_set_active_generational_gc(&gc); }
-    ~GenHeap() { brass_set_active_generational_gc(nullptr); }
-};
+// A 64 KB eden (the floor), bound to the thread: 20000 48-byte objects
+// collect it about seventeen times.
+using GenHeap = test::BoundHeap;
 
 // ---------------------------------------------------------------------------
 // 1. Walk cost against host stack depth.
@@ -133,7 +131,7 @@ WalkCost run_walk(int depth, Entry how) {
     WalkCost c;
     c.result = sweep21_host_rec(depth, 20000, how);
     c.steps = brass_stack_walk_unwind_steps() - before;
-    c.minors = heap.gc.minor_collection_count();
+    c.minors = heap.minor_collections();
     g_jit = nullptr;
     return c;
 }
@@ -152,7 +150,7 @@ TEST_CASE("Sweep21 - a collection's unwind does not grow with the host's stack d
         const WalkCost deep = run_walk(3000, how);
         CHECK_EQ(shallow.result, 42);
         CHECK_EQ(deep.result, 42);
-        REQUIRE(shallow.minors > 20);
+        REQUIRE(shallow.minors > 10);
         CHECK_EQ(deep.minors, shallow.minors);
         // One unwind of the 3000 frames, not one per collection (before the
         // fix: over 3000 * minors); each later walk takes a few steps.
@@ -175,7 +173,7 @@ TEST_CASE("Sweep21 - an entry scope under a generated caller answers with that c
     REQUIRE(g_g != nullptr);
     REQUIRE(f != nullptr);
     CHECK_EQ(f(20000), 84);
-    CHECK(heap.gc.minor_collection_count() > 20);
+    CHECK(heap.minor_collections() > 10);
 }
 #endif
 
@@ -347,7 +345,7 @@ TEST_CASE("Sweep21 - coro_resume reads and unregisters the moved frame's live co
     }, &frame);
     const uintptr_t original = frame;
     CHECK_EQ(brass_coro_resume(frame, 0), 7u);
-    REQUIRE(heap.gc.minor_collection_count() > 0);
+    REQUIRE(heap.minor_collections() > 0);
     CHECK(frame != original);  // the body's collections moved the frame
     CHECK_EQ(brass_coro_is_done(frame), 1u);
     // A finished body's resume unregisters the frame: through a stale

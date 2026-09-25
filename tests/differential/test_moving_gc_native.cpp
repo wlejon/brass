@@ -4,7 +4,7 @@
 #include <brass/mir/verifier.hpp>
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/codegen/jit_exec.hpp>
-#include <brass/gc/mini_cheney.hpp>
+#include <brass/gc/heap.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <vector>
 
@@ -93,18 +93,19 @@ TEST_CASE("Moving GC Native - Linked List Allocation and Safepoints") {
 
     // 1. Interpreter differential baseline
     {
-        Interpreter interp(128 * 1024);
-        interp.gc().set_stress_mode(true);
+        Interpreter interp(gc::HeapConfig{});
+        interp.heap().set_stress(gc::StressMode::Full);
         RuntimeValue interp_res = interp.run(mod, "test_list_moving", {});
         CHECK_EQ(interp_res.as_i64(), 150LL);
-        CHECK(interp.gc().collection_count() >= 5ULL);
+        CHECK(interp.heap().collection_count() >= 5ULL);
     }
 
-    // 2. Native JIT Execution with Cheney Moving Collector & Stack Walking
+    // 2. Native JIT Execution with a moving collection at every allocation
+    // and safepoint & Stack Walking
     {
-        MiniCheneyGC gc(128 * 1024);
-        gc.set_stress_mode(true);
-        brass_set_active_gc(&gc);
+        gc::Heap gc;
+        gc.set_stress(gc::StressMode::Full);
+        gc::HeapScope bind(gc);
 
         codegen::JitExecutionEngine jit(Target::host());
         bool ok = jit.compile_and_load(mod);
@@ -116,7 +117,6 @@ TEST_CASE("Moving GC Native - Linked List Allocation and Safepoints") {
         CHECK_EQ(native_res.as_i64(), 150LL);
         CHECK(gc.collection_count() >= 5ULL);
 
-        brass_set_active_gc(nullptr);
         brass_set_active_stack_maps(nullptr);
     }
 }
@@ -216,8 +216,8 @@ TEST_CASE("Moving GC Native - Binary Tree Construction and Evacuation") {
 
     // 1. Interpreter
     {
-        Interpreter interp(128 * 1024);
-        interp.gc().set_stress_mode(true);
+        Interpreter interp(gc::HeapConfig{});
+        interp.heap().set_stress(gc::StressMode::Full);
         RuntimeValue interp_res = interp.run(mod, "test_tree_moving", {});
         // 1 + 10 + 100 + 200 + 20 + 300 + 400 = 1031
         CHECK_EQ(interp_res.as_i64(), 1031LL);
@@ -225,9 +225,9 @@ TEST_CASE("Moving GC Native - Binary Tree Construction and Evacuation") {
 
     // 2. Native JIT
     {
-        MiniCheneyGC gc(128 * 1024);
-        gc.set_stress_mode(true);
-        brass_set_active_gc(&gc);
+        gc::Heap gc;
+        gc.set_stress(gc::StressMode::Full);
+        gc::HeapScope bind(gc);
 
         codegen::JitExecutionEngine jit(Target::host());
         bool ok = jit.compile_and_load(mod);
@@ -237,8 +237,8 @@ TEST_CASE("Moving GC Native - Binary Tree Construction and Evacuation") {
 
         RuntimeValue native_res = jit.invoke("test_tree_moving", {});
         CHECK_EQ(native_res.as_i64(), 1031LL);
+        CHECK(gc.collection_count() >= 1ULL);
 
-        brass_set_active_gc(nullptr);
         brass_set_active_stack_maps(nullptr);
     }
 }
@@ -298,17 +298,17 @@ TEST_CASE("Moving GC Native - Cross-Function Call Roots and Callee Registers") {
 
     // 1. Interpreter
     {
-        Interpreter interp(128 * 1024);
-        interp.gc().set_stress_mode(true);
+        Interpreter interp(gc::HeapConfig{});
+        interp.heap().set_stress(gc::StressMode::Full);
         RuntimeValue interp_res = interp.run(mod, "process_pair", {RuntimeValue::from_i64(1234), RuntimeValue::from_i64(5678)});
         CHECK_EQ(interp_res.as_i64(), 6912LL);
     }
 
     // 2. Native JIT
     {
-        MiniCheneyGC gc(128 * 1024);
-        gc.set_stress_mode(true);
-        brass_set_active_gc(&gc);
+        gc::Heap gc;
+        gc.set_stress(gc::StressMode::Full);
+        gc::HeapScope bind(gc);
 
         codegen::JitExecutionEngine jit(Target::host());
         bool ok = jit.compile_and_load(mod);
@@ -320,7 +320,6 @@ TEST_CASE("Moving GC Native - Cross-Function Call Roots and Callee Registers") {
         CHECK_EQ(native_res.as_i64(), 6912LL);
         CHECK(gc.collection_count() >= 3ULL);
 
-        brass_set_active_gc(nullptr);
         brass_set_active_stack_maps(nullptr);
     }
 }

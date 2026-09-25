@@ -4,7 +4,7 @@
 #include <brass/vm/bytecode_compiler.hpp>
 #include <brass/interpreter/value.hpp>
 #include <brass/interpreter/interpreter.hpp>
-#include <brass/gc/mini_cheney.hpp>
+#include <brass/gc/heap.hpp>
 #include <brass/mir/module.hpp>
 #include <brass/mir/function.hpp>
 
@@ -19,7 +19,6 @@
 
 namespace brass {
 
-class GenerationalGC;
 class FastInterpreter;
 namespace runtime {
 class FunctionHandle;
@@ -54,14 +53,18 @@ public:
     using HostFn = FastHostFn;
     using DeoptHandler = FastDeoptHandler;
 
-    explicit FastInterpreter(size_t gc_semispace_size = MiniCheneyGC::DEFAULT_SEMISPACE_SIZE);
+    // Allocates from `heap`; null: the thread's current heap
+    // (gc::Heap::current()) when one is bound, else a heap of its own.
+    explicit FastInterpreter(gc::Heap* heap = nullptr);
+    // Allocates from a heap of its own, configured by `config`.
+    explicit FastInterpreter(const gc::HeapConfig& config);
     ~FastInterpreter();
 
     FastInterpreter(const FastInterpreter&) = delete;
     FastInterpreter& operator=(const FastInterpreter&) = delete;
-    // Not movable: its heap's root provider (and a generational GC's, see
-    // set_generational_gc) captures `this`, as do the thread's current
-    // interpreter and running frames. Hold one through a unique_ptr to move it.
+    // Not movable: its heap's root source captures `this`, as do the
+    // thread's current interpreter and running frames. Hold one through a
+    // unique_ptr to move it.
     FastInterpreter(FastInterpreter&&) = delete;
     FastInterpreter& operator=(FastInterpreter&&) = delete;
 
@@ -92,25 +95,17 @@ public:
     void set_dispatch_table(runtime::FunctionDispatchTable* table);
     runtime::FunctionDispatchTable& dispatch_table() const noexcept;
 
-    // GC access: the heap this interpreter allocates from, its own unless
-    // it borrows one.
-    MiniCheneyGC& gc() noexcept { return borrowed_gc_ ? *borrowed_gc_ : gc_; }
-    const MiniCheneyGC& gc() const noexcept { return borrowed_gc_ ? *borrowed_gc_ : gc_; }
-    // Allocates from `heap` (null: its own) instead. The caller keeps this
-    // interpreter's frames among `heap`'s roots while it runs (its root
-    // provider only knows the heap owner's), e.g. with a ThreadRootsScope.
-    void borrow_gc(MiniCheneyGC* heap) noexcept { borrowed_gc_ = heap; }
+    // The heap this interpreter allocates from, as Interpreter::heap(): its
+    // frames are the heap's roots, and it is the thread's current heap
+    // while the interpreter runs.
+    gc::Heap& heap() noexcept { return *heap_; }
+    const gc::Heap& heap() const noexcept { return *heap_; }
+    bool owns_heap() const noexcept { return own_heap_ != nullptr; }
+    // Allocates from `heap` from now on (null: a heap of its own). Not while
+    // it runs.
+    void use_heap(gc::Heap* heap);
 
-    void set_generational_gc(GenerationalGC* gc) noexcept;
-    // Allocates from, and collects (brass_gc_collect), the generational
-    // `heap` (null: stop) as set_generational_gc does, but leaves `heap`'s
-    // root provider alone: as with borrow_gc, the caller keeps this
-    // interpreter's frames among `heap`'s roots (a ThreadRootsScope).
-    void borrow_generational_gc(GenerationalGC* heap) noexcept { gen_gc_ = heap; }
-    GenerationalGC* generational_gc() noexcept { return gen_gc_; }
-    const GenerationalGC* generational_gc() const noexcept { return gen_gc_; }
-
-    // Allocation in managed GC heap
+    // A zeroed object from heap() (Interpreter::allocate_gc).
     uintptr_t allocate_gc(size_t size, uint64_t pointer_mask = 0, uint32_t type_tag = 0);
 
     // Host / External function registration
@@ -185,7 +180,12 @@ public:
     FastFrame* current_frame() noexcept { return current_frame_; }
     const FastFrame* current_frame() const noexcept { return current_frame_; }
     void set_current_frame(FastFrame* frame) noexcept { current_frame_ = frame; }
+    // The slots of this interpreter's gcref-typed registers (frames and
+    // suspended coroutines), its exception in flight and its last deopt state.
     void collect_all_roots(std::vector<uintptr_t*>& roots);
+    // The nonzero registers without a gcref type, which may still hold a
+    // reference a host or native callee returned untyped.
+    void collect_untyped_registers(std::vector<uintptr_t*>& slots);
 
     void inc_call_depth() noexcept { ++call_depth_; }
     void dec_call_depth() noexcept { if (call_depth_ > 0) --call_depth_; }
@@ -267,9 +267,15 @@ private:
     const Module* module_ = nullptr;
     const BytecodeModule* bytecode_module_ = nullptr;
     runtime::FunctionDispatchTable* dispatch_table_ = nullptr;
-    MiniCheneyGC gc_;
-    MiniCheneyGC* borrowed_gc_ = nullptr;
-    GenerationalGC* gen_gc_ = nullptr;
+    void attach_heap(gc::Heap* heap);
+    void detach_heap() noexcept;
+    // fn(slot, typed_gcref) for every nonzero register of the running frames
+    // and suspended coroutines.
+    template <typename Fn>
+    void for_each_register(Fn&& fn);
+    std::unique_ptr<gc::Heap> own_heap_;
+    gc::Heap* heap_ = nullptr;
+    gc::Heap::RootSourceId root_source_ = 0;
 
     FastFrame* current_frame_ = nullptr;
     size_t call_depth_ = 0;

@@ -12,6 +12,7 @@
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/tiering.hpp>
 #include <brass/gc/runtime_gc.hpp>
+#include "gc_test_heap.hpp"
 #include <iostream>
 #include <memory>
 #include <string>
@@ -85,20 +86,17 @@ void run_bridge_gc_case(bool stress) {
     cfg.enable_background_compile = false;
     cfg.set_use_fast_interpreter(false);
     prog.pipeline().initialize(cfg);
-    Interpreter interp(4096);
-    interp.gc().set_stress_mode(stress);
-    struct ActiveGc {
-        explicit ActiveGc(MiniCheneyGC* gc) : prev(brass_get_active_gc()) { brass_set_active_gc(gc); }
-        ~ActiveGc() { brass_set_active_gc(prev); }
-        MiniCheneyGC* prev;
-    } active_gc(&interp.gc());
+    // A 64 KB eden: @gb_churn's 1000 objects collect it.
+    Interpreter interp(test::small_heap_config());
+    interp.heap().set_stress(stress ? gc::StressMode::Minor : gc::StressMode::None);
+    gc::HeapScope active_gc(interp.heap());
     interp.set_dispatch_table(&prog);
     interp.set_module(mod.get());
     REQUIRE(prog.pipeline().compile_and_install_tier1("gb_hold", mod->get_function("gb_hold")));
     for (int64_t n : {1, 10, 100, 1000}) {
-        const size_t before = interp.gc().collection_count();
+        const size_t before = interp.heap().collection_count();
         CHECK_EQ(interp.run(*mod->get_function("gb_main"), {RuntimeValue::from_i64(n)}).as_i64(), 42);
-        if (n == 1000 || stress) CHECK(interp.gc().collection_count() > before);
+        if (n == 1000 || stress) CHECK(interp.heap().collection_count() > before);
     }
     CHECK(prog.pipeline().is_baseline_rejected("gb_churn"));
 }

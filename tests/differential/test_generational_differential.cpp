@@ -1,135 +1,155 @@
+// The same object graphs built on two heaps, one collected only by young
+// (minor) collections, whose old-to-young references are found through the
+// write barrier's cards, the other only by full collections, which trace
+// everything and promote every survivor: both must keep identical graphs.
 #include "test_framework.hpp"
 #include <brass/mir/module.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/verifier.hpp>
 #include <brass/interpreter/interpreter.hpp>
-#include <brass/gc/mini_cheney.hpp>
-#include <brass/gc/generational_gc.hpp>
+#include <brass/gc/heap.hpp>
 #include <vector>
 
 using namespace brass;
 
-TEST_CASE("Differential - Generational GC vs Mini Cheney GC Linked List Churn") {
-    // Semi-space for Cheney: 128 KB
-    MiniCheneyGC cheney_gc(128 * 1024);
-    // Generational: 32 KB nursery, 32 KB survivor, 128 KB tenured
-    GenerationalGC gen_gc(32 * 1024, 32 * 1024, 128 * 1024);
+namespace {
 
-    uintptr_t cheney_head = 0;
-    uintptr_t gen_head = 0;
+gc::HeapConfig small_config(uint8_t tenure_age) {
+    gc::HeapConfig config;
+    config.eden_bytes = 64 * 1024;
+    config.survivor_bytes = 32 * 1024;
+    config.tenure_age = tenure_age;
+    config.poison = true;
+    config.read_environment = false;
+    return config;
+}
 
-    std::vector<uintptr_t*> cheney_roots = { &cheney_head };
-    std::vector<uintptr_t*> gen_roots = { &gen_head };
+} // namespace
+
+TEST_CASE("Differential - Minor-collected vs full-collected heap: linked list churn") {
+    gc::Heap full_gc(small_config(2));
+    gc::Heap gen_gc(small_config(2));
+
+    uint64_t full_head = 0;
+    uint64_t gen_head = 0;
+    full_gc.add_root(&full_head);
+    gen_gc.add_root(&gen_head);
 
     constexpr int ITERATIONS = 50;
     for (int i = 0; i < ITERATIONS; ++i) {
         // Allocate persistent list node: payload 16 bytes (val: i64, next: gcref)
         // pointer_mask: bit 1 (offset 8) is gcref -> 1ULL << 1 = 2
-        uintptr_t c_node = cheney_gc.allocate(16, 2ULL, 1);
-        cheney_gc.write_field(c_node, 0, static_cast<uint64_t>(i * 10));
-        cheney_gc.write_field(c_node, 1, cheney_head);
-        cheney_head = c_node;
+        uintptr_t f_node = full_gc.allocate_masked(16, 2ULL, 1);
+        full_gc.store(f_node, 0, static_cast<uint64_t>(i * 10));
+        full_gc.store(f_node, 1, full_head);
+        full_head = f_node;
 
-        uintptr_t g_node = gen_gc.allocate(16, 2ULL, 1);
-        gen_gc.write_field(g_node, 0, static_cast<uint64_t>(i * 10));
-        gen_gc.write_field(g_node, 1, gen_head);
-        // Write barrier on list link
-        gen_gc.write_barrier(g_node, gen_head);
+        uintptr_t g_node = gen_gc.allocate_masked(16, 2ULL, 1);
+        gen_gc.store(g_node, 0, static_cast<uint64_t>(i * 10));
+        gen_gc.store(g_node, 1, gen_head);  // store() applies the write barrier
         gen_head = g_node;
 
         // Churn: allocate transient throwaway garbage
         for (int churn = 0; churn < 20; ++churn) {
-            uintptr_t c_garbage = cheney_gc.allocate(32, 0, 99);
-            cheney_gc.write_field(c_garbage, 0, 0xDEADBEEF);
+            uintptr_t f_garbage = full_gc.allocate_masked(32, 0, 99);
+            full_gc.store(f_garbage, 0, 0xDEADBEEF);
 
-            uintptr_t g_garbage = gen_gc.allocate(32, 0, 99);
-            gen_gc.write_field(g_garbage, 0, 0xDEADBEEF);
+            uintptr_t g_garbage = gen_gc.allocate_masked(32, 0, 99);
+            gen_gc.store(g_garbage, 0, 0xDEADBEEF);
         }
 
         // Trigger collection periodically
         if (i % 10 == 0) {
-            cheney_gc.collect(cheney_roots);
-            gen_gc.collect(gen_roots);
+            full_gc.collect(gc::CollectionKind::Full);
+            gen_gc.collect(gc::CollectionKind::Minor);
         }
     }
 
     // Final collection
-    cheney_gc.collect(cheney_roots);
-    gen_gc.collect(gen_roots);
+    full_gc.collect(gc::CollectionKind::Full);
+    gen_gc.collect(gc::CollectionKind::Minor);
 
-    CHECK(gen_gc.minor_collections() > 0);
+    CHECK(gen_gc.stats().minor_collections > 0);
+    CHECK_EQ(gen_gc.stats().full_collections, 0u);
+    CHECK(full_gc.stats().full_collections > 0);
+    CHECK(gen_gc.stats().promoted_bytes > 0);  // the list's older nodes are old, the newer young
 
     // Verify both lists produce identical length and values
-    uintptr_t cur_c = cheney_head;
-    uintptr_t cur_g = gen_head;
+    uint64_t cur_f = full_head;
+    uint64_t cur_g = gen_head;
     int verified_nodes = 0;
 
-    while (cur_c != 0 && cur_g != 0) {
-        CHECK(cheney_gc.is_valid_object(cur_c));
+    while (cur_f != 0 && cur_g != 0) {
+        CHECK(full_gc.is_valid_object(cur_f));
         CHECK(gen_gc.is_valid_object(cur_g));
 
-        uint64_t val_c = cheney_gc.read_field(cur_c, 0);
-        uint64_t val_g = gen_gc.read_field(cur_g, 0);
-        CHECK_EQ(val_c, val_g);
+        uint64_t val_f = gc::Heap::load(cur_f, 0);
+        uint64_t val_g = gc::Heap::load(cur_g, 0);
+        CHECK_EQ(val_f, val_g);
 
-        cur_c = cheney_gc.read_field(cur_c, 1);
-        cur_g = gen_gc.read_field(cur_g, 1);
+        cur_f = gc::Heap::load(cur_f, 1);
+        cur_g = gc::Heap::load(cur_g, 1);
         verified_nodes++;
     }
 
-    CHECK_EQ(cur_c, 0ULL);
+    CHECK_EQ(cur_f, 0ULL);
     CHECK_EQ(cur_g, 0ULL);
     CHECK_EQ(verified_nodes, ITERATIONS);
+    full_gc.remove_root(&full_head);
+    gen_gc.remove_root(&gen_head);
 }
 
 TEST_CASE("Differential - Old-to-Young mutation across Minor Collections") {
-    MiniCheneyGC cheney_gc(64 * 1024);
-    GenerationalGC gen_gc(32 * 1024, 32 * 1024, 64 * 1024);
-    gen_gc.set_tenuring_threshold(1);
+    gc::Heap full_gc(small_config(1));
+    gc::Heap gen_gc(small_config(1));  // promoted by the first minor collection
 
-    // Create long-lived root object in both GCs
-    uintptr_t c_root = cheney_gc.allocate(16, 2ULL, 1);
-    cheney_gc.write_field(c_root, 0, 1000ULL);
-    cheney_gc.write_field(c_root, 1, 0ULL);
+    // Create long-lived root object in both heaps
+    uint64_t f_root = full_gc.allocate_masked(16, 2ULL, 1);
+    full_gc.store(f_root, 0, 1000ULL);
+    full_gc.store(f_root, 1, 0ULL);
 
-    uintptr_t g_root = gen_gc.allocate(16, 2ULL, 1);
-    gen_gc.write_field(g_root, 0, 1000ULL);
-    gen_gc.write_field(g_root, 1, 0ULL);
+    uint64_t g_root = gen_gc.allocate_masked(16, 2ULL, 1);
+    gen_gc.store(g_root, 0, 1000ULL);
+    gen_gc.store(g_root, 1, 0ULL);
 
-    std::vector<uintptr_t*> c_roots = { &c_root };
-    std::vector<uintptr_t*> g_roots = { &g_root };
+    full_gc.add_root(&f_root);
+    gen_gc.add_root(&g_root);
 
-    // Advance generation: g_root becomes tenured
-    gen_gc.collect(g_roots);
-    cheney_gc.collect(c_roots);
-    CHECK(gen_gc.is_in_tenured(g_root));
+    // Advance generation: both roots become old
+    gen_gc.collect(gc::CollectionKind::Minor);
+    full_gc.collect(gc::CollectionKind::Full);
+    CHECK(gen_gc.is_old(g_root));
+    CHECK(full_gc.is_old(f_root));
 
-    // Now allocate new young leaf in nursery
-    uintptr_t c_leaf = cheney_gc.allocate(16, 0ULL, 2);
-    cheney_gc.write_field(c_leaf, 0, 9999ULL);
-    cheney_gc.write_field(c_root, 1, c_leaf);
+    // Now allocate a new young leaf
+    uintptr_t f_leaf = full_gc.allocate_masked(16, 0ULL, 2);
+    full_gc.store(f_leaf, 0, 9999ULL);
+    full_gc.store(f_root, 1, f_leaf);
 
-    uintptr_t g_leaf = gen_gc.allocate(16, 0ULL, 2);
-    gen_gc.write_field(g_leaf, 0, 9999ULL);
-    gen_gc.write_field(g_root, 1, g_leaf);
-    gen_gc.write_barrier(g_root, g_leaf); // Critical: old points to young!
+    uintptr_t g_leaf = gen_gc.allocate_masked(16, 0ULL, 2);
+    gen_gc.store(g_leaf, 0, 9999ULL);
+    gen_gc.store(g_root, 1, g_leaf);  // Critical: old points to young, through the barrier
+    CHECK(gen_gc.is_young(g_leaf));
 
-    // Scavenge with ONLY roots (leaf is not directly rooted!)
-    gen_gc.collect(g_roots);
-    cheney_gc.collect(c_roots);
+    // Collect with ONLY roots (leaf is not directly rooted!)
+    gen_gc.collect(gc::CollectionKind::Minor);
+    full_gc.collect(gc::CollectionKind::Full);
 
     // Both should preserve leaf through root's reference
-    uintptr_t c_leaf_after = cheney_gc.read_field(c_root, 1);
-    uintptr_t g_leaf_after = gen_gc.read_field(g_root, 1);
+    uint64_t f_leaf_after = gc::Heap::load(f_root, 1);
+    uint64_t g_leaf_after = gc::Heap::load(g_root, 1);
 
-    REQUIRE_NE(c_leaf_after, 0ULL);
+    REQUIRE_NE(f_leaf_after, 0ULL);
     REQUIRE_NE(g_leaf_after, 0ULL);
+    CHECK_NE(g_leaf_after, g_leaf);  // moved: promoted by this minor collection
 
-    CHECK(cheney_gc.is_valid_object(c_leaf_after));
+    CHECK(full_gc.is_valid_object(f_leaf_after));
     CHECK(gen_gc.is_valid_object(g_leaf_after));
 
-    CHECK_EQ(cheney_gc.read_field(c_leaf_after, 0), 9999ULL);
-    CHECK_EQ(gen_gc.read_field(g_leaf_after, 0), 9999ULL);
+    CHECK_EQ(gc::Heap::load(f_leaf_after, 0), 9999ULL);
+    CHECK_EQ(gc::Heap::load(g_leaf_after, 0), 9999ULL);
+    full_gc.remove_root(&f_root);
+    gen_gc.remove_root(&g_root);
 }
 
 TEST_CASE("Differential - Interpreter MIR execution with Write Barrier") {
@@ -156,16 +176,18 @@ TEST_CASE("Differential - Interpreter MIR execution with Write Barrier") {
     DiagnosticReporter diag;
     REQUIRE(verify_module(mod, &diag));
 
-    // Execute on Interpreter
-    Interpreter interp_cheney;
-    interp_cheney.set_module(&mod);
-    auto res_cheney = interp_cheney.run(*fn, {});
-    CHECK_EQ(res_cheney.as_i64(), 4242LL);
+    // Execute on an Interpreter with a heap of its own
+    Interpreter interp_plain(gc::HeapConfig{});
+    interp_plain.set_module(&mod);
+    auto res_plain = interp_plain.run(*fn, {});
+    CHECK_EQ(res_plain.as_i64(), 4242LL);
 
-    GenerationalGC gen_gc(32 * 1024, 32 * 1024, 64 * 1024);
-    Interpreter interp_gen;
+    // And on one sharing a heap that collects at every allocation and safepoint
+    gc::Heap gen_gc(small_config(2));
+    gen_gc.set_stress(gc::StressMode::Alternate);
+    Interpreter interp_gen(&gen_gc);
     interp_gen.set_module(&mod);
-    interp_gen.set_generational_gc(&gen_gc);
     auto res_gen = interp_gen.run(*fn, {});
     CHECK_EQ(res_gen.as_i64(), 4242LL);
+    CHECK(gen_gc.collection_count() >= 1u);
 }

@@ -1,7 +1,6 @@
 #include "test_framework.hpp"
 #include <brass/runtime/patcher.hpp>
 #include <brass/runtime/exception.hpp>
-#include <brass/runtime/osr_coordinator.hpp>
 #include <brass/codegen/jit_exec.hpp>
 #include <brass/interpreter/value.hpp>
 #include <brass/mir/builder.hpp>
@@ -337,24 +336,4 @@ TEST_CASE("AArch64 Runtime - Unhandled Throw Envelope Catch") {
         CHECK_EQ(e.value().as_i32(), 777);
     }
     CHECK(caught);
-}
-
-// =============================================================================
-// 4. OSR Coordinator Vector Support
-// =============================================================================
-TEST_CASE("AArch64 Runtime - OSR Migration Frame Vector Packing") {
-    OsrMigrationFrame frame;
-    frame.loop_header_id = 42;
-
-    alignas(16) uint8_t vec[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
-    uint64_t lo = 0, hi = 0;
-    std::memcpy(&lo, vec, 8);
-    std::memcpy(&hi, vec + 8, 8);
-
-    frame.add_slot(0, lo);
-    frame.add_slot(1, hi);
-
-    CHECK_EQ(frame.count, 2u);
-    CHECK_EQ(frame.get_raw_value(0), lo);
-    CHECK_EQ(frame.get_raw_value(1), hi);
 }

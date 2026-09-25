@@ -221,67 +221,6 @@ AArch64CompilationResult AArch64EmitContext::compile_pass(const std::vector<uint
         }
     }
 
-    // 4.5 Specialized OSR secondary prologue
-    if (fn_.osr_entry.enabled && block_labels_.find(fn_.osr_entry.loop_header_id) != block_labels_.end()) {
-        buffer_.align(16);
-        result.osr_entry_offset = buffer_.size();
-
-        AArch64FrameLayout::emit_prologue(enc_, frame_, fn_.calling_conv);
-
-        // AAPCS64 1st argument (OsrMigrationFrame*) is X0
-        enc_.mov(GPR::X16, GPR::X0);
-
-        // Only values live at the loop header are loaded: a migrated value with
-        // no live range there (a constant folded to an immediate, a value only
-        // used before the loop) keeps a stale location that may alias a
-        // loop-carried value, and writing it would clobber that value.
-        if (fn_.osr_entry.live_at_header.size() != fn_.osr_entry.live_in_vregs.size()) {
-            throw std::logic_error("OSR entry for " + std::string(fn_.name) +
-                                   ": live-at-header set was not computed by register allocation");
-        }
-        for (size_t i = 0; i < fn_.osr_entry.live_in_vregs.size(); ++i) {
-            if (!fn_.osr_entry.live_at_header[i]) continue;
-            VReg vr = fn_.osr_entry.live_in_vregs[i];
-            const VRegInfo& info = fn_.get_vreg_info(vr);
-            int32_t slot_offset = static_cast<int32_t>(16 + i * 16);
-
-            if (!info.is_spilled && !info.assigned_preg.is_valid()) {
-                throw std::logic_error("OSR entry for " + std::string(fn_.name) + ": v" +
-                                       std::to_string(vr.id) + " is live at the loop header but has no location");
-            }
-            if (!info.is_spilled && info.assigned_preg.is_valid()) {
-                PReg preg = info.assigned_preg;
-                if (preg.is_gpr()) {
-                    if (vr.size == 4) {
-                        enc_.ldr32(preg.as_aarch64_gpr(), ptr(GPR::X16, slot_offset));
-                    } else {
-                        enc_.ldr(preg.as_aarch64_gpr(), ptr(GPR::X16, slot_offset));
-                    }
-                } else if (preg.is_xmm()) {
-                    if (vr.size == 4) {
-                        enc_.ldr_s(preg.as_aarch64_fpr(), ptr(GPR::X16, slot_offset));
-                    } else if (vr.size == 16) {
-                        enc_.ldr_q(preg.as_aarch64_fpr(), ptr(GPR::X16, slot_offset));
-                    } else {
-                        enc_.ldr(preg.as_aarch64_fpr(), ptr(GPR::X16, slot_offset));
-                    }
-                }
-            } else if (info.is_spilled && info.assigned_spill_slot >= 0) {
-                MemAddress stack_addr = AArch64FrameLayout::spill_slot_address(info.assigned_spill_slot, frame_);
-                stack_addr = ensure_accessible_mem(stack_addr, GPR::X17);
-                if (vr.is_xmm()) {
-                    enc_.ldr(FPR::V31, ptr(GPR::X16, slot_offset));
-                    enc_.str(FPR::V31, stack_addr);
-                } else {
-                    enc_.ldr(GPR::X17, ptr(GPR::X16, slot_offset));
-                    enc_.str(GPR::X17, stack_addr);
-                }
-            }
-        }
-
-        enc_.b(block_labels_[fn_.osr_entry.loop_header_id]);
-    }
-
     result.code_buffer = std::move(buffer_);
     result.safepoints = std::move(safepoints_);
     result.stack_map.function_name = fn_.name;

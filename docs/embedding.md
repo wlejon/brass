@@ -15,10 +15,10 @@ Brass provides a clean, thread-safe embedding surface for embedding dynamic lang
        |                                             |
        v                                             v
 +-------------------------------+             +-------------------------------+
-|    HostEngine / Embedding     |             |      Host Cheney Moving GC    |
-|  - Register host callbacks    |             |  - 2-Space Relocating Compact |
-|  - In-memory MIR compilation  |             |  - Heap Poisoning (0xDEADBEEF)|
-|  - Target ABI configuration   |             |  - Stack Walk Root Relocation |
+|    HostEngine / Embedding     |             |          gc::Heap             |
+|  - Register host callbacks    |             |  - Generational, per thread   |
+|  - In-memory MIR compilation  |             |  - Host-defined layouts       |
+|  - Target ABI configuration   |             |  - Stack-map root relocation  |
 +-------------------------------+             +-------------------------------+
        |                                             |
        v                                             v
@@ -53,12 +53,12 @@ auto host_print = [](int64_t val) -> void {
 };
 engine.register_external_symbol("host_print", reinterpret_cast<void*>(+host_print));
 
-// Optionally attach a HostGC for automatic safepoint and allocator binding
-brass::HostGC gc(1024 * 1024);
-engine.register_host_gc(&gc);
-
 // Compile in-memory MIR Module into an executable CompiledModule
 std::unique_ptr<brass::CompiledModule> compiled = engine.compile(my_module);
+
+// Code that allocates (brass_gc_alloc) runs with a heap bound on the thread
+brass::gc::Heap heap;
+brass::gc::HeapScope bind(heap);
 ```
 
 ### 2.2 `brass::CompiledModule`
@@ -91,15 +91,15 @@ compiled->walk_stack(top_rbp, top_ip, [](void** root_slot) {
 
 ## 3. Host C Embedding Interface (`brass/embedding/brass_c_api.h`)
 
-For runtimes integrating directly with the internal host engine and Cheney GC via C FFI, Brass exposes host embedding hooks in `<brass/embedding/brass_c_api.h>` (for the general public `libbrass` compiler SDK C-ABI, see the [Embedding Guide](embedding_guide.md)):
+For runtimes integrating directly with the internal host engine and heap via C FFI, Brass exposes host embedding hooks in `<brass/embedding/brass_c_api.h>` (for the general public `libbrass` compiler SDK C-ABI, see the [Embedding Guide](embedding_guide.md)):
 
 ```c
 #include <brass/embedding/brass_c_api.h>
 
-// Create engine and GC
+// Create the engine, and a heap bound to this thread for compiled code
 brass_engine_t* engine = brass_engine_create();
-brass_gc_t* gc = brass_host_gc_create(256 * 1024);
-brass_engine_register_gc(engine, gc);
+brass_heap_t* heap = brass_heap_create(0);   /* 0: default young size */
+brass_heap_bind(heap);
 
 // Register external host symbol
 brass_engine_register_symbol(engine, "my_host_fn", (void*)&my_host_fn);
@@ -121,7 +121,8 @@ brass_compiled_module_patch_call(compiled, "call_site", (const void*)&new_stub);
 // Cleanup
 brass_embed_compiled_module_destroy(compiled);
 brass_embed_module_destroy(mod);
-brass_host_gc_destroy(gc);
+brass_heap_bind(NULL);
+brass_heap_destroy(heap);
 brass_engine_destroy(engine);
 ```
 
@@ -157,18 +158,14 @@ if (v_int.is_i32()) {
 
 ---
 
-## 5. Moving Cheney GC Contract & Stack Map Coordination
+## 5. The Heap and Stack Maps
 
-The `HostGC` is a Cheney moving semispace garbage collector designed to coordinate seamlessly with Brass stack maps:
+Compiled code allocates from the calling thread's `gc::Heap` (bound with `gc::HeapScope` or `brass_heap_bind`); [gc_contract.md](gc_contract.md) is the full design and contract. In short:
 
-1. **Heap Poisoning**:
-   - Whenever semispaces swap, the old space is immediately filled with `0xDEADBEEFDEADBEEFULL` to catch dangling pointers instantly.
-2. **Stack Frame Traversal**:
-   - During allocation or safepoint, `brass_stack_walk` unrolls native stack frames using RBP chains and Brass `ModuleStackMap` records.
-3. **In-Place Root Relocation**:
-   - Live `gcref` spill slots and `HostValue` NaN-boxed object references are automatically evacuated into To-Space and rewritten in-place.
-4. **Stress Mode**:
-   - Setting `gc.set_stress_mode(true)` forces a collection on every allocation and safepoint to catch root retention bugs.
+1. **Roots in generated frames.** A collection that `brass_gc_alloc`, `brass_gc_safepoint` or `brass_gc_collect` triggers walks the calling frames with `brass_stack_walk` and the stack maps each loaded module registers, and rewrites every live `gcref` slot in place. A NaN-boxed `HostValue` gcref keeps its tag when its address is rewritten.
+2. **Host roots.** Slots the host holds outside the heap are registered with `brass_heap_add_root` (or `gc::Heap::add_root` / `add_root_source`).
+3. **Barrier.** A store of a young reference into an old object goes through the write barrier (`brass_heap_write_barrier`, or MIR `write_barrier` in compiled code).
+4. **Checking.** `brass_heap_set_stress` collects at every allocation and safepoint; `BRASS_GC_VERIFY=1` verifies the heap around every collection and `BRASS_GC_POISON=1` fills freed memory with `0xDB`.
 
 ---
 

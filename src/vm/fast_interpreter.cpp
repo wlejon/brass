@@ -36,9 +36,11 @@ RuntimeValue FastInterpreter::execute_frame(FastFrame& frame) {
 
     // Loop bookkeeping happens at backward branches only: the instruction
     // budget is charged by the loop's length, and the function's backedge
-    // counter (or the OSR coordinator, when enabled) is told.
+    // counter (or the OSR coordinator, when the program's loops can OSR) is
+    // told.
     const uint64_t insn_limit = max_instructions_ > 0 ? max_instructions_ : ~uint64_t{0};
-    const bool osr_on = frame.mir_fn != nullptr && dispatch_table().osr().is_enabled();
+    const runtime::OsrCoordinator& osr = dispatch_table().osr();
+    const bool osr_on = frame.mir_fn != nullptr && osr.is_enabled() && osr.runs_program();
     runtime::TieringFeedback* const feedback = &frame.info->tiering(dispatch_table_);
 
 #define RA registers[decode_a(inst)]
@@ -108,7 +110,7 @@ RuntimeValue FastInterpreter::execute_frame(FastFrame& frame) {
         TENTRY(jump); TENTRY(jump_if); TENTRY(jump_if_not);
         TENTRY(ret); TENTRY(ret_void); TENTRY(switch_);
         TENTRY(call); TENTRY(call_indirect); TENTRY(patchable_call); TENTRY(func_addr);
-        TENTRY(safepoint); TENTRY(write_barrier); TENTRY(guard); TENTRY(resume_point); TENTRY(osr_entry);
+        TENTRY(safepoint); TENTRY(write_barrier); TENTRY(guard); TENTRY(resume_point);
         TENTRY(pinned_tls_read); TENTRY(pinned_tls_write); TENTRY(read_sp);
         TENTRY(throw_); TENTRY(invoke); TENTRY(landing_pad); TENTRY(resume);
         TENTRY(coro_create); TENTRY(coro_suspend); TENTRY(coro_resume); TENTRY(coro_destroy);
@@ -365,7 +367,16 @@ loop_start:
         STORE(store8, uint8_t)
         STORE(store16, uint16_t)
         STORE(store32, uint32_t)
-        STORE(store64, uint64_t)
+        // A word store may make an old object name a young one: the heap's
+        // barrier remembers it, whether or not the MIR carries a
+        // write_barrier for it.
+        OP_CASE(store64) {
+            const uint64_t v_ = RA;
+            const uintptr_t at_ = static_cast<uintptr_t>(RB + static_cast<int64_t>(decode_imm24(inst)));
+            std::memcpy(reinterpret_cast<void*>(at_), &v_, sizeof v_);
+            heap_->write_barrier_interior(at_, v_);
+            NEXT();
+        }
 
         OP_CASE(alloca_) {
             // The size is the next code word; the alignment is d.
@@ -477,7 +488,6 @@ loop_start:
         }
 
         OP_CASE(resume_point) { NEXT(); }
-        OP_CASE(osr_entry) { NEXT(); }
 
         OP_CASE(pinned_tls_write) { tls_block_ = RB; NEXT(); }
         OP_CASE(pinned_tls_read) {

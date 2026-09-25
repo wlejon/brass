@@ -1,9 +1,7 @@
 #include <brass/runtime/coroutine.hpp>
 #include <brass/gc/runtime_gc.hpp>
-#include <brass/gc/generational_gc.hpp>
-#include <brass/gc/host_heap.hpp>
+#include <brass/gc/heap.hpp>
 #include <brass/gc/native_frames.hpp>
-#include <brass/embedding/host_gc.hpp>
 #include <brass/embedding/nanbox.hpp>
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/runtime/exception.hpp>
@@ -91,12 +89,6 @@ std::shared_ptr<CoroFrameRegistry> make_coro_frame_registry(CoroFrameHolds holds
     return std::make_shared<CoroFrameRegistry>(std::move(holds));
 }
 
-void set_coro_frame_registry_holds(CoroFrameRegistry& registry, CoroFrameHolds holds) {
-    if (!holds) throw std::logic_error("set_coro_frame_registry_holds: a heap's registry needs its holds predicate");
-    std::lock_guard<std::recursive_mutex> own(registry.mutex);
-    registry.holds = std::move(holds);
-}
-
 CoroRootsLock::CoroRootsLock(CoroFrameRegistry& registry) : registry_(&registry) {
     registry_->mutex.lock();
 }
@@ -107,15 +99,6 @@ CoroRootsLock::~CoroRootsLock() {
 
 namespace {
 
-// The installed HostHeap's frames, and frames allocated outside any heap
-// (never collected, so never reported as roots).
-CoroFrameRegistry& host_heap_frames() {
-    static auto* r = new CoroFrameRegistry([](uintptr_t addr) {
-        const HostHeap* heap = brass::host_heap();
-        return heap != nullptr && heap->contains(addr);
-    });
-    return *r;
-}
 // Every frame allocated outside any heap: they are never freed, so an
 // address here stays a frame. Guarded by unmanaged_frames()' lock.
 std::unordered_set<uintptr_t>& unmanaged_frame_addrs() {
@@ -137,8 +120,7 @@ BrassCoroFrame* checked_coro_frame(uintptr_t handle, const char* what) {
         std::lock_guard<std::recursive_mutex> own(r->mutex);
         if (r->holds(handle)) return reinterpret_cast<BrassCoroFrame*>(handle);
     }
-    // A registered frame is unfinished and live wherever it is (a HostHeap
-    // that cannot answer `contains` still has its registered frames).
+    // A registered frame is unfinished and live wherever it is.
     for (CoroFrameRegistry* r : live_registries()) {
         std::lock_guard<std::recursive_mutex> own(r->mutex);
         for (auto& cell : r->frames) {
@@ -156,10 +138,7 @@ BrassCoroFrame* checked_coro_frame(uintptr_t handle, const char* what) {
 // The registry of the heap allocate_coro_frame allocates from on this thread
 // (the same order of choice).
 CoroFrameRegistry& current_coro_registry() {
-    if (brass::host_heap() != nullptr) return host_heap_frames();
-    if (GenerationalGC* gen_gc = brass::brass_get_active_generational_gc()) return gen_gc->coro_frames();
-    if (HostGC* host_gc = brass::get_active_host_gc()) return host_gc->coro_frames();
-    if (MiniCheneyGC* gc = brass::brass_get_active_gc()) return gc->coro_frames();
+    if (gc::Heap* heap = gc::Heap::current()) return heap->coro_frames();
     return unmanaged_frames();
 }
 
@@ -366,24 +345,6 @@ void append_active_coro_roots(CoroFrameRegistry& registry, std::vector<uintptr_t
     }
 }
 
-void append_host_heap_coro_roots(std::vector<uintptr_t*>& roots) {
-    // The host updates these slots after this returns: only while its
-    // collection holds the registry's lock may it be handed them.
-    if (!brass::in_host_heap_collection()) {
-        throw std::logic_error("brass_enumerate_thread_roots: called outside a HostHeapCollectionScope; a host's "
-                               "collection holds one until it has updated the slots reported");
-    }
-    append_active_coro_roots(host_heap_frames(), roots);
-}
-
-void lock_host_heap_coro_roots() {
-    host_heap_frames().mutex.lock();
-}
-
-void unlock_host_heap_coro_roots() noexcept {
-    host_heap_frames().mutex.unlock();
-}
-
 void finish_thrown_coro_frame(BrassCoroFrame* frame) noexcept {
     if (!frame) return;
     frame->is_done = 1;
@@ -414,39 +375,18 @@ namespace {
 
 uintptr_t allocate_coro_frame(size_t total_size, uint64_t frame_mask,
                               uintptr_t caller_fp, uintptr_t caller_ip) {
-    if (brass::host_heap() != nullptr) {
-        // The frame is an object of the host's heap; its slots are traced
-        // through frame_mask like any other, and while suspended it is also
-        // a root through the active-frame registry.
-        return brass::host_heap_allocate(total_size, frame_mask, TYPE_TAG_CORO_FRAME,
-                                         caller_fp, caller_ip);
-    }
-    const bool has_caller = caller_fp != 0 && caller_ip != 0;
-    const ModuleStackMap* maps = has_caller ? brass::brass_stack_maps_for_caller(caller_ip) : nullptr;
-    if (GenerationalGC* gen_gc = brass::brass_get_active_generational_gc()) {
-        if (!gen_gc->can_allocate_fast(total_size) && has_caller) {
-            if (!maps) coro_fatal_no_maps();
-            return brass::brass_runtime_gc_alloc(gen_gc, *maps, total_size, frame_mask,
-                                                 TYPE_TAG_CORO_FRAME, caller_fp, caller_ip);
+    if (gc::Heap* heap = gc::Heap::current()) {
+        // The frame is an object of the heap; its slots are traced through
+        // frame_mask like any other, and while suspended it is also a root
+        // through the heap's frame registry.
+        const bool has_caller = caller_fp != 0 && caller_ip != 0;
+        if (has_caller && !brass::brass_stack_maps_for_caller(caller_ip)) {
+            const size_t total = gc::payload_bytes_for(total_size) + gc::kHeaderBytes;
+            const auto* buffer = heap->allocation_buffer();
+            if (total > static_cast<size_t>(buffer->end - buffer->top)) coro_fatal_no_maps();
         }
-        return gen_gc->allocate(total_size, frame_mask, TYPE_TAG_CORO_FRAME);
-    }
-    if (HostGC* host_gc = brass::get_active_host_gc()) {
-        // As host_gc_alloc_bridge: collect with the caller's frames first.
-        if (caller_fp != 0 && caller_ip != 0 && !host_gc->can_allocate_fast(total_size)) {
-            std::vector<uintptr_t*> ptr_roots;
-            std::vector<HostValue*> val_roots;
-            host_gc->collect(ptr_roots, val_roots, caller_fp, caller_ip);
-        }
-        return host_gc->allocate(total_size, frame_mask, TYPE_TAG_CORO_FRAME);
-    }
-    if (MiniCheneyGC* gc = brass::brass_get_active_gc()) {
-        if (!gc->can_allocate_fast(total_size) && has_caller) {
-            if (!maps) coro_fatal_no_maps();
-            return brass::brass_runtime_gc_alloc(gc, *maps, total_size, frame_mask,
-                                                 TYPE_TAG_CORO_FRAME, caller_fp, caller_ip);
-        }
-        return gc->allocate(total_size, frame_mask, TYPE_TAG_CORO_FRAME);
+        return heap->allocate_at(total_size, gc::mask_layout(frame_mask, TYPE_TAG_CORO_FRAME), 0, 0,
+                                 has_caller ? caller_fp : 0, has_caller ? caller_ip : 0);
     }
     const uintptr_t frame = reinterpret_cast<uintptr_t>(std::calloc(1, total_size));
     if (frame) {

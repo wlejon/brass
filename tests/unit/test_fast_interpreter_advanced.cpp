@@ -9,8 +9,7 @@
 #include <brass/runtime/exception.hpp>
 #include <brass/runtime/deopt.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
-#include <brass/gc/mini_cheney.hpp>
-#include <brass/gc/generational_gc.hpp>
+#include <brass/gc/heap.hpp>
 #include <vector>
 #include <cstring>
 
@@ -541,39 +540,39 @@ TEST_CASE("Fast Interpreter - GC Root Scanning during Active Frame") {
     b.build_ret(call_inst);
     fn->rebuild_cfg_predecessors();
 
-    FastInterpreter interp;
+    FastInterpreter interp(gc::HeapConfig{});
 
     // Allocate an object in GC heap before running
-    uintptr_t obj = interp.gc().allocate(24, 0, 1);
+    uintptr_t obj = interp.heap().allocate_masked(24, 0, 1);
     REQUIRE(obj != 0);
-    interp.gc().write_field(obj, 0, 0x1122334455667788ULL);
-    interp.gc().write_field(obj, 1, 0xAABBCCDDEEFF0011ULL);
+    interp.heap().store(obj, 0, 0x1122334455667788ULL);
+    interp.heap().store(obj, 1, 0xAABBCCDDEEFF0011ULL);
 
     uintptr_t old_addr = obj;
     uintptr_t new_addr = 0;
 
     interp.register_external_function("trigger_gc_scavenge", [&](FastInterpreter& in, const std::vector<RuntimeValue>&) -> RuntimeValue {
-        std::vector<uintptr_t*> roots;
-        uintptr_t local_root = obj;
-        roots.push_back(&local_root);
+        uint64_t local_root = obj;
+        in.heap().add_root(&local_root);
+        // A full collection: the young object is promoted (moved).
+        in.heap().collect(gc::CollectionKind::Full);
+        in.heap().remove_root(&local_root);
 
-        in.gc().collect(roots);
-
-        new_addr = local_root;
-        return RuntimeValue::from_i64(static_cast<int64_t>(in.gc().read_field(new_addr, 0)));
+        new_addr = static_cast<uintptr_t>(local_root);
+        return RuntimeValue::from_i64(static_cast<int64_t>(gc::Heap::load(new_addr, 0)));
     });
 
     RuntimeValue res = interp.run(*fn, {});
     CHECK_EQ(static_cast<uint64_t>(res.as_i64()), 0x1122334455667788ULL);
     CHECK_NE(old_addr, new_addr);
-    CHECK(interp.gc().is_valid_object(new_addr));
-    CHECK(!interp.gc().is_valid_object(old_addr));
+    CHECK(interp.heap().is_valid_object(new_addr));
+    CHECK(interp.heap().is_old(new_addr));
+    CHECK(!interp.heap().is_valid_object(old_addr));
 }
 
-TEST_CASE("Fast Interpreter - GenerationalGC Nursery Scavenge with Active Frame") {
-    GenerationalGC gen_gc(64 * 1024, 32 * 1024, 256 * 1024);
-    FastInterpreter interp;
-    interp.set_generational_gc(&gen_gc);
+TEST_CASE("Fast Interpreter - Young Generation Scavenge with Active Frame") {
+    gc::Heap gen_gc;
+    FastInterpreter interp(&gen_gc);
 
     Module mod("gen_gc_mod");
     Builder b(mod);
@@ -587,28 +586,28 @@ TEST_CASE("Fast Interpreter - GenerationalGC Nursery Scavenge with Active Frame"
     b.build_ret(call_inst);
     fn->rebuild_cfg_predecessors();
 
-    uintptr_t nursery_obj = gen_gc.allocate(16, 0, 9);
+    uintptr_t nursery_obj = gen_gc.allocate_masked(16, 0, 9);
     REQUIRE(nursery_obj != 0);
-    gen_gc.write_field(nursery_obj, 0, 0xCAFEBABE12345678ULL);
+    gen_gc.store(nursery_obj, 0, 0xCAFEBABE12345678ULL);
 
     uintptr_t old_addr = nursery_obj;
     uintptr_t updated_addr = 0;
 
     interp.register_external_function("gen_gc_hook", [&](FastInterpreter&, const std::vector<RuntimeValue>&) -> RuntimeValue {
-        std::vector<uintptr_t*> roots;
-        uintptr_t root = nursery_obj;
-        roots.push_back(&root);
+        uint64_t root = nursery_obj;
+        gen_gc.add_root(&root);
+        gen_gc.collect(gc::CollectionKind::Minor);
+        gen_gc.remove_root(&root);
 
-        gen_gc.minor_collect(roots);
-
-        updated_addr = root;
-        return RuntimeValue::from_i64(static_cast<int64_t>(gen_gc.read_field(updated_addr, 0)));
+        updated_addr = static_cast<uintptr_t>(root);
+        return RuntimeValue::from_i64(static_cast<int64_t>(gc::Heap::load(updated_addr, 0)));
     });
 
     RuntimeValue res = interp.run(*fn, {});
     CHECK_EQ(static_cast<uint64_t>(res.as_i64()), 0xCAFEBABE12345678ULL);
     CHECK_NE(old_addr, updated_addr);
     CHECK(gen_gc.is_valid_object(updated_addr));
+    CHECK(gen_gc.is_young(updated_addr));  // copied to a survivor space, not yet promoted
 }
 
 TEST_CASE("Fast Interpreter - GC Root Scanning of Suspended Coroutine") {
@@ -631,16 +630,16 @@ TEST_CASE("Fast Interpreter - GC Root Scanning of Suspended Coroutine") {
     b.build_ret(read_call);
     gen->rebuild_cfg_predecessors();
 
-    FastInterpreter interp;
+    FastInterpreter interp(gc::HeapConfig{});
 
-    uintptr_t obj = interp.gc().allocate(16, 0, 10);
-    interp.gc().write_field(obj, 0, 0xDEADBEEFCAFEULL);
+    uintptr_t obj = interp.heap().allocate_masked(16, 0, 10);
+    interp.heap().store(obj, 0, 0xDEADBEEFCAFEULL);
     uintptr_t old_addr = obj;
     uintptr_t updated_obj = 0;
 
-    interp.register_external_function("read_coro_gc_field", [&](FastInterpreter& in, const std::vector<RuntimeValue>& args) -> RuntimeValue {
+    interp.register_external_function("read_coro_gc_field", [&](FastInterpreter&, const std::vector<RuntimeValue>& args) -> RuntimeValue {
         updated_obj = args[0].as_gcref();
-        return RuntimeValue::from_i64(static_cast<int64_t>(in.gc().read_field(updated_obj, 0)));
+        return RuntimeValue::from_i64(static_cast<int64_t>(gc::Heap::load(updated_obj, 0)));
     });
 
     uintptr_t handle = interp.coro_create(*gen, {RuntimeValue::from_gcref(obj)});
@@ -651,17 +650,19 @@ TEST_CASE("Fast Interpreter - GC Root Scanning of Suspended Coroutine") {
     CHECK_EQ(y1, 1ULL);
     CHECK(!interp.coro_is_done(handle));
 
-    // 2. Coroutine is now suspended. Trigger GC collection from host!
+    // 2. Coroutine is now suspended. Trigger GC collection from host: the
+    // interpreter's roots (the suspended coroutine's registers among them)
+    // are a root source of its heap.
     std::vector<uintptr_t*> roots;
     interp.collect_all_roots(roots);
     REQUIRE(!roots.empty());
-    interp.gc().collect(roots);
+    interp.heap().collect(gc::CollectionKind::Minor);
 
     // 3. Resume coroutine: it reads from the updated object pointer
     uint64_t final_res = interp.coro_resume(handle, 0);
     CHECK_EQ(final_res, 0xDEADBEEFCAFEULL);
     CHECK_NE(old_addr, updated_obj);
-    CHECK(interp.gc().is_valid_object(updated_obj));
+    CHECK(interp.heap().is_valid_object(updated_obj));
     CHECK(interp.coro_is_done(handle));
 
     interp.coro_destroy(handle);

@@ -2,7 +2,7 @@
 
 #include <brass/interpreter/value.hpp>
 #include <brass/interpreter/frame.hpp>
-#include <brass/gc/mini_cheney.hpp>
+#include <brass/gc/heap.hpp>
 #include <brass/mir/module.hpp>
 #include <brass/mir/function.hpp>
 #include <brass/mir/block.hpp>
@@ -22,7 +22,6 @@ class FunctionDispatchTable;
 }
 
 class Interpreter;
-class GenerationalGC;
 
 class InterpreterException : public std::runtime_error {
 public:
@@ -71,8 +70,12 @@ using DeoptHandler = std::function<RuntimeValue(Interpreter& interp, const Deopt
 
 class Interpreter {
 public:
-    explicit Interpreter(size_t gc_semispace_size = MiniCheneyGC::DEFAULT_SEMISPACE_SIZE);
-    ~Interpreter() = default;
+    // Allocates from `heap`; null: the thread's current heap
+    // (gc::Heap::current()) when one is bound, else a heap of its own.
+    explicit Interpreter(gc::Heap* heap = nullptr);
+    // Allocates from a heap of its own, configured by `config`.
+    explicit Interpreter(const gc::HeapConfig& config);
+    ~Interpreter();
 
     Interpreter(const Interpreter&) = delete;
     Interpreter& operator=(const Interpreter&) = delete;
@@ -92,30 +95,19 @@ public:
     void set_dispatch_table(runtime::FunctionDispatchTable* table) noexcept { dispatch_table_ = table; }
     runtime::FunctionDispatchTable& dispatch_table() const noexcept;
 
-    // Garbage Collector access: the heap this interpreter allocates from,
-    // its own unless it borrows one.
-    MiniCheneyGC& gc() noexcept { return borrowed_gc_ ? *borrowed_gc_ : gc_; }
-    const MiniCheneyGC& gc() const noexcept { return borrowed_gc_ ? *borrowed_gc_ : gc_; }
-    // Allocates from `heap` (null: its own) instead. The caller keeps this
-    // interpreter's frames among `heap`'s roots while it runs (its root
-    // provider only knows the heap owner's), e.g. with a ThreadRootsScope.
-    void borrow_gc(MiniCheneyGC* heap) noexcept { borrowed_gc_ = heap; }
+    // The heap this interpreter allocates from. Its frames are that heap's
+    // roots (a root source registered for the interpreter's lifetime), and
+    // while it runs the heap is the thread's current one, so generated code
+    // and coroutine frames it calls into allocate there too.
+    gc::Heap& heap() noexcept { return *heap_; }
+    const gc::Heap& heap() const noexcept { return *heap_; }
+    bool owns_heap() const noexcept { return own_heap_ != nullptr; }
+    // Allocates from `heap` from now on (null: a heap of its own). Not while
+    // it runs.
+    void use_heap(gc::Heap* heap);
 
-    void set_generational_gc(GenerationalGC* gc) noexcept { gen_gc_ = gc; }
-    // Allocates from, and collects (brass_gc_collect), the generational
-    // `heap` (null: stop) instead of gc(); also its write barrier. As with
-    // borrow_gc, the caller keeps this interpreter's frames among `heap`'s
-    // roots while it runs (a ThreadRootsScope); `heap`'s root provider is
-    // left alone.
-    void borrow_generational_gc(GenerationalGC* heap) noexcept {
-        borrowed_gen_gc_ = heap;
-        gen_gc_ = heap;
-    }
-    GenerationalGC* borrowed_generational_gc() noexcept { return borrowed_gen_gc_; }
-    GenerationalGC* generational_gc() noexcept { return gen_gc_; }
-    const GenerationalGC* generational_gc() const noexcept { return gen_gc_; }
-
-    // Allocation in managed GC heap
+    // A zeroed object from heap(): words of `pointer_mask` are references
+    // (bit 63: every word from 63 on), `type_tag` its tag.
     uintptr_t allocate_gc(size_t size, uint64_t pointer_mask = 0, uint32_t type_tag = 0);
 
     // Host / External function registration
@@ -203,17 +195,19 @@ private:
         ActiveScope(const ActiveScope&) = delete;
         ActiveScope& operator=(const ActiveScope&) = delete;
         Interpreter* prev;
+        gc::Heap* prev_heap;
     };
+    void attach_heap(gc::Heap* heap);
+    void detach_heap() noexcept;
     RuntimeValue execute_function(const Function& fn, const std::vector<RuntimeValue>& args);
     RuntimeValue execute_function_from_block(const Function& fn, BasicBlock* start_block, const std::vector<RuntimeValue>& block_args, InterpreterFrame* existing_frame = nullptr);
     void register_builtin_host_functions();
 
     const Module* module_ = nullptr;
     runtime::FunctionDispatchTable* dispatch_table_ = nullptr;
-    MiniCheneyGC gc_;
-    MiniCheneyGC* borrowed_gc_ = nullptr;
-    GenerationalGC* gen_gc_ = nullptr;
-    GenerationalGC* borrowed_gen_gc_ = nullptr;
+    std::unique_ptr<gc::Heap> own_heap_;
+    gc::Heap* heap_ = nullptr;
+    gc::Heap::RootSourceId root_source_ = 0;
 
     InterpreterFrame* current_frame_ = nullptr;
     size_t call_depth_ = 0;

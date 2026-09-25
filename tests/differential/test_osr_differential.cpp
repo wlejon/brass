@@ -2,10 +2,48 @@
 #include <brass/mir/builder.hpp>
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/embedding/embedding.hpp>
+#include <brass/runtime/code_installer.hpp>
+#include <brass/runtime/compile_pool.hpp>
+#include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
+#include <brass/vm/fast_interpreter.hpp>
 
 using namespace brass;
 using namespace brass::runtime;
+
+#if defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64)
+
+namespace {
+
+// Runs fn(arg) on a program's fast interpreter with OSR after `threshold`
+// backedges until a run has entered the loop's OSR code (the first runs ask
+// for it, and it compiles in the background). Every run answers the first
+// run's result; the last run's is returned.
+RuntimeValue run_until_osr(const Function& fn, int64_t arg, uint64_t threshold, uint64_t& migrations) {
+    FunctionDispatchTable prog;
+    TieringConfig cfg;
+    cfg.invocation_tier1_threshold = 1000000;
+    cfg.invocation_tier2_threshold = 1000000;
+    cfg.enable_background_compile = false;
+    cfg.set_use_fast_interpreter(true);
+    prog.pipeline().initialize(cfg);
+    prog.osr().set_enabled(true);
+    prog.osr().set_threshold(threshold);
+    FastInterpreter interp;
+    interp.set_dispatch_table(&prog);
+
+    const RuntimeValue first = interp.run(fn, {RuntimeValue::from_i64(arg)});
+    RuntimeValue last = first;
+    for (int run = 0; run < 16 && prog.osr().total_osr_migrations() == 0; ++run) {
+        CompilePool::shared().wait_owner(&prog.osr());
+        last = interp.run(fn, {RuntimeValue::from_i64(arg)});
+        CHECK_EQ(last.as_i64(), first.as_i64());
+    }
+    migrations = prog.osr().total_osr_migrations();
+    return last;
+}
+
+} // namespace
 
 TEST_CASE("OSR Differential - Accumulator Loop: Pure Interpreter vs Full JIT vs OSR JIT") {
     Module mod("diff_acc_mod");
@@ -38,11 +76,7 @@ TEST_CASE("OSR Differential - Accumulator Loop: Pure Interpreter vs Full JIT vs 
 
     int64_t n_iters = 300;
 
-    // 1. Pure Interpreter (OSR disabled)
-    OsrCoordinator::instance().clear_cache();
-    OsrCoordinator::instance().reset_stats();
-    OsrCoordinator::instance().set_enabled(false);
-
+    // 1. Pure Interpreter
     Interpreter interp_pure;
     interp_pure.set_module(&mod);
     RuntimeValue res_pure = interp_pure.run(*fn, {RuntimeValue::from_i64(n_iters)});
@@ -53,24 +87,14 @@ TEST_CASE("OSR Differential - Accumulator Loop: Pure Interpreter vs Full JIT vs 
     REQUIRE(compiled != nullptr);
     RuntimeValue res_jit = compiled->invoke("diff_acc", {RuntimeValue::from_i64(n_iters)});
 
-    // 3. OSR JIT (Tier-up mid-flight at iteration 40)
-    OsrCoordinator::instance().clear_cache();
-    OsrCoordinator::instance().reset_stats();
-    OsrCoordinator::instance().set_enabled(true);
-    OsrCoordinator::instance().set_threshold(40);
-
-    Interpreter interp_osr;
-    interp_osr.set_module(&mod);
-    RuntimeValue res_osr = interp_osr.run(*fn, {RuntimeValue::from_i64(n_iters)});
+    // 3. OSR JIT (tier-up mid-flight)
+    uint64_t migrations = 0;
+    RuntimeValue res_osr = run_until_osr(*fn, n_iters, 40, migrations);
 
     // Result Equivalence
     CHECK_EQ(res_pure.as_i64(), res_jit.as_i64());
     CHECK_EQ(res_pure.as_i64(), res_osr.as_i64());
-    CHECK(OsrCoordinator::instance().total_osr_migrations() > 0);
-
-    OsrCoordinator::instance().set_enabled(false);
-    OsrCoordinator::instance().set_threshold(BACKEDGE_OSR_THRESHOLD);
-    OsrCoordinator::instance().clear_cache();
+    CHECK(migrations > 0);
 }
 
 TEST_CASE("OSR Differential - Fibonacci Iterative: Pure Interpreter vs Full JIT vs OSR JIT") {
@@ -107,8 +131,6 @@ TEST_CASE("OSR Differential - Fibonacci Iterative: Pure Interpreter vs Full JIT 
     int64_t fib_n = 45;
 
     // Pure interpreter
-    OsrCoordinator::instance().clear_cache();
-    OsrCoordinator::instance().set_enabled(false);
     Interpreter interp_pure;
     interp_pure.set_module(&mod);
     RuntimeValue res_pure = interp_pure.run(*fn, {RuntimeValue::from_i64(fib_n)});
@@ -120,19 +142,12 @@ TEST_CASE("OSR Differential - Fibonacci Iterative: Pure Interpreter vs Full JIT 
     RuntimeValue res_jit = compiled->invoke("fib_iter", {RuntimeValue::from_i64(fib_n)});
 
     // OSR JIT
-    OsrCoordinator::instance().clear_cache();
-    OsrCoordinator::instance().reset_stats();
-    OsrCoordinator::instance().set_enabled(true);
-    OsrCoordinator::instance().set_threshold(15);
-    Interpreter interp_osr;
-    interp_osr.set_module(&mod);
-    RuntimeValue res_osr = interp_osr.run(*fn, {RuntimeValue::from_i64(fib_n)});
+    uint64_t migrations = 0;
+    RuntimeValue res_osr = run_until_osr(*fn, fib_n, 15, migrations);
 
     CHECK_EQ(res_pure.as_i64(), res_jit.as_i64());
     CHECK_EQ(res_pure.as_i64(), res_osr.as_i64());
-    CHECK(OsrCoordinator::instance().total_osr_migrations() > 0);
-
-    OsrCoordinator::instance().set_enabled(false);
-    OsrCoordinator::instance().set_threshold(BACKEDGE_OSR_THRESHOLD);
-    OsrCoordinator::instance().clear_cache();
+    CHECK(migrations > 0);
 }
+
+#endif

@@ -1,16 +1,12 @@
 // Regressions from bug sweep 30:
-// - A callee's guard failing in OSR code is finished in Tier 0. When that
-//   Tier-0 continuation threw, the throw left the deopt handler as a C++
-//   exception and unwound into the OSR code, whose `invoke` landing pad only
-//   takes native (brass_throw) exceptions: the process crashed. The deopt
-//   entry now raises it as a brass exception to the OSR code's pad.
-// - While an OSR call ran, its thread-wide deopt handler also took guard
-//   failures of native code outside the OSR module (a module the host
-//   compiled, reached through a function pointer) and threw "not a function
-//   of its OSR module". It now declines them: the outer handler, else the
-//   code's own exit stub, takes them, as with no OSR call.
-// - The verifier accepted a guard with neither an exit-stub function nor a
-//   resume target for its id; Tier 0 then threw DeoptException when it failed.
+// - A callee's guard failing in OSR code is finished in Tier 0. A throw out
+//   of that Tier-0 continuation reaches the OSR code's `invoke` landing pad
+//   as a brass exception.
+// - Guard failures of native code outside the program (a module the host
+//   compiled, reached through a function pointer) are that code's: its own
+//   exit stub takes them, OSR call or not.
+// - The verifier rejects a guard with neither an exit-stub function nor a
+//   resume target for its id.
 #include "test_framework.hpp"
 #include <brass/embedding/embedding.hpp>
 #include <brass/interpreter/interpreter.hpp>
@@ -206,39 +202,33 @@ int64_t run_case(Module& mod, const char* fname, std::vector<RuntimeValue> args,
             }));
         got = in.run(*mod.get_function(fname), args).as_i64();
     }
-    // An OSR call a throw ends is not counted as a migration; its deopt is.
-    if (osr_count) *osr_count = prog.osr().total_osr_migrations() + prog.osr().total_native_deopts();
+    if (osr_count) *osr_count = prog.osr().total_osr_migrations();
     return got;
 }
 
 // sum_{i<1000} (i+1) + sum_{1000<=i<2000, i!=1500} 7i + 1e9 + 1500
 constexpr int64_t kExcWant = 1010988000;
 
-void check_osr_matches_tier0(Module& mod, const char* fname, std::vector<RuntimeValue> args, bool fast,
-                             int64_t want) {
-    CHECK_EQ(run_case(mod, fname, args, false, fast, nullptr), want);
+// Both interpreters answer `want` without OSR; the fast interpreter, which
+// runs the program's OSR code, answers it entering that code.
+void check_osr_matches_tier0(Module& mod, const char* fname, std::vector<RuntimeValue> args, int64_t want) {
+    CHECK_EQ(run_case(mod, fname, args, false, false, nullptr), want);
+    CHECK_EQ(run_case(mod, fname, args, false, true, nullptr), want);
     uint64_t osr = 0;
-    CHECK_EQ(run_case(mod, fname, args, true, fast, &osr), want);
+    CHECK_EQ(run_case(mod, fname, args, true, true, &osr), want);
     CHECK(osr > 0);
 }
 
 } // namespace
 
-TEST_CASE("Sweep30 - a callee's Tier-0 throw after a deopt reaches the OSR code's invoke pad (Interpreter)") {
+TEST_CASE("Sweep30 - a callee's Tier-0 throw after a deopt reaches the OSR code's invoke pad") {
     auto mod = parse_ok(kOsrSrc);
-    check_osr_matches_tier0(*mod, "fe", {RuntimeValue::from_i64(2000)}, false, kExcWant);
-}
-
-TEST_CASE("Sweep30 - a callee's Tier-0 throw after a deopt reaches the OSR code's invoke pad (FastInterpreter)") {
-    auto mod = parse_ok(kOsrSrc);
-    check_osr_matches_tier0(*mod, "fe", {RuntimeValue::from_i64(2000)}, true, kExcWant);
+    check_osr_matches_tier0(*mod, "fe", {RuntimeValue::from_i64(2000)}, kExcWant);
 }
 
 TEST_CASE("Sweep30 - the OSR'd function's own exit stub throwing still leaves the OSR call") {
     auto mod = parse_ok(kOsrSrc);
-    for (bool fast : {false, true}) {
-        check_osr_matches_tier0(*mod, "fomain", {RuntimeValue::from_i64(2000)}, fast, 1000000000 + 1500);
-    }
+    check_osr_matches_tier0(*mod, "fomain", {RuntimeValue::from_i64(2000)}, 1000000000 + 1500);
 }
 
 TEST_CASE("Sweep30 - an OSR call leaves guard failures of foreign native code to their exit stubs") {
@@ -252,12 +242,10 @@ TEST_CASE("Sweep30 - an OSR call leaves guard failures of foreign native code to
     auto mod = parse_ok(kOsrSrc);
     // sum_{i<1000} (i+1) + sum_{1000<=i<2000} 7i
     const int64_t want = 10997000;
-    for (bool fast : {false, true}) {
-        check_osr_matches_tier0(*mod, "f4",
-                                {RuntimeValue::from_i64(2000),
-                                 RuntimeValue::from_ptr(reinterpret_cast<const void*>(&s30_hostfn))},
-                                fast, want);
-    }
+    check_osr_matches_tier0(*mod, "f4",
+                            {RuntimeValue::from_i64(2000),
+                             RuntimeValue::from_ptr(reinterpret_cast<const void*>(&s30_hostfn))},
+                            want);
     g_foreign_h = nullptr;
 }
 

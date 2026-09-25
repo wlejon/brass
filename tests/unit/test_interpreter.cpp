@@ -322,12 +322,14 @@ TEST_CASE("Interpreter - Moving GC Heap Execution with Safepoint") {
     Value* sum = b.build_add(read_v1, read_v2);
     b.build_ret(sum);
 
-    Interpreter interp(128 * 1024);
-    interp.gc().set_stress_mode(true); // Force moving GC at allocation and safepoints
+    Interpreter interp(gc::HeapConfig{});
+    // Collect at every allocation and safepoint; full collections move the
+    // young objects (promoting them).
+    interp.heap().set_stress(gc::StressMode::Full);
 
     RuntimeValue res = interp.run(*fn);
     CHECK_EQ(res.as_i64(), 300);
-    CHECK(interp.gc().collection_count() >= 3); // 2 allocations + 1 safepoint
+    CHECK(interp.heap().collection_count() >= 3); // 2 allocations + 1 safepoint
 }
 
 TEST_CASE("Interpreter - Speculation, Guard Failure, and State Map Capture") {

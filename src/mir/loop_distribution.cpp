@@ -98,7 +98,6 @@ bool is_pure_computation(const Instruction& inst) {
         case Opcode::safepoint:
         case Opcode::guard:
         case Opcode::resume_point:
-        case Opcode::osr_entry:
             return false;
         case Opcode::sdiv:
         case Opcode::udiv:

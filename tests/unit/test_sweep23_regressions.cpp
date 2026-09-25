@@ -17,7 +17,7 @@
 #include <brass/vm/fast_interpreter.hpp>
 #include <brass/codegen/baseline_jit.hpp>
 #include <brass/codegen/jit_exec.hpp>
-#include <brass/gc/generational_gc.hpp>
+#include "gc_test_heap.hpp"
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/runtime/coroutine.hpp>
 #include <brass/fuzz/diff_fuzzer.hpp>
@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <brass/gc/native_frames.hpp>
 #include <vector>
 
 using namespace brass;
@@ -379,11 +380,7 @@ b0:
 }
 )";
 
-struct GenHeap {
-    GenerationalGC gc{32 * 1024, 16 * 1024, 1 << 20, 2};
-    GenHeap() { brass_set_active_generational_gc(&gc); }
-    ~GenHeap() { brass_set_active_generational_gc(nullptr); }
-};
+using GenHeap = test::BoundHeap;
 
 // Resumes a FastInterpreter-created coroutine with 0, 1, ... until done.
 std::vector<uint64_t> fast_yields(FastInterpreter& fast, uintptr_t h) {
@@ -552,11 +549,15 @@ TEST_CASE("Sweep23 - MIR coro_create/resume/destroy agree on the interpreter, Fa
 TEST_CASE("Sweep23 - FastInterpreter coroutine with gcref slots created from MIR") {
     auto mod = lower(kGc);
     GenHeap heap;
-    uintptr_t obj = heap.gc.allocate(48, 0, 2);
+    uintptr_t obj = heap->allocate_masked(48, 0, 2);
     REQUIRE(obj != 0);
     *reinterpret_cast<int64_t*>(obj + 16) = 40;
+    // A root: the frames' allocations may move it (BRASS_GC_STRESS).
+    ThreadRootsScope keep_obj([](void* ctx, std::vector<uintptr_t*>& roots) {
+        roots.push_back(static_cast<uintptr_t*>(ctx));
+    }, &obj);
     FastInterpreter fast;
-    CHECK_EQ(fast.run(*mod->get_function("make"), {RuntimeValue::from_ptr(obj)}).as_i64(), 40414243);
+    CHECK_EQ(fast.run(*mod->get_function("make"), {RuntimeValue::from_gcref(obj)}).as_i64(), 40414243);
     // Through the host API: the gcref argument lands in the frame's pointer slot.
     *reinterpret_cast<int64_t*>(obj + 16) = 40;
     const uintptr_t h = fast.coro_create(*mod, "gcb", {RuntimeValue::from_gcref(obj), RuntimeValue::from_i64(3)});

@@ -581,27 +581,6 @@ namespace brass::mir_parser {
                 break;
             }
 
-            case Opcode::osr_entry: {  // `osr_entry HEADER_ID [ %live, ... ]`
-                if (!peek().is(TokenKind::IntLiteral)) {
-                    error(peek().location, "Expected integer loop header id for osr_entry");
-                    return false;
-                }
-                uint32_t header_id = 0;
-                if (!take_unsigned(UINT32_MAX, "a loop header id", header_id)) return false;
-                std::vector<Value*> live_ins;
-                if (match(TokenKind::LBracket)) {
-                    while (!peek().is(TokenKind::RBracket) && !peek().is(TokenKind::Eof)) {
-                        Value* v = parse_val();
-                        if (!v) return false;
-                        live_ins.push_back(v);
-                        if (!peek().is(TokenKind::RBracket) && !expect(TokenKind::Comma, "','")) return false;
-                    }
-                    if (!expect(TokenKind::RBracket, "']'")) return false;
-                }
-                res_inst = b.build_osr_entry(header_id, Span<Value* const>(live_ins.data(), live_ins.size()));
-                break;
-            }
-
             case Opcode::br: {
                 BranchTarget target;
                 if (!parse_branch_target(target)) return false;

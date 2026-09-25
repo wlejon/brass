@@ -132,8 +132,6 @@ bb0:
   guard %15, @deopt_here, [%1, %5]
   guard %15, @deopt_bare
   resume_point 3
-  osr_entry 17 [%1, %5]
-  osr_entry 18
   br_if %15, bb1(%1), bb2
   br bb2
 

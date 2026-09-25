@@ -95,16 +95,7 @@ void FastInterpreter::register_builtin_host_functions() {
     });
 
     register_external_function("brass_gc_collect", [](FastInterpreter& interp, const std::vector<RuntimeValue>&) -> RuntimeValue {
-        if (auto* host = host_heap()) {
-            host->collect();
-            return RuntimeValue::from_void();
-        }
-        // The heap allocate_gc allocates from.
-        if (GenerationalGC* gen = interp.generational_gc()) {
-            gen->collect();
-            return RuntimeValue::from_void();
-        }
-        interp.gc().collect();
+        interp.heap().collect(gc::CollectionKind::Full);
         return RuntimeValue::from_void();
     });
 
@@ -130,15 +121,12 @@ void FastInterpreter::register_builtin_host_functions() {
 }
 
 void FastInterpreter::handle_write_barrier(FastFrame& frame, uint32_t obj_reg, uint32_t val_reg) {
-    if (gen_gc_) {
-        gen_gc_->write_barrier(frame.registers[obj_reg], frame.registers[val_reg]);
-    }
+    heap_->write_barrier_interior(static_cast<uintptr_t>(frame.registers[obj_reg] & gc::kAddressMask),
+                                  frame.registers[val_reg]);
 }
 
 void FastInterpreter::handle_safepoint(FastFrame& /*frame*/) {
-    if (gc().stress_mode()) {
-        gc().collect();
-    }
+    heap_->safepoint_at(0, 0);
 }
 
 // Vector instructions run through the reference interpreter's value
@@ -163,10 +151,10 @@ void FastInterpreter::execute_vector_op(FastFrame& frame, BytecodeWord inst, con
         case BytecodeOp::vzero: out = val_vzero(type_of(a)); break;
         case BytecodeOp::vbroadcast: out = val_vbroadcast(type_of(a), val(b)); break;
         case BytecodeOp::vload:
-            out = gc().read_memory(static_cast<uintptr_t>(frame.registers[b]), decode_imm24(inst), type_of(a));
+            out = read_memory(*heap_, static_cast<uintptr_t>(frame.registers[b]), decode_imm24(inst), type_of(a));
             break;
         case BytecodeOp::vstore:
-            gc().write_memory(static_cast<uintptr_t>(frame.registers[b]), decode_imm24(inst), type_of(a), val(a));
+            write_memory(*heap_, static_cast<uintptr_t>(frame.registers[b]), decode_imm24(inst), type_of(a), val(a));
             return;
         case BytecodeOp::vadd: out = val_vadd(val(b), val(c)); break;
         case BytecodeOp::vsub: out = val_vsub(val(b), val(c)); break;
@@ -196,30 +184,14 @@ bool FastInterpreter::handle_osr_backedge(FastFrame& frame, uint32_t target_pc, 
     runtime::TieringFeedback& fb = frame.info->tiering(dispatch_table_);
     auto& coordinator = dispatch_table().osr();
     const BytecodeFunction* bfn = frame.bfn;
-    if (coordinator.runs_program()) {
-        // Past the threshold, one backedge in 64 asks for the loop's OSR
-        // code (compiled in the background) and enters it once it is ready.
-        fb.count_backedge_fast();
-        const uint64_t n = fb.backedge_count();
-        if (!frame.mir_fn || !bfn || n < coordinator.threshold() || (n & 63) != 0) return false;
-        auto it = bfn->pc_block_map.find(target_pc);
-        if (it == bfn->pc_block_map.end() || !it->second) return false;
-        return coordinator.try_osr_migration(*this, *frame.mir_fn, const_cast<BasicBlock*>(it->second), frame,
-                                             out_res);
-    }
-    // Below the threshold only the count matters; try_osr_migration counts
-    // the backedge itself once it is called.
-    if (!frame.mir_fn || !bfn || fb.backedge_count() + 1 < coordinator.threshold()) {
-        fb.record_backedge();
-        return false;
-    }
+    // Past the threshold, one backedge in 64 asks for the loop's OSR code
+    // (compiled in the background) and enters it once it is ready.
+    fb.count_backedge_fast();
+    const uint64_t n = fb.backedge_count();
+    if (!frame.mir_fn || !bfn || n < coordinator.threshold() || (n & 63) != 0) return false;
     auto it = bfn->pc_block_map.find(target_pc);
-    if (it == bfn->pc_block_map.end() || !it->second) {
-        fb.record_backedge();
-        return false;
-    }
-    BasicBlock* loop_header = const_cast<BasicBlock*>(it->second);
-    return coordinator.try_osr_migration(*this, *frame.mir_fn, loop_header, frame, out_res);
+    if (it == bfn->pc_block_map.end() || !it->second) return false;
+    return coordinator.try_osr_migration(*this, *frame.mir_fn, const_cast<BasicBlock*>(it->second), frame, out_res);
 }
 
 } // namespace brass

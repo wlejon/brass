@@ -1,6 +1,6 @@
 #include <brass/embedding/brass_c_api.h>
 #include <brass/embedding/embedding.hpp>
-#include <brass/embedding/host_gc.hpp>
+#include <brass/gc/heap.hpp>
 #include <brass/embedding/nanbox.hpp>
 #include <brass/mir/module.hpp>
 
@@ -16,10 +16,15 @@ struct brass_module_t {
     std::unique_ptr<brass::Module> module;
 };
 
-struct brass_gc_t {
-    brass::HostGC gc;
-    explicit brass_gc_t(size_t semispace_size) : gc(semispace_size) {}
+struct brass_heap_t {
+    brass::gc::Heap heap;
+    explicit brass_heap_t(const brass::gc::HeapConfig& config) : heap(config) {}
 };
+
+namespace {
+// The thread's bound C handle, beside gc::Heap::current() (which it binds).
+thread_local brass_heap_t* t_bound_heap = nullptr;
+} // namespace
 
 extern "C" {
 
@@ -42,14 +47,6 @@ void brass_engine_register_symbol(brass_engine_t* engine, const char* name, void
     if (!engine || !name) return;
     try {
         engine->engine.register_external_symbol(name, address);
-    } catch (...) {
-    }
-}
-
-void brass_engine_register_gc(brass_engine_t* engine, brass_gc_t* gc) {
-    if (!engine) return;
-    try {
-        engine->engine.register_host_gc(gc ? &gc->gc : nullptr);
     } catch (...) {
     }
 }
@@ -159,87 +156,92 @@ size_t brass_compiled_module_walk_stack(
     }
 }
 
-brass_gc_t* brass_host_gc_create(size_t semispace_size) {
+brass_heap_t* brass_heap_create(size_t young_bytes) {
     try {
-        return new brass_gc_t(semispace_size > 0 ? semispace_size : brass::HostGC::DEFAULT_SEMISPACE_SIZE);
+        brass::gc::HeapConfig config;
+        if (young_bytes > 0) config.eden_bytes = young_bytes;
+        // Raw addresses (tag 0) and NaN-boxed gcref values are references.
+        config.reference_tags = {0, static_cast<uint16_t>(brass::HostValue::TAG_GCREF >> 48)};
+        return new brass_heap_t(config);
     } catch (...) {
         return nullptr;
     }
 }
 
-void brass_host_gc_destroy(brass_gc_t* gc) {
-    try {
-        delete gc;
-    } catch (...) {
+void brass_heap_destroy(brass_heap_t* heap) {
+    if (!heap) return;
+    if (t_bound_heap == heap) {
+        t_bound_heap = nullptr;
+        brass::gc::Heap::set_current(nullptr);
     }
+    delete heap;
 }
 
-uintptr_t brass_host_gc_allocate(brass_gc_t* gc, size_t size, uint64_t pointer_mask, uint32_t type_tag) {
-    if (!gc) return 0;
+brass_heap_t* brass_heap_bind(brass_heap_t* heap) {
+    brass_heap_t* previous = t_bound_heap;
+    t_bound_heap = heap;
+    brass::gc::Heap::set_current(heap ? &heap->heap : nullptr);
+    return previous;
+}
+
+uintptr_t brass_heap_allocate(brass_heap_t* heap, size_t size, uint64_t pointer_mask, uint32_t type_tag) {
+    if (!heap) return 0;
     try {
-        return gc->gc.allocate(size, pointer_mask, type_tag);
+        return heap->heap.allocate_masked(size, pointer_mask, type_tag);
     } catch (...) {
         return 0;
     }
 }
 
-brass_value_t brass_host_gc_allocate_value(brass_gc_t* gc, size_t size, uint64_t pointer_mask, uint32_t type_tag) {
-    if (!gc) return brass::HostValue::null_val().raw();
-    try {
-        return gc->gc.allocate_value(size, pointer_mask, type_tag).raw();
-    } catch (...) {
-        return brass::HostValue::null_val().raw();
-    }
+brass_value_t brass_heap_allocate_value(brass_heap_t* heap, size_t size, uint64_t pointer_mask, uint32_t type_tag) {
+    const uintptr_t object = brass_heap_allocate(heap, size, pointer_mask, type_tag);
+    return object ? brass::HostValue::from_gcref(object).raw() : brass::HostValue::null_val().raw();
 }
 
-void brass_host_gc_collect(brass_gc_t* gc) {
-    if (!gc) return;
+void brass_heap_collect(brass_heap_t* heap, int full) {
+    if (!heap) return;
     try {
-        gc->gc.collect();
+        heap->heap.collect(full ? brass::gc::CollectionKind::Full : brass::gc::CollectionKind::Minor);
     } catch (...) {
     }
 }
 
-void brass_host_gc_safepoint(brass_gc_t* gc, uintptr_t rbp, uintptr_t return_ip) {
-    if (!gc) return;
+void brass_heap_add_root(brass_heap_t* heap, uint64_t* slot) {
+    if (!heap || !slot) return;
     try {
-        gc->gc.safepoint(rbp, return_ip);
+        heap->heap.add_root(slot);
     } catch (...) {
     }
 }
 
-void brass_host_gc_set_stress_mode(brass_gc_t* gc, int enable) {
-    if (!gc) return;
-    try {
-        gc->gc.set_stress_mode(enable != 0);
-    } catch (...) {
+void brass_heap_remove_root(brass_heap_t* heap, uint64_t* slot) {
+    if (!heap || !slot) return;
+    heap->heap.remove_root(slot);
+}
+
+void brass_heap_write_barrier(brass_heap_t* heap, uintptr_t object, uint64_t value) {
+    if (heap) heap->heap.write_barrier_interior(object, value);
+}
+
+void brass_heap_set_stress(brass_heap_t* heap, int mode) {
+    if (!heap) return;
+    using brass::gc::StressMode;
+    const StressMode modes[] = {StressMode::None, StressMode::Minor, StressMode::Full, StressMode::Alternate};
+    heap->heap.set_stress(mode >= 0 && mode <= 3 ? modes[mode] : StressMode::None);
+}
+
+int brass_heap_get_stress(const brass_heap_t* heap) {
+    if (!heap) return 0;
+    switch (heap->heap.stress()) {
+        case brass::gc::StressMode::Minor: return 1;
+        case brass::gc::StressMode::Full: return 2;
+        case brass::gc::StressMode::Alternate: return 3;
+        default: return 0;
     }
 }
 
-int brass_host_gc_get_stress_mode(const brass_gc_t* gc) {
-    if (!gc) return 0;
-    try {
-        return gc->gc.stress_mode() ? 1 : 0;
-    } catch (...) {
-        return 0;
-    }
-}
-
-size_t brass_host_gc_collection_count(const brass_gc_t* gc) {
-    if (!gc) return 0;
-    try {
-        return gc->gc.collection_count();
-    } catch (...) {
-        return 0;
-    }
-}
-
-void brass_host_gc_reset(brass_gc_t* gc) {
-    if (!gc) return;
-    try {
-        gc->gc.reset();
-    } catch (...) {
-    }
+size_t brass_heap_collection_count(const brass_heap_t* heap) {
+    return heap ? static_cast<size_t>(heap->heap.collection_count()) : 0;
 }
 
 brass_value_t brass_value_from_f64(double d) {

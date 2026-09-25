@@ -11,25 +11,21 @@ Standalone C++20 library with CMake.
 
 ## Key Features
 
-1. **Precise Moving GC with Values in Registers**: First-class `gcref` tracking in SSA MIR with a hybrid register & stack map design: `gcref` pointers reside directly in native CPU registers during intra-procedural computation (achieving zero-overhead fast paths), and the linear scan allocator precisely spills them to stack slots across calls and safepoint boundaries, generating compact binary stack maps (`BSCM`) for moving GC root relocation without shadow stacks.
-2. **Generational GC, Card Table & TLAB**: Two-generation GC with nursery, survivor, and tenured spaces, 512-byte card table tracking for old-to-young pointers, and lock-free thread-local allocation buffers (`TLAB`).
-3. **Thread-Safe Runtime Dynamic Patching**: Dynamic patching for Inline Caches (ICs), call sites (`0xE8`), and near jumps (`0xE9`) on x64/AArch64 without stopping mutator threads, executed via thread-safe atomic 32-bit displacement patching with verified cache-line boundary alignment (`is_cache_line_safe`) and processor memory bus snooping.
-4. **Speculation, Deoptimization & OSR**: Native `guard` checks with out-of-line exit stubs, captured `DeoptFrame` state maps, interior resume tables, and On-Stack Replacement (OSR) migrating interpreter loops into running JIT loops.
-5. **Comprehensive Optimization Pipeline**: Global Value Numbering (GVN & GVN-PRE), Sparse Conditional Constant Propagation (SCCP), SROA, Partial Escape Analysis & Allocation Sinking (PEA), Value Range Analysis & Bounds Check Elimination (BCE), loop unswitching, tiling, fusion, and array contraction.
-6. **SIMD & SLP Vectorization**: Automatic straight-line (SLP) and loop vectorization generating 128-bit SSE (`v128`) and 256-bit AVX2 (`v256`) instructions with hardware FMA contraction.
-7. **Loop Dependence & Auto-Parallelization**: Affine loop dependence analysis (distance and direction vectors with alias analysis disambiguation) with multithreaded chunk execution via the parallel runtime.
-8. **Coroutines & Exception Handling**: Native zero-cost exception handling (`invoke`, `landing_pad`, `throw`, `resume`) and first-class coroutine state-machine lowering (`coro_create`, `coro_suspend`, `coro_resume`).
-9. **Byte-Level Determinism Ratchet**: 100% byte-for-byte deterministic emission of COFF (Win64), ELF64 (Linux/SysV), and Mach-O (macOS) relocatable object files across runs.
-10. **Multi-Format Output & Standalone Linking**: Full Win64 SEH (`.pdata`/`.xdata`), Linux SysV CFI (`.eh_frame`), and built-in PE DLL, ELF `.so`, and Mach-O `.dylib` standalone linkers that produce shared libraries without external linkers.
-11. **Differential Verification Oracle**: Built-in reference MIR interpreter and differential fuzzing harness.
-12. **NVIDIA PTX & GPU Execution**: `PtxTarget` lowers MIR through `PtxISel` into a typed PTX IR, runs cleanup passes (copy propagation, dead code, branch simplification) and a structural verifier, and prints the text. GPU intrinsics (thread indices, shuffles, barriers, `.shared` arrays, approx math, f16, narrow loads, atomics) are MIR builtins with `KernelBuilder` helpers, and the fused ML kernels (RMSNorm, LayerNorm, SwiGLU, AdaLN, GEMV, Q8_0/Q4_K GEMV) are written as MIR with them -- no PTX strings. A dynamically-loaded CUDA driver runtime (Windows and Linux, no link-time CUDA dependency) JIT-compiles the PTX and launches it on device; the tests validate every kernel with `ptxas` and against host references on a real GPU.
+1. **Precise GC references in registers**: `gcref` is a MIR type. References live in registers between GC points; the linear scan allocator spills those live across a call or safepoint to frame slots and records them in binary stack maps (`BSCM`), so a moving collector finds and rewrites them without a shadow stack.
+2. **One garbage-collected heap**: `gc::Heap` is generational: a copying young generation over a non-moving mark-region (Immix-style) old generation and a large-object space, inside one reserved address range per heap, with a card-marking write barrier. Object layouts and tracing are host-defined; weak references, ephemerons, finalizers and post-collection hooks are built in; each thread has its own heap. It has a verification mode and stress modes. See [docs/gc_contract.md](docs/gc_contract.md).
+3. **Runtime code patching**: in-place patching of constants, direct calls and near branches on x64 and AArch64 for inline caches and call-site rebinding, with cache-line alignment rules that keep each patch a single atomic write (see [docs/patching_protocol.md](docs/patching_protocol.md)).
+4. **Speculation and deoptimization**: `guard` instructions with out-of-line exit stubs, deopt state maps and resume tables that continue a failed guard's call in the interpreter.
+5. **Optimization pipeline**: GVN and GVN-PRE, SCCP, SROA, partial escape analysis and allocation sinking, range analysis and bounds-check elimination, inlining, loop unswitching, unrolling, tiling, fusion, distribution and array contraction, write-barrier elimination.
+6. **Vectorization**: SLP and loop vectorization to 128-bit (`v128`) and 256-bit (`v256`) vector types, with FMA contraction.
+7. **Loop dependence and parallelization**: affine dependence analysis (distance and direction vectors, alias analysis) and parallel execution of independent loop iterations through the parallel runtime.
+8. **Coroutines and exceptions**: exception handling (`invoke`, `landing_pad`, `throw`, `resume`) and coroutine lowering (`coro_create`, `coro_suspend`, `coro_resume`).
+9. **Object files and linkers**: COFF (with Win64 `.pdata`/`.xdata`), ELF64 (with `.eh_frame`) and Mach-O relocatable objects, emitted deterministically (a test checks byte-identical output across runs), and built-in PE DLL, ELF `.so` and Mach-O `.dylib` linkers.
+10. **Tiers and oracle**: a reference MIR interpreter, a register-bytecode interpreter, a baseline JIT and an optimizing JIT, with a differential fuzzer that compares them. A program's fast interpreter tiers a hot loop up in place through on-stack replacement: it requests an optimized OSR entry function for the loop header and transfers the live values into it once the code is installed.
+11. **PTX backend**: `PtxTarget` lowers MIR to PTX through a typed PTX IR with cleanup passes and a verifier. GPU intrinsics (thread indices, shuffles, barriers, `.shared` arrays, approximate math, f16, atomics) are MIR builtins with `KernelBuilder` helpers. A dynamically loaded CUDA driver runtime (no link-time CUDA dependency) JIT-compiles the PTX and launches it; the tests validate kernels with `ptxas` and against host references when a GPU is present.
 
-## Performance Bars
+## Performance Tracking
 
-- **Native Throughput**: Matches or beats compiled C++ baseline code across numeric loops, prime sieve, Collatz, matrix multiplication, and linked list traversals (within <= 1.8x envelope of Clang -O2 on naive scalar loops, beating Clang -O2 down to 0.28x-0.70x on vectorized SIMD kernels).
-- **GC Efficiency**: Measured >= 1.25x to 3.9x faster than explicit shadow-stack tracking across GC reference benchmarks by keeping managed pointers directly in native CPU registers with zero runtime GC overhead on fast paths, spilling to stack slots only across calls and safepoints with compact binary stack map tracking.
-- **Determinism**: 100% byte-identical object files verified under scrambled heap allocations.
-- **Compile Throughput**: Sub-second compilation of 6,000+ functions (> 7,000 functions/sec, > 3.2 MB/sec) directly into executable native machine code.
+Benchmarks live in `tests/benchmarks` and run under the `perf` ctest label, which also checks them against the recorded ratchet in `bench/ratchet.json`; results depend on the machine. `brass_gc_pause_bench` reports the heap's minor and full collection pauses against the size of the live old generation.
 
 ## Building & Testing
 
@@ -95,11 +91,11 @@ and the library itself has no link-time CUDA dependency.
 
 - [MIR Reference Specification](docs/mir_reference.md)
 - [Optimization Passes & Semantics Specification](docs/semantics.md)
-- [GC Contract & Moving Garbage Collectors](docs/gc_contract.md)
+- [Garbage Collection: Design and Contract](docs/gc_contract.md)
 - [Speculation, Guards, Deoptimization & OSR](docs/speculation_and_deopt.md)
 - [Patching Protocol & Concurrency Rules](docs/patching_protocol.md)
 - [Consumer's Guide to Lowering](docs/lowering_guide.md)
 - [libbrass Embedding Guide (Public C-ABI)](docs/embedding_guide.md)
-- [Host Engine & Moving GC Embedding Guide](docs/embedding.md)
+- [Host Engine & Heap Embedding Guide](docs/embedding.md)
 - [PTX Backend Design](docs/ptx_backend_design.md)
 - [Writing PTX Kernels with KernelBuilder](docs/ptx_kernel_authoring.md)

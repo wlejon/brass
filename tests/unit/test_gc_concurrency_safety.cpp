@@ -1,7 +1,8 @@
 #include "test_framework.hpp"
 #include <brass/brass.hpp>
-#include <brass/gc/generational_gc.hpp>
+#include <brass/gc/heap.hpp>
 #include <brass/gc/runtime_gc.hpp>
+#include <brass/interpreter/memory_access.hpp>
 #include <brass/runtime/tiering.hpp>
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
@@ -39,6 +40,23 @@ std::unique_ptr<Module> create_simple_test_module(const std::string& name) {
     return mod;
 }
 
+// A heap that ignores BRASS_GC_* (these tests place objects by generation).
+gc::HeapConfig plain_config() {
+    gc::HeapConfig config;
+    config.read_environment = false;
+    return config;
+}
+
+uint8_t& card_of(gc::Heap& heap, uintptr_t old_address) {
+    return heap.card_table_base()[(old_address - heap.old_base()) >> gc::kCardShift];
+}
+bool card_dirty(gc::Heap& heap, uintptr_t old_address) { return card_of(heap, old_address) == gc::kCardDirty; }
+void clean_card(gc::Heap& heap, uintptr_t old_address) { card_of(heap, old_address) = gc::kCardClean; }
+
+uintptr_t allocate_old(gc::Heap& heap, size_t bytes, uint64_t mask, uint32_t tag) {
+    return heap.allocate(bytes, gc::mask_layout(mask, tag), gc::kAllocOld);
+}
+
 } // namespace
 
 // ============================================================================
@@ -46,84 +64,64 @@ std::unique_ptr<Module> create_simple_test_module(const std::string& name) {
 // ============================================================================
 
 TEST_CASE("GC Concurrency Safety - Write barrier card marking with tagged young pointers") {
-    GenerationalGC gc(64 * 1024, 16 * 1024, 64 * 1024, 2);
-    brass_set_active_generational_gc(&gc);
+    gc::Heap heap(plain_config());
+    gc::HeapScope bind(heap);
 
-    // Allocate an old object directly in tenured space (size > nursery_size / 2)
-    size_t large_size = 40 * 1024;
-    uintptr_t old_obj = gc.allocate(large_size, 0, 10);
+    uintptr_t old_obj = allocate_old(heap, 256, 0, 10);
     REQUIRE(old_obj != 0);
-    REQUIRE(gc.is_old(old_obj));
+    REQUIRE(heap.is_old(old_obj));
 
-    // Allocate young object in nursery
-    uintptr_t young_obj = gc.allocate(64, 0, 20);
+    uintptr_t young_obj = heap.allocate_masked(64, 0, 20);
     REQUIRE(young_obj != 0);
-    REQUIRE(gc.is_young(young_obj));
+    REQUIRE(heap.is_young(young_obj));
 
-    // Initially clean all cards
-    gc.card_table().clean_all();
-    CHECK(!gc.card_table().is_dirty_addr(old_obj));
+    clean_card(heap, old_obj);
+    CHECK(!card_dirty(heap, old_obj));
 
     // Test 1: Raw young pointer marks card
-    gc.write_barrier(old_obj, young_obj);
-    CHECK(gc.card_table().is_dirty_addr(old_obj));
-
-    // Clean cards again
-    gc.card_table().clean_all();
-    CHECK(!gc.card_table().is_dirty_addr(old_obj));
+    heap.write_barrier(old_obj, young_obj);
+    CHECK(card_dirty(heap, old_obj));
+    clean_card(heap, old_obj);
 
     // Test 2: Bronze object tagged young pointer marks card
-    uintptr_t bronze_tagged_young = BRONZE_OBJECT_TAG | young_obj;
-    gc.write_barrier(old_obj, bronze_tagged_young);
-    CHECK(gc.card_table().is_dirty_addr(old_obj));
-
-    // Clean cards again
-    gc.card_table().clean_all();
-    CHECK(!gc.card_table().is_dirty_addr(old_obj));
+    uint64_t bronze_tagged_young = BRONZE_OBJECT_TAG | young_obj;
+    heap.write_barrier(old_obj, bronze_tagged_young);
+    CHECK(card_dirty(heap, old_obj));
+    clean_card(heap, old_obj);
 
     // Test 3: HostValue GCRef tagged young pointer marks card
-    uintptr_t host_tagged_young = HOST_GCREF_TAG | young_obj;
-    gc.write_barrier(old_obj, host_tagged_young);
-    CHECK(gc.card_table().is_dirty_addr(old_obj));
+    uint64_t host_tagged_young = HOST_GCREF_TAG | young_obj;
+    heap.write_barrier(old_obj, host_tagged_young);
+    CHECK(card_dirty(heap, old_obj));
+    clean_card(heap, old_obj);
 
-    // Clean cards again
-    gc.card_table().clean_all();
-    CHECK(!gc.card_table().is_dirty_addr(old_obj));
-
-    // Test 4: brass's default barrier with Bronze tag marks card
-    brass_default_gc_write_barrier(old_obj, bronze_tagged_young);
-    CHECK(gc.card_table().is_dirty_addr(old_obj));
-
-    // Clean cards again
-    gc.card_table().clean_all();
-    CHECK(!gc.card_table().is_dirty_addr(old_obj));
+    // Test 4: brass's default barrier (the thread's heap) with Bronze tag marks card
+    brass_default_gc_write_barrier(old_obj, static_cast<uintptr_t>(bronze_tagged_young));
+    CHECK(card_dirty(heap, old_obj));
+    clean_card(heap, old_obj);
 
     // Test 5: brass's default barrier with Host tag marks card
-    brass_default_gc_write_barrier(old_obj, host_tagged_young);
-    CHECK(gc.card_table().is_dirty_addr(old_obj));
-
-    // Clean cards again
-    gc.card_table().clean_all();
-    CHECK(!gc.card_table().is_dirty_addr(old_obj));
+    brass_default_gc_write_barrier(old_obj, static_cast<uintptr_t>(host_tagged_young));
+    CHECK(card_dirty(heap, old_obj));
+    clean_card(heap, old_obj);
 
     // Test 6: Non-pointer tagged value (e.g. tagged int32 42) must NOT mark card
-    uintptr_t tagged_int = 0x7FF900000000002AULL;
-    gc.write_barrier(old_obj, tagged_int);
-    CHECK(!gc.card_table().is_dirty_addr(old_obj));
+    uint64_t tagged_int = 0x7FF900000000002AULL;
+    heap.write_barrier(old_obj, tagged_int);
+    CHECK(!card_dirty(heap, old_obj));
 
     // Test 7: Another old object written into old object must NOT mark card
-    uintptr_t another_old_obj = gc.allocate(large_size, 0, 11);
-    REQUIRE(gc.is_old(another_old_obj));
-    gc.write_barrier(old_obj, another_old_obj);
-    CHECK(!gc.card_table().is_dirty_addr(old_obj));
+    uintptr_t another_old_obj = allocate_old(heap, 256, 0, 11);
+    REQUIRE(heap.is_old(another_old_obj));
+    heap.write_barrier(old_obj, another_old_obj);
+    CHECK(!card_dirty(heap, old_obj));
 
-    // Test 8: Young object written into young object must NOT mark card (only old->young)
-    uintptr_t young_obj2 = gc.allocate(64, 0, 21);
-    REQUIRE(gc.is_young(young_obj2));
-    gc.write_barrier(young_obj, young_obj2);
-    CHECK(!gc.card_table().is_dirty_addr(young_obj));
-
-    brass_set_active_generational_gc(nullptr);
+    // Test 8: Young object written into young object marks no card (only old->young)
+    uintptr_t young_obj2 = heap.allocate_masked(64, 0, 21);
+    REQUIRE(heap.is_young(young_obj2));
+    heap.write_barrier(young_obj, young_obj2);
+    CHECK(!card_dirty(heap, old_obj));
+    CHECK(!card_dirty(heap, another_old_obj));
 }
 
 // ============================================================================
@@ -131,46 +129,46 @@ TEST_CASE("GC Concurrency Safety - Write barrier card marking with tagged young 
 // ============================================================================
 
 TEST_CASE("GC Concurrency Safety - Minor scavenge evacuates tagged roots preserving tag bits") {
-    GenerationalGC gc(64 * 1024, 16 * 1024, 64 * 1024, 2);
+    gc::Heap heap(plain_config());
 
     // Allocate two young objects
-    uintptr_t young1 = gc.allocate(64, 0, 1);
-    uintptr_t young2 = gc.allocate(64, 0, 2);
+    uintptr_t young1 = heap.allocate_masked(64, 0, 1);
+    uintptr_t young2 = heap.allocate_masked(64, 0, 2);
     REQUIRE(young1 != 0);
     REQUIRE(young2 != 0);
-    REQUIRE(gc.is_in_nursery(young1));
-    REQUIRE(gc.is_in_nursery(young2));
+    REQUIRE(heap.is_young(young1));
+    REQUIRE(heap.is_young(young2));
 
     // Write distinctive payloads
     *reinterpret_cast<uint64_t*>(young1) = 0x1122334455667788ULL;
     *reinterpret_cast<uint64_t*>(young2) = 0xAABBCCDDEEFF0011ULL;
 
     // Root 1: Bronze tagged object pointer
-    uintptr_t root1 = BRONZE_OBJECT_TAG | young1;
+    uint64_t root1 = BRONZE_OBJECT_TAG | young1;
     // Root 2: HostValue GCRef tagged pointer
-    uintptr_t root2 = HOST_GCREF_TAG | young2;
+    uint64_t root2 = HOST_GCREF_TAG | young2;
     // Root 3: Duplicate reference to young1 with different tag
-    uintptr_t root3 = HOST_GCREF_TAG | young1;
+    uint64_t root3 = HOST_GCREF_TAG | young1;
 
-    gc.register_root(&root1);
-    gc.register_root(&root2);
-    gc.register_root(&root3);
+    heap.add_root(&root1);
+    heap.add_root(&root2);
+    heap.add_root(&root3);
 
-    // Run minor collection (evacuate to survivor)
-    gc.minor_collect();
+    // Run minor collection (evacuate to a survivor space)
+    heap.collect(gc::CollectionKind::Minor);
 
-    // Check Root 1: Tag preserved, pointer updated to survivor space
+    // Check Root 1: Tag preserved, pointer updated into the young generation
     CHECK((root1 & TAG_MASK) == BRONZE_OBJECT_TAG);
     uintptr_t new_ptr1 = root1 & PAYLOAD_MASK;
     CHECK(new_ptr1 != young1);
-    CHECK(gc.is_in_survivor(new_ptr1));
+    CHECK(heap.is_young(new_ptr1));
     CHECK(*reinterpret_cast<uint64_t*>(new_ptr1) == 0x1122334455667788ULL);
 
-    // Check Root 2: Tag preserved, pointer updated to survivor space
+    // Check Root 2: Tag preserved, pointer updated into the young generation
     CHECK((root2 & TAG_MASK) == HOST_GCREF_TAG);
     uintptr_t new_ptr2 = root2 & PAYLOAD_MASK;
     CHECK(new_ptr2 != young2);
-    CHECK(gc.is_in_survivor(new_ptr2));
+    CHECK(heap.is_young(new_ptr2));
     CHECK(*reinterpret_cast<uint64_t*>(new_ptr2) == 0xAABBCCDDEEFF0011ULL);
 
     // Check Root 3: Pointing to same object as root1, with HOST_GCREF_TAG preserved
@@ -178,62 +176,65 @@ TEST_CASE("GC Concurrency Safety - Minor scavenge evacuates tagged roots preserv
     uintptr_t new_ptr3 = root3 & PAYLOAD_MASK;
     CHECK(new_ptr3 == new_ptr1);
 
-    // Run major collection: evacuates to tenured space, preserving tags
-    gc.major_collect();
+    // Run full collection: promotes to the old generation, preserving tags
+    heap.collect(gc::CollectionKind::Full);
 
     CHECK((root1 & TAG_MASK) == BRONZE_OBJECT_TAG);
     uintptr_t tenured_ptr1 = root1 & PAYLOAD_MASK;
-    CHECK(gc.is_old(tenured_ptr1));
+    CHECK(heap.is_old(tenured_ptr1));
     CHECK(*reinterpret_cast<uint64_t*>(tenured_ptr1) == 0x1122334455667788ULL);
 
     CHECK((root2 & TAG_MASK) == HOST_GCREF_TAG);
     uintptr_t tenured_ptr2 = root2 & PAYLOAD_MASK;
-    CHECK(gc.is_old(tenured_ptr2));
+    CHECK(heap.is_old(tenured_ptr2));
     CHECK(*reinterpret_cast<uint64_t*>(tenured_ptr2) == 0xAABBCCDDEEFF0011ULL);
 
     CHECK((root3 & TAG_MASK) == HOST_GCREF_TAG);
     CHECK((root3 & PAYLOAD_MASK) == tenured_ptr1);
 
-    gc.unregister_root(&root1);
-    gc.unregister_root(&root2);
-    gc.unregister_root(&root3);
+    heap.remove_root(&root1);
+    heap.remove_root(&root2);
+    heap.remove_root(&root3);
 }
 
 TEST_CASE("GC Concurrency Safety - Card roots and Cheney scan with tagged pointers in fields") {
-    GenerationalGC gc(64 * 1024, 16 * 1024, 64 * 1024, 2);
+    gc::Heap heap(plain_config());
 
-    // Allocate tenured object: large allocation (> 32KB)
-    size_t tenured_sz = 36 * 1024;
-    // Word 0 is a pointer (pointer_mask = 1)
-    uintptr_t tenured_parent = gc.allocate(tenured_sz, 1ULL, 5);
-    REQUIRE(gc.is_old(tenured_parent));
+    // An old parent whose word 0 is a reference (pointer_mask = 1)
+    uintptr_t tenured_parent = allocate_old(heap, 256, 1ULL, 5);
+    REQUIRE(heap.is_old(tenured_parent));
+    // Rooted: an unreachable old object is only reclaimed by a full collection,
+    // but the test's reference should not rely on that.
+    uint64_t parent_root = tenured_parent;
+    heap.add_root(&parent_root);
 
-    // Allocate young child in nursery
-    uintptr_t young_child = gc.allocate(64, 0, 6);
-    REQUIRE(gc.is_in_nursery(young_child));
+    // Allocate young child
+    uintptr_t young_child = heap.allocate_masked(64, 0, 6);
+    REQUIRE(heap.is_young(young_child));
     *reinterpret_cast<uint64_t*>(young_child) = 0x9988776655443322ULL;
 
-    // Store tagged young pointer into tenured parent's field 0
-    uintptr_t tagged_child = BRONZE_OBJECT_TAG | young_child;
-    *reinterpret_cast<uintptr_t*>(tenured_parent) = tagged_child;
-    gc.write_barrier(tenured_parent, tagged_child);
+    // Store tagged young pointer into the old parent's field 0
+    uint64_t tagged_child = BRONZE_OBJECT_TAG | young_child;
+    heap.store(tenured_parent, 0, tagged_child);
 
     // Verify card is dirty
-    CHECK(gc.card_table().is_dirty_addr(tenured_parent));
+    CHECK(card_dirty(heap, tenured_parent));
 
-    // Collect minor: parent is in tenured, child referenced only via dirty card
-    gc.minor_collect();
+    // Collect minor: parent is old, child referenced only via dirty card
+    heap.collect(gc::CollectionKind::Minor);
+    CHECK(parent_root == tenured_parent);  // old objects never move
 
-    // Verify tenured parent's field 0 has evacuated child with tag intact
-    uintptr_t updated_child_val = *reinterpret_cast<uintptr_t*>(tenured_parent);
+    // Verify the parent's field 0 has the evacuated child with tag intact
+    uint64_t updated_child_val = gc::Heap::load(tenured_parent, 0);
     CHECK((updated_child_val & TAG_MASK) == BRONZE_OBJECT_TAG);
     uintptr_t updated_child_ptr = updated_child_val & PAYLOAD_MASK;
     CHECK(updated_child_ptr != young_child);
-    CHECK(gc.is_in_survivor(updated_child_ptr));
+    CHECK(heap.is_young(updated_child_ptr));
     CHECK(*reinterpret_cast<uint64_t*>(updated_child_ptr) == 0x9988776655443322ULL);
 
     // Card should still be dirty because survivor is young
-    CHECK(gc.card_table().is_dirty_addr(tenured_parent));
+    CHECK(card_dirty(heap, tenured_parent));
+    heap.remove_root(&parent_root);
 }
 
 // ============================================================================
@@ -241,7 +242,7 @@ TEST_CASE("GC Concurrency Safety - Card roots and Cheney scan with tagged pointe
 // ============================================================================
 
 TEST_CASE("GC Concurrency Safety - Float read_memory and write_memory width safety") {
-    GenerationalGC gc(64 * 1024, 16 * 1024, 64 * 1024, 2);
+    gc::Heap heap(plain_config());
 
     // Memory buffer with canaries surrounding float fields
     struct alignas(8) TestBuffer {
@@ -256,34 +257,34 @@ TEST_CASE("GC Concurrency Safety - Float read_memory and write_memory width safe
     uintptr_t base = reinterpret_cast<uintptr_t>(&buf);
 
     // 1. Read f32: must return f32 value without reading 8 bytes
-    RuntimeValue read_f32 = gc.read_memory(base, offsetof(TestBuffer, f32_val), Type::f32());
+    RuntimeValue read_f32 = read_memory(heap, base, offsetof(TestBuffer, f32_val), Type::f32());
     CHECK(read_f32.is_f32());
     CHECK(read_f32.as_f32() == 1.5f);
 
     // 2. Read f64: must return f64 value
-    RuntimeValue read_f64 = gc.read_memory(base, offsetof(TestBuffer, f64_val), Type::f64());
+    RuntimeValue read_f64 = read_memory(heap, base, offsetof(TestBuffer, f64_val), Type::f64());
     CHECK(read_f64.is_f64());
     CHECK(read_f64.as_f64() == 3.141592653589793);
 
     // 3. Write f32: must write exactly 4 bytes without corrupting canary_middle
-    gc.write_memory(base, offsetof(TestBuffer, f32_val), Type::f32(), RuntimeValue::from_f32(99.25f));
+    write_memory(heap, base, offsetof(TestBuffer, f32_val), Type::f32(), RuntimeValue::from_f32(99.25f));
     CHECK(buf.f32_val == 99.25f);
     CHECK(buf.canary_before == 0xAAAAAAAA);
     CHECK(buf.canary_middle == 0xBBBBBBBB); // MUST NOT be overwritten by 8-byte write!
 
     // Verify reading back written f32
-    RuntimeValue read_f32_back = gc.read_memory(base, offsetof(TestBuffer, f32_val), Type::f32());
+    RuntimeValue read_f32_back = read_memory(heap, base, offsetof(TestBuffer, f32_val), Type::f32());
     CHECK(read_f32_back.is_f32());
     CHECK(read_f32_back.as_f32() == 99.25f);
 
     // 4. Write f64: writes 8 bytes
-    gc.write_memory(base, offsetof(TestBuffer, f64_val), Type::f64(), RuntimeValue::from_f64(2.718281828459045));
+    write_memory(heap, base, offsetof(TestBuffer, f64_val), Type::f64(), RuntimeValue::from_f64(2.718281828459045));
     CHECK(buf.f64_val == 2.718281828459045);
     CHECK(buf.canary_middle == 0xBBBBBBBB);
     CHECK(buf.canary_after == 0xCCCCCCCC);
 
     // Verify reading back written f64
-    RuntimeValue read_f64_back = gc.read_memory(base, offsetof(TestBuffer, f64_val), Type::f64());
+    RuntimeValue read_f64_back = read_memory(heap, base, offsetof(TestBuffer, f64_val), Type::f64());
     CHECK(read_f64_back.is_f64());
     CHECK(read_f64_back.as_f64() == 2.718281828459045);
 }

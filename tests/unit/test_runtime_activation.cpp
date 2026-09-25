@@ -9,10 +9,13 @@
 #include <brass/mir/verifier.hpp>
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/runtime/code_installer.hpp>
+#include <brass/runtime/compile_pool.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
 #include <brass/runtime/tiering.hpp>
 #include <brass/gc/runtime_gc.hpp>
+#include "gc_test_heap.hpp"
+#include <brass/vm/fast_interpreter.hpp>
 #include <atomic>
 #include <iostream>
 #include <memory>
@@ -115,14 +118,20 @@ TieringConfig work_config() {
     return c;
 }
 
-constexpr size_t kSmallHeap = 4096;
+// A young collection at every allocation and safepoint: every call
+// collects many times.
+gc::HeapConfig small_heap() {
+    gc::HeapConfig config = test::small_heap_config();
+    config.stress = gc::StressMode::Minor;
+    return config;
+}
 
-// Restores the calling thread's active collector and stack maps.
+// Restores the calling thread's heap and stack maps.
 struct GcStateGuard {
-    MiniCheneyGC* gc = brass_get_active_gc();
+    gc::Heap* heap = gc::Heap::current();
     const ModuleStackMap* maps = brass_get_active_stack_maps();
     ~GcStateGuard() {
-        brass_set_active_gc(gc);
+        gc::Heap::set_current(heap);
         brass_set_active_stack_maps(maps);
     }
 };
@@ -130,14 +139,24 @@ struct GcStateGuard {
 // @ra_guard_loop(n, deopt_at): 10 per iteration, n iterations. Its guard
 // fails at iteration deopt_at, where the interpreter resumes the loop.
 Function* build_guard_loop(Module& mod) {
+    // The guard's exit stub finishes the loop from its state:
+    // acc + 10 * (n - i).
+    Function* rest = mod.create_function("ra_guard_rest", Type::i64(), {Type::i64(), Type::i64(), Type::i64()});
+    {
+        Builder rb(*rest);
+        rb.position_at_end(rb.append_block("entry"));
+        Value* ri = rb.add_param(Type::i64());
+        Value* racc = rb.add_param(Type::i64());
+        Value* rn = rb.add_param(Type::i64());
+        rb.build_ret(rb.build_add(racc, rb.build_mul(rb.build_sub(rn, ri), rb.build_iconst_i64(10))));
+    }
+
     Function* fn = mod.create_function("ra_guard_loop", Type::i64(), {Type::i64(), Type::i64()});
     Builder b(*fn);
     BasicBlock* b0 = b.append_block("b0");
     BasicBlock* b1 = b.append_block("b1");
     BasicBlock* b2 = b.append_block("b2");
-    BasicBlock* b_resume = b.append_block("b_resume");
     BasicBlock* b3 = b.append_block("b3");
-    fn->add_resume_point(1, b_resume);
 
     b.position_at_end(b0);
     Value* n = b.add_param(Type::i64());
@@ -150,11 +169,8 @@ Function* build_guard_loop(Module& mod) {
     b.build_br_if(b.build_slt(i_val, n), b2, {}, b3, {});
 
     b.position_at_end(b2);
-    Instruction* g = b.build_guard(b.build_slt(i_val, deopt_at), "", {i_val, acc_val});
+    Instruction* g = b.build_guard(b.build_slt(i_val, deopt_at), "ra_guard_rest", {i_val, acc_val, n});
     g->set_resume_id(1);
-    b.build_br(b1, {b.build_add(i_val, b.build_iconst_i64(1)), b.build_add(acc_val, b.build_iconst_i64(10))});
-
-    b.position_at_end(b_resume);
     b.build_br(b1, {b.build_add(i_val, b.build_iconst_i64(1)), b.build_add(acc_val, b.build_iconst_i64(10))});
 
     b.position_at_end(b3);
@@ -164,15 +180,13 @@ Function* build_guard_loop(Module& mod) {
 
 } // namespace
 
-TEST_CASE("Runtime activation - tier-1 code keeps its GC roots after an OSR compile on its thread") {
+TEST_CASE("Runtime activation - tier-1 code keeps its GC roots after an OSR call on its thread") {
     GcStateGuard restore;
     auto mod = parse_work();
     FunctionDispatchTable prog;
     prog.pipeline().initialize(work_config());
-    prog.osr().set_enabled(true);
-    prog.osr().set_threshold(50);
-    Interpreter interp(kSmallHeap);
-    brass_set_active_gc(&interp.gc());
+    Interpreter interp(small_heap());
+    gc::Heap::set_current(&interp.heap());
     interp.set_dispatch_table(&prog);
     interp.set_module(mod.get());
     Function* work = mod->get_function("ra_work");
@@ -182,12 +196,24 @@ TEST_CASE("Runtime activation - tier-1 code keeps its GC roots after an OSR comp
     for (int i = 0; i < 3; ++i) CHECK_EQ(interp.run(*work, args).as_i64(), work_expected(150));
     REQUIRE(prog.find("ra_work")->tier() == TierLevel::Tier1_Baseline);
 
-    // A different function OSRs: compiling and running its OSR module must
+    // Another program's loop enters its OSR code on this thread: that must
     // leave the maps tier-1 code on this thread is found with.
+    FunctionDispatchTable osr_prog;
+    TieringConfig osr_cfg;
+    osr_cfg.invocation_tier1_threshold = 1000000;
+    osr_cfg.invocation_tier2_threshold = 1000000;
+    osr_cfg.enable_background_compile = false;
+    osr_cfg.set_use_fast_interpreter(true);
+    osr_prog.pipeline().initialize(osr_cfg);
+    osr_prog.osr().set_enabled(true);
+    osr_prog.osr().set_threshold(50);
+    FastInterpreter spinner;
+    spinner.set_dispatch_table(&osr_prog);
     const ModuleStackMap* maps_before = brass_get_active_stack_maps();
-    const uint64_t osr0 = prog.osr().total_osr_migrations();
-    CHECK_EQ(interp.run(*spin, {RuntimeValue::from_i64(1000)}).as_i64(), 499500);
-    REQUIRE(prog.osr().total_osr_migrations() > osr0);
+    CHECK_EQ(spinner.run(*spin, {RuntimeValue::from_i64(1000)}).as_i64(), 499500);
+    CompilePool::shared().wait_owner(&osr_prog.osr());
+    CHECK_EQ(spinner.run(*spin, {RuntimeValue::from_i64(1000)}).as_i64(), 499500);
+    REQUIRE(osr_prog.osr().total_osr_migrations() > 0);
     CHECK(brass_get_active_stack_maps() == maps_before);
 
     for (int i = 0; i < 3; ++i) CHECK_EQ(interp.run(*work, args).as_i64(), work_expected(150));
@@ -203,12 +229,12 @@ TEST_CASE("Runtime activation - a worker thread runs and collects in tier-1 code
     Function* work = mod->get_function("ra_work");
     const std::vector<RuntimeValue> args = {RuntimeValue::from_i64(150)};
     {
-        Interpreter interp(kSmallHeap);
-        brass_set_active_gc(&interp.gc());
+        Interpreter interp(small_heap());
+        gc::Heap::set_current(&interp.heap());
         interp.set_dispatch_table(&prog);
         interp.set_module(mod.get());
         for (int i = 0; i < 4; ++i) CHECK_EQ(interp.run(*work, args).as_i64(), work_expected(150));
-        brass_set_active_gc(restore.gc);
+        gc::Heap::set_current(restore.heap);
     }
     FunctionHandle* h = prog.find("ra_work");
     REQUIRE(h != nullptr);
@@ -218,8 +244,8 @@ TEST_CASE("Runtime activation - a worker thread runs and collects in tier-1 code
     std::atomic<int> bad{0};
     std::atomic<int64_t> direct{0};
     std::thread worker([&] {
-        Interpreter interp(kSmallHeap);
-        brass_set_active_gc(&interp.gc());
+        Interpreter interp(small_heap());
+        gc::HeapScope bind(interp.heap());
         interp.set_dispatch_table(&prog);
         interp.set_module(mod.get());
         for (int it = 0; it < 5; ++it) {
@@ -228,7 +254,6 @@ TEST_CASE("Runtime activation - a worker thread runs and collects in tier-1 code
         }
         auto fn = reinterpret_cast<int64_t (*)(int64_t)>(h->native_entry());
         direct.store(fn(150));
-        brass_set_active_gc(nullptr);
     });
     worker.join();
     CHECK_EQ(bad.load(), 0);
@@ -239,7 +264,8 @@ TEST_CASE("Runtime activation - a worker thread runs and collects in tier-1 code
 TEST_CASE("Runtime activation - concurrent OSR calls on two threads each resume their own deopt") {
     // Each thread runs its own program with a different trip count, and both
     // are inside their OSR code at once for most of it. A guard failure must
-    // resume the interpreter frame of its own thread's OSR call.
+    // finish its own thread's OSR call from that call's state. A first
+    // round asks for the OSR code; the later ones enter it.
     constexpr int kThreads = 2;
     constexpr int kRounds = 8;
     std::atomic<int> bad{0};
@@ -250,9 +276,15 @@ TEST_CASE("Runtime activation - concurrent OSR calls on two threads each resume 
             Module mod("ra_deopt_" + std::to_string(t));
             Function* fn = build_guard_loop(mod);
             FunctionDispatchTable prog;
+            TieringConfig cfg;
+            cfg.invocation_tier1_threshold = 1000000;
+            cfg.invocation_tier2_threshold = 1000000;
+            cfg.enable_background_compile = false;
+            cfg.set_use_fast_interpreter(true);
+            prog.pipeline().initialize(cfg);
             prog.osr().set_enabled(true);
             prog.osr().set_threshold(30);
-            Interpreter interp;
+            FastInterpreter interp;
             interp.set_dispatch_table(&prog);
             interp.set_module(&mod);
             for (int round = 0; round < kRounds; ++round) {
@@ -262,8 +294,9 @@ TEST_CASE("Runtime activation - concurrent OSR calls on two threads each resume 
                 const int64_t got =
                     interp.run(*fn, {RuntimeValue::from_i64(n), RuntimeValue::from_i64(n - 40)}).as_i64();
                 if (got != 10 * n) bad.fetch_add(1);
+                if (round == 0) CompilePool::shared().wait_owner(&prog.osr());
             }
-            if (prog.osr().total_osr_migrations() == 0 || prog.osr().total_native_deopts() == 0) bad.fetch_add(1);
+            if (prog.osr().total_osr_migrations() == 0 || prog.pipeline().tier2_deopts() == 0) bad.fetch_add(1);
         });
     }
     for (auto& th : threads) th.join();

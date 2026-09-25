@@ -175,7 +175,6 @@ std::string_view bytecode_op_name(BytecodeOp op) noexcept {
         case BytecodeOp::write_barrier: return "write_barrier";
         case BytecodeOp::guard: return "guard";
         case BytecodeOp::resume_point: return "resume_point";
-        case BytecodeOp::osr_entry: return "osr_entry";
         case BytecodeOp::pinned_tls_read: return "pinned_tls_read";
         case BytecodeOp::pinned_tls_write: return "pinned_tls_write";
         case BytecodeOp::read_sp: return "read_sp";

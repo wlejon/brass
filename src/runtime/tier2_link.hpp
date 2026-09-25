@@ -1,7 +1,7 @@
 #pragma once
 
 // What a tier-2 compile (CodeInstaller::install_tier2) and an OSR entry
-// compile (osr_compile.cpp) of one program's code share: the optimization
+// compile (OsrCoordinator, osr_coordinator.cpp) of one program's code share: the optimization
 // passes, the engine with the program's symbols, the program's function
 // pointers and stubs linked in, and the deopt continuation.
 

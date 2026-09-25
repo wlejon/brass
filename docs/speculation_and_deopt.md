@@ -104,19 +104,14 @@ The compiler records function resume offsets in `ResumeTableRegistry` (`engine.g
 
 ## 4. On-Stack Replacement (OSR)
 
-Brass supports On-Stack Replacement to promote long-running interpreter loops directly into Tier-2 optimized JIT code while actively running:
+On-Stack Replacement moves a long-running interpreted loop into Tier-2 optimized code mid-loop. It happens in a program whose `MultiTierPipeline` runs it, on the `FastInterpreter` the pipeline runs it with; the program's `OsrCoordinator` (`FunctionDispatchTable::osr()`) is enabled and given a backedge threshold (`set_enabled`, `set_threshold`).
 
-1. **`osr_entry` Instruction**:
-   Placed at candidate loop headers in compiled functions:
-   ```mir
-   osr_entry 100 [%val1, %val2]
-   ```
-2. **Loop Backedge Profiling**:
-   The interpreter tracks loop backedge counts against a configurable threshold (e.g. `osr_threshold = 100`).
-3. **`OsrMigrationFrame`**:
-   Upon reaching the threshold, active interpreter variables are packed into an `OsrMigrationFrame` containing slot indices and NaN-boxed `HostValue` entries.
-4. **`OsrCoordinator`**:
-   The `OsrCoordinator` retrieves the compiled loop header target address via `engine.get_osr_entry_address("fn_name")` and pivots execution into the JIT frame with state intact.
+1. **Backedge counting**: the interpreter counts a function's backedges. Past the threshold, a backedge to a loop header asks the coordinator for the header's OSR entry.
+2. **The OSR entry function** (`mir/osr_entry.hpp`): `plan_osr_entry` finds the values live into the header, and `build_osr_entry_function` builds a function of its own, `(ptr buffer) -> the function's return type`, whose entry block loads those values from the buffer and branches to the header, followed by every block reachable from it. Its control flow is ordinary, so the whole optimizer runs on it.
+3. **Background compile**: the entry function, with the bodies of what it calls, is copied on the interpreter's thread, then optimized with the program's tier-2 passes and compiled on the shared `CompilePool`. The interpreter keeps running the loop meanwhile.
+4. **Entry**: a later backedge to the header, once the code is ready, fills the buffer from the frame's registers and calls the entry; its result is the activation's. A failed guard in the code finishes the call in Tier 0, as tier-2 code of the program does.
+
+A loop in a function with resume points (a coroutine, or a guard with a resume target), or with a gcref or vector value live into its header, stays interpreted. The reference `Interpreter`, and a `FastInterpreter` whose program's pipeline is not initialized, do not OSR.
 
 ---
 

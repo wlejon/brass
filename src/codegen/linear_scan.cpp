@@ -336,9 +336,6 @@ void LinearScanAllocator::allocate() {
         }
     }
 
-    // 3.5 OSR entry: record which migrated values are live at the loop header.
-    if (fn_.osr_entry.enabled) mark_osr_live_ins();
-
     // 4. Update function frame info
     uint32_t final_callee_gprs = 0;
     uint32_t final_callee_xmms = 0;
@@ -885,35 +882,6 @@ int32_t LinearScanAllocator::allocate_spill_slot(bool is_gcref, uint8_t size) {
     fn_.frame.spill_slot_is_gcref.push_back(is_gcref);
     fn_.frame.num_spill_slots = next_spill_slot_;
     return slot;
-}
-
-
-
-void LinearScanAllocator::mark_osr_live_ins() {
-    LirOsrEntry& osr = fn_.osr_entry;
-    const LirBlock* header = fn_.get_block_by_id(osr.loop_header_id);
-    if (!header) {
-        throw std::logic_error("register allocation: OSR loop header b" +
-                               std::to_string(osr.loop_header_id) + " does not exist");
-    }
-    const BlockLiveness& bl = liveness_.block_liveness(header);
-    osr.live_at_header.assign(osr.live_in_vregs.size(), 0);
-    for (VReg live : bl.live_in) {
-        bool found = false;
-        for (size_t i = 0; i < osr.live_in_vregs.size(); ++i) {
-            if (osr.live_in_vregs[i].id == live.id) {
-                osr.live_at_header[i] = 1;
-                found = true;
-            }
-        }
-        // Every value live into the header must come from the migration frame;
-        // anything else would enter the loop uninitialized.
-        if (!found) {
-            throw std::runtime_error("register allocation: v" + std::to_string(live.id) +
-                                     " is live at OSR loop header b" + std::to_string(osr.loop_header_id) +
-                                     " but has no migration slot");
-        }
-    }
 }
 
 void run_linear_scan_regalloc(

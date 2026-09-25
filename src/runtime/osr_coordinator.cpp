@@ -1,165 +1,55 @@
+// On-stack replacement (osr_coordinator.hpp): a hot loop's OSR entry
+// function, compiled on the shared CompilePool and entered from the
+// FastInterpreter's backedge once it is ready.
+
 #include <brass/runtime/osr_coordinator.hpp>
-#include <brass/interpreter/interpreter.hpp>
+#include <brass/codegen/jit_exec.hpp>
+#include <brass/mir/loop_opt.hpp>
+#include <brass/mir/osr_entry.hpp>
+#include <brass/runtime/code_installer.hpp>
+#include <brass/runtime/compile_pool.hpp>
+#include <brass/runtime/multi_tier_pipeline.hpp>
+#include <brass/target/target.hpp>
 #include <brass/vm/fast_interpreter.hpp>
 #include "../vm/fast_interpreter_impl.hpp"
-#include <brass/mir/dominators.hpp>
-#include <brass/mir/osr.hpp>
-#include <brass/embedding/embedding.hpp>
-#include <brass/gc/runtime_gc.hpp>
-#include <brass/gc/native_frames.hpp>
-#include <cstring>
+#include "tier2_link.hpp"
 #include <stdexcept>
-#include <unordered_set>
+#include <string>
 #include <vector>
-#if defined(__x86_64__) || defined(_M_X64)
-#include <immintrin.h>
-#elif defined(__aarch64__) || defined(_M_ARM64)
-#include <arm_neon.h>
-#endif
 
 namespace brass::runtime {
 
-namespace {
-
-// Bridges an interpreter's heap to the native runtime for the duration of an
-// OSR call. OSR code allocates through brass_gc_alloc and polls
-// brass_gc_safepoint, which use the thread's active GC and stack maps.
-// Pointing them at the interpreter's collector (the one its own allocations
-// use) and at the OSR module's stack maps makes native allocations land in the
-// same heap as the migrated gcrefs. A collection then roots both the native
-// frames (stack-walked through the code stack-map registry, which also holds
-// the maps of tier-1 and tier-2 code the OSR code calls) and the interpreter
-// frames (the collector's root provider, installed by the interpreter). Both
-// are restored on exit, so code that runs later on this thread finds the
-// maps it found before.
-class NativeGcBridge {
-public:
-    NativeGcBridge(MiniCheneyGC* gc, GenerationalGC* gen_gc, const ModuleStackMap* maps) noexcept
-        : prev_gc_(brass_get_active_gc()),
-          prev_gen_gc_(brass_get_active_generational_gc()),
-          prev_maps_(brass_get_active_stack_maps()) {
-        brass_set_active_gc(gc);
-        brass_set_active_generational_gc(gen_gc);
-        brass_set_active_stack_maps(maps);
-    }
-    ~NativeGcBridge() {
-        brass_set_active_gc(prev_gc_);
-        brass_set_active_generational_gc(prev_gen_gc_);
-        brass_set_active_stack_maps(prev_maps_);
-    }
-    NativeGcBridge(const NativeGcBridge&) = delete;
-    NativeGcBridge& operator=(const NativeGcBridge&) = delete;
-
-private:
-    MiniCheneyGC* prev_gc_;
-    GenerationalGC* prev_gen_gc_;
-    const ModuleStackMap* prev_maps_;
+struct OsrCoordinator::Entry {
+    enum class State : uint8_t { Compiling, Ready, Failed };
+    std::atomic<State> state{State::Compiling};
+    OsrEntryPlan plan;
+    std::string name;
+    std::shared_ptr<codegen::JitExecutionEngine> jit;
+    void* entry = nullptr;
 };
 
-// A native deopt frame's state values as the interpreter holds them, gcref
-// values tagged as such.
-std::vector<RuntimeValue> guard_state_values(const Function& fn, const DeoptFrame& dframe) {
-    std::vector<RuntimeValue> vals = dframe.to_runtime_values();
-    if (const Instruction* g = fn.find_guard(dframe.resume_id)) {
-        for (size_t i = 0; i < g->state_map().size() && i < vals.size(); ++i) {
-            const Value* sv = g->state_map()[i];
-            if (sv && sv->type().is_gcref() && !vals[i].is_gcref()) {
-                vals[i] = RuntimeValue::from_gcref(vals[i].as_u64());
-            }
-        }
-    }
-    return vals;
-}
+namespace {
 
-// The function whose code a guard failure seen by an OSR call's deopt
-// handler came from. The OSR module is the whole module compiled again, so
-// the OSR code calls the module's own copies of its callees, which have no
-// resumer: `osr_fn` for its own code, another function of its module for
-// that function's copy. Anything else (no code entry, code of another
-// module, such as a module the host compiled and calls through a pointer) is
-// not this call's to resume: null, and the handler passes it on
-// (decline_foreign_deopt).
-const Function* deopt_owner(const CompiledModule& osr_mod, const Function& osr_fn, const DeoptFrame& dframe) {
-    if (dframe.code_entry) {
-        if (osr_mod.get_symbol_address(osr_fn.name()) == dframe.code_entry) return &osr_fn;
-        if (const Module* mod = osr_fn.parent()) {
-            for (const Function* f : mod->functions()) {
-                if (f && !f->blocks().empty() && osr_mod.get_symbol_address(f->name()) == dframe.code_entry) {
-                    return f;
-                }
-            }
-        }
+// The OSR'd frame is the native code's while it runs: the interpreter's
+// record of it leaves the thread's frame chain, so a stack walk sees the
+// function once, as the native frame.
+class HiddenFrame {
+public:
+    explicit HiddenFrame(FastFrame& frame) noexcept : top_(FastInterpreter::thread_frame_top()), saved_(top_) {
+        top_ = frame.thread_prev;
     }
-    return nullptr;
-}
+    ~HiddenFrame() { top_ = saved_; }
+    HiddenFrame(const HiddenFrame&) = delete;
+    HiddenFrame& operator=(const HiddenFrame&) = delete;
 
-// A guard failure of code outside the OSR module: the handler the OSR call
-// replaced (an outer OSR call's) gets it, else the deopt entry does what it
-// does with no handler (the code's own exit stub).
-void* decline_foreign_deopt(const DeoptHandlerFn& prev, const DeoptFrame& dframe) {
-    if (prev) return prev(dframe);
-    deopt_handler_decline();
-    return nullptr;
-}
+private:
+    FastFrame*& top_;
+    FastFrame* saved_;
+};
 
-// Runs a callee's Tier-0 continuation for OSR code. A MIR exception it throws
-// must reach the OSR code's landing pads as a native throw does (a C++
-// exception unwinding into them is not one): the deopt entry raises it to
-// the first pad above the callee's frame and below `stack_limit`, or rethrows
-// it when there is none.
-template <typename Run>
-RuntimeValue run_callee_continuation(uintptr_t stack_limit, Run&& run) {
-    try {
-        return run();
-    } catch (const InterpreterThrownException& ex) {
-        deopt_handler_throw_native(ex.value().raw_bits(), stack_limit, std::current_exception());
-    } catch (const BrassException& ex) {
-        deopt_handler_throw_native(ex.value().raw(), stack_limit, std::current_exception());
-    }
-    return RuntimeValue();
-}
-
-// Whether a guard of `fn` failing in its OSR code may come from an inner
-// activation of `fn` rather than the OSR'd one: `fn` has a guard and its OSR
-// code may call `fn` again (a call path back to it, or a call it cannot see
-// through). The deopt record names only the code that failed, not which
-// activation, so such a function is not OSR'd: resuming the OSR'd frame for
-// an inner call's failure would finish the wrong activation.
-bool osr_guard_frame_ambiguous(const Function& fn) {
-    const Module* mod = fn.parent();
-    if (!mod) return true;
-    bool has_guard = false;
-    for (const BasicBlock* bb : fn.blocks()) {
-        if (!bb) continue;
-        for (const Instruction* inst : *const_cast<BasicBlock*>(bb)) {
-            if (inst && inst->opcode() == Opcode::guard) has_guard = true;
-        }
-    }
-    if (!has_guard) return false;
-    std::vector<const Function*> work{&fn};
-    std::unordered_set<const Function*> seen{&fn};
-    while (!work.empty()) {
-        const Function* cur = work.back();
-        work.pop_back();
-        for (const BasicBlock* bb : cur->blocks()) {
-            if (!bb) continue;
-            for (const Instruction* inst : *const_cast<BasicBlock*>(bb)) {
-                if (!inst || !inst->is_call()) continue;
-                if (inst->opcode() != Opcode::call && inst->opcode() != Opcode::invoke) return true;
-                const Function* callee = mod->get_function(inst->symbol());
-                if (callee == &fn) return true;
-                if (callee && !callee->blocks().empty() && seen.insert(callee).second) work.push_back(callee);
-            }
-        }
-    }
-    return false;
-}
+constexpr uint8_t kOsrPriority = 255;
 
 } // namespace
-
-static thread_local brass::Interpreter* t_active_interpreter = nullptr;
-static thread_local const brass::Function* t_active_fn = nullptr;
-static thread_local brass::InterpreterFrame* t_active_frame = nullptr;
 
 OsrCoordinator& OsrCoordinator::instance() {
     static OsrCoordinator s_instance;
@@ -174,6 +64,10 @@ OsrCoordinator::OsrCoordinator(TieringRegistry& registry) : registry_(&registry)
     }
 }
 
+OsrCoordinator::~OsrCoordinator() {
+    release_program();
+}
+
 TieringRegistry& OsrCoordinator::registry() const noexcept {
     return registry_ ? *registry_ : TieringRegistry::instance();
 }
@@ -183,436 +77,178 @@ void OsrCoordinator::set_threshold(uint64_t threshold) noexcept {
     registry().default_config().backedge_osr_threshold = threshold;
 }
 
-void OsrCoordinator::set_active_interpreter(Interpreter* interp) noexcept {
-    t_active_interpreter = interp;
-}
-
-Interpreter* OsrCoordinator::active_interpreter() const noexcept {
-    return t_active_interpreter;
-}
-
-void OsrCoordinator::set_active_frame(InterpreterFrame* frame) noexcept {
-    t_active_frame = frame;
-}
-
-InterpreterFrame* OsrCoordinator::active_frame() const noexcept {
-    return t_active_frame;
-}
-
-void OsrCoordinator::clear_cache() {
-    std::lock_guard<std::mutex> lock(osr_mutex_);
-    osr_modules_.clear();
-    osr_targets_.clear();
-    loop_latches_.clear();
-    backedge_pairs_.clear();
-}
-
-bool OsrCoordinator::is_loop_backedge(const Function& fn, const BasicBlock* from_bb, const BasicBlock* to_bb) {
-    if (!from_bb || !to_bb) return false;
-
-    std::string fn_name(fn.name());
-    std::lock_guard<std::mutex> lock(osr_mutex_);
-    auto it = backedge_pairs_.find(fn_name);
-    if (it == backedge_pairs_.end()) {
-        const_cast<Function&>(fn).rebuild_cfg_predecessors();
-        DominatorTree dom(fn);
-        auto& pairs = backedge_pairs_[fn_name];
-        auto& latches = loop_latches_[fn_name];
-        for (const BasicBlock* bb : fn.blocks()) {
-            if (!bb || !dom.is_reachable(bb)) continue;
-            for (const BasicBlock* succ : bb->successors()) {
-                if (!succ || !dom.is_reachable(succ)) continue;
-                if (dom.dominates(succ, bb)) {
-                    latches.insert(bb);
-                    uint64_t edge_key = (static_cast<uint64_t>(bb->id()) << 32) | static_cast<uint64_t>(succ->id());
-                    pairs.insert(edge_key);
-                }
-            }
-        }
-        it = backedge_pairs_.find(fn_name);
+void OsrCoordinator::release_program() {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        released_ = true;
     }
-
-    uint64_t edge_key = (static_cast<uint64_t>(from_bb->id()) << 32) | static_cast<uint64_t>(to_bb->id());
-    return it != backedge_pairs_.end() && it->second.find(edge_key) != it->second.end();
+    CompilePool& pool = CompilePool::shared();
+    pool.cancel(this);
+    pool.wait_owner(this);
+    std::lock_guard<std::mutex> lock(mutex_);
+    entries_.clear();
 }
 
-bool OsrCoordinator::try_osr_migration(
-    Interpreter& interp,
-    const Function& fn,
-    BasicBlock* loop_header,
-    InterpreterFrame& frame,
-    RuntimeValue& out_result
-) {
-    if (!enabled_ || !loop_header) return false;
+void OsrCoordinator::stop_compiles() {
+    CompilePool& pool = CompilePool::shared();
+    pool.cancel(this);
+    pool.wait_owner(this);
+    // Nothing of this coordinator's is queued or running now: an entry still
+    // compiling was dropped.
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto it = entries_.begin(); it != entries_.end();) {
+        if (it->second->state.load(std::memory_order_acquire) == Entry::State::Compiling) {
+            it = entries_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
 
-    TieringFeedback& feedback = registry().get_or_create(fn.name());
-    feedback.record_backedge();
+bool OsrCoordinator::runs_program() const noexcept {
+    return registry().dispatch_table().pipeline().is_initialized();
+}
 
-    if (feedback.is_bailed_out() || !feedback.should_trigger_osr(threshold_)) {
+bool OsrCoordinator::try_osr_migration(FastInterpreter&, const Function& fn, BasicBlock* loop_header,
+                                       FastFrame& frame, RuntimeValue& out_result) {
+    if (!enabled_ || !loop_header || !runs_program()) return false;
+    std::shared_ptr<Entry> e;
+    bool start = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (released_) return false;
+        std::shared_ptr<Entry>& slot = entries_[loop_header];
+        if (!slot) {
+            slot = std::make_shared<Entry>();
+            start = true;
+        }
+        e = slot;
+    }
+    if (start) {
+        request_entry(fn, *loop_header, e);
         return false;
     }
-
-    std::string cache_key = std::string(fn.name()) + "@" + std::to_string(loop_header->id());
-    CompiledModule* comp_mod = nullptr;
-    void* osr_entry_addr = nullptr;
-    OsrTarget target;
-
-    {
-        std::lock_guard<std::mutex> lock(osr_mutex_);
-        auto mod_it = osr_modules_.find(cache_key);
-        if (mod_it != osr_modules_.end()) {
-            comp_mod = mod_it->second.get();
-        } else {
-            if (!fn.parent()) return false;
-            if (osr_guard_frame_ambiguous(fn)) {
-                feedback.record_bailout("OSR refused: a guard failure could be an inner activation's");
-                return false;
-            }
-            HostEngine engine;
-            auto compiled = engine.compile_with_osr(*fn.parent(), fn.name(), loop_header->id());
-            if (!compiled) {
-                feedback.record_bailout("OSR compilation failed");
-                return false;
-            }
-            comp_mod = compiled.get();
-            osr_modules_[cache_key] = std::move(compiled);
-
-            OsrTarget t = analyze_osr_target(const_cast<Function&>(fn), loop_header);
-            osr_targets_[cache_key] = std::move(t);
-        }
-
-        if (!comp_mod) return false;
-
-        target = osr_targets_[cache_key];
-        osr_entry_addr = comp_mod->get_osr_entry_address(fn.name());
-        if (!osr_entry_addr) {
-            feedback.record_bailout("OSR entry point not found");
-            return false;
-        }
-    }
-
-    // Pack migration frame with live-in values from the interpreter frame
-    OsrMigrationFrame mig_frame;
-    mig_frame.loop_header_id = loop_header->id();
-    for (size_t i = 0; i < target.live_ins.size() && i < OsrMigrationFrame::kMaxInlineSlots; ++i) {
-        Value* v = target.live_ins[i];
-        RuntimeValue val = frame.get_value(v);
-        mig_frame.add_slot(static_cast<uint32_t>(i), val.as_u64());
-    }
-
-    // Set active execution context for potential native deoptimization on this thread
-    Interpreter* prev_interp = t_active_interpreter;
-    const Function* prev_fn = t_active_fn;
-    InterpreterFrame* prev_frame = t_active_frame;
-
-    t_active_interpreter = &interp;
-    t_active_fn = &fn;
-    t_active_frame = &frame;
-
-    bool deopt_occurred = false;
-    RuntimeValue deopt_res;
-
-    // Every native frame of this OSR call lies below this frame's locals.
-    const uintptr_t osr_stack_limit = reinterpret_cast<uintptr_t>(&mig_frame);
-    auto prev_handler = get_deopt_handler();
-    register_deopt_handler([&](const DeoptFrame& dframe) -> void* {
-        const Function* owner_p = deopt_owner(*comp_mod, fn, dframe);
-        if (!owner_p) return decline_foreign_deopt(prev_handler, dframe);
-        const Function& owner = *owner_p;
-        total_native_deopts_++;
-        registry().get_or_create(owner.name()).record_deoptimization();
-        if (&owner != &fn) {
-            // A callee's copy: finish that call in Tier 0 and hand its
-            // result back to the OSR code, which carries on.
-            RuntimeValue r = run_callee_continuation(osr_stack_limit, [&] {
-                return interp.resume_after_guard(owner, dframe.resume_id, guard_state_values(owner, dframe), nullptr);
-            });
-            return reinterpret_cast<void*>(r.as_u64());
-        }
-        deopt_occurred = true;
-        deopt_res = interp.resume_after_guard(fn, dframe.resume_id, guard_state_values(fn, dframe), &frame);
-        return reinterpret_cast<void*>(deopt_res.as_u64());
-    });
-
-    struct HandlerScopeGuard {
-        DeoptHandlerFn prev;
-        Interpreter* prev_interp;
-        const Function* prev_fn;
-        InterpreterFrame* prev_frame;
-        ~HandlerScopeGuard() {
-            register_deopt_handler(prev);
-            t_active_interpreter = prev_interp;
-            t_active_fn = prev_fn;
-            t_active_frame = prev_frame;
-        }
-    } guard{prev_handler, prev_interp, prev_fn, prev_frame};
-
-    // The reference interpreter allocates only from its semispace collector
-    // (its generational GC, when set, is used for write barriers alone), so
-    // native allocations must not go to a generational heap either.
-    NativeGcBridge gc_bridge(&interp.gc(), nullptr, &comp_mod->stack_maps());
-
-    // The OSR code is entered from C++: a native throw's pad search stops
-    // here (exception_win64.cpp) and leaves as a C++ exception instead.
-    GeneratedCodeEntryScope entry;
-
-    // Invoke specialized OSR entry stub
-    Type ret_t = fn.return_type();
-    if (ret_t.is_void()) {
-        using NativeOsrFn = void (*)(const OsrMigrationFrame*);
-        reinterpret_cast<NativeOsrFn>(osr_entry_addr)(&mig_frame);
-        out_result = deopt_occurred ? deopt_res : RuntimeValue::from_void();
-    } else if (ret_t.is_float()) {
-        if (ret_t.kind() == TypeKind::F32) {
-            using NativeOsrFn = float (*)(const OsrMigrationFrame*);
-            float r = reinterpret_cast<NativeOsrFn>(osr_entry_addr)(&mig_frame);
-            out_result = deopt_occurred ? deopt_res : RuntimeValue::from_f32(r);
-        } else {
-            using NativeOsrFn = double (*)(const OsrMigrationFrame*);
-            double r = reinterpret_cast<NativeOsrFn>(osr_entry_addr)(&mig_frame);
-            out_result = deopt_occurred ? deopt_res : RuntimeValue::from_f64(r);
-        }
-    } else if (ret_t.is_vector()) {
-#if defined(__x86_64__) || defined(_M_X64)
-        using NativeOsrFn = __m128 (*)(const OsrMigrationFrame*);
-        __m128 r = reinterpret_cast<NativeOsrFn>(osr_entry_addr)(&mig_frame);
-        if (deopt_occurred) {
-            out_result = deopt_res;
-        } else {
-            alignas(16) uint8_t b[16];
-            std::memcpy(b, &r, 16);
-            out_result = RuntimeValue::from_v128(ret_t, b);
-        }
-#elif defined(__aarch64__) || defined(_M_ARM64)
-        using NativeOsrFn = uint8x16_t (*)(const OsrMigrationFrame*);
-        uint8x16_t r = reinterpret_cast<NativeOsrFn>(osr_entry_addr)(&mig_frame);
-        if (deopt_occurred) {
-            out_result = deopt_res;
-        } else {
-            alignas(16) uint8_t b[16];
-            vst1q_u8(b, r);
-            out_result = RuntimeValue::from_v128(ret_t, b);
-        }
-#else
-        (void)osr_entry_addr;
-        alignas(16) uint8_t b[16] = {0};
-        out_result = RuntimeValue::from_v128(ret_t, b);
-#endif
-    } else if (ret_t.is_i32()) {
-        using NativeOsrFn = int32_t (*)(const OsrMigrationFrame*);
-        int32_t r = reinterpret_cast<NativeOsrFn>(osr_entry_addr)(&mig_frame);
-        out_result = deopt_occurred ? deopt_res : RuntimeValue::from_i32(r);
-    } else {
-        using NativeOsrFn = int64_t (*)(const OsrMigrationFrame*);
-        int64_t r = reinterpret_cast<NativeOsrFn>(osr_entry_addr)(&mig_frame);
-        out_result = deopt_occurred ? deopt_res : RuntimeValue::from_bits(ret_t, static_cast<uint64_t>(r));
-    }
-
-    total_osr_migrations_++;
-    return true;
+    if (e->state.load(std::memory_order_acquire) != Entry::State::Ready) return false;
+    return enter(fn, frame, *e, out_result);
 }
 
-bool OsrCoordinator::try_osr_migration(
-    FastInterpreter& interp,
-    const Function& fn,
-    BasicBlock* loop_header,
-    FastFrame& frame,
-    RuntimeValue& out_result
-) {
-    if (!enabled_ || !loop_header) return false;
-    // A program's own code: an OSR entry compiled in the background.
-    if (runs_program()) return try_program_osr(interp, fn, loop_header, frame, out_result);
+void OsrCoordinator::request_entry(const Function& fn, const BasicBlock& header, const std::shared_ptr<Entry>& e) {
+    auto fail = [&] { e->state.store(Entry::State::Failed, std::memory_order_release); };
+    const Module* src = fn.parent();
+    FunctionDispatchTable& table = registry().dispatch_table();
+    // The function's handle is where a failed guard of the code resumes;
+    // one bound to another Function is not this code's.
+    FunctionHandle* handle = table.get_or_create(fn.name(), &fn);
+    if (!src || !handle || handle->mir_function() != &fn) return fail();
 
-    TieringFeedback& feedback = registry().get_or_create(fn.name());
-    feedback.record_backedge();
+    std::string why;
+    auto plan = plan_osr_entry(fn, header, &why);
+    if (!plan) return fail();
+    e->plan = std::move(*plan);
+    e->name = std::string(fn.name()) + ".osr" + std::to_string(header.id());
 
-    if (feedback.is_bailed_out() || !feedback.should_trigger_osr(threshold_)) {
-        return false;
+    // The copy: the entry function, the bodies of what it calls and of its
+    // speculated call targets, every other program function declared.
+    std::unique_ptr<Module> mod;
+    try {
+        mod = std::make_unique<Module>(src->name());
+        mod->set_allow_fp_reassociation(src->allow_fp_reassociation());
+        mod->set_pinned_tls_register(src->pinned_tls_register());
+        mod->copy_declarations_from(*src);
+        if (!build_osr_entry_function(e->plan, *mod, e->name, &why)) return fail();
+        clone_callee_closure(*src, *mod, e->plan.region, detail::speculated_call_targets(table, fn.name()), &fn);
+        detail::bind_declared_handles(table, *mod, *src);
+    } catch (const std::exception&) {
+        return fail();
     }
 
-    std::string cache_key = std::string(fn.name()) + "@" + std::to_string(loop_header->id());
-    CompiledModule* comp_mod = nullptr;
-    void* osr_entry_addr = nullptr;
-    OsrTarget target;
+    auto job = [this, &fn, e, m = std::shared_ptr<Module>(std::move(mod))] { compile_entry(fn, *m, *e); };
+    if (!CompilePool::shared().submit(this, kOsrPriority, std::move(job))) fail();
+}
 
-    {
-        std::lock_guard<std::mutex> lock(osr_mutex_);
-        auto mod_it = osr_modules_.find(cache_key);
-        if (mod_it != osr_modules_.end()) {
-            comp_mod = mod_it->second.get();
-        } else {
-            if (!fn.parent()) return false;
-            if (osr_guard_frame_ambiguous(fn)) {
-                feedback.record_bailout("OSR refused: a guard failure could be an inner activation's");
-                return false;
-            }
-            HostEngine engine;
-            auto compiled = engine.compile_with_osr(*fn.parent(), fn.name(), loop_header->id());
-            if (!compiled) {
-                feedback.record_bailout("OSR compilation failed");
-                return false;
-            }
-            comp_mod = compiled.get();
-            osr_modules_[cache_key] = std::move(compiled);
+void OsrCoordinator::compile_entry(const Function& fn, Module& copy, Entry& e) {
+    Module* const mod = &copy;
+    auto fail = [&] { e.state.store(Entry::State::Failed, std::memory_order_release); };
+    FunctionDispatchTable& table = registry().dispatch_table();
+    MultiTierPipeline& pipeline = table.pipeline();
+    FunctionHandle* handle = table.find(fn.name());
+    if (!handle || handle->mir_function() != &fn) return fail();
 
-            OsrTarget t = analyze_osr_target(const_cast<Function&>(fn), loop_header);
-            osr_targets_[cache_key] = std::move(t);
-        }
-
-        if (!comp_mod) return false;
-
-        target = osr_targets_[cache_key];
-        osr_entry_addr = comp_mod->get_osr_entry_address(fn.name());
-        if (!osr_entry_addr) {
-            feedback.record_bailout("OSR entry point not found");
-            return false;
-        }
+    // The program's own functions this copy defines: their func_addrs yield
+    // the program's addresses, their guards resume in their Functions.
+    std::unordered_map<std::string, const Function*> siblings;
+    for (const Function* f : mod->functions()) {
+        if (!f || f->block_count() == 0 || f->name() == e.name) continue;
+        const FunctionHandle* h = table.find(f->name());
+        const Function* def = fn.parent()->get_function(f->name());
+        if (h && def && h->mir_function() == def) siblings.emplace(std::string(f->name()), def);
     }
 
-    // Pack migration frame with live-in values from the FastFrame
-    OsrMigrationFrame mig_frame;
-    mig_frame.loop_header_id = loop_header->id();
+    std::shared_ptr<codegen::JitExecutionEngine> jit;
+    try {
+        std::string errors;
+        if (!detail::run_tier2_optimization_pipeline(*mod, table, errors)) return fail();
+        const Function* entry_fn = mod->get_function(e.name);
+        std::string why;
+        if (!entry_fn || !deopt_targets_valid(*entry_fn, &fn, why)) return fail();
+        jit = detail::make_tier2_engine(table, Target::host());
+        auto known = [&](std::string_view name) { return name == fn.name() || siblings.count(std::string(name)) != 0; };
+        detail::canonicalize_function_addresses(*mod, known, pipeline, *jit);
+        detail::link_declared_functions(*mod, table, *jit);
+        if (!jit->compile_and_load(*mod)) return fail();
+    } catch (const std::exception&) {
+        return fail();
+    }
+
+    void* entry = jit->get_symbol_address(e.name);
+    if (!entry) return fail();
+    pipeline.add_stack_maps(jit->stack_maps());
+    for (const auto& lf : jit->loaded_functions()) {
+        const Function* f = mod->get_function(lf.name);
+        if (!f || f->block_count() == 0) continue;
+        const std::string_view shown = lf.name == e.name ? fn.name() : std::string_view(lf.name);
+        pipeline.notify_code_installed({shown, TierLevel::Tier2_Optimized, lf.code, lf.size, &lf.lines});
+    }
+    for (const Function* f : mod->functions()) {
+        if (!f || f->block_count() == 0) continue;
+        void* addr = jit->get_symbol_address(f->name());
+        if (!addr) continue;
+        if (f->name() == e.name) {
+            table.register_code_address(addr, fn.name());
+            continue;
+        }
+        table.register_code_address(addr, f->name());
+        auto sib = siblings.find(std::string(f->name()));
+        FunctionHandle* h = sib != siblings.end() ? table.find(f->name()) : nullptr;
+        std::string why;
+        if (h && deopt_targets_valid(*f, sib->second, why)) detail::register_tier2_resumer(table, *h, addr, sib->second);
+    }
+    detail::register_tier2_resumer(table, *handle, entry, &fn);
+    e.jit = std::move(jit);
+    e.entry = entry;
+    e.state.store(Entry::State::Ready, std::memory_order_release);
+}
+
+bool OsrCoordinator::enter(const Function& fn, FastFrame& frame, const Entry& e, RuntimeValue& out_result) {
     const BytecodeFunction* bfn = frame.bfn;
-    for (size_t i = 0; i < target.live_ins.size() && i < OsrMigrationFrame::kMaxInlineSlots; ++i) {
-        Value* v = target.live_ins[i];
-        uint64_t val = 0;
-        if (bfn) {
-            auto it = bfn->ssa_to_reg.find(v->id());
-            if (it != bfn->ssa_to_reg.end() && it->second < frame.num_registers) {
-                val = frame.registers[it->second];
-            }
-        }
-        mig_frame.add_slot(static_cast<uint32_t>(i), val);
+    if (!bfn || FastInterpreter::thread_frame_top() != &frame) return false;
+    // The frame's live values, where the entry reads them: a register each,
+    // raw (a narrower value is read from its low bytes).
+    std::vector<uint64_t> buffer(e.plan.live_ins.size(), 0);
+    for (size_t i = 0; i < e.plan.live_ins.size(); ++i) {
+        const auto& li = e.plan.live_ins[i];
+        if (li.rematerialize) continue;
+        auto it = bfn->ssa_to_reg.find(li.value->id());
+        if (it == bfn->ssa_to_reg.end() || it->second >= frame.num_registers) return false;
+        buffer[i] = frame.registers[it->second];
     }
-
-    bool deopt_occurred = false;
-    RuntimeValue deopt_res;
-
-    // Every native frame of this OSR call lies below this frame's locals.
-    const uintptr_t osr_stack_limit = reinterpret_cast<uintptr_t>(&mig_frame);
-    auto prev_handler = get_deopt_handler();
-    register_deopt_handler([&](const DeoptFrame& dframe) -> void* {
-        // A callee's copy in the OSR module finishes that call in Tier 0 and
-        // hands its result back to the OSR code, which carries on; the OSR'd
-        // function's own failure finishes the whole OSR call.
-        const Function* owner_p = deopt_owner(*comp_mod, fn, dframe);
-        if (!owner_p) return decline_foreign_deopt(prev_handler, dframe);
-        const Function& owner = *owner_p;
-        total_native_deopts_++;
-        registry().get_or_create(owner.name()).record_deoptimization();
-        // The exits the interpreter's guard takes, in its order.
-        const Instruction* g_inst = owner.find_guard(dframe.resume_id);
-        if (!g_inst) {
-            throw InterpreterException("No guard with resume id " + std::to_string(dframe.resume_id) +
-                                       " in function " + std::string(owner.name()));
-        }
-        std::vector<RuntimeValue> state_vals = guard_state_values(owner, dframe);
-        auto finish = [&] {
-            if (const Function* stub = owner.guard_exit_stub(*g_inst)) return interp.run(*stub, state_vals);
-            return interp.resume(owner, dframe.resume_id, state_vals);
-        };
-        // The OSR'd function's own continuation ran its handlers in Tier 0:
-        // what it throws leaves the OSR call.
-        RuntimeValue r = &owner == &fn ? finish() : run_callee_continuation(osr_stack_limit, finish);
-        if (&owner == &fn) {
-            deopt_occurred = true;
-            deopt_res = r;
-        }
-        return reinterpret_cast<void*>(r.as_u64());
-    });
-
-    struct HandlerScopeGuard {
-        DeoptHandlerFn prev;
-        ~HandlerScopeGuard() {
-            register_deopt_handler(prev);
-        }
-    } guard{prev_handler};
-
-    // Native allocations go where FastInterpreter::allocate_gc sends them: its
-    // generational GC when set, else its semispace collector.
-    NativeGcBridge gc_bridge(&interp.gc(), interp.generational_gc(), &comp_mod->stack_maps());
-
-    // The OSR code is entered from C++: a native throw's pad search stops
-    // here (exception_win64.cpp) and leaves as a C++ exception instead.
-    GeneratedCodeEntryScope entry;
-
-    // Invoke specialized OSR entry stub
-    Type ret_t = fn.return_type();
-    if (ret_t.is_void()) {
-        using NativeOsrFn = void (*)(const OsrMigrationFrame*);
-        reinterpret_cast<NativeOsrFn>(osr_entry_addr)(&mig_frame);
-        out_result = deopt_occurred ? deopt_res : RuntimeValue::from_void();
-    } else if (ret_t.is_float()) {
-        if (ret_t.kind() == TypeKind::F32) {
-            using NativeOsrFn = float (*)(const OsrMigrationFrame*);
-            float r = reinterpret_cast<NativeOsrFn>(osr_entry_addr)(&mig_frame);
-            out_result = deopt_occurred ? deopt_res : RuntimeValue::from_f32(r);
-        } else {
-            using NativeOsrFn = double (*)(const OsrMigrationFrame*);
-            double r = reinterpret_cast<NativeOsrFn>(osr_entry_addr)(&mig_frame);
-            out_result = deopt_occurred ? deopt_res : RuntimeValue::from_f64(r);
-        }
-    } else if (ret_t.is_vector()) {
-#if defined(__x86_64__) || defined(_M_X64)
-        using NativeOsrFn = __m128 (*)(const OsrMigrationFrame*);
-        __m128 r = reinterpret_cast<NativeOsrFn>(osr_entry_addr)(&mig_frame);
-        if (deopt_occurred) {
-            out_result = deopt_res;
-        } else {
-            alignas(16) uint8_t b[16];
-            std::memcpy(b, &r, 16);
-            out_result = RuntimeValue::from_v128(ret_t, b);
-        }
-#elif defined(__aarch64__) || defined(_M_ARM64)
-        using NativeOsrFn = uint8x16_t (*)(const OsrMigrationFrame*);
-        uint8x16_t r = reinterpret_cast<NativeOsrFn>(osr_entry_addr)(&mig_frame);
-        if (deopt_occurred) {
-            out_result = deopt_res;
-        } else {
-            alignas(16) uint8_t b[16];
-            vst1q_u8(b, r);
-            out_result = RuntimeValue::from_v128(ret_t, b);
-        }
-#else
-        (void)osr_entry_addr;
-        alignas(16) uint8_t b[16] = {0};
-        out_result = RuntimeValue::from_v128(ret_t, b);
-#endif
-    } else if (ret_t.is_i32()) {
-        using NativeOsrFn = int32_t (*)(const OsrMigrationFrame*);
-        int32_t r = reinterpret_cast<NativeOsrFn>(osr_entry_addr)(&mig_frame);
-        out_result = deopt_occurred ? deopt_res : RuntimeValue::from_i32(r);
-    } else {
-        using NativeOsrFn = uint64_t (*)(const OsrMigrationFrame*);
-        uint64_t r = reinterpret_cast<NativeOsrFn>(osr_entry_addr)(&mig_frame);
-        if (deopt_occurred) {
-            out_result = deopt_res;
-        } else if (ret_t.is_gcref()) {
-            out_result = RuntimeValue::from_gcref(static_cast<uintptr_t>(r));
-        } else {
-            out_result = RuntimeValue::from_bits(ret_t, r);
-        }
-    }
-
+    const std::vector<Type> params{Type::ptr()};
+    const std::vector<RuntimeValue> args{RuntimeValue::from_ptr(buffer.data())};
+    // Counted on entry: a throw can end the OSR call.
     total_osr_migrations_++;
+    HiddenFrame hidden(frame);
+    out_result = invoke_native_address(e.entry, fn.return_type(), &params, args);
     return true;
-}
-
-void* OsrCoordinator::handle_native_deopt(const DeoptFrame& deopt_frame) {
-    total_native_deopts_++;
-    const Function* cur_fn = t_active_fn;
-    Interpreter* cur_interp = t_active_interpreter;
-    InterpreterFrame* cur_frame = t_active_frame;
-    if (cur_fn) {
-        TieringFeedback& fb = registry().get_or_create(cur_fn->name());
-        fb.record_deoptimization();
-    }
-    if (cur_interp && cur_fn) {
-        RuntimeValue res = cur_interp->resume_after_guard(*cur_fn, deopt_frame.resume_id,
-                                                          guard_state_values(*cur_fn, deopt_frame), cur_frame);
-        return reinterpret_cast<void*>(res.as_u64());
-    }
-    return nullptr;
 }
 
 } // namespace brass::runtime

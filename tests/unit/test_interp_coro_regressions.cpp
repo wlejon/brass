@@ -3,21 +3,20 @@
 //   body as one; the interpreter's roots report only gcrefs, so a collection
 //   that moved the frame left both stale (and yielded_val was written through
 //   the stale pointer after the body returned). Reached whenever the
-//   Interpreter allocates from the frame's heap: a borrowed heap (the fresh
-//   Tier-0 interpreter a deopt starts) or a host heap.
+//   Interpreter allocates from the frame's heap: a shared heap (the fresh
+//   Tier-0 interpreter a deopt starts) or the thread's heap.
 // - coro_resume took every frame's fn_ptr for a Function*; a frame generated
 //   code created holds a native code address there.
 #include "test_framework.hpp"
+#include "gc_test_heap.hpp"
 #include <brass/mir/module.hpp>
 #include <brass/mir/parser.hpp>
 #include <brass/mir/verifier.hpp>
 #include <brass/mir/coro_transform.hpp>
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/codegen/jit_exec.hpp>
-#include <brass/gc/generational_gc.hpp>
-#include <brass/gc/mini_cheney.hpp>
+#include <brass/gc/heap.hpp>
 #include <brass/gc/runtime_gc.hpp>
-#include <brass/gc/host_heap.hpp>
 #include <brass/gc/native_frames.hpp>
 #include <brass/runtime/coroutine.hpp>
 #include <algorithm>
@@ -94,109 +93,17 @@ b0:
 
 constexpr int64_t kMoveWant = 5025055055;
 
-// As tier_deopt's fresh interpreter: borrow the thread's heap and publish
-// the interpreter's frames as thread roots.
-int64_t run_borrowing(Module& mod, GenerationalGC* gen, MiniCheneyGC* ch) {
-    Interpreter in;
+// As tier_deopt's fresh interpreter: allocate from the thread's heap and
+// publish the interpreter's frames as thread roots as well.
+int64_t run_borrowing(Module& mod, gc::Heap& heap) {
+    Interpreter in(&heap);
+    REQUIRE(!in.owns_heap());
     in.set_module(&mod);
-    if (gen) in.borrow_generational_gc(gen);
-    if (ch) in.borrow_gc(ch);
     ThreadRootsScope roots([](void* ctx, std::vector<uintptr_t*>& out) {
         static_cast<Interpreter*>(ctx)->collect_all_roots(out);
     }, &in);
     return in.run(*mod.get_function("main"), {RuntimeValue::from_i64(5)}).as_i64();
 }
-
-// Semispace copying host heap collecting on every 4th allocation, with the
-// roots brass_enumerate_thread_roots reports.
-class CopyHeap final : public HostHeap {
-public:
-    static constexpr size_t kCap = 1 << 20;
-    CopyHeap() : a_(kCap), b_(kCap) { from_ = a_.data(); to_ = b_.data(); }
-    uintptr_t allocate(size_t size, uint64_t mask, uint32_t tag) override {
-        return allocate_at(size, mask, tag, 0, 0);
-    }
-    uintptr_t allocate_at(size_t size, uint64_t mask, uint32_t, uintptr_t fp, uintptr_t ip) override {
-        if (++allocs_ % 4 == 0) collect_now(fp, ip);
-        size_t need = 24 + ((size + 7) & ~size_t(7));
-        if (top_ + need > kCap) collect_now(fp, ip);
-        if (top_ + need > kCap) return 0;
-        uint64_t* hd = reinterpret_cast<uint64_t*>(from_ + top_);
-        hd[0] = size; hd[1] = mask; hd[2] = 0;
-        std::memset(hd + 3, 0, need - 24);
-        top_ += need;
-        return reinterpret_cast<uintptr_t>(hd + 3);
-    }
-    void collect() override { collect_now(0, 0); }
-    void safepoint_at(uintptr_t fp, uintptr_t ip) override { collect_now(fp, ip); }
-    int collections = 0;
-
-private:
-    bool in_from(uintptr_t p) const {
-        return p >= reinterpret_cast<uintptr_t>(from_) && p < reinterpret_cast<uintptr_t>(from_) + kCap;
-    }
-    uintptr_t copy(uintptr_t p) {
-        uint64_t* hd = reinterpret_cast<uint64_t*>(p) - 3;
-        if (hd[2]) return hd[2];
-        size_t need = 24 + ((hd[0] + 7) & ~size_t(7));
-        uint64_t* n = reinterpret_cast<uint64_t*>(to_ + ttop_);
-        std::memcpy(n, hd, need);
-        n[2] = 0;
-        ttop_ += need;
-        hd[2] = reinterpret_cast<uintptr_t>(n + 3);
-        return hd[2];
-    }
-    void fix(uintptr_t* slot) {
-        uintptr_t v = *slot;
-        uintptr_t p = v & 0x0000FFFFFFFFFFFFULL;
-        if (!in_from(p)) return;
-        *slot = (v & ~0x0000FFFFFFFFFFFFULL) | copy(p);
-    }
-    void collect_now(uintptr_t fp, uintptr_t ip) {
-        HostHeapCollectionScope collecting; // until the last slot is updated
-        std::vector<uintptr_t*> roots;
-        brass_enumerate_thread_roots(fp, ip, roots);
-        // Copies start at a different offset each time, so an object that
-        // survives alone never lands where a stale pointer to it points.
-        ttop_ = 64 * static_cast<size_t>(collections % 3 + 1);
-        const size_t start = ttop_;
-        for (uintptr_t* s : roots) fix(s);
-        size_t scan = start;
-        while (scan < ttop_) {
-            uint64_t* hd = reinterpret_cast<uint64_t*>(to_ + scan);
-            size_t n = (hd[0] + 7) / 8;
-            for (size_t i = 0; i < n; ++i) {
-                if ((hd[1] >> (i < 63 ? i : 63)) & 1) fix(reinterpret_cast<uintptr_t*>(hd + 3 + i));
-            }
-            scan += 24 + n * 8;
-        }
-        uint64_t* fw = reinterpret_cast<uint64_t*>(from_);
-        for (size_t i = 0; i < kCap / 8; ++i) fw[i] = 0xDEADBEEFDEADBEEFULL;
-        std::swap(from_, to_);
-        top_ = ttop_;
-        base_ = start;
-        ++collections;
-    }
-
-public:
-    // An object start in the current space (the walk brass relies on to
-    // check a finished coroutine frame's handle).
-    bool contains(uintptr_t addr) const override {
-        for (size_t at = base_; at < top_;) {
-            const uint64_t* hd = reinterpret_cast<const uint64_t*>(from_ + at);
-            if (reinterpret_cast<uintptr_t>(hd + 3) == addr) return true;
-            at += 24 + ((hd[0] + 7) & ~uint64_t(7));
-        }
-        return false;
-    }
-
-private:
-    std::vector<uint8_t> a_, b_;
-    uint8_t* from_;
-    uint8_t* to_;
-    size_t top_ = 0, ttop_ = 0, base_ = 0;
-    int allocs_ = 0;
-};
 
 // @drv resumes a frame it is handed; the frame here comes from generated code.
 const char* kMix = R"(module @m2
@@ -228,53 +135,45 @@ b0:
 
 } // namespace
 
-TEST_CASE("InterpCoro - a borrowing Interpreter's coroutine frame survives a MiniCheneyGC move") {
+// Promoted by its first minor collection: the frame moves into the old
+// generation while the body runs.
+TEST_CASE("InterpCoro - a borrowing Interpreter's coroutine frame survives a promoting move") {
     auto mod = lower(kMove);
-    MiniCheneyGC ch(64 * 1024);
-    brass_set_active_gc(&ch);
-    int64_t r = 0;
-    try {
-        r = run_borrowing(*mod, nullptr, &ch);
-    } catch (...) {
-        brass_set_active_gc(nullptr);
-        throw;
-    }
-    brass_set_active_gc(nullptr);
+    test::BoundHeap heap(test::small_heap_config(/*tenure_age=*/1));
+    heap->set_poison(true);
+    const int64_t r = run_borrowing(*mod, heap.heap);
     CHECK_EQ(r, kMoveWant);
+    CHECK(heap.minor_collections() > 0);
 }
 
-TEST_CASE("InterpCoro - a borrowing Interpreter's coroutine frame survives a GenerationalGC move") {
+// Copied between survivor spaces before its promotion.
+TEST_CASE("InterpCoro - a borrowing Interpreter's coroutine frame survives a young-generation move") {
     auto mod = lower(kMove);
-    GenerationalGC gen(32 * 1024, 16 * 1024, 1 << 20, 2);
-    brass_set_active_generational_gc(&gen);
-    int64_t r = 0;
-    try {
-        r = run_borrowing(*mod, &gen, nullptr);
-    } catch (...) {
-        brass_set_active_generational_gc(nullptr);
-        throw;
-    }
-    brass_set_active_generational_gc(nullptr);
+    test::BoundHeap heap(test::small_heap_config(/*tenure_age=*/2));
+    heap->set_poison(true);
+    const int64_t r = run_borrowing(*mod, heap.heap);
     CHECK_EQ(r, kMoveWant);
-    CHECK(gen.minor_collection_count() > 0);
+    CHECK(heap.minor_collections() > 0);
 }
 
-TEST_CASE("InterpCoro - an Interpreter's coroutine frame survives a copying host heap") {
+// A collection at every allocation (minor ones, every eighth full), freed
+// memory poisoned: every stale frame pointer reads 0xDB bytes.
+TEST_CASE("InterpCoro - an Interpreter's coroutine frame survives a collection at every allocation") {
     auto mod = lower(kMove);
-    CopyHeap heap;
-    set_host_heap(&heap);
+    test::BoundHeap heap;
+    heap->set_poison(true);
+    heap->set_stress(gc::StressMode::Alternate);
     int64_t r = 0;
-    try {
+    {
         Interpreter in;
+        REQUIRE(&in.heap() == &heap.heap);
         in.set_module(mod.get());
         r = in.run(*mod->get_function("main"), {RuntimeValue::from_i64(5)}).as_i64();
-    } catch (...) {
-        set_host_heap(nullptr);
-        throw;
     }
-    set_host_heap(nullptr);
+    heap->set_stress(gc::StressMode::None);
     CHECK_EQ(r, kMoveWant);
-    CHECK(heap.collections > 0);
+    CHECK(heap.minor_collections() > 1000);
+    CHECK(heap.full_collections() > 100);
 }
 
 TEST_CASE("InterpCoro - the Interpreter resumes a coroutine frame generated code created") {

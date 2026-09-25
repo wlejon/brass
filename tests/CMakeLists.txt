@@ -9,7 +9,6 @@ add_executable(brass_unit_tests
     unit/test_mir_printer_parser.cpp
     unit/test_mir_parser_strictness.cpp
     unit/test_mir_loop_opt.cpp
-    unit/test_mini_cheney.cpp
     unit/test_interpreter.cpp
     unit/test_bytecode_compiler.cpp
     unit/test_fast_interpreter.cpp
@@ -110,8 +109,6 @@ add_executable(brass_unit_tests
     unit/test_source_map.cpp
     unit/test_symbolicator.cpp
     differential/test_debug_differential.cpp
-    unit/test_tlab.cpp
-    unit/test_host_heap.cpp
     unit/test_heap_roots_regressions.cpp
     unit/test_gc_sweep19_regressions.cpp
     unit/test_gc_sweep20_regressions.cpp
@@ -144,11 +141,13 @@ add_executable(brass_unit_tests
     unit/test_allocation_sinking.cpp
     differential/test_pea_differential.cpp
     unit/test_card_table.cpp
-    unit/test_generational_gc.cpp
+    unit/test_gc_heap.cpp
+    unit/test_gc_heap_weak.cpp
+    unit/test_gc_heap_roots.cpp
+    unit/test_gc_heap_threads.cpp
     unit/test_write_barrier_elim.cpp
     differential/test_generational_differential.cpp
     unit/test_tiering.cpp
-    unit/test_osr_entry.cpp
     unit/test_osr_runtime.cpp
     differential/test_osr_differential.cpp
     differential/test_osr_regressions.cpp
@@ -394,6 +393,11 @@ add_test(NAME performance_ratchet COMMAND brass_benchmarks --check-ratchet)
 set_tests_properties(benchmarks performance_ratchet PROPERTIES
     TIMEOUT 600 RUN_SERIAL TRUE WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" LABELS "perf")
 
+# gc::Heap pause times against the live old-generation size (not a test).
+add_executable(brass_gc_pause_bench benchmarks/gc_pause_bench.cpp)
+target_include_directories(brass_gc_pause_bench PRIVATE ${BRASS_INCLUDE_DIR})
+target_link_libraries(brass_gc_pause_bench PRIVATE brass)
+
 if(BRASS_BUILD_TOOLS)
     # brass_opt_cli.coro_args.*: brass-opt lowers coroutines before running
     # them (an unlowered body once yielded 1, 0, 0), and --args takes a
@@ -445,15 +449,15 @@ if(BRASS_BUILD_TOOLS)
     # parameter is i32 and which has a resume table; tier 2 returned the
     # resume block's 7777 for f(0, 1000) (its entry dispatched on %k).
     set(_guard_cases
-        "param0_dispatch|f|0,1000|499500|interp baseline jit osr jit_osr"
-        "param0_dispatch|f|5,1000|504500|interp baseline jit osr jit_osr"
+        "param0_dispatch|f|0,1000|499500|interp baseline jit osr"
+        "param0_dispatch|f|5,1000|504500|interp baseline jit osr"
         "osr_resume|f|1000|11175150|interp baseline osr"
-        "osr_stub|f|1000|11175150|interp baseline jit osr jit_osr"
-        "osr_both|main|1000|111751501|interp baseline jit osr jit_osr"
-        "stub_f64|spec|3.0,0|4[.]5|interp baseline jit osr jit_osr"
-        "stub_f64|spec|3.0,1|8[.]0|interp baseline jit osr jit_osr"
-        "stub_many|spec|3,0|148978294|interp baseline jit osr jit_osr"
-        "stub_many|spec|3,1|13|interp baseline jit osr jit_osr")
+        "osr_stub|f|1000|11175150|interp baseline jit osr"
+        "osr_both|main|1000|111751501|interp baseline jit osr"
+        "stub_f64|spec|3.0,0|4[.]5|interp baseline jit osr"
+        "stub_f64|spec|3.0,1|8[.]0|interp baseline jit osr"
+        "stub_many|spec|3,0|148978294|interp baseline jit osr"
+        "stub_many|spec|3,1|13|interp baseline jit osr")
     foreach(_case IN LISTS _guard_cases)
         string(REPLACE "|" ";" _parts "${_case}")
         list(GET _parts 0 _file)
@@ -471,10 +475,9 @@ if(BRASS_BUILD_TOOLS)
             elseif(_mode STREQUAL "baseline")
                 set(_flags "--baseline-jit")
             elseif(_mode STREQUAL "osr")
-                # The interpreter enters the hot loop's tier-2 code through OSR.
+                # The fast interpreter enters the hot loop's tier-2 code
+                # through OSR.
                 set(_flags "--enable-osr;--osr-threshold=10")
-            elseif(_mode STREQUAL "jit_osr")
-                set(_flags "--jit;--enable-osr;--osr-threshold=10")
             endif()
             set(_name "brass_opt_cli.guard.${_file}.${_fn}.${_arg_tag}.${_mode}")
             add_test(NAME "${_name}"

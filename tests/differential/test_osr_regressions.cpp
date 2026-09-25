@@ -1,25 +1,29 @@
-// OSR regressions from sweep 3.
-//
-// S3-1: the OSR prologue loaded every migrated value into its allocated
-// location, including constants defined before the loop that isel folds to
-// immediates. Those have no live range at the loop header, so their stale
-// register aliased a loop-carried value and clobbered it on entry.
-//
-// S3-3: OSR migrated allocating loops into native code with no GC wired to
-// the native runtime, so the first native allocation returned null.
+// OSR regressions: loops whose OSR entry carries constants defined before
+// the loop (S3-1: they once clobbered loop-carried values on entry) and
+// loops that allocate or hold gcrefs (S3-3: native allocations once had no
+// heap). Each entry runs in a program on its fast interpreter, first to ask
+// for the loops' OSR code and then, once it is compiled, entering it; both
+// runs answer what the interpreter answers without OSR.
 
 #include "test_framework.hpp"
 #include <brass/core/diagnostics.hpp>
-#include <brass/interpreter/interpreter.hpp>
+#include <brass/gc/heap.hpp>
+#include <brass/gc/runtime_gc.hpp>
 #include <brass/mir/parser.hpp>
+#include <brass/runtime/code_installer.hpp>
+#include <brass/runtime/compile_pool.hpp>
+#include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
 #include <brass/runtime/tiering.hpp>
+#include <brass/vm/fast_interpreter.hpp>
 #include <initializer_list>
 #include <memory>
 #include <string_view>
 
 using namespace brass;
 using namespace brass::runtime;
+
+#if defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64)
 
 namespace {
 
@@ -30,25 +34,31 @@ std::unique_ptr<Module> parse_or_fail(std::string_view src) {
     return mod;
 }
 
-void reset_osr_state() {
-    OsrCoordinator::instance().clear_cache();
-    OsrCoordinator::instance().reset_stats();
-    TieringRegistry::instance().clear();
-}
+// Native code allocates through brass_gc_alloc: on the interpreter's heap
+// while the scope lasts.
+using ActiveHeap = gc::HeapScope;
 
-// Runs `entry` in the reference interpreter with OSR at `threshold`
-// (0 = OSR off), optionally with a GC collecting at every allocation.
-int64_t run_entry(const Module& mod, std::string_view entry, uint64_t threshold, bool gc_stress = false) {
-    reset_osr_state();
-    OsrCoordinator::instance().set_enabled(threshold != 0);
-    if (threshold != 0) OsrCoordinator::instance().set_threshold(threshold);
-    Interpreter interp;
-    if (gc_stress) interp.gc().set_stress_mode(true);
-    RuntimeValue r = interp.run(mod, entry);
-    OsrCoordinator::instance().set_enabled(false);
-    OsrCoordinator::instance().set_threshold(BACKEDGE_OSR_THRESHOLD);
-    reset_osr_state();
-    return r.as_i64();
+// Runs `entry` in a program on its fast interpreter with OSR at `threshold`
+// (0 = OSR off), twice: the second run enters the OSR code the first asked
+// for. Both runs must agree.
+int64_t run_entry(const Module& mod, std::string_view entry, uint64_t threshold) {
+    FunctionDispatchTable prog;
+    TieringConfig cfg;
+    cfg.invocation_tier1_threshold = 1000000;
+    cfg.invocation_tier2_threshold = 1000000;
+    cfg.enable_background_compile = false;
+    cfg.set_use_fast_interpreter(true);
+    prog.pipeline().initialize(cfg);
+    prog.osr().set_enabled(threshold != 0);
+    if (threshold != 0) prog.osr().set_threshold(threshold);
+    FastInterpreter interp;
+    interp.set_dispatch_table(&prog);
+    ActiveHeap heap(interp.heap());
+    const int64_t first = interp.run(mod, entry).as_i64();
+    CompilePool::shared().wait_owner(&prog.osr());
+    const int64_t second = interp.run(mod, entry).as_i64();
+    CHECK_EQ(first, second);
+    return second;
 }
 
 constexpr std::string_view kHoistedConstants = R"(
@@ -258,34 +268,24 @@ TEST_CASE("OSR regression S3-1 - live-in parameter and a non-immediate constant"
     }
 }
 
-TEST_CASE("OSR regression S3-3 - an allocating loop migrates onto the interpreter's heap") {
+TEST_CASE("OSR regression S3-3 - an allocating loop allocates on the host's heap in its OSR code") {
     auto mod = parse_or_fail(kAllocatingLoops);
     CHECK_EQ(run_entry(*mod, "main2", 0), 44850);
     for (uint64_t t : {1u, 5u, 100u}) {
         CHECK_EQ(run_entry(*mod, "main2", t), 44850);
-        // Collect at every allocation: native frames are rooted through the
-        // OSR module's stack maps, interpreter frames through the root provider.
-        CHECK_EQ(run_entry(*mod, "main2", t, true), 44850);
     }
 }
 
-TEST_CASE("OSR regression S3-3 - a migrated gcref survives collections in the native loop") {
+TEST_CASE("OSR regression S3-3 - loops carrying gcrefs answer the interpreter's result") {
+    // A gcref live into a loop header is no OSR entry's (the entry's buffer
+    // carries no gcref): these loops stay interpreted.
     auto mod = parse_or_fail(kAllocatingLoops);
     CHECK_EQ(run_entry(*mod, "main", 0), 2100);
+    CHECK_EQ(run_entry(*mod, "hold", 0), 180000);
     for (uint64_t t : {1u, 5u, 100u}) {
         CHECK_EQ(run_entry(*mod, "main", t), 2100);
-        CHECK_EQ(run_entry(*mod, "main", t, true), 2100);
+        CHECK_EQ(run_entry(*mod, "hold", t), 180000);
     }
 }
 
-TEST_CASE("OSR regression S3-3 - a native safepoint roots the interpreter's frames") {
-    // hold() keeps the first list in its interpreter frame while the second
-    // build() runs natively; the native safepoint collects, and once did so
-    // with the stack-walked roots alone, leaving hold's gcref dangling.
-    auto mod = parse_or_fail(kAllocatingLoops);
-    CHECK_EQ(run_entry(*mod, "hold", 0), 180000);
-    for (uint64_t t : {1u, 5u, 100u}) {
-        CHECK_EQ(run_entry(*mod, "hold", t), 180000);
-        CHECK_EQ(run_entry(*mod, "hold", t, true), 180000);
-    }
-}
+#endif

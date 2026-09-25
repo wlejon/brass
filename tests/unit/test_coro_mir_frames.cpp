@@ -17,7 +17,7 @@
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/tiering.hpp>
 #include <brass/runtime/coroutine.hpp>
-#include <brass/gc/mini_cheney.hpp>
+#include "gc_test_heap.hpp"
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/gc/native_frames.hpp>
 #include <cstdio>
@@ -120,8 +120,12 @@ void install_drv_tier2(FunctionDispatchTable& prog, Module& mod) {
     REQUIRE(h->native_entry() != nullptr);
 }
 
-// A frame the Interpreter made for @body of kBodyMod, with p = 5.
+// A frame the Interpreter made for @body of kBodyMod, with p = 5. The caller
+// binds a heap first: the frame is an object of the thread's heap, which must
+// outlive the interpreter (one with no heap bound would take the frame down
+// with its own).
 uintptr_t make_frame(Module& bodies) {
+    REQUIRE(gc::Heap::current() != nullptr);
     Interpreter in;
     in.set_module(&bodies);
     const RuntimeValue c = in.run(*bodies.get_function("mk"), {RuntimeValue::from_i64(5)});
@@ -156,6 +160,7 @@ TEST_CASE("CoroMirFrames - tier-2 code resumes a frame the FastInterpreter creat
 TEST_CASE("CoroMirFrames - the Interpreter resumes a body of another module") {
     auto bodies = lower(kBodyMod);
     auto drivers = lower(kDrvMod);
+    test::BoundHeap heap;
     const uintptr_t frame = make_frame(*bodies);
     Interpreter in;
     in.set_module(drivers.get());
@@ -167,6 +172,7 @@ TEST_CASE("CoroMirFrames - the Interpreter resumes a body of another module") {
 TEST_CASE("CoroMirFrames - the FastInterpreter resumes a body of another module") {
     auto bodies = lower(kBodyMod);
     auto drivers = lower(kDrvMod);
+    test::BoundHeap heap;
     const uintptr_t frame = make_frame(*bodies);
     FastInterpreter fi;
     fi.set_module(drivers.get());
@@ -177,6 +183,7 @@ TEST_CASE("CoroMirFrames - the FastInterpreter resumes a body of another module"
 
 TEST_CASE("CoroMirFrames - the host resumes an interpreter-created frame through brass_coro_resume") {
     auto bodies = lower(kBodyMod);
+    test::BoundHeap heap;
     const uintptr_t frame = make_frame(*bodies);
     CHECK_EQ(brass_coro_resume(frame, 10), 5u);
     CHECK_EQ(brass_coro_resume(frame, 20), 25u);
@@ -190,6 +197,7 @@ TEST_CASE("CoroMirFrames - the host resumes an interpreter-created frame through
 
 TEST_CASE("CoroMirFrames - MicrotaskQueue resumes an interpreter-created frame") {
     auto bodies = lower(kBodyMod);
+    test::BoundHeap heap;
     const uintptr_t frame = make_frame(*bodies);
     auto* cf = reinterpret_cast<BrassCoroFrame*>(frame);
     MicrotaskQueue q;
@@ -206,7 +214,7 @@ TEST_CASE("CoroMirFrames - MicrotaskQueue resumes an interpreter-created frame")
 // The host resumes, with a moving heap active, a frame whose body collects
 // between its suspends: the fresh Tier-0 interpreter allocates from that
 // heap, and the frame (moved) is reached through the host's root.
-TEST_CASE("CoroMirFrames - a host-resumed MIR frame survives a MiniCheneyGC move") {
+TEST_CASE("CoroMirFrames - a host-resumed MIR frame survives a moving collection") {
     const char* src = R"(module @mv
 extern @brass_gc_alloc
 func @body(%p: i64) -> i64 {
@@ -237,11 +245,10 @@ b0:
 }
 )";
     auto mod = lower(src);
-    MiniCheneyGC ch(64 * 1024);
-    brass_set_active_gc(&ch);
+    test::BoundHeap ch;  // 64 KB eden: the body's 3000 objects collect it
     uint64_t y[3] = {};
     size_t collections = 0;
-    try {
+    {
         uintptr_t frame = 0;
         ThreadRootsScope root([](void* ctx, std::vector<uintptr_t*>& roots) {
             roots.push_back(static_cast<uintptr_t*>(ctx));
@@ -249,19 +256,15 @@ b0:
         {
             Interpreter in;
             in.set_module(mod.get());
-            in.borrow_gc(&ch);
+            REQUIRE(&in.heap() == &ch.heap);
             frame = static_cast<uintptr_t>(in.run(*mod->get_function("mk"), {RuntimeValue::from_i64(5)}).raw_bits());
         }
         REQUIRE(frame != 0);
         y[0] = brass_coro_resume(frame, 10);
         y[1] = brass_coro_resume(frame, 20);
         y[2] = brass_coro_resume(frame, 30);
-        collections = ch.collection_count();
-    } catch (...) {
-        brass_set_active_gc(nullptr);
-        throw;
+        collections = ch.heap.collection_count();
     }
-    brass_set_active_gc(nullptr);
     CHECK_EQ(y[0], 5u);
     CHECK_EQ(y[1], 25u);
     CHECK_EQ(y[2], 55u);

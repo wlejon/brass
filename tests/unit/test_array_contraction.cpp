@@ -6,10 +6,20 @@
 #include <brass/mir/loop_fusion.hpp>
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/loop_analysis.hpp>
-#include <brass/gc/mini_cheney.hpp>
+#include <brass/gc/heap.hpp>
 #include <brass/interpreter/interpreter.hpp>
 
 using namespace brass;
+
+namespace {
+// Objects the heap holds (none of these runs collects, so every object the
+// function allocated is still there).
+size_t heap_object_count(const gc::Heap& heap) {
+    size_t n = 0;
+    heap.for_each_object([&](uintptr_t) { ++n; });
+    return n;
+}
+} // namespace
 
 TEST_CASE("Array Contraction - Eliminate Buffer and Verify 0 Cheney GC Allocations") {
     Module mod("test_contraction_gc");
@@ -91,7 +101,7 @@ TEST_CASE("Array Contraction - Eliminate Buffer and Verify 0 Cheney GC Allocatio
         auto res = interp_unopt.run(*fn, {RuntimeValue::from_i64(10)});
         // sum_{i=0..9} (2*i) = 2 * 45 = 90
         CHECK_EQ(res.as_i64(), 90);
-        CHECK_EQ(interp_unopt.gc().total_allocations(), 1);
+        CHECK_EQ(heap_object_count(interp_unopt.heap()), 1);
     }
 
     // 2. Run Array Contraction pass (which fuses and contracts)
@@ -130,8 +140,8 @@ TEST_CASE("Array Contraction - Eliminate Buffer and Verify 0 Cheney GC Allocatio
         Interpreter interp_opt;
         auto res = interp_opt.run(*fn, {RuntimeValue::from_i64(10)});
         CHECK_EQ(res.as_i64(), 90);
-        CHECK_EQ(interp_opt.gc().total_allocations(), 0);
-        CHECK_EQ(interp_opt.gc().total_allocated_bytes(), 0);
+        CHECK_EQ(heap_object_count(interp_opt.heap()), 0);
+        CHECK_EQ(interp_opt.heap().allocated_bytes(), 0);
     }
 }
 

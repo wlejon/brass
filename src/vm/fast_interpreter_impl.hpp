@@ -1,9 +1,8 @@
 #pragma once
 
 #include <brass/vm/fast_interpreter.hpp>
-#include <brass/gc/generational_gc.hpp>
 #include <brass/gc/runtime_gc.hpp>
-#include <brass/gc/host_heap.hpp>
+#include <brass/interpreter/memory_access.hpp>
 #include <brass/runtime/coroutine.hpp>
 #include <brass/runtime/deopt.hpp>
 #include <brass/runtime/tiering.hpp>
@@ -181,6 +180,7 @@ struct FrameGuard {
     FastInterpreter& interp;
     FastFrame& frame;
     FastInterpreter* prev_interp{nullptr};
+    gc::Heap* prev_heap{nullptr};
     FastAllocaArena::Mark alloca_mark;
 
     // `mark` is the arena position before the frame's register file was
@@ -189,6 +189,8 @@ struct FrameGuard {
         : interp(in), frame(f), alloca_mark(mark) {
         prev_interp = FastInterpreter::current();
         FastInterpreter::set_current(&in);
+        prev_heap = gc::Heap::current();
+        gc::Heap::set_current(&in.heap());
         frame.caller = interp.current_frame();
         interp.set_current_frame(&frame);
         FastFrame*& top = FastInterpreter::thread_frame_top();
@@ -201,6 +203,7 @@ struct FrameGuard {
         interp.alloca_arena_->release(alloca_mark);
         FastInterpreter::thread_frame_top() = frame.thread_prev;
         FastInterpreter::set_current(prev_interp);
+        gc::Heap::set_current(prev_heap);
         interp.set_current_frame(frame.caller);
         interp.dec_call_depth();
     }

@@ -4,7 +4,7 @@
 #include <brass/codegen/baseline_jit.hpp>
 #include <brass/codegen/unsupported_operation.hpp>
 #include <brass/runtime/parallel_runtime.hpp>
-#include <brass/gc/mini_cheney.hpp>
+#include <brass/gc/heap.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/gc/stack_map.hpp>
 
@@ -110,19 +110,14 @@ TierResult DiffFuzzer::run_baseline(const Module& mod, std::string_view fn_name,
 
     auto res_box = std::make_shared<TierResult>();
     auto worker_task = [state, entry, res_box, args]() {
-        auto gc = std::make_unique<MiniCheneyGC>(256 * 1024);
-        MiniCheneyGC* old_gc = brass_get_active_gc();
+        gc::Heap heap;
+        gc::HeapScope heap_scope(heap);
         const ModuleStackMap* old_maps = brass_get_active_stack_maps();
-        brass_set_active_gc(gc.get());
         brass_set_active_stack_maps(&state->stack_maps);
         struct Guard {
-            MiniCheneyGC* gc;
             const ModuleStackMap* maps;
-            ~Guard() {
-                brass_set_active_gc(gc);
-                brass_set_active_stack_maps(maps);
-            }
-        } guard{old_gc, old_maps};
+            ~Guard() { brass_set_active_stack_maps(maps); }
+        } guard{old_maps};
 
         std::string fault;
         bool prot_ok = run_protected([&]() {

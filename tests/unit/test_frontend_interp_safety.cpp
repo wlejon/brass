@@ -2,7 +2,6 @@
 #include <brass/brass.hpp>
 #include <brass/codegen/baseline_jit.hpp>
 #include <brass/interpreter/interpreter.hpp>
-#include <brass/runtime/osr_coordinator.hpp>
 #include <cstdint>
 #include <vector>
 
@@ -198,45 +197,4 @@ TEST_CASE("Frontend & Interp Safety - f32 comparisons IEEE 754") {
     Interpreter interp;
     RuntimeValue r = interp.run(*fn, {});
     CHECK_EQ(r.as_i32(), 1);
-}
-
-// 6. OSR backedge checking: cache lookup without rebuilding DominatorTree
-TEST_CASE("Frontend & Interp Safety - OSR backedge cache lookup") {
-    Module mod("osr_backedge_mod");
-    Function* fn = mod.create_function("loop_fn", Type::i64(), {});
-    Builder b(*fn);
-
-    BasicBlock* b_entry = b.append_block("entry");
-    BasicBlock* b_header = b.append_block("loop_header");
-    BasicBlock* b_body = b.append_block("loop_body");
-    BasicBlock* b_exit = b.append_block("exit");
-
-    b.position_at_end(b_entry);
-    b.build_br(b_header);
-
-    b.position_at_end(b_header);
-    Value* cond = b.build_iconst_i32(1);
-    b.build_br_if(cond, b_body, {}, b_exit, {});
-
-    b.position_at_end(b_body);
-    b.build_br(b_header);
-
-    b.position_at_end(b_exit);
-    b.build_ret(b.build_iconst_i64(0));
-
-    runtime::OsrCoordinator& coord = runtime::OsrCoordinator::instance();
-    coord.clear_cache();
-
-    // Loop body -> loop header is a backedge
-    CHECK(coord.is_loop_backedge(*fn, b_body, b_header));
-
-    // Subsequent lookups must return true from the cache
-    for (int i = 0; i < 10; ++i) {
-        CHECK(coord.is_loop_backedge(*fn, b_body, b_header));
-    }
-
-    // Non-backedges must return false
-    CHECK(!coord.is_loop_backedge(*fn, b_entry, b_header));
-    CHECK(!coord.is_loop_backedge(*fn, b_header, b_exit));
-    CHECK(!coord.is_loop_backedge(*fn, b_header, b_body));
 }

@@ -14,7 +14,7 @@
 #include <brass/vm/fast_interpreter.hpp>
 #include <brass/codegen/baseline_jit.hpp>
 #include <brass/codegen/jit_exec.hpp>
-#include <brass/gc/generational_gc.hpp>
+#include <brass/gc/heap.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/gc/native_frames.hpp>
 #include <brass/runtime/coroutine.hpp>

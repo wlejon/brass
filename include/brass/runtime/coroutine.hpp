@@ -1,6 +1,5 @@
 #pragma once
 
-#include <brass/gc/mini_cheney.hpp>
 #include <brass/interpreter/value.hpp>
 #include <cstdint>
 #include <cstddef>
@@ -128,9 +127,9 @@ private:
 };
 
 // Suspended coroutine frames are roots of the heap they were allocated in.
-// Each heap owns a registry of its frames (MiniCheneyGC, GenerationalGC and
-// HostGC each hold one; the installed HostHeap's frames share one, as do
-// frames allocated outside any heap), and a heap's entries go with it. A
+// Each gc::Heap owns a registry of its frames (frames allocated on a thread
+// with no heap share one and are never freed), and a heap's entries go with
+// it. A
 // frame leaves its registry when it finishes, when its body throws, or on
 // brass_coro_destroy. The set of registries is guarded by one lock, and each
 // registry's entries by its own: a heap's collection updates its entries in
@@ -156,8 +155,6 @@ class CoroFrameRegistry;
 // now. Called under the registry's lock, which the heap's collection holds.
 using CoroFrameHolds = std::function<bool(uintptr_t addr)>;
 std::shared_ptr<CoroFrameRegistry> make_coro_frame_registry(CoroFrameHolds holds);
-// The heap that owns `registry` moved (HostGC's move operations).
-void set_coro_frame_registry_holds(CoroFrameRegistry& registry, CoroFrameHolds holds);
 
 // Held by a heap's collection from gathering its coroutine roots
 // (append_active_coro_roots) until the last root slot is updated.
@@ -182,15 +179,6 @@ void visit_active_coro_frames(const std::function<void(uintptr_t*)>& visitor);
 // The unfinished frames of one heap, as root slots its collection updates
 // (under a CoroRootsLock on `registry`, held until the slots are updated).
 void append_active_coro_roots(CoroFrameRegistry& registry, std::vector<uintptr_t*>& roots);
-// The same for the installed HostHeap's frames (brass_enumerate_thread_roots).
-// The host's collector updates these slots after this returns, so the
-// registry's lock is held by a HostHeapCollectionScope (host_heap.hpp) the
-// collector opens around both; with none open on the calling thread this is
-// a hard error (std::logic_error).
-void append_host_heap_coro_roots(std::vector<uintptr_t*>& roots);
-// The lock a HostHeapCollectionScope holds: the HostHeap frames' registry.
-void lock_host_heap_coro_roots();
-void unlock_host_heap_coro_roots() noexcept;
 
 // A body that throws is finished, as a generator that threw is: its frame is
 // done (a later resume returns 0 without running it) and no longer a root.

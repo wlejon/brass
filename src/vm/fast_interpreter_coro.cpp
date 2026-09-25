@@ -33,6 +33,19 @@ uintptr_t FastInterpreter::coro_create_lowered(const Function& fn, const std::ve
     for (const RuntimeValue& a : args) arg_slots += coro_slot_count(a.type());
     const uint32_t slot_count = std::max(layout.slot_count, arg_slots);
 
+    // `args` are copies of this interpreter's registers, which the frame's
+    // allocation may move (it may collect): the gcref ones are roots of their
+    // own until they are stored in the frame.
+    std::vector<uint64_t> refs;
+    for (const RuntimeValue& a : args) {
+        if (a.is_gcref()) refs.push_back(static_cast<uint64_t>(a.raw_bits()));
+    }
+    ThreadRootsScope keep_refs([](void* ctx, std::vector<uintptr_t*>& roots) {
+        for (uint64_t& r : *static_cast<std::vector<uint64_t>*>(ctx)) {
+            roots.push_back(reinterpret_cast<uintptr_t*>(&r));
+        }
+    }, &refs);
+
     // No generated frame: this interpreter's roots reach the heap through
     // its scope and provider.
     // Its body is MIR (CORO_FLAG_MIR_BODY), which every tier can resume.
@@ -44,9 +57,12 @@ uintptr_t FastInterpreter::coro_create_lowered(const Function& fn, const std::ve
     // Arguments fill consecutive slots, a vector spanning coro_slot_count of
     // them, where the lowered body loads each.
     uint32_t slot = 0;
+    size_t ref = 0;
     for (const RuntimeValue& a : args) {
         if (a.is_vector()) {
             std::memcpy(&cf->slots[slot], a.vec_bytes(), a.is_v256() ? 32 : 16);
+        } else if (a.is_gcref()) {
+            cf->slots[slot] = refs[ref++];
         } else {
             cf->slots[slot] = static_cast<uint64_t>(a.raw_bits());
         }

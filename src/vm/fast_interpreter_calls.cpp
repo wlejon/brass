@@ -74,8 +74,8 @@ void FastInterpreter::register_external_function(std::string_view name, brass::H
 
 Interpreter& FastInterpreter::host_adapter_interpreter() {
     // brass::HostFn callbacks take an Interpreter; one is built on first
-    // use and shared by every such callback.
-    if (!host_adapter_) host_adapter_ = std::make_unique<Interpreter>(1024 * 1024);
+    // use and shared by every such callback. It allocates from this heap.
+    if (!host_adapter_) host_adapter_ = std::make_unique<Interpreter>(heap_);
     return *host_adapter_;
 }
 

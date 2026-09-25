@@ -3,8 +3,6 @@
 #include <brass/object/object_writer.hpp>
 #include <brass/object/coff_writer.hpp>
 #include <brass/object/elf_writer.hpp>
-#include <brass/mir/osr.hpp>
-#include <brass/mir/loop_opt.hpp>
 #include <stdexcept>
 
 namespace brass {
@@ -38,16 +36,6 @@ const runtime::FunctionResumeTable* CompiledModule::get_resume_table(std::string
 void* CompiledModule::get_resume_target_address(std::string_view fn_name, uint32_t resume_id) const {
     if (!jit_engine_) return nullptr;
     return jit_engine_->get_resume_target_address(fn_name, resume_id);
-}
-
-size_t CompiledModule::get_osr_entry_offset(std::string_view fn_name) const {
-    if (!jit_engine_) return 0;
-    return jit_engine_->get_osr_entry_offset(fn_name);
-}
-
-void* CompiledModule::get_osr_entry_address(std::string_view fn_name) const {
-    if (!jit_engine_) return nullptr;
-    return jit_engine_->get_osr_entry_address(fn_name);
 }
 
 const runtime::PatchRegistry& CompiledModule::patch_sites() const noexcept {
@@ -107,11 +95,11 @@ RuntimeValue CompiledModule::invoke(std::string_view name, const std::vector<Run
 }
 
 HostEngine::HostEngine()
-    : options_{Target::host(), true, false} {
+    : options_{Target::host(), true} {
 }
 
 HostEngine::HostEngine(const Target& target)
-    : options_{target, true, false} {
+    : options_{target, true} {
 }
 
 HostEngine::HostEngine(const EngineOptions& options)
@@ -122,13 +110,6 @@ void HostEngine::register_external_symbol(std::string_view name, void* address) 
     registered_symbols_[std::string(name)] = address;
 }
 
-void HostEngine::register_host_gc(HostGC* gc) {
-    attached_gc_ = gc;
-    if (gc) {
-        set_active_host_gc(gc);
-    }
-}
-
 std::unique_ptr<CompiledModule> HostEngine::compile(const Module& mod) {
     auto jit = std::make_unique<codegen::JitExecutionEngine>(options_.target);
 
@@ -137,30 +118,14 @@ std::unique_ptr<CompiledModule> HostEngine::compile(const Module& mod) {
         jit->register_external_symbol(name, addr);
     }
 
-    // Register HostGC and RuntimeGC runtime bridge symbols
-    if (attached_gc_ != nullptr) {
-        set_active_host_gc(attached_gc_);
-        jit->register_external_symbol("host_gc_safepoint", reinterpret_cast<void*>(&host_gc_safepoint));
-        jit->register_external_symbol("host_gc_alloc", reinterpret_cast<void*>(&host_gc_alloc));
-        jit->register_external_symbol("host_gc_alloc_nanbox", reinterpret_cast<void*>(&host_gc_alloc_nanbox));
-        jit->register_external_symbol("host_gc_collect", reinterpret_cast<void*>(&host_gc_collect));
-        jit->register_external_symbol("brass_gc_safepoint", reinterpret_cast<void*>(&host_gc_safepoint));
-        jit->register_external_symbol("brass_gc_alloc", reinterpret_cast<void*>(&host_gc_alloc));
-        jit->register_external_symbol("brass_gc_collect", reinterpret_cast<void*>(&host_gc_collect));
-    } else {
-        // Standard GC runtime symbols
-        jit->register_external_symbol("brass_gc_safepoint", reinterpret_cast<void*>(&brass_gc_safepoint));
-        jit->register_external_symbol("brass_gc_alloc", reinterpret_cast<void*>(&brass_gc_alloc));
-        jit->register_external_symbol("brass_gc_collect", reinterpret_cast<void*>(&brass_gc_collect));
-    }
+    // The collector's entry points, on the calling thread's current heap.
+    jit->register_external_symbol("brass_gc_safepoint", reinterpret_cast<void*>(&brass_gc_safepoint));
+    jit->register_external_symbol("brass_gc_alloc", reinterpret_cast<void*>(&brass_gc_alloc));
+    jit->register_external_symbol("brass_gc_collect", reinterpret_cast<void*>(&brass_gc_collect));
 
     bool ok = jit->compile_and_load(mod);
     if (!ok) {
         return nullptr;
-    }
-
-    if (attached_gc_ != nullptr) {
-        attached_gc_->set_stack_maps(&jit->stack_maps());
     }
 
     return std::make_unique<CompiledModule>(std::move(jit));
@@ -168,30 +133,6 @@ std::unique_ptr<CompiledModule> HostEngine::compile(const Module& mod) {
 
 std::unique_ptr<CompiledModule> HostEngine::compile(Module& mod) {
     return compile(const_cast<const Module&>(mod));
-}
-
-std::unique_ptr<CompiledModule> HostEngine::compile_with_osr(const Module& mod, std::string_view fn_name, uint32_t loop_header_id) {
-    Module osr_mod(mod.name());
-    osr_mod.set_allow_fp_reassociation(mod.allow_fp_reassociation());
-    osr_mod.copy_declarations_from(mod);
-    for (const auto* f : mod.functions()) {
-        Function* cloned = clone_function(*f, osr_mod);
-        if (cloned->name() == fn_name) {
-            BasicBlock* header = cloned->get_block_by_id(loop_header_id);
-            if (header) {
-                OsrTarget target = analyze_osr_target(*cloned, header);
-                Instruction* osr_inst = osr_mod.arena().make<Instruction>(Opcode::osr_entry, Type::void_type());
-                osr_inst->set_imm_i64(static_cast<int64_t>(loop_header_id));
-                for (Value* v : target.live_ins) {
-                    if (v) osr_inst->add_operand(v);
-                }
-                if (cloned->entry_block()) {
-                    cloned->entry_block()->prepend_instruction(osr_inst);
-                }
-            }
-        }
-    }
-    return compile(osr_mod);
 }
 
 bool HostEngine::compile_to_object(const Module& mod, const std::string& output_path) {

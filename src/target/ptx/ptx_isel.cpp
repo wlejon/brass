@@ -315,7 +315,6 @@ void PtxISel::lower_instruction(const brass::Instruction& inst) {
         case Opcode::safepoint:
         case Opcode::write_barrier:
         case Opcode::resume_point:
-        case Opcode::osr_entry:
             break;
 
         // Terminators

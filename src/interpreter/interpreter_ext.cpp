@@ -1,7 +1,5 @@
 #include <brass/interpreter/interpreter.hpp>
-#include <brass/gc/generational_gc.hpp>
 #include <brass/gc/runtime_gc.hpp>
-#include <brass/gc/host_heap.hpp>
 #include <brass/runtime/parallel_runtime.hpp>
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
@@ -16,11 +14,51 @@ thread_local runtime::ReductionKind s_interp_red_kind = runtime::ReductionKind::
 thread_local Interpreter* s_active_interp = nullptr;
 } // namespace
 
-Interpreter::ActiveScope::ActiveScope(Interpreter* interp) noexcept : prev(s_active_interp) {
+Interpreter::ActiveScope::ActiveScope(Interpreter* interp) noexcept
+    : prev(s_active_interp), prev_heap(gc::Heap::current()) {
     s_active_interp = interp;
+    gc::Heap::set_current(interp->heap_);
 }
 
-Interpreter::ActiveScope::~ActiveScope() { s_active_interp = prev; }
+Interpreter::ActiveScope::~ActiveScope() {
+    s_active_interp = prev;
+    gc::Heap::set_current(prev_heap);
+}
+
+namespace {
+void visit_interpreter_roots(gc::Tracer& tracer, void* context) {
+    std::vector<uintptr_t*> roots;
+    static_cast<Interpreter*>(context)->collect_all_roots(roots);
+    // A frame keeps every gcref-typed value it computed, derived ones
+    // included (MIR may leave one in a frame across a call it does not
+    // outlive): each is kept as an offset into its object.
+    for (uintptr_t* slot : roots) tracer.visit_derived(reinterpret_cast<uint64_t*>(slot));
+}
+} // namespace
+
+void Interpreter::attach_heap(gc::Heap* heap) {
+    heap_ = heap;
+    root_source_ = heap_->add_root_source(&visit_interpreter_roots, this);
+}
+
+void Interpreter::detach_heap() noexcept {
+    if (heap_) heap_->remove_root_source(root_source_);
+    heap_ = nullptr;
+    root_source_ = 0;
+}
+
+void Interpreter::use_heap(gc::Heap* heap) {
+    if (heap && heap == heap_) return;
+    if (!heap && own_heap_ && heap_ == own_heap_.get()) return;
+    detach_heap();
+    if (heap) {
+        own_heap_.reset();
+        attach_heap(heap);
+    } else {
+        if (!own_heap_) own_heap_ = std::make_unique<gc::Heap>();
+        attach_heap(own_heap_.get());
+    }
+}
 
 Interpreter* Interpreter::active_on_thread() noexcept { return s_active_interp; }
 
@@ -107,17 +145,7 @@ void Interpreter::register_builtin_host_functions() {
     });
 
     register_external_function("brass_gc_collect", [](Interpreter& interp, const std::vector<RuntimeValue>&) -> RuntimeValue {
-        if (auto* host = host_heap()) {
-            host->collect();
-            return RuntimeValue::from_void();
-        }
-        // A borrowed heap sees this interpreter's frames through the
-        // borrower's ThreadRootsScope (borrow_generational_gc).
-        if (GenerationalGC* gen = interp.borrowed_generational_gc()) {
-            gen->collect();
-            return RuntimeValue::from_void();
-        }
-        interp.gc().collect();
+        interp.heap().collect(gc::CollectionKind::Full);
         return RuntimeValue::from_void();
     });
 
@@ -224,11 +252,7 @@ void Interpreter::collect_all_roots(std::vector<uintptr_t*>& roots) {
 }
 
 uintptr_t Interpreter::allocate_gc(size_t size, uint64_t pointer_mask, uint32_t type_tag) {
-    if (host_heap()) return host_heap_allocate(size, pointer_mask, type_tag);
-    // A borrowed heap sees this interpreter's frames through the borrower's
-    // ThreadRootsScope, its own heap through its root provider.
-    if (borrowed_gen_gc_) return borrowed_gen_gc_->allocate(size, pointer_mask, type_tag);
-    return gc().allocate(size, pointer_mask, type_tag);
+    return heap_->allocate_masked(size, pointer_mask, type_tag);
 }
 
 void Interpreter::register_external_function(std::string_view name, HostFn fn) {

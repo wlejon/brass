@@ -10,9 +10,10 @@
 // starts in the interpreter, whose root provider sees only interpreter
 // frames: the native frames between it and the outer interpreter would keep
 // from-space addresses. Every such entry records the native frame that made
-// the call with a NativeFramesScope; every collector on the thread
-// (MiniCheneyGC, GenerationalGC) then walks each recorded run of native
-// frames with the code stack maps and reports their gcref slots as roots.
+// the call with a NativeFramesScope; the thread's gc::Heap (and a host
+// runtime's collector, through brass_enumerate_thread_roots) then walks each
+// recorded run of native frames with the code stack maps and reports their
+// gcref slots as roots.
 //
 // A walk starts at the recorded frame and goes upward as a safepoint walk
 // does; a slot reported twice (a run also reached by a safepoint's own walk)

@@ -175,7 +175,6 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
     // describe freed code.
     regs_.release();
     symbol_table_.clear();
-    osr_entry_offsets_.clear();
     stack_maps_ = ModuleStackMap{};
     resume_tables_.clear();
     patch_sites_.clear();
@@ -358,16 +357,12 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
             symbol_table_[sym.name] = sec_bases[sym.section_index] + sym.value;
         }
     }
-    osr_entry_offsets_.clear();
     std::unordered_map<std::string_view, const FunctionDebugTable*> debug_table_of;
     for (const auto& dt : working_obj.debug_tables) debug_table_of.emplace(dt.function_name(), &dt);
     for (const auto& fn : working_obj.functions) {
         int32_t text_idx = working_obj.get_section_index(".text");
         if (text_idx >= 0 && sec_bases[text_idx]) {
             symbol_table_[fn.name] = sec_bases[text_idx] + fn.text_offset;
-            if (fn.osr_entry_offset > 0) {
-                osr_entry_offsets_[fn.name] = fn.osr_entry_offset;
-            }
             LoadedFunction loaded;
             loaded.name = fn.name;
             loaded.code = sec_bases[text_idx] + fn.text_offset;
@@ -634,9 +629,9 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
     } else {
         regs_.text_base = module_base;
     }
-    // Loading code does not touch any thread's active maps (an OSR compile
-    // would retarget the compiling thread's GC at the OSR module alone): the
-    // code registry makes the maps found wherever the code runs.
+    // Loading code does not touch any thread's active maps (a background
+    // compile would retarget the compiling thread's GC at the new module
+    // alone): the code registry makes the maps found wherever the code runs.
     regs_.stack_maps = register_code_stack_maps(stack_maps_);
 
     // Register Resume Tables and Patch Sites
@@ -825,22 +820,6 @@ bool JitExecutionEngine::patch_call(std::string_view site_name, std::string_view
     void* target_addr = get_symbol_address(new_target_fn);
     if (!target_addr) return false;
     return patch_call(site_name, target_addr);
-}
-
-size_t JitExecutionEngine::get_osr_entry_offset(std::string_view fn_name) const {
-    auto it = osr_entry_offsets_.find(std::string(fn_name));
-    if (it != osr_entry_offsets_.end()) {
-        return it->second;
-    }
-    return 0;
-}
-
-void* JitExecutionEngine::get_osr_entry_address(std::string_view fn_name) const {
-    size_t off = get_osr_entry_offset(fn_name);
-    if (off == 0) return nullptr;
-    void* fn_addr = get_symbol_address(fn_name);
-    if (!fn_addr) return nullptr;
-    return reinterpret_cast<uint8_t*>(fn_addr) + off;
 }
 
 runtime::MultiTierPipeline* JitExecutionEngine::multi_tier_pipeline() noexcept {

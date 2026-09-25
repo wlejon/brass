@@ -243,13 +243,13 @@ using DeoptHandlerFn = std::function<void*(const DeoptFrame&)>;
 DeoptFrame* get_thread_deopt_frame() noexcept;
 void set_thread_deopt_frame(const DeoptFrame* frame) noexcept;
 // The calling thread's deopt handler: it handles guard failures of code
-// running on this thread only. Whoever installs one for a scope (an OSR
-// call) restores the previous one when the scope ends.
+// running on this thread only. Whoever installs one for a scope restores
+// the previous one when the scope ends.
 void register_deopt_handler(DeoptHandlerFn handler);
 DeoptHandlerFn get_deopt_handler();
 
 // Called by a deopt handler, before it returns, when the failing code is not
-// its own (an OSR call's handler seeing a guard of code outside its module).
+// its own (a handler scoped to one module seeing a guard of code outside it).
 // The deopt entry then does what it does with no handler installed: the
 // native code takes its exit stub, and a guard with none aborts. The
 // handler's return value is ignored.

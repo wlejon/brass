@@ -449,7 +449,8 @@ TEST_CASE("SROA - Zero GC Allocation Verification (Cheney GC total allocations r
     {
         Interpreter interp_baseline;
         RuntimeValue baseline_res = interp_baseline.run(*fn, {RuntimeValue::from_i64(100)});
-        CHECK(interp_baseline.gc().total_allocations() >= 100ULL);
+        // At least 100 objects of at least a header and a granule each.
+        CHECK(interp_baseline.heap().allocated_bytes() >= 100ULL * 16);
         CHECK_EQ(baseline_res.as_f64(), 29700.0); // sum of 6*i for i=0..99: 6 * (99*100/2) = 29700.0
     }
 
@@ -471,6 +472,6 @@ TEST_CASE("SROA - Zero GC Allocation Verification (Cheney GC total allocations r
         Interpreter interp_sroa;
         RuntimeValue sroa_res = interp_sroa.run(*fn, {RuntimeValue::from_i64(100)});
         CHECK_EQ(sroa_res.as_f64(), 29700.0);
-        CHECK_EQ(interp_sroa.gc().total_allocations(), 0ULL);
+        CHECK_EQ(interp_sroa.heap().allocated_bytes(), 0ULL);
     }
 }
