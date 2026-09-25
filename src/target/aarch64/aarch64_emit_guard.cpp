@@ -9,6 +9,57 @@ namespace brass::aarch64 {
 
 using namespace brass::codegen;
 
+namespace {
+
+// Where each state value goes when a guard's exit stub is called as
+// stub(state values...): X0-X7 and V0-V7 fill independently, and the rest
+// go on the stack in an 8-byte slot each, or on Apple at their natural size
+// and alignment (aarch64_isel.cpp's parameter lowering). The verifier
+// matched the stub's parameters to the state values, so each value's kind
+// picks its class and its operand its size.
+struct ExitStubArgLoc {
+    bool is_float = false;
+    int reg = -1;           // register index, or -1 for a stack argument
+    uint32_t stack_off = 0; // from SP at the call
+    uint8_t size = 8;       // bytes stored on the stack
+};
+
+struct ExitStubArgPlan {
+    std::vector<ExitStubArgLoc> locs;
+    // Bytes at the bottom of the guard exit's allocation for the stack
+    // arguments; a multiple of 16.
+    size_t out_area = 0;
+};
+
+ExitStubArgPlan plan_exit_stub_args(const LirInst& inst, bool apple) {
+    ExitStubArgPlan plan;
+    const size_t n = inst.deopt_kinds.size();
+    plan.locs.resize(n);
+    int gprs = 0, fprs = 0;
+    uint32_t stack = 0;
+    for (size_t i = 0; i < n; ++i) {
+        const auto kind = static_cast<runtime::DeoptValueKind>(inst.deopt_kinds[i]);
+        ExitStubArgLoc& loc = plan.locs[i];
+        loc.is_float = kind == runtime::DeoptValueKind::Float32 || kind == runtime::DeoptValueKind::Float64;
+        int& used = loc.is_float ? fprs : gprs;
+        if (used < 8) {
+            loc.reg = used++;
+            continue;
+        }
+        uint32_t sz = inst.uses[i].size;
+        if (sz != 1 && sz != 2 && sz != 4) sz = 8;
+        const uint32_t align = apple ? sz : 8;
+        stack = (stack + align - 1) & ~(align - 1);
+        loc.stack_off = stack;
+        loc.size = static_cast<uint8_t>(apple ? sz : 8);
+        stack += loc.size;
+    }
+    plan.out_area = (static_cast<size_t>(stack) + 15) & ~size_t(15);
+    return plan;
+}
+
+} // namespace
+
 // SP -= bytes (allocate) or SP += bytes (release) in one instruction that
 // writes SP: an immediate add/sub encodes 12 bits, optionally shifted by 12,
 // and a larger amount is formed in X16 first (a split immediate would move
@@ -32,6 +83,8 @@ void AArch64EmitContext::move_sp_for_guard_exit(bool allocate, size_t bytes) {
 // exactly as the x64 guard exit does. Spilled state values are read straight
 // from their frame-pointer-relative slots, so any number of them can be
 // spilled. X16 carries each value, X17 an out-of-range record address.
+// Below the record, in the same allocation, is the outgoing area of the
+// exit stub's stack arguments: SP moves once for both.
 void AArch64EmitContext::emit_guard_exit(const LirInst& inst) {
     const size_t num_uses = inst.uses.size();
     if (inst.deopt_kinds.size() != num_uses) {
@@ -42,7 +95,10 @@ void AArch64EmitContext::emit_guard_exit(const LirInst& inst) {
     const size_t header_bytes = runtime::DeoptExitRecord::kSlotsOffset;
     const size_t slots_bytes = num_uses * 8;
     const size_t kinds_bytes = (num_uses + 7) & ~size_t(7);
-    const size_t total_alloc = (header_bytes + slots_bytes + kinds_bytes + 15) & ~size_t(15);
+    const bool apple = fn_.calling_conv.kind() == CallingConvKind::AppleAAPCS64;
+    const ExitStubArgPlan plan = has_exit_symbol ? plan_exit_stub_args(inst, apple) : ExitStubArgPlan{};
+    const size_t rec_off = plan.out_area;
+    const size_t total_alloc = (rec_off + header_bytes + slots_bytes + kinds_bytes + 15) & ~size_t(15);
     // add/sub immediates split into two 12-bit halves reach 16 MiB without a
     // scratch register (X16 holds the value being stored).
     if (total_alloc > 0x00FF0000u) {
@@ -61,12 +117,14 @@ void AArch64EmitContext::emit_guard_exit(const LirInst& inst) {
     }
     move_sp_for_guard_exit(true, total_alloc);
 
-    // The record sits at SP. Offsets past the scaled 12-bit range go through X17.
-    auto record_mem = [&](size_t off) -> MemAddress {
-        if (off % 8 == 0 && off / 8 <= 4095) return ptr(GPR::SP, static_cast<int64_t>(off));
+    // The record sits at SP + rec_off, the stack arguments at SP. Offsets
+    // past the scaled 12-bit range go through X17.
+    auto sp_mem = [&](size_t off, size_t size) -> MemAddress {
+        if (off % size == 0 && off / size <= 4095) return ptr(GPR::SP, static_cast<int64_t>(off));
         enc_.add(GPR::X17, GPR::SP, static_cast<uint32_t>(off));
         return ptr(GPR::X17, 0);
     };
+    auto record_mem = [&](size_t off) -> MemAddress { return sp_mem(rec_off + off, 8); };
 
     for (size_t i = 0; i < num_uses; ++i) {
         const auto& op = inst.uses[i];
@@ -124,33 +182,14 @@ void AArch64EmitContext::emit_guard_exit(const LirInst& inst) {
     // Header: code_entry (this function's own entry, the key its resumer is
     // registered under), resume id, reason, count, flags.
     enc_.load_symbol_address(GPR::X16, fn_.name);
-    enc_.str(GPR::X16, ptr(GPR::SP, 0));
+    enc_.str(GPR::X16, record_mem(0));
     enc_.mov(GPR::X16, (static_cast<uint64_t>(rsn) << 32) | rid);
-    enc_.str(GPR::X16, ptr(GPR::SP, 8));
+    enc_.str(GPR::X16, record_mem(8));
     enc_.mov(GPR::X16, (static_cast<uint64_t>(flags) << 32) | cnt);
-    enc_.str(GPR::X16, ptr(GPR::SP, 16));
+    enc_.str(GPR::X16, record_mem(16));
 
-    // Exit stub arguments (AAPCS64 registers only; the verifier matched the
-    // stub's parameters to the state values, so each kind picks its class).
-    struct ArgReg {
-        bool is_float;
-        uint8_t reg;
-    };
-    std::vector<ArgReg> stub_args;
-    if (has_exit_symbol) {
-        uint8_t gprs = 0, fprs = 0;
-        for (size_t i = 0; i < num_uses; ++i) {
-            const auto kind = static_cast<runtime::DeoptValueKind>(inst.deopt_kinds[i]);
-            const bool is_float = kind == runtime::DeoptValueKind::Float32 || kind == runtime::DeoptValueKind::Float64;
-            uint8_t& used = is_float ? fprs : gprs;
-            if (used >= 8) {
-                throw_unsupported("aarch64 emit (guard exit)", "exit stub with stack-passed arguments");
-            }
-            stub_args.push_back({is_float, used++});
-        }
-    }
-
-    enc_.mov(GPR::X0, GPR::SP);
+    if (rec_off == 0) enc_.mov(GPR::X0, GPR::SP);
+    else enc_.add(GPR::X0, GPR::SP, static_cast<uint32_t>(rec_off));
     enc_.bl("brass_deopt_exit_record");
 
     // Handled: X0 points at the lower tier's result bits for this frame.
@@ -169,13 +208,29 @@ void AArch64EmitContext::emit_guard_exit(const LirInst& inst) {
     if (has_exit_symbol) {
         // No handler or resumer: the exit stub finishes the call, called as
         // stub(state values...) with the values read back from the record
-        // (still at SP). Its return registers are the function's.
+        // (still on the stack). A slot holds a float in its low bits and a
+        // narrow integer sign-extended, so a stack argument is its low
+        // bytes. Its return registers are the function's.
         for (size_t i = 0; i < num_uses; ++i) {
+            const ExitStubArgLoc& loc = plan.locs[i];
+            if (loc.reg >= 0) continue;
+            enc_.ldr(GPR::X16, record_mem(header_bytes + i * 8));
+            const MemAddress dst = sp_mem(loc.stack_off, loc.size);
+            switch (loc.size) {
+                case 1: enc_.strb(GPR::X16, dst); break;
+                case 2: enc_.strh(GPR::X16, dst); break;
+                case 4: enc_.str32(GPR::X16, dst); break;
+                default: enc_.str(GPR::X16, dst); break;
+            }
+        }
+        for (size_t i = 0; i < num_uses; ++i) {
+            const ExitStubArgLoc& loc = plan.locs[i];
+            if (loc.reg < 0) continue;
             const MemAddress src = record_mem(header_bytes + i * 8);
-            if (stub_args[i].is_float) {
-                enc_.ldr(static_cast<FPR>(stub_args[i].reg), src);
+            if (loc.is_float) {
+                enc_.ldr(static_cast<FPR>(loc.reg), src);
             } else {
-                enc_.ldr(static_cast<GPR>(stub_args[i].reg), src);
+                enc_.ldr(static_cast<GPR>(loc.reg), src);
             }
         }
         enc_.bl(inst.exit_symbol);

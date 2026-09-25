@@ -25,12 +25,29 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+// The walk is made with the platform's unwinder: .pdata on Windows x64, the
+// DWARF unwind info generated code registers elsewhere (AArch64 exit stubs
+// take stack arguments past x7 / d7).
 #if defined(_WIN32) && (defined(_M_X64) || defined(__x86_64__))
 #define S31_WIN64_WALK 1
+#define S31_WALK 1
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
+#elif !defined(_WIN32) && (defined(__x86_64__) || defined(__aarch64__))
+#define S31_WALK 1
+#if defined(__APPLE__)
+#include <libunwind.h>
+#else
+#include <unwind.h>
+#endif
+#endif
+
+#if defined(_MSC_VER)
+#define S31_NOINLINE __declspec(noinline)
+#else
+#define S31_NOINLINE __attribute__((noinline))
 #endif
 
 using namespace brass;
@@ -46,7 +63,7 @@ std::unique_ptr<Module> parse_ok(const std::string& src) {
     return mod;
 }
 
-#if defined(S31_WIN64_WALK)
+#if defined(S31_WALK)
 
 // @g's guard fails for x >= 1000 and exits to @gs with `nstate` state values
 // (nstate - 1 copies of %x, then %p). @gs calls the host function %p(x).
@@ -76,10 +93,11 @@ std::string guard_exit_src(int nstate) {
 }
 
 uintptr_t g_limit_rsp = 0;  // an address in s31_call_main's frame
-DWORD64 g_main_lo = 0, g_main_hi = 0;
+uintptr_t g_main_lo = 0, g_main_hi = 0;
 bool g_walk_ok = false;
 bool g_cpp_throw = false;
 
+#if defined(S31_WIN64_WALK)
 // Unwinds from here through .pdata and checks it reaches s31_call_main with
 // an RSP below that frame's locals.
 extern "C" __declspec(noinline) int64_t s31_host_walk(int64_t x) {
@@ -102,10 +120,59 @@ extern "C" __declspec(noinline) int64_t s31_host_walk(int64_t x) {
     if (g_cpp_throw) throw std::runtime_error("s31 host exception");
     return x * 7;
 }
+#elif defined(__APPLE__)
+// Unwinds from here with the DWARF unwind info and checks it reaches
+// s31_call_main with an SP below that frame's locals.
+extern "C" S31_NOINLINE int64_t s31_host_walk(int64_t x) {
+    g_walk_ok = false;
+    unw_context_t uc;
+    unw_cursor_t cur;
+    if (unw_getcontext(&uc) == 0 && unw_init_local(&cur, &uc) == 0) {
+        for (int depth = 0; depth < 64 && unw_step(&cur) > 0; ++depth) {
+            unw_proc_info_t info;
+            if (unw_get_proc_info(&cur, &info) != 0) break;  // every frame here is described
+            if (info.start_ip == g_main_lo) {
+                unw_word_t sp = 0;
+                g_walk_ok = unw_get_reg(&cur, UNW_REG_SP, &sp) == 0 && sp < g_limit_rsp;
+                break;
+            }
+        }
+    }
+    if (g_cpp_throw) throw std::runtime_error("s31 host exception");
+    return x * 7;
+}
+#else
+struct S31Walk {
+    int depth = 0;
+    uintptr_t callee_cfa = 0;  // the callee frame's CFA: this frame's SP
+};
+
+_Unwind_Reason_Code s31_walk_frame(struct _Unwind_Context* ctx, void* arg) {
+    auto* w = static_cast<S31Walk*>(arg);
+    const uintptr_t start = reinterpret_cast<uintptr_t>(
+        _Unwind_FindEnclosingFunction(reinterpret_cast<void*>(_Unwind_GetIP(ctx))));
+    if (start == g_main_lo) {
+        g_walk_ok = w->callee_cfa != 0 && w->callee_cfa < g_limit_rsp;
+        return _URC_END_OF_STACK;
+    }
+    w->callee_cfa = static_cast<uintptr_t>(_Unwind_GetCFA(ctx));
+    return ++w->depth < 64 ? _URC_NO_REASON : _URC_END_OF_STACK;
+}
+
+// Unwinds from here with the DWARF unwind info and checks it reaches
+// s31_call_main with an SP below that frame's locals.
+extern "C" S31_NOINLINE int64_t s31_host_walk(int64_t x) {
+    g_walk_ok = false;
+    S31Walk w;
+    _Unwind_Backtrace(&s31_walk_frame, &w);
+    if (g_cpp_throw) throw std::runtime_error("s31 host exception");
+    return x * 7;
+}
+#endif
 
 using MainFn = int64_t (*)(int64_t, const void*);
 
-__declspec(noinline) int64_t s31_call_main(MainFn f, int64_t x) {
+S31_NOINLINE int64_t s31_call_main(MainFn f, int64_t x) {
     volatile int marker = 0;
     g_limit_rsp = reinterpret_cast<uintptr_t>(&marker);
     int64_t r = f(x, reinterpret_cast<const void*>(&s31_host_walk));
@@ -115,12 +182,16 @@ __declspec(noinline) int64_t s31_call_main(MainFn f, int64_t x) {
 // Compiles the module natively (no tiering, no deopt handler: the failing
 // guard calls its exit stub) and runs `entry`(1500).
 void run_guard_exit(int nstate, const char* entry, bool cpp_throw) {
+#if defined(S31_WIN64_WALK)
     DWORD64 base = 0;
     const DWORD64 addr = reinterpret_cast<DWORD64>(&s31_call_main);
     PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(addr, &base, nullptr);
     REQUIRE(fe != nullptr);
     g_main_lo = base + fe->BeginAddress;
     g_main_hi = base + fe->EndAddress;
+#else
+    g_main_lo = reinterpret_cast<uintptr_t>(&s31_call_main);
+#endif
     g_cpp_throw = cpp_throw;
 
     auto mod = parse_ok(guard_exit_src(nstate));
@@ -148,17 +219,19 @@ void run_guard_exit(int nstate, const char* entry, bool cpp_throw) {
 
 } // namespace
 
-#if defined(S31_WIN64_WALK)
+#if defined(S31_WALK)
 
 TEST_CASE("Sweep31 - an exit stub with stack arguments unwinds to its native caller (walk5)") {
     run_guard_exit(4, "main", false);
     run_guard_exit(5, "main", false);
     run_guard_exit(7, "main", false);
+    run_guard_exit(10, "main", false);  // AArch64: x0-x7, then the stack
 }
 
 TEST_CASE("Sweep31 - a C++ exception from an exit stub with stack arguments reaches the host (cpp5)") {
     run_guard_exit(5, "main", true);
     run_guard_exit(7, "main", true);
+    run_guard_exit(10, "main", true);
 }
 
 TEST_CASE("Sweep31 - the second guard of a function unwinds with stack arguments too (two5)") {

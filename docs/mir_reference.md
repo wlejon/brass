@@ -121,7 +121,7 @@ A guard with an exit stub always takes the stub, even when it also has a resume 
 | Tier 2, with a pipeline resumer or deopt handler (OSR) | the lower tier finishes the call and takes the same exits as the interpreter, in the same order | the same | the resumer or handler handles it; with neither, a fatal error |
 | Tier 2, standalone (no resumer and no handler) | native call `stub(v...)`; the stub's return registers are the function's | fatal error: nothing can resume the frame | fatal error |
 
-Tier 2 rejects a guard in a function that returns a vector, because a lower tier returns its result as one 64-bit word. On AArch64, tier 2 passes stub arguments only in registers (x0-x7 and d0-d7), and a stub that needs stack arguments is a compile error.
+Tier 2 rejects a guard in a function that returns a vector, because a lower tier returns its result as one 64-bit word. Arguments past the registers go on the stack as for any call, on AArch64 as on x64.
 
 ### Terminators
 - `br <target_block>(<args...>)`
