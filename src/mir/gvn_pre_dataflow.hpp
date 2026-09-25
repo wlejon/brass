@@ -128,7 +128,18 @@ public:
         const Instruction* exemplar
     ) const;
 
+    // The block-local facts for a block with an event, or the default for one
+    // without. Its `transp` is only meaningful for the former: ask
+    // `is_transparent`, which also answers for a block a load's writers make
+    // opaque without an event of its own.
     const BlockLocalInfo& get_local_info(const BasicBlock* bb) const;
+    bool is_transparent(const BasicBlock* bb) const;
+
+    // The blocks the current expression is anticipated at the entry of, in
+    // block order: every block the partial-redundancy step can act at.
+    std::vector<BasicBlock*> anticipated_blocks() const;
+    // The blocks holding an evaluation of the current expression.
+    std::vector<BasicBlock*> evaluation_blocks() const;
 
 private:
     void compute_local_info(const PreExpression& expr, const Instruction* exemplar);
@@ -140,23 +151,53 @@ private:
     static constexpr uint32_t kNoBlock = ~uint32_t{0};
     uint32_t ordinal(const BasicBlock* bb) const noexcept;
 
+    // Whether the current expression passes through block `o` unchanged:
+    // the replayed facts for a block with an event, and otherwise — for a
+    // load — whether none of the block's writers can clobber it, found on the
+    // first question and remembered for the rest of the expression.
+    bool transparent(uint32_t o) const;
+    static constexpr uint8_t kOpacityUnknown = 0;
+    static constexpr uint8_t kTransparent = 1;
+    static constexpr uint8_t kOpaque = 2;
+
     Function& fn_;
     const DominatorTree& dom_;
     const AliasAnalysis& aa_;
     const PreFunctionIndex& index_;
 
-    // Per block ordinal. `local_info_` is reset only where the previous
-    // expression touched it (`touched_`); the dataflow vectors are rewritten
-    // in full, since every block takes part in them.
+    // Per block ordinal, and SPARSE: every vector below is reset only where
+    // the previous expression set it (`touched_`, `ant_set_`, `avail_set_`),
+    // and the dataflow visits only the blocks an expression's events can
+    // reach. Sweeping every block per expression made the pass
+    // candidates x blocks, which on a function of eight thousand blocks and
+    // eighty thousand instructions — a bundled library's top level — was
+    // twenty-five seconds of a one-minute compile.
     std::vector<BlockLocalInfo> local_info_;
     std::vector<uint32_t> touched_;
+    std::vector<uint8_t> is_touched_;
+    mutable std::vector<uint8_t> opacity_;
+    mutable std::vector<uint32_t> opacity_set_;
+    bool track_memory_ = false;
+    const Instruction* exemplar_ = nullptr;
+    // Per underlying base, the blocks holding a store off it, in block order:
+    // the only stores that can MUST-alias a load off the same base.
+    std::unordered_map<const Value*, std::vector<uint32_t>> stores_by_base_;
     std::vector<uint8_t> ant_in_;
-    std::vector<uint8_t> ant_out_;
+    std::vector<uint32_t> ant_set_;
     std::vector<Value*> avail_at_exit_;
+    std::vector<uint32_t> avail_set_;
+    // Blocks from which no path reaches a block without successors. The
+    // greatest fixpoint anticipates a transparent one of these vacuously, so
+    // they join every expression's candidate set; there are few.
+    std::vector<uint32_t> no_exit_blocks_;
     // Per block ordinal, the successor and predecessor ordinals, so the
     // fixpoint sweeps index vectors and never touch a pointer map.
     std::vector<std::vector<uint32_t>> succs_;
     std::vector<std::vector<uint32_t>> preds_;
+    // `succs_` reversed: the blocks listing this one as a successor. What
+    // anticipation walks backwards over, so it reads the edges it propagates
+    // along rather than the predecessor lists availability uses.
+    std::vector<std::vector<uint32_t>> succ_of_;
     std::vector<bool> pred_has_unknown_;  // a null predecessor: never all-same
     BlockLocalInfo default_local_info_;
 };

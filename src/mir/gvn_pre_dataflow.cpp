@@ -253,9 +253,21 @@ PreDataflow::PreDataflow(
 ) : fn_(fn), dom_(dom), aa_(aa), index_(index) {
     const size_t n = index_.blocks.size();
     local_info_.resize(n);
-    ant_in_.assign(n, 1);
-    ant_out_.assign(n, 1);
+    is_touched_.assign(n, 0);
+    opacity_.assign(n, kOpacityUnknown);
+    ant_in_.assign(n, 0);
     avail_at_exit_.assign(n, nullptr);
+    for (uint32_t o = 0; o < n; ++o) {
+        for (const auto& w : index_.memory_writers[o]) {
+            const Opcode op = w.inst->opcode();
+            if (op != Opcode::store && op != Opcode::vstore) continue;
+            int64_t ignored = 0;
+            const Value* base = aa_.get_underlying_base(w.inst->operand(0), ignored);
+            if (!base) continue;
+            auto& blocks = stores_by_base_[base];
+            if (blocks.empty() || blocks.back() != o) blocks.push_back(o);
+        }
+    }
     succs_.resize(n);
     preds_.resize(n);
     pred_has_unknown_.assign(n, false);
@@ -275,6 +287,35 @@ PreDataflow::PreDataflow(
             }
         }
     }
+
+    // Which blocks reach an exit along the edges anticipation reads
+    // (`succs_`), found backwards from the exits over those same edges.
+    std::vector<std::vector<uint32_t>>& into = succ_of_;
+    into.resize(n);
+    for (uint32_t i = 0; i < n; ++i) {
+        for (uint32_t s : succs_[i]) into[s].push_back(i);
+    }
+    std::vector<uint8_t> reaches_exit(n, 0);
+    std::vector<uint32_t> work;
+    for (uint32_t i = 0; i < n; ++i) {
+        if (index_.blocks[i]->successors().empty()) {
+            reaches_exit[i] = 1;
+            work.push_back(i);
+        }
+    }
+    while (!work.empty()) {
+        const uint32_t b = work.back();
+        work.pop_back();
+        for (uint32_t p : into[b]) {
+            if (!reaches_exit[p]) {
+                reaches_exit[p] = 1;
+                work.push_back(p);
+            }
+        }
+    }
+    for (uint32_t i = 0; i < n; ++i) {
+        if (!reaches_exit[i]) no_exit_blocks_.push_back(i);
+    }
 }
 
 uint32_t PreDataflow::ordinal(const BasicBlock* bb) const noexcept {
@@ -284,8 +325,13 @@ uint32_t PreDataflow::ordinal(const BasicBlock* bb) const noexcept {
 }
 
 void PreDataflow::analyze_expression(const PreExpression& expr, const Instruction* exemplar) {
-    for (uint32_t o : touched_) local_info_[o] = BlockLocalInfo{};
+    for (uint32_t o : touched_) {
+        local_info_[o] = BlockLocalInfo{};
+        is_touched_[o] = 0;
+    }
     touched_.clear();
+    for (uint32_t o : opacity_set_) opacity_[o] = kOpacityUnknown;
+    opacity_set_.clear();
 
     compute_local_info(expr, exemplar);
     compute_anticipation();
@@ -331,6 +377,8 @@ void PreDataflow::compute_local_info(const PreExpression& expr, const Instructio
     });
 
     const bool track_memory = expr.is_load() && exemplar;
+    track_memory_ = track_memory;
+    exemplar_ = exemplar;
 
     // One block's events, replayed.
     BlockLocalInfo info;
@@ -386,6 +434,7 @@ void PreDataflow::compute_local_info(const PreExpression& expr, const Instructio
     auto end_block = [&](uint32_t block) {
         local_info_[block] = std::move(info);
         touched_.push_back(block);
+        is_touched_[block] = 1;
     };
 
     size_t s = 0;  // cursor into `sparse`
@@ -399,15 +448,34 @@ void PreDataflow::compute_local_info(const PreExpression& expr, const Instructio
         return;
     }
 
-    // A load: every block with a memory writer takes part, merged with that
-    // block's sparse events by position (sparse first on a tie, which is
-    // the kill-before-clobber rule above; an evaluation never shares a
-    // position with a writer).
-    const size_t n = index_.blocks.size();
-    for (uint32_t block = 0; block < n; ++block) {
+    // A load. The blocks replayed in full are the ones with an event and the
+    // ones holding a store that can MUST-alias it — a store off the same
+    // underlying base, since that is the only way `alias` answers MustAlias —
+    // because a must-alias store makes the load available without evaluating
+    // it. Any other writer can only clobber, which makes its block opaque and
+    // nothing else; that is asked lazily (`is_transparent`), for the blocks
+    // the dataflow actually reaches. Replaying every block with a writer made
+    // each load cost the whole function's writers: in a large function, where
+    // nearly every block calls something, that was the pass's entire cost.
+    //
+    // Writers merge with a block's sparse events by position (sparse first on
+    // a tie, which is the kill-before-clobber rule above; an evaluation never
+    // shares a position with a writer).
+    std::vector<uint32_t> active;
+    for (const Event& e : sparse) {
+        if (active.empty() || active.back() != e.block) active.push_back(e.block);
+    }
+    if (expr.op0 != nullptr) {
+        int64_t ignored = 0;
+        const Value* base = aa_.get_underlying_base(expr.op0, ignored);
+        if (const auto it = stores_by_base_.find(base); base && it != stores_by_base_.end()) {
+            active.insert(active.end(), it->second.begin(), it->second.end());
+            std::sort(active.begin(), active.end());
+            active.erase(std::unique(active.begin(), active.end()), active.end());
+        }
+    }
+    for (const uint32_t block : active) {
         const auto& writers = index_.memory_writers[block];
-        const bool has_sparse = s < sparse.size() && sparse[s].block == block;
-        if (writers.empty() && !has_sparse) continue;
         begin_block();
         size_t w = 0;
         while (w < writers.size() || (s < sparse.size() && sparse[s].block == block)) {
@@ -425,80 +493,140 @@ void PreDataflow::compute_local_info(const PreExpression& expr, const Instructio
     }
 }
 
+// AntIn(b)  = ant_loc(b) || (transp(b) && AntOut(b))
+// AntOut(b) = b has successors && every successor has AntIn
+// as a GREATEST fixpoint, computed on a superset of the blocks that can come
+// out true rather than on every block.
+//
+// The superset: a block anticipating the expression without evaluating it is
+// transparent, and so is every block on a path from it until that path meets
+// an evaluation — which it must, before any exit, because an exit anticipates
+// only what it evaluates. So the block is found walking BACKWARDS from the
+// evaluating blocks through transparent ones. The one other way to be true is
+// vacuous: a transparent block with no path to an exit at all (an endless
+// loop), which the walk may miss; those are `no_exit_blocks_`, added outright.
+// Every block outside the superset is false, exactly as the dense sweep found
+// it, and inside it the fixpoint runs as before, from true downwards.
 void PreDataflow::compute_anticipation() {
-    // Initialize: AntIn and AntOut default to true, except exit blocks
-    const size_t n = index_.blocks.size();
-    std::fill(ant_in_.begin(), ant_in_.end(), uint8_t{1});
-    std::fill(ant_out_.begin(), ant_out_.end(), uint8_t{1});
+    for (uint32_t o : ant_set_) ant_in_[o] = 0;
+    ant_set_.clear();
 
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (size_t i = n; i-- > 0;) {
-            uint8_t new_out = 1;
-            if (index_.blocks[i]->successors().empty()) {
-                new_out = 0;
-            } else {
-                for (uint32_t succ : succs_[i]) {
-                    if (!ant_in_[succ]) {
-                        new_out = 0;
-                        break;
-                    }
-                }
+    std::vector<uint32_t> work;
+    auto admit = [&](uint32_t o) {
+        if (ant_in_[o]) return;
+        ant_in_[o] = 1;
+        ant_set_.push_back(o);
+        work.push_back(o);
+    };
+    for (uint32_t o : touched_) {
+        if (local_info_[o].ant_loc) admit(o);
+    }
+    for (uint32_t o : no_exit_blocks_) {
+        if (local_info_[o].ant_loc || transparent(o)) admit(o);
+    }
+    while (!work.empty()) {
+        const uint32_t b = work.back();
+        work.pop_back();
+        for (uint32_t p : succ_of_[b]) {
+            if (local_info_[p].ant_loc || transparent(p)) admit(p);
+        }
+    }
+
+    // Downwards from true: a block falls when an exit or a false successor
+    // leaves nothing to anticipate below it, and its predecessors in the set
+    // are looked at again.
+    work = ant_set_;
+    while (!work.empty()) {
+        const uint32_t b = work.back();
+        work.pop_back();
+        if (!ant_in_[b] || local_info_[b].ant_loc) continue;
+        bool out = !index_.blocks[b]->successors().empty();
+        for (uint32_t s : succs_[b]) {
+            if (!out) break;
+            out = ant_in_[s] != 0;
+        }
+        if (out) continue;
+        ant_in_[b] = 0;
+        for (uint32_t p : succ_of_[b]) {
+            if (ant_in_[p] && !local_info_[p].ant_loc) work.push_back(p);
+        }
+    }
+    ant_set_.erase(std::remove_if(ant_set_.begin(), ant_set_.end(),
+                                  [&](uint32_t o) { return ant_in_[o] == 0; }),
+                   ant_set_.end());
+    std::sort(ant_set_.begin(), ant_set_.end());
+}
+
+// Forward across transparent blocks: a block without its own value takes the
+// one every predecessor agrees on. Only blocks downstream of a block that
+// makes the value available can take one, so the walk starts there. A block's
+// value, once set, never changes (it would need a predecessor's to change
+// first), so the order blocks are visited in cannot matter.
+void PreDataflow::compute_availability() {
+    for (uint32_t o : avail_set_) avail_at_exit_[o] = nullptr;
+    avail_set_.clear();
+
+    std::vector<uint32_t> work;
+    for (uint32_t o : touched_) {
+        const BlockLocalInfo& info = local_info_[o];
+        if (info.avail_loc && info.avail_val) {
+            avail_at_exit_[o] = info.avail_val;
+            avail_set_.push_back(o);
+            work.insert(work.end(), succs_[o].begin(), succs_[o].end());
+        }
+    }
+    while (!work.empty()) {
+        const uint32_t i = work.back();
+        work.pop_back();
+        if (local_info_[i].avail_loc) continue;
+        if (!transparent(i)) continue;
+        if (index_.blocks[i]->predecessors().empty()) continue;
+        if (pred_has_unknown_[i]) continue;
+
+        Value* common_val = nullptr;
+        bool all_same = true;
+        for (uint32_t pred : preds_[i]) {
+            Value* v = avail_at_exit_[pred];
+            if (v == nullptr) {
+                all_same = false;
+                break;
             }
-
-            const BlockLocalInfo& info = local_info_[i];
-            const uint8_t new_in = (info.ant_loc || (info.transp && new_out)) ? 1 : 0;
-
-            if (new_in != ant_in_[i] || new_out != ant_out_[i]) {
-                ant_in_[i] = new_in;
-                ant_out_[i] = new_out;
-                changed = true;
+            if (!common_val) {
+                common_val = v;
+            } else if (common_val != v) {
+                all_same = false;
+                break;
             }
+        }
+
+        if (all_same && common_val && avail_at_exit_[i] != common_val) {
+            if (avail_at_exit_[i] == nullptr) avail_set_.push_back(i);
+            avail_at_exit_[i] = common_val;
+            work.insert(work.end(), succs_[i].begin(), succs_[i].end());
         }
     }
 }
 
-void PreDataflow::compute_availability() {
-    const size_t n = index_.blocks.size();
-    for (size_t i = 0; i < n; ++i) {
-        const BlockLocalInfo& info = local_info_[i];
-        avail_at_exit_[i] = (info.avail_loc && info.avail_val) ? info.avail_val : nullptr;
-    }
-
-    // Forward propagation across transparent blocks
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (size_t i = 0; i < n; ++i) {
-            const BlockLocalInfo& info = local_info_[i];
-            if (info.avail_loc) continue;
-            if (!info.transp) continue;
-            if (index_.blocks[i]->predecessors().empty()) continue;
-            if (pred_has_unknown_[i]) continue;
-
-            Value* common_val = nullptr;
-            bool all_same = true;
-            for (uint32_t pred : preds_[i]) {
-                Value* v = avail_at_exit_[pred];
-                if (v == nullptr) {
-                    all_same = false;
-                    break;
-                }
-                if (!common_val) {
-                    common_val = v;
-                } else if (common_val != v) {
-                    all_same = false;
-                    break;
-                }
-            }
-
-            if (all_same && common_val && avail_at_exit_[i] != common_val) {
-                avail_at_exit_[i] = common_val;
-                changed = true;
+bool PreDataflow::transparent(uint32_t o) const {
+    if (is_touched_[o]) return local_info_[o].transp;
+    if (!track_memory_) return true;
+    if (opacity_[o] == kOpacityUnknown) {
+        bool clear = true;
+        for (const auto& w : index_.memory_writers[o]) {
+            if (aa_.can_clobber(w.inst, exemplar_)) {
+                clear = false;
+                break;
             }
         }
+        opacity_[o] = clear ? kTransparent : kOpaque;
+        opacity_set_.push_back(o);
     }
+    return opacity_[o] == kTransparent;
+}
+
+bool PreDataflow::is_transparent(const BasicBlock* bb) const {
+    const uint32_t o = ordinal(bb);
+    return o == kNoBlock || transparent(o);
 }
 
 bool PreDataflow::is_anticipated_at_entry(const BasicBlock* bb) const {
@@ -508,7 +636,26 @@ bool PreDataflow::is_anticipated_at_entry(const BasicBlock* bb) const {
 
 bool PreDataflow::is_anticipated_at_exit(const BasicBlock* bb) const {
     const uint32_t o = ordinal(bb);
-    return o != kNoBlock && ant_out_[o] != 0;
+    if (o == kNoBlock || index_.blocks[o]->successors().empty()) return false;
+    for (uint32_t s : succs_[o]) {
+        if (!ant_in_[s]) return false;
+    }
+    return true;
+}
+
+std::vector<BasicBlock*> PreDataflow::anticipated_blocks() const {
+    std::vector<BasicBlock*> out;
+    out.reserve(ant_set_.size());
+    for (uint32_t o : ant_set_) out.push_back(index_.blocks[o]);
+    return out;
+}
+
+std::vector<BasicBlock*> PreDataflow::evaluation_blocks() const {
+    std::vector<BasicBlock*> out;
+    for (uint32_t o : touched_) {
+        if (!local_info_[o].evaluations.empty()) out.push_back(index_.blocks[o]);
+    }
+    return out;
 }
 
 Value* PreDataflow::available_at_exit(const BasicBlock* bb) const {

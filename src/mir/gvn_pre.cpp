@@ -356,14 +356,17 @@ bool gvn_pre_function(Function& fn, const GvnPreOptions& options) {
             // A. Check for Loop Invariant Code Motion (LICM):
             // If an expression is computed inside a loop, all its operands dominate the loop preheader,
             // and no instruction in the loop clobbers it, hoist it to the preheader.
+            // Asked from the evaluations' side: a loop holds one when one of
+            // the (few) evaluating blocks is in it, which costs nothing like a
+            // walk over every loop's blocks for every expression.
+            const std::vector<BasicBlock*> eval_blocks = dataflow.evaluation_blocks();
             for (const NaturalLoop& loop : loops) {
                 const std::unordered_set<BasicBlock*>& loop_set = loop.blocks;
                 BasicBlock* preheader = loop.preheader;
 
                 bool has_loop_eval = false;
-                for (BasicBlock* b_block : loop_set) {
-                    const auto& b_info = dataflow.get_local_info(b_block);
-                    if (!b_info.evaluations.empty()) {
+                for (BasicBlock* b_block : eval_blocks) {
+                    if (loop_set.count(b_block) != 0) {
                         has_loop_eval = true;
                         break;
                     }
@@ -377,7 +380,7 @@ bool gvn_pre_function(Function& fn, const GvnPreOptions& options) {
                 if (expr.is_load()) {
                     bool loop_transparent = true;
                     for (BasicBlock* b_block : loop_set) {
-                        if (!dataflow.get_local_info(b_block).transp) {
+                        if (!dataflow.is_transparent(b_block)) {
                             loop_transparent = false;
                             break;
                         }
@@ -412,8 +415,10 @@ bool gvn_pre_function(Function& fn, const GvnPreOptions& options) {
 
             if (iter_changed) break;
 
-            // B. Check Join/Merge blocks for Partial Redundancy
-            for (BasicBlock* bb : fn.blocks()) {
+            // B. Check Join/Merge blocks for Partial Redundancy. Only a block
+            // the expression is anticipated at can be one, and the dataflow
+            // lists exactly those, in block order.
+            for (BasicBlock* bb : dataflow.anticipated_blocks()) {
                 if (!bb) continue;
                 if (bb->predecessors().size() <= 1) continue;
 
