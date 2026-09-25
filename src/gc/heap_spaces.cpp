@@ -211,11 +211,13 @@ uint64_t HeapState::sweep_old() {
             meta.starts[w] &= meta.marks[w];
             meta.marks[w] = 0;
         }
-        size_t used = 0;
-        for (size_t l = 0; l < kLinesPerBlock; ++l) {
-            meta.line_used[l] = meta.line_mark[l];
-            meta.line_mark[l] = 0;
-            used += meta.line_used[l];
+        std::memcpy(meta.line_used, meta.line_mark, kLinesPerBlock);
+        std::memset(meta.line_mark, 0, kLinesPerBlock);
+        size_t used = 0;  // line marks are 0 or 1, so a word's popcount counts its lines
+        for (size_t l = 0; l < kLinesPerBlock; l += 8) {
+            uint64_t word;
+            std::memcpy(&word, meta.line_used + l, 8);
+            used += popcount64(word);
         }
         mature_used_lines += used;
         if (used == 0) {
@@ -227,16 +229,31 @@ uint64_t HeapState::sweep_old() {
     }
     // Both lists run from the highest block down, so popping from the back
     // hands out the lowest addresses first. Free blocks past the retained
-    // few (the highest) go back to the OS; they stay on the list and are
-    // committed again when reused.
-    if (free_blocks.size() > kRetainedFreeBlocks) {
-        const size_t release = free_blocks.size() - kRetainedFreeBlocks;
-        for (size_t k = 0; k < release; ++k) {
-            BlockMeta& meta = *blocks[free_blocks[k]];
-            if (meta.committed) {
-                vm_decommit(reinterpret_cast<void*>(block_base(free_blocks[k])), kBlockBytes);
-                meta.committed = false;
+    // ones (the highest) go back to the OS; they stay on the list and are
+    // committed again when reused. The retained count scales with the blocks
+    // in use, so a heap that promotes steadily is not decommitting and
+    // recommitting the same blocks at every full collection; runs of
+    // adjacent blocks go back in one call.
+    const size_t in_use = blocks.size() - free_blocks.size();
+    const size_t retained = std::max(kRetainedFreeBlocks, in_use / 4);
+    if (free_blocks.size() > retained) {
+        const size_t release = free_blocks.size() - retained;
+        size_t k = 0;
+        while (k < release) {
+            if (!blocks[free_blocks[k]]->committed) {
+                ++k;
+                continue;
             }
+            const uint32_t high = free_blocks[k];
+            uint32_t low = high;
+            blocks[low]->committed = false;
+            while (k + 1 < release && free_blocks[k + 1] == low - 1 && blocks[low - 1]->committed) {
+                ++k;
+                --low;
+                blocks[low]->committed = false;
+            }
+            vm_decommit(reinterpret_cast<void*>(block_base(low)), static_cast<size_t>(high - low + 1) * kBlockBytes);
+            ++k;
         }
     }
     if (poison) {

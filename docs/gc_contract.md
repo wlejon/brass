@@ -58,9 +58,10 @@ Each heap reserves one contiguous address range and commits memory as it grows:
   young generation                  old generation (never moves)
 ```
 
-- **Young generation.** Eden (8 MB by default, never below `kMinEdenBytes` = 64 KB) and two survivor spaces (1 MB each). Allocation bumps a pointer through eden. A minor collection copies live young objects into the other survivor space, aging them; an object that has survived `tenure_age` minor collections (default 2), or that does not fit in the survivor space, is promoted to the old generation.
+- **Young generation.** Eden (16 MB by default, never below `kMinEdenBytes` = 64 KB) and two survivor spaces (8 MB each). Allocation bumps a pointer through eden. A minor collection copies live young objects into the other survivor space, aging them; an object that has survived `tenure_age` minor collections (default 2), or that does not fit in the survivor space, is promoted to the old generation.
+- **Adaptive tenuring.** When a minor collection overflows the survivor space, the collections after it promote every survivor directly (`promote-all`), for as long as at least half of the young data collected survives. A program building long-lived data then copies it once instead of twice; one whose survivors are short-lived returns to aging at the first collection where most of eden died. A full collection leaves the mode as the last minor collection set it.
 - **Mature space.** 32 KB blocks of 256-byte lines, Immix-style. Objects of up to 8 KB (header included) are allocated into runs of free lines ("holes") of partly used blocks, or into whole free blocks. Objects are never moved once there. Side bitmaps per block record object starts and marks.
-- **Large-object space.** Objects above the large-object threshold (64 KB by default, never below `kMinLargeObjectBytes` = 16 KB) and old objects above 8 KB get their own run of 4 KB pages, freed as a unit.
+- **Large-object space.** Objects above the large-object threshold (1 MB by default, never below `kMinLargeObjectBytes` = 16 KB, and never above a quarter of eden) are allocated there directly; smaller ones start young, and those that are promoted above 8 KB land there too. Each gets its own run of 4 KB pages, freed as a unit. The threshold is high because a large object allocated old stays until a full collection: a growing array's discarded backing stores would otherwise keep every young object they named alive through their dirty cards until then.
 - The mature and large reservations are 4 GB each by default (`HeapConfig`), address space only.
 
 Every object has an 8-byte header before its payload: `{uint32 size; uint16 layout; uint8 gc_bits; uint8 host_bits}`. A reference is the payload address. `host_bits` are the host's; the collector copies them and never reads them.
@@ -77,6 +78,8 @@ How the collector finds an object's references is its layout, registered once in
 
 `mask_layout(mask, type_tag)` interns the `Mask` layout that `brass_gc_alloc(size, mask, tag)` uses. A layout also carries a `type_tag` (the host's label) and a name used in verification messages.
 
+A `Custom` layout may also give a `TraceRangeFn(payload, bytes, begin, end, Tracer&)` that visits only the slots in payload bytes `[begin, end)`. With it, a minor collection rescans just the dirty cards of a large old object, and a parallel full collection splits the scan of a large object between threads; without it, both scan the whole object. In a full collection the range that begins at offset 0 also visits whatever the full trace visits outside the payload (a shape's prototype, say). `Words` and `Mask` layouts are scanned by range natively.
+
 A *word slot* holds a reference in its low 48 bits; the high 16 bits are a tag the collector preserves when it updates the slot, so NaN-boxed values work unchanged. `HeapConfig::reference_tags` limits which tags count as references: empty means every tag, otherwise exactly the tags listed. A raw gcref has tag 0, so the embedding C API lists 0 and the `HostValue` gcref tag; a host whose references are all NaN-boxed lists only its pointer tags, and then a raw pointer or a small integer in a slot, a register an interpreter visits conservatively, or a barrier's stored value is never taken for a reference. A word whose address lies outside the heap is not a reference to it.
 
 A `TraceFn` runs during a collection. It must not allocate, must visit the same slots each time for the same object state, and reads other objects only through slot values the tracer has written back.
@@ -85,20 +88,21 @@ A `TraceFn` runs during a collection. It must not allocate, must visit the same 
 Collections are stop-the-world for the heap's thread only; other threads' heaps keep running.
 
 - **Minor.** Roots and the old generation's dirty cards are scanned; live young objects are copied (Cheney-style) into the survivor space or promoted. The pause depends on the surviving young data and the number of dirty cards, not on the size of the old generation.
-- **Full.** Every live young object is promoted; old objects are marked in place (mature marks in side bitmaps, which also mark lines; large objects by a header bit). The sweep keeps only marked starts, rebuilds each block's free lines into the free and recyclable block lists, releases excess free blocks back to the OS, and frees dead large objects. Afterwards the young generation is empty and every card is clean.
+- **Full.** Three phases. First the young generation is evacuated as a minor collection would, except that every survivor is promoted. Then the old generation is marked in place (mature marks in side bitmaps, large objects by a header bit; each scanned object marks its lines). Marking moves and allocates nothing, so once the old generation holds `parallel_mark_bytes` (16 MB by default) it runs on several threads (`mark_threads`, default half the hardware threads, at most 8): each keeps its own mark stack, claims mark bits atomically, hands work to a shared pool when another thread is idle, and scans a large object in 16 KB slices that the threads share. The ephemeron fixpoint runs between rounds on the collecting thread. Finally weak slots are settled, hooks run, and the sweep keeps only marked starts, rebuilds each block's free lines into the free and recyclable block lists, releases excess free blocks back to the OS (a contiguous run in one call), and frees dead large objects. Afterwards the young generation is empty and every card is clean.
 - **Triggers.** An allocation that finds eden full runs a minor collection. Old-generation growth since the last full collection (direct old allocation plus promotion) above `max(min_full_threshold_bytes, growth_factor × live old bytes)` runs a full collection. `request_collection(kind)` asks for one at the next allocation or safepoint; `collect(kind)` runs one now.
 - **Stress.** `StressMode::Minor`, `Full` or `Alternate` (minor, every eighth full) collects at every allocation and safepoint. The fast allocation path is disabled so every allocation reaches the runtime.
 
 ### 2.4. Remembered Set: Cards and the Write Barrier
-The old generation is covered by a card table of 512-byte cards. The card of an old object is the card of its start. A store of a young reference into an old object must dirty that object's card:
+The old generation is covered by a card table of 512-byte cards. A store of a young reference into an old object must be remembered:
 
 ```cpp
 heap.write_barrier(object, value);          // object: the object's payload address
-heap.write_barrier_interior(address, value);// address: anywhere inside the object
-heap.remember(object);                      // a bulk copy: dirty an old object's card outright
+heap.write_barrier_interior(address, value);// address: the slot written, anywhere inside the object
+heap.remember(object);                      // a bulk copy: rescan the whole object
+heap.remember_range(object, begin, end);    // a bulk copy into addresses [begin, end) of it
 ```
 
-The barrier's fast path is two range checks and a tag check; `write_barrier_interior` looks the object up only when the store needs remembering. `remember` is for a memcpy of many words into an object, where checking each word would cost more than rescanning the object once. A minor collection scans the objects starting in each dirty card and cleans the card, re-dirtying it when the object still names a young object afterwards.
+A mature object is remembered by the card of its start, and a minor collection scans every object starting in a dirty card. A large object is remembered per card: `write_barrier_interior` and `remember_range` dirty only the cards holding the slots written, and the minor collection rescans just those cards (through the layout's range scan). Its first card carries the difference between the two cases, since it is also where the object starts: `write_barrier`, `remember`, or a store whose slot the barrier cannot place dirty it as "rescan the whole object", while a slot store in its own bytes marks it as a range like any other card. The barrier's fast path is two range checks and a tag check; `write_barrier_interior` looks the object up only when the store needs remembering. A minor collection cleans each card it scans and re-dirties it when the slots it covers still name young objects afterwards.
 
 Compiled code calls `brass_gc_write_barrier(obj, val)` for MIR's `write_barrier`, which by default is `brass_default_gc_write_barrier`: the interior barrier on the thread's heap. A MIR producer must emit `write_barrier` after every store of a `gcref` into an object that may be old. The interpreters apply the barrier to every 8-byte store themselves.
 
@@ -115,12 +119,14 @@ Old objects never move. `allocate(bytes, layout, kAllocOld)` pretenures an objec
 - `add_finalizer(object, fn, context)` calls `fn(context)` once, after the collection that finds the object dead, when the heap is consistent again; the callback may allocate.
 
 ### 2.7. Threads
-A heap belongs to one thread at a time; nothing in it is locked on the allocation or collection paths. Each thread has a current heap (`Heap::current()`, bound with `HeapScope`), which the runtime entry points and the interpreters use. Many heaps can live in a process, each collecting independently; the layout registry is the only shared state (lock-protected registration, lock-free lookup). A reference from one heap into another is not traced. A heap may move to another thread as long as no two threads use it at once. Collection is stop-the-world per heap; the tracer interface does not rule out concurrent marking later.
+A heap belongs to one thread at a time; nothing in it is locked on the allocation or collection paths. Each thread has a current heap (`Heap::current()`, bound with `HeapScope`), which the runtime entry points and the interpreters use. Many heaps can live in a process, each collecting independently; the layout registry is the only shared state (lock-protected registration, lock-free lookup). A reference from one heap into another is not traced. A heap may move to another thread as long as no two threads use it at once. Collection is stop-the-world per heap. A full collection may mark on helper threads it starts and joins before it returns; they run only the collector's own marking and the layouts' trace functions, never host code otherwise, so a `TraceFn` must be safe to call from a thread other than the heap's (it touches only the object it is given and the tracer).
 
 ### 2.8. Verification and Stress
 - `set_verify(true)` (or `BRASS_GC_VERIFY=1`) checks the whole heap before and after every collection: every header, every reference slot names an object of the heap, and every old object that names a young one has a dirty card. A violation stops the process with a message naming the object, its layout and the slot.
 - `set_poison(true)` (`BRASS_GC_POISON=1`) fills evacuated young space and freed old memory with `0xDB` bytes.
 - `BRASS_GC_STRESS=minor|full|alternate` sets the stress mode of every heap created with `read_environment` (the default).
+- `BRASS_GC_LOG=1` (`HeapConfig::log`) prints one line per collection to stderr: its kind and trigger (explicit, eden full, old-generation growth, requested, stress, exhausted), its pause split into phases (roots, cards, trace, weak, hooks, sweep), the bytes and objects copied, promoted and marked, the dirty cards scanned, and the old generation's size against its full-collection threshold; the heap's destructor prints totals.
+- `BRASS_GC_MARK_THREADS=n` (`HeapConfig::mark_threads`) sets the number of threads a full collection marks with; 1 marks on the collecting thread alone.
 - `is_valid_object`, `find_object` (interior address to object), `check_access` (the interpreters' bounds check), `for_each_object` and `stats()` (collection counts, pause totals and maxima, promoted and live bytes) support debugging and tests.
 
 ---
@@ -184,7 +190,8 @@ The embedding C API (`include/brass/embedding/brass_c_api.h`) wraps the same hea
 
 ## 5. Limits
 
-- Collection is stop-the-world per heap, and marking is not concurrent or incremental; a full collection's pause grows with the live old generation.
+- Collection is stop-the-world per heap, and marking is parallel but not concurrent or incremental; a full collection's pause grows with the live old generation.
+- A minor collection copies on one thread, so its pause grows with the young data that survives it: a program allocating nothing but long-lived data pays for copying a whole eden at each minor collection.
 - The old generation does not compact: fragmentation in the mature space is bounded by line and block reuse but not repaired by evacuation.
 - A young object cannot be pinned in place; objects that must not move are allocated old (`kAllocOld` / `kAllocPinned`).
 - Compiled code calls the write barrier and `brass_gc_alloc` out of line; neither is inlined into generated code.

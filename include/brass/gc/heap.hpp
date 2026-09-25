@@ -44,8 +44,14 @@ inline constexpr uint32_t kAllocOld = 1u << 0;     // allocate in the old genera
 inline constexpr uint32_t kAllocPinned = 1u << 1;  // old, and never moved by any collection
 
 struct HeapConfig {
-    size_t eden_bytes = size_t{8} << 20;
-    size_t survivor_bytes = size_t{1} << 20;  // each of the two survivor spaces
+    size_t eden_bytes = size_t{16} << 20;
+    // Each of the two survivor spaces. Young objects that survive a minor
+    // collection but not yet `tenure_age` of them wait here; whatever does
+    // not fit is promoted early, and an early-promoted object that then dies
+    // stays in the old generation (holding whatever young objects it names)
+    // until the next full collection. So this is sized for the young data a
+    // program keeps live across one collection, not for the average.
+    size_t survivor_bytes = size_t{8} << 20;
     // Minor collections an object survives in a survivor space before it is
     // promoted (1: promoted by its first minor collection; at most 7, since
     // an object's age saturates there).
@@ -54,16 +60,29 @@ struct HeapConfig {
     // memory is committed as the heap grows.
     size_t mature_reserve_bytes = size_t{4} << 30;
     size_t large_reserve_bytes = size_t{4} << 30;
-    // Payloads above this many bytes are allocated straight into the
-    // large-object space (never below kMinLargeObjectBytes, gc_limits.hpp).
-    size_t large_object_bytes = 64 * 1024;
+    // Payloads above this many bytes (or above a quarter of eden) are
+    // allocated straight into the large-object space (never below
+    // kMinLargeObjectBytes, gc_limits.hpp); smaller ones start young. A large
+    // allocation is old at once, so if it dies young it still keeps every
+    // young object it names alive until the next full collection: a growing
+    // array's backing store must not cross this line while it is short-lived.
+    size_t large_object_bytes = size_t{1} << 20;
     // Old-generation growth that triggers a full collection: the larger of
     // this and `growth_factor` times the live old bytes after the last one.
     size_t min_full_threshold_bytes = size_t{32} << 20;
     double growth_factor = 1.0;
+    // Threads that mark the old generation in a full collection (the
+    // collecting thread among them) once it holds at least
+    // `parallel_mark_bytes`; smaller old generations are marked by the
+    // collecting thread alone. 0: half the hardware threads, at most 8.
+    unsigned mark_threads = 0;
+    size_t parallel_mark_bytes = size_t{16} << 20;
     StressMode stress = StressMode::None;
     bool verify = false;  // verify the heap before and after every collection
     bool poison = false;  // overwrite freed memory with 0xDB after every collection
+    // A line on stderr per collection (kind, trigger, pause by phase, bytes
+    // copied, promoted and marked) and a summary when the heap is destroyed.
+    bool log = false;
     // The high-16-bit tags under which a word slot's low 48 bits are a
     // reference. Empty: every tag. Otherwise exactly the tags listed: a raw
     // gcref has tag 0, so a heap that holds raw gcrefs lists 0, and one whose
@@ -71,8 +90,9 @@ struct HeapConfig {
     // pointers and small numbers in its slots and registers are never taken
     // for references.
     std::vector<uint16_t> reference_tags;
-    // BRASS_GC_STRESS (minor|full|alternate|1), BRASS_GC_VERIFY=1 and
-    // BRASS_GC_POISON=1 override the fields above when set.
+    // BRASS_GC_STRESS (minor|full|alternate|1), BRASS_GC_VERIFY=1,
+    // BRASS_GC_POISON=1, BRASS_GC_LOG=1 and BRASS_GC_MARK_THREADS=n override
+    // the fields above when set.
     bool read_environment = true;
 };
 
@@ -180,7 +200,9 @@ public:
     }
     // The barrier for a store through `address`, any address inside an object
     // (a derived pointer): the object is looked up only when the store needs
-    // remembering. For stores whose object start is not at hand.
+    // remembering. For stores whose object start is not at hand. Given the
+    // slot's own address, a store into a large object remembers only the
+    // card holding the slot.
     void write_barrier_interior(uintptr_t address, uint64_t value) noexcept {
         if (address - old_lo_ < old_span_ &&
             (static_cast<uintptr_t>(value & kAddressMask) - young_lo_) < young_span_ &&
@@ -194,6 +216,11 @@ public:
     // every slot of it.
     void remember(uintptr_t object) noexcept {
         if (object - old_lo_ < old_span_) cards_[(object - old_lo_) >> kCardShift] = kCardDirty;
+    }
+    // As remember, for a bulk write into bytes [begin, end) of `object`: a
+    // large object has only the cards covering the range rescanned.
+    void remember_range(uintptr_t object, uintptr_t begin, uintptr_t end) noexcept {
+        if (object - old_lo_ < old_span_) remember_range_old(object, begin, end);
     }
     // Payload word `index` of `object`, and a store to it with its barrier.
     [[nodiscard]] static uint64_t load(uintptr_t object, size_t index) noexcept {
@@ -303,6 +330,7 @@ private:
     friend struct detail::HeapState;
 
     void remember_interior(uintptr_t address) noexcept;
+    void remember_range_old(uintptr_t object, uintptr_t begin, uintptr_t end) noexcept;
 
     AllocationBuffer own_alloc_;
     AllocationBuffer* alloc_ = &own_alloc_;

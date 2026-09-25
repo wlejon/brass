@@ -394,10 +394,13 @@ add_test(NAME performance_ratchet COMMAND brass_benchmarks --check-ratchet)
 set_tests_properties(benchmarks performance_ratchet PROPERTIES
     TIMEOUT 600 RUN_SERIAL TRUE WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" LABELS "perf")
 
-# gc::Heap pause times against the live old-generation size (not a test).
+# gc::Heap pause times against the live old-generation size. Run by hand for
+# the full table; `--check` is the perf ratchet on collector pauses.
 add_executable(brass_gc_pause_bench benchmarks/gc_pause_bench.cpp)
 target_include_directories(brass_gc_pause_bench PRIVATE ${BRASS_INCLUDE_DIR})
 target_link_libraries(brass_gc_pause_bench PRIVATE brass)
+add_test(NAME gc_pause_ratchet COMMAND brass_gc_pause_bench --check)
+set_tests_properties(gc_pause_ratchet PROPERTIES TIMEOUT 600 RUN_SERIAL TRUE LABELS "perf")
 
 if(BRASS_BUILD_TOOLS)
     # brass_opt_cli.coro_args.*: brass-opt lowers coroutines before running

@@ -17,6 +17,8 @@ namespace {
 gc::HeapConfig plain_config() {
     gc::HeapConfig config;
     config.read_environment = false;
+    // The 100KB allocations below stand for large, directly-tenured objects.
+    config.large_object_bytes = 64 * 1024;
     return config;
 }
 

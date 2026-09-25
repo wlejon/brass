@@ -57,6 +57,10 @@ void apply_environment(HeapConfig& config) {
     if (!verify.empty() && verify != "0") config.verify = true;
     const std::string poison = env_value("BRASS_GC_POISON");
     if (!poison.empty() && poison != "0") config.poison = true;
+    const std::string log = env_value("BRASS_GC_LOG");
+    if (!log.empty() && log != "0") config.log = true;
+    const std::string threads = env_value("BRASS_GC_MARK_THREADS");
+    if (!threads.empty()) config.mark_threads = static_cast<unsigned>(std::strtoul(threads.c_str(), nullptr, 10));
 }
 
 } // namespace
@@ -103,7 +107,7 @@ Heap::Heap(const HeapConfig& config) : s_(std::make_unique<HeapState>(*this)) {
     cards_ = s.cards;
 
     const size_t large_threshold = std::max(s.config.large_object_bytes, kMinLargeObjectBytes);
-    max_young_total_ = std::min(large_threshold + kHeaderBytes, eden / 2);
+    max_young_total_ = std::max(std::min(large_threshold + kHeaderBytes, eden / 4), kMinLargeObjectBytes + kHeaderBytes);
 
     if (!s.config.reference_tags.empty()) {
         s.reference_tag_bits.assign(65536 / 64, 0);
@@ -117,12 +121,14 @@ Heap::Heap(const HeapConfig& config) : s_(std::make_unique<HeapState>(*this)) {
     s.stress = s.config.stress;
     s.verify = s.config.verify;
     s.poison = s.config.poison;
+    s.log = s.config.log;
     s.reset_eden();
 }
 
 Heap::~Heap() {
     if (t_current_heap == this) t_current_heap = nullptr;
     HeapState& s = *s_;
+    if (s.log && s.stats.minor_collections + s.stats.full_collections > 0) detail::log_summary(s);
     s.coro_frames.reset();  // its frames are gone with the heap
     detail::vm_release(s.cards, s.cards_bytes);
     detail::vm_release(reinterpret_cast<void*>(s.base), s.reserve_bytes);
@@ -204,18 +210,25 @@ uintptr_t Heap::allocate_at(size_t bytes, LayoutId layout, uint32_t flags, uint8
         ++s.stress_counter;
         const bool full = s.stress == StressMode::Full ||
                           (s.stress == StressMode::Alternate && (s.stress_counter & 7) == 0);
+        s.trigger = detail::GcTrigger::Stress;
         collect_at(full ? CollectionKind::Full : CollectionKind::Minor, 0, 0);
     } else if (s.full_requested) {
+        s.trigger = detail::GcTrigger::Requested;
         collect_at(CollectionKind::Full, 0, 0);
     } else if (s.minor_requested) {
+        s.trigger = detail::GcTrigger::Requested;
         collect_at(CollectionKind::Minor, 0, 0);
     }
 
     const bool old = (flags & (kAllocOld | kAllocPinned)) != 0 || total > max_young_total_;
     if (old) {
-        if (s.old_allocated_since_full + total > s.full_threshold) collect_at(CollectionKind::Full, 0, 0);
+        if (s.old_allocated_since_full + total > s.full_threshold) {
+            s.trigger = detail::GcTrigger::OldGrowth;
+            collect_at(CollectionKind::Full, 0, 0);
+        }
         uintptr_t header = s.old_allocate(total);
         if (header == 0) {
+            s.trigger = detail::GcTrigger::Exhausted;
             collect_at(CollectionKind::Full, 0, 0);
             header = s.old_allocate(total);
             if (header == 0) throw std::bad_alloc();
@@ -246,6 +259,7 @@ uintptr_t Heap::allocate_at(size_t bytes, LayoutId layout, uint32_t flags, uint8
             std::memset(reinterpret_cast<void*>(at + kHeaderBytes), 0, payload);
             return at + kHeaderBytes;
         }
+        s.trigger = detail::GcTrigger::EdenFull;
         collect_at(CollectionKind::Minor, 0, 0);
     }
     throw std::bad_alloc();
@@ -261,7 +275,10 @@ void Heap::collect_at(CollectionKind kind, uintptr_t caller_fp, uintptr_t caller
     }
     MutatorFrame frame(s, caller_fp, caller_ip);
     Collector::collect(*this, kind);
-    if (kind == CollectionKind::Minor && s.full_requested) Collector::collect(*this, CollectionKind::Full);
+    if (kind == CollectionKind::Minor && s.full_requested) {
+        s.trigger = detail::GcTrigger::OldGrowth;
+        Collector::collect(*this, CollectionKind::Full);
+    }
 
     // Finalizers run once the heap is consistent again; they may allocate.
     while (!s.pending_finalizers.empty()) {
@@ -278,10 +295,13 @@ void Heap::safepoint_at(uintptr_t caller_fp, uintptr_t caller_ip) {
         ++s.stress_counter;
         const bool full = s.stress == StressMode::Full ||
                           (s.stress == StressMode::Alternate && (s.stress_counter & 7) == 0);
+        s.trigger = detail::GcTrigger::Stress;
         collect_at(full ? CollectionKind::Full : CollectionKind::Minor, caller_fp, caller_ip);
     } else if (s.full_requested) {
+        s.trigger = detail::GcTrigger::Requested;
         collect_at(CollectionKind::Full, caller_fp, caller_ip);
     } else if (s.minor_requested) {
+        s.trigger = detail::GcTrigger::Requested;
         collect_at(CollectionKind::Minor, caller_fp, caller_ip);
     }
 }

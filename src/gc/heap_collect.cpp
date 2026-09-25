@@ -6,13 +6,20 @@
 // spaces are then empty but for the survivors. Its cost is the roots, the
 // dirty cards and the survivors, whatever the old generation's size.
 //
-// Full: every young survivor is promoted, every reachable old object is
-// marked in place (mature objects in the blocks' side bitmaps and their
-// lines, large objects in their header), and the old generation is swept:
-// unmarked objects' lines and pages are reclaimed without moving anything.
+// Full, in three phases. First the young generation is emptied: an
+// evacuation exactly like a minor collection's, promoting every survivor
+// (whatever a dirty card of a dead old object keeps alive is promoted too,
+// and swept below with it). Then every reachable old object is marked in
+// place (heap_mark.cpp: mature objects in the blocks' side bitmaps and their
+// lines, large objects in their header), on several threads when the old
+// generation is large, since nothing moves or is allocated while it runs.
+// Last, weak slots, ephemerons and finalizers are settled, the hooks run, and
+// the old generation is swept: unmarked objects' lines and pages are
+// reclaimed without moving anything.
 //
-// Both trace through the same Tracer with a mode-specific slow path, and both
-// settle weak slots, ephemerons and finalizers the same way (heap_weak.cpp).
+// Every phase traces through a Tracer with a mode-specific slow path, and
+// each settles weak slots, ephemerons and finalizers the same way
+// (heap_weak.cpp).
 
 #include "heap_internal.hpp"
 
@@ -34,7 +41,7 @@ constexpr uint8_t kPoisonByte = 0xDB;
 
 GcState& gc_state(Tracer& t) noexcept { return *static_cast<GcState*>(t.state()); }
 
-// ---- minor collection ----
+// ---- the young generation's evacuation (minor, and a full's first phase) ----
 
 uintptr_t evacuate_young(GcState& g, uintptr_t object) {
     HeapState& s = g.s;
@@ -43,13 +50,14 @@ uintptr_t evacuate_young(GcState& g, uintptr_t object) {
     const unsigned age = std::min<unsigned>(h->age() + 1u, 7u);
     uintptr_t dest = 0;
     bool promoted = false;
-    if (age < s.config.tenure_age &&
-        s.survivor_top[g.to] + total <= s.survivor_lo[g.to] + s.survivor_bytes) {
+    const bool young_enough = age < g.tenure_age;
+    if (young_enough && s.survivor_top[g.to] + total <= s.survivor_lo[g.to] + s.survivor_bytes) {
         dest = s.survivor_top[g.to];
         s.survivor_top[g.to] += total;
     } else {
+        if (young_enough) g.survivor_overflow = true;
         dest = s.old_allocate(total);
-        if (dest == 0) gc_fatal("the old generation's reservation is exhausted during a minor collection");
+        if (dest == 0) gc_fatal("the old generation's reservation is exhausted while promoting a young object");
         promoted = true;
     }
     std::memcpy(reinterpret_cast<void*>(dest), h, total);
@@ -60,11 +68,13 @@ uintptr_t evacuate_young(GcState& g, uintptr_t object) {
     const uintptr_t moved = dest + kHeaderBytes;
     if (promoted) {
         g.promoted_bytes += total;
+        ++g.promoted_objects;
         s.old_allocated_since_full += total;
     } else {
         s.set_young_start(moved);
     }
     g.copied_bytes += total;
+    ++g.copied_objects;
     h->gc_bits = static_cast<uint8_t>(h->gc_bits | kGcForwarded);
     *reinterpret_cast<uintptr_t*>(object) = moved;
     ++s.relocation_epoch;
@@ -82,84 +92,7 @@ void minor_visit(Tracer& t, uint64_t* slot, uint64_t word) {
         now = h->forwarded() ? *reinterpret_cast<const uintptr_t*>(a) : evacuate_young(g, a);
         *slot = (word & ~kAddressMask) | now;
     }
-    if (t.owner_old() && g.heap.is_young(now)) *g.s.card_of(t.owner()) = kCardDirty;
-}
-
-// ---- full collection ----
-
-bool mark_mature(GcState& g, uintptr_t object) {
-    HeapState& s = g.s;
-    const uint32_t index = s.block_index(object);
-    if (index >= s.blocks.size() || !s.blocks[index]->in_use) {
-        char msg[160];
-        std::snprintf(msg, sizeof msg, "a reference to %p names no block in use of the mature space",
-                      reinterpret_cast<void*>(object));
-        gc_fatal(msg);
-    }
-    BlockMeta& meta = *s.blocks[index];
-    const uintptr_t lo = s.block_base(index);
-    const size_t granule = (object - lo) / kGranuleBytes;
-    const uint64_t bit = uint64_t{1} << (granule & 63);
-    uint64_t& word = meta.marks[granule >> 6];
-    if (word & bit) return false;
-    word |= bit;
-    const size_t total = kHeaderBytes + header_of(object)->size;
-    s.mark_lines(meta, lo, object - kHeaderBytes, total, true);
-    g.marked_bytes += total;
-    return true;
-}
-
-bool mark_large(GcState& g, uintptr_t object) {
-    ObjectHeader* h = header_of(object);
-    if (h->gc_bits & kGcLargeMarked) return false;
-    h->gc_bits = static_cast<uint8_t>(h->gc_bits | kGcLargeMarked);
-    g.marked_bytes += kHeaderBytes + h->size;
-    return true;
-}
-
-// Marks a freshly promoted copy (it lives past this collection's sweep).
-void mark_new_old(GcState& g, uintptr_t object) {
-    if (g.s.in_mature(object)) mark_mature(g, object);
-    else mark_large(g, object);
-}
-
-uintptr_t promote_young(GcState& g, uintptr_t object) {
-    HeapState& s = g.s;
-    ObjectHeader* h = header_of(object);
-    const size_t total = kHeaderBytes + h->size;
-    const uintptr_t dest = s.old_allocate(total);
-    if (dest == 0) gc_fatal("the old generation's reservation is exhausted during a full collection");
-    std::memcpy(reinterpret_cast<void*>(dest), h, total);
-    auto* nh = reinterpret_cast<ObjectHeader*>(dest);
-    nh->gc_bits = static_cast<uint8_t>(h->gc_bits & ~(kGcForwarded | kGcAgeMask));
-    const uintptr_t moved = dest + kHeaderBytes;
-    h->gc_bits = static_cast<uint8_t>(h->gc_bits | kGcForwarded);
-    *reinterpret_cast<uintptr_t*>(object) = moved;
-    ++s.relocation_epoch;
-    g.copied_bytes += total;
-    g.promoted_bytes += total;
-    mark_new_old(g, moved);
-    g.gray.push_back(moved);
-    return moved;
-}
-
-void full_visit(Tracer& t, uint64_t* slot, uint64_t word) {
-    GcState& g = gc_state(t);
-    if (!g.heap.is_reference_tag(word)) return;
-    const uintptr_t a = static_cast<uintptr_t>(word & kAddressMask);
-    HeapState& s = g.s;
-    if (g.heap.is_young(a)) {
-        if (!g.in_from(a)) return;
-        const ObjectHeader* h = header_of(a);
-        const uintptr_t now = h->forwarded() ? *reinterpret_cast<const uintptr_t*>(a) : promote_young(g, a);
-        *slot = (word & ~kAddressMask) | now;
-        return;
-    }
-    if (s.in_mature(a)) {
-        if (mark_mature(g, a)) g.gray.push_back(a);
-    } else if (s.in_large(a)) {
-        if (mark_large(g, a)) g.gray.push_back(a);
-    }
+    if (t.owner_old() && g.heap.is_young(now)) g.s.remember_slot(t.owner(), slot);
 }
 
 void drain(Tracer& t, GcState& g) {
@@ -170,43 +103,22 @@ void drain(Tracer& t, GcState& g) {
     }
 }
 
-// ---- the old generation's dirty cards (minor) ----
-
-void scan_dirty_cards(Tracer& t, GcState& g) {
-    HeapState& s = g.s;
-    for (size_t i = 0; i < s.blocks.size(); ++i) {
-        BlockMeta& meta = *s.blocks[i];
-        if (!meta.in_use) continue;
-        const uintptr_t lo = s.block_base(static_cast<uint32_t>(i));
-        uint8_t* cards = s.card_of(lo);
-        uint64_t any_dirty = 0;
-        for (size_t w = 0; w < kCardsPerBlock / 8; ++w) {
-            uint64_t word;
-            std::memcpy(&word, cards + w * 8, 8);
-            any_dirty |= word ^ 0x0101010101010101ULL;
-        }
-        if (!any_dirty) continue;
-        for (size_t c = 0; c < kCardsPerBlock; ++c) {
-            if (cards[c] != kCardDirty) continue;
-            cards[c] = kCardClean;
-            uint64_t starts = meta.starts[c];  // card c covers start word c
-            while (starts) {
-                const unsigned bit = ctz64(starts);
-                starts &= starts - 1;
-                scan_object(t, lo + (c * 64 + bit) * kGranuleBytes, true);
-            }
-        }
-    }
-    std::vector<uintptr_t> dirty_large;
-    for (const auto& entry : s.large_objects) {
-        const uintptr_t object = s.large_lo + static_cast<uintptr_t>(entry.first) * kPageBytes + kHeaderBytes;
-        uint8_t* card = s.card_of(object);
-        if (*card == kCardDirty) {
-            *card = kCardClean;
-            dirty_large.push_back(object);
-        }
-    }
-    for (uintptr_t object : dirty_large) scan_object(t, object, true);
+// Copies every young object the roots and the dirty cards reach, and settles
+// the weak slots and ephemerons that name young objects. `young` is a Minor
+// state; its phases are timed into `clock`'s collection.
+void evacuate(GcState& young, PhaseClock& clock) {
+    HeapState& s = young.s;
+    Tracer t(young.heap, Tracer::Purpose::Minor, young.heap.young_base(),
+             young.heap.young_base() + young.heap.young_span(), &minor_visit, &weak_visit, &ephemeron_visit,
+             &young);
+    visit_roots(s, t);
+    clock.lap(kPhaseRoots);
+    scan_dirty_cards(t, young);
+    clock.lap(kPhaseCards);
+    trace_to_fixpoint(t, young);
+    clock.lap(kPhaseTrace);
+    settle_weakness(young);
+    clock.lap(kPhaseWeak);
 }
 
 void run_hooks(GcState& g) {
@@ -220,51 +132,79 @@ void clean_all_cards(HeapState& s) {
     }
 }
 
+void poison_evacuated(HeapState& s, const GcState& g) {
+    if (!s.poison) return;
+    std::memset(reinterpret_cast<void*>(s.eden_lo), kPoisonByte, g.eden_top - s.eden_lo);
+    std::memset(reinterpret_cast<void*>(s.survivor_lo[g.from]), kPoisonByte, g.from_top - s.survivor_lo[g.from]);
+}
+
 void minor(GcState& g) {
     HeapState& s = g.s;
-    Tracer t(g.heap, Tracer::Purpose::Minor, g.heap.young_base(), g.heap.young_base() + g.heap.young_span(),
-             &minor_visit, &weak_visit, &ephemeron_visit, &g);
-    visit_roots(s, t);
-    scan_dirty_cards(t, g);
-    trace_to_fixpoint(t, g);
-    settle_weakness(g);
+    PhaseClock clock(g);
+    g.tenure_age = s.promote_all ? 1u : s.config.tenure_age;
+    evacuate(g, clock);
     run_hooks(g);
+    clock.lap(kPhaseHooks);
 
     // Reclaim the evacuated spaces.
-    if (s.poison) {
-        std::memset(reinterpret_cast<void*>(s.eden_lo), kPoisonByte, g.eden_top - s.eden_lo);
-        std::memset(reinterpret_cast<void*>(s.survivor_lo[g.from]), kPoisonByte, g.from_top - s.survivor_lo[g.from]);
-    }
-    s.clear_young_starts(s.eden_lo, s.eden_hi);
-    s.clear_young_starts(s.survivor_lo[g.from], s.survivor_lo[g.from] + s.survivor_bytes);
+    poison_evacuated(s, g);
+    s.clear_young_starts(s.eden_lo, g.eden_top);
+    s.clear_young_starts(s.survivor_lo[g.from], g.from_top);
     s.survivor_top[g.from] = s.survivor_lo[g.from];
     s.from_survivor = g.to;
     s.eden_bytes_retired += g.eden_top - s.eden_lo;
     s.reset_eden();
     s.minor_requested = false;
     if (s.old_allocated_since_full > s.full_threshold) s.full_requested = true;
+    // Promote everything next time while survival stays high: after an
+    // overflow, and for as long as half or more of the young data survives
+    // each promote-all collection. Short-lived data that merely happens to
+    // be live at a collection (a batch being built) is a small fraction of
+    // a full eden, so it leaves this mode at once rather than being tenured.
+    const uint64_t collected = (g.eden_top - s.eden_lo) + (g.from_top - s.survivor_lo[g.from]);
+    s.promote_all = g.survivor_overflow || (s.promote_all && g.copied_bytes * 2 >= collected);
+    clock.lap(kPhaseSweep);
 }
 
 void full(GcState& g) {
     HeapState& s = g.s;
-    Tracer t(g.heap, Tracer::Purpose::Full, s.base, s.base + s.reserve_bytes, &full_visit, &weak_visit,
-             &ephemeron_visit, &g);
-    visit_roots(s, t);
-    trace_to_fixpoint(t, g);
+    PhaseClock clock(g);
+
+    // Phase 1: the young generation, emptied into the old one.
+    GcState young(s, g.heap, CollectionKind::Minor);
+    young.from = g.from;
+    young.to = g.to;
+    young.eden_top = g.eden_top;
+    young.from_top = g.from_top;
+    young.tenure_age = 1;
+    evacuate(young, clock);
+    g.copied_bytes += young.copied_bytes;
+    g.copied_objects += young.copied_objects;
+    g.promoted_bytes += young.promoted_bytes;
+    g.promoted_objects += young.promoted_objects;
+    g.dirty_cards += young.dirty_cards;
+
+    // Phase 2: the old generation, marked in place.
+    mark_old_generation(g, clock);
+
+    // Phase 3: weakness, hooks, reclamation.
     settle_weakness(g);
+    clock.lap(kPhaseWeak);
     run_hooks(g);
+    clock.lap(kPhaseHooks);
 
     s.sweep_old();
     clean_all_cards(s);
-    if (s.poison) {
-        std::memset(reinterpret_cast<void*>(s.eden_lo), kPoisonByte, g.eden_top - s.eden_lo);
-        std::memset(reinterpret_cast<void*>(s.survivor_lo[g.from]), kPoisonByte, g.from_top - s.survivor_lo[g.from]);
-    }
+    poison_evacuated(s, g);
     std::fill(s.young_starts.begin(), s.young_starts.end(), 0);
     s.survivor_top[0] = s.survivor_lo[0];
     s.survivor_top[1] = s.survivor_lo[1];
     s.eden_bytes_retired += g.eden_top - s.eden_lo;
     s.reset_eden();
+    // promote_all is left as the last minor collection set it: a full
+    // collection says nothing about how much of the young data survives, and
+    // a program still building long-lived data would otherwise refill the
+    // survivor space only to promote it all again at the next overflow.
 
     const double grown = static_cast<double>(g.marked_bytes) * s.config.growth_factor;
     s.full_threshold = std::max<uint64_t>(s.config.min_full_threshold_bytes, static_cast<uint64_t>(grown));
@@ -272,6 +212,7 @@ void full(GcState& g) {
     s.stats.old_live_bytes = g.marked_bytes;
     s.full_requested = false;
     s.minor_requested = false;
+    clock.lap(kPhaseSweep);
 }
 
 } // namespace
@@ -332,7 +273,11 @@ uintptr_t live_address(const GcState& g, uintptr_t a) noexcept {
     if (g.heap.is_young(a)) {
         if (!g.in_from(a)) return a;
         const ObjectHeader* h = header_of(a);
-        return h->forwarded() ? *reinterpret_cast<const uintptr_t*>(a) : 0;
+        if (!h->forwarded()) return 0;
+        a = *reinterpret_cast<const uintptr_t*>(a);
+        // A full collection promoted it first; whether it lives is the mark
+        // of its old copy.
+        if (g.kind == CollectionKind::Minor || g.heap.is_young(a)) return a;
     }
     if (g.kind == CollectionKind::Minor) return a;
     if (s.in_mature(a)) {
@@ -414,6 +359,7 @@ void Collector::collect(Heap& heap, CollectionKind kind) {
     g.to = 1 - g.from;
     g.eden_top = heap.alloc_->top;
     g.from_top = s.survivor_top[g.from];
+    g.eden_used = g.eden_top - s.eden_lo;
     s.gc_eden_top = g.eden_top;
     s.gc_from_top = g.from_top;
     if (kind == CollectionKind::Minor) minor(g);
@@ -438,6 +384,8 @@ void Collector::collect(Heap& heap, CollectionKind kind) {
         st.full_pause_ns_total += pause;
         st.full_pause_ns_max = std::max(st.full_pause_ns_max, pause);
     }
+    if (s.log) log_collection(g, pause);
+    s.trigger = GcTrigger::Explicit;
 }
 
 } // namespace brass::gc::detail

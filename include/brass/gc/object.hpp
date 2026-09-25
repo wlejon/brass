@@ -37,12 +37,16 @@ inline constexpr size_t kMaxMediumObjectBytes = 8 * 1024;
 inline constexpr size_t kPageBytes = 4096;
 
 // Cards: one byte per 512 bytes of the old generation (mature blocks and
-// large objects). A store into an old object dirties the card holding the
-// object's payload address.
+// large objects). A store into a mature object dirties the card holding the
+// object's payload address. A large object's first card dirty means the
+// whole object; a store whose slot address is known dirties the slot's own
+// card instead (kCardDirtyRange when that is the first card), so only the
+// 512 bytes around it are rescanned.
 inline constexpr unsigned kCardShift = 9;
 inline constexpr size_t kCardBytes = size_t{1} << kCardShift;
 inline constexpr uint8_t kCardDirty = 0x00;
 inline constexpr uint8_t kCardClean = 0x01;
+inline constexpr uint8_t kCardDirtyRange = 0x02;
 
 // Header bits the collector owns (ObjectHeader::gc_bits).
 inline constexpr uint8_t kGcForwarded = 0x01;  // young copy left behind; payload word 0 = new address
@@ -96,11 +100,26 @@ enum class LayoutKind : uint8_t {
 // the same object state.
 using TraceFn = void (*)(uintptr_t payload, size_t payload_bytes, Tracer& tracer);
 
+// Visits only the references stored in payload bytes [begin, end) of one
+// object of a Custom layout (a slot counts when its first byte lies in the
+// range), under the same rules as a TraceFn. A minor collection uses it to
+// rescan just the dirty cards of a large old object, and a parallel full
+// collection to split a large object's scan between threads. Visiting more
+// than the range is allowed, only slower. In a full collection
+// (Tracer::Purpose::Full) the call whose range begins at offset 0 must also
+// visit whatever the full trace visits outside the payload, since the
+// object's ranges then stand in for its trace.
+using TraceRangeFn = void (*)(uintptr_t payload, size_t payload_bytes, size_t begin, size_t end,
+                              Tracer& tracer);
+
 struct LayoutDescriptor {
     LayoutKind kind = LayoutKind::Leaf;
     uint64_t mask = 0;        // Mask
     uint32_t type_tag = 0;    // the host's label for objects of this layout
     TraceFn trace = nullptr;  // Custom
+    // Custom, optional: without it a dirty card of a large object rescans
+    // the whole object.
+    TraceRangeFn trace_range = nullptr;
     const char* name = "";    // diagnostics (heap verification names it)
 };
 

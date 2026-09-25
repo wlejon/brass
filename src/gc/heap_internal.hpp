@@ -7,6 +7,7 @@
 // finalizers) and heap_verify.cpp (verification, walking, poisoning).
 
 #include <brass/gc/heap.hpp>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -40,6 +41,8 @@ inline unsigned ctz64(uint64_t word) noexcept {
     return static_cast<unsigned>(__builtin_ctzll(word));
 #endif
 }
+
+inline unsigned popcount64(uint64_t word) noexcept { return static_cast<unsigned>(std::popcount(word)); }
 
 // Index of the highest set bit of a nonzero word.
 inline unsigned clz_index64(uint64_t word) noexcept {
@@ -90,6 +93,27 @@ struct FinalizerEntry {
     uintptr_t object;
     void (*fn)(void*);
     void* context;
+};
+
+// The phases of a collection the log times.
+enum GcPhase : unsigned {
+    kPhaseRoots,   // root slots, root sources, generated and native frames
+    kPhaseCards,   // the old generation's dirty cards (minor)
+    kPhaseTrace,   // the transitive closure, ephemerons included
+    kPhaseWeak,    // weak slots, dead ephemerons, finalizer bookkeeping
+    kPhaseHooks,   // post-collection hooks
+    kPhaseSweep,   // reclaiming: the old generation's sweep, the young spaces' reset
+    kGcPhaseCount,
+};
+
+// Why a collection runs (the log names it).
+enum class GcTrigger : uint8_t {
+    Explicit,    // Heap::collect / collect_at
+    EdenFull,    // a young allocation found eden full
+    OldGrowth,   // old-generation growth passed the full-collection threshold
+    Requested,   // request_collection, honoured at an allocation or safepoint
+    Stress,      // stress mode
+    Exhausted,   // an old allocation found the reservation full
 };
 
 struct HeapState {
@@ -154,6 +178,13 @@ struct HeapState {
     StressMode stress = StressMode::None;
     bool verify = false;
     bool poison = false;
+    bool log = false;                 // one line per collection on stderr (heap_log.cpp)
+    // The next minor collection promotes every survivor rather than copying it
+    // into a survivor space first: set while survival runs high (the last one
+    // overflowed the survivor space), when the survivors are mostly on their
+    // way to the old generation anyway and copying them twice is waste.
+    bool promote_all = false;
+    GcTrigger trigger = GcTrigger::Explicit;  // why the next collection runs
 
     // The collection in progress, if any.
     bool collecting = false;
@@ -197,6 +228,29 @@ struct HeapState {
     void sync_eden_starts() noexcept;
     [[nodiscard]] uint8_t* card_of(uintptr_t old_address) const noexcept {
         return cards + ((old_address - mature_lo) >> kCardShift);
+    }
+    // The payload address of the large object whose run starts at page `head`.
+    [[nodiscard]] uintptr_t large_object_at(uint32_t head) const noexcept {
+        return large_lo + static_cast<uintptr_t>(head) * kPageBytes + kHeaderBytes;
+    }
+    // Remembers that `slot` of old object `owner` names a young object: the
+    // owner's card for a mature object; for a large object the slot's own
+    // card (kCardDirtyRange on the first card, which kCardDirty would make a
+    // whole-object rescan), or the whole object when the slot lies outside it.
+    void remember_slot(uintptr_t owner, const void* slot) noexcept {
+        if (!in_large(owner)) {
+            *card_of(owner) = kCardDirty;
+            return;
+        }
+        const auto at = reinterpret_cast<uintptr_t>(slot);
+        uint8_t* first = card_of(owner);
+        if (at - owner >= header_of(owner)->size) {
+            *first = kCardDirty;
+            return;
+        }
+        uint8_t* card = card_of(at);
+        if (card != first) *card = kCardDirty;
+        else if (*card != kCardDirty) *card = kCardDirtyRange;
     }
 
     // ---- spaces (heap_spaces.cpp) ----
@@ -278,12 +332,22 @@ struct GcState {
     int to = 1;                 // the survivor space copied into
     uintptr_t eden_top = 0;     // eden's allocation top when the collection started
     uintptr_t from_top = 0;     // the from-survivor space's top then
+    unsigned tenure_age = 1;    // a minor collection promotes survivors that reach this age
+    bool survivor_overflow = false;  // a survivor too young to promote did not fit
     std::vector<uintptr_t> gray;
     std::vector<WeakEntry> weak;
     std::vector<EphemeronEntry> ephemerons;  // keys not (yet) known alive
     uint64_t copied_bytes = 0;
     uint64_t promoted_bytes = 0;
     uint64_t marked_bytes = 0;
+
+    // Measurement for the log: objects handled and where the pause went.
+    uint64_t copied_objects = 0;
+    uint64_t promoted_objects = 0;
+    uint64_t marked_objects = 0;
+    uint64_t dirty_cards = 0;
+    uint64_t eden_used = 0;
+    uint64_t phase_ns[kGcPhaseCount] = {};
 
     GcState(HeapState& state, Heap& h, CollectionKind k) : s(state), heap(h), kind(k) {}
 
@@ -294,14 +358,45 @@ struct GcState {
     }
 };
 
+// Monotonic nanoseconds, for phase timing (heap_log.cpp).
+uint64_t gc_now_ns() noexcept;
+
+// Times the phases of a collection into GcState::phase_ns, only when logging.
+class PhaseClock {
+public:
+    explicit PhaseClock(GcState& g) noexcept : g_(g), on_(g.s.log), last_(on_ ? gc_now_ns() : 0) {}
+    void lap(GcPhase phase) noexcept {
+        if (!on_) return;
+        const uint64_t now = gc_now_ns();
+        g_.phase_ns[phase] += now - last_;
+        last_ = now;
+    }
+
+private:
+    GcState& g_;
+    bool on_;
+    uint64_t last_;
+};
+
+// A full collection's marking (heap_mark.cpp): with the young generation
+// already empty, marks every old object the roots reach, resolving
+// ephemerons to a fixpoint. Leaves the weak slots and the ephemerons whose
+// keys died in `g` for settle_weakness, and the marked totals in `g`.
+void mark_old_generation(GcState& g, PhaseClock& clock);
+
 // Where the object at `a` is after this collection so far, or 0 if it is not
 // (yet) known to be alive. Addresses the collection does not collect are
 // returned unchanged.
 uintptr_t live_address(const GcState& g, uintptr_t a) noexcept;
 // Visits every root of the heap with `tracer`.
 void visit_roots(HeapState& s, Tracer& tracer);
+// Rescans the old generation's dirty cards, cleaning them (heap_cards.cpp).
+void scan_dirty_cards(Tracer& tracer, GcState& g);
 // Visits the references of the object at `object` (old: it lives in the old generation).
 void scan_object(Tracer& tracer, uintptr_t object, bool old);
+// Visits the references of old object `object` stored in payload bytes
+// [begin, end) (more when its layout cannot trace a range).
+void scan_object_range(Tracer& tracer, uintptr_t object, size_t begin, size_t end);
 // heap_weak.cpp
 void weak_visit(Tracer& tracer, uint64_t* slot, uint64_t cleared);
 void ephemeron_visit(Tracer& tracer, uint64_t* key, uint64_t* value, uint64_t cleared_key,
@@ -310,6 +405,10 @@ void ephemeron_visit(Tracer& tracer, uint64_t* key, uint64_t* value, uint64_t cl
 void trace_to_fixpoint(Tracer& tracer, GcState& g);
 // Settles weak slots, clears dead ephemerons, queues finalizers of the dead.
 void settle_weakness(GcState& g);
+// heap_log.cpp: BRASS_GC_LOG. A line per collection, and a summary when the
+// heap is destroyed.
+void log_collection(const GcState& g, uint64_t pause_ns);
+void log_summary(const HeapState& s);
 // heap_verify.cpp
 void verify_heap(Heap& heap, const char* when);
 // The payload address of the object whose header or payload holds `a`, or 0.

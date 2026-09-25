@@ -5,6 +5,7 @@
 
 #include "heap_internal.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <stdexcept>
 #include <string>
@@ -111,8 +112,28 @@ uintptr_t containing_object(HeapState& s, uintptr_t a, bool accept_forwarded) no
 } // namespace detail
 
 void Heap::remember_interior(uintptr_t address) noexcept {
+    HeapState& s = *s_;
+    if (s.in_large(address)) {
+        // No object search: the page table names the object, and the slot's
+        // own card is what needs rescanning.
+        const uint32_t head = s.large_head_of(address);
+        if (head != UINT32_MAX) s.remember_slot(s.large_object_at(head), reinterpret_cast<const void*>(address));
+        return;
+    }
     const uintptr_t object = find_object(address);
     if (object != 0) cards_[(object - old_lo_) >> kCardShift] = kCardDirty;
+}
+
+void Heap::remember_range_old(uintptr_t object, uintptr_t begin, uintptr_t end) noexcept {
+    HeapState& s = *s_;
+    if (!s.in_large(object) || end <= begin || begin < object ||
+        end - object > header_of(object)->size) {
+        cards_[(object - old_lo_) >> kCardShift] = kCardDirty;
+        return;
+    }
+    for (uintptr_t at = begin & ~(kCardBytes - 1); at < end; at += kCardBytes) {
+        s.remember_slot(object, reinterpret_cast<const void*>(std::max(at, begin)));
+    }
 }
 
 void Heap::check_access(uintptr_t base, int64_t offset, size_t size, const char* what) const {
@@ -212,8 +233,15 @@ void verify_visit(Tracer& t, uint64_t* slot, uint64_t word) {
         verify_fail(v.when, describe(t.owner()) + ": " + buf);
     }
     if (t.owner_old() && heap.is_young(a)) {
-        const uint8_t card = heap.card_table_base()[(t.owner() - heap.old_base()) >> kCardShift];
-        if (card != kCardDirty) {
+        const HeapState& s = Collector::state(heap);
+        const uint8_t* first = s.card_of(t.owner());
+        bool remembered = *first == kCardDirty;
+        if (!remembered && s.in_large(t.owner())) {
+            // A large object is remembered card by card: the slot's own card.
+            const auto at = reinterpret_cast<uintptr_t>(slot);
+            remembered = at - t.owner() < header_of(t.owner())->size && *s.card_of(at) != kCardClean;
+        }
+        if (!remembered) {
             char buf[200];
             std::snprintf(buf, sizeof buf,
                           "slot %p names young object %p but the owner's card is clean (a store without "
