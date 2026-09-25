@@ -321,7 +321,7 @@ uintptr_t containing_object(HeapState& s, uintptr_t a, bool accept_forwarded) no
 struct Collector {
     static void collect(Heap& heap, CollectionKind kind);
     static HeapState& state(const Heap& heap) noexcept { return *heap.s_; }
-    static Heap::AllocationBuffer& buffer(Heap& heap) noexcept { return heap.alloc_; }
+    static Heap::AllocationBuffer& buffer(Heap& heap) noexcept { return *heap.alloc_; }
     static size_t max_young_total(const Heap& heap) noexcept { return heap.max_young_total_; }
 };
 

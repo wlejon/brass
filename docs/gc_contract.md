@@ -77,7 +77,7 @@ How the collector finds an object's references is its layout, registered once in
 
 `mask_layout(mask, type_tag)` interns the `Mask` layout that `brass_gc_alloc(size, mask, tag)` uses. A layout also carries a `type_tag` (the host's label) and a name used in verification messages.
 
-A *word slot* holds a reference in its low 48 bits; the high 16 bits are a tag the collector preserves when it updates the slot, so NaN-boxed values work unchanged. `HeapConfig::reference_tags` limits which tags count as references (empty: every tag; the embedding C API uses tag 0 and the `HostValue` gcref tag). A word whose address lies outside the heap is not a reference to it.
+A *word slot* holds a reference in its low 48 bits; the high 16 bits are a tag the collector preserves when it updates the slot, so NaN-boxed values work unchanged. `HeapConfig::reference_tags` limits which tags count as references: empty means every tag, otherwise exactly the tags listed. A raw gcref has tag 0, so the embedding C API lists 0 and the `HostValue` gcref tag; a host whose references are all NaN-boxed lists only its pointer tags, and then a raw pointer or a small integer in a slot, a register an interpreter visits conservatively, or a barrier's stored value is never taken for a reference. A word whose address lies outside the heap is not a reference to it.
 
 A `TraceFn` runs during a collection. It must not allocate, must visit the same slots each time for the same object state, and reads other objects only through slot values the tracer has written back.
 
@@ -95,9 +95,10 @@ The old generation is covered by a card table of 512-byte cards. The card of an 
 ```cpp
 heap.write_barrier(object, value);          // object: the object's payload address
 heap.write_barrier_interior(address, value);// address: anywhere inside the object
+heap.remember(object);                      // a bulk copy: dirty an old object's card outright
 ```
 
-The barrier's fast path is two range checks and a tag check; `write_barrier_interior` looks the object up only when the store needs remembering. A minor collection scans the objects starting in each dirty card and cleans the card, re-dirtying it when the object still names a young object afterwards.
+The barrier's fast path is two range checks and a tag check; `write_barrier_interior` looks the object up only when the store needs remembering. `remember` is for a memcpy of many words into an object, where checking each word would cost more than rescanning the object once. A minor collection scans the objects starting in each dirty card and cleans the card, re-dirtying it when the object still names a young object afterwards.
 
 Compiled code calls `brass_gc_write_barrier(obj, val)` for MIR's `write_barrier`, which by default is `brass_default_gc_write_barrier`: the interior barrier on the thread's heap. A MIR producer must emit `write_barrier` after every store of a `gcref` into an object that may be old. The interpreters apply the barrier to every 8-byte store themselves.
 
@@ -139,7 +140,7 @@ Generated code calls these C symbols (`include/brass/gc/runtime_gc.hpp`); each a
 
 On MSVC the first three and `brass_coro_create` are assembly stubs (`src/gc/gc_msvc_{x64,arm64}.asm`) that pass their caller's frame pointer and return address to a C++ bridge; elsewhere the functions read them with `__builtin_frame_address` and `__builtin_return_address`.
 
-`Heap::allocation_buffer()` exposes the eden bump region `{top, end}` so code can allocate young objects inline: write the header at `top`, advance `top`, zero the payload, and call the runtime when the object does not fit. Stress mode pulls `end` back to `top`.
+`Heap::allocation_buffer()` exposes the eden bump region `{top, end}` so code can allocate young objects inline: write the header at `top`, advance `top`, zero the payload, and call the runtime when the object does not fit. Stress mode pulls `end` back to `top`. `Heap::bind_allocation_buffer(buffer)` moves the region into a host-owned `{top, end}` pair (a per-thread block its generated code already addresses), carrying the current values over; the heap then bumps and resets that pair, and `nullptr` moves it back.
 
 ---
 
@@ -175,7 +176,7 @@ heap.add_finalizer(obj, &release_native, native_ptr);
 heap.collect(CollectionKind::Minor);    // or Full; or let allocation trigger them
 ```
 
-The runtime's own interpreters and compiled code share the heap when it is bound on the thread: `Interpreter` and `FastInterpreter` constructed with no heap use the thread's current heap, register their frames as a root source, and bind their heap while they run. Generated code allocates through `brass_gc_alloc` on the current heap. A host with its own collector that is not `gc::Heap` can still enumerate brass's roots on a thread with `brass_enumerate_thread_roots(fp, ip, roots)`: the generated frames above `(fp, ip)`, the recorded native frames, and the running interpreters' frames.
+The runtime's own interpreters and compiled code share the heap when it is bound on the thread: `Interpreter` and `FastInterpreter` constructed with no heap use the thread's current heap, register their frames as a root source, and bind their heap while they run. Generated code allocates through `brass_gc_alloc` on the current heap. A host binds its heap before it constructs interpreters or runs generated code, so everything brass allocates on its behalf (interpreter state, coroutine frames) lands on the heap the host collects.
 
 The embedding C API (`include/brass/embedding/brass_c_api.h`) wraps the same heap: `brass_heap_create`, `brass_heap_bind`, `brass_heap_allocate`, `brass_heap_collect`, `brass_heap_add_root`, `brass_heap_write_barrier`, `brass_heap_set_stress`.
 

@@ -97,20 +97,37 @@ TEST_CASE("gc::Heap roots - the interior barrier remembers a store through a der
     h.remove_root(&old);
 }
 
+TEST_CASE("gc::Heap roots - a reference-tagged word naming memory outside the heap is left alone") {
+    Heap h(small_config());  // verify mode: every slot is checked before and after
+    static uint64_t immortal[2] = {0, 0};
+    const uint64_t outside = reinterpret_cast<uintptr_t>(&immortal[0]);
+    uint64_t root = h.allocate(16, kPair);
+    h.add_root(&root);
+    h.store(static_cast<uintptr_t>(root), 0, outside);
+    uint64_t direct = outside;
+    h.add_root(&direct);
+    h.collect(CollectionKind::Minor);
+    CHECK(h.is_valid_object(static_cast<uintptr_t>(root)));
+    CHECK_EQ(Heap::load(static_cast<uintptr_t>(root), 0), outside);
+    h.collect(CollectionKind::Full);
+    CHECK_EQ(Heap::load(static_cast<uintptr_t>(root), 0), outside);
+    CHECK_EQ(direct, outside);
+    h.remove_root(&direct);
+    h.remove_root(&root);
+}
+
 TEST_CASE("gc::Heap roots - heaps made without a configuration take the process default") {
     const HeapConfig saved = Heap::default_config();
-    HeapConfig forbidden = small_config();
-    forbidden.forbid_allocation = true;
-    Heap::set_default_config(forbidden);
+    HeapConfig stressed = small_config();
+    stressed.stress = StressMode::Minor;
+    Heap::set_default_config(stressed);
     {
-        Heap h;  // the default: allocation forbidden
+        Heap h;  // the default: a minor collection at every allocation
         // The inline fast path never admits an object, so every allocation
-        // reaches the runtime, which stops the process; collections and
-        // safepoints do nothing.
+        // reaches the runtime, which collects first.
         CHECK(h.allocation_buffer()->top == h.allocation_buffer()->end);
-        h.collect(CollectionKind::Full);
-        h.safepoint_at(0, 0);
-        CHECK_EQ(h.collection_count(), uint64_t{0});
+        CHECK(h.allocate(16, kPair) != 0);
+        CHECK_EQ(h.collection_count(), uint64_t{1});
     }
     Heap::set_default_config(saved);
     Heap h;

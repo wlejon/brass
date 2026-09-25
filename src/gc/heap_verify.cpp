@@ -37,7 +37,7 @@ bool Heap::is_valid_object(uintptr_t a) const noexcept {
     if ((a & (kGranuleBytes - 1)) != 0 || !contains(a)) return false;
     if (is_young(a)) {
         if (s.in_eden(a)) {
-            if (a < s.eden_lo + kHeaderBytes || a >= alloc_.top) return false;
+            if (a < s.eden_lo + kHeaderBytes || a >= alloc_->top) return false;
             if (a >= s.eden_synced) s.sync_eden_starts();
         } else {
             const int w = s.in_survivor(0, a) ? 0 : 1;
@@ -154,7 +154,7 @@ void Heap::for_each_object(const std::function<void(uintptr_t)>& fn) const {
             }
         }
     };
-    walk_bits(s.young_starts.data(), s.young_bit(s.eden_lo), s.young_bit(alloc_.top), s.eden_lo);
+    walk_bits(s.young_starts.data(), s.young_bit(s.eden_lo), s.young_bit(alloc_->top), s.eden_lo);
     for (int w = 0; w < 2; ++w) {
         walk_bits(s.young_starts.data(), s.young_bit(s.survivor_lo[w]), s.young_bit(s.survivor_top[w]), s.eden_lo);
     }
@@ -202,6 +202,9 @@ void verify_visit(Tracer& t, uint64_t* slot, uint64_t word) {
     Heap& heap = t.heap();
     if (!heap.is_reference_tag(word)) return;
     const uintptr_t a = static_cast<uintptr_t>(word & kAddressMask);
+    // An address outside the heap is not a reference to it (a host's
+    // immortal data, say).
+    if (!heap.contains(a)) return;
     if (!heap.is_valid_object(a)) {
         char buf[160];
         std::snprintf(buf, sizeof buf, "slot %p holds 0x%016llx, inside the heap but not an object",

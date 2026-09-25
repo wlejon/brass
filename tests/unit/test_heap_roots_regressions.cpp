@@ -1,7 +1,6 @@
 // Regressions from bug sweep 17: interpreter moves, the heap a fresh Tier-0
 // interpreter (deoptimization, native-to-Tier-0 call) allocates from, and
-// the roots a collection on the thread's heap sees (and a host runtime's
-// own collector could ask for through brass_enumerate_thread_roots).
+// the roots a collection on the thread's heap sees.
 #include "test_framework.hpp"
 #include <brass/mir/module.hpp>
 #include <brass/mir/parser.hpp>
@@ -118,15 +117,14 @@ FunctionHandle* install2(FunctionDispatchTable& prog, Module& mod, const char* n
 
 // A heap bound to the thread whose freed memory is poisoned (a stale slot
 // reads 0xDB bytes), plus a root source that visits nothing but, at every
-// collection, asks brass for the thread's roots the way a host runtime's
-// own collector would, and counts the slots naming the watched object.
+// collection, asks brass for the thread roots the heap visits and counts the
+// slots naming the watched object.
 struct RootCountHeap {
     gc::Heap heap;
     gc::HeapScope bind{heap};
     gc::Heap::RootSourceId source = 0;
     uintptr_t watched = 0;
     size_t thread_roots_naming = 0;
-    size_t enumerated_naming = 0;
     int collects = 0;
 
     RootCountHeap() {
@@ -144,11 +142,6 @@ struct RootCountHeap {
         size_t naming = 0;
         for (uintptr_t* s : roots) if (s && *s == watched) ++naming;
         thread_roots_naming = std::max(thread_roots_naming, naming);
-        roots.clear();
-        brass_enumerate_thread_roots(0, 0, roots);
-        naming = 0;
-        for (uintptr_t* s : roots) if (s && *s == watched) ++naming;
-        enumerated_naming = std::max(enumerated_naming, naming);
     }
 };
 
@@ -167,10 +160,8 @@ void host_roots_case(bool fast) {
     CHECK_EQ(r.as_i64(), 42);
     CHECK_EQ(prog.pipeline().tier2_deopts(), 1u);
     REQUIRE(heap.collects >= 1);
-    // The fresh interpreter's frame holding %o is a thread root, found both
-    // by the heap (the read above) and through the thread-root enumeration.
+    // The fresh interpreter's frame holding %o is a thread root.
     CHECK(heap.thread_roots_naming >= 1u);
-    CHECK(heap.enumerated_naming >= 1u);
 }
 
 void generational_case(bool fast) {

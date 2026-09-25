@@ -65,12 +65,12 @@ struct HeapConfig {
     bool verify = false;  // verify the heap before and after every collection
     bool poison = false;  // overwrite freed memory with 0xDB after every collection
     // The high-16-bit tags under which a word slot's low 48 bits are a
-    // reference. Empty: every tag (a raw gcref has tag 0).
+    // reference. Empty: every tag. Otherwise exactly the tags listed: a raw
+    // gcref has tag 0, so a heap that holds raw gcrefs lists 0, and one whose
+    // references are all tagged (NaN-boxed values) leaves it out, so raw
+    // pointers and small numbers in its slots and registers are never taken
+    // for references.
     std::vector<uint16_t> reference_tags;
-    // Any allocation is fatal and collections do nothing: for a host that
-    // keeps every object in its own collector, so that brass's runtime and
-    // interpreters can never place one outside it.
-    bool forbid_allocation = false;
     // BRASS_GC_STRESS (minor|full|alternate|1), BRASS_GC_VERIFY=1 and
     // BRASS_GC_POISON=1 override the fields above when set.
     bool read_environment = true;
@@ -117,9 +117,9 @@ public:
     uintptr_t allocate(size_t bytes, LayoutId layout, uint32_t flags = 0, uint8_t host_bits = 0) {
         const size_t total = payload_bytes_for(bytes) + kHeaderBytes;
         if (flags == 0 && total <= max_young_total_ &&
-            total <= static_cast<size_t>(alloc_.end - alloc_.top)) {
-            const uintptr_t at = alloc_.top;
-            alloc_.top = at + total;
+            total <= static_cast<size_t>(alloc_->end - alloc_->top)) {
+            const uintptr_t at = alloc_->top;
+            alloc_->top = at + total;
             auto* header = reinterpret_cast<ObjectHeader*>(at);
             header->size = static_cast<uint32_t>(total - kHeaderBytes);
             header->layout = layout;
@@ -149,7 +149,13 @@ public:
         uintptr_t top = 0;
         uintptr_t end = 0;
     };
-    AllocationBuffer* allocation_buffer() noexcept { return &alloc_; }
+    AllocationBuffer* allocation_buffer() noexcept { return alloc_; }
+    // Moves the bump region into `buffer` (null: back into the heap's own),
+    // carrying over its current top and end. A host whose generated code
+    // reaches the region through its own per-thread block keeps it there.
+    // The buffer must outlive the binding; the heap reads and writes it for
+    // every allocation and collection until rebound.
+    void bind_allocation_buffer(AllocationBuffer* buffer) noexcept;
 
     // ---- Collection --------------------------------------------------------
     void collect(CollectionKind kind = CollectionKind::Full) { collect_at(kind, 0, 0); }
@@ -182,6 +188,13 @@ public:
             remember_interior(address);
         }
     }
+    // The barrier for a bulk write (a memcpy of many words) into `object`,
+    // which must be an object's payload address: when the object is old, its
+    // card is dirtied unconditionally, so the next minor collection rescans
+    // every slot of it.
+    void remember(uintptr_t object) noexcept {
+        if (object - old_lo_ < old_span_) cards_[(object - old_lo_) >> kCardShift] = kCardDirty;
+    }
     // Payload word `index` of `object`, and a store to it with its barrier.
     [[nodiscard]] static uint64_t load(uintptr_t object, size_t index) noexcept {
         return reinterpret_cast<const uint64_t*>(object)[index];
@@ -194,6 +207,10 @@ public:
     [[nodiscard]] bool is_old(uintptr_t address) const noexcept { return address - old_lo_ < old_span_; }
     // Whether `address` lies inside this heap's reservation.
     [[nodiscard]] bool contains(uintptr_t address) const noexcept { return address - heap_lo_ < heap_span_; }
+    // The reservation: every object this heap ever holds lies in
+    // [reservation_base(), reservation_base() + reservation_bytes()).
+    [[nodiscard]] uintptr_t reservation_base() const noexcept { return heap_lo_; }
+    [[nodiscard]] size_t reservation_bytes() const noexcept { return heap_span_; }
     [[nodiscard]] bool is_reference_tag(uint64_t word) const noexcept {
         if (!ref_tags_) return true;
         const uint64_t tag = word >> kTagShift;
@@ -287,7 +304,8 @@ private:
 
     void remember_interior(uintptr_t address) noexcept;
 
-    AllocationBuffer alloc_;
+    AllocationBuffer own_alloc_;
+    AllocationBuffer* alloc_ = &own_alloc_;
     size_t max_young_total_ = 0;
     uintptr_t young_lo_ = 0;
     uintptr_t young_span_ = 0;

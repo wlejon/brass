@@ -412,7 +412,7 @@ void Collector::collect(Heap& heap, CollectionKind kind) {
     GcState g(s, heap, kind);
     g.from = s.from_survivor;
     g.to = 1 - g.from;
-    g.eden_top = heap.alloc_.top;
+    g.eden_top = heap.alloc_->top;
     g.from_top = s.survivor_top[g.from];
     s.gc_eden_top = g.eden_top;
     s.gc_from_top = g.from_top;

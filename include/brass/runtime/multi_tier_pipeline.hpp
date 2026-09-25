@@ -302,7 +302,9 @@ private:
                                  uint32_t resume_id = 0);
     void setup_fast_interpreter(FastInterpreter& interp, Module& mod);
     // The Tier-0 interpreter kept across execute() calls on one module,
-    // rebuilt when the module or the registered symbols change.
+    // rebuilt when the module or the registered symbols change. It runs the
+    // executes whose current heap is its heap (a private heap of its own:
+    // those with none); the rest get an interpreter of their own.
     FastInterpreter& persistent_fast_interpreter(Module& mod);
 
     FunctionDispatchTable* const table_;

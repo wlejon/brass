@@ -107,7 +107,6 @@ Heap::Heap(const HeapConfig& config) : s_(std::make_unique<HeapState>(*this)) {
 
     if (!s.config.reference_tags.empty()) {
         s.reference_tag_bits.assign(65536 / 64, 0);
-        s.reference_tag_bits[0] |= 1;  // a raw gcref is always a reference
         for (uint16_t tag : s.config.reference_tags) {
             s.reference_tag_bits[tag >> 6] |= uint64_t{1} << (tag & 63);
         }
@@ -158,18 +157,18 @@ void Heap::set_current(Heap* heap) noexcept { t_current_heap = heap; }
 namespace detail {
 
 void HeapState::reset_eden() noexcept {
-    heap.alloc_.top = eden_lo;
+    heap.alloc_->top = eden_lo;
     eden_synced = eden_lo;
     update_fast_limit();
 }
 
 void HeapState::update_fast_limit() noexcept {
-    heap.alloc_.end = (stress != StressMode::None || config.forbid_allocation) ? heap.alloc_.top : eden_hi;
+    heap.alloc_->end = stress != StressMode::None ? heap.alloc_->top : eden_hi;
 }
 
 void HeapState::sync_eden_starts() noexcept {
     uintptr_t p = eden_synced;
-    const uintptr_t top = heap.alloc_.top;
+    const uintptr_t top = heap.alloc_->top;
     while (p < top) {
         const auto* header = reinterpret_cast<const ObjectHeader*>(p);
         set_young_start(p + kHeaderBytes);
@@ -195,16 +194,6 @@ uintptr_t Heap::allocate_at(size_t bytes, LayoutId layout, uint32_t flags, uint8
     if (s.collecting) {
         detail::gc_fatal("allocation during a collection (a trace function, root source or "
                          "post-collection hook allocated on the heap it runs for)");
-    }
-    if (s.config.forbid_allocation) {
-        std::fprintf(stderr,
-                     "brass: fatal: a %zu-byte object (layout %u) was allocated on a heap whose "
-                     "configuration forbids allocation (HeapConfig::forbid_allocation: the host "
-                     "keeps every object in its own heap), caller fp 0x%llx ip 0x%llx\n",
-                     bytes, static_cast<unsigned>(layout), static_cast<unsigned long long>(caller_fp),
-                     static_cast<unsigned long long>(caller_ip));
-        std::fflush(stderr);
-        std::abort();
     }
     if (bytes > (size_t{1} << 31)) throw std::bad_alloc();
     const size_t payload = payload_bytes_for(bytes);
@@ -245,9 +234,9 @@ uintptr_t Heap::allocate_at(size_t bytes, LayoutId layout, uint32_t flags, uint8
     }
 
     for (int attempt = 0; attempt < 3; ++attempt) {
-        if (s.eden_hi - alloc_.top >= total) {
-            const uintptr_t at = alloc_.top;
-            alloc_.top = at + total;
+        if (s.eden_hi - alloc_->top >= total) {
+            const uintptr_t at = alloc_->top;
+            alloc_->top = at + total;
             s.update_fast_limit();
             auto* h = reinterpret_cast<ObjectHeader*>(at);
             h->size = static_cast<uint32_t>(payload);
@@ -270,7 +259,6 @@ void Heap::collect_at(CollectionKind kind, uintptr_t caller_fp, uintptr_t caller
         detail::gc_fatal("a collection was requested during a collection (a trace function, root "
                          "source or post-collection hook allocated or collected)");
     }
-    if (s.config.forbid_allocation) return;  // it holds no object
     MutatorFrame frame(s, caller_fp, caller_ip);
     Collector::collect(*this, kind);
     if (kind == CollectionKind::Minor && s.full_requested) Collector::collect(*this, CollectionKind::Full);
@@ -285,7 +273,7 @@ void Heap::collect_at(CollectionKind kind, uintptr_t caller_fp, uintptr_t caller
 
 void Heap::safepoint_at(uintptr_t caller_fp, uintptr_t caller_ip) {
     HeapState& s = *s_;
-    if (s.collecting || s.config.forbid_allocation) return;
+    if (s.collecting) return;
     if (s.stress != StressMode::None) {
         ++s.stress_counter;
         const bool full = s.stress == StressMode::Full ||
@@ -381,7 +369,7 @@ uint64_t Heap::relocation_epoch() const noexcept { return s_->relocation_epoch; 
 size_t Heap::young_used_bytes() const noexcept {
     const HeapState& s = *s_;
     const int from = s.from_survivor;
-    return (alloc_.top - s.eden_lo) + (s.survivor_top[from] - s.survivor_lo[from]);
+    return (alloc_->top - s.eden_lo) + (s.survivor_top[from] - s.survivor_lo[from]);
 }
 
 size_t Heap::old_used_bytes() const noexcept {
@@ -396,7 +384,14 @@ size_t Heap::committed_bytes() const noexcept {
 }
 
 uint64_t Heap::allocated_bytes() const noexcept {
-    return s_->eden_bytes_retired + (alloc_.top - s_->eden_lo) + s_->old_direct_bytes;
+    return s_->eden_bytes_retired + (alloc_->top - s_->eden_lo) + s_->old_direct_bytes;
+}
+
+void Heap::bind_allocation_buffer(AllocationBuffer* buffer) noexcept {
+    AllocationBuffer* next = buffer ? buffer : &own_alloc_;
+    if (next == alloc_) return;
+    *next = *alloc_;
+    alloc_ = next;
 }
 
 runtime::CoroFrameRegistry& Heap::coro_frames() {

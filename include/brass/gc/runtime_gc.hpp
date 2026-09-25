@@ -30,14 +30,6 @@ const ModuleStackMap* brass_stack_maps_for_caller(uintptr_t caller_ip) noexcept;
 void brass_append_generated_frame_roots(uintptr_t caller_fp, uintptr_t caller_ip,
                                         std::vector<uintptr_t*>& roots);
 
-// Every root slot brass holds on this thread for a collector that is not
-// gc::Heap (a host runtime with its own heap): the generated frames from
-// (caller_fp, caller_ip) upward, the native frames registered under re-entered
-// interpreter code (native_frames.hpp), and the frames of the interpreters
-// running on this thread. gc::Heap gathers the same set itself.
-void brass_enumerate_thread_roots(uintptr_t caller_fp, uintptr_t caller_ip,
-                                  std::vector<uintptr_t*>& roots);
-
 } // namespace brass
 
 // The C symbols generated code calls. brass_gc_alloc, brass_gc_safepoint and

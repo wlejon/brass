@@ -3,8 +3,6 @@
 #include <brass/gc/heap.hpp>
 #include <brass/gc/native_frames.hpp>
 #include <brass/gc/stack_walker.hpp>
-#include <brass/interpreter/interpreter.hpp>
-#include <brass/vm/fast_interpreter.hpp>
 
 #include <cstdio>
 #include <cstdlib>
@@ -76,13 +74,6 @@ void brass_append_generated_frame_roots(uintptr_t caller_fp, uintptr_t caller_ip
     const auto* maps = walk_maps(caller_ip);
     if (!maps) return;
     brass_stack_walk(caller_fp, caller_ip, *maps, &push_slot, &roots);
-}
-
-void brass_enumerate_thread_roots(uintptr_t caller_fp, uintptr_t caller_ip, std::vector<uintptr_t*>& roots) {
-    brass_append_generated_frame_roots(caller_fp, caller_ip, roots);
-    brass_append_native_frame_roots(roots);
-    if (Interpreter* interp = Interpreter::active_on_thread()) interp->collect_all_roots(roots);
-    if (FastInterpreter* fast = FastInterpreter::current()) fast->collect_all_roots(roots);
 }
 
 } // namespace brass

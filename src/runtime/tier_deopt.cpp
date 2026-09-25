@@ -211,8 +211,8 @@ RuntimeValue MultiTierPipeline::run_fresh_tier0(FunctionDispatchTable& table, co
     // Either interpreter allocates from the thread's current heap, which the
     // native code on this thread allocates from and whose objects it and its
     // caller hold; its frames are that heap's roots. They are also published
-    // as thread roots (brass_append_native_frame_roots), for a host runtime's
-    // own collector (brass_enumerate_thread_roots).
+    // as thread roots (brass_append_native_frame_roots), which every
+    // collection on the thread visits whichever heap the interpreter uses.
     auto run = [&](auto& interp) {
         using Interp = std::remove_reference_t<decltype(interp)>;
         ThreadRootsScope roots([](void* ctx, std::vector<uintptr_t*>& out) {

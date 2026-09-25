@@ -651,6 +651,7 @@ RuntimeValue MultiTierPipeline::execute(
     RuntimeValue result;
 
     if (config_.use_fast_interpreter()) {
+        bool ran = false;
         bool expected = false;
         if (fast_interp_busy_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
             struct Release {
@@ -658,13 +659,23 @@ RuntimeValue MultiTierPipeline::execute(
                 ~Release() { busy.store(false, std::memory_order_release); }
             } release{fast_interp_busy_};
             FastInterpreter& fast_interp = persistent_fast_interpreter(mod);
-            // Each execute starts with a fresh TLS block, as a new
-            // interpreter would.
-            fast_interp.set_tls_block(0);
-            result = handle->call(fast_interp, args);
-        } else {
-            // Re-entrant or concurrent execute: the kept interpreter is in
-            // use, so this one gets its own.
+            // The kept interpreter's frames are roots of the heap it was
+            // built on: a shared heap belongs to the thread that built it,
+            // and any other thread runs in an interpreter of its own, on its
+            // current heap or a private one.
+            const gc::Heap* here = gc::Heap::current();
+            if (here == &fast_interp.heap() || (!here && fast_interp.owns_heap())) {
+                // Each execute starts with a fresh TLS block, as a new
+                // interpreter would.
+                fast_interp.set_tls_block(0);
+                result = handle->call(fast_interp, args);
+                ran = true;
+            }
+        }
+        if (!ran) {
+            // Re-entrant or concurrent execute, or one on another heap's
+            // thread: the kept interpreter is not this call's, so it gets
+            // its own, on the calling thread's heap.
             FastInterpreter fast_interp;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
