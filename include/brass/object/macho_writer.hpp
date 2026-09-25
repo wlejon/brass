@@ -1,6 +1,7 @@
 #pragma once
 
 #include <brass/object/object_writer.hpp>
+#include <optional>
 #include <vector>
 #include <string>
 #include <string_view>
@@ -34,6 +35,11 @@ namespace macho {
     constexpr uint32_t LC_LOAD_DYLINKER  = 0xe;
     constexpr uint32_t LC_DYLD_INFO_ONLY = 0x80000022;
     constexpr uint32_t LC_BUILD_VERSION  = 0x32;
+
+    // LC_BUILD_VERSION platforms.
+    constexpr uint32_t PLATFORM_MACOS        = 1;
+    constexpr uint32_t PLATFORM_IOS          = 2;
+    constexpr uint32_t PLATFORM_IOSSIMULATOR = 7;
 
     constexpr int32_t VM_PROT_NONE    = 0;
     constexpr int32_t VM_PROT_READ    = 1;
@@ -88,15 +94,47 @@ namespace macho {
     constexpr uint32_t ARM64_RELOC_ADDEND              = 10;
 }
 
+// What LC_BUILD_VERSION says an image is built for: the platform and the
+// minimum OS and SDK versions, each packed as major << 16 | minor << 8 |
+// patch (X.Y.Z). ld warns about an object without one ("no platform load
+// command found") and checks its minimum against the link's.
+//
+// brass's Target has no iOS: an arm64 iOS or simulator object is an
+// aarch64-macos object (the same Darwin calling convention) with platform
+// PLATFORM_IOS or PLATFORM_IOSSIMULATOR here.
+struct MachOBuildVersion {
+    uint32_t platform = macho::PLATFORM_MACOS;
+    uint32_t minos = 0;  // 0: the default below
+    uint32_t sdk = 0;    // 0: the default below
+
+    // Parses "X", "X.Y" or "X.Y.Z" (a deployment target); nullopt if it is not one.
+    static std::optional<uint32_t> parse_version(std::string_view text);
+
+    // `requested` with its zero fields filled in. The minimum OS is, in
+    // order: the deployment-target environment variable a compiler and ld
+    // read (MACOSX_DEPLOYMENT_TARGET, or IPHONEOS_DEPLOYMENT_TARGET for iOS
+    // and its simulator); on macOS, the deployment target brass itself was
+    // built for, which is the project's when brass builds in the same tree
+    // (CMAKE_OSX_DEPLOYMENT_TARGET), so its objects link with the others
+    // without warnings; else 11.0 for arm64 (its first macOS), 10.15 for
+    // x86_64, 14.0 for iOS. An arm64 macOS minimum is never below 11.0. The
+    // SDK is the one brass was built against on macOS, and never below the
+    // minimum.
+    static MachOBuildVersion resolve(const Target& target, const MachOBuildVersion& requested);
+};
+
 class MachOWriter {
 public:
     explicit MachOWriter(const ObjectFile& obj);
+    // `build_version`'s zero fields are resolved (MachOBuildVersion::resolve).
+    MachOWriter(const ObjectFile& obj, const MachOBuildVersion& build_version);
 
     std::vector<uint8_t> write();
     bool write_to_file(const std::string& path);
 
 private:
     ObjectFile obj_;
+    MachOBuildVersion build_version_;
 };
 
 std::vector<uint8_t> emit_macho_object(const ObjectFile& obj);

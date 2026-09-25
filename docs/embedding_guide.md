@@ -222,6 +222,16 @@ void emit_relocatable_object(BrassModule mod) {
 }
 ```
 
+A Mach-O object or `.dylib` carries an `LC_BUILD_VERSION` (without one, `ld`
+warns "no platform load command found"). Its minimum OS is
+`MACOSX_DEPLOYMENT_TARGET` from the environment when set, else the deployment
+target brass itself was compiled for (so a brass built in the same CMake tree
+as the host follows its `CMAKE_OSX_DEPLOYMENT_TARGET`), else 11.0 on arm64 and
+10.15 on x86_64. From C++, `object::MachOBuildVersion` (`MachOWriter`'s second
+argument, `LinkerOptions::macho_build_version`) sets the platform and
+versions explicitly, including `PLATFORM_IOS` / `PLATFORM_IOSSIMULATOR` for an
+iOS object built from an `aarch64_macos()` (Darwin ABI) target.
+
 ---
 
 ## 5. Standalone AOT Shared Library Linking

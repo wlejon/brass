@@ -47,6 +47,7 @@ std::vector<uint8_t> AotLinker::link(const object::ObjectFile& obj, const Linker
         macho_opts.explicit_exports = options.explicit_exports;
         macho_opts.imports = options.imports;
         macho_opts.rpaths = options.rpaths;
+        macho_opts.build_version = options.macho_build_version;
         return MachODylibWriter::emit(obj, macho_opts, error_out);
     } else {
         ElfSoOptions elf_opts;

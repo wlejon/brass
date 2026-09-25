@@ -3,6 +3,7 @@
 #include <brass/target/target.hpp>
 #include <brass/mir/module.hpp>
 #include <brass/object/object_writer.hpp>
+#include <brass/object/macho_writer.hpp>
 #include <brass/target/image_imports.hpp>
 #include <string>
 #include <vector>
@@ -32,6 +33,9 @@ struct LinkerOptions {
     // Run-time search paths for those libraries (DT_RUNPATH / LC_RPATH);
     // PE has no equivalent and ignores them.
     std::vector<std::string> rpaths;
+    // A Mach-O image's LC_BUILD_VERSION (platform, minimum OS, SDK); zero
+    // fields are resolved (object::MachOBuildVersion::resolve).
+    object::MachOBuildVersion macho_build_version;
 };
 
 class AotLinker {

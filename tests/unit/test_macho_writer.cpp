@@ -67,7 +67,7 @@ TEST_CASE("Mach-O Writer - Header and Section Table Layout") {
     CHECK_EQ(cputype, macho::CPU_TYPE_X86_64);
     CHECK_EQ(cpusubtype, macho::CPU_SUBTYPE_X86_64_ALL);
     CHECK_EQ(filetype, macho::MH_OBJECT);
-    CHECK_EQ(ncmds, 3u); // LC_SEGMENT_64, LC_SYMTAB, LC_DYSYMTAB
+    CHECK_EQ(ncmds, 4u); // LC_SEGMENT_64, LC_BUILD_VERSION, LC_SYMTAB, LC_DYSYMTAB
     CHECK(sizeofcmds > 0);
 
     // 2. Read LC_SEGMENT_64
@@ -112,8 +112,17 @@ TEST_CASE("Mach-O Writer - Header and Section Table Layout") {
     CHECK(found_text);
     CHECK(found_eh_frame);
 
-    // 3. Read LC_SYMTAB
+    // 3. LC_BUILD_VERSION: ld warns about an object without one
     cmd_ptr += seg_cmdsize;
+    REQUIRE_EQ(read_u32(cmd_ptr + 0), macho::LC_BUILD_VERSION);
+    CHECK_EQ(read_u32(cmd_ptr + 4), 24u);
+    CHECK_EQ(read_u32(cmd_ptr + 8), macho::PLATFORM_MACOS);
+    CHECK(read_u32(cmd_ptr + 12) >= 0x000A0F00u);  // minos: at least 10.15
+    CHECK(read_u32(cmd_ptr + 16) >= read_u32(cmd_ptr + 12));  // sdk
+    CHECK_EQ(read_u32(cmd_ptr + 20), 0u);  // ntools
+    cmd_ptr += 24;
+
+    // 4. Read LC_SYMTAB
     uint32_t symtab_cmd = read_u32(cmd_ptr + 0);
     uint32_t symtab_cmdsize = read_u32(cmd_ptr + 4);
     CHECK_EQ(symtab_cmd, macho::LC_SYMTAB);
@@ -345,4 +354,51 @@ TEST_CASE("Mach-O Dylib Writer - Direct Emission Structure") {
     CHECK(has_dyld_info);
     CHECK(has_symtab);
     CHECK(has_dysymtab);
+}
+
+TEST_CASE("Mach-O Writer - LC_BUILD_VERSION carries the requested or resolved platform and versions") {
+    CHECK_EQ(MachOBuildVersion::parse_version("11").value_or(0), 0x000B0000u);
+    CHECK_EQ(MachOBuildVersion::parse_version("10.15").value_or(0), 0x000A0F00u);
+    CHECK_EQ(MachOBuildVersion::parse_version("13.3.1").value_or(0), 0x000D0301u);
+    CHECK(!MachOBuildVersion::parse_version(""));
+    CHECK(!MachOBuildVersion::parse_version("11."));
+    CHECK(!MachOBuildVersion::parse_version("1.2.3.4"));
+    CHECK(!MachOBuildVersion::parse_version("11.256"));
+    CHECK(!MachOBuildVersion::parse_version("v11"));
+
+    // An arm64 macOS minimum is never below 11.0, its first release.
+    MachOBuildVersion old;
+    old.minos = 0x000A0D00u;
+    CHECK_EQ(MachOBuildVersion::resolve(Target::aarch64_macos(), old).minos, 0x000B0000u);
+    CHECK_EQ(MachOBuildVersion::resolve(Target::x64_macos(), old).minos, 0x000A0D00u);
+
+    Module mod("test_macho_bv");
+    Function* fn = mod.create_function("bv_fn", Type::i64(), {Type::i64()});
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    b.build_ret(b.add_block_param(entry, Type::i64()));
+    fn->rebuild_cfg_predecessors();
+    REQUIRE(verify_function(*fn));
+    ObjectFile obj = compile_module_to_object(mod, Target::aarch64_macos());
+
+    // An iOS simulator object: the same code, another platform.
+    MachOBuildVersion sim;
+    sim.platform = macho::PLATFORM_IOSSIMULATOR;
+    sim.minos = 0x000F0200u;
+    std::vector<uint8_t> bytes = MachOWriter(obj, sim).write();
+    REQUIRE(bytes.size() >= 32);
+    const uint32_t ncmds = read_u32(bytes.data() + 16);
+    const uint8_t* cmd = bytes.data() + 32;
+    bool found = false;
+    for (uint32_t i = 0; i < ncmds; ++i) {
+        if (read_u32(cmd) == macho::LC_BUILD_VERSION) {
+            found = true;
+            CHECK_EQ(read_u32(cmd + 8), macho::PLATFORM_IOSSIMULATOR);
+            CHECK_EQ(read_u32(cmd + 12), 0x000F0200u);
+            CHECK(read_u32(cmd + 16) >= 0x000F0200u);
+        }
+        cmd += read_u32(cmd + 4);
+    }
+    CHECK(found);
 }

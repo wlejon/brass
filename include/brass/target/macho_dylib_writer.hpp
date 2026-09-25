@@ -1,6 +1,7 @@
 #pragma once
 
 #include <brass/object/object_writer.hpp>
+#include <brass/object/macho_writer.hpp>
 #include <brass/target/image_imports.hpp>
 #include <string>
 #include <vector>
@@ -19,6 +20,8 @@ struct MachODylibOptions {
     std::vector<ImportLibrary> imports;
     // LC_RPATH entries, in order.
     std::vector<std::string> rpaths;
+    // LC_BUILD_VERSION; zero fields are resolved (MachOBuildVersion::resolve).
+    object::MachOBuildVersion build_version;
 };
 
 class MachODylibWriter {

@@ -9,6 +9,10 @@
 #include <unordered_map>
 #include <algorithm>
 #include <bit>
+#include <cstdlib>
+#if defined(__APPLE__)
+#include <Availability.h>
+#endif
 
 namespace brass::object {
 
@@ -210,8 +214,84 @@ void encode_macho_reloc(MachOSectionEntry& s, const ObjectRelocation& r, bool is
 
 } // namespace
 
+std::optional<uint32_t> MachOBuildVersion::parse_version(std::string_view text) {
+    uint32_t parts[3] = {0, 0, 0};
+    size_t n = 0;
+    size_t i = 0;
+    while (true) {
+        if (n == 3 || i >= text.size() || text[i] < '0' || text[i] > '9') return std::nullopt;
+        uint32_t v = 0;
+        while (i < text.size() && text[i] >= '0' && text[i] <= '9') {
+            v = v * 10 + static_cast<uint32_t>(text[i] - '0');
+            if (v > 0xFFFF) return std::nullopt;
+            ++i;
+        }
+        parts[n++] = v;
+        if (i == text.size()) break;
+        if (text[i] != '.') return std::nullopt;
+        ++i;
+    }
+    if (parts[1] > 0xFF || parts[2] > 0xFF) return std::nullopt;
+    return parts[0] << 16 | parts[1] << 8 | parts[2];
+}
+
+namespace {
+
+// A version as Availability.h writes it from 10.10 / iOS 10 on: decimal
+// XXYYZZ (110000 is 11.0). 0 if brass is not built for that platform.
+constexpr uint32_t availability_version(long v) {
+    return v <= 0 ? 0u
+                  : static_cast<uint32_t>((v / 10000) << 16 | ((v / 100) % 100) << 8 | (v % 100));
+}
+
+#if defined(__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__)
+constexpr uint32_t kBuiltMacosMin = availability_version(__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__);
+#else
+constexpr uint32_t kBuiltMacosMin = 0;
+#endif
+#if defined(__APPLE__) && defined(__MAC_OS_X_VERSION_MAX_ALLOWED)
+constexpr uint32_t kBuiltMacosSdk = availability_version(__MAC_OS_X_VERSION_MAX_ALLOWED);
+#else
+constexpr uint32_t kBuiltMacosSdk = 0;
+#endif
+#if defined(__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__)
+constexpr uint32_t kBuiltIosMin = availability_version(__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__);
+#else
+constexpr uint32_t kBuiltIosMin = 0;
+#endif
+#if defined(__APPLE__) && defined(__IPHONE_OS_VERSION_MAX_ALLOWED)
+constexpr uint32_t kBuiltIosSdk = availability_version(__IPHONE_OS_VERSION_MAX_ALLOWED);
+#else
+constexpr uint32_t kBuiltIosSdk = 0;
+#endif
+
+uint32_t env_version(const char* name) {
+    const char* v = std::getenv(name);
+    if (!v || !*v) return 0;
+    return MachOBuildVersion::parse_version(v).value_or(0);
+}
+
+} // namespace
+
+MachOBuildVersion MachOBuildVersion::resolve(const Target& target, const MachOBuildVersion& requested) {
+    MachOBuildVersion out = requested;
+    const bool macos = out.platform == macho::PLATFORM_MACOS;
+    if (out.minos == 0) {
+        out.minos = env_version(macos ? "MACOSX_DEPLOYMENT_TARGET" : "IPHONEOS_DEPLOYMENT_TARGET");
+    }
+    if (out.minos == 0) out.minos = macos ? kBuiltMacosMin : kBuiltIosMin;
+    if (out.minos == 0) out.minos = !macos ? 0x000E0000u : target.is_aarch64() ? 0x000B0000u : 0x000A0F00u;
+    if (macos && target.is_aarch64() && out.minos < 0x000B0000u) out.minos = 0x000B0000u;
+    if (out.sdk == 0) out.sdk = macos ? kBuiltMacosSdk : kBuiltIosSdk;
+    if (out.sdk < out.minos) out.sdk = out.minos;
+    return out;
+}
+
 MachOWriter::MachOWriter(const ObjectFile& obj)
-    : obj_(obj) {}
+    : obj_(obj), build_version_(MachOBuildVersion::resolve(obj.target, MachOBuildVersion{})) {}
+
+MachOWriter::MachOWriter(const ObjectFile& obj, const MachOBuildVersion& build_version)
+    : obj_(obj), build_version_(MachOBuildVersion::resolve(obj.target, build_version)) {}
 
 std::vector<uint8_t> MachOWriter::write() {
     ObjectFile working_obj = obj_;
@@ -398,7 +478,8 @@ std::vector<uint8_t> MachOWriter::write() {
     uint32_t segment_cmd_size = 72 + nsects * 80;
     uint32_t symtab_cmd_size = 24;
     uint32_t dysymtab_cmd_size = 80;
-    uint32_t sizeofcmds = segment_cmd_size + symtab_cmd_size + dysymtab_cmd_size;
+    uint32_t build_version_cmd_size = 24;
+    uint32_t sizeofcmds = segment_cmd_size + build_version_cmd_size + symtab_cmd_size + dysymtab_cmd_size;
 
     uint32_t cur_file_offset = 32 + sizeofcmds; // mach_header_64 (32 bytes) + cmds
     cur_file_offset = (cur_file_offset + 15) & ~15u; // 16-byte align section data
@@ -496,7 +577,7 @@ std::vector<uint8_t> MachOWriter::write() {
     write_u32(out, cpu_type);
     write_u32(out, cpu_subtype);
     write_u32(out, macho::MH_OBJECT);
-    write_u32(out, 3); // ncmds
+    write_u32(out, 4); // ncmds
     write_u32(out, sizeofcmds);
     write_u32(out, macho::MH_SUBSECTIONS_VIA_SYMBOLS); // flags
     write_u32(out, 0); // reserved
@@ -529,6 +610,14 @@ std::vector<uint8_t> MachOWriter::write() {
         write_u32(out, 0); // reserved2
         write_u32(out, 0); // reserved3
     }
+
+    // Write LC_BUILD_VERSION (24 bytes, no tools), where clang puts it
+    write_u32(out, macho::LC_BUILD_VERSION);
+    write_u32(out, build_version_cmd_size);
+    write_u32(out, build_version_.platform);
+    write_u32(out, build_version_.minos);
+    write_u32(out, build_version_.sdk);
+    write_u32(out, 0); // ntools
 
     // Write LC_SYMTAB (24 bytes)
     write_u32(out, macho::LC_SYMTAB);

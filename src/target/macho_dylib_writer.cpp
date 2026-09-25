@@ -559,11 +559,12 @@ std::vector<uint8_t> MachODylibWriter::write() {
     write_u32(cmds, static_cast<uint32_t>(indirect.size() / 4));
     for (int i = 0; i < 4; ++i) write_u32(cmds, 0);   // extrel, locrel
 
+    const MachOBuildVersion build_version = MachOBuildVersion::resolve(working_obj.target, options_.build_version);
     write_u32(cmds, macho::LC_BUILD_VERSION);
     write_u32(cmds, 24);
-    write_u32(cmds, 1);            // PLATFORM_MACOS
-    write_u32(cmds, 0x000b0000);   // minos 11.0
-    write_u32(cmds, 0x000e0000);   // sdk 14.0
+    write_u32(cmds, build_version.platform);
+    write_u32(cmds, build_version.minos);
+    write_u32(cmds, build_version.sdk);
     write_u32(cmds, 0);            // ntools
 
     write_u32(cmds, LC_UUID);
