@@ -94,6 +94,61 @@ std::optional<OsrEntryPlan> plan_osr_entry(const Function& fn, const BasicBlock&
     return plan;
 }
 
+bool region_has_call(const OsrEntryPlan& plan) {
+    for (const BasicBlock* bb : plan.region) {
+        for (const Instruction* inst : *const_cast<BasicBlock*>(bb)) {
+            if (inst && is_call(inst->opcode())) return true;
+        }
+    }
+    return false;
+}
+
+namespace {
+
+// Every backedge to `header` goes through a poll of the leave flag: set, the
+// frame's live values go back to the buffer and the function returns.
+void add_leave_check(const OsrEntryPlan& plan, Function& out, Builder& b, Value* buffer, Value* flag_addr,
+                     BasicBlock* header, const ir::ValueMap& values, const std::vector<BasicBlock*>& latches) {
+    BasicBlock* poll = ir::new_block(out, "osr.poll");
+    BasicBlock* leave = ir::new_block(out, "osr.leave");
+    std::vector<Value*> poll_params;
+    std::vector<Value*> leave_params;
+    for (const Value* p : plan.block->params()) {
+        poll_params.push_back(ir::new_block_param(out, poll, p->type()));
+        leave_params.push_back(ir::new_block_param(out, leave, p->type()));
+    }
+    for (BasicBlock* bb : latches) {
+        Instruction* term = bb->terminator();
+        if (!term) continue;
+        for_each_edge(*term, [&](BranchTarget& t) {
+            if (t.block == header) t.block = poll;
+        });
+    }
+
+    b.position_at_end(poll);
+    Value* flag = b.build_load(Type::i64(), flag_addr);
+    Value* set = b.build_ne(flag, b.build_iconst_i64(0));
+    const Span<Value* const> args(poll_params.data(), poll_params.size());
+    b.build_br_if(set, leave, args, header, args);
+
+    b.position_at_end(leave);
+    for (size_t i = 0; i < plan.live_ins.size(); ++i) {
+        const auto& li = plan.live_ins[i];
+        if (li.rematerialize) continue;
+        Value* v = i < leave_params.size() ? leave_params[i] : values.at(li.value);
+        b.build_store(li.value->type(), buffer, static_cast<int32_t>(i * 8), v);
+    }
+    b.build_store(Type::i64(), buffer, static_cast<int32_t>(plan.left_slot() * 8), b.build_iconst_i64(1));
+    const Type rt = out.return_type();
+    if (rt.is_void()) {
+        b.build_ret_void();
+    } else {
+        b.build_ret(b.build_load(rt, buffer, static_cast<int32_t>((plan.left_slot() + 1) * 8)));
+    }
+}
+
+} // namespace
+
 Function* build_osr_entry_function(const OsrEntryPlan& plan, Module& dst, std::string_view name, std::string* why) {
     const Function& fn = *plan.function;
     const std::vector<Type> params{Type::ptr()};
@@ -137,6 +192,9 @@ Function* build_osr_entry_function(const OsrEntryPlan& plan, Module& dst, std::s
         }
         incoming.emplace_back(li.value, v);
     }
+    const bool leave_check = plan.leave_check && !fn.return_type().is_vector();
+    Value* flag_addr =
+        leave_check ? b.build_load(Type::ptr(), buffer, static_cast<int32_t>(plan.leave_flag_slot() * 8)) : nullptr;
 
     // A live value defined in the region (an enclosing loop's, reached again
     // through its latch) has two definitions in the entry function: the
@@ -184,6 +242,12 @@ Function* build_osr_entry_function(const OsrEntryPlan& plan, Module& dst, std::s
         }
     }
     for (const auto& [src_inst, copy] : cloned) ir::clone_uses(*src_inst, *copy, values, blocks);
+
+    if (leave_check) {
+        std::vector<BasicBlock*> region_blocks;
+        for (const BasicBlock* src_bb : plan.region) region_blocks.push_back(blocks.at(src_bb));
+        add_leave_check(plan, *out, b, buffer, flag_addr, blocks.at(plan.block), values, region_blocks);
+    }
 
     if (!slots.empty()) {
         // Every read of a slotted value loads the slot just before it, and

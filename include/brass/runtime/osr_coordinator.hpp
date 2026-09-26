@@ -83,7 +83,13 @@ public:
 
     // Statistics
     uint64_t total_osr_migrations() const noexcept { return total_osr_migrations_.load(std::memory_order_relaxed); }
-    void reset_stats() noexcept { total_osr_migrations_.store(0, std::memory_order_relaxed); }
+    // Frames that left invalidated OSR code at a backedge and went on in
+    // the interpreter.
+    uint64_t total_osr_leaves() const noexcept { return total_osr_leaves_.load(std::memory_order_relaxed); }
+    void reset_stats() noexcept {
+        total_osr_migrations_.store(0, std::memory_order_relaxed);
+        total_osr_leaves_.store(0, std::memory_order_relaxed);
+    }
 
 private:
     OsrCoordinator();
@@ -114,6 +120,7 @@ private:
     bool enabled_ = false;
     uint64_t threshold_ = BACKEDGE_OSR_THRESHOLD;
     std::atomic<uint64_t> total_osr_migrations_{0};
+    std::atomic<uint64_t> total_osr_leaves_{0};
 };
 
 } // namespace brass::runtime

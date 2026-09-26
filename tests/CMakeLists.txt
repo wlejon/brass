@@ -217,6 +217,7 @@ add_executable(brass_unit_tests
     unit/test_deopt_carried_callee.cpp
     unit/test_program_runtime_state.cpp
     unit/test_program_osr.cpp
+    unit/test_osr_leave.cpp
     unit/test_kernel_jit.cpp
     unit/test_audio_intrinsics.cpp
     unit/test_sdf_builder.cpp

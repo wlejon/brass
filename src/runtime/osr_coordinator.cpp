@@ -33,6 +33,11 @@ struct OsrCoordinator::Entry {
     const BasicBlock* header = nullptr;
     std::atomic<uint64_t> deopts{0};
     mutable std::atomic<bool> entered{false};
+    // The code's leave flag (OsrEntryPlan::leave_check), read by the code at
+    // each backedge to its header: set when the code is invalidated, so a
+    // frame still in it goes back to the interpreter there instead of
+    // calling a failing callee copy on every iteration.
+    mutable std::atomic<uint64_t> leave{0};
 };
 
 namespace {
@@ -55,6 +60,27 @@ private:
 };
 
 constexpr uint8_t kOsrPriority = 255;
+
+static_assert(sizeof(std::atomic<uint64_t>) == sizeof(uint64_t) && std::atomic<uint64_t>::is_always_lock_free,
+              "OSR code reads the leave flag as a plain u64");
+
+// A value the OSR code wrote back as the interpreter's register holds it: a
+// narrower value's store left the slot's upper bytes as they were on entry
+// (the interpreter keeps a narrow value zero-extended, as trunc8 and trunc16
+// leave it).
+uint64_t register_bits(Type t, uint64_t bits) {
+    switch (t.kind()) {
+        case TypeKind::I8:
+            return bits & 0xFFull;
+        case TypeKind::I16:
+            return bits & 0xFFFFull;
+        case TypeKind::I32:
+        case TypeKind::F32:
+            return bits & 0xFFFFFFFFull;
+        default:
+            return bits;
+    }
+}
 
 } // namespace
 
@@ -103,6 +129,7 @@ void OsrCoordinator::note_deopt(const std::shared_ptr<Entry>& e) {
     if (e->deopts.fetch_add(1, std::memory_order_relaxed) + 1 < threshold) return;
     Entry::State ready = Entry::State::Ready;
     if (!e->state.compare_exchange_strong(ready, Entry::State::Invalid, std::memory_order_acq_rel)) return;
+    e->leave.store(1, std::memory_order_release);
     record_tier_instant(TierEventKind::Invalidate, e->plan.function ? e->plan.function->name() : e->name);
     // The continuation runs the loop in a Tier-0 frame nested under this
     // code; entering the code again at its next backedge would fail the
@@ -204,6 +231,7 @@ std::unique_ptr<Module> OsrCoordinator::copy_entry(const Function& fn, const Bas
     auto plan = plan_osr_entry(fn, header, &why);
     if (!plan) return nullptr;
     e->plan = std::move(*plan);
+    e->plan.leave_check = region_has_call(e->plan);
     e->name = std::string(fn.name()) + ".osr" + std::to_string(header.id());
 
     // The copy: the entry function, the bodies of what it calls and of its
@@ -325,22 +353,42 @@ bool OsrCoordinator::enter(const Function& fn, FastFrame& frame, const Entry& e,
     if (!bfn || FastInterpreter::thread_frame_top() != &frame) return false;
     // The frame's live values, where the entry reads them: a register each,
     // raw (a narrower value is read from its low bytes).
-    std::vector<uint64_t> buffer(e.plan.live_ins.size(), 0);
-    for (size_t i = 0; i < e.plan.live_ins.size(); ++i) {
+    const size_t n = e.plan.live_ins.size();
+    std::vector<uint64_t> buffer(e.plan.buffer_slots(), 0);
+    std::vector<uint32_t> regs(n, 0);
+    for (size_t i = 0; i < n; ++i) {
         const auto& li = e.plan.live_ins[i];
         if (li.rematerialize) continue;
         auto it = bfn->ssa_to_reg.find(li.value->id());
         if (it == bfn->ssa_to_reg.end() || it->second >= frame.num_registers) return false;
+        regs[i] = it->second;
         buffer[i] = frame.registers[it->second];
     }
+    if (e.plan.leave_check) buffer[e.plan.leave_flag_slot()] = reinterpret_cast<uintptr_t>(&e.leave);
     const std::vector<Type> params{Type::ptr()};
     const std::vector<RuntimeValue> args{RuntimeValue::from_ptr(buffer.data())};
     // Counted on entry: a throw can end the OSR call.
     total_osr_migrations_++;
     if (!e.entered.exchange(true, std::memory_order_relaxed)) record_tier_instant(TierEventKind::OsrEnter, fn.name());
-    HiddenFrame hidden(frame);
-    out_result = invoke_native_address(e.entry, fn.return_type(), &params, args);
-    return true;
+    RuntimeValue result;
+    {
+        HiddenFrame hidden(frame);
+        result = invoke_native_address(e.entry, fn.return_type(), &params, args);
+    }
+    if (!e.plan.leave_check || buffer[e.plan.left_slot()] == 0) {
+        out_result = result;
+        return true;
+    }
+    // The code was invalidated and left at a backedge to the header with the
+    // loop's values in the buffer: the frame takes them back and goes on
+    // with the backedge, in the interpreter.
+    for (size_t i = 0; i < n; ++i) {
+        const auto& li = e.plan.live_ins[i];
+        if (li.rematerialize) continue;
+        frame.registers[regs[i]] = register_bits(li.value->type(), buffer[i]);
+    }
+    total_osr_leaves_++;
+    return false;
 }
 
 } // namespace brass::runtime
