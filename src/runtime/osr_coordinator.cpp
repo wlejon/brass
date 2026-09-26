@@ -20,12 +20,17 @@
 namespace brass::runtime {
 
 struct OsrCoordinator::Entry {
-    enum class State : uint8_t { Compiling, Ready, Failed };
+    // Invalid: the code's speculation failed deopt_threshold times; it is
+    // never entered again, but frames may still be running it, so it stays
+    // alive (retired_) until the program is released.
+    enum class State : uint8_t { Compiling, Ready, Failed, Invalid };
     std::atomic<State> state{State::Compiling};
     OsrEntryPlan plan;
     std::string name;
     std::shared_ptr<codegen::JitExecutionEngine> jit;
     void* entry = nullptr;
+    const BasicBlock* header = nullptr;
+    std::atomic<uint64_t> deopts{0};
 };
 
 namespace {
@@ -87,6 +92,29 @@ void OsrCoordinator::release_program() {
     pool.wait_owner(this);
     std::lock_guard<std::mutex> lock(mutex_);
     entries_.clear();
+    retired_.clear();
+    reoptimizations_.clear();
+}
+
+void OsrCoordinator::note_deopt(const std::shared_ptr<Entry>& e) {
+    const uint64_t threshold = registry().default_config().deopt_threshold;
+    if (e->deopts.fetch_add(1, std::memory_order_relaxed) + 1 < threshold) return;
+    Entry::State ready = Entry::State::Ready;
+    if (!e->state.compare_exchange_strong(ready, Entry::State::Invalid, std::memory_order_acq_rel)) return;
+    // The continuation runs the loop in a Tier-0 frame nested under this
+    // code; entering the code again at its next backedge would fail the
+    // same guard and nest another frame, without bound. With a front pass
+    // the loop may get a new entry, compiled against the feedback the
+    // failures produced, a bounded number of times, as tier-up does.
+    const bool front_pass = static_cast<bool>(registry().dispatch_table().pipeline().tier2_front_pass());
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (released_) return;
+    auto it = entries_.find(e->header);
+    if (it == entries_.end() || it->second != e) return;
+    if (front_pass && ++reoptimizations_[e->header] <= kMaxReoptimizations) {
+        retired_.push_back(std::move(it->second));
+        entries_.erase(it);
+    }
 }
 
 void OsrCoordinator::stop_compiles() {
@@ -120,6 +148,7 @@ bool OsrCoordinator::try_osr_migration(FastInterpreter&, const Function& fn, Bas
         std::shared_ptr<Entry>& slot = entries_[loop_header];
         if (!slot) {
             slot = std::make_shared<Entry>();
+            slot->header = loop_header;
             start = true;
         }
         e = slot;
@@ -171,11 +200,12 @@ void OsrCoordinator::request_entry(const Function& fn, const BasicBlock& header,
         return fail();
     }
 
-    auto job = [this, &fn, e, m = std::shared_ptr<Module>(std::move(mod))] { compile_entry(fn, *m, *e); };
+    auto job = [this, &fn, e, m = std::shared_ptr<Module>(std::move(mod))] { compile_entry(fn, *m, e); };
     if (!CompilePool::shared().submit(this, kOsrPriority, std::move(job))) fail();
 }
 
-void OsrCoordinator::compile_entry(const Function& fn, Module& copy, Entry& e) {
+void OsrCoordinator::compile_entry(const Function& fn, Module& copy, const std::shared_ptr<Entry>& shared) {
+    Entry& e = *shared;
     Module* const mod = &copy;
     auto fail = [&] { e.state.store(Entry::State::Failed, std::memory_order_release); };
     FunctionDispatchTable& table = registry().dispatch_table();
@@ -241,7 +271,11 @@ void OsrCoordinator::compile_entry(const Function& fn, Module& copy, Entry& e) {
         std::string why;
         if (h && deopt_targets_valid(*f, sib->second, why)) detail::register_tier2_resumer(table, *h, addr, sib->second);
     }
-    detail::register_tier2_resumer(table, *handle, entry, &fn);
+    // Weak: the entry owns the code the resumer is registered for.
+    std::weak_ptr<Entry> weak = shared;
+    detail::register_tier2_resumer(table, *handle, entry, &fn, [this, weak](const DeoptFrame&) {
+        if (std::shared_ptr<Entry> live = weak.lock()) note_deopt(live);
+    });
     e.jit = std::move(jit);
     e.entry = entry;
     e.state.store(Entry::State::Ready, std::memory_order_release);

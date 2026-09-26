@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <mutex>
 #include <atomic>
+#include <vector>
 
 namespace brass {
 class FastInterpreter;
@@ -89,12 +90,19 @@ private:
 
     struct Entry;
     void request_entry(const Function& fn, const BasicBlock& header, const std::shared_ptr<Entry>& e);
-    void compile_entry(const Function& fn, Module& copy, Entry& e);
+    void compile_entry(const Function& fn, Module& copy, const std::shared_ptr<Entry>& e);
+    // A guard of `e`'s code failed: past the deopt threshold the entry is
+    // never entered again (osr_coordinator.cpp).
+    void note_deopt(const std::shared_ptr<Entry>& e);
     bool enter(const Function& fn, FastFrame& frame, const Entry& e, RuntimeValue& out_result);
 
     std::mutex mutex_;
     bool released_ = false;
     std::unordered_map<const BasicBlock*, std::shared_ptr<Entry>> entries_;
+    // Invalidated entries whose code frames may still be running, and how
+    // many times each loop header's entry was replaced.
+    std::vector<std::shared_ptr<Entry>> retired_;
+    std::unordered_map<const BasicBlock*, uint32_t> reoptimizations_;
 
     TieringRegistry* const registry_ = nullptr; // null: the default program
     bool enabled_ = false;

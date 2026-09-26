@@ -166,12 +166,13 @@ void link_declared_functions(const Module& mod, FunctionDispatchTable& table, co
 }
 
 void register_tier2_resumer(FunctionDispatchTable& table, FunctionHandle& handle, void* entry,
-                            const Function* compiled_from) {
+                            const Function* compiled_from, std::function<void(const DeoptFrame&)> before) {
     // The resumer is unregistered when the handle retires, which the table
     // does before it goes away, so capturing both raw is safe.
     FunctionHandle* hp = &handle;
     FunctionDispatchTable* tp = &table;
-    register_deopt_resumer(entry, [hp, tp, entry](const DeoptFrame& frame) -> uint64_t {
+    register_deopt_resumer(entry, [hp, tp, entry, before = std::move(before)](const DeoptFrame& frame) -> uint64_t {
+        if (before) before(frame);
         const Function* from = hp->deopt_function(entry);
         if (!from) {
             std::fprintf(stderr, "brass: fatal deoptimization error: tier-2 code of '%s' deoptimized but the "

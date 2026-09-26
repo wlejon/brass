@@ -17,6 +17,7 @@
 
 namespace brass::runtime {
 class MultiTierPipeline;
+class DeoptFrame;
 }
 
 namespace brass::runtime::detail {
@@ -59,8 +60,13 @@ void link_declared_functions(const Module& mod, FunctionDispatchTable& table, co
 
 // Registers the deopt continuation of the tier-2 code at `entry`, compiled
 // from `compiled_from` for `handle`'s function: a failed guard finishes
-// the call in Tier 0 (MultiTierPipeline::resume_after_deopt).
+// the call in Tier 0 (MultiTierPipeline::resume_after_deopt). `before`, when
+// set, runs first on every failure, before the continuation: an OSR entry
+// uses it to stop being entered once its speculation is invalid, because the
+// continuation runs the loop in a Tier-0 frame nested under the failing code
+// and would otherwise re-enter it at the next backedge.
 void register_tier2_resumer(FunctionDispatchTable& table, FunctionHandle& handle, void* entry,
-                            const Function* compiled_from);
+                            const Function* compiled_from,
+                            std::function<void(const DeoptFrame&)> before = {});
 
 } // namespace brass::runtime::detail
