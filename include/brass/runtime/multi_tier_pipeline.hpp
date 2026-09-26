@@ -163,6 +163,13 @@ public:
     // this thread when that one runs this program (a fresh one otherwise),
     // and an exception it throws unwinds through the native callers.
     uint64_t call_tier0_from_native(std::string_view name, const uint64_t* bits, size_t count);
+    // Runs lowered coroutine body `body` of program `table` on `frame` in a
+    // fresh Tier-0 interpreter of this pipeline's kind: a host resumed one of
+    // the program's frames with no interpreter running on the thread
+    // (coroutine_mir.cpp). The body then runs in the same Tier 0 as every
+    // other function of the program, with that interpreter's state and its
+    // host symbols.
+    RuntimeValue run_coro_body_fresh(FunctionDispatchTable& table, const Function& body, uintptr_t frame);
 
     // The optimization passes tier 2 runs over the module of a hot
     // function's closure (the function, the bodies it may inline, its exit

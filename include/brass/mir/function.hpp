@@ -84,6 +84,19 @@ public:
     bool allow_fp_reassociation() const noexcept { return allow_fp_reassociation_; }
     void set_allow_fp_reassociation(bool allow) noexcept { allow_fp_reassociation_ = allow; }
 
+    // A lowered coroutine body's frame shape, recorded by coroutine lowering
+    // (compute_coro_frame_layout): the slot count and which slots hold
+    // references. Recorded rather than rederived because the passes that run
+    // on the body afterwards may retype or fold its frame accesses.
+    bool has_coro_frame_layout() const noexcept { return has_coro_frame_layout_; }
+    uint32_t coro_frame_slot_count() const noexcept { return coro_frame_slot_count_; }
+    const std::vector<uint64_t>& coro_frame_ref_bits() const noexcept { return coro_frame_ref_bits_; }
+    void set_coro_frame_layout(uint32_t slot_count, std::vector<uint64_t> ref_bits) {
+        has_coro_frame_layout_ = true;
+        coro_frame_slot_count_ = slot_count;
+        coro_frame_ref_bits_ = std::move(ref_bits);
+    }
+
     uint32_t next_value_id() noexcept { return next_value_id_++; }
     uint32_t next_block_id() noexcept { return next_block_id_++; }
     uint32_t current_next_value_id() const noexcept { return next_value_id_; }
@@ -107,6 +120,10 @@ private:
     uint32_t next_value_id_ = 0;
     uint32_t next_block_id_ = 0;
     bool allow_fp_reassociation_ = false;
+
+    bool has_coro_frame_layout_ = false;
+    uint32_t coro_frame_slot_count_ = 0;
+    std::vector<uint64_t> coro_frame_ref_bits_;
 };
 
 } // namespace brass

@@ -201,6 +201,11 @@ uint64_t MultiTierPipeline::call_tier0_from_native(std::string_view name, const 
     return r.is_void() ? 0 : r.raw_bits();
 }
 
+RuntimeValue MultiTierPipeline::run_coro_body_fresh(FunctionDispatchTable& table, const Function& body,
+                                                    uintptr_t frame) {
+    return run_fresh_tier0(table, &body, {RuntimeValue::from_gcref(frame)});
+}
+
 void* MultiTierPipeline::tier0_bridge(std::string_view name) {
     FunctionHandle* handle = table_->find(name);
     const Function* fn = handle ? handle->mir_function() : nullptr;

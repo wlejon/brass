@@ -391,7 +391,12 @@ uintptr_t allocate_coro_frame_object(size_t total_size, gc::LayoutId layout, uin
             const auto* buffer = heap->allocation_buffer();
             if (total > static_cast<size_t>(buffer->end - buffer->top)) coro_fatal_no_maps();
         }
-        const uintptr_t frame = heap->allocate_at(total_size, layout, 0, 0, has_caller ? caller_fp : 0,
+        // Generated code, interpreters and resumers hold a frame by its raw
+        // address. A heap that does not take raw addresses for references
+        // could not update those when the frame moved, so there the frame
+        // is allocated old, where nothing moves.
+        const uint32_t flags = heap->raw_addresses_are_references() ? 0u : gc::kAllocOld;
+        const uintptr_t frame = heap->allocate_at(total_size, layout, flags, 0, has_caller ? caller_fp : 0,
                                                   has_caller ? caller_ip : 0);
         if (frame) heap->remember(frame);
         return frame;
@@ -611,15 +616,25 @@ void brass_coro_set_awaiter(uintptr_t coro_frame, uintptr_t awaiter) {
     if (!coro_frame) return;
     BrassCoroFrame* frame = checked_coro_frame(coro_frame, "brass_coro_set_awaiter");
     if (awaiter) (void)checked_coro_frame(awaiter, "brass_coro_set_awaiter (awaiter)");
-    frame->awaiter = awaiter;
-    if (gc::Heap* heap = gc::Heap::current()) {
-        if (heap->contains(coro_frame)) heap->write_barrier(coro_frame, awaiter);
-    }
+    // Kept under the heap's raw-address tag, so the frame's layout traces it
+    // on a heap whose reference tags leave raw addresses out.
+    uint64_t word = awaiter;
+    gc::Heap* heap = gc::Heap::current();
+    if (awaiter && heap && heap->contains(awaiter)) word |= heap->raw_address_tag();
+    frame->awaiter = word;
+    if (heap && heap->contains(coro_frame)) heap->write_barrier(coro_frame, word);
 }
 
 uintptr_t brass_coro_awaiter(uintptr_t coro_frame) {
     if (!coro_frame) return 0;
-    return static_cast<uintptr_t>(checked_coro_frame(coro_frame, "brass_coro_awaiter")->awaiter);
+    return static_cast<uintptr_t>(checked_coro_frame(coro_frame, "brass_coro_awaiter")->awaiter &
+                                  gc::kAddressMask);
+}
+
+void brass_coro_unroot(uintptr_t coro_frame) {
+    if (!coro_frame) return;
+    BrassCoroFrame* frame = checked_coro_frame(coro_frame, "brass_coro_unroot");
+    unregister_active_coro_frame(frame);
 }
 
 } // extern "C"

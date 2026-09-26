@@ -251,6 +251,17 @@ public:
         const uint64_t tag = word >> kTagShift;
         return ((ref_tags_[tag >> 6] >> (tag & 63)) & 1) != 0;
     }
+    // Whether a raw address (tag 0) in a slot is a reference to this heap.
+    // A heap whose reference tags leave 0 out cannot update a raw address
+    // when the object moves: what brass itself holds raw (coroutine frames)
+    // it allocates in the old generation there, which never moves.
+    [[nodiscard]] bool raw_addresses_are_references() const noexcept { return raw_address_tag_ == 0; }
+    // The high bits of a tag under which this heap takes a word for a
+    // reference (already shifted into place): 0 when raw addresses are
+    // references, else the first of the configured tags. A slot brass keeps
+    // for a raw address stores it under this tag, so the ordinary visit
+    // traces it on every heap; readers mask the tag off (kAddressMask).
+    [[nodiscard]] uint64_t raw_address_tag() const noexcept { return raw_address_tag_; }
     // Card of old-generation address `a`: card_table_base()[(a - old_base()) >> kCardShift].
     [[nodiscard]] uint8_t* card_table_base() const noexcept { return cards_; }
     [[nodiscard]] uintptr_t old_base() const noexcept { return old_lo_; }
@@ -351,6 +362,7 @@ private:
     uintptr_t heap_span_ = 0;
     uint8_t* cards_ = nullptr;
     const uint64_t* ref_tags_ = nullptr;
+    uint64_t raw_address_tag_ = 0;
     std::unique_ptr<detail::HeapState> s_;
 };
 

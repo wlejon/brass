@@ -181,6 +181,37 @@ TEST_CASE("Hardening - Suspended Coroutines Rooting and Lifecycle Across Collect
     gen_gc.remove_root(&coro_root);
 }
 
+TEST_CASE("Hardening - Pretenured frame's argument slots follow young objects across minor collections") {
+    // A heap whose references are all tagged allocates frames old; the
+    // creator stores the arguments with no barrier, so the frame's card is
+    // what a minor collection finds them through, every time until they are
+    // old themselves.
+    gc::HeapConfig config = plain_config();
+    config.reference_tags = {static_cast<uint16_t>(BRONZE_OBJECT_TAG >> 48)};
+    config.tenure_age = 3;
+    gc::Heap gen_gc(config);
+    gc::HeapScope bind(gen_gc);
+
+    uintptr_t coro_addr = brass_coro_create_at(nullptr, 2, 0x1ULL, 0, 0);
+    REQUIRE(coro_addr != 0);
+    CHECK(gen_gc.is_old(coro_addr));
+    auto* frame = reinterpret_cast<BrassCoroFrame*>(coro_addr);
+
+    uintptr_t child = gen_gc.allocate_masked(16, 0, 31);
+    gen_gc.store(child, 0, 0xCAFEULL);
+    frame->slots[0] = child | BRONZE_OBJECT_TAG;
+
+    for (int i = 0; i < 5; ++i) {
+        gen_gc.collect(gc::CollectionKind::Minor);
+        const uint64_t word = frame->slots[0];
+        CHECK_EQ(word & 0xFFFF000000000000ULL, BRONZE_OBJECT_TAG);
+        const uintptr_t now = static_cast<uintptr_t>(word & gc::kAddressMask);
+        REQUIRE(gen_gc.contains(now));
+        CHECK_EQ(gc::Heap::load(now, 0), 0xCAFEULL);
+    }
+    brass_coro_destroy(coro_addr);
+}
+
 TEST_CASE("Hardening - Card Table Multi-Card Object Scanning") {
     gc::HeapConfig config = plain_config();
     config.tenure_age = 2;

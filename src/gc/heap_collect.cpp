@@ -228,7 +228,9 @@ void visit_roots(HeapState& s, Tracer& t) {
         brass_append_stack_roots_from_here(slots);
     }
     brass_append_native_frame_roots(slots);
-    if (s.coro_frames) runtime::append_active_coro_roots(*s.coro_frames, slots);
+    // The registry's slots hold raw frame addresses, references on any heap.
+    std::vector<uintptr_t*> frame_slots;
+    if (s.coro_frames) runtime::append_active_coro_roots(*s.coro_frames, frame_slots);
 
     t.set_owner(0, false);
     for (size_t i = 0; i < s.roots.size(); ++i) t.visit(s.roots[i]);
@@ -239,6 +241,7 @@ void visit_roots(HeapState& s, Tracer& t) {
         t.set_owner(0, false);
     }
     for (uintptr_t* slot : slots) t.visit_ref(slot);
+    for (uintptr_t* slot : frame_slots) t.visit_address(slot);
 }
 
 void scan_object(Tracer& t, uintptr_t object, bool old) {
@@ -311,6 +314,13 @@ void brass::gc::Tracer::visit_derived(uint64_t* slot) noexcept {
     uint64_t moved = (word & ~kAddressMask) | base;
     visit(&moved);
     *slot = (word & ~kAddressMask) | ((moved & kAddressMask) + (a - base));
+}
+
+void brass::gc::Tracer::visit_address(uintptr_t* slot) noexcept {
+    if (*slot == 0) return;
+    uint64_t word = (static_cast<uint64_t>(*slot) & kAddressMask) | heap().raw_address_tag();
+    visit(&word);
+    *slot = static_cast<uintptr_t>(word & kAddressMask);
 }
 
 void brass::gc::Tracer::visit_conservative(uint64_t* slot) noexcept {

@@ -35,8 +35,16 @@ struct CoroFrameLayout {
 // no `coro_suspend` left and exactly one pointer/gcref parameter (the frame).
 bool is_lowered_coro_body(const Function& fn);
 
-// The frame slots a lowered body loads/stores through its frame parameter.
+// The frame slots a lowered body loads/stores through its frame parameter:
+// the layout coroutine lowering recorded on the body (Function::
+// set_coro_frame_layout), or, for a body that carries none, the one its frame
+// accesses name.
 CoroFrameLayout compute_coro_frame_layout(const Function& fn);
+
+// Records on `fn`, a lowered body, the layout its frame accesses name now.
+// Coroutine lowering does this for every body it lowers, before any pass can
+// retype or fold those accesses.
+void record_coro_frame_layout(Function& fn);
 
 // Frame slots are 8 bytes; a value of type `t` occupies this many
 // consecutive ones (2 for a v128, 4 for a v256). Frame accesses of vector
@@ -58,7 +66,11 @@ uint32_t coro_create_slot_count(const Instruction& create);
 //   otherwise; the verifier rejects wide coro_suspend/coro_resume values)
 // - Live SSA values across suspends are spilled to GC-tracked frame slots
 //   (after the argument slots), a reference's store followed by its
-//   write barrier (the frame may be old by then); any number of them
+//   write barrier (the frame may be old by then); any number of them. An
+//   invoke's result is stored on its normal edge
+// - The entry block's allocas are re-created on every resume (their contents
+//   do not survive a suspend); an alloca elsewhere that is live across a
+//   suspend is a std::logic_error
 // - A body may declare a leading frame parameter and read the frame's
 //   header through it (CORO_OFFSET_RESUME_MODE after a suspend is the mode
 //   the resume passed); it is the lowered body's frame

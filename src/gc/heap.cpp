@@ -115,6 +115,9 @@ Heap::Heap(const HeapConfig& config) : s_(std::make_unique<HeapState>(*this)) {
             s.reference_tag_bits[tag >> 6] |= uint64_t{1} << (tag & 63);
         }
         ref_tags_ = s.reference_tag_bits.data();
+        if (!is_reference_tag(0)) {
+            raw_address_tag_ = static_cast<uint64_t>(s.config.reference_tags.front()) << kTagShift;
+        }
     }
 
     s.full_threshold = s.config.min_full_threshold_bytes;

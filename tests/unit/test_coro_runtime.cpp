@@ -8,6 +8,7 @@
 #include <brass/codegen/baseline_jit.hpp>
 #include <brass/runtime/code_installer.hpp>
 #include <brass/vm/fast_interpreter.hpp>
+#include "gc_test_heap.hpp"
 #include <memory>
 
 using namespace brass;
@@ -186,6 +187,52 @@ TEST_CASE("Coroutine Runtime - Cheney Moving GC Active Frame Tracking") {
         }
     });
     CHECK(visited_count == 0);
+}
+
+// A host whose references are all NaN-boxed lists only its pointer tags, so
+// a raw address is no reference there. Frames are then allocated old (they
+// never move, so the raw handles to them stay valid), the registry still
+// keeps a suspended frame alive, the awaiter link is traced, and an
+// unrooted frame lives only as long as something refers to it.
+TEST_CASE("Coroutine Runtime - frames on a heap whose reference tags leave raw addresses out") {
+    constexpr uint64_t kTag = 0xFFF1;
+    gc::HeapConfig config = test::small_heap_config();
+    config.reference_tags = {static_cast<uint16_t>(kTag)};
+    test::BoundHeap heap(config);
+    CHECK(!heap->raw_addresses_are_references());
+    CHECK_EQ(heap->raw_address_tag(), kTag << gc::kTagShift);
+
+    uintptr_t frame = brass_coro_create_at(nullptr, 2, 1, 0, 0);
+    REQUIRE(frame != 0);
+    CHECK(heap->is_old(frame));
+    uintptr_t obj = heap->allocate_masked(32, 0, 1);
+    REQUIRE(heap->is_young(obj));
+    *reinterpret_cast<int64_t*>(obj) = 77;
+    auto* f = reinterpret_cast<runtime::BrassCoroFrame*>(frame);
+    f->slots[0] = (kTag << gc::kTagShift) | obj;
+    heap->write_barrier(frame, f->slots[0]);
+
+    heap->collect(gc::CollectionKind::Minor);
+    heap->collect(gc::CollectionKind::Full);
+    CHECK(heap->is_valid_object(frame));
+    const uintptr_t moved = static_cast<uintptr_t>(f->slots[0] & gc::kAddressMask);
+    CHECK((f->slots[0] >> gc::kTagShift) == kTag);
+    CHECK(heap->is_valid_object(moved));
+    CHECK_EQ(*reinterpret_cast<int64_t*>(moved), 77);
+
+    uintptr_t awaiter = brass_coro_create_at(nullptr, 1, 0, 0, 0);
+    REQUIRE(awaiter != 0);
+    brass_coro_set_awaiter(frame, awaiter);
+    brass_coro_unroot(awaiter);
+    heap->collect(gc::CollectionKind::Full);
+    CHECK(heap->is_valid_object(awaiter));
+    CHECK_EQ(brass_coro_awaiter(frame), awaiter);
+    CHECK(!brass_coro_is_done(awaiter));
+
+    brass_coro_unroot(frame);
+    heap->collect(gc::CollectionKind::Full);
+    CHECK(!heap->is_valid_object(frame));
+    CHECK(!heap->is_valid_object(awaiter));
 }
 
 TEST_CASE("Coroutine Runtime - Microtask Queue & Promises") {

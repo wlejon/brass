@@ -50,7 +50,9 @@ This document guides frontend language compilers (such as `bronze`, the JS AOT c
    - Read the resume mode after a suspend (body with a leading frame parameter) -> `b.build_coro_resume_mode(frame)`
    - Destroy coroutine -> `b.build_coro_destroy(coro_ptr)`
    - Link a frame to the one awaiting it (async stack traces) -> call `brass_coro_set_awaiter(frame, awaiter)`
-   - Emit coroutines unlowered: the pipeline and the embedding compile entry points run `CoroTransformPass` themselves.
+   - Emit coroutines unlowered: the pipeline and the embedding compile entry points run `CoroTransformPass` themselves. A producer that runs its own optimization pipeline runs `lower_coroutines(module)` before it, since until then a suspend is an ordinary instruction the passes may move frame reads and unboxed references across.
+   - Allocas a coroutine body needs across a suspend go in its entry block (re-created on every resume).
+   - A host whose own object owns the frame calls `brass_coro_unroot(frame)` once it holds it; until then the frame is a root.
 6. **Speculation, Guards & Deoptimization**:
    - Lower speculative checks into `b.build_guard(cond, "generic_twin_exit", live_state_values)`.
    - Implement interior resume targets in generic twin functions with `twin->add_resume_point(resume_id, target_block)`.

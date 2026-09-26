@@ -44,6 +44,10 @@ public:
     // register): visited as a strong reference only when it names the start
     // of an object, otherwise left alone.
     void visit_conservative(uint64_t* slot) noexcept;
+    // A slot known to hold a raw object address (tag 0) or 0: a strong
+    // reference whatever the heap's reference tags (Heap::raw_address_tag),
+    // updated if the object moves and left raw.
+    void visit_address(uintptr_t* slot) noexcept;
 
     // A weak reference: does not keep the target alive. Once the collection
     // has decided liveness, the slot is updated if the target survived and

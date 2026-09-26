@@ -157,6 +157,56 @@ done(%r: i64):
 }
 )";
 
+// An invoke's result live across a suspend (stored on the invoke's normal
+// edge), and an entry-block alloca used on both sides of the suspend: each
+// resume has its own, so a word written before the suspend is not read
+// after it.
+constexpr std::string_view kInvokeAlloca = R"(module @invalloca
+func @twice(%x: i64) -> i64 {
+b0:
+  %two = iconst.i64 2
+  %r = mul.i64 %x, %two
+  ret %r
+}
+
+func @body(%p: i64) -> i64 {
+b0:
+  %buf = alloca 16, 8
+  %a = invoke.i64 @twice(%p), c1, pad
+c1:
+  store.i64 %buf, 0, %a
+  %y = coro_suspend.i64 %a, 1
+  store.i64 %buf, 8, %y
+  %l = load.i64 %buf, 8
+  %s = add.i64 %a, %l
+  %y2 = coro_suspend.i64 %s, 2
+  %t = add.i64 %s, %a
+  %u = add.i64 %t, %y2
+  ret %u
+pad:
+  %e = landing_pad
+  ret %e
+}
+
+func @drv(%p: i64) -> i64 {
+b0:
+  %c = coro_create @body(%p)
+  %z = iconst.i64 0
+  %y0 = coro_resume.i64 %c, %z
+  %three = iconst.i64 3
+  %y1 = coro_resume.i64 %c, %three
+  %seven = iconst.i64 7
+  %y2 = coro_resume.i64 %c, %seven
+  coro_destroy %c
+  %k = iconst.i64 1000
+  %t0 = mul.i64 %y0, %k
+  %t1 = add.i64 %t0, %y1
+  %t2 = mul.i64 %t1, %k
+  %t3 = add.i64 %t2, %y2
+  ret %t3
+}
+)";
+
 int64_t run_placed(std::string_view src, std::string_view body, Tier body_tier, std::string_view driver,
                    Tier driver_tier, const std::vector<RuntimeValue>& args) {
     auto mod = parse_program(src);
@@ -203,6 +253,37 @@ TEST_CASE("CoroTiers - exceptions across suspend points (try region and handler 
     // -4 + 10000 + 5 and returns 7 + 5.
     check_matrix(kEh, "ehgen", "ehdrv", {RuntimeValue::from_i64(5), RuntimeValue::from_i64(-4)},
                  (15LL * 100000 + 10001) * 100 + 12);
+}
+
+TEST_CASE("CoroTiers - an invoke result and an entry alloca across suspends, in every placement") {
+    // p = 5: a = 10, yield 10; resumed 3: s = 13, yield 13; resumed 7:
+    // 13 + 10 + 7 = 30.
+    check_matrix(kInvokeAlloca, "body", "drv", {RuntimeValue::from_i64(5)}, (10LL * 1000 + 13) * 1000 + 30);
+}
+
+TEST_CASE("CoroTiers - an alloca outside the entry block live across a suspend is refused") {
+    constexpr std::string_view src = R"(module @late
+func @late(%p: i64) -> i64 {
+b0:
+  br b1
+b1:
+  %buf = alloca 8, 8
+  store.i64 %buf, 0, %p
+  %y = coro_suspend.i64 %p, 1
+  %l = load.i64 %buf, 0
+  ret %l
+}
+)";
+    DiagnosticReporter diag;
+    auto mod = parse_module(src, &diag);
+    REQUIRE(mod != nullptr);
+    bool threw = false;
+    try {
+        CoroTransformPass().run_on_function(*mod->get_function("late"), true);
+    } catch (const std::logic_error&) {
+        threw = true;
+    }
+    CHECK(threw);
 }
 
 TEST_CASE("CoroTiers - a generator loop agrees in every placement") {

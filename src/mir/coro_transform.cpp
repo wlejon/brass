@@ -244,6 +244,15 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force, int64_t create
         }
     }
 
+    // An alloca is stack memory of one invocation of the body, and each
+    // resume is a new invocation: the entry block's allocas are re-created by
+    // bb_coro_entry on every resume (step 5), so their addresses are never
+    // spilled. Their contents do not survive a suspend.
+    std::vector<Instruction*> entry_allocas;
+    for (Instruction* inst : *orig_entry) {
+        if (inst->opcode() == Opcode::alloca_) entry_allocas.push_back(inst);
+    }
+
     // Values live just after each suspend: they cross it.
     std::unordered_set<Value*> crossing;
     for (auto& sp : suspends) {
@@ -255,6 +264,14 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force, int64_t create
         if (sp.inst->result()) cur_live.erase(sp.inst->result());
         cur_live.erase(orig_frame_val);
         crossing.insert(cur_live.begin(), cur_live.end());
+    }
+    for (Instruction* a : entry_allocas) crossing.erase(a->result());
+    for (Value* v : crossing) {
+        Instruction* d = v->defining_instruction();
+        if (d && d->opcode() == Opcode::alloca_) {
+            throw std::logic_error(fn_desc(fn) + "an alloca outside the entry block is live across a suspend; "
+                                                 "a body's allocas belong in its entry block");
+        }
     }
 
     // 4. Slot allocation. Arguments keep their argument slots; every other
@@ -324,6 +341,10 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force, int64_t create
         fn.add_resume_point(sp.state_id, resume_bb);
     }
     entry_bb->append_instruction(sw_inst);
+    for (auto it = entry_allocas.rbegin(); it != entry_allocas.rend(); ++it) {
+        orig_entry->remove_instruction(*it);
+        entry_bb->prepend_instruction(*it);
+    }
     std::unordered_set<Instruction*> suspend_rets;
 
     for (auto& sp : suspends) {
@@ -385,6 +406,22 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force, int64_t create
         Instruction* d = v->defining_instruction();
         if (!d || !d->parent()) {
             throw std::logic_error(fn_desc(fn) + "a value live across a suspend has no definition");
+        }
+        if (d->opcode() == Opcode::invoke) {
+            // The result exists only on the normal edge: the store goes on a
+            // block of its own there, which the invoke's block dominates.
+            std::string edge_name = "bb_invoke_spill_" + std::to_string(v->id());
+            std::string_view edge_view = fn.parent() ? fn.parent()->string_pool().intern(edge_name)
+                                                     : std::string_view("bb_invoke_spill");
+            BasicBlock* edge = arena.make<BasicBlock>(fn.next_block_id(), edge_view);
+            fn.append_block(edge);
+            Instruction* br = arena.make<Instruction>(Opcode::br, Type::void_type());
+            br->set_branch_target(d->normal_target());
+            d->set_normal_target(BranchTarget(edge));
+            edge->append_instruction(st);
+            if (wb) edge->append_instruction(wb);
+            edge->append_instruction(br);
+            continue;
         }
         if (d->is_terminator()) {
             throw std::logic_error(fn_desc(fn) + "the result of a terminator (" +
@@ -449,6 +486,7 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force, int64_t create
         }
     }
 
+    record_coro_frame_layout(fn);
     return true;
 }
 
@@ -505,7 +543,19 @@ uint32_t coro_create_slot_count(const Instruction& create) {
     return n;
 }
 
-CoroFrameLayout compute_coro_frame_layout(const Function& fn) {
+namespace {
+
+void finish_layout(CoroFrameLayout& layout) {
+    layout.slot_count = std::max(layout.slot_count, 1U);
+    layout.pointer_mask = layout.ref_bits.empty() ? 0 : layout.ref_bits[0];
+    layout.fits_pointer_mask = true;
+    for (size_t w = 1; w < layout.ref_bits.size(); ++w) {
+        if (layout.ref_bits[w]) layout.fits_pointer_mask = false;
+    }
+}
+
+// The slots the body's frame accesses name, as lowering left them.
+CoroFrameLayout scan_coro_frame_layout(const Function& fn) {
     CoroFrameLayout layout;
     const BasicBlock* entry = fn.entry_block();
     const Value* frame = (entry && entry->param_count() > 0) ? entry->param(0) : nullptr;
@@ -522,12 +572,23 @@ CoroFrameLayout compute_coro_frame_layout(const Function& fn) {
             }
         }
     }
-    layout.slot_count = std::max(layout.slot_count, 1U);
-    layout.pointer_mask = layout.ref_bits.empty() ? 0 : layout.ref_bits[0];
-    layout.fits_pointer_mask = true;
-    for (size_t w = 1; w < layout.ref_bits.size(); ++w) {
-        if (layout.ref_bits[w]) layout.fits_pointer_mask = false;
-    }
+    finish_layout(layout);
+    return layout;
+}
+
+} // namespace
+
+void record_coro_frame_layout(Function& fn) {
+    const CoroFrameLayout layout = scan_coro_frame_layout(fn);
+    fn.set_coro_frame_layout(layout.slot_count, layout.ref_bits);
+}
+
+CoroFrameLayout compute_coro_frame_layout(const Function& fn) {
+    if (!fn.has_coro_frame_layout()) return scan_coro_frame_layout(fn);
+    CoroFrameLayout layout;
+    layout.slot_count = fn.coro_frame_slot_count();
+    layout.ref_bits = fn.coro_frame_ref_bits();
+    finish_layout(layout);
     return layout;
 }
 

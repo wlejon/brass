@@ -942,7 +942,8 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                     break;
                 }
                 default:
-                    throw InterpreterException("Unsupported opcode in interpreter");
+                    throw InterpreterException("Unsupported opcode in interpreter: " +
+                                               std::string(opcode_name(inst->opcode())));
             }
 
             if (transitioned) {

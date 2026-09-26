@@ -31,7 +31,8 @@ struct BrassCoroFrame {
     uint32_t flags;         // CORO_FLAG_*
     uint32_t resume_mode;   // The mode the latest resume passed in (CoroResumeMode or the producer's own)
     uint32_t reserved;
-    uint64_t awaiter;       // The frame waiting on this one (a gcref, traced), or 0
+    uint64_t awaiter;       // The frame waiting on this one, or 0: its address under the heap's
+                            // raw-address tag (traced; brass_coro_awaiter masks the tag off)
     uint64_t slots[1];      // Spilled SSA slots (flexible / variable sized)
 };
 
@@ -231,9 +232,12 @@ private:
 // Suspended coroutine frames are roots of the heap they were allocated in.
 // Each gc::Heap owns a registry of its frames (frames allocated on a thread
 // with no heap share one and are never freed), and a heap's entries go with
-// it. A
-// frame leaves its registry when it finishes, when its body throws, or on
-// brass_coro_destroy. The set of registries is guarded by one lock, and each
+// it. A registry's slots hold raw addresses and are references whatever the
+// heap's reference tags (gc::Tracer::visit_address). A frame leaves its
+// registry when it finishes, when its body throws, on brass_coro_destroy, or
+// on brass_coro_unroot. A heap whose reference tags leave raw addresses out
+// allocates its frames in the old generation, where they never move: the
+// raw frame addresses generated code and resumers hold stay valid. The set of registries is guarded by one lock, and each
 // registry's entries by its own: a heap's collection updates its entries in
 // place while it holds a CoroRootsLock on its registry, so a thread that
 // looks through the registries (unregister, is_active_coro_frame) never reads
@@ -319,6 +323,11 @@ uint32_t brass_coro_is_done(uintptr_t coro_frame);
 // barrier; 0 clears it. The awaiter is kept alive by the frame.
 void brass_coro_set_awaiter(uintptr_t coro_frame, uintptr_t awaiter);
 uintptr_t brass_coro_awaiter(uintptr_t coro_frame);
+// Takes an unfinished frame out of its heap's roots: from now on the frame
+// lives exactly as long as something the collector traces refers to it (a
+// host object holding it in a reference slot), as any other heap object
+// does. It stays resumable; a CoroFrameRef to it resolves to null.
+void brass_coro_unroot(uintptr_t coro_frame);
 // Marks a registered frame finished and unregisters it; a finished frame is
 // left as it is. A handle no live heap holds (its heap was torn down, or it
 // is no coroutine frame) is a hard error and is not written through, as for

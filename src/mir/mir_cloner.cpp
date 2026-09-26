@@ -122,6 +122,9 @@ Function* clone_function(const Function& src, Module& dst_mod) {
     }
 
     dst_fn->set_allow_fp_reassociation(src.allow_fp_reassociation());
+    if (src.has_coro_frame_layout()) {
+        dst_fn->set_coro_frame_layout(src.coro_frame_slot_count(), src.coro_frame_ref_bits());
+    }
     dst_fn->rebuild_cfg_predecessors();
     return dst_fn;
 }
