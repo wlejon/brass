@@ -1,4 +1,5 @@
 #include <brass/runtime/background_compiler.hpp>
+#include <brass/runtime/tier_timeline.hpp>
 #include <brass/mir/loop_opt.hpp>
 #include <iostream>
 #include <iomanip>
@@ -117,6 +118,7 @@ bool BackgroundCompiler::enqueue(
     // after this point is not published to, one rebound before it is not
     // compiled for the old module.
     if (!handle) handle = installer_.dispatch_table().get_or_create(fn_name);
+    TierEventScope timed(TierEventKind::Tier2Enqueue, fn_name);
     auto mod_copy = clone_for_tier2(installer_.dispatch_table(), module, fn_name);
     if (!mod_copy) return false;
     const Tier2Bindings bindings = installer_.capture_tier2_bindings(*handle, *mod_copy, fn_name, &module);

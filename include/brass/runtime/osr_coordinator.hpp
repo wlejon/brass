@@ -90,6 +90,12 @@ private:
 
     struct Entry;
     void request_entry(const Function& fn, const BasicBlock& header, const std::shared_ptr<Entry>& e);
+    // On the compiling worker: plans `e` and copies its entry function with
+    // the bodies it calls (and `targets`, the call targets the interpreter's
+    // feedback speculates on) into a module of its own; null when the loop
+    // has no entry.
+    std::unique_ptr<Module> copy_entry(const Function& fn, const BasicBlock& header, const std::shared_ptr<Entry>& e,
+                                       const std::vector<std::string>& targets);
     void compile_entry(const Function& fn, Module& copy, const std::shared_ptr<Entry>& e);
     // A guard of `e`'s code failed: past the deopt threshold the entry is
     // never entered again (osr_coordinator.cpp).

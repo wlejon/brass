@@ -267,6 +267,13 @@ public:
     // rebind_mir_function): the call finishes in `compiled_from`.
     uint64_t resume_after_deopt(FunctionHandle& handle, const DeoptFrame& frame, FunctionDispatchTable& table,
                                 const Function& compiled_from);
+    // A guard failed in the body of a callee that `owner`'s tier-2 code at
+    // `owner_entry` (compiled from `compiled_from`) carries and calls
+    // directly. The owner's code keeps calling that copy, so the failure
+    // counts against the owner too, which invalidates it as its own guard
+    // failing would; else every later call through it deoptimizes.
+    void note_carried_deopt(FunctionHandle& owner, const Function* compiled_from, void* owner_entry,
+                            uint32_t resume_id);
     uint64_t tier2_deopts() const noexcept { return tier2_deopts_.load(std::memory_order_relaxed); }
     uint64_t tier2_invalidations() const noexcept { return tier2_invalidations_.load(std::memory_order_relaxed); }
 
@@ -294,6 +301,9 @@ private:
     explicit MultiTierPipeline(DefaultTag);
 
     void tier_invocation(TieringFeedback& fb, std::string_view fn_name, FunctionHandle* handle);
+    // Records a failure of guard `resume_id` in `handle`'s tier-2 code and
+    // invalidates that code once the guard is judged mis-speculated.
+    void charge_deopt(FunctionHandle& handle, FunctionDispatchTable& table, uint32_t resume_id);
     // Tier-1 code reaches a module function with no native entry through a
     // lazy stub that resolves to the callee's native entry. Claims `name`
     // (in progress) and compiles it into a node appended to `nodes`, whose
@@ -320,6 +330,11 @@ private:
                                  const std::vector<RuntimeValue>& args, const Function* resume_fn = nullptr,
                                  uint32_t resume_id = 0);
     void setup_fast_interpreter(FastInterpreter& interp, Module& mod);
+    // The tier timeline's report of this program (BRASS_TIER_LOG,
+    // tier_timeline.hpp), once: on release, or when the host stops its
+    // compiles on the way out.
+    void emit_tier_report();
+    std::atomic<bool> tier_report_emitted_{false};
     // The Tier-0 interpreter kept across execute() calls on one module,
     // rebuilt when the module or the registered symbols change. It runs the
     // executes whose current heap is its heap (a private heap of its own:

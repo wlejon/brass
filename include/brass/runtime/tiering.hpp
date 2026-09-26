@@ -292,6 +292,12 @@ public:
     );
 
     void dump_stats(std::ostream& os) const;
+    // Calls `fn` with each function's feedback, under the registry lock (it
+    // must not call back into the registry).
+    template <typename Fn> void for_each_feedback(Fn&& fn) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& [name, fb] : feedback_map_) fn(*fb);
+    }
 
 private:
     TieringRegistry();

@@ -5,6 +5,7 @@
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/codegen/unsupported_operation.hpp>
 #include <brass/mir/coro_transform.hpp>
+#include <brass/runtime/tier_timeline.hpp>
 #include <algorithm>
 #include <iostream>
 #include <iomanip>
@@ -117,7 +118,13 @@ BackgroundCompiler& MultiTierPipeline::background_compiler() {
     return *bg_;
 }
 
+void MultiTierPipeline::emit_tier_report() {
+    if (initialized_ && !tier_report_emitted_.exchange(true)) emit_tier_report_from_env(tiering());
+}
+
 void MultiTierPipeline::stop_background_compiles() {
+    // A host about to exit: the program's report, as it stands.
+    emit_tier_report();
     BackgroundCompiler* bg = nullptr;
     if (is_default_) {
         bg = &BackgroundCompiler::instance();
@@ -134,6 +141,7 @@ void MultiTierPipeline::release_program() {
     if (is_default_) {
         throw std::logic_error("MultiTierPipeline::release_program: the default program is never released");
     }
+    emit_tier_report();
     {
         // Drops the queued compiles, then joins the workers: an in-flight
         // compile finishes installing into the program's still-live handles.
@@ -178,6 +186,7 @@ void MultiTierPipeline::forget(const Module* mod) noexcept {
 }
 
 void MultiTierPipeline::initialize(const TieringConfig& config) {
+    enable_tier_timeline_from_env();
     std::lock_guard<std::mutex> lock(mutex_);
     config_ = config;
     initialized_ = true;
@@ -442,9 +451,11 @@ std::optional<detail::Tier1Link> MultiTierPipeline::open_tier1_node(std::string_
 
     auto start = std::chrono::high_resolution_clock::now();
     codegen::BaselineCompiledFunction compiled;
+    TierEventScope timed(TierEventKind::Tier1Compile, name);
     try {
         compiled = baseline_compiler_.compile(*fn, Target::host());
     } catch (const codegen::UnsupportedOperation&) {
+        timed.set_ok(false);
         // The baseline tier does not compile this function (an opcode it
         // rejects, e.g. exceptions or coroutines): it stays in Tier 0.
         std::lock_guard<std::mutex> lock(compiling_mutex_);

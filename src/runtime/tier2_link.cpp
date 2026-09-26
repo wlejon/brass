@@ -13,6 +13,7 @@
 #include <brass/runtime/host_symbols.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/type_feedback.hpp>
+#include <brass/runtime/tier_timeline.hpp>
 #include <cstdio>
 #include <cstdlib>
 #include <unordered_map>
@@ -74,7 +75,10 @@ void bind_declared_handles(FunctionDispatchTable& table, const Module& copy, con
 }
 
 bool run_tier2_optimization_pipeline(Module& mod, FunctionDispatchTable& table, std::string& errors) {
-    if (MultiTierPipeline::Tier2FrontPass front = table.pipeline().tier2_front_pass()) front(mod);
+    if (MultiTierPipeline::Tier2FrontPass front = table.pipeline().tier2_front_pass()) {
+        TierEventScope timed(TierEventKind::FrontPass, mod.name());
+        front(mod);
+    }
     run_pipeline(mod, tier2_pipeline(table.tiering().type_feedback(), table.pipeline().tier2_passes()));
     DiagnosticReporter diag;
     if (verify_module(mod, &diag)) return true;

@@ -11,6 +11,7 @@
 #include <brass/runtime/deopt.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
 #include <brass/runtime/coroutine.hpp>
+#include <brass/runtime/tier_timeline.hpp>
 #include "tier2_link.hpp"
 #include <algorithm>
 #include <cstdio>
@@ -406,6 +407,8 @@ CodeInstallResult CodeInstaller::install_tier2(
     // published only if the handle is still bound to it when compilation
     // finishes.
     const Function* bound = bindings.target;
+    TierEventScope timed(TierEventKind::Tier2Compile, fn_name);
+    timed.set_ok(false);
 
     // Compile errors are results, never exceptions: a background worker
     // and the invocation hook in native code both call this. A rejected
@@ -555,14 +558,22 @@ CodeInstallResult CodeInstaller::install_tier2(
         if (!other_handle || !other_ptr) continue;
         // Published or not, this copy of the sibling runs when the target
         // calls it, so its guards resume in its Tier-0 Function (validated
-        // above).
-        register_resumer(*other_handle, other_ptr, other_fn);
+        // above), and their failures count against the target's code too:
+        // the target keeps calling this copy until its own code goes.
+        MultiTierPipeline* pipeline = &table_->pipeline();
+        FunctionHandle* owner = &handle;
+        detail::register_tier2_resumer(*table_, *other_handle, other_ptr, other_fn,
+                                       [pipeline, owner, bound, native_code_ptr](const DeoptFrame& frame) {
+                                           pipeline->note_carried_deopt(*owner, bound, native_code_ptr,
+                                                                        frame.resume_id);
+                                       });
         if (!other_handle->has_native_entry() && other_handle->mir_function() == other_fn) {
             other_handle->publish_optimized(jit, other_ptr, other_fn, fn->return_type(), fn->param_types(),
                                             /*require_no_entry=*/true);
         }
     }
 
+    timed.set_ok(true);
     return {true, native_code_ptr, "", 0};
 }
 

@@ -4,6 +4,7 @@
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/deopt.hpp>
+#include <brass/runtime/tier_timeline.hpp>
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/vm/fast_interpreter.hpp>
 #include <brass/runtime/host_symbols.hpp>
@@ -152,25 +153,11 @@ uint64_t MultiTierPipeline::resume_after_deopt(FunctionHandle& handle, const Deo
     }
 
     tier2_deopts_.fetch_add(1, std::memory_order_relaxed);
-    TieringFeedback& fb = table.tiering().get_feedback(handle.name());
-    if (current_code) fb.record_deopt(frame.resume_id);
-    if (current_code && handle.tier() == TierLevel::Tier2_Optimized && fb.is_speculation_invalid(frame.resume_id)) {
-        // The speculation is wrong for this program: stop entering the
-        // optimized code. With a front pass, a recompile asks the front end
-        // again, and its feedback now records what failed here (the
-        // continuation ran the lower tier's path), so the function may tier
-        // up again, a bounded number of times. Otherwise tier 2 has no
-        // non-speculating variant to fall back to, and it never recompiles.
-        handle.invalidate_optimized();
-        fb.set_tier(handle.tier());
-        tier2_invalidations_.fetch_add(1, std::memory_order_relaxed);
-        if (tier2_front_pass() && fb.record_reoptimization() <= kMaxReoptimizations) {
-            fb.clear_deopts();
-            fb.clear_bailout();
-        } else {
-            fb.trigger_bailout("guard " + std::to_string(frame.resume_id) + " failed repeatedly in tier-2 code");
-        }
+    if (tier_timeline_enabled()) {
+        record_tier_instant(TierEventKind::Deopt,
+                            std::string(handle.name()) + " guard=" + std::to_string(frame.resume_id));
     }
+    if (current_code) charge_deopt(handle, table, frame.resume_id);
 
     // The same exits the interpreter's guard takes, in its order.
     const Function* stub = exit_stub_of(*fn, *guard);
@@ -198,6 +185,42 @@ uint64_t MultiTierPipeline::resume_after_deopt(FunctionHandle& handle, const Deo
     RuntimeValue result = stub ? run_fresh_tier0(table, stub, state)
                                : run_fresh_tier0(table, nullptr, state, fn, frame.resume_id);
     return result.is_void() ? 0 : result.raw_bits();
+}
+
+void MultiTierPipeline::charge_deopt(FunctionHandle& handle, FunctionDispatchTable& table, uint32_t resume_id) {
+    TieringFeedback& fb = table.tiering().get_feedback(handle.name());
+    fb.record_deopt(resume_id);
+    if (handle.tier() != TierLevel::Tier2_Optimized || !fb.is_speculation_invalid(resume_id)) return;
+    // The speculation is wrong for this program: stop entering the
+    // optimized code. With a front pass, a recompile asks the front end
+    // again, and its feedback now records what failed here (the
+    // continuation ran the lower tier's path), so the function may tier
+    // up again, a bounded number of times. Otherwise tier 2 has no
+    // non-speculating variant to fall back to, and it never recompiles.
+    handle.invalidate_optimized();
+    // Tier-1 callers reach tier-2 code through the function's lazy stub,
+    // which may still jump to the dropped code: re-armed, it resolves to
+    // whatever code the handle has now on its next call.
+    if (const auto& lazy = baseline_compiler_.lazy_symbols(); lazy && lazy->resolved_target(handle.name())) {
+        lazy->define(handle.name(), nullptr);
+    }
+    fb.set_tier(handle.tier());
+    tier2_invalidations_.fetch_add(1, std::memory_order_relaxed);
+    record_tier_instant(TierEventKind::Invalidate, handle.name());
+    if (tier2_front_pass() && fb.record_reoptimization() <= kMaxReoptimizations) {
+        fb.clear_deopts();
+        fb.clear_bailout();
+    } else {
+        fb.trigger_bailout("guard " + std::to_string(resume_id) + " failed repeatedly in tier-2 code");
+    }
+}
+
+void MultiTierPipeline::note_carried_deopt(FunctionHandle& owner, const Function* compiled_from, void* owner_entry,
+                                           uint32_t resume_id) {
+    // The owner's current code is the one carrying the failed copy; code it
+    // has since replaced or dropped is not charged again.
+    if (owner.mir_function() != compiled_from || owner.native_entry() != owner_entry) return;
+    charge_deopt(owner, *table_, resume_id);
 }
 
 RuntimeValue MultiTierPipeline::run_fresh_tier0(FunctionDispatchTable& table, const Function* fn,

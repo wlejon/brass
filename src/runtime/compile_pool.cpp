@@ -1,4 +1,5 @@
 #include <brass/runtime/compile_pool.hpp>
+#include <brass/runtime/tier_timeline.hpp>
 
 #include <algorithm>
 #include <cstdlib>
@@ -188,6 +189,7 @@ size_t CompilePool::thread_count() const {
 }
 
 void CompilePool::worker_loop() {
+    detail::t_on_compile_worker = true;
     for (;;) {
         Job job;
         {

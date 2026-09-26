@@ -9,6 +9,7 @@
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/compile_pool.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
+#include <brass/runtime/tier_timeline.hpp>
 #include <brass/target/target.hpp>
 #include <brass/vm/fast_interpreter.hpp>
 #include "../vm/fast_interpreter_impl.hpp"
@@ -31,6 +32,7 @@ struct OsrCoordinator::Entry {
     void* entry = nullptr;
     const BasicBlock* header = nullptr;
     std::atomic<uint64_t> deopts{0};
+    mutable std::atomic<bool> entered{false};
 };
 
 namespace {
@@ -101,6 +103,7 @@ void OsrCoordinator::note_deopt(const std::shared_ptr<Entry>& e) {
     if (e->deopts.fetch_add(1, std::memory_order_relaxed) + 1 < threshold) return;
     Entry::State ready = Entry::State::Ready;
     if (!e->state.compare_exchange_strong(ready, Entry::State::Invalid, std::memory_order_acq_rel)) return;
+    record_tier_instant(TierEventKind::Invalidate, e->plan.function ? e->plan.function->name() : e->name);
     // The continuation runs the loop in a Tier-0 frame nested under this
     // code; entering the code again at its next backedge would fail the
     // same guard and nest another frame, without bound. With a front pass
@@ -162,17 +165,44 @@ bool OsrCoordinator::try_osr_migration(FastInterpreter&, const Function& fn, Bas
 }
 
 void OsrCoordinator::request_entry(const Function& fn, const BasicBlock& header, const std::shared_ptr<Entry>& e) {
-    auto fail = [&] { e->state.store(Entry::State::Failed, std::memory_order_release); };
-    const Module* src = fn.parent();
+    TierEventScope timed(TierEventKind::OsrRequest, fn.name());
+    auto fail = [&] {
+        timed.set_ok(false);
+        e->state.store(Entry::State::Failed, std::memory_order_release);
+    };
     FunctionDispatchTable& table = registry().dispatch_table();
     // The function's handle is where a failed guard of the code resumes;
     // one bound to another Function is not this code's.
     FunctionHandle* handle = table.get_or_create(fn.name(), &fn);
-    if (!src || !handle || handle->mir_function() != &fn) return fail();
+    if (!fn.parent() || !handle || handle->mir_function() != &fn) return fail();
 
+    // Only the call targets are read here, on the interpreter's thread: its
+    // type feedback grows as it runs. Planning the entry and copying it
+    // with its callees read the program's MIR, which running it does not
+    // change, and take milliseconds (a loop nest's liveness, the region's
+    // SSA repair), so they run on the worker, ahead of the compile, while
+    // the interpreter carries on with the loop.
+    auto job = [this, &fn, hdr = &header, e, targets = detail::speculated_call_targets(table, fn.name())] {
+        std::unique_ptr<Module> mod = copy_entry(fn, *hdr, e, targets);
+        if (!mod) {
+            e->state.store(Entry::State::Failed, std::memory_order_release);
+            return;
+        }
+        compile_entry(fn, *mod, e);
+    };
+    if (!CompilePool::shared().submit(this, kOsrPriority, std::move(job))) fail();
+}
+
+std::unique_ptr<Module> OsrCoordinator::copy_entry(const Function& fn, const BasicBlock& header,
+                                                   const std::shared_ptr<Entry>& e,
+                                                   const std::vector<std::string>& targets) {
+    TierEventScope timed(TierEventKind::OsrRequest, fn.name());
+    timed.set_ok(false);
+    const Module* src = fn.parent();
+    FunctionDispatchTable& table = registry().dispatch_table();
     std::string why;
     auto plan = plan_osr_entry(fn, header, &why);
-    if (!plan) return fail();
+    if (!plan) return nullptr;
     e->plan = std::move(*plan);
     e->name = std::string(fn.name()) + ".osr" + std::to_string(header.id());
 
@@ -184,8 +214,8 @@ void OsrCoordinator::request_entry(const Function& fn, const BasicBlock& header,
         mod->set_allow_fp_reassociation(src->allow_fp_reassociation());
         mod->set_pinned_tls_register(src->pinned_tls_register());
         mod->copy_declarations_from(*src);
-        if (!build_osr_entry_function(e->plan, *mod, e->name, &why)) return fail();
-        clone_callee_closure(*src, *mod, e->plan.region, detail::speculated_call_targets(table, fn.name()), &fn);
+        if (!build_osr_entry_function(e->plan, *mod, e->name, &why)) return nullptr;
+        clone_callee_closure(*src, *mod, e->plan.region, targets, &fn);
         // Every program function the copy carries a body of has its handle
         // now: a guard of that body failing in the OSR code resumes through
         // it (compile_entry registers the resumer), and a callee the
@@ -197,17 +227,20 @@ void OsrCoordinator::request_entry(const Function& fn, const BasicBlock& header,
         }
         detail::bind_declared_handles(table, *mod, *src);
     } catch (const std::exception&) {
-        return fail();
+        return nullptr;
     }
-
-    auto job = [this, &fn, e, m = std::shared_ptr<Module>(std::move(mod))] { compile_entry(fn, *m, e); };
-    if (!CompilePool::shared().submit(this, kOsrPriority, std::move(job))) fail();
+    timed.set_ok(true);
+    return mod;
 }
 
 void OsrCoordinator::compile_entry(const Function& fn, Module& copy, const std::shared_ptr<Entry>& shared) {
     Entry& e = *shared;
     Module* const mod = &copy;
-    auto fail = [&] { e.state.store(Entry::State::Failed, std::memory_order_release); };
+    TierEventScope timed(TierEventKind::OsrCompile, fn.name());
+    auto fail = [&] {
+        timed.set_ok(false);
+        e.state.store(Entry::State::Failed, std::memory_order_release);
+    };
     FunctionDispatchTable& table = registry().dispatch_table();
     MultiTierPipeline& pipeline = table.pipeline();
     FunctionHandle* handle = table.find(fn.name());
@@ -258,6 +291,13 @@ void OsrCoordinator::compile_entry(const Function& fn, Module& copy, const std::
         const std::string_view shown = lf.name == e.name ? fn.name() : std::string_view(lf.name);
         pipeline.notify_code_installed({shown, TierLevel::Tier2_Optimized, lf.code, lf.size, &lf.lines});
     }
+    // Weak: the entry owns the code the resumers are registered for. A
+    // guard of a carried callee body failing counts against the entry as
+    // its own guards do: the loop keeps calling that copy.
+    std::weak_ptr<Entry> weak = shared;
+    auto count_against_entry = [this, weak](const DeoptFrame&) {
+        if (std::shared_ptr<Entry> live = weak.lock()) note_deopt(live);
+    };
     for (const Function* f : mod->functions()) {
         if (!f || f->block_count() == 0) continue;
         void* addr = jit->get_symbol_address(f->name());
@@ -270,13 +310,11 @@ void OsrCoordinator::compile_entry(const Function& fn, Module& copy, const std::
         auto sib = siblings.find(std::string(f->name()));
         FunctionHandle* h = sib != siblings.end() ? table.find(f->name()) : nullptr;
         std::string why;
-        if (h && deopt_targets_valid(*f, sib->second, why)) detail::register_tier2_resumer(table, *h, addr, sib->second);
+        if (h && deopt_targets_valid(*f, sib->second, why)) {
+            detail::register_tier2_resumer(table, *h, addr, sib->second, count_against_entry);
+        }
     }
-    // Weak: the entry owns the code the resumer is registered for.
-    std::weak_ptr<Entry> weak = shared;
-    detail::register_tier2_resumer(table, *handle, entry, &fn, [this, weak](const DeoptFrame&) {
-        if (std::shared_ptr<Entry> live = weak.lock()) note_deopt(live);
-    });
+    detail::register_tier2_resumer(table, *handle, entry, &fn, count_against_entry);
     e.jit = std::move(jit);
     e.entry = entry;
     e.state.store(Entry::State::Ready, std::memory_order_release);
@@ -299,6 +337,7 @@ bool OsrCoordinator::enter(const Function& fn, FastFrame& frame, const Entry& e,
     const std::vector<RuntimeValue> args{RuntimeValue::from_ptr(buffer.data())};
     // Counted on entry: a throw can end the OSR call.
     total_osr_migrations_++;
+    if (!e.entered.exchange(true, std::memory_order_relaxed)) record_tier_instant(TierEventKind::OsrEnter, fn.name());
     HiddenFrame hidden(frame);
     out_result = invoke_native_address(e.entry, fn.return_type(), &params, args);
     return true;
