@@ -56,6 +56,12 @@ struct TieringConfig {
     // Tier 2 compiles run on the process's CompilePool::shared(), sized for
     // the machine, not on the mutator.
     bool enable_background_compile = false;
+    // A function reaching the tier-1 threshold in a running program is
+    // baseline-compiled on the same pool (MultiTierPipeline::request_tier1)
+    // and keeps running in Tier 0 until its code is installed, rather than
+    // stopping the mutator for the compile of it and every function it
+    // reaches.
+    bool enable_background_tier1 = false;
     Tier0Interpreter tier0_interpreter = Tier0Interpreter::Oracle;
     // The highest tier the pipeline compiles a program function to. At
     // Tier0_Interpreter nothing of the program is compiled: every function

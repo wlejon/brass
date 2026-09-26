@@ -33,7 +33,7 @@ class TieringRegistry;
 
 enum class TierEventKind : uint8_t {
     Tier1Compile,  // baseline code for one function (a call cycle's members each)
-    Tier2Enqueue,  // the program's thread copying a function for a background tier-2 compile
+    Tier2Enqueue,  // queueing a background tier-2 compile; the copy it takes runs on the worker
     Tier2Compile,  // optimizing, compiling and installing one function's tier-2 code
     OsrRequest,    // the program's thread planning and copying a hot loop's OSR entry
     OsrCompile,    // optimizing and compiling that entry

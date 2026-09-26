@@ -143,6 +143,9 @@ public:
     // Returns false too while a function it needs is being compiled on
     // another thread; tiering then asks again later.
     bool compile_and_install_tier1(std::string_view fn_name, const Function* fn = nullptr);
+    // compile_and_install_tier1 of `fn_name` as a CompilePool::shared() job,
+    // at most one queued or running per function. True if it was queued.
+    bool request_tier1(std::string_view fn_name);
     bool is_baseline_rejected(std::string_view fn_name) const;
 
     // The program's one function-pointer representation: the address every
@@ -374,6 +377,9 @@ private:
     std::unordered_set<std::string> in_progress_compilations_;
     std::unordered_set<std::string> baseline_rejected_; // under compiling_mutex_
     std::unordered_set<std::string> tier2_in_progress_; // under compiling_mutex_
+    std::unordered_set<std::string> tier1_requested_;   // under compiling_mutex_
+    // Drops the queued request_tier1 jobs and waits out the running ones.
+    void drain_tier1_requests();
     // Native-to-Tier-0 bridges by function name (tier0_bridge.cpp); kept
     // for the pipeline's lifetime, since lazy stubs point into them.
     std::mutex bridges_mutex_;

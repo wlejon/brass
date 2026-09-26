@@ -50,6 +50,12 @@ struct CompileTask {
     // What the handles were bound to when module_copy was taken: the code
     // is published only to handles still bound to these.
     Tier2Bindings bindings;
+    // Set when the worker takes the copy (BackgroundCompiler::enqueue in a
+    // running program): the Module it copies `function_name` from, and the
+    // call targets the function's type feedback named at enqueue. Only
+    // `bindings.target` is filled until then.
+    const Module* copy_source = nullptr;
+    std::vector<std::string> copy_targets;
     std::string error_message;
     std::chrono::high_resolution_clock::time_point enqueue_time;
     std::chrono::high_resolution_clock::time_point finish_time;
@@ -157,6 +163,11 @@ private:
     // source to check the siblings against).
     bool enqueue_copy(std::string_view fn_name, std::unique_ptr<Module> module_copy, FunctionHandle* handle,
                       CompilePriority priority, TierLevel target_tier, const Tier2Bindings* bindings);
+    // Queues `task` (its function_name, handle, tiers and bindings set) on
+    // the pool, unless its function is already queued or compiling.
+    bool submit_task(std::shared_ptr<CompileTask> task);
+    // A task queued without its copy takes it here, on the worker.
+    bool take_deferred_copy(CompileTask& task);
 
     BackgroundCompilerConfig config_;
     CodeInstaller installer_;

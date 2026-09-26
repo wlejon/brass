@@ -1,6 +1,8 @@
 #include <brass/runtime/background_compiler.hpp>
+#include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/tier_timeline.hpp>
 #include <brass/mir/loop_opt.hpp>
+#include "tier2_link.hpp"
 #include <iostream>
 #include <iomanip>
 
@@ -117,14 +119,52 @@ bool BackgroundCompiler::enqueue(
     // The bindings are captured before the clone is taken: a handle rebound
     // after this point is not published to, one rebound before it is not
     // compiled for the old module.
-    if (!handle) handle = installer_.dispatch_table().get_or_create(fn_name);
+    FunctionDispatchTable& table = installer_.dispatch_table();
+    if (!handle) handle = table.get_or_create(fn_name);
     TierEventScope timed(TierEventKind::Tier2Enqueue, fn_name);
-    auto mod_copy = clone_for_tier2(installer_.dispatch_table(), module, fn_name);
-    if (!mod_copy) return false;
-    const Tier2Bindings bindings = installer_.capture_tier2_bindings(*handle, *mod_copy, fn_name, &module);
-    // Bound to another module's Function: this module's code is not its.
-    if (bindings.target_foreign) return false;
-    return enqueue_copy(fn_name, std::move(mod_copy), handle, priority, target_tier, &bindings);
+    if (!table.pipeline().is_initialized()) {
+        auto mod_copy = clone_for_tier2(table, module, fn_name);
+        if (!mod_copy) return false;
+        const Tier2Bindings bindings = installer_.capture_tier2_bindings(*handle, *mod_copy, fn_name, &module);
+        // Bound to another module's Function: this module's code is not its.
+        if (bindings.target_foreign) return false;
+        return enqueue_copy(fn_name, std::move(mod_copy), handle, priority, target_tier, &bindings);
+    }
+    // In a running program only the call targets are read here, on the
+    // program's thread: its type feedback grows as it runs. Copying the
+    // function with their bodies reads the program's MIR, which running it
+    // does not change, and takes milliseconds for a large function (a
+    // recompile after a deopt included), so the worker does it ahead of the
+    // compile, as an OSR entry's copy is taken (osr_coordinator.cpp).
+    const Function* target = handle->mir_function();
+    if (target && target != module.get_function(fn_name)) return false;
+    auto task = std::make_shared<CompileTask>();
+    task->function_name = std::string(fn_name);
+    task->handle = handle;
+    task->priority = priority;
+    task->target_tier = target_tier;
+    task->bindings.target = target;
+    task->copy_source = &module;
+    task->copy_targets = detail::speculated_call_targets(table, fn_name);
+    return submit_task(std::move(task));
+}
+
+bool BackgroundCompiler::take_deferred_copy(CompileTask& task) {
+    TierEventScope timed(TierEventKind::Tier2Enqueue, task.function_name);
+    timed.set_ok(false);
+    FunctionDispatchTable& table = installer_.dispatch_table();
+    const Module& src = *task.copy_source;
+    std::unique_ptr<Module> copy = clone_function_module(src, task.function_name, task.copy_targets);
+    if (!copy) return false;
+    detail::bind_declared_handles(table, *copy, src);
+    Tier2Bindings bindings = installer_.capture_tier2_bindings(*task.handle, *copy, task.function_name, &src);
+    // Rebound since the enqueue: the code this copy makes is no longer the
+    // handle's, and the handle's own Function was never tried.
+    if (bindings.target_foreign || bindings.target != task.bindings.target) return false;
+    task.bindings = std::move(bindings);
+    task.module_copy = std::move(copy);
+    timed.set_ok(true);
+    return true;
 }
 
 bool BackgroundCompiler::tier2_candidate(const FunctionHandle& handle) {
@@ -151,8 +191,23 @@ bool BackgroundCompiler::enqueue_copy(std::string_view fn_name, std::unique_ptr<
                                       FunctionHandle* handle, CompilePriority priority, TierLevel target_tier,
                                       const Tier2Bindings* bindings) {
     if (!module_copy) return false;
-    std::string key(fn_name);
+    if (!handle) handle = installer_.dispatch_table().get_or_create(fn_name);
+    Tier2Bindings captured =
+        bindings ? *bindings : installer_.capture_tier2_bindings(*handle, *module_copy, fn_name, nullptr);
+    if (captured.target_foreign) return false;
 
+    auto task = std::make_shared<CompileTask>();
+    task->function_name = std::string(fn_name);
+    task->module_copy = std::move(module_copy);
+    task->target_tier = target_tier;
+    task->priority = priority;
+    task->handle = handle;
+    task->bindings = std::move(captured);
+    return submit_task(std::move(task));
+}
+
+bool BackgroundCompiler::submit_task(std::shared_ptr<CompileTask> task) {
+    const std::string key = task->function_name;
     std::lock_guard<std::mutex> lock(mutex_);
 
     // A private pool stopped since its last task starts again.
@@ -163,30 +218,16 @@ bool BackgroundCompiler::enqueue_copy(std::string_view fn_name, std::unique_ptr<
         stats_.tasks_deduplicated++;
         return false;
     }
+    if (!tier2_candidate(*task->handle)) return false;
 
-    if (!handle) {
-        handle = installer_.dispatch_table().get_or_create(fn_name);
-    }
-
-    if (!tier2_candidate(*handle)) return false;
-    Tier2Bindings captured =
-        bindings ? *bindings : installer_.capture_tier2_bindings(*handle, *module_copy, key, nullptr);
-    if (captured.target_foreign) return false;
-
-    auto task = std::make_shared<CompileTask>();
     task->id = next_task_id_++;
-    task->function_name = key;
-    task->module_copy = std::move(module_copy);
-    task->target_tier = target_tier;
-    task->priority = priority;
     task->status = CompileStatus::Pending;
-    task->handle = handle;
-    task->bindings = std::move(captured);
     task->enqueue_time = std::chrono::high_resolution_clock::now();
+    const uint8_t priority = static_cast<uint8_t>(task->priority);
 
     // The pool calls back under its own lock only to queue; this lock is
     // never taken by the pool, so holding it here is safe.
-    if (!pool_->submit(this, static_cast<uint8_t>(priority), [this, task] { run_task(*task); })) return false;
+    if (!pool_->submit(this, priority, [this, task] { run_task(*task); })) return false;
 
     active_names_.insert(key);
     queued_names_.insert(key);
@@ -255,7 +296,12 @@ void BackgroundCompiler::run_task(CompileTask& task) {
     // on its lower tier rather than terminating the process.
     CodeInstallResult res;
     try {
-        res = installer_.install_tier2(*task.handle, std::move(task.module_copy), task.function_name, task.bindings);
+        if (task.copy_source && !take_deferred_copy(task)) {
+            res = {false, nullptr, "Tier-2 copy of the function could not be taken", 0};
+        } else {
+            res = installer_.install_tier2(*task.handle, std::move(task.module_copy), task.function_name,
+                                           task.bindings);
+        }
     } catch (const std::exception& e) {
         res = {false, nullptr, std::string("Tier-2 compilation threw: ") + e.what(), 0};
         task.handle->mark_tier2_rejected(task.bindings.target);

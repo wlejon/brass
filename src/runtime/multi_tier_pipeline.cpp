@@ -6,6 +6,7 @@
 #include <brass/codegen/unsupported_operation.hpp>
 #include <brass/mir/coro_transform.hpp>
 #include <brass/runtime/tier_timeline.hpp>
+#include <brass/runtime/compile_pool.hpp>
 #include <algorithm>
 #include <iostream>
 #include <iomanip>
@@ -151,6 +152,7 @@ void MultiTierPipeline::release_program() {
             bg_->stop();
         }
     }
+    drain_tier1_requests();
     clear_baseline_cache();
     std::lock_guard<std::mutex> lock(mutex_);
     initialized_ = false;
@@ -214,6 +216,7 @@ void MultiTierPipeline::initialize(const TieringConfig& config) {
 }
 
 void MultiTierPipeline::shutdown() {
+    drain_tier1_requests();
     clear_baseline_cache();
     if (is_default_) {
         if (BackgroundCompiler::instance().is_running()) BackgroundCompiler::instance().stop();
@@ -318,6 +321,39 @@ void MultiTierPipeline::clear_baseline_cache() {
 bool MultiTierPipeline::is_baseline_rejected(std::string_view fn_name) const {
     std::lock_guard<std::mutex> lock(compiling_mutex_);
     return baseline_rejected_.count(std::string(fn_name)) != 0;
+}
+
+bool MultiTierPipeline::request_tier1(std::string_view fn_name) {
+    std::string key(fn_name);
+    {
+        std::lock_guard<std::mutex> lock(compiling_mutex_);
+        if (baseline_rejected_.count(key) || !tier1_requested_.insert(key).second) return false;
+    }
+    // Below tier-2 work: a function's baseline code is what it runs until
+    // its optimized code exists, and a tier-2 compile of a caller links to
+    // its stub either way.
+    constexpr uint8_t kTier1Priority = 128;
+    auto job = [this, key] {
+        try {
+            compile_and_install_tier1(key);
+        } catch (...) {
+            // Left in Tier 0; tiering asks again.
+        }
+        std::lock_guard<std::mutex> lock(compiling_mutex_);
+        tier1_requested_.erase(key);
+    };
+    if (CompilePool::shared().submit(this, kTier1Priority, std::move(job))) return true;
+    std::lock_guard<std::mutex> lock(compiling_mutex_);
+    tier1_requested_.erase(key);
+    return false;
+}
+
+void MultiTierPipeline::drain_tier1_requests() {
+    if (process_exiting()) return;
+    CompilePool::shared().cancel(this);
+    CompilePool::shared().wait_owner(this);
+    std::lock_guard<std::mutex> lock(compiling_mutex_);
+    tier1_requested_.clear();
 }
 
 bool MultiTierPipeline::compile_and_install_tier1(std::string_view fn_name, const Function* fn) {
@@ -502,6 +538,17 @@ void* MultiTierPipeline::compile_tier1_on_demand(std::string_view name) {
     if (!handle) return nullptr;
     // Nothing of the program is compiled: the call runs it in Tier 0.
     if (config_.max_tier < TierLevel::Tier1_Baseline) return tier0_bridge(name);
+    // In the background: this call and the ones after it run in Tier 0
+    // through the bridge until the worker installs the code, which points
+    // the stub at it (install_tier1_group). The stub keeps whichever of the
+    // two reaches it first, so an install that wins is never overwritten.
+    if (config_.enable_background_tier1 && !handle->native_entry()) {
+        const Function* fn = handle->mir_function();
+        if (fn && !is_baseline_rejected(name) && tier0_bridge_supported(*fn)) {
+            request_tier1(name);
+            if (void* bridge = tier0_bridge(name)) return bridge;
+        }
+    }
     for (;;) {
         if (void* entry = handle->native_entry()) return entry;
         if (compile_and_install_tier1(name)) continue;
@@ -638,7 +685,8 @@ void MultiTierPipeline::tier_invocation(TieringFeedback& fb, std::string_view fn
     if (tier == TierLevel::Tier0_Interpreter) {
         stats_.tier0_invocations.fetch_add(1, std::memory_order_relaxed);
         if (count >= config_.invocation_tier1_threshold && !fb.is_bailout_set()) {
-            compile_and_install_tier1(fn_name);
+            if (config_.enable_background_tier1) request_tier1(fn_name);
+            else compile_and_install_tier1(fn_name);
         }
     } else if (tier == TierLevel::Tier1_Baseline) {
         stats_.tier1_invocations.fetch_add(1, std::memory_order_relaxed);

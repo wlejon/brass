@@ -273,6 +273,12 @@ void TieringRegistry::clear() {
 bool TieringRegistry::on_invocation_threshold_reached(std::string_view fn_name) {
     MultiTierPipeline& p = pipeline();
     if (p.is_initialized()) {
+        // Queued: the function runs in Tier 0 until the worker installs its
+        // code, and asks again (a retry) if that did not happen.
+        if (p.config().enable_background_tier1) {
+            p.request_tier1(fn_name);
+            return false;
+        }
         return p.compile_and_install_tier1(fn_name);
     }
     if (!config_.enable_background_compile) {

@@ -206,6 +206,7 @@ add_executable(brass_unit_tests
     unit/test_invoke_return_types.cpp
     unit/test_baseline_lazy_symbols.cpp
     unit/test_tier1_cold_callees.cpp
+    unit/test_tier1_background.cpp
     unit/test_tier1_link_order.cpp
     unit/test_function_pointer_tiers.cpp
     unit/test_gc_native_frames.cpp
