@@ -19,15 +19,17 @@ struct Section;
 
 namespace brass::runtime {
 
-// 1. Exception representation: BrassException envelope storing HostValue
-class BrassException : public std::exception {
+// 1. Exception representation: BrassException envelope storing HostValue.
+// It deliberately does not derive from std::exception: it carries a guest
+// language's throw across native frames, and a host library's
+// `catch (const std::exception&)` (meant for its own errors) must not
+// intercept and rewrap it. Only `catch (...)` or a catch naming this type
+// sees it.
+class BrassException {
 public:
     explicit BrassException(HostValue val) noexcept : value_(val) {}
 
     [[nodiscard]] HostValue value() const noexcept { return value_; }
-    [[nodiscard]] const char* what() const noexcept override {
-        return "BrassException: runtime exception";
-    }
 
 private:
     HostValue value_;
