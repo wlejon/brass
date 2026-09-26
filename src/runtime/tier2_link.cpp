@@ -7,6 +7,8 @@
 #include <brass/mir/pass_pipeline.hpp>
 #include <brass/mir/verifier.hpp>
 #include <brass/runtime/deopt.hpp>
+#include <brass/runtime/coroutine.hpp>
+#include <brass/mir/coro_transform.hpp>
 #include <brass/runtime/exception.hpp>
 #include <brass/runtime/host_symbols.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
@@ -47,6 +49,8 @@ Pipeline tier2_pipeline(const FeedbackRegistry& feedback, const std::optional<Pa
 
 // The prefix of the symbol a canonicalized func_addr links against.
 constexpr std::string_view kCanonicalFnPtrPrefix = "brass.fn_ptr:";
+// The prefix of the symbol a coro_create's body descriptor links against.
+constexpr std::string_view kCoroBodyPrefix = "brass.coro_body:";
 
 } // namespace
 
@@ -117,6 +121,30 @@ void canonicalize_function_addresses(Module& mod, const std::function<bool(std::
                 if (const std::string* sym = symbol_for(inst->symbol())) {
                     inst->set_symbol(mod.string_pool().intern(*sym));
                 }
+            }
+        }
+    }
+}
+
+void link_coroutine_bodies(Module& mod, FunctionDispatchTable& table, codegen::JitExecutionEngine& jit) {
+    std::unordered_map<std::string, std::string> linked;  // body name -> descriptor symbol
+    for (Function* fn : mod.functions()) {
+        if (!fn) continue;
+        for (BasicBlock* bb : fn->blocks()) {
+            if (!bb) continue;
+            for (Instruction* inst : *bb) {
+                if (!inst || inst->opcode() != Opcode::coro_create) continue;
+                const std::string name(inst->symbol());
+                auto it = linked.find(name);
+                if (it == linked.end()) {
+                    const FunctionHandle* h = table.find(name);
+                    const Function* body = h ? h->mir_function() : nullptr;
+                    if (!body || !is_lowered_coro_body(*body)) continue;
+                    std::string sym = std::string(kCoroBodyPrefix) + name;
+                    jit.register_external_symbol(sym, const_cast<CoroBody*>(&coro_body_of(*body, &table)));
+                    it = linked.emplace(name, std::move(sym)).first;
+                }
+                inst->set_extra_symbol(mod.string_pool().intern(it->second));
             }
         }
     }

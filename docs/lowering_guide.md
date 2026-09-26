@@ -46,8 +46,11 @@ This document guides frontend language compilers (such as `bronze`, the JS AOT c
 5. **Coroutines & Generators**:
    - Create coroutine frame -> `b.build_coro_create("fn_symbol", args)`
    - Yield value -> `b.build_coro_suspend(yield_val, resume_id)`
-   - Resume coroutine -> `b.build_coro_resume(coro_ptr, arg_val)`
+   - Resume coroutine -> `b.build_coro_resume(coro_ptr, arg_val)`, or `b.build_coro_resume(coro_ptr, arg_val, mode, type)` with a next/throw/return mode
+   - Read the resume mode after a suspend (body with a leading frame parameter) -> `b.build_coro_resume_mode(frame)`
    - Destroy coroutine -> `b.build_coro_destroy(coro_ptr)`
+   - Link a frame to the one awaiting it (async stack traces) -> call `brass_coro_set_awaiter(frame, awaiter)`
+   - Emit coroutines unlowered: the pipeline and the embedding compile entry points run `CoroTransformPass` themselves.
 6. **Speculation, Guards & Deoptimization**:
    - Lower speculative checks into `b.build_guard(cond, "generic_twin_exit", live_state_values)`.
    - Implement interior resume targets in generic twin functions with `twin->add_resume_point(resume_id, target_block)`.

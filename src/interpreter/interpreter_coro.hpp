@@ -9,10 +9,13 @@ namespace brass {
 // Coroutine opcodes over lowered coroutine bodies (see CoroTransformPass):
 // the body takes the frame, dispatches on its state_id and keeps is_done.
 // Handles are gcrefs: the frame is a heap object a collection may move.
-RuntimeValue interp_coro_create(const Instruction& inst, InterpreterFrame& frame, const Module* mod);
-// Runs a frame's MIR body (CORO_FLAG_MIR_BODY, any module) through
-// `exec_fn`, which runs it in its own module; a frame generated code created
-// (its fn_ptr a native address) runs through brass_coro_resume.
+// The frame's body descriptor belongs to `table`, the interpreter's program.
+RuntimeValue interp_coro_create(const Instruction& inst, InterpreterFrame& frame, const Module* mod,
+                                runtime::FunctionDispatchTable* table);
+// Runs a frame's Tier-0 body (a descriptor's MIR, any module) through
+// `exec_fn`, which runs it in its own module; a body with native code (a
+// fixed-code frame, or a descriptor whose program has compiled it) runs
+// through brass_coro_resume_with.
 RuntimeValue interp_coro_resume(
     const Instruction& inst,
     InterpreterFrame& frame,

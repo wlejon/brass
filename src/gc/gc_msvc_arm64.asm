@@ -24,6 +24,7 @@
         IMPORT  brass_runtime_gc_safepoint_bridge
         IMPORT  brass_runtime_gc_alloc_bridge
         IMPORT  brass_coro_create_at
+        IMPORT  brass_coro_create_body_at
         IMPORT  brass_throw_impl
         IMPORT  brass_current_exception_bits
         IMPORT  brass_runtime_gc_collect_bridge
@@ -115,6 +116,23 @@ brass_coro_create_epilog
 brass_coro_create_end
         ENDP
         BRASS_FRAME_UNWIND brass_coro_create, 16, 1
+
+; uintptr_t brass_coro_create_body(const void* body)
+; The same for a frame of a body descriptor.
+; x0 = body; x1 = caller_fp, x2 = caller_ip
+        ALIGN   4
+        EXPORT  brass_coro_create_body
+brass_coro_create_body PROC
+        stp     x29, x30, [sp, #-16]!
+        mov     x29, sp
+        ldp     x1, x2, [x29]
+        bl      brass_coro_create_body_at
+brass_coro_create_body_epilog
+        ldp     x29, x30, [sp], #16
+        ret
+brass_coro_create_body_end
+        ENDP
+        BRASS_FRAME_UNWIND brass_coro_create_body, 16, 1
 
 ; void brass_gc_collect()
         ALIGN   4

@@ -2,6 +2,7 @@
 #include <brass/mir/coro_transform.hpp>
 #include <brass/mir/function.hpp>
 #include <brass/mir/module.hpp>
+#include <brass/gc/native_frames.hpp>
 #include <algorithm>
 #include <cstring>
 
@@ -45,15 +46,15 @@ uintptr_t coro_handle(const Instruction& inst, InterpreterFrame& frame, const ch
 
 } // namespace
 
-RuntimeValue interp_coro_create(const Instruction& inst, InterpreterFrame& frame, const Module* mod) {
+RuntimeValue interp_coro_create(const Instruction& inst, InterpreterFrame& frame, const Module* mod,
+                                runtime::FunctionDispatchTable* table) {
     const Function& target_fn = lowered_coro_target(inst.symbol(), mod);
-    CoroFrameLayout layout = compute_coro_frame_layout(target_fn);
-    uint32_t slot_count = std::max(layout.slot_count, coro_create_slot_count(inst));
+    const runtime::CoroBody& body = runtime::coro_body_of(target_fn, table);
 
     // No generated frame: this interpreter's roots reach the heap through
-    // its scope and provider.
-    // Its body is MIR (CORO_FLAG_MIR_BODY), which every tier can resume.
-    uintptr_t frame_addr = runtime::create_mir_coro_frame(target_fn, slot_count, layout.pointer_mask);
+    // its scope and provider. Its body is the descriptor of `target_fn` in
+    // this program, which every tier resumes in the body's best tier.
+    uintptr_t frame_addr = runtime::create_coro_frame(body, coro_create_slot_count(inst));
     auto* frame_ptr = reinterpret_cast<runtime::BrassCoroFrame*>(frame_addr);
     if (!frame_ptr) {
         throw InterpreterException("coro_create: frame allocation failed");
@@ -98,29 +99,39 @@ RuntimeValue interp_coro_resume(
         ? frame.get_value(inst.operand(1))
         : RuntimeValue::from_i64(0);
     const uint64_t input_bits = static_cast<uint64_t>(input_val.raw_bits());
+    const uint32_t mode = (inst.operand_count() > 2 && inst.operand(2))
+        ? static_cast<uint32_t>(frame.get_value(inst.operand(2)).raw_bits())
+        : 0u;
 
-    // A MIR body (an interpreter created the frame, in any module) runs
-    // here; generated code's body runs natively.
-    const Function* body = runtime::mir_coro_body(frame_ptr);    if (!body) {
-        if (!frame_ptr->fn_ptr) {
-            throw InterpreterException("coro_resume: coroutine frame has no body");
-        }
-        // Generated code's frame: run it natively. It roots the frame
-        // itself; this frame's gcref operand is updated by the root walk.
-        return RuntimeValue::from_bits(inst.type(), brass_coro_resume(frame_addr, input_bits));
+    // A body with native code (generated code's frame, or a descriptor whose
+    // program compiled the body) runs natively; it roots the frame itself,
+    // and this frame's gcref operand is updated by the root walk. A Tier-0
+    // body (any module) runs here.
+    if (!frame_ptr->fn_ptr) {
+        throw InterpreterException("coro_resume: coroutine frame has no body");
     }
-    if (!is_lowered_coro_body(*body)) {
-        throw InterpreterException("coro_resume: coroutine body " + std::string(body->name()) +
-                                   " has not been lowered by CoroTransformPass");
+    if (runtime::coro_body_native_entry(frame_ptr)) {
+        return RuntimeValue::from_bits(inst.type(), brass_coro_resume_with(frame_addr, input_bits, mode));
+    }
+    const Function* body = runtime::mir_coro_body(frame_ptr);
+    if (!body) {
+        throw InterpreterException("coro_resume: the module of the frame's coroutine body was destroyed");
     }
     frame_ptr->resume_arg = input_bits;
+    frame_ptr->resume_mode = mode;
+    runtime::coro_resume_value_barrier(frame_addr, input_bits);
 
     // The lowered body dispatches on state_id and maintains is_done itself,
     // exactly as brass_coro_resume runs it natively. It may collect and move
     // the frame: the argument is a gcref (the body's frame parameter is
     // one), and the operand here is a root, so it is re-read afterwards.
     RuntimeValue yielded_res;
+    uintptr_t running_root = frame_addr;
     try {
+        ThreadRootsScope running_slot([](void* ctx, std::vector<uintptr_t*>& roots) {
+            roots.push_back(static_cast<uintptr_t*>(ctx));
+        }, &running_root);
+        runtime::RunningCoroScope running(&running_root);
         yielded_res = exec_fn(*body, {RuntimeValue::from_gcref(frame_addr)});
     } catch (...) {
         // A body that throws is finished (brass_coro_resume does the same).

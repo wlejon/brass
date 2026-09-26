@@ -157,8 +157,12 @@ Tier 2 rejects a guard in a function that returns a vector, because a lower tier
 ### Coroutines
 - `coro_create @fn_symbol(<args...>)` -> `ptr`
 - `coro_suspend.<type> <coro_ptr:ptr> [, <resume_id:i32>]` -> `<type>`
-- `coro_resume.<type> <coro_ptr:ptr> [, <yield_val>]` -> `<type>`
+- `coro_resume.<type> <coro_ptr:ptr> [, <resume_val> [, <mode:i32>]]` -> `<type>`
 - `coro_destroy <coro_ptr:ptr>`
+
+`coro_resume` stores the resume value and the mode (`CoroResumeMode` in `include/brass/runtime/coroutine.hpp`: 0 next, 1 throw, 2 return; 0 when omitted) in the frame header before it runs the body; the suspend returns the value. The mode is the body's to interpret: a body that declares its frame as a leading `gcref` parameter reads it with `load.i32 %frame, 40` (`CORO_OFFSET_RESUME_MODE`; `MirBuilder::build_coro_resume_mode`) after a suspend and throws or returns accordingly.
+
+`CoroTransformPass` lowers every `coro_create` target into a state machine that takes the frame as its only parameter. The multi-tier pipeline and the embedding compile entry points run it themselves (`lower_coroutines`), so producers emit unlowered coroutines. A lowered body runs in every tier: a frame records the body's descriptor (`CoroBody`, one per body and program), and each resume enters the best code the body's handle has installed, counting toward its tier-up while it runs in Tier 0, so a suspended frame resumes in a higher tier than it was created in. The descriptor's reference map covers any number of frame slots. Each frame header also holds an awaiter link (`brass_coro_set_awaiter` / `brass_coro_awaiter`), traced as a reference; `coro_async_stack` and `current_async_stack` walk it from a frame or from the innermost running body.
 
 ---
 

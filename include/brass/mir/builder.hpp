@@ -237,6 +237,13 @@ public:
     Value* build_coro_create(std::string_view callee, std::initializer_list<Value*> args);
     Value* build_coro_suspend(Value* yield_val, uint32_t state_id = 0, Type return_type = Type::i64());
     Value* build_coro_resume(Value* coro_val, Value* input_val = nullptr, Type return_type = Type::i64());
+    // A resume passing a mode (an i32: CoroResumeMode, or the producer's
+    // own) with the value; a null input resumes with 0.
+    Value* build_coro_resume(Value* coro_val, Value* input_val, Value* mode, Type return_type);
+    // In a coroutine body with a leading frame parameter `frame`, after a
+    // suspend: the mode the resume passed (a load of the frame header's
+    // resume_mode, which CoroTransformPass keeps with the resume).
+    Value* build_coro_resume_mode(Value* frame);
     Instruction* build_coro_destroy(Value* coro_val);
 
     Instruction* insert(Instruction* inst);

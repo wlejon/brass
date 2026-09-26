@@ -4,6 +4,7 @@
 #include <brass/mir/module.hpp>
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace brass {
 
@@ -21,7 +22,13 @@ struct CoroTransformOptions {
 // Frame shape of a lowered coroutine body, as `coro_create` must allocate it.
 struct CoroFrameLayout {
     uint32_t slot_count = 0;   // slots the body addresses (at least 1)
-    uint64_t pointer_mask = 0; // bit i set: slot i holds a pointer/gcref
+    // Bit i (word i / 64, bit i % 64) set: slot i holds a reference (a
+    // pointer, gcref or tagged value). Unbounded.
+    std::vector<uint64_t> ref_bits;
+    // The first 64 slots of ref_bits (what the fixed-code entry,
+    // brass_coro_create, takes), and whether it describes them all.
+    uint64_t pointer_mask = 0;
+    bool fits_pointer_mask = true;
 };
 
 // True when `fn` has the lowered coroutine-body ABI that every tier executes:
@@ -50,9 +57,19 @@ uint32_t coro_create_slot_count(const Instruction& create);
 // - yielded, resume and return values must fit 8 bytes (std::logic_error
 //   otherwise; the verifier rejects wide coro_suspend/coro_resume values)
 // - Live SSA values across suspends are spilled to GC-tracked frame slots
-//   (after the argument slots)
+//   (after the argument slots), a reference's store followed by its
+//   write barrier (the frame may be old by then); any number of them
+// - A body may declare a leading frame parameter and read the frame's
+//   header through it (CORO_OFFSET_RESUME_MODE after a suspend is the mode
+//   the resume passed); it is the lowered body's frame
 // - Resume blocks are created and entry dispatch switch is injected
 // - Frame completion marks `is_done = 1` and `state_id = ~0U`
+// Lowers every coroutine body of `mod` that is not lowered yet (a body
+// already lowered is left alone), so a module can be handed to any tier:
+// what the tiered pipeline, the JIT engine and the embedding compiler run
+// before they execute a module. Returns whether anything changed.
+bool lower_coroutines(Module& mod);
+
 class CoroTransformPass {
 public:
     explicit CoroTransformPass(const CoroTransformOptions& options = {})

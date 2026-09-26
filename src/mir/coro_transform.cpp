@@ -15,11 +15,9 @@ namespace brass {
 
 namespace {
 
-// A frame slot's pointer bit is bit (slot + 5) of the frame object's header
-// mask (the slots follow five header words), and bit 63 of that mask means
-// "every field from 63 on". A gcref slot past this one cannot be described
-// precisely.
-constexpr uint32_t kMaxPointerSlot = 63 - static_cast<uint32_t>(runtime::CORO_OFFSET_SLOTS / 8) - 1;
+bool is_ref_type(Type t) {
+    return t.is_pointer_or_gcref() || t.is_tagged();
+}
 
 struct SuspendPoint {
     Instruction* inst = nullptr;
@@ -260,9 +258,10 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force, int64_t create
     }
 
     // 4. Slot allocation. Arguments keep their argument slots; every other
-    // crossing value gets its own slot, gcrefs first so they stay within
-    // the frame's precise pointer mask. Sorted by id for a stable layout.
-    // A value wider than 8 bytes spans consecutive slots (coro_slot_count).
+    // crossing value gets its own slot, references first (they then fit the
+    // fixed-code entry's 64-bit mask as long as they can). Sorted by id for
+    // a stable layout. A value wider than 8 bytes spans consecutive slots
+    // (coro_slot_count).
     std::unordered_map<Value*, uint32_t> slot_map;
     std::vector<Value*> spilled;
     std::vector<uint32_t> arg_slot(arg_count);
@@ -276,8 +275,8 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force, int64_t create
         if (!slot_map.count(v)) spilled.push_back(v);
     }
     std::sort(spilled.begin(), spilled.end(), [](const Value* a, const Value* b) {
-        const bool ga = a->type().is_pointer_or_gcref() || a->type().is_tagged();
-        const bool gb = b->type().is_pointer_or_gcref() || b->type().is_tagged();
+        const bool ga = is_ref_type(a->type());
+        const bool gb = is_ref_type(b->type());
         if (ga != gb) return ga;
         return a->id() < b->id();
     });
@@ -286,13 +285,6 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force, int64_t create
         slot_map[v] = next_slot;
         next_slot += coro_slot_count(v->type());
         if (options_.stats) options_.stats->variables_spilled++;
-    }
-    for (const auto& [v, slot] : slot_map) {
-        if ((v->type().is_pointer_or_gcref() || v->type().is_tagged()) && slot > kMaxPointerSlot) {
-            throw std::logic_error(fn_desc(fn) + "a gcref live across a suspend needs frame slot " +
-                                   std::to_string(slot) + ", past the last slot the frame's pointer mask covers (" +
-                                   std::to_string(kMaxPointerSlot) + ")");
-        }
     }
 
     // 5. Prepend new entry block with dispatch switch
@@ -373,10 +365,20 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force, int64_t create
         }
     }
 
-    // 7. Store each spilled value to its slot where it is defined.
+    // 7. Store each spilled value to its slot where it is defined. A
+    // reference's store carries its write barrier: a frame that survived a
+    // collection since it was created may be old, and its slots are found
+    // by a minor collection only through its card.
     for (Value* v : spilled) {
         Instruction* st = make_store(arena, global_frame_param, slot_offset(slot_map[v]), v);
+        Instruction* wb = nullptr;
+        if (is_ref_type(v->type())) {
+            wb = arena.make<Instruction>(Opcode::write_barrier, Type::void_type());
+            wb->add_operand(global_frame_param);
+            wb->add_operand(v);
+        }
         if (v->is_block_param()) {
+            if (wb) v->defining_block()->prepend_instruction(wb);
             v->defining_block()->prepend_instruction(st);
             continue;
         }
@@ -389,6 +391,7 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force, int64_t create
                                    std::string(opcode_name(d->opcode())) +
                                    ") is live across a suspend, which is not supported");
         }
+        if (wb) d->parent()->insert_after(wb, d);
         d->parent()->insert_after(st, d);
     }
 
@@ -435,7 +438,13 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force, int64_t create
             if (dom.is_reachable(bb) && dom.dominates(def_bb, bb)) continue;
             if (!block_uses(bb, v)) continue;
             Instruction* ld = make_load(fn, arena, v->type(), global_frame_param, slot_offset(slot));
-            bb->prepend_instruction(ld);
+            // A landing pad stays its block's first instruction.
+            Instruction* head = bb->head();
+            if (head && head->opcode() == Opcode::landing_pad) {
+                bb->insert_after(ld, head);
+            } else {
+                bb->prepend_instruction(ld);
+            }
             replace_uses_in(*bb, v, ld->result());
         }
     }
@@ -507,18 +516,38 @@ CoroFrameLayout compute_coro_frame_layout(const Function& fn) {
             if (!frame || inst->operand(0) != frame || inst->offset() < runtime::CORO_OFFSET_SLOTS) continue;
             uint32_t slot = static_cast<uint32_t>((inst->offset() - runtime::CORO_OFFSET_SLOTS) / 8);
             layout.slot_count = std::max(layout.slot_count, slot + coro_slot_count(inst->memory_type()));
-            if (inst->memory_type().is_pointer_or_gcref() || inst->memory_type().is_tagged()) {
-                if (slot > kMaxPointerSlot) {
-                    throw std::logic_error("coroutine frame of @" + std::string(fn.name()) + ": gcref slot " +
-                                           std::to_string(slot) + " is past the last slot the frame's pointer "
-                                           "mask covers (" + std::to_string(kMaxPointerSlot) + ")");
-                }
-                layout.pointer_mask |= (1ULL << slot);
+            if (is_ref_type(inst->memory_type())) {
+                if (layout.ref_bits.size() <= slot / 64) layout.ref_bits.resize(slot / 64 + 1, 0);
+                layout.ref_bits[slot / 64] |= uint64_t{1} << (slot % 64);
             }
         }
     }
     layout.slot_count = std::max(layout.slot_count, 1U);
+    layout.pointer_mask = layout.ref_bits.empty() ? 0 : layout.ref_bits[0];
+    layout.fits_pointer_mask = true;
+    for (size_t w = 1; w < layout.ref_bits.size(); ++w) {
+        if (layout.ref_bits[w]) layout.fits_pointer_mask = false;
+    }
     return layout;
+}
+
+bool lower_coroutines(Module& mod) {
+    // Cheap when there is nothing to lower: a scan for the coroutine ops.
+    bool any = false;
+    for (const Function* fn : mod.functions()) {
+        if (!fn) continue;
+        for (const BasicBlock* bb : fn->blocks()) {
+            for (const Instruction* inst : *bb) {
+                if (inst->opcode() == Opcode::coro_suspend || inst->opcode() == Opcode::coro_create) {
+                    any = true;
+                    break;
+                }
+            }
+            if (any) break;
+        }
+        if (any) break;
+    }
+    return any && CoroTransformPass().run_on_module(mod);
 }
 
 } // namespace brass

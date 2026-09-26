@@ -1,6 +1,7 @@
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/runtime/parallel_runtime.hpp>
+#include <brass/runtime/coroutine.hpp>
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <iostream>
@@ -147,6 +148,18 @@ void Interpreter::register_builtin_host_functions() {
     register_external_function("brass_gc_collect", [](Interpreter& interp, const std::vector<RuntimeValue>&) -> RuntimeValue {
         interp.heap().collect(gc::CollectionKind::Full);
         return RuntimeValue::from_void();
+    });
+
+    // A coroutine frame's awaiter link (coroutine.hpp), as generated code
+    // calls it.
+    register_external_function("brass_coro_set_awaiter", [](Interpreter&, const std::vector<RuntimeValue>& args) -> RuntimeValue {
+        if (args.size() != 2) throw InterpreterException("brass_coro_set_awaiter takes (frame, awaiter)");
+        brass_coro_set_awaiter(static_cast<uintptr_t>(args[0].raw_bits()), static_cast<uintptr_t>(args[1].raw_bits()));
+        return RuntimeValue::from_void();
+    });
+    register_external_function("brass_coro_awaiter", [](Interpreter&, const std::vector<RuntimeValue>& args) -> RuntimeValue {
+        if (args.size() != 1) throw InterpreterException("brass_coro_awaiter takes (frame)");
+        return RuntimeValue::from_gcref(brass_coro_awaiter(static_cast<uintptr_t>(args[0].raw_bits())));
     });
 
     register_external_function("sqrt", [](Interpreter&, const std::vector<RuntimeValue>& args) -> RuntimeValue {

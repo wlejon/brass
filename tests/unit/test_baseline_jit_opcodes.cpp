@@ -131,13 +131,13 @@ TEST_CASE("Baseline JIT opcodes - every opcode is compiled or deliberately rejec
         CHECK(!opcode_name(op).empty());
         // Vector opcodes are compiled for 128-bit types (the pre-scan
         // rejects 256-bit ones: test_baseline_jit_vector.cpp).
-        // (The AArch64 pre-scan also rejects the exception opcodes.)
-        const bool deliberately_rejected = is_coro_op(op);
+        // (The AArch64 pre-scan also rejects the exception and coroutine
+        // opcodes.) coro_suspend exists only in an unlowered body.
+        const bool deliberately_rejected = op == Opcode::coro_suspend;
         CHECK_EQ(BaselineJitCompiler::supports_opcode(op), !deliberately_rejected);
         (deliberately_rejected ? rejected : supported)++;
     }
-    // The 4 coroutine opcodes.
-    CHECK_EQ(rejected, size_t{4});
+    CHECK_EQ(rejected, size_t{1});
     CHECK_EQ(supported + rejected, size_t{last} + 1);
 }
 

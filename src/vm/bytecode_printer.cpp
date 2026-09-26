@@ -150,6 +150,10 @@ size_t print_operands(std::ostream& os, const BytecodeFunction& fn, size_t pc) {
         case BytecodeOp::coro_suspend:
             os << " " << reg_name(a) << ", " << reg_name(b) << ", resume_id=" << next;
             break;
+        case BytecodeOp::coro_resume:
+            os << " " << reg_name(a) << ", " << reg_name(b) << ", " << reg_name(c) << ", mode "
+               << reg_name(static_cast<uint32_t>(next));
+            break;
         case BytecodeOp::vshuffle:
             os << " " << reg_name(a) << ", " << reg_name(b) << ", " << reg_name(c) << ", mask=0x" << std::hex << next
                << std::dec;

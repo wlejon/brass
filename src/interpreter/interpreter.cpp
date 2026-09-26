@@ -837,7 +837,7 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                 }
 
                 case Opcode::coro_create: {
-                    RuntimeValue res = interp_coro_create(*inst, frame, module_);
+                    RuntimeValue res = interp_coro_create(*inst, frame, module_, &dispatch_table());
                     if (inst->result()) {
                         frame.set_value(inst->result(), res);
                     }

@@ -515,6 +515,9 @@ public:
                 os_ << value_name(inst.operand(0));
                 if (inst.operand_count() > 1 && inst.operand(1)) {
                     os_ << ", " << value_name(inst.operand(1));
+                    if (inst.operand_count() > 2 && inst.operand(2)) {
+                        os_ << ", " << value_name(inst.operand(2));
+                    }
                 }
                 break;
             }

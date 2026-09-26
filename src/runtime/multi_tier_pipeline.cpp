@@ -4,6 +4,7 @@
 #include <brass/runtime/host_symbols.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/codegen/unsupported_operation.hpp>
+#include <brass/mir/coro_transform.hpp>
 #include <algorithm>
 #include <iostream>
 #include <iomanip>
@@ -635,6 +636,9 @@ RuntimeValue MultiTierPipeline::execute(
     const std::vector<RuntimeValue>& args
 ) {
     ProgramScope program_scope(*table_);
+    // Every tier runs coroutine bodies lowered; a producer need not lower
+    // them itself.
+    lower_coroutines(mod);
     tiering().set_active_module(&mod);
     for (const auto* fn : mod.functions()) {
         if (fn) {

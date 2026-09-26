@@ -66,6 +66,9 @@ struct X64BaselineEmitter {
     // func_addr of a module function: its canonical address
     // (BaselineJitCompiler::function_address_in), or null.
     BaselineSymbolResolver function_address;
+    // coro_create of a module function: its body descriptor
+    // (runtime::coro_body_of), or null.
+    BaselineSymbolResolver coro_body;
 
     // The invoke call sites: [begin, end) holds the call, whose return
     // address is `end`, and a throw out of it lands at `pad`.
@@ -165,6 +168,8 @@ bool emit_baseline_x64_op(X64BaselineEmitter& emitter, const Instruction& inst);
 // when `inst` is not one.
 bool emit_baseline_x64_narrow(X64BaselineEmitter& emitter, const Instruction& inst);
 bool emit_baseline_x64_fp_op(X64BaselineEmitter& emitter, const Instruction& inst);
+// coro_create / coro_resume / coro_destroy (baseline_emit_coro.cpp).
+bool emit_baseline_x64_coro_op(X64BaselineEmitter& emitter, const Instruction& inst);
 // Vector opcodes, and select / loads / stores / ret of a vector value.
 bool emit_baseline_x64_vec_op(X64BaselineEmitter& emitter, const Instruction& inst);
 

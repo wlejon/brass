@@ -46,6 +46,13 @@ std::shared_ptr<codegen::JitExecutionEngine> make_tier2_engine(FunctionDispatchT
 void canonicalize_function_addresses(Module& mod, const std::function<bool(std::string_view)>& known,
                                      MultiTierPipeline& pipeline, codegen::JitExecutionEngine& jit);
 
+// Makes every coro_create of `mod` naming a lowered coroutine body of the
+// program create a frame of the program's descriptor of that body (the
+// instruction's extra symbol, bound in `jit`): the frame resumes in the
+// body's best tier, as the lower tiers' frames do, whatever the tier-2
+// module holds.
+void link_coroutine_bodies(Module& mod, FunctionDispatchTable& table, codegen::JitExecutionEngine& jit);
+
 // Links the program functions `mod` names but does not define against
 // their stubs: a call reaches whatever code each has.
 void link_declared_functions(const Module& mod, FunctionDispatchTable& table, codegen::JitExecutionEngine& jit);

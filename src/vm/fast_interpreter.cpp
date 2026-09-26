@@ -546,8 +546,12 @@ loop_start:
         OP_CASE(coro_resume) {
             const uint32_t input_reg = decode_c(inst);
             const uint64_t input_val = input_reg != kNoReg ? registers[input_reg] : 0;
-            RA = coro_resume(static_cast<uintptr_t>(RB), input_val);
-            NEXT();
+            // The resume-mode register is the next code word.
+            const uint32_t mode_reg = static_cast<uint32_t>(pc[1]);
+            const uint32_t mode = mode_reg != kNoReg ? static_cast<uint32_t>(registers[mode_reg]) : 0u;
+            RA = coro_resume(static_cast<uintptr_t>(RB), input_val, mode);
+            pc += 2;
+            DISPATCH();
         }
         OP_CASE(coro_destroy) { coro_destroy(static_cast<uintptr_t>(RB)); NEXT(); }
 

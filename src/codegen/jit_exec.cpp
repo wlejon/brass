@@ -68,6 +68,9 @@ static void register_brass_runtime_symbols(JitExecutionEngine& e) {
     e.register_external_symbol("brass_sysv_personality", reinterpret_cast<void*>(&runtime::brass_default_sysv_personality));
 #endif
     e.register_external_symbol("brass_coro_create", reinterpret_cast<void*>(&brass_coro_create));
+    e.register_external_symbol("brass_coro_create_body", reinterpret_cast<void*>(&brass_coro_create_body));
+    e.register_external_symbol("brass_coro_set_awaiter", reinterpret_cast<void*>(&brass_coro_set_awaiter));
+    e.register_external_symbol("brass_coro_awaiter", reinterpret_cast<void*>(&brass_coro_awaiter));
     e.register_external_symbol("brass_coro_resume", reinterpret_cast<void*>(&brass_coro_resume_from_generated));
     e.register_external_symbol("brass_coro_resume_from_generated",
                                reinterpret_cast<void*>(&brass_coro_resume_from_generated));

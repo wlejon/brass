@@ -44,7 +44,7 @@ Every module brass loads registers its maps with the code registry (`code_stack_
 A collection's roots are:
 
 - the slots registered with `Heap::add_root`, and every root source (`add_root_source`): each interpreter registers one for its frames, a host runtime registers its handle tables and module/global cells;
-- the generated frames above the runtime call that started the collection (`brass_gc_alloc`, `brass_gc_safepoint`, `brass_gc_collect`, `brass_coro_create`), walked through the stack maps from the caller frame the call captured;
+- the generated frames above the runtime call that started the collection (`brass_gc_alloc`, `brass_gc_safepoint`, `brass_gc_collect`, `brass_coro_create`, `brass_coro_create_body`), walked through the stack maps from the caller frame the call captured;
 - with `HeapConfig::walk_stack_on_host_collection`, a collection started from host code (`Heap::allocate` or `Heap::collect` called by C++ with no captured generated frame) walks the native stack from its own frame (`brass_append_stack_roots_from_here`), visiting every generated frame a stack map describes. It steps through the C++ frames by their unwind information as above, so C++ code may omit frame pointers (on Windows ARM64, which MSVC never does there, it follows the chain);
 - generated frames below re-entered interpreter code, recorded by `NativeFramesScope` (`native_frames.hpp`) at every native-to-interpreter transition brass makes;
 - the suspended coroutine frames the heap allocated (`Heap::coro_frames()`).
@@ -147,9 +147,12 @@ Generated code calls these C symbols (`include/brass/gc/runtime_gc.hpp`); each a
 | `brass_gc_collect()` | A full collection. |
 | `brass_gc_write_barrier(obj, val)` | Default: `write_barrier_interior` on the current heap. A host may register its own under this name. |
 | `brass_gc_card_table_base()`, `brass_gc_heap_base()` | The card table and the old generation's base. |
-| `brass_coro_create(fn, slots, mask)` | A coroutine frame, allocated on the current heap (or unmanaged memory when the thread has none). |
+| `brass_coro_create(fn, slots, mask)` | A coroutine frame for fixed native code, allocated on the current heap (or unmanaged memory when the thread has none); `mask` bit 6 is the awaiter link and bit `i + 7` slot `i`. |
+| `brass_coro_create_body(desc)` | A frame for a lowered body's descriptor (`CoroBody`), traced by the descriptor's reference map (any number of slots) plus the awaiter link. |
 
-On MSVC the first three and `brass_coro_create` are assembly stubs (`src/gc/gc_msvc_{x64,arm64}.asm`) that pass their caller's frame pointer and return address to a C++ bridge; elsewhere the functions read them with `__builtin_frame_address` and `__builtin_return_address`.
+A frame that is old when its body resumes still receives young references: the transform emits a `write_barrier` after every spill of a reference into the frame, and the resume value is barriered as it is stored.
+
+On MSVC the first three, `brass_coro_create` and `brass_coro_create_body` are assembly stubs (`src/gc/gc_msvc_{x64,arm64}.asm`) that pass their caller's frame pointer and return address to a C++ bridge; elsewhere the functions read them with `__builtin_frame_address` and `__builtin_return_address`.
 
 `Heap::allocation_buffer()` exposes the eden bump region `{top, end}` so code can allocate young objects inline: write the header at `top`, advance `top`, zero the payload, and call the runtime when the object does not fit. Stress mode pulls `end` back to `top`. `Heap::bind_allocation_buffer(buffer)` moves the region into a host-owned `{top, end}` pair (a per-thread block its generated code already addresses), carrying the current values over; the heap then bumps and resets that pair, and `nullptr` moves it back.
 

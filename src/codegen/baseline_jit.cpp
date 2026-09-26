@@ -9,6 +9,7 @@
 #include <brass/runtime/type_feedback.hpp>
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
+#include <brass/runtime/coroutine.hpp>
 #include <brass/core/string_pool.hpp>
 #include <brass/pgo/instrument.hpp>
 #include <cstring>
@@ -260,6 +261,8 @@ BaselineJitCompiler::BaselineJitCompiler(Target target)
     symbols_["brass_record_property_feedback"] = reinterpret_cast<void*>(&brass_record_property_feedback);
     symbols_["brass_gc_write_barrier"] = reinterpret_cast<void*>(&brass_default_gc_write_barrier);
     symbols_["brass_tier1_record_invocation_fb"] = reinterpret_cast<void*>(&brass_tier1_record_invocation_fb);
+    symbols_["brass_coro_set_awaiter"] = reinterpret_cast<void*>(&brass_coro_set_awaiter);
+    symbols_["brass_coro_awaiter"] = reinterpret_cast<void*>(&brass_coro_awaiter);
     lazy_ = std::make_shared<LazySymbolTable>([this](std::string_view name) { return resolve_lazy(name); });
 }
 

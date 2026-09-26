@@ -10,6 +10,7 @@
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/deopt.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
+#include <brass/runtime/coroutine.hpp>
 #include "tier2_link.hpp"
 #include <algorithm>
 #include <cstdio>
@@ -105,6 +106,8 @@ TieringRegistry& tiering_of(FunctionDispatchTable* table) noexcept {
 }
 
 FunctionDispatchTable::~FunctionDispatchTable() {
+    // Coroutine frames of this program's bodies resume in Tier 0 from now on.
+    forget_coro_body_program(this);
     if (is_default_) {
         g_dispatch_table_alive.store(false, std::memory_order_release);
         return;
@@ -182,6 +185,9 @@ void FunctionDispatchTable::retire_locked(std::unique_ptr<FunctionHandle> handle
 
 void forget_module(const Module& mod) noexcept {
     std::string routed;
+    // Coroutine descriptors forget the module's bodies (their frames can no
+    // longer resume; the descriptors stay, so the frames stay traceable).
+    for (const Function* fn : mod.functions()) forget_coro_body_function(fn);
     try {
         if (g_dispatch_table_alive.load(std::memory_order_acquire)) {
             FunctionDispatchTable::instance().forget_module(mod);
@@ -460,6 +466,7 @@ CodeInstallResult CodeInstaller::install_tier2(
         };
         detail::canonicalize_function_addresses(*module, known, table_->pipeline(), *jit);
         detail::link_declared_functions(*module, *table_, *jit);
+        detail::link_coroutine_bodies(*module, *table_, *jit);
     }
 
     // Compile and link in executable memory

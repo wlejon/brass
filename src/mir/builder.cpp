@@ -1,4 +1,5 @@
 #include <brass/mir/builder.hpp>
+#include <brass/runtime/coroutine.hpp>
 #include <stdexcept>
 
 namespace brass {
@@ -963,6 +964,27 @@ Value* Builder::build_coro_resume(Value* coro_val, Value* input_val, Type return
     }
     insert(inst);
     return nullptr;
+}
+
+Value* Builder::build_coro_resume(Value* coro_val, Value* input_val, Value* mode, Type return_type) {
+    if (!mode) return build_coro_resume(coro_val, input_val, return_type);
+    if (!input_val) input_val = build_iconst_i64(0);
+    Instruction* inst = get_arena().make<Instruction>(Opcode::coro_resume, return_type);
+    inst->add_operand(coro_val);
+    inst->add_operand(input_val);
+    inst->add_operand(mode);
+    Value* res = nullptr;
+    if (!return_type.is_void()) {
+        res = create_value(return_type);
+        inst->set_result(res);
+        res->set_defining_instruction(inst);
+    }
+    insert(inst);
+    return res;
+}
+
+Value* Builder::build_coro_resume_mode(Value* frame) {
+    return build_load(Type::i32(), frame, runtime::CORO_OFFSET_RESUME_MODE);
 }
 
 Instruction* Builder::build_coro_destroy(Value* coro_val) {

@@ -516,7 +516,10 @@ void FunctionCompilerContext::lower_coroutine(const Instruction& inst) {
         }
         case Opcode::coro_resume: {
             BcReg input_reg = inst.operand_count() > 1 && inst.operand(1) ? get_reg(inst.operand(1)) : kNoReg;
+            BcReg mode_reg = inst.operand_count() > 2 && inst.operand(2) ? get_reg(inst.operand(2)) : kNoReg;
             emit(BytecodeOp::coro_resume, get_result_reg(inst), get_reg(inst.operand(0)), input_reg);
+            // The resume-mode register is the next code word.
+            out.emit(static_cast<BytecodeWord>(mode_reg));
             break;
         }
         case Opcode::coro_destroy:

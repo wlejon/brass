@@ -10,6 +10,8 @@
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/mir/module.hpp>
+#include <brass/mir/coro_transform.hpp>
+#include <brass/runtime/coroutine.hpp>
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
@@ -25,13 +27,11 @@ bool BaselineJitCompiler::supports_opcode(Opcode op) noexcept {
     // Vector opcodes are compiled for 128-bit types; the pre-scan rejects
     // 256-bit vectors and the few type / operand combinations it does not.
     switch (op) {
-        // Coroutines: the interpreter's coroutine frames hold a MIR Function*
-        // and resume by interpreting it, native tiers hold a code pointer;
-        // a frame created in one tier cannot be resumed in the other.
-        case Opcode::coro_create:
+        // Only an unlowered coroutine body has one (CoroTransformPass). The
+        // other coroutine operations are runtime calls on frames whose body
+        // is a descriptor every tier resumes (x64; the AArch64 pre-scan
+        // rejects them).
         case Opcode::coro_suspend:
-        case Opcode::coro_resume:
-        case Opcode::coro_destroy:
             return false;
         default:
             return true;
@@ -74,6 +74,13 @@ void check_x64_baseline_supported(const Function& fn, const Target& target, cons
                 if (inst->operand(i)) check_type(inst->operand(i)->type(), "operand");
             }
             check_x64_baseline_vector_inst(fn, *inst, target, cc);
+            if (op == Opcode::coro_create) {
+                const Function* body = fn.parent() ? fn.parent()->get_function(inst->symbol()) : nullptr;
+                if (!body || !is_lowered_coro_body(*body)) {
+                    throw_unsupported(kX64BaselineStage, "coro_create of " + std::string(inst->symbol()) +
+                                      ", not a lowered coroutine body of the module");
+                }
+            }
             if (op == Opcode::guard) {
                 const Function* stub = fn.guard_exit_stub(*inst);
                 std::string why;
@@ -360,6 +367,13 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
         frame_size, cc, fn_entry_label, gcref_slots, layout.tagged_slots, preserves_r13, lazy_.get()
     };
     emitter.function_address = [this, &fn](std::string_view name) { return function_address_in(fn, name); };
+    // A coroutine body's descriptor in the program this compiler publishes
+    // into: its frames resume in the body's best tier.
+    emitter.coro_body = [this, &fn](std::string_view name) -> void* {
+        const Function* body = fn.parent() ? fn.parent()->get_function(name) : nullptr;
+        if (!body) return nullptr;
+        return const_cast<runtime::CoroBody*>(&runtime::coro_body_of(*body, &dispatch_table()));
+    };
 
     // 5. Code for each block, noting where each source position begins
     std::vector<DebugLineEntry> lines;
@@ -375,6 +389,7 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
             if (emit_baseline_x64_vec_op(emitter, inst)) continue;
             if (emit_baseline_x64_op(emitter, inst)) continue;
             if (emit_baseline_x64_fp_op(emitter, inst)) continue;
+            if (emit_baseline_x64_coro_op(emitter, inst)) continue;
             emit_control_op(emitter, inst);
         }
     }

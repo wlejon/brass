@@ -1,5 +1,5 @@
 // Regressions: a coroutine frame an interpreter creates has a MIR body
-// (CORO_FLAG_MIR_BODY: fn_ptr is the lowered body's Function). Every tier
+// (CORO_FLAG_BODY: fn_ptr is the body descriptor). Every tier
 // must resume it:
 // - brass_coro_resume took any fn_ptr for machine code and called the
 //   Function object: a frame the Interpreter or FastInterpreter created and
@@ -131,7 +131,7 @@ uintptr_t make_frame(Module& bodies) {
     const RuntimeValue c = in.run(*bodies.get_function("mk"), {RuntimeValue::from_i64(5)});
     const uintptr_t frame = static_cast<uintptr_t>(c.raw_bits());
     REQUIRE(frame != 0);
-    REQUIRE((reinterpret_cast<BrassCoroFrame*>(frame)->flags & CORO_FLAG_MIR_BODY) != 0);
+    REQUIRE((reinterpret_cast<BrassCoroFrame*>(frame)->flags & CORO_FLAG_BODY) != 0);
     return frame;
 }
 

@@ -209,7 +209,8 @@ public:
     uintptr_t coro_create(const Function& fn, const std::vector<RuntimeValue>& args = {});
     uintptr_t coro_create(const Module& mod, std::string_view callee, const std::vector<RuntimeValue>& args = {});
     uintptr_t coro_create(std::string_view callee, const std::vector<RuntimeValue>& args = {});
-    uint64_t coro_resume(uintptr_t handle, uint64_t input_val = 0);
+    // `mode` is the resume mode a lowered body reads (CoroResumeMode).
+    uint64_t coro_resume(uintptr_t handle, uint64_t input_val = 0, uint32_t mode = 0);
     RuntimeValue coro_resume_val(uintptr_t handle, RuntimeValue input_val = RuntimeValue::from_i64(0));
     void coro_suspend(FastFrame& frame, uint32_t dst_reg, uint32_t yield_reg, uint32_t resume_id);
     void coro_destroy(uintptr_t handle);
@@ -326,11 +327,12 @@ private:
     // Lowered coroutine bodies (CoroTransformPass) run as on every other
     // tier: the handle is the BrassCoroFrame, arguments fill its slots
     // (coro_slot_count each) and each resume calls the body with the frame.
-    // The frame's body is MIR (CORO_FLAG_MIR_BODY), as the Interpreter's is.
+    // The frame's body is the descriptor of the MIR body in this
+    // interpreter's program (CORO_FLAG_BODY), as the Interpreter's is.
     // active_coros_ holds only the unlowered, register-snapshot coroutines
     // this interpreter also runs.
     uintptr_t coro_create_lowered(const Function& fn, const std::vector<RuntimeValue>& args);
-    uint64_t coro_resume_lowered(uintptr_t frame, uint64_t input_val);
+    uint64_t coro_resume_lowered(uintptr_t frame, uint64_t input_val, uint32_t mode);
     // The MIR body of the frame `handle`, or null (generated code's frame).
     const Function* lowered_coro_body(uintptr_t handle) const;
 

@@ -138,6 +138,8 @@ add_executable(brass_unit_tests
     unit/test_coro_transform.cpp
     unit/test_coro_live_across_suspend.cpp
     unit/test_coro_runtime.cpp
+    unit/test_coro_tiers.cpp
+    unit/test_coro_frames_gc.cpp
     differential/test_coro_differential.cpp
     unit/test_partial_escape.cpp
     unit/test_allocation_sinking.cpp

@@ -4,6 +4,7 @@ EXTERN brass_runtime_gc_safepoint_bridge: PROC
 EXTERN brass_runtime_gc_alloc_bridge: PROC
 EXTERN brass_runtime_gc_collect_bridge: PROC
 EXTERN brass_coro_create_at: PROC
+EXTERN brass_coro_create_body_at: PROC
 EXTERN brass_throw_impl: PROC
 EXTERN brass_current_exception_bits: PROC
 
@@ -76,6 +77,25 @@ brass_coro_create PROC FRAME
     pop rbp
     ret
 brass_coro_create ENDP
+
+; uintptr_t brass_coro_create_body(const void* body)
+; The same for a frame of a body descriptor: rcx = body, rdx = caller_rbp,
+; r8 = caller_ip for brass_coro_create_body_at.
+brass_coro_create_body PROC FRAME
+    push rbp
+    .pushreg rbp
+    mov rbp, rsp
+    .setframe rbp, 0
+    sub rsp, 32
+    .allocstack 32
+    .endprolog
+    mov rdx, qword ptr [rbp]
+    mov r8, qword ptr [rbp + 8]
+    call brass_coro_create_body_at
+    add rsp, 32
+    pop rbp
+    ret
+brass_coro_create_body ENDP
 
 ; void brass_gc_collect()
 brass_gc_collect PROC FRAME

@@ -1,5 +1,6 @@
 #include <brass/embedding/embedding.hpp>
 #include <brass/gc/runtime_gc.hpp>
+#include <brass/mir/coro_transform.hpp>
 #include <brass/object/object_writer.hpp>
 #include <brass/object/coff_writer.hpp>
 #include <brass/object/elf_writer.hpp>
@@ -132,6 +133,8 @@ std::unique_ptr<CompiledModule> HostEngine::compile(const Module& mod) {
 }
 
 std::unique_ptr<CompiledModule> HostEngine::compile(Module& mod) {
+    // Coroutine bodies compile lowered; the producer need not lower them.
+    lower_coroutines(mod);
     return compile(const_cast<const Module&>(mod));
 }
 
@@ -149,6 +152,7 @@ bool HostEngine::compile_to_object(const Module& mod, const std::string& output_
 }
 
 bool HostEngine::compile_to_object(Module& mod, const std::string& output_path) {
+    lower_coroutines(mod);
     return compile_to_object(const_cast<const Module&>(mod), output_path);
 }
 

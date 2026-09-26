@@ -62,6 +62,14 @@ bool verify_coro_instruction(
                         report_error(inst_prefix + "coro_resume input argument must fit the frame's 8-byte resume field.");
                     }
                 }
+                if (inst->operand_count() > 3) {
+                    report_error(inst_prefix + "coro_resume takes at most 3 operands (frame, value, mode).");
+                } else if (inst->operand_count() == 3) {
+                    const Value* op2 = inst->operand(2);
+                    if (!op2 || op2->type() != Type::i32()) {
+                        report_error(inst_prefix + "coro_resume mode operand must be i32.");
+                    }
+                }
             }
             if (inst->result() && inst->result()->type().size_in_bytes() > 8) {
                 report_error(inst_prefix + "coro_resume result must fit the frame's 8-byte yield field.");

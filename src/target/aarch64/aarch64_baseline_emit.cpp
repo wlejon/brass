@@ -57,6 +57,11 @@ void check_supported(const Function& fn, const Target& target) {
                 op == Opcode::resume) {
                 throw_unsupported(kA64BaselineStage, opcode_name(op));
             }
+            // So are the coroutine operations: a function that creates or
+            // resumes a coroutine stays in the interpreter here.
+            if (is_coro_op(op)) {
+                throw_unsupported(kA64BaselineStage, opcode_name(op));
+            }
             if (inst->produces_value()) check_type(inst->type(), "value");
             for (size_t i = 0; i < inst->operand_count(); ++i) {
                 if (inst->operand(i)) check_type(inst->operand(i)->type(), "operand");

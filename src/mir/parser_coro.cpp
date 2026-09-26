@@ -117,15 +117,20 @@ bool parse_coro_instruction(
             if (!coro_val) return false;
 
             Value* input_val = nullptr;
+            Value* mode_val = nullptr;
             if (ctx.match(TokenKind::Comma)) {
                 input_val = ctx.parse_val();
                 if (!input_val) return false;
+                if (ctx.match(TokenKind::Comma)) {
+                    mode_val = ctx.parse_val();
+                    if (!mode_val) return false;
+                }
             }
 
             // decode_coro_opcode gives the bare name i64; the parser clears
             // it for a void instruction (no result).
             const Type ret_type = !type_annotation.is_void() ? type_annotation : type_suffix;
-            res_val = b.build_coro_resume(coro_val, input_val, ret_type);
+            res_val = b.build_coro_resume(coro_val, input_val, mode_val, ret_type);
             res_inst = res_val ? res_val->defining_instruction() : nullptr;
             return true;
         }

@@ -195,6 +195,7 @@ void OsrCoordinator::compile_entry(const Function& fn, Module& copy, Entry& e) {
         auto known = [&](std::string_view name) { return name == fn.name() || siblings.count(std::string(name)) != 0; };
         detail::canonicalize_function_addresses(*mod, known, pipeline, *jit);
         detail::link_declared_functions(*mod, table, *jit);
+        detail::link_coroutine_bodies(*mod, table, *jit);
         if (!jit->compile_and_load(*mod)) return fail();
     } catch (const std::exception&) {
         return fail();

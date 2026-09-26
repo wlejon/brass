@@ -373,11 +373,17 @@ namespace {
     std::abort();
 }
 
-uintptr_t allocate_coro_frame(size_t total_size, uint64_t frame_mask,
-                              uintptr_t caller_fp, uintptr_t caller_ip) {
+} // namespace
+
+// The frame object, from the thread's heap (or outside any heap). A frame
+// allocated straight into the old generation is remembered: its creator
+// stores the arguments (young references among them) with no barrier, and
+// no collection can come between.
+uintptr_t allocate_coro_frame_object(size_t total_size, gc::LayoutId layout, uintptr_t caller_fp,
+                                     uintptr_t caller_ip) {
     if (gc::Heap* heap = gc::Heap::current()) {
         // The frame is an object of the heap; its slots are traced through
-        // frame_mask like any other, and while suspended it is also a root
+        // its layout like any other, and while suspended it is also a root
         // through the heap's frame registry.
         const bool has_caller = caller_fp != 0 && caller_ip != 0;
         if (has_caller && !brass::brass_stack_maps_for_caller(caller_ip)) {
@@ -385,8 +391,10 @@ uintptr_t allocate_coro_frame(size_t total_size, uint64_t frame_mask,
             const auto* buffer = heap->allocation_buffer();
             if (total > static_cast<size_t>(buffer->end - buffer->top)) coro_fatal_no_maps();
         }
-        return heap->allocate_at(total_size, gc::mask_layout(frame_mask, TYPE_TAG_CORO_FRAME), 0, 0,
-                                 has_caller ? caller_fp : 0, has_caller ? caller_ip : 0);
+        const uintptr_t frame = heap->allocate_at(total_size, layout, 0, 0, has_caller ? caller_fp : 0,
+                                                  has_caller ? caller_ip : 0);
+        if (frame) heap->remember(frame);
+        return frame;
     }
     const uintptr_t frame = reinterpret_cast<uintptr_t>(std::calloc(1, total_size));
     if (frame) {
@@ -397,7 +405,27 @@ uintptr_t allocate_coro_frame(size_t total_size, uint64_t frame_mask,
     return frame;
 }
 
-} // namespace
+void coro_resume_value_barrier(uintptr_t frame, uint64_t value) noexcept {
+    if (gc::Heap* heap = gc::Heap::current()) {
+        if (heap->contains(frame)) heap->write_barrier(frame, value);
+    }
+}
+
+void init_coro_frame(BrassCoroFrame* frame, void* fn_ptr, uint32_t slot_count, uint32_t flags) {
+    frame->state_id = 0;
+    frame->is_done = 0;
+    frame->fn_ptr = fn_ptr;
+    frame->yielded_val = 0;
+    frame->resume_arg = 0;
+    frame->slot_count = slot_count;
+    frame->flags = flags;
+    frame->resume_mode = 0;
+    frame->reserved = 0;
+    frame->awaiter = 0;
+    register_active_coro_frame(frame);
+}
+
+uintptr_t create_coro_frame_at(const CoroBody& body, uint32_t min_slots, uintptr_t caller_fp, uintptr_t caller_ip);
 
 } // namespace brass::runtime
 
@@ -408,41 +436,46 @@ using namespace brass::runtime;
 
 uintptr_t brass_coro_create_at(void* fn_ptr, uint32_t slot_count, uint64_t pointer_mask,
                                uintptr_t caller_fp, uintptr_t caller_ip) {
-    size_t extra_slots = (slot_count > 1) ? (slot_count - 1) : 0;
-    size_t total_size = sizeof(BrassCoroFrame) + extra_slots * sizeof(uint64_t);
+    if (slot_count == 0) slot_count = 1;
+    const size_t total_size = CORO_FRAME_HEADER_SIZE + static_cast<size_t>(slot_count) * sizeof(uint64_t);
 
-    constexpr size_t slot_shift = CORO_OFFSET_SLOTS / sizeof(uint64_t);
-    uint64_t frame_mask = (pointer_mask << slot_shift);
-    if (pointer_mask & (1ULL << 63)) {
-        frame_mask |= (1ULL << 63);
-    }
+    // A Mask layout: the awaiter word, then slot i at word (i + header
+    // words); bit 63 of the object mask covers every word from 63 on.
+    constexpr unsigned header_words = CORO_FRAME_HEADER_SIZE / sizeof(uint64_t);
+    constexpr unsigned precise_slots = 63 - header_words;
+    uint64_t frame_mask = (uint64_t{1} << (CORO_OFFSET_AWAITER / 8)) |
+                          ((pointer_mask & ((uint64_t{1} << precise_slots) - 1)) << header_words);
+    if (pointer_mask >> precise_slots) frame_mask |= (uint64_t{1} << 63);
 
-    auto* frame = reinterpret_cast<BrassCoroFrame*>(
-        allocate_coro_frame(total_size, frame_mask, caller_fp, caller_ip));
-
+    auto* frame = reinterpret_cast<BrassCoroFrame*>(allocate_coro_frame_object(
+        total_size, gc::mask_layout(frame_mask, TYPE_TAG_CORO_FRAME), caller_fp, caller_ip));
     if (!frame) return 0;
-
-    frame->state_id = 0;
-    frame->is_done = 0;
-    frame->fn_ptr = fn_ptr;
-    frame->yielded_val = 0;
-    frame->resume_arg = 0;
-    frame->slot_count = slot_count;
-    frame->flags = 0;
-
-    register_active_coro_frame(frame);
+    init_coro_frame(frame, fn_ptr, slot_count, 0);
     return reinterpret_cast<uintptr_t>(frame);
 }
 
-// Generated code calls brass_coro_create with no frame argument, so it takes
-// its caller's frame as brass_gc_alloc does. MSVC: the stub in
-// gc_msvc_x64.asm / gc_msvc_arm64.asm, which calls brass_coro_create_at.
+uintptr_t brass_coro_create_body_at(const void* body, uintptr_t caller_fp, uintptr_t caller_ip) {
+    if (!body) return 0;
+    return create_coro_frame_at(*static_cast<const CoroBody*>(body), 0, caller_fp, caller_ip);
+}
+
+// Generated code calls brass_coro_create / brass_coro_create_body with no
+// frame argument, so they take their caller's frame as brass_gc_alloc does.
+// MSVC: the stubs in gc_msvc_x64.asm / gc_msvc_arm64.asm, which call the
+// _at functions.
 #if !defined(_MSC_VER)
 uintptr_t brass_coro_create(void* fn_ptr, uint32_t slot_count, uint64_t pointer_mask) {
     void* frame = __builtin_frame_address(0);
     uintptr_t caller_fp = frame ? *reinterpret_cast<uintptr_t*>(frame) : 0;
     uintptr_t caller_ip = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
     return brass_coro_create_at(fn_ptr, slot_count, pointer_mask, caller_fp, caller_ip);
+}
+
+uintptr_t brass_coro_create_body(const void* body) {
+    void* frame = __builtin_frame_address(0);
+    uintptr_t caller_fp = frame ? *reinterpret_cast<uintptr_t*>(frame) : 0;
+    uintptr_t caller_ip = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
+    return brass_coro_create_body_at(body, caller_fp, caller_ip);
 }
 #endif
 
@@ -451,8 +484,8 @@ namespace {
 // The body of both resume entries; `caller_*` name the frame that called the
 // entry (brass_capture_caller_frame, taken there). Every scope it opens lives
 // in this frame, so an exception leaving it has already destroyed them.
-uint64_t coro_resume_impl(uintptr_t coro_frame, uint64_t input_val, bool have_caller, uintptr_t caller_rbp,
-                          uintptr_t caller_ip) {
+uint64_t coro_resume_impl(uintptr_t coro_frame, uint64_t input_val, uint32_t mode, bool have_caller,
+                          uintptr_t caller_rbp, uintptr_t caller_ip) {
     if (!coro_frame) return 0;
     BrassCoroFrame* frame = checked_coro_frame(coro_frame, "brass_coro_resume");
 
@@ -462,6 +495,8 @@ uint64_t coro_resume_impl(uintptr_t coro_frame, uint64_t input_val, bool have_ca
     }
 
     frame->resume_arg = input_val;
+    frame->resume_mode = mode;
+    coro_resume_value_barrier(coro_frame, input_val);
 
     if (frame->fn_ptr == nullptr) {
         // Not a jump into non-code: nothing can run this frame. (A
@@ -486,10 +521,11 @@ uint64_t coro_resume_impl(uintptr_t coro_frame, uint64_t input_val, bool have_ca
     ThreadRootsScope frame_root([](void* ctx, std::vector<uintptr_t*>& roots) {
         roots.push_back(static_cast<uintptr_t*>(ctx));
     }, &coro_frame);
+    RunningCoroScope running(&coro_frame);
     uint64_t result;
     try {
-        if (mir_coro_body(frame) != nullptr) {
-            result = resume_mir_coro_body(coro_frame);
+        if (coro_body(frame) != nullptr) {
+            result = resume_coro_body(coro_frame);
         } else {
             // A native body is generated code entered from this C++ frame: a
             // throw in it searches for pads no further than here and leaves as
@@ -519,7 +555,13 @@ uint64_t coro_resume_impl(uintptr_t coro_frame, uint64_t input_val, bool have_ca
 BRASS_CORO_NOINLINE uint64_t brass_coro_resume(uintptr_t coro_frame, uint64_t input_val) {
     uintptr_t caller_rbp = 0, caller_ip = 0;
     const bool have_caller = brass_capture_caller_frame(caller_rbp, caller_ip);
-    return coro_resume_impl(coro_frame, input_val, have_caller, caller_rbp, caller_ip);
+    return coro_resume_impl(coro_frame, input_val, 0, have_caller, caller_rbp, caller_ip);
+}
+
+BRASS_CORO_NOINLINE uint64_t brass_coro_resume_with(uintptr_t coro_frame, uint64_t input_val, uint32_t mode) {
+    uintptr_t caller_rbp = 0, caller_ip = 0;
+    const bool have_caller = brass_capture_caller_frame(caller_rbp, caller_ip);
+    return coro_resume_impl(coro_frame, input_val, mode, have_caller, caller_rbp, caller_ip);
 }
 
 // The entry generated code calls (the JIT's "brass_coro_resume"). Its caller's
@@ -527,12 +569,13 @@ BRASS_CORO_NOINLINE uint64_t brass_coro_resume(uintptr_t coro_frame, uint64_t in
 // exceptions), so an exception the body throws is caught here, once
 // coro_resume_impl's scopes are gone, and raised again natively from this
 // frame, which holds nothing to unwind.
-BRASS_CORO_NOINLINE uint64_t brass_coro_resume_from_generated(uintptr_t coro_frame, uint64_t input_val) {
+BRASS_CORO_NOINLINE uint64_t brass_coro_resume_from_generated(uintptr_t coro_frame, uint64_t input_val,
+                                                              uint32_t mode) {
     uintptr_t caller_rbp = 0, caller_ip = 0;
     const bool have_caller = brass_capture_caller_frame(caller_rbp, caller_ip);
     HostValue pending{};
     try {
-        return coro_resume_impl(coro_frame, input_val, have_caller, caller_rbp, caller_ip);
+        return coro_resume_impl(coro_frame, input_val, mode, have_caller, caller_rbp, caller_ip);
     } catch (const BrassException& ex) {
         pending = ex.value();
     } catch (const InterpreterThrownException& ex) {
@@ -564,4 +607,57 @@ void brass_coro_destroy(uintptr_t coro_frame) {
     erase_from(*owner, coro_frame);
 }
 
+void brass_coro_set_awaiter(uintptr_t coro_frame, uintptr_t awaiter) {
+    if (!coro_frame) return;
+    BrassCoroFrame* frame = checked_coro_frame(coro_frame, "brass_coro_set_awaiter");
+    if (awaiter) (void)checked_coro_frame(awaiter, "brass_coro_set_awaiter (awaiter)");
+    frame->awaiter = awaiter;
+    if (gc::Heap* heap = gc::Heap::current()) {
+        if (heap->contains(coro_frame)) heap->write_barrier(coro_frame, awaiter);
+    }
+}
+
+uintptr_t brass_coro_awaiter(uintptr_t coro_frame) {
+    if (!coro_frame) return 0;
+    return static_cast<uintptr_t>(checked_coro_frame(coro_frame, "brass_coro_awaiter")->awaiter);
+}
+
 } // extern "C"
+
+namespace brass::runtime {
+
+namespace {
+// The root slots of the frames being resumed on this thread, innermost
+// last (each is a root its resumer registered, so it names the live copy).
+thread_local std::vector<uintptr_t*> t_running_frames;
+} // namespace
+
+RunningCoroScope::RunningCoroScope(uintptr_t* frame_root) {
+    t_running_frames.push_back(frame_root);
+}
+
+RunningCoroScope::~RunningCoroScope() {
+    t_running_frames.pop_back();
+}
+
+uintptr_t current_coro_frame() noexcept {
+    return t_running_frames.empty() ? 0 : *t_running_frames.back();
+}
+
+std::vector<CoroStackEntry> coro_async_stack(uintptr_t frame) {
+    std::vector<CoroStackEntry> out;
+    std::unordered_set<uintptr_t> seen;
+    while (frame && seen.insert(frame).second) {
+        const auto* f = reinterpret_cast<const BrassCoroFrame*>(frame);
+        const CoroBody* body = coro_body(f);
+        out.push_back({frame, body ? std::string_view(body->name) : std::string_view(), f->state_id});
+        frame = static_cast<uintptr_t>(f->awaiter & gc::kAddressMask);
+    }
+    return out;
+}
+
+std::vector<CoroStackEntry> current_async_stack() {
+    return coro_async_stack(current_coro_frame());
+}
+
+} // namespace brass::runtime

@@ -322,9 +322,11 @@ inline constexpr uint32_t decode_src2(BytecodeWord inst) noexcept { return decod
 int64_t bytecode_branch_target(BytecodeWord inst, size_t pc) noexcept;
 
 // Code words an instruction occupies: alloca_ (size), coro_suspend (resume
-// id) and vshuffle (mask) carry a second, raw data word.
+// id), coro_resume (the resume-mode register, or kNoReg) and vshuffle (mask)
+// carry a second, raw data word.
 inline constexpr size_t bytecode_inst_words(BytecodeOp op) noexcept {
-    return (op == BytecodeOp::alloca_ || op == BytecodeOp::coro_suspend || op == BytecodeOp::vshuffle) ? 2 : 1;
+    return (op == BytecodeOp::alloca_ || op == BytecodeOp::coro_suspend || op == BytecodeOp::coro_resume ||
+            op == BytecodeOp::vshuffle) ? 2 : 1;
 }
 
 struct ExceptionEntry {

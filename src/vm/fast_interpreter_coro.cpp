@@ -28,10 +28,9 @@ std::vector<uint64_t> coro_raw_args(const std::vector<RuntimeValue>& args) {
 } // namespace
 
 uintptr_t FastInterpreter::coro_create_lowered(const Function& fn, const std::vector<RuntimeValue>& args) {
-    const CoroFrameLayout layout = compute_coro_frame_layout(fn);
+    const runtime::CoroBody& body = runtime::coro_body_of(fn, &dispatch_table());
     uint32_t arg_slots = 0;
     for (const RuntimeValue& a : args) arg_slots += coro_slot_count(a.type());
-    const uint32_t slot_count = std::max(layout.slot_count, arg_slots);
 
     // `args` are copies of this interpreter's registers, which the frame's
     // allocation may move (it may collect): the gcref ones are roots of their
@@ -47,9 +46,9 @@ uintptr_t FastInterpreter::coro_create_lowered(const Function& fn, const std::ve
     }, &refs);
 
     // No generated frame: this interpreter's roots reach the heap through
-    // its scope and provider.
-    // Its body is MIR (CORO_FLAG_MIR_BODY), which every tier can resume.
-    const uintptr_t frame_addr = runtime::create_mir_coro_frame(fn, slot_count, layout.pointer_mask);
+    // its scope and provider. Its body is the descriptor of `fn` in this
+    // program, which every tier resumes in the body's best tier.
+    const uintptr_t frame_addr = runtime::create_coro_frame(body, arg_slots);
     auto* cf = reinterpret_cast<runtime::BrassCoroFrame*>(frame_addr);
     if (!cf) {
         throw InterpreterException("coro_create: frame allocation failed");
@@ -72,35 +71,42 @@ uintptr_t FastInterpreter::coro_create_lowered(const Function& fn, const std::ve
 }
 
 const Function* FastInterpreter::lowered_coro_body(uintptr_t handle) const {
-    const Function* body = runtime::mir_coro_body(reinterpret_cast<const runtime::BrassCoroFrame*>(handle));    if (body && !is_lowered_coro_body(*body)) {
+    const Function* body = runtime::mir_coro_body(reinterpret_cast<const runtime::BrassCoroFrame*>(handle));
+    if (body && !is_lowered_coro_body(*body)) {
         throw InterpreterException("coro_resume: coroutine body " + std::string(body->name()) +
                                    " has not been lowered by CoroTransformPass");
     }
     return body;
 }
 
-uint64_t FastInterpreter::coro_resume_lowered(uintptr_t handle, uint64_t input_val) {
+uint64_t FastInterpreter::coro_resume_lowered(uintptr_t handle, uint64_t input_val, uint32_t mode) {
     auto* cf = reinterpret_cast<runtime::BrassCoroFrame*>(handle);
     if (cf->is_done) {
         return cf->yielded_val;
     }
-    // A MIR body (an interpreter created the frame, in any module) runs
-    // here, in its own module (call_from_native); generated code's natively.
+    if (!cf->fn_ptr) {
+        throw InterpreterException("coro_resume: coroutine frame has no body");
+    }
+    // A body with native code (generated code's frame, or a descriptor whose
+    // program compiled the body) runs natively; a Tier-0 body (any module)
+    // runs here, in its own module (call_from_native).
+    if (runtime::coro_body_native_entry(cf)) {
+        return brass_coro_resume_with(handle, input_val, mode);
+    }
     const Function* body = lowered_coro_body(handle);
     if (!body) {
-        if (!cf->fn_ptr) {
-            throw InterpreterException("coro_resume: coroutine frame has no body");
-        }
-        // Generated code's frame: run it natively.
-        return brass_coro_resume(handle, input_val);
+        throw InterpreterException("coro_resume: the module of the frame's coroutine body was destroyed");
     }
     cf->resume_arg = input_val;
+    cf->resume_mode = mode;
+    runtime::coro_resume_value_barrier(handle, input_val);
     // The body dispatches on state_id and maintains is_done itself. It may
     // collect and move the frame; `handle` is a root so the writes below
     // reach the live copy.
     ThreadRootsScope frame_root([](void* ctx, std::vector<uintptr_t*>& roots) {
         roots.push_back(static_cast<uintptr_t*>(ctx));
     }, &handle);
+    runtime::RunningCoroScope running(&handle);
     RuntimeValue r;
     try {
         r = call_from_native(*body, {RuntimeValue::from_ptr(handle)});
@@ -223,13 +229,19 @@ void FastInterpreter::coro_suspend(FastFrame& frame, uint32_t dst_reg, uint32_t 
     throw FastCoroSuspendException(yield_val, coro->state_id);
 }
 
-uint64_t FastInterpreter::coro_resume(uintptr_t handle, uint64_t input_val) {
+uint64_t FastInterpreter::coro_resume(uintptr_t handle, uint64_t input_val, uint32_t mode) {
     auto it = active_coros_.find(handle);
     if (it == active_coros_.end()) {
         if (handle == 0) {
             throw InterpreterException("coro_resume of a null coroutine frame");
         }
-        return coro_resume_lowered(handle, input_val);
+        return coro_resume_lowered(handle, input_val, mode);
+    }
+    // An unlowered coroutine keeps its state in this interpreter and has no
+    // frame header to carry a mode: it resumes in mode Next only.
+    if (mode != 0) {
+        throw InterpreterException("coro_resume with a resume mode of a coroutine body not lowered by "
+                                   "CoroTransformPass");
     }
 
     FastCoroState* coro = it->second.get();
