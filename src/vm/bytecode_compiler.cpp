@@ -166,6 +166,14 @@ std::unique_ptr<BytecodeFunction> BytecodeCompiler::compile(const Function& fn) 
         }
         bfn->resume_points.push_back(std::move(rpe));
     }
+    for (GuardInfo& g : bfn->guards) {
+        for (size_t i = 0; i < bfn->resume_points.size(); ++i) {
+            if (bfn->resume_points[i].resume_id == g.resume_id) {
+                g.resume_index = static_cast<int32_t>(i);
+                break;
+            }
+        }
+    }
 
     return bfn;
 }

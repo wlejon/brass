@@ -141,6 +141,7 @@ void LivenessAnalysis::run() {
 
     // 2. Assign instruction IDs
     assign_instruction_ids();
+    find_guard_exits();
 
     // 3. Compute local defs/uses for each block
     compute_local_liveness();
@@ -174,6 +175,60 @@ void LivenessAnalysis::assign_instruction_ids() {
     }
 }
 
+// A guard's exit block holds only its GuardExit, which reads the guard's
+// state, and is entered only from the guard's Jcc: nothing runs between the
+// two, so each state value is read where the Jcc is, from the place it had
+// there. The block's uses are therefore counted at the Jcc. Isel creates
+// these blocks after all the others, so counted where they stand every state
+// value would stay live, and hold a register or a spill slot, from its
+// definition to the end of the function: an armed guard's operands (the boxed
+// inputs of an arithmetic site, which the fast path otherwise leaves dead once
+// unboxed) and every value of a loop body its guards name would compete for
+// registers across the whole rest of the function.
+void LivenessAnalysis::find_guard_exits() {
+    guard_exits_.clear();
+    std::unordered_map<uint32_t, const LirBlock*> candidates;
+    for (const auto& block : fn_.blocks) {
+        if (block->instructions.size() == 1 && block->instructions.front()->opcode == LirOpcode::GuardExit &&
+            block->successors.empty()) {
+            candidates.emplace(block->id, block.get());
+        }
+    }
+    if (candidates.empty()) return;
+    // Every edge into a candidate must be a Jcc naming it.
+    std::unordered_map<uint32_t, bool> ok;
+    for (const auto& [id, b] : candidates) ok[id] = true;
+    for (const auto& block : fn_.blocks) {
+        std::unordered_map<uint32_t, bool> by_jcc;
+        for (const auto& inst : block->instructions) {
+            for (const auto& u : inst->uses) {
+                if (!u.is_label() || !candidates.count(u.label_id)) continue;
+                if (inst->opcode == LirOpcode::Jcc) {
+                    by_jcc[u.label_id] = true;
+                } else {
+                    ok[u.label_id] = false;
+                }
+            }
+        }
+        for (const auto* succ : block->successors) {
+            if (succ && candidates.count(succ->id) && !by_jcc.count(succ->id)) ok[succ->id] = false;
+        }
+    }
+    for (const auto& [id, b] : candidates) {
+        if (ok[id]) guard_exits_.emplace(id, b->instructions.front().get());
+    }
+}
+
+const LirInst* LivenessAnalysis::guard_exit_taken_by(const LirInst& inst) const {
+    if (inst.opcode != LirOpcode::Jcc || guard_exits_.empty()) return nullptr;
+    for (const auto& u : inst.uses) {
+        if (!u.is_label()) continue;
+        auto it = guard_exits_.find(u.label_id);
+        if (it != guard_exits_.end()) return it->second;
+    }
+    return nullptr;
+}
+
 void LivenessAnalysis::compute_local_liveness() {
     const size_t num_vregs = fn_.vreg_table.size();
     std::vector<uint8_t> def_set(num_vregs, 0);
@@ -202,15 +257,22 @@ void LivenessAnalysis::compute_local_liveness() {
             }
         };
 
+        // A guard exit block's uses belong to the Jcc that enters it.
+        const bool is_guard_exit = guard_exits_.count(block->id) != 0;
         for (const auto& inst : block->instructions) {
-            for (const auto& u : inst->uses) {
-                if (u.is_vreg()) {
-                    add_use(u.vreg_val);
-                } else if (u.is_mem()) {
-                    add_use(u.mem_val.base_vreg);
-                    add_use(u.mem_val.index_vreg);
+            if (is_guard_exit) break;
+            auto add_uses_of = [&](const LirInst& reader) {
+                for (const auto& u : reader.uses) {
+                    if (u.is_vreg()) {
+                        add_use(u.vreg_val);
+                    } else if (u.is_mem()) {
+                        add_use(u.mem_val.base_vreg);
+                        add_use(u.mem_val.index_vreg);
+                    }
                 }
-            }
+            };
+            add_uses_of(*inst);
+            if (const LirInst* exit = guard_exit_taken_by(*inst)) add_uses_of(*exit);
             for (const auto& d : inst->defs) {
                 if (d.is_vreg()) {
                     add_def(d.vreg_val);
@@ -331,7 +393,9 @@ void LivenessAnalysis::build_intervals() {
             }
         }
 
-        // Walk instructions in reverse
+        // Walk instructions in reverse (a guard exit block's uses are its
+        // Jcc's, find_guard_exits)
+        if (guard_exits_.count(block->id)) continue;
         for (auto inst_it = block->instructions.rbegin(); inst_it != block->instructions.rend(); ++inst_it) {
             const auto& inst = *inst_it;
             uint32_t inst_id = inst->id;
@@ -351,6 +415,18 @@ void LivenessAnalysis::build_intervals() {
                     if (d.mem_val.index_vreg.is_valid() && d.mem_val.index_vreg.id < intervals_.size()) {
                         intervals_[d.mem_val.index_vreg.id].add_use_pos(inst_id, false, true);
                         intervals_[d.mem_val.index_vreg.id].add_range(bl.start_id, inst_id);
+                    }
+                }
+            }
+
+            // A Jcc into a guard exit block reads the exit's state here
+            // (find_guard_exits). The exit copies each value from wherever
+            // it lives, so none needs a register.
+            if (const LirInst* exit = guard_exit_taken_by(*inst)) {
+                for (const auto& u : exit->uses) {
+                    if (u.is_vreg() && u.vreg_val.is_valid() && u.vreg_val.id < intervals_.size()) {
+                        intervals_[u.vreg_val.id].add_use_pos(inst_id, false, false);
+                        intervals_[u.vreg_val.id].add_range(bl.start_id, inst_id);
                     }
                 }
             }

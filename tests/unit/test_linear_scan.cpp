@@ -654,3 +654,65 @@ TEST_CASE("Linear Scan - Fabs records the emitter's scratch registers as clobber
     CHECK_NE(rewritten->clobbered_xmms & reg_mask(XMM::XMM15), 0u);
     CHECK_NE(rewritten->clobbered_xmms & reg_mask(XMM::XMM14), 0u);
 }
+
+TEST_CASE("Linear Scan - a guard's state is live to its Jcc, not to its exit block at the end of the function") {
+    // The exit block isel creates for a guard comes after every other block,
+    // and it is entered only from the guard's Jcc: a state value read nowhere
+    // else must die at the Jcc, or it holds a register (or a spill slot)
+    // through the rest of the function.
+    Module mod;
+    Function* fn = mod.create_function("guarded", Type::i64(), {Type::i64(), Type::i64()});
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    BasicBlock* tail = b.append_block("tail");
+    Value* a = b.add_block_param(entry, Type::i64());
+    Value* c = b.add_block_param(entry, Type::i64());
+    b.position_at_end(entry);
+    Value* only_state = b.build_mul(a, c);
+    Value* ok = b.build_slt(a, c);
+    b.build_guard(ok, "exit_label", {a, c, only_state});
+    Value* t1 = b.build_add(a, c);
+    b.build_br(tail);
+    b.position_at_end(tail);
+    Value* t2 = b.build_mul(t1, c);
+    Value* t3 = b.build_sub(t2, a);
+    b.build_ret(t3);
+    fn->rebuild_cfg_predecessors();
+    REQUIRE(verify_function(*fn));
+
+    X64ISel isel(Target::x64_windows(), CallingConvention::win64());
+    auto lir = isel.lower(*fn);
+    REQUIRE(lir != nullptr);
+    LivenessAnalysis liveness(*lir);
+    liveness.run();
+
+    const LirInst* jcc = nullptr;
+    const LirInst* exit = nullptr;
+    uint32_t last_id = 0;
+    for (const auto& blk : lir->blocks) {
+        for (const auto& inst : blk->instructions) {
+            last_id = std::max(last_id, inst->id);
+            if (inst->opcode == LirOpcode::Jcc && !jcc) jcc = inst.get();
+            if (inst->opcode == LirOpcode::GuardExit) exit = inst.get();
+        }
+    }
+    REQUIRE(jcc != nullptr);
+    REQUIRE(exit != nullptr);
+    CHECK(exit->id > jcc->id);
+    REQUIRE(exit->uses.size() == 3);
+    // The product is read only by the exit: its interval ends at the Jcc.
+    REQUIRE(exit->uses[2].is_vreg());
+    const LiveInterval* prod = liveness.get_interval(exit->uses[2].vreg_val);
+    REQUIRE(prod != nullptr);
+    CHECK(prod->end_id <= jcc->id);
+    // `a` is read after the guard too: it lives on past the Jcc, but not to
+    // the exit block.
+    REQUIRE(exit->uses[0].is_vreg());
+    const LiveInterval* ai = liveness.get_interval(exit->uses[0].vreg_val);
+    REQUIRE(ai != nullptr);
+    CHECK(ai->end_id > jcc->id);
+    CHECK(ai->end_id < exit->id);
+    // The allocation still succeeds with the shortened intervals.
+    run_linear_scan_regalloc(*lir, liveness, CallingConvention::win64());
+}

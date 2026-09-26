@@ -381,6 +381,10 @@ struct GuardInfo {
     uint32_t resume_id = 0;
     std::string exit_stub;
     std::vector<BcReg> state_regs;
+    // Index in the function's resume_points of this guard's resume id, -1
+    // when it has none: found once at compile time, so neither a deopt-stress
+    // check nor an exit scans the table.
+    int32_t resume_index = -1;
 };
 
 // A patchable constant: the value patched under `symbol`, else the MIR default.

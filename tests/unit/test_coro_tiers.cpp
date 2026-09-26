@@ -5,6 +5,7 @@
 // resumes alone; the pipeline lowers coroutines itself.
 #include "coro_tier_harness.hpp"
 #include <brass/runtime/coroutine.hpp>
+#include <brass/runtime/deopt_stress.hpp>
 #include <string>
 
 using namespace brass;
@@ -336,4 +337,192 @@ TEST_CASE("CoroTiers - the pipeline lowers an unlowered module before running it
                                     {RuntimeValue::from_i64(40)}));
     // Lowering again changes nothing.
     CHECK(!lower_coroutines(*mod));
+}
+
+namespace {
+
+// Speculation in a coroutine body, in the front-end contract's shape: each
+// guard resumes at the block its site's slow path starts (no exit stub), its
+// state is what that block reads, and the slow path computes what the fast
+// one does. Guard 1 sits before the suspend, guard 2 after it and reads
+// values that cross it. Their resume ids are the suspend's state id (1) and
+// the next one: lowering must not put its resume block in the guards' table,
+// and must give each guard the frame, which the lowered body reads after
+// every resume target and which the front end never named.
+constexpr std::string_view kSpecGen = R"(module @specgen
+func @sg(%p: i64, %lim: i64, %n: i64) -> i64 {
+b0:
+  %z = iconst.i64 0
+  br loop(%z, %z)
+loop(%i: i64, %acc: i64):
+  %ok1 = slt.i64 %acc, %lim
+  guard %ok1, @spec, [%i, %acc, %p, %lim, %n], id 1
+  br_if %ok1, fast1, slow1
+fast1:
+  %a1 = add.i64 %acc, %p
+  br j1(%a1)
+slow1:
+  %a1s = add.i64 %p, %acc
+  br j1(%a1s)
+j1(%v: i64):
+  %in = coro_suspend.i64 %v, 1
+  %ok2 = slt.i64 %in, %lim
+  guard %ok2, @spec, [%i, %in, %v, %p, %lim, %n], id 2
+  br_if %ok2, fast2, slow2
+fast2:
+  %t = mul.i64 %in, %p
+  br j2(%t)
+slow2:
+  %ts = mul.i64 %p, %in
+  br j2(%ts)
+j2(%w: i64):
+  %acc2 = add.i64 %v, %w
+  %one = iconst.i64 1
+  %i2 = add.i64 %i, %one
+  %more = slt.i64 %i2, %n
+  br_if %more, loop(%i2, %acc2), done(%acc2)
+done(%r: i64):
+  ret %r
+
+resume_table {
+  entry 1 -> slow1
+  entry 2 -> slow2
+}
+}
+
+func @sdrv(%p: i64, %lim: i64, %n: i64) -> i64 {
+b0:
+  %c = coro_create @sg(%p, %lim, %n)
+  %z = iconst.i64 0
+  %first = coro_resume.i64 %c, %z
+  br loop(%z, %first)
+loop(%k: i64, %sum: i64):
+  %three = iconst.i64 3
+  %sent = mul.i64 %k, %three
+  %y = coro_resume.i64 %c, %sent
+  %m = iconst.i64 31
+  %s1 = mul.i64 %sum, %m
+  %s2 = add.i64 %s1, %y
+  %one = iconst.i64 1
+  %k2 = add.i64 %k, %one
+  %more = slt.i64 %k2, %n
+  br_if %more, loop(%k2, %s2), done(%s2)
+done(%r: i64):
+  coro_destroy %c
+  ret %r
+}
+)";
+
+// p = 7, lim = 50, n = 40: guard 1 fails once the accumulator passes 50,
+// guard 2 once the sent value (3k) does, so native code deoptimizes on
+// both sides of the suspend for real, and resumes the body in Tier 0.
+const std::vector<RuntimeValue> kSpecArgs{RuntimeValue::from_i64(7), RuntimeValue::from_i64(50),
+                                          RuntimeValue::from_i64(40)};
+
+} // namespace
+
+TEST_CASE("CoroTiers - lowering keeps suspend states out of the guards' resume table and completes guard states") {
+    auto mod = parse_program(kSpecGen);  // verifies the lowered body too
+    const Function* sg = mod->get_function("sg");
+    REQUIRE(sg != nullptr);
+    REQUIRE(sg->resume_points().size() == 3);  // two guards and the suspend
+    CHECK(sg->get_resume_target(coro_suspend_resume_id(1)) != nullptr);
+    CHECK(std::string(sg->get_resume_target(1)->name()) == "slow1");
+    CHECK(std::string(sg->get_resume_target(2)->name()) == "slow2");
+    CHECK(coro_body_resumes_mid_body(*sg));
+    const Value* frame = sg->entry_block()->param(0);
+    for (uint32_t id : {1u, 2u}) {
+        const Instruction* g = sg->find_guard(id);
+        REQUIRE(g != nullptr);
+        bool has_frame = false;
+        for (const Value* v : g->state_map()) has_frame = has_frame || v == frame;
+        CHECK(has_frame);
+    }
+}
+
+TEST_CASE("CoroTiers - guards before and after a suspend deoptimize into Tier 0 mid-coroutine, under deopt stress") {
+    int64_t want = 0;
+    {
+        runtime::DeoptStressScope off(0);
+        want = run_placed(kSpecGen, "sg", Tier::Interp, "sdrv", Tier::Interp, kSpecArgs);
+    }
+    const runtime::DeoptStressConfig configs[] = {{0, -1}, {1, -1}, {2, -1}, {3, -1}, {1, 1}, {1, 2}};
+    for (const runtime::DeoptStressConfig& cfg : configs) {
+        runtime::DeoptStressScope scope(cfg);
+        for (Tier bt : kTiers) {
+            for (Tier dt : kTiers) {
+                runtime::reset_deopt_stress_counters();
+                const int64_t got = run_placed(kSpecGen, "sg", bt, "sdrv", dt, kSpecArgs);
+                if (got != want) {
+                    std::printf("stress period %llu site %lld, body %s, driver %s: %lld, want %lld\n",
+                                static_cast<unsigned long long>(cfg.period), static_cast<long long>(cfg.resume_id),
+                                tier_name(bt), tier_name(dt), static_cast<long long>(got),
+                                static_cast<long long>(want));
+                }
+                CHECK_EQ(got, want);
+                if (cfg.period != 0) CHECK(runtime::deopt_stress_forced() > 0);
+            }
+        }
+    }
+}
+
+TEST_CASE("CoroTiers - a guard in code no path reaches is dropped by lowering, not completed") {
+    // The shape of bronze's top-level-await body with a `throw` before its
+    // end: a guard in dead code whose resume target returns, which after
+    // lowering reads the frame. No state can be proven at an unreachable
+    // guard, and it never runs: lowering removes it and its resume point.
+    constexpr std::string_view src = R"(module @deadguard
+func @dg(%p: i64) -> i64 {
+b0:
+  %y = coro_suspend.i64 %p, 1
+  %s = add.i64 %y, %p
+  ret %s
+dead:
+  %one = iconst.i32 1
+  guard %one, @spec, [%p], id 0
+  br slow
+slow:
+  %r = add.i64 %p, %p
+  ret %r
+
+resume_table {
+  entry 0 -> slow
+}
+}
+
+func @ddrv(%p: i64) -> i64 {
+b0:
+  %c = coro_create @dg(%p)
+  %z = iconst.i64 0
+  %y0 = coro_resume.i64 %c, %z
+  %five = iconst.i64 5
+  %y1 = coro_resume.i64 %c, %five
+  coro_destroy %c
+  %k = iconst.i64 1000
+  %t = mul.i64 %y0, %k
+  %u = add.i64 %t, %y1
+  ret %u
+}
+)";
+    auto mod = parse_program(src);  // lowers and verifies
+    const Function* dg = mod->get_function("dg");
+    REQUIRE(dg != nullptr);
+    CHECK(dg->find_guard(0) == nullptr);
+    CHECK(dg->get_resume_target(0) == nullptr);
+    check_matrix(src, "dg", "ddrv", {RuntimeValue::from_i64(7)}, 7 * 1000 + 12);
+}
+
+TEST_CASE("CoroTiers - a tier-2 body that deoptimizes mid-coroutine keeps its frame for the next resume") {
+    // The body in Tier 2 with a deopt threshold that never retires it: every
+    // resume enters the native code, and each failed guard finishes that
+    // resume in Tier 0 over the same frame, whose state and slots the next
+    // resume (native again) continues from.
+    auto mod = parse_program(kSpecGen);
+    test::BoundHeap heap;
+    Program prog(*mod);
+    prog.place("sg", Tier::Opt);
+    const int64_t want = run_placed(kSpecGen, "sg", Tier::Interp, "sdrv", Tier::Interp, kSpecArgs);
+    CHECK_EQ(prog.call("sdrv", Tier::Interp, kSpecArgs).as_i64(), want);
+    CHECK_EQ(prog.table.find("sg")->tier(), TierLevel::Tier2_Optimized);
+    CHECK(prog.table.tiering().get_feedback("sg").deopt_count() > 0);
 }

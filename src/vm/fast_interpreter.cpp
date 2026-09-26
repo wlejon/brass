@@ -23,10 +23,12 @@ namespace {
 // Deopt stress (runtime/deopt_stress.hpp): whether this evaluation of a
 // passing guard must fail. Only a guard the guard op can exit without a
 // handler counts: an exit stub of `module`, or a resume point.
-bool stress_fails_guard(const BytecodeFunction& fn, const GuardInfo& g, const Module* module, bool has_handler) {
+// The resume point is checked first: it is precomputed, where the stub is a
+// module lookup by name, and a guard with a resume point can exit either way.
+bool stress_fails_guard(const GuardInfo& g, const Module* module, bool has_handler) {
     if (has_handler) return false;
-    bool can_exit = module && !g.exit_stub.empty() && module->get_function(g.exit_stub);
-    for (const auto& rp : fn.resume_points) can_exit = can_exit || rp.resume_id == g.resume_id;
+    const bool can_exit =
+        g.resume_index >= 0 || (module && !g.exit_stub.empty() && module->get_function(g.exit_stub));
     return can_exit && runtime::deopt_stress_should_fail(g.resume_id);
 }
 
@@ -469,7 +471,7 @@ loop_start:
         OP_CASE(guard) {
             if (BRASS_LIKELY(RA != 0) &&
                 (BRASS_LIKELY(!runtime::deopt_stress_active()) ||
-                 !stress_fails_guard(fn, fn.guards[decode_uimm32(inst)], module_, static_cast<bool>(deopt_handler_)))) {
+                 !stress_fails_guard(fn.guards[decode_uimm32(inst)], module_, static_cast<bool>(deopt_handler_)))) {
                 NEXT();
             }
             const GuardInfo& g = fn.guards[decode_uimm32(inst)];
@@ -500,8 +502,8 @@ loop_start:
                     return run(*stub_fn, last_deopt_.state_map);
                 }
             }
-            for (const auto& rp : fn.resume_points) {
-                if (rp.resume_id != g.resume_id) continue;
+            if (g.resume_index >= 0) {
+                const ResumePointEntry& rp = fn.resume_points[static_cast<size_t>(g.resume_index)];
                 for (size_t i = 0; i < last_deopt_.state_map.size() && i < rp.param_regs.size(); ++i) {
                     fast_set_reg(frame, rp.param_regs[i], last_deopt_.state_map[i]);
                 }

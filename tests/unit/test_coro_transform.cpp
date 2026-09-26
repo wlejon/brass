@@ -38,9 +38,14 @@ TEST_CASE("Coroutine Transform - Single Suspend Transformation") {
     CHECK(fn->entry_block()->tail() != nullptr);
     CHECK(fn->entry_block()->tail()->opcode() == Opcode::switch_);
 
-    // Check resume points registered
-    CHECK(fn->resume_points().size() == 1);
-    CHECK(fn->resume_points()[0].first == 1);
+    // The dispatch switch alone enters the resume block; its resume-table
+    // entry is numbered apart from guards' resume ids.
+    REQUIRE(fn->resume_points().size() == 1);
+    CHECK(fn->resume_points()[0].first == coro_suspend_resume_id(1));
+    CHECK(fn->get_resume_target(1) == nullptr);
+    CHECK(fn->entry_block()->tail()->switch_cases().size() == 1);
+    CHECK(fn->entry_block()->tail()->switch_cases()[0].value == 1);
+    CHECK(coro_body_resumes_mid_body(*fn));
 
     DiagnosticReporter diag;
     bool ok = verify_module(mod, &diag);
@@ -79,6 +84,8 @@ TEST_CASE("Coroutine Transform - Multiple Suspend Points & Spilling") {
     CHECK(stats.coroutines_transformed == 1);
     CHECK(stats.suspend_points_transformed == 2);
     CHECK(fn->resume_points().size() == 2);
+    CHECK(fn->get_resume_target(coro_suspend_resume_id(2)) != nullptr);
+    CHECK(fn->entry_block()->tail()->switch_cases().size() == 2);
 
     DiagnosticReporter diag;
     bool ok2 = verify_module(mod, &diag);

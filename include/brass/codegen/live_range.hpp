@@ -96,7 +96,13 @@ private:
     std::unordered_map<const LirBlock*, BlockLiveness> block_liveness_;
     std::vector<uint32_t> call_inst_ids_;   // in id order
     std::vector<BlockRange> block_ranges_;  // non-empty blocks, by start id
+    // Guard exit blocks entered only by a Jcc: block id -> its GuardExit.
+    std::unordered_map<uint32_t, const LirInst*> guard_exits_;
 
+    void find_guard_exits();
+    // The GuardExit `inst` branches to when it is a Jcc to one of
+    // guard_exits_, else null.
+    const LirInst* guard_exit_taken_by(const LirInst& inst) const;
     void assign_instruction_ids();
     void compute_local_liveness();
     void compute_global_liveness();

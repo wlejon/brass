@@ -1,4 +1,5 @@
 #include <brass/mir/coro_transform.hpp>
+#include <brass/mir/block_liveness.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/instruction.hpp>
@@ -83,6 +84,72 @@ bool block_uses(BasicBlock* bb, const Value* v) {
 
 std::string fn_desc(const Function& fn) {
     return "coroutine lowering of @" + std::string(fn.name()) + ": ";
+}
+
+// Whether `v` is defined where `at` executes: in a block dominating `at`'s,
+// or earlier in the same block.
+bool available_at(const Value* v, const Instruction* at, const DominatorTree& dom) {
+    const BasicBlock* db = def_block_of(v);
+    const BasicBlock* ab = at->parent();
+    if (!db || !ab) return false;
+    if (db != ab) return dom.is_reachable(ab) && dom.dominates(db, ab);
+    if (v->is_block_param()) return true;
+    for (const Instruction* i = ab->head(); i && i != at; i = i->next()) {
+        if (i->result() == v) return true;
+    }
+    return false;
+}
+
+// A guard that resumes at a block of this body (no exit stub) gives a lower
+// tier every value that block reads (verify_guard_resume_state). Lowering
+// makes the body read values the front end's state never named: the frame,
+// which each return, spill store and reload now addresses, and values the
+// resume block's successors reload. Each one the target reads and the state
+// lacks is appended, in id order, to the Tier-0 guard; a tier-2 copy is
+// taken of the lowered body, so its guard of the same resume id carries the
+// same state in the same order.
+//
+// A guard in a block the lowered body cannot reach (code after a `throw`, as
+// a front end may leave it) never runs in any tier, and dominance says
+// nothing about what is defined there, so no state can be proven for it: it
+// is removed, with its resume point when no other guard names that id. Its
+// resume target stays a block of the body, now reachable from nothing.
+void complete_guard_states(Function& fn, const DominatorTree& dom) {
+    std::vector<Instruction*> guards;
+    std::vector<Instruction*> dead;
+    for (BasicBlock* bb : fn.blocks()) {
+        for (Instruction* inst : *bb) {
+            if (inst->opcode() == Opcode::guard && !fn.guard_exit_stub(*inst) &&
+                fn.get_resume_target(inst->resume_id())) {
+                (dom.is_reachable(bb) ? guards : dead).push_back(inst);
+            }
+        }
+    }
+    for (Instruction* g : dead) {
+        const uint32_t id = g->resume_id();
+        g->parent()->remove_instruction(g);
+        if (!fn.find_guard(id)) fn.remove_resume_point(id);
+    }
+    if (guards.empty()) return;
+    const auto live_in = block_live_ins(fn);
+    for (Instruction* g : guards) {
+        auto it = live_in.find(fn.get_resume_target(g->resume_id()));
+        if (it == live_in.end()) continue;
+        const std::unordered_set<const Value*> have(g->state_map().begin(), g->state_map().end());
+        std::vector<Value*> add;
+        for (const Value* v : it->second) {
+            if (!have.count(v)) add.push_back(const_cast<Value*>(v));
+        }
+        std::sort(add.begin(), add.end(), [](const Value* a, const Value* b) { return a->id() < b->id(); });
+        for (Value* v : add) {
+            if (!available_at(v, g, dom)) {
+                throw std::logic_error(fn_desc(fn) + "guard (resume id " + std::to_string(g->resume_id()) +
+                                       ") resumes at a block that reads %" + std::to_string(v->id()) +
+                                       ", which is not defined at the guard");
+            }
+            g->state_map().push_back(v);
+        }
+    }
 }
 
 } // namespace
@@ -337,8 +404,13 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force, int64_t create
         fn.append_block(resume_bb);
         sp.resume_bb = resume_bb;
 
+        // Only the dispatch switch enters a suspend's resume block. Its entry
+        // in the resume table (which keeps the passes that assume one entry
+        // off the body, as a mid-body entry needs) is numbered apart from
+        // the guards' resume ids, which the front end picks and a deopt looks
+        // its target up by: a state id is not a resume id.
         sw_inst->add_switch_case(static_cast<int64_t>(sp.state_id), resume_bb);
-        fn.add_resume_point(sp.state_id, resume_bb);
+        fn.add_resume_point(coro_suspend_resume_id(sp.state_id), resume_bb);
     }
     entry_bb->append_instruction(sw_inst);
     for (auto it = entry_allocas.rbegin(); it != entry_allocas.rend(); ++it) {
@@ -486,6 +558,10 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force, int64_t create
         }
     }
 
+    // 10. Guards resuming in this body (step 9 already renamed a reloaded
+    // value in their state, a state map being a use).
+    complete_guard_states(fn, dom);
+
     record_coro_frame_layout(fn);
     return true;
 }
@@ -530,6 +606,13 @@ bool is_lowered_coro_body(const Function& fn) {
         }
     }
     return true;
+}
+
+bool coro_body_resumes_mid_body(const Function& fn) {
+    const BasicBlock* entry = fn.entry_block();
+    if (!entry || entry->name() != "bb_coro_entry") return false;
+    const Instruction* term = entry->terminator();
+    return term && term->opcode() == Opcode::switch_ && !term->switch_cases().empty();
 }
 
 uint32_t coro_slot_count(Type t) {

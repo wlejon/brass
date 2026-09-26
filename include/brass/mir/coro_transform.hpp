@@ -35,6 +35,21 @@ struct CoroFrameLayout {
 // no `coro_suspend` left and exactly one pointer/gcref parameter (the frame).
 bool is_lowered_coro_body(const Function& fn);
 
+// True when `fn` is a lowered body with a suspend: its entry's dispatch
+// switch re-enters it mid-body (at a resume block no other edge names), so
+// passes that assume one entry (loop passes, allocation sinking) skip it.
+bool coro_body_resumes_mid_body(const Function& fn);
+
+// The resume-table id lowering gives the resume block of the suspend with
+// state id `state_id`: the state id with the top bit set. Guards' resume ids
+// (a front end's numbering, which a deopt looks its target up by) stay below
+// 2^31, so a guard and a suspend never share one; nothing looks a suspend's
+// entry up, since only the dispatch switch enters its block.
+inline constexpr uint32_t kCoroSuspendResumeIdBit = 0x80000000u;
+inline constexpr uint32_t coro_suspend_resume_id(uint32_t state_id) noexcept {
+    return state_id | kCoroSuspendResumeIdBit;
+}
+
 // The frame slots a lowered body loads/stores through its frame parameter:
 // the layout coroutine lowering recorded on the body (Function::
 // set_coro_frame_layout), or, for a body that carries none, the one its frame
