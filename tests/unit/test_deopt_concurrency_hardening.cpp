@@ -209,7 +209,7 @@ TEST_CASE("Deopt Hardening - Win64 SEH Personality Landing Pad Identification") 
     CHECK_EQ(brass_seh_find_landing_pad(0x10030, image_base, handler_data), 0x10000 + 0x100);
 
     // The personality claims nothing that is not a brass exception.
-    CHECK_EQ(brass_seh_personality(nullptr, nullptr, nullptr, nullptr), 1);
+    CHECK_EQ(brass_default_seh_personality(nullptr, nullptr, nullptr, nullptr), 1);
 
     // 4. Fallback to global registry when HandlerData is null
     FunctionExceptionTable table_global("global_seh_fn", 0x5000, 0x6000);

@@ -98,7 +98,7 @@ brass_gc_collect ENDP
 ; rcx = val
 ; 256 = 32 shadow + sizeof(SavedRegisters) (216), rounded for alignment;
 ; brass_throw_impl copies the whole struct, so all of it must be in-frame.
-brass_throw PROC FRAME
+brass_default_throw PROC FRAME
     push rbp
     .pushreg rbp
     mov rbp, rsp
@@ -120,20 +120,20 @@ brass_throw PROC FRAME
     add rsp, 256
     pop rbp
     ret
-brass_throw ENDP
+brass_default_throw ENDP
 
 ; void brass_rethrow()
 ; Re-raises the pending exception. Tail-jumps into brass_throw so the walker
 ; sees the JIT frame's return address rather than a C++ helper's.
-brass_rethrow PROC FRAME
+brass_default_rethrow PROC FRAME
     sub rsp, 40
     .allocstack 40
     .endprolog
     call brass_current_exception_bits
     add rsp, 40
     mov rcx, rax
-    jmp brass_throw
-brass_rethrow ENDP
+    jmp brass_default_throw
+brass_default_rethrow ENDP
 
 ; void brass_jump_to_landing_pad_msvc(void* ip, void* rbp, void* rsp, uint64_t val, const SavedRegisters* regs)
 ; rcx = ip, rdx = rbp, r8 = rsp, r9 = val, [rsp + 40] = regs

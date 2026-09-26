@@ -139,8 +139,8 @@ brass_gc_collect_end
 ; caller_fp = x2, caller_ip = x3) walks from the throwing frame and does
 ; not return.
         ALIGN   4
-        EXPORT  brass_throw
-brass_throw PROC
+        EXPORT  brass_default_throw
+brass_default_throw PROC
         stp     x29, x30, [sp, #-240]!
         mov     x29, sp
         add     x1, sp, #16
@@ -156,25 +156,25 @@ brass_throw PROC
         ldp     x2, x3, [x29]
         bl      brass_throw_impl
         brk     #0xF000
-brass_throw_end
+brass_default_throw_end
         ENDP
-        BRASS_FRAME_UNWIND brass_throw, 240, 0
+        BRASS_FRAME_UNWIND brass_default_throw, 240, 0
 
 ; void brass_rethrow()
 ; Re-raises the pending exception. Tail-branches into brass_throw so the
 ; walker sees the JIT frame's return address rather than a C++ helper's.
         ALIGN   4
-        EXPORT  brass_rethrow
-brass_rethrow PROC
+        EXPORT  brass_default_rethrow
+brass_default_rethrow PROC
         stp     x29, x30, [sp, #-16]!
         mov     x29, sp
         bl      brass_current_exception_bits    ; x0 = the pending value
-brass_rethrow_epilog
+brass_default_rethrow_epilog
         ldp     x29, x30, [sp], #16
-        b       brass_throw
-brass_rethrow_end
+        b       brass_default_throw
+brass_default_rethrow_end
         ENDP
-        BRASS_FRAME_UNWIND brass_rethrow, 16, 1
+        BRASS_FRAME_UNWIND brass_default_rethrow, 16, 1
 
 ; void brass_jump_to_landing_pad_msvc(void* ip, void* fp, void* sp, uint64_t val,
 ;                                     const SavedRegisters* regs)

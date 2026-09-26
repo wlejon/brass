@@ -33,10 +33,10 @@ extern "C" uint64_t brass_current_exception_bits() noexcept {
 // throw that has to unwind through this frame.
 __asm__(
     ".text\n"
-    ".globl brass_throw\n"
-    ".def brass_throw; .scl 2; .type 32; .endef\n"
-    ".seh_proc brass_throw\n"
-    "brass_throw:\n"
+    ".globl brass_default_throw\n"
+    ".def brass_default_throw; .scl 2; .type 32; .endef\n"
+    ".seh_proc brass_default_throw\n"
+    "brass_default_throw:\n"
     "    pushq %rbp\n"
     "    .seh_pushreg %rbp\n"
     "    movq %rsp, %rbp\n"
@@ -58,10 +58,10 @@ __asm__(
     "    ud2\n"
     ".seh_endproc\n"
     "\n"
-    ".globl brass_rethrow\n"
-    ".def brass_rethrow; .scl 2; .type 32; .endef\n"
-    ".seh_proc brass_rethrow\n"
-    "brass_rethrow:\n"
+    ".globl brass_default_rethrow\n"
+    ".def brass_default_rethrow; .scl 2; .type 32; .endef\n"
+    ".seh_proc brass_default_rethrow\n"
+    "brass_default_rethrow:\n"
     "    subq $40, %rsp\n"
     "    .seh_stackalloc 40\n"
     "    .seh_endprologue\n"
@@ -69,7 +69,7 @@ __asm__(
     "    addq $40, %rsp\n"
     "    movq %rax, %rcx\n"
     // Tail jump: brass_throw must see the JIT frame's return address, not ours.
-    "    jmp brass_throw\n"
+    "    jmp brass_default_throw\n"
     ".seh_endproc\n"
 );
 
@@ -92,9 +92,9 @@ __asm__(
 // CFI lets a fallback C++ throw unwind through the stub.
 __asm__(
     ".text\n"
-    ".globl " BRASS_ASM_SYM(brass_throw) "\n"
-    BRASS_ASM_TYPE(brass_throw)
-    BRASS_ASM_SYM(brass_throw) ":\n"
+    ".globl " BRASS_ASM_SYM(brass_default_throw) "\n"
+    BRASS_ASM_TYPE(brass_default_throw)
+    BRASS_ASM_SYM(brass_default_throw) ":\n"
     "    .cfi_startproc\n"
     "    pushq %rbp\n"
     "    .cfi_def_cfa_offset 16\n"
@@ -115,11 +115,11 @@ __asm__(
     "    call " BRASS_ASM_CALL(brass_throw_impl) "\n"
     "    ud2\n"
     "    .cfi_endproc\n"
-    BRASS_ASM_SIZE(brass_throw)
+    BRASS_ASM_SIZE(brass_default_throw)
     "\n"
-    ".globl " BRASS_ASM_SYM(brass_rethrow) "\n"
-    BRASS_ASM_TYPE(brass_rethrow)
-    BRASS_ASM_SYM(brass_rethrow) ":\n"
+    ".globl " BRASS_ASM_SYM(brass_default_rethrow) "\n"
+    BRASS_ASM_TYPE(brass_default_rethrow)
+    BRASS_ASM_SYM(brass_default_rethrow) ":\n"
     "    .cfi_startproc\n"
     "    subq $8, %rsp\n"
     "    .cfi_def_cfa_offset 16\n"
@@ -128,9 +128,9 @@ __asm__(
     "    .cfi_def_cfa_offset 8\n"
     "    movq %rax, %rdi\n"
     // Tail jump: brass_throw must see the JIT frame's return address, not ours.
-    "    jmp " BRASS_ASM_CALL(brass_throw) "\n"
+    "    jmp " BRASS_ASM_CALL(brass_default_throw) "\n"
     "    .cfi_endproc\n"
-    BRASS_ASM_SIZE(brass_rethrow)
+    BRASS_ASM_SIZE(brass_default_rethrow)
 );
 
 #undef BRASS_ASM_SYM

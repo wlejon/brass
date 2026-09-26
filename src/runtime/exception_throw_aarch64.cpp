@@ -37,7 +37,7 @@ extern "C" uint64_t brass_current_exception_bits() noexcept {
 // its fp and the return address into it.
 __asm__(
     ".text\n"
-    BRASS_ASM_FN_BEGIN(brass_throw)
+    BRASS_ASM_FN_BEGIN(brass_default_throw)
     "    .cfi_startproc\n"
     "    stp x29, x30, [sp, #-240]!\n"
     "    .cfi_def_cfa_offset 240\n"
@@ -59,9 +59,9 @@ __asm__(
     "    bl " BRASS_A64_CALL(brass_throw_impl) "\n"
     "    brk #0\n"
     "    .cfi_endproc\n"
-    BRASS_ASM_FN_END(brass_throw)
+    BRASS_ASM_FN_END(brass_default_throw)
     "\n"
-    BRASS_ASM_FN_BEGIN(brass_rethrow)
+    BRASS_ASM_FN_BEGIN(brass_default_rethrow)
     "    .cfi_startproc\n"
     "    stp x29, x30, [sp, #-16]!\n"
     "    .cfi_def_cfa_offset 16\n"
@@ -74,9 +74,9 @@ __asm__(
     "    .cfi_restore x29\n"
     "    .cfi_restore x30\n"
     // Tail branch: brass_throw must see the JIT frame's return address.
-    "    b " BRASS_A64_CALL(brass_throw) "\n"
+    "    b " BRASS_A64_CALL(brass_default_throw) "\n"
     "    .cfi_endproc\n"
-    BRASS_ASM_FN_END(brass_rethrow)
+    BRASS_ASM_FN_END(brass_default_rethrow)
     "\n"
     // brass_a64_jump_to_landing_pad(ip = x0, fp = x1, sp = x2, val = x3,
     // regs = x4): restores the callee-saved registers the walker collected,

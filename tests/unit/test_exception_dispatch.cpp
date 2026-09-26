@@ -28,7 +28,7 @@ TEST_CASE("Exception Dispatch - Unhandled Exception Throws C++ Envelope") {
     HostValue exc_val = HostValue::from_i32(99);
     bool caught = false;
     try {
-        brass_throw(exc_val);
+        brass_default_throw(exc_val);
     } catch (const BrassException& e) {
         caught = true;
         CHECK_EQ(e.value().as_i32(), 99);

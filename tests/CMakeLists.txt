@@ -132,6 +132,7 @@ add_executable(brass_unit_tests
     unit/test_exceptions_mir.cpp
     unit/test_unwind_tables.cpp
     unit/test_exception_dispatch.cpp
+    unit/test_exception_native_boundary.cpp
     differential/test_exception_differential.cpp
     unit/test_coro_mir.cpp
     unit/test_coro_transform.cpp
@@ -598,6 +599,7 @@ if(BRASS_BUILD_TOOLS)
         set_source_files_properties("${_eh_aot_obj}" PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
         add_executable(brass_aot_eh_host aot/eh_aot_host.c "${_eh_aot_obj}")
         target_link_libraries(brass_aot_eh_host PRIVATE brass)
+        brass_bind_eh_symbols(brass_aot_eh_host)
         add_test(NAME aot_coff.eh
             COMMAND ${CMAKE_COMMAND}
                 "-DHOST_EXE=$<TARGET_FILE:brass_aot_eh_host>"

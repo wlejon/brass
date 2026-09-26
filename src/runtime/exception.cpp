@@ -45,17 +45,12 @@ void ExceptionTableRegistry::register_function_mapping(
     re.start = fn_start;
     re.end = fn_start + fn_size;
     re.table = table;
-    ranges_.push_back(std::move(re));
+    ranges_[fn_start] = std::move(re);
 }
 
 void ExceptionTableRegistry::unregister_function_mapping(uintptr_t fn_start) {
     std::lock_guard<std::mutex> lock(mutex_);
-    for (auto it = ranges_.begin(); it != ranges_.end(); ++it) {
-        if (it->start == fn_start) {
-            ranges_.erase(it);
-            break;
-        }
-    }
+    ranges_.erase(fn_start);
 }
 
 void ExceptionTableRegistry::clear() {
@@ -64,15 +59,21 @@ void ExceptionTableRegistry::clear() {
     ranges_.clear();
 }
 
+// The range holding the call instruction whose return address is pc (the
+// byte before it). Under mutex_.
+const ExceptionTableRegistry::RangeEntry* ExceptionTableRegistry::find_range(uintptr_t pc) const noexcept {
+    const uintptr_t lookup_pc = (pc > 0) ? (pc - 1) : pc;
+    auto it = ranges_.upper_bound(lookup_pc);
+    if (it == ranges_.begin()) return nullptr;
+    --it;
+    const RangeEntry& r = it->second;
+    return (lookup_pc >= r.start && lookup_pc < r.end) ? &r : nullptr;
+}
+
 const FunctionExceptionTable* ExceptionTableRegistry::find_function_by_pc(uintptr_t pc) const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    uintptr_t lookup_pc = (pc > 0) ? (pc - 1) : pc;
-    for (const auto& r : ranges_) {
-        if (lookup_pc >= r.start && lookup_pc < r.end) {
-            return &r.table;
-        }
-    }
-    return nullptr;
+    const RangeEntry* r = find_range(pc);
+    return r ? &r->table : nullptr;
 }
 
 const ExceptionScopeEntry* ExceptionTableRegistry::find_scope_by_pc(
@@ -81,16 +82,11 @@ const ExceptionScopeEntry* ExceptionTableRegistry::find_scope_by_pc(
     const FunctionExceptionTable** out_table
 ) const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    uintptr_t lookup_pc = (pc > 0) ? (pc - 1) : pc;
-    for (const auto& r : ranges_) {
-        if (lookup_pc >= r.start && lookup_pc < r.end) {
-            if (out_fn_start) *out_fn_start = r.start;
-            if (out_table) *out_table = &r.table;
-            uint32_t off = static_cast<uint32_t>(pc - r.start);
-            return r.table.find_scope(off);
-        }
-    }
-    return nullptr;
+    const RangeEntry* r = find_range(pc);
+    if (!r) return nullptr;
+    if (out_fn_start) *out_fn_start = r->start;
+    if (out_table) *out_table = &r->table;
+    return r->table.find_scope(static_cast<uint32_t>(pc - r->start));
 }
 
 ExceptionTableRegistry& get_global_exception_registry() noexcept {
@@ -235,6 +231,15 @@ extern "C" BRASS_NOINLINE_NOFP void brass_throw_impl(
 ) {
     brass_set_current_exception(val);
 
+#if defined(_WIN32) || defined(__aarch64__) || defined(_M_ARM64)
+    // Win64 (xmm6-xmm15) and AArch64 (d8-d15) have callee-saved vector
+    // registers, which the frame-chain walk below does not restore: a pad
+    // entered through it would see the thrower's values in them. The unwinder
+    // behind brass_seh_raise restores every callee-saved register.
+    (void)regs;
+    (void)caller_rbp;
+    (void)caller_ip;
+#else
     uintptr_t cur_rbp = caller_rbp;
     uintptr_t cur_ip = caller_ip;
 
@@ -251,12 +256,7 @@ extern "C" BRASS_NOINLINE_NOFP void brass_throw_impl(
         if (scope && fn_table) {
             void* landing_pad_ip = reinterpret_cast<void*>(fn_start + scope->landing_pad_offset);
             void* target_rbp = reinterpret_cast<void*>(cur_rbp);
-#if defined(__aarch64__) || defined(_M_ARM64)
-            void* target_rsp = reinterpret_cast<void*>(cur_rbp);
-#else
-            uintptr_t target_rsp_val = cur_rbp - fn_table->frame_size();
-            void* target_rsp = reinterpret_cast<void*>(target_rsp_val);
-#endif
+            void* target_rsp = reinterpret_cast<void*>(cur_rbp - fn_table->frame_size());
 
             brass_jump_to_landing_pad(landing_pad_ip, target_rbp, target_rsp, val, current_regs);
         }
@@ -271,29 +271,6 @@ extern "C" BRASS_NOINLINE_NOFP void brass_throw_impl(
         // Restore intermediate callee-saved registers preserved by cur_fn on its stack
         uint32_t gpr_mask = cur_fn->saved_callee_gprs();
         if (gpr_mask != 0) {
-#if defined(__aarch64__) || defined(_M_ARM64)
-            size_t slot_idx = 0;
-            for (int i = 19; i <= 28; ++i) {
-                if (gpr_mask & (1u << i)) {
-                    int64_t disp = 16 + static_cast<int64_t>(slot_idx * 8);
-                    uint64_t saved_val = *reinterpret_cast<const uint64_t*>(cur_rbp + disp);
-                    switch (i) {
-                        case 19: current_regs.x19 = saved_val; break;
-                        case 20: current_regs.x20 = saved_val; break;
-                        case 21: current_regs.x21 = saved_val; break;
-                        case 22: current_regs.x22 = saved_val; break;
-                        case 23: current_regs.x23 = saved_val; break;
-                        case 24: current_regs.x24 = saved_val; break;
-                        case 25: current_regs.x25 = saved_val; break;
-                        case 26: current_regs.x26 = saved_val; break;
-                        case 27: current_regs.x27 = saved_val; break;
-                        case 28: current_regs.x28 = saved_val; break;
-                        default: break;
-                    }
-                    slot_idx++;
-                }
-            }
-#else
             size_t slot_idx = 0;
             for (int i = 0; i < 16; ++i) {
                 if (gpr_mask & (1u << i)) {
@@ -314,7 +291,6 @@ extern "C" BRASS_NOINLINE_NOFP void brass_throw_impl(
                     }
                 }
             }
-#endif
         }
 
         auto* rbp_ptr = reinterpret_cast<uintptr_t*>(cur_rbp);
@@ -327,6 +303,7 @@ extern "C" BRASS_NOINLINE_NOFP void brass_throw_impl(
         cur_rbp = next_rbp;
         cur_ip = next_ip;
     }
+#endif
 
     // Frames the registry does not know (AOT objects, brass-built DLLs, or
     // JIT code above a host frame) are found through their .pdata/.xdata by
@@ -339,18 +316,18 @@ extern "C" BRASS_NOINLINE_NOFP void brass_throw_impl(
 
 extern "C" {
 
-// brass_throw / brass_rethrow are asm stubs on x86-64 (exception_throw_x64.cpp
+// brass_default_throw / brass_default_rethrow are asm stubs on x86-64 (exception_throw_x64.cpp
 // for GCC/Clang, gc_msvc_x64.asm for MSVC) and on AArch64
 // (exception_throw_aarch64.cpp for GCC/Clang, gc_msvc_arm64.asm for MSVC).
 #if !(defined(__x86_64__) || defined(_M_X64)) && !(defined(__aarch64__) || defined(_M_ARM64))
-[[noreturn]] void brass_throw(HostValue val) {
+[[noreturn]] void brass_default_throw(HostValue val) {
     SavedRegisters regs{};
     brass_throw_impl(val, &regs, 0, 0);
 }
 
-[[noreturn]] void brass_rethrow() {
+[[noreturn]] void brass_default_rethrow() {
     HostValue val = brass_get_current_exception();
-    brass_throw(val);
+    brass_default_throw(val);
 }
 #endif
 

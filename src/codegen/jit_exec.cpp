@@ -60,10 +60,12 @@ static void register_brass_runtime_symbols(JitExecutionEngine& e) {
     e.register_external_symbol("brass_patch_const32", reinterpret_cast<void*>(&brass_patch_const32));
     e.register_external_symbol("brass_patch_const64", reinterpret_cast<void*>(&brass_patch_const64));
     e.register_external_symbol("brass_patch_call", reinterpret_cast<void*>(&brass_patch_call));
-    e.register_external_symbol("brass_throw", reinterpret_cast<void*>(&runtime::brass_throw));
-    e.register_external_symbol("brass_rethrow", reinterpret_cast<void*>(&runtime::brass_rethrow));
+    e.register_external_symbol("brass_throw", reinterpret_cast<void*>(&runtime::brass_default_throw));
+    e.register_external_symbol("brass_rethrow", reinterpret_cast<void*>(&runtime::brass_default_rethrow));
 #if defined(_WIN32)
-    e.register_external_symbol("brass_seh_personality", reinterpret_cast<void*>(&runtime::brass_seh_personality));
+    e.register_external_symbol("brass_seh_personality", reinterpret_cast<void*>(&runtime::brass_default_seh_personality));
+#else
+    e.register_external_symbol("brass_sysv_personality", reinterpret_cast<void*>(&runtime::brass_default_sysv_personality));
 #endif
     e.register_external_symbol("brass_coro_create", reinterpret_cast<void*>(&brass_coro_create));
     e.register_external_symbol("brass_coro_resume", reinterpret_cast<void*>(&brass_coro_resume_from_generated));
@@ -227,14 +229,20 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
         // DWARF CFI for every function, laid out with the data pages (its
         // pc-relative FDE addresses are relocated like any other section)
         // and handed to the unwinder below, so that a C++ exception thrown by
-        // a host function called from JIT code unwinds through the JIT frames.
+        // a host function called from JIT code unwinds through the JIT frames
+        // and a BrassException lands at their pads (brass_sysv_personality).
         auto& eh = working_obj.get_or_create_section(
             ".eh_frame",
             object::SectionKind::EhFrame,
             object::SectionFlags::Read | object::SectionFlags::Alloc,
             8
         );
-        object::ElfCfiBuilder::build_eh_frame(working_obj, eh);
+#if !defined(_WIN32) && (defined(__x86_64__) || defined(__aarch64__))
+        constexpr bool with_personality = true;
+#else
+        constexpr bool with_personality = false;  // no brass_sysv_personality in this process
+#endif
+        object::ElfCfiBuilder::build_eh_frame(working_obj, eh, with_personality);
     }
 
     size_t page_sz = jit_system_page_size();

@@ -4,6 +4,7 @@
 #include <brass/mir/verifier.hpp>
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/critical_edge.hpp>
+#include <brass/mir/parser.hpp>
 #include <brass/interpreter/interpreter.hpp>
 
 using namespace brass;
@@ -166,4 +167,40 @@ TEST_CASE("Critical Edge - Splitting Preserves Block Parameter Passing and Runti
     // Path 3: c1=1, c2=0 -> b0 -> b1 -> b3 -> returns 0
     RuntimeValue r3 = interp.run(mod, "calc", {RuntimeValue::from_i32(1), RuntimeValue::from_i32(0)});
     CHECK_EQ(r3.as_i64(), 0LL);
+}
+
+TEST_CASE("Critical Edge - edges into a landing pad two invokes share stay whole, and the split ends") {
+    // Both unwind edges are critical by shape (each invoke has two
+    // successors, the pad two predecessors), and neither may be split: the
+    // pass must finish with the pad still their shared target.
+    const char* src = R"(
+func @work(%0: i64) -> i64 {
+bb0:
+  ret %0
+}
+
+func @two(%0: i64) -> i64 {
+bb0:
+  %1 = invoke.i64 @work(%0), bb1, bb3
+
+bb1:
+  %2 = invoke.i64 @work(%1), bb2, bb3
+
+bb2:
+  ret %2
+
+bb3:
+  %3 = landing_pad
+  ret %3
+}
+)";
+    DiagnosticReporter diag;
+    auto mod = parse_module(src, &diag);
+    REQUIRE(mod != nullptr);
+    Function* fn = mod->get_function("two");
+    REQUIRE(fn != nullptr);
+    const size_t blocks_before = fn->blocks().size();
+    CHECK_FALSE(split_critical_edges(*fn));
+    CHECK_EQ(fn->blocks().size(), blocks_before);
+    CHECK(verify_function(*fn));
 }

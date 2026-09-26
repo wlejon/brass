@@ -56,7 +56,6 @@ else()
             -Wpedantic
             -Wconversion
             -Wno-unused-parameter
-            -fno-omit-frame-pointer
             $<$<CONFIG:Release>:-O3>
         )
         if(WIN32 OR MINGW)
@@ -118,6 +117,29 @@ endif()
 add_library(brass STATIC ${BRASS_SOURCES})
 add_library(brass::brass ALIAS brass)
 
+# brass_bind_eh_symbols(<target>): an executable that links AOT objects and
+# brass itself, with no runtime image exporting the canonical throw and
+# personality names (include/brass/runtime/exception.hpp), binds those names
+# to brass's brass_default_* definitions.
+function(brass_bind_eh_symbols target)
+    set(_names brass_throw brass_rethrow)
+    if(WIN32)
+        list(APPEND _names brass_seh_personality)
+    else()
+        list(APPEND _names brass_sysv_personality)
+    endif()
+    foreach(_name IN LISTS _names)
+        string(REGEX REPLACE "^brass_" "brass_default_" _internal "${_name}")
+        if(MSVC)
+            target_link_options(${target} PRIVATE "/ALTERNATENAME:${_name}=${_internal}")
+        elseif(APPLE)
+            target_link_options(${target} PRIVATE "LINKER:-alias,_${_internal},_${_name}")
+        else()
+            target_link_options(${target} PRIVATE "LINKER:--defsym=${_name}=${_internal}")
+        endif()
+    endforeach()
+endfunction()
+
 target_include_directories(brass
     PUBLIC
         $<BUILD_INTERFACE:${BRASS_INCLUDE_DIR}>
@@ -149,7 +171,6 @@ else()
         -Wextra
         -Wpedantic
         -Wno-unused-parameter
-        -fno-omit-frame-pointer
     )
 endif()
 

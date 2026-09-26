@@ -7,6 +7,7 @@
 #include <string_view>
 #include <vector>
 #include <unordered_map>
+#include <map>
 #include <exception>
 #include <mutex>
 
@@ -134,7 +135,11 @@ private:
         uintptr_t end = 0;
         FunctionExceptionTable table;
     };
-    std::vector<RangeEntry> ranges_;
+    // By start address: a lookup is a search, not a scan of every function
+    // the program ever compiled, and an entry's table stays where it is
+    // while other functions come and go.
+    std::map<uintptr_t, RangeEntry> ranges_;
+    const RangeEntry* find_range(uintptr_t pc) const noexcept;
 };
 
 ExceptionTableRegistry& get_global_exception_registry() noexcept;
@@ -172,9 +177,17 @@ struct SavedRegisters {
     const SavedRegisters& saved_regs = SavedRegisters{}
 );
 
+// Generated code names its throw, rethrow and personality routines by the
+// canonical symbols brass_throw, brass_rethrow and brass_seh_personality /
+// brass_sysv_personality. brass's definitions are these brass_default_*
+// functions, bound to the canonical names by an engine's symbol table (the
+// JIT) or by the one image in the process that exports them under those
+// names (a host runtime, for AOT objects). Like brass_gc_write_barrier, no
+// canonical name is defined here, so a process that also links brass
+// statically still has exactly one definition of each.
 extern "C" {
-[[noreturn]] void brass_throw(HostValue val);
-[[noreturn]] void brass_rethrow();
+[[noreturn]] void brass_default_throw(HostValue val);
+[[noreturn]] void brass_default_rethrow();
 }
 
 // 7. Win64 SEH scope table emitter and personality routine
@@ -196,9 +209,11 @@ uint64_t brass_seh_find_landing_pad(uint64_t control_pc, uint64_t image_base, co
 // Raises val to the first frame the OS unwinder can see that has a brass
 // landing pad for it; does not return then. On Win64 that is a Win64 SEH
 // exception; on other x86-64 and AArch64 hosts the DWARF unwinder finds the
-// frame and its pad is entered directly, abandoning the frames in between
-// (exception_raise_unwind.cpp), so callers raise from frames holding nothing
-// to unwind. Returns false (and raises nothing) when no such frame exists,
+// frame and its pad is entered directly, abandoning the frames in between,
+// unless one of them has unwinding of its own, when it throws a C++
+// BrassException for the C++ unwinder to take there instead
+// (exception_raise_unwind.cpp). Callers raise from frames holding nothing to
+// unwind. Returns false (and raises nothing) when no such frame exists,
 // or on any other host. Only frames below the innermost generated-code entry
 // (GeneratedCodeEntryScope) count, here and in brass_seh_raise_above: the
 // C++ frames above it must see a C++ exception, which the caller throws.
@@ -213,14 +228,32 @@ bool brass_seh_raise(HostValue val);
 // the stack, or where brass_seh_raise cannot raise.
 bool brass_seh_raise_above(HostValue val, const void* deopted_entry, uintptr_t stack_limit);
 
-extern "C" int brass_seh_personality(
+// The language handler of every Win64 function with brass landing pads. It
+// lands two kinds of exception at a pad: a brass SEH exception, and a C++
+// BrassException (MSVC's C++ exception ABI) thrown by compiled code the
+// generated code called, whose compiled frames unwind with their destructors
+// run. A host or runtime function called from generated code raises into
+// its caller's pads by throwing a BrassException.
+extern "C" int brass_default_seh_personality(
     void* ExceptionRecord,
     void* EstablisherFrame,
     void* ContextRecord,
     void* DispatcherContext
 );
 
-// 8. SysV DWARF LSDA emitter
+// 8. SysV DWARF LSDA emitter and personality routine
+//
+// The LSDA is gcc's layout: no LPStart or type table, a udata4 call-site
+// table of (begin, length, pad) function offsets, one catch-all action.
 void emit_sysv_lsda(object::Section& lsda_sec, const FunctionExceptionTable& table);
+
+// The personality routine the .eh_frame CIE of generated code names off
+// Windows (x86-64 and AArch64; the Itanium unwinder's signature, with its
+// enums as ints). It lands a C++ BrassException thrown by a function the
+// generated code called at the frame's pad for that call, found in the
+// frame's LSDA or, without one, in the JIT registry; everything else passes
+// through. It is brass_seh_personality's counterpart.
+extern "C" int brass_default_sysv_personality(int version, int actions, uint64_t exception_class,
+                                      void* exception_object, void* context);
 
 } // namespace brass::runtime

@@ -538,7 +538,7 @@ BRASS_CORO_NOINLINE uint64_t brass_coro_resume_from_generated(uintptr_t coro_fra
     } catch (const InterpreterThrownException& ex) {
         pending = HostValue::from_raw(ex.value().raw_bits());
     }
-    brass_throw(pending);
+    brass_default_throw(pending);
 }
 
 uint32_t brass_coro_is_done(uintptr_t coro_frame) {

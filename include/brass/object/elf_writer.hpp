@@ -92,9 +92,18 @@ namespace elf {
 
 class ElfCfiBuilder {
 public:
+    // DWARF CFI for every function of `obj`, into eh_frame_sec. With
+    // `with_personality`, a function with exception scopes gets an LSDA in
+    // .gcc_except_table and an FDE under a second CIE that names
+    // brass_sysv_personality (through a pointer word in
+    // .data.rel.ro.brass_personality), so a C++ BrassException thrown by a
+    // function it calls lands at its pads. The builder adds those sections
+    // and the personality's undefined symbol to `obj`; the reference passed
+    // in is looked up again afterwards, since adding a section may move it.
     static void build_eh_frame(
         ObjectFile& obj,
-        Section& eh_frame_sec
+        Section& eh_frame_sec,
+        bool with_personality = false
     );
 };
 

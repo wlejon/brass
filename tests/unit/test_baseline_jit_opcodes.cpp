@@ -131,25 +131,18 @@ TEST_CASE("Baseline JIT opcodes - every opcode is compiled or deliberately rejec
         CHECK(!opcode_name(op).empty());
         // Vector opcodes are compiled for 128-bit types (the pre-scan
         // rejects 256-bit ones: test_baseline_jit_vector.cpp).
-        const bool deliberately_rejected =
-            is_coro_op(op) || op == Opcode::throw_ || op == Opcode::invoke ||
-            op == Opcode::landing_pad || op == Opcode::resume;
+        // (The AArch64 pre-scan also rejects the exception opcodes.)
+        const bool deliberately_rejected = is_coro_op(op);
         CHECK_EQ(BaselineJitCompiler::supports_opcode(op), !deliberately_rejected);
         (deliberately_rejected ? rejected : supported)++;
     }
-    // 4 coroutine and 4 exception opcodes.
-    CHECK_EQ(rejected, size_t{8});
+    // The 4 coroutine opcodes.
+    CHECK_EQ(rejected, size_t{4});
     CHECK_EQ(supported + rejected, size_t{last} + 1);
 }
 
 TEST_CASE("Baseline JIT opcodes - rejected opcodes fail at compile time, not at run time") {
     const char* sources[] = {
-        R"(module @m
-func @bl_rej_throw(%0: i64) -> i64 {
-entry:
-  throw %0
-}
-)",
         R"(module @m
 func @bl_rej_vec(%0: i64) -> i64 {
 entry:
@@ -177,7 +170,8 @@ TEST_CASE("Baseline JIT opcodes - the pipeline keeps a rejected function in the 
     auto mod = parse_or_fail(R"(module @m
 func @bl_rej_pipeline(%0: i64) -> i64 {
 entry:
-  throw %0
+  %1 = vzero.f64x4
+  ret %0
 }
 )");
     const Function* f = mod->get_function("bl_rej_pipeline");

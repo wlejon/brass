@@ -31,7 +31,11 @@ uint32_t checked_u32(size_t v) {
 
 // Win64 UNWIND_INFO + one RUNTIME_FUNCTION; returns the RUNTIME_FUNCTION's
 // offset. Codes are listed in unwind order (descending prologue offset).
-size_t append_win64(std::vector<uint8_t>& image, const X64BaselinePrologue& p, uint32_t code_size) {
+// With scopes, the UNWIND_INFO names brass_seh_personality as the exception
+// handler and carries the scope table as its data; the image is based at the
+// code's first byte, so every address in it is a code offset.
+size_t append_win64(std::vector<uint8_t>& image, const X64BaselinePrologue& p, uint32_t code_size,
+                    const runtime::FunctionExceptionTable& eh) {
     constexpr uint8_t kPushNonvol = 0, kAllocLarge = 1, kAllocSmall = 2, kSetFpreg = 3, kSaveNonvol = 4;
     constexpr uint8_t kRbp = 5, kR13 = 13;
     const uint32_t prolog_end = p.r13_save_end ? p.r13_save_end : p.alloc_end;
@@ -76,9 +80,24 @@ size_t append_win64(std::vector<uint8_t>& image, const X64BaselinePrologue& p, u
     }
     code(p.push_end, kPushNonvol, kRbp);
 
+    // The handler is reached through `jmp [rip+0]; <address>` in the image:
+    // an RVA has 32 bits, and the personality lies anywhere in the process
+    // (exception_win64.cpp recognizes the thunk).
+    const bool has_handler = eh.has_scopes();
+    size_t thunk_off = 0;
+    if (has_handler) {
+        align_to(image, 8, 0xCC);
+        thunk_off = image.size();
+        const uint8_t jmp[6] = {0xFF, 0x25, 0, 0, 0, 0};
+        image.insert(image.end(), jmp, jmp + 6);
+        const auto target = reinterpret_cast<uint64_t>(&runtime::brass_default_seh_personality);
+        for (int i = 0; i < 8; ++i) image.push_back(static_cast<uint8_t>(target >> (8 * i)));
+    }
+
+    constexpr uint8_t kUnwFlagEHandler = 1;
     align_to(image, 4, 0xCC);
     const size_t info_off = image.size();
-    image.push_back(1);                                        // version 1, no flags
+    image.push_back(static_cast<uint8_t>(1 | ((has_handler ? kUnwFlagEHandler : 0) << 3)));  // version 1
     image.push_back(static_cast<uint8_t>(prolog_end));
     image.push_back(static_cast<uint8_t>(codes.size()));
     image.push_back(static_cast<uint8_t>(kRbp | (frame_offset << 4)));
@@ -87,6 +106,16 @@ size_t append_win64(std::vector<uint8_t>& image, const X64BaselinePrologue& p, u
         image.push_back(static_cast<uint8_t>(c >> 8));
     }
     if (codes.size() % 2) { image.push_back(0); image.push_back(0); }
+    if (has_handler) {
+        put_u32(image, checked_u32(thunk_off));
+        // The scope table brass_seh_find_landing_pad reads.
+        put_u32(image, checked_u32(eh.scopes().size()));
+        for (const auto& s : eh.scopes()) {
+            put_u32(image, s.begin_offset);
+            put_u32(image, s.end_offset);
+            put_u32(image, s.landing_pad_offset);
+        }
+    }
 
     const size_t rf_off = image.size();
     put_u32(image, 0);
@@ -110,19 +139,30 @@ void advance(std::vector<uint8_t>& out, uint32_t delta) {
     else { out.push_back(0x02); out.push_back(static_cast<uint8_t>(delta)); } // advance_loc1
 }
 
-// A CIE, one FDE and the zero terminator; returns the CIE's offset.
-size_t append_eh_frame(std::vector<uint8_t>& image, const X64BaselinePrologue& p, uint32_t code_size) {
+// A CIE, one FDE and the zero terminator; returns the CIE's offset. With
+// scopes, the CIE ("zPR") names brass_sysv_personality by its absolute
+// address, which finds the pads in the JIT registry.
+size_t append_eh_frame(std::vector<uint8_t>& image, const X64BaselinePrologue& p, uint32_t code_size,
+                       const runtime::FunctionExceptionTable& eh) {
     constexpr uint8_t kRbp = 6, kR13 = 13, kRa = 16, kRsp = 7;
     align_to(image, 8, 0xCC);
     const size_t cie = image.size();
     put_u32(image, 0);                      // length, patched
     put_u32(image, 0);                      // CIE id
     image.push_back(1);                     // version
-    image.push_back('z'); image.push_back('R'); image.push_back(0);
+    const bool personality = eh.has_scopes();
+    image.push_back('z');
+    if (personality) image.push_back('P');
+    image.push_back('R'); image.push_back(0);
     put_uleb(image, 1);                     // code alignment
     image.push_back(0x78);                  // data alignment -8 (sleb)
     image.push_back(kRa);
-    put_uleb(image, 1);                     // augmentation data length
+    put_uleb(image, personality ? 10 : 1);  // augmentation data length
+    if (personality) {
+        image.push_back(0x00);              // personality: absptr
+        const auto target = reinterpret_cast<uint64_t>(&runtime::brass_default_sysv_personality);
+        for (int i = 0; i < 8; ++i) image.push_back(static_cast<uint8_t>(target >> (8 * i)));
+    }
     image.push_back(0x1B);                  // FDE pointers: pcrel | sdata4
     image.push_back(0x0C); image.push_back(kRsp); image.push_back(8); // def_cfa rsp+8
     image.push_back(0x80 | kRa); image.push_back(1);                  // ra at cfa-8
@@ -154,8 +194,9 @@ size_t append_eh_frame(std::vector<uint8_t>& image, const X64BaselinePrologue& p
 } // namespace
 
 size_t append_x64_baseline_unwind(std::vector<uint8_t>& image, const X64BaselinePrologue& p,
-                                  uint32_t code_size, bool windows) {
-    return windows ? append_win64(image, p, code_size) : append_eh_frame(image, p, code_size);
+                                  uint32_t code_size, bool windows,
+                                  const runtime::FunctionExceptionTable& eh) {
+    return windows ? append_win64(image, p, code_size, eh) : append_eh_frame(image, p, code_size, eh);
 }
 
 } // namespace brass::codegen

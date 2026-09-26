@@ -210,6 +210,13 @@ public:
     void set_enable_mir_opts(bool enable) { enable_mir_opts_ = enable; }
     bool enable_mir_opts() const noexcept { return enable_mir_opts_; }
 
+    // The whole module's stack maps, encoded into read-only data under the
+    // global symbol `__brass_stack_maps`, for a host that loads the object's
+    // image and registers its maps by that name. Off for a host that encodes
+    // `ObjectFile::stack_maps` its own way and would otherwise carry both.
+    void set_emit_stack_map_symbol(bool enable) { emit_stack_map_symbol_ = enable; }
+    bool emit_stack_map_symbol() const noexcept { return emit_stack_map_symbol_; }
+
     ObjectFile compile(const Module& mod);
 
 private:
@@ -218,6 +225,7 @@ private:
     codegen::SchedOptions sched_opts_;
     bool enable_trace_layout_ = false;
     bool enable_mir_opts_ = true;
+    bool emit_stack_map_symbol_ = true;
 };
 
 ObjectFile compile_module_to_object(const Module& mod, const Target& target, const codegen::SchedOptions& sched_opts);

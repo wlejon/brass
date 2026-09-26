@@ -1,6 +1,10 @@
 #include <brass/object/elf_writer.hpp>
 #include <brass/target/x64/x64_frame.hpp>
 #include <brass/target/aarch64/aarch64_frame.hpp>
+#include <brass/runtime/exception.hpp>
+#include <cstdint>
+#include <optional>
+#include <string>
 #include <vector>
 #include <algorithm>
 
@@ -48,68 +52,151 @@ void patch_u32_le(std::vector<uint8_t>& buf, size_t offset, uint32_t val) {
     buf[offset + 3] = static_cast<uint8_t>((val >> 24) & 0xFF);
 }
 
+constexpr uint8_t kPcrelSdata4 = elf::DW_EH_PE_pcrel | elf::DW_EH_PE_sdata4;  // 0x1B
+constexpr uint8_t kIndirect = 0x80;                                            // DW_EH_PE_indirect
+
+constexpr const char* kLsdaSection = ".gcc_except_table";
+// The word holding brass_sysv_personality's address, which the CIE points
+// at (DW_EH_PE_indirect): an absolute address belongs in relocated data,
+// not in .eh_frame, and the word lets a shared object bind the personality
+// wherever it is.
+constexpr const char* kPersonalitySection = ".data.rel.ro.brass_personality";
+constexpr const char* kPersonalitySymbol = "brass_sysv_personality";
+
+// One CIE; returns its offset. With `personality`, it is "zPLR": the
+// personality through kPersonalitySection's word and an LSDA pointer in
+// every FDE that uses it; otherwise "zR".
+size_t emit_cie(Section& sec, bool is_aarch64, bool personality) {
+    sec.align_to(8);
+    const size_t cie_start = sec.data.size();
+    sec.emit32(0); // Length placeholder
+    sec.emit32(0); // CIE ID = 0 (for .eh_frame)
+    sec.emit8(1);  // Version = 1
+
+    sec.emit8('z');
+    if (personality) {
+        sec.emit8('P');
+        sec.emit8('L');
+    }
+    sec.emit8('R');
+    sec.emit8(0);
+
+    sec.emit8(is_aarch64 ? 4 : 1);    // Code alignment factor (ULEB128)
+    sec.emit8(0x78);                  // Data alignment factor = -8 (SLEB128)
+    sec.emit8(is_aarch64 ? 30 : 16);  // Return address register: LR (X30) / RIP (ULEB128)
+    if (personality) {
+        sec.emit8(7);                 // Augmentation data length (ULEB128)
+        sec.emit8(kIndirect | kPcrelSdata4);
+        ObjectRelocation r;
+        r.offset = sec.data.size();
+        r.kind = RelocKind::PCRel32;
+        r.symbol_name = kPersonalitySection;
+        r.addend = 0;
+        sec.relocations.push_back(std::move(r));
+        sec.emit32(0);
+        sec.emit8(kPcrelSdata4);      // LSDA pointers
+        sec.emit8(kPcrelSdata4);      // FDE pointers
+    } else {
+        sec.emit8(1);                 // Augmentation data length (ULEB128)
+        sec.emit8(kPcrelSdata4);      // FDE pointers
+    }
+
+    // Initial instructions.
+    if (is_aarch64) {
+        // DW_CFA_def_cfa register 31 (SP), offset 0
+        sec.emit8(elf::DW_CFA_def_cfa);
+        sec.emit8(31);
+        sec.emit8(0);
+    } else {
+        // DW_CFA_def_cfa (RSP, 8)
+        sec.emit8(elf::DW_CFA_def_cfa);
+        sec.emit8(7);
+        sec.emit8(8);
+        // DW_CFA_offset (RIP, 1 * -8 = -8)
+        sec.emit8(elf::DW_CFA_offset | 16);
+        sec.emit8(1);
+    }
+
+    sec.align_to(8);
+    patch_u32_le(sec.data, cie_start, static_cast<uint32_t>(sec.data.size() - cie_start - 4));
+    return cie_start;
+}
+
+// The LSDA of every function with exception scopes, in kLsdaSection, and
+// the personality word; returns each function's LSDA offset (SIZE_MAX for
+// one without scopes). Returns an empty vector when no function has scopes.
+std::vector<size_t> emit_lsdas(ObjectFile& obj) {
+    bool any = false;
+    for (const auto& fn : obj.functions) any = any || fn.exception_table.has_scopes();
+    if (!any) return {};
+
+    std::vector<size_t> offsets(obj.functions.size(), SIZE_MAX);
+    Section& lsda = obj.get_or_create_section(kLsdaSection, SectionKind::RoData,
+                                              SectionFlags::Read | SectionFlags::Alloc, 4);
+    for (size_t i = 0; i < obj.functions.size(); ++i) {
+        const auto& table = obj.functions[i].exception_table;
+        if (!table.has_scopes()) continue;
+        lsda.align_to(4);
+        offsets[i] = lsda.data.size();
+        runtime::emit_sysv_lsda(lsda, table);
+    }
+
+    if (!obj.find_symbol(kPersonalitySymbol)) {
+        ObjectSymbol s;
+        s.name = kPersonalitySymbol;
+        s.section_index = SECTION_UNDEF;
+        s.binding = SymbolBinding::Global;
+        s.type = SymbolType::Function;
+        obj.add_symbol(std::move(s));
+    }
+    Section& word = obj.get_or_create_section(kPersonalitySection, SectionKind::Data,
+                                              SectionFlags::Read | SectionFlags::Write | SectionFlags::Alloc, 8);
+    if (word.data.empty()) {
+        ObjectRelocation r;
+        r.offset = 0;
+        r.kind = RelocKind::Abs64;
+        r.symbol_name = kPersonalitySymbol;
+        r.addend = 0;
+        word.relocations.push_back(std::move(r));
+        word.emit64(0);
+    }
+    return offsets;
+}
+
 } // namespace
 
 void ElfCfiBuilder::build_eh_frame(
     ObjectFile& obj,
-    Section& eh_frame_sec
+    Section& eh_frame_section,
+    bool with_personality
 ) {
-    eh_frame_sec.align_to(8);
+    // The LSDA and personality sections come first: creating a section may
+    // move the one passed in when it is one of `obj`'s own, so that one is
+    // found again by its index afterwards.
+    std::optional<size_t> own_index;
+    for (size_t i = 0; i < obj.sections.size(); ++i) {
+        if (&obj.sections[i] == &eh_frame_section) own_index = i;
+    }
+    const std::vector<size_t> lsda_offsets = with_personality ? emit_lsdas(obj) : std::vector<size_t>{};
+    Section& eh_frame_sec = own_index ? obj.sections[*own_index] : eh_frame_section;
 
     bool is_aarch64 = obj.target.is_aarch64();
 
-    // 1. Common Information Entry (CIE)
-    size_t cie_start = eh_frame_sec.data.size();
-    eh_frame_sec.emit32(0); // Length placeholder
-    eh_frame_sec.emit32(0); // CIE ID = 0 (for .eh_frame)
-    eh_frame_sec.emit8(1);  // Version = 1
-    
-    // Augmentation: "zR\0"
-    eh_frame_sec.emit8('z');
-    eh_frame_sec.emit8('R');
-    eh_frame_sec.emit8(0);
-
-    if (is_aarch64) {
-        eh_frame_sec.emit8(4);    // Code alignment factor = 4 (ULEB128)
-        eh_frame_sec.emit8(0x78); // Data alignment factor = -8 (SLEB128)
-        eh_frame_sec.emit8(30);   // Return address register = 30 (LR / X30) (ULEB128)
-        eh_frame_sec.emit8(1);    // Augmentation data length = 1 (ULEB128)
-        eh_frame_sec.emit8(elf::DW_EH_PE_pcrel | elf::DW_EH_PE_sdata4); // 0x1B
-
-        // Initial instructions:
-        // DW_CFA_def_cfa register 31 (SP), offset 0
-        eh_frame_sec.emit8(elf::DW_CFA_def_cfa);
-        eh_frame_sec.emit8(31); // SP
-        eh_frame_sec.emit8(0);  // offset 0
-    } else {
-        eh_frame_sec.emit8(1);    // Code alignment factor = 1 (ULEB128)
-        eh_frame_sec.emit8(0x78); // Data alignment factor = -8 (SLEB128)
-        eh_frame_sec.emit8(16);   // Return address register = 16 (RIP) (ULEB128)
-        eh_frame_sec.emit8(1);    // Augmentation data length = 1 (ULEB128)
-        eh_frame_sec.emit8(elf::DW_EH_PE_pcrel | elf::DW_EH_PE_sdata4); // 0x1B
-
-        // Initial instructions:
-        // DW_CFA_def_cfa (RSP, 8)
-        eh_frame_sec.emit8(elf::DW_CFA_def_cfa);
-        eh_frame_sec.emit8(7); // RSP
-        eh_frame_sec.emit8(8); // offset 8
-
-        // DW_CFA_offset (RIP, 1 * -8 = -8)
-        eh_frame_sec.emit8(elf::DW_CFA_offset | 16);
-        eh_frame_sec.emit8(1);
-    }
-
-    eh_frame_sec.align_to(8);
-    uint32_t cie_len = static_cast<uint32_t>(eh_frame_sec.data.size() - cie_start - 4);
-    patch_u32_le(eh_frame_sec.data, cie_start, cie_len);
+    // 1. Common Information Entries: the plain one, and the one naming the
+    // personality when some function has landing pads.
+    const size_t cie_start = emit_cie(eh_frame_sec, is_aarch64, false);
+    const size_t eh_cie_start = lsda_offsets.empty() ? cie_start : emit_cie(eh_frame_sec, is_aarch64, true);
 
     // 2. Frame Description Entries (FDE) for each function
-    for (const auto& fn : obj.functions) {
+    for (size_t fn_index = 0; fn_index < obj.functions.size(); ++fn_index) {
+        const auto& fn = obj.functions[fn_index];
+        const size_t lsda_offset = lsda_offsets.empty() ? SIZE_MAX : lsda_offsets[fn_index];
         size_t fde_start = eh_frame_sec.data.size();
         eh_frame_sec.emit32(0); // Length placeholder
-        
+
         // CIE Pointer: offset from this field to CIE start
-        uint32_t cie_pointer = static_cast<uint32_t>(fde_start + 4 - cie_start);
+        const size_t fn_cie = lsda_offset == SIZE_MAX ? cie_start : eh_cie_start;
+        uint32_t cie_pointer = static_cast<uint32_t>(fde_start + 4 - fn_cie);
         eh_frame_sec.emit32(cie_pointer);
 
         // PC Begin (4 bytes, DW_EH_PE_pcrel | DW_EH_PE_sdata4)
@@ -126,8 +213,20 @@ void ElfCfiBuilder::build_eh_frame(
         // PC Range (4 bytes)
         eh_frame_sec.emit32(static_cast<uint32_t>(fn.text_size));
 
-        // Augmentation Data Length = 0 (ULEB128)
-        eh_frame_sec.emit8(0);
+        if (lsda_offset == SIZE_MAX) {
+            // Augmentation Data Length = 0 (ULEB128)
+            eh_frame_sec.emit8(0);
+        } else {
+            // Augmentation data: the LSDA pointer (pcrel | sdata4)
+            eh_frame_sec.emit8(4);
+            ObjectRelocation lr;
+            lr.offset = eh_frame_sec.data.size();
+            lr.kind = RelocKind::PCRel32;
+            lr.symbol_name = kLsdaSection;
+            lr.addend = static_cast<int64_t>(lsda_offset);
+            eh_frame_sec.relocations.push_back(std::move(lr));
+            eh_frame_sec.emit32(0);
+        }
 
         if (!fn.frame_info.is_leaf) {
             if (is_aarch64) {

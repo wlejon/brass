@@ -330,7 +330,7 @@ TEST_CASE("AArch64 Runtime - Unhandled Throw Envelope Catch") {
     HostValue val = HostValue::from_i32(777);
     bool caught = false;
     try {
-        brass_throw(val);
+        brass_default_throw(val);
     } catch (const BrassException& e) {
         caught = true;
         CHECK_EQ(e.value().as_i32(), 777);
