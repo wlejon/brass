@@ -7,6 +7,7 @@
 #include <brass/object/object_writer.hpp>
 #include <brass/gc/stack_map.hpp>
 #include <brass/debug/debug_section.hpp>
+#include <brass/debug/jit_code_registry.hpp>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -282,6 +283,12 @@ public:
     void set_lower_tier_resumes(bool enable) noexcept { lower_tier_resumes_ = enable; }
     bool lower_tier_resumes() const noexcept { return lower_tier_resumes_; }
 
+    // The tier the loaded functions are registered as with the JIT code
+    // registry (debug/jit_code_registry.hpp): what profilers, debuggers and
+    // crash reports call them. Optimized unless set before loading.
+    void set_code_tier(debug::JitTier tier) noexcept { code_tier_ = tier; }
+    debug::JitTier code_tier() const noexcept { return code_tier_; }
+
     // Function/symbol lookup
     void* get_symbol_address(std::string_view name) const;
 
@@ -357,6 +364,8 @@ private:
         void release_seh_tables() noexcept;
         void release_eh_frame() noexcept;
 
+        // The loaded functions' entry in the JIT code registry.
+        std::shared_ptr<const void> debug_code;
         // The loaded code's entry in the code stack-map registry.
         std::shared_ptr<const void> stack_maps;
         // Function starts mapped in the global exception registry.
@@ -392,6 +401,7 @@ private:
     std::vector<LoadedFunction> loaded_functions_;
     SchedOptions sched_opts_;
     bool lower_tier_resumes_ = false;
+    debug::JitTier code_tier_ = debug::JitTier::Optimized;
 
     void register_seh_tables(const object::ObjectFile& obj, uint8_t* base_ptr);
     void register_eh_frame(uint8_t* eh_frame);

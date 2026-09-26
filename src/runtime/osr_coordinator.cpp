@@ -239,6 +239,7 @@ void OsrCoordinator::compile_entry(const Function& fn, Module& copy, const std::
             if (!deopt_targets_valid(*f, sib != siblings.end() ? sib->second : nullptr, why)) return fail();
         }
         jit = detail::make_tier2_engine(table, Target::host());
+        jit->set_code_tier(debug::JitTier::Osr);
         auto known = [&](std::string_view name) { return name == fn.name() || siblings.count(std::string(name)) != 0; };
         detail::canonicalize_function_addresses(*mod, known, pipeline, *jit);
         detail::link_declared_functions(*mod, table, *jit);

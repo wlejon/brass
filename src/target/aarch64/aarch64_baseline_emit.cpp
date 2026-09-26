@@ -417,6 +417,10 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
 
     BaselineCompiledFunction compiled(
         fn.name(), fn.return_type(), fn.param_types(), mem_block, entry_ptr, code_bytes, std::move(pass.stack_map));
+    if (runs_here) {
+        compiled.set_debug_registration(
+            debug::register_jit_code(debug::JitTier::Baseline, fn.name(), entry_ptr, code_bytes));
+    }
     if (pass.uses_lazy_stubs) compiled.set_link_keepalive(lazy);
     compiled.set_lazy_call_symbols(std::move(pass.lazy_call_symbols));
     compiled.set_lazy_addr_symbols(std::move(pass.lazy_addr_symbols));

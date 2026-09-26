@@ -1,6 +1,7 @@
 // Lazy linking stubs for the baseline tier (see lazy_symbols.hpp).
 #include <brass/codegen/lazy_symbols.hpp>
 #include <brass/codegen/jit_exec.hpp>
+#include <brass/debug/jit_code_registry.hpp>
 #include <brass/target/aarch64/aarch64_encoder.hpp>
 #include <brass/target/x64/x64_encoder.hpp>
 #include <cstdio>
@@ -81,6 +82,9 @@ void* build_resolver_thunk() {
     if (!block->make_executable_read_only()) {
         throw std::runtime_error("lazy symbols: cannot make the resolver thunk executable");
     }
+    // Named for profilers and crash reports; lives as long as the thunk.
+    new std::shared_ptr<const void>(
+        debug::register_jit_code(debug::JitTier::Stub, "brass_lazy_resolver", block->data(), buffer.size()));
     return block->data();
 }
 
@@ -144,6 +148,9 @@ void* build_resolver_thunk() {
     if (!block->make_executable_read_only()) {
         throw std::runtime_error("lazy symbols: cannot make the resolver thunk executable");
     }
+    // Named for profilers and crash reports; lives as long as the thunk.
+    new std::shared_ptr<const void>(
+        debug::register_jit_code(debug::JitTier::Stub, "brass_lazy_resolver", block->data(), buffer.size()));
     return block->data();
 }
 
@@ -173,6 +180,9 @@ void* resolver_thunk() {
 struct LazySymbolTable::Chunk {
     std::unique_ptr<LazySymbolCell[]> cells{new LazySymbolCell[kStubsPerChunk]};
     JitMemoryBlock code{kStubSize * kStubsPerChunk};
+    // Each used stub's registration as "stub:<symbol>"; after `code`, so
+    // they go before it does.
+    std::vector<std::shared_ptr<const void>> debug_names;
 };
 
 LazySymbolTable::LazySymbolTable(Resolver resolver) : resolver_(std::move(resolver)) {}
@@ -209,6 +219,9 @@ void* LazySymbolTable::stub_for(std::string_view name) {
     cell->name = std::string(name);
     void* stub = chunk.code.data() + index * kStubSize;
     by_name_.emplace(cell->name, std::make_pair(cell, stub));
+    if (auto reg = debug::register_jit_code(debug::JitTier::Stub, "stub:" + cell->name, stub, kStubSize)) {
+        chunk.debug_names.push_back(std::move(reg));
+    }
     return stub;
 #else
     (void)name;

@@ -53,6 +53,11 @@ public:
     void set_eh_registration(std::shared_ptr<const void> registration) {
         eh_registration_ = std::move(registration);
     }
+    // The code's entry in the JIT code registry (debug/jit_code_registry.hpp),
+    // shared by the copies and dropped before the memory.
+    void set_debug_registration(std::shared_ptr<const void> registration) {
+        debug_registration_ = std::move(registration);
+    }
     // The symbols the code calls directly through a lazy-link stub because
     // they did not resolve when it was compiled.
     const std::vector<std::string>& lazy_call_symbols() const noexcept { return lazy_call_symbols_; }
@@ -92,6 +97,7 @@ private:
     // code memory does.
     std::shared_ptr<const void> eh_registration_;
     std::shared_ptr<const void> stack_map_registration_;
+    std::shared_ptr<const void> debug_registration_;
 };
 
 using BaselineSymbolResolver = std::function<void*(std::string_view)>;

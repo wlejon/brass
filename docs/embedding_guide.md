@@ -283,3 +283,48 @@ add_subdirectory(brass)
 target_link_libraries(my_host PRIVATE brass_shared)
 target_include_directories(my_host PRIVATE ${BRASS_INCLUDE_DIR})
 ```
+
+---
+
+## 8. JIT Code in Native Tools
+
+Every function a JIT tier installs (baseline, tier 2, OSR, lazy-link stubs)
+is registered by name and tier in the JIT code registry
+(`include/brass/debug/jit_code_registry.hpp`) and unregistered before its
+code is freed. Tools see it as `<name> [tier 1]`, `[tier 2]`, `[tier 2 osr]`
+or `[stub]`.
+
+| Knob | Effect |
+|------|--------|
+| `BRASS_PERF_MAP=1` | appends `START SIZE name` lines to `<dir>/perf-<pid>.map` (perf, bpftrace) |
+| `BRASS_JITDUMP=1` | writes `<dir>/jit-<pid>.dump` with each function's code (`perf record -k 1`, then `perf inject --jit`) |
+| `BRASS_PERF_DIR=<dir>` | `<dir>` for both; default `/tmp` (`%TEMP%` on Windows) |
+| `BRASS_GDB_JIT=1` | the GDB JIT interface: an in-memory ELF symbol file per load, through `__jit_debug_register_code` |
+| `INTEL_JIT_PROFILER64` | set by VTune itself: brass loads its collector and reports method loads and unloads |
+| `BRASS_JIT_CRASH_REPORT=0/1` | the crash report: on by default on Windows, opt-in on POSIX |
+
+Knobs are read at the first registration. With all of them off, a
+registration is one map insert under a mutex on the compile path (about
+0.1 us against about 100 us for the smallest compile); nothing runs on the
+execution path.
+
+In process, `Symbolicator::symbolize_ip` names any registered JIT address,
+`Symbolicator::symbolize_current_stack` and `debug::capture_native_stack`
+walk the native stack (Windows through the RUNTIME_FUNCTIONs brass registers
+with `RtlAddFunctionTable`, elsewhere `_Unwind_Backtrace` through the
+registered `.eh_frame`), and both append the running coroutine's async stack
+(the awaiter chain, `runtime::current_async_stack`).
+
+The crash report prints, for a fault whose address is JIT code, the named
+stack to stderr and passes the fault on unhandled. On Windows it is a
+vectored handler added last, so it runs after the host's own handlers and,
+under a debugger, once the debugger passes the first chance on (`gn`).
+
+WinDbg / cdb have no JIT registration interface. They unwind through JIT
+frames (the dynamic function tables are read out of the process), so `k`
+shows the whole stack, but JIT frames appear as bare addresses. To name one,
+continue the first-chance exception so the crash report prints, or look the
+address up in the perf map (`BRASS_PERF_MAP=1` works on Windows too). ETW
+sampling (WPR / WPA) likewise walks the stacks but shows JIT frames unnamed;
+naming them would need MethodLoad-style rundown events, which brass does
+not emit.

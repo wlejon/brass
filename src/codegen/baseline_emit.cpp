@@ -446,6 +446,10 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
             runtime::get_global_exception_registry().unregister_function_mapping(reinterpret_cast<uintptr_t>(p));
         }));
     }
+    if (runs_here) {
+        compiled.set_debug_registration(
+            debug::register_jit_code(debug::JitTier::Baseline, fn.name(), entry_ptr, code_bytes));
+    }
     if (emitter.uses_lazy_stubs) compiled.set_link_keepalive(lazy_);
     compiled.set_lazy_call_symbols(std::move(emitter.lazy_call_symbols));
     compiled.set_lazy_addr_symbols(std::move(emitter.lazy_addr_symbols));

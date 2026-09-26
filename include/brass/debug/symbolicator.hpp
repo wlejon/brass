@@ -53,7 +53,16 @@ public:
 
     StackTrace symbolize_ip(uintptr_t code_base, uintptr_t ip) const;
     StackTrace symbolize_offset(const std::string& fn_name, uint32_t offset) const;
+    // An address in no range or table given to this symbolicator is looked
+    // up in the process's JIT code registry (debug/jit_code_registry.hpp):
+    // a JIT function is named "<name> [tier N]", with its source position
+    // when this symbolicator has the function's table.
     StackTrace symbolize_ip(uintptr_t ip) const;
+
+    // The calling thread's native stack, JIT frames named as above, then the
+    // async stack of the coroutine running on this thread (each awaiter as
+    // "async <body>"), when there is one.
+    StackTrace symbolize_current_stack(size_t max_frames = 64) const;
 
     StackTrace symbolize_stack(uintptr_t top_rbp, uintptr_t top_return_ip, const ModuleStackMap& stack_maps) const;
 

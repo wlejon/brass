@@ -1,4 +1,6 @@
 #include <brass/debug/symbolicator.hpp>
+#include <brass/debug/jit_code_registry.hpp>
+#include <brass/runtime/coroutine.hpp>
 #include <sstream>
 #include <iomanip>
 
@@ -172,10 +174,44 @@ StackTrace Symbolicator::symbolize_ip(uintptr_t ip) const {
             return symbolize_offset(t.function_name(), offset);
         }
     }
+    debug::JitCodeInfo jit;
+    if (debug::find_jit_code(ip, &jit)) {
+        StackTrace trace = symbolize_offset(jit.name, static_cast<uint32_t>(ip - jit.start));
+        // The outermost frame of the expansion is the function itself.
+        std::string& outer = trace.frames.back().function_name;
+        outer += " [";
+        outer += debug::jit_tier_label(jit.tier);
+        outer += "]";
+        return trace;
+    }
     std::ostringstream ss;
     ss << "0x" << std::hex << ip;
     StackTrace trace;
     trace.frames.push_back({ss.str(), "", 0, 0, false});
+    return trace;
+}
+
+StackTrace Symbolicator::symbolize_current_stack(size_t max_frames) const {
+    StackTrace trace;
+    const std::vector<debug::NativeFrame> frames = debug::capture_native_stack(max_frames);
+    for (size_t i = 0; i < frames.size(); ++i) {
+        const debug::NativeFrame& f = frames[i];
+        if (f.is_jit) {
+            // Return addresses: the call is the byte before.
+            StackTrace t = symbolize_ip(f.ip - 1);
+            for (auto& fr : t.frames) trace.frames.push_back(std::move(fr));
+        } else {
+            std::ostringstream ss;
+            if (!f.module.empty()) ss << f.module << "+0x" << std::hex << f.module_offset;
+            else ss << "0x" << std::hex << f.ip;
+            trace.frames.push_back({ss.str(), "", 0, 0, false});
+        }
+    }
+    for (const auto& a : runtime::current_async_stack()) {
+        std::string name = "async ";
+        name += a.name.empty() ? std::string_view("<fixed-code body>") : a.name;
+        trace.frames.push_back({std::move(name), "", 0, a.state_id, false});
+    }
     return trace;
 }
 

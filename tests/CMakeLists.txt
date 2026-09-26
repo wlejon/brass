@@ -109,6 +109,7 @@ add_executable(brass_unit_tests
     unit/test_source_loc.cpp
     unit/test_source_map.cpp
     unit/test_symbolicator.cpp
+    unit/test_jit_observability.cpp
     differential/test_debug_differential.cpp
     unit/test_heap_roots_regressions.cpp
     unit/test_gc_sweep19_regressions.cpp

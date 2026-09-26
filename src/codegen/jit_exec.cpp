@@ -116,7 +116,8 @@ JitExecutionEngine::JitExecutionEngine(JitExecutionEngine&& other) noexcept = de
 JitExecutionEngine& JitExecutionEngine::operator=(JitExecutionEngine&& other) noexcept = default;
 
 JitExecutionEngine::LoadRegistrations::LoadRegistrations(LoadRegistrations&& other) noexcept
-    : stack_maps(std::move(other.stack_maps)),
+    : debug_code(std::move(other.debug_code)),
+      stack_maps(std::move(other.stack_maps)),
       exception_fns(std::exchange(other.exception_fns, {})),
       pdata_table(std::exchange(other.pdata_table, nullptr)),
       pdata_count(std::exchange(other.pdata_count, 0)),
@@ -128,6 +129,7 @@ JitExecutionEngine::LoadRegistrations&
 JitExecutionEngine::LoadRegistrations::operator=(LoadRegistrations&& other) noexcept {
     if (this != &other) {
         release();
+        debug_code = std::move(other.debug_code);
         stack_maps = std::move(other.stack_maps);
         exception_fns = std::exchange(other.exception_fns, {});
         pdata_table = std::exchange(other.pdata_table, nullptr);
@@ -140,6 +142,7 @@ JitExecutionEngine::LoadRegistrations::operator=(LoadRegistrations&& other) noex
 }
 
 void JitExecutionEngine::LoadRegistrations::release() noexcept {
+    debug_code.reset();
     stack_maps.reset();
     release_seh_tables();
     release_eh_frame();
@@ -693,6 +696,13 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
     if (code_mem_.is_valid() && !code_mem_.make_executable_read_only(code_pages_size)) {
         std::cerr << "JIT Error: could not make the code pages executable\n";
         return false;
+    }
+    // Named for profilers, debuggers and crash reports, until release().
+    if (!loaded_functions_.empty() && code_mem_.is_valid()) {
+        std::vector<debug::JitCodeRange> ranges;
+        ranges.reserve(loaded_functions_.size());
+        for (const auto& f : loaded_functions_) ranges.push_back({f.name, f.code, f.size});
+        regs_.debug_code = debug::register_jit_code(code_tier_, ranges.data(), ranges.size());
     }
     return true;
 }

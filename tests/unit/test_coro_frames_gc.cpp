@@ -7,6 +7,8 @@
 #include "coro_tier_harness.hpp"
 #include <brass/gc/native_frames.hpp>
 #include <brass/runtime/coroutine.hpp>
+#include <brass/debug/jit_code_registry.hpp>
+#include <brass/debug/symbolicator.hpp>
 #include <bit>
 #include <string>
 
@@ -187,6 +189,31 @@ TEST_CASE("CoroFramesGc - the awaiter link keeps its frame alive, moves with it,
     brass_coro_set_awaiter(after, inner.frame);
     CHECK_EQ(coro_async_stack(inner.frame).size(), size_t{2});
     brass_coro_set_awaiter(after, 0);
+}
+
+TEST_CASE("CoroFramesGc - the symbolizer appends the running frame's async stack") {
+    auto mod = parse_program(kKeep);
+    test::BoundHeap heap(test::small_heap_config());
+    Program prog(*mod);
+    RootedFrame inner, outer;
+    inner.frame = static_cast<uintptr_t>(prog.call("mk", Tier::Interp, {RuntimeValue::from_i64(1)}).raw_bits());
+    outer.frame = static_cast<uintptr_t>(prog.call("mk", Tier::Interp, {RuntimeValue::from_i64(2)}).raw_bits());
+    brass_coro_set_awaiter(inner.frame, outer.frame);
+    {
+        RunningCoroScope running(&inner.frame);
+        const StackTrace trace = Symbolicator().symbolize_current_stack();
+        size_t async_frames = 0;
+        for (const auto& f : trace.frames) {
+            if (f.function_name == "async keep") ++async_frames;
+        }
+        CHECK_EQ(async_frames, size_t{2});
+        const std::string text = debug::format_native_stack(debug::capture_native_stack(), true);
+        CHECK(text.find("async #0 keep") != std::string::npos);
+        CHECK(text.find("async #1 keep") != std::string::npos);
+    }
+    brass_coro_set_awaiter(inner.frame, 0);
+    brass_coro_destroy(inner.frame);
+    brass_coro_destroy(outer.frame);
 }
 
 namespace {
