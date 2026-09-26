@@ -362,12 +362,19 @@ void* BaselineJitCompiler::resolve_symbol_in(const Function& fn, std::string_vie
         if (const char* data = mod->string_symbol(name)) return const_cast<char*>(data);
         // A function the module defines shadows a registered symbol of the
         // same name (a program function called `sqrt` is not libm's), as in
-        // tier 2's linker. Bound directly once this module's copy is
-        // compiled; until then through the lazy stub, which compile_module
-        // points at the module's copy when it installs it.
+        // tier 2's linker. Bound directly once this module's copy has
+        // baseline code; until then through the lazy stub, which
+        // compile_module points at the module's copy when it installs it.
+        // Tier-2 code is reached through the stub too: invalidation drops
+        // it and re-arms the stub, and a caller bound to it directly would
+        // keep entering it, failing its guards on every call.
         if (const Function* def = mod->get_function(name); def && def->block_count() > 0) {
             runtime::FunctionHandle* handle = dispatch_table().find(name);
-            if (handle && handle->mir_function() == def && handle->native_entry()) return handle->native_entry();
+            if (handle && handle->mir_function() == def) {
+                void* entry = handle->native_entry();
+                const auto baseline = handle->baseline_function();
+                if (entry && baseline && entry == baseline->entry_point()) return entry;
+            }
             // Not compiled yet (compile_module installs it later, or the
             // tiering layer compiles it one function at a time): the stub,
             // which with shadowing on must not resolve to a registered

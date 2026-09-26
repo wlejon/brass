@@ -213,6 +213,7 @@ add_executable(brass_unit_tests
     unit/test_baseline_frame.cpp
     unit/test_baseline_unwind.cpp
     unit/test_program_dispatch.cpp
+    unit/test_deopt_carried_callee.cpp
     unit/test_program_runtime_state.cpp
     unit/test_program_osr.cpp
     unit/test_kernel_jit.cpp
