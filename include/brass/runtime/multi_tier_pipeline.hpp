@@ -344,6 +344,11 @@ private:
 
     mutable std::mutex mutex_;
     std::unordered_map<std::string, void*> external_symbols_;
+    // external_symbols_ as of symbols_gen_ == shared_symbols_gen_, handed to
+    // every Tier-2 engine rather than copied into each: an engine lives as
+    // long as its code, and a program's retired engines accumulate.
+    mutable std::shared_ptr<const std::unordered_map<std::string, void*>> shared_symbols_;
+    mutable uint64_t shared_symbols_gen_ = 0;
     std::unordered_map<std::string, FastHostFn> external_functions_;
     std::unordered_map<std::string, std::shared_ptr<codegen::BaselineCompiledFunction>> baseline_functions_;
     MultiTierStats stats_;

@@ -151,7 +151,21 @@ void JitExecutionEngine::LoadRegistrations::release() noexcept {
 }
 
 void JitExecutionEngine::register_external_symbol(std::string_view name, void* address) {
-    external_symbols_[std::string(name)] = address;
+    if (shared_symbols_) over_shared_symbols_[std::string(name)] = address;
+    else external_symbols_[std::string(name)] = address;
+}
+
+void JitExecutionEngine::set_shared_symbols(SharedSymbols symbols) {
+    shared_symbols_ = std::move(symbols);
+}
+
+void* JitExecutionEngine::find_external_symbol(const std::string& name) const {
+    if (auto it = over_shared_symbols_.find(name); it != over_shared_symbols_.end()) return it->second;
+    if (shared_symbols_) {
+        if (auto it = shared_symbols_->find(name); it != shared_symbols_->end()) return it->second;
+    }
+    if (auto it = external_symbols_.find(name); it != external_symbols_.end()) return it->second;
+    return nullptr;
 }
 
 void JitExecutionEngine::register_function_signature(std::string_view name, Type ret_type, std::vector<Type> param_types) {
@@ -414,10 +428,7 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
             if (it != symbol_table_.end()) {
                 target_addr = it->second;
             } else {
-                auto ext_it = external_symbols_.find(r.symbol_name);
-                if (ext_it != external_symbols_.end()) {
-                    target_addr = ext_it->second;
-                }
+                target_addr = find_external_symbol(r.symbol_name);
             }
 
             if (!target_addr) {
@@ -687,15 +698,12 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
 }
 
 void* JitExecutionEngine::get_symbol_address(std::string_view name) const {
-    auto it = symbol_table_.find(std::string(name));
+    const std::string key(name);
+    auto it = symbol_table_.find(key);
     if (it != symbol_table_.end()) {
         return it->second;
     }
-    auto ext_it = external_symbols_.find(std::string(name));
-    if (ext_it != external_symbols_.end()) {
-        return ext_it->second;
-    }
-    return nullptr;
+    return find_external_symbol(key);
 }
 
 // RtlAddFunctionTable takes the native RUNTIME_FUNCTION: 12 bytes on x64,

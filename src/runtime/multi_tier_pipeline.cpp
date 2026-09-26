@@ -245,7 +245,11 @@ void MultiTierPipeline::register_external_symbol(std::string_view name, void* ad
 
 void MultiTierPipeline::install_external_symbols(codegen::JitExecutionEngine& jit) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    for (const auto& [name, addr] : external_symbols_) jit.register_external_symbol(name, addr);
+    if (!shared_symbols_ || shared_symbols_gen_ != symbols_gen_) {
+        shared_symbols_ = std::make_shared<const std::unordered_map<std::string, void*>>(external_symbols_);
+        shared_symbols_gen_ = symbols_gen_;
+    }
+    jit.set_shared_symbols(shared_symbols_);
 }
 
 void MultiTierPipeline::set_tier2_passes(std::optional<PassPipelineOptions> passes) {

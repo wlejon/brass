@@ -258,6 +258,13 @@ public:
 
     // Register host external function/symbol
     void register_external_symbol(std::string_view name, void* address);
+    using SharedSymbols = std::shared_ptr<const std::unordered_map<std::string, void*>>;
+    // A table of symbols shared with other engines rather than copied into
+    // this one: a program's own symbols, which every Tier-2 engine of the
+    // program resolves against and which run to tens of thousands of names.
+    // Symbols registered after this take precedence over the table, and the
+    // table over those registered before it.
+    void set_shared_symbols(SharedSymbols symbols);
     void register_function_signature(std::string_view name, Type ret_type, std::vector<Type> param_types = {});
 
     // Compilation & loading
@@ -373,6 +380,10 @@ private:
 
     std::unordered_map<std::string, void*> symbol_table_;
     std::unordered_map<std::string, void*> external_symbols_;
+    SharedSymbols shared_symbols_;
+    std::unordered_map<std::string, void*> over_shared_symbols_;
+
+    void* find_external_symbol(const std::string& name) const;
     std::unordered_map<std::string, std::pair<Type, std::vector<Type>>> function_signatures_;
     ModuleStackMap stack_maps_;
     runtime::ResumeTableRegistry resume_tables_;
