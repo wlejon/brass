@@ -37,9 +37,19 @@ bool is_rematerializable(const Value* v) {
 } // namespace
 
 std::optional<OsrEntryPlan> plan_osr_entry(const Function& fn, const BasicBlock& block, std::string* why) {
-    if (!fn.resume_points().empty()) {
-        fail(why, "a coroutine (it has resume points)");
+    // A coroutine's resume points re-enter it mid-body, which an OSR entry
+    // cannot stand in for. A guard's resume target is different: the entry
+    // function carries the guard (not the resume table), and a failure in
+    // it finishes the call in Tier 0, at the original function's target.
+    if (fn.has_coro_frame_layout()) {
+        fail(why, "a coroutine body");
         return std::nullopt;
+    }
+    for (const auto& rp : fn.resume_points()) {
+        if (!fn.find_guard(rp.first)) {
+            fail(why, "resume point " + std::to_string(rp.first) + " belongs to no guard");
+            return std::nullopt;
+        }
     }
     if (fn.entry_block() == &block) {
         fail(why, "the entry block is not an OSR entry");

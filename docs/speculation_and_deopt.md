@@ -111,9 +111,19 @@ On-Stack Replacement moves a long-running interpreted loop into Tier-2 optimized
 3. **Background compile**: the entry function, with the bodies of what it calls, is copied on the interpreter's thread, then optimized with the program's tier-2 passes and compiled on the shared `CompilePool`. The interpreter keeps running the loop meanwhile.
 4. **Entry**: a later backedge to the header, once the code is ready, fills the buffer from the frame's registers and calls the entry; its result is the activation's. A failed guard in the code finishes the call in Tier 0, as tier-2 code of the program does.
 
-A loop in a function with resume points (a coroutine, or a guard with a resume target), or with a gcref or vector value live into its header, stays interpreted. The reference `Interpreter`, and a `FastInterpreter` whose program's pipeline is not initialized, do not OSR.
+A loop in a coroutine body, in a function with a resume point that no guard of it names, or with a gcref or vector value live into its header, stays interpreted. A function whose resume points are all its guards' resume targets does OSR: the entry function carries the guards (not the resume table), and one failing in the OSR code finishes the call in Tier 0 at the Tier-0 guard of the same resume id, as tier-2 code does. The reference `Interpreter`, and a `FastInterpreter` whose program's pipeline is not initialized, do not OSR.
 
 Every program function the OSR copy carries a body of gets its handle when the copy is made, and each of those bodies gets a deopt resumer, so a callee's guard failing inside OSR code finishes the callee in Tier 0 and returns into the OSR code. A copy with a guarded body that has no Tier-0 function to resume in is not compiled.
+
+A tier-up copy follows the same rule for the callee bodies it carries: after the pipeline, each one must pass `deopt_targets_valid` against its own Tier-0 function or the compile is rejected, and each one gets a resumer whether or not its code is published as that callee's entry.
+
+## 4b. Front-end speculation passes
+
+A front end whose Tier-0 functions carry speculation sites registers one pass with `MultiTierPipeline::set_tier2_front_pass`. `run_tier2_optimization_pipeline` runs it first on every tier-2 copy, tier-up and OSR alike, before the program's tier-2 passes. The pass sees the copy only and may use whatever feedback the front end has collected in Tier 0. It can decide per site to arm a guard (give it a real condition), or drop one, along with the copy's resume points. The Tier-0 function keeps its guards and resume table, so a guard armed in the copy still has a Tier-0 guard of its resume id to finish at.
+
+The contract for a site's Tier-0 form: a guard whose condition always holds in Tier 0, whose resume target is the block the site's slow path starts in, and whose state is every value live into that block. That block is then correct to resume from with only the guard's state, so arming the guard in the copy is always sound. Bronze's sites are the reference (`il2mir/il_speculation.h` in bronze).
+
+**Reoptimization.** A tier-2 function whose speculation is invalidated (its deopt count passes the threshold) normally bails out to Tier 1 for good. With a front pass registered, it instead drops the invalid code and clears its deopt counts, up to `FunctionFeedback::kMaxReoptimizations` (3) times, and tiers up again. The front pass then sees the feedback the failures produced and stops arming the sites that failed. After the last reoptimization it bails out as before.
 
 ---
 

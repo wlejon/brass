@@ -43,6 +43,9 @@ inline constexpr uint64_t INVOCATION_TIER1_THRESHOLD = 50;
 inline constexpr uint64_t INVOCATION_TIER2_THRESHOLD = 200;
 inline constexpr uint64_t BACKEDGE_OSR_THRESHOLD = 100;
 inline constexpr uint64_t DEOPT_THRESHOLD = 5;
+// Times a program with a tier-2 front pass recompiles a function whose
+// tier-2 code was invalidated, before it stays in the lower tiers.
+inline constexpr uint32_t kMaxReoptimizations = 3;
 
 struct TieringConfig {
     uint64_t invocation_tier1_threshold = INVOCATION_TIER1_THRESHOLD;
@@ -140,6 +143,12 @@ public:
     void record_deopt(uint32_t guard_site_id = 0) noexcept;
     void record_deoptimization(uint32_t guard_site_id = 0) noexcept { record_deopt(guard_site_id); }
     bool is_speculation_invalid(uint32_t guard_site_id) const noexcept;
+    // Re-optimization after an invalidation (MultiTierPipeline::
+    // resume_after_deopt): the count of invalidations so far, this one
+    // included, and the deopt counts cleared for the next code's guards.
+    uint32_t record_reoptimization() noexcept { return reoptimizations_.fetch_add(1, std::memory_order_relaxed) + 1; }
+    uint32_t reoptimizations() const noexcept { return reoptimizations_.load(std::memory_order_relaxed); }
+    void clear_deopts() noexcept;
 
     // Bail-out tracker
     bool is_bailout_set() const noexcept { return bailout_triggered_; }
@@ -205,6 +214,7 @@ private:
     std::atomic<uint64_t> total_backedges_{0};
     std::atomic<uint64_t> unkeyed_backedges_{0};
     std::atomic<uint64_t> deopt_count_{0};
+    std::atomic<uint32_t> reoptimizations_{0};
     // Keyed backedges and guard failures are rare (OSR and deopt paths).
     mutable std::mutex maps_mutex_;
     std::unordered_map<uint32_t, uint64_t> loop_backedges_;

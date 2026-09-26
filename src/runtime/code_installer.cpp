@@ -443,6 +443,18 @@ CodeInstallResult CodeInstaller::install_tier2(
         if (!deopt_targets_valid(*target_fn, bound, why)) {
             return reject("Tier-2 code for '" + std::string(fn_name) + "' cannot deoptimize: " + why);
         }
+        // So must every other body of the copy: the target may call its
+        // own copy of a sibling directly, and a guard failing there needs a
+        // Tier-0 Function to resume in (as OSR copies require).
+        for (const Function* fn : module->functions()) {
+            if (!fn || fn == target_fn || fn->block_count() == 0) continue;
+            auto recorded = bindings.siblings.find(std::string(fn->name()));
+            const Function* tier0 = recorded != bindings.siblings.end() ? recorded->second : nullptr;
+            if (!deopt_targets_valid(*fn, tier0, why)) {
+                return reject("Tier-2 code for '" + std::string(fn_name) + "' carries '" +
+                              std::string(fn->name()) + "', which cannot deoptimize: " + why);
+            }
+        }
     }
 
     // 2. Machine code generation and relocation
@@ -538,15 +550,16 @@ CodeInstallResult CodeInstaller::install_tier2(
         auto recorded = bindings.siblings.find(std::string(fn->name()));
         if (recorded == bindings.siblings.end()) continue;
         FunctionHandle* other_handle = table_->find(fn->name());
-        if (other_handle && !other_handle->has_native_entry() && other_handle->mir_function() == recorded->second) {
-            void* other_ptr = jit->get_symbol_address(fn->name());
-            const Function* other_fn = recorded->second;
-            std::string why;
-            if (other_ptr && deopt_targets_valid(*fn, other_fn, why)) {
-                register_resumer(*other_handle, other_ptr, other_fn);
-                other_handle->publish_optimized(jit, other_ptr, other_fn, fn->return_type(), fn->param_types(),
-                                                /*require_no_entry=*/true);
-            }
+        void* other_ptr = jit->get_symbol_address(fn->name());
+        const Function* other_fn = recorded->second;
+        if (!other_handle || !other_ptr) continue;
+        // Published or not, this copy of the sibling runs when the target
+        // calls it, so its guards resume in its Tier-0 Function (validated
+        // above).
+        register_resumer(*other_handle, other_ptr, other_fn);
+        if (!other_handle->has_native_entry() && other_handle->mir_function() == other_fn) {
+            other_handle->publish_optimized(jit, other_ptr, other_fn, fn->return_type(), fn->param_types(),
+                                            /*require_no_entry=*/true);
         }
     }
 

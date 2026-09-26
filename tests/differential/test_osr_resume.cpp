@@ -9,8 +9,9 @@
 // every run takes it) finishes the OSR call in Tier 0 through its exit
 // stub; a callee's resume-only guard failing inside OSR code resumes the
 // callee in Tier 0 at its resume block and returns into the OSR code; a
-// function with resume points is never entered through OSR. Each answer is
-// the interpreter's.
+// function whose resume points are its guards' is entered through OSR, one
+// with a resume point no guard names is not. Each answer is the
+// interpreter's.
 
 #include "test_framework.hpp"
 #include <brass/brass.hpp>
@@ -246,7 +247,7 @@ TEST_CASE("OSR resume - the entry plan carries the header's parameters first and
     for (const BasicBlock* bb : plan->region) CHECK(bb != fn.entry_block());
 }
 
-TEST_CASE("OSR resume - no entry at the entry block, into a function with resume points, or carrying a gcref") {
+TEST_CASE("OSR resume - no entry at the entry block, into a function with an unguarded resume point, or carrying a gcref") {
     std::string why;
     {
         auto mod = parse_or_fail(kSumLoop);
@@ -254,6 +255,8 @@ TEST_CASE("OSR resume - no entry at the entry block, into a function with resume
         CHECK(!plan_osr_entry(fn, *fn.entry_block(), &why).has_value());
     }
     {
+        // Resume point 5 belongs to no guard: nothing in the OSR code could
+        // name it, so nothing says what a resume there would carry.
         auto mod = parse_or_fail(R"(module @osr_resume_points
 func @f(%n: i64) -> i64 {
 bb0:
@@ -262,7 +265,7 @@ bb0:
 bb1(%i: i64):
   %big = iconst.i64 1000000
   %ok = slt %i, %big
-  guard %ok, @slow, [%i]
+  guard %ok, @slow, [%i], id 0
   %one = iconst.i64 1
   %j = add %i, %one
   %c = slt %j, %n
@@ -273,7 +276,7 @@ bres(%x: i64):
   ret %x
 
 resume_table {
-  entry 0 -> bres
+  entry 5 -> bres
 }
 }
 )");
@@ -382,7 +385,7 @@ TEST_CASE("OSR resume - a callee's resume-only guard failing under OSR resumes t
     CHECK(deopt_stress_forced() > 0);
 }
 
-TEST_CASE("OSR resume - a loop in a function with resume points stays interpreted") {
+TEST_CASE("OSR resume - a loop in a function whose resume points are its guards' enters OSR") {
     auto mod = parse_or_fail(R"(module @osr_resume_stays
 func @f(%n: i64) -> i64 {
 bb0:
@@ -418,7 +421,9 @@ resume_table {
         CHECK_EQ(interp.run(fn, {RuntimeValue::from_i64(3000)}).as_i64(), 2999 * 3000 / 2);
         CompilePool::shared().wait_owner(&prog.osr());
     }
-    CHECK_EQ(prog.osr().total_osr_migrations(), 0u);
+    // The guard's resume point is one the OSR code's guard names, so a
+    // failure there would resume at bres in Tier 0 with the guard's state.
+    CHECK(prog.osr().total_osr_migrations() > 0u);
 }
 
 #endif

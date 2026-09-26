@@ -182,6 +182,18 @@ public:
     void set_tier2_passes(std::optional<PassPipelineOptions> passes);
     std::optional<PassPipelineOptions> tier2_passes() const;
 
+    // The front end's speculation pass: run first over every tier-2 copy
+    // (tier-up and OSR alike), on the compiling thread, before any brass
+    // pass. It decides from the front end's own feedback which of its
+    // guards the copy keeps. A front end whose Tier-0 functions carry
+    // guards that only exist to give tier 2 somewhere to deoptimize to
+    // arms them here, and drops the rest. It may rewrite only guard
+    // conditions, branch conditions and the copy's resume table: every
+    // guard it keeps must still match its Tier-0 guard (deopt_targets_valid).
+    using Tier2FrontPass = std::function<void(Module&)>;
+    void set_tier2_front_pass(Tier2FrontPass pass);
+    Tier2FrontPass tier2_front_pass() const;
+
     // Tells `observer` of every function's native code this program installs
     // from now on (Tier 1 and Tier 2, not the native-to-Tier-0 bridges): a
     // host that maps code addresses back to its functions, e.g. for stack
@@ -348,6 +360,7 @@ private:
     std::unordered_map<std::string, std::shared_ptr<void>> tier0_bridges_;
     CodeInstallObserver code_observer_;
     std::optional<PassPipelineOptions> tier2_passes_; // under mutex_
+    Tier2FrontPass tier2_front_pass_;                  // under mutex_
     // Testing only (set_tier1_compile_hook, set_tier1_install_hook).
     std::function<void(std::string_view)> tier1_compile_hook_;
     std::function<void(std::string_view)> tier1_install_hook_;

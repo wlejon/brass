@@ -61,6 +61,10 @@ public:
 
     void add_resume_point(uint32_t resume_id, BasicBlock* target);
     BasicBlock* get_resume_target(uint32_t resume_id) const noexcept;
+    // Drops `resume_id`'s entry (no-op when it has none). A tier-2 copy whose
+    // guards finish in Tier 0 needs no resume blocks of its own, and a block
+    // that stays a resume target stays reachable.
+    void remove_resume_point(uint32_t resume_id);
     const std::vector<std::pair<uint32_t, BasicBlock*>>& resume_points() const noexcept {
         return resume_points_;
     }

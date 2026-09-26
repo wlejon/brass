@@ -258,6 +258,16 @@ std::optional<PassPipelineOptions> MultiTierPipeline::tier2_passes() const {
     return tier2_passes_;
 }
 
+void MultiTierPipeline::set_tier2_front_pass(Tier2FrontPass pass) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    tier2_front_pass_ = std::move(pass);
+}
+
+MultiTierPipeline::Tier2FrontPass MultiTierPipeline::tier2_front_pass() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return tier2_front_pass_;
+}
+
 void MultiTierPipeline::register_external_function(std::string_view name, FastHostFn fn) {
     std::lock_guard<std::mutex> lock(mutex_);
     external_functions_[std::string(name)] = std::move(fn);

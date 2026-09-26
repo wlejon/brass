@@ -156,12 +156,20 @@ uint64_t MultiTierPipeline::resume_after_deopt(FunctionHandle& handle, const Deo
     if (current_code) fb.record_deopt(frame.resume_id);
     if (current_code && handle.tier() == TierLevel::Tier2_Optimized && fb.is_speculation_invalid(frame.resume_id)) {
         // The speculation is wrong for this program: stop entering the
-        // optimized code and never recompile it (tier 2 has no
-        // non-speculating variant to fall back to).
-        fb.trigger_bailout("guard " + std::to_string(frame.resume_id) + " failed repeatedly in tier-2 code");
+        // optimized code. With a front pass, a recompile asks the front end
+        // again, and its feedback now records what failed here (the
+        // continuation ran the lower tier's path), so the function may tier
+        // up again, a bounded number of times. Otherwise tier 2 has no
+        // non-speculating variant to fall back to, and it never recompiles.
         handle.invalidate_optimized();
         fb.set_tier(handle.tier());
         tier2_invalidations_.fetch_add(1, std::memory_order_relaxed);
+        if (tier2_front_pass() && fb.record_reoptimization() <= kMaxReoptimizations) {
+            fb.clear_deopts();
+            fb.clear_bailout();
+        } else {
+            fb.trigger_bailout("guard " + std::to_string(frame.resume_id) + " failed repeatedly in tier-2 code");
+        }
     }
 
     // The same exits the interpreter's guard takes, in its order.
