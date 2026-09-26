@@ -4,6 +4,7 @@
 #include <brass/gc/runtime_gc.hpp>
 #include "interpreter_coro.hpp"
 #include <brass/runtime/code_installer.hpp>
+#include <brass/runtime/deopt_stress.hpp>
 #include <brass/runtime/exception.hpp>
 #include <brass/runtime/tiering.hpp>
 #include <brass/runtime/type_feedback.hpp>
@@ -11,6 +12,20 @@
 #include <cmath>
 
 namespace brass {
+
+namespace {
+
+// Deopt stress (runtime/deopt_stress.hpp): whether this evaluation of a
+// passing guard must fail. Only a guard the forward path below can exit
+// without a handler counts: an exit stub of `module`, or a resume target.
+bool stress_fails_guard(const Function& fn, const Instruction& guard, const Module* module, bool has_handler) {
+    if (has_handler) return false;
+    const bool has_stub = module && !guard.symbol().empty() && module->get_function(guard.symbol());
+    if (!has_stub && !fn.get_resume_target(guard.resume_id())) return false;
+    return runtime::deopt_stress_should_fail(guard.resume_id());
+}
+
+} // namespace
 
 Interpreter::Interpreter(gc::Heap* heap) {
     use_heap(heap ? heap : gc::Heap::current());
@@ -680,7 +695,8 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
 
                 case Opcode::guard: {
                     RuntimeValue cond = frame.get_value(inst->operand(0));
-                    if (cond.as_i32() == 0) {
+                    if (cond.as_i32() == 0 || (runtime::deopt_stress_active() &&
+                                                 stress_fails_guard(fn, *inst, module_, static_cast<bool>(deopt_handler_)))) {
                         std::vector<RuntimeValue> captured;
                         captured.reserve(inst->state_map().size());
                         for (Value* v : inst->state_map()) {

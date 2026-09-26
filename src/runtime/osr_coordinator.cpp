@@ -157,6 +157,15 @@ void OsrCoordinator::request_entry(const Function& fn, const BasicBlock& header,
         mod->copy_declarations_from(*src);
         if (!build_osr_entry_function(e->plan, *mod, e->name, &why)) return fail();
         clone_callee_closure(*src, *mod, e->plan.region, detail::speculated_call_targets(table, fn.name()), &fn);
+        // Every program function the copy carries a body of has its handle
+        // now: a guard of that body failing in the OSR code resumes through
+        // it (compile_entry registers the resumer), and a callee the
+        // interpreter had not yet called has none, which left such a
+        // failure with nowhere to go.
+        for (const Function* f : mod->functions()) {
+            if (!f || f->block_count() == 0 || f->name() == e->name) continue;
+            if (const Function* def = src->get_function(f->name())) table.get_or_create(f->name(), def);
+        }
         detail::bind_declared_handles(table, *mod, *src);
     } catch (const std::exception&) {
         return fail();
@@ -191,6 +200,14 @@ void OsrCoordinator::compile_entry(const Function& fn, Module& copy, Entry& e) {
         const Function* entry_fn = mod->get_function(e.name);
         std::string why;
         if (!entry_fn || !deopt_targets_valid(*entry_fn, &fn, why)) return fail();
+        // Every other body's guards need a Tier-0 Function to resume in (its
+        // resumer, registered below): a guard failing where there is none
+        // would be fatal, so such a copy stays uncompiled.
+        for (const Function* f : mod->functions()) {
+            if (!f || f->block_count() == 0 || f == entry_fn) continue;
+            auto sib = siblings.find(std::string(f->name()));
+            if (!deopt_targets_valid(*f, sib != siblings.end() ? sib->second : nullptr, why)) return fail();
+        }
         jit = detail::make_tier2_engine(table, Target::host());
         auto known = [&](std::string_view name) { return name == fn.name() || siblings.count(std::string(name)) != 0; };
         detail::canonicalize_function_addresses(*mod, known, pipeline, *jit);

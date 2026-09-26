@@ -268,6 +268,13 @@ public:
     const SchedOptions& sched_options() const noexcept { return sched_opts_; }
     void set_sched_options(const SchedOptions& opts) { sched_opts_ = opts; }
 
+    // Code this engine compiles has a lower tier that continues a guard's
+    // resume block after a deopt (a pipeline's tier-2 and OSR code). Under
+    // deopt stress (runtime/deopt_stress.hpp) its resume-only guards are
+    // then forced to fail too; standalone, only guards with exit stubs are.
+    void set_lower_tier_resumes(bool enable) noexcept { lower_tier_resumes_ = enable; }
+    bool lower_tier_resumes() const noexcept { return lower_tier_resumes_; }
+
     // Function/symbol lookup
     void* get_symbol_address(std::string_view name) const;
 
@@ -373,6 +380,7 @@ private:
     runtime::ExceptionTableRegistry exception_tables_;
     std::vector<LoadedFunction> loaded_functions_;
     SchedOptions sched_opts_;
+    bool lower_tier_resumes_ = false;
 
     void register_seh_tables(const object::ObjectFile& obj, uint8_t* base_ptr);
     void register_eh_frame(uint8_t* eh_frame);

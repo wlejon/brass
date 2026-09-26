@@ -134,6 +134,7 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
         loop_opts.enable_fp_reassociation = fn->allow_fp_reassociation() || mod.allow_fp_reassociation();
 
         const Function* fn_to_lower = fn;
+        Function* opt_fn_mut = nullptr;
         std::unique_ptr<Module> opt_mod;
         if (enable_mir_opts_ && !mod.has_loop_optimizations()) {
             opt_mod = std::make_unique<Module>(mod.name());
@@ -158,6 +159,22 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
                                          std::string(fn->name()) + "':\n" + diag.format_all());
             }
             fn_to_lower = opt_fn;
+            opt_fn_mut = opt_fn;
+        }
+
+        // Deopt stress guards go in after the optimizer, into the copy that
+        // is lowered (a copy made for them when there is none yet).
+        if (has_deopt_stress_guards(*fn_to_lower, &mod, deopt_stress_)) {
+            if (!opt_fn_mut) {
+                opt_mod = std::make_unique<Module>(mod.name());
+                opt_mod->set_allow_fp_reassociation(mod.allow_fp_reassociation());
+                opt_mod->set_pinned_tls_register(mod.pinned_tls_register());
+                opt_mod->copy_declarations_from(mod);
+                opt_fn_mut = clone_function(*fn, *opt_mod);
+                fn_to_lower = opt_fn_mut;
+            }
+            insert_deopt_stress_guards(*opt_fn_mut, &mod, deopt_stress_);
+            opt_fn_mut->rebuild_cfg_predecessors();
         }
 
         // 1. ISel to LIR

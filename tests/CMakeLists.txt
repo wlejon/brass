@@ -155,6 +155,8 @@ add_executable(brass_unit_tests
     unit/test_osr_runtime.cpp
     differential/test_osr_differential.cpp
     differential/test_osr_regressions.cpp
+    differential/test_osr_resume.cpp
+    differential/test_deopt_stress_differential.cpp
     differential/test_eh_coro_regressions.cpp
     unit/test_critical_edge.cpp
     unit/test_gvn_pre.cpp
@@ -491,6 +493,51 @@ if(BRASS_BUILD_TOOLS)
             add_test(NAME "${_name}"
                 COMMAND brass-opt "${CMAKE_CURRENT_SOURCE_DIR}/cli/guard_${_file}.mir" -r ${_fn} --args ${_arg_list} ${_flags})
             set_tests_properties("${_name}" PROPERTIES
+                TIMEOUT 60 PASS_REGULAR_EXPRESSION "^${_want}[\r\n]" LABELS "correctness")
+        endforeach()
+    endforeach()
+    # brass_opt_cli.guard_stress.*: the same guard programs under deopt stress
+    # (BRASS_DEOPT_STRESS, runtime/deopt_stress.hpp): every engine takes the
+    # exits the stressed interpreter takes and prints its answer. At 1 every
+    # guard fails; at 3 every third evaluation does, and every engine
+    # evaluates the guards in the same order, so that agrees too. The exits
+    # here are not the fast paths' answers, so these are not the unstressed
+    # results.
+    set(_guard_stress_cases
+        "param0_dispatch|f|0,1000|1|-1|interp baseline jit osr"
+        "osr_resume|f|1000|1|0|interp baseline osr"
+        "osr_resume|f|1000|3|1002|interp baseline osr"
+        "osr_stub|f|1000|1|0|interp baseline jit osr"
+        "osr_stub|f|1000|3|1002|interp baseline jit osr"
+        "osr_both|main|1000|1|1|interp baseline jit osr"
+        "osr_both|main|1000|3|10021|interp baseline jit osr"
+        "stub_f64|spec|3.0,1|1|4[.]5|interp baseline jit osr"
+        "stub_many|spec|3,1|1|148978294|interp baseline jit osr")
+    foreach(_case IN LISTS _guard_stress_cases)
+        string(REPLACE "|" ";" _parts "${_case}")
+        list(GET _parts 0 _file)
+        list(GET _parts 1 _fn)
+        list(GET _parts 2 _args)
+        list(GET _parts 3 _stress)
+        list(GET _parts 4 _want)
+        list(GET _parts 5 _modes)
+        string(REPLACE "," ";" _arg_list "${_args}")
+        string(REPLACE "," "_" _arg_tag "${_args}")
+        string(REPLACE " " ";" _modes "${_modes}")
+        foreach(_mode IN LISTS _modes)
+            set(_flags "")
+            if(_mode STREQUAL "jit")
+                set(_flags "--jit")
+            elseif(_mode STREQUAL "baseline")
+                set(_flags "--baseline-jit")
+            elseif(_mode STREQUAL "osr")
+                set(_flags "--enable-osr;--osr-threshold=10")
+            endif()
+            set(_name "brass_opt_cli.guard_stress.${_file}.${_fn}.${_arg_tag}.s${_stress}.${_mode}")
+            add_test(NAME "${_name}"
+                COMMAND brass-opt "${CMAKE_CURRENT_SOURCE_DIR}/cli/guard_${_file}.mir" -r ${_fn} --args ${_arg_list} ${_flags})
+            set_tests_properties("${_name}" PROPERTIES
+                ENVIRONMENT "BRASS_DEOPT_STRESS=${_stress}"
                 TIMEOUT 60 PASS_REGULAR_EXPRESSION "^${_want}[\r\n]" LABELS "correctness")
         endforeach()
     endforeach()

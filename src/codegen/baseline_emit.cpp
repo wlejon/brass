@@ -8,6 +8,7 @@
 #include <brass/runtime/tiering.hpp>
 #include <brass/runtime/type_feedback.hpp>
 #include <brass/runtime/code_installer.hpp>
+#include <brass/runtime/deopt_stress.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/mir/module.hpp>
 #include <brass/mir/coro_transform.hpp>
@@ -97,8 +98,18 @@ void check_x64_baseline_supported(const Function& fn, const Target& target, cons
 
 void emit_guard(X64BaselineEmitter& em, const Instruction& inst) {
     Label cont = em.buffer.create_label();
+    Label fail = em.buffer.create_label();
+    // Deopt stress, decided as the code is compiled: the poll counts the
+    // evaluation and answers 0 when the guard must fail.
+    const runtime::DeoptStressConfig stress = runtime::deopt_stress_config();
+    if (stress.active() && stress.selects(inst.resume_id())) {
+        em.call_abs(reinterpret_cast<const void*>(&brass_deopt_stress_poll));
+        em.enc.test32(GPR::RAX, GPR::RAX);
+        em.enc.je(fail);
+    }
     em.test_cond(inst.operand(0));
     em.enc.jne(cont);
+    em.buffer.bind(fail);
 
     // Guard failed: the same exits the interpreter takes, in its order.
     std::vector<const Value*> state(inst.state_map().begin(), inst.state_map().end());

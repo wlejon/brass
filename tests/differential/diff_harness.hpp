@@ -7,6 +7,13 @@
 #include <brass/mir/verifier.hpp>
 #include <brass/mir/printer.hpp>
 #include <brass/mir/loop_opt.hpp>
+#include <brass/runtime/code_installer.hpp>
+#include <brass/runtime/deopt_stress.hpp>
+#include <brass/runtime/multi_tier_pipeline.hpp>
+#include <brass/runtime/tiering.hpp>
+#include <brass/vm/fast_interpreter.hpp>
+#include <set>
+#include <string>
 #include <vector>
 #include <string_view>
 #include <iostream>
@@ -162,6 +169,199 @@ inline void assert_diff_3way(
         }
         CHECK_EQ(interp_res.raw_bits(), jit_unopt_res.raw_bits());
         CHECK_EQ(jit_unopt_res.raw_bits(), jit_opt_res.raw_bits());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cross-tier differential: the same MIR on every tier, with and without
+// deopt stress (runtime/deopt_stress.hpp).
+//
+// Tiers: the reference interpreter (the oracle), the fast interpreter,
+// Tier 1 (the baseline JIT, installed by a program's pipeline), Tier 2
+// installed by a program's pipeline (its deopts finish in Tier 0), and the
+// standalone JIT engine. Every tier gives the oracle's answer; then, under
+// deopt stress at period 1 (every eligible guard evaluation fails) and at
+// each guard site alone, every tier gives the stressed oracle's answer.
+// With `exits_equivalent` (each guard's exits compute what its fast path
+// does, which is what speculation promises) stress at any period gives the
+// unstressed answer.
+
+enum class DiffTier { Interp, Fast, Baseline, Tier2, Jit };
+
+inline const char* diff_tier_name(DiffTier t) {
+    switch (t) {
+        case DiffTier::Interp: return "interp";
+        case DiffTier::Fast: return "fast";
+        case DiffTier::Baseline: return "tier1";
+        case DiffTier::Tier2: return "tier2";
+        case DiffTier::Jit: return "jit";
+    }
+    return "?";
+}
+
+struct TierDiffOptions {
+    bool fast = true;
+    bool baseline = true;
+    bool tier2 = true;
+    bool jit = true;
+    bool deopt_stress = true;
+    bool exits_equivalent = false;
+    std::vector<uint64_t> equivalent_periods{1, 2, 3, 5};
+};
+
+// Guards of the module: each one's resume id, and whether any has only a
+// resume target (standalone tier-2 code cannot continue one).
+struct ModuleGuards {
+    std::set<uint32_t> resume_ids;
+    bool resume_only = false;
+};
+
+inline ModuleGuards collect_guards(const Module& mod) {
+    ModuleGuards g;
+    for (const Function* fn : mod.functions()) {
+        if (!fn) continue;
+        for (const BasicBlock* bb : fn->blocks()) {
+            for (const Instruction* inst : *bb) {
+                if (!inst || inst->opcode() != Opcode::guard) continue;
+                g.resume_ids.insert(inst->resume_id());
+                if (!fn->guard_exit_stub(*inst) && fn->get_resume_target(inst->resume_id())) g.resume_only = true;
+            }
+        }
+    }
+    return g;
+}
+
+inline bool same_answer(const RuntimeValue& a, const RuntimeValue& b) {
+    if (a.is_f64() && std::isnan(a.as_f64())) return b.is_f64() && std::isnan(b.as_f64());
+    if (a.is_f32() && std::isnan(a.as_f32())) return b.is_f32() && std::isnan(b.as_f32());
+    if (a.is_vector()) return a == b;
+    return a.raw_bits() == b.raw_bits();
+}
+
+// Runs `fn_name` on one tier. Native tiers compile now, under whatever deopt
+// stress is set, in a program of their own.
+inline RuntimeValue run_on_tier(Module& mod, std::string_view fn_name, const std::vector<RuntimeValue>& args,
+                                DiffTier tier) {
+    switch (tier) {
+        case DiffTier::Interp: {
+            Interpreter in;
+            return in.run(mod, fn_name, args);
+        }
+        case DiffTier::Fast: {
+            FastInterpreter fi;
+            return fi.run(mod, fn_name, args);
+        }
+        case DiffTier::Jit: {
+            codegen::JitExecutionEngine jit(Target::host());
+            REQUIRE(jit.compile_and_load(mod));
+            return jit.invoke(fn_name, args);
+        }
+        case DiffTier::Baseline:
+        case DiffTier::Tier2: break;
+    }
+    runtime::FunctionDispatchTable table;
+    runtime::TieringConfig cfg;
+    cfg.invocation_tier1_threshold = 1000000000;
+    cfg.invocation_tier2_threshold = 1000000000;
+    cfg.enable_background_compile = false;
+    cfg.set_use_fast_interpreter(false);
+    table.pipeline().initialize(cfg);
+    table.tiering().set_active_module(&mod);
+    for (const Function* f : mod.functions()) {
+        if (f) table.get_or_create(f->name(), f);
+    }
+    const Function* f = mod.get_function(fn_name);
+    REQUIRE(f != nullptr);
+    runtime::FunctionHandle* h = table.get_or_create(fn_name, f);
+    if (tier == DiffTier::Baseline) {
+        const bool ok = table.pipeline().compile_and_install_tier1(fn_name, f);
+        if (!ok) std::cerr << "tier 1 rejected " << fn_name << "\n";
+        REQUIRE(ok);
+    } else {
+        // Forced deopts must not retire the code under test.
+        table.tiering().get_feedback(fn_name).set_deopt_threshold(1000000000);
+        runtime::CodeInstaller installer(table);
+        const runtime::CodeInstallResult res = installer.install_tier2(*h, mod, fn_name);
+        if (!res.success) std::cerr << "install_tier2 " << fn_name << ": " << res.error_message << "\n";
+        REQUIRE(res.success);
+    }
+    REQUIRE(h->native_entry() != nullptr);
+    RuntimeValue r;
+    {
+        runtime::ProgramScope scope(table);
+        r = h->call_native(args);
+    }
+    table.tiering().set_active_module(nullptr);
+    return r;
+}
+
+// Every enabled tier against `expected`. With `min_forced`, each tier must
+// also have forced at least that many guard failures.
+inline void check_tiers(Module& mod, std::string_view fn_name, const std::vector<RuntimeValue>& args,
+                        const TierDiffOptions& opts, const RuntimeValue& expected, std::string_view what,
+                        bool jit_ok, uint64_t min_forced = 0) {
+    std::vector<DiffTier> tiers{DiffTier::Interp};
+    if (opts.fast) tiers.push_back(DiffTier::Fast);
+    if (opts.baseline) tiers.push_back(DiffTier::Baseline);
+    if (opts.tier2) tiers.push_back(DiffTier::Tier2);
+    if (opts.jit && jit_ok) tiers.push_back(DiffTier::Jit);
+    for (DiffTier t : tiers) {
+        runtime::reset_deopt_stress_counters();
+        const RuntimeValue got = run_on_tier(mod, fn_name, args, t);
+        const uint64_t forced = runtime::deopt_stress_forced();
+        if (!same_answer(expected, got)) {
+            std::cerr << "TIER MISMATCH in " << fn_name << " (" << what << ") on " << diff_tier_name(t)
+                      << ": expected " << to_string(expected) << ", got " << to_string(got) << "\n";
+        }
+        CHECK(same_answer(expected, got));
+        if (forced < min_forced) {
+            std::cerr << "no forced deopt in " << fn_name << " (" << what << ") on " << diff_tier_name(t) << "\n";
+        }
+        CHECK(forced >= min_forced);
+    }
+}
+
+inline void assert_diff_tiers(Module& mod, std::string_view fn_name, const std::vector<RuntimeValue>& args,
+                              const TierDiffOptions& opts = {}) {
+    DiagnosticReporter diag;
+    const bool ok = verify_module(mod, &diag);
+    if (!ok) std::cerr << "Module verification error in " << fn_name << ":\n" << diag.format_all() << "\n";
+    REQUIRE(ok);
+    const ModuleGuards guards = collect_guards(mod);
+
+    RuntimeValue plain;
+    {
+        runtime::DeoptStressScope off(0);
+        plain = run_on_tier(mod, fn_name, args, DiffTier::Interp);
+        check_tiers(mod, fn_name, args, opts, plain, "no stress", true);
+    }
+    if (!opts.deopt_stress || guards.resume_ids.empty()) return;
+
+    // Standalone tier 2 forces only guards with exit stubs; a module with a
+    // resume-only guard would exit elsewhere than the oracle does.
+    const bool jit_ok = !guards.resume_only;
+    auto stressed = [&](const runtime::DeoptStressConfig& cfg, const std::string& what) {
+        runtime::DeoptStressScope scope(cfg);
+        const RuntimeValue oracle = run_on_tier(mod, fn_name, args, DiffTier::Interp);
+        const bool fired = runtime::deopt_stress_forced() > 0;
+        check_tiers(mod, fn_name, args, opts, oracle, what, jit_ok, fired ? 1 : 0);
+        if (opts.exits_equivalent) {
+            if (!same_answer(plain, oracle)) {
+                std::cerr << "stressed answer differs in " << fn_name << " (" << what << "): " << to_string(oracle)
+                          << " vs " << to_string(plain) << "\n";
+            }
+            CHECK(same_answer(plain, oracle));
+        }
+    };
+    stressed({1, -1}, "stress: every guard");
+    for (uint32_t id : guards.resume_ids) {
+        stressed({1, static_cast<int64_t>(id)}, "stress: guard " + std::to_string(id));
+    }
+    if (opts.exits_equivalent) {
+        for (uint64_t p : opts.equivalent_periods) {
+            runtime::DeoptStressScope scope(p);
+            check_tiers(mod, fn_name, args, opts, plain, "stress: period " + std::to_string(p), jit_ok);
+        }
     }
 }
 

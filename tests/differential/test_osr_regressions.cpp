@@ -40,8 +40,10 @@ using ActiveHeap = gc::HeapScope;
 
 // Runs `entry` in a program on its fast interpreter with OSR at `threshold`
 // (0 = OSR off), twice: the second run enters the OSR code the first asked
-// for. Both runs must agree.
-int64_t run_entry(const Module& mod, std::string_view entry, uint64_t threshold) {
+// for. Both runs must agree. `gc_stress`: the interpreter's own heap
+// collects at every allocation, the OSR code's included.
+int64_t run_entry(const Module& mod, std::string_view entry, uint64_t threshold, bool gc_stress = false,
+                  uint64_t* migrations = nullptr, uint64_t* collections = nullptr) {
     FunctionDispatchTable prog;
     TieringConfig cfg;
     cfg.invocation_tier1_threshold = 1000000;
@@ -51,13 +53,17 @@ int64_t run_entry(const Module& mod, std::string_view entry, uint64_t threshold)
     prog.pipeline().initialize(cfg);
     prog.osr().set_enabled(threshold != 0);
     if (threshold != 0) prog.osr().set_threshold(threshold);
-    FastInterpreter interp;
+    gc::HeapConfig heap_cfg;
+    heap_cfg.stress = gc_stress ? gc::StressMode::Minor : gc::StressMode::None;
+    FastInterpreter interp(heap_cfg);
     interp.set_dispatch_table(&prog);
     ActiveHeap heap(interp.heap());
     const int64_t first = interp.run(mod, entry).as_i64();
     CompilePool::shared().wait_owner(&prog.osr());
     const int64_t second = interp.run(mod, entry).as_i64();
     CHECK_EQ(first, second);
+    if (migrations) *migrations = prog.osr().total_osr_migrations();
+    if (collections) *collections = interp.heap().collection_count();
     return second;
 }
 
@@ -208,6 +214,21 @@ b0:
   ret %1
 }
 
+func @hold_native() -> i64 {
+b0:
+  %0 = iconst.i64 16
+  %1 = iconst.i64 0
+  %2 = iconst.i32 1
+  %3 = call.gcref @brass_gc_alloc(%0, %1, %2)
+  %4 = iconst.i64 1234
+  store.i64 %3, 0, %4
+  %5 = iconst.i64 3000
+  %6 = call.i64 @spin_alloc(%5)
+  %7 = load.i64 %3, 0
+  %8 = add.i64 %6, %7
+  ret %8
+}
+
 func @build(%0: i64) -> gcref {
 b0:
   %1 = iconst.i64 24
@@ -273,6 +294,32 @@ TEST_CASE("OSR regression S3-3 - an allocating loop allocates on the host's heap
     CHECK_EQ(run_entry(*mod, "main2", 0), 44850);
     for (uint64_t t : {1u, 5u, 100u}) {
         CHECK_EQ(run_entry(*mod, "main2", t), 44850);
+    }
+}
+
+TEST_CASE("OSR regression S3-3 - OSR code collecting at every allocation keeps its values") {
+    // Collections from inside the OSR code: its own frame is rooted through
+    // the OSR module's stack maps.
+    auto mod = parse_or_fail(kAllocatingLoops);
+    for (uint64_t t : {1u, 5u, 100u}) {
+        uint64_t migrations = 0, collections = 0;
+        CHECK_EQ(run_entry(*mod, "main2", t, true, &migrations, &collections), 44850);
+        CHECK(migrations > 0);
+        CHECK(collections > 0);
+    }
+}
+
+TEST_CASE("OSR regression S3-3 - a collection in OSR code roots the interpreter frames beneath it") {
+    // hold_native keeps a gcref in its interpreter frame while spin_alloc's
+    // loop allocates in its OSR code, collecting at every allocation: the
+    // object must be found through the interpreter's roots and survive.
+    auto mod = parse_or_fail(kAllocatingLoops);
+    CHECK_EQ(run_entry(*mod, "hold_native", 0), 4499734);
+    for (uint64_t t : {1u, 5u, 100u}) {
+        uint64_t migrations = 0, collections = 0;
+        CHECK_EQ(run_entry(*mod, "hold_native", t, true, &migrations, &collections), 4499734);
+        CHECK(migrations > 0);
+        CHECK(collections > 0);
     }
 }
 

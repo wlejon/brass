@@ -8,6 +8,7 @@
 #include <brass/codegen/emit_context.hpp>
 #include <brass/codegen/instruction_scheduler.hpp>
 #include <brass/mir/module.hpp>
+#include <brass/mir/deopt_stress.hpp>
 #include <brass/gc/stack_map.hpp>
 #include <string>
 #include <string_view>
@@ -217,12 +218,20 @@ public:
     void set_emit_stack_map_symbol(bool enable) { emit_stack_map_symbol_ = enable; }
     bool emit_stack_map_symbol() const noexcept { return emit_stack_map_symbol_; }
 
+    // Deopt stress (runtime/deopt_stress.hpp): each function's eligible
+    // guards get a forced-failure guard before them, placed after the MIR
+    // optimizer (mir/deopt_stress.hpp). A plan with period 0 is off, the
+    // default; the JIT engine sets it from the runtime configuration.
+    void set_deopt_stress(const DeoptStressPlan& plan) { deopt_stress_ = plan; }
+    const DeoptStressPlan& deopt_stress() const noexcept { return deopt_stress_; }
+
     ObjectFile compile(const Module& mod);
 
 private:
     Target target_;
     CallingConvention cc_;
     codegen::SchedOptions sched_opts_;
+    DeoptStressPlan deopt_stress_;
     bool enable_trace_layout_ = false;
     bool enable_mir_opts_ = true;
     bool emit_stack_map_symbol_ = true;

@@ -2,6 +2,7 @@
 // block, the region reachable from it) and the function built from it.
 
 #include <brass/mir/osr_entry.hpp>
+#include <brass/mir/block_liveness.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/sroa.hpp>
 #include <brass/mir/uses.hpp>
@@ -23,51 +24,8 @@ bool fail(std::string* why, std::string msg) {
     return false;
 }
 
-// The values live into each block of `fn` (block parameters are defined by
-// their block, so never live into it): the usual backward dataflow, with an
-// edge's arguments read by its source block.
 std::unordered_map<const BasicBlock*, ValueSet> live_in_sets(const Function& fn) {
-    struct BlockInfo {
-        ValueSet use;
-        ValueSet def;
-        std::vector<const BasicBlock*> succs;
-    };
-    std::unordered_map<const BasicBlock*, BlockInfo> info;
-    for (const BasicBlock* bb : fn.blocks()) {
-        if (!bb) continue;
-        BlockInfo& bi = info[bb];
-        for (const Value* p : bb->params()) bi.def.insert(p);
-        for (const Instruction* inst : *const_cast<BasicBlock*>(bb)) {
-            if (!inst) continue;
-            for_each_use(*inst, [&](Value* v) {
-                // Only SSA values are live; a constant is defined like any
-                // other instruction, so it is one too.
-                if (!bi.def.count(v)) bi.use.insert(v);
-            });
-            if (inst->result()) bi.def.insert(inst->result());
-        }
-        for (const BasicBlock* s : bb->successors()) {
-            if (s) bi.succs.push_back(s);
-        }
-    }
-    std::unordered_map<const BasicBlock*, ValueSet> live_in;
-    for (auto& [bb, bi] : info) live_in[bb] = bi.use;
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (auto it = fn.blocks().rbegin(); it != fn.blocks().rend(); ++it) {
-            const BasicBlock* bb = *it;
-            if (!bb) continue;
-            BlockInfo& bi = info[bb];
-            ValueSet& in = live_in[bb];
-            for (const BasicBlock* s : bi.succs) {
-                for (const Value* v : live_in[s]) {
-                    if (!bi.def.count(v) && in.insert(v).second) changed = true;
-                }
-            }
-        }
-    }
-    return live_in;
+    return block_live_ins(fn);
 }
 
 bool is_rematerializable(const Value* v) {

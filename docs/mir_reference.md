@@ -114,7 +114,7 @@ Integer literals must fit the field they fill, or the parser reports "out of ran
 When a guard's condition is 0, the guard exits with its state values `[v0, ..., vN-1]`. A guard can exit in two ways:
 
 - **Exit stub.** The guard's `@label` names a function of the same module. That function is called as `stub(v0, ..., vN-1)`, and its result becomes the guarded function's result. The verifier requires the stub to have exactly N parameters, where parameter i has the type of vi, and to return the guarded function's return type. A label that names no function (for example `@exit_stub`) is only a label, and the guard then has no exit stub.
-- **Resume target.** The function's `resume_table` maps the guard's resume id to a block. Execution continues in that block, in the same function, and block parameter i takes vi. The verifier requires the block to have at most N parameters, with matching types.
+- **Resume target.** The function's `resume_table` maps the guard's resume id to a block. Execution continues in that block, in the same function, and block parameter i takes vi. The verifier requires the block to have at most N parameters, with matching types, and every value live into the block (read from it onward without being defined first) to be one of the guard's state values: a lower tier resuming there after a tier-2 deopt gets the state values and nothing else, and restores each under its own name.
 
 A guard with an exit stub always takes the stub, even when it also has a resume target. A guard with neither can only exit through a deopt handler. The tiers behave as follows:
 

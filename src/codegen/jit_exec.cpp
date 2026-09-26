@@ -5,6 +5,7 @@
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/gc/code_stack_maps.hpp>
 #include <brass/runtime/deopt.hpp>
+#include <brass/runtime/deopt_stress.hpp>
 #include <brass/runtime/resume_table.hpp>
 #include <brass/runtime/patcher.hpp>
 #include <brass/runtime/exception.hpp>
@@ -165,7 +166,19 @@ bool JitExecutionEngine::compile_and_load(const Module& mod, size_t code_padding
         function_signatures_[std::string(fn->name())] = {fn->return_type(), std::move(params)};
     }
 
-    object::ObjectFile obj = object::compile_module_to_object(mod, target_, sched_opts_);
+    object::ModuleCompiler compiler(target_);
+    compiler.set_sched_options(sched_opts_);
+    const runtime::DeoptStressConfig stress = runtime::deopt_stress_config();
+    if (stress.active()) {
+        DeoptStressPlan plan;
+        plan.period = stress.period;
+        plan.resume_id = stress.resume_id;
+        plan.evaluations = runtime::deopt_stress_evaluation_counter_address();
+        plan.forced = runtime::deopt_stress_forced_counter_address();
+        plan.resume_targets = lower_tier_resumes_;
+        compiler.set_deopt_stress(plan);
+    }
+    object::ObjectFile obj = compiler.compile(mod);
     return load_object(obj, code_padding);
 }
 

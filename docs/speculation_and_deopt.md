@@ -113,6 +113,18 @@ On-Stack Replacement moves a long-running interpreted loop into Tier-2 optimized
 
 A loop in a function with resume points (a coroutine, or a guard with a resume target), or with a gcref or vector value live into its header, stays interpreted. The reference `Interpreter`, and a `FastInterpreter` whose program's pipeline is not initialized, do not OSR.
 
+Every program function the OSR copy carries a body of gets its handle when the copy is made, and each of those bodies gets a deopt resumer, so a callee's guard failing inside OSR code finishes the callee in Tier 0 and returns into the OSR code. A copy with a guarded body that has no Tier-0 function to resume in is not compiled.
+
+---
+
+## 4a. Deopt stress
+
+`BRASS_DEOPT_STRESS` (`runtime/deopt_stress.hpp`) forces guards to fail, the way `BRASS_GC_STRESS` forces collections: `1`/`all` fails every eligible guard evaluation, `<N>` every Nth (one counter shared by every tier), `site:<R>` only guards with resume id R, `site:<R>:<N>` every Nth of those. Tests set it with `DeoptStressScope`. An eligible guard is one with an exit to take: an exit stub, or a resume target in a tier that can continue one (interpreters, the baseline JIT, pipeline tier-2 and OSR code; standalone tier 2 forces only stub guards).
+
+The interpreters check at each evaluation. The baseline JIT, compiled while stress is on, calls `brass_deopt_stress_poll` before each selected guard. Tier 2 places, after the optimizer, a guard of its own before each eligible guard with the same exits, state values and resume id (`mir/deopt_stress.hpp`), counting inline, so the real guard's code and the values live at it are unchanged.
+
+Under period 1 or one site, every tier exits where the stressed interpreter does and must give its answer; for a program whose exits compute what their fast paths compute (speculation's contract), every period must give the unstressed answer. `assert_diff_tiers` (`tests/differential/diff_harness.hpp`) checks both across the reference interpreter, the fast interpreter, Tier 1, pipeline Tier 2 and the standalone JIT.
+
 ---
 
 ## 5. Metadata Preservation During Optimization

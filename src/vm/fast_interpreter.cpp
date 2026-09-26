@@ -8,6 +8,7 @@
 #include <brass/interpreter/float_arith.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
 #include <brass/runtime/code_installer.hpp>
+#include <brass/runtime/deopt_stress.hpp>
 #include <brass/runtime/host_symbols.hpp>
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -16,6 +17,20 @@
 #endif
 
 namespace brass {
+
+namespace {
+
+// Deopt stress (runtime/deopt_stress.hpp): whether this evaluation of a
+// passing guard must fail. Only a guard the guard op can exit without a
+// handler counts: an exit stub of `module`, or a resume point.
+bool stress_fails_guard(const BytecodeFunction& fn, const GuardInfo& g, const Module* module, bool has_handler) {
+    if (has_handler) return false;
+    bool can_exit = module && !g.exit_stub.empty() && module->get_function(g.exit_stub);
+    for (const auto& rp : fn.resume_points) can_exit = can_exit || rp.resume_id == g.resume_id;
+    return can_exit && runtime::deopt_stress_should_fail(g.resume_id);
+}
+
+} // namespace
 
 void FastInterpreter::throw_instruction_limit() const {
     throw InterpreterException("Maximum instruction execution count exceeded (" + std::to_string(max_instructions_) + ")");
@@ -452,7 +467,11 @@ loop_start:
         OP_CASE(write_barrier) { handle_write_barrier(frame, decode_b(inst), decode_c(inst)); NEXT(); }
 
         OP_CASE(guard) {
-            if (BRASS_LIKELY(RA != 0)) NEXT();
+            if (BRASS_LIKELY(RA != 0) &&
+                (BRASS_LIKELY(!runtime::deopt_stress_active()) ||
+                 !stress_fails_guard(fn, fn.guards[decode_uimm32(inst)], module_, static_cast<bool>(deopt_handler_)))) {
+                NEXT();
+            }
             const GuardInfo& g = fn.guards[decode_uimm32(inst)];
             last_deopt_.deoptimized = true;
             last_deopt_.exit_stub = g.exit_stub;

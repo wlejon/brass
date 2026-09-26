@@ -8,6 +8,7 @@
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/runtime/tiering.hpp>
 #include <brass/runtime/code_installer.hpp>
+#include <brass/runtime/deopt_stress.hpp>
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
@@ -87,7 +88,16 @@ void branch_if_nonzero(AArch64BaselineEmitter& em, const Value* cond, Label take
 
 void emit_guard(AArch64BaselineEmitter& em, const Instruction& inst) {
     Label cont = em.buffer.create_label();
+    Label fail = em.buffer.create_label();
+    // Deopt stress, decided as the code is compiled: the poll counts the
+    // evaluation and answers 0 when the guard must fail.
+    const runtime::DeoptStressConfig stress = runtime::deopt_stress_config();
+    if (stress.active() && stress.selects(inst.resume_id())) {
+        em.call_abs(reinterpret_cast<const void*>(&brass_deopt_stress_poll));
+        em.enc.cbz32(GPR::X0, fail);
+    }
     branch_if_nonzero(em, inst.operand(0), cont);
+    em.buffer.bind(fail);
 
     // Guard failed: the same exits the interpreter takes, in its order.
     const Module* mod = em.fn.parent();

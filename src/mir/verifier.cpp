@@ -4,6 +4,7 @@
 #include "verifier_coro.hpp"
 #include "verifier_dom.hpp"
 #include "verifier_gc.hpp"
+#include "verifier_guards.hpp"
 #include <unordered_map>
 #include <unordered_set>
 #include <queue>
@@ -941,6 +942,7 @@ bool Verifier::verify_function(const Function& fn) {
     }
 
     verify_derived_gcrefs(fn, fn_prefix, [this](const std::string& msg) { report_error(msg); });
+    verify_guard_resume_state(fn, fn_prefix, [this](const std::string& msg) { report_error(msg); });
 
     // A guard's resume id names the one Tier-0 guard a deopt resumes at.
     // Guards may share an id only as copies of one guard (code duplication
