@@ -98,6 +98,8 @@ In the C++ API:
 twin->add_resume_point(0, bb_resume_0);
 ```
 
+**Allocas in a guard's state.** A value defined by an `alloca` is an address in the frame that computed it. When tier-2 (or OSR) code deoptimizes, the call finishes in a new Tier-0 frame, so a resume from native code (`Interpreter::resume`, `FastInterpreter::resume`) re-creates every alloca in the guard's state as a buffer of the new frame, with the alignment and `tagged`-ness of the Tier-0 alloca, and copies into it the contents of the deoptimized frame's buffer (that frame is still on the stack below the resume, and nothing allocates between the exit and the copy). The state value and any resume-block parameter it fills then name the new buffer, so a `tagged` buffer's words are roots of the frame that uses them. A guard failing inside its own interpreter frame keeps the frame's buffers as they are.
+
 The compiler records function resume offsets in `ResumeTableRegistry` (`engine.get_resume_target_address(fn, resume_id)`). A resume block is entered only by a guard exit (see "Guard exits" in `mir_reference.md`); a function's entry never dispatches on its arguments, so `%resume_id` above is an ordinary parameter and calling `generic_twin(0, buf)` runs `bb0`.
 
 ---

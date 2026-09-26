@@ -152,6 +152,17 @@ std::unique_ptr<BytecodeFunction> BytecodeCompiler::compile(const Function& fn) 
         }
         if (const Instruction* g = fn.find_guard(resume_id)) {
             for (const Value* sv : g->state_map()) rpe.state_regs.push_back(sv ? ctx.get_reg(sv) : kNoReg);
+            for (size_t i = 0; i < g->state_map().size(); ++i) {
+                const Value* sv = g->state_map()[i];
+                const Instruction* def = sv ? sv->defining_instruction() : nullptr;
+                if (!def || def->opcode() != Opcode::alloca_) continue;
+                ResumePointEntry::AllocaRemat r;
+                r.state_index = static_cast<uint32_t>(i);
+                r.size = static_cast<uint32_t>(def->imm_i32() > 0 ? def->imm_i32() : 0);
+                r.align = static_cast<uint32_t>(def->offset() > 0 ? def->offset() : 16);
+                r.tagged = def->memory_type().is_tagged();
+                rpe.allocas.push_back(r);
+            }
         }
         bfn->resume_points.push_back(std::move(rpe));
     }

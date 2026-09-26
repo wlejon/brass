@@ -281,7 +281,64 @@ done(%res: i64):
 }
 )";
 
+// An alloca in the state, as a front end's argument block is: a resume in a
+// fresh Tier-0 frame gets a buffer of its own holding what the deoptimized
+// frame's held, including the word only the entry block wrote.
+constexpr std::string_view kAllocaState = R"(module @ds_alloca
+func @sum2(%p: ptr) -> i64 {
+bb0:
+  %a = load.i64 %p, 0
+  %b = load.i64 %p, 8
+  %r = add %a, %b
+  ret %r
+}
+
+func @f(%n: i64, %lim: i64) -> i64 {
+bb0:
+  %buf = alloca 16, 8
+  %z = iconst.i64 0
+  %k = iconst.i64 5
+  store.i64 %buf, 8, %k
+  br bb1(%z, %z)
+bb1(%i: i64, %acc: i64):
+  %c = slt %i, %n
+  br_if %c, bb2, bb3(%acc)
+bb2:
+  store.i64 %buf, 0, %i
+  %ok = slt %i, %lim
+  guard %ok, @slow, [%i, %acc, %n, %lim, %buf]
+  %s = call.i64 @sum2(%buf)
+  %acc2 = add %acc, %s
+  %one = iconst.i64 1
+  %in = add %i, %one
+  br bb1(%in, %acc2)
+bb3(%r: i64):
+  ret %r
+bres:
+  %s1 = call.i64 @sum2(%buf)
+  %two = iconst.i64 2
+  %s2 = mul %s1, %two
+  %s3 = sub %s2, %s1
+  %acc3 = add %acc, %s3
+  %one3 = iconst.i64 1
+  %jn = add %i, %one3
+  br bb1(%jn, %acc3)
+
+resume_table {
+  entry 0 -> bres
+}
+}
+)";
+
 } // namespace
+
+TEST_CASE("Deopt stress - an alloca in a guard's state is rebuilt with its contents on resume") {
+    auto mod = parse_or_fail(kAllocaState);
+    assert_diff_tiers(*mod, "f", i64s({80, 1000}), contract());
+    TierDiffOptions o = contract();
+    o.jit = false;
+    assert_diff_tiers(*mod, "f", i64s({80, 30}), o);
+}
 
 TEST_CASE("Deopt stress - configuration, counting and site selection") {
     runtime::DeoptStressScope off(0);

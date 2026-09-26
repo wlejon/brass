@@ -6,6 +6,7 @@
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <iostream>
 #include <cmath>
+#include <cstring>
 
 namespace brass {
 
@@ -181,6 +182,101 @@ void Interpreter::register_builtin_host_functions() {
         if (args.empty()) return RuntimeValue::from_f64(0.0);
         return RuntimeValue::from_f64(std::ceil(args[0].as_f64()));
     });
+}
+
+RuntimeValue Interpreter::resume(const Function& fn, uint32_t resume_id, const std::vector<RuntimeValue>& state_values) {
+    if (fn.parent()) {
+        module_ = fn.parent();
+    }
+    BasicBlock* target_bb = fn.get_resume_target(resume_id);
+    if (!target_bb) {
+        throw InterpreterException("Resume target ID " + std::to_string(resume_id) + " not found in function " + std::string(fn.name()));
+    }
+    if (const Instruction* guard = fn.find_guard(resume_id)) {
+        // A guard's resume rebuilds its state-map values as well as the
+        // block's parameters: the code after the resume block reads them.
+        InterpreterFrame frame(&fn, current_frame_);
+        // An alloca in the state is a buffer of the frame that deoptimized,
+        // which is still live below this call: the new frame gets a buffer
+        // of its own with the same contents, as its own alloca would have.
+        std::vector<RuntimeValue> state = state_values;
+        const auto& sm = guard->state_map();
+        for (size_t i = 0; i < sm.size() && i < state.size(); ++i) {
+            const Instruction* def = sm[i] ? sm[i]->defining_instruction() : nullptr;
+            if (!def || def->opcode() != Opcode::alloca_) continue;
+            const size_t size = static_cast<size_t>(def->imm_i32() > 0 ? def->imm_i32() : 0);
+            void* buf = frame.allocate(size, static_cast<size_t>(def->offset() > 0 ? def->offset() : 16),
+                                       def->memory_type().is_tagged());
+            const uint64_t old = state[i].raw_bits();
+            if (old != 0 && size != 0) std::memcpy(buf, reinterpret_cast<const void*>(static_cast<uintptr_t>(old)), size);
+            state[i] = RuntimeValue::from_ptr(buf);
+        }
+        return resume_with_frame(fn, resume_id, state, frame);
+    }
+    return execute_function_from_block(fn, target_bb, state_values);
+}
+
+RuntimeValue Interpreter::resume_with_frame(const Function& fn, uint32_t resume_id, const std::vector<RuntimeValue>& state_values, InterpreterFrame& frame) {
+    if (fn.parent()) {
+        module_ = fn.parent();
+    }
+    BasicBlock* target_bb = fn.get_resume_target(resume_id);
+    if (!target_bb) {
+        throw InterpreterException("Resume target ID " + std::to_string(resume_id) + " not found in function " + std::string(fn.name()));
+    }
+
+    // Both the guard's state-map values and the resume block's parameters
+    // take state value i at position i, as the forward guard path does.
+    if (const Instruction* guard_inst = fn.find_guard(resume_id)) {
+        for (size_t i = 0; i < guard_inst->state_map().size() && i < state_values.size(); ++i) {
+            const Value* sv = guard_inst->state_map()[i];
+            if (sv) {
+                RuntimeValue rv = state_values[i];
+                if (sv->type().is_gc_root() && rv.type() != sv->type()) {
+                    rv = RuntimeValue::from_bits(sv->type(), rv.as_u64());
+                }
+                frame.set_value(sv, rv);
+            }
+        }
+    }
+    if (target_bb->param_count() > state_values.size()) {
+        throw InterpreterException("Resume target of guard " + std::to_string(resume_id) + " in function " +
+                                   std::string(fn.name()) + " has " + std::to_string(target_bb->param_count()) +
+                                   " parameters but the deopt state has " + std::to_string(state_values.size()) +
+                                   " values");
+    }
+    for (size_t p = 0; p < target_bb->param_count(); ++p) {
+        const Value* pv = target_bb->param(p);
+        if (pv) {
+            RuntimeValue rv = state_values[p];
+            if (pv->type().is_gc_root() && rv.type() != pv->type()) {
+                rv = RuntimeValue::from_bits(pv->type(), rv.as_u64());
+            }
+            frame.set_value(pv, rv);
+        }
+    }
+
+    return execute_function_from_block(fn, target_bb, {}, &frame);
+}
+
+RuntimeValue Interpreter::resume_after_guard(const Function& fn, uint32_t resume_id,
+                                             const std::vector<RuntimeValue>& state_values, InterpreterFrame* frame) {
+    // The exits the forward guard takes, in its order: the exit stub, whose
+    // result is the function's, else the resume target.
+    const Instruction* guard = fn.find_guard(resume_id);
+    if (!guard) {
+        throw InterpreterException("No guard with resume id " + std::to_string(resume_id) + " in function " +
+                                   std::string(fn.name()));
+    }
+    if (const Function* stub = fn.guard_exit_stub(*guard)) {
+        if (fn.parent()) module_ = fn.parent();
+        return execute_function(*stub, state_values);
+    }
+    if (!fn.get_resume_target(resume_id)) {
+        throw InterpreterException("Guard " + std::to_string(resume_id) + " in function " + std::string(fn.name()) +
+                                   " has neither an exit stub nor a resume target");
+    }
+    return frame ? resume_with_frame(fn, resume_id, state_values, *frame) : resume(fn, resume_id, state_values);
 }
 
 RuntimeValue Interpreter::resume_from_native(const Function& fn, uint32_t resume_id,

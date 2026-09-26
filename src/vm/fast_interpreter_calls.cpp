@@ -6,6 +6,7 @@
 #include "fast_interpreter_impl.hpp"
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
+#include <cstring>
 
 namespace brass {
 
@@ -428,7 +429,7 @@ RuntimeValue FastInterpreter::call_bytecode(FastCallTarget& t, FastFrame& caller
 // ---------------------------------------------------------------------------
 
 RuntimeValue FastInterpreter::enter_frame(FastFnInfo& info, const std::vector<RuntimeValue>& args, uint32_t start_pc,
-                                          const std::vector<BcReg>* arg_regs) {
+                                          const std::vector<BcReg>* arg_regs, const ResumePointEntry* resume) {
     if (call_depth_ >= max_call_depth_) {
         throw InterpreterException("Call stack depth limit exceeded (" + std::to_string(max_call_depth_) + ")");
     }
@@ -448,6 +449,30 @@ RuntimeValue FastInterpreter::enter_frame(FastFnInfo& info, const std::vector<Ru
         const uint32_t reg = arg_regs ? (i < arg_regs->size() ? (*arg_regs)[i] : kNoReg) : static_cast<uint32_t>(i);
         if (reg >= n) continue;
         fast_set_reg(frame, reg, args[i]);
+    }
+    if (resume) {
+        // Each alloca in the guard's state gets a buffer of this frame, as
+        // its own alloca would have, holding what the deoptimized frame's
+        // buffer (still live below this call) holds. Every register that took
+        // that state value (the state value's own, a block parameter) is
+        // pointed at the new buffer.
+        for (const ResumePointEntry::AllocaRemat& r : resume->allocas) {
+            if (r.state_index >= args.size() || r.state_index >= resume->state_regs.size()) continue;
+            const uint64_t old = args[r.state_index].raw_bits();
+            void* buf = alloca_arena_->allocate(r.size, r.align);
+            if (old != 0) {
+                std::memcpy(buf, reinterpret_cast<const void*>(static_cast<uintptr_t>(old)), r.size);
+            } else {
+                std::memset(buf, 0, r.size);
+            }
+            if (r.tagged) tagged_allocas_.push_back({static_cast<uint64_t*>(buf), r.size / 8});
+            const uint64_t addr = reinterpret_cast<uintptr_t>(buf);
+            const uint32_t sreg = resume->state_regs[r.state_index];
+            if (sreg < n) regs[sreg] = addr;
+            if (r.state_index < resume->param_regs.size() && resume->param_regs[r.state_index] < n) {
+                regs[resume->param_regs[r.state_index]] = addr;
+            }
+        }
     }
     return execute_frame(frame);
 }
@@ -558,7 +583,7 @@ RuntimeValue FastInterpreter::resume(const BytecodeFunction& fn, uint32_t resume
             vals.push_back(state_values[i]);
             regs.push_back(target->param_regs[i]);
         }
-        return enter_frame(fn_info(fn), vals, target->target_pc, &regs);
+        return enter_frame(fn_info(fn), vals, target->target_pc, &regs, target);
     }
     return enter_frame(fn_info(fn), state_values, target->target_pc,
                        target->param_regs.empty() ? nullptr : &target->param_regs);

@@ -343,6 +343,17 @@ struct ResumePointEntry {
     // (none without one): a resume from native code rebuilds them from the
     // deopt state, value i from state value i, as the interpreter does.
     std::vector<BcReg> state_regs;
+    // The state values that are this function's allocas. A resume from
+    // native code re-creates each in the new frame, with the contents the
+    // deoptimized frame's buffer holds (that frame is still on the stack),
+    // instead of pointing the new frame into the old one.
+    struct AllocaRemat {
+        uint32_t state_index = 0;
+        uint32_t size = 0;
+        uint32_t align = 16;
+        bool tagged = false;
+    };
+    std::vector<AllocaRemat> allocas;
 };
 
 struct LineInfoEntry {

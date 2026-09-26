@@ -262,9 +262,10 @@ private:
     RuntimeValue call_raw_native(uintptr_t ptr, const FastFrame& frame, const CallSiteInfo& cs);
     RuntimeValue call_bytecode(FastCallTarget& t, FastFrame& caller, const CallSiteInfo& cs);
     // Runs `info`'s function from `start_pc` with args[i] in register
-    // (*arg_regs)[i], or in register i when arg_regs is null.
+    // (*arg_regs)[i], or in register i when arg_regs is null. A resume
+    // passes its entry, whose allocas are re-created in the new frame.
     RuntimeValue enter_frame(FastFnInfo& info, const std::vector<RuntimeValue>& args, uint32_t start_pc,
-                             const std::vector<BcReg>* arg_regs);
+                             const std::vector<BcReg>* arg_regs, const ResumePointEntry* resume = nullptr);
     Interpreter& host_adapter_interpreter();
     [[noreturn]] void throw_instruction_limit() const;
 
