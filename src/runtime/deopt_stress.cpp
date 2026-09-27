@@ -1,6 +1,7 @@
 // Deopt stress (include/brass/runtime/deopt_stress.hpp): the configuration,
 // read from BRASS_DEOPT_STRESS once, and the counters every tier shares.
 #include <brass/runtime/deopt_stress.hpp>
+#include <brass/core/atomic_ref.hpp>
 
 #include <cstdlib>
 #include <string>
@@ -89,9 +90,9 @@ namespace {
 
 // Counts one evaluation of a selected guard; true when it must fail.
 bool tick(uint64_t period) noexcept {
-    const uint64_t n = std::atomic_ref<uint64_t>(g_evaluations).fetch_add(1, std::memory_order_relaxed) + 1;
+    const uint64_t n = AtomicRef<uint64_t>(g_evaluations).fetch_add(1, std::memory_order_relaxed) + 1;
     if (n % period != 0) return false;
-    std::atomic_ref<uint64_t>(g_forced).fetch_add(1, std::memory_order_relaxed);
+    AtomicRef<uint64_t>(g_forced).fetch_add(1, std::memory_order_relaxed);
     return true;
 }
 
@@ -115,16 +116,16 @@ extern "C" uint32_t brass_deopt_stress_poll() {
 namespace brass::runtime {
 
 uint64_t deopt_stress_evaluations() noexcept {
-    return std::atomic_ref<uint64_t>(g_evaluations).load(std::memory_order_relaxed);
+    return AtomicRef<uint64_t>(g_evaluations).load(std::memory_order_relaxed);
 }
 
 uint64_t deopt_stress_forced() noexcept {
-    return std::atomic_ref<uint64_t>(g_forced).load(std::memory_order_relaxed);
+    return AtomicRef<uint64_t>(g_forced).load(std::memory_order_relaxed);
 }
 
 void reset_deopt_stress_counters() noexcept {
-    std::atomic_ref<uint64_t>(g_evaluations).store(0, std::memory_order_relaxed);
-    std::atomic_ref<uint64_t>(g_forced).store(0, std::memory_order_relaxed);
+    AtomicRef<uint64_t>(g_evaluations).store(0, std::memory_order_relaxed);
+    AtomicRef<uint64_t>(g_forced).store(0, std::memory_order_relaxed);
 }
 
 uint64_t* deopt_stress_evaluation_counter_address() noexcept { return &g_evaluations; }

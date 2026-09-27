@@ -120,7 +120,7 @@ uintptr_t landing_pad_for(_Unwind_Context* ctx) {
     const uintptr_t ip = _Unwind_GetIPInfo(ctx, &before);
     if (ip == 0) return 0;
     const uintptr_t call_ip = before ? ip : ip - 1;
-    if (const auto* lsda = static_cast<const uint8_t*>(_Unwind_GetLanguageSpecificData(ctx))) {
+    if (const auto* lsda = reinterpret_cast<const uint8_t*>(_Unwind_GetLanguageSpecificData(ctx))) {
         const uintptr_t fn_start = _Unwind_GetRegionStart(ctx);
         return call_ip >= fn_start ? pad_from_lsda(lsda, fn_start, call_ip - fn_start) : 0;
     }
@@ -154,7 +154,7 @@ extern "C" int brass_default_sysv_personality(int version, int actions, uint64_t
     __cxa_begin_catch(ue);
     __cxa_end_catch();
     brass_set_current_exception(HostValue::from_raw(bits));
-    _Unwind_SetGR(ctx, kReturnReg, static_cast<_Unwind_Word>(bits));
+    _Unwind_SetGR(ctx, kReturnReg, static_cast<uintptr_t>(bits));
     _Unwind_SetIP(ctx, pad);
     return _URC_INSTALL_CONTEXT;
 }

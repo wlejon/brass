@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <brass/core/atomic_ref.hpp>
 #include <cstdio>
 #include <memory>
 #include <mutex>
@@ -94,7 +95,7 @@ MarkWorker& worker_of(Tracer& t) noexcept { return *static_cast<MarkWorker*>(t.s
 template <bool Parallel>
 bool claim(uint64_t& word, uint64_t bit) noexcept {
     if constexpr (Parallel) {
-        std::atomic_ref<uint64_t> w(word);
+        AtomicRef<uint64_t> w(word);
         if (w.load(std::memory_order_relaxed) & bit) return false;
         return (w.fetch_or(bit, std::memory_order_relaxed) & bit) == 0;
     } else {
@@ -107,7 +108,7 @@ bool claim(uint64_t& word, uint64_t bit) noexcept {
 template <bool Parallel>
 bool claim_large(uint8_t& bits) noexcept {
     if constexpr (Parallel) {
-        std::atomic_ref<uint8_t> b(bits);
+        AtomicRef<uint8_t> b(bits);
         if (b.load(std::memory_order_relaxed) & kGcLargeMarked) return false;
         return (b.fetch_or(kGcLargeMarked, std::memory_order_relaxed) & kGcLargeMarked) == 0;
     } else {
@@ -123,11 +124,11 @@ bool is_marked(const HeapState& s, uintptr_t a) noexcept {
         if (index >= s.blocks.size()) return true;
         BlockMeta& meta = *s.blocks[index];
         const size_t granule = (a - s.block_base(index)) / kGranuleBytes;
-        const uint64_t word = std::atomic_ref<uint64_t>(meta.marks[granule >> 6]).load(std::memory_order_relaxed);
+        const uint64_t word = AtomicRef<uint64_t>(meta.marks[granule >> 6]).load(std::memory_order_relaxed);
         return ((word >> (granule & 63)) & 1) != 0;
     }
     if (s.in_large(a)) {
-        const uint8_t bits = std::atomic_ref<uint8_t>(header_of(a)->gc_bits).load(std::memory_order_relaxed);
+        const uint8_t bits = AtomicRef<uint8_t>(header_of(a)->gc_bits).load(std::memory_order_relaxed);
         return (bits & kGcLargeMarked) != 0;
     }
     return true;
@@ -187,7 +188,7 @@ void account(MarkWorker& w, uintptr_t object) noexcept {
     const size_t first = (object - kHeaderBytes - lo) / kLineBytes;
     const size_t last = (object - kHeaderBytes + total - 1 - lo) / kLineBytes;
     for (size_t l = first; l <= last; ++l) {
-        if constexpr (Parallel) std::atomic_ref<uint8_t>(meta.line_mark[l]).store(1, std::memory_order_relaxed);
+        if constexpr (Parallel) AtomicRef<uint8_t>(meta.line_mark[l]).store(1, std::memory_order_relaxed);
         else meta.line_mark[l] = 1;
     }
 }
