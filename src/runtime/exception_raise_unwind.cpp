@@ -112,11 +112,17 @@ void walk_native_frames(Visit&& visit) {
         unw_word_t v = 0;
         if (unw_get_reg(&cur, UNW_REG_IP, &v) != 0 || v == 0) return;
         f.pc = static_cast<uintptr_t>(v);
+#if defined(__aarch64__)
+        f.pc &= (uintptr_t{1} << 48) - 1;
+#endif
         if (unw_get_reg(&cur, UNW_REG_SP, &v) == 0) f.sp = static_cast<uintptr_t>(v);
         f.fp = static_cast<uintptr_t>(gpr(kFpReg));
         unw_proc_info_t info;
         if (unw_get_proc_info(&cur, &info) == 0) {
             f.fn_start = static_cast<uintptr_t>(info.start_ip);
+#if defined(__aarch64__)
+            f.fn_start &= (uintptr_t{1} << 48) - 1;
+#endif
             f.has_lsda = info.lsda != 0;
         }
         restore_callee_saved(f.regs, gpr, [&cur](int reg) -> uint64_t {
@@ -138,6 +144,9 @@ void walk_native_frames(Visit&& visit) {
         auto gpr = [ctx](int reg) -> uint64_t { return static_cast<uint64_t>(_Unwind_GetGR(ctx, reg)); };
         NativeFrame f;
         f.pc = static_cast<uintptr_t>(_Unwind_GetIP(ctx));
+#if defined(__aarch64__)
+        f.pc &= (uintptr_t{1} << 48) - 1;
+#endif
         if (f.pc == 0 || ++s->depth > 100000) return _URC_END_OF_STACK;
         f.sp = s->callee_cfa;
         s->callee_cfa = static_cast<uintptr_t>(_Unwind_GetCFA(ctx));
@@ -182,7 +191,7 @@ bool landing_pad_in(const NativeFrame& f, PadTarget& out) {
     out.ip = reinterpret_cast<void*>(fn_start + scope->landing_pad_offset);
     out.fp = reinterpret_cast<void*>(f.fp);
 #if defined(__aarch64__)
-    out.sp = reinterpret_cast<void*>(f.fp);
+    out.sp = reinterpret_cast<void*>(f.sp ? f.sp : f.fp);
 #else
     out.sp = reinterpret_cast<void*>(f.fp - table->frame_size());
 #endif

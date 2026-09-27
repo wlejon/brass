@@ -124,11 +124,17 @@ uintptr_t pad_from_lsda(const uint8_t* lsda, uintptr_t fn_start, uintptr_t call_
 
 uintptr_t landing_pad_for(_Unwind_Context* ctx) {
     int before = 0;
-    const uintptr_t ip = _Unwind_GetIPInfo(ctx, &before);
+    uintptr_t ip = _Unwind_GetIPInfo(ctx, &before);
     if (ip == 0) return 0;
+#if defined(__aarch64__)
+    ip &= (uintptr_t{1} << 48) - 1;
+#endif
     const uintptr_t call_ip = before ? ip : ip - 1;
     if (const auto* lsda = reinterpret_cast<const uint8_t*>(_Unwind_GetLanguageSpecificData(ctx))) {
-        const uintptr_t fn_start = _Unwind_GetRegionStart(ctx);
+        uintptr_t fn_start = _Unwind_GetRegionStart(ctx);
+#if defined(__aarch64__)
+        fn_start &= (uintptr_t{1} << 48) - 1;
+#endif
         return call_ip >= fn_start ? pad_from_lsda(lsda, fn_start, call_ip - fn_start) : 0;
     }
     uintptr_t fn_start = 0;

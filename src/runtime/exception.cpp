@@ -62,6 +62,9 @@ void ExceptionTableRegistry::clear() {
 // The range holding the call instruction whose return address is pc (the
 // byte before it). Under mutex_.
 const ExceptionTableRegistry::RangeEntry* ExceptionTableRegistry::find_range(uintptr_t pc) const noexcept {
+#if defined(__aarch64__)
+    pc &= (uintptr_t{1} << 48) - 1;
+#endif
     const uintptr_t lookup_pc = (pc > 0) ? (pc - 1) : pc;
     auto it = ranges_.upper_bound(lookup_pc);
     if (it == ranges_.begin()) return nullptr;
@@ -81,6 +84,9 @@ const ExceptionScopeEntry* ExceptionTableRegistry::find_scope_by_pc(
     uintptr_t* out_fn_start,
     const FunctionExceptionTable** out_table
 ) const noexcept {
+#if defined(__aarch64__)
+    pc &= (uintptr_t{1} << 48) - 1;
+#endif
     std::lock_guard<std::mutex> lock(mutex_);
     const RangeEntry* r = find_range(pc);
     if (!r) return nullptr;

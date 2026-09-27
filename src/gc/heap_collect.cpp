@@ -127,8 +127,9 @@ void run_hooks(GcState& g) {
 }
 
 void clean_all_cards(HeapState& s) {
+    const size_t page = os_page_bytes();
     for (size_t p = 0; p < s.card_pages_committed.size(); ++p) {
-        if (s.card_pages_committed[p]) std::memset(s.cards + p * 4096, kCardClean, 4096);
+        if (s.card_pages_committed[p]) std::memset(s.cards + p * page, kCardClean, page);
     }
 }
 

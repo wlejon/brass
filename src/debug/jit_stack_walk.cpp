@@ -116,8 +116,11 @@ struct UnwindState {
 _Unwind_Reason_Code unwind_step(struct _Unwind_Context* uc, void* arg) {
     auto* s = static_cast<UnwindState*>(arg);
     int before = 0;
-    const uintptr_t ip = static_cast<uintptr_t>(_Unwind_GetIPInfo(uc, &before));
+    uintptr_t ip = static_cast<uintptr_t>(_Unwind_GetIPInfo(uc, &before));
     if (ip == 0) return _URC_END_OF_STACK;
+#if defined(__aarch64__)
+    ip &= (uintptr_t{1} << 48) - 1;
+#endif
     if (s->depth++ >= s->skip) s->out->push_back(make_frame(ip, before ? ip : ip - 1, false));
     return s->out->size() >= s->max ? _URC_END_OF_STACK : _URC_NO_REASON;
 }

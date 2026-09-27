@@ -41,8 +41,11 @@ uintptr_t load_word(uintptr_t addr) noexcept {
 // and brass's stubs do.
 bool step_by_frame_record(NativeUnwindFrame& f) noexcept {
     if (f.fp == 0 || (f.fp % 8) != 0 || f.fp < f.sp) return false;
-    const uintptr_t ra = load_word(f.fp + 8);
+    uintptr_t ra = load_word(f.fp + 8);
     if (ra == 0) return false;
+#if defined(__aarch64__)
+    ra &= (uintptr_t{1} << 48) - 1;
+#endif
     const uintptr_t next_fp = load_word(f.fp);
     f.sp = f.fp + 16;
     f.fp = next_fp;
@@ -516,6 +519,9 @@ bool brass_unwind_step(NativeUnwindFrame& f, bool ip_is_return_address) noexcept
         return false;
     }
     f.ip = static_cast<uintptr_t>(ip);
+#if defined(__aarch64__)
+    f.ip &= (uintptr_t{1} << 48) - 1;
+#endif
     f.sp = static_cast<uintptr_t>(sp);
     f.fp = static_cast<uintptr_t>(fp);
     return true;
@@ -552,6 +558,9 @@ _Unwind_Reason_Code capture_one(_Unwind_Context* ctx, void* arg) {
     auto* c = static_cast<Capture*>(arg);
     if (c->index == c->want) {
         c->out.ip = static_cast<uintptr_t>(_Unwind_GetIP(ctx));
+#if defined(__aarch64__)
+        c->out.ip &= (uintptr_t{1} << 48) - 1;
+#endif
         c->out.sp = static_cast<uintptr_t>(_Unwind_GetCFA(ctx));
         c->out.fp = static_cast<uintptr_t>(_Unwind_GetGR(ctx, static_cast<int>(kFpReg)));
         c->found = c->out.ip != 0 && c->out.sp != 0;
