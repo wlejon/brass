@@ -113,8 +113,13 @@ uintptr_t runtime_alloc(size_t size, uint64_t pointer_mask, uint32_t type_tag,
     Heap* heap = Heap::current();
     if (!heap) brass::gc_fatal_no_heap();
     const brass::gc::LayoutId layout = brass::gc::mask_layout(pointer_mask, type_tag);
-    // The inline fast path never collects; the slow path may, and then the
-    // caller's frames must be describable.
+    // The bump fast path never collects, so it needs no stack maps and no
+    // mutator frame: only the slow path goes through allocate_at. (In stress
+    // mode `end` sits at `top`, so every allocation still takes the slow
+    // path there.)
+    if (const uintptr_t obj = heap->try_allocate_young(size, layout)) return obj;
+    // The slow path may collect, and then the caller's frames must be
+    // describable.
     Heap::AllocationBuffer& buffer = *heap->allocation_buffer();
     const size_t total = brass::gc::payload_bytes_for(size) + brass::gc::kHeaderBytes;
     if (total > static_cast<size_t>(buffer.end - buffer.top) && caller_ip != 0 &&

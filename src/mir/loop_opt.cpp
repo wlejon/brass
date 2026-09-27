@@ -41,10 +41,17 @@ Pipeline loop_pipeline(const LoopOptOptions& o) {
     if (o.enable_slp) p.add(passes::slp_vectorize(o));
     if (o.enable_vectorize) p.add(passes::loop_vectorize(o));
     if (o.enable_fma) p.add(passes::fma(o));
-    if (o.enable_unroll) p.add(passes::loop_unroll(o));
-    // After the vectorizer and unroller: IVSR turns `load_indexed a, i, 8`
-    // into a byte-offset form neither matches.
+    // After the vectorizer: IVSR turns `load_indexed a, i, 8` into a
+    // byte-offset form it does not match. Before the unroller, so the
+    // unrolled copies address off one scaled variable per access with
+    // constant displacements; strength-reducing only the unrolled body
+    // leaves each copy its own index arithmetic and hoisted bases, more
+    // live values than the registers hold (naive matmul ran 1.7x slower).
     if (o.enable_ivsr) p.add(passes::ivsr(o));
+    if (o.enable_unroll) p.add(passes::loop_unroll(o));
+    // Again for the loops unrolling produced (the remainder loop) or
+    // exposed.
+    if (o.enable_ivsr && o.enable_unroll) p.add(passes::ivsr(o, "ivsr 2"));
     if (o.enable_dce) p.add(passes::dce());
     if (o.enable_diamond_select) p.add(passes::select_opt("select_opt 2"));
     return p;

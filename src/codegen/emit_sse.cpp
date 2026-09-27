@@ -14,7 +14,14 @@ void EmitContext::emit_sse_instruction(const LirInst& inst) {
             }
             if (dst.is_preg()) {
                 XMM dst_x = dst.preg_val.as_xmm();
-                if (src.is_preg()) enc_.movsd(dst_x, src.preg_val.as_xmm());
+                // A scalar copy (one use) goes out as movaps: movsd xmm, xmm
+                // merges into dst's upper lane, so it waits on dst's last
+                // writer and is not eliminated at rename, a cycle added to
+                // every loop-carried f64 moved between registers. The merge
+                // form (lane-0 insert) names dst as a second use and keeps
+                // movsd.
+                if (src.is_preg() && inst.uses.size() == 1) enc_.movaps(dst_x, src.preg_val.as_xmm());
+                else if (src.is_preg()) enc_.movsd(dst_x, src.preg_val.as_xmm());
                 else enc_.movsd(dst_x, to_mem_address(src));
             } else {
                 MemAddress dst_mem = to_mem_address(dst);
@@ -34,7 +41,9 @@ void EmitContext::emit_sse_instruction(const LirInst& inst) {
             }
             if (dst.is_preg()) {
                 XMM dst_x = dst.preg_val.as_xmm();
-                if (src.is_preg()) enc_.movss(dst_x, src.preg_val.as_xmm());
+                // As for Movsd: a scalar copy is a full-register movaps.
+                if (src.is_preg() && inst.uses.size() == 1) enc_.movaps(dst_x, src.preg_val.as_xmm());
+                else if (src.is_preg()) enc_.movss(dst_x, src.preg_val.as_xmm());
                 else enc_.movss(dst_x, to_mem_address(src));
             } else {
                 MemAddress dst_mem = to_mem_address(dst);

@@ -305,18 +305,21 @@ PassStep loop_unroll(const LoopOptOptions& options) {
     }, [](Function& fn) { return scalar_cleanup(fn); });
 }
 
-PassStep ivsr(const LoopOptOptions& options) {
+PassStep ivsr(const LoopOptOptions& options, std::string name) {
     std::function<bool(Function&)> follow;
     if (options.enable_dce) {
         // The original induction variable often dies once its uses moved
-        // to the scaled one.
-        follow = [](Function& fn) {
+        // to the scaled one, and the scaled steps and bases it built in
+        // the loop's preheader or body are invariants LICM hoists.
+        const bool licm = options.enable_licm;
+        follow = [licm](Function& fn) {
             LoopCleanupOptions o;
-            o.licm = false;
+            o.licm = licm;
             return brass::loop_cleanup(fn, o);
         };
     }
-    return loop_step("ivsr", [](Function& fn) { return strength_reduce_induction_variables(fn); }, std::move(follow));
+    return loop_step(std::move(name), [](Function& fn) { return strength_reduce_induction_variables(fn); },
+                     std::move(follow));
 }
 
 PassStep write_barrier_elim(bool dump_stats, std::ostream* report) {

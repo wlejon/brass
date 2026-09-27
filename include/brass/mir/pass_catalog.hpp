@@ -67,8 +67,10 @@ PassStep fma(const LoopOptOptions& options);
 PassStep loop_unroll(const LoopOptOptions& options);
 // Induction-variable strength reduction. It rewrites indexed accesses into
 // a form the vectorizer does not match, so pipelines run it after the
-// vectorizer and the unroller.
-PassStep ivsr(const LoopOptOptions& options);
+// vectorizer. The loop pipeline runs it on each side of the unroller: before
+// it, so the unrolled copies share one scaled variable per access; after
+// it, for the loops only unrolling exposed.
+PassStep ivsr(const LoopOptOptions& options, std::string name = "ivsr");
 
 // --- Module passes ------------------------------------------------------
 PassStep write_barrier_elim(bool dump_stats = false, std::ostream* report = nullptr);

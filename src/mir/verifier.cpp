@@ -169,47 +169,48 @@ bool Verifier::verify_function(const Function& fn) {
                                             std::string(opcode_name(inst->opcode())) + "': ";
 
             // Check operands & SSA Dominance
-            auto check_value_dom = [&](const Value* val, const std::string& desc) {
+            auto check_value_dom = [&](const Value* val, std::string_view kind, size_t index) {  // desc(): built for a report only
+                const auto desc = [&] { return std::string(kind) + " " + std::to_string(index); };
                 if (!val) {
-                    report_error(inst_prefix + desc + " operand is null.");
+                    report_error(inst_prefix + desc() +" operand is null.");
                     return;
                 }
                 if (val->is_block_param()) {
                     const BasicBlock* def_bb = val->defining_block();
                     if (!def_bb) {
-                        report_error(inst_prefix + desc + " block parameter has null defining block.");
+                        report_error(inst_prefix + desc() +" block parameter has null defining block.");
                     } else if (val->param_index() >= def_bb->param_count() ||
                                def_bb->param(val->param_index()) != val) {
                         // A pass dropped the parameter from its block but
                         // left this use behind.
-                        report_error(inst_prefix + desc + " uses a parameter no longer on block '" +
+                        report_error(inst_prefix + desc() +" uses a parameter no longer on block '" +
                                      std::string(def_bb->name()) + "'.");
                     } else if (dom.is_reachable(bb) && !dom.dominates(def_bb, bb)) {
-                        report_error(inst_prefix + "SSA Dominance violation: " + desc +
+                        report_error(inst_prefix + "SSA Dominance violation: " + desc() +
                                      " block parameter of block '" + std::string(def_bb->name()) +
                                      "' does not dominate use in block '" + std::string(bb->name()) + "'.");
                     }
                 } else if (val->is_instruction()) {
                     const Instruction* def_inst = val->defining_instruction();
                     if (!def_inst) {
-                        report_error(inst_prefix + desc + " instruction result has null defining instruction.");
+                        report_error(inst_prefix + desc() +" instruction result has null defining instruction.");
                     } else {
                         const BasicBlock* def_bb = def_inst->parent();
                         if (!def_bb) {
-                            report_error(inst_prefix + desc + " defining instruction has null parent block.");
+                            report_error(inst_prefix + desc() +" defining instruction has null parent block.");
                         } else if (def_bb == bb) {
                             auto it_def = inst_index.find(def_inst);
                             auto it_use = inst_index.find(inst);
                             if (it_def != inst_index.end() && it_use != inst_index.end()) {
                                 if (it_def->second >= it_use->second) {
-                                    report_error(inst_prefix + "SSA Dominance violation: " + desc +
+                                    report_error(inst_prefix + "SSA Dominance violation: " + desc() +
                                                  " is used before or at its definition in the same block (def_idx=" +
                                                  std::to_string(it_def->second) + " use_idx=" + std::to_string(it_use->second) +
                                                  " def_op=" + std::to_string(static_cast<int>(def_inst->opcode())) + ").");
                                 }
                             }
                         } else if (dom.is_reachable(bb) && !dom.dominates(def_bb, bb)) {
-                            report_error(inst_prefix + "SSA Dominance violation: " + desc +
+                            report_error(inst_prefix + "SSA Dominance violation: " + desc() +
                                          " defined in block '" + std::string(def_bb->name()) +
                                          "' does not dominate use in block '" + std::string(bb->name()) + "'.");
                         }
@@ -219,12 +220,11 @@ bool Verifier::verify_function(const Function& fn) {
 
             // 1. Check general operands dominance
             for (size_t op_i = 0; op_i < inst->operand_count(); ++op_i) {
-                check_value_dom(inst->operand(op_i), "operand " + std::to_string(op_i));
+                check_value_dom(inst->operand(op_i), "operand", op_i);
             }
-
             // 2. Check state map dominance
             for (size_t sm_i = 0; sm_i < inst->state_map().size(); ++sm_i) {
-                check_value_dom(inst->state_map()[sm_i], "state map operand " + std::to_string(sm_i));
+                check_value_dom(inst->state_map()[sm_i], "state map operand", sm_i);
             }
 
             // 3. Opcode-specific type & semantic rules
@@ -804,7 +804,7 @@ bool Verifier::verify_function(const Function& fn) {
                                          "' expects " + std::to_string(target.block->param_count()) + ".");
                         } else {
                             for (size_t a_i = 0; a_i < target.args.size(); ++a_i) {
-                                check_value_dom(target.args[a_i], "branch arg " + std::to_string(a_i));
+                                check_value_dom(target.args[a_i], "branch arg", a_i);
                                 if (target.args[a_i] && target.args[a_i]->type() != target.block->param(a_i)->type()) {
                                     report_error(inst_prefix + "Branch argument " + std::to_string(a_i) +
                                                  " type (" + std::string(target.args[a_i]->type().name()) +
@@ -833,7 +833,7 @@ bool Verifier::verify_function(const Function& fn) {
                                              " arguments, but target expects " + std::to_string(target.block->param_count()) + ".");
                             } else {
                                 for (size_t a_i = 0; a_i < target.args.size(); ++a_i) {
-                                    check_value_dom(target.args[a_i], label + " arg " + std::to_string(a_i));
+                                    check_value_dom(target.args[a_i], label + " arg", a_i);
                                     if (target.args[a_i] && target.args[a_i]->type() != target.block->param(a_i)->type()) {
                                         report_error(inst_prefix + label + " argument " + std::to_string(a_i) +
                                                      " type (" + std::string(target.args[a_i]->type().name()) +
@@ -865,7 +865,7 @@ bool Verifier::verify_function(const Function& fn) {
                                              " arguments, but target expects " + std::to_string(target.block->param_count()) + ".");
                             } else {
                                 for (size_t a_i = 0; a_i < target.args.size(); ++a_i) {
-                                    check_value_dom(target.args[a_i], label + " arg " + std::to_string(a_i));
+                                    check_value_dom(target.args[a_i], label + " arg", a_i);
                                     if (target.args[a_i] && target.args[a_i]->type() != target.block->param(a_i)->type()) {
                                         report_error(inst_prefix + label + " argument " + std::to_string(a_i) +
                                                      " type (" + std::string(target.args[a_i]->type().name()) +

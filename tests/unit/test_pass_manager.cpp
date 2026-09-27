@@ -230,10 +230,12 @@ TEST_CASE("Pass manager - the declared pipelines have no accidental repeats") {
     CHECK_EQ(std::count(fn.begin(), fn.end(), "sroa"), 1);
     CHECK_EQ(std::count(fn.begin(), fn.end(), "allocation_sinking"), 1);
 
-    // IVSR after the transforms whose input form it would destroy.
+    // IVSR after the vectorizer, whose input form it would destroy, and on
+    // each side of the unroller.
     const std::vector<std::string> loops = loop_pipeline(LoopOptOptions{}).names();
     CHECK(index_of(loops, "loop_vectorize") < index_of(loops, "ivsr"));
-    CHECK(index_of(loops, "loop_unroll") < index_of(loops, "ivsr"));
+    CHECK(index_of(loops, "ivsr") < index_of(loops, "loop_unroll"));
+    CHECK(index_of(loops, "loop_unroll") < index_of(loops, "ivsr 2"));
 
     // IPO devirtualizes in its own step only.
     InlinerOptions io;

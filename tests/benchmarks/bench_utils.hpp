@@ -544,16 +544,61 @@ public:
         return !ratios_.empty();
     }
 
-    bool save(const std::string& filepath) const {
+    // Per-platform goldens. The ratios compare brass against native code the
+    // host compiler built, so a baseline pinned under MSVC need not hold
+    // against GCC or Clang: bench/ratchet.<platform>.json, when present,
+    // overrides the keys it names, and --update-ratchet writes those keys
+    // back to it and the rest to ratchet.json.
+    static const char* platform_name() {
+#if defined(_WIN32)
+        return "windows";
+#elif defined(__APPLE__)
+        return "macos";
+#else
+        return "linux";
+#endif
+    }
+
+    static std::string platform_overlay_path(const std::string& base_path) {
+        const std::string ext = ".json";
+        std::string stem = base_path;
+        if (stem.size() >= ext.size() && stem.compare(stem.size() - ext.size(), ext.size(), ext) == 0) {
+            stem.resize(stem.size() - ext.size());
+        }
+        return stem + "." + platform_name() + ext;
+    }
+
+    bool load_overlay(const std::string& filepath) {
+        RatchetManager overlay;
+        if (!overlay.load(filepath)) return false;
+        for (const auto& [key, val] : overlay.ratios_) {
+            ratios_[key] = val;
+            overlay_keys_.push_back(key);
+        }
+        return true;
+    }
+
+    bool has_overlay() const { return !overlay_keys_.empty(); }
+
+    // The base file gets every key but the overlay's; the overlay file (when
+    // one was loaded) only its own.
+    bool save(const std::string& filepath) const { return save_filtered(filepath, false); }
+    bool save_overlay(const std::string& filepath) const { return save_filtered(filepath, true); }
+
+    bool save_filtered(const std::string& filepath, bool overlay_only) const {
         std::ofstream file(filepath);
         if (!file.is_open()) {
             return false;
         }
+        std::vector<std::pair<std::string, double>> rows;
+        for (const auto& [key, val] : ratios_) {
+            const bool in_overlay = std::find(overlay_keys_.begin(), overlay_keys_.end(), key) != overlay_keys_.end();
+            if (in_overlay == overlay_only) rows.emplace_back(key, val);
+        }
         file << "{\n";
-        size_t idx = 0;
-        for (auto it = ratios_.begin(); it != ratios_.end(); ++it, ++idx) {
-            file << "  \"" << it->first << "\": " << std::fixed << std::setprecision(2) << it->second;
-            if (idx + 1 < ratios_.size()) {
+        for (size_t idx = 0; idx < rows.size(); ++idx) {
+            file << "  \"" << rows[idx].first << "\": " << std::fixed << std::setprecision(2) << rows[idx].second;
+            if (idx + 1 < rows.size()) {
                 file << ",";
             }
             file << "\n";
@@ -633,6 +678,7 @@ public:
 
 private:
     std::map<std::string, double> ratios_;
+    std::vector<std::string> overlay_keys_;
 };
 
 inline BenchmarkResult make_paired_result(

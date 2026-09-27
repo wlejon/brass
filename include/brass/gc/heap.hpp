@@ -143,20 +143,25 @@ public:
     // reference the caller holds across the call must be a root. Throws
     // std::bad_alloc when the reservation is exhausted.
     uintptr_t allocate(size_t bytes, LayoutId layout, uint32_t flags = 0, uint8_t host_bits = 0) {
-        const size_t total = payload_bytes_for(bytes) + kHeaderBytes;
-        if (flags == 0 && total <= max_young_total_ &&
-            total <= static_cast<size_t>(alloc_->end - alloc_->top)) {
-            const uintptr_t at = alloc_->top;
-            alloc_->top = at + total;
-            auto* header = reinterpret_cast<ObjectHeader*>(at);
-            header->size = static_cast<uint32_t>(total - kHeaderBytes);
-            header->layout = layout;
-            header->gc_bits = 0;
-            header->host_bits = host_bits;
-            std::memset(reinterpret_cast<void*>(at + kHeaderBytes), 0, total - kHeaderBytes);
-            return at + kHeaderBytes;
+        if (flags == 0) {
+            if (const uintptr_t obj = try_allocate_young(bytes, layout, host_bits)) return obj;
         }
         return allocate_at(bytes, layout, flags, host_bits, 0, 0);
+    }
+    // The bump fast path alone: a zeroed young object when it fits in the
+    // allocation buffer, else 0. Never collects, so it needs no roots.
+    uintptr_t try_allocate_young(size_t bytes, LayoutId layout, uint8_t host_bits = 0) noexcept {
+        const size_t total = payload_bytes_for(bytes) + kHeaderBytes;
+        if (total > max_young_total_ || total > static_cast<size_t>(alloc_->end - alloc_->top)) return 0;
+        const uintptr_t at = alloc_->top;
+        alloc_->top = at + total;
+        auto* header = reinterpret_cast<ObjectHeader*>(at);
+        header->size = static_cast<uint32_t>(total - kHeaderBytes);
+        header->layout = layout;
+        header->gc_bits = 0;
+        header->host_bits = host_bits;
+        std::memset(reinterpret_cast<void*>(at + kHeaderBytes), 0, total - kHeaderBytes);
+        return at + kHeaderBytes;
     }
     // The Mask layout (mask_layout) for (pointer_mask, type_tag).
     uintptr_t allocate_masked(size_t bytes, uint64_t pointer_mask, uint32_t type_tag) {

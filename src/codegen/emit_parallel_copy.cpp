@@ -56,12 +56,14 @@ void EmitContext::emit_parallel_copy(const LirInst& inst) {
                 } else if (dst.size == 16 || src.size == 16) {
                     if (src.is_preg()) enc_.movaps(dst_xmm, src.preg_val.as_xmm());
                     else enc_.movups(dst_xmm, to_mem_address(src));
+                } else if (src.is_preg()) {
+                    // A scalar register copy: movaps, not the merging movss /
+                    // movsd, which would wait on dst's previous value.
+                    enc_.movaps(dst_xmm, src.preg_val.as_xmm());
                 } else if (dst.size == 4 && src.size == 4) {
-                    if (src.is_preg()) enc_.movss(dst_xmm, src.preg_val.as_xmm());
-                    else enc_.movss(dst_xmm, to_mem_address(src));
+                    enc_.movss(dst_xmm, to_mem_address(src));
                 } else {
-                    if (src.is_preg()) enc_.movsd(dst_xmm, src.preg_val.as_xmm());
-                    else enc_.movsd(dst_xmm, to_mem_address(src));
+                    enc_.movsd(dst_xmm, to_mem_address(src));
                 }
             }
         } else {

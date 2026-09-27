@@ -210,14 +210,26 @@ bool ivsr_loop(Function& fn, LoopInfo& loop) {
             }
             if (!matched) continue;
 
+            // The displacement stays in the access (x64 and AArch64 address
+            // it for free), as does a constant invariant part of the index
+            // when the sum fits: one base per array rather than one hoisted
+            // pointer per constant offset, each held in a register across
+            // the loop.
             Value* new_base = base;
-            if (inv_offset) new_base = build_add(b_ph, new_base, build_mul(b_ph, inv_offset, scale));
-            if (offset != 0) new_base = build_add(b_ph, new_base, b_ph.build_iconst_i64(offset));
+            int64_t new_offset = offset;
+            int64_t inv_const = 0;
+            if (inv_offset && get_const_int(inv_offset, inv_const) && inv_const >= INT32_MIN / 8 &&
+                inv_const <= INT32_MAX / 8 && offset + inv_const * scale >= INT32_MIN &&
+                offset + inv_const * scale <= INT32_MAX) {
+                new_offset = offset + inv_const * scale;
+            } else if (inv_offset) {
+                new_base = build_add(b_ph, new_base, build_mul(b_ph, inv_offset, scale));
+            }
             Value* scaled = scaled_biv(*matched, scale);
             inst->set_operand(0, new_base);
             inst->set_operand(1, scaled);
             inst->set_scale(1);
-            inst->set_offset(0);
+            inst->set_offset(static_cast<int32_t>(new_offset));
             changed = true;
         }
     }

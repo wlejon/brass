@@ -393,7 +393,8 @@ bool eliminate_dead_code(Function& fn) {
                 Instruction* prev = cur->prev();
                 if (!cur->has_side_effects() && cur->produces_value()) {
                     Value* res = cur->result();
-                    if (!res || use_counts[res] == 0) {
+                    auto r_it = res ? use_counts.find(res) : use_counts.end();
+                    if (!res || r_it == use_counts.end() || r_it->second == 0) {
                         for_each_use(*cur, [&](const Value* v) {
                             auto it = use_counts.find(v);
                             if (it != use_counts.end() && it->second > 0) --it->second;
@@ -413,11 +414,23 @@ bool eliminate_dead_code(Function& fn) {
             size_t p_i = 0;
             while (p_i < bb->param_count()) {
                 Value* p = bb->param(p_i);
-                if (p && use_counts[p] == 0) {
+                auto p_it = p ? use_counts.find(p) : use_counts.end();
+                if (p && (p_it == use_counts.end() || p_it->second == 0)) {
+                    // The edge arguments that fed it go with it: each loses
+                    // a use (recounting the function per parameter was
+                    // quadratic in large functions).
+                    for (BasicBlock* pred : fn.blocks()) {
+                        Instruction* term = pred ? pred->terminator() : nullptr;
+                        if (!term) continue;
+                        for_each_edge(*term, [&](BranchTarget& bt) {
+                            if (bt.block != bb || p_i >= bt.args.size()) return;
+                            auto it = use_counts.find(bt.args[p_i]);
+                            if (it != use_counts.end() && it->second > 0) --it->second;
+                        });
+                    }
                     remove_block_param(*bb, p_i);
                     progress = true;
                     changed = true;
-                    use_counts = compute_use_counts(fn);
                 } else {
                     ++p_i;
                 }
@@ -544,8 +557,11 @@ bool loop_cleanup(Function& fn, const LoopCleanupOptions& options) {
     for (size_t iter = 0; iter < options.max_iterations; ++iter) {
         bool iter_changed = false;
         if (options.fold_and_dce) iter_changed |= cleanups();
-        if (options.licm) iter_changed |= hoist_loop_invariants(fn);
-        if (options.licm && options.fold_and_dce) iter_changed |= cleanups();
+        // The second cleanup is for what hoisting exposed: after a round
+        // LICM left alone the next iteration's first one is the same run.
+        const bool hoisted = options.licm && hoist_loop_invariants(fn);
+        iter_changed |= hoisted;
+        if (hoisted && options.fold_and_dce) iter_changed |= cleanups();
         fn.rebuild_cfg_predecessors();
         any_changed |= iter_changed;
         // Without LICM a second round would find nothing the first missed.

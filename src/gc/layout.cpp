@@ -92,12 +92,30 @@ LayoutId register_layout(const LayoutDescriptor& descriptor) {
     return r.append_locked(descriptor);
 }
 
+namespace {
+
+// The registry lookup behind mask_layout's per-thread cache, out of line so
+// the cache hit (every allocation from generated code) costs no prologue.
+#if defined(_MSC_VER)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+LayoutId mask_layout_slow(uint64_t mask, uint32_t type_tag, MaskCacheEntry& cached);
+
+} // namespace
+
 LayoutId mask_layout(uint64_t mask, uint32_t type_tag) {
     const size_t slot = static_cast<size_t>((mask ^ (mask >> 17) ^ (static_cast<uint64_t>(type_tag) * 31)) %
                                             kMaskCacheSize);
     MaskCacheEntry& cached = t_mask_cache[slot];
     if (cached.valid && cached.mask == mask && cached.tag == type_tag) return cached.id;
+    return mask_layout_slow(mask, type_tag, cached);
+}
 
+namespace {
+
+LayoutId mask_layout_slow(uint64_t mask, uint32_t type_tag, MaskCacheEntry& cached) {
     Registry& r = registry();
     LayoutId id;
     {
@@ -118,6 +136,8 @@ LayoutId mask_layout(uint64_t mask, uint32_t type_tag) {
     cached = MaskCacheEntry{mask, type_tag, id, true};
     return id;
 }
+
+} // namespace
 
 const LayoutDescriptor& layout_descriptor(LayoutId id) noexcept {
     const LayoutDescriptor* chunk = registry().chunks[id >> kChunkBits].load(std::memory_order_acquire);

@@ -1,0 +1,8 @@
+{
+  "cheney_gc": 1.92,
+  "fast_interp_collatz_1000": 0.13,
+  "fast_interp_fib_iter_40": 0.18,
+  "fast_interp_matmul_32x32": 0.13,
+  "fast_interp_prime_sieve_100k": 0.14,
+  "shapes": 1.60
+}

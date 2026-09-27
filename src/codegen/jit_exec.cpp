@@ -660,9 +660,25 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
         regs_.text_base = sec_bases[text_idx];
         uintptr_t text_base = reinterpret_cast<uintptr_t>(regs_.text_base);
         stack_maps_.relocate(text_base);
+        // One name index for the whole load: register_function_address
+        // searches the maps linearly, which made loading a module of many
+        // functions quadratic. The first map of a name wins, as there.
+        std::unordered_map<std::string, size_t> map_of;
+        map_of.reserve(stack_maps_.size());
+        for (size_t i = 0; i < stack_maps_.size(); ++i) {
+            map_of.emplace(stack_maps_.functions()[i].function_name, i);
+        }
         for (const auto& fn : working_obj.functions) {
             uintptr_t fn_addr = reinterpret_cast<uintptr_t>(sec_bases[text_idx] + fn.text_offset);
-            stack_maps_.register_function_address(fn.name, fn_addr, static_cast<uint32_t>(fn.text_size));
+            auto it = map_of.find(fn.name);
+            if (it == map_of.end()) {
+                stack_maps_.register_function_address(fn.name, fn_addr, static_cast<uint32_t>(fn.text_size));
+                map_of.emplace(fn.name, stack_maps_.size() - 1);
+                continue;
+            }
+            FunctionStackMap& m = stack_maps_.functions()[it->second];
+            m.function_address = fn_addr;
+            if (fn.text_size > 0) m.code_size = static_cast<uint32_t>(fn.text_size);
         }
     } else {
         regs_.text_base = module_base;

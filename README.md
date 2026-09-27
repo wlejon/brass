@@ -25,7 +25,7 @@ Standalone C++20 library with CMake.
 
 ## Performance Tracking
 
-Benchmarks live in `tests/benchmarks` and run under the `perf` ctest label, which also checks them against the recorded ratchet in `bench/ratchet.json`; results depend on the machine. `brass_gc_pause_bench` reports the heap's minor and full collection pauses against the size of the live old generation.
+Benchmarks live in `tests/benchmarks` and run under the `perf` ctest label, which also checks them against the recorded ratchet in `bench/ratchet.json`; results depend on the machine. The ratios compare brass with native code built by the host compiler, so `bench/ratchet.<platform>.json` (`linux`, `windows`, `macos`), when present, overrides the keys it names on that platform; `--update-ratchet` writes those keys back to it. `brass_gc_pause_bench` reports the heap's minor and full collection pauses against the size of the live old generation.
 
 ## Building & Testing
 

@@ -13,6 +13,7 @@
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/verifier.hpp>
 #include <algorithm>
+#include <unordered_set>
 #include <cstring>
 #include <stdexcept>
 #include <iostream>
@@ -126,12 +127,28 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
         16
     );
 
+    // The loop pipeline, built once per FP-reassociation setting rather than
+    // once per function (a module of thousands of small functions spent
+    // more building step lists than running most of them).
+    std::unique_ptr<Pipeline> loop_pipes[2];
+    // Stack maps appended by name without add_function's linear search for
+    // an existing map (quadratic over a large module); a repeated name
+    // still replaces through it.
+    std::unordered_set<std::string> mapped;
+    auto add_stack_map = [&](const FunctionStackMap& m) {
+        if (mapped.insert(m.function_name).second) obj.stack_maps.functions().push_back(m);
+        else obj.stack_maps.add_function(m);
+    };
     for (const auto* fn : mod.functions()) {
         if (!fn) continue;
 
-        LoopOptOptions loop_opts;
-        loop_opts.enable_f64_demote = false;
-        loop_opts.enable_fp_reassociation = fn->allow_fp_reassociation() || mod.allow_fp_reassociation();
+        const bool reassoc = fn->allow_fp_reassociation() || mod.allow_fp_reassociation();
+        if (enable_mir_opts_ && !loop_pipes[reassoc]) {
+            LoopOptOptions loop_opts;
+            loop_opts.enable_f64_demote = false;
+            loop_opts.enable_fp_reassociation = reassoc;
+            loop_pipes[reassoc] = std::make_unique<Pipeline>(loop_pipeline(loop_opts));
+        }
 
         const Function* fn_to_lower = fn;
         Function* opt_fn_mut = nullptr;
@@ -147,14 +164,15 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
             // The optimizer's guarantees hold only for well-formed input;
             // IR the verifier rejects is lowered as given, unoptimized.
             const bool input_valid = verify_function(*opt_fn);
-            if (input_valid) optimize_function_loops(*opt_fn, loop_opts);
+            const bool optimized = input_valid && run_pipeline(*opt_fn, *loop_pipes[reassoc]).changed;
             opt_fn->rebuild_cfg_predecessors();
             opt_fn->sort_blocks_rpo();
             opt_fn->rebuild_cfg_predecessors();
             // Lowering broken IR would emit wrong code silently; an
-            // optimizer bug has to surface here instead.
+            // optimizer bug has to surface here instead. A function the
+            // optimizer left unchanged is the valid input, reordered.
             DiagnosticReporter diag;
-            if (input_valid && !verify_function(*opt_fn, &diag)) {
+            if (optimized && !verify_function(*opt_fn, &diag)) {
                 throw std::runtime_error("MIR loop optimization produced invalid IR for '" +
                                          std::string(fn->name()) + "':\n" + diag.format_all());
             }
@@ -215,7 +233,9 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
         }
 
         // 3.5 LIR Trace Scheduling & Fall-Through Block Layout
-        if (enable_trace_layout_ || loop_opts.enable_trace_layout) {
+        // (The loop options' enable_trace_layout was always its default,
+        // false, here.)
+        if (enable_trace_layout_) {
             codegen::optimize_block_layout(*lir);
         }
 
@@ -255,7 +275,7 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
             cfi.stack_map = std::move(res.stack_map);
             cfi.stack_map.code_offset = static_cast<uint32_t>(fn_offset);
             cfi.stack_map.code_size = static_cast<uint32_t>(fn_size);
-            obj.stack_maps.add_function(cfi.stack_map);
+            add_stack_map(cfi.stack_map);
 
             cfi.resume_table = std::move(res.resume_table);
             obj.resume_tables.register_table(cfi.name, cfi.resume_table);
@@ -344,7 +364,7 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
             cfi.stack_map = std::move(res.stack_map);
             cfi.stack_map.code_offset = static_cast<uint32_t>(fn_offset);
             cfi.stack_map.code_size = static_cast<uint32_t>(fn_size);
-            obj.stack_maps.add_function(cfi.stack_map);
+            add_stack_map(cfi.stack_map);
 
             cfi.resume_table = std::move(res.resume_table);
             obj.resume_tables.register_table(cfi.name, cfi.resume_table);

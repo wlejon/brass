@@ -43,6 +43,10 @@ int main(int argc, char** argv) {
     RatchetManager ratchet = RatchetManager::defaults();
     bool loaded_from_disk = ratchet.load(ratchet_path);
     (void)loaded_from_disk;
+    const std::string overlay_path = RatchetManager::platform_overlay_path(ratchet_path);
+    if (ratchet.load_overlay(overlay_path)) {
+        std::cout << "[RATCHET] " << RatchetManager::platform_name() << " goldens from " << overlay_path << "\n";
+    }
     RatchetManager::active() = &ratchet;
 
     // 2. Emit Run Provenance Header
@@ -81,6 +85,10 @@ int main(int argc, char** argv) {
     // 7. Update ratchet if requested
     if (update_ratchet) {
         ratchet.update_from_results(results, false);
+        if (ratchet.has_overlay() && !ratchet.save_overlay(overlay_path)) {
+            std::cerr << "[RATCHET] ERROR: Failed to write updated ratchet to: " << overlay_path << "\n";
+            return 1;
+        }
         if (ratchet.save(ratchet_path)) {
             std::cout << "[RATCHET] Successfully updated golden ratchet ratios at: " << ratchet_path << "\n";
             return 0;
