@@ -15,8 +15,6 @@ namespace {
 constexpr size_t kRetainedFreeBlocks = 64;
 constexpr uint8_t kPoisonByte = 0xDB;
 
-size_t os_page_bytes() { return 4096; }
-
 } // namespace
 
 void HeapState::commit_cards(uintptr_t lo, uintptr_t hi) {

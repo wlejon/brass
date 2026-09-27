@@ -24,6 +24,7 @@ namespace brass::gc::detail {
 
 // Reserve, commit, decommit and release address space (virtual_memory.cpp).
 // Committed memory reads as zero until written.
+size_t os_page_bytes();
 void* vm_reserve(size_t bytes, size_t alignment);
 void vm_commit(void* address, size_t bytes);
 void vm_decommit(void* address, size_t bytes);

@@ -95,8 +95,9 @@ Heap::Heap(const HeapConfig& config) : s_(std::make_unique<HeapState>(*this)) {
     s.large_reserve = large;
 
     s.cards_bytes = (mature + large) >> kCardShift;
-    s.cards = static_cast<uint8_t*>(detail::vm_reserve(s.cards_bytes, 4096));
-    s.card_pages_committed.assign((s.cards_bytes + 4095) / 4096, 0);
+    const size_t card_page = detail::os_page_bytes();
+    s.cards = static_cast<uint8_t*>(detail::vm_reserve(s.cards_bytes, card_page));
+    s.card_pages_committed.assign((s.cards_bytes + card_page - 1) / card_page, 0);
 
     young_lo_ = s.base;
     young_span_ = young;

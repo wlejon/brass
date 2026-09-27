@@ -38,17 +38,22 @@ namespace {
 constexpr uint64_t kGnuCxx = 0x474E5543432B2B00ull;
 constexpr uint64_t kClangCxx = 0x434C4E47432B2B00ull;
 
-// The Itanium C++ ABI (2.2.1) places the unwinder's _Unwind_Exception last
-// in the __cxa_exception header, directly before the thrown object, and the
-// header's first field (exceptionType; primaryException in a dependent
-// header) ten pointer-sized words before it: exceptionDestructor,
-// unexpectedHandler, terminateHandler, nextException, the two int counters,
-// actionRecord, languageSpecificData, catchTemp and adjustedPtr lie between.
-// libstdc++ and libc++abi agree on it.
-constexpr size_t kHeaderFirstFieldOffset = 10 * sizeof(void*);
-
-const void* header_first_field(const _Unwind_Exception* ue) {
-    const auto* p = reinterpret_cast<const char*>(ue) - kHeaderFirstFieldOffset;
+// Negative offsets from _Unwind_Exception to fields in the exception header.
+//
+// In libstdc++ (GNU, kGnuCxx):
+// __cxa_exception has exceptionType at offset 0, and _Unwind_Exception is at
+// offset 80 (10 pointer words). In dependent exceptions
+// (__cxa_dependent_exception), primaryException is at offset 0 (10 pointer
+// words before _Unwind_Exception).
+//
+// In libc++abi (Apple Clang / LLVM on 64-bit, kClangCxx):
+// __cxa_exception has referenceCount at offset 0 and exceptionType at offset 8.
+// With 8 bytes of alignment padding before _Unwind_Exception at offset 96,
+// exceptionType is at offset 8 (88 bytes = 11 pointer words before
+// _Unwind_Exception). In dependent exceptions, primaryException is at offset 0
+// (96 bytes = 12 pointer words before _Unwind_Exception).
+const void* read_ptr_at_negative_offset(const _Unwind_Exception* ue, size_t offset_bytes) {
+    const auto* p = reinterpret_cast<const char*>(ue) - offset_bytes;
     const void* v = nullptr;
     std::memcpy(&v, p, sizeof(v));
     return v;
@@ -61,13 +66,15 @@ bool cxx_brass_exception_bits(uint64_t cls, const _Unwind_Exception* ue, uint64_
     if ((kind != kGnuCxx && kind != kClangCxx) || last > 1) return false;
     const _Unwind_Exception* primary = ue;
     if (last == 1) {
-        // A dependent header's first field is the primary thrown object,
-        // which follows the primary header's _Unwind_Exception.
-        const auto* object = static_cast<const _Unwind_Exception*>(header_first_field(ue));
+        // A dependent header's primaryException field points to the primary
+        // thrown object, which follows the primary header's _Unwind_Exception.
+        const size_t dep_offset = (kind == kClangCxx) ? 12 * sizeof(void*) : 10 * sizeof(void*);
+        const auto* object = static_cast<const _Unwind_Exception*>(read_ptr_at_negative_offset(ue, dep_offset));
         if (!object) return false;
         primary = object - 1;
     }
-    const auto* type = static_cast<const std::type_info*>(header_first_field(primary));
+    const size_t type_offset = (kind == kClangCxx) ? 11 * sizeof(void*) : 10 * sizeof(void*);
+    const auto* type = static_cast<const std::type_info*>(read_ptr_at_negative_offset(primary, type_offset));
     if (!type || *type != typeid(BrassException)) return false;
     const auto* thrown = reinterpret_cast<const BrassException*>(primary + 1);
     bits = thrown->value().raw();

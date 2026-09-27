@@ -352,8 +352,12 @@ b2:
     }
     FunctionHandle* t = prog.find("bx_t");
     REQUIRE(t != nullptr);
+#if defined(__x86_64__) || defined(_M_X64)
     CHECK(t->native_entry() != nullptr);
     CHECK(!prog.pipeline().is_baseline_rejected("bx_t"));
+#else
+    CHECK(prog.pipeline().is_baseline_rejected("bx_t"));
+#endif
 }
 
 TEST_CASE("Tier-2 reinstall - replacing live tier-2 code keeps it for callers bound to it") {

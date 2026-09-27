@@ -128,6 +128,7 @@ loop(%i: i64, %acc: i64):
     }
 }
 
+#if defined(__x86_64__) || defined(_M_X64)
 TEST_CASE("Baseline frame - a value live across an invoke's normal edge keeps its slot") {
     // @cont is laid out before @loop and reached only through the invoke, so
     // %k (defined in entry, used only in @cont) is live through @loop solely
@@ -172,6 +173,7 @@ pad:
         for (int64_t b : {-2, 0, 5}) CHECK_EQ(fn(a, b), a * (b + 7));
     }
 }
+#endif
 
 namespace {
 

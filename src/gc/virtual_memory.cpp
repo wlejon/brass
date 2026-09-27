@@ -3,6 +3,7 @@
 
 #include "heap_internal.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <new>
@@ -17,9 +18,31 @@
 #include <windows.h>
 #else
 #include <sys/mman.h>
+#include <unistd.h>
+
+#if defined(__APPLE__)
+#ifndef MAP_ANON
+#define MAP_ANON MAP_ANONYMOUS
+#endif
+#define BRASS_MAP_ANON (MAP_PRIVATE | MAP_ANON)
+#else
+#define BRASS_MAP_ANON (MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE)
+#endif
+
 #endif
 
 namespace brass::gc::detail {
+
+size_t os_page_bytes() {
+#if defined(_WIN32)
+    SYSTEM_INFO info;
+    GetSystemInfo(&info);
+    return info.dwPageSize;
+#else
+    static const size_t page_sz = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    return page_sz ? page_sz : 4096;
+#endif
+}
 
 void gc_fatal(const char* message) {
     std::fprintf(stderr, "brass: fatal: gc: %s\n", message);
@@ -28,6 +51,9 @@ void gc_fatal(const char* message) {
 }
 
 void* vm_reserve(size_t bytes, size_t alignment) {
+    const size_t page = os_page_bytes();
+    alignment = std::max(alignment, page);
+    bytes = (bytes + page - 1) & ~(page - 1);
     const size_t padded = bytes + alignment;
 #if defined(_WIN32)
     void* raw = VirtualAlloc(nullptr, padded, MEM_RESERVE, PAGE_NOACCESS);
@@ -48,7 +74,7 @@ void* vm_reserve(size_t bytes, size_t alignment) {
     }
     throw std::bad_alloc();
 #else
-    void* raw = mmap(nullptr, padded, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    void* raw = mmap(nullptr, padded, PROT_NONE, BRASS_MAP_ANON, -1, 0);
     if (raw == MAP_FAILED) throw std::bad_alloc();
     const uintptr_t start = reinterpret_cast<uintptr_t>(raw);
     const uintptr_t aligned = (start + alignment - 1) & ~(uintptr_t{alignment} - 1);
@@ -64,7 +90,13 @@ void vm_commit(void* address, size_t bytes) {
 #if defined(_WIN32)
     if (!VirtualAlloc(address, bytes, MEM_COMMIT, PAGE_READWRITE)) throw std::bad_alloc();
 #else
-    if (mprotect(address, bytes, PROT_READ | PROT_WRITE) != 0) throw std::bad_alloc();
+    const size_t page = os_page_bytes();
+    const uintptr_t addr = reinterpret_cast<uintptr_t>(address);
+    const uintptr_t aligned_addr = addr & ~(uintptr_t{page} - 1);
+    const size_t aligned_bytes = ((addr + bytes + page - 1) & ~(uintptr_t{page} - 1)) - aligned_addr;
+    if (mprotect(reinterpret_cast<void*>(aligned_addr), aligned_bytes, PROT_READ | PROT_WRITE) != 0) {
+        throw std::bad_alloc();
+    }
 #endif
 }
 
@@ -76,17 +108,25 @@ void vm_decommit(void* address, size_t bytes) {
     // A fresh anonymous mapping over the range: its pages read as zero once
     // committed again on every POSIX system (MADV_DONTNEED does not promise
     // that on macOS).
-    mmap(address, bytes, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    const size_t page = os_page_bytes();
+    const uintptr_t addr = reinterpret_cast<uintptr_t>(address);
+    const uintptr_t aligned_addr = addr & ~(uintptr_t{page} - 1);
+    const size_t aligned_bytes = ((addr + bytes + page - 1) & ~(uintptr_t{page} - 1)) - aligned_addr;
+    mmap(reinterpret_cast<void*>(aligned_addr), aligned_bytes, PROT_NONE, MAP_FIXED | BRASS_MAP_ANON, -1, 0);
 #endif
 }
 
 void vm_release(void* address, size_t bytes) {
-    if (!address) return;
+    if (!address || bytes == 0) return;
 #if defined(_WIN32)
     (void)bytes;
     VirtualFree(address, 0, MEM_RELEASE);
 #else
-    munmap(address, bytes);
+    const size_t page = os_page_bytes();
+    const uintptr_t addr = reinterpret_cast<uintptr_t>(address);
+    const uintptr_t aligned_addr = addr & ~(uintptr_t{page} - 1);
+    const size_t aligned_bytes = ((addr + bytes + page - 1) & ~(uintptr_t{page} - 1)) - aligned_addr;
+    munmap(reinterpret_cast<void*>(aligned_addr), aligned_bytes);
 #endif
 }
 

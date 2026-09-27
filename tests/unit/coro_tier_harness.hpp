@@ -25,7 +25,11 @@
 namespace brass::coro_test {
 
 enum class Tier { Interp, Fast, Base, Opt };
+#if defined(__x86_64__) || defined(_M_X64)
 inline constexpr Tier kTiers[] = {Tier::Interp, Tier::Fast, Tier::Base, Tier::Opt};
+#else
+inline constexpr Tier kTiers[] = {Tier::Interp, Tier::Fast, Tier::Opt};
+#endif
 
 inline const char* tier_name(Tier t) {
     switch (t) {
@@ -82,10 +86,14 @@ struct Program {
         REQUIRE(f != nullptr);
         runtime::FunctionHandle* h = table.get_or_create(fn, f);
         if (tier == Tier::Base) {
+#if defined(__x86_64__) || defined(_M_X64)
             const bool ok = table.pipeline().compile_and_install_tier1(fn, f);
             if (!ok) std::printf("tier 1 rejected %s\n", std::string(fn).c_str());
             REQUIRE(ok);
             REQUIRE(h->native_entry() != nullptr);
+#else
+            return;
+#endif
         } else if (tier == Tier::Opt) {
             table.tiering().get_feedback(fn).set_deopt_threshold(1000000);
             runtime::CodeInstaller installer(table);

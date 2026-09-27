@@ -96,7 +96,11 @@ TEST_CASE("CoroFramesGc - a frame traces more reference slots than a 64-bit mask
     for (uint64_t w : layout.ref_bits) refs += static_cast<uint32_t>(std::popcount(w));
     CHECK(refs >= static_cast<uint32_t>(kRefs));
     for (Tier bt : kTiers) {
+#if defined(__x86_64__) || defined(_M_X64)
         for (Tier dt : {Tier::Interp, Tier::Base, Tier::Opt}) {
+#else
+        for (Tier dt : {Tier::Interp, Tier::Opt}) {
+#endif
             test::BoundHeap heap;
             Program prog(*mod);
             prog.place("big", bt);
@@ -122,8 +126,13 @@ TEST_CASE("CoroFramesGc - suspended frames with many references survive stress c
             test::BoundHeap heap(cfg);
             Program prog(*mod);
             prog.place("big", bt);
-            prog.place("runbig", Tier::Base);
-            CHECK_EQ(prog.call("runbig", Tier::Base, {RuntimeValue::from_i64(50)}).as_i64(), big_sum(kRefs));
+#if defined(__x86_64__) || defined(_M_X64)
+            constexpr Tier dt = Tier::Base;
+#else
+            constexpr Tier dt = Tier::Opt;
+#endif
+            prog.place("runbig", dt);
+            CHECK_EQ(prog.call("runbig", dt, {RuntimeValue::from_i64(50)}).as_i64(), big_sum(kRefs));
         }
     }
 }

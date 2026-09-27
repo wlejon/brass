@@ -313,6 +313,7 @@ TEST_CASE("CoroTiers - a body resumed often tiers up to Tier 1 then Tier 2, fram
     CHECK_EQ(prog.call("drive", Tier::Fast, {RuntimeValue::from_i64(60)}).as_i64(), want);
 }
 
+#if defined(__x86_64__) || defined(_M_X64)
 TEST_CASE("CoroTiers - Tier 1 compiles a function that creates and resumes a coroutine") {
     auto mod = parse_program(kModes);
     test::BoundHeap heap;
@@ -322,6 +323,7 @@ TEST_CASE("CoroTiers - Tier 1 compiles a function that creates and resumes a cor
     prog.place("drv", Tier::Base);
     CHECK_EQ(prog.table.find("drv")->tier(), TierLevel::Tier1_Baseline);
 }
+#endif
 
 TEST_CASE("CoroTiers - the pipeline lowers an unlowered module before running it") {
     DiagnosticReporter diag;
