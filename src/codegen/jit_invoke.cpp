@@ -123,13 +123,72 @@ RuntimeValue aarch64_invoke_result_value(Type ret_type, const AArch64InvokeResul
 
 namespace brass::codegen {
 
-#if !(defined(__GNUC__) || defined(__clang__))
+// The Windows inline-asm path below is taken only by Clang/GCC on Windows;
+// MSVC has these stubs in gc_msvc_x64.asm, and the SysV hosts in the
+// file-scope asm after this block.
+#if (defined(__GNUC__) || defined(__clang__)) && defined(_WIN32)
+#define BRASS_V256_INLINE_ASM 1
+#else
+#define BRASS_V256_INLINE_ASM 0
+#endif
+
+#if !BRASS_V256_INLINE_ASM
 extern "C" {
 void brass_call_jit_v256_0(void* addr, uint8_t* out);
 void brass_call_jit_v256_1(void* addr, uint8_t* out, const uint8_t* a0);
 void brass_call_jit_v256_2(void* addr, uint8_t* out, const uint8_t* a0, const uint8_t* a1);
 void brass_call_jit_v256_3(void* addr, uint8_t* out, const uint8_t* a0, const uint8_t* a1, const uint8_t* a2);
 }
+#endif
+
+#if !defined(_WIN32) && (defined(__GNUC__) || defined(__clang__))
+// SysV: addr in rdi, out in rsi, the vector arguments' addresses in rdx, rcx
+// and r8. Written as functions rather than inline asm around the call: the
+// compiler knows nothing of an inline call's needs, so the stack was 8 bytes
+// off the 16-byte alignment the callee's calls expect (a throw's movaps
+// faulted), the red zone below rsp was not skipped, and `out` could sit in a
+// register the callee clobbers (rdi, rsi and every xmm are caller-saved
+// here). Here `out` is kept in rbx; push rbp, push rbx and 8 more bytes
+// leave rsp 16-byte aligned at the call. The frame has CFI, since a throw
+// may unwind through it to a host catch.
+#define BRASS_V256_STUB(name, loads)                  \
+    BRASS_ASM_FN_BEGIN(name)                          \
+    "    .cfi_startproc\n"                            \
+    "    pushq %rbp\n"                                \
+    "    .cfi_def_cfa_offset 16\n"                    \
+    "    .cfi_offset %rbp, -16\n"                     \
+    "    movq %rsp, %rbp\n"                           \
+    "    .cfi_def_cfa_register %rbp\n"                \
+    "    pushq %rbx\n"                                \
+    "    .cfi_offset %rbx, -24\n"                     \
+    "    subq $8, %rsp\n"                             \
+    "    movq %rsi, %rbx\n"                           \
+    "    movq %rdi, %rax\n"                           \
+    loads                                             \
+    "    call *%rax\n"                                \
+    "    vmovups %ymm0, (%rbx)\n"                     \
+    "    vzeroupper\n"                                \
+    "    movq -8(%rbp), %rbx\n"                       \
+    "    leave\n"                                     \
+    "    .cfi_def_cfa %rsp, 8\n"                      \
+    "    ret\n"                                       \
+    "    .cfi_endproc\n"                              \
+    BRASS_ASM_FN_END(name)
+
+__asm__(
+    ".text\n"
+    BRASS_V256_STUB(brass_call_jit_v256_0, "")
+    BRASS_V256_STUB(brass_call_jit_v256_1,
+                    "    vmovups (%rdx), %ymm0\n")
+    BRASS_V256_STUB(brass_call_jit_v256_2,
+                    "    vmovups (%rdx), %ymm0\n"
+                    "    vmovups (%rcx), %ymm1\n")
+    BRASS_V256_STUB(brass_call_jit_v256_3,
+                    "    vmovups (%rdx), %ymm0\n"
+                    "    vmovups (%rcx), %ymm1\n"
+                    "    vmovups (%r8), %ymm2\n")
+);
+#undef BRASS_V256_STUB
 #endif
 
 extern "C" void x64_sysv_invoke_thunk(
@@ -143,7 +202,7 @@ namespace {
 // capture. Such a function is called here with its (at most three) 256-bit
 // vector arguments in YMM0..YMM2, and the result stored to `out`.
 void call_jit_v256(void* addr, const std::vector<RuntimeValue>& args, uint8_t* out) {
-#if defined(__GNUC__) || defined(__clang__)
+#if BRASS_V256_INLINE_ASM
     switch (args.size()) {
         case 0:
             asm volatile(

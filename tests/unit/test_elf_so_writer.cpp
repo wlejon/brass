@@ -2,8 +2,10 @@
 #include <brass/mir/module.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/verifier.hpp>
+#include <brass/mir/parser.hpp>
 #include <brass/object/object_writer.hpp>
 #include <brass/target/elf_so_writer.hpp>
+#include <algorithm>
 #include <cstring>
 #include <vector>
 #include <string>
@@ -361,4 +363,57 @@ TEST_CASE("ELF SO Writer - DynSym and DynStr String Table Indices") {
     bool has_f2 = std::find(discovered_names.begin(), discovered_names.end(), "second_kernel") != discovered_names.end();
     CHECK(has_f1);
     CHECK(has_f2);
+}
+
+// A function with landing pads is described to the unwinder with its LSDA
+// and the CIE naming brass_sysv_personality, bound at load, as in a
+// relocatable object. The shared object once carried only the plain "zR"
+// CIE, so a C++ BrassException a helper or host function threw passed
+// through the module's frames and missed every pad: on Linux a program
+// built by bronze (a module .so and its host) could not catch a TypeError
+// the runtime raised.
+TEST_CASE("ELF SO Writer - a function with landing pads names the personality and its LSDA") {
+    const char* src = R"(module @so_eh
+func @so_thrower(%x: i64) -> i64 {
+b0:
+  throw %x
+}
+func @so_catcher(%x: i64) -> i64 {
+b0:
+  %v = invoke.i64 @so_thrower(%x), ok, bad
+ok:
+  ret %v
+bad:
+  %e = landing_pad.i64
+  ret %e
+}
+)";
+    DiagnosticReporter diag;
+    auto mod = parse_module(src, &diag);
+    REQUIRE(mod != nullptr);
+    REQUIRE(verify_module(*mod, &diag));
+    object::ObjectFile obj = object::compile_module_to_object(*mod, Target::x64_linux());
+    bool any_scopes = false;
+    for (const auto& fn : obj.functions) any_scopes = any_scopes || fn.exception_table.has_scopes();
+    REQUIRE(any_scopes);
+
+    // Every symbol the object leaves undefined, and the personality the
+    // writer's unwind information will name, from one runtime library.
+    ImportLibrary rt{"libbrass_rt.so", {"brass_sysv_personality"}};
+    for (const auto& s : obj.symbols) {
+        if (s.section_index == object::SECTION_UNDEF) rt.symbols.push_back(s.name);
+    }
+    ElfSoOptions opts;
+    opts.imports.push_back(rt);
+    std::string err;
+    std::vector<uint8_t> so = ElfSoWriter::emit(obj, opts, &err);
+    CHECK_EQ(err, std::string());
+    REQUIRE(!so.empty());
+    auto contains = [&](const char* s) {
+        const size_t n = std::strlen(s) + 1;   // with the terminator
+        return std::search(so.begin(), so.end(), s, s + n) != so.end();
+    };
+    CHECK(contains("zR"));
+    CHECK(contains("zPLR"));
+    CHECK(contains("brass_sysv_personality"));
 }

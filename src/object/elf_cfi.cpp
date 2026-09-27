@@ -55,12 +55,12 @@ void patch_u32_le(std::vector<uint8_t>& buf, size_t offset, uint32_t val) {
 constexpr uint8_t kPcrelSdata4 = elf::DW_EH_PE_pcrel | elf::DW_EH_PE_sdata4;  // 0x1B
 constexpr uint8_t kIndirect = 0x80;                                            // DW_EH_PE_indirect
 
-constexpr const char* kLsdaSection = ".gcc_except_table";
+constexpr const char* kLsdaSection = ElfCfiBuilder::kLsdaSection;
 // The word holding brass_sysv_personality's address, which the CIE points
 // at (DW_EH_PE_indirect): an absolute address belongs in relocated data,
 // not in .eh_frame, and the word lets a shared object bind the personality
 // wherever it is.
-constexpr const char* kPersonalitySection = ".data.rel.ro.brass_personality";
+constexpr const char* kPersonalitySection = ElfCfiBuilder::kPersonalitySection;
 constexpr const char* kPersonalitySymbol = "brass_sysv_personality";
 
 // One CIE; returns its offset. With `personality`, it is "zPLR": the

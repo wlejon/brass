@@ -105,6 +105,11 @@ public:
         Section& eh_frame_sec,
         bool with_personality = false
     );
+
+    // The two sections `with_personality` adds, for an image writer that
+    // places only a fixed set of sections and folds these into its own.
+    static constexpr const char* kLsdaSection = ".gcc_except_table";
+    static constexpr const char* kPersonalitySection = ".data.rel.ro.brass_personality";
 };
 
 class ElfWriter {

@@ -10,6 +10,9 @@
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/deopt_stress.hpp>
 #include <brass/runtime/host_symbols.hpp>
+#include <atomic>
+#include <cstring>
+#include <mutex>
 
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic push
@@ -79,11 +82,17 @@ RuntimeValue FastInterpreter::execute_frame(FastFrame& frame) {
 
 #if defined(__GNUC__) || defined(__clang__)
 #define BRASS_DIRECT_THREADED 1
+    // Shared by every thread. It is built in a local array and published
+    // once: filled in place, a second thread's first call re-wrote every
+    // entry to do_invalid_op while the first thread was already dispatching
+    // through it ("Invalid opcode 7" on two threads entering at once).
     static void* dispatch_table[256];
-    static bool table_inited = false;
-    if (BRASS_UNLIKELY(!table_inited)) {
-        for (size_t i = 0; i < 256; ++i) dispatch_table[i] = &&do_invalid_op;
-#define TENTRY(op) dispatch_table[static_cast<size_t>(BytecodeOp::op)] = &&do_##op
+    static std::once_flag table_once;
+    static std::atomic<bool> table_inited{false};
+    if (BRASS_UNLIKELY(!table_inited.load(std::memory_order_acquire))) {
+        void* local_table[256];
+        for (size_t i = 0; i < 256; ++i) local_table[i] = &&do_invalid_op;
+#define TENTRY(op) local_table[static_cast<size_t>(BytecodeOp::op)] = &&do_##op
         TENTRY(nop); TENTRY(unreachable); TENTRY(iconst32); TENTRY(load_const);
         TENTRY(patchable_const32); TENTRY(patchable_const64);
         TENTRY(mov); TENTRY(mov_imm); TENTRY(sext64); TENTRY(zext64);
@@ -141,7 +150,8 @@ RuntimeValue FastInterpreter::execute_frame(FastFrame& frame) {
         TENTRY(br_slt_i64); TENTRY(br_sle_i64); TENTRY(br_ult_i64); TENTRY(br_ule_i64);
         TENTRY(add_imm_i32); TENTRY(add_imm_i64);
 #undef TENTRY
-        table_inited = true;
+        std::call_once(table_once, [&] { std::memcpy(dispatch_table, local_table, sizeof(local_table)); });
+        table_inited.store(true, std::memory_order_release);
     }
 
 #define OP_CASE(name) do_##name:

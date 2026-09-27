@@ -1,5 +1,6 @@
 #include "test_framework.hpp"
 #include <brass/gc/stack_walker.hpp>
+#include <brass/gc/native_unwind.hpp>
 #include <vector>
 #include <cstdint>
 
@@ -216,3 +217,53 @@ TEST_CASE("Stack Walker - Safety Guards (Misaligned, Cycles, Nulls)") {
     dummy[3] = 0x1000;
     CHECK_EQ(brass_stack_walk(reinterpret_cast<uintptr_t>(&dummy[2]), 0x1000, empty_maps, nullptr, nullptr), 0ULL);
 }
+
+#if defined(BRASS_NATIVE_UNWIND)
+namespace {
+
+struct CaptureProbe {
+    NativeUnwindFrame frame;
+    bool ok = false;
+    uintptr_t callee_local = 0;
+    uintptr_t caller_local = 0;
+};
+
+__attribute__((noinline)) void capture_callee(CaptureProbe& p) {
+    volatile int here = 0;
+    p.callee_local = reinterpret_cast<uintptr_t>(&here);
+    p.ok = brass_capture_frame(p.frame, 0);
+    asm volatile("" ::: "memory");
+}
+
+__attribute__((noinline)) void capture_caller(CaptureProbe& p) {
+    volatile int mine = 0;
+    p.caller_local = reinterpret_cast<uintptr_t>(&mine);
+    capture_callee(p);
+    asm volatile("" ::: "memory");
+}
+
+} // namespace
+
+// The walk a host collection starts (brass_stack_walk_from_here) begins at
+// the frame brass_capture_frame hands it, and every CFI step after that
+// works from its stack pointer. That pointer was once the callee's (the
+// context _Unwind_Backtrace gives for a frame already carries the frame's
+// own stack pointer as its CFA): the first step then read the saved rbp and
+// return address a whole frame too low, and a collection started from a
+// host function called by generated code never reached the generated frames.
+TEST_CASE("Stack Walker - a captured native frame carries its own stack pointer, and steps to its caller") {
+    CaptureProbe p;
+    capture_caller(p);
+    REQUIRE(p.ok);
+    // capture_caller at its call to capture_callee: above every byte of the
+    // callee's frame, at or below the caller's own locals.
+    CHECK(p.frame.sp > p.callee_local);
+    CHECK(p.frame.sp <= p.caller_local);
+    CHECK(brass_ip_in_image(p.frame.ip));
+    // One CFI step: this test's frame, above capture_caller's locals.
+    NativeUnwindFrame up = p.frame;
+    REQUIRE(brass_unwind_step(up));
+    CHECK(up.sp > p.caller_local);
+    CHECK(brass_ip_in_image(up.ip));
+}
+#endif

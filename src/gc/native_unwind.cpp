@@ -417,24 +417,27 @@ bool brass_unwind_step(NativeUnwindFrame& f, bool ip_is_return_address) noexcept
 namespace {
 
 struct Capture {
-    unsigned want;
+    unsigned want = 0;
     unsigned index = 0;
-    uintptr_t callee_cfa = 0;
     NativeUnwindFrame out;
     bool found = false;
 };
 
+// A context _Unwind_Backtrace hands the callback describes a frame after the
+// unwinder stepped out of its callee: its IP is the return address into the
+// frame, and its CFA (_Unwind_GetCFA) is the callee's canonical frame
+// address, which is this frame's own stack pointer at that call, as libgcc
+// and LLVM libunwind both report it. It is not this frame's CFA: taking the
+// next frame's value instead started the walk a whole frame too low.
 _Unwind_Reason_Code capture_one(_Unwind_Context* ctx, void* arg) {
     auto* c = static_cast<Capture*>(arg);
-    const uintptr_t cfa = static_cast<uintptr_t>(_Unwind_GetCFA(ctx));
     if (c->index == c->want) {
         c->out.ip = static_cast<uintptr_t>(_Unwind_GetIP(ctx));
-        c->out.sp = c->callee_cfa;
+        c->out.sp = static_cast<uintptr_t>(_Unwind_GetCFA(ctx));
         c->out.fp = static_cast<uintptr_t>(_Unwind_GetGR(ctx, static_cast<int>(kFpReg)));
         c->found = c->out.ip != 0 && c->out.sp != 0;
         return _URC_END_OF_STACK;
     }
-    c->callee_cfa = cfa;
     ++c->index;
     return _URC_NO_REASON;
 }
@@ -443,7 +446,8 @@ _Unwind_Reason_Code capture_one(_Unwind_Context* ctx, void* arg) {
 
 __attribute__((noinline)) bool brass_capture_frame(NativeUnwindFrame& f, unsigned skip) noexcept {
     // Frame 0 is this function, 1 its caller, 2 that caller's caller.
-    Capture c{skip + 2};
+    Capture c;
+    c.want = skip + 2;
     _Unwind_Backtrace(capture_one, &c);
     if (!c.found) return false;
     f = c.out;
