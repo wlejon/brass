@@ -68,9 +68,13 @@ void EmitContext::emit_parallel_copy(const LirInst& inst) {
             }
         } else {
             MemAddress dst_mem = to_mem_address(dst);
+            // A spill slot holds a 32-bit GPR value zero-extended to all 8
+            // bytes (linear_scan_rewrite's write-back does the same): its
+            // reloads may be 64-bit, e.g. as an address index.
+            const bool whole_slot = dst.is_spill_slot();
             if (src.is_preg()) {
                 if (src.preg_val.is_gpr()) {
-                    if (src.size == 4) enc_.mov32(dst_mem, src.preg_val.as_gpr());
+                    if (src.size == 4 && !whole_slot) enc_.mov32(dst_mem, src.preg_val.as_gpr());
                     else enc_.mov(dst_mem, src.preg_val.as_gpr());
                 } else {
                     if (dst.size == 32 || src.size == 32) {
@@ -86,6 +90,11 @@ void EmitContext::emit_parallel_copy(const LirInst& inst) {
             } else if (src.is_imm_int()) {
                 if (dst.size == 4) {
                     enc_.mov32(dst_mem, static_cast<int32_t>(src.imm_int));
+                    if (whole_slot) {
+                        MemAddress hi = dst_mem;
+                        hi.disp += 4;
+                        enc_.mov32(hi, 0);
+                    }
                 } else if (src.imm_int >= INT32_MIN && src.imm_int <= INT32_MAX) {
                     enc_.mov(dst_mem, static_cast<int32_t>(src.imm_int));
                 } else {
@@ -107,8 +116,9 @@ void EmitContext::emit_parallel_copy(const LirInst& inst) {
                     enc_.movups(XMM::XMM15, src_mem);
                     enc_.movups(dst_mem, XMM::XMM15);
                 } else if (dst.size == 4 && src.size == 4) {
-                    enc_.mov32(GPR::R11, src_mem);
-                    enc_.mov32(dst_mem, GPR::R11);
+                    enc_.mov32(GPR::R11, src_mem);   // zero-extends
+                    if (whole_slot) enc_.mov(dst_mem, GPR::R11);
+                    else enc_.mov32(dst_mem, GPR::R11);
                 } else {
                     enc_.mov(GPR::R11, src_mem);
                     enc_.mov(dst_mem, GPR::R11);
