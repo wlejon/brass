@@ -110,6 +110,13 @@ public:
     // places only a fixed set of sections and folds these into its own.
     static constexpr const char* kLsdaSection = ".gcc_except_table";
     static constexpr const char* kPersonalitySection = ".data.rel.ro.brass_personality";
+
+    // Appends section `from` to section `into` (created if absent), with its
+    // relocations, and points every relocation that named `from` at the same
+    // bytes of `into`. `from` is left empty; it must define no symbols (the
+    // two sections above define none), so no symbol index has to move.
+    static void fold_section(ObjectFile& obj, const std::string& from, const std::string& into,
+                             SectionKind kind, SectionFlags flags);
 };
 
 class ElfWriter {

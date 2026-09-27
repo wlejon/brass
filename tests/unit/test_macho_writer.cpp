@@ -2,10 +2,12 @@
 #include <brass/mir/module.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/verifier.hpp>
+#include <brass/mir/parser.hpp>
 #include <brass/object/object_writer.hpp>
 #include <brass/object/macho_writer.hpp>
 #include <brass/target/macho_dylib_writer.hpp>
 #include <brass/target/aot_linker.hpp>
+#include <algorithm>
 #include <cstring>
 #include <vector>
 #include <string>
@@ -354,6 +356,57 @@ TEST_CASE("Mach-O Dylib Writer - Direct Emission Structure") {
     CHECK(has_dyld_info);
     CHECK(has_symtab);
     CHECK(has_dysymtab);
+}
+
+// A function with landing pads is described to the unwinder with its LSDA
+// and the CIE naming brass_sysv_personality, bound by dyld, as the ELF
+// shared-object writer does. The dylib once carried only the plain "zR" CIE,
+// so a C++ BrassException a helper or host function threw passed through
+// the module's frames and missed every pad.
+TEST_CASE("Mach-O Dylib Writer - a function with landing pads names the personality and its LSDA") {
+    const char* src = R"(module @dylib_eh
+func @dy_thrower(%x: i64) -> i64 {
+b0:
+  throw %x
+}
+func @dy_catcher(%x: i64) -> i64 {
+b0:
+  %v = invoke.i64 @dy_thrower(%x), ok, bad
+ok:
+  ret %v
+bad:
+  %e = landing_pad.i64
+  ret %e
+}
+)";
+    for (const Target target : {Target::x64_macos(), Target::aarch64_macos()}) {
+        DiagnosticReporter diag;
+        auto mod = parse_module(src, &diag);
+        REQUIRE(mod != nullptr);
+        REQUIRE(verify_module(*mod, &diag));
+        ObjectFile obj = compile_module_to_object(*mod, target);
+        bool any_scopes = false;
+        for (const auto& fn : obj.functions) any_scopes = any_scopes || fn.exception_table.has_scopes();
+        REQUIRE(any_scopes);
+
+        ImportLibrary rt{"@rpath/libbrass_rt.dylib", {"brass_sysv_personality"}};
+        for (const auto& s : obj.symbols) {
+            if (s.section_index == SECTION_UNDEF) rt.symbols.push_back(s.name);
+        }
+        MachODylibOptions opts;
+        opts.imports.push_back(rt);
+        std::string err;
+        std::vector<uint8_t> dylib = MachODylibWriter::emit(obj, opts, &err);
+        CHECK_EQ(err, std::string());
+        REQUIRE(!dylib.empty());
+        auto contains = [&](const char* s) {
+            const size_t n = std::strlen(s) + 1;  // with the terminator
+            return std::search(dylib.begin(), dylib.end(), s, s + n) != dylib.end();
+        };
+        CHECK(contains("zR"));
+        CHECK(contains("zPLR"));
+        CHECK(contains("_brass_sysv_personality"));
+    }
 }
 
 TEST_CASE("Mach-O Writer - LC_BUILD_VERSION carries the requested or resolved platform and versions") {

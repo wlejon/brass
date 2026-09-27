@@ -110,11 +110,34 @@ std::vector<uint8_t> MachODylibWriter::write() {
 
     // DWARF CFI in __TEXT,__eh_frame, which libunwind searches when there is
     // no __unwind_info, so that a C++ exception thrown from a host callback
-    // unwinds through this image's frames.
+    // unwinds through this image's frames and lands at their pads: a
+    // function with exception scopes gets its LSDA and the CIE naming
+    // brass_sysv_personality, as the ELF shared-object writer does. Without
+    // the personality a BrassException (every TypeError a runtime helper or
+    // a native raises) passed through the image's frames uncaught. The LSDAs
+    // join the read-only data (__DATA_CONST,__const) and the personality
+    // word the writable data, which dyld binds; both are sections this
+    // writer places.
     if (!working_obj.functions.empty() && !working_obj.get_section(".eh_frame")) {
+        auto first_of_kind = [&](SectionKind kind, const char* fallback) -> std::string {
+            for (const auto& s : working_obj.sections) {
+                if (s.kind == kind) return s.name;
+            }
+            return fallback;
+        };
+        std::string ro_name = working_obj.get_section(".rodata")  ? std::string(".rodata")
+                              : working_obj.get_section(".rdata") ? std::string(".rdata")
+                              : working_obj.get_section("__const") ? std::string("__const")
+                                                                   : first_of_kind(SectionKind::RoData, ".rodata");
+        std::string data_name =
+            working_obj.get_section(".data") ? std::string(".data") : first_of_kind(SectionKind::Data, ".data");
         auto& eh = working_obj.get_or_create_section(
             ".eh_frame", SectionKind::EhFrame, SectionFlags::Read | SectionFlags::Alloc, 8);
-        ElfCfiBuilder::build_eh_frame(working_obj, eh);
+        ElfCfiBuilder::build_eh_frame(working_obj, eh, /*with_personality=*/true);
+        ElfCfiBuilder::fold_section(working_obj, ElfCfiBuilder::kLsdaSection, ro_name, SectionKind::RoData,
+                                    SectionFlags::Read | SectionFlags::Alloc);
+        ElfCfiBuilder::fold_section(working_obj, ElfCfiBuilder::kPersonalitySection, data_name, SectionKind::Data,
+                                    SectionFlags::Read | SectionFlags::Write | SectionFlags::Alloc);
     }
 
     // ---- the object's sections ---------------------------------------------

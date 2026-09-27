@@ -138,36 +138,6 @@ size_t count_fdes(const std::vector<uint8_t>& eh_frame) {
     return n;
 }
 
-// Appends section `from` to section `into` (created if absent), with its
-// relocations, and points every relocation that named `from` at the same
-// bytes of `into`. `from` is left empty; it defines no symbols, so no index
-// has to move.
-void fold_section(object::ObjectFile& obj, const std::string& from, const std::string& into,
-                  object::SectionKind kind, object::SectionFlags flags) {
-    const object::Section* src = obj.get_section(from);
-    if (src == nullptr || src->data.empty()) return;
-    const uint32_t align = std::max<uint32_t>(src->alignment, 1);
-    object::Section& dst = obj.get_or_create_section(into, kind, flags, std::max<uint32_t>(align, 8));
-    object::Section& moved = *obj.get_section(from);   // creating `dst` may have moved it
-    dst.alignment = std::max(dst.alignment, align);
-    dst.align_to(align);
-    const uint64_t base = dst.data.size();
-    dst.data.insert(dst.data.end(), moved.data.begin(), moved.data.end());
-    for (object::ObjectRelocation r : moved.relocations) {
-        r.offset += base;
-        dst.relocations.push_back(std::move(r));
-    }
-    moved.data.clear();
-    moved.relocations.clear();
-    for (auto& sec : obj.sections) {
-        for (auto& r : sec.relocations) {
-            if (r.symbol_name != from) continue;
-            r.symbol_name = into;
-            r.addend += static_cast<int64_t>(base);
-        }
-    }
-}
-
 } // namespace
 
 ElfSoWriter::ElfSoWriter(const object::ObjectFile& obj, const ElfSoOptions& options)
@@ -199,10 +169,12 @@ std::vector<uint8_t> ElfSoWriter::write() {
             ".eh_frame", object::SectionKind::EhFrame,
             object::SectionFlags::Read | object::SectionFlags::Alloc, 8);
         object::ElfCfiBuilder::build_eh_frame(working_obj, eh, /*with_personality=*/true);
-        fold_section(working_obj, object::ElfCfiBuilder::kLsdaSection, ro_name, object::SectionKind::RoData,
-                     object::SectionFlags::Read | object::SectionFlags::Alloc);
-        fold_section(working_obj, object::ElfCfiBuilder::kPersonalitySection, ".data", object::SectionKind::Data,
-                     object::SectionFlags::Read | object::SectionFlags::Write | object::SectionFlags::Alloc);
+        object::ElfCfiBuilder::fold_section(working_obj, object::ElfCfiBuilder::kLsdaSection, ro_name,
+                                            object::SectionKind::RoData,
+                                            object::SectionFlags::Read | object::SectionFlags::Alloc);
+        object::ElfCfiBuilder::fold_section(
+            working_obj, object::ElfCfiBuilder::kPersonalitySection, ".data", object::SectionKind::Data,
+            object::SectionFlags::Read | object::SectionFlags::Write | object::SectionFlags::Alloc);
     }
     const auto* eh_src = working_obj.get_section(".eh_frame");
     const bool has_eh = eh_src != nullptr && !eh_src->data.empty();

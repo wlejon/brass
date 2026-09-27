@@ -82,17 +82,22 @@ RuntimeValue FastInterpreter::execute_frame(FastFrame& frame) {
 
 #if defined(__GNUC__) || defined(__clang__)
 #define BRASS_DIRECT_THREADED 1
-    // Shared by every thread. It is built in a local array and published
-    // once: filled in place, a second thread's first call re-wrote every
-    // entry to do_invalid_op while the first thread was already dispatching
-    // through it ("Invalid opcode 7" on two threads entering at once).
+    // Shared by every thread, and filled exactly once under a lock: filled
+    // unguarded, a second thread's first call re-wrote every entry to
+    // do_invalid_op while the first thread was already dispatching through
+    // it ("Invalid opcode 7" on two threads entering at once). It is filled
+    // in place rather than built in a local array and copied, because a
+    // local array of 256 pointers is 2 KB in every interpreter frame — every
+    // JS call at tier 0 — and GCC keeps it there for the frame's lifetime,
+    // which cost Linux 40% of its recursion depth (tiers_06_ackermann).
     static void* dispatch_table[256];
-    static std::once_flag table_once;
+    static std::mutex table_mutex;
     static std::atomic<bool> table_inited{false};
     if (BRASS_UNLIKELY(!table_inited.load(std::memory_order_acquire))) {
-        void* local_table[256];
-        for (size_t i = 0; i < 256; ++i) local_table[i] = &&do_invalid_op;
-#define TENTRY(op) local_table[static_cast<size_t>(BytecodeOp::op)] = &&do_##op
+        std::lock_guard<std::mutex> table_lock(table_mutex);
+        if (!table_inited.load(std::memory_order_relaxed)) {
+        for (size_t i = 0; i < 256; ++i) dispatch_table[i] = &&do_invalid_op;
+#define TENTRY(op) dispatch_table[static_cast<size_t>(BytecodeOp::op)] = &&do_##op
         TENTRY(nop); TENTRY(unreachable); TENTRY(iconst32); TENTRY(load_const);
         TENTRY(patchable_const32); TENTRY(patchable_const64);
         TENTRY(mov); TENTRY(mov_imm); TENTRY(sext64); TENTRY(zext64);
@@ -150,8 +155,8 @@ RuntimeValue FastInterpreter::execute_frame(FastFrame& frame) {
         TENTRY(br_slt_i64); TENTRY(br_sle_i64); TENTRY(br_ult_i64); TENTRY(br_ule_i64);
         TENTRY(add_imm_i32); TENTRY(add_imm_i64);
 #undef TENTRY
-        std::call_once(table_once, [&] { std::memcpy(dispatch_table, local_table, sizeof(local_table)); });
         table_inited.store(true, std::memory_order_release);
+        }
     }
 
 #define OP_CASE(name) do_##name:

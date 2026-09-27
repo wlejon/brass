@@ -125,16 +125,31 @@ void skip_encoded(Reader& r, uint8_t enc) noexcept {
 }
 
 // How the caller's value of one register is recovered.
+// A DWARF expression inside the CFI, which lives as long as its image does.
+struct Expr {
+    const uint8_t* p = nullptr;
+    uint64_t len = 0;
+};
+
 struct Rule {
-    enum Kind : uint8_t { Same, Undefined, Offset, ValOffset, Register, Unsupported };
+    enum Kind : uint8_t { Same, Undefined, Offset, ValOffset, Register, Expression, ValExpression };
     Kind kind = Same;
     int64_t value = 0;  // the CFA offset, or the register
+    Expr expr;          // Expression / ValExpression
+
+    Rule() = default;
+    Rule(Kind k, int64_t v, Expr e = {}) noexcept : kind(k), value(v), expr(e) {}
 };
 
 struct Row {
     unsigned cfa_reg = kSpReg;
     int64_t cfa_offset = 0;
     bool cfa_ok = true;
+    // A CFA computed by an expression (DW_CFA_def_cfa_expression), as GCC
+    // describes a function that realigns its stack: the CFA is then loaded
+    // from the frame (`breg6 -40; deref`), not a register plus an offset.
+    bool cfa_is_expr = false;
+    Expr cfa_expr;
     Rule fp;
     Rule ra;
     bool ra_signed = false;  // AArch64 pointer authentication
@@ -250,14 +265,26 @@ bool run_cfa_program(const uint8_t* p, const uint8_t* end, const Cie& cie, uintp
             row.cfa_reg = static_cast<unsigned>(r.uleb());
             row.cfa_offset = static_cast<int64_t>(r.uleb());
             row.cfa_ok = true;
+            row.cfa_is_expr = false;
             break;
-        case 0x0D: row.cfa_reg = static_cast<unsigned>(r.uleb()); break;            // def_cfa_register
-        case 0x0E: row.cfa_offset = static_cast<int64_t>(r.uleb()); break;          // def_cfa_offset
-        case 0x0F: row.cfa_ok = false; r.skip(r.uleb()); break;                      // def_cfa_expression
+        case 0x0D:  // def_cfa_register
+            row.cfa_reg = static_cast<unsigned>(r.uleb());
+            row.cfa_is_expr = false;
+            break;
+        case 0x0E: row.cfa_offset = static_cast<int64_t>(r.uleb()); break;  // def_cfa_offset
+        case 0x0F: {  // def_cfa_expression
+            const uint64_t n = r.uleb();
+            row.cfa_expr = {r.p, n};
+            row.cfa_is_expr = true;
+            row.cfa_ok = true;
+            r.skip(n);
+            break;
+        }
         case 0x10: case 0x16: {  // expression, val_expression
             const uint64_t reg = r.uleb();
-            set_rule(row, cie, reg, {Rule::Unsupported, 0});
-            r.skip(r.uleb());
+            const uint64_t n = r.uleb();
+            set_rule(row, cie, reg, {op == 0x10 ? Rule::Expression : Rule::ValExpression, 0, {r.p, n}});
+            r.skip(n);
             break;
         }
         case 0x11: {  // offset_extended_sf
@@ -269,6 +296,7 @@ bool run_cfa_program(const uint8_t* p, const uint8_t* end, const Cie& cie, uintp
             row.cfa_reg = static_cast<unsigned>(r.uleb());
             row.cfa_offset = r.sleb() * cie.data_align;
             row.cfa_ok = true;
+            row.cfa_is_expr = false;
             break;
         case 0x13: row.cfa_offset = r.sleb() * cie.data_align; break;  // def_cfa_offset_sf
         case 0x14: {  // val_offset
@@ -301,6 +329,85 @@ bool register_value(const NativeUnwindFrame& f, int64_t reg, uintptr_t& out) noe
     return true;
 }
 
+// Evaluates a CFI expression (DWARF 5 section 2.5) over the frame's known
+// registers, with `initial` pushed first when there is one (a register
+// rule's expression starts from the CFA). What compilers emit here is small
+// — GCC's realigned-stack frames say `breg6 -40; deref` for the CFA and
+// `breg6 <off>` for each saved register — so this knows the stack, constant,
+// register and arithmetic operations and refuses anything else (a register
+// it does not track, a control-flow op), which fails the step as before.
+bool eval_expr(const Expr& e, const NativeUnwindFrame& f, const uintptr_t* initial, uintptr_t& out) noexcept {
+    constexpr int kDepth = 16;
+    uintptr_t st[kDepth];
+    int n = 0;
+    auto push = [&](uintptr_t v) {
+        if (n == kDepth) return false;
+        st[n++] = v;
+        return true;
+    };
+    if (initial && !push(*initial)) return false;
+    Reader r{e.p, e.p + e.len};
+    while (r.ok && r.p < r.end) {
+        const uint8_t op = r.u8();
+        if (op >= 0x30 && op <= 0x4F) {  // lit0..lit31
+            if (!push(op - 0x30u)) return false;
+            continue;
+        }
+        if (op >= 0x70 && op <= 0x8F) {  // breg0..breg31
+            uintptr_t v = 0;
+            if (!register_value(f, op - 0x70, v)) return false;
+            if (!push(v + static_cast<uintptr_t>(r.sleb()))) return false;
+            continue;
+        }
+        switch (op) {
+        case 0x06:  // deref
+            if (n < 1 || st[n - 1] == 0 || (st[n - 1] % 8) != 0) return false;
+            st[n - 1] = load_word(st[n - 1]);
+            break;
+        case 0x08: if (!push(r.fixed(1))) return false; break;                                 // const1u
+        case 0x09: if (!push(static_cast<uintptr_t>(static_cast<int8_t>(r.fixed(1))))) return false; break;   // const1s
+        case 0x0A: if (!push(r.fixed(2))) return false; break;                                 // const2u
+        case 0x0B: if (!push(static_cast<uintptr_t>(static_cast<int16_t>(r.fixed(2))))) return false; break;  // const2s
+        case 0x0C: if (!push(r.fixed(4))) return false; break;                                 // const4u
+        case 0x0D: if (!push(static_cast<uintptr_t>(static_cast<int32_t>(r.fixed(4))))) return false; break;  // const4s
+        case 0x0E: case 0x0F: if (!push(r.fixed(8))) return false; break;                      // const8u/s
+        case 0x10: if (!push(r.uleb())) return false; break;                                   // constu
+        case 0x11: if (!push(static_cast<uintptr_t>(r.sleb()))) return false; break;           // consts
+        case 0x12: if (n < 1 || !push(st[n - 1])) return false; break;                         // dup
+        case 0x13: if (n < 1) return false; --n; break;                                        // drop
+        case 0x1A: case 0x1C: case 0x1E: case 0x21: case 0x22: case 0x27: {  // and minus mul or plus xor
+            if (n < 2) return false;
+            const uintptr_t b = st[--n];
+            uintptr_t& a = st[n - 1];
+            switch (op) {
+            case 0x1A: a &= b; break;
+            case 0x1C: a -= b; break;
+            case 0x1E: a *= b; break;
+            case 0x21: a |= b; break;
+            case 0x22: a += b; break;
+            default: a ^= b; break;
+            }
+            break;
+        }
+        case 0x23:  // plus_uconst
+            if (n < 1) return false;
+            st[n - 1] += static_cast<uintptr_t>(r.uleb());
+            break;
+        case 0x92: {  // bregx
+            const uint64_t reg = r.uleb();
+            uintptr_t v = 0;
+            if (!register_value(f, static_cast<int64_t>(reg), v)) return false;
+            if (!push(v + static_cast<uintptr_t>(r.sleb()))) return false;
+            break;
+        }
+        default: return false;
+        }
+    }
+    if (!r.ok || n < 1) return false;
+    out = st[n - 1];
+    return true;
+}
+
 bool apply_rule(const Rule& rule, const NativeUnwindFrame& f, uintptr_t cfa, uintptr_t same, uintptr_t& out) noexcept {
     switch (rule.kind) {
     case Rule::Same: out = same; return true;
@@ -308,6 +415,13 @@ bool apply_rule(const Rule& rule, const NativeUnwindFrame& f, uintptr_t cfa, uin
     case Rule::Offset: out = load_word(cfa + static_cast<uintptr_t>(rule.value)); return true;
     case Rule::ValOffset: out = cfa + static_cast<uintptr_t>(rule.value); return true;
     case Rule::Register: return register_value(f, rule.value, out);
+    case Rule::Expression: {
+        uintptr_t at = 0;
+        if (!eval_expr(rule.expr, f, &cfa, at) || (at % 8) != 0) return false;
+        out = load_word(at);
+        return true;
+    }
+    case Rule::ValExpression: return eval_expr(rule.expr, f, &cfa, out);
     default: return false;
     }
 }
@@ -347,9 +461,14 @@ CfiStep step_by_cfi(NativeUnwindFrame& f, uintptr_t lookup) noexcept {
     if (!run_cfa_program(r.p, r.end, cie, loc, lookup, row, initial)) return CfiStep::Failed;
     if (!row.cfa_ok) return CfiStep::Failed;
 
-    uintptr_t base = 0;
-    if (!register_value(f, row.cfa_reg, base)) return CfiStep::Failed;
-    const uintptr_t cfa = base + static_cast<uintptr_t>(row.cfa_offset);
+    uintptr_t cfa = 0;
+    if (row.cfa_is_expr) {
+        if (!eval_expr(row.cfa_expr, f, nullptr, cfa)) return CfiStep::Failed;
+    } else {
+        uintptr_t base = 0;
+        if (!register_value(f, row.cfa_reg, base)) return CfiStep::Failed;
+        cfa = base + static_cast<uintptr_t>(row.cfa_offset);
+    }
     if (cfa <= f.sp || (cfa % 8) != 0) return CfiStep::Failed;
 
     uintptr_t ra = 0, fp = 0;
@@ -455,8 +574,19 @@ __attribute__((noinline)) bool brass_capture_frame(NativeUnwindFrame& f, unsigne
 }
 
 bool brass_ip_in_image(uintptr_t ip) noexcept {
+#if defined(DLFO_EH_SEGMENT_TYPE)
+    // glibc 2.35+: a lock-free lookup in a sorted table of the loaded
+    // objects. dladdr answers the same question but also looks for the
+    // nearest symbol, scanning the object's whole symbol table on every
+    // call; a collection asks once per frame it steps, so under GC stress a
+    // deep native stack (82k frames of nested async resumes) made every
+    // collection take seconds and the program never finished.
+    dl_find_object found;
+    return _dl_find_object(reinterpret_cast<void*>(ip), &found) == 0;
+#else
     Dl_info info;
     return dladdr(reinterpret_cast<void*>(ip), &info) != 0 && info.dli_fbase != nullptr;
+#endif
 }
 
 } // namespace brass

@@ -6,6 +6,9 @@
 #include <brass/mir/critical_edge.hpp>
 #include <brass/mir/parser.hpp>
 #include <brass/interpreter/interpreter.hpp>
+#include <algorithm>
+#include <string>
+#include <vector>
 
 using namespace brass;
 
@@ -107,6 +110,71 @@ TEST_CASE("Critical Edge - Splitting Preserves Dominance and Verification") {
     CHECK(dom.dominates(b0, split_bb));
     CHECK(dom.dominates(b1, split_bb));
     CHECK_FALSE(dom.dominates(split_bb, b2));
+}
+
+// split_critical_edges splits every edge in one pass and rebuilds the
+// predecessor lists once (it once rebuilt them and rescanned from the
+// first block after each split, quadratic in the blocks: most of a
+// minute on a bundle's top level). The blocks it creates land where
+// splitting one edge at a time put them: right after their source, a
+// source's later splits before its earlier ones.
+TEST_CASE("Critical Edge - splitting all edges places each split after its source, with exact predecessors") {
+    Module mod("test_crit_edge_all");
+    Builder b(mod);
+    Function* fn = mod.create_function("test_all", Type::i32(), {Type::i32(), Type::i32()});
+    b.set_function(fn);
+
+    BasicBlock* e = b.append_block("e");
+    BasicBlock* a = b.append_block("a");
+    BasicBlock* c = b.append_block("c");
+    BasicBlock* d1 = b.append_block("d1");
+    BasicBlock* d2 = b.append_block("d2");
+    BasicBlock* j = b.append_block("j");
+
+    b.position_at_end(e);
+    Value* c1 = b.add_block_param(e, Type::i32());
+    Value* c2 = b.add_block_param(e, Type::i32());
+    b.build_br_if(c1, a, c);
+    b.position_at_end(a);
+    b.build_br_if(c2, d1, d2);
+    b.position_at_end(c);
+    b.build_br_if(c2, d1, d2);
+    b.position_at_end(d1);
+    b.build_br(j);
+    b.position_at_end(d2);
+    b.build_br(j);
+    b.position_at_end(j);
+    b.build_ret(b.build_iconst_i32(7));
+    fn->rebuild_cfg_predecessors();
+    REQUIRE(verify_function(*fn));
+
+    CriticalEdgeStats stats;
+    REQUIRE(split_critical_edges(*fn, &stats));
+    CHECK_EQ(stats.critical_edges_split, 4ULL);
+    REQUIRE(verify_function(*fn));
+
+    std::vector<std::string> order;
+    for (const BasicBlock* bb : fn->blocks()) order.emplace_back(bb->name());
+    const std::vector<std::string> expected = {"e", "a", "a_d2_crit", "a_d1_crit", "c", "c_d2_crit",
+                                               "c_d1_crit", "d1", "d2", "j"};
+    CHECK(order == expected);
+
+    for (BasicBlock* src : fn->blocks()) {
+        for (BasicBlock* dst : src->successors()) CHECK_FALSE(is_critical_edge(src, dst));
+    }
+    // Every list names exactly the blocks that branch there.
+    for (const BasicBlock* bb : fn->blocks()) {
+        size_t edges_in = 0;
+        for (const BasicBlock* src : fn->blocks()) {
+            for (const BasicBlock* s : src->successors()) edges_in += s == bb ? 1 : 0;
+        }
+        CHECK_EQ(bb->predecessors().size(), edges_in);
+        for (const BasicBlock* p : bb->predecessors()) {
+            const auto succs = p->successors();
+            CHECK(std::find(succs.begin(), succs.end(), bb) != succs.end());
+        }
+    }
+    CHECK_FALSE(split_critical_edges(*fn));
 }
 
 TEST_CASE("Critical Edge - Splitting Preserves Block Parameter Passing and Runtime Values") {

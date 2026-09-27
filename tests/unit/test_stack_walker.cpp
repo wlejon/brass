@@ -221,24 +221,38 @@ TEST_CASE("Stack Walker - Safety Guards (Misaligned, Cycles, Nulls)") {
 #if defined(BRASS_NATIVE_UNWIND)
 namespace {
 
+// The frame captured in the callee, and the steps from it. The steps are
+// taken in the callee, while every frame they cross is live: once the
+// caller has returned, its stack is reused by whatever runs next (the
+// step's own frame among it), and stepping it reads whatever that left.
 struct CaptureProbe {
     NativeUnwindFrame frame;
+    NativeUnwindFrame up;       // one step from `frame`
+    NativeUnwindFrame further;  // one step from `up`
     bool ok = false;
+    bool stepped = false;
+    bool stepped_again = false;
     uintptr_t callee_local = 0;
     uintptr_t caller_local = 0;
 };
 
-__attribute__((noinline)) void capture_callee(CaptureProbe& p) {
-    volatile int here = 0;
+// Eight arguments, so a caller passes two of them on its stack.
+__attribute__((noinline)) void capture_callee(CaptureProbe& p, long a1, long a2, long a3, long a4, long a5,
+                                              long a6, long a7, long a8) {
+    volatile long here = a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8;
     p.callee_local = reinterpret_cast<uintptr_t>(&here);
     p.ok = brass_capture_frame(p.frame, 0);
+    p.up = p.frame;
+    p.stepped = p.ok && brass_unwind_step(p.up);
+    p.further = p.up;
+    p.stepped_again = p.stepped && brass_unwind_step(p.further);
     asm volatile("" ::: "memory");
 }
 
 __attribute__((noinline)) void capture_caller(CaptureProbe& p) {
     volatile int mine = 0;
     p.caller_local = reinterpret_cast<uintptr_t>(&mine);
-    capture_callee(p);
+    capture_callee(p, 0, 0, 0, 0, 0, 0, 0, 0);
     asm volatile("" ::: "memory");
 }
 
@@ -261,9 +275,49 @@ TEST_CASE("Stack Walker - a captured native frame carries its own stack pointer,
     CHECK(p.frame.sp <= p.caller_local);
     CHECK(brass_ip_in_image(p.frame.ip));
     // One CFI step: this test's frame, above capture_caller's locals.
-    NativeUnwindFrame up = p.frame;
-    REQUIRE(brass_unwind_step(up));
-    CHECK(up.sp > p.caller_local);
-    CHECK(brass_ip_in_image(up.ip));
+    REQUIRE(p.stepped);
+    CHECK(p.up.sp > p.caller_local);
+    CHECK(brass_ip_in_image(p.up.ip));
+}
+
+namespace {
+
+// A frame that realigns its stack through a dynamic realign argument
+// pointer (r10 on x86-64), which GCC describes with DWARF expressions: the
+// CFA is `breg6 -N; deref` (loaded from the frame) and each saved register
+// an `expression` rule, as in the fast interpreter's execute_frame.
+// GCC uses that prologue when a realigned frame passes arguments on its
+// stack, as execute_frame does; an over-aligned local alone only gets an
+// rbp-based realignment that def_cfa rules describe.
+__attribute__((noinline)) void capture_realigned(CaptureProbe& p, long seed) {
+    alignas(64) volatile char mine[64] = {};
+    p.caller_local = reinterpret_cast<uintptr_t>(&mine[0]);
+    capture_callee(p, seed, seed + 1, seed + 2, seed + 3, seed + 4, seed + 5, seed + 6, mine[1]);
+    asm volatile("" ::: "memory");
+}
+
+} // namespace
+
+// The CFI interpreter refused DW_CFA_def_cfa_expression and expression
+// rules, so every walk ended at the first realigned frame: on Linux, at
+// each fast-interpreter frame. A stack trace lost every native frame older
+// than it (Array.forEach calling an interpreted callback), and a collection
+// that walked up through an interpreted frame never reached the generated
+// frames beneath it.
+TEST_CASE("Stack Walker - a CFI step crosses a frame that realigns its stack") {
+    CaptureProbe p;
+    volatile long seed = 1;
+    capture_realigned(p, seed);
+    REQUIRE(p.ok);
+    CHECK(p.frame.sp > p.callee_local);
+    CHECK(p.frame.sp <= p.caller_local);
+    REQUIRE(p.stepped);
+    CHECK(p.up.sp > p.caller_local + 64);
+    CHECK(brass_ip_in_image(p.up.ip));
+    // And onward from there, on the frame pointer the expression rule
+    // restored.
+    CHECK(p.stepped_again);
+    CHECK(p.further.sp > p.up.sp);
+    CHECK(brass_ip_in_image(p.further.ip));
 }
 #endif
