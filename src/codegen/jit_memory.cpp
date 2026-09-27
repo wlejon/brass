@@ -232,7 +232,7 @@ void JitMemoryBlock::unregister_unwind_info() noexcept {
 #if defined(_WIN32) && (defined(_M_X64) || defined(__x86_64__) || defined(_M_ARM64) || defined(__aarch64__))
     RtlDeleteFunctionTable(reinterpret_cast<PRUNTIME_FUNCTION>(unwind_table_));
 #elif defined(__APPLE__)
-    uint8_t* p = unwind_table_;
+    uint8_t* p = static_cast<uint8_t*>(unwind_table_);
     while (p + 8 <= ptr_ + size_) {
         uint32_t len = 0;
         std::memcpy(&len, p, 4);
