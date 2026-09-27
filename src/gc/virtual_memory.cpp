@@ -110,9 +110,11 @@ void vm_decommit(void* address, size_t bytes) {
     // that on macOS).
     const size_t page = os_page_bytes();
     const uintptr_t addr = reinterpret_cast<uintptr_t>(address);
-    const uintptr_t aligned_addr = addr & ~(uintptr_t{page} - 1);
-    const size_t aligned_bytes = ((addr + bytes + page - 1) & ~(uintptr_t{page} - 1)) - aligned_addr;
-    mmap(reinterpret_cast<void*>(aligned_addr), aligned_bytes, PROT_NONE, MAP_FIXED | BRASS_MAP_ANON, -1, 0);
+    const uintptr_t aligned_addr = (addr + page - 1) & ~(uintptr_t{page} - 1);
+    const uintptr_t aligned_end = (addr + bytes) & ~(uintptr_t{page} - 1);
+    if (aligned_end > aligned_addr) {
+        mmap(reinterpret_cast<void*>(aligned_addr), aligned_end - aligned_addr, PROT_NONE, MAP_FIXED | BRASS_MAP_ANON, -1, 0);
+    }
 #endif
 }
 

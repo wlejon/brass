@@ -68,12 +68,12 @@ bool cxx_brass_exception_bits(uint64_t cls, const _Unwind_Exception* ue, uint64_
     if (last == 1) {
         // A dependent header's primaryException field points to the primary
         // thrown object, which follows the primary header's _Unwind_Exception.
-        const size_t dep_offset = (kind == kClangCxx) ? 12 * sizeof(void*) : 10 * sizeof(void*);
+        const size_t dep_offset = (kind == kClangCxx) ? 11 * sizeof(void*) : 10 * sizeof(void*);
         const auto* object = static_cast<const _Unwind_Exception*>(read_ptr_at_negative_offset(ue, dep_offset));
         if (!object) return false;
         primary = object - 1;
     }
-    const size_t type_offset = (kind == kClangCxx) ? 11 * sizeof(void*) : 10 * sizeof(void*);
+    const size_t type_offset = 10 * sizeof(void*);
     const auto* type = static_cast<const std::type_info*>(read_ptr_at_negative_offset(primary, type_offset));
     if (!type || *type != typeid(BrassException)) return false;
     const auto* thrown = reinterpret_cast<const BrassException*>(primary + 1);

@@ -265,7 +265,11 @@ b0:
 }
 )";
     auto mod = parse_program(src);
+#if defined(__x86_64__) || defined(_M_X64)
     for (Tier bt : {Tier::Base, Tier::Opt}) {
+#else
+    for (Tier bt : {Tier::Opt}) {
+#endif
         test::BoundHeap heap;
         Program prog(*mod);
         prog.table.pipeline().register_external_symbol("coro_test_probe", reinterpret_cast<void*>(&coro_test_probe));

@@ -242,9 +242,7 @@ uintptr_t Heap::allocate_at(size_t bytes, LayoutId layout, uint32_t flags, uint8
         h->layout = layout;
         h->gc_bits = (flags & kAllocPinned) ? kGcPinned : 0;
         h->host_bits = host_bits;
-        if (total <= kMaxMediumObjectBytes) {
-            std::memset(reinterpret_cast<void*>(header + kHeaderBytes), 0, payload);
-        }  // a large object's pages were committed for it and read as zero
+        std::memset(reinterpret_cast<void*>(header + kHeaderBytes), 0, payload);
         s.old_allocated_since_full += total;
         s.old_direct_bytes += total;
         return header + kHeaderBytes;

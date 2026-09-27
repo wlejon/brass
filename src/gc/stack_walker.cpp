@@ -238,7 +238,11 @@ size_t walk_stack(
         if (find_map(cur.ip()) == nullptr) {
             if (unwind_to_generated(cur) != UnwindResult::Generated) return 0;
         }
+#if defined(_WIN32) && defined(_M_X64)
         if (cur.sp() >= stop_at || cur.fp() < cur.sp()) return 0;
+#else
+        if (cur.sp() >= stop_at) return 0;
+#endif
         cur_rbp = cur.fp();
         cur_return_ip = cur.ip();
     }
@@ -261,8 +265,10 @@ size_t walk_stack(
             const UnwindResult res = unwind_to_generated(cur);
             if (res != UnwindResult::Generated) break;
             if (cur.sp() >= stop_at) break;
+#if defined(_WIN32) && defined(_M_X64)
             // The generated frame's rbp lies at or above its stack pointer.
             if (cur.fp() < cur.sp()) break;
+#endif
             cur_rbp = cur.fp();
             cur_return_ip = cur.ip();
             callee_rbp = 0;

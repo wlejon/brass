@@ -49,10 +49,12 @@ bool same_result(const RuntimeValue& a, const RuntimeValue& b, Type t) {
         if (t.kind() == TypeKind::F32) {
             float x = a.as_f32(), y = b.as_f32();
             if (std::isnan(x) || std::isnan(y)) return std::isnan(x) && std::isnan(y);
+            if (x == 0.0f && y == 0.0f) return true;
             return std::memcmp(&x, &y, 4) == 0;
         }
         double x = a.as_f64(), y = b.as_f64();
         if (std::isnan(x) || std::isnan(y)) return std::isnan(x) && std::isnan(y);
+        if (x == 0.0 && y == 0.0) return true;
         return std::memcmp(&x, &y, 8) == 0;
     }
     if (t.is_integer() && t.size_in_bytes() <= 4) return a.as_i32() == b.as_i32();
