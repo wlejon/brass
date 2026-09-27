@@ -40,18 +40,13 @@ constexpr uint64_t kClangCxx = 0x434C4E47432B2B00ull;
 
 // Negative offsets from _Unwind_Exception to fields in the exception header.
 //
-// In libstdc++ (GNU, kGnuCxx):
-// __cxa_exception has exceptionType at offset 0, and _Unwind_Exception is at
-// offset 80 (10 pointer words). In dependent exceptions
-// (__cxa_dependent_exception), primaryException is at offset 0 (10 pointer
-// words before _Unwind_Exception).
-//
-// In libc++abi (Apple Clang / LLVM on 64-bit, kClangCxx):
-// __cxa_exception has referenceCount at offset 0 and exceptionType at offset 8.
-// With 8 bytes of alignment padding before _Unwind_Exception at offset 96,
-// exceptionType is at offset 8 (88 bytes = 11 pointer words before
-// _Unwind_Exception). In dependent exceptions, primaryException is at offset 0
-// (96 bytes = 12 pointer words before _Unwind_Exception).
+// In both libstdc++ (GNU, kGnuCxx) and libc++abi (Apple Clang / LLVM, kClangCxx)
+// on 64-bit systems, exactly 10 pointer words (80 bytes) precede _Unwind_Exception:
+// exceptionDestructor (1), unexpectedHandler (2), terminateHandler (3),
+// nextException (4), handlerCount/handlerSwitchValue (5), actionRecord (6),
+// languageSpecificData (7), catchTemp (8), adjustedPtr (9), and directly before
+// them at offset -10 * sizeof(void*) is exceptionType (or primaryException in
+// __cxa_dependent_exception).
 const void* read_ptr_at_negative_offset(const _Unwind_Exception* ue, size_t offset_bytes) {
     const auto* p = reinterpret_cast<const char*>(ue) - offset_bytes;
     const void* v = nullptr;
@@ -68,15 +63,21 @@ bool cxx_brass_exception_bits(uint64_t cls, const _Unwind_Exception* ue, uint64_
     if (last == 1) {
         // A dependent header's primaryException field points to the primary
         // thrown object, which follows the primary header's _Unwind_Exception.
-        const size_t dep_offset = (kind == kClangCxx) ? 12 * sizeof(void*) : 10 * sizeof(void*);
+        const size_t dep_offset = 10 * sizeof(void*);
         const auto* object = static_cast<const _Unwind_Exception*>(read_ptr_at_negative_offset(ue, dep_offset));
         if (!object) return false;
         primary = object - 1;
     }
-    const size_t type_offset = (kind == kClangCxx) ? 11 * sizeof(void*) : 10 * sizeof(void*);
+    const size_t type_offset = 10 * sizeof(void*);
     const auto* type = static_cast<const std::type_info*>(read_ptr_at_negative_offset(primary, type_offset));
     if (!type) return false;
-    if (*type != typeid(BrassException) && std::strcmp(type->name(), typeid(BrassException).name()) != 0) return false;
+    if (*type != typeid(BrassException)) {
+        const char* n1 = type->name();
+        const char* n2 = typeid(BrassException).name();
+        if (n1 && n1[0] == '*') ++n1;
+        if (n2 && n2[0] == '*') ++n2;
+        if (!n1 || !n2 || std::strcmp(n1, n2) != 0) return false;
+    }
     const auto* thrown = reinterpret_cast<const BrassException*>(primary + 1);
     bits = thrown->value().raw();
     return true;

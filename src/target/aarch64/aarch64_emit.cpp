@@ -153,6 +153,15 @@ AArch64CompilationResult AArch64EmitContext::compile_pass(const std::vector<uint
         buffer_.bind(block_labels_[block->id]);
         result.block_offsets[block->id] = buffer_.size();
 
+        if (block->is_landing_pad) {
+            size_t outgoing_bytes = (frame_.outgoing_arg_space + 15) & ~size_t(15);
+            if (outgoing_bytes == 0) {
+                enc_.mov(GPR::SP, GPR::FP);
+            } else {
+                enc_.sub(GPR::SP, GPR::FP, static_cast<uint32_t>(outgoing_bytes));
+            }
+        }
+
         uint32_t next_block_id = (b_idx + 1 < fn_.blocks.size()) ? fn_.blocks[b_idx + 1]->id : UINT32_MAX;
         size_t n_insts = block->instructions.size();
 

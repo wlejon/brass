@@ -482,6 +482,7 @@ public:
     std::vector<LirBlock*> successors;
     uint32_t loop_depth = 0;
     x64::Label x64_label;
+    bool is_landing_pad = false;
 
     LirBlock() = default;
     LirBlock(uint32_t id, std::string name) : id(id), name(std::move(name)) {}

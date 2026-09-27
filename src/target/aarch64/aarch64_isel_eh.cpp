@@ -56,6 +56,7 @@ void AArch64ISel::lower_resume(const Instruction& inst, LirBlock& lir_bb) {
 }
 
 void AArch64ISel::lower_landing_pad(const Instruction& inst, LirBlock& lir_bb) {
+    lir_bb.is_landing_pad = true;
     if (inst.type() != Type::void_type() && inst.result()) {
         VReg dst_v = get_vreg(inst.result());
         uint8_t sz = dst_v.size;

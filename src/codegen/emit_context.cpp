@@ -181,6 +181,14 @@ CompilationResult EmitContext::compile_once() {
         buffer_.bind(block_labels_[block->id]);
         result.block_offsets[block->id] = buffer_.size();
 
+        if (block->is_landing_pad) {
+            if (frame_.total_frame_size > 0) {
+                enc_.lea(GPR::RSP, ptr(GPR::RBP, -static_cast<int32_t>(frame_.total_frame_size)));
+            } else {
+                enc_.mov(GPR::RSP, GPR::RBP);
+            }
+        }
+
         auto falls_to = [&](uint32_t target) {
             for (size_t i = b_idx + 1; i < fn_.blocks.size(); ++i) {
                 if (fn_.blocks[i]->id == target) return true;

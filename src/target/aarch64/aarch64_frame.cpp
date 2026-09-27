@@ -199,12 +199,15 @@ void AArch64FrameLayout::emit_epilogue(
     size_t outgoing_bytes = (frame.outgoing_arg_space + 15) & ~size_t(15);
 
     if (total_size <= 504 && outgoing_bytes == 0) {
+        enc.mov(GPR::SP, GPR::FP);
         // ldp fp, lr, [sp], #total_size
         enc.ldp(GPR::FP, GPR::LR, post_idx(GPR::SP, static_cast<int64_t>(total_size)));
     } else {
         if (outgoing_bytes == 0) {
+            enc.mov(GPR::SP, GPR::FP);
             enc.ldp(GPR::FP, GPR::LR, ptr(GPR::SP, 0));
         } else {
+            enc.sub(GPR::SP, GPR::FP, static_cast<uint32_t>(outgoing_bytes));
             enc.ldp(GPR::FP, GPR::LR, ptr(GPR::FP, 0));
         }
         enc.add(GPR::SP, GPR::SP, static_cast<uint32_t>(total_size));
