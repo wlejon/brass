@@ -562,10 +562,12 @@ void AArch64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& li
                     movsd->mir_origin = &inst;
                     lir_bb.append_inst(std::move(movsd));
                 } else {
-                    emit_movaps(dst, src);
+                    // One instruction reading only the vector: dst is an f64
+                    // register, spilled and reloaded 8 bytes wide, so it
+                    // cannot carry the whole vector from a copy to a shuffle.
                     auto shuf = std::make_unique<LirInst>(LirOpcode::Shufpd);
                     shuf->add_def(LirOperand::vreg(dst, 8));
-                    shuf->add_use(LirOperand::vreg(dst, 16));
+                    shuf->add_use(LirOperand::vreg(src, 16));
                     shuf->add_use(LirOperand::vreg(src, 16));
                     shuf->add_use(LirOperand::imm(1, 1));
                     shuf->mir_origin = &inst;

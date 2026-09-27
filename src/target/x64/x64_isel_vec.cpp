@@ -561,10 +561,14 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
                     movsd->mir_origin = &inst;
                     lir_bb.append_inst(std::move(movsd));
                 } else {
-                    emit_movaps(dst, src);
+                    // One instruction reading only the vector: dst is an f64
+                    // register, whose spill slot and reloads are 8 bytes, so
+                    // a copy of the whole vector parked in it (movaps, then
+                    // shufpd reading dst) lost the high lane whenever dst was
+                    // spilled between the two.
                     auto shuf = std::make_unique<LirInst>(LirOpcode::Shufpd);
                     shuf->add_def(LirOperand::vreg(dst, 8));
-                    shuf->add_use(LirOperand::vreg(dst, 16));
+                    shuf->add_use(LirOperand::vreg(src, 16));
                     shuf->add_use(LirOperand::vreg(src, 16));
                     shuf->add_use(LirOperand::imm(1, 1));
                     shuf->mir_origin = &inst;
