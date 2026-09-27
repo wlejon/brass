@@ -801,30 +801,33 @@ void X64ISel::lower_branch_if(const Instruction& inst, LirBlock& lir_bb) {
         jmp_inst->add_use(LirOperand::label(f_target.block->id()));
         jmp_inst->mir_origin = &inst;
         lir_bb.append_inst(std::move(jmp_inst));
-    } else if (t_target.args.empty()) {
+    } else if (t_target.args.empty() || f_target.args.empty()) {
+        // The side with arguments gets a block of its own for their copies,
+        // so that the block ends in a `jcc` + `jmp` pair the emitter can
+        // turn either way: a loop's head whose exit carries a value falls
+        // into its body (one branch an iteration, not two), and a copy
+        // allocation leaves empty is a jump that branches thread through.
+        const bool true_side = !t_target.args.empty();
+        const auto& with_args = true_side ? t_target : f_target;
+        const auto& plain = true_side ? f_target : t_target;
+        auto* trampoline = lir_fn_->create_block(true_side ? "br_if_true" : "br_if_false");
+        link_blocks(lir_bb, *trampoline);
+        if (auto* target_lir = lir_fn_->get_block_by_id(with_args.block->id())) link_blocks(*trampoline, *target_lir);
+
         auto jcc_inst = std::make_unique<LirInst>(LirOpcode::Jcc);
-        jcc_inst->condition = branch_cond;
-        jcc_inst->add_use(LirOperand::label(t_target.block->id()));
+        jcc_inst->condition = true_side ? invert(branch_cond) : branch_cond;
+        jcc_inst->add_use(LirOperand::label(plain.block->id()));
         lir_bb.append_inst(std::move(jcc_inst));
 
-        emit_target_args(lir_bb, f_target);
+        auto jmp_inst = std::make_unique<LirInst>(LirOpcode::Jmp);
+        jmp_inst->add_use(LirOperand::label(trampoline->id));
+        jmp_inst->mir_origin = &inst;
+        lir_bb.append_inst(std::move(jmp_inst));
 
-        auto jmp_f = std::make_unique<LirInst>(LirOpcode::Jmp);
-        jmp_f->add_use(LirOperand::label(f_target.block->id()));
-        jmp_f->mir_origin = &inst;
-        lir_bb.append_inst(std::move(jmp_f));
-    } else if (f_target.args.empty()) {
-        auto jcc_inst = std::make_unique<LirInst>(LirOpcode::Jcc);
-        jcc_inst->condition = invert(branch_cond);
-        jcc_inst->add_use(LirOperand::label(f_target.block->id()));
-        lir_bb.append_inst(std::move(jcc_inst));
-
-        emit_target_args(lir_bb, t_target);
-
-        auto jmp_t = std::make_unique<LirInst>(LirOpcode::Jmp);
-        jmp_t->add_use(LirOperand::label(t_target.block->id()));
-        jmp_t->mir_origin = &inst;
-        lir_bb.append_inst(std::move(jmp_t));
+        emit_target_args(*trampoline, with_args);
+        auto jmp_on = std::make_unique<LirInst>(LirOpcode::Jmp);
+        jmp_on->add_use(LirOperand::label(with_args.block->id()));
+        trampoline->append_inst(std::move(jmp_on));
     } else {
         auto* false_trampoline = lir_fn_->create_block("br_if_false");
         link_blocks(lir_bb, *false_trampoline);

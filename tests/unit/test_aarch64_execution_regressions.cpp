@@ -264,6 +264,66 @@ TEST_CASE("AArch64 parallel copy - an i64 parked across a register cycle keeps i
     CHECK(!has_word(code, size, 0x2A0103EEu));  // mov w14, w1
 }
 
+namespace {
+
+// Load/store register (immediate, unscaled or register offset) GPR stores:
+// bits 29:27 = 111, V = 0, opc = 00; the access size is bits 31:30.
+bool is_gpr_store(uint32_t w) {
+    return ((w >> 27) & 7u) == 7u && ((w >> 26) & 1u) == 0u && ((w >> 22) & 3u) == 0u;
+}
+
+size_t count_gpr_stores(const uint8_t* code, size_t size, uint32_t size_bits) {
+    size_t n = 0;
+    for (size_t off = 0; off + 4 <= size; off += 4) {
+        uint32_t w = 0;
+        std::memcpy(&w, code + off, 4);
+        if (is_gpr_store(w) && (w >> 30) == size_bits) ++n;
+    }
+    return n;
+}
+
+} // namespace
+
+TEST_CASE("AArch64 parallel copy - a narrow GPR copy into a spill slot fills all 8 bytes") {
+    // The same bug d0a886d fixed on x64: a 32-bit register, immediate or
+    // slot-to-slot copy into a spill slot stored 4 bytes, but the slot's
+    // other writers (linear_scan_rewrite's write-back) store all 8 and its
+    // reloads may be 64-bit (an address index), so the stale upper half
+    // became part of an address.
+    for (uint8_t sz : {uint8_t{1}, uint8_t{2}, uint8_t{4}}) {
+        LirFunction fn;
+        fn.name = "spill_copy";
+        fn.frame.is_leaf = true;
+        fn.frame.num_spill_slots = 3;
+        auto bb = std::make_unique<LirBlock>(0, "entry");
+        auto pc = std::make_unique<LirInst>(LirOpcode::ParallelCopy);
+        pc->add_def(LirOperand::slot(0, sz));
+        pc->add_use(LirOperand::preg_aarch64_gpr(aarch64::GPR::X3, sz));
+        pc->add_def(LirOperand::slot(1, sz));
+        pc->add_use(LirOperand::imm(0x5a, sz));
+        pc->add_def(LirOperand::slot(2, sz));
+        pc->add_use(LirOperand::preg_aarch64_gpr(aarch64::GPR::X4, sz));
+        bb->append_inst(std::move(pc));
+        // A slot-to-slot copy: slot 0 <- slot 2 would be reordered, so use a
+        // separate instruction.
+        auto pc2 = std::make_unique<LirInst>(LirOpcode::ParallelCopy);
+        pc2->add_def(LirOperand::slot(0, sz));
+        pc2->add_use(LirOperand::slot(2, sz));
+        bb->append_inst(std::move(pc2));
+        bb->append_inst(std::make_unique<LirInst>(LirOpcode::Ret));
+        fn.blocks.push_back(std::move(bb));
+
+        aarch64::AArch64EmitContext emitter(fn, Target::aarch64_linux());
+        auto res = emitter.compile();
+        const uint8_t* code = res.code_buffer.data();
+        const size_t size = res.code_buffer.size();
+        CHECK_EQ(count_gpr_stores(code, size, 0u), size_t{0});   // strb
+        CHECK_EQ(count_gpr_stores(code, size, 1u), size_t{0});   // strh
+        CHECK_EQ(count_gpr_stores(code, size, 2u), size_t{0});   // str w
+        CHECK(count_gpr_stores(code, size, 3u) >= size_t{4});    // str x
+    }
+}
+
 TEST_CASE("x64 parallel copy - an i64 parked across a register cycle keeps its upper half") {
     // The same break in the shared x64 emitter, on a three-register cycle
     // (a two-register one is an xchg): ecx <- eax (i32), rax <- rdx,
@@ -376,16 +436,26 @@ TEST_CASE("AArch64 regalloc - a vector live across a call is not kept in v8-v15"
     LinearScanAllocator regalloc(*lir, liveness, CallingConvention::aapcs64());
     regalloc.allocate();
 
-    size_t spilled_vectors = 0;
-    for (const VRegInfo& info : lir->vreg_table) {
-        if (info.vreg.is_gpr() || info.vreg.size <= 8) continue;
-        if (info.is_spilled) {
-            ++spilled_vectors;
-        } else if (info.assigned_preg.is_valid()) {
-            const auto code = static_cast<int>(info.assigned_preg.as_aarch64_fpr());
-            CHECK(code < 8 || code > 15);
+    // The allocator splits values, so the vector may sit in a register on
+    // either side of the call: what matters is the rewritten code. No
+    // 128-bit operand names v8-v15, and the vector goes through a 16-byte
+    // spill slot to get across the call.
+    size_t vector_spill_stores = 0;
+    for (const auto& block : lir->blocks) {
+        for (const auto& inst : block->instructions) {
+            for (const auto* ops : {&inst->defs, &inst->uses}) {
+                for (const auto& op : *ops) {
+                    if (op.is_preg() && op.preg_val.is_xmm() && op.size == 16) {
+                        const auto code = static_cast<int>(op.preg_val.as_aarch64_fpr());
+                        CHECK(code < 8 || code > 15);
+                    }
+                }
+            }
+            if (!inst->defs.empty() && inst->defs[0].is_spill_slot() && inst->defs[0].size == 16) {
+                ++vector_spill_stores;
+            }
         }
     }
-    CHECK(spilled_vectors >= 1);
+    CHECK(vector_spill_stores >= 1);
     CHECK_EQ(lir->frame.saved_callee_xmms, 0u);
 }

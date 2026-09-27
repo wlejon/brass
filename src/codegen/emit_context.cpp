@@ -1,4 +1,5 @@
 #include <brass/codegen/emit_context.hpp>
+#include <brass/codegen/branch_threading.hpp>
 #include <brass/runtime/deopt.hpp>
 #include <iostream>
 #include <stdexcept>
@@ -48,7 +49,74 @@ MemAddress EmitContext::to_mem_address(const LirOperand& op) const {
                            " used as a memory address in " + fn_.name);
 }
 
+namespace {
+
+// Opcodes whose encoding is always VEX.256 (the FMA vector forms are 256-bit
+// only on 32-byte operands, which the operand scan sees).
+bool is_vex256_opcode(LirOpcode op) {
+    switch (op) {
+        case LirOpcode::Vmovaps: case LirOpcode::Vmovups:
+        case LirOpcode::Vaddps: case LirOpcode::Vsubps: case LirOpcode::Vmulps:
+        case LirOpcode::Vdivps: case LirOpcode::Vminps: case LirOpcode::Vmaxps:
+        case LirOpcode::Vaddpd: case LirOpcode::Vsubpd: case LirOpcode::Vmulpd:
+        case LirOpcode::Vdivpd: case LirOpcode::Vminpd: case LirOpcode::Vmaxpd:
+        case LirOpcode::Vsqrtps: case LirOpcode::Vsqrtpd:
+        case LirOpcode::Vextractf128: case LirOpcode::Vinsertf128:
+        case LirOpcode::Vpaddd: case LirOpcode::Vpsubd: case LirOpcode::Vpmulld:
+        case LirOpcode::Vpaddq: case LirOpcode::Vpsubq:
+        case LirOpcode::Vandps: case LirOpcode::Vorps: case LirOpcode::Vxorps:
+        case LirOpcode::Vandpd: case LirOpcode::Vorpd: case LirOpcode::Vxorpd:
+        case LirOpcode::Vpand: case LirOpcode::Vpor: case LirOpcode::Vpxor:
+        case LirOpcode::Vbroadcastss: case LirOpcode::Vbroadcastsd:
+        case LirOpcode::Vpbroadcastd: case LirOpcode::Vpbroadcastq:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// A 32-byte operand is a YMM register or a 256-bit memory access; there is
+// no 32-byte GPR value.
+bool has_256_operand(const std::vector<LirOperand>& ops) {
+    for (const auto& op : ops) {
+        if (op.size == 32) return true;
+    }
+    return false;
+}
+
+bool function_dirties_upper(const LirFunction& fn) {
+    for (const auto& block : fn.blocks) {
+        for (const auto& inst : block->instructions) {
+            if (is_vex256_opcode(inst->opcode) || has_256_operand(inst->defs) ||
+                has_256_operand(inst->uses)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+void EmitContext::clear_upper_state() {
+    if (dirties_upper_) enc_.vzeroupper();
+}
+
 CompilationResult EmitContext::compile() {
+    // The scan is the normal path; the encoder's own record of a VEX.256
+    // encoding backs it up (an emitter that uses YMM behind a narrower LIR
+    // operand), re-emitting the function once with the clears in place.
+    if (!dirties_upper_) dirties_upper_ = function_dirties_upper(fn_);
+    CompilationResult result = compile_once();
+    if (!dirties_upper_ && enc_.wrote_256()) {
+        EmitContext again(fn_, target_);
+        again.dirties_upper_ = true;
+        return again.compile();
+    }
+    return result;
+}
+
+CompilationResult EmitContext::compile_once() {
     CompilationResult result;
     safepoints_.clear();
     stack_map_records_.clear();
@@ -88,41 +156,41 @@ CompilationResult EmitContext::compile() {
     zero_tagged_locals();
 
     // 4. Emit blocks
+    const BranchThreading threading(fn_);
+    // A target is the fall-through when only blocks that emit nothing lie
+    // between: skipped ones, empty ones, and a jump to the block after.
+    auto emits_nothing = [&](size_t i) {
+        const auto& ins = fn_.blocks[i]->instructions;
+        if (threading.skipped(i) || ins.empty()) return true;
+        const ClosingBranches c = closing_branches(fn_, i);
+        return ins.size() == 1 && c.count == 1 && !c.conditional && i + 1 < fn_.blocks.size() &&
+               threading.target(c.other) == fn_.blocks[i + 1]->id;
+    };
     for (size_t b_idx = 0; b_idx < fn_.blocks.size(); ++b_idx) {
         const auto& block = fn_.blocks[b_idx];
+        if (threading.skipped(b_idx)) {
+            buffer_.bind(block_labels_[block->id]);
+            continue;
+        }
         if (b_idx > 0) {
-            // Ensure loop headers and branch targets are 16-byte aligned.
-            buffer_.align(16);
+            // Branch targets start 16-byte aligned, and a loop's head 32:
+            // a small loop then sits in one 32-byte fetch window (on Zen
+            // one straddling two ran the sieve's inner loop 1.3x slower).
+            buffer_.align(threading.loop_head(b_idx) ? 32 : 16);
         }
         buffer_.bind(block_labels_[block->id]);
         result.block_offsets[block->id] = buffer_.size();
 
-        uint32_t next_block_id = (b_idx + 1 < fn_.blocks.size()) ? fn_.blocks[b_idx + 1]->id : UINT32_MAX;
+        auto falls_to = [&](uint32_t target) {
+            for (size_t i = b_idx + 1; i < fn_.blocks.size(); ++i) {
+                if (fn_.blocks[i]->id == target) return true;
+                if (!emits_nothing(i)) return false;
+            }
+            return false;
+        };
         size_t n_insts = block->instructions.size();
-
-        bool has_jcc_jmp = false;
-        bool has_trailing_jmp = false;
-
-        if (n_insts >= 2) {
-            const auto& second_last = *block->instructions[n_insts - 2];
-            const auto& last = *block->instructions[n_insts - 1];
-            if (second_last.opcode == LirOpcode::Jcc && last.opcode == LirOpcode::Jmp &&
-                !second_last.uses.empty() && second_last.uses[0].is_label() &&
-                !last.uses.empty() && last.uses[0].is_label()) {
-                has_jcc_jmp = true;
-            }
-        }
-
-        if (!has_jcc_jmp && n_insts >= 1) {
-            const auto& last = *block->instructions[n_insts - 1];
-            if (last.opcode == LirOpcode::Jmp && !last.uses.empty() && last.uses[0].is_label()) {
-                has_trailing_jmp = true;
-            }
-        }
-
-        size_t limit = n_insts;
-        if (has_jcc_jmp) limit = n_insts - 2;
-        else if (has_trailing_jmp) limit = n_insts - 1;
+        const ClosingBranches closing = closing_branches(fn_, b_idx);
+        const size_t limit = n_insts - closing.count;
 
         for (size_t i_idx = 0; i_idx < limit; ++i_idx) {
             const auto& inst = *block->instructions[i_idx];
@@ -137,30 +205,29 @@ CompilationResult EmitContext::compile() {
             emit_instruction(inst, b_idx == 0, i_idx == 0);
         }
 
-        if (has_jcc_jmp) {
-            const auto& jcc = *block->instructions[n_insts - 2];
-            const auto& jmp = *block->instructions[n_insts - 1];
+        if (closing.conditional) {
+            const auto& jcc = *block->instructions[n_insts - closing.count];
             if (jcc.loc.is_valid()) {
                 result.debug_table.add_line_entry(static_cast<uint32_t>(buffer_.size()), jcc.loc);
             }
-            uint32_t true_target = jcc.uses[0].label_id;
-            uint32_t false_target = jmp.uses[0].label_id;
+            uint32_t true_target = threading.target(closing.taken);
+            uint32_t false_target = threading.target(closing.other);
 
-            if (false_target == next_block_id) {
+            if (falls_to(false_target)) {
                 enc_.j(jcc.condition, block_labels_[true_target]);
-            } else if (true_target == next_block_id) {
+            } else if (falls_to(true_target)) {
                 enc_.j(invert(jcc.condition), block_labels_[false_target]);
             } else {
                 enc_.j(jcc.condition, block_labels_[true_target]);
                 enc_.jmp(block_labels_[false_target]);
             }
-        } else if (has_trailing_jmp) {
+        } else if (closing.count == 1) {
             const auto& jmp = *block->instructions[n_insts - 1];
             if (jmp.loc.is_valid()) {
                 result.debug_table.add_line_entry(static_cast<uint32_t>(buffer_.size()), jmp.loc);
             }
-            uint32_t target = jmp.uses[0].label_id;
-            if (target != next_block_id) {
+            uint32_t target = threading.target(closing.other);
+            if (!falls_to(target)) {
                 enc_.jmp(block_labels_[target]);
             }
         }
@@ -359,6 +426,10 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
             enc_.j(inst.condition, block_labels_[inst.uses[0].label_id]);
             break;
         case LirOpcode::Call: {
+            // A 256-bit argument travels in a YMM register; no other value
+            // lives in one across a call (256-bit values spanning a call
+            // are spilled), so the clear loses nothing.
+            if (!has_256_operand(inst.uses)) clear_upper_state();
             spill_callee_saved_roots(inst);
 
             size_t call_start = buffer_.size();
@@ -402,6 +473,7 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
             break;
         }
         case LirOpcode::CallIndirect: {
+            if (!has_256_operand(inst.uses)) clear_upper_state();
             spill_callee_saved_roots(inst);
             size_t call_start = buffer_.size();
             enc_.call(to_gpr(inst.uses.back()));
@@ -415,6 +487,8 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
             break;
         }
         case LirOpcode::Ret: {
+            // A 256-bit result is returned in YMM0; its caller clears.
+            if (!fn_.return_type.is_v256()) clear_upper_state();
             X64FrameLayout::emit_epilogue(enc_, frame_, fn_.calling_conv);
             break;
         }
@@ -425,6 +499,7 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
             else enc_.lea(to_gpr(inst.defs[0]), to_mem_address(inst.uses[0]));
             break;
         case LirOpcode::Safepoint: {
+            clear_upper_state();
             spill_callee_saved_roots(inst);
             enc_.call("brass_gc_safepoint");
             size_t return_offset = buffer_.size();
@@ -548,6 +623,9 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
 
             const GPR arg0 = (fn_.calling_conv.kind() == CallingConvKind::Win64) ? GPR::RCX : GPR::RDI;
             enc_.lea(arg0, ptr(GPR::RSP, rec_disp));
+            // The state values are in the record now; nothing after this
+            // point reads a YMM register.
+            clear_upper_state();
             enc_.call("brass_deopt_exit_record");
 
             auto emit_epilogue = [&]() {

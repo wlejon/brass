@@ -641,57 +641,149 @@ VRegInfo& LirFunction::get_vreg_info(VReg v) {
     throw std::out_of_range("Invalid VReg id in get_vreg_info");
 }
 
+// Reverse post-order that keeps every loop contiguous: the header, then the
+// loop's blocks, then what the loop exits to. Any DFS gives a reverse
+// post-order; this one, at a block, visits last the successors that stay in
+// the most of the block's loops, so that they come first after it. Plain DFS
+// order put a loop's body after its exit and everything the exit reaches,
+// and a value live through the loop but used after it then had its only
+// split point inside the loop (register allocation splits at the shallowest
+// block boundary between a use and the conflict, in this order).
 void LirFunction::sort_blocks_rpo() {
     if (blocks.size() <= 1) return;
     LirBlock* entry = entry_block();
     if (!entry) return;
+    const size_t n = blocks.size();
 
-    std::unordered_map<const LirBlock*, size_t> block_idx;
-    block_idx.reserve(blocks.size());
-    for (size_t i = 0; i < blocks.size(); ++i) {
-        if (blocks[i]) block_idx[blocks[i].get()] = i;
+    std::unordered_map<const LirBlock*, uint32_t> block_idx;
+    block_idx.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        if (blocks[i]) block_idx[blocks[i].get()] = static_cast<uint32_t>(i);
     }
-
-    std::vector<bool> visited(blocks.size(), false);
-    std::vector<LirBlock*> entry_po;
-    entry_po.reserve(blocks.size());
+    std::vector<std::vector<uint32_t>> succs(n), preds(n);
+    for (size_t i = 0; i < n; ++i) {
+        if (!blocks[i]) continue;
+        for (const LirBlock* s : blocks[i]->successors) {
+            auto it = s ? block_idx.find(s) : block_idx.end();
+            if (it == block_idx.end()) continue;
+            succs[i].push_back(it->second);
+            preds[it->second].push_back(static_cast<uint32_t>(i));
+        }
+    }
+    std::vector<uint32_t> roots;
+    roots.push_back(block_idx.at(entry));
+    for (const auto& entry_pair : resume_entries) {
+        LirBlock* rb = get_block_by_id(entry_pair.second);
+        if (auto it = rb ? block_idx.find(rb) : block_idx.end(); it != block_idx.end()) roots.push_back(it->second);
+    }
+    for (uint32_t i = 0; i < n; ++i) {
+        if (blocks[i]) roots.push_back(i);
+    }
 
     // An explicit stack, not recursion: a chain of many thousands of blocks
     // overflowed the native stack.
-    std::vector<std::pair<LirBlock*, size_t>> stack;
-    auto dfs = [&](LirBlock* root, std::vector<LirBlock*>& po) {
-        auto enter = [&](LirBlock* b) {
-            auto it = block_idx.find(b);
-            if (it == block_idx.end() || visited[it->second]) return;
-            visited[it->second] = true;
-            stack.push_back({b, 0});
-        };
-        enter(root);
+    std::vector<std::pair<uint32_t, size_t>> stack;
+    std::vector<uint8_t> state(n, 0);  // 0 unseen, 1 on the stack, 2 done
+
+    // Loops: a retreating edge latch -> header; the loop's blocks are those
+    // that reach the latch without passing the header.
+    std::vector<std::pair<uint32_t, uint32_t>> back_edges;  // (header, latch)
+    for (uint32_t r : roots) {
+        if (state[r]) continue;
+        state[r] = 1;
+        stack.push_back({r, 0});
         while (!stack.empty()) {
             auto& [b, next] = stack.back();
-            if (next == b->successors.size()) {
-                po.push_back(b);
+            if (next == succs[b].size()) {
+                state[b] = 2;
                 stack.pop_back();
                 continue;
             }
-            LirBlock* succ = b->successors[next++];
-            if (succ) enter(succ);
+            const uint32_t s = succs[b][next++];
+            if (state[s] == 1) {
+                back_edges.push_back({s, b});
+            } else if (state[s] == 0) {
+                state[s] = 1;
+                stack.push_back({s, 0});
+            }
+        }
+    }
+    std::vector<std::vector<uint32_t>> loops_of(n);  // headers, ascending
+    if (!back_edges.empty()) {
+        std::sort(back_edges.begin(), back_edges.end());
+        std::vector<uint32_t> mark(n, UINT32_MAX);
+        std::vector<uint32_t> work;
+        for (size_t e = 0; e < back_edges.size();) {
+            const uint32_t h = back_edges[e].first;
+            mark[h] = h;
+            loops_of[h].push_back(h);
+            for (; e < back_edges.size() && back_edges[e].first == h; ++e) {
+                const uint32_t latch = back_edges[e].second;
+                if (mark[latch] == h) continue;
+                mark[latch] = h;
+                loops_of[latch].push_back(h);
+                work.push_back(latch);
+                while (!work.empty()) {
+                    const uint32_t c = work.back();
+                    work.pop_back();
+                    for (uint32_t p : preds[c]) {
+                        if (mark[p] == h) continue;
+                        mark[p] = h;
+                        loops_of[p].push_back(h);
+                        work.push_back(p);
+                    }
+                }
+            }
+        }
+        for (uint32_t i = 0; i < n; ++i) {
+            if (loops_of[i].size() < 2) continue;
+            std::sort(loops_of[i].begin(), loops_of[i].end());
+        }
+        // Successors that stay in fewer of the block's loops go first.
+        auto shared = [&](uint32_t a, uint32_t b) {
+            size_t k = 0;
+            auto x = loops_of[a].begin(), y = loops_of[b].begin();
+            while (x != loops_of[a].end() && y != loops_of[b].end()) {
+                if (*x < *y) ++x;
+                else if (*y < *x) ++y;
+                else { ++k; ++x; ++y; }
+            }
+            return k;
+        };
+        for (uint32_t i = 0; i < n; ++i) {
+            if (loops_of[i].empty() || succs[i].size() < 2) continue;
+            std::stable_sort(succs[i].begin(), succs[i].end(),
+                [&](uint32_t a, uint32_t b) { return shared(i, a) < shared(i, b); });
+        }
+    }
+
+    std::fill(state.begin(), state.end(), uint8_t{0});
+    auto dfs = [&](uint32_t root, std::vector<LirBlock*>& po) {
+        if (state[root]) return;
+        state[root] = 1;
+        stack.push_back({root, 0});
+        while (!stack.empty()) {
+            auto& [b, next] = stack.back();
+            if (next == succs[b].size()) {
+                po.push_back(blocks[b].get());
+                stack.pop_back();
+                continue;
+            }
+            const uint32_t s = succs[b][next++];
+            if (!state[s]) {
+                state[s] = 1;
+                stack.push_back({s, 0});
+            }
         }
     };
 
-    dfs(entry, entry_po);
+    std::vector<LirBlock*> entry_po;
+    entry_po.reserve(n);
+    dfs(roots[0], entry_po);
     std::reverse(entry_po.begin(), entry_po.end());
 
     std::vector<LirBlock*> other_po;
-    for (const auto& entry_pair : resume_entries) {
-        LirBlock* rb = get_block_by_id(entry_pair.second);
-        if (rb) dfs(rb, other_po);
-    }
-
-    for (const auto& b : blocks) {
-        if (b) dfs(b.get(), other_po);
-    }
-
+    for (size_t r = 1; r < roots.size(); ++r) dfs(roots[r], other_po);
     std::reverse(other_po.begin(), other_po.end());
 
     std::vector<LirBlock*> full_order = std::move(entry_po);

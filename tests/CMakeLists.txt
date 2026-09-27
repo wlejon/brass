@@ -168,10 +168,13 @@ add_executable(brass_unit_tests
     differential/test_loop_transform_differential.cpp
     unit/test_vex_encoder.cpp
     unit/test_v256_mir.cpp
+    unit/test_vzeroupper.cpp
+    unit/test_branch_threading.cpp
     unit/test_fma_opt.cpp
     differential/test_avx2_differential.cpp
     differential/test_avx2_isel_regressions.cpp
     differential/test_vextract_spill.cpp
+    differential/test_state_through_pointer.cpp
     unit/test_background_compiler.cpp
     unit/test_atomic_code_install.cpp
     differential/test_async_jit_differential.cpp

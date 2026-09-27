@@ -75,6 +75,14 @@ private:
     };
     std::vector<PendingExceptionScope> pending_exception_scopes_;
 
+    // The function writes 256-bit YMM registers, leaving their upper halves
+    // dirty; then every call and return that does not pass a 256-bit value
+    // clears them first (vzeroupper), as the x64 ABIs expect, or the
+    // legacy-SSE code that runs next pays a merge on each instruction.
+    bool dirties_upper_ = false;
+    void clear_upper_state();
+    CompilationResult compile_once();
+
     x64::MemAddress to_mem_address(const LirOperand& op) const;
     x64::GPR to_gpr(const LirOperand& op) const;
     x64::XMM to_xmm(const LirOperand& op) const;

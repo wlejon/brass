@@ -83,6 +83,9 @@ public:
 
     const BlockLiveness& block_liveness(const LirBlock* b) const;
     uint32_t get_loop_depth_at(uint32_t inst_id) const;
+    // Guard exit blocks whose uses are counted at the Jcc entering them:
+    // block id -> the block's GuardExit.
+    const std::unordered_map<uint32_t, const LirInst*>& guard_exits() const noexcept { return guard_exits_; }
 
 private:
     struct BlockRange {

@@ -123,7 +123,10 @@ static bool is_xmm_opcode(LirOpcode op) {
 void LinearScanAllocator::rewrite_instructions() {
     using namespace brass::x64;
 
-    auto resolve_operand = [this](const LirOperand& op) -> LirOperand {
+    // The location of a value at the instruction being rewritten: the piece
+    // covering its position (a guard exit's, the Jcc entering it).
+    uint32_t at = 0;
+    auto resolve_operand = [this, &at](const LirOperand& op) -> LirOperand {
         if (op.is_vreg()) {
             // A register operand the allocator gave no home would be
             // emitted as an arbitrary frame address; that is a bug in the
@@ -132,27 +135,23 @@ void LinearScanAllocator::rewrite_instructions() {
                 throw std::logic_error("register allocation: operand has no virtual register in " +
                                        std::string(fn_.name));
             }
-            const VRegInfo& info = fn_.get_vreg_info(op.vreg_val);
-            if (info.is_spilled) {
-                return LirOperand::slot(info.assigned_spill_slot, op.size);
-            } else if (info.assigned_preg.is_valid()) {
-                return LirOperand::preg(info.assigned_preg, op.size);
-            }
+            LirOperand loc = location_at(op.vreg_val, at, op.size);
+            if (!loc.is_none()) return loc;
             throw std::logic_error("register allocation: v" + std::to_string(op.vreg_val.id) +
                                    " was given neither a register nor a spill slot in " + std::string(fn_.name));
         } else if (op.is_mem()) {
             LirMem mem = op.mem_val;
             if (mem.base_vreg.is_valid() && mem.base_vreg.id < fn_.vreg_table.size()) {
-                const VRegInfo& b_info = fn_.get_vreg_info(mem.base_vreg);
-                if (b_info.assigned_preg.is_valid()) {
-                    mem.base_preg = b_info.assigned_preg;
+                LirOperand loc = location_at(mem.base_vreg, at, 8);
+                if (loc.is_preg()) {
+                    mem.base_preg = loc.preg_val;
                     mem.base_vreg = VReg{};
                 }
             }
             if (mem.index_vreg.is_valid() && mem.index_vreg.id < fn_.vreg_table.size()) {
-                const VRegInfo& i_info = fn_.get_vreg_info(mem.index_vreg);
-                if (i_info.assigned_preg.is_valid()) {
-                    mem.index_preg = i_info.assigned_preg;
+                LirOperand loc = location_at(mem.index_vreg, at, 8);
+                if (loc.is_preg()) {
+                    mem.index_preg = loc.preg_val;
                     mem.index_vreg = VReg{};
                 }
             }
@@ -171,10 +170,32 @@ void LinearScanAllocator::rewrite_instructions() {
     PReg base_scratch_reg = is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X12) : PReg::gpr(brass::x64::GPR::R10);
     PReg idx_scratch_reg = is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X13) : PReg::gpr(brass::x64::GPR::R11);
 
+    const auto& guard_exits = liveness_.guard_exits();
     for (const auto& block : fn_.blocks) {
         std::vector<std::unique_ptr<LirInst>> rewritten;
+        // A guard exit's state is read where the Jcc entering it is.
+        uint32_t exit_at = UINT32_MAX;
+        if (guard_exits.count(block->id)) {
+            if (auto g = guard_exit_at_.find(block->id); g != guard_exit_at_.end()) exit_at = g->second;
+        }
+        auto emit_pending = [&](auto& map, uint32_t key) {
+            auto it = map.find(key);
+            if (it != map.end()) emit_moves(it->second, rewritten);
+        };
+        emit_pending(moves_at_start_, block->id);
+        const size_t count = block->instructions.size();
+        const bool ends_with_jmp = count > 0 && block->instructions.back()->opcode == LirOpcode::Jmp;
 
-        for (auto& inst : block->instructions) {
+        // Moves after an instruction go in once it and its write-back are
+        // out, at the top of the next iteration (some paths `continue`).
+        uint32_t prev_id = UINT32_MAX;
+        for (size_t inst_index = 0; inst_index < count; ++inst_index) {
+            auto& inst = block->instructions[inst_index];
+            if (prev_id != UINT32_MAX) emit_pending(moves_after_, prev_id);
+            prev_id = inst->id;
+            at = exit_at != UINT32_MAX && inst->opcode == LirOpcode::GuardExit ? exit_at : inst->id;
+            emit_pending(moves_before_, inst->id);
+            if (inst_index + 1 == count && inst->opcode == LirOpcode::Jmp) emit_pending(moves_at_end_, block->id);
             bool base_reloaded = false;
             bool idx_reloaded = false;
 
@@ -183,11 +204,11 @@ void LinearScanAllocator::rewrite_instructions() {
                 for (auto& op : *op_list) {
                     if (op.is_mem()) {
                         if (op.mem_val.base_vreg.is_valid() && op.mem_val.base_vreg.id < fn_.vreg_table.size()) {
-                            const VRegInfo& b_info = fn_.get_vreg_info(op.mem_val.base_vreg);
-                            if (b_info.is_spilled) {
+                            LirOperand loc = location_at(op.mem_val.base_vreg, at, 8);
+                            if (loc.is_spill_slot()) {
                                 auto load_base = std::make_unique<LirInst>(LirOpcode::Mov);
                                 load_base->add_def(LirOperand::preg(base_scratch_reg, 8));
-                                load_base->add_use(LirOperand::slot(b_info.assigned_spill_slot, 8));
+                                load_base->add_use(LirOperand::slot(loc.spill_slot, 8));
                                 rewritten.push_back(std::move(load_base));
 
                                 op.mem_val.base_preg = base_scratch_reg;
@@ -196,11 +217,11 @@ void LinearScanAllocator::rewrite_instructions() {
                             }
                         }
                         if (op.mem_val.index_vreg.is_valid() && op.mem_val.index_vreg.id < fn_.vreg_table.size()) {
-                            const VRegInfo& i_info = fn_.get_vreg_info(op.mem_val.index_vreg);
-                            if (i_info.is_spilled) {
+                            LirOperand loc = location_at(op.mem_val.index_vreg, at, 8);
+                            if (loc.is_spill_slot()) {
                                 auto load_idx = std::make_unique<LirInst>(LirOpcode::Mov);
                                 load_idx->add_def(LirOperand::preg(idx_scratch_reg, 8));
-                                load_idx->add_use(LirOperand::slot(i_info.assigned_spill_slot, 8));
+                                load_idx->add_use(LirOperand::slot(loc.spill_slot, 8));
                                 rewritten.push_back(std::move(load_idx));
 
                                 op.mem_val.index_preg = idx_scratch_reg;
@@ -491,6 +512,8 @@ void LinearScanAllocator::rewrite_instructions() {
                 rewritten.push_back(std::move(store_back));
             }
         }
+        if (prev_id != UINT32_MAX) emit_pending(moves_after_, prev_id);
+        if (!ends_with_jmp) emit_pending(moves_at_end_, block->id);
 
         block->instructions = std::move(rewritten);
     }

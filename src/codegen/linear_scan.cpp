@@ -122,9 +122,22 @@ void LinearScanAllocator::build_coalesce_hints() {
 }
 
 void LinearScanAllocator::build_constraint_index() {
-    constrained_ids_.clear();
-    constraint_or_.clear();
+    for (int c = 0; c < 2; ++c) {
+        constrained_ids_[c].clear();
+        constraint_words_[c].clear();
+        constraint_or_[c][0].clear();
+        constraint_or_[c][1].clear();
+    }
     mem_index_vregs_.clear();
+
+    // A call or safepoint takes every caller-saved register of the pools:
+    // a value live across one keeps to callee-saved registers there.
+    uint32_t caller_saved[2] = {0, 0};
+    for (int c = 0; c < 2; ++c) {
+        for (PReg reg : (c == 0 ? available_gprs_ : available_xmms_)) {
+            if (reg.code < 32 && !is_callee_saved(reg)) caller_saved[c] |= (1u << reg.code);
+        }
+    }
 
     auto note_mem_index = [this](const LirOperand& op) {
         if (op.is_mem() && op.mem_val.index_vreg.is_valid() &&
@@ -147,7 +160,6 @@ void LinearScanAllocator::build_constraint_index() {
         (reg.reg_class == RegClass::GPR ? gprs : xmms) |= (1u << reg.code);
     };
 
-    std::vector<InstConstraints> words;
     std::vector<InstConstraints> held;
     // Instruction ids are assigned in block order by the liveness analysis, so
     // walking the blocks yields the instructions already sorted by id.
@@ -156,44 +168,103 @@ void LinearScanAllocator::build_constraint_index() {
         size_t idx_in_block = 0;
         for (const auto& inst : block->instructions) {
             const InstConstraints& h = held[idx_in_block++];
-            uint32_t pinned_gprs = 0, pinned_xmms = 0;
+            uint32_t pinned[2] = {0, 0};
             for (size_t i = 0; i < inst->defs.size(); ++i) {
                 pinned_by(inst->defs[i], i < inst->def_constraints.size() ? &inst->def_constraints[i] : nullptr,
-                          pinned_gprs, pinned_xmms);
+                          pinned[0], pinned[1]);
             }
             for (size_t i = 0; i < inst->uses.size(); ++i) {
                 pinned_by(inst->uses[i], i < inst->use_constraints.size() ? &inst->use_constraints[i] : nullptr,
-                          pinned_gprs, pinned_xmms);
+                          pinned[0], pinned[1]);
             }
-            // A register held across the instruction blocks every interval
-            // covering it, like a clobber: no interval's own fixed position
+            const bool is_call = inst->is_call() || inst->opcode == LirOpcode::Safepoint;
+            // A register held across the instruction blocks every value
+            // covering it, like a clobber: no value's own fixed position
             // there may take it, since that would overwrite the held value.
-            const uint32_t blocked_gprs = inst->clobbered_gprs | h.clobbered_gprs;
-            const uint32_t blocked_xmms = inst->clobbered_xmms | h.clobbered_xmms;
-            if (blocked_gprs != 0 || blocked_xmms != 0 || pinned_gprs != 0 || pinned_xmms != 0) {
-                constrained_ids_.push_back(inst->id);
-                words.push_back(InstConstraints{
-                    blocked_gprs,
-                    blocked_xmms,
-                    pinned_gprs,
-                    pinned_xmms
-                });
+            const uint32_t blocked[2] = {
+                inst->clobbered_gprs | h.clobbered_gprs | (is_call ? caller_saved[0] : 0u),
+                inst->clobbered_xmms | h.clobbered_xmms | (is_call ? caller_saved[1] : 0u),
+            };
+            for (int c = 0; c < 2; ++c) {
+                if (blocked[c] == 0 && pinned[c] == 0 && !is_call) continue;
+                constrained_ids_[c].push_back(inst->id);
+                constraint_words_[c].push_back(ConstraintWord{blocked[c], pinned[c], is_call ? ~0u : 0u});
             }
             for (const auto& op : inst->defs) note_mem_index(op);
             for (const auto& op : inst->uses) note_mem_index(op);
         }
     }
 
-    const size_t n = words.size();
-    if (n == 0) return;
-    constraint_or_.push_back(std::move(words));
-    for (size_t span = 2; span <= n; span *= 2) {
-        const std::vector<InstConstraints>& prev = constraint_or_.back();
-        std::vector<InstConstraints> level(n - span + 1);
-        for (size_t i = 0; i < level.size(); ++i) {
-            level[i] = prev[i] | prev[i + span / 2];
+    for (int c = 0; c < 2; ++c) {
+        const std::vector<ConstraintWord>& words = constraint_words_[c];
+        const size_t n = words.size();
+        if (n == 0) continue;
+        // Only a vector register can be too wide for the callee-saved ones.
+        for (int wide = 0; wide < (c == 1 ? 2 : 1); ++wide) {
+            auto& table = constraint_or_[c][wide];
+            std::vector<uint32_t> base(n);
+            for (size_t i = 0; i < n; ++i) base[i] = words[i].clob | words[i].pin | (wide ? words[i].call : 0u);
+            table.push_back(std::move(base));
+            for (size_t span = 2; span <= n; span *= 2) {
+                const std::vector<uint32_t>& prev = table.back();
+                std::vector<uint32_t> level(n - span + 1);
+                for (size_t i = 0; i < level.size(); ++i) level[i] = prev[i] | prev[i + span / 2];
+                table.push_back(std::move(level));
+            }
         }
-        constraint_or_.push_back(std::move(level));
+    }
+}
+
+// Blocks by position, each with the loop depth at which a move placed where
+// it begins runs: its own depth, or its layout predecessor's when that is
+// shallower (the edge into a loop header from its preheader), and a
+// range-minimum table over it for choosing split positions.
+void LinearScanAllocator::build_block_spans() {
+    spans_.clear();
+    depth_rmq_.clear();
+    uint32_t prev_depth = 0;
+    for (const auto& block : fn_.blocks) {
+        if (block->instructions.empty()) continue;
+        const BlockLiveness& bl = liveness_.block_liveness(block.get());
+        BlockSpan s;
+        s.start = bl.start_id;
+        s.end = bl.end_id;
+        s.depth = block->loop_depth;
+        s.entry_depth = spans_.empty() ? s.depth : std::min(s.depth, prev_depth);
+        prev_depth = s.depth;
+        spans_.push_back(s);
+    }
+    const size_t n = spans_.size();
+    if (n == 0) return;
+    // Each block's run at its depth or deeper: bounded by the nearest
+    // shallower block on each side (a monotonic stack each way).
+    {
+        std::vector<uint32_t> stack;
+        for (size_t i = 0; i < n; ++i) {
+            while (!stack.empty() && spans_[stack.back()].depth >= spans_[i].depth) stack.pop_back();
+            spans_[i].loop_from = stack.empty() ? spans_[0].start : spans_[stack.back() + 1].start;
+            stack.push_back(static_cast<uint32_t>(i));
+        }
+        stack.clear();
+        for (size_t i = n; i-- > 0;) {
+            while (!stack.empty() && spans_[stack.back()].depth >= spans_[i].depth) stack.pop_back();
+            spans_[i].loop_to = stack.empty() ? spans_[n - 1].end : spans_[stack.back() - 1].end;
+            stack.push_back(static_cast<uint32_t>(i));
+        }
+    }
+    std::vector<uint32_t> base(n);
+    for (size_t i = 0; i < n; ++i) base[i] = static_cast<uint32_t>(i);
+    depth_rmq_.push_back(std::move(base));
+    auto better = [this](uint32_t a, uint32_t b) {
+        // Least depth; the later block among equals.
+        if (spans_[a].entry_depth != spans_[b].entry_depth) return spans_[a].entry_depth < spans_[b].entry_depth ? a : b;
+        return std::max(a, b);
+    };
+    for (size_t span = 2; span <= n; span *= 2) {
+        const std::vector<uint32_t>& prev = depth_rmq_.back();
+        std::vector<uint32_t> level(n - span + 1);
+        for (size_t i = 0; i < level.size(); ++i) level[i] = better(prev[i], prev[i + span / 2]);
+        depth_rmq_.push_back(std::move(level));
     }
 }
 
@@ -270,17 +341,11 @@ void LinearScanAllocator::compute_held_pregs(const LirBlock& block, std::vector<
     }
 }
 
-// The OR of the constraint words of constrained instructions [lo, hi).
-InstConstraints LinearScanAllocator::constraint_or(size_t lo, size_t hi) const noexcept {
-    if (lo >= hi) return InstConstraints{};
-    const size_t k = static_cast<size_t>(std::bit_width(hi - lo) - 1);
-    return constraint_or_[k][lo] | constraint_or_[k][hi - (size_t{1} << k)];
-}
-
 void LinearScanAllocator::allocate() {
     // 0. Build coalescing hints & detect calls
     build_coalesce_hints();
     build_constraint_index();
+    build_block_spans();
     for (const auto& block : fn_.blocks) {
         for (const auto& inst : block->instructions) {
             if (inst->is_call() || inst->opcode == LirOpcode::Safepoint || inst->opcode == LirOpcode::GuardExit) {
@@ -289,59 +354,70 @@ void LinearScanAllocator::allocate() {
         }
     }
 
-    // 1. Collect all non-empty intervals sorted by start_id
-    std::vector<LiveInterval*> unhandled;
-    for (auto& interval : liveness_.intervals()) {
-        if (interval.start_id <= interval.end_id && interval.vreg.is_valid()) {
-            unhandled.push_back(&interval);
-        }
+    const size_t num_vregs = fn_.vreg_table.size();
+    pieces_.clear();
+    vreg_pieces_.assign(num_vregs, {});
+    vreg_slot_.assign(num_vregs, -1);
+    unsplittable_.assign(num_vregs, 0);
+    is_mem_index_.assign(num_vregs, 0);
+    for (VReg v : mem_index_vregs_) {
+        if (v.id < num_vregs) is_mem_index_[v.id] = 1;
     }
-
-    std::sort(unhandled.begin(), unhandled.end(),
-        [](const LiveInterval* a, const LiveInterval* b) {
-            if (a->start_id != b->start_id) {
-                return a->start_id < b->start_id;
+    for (size_t id = 0; id < num_vregs; ++id) {
+        if (fn_.vreg_table[id].vreg.is_gcref) unsplittable_[id] = 1;
+    }
+    def_pos_.assign(num_vregs, UINT32_MAX);
+    for (const auto& interval : liveness_.intervals()) {
+        if (!interval.vreg.is_valid() || interval.vreg.id >= num_vregs) continue;
+        uint32_t def = UINT32_MAX;
+        for (const auto& u : interval.use_positions) {
+            if (!u.is_def) continue;
+            if (def != UINT32_MAX && def != u.inst_id) {
+                def = UINT32_MAX;
+                break;
             }
-            return a->end_id < b->end_id;
-        });
-
+            def = u.inst_id;
+        }
+        def_pos_[interval.vreg.id] = def;
+    }
     active_.clear();
+    next_seq_ = 0;
     used_callee_gprs_ = 0;
     used_callee_xmms_ = 0;
     next_spill_slot_ = 0;
+    moves_before_.clear();
+    moves_after_.clear();
+    moves_at_start_.clear();
+    moves_at_end_.clear();
+    edge_splits_.clear();
+    emitted_parallel_copy_ = false;
 
-    // 2. Process intervals in order
-    for (auto* current : unhandled) {
-        expire_old_intervals(current->start_id);
+    // 1-2. Split what cannot move between locations, then scan.
+    mark_unsplittable_live_ins();
+    run_scan();
 
-        if (current->spans_call &&
-            (current->vreg.is_gcref || fpr_wider_than_callee_saved(current->vreg))) {
-            current->assigned_spill_slot = allocate_spill_slot(current->vreg.is_gcref, current->vreg.size);
-            current->assigned_preg = PReg{};
-            continue;
-        }
-
-        if (!try_allocate_free_reg(*current)) {
-            allocate_blocked_reg(*current);
-        }
-    }
-
-    // 3. Update function virtual register table
-    for (const auto& interval : liveness_.intervals()) {
-        if (interval.vreg.is_valid()) {
-            VRegInfo& info = fn_.get_vreg_info(interval.vreg);
-            info.assigned_preg = interval.assigned_preg;
-            info.assigned_spill_slot = interval.assigned_spill_slot;
-            info.is_spilled = (interval.assigned_spill_slot >= 0);
-        }
+    // 3. The vreg table and the intervals keep the first piece's location,
+    // which is the value's only one unless it was split. After allocation
+    // only GC references are looked up there, and those are never split.
+    for (auto& interval : liveness_.intervals()) {
+        if (!interval.vreg.is_valid() || interval.vreg.id >= num_vregs) continue;
+        const auto& list = vreg_pieces_[interval.vreg.id];
+        if (list.empty()) continue;
+        const AllocPiece& first = pieces_[list.front()];
+        interval.assigned_preg = first.spilled ? PReg{} : first.reg;
+        interval.assigned_spill_slot = first.spilled ? vreg_slot_[interval.vreg.id] : -1;
+        VRegInfo& info = fn_.get_vreg_info(interval.vreg);
+        info.assigned_preg = interval.assigned_preg;
+        info.assigned_spill_slot = interval.assigned_spill_slot;
+        info.is_spilled = first.spilled;
     }
 
     // 4. Update function frame info
     uint32_t final_callee_gprs = 0;
     uint32_t final_callee_xmms = 0;
-    for (const auto& interval : liveness_.intervals()) {
-        if (interval.vreg.is_valid() && interval.assigned_preg.is_valid()) {
-            PReg preg = interval.assigned_preg;
+    for (const auto& piece : pieces_) {
+        if (!piece.spilled && piece.reg.is_valid()) {
+            PReg preg = piece.reg;
             if (cc_.target().is_aarch64()) {
                 if (preg.is_gpr() && cc_.is_callee_saved(preg.as_aarch64_gpr())) {
                     final_callee_gprs |= aarch64::reg_mask(preg.as_aarch64_gpr());
@@ -402,8 +478,101 @@ void LinearScanAllocator::allocate() {
     // 5. Record live GC references at all call sites and safepoints.
     record_live_gcrefs();
 
-    // 6. Rewrite all instructions in the function
+    // 6. Rewrite all instructions in the function, with the moves between
+    // the pieces of split values, and give critical edges their blocks.
+    collect_resolution_moves();
     rewrite_instructions();
+    split_critical_edges();
+    if (emitted_parallel_copy_ && cc_.kind() == CallingConvKind::Win64) {
+        // A cycle of moves parks a value in XMM14; a memory-to-memory move
+        // goes through XMM15. Both are callee-saved on Win64.
+        fn_.frame.saved_callee_xmms |= brass::x64::reg_mask(brass::x64::XMM::XMM14) |
+                                       brass::x64::reg_mask(brass::x64::XMM::XMM15);
+    }
+
+    // A copy the allocator gave one register at both ends is gone: the x64
+    // emitter writes nothing for these, and one left between a latch's
+    // `jcc` out of the loop and its `jmp` back (the block arguments' copy)
+    // kept the emitter from folding the two into one branch.
+    if (cc_.target().is_x64()) {
+        auto same = [](const LirOperand& d, const LirOperand& s) {
+            return d.is_preg() && s.is_preg() && d.preg_val == s.preg_val;
+        };
+        for (auto& block : fn_.blocks) {
+            auto& ins = block->instructions;
+            ins.erase(std::remove_if(ins.begin(), ins.end(), [&](const std::unique_ptr<LirInst>& p) {
+                LirInst& i = *p;
+                if (i.opcode == LirOpcode::ParallelCopy) {
+                    if (i.defs.size() != i.uses.size()) return false;
+                    size_t kept = 0;
+                    for (size_t k = 0; k < i.defs.size(); ++k) {
+                        if (same(i.defs[k], i.uses[k])) continue;
+                        i.defs[kept] = i.defs[k];
+                        i.uses[kept] = i.uses[k];
+                        if (k < i.def_constraints.size() && kept < i.def_constraints.size()) {
+                            i.def_constraints[kept] = i.def_constraints[k];
+                        }
+                        if (k < i.use_constraints.size() && kept < i.use_constraints.size()) {
+                            i.use_constraints[kept] = i.use_constraints[k];
+                        }
+                        ++kept;
+                    }
+                    i.defs.resize(kept);
+                    i.uses.resize(kept);
+                    if (i.def_constraints.size() > kept) i.def_constraints.resize(kept);
+                    if (i.use_constraints.size() > kept) i.use_constraints.resize(kept);
+                    return kept == 0;
+                }
+                if (i.opcode != LirOpcode::Mov && i.opcode != LirOpcode::Movsd && i.opcode != LirOpcode::Movss) {
+                    return false;
+                }
+                return i.defs.size() == 1 && i.uses.size() == 1 && same(i.defs[0], i.uses[0]);
+            }), ins.end());
+        }
+    }
+}
+
+LirOperand LinearScanAllocator::location_at(VReg v, uint32_t id, uint8_t size) const {
+    if (!v.is_valid() || v.id >= vreg_pieces_.size()) return LirOperand{};
+    const auto& list = vreg_pieces_[v.id];
+    if (list.empty()) return LirOperand{};
+    size_t k = 0;
+    if (list.size() > 1) {
+        auto it = std::upper_bound(list.begin(), list.end(), id,
+            [this](uint32_t pos, uint32_t idx) { return pos < pieces_[idx].from; });
+        if (it == list.begin()) return LirOperand{};
+        k = static_cast<size_t>(it - list.begin()) - 1;
+    }
+    const AllocPiece& p = pieces_[list[k]];
+    if (id < p.from || id > p.to) return LirOperand{};
+    if (p.spilled) return LirOperand::slot(vreg_slot_[v.id], size);
+    if (!p.reg.is_valid()) return LirOperand{};
+    return LirOperand::preg(p.reg, size);
+}
+
+bool LinearScanAllocator::is_callee_saved(PReg reg) const {
+    if (cc_.target().is_aarch64()) {
+        return reg.is_gpr() ? cc_.is_callee_saved(reg.as_aarch64_gpr()) : cc_.is_callee_saved(reg.as_aarch64_fpr());
+    }
+    return reg.is_gpr() ? cc_.is_callee_saved(reg.as_gpr()) : cc_.is_callee_saved(reg.as_xmm());
+}
+
+void LinearScanAllocator::mark_callee_saved(PReg reg) {
+    if (!is_callee_saved(reg)) return;
+    if (cc_.target().is_aarch64()) {
+        if (reg.is_gpr()) used_callee_gprs_ |= aarch64::reg_mask(reg.as_aarch64_gpr());
+        else used_callee_xmms_ |= aarch64::reg_mask(reg.as_aarch64_fpr());
+    } else {
+        if (reg.is_gpr()) used_callee_gprs_ |= x64::reg_mask(reg.as_gpr());
+        else used_callee_xmms_ |= x64::reg_mask(reg.as_xmm());
+    }
+}
+
+// One spill slot per value, shared by all its spilled pieces.
+int32_t LinearScanAllocator::slot_of(VReg v) {
+    int32_t& slot = vreg_slot_[v.id];
+    if (slot < 0) slot = allocate_spill_slot(v.is_gcref, v.size);
+    return slot;
 }
 
 void LinearScanAllocator::record_live_gcrefs() {
@@ -457,391 +626,9 @@ void LinearScanAllocator::record_live_gcrefs() {
     }
 }
 
-void LinearScanAllocator::expire_old_intervals(uint32_t current_start) {
-    auto it = active_.begin();
-    while (it != active_.end()) {
-        if ((*it)->end_id <= current_start) {
-            it = active_.erase(it);
-        } else {
-            ++it;
-        }
-    }
-}
-
 bool LinearScanAllocator::fpr_wider_than_callee_saved(const VReg& vreg) const {
     if (vreg.is_gpr()) return false;
     return vreg.size > (cc_.target().is_aarch64() ? 8u : 16u);
-}
-
-uint32_t LinearScanAllocator::get_hard_blocked_regs(const LiveInterval& interval) const {
-    bool is_gpr = interval.vreg.is_gpr();
-    const auto& pool = is_gpr ? available_gprs_ : available_xmms_;
-
-    uint32_t blocked = 0;
-    if (is_gpr) {
-        blocked |= fn_.reserved_gprs;
-    }
-    auto block = [&blocked](PReg reg) { blocked |= (1u << reg.code); };
-
-    if (interval.spans_call) {
-        if (interval.vreg.is_gcref || fpr_wider_than_callee_saved(interval.vreg)) {
-            for (const auto& reg : pool) {
-                block(reg);
-            }
-        } else {
-            for (const auto& reg : pool) {
-                bool is_callee = false;
-                if (cc_.target().is_aarch64()) {
-                    is_callee = is_gpr ? cc_.is_callee_saved(reg.as_aarch64_gpr()) : cc_.is_callee_saved(reg.as_aarch64_fpr());
-                } else {
-                    is_callee = is_gpr ? cc_.is_callee_saved(reg.as_gpr()) : cc_.is_callee_saved(reg.as_xmm());
-                }
-                if (!is_callee) {
-                    block(reg);
-                }
-            }
-        }
-    }
-
-    // Every register clobbered or pinned by an instruction the interval covers
-    // blocks it, except a pin that is this interval's own fixed position
-    // there: at such an instruction the pins minus its own fixed registers
-    // count. Use positions are in id order, so the instructions to except
-    // are met in order while walking each segment's constrained range.
-    auto both = [&](const InstConstraints& c) -> uint32_t {
-        return is_gpr ? (c.clobbered_gprs | c.pinned_gprs) : (c.clobbered_xmms | c.pinned_xmms);
-    };
-    auto clobbered = [&](const InstConstraints& c) -> uint32_t {
-        return is_gpr ? c.clobbered_gprs : c.clobbered_xmms;
-    };
-    auto pinned = [&](const InstConstraints& c) -> uint32_t {
-        return is_gpr ? c.pinned_gprs : c.pinned_xmms;
-    };
-
-    auto own_fixed = interval.use_positions.begin();
-    const auto own_fixed_end = interval.use_positions.end();
-    for (const auto& seg : interval.segments) {
-        size_t cur = std::lower_bound(constrained_ids_.begin(), constrained_ids_.end(), seg.start) - constrained_ids_.begin();
-        const size_t hi = std::upper_bound(constrained_ids_.begin(), constrained_ids_.end(), seg.end) - constrained_ids_.begin();
-        while (own_fixed != own_fixed_end && own_fixed->inst_id < seg.start) ++own_fixed;
-        while (own_fixed != own_fixed_end && own_fixed->inst_id <= seg.end) {
-            const uint32_t at = own_fixed->inst_id;
-            uint32_t own = 0;
-            for (; own_fixed != own_fixed_end && own_fixed->inst_id == at; ++own_fixed) {
-                if (own_fixed->fixed_reg.is_valid() && own_fixed->fixed_reg.reg_class == interval.vreg.reg_class &&
-                    own_fixed->fixed_reg.code < 32) {
-                    own |= (1u << own_fixed->fixed_reg.code);
-                }
-            }
-            if (!vreg_at_preg_hints_.empty()) {
-                auto [h_beg, h_end] = vreg_at_preg_hints_.equal_range((static_cast<uint64_t>(interval.vreg.id) << 32) | at);
-                for (auto h = h_beg; h != h_end; ++h) {
-                    if (h->second.is_valid() && h->second.reg_class == interval.vreg.reg_class && h->second.code < 32) {
-                        own |= (1u << h->second.code);
-                    }
-                }
-            }
-            if (own == 0) continue;
-            const size_t idx = std::lower_bound(constrained_ids_.begin() + cur, constrained_ids_.begin() + hi, at) -
-                               constrained_ids_.begin();
-            if (idx >= hi || constrained_ids_[idx] != at) continue;
-            blocked |= both(constraint_or(cur, idx));
-            const InstConstraints& w = constraint_or_[0][idx];
-            blocked |= clobbered(w);
-            blocked |= pinned(w) & ~own;
-            cur = idx + 1;
-        }
-        blocked |= both(constraint_or(cur, hi));
-    }
-
-    if (cc_.target().is_x64()) {
-        if (is_gpr && std::find(mem_index_vregs_.begin(), mem_index_vregs_.end(), interval.vreg) != mem_index_vregs_.end()) {
-            block(PReg::gpr(x64::GPR::R12));
-            block(PReg::gpr(x64::GPR::RSP));
-        }
-    }
-
-    return blocked;
-}
-
-uint32_t LinearScanAllocator::get_occupied_regs(const LiveInterval& interval) const {
-    uint32_t occupied_regs = get_hard_blocked_regs(interval);
-    for (const auto* act : active_) {
-        if (act->vreg.reg_class == interval.vreg.reg_class && act->assigned_preg.is_valid() &&
-            act->assigned_preg.code < 32) {
-            if (act->overlaps(interval)) {
-                occupied_regs |= (1u << act->assigned_preg.code);
-            }
-        }
-    }
-    return occupied_regs;
-}
-
-static bool in_mask(uint32_t mask, uint8_t code) noexcept {
-    if (code >= 32) return false;
-    return (mask >> code) & 1u;
-}
-
-bool LinearScanAllocator::try_allocate_free_reg(LiveInterval& interval) {
-    if (interval.vreg.is_gcref && interval.spans_call) {
-        return false;
-    }
-
-    bool is_gpr = interval.vreg.is_gpr();
-    const auto& pool = is_gpr ? available_gprs_ : available_xmms_;
-
-    const uint32_t occupied_regs = get_occupied_regs(interval);
-
-    auto check_is_callee = [this, is_gpr](PReg reg) {
-        if (cc_.target().is_aarch64()) {
-            return is_gpr ? cc_.is_callee_saved(reg.as_aarch64_gpr()) : cc_.is_callee_saved(reg.as_aarch64_fpr());
-        } else {
-            return is_gpr ? cc_.is_callee_saved(reg.as_gpr()) : cc_.is_callee_saved(reg.as_xmm());
-        }
-    };
-    auto mark_callee_saved = [this, is_gpr](PReg reg) {
-        if (cc_.target().is_aarch64()) {
-            if (is_gpr && cc_.is_callee_saved(reg.as_aarch64_gpr())) {
-                used_callee_gprs_ |= aarch64::reg_mask(reg.as_aarch64_gpr());
-            } else if (!is_gpr && cc_.is_callee_saved(reg.as_aarch64_fpr())) {
-                used_callee_xmms_ |= aarch64::reg_mask(reg.as_aarch64_fpr());
-            }
-        } else {
-            if (is_gpr && cc_.is_callee_saved(reg.as_gpr())) {
-                used_callee_gprs_ |= x64::reg_mask(reg.as_gpr());
-            } else if (!is_gpr && cc_.is_callee_saved(reg.as_xmm())) {
-                used_callee_xmms_ |= x64::reg_mask(reg.as_xmm());
-            }
-        }
-    };
-
-    // 1. If interval has a fixed constraint, check if that fixed register is valid
-    for (const auto& pos : interval.use_positions) {
-        if (pos.fixed_reg.is_valid() && pos.fixed_reg.reg_class == interval.vreg.reg_class) {
-            uint8_t fixed_code = pos.fixed_reg.code;
-            if (!in_mask(occupied_regs, fixed_code)) {
-                interval.assigned_preg = pos.fixed_reg;
-                mark_callee_saved(pos.fixed_reg);
-
-                active_.push_back(&interval);
-                std::sort(active_.begin(), active_.end(),
-                    [](const LiveInterval* a, const LiveInterval* b) {
-                        return a->end_id < b->end_id;
-                    });
-                return true;
-            }
-        }
-    }
-
-    // 1.5. Try Fixed Physical Register Hints
-    //
-    // Only a register the allocator could have picked anyway: a copy from the
-    // stack pointer (`read_sp`) hints its destination at SP, and a value that
-    // lives in SP is not a value. AArch64's register 31 is SP only to the few
-    // encodings that say so and XZR to every other one, so `cmp` against a
-    // vreg allocated there compared against zero.
-    auto in_pool = [&pool](PReg reg) {
-        return std::any_of(pool.begin(), pool.end(), [&](const PReg& p) { return p.code == reg.code; });
-    };
-    auto fixed_hint_it = fixed_preg_hints_.find(interval.vreg.id);
-    if (fixed_hint_it != fixed_preg_hints_.end()) {
-        for (PReg hint_reg : fixed_hint_it->second) {
-            if (hint_reg.is_valid() && hint_reg.reg_class == interval.vreg.reg_class && hint_reg.code < 32 &&
-                in_pool(hint_reg)) {
-                if (!in_mask(occupied_regs, hint_reg.code)) {
-                    bool is_callee = check_is_callee(hint_reg);
-                    if (!interval.spans_call || is_callee) {
-                        interval.assigned_preg = hint_reg;
-                        if (is_callee) {
-                            mark_callee_saved(hint_reg);
-                        }
-
-                        active_.push_back(&interval);
-                        std::sort(active_.begin(), active_.end(),
-                            [](const LiveInterval* a, const LiveInterval* b) {
-                                return a->end_id < b->end_id;
-                            });
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-
-    // 2. Try Coalescing Hint from partners
-    auto hint_it = coalesce_hints_.find(interval.vreg.id);
-    if (hint_it != coalesce_hints_.end()) {
-        for (VReg partner_v : hint_it->second) {
-            const auto* p_int = liveness_.get_interval(partner_v);
-            if (p_int && p_int->assigned_preg.is_valid() && p_int->assigned_preg.reg_class == interval.vreg.reg_class) {
-                PReg hint_reg = p_int->assigned_preg;
-                if (!in_mask(occupied_regs, hint_reg.code)) {
-                    bool is_callee = check_is_callee(hint_reg);
-                    if (!interval.spans_call || is_callee) {
-                        interval.assigned_preg = hint_reg;
-                        if (is_callee) {
-                            mark_callee_saved(hint_reg);
-                        }
-
-                        active_.push_back(&interval);
-                        std::sort(active_.begin(), active_.end(),
-                            [](const LiveInterval* a, const LiveInterval* b) {
-                                return a->end_id < b->end_id;
-                            });
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-
-    // 3. Register Pool Priority
-    std::vector<PReg> candidates;
-    if (interval.spans_call) {
-        for (const auto& reg : pool) {
-            bool is_callee = check_is_callee(reg);
-            if (is_callee && !in_mask(occupied_regs, reg.code)) {
-                candidates.push_back(reg);
-            }
-        }
-    } else {
-        for (const auto& reg : pool) {
-            bool is_callee = check_is_callee(reg);
-            if (!is_callee && !in_mask(occupied_regs, reg.code)) {
-                candidates.push_back(reg);
-            }
-        }
-        for (const auto& reg : pool) {
-            bool is_callee = check_is_callee(reg);
-            if (is_callee && !in_mask(occupied_regs, reg.code)) {
-                candidates.push_back(reg);
-            }
-        }
-    }
-
-    if (!candidates.empty()) {
-        PReg chosen = candidates.front();
-        interval.assigned_preg = chosen;
-        mark_callee_saved(chosen);
-
-        active_.push_back(&interval);
-        std::sort(active_.begin(), active_.end(),
-            [](const LiveInterval* a, const LiveInterval* b) {
-                return a->end_id < b->end_id;
-            });
-        return true;
-    }
-
-    return false;
-}
-
-void LinearScanAllocator::allocate_blocked_reg(LiveInterval& interval) {
-    if (interval.vreg.is_gcref && interval.spans_call) {
-        interval.assigned_spill_slot = allocate_spill_slot(true, interval.vreg.size);
-        interval.assigned_preg = PReg{};
-        return;
-    }
-
-    bool is_gpr = interval.vreg.is_gpr();
-    const auto& pool = is_gpr ? available_gprs_ : available_xmms_;
-    const uint32_t hard_blocked = get_hard_blocked_regs(interval);
-
-    auto check_is_callee = [this, is_gpr](PReg reg) {
-        if (cc_.target().is_aarch64()) {
-            return is_gpr ? cc_.is_callee_saved(reg.as_aarch64_gpr()) : cc_.is_callee_saved(reg.as_aarch64_fpr());
-        } else {
-            return is_gpr ? cc_.is_callee_saved(reg.as_gpr()) : cc_.is_callee_saved(reg.as_xmm());
-        }
-    };
-    auto mark_callee_saved = [this, is_gpr](PReg reg) {
-        if (cc_.target().is_aarch64()) {
-            if (is_gpr && cc_.is_callee_saved(reg.as_aarch64_gpr())) {
-                used_callee_gprs_ |= aarch64::reg_mask(reg.as_aarch64_gpr());
-            } else if (!is_gpr && cc_.is_callee_saved(reg.as_aarch64_fpr())) {
-                used_callee_xmms_ |= aarch64::reg_mask(reg.as_aarch64_fpr());
-            }
-        } else {
-            if (is_gpr && cc_.is_callee_saved(reg.as_gpr())) {
-                used_callee_gprs_ |= x64::reg_mask(reg.as_gpr());
-            } else if (!is_gpr && cc_.is_callee_saved(reg.as_xmm())) {
-                used_callee_xmms_ |= x64::reg_mask(reg.as_xmm());
-            }
-        }
-    };
-
-    // The active intervals that conflict with this one, bucketed by the
-    // register they hold, in active order — one overlap test per interval
-    // rather than one per (register, interval) pair.
-    std::vector<LiveInterval*> conflicts_by_reg[32];
-    for (auto* act : active_) {
-        if (act->vreg.reg_class == interval.vreg.reg_class && act->assigned_preg.is_valid() &&
-            act->assigned_preg.code < 32 && act->overlaps(interval)) {
-            conflicts_by_reg[act->assigned_preg.code].push_back(act);
-        }
-    }
-
-    PReg best_reg{};
-    std::vector<LiveInterval*> best_conflicts;
-    float best_cost = interval.spill_weight;
-    uint32_t best_furthest_end = 0;
-
-    for (const auto& reg : pool) {
-        if (in_mask(hard_blocked, reg.code)) {
-            continue;
-        }
-        if (interval.spans_call) {
-            bool is_callee = check_is_callee(reg);
-            if (!is_callee) {
-                continue;
-            }
-        }
-
-        std::vector<LiveInterval*>& conflicts = conflicts_by_reg[reg.code];
-        float total_weight = 0.0f;
-        uint32_t furthest_end = 0;
-        for (const auto* act : conflicts) {
-            total_weight += act->spill_weight;
-            furthest_end = std::max(furthest_end, act->end_id);
-        }
-
-        if (conflicts.empty()) {
-            best_reg = reg;
-            best_conflicts.clear();
-            best_cost = 0.0f;
-            break;
-        }
-
-        if (total_weight < best_cost || (total_weight == best_cost && furthest_end > best_furthest_end && best_reg.is_valid())) {
-            best_cost = total_weight;
-            best_reg = reg;
-            best_conflicts = std::move(conflicts);
-            best_furthest_end = furthest_end;
-        }
-    }
-
-    if (best_reg.is_valid()) {
-        for (auto* c : best_conflicts) {
-            c->assigned_preg = PReg{};
-            c->assigned_spill_slot = allocate_spill_slot(c->vreg.is_gcref, c->vreg.size);
-            auto it = std::find(active_.begin(), active_.end(), c);
-            if (it != active_.end()) {
-                active_.erase(it);
-            }
-        }
-
-        interval.assigned_preg = best_reg;
-        mark_callee_saved(best_reg);
-
-        active_.push_back(&interval);
-        std::sort(active_.begin(), active_.end(),
-            [](const LiveInterval* a, const LiveInterval* b) {
-                return a->end_id < b->end_id;
-            });
-    } else {
-        // Spill interval
-        interval.assigned_spill_slot = allocate_spill_slot(interval.vreg.is_gcref, interval.vreg.size);
-        interval.assigned_preg = PReg{};
-    }
 }
 
 // A value wider than 8 bytes takes 2 (16 bytes) or 4 (32 bytes) adjacent

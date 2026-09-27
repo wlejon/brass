@@ -70,9 +70,15 @@ void AArch64EmitContext::emit_parallel_copy(const LirInst& inst) {
         } else {
             MemAddress dst_mem = ensure_accessible_mem(to_mem_address(dst), GPR::X17);
             GPR data_scratch = (dst_mem.base == GPR::X16 || dst_mem.index == GPR::X16) ? GPR::X15 : GPR::X16;
+            // A spill slot holds a narrow GPR value zero-extended to all 8
+            // bytes (linear_scan_rewrite's write-back stores the whole
+            // register): its reloads may be 64-bit, e.g. as an address
+            // index, so a 1/2/4-byte store would leave a stale upper half.
+            const bool whole_slot = dst.is_spill_slot();
             if (src.is_preg()) {
                 if (src.preg_val.is_gpr()) {
-                    if (dst.size == 1 || src.size == 1) enc_.strb(src.preg_val.as_aarch64_gpr(), dst_mem);
+                    if (whole_slot) enc_.str(src.preg_val.as_aarch64_gpr(), dst_mem);
+                    else if (dst.size == 1 || src.size == 1) enc_.strb(src.preg_val.as_aarch64_gpr(), dst_mem);
                     else if (dst.size == 2 || src.size == 2) enc_.strh(src.preg_val.as_aarch64_gpr(), dst_mem);
                     else if (dst.size == 4 || src.size == 4) enc_.str32(src.preg_val.as_aarch64_gpr(), dst_mem);
                     else enc_.str(src.preg_val.as_aarch64_gpr(), dst_mem);
@@ -82,15 +88,20 @@ void AArch64EmitContext::emit_parallel_copy(const LirInst& inst) {
                     else enc_.str(src.preg_val.as_aarch64_fpr(), dst_mem);
                 }
             } else if (src.is_imm_int()) {
+                // mov wN zero-extends into xN, so a whole-slot store of the
+                // X register writes the value with its upper half zeroed.
                 if (dst.size == 1) {
                     enc_.mov32(data_scratch, static_cast<uint32_t>(src.imm_int & 0xff));
-                    enc_.strb(data_scratch, dst_mem);
+                    if (whole_slot) enc_.str(data_scratch, dst_mem);
+                    else enc_.strb(data_scratch, dst_mem);
                 } else if (dst.size == 2) {
                     enc_.mov32(data_scratch, static_cast<uint32_t>(src.imm_int & 0xffff));
-                    enc_.strh(data_scratch, dst_mem);
+                    if (whole_slot) enc_.str(data_scratch, dst_mem);
+                    else enc_.strh(data_scratch, dst_mem);
                 } else if (dst.size == 4) {
                     enc_.mov32(data_scratch, static_cast<uint32_t>(src.imm_int));
-                    enc_.str32(data_scratch, dst_mem);
+                    if (whole_slot) enc_.str(data_scratch, dst_mem);
+                    else enc_.str32(data_scratch, dst_mem);
                 } else {
                     enc_.mov(data_scratch, static_cast<uint64_t>(src.imm_int));
                     enc_.str(data_scratch, dst_mem);
@@ -103,14 +114,17 @@ void AArch64EmitContext::emit_parallel_copy(const LirInst& inst) {
                     enc_.ldr_q(FPR::V31, src_mem);
                     enc_.str_q(FPR::V31, dst_mem);
                 } else if (dst.size == 1 || src.size == 1) {
-                    enc_.ldrb(data_scratch, src_mem);
-                    enc_.strb(data_scratch, dst_mem);
+                    enc_.ldrb(data_scratch, src_mem);   // zero-extends
+                    if (whole_slot) enc_.str(data_scratch, dst_mem);
+                    else enc_.strb(data_scratch, dst_mem);
                 } else if (dst.size == 2 || src.size == 2) {
-                    enc_.ldrh(data_scratch, src_mem);
-                    enc_.strh(data_scratch, dst_mem);
+                    enc_.ldrh(data_scratch, src_mem);   // zero-extends
+                    if (whole_slot) enc_.str(data_scratch, dst_mem);
+                    else enc_.strh(data_scratch, dst_mem);
                 } else if (dst.size == 4 || src.size == 4) {
-                    enc_.ldr32(data_scratch, src_mem);
-                    enc_.str32(data_scratch, dst_mem);
+                    enc_.ldr32(data_scratch, src_mem);  // zero-extends
+                    if (whole_slot) enc_.str(data_scratch, dst_mem);
+                    else enc_.str32(data_scratch, dst_mem);
                 } else {
                     enc_.ldr(data_scratch, src_mem);
                     enc_.str(data_scratch, dst_mem);

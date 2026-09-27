@@ -52,11 +52,19 @@ void LiveInterval::shorten_start(uint32_t from_id) {
         return;
     }
 
+    bool covered = false;
     for (auto& seg : segments) {
-        if (seg.start < from_id && seg.end >= from_id) {
+        if (seg.start <= from_id && seg.end >= from_id) {
             seg.start = from_id;
+            covered = true;
             break;
         }
+    }
+    // A definition no later use reads (a value redefined before its next
+    // read) still writes its location: it is live at the instruction.
+    if (!covered) {
+        add_range(from_id, from_id + 1);
+        return;
     }
 
     start_id = UINT32_MAX;
@@ -385,11 +393,17 @@ void LivenessAnalysis::build_intervals() {
     for (auto it = fn_.blocks.rbegin(); it != fn_.blocks.rend(); ++it) {
         auto* block = it->get();
         const BlockLiveness& bl = block_liveness_[block];
+        // A value live into the block is live before its first instruction:
+        // from the position between it and the previous block's last. From
+        // the first instruction itself, it could share a register with a
+        // value that instruction reads for the last time (strict overlap),
+        // both of them live on entry.
+        const uint32_t live_from = bl.start_id > 0 ? bl.start_id - 1 : 0;
 
         // Add whole-block live range for each variable live out of the block
         for (VReg v : bl.live_out) {
             if (v.is_valid() && v.id < intervals_.size()) {
-                intervals_[v.id].add_range(bl.start_id, bl.end_id + 1);
+                intervals_[v.id].add_range(live_from, bl.end_id + 1);
             }
         }
 
@@ -410,11 +424,11 @@ void LivenessAnalysis::build_intervals() {
                 } else if (d.is_mem()) {
                     if (d.mem_val.base_vreg.is_valid() && d.mem_val.base_vreg.id < intervals_.size()) {
                         intervals_[d.mem_val.base_vreg.id].add_use_pos(inst_id, false, true);
-                        intervals_[d.mem_val.base_vreg.id].add_range(bl.start_id, inst_id);
+                        intervals_[d.mem_val.base_vreg.id].add_range(live_from,inst_id);
                     }
                     if (d.mem_val.index_vreg.is_valid() && d.mem_val.index_vreg.id < intervals_.size()) {
                         intervals_[d.mem_val.index_vreg.id].add_use_pos(inst_id, false, true);
-                        intervals_[d.mem_val.index_vreg.id].add_range(bl.start_id, inst_id);
+                        intervals_[d.mem_val.index_vreg.id].add_range(live_from,inst_id);
                     }
                 }
             }
@@ -426,7 +440,7 @@ void LivenessAnalysis::build_intervals() {
                 for (const auto& u : exit->uses) {
                     if (u.is_vreg() && u.vreg_val.is_valid() && u.vreg_val.id < intervals_.size()) {
                         intervals_[u.vreg_val.id].add_use_pos(inst_id, false, false);
-                        intervals_[u.vreg_val.id].add_range(bl.start_id, inst_id);
+                        intervals_[u.vreg_val.id].add_range(live_from,inst_id);
                     }
                 }
             }
@@ -438,15 +452,15 @@ void LivenessAnalysis::build_intervals() {
 
                 if (u.is_vreg() && u.vreg_val.is_valid() && u.vreg_val.id < intervals_.size()) {
                     intervals_[u.vreg_val.id].add_use_pos(inst_id, false, true, fc.fixed_preg);
-                    intervals_[u.vreg_val.id].add_range(bl.start_id, inst_id);
+                    intervals_[u.vreg_val.id].add_range(live_from,inst_id);
                 } else if (u.is_mem()) {
                     if (u.mem_val.base_vreg.is_valid() && u.mem_val.base_vreg.id < intervals_.size()) {
                         intervals_[u.mem_val.base_vreg.id].add_use_pos(inst_id, false, true);
-                        intervals_[u.mem_val.base_vreg.id].add_range(bl.start_id, inst_id);
+                        intervals_[u.mem_val.base_vreg.id].add_range(live_from,inst_id);
                     }
                     if (u.mem_val.index_vreg.is_valid() && u.mem_val.index_vreg.id < intervals_.size()) {
                         intervals_[u.mem_val.index_vreg.id].add_use_pos(inst_id, false, true);
-                        intervals_[u.mem_val.index_vreg.id].add_range(bl.start_id, inst_id);
+                        intervals_[u.mem_val.index_vreg.id].add_range(live_from,inst_id);
                     }
                 }
             }

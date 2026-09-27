@@ -10,6 +10,7 @@ void X64Encoder::emit_vex2(bool r, uint8_t vvvv, bool l, uint8_t pp) {
     uint8_t inv_r = r ? 0 : 1;
     uint8_t inv_vvvv = (~vvvv) & 0x0F;
     uint8_t l_bit = l ? 1 : 0;
+    wrote_256_ |= l;
     buffer_.emit8(0xC5);
     buffer_.emit8(static_cast<uint8_t>((inv_r << 7) | (inv_vvvv << 3) | (l_bit << 2) | (pp & 0x03)));
 }
@@ -20,6 +21,7 @@ void X64Encoder::emit_vex3(bool w, bool r, bool x, bool b, uint8_t mmmmm, uint8_
     uint8_t inv_b = b ? 0 : 1;
     uint8_t inv_vvvv = (~vvvv) & 0x0F;
     uint8_t l_bit = l ? 1 : 0;
+    wrote_256_ |= l;
     buffer_.emit8(0xC4);
     buffer_.emit8(static_cast<uint8_t>((inv_r << 7) | (inv_x << 6) | (inv_b << 5) | (mmmmm & 0x1F)));
     buffer_.emit8(static_cast<uint8_t>((w ? 0x80 : 0x00) | (inv_vvvv << 3) | (l_bit << 2) | (pp & 0x03)));
@@ -31,6 +33,11 @@ void X64Encoder::emit_vex(bool w, uint8_t mmmmm, uint8_t pp, bool l, bool r, boo
     } else {
         emit_vex3(w, r, x, b, mmmmm, vvvv, l, pp);
     }
+}
+
+void X64Encoder::vzeroupper() {
+    emit_vex2(false, 0, false, 0);   // C5 F8
+    buffer_.emit8(0x77);
 }
 
 // =========================================================================

@@ -445,6 +445,13 @@ public:
     void emit_vex3(bool w, bool r, bool x, bool b, uint8_t mmmmm, uint8_t vvvv, bool l, uint8_t pp);
     void emit_vex(bool w, uint8_t mmmmm, uint8_t pp, bool l, bool r, bool x, bool b, uint8_t vvvv);
 
+    // VEX.128.0F.WIG 77: zeroes bits 255:128 of every YMM register, so the
+    // legacy-SSE code that runs next pays no upper-state penalty.
+    void vzeroupper();
+    // Whether anything encoded so far is a VEX.256 instruction (L = 1),
+    // which leaves the upper halves of the YMM registers dirty.
+    bool wrote_256() const noexcept { return wrote_256_; }
+
     // 256-bit AVX/AVX2 Moves
     void vmovaps(XMM dst, XMM src);
     void vmovaps(XMM dst, const MemAddress& src);
@@ -722,6 +729,7 @@ public:
 
 private:
     CodeBuffer& buffer_;
+    bool wrote_256_ = false;
 
     // Low-level emission helpers
     void emit_rex(bool w, bool r, bool x, bool b);
