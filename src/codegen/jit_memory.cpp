@@ -202,12 +202,22 @@ bool JitMemoryBlock::register_unwind_info(size_t offset, uint32_t count) {
 #elif !defined(_WIN32)
     (void)count;
 #if defined(__APPLE__)
-    // Apple's libunwind takes one FDE per call: the first after the CIE.
-    uint32_t cie_len = 0;
-    std::memcpy(&cie_len, table, 4);
-    table += 4 + cie_len;
-#endif
+    // Apple's libunwind takes one FDE per call: skip CIEs and register each FDE.
+    uint8_t* p = table;
+    while (p + 8 <= ptr_ + size_) {
+        uint32_t len = 0;
+        std::memcpy(&len, p, 4);
+        if (len == 0 || len == 0xFFFFFFFFu || p + 4 + len > ptr_ + size_) break;
+        uint32_t cie_id = 0;
+        std::memcpy(&cie_id, p + 4, 4);
+        if (cie_id != 0) {
+            __register_frame(p);
+        }
+        p += 4 + len;
+    }
+#else
     __register_frame(table);
+#endif
     unwind_table_ = table;
     return true;
 #else
@@ -221,6 +231,19 @@ void JitMemoryBlock::unregister_unwind_info() noexcept {
     if (!unwind_table_) return;
 #if defined(_WIN32) && (defined(_M_X64) || defined(__x86_64__) || defined(_M_ARM64) || defined(__aarch64__))
     RtlDeleteFunctionTable(reinterpret_cast<PRUNTIME_FUNCTION>(unwind_table_));
+#elif defined(__APPLE__)
+    uint8_t* p = unwind_table_;
+    while (p + 8 <= ptr_ + size_) {
+        uint32_t len = 0;
+        std::memcpy(&len, p, 4);
+        if (len == 0 || len == 0xFFFFFFFFu || p + 4 + len > ptr_ + size_) break;
+        uint32_t cie_id = 0;
+        std::memcpy(&cie_id, p + 4, 4);
+        if (cie_id != 0) {
+            __deregister_frame(p);
+        }
+        p += 4 + len;
+    }
 #elif !defined(_WIN32)
     __deregister_frame(unwind_table_);
 #endif
