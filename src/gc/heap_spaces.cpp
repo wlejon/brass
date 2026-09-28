@@ -40,6 +40,8 @@ void HeapState::mark_lines(BlockMeta& meta, uintptr_t block_lo, uintptr_t header
 }
 
 uint32_t HeapState::acquire_free_block() {
+    // The last `reserve_mature_blocks` are a collection's (the promotion reserve).
+    if (!collecting && mature_blocks_available() <= reserve_mature_blocks) return UINT32_MAX;
     uint32_t index;
     if (!free_blocks.empty()) {
         index = free_blocks.back();
@@ -122,6 +124,10 @@ uintptr_t HeapState::mature_allocate(size_t total) {
 
 uintptr_t HeapState::large_allocate(size_t total) {
     const uint32_t pages = static_cast<uint32_t>((total + kPageBytes - 1) / kPageBytes);
+    // The promotion reserve: the last `reserve_large_bytes` are a collection's.
+    if (!collecting && large_used_bytes + static_cast<size_t>(pages) * kPageBytes + reserve_large_bytes > large_reserve) {
+        return 0;
+    }
     uint32_t start = UINT32_MAX;
     for (auto it = large_free_runs.begin(); it != large_free_runs.end(); ++it) {
         if (it->second >= pages) {

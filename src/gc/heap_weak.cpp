@@ -47,7 +47,7 @@ void ephemeron_visit(Tracer& t, uint64_t* key, uint64_t* value, uint64_t cleared
     }
     *key = (word & ~kAddressMask) | live;
     if (g.kind == CollectionKind::Minor && t.owner_old() && g.heap.is_young(live)) {
-        *g.s.card_of(t.owner()) = kCardDirty;
+        g.s.mark_card(t.owner(), kCardDirty);
     }
     t.visit(value);
 }
@@ -66,7 +66,7 @@ void settle_weakness(GcState& g) {
         }
         *w.slot = (word & ~kAddressMask) | live;
         if (g.kind == CollectionKind::Minor && w.owner_old && g.heap.is_young(live)) {
-            *s.card_of(w.owner) = kCardDirty;
+            s.mark_card(w.owner, kCardDirty);
         }
     }
     g.weak.clear();

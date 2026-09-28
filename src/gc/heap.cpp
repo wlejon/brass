@@ -22,9 +22,14 @@ using detail::Collector;
 using detail::HeapState;
 using detail::MutatorFrame;
 
-namespace {
-
+// The thread's heap (Heap::current); runtime_gc.cpp reads it directly on
+// generated code's allocation path.
+namespace detail {
 thread_local Heap* t_current_heap = nullptr;
+}
+using detail::t_current_heap;
+
+namespace {
 
 constexpr size_t kYoungGranularity = 64 * 1024;
 
@@ -61,6 +66,13 @@ void apply_environment(HeapConfig& config) {
     if (!log.empty() && log != "0") config.log = true;
     const std::string threads = env_value("BRASS_GC_MARK_THREADS");
     if (!threads.empty()) config.mark_threads = static_cast<unsigned>(std::strtoul(threads.c_str(), nullptr, 10));
+    // Both old spaces' reservations, in MB: a small one makes the
+    // out-of-memory path reachable from a test.
+    const std::string old_mb = env_value("BRASS_GC_OLD_RESERVE_MB");
+    if (const unsigned long long mb = std::strtoull(old_mb.c_str(), nullptr, 10); mb > 0) {
+        config.mature_reserve_bytes = static_cast<size_t>(mb) << 20;
+        config.large_reserve_bytes = static_cast<size_t>(mb) << 20;
+    }
 }
 
 } // namespace
@@ -98,6 +110,9 @@ Heap::Heap(const HeapConfig& config) : s_(std::make_unique<HeapState>(*this)) {
     const size_t card_page = detail::os_page_bytes();
     s.cards = static_cast<uint8_t*>(detail::vm_reserve(s.cards_bytes, card_page));
     s.card_pages_committed.assign((s.cards_bytes + card_page - 1) / card_page, 0);
+    s.region_bytes.assign(((mature + large) >> kCardRegionShift) + 1, 0);
+    s.regions = s.region_bytes.data();
+    regions_ = s.regions;
 
     young_lo_ = s.base;
     young_span_ = young;
@@ -106,6 +121,13 @@ Heap::Heap(const HeapConfig& config) : s_(std::make_unique<HeapState>(*this)) {
     heap_lo_ = s.base;
     heap_span_ = s.reserve_bytes;
     cards_ = s.cards;
+
+    // What one collection could promote, doubled for fragmentation, held back
+    // from the mutator (HeapState::reserve_mature_blocks); never more than a
+    // quarter of a space.
+    const size_t promotable = 2 * (eden + survivor);
+    s.reserve_mature_blocks = std::min((promotable + kBlockBytes - 1) / kBlockBytes + 4, mature / kBlockBytes / 4);
+    s.reserve_large_bytes = std::min(round_up(promotable, kPageBytes), large / 4);
 
     const size_t large_threshold = std::max(s.config.large_object_bytes, kMinLargeObjectBytes);
     max_young_total_ = std::max(std::min(large_threshold + kHeaderBytes, eden / 4), kMinLargeObjectBytes + kHeaderBytes);
@@ -223,8 +245,18 @@ uintptr_t Heap::allocate_at(size_t bytes, LayoutId layout, uint32_t flags, uint8
         s.trigger = detail::GcTrigger::Requested;
         collect_at(CollectionKind::Minor, 0, 0);
     }
+    // A collection has had to promote into the reserve (HeapState::
+    // old_critical): a full collection may give the room back; if it does not,
+    // this allocation fails rather than let the heap reach a collection with
+    // nowhere to promote to. The failure leaves the heap consistent, eden
+    // empty, so the program can drop references and go on.
+    if (s.old_critical) {
+        s.trigger = detail::GcTrigger::Exhausted;
+        collect_at(CollectionKind::Full, 0, 0);
+        if (s.old_critical) throw std::bad_alloc();
+    }
 
-    const bool old = (flags & (kAllocOld | kAllocPinned)) != 0 || total > max_young_total_;
+    const bool old =(flags & (kAllocOld | kAllocPinned)) != 0 || total > max_young_total_;
     if (old) {
         if (s.old_allocated_since_full + total > s.full_threshold) {
             s.trigger = detail::GcTrigger::OldGrowth;

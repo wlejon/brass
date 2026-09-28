@@ -99,8 +99,9 @@ struct HeapConfig {
     // their frame pointers elsewhere, where that code must keep them.
     bool walk_stack_on_host_collection = false;
     // BRASS_GC_STRESS (minor|full|alternate|1), BRASS_GC_VERIFY=1,
-    // BRASS_GC_POISON=1, BRASS_GC_LOG=1 and BRASS_GC_MARK_THREADS=n override
-    // the fields above when set.
+    // BRASS_GC_POISON=1, BRASS_GC_LOG=1, BRASS_GC_MARK_THREADS=n and
+    // BRASS_GC_OLD_RESERVE_MB=n (both old reservations) override the fields
+    // above when set.
     bool read_environment = true;
 };
 
@@ -160,8 +161,23 @@ public:
         header->layout = layout;
         header->gc_bits = 0;
         header->host_bits = host_bits;
-        std::memset(reinterpret_cast<void*>(at + kHeaderBytes), 0, total - kHeaderBytes);
+        zero_payload(at + kHeaderBytes, total - kHeaderBytes);
         return at + kHeaderBytes;
+    }
+    // Zeroes a fresh payload. Most objects are a few words, and a size known
+    // only at run time (brass_gc_alloc's) would otherwise cost a call into the
+    // C library's memset per allocation, which is most of an allocation.
+    static void zero_payload(uintptr_t payload, size_t bytes) noexcept {
+        auto* w = reinterpret_cast<uint64_t*>(payload);
+        switch (bytes >> 3) {
+            case 6: w[5] = 0; [[fallthrough]];
+            case 5: w[4] = 0; [[fallthrough]];
+            case 4: w[3] = 0; [[fallthrough]];
+            case 3: w[2] = 0; [[fallthrough]];
+            case 2: w[1] = 0; [[fallthrough]];
+            case 1: w[0] = 0; return;
+            default: std::memset(w, 0, bytes); return;
+        }
     }
     // The Mask layout (mask_layout) for (pointer_mask, type_tag).
     uintptr_t allocate_masked(size_t bytes, uint64_t pointer_mask, uint32_t type_tag) {
@@ -208,7 +224,7 @@ public:
         if (object - old_lo_ < old_span_ &&
             (static_cast<uintptr_t>(value & kAddressMask) - young_lo_) < young_span_ &&
             is_reference_tag(value)) {
-            cards_[(object - old_lo_) >> kCardShift] = kCardDirty;
+            dirty_card(object);
         }
     }
     // The barrier for a store through `address`, any address inside an object
@@ -228,7 +244,7 @@ public:
     // card is dirtied unconditionally, so the next minor collection rescans
     // every slot of it.
     void remember(uintptr_t object) noexcept {
-        if (object - old_lo_ < old_span_) cards_[(object - old_lo_) >> kCardShift] = kCardDirty;
+        if (object - old_lo_ < old_span_) dirty_card(object);
     }
     // As remember, for a bulk write into bytes [begin, end) of `object`: a
     // large object has only the cards covering the range rescanned.
@@ -268,7 +284,11 @@ public:
     // traces it on every heap; readers mask the tag off (kAddressMask).
     [[nodiscard]] uint64_t raw_address_tag() const noexcept { return raw_address_tag_; }
     // Card of old-generation address `a`: card_table_base()[(a - old_base()) >> kCardShift].
+    // Code that dirties a card itself must also set the card's region byte,
+    // card_region_base()[(a - old_base()) >> kCardRegionShift] = 1, or a minor
+    // collection will not look at the card.
     [[nodiscard]] uint8_t* card_table_base() const noexcept { return cards_; }
+    [[nodiscard]] uint8_t* card_region_base() const noexcept { return regions_; }
     [[nodiscard]] uintptr_t old_base() const noexcept { return old_lo_; }
     [[nodiscard]] uintptr_t young_base() const noexcept { return young_lo_; }
     [[nodiscard]] size_t young_span() const noexcept { return young_span_; }
@@ -355,6 +375,12 @@ private:
 
     void remember_interior(uintptr_t address) noexcept;
     void remember_range_old(uintptr_t object, uintptr_t begin, uintptr_t end) noexcept;
+    // Dirties the card of old address `a` and marks its region (kCardRegionShift).
+    void dirty_card(uintptr_t a) noexcept {
+        const uintptr_t off = a - old_lo_;
+        cards_[off >> kCardShift] = kCardDirty;
+        regions_[off >> kCardRegionShift] = 1;
+    }
 
     AllocationBuffer own_alloc_;
     AllocationBuffer* alloc_ = &own_alloc_;
@@ -366,6 +392,7 @@ private:
     uintptr_t heap_lo_ = 0;
     uintptr_t heap_span_ = 0;
     uint8_t* cards_ = nullptr;
+    uint8_t* regions_ = nullptr;
     const uint64_t* ref_tags_ = nullptr;
     uint64_t raw_address_tag_ = 0;
     std::unique_ptr<detail::HeapState> s_;

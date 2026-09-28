@@ -8,6 +8,10 @@
 #include <cstdlib>
 #include <vector>
 
+namespace brass::gc::detail {
+extern thread_local Heap* t_current_heap;  // heap.cpp: Heap::current()
+}
+
 namespace brass {
 
 namespace {
@@ -92,6 +96,25 @@ namespace {
 using brass::gc::CollectionKind;
 using brass::gc::Heap;
 
+// The layout of this thread's last allocation from generated code, which is
+// almost always the next one's too (a loop allocating one kind of node), so
+// the common allocation skips the call into the layout registry's cache.
+struct LastLayout {
+    uint64_t mask = 0;
+    uint32_t tag = 0;
+    brass::gc::LayoutId id = 0;
+    bool valid = false;
+};
+thread_local LastLayout t_last_layout;
+
+inline brass::gc::LayoutId layout_for(uint64_t mask, uint32_t tag) {
+    LastLayout& last = t_last_layout;
+    if (last.valid && last.mask == mask && last.tag == tag) return last.id;
+    const brass::gc::LayoutId id = brass::gc::mask_layout(mask, tag);
+    last = LastLayout{mask, tag, id, true};
+    return id;
+}
+
 void runtime_safepoint(uintptr_t caller_fp, uintptr_t caller_ip) {
     Heap* heap = Heap::current();
     if (!heap || heap->in_collection()) return;
@@ -110,9 +133,9 @@ void runtime_collect(uintptr_t caller_fp, uintptr_t caller_ip) {
 
 uintptr_t runtime_alloc(size_t size, uint64_t pointer_mask, uint32_t type_tag,
                         uintptr_t caller_fp, uintptr_t caller_ip) {
-    Heap* heap = Heap::current();
+    Heap* heap = brass::gc::detail::t_current_heap;
     if (!heap) brass::gc_fatal_no_heap();
-    const brass::gc::LayoutId layout = brass::gc::mask_layout(pointer_mask, type_tag);
+    const brass::gc::LayoutId layout = layout_for(pointer_mask, type_tag);
     // The bump fast path never collects, so it needs no stack maps and no
     // mutator frame: only the slow path goes through allocate_at. (In stress
     // mode `end` sits at `top`, so every allocation still takes the slow

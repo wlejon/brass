@@ -131,6 +131,7 @@ void clean_all_cards(HeapState& s) {
     for (size_t p = 0; p < s.card_pages_committed.size(); ++p) {
         if (s.card_pages_committed[p]) std::memset(s.cards + p * page, kCardClean, page);
     }
+    std::fill(s.region_bytes.begin(), s.region_bytes.end(), uint8_t{0});
 }
 
 void poison_evacuated(HeapState& s, const GcState& g) {
@@ -351,7 +352,7 @@ void trace_to_fixpoint(Tracer& t, GcState& g) {
             *e.key = (word & ~kAddressMask) | live;
             t.set_owner(e.owner, e.owner_old);
             if (g.kind == CollectionKind::Minor && e.owner_old && g.heap.is_young(live)) {
-                *g.s.card_of(e.owner) = kCardDirty;
+                g.s.mark_card(e.owner, kCardDirty);
             }
             t.visit(e.value);
             progress = true;
@@ -380,6 +381,7 @@ void Collector::collect(Heap& heap, CollectionKind kind) {
     if (kind == CollectionKind::Minor) minor(g);
     else full(g);
     s.collecting = false;
+    s.old_critical = s.old_in_reserve();
 
     if (s.verify) verify_heap(heap, "after a collection");
     coro_lock.reset();

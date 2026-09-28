@@ -47,6 +47,12 @@ inline constexpr size_t kCardBytes = size_t{1} << kCardShift;
 inline constexpr uint8_t kCardDirty = 0x00;
 inline constexpr uint8_t kCardClean = 0x01;
 inline constexpr uint8_t kCardDirtyRange = 0x02;
+// Card regions: one byte per 32 KB of the old generation (a mature block, or
+// eight large-object pages), nonzero when any card in it may be dirty. Every
+// card store sets its region's byte too, so a minor collection visits only
+// the regions the mutator wrote to and its cost follows the remembered set,
+// not the size of the old generation.
+inline constexpr unsigned kCardRegionShift = 15;
 
 // Header bits the collector owns (ObjectHeader::gc_bits).
 inline constexpr uint8_t kGcForwarded = 0x01;  // young copy left behind; payload word 0 = new address

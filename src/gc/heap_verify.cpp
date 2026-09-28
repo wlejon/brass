@@ -121,14 +121,14 @@ void Heap::remember_interior(uintptr_t address) noexcept {
         return;
     }
     const uintptr_t object = find_object(address);
-    if (object != 0) cards_[(object - old_lo_) >> kCardShift] = kCardDirty;
+    if (object != 0) dirty_card(object);
 }
 
 void Heap::remember_range_old(uintptr_t object, uintptr_t begin, uintptr_t end) noexcept {
     HeapState& s = *s_;
     if (!s.in_large(object) || end <= begin || begin < object ||
         end - object > header_of(object)->size) {
-        cards_[(object - old_lo_) >> kCardShift] = kCardDirty;
+        dirty_card(object);
         return;
     }
     for (uintptr_t at = begin & ~(kCardBytes - 1); at < end; at += kCardBytes) {
@@ -235,11 +235,15 @@ void verify_visit(Tracer& t, uint64_t* slot, uint64_t word) {
     if (t.owner_old() && heap.is_young(a)) {
         const HeapState& s = Collector::state(heap);
         const uint8_t* first = s.card_of(t.owner());
-        bool remembered = *first == kCardDirty;
+        const auto region_marked = [&s](uintptr_t addr) {
+            return s.regions[(addr - s.mature_lo) >> kCardRegionShift] != 0;
+        };
+        bool remembered = *first == kCardDirty && region_marked(t.owner());
         if (!remembered && s.in_large(t.owner())) {
             // A large object is remembered card by card: the slot's own card.
             const auto at = reinterpret_cast<uintptr_t>(slot);
-            remembered = at - t.owner() < header_of(t.owner())->size && *s.card_of(at) != kCardClean;
+            remembered = at - t.owner() < header_of(t.owner())->size && *s.card_of(at) != kCardClean &&
+                         region_marked(at);
         }
         if (!remembered) {
             char buf[200];

@@ -240,19 +240,29 @@ struct HeapState {
     // whole-object rescan), or the whole object when the slot lies outside it.
     void remember_slot(uintptr_t owner, const void* slot) noexcept {
         if (!in_large(owner)) {
-            *card_of(owner) = kCardDirty;
+            mark_card(owner, kCardDirty);
             return;
         }
         const auto at = reinterpret_cast<uintptr_t>(slot);
         uint8_t* first = card_of(owner);
         if (at - owner >= header_of(owner)->size) {
-            *first = kCardDirty;
+            mark_card(owner, kCardDirty);
             return;
         }
         uint8_t* card = card_of(at);
-        if (card != first) *card = kCardDirty;
-        else if (*card != kCardDirty) *card = kCardDirtyRange;
+        if (card != first) mark_card(at, kCardDirty);
+        else if (*card != kCardDirty) mark_card(at, kCardDirtyRange);
     }
+    // Sets the card of old address `a` to `value` (kCardDirty or
+    // kCardDirtyRange) and marks its region (kCardRegionShift): every card
+    // store goes through here or Heap::dirty_card.
+    void mark_card(uintptr_t a, uint8_t value) noexcept {
+        cards[(a - mature_lo) >> kCardShift] = value;
+        regions[(a - mature_lo) >> kCardRegionShift] = 1;
+    }
+    // One byte per 32 KB of [mature_lo, large_lo + large_reserve).
+    uint8_t* regions = nullptr;
+    std::vector<uint8_t> region_bytes;
 
     // ---- spaces (heap_spaces.cpp) ----
     // The header address of `total` bytes (header included) in the mature
@@ -281,6 +291,29 @@ struct HeapState {
     void reset_eden() noexcept;
     void update_fast_limit() noexcept;
     uint64_t old_direct_bytes = 0;  // allocated straight into the old generation
+
+    // ---- the promotion reserve (heap_spaces.cpp) ----
+    // A collection copies young survivors into the old generation and cannot
+    // stop half way, so the room it may need is kept from the mutator: the
+    // mutator's own old allocations stop short of each space's end by what one
+    // collection could promote (twice the young generation's live capacity,
+    // for fragmentation), and only a collection takes blocks or pages from
+    // that margin. Once a collection has had to, the heap is `old_critical`:
+    // the next allocation that reaches the runtime runs a full collection
+    // first and, if the margin is still breached, fails with std::bad_alloc
+    // (which a host turns into its out-of-memory error) instead of risking a
+    // collection with nowhere to promote to.
+    size_t reserve_mature_blocks = 0;
+    size_t reserve_large_bytes = 0;
+    bool old_critical = false;
+    [[nodiscard]] size_t mature_blocks_available() const noexcept {
+        return (mature_reserve / kBlockBytes - blocks.size()) + free_blocks.size();
+    }
+    // Whether the old generation has eaten into the promotion reserve.
+    [[nodiscard]] bool old_in_reserve() const noexcept {
+        return mature_blocks_available() < reserve_mature_blocks ||
+               large_used_bytes + reserve_large_bytes > large_reserve;
+    }
 };
 
 // Records, for its lifetime, the generated frame on whose behalf the heap is
