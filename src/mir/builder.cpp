@@ -11,6 +11,7 @@ Builder::Builder(Function& fn) noexcept
     : module_(fn.parent()), function_(&fn) {}
 
 void Builder::set_function(Function* fn) noexcept {
+    clear_const_cache();
     function_ = fn;
     if (fn && fn->parent()) {
         module_ = fn->parent();
@@ -18,6 +19,7 @@ void Builder::set_function(Function* fn) noexcept {
 }
 
 void Builder::position_at_end(BasicBlock* bb) noexcept {
+    if (bb != block_) clear_const_cache();
     block_ = bb;
     insert_before_ = nullptr;
     if (bb && bb->parent()) {
@@ -30,6 +32,7 @@ void Builder::position_at_end(BasicBlock* bb) noexcept {
 
 void Builder::position_before(Instruction* inst) noexcept {
     if (inst) {
+        if (inst->parent() != block_) clear_const_cache();
         block_ = inst->parent();
         insert_before_ = inst;
         if (block_ && block_->parent()) {
@@ -43,6 +46,7 @@ void Builder::position_before(Instruction* inst) noexcept {
 
 void Builder::position_after(Instruction* inst) noexcept {
     if (inst) {
+        if (inst->parent() != block_) clear_const_cache();
         block_ = inst->parent();
         insert_before_ = inst->next();
         if (block_ && block_->parent()) {
@@ -127,26 +131,6 @@ Instruction* Builder::insert(Instruction* inst) {
         }
     }
     return inst;
-}
-
-Value* Builder::build_iconst_i32(int32_t val) {
-    Instruction* inst = get_arena().make<Instruction>(Opcode::iconst_i32, Type::i32());
-    inst->set_imm_i32(val);
-    Value* res = create_value(Type::i32());
-    res->set_defining_instruction(inst);
-    inst->set_result(res);
-    insert(inst);
-    return res;
-}
-
-Value* Builder::build_iconst_i64(int64_t val) {
-    Instruction* inst = get_arena().make<Instruction>(Opcode::iconst_i64, Type::i64());
-    inst->set_imm_i64(val);
-    Value* res = create_value(Type::i64());
-    res->set_defining_instruction(inst);
-    inst->set_result(res);
-    insert(inst);
-    return res;
 }
 
 Value* Builder::build_fconst_f32(float val) {

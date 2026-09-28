@@ -43,6 +43,18 @@ public:
     Value* add_param(Type type);
 
     // Constants
+    //
+    // With constant reuse on, an integer constant built while appending to the
+    // end of a block returns the same constant built earlier in that block, if
+    // the builder has stayed in the block since. A front end that spells every
+    // tag and offset inline says each one once per block instead of once per
+    // use. Off by default: a pass that edits a constant in place must not have
+    // it shared behind its back.
+    void set_const_reuse(bool on) noexcept {
+        const_reuse_ = on;
+        clear_const_cache();
+    }
+    bool const_reuse() const noexcept { return const_reuse_; }
     Value* build_iconst_i32(int32_t val);
     Value* build_iconst_i64(int64_t val);
     Value* build_fconst_f32(float val);
@@ -253,6 +265,18 @@ public:
 private:
     Arena& get_arena();
     StringPool& get_string_pool();
+    Value* reuse_const(Opcode op, int64_t val) const noexcept;
+    void remember_const(Instruction* inst) noexcept;
+    void clear_const_cache() noexcept {
+        const_count_ = 0;
+        const_next_ = 0;
+    }
+
+    static constexpr uint32_t kConstCache = 16;
+    Instruction* const_cache_[kConstCache] = {};
+    uint32_t const_count_ = 0;
+    uint32_t const_next_ = 0;
+    bool const_reuse_ = false;
 
     Module* module_ = nullptr;
     Function* function_ = nullptr;
