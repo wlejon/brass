@@ -57,6 +57,9 @@ bool Verifier::verify_module(const Module& mod) {
         if (!fn_names.insert(fn->name()).second) {
             report_error("Duplicate function name in module: '" + std::string(fn->name()) + "'");
         }
+        // A lazy body is not there yet; its producer verifies it when it
+        // builds it (Module::set_body_provider).
+        if (fn->is_lazy()) continue;
         verify_function(*fn);
     }
 

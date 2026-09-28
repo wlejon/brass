@@ -387,7 +387,7 @@ const Function* Interpreter::find_function_by_pointer(uintptr_t ptr) const noexc
 }
 
 uintptr_t Interpreter::function_address(const Function& fn) {
-    if (fn.block_count() == 0) {
+    if (!fn.has_body()) {
         uintptr_t ptr = reinterpret_cast<uintptr_t>(&fn);
         register_function_pointer(ptr, &fn);
         return ptr;

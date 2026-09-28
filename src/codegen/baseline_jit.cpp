@@ -326,7 +326,7 @@ void* BaselineJitCompiler::function_address_in(const Function& fn, std::string_v
     const Module* mod = fn.parent();
     if (!mod) return nullptr;
     const Function* def = mod->get_function(name);
-    if (!def || def->block_count() == 0) return nullptr;
+    if (!def || !def->has_body()) return nullptr;
     {
         std::lock_guard<std::mutex> lock(symbols_mutex_);
         if (!module_functions_shadow_) return nullptr;
@@ -371,7 +371,7 @@ void* BaselineJitCompiler::resolve_symbol_in(const Function& fn, std::string_vie
         // had optimized code, for as long as the caller itself ran in tier
         // 1 — in a program whose hot callers are loops called a few times,
         // for good.
-        if (const Function* def = mod->get_function(name); def && def->block_count() > 0) {
+        if (const Function* def = mod->get_function(name); def && def->has_body()) {
             runtime::FunctionHandle* handle = dispatch_table().find(name);
             if (handle && handle->mir_function() == def) {
                 void* entry = handle->native_entry();

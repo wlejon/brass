@@ -160,7 +160,7 @@ void FastInterpreter::register_function_pointer(uintptr_t ptr, const Function* f
 
 uintptr_t FastInterpreter::function_address(const Function& fn) {
     uintptr_t ptr = reinterpret_cast<uintptr_t>(&fn);
-    if (fn.block_count() > 0) {
+    if (fn.has_body()) {
         ptr = reinterpret_cast<uintptr_t>(dispatch_table().pipeline().function_address(fn.name(), &fn));
     }
     register_function_pointer(ptr, &fn);

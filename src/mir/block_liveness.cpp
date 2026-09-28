@@ -14,22 +14,28 @@ namespace {
 constexpr uint32_t kNoBlock = UINT32_MAX;
 
 BlockLiveIns compute(const Function& fn, const std::vector<const BasicBlock*>* targets) {
-    // Dense block numbering, in the function's block order.
+    // Dense block numbering, in the function's block order. Looked up by the
+    // block's id first (a slot per id, holding the block that claimed it),
+    // and by address only for a block whose id another block holds: every
+    // use asks, and a hash lookup each was most of the cost.
     std::vector<const BasicBlock*> blocks;
     blocks.reserve(fn.blocks().size());
+    std::vector<std::pair<const BasicBlock*, uint32_t>> by_id(fn.current_next_block_id(), {nullptr, kNoBlock});
     std::unordered_map<const BasicBlock*, uint32_t> index;
-    index.reserve(fn.blocks().size() * 2);
-    for (const BasicBlock* bb : fn.blocks()) {
-        if (!bb || index.count(bb)) continue;
-        index.emplace(bb, static_cast<uint32_t>(blocks.size()));
-        blocks.push_back(bb);
-    }
-    const size_t n = blocks.size();
     auto block_of = [&](const BasicBlock* bb) -> uint32_t {
         if (!bb) return kNoBlock;
+        if (bb->id() < by_id.size() && by_id[bb->id()].first == bb) return by_id[bb->id()].second;
         auto it = index.find(bb);
         return it == index.end() ? kNoBlock : it->second;
     };
+    for (const BasicBlock* bb : fn.blocks()) {
+        if (!bb || block_of(bb) != kNoBlock) continue;
+        const auto b = static_cast<uint32_t>(blocks.size());
+        if (bb->id() < by_id.size() && !by_id[bb->id()].first) by_id[bb->id()] = {bb, b};
+        else index.emplace(bb, b);
+        blocks.push_back(bb);
+    }
+    const size_t n = blocks.size();
 
     // Predecessors (from each listed block's own successors) and every use
     // a block reads before any definition of it in the block: a use of a
@@ -37,18 +43,10 @@ BlockLiveIns compute(const Function& fn, const std::vector<const BasicBlock*>* t
     // in the same block is defined before its use in valid SSA.
     std::vector<std::vector<uint32_t>> preds(n);
     std::vector<std::pair<const Value*, uint32_t>> uses;
-    std::unordered_map<const Value*, uint32_t> def_block;
     auto def_of = [&](const Value* v) -> uint32_t {
-        auto it = def_block.find(v);
-        if (it != def_block.end()) return it->second;
-        uint32_t d = kNoBlock;
-        if (v->is_block_param()) {
-            d = block_of(v->defining_block());
-        } else if (const Instruction* def = v->defining_instruction()) {
-            d = block_of(def->parent());
-        }
-        def_block.emplace(v, d);
-        return d;
+        if (v->is_block_param()) return block_of(v->defining_block());
+        if (const Instruction* def = v->defining_instruction()) return block_of(def->parent());
+        return kNoBlock;
     };
     for (uint32_t b = 0; b < n; ++b) {
         const BasicBlock* bb = blocks[b];
@@ -72,11 +70,7 @@ BlockLiveIns compute(const Function& fn, const std::vector<const BasicBlock*>* t
             if (ti != kNoBlock) wanted[ti] = 1;
         }
     }
-    BlockLiveIns live_in;
-    live_in.reserve(targets ? targets->size() : n);
-    for (uint32_t b = 0; b < n; ++b) {
-        if (!targets || wanted[b]) live_in[blocks[b]];
-    }
+    std::vector<std::vector<const Value*>> sets(n);
 
     // Per value: every block from a use back to (not into) its definition.
     std::sort(uses.begin(), uses.end());
@@ -90,7 +84,7 @@ BlockLiveIns compute(const Function& fn, const std::vector<const BasicBlock*>* t
         auto mark = [&](uint32_t b) {
             if (stamp[b] == round) return;
             stamp[b] = round;
-            if (!targets || wanted[b]) live_in[blocks[b]].push_back(v);
+            if (!targets || wanted[b]) sets[b].push_back(v);
             work.push_back(b);
         };
         for (; i < uses.size() && uses[i].first == v; ++i) mark(uses[i].second);
@@ -101,6 +95,11 @@ BlockLiveIns compute(const Function& fn, const std::vector<const BasicBlock*>* t
                 if (p != def) mark(p);
             }
         }
+    }
+    BlockLiveIns live_in;
+    live_in.reserve(targets ? targets->size() : n);
+    for (uint32_t b = 0; b < n; ++b) {
+        if (!targets || wanted[b]) live_in.emplace(blocks[b], std::move(sets[b]));
     }
     return live_in;
 }

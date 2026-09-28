@@ -573,8 +573,10 @@ bool CoroTransformPass::run_on_module(Module& mod) {
     // Every coro_create target is a coroutine body, suspends or not; every
     // coro_create of one body passes the same number of arguments.
     std::unordered_map<std::string_view, int64_t> coro_targets;
+    // A lazy body has no coroutine ops (Module::materialize checks), and
+    // another thread may be building it.
     for (Function* fn : mod.functions()) {
-        if (!fn) continue;
+        if (!fn || !fn->body_ready()) continue;
         for (BasicBlock* bb : fn->blocks()) {
             for (Instruction* inst : *bb) {
                 if (inst->opcode() != Opcode::coro_create) continue;
@@ -591,7 +593,7 @@ bool CoroTransformPass::run_on_module(Module& mod) {
 
     bool changed = false;
     for (Function* fn : mod.functions()) {
-        if (!fn) continue;
+        if (!fn || !fn->body_ready()) continue;
         auto it = coro_targets.find(fn->name());
         const bool target = it != coro_targets.end();
         if (run_on_function(*fn, target, target ? it->second : -1)) {
@@ -682,7 +684,7 @@ bool lower_coroutines(Module& mod) {
     // Cheap when there is nothing to lower: a scan for the coroutine ops.
     bool any = false;
     for (const Function* fn : mod.functions()) {
-        if (!fn) continue;
+        if (!fn || !fn->body_ready()) continue;
         for (const BasicBlock* bb : fn->blocks()) {
             for (const Instruction* inst : *bb) {
                 if (inst->opcode() == Opcode::coro_suspend || inst->opcode() == Opcode::coro_create) {

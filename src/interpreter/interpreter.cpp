@@ -79,6 +79,7 @@ RuntimeValue Interpreter::execute_function(const Function& fn, const std::vector
         }
     }
 
+    if (fn.is_lazy() && fn.parent()) fn.parent()->materialize(fn);
     BasicBlock* entry = fn.entry_block();
     if (!entry) {
         return RuntimeValue::from_void();

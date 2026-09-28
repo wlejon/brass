@@ -1,10 +1,23 @@
 #include <brass/mir/module.hpp>
 #include <brass/runtime/code_installer.hpp>
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 
 namespace brass {
+
+struct Module::LazyBodies {
+    std::mutex mutex;
+    BodyProvider provider;
+    std::atomic<size_t> built{0};
+};
+
+Module::Module() noexcept = default;
+Module::Module(Module&&) noexcept = default;
 
 Module::Module(std::string_view name)
     : arena_(), string_pool_(), name_(string_pool_.intern(name)) {}
@@ -31,7 +44,52 @@ Module& Module::operator=(Module&& other) noexcept {
     pinned_tls_register_ = other.pinned_tls_register_;
     has_loop_optimizations_ = other.has_loop_optimizations_;
     debug_context_ = std::move(other.debug_context_);
+    lazy_ = std::move(other.lazy_);
     return *this;
+}
+
+void Module::set_body_provider(BodyProvider provider) {
+    if (!lazy_) lazy_ = std::make_unique<LazyBodies>();
+    lazy_->provider = std::move(provider);
+}
+
+void Module::materialize(const Function& fn) const {
+    if (!fn.is_lazy()) return;
+    if (!lazy_ || !lazy_->provider) {
+        std::fprintf(stderr, "brass: fatal: '%.*s' has a lazy body and its module no provider\n",
+                     static_cast<int>(fn.name().size()), fn.name().data());
+        std::fflush(stderr);
+        std::abort();
+    }
+    std::lock_guard<std::mutex> lock(lazy_->mutex);
+    if (!fn.is_lazy()) return;
+    auto& body = const_cast<Function&>(fn);
+    if (!lazy_->provider(body)) {
+        std::fprintf(stderr, "brass: fatal: building the body of '%.*s' failed\n",
+                     static_cast<int>(fn.name().size()), fn.name().data());
+        std::fflush(stderr);
+        std::abort();
+    }
+    // Coroutine lowering runs once over the bodies a module has when it
+    // starts executing, and pairs every coro_create with its body: a body
+    // built after that cannot join in, so one needing it is an error of the
+    // producer, not something to run unlowered.
+    for (const BasicBlock* bb : body.blocks()) {
+        for (const Instruction* inst : *bb) {
+            if (inst && (inst->opcode() == Opcode::coro_create || inst->opcode() == Opcode::coro_suspend)) {
+                std::fprintf(stderr, "brass: fatal: lazy body '%.*s' has coroutine ops; build it eagerly\n",
+                             static_cast<int>(fn.name().size()), fn.name().data());
+                std::fflush(stderr);
+                std::abort();
+            }
+        }
+    }
+    lazy_->built.fetch_add(1, std::memory_order_relaxed);
+    body.mark_body_ready();
+}
+
+size_t Module::materialized_count() const noexcept {
+    return lazy_ ? lazy_->built.load(std::memory_order_relaxed) : 0;
 }
 
 void Module::set_name(std::string_view name) {

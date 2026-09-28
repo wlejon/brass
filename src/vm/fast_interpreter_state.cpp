@@ -124,6 +124,8 @@ const BytecodeFunction* FastInterpreter::get_or_compile(const Function& fn) {
     if (it != compiled_functions_.end()) {
         return it->second.get();
     }
+    // A lazy function's body is built here, by its first call
+    // (BytecodeCompiler::compile).
     auto bfn = compiler_.compile(fn);
     const BytecodeFunction* ptr = bfn.get();
     compiled_functions_[&fn] = std::move(bfn);

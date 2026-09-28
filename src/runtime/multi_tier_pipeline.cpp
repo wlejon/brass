@@ -549,7 +549,15 @@ std::optional<detail::Tier1Link> MultiTierPipeline::open_tier1_node(std::string_
     for (const std::string& sym : compiled.lazy_call_symbols()) {
         // Anything else is a host symbol, bound when it is registered.
         const Function* def = mod ? mod->get_function(sym) : nullptr;
-        if (!def || def->block_count() == 0) continue;
+        if (!def || !def->has_body()) continue;
+        // A lazy body has never run in any tier: compiling it now would
+        // build (and compile) code that may never run, and so on through
+        // its callees. Its stub compiles it on its first call instead, as
+        // for a func_addr target, when a Tier-0 bridge can stand in.
+        if (def->is_lazy() && !is_baseline_rejected(sym) && tier0_bridge_supported(*def)) {
+            table_->get_or_create(sym, def);
+            continue;
+        }
         node.callees.emplace_back(sym, def);
     }
     // A function whose address the code takes is compiled when first
@@ -560,11 +568,13 @@ std::optional<detail::Tier1Link> MultiTierPipeline::open_tier1_node(std::string_
     // could only trap.
     for (const std::string& sym : compiled.lazy_addr_symbols()) {
         const Function* def = mod ? mod->get_function(sym) : nullptr;
-        if (!def || def->block_count() == 0) continue;
+        if (!def || !def->has_body()) continue;
         // The stub finds it (and its MIR) through its handle.
         if (table_->get_or_create(sym, def)->native_entry()) continue;
-        if ((is_baseline_rejected(sym) || !baseline_compiler_.passes_prescan(*def, Target::host())) &&
-            !tier0_bridge_supported(*def)) {
+        // The bridge first: it reads only the signature, where the prescan
+        // reads (and so builds) the body.
+        if (!tier0_bridge_supported(*def) &&
+            (is_baseline_rejected(sym) || !baseline_compiler_.passes_prescan(*def, Target::host()))) {
             node.link = Tier1Link::Rejected;
         }
     }

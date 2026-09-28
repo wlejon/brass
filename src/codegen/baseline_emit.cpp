@@ -256,6 +256,7 @@ void emit_control_op(X64BaselineEmitter& em, const Instruction& inst) {
 } // namespace
 
 bool BaselineJitCompiler::passes_prescan(const Function& fn, Target target) const {
+    if (fn.is_lazy() && fn.parent()) fn.parent()->materialize(fn);
     try {
         if (target.is_aarch64()) aarch64::check_aarch64_baseline_supported(fn, target);
         else check_x64_baseline_supported(fn, target, CallingConvention::for_target(target));
@@ -266,6 +267,8 @@ bool BaselineJitCompiler::passes_prescan(const Function& fn, Target target) cons
 }
 
 BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target target) {
+    // A lazy function's body is built by its first compile.
+    if (fn.is_lazy() && fn.parent()) fn.parent()->materialize(fn);
     if (target.is_aarch64()) {
         return aarch64::compile_baseline_aarch64(fn, target, [this, &fn](std::string_view name) {
             return resolve_symbol_in(fn, name);

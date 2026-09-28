@@ -6,6 +6,8 @@
 #include <brass/mir/function.hpp>
 #include <brass/mir/runtime_symbols.hpp>
 #include <brass/debug/source_loc.hpp>
+#include <functional>
+#include <memory>
 #include <string_view>
 #include <vector>
 #include <unordered_map>
@@ -16,13 +18,14 @@ namespace brass {
 
 class Module {
 public:
-    Module() noexcept = default;
+    // Defined in module.cpp, where the lazy-body state is complete.
+    Module() noexcept;
     explicit Module(std::string_view name);
     ~Module();
 
     Module(const Module&) = delete;
     Module& operator=(const Module&) = delete;
-    Module(Module&&) noexcept = default;
+    Module(Module&&) noexcept;
     // Not defaulted: the functions being replaced must leave the runtime
     // registries first, as in the destructor.
     Module& operator=(Module&& other) noexcept;
@@ -102,6 +105,22 @@ public:
     DebugContext& debug_context() noexcept { return debug_context_; }
     const DebugContext& debug_context() const noexcept { return debug_context_; }
 
+    // Lazy function bodies (Function::mark_lazy). The provider builds one
+    // lazy function's blocks in this module and returns whether it could;
+    // it runs under the module's body lock, so it builds one body at a time
+    // and must not ask for another. It may intern strings and allocate in
+    // this module, and must not add functions or declarations: other
+    // threads read those while it runs.
+    using BodyProvider = std::function<bool(Function&)>;
+    void set_body_provider(BodyProvider provider);
+    // Builds `fn`'s body if it is lazy, on whichever thread first needs it;
+    // every other thread asking meanwhile waits for it. Returns once the
+    // body can be read. A provider that fails is fatal: the function has
+    // no code to run and no declaration to call instead.
+    void materialize(const Function& fn) const;
+    // How many lazy bodies have been built, for a host's load report.
+    size_t materialized_count() const noexcept;
+
 private:
     Arena arena_;
     StringPool string_pool_;
@@ -116,6 +135,9 @@ private:
     bool pinned_tls_register_ = false;
     bool has_loop_optimizations_ = false;
     DebugContext debug_context_;
+    // Last: the lazy-body state is defined in module.cpp.
+    struct LazyBodies;
+    std::unique_ptr<LazyBodies> lazy_;
 };
 
 } // namespace brass

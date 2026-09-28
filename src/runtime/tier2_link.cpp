@@ -70,7 +70,7 @@ void bind_declared_handles(FunctionDispatchTable& table, const Module& copy, con
     for (std::string_view name : copy.external_symbols()) {
         if (copy.get_function(name)) continue;
         const Function* def = src.get_function(name);
-        if (def && def->block_count() != 0 && !table.find(name)) table.get_or_create(name, def);
+        if (def && def->has_body() && !table.find(name)) table.get_or_create(name, def);
     }
 }
 
@@ -110,7 +110,7 @@ void canonicalize_function_addresses(Module& mod, const std::function<bool(std::
         const std::string key(name);
         if (auto it = canonical.find(key); it != canonical.end()) return &it->second;
         const Function* def = mod.get_function(name);
-        if (!def || def->block_count() == 0) return nullptr;
+        if (!def || !def->has_body()) return nullptr;
         if (!known(name)) return nullptr;
         // No Function: the handle exists and keeps what it is bound to.
         void* stub = pipeline.function_address(name, nullptr);
@@ -162,7 +162,7 @@ void link_declared_functions(const Module& mod, FunctionDispatchTable& table, co
         if (mod.get_function(name)) continue;
         const FunctionHandle* h = table.find(name);
         const Function* def = h ? h->mir_function() : nullptr;
-        if (!def || def->block_count() == 0) continue;
+        if (!def || !def->has_body()) continue;
         if (void* stub = table.pipeline().function_address(name, nullptr)) {
             jit.register_external_symbol(name, stub);
         }

@@ -44,6 +44,7 @@ std::unordered_map<const Value*, uint32_t> count_uses(const detail::BlockLayout&
 } // namespace
 
 std::unique_ptr<BytecodeFunction> BytecodeCompiler::compile(const Function& fn) {
+    if (fn.is_lazy() && fn.parent()) fn.parent()->materialize(fn);
     auto bfn = std::make_unique<BytecodeFunction>(fn.name(), fn.return_type(), fn.param_types());
 
     // Step 1: register allocation over the emission order.

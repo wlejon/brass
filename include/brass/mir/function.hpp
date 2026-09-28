@@ -2,6 +2,7 @@
 
 #include <brass/mir/types.hpp>
 #include <brass/mir/block.hpp>
+#include <atomic>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -48,6 +49,20 @@ public:
     const std::vector<BasicBlock*>& blocks() const noexcept { return blocks_; }
     std::vector<BasicBlock*>& blocks() noexcept { return blocks_; }
     size_t block_count() const noexcept { return blocks_.size(); }
+
+    // A lazy function is a definition whose body its module builds on first
+    // use (Module::set_body_provider, Module::materialize): until then it
+    // has no blocks, and nothing may read its blocks, which another thread
+    // may be building. has_body() is the question "a definition, not a
+    // declaration?"; body_ready() is "may its blocks be read now?".
+    bool is_lazy() const noexcept { return body_state_.load(std::memory_order_acquire) != kBodyReady; }
+    bool body_ready() const noexcept { return !is_lazy(); }
+    bool has_body() const noexcept { return is_lazy() || !blocks_.empty(); }
+    // Called by the module's front end before the program runs, on a
+    // function with no blocks yet.
+    void mark_lazy() noexcept { body_state_.store(kBodyLazy, std::memory_order_release); }
+    // Called by Module::materialize once the body is built: publishes it.
+    void mark_body_ready() noexcept { body_state_.store(kBodyReady, std::memory_order_release); }
 
     BasicBlock* entry_block() const noexcept {
         return blocks_.empty() ? nullptr : blocks_.front();
@@ -125,6 +140,10 @@ public:
     void rebuild_cfg_predecessors();
 
 private:
+    static constexpr uint8_t kBodyReady = 0;
+    static constexpr uint8_t kBodyLazy = 1;
+    std::atomic<uint8_t> body_state_{kBodyReady};
+
     std::string_view name_;
     Type return_type_ = Type::void_type();
     std::vector<Type> param_types_;
