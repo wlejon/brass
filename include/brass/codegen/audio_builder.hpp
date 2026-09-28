@@ -48,9 +48,9 @@ public:
 #if defined(__x86_64__) || defined(_M_X64)
         unsigned int mxcsr = _mm_getcsr();
         if (enable) {
-            mxcsr |= 0x8040;
+            mxcsr |= 0x8040u;
         } else {
-            mxcsr &= ~0x8040;
+            mxcsr &= ~0x8040u;
         }
         _mm_setcsr(mxcsr);
 #elif defined(__aarch64__) || defined(_M_ARM64)
