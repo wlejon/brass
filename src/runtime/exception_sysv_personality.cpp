@@ -45,8 +45,11 @@ constexpr uint64_t kClangCxx = 0x434C4E47432B2B00ull;
 // exceptionDestructor (1), unexpectedHandler (2), terminateHandler (3),
 // nextException (4), handlerCount/handlerSwitchValue (5), actionRecord (6),
 // languageSpecificData (7), catchTemp (8), adjustedPtr (9), and directly before
-// them at offset -10 * sizeof(void*) is exceptionType (or primaryException in
-// __cxa_dependent_exception).
+// them at offset -10 * sizeof(void*) is exceptionType.
+//
+// In dependent exceptions (__cxa_dependent_exception):
+// - In libstdc++, primaryException is at offset -10 * sizeof(void*).
+// - In libc++abi, primaryException is at offset -11 * sizeof(void*) (before exceptionType).
 const void* read_ptr_at_negative_offset(const _Unwind_Exception* ue, size_t offset_bytes) {
     const auto* p = reinterpret_cast<const char*>(ue) - offset_bytes;
     const void* v = nullptr;
@@ -63,7 +66,7 @@ bool cxx_brass_exception_bits(uint64_t cls, const _Unwind_Exception* ue, uint64_
     if (last == 1) {
         // A dependent header's primaryException field points to the primary
         // thrown object, which follows the primary header's _Unwind_Exception.
-        const size_t dep_offset = 10 * sizeof(void*);
+        const size_t dep_offset = (kind == kClangCxx) ? 11 * sizeof(void*) : 10 * sizeof(void*);
         const auto* object = static_cast<const _Unwind_Exception*>(read_ptr_at_negative_offset(ue, dep_offset));
         if (!object) return false;
         primary = object - 1;
