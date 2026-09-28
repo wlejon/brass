@@ -12,6 +12,10 @@
 #include <process.h>
 #else
 #include <unistd.h>
+#include <signal.h>
+#include <execinfo.h>
+#include <cstring>
+#include <cstdio>
 #endif
 #include <sstream>
 #include <cmath>
@@ -131,6 +135,25 @@ public:
         int total = 0;
         int passed = 0;
         int failed = 0;
+
+#if !defined(_WIN32)
+        struct sigaction sa;
+        std::memset(&sa, 0, sizeof(sa));
+        sa.sa_sigaction = [](int sig, siginfo_t* info, void*) {
+            const char* name = (sig == SIGSEGV) ? "SIGSEGV" : (sig == SIGBUS) ? "SIGBUS" : "SIGNAL";
+            char buf[128];
+            int n = snprintf(buf, sizeof(buf), "\n*** CRASH %s (%d) at addr %p ***\n",
+                             name, sig, info ? info->si_addr : nullptr);
+            if (n > 0) (void)write(STDERR_FILENO, buf, static_cast<size_t>(n));
+            void* frames[64];
+            int count = backtrace(frames, 64);
+            backtrace_symbols_fd(frames, count, STDERR_FILENO);
+            _exit(128 + sig);
+        };
+        sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
+        sigaction(SIGSEGV, &sa, nullptr);
+        sigaction(SIGBUS, &sa, nullptr);
+#endif
 
         std::cout << "==================================================\n";
         std::cout << "Running brass test suite...\n";
