@@ -429,7 +429,7 @@ RuntimeValue FastInterpreter::call_bytecode(FastCallTarget& t, FastFrame& caller
                         caller.vector_regs + static_cast<size_t>(cs.arg_regs[i]) * kFastVecBytes, kFastVecBytes);
         }
     }
-    FrameGuard guard(*this, frame, mark);
+    CallFrameGuard guard(*this, frame, mark);
     return execute_frame(frame);
 }
 

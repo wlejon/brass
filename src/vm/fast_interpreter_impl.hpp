@@ -218,6 +218,37 @@ struct FrameGuard {
     }
 };
 
+// FrameGuard for a call from a frame of the same interpreter
+// (call_bytecode): the thread's current interpreter and heap are already
+// this interpreter's, since every frame runs under a FrameGuard that set
+// them and every nested switch is undone on the way back, so only the
+// frame links, the arena and the depth move. Per call this saves four
+// out-of-line TLS accesses, most of a small recursive call's overhead.
+struct CallFrameGuard {
+    FastInterpreter& interp;
+    FastFrame& frame;
+    FastFrame*& top;
+    FastAllocaArena::Mark alloca_mark;
+    size_t tagged_mark;
+
+    CallFrameGuard(FastInterpreter& in, FastFrame& f, FastAllocaArena::Mark mark)
+        : interp(in), frame(f), top(FastInterpreter::thread_frame_top()), alloca_mark(mark),
+          tagged_mark(in.tagged_allocas_.size()) {
+        frame.caller = interp.current_frame();
+        interp.set_current_frame(&frame);
+        frame.thread_prev = top;
+        top = &frame;
+        interp.inc_call_depth();
+    }
+    ~CallFrameGuard() {
+        interp.alloca_arena_->release(alloca_mark);
+        if (BRASS_UNLIKELY(interp.tagged_allocas_.size() != tagged_mark)) interp.tagged_allocas_.resize(tagged_mark);
+        top = frame.thread_prev;
+        interp.set_current_frame(frame.caller);
+        interp.dec_call_depth();
+    }
+};
+
 template <typename T>
 inline bool mul_overflows(T a, T b, T& res) noexcept {
 #if defined(__GNUC__) || defined(__clang__)

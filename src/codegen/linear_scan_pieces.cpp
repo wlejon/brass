@@ -484,27 +484,70 @@ void LinearScanAllocator::allocate_blocked(uint32_t idx, std::vector<uint32_t>& 
         }
         return weight(q);
     };
-    const uint32_t depth_here = liveness_.get_loop_depth_at(p.start);
+    // The block this piece starts in; a piece split off at a block boundary
+    // starts in the gap before the next block, and belongs to that one (the
+    // gap itself reads as depth 0).
+    uint32_t depth_here = 0;
+    uint32_t loop_to = kNever; // the back edge of the loop it starts in
+    {
+        auto it = std::upper_bound(spans_.begin(), spans_.end(), p.start,
+            [](uint32_t x, const BlockSpan& s) { return x < s.start; });
+        const BlockSpan* s = nullptr;
+        if (it != spans_.begin() && p.start <= (it - 1)->end) s = &*(it - 1);
+        else if (it != spans_.end()) s = &*it;
+        if (s != nullptr) {
+            depth_here = s->depth;
+            if (s->depth > 0) loop_to = s->loop_to;
+        }
+    }
+    const uint32_t first = next_use(p, p.start, true);
+    // The loop the value is next read in.
+    const uint32_t depth_use = first == kNever ? depth_here : liveness_.get_loop_depth_at(first);
     double cost[32] = {};
+    bool invariant_only[32];
     for (int r = 0; r < 32; ++r) {
+        invariant_only[r] = !holders[r].empty();
         for (uint32_t a : holders[r]) {
             const AllocPiece& h = pieces_[a];
             const uint32_t again = needed_again(h, p.start);
             if (again != kNever) cost[r] += weight(again);
             const uint32_t def = def_pos_[h.vreg().id];
-            if (def != kNever && liveness_.get_loop_depth_at(def) < depth_here) continue;
+            const uint32_t def_depth = def == kNever ? kNever : liveness_.get_loop_depth_at(def);
+            if (def_depth == kNever || def_depth >= depth_use) invariant_only[r] = false;
+            if (def != kNever && def_depth < depth_here) continue;
             const uint32_t last = p.start == 0 ? kNever : last_use_at_or_before(h, p.start - 1);
             const uint32_t lo = std::max(h.start + 1, last == kNever ? 0u : last + 1);
             const uint32_t q = lo <= p.start ? split_position(lo, p.start) : kNever;
-            cost[r] += q == kNever ? weight(p.start) : weight_split(q);
+            double store = q == kNever ? weight(p.start) : weight_split(q);
+            // A value the loop carries round its back edge (an accumulator,
+            // a counter), split off before the loop, waits in its slot at the
+            // loop header, so the back edge stores it every iteration: the
+            // split's own store outside the loop is not what it costs.
+            if (again != kNever && loop_to != kNever && piece_covers(h, loop_to)) {
+                store = std::max(store, weight(again));
+            }
+            cost[r] += store;
         }
     }
-    const uint32_t first = next_use(p, p.start, true);
+    // A register whose holders are needed before this value's first use is
+    // normally out of reach, except when every holder is invariant in the
+    // loop this value lives in: an invariant waits in its slot for the price
+    // of a load at each use (often folded into the instruction), while a
+    // value the loop defines, left in its slot, pays a load at its use and a
+    // store where it is defined, every iteration. So a loop-carried value
+    // (an accumulator) takes an invariant's register when that is cheaper.
+    double own_cost = 0;
+    if (depth_use > 0 && first != kNever && !whole_only) {
+        own_cost = weight(first);
+        const uint32_t def = def_pos_[v.id];
+        if (def == kNever || liveness_.get_loop_depth_at(def) >= depth_use) own_cost += weight(first);
+    }
     PReg best{};
     uint32_t best_use = 0;
     double best_cost = 0;
     auto consider = [&](PReg r) {
-        if (use_q[r.code] < first || hard_q[r.code] <= p.start) return;
+        if (hard_q[r.code] <= p.start) return;
+        if (use_q[r.code] < first && !(invariant_only[r.code] && cost[r.code] < own_cost)) return;
         if (!best.is_valid() || cost[r.code] < best_cost ||
             (cost[r.code] == best_cost && use_q[r.code] > best_use)) {
             best = r;
@@ -527,8 +570,10 @@ void LinearScanAllocator::allocate_blocked(uint32_t idx, std::vector<uint32_t>& 
     // a counter of an outer loop, idle through an inner one, gives up its
     // register to a value the inner loop reads, and a value read once
     // stays in its slot over one the same loop needs. Each use gets its own
-    // try, and a free register is always taken (try_allocate_free).
-    if (!whole_only && first > p.start) {
+    // try, and a free register is always taken (try_allocate_free). An
+    // invariant's register (best_use before first) was already weighed
+    // against this value's whole per-iteration cost above.
+    if (!whole_only && first > p.start && best_use >= first) {
         const auto& list = vreg_pieces_[v.id];
         const bool waits_in_slot = std::any_of(list.begin(), list.end(), [&](uint32_t i) {
             return i != idx && pieces_[i].to == p.from && pieces_[i].spilled;
@@ -538,7 +583,8 @@ void LinearScanAllocator::allocate_blocked(uint32_t idx, std::vector<uint32_t>& 
             [](const UsePosition& u, uint32_t x) { return u.inst_id < x; });
         const bool starts_with_def = it != uses.end() && it->inst_id <= p.to && it->is_def;
         if (waits_in_slot && !starts_with_def) {
-            double stay = 0;
+            // A value the loop redefines is also stored every iteration.
+            double stay = own_cost > weight(first) ? own_cost - weight(first) : 0;
             bool fixed = false;
             for (; it != uses.end() && it->inst_id < best_use && it->inst_id <= p.to; ++it) {
                 if (it->requires_reg && !it->is_def) stay += weight(it->inst_id);

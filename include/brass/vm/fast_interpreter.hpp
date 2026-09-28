@@ -336,6 +336,7 @@ private:
     // allocation order: a frame drops its own on exit (FrameGuard).
     std::vector<std::pair<uint64_t*, uint32_t>> tagged_allocas_;
     friend struct FrameGuard;
+    friend struct CallFrameGuard;
 
     DeoptResult last_deopt_;
     FastDeoptHandler deopt_handler_;
