@@ -286,7 +286,7 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
 
     Type ret_type = Type::i64();
     const std::vector<Type>* param_types = nullptr;
-    auto sig_it = function_signatures_.find(std::string(name));
+    auto sig_it = function_signatures_.find(name);
     if (sig_it != function_signatures_.end()) {
         ret_type = sig_it->second.first;
         param_types = &sig_it->second.second;
@@ -427,7 +427,7 @@ RuntimeValue JitExecutionEngine::invoke(std::string_view name, const std::vector
 
     Type ret_type = Type::i64();
     const std::vector<Type>* param_types = nullptr;
-    auto sig_it = function_signatures_.find(std::string(name));
+    auto sig_it = function_signatures_.find(name);
     if (sig_it != function_signatures_.end()) {
         ret_type = sig_it->second.first;
         param_types = &sig_it->second.second;

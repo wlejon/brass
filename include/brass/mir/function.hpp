@@ -64,6 +64,13 @@ public:
     // Called by Module::materialize once the body is built: publishes it.
     void mark_body_ready() noexcept { body_state_.store(kBodyReady, std::memory_order_release); }
 
+    // Set once a handle is bound to this function (the only Functions code
+    // is compiled from, so also every deopt target): runtime::forget_module
+    // scans the tables' handles only for a module with such a function, so
+    // dropping a private copy (a tier-2 or OSR compile's) costs nothing there.
+    void mark_dispatch_referenced() const noexcept { dispatch_referenced_.store(true, std::memory_order_release); }
+    bool dispatch_referenced() const noexcept { return dispatch_referenced_.load(std::memory_order_acquire); }
+
     BasicBlock* entry_block() const noexcept {
         return blocks_.empty() ? nullptr : blocks_.front();
     }
@@ -143,6 +150,7 @@ private:
     static constexpr uint8_t kBodyReady = 0;
     static constexpr uint8_t kBodyLazy = 1;
     std::atomic<uint8_t> body_state_{kBodyReady};
+    mutable std::atomic<bool> dispatch_referenced_{false};
 
     std::string_view name_;
     Type return_type_ = Type::void_type();

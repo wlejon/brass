@@ -9,6 +9,48 @@
 namespace brass {
 
 class Function;
+class BasicBlock;
+
+// A block's successors, by value: up to two (every br, br_if and invoke)
+// held inline, a switch's larger set on the heap. Iterates, indexes and
+// converts to a vector like the vector it replaced, without allocating in
+// the common case (CFG walks ask for it once per block visit).
+class SuccessorList {
+public:
+    using value_type = BasicBlock*;
+    using const_iterator = BasicBlock* const*;
+    using iterator = const_iterator;
+
+    SuccessorList() noexcept = default;
+
+    void push_back(BasicBlock* bb) {
+        if (!spill_.empty()) {
+            spill_.push_back(bb);
+        } else if (size_ < kInline) {
+            inline_[size_] = bb;
+        } else {
+            spill_.assign(inline_, inline_ + size_);
+            spill_.push_back(bb);
+        }
+        ++size_;
+    }
+
+    const_iterator begin() const noexcept { return spill_.empty() ? inline_ : spill_.data(); }
+    const_iterator end() const noexcept { return begin() + size_; }
+    size_t size() const noexcept { return size_; }
+    bool empty() const noexcept { return size_ == 0; }
+    BasicBlock* operator[](size_t i) const noexcept { return begin()[i]; }
+    BasicBlock* front() const noexcept { return begin()[0]; }
+    BasicBlock* back() const noexcept { return begin()[size_ - 1]; }
+
+    operator std::vector<BasicBlock*>() const { return std::vector<BasicBlock*>(begin(), end()); }
+
+private:
+    static constexpr size_t kInline = 2;
+    BasicBlock* inline_[kInline] = {};
+    size_t size_ = 0;
+    std::vector<BasicBlock*> spill_;
+};
 
 class BasicBlock {
 public:
@@ -101,7 +143,7 @@ public:
     void remove_predecessor(BasicBlock* pred);
     void clear_predecessors() noexcept { predecessors_.clear(); }
 
-    std::vector<BasicBlock*> successors() const;
+    SuccessorList successors() const;
 
     InstructionIterator begin() noexcept { return InstructionIterator(head_); }
     InstructionIterator end() noexcept { return InstructionIterator(nullptr); }

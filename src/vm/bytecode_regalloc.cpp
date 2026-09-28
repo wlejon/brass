@@ -4,51 +4,36 @@
 #include <queue>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 
 namespace brass::detail {
 
 std::vector<const BranchTarget*> branch_targets_of(const Instruction& inst) {
     std::vector<const BranchTarget*> out;
-    switch (inst.opcode()) {
-        case Opcode::br:
-            out.push_back(&inst.branch_target());
-            break;
-        case Opcode::br_if:
-            out.push_back(&inst.true_target());
-            out.push_back(&inst.false_target());
-            break;
-        case Opcode::switch_:
-            for (const auto& sc : inst.switch_cases()) out.push_back(&sc.target);
-            out.push_back(&inst.default_target());
-            break;
-        case Opcode::invoke:
-            out.push_back(&inst.normal_target());
-            out.push_back(&inst.unwind_target());
-            break;
-        default:
-            break;
-    }
+    for_each_branch_target(inst, [&](const BranchTarget& t) { out.push_back(&t); });
     return out;
 }
 
 BlockLayout build_block_layout(const Function& fn) {
     BlockLayout layout;
     const BasicBlock* entry = fn.entry_block();
+    layout.order.reserve(fn.blocks().size());
     if (entry) layout.order.push_back(entry);
     for (const BasicBlock* bb : fn.blocks()) {
         if (bb && bb != entry) layout.order.push_back(bb);
     }
+    layout.index.reserve(fn.current_next_block_id());
     for (uint32_t i = 0; i < layout.order.size(); ++i) {
-        layout.index.emplace(layout.order[i], i);
+        layout.index.insert(layout.order[i], i);
     }
 
     auto block_index = [&](const BasicBlock* bb) -> uint32_t {
-        auto it = layout.index.find(bb);
-        if (it == layout.index.end()) {
+        const uint32_t* found = layout.index.find(bb);
+        if (!found) {
             throw std::runtime_error("Function @" + std::string(fn.name()) +
                                      ": branch to a block that is not in the function");
         }
-        return it->second;
+        return *found;
     };
 
     std::unordered_map<uint32_t, const BasicBlock*> resume_targets;
@@ -67,10 +52,12 @@ BlockLayout build_block_layout(const Function& fn) {
                 layout.preds[ti].push_back(bi);
             }
         };
+        // Only a block's terminator branches, and only a guard adds an
+        // edge of its own.
         for (const Instruction* inst : *layout.order[bi]) {
             if (!inst) continue;
-            for (const BranchTarget* t : branch_targets_of(*inst)) add_edge(t->block);
-            if (inst->opcode() == Opcode::guard) {
+            for_each_branch_target(*inst, [&](const BranchTarget& t) { add_edge(t.block); });
+            if (inst->opcode() == Opcode::guard && !resume_targets.empty()) {
                 // A failing guard may re-enter this frame at its resume block.
                 auto it = resume_targets.find(inst->resume_id());
                 if (it != resume_targets.end()) add_edge(it->second);
@@ -100,10 +87,12 @@ RegisterAssignment allocate_bytecode_registers(const Function& fn, const BlockLa
     std::vector<uint32_t> block_start(nblocks, 0), block_end(nblocks, 0);
 
     std::vector<ValueInfo> values;
-    std::unordered_map<const Value*, uint32_t> vindex;
+    DenseIdMap<Value, uint32_t> vindex;
+    vindex.reserve(fn.current_next_value_id());
+    values.reserve(fn.current_next_value_id());
     auto define = [&](const Value* v, uint32_t block, uint32_t pos, int32_t fixed) {
         if (!v) return;
-        if (!vindex.emplace(v, static_cast<uint32_t>(values.size())).second) {
+        if (!vindex.insert(v, static_cast<uint32_t>(values.size()))) {
             throw std::runtime_error("Function @" + std::string(fn.name()) + ": value %" +
                                      std::to_string(v->id()) + " is defined twice");
         }
@@ -143,15 +132,15 @@ RegisterAssignment allocate_bytecode_registers(const Function& fn, const BlockLa
     std::vector<std::pair<uint32_t, uint32_t>> cross_uses; // (value index, block)
     auto use = [&](const Value* v, uint32_t bi, uint32_t at) {
         if (!v) return;
-        auto it = vindex.find(v);
-        if (it == vindex.end()) {
+        const uint32_t* idx = vindex.find(v);
+        if (!idx) {
             throw std::runtime_error("Function @" + std::string(fn.name()) + ": value %" +
                                      std::to_string(v->id()) + " is used but never defined");
         }
-        ValueInfo& vi = values[it->second];
+        ValueInfo& vi = values[*idx];
         vi.lo = std::min(vi.lo, at);
         vi.hi = std::max(vi.hi, at);
-        if (bi != vi.def_block) cross_uses.emplace_back(it->second, bi);
+        if (bi != vi.def_block) cross_uses.emplace_back(*idx, bi);
     };
     for (uint32_t bi = 0; bi < nblocks; ++bi) {
         uint32_t at = block_start[bi];
@@ -160,9 +149,9 @@ RegisterAssignment allocate_bytecode_registers(const Function& fn, const BlockLa
             ++at;
             for (size_t i = 0; i < inst->operand_count(); ++i) use(inst->operand(i), bi, at);
             for (const Value* v : inst->state_map()) use(v, bi, at);
-            for (const BranchTarget* t : branch_targets_of(*inst)) {
-                for (const Value* v : t->args) use(v, bi, at);
-            }
+            for_each_branch_target(*inst, [&](const BranchTarget& t) {
+                for (const Value* v : t.args) use(v, bi, at);
+            });
         }
     }
     // Walk back from each use to the definition: the value is live into
@@ -227,11 +216,14 @@ RegisterAssignment allocate_bytecode_registers(const Function& fn, const BlockLa
         fresh(t);
     }
 
+    // Each value's register by its index, as the scan assigns them.
+    std::vector<BcReg> assigned(values.size(), 0);
+    out.reg.reserve(fn.current_next_value_id());
     for (uint32_t vi_idx : order) {
         const ValueInfo& vi = values[vi_idx];
         while (!active.empty() && active.top().first < vi.lo) {
             const ValueInfo& done = values[active.top().second];
-            BcReg r = out.reg.at(done.value);
+            BcReg r = assigned[active.top().second];
             size_t cls = type_class(done.value->type());
             if (free_regs.size() <= cls) free_regs.resize(cls + 1);
             free_regs[cls].push_back(r);
@@ -249,7 +241,8 @@ RegisterAssignment allocate_bytecode_registers(const Function& fn, const BlockLa
                 r = fresh(vi.value->type());
             }
         }
-        out.reg.emplace(vi.value, r);
+        out.reg.insert(vi.value, r);
+        assigned[vi_idx] = r;
         active.emplace(vi.hi, vi_idx);
     }
     out.num_registers = next_reg;

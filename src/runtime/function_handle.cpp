@@ -29,10 +29,12 @@ namespace brass::runtime {
 
 FunctionHandle::FunctionHandle(std::string_view name, const Function* mir_fn)
     : name_(name), mir_function_(mir_fn) {
+    if (mir_fn) mir_fn->mark_dispatch_referenced();
     if (mir_fn) sig_ = std::make_shared<const Signature>(Signature{mir_fn->return_type(), mir_fn->param_types()});
 }
 
 void FunctionHandle::set_mir_function_locked(const Function* fn) {
+    if (fn) fn->mark_dispatch_referenced();
     mir_function_.store(fn, std::memory_order_release);
     if (fn) sig_ = std::make_shared<const Signature>(Signature{fn->return_type(), fn->param_types()});
 }
@@ -176,6 +178,10 @@ size_t FunctionHandle::retired_engine_count() const {
 }
 
 void FunctionHandle::add_deopt_entry(void* entry, const Function* compiled_from) {
+    // Not marked dispatch-referenced here: code is only ever compiled from a
+    // Function some handle was bound to, which the binding marked already.
+    // A handle outliving its module (outside any table) may pass one that is
+    // gone by now, so this must not write through `compiled_from`.
     std::lock_guard<std::mutex> lock(engine_mutex_);
     deopt_entries_.push_back({entry, compiled_from});
 }

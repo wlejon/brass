@@ -5,6 +5,7 @@
 #include <brass/mir/function.hpp>
 #include <brass/interpreter/value.hpp>
 #include <brass/runtime/tiering.hpp>
+#include <brass/core/string_map.hpp>
 #include <atomic>
 #include <memory>
 #include <string>
@@ -294,7 +295,8 @@ private:
     // Shared for lookups (every interpreter call resolution and compile
     // thread reads it), exclusive for changes.
     mutable std::shared_mutex mutex_;
-    std::unordered_map<std::string, std::unique_ptr<FunctionHandle>> handles_;
+    // Looked up by string_view without building a key string.
+    StringMap<std::unique_ptr<FunctionHandle>> handles_;
     // Handles dropped by clear() or replaced by register_handle(); callers
     // may hold pointers resolved before registry_generation() moved.
     std::vector<std::unique_ptr<FunctionHandle>> retired_;
@@ -302,7 +304,10 @@ private:
     // adds nothing; one entry per stub plus one per function of each tier-2
     // engine installed, retired ones included (they stay alive, see
     // FunctionHandle::set_jit_engine). clear() empties it.
-    std::unordered_map<const void*, std::string> code_addresses_; // under mutex_
+    // Its own lock: tier-2 installs register every function of the engine,
+    // which must not stall the handle lookups of running code.
+    mutable std::shared_mutex code_addresses_mutex_;
+    std::unordered_map<const void*, std::string> code_addresses_; // under code_addresses_mutex_
 };
 
 using DispatchTable = FunctionDispatchTable;

@@ -104,8 +104,9 @@ private:
                                        const std::vector<std::string>& targets);
     void compile_entry(const Function& fn, Module& copy, const std::shared_ptr<Entry>& e);
     // A guard of `e`'s code failed: past the deopt threshold the entry is
-    // never entered again (osr_coordinator.cpp).
-    void note_deopt(const std::shared_ptr<Entry>& e);
+    // never entered again (osr_coordinator.cpp). `resume_id` is the failing
+    // guard's.
+    void note_deopt(const std::shared_ptr<Entry>& e, uint32_t resume_id);
     bool enter(const Function& fn, FastFrame& frame, const Entry& e, RuntimeValue& out_result);
 
     std::mutex mutex_;

@@ -8,6 +8,7 @@
 #include <brass/gc/stack_map.hpp>
 #include <brass/debug/debug_section.hpp>
 #include <brass/debug/jit_code_registry.hpp>
+#include <brass/core/string_map.hpp>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -387,13 +388,13 @@ private:
     JitMemoryBlock code_mem_;
     DataMemoryBlock data_mem_;
 
-    std::unordered_map<std::string, void*> symbol_table_;
+    StringMap<void*> symbol_table_;
     std::unordered_map<std::string, void*> external_symbols_;
     SharedSymbols shared_symbols_;
     std::unordered_map<std::string, void*> over_shared_symbols_;
 
     void* find_external_symbol(const std::string& name) const;
-    std::unordered_map<std::string, std::pair<Type, std::vector<Type>>> function_signatures_;
+    StringMap<std::pair<Type, std::vector<Type>>> function_signatures_;
     ModuleStackMap stack_maps_;
     runtime::ResumeTableRegistry resume_tables_;
     runtime::PatchRegistry patch_sites_;

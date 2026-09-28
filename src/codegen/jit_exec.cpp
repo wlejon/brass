@@ -724,12 +724,11 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
 }
 
 void* JitExecutionEngine::get_symbol_address(std::string_view name) const {
-    const std::string key(name);
-    auto it = symbol_table_.find(key);
+    auto it = symbol_table_.find(name);
     if (it != symbol_table_.end()) {
         return it->second;
     }
-    return find_external_symbol(key);
+    return find_external_symbol(std::string(name));
 }
 
 // RtlAddFunctionTable takes the native RUNTIME_FUNCTION: 12 bytes on x64,

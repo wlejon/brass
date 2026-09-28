@@ -172,7 +172,9 @@ void FunctionDispatchTable::forget_deopt_functions(const Module& mod) {
     const auto& fns = mod.functions();
     if (fns.empty()) return;
     std::unordered_set<const Function*> dying(fns.begin(), fns.end());
-    std::lock_guard<std::shared_mutex> lock(mutex_);
+    // Each handle's deopt entries are under its own lock; the map itself is
+    // only read, so running code keeps resolving handles meanwhile.
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     for (auto& [_, handle] : handles_) {
         if (handle) handle->forget_deopt_functions(dying);
     }
@@ -189,8 +191,13 @@ void forget_module(const Module& mod) noexcept {
     // Coroutine descriptors forget the module's bodies (their frames can no
     // longer resume; the descriptors stay, so the frames stay traceable).
     for (const Function* fn : mod.functions()) forget_coro_body_function(fn);
+    // No handle was ever bound to one of the module's functions nor holds
+    // code that deoptimizes into one (a compile's private copy): there is
+    // nothing in any table's handles to detach, forget or report.
+    const bool referenced = std::any_of(mod.functions().begin(), mod.functions().end(),
+                                        [](const Function* f) { return f && f->dispatch_referenced(); });
     try {
-        if (g_dispatch_table_alive.load(std::memory_order_acquire)) {
+        if (referenced && g_dispatch_table_alive.load(std::memory_order_acquire)) {
             FunctionDispatchTable::instance().forget_module(mod);
         }
         TieringRegistry::forget_module(&mod);
@@ -204,6 +211,7 @@ void forget_module(const Module& mod) noexcept {
             t->pipeline().forget(&mod);
             // Tier-2 code a handle was rebound away from may still deopt:
             // it must not resume in a dead Function.
+            if (!referenced) continue;
             t->forget_deopt_functions(mod);
             if (routed.empty()) routed = t->handle_into(mod);
         }
@@ -222,19 +230,18 @@ void forget_module(const Module& mod) noexcept {
 }
 
 FunctionHandle* FunctionDispatchTable::get_or_create(std::string_view name, const Function* fn) {
-    std::string key(name);
     FunctionHandle* ptr = nullptr;
     bool retired_code = false;
     {
         // The common case, an existing handle already bound to `fn`, needs
         // only the shared lock.
         std::shared_lock<std::shared_mutex> lock(mutex_);
-        auto it = handles_.find(key);
+        auto it = handles_.find(name);
         if (it != handles_.end() && (!fn || it->second->mir_function() == fn)) return it->second.get();
     }
     {
         std::lock_guard<std::shared_mutex> lock(mutex_);
-        auto it = handles_.find(key);
+        auto it = handles_.find(name);
         if (it != handles_.end()) {
             FunctionHandle& h = *it->second;
             if (fn && h.mir_function() != fn) {
@@ -255,7 +262,7 @@ FunctionHandle* FunctionDispatchTable::get_or_create(std::string_view name, cons
         } else {
             auto handle = std::make_unique<FunctionHandle>(name, fn);
             ptr = handle.get();
-            handles_[key] = std::move(handle);
+            handles_.emplace(std::string(name), std::move(handle));
             bump_registry_generation();
         }
     }
@@ -269,9 +276,8 @@ FunctionHandle* FunctionDispatchTable::get_or_create(std::string_view name, cons
 }
 
 FunctionHandle* FunctionDispatchTable::find(std::string_view name) const {
-    std::string key(name);
     std::shared_lock<std::shared_mutex> lock(mutex_);
-    auto it = handles_.find(key);
+    auto it = handles_.find(name);
     if (it != handles_.end()) {
         return it->second.get();
     }
@@ -300,6 +306,7 @@ void FunctionDispatchTable::clear() {
     // stale address would map back to a same-named function of the next
     // one. Lazy stubs re-register on every func_addr, tier-2 code on
     // install, so the live program's addresses come back as it runs.
+    std::lock_guard<std::shared_mutex> addr_lock(code_addresses_mutex_);
     code_addresses_.clear();
     bump_registry_generation();
 }
@@ -307,16 +314,16 @@ void FunctionDispatchTable::clear() {
 void FunctionDispatchTable::register_code_address(const void* addr, std::string_view name) {
     if (!addr) return;
     {
-        std::shared_lock<std::shared_mutex> lock(mutex_);
+        std::shared_lock<std::shared_mutex> lock(code_addresses_mutex_);
         auto it = code_addresses_.find(addr);
         if (it != code_addresses_.end() && it->second == name) return;
     }
-    std::lock_guard<std::shared_mutex> lock(mutex_);
+    std::lock_guard<std::shared_mutex> lock(code_addresses_mutex_);
     code_addresses_[addr] = std::string(name);
 }
 
 std::string FunctionDispatchTable::function_name_at(const void* addr) const {
-    std::shared_lock<std::shared_mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(code_addresses_mutex_);
     auto it = code_addresses_.find(addr);
     return it != code_addresses_.end() ? it->second : std::string();
 }

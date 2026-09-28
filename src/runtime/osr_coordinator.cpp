@@ -124,13 +124,15 @@ void OsrCoordinator::release_program() {
     reoptimizations_.clear();
 }
 
-void OsrCoordinator::note_deopt(const std::shared_ptr<Entry>& e) {
+void OsrCoordinator::note_deopt(const std::shared_ptr<Entry>& e, uint32_t resume_id) {
     const uint64_t threshold = registry().default_config().deopt_threshold;
     if (e->deopts.fetch_add(1, std::memory_order_relaxed) + 1 < threshold) return;
     Entry::State ready = Entry::State::Ready;
     if (!e->state.compare_exchange_strong(ready, Entry::State::Invalid, std::memory_order_acq_rel)) return;
     e->leave.store(1, std::memory_order_release);
-    record_tier_instant(TierEventKind::Invalidate, e->plan.function ? e->plan.function->name() : e->name);
+    const std::string_view fn_name = e->plan.function ? e->plan.function->name() : std::string_view(e->name);
+    record_tier_instant(TierEventKind::Invalidate, fn_name);
+    registry().dispatch_table().pipeline().notify_invalidation(fn_name, resume_id);
     // The continuation runs the loop in a Tier-0 frame nested under this
     // code; entering the code again at its next backedge would fail the
     // same guard and nest another frame, without bound. With a front pass
@@ -175,13 +177,26 @@ bool OsrCoordinator::try_osr_migration(FastInterpreter&, const Function& fn, Bas
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (released_) return false;
-        std::shared_ptr<Entry>& slot = entries_[loop_header];
-        if (!slot) {
-            slot = std::make_shared<Entry>();
+        auto it = entries_.find(loop_header);
+        if (it == entries_.end()) {
+            // One entry of a function compiles at a time. The backedge count
+            // is the function's, so a frame past the threshold asks at every
+            // loop header it crosses, and an entry is a copy of the whole
+            // rest of the function: each would cost a full compile of the
+            // same code. The frame enters the first one at its header, and a
+            // header it never reaches again asks once that one is done.
+            for (const auto& [header, other] : entries_) {
+                if (header->parent() == loop_header->parent() &&
+                    other->state.load(std::memory_order_acquire) == Entry::State::Compiling) {
+                    return false;
+                }
+            }
+            auto slot = std::make_shared<Entry>();
             slot->header = loop_header;
+            it = entries_.emplace(loop_header, std::move(slot)).first;
             start = true;
         }
-        e = slot;
+        e = it->second;
     }
     if (start) {
         request_entry(fn, *loop_header, e);
@@ -323,8 +338,8 @@ void OsrCoordinator::compile_entry(const Function& fn, Module& copy, const std::
     // guard of a carried callee body failing counts against the entry as
     // its own guards do: the loop keeps calling that copy.
     std::weak_ptr<Entry> weak = shared;
-    auto count_against_entry = [this, weak](const DeoptFrame&) {
-        if (std::shared_ptr<Entry> live = weak.lock()) note_deopt(live);
+    auto count_against_entry = [this, weak](const DeoptFrame& frame) {
+        if (std::shared_ptr<Entry> live = weak.lock()) note_deopt(live, frame.resume_id);
     };
     for (const Function* f : mod->functions()) {
         if (!f || f->block_count() == 0) continue;
@@ -359,10 +374,10 @@ bool OsrCoordinator::enter(const Function& fn, FastFrame& frame, const Entry& e,
     for (size_t i = 0; i < n; ++i) {
         const auto& li = e.plan.live_ins[i];
         if (li.rematerialize) continue;
-        auto it = bfn->ssa_to_reg.find(li.value->id());
-        if (it == bfn->ssa_to_reg.end() || it->second >= frame.num_registers) return false;
-        regs[i] = it->second;
-        buffer[i] = frame.registers[it->second];
+        const BcReg r = bfn->reg_of_ssa(li.value->id());
+        if (r == kNoReg || r >= frame.num_registers) return false;
+        regs[i] = r;
+        buffer[i] = frame.registers[r];
     }
     if (e.plan.leave_check) buffer[e.plan.leave_flag_slot()] = reinterpret_cast<uintptr_t>(&e.leave);
     const std::vector<Type> params{Type::ptr()};

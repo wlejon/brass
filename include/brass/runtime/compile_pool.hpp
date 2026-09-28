@@ -38,9 +38,12 @@ public:
     // anything up never starts one. BRASS_JIT_THREADS in the environment
     // overrides the size.
     static CompilePool& shared();
-    // A quarter of the hardware threads, at least one and at most four: a
+    // A quarter of the hardware threads, at least one and at most eight: a
     // compile job is long, and the threads it would take are the mutator's
-    // and the host's own.
+    // and the host's own. A large program's start queues far more tier-up
+    // and OSR work than four threads keep up with (tats: 38 s of compiles
+    // inside a 22 s start), and every job still queued is a function or a
+    // loop running interpreted meanwhile.
     static size_t default_thread_count();
 
     // A private pool of `threads` workers, started now (none: jobs queue

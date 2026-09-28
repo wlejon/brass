@@ -12,12 +12,12 @@
 // type, which keeps BytecodeFunction::register_types exact (the GC and the
 // deopt/throw paths read it).
 
+#include "dense_id_map.hpp"
 #include <brass/vm/bytecode.hpp>
 #include <brass/mir/function.hpp>
 #include <brass/mir/block.hpp>
 #include <brass/mir/instruction.hpp>
 #include <cstdint>
-#include <unordered_map>
 #include <vector>
 
 namespace brass::detail {
@@ -27,7 +27,7 @@ namespace brass::detail {
 // guard -> its resume block.
 struct BlockLayout {
     std::vector<const BasicBlock*> order;
-    std::unordered_map<const BasicBlock*, uint32_t> index;
+    DenseIdMap<BasicBlock, uint32_t> index;
     std::vector<std::vector<uint32_t>> succs;
     std::vector<std::vector<uint32_t>> preds;
 };
@@ -35,7 +35,7 @@ struct BlockLayout {
 BlockLayout build_block_layout(const Function& fn);
 
 struct RegisterAssignment {
-    std::unordered_map<const Value*, BcReg> reg;
+    DenseIdMap<Value, BcReg> reg;
     std::vector<Type> register_types; // per register
     uint32_t num_registers = 0;       // allocated registers (no scratch)
     uint32_t num_values = 0;          // SSA values allocated
@@ -45,8 +45,32 @@ struct RegisterAssignment {
 // the encoding holds, or uses a value it never defines.
 RegisterAssignment allocate_bytecode_registers(const Function& fn, const BlockLayout& layout);
 
-// The branch targets of a terminator (br / br_if / switch / invoke), in a
-// fixed order; empty for other instructions.
+// Calls `fn` with each branch target of a terminator (br / br_if / switch /
+// invoke), in a fixed order; nothing for other instructions.
+template <typename Fn>
+void for_each_branch_target(const Instruction& inst, Fn&& fn) {
+    switch (inst.opcode()) {
+        case Opcode::br:
+            fn(inst.branch_target());
+            break;
+        case Opcode::br_if:
+            fn(inst.true_target());
+            fn(inst.false_target());
+            break;
+        case Opcode::switch_:
+            for (const auto& sc : inst.switch_cases()) fn(sc.target);
+            fn(inst.default_target());
+            break;
+        case Opcode::invoke:
+            fn(inst.normal_target());
+            fn(inst.unwind_target());
+            break;
+        default:
+            break;
+    }
+}
+
+// The branch targets of a terminator, as a list (for_each_branch_target's).
 std::vector<const BranchTarget*> branch_targets_of(const Instruction& inst);
 
 } // namespace brass::detail

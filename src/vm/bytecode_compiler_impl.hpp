@@ -42,7 +42,7 @@ public:
     BytecodeFunction& out;
     const BlockLayout& layout;
     const RegisterAssignment& regs;
-    std::unordered_map<const BasicBlock*, uint32_t> block_pc_map;
+    DenseIdMap<BasicBlock, uint32_t> block_pc_map;
     std::vector<JumpFixup> jump_fixups;
     std::vector<SwitchFixup> switch_fixups;
     std::vector<ExceptionFixup> exception_fixups;
@@ -64,9 +64,9 @@ public:
 
     BcReg get_reg(const Value* v) const {
         if (!v) fail("operand is null");
-        auto it = regs.reg.find(v);
-        if (it == regs.reg.end()) fail("value %" + std::to_string(v->id()) + " has no register");
-        return it->second;
+        const BcReg* r = regs.reg.find(v);
+        if (!r) fail("value %" + std::to_string(v->id()) + " has no register");
+        return *r;
     }
 
     // The result register, or kNoReg for an instruction without a value.

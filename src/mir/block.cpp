@@ -127,8 +127,8 @@ void BasicBlock::remove_predecessor(BasicBlock* pred) {
     }
 }
 
-std::vector<BasicBlock*> BasicBlock::successors() const {
-    std::vector<BasicBlock*> succs;
+SuccessorList BasicBlock::successors() const {
+    SuccessorList succs;
     Instruction* term = terminator();
     if (!term) return succs;
 

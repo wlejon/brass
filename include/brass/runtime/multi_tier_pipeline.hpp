@@ -206,6 +206,20 @@ public:
         if (code_observer_) code_observer_(code);
     }
 
+    // Tells `observer` of each tier-2 invalidation: the function whose code
+    // was dropped and the resume id of the guard whose failures dropped it
+    // (a guard of an inlined copy carries its own function's id). A front
+    // end whose front pass arms guards from its own feedback uses it to
+    // stop arming that guard, so a recompile does not repeat the
+    // speculation that just failed. Called on the deoptimizing thread,
+    // after the code is dropped. Set before the program runs.
+    using InvalidationObserver = std::function<void(std::string_view fn_name, uint32_t resume_id)>;
+    void set_invalidation_observer(InvalidationObserver observer) { invalidation_observer_ = std::move(observer); }
+    // Tells the observer of an invalidation (tier-2 code or an OSR entry).
+    void notify_invalidation(std::string_view fn_name, uint32_t resume_id) const {
+        if (invalidation_observer_) invalidation_observer_(fn_name, resume_id);
+    }
+
     // Testing only: called with each function's name as a Tier 1 compile of
     // it starts (on the compiling thread, while it counts as in progress).
     // Set before compiles start.
@@ -418,6 +432,7 @@ private:
     std::mutex bridges_mutex_;
     std::unordered_map<std::string, std::shared_ptr<void>> tier0_bridges_;
     CodeInstallObserver code_observer_;
+    InvalidationObserver invalidation_observer_;
     std::optional<PassPipelineOptions> tier2_passes_; // under mutex_
     Tier2FrontPass tier2_front_pass_;                  // under mutex_
     // Testing only (set_tier1_compile_hook, set_tier1_install_hook).

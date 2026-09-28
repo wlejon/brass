@@ -2,6 +2,7 @@
 
 #include <brass/mir/types.hpp>
 #include <brass/debug/source_loc.hpp>
+#include <brass/core/string_map.hpp>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -408,8 +409,22 @@ public:
     std::vector<Type> param_types;
     // Every value sharing a register has the same type, so this is exact.
     std::vector<Type> register_types;
-    std::unordered_map<uint32_t, BcReg> ssa_to_reg;
-    std::unordered_map<uint32_t, const BasicBlock*> pc_block_map;
+    // The register of the SSA value with each id, kNoReg for an id with
+    // none (reg_of_ssa reads it).
+    std::vector<BcReg> ssa_to_reg;
+    // Each block's first pc, in increasing pc order (block_at_pc reads it).
+    std::vector<std::pair<uint32_t, const BasicBlock*>> pc_block_map;
+
+    BcReg reg_of_ssa(uint32_t id) const noexcept { return id < ssa_to_reg.size() ? ssa_to_reg[id] : kNoReg; }
+    // The block whose code starts at `pc`, or null.
+    const BasicBlock* block_at_pc(uint32_t pc) const noexcept {
+        size_t lo = 0, hi = pc_block_map.size();
+        while (lo < hi) {
+            const size_t mid = (lo + hi) / 2;
+            if (pc_block_map[mid].first < pc) lo = mid + 1; else hi = mid;
+        }
+        return lo < pc_block_map.size() && pc_block_map[lo].first == pc ? pc_block_map[lo].second : nullptr;
+    }
     std::vector<ExceptionEntry> exception_table;
     std::vector<ResumePointEntry> resume_points;
     std::vector<LineInfoEntry> line_info_table;
@@ -462,7 +477,7 @@ public:
     void add_symbol(std::string_view name, uint32_t func_index);
     uint32_t find_symbol(std::string_view name) const;
     bool has_symbol(std::string_view name) const;
-    const std::unordered_map<std::string, uint32_t>& symbol_table() const noexcept { return symbol_table_; }
+    const StringMap<uint32_t>& symbol_table() const noexcept { return symbol_table_; }
 
     std::vector<uint64_t>& module_constants() noexcept { return module_constants_; }
     const std::vector<uint64_t>& module_constants() const noexcept { return module_constants_; }
@@ -470,7 +485,7 @@ public:
 private:
     std::string name_;
     std::vector<std::unique_ptr<BytecodeFunction>> functions_;
-    std::unordered_map<std::string, uint32_t> symbol_table_;
+    StringMap<uint32_t> symbol_table_;
     std::vector<uint64_t> module_constants_;
 };
 

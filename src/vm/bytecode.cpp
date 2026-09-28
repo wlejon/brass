@@ -344,7 +344,7 @@ void BytecodeModule::add_function(std::unique_ptr<BytecodeFunction> fn) {
 }
 
 BytecodeFunction* BytecodeModule::get_function(std::string_view name) const noexcept {
-    auto it = symbol_table_.find(std::string(name));
+    auto it = symbol_table_.find(name);
     if (it != symbol_table_.end() && it->second < functions_.size()) {
         return functions_[it->second].get();
     }
@@ -363,7 +363,7 @@ void BytecodeModule::add_symbol(std::string_view name, uint32_t func_index) {
 }
 
 uint32_t BytecodeModule::find_symbol(std::string_view name) const {
-    auto it = symbol_table_.find(std::string(name));
+    auto it = symbol_table_.find(name);
     if (it != symbol_table_.end()) {
         return it->second;
     }
@@ -371,7 +371,7 @@ uint32_t BytecodeModule::find_symbol(std::string_view name) const {
 }
 
 bool BytecodeModule::has_symbol(std::string_view name) const {
-    return symbol_table_.find(std::string(name)) != symbol_table_.end();
+    return symbol_table_.find(name) != symbol_table_.end();
 }
 
 } // namespace brass

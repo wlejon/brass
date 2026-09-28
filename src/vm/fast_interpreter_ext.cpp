@@ -202,9 +202,9 @@ bool FastInterpreter::handle_osr_backedge(FastFrame& frame, uint32_t target_pc, 
     fb.count_backedge_fast();
     const uint64_t n = fb.backedge_count();
     if (!frame.mir_fn || !bfn || n < coordinator.threshold() || (n & 63) != 0) return false;
-    auto it = bfn->pc_block_map.find(target_pc);
-    if (it == bfn->pc_block_map.end() || !it->second) return false;
-    return coordinator.try_osr_migration(*this, *frame.mir_fn, const_cast<BasicBlock*>(it->second), frame, out_res);
+    const BasicBlock* target = bfn->block_at_pc(target_pc);
+    if (!target) return false;
+    return coordinator.try_osr_migration(*this, *frame.mir_fn, const_cast<BasicBlock*>(target), frame, out_res);
 }
 
 } // namespace brass

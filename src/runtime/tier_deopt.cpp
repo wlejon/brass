@@ -212,6 +212,7 @@ void MultiTierPipeline::charge_deopt(FunctionHandle& handle, FunctionDispatchTab
     fb.set_tier(handle.tier());
     tier2_invalidations_.fetch_add(1, std::memory_order_relaxed);
     record_tier_instant(TierEventKind::Invalidate, handle.name());
+    notify_invalidation(handle.name(), resume_id);
     if (tier2_front_pass() && fb.record_reoptimization() <= kMaxReoptimizations) {
         fb.clear_deopts();
         fb.clear_bailout();

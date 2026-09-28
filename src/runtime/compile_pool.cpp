@@ -60,7 +60,7 @@ long env_thread_count() {
 size_t CompilePool::default_thread_count() {
     if (const long n = env_thread_count()) return static_cast<size_t>(std::min<long>(n, 64));
     const size_t hw = std::thread::hardware_concurrency();
-    return std::clamp<size_t>(hw / 4, 1, 4);
+    return std::clamp<size_t>(hw / 4, 1, 8);
 }
 
 CompilePool& CompilePool::shared() {

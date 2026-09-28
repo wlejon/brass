@@ -20,22 +20,20 @@ std::unique_ptr<BytecodeModule> BytecodeCompiler::compile(const Module& mod) {
 namespace {
 
 // Use counts of every value, for compare-branch fusion.
-std::unordered_map<const Value*, uint32_t> count_uses(const detail::BlockLayout& layout) {
-    std::unordered_map<const Value*, uint32_t> uses;
+detail::DenseIdMap<Value, uint32_t> count_uses(const Function& fn, const detail::BlockLayout& layout) {
+    detail::DenseIdMap<Value, uint32_t> uses;
+    uses.reserve(fn.current_next_value_id());
+    auto count = [&](const Value* v) {
+        if (v) ++uses.get_or_insert(v, 0);
+    };
     for (const BasicBlock* bb : layout.order) {
         for (const Instruction* inst : *bb) {
             if (!inst) continue;
-            for (size_t i = 0; i < inst->operand_count(); ++i) {
-                if (inst->operand(i)) ++uses[inst->operand(i)];
-            }
-            for (const Value* v : inst->state_map()) {
-                if (v) ++uses[v];
-            }
-            for (const BranchTarget* t : detail::branch_targets_of(*inst)) {
-                for (const Value* v : t->args) {
-                    if (v) ++uses[v];
-                }
-            }
+            for (size_t i = 0; i < inst->operand_count(); ++i) count(inst->operand(i));
+            for (const Value* v : inst->state_map()) count(v);
+            detail::for_each_branch_target(*inst, [&](const BranchTarget& t) {
+                for (const Value* v : t.args) count(v);
+            });
         }
     }
     return uses;
@@ -61,16 +59,29 @@ std::unique_ptr<BytecodeFunction> BytecodeCompiler::compile(const Function& fn) 
     bfn->register_types.push_back(Type::i64());
     bfn->register_types.push_back(Type::i64());
     bfn->num_registers = regs.num_registers + 2;
-    for (const auto& [v, r] : regs.reg) bfn->ssa_to_reg[v->id()] = r;
+    bfn->ssa_to_reg.assign(fn.current_next_value_id(), kNoReg);
+    regs.reg.for_each([&](const Value* v, BcReg r) {
+        if (v->id() >= bfn->ssa_to_reg.size()) bfn->ssa_to_reg.resize(v->id() + 1, kNoReg);
+        bfn->ssa_to_reg[v->id()] = r;
+    });
 
     // Step 2: lower the blocks in layout order.
-    const auto uses = count_uses(layout);
+    const auto uses = count_uses(fn, layout);
+    ctx.block_pc_map.reserve(fn.current_next_block_id());
+    bfn->pc_block_map.reserve(layout.order.size());
     for (size_t bi = 0; bi < layout.order.size(); ++bi) {
         const BasicBlock* bb = layout.order[bi];
         ctx.next_block = bi + 1 < layout.order.size() ? layout.order[bi + 1] : nullptr;
         uint32_t b_pc = static_cast<uint32_t>(bfn->current_pc());
-        ctx.block_pc_map[bb] = b_pc;
-        bfn->pc_block_map[b_pc] = bb;
+        ctx.block_pc_map.insert(bb, b_pc);
+        // Pcs only grow, so the list stays sorted; a block that emitted
+        // nothing shares its pc with the next and the later one wins, as a
+        // map's assignment did.
+        if (!bfn->pc_block_map.empty() && bfn->pc_block_map.back().first == b_pc) {
+            bfn->pc_block_map.back().second = bb;
+        } else {
+            bfn->pc_block_map.emplace_back(b_pc, bb);
+        }
         // Falling off a block into its layout successor would be silent
         // misexecution; malformed blocks are rejected.
         if (!bb->terminator()) ctx.fail("block does not end in a terminator");
@@ -86,8 +97,8 @@ std::unique_ptr<BytecodeFunction> BytecodeCompiler::compile(const Function& fn) 
             const Instruction* next = inst->next();
             if (next && next->opcode() == Opcode::br_if && next->operand(0) == inst->result() &&
                 inst->result()) {
-                auto it = uses.find(inst->result());
-                if (it != uses.end() && it->second == 1 && ctx.can_fuse_compare_branch(*inst)) {
+                const uint32_t* n = uses.find(inst->result());
+                if (n && *n == 1 && ctx.can_fuse_compare_branch(*inst)) {
                     ctx.fused_compare = inst;
                     continue;
                 }
@@ -99,9 +110,9 @@ std::unique_ptr<BytecodeFunction> BytecodeCompiler::compile(const Function& fn) 
 
     // Step 3: patch jump targets.
     for (const auto& fixup : ctx.jump_fixups) {
-        auto it = ctx.block_pc_map.find(fixup.target);
-        if (it == ctx.block_pc_map.end()) ctx.fail("jump target block was never placed");
-        int64_t rel = static_cast<int64_t>(it->second) - static_cast<int64_t>(fixup.inst_idx);
+        const uint32_t* placed = ctx.block_pc_map.find(fixup.target);
+        if (!placed) ctx.fail("jump target block was never placed");
+        int64_t rel = static_cast<int64_t>(*placed) - static_cast<int64_t>(fixup.inst_idx);
         BytecodeWord& w = bfn->code[fixup.inst_idx];
         if (fixup.imm24) {
             if (!fits_imm24(rel)) ctx.fail("compare-branch offset out of range: " + std::to_string(rel));
@@ -115,9 +126,9 @@ std::unique_ptr<BytecodeFunction> BytecodeCompiler::compile(const Function& fn) 
     for (const auto& sf : ctx.switch_fixups) {
         int64_t target_pc = sf.trampoline_pc;
         if (target_pc < 0) {
-            auto it = ctx.block_pc_map.find(sf.target);
-            if (it == ctx.block_pc_map.end()) ctx.fail("switch target block was never placed");
-            target_pc = it->second;
+            const uint32_t* placed = ctx.block_pc_map.find(sf.target);
+            if (!placed) ctx.fail("switch target block was never placed");
+            target_pc = *placed;
         }
         SwitchTable& table = bfn->switch_tables[sf.table_idx];
         if (sf.is_default) {
@@ -134,9 +145,9 @@ std::unique_ptr<BytecodeFunction> BytecodeCompiler::compile(const Function& fn) 
     for (const auto& ef : ctx.exception_fixups) {
         int64_t handler = ef.trampoline_pc;
         if (handler < 0) {
-            auto it = ctx.block_pc_map.find(ef.unwind_target);
-            if (it == ctx.block_pc_map.end()) ctx.fail("unwind block was never placed");
-            handler = it->second;
+            const uint32_t* placed = ctx.block_pc_map.find(ef.unwind_target);
+            if (!placed) ctx.fail("unwind block was never placed");
+            handler = *placed;
         }
         bfn->exception_table[ef.ee_idx].handler_pc = static_cast<uint32_t>(handler);
     }
@@ -146,11 +157,11 @@ std::unique_ptr<BytecodeFunction> BytecodeCompiler::compile(const Function& fn) 
                                   ? std::unordered_map<uint32_t, const Instruction*>{}
                                   : fn.guards_by_resume_id();
     for (const auto& [resume_id, target_bb] : fn.resume_points()) {
-        auto it = ctx.block_pc_map.find(target_bb);
-        if (it == ctx.block_pc_map.end()) continue;
+        const uint32_t* placed = ctx.block_pc_map.find(target_bb);
+        if (!placed) continue;
         ResumePointEntry rpe;
         rpe.resume_id = resume_id;
-        rpe.target_pc = it->second;
+        rpe.target_pc = *placed;
         for (size_t p = 0; p < target_bb->param_count(); ++p) {
             if (const Value* pv = target_bb->param(p)) rpe.param_regs.push_back(ctx.get_reg(pv));
         }
