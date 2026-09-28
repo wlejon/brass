@@ -127,7 +127,7 @@ FunctionDispatchTable::~FunctionDispatchTable() {
     pipeline_->release_program();
     // Release this program's code and deopt resumers, and make every
     // interpreter's cached handle pointer stale before the memory goes.
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::shared_mutex> lock(mutex_);
     for (auto& [_, handle] : handles_) {
         if (handle) handle->retire();
     }
@@ -140,7 +140,7 @@ std::string FunctionDispatchTable::handle_into(const Module& mod) const {
     const auto& fns = mod.functions();
     if (fns.empty()) return {};
     std::unordered_set<const Function*> dying(fns.begin(), fns.end());
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     for (const auto& [name, handle] : handles_) {
         if (handle && dying.count(handle->mir_function()) != 0) return name;
     }
@@ -155,7 +155,7 @@ void FunctionDispatchTable::forget_module(const Module& mod) {
     const auto& fns = mod.functions();
     if (fns.empty()) return;
     std::unordered_set<const Function*> dying(fns.begin(), fns.end());
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::shared_mutex> lock(mutex_);
     bool changed = false;
     for (auto& [_, handle] : handles_) {
         if (!handle) continue;
@@ -172,7 +172,7 @@ void FunctionDispatchTable::forget_deopt_functions(const Module& mod) {
     const auto& fns = mod.functions();
     if (fns.empty()) return;
     std::unordered_set<const Function*> dying(fns.begin(), fns.end());
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::shared_mutex> lock(mutex_);
     for (auto& [_, handle] : handles_) {
         if (handle) handle->forget_deopt_functions(dying);
     }
@@ -226,7 +226,14 @@ FunctionHandle* FunctionDispatchTable::get_or_create(std::string_view name, cons
     FunctionHandle* ptr = nullptr;
     bool retired_code = false;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        // The common case, an existing handle already bound to `fn`, needs
+        // only the shared lock.
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+        auto it = handles_.find(key);
+        if (it != handles_.end() && (!fn || it->second->mir_function() == fn)) return it->second.get();
+    }
+    {
+        std::lock_guard<std::shared_mutex> lock(mutex_);
         auto it = handles_.find(key);
         if (it != handles_.end()) {
             FunctionHandle& h = *it->second;
@@ -263,7 +270,7 @@ FunctionHandle* FunctionDispatchTable::get_or_create(std::string_view name, cons
 
 FunctionHandle* FunctionDispatchTable::find(std::string_view name) const {
     std::string key(name);
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     auto it = handles_.find(key);
     if (it != handles_.end()) {
         return it->second.get();
@@ -278,7 +285,7 @@ bool FunctionDispatchTable::has(std::string_view name) const {
 void FunctionDispatchTable::register_handle(std::unique_ptr<FunctionHandle> handle) {
     if (!handle) return;
     std::string key(handle->name());
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::shared_mutex> lock(mutex_);
     auto& slot = handles_[key];
     retire_locked(std::move(slot));
     slot = std::move(handle);
@@ -286,7 +293,7 @@ void FunctionDispatchTable::register_handle(std::unique_ptr<FunctionHandle> hand
 }
 
 void FunctionDispatchTable::clear() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::shared_mutex> lock(mutex_);
     for (auto& [_, handle] : handles_) retire_locked(std::move(handle));
     handles_.clear();
     // The reverse table names functions of the program just cleared: a
@@ -299,23 +306,28 @@ void FunctionDispatchTable::clear() {
 
 void FunctionDispatchTable::register_code_address(const void* addr, std::string_view name) {
     if (!addr) return;
-    std::lock_guard<std::mutex> lock(mutex_);
+    {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+        auto it = code_addresses_.find(addr);
+        if (it != code_addresses_.end() && it->second == name) return;
+    }
+    std::lock_guard<std::shared_mutex> lock(mutex_);
     code_addresses_[addr] = std::string(name);
 }
 
 std::string FunctionDispatchTable::function_name_at(const void* addr) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     auto it = code_addresses_.find(addr);
     return it != code_addresses_.end() ? it->second : std::string();
 }
 
 size_t FunctionDispatchTable::size() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     return handles_.size();
 }
 
 std::vector<FunctionHandle*> FunctionDispatchTable::all_handles() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     std::vector<FunctionHandle*> result;
     result.reserve(handles_.size());
     for (const auto& [_, handle] : handles_) {
@@ -337,6 +349,24 @@ CodeInstaller::CodeInstaller(FunctionDispatchTable& table, const Target& target)
 void CodeInstaller::register_external_symbol(std::string_view name, void* address) {
     std::lock_guard<std::mutex> lock(symbols_mutex_);
     external_symbols_[std::string(name)] = address;
+}
+
+// Points `handle`'s lazy stub at the tier-2 code just published for it. The
+// stub is how everything but a direct Tier-0 dispatch reaches a program
+// function: a function object's code pointer, a tier-2 caller's link, and a
+// tier-1 caller's call. Tier-1 install fills it with the baseline entry;
+// left there, every caller but the interpreter kept running the tier-1 code
+// after the optimized code was installed. A stub not yet resolved resolves
+// to the handle's entry on its first call, and is left alone. Invalidation
+// re-arms the stub (tier_deopt.cpp); if it has already dropped this code
+// again, the stub is re-armed here too rather than left on dropped code.
+static void retarget_lazy_stub(FunctionDispatchTable& table, FunctionHandle& handle, void* entry) {
+    MultiTierPipeline& pipeline = table.pipeline();
+    if (!pipeline.is_initialized()) return;
+    const auto& lazy = pipeline.baseline_compiler().lazy_symbols();
+    if (!lazy || !lazy->resolved_target(handle.name())) return;
+    lazy->define(handle.name(), entry);
+    if (handle.native_entry() != entry) lazy->define(handle.name(), nullptr);
 }
 
 static CodeInstallResult foreign_target(const FunctionHandle& handle, std::string_view fn_name,
@@ -532,6 +562,38 @@ CodeInstallResult CodeInstaller::install_tier2(
         if (!fn || fn->block_count() == 0) continue;
         if (void* addr = jit->get_symbol_address(fn->name())) table_->register_code_address(addr, fn->name());
     }
+    // The module's other functions: the target calls their copies here
+    // directly, so each copy's guards resume in its Tier-0 Function
+    // (validated above), and their failures count against the target's
+    // code too: the target keeps calling this copy until its own code goes.
+    // Registered before the target is published, since its first call may
+    // reach a copy whose guard fails.
+    struct SiblingCopy {
+        FunctionHandle* handle;
+        void* entry;
+        const Function* fn;
+        const Function* compiled_from;
+    };
+    std::vector<SiblingCopy> sibling_copies;
+    for (const Function* fn : module->functions()) {
+        // A declaration has no code here (its name links to its stub).
+        if (!fn || fn->name() == fn_name || fn->block_count() == 0) continue;
+        auto recorded = bindings.siblings.find(std::string(fn->name()));
+        if (recorded == bindings.siblings.end()) continue;
+        FunctionHandle* other_handle = table_->find(fn->name());
+        void* other_ptr = jit->get_symbol_address(fn->name());
+        const Function* other_fn = recorded->second;
+        if (!other_handle || !other_ptr) continue;
+        MultiTierPipeline* pipeline = &table_->pipeline();
+        FunctionHandle* owner = &handle;
+        detail::register_tier2_resumer(*table_, *other_handle, other_ptr, other_fn,
+                                       [pipeline, owner, bound, native_code_ptr](const DeoptFrame& frame) {
+                                           pipeline->note_carried_deopt(*owner, bound, native_code_ptr,
+                                                                        frame.resume_id);
+                                       });
+        sibling_copies.push_back({other_handle, other_ptr, fn, other_fn});
+    }
+
     // The resumer is registered before the entry is published (a guard can
     // fail on the first call). If the handle was rebound, detached or
     // retired while this compiled, nothing is published: the code is
@@ -544,32 +606,19 @@ CodeInstallResult CodeInstaller::install_tier2(
                 0};
     }
     table_->tiering().get_feedback(handle.name()).set_tier(TierLevel::Tier2_Optimized);
+    retarget_lazy_stub(*table_, handle, native_code_ptr);
 
-    // Also publish the module's other functions to their handles, each only
-    // while it is bound to the Function recorded when the module was cloned.
-    for (const Function* fn : module->functions()) {
-        // A declaration has no code here (its name links to its stub).
-        if (!fn || fn->name() == fn_name || fn->block_count() == 0) continue;
-        auto recorded = bindings.siblings.find(std::string(fn->name()));
-        if (recorded == bindings.siblings.end()) continue;
-        FunctionHandle* other_handle = table_->find(fn->name());
-        void* other_ptr = jit->get_symbol_address(fn->name());
-        const Function* other_fn = recorded->second;
-        if (!other_handle || !other_ptr) continue;
-        // Published or not, this copy of the sibling runs when the target
-        // calls it, so its guards resume in its Tier-0 Function (validated
-        // above), and their failures count against the target's code too:
-        // the target keeps calling this copy until its own code goes.
-        MultiTierPipeline* pipeline = &table_->pipeline();
-        FunctionHandle* owner = &handle;
-        detail::register_tier2_resumer(*table_, *other_handle, other_ptr, other_fn,
-                                       [pipeline, owner, bound, native_code_ptr](const DeoptFrame& frame) {
-                                           pipeline->note_carried_deopt(*owner, bound, native_code_ptr,
-                                                                        frame.resume_id);
-                                       });
-        if (!other_handle->has_native_entry() && other_handle->mir_function() == other_fn) {
+    // Also publish the other functions to their handles, each only while it
+    // is bound to the Function recorded when the module was cloned.
+    for (const SiblingCopy& s : sibling_copies) {
+        FunctionHandle* other_handle = s.handle;
+        void* other_ptr = s.entry;
+        const Function* other_fn = s.compiled_from;
+        const Function* fn = s.fn;
+        if (!other_handle->has_native_entry() && other_handle->mir_function() == other_fn &&
             other_handle->publish_optimized(jit, other_ptr, other_fn, fn->return_type(), fn->param_types(),
-                                            /*require_no_entry=*/true);
+                                            /*require_no_entry=*/true)) {
+            retarget_lazy_stub(*table_, *other_handle, other_ptr);
         }
     }
 

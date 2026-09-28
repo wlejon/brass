@@ -12,6 +12,7 @@
 #include <iomanip>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -26,6 +27,38 @@ extern "C" void brass_tier1_record_invocation_fb(void* feedback) {
     brass::runtime::MultiTierPipeline& pipeline = fb.registry().pipeline();
     if (!pipeline.is_initialized()) return;
     pipeline.on_invocation(fb);
+}
+
+// Tier-1 code's backedge hook, reached when the function's backedge budget
+// runs out: counts what the budget measured, re-arms it far away (a
+// deferred or refused compile is asked again later, not every iteration)
+// and lets the pipeline send the function to Tier 2.
+extern "C" void brass_tier1_backedges_fb(void* feedback) {
+    if (!feedback) return;
+    using brass::runtime::TieringFeedback;
+    auto& fb = *static_cast<TieringFeedback*>(feedback);
+    const int64_t spent = TieringFeedback::kTier1BackedgeBudget;
+    fb.tier1_backedge_budget()->store(TieringFeedback::kTier1BackedgeRearm, std::memory_order_relaxed);
+    fb.add_backedges(static_cast<uint64_t>(spent));
+    // BRASS_TIER1_BACKEDGE_TIERUP=0 counts but never tiers up (A/B knob).
+    static const bool enabled = [] {
+#if defined(_MSC_VER)
+        // MSVC deprecates getenv (C4996, an error under /WX).
+        char* owned = nullptr;
+        size_t len = 0;
+        if (_dupenv_s(&owned, &len, "BRASS_TIER1_BACKEDGE_TIERUP") != 0 || !owned) return true;
+        const bool off = owned[0] == '0';
+        std::free(owned);
+        return !off;
+#else
+        const char* v = std::getenv("BRASS_TIER1_BACKEDGE_TIERUP");
+        return !(v && v[0] == '0');
+#endif
+    }();
+    if (!enabled) return;
+    brass::runtime::MultiTierPipeline& pipeline = fb.registry().pipeline();
+    if (!pipeline.is_initialized()) return;
+    pipeline.on_tier1_backedges(fb);
 }
 
 namespace brass::runtime {
@@ -154,6 +187,7 @@ void MultiTierPipeline::release_program() {
     }
     drain_tier1_requests();
     clear_baseline_cache();
+    drop_fresh_interpreters(nullptr);
     std::lock_guard<std::mutex> lock(mutex_);
     initialized_ = false;
     if (brass_get_active_stack_maps() == &active_stack_maps_) {
@@ -181,7 +215,9 @@ void MultiTierPipeline::forget_module(const Module* mod) noexcept {
 }
 
 void MultiTierPipeline::forget(const Module* mod) noexcept {
+    drop_fresh_interpreters(mod);
     std::lock_guard<std::mutex> lock(mutex_);
+    if (prepared_module_ == mod) prepared_module_ = nullptr;
     if (fast_interp_module_ != mod) return;
     fast_interp_module_ = nullptr;
     if (!fast_interp_busy_.load(std::memory_order_acquire)) fast_interp_.reset();
@@ -224,6 +260,7 @@ void MultiTierPipeline::shutdown() {
         std::lock_guard<std::mutex> lock(bg_mutex_);
         if (bg_) bg_->stop();
     }
+    drop_fresh_interpreters(nullptr);
     std::lock_guard<std::mutex> lock(mutex_);
     initialized_ = false;
     if (!fast_interp_busy_.load(std::memory_order_acquire)) {
@@ -257,11 +294,15 @@ void MultiTierPipeline::register_external_symbol(std::string_view name, void* ad
 
 void MultiTierPipeline::install_external_symbols(codegen::JitExecutionEngine& jit) const {
     std::lock_guard<std::mutex> lock(mutex_);
+    jit.set_shared_symbols(shared_symbols_locked());
+}
+
+const std::shared_ptr<const std::unordered_map<std::string, void*>>& MultiTierPipeline::shared_symbols_locked() const {
     if (!shared_symbols_ || shared_symbols_gen_ != symbols_gen_) {
         shared_symbols_ = std::make_shared<const std::unordered_map<std::string, void*>>(external_symbols_);
         shared_symbols_gen_ = symbols_gen_;
     }
-    jit.set_shared_symbols(shared_symbols_);
+    return shared_symbols_;
 }
 
 void MultiTierPipeline::set_tier2_passes(std::optional<PassPipelineOptions> passes) {
@@ -690,17 +731,24 @@ void MultiTierPipeline::tier_invocation(TieringFeedback& fb, std::string_view fn
         }
     } else if (tier == TierLevel::Tier1_Baseline) {
         stats_.tier1_invocations.fetch_add(1, std::memory_order_relaxed);
-        if (count >= config_.invocation_tier2_threshold && !fb.is_bailout_set() &&
-            config_.max_tier >= TierLevel::Tier2_Optimized) {
-            if (config_.enable_background_compile || tiering().is_background_compile_enabled()) {
-                enqueue_tier2(fn_name, nullptr, handle);
-            } else {
-                compile_tier2_now(fn_name, handle);
-            }
-        }
+        if (count >= config_.invocation_tier2_threshold) promote_tier1(fb, fn_name, handle);
     } else if (tier == TierLevel::Tier2_Optimized) {
         stats_.tier2_invocations.fetch_add(1, std::memory_order_relaxed);
     }
+}
+
+void MultiTierPipeline::promote_tier1(TieringFeedback& fb, std::string_view fn_name, FunctionHandle* handle) {
+    if (fb.is_bailout_set() || config_.max_tier < TierLevel::Tier2_Optimized) return;
+    if (config_.enable_background_compile || tiering().is_background_compile_enabled()) {
+        enqueue_tier2(fn_name, nullptr, handle);
+    } else {
+        compile_tier2_now(fn_name, handle);
+    }
+}
+
+void MultiTierPipeline::on_tier1_backedges(TieringFeedback& fb) {
+    if (fb.current_tier() != TierLevel::Tier1_Baseline) return;
+    promote_tier1(fb, fb.function_name(), nullptr);
 }
 
 RuntimeValue MultiTierPipeline::execute(
@@ -709,15 +757,25 @@ RuntimeValue MultiTierPipeline::execute(
     const std::vector<RuntimeValue>& args
 ) {
     ProgramScope program_scope(*table_);
-    // Every tier runs coroutine bodies lowered; a producer need not lower
-    // them itself.
-    lower_coroutines(mod);
-    tiering().set_active_module(&mod);
-    for (const auto* fn : mod.functions()) {
-        if (fn) {
-            table_->get_or_create(fn->name(), fn);
-        }
+    bool prepared = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        prepared = prepared_module_ == &mod && prepared_function_count_ == mod.function_count();
     }
+    if (!prepared) {
+        // Every tier runs coroutine bodies lowered; a producer need not
+        // lower them itself.
+        lower_coroutines(mod);
+        for (const auto* fn : mod.functions()) {
+            if (fn) {
+                table_->get_or_create(fn->name(), fn);
+            }
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        prepared_module_ = &mod;
+        prepared_function_count_ = mod.function_count();
+    }
+    tiering().set_active_module(&mod);
 
     auto* fn = mod.get_function(entry_fn);
     if (!fn) {
@@ -777,9 +835,10 @@ void MultiTierPipeline::setup_fast_interpreter(FastInterpreter& interp, Module& 
     interp.set_dispatch_table(table_);
     interp.set_module(&mod);
     install_host_symbols(interp);
-    for (const auto& [sym, addr] : external_symbols_) {
-        interp.register_external_symbol(sym, addr);
-    }
+    // One shared snapshot rather than a copy per interpreter: a host
+    // registers thousands, and native code entering Tier 0 from outside an
+    // interpreter sets one up per call (run_fresh_tier0).
+    interp.set_shared_external_symbols(shared_symbols_locked());
     for (const auto& [name, fn_ptr] : external_functions_) {
         interp.register_external_function(name, fn_ptr);
     }

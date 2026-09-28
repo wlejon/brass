@@ -131,7 +131,10 @@ void complete_guard_states(Function& fn, const DominatorTree& dom) {
         if (!fn.find_guard(id)) fn.remove_resume_point(id);
     }
     if (guards.empty()) return;
-    const auto live_in = block_live_ins(fn);
+    std::vector<const BasicBlock*> targets;
+    targets.reserve(guards.size());
+    for (const Instruction* g : guards) targets.push_back(fn.get_resume_target(g->resume_id()));
+    const auto live_in = block_live_ins(fn, targets);
     for (Instruction* g : guards) {
         auto it = live_in.find(fn.get_resume_target(g->resume_id()));
         if (it == live_in.end()) continue;

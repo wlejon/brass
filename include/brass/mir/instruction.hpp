@@ -143,7 +143,9 @@ public:
     void set_extra_symbol(std::string_view sym) noexcept { extra_symbol_ = sym; }
 
     uint32_t resume_id() const noexcept { return static_cast<uint32_t>(imm_i64_); }
-    void set_resume_id(uint32_t id) noexcept { imm_i64_ = static_cast<int64_t>(id); }
+    // A guard's id is reported to its function (Function::
+    // note_guard_resume_id), which hands out the next fresh one.
+    void set_resume_id(uint32_t id) noexcept;
 
     uint32_t site_id() const noexcept { return static_cast<uint32_t>(imm_i64_); }
     void set_site_id(uint32_t id) noexcept { imm_i64_ = static_cast<int64_t>(id); }

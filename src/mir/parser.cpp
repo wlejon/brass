@@ -576,7 +576,10 @@ namespace brass::mir_parser {
                     has_id = true;
                 }
                 Instruction* g = b.build_guard(cond, exit_stub, state_map);
-                if (has_id) g->set_resume_id(id);
+                if (has_id) {
+                    g->set_resume_id(id);
+                    if (Function* gf = g->parent() ? g->parent()->parent() : nullptr) gf->note_guard_resume_id(id);
+                }
                 break;
             }
 

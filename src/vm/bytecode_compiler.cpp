@@ -141,6 +141,9 @@ std::unique_ptr<BytecodeFunction> BytecodeCompiler::compile(const Function& fn) 
     }
 
     // Step 4: resume points.
+    const auto guards_by_id = fn.resume_points().empty()
+                                  ? std::unordered_map<uint32_t, const Instruction*>{}
+                                  : fn.guards_by_resume_id();
     for (const auto& [resume_id, target_bb] : fn.resume_points()) {
         auto it = ctx.block_pc_map.find(target_bb);
         if (it == ctx.block_pc_map.end()) continue;
@@ -150,7 +153,8 @@ std::unique_ptr<BytecodeFunction> BytecodeCompiler::compile(const Function& fn) 
         for (size_t p = 0; p < target_bb->param_count(); ++p) {
             if (const Value* pv = target_bb->param(p)) rpe.param_regs.push_back(ctx.get_reg(pv));
         }
-        if (const Instruction* g = fn.find_guard(resume_id)) {
+        const auto git = guards_by_id.find(resume_id);
+        if (const Instruction* g = git == guards_by_id.end() ? nullptr : git->second) {
             for (const Value* sv : g->state_map()) rpe.state_regs.push_back(sv ? ctx.get_reg(sv) : kNoReg);
             for (size_t i = 0; i < g->state_map().size(); ++i) {
                 const Value* sv = g->state_map()[i];
@@ -166,12 +170,15 @@ std::unique_ptr<BytecodeFunction> BytecodeCompiler::compile(const Function& fn) 
         }
         bfn->resume_points.push_back(std::move(rpe));
     }
-    for (GuardInfo& g : bfn->guards) {
+    if (!bfn->guards.empty()) {
+        std::unordered_map<uint32_t, int32_t> resume_index;
+        resume_index.reserve(bfn->resume_points.size() * 2);
         for (size_t i = 0; i < bfn->resume_points.size(); ++i) {
-            if (bfn->resume_points[i].resume_id == g.resume_id) {
-                g.resume_index = static_cast<int32_t>(i);
-                break;
-            }
+            resume_index.emplace(bfn->resume_points[i].resume_id, static_cast<int32_t>(i));
+        }
+        for (GuardInfo& g : bfn->guards) {
+            auto it = resume_index.find(g.resume_id);
+            if (it != resume_index.end()) g.resume_index = it->second;
         }
     }
 

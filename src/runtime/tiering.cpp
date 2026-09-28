@@ -166,6 +166,7 @@ void TieringFeedback::reset() noexcept {
     invocations_.store(0, std::memory_order_relaxed);
     total_backedges_.store(0, std::memory_order_relaxed);
     unkeyed_backedges_.store(0, std::memory_order_relaxed);
+    tier1_backedge_budget_.store(kTier1BackedgeBudget, std::memory_order_relaxed);
     deopt_count_.store(0, std::memory_order_relaxed);
     tier1_retry_at_.store(UINT64_MAX, std::memory_order_relaxed);
     tier1_retries_.store(0, std::memory_order_relaxed);

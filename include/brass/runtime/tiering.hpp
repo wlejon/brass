@@ -142,6 +142,16 @@ public:
     void count_backedge_fast() noexcept {
         total_backedges_.store(total_backedges_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
     }
+    // Tier-1 code counts its loop backedges down from this budget (a plain,
+    // non-locked decrement: a lost count only delays the hook) and calls
+    // brass_tier1_backedges_fb when it reaches zero, so a loop-heavy
+    // function asks for Tier 2 by work done, not only by calls made.
+    static constexpr int64_t kTier1BackedgeBudget = 2000;
+    // After the hook fires: how far away the next check is.
+    static constexpr int64_t kTier1BackedgeRearm = int64_t{1} << 16;
+    std::atomic<int64_t>* tier1_backedge_budget() noexcept { return &tier1_backedge_budget_; }
+    // The hook's bookkeeping: `n` backedges ran in Tier 1 since the last one.
+    void add_backedges(uint64_t n) noexcept { total_backedges_.fetch_add(n, std::memory_order_relaxed); }
 
     // Deoptimizations & Guard failure tracker (ratchet)
     uint64_t deopt_count() const noexcept { return deopt_count_.load(std::memory_order_relaxed); }
@@ -219,6 +229,7 @@ private:
     std::atomic<uint32_t> tier1_retries_{0};
     std::atomic<uint64_t> total_backedges_{0};
     std::atomic<uint64_t> unkeyed_backedges_{0};
+    std::atomic<int64_t> tier1_backedge_budget_{kTier1BackedgeBudget};
     std::atomic<uint64_t> deopt_count_{0};
     std::atomic<uint32_t> reoptimizations_{0};
     // Keyed backedges and guard failures are rare (OSR and deopt paths).

@@ -188,22 +188,47 @@ size_t CompilePool::thread_count() const {
     return workers_.size();
 }
 
+// Jobs below this priority (tier-2 compiles, which can run for a long time
+// on a large function) may fill all workers but one: the last is kept for
+// the short, latency-bound ones (Tier 1, whose callers run in Tier 0 through
+// a bridge until it lands, and OSR entries).
+constexpr uint8_t kReservedPriority = 128;
+
+std::vector<CompilePool::Job>::iterator CompilePool::pick_locked() {
+    const size_t bulk_limit = workers_.size() > 1 ? workers_.size() - 1 : workers_.size();
+    const bool bulk_ok = bulk_running_ < bulk_limit;
+    // Highest priority, then oldest, among the jobs that may start now.
+    auto best = queue_.end();
+    for (auto it = queue_.begin(); it != queue_.end(); ++it) {
+        if (it->priority < kReservedPriority && !bulk_ok) continue;
+        if (best == queue_.end() || it->priority > best->priority ||
+            (it->priority == best->priority && it->seq < best->seq)) {
+            best = it;
+        }
+    }
+    return best;
+}
+
 void CompilePool::worker_loop() {
     detail::t_on_compile_worker = true;
     for (;;) {
         Job job;
+        bool bulk = false;
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            cv_work_.wait(lock, [this] { return stopping_ || !queue_.empty(); });
-            if (stopping_) return;
-            // Highest priority, then oldest.
-            auto best = std::min_element(queue_.begin(), queue_.end(), [](const Job& a, const Job& b) {
-                return a.priority != b.priority ? a.priority > b.priority : a.seq < b.seq;
+            auto best = queue_.end();
+            cv_work_.wait(lock, [this, &best] {
+                if (stopping_) return true;
+                best = pick_locked();
+                return best != queue_.end();
             });
+            if (stopping_) return;
             job = std::move(*best);
             queue_.erase(best);
             ++running_[job.owner];
             ++busy_;
+            bulk = job.priority < kReservedPriority;
+            if (bulk) ++bulk_running_;
         }
         try {
             job.run();
@@ -216,8 +241,12 @@ void CompilePool::worker_loop() {
             std::lock_guard<std::mutex> lock(mutex_);
             if (--running_[job.owner] == 0) running_.erase(job.owner);
             --busy_;
+            if (bulk) --bulk_running_;
         }
         cv_done_.notify_all();
+        // A bulk slot freed: a worker parked on a queue of only bulk jobs may
+        // take one now.
+        if (bulk) cv_work_.notify_one();
     }
 }
 

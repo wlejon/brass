@@ -133,9 +133,14 @@ RegisterAssignment allocate_bytecode_registers(const Function& fn, const BlockLa
         block_end[bi] = pos - 1;
     }
 
-    // Uses, and the live-range hull of every value.
-    std::vector<uint32_t> stamp(nblocks, 0);
-    std::vector<uint32_t> worklist;
+    // Uses, and the live-range hull of every value. A use outside its
+    // value's defining block is recorded first and walked after, all of one
+    // value's uses together: the walk back from a use stops at blocks
+    // already walked for that value, which only holds while no other value's
+    // walk has overwritten the stamps in between. Walked use by use, a value
+    // read in every block of a large body (the frame, the environment) was
+    // re-walked over its whole range at each use, quadratic in the body.
+    std::vector<std::pair<uint32_t, uint32_t>> cross_uses; // (value index, block)
     auto use = [&](const Value* v, uint32_t bi, uint32_t at) {
         if (!v) return;
         auto it = vindex.find(v);
@@ -146,30 +151,8 @@ RegisterAssignment allocate_bytecode_registers(const Function& fn, const BlockLa
         ValueInfo& vi = values[it->second];
         vi.lo = std::min(vi.lo, at);
         vi.hi = std::max(vi.hi, at);
-        if (bi == vi.def_block) return;
-        // Walk back from the use to the definition: the value is live into
-        // every block on the way and live out of each of their predecessors.
-        const uint32_t tag = it->second + 1;
-        auto live_in = [&](uint32_t b) {
-            if (stamp[b] == tag) return;
-            stamp[b] = tag;
-            worklist.push_back(b);
-        };
-        live_in(bi);
-        while (!worklist.empty()) {
-            uint32_t b = worklist.back();
-            worklist.pop_back();
-            vi.lo = std::min(vi.lo, block_start[b]);
-            vi.hi = std::max(vi.hi, block_start[b]);
-            for (uint32_t p : layout.preds[b]) {
-                vi.lo = std::min(vi.lo, block_end[p]);
-                vi.hi = std::max(vi.hi, block_end[p]);
-                if (p != vi.def_block) live_in(p);
-            }
-        }
+        if (bi != vi.def_block) cross_uses.emplace_back(it->second, bi);
     };
-    // Each use walk must see fresh stamps for its value only; stamps are
-    // tagged by value, and repeated walks of one value may share them.
     for (uint32_t bi = 0; bi < nblocks; ++bi) {
         uint32_t at = block_start[bi];
         for (const Instruction* inst : *layout.order[bi]) {
@@ -179,6 +162,33 @@ RegisterAssignment allocate_bytecode_registers(const Function& fn, const BlockLa
             for (const Value* v : inst->state_map()) use(v, bi, at);
             for (const BranchTarget* t : branch_targets_of(*inst)) {
                 for (const Value* v : t->args) use(v, bi, at);
+            }
+        }
+    }
+    // Walk back from each use to the definition: the value is live into
+    // every block on the way and live out of each of their predecessors.
+    std::sort(cross_uses.begin(), cross_uses.end());
+    std::vector<uint32_t> stamp(nblocks, 0);
+    std::vector<uint32_t> worklist;
+    for (size_t i = 0; i < cross_uses.size();) {
+        const uint32_t vidx = cross_uses[i].first;
+        ValueInfo& vi = values[vidx];
+        const uint32_t tag = vidx + 1;
+        auto live_in = [&](uint32_t b) {
+            if (stamp[b] == tag) return;
+            stamp[b] = tag;
+            worklist.push_back(b);
+        };
+        for (; i < cross_uses.size() && cross_uses[i].first == vidx; ++i) live_in(cross_uses[i].second);
+        while (!worklist.empty()) {
+            uint32_t b = worklist.back();
+            worklist.pop_back();
+            vi.lo = std::min(vi.lo, block_start[b]);
+            vi.hi = std::max(vi.hi, block_start[b]);
+            for (uint32_t p : layout.preds[b]) {
+                vi.lo = std::min(vi.lo, block_end[p]);
+                vi.hi = std::max(vi.hi, block_end[p]);
+                if (p != vi.def_block) live_in(p);
             }
         }
     }

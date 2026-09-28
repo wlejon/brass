@@ -4,6 +4,7 @@
 #include <brass/mir/block.hpp>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 #include <cstdint>
 #include <utility>
@@ -71,10 +72,23 @@ public:
 
     // The first guard of this function with `resume_id`, or null.
     const Instruction* find_guard(uint32_t resume_id) const noexcept;
+    // find_guard for every resume id at once (one walk of the body): what a
+    // caller looking up many ids uses, since find_guard walks the body each
+    // time.
+    std::unordered_map<uint32_t, const Instruction*> guards_by_resume_id() const;
     // The resume id a new guard of this function gets: one past the largest
     // id of its guards, 0 when it has none. A resume id names one Tier-0
     // guard; tier-2 deopt finds the guard to resume at by it.
     uint32_t next_guard_resume_id() const noexcept;
+    // Allocates a new guard's resume id: next_guard_resume_id() the first
+    // time (one scan), then a counter, so building N guards costs O(N)
+    // rather than a scan of the whole body per guard. Ids stay unique; a
+    // guard removed since leaves a gap instead of being reused. A guard given
+    // an explicit id afterwards is reported with note_guard_resume_id.
+    uint32_t take_guard_resume_id() noexcept;
+    void note_guard_resume_id(uint32_t id) noexcept {
+        if (guard_id_known_ && id >= next_guard_id_) next_guard_id_ = id + 1;
+    }
     // A guard's exit stub: the function of this function's module named by
     // the guard's exit label, or null when the label names none (it is then
     // only a label). Called as stub(state values...); its result is this
@@ -120,9 +134,15 @@ private:
     Module* parent_ = nullptr;
 
     std::vector<std::pair<uint32_t, BasicBlock*>> resume_points_;
+    // resume id -> position in resume_points_, built once the table is large
+    // (resume_point_position); empty otherwise.
+    mutable std::unordered_map<uint32_t, uint32_t> resume_index_;
+    size_t resume_point_position(uint32_t resume_id) const noexcept;
 
     uint32_t next_value_id_ = 0;
     uint32_t next_block_id_ = 0;
+    uint32_t next_guard_id_ = 0;
+    bool guard_id_known_ = false;
     bool allow_fp_reassociation_ = false;
 
     bool has_coro_frame_layout_ = false;

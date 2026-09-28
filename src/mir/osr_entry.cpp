@@ -17,15 +17,9 @@ namespace brass {
 
 namespace {
 
-using ValueSet = std::unordered_set<const Value*>;
-
 bool fail(std::string* why, std::string msg) {
     if (why) *why = std::move(msg);
     return false;
-}
-
-std::unordered_map<const BasicBlock*, ValueSet> live_in_sets(const Function& fn) {
-    return block_live_ins(fn);
 }
 
 bool is_rematerializable(const Value* v) {
@@ -74,7 +68,7 @@ std::optional<OsrEntryPlan> plan_osr_entry(const Function& fn, const BasicBlock&
         if (bb && reach.count(bb)) plan.region.push_back(bb);
     }
 
-    const auto live_in = live_in_sets(fn);
+    const auto live_in = block_live_ins(fn, {&block});
     std::vector<const Value*> live(live_in.at(&block).begin(), live_in.at(&block).end());
     std::sort(live.begin(), live.end(), [](const Value* a, const Value* b) { return a->id() < b->id(); });
 

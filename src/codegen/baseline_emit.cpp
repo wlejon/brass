@@ -154,10 +154,12 @@ void emit_switch(X64BaselineEmitter& em, const Instruction& inst) {
         enc.je(case_body);
     }
     em.copy_block_args(inst.default_target());
+    em.count_backedge(inst.default_target().block);
     enc.jmp(em.block_label(inst.default_target().block));
     for (size_t i = 0; i < inst.switch_cases().size(); ++i) {
         em.buffer.bind(case_labels[i]);
         em.copy_block_args(inst.switch_cases()[i].target);
+        em.count_backedge(inst.switch_cases()[i].target.block);
         enc.jmp(em.block_label(inst.switch_cases()[i].target.block));
     }
 }
@@ -189,6 +191,7 @@ void emit_control_op(X64BaselineEmitter& em, const Instruction& inst) {
         }
         case Opcode::br:
             em.copy_block_args(inst.branch_target());
+            em.count_backedge(inst.branch_target().block);
             enc.jmp(em.block_label(inst.branch_target().block));
             return;
         case Opcode::br_if: {
@@ -196,9 +199,11 @@ void emit_control_op(X64BaselineEmitter& em, const Instruction& inst) {
             Label true_edge = em.buffer.create_label();
             enc.jne(true_edge);
             em.copy_block_args(inst.false_target());
+            em.count_backedge(inst.false_target().block);
             enc.jmp(em.block_label(inst.false_target().block));
             em.buffer.bind(true_edge);
             em.copy_block_args(inst.true_target());
+            em.count_backedge(inst.true_target().block);
             enc.jmp(em.block_label(inst.true_target().block));
             return;
         }
@@ -387,9 +392,22 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
     };
 
     // 5. Code for each block, noting where each source position begins
+    // Tier-up by work: loop backedges count down the feedback's budget
+    // (only for code whose program has a pipeline to tier it up).
+    if (!fn.name().empty() && dispatch_table().tiering().pipeline().is_initialized()) {
+        runtime::TieringFeedback* feedback = &dispatch_table().tiering().get_feedback(fn.name());
+        emitter.backedge_feedback = feedback;
+        emitter.backedge_budget = feedback->tier1_backedge_budget();
+        uint32_t pos = 0;
+        for (const auto* bb : fn.blocks()) {
+            if (bb) emitter.block_pos[bb->id()] = pos++;
+        }
+    }
+
     std::vector<DebugLineEntry> lines;
     for (const auto* bb : fn.blocks()) {
         if (!bb) continue;
+        emitter.cur_block_pos = emitter.block_pos.count(bb->id()) ? emitter.block_pos[bb->id()] : 0;
         buffer.bind(block_labels[bb->id()]);
         for (const auto* inst_ptr : *bb) {
             if (!inst_ptr) continue;

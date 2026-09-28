@@ -104,6 +104,13 @@ public:
     // Allocates from `heap` from now on (null: a heap of its own). Not while
     // it runs.
     void use_heap(gc::Heap* heap);
+    // Lets go of a heap it does not own (and its host adapter), so an idle
+    // interpreter kept for reuse holds nothing of a heap that may die before
+    // it; use_heap() attaches it again. Not while it runs.
+    void park_heap() noexcept;
+    // Idle on a heap it does not own: no frame running, no coroutine
+    // suspended in it (whose registers are roots only while attached).
+    bool is_parkable() const noexcept;
 
     // A zeroed object from heap() (Interpreter::allocate_gc).
     uintptr_t allocate_gc(size_t size, uint64_t pointer_mask = 0, uint32_t type_tag = 0);
@@ -118,6 +125,14 @@ public:
     void register_external_symbol(std::string_view name, void* addr);
     void* find_external_symbol(std::string_view name) const noexcept;
     bool has_external_symbol(std::string_view name) const noexcept;
+    // A shared, immutable symbol table consulted after the interpreter's own
+    // registrations (a pipeline hands every interpreter it sets up one
+    // snapshot of its symbols instead of copying thousands into each).
+    using SharedSymbols = std::shared_ptr<const std::unordered_map<std::string, void*>>;
+    void set_shared_external_symbols(SharedSymbols symbols) {
+        shared_external_symbols_ = std::move(symbols);
+        invalidate_call_caches();
+    }
 
     // Function pointer registration
     void register_function_pointer(uintptr_t ptr, const Function* fn);
@@ -292,6 +307,7 @@ private:
 
     std::unordered_map<std::string, FastHostFn> external_functions_;
     std::unordered_map<std::string, void*> external_symbols_;
+    SharedSymbols shared_external_symbols_;
     std::unordered_map<uintptr_t, const Function*> function_pointers_;
     std::unordered_map<uintptr_t, const BytecodeFunction*> bytecode_function_pointers_;
     std::unordered_map<uintptr_t, FastHostFn> host_function_pointers_;

@@ -465,7 +465,15 @@ loop_start:
         }
 
         OP_CASE(func_addr) {
-            const std::string& sym = fn.string_pool[decode_uimm32(inst)];
+            const uint32_t sym_idx = decode_uimm32(inst);
+            FastFnInfo& finfo = *frame.info;
+            if (BRASS_LIKELY(finfo.func_addr_epoch == resolve_epoch_ && sym_idx < finfo.func_addrs.size() &&
+                             finfo.func_addrs[sym_idx] != 0 &&
+                             finfo.func_addr_gen == runtime::registry_generation())) {
+                RA = finfo.func_addrs[sym_idx];
+                NEXT();
+            }
+            const std::string& sym = fn.string_pool[sym_idx];
             const Function* target_fn = module_ ? module_->get_function(sym) : nullptr;
             uintptr_t fn_ptr = reinterpret_cast<uintptr_t>(target_fn);
             if (target_fn) {
@@ -476,6 +484,17 @@ loop_start:
             } else if (void* ext_sym = find_external_symbol(sym)) {
                 fn_ptr = reinterpret_cast<uintptr_t>(ext_sym);
             }
+            // Resolving may have moved the epoch (a newly registered
+            // pointer): the cache is keyed on the epoch after it.
+            const uint64_t gen_now = runtime::registry_generation();
+            if (finfo.func_addr_epoch != resolve_epoch_ || finfo.func_addr_gen != gen_now) {
+                finfo.func_addrs.assign(fn.string_pool.size(), 0);
+                finfo.func_addr_epoch = resolve_epoch_;
+                finfo.func_addr_gen = gen_now;
+            } else if (finfo.func_addrs.size() < fn.string_pool.size()) {
+                finfo.func_addrs.resize(fn.string_pool.size(), 0);
+            }
+            finfo.func_addrs[sym_idx] = fn_ptr;
             RA = fn_ptr;
             NEXT();
         }

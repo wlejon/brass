@@ -1,10 +1,20 @@
 #include <brass/mir/block.hpp>
+#include <brass/mir/function.hpp>
 #include <algorithm>
 
 namespace brass {
 
+namespace {
+// A guard arriving with an id of its own (cloned, inlined, moved) keeps the
+// function's next fresh id past it (Function::take_guard_resume_id).
+void note_guard(const BasicBlock* bb, const Instruction* inst) noexcept {
+    if (inst->opcode() == Opcode::guard && bb->parent()) bb->parent()->note_guard_resume_id(inst->resume_id());
+}
+} // namespace
+
 void BasicBlock::append_instruction(Instruction* inst) {
     if (!inst) return;
+    note_guard(this, inst);
     inst->set_parent(this);
     inst->set_next(nullptr);
     inst->set_prev(tail_);
@@ -21,6 +31,7 @@ void BasicBlock::append_instruction(Instruction* inst) {
 
 void BasicBlock::prepend_instruction(Instruction* inst) {
     if (!inst) return;
+    note_guard(this, inst);
     inst->set_parent(this);
     inst->set_prev(nullptr);
     inst->set_next(head_);
@@ -41,6 +52,7 @@ void BasicBlock::insert_before(Instruction* inst, Instruction* before_inst) {
         append_instruction(inst);
         return;
     }
+    note_guard(this, inst);
     inst->set_parent(this);
     Instruction* prev = before_inst->prev();
     inst->set_prev(prev);
@@ -61,6 +73,7 @@ void BasicBlock::insert_after(Instruction* inst, Instruction* after_inst) {
         prepend_instruction(inst);
         return;
     }
+    note_guard(this, inst);
     inst->set_parent(this);
     Instruction* next = after_inst->next();
     inst->set_prev(after_inst);

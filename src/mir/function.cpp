@@ -2,6 +2,7 @@
 #include <brass/mir/module.hpp>
 #include <brass/mir/instruction.hpp>
 #include <algorithm>
+#include <cstdint>
 #include <unordered_map>
 
 namespace brass {
@@ -44,27 +45,51 @@ BasicBlock* Function::get_block_by_id(uint32_t id) const noexcept {
     return nullptr;
 }
 
-void Function::add_resume_point(uint32_t resume_id, BasicBlock* target) {
-    for (auto& entry : resume_points_) {
-        if (entry.first == resume_id) {
-            entry.second = target;
-            return;
+// Past a handful of entries the resume table is looked up through an index
+// (id -> position): a body with a speculation guard per site adds thousands,
+// and a scan per add or lookup made building and verifying one quadratic.
+namespace {
+constexpr size_t kResumeIndexFrom = 16;
+}
+
+size_t Function::resume_point_position(uint32_t resume_id) const noexcept {
+    if (resume_points_.size() < kResumeIndexFrom) {
+        for (size_t i = 0; i < resume_points_.size(); ++i) {
+            if (resume_points_[i].first == resume_id) return i;
+        }
+        return SIZE_MAX;
+    }
+    if (resume_index_.size() != resume_points_.size()) {
+        resume_index_.clear();
+        resume_index_.reserve(resume_points_.size() * 2);
+        for (size_t i = 0; i < resume_points_.size(); ++i) {
+            resume_index_.emplace(resume_points_[i].first, static_cast<uint32_t>(i));
         }
     }
+    auto it = resume_index_.find(resume_id);
+    return it == resume_index_.end() ? SIZE_MAX : it->second;
+}
+
+void Function::add_resume_point(uint32_t resume_id, BasicBlock* target) {
+    const size_t at = resume_point_position(resume_id);
+    if (at != SIZE_MAX) {
+        resume_points_[at].second = target;
+        return;
+    }
     resume_points_.push_back({resume_id, target});
+    if (!resume_index_.empty()) {
+        resume_index_.emplace(resume_id, static_cast<uint32_t>(resume_points_.size() - 1));
+    }
 }
 
 void Function::remove_resume_point(uint32_t resume_id) {
     std::erase_if(resume_points_, [&](const auto& entry) { return entry.first == resume_id; });
+    resume_index_.clear();
 }
 
 BasicBlock* Function::get_resume_target(uint32_t resume_id) const noexcept {
-    for (const auto& entry : resume_points_) {
-        if (entry.first == resume_id) {
-            return entry.second;
-        }
-    }
-    return nullptr;
+    const size_t at = resume_point_position(resume_id);
+    return at == SIZE_MAX ? nullptr : resume_points_[at].second;
 }
 
 const Instruction* Function::find_guard(uint32_t resume_id) const noexcept {
@@ -75,6 +100,17 @@ const Instruction* Function::find_guard(uint32_t resume_id) const noexcept {
         }
     }
     return nullptr;
+}
+
+std::unordered_map<uint32_t, const Instruction*> Function::guards_by_resume_id() const {
+    std::unordered_map<uint32_t, const Instruction*> out;
+    for (const auto* bb : blocks_) {
+        if (!bb) continue;
+        for (const auto* inst : *bb) {
+            if (inst && inst->opcode() == Opcode::guard) out.emplace(inst->resume_id(), inst);
+        }
+    }
+    return out;
 }
 
 uint32_t Function::next_guard_resume_id() const noexcept {
@@ -90,6 +126,14 @@ uint32_t Function::next_guard_resume_id() const noexcept {
         }
     }
     return any ? max_id + 1 : 0;
+}
+
+uint32_t Function::take_guard_resume_id() noexcept {
+    if (!guard_id_known_) {
+        next_guard_id_ = next_guard_resume_id();
+        guard_id_known_ = true;
+    }
+    return next_guard_id_++;
 }
 
 const Function* Function::guard_exit_stub(const Instruction& guard) const noexcept {

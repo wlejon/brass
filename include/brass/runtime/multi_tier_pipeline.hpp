@@ -241,6 +241,10 @@ public:
     // with); the name overload looks the function up first.
     void on_invocation(std::string_view fn_name);
     void on_invocation(TieringFeedback& fb);
+    // Tier-1 code spent its backedge budget (TieringFeedback::
+    // tier1_backedge_budget): a loop-heavy function is sent to Tier 2 now
+    // rather than at the invocation threshold.
+    void on_tier1_backedges(TieringFeedback& fb);
 
     // Called by ~Module: drops the Tier-0 interpreter kept for `mod` (the
     // default program's; forget() is one pipeline's part).
@@ -304,6 +308,7 @@ private:
     explicit MultiTierPipeline(DefaultTag);
 
     void tier_invocation(TieringFeedback& fb, std::string_view fn_name, FunctionHandle* handle);
+    void promote_tier1(TieringFeedback& fb, std::string_view fn_name, FunctionHandle* handle);
     // Records a failure of guard `resume_id` in `handle`'s tier-2 code and
     // invalidates that code once the guard is judged mis-speculated.
     void charge_deopt(FunctionHandle& handle, FunctionDispatchTable& table, uint32_t resume_id);
@@ -353,7 +358,33 @@ private:
     const Module* fast_interp_module_ = nullptr;
     uint64_t fast_interp_symbols_gen_ = 0;
     uint64_t symbols_gen_ = 1;
+    // The module execute() last prepared (coroutines lowered, every function
+    // given a handle) and its function count then: a later execute of the
+    // same module skips the two whole-module walks, which on a large program
+    // cost as much as a fifth of a second each time the host entered it.
+    // Under mutex_.
+    const Module* prepared_module_ = nullptr;
+    size_t prepared_function_count_ = 0;
     std::atomic<bool> fast_interp_busy_{false};
+
+    // Idle interpreters run_fresh_tier0 set up before, kept (parked off
+    // their heap) so the next native-to-Tier-0 call or deopt continuation
+    // reuses one, with its compiled bytecode, rather than building a
+    // FastInterpreter (every function's pointer, the host's functions) and
+    // recompiling each function it runs. Dropped with their module.
+    struct FreshInterpreter {
+        std::unique_ptr<FastInterpreter> interp;
+        const Module* mod = nullptr;
+        const FunctionDispatchTable* table = nullptr;
+        uint64_t symbols_gen = 0;
+    };
+    std::mutex fresh_pool_mutex_;
+    std::vector<FreshInterpreter> fresh_pool_; // under fresh_pool_mutex_
+    std::unique_ptr<FastInterpreter> take_fresh_interpreter(FunctionDispatchTable& table, Module* mod,
+                                                            uint64_t& symbols_gen);
+    void keep_fresh_interpreter(std::unique_ptr<FastInterpreter> interp, FunctionDispatchTable& table,
+                                Module* mod, uint64_t symbols_gen) noexcept;
+    void drop_fresh_interpreters(const Module* mod) noexcept;
 
     bool initialized_ = false;
     TieringConfig config_;
@@ -367,6 +398,8 @@ private:
     // long as its code, and a program's retired engines accumulate.
     mutable std::shared_ptr<const std::unordered_map<std::string, void*>> shared_symbols_;
     mutable uint64_t shared_symbols_gen_ = 0;
+    // shared_symbols_, rebuilt first if stale; mutex_ held.
+    const std::shared_ptr<const std::unordered_map<std::string, void*>>& shared_symbols_locked() const;
     std::unordered_map<std::string, FastHostFn> external_functions_;
     std::unordered_map<std::string, std::shared_ptr<codegen::BaselineCompiledFunction>> baseline_functions_;
     MultiTierStats stats_;

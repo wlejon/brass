@@ -61,6 +61,9 @@ RuntimeValue materialize(Type t, uint64_t bits) {
 } // namespace
 
 bool deopt_targets_valid(const Function& optimized, const Function* tier0, std::string& why) {
+    // Tier 0's guards by resume id, built on the first guard: one walk of
+    // its body rather than one per guard of the optimized copy.
+    std::optional<std::unordered_map<uint32_t, const Instruction*>> tier0_guards;
     for (const auto* bb : optimized.blocks()) {
         if (!bb) continue;
         for (const auto* inst : *bb) {
@@ -70,7 +73,9 @@ bool deopt_targets_valid(const Function& optimized, const Function* tier0, std::
                 why = site + " but no Tier-0 function to resume in";
                 return false;
             }
-            const Instruction* g = find_guard(*tier0, inst->resume_id());
+            if (!tier0_guards) tier0_guards = tier0->guards_by_resume_id();
+            const auto git = tier0_guards->find(inst->resume_id());
+            const Instruction* g = git == tier0_guards->end() ? nullptr : git->second;
             if (!g) {
                 why = site + " has no matching guard in the Tier-0 function";
                 return false;
@@ -223,6 +228,72 @@ void MultiTierPipeline::note_carried_deopt(FunctionHandle& owner, const Function
     charge_deopt(owner, *table_, resume_id);
 }
 
+std::unique_ptr<FastInterpreter> MultiTierPipeline::take_fresh_interpreter(FunctionDispatchTable& table, Module* mod,
+                                                                           uint64_t& symbols_gen) {
+    std::unique_ptr<FastInterpreter> interp;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        symbols_gen = symbols_gen_;
+    }
+    {
+        std::lock_guard<std::mutex> lock(fresh_pool_mutex_);
+        for (size_t i = fresh_pool_.size(); i-- > 0;) {
+            FreshInterpreter& f = fresh_pool_[i];
+            if (f.mod == mod && f.table == &table && f.symbols_gen == symbols_gen) {
+                interp = std::move(f.interp);
+                fresh_pool_.erase(fresh_pool_.begin() + static_cast<std::ptrdiff_t>(i));
+                break;
+            }
+        }
+    }
+    if (interp) {
+        // As a new interpreter would: the thread's current heap, a fresh TLS
+        // block.
+        interp->use_heap(gc::Heap::current());
+        interp->set_tls_block(0);
+        return interp;
+    }
+    interp = std::make_unique<FastInterpreter>();
+    interp->set_dispatch_table(&table);
+    if (mod) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        setup_fast_interpreter(*interp, *mod);
+    }
+    return interp;
+}
+
+void MultiTierPipeline::keep_fresh_interpreter(std::unique_ptr<FastInterpreter> interp, FunctionDispatchTable& table,
+                                               Module* mod, uint64_t symbols_gen) noexcept {
+    // Only one on a heap it does not own (a private heap dies with it), and
+    // a few: nested fresh runs are rare and shallow.
+    constexpr size_t kMaxKept = 8;
+    if (!interp || !interp->is_parkable()) return;
+    interp->park_heap();
+    std::unique_ptr<FastInterpreter> dropped;
+    std::lock_guard<std::mutex> lock(fresh_pool_mutex_);
+    if (fresh_pool_.size() >= kMaxKept) {
+        dropped = std::move(fresh_pool_.front().interp);
+        fresh_pool_.erase(fresh_pool_.begin());
+    }
+    try {
+        fresh_pool_.push_back({std::move(interp), mod, &table, symbols_gen});
+    } catch (...) {
+    }
+}
+
+void MultiTierPipeline::drop_fresh_interpreters(const Module* mod) noexcept {
+    std::vector<FreshInterpreter> dropped;
+    std::lock_guard<std::mutex> lock(fresh_pool_mutex_);
+    for (auto it = fresh_pool_.begin(); it != fresh_pool_.end();) {
+        if (!mod || it->mod == mod) {
+            dropped.push_back(std::move(*it));
+            it = fresh_pool_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 RuntimeValue MultiTierPipeline::run_fresh_tier0(FunctionDispatchTable& table, const Function* fn,
                                                 const std::vector<RuntimeValue>& args, const Function* resume_fn,
                                                 uint32_t resume_id) {
@@ -253,13 +324,13 @@ RuntimeValue MultiTierPipeline::run_fresh_tier0(FunctionDispatchTable& table, co
         return interp.owns_heap() ? check_result(r, interp.heap()) : r;
     };
     if (config_.use_fast_interpreter()) {
-        FastInterpreter interp;
-        interp.set_dispatch_table(&table);
-        if (mod) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            setup_fast_interpreter(interp, *mod);
-        }
-        return run(interp);
+        uint64_t gen = 0;
+        std::unique_ptr<FastInterpreter> interp = take_fresh_interpreter(table, mod, gen);
+        // A run that throws may leave the interpreter mid-frame: it is not
+        // kept then.
+        RuntimeValue r = run(*interp);
+        keep_fresh_interpreter(std::move(interp), table, mod, gen);
+        return r;
     }
     // As execute() sets up the oracle interpreter.
     Interpreter interp;

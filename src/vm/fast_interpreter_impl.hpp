@@ -88,6 +88,13 @@ struct FastFnInfo {
     // The program the feedback was resolved in (null: the default program).
     runtime::FunctionDispatchTable* feedback_table = nullptr;
     std::vector<FastCallTarget> calls;
+    // func_addr results by string-pool index (0: not resolved yet), valid
+    // while the interpreter's resolve epoch and the registry generation
+    // are the ones they were resolved in: a module function's address is
+    // its canonical stub, an external's its registered address.
+    std::vector<uintptr_t> func_addrs;
+    uint64_t func_addr_epoch = 0;
+    uint64_t func_addr_gen = 0;
 
     // The function's feedback in `table`'s program (the owning interpreter's
     // dispatch table), re-resolved when the interpreter is pointed at

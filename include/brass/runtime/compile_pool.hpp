@@ -86,6 +86,9 @@ private:
     void worker_loop();
     void start_locked(size_t threads);
     bool owner_idle_locked(Owner owner) const;
+    // The job a free worker takes now (queue_.end(): none may start), with
+    // one worker kept back from long, low-priority jobs (compile_pool.cpp).
+    std::vector<Job>::iterator pick_locked();
 
     const bool is_shared_;
     size_t configured_threads_;
@@ -96,6 +99,7 @@ private:
     std::vector<Job> queue_;
     std::unordered_map<Owner, size_t> running_;
     size_t busy_ = 0;
+    size_t bulk_running_ = 0; // running jobs below the reserved priority
     uint64_t next_seq_ = 1;
     bool stopping_ = false;
     bool closed_ = false;

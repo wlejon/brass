@@ -11,6 +11,9 @@
 #include <string_view>
 #include <vector>
 
+// Tier-1 backedge hook (multi_tier_pipeline.cpp).
+extern "C" void brass_tier1_backedges_fb(void* feedback);
+
 namespace brass::codegen {
 
 using namespace brass::x64;
@@ -69,6 +72,18 @@ struct X64BaselineEmitter {
     // coro_create of a module function: its body descriptor
     // (runtime::coro_body_of), or null.
     BaselineSymbolResolver coro_body;
+    // Backedge counting (TieringFeedback::tier1_backedge_budget): the
+    // function's feedback, its budget cell, each block's position in
+    // emission order, and the position of the block being emitted. An edge
+    // to a block at or before the current one is a loop backedge.
+    void* backedge_feedback = nullptr;
+    void* backedge_budget = nullptr;
+    std::unordered_map<uint32_t, uint32_t> block_pos;
+    uint32_t cur_block_pos = 0;
+    // Emits the budget decrement (and the hook call at zero) for an edge to
+    // `target` when it is a backedge. Clobbers flags, R11 and the first
+    // argument register; the block arguments must already be copied.
+    void count_backedge(const BasicBlock* target);
 
     // The invoke call sites: [begin, end) holds the call, whose return
     // address is `end`, and a throw out of it lands at `pad`.

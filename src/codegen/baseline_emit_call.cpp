@@ -56,6 +56,20 @@ void X64BaselineEmitter::call_abs(const void* fn_ptr) {
     enc.call(GPR::R11);
 }
 
+void X64BaselineEmitter::count_backedge(const BasicBlock* dest) {
+    if (!backedge_budget || !dest) return;
+    auto it = block_pos.find(dest->id());
+    if (it == block_pos.end() || it->second > cur_block_pos) return;
+    // sub qword [budget], 1; jne done; call the hook with the feedback.
+    Label done = buffer.create_label();
+    enc.movabs(GPR::R11, reinterpret_cast<uint64_t>(backedge_budget));
+    enc.sub(MemAddress::base_disp(GPR::R11, 0), 1);
+    enc.jne(done);
+    enc.movabs(target.is_windows() ? GPR::RCX : GPR::RDI, reinterpret_cast<uint64_t>(backedge_feedback));
+    call_abs(reinterpret_cast<const void*>(&brass_tier1_backedges_fb));
+    buffer.bind(done);
+}
+
 void X64BaselineEmitter::record_safepoint(uint32_t site_id) {
     StackMapRecord rec;
     rec.instruction_offset = static_cast<uint32_t>(buffer.size());

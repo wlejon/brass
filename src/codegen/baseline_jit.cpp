@@ -362,18 +362,28 @@ void* BaselineJitCompiler::resolve_symbol_in(const Function& fn, std::string_vie
         if (const char* data = mod->string_symbol(name)) return const_cast<char*>(data);
         // A function the module defines shadows a registered symbol of the
         // same name (a program function called `sqrt` is not libm's), as in
-        // tier 2's linker. Bound directly once this module's copy has
-        // baseline code; until then through the lazy stub, which
-        // compile_module points at the module's copy when it installs it.
-        // Tier-2 code is reached through the stub too: invalidation drops
-        // it and re-arms the stub, and a caller bound to it directly would
-        // keep entering it, failing its guards on every call.
+        // tier 2's linker. Called through its lazy stub, which
+        // compile_module points at the module's copy when it installs it,
+        // and whose cell follows the function's best code: tier-1 install
+        // fills it, tier-2 install retargets it (code_installer.cpp) and
+        // invalidation re-arms it. Bound directly to the callee's baseline
+        // entry, a tier-1 caller kept calling tier-1 code after the callee
+        // had optimized code, for as long as the caller itself ran in tier
+        // 1 — in a program whose hot callers are loops called a few times,
+        // for good.
         if (const Function* def = mod->get_function(name); def && def->block_count() > 0) {
             runtime::FunctionHandle* handle = dispatch_table().find(name);
             if (handle && handle->mir_function() == def) {
                 void* entry = handle->native_entry();
                 const auto baseline = handle->baseline_function();
-                if (entry && baseline && entry == baseline->entry_point()) return entry;
+                // Installed, and the stub's cell already holds its code:
+                // through the stub. A stub not pointed at it (a compiler
+                // used without the tiering layer) would resolve the name
+                // to the registered symbol it shadows: bound directly.
+                if (entry && baseline) {
+                    if (lazy_ && lazy_->resolved_target(name) == entry) return nullptr;
+                    if (entry == baseline->entry_point()) return entry;
+                }
             }
             // Not compiled yet (compile_module installs it later, or the
             // tiering layer compiles it one function at a time): the stub,

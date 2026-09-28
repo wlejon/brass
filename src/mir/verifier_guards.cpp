@@ -25,7 +25,10 @@ void verify_guard_resume_state(
     }
     if (resuming.empty()) return;
 
-    const auto live_in = block_live_ins(fn);
+    std::vector<const BasicBlock*> targets;
+    targets.reserve(resuming.size());
+    for (const Instruction* guard : resuming) targets.push_back(fn.get_resume_target(guard->resume_id()));
+    const auto live_in = block_live_ins(fn, targets);
     for (const Instruction* guard : resuming) {
         const BasicBlock* target = fn.get_resume_target(guard->resume_id());
         auto it = live_in.find(target);

@@ -54,6 +54,21 @@ void FastInterpreter::detach_heap() noexcept {
     root_source_ = 0;
 }
 
+void FastInterpreter::park_heap() noexcept {
+    if (own_heap_) return;
+    // Values it still reports as roots would go stale while no collection
+    // sees them.
+    last_deopt_ = DeoptResult{};
+    current_exception_ = RuntimeValue{};
+    tagged_allocas_.clear();
+    host_adapter_.reset();
+    detach_heap();
+}
+
+bool FastInterpreter::is_parkable() const noexcept {
+    return !own_heap_ && current_frame_ == nullptr && call_depth_ == 0 && active_coros_.empty();
+}
+
 void FastInterpreter::use_heap(gc::Heap* heap) {
     if (heap && heap == heap_) return;
     if (!heap && own_heap_ && heap_ == own_heap_.get()) return;

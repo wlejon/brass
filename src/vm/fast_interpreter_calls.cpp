@@ -86,15 +86,24 @@ bool FastInterpreter::has_external_function(std::string_view name) const noexcep
 
 void FastInterpreter::register_external_symbol(std::string_view name, void* addr) {
     external_symbols_[std::string(name)] = addr;
+    invalidate_call_caches();
 }
 
 void* FastInterpreter::find_external_symbol(std::string_view name) const noexcept {
-    auto it = external_symbols_.find(std::string(name));
-    return it != external_symbols_.end() ? it->second : nullptr;
+    const std::string key(name);
+    auto it = external_symbols_.find(key);
+    if (it != external_symbols_.end()) return it->second;
+    if (shared_external_symbols_) {
+        auto sit = shared_external_symbols_->find(key);
+        if (sit != shared_external_symbols_->end()) return sit->second;
+    }
+    return nullptr;
 }
 
 bool FastInterpreter::has_external_symbol(std::string_view name) const noexcept {
-    return external_symbols_.find(std::string(name)) != external_symbols_.end();
+    const std::string key(name);
+    return external_symbols_.find(key) != external_symbols_.end() ||
+           (shared_external_symbols_ && shared_external_symbols_->find(key) != shared_external_symbols_->end());
 }
 
 void FastInterpreter::retire_caches() {

@@ -13,6 +13,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <mutex>
+#include <shared_mutex>
 #include <cstdint>
 
 namespace brass {
@@ -290,7 +291,9 @@ private:
     std::unique_ptr<MultiTierPipeline> pipeline_;
     // Holds OSR entries counting into tiering_, so it is destroyed before it.
     std::unique_ptr<OsrCoordinator> osr_;
-    mutable std::mutex mutex_;
+    // Shared for lookups (every interpreter call resolution and compile
+    // thread reads it), exclusive for changes.
+    mutable std::shared_mutex mutex_;
     std::unordered_map<std::string, std::unique_ptr<FunctionHandle>> handles_;
     // Handles dropped by clear() or replaced by register_handle(); callers
     // may hold pointers resolved before registry_generation() moved.
