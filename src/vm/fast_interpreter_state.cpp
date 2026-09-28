@@ -109,6 +109,17 @@ void FastInterpreter::for_each_frame_on_thread(const std::function<bool(const In
     }
 }
 
+size_t FastInterpreter::read_suspended_frames(const FastFrame* top, const void** frame_addresses,
+                                              const Function** functions, size_t cap) noexcept {
+    size_t n = 0;
+    for (const FastFrame* f = top; f && n < cap; f = f->thread_prev) {
+        frame_addresses[n] = f;
+        functions[n] = f->mir_fn;
+        ++n;
+    }
+    return n;
+}
+
 void FastInterpreter::clear_compile_cache() noexcept {
     try {
         retire_caches();

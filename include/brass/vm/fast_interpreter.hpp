@@ -80,6 +80,14 @@ public:
     // The innermost frame on this thread (the head of the chain the visit
     // walks); maintained by the interpreter as frames are entered and left.
     static FastFrame*& thread_frame_top() noexcept;
+    // For a sampling profiler reading ANOTHER thread while that thread is
+    // suspended: `top` is the value in that thread's thread_frame_top() slot
+    // (whose address the thread took itself, since the slot is thread-local).
+    // Fills up to `cap` of its frames, innermost first — each record's address
+    // and its MIR function (null for bytecode compiled without one) — and
+    // returns how many it filled. No allocation, no lock, no call.
+    static size_t read_suspended_frames(const FastFrame* top, const void** frame_addresses,
+                                        const Function** functions, size_t cap) noexcept;
 
     // Module management
     void set_module(const Module* mod);

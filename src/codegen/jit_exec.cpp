@@ -12,6 +12,7 @@
 #include <brass/runtime/coroutine.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/parallel_runtime.hpp>
+#include <brass/debug/jit_unwind_registry.hpp>
 #include <algorithm>
 #include <mutex>
 #include <vector>
@@ -754,6 +755,8 @@ void JitExecutionEngine::register_seh_tables(const object::ObjectFile& obj, uint
                     static_cast<DWORD>(regs_.pdata_count),
                     static_cast<DWORD64>(regs_.code_base)
                 );
+                debug::register_jit_unwind_table(regs_.pdata_table, static_cast<uint32_t>(regs_.pdata_count),
+                                                 regs_.code_base);
             }
         }
     }
@@ -817,6 +820,7 @@ void JitExecutionEngine::LoadRegistrations::release_eh_frame() noexcept {
 void JitExecutionEngine::LoadRegistrations::release_seh_tables() noexcept {
 #if defined(BRASS_JIT_SEH_REGISTRATION)
     if (pdata_table) {
+        debug::unregister_jit_unwind_table(pdata_table);
         RtlDeleteFunctionTable(reinterpret_cast<PRUNTIME_FUNCTION>(pdata_table));
     }
 #endif

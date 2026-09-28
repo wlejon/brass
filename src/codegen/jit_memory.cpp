@@ -6,6 +6,7 @@
 // per thread by pthread_jit_write_protect_np, so each thread still sees it as
 // either writable or executable, never both.)
 #include <brass/codegen/jit_exec.hpp>
+#include <brass/debug/jit_unwind_registry.hpp>
 #include <algorithm>
 #include <cstring>
 #include <mutex>
@@ -197,6 +198,7 @@ bool JitMemoryBlock::register_unwind_info(size_t offset, uint32_t count) {
                              static_cast<DWORD64>(reinterpret_cast<uintptr_t>(ptr_)))) {
         return false;
     }
+    debug::register_jit_unwind_table(table, count, reinterpret_cast<uintptr_t>(ptr_));
     unwind_table_ = table;
     return true;
 #elif !defined(_WIN32)
@@ -230,6 +232,7 @@ bool JitMemoryBlock::register_unwind_info(size_t offset, uint32_t count) {
 void JitMemoryBlock::unregister_unwind_info() noexcept {
     if (!unwind_table_) return;
 #if defined(_WIN32) && (defined(_M_X64) || defined(__x86_64__) || defined(_M_ARM64) || defined(__aarch64__))
+    debug::unregister_jit_unwind_table(unwind_table_);
     RtlDeleteFunctionTable(reinterpret_cast<PRUNTIME_FUNCTION>(unwind_table_));
 #elif !defined(_WIN32)
 #if defined(__APPLE__)
