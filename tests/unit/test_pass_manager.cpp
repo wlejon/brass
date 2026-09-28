@@ -288,12 +288,4 @@ TEST_CASE("Pass manager - production pipeline vectorizes a bronze-shaped loop") 
         auto fresh = parse(kBronzeLoop);
         CHECK_EQ(run_main(*mod, n, 100), run_main(*fresh, n, 100));
     }
-
-    // The old order - IVSR first - leaves the vectorizer nothing to match.
-    auto old_order = parse(kBronzeLoop);
-    Pipeline p;
-    p.add(passes::ivsr(opts.loop));
-    p.add(passes::loop_vectorize(opts.loop));
-    run_pipeline(*old_order, p);
-    CHECK_EQ(count_opcode(*old_order->get_function("kernel"), Opcode::vload), size_t{0});
 }

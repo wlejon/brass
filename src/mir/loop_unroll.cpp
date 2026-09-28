@@ -10,6 +10,77 @@
 
 namespace brass {
 
+namespace {
+
+// The unrolled loop's trip test: may copies 0..F-1 all run, i.e. does
+// `iv + (F-1)*step` still satisfy the loop's bound without wrapping.
+//
+// With a constant positive step s and a `<` bound the test is one compare
+// of the variable itself, `iv < L'`, against L' = limit - c (c = (F-1)*s)
+// clamped at the type's minimum, computed once in the preheader:
+//   signed:   iv + c < limit, iv + c not wrapping  <=>  iv < max(limit, MIN + c) - c
+//   unsigned: iv + c <u limit, iv + c not wrapping <=>  iv <u max_u(limit, c) - c
+// (when limit < MIN + c no iv qualifies, and max(...) - c = MIN admits none;
+// when iv + c would wrap, iv > MAX - c >= L' fails too). One compare-and-
+// branch per trip instead of two compares combined with and.
+//
+// Otherwise the general form: the bound on iv + (F-1)*step, and'ed with a
+// test that the sum did not wrap.
+Value* build_unroll_trip_test(Builder& b, BasicBlock& preheader, const CountedLoopAnalysis& cla,
+                              const ParamAnalysis& primary_iv, Value* cur_iv, size_t F) {
+    const Type iv_type = primary_iv.type;
+    int64_t step = 0;
+    if (!primary_iv.is_sub && (cla.cmp_opcode == Opcode::slt || cla.cmp_opcode == Opcode::ult) &&
+        (iv_type == Type::i32() || iv_type == Type::i64()) && get_const_int(primary_iv.step_val, step) &&
+        step > 0 && step <= (iv_type == Type::i32() ? int64_t{INT32_MAX} : INT64_MAX) / static_cast<int64_t>(F)) {
+        const int64_t c = step * static_cast<int64_t>(F - 1);
+        const bool is_signed = cla.cmp_opcode == Opcode::slt;
+        const int64_t floor = is_signed ? (iv_type == Type::i32() ? int64_t{INT32_MIN} : INT64_MIN) + c : c;
+        Builder ph(*preheader.parent()->parent());
+        ph.set_function(preheader.parent());
+        ph.position_before(preheader.terminator());
+        Value* limit = get_invariant_val(ph, iv_type, cla.limit_val);
+        Value* floor_v = make_smart_const_int(ph, iv_type, floor);
+        Value* below = is_signed ? ph.build_slt(limit, floor_v) : ph.build_ult(limit, floor_v);
+        Value* clamped = ph.build_select(below, floor_v, limit);
+        Value* limit2 = ph.build_sub(clamped, make_smart_const_int(ph, iv_type, c));
+        return is_signed ? b.build_slt(cur_iv, limit2) : b.build_ult(cur_iv, limit2);
+    }
+
+    Value* iv_step = get_invariant_val(b, iv_type, primary_iv.step_val);
+    Value* f_minus_1_step = make_smart_mul(b, iv_type, iv_step, static_cast<int64_t>(F - 1));
+    Value* check_iv = primary_iv.is_sub ? b.build_sub(cur_iv, f_minus_1_step) : make_smart_add(b, iv_type, cur_iv, f_minus_1_step);
+    Value* limit_val = get_invariant_val(b, iv_type, cla.limit_val);
+
+    Value* cond = nullptr;
+    switch (cla.cmp_opcode) {
+        case Opcode::slt: cond = b.build_slt(check_iv, limit_val); break;
+        case Opcode::ult: cond = b.build_ult(check_iv, limit_val); break;
+        case Opcode::sle: cond = b.build_sle(check_iv, limit_val); break;
+        case Opcode::ule: cond = b.build_ule(check_iv, limit_val); break;
+        case Opcode::sgt: cond = b.build_sgt(check_iv, limit_val); break;
+        case Opcode::ugt: cond = b.build_ugt(check_iv, limit_val); break;
+        case Opcode::sge: cond = b.build_sge(check_iv, limit_val); break;
+        case Opcode::uge: cond = b.build_uge(check_iv, limit_val); break;
+        default: cond = b.build_slt(check_iv, limit_val); break;
+    }
+
+    // Guard against signed/unsigned overflow when check_iv = cur_iv + (F - 1) * step
+    Value* no_ovf = nullptr;
+    if (cla.cmp_opcode == Opcode::slt || cla.cmp_opcode == Opcode::sle) {
+        no_ovf = b.build_sle(cur_iv, check_iv);
+    } else if (cla.cmp_opcode == Opcode::sgt || cla.cmp_opcode == Opcode::sge) {
+        no_ovf = b.build_sge(cur_iv, check_iv);
+    } else if (cla.cmp_opcode == Opcode::ult || cla.cmp_opcode == Opcode::ule) {
+        no_ovf = b.build_ule(cur_iv, check_iv);
+    } else if (cla.cmp_opcode == Opcode::ugt || cla.cmp_opcode == Opcode::uge) {
+        no_ovf = b.build_uge(cur_iv, check_iv);
+    }
+    return no_ovf ? b.build_and(no_ovf, cond) : cond;
+}
+
+} // namespace
+
 bool unroll_loop(
     Function& fn,
     LoopInfo& loop,
@@ -142,41 +213,8 @@ bool unroll_loop(
     }
     Value* cur_iv = unroll_hdr_params[iv_unroll_idx];
 
-    // Compute check_val = cur_iv + (F - 1) * iv_step
-    Value* iv_step = get_invariant_val(b, iv_type, primary_iv.step_val);
-    Value* f_minus_1_step = make_smart_mul(b, iv_type, iv_step, static_cast<int64_t>(F - 1));
-    Value* check_iv = primary_iv.is_sub ? b.build_sub(cur_iv, f_minus_1_step) : make_smart_add(b, iv_type, cur_iv, f_minus_1_step);
-    Value* limit_val = get_invariant_val(b, iv_type, cla.limit_val);
-
-    Value* unroll_cond = nullptr;
-    switch (cla.cmp_opcode) {
-        case Opcode::slt: unroll_cond = b.build_slt(check_iv, limit_val); break;
-        case Opcode::ult: unroll_cond = b.build_ult(check_iv, limit_val); break;
-        case Opcode::sle: unroll_cond = b.build_sle(check_iv, limit_val); break;
-        case Opcode::ule: unroll_cond = b.build_ule(check_iv, limit_val); break;
-        case Opcode::sgt: unroll_cond = b.build_sgt(check_iv, limit_val); break;
-        case Opcode::ugt: unroll_cond = b.build_ugt(check_iv, limit_val); break;
-        case Opcode::sge: unroll_cond = b.build_sge(check_iv, limit_val); break;
-        case Opcode::uge: unroll_cond = b.build_uge(check_iv, limit_val); break;
-        default: unroll_cond = b.build_slt(check_iv, limit_val); break;
-    }
-
-    // Guard against signed/unsigned overflow when check_iv = cur_iv + (F - 1) * step
-    Value* no_ovf = nullptr;
-    if (cla.cmp_opcode == Opcode::slt || cla.cmp_opcode == Opcode::sle) {
-        no_ovf = b.build_sle(cur_iv, check_iv);
-    } else if (cla.cmp_opcode == Opcode::sgt || cla.cmp_opcode == Opcode::sge) {
-        no_ovf = b.build_sge(cur_iv, check_iv);
-    } else if (cla.cmp_opcode == Opcode::ult || cla.cmp_opcode == Opcode::ule) {
-        no_ovf = b.build_ule(cur_iv, check_iv);
-    } else if (cla.cmp_opcode == Opcode::ugt || cla.cmp_opcode == Opcode::uge) {
-        no_ovf = b.build_uge(cur_iv, check_iv);
-    }
-    if (no_ovf) {
-        unroll_cond = b.build_and(no_ovf, unroll_cond);
-    }
-
     // Branch to unroll_body (on true) or unroll_exit (on false)
+    Value* unroll_cond = build_unroll_trip_test(b, *preheader, cla, primary_iv, cur_iv, F);
     std::vector<Value*> unroll_exit_args = unroll_hdr->params();
     b.build_br_if(unroll_cond, unroll_body, {}, unroll_exit, unroll_exit_args);
 

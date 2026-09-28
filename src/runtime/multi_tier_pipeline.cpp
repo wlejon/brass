@@ -176,6 +176,7 @@ void MultiTierPipeline::release_program() {
         throw std::logic_error("MultiTierPipeline::release_program: the default program is never released");
     }
     emit_tier_report();
+    warmer_.stop();
     {
         // Drops the queued compiles, then joins the workers: an in-flight
         // compile finishes installing into the program's still-live handles.
@@ -215,6 +216,7 @@ void MultiTierPipeline::forget_module(const Module* mod) noexcept {
 }
 
 void MultiTierPipeline::forget(const Module* mod) noexcept {
+    warmer_.forget(mod);
     drop_fresh_interpreters(mod);
     std::lock_guard<std::mutex> lock(mutex_);
     if (prepared_module_ == mod) prepared_module_ = nullptr;

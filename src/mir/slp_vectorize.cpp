@@ -1,6 +1,7 @@
 #include <brass/mir/slp_vectorize.hpp>
 #include "slp_analysis.hpp"
 #include <brass/mir/builder.hpp>
+#include <brass/mir/uses.hpp>
 #include <unordered_set>
 #include <unordered_map>
 
@@ -317,29 +318,29 @@ static void replace_scalar_uses(
             }
             if (dead_insts.count(inst)) continue;
             if (!reached_def) continue;
-
-            for (size_t op_i = 0; op_i < inst->operand_count(); ++op_i) {
-                if (inst->operand(op_i) == old_val) {
-                    inst->set_operand(op_i, new_val);
-                }
-            }
-        }
-        Instruction* term = bb->terminator();
-        if (term) {
-            if (term->opcode() == Opcode::br) {
-                for (Value*& arg : term->branch_target().args) {
-                    if (arg == old_val) arg = new_val;
-                }
-            } else if (term->opcode() == Opcode::br_if) {
-                for (Value*& arg : term->true_target().args) {
-                    if (arg == old_val) arg = new_val;
-                }
-                for (Value*& arg : term->false_target().args) {
-                    if (arg == old_val) arg = new_val;
-                }
-            }
+            // Every slot: a guard's deopt state map reads the scalar as
+            // surely as an operand does, and the scalar is about to go.
+            replace_uses_in(*inst, old_val, new_val);
         }
     }
+}
+
+// True when a result of `insts` (other than as an operand of another of
+// them) is read in `bb` before `last`: the lanes' vector value is built just
+// before `last`, so such a use would be left reading a removed scalar.
+static bool used_before(const BasicBlock& bb, const std::vector<Instruction*>& insts, const Instruction* last) {
+    std::unordered_set<const Value*> results;
+    std::unordered_set<const Instruction*> members(insts.begin(), insts.end());
+    for (const Instruction* inst : insts) {
+        if (inst && inst->produces_value()) results.insert(inst->result());
+    }
+    for (const Instruction* inst = bb.head(); inst != nullptr && inst != last; inst = inst->next()) {
+        if (members.count(inst)) continue;
+        bool hit = false;
+        for_each_use(*inst, [&](const Value* v) { hit = hit || results.count(v) != 0; });
+        if (hit) return true;
+    }
+    return false;
 }
 
 } // namespace
@@ -378,13 +379,10 @@ bool slp_vectorize_block(BasicBlock& bb, const SlpOptions& options) {
                 for (BasicBlock* blk : fn->blocks()) {
                     for (Instruction* inst = blk->head(); inst != nullptr; inst = inst->next()) {
                         if (vectorized_defs.count(inst) || all_dead_stores.count(inst)) continue;
-                        for (Value* opnd : inst->operands()) {
-                            if (opnd == res) {
-                                has_external_use = true;
-                                break;
-                            }
+                        if (uses_value(*inst, res)) {
+                            has_external_use = true;
+                            break;
                         }
-                        if (has_external_use) break;
                     }
                     if (has_external_use) break;
                 }
@@ -447,6 +445,7 @@ bool slp_vectorize_block(BasicBlock& bb, const SlpOptions& options) {
 
         // Check if all operands across the bundle are from extracts or broadcasts
         Instruction* last_inst = ab.insts.back();
+        if (used_before(bb, ab.insts, last_inst)) continue;
         b.position_before(last_inst);
 
         std::unordered_set<Instruction*> visited;

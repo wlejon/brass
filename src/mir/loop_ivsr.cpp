@@ -6,6 +6,7 @@
 #include "ir_clone.hpp"
 #include <algorithm>
 #include <limits>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -23,7 +24,39 @@ struct BasicIV {
     Value* init = nullptr;
     Value* step = nullptr;
     bool is_sub = false;
+    Instruction* update = nullptr;  // the latch's `param +/- step`
 };
+
+// Where a value is read: the instruction, and the operand index, or -1 for
+// a deopt state map or an edge argument.
+using UseList = std::vector<std::pair<Instruction*, int>>;
+
+std::unordered_map<const Value*, UseList> collect_uses(Function& fn) {
+    std::unordered_map<const Value*, UseList> uses;
+    for (BasicBlock* bb : fn.blocks()) {
+        if (!bb) continue;
+        for (Instruction* inst : *bb) {
+            if (!inst) continue;
+            const auto& ops = inst->operands();
+            for (size_t i = 0; i < ops.size(); ++i) {
+                if (ops[i]) uses[ops[i]].emplace_back(inst, static_cast<int>(i));
+            }
+            for (Value* v : inst->state_map()) {
+                if (v) uses[v].emplace_back(inst, -1);
+            }
+            for_each_edge(*inst, [&](BranchTarget& bt) {
+                for (Value* v : bt.args) {
+                    if (v) uses[v].emplace_back(inst, -1);
+                }
+            });
+        }
+    }
+    return uses;
+}
+
+bool is_index_slot(const Instruction* inst, int operand) {
+    return operand == 1 && (inst->opcode() == Opcode::load_indexed || inst->opcode() == Opcode::store_indexed);
+}
 
 struct PairHash {
     size_t operator()(const std::pair<const Value*, uint8_t>& p) const noexcept {
@@ -141,7 +174,7 @@ bool ivsr_loop(Function& fn, LoopInfo& loop) {
         if (!latch_arg || !latch_arg->is_instruction()) continue;
         Instruction* def = latch_arg->defining_instruction();
         if (!def || def->type() != Type::i64()) continue;
-        BasicIV biv{param, ph_bt->args[i], nullptr, false};
+        BasicIV biv{param, ph_bt->args[i], nullptr, false, def};
         if (def->opcode() == Opcode::add) {
             if (def->operand(0) == param && loop.is_loop_invariant(def->operand(1))) biv.step = def->operand(1);
             else if (def->operand(1) == param && loop.is_loop_invariant(def->operand(0))) biv.step = def->operand(0);
@@ -178,6 +211,89 @@ bool ivsr_loop(Function& fn, LoopInfo& loop) {
         return scaled;
     };
 
+    // The header's exit compare `cmp(iv, limit)` on a basic variable, when
+    // it has one.
+    Instruction* hdr_term = header->terminator();
+    Instruction* exit_cmp = nullptr;
+    if (hdr_term && hdr_term->opcode() == Opcode::br_if) {
+        Value* cond_val = hdr_term->operand(0);
+        Instruction* c = cond_val && cond_val->is_instruction() ? cond_val->defining_instruction() : nullptr;
+        if (c && c->parent() == header && c->operand_count() == 2 && param_to_biv.count(c->operand(0)) &&
+            is_i64(c->operand(1)) && loop.is_loop_invariant(c->operand(1))) {
+            exit_cmp = c;
+        }
+    }
+
+    // Whether the variable stays in a register across the loop whatever this
+    // pass does with its addresses: something other than an indexed access
+    // (or an add feeding only those), its own update, or an exit compare
+    // this pass can move onto the variable scaled by `scale`, reads it - an
+    // exit edge, a compare against a variable limit, arithmetic.
+    std::unordered_map<const Value*, UseList> uses;
+    bool uses_ready = false;
+    auto stays_live = [&](const BasicIV& biv, uint8_t scale) -> bool {
+        if (!uses_ready) {
+            uses = collect_uses(fn);
+            uses_ready = true;
+        }
+        auto only_indexes = [&](const Value* v) {
+            for (const auto& [u, slot] : uses[v]) {
+                if (!is_index_slot(u, slot) || !loop.contains(u->parent())) return false;
+            }
+            return true;
+        };
+        for (const auto& [u, slot] : uses[biv.param]) {
+            if (u == biv.update) continue;
+            if (!loop.contains(u->parent())) return true;
+            if (is_index_slot(u, slot)) continue;
+            if (u->opcode() == Opcode::add && u->type() == Type::i64() && (slot == 0 || slot == 1) &&
+                loop.is_loop_invariant(u->operand(1 - slot)) && only_indexes(u->result())) {
+                continue;
+            }
+            if (u == exit_cmp && slot == 0 &&
+                scaled_exit_compare_is_exact(biv, *u, u->operand(1), loop, *hdr_term, scale)) {
+                continue;
+            }
+            return true;
+        }
+        for (const auto& [u, slot] : uses[biv.update->result()]) {
+            if (u != latch_term || slot != -1) return true;
+        }
+        return false;
+    };
+
+    // Pointer variables: `base + s*i` stepped by s*step, one per (base,
+    // variable, scale). Used when the step is not a constant: the unroller's
+    // copies then address `p + k*s*step` from one register, where the scaled
+    // form needs `base + (si + k*s*step)`, an add per copy.
+    struct PointerIV {
+        const Value* base;
+        const Value* param;
+        uint8_t scale;
+        Value* p;
+    };
+    std::vector<PointerIV> pointer_ivs;
+    auto pointer_iv = [&](Value* base, const BasicIV& biv, uint8_t scale) -> Value* {
+        for (const PointerIV& e : pointer_ivs) {
+            if (e.base == base && e.param == biv.param && e.scale == scale) return e.p;
+        }
+        Value* init = build_add(b_ph, base, build_mul(b_ph, biv.init, scale));
+        Value* step_bytes = build_mul(b_ph, biv.step, scale);
+        Value* p = ir::new_block_param(fn, header, base->type());
+        ph_bt->args.push_back(init);
+        latch_bt->args.push_back(b_latch.build_add(p, step_bytes));
+        pointer_ivs.push_back({base, biv.param, scale, p});
+        return p;
+    };
+
+    enum class AccessMode { Index, Pointer, Scaled };
+    struct Access {
+        Instruction* inst;
+        const BasicIV* biv;
+        Value* inv_offset;
+        AccessMode mode;
+    };
+    std::vector<Access> accesses;
     for (BasicBlock* bb : loop.blocks()) {
         if (!bb || bb == preheader) continue;
         for (Instruction* inst : *bb) {
@@ -185,7 +301,6 @@ bool ivsr_loop(Function& fn, LoopInfo& loop) {
             Value* base = inst->operand(0);
             Value* index = inst->operand(1);
             const uint8_t scale = inst->scale();
-            const int32_t offset = inst->offset();
             if (!base || !index || !loop.is_loop_invariant(base)) continue;
             // base + offset would be a derived gcref live across the loop.
             if (!base->type().is_pointer() && base->type() != Type::i64()) continue;
@@ -210,28 +325,82 @@ bool ivsr_loop(Function& fn, LoopInfo& loop) {
             }
             if (!matched) continue;
 
-            // The displacement stays in the access (x64 and AArch64 address
-            // it for free), as does a constant invariant part of the index
-            // when the sum fits: one base per array rather than one hoisted
-            // pointer per constant offset, each held in a register across
-            // the loop.
-            Value* new_base = base;
-            int64_t new_offset = offset;
-            int64_t inv_const = 0;
-            if (inv_offset && get_const_int(inv_offset, inv_const) && inv_const >= INT32_MIN / 8 &&
-                inv_const <= INT32_MAX / 8 && offset + inv_const * scale >= INT32_MIN &&
-                offset + inv_const * scale <= INT32_MAX) {
-                new_offset = offset + inv_const * scale;
-            } else if (inv_offset) {
-                new_base = build_add(b_ph, new_base, build_mul(b_ph, inv_offset, scale));
+            // How the access is rewritten, decided before any rewriting
+            // changes the uses stays_live reads.
+            //  - Index: the variable stays live anyway and its scale is an
+            //    addressing-mode one, so it indexes the access itself
+            //    (`base + i*s + d`) rather than feeding a second, scaled
+            //    variable that would be live beside it.
+            //  - Pointer: the step is not a constant (see pointer_iv).
+            //  - Scaled: `base + si + d` with si the scaled variable, shared
+            //    by every array the variable indexes.
+            int64_t step_c = 0;
+            AccessMode mode = AccessMode::Scaled;
+            if (get_const_int(matched->step, step_c)) {
+                if ((scale == 2 || scale == 4 || scale == 8) && stays_live(*matched, scale)) mode = AccessMode::Index;
+            } else if (!matched->is_sub) {
+                mode = AccessMode::Pointer;
             }
-            Value* scaled = scaled_biv(*matched, scale);
-            inst->set_operand(0, new_base);
-            inst->set_operand(1, scaled);
-            inst->set_scale(1);
-            inst->set_offset(static_cast<int32_t>(new_offset));
-            changed = true;
+            if (mode == AccessMode::Index && !inv_offset) continue;  // already `base + i*s`
+            accesses.push_back({inst, matched, inv_offset, mode});
         }
+    }
+
+    // A hoisted `base + inv*s`, one per (base, invariant, scale).
+    std::vector<std::pair<std::tuple<Value*, Value*, uint8_t>, Value*>> hoisted_bases;
+    auto hoisted_base = [&](Value* base, Value* inv, uint8_t scale) -> Value* {
+        const auto key = std::make_tuple(base, inv, scale);
+        for (const auto& [k, v] : hoisted_bases) {
+            if (k == key) return v;
+        }
+        Value* v = build_add(b_ph, base, build_mul(b_ph, inv, scale));
+        hoisted_bases.emplace_back(key, v);
+        return v;
+    };
+
+    for (const Access& a : accesses) {
+        Instruction* inst = a.inst;
+        const uint8_t scale = inst->scale();
+        // The displacement stays in the access (x64 and AArch64 address
+        // it for free), as does a constant invariant part of the index
+        // when the sum fits: one base per array rather than one hoisted
+        // pointer per constant offset, each held in a register across
+        // the loop.
+        Value* new_base = inst->operand(0);
+        const int32_t offset = inst->offset();
+        int64_t new_offset = offset;
+        int64_t inv_const = 0;
+        if (a.inv_offset && get_const_int(a.inv_offset, inv_const) && inv_const >= INT32_MIN / 8 &&
+            inv_const <= INT32_MAX / 8 && offset + inv_const * scale >= INT32_MIN &&
+            offset + inv_const * scale <= INT32_MAX) {
+            new_offset = offset + inv_const * scale;
+        } else if (a.inv_offset) {
+            new_base = hoisted_base(new_base, a.inv_offset, scale);
+        }
+        switch (a.mode) {
+            case AccessMode::Index:
+                inst->set_operand(0, new_base);
+                inst->set_operand(1, a.biv->param);
+                break;
+            case AccessMode::Pointer: {
+                // load_indexed/store_indexed without the index are load/store
+                // with the same operands, offset and memory type.
+                Value* p = pointer_iv(new_base, *a.biv, scale);
+                auto& ops = inst->operands();
+                ops.erase(ops.begin() + 1);
+                inst->set_opcode(inst->opcode() == Opcode::load_indexed ? Opcode::load : Opcode::store);
+                inst->set_operand(0, p);
+                inst->set_scale(1);
+                break;
+            }
+            case AccessMode::Scaled:
+                inst->set_operand(0, new_base);
+                inst->set_operand(1, scaled_biv(*a.biv, scale));
+                inst->set_scale(1);
+                break;
+        }
+        inst->set_offset(static_cast<int32_t>(new_offset));
+        changed = true;
     }
 
     // i * s and i << log2(s) are the scaled variable itself.
@@ -269,27 +438,18 @@ bool ivsr_loop(Function& fn, LoopInfo& loop) {
 
     // Move the header's exit compare onto the scaled variable, so the
     // original one can die - only when that cannot change its outcome.
-    Instruction* hdr_term = header->terminator();
-    if (hdr_term && hdr_term->opcode() == Opcode::br_if) {
-        Value* cond_val = hdr_term->operand(0);
-        Instruction* cond_inst = cond_val && cond_val->is_instruction() ? cond_val->defining_instruction() : nullptr;
-        if (cond_inst && cond_inst->parent() == header && cond_inst->operand_count() == 2) {
-            Value* lhs = cond_inst->operand(0);
-            Value* rhs = cond_inst->operand(1);
-            auto p = param_to_biv.find(lhs);
-            if (p != param_to_biv.end() && is_i64(rhs) && loop.is_loop_invariant(rhs)) {
-                const BasicIV& biv = bivs[p->second];
-                for (uint8_t sc : {uint8_t(8), uint8_t(4), uint8_t(2)}) {
-                    auto it = biv_scaled_map.find(std::make_pair(static_cast<const Value*>(biv.param), sc));
-                    if (it == biv_scaled_map.end()) continue;
-                    if (scaled_exit_compare_is_exact(biv, *cond_inst, rhs, loop, *hdr_term, sc)) {
-                        cond_inst->set_operand(0, it->second);
-                        cond_inst->set_operand(1, build_mul(b_ph, rhs, sc));
-                        changed = true;
-                    }
-                    break;
-                }
+    if (exit_cmp) {
+        Value* rhs = exit_cmp->operand(1);
+        const BasicIV& biv = bivs[param_to_biv[exit_cmp->operand(0)]];
+        for (uint8_t sc : {uint8_t(8), uint8_t(4), uint8_t(2)}) {
+            auto it = biv_scaled_map.find(std::make_pair(static_cast<const Value*>(biv.param), sc));
+            if (it == biv_scaled_map.end()) continue;
+            if (scaled_exit_compare_is_exact(biv, *exit_cmp, rhs, loop, *hdr_term, sc)) {
+                exit_cmp->set_operand(0, it->second);
+                exit_cmp->set_operand(1, build_mul(b_ph, rhs, sc));
+                changed = true;
             }
+            break;
         }
     }
     return changed;

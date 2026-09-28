@@ -252,6 +252,18 @@ RuntimeValue FunctionHandle::call_native(const std::vector<RuntimeValue>& args) 
         throw std::runtime_error("FunctionHandle::call_native: native entry is null for " + name_);
     }
 
+#if defined(BRASS_NATIVE_INVOKE_THUNKS)
+    // The entry and signature are in hand: the engine's invoke would look
+    // both up again by name, on every call from Tier 0. `engine` keeps the
+    // code alive for the call. A 256-bit vector signature takes the
+    // engine's path, which has its own convention for it.
+    if (engine && sig) {
+        bool v256 = sig->ret.is_v256();
+        for (const Type& t : sig->params) v256 = v256 || t.is_v256();
+        for (const RuntimeValue& a : args) v256 = v256 || a.is_v256();
+        if (!v256) return invoke_native_address(addr, sig->ret, sig->params.empty() ? nullptr : &sig->params, args);
+    }
+#endif
     if (engine) {
         return engine->invoke(name_, args);
     }

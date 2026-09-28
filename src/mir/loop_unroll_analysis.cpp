@@ -312,7 +312,12 @@ bool analyze_loop(
     for (size_t i = 0; i < header->param_count(); ++i) {
         const ParamAnalysis& pa = cla.params[i];
         if (pa.role == ParamRole::BasicIV || pa.role == ParamRole::DerivedIV) {
-            if (pa.type != Type::i32() && pa.type != Type::i64()) {
+            // A pointer stepped by an i64 (IVSR's pointer variables) copies
+            // like an integer one: copy k addresses `p + k*step`. It is never
+            // the variable the loop counts by.
+            const bool ptr_iv = pa.role == ParamRole::DerivedIV && pa.type.is_pointer() && !pa.is_sub &&
+                                pa.step_val && pa.step_val->type() == Type::i64();
+            if (pa.type != Type::i32() && pa.type != Type::i64() && !ptr_iv) {
                 return false;
             }
         }

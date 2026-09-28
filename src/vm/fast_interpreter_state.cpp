@@ -3,6 +3,8 @@
 // The dispatch loop lives in fast_interpreter.cpp.
 
 #include "fast_interpreter_impl.hpp"
+#include <brass/runtime/code_installer.hpp>
+#include <brass/runtime/multi_tier_pipeline.hpp>
 
 namespace brass {
 
@@ -135,9 +137,13 @@ const BytecodeFunction* FastInterpreter::get_or_compile(const Function& fn) {
     if (it != compiled_functions_.end()) {
         return it->second.get();
     }
-    // A lazy function's body is built here, by its first call
-    // (BytecodeCompiler::compile).
-    auto bfn = compiler_.compile(fn);
+    // Built ahead by the program's warmer, or, as a lazy function's body is
+    // otherwise, here by its first call (BytecodeCompiler::compile).
+    runtime::BytecodeWarmer& warmer = dispatch_table().pipeline().bytecode_warmer();
+    std::shared_ptr<const BytecodeFunction> bfn;
+    if (warmer.active()) bfn = warmer.take(fn);
+    if (!bfn) bfn = compiler_.compile(fn);
+    if (warmer.recording()) warmer.record(fn);
     const BytecodeFunction* ptr = bfn.get();
     compiled_functions_[&fn] = std::move(bfn);
     return ptr;

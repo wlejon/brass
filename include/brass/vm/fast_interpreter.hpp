@@ -322,13 +322,15 @@ private:
     std::unordered_map<std::string, int64_t> patched_consts_;
     std::unordered_map<std::string, std::string> patched_calls_;
 
-    std::unordered_map<const Function*, std::unique_ptr<BytecodeFunction>> compiled_functions_;
+    // Shared: bytecode the program's warmer built (runtime::BytecodeWarmer)
+    // is read by every interpreter of the program.
+    std::unordered_map<const Function*, std::shared_ptr<const BytecodeFunction>> compiled_functions_;
     BytecodeCompiler compiler_;
     std::unordered_map<const BytecodeFunction*, std::unique_ptr<FastFnInfo>> fn_infos_;
     uint64_t resolve_epoch_ = 1;
     // Compiled code and infos dropped while frames may still use them;
     // freed once no frame is active.
-    std::vector<std::unique_ptr<BytecodeFunction>> retired_bytecode_;
+    std::vector<std::shared_ptr<const BytecodeFunction>> retired_bytecode_;
     std::vector<std::unique_ptr<FastFnInfo>> retired_infos_;
 
     // Argument vectors for host and native calls, one per nesting level so

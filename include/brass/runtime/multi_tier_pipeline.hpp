@@ -2,6 +2,7 @@
 
 #include <brass/runtime/tiering.hpp>
 #include <brass/runtime/background_compiler.hpp>
+#include <brass/runtime/bytecode_warmer.hpp>
 #include <brass/runtime/code_installer.hpp>
 #include <brass/codegen/baseline_jit.hpp>
 #include <brass/mir/module.hpp>
@@ -112,6 +113,11 @@ public:
     // The default program's is BackgroundCompiler::instance(); an owned
     // program's is its own, created on first use and stopped with it.
     BackgroundCompiler& background_compiler();
+
+    // Tier-0 bytecode built ahead of first calls, and the first-use order
+    // that tells a later run what to build (bytecode_warmer.hpp). Stopped
+    // with the program, or with the module it was warming.
+    BytecodeWarmer& bytecode_warmer() noexcept { return warmer_; }
     // Drops the queued background compiles and joins the workers, once the
     // one in flight has installed its code; the next tier-up starts them
     // again. Nothing when no background compile was ever queued. For a host
@@ -438,6 +444,7 @@ private:
     // Testing only (set_tier1_compile_hook, set_tier1_install_hook).
     std::function<void(std::string_view)> tier1_compile_hook_;
     std::function<void(std::string_view)> tier1_install_hook_;
+    BytecodeWarmer warmer_;
 };
 
 } // namespace brass::runtime
