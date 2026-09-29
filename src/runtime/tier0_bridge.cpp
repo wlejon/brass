@@ -123,10 +123,13 @@ std::string bridge_entry_symbol(size_t n) { return "brass_tier0_bridge_entry" + 
 bool bridgeable(Type t) {
     switch (t.kind()) {
         case TypeKind::I8:
+        case TypeKind::I16:
         case TypeKind::I32:
         case TypeKind::I64:
         case TypeKind::Ptr:
         case TypeKind::F64:
+        case TypeKind::GCRef:
+        case TypeKind::Tagged:
             return true;
         default:
             return false;
@@ -136,6 +139,7 @@ bool bridgeable(Type t) {
 // Raw bits as the value the interpreter holds for a value of type `t`.
 RuntimeValue materialize(Type t, uint64_t bits) {
     if (t.kind() == TypeKind::I8) bits &= 0xFFull;
+    if (t.kind() == TypeKind::I16) bits &= 0xFFFFull;
     if (t.kind() == TypeKind::I32) bits &= 0xFFFFFFFFull;
     return RuntimeValue::from_bits(t, bits);
 }
@@ -239,9 +243,11 @@ void* MultiTierPipeline::tier0_bridge(std::string_view name) {
         Value* p = b.add_block_param(entry, t);
         switch (t.kind()) {
             case TypeKind::I8: p = b.build_zext_i64(p); break;
+            case TypeKind::I16: p = b.build_sext_i64(p); break;
             case TypeKind::I32: p = b.build_sext_i64(p); break;
             // (Named result-type first: bitcast_i64_f64 makes an i64.)
             case TypeKind::F64: p = b.build_bitcast_i64_f64(p); break;
+            case TypeKind::Tagged: p = b.build_bitcast_i64_tagged(p); break;
             default: break;
         }
         call_args.push_back(p);
@@ -254,6 +260,7 @@ void* MultiTierPipeline::tier0_bridge(std::string_view name) {
         case TypeKind::I8: b.build_ret(b.build_trunc_i8(r)); break;
         case TypeKind::I32: b.build_ret(b.build_trunc_i32(r)); break;
         case TypeKind::F64: b.build_ret(b.build_bitcast_f64_i64(r)); break;
+        case TypeKind::Tagged: b.build_ret(b.build_bitcast_tagged_i64(r)); break;
         default: b.build_ret(r); break;
     }
     bf->rebuild_cfg_predecessors();

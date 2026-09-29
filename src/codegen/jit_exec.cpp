@@ -780,13 +780,7 @@ void JitExecutionEngine::register_eh_frame(uint8_t* eh_frame) {
     // can run the code.
     const Target host = Target::host();
     if (target_.is_aarch64() != host.is_aarch64() || target_.is_windows()) return;
-#if defined(__APPLE__) && defined(__aarch64__)
-    // On Apple Silicon (ARM64), system libunwind enforces Pointer Authentication (PAC)
-    // verification when unwinding through DWARF FDEs. Registering unauthenticated JIT
-    // FDEs via __register_frame causes libunwind to fault with SIGTRAP (BRK #0xc471).
-    (void)eh_frame;
-    return;
-#elif defined(__APPLE__)
+#if defined(__APPLE__)
     // Apple's libunwind registers a single FDE per call.
     uint8_t* p = eh_frame;
     for (;;) {
@@ -816,13 +810,9 @@ void JitExecutionEngine::register_eh_frame(uint8_t* eh_frame) {
 
 void JitExecutionEngine::LoadRegistrations::release_eh_frame() noexcept {
 #if !defined(_WIN32)
-#if defined(__APPLE__) && defined(__aarch64__)
-    // No-op matching register_eh_frame
-#else
     for (auto it = fdes.rbegin(); it != fdes.rend(); ++it) {
         __deregister_frame(*it);
     }
-#endif
 #endif
     fdes.clear();
 }
