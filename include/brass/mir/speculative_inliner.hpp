@@ -15,6 +15,11 @@ struct SpeculativeInlinerOptions {
     size_t max_polymorphic_degree = 2;
     size_t max_callee_instruction_count = 120;
     size_t min_invocations = 1;
+    // Whether a call with no site id (or one the vector has no slot for)
+    // may take the slot at its ordinal position among the function's calls.
+    // Off for a copy whose calls are not the profiled function's in order
+    // (an OSR entry: the loop's region of it, entered mid-body).
+    bool positional_slots = true;
 };
 
 // Speculatively devirtualizes and optionally inlines indirect/dynamic calls within a single function

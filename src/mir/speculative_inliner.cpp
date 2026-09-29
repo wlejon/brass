@@ -3,6 +3,7 @@
 #include <brass/mir/verifier.hpp>
 #include <brass/mir/uses.hpp>
 #include <algorithm>
+#include <string_view>
 #include <vector>
 #include <unordered_set>
 
@@ -476,10 +477,10 @@ bool run_speculative_devirtualization(
                 if (sid != 0) {
                     slot = tfv->find_slot(sid);
                 }
-                if (!slot) {
+                if (!slot && opts.positional_slots) {
                     slot = tfv->find_slot(call_counter);
                 }
-                if (!slot) {
+                if (!slot && opts.positional_slots) {
                     slot = tfv->find_slot(call_counter - 1);
                 }
                 if (!slot || slot->total_invocations < opts.min_invocations) {
@@ -526,8 +527,27 @@ bool run_speculative_devirtualization(
     for (Function* fn : mod.functions()) {
         if (!fn) continue;
         const runtime::TypeFeedbackVector* tfv = registry.find(fn->name());
+        if (tfv) {
+            changed |= run_speculative_devirtualization(*fn, mod, tfv, opts);
+            continue;
+        }
+        // An OSR entry (`<fn>.osr<header>`, OsrCoordinator::copy_entry) is
+        // a copy of <fn>'s loop and carries its call sites' ids: the
+        // feedback is <fn>'s. Without this the entry of a hot loop never
+        // devirtualized a call the whole-function compile of the same code
+        // did. Matched by site id only, since the entry's calls start at
+        // the loop, not at the top of the function.
+        const std::string_view name = fn->name();
+        const size_t osr = name.rfind(".osr");
+        if (osr == std::string_view::npos || osr + 4 == name.size()) continue;
+        bool digits = true;
+        for (size_t i = osr + 4; i < name.size(); ++i) digits = digits && name[i] >= '0' && name[i] <= '9';
+        if (!digits) continue;
+        tfv = registry.find(name.substr(0, osr));
         if (!tfv) continue;
-        changed |= run_speculative_devirtualization(*fn, mod, tfv, opts);
+        SpeculativeInlinerOptions by_site = opts;
+        by_site.positional_slots = false;
+        changed |= run_speculative_devirtualization(*fn, mod, tfv, by_site);
     }
     return changed;
 }
