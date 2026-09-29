@@ -203,7 +203,14 @@ bool JitMemoryBlock::register_unwind_info(size_t offset, uint32_t count) {
     return true;
 #elif !defined(_WIN32)
     (void)count;
-#if defined(__APPLE__)
+#if defined(__APPLE__) && defined(__aarch64__)
+    // On Apple Silicon (ARM64), system libunwind enforces Pointer Authentication (PAC)
+    // verification when unwinding through DWARF FDEs. Registering unauthenticated JIT
+    // FDEs via __register_frame causes libunwind to fault with SIGTRAP (BRK #0xc471).
+    // Native frame records (x29/x30) are mandated by the Apple ARM64 ABI and used instead.
+    unwind_table_ = table;
+    return true;
+#elif defined(__APPLE__)
     // Apple's libunwind registers a single FDE per call.
     uint8_t* p = table;
     for (;;) {
@@ -235,7 +242,9 @@ void JitMemoryBlock::unregister_unwind_info() noexcept {
     debug::unregister_jit_unwind_table(unwind_table_);
     RtlDeleteFunctionTable(reinterpret_cast<PRUNTIME_FUNCTION>(unwind_table_));
 #elif !defined(_WIN32)
-#if defined(__APPLE__)
+#if defined(__APPLE__) && defined(__aarch64__)
+    // No-op matching register_unwind_info
+#elif defined(__APPLE__)
     uint8_t* p = static_cast<uint8_t*>(unwind_table_);
     for (;;) {
         uint32_t len = 0;

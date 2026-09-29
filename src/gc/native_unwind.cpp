@@ -494,38 +494,14 @@ CfiStep step_by_cfi(NativeUnwindFrame& f, uintptr_t lookup) noexcept {
 
 bool brass_unwind_step(NativeUnwindFrame& f, bool ip_is_return_address) noexcept {
     if (f.ip == 0) return false;
-    const uintptr_t lookup = ip_is_return_address ? f.ip - 1 : f.ip;
 #if defined(__APPLE__)
-    unw_context_t uc;
-    unw_cursor_t cur;
-    if (unw_getcontext(&uc) != 0 || unw_init_local(&cur, &uc) != 0) return false;
-    // The IP last: setting it looks up the unwind information of the code
-    // there, at the call itself (its row is the return address's).
-    if (unw_set_reg(&cur, UNW_REG_SP, f.sp) != 0 || unw_set_reg(&cur, kFpReg, f.fp) != 0 ||
-        unw_set_reg(&cur, UNW_REG_IP, lookup) != 0) {
-        return false;
-    }
-    unw_proc_info_t info;
-    if (unw_get_proc_info(&cur, &info) != 0 || info.start_ip == 0) {
-        NativeUnwindFrame g = f;
-        if (!step_by_frame_record(g)) return false;
-        f = g;
-        return true;
-    }
-    if (unw_step(&cur) <= 0) return false;
-    unw_word_t ip = 0, sp = 0, fp = 0;
-    if (unw_get_reg(&cur, UNW_REG_IP, &ip) != 0 || unw_get_reg(&cur, UNW_REG_SP, &sp) != 0 ||
-        unw_get_reg(&cur, kFpReg, &fp) != 0 || ip == 0 || sp <= f.sp) {
-        return false;
-    }
-    f.ip = static_cast<uintptr_t>(ip);
-#if defined(__aarch64__)
-    f.ip &= (uintptr_t{1} << 48) - 1;
-#endif
-    f.sp = static_cast<uintptr_t>(sp);
-    f.fp = static_cast<uintptr_t>(fp);
+    (void)ip_is_return_address;
+    NativeUnwindFrame g = f;
+    if (!step_by_frame_record(g)) return false;
+    f = g;
     return true;
 #else
+    const uintptr_t lookup = ip_is_return_address ? f.ip - 1 : f.ip;
     NativeUnwindFrame g = f;
     switch (step_by_cfi(g, lookup)) {
     case CfiStep::Stepped: f = g; return true;
@@ -573,6 +549,24 @@ _Unwind_Reason_Code capture_one(_Unwind_Context* ctx, void* arg) {
 } // namespace
 
 __attribute__((noinline)) bool brass_capture_frame(NativeUnwindFrame& f, unsigned skip) noexcept {
+#if defined(__APPLE__) && defined(__aarch64__)
+    // On Apple ARM64, the ABI strictly mandates frame records (x29).
+    // Avoid libunwind cursor APIs which trigger Pointer Authentication (PAC)
+    // traps (BRK #0xc471) when querying synthesized frames.
+    const auto* fp = static_cast<const uintptr_t*>(__builtin_frame_address(0));
+    if (!fp || (reinterpret_cast<uintptr_t>(fp) % 8) != 0) return false;
+    if (!fp[0] || (fp[0] % 8) != 0 || fp[0] <= reinterpret_cast<uintptr_t>(fp)) return false;
+
+    NativeUnwindFrame cur;
+    cur.fp = fp[0];
+    cur.ip = fp[1] & ((uintptr_t{1} << 48) - 1);
+    cur.sp = reinterpret_cast<uintptr_t>(fp) + 16;
+    for (unsigned i = 0; i < skip; ++i) {
+        if (!step_by_frame_record(cur)) return false;
+    }
+    f = cur;
+    return true;
+#else
     // Frame 0 is this function, 1 its caller, 2 that caller's caller.
     Capture c;
     c.want = skip + 2;
@@ -580,6 +574,7 @@ __attribute__((noinline)) bool brass_capture_frame(NativeUnwindFrame& f, unsigne
     if (!c.found) return false;
     f = c.out;
     return true;
+#endif
 }
 
 bool brass_ip_in_image(uintptr_t ip) noexcept {
