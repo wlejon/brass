@@ -29,7 +29,12 @@
 #include <brass/runtime/exception.hpp>
 #include <brass/gc/native_frames.hpp>
 
-#if !defined(_WIN32) && (defined(__x86_64__) || defined(__aarch64__))
+// On Apple Silicon (ARM64), system libunwind enforces Pointer Authentication (PAC)
+// during cursor stepping (unw_step), which faults with BRK #0xc471 when crossing
+// unauthenticated JIT frames. On that platform, the throw stays a C++ exception
+// (BrassException), which is carried through frames by the C++ personality routine
+// (brass_sysv_personality) and caught at landing pads or host try-catch blocks.
+#if !defined(_WIN32) && (defined(__x86_64__) || defined(__aarch64__)) && !(defined(__APPLE__) && defined(__aarch64__))
 #define BRASS_UNWIND_RAISE 1
 #include <cstdint>
 #include <cstring>
@@ -265,7 +270,7 @@ bool brass_seh_raise_above(HostValue val, const void* deopted_entry, uintptr_t s
     brass_jump_to_landing_pad(target.ip, target.fp, target.sp, val, target.regs);
 }
 
-#elif !(defined(_WIN32) && (defined(_M_X64) || defined(__x86_64__) || defined(_M_ARM64) || defined(__aarch64__)))
+#elif (defined(__APPLE__) && defined(__aarch64__)) || !(defined(_WIN32) && (defined(_M_X64) || defined(__x86_64__) || defined(_M_ARM64) || defined(__aarch64__)))
 
 // No unwinder walk here (and no Win64 SEH): the throw stays a C++ exception.
 bool brass_seh_raise(HostValue) {
