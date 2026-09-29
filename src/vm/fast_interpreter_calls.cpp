@@ -502,7 +502,11 @@ RuntimeValue FastInterpreter::run(const Function& fn, const std::vector<RuntimeV
 
     auto* handle = dispatch_table().find(fn.name());
     if (handle && handle->mir_function() == &fn && handle->native_entry() != nullptr) {
-        return handle->call_native(args);
+        try {
+            return handle->call_native(args);
+        } catch (const runtime::BrassException& be) {
+            throw InterpreterThrownException(RuntimeValue::from_bits(Type::i64(), be.value().raw()));
+        }
     }
 
     const BytecodeFunction* bfn = get_or_compile(fn);
@@ -510,9 +514,17 @@ RuntimeValue FastInterpreter::run(const Function& fn, const std::vector<RuntimeV
     info.tiering(dispatch_table_).record_invocation();
 
     if (handle && handle->mir_function() == &fn && handle->native_entry() != nullptr) {
-        return handle->call_native(args);
+        try {
+            return handle->call_native(args);
+        } catch (const runtime::BrassException& be) {
+            throw InterpreterThrownException(RuntimeValue::from_bits(Type::i64(), be.value().raw()));
+        }
     }
-    return enter_frame(info, args, 0, nullptr);
+    try {
+        return enter_frame(info, args, 0, nullptr);
+    } catch (const runtime::BrassException& be) {
+        throw InterpreterThrownException(RuntimeValue::from_bits(Type::i64(), be.value().raw()));
+    }
 }
 
 RuntimeValue FastInterpreter::run(const BytecodeFunction& fn) {
@@ -522,7 +534,11 @@ RuntimeValue FastInterpreter::run(const BytecodeFunction& fn) {
 RuntimeValue FastInterpreter::run(const BytecodeFunction& fn, const std::vector<RuntimeValue>& args) {
     runtime::ProgramScope program_scope(dispatch_table());
     release_retired();
-    return enter_frame(fn_info(fn), args, 0, nullptr);
+    try {
+        return enter_frame(fn_info(fn), args, 0, nullptr);
+    } catch (const runtime::BrassException& be) {
+        throw InterpreterThrownException(RuntimeValue::from_bits(Type::i64(), be.value().raw()));
+    }
 }
 
 RuntimeValue FastInterpreter::run(std::string_view fn_name) {

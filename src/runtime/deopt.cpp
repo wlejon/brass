@@ -175,6 +175,9 @@ void* call_deopt_handler(const DeoptHandlerFn& handler, const DeoptFrame& frame,
     const HostValue val(outcome.value);
     brass_set_current_exception(val);
     brass_seh_raise_above(val, code_entry, outcome.stack_limit);
+    if (brass_innermost_entry_scope()) {
+        throw BrassException(val);
+    }
     std::exception_ptr ep = std::move(outcome.fallback);
     outcome = HandlerOutcome{};
     if (!ep) {

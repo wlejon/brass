@@ -561,7 +561,7 @@ __attribute__((noinline)) bool brass_capture_frame(NativeUnwindFrame& f, unsigne
     cur.fp = fp[0];
     cur.ip = fp[1] & ((uintptr_t{1} << 48) - 1);
     cur.sp = reinterpret_cast<uintptr_t>(fp) + 16;
-    for (unsigned i = 0; i < skip; ++i) {
+    for (unsigned i = 0; i <= skip; ++i) {
         if (!step_by_frame_record(cur)) return false;
     }
     f = cur;

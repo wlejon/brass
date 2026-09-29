@@ -73,6 +73,9 @@ BRASS_BRIDGE_NOINLINE uint64_t bridge_run(Tier0Bridge* ctx, uintptr_t caller_rbp
 [[noreturn]] BRASS_BRIDGE_NOINLINE void bridge_reraise(bool from_tier0, RuntimeValue tier0_value, HostValue bits) {
     brass_set_current_exception(bits);
     brass_seh_raise(bits); // does not return when a pad catches it
+    if (brass_innermost_entry_scope()) {
+        throw BrassException(bits);
+    }
     if (from_tier0) throw InterpreterThrownException(tier0_value);
     throw BrassException(bits);
 }

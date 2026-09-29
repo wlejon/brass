@@ -6,6 +6,7 @@
 // per thread by pthread_jit_write_protect_np, so each thread still sees it as
 // either writable or executable, never both.)
 #include <brass/codegen/jit_exec.hpp>
+#include <brass/codegen/jit_unwind_apple.hpp>
 #include <brass/debug/jit_unwind_registry.hpp>
 #include <algorithm>
 #include <cstring>
@@ -204,6 +205,12 @@ bool JitMemoryBlock::register_unwind_info(size_t offset, uint32_t count) {
 #elif !defined(_WIN32)
     (void)count;
 #if defined(__APPLE__)
+    if (has_apple_dynamic_unwind()) {
+        if (register_apple_dynamic_unwind(ptr_, offset, table, size_ - offset)) {
+            unwind_table_ = ptr_;
+            return true;
+        }
+    }
     // Apple's libunwind registers a single FDE per call.
     uint8_t* p = table;
     for (;;) {
@@ -236,6 +243,11 @@ void JitMemoryBlock::unregister_unwind_info() noexcept {
     RtlDeleteFunctionTable(reinterpret_cast<PRUNTIME_FUNCTION>(unwind_table_));
 #elif !defined(_WIN32)
 #if defined(__APPLE__)
+    if (has_apple_dynamic_unwind()) {
+        unregister_apple_dynamic_unwind(unwind_table_);
+        unwind_table_ = nullptr;
+        return;
+    }
     uint8_t* p = static_cast<uint8_t*>(unwind_table_);
     for (;;) {
         uint32_t len = 0;

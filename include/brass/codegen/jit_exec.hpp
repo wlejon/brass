@@ -405,7 +405,7 @@ private:
     debug::JitTier code_tier_ = debug::JitTier::Optimized;
 
     void register_seh_tables(const object::ObjectFile& obj, uint8_t* base_ptr);
-    void register_eh_frame(uint8_t* eh_frame);
+    void register_eh_frame(uint8_t* eh_frame, size_t eh_size = 0);
 };
 
 } // namespace brass::codegen

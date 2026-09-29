@@ -13,6 +13,7 @@
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/parallel_runtime.hpp>
 #include <brass/debug/jit_unwind_registry.hpp>
+#include <brass/codegen/jit_unwind_apple.hpp>
 #include <algorithm>
 #include <mutex>
 #include <vector>
@@ -644,16 +645,6 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
         }
     }
 
-    // Windows SEH Registration
-    if (target_.is_windows()) {
-        register_seh_tables(working_obj, module_base);
-    } else {
-        auto eh_it = symbol_table_.find(".eh_frame");
-        if (eh_it != symbol_table_.end() && eh_it->second) {
-            register_eh_frame(static_cast<uint8_t*>(eh_it->second));
-        }
-    }
-
     // Register and relocate Stack Maps
     stack_maps_ = working_obj.stack_maps;
     int32_t text_idx = working_obj.get_section_index(".text");
@@ -683,6 +674,18 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
         }
     } else {
         regs_.text_base = module_base;
+    }
+
+    // Windows SEH / DWARF .eh_frame Registration
+    if (target_.is_windows()) {
+        register_seh_tables(working_obj, module_base);
+    } else {
+        auto eh_it = symbol_table_.find(".eh_frame");
+        if (eh_it != symbol_table_.end() && eh_it->second) {
+            const auto* eh_sec = working_obj.get_section(".eh_frame");
+            size_t eh_size = eh_sec ? eh_sec->data.size() : 0;
+            register_eh_frame(static_cast<uint8_t*>(eh_it->second), eh_size);
+        }
     }
     // Loading code does not touch any thread's active maps (a background
     // compile would retarget the compiling thread's GC at the new module
@@ -773,7 +776,7 @@ extern "C" void __register_frame(void*);
 extern "C" void __deregister_frame(void*);
 #endif
 
-void JitExecutionEngine::register_eh_frame(uint8_t* eh_frame) {
+void JitExecutionEngine::register_eh_frame(uint8_t* eh_frame, size_t eh_size) {
     regs_.release_eh_frame();
 #if !defined(_WIN32)
     // Frames are only described to this process's unwinder when this process
@@ -781,6 +784,13 @@ void JitExecutionEngine::register_eh_frame(uint8_t* eh_frame) {
     const Target host = Target::host();
     if (target_.is_aarch64() != host.is_aarch64() || target_.is_windows()) return;
 #if defined(__APPLE__)
+    if (has_apple_dynamic_unwind()) {
+        const void* code_start = regs_.text_base ? regs_.text_base : (code_mem_.is_valid() ? code_mem_.data() : nullptr);
+        size_t code_size = code_mem_.is_valid() ? code_mem_.size() : 0;
+        if (code_start && code_size > 0 && register_apple_dynamic_unwind(code_start, code_size, eh_frame, eh_size)) {
+            return;
+        }
+    }
     // Apple's libunwind registers a single FDE per call.
     uint8_t* p = eh_frame;
     for (;;) {
@@ -799,17 +809,24 @@ void JitExecutionEngine::register_eh_frame(uint8_t* eh_frame) {
         p += 4 + len;
     }
 #else
+    (void)eh_size;
     // libgcc takes the whole zero-terminated section.
     __register_frame(eh_frame);
     regs_.fdes.push_back(eh_frame);
 #endif
 #else
     (void)eh_frame;
+    (void)eh_size;
 #endif
 }
 
 void JitExecutionEngine::LoadRegistrations::release_eh_frame() noexcept {
 #if !defined(_WIN32)
+#if defined(__APPLE__)
+    if (text_base) {
+        unregister_apple_dynamic_unwind(text_base);
+    }
+#endif
     for (auto it = fdes.rbegin(); it != fdes.rend(); ++it) {
         __deregister_frame(*it);
     }

@@ -65,7 +65,11 @@ RuntimeValue Interpreter::execute_function(const Function& fn, const std::vector
     if (handle && handle->mir_function() == &fn) {
         void* native_code = handle->native_entry();
         if (native_code != nullptr) {
-            return handle->call_native(args);
+            try {
+                return handle->call_native(args);
+            } catch (const runtime::BrassException& be) {
+                throw InterpreterThrownException(RuntimeValue::from_bits(Type::i64(), be.value().raw()));
+            }
         }
     }
 
@@ -75,7 +79,11 @@ RuntimeValue Interpreter::execute_function(const Function& fn, const std::vector
     if (handle && handle->mir_function() == &fn) {
         void* native_code = handle->native_entry();
         if (native_code != nullptr) {
-            return handle->call_native(args);
+            try {
+                return handle->call_native(args);
+            } catch (const runtime::BrassException& be) {
+                throw InterpreterThrownException(RuntimeValue::from_bits(Type::i64(), be.value().raw()));
+            }
         }
     }
 
