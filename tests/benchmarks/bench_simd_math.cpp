@@ -18,7 +18,7 @@ namespace {
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((optimize("no-tree-vectorize")))
 #endif
-float native_dot4_scalar(const float* a, const float* b, int64_t count) {
+BRASS_BENCH_NATIVE float native_dot4_scalar(const float* a, const float* b, int64_t count) {
     float sum = 0.0f;
     for (int64_t i = 0; i < count; ++i) {
         int64_t idx = i * 4;
@@ -33,7 +33,7 @@ float native_dot4_scalar(const float* a, const float* b, int64_t count) {
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((optimize("no-tree-vectorize")))
 #endif
-void native_vec3_math_scalar(const float* a, const float* b, float* out, int64_t count, float half_val) {
+BRASS_BENCH_NATIVE void native_vec3_math_scalar(const float* a, const float* b, float* out, int64_t count, float half_val) {
     for (int64_t i = 0; i < count; ++i) {
         int64_t idx = i * 4;
         float x = a[idx + 0];
@@ -51,7 +51,7 @@ void native_vec3_math_scalar(const float* a, const float* b, float* out, int64_t
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((optimize("no-tree-vectorize")))
 #endif
-void native_matmul4x4_scalar(const float* a, const float* b, float* c, int64_t count) {
+BRASS_BENCH_NATIVE void native_matmul4x4_scalar(const float* a, const float* b, float* c, int64_t count) {
     for (int64_t m = 0; m < count; ++m) {
         const float* ma = a + m * 16;
         const float* mb = b + m * 16;
@@ -341,7 +341,7 @@ void run_simd_math_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
         };
 
         auto paired = measure_paired_multi_placement(DEFAULT_BENCH_REPETITIONS, run_scalar, make_jit_runner);
-        results.push_back(make_paired_result("simd_dot4", "SIMD 4D Dot Product (f32x4 vs scalar)", iters, paired, ratchet.get_ratio("simd_dot4", 0.50)));
+        results.push_back(make_paired_result("simd_dot4", "SIMD 4D Dot Product (f32x4 vs scalar)", iters, paired));
         BenchmarkReporter::print_row(results.back());
     }
 
@@ -382,7 +382,7 @@ void run_simd_math_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
         };
 
         auto paired = measure_paired_multi_placement(DEFAULT_BENCH_REPETITIONS, run_scalar, make_jit_runner);
-        results.push_back(make_paired_result("simd_vec3_math", "SIMD 3D Vector Math (Normalize+Lerp)", iters, paired, ratchet.get_ratio("simd_vec3_math", 0.85)));
+        results.push_back(make_paired_result("simd_vec3_math", "SIMD 3D Vector Math (Normalize+Lerp)", iters, paired));
         BenchmarkReporter::print_row(results.back());
     }
 
@@ -420,7 +420,7 @@ void run_simd_math_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
         };
 
         auto paired = measure_paired_multi_placement(DEFAULT_BENCH_REPETITIONS, run_scalar, make_jit_runner);
-        results.push_back(make_paired_result("simd_matmul4x4", "SIMD 4x4 MatMul (f32x4 vs scalar loop)", iters, paired, ratchet.get_ratio("simd_matmul4x4", 0.50)));
+        results.push_back(make_paired_result("simd_matmul4x4", "SIMD 4x4 MatMul (f32x4 vs scalar loop)", iters, paired));
         BenchmarkReporter::print_row(results.back());
     }
 }

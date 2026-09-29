@@ -14,6 +14,7 @@
 #include <cassert>
 #include <ctime>
 #include <cctype>
+#include <cstring>
 
 #include <algorithm>
 
@@ -72,6 +73,26 @@ inline void ClobberMemory() {
     #endif
 #endif
 }
+
+// ============================================================================
+// Fixed placement for native baselines
+// ============================================================================
+
+// A native baseline's loop runs at whatever alignment the linker gives it,
+// and an edit to any code linked before it moves that: a relink that changed
+// only a header shifted matmul_i64_32 by 14-16%. The baselines are therefore
+// out-of-line and, under MSVC, in their own grouped section, which the
+// linker sorts ahead of ordinary code (.text$mn) at the page-aligned start of
+// .text, so their addresses depend only on the baselines themselves. GCC and
+// Clang get 64-byte function alignment instead. (The JIT side needs none of
+// this: it is measured at several code placements and the median taken.)
+#if defined(_MSC_VER)
+#define BRASS_BENCH_SECTION __declspec(code_seg(".text$bnat"))
+#define BRASS_BENCH_NATIVE __declspec(noinline) BRASS_BENCH_SECTION
+#else
+#define BRASS_BENCH_SECTION __attribute__((aligned(64)))
+#define BRASS_BENCH_NATIVE __attribute__((noinline)) BRASS_BENCH_SECTION
+#endif
 
 // ============================================================================
 // Build Type & Environment Utilities
@@ -142,11 +163,14 @@ struct TimingStats {
         : TimingStats(std::vector<double>(list)) {}
 };
 
+// One benchmark's outcome. `ratio` is the number the ratchet gates: a median
+// over repetitions, lower-is-better unless the key's RatchetPolicy says
+// otherwise (see bench_ratchet.hpp).
 struct BenchmarkResult {
     std::string key; // Benchmark identifier, e.g. "fib", "matmul_i64_32_naive"
     std::string name;
     size_t iterations = 0;
-    size_t repetitions = 5;
+    size_t repetitions = 0;
     double native_ms = 0.0;
     double native_min_ms = 0.0;
     double native_max_ms = 0.0;
@@ -162,8 +186,6 @@ struct BenchmarkResult {
     double ratio_vec = 0.0; // vs vectorized native (median)
     double ratio_vec_min = 0.0;
     double ratio_vec_max = 0.0;
-    double target_ratio = 0.0; // Golden ratio from ratchet
-    bool passes_bar = true;
     std::string notes;
 };
 
@@ -171,11 +193,14 @@ inline size_t default_bench_placements() noexcept {
     return is_debug_build() ? 1 : 5;
 }
 
+// Repetitions per benchmark. Each repetition is itself the median over the
+// code placements, so the reported ratio is a median of medians; 7 keeps a
+// single slow repetition (a context switch, a frequency dip) from moving it.
 inline size_t default_bench_repetitions() noexcept {
-    return is_debug_build() ? 1 : 5;
+    return is_debug_build() ? 1 : 7;
 }
 
-constexpr size_t DEFAULT_BENCH_REPETITIONS = 5;
+constexpr size_t DEFAULT_BENCH_REPETITIONS = 7;
 
 template <typename F>
 inline TimingStats measure_repetitions(size_t repetitions, F&& func) {
@@ -387,311 +412,13 @@ inline TripletRepetitionResult measure_triplet_repetitions(size_t repetitions, F
     return measure_triplet_multi_placement(repetitions, std::forward<F1>(fn_vec), std::forward<F2>(fn_scalar), [&](size_t) { return fn_jit; });
 }
 
-class RatchetManager;
-
 inline BenchmarkResult make_paired_result(
     const std::string& key,
     const std::string& name,
     size_t iterations,
     const PairedRepetitionResult& paired,
-    double target_ratio,
     const std::string& notes = ""
-);
-
-inline BenchmarkResult make_paired_result(
-    const std::string& key,
-    const std::string& name,
-    size_t iterations,
-    const PairedRepetitionResult& paired,
-    const RatchetManager& ratchet,
-    double default_target = 1.30,
-    const std::string& notes = ""
-);
-
-inline BenchmarkResult make_triplet_result(
-    const std::string& key,
-    const std::string& name,
-    size_t iterations,
-    const TripletRepetitionResult& triplet,
-    double target_ratio,
-    const std::string& notes = ""
-);
-
-inline BenchmarkResult make_triplet_result(
-    const std::string& key,
-    const std::string& name,
-    size_t iterations,
-    const TripletRepetitionResult& triplet,
-    const RatchetManager& ratchet,
-    double default_target = 1.30,
-    const std::string& notes = ""
-);
-
-// ============================================================================
-// Performance Ratchet Manager
-// ============================================================================
-
-class RatchetManager {
-public:
-    static RatchetManager*& active() {
-        static RatchetManager* s_active = nullptr;
-        return s_active;
-    }
-
-    static RatchetManager defaults() {
-        RatchetManager rm;
-        rm.ratios_ = {
-            {"cheney_gc", 1.35},
-            {"collatz", 1.20},
-            {"compile_speed", 1000.00},
-            // FastInterpreter time over Oracle time (lower is better).
-            {"fast_interp_collatz_1000", 0.08},
-            {"fast_interp_fib_iter_40", 0.12},
-            {"fast_interp_fib_rec_22", 0.22},
-            {"fast_interp_matmul_32x32", 0.12},
-            {"fast_interp_prime_sieve_100k", 0.10},
-            {"fib", 2.50},
-            {"gc_model_speedup", 1.25},
-            {"icache", 0.80},
-            {"linked_list", 0.95},
-            {"matmul_f64_32_reassoc_naive", 1.25},
-            {"matmul_f64_32_reassoc_preopt", 1.25},
-            {"matmul_f64_32_strict_naive", 3.30},
-            {"matmul_f64_32_strict_preopt", 3.30},
-            {"matmul_f64_64_reassoc_naive", 1.05},
-            {"matmul_f64_64_reassoc_preopt", 1.05},
-            {"matmul_f64_64_strict_naive", 2.50},
-            {"matmul_f64_64_strict_preopt", 2.50},
-            {"matmul_i64_32_naive", 1.45},
-            {"matmul_i64_32_preopt", 1.45},
-            {"matmul_i64_64_naive", 1.45},
-            {"matmul_i64_64_preopt", 1.45},
-            {"nanbox", 1.15},
-            {"shapes", 1.35},
-            {"sieve", 1.35},
-            {"simd_dot4", 0.50},
-            {"simd_matmul4x4", 0.50},
-            {"simd_vec3_math", 2.20}
-        };
-        return rm;
-    }
-
-    bool has_ratio(const std::string& key) const {
-        return ratios_.find(key) != ratios_.end();
-    }
-
-    static std::string find_ratchet_file(const std::string& explicit_path = "") {
-        if (!explicit_path.empty()) {
-            std::ifstream f(explicit_path);
-            if (f.good()) return explicit_path;
-        }
-#if defined(BRASS_BENCH_RATCHET_PATH)
-        {
-            std::ifstream f(BRASS_BENCH_RATCHET_PATH);
-            if (f.good()) return BRASS_BENCH_RATCHET_PATH;
-        }
-#endif
-        const std::vector<std::string> candidates = {
-            "bench/ratchet.json",
-            "../bench/ratchet.json",
-            "../../bench/ratchet.json"
-        };
-        for (const auto& path : candidates) {
-            std::ifstream f(path);
-            if (f.good()) return path;
-        }
-        return "bench/ratchet.json";
-    }
-
-    bool load(const std::string& filepath) {
-        std::ifstream file(filepath);
-        if (!file.is_open()) {
-            return false;
-        }
-        std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-        file.close();
-
-        size_t pos = 0;
-        while (pos < content.size()) {
-            size_t quote_start = content.find('"', pos);
-            if (quote_start == std::string::npos) break;
-            size_t quote_end = content.find('"', quote_start + 1);
-            if (quote_end == std::string::npos) break;
-            std::string key = content.substr(quote_start + 1, quote_end - quote_start - 1);
-
-            size_t colon_pos = content.find(':', quote_end);
-            if (colon_pos == std::string::npos) break;
-
-            size_t val_start = colon_pos + 1;
-            while (val_start < content.size() && (std::isspace(static_cast<unsigned char>(content[val_start])) || content[val_start] == '\r' || content[val_start] == '\n')) {
-                val_start++;
-            }
-
-            size_t val_end = val_start;
-            while (val_end < content.size() && (std::isdigit(static_cast<unsigned char>(content[val_end])) || content[val_end] == '.' || content[val_end] == '-' || content[val_end] == '+' || content[val_end] == 'e' || content[val_end] == 'E')) {
-                val_end++;
-            }
-
-            if (val_end > val_start) {
-                std::string num_str = content.substr(val_start, val_end - val_start);
-                try {
-                    double val = std::stod(num_str);
-                    ratios_[key] = val;
-                } catch (...) {}
-            }
-            pos = val_end;
-        }
-        return !ratios_.empty();
-    }
-
-    // Per-platform goldens. The ratios compare brass against native code the
-    // host compiler built, so a baseline pinned under MSVC need not hold
-    // against GCC or Clang: bench/ratchet.<platform>.json, when present,
-    // overrides the keys it names, and --update-ratchet writes those keys
-    // back to it and the rest to ratchet.json.
-    static const char* platform_name() {
-#if defined(_WIN32)
-        return "windows";
-#elif defined(__APPLE__)
-        return "macos";
-#else
-        return "linux";
-#endif
-    }
-
-    static std::string platform_overlay_path(const std::string& base_path) {
-        const std::string ext = ".json";
-        std::string stem = base_path;
-        if (stem.size() >= ext.size() && stem.compare(stem.size() - ext.size(), ext.size(), ext) == 0) {
-            stem.resize(stem.size() - ext.size());
-        }
-        return stem + "." + platform_name() + ext;
-    }
-
-    bool load_overlay(const std::string& filepath) {
-        RatchetManager overlay;
-        if (!overlay.load(filepath)) return false;
-        for (const auto& [key, val] : overlay.ratios_) {
-            ratios_[key] = val;
-            overlay_keys_.push_back(key);
-        }
-        return true;
-    }
-
-    bool has_overlay() const { return !overlay_keys_.empty(); }
-
-    // The base file gets every key but the overlay's; the overlay file (when
-    // one was loaded) only its own.
-    bool save(const std::string& filepath) const { return save_filtered(filepath, false); }
-    bool save_overlay(const std::string& filepath) const { return save_filtered(filepath, true); }
-
-    bool save_filtered(const std::string& filepath, bool overlay_only) const {
-        std::ofstream file(filepath);
-        if (!file.is_open()) {
-            return false;
-        }
-        std::vector<std::pair<std::string, double>> rows;
-        for (const auto& [key, val] : ratios_) {
-            const bool in_overlay = std::find(overlay_keys_.begin(), overlay_keys_.end(), key) != overlay_keys_.end();
-            if (in_overlay == overlay_only) rows.emplace_back(key, val);
-        }
-        file << "{\n";
-        for (size_t idx = 0; idx < rows.size(); ++idx) {
-            file << "  \"" << rows[idx].first << "\": " << std::fixed << std::setprecision(2) << rows[idx].second;
-            if (idx + 1 < rows.size()) {
-                file << ",";
-            }
-            file << "\n";
-        }
-        file << "}\n";
-        return true;
-    }
-
-    double get_ratio(const std::string& key, double default_val = 1.30) const {
-        auto it = ratios_.find(key);
-        if (it != ratios_.end()) {
-            return it->second;
-        }
-        return default_val;
-    }
-
-    void set_ratio(const std::string& key, double val) {
-        ratios_[key] = val;
-    }
-
-    const std::map<std::string, double>& ratios() const {
-        return ratios_;
-    }
-
-    bool check_ratchet(const std::vector<BenchmarkResult>& results, double max_regression_factor, std::vector<std::string>& out_failures) const {
-        bool all_passed = true;
-        for (const auto& res : results) {
-            if (res.key.empty()) continue;
-            if (res.key == "gc_model_speedup") {
-                double golden = get_ratio(res.key, 1.25);
-                double min_allowed = golden * (2.0 - max_regression_factor);
-                if (res.ratio < min_allowed) {
-                    all_passed = false;
-                    std::ostringstream oss;
-                    oss << "Benchmark '" << res.name << "' (key: " << res.key << "): measured "
-                        << std::fixed << std::setprecision(2) << res.ratio << "x is below ratchet speedup "
-                        << min_allowed << "x";
-                    out_failures.push_back(oss.str());
-                }
-            } else {
-                double golden = get_ratio(res.key, 1.30);
-                double max_allowed = golden * max_regression_factor;
-                if (res.ratio > max_allowed) {
-                    all_passed = false;
-                    std::ostringstream oss;
-                    if (res.key == "compile_speed") {
-                        oss << "Benchmark '" << res.name << "' (key: " << res.key << "): measured "
-                            << std::fixed << std::setprecision(2) << res.ratio << " ms exceeds ratchet "
-                            << golden << " ms * " << max_regression_factor << " (" << max_allowed << " ms)";
-                    } else {
-                        oss << "Benchmark '" << res.name << "' (key: " << res.key << "): measured "
-                            << std::fixed << std::setprecision(2) << res.ratio << "x exceeds ratchet "
-                            << golden << "x * " << max_regression_factor << " (" << max_allowed << "x)";
-                    }
-                    out_failures.push_back(oss.str());
-                }
-            }
-        }
-        return all_passed;
-    }
-
-    void update_from_results(const std::vector<BenchmarkResult>& results, bool only_if_improved = false) {
-        for (const auto& res : results) {
-            if (res.key.empty() || res.ratio <= 0.0) continue;
-            auto it = ratios_.find(res.key);
-            if (it == ratios_.end()) {
-                ratios_[res.key] = res.ratio;
-            } else if (res.key == "gc_model_speedup") {
-                if (!only_if_improved || res.ratio > it->second) {
-                    it->second = res.ratio;
-                }
-            } else if (!only_if_improved || res.ratio < it->second) {
-                it->second = res.ratio;
-            }
-        }
-    }
-
-private:
-    std::map<std::string, double> ratios_;
-    std::vector<std::string> overlay_keys_;
-};
-
-inline BenchmarkResult make_paired_result(
-    const std::string& key,
-    const std::string& name,
-    size_t iterations,
-    const PairedRepetitionResult& paired,
-    double target_ratio,
-    const std::string& notes
 ) {
-    if (RatchetManager::active() && RatchetManager::active()->has_ratio(key)) {
-        target_ratio = RatchetManager::active()->get_ratio(key, target_ratio);
-    }
     BenchmarkResult r;
     r.key = key;
     r.name = name;
@@ -700,37 +427,14 @@ inline BenchmarkResult make_paired_result(
     r.native_ms = paired.native_stats.median;
     r.native_min_ms = paired.native_stats.min;
     r.native_max_ms = paired.native_stats.max;
-    r.native_scalar_ms = 0.0;
     r.brass_ms = paired.brass_stats.median;
     r.brass_min_ms = paired.brass_stats.min;
     r.brass_max_ms = paired.brass_stats.max;
     r.ratio = paired.ratio_stats.median;
     r.ratio_min = paired.ratio_stats.min;
     r.ratio_max = paired.ratio_stats.max;
-    r.ratio_vec = 0.0;
-    r.target_ratio = target_ratio;
-    r.passes_bar = (target_ratio > 0.0) ? (r.ratio <= target_ratio) : true;
-    if (!notes.empty()) {
-        r.notes = notes;
-    } else if (target_ratio > 0.0) {
-        std::ostringstream oss;
-        oss << "<= " << std::fixed << std::setprecision(2) << target_ratio << "x baseline";
-        r.notes = oss.str();
-    }
+    r.notes = notes;
     return r;
-}
-
-inline BenchmarkResult make_paired_result(
-    const std::string& key,
-    const std::string& name,
-    size_t iterations,
-    const PairedRepetitionResult& paired,
-    const RatchetManager& ratchet,
-    double default_target,
-    const std::string& notes
-) {
-    double target = ratchet.has_ratio(key) ? ratchet.get_ratio(key, default_target) : default_target;
-    return make_paired_result(key, name, iterations, paired, target, notes);
 }
 
 inline BenchmarkResult make_triplet_result(
@@ -738,12 +442,8 @@ inline BenchmarkResult make_triplet_result(
     const std::string& name,
     size_t iterations,
     const TripletRepetitionResult& triplet,
-    double target_ratio,
-    const std::string& notes
+    const std::string& notes = ""
 ) {
-    if (RatchetManager::active() && RatchetManager::active()->has_ratio(key)) {
-        target_ratio = RatchetManager::active()->get_ratio(key, target_ratio);
-    }
     BenchmarkResult r;
     r.key = key;
     r.name = name;
@@ -764,31 +464,58 @@ inline BenchmarkResult make_triplet_result(
     r.ratio_vec = triplet.ratio_vec_stats.median;
     r.ratio_vec_min = triplet.ratio_vec_stats.min;
     r.ratio_vec_max = triplet.ratio_vec_stats.max;
-    r.target_ratio = target_ratio;
-    r.passes_bar = (target_ratio > 0.0) ? (r.ratio <= target_ratio) : true;
     if (!notes.empty()) {
         r.notes = notes;
     } else {
         std::ostringstream oss;
-        oss << "<= " << std::fixed << std::setprecision(2) << target_ratio << "x scalar (vec: "
-            << std::fixed << std::setprecision(2) << r.ratio_vec << "x)";
+        oss << "vec: " << std::fixed << std::setprecision(2) << r.ratio_vec << "x";
         r.notes = oss.str();
     }
     return r;
 }
 
-inline BenchmarkResult make_triplet_result(
-    const std::string& key,
-    const std::string& name,
-    size_t iterations,
-    const TripletRepetitionResult& triplet,
-    const RatchetManager& ratchet,
-    double default_target,
-    const std::string& notes
-) {
-    double target = ratchet.has_ratio(key) ? ratchet.get_ratio(key, default_target) : default_target;
-    return make_triplet_result(key, name, iterations, triplet, target, notes);
+// ============================================================================
+// Deterministic data placement
+// ============================================================================
+
+// Benchmark buffers whose relative placement is the same in every process.
+// A plain std::vector lands wherever the heap puts it, so two runs of the
+// same binary can differ in how the matrices of one benchmark alias in L1
+// (4K aliasing): a whole run then reads ~13% slower on one key. Each
+// allocation here starts at a page boundary plus an offset that steps by a
+// cache line per allocation, in allocation order, which the program fixes.
+inline void* placed_alloc(size_t bytes) {
+    static unsigned counter = 0;
+    const size_t shift = 64 * (1 + counter++ % 15);
+    void* raw = ::operator new(bytes + 4096 + shift);
+    const uintptr_t page = (reinterpret_cast<uintptr_t>(raw) + 4095) & ~uintptr_t{4095};
+    auto* p = reinterpret_cast<unsigned char*>(page + shift);
+    std::memcpy(p - sizeof(void*), &raw, sizeof(void*));
+    return p;
 }
+
+inline void placed_free(void* p) noexcept {
+    void* raw = nullptr;
+    std::memcpy(&raw, static_cast<unsigned char*>(p) - sizeof(void*), sizeof(void*));
+    ::operator delete(raw);
+}
+
+template <typename T>
+struct PlacedAllocator {
+    using value_type = T;
+    PlacedAllocator() = default;
+    template <typename U>
+    PlacedAllocator(const PlacedAllocator<U>&) noexcept {}
+    T* allocate(size_t n) { return static_cast<T*>(placed_alloc(n * sizeof(T))); }
+    void deallocate(T* p, size_t) noexcept { placed_free(p); }
+    template <typename U>
+    bool operator==(const PlacedAllocator<U>&) const noexcept { return true; }
+    template <typename U>
+    bool operator!=(const PlacedAllocator<U>&) const noexcept { return false; }
+};
+
+template <typename T>
+using PlacedVector = std::vector<T, PlacedAllocator<T>>;
 
 // ============================================================================
 // Shadow-stack frame definition for GC comparison
@@ -821,7 +548,8 @@ struct ThreadShadowStack {
 } // namespace brass::bench
 
 // ============================================================================
-// Reporter (extracted to bench_reporter.hpp)
+// Ratchet and reporter
 // ============================================================================
 
+#include "bench_ratchet.hpp"
 #include "bench_reporter.hpp"

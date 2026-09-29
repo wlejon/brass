@@ -417,7 +417,6 @@ void run_compile_speed_benchmark(std::vector<BenchmarkResult>& results) {
     }
 
     double total_ms = total_stats.median;
-    bool sub_2s_target = (total_ms < 2000.0);
     bool correctness_ok = deterministic;
     if (!correctness_ok) {
         std::cerr << "FATAL: Compile speed benchmark correctness failure!\n";
@@ -438,8 +437,7 @@ void run_compile_speed_benchmark(std::vector<BenchmarkResult>& results) {
         verify_stats,
         codegen_stats,
         total_stats,
-        deterministic,
-        sub_2s_target
+        deterministic
     );
 
     BenchmarkResult res;
@@ -455,9 +453,7 @@ void run_compile_speed_benchmark(std::vector<BenchmarkResult>& results) {
     res.ratio = total_ms;
     res.ratio_min = total_stats.min;
     res.ratio_max = total_stats.max;
-    res.target_ratio = 2000.0;
-    res.passes_bar = sub_2s_target;
-    res.notes = "< 2000.0 ms target";
+    res.notes = "end-to-end ms";
     results.push_back(res);
 }
 

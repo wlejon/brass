@@ -22,7 +22,7 @@ namespace {
 // 1. Native Baselines
 // ============================================================================
 
-uint64_t native_fib_iter(uint64_t n) {
+BRASS_BENCH_NATIVE uint64_t native_fib_iter(uint64_t n) {
     if (n < 2) return n;
     uint64_t a = 0, b = 1;
     for (uint64_t i = 2; i <= n; ++i) {
@@ -33,7 +33,7 @@ uint64_t native_fib_iter(uint64_t n) {
     return b;
 }
 
-int64_t native_prime_sieve(int64_t* is_prime, int64_t limit) {
+BRASS_BENCH_NATIVE int64_t native_prime_sieve(int64_t* is_prime, int64_t limit) {
     std::fill(is_prime, is_prime + limit, int64_t(1));
     is_prime[0] = 0;
     is_prime[1] = 0;
@@ -51,7 +51,7 @@ int64_t native_prime_sieve(int64_t* is_prime, int64_t limit) {
     return count;
 }
 
-int64_t native_collatz_sum(int64_t max_n) {
+BRASS_BENCH_NATIVE int64_t native_collatz_sum(int64_t max_n) {
     int64_t total_steps = 0;
     for (int64_t i = 1; i <= max_n; ++i) {
         int64_t n = i;
@@ -70,7 +70,7 @@ int64_t native_collatz_sum(int64_t max_n) {
 }
 
 // Vectorized -O3 baseline
-void native_matmul_i64(const int64_t* A, const int64_t* B, int64_t* C, int64_t N) {
+BRASS_BENCH_NATIVE void native_matmul_i64(const int64_t* A, const int64_t* B, int64_t* C, int64_t N) {
     for (int64_t i = 0; i < N; ++i) {
         for (int64_t j = 0; j < N; ++j) {
             int64_t sum = 0;
@@ -86,7 +86,7 @@ void native_matmul_i64(const int64_t* A, const int64_t* B, int64_t* C, int64_t N
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((optimize("no-tree-vectorize")))
 #endif
-void native_matmul_i64_scalar(const int64_t* A, const int64_t* B, int64_t* C, int64_t N) {
+BRASS_BENCH_NATIVE void native_matmul_i64_scalar(const int64_t* A, const int64_t* B, int64_t* C, int64_t N) {
     for (int64_t i = 0; i < N; ++i) {
         for (int64_t j = 0; j < N; ++j) {
             int64_t sum = 0;
@@ -99,7 +99,7 @@ void native_matmul_i64_scalar(const int64_t* A, const int64_t* B, int64_t* C, in
 }
 
 // Vectorized -O3 baseline
-void native_matmul_f64(const double* A, const double* B, double* C, int64_t N) {
+BRASS_BENCH_NATIVE void native_matmul_f64(const double* A, const double* B, double* C, int64_t N) {
     for (int64_t i = 0; i < N; ++i) {
         for (int64_t j = 0; j < N; ++j) {
             double sum = 0.0;
@@ -115,7 +115,7 @@ void native_matmul_f64(const double* A, const double* B, double* C, int64_t N) {
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((optimize("no-tree-vectorize")))
 #endif
-void native_matmul_f64_scalar(const double* A, const double* B, double* C, int64_t N) {
+BRASS_BENCH_NATIVE void native_matmul_f64_scalar(const double* A, const double* B, double* C, int64_t N) {
     for (int64_t i = 0; i < N; ++i) {
         for (int64_t j = 0; j < N; ++j) {
             double sum = 0.0;
@@ -132,7 +132,7 @@ struct BenchListNode {
     BenchListNode* next;
 };
 
-int64_t native_list_traversal(const BenchListNode* head) {
+BRASS_BENCH_NATIVE int64_t native_list_traversal(const BenchListNode* head) {
     int64_t sum = 0;
     while (head) {
         sum += head->value;
@@ -195,7 +195,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
             std::abort();
         }
 
-        results.push_back(make_paired_result("fib", "Iterative Fibonacci (N=45)", iters, paired, ratchet.get_ratio("fib", 1.25)));
+        results.push_back(make_paired_result("fib", "Iterative Fibonacci (N=45)", iters, paired));
         BenchmarkReporter::print_row(results.back());
     }
 
@@ -203,7 +203,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
     {
         size_t iters = 500;
         int64_t limit = 100000;
-        std::vector<int64_t> native_buf(limit, 0);
+        PlacedVector<int64_t> native_buf(limit, 0);
 
         auto run_native = [buf = native_buf.data(), limit, iters]() {
             int64_t count = 0;
@@ -226,7 +226,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
                 std::cerr << "FATAL: prime_sieve function pointer is null!\n";
                 std::abort();
             }
-            auto jit_buf = std::make_shared<std::vector<int64_t>>(limit, 0);
+            auto jit_buf = std::make_shared<PlacedVector<int64_t>>(limit, 0);
             return [jit, sieve_fn, jit_buf, limit, iters]() {
                 int64_t count = 0;
                 for (size_t i = 0; i < iters; ++i) {
@@ -251,7 +251,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
             std::abort();
         }
 
-        results.push_back(make_paired_result("sieve", "Prime Sieve (N=100k)", iters, paired, ratchet.get_ratio("sieve", 1.35)));
+        results.push_back(make_paired_result("sieve", "Prime Sieve (N=100k)", iters, paired));
         BenchmarkReporter::print_row(results.back());
     }
 
@@ -303,7 +303,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
             std::abort();
         }
 
-        results.push_back(make_paired_result("collatz", "Collatz Sum (1..100k)", iters, paired, ratchet.get_ratio("collatz", 1.05)));
+        results.push_back(make_paired_result("collatz", "Collatz Sum (1..100k)", iters, paired));
         BenchmarkReporter::print_row(results.back());
     }
 
@@ -311,7 +311,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
     {
         size_t iters = 2000;
         int64_t N = 32;
-        std::vector<int64_t> A(N * N, 2), B(N * N, 3), C_native(N * N, 0), C_scalar(N * N, 0);
+        PlacedVector<int64_t> A(N * N, 2), B(N * N, 3), C_native(N * N, 0), C_scalar(N * N, 0);
 
         auto run_vec = [a = A.data(), b = B.data(), c = C_native.data(), N, iters]() {
             for (size_t i = 0; i < iters; ++i) {
@@ -342,7 +342,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
                     std::cerr << "FATAL: matmul_i64_naive function pointer is null!\n";
                     std::abort();
                 }
-                auto c_jit = std::make_shared<std::vector<int64_t>>(N * N, 0);
+                auto c_jit = std::make_shared<PlacedVector<int64_t>>(N * N, 0);
                 return [jit, matmul_fn, a = A.data(), b = B.data(), c_jit, N, iters]() {
                     for (size_t i = 0; i < iters; ++i) {
                         int64_t size_n = N;
@@ -355,7 +355,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
 
             auto triplet = measure_triplet_multi_placement(DEFAULT_BENCH_REPETITIONS, run_vec, run_scalar, make_jit_runner);
 
-            std::vector<int64_t> C_jit_v(N * N, 0);
+            PlacedVector<int64_t> C_jit_v(N * N, 0);
             auto test_jit = make_jit_runner(0);
             test_jit();
             native_matmul_i64(A.data(), B.data(), C_native.data(), N);
@@ -368,7 +368,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
                 std::abort();
             }
 
-            results.push_back(make_triplet_result("matmul_i64_32_naive", "MatMul 32x32 (i64, naive)", iters, triplet, ratchet.get_ratio("matmul_i64_32_naive", 1.50)));
+            results.push_back(make_triplet_result("matmul_i64_32_naive", "MatMul 32x32 (i64, naive)", iters, triplet));
             BenchmarkReporter::print_row(results.back());
         }
 
@@ -383,7 +383,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
                     std::cerr << "FATAL: matmul_i64_preopt function pointer is null!\n";
                     std::abort();
                 }
-                auto c_jit = std::make_shared<std::vector<int64_t>>(N * N, 0);
+                auto c_jit = std::make_shared<PlacedVector<int64_t>>(N * N, 0);
                 return [jit, matmul_fn, a = A.data(), b = B.data(), c_jit, N, iters]() {
                     for (size_t i = 0; i < iters; ++i) {
                         int64_t size_n = N;
@@ -396,7 +396,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
 
             auto triplet = measure_triplet_multi_placement(DEFAULT_BENCH_REPETITIONS, run_vec, run_scalar, make_jit_runner);
 
-            std::vector<int64_t> C_jit_v(N * N, 0);
+            PlacedVector<int64_t> C_jit_v(N * N, 0);
             JitExecutionEngine jit_v;
             jit_v.compile_and_load(*mod);
             auto fn_v = jit_v.get_function_ptr<void(*)(const int64_t*, const int64_t*, int64_t*, int64_t)>("matmul_i64_preopt");
@@ -406,7 +406,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
                 std::abort();
             }
 
-            results.push_back(make_triplet_result("matmul_i64_32_preopt", "MatMul 32x32 (i64, preopt)", iters, triplet, ratchet.get_ratio("matmul_i64_32_preopt", 1.50)));
+            results.push_back(make_triplet_result("matmul_i64_32_preopt", "MatMul 32x32 (i64, preopt)", iters, triplet));
             BenchmarkReporter::print_row(results.back());
         }
     }
@@ -415,7 +415,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
     {
         size_t iters = 250;
         int64_t N = 64;
-        std::vector<int64_t> A(N * N, 2), B(N * N, 3), C_native(N * N, 0), C_scalar(N * N, 0);
+        PlacedVector<int64_t> A(N * N, 2), B(N * N, 3), C_native(N * N, 0), C_scalar(N * N, 0);
 
         auto run_vec = [a = A.data(), b = B.data(), c = C_native.data(), N, iters]() {
             for (size_t i = 0; i < iters; ++i) {
@@ -446,7 +446,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
                     std::cerr << "FATAL: matmul_i64_naive function pointer is null!\n";
                     std::abort();
                 }
-                auto c_jit = std::make_shared<std::vector<int64_t>>(N * N, 0);
+                auto c_jit = std::make_shared<PlacedVector<int64_t>>(N * N, 0);
                 return [jit, matmul_fn, a = A.data(), b = B.data(), c_jit, N, iters]() {
                     for (size_t i = 0; i < iters; ++i) {
                         int64_t size_n = N;
@@ -459,7 +459,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
 
             auto triplet = measure_triplet_multi_placement(DEFAULT_BENCH_REPETITIONS, run_vec, run_scalar, make_jit_runner);
 
-            std::vector<int64_t> C_jit_v(N * N, 0);
+            PlacedVector<int64_t> C_jit_v(N * N, 0);
             JitExecutionEngine jit_v;
             jit_v.compile_and_load(*mod);
             auto fn_v = jit_v.get_function_ptr<void(*)(const int64_t*, const int64_t*, int64_t*, int64_t)>("matmul_i64_naive");
@@ -469,7 +469,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
                 std::abort();
             }
 
-            results.push_back(make_triplet_result("matmul_i64_64_naive", "MatMul 64x64 (i64, naive)", iters, triplet, ratchet.get_ratio("matmul_i64_64_naive", 1.45)));
+            results.push_back(make_triplet_result("matmul_i64_64_naive", "MatMul 64x64 (i64, naive)", iters, triplet));
             BenchmarkReporter::print_row(results.back());
         }
 
@@ -484,7 +484,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
                     std::cerr << "FATAL: matmul_i64_preopt function pointer is null!\n";
                     std::abort();
                 }
-                auto c_jit = std::make_shared<std::vector<int64_t>>(N * N, 0);
+                auto c_jit = std::make_shared<PlacedVector<int64_t>>(N * N, 0);
                 return [jit, matmul_fn, a = A.data(), b = B.data(), c_jit, N, iters]() {
                     for (size_t i = 0; i < iters; ++i) {
                         int64_t size_n = N;
@@ -497,7 +497,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
 
             auto triplet = measure_triplet_multi_placement(DEFAULT_BENCH_REPETITIONS, run_vec, run_scalar, make_jit_runner);
 
-            std::vector<int64_t> C_jit_v(N * N, 0);
+            PlacedVector<int64_t> C_jit_v(N * N, 0);
             JitExecutionEngine jit_v;
             jit_v.compile_and_load(*mod);
             auto fn_v = jit_v.get_function_ptr<void(*)(const int64_t*, const int64_t*, int64_t*, int64_t)>("matmul_i64_preopt");
@@ -507,7 +507,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
                 std::abort();
             }
 
-            results.push_back(make_triplet_result("matmul_i64_64_preopt", "MatMul 64x64 (i64, preopt)", iters, triplet, ratchet.get_ratio("matmul_i64_64_preopt", 1.45)));
+            results.push_back(make_triplet_result("matmul_i64_64_preopt", "MatMul 64x64 (i64, preopt)", iters, triplet));
             BenchmarkReporter::print_row(results.back());
         }
     }
@@ -516,7 +516,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
     {
         size_t iters = 2000;
         int64_t N = 32;
-        std::vector<double> A(N * N, 1.5), B(N * N, 2.5), C_native(N * N, 0.0), C_scalar(N * N, 0.0);
+        PlacedVector<double> A(N * N, 1.5), B(N * N, 2.5), C_native(N * N, 0.0), C_scalar(N * N, 0.0);
 
         auto run_vec = [a = A.data(), b = B.data(), c = C_native.data(), N, iters]() {
             for (size_t i = 0; i < iters; ++i) {
@@ -536,7 +536,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
             }
         };
 
-        auto run_f64_32 = [&](const char* key, const char* name, std::unique_ptr<Module> mod, const char* fn_sym, double def_target) {
+        auto run_f64_32 = [&](const char* key, const char* name, std::unique_ptr<Module> mod, const char* fn_sym) {
             auto make_jit_runner = [&](size_t padding) {
                 auto jit = std::make_shared<JitExecutionEngine>();
                 jit->compile_and_load(*mod, padding);
@@ -545,7 +545,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
                     std::cerr << "FATAL: " << fn_sym << " function pointer is null!\n";
                     std::abort();
                 }
-                auto c_jit = std::make_shared<std::vector<double>>(N * N, 0.0);
+                auto c_jit = std::make_shared<PlacedVector<double>>(N * N, 0.0);
                 return [jit, matmul_fn, a = A.data(), b = B.data(), c_jit, N, iters]() {
                     for (size_t i = 0; i < iters; ++i) {
                         int64_t size_n = N;
@@ -571,25 +571,25 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
                 }
             }
 
-            results.push_back(make_triplet_result(key, name, iters, triplet, ratchet.get_ratio(key, def_target)));
+            results.push_back(make_triplet_result(key, name, iters, triplet));
             BenchmarkReporter::print_row(results.back());
         };
 
         // 6a. Strict Naive
-        run_f64_32("matmul_f64_32_strict_naive", "MatMul 32x32 (f64, strict, naive)", build_matmul_f64_strict_naive_module(), "matmul_f64_strict_naive", 2.25);
+        run_f64_32("matmul_f64_32_strict_naive", "MatMul 32x32 (f64, strict, naive)", build_matmul_f64_strict_naive_module(), "matmul_f64_strict_naive");
         // 6b. Strict Preopt
-        run_f64_32("matmul_f64_32_strict_preopt", "MatMul 32x32 (f64, strict, preopt)", build_matmul_f64_strict_preopt_module(), "matmul_f64_strict_preopt", 2.20);
+        run_f64_32("matmul_f64_32_strict_preopt", "MatMul 32x32 (f64, strict, preopt)", build_matmul_f64_strict_preopt_module(), "matmul_f64_strict_preopt");
         // 6c. Reassoc Naive (flagged opt-in)
-        run_f64_32("matmul_f64_32_reassoc_naive", "MatMul 32x32 (f64, reassoc, naive)", build_matmul_f64_reassoc_naive_module(), "matmul_f64_reassoc_naive", 1.00);
+        run_f64_32("matmul_f64_32_reassoc_naive", "MatMul 32x32 (f64, reassoc, naive)", build_matmul_f64_reassoc_naive_module(), "matmul_f64_reassoc_naive");
         // 6d. Reassoc Preopt (flagged opt-in)
-        run_f64_32("matmul_f64_32_reassoc_preopt", "MatMul 32x32 (f64, reassoc, preopt)", build_matmul_f64_reassoc_preopt_module(), "matmul_f64_reassoc_preopt", 1.00);
+        run_f64_32("matmul_f64_32_reassoc_preopt", "MatMul 32x32 (f64, reassoc, preopt)", build_matmul_f64_reassoc_preopt_module(), "matmul_f64_reassoc_preopt");
     }
 
     // 7. Matrix Multiplication 64x64 Float (Strict and Reassoc)
     {
         size_t iters = 250;
         int64_t N = 64;
-        std::vector<double> A(N * N, 1.5), B(N * N, 2.5), C_native(N * N, 0.0), C_scalar(N * N, 0.0);
+        PlacedVector<double> A(N * N, 1.5), B(N * N, 2.5), C_native(N * N, 0.0), C_scalar(N * N, 0.0);
 
         auto run_vec = [a = A.data(), b = B.data(), c = C_native.data(), N, iters]() {
             for (size_t i = 0; i < iters; ++i) {
@@ -609,7 +609,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
             }
         };
 
-        auto run_f64_64 = [&](const char* key, const char* name, std::unique_ptr<Module> mod, const char* fn_sym, double def_target) {
+        auto run_f64_64 = [&](const char* key, const char* name, std::unique_ptr<Module> mod, const char* fn_sym) {
             auto make_jit_runner = [&](size_t padding) {
                 auto jit = std::make_shared<JitExecutionEngine>();
                 jit->compile_and_load(*mod, padding);
@@ -618,7 +618,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
                     std::cerr << "FATAL: " << fn_sym << " function pointer is null!\n";
                     std::abort();
                 }
-                auto c_jit = std::make_shared<std::vector<double>>(N * N, 0.0);
+                auto c_jit = std::make_shared<PlacedVector<double>>(N * N, 0.0);
                 return [jit, matmul_fn, a = A.data(), b = B.data(), c_jit, N, iters]() {
                     for (size_t i = 0; i < iters; ++i) {
                         int64_t size_n = N;
@@ -644,18 +644,18 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
                 }
             }
 
-            results.push_back(make_triplet_result(key, name, iters, triplet, ratchet.get_ratio(key, def_target)));
+            results.push_back(make_triplet_result(key, name, iters, triplet));
             BenchmarkReporter::print_row(results.back());
         };
 
         // 7a. Strict Naive
-        run_f64_64("matmul_f64_64_strict_naive", "MatMul 64x64 (f64, strict, naive)", build_matmul_f64_strict_naive_module(), "matmul_f64_strict_naive", 1.70);
+        run_f64_64("matmul_f64_64_strict_naive", "MatMul 64x64 (f64, strict, naive)", build_matmul_f64_strict_naive_module(), "matmul_f64_strict_naive");
         // 7b. Strict Preopt
-        run_f64_64("matmul_f64_64_strict_preopt", "MatMul 64x64 (f64, strict, preopt)", build_matmul_f64_strict_preopt_module(), "matmul_f64_strict_preopt", 1.70);
+        run_f64_64("matmul_f64_64_strict_preopt", "MatMul 64x64 (f64, strict, preopt)", build_matmul_f64_strict_preopt_module(), "matmul_f64_strict_preopt");
         // 7c. Reassoc Naive (flagged opt-in)
-        run_f64_64("matmul_f64_64_reassoc_naive", "MatMul 64x64 (f64, reassoc, naive)", build_matmul_f64_reassoc_naive_module(), "matmul_f64_reassoc_naive", 1.05);
+        run_f64_64("matmul_f64_64_reassoc_naive", "MatMul 64x64 (f64, reassoc, naive)", build_matmul_f64_reassoc_naive_module(), "matmul_f64_reassoc_naive");
         // 7d. Reassoc Preopt (flagged opt-in)
-        run_f64_64("matmul_f64_64_reassoc_preopt", "MatMul 64x64 (f64, reassoc, preopt)", build_matmul_f64_reassoc_preopt_module(), "matmul_f64_reassoc_preopt", 1.05);
+        run_f64_64("matmul_f64_64_reassoc_preopt", "MatMul 64x64 (f64, reassoc, preopt)", build_matmul_f64_reassoc_preopt_module(), "matmul_f64_reassoc_preopt");
     }
 
     // 8. Pointer-Chasing Linked List Traversal
@@ -711,7 +711,7 @@ void run_numeric_benchmarks(std::vector<BenchmarkResult>& results, const Ratchet
             std::abort();
         }
 
-        results.push_back(make_paired_result("linked_list", "Linked List Traversal (50k)", iters, paired, ratchet.get_ratio("linked_list", 0.90)));
+        results.push_back(make_paired_result("linked_list", "Linked List Traversal (50k)", iters, paired));
         BenchmarkReporter::print_row(results.back());
     }
 }

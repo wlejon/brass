@@ -4,6 +4,7 @@
 #include <brass/brass.hpp>
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/vm/fast_interpreter.hpp>
+#include <brass/runtime/code_installer.hpp>
 #include <brass/codegen/baseline_jit.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/verifier.hpp>
@@ -16,6 +17,18 @@
 #include <algorithm>
 #include <memory>
 
+// Fast-interpreter benchmarks. The ratcheted number (interp_<name>, lower is
+// better) is the fast interpreter's time per op divided by the baseline
+// JIT's on the same MIR, taken per repetition, then the median. The baseline
+// JIT's code lives in JIT memory at a placement brass controls, so the ratio
+// holds within a few percent across rebuilds of this binary; against native
+// C++ it moved 10-13% on a relink that changed nothing measured, because the
+// native loop's alignment in the executable moved. (Re-baseline the interp_
+// keys when the baseline JIT's codegen changes.) Native and the reference
+// interpreter (oracle) are printed for context and gate nothing; the oracle
+// is timed on a fraction of the iterations because it is two orders of
+// magnitude slower.
+
 using namespace brass;
 using namespace brass::bench;
 using namespace brass::codegen;
@@ -23,7 +36,7 @@ using namespace brass::codegen;
 namespace {
 
 // ============================================================================
-// 1. Native C++ Baseline Implementations
+// 1. Native C++ Baselines (inputs arrive opaque so nothing constant-folds)
 // ============================================================================
 
 uint64_t native_fib_iter(uint64_t n) {
@@ -73,6 +86,11 @@ int64_t native_prime_sieve(int64_t* is_prime, int64_t limit) {
     return count;
 }
 
+#if defined(_MSC_VER)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
 int64_t native_fib_rec(int64_t n) {
     if (n < 2) return n;
     return native_fib_rec(n - 1) + native_fib_rec(n - 2);
@@ -129,478 +147,251 @@ std::unique_ptr<Module> build_fib_rec_module() {
 }
 
 // ============================================================================
-// 3. Benchmark Metric Record
+// 3. Measurement
 // ============================================================================
 
-struct InterpBenchmarkMetric {
+struct InterpMetric {
     std::string key;
     std::string name;
     size_t iterations = 0;
-    double oracle_ms = 0.0;
-    double fast_ms = 0.0;
-    double jit_ms = 0.0;
-    double native_ms = 0.0;
     double oracle_ns_op = 0.0;
-    double fast_ns_op = 0.0;
-    double jit_ns_op = 0.0;
-    double native_ns_op = 0.0;
-    double fast_vs_oracle_speedup = 0.0;
-    double jit_vs_fast_speedup = 0.0;
+    TimingStats fast_ms;
+    TimingStats jit_ms;
+    TimingStats native_ms;
+    TimingStats fast_vs_native; // context
+    TimingStats fast_vs_jit;    // ratcheted
 };
 
-void print_interpreter_benchmark_header() {
-    std::cout << "\n";
-    std::cout << "========================================================================================================================\n";
-    std::cout << " Interpreter Performance: Oracle vs FastInterpreter vs Baseline JIT vs Native C++\n";
-    std::cout << "========================================================================================================================\n";
-    std::cout << std::left  << std::setw(32) << " Benchmark"
-              << std::right << std::setw(15) << "Oracle (ns/op)"
-              << std::right << std::setw(15) << "Fast (ns/op)"
-              << std::right << std::setw(15) << "JIT (ns/op)"
-              << std::right << std::setw(15) << "Native (ns/op)"
-              << std::right << std::setw(14) << "Fast/Oracle"
-              << std::right << std::setw(14) << "JIT/Fast"
-              << "\n";
-    std::cout << "------------------------------------------------------------------------------------------------------------------------\n";
-}
-
-void print_interpreter_benchmark_row(const InterpBenchmarkMetric& m) {
-    std::cout << std::left  << " " << std::setw(31) << m.name
-              << std::right << std::setw(15) << std::fixed << std::setprecision(1) << m.oracle_ns_op
-              << std::right << std::setw(15) << std::fixed << std::setprecision(1) << m.fast_ns_op
-              << std::right << std::setw(15) << std::fixed << std::setprecision(1) << m.jit_ns_op
-              << std::right << std::setw(15) << std::fixed << std::setprecision(1) << m.native_ns_op
-              << std::right << std::setw(13) << std::fixed << std::setprecision(2) << m.fast_vs_oracle_speedup << "x"
-              << std::right << std::setw(13) << std::fixed << std::setprecision(2) << m.jit_vs_fast_speedup << "x"
-              << "\n";
-}
-
-void print_interpreter_benchmark_summary(const std::vector<InterpBenchmarkMetric>& metrics) {
-    if (metrics.empty()) return;
-    double log_sum_fo = 0.0;
-    double log_sum_jf = 0.0;
-    for (const auto& m : metrics) {
-        log_sum_fo += std::log(std::max(m.fast_vs_oracle_speedup, 0.001));
-        log_sum_jf += std::log(std::max(m.jit_vs_fast_speedup, 0.001));
+// Interleaves the three tiers inside each repetition so drift (clocks,
+// another process waking up) lands on all of them, and takes each ratio per
+// repetition before the median.
+template <typename FFast, typename FJit, typename FNative>
+void measure_tiers(InterpMetric& m, size_t reps, FFast&& fast, FJit&& jit, FNative&& native) {
+    if (is_debug_build()) reps = 1;
+    fast();
+    jit();
+    native();
+    std::vector<double> f, j, n, fn, fj;
+    Stopwatch sw;
+    for (size_t r = 0; r < reps; ++r) {
+        sw.start(); fast();   const double f_ms = sw.stop_ms();
+        sw.start(); jit();    const double j_ms = sw.stop_ms();
+        sw.start(); native(); const double n_ms = sw.stop_ms();
+        f.push_back(f_ms);
+        j.push_back(j_ms);
+        n.push_back(n_ms);
+        fn.push_back(n_ms > 0.0 ? f_ms / n_ms : 0.0);
+        fj.push_back(j_ms > 0.0 ? f_ms / j_ms : 0.0);
     }
-    double geomean_fo = std::exp(log_sum_fo / static_cast<double>(metrics.size()));
-    double geomean_jf = std::exp(log_sum_jf / static_cast<double>(metrics.size()));
+    m.fast_ms = TimingStats(std::move(f));
+    m.jit_ms = TimingStats(std::move(j));
+    m.native_ms = TimingStats(std::move(n));
+    m.fast_vs_native = TimingStats(std::move(fn));
+    m.fast_vs_jit = TimingStats(std::move(fj));
+}
 
-    std::cout << "------------------------------------------------------------------------------------------------------------------------\n";
-    std::cout << std::left  << " " << std::setw(31) << "Geometric Mean"
-              << std::right << std::setw(60) << " "
-              << std::right << std::setw(13) << std::fixed << std::setprecision(2) << geomean_fo << "x"
-              << std::right << std::setw(13) << std::fixed << std::setprecision(2) << geomean_jf << "x"
+template <typename FOracle>
+double time_oracle_ns_op(size_t oracle_iters, FOracle&& oracle_once) {
+    oracle_once();
+    Stopwatch sw;
+    sw.start();
+    for (size_t i = 0; i < oracle_iters; ++i) oracle_once();
+    return sw.stop_ms() * 1e6 / static_cast<double>(oracle_iters);
+}
+
+const BaselineCompiledFunction* find_compiled(const std::vector<BaselineCompiledFunction>& fns, const char* name) {
+    for (const auto& cf : fns) {
+        if (cf.name() == name) return &cf;
+    }
+    std::cerr << "FATAL: baseline JIT did not produce " << name << "\n";
+    std::abort();
+}
+
+constexpr size_t kInterpRepetitions = 9;
+
+// Runs one benchmark: `args` is the call's argument list, `native_once` one
+// native call. Every tier runs `iters` calls per repetition.
+template <typename FNativeOnce>
+InterpMetric run_one(const char* key, const char* name, Module& mod, const char* fn_name,
+                     const std::vector<RuntimeValue>& args, size_t iters, size_t oracle_iters,
+                     FNativeOnce&& native_once) {
+    InterpMetric m;
+    m.key = key;
+    m.name = name;
+    m.iterations = iters;
+
+    runtime::FunctionDispatchTable oracle_program;
+    Interpreter oracle;
+    oracle.set_dispatch_table(&oracle_program);
+    m.oracle_ns_op = time_oracle_ns_op(oracle_iters, [&] {
+        RuntimeValue r = oracle.run(mod, fn_name, args);
+        DoNotOptimize(r);
+    });
+
+    // A program of its own: the baseline JIT below registers its code by name
+    // in the default program, and a FastInterpreter on that program would
+    // call it instead of interpreting. An owned program's pipeline is not
+    // running, so nothing tiers up (no OSR) either: this times the
+    // interpreter alone.
+    runtime::FunctionDispatchTable fast_program;
+    FastInterpreter fast;
+    fast.set_dispatch_table(&fast_program);
+    BaselineJitCompiler jit_compiler;
+    auto compiled_funcs = jit_compiler.compile_module(mod);
+    const BaselineCompiledFunction* compiled = find_compiled(compiled_funcs, fn_name);
+
+    measure_tiers(m, kInterpRepetitions,
+        [&] {
+            for (size_t i = 0; i < iters; ++i) {
+                RuntimeValue r = fast.run(mod, fn_name, args);
+                DoNotOptimize(r);
+            }
+        },
+        [&] {
+            for (size_t i = 0; i < iters; ++i) {
+                RuntimeValue r = compiled->invoke(args);
+                DoNotOptimize(r);
+            }
+        },
+        [&] {
+            for (size_t i = 0; i < iters; ++i) native_once();
+        });
+    return m;
+}
+
+void print_header() {
+    std::cout << "\n";
+    std::cout << "==================================================================================================================================\n";
+    std::cout << " Fast interpreter (ns/op, median of " << kInterpRepetitions << "): ratcheted as Fast/JIT; Oracle and native for context\n";
+    std::cout << "==================================================================================================================================\n";
+    std::cout << std::left  << std::setw(32) << " Benchmark"
+              << std::right << std::setw(14) << "Oracle"
+              << std::right << std::setw(14) << "Fast"
+              << std::right << std::setw(14) << "JIT"
+              << std::right << std::setw(14) << "Native"
+              << std::right << std::setw(24) << "Fast/JIT [min-max]"
+              << std::right << std::setw(14) << "Fast/Native"
+              << std::right << std::setw(14) << "Oracle/Fast"
               << "\n";
-    std::cout << "========================================================================================================================\n\n";
+    std::cout << "----------------------------------------------------------------------------------------------------------------------------------\n";
+}
+
+void print_row(const InterpMetric& m) {
+    const double it = static_cast<double>(m.iterations);
+    auto ns = [&](const TimingStats& s) { return s.median * 1e6 / it; };
+    const double fast_ns = ns(m.fast_ms);
+    std::ostringstream fj;
+    fj << std::fixed << std::setprecision(2) << m.fast_vs_jit.median << "x ["
+       << m.fast_vs_jit.min << "-" << m.fast_vs_jit.max << "]";
+    std::cout << std::left  << " " << std::setw(31) << m.name << std::fixed << std::setprecision(1)
+              << std::right << std::setw(14) << m.oracle_ns_op
+              << std::right << std::setw(14) << fast_ns
+              << std::right << std::setw(14) << ns(m.jit_ms)
+              << std::right << std::setw(14) << ns(m.native_ms)
+              << std::right << std::setw(24) << fj.str()
+              << std::right << std::setw(13) << m.fast_vs_native.median << "x"
+              << std::right << std::setw(13) << (fast_ns > 0.0 ? m.oracle_ns_op / fast_ns : 0.0) << "x"
+              << "\n";
 }
 
 } // namespace
 
 namespace brass::bench {
 
-void run_interpreter_benchmarks(std::vector<BenchmarkResult>& results, const RatchetManager& ratchet) {
-    std::vector<InterpBenchmarkMetric> metrics;
-    metrics.reserve(5);
+void run_interpreter_benchmarks(std::vector<BenchmarkResult>& results, const RatchetManager&) {
+    const bool dbg = is_debug_build();
+    std::vector<InterpMetric> metrics;
+    print_header();
 
-    auto compute_metrics = [](InterpBenchmarkMetric& m, size_t iters, double oracle_ms, double fast_ms, double jit_ms, double native_ms) {
-        m.iterations = iters;
-        m.oracle_ms = oracle_ms;
-        m.fast_ms = fast_ms;
-        m.jit_ms = jit_ms;
-        m.native_ms = native_ms;
-        const double d_iters = static_cast<double>(iters);
-        m.oracle_ns_op = (oracle_ms * 1e6) / d_iters;
-        m.fast_ns_op = (fast_ms * 1e6) / d_iters;
-        m.jit_ns_op = (jit_ms * 1e6) / d_iters;
-        m.native_ns_op = (native_ms * 1e6) / d_iters;
-        m.fast_vs_oracle_speedup = (fast_ms > 0.0) ? (oracle_ms / fast_ms) : 1.0;
-        m.jit_vs_fast_speedup = (jit_ms > 0.0) ? (fast_ms / jit_ms) : 1.0;
-    };
-
-    print_interpreter_benchmark_header();
-
-    // ========================================================================
-    // Benchmark 1: Iterative Fibonacci (n = 40)
-    // ========================================================================
     {
-        const size_t iters = is_debug_build() ? 1000 : 25000;
-        const int64_t n = 40;
+        const size_t iters = dbg ? 1000 : 25000;
         auto mod = build_fib_module();
-
-        // 1. Oracle
-        Interpreter oracle;
-        oracle.run(*mod, "fib_iter", {RuntimeValue::from_i64(n)});
-        Stopwatch sw;
-        sw.start();
-        for (size_t i = 0; i < iters; ++i) {
-            RuntimeValue r = oracle.run(*mod, "fib_iter", {RuntimeValue::from_i64(n)});
-            DoNotOptimize(r);
-        }
-        double oracle_ms = sw.stop_ms();
-
-        // 2. FastInterpreter
-        FastInterpreter fast;
-        fast.run(*mod, "fib_iter", {RuntimeValue::from_i64(n)});
-        sw.start();
-        for (size_t i = 0; i < iters; ++i) {
-            RuntimeValue r = fast.run(*mod, "fib_iter", {RuntimeValue::from_i64(n)});
-            DoNotOptimize(r);
-        }
-        double fast_ms = sw.stop_ms();
-
-        // 3. Baseline JIT
-        BaselineJitCompiler jit_compiler;
-        auto compiled_funcs = jit_compiler.compile_module(*mod);
-        const BaselineCompiledFunction* compiled = nullptr;
-        for (const auto& cf : compiled_funcs) {
-            if (cf.name() == "fib_iter") { compiled = &cf; break; }
-        }
-        if (compiled) compiled->invoke({RuntimeValue::from_i64(n)});
-        sw.start();
-        if (compiled) {
-            for (size_t i = 0; i < iters; ++i) {
-                RuntimeValue r = compiled->invoke({RuntimeValue::from_i64(n)});
+        metrics.push_back(run_one("fib_iter_40", "Iterative Fibonacci (n=40)", *mod, "fib_iter",
+            {RuntimeValue::from_i64(40)}, iters, iters / 10, [] {
+                uint64_t n = 40;
+                DoNotOptimize(n);
+                uint64_t r = native_fib_iter(n);
                 DoNotOptimize(r);
-            }
-        }
-        double jit_ms = sw.stop_ms();
-
-        // 4. Native C++
-        native_fib_iter(static_cast<uint64_t>(n));
-        sw.start();
-        for (size_t i = 0; i < iters; ++i) {
-            uint64_t r = native_fib_iter(static_cast<uint64_t>(n));
-            DoNotOptimize(r);
-        }
-        double native_ms = sw.stop_ms();
-
-        InterpBenchmarkMetric m;
-        m.key = "fib_iter_40";
-        m.name = "Iterative Fibonacci (n=40)";
-        compute_metrics(m, iters, oracle_ms, fast_ms, jit_ms, native_ms);
-
-        print_interpreter_benchmark_row(m);
-        metrics.push_back(m);
+            }));
     }
-
-    // ========================================================================
-    // Benchmark 2: Collatz Steps (n = 1000)
-    // ========================================================================
     {
-        const size_t iters = is_debug_build() ? 200 : 2500;
-        const int64_t max_n = 1000;
+        const size_t iters = dbg ? 20 : 100;
         auto mod = build_collatz_module();
-
-        // 1. Oracle
-        Interpreter oracle;
-        oracle.run(*mod, "collatz_sum", {RuntimeValue::from_i64(max_n)});
-        Stopwatch sw;
-        sw.start();
-        for (size_t i = 0; i < iters; ++i) {
-            RuntimeValue r = oracle.run(*mod, "collatz_sum", {RuntimeValue::from_i64(max_n)});
-            DoNotOptimize(r);
-        }
-        double oracle_ms = sw.stop_ms();
-
-        // 2. FastInterpreter
-        FastInterpreter fast;
-        fast.run(*mod, "collatz_sum", {RuntimeValue::from_i64(max_n)});
-        sw.start();
-        for (size_t i = 0; i < iters; ++i) {
-            RuntimeValue r = fast.run(*mod, "collatz_sum", {RuntimeValue::from_i64(max_n)});
-            DoNotOptimize(r);
-        }
-        double fast_ms = sw.stop_ms();
-
-        // 3. Baseline JIT
-        BaselineJitCompiler jit_compiler;
-        auto compiled_funcs = jit_compiler.compile_module(*mod);
-        const BaselineCompiledFunction* compiled = nullptr;
-        for (const auto& cf : compiled_funcs) {
-            if (cf.name() == "collatz_sum") { compiled = &cf; break; }
-        }
-        if (compiled) compiled->invoke({RuntimeValue::from_i64(max_n)});
-        sw.start();
-        if (compiled) {
-            for (size_t i = 0; i < iters; ++i) {
-                RuntimeValue r = compiled->invoke({RuntimeValue::from_i64(max_n)});
+        metrics.push_back(run_one("collatz_1000", "Collatz Steps (n=1000)", *mod, "collatz_sum",
+            {RuntimeValue::from_i64(1000)}, iters, dbg ? 2 : 10, [] {
+                int64_t n = 1000;
+                DoNotOptimize(n);
+                int64_t r = native_collatz_sum(n);
                 DoNotOptimize(r);
-            }
-        }
-        double jit_ms = sw.stop_ms();
-
-        // 4. Native C++
-        native_collatz_sum(max_n);
-        sw.start();
-        for (size_t i = 0; i < iters; ++i) {
-            int64_t r = native_collatz_sum(max_n);
-            DoNotOptimize(r);
-        }
-        double native_ms = sw.stop_ms();
-
-        InterpBenchmarkMetric m;
-        m.key = "collatz_1000";
-        m.name = "Collatz Steps (n=1000)";
-        compute_metrics(m, iters, oracle_ms, fast_ms, jit_ms, native_ms);
-
-        print_interpreter_benchmark_row(m);
-        metrics.push_back(m);
+            }));
     }
-
-    // ========================================================================
-    // Benchmark 3: Prime Sieve (limit = 100000)
-    // ========================================================================
     {
-        const size_t iters = is_debug_build() ? 5 : 40;
+        const size_t iters = dbg ? 4 : 20;
         const int64_t limit = 100000;
         std::vector<int64_t> buf(static_cast<size_t>(limit), 0);
+        std::vector<int64_t> native_buf(static_cast<size_t>(limit), 0);
         auto mod = build_sieve_module();
-
-        // 1. Oracle
-        Interpreter oracle;
-        oracle.run(*mod, "prime_sieve", {RuntimeValue::from_ptr(buf.data()), RuntimeValue::from_i64(limit)});
-        Stopwatch sw;
-        sw.start();
-        for (size_t i = 0; i < iters; ++i) {
-            RuntimeValue r = oracle.run(*mod, "prime_sieve", {RuntimeValue::from_ptr(buf.data()), RuntimeValue::from_i64(limit)});
-            DoNotOptimize(r);
-        }
-        double oracle_ms = sw.stop_ms();
-
-        // 2. FastInterpreter
-        FastInterpreter fast;
-        fast.run(*mod, "prime_sieve", {RuntimeValue::from_ptr(buf.data()), RuntimeValue::from_i64(limit)});
-        sw.start();
-        for (size_t i = 0; i < iters; ++i) {
-            RuntimeValue r = fast.run(*mod, "prime_sieve", {RuntimeValue::from_ptr(buf.data()), RuntimeValue::from_i64(limit)});
-            DoNotOptimize(r);
-        }
-        double fast_ms = sw.stop_ms();
-
-        // 3. Baseline JIT
-        BaselineJitCompiler jit_compiler;
-        auto compiled_funcs = jit_compiler.compile_module(*mod);
-        const BaselineCompiledFunction* compiled = nullptr;
-        for (const auto& cf : compiled_funcs) {
-            if (cf.name() == "prime_sieve") { compiled = &cf; break; }
-        }
-        if (compiled) compiled->invoke({RuntimeValue::from_ptr(buf.data()), RuntimeValue::from_i64(limit)});
-        sw.start();
-        if (compiled) {
-            for (size_t i = 0; i < iters; ++i) {
-                RuntimeValue r = compiled->invoke({RuntimeValue::from_ptr(buf.data()), RuntimeValue::from_i64(limit)});
+        metrics.push_back(run_one("prime_sieve_100k", "Prime Sieve (limit=100k)", *mod, "prime_sieve",
+            {RuntimeValue::from_ptr(buf.data()), RuntimeValue::from_i64(limit)}, iters, dbg ? 1 : 4, [&] {
+                int64_t lim = limit;
+                DoNotOptimize(lim);
+                int64_t r = native_prime_sieve(native_buf.data(), lim);
                 DoNotOptimize(r);
-            }
-        }
-        double jit_ms = sw.stop_ms();
-
-        // 4. Native C++
-        native_prime_sieve(buf.data(), limit);
-        sw.start();
-        for (size_t i = 0; i < iters; ++i) {
-            int64_t r = native_prime_sieve(buf.data(), limit);
-            DoNotOptimize(r);
-        }
-        double native_ms = sw.stop_ms();
-
-        InterpBenchmarkMetric m;
-        m.key = "prime_sieve_100k";
-        m.name = "Prime Sieve (limit=100k)";
-        compute_metrics(m, iters, oracle_ms, fast_ms, jit_ms, native_ms);
-
-        print_interpreter_benchmark_row(m);
-        metrics.push_back(m);
+            }));
     }
-
-    // ========================================================================
-    // Benchmark 4: Recursive Fibonacci (n = 22)
-    // ========================================================================
     {
-        const size_t iters = is_debug_build() ? 2 : 12;
-        const int64_t n = 22;
+        const size_t iters = dbg ? 4 : 40;
         auto mod = build_fib_rec_module();
-
-        // 1. Oracle
-        Interpreter oracle;
-        oracle.run(*mod, "fib_rec", {RuntimeValue::from_i64(n)});
-        Stopwatch sw;
-        sw.start();
-        for (size_t i = 0; i < iters; ++i) {
-            RuntimeValue r = oracle.run(*mod, "fib_rec", {RuntimeValue::from_i64(n)});
-            DoNotOptimize(r);
-        }
-        double oracle_ms = sw.stop_ms();
-
-        // 2. FastInterpreter
-        FastInterpreter fast;
-        fast.run(*mod, "fib_rec", {RuntimeValue::from_i64(n)});
-        sw.start();
-        for (size_t i = 0; i < iters; ++i) {
-            RuntimeValue r = fast.run(*mod, "fib_rec", {RuntimeValue::from_i64(n)});
-            DoNotOptimize(r);
-        }
-        double fast_ms = sw.stop_ms();
-
-        // 3. Baseline JIT
-        BaselineJitCompiler jit_compiler;
-        auto compiled_funcs = jit_compiler.compile_module(*mod);
-        const BaselineCompiledFunction* compiled = nullptr;
-        for (const auto& cf : compiled_funcs) {
-            if (cf.name() == "fib_rec") { compiled = &cf; break; }
-        }
-        if (compiled) compiled->invoke({RuntimeValue::from_i64(n)});
-        sw.start();
-        if (compiled) {
-            for (size_t i = 0; i < iters; ++i) {
-                RuntimeValue r = compiled->invoke({RuntimeValue::from_i64(n)});
+        metrics.push_back(run_one("fib_rec_22", "Recursive Fibonacci (n=22)", *mod, "fib_rec",
+            {RuntimeValue::from_i64(22)}, iters, dbg ? 1 : 4, [] {
+                int64_t n = 22;
+                DoNotOptimize(n);
+                int64_t r = native_fib_rec(n);
                 DoNotOptimize(r);
-            }
-        }
-        double jit_ms = sw.stop_ms();
-
-        // 4. Native C++
-        native_fib_rec(n);
-        sw.start();
-        for (size_t i = 0; i < iters; ++i) {
-            int64_t r = native_fib_rec(n);
-            DoNotOptimize(r);
-        }
-        double native_ms = sw.stop_ms();
-
-        InterpBenchmarkMetric m;
-        m.key = "fib_rec_22";
-        m.name = "Recursive Fibonacci (n=22)";
-        compute_metrics(m, iters, oracle_ms, fast_ms, jit_ms, native_ms);
-
-        print_interpreter_benchmark_row(m);
-        metrics.push_back(m);
+            }));
     }
-
-    // ========================================================================
-    // Benchmark 5: Matrix Multiplication (32x32)
-    // ========================================================================
     {
-        const size_t iters = is_debug_build() ? 5 : 35;
+        const size_t iters = dbg ? 5 : 60;
         const int64_t N = 32;
-        const size_t total_elements = static_cast<size_t>(N * N);
-        std::vector<int64_t> A(total_elements, 1);
-        std::vector<int64_t> B(total_elements, 2);
-        std::vector<int64_t> C(total_elements, 0);
-
-        for (size_t idx = 0; idx < total_elements; ++idx) {
+        const size_t total = static_cast<size_t>(N * N);
+        std::vector<int64_t> A(total), B(total), C(total, 0), NC(total, 0);
+        for (size_t idx = 0; idx < total; ++idx) {
             A[idx] = static_cast<int64_t>((idx % 17) + 1);
             B[idx] = static_cast<int64_t>((idx % 13) + 1);
         }
-
         auto mod = build_matmul_i64_naive_module();
-
-        // 1. Oracle
-        Interpreter oracle;
-        oracle.run(*mod, "matmul_i64_naive", {
-            RuntimeValue::from_ptr(A.data()),
-            RuntimeValue::from_ptr(B.data()),
-            RuntimeValue::from_ptr(C.data()),
-            RuntimeValue::from_i64(N)
-        });
-        Stopwatch sw;
-        sw.start();
-        for (size_t i = 0; i < iters; ++i) {
-            RuntimeValue r = oracle.run(*mod, "matmul_i64_naive", {
-                RuntimeValue::from_ptr(A.data()),
-                RuntimeValue::from_ptr(B.data()),
-                RuntimeValue::from_ptr(C.data()),
-                RuntimeValue::from_i64(N)
-            });
-            DoNotOptimize(r);
-        }
-        double oracle_ms = sw.stop_ms();
-
-        // 2. FastInterpreter
-        FastInterpreter fast;
-        fast.run(*mod, "matmul_i64_naive", {
-            RuntimeValue::from_ptr(A.data()),
-            RuntimeValue::from_ptr(B.data()),
-            RuntimeValue::from_ptr(C.data()),
-            RuntimeValue::from_i64(N)
-        });
-        sw.start();
-        for (size_t i = 0; i < iters; ++i) {
-            RuntimeValue r = fast.run(*mod, "matmul_i64_naive", {
-                RuntimeValue::from_ptr(A.data()),
-                RuntimeValue::from_ptr(B.data()),
-                RuntimeValue::from_ptr(C.data()),
-                RuntimeValue::from_i64(N)
-            });
-            DoNotOptimize(r);
-        }
-        double fast_ms = sw.stop_ms();
-
-        // 3. Baseline JIT
-        BaselineJitCompiler jit_compiler;
-        auto compiled_funcs = jit_compiler.compile_module(*mod);
-        const BaselineCompiledFunction* compiled = nullptr;
-        for (const auto& cf : compiled_funcs) {
-            if (cf.name() == "matmul_i64_naive") { compiled = &cf; break; }
-        }
-        if (compiled) {
-            compiled->invoke({
-                RuntimeValue::from_ptr(A.data()),
-                RuntimeValue::from_ptr(B.data()),
-                RuntimeValue::from_ptr(C.data()),
-                RuntimeValue::from_i64(N)
-            });
-        }
-        sw.start();
-        if (compiled) {
-            for (size_t i = 0; i < iters; ++i) {
-                RuntimeValue r = compiled->invoke({
-                    RuntimeValue::from_ptr(A.data()),
-                    RuntimeValue::from_ptr(B.data()),
-                    RuntimeValue::from_ptr(C.data()),
-                    RuntimeValue::from_i64(N)
-                });
-                DoNotOptimize(r);
-            }
-        }
-        double jit_ms = sw.stop_ms();
-
-        // 4. Native C++
-        native_matmul_i64(A.data(), B.data(), C.data(), N);
-        sw.start();
-        for (size_t i = 0; i < iters; ++i) {
-            native_matmul_i64(A.data(), B.data(), C.data(), N);
-            ClobberMemory();
-        }
-        double native_ms = sw.stop_ms();
-
-        InterpBenchmarkMetric m;
-        m.key = "matmul_32x32";
-        m.name = "Matrix Multiply (32x32)";
-        compute_metrics(m, iters, oracle_ms, fast_ms, jit_ms, native_ms);
-
-        print_interpreter_benchmark_row(m);
-        metrics.push_back(m);
+        metrics.push_back(run_one("matmul_32x32", "Matrix Multiply (32x32)", *mod, "matmul_i64_naive",
+            {RuntimeValue::from_ptr(A.data()), RuntimeValue::from_ptr(B.data()),
+             RuntimeValue::from_ptr(C.data()), RuntimeValue::from_i64(N)},
+            iters, dbg ? 1 : 6, [&] {
+                int64_t n = N;
+                DoNotOptimize(n);
+                native_matmul_i64(A.data(), B.data(), NC.data(), n);
+                ClobberMemory();
+            }));
     }
 
-    print_interpreter_benchmark_summary(metrics);
+    for (const auto& m : metrics) print_row(m);
+    std::cout << "==================================================================================================================================\n\n";
 
-    // Record results for benchmark suite
     for (const auto& m : metrics) {
         BenchmarkResult res;
-        res.key = "fast_interp_" + m.key;
+        res.key = "interp_" + m.key;
         res.name = "FastInterpreter: " + m.name;
         res.iterations = m.iterations;
-        res.repetitions = 1;
-        res.native_ms = m.oracle_ms; // Oracle is baseline comparator
-        res.brass_ms = m.fast_ms;
-        // Ratcheted as FastInterpreter time over Oracle time: lower is
-        // better, like every other ratio the ratchet checks.
-        res.ratio = (m.oracle_ms > 0.0) ? (m.fast_ms / m.oracle_ms) : 1.0;
-        res.target_ratio = ratchet.get_ratio(res.key, 1.0);
-        res.passes_bar = res.ratio <= res.target_ratio;
-        res.notes = std::to_string(m.fast_vs_oracle_speedup) + "x vs Oracle; " +
-                    std::to_string(m.jit_vs_fast_speedup) + "x JIT/Fast";
+        res.repetitions = m.fast_vs_jit.samples.size();
+        res.native_ms = m.jit_ms.median;
+        res.native_min_ms = m.jit_ms.min;
+        res.native_max_ms = m.jit_ms.max;
+        res.brass_ms = m.fast_ms.median;
+        res.brass_min_ms = m.fast_ms.min;
+        res.brass_max_ms = m.fast_ms.max;
+        res.ratio = m.fast_vs_jit.median;
+        res.ratio_min = m.fast_vs_jit.min;
+        res.ratio_max = m.fast_vs_jit.max;
+        std::ostringstream notes;
+        notes << std::fixed << std::setprecision(1) << "fast/native " << m.fast_vs_native.median << "x";
+        res.notes = notes.str();
         results.push_back(res);
     }
 }

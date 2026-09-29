@@ -22,7 +22,7 @@ __attribute__((noinline))
 #elif defined(_MSC_VER)
 __declspec(noinline)
 #endif
-int64_t target_stub_1(int64_t x) {
+BRASS_BENCH_SECTION int64_t target_stub_1(int64_t x) {
     DoNotOptimize(x);
     int64_t res = (x + 3) & 0x7FFFFFFF;
     DoNotOptimize(res);
@@ -34,7 +34,7 @@ __attribute__((noinline))
 #elif defined(_MSC_VER)
 __declspec(noinline)
 #endif
-int64_t target_stub_2(int64_t x) {
+BRASS_BENCH_SECTION int64_t target_stub_2(int64_t x) {
     DoNotOptimize(x);
     int64_t res = ((x ^ 0x5555) + 1) & 0x7FFFFFFF;
     DoNotOptimize(res);
@@ -53,7 +53,7 @@ __attribute__((noinline))
 #elif defined(_MSC_VER)
 __declspec(noinline)
 #endif
-double native_nanbox_tag_test(const uint64_t* data, int64_t len) {
+BRASS_BENCH_SECTION double native_nanbox_tag_test(const uint64_t* data, int64_t len) {
     double acc = 0.0;
     for (int64_t i = 0; i < len; ++i) {
         uint64_t v = data[i];
@@ -79,7 +79,7 @@ __attribute__((noinline))
 #elif defined(_MSC_VER)
 __declspec(noinline)
 #endif
-int64_t native_shape_guard(const uintptr_t* objs, int64_t len) {
+BRASS_BENCH_SECTION int64_t native_shape_guard(const uintptr_t* objs, int64_t len) {
     int64_t sum = 0;
     for (int64_t i = 0; i < len; ++i) {
         const uint64_t* obj = reinterpret_cast<const uint64_t*>(objs[i]);
@@ -103,7 +103,7 @@ __attribute__((noinline))
 #elif defined(_MSC_VER)
 __declspec(noinline)
 #endif
-int64_t native_patchable_ic_loop(int64_t iters_phase1, int64_t iters_phase2) {
+BRASS_BENCH_SECTION int64_t native_patchable_ic_loop(int64_t iters_phase1, int64_t iters_phase2) {
     int64_t acc = 0;
     for (int64_t i = 0; i < iters_phase1; ++i) {
         int64_t sub = target_stub_1(acc);
@@ -129,7 +129,7 @@ __attribute__((noinline))
 #elif defined(_MSC_VER)
 __declspec(noinline)
 #endif
-int64_t shadow_stack_alloc_loop(int64_t num_nodes, ThreadShadowStack& ss) {
+BRASS_BENCH_SECTION int64_t shadow_stack_alloc_loop(int64_t num_nodes, ThreadShadowStack& ss) {
     ShadowStackFrame frame;
     frame.roots[0] = nullptr;
     ss.push(&frame, 1);
@@ -232,7 +232,7 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
             std::abort();
         }
 
-        results.push_back(make_paired_result("nanbox", "NaN-Box Tag-Test Loop", iters, paired, ratchet.get_ratio("nanbox", 1.15)));
+        results.push_back(make_paired_result("nanbox", "NaN-Box Tag-Test Loop", iters, paired));
         BenchmarkReporter::print_row(results.back());
     }
 
@@ -304,7 +304,7 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
             std::abort();
         }
 
-        results.push_back(make_paired_result("shapes", "Shape-Guarded Field Loads", iters, paired, ratchet.get_ratio("shapes", 1.20)));
+        results.push_back(make_paired_result("shapes", "Shape-Guarded Field Loads", iters, paired));
         BenchmarkReporter::print_row(results.back());
     }
 
@@ -361,7 +361,7 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
             std::abort();
         }
 
-        results.push_back(make_paired_result("icache", "Patchable-Call Inline Cache", outer_rounds, paired, ratchet.get_ratio("icache", 0.80)));
+        results.push_back(make_paired_result("icache", "Patchable-Call Inline Cache", outer_rounds, paired));
         BenchmarkReporter::print_row(results.back());
     }
 
@@ -430,7 +430,7 @@ void run_js_shapes_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
             std::abort();
         }
 
-        results.push_back(make_paired_result("cheney_gc", "Linked Node Alloc (gc::Heap)", gc_rounds, paired, ratchet.get_ratio("cheney_gc", 1.35)));
+        results.push_back(make_paired_result("cheney_gc", "Linked Node Alloc (gc::Heap)", gc_rounds, paired));
         BenchmarkReporter::print_row(results.back());
 
         brass_set_active_stack_maps(nullptr);

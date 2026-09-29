@@ -382,6 +382,7 @@ add_executable(brass_benchmarks
     benchmarks/bench_compile_speed.cpp
     benchmarks/bench_simd_math.cpp
     benchmarks/bench_interpreter.cpp
+    benchmarks/bench_load.cpp
 )
 
 target_include_directories(brass_benchmarks

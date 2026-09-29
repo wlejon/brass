@@ -25,7 +25,16 @@ Standalone C++20 library with CMake.
 
 ## Performance Tracking
 
-Benchmarks live in `tests/benchmarks` and run under the `perf` ctest label, which also checks them against the recorded ratchet in `bench/ratchet.json`; results depend on the machine. The ratios compare brass with native code built by the host compiler, so `bench/ratchet.<platform>.json` (`linux`, `windows`, `macos`), when present, overrides the keys it names on that platform; `--update-ratchet` writes those keys back to it. `brass_gc_pause_bench` reports the heap's minor and full collection pauses against the size of the live old generation.
+Benchmarks live in `tests/benchmarks` and run under the `perf` ctest label, which also checks them against the recorded ratchet in `bench/ratchet.json`; results depend on the machine. The ratios compare brass with native code built by the host compiler, so `bench/ratchet.<platform>.json` (`linux`, `windows`, `macos`), when present, overrides the keys it names on that platform. `brass_gc_pause_bench` reports the heap's minor and full collection pauses against the size of the live old generation.
+
+The ratchet has one notion of pass: each key's number (a median over repetitions) may be worse than its golden by at most that key's margin, 10% unless `RatchetPolicy` in `tests/benchmarks/bench_ratchet.hpp` widens it for a key that is noisier between quiet runs. There are no aspiration targets; a design claim such as the stack-map GC model beating a shadow stack (`gc_model_speedup`, higher is better) or compile speed is held by its golden like any other key. The `interp_*` keys are the fast interpreter's time over the baseline JIT's on the same MIR, with the interpreter on a program of its own so nothing tiers up (native C++ as the denominator moved 10-13% when a relink shifted its alignment; re-baseline these keys when the baseline JIT's codegen changes). The suite prints the machine's CPU load before and during the run and flags a busy machine, whose numbers should be neither trusted nor recorded; on Windows it pins the benchmark thread to one logical CPU (`--cpu`, `BRASS_BENCH_CPU`; `-1` turns it off) so a run does not move between unlike cores.
+
+```bash
+build_vs/tests/Release/brass_benchmarks.exe --check-ratchet    # the gate: exit 1 on a regression
+build_vs/tests/Release/brass_benchmarks.exe --update-ratchet   # record this run's medians as goldens
+```
+
+`--update-ratchet` writes every measured key to the platform overlay when one exists (so re-baselining one platform never rewrites another's goldens), otherwise to `bench/ratchet.json`. Re-baseline only on a quiet machine, from a run that already looks like the runs before it.
 
 ## Building & Testing
 
