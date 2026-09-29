@@ -82,7 +82,7 @@ TEST_CASE("Mach-O Writer - Header and Section Table Layout") {
     CHECK(nsects >= 2u); // __text and __eh_frame (and __const if stack maps present)
 
     bool found_text = false;
-    bool found_eh_frame = false;
+    bool found_unwind = false;
 
     const uint8_t* sec_ptr = cmd_ptr + 72;
     for (uint32_t i = 0; i < nsects; ++i) {
@@ -103,16 +103,15 @@ TEST_CASE("Mach-O Writer - Header and Section Table Layout") {
             CHECK(offset >= 32 + sizeofcmds);
             CHECK_EQ(align_pow2, 4u); // 2^4 = 16-byte aligned
             CHECK((flags & macho::S_ATTR_PURE_INSTRUCTIONS) != 0);
-        } else if (std::strcmp(sectname, "__eh_frame") == 0) {
-            found_eh_frame = true;
-            CHECK_EQ(std::string(segname), "__TEXT");
+        } else if (std::strcmp(sectname, "__compact_unwind") == 0 || std::strcmp(sectname, "__eh_frame") == 0) {
+            found_unwind = true;
             CHECK(size > 0);
             CHECK(align_pow2 >= 3u); // At least 8-byte aligned
         }
     }
 
     CHECK(found_text);
-    CHECK(found_eh_frame);
+    CHECK(found_unwind);
 
     // 3. LC_BUILD_VERSION: ld warns about an object without one
     cmd_ptr += seg_cmdsize;

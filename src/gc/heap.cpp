@@ -25,7 +25,11 @@ using detail::MutatorFrame;
 // The thread's heap (Heap::current); runtime_gc.cpp reads it directly on
 // generated code's allocation path.
 namespace detail {
+#if defined(_MSC_VER)
 thread_local Heap* t_current_heap = nullptr;
+#else
+__attribute__((visibility("default"))) thread_local Heap* t_current_heap = nullptr;
+#endif
 }
 using detail::t_current_heap;
 
@@ -181,8 +185,13 @@ void Heap::set_default_config(const HeapConfig& config) {
     default_config_storage() = config;
 }
 
+#if defined(_MSC_VER)
 Heap* Heap::current() noexcept { return t_current_heap; }
 void Heap::set_current(Heap* heap) noexcept { t_current_heap = heap; }
+#else
+__attribute__((visibility("default"))) Heap* Heap::current() noexcept { return t_current_heap; }
+__attribute__((visibility("default"))) void Heap::set_current(Heap* heap) noexcept { t_current_heap = heap; }
+#endif
 
 // ---- young generation bookkeeping --------------------------------------------
 

@@ -106,6 +106,10 @@ public:
         bool with_personality = false
     );
 
+    // Emits the LSDA of each function with exception scopes into .gcc_except_table,
+    // and returns the offset in .gcc_except_table for each function (SIZE_MAX if none).
+    static std::vector<size_t> emit_lsdas(ObjectFile& obj);
+
     // The two sections `with_personality` adds, for an image writer that
     // places only a fixed set of sections and folds these into its own.
     static constexpr const char* kLsdaSection = ".gcc_except_table";

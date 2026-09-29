@@ -135,8 +135,13 @@ public:
     // ---- The thread's heap -------------------------------------------------
     // The heap generated code and brass's interpreters allocate from on the
     // calling thread (null: none). Prefer HeapScope.
+#if defined(_MSC_VER)
     static Heap* current() noexcept;
     static void set_current(Heap* heap) noexcept;
+#else
+    __attribute__((visibility("default"))) static Heap* current() noexcept;
+    __attribute__((visibility("default"))) static void set_current(Heap* heap) noexcept;
+#endif
 
     // ---- Allocation --------------------------------------------------------
     // A zeroed object of at least `bytes` payload bytes (see

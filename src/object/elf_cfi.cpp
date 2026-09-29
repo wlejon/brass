@@ -122,10 +122,9 @@ size_t emit_cie(Section& sec, bool is_aarch64, bool personality) {
     return cie_start;
 }
 
-// The LSDA of every function with exception scopes, in kLsdaSection, and
-// the personality word; returns each function's LSDA offset (SIZE_MAX for
-// one without scopes). Returns an empty vector when no function has scopes.
-std::vector<size_t> emit_lsdas(ObjectFile& obj) {
+} // namespace
+
+std::vector<size_t> ElfCfiBuilder::emit_lsdas(ObjectFile& obj) {
     bool any = false;
     for (const auto& fn : obj.functions) any = any || fn.exception_table.has_scopes();
     if (!any) return {};
@@ -149,21 +148,8 @@ std::vector<size_t> emit_lsdas(ObjectFile& obj) {
         s.type = SymbolType::Function;
         obj.add_symbol(std::move(s));
     }
-    Section& word = obj.get_or_create_section(kPersonalitySection, SectionKind::Data,
-                                              SectionFlags::Read | SectionFlags::Write | SectionFlags::Alloc, 8);
-    if (word.data.empty()) {
-        ObjectRelocation r;
-        r.offset = 0;
-        r.kind = RelocKind::Abs64;
-        r.symbol_name = kPersonalitySymbol;
-        r.addend = 0;
-        word.relocations.push_back(std::move(r));
-        word.emit64(0);
-    }
     return offsets;
 }
-
-} // namespace
 
 void ElfCfiBuilder::build_eh_frame(
     ObjectFile& obj,
@@ -178,6 +164,19 @@ void ElfCfiBuilder::build_eh_frame(
         if (&obj.sections[i] == &eh_frame_section) own_index = i;
     }
     const std::vector<size_t> lsda_offsets = with_personality ? emit_lsdas(obj) : std::vector<size_t>{};
+    if (!lsda_offsets.empty()) {
+        Section& word = obj.get_or_create_section(kPersonalitySection, SectionKind::Data,
+                                                  SectionFlags::Read | SectionFlags::Write | SectionFlags::Alloc, 8);
+        if (word.data.empty()) {
+            ObjectRelocation r;
+            r.offset = 0;
+            r.kind = RelocKind::Abs64;
+            r.symbol_name = kPersonalitySymbol;
+            r.addend = 0;
+            word.relocations.push_back(std::move(r));
+            word.emit64(0);
+        }
+    }
     Section& eh_frame_sec = own_index ? obj.sections[*own_index] : eh_frame_section;
 
     bool is_aarch64 = obj.target.is_aarch64();

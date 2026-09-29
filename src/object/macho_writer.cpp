@@ -1,6 +1,7 @@
 #include <brass/object/macho_writer.hpp>
 #include <brass/object/elf_writer.hpp>
 #include <brass/object/aarch64_reloc.hpp>
+#include <brass/target/aarch64/aarch64_frame.hpp>
 #include <fstream>
 #include <cstring>
 #include <stdexcept>
@@ -144,11 +145,15 @@ void encode_macho_reloc(MachOSectionEntry& s, const ObjectRelocation& r, bool is
         } else if (r.kind == RelocKind::GotPCRel32) {
             r_pcrel = 1;
             r_type = macho::X86_64_RELOC_GOT_LOAD;
-        } else if (r.kind == RelocKind::Abs64) {
-            r_length = 3; // 8 bytes
+        } else if (r.kind == RelocKind::Abs64 || r.kind == RelocKind::Abs32 || r.kind == RelocKind::Addr32NB) {
             r_type = macho::X86_64_RELOC_UNSIGNED;
-        } else if (r.kind == RelocKind::Abs32 || r.kind == RelocKind::Addr32NB) {
-            r_type = macho::X86_64_RELOC_UNSIGNED;
+            r_length = r.kind == RelocKind::Abs64 ? 3 : 2;
+            const size_t width = r.kind == RelocKind::Abs64 ? 8 : 4;
+            if (r.addend != 0) {
+                if (r.offset + width > s.data.size()) bad_reloc(r, "outside its section");
+                const uint64_t a = static_cast<uint64_t>(r.addend);
+                std::memcpy(s.data.data() + r.offset, &a, width);
+            }
         } else if (a64::is_instruction_kind(r.kind)) {
             bad_reloc(r, "an AArch64 relocation in an x86-64 object");
         }
@@ -311,17 +316,99 @@ std::vector<uint8_t> MachOWriter::write() {
     // GOT_LOAD relocations for ld64 to bind (and relax if it can).
     relax_got_loads(working_obj);
 
-    // Generate DWARF .eh_frame for unwinding
+    // Generate compact unwind and LSDAs for Darwin
     if (!working_obj.functions.empty()) {
-        working_obj.get_or_create_section(
-            ".eh_frame",
-            SectionKind::EhFrame,
-            SectionFlags::Read | SectionFlags::Alloc,
+        std::vector<size_t> lsda_offsets = ElfCfiBuilder::emit_lsdas(working_obj);
+        Section& cu_sec = working_obj.get_or_create_section(
+            "__compact_unwind",
+            SectionKind::Custom,
+            SectionFlags::Alloc,
             8
         );
-        Section* eh_frame_sec = working_obj.get_section(".eh_frame");
-        if (eh_frame_sec && eh_frame_sec->data.empty()) {
-            ElfCfiBuilder::build_eh_frame(working_obj, *eh_frame_sec);
+        const bool is_aarch64 = working_obj.target.is_aarch64();
+        for (size_t fn_idx = 0; fn_idx < working_obj.functions.size(); ++fn_idx) {
+            const auto& fn = working_obj.functions[fn_idx];
+            const size_t entry_offset = cu_sec.data.size();
+            const bool has_lsda = !lsda_offsets.empty() && fn_idx < lsda_offsets.size() &&
+                                  lsda_offsets[fn_idx] != SIZE_MAX;
+
+            // 1. Function start address (8 bytes, Abs64 relocation)
+            ObjectRelocation fn_reloc;
+            fn_reloc.offset = entry_offset;
+            fn_reloc.kind = RelocKind::Abs64;
+            if (!fn.name.empty() && working_obj.find_symbol(fn.name)) {
+                fn_reloc.symbol_name = fn.name;
+                fn_reloc.addend = 0;
+            } else {
+                fn_reloc.symbol_name = ".text";
+                fn_reloc.addend = static_cast<int64_t>(fn.text_offset);
+            }
+            cu_sec.relocations.push_back(std::move(fn_reloc));
+            cu_sec.emit64(0);
+
+            // 2. Function length (4 bytes)
+            cu_sec.emit32(static_cast<uint32_t>(fn.text_size));
+
+            // 3. Compact unwind encoding (4 bytes)
+            uint32_t encoding = 0;
+            if (has_lsda) {
+                encoding |= 0x40000000u; // UNWIND_HAS_LSDA
+            }
+            if (is_aarch64) {
+                if (fn.frame_info.is_leaf) {
+                    uint32_t stack_units = static_cast<uint32_t>(fn.frame_info.total_frame_size / 16);
+                    encoding |= 0x02000000u | ((stack_units << 12) & 0x00FFF000u); // UNWIND_ARM64_MODE_FRAMELESS
+                } else {
+                    encoding |= 0x04000000u; // UNWIND_ARM64_MODE_FRAME
+                    auto gprs = aarch64::AArch64FrameLayout::get_saved_callee_gprs(fn.frame_info);
+                    auto has_gpr = [&](int r) {
+                        return std::find(gprs.begin(), gprs.end(), static_cast<aarch64::GPR>(r)) != gprs.end();
+                    };
+                    if (has_gpr(19) && has_gpr(20)) encoding |= 0x00000001u;
+                    if (has_gpr(21) && has_gpr(22)) encoding |= 0x00000002u;
+                    if (has_gpr(23) && has_gpr(24)) encoding |= 0x00000004u;
+                    if (has_gpr(25) && has_gpr(26)) encoding |= 0x00000008u;
+                    if (has_gpr(27) && has_gpr(28)) encoding |= 0x00000010u;
+                    auto fprs = aarch64::AArch64FrameLayout::get_saved_callee_fprs(fn.frame_info);
+                    auto has_fpr = [&](int r) {
+                        return std::find(fprs.begin(), fprs.end(), static_cast<aarch64::FPR>(r)) != fprs.end();
+                    };
+                    if (has_fpr(8) && has_fpr(9)) encoding |= 0x00000100u;
+                    if (has_fpr(10) && has_fpr(11)) encoding |= 0x00000200u;
+                    if (has_fpr(12) && has_fpr(13)) encoding |= 0x00000400u;
+                    if (has_fpr(14) && has_fpr(15)) encoding |= 0x00000800u;
+                }
+            } else {
+                if (fn.frame_info.is_leaf) {
+                    uint32_t stack_units = static_cast<uint32_t>(fn.frame_info.total_frame_size / 8);
+                    encoding |= 0x02000000u | ((stack_units << 16) & 0x00FF0000u); // UNWIND_X86_64_MODE_STACK_IMMD
+                } else {
+                    encoding |= 0x01000000u; // UNWIND_X86_64_MODE_RBP_FRAME
+                }
+            }
+            cu_sec.emit32(encoding);
+
+            // 4. Personality function (8 bytes)
+            if (has_lsda) {
+                ObjectRelocation pers_reloc;
+                pers_reloc.offset = entry_offset + 16;
+                pers_reloc.kind = RelocKind::Abs64;
+                pers_reloc.symbol_name = "brass_sysv_personality";
+                pers_reloc.addend = 0;
+                cu_sec.relocations.push_back(std::move(pers_reloc));
+            }
+            cu_sec.emit64(0);
+
+            // 5. LSDA address (8 bytes)
+            if (has_lsda) {
+                ObjectRelocation lsda_reloc;
+                lsda_reloc.offset = entry_offset + 24;
+                lsda_reloc.kind = RelocKind::Abs64;
+                lsda_reloc.symbol_name = ".gcc_except_table";
+                lsda_reloc.addend = static_cast<int64_t>(lsda_offsets[fn_idx]);
+                cu_sec.relocations.push_back(std::move(lsda_reloc));
+            }
+            cu_sec.emit64(0);
         }
     }
 
@@ -345,14 +432,16 @@ std::vector<uint8_t> MachOWriter::write() {
             entry.segname = sec.relocations.empty() ? "__TEXT" : "__DATA";
             entry.flags = macho::S_REGULAR;
             if (entry.align_pow2 < 4) entry.align_pow2 = 4;
-        } else if (sec.name == ".data" || sec.kind == SectionKind::Data) {
-            entry.sectname = "__data";
-            entry.segname = "__DATA";
+        } else if (sec.name == ".gcc_except_table") {
+            entry.sectname = "__gcc_except_tab";
+            entry.segname = "__TEXT";
             entry.flags = macho::S_REGULAR;
-        } else if (sec.name == ".bss" || sec.kind == SectionKind::Bss) {
-            entry.sectname = "__bss";
-            entry.segname = "__DATA";
-            entry.flags = macho::S_ZEROFILL;
+            if (entry.align_pow2 < 2) entry.align_pow2 = 2;
+        } else if (sec.name == "__compact_unwind" || sec.name == ".compact_unwind") {
+            entry.sectname = "__compact_unwind";
+            entry.segname = "__LD";
+            entry.flags = macho::S_REGULAR | 0x02000000u; // S_ATTR_DEBUG
+            if (entry.align_pow2 < 3) entry.align_pow2 = 3;
         } else if (sec.name == ".eh_frame" || sec.kind == SectionKind::EhFrame) {
             entry.sectname = "__eh_frame";
             entry.segname = "__TEXT";
@@ -365,6 +454,14 @@ std::vector<uint8_t> MachOWriter::write() {
                 entry.data[entry.data.size() - 1] == 0) {
                 entry.data.resize(entry.data.size() - 4);
             }
+        } else if (sec.name == ".data" || sec.kind == SectionKind::Data) {
+            entry.sectname = "__data";
+            entry.segname = "__DATA";
+            entry.flags = macho::S_REGULAR;
+        } else if (sec.name == ".bss" || sec.kind == SectionKind::Bss) {
+            entry.sectname = "__bss";
+            entry.segname = "__DATA";
+            entry.flags = macho::S_ZEROFILL;
         } else if (sec.name.rfind(".brass_dbg", 0) == 0 || sec.name.rfind(".debug", 0) == 0) {
             entry.sectname = "__" + sec.name.substr(1);
             entry.segname = "__DWARF";
@@ -519,30 +616,7 @@ std::vector<uint8_t> MachOWriter::write() {
         }
     }
 
-    // Pre-resolve PC-relative displacements in __eh_frame and clear relocations
-    for (auto& s : macho_sections) {
-        if (s.sectname == "__eh_frame") {
-            uint64_t text_addr = 0;
-            for (const auto& other : macho_sections) {
-                if (other.sectname == "__text") {
-                    text_addr = other.addr;
-                    break;
-                }
-            }
-            for (const auto& r : s.relocations) {
-                int64_t target_addr = static_cast<int64_t>(text_addr) + r.addend;
-                int64_t cur_addr = static_cast<int64_t>(s.addr + r.offset);
-                int32_t disp = static_cast<int32_t>(target_addr - cur_addr);
-                if (r.offset + 4 <= s.data.size()) {
-                    s.data[r.offset + 0] = static_cast<uint8_t>(disp & 0xFF);
-                    s.data[r.offset + 1] = static_cast<uint8_t>((disp >> 8) & 0xFF);
-                    s.data[r.offset + 2] = static_cast<uint8_t>((disp >> 16) & 0xFF);
-                    s.data[r.offset + 3] = static_cast<uint8_t>((disp >> 24) & 0xFF);
-                }
-            }
-            s.relocations.clear();
-        }
-    }
+
 
     // Encode the relocation_info entries (an ARM64 addend is a separate
     // ARM64_RELOC_ADDEND entry in front of the one it modifies, so the count

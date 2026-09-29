@@ -16,8 +16,10 @@
 
 #if defined(_MSC_VER)
 #define BRASS_CORO_NOINLINE __declspec(noinline)
+#define BRASS_CORO_EXPORT
 #else
 #define BRASS_CORO_NOINLINE __attribute__((noinline))
+#define BRASS_CORO_EXPORT __attribute__((visibility("default")))
 #endif
 
 namespace brass::runtime {
@@ -26,19 +28,19 @@ namespace {
 
 static MicrotaskQueue g_microtask_queue;
 
+} // namespace
+
 // The set of live registries, and every CoroFrameCell's state and owner
 // (leaked: heaps may die during static destruction). Recursive: a visitor
 // may register frames.
-std::recursive_mutex& registries_mutex() {
+BRASS_CORO_EXPORT std::recursive_mutex& registries_mutex() {
     static auto* m = new std::recursive_mutex();
     return *m;
 }
-std::vector<CoroFrameRegistry*>& live_registries() {
+BRASS_CORO_EXPORT std::vector<CoroFrameRegistry*>& live_registries() {
     static auto* v = new std::vector<CoroFrameRegistry*>();
     return *v;
 }
-
-} // namespace
 
 // One registered frame. `addr` is the root slot a collection of the owning
 // heap updates (under the registry's lock); `state` and `owner` are guarded
@@ -97,20 +99,20 @@ CoroRootsLock::~CoroRootsLock() {
     registry_->mutex.unlock();
 }
 
-namespace {
-
 // Every frame allocated outside any heap: they are never freed, so an
 // address here stays a frame. Guarded by unmanaged_frames()' lock.
-std::unordered_set<uintptr_t>& unmanaged_frame_addrs() {
+BRASS_CORO_EXPORT std::unordered_set<uintptr_t>& unmanaged_frame_addrs() {
     static auto* s = new std::unordered_set<uintptr_t>();
     return *s;
 }
-CoroFrameRegistry& unmanaged_frames() {
+BRASS_CORO_EXPORT CoroFrameRegistry& unmanaged_frames() {
     static auto* r = new CoroFrameRegistry([](uintptr_t addr) {
         return unmanaged_frame_addrs().count(addr) != 0;
     });
     return *r;
 }
+
+namespace {
 
 // The frame `handle` names, once some live heap is known to hold it (its
 // registry's `holds`); otherwise a hard error, before any access through it.
