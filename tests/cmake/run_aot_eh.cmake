@@ -1,5 +1,5 @@
-# Runs the AOT exception host (tests/aot/eh_aot_host.c linked with the COFF
-# object brass-opt -c made from tests/aot/eh_aot.mir, and brass.lib) and
+# Runs the AOT exception host (tests/aot/eh_aot_host.c linked with the object
+# brass-opt -c made from tests/aot/eh_aot.mir, and the brass library) and
 # checks every "<function> <arg> <result>" line it prints against brass-opt
 # running the same function in the interpreter and under --jit.
 #

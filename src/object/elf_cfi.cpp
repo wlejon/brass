@@ -64,9 +64,10 @@ constexpr const char* kPersonalitySection = ElfCfiBuilder::kPersonalitySection;
 constexpr const char* kPersonalitySymbol = "brass_sysv_personality";
 
 // One CIE; returns its offset. With `personality`, it is "zPLR": the
-// personality through kPersonalitySection's word and an LSDA pointer in
-// every FDE that uses it; otherwise "zR".
-size_t emit_cie(Section& sec, bool is_aarch64, bool personality) {
+// personality through kPersonalitySection's word (or, `via_got`, through the
+// slot the static linker makes for the symbol) and an LSDA pointer in every
+// FDE that uses it; otherwise "zR".
+size_t emit_cie(Section& sec, bool is_aarch64, bool personality, bool via_got = false) {
     sec.align_to(8);
     const size_t cie_start = sec.data.size();
     sec.emit32(0); // Length placeholder
@@ -89,8 +90,8 @@ size_t emit_cie(Section& sec, bool is_aarch64, bool personality) {
         sec.emit8(kIndirect | kPcrelSdata4);
         ObjectRelocation r;
         r.offset = sec.data.size();
-        r.kind = RelocKind::PCRel32;
-        r.symbol_name = kPersonalitySection;
+        r.kind = via_got ? RelocKind::GotPCRel32 : RelocKind::PCRel32;
+        r.symbol_name = via_got ? kPersonalitySymbol : kPersonalitySection;
         r.addend = 0;
         sec.relocations.push_back(std::move(r));
         sec.emit32(0);
@@ -154,7 +155,8 @@ std::vector<size_t> ElfCfiBuilder::emit_lsdas(ObjectFile& obj) {
 void ElfCfiBuilder::build_eh_frame(
     ObjectFile& obj,
     Section& eh_frame_section,
-    bool with_personality
+    bool with_personality,
+    bool personality_via_got
 ) {
     // The LSDA and personality sections come first: creating a section may
     // move the one passed in when it is one of `obj`'s own, so that one is
@@ -164,7 +166,7 @@ void ElfCfiBuilder::build_eh_frame(
         if (&obj.sections[i] == &eh_frame_section) own_index = i;
     }
     const std::vector<size_t> lsda_offsets = with_personality ? emit_lsdas(obj) : std::vector<size_t>{};
-    if (!lsda_offsets.empty()) {
+    if (!lsda_offsets.empty() && !personality_via_got) {
         Section& word = obj.get_or_create_section(kPersonalitySection, SectionKind::Data,
                                                   SectionFlags::Read | SectionFlags::Write | SectionFlags::Alloc, 8);
         if (word.data.empty()) {
@@ -184,7 +186,8 @@ void ElfCfiBuilder::build_eh_frame(
     // 1. Common Information Entries: the plain one, and the one naming the
     // personality when some function has landing pads.
     const size_t cie_start = emit_cie(eh_frame_sec, is_aarch64, false);
-    const size_t eh_cie_start = lsda_offsets.empty() ? cie_start : emit_cie(eh_frame_sec, is_aarch64, true);
+    const size_t eh_cie_start =
+        lsda_offsets.empty() ? cie_start : emit_cie(eh_frame_sec, is_aarch64, true, personality_via_got);
 
     // 2. Frame Description Entries (FDE) for each function
     for (size_t fn_index = 0; fn_index < obj.functions.size(); ++fn_index) {

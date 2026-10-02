@@ -100,10 +100,17 @@ public:
     // function it calls lands at its pads. The builder adds those sections
     // and the personality's undefined symbol to `obj`; the reference passed
     // in is looked up again afterwards, since adding a section may move it.
+    //
+    // `personality_via_got` is the form a Mach-O relocatable object takes:
+    // no pointer word, and the CIE's personality field carries a GotPCRel32
+    // relocation against brass_sysv_personality itself, which the writer
+    // turns into the pointer-to-GOT relocation ld requires there (it finds
+    // the personality by that relocation, not by the bytes).
     static void build_eh_frame(
         ObjectFile& obj,
         Section& eh_frame_sec,
-        bool with_personality = false
+        bool with_personality = false,
+        bool personality_via_got = false
     );
 
     // Emits the LSDA of each function with exception scopes into .gcc_except_table,

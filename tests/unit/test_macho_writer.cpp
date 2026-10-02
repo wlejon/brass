@@ -408,6 +408,144 @@ bad:
     }
 }
 
+// What ld needs from a relocatable object to give each function its own
+// pads: an FDE per function under a CIE whose personality is a GOT-pointer
+// relocation against the symbol, and each LSDA under a symbol of its own in
+// __TEXT,__gcc_except_tab, with the FDE's resolved pointers landing on the
+// function and on that symbol. The object once carried __compact_unwind
+// entries whose LSDA fields were bare offsets into a section it named
+// __const: ld resolved all of them to the first function's table, so only
+// the first function with a pad in an object ever caught.
+TEST_CASE("Mach-O Writer - every function with landing pads gets its own LSDA atom") {
+    const char* src = R"(module @obj_eh
+func @ob_thrower(%x: i64) -> i64 {
+b0:
+  throw %x
+}
+func @ob_first(%x: i64) -> i64 {
+b0:
+  %v = invoke.i64 @ob_thrower(%x), ok, bad
+ok:
+  ret %v
+bad:
+  %e = landing_pad.i64
+  ret %e
+}
+func @ob_second(%x: i64) -> i64 {
+b0:
+  %v = invoke.i64 @ob_first(%x), ok, bad
+ok:
+  ret %v
+bad:
+  %e = landing_pad.i64
+  %r = add %e, %x
+  ret %r
+}
+)";
+    for (const Target target : {Target::x64_macos(), Target::aarch64_macos()}) {
+        DiagnosticReporter diag;
+        auto mod = parse_module(src, &diag);
+        REQUIRE(mod != nullptr);
+        REQUIRE(verify_module(*mod, &diag));
+        ObjectFile obj = compile_module_to_object(*mod, target);
+        const std::vector<uint8_t> bytes = emit_macho_object(obj);
+        REQUIRE(bytes.size() >= 32);
+
+        struct Sec {
+            std::string name, seg;
+            uint64_t addr = 0, size = 0;
+            uint32_t offset = 0, reloff = 0, nreloc = 0;
+        };
+        std::vector<Sec> secs;
+        const uint8_t* seg = bytes.data() + 32;
+        REQUIRE_EQ(read_u32(seg), macho::LC_SEGMENT_64);
+        const uint32_t nsects = read_u32(seg + 64);
+        for (uint32_t i = 0; i < nsects; ++i) {
+            const uint8_t* p = seg + 72 + i * 80;
+            char sectname[17] = {0};
+            char segname[17] = {0};
+            std::memcpy(sectname, p, 16);
+            std::memcpy(segname, p + 16, 16);
+            secs.push_back({sectname, segname, read_u64(p + 32), read_u64(p + 40), read_u32(p + 48),
+                            read_u32(p + 56), read_u32(p + 60)});
+        }
+        const Sec* eh = nullptr;
+        const Sec* lsda = nullptr;
+        uint8_t lsda_sect = 0;
+        for (size_t i = 0; i < secs.size(); ++i) {
+            CHECK(secs[i].name != "__compact_unwind");
+            if (secs[i].name == "__eh_frame") eh = &secs[i];
+            if (secs[i].name == "__gcc_except_tab") {
+                lsda = &secs[i];
+                lsda_sect = static_cast<uint8_t>(i + 1);
+            }
+        }
+        REQUIRE(eh != nullptr);
+        REQUIRE(lsda != nullptr);
+        CHECK_EQ(lsda->seg, std::string("__TEXT"));
+
+        const uint8_t* symtab = seg + read_u32(seg + 4) + 24;  // past LC_BUILD_VERSION
+        REQUIRE_EQ(read_u32(symtab), macho::LC_SYMTAB);
+        const uint32_t symoff = read_u32(symtab + 8);
+        const uint32_t nsyms = read_u32(symtab + 12);
+        const char* strtab = reinterpret_cast<const char*>(bytes.data() + read_u32(symtab + 16));
+        auto sym_name = [&](uint32_t i) { return std::string(strtab + read_u32(bytes.data() + symoff + i * 16)); };
+        auto sym_value = [&](uint32_t i) { return read_u64(bytes.data() + symoff + i * 16 + 8); };
+        std::vector<uint64_t> lsda_atoms;
+        std::vector<uint64_t> fn_starts;
+        for (uint32_t i = 0; i < nsyms; ++i) {
+            const uint8_t* s = bytes.data() + symoff + i * 16;
+            const std::string name = sym_name(i);
+            if (name.rfind("_GCC_except_table", 0) == 0) {
+                CHECK_EQ(s[4], macho::N_SECT);  // local
+                CHECK_EQ(s[5], lsda_sect);
+                lsda_atoms.push_back(sym_value(i));
+            }
+            if (name == "_ob_first" || name == "_ob_second") fn_starts.push_back(sym_value(i));
+        }
+        std::sort(lsda_atoms.begin(), lsda_atoms.end());
+        REQUIRE_EQ(lsda_atoms.size(), size_t{2});
+        REQUIRE_EQ(fn_starts.size(), size_t{2});
+        CHECK(lsda_atoms[0] == lsda->addr);
+        CHECK(lsda_atoms[0] < lsda_atoms[1]);
+        CHECK(lsda_atoms[1] < lsda->addr + lsda->size);
+
+        // The one relocation of __eh_frame: the personality, through the GOT.
+        REQUIRE_EQ(eh->nreloc, 1u);
+        const uint32_t r_info = read_u32(bytes.data() + eh->reloff + 4);
+        CHECK_EQ((r_info >> 24) & 1, 1u);  // pcrel
+        CHECK_EQ((r_info >> 25) & 3, 2u);  // 4 bytes
+        CHECK_EQ((r_info >> 27) & 1, 1u);  // extern
+        CHECK_EQ((r_info >> 28) & 0xF, target.is_aarch64() ? uint32_t{macho::ARM64_RELOC_POINTER_TO_GOT}
+                                                           : uint32_t{macho::X86_64_RELOC_GOT});
+        CHECK_EQ(sym_name(r_info & 0x00FFFFFFu), std::string("_brass_sysv_personality"));
+
+        // Each FDE that has an LSDA: its function start and its LSDA, as
+        // resolved in place, are a catcher and that catcher's own table.
+        std::vector<uint64_t> fde_fns;
+        std::vector<uint64_t> fde_lsdas;
+        const uint8_t* ehp = bytes.data() + eh->offset;
+        for (uint64_t at = 0; at + 8 <= eh->size;) {
+            const uint32_t len = read_u32(ehp + at);
+            if (len == 0) break;
+            const bool is_fde = read_u32(ehp + at + 4) != 0;
+            if (is_fde && ehp[at + 16] == 4) {
+                auto pcrel = [&](uint64_t field) {
+                    return eh->addr + field + static_cast<int64_t>(static_cast<int32_t>(read_u32(ehp + field)));
+                };
+                fde_fns.push_back(pcrel(at + 8));
+                fde_lsdas.push_back(pcrel(at + 17));
+            }
+            at += 4 + len;
+        }
+        std::sort(fde_fns.begin(), fde_fns.end());
+        std::sort(fde_lsdas.begin(), fde_lsdas.end());
+        std::sort(fn_starts.begin(), fn_starts.end());
+        CHECK(fde_fns == fn_starts);
+        CHECK(fde_lsdas == lsda_atoms);
+    }
+}
+
 TEST_CASE("Mach-O Writer - LC_BUILD_VERSION carries the requested or resolved platform and versions") {
     CHECK_EQ(MachOBuildVersion::parse_version("11").value_or(0), 0x000B0000u);
     CHECK_EQ(MachOBuildVersion::parse_version("10.15").value_or(0), 0x000A0F00u);

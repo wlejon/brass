@@ -1,5 +1,5 @@
 /* Host for the AOT exception test: calls the brass functions compiled from
- * eh_aot.mir into a COFF object and prints one "<function> <arg> <result>"
+ * eh_aot.mir into an object file and prints one "<function> <arg> <result>"
  * line per call, for tests/cmake/run_aot_eh.cmake to check against the
  * interpreter. Every call with arg > 0 throws inside brass code. */
 #include <stdint.h>

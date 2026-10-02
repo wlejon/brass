@@ -639,16 +639,31 @@ if(BRASS_BUILD_TOOLS)
         set_tests_properties("brass_opt_cli.compile_scaling.${_shape}.jit" PROPERTIES
             TIMEOUT 60 LABELS "correctness")
     endforeach()
-    # aot_coff.eh: exceptions in AOT COFF code on Win64. brass-opt -c makes
-    # an object from tests/aot/eh_aot.mir, MSVC links it with a C host and
-    # brass.lib, and every result must match the interpreter and the JIT:
-    # throw to a landing pad, rethrow from a pad, resume, and values live
-    # into a pad across a frame that uses callee-saved registers. The first
-    # throw once ended the process silently (unrelocated scope tables, a
-    # personality that never unwound, and a throw that only searched JIT
-    # code).
+    # aot_<format>.eh: exceptions in AOT object code that the system linker
+    # links. brass-opt -c makes an object from tests/aot/eh_aot.mir, the
+    # toolchain links it with a C host and the brass library, and every
+    # result must match the interpreter and the JIT: throw to a landing pad,
+    # rethrow from a pad, resume, and values live into a pad across a frame
+    # that uses callee-saved registers.
+    #  - aot_coff.eh (Win64): the first throw once ended the process silently
+    #    (unrelocated scope tables, a personality that never unwound, and a
+    #    throw that only searched JIT code).
+    #  - aot_macho.eh: ld gave every function of the object the first
+    #    function's LSDA, so only that one caught, and the compact unwind
+    #    encodings described a register-save layout brass frames do not have.
+    #  - aot_elf.eh: the same host over the ELF object's .eh_frame.
+    set(_eh_aot_test "")
     if(MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64")
+        set(_eh_aot_test aot_coff.eh)
         set(_eh_aot_obj "${CMAKE_CURRENT_BINARY_DIR}/aot/eh_aot.obj")
+    elseif(APPLE)
+        set(_eh_aot_test aot_macho.eh)
+        set(_eh_aot_obj "${CMAKE_CURRENT_BINARY_DIR}/aot/eh_aot.o")
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        set(_eh_aot_test aot_elf.eh)
+        set(_eh_aot_obj "${CMAKE_CURRENT_BINARY_DIR}/aot/eh_aot.o")
+    endif()
+    if(_eh_aot_test)
         add_custom_command(
             OUTPUT "${_eh_aot_obj}"
             COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/aot"
@@ -660,13 +675,13 @@ if(BRASS_BUILD_TOOLS)
         add_executable(brass_aot_eh_host aot/eh_aot_host.c "${_eh_aot_obj}")
         target_link_libraries(brass_aot_eh_host PRIVATE brass)
         brass_bind_eh_symbols(brass_aot_eh_host)
-        add_test(NAME aot_coff.eh
+        add_test(NAME ${_eh_aot_test}
             COMMAND ${CMAKE_COMMAND}
                 "-DHOST_EXE=$<TARGET_FILE:brass_aot_eh_host>"
                 "-DBRASS_OPT=$<TARGET_FILE:brass-opt>"
                 "-DMIR=${CMAKE_CURRENT_SOURCE_DIR}/aot/eh_aot.mir"
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/run_aot_eh.cmake")
-        set_tests_properties(aot_coff.eh PROPERTIES TIMEOUT 300 LABELS "correctness")
+        set_tests_properties(${_eh_aot_test} PROPERTIES TIMEOUT 300 LABELS "correctness")
     endif()
 endif()
 

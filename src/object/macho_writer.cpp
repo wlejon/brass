@@ -1,7 +1,6 @@
 #include <brass/object/macho_writer.hpp>
 #include <brass/object/elf_writer.hpp>
 #include <brass/object/aarch64_reloc.hpp>
-#include <brass/target/aarch64/aarch64_frame.hpp>
 #include <fstream>
 #include <cstring>
 #include <stdexcept>
@@ -110,16 +109,24 @@ uint32_t reloc_info(uint32_t symbolnum, uint32_t pcrel, uint32_t length, uint32_
 }
 
 // Appends the relocation_info entries for `r` to `s.encoded_relocs`.
+// `sec_addrs` is each Mach-O section's address in the object.
 void encode_macho_reloc(MachOSectionEntry& s, const ObjectRelocation& r, bool is_aarch64,
                         const std::unordered_map<std::string, uint32_t>& sec_name_to_idx,
+                        const std::vector<uint64_t>& sec_addrs,
                         const std::unordered_map<std::string, uint32_t>& sym_name_to_idx,
                         const std::vector<MachOSymbolEntry>& all_symbols) {
     uint32_t sym_idx = 0;
     uint32_t r_extern = 1;
+    // What an UNSIGNED relocation's bytes hold: the addend against a symbol,
+    // the target's address in this object against a section (the linker
+    // finds the atom by that address, so a bare offset into any section but
+    // the one at address 0 names the wrong bytes).
+    uint64_t unsigned_value = static_cast<uint64_t>(r.addend);
     auto sec_it = sec_name_to_idx.find(r.symbol_name);
     if (sec_it != sec_name_to_idx.end()) {
         r_extern = 0;
         sym_idx = sec_it->second + 1; // 1-based section number
+        unsigned_value += sec_addrs[sec_it->second];
     } else {
         auto it = sym_name_to_idx.find(r.symbol_name);
         if (it != sym_name_to_idx.end()) {
@@ -127,6 +134,11 @@ void encode_macho_reloc(MachOSectionEntry& s, const ObjectRelocation& r, bool is
         }
     }
     const int32_t r_address = static_cast<int32_t>(r.offset);
+    // A personality pointer (DW_EH_PE_indirect | pcrel | sdata4) in a CIE.
+    const bool eh_frame_got = r.kind == RelocKind::GotPCRel32 && s.sectname == "__eh_frame";
+    if (eh_frame_got && (!r_extern || r.addend != 0 || r.offset + 4 > s.data.size())) {
+        bad_reloc(r, "a GOT pointer in __eh_frame names a symbol, without an addend");
+    }
 
     if (!is_aarch64) {
         const bool is_func = r_extern && (sym_idx < all_symbols.size() && all_symbols[sym_idx].type == SymbolType::Function);
@@ -142,6 +154,14 @@ void encode_macho_reloc(MachOSectionEntry& s, const ObjectRelocation& r, bool is
         } else if (r.kind == RelocKind::SecRel32) {
             r_pcrel = 1;
             r_type = macho::X86_64_RELOC_SIGNED;
+        } else if (eh_frame_got) {
+            // The distance to the symbol's GOT slot, measured as an
+            // instruction's would be, from the end of the field: the bytes
+            // carry the 4 that puts it back at the field's start.
+            r_pcrel = 1;
+            r_type = macho::X86_64_RELOC_GOT;
+            const uint32_t four = 4;
+            std::memcpy(s.data.data() + r.offset, &four, 4);
         } else if (r.kind == RelocKind::GotPCRel32) {
             r_pcrel = 1;
             r_type = macho::X86_64_RELOC_GOT_LOAD;
@@ -149,10 +169,9 @@ void encode_macho_reloc(MachOSectionEntry& s, const ObjectRelocation& r, bool is
             r_type = macho::X86_64_RELOC_UNSIGNED;
             r_length = r.kind == RelocKind::Abs64 ? 3 : 2;
             const size_t width = r.kind == RelocKind::Abs64 ? 8 : 4;
-            if (r.addend != 0) {
+            if (unsigned_value != 0) {
                 if (r.offset + width > s.data.size()) bad_reloc(r, "outside its section");
-                const uint64_t a = static_cast<uint64_t>(r.addend);
-                std::memcpy(s.data.data() + r.offset, &a, width);
+                std::memcpy(s.data.data() + r.offset, &unsigned_value, width);
             }
         } else if (a64::is_instruction_kind(r.kind)) {
             bad_reloc(r, "an AArch64 relocation in an x86-64 object");
@@ -193,18 +212,21 @@ void encode_macho_reloc(MachOSectionEntry& s, const ObjectRelocation& r, bool is
             r_type = macho::ARM64_RELOC_UNSIGNED;
             r_length = r.kind == RelocKind::Abs64 ? 3 : 2;
             const size_t width = r.kind == RelocKind::Abs64 ? 8 : 4;
-            if (r.addend != 0) {
+            if (unsigned_value != 0) {
                 if (r.offset + width > s.data.size()) bad_reloc(r, "outside its section");
-                const uint64_t a = static_cast<uint64_t>(r.addend);
-                std::memcpy(s.data.data() + r.offset, &a, width);
+                std::memcpy(s.data.data() + r.offset, &unsigned_value, width);
             }
             break;
         }
+        case RelocKind::GotPCRel32:
+            // Code reaches the GOT by GotPage21 + GotLo12; the one 32-bit
+            // pc-relative GOT reference is a CIE's personality pointer.
+            if (!eh_frame_got) bad_reloc(r, "no ARM64 Mach-O equivalent");
+            r_type = macho::ARM64_RELOC_POINTER_TO_GOT; r_pcrel = 1; break;
         case RelocKind::PCRel32:
         case RelocKind::SecRel32:
         case RelocKind::Addr32NB:
         case RelocKind::SecIdx:
-        case RelocKind::GotPCRel32:
             bad_reloc(r, "no ARM64 Mach-O equivalent");
     }
     if (addend_entry && r.addend != 0) {
@@ -316,99 +338,57 @@ std::vector<uint8_t> MachOWriter::write() {
     // GOT_LOAD relocations for ld64 to bind (and relax if it can).
     relax_got_loads(working_obj);
 
-    // Generate compact unwind and LSDAs for Darwin
+    // Unwind information: DWARF CFI in __eh_frame, with the personality and
+    // each function's LSDA named there. ld turns every FDE into a
+    // DWARF-mode entry of __unwind_info on its own, so no __compact_unwind
+    // is written, and it could not be: the frame-based compact encodings
+    // describe a frame whose callee-saved pairs sit directly below the
+    // frame record, where a brass frame keeps the record at the bottom and
+    // its saves above it (and may save an odd register). Unwinding through
+    // such an entry reloads x19-x28 from whatever lies under the frame.
+    //
+    // Three things ld needs from the object, all as clang writes them:
+    //  - the CIE's personality as a pointer-to-GOT relocation against the
+    //    symbol (ld finds the personality by the relocation);
+    //  - the LSDAs in __TEXT,__gcc_except_tab with a symbol at the start of
+    //    each: ld records an FDE's LSDA as the atom its pointer falls in,
+    //    not the address, so LSDAs that share an atom all resolve to the
+    //    first one and every function but the first loses its pads;
+    //  - the pc-relative FDE fields as resolved values (below, once the
+    //    sections have addresses), which ld reads where there is no
+    //    relocation.
     if (!working_obj.functions.empty()) {
-        std::vector<size_t> lsda_offsets = ElfCfiBuilder::emit_lsdas(working_obj);
-        Section& cu_sec = working_obj.get_or_create_section(
-            "__compact_unwind",
-            SectionKind::Custom,
-            SectionFlags::Alloc,
+        working_obj.get_or_create_section(
+            ".eh_frame",
+            SectionKind::EhFrame,
+            SectionFlags::Read | SectionFlags::Alloc,
             8
         );
-        const bool is_aarch64 = working_obj.target.is_aarch64();
-        for (size_t fn_idx = 0; fn_idx < working_obj.functions.size(); ++fn_idx) {
-            const auto& fn = working_obj.functions[fn_idx];
-            const size_t entry_offset = cu_sec.data.size();
-            const bool has_lsda = !lsda_offsets.empty() && fn_idx < lsda_offsets.size() &&
-                                  lsda_offsets[fn_idx] != SIZE_MAX;
-
-            // 1. Function start address (8 bytes, Abs64 relocation)
-            ObjectRelocation fn_reloc;
-            fn_reloc.offset = entry_offset;
-            fn_reloc.kind = RelocKind::Abs64;
-            if (!fn.name.empty() && working_obj.find_symbol(fn.name)) {
-                fn_reloc.symbol_name = fn.name;
-                fn_reloc.addend = 0;
-            } else {
-                fn_reloc.symbol_name = ".text";
-                fn_reloc.addend = static_cast<int64_t>(fn.text_offset);
-            }
-            cu_sec.relocations.push_back(std::move(fn_reloc));
-            cu_sec.emit64(0);
-
-            // 2. Function length (4 bytes)
-            cu_sec.emit32(static_cast<uint32_t>(fn.text_size));
-
-            // 3. Compact unwind encoding (4 bytes)
-            uint32_t encoding = 0;
-            if (has_lsda) {
-                encoding |= 0x40000000u; // UNWIND_HAS_LSDA
-            }
-            if (is_aarch64) {
-                if (fn.frame_info.is_leaf) {
-                    uint32_t stack_units = static_cast<uint32_t>(fn.frame_info.total_frame_size / 16);
-                    encoding |= 0x02000000u | ((stack_units << 12) & 0x00FFF000u); // UNWIND_ARM64_MODE_FRAMELESS
-                } else {
-                    encoding |= 0x04000000u; // UNWIND_ARM64_MODE_FRAME
-                    auto gprs = aarch64::AArch64FrameLayout::get_saved_callee_gprs(fn.frame_info);
-                    auto has_gpr = [&](int r) {
-                        return std::find(gprs.begin(), gprs.end(), static_cast<aarch64::GPR>(r)) != gprs.end();
-                    };
-                    if (has_gpr(19) && has_gpr(20)) encoding |= 0x00000001u;
-                    if (has_gpr(21) && has_gpr(22)) encoding |= 0x00000002u;
-                    if (has_gpr(23) && has_gpr(24)) encoding |= 0x00000004u;
-                    if (has_gpr(25) && has_gpr(26)) encoding |= 0x00000008u;
-                    if (has_gpr(27) && has_gpr(28)) encoding |= 0x00000010u;
-                    auto fprs = aarch64::AArch64FrameLayout::get_saved_callee_fprs(fn.frame_info);
-                    auto has_fpr = [&](int r) {
-                        return std::find(fprs.begin(), fprs.end(), static_cast<aarch64::FPR>(r)) != fprs.end();
-                    };
-                    if (has_fpr(8) && has_fpr(9)) encoding |= 0x00000100u;
-                    if (has_fpr(10) && has_fpr(11)) encoding |= 0x00000200u;
-                    if (has_fpr(12) && has_fpr(13)) encoding |= 0x00000400u;
-                    if (has_fpr(14) && has_fpr(15)) encoding |= 0x00000800u;
-                }
-            } else {
-                if (fn.frame_info.is_leaf) {
-                    uint32_t stack_units = static_cast<uint32_t>(fn.frame_info.total_frame_size / 8);
-                    encoding |= 0x02000000u | ((stack_units << 16) & 0x00FF0000u); // UNWIND_X86_64_MODE_STACK_IMMD
-                } else {
-                    encoding |= 0x01000000u; // UNWIND_X86_64_MODE_RBP_FRAME
+        Section* eh_frame_sec = working_obj.get_section(".eh_frame");
+        if (eh_frame_sec && eh_frame_sec->data.empty()) {
+            ElfCfiBuilder::build_eh_frame(working_obj, *eh_frame_sec, /*with_personality=*/true,
+                                          /*personality_via_got=*/true);
+        }
+        const int32_t lsda_index = working_obj.get_section_index(ElfCfiBuilder::kLsdaSection);
+        eh_frame_sec = working_obj.get_section(".eh_frame");  // adding sections may have moved it
+        if (lsda_index >= 0 && eh_frame_sec) {
+            std::vector<uint64_t> lsda_starts;
+            for (const auto& r : eh_frame_sec->relocations) {
+                if (r.symbol_name == ElfCfiBuilder::kLsdaSection) {
+                    lsda_starts.push_back(static_cast<uint64_t>(r.addend));
                 }
             }
-            cu_sec.emit32(encoding);
-
-            // 4. Personality function (8 bytes)
-            if (has_lsda) {
-                ObjectRelocation pers_reloc;
-                pers_reloc.offset = entry_offset + 16;
-                pers_reloc.kind = RelocKind::Abs64;
-                pers_reloc.symbol_name = "brass_sysv_personality";
-                pers_reloc.addend = 0;
-                cu_sec.relocations.push_back(std::move(pers_reloc));
+            std::sort(lsda_starts.begin(), lsda_starts.end());
+            lsda_starts.erase(std::unique(lsda_starts.begin(), lsda_starts.end()), lsda_starts.end());
+            for (size_t i = 0; i < lsda_starts.size(); ++i) {
+                ObjectSymbol s;
+                s.name = "GCC_except_table" + std::to_string(i);
+                s.section_index = lsda_index;
+                s.value = lsda_starts[i];
+                s.binding = SymbolBinding::Local;
+                s.type = SymbolType::Object;
+                working_obj.add_symbol(std::move(s));
             }
-            cu_sec.emit64(0);
-
-            // 5. LSDA address (8 bytes)
-            if (has_lsda) {
-                ObjectRelocation lsda_reloc;
-                lsda_reloc.offset = entry_offset + 24;
-                lsda_reloc.kind = RelocKind::Abs64;
-                lsda_reloc.symbol_name = ".gcc_except_table";
-                lsda_reloc.addend = static_cast<int64_t>(lsda_offsets[fn_idx]);
-                cu_sec.relocations.push_back(std::move(lsda_reloc));
-            }
-            cu_sec.emit64(0);
         }
     }
 
@@ -427,16 +407,18 @@ std::vector<uint8_t> MachOWriter::write() {
             entry.segname = "__TEXT";
             entry.flags = macho::S_REGULAR | macho::S_ATTR_PURE_INSTRUCTIONS | macho::S_ATTR_SOME_INSTRUCTIONS;
             if (entry.align_pow2 < 4) entry.align_pow2 = 4;
+        } else if (sec.name == ElfCfiBuilder::kLsdaSection) {
+            // Ahead of the read-only data it is a kind of: as __const it
+            // would share that section's name with the real one.
+            entry.sectname = "__gcc_except_tab";
+            entry.segname = "__TEXT";
+            entry.flags = macho::S_REGULAR;
+            if (entry.align_pow2 < 2) entry.align_pow2 = 2;
         } else if (sec.name == ".rodata" || sec.name == ".rdata" || sec.name == "__const" || sec.kind == SectionKind::RoData) {
             entry.sectname = "__const";
             entry.segname = sec.relocations.empty() ? "__TEXT" : "__DATA";
             entry.flags = macho::S_REGULAR;
             if (entry.align_pow2 < 4) entry.align_pow2 = 4;
-        } else if (sec.name == ".gcc_except_table") {
-            entry.sectname = "__gcc_except_tab";
-            entry.segname = "__TEXT";
-            entry.flags = macho::S_REGULAR;
-            if (entry.align_pow2 < 2) entry.align_pow2 = 2;
         } else if (sec.name == "__compact_unwind" || sec.name == ".compact_unwind") {
             entry.sectname = "__compact_unwind";
             entry.segname = "__LD";
@@ -616,7 +598,28 @@ std::vector<uint8_t> MachOWriter::write() {
         }
     }
 
+    std::vector<uint64_t> sec_addrs;
+    sec_addrs.reserve(macho_sections.size());
+    for (const auto& s : macho_sections) sec_addrs.push_back(s.addr);
 
+    // __eh_frame's pc-relative fields that name a section (an FDE's function
+    // start, its LSDA) are distances inside this object, known now: written
+    // in place, they need no relocation, and Mach-O has no pc-relative data
+    // relocation against a section to write one with.
+    for (auto& s : macho_sections) {
+        if (s.sectname != "__eh_frame") continue;
+        std::erase_if(s.relocations, [&](const ObjectRelocation& r) {
+            if (r.kind != RelocKind::PCRel32) return false;
+            auto target = sec_name_to_idx.find(r.symbol_name);
+            if (target == sec_name_to_idx.end()) return false;
+            if (r.offset + 4 > s.data.size()) bad_reloc(r, "outside its section");
+            const int64_t delta = static_cast<int64_t>(sec_addrs[target->second]) + r.addend -
+                                  static_cast<int64_t>(s.addr + r.offset);
+            const int32_t v = static_cast<int32_t>(delta);
+            std::memcpy(s.data.data() + r.offset, &v, 4);
+            return true;
+        });
+    }
 
     // Encode the relocation_info entries (an ARM64 addend is a separate
     // ARM64_RELOC_ADDEND entry in front of the one it modifies, so the count
@@ -624,7 +627,7 @@ std::vector<uint8_t> MachOWriter::write() {
     const bool is_aarch64 = working_obj.target.is_aarch64();
     for (auto& s : macho_sections) {
         for (const auto& r : s.relocations) {
-            encode_macho_reloc(s, r, is_aarch64, sec_name_to_idx, sym_name_to_idx, all_symbols);
+            encode_macho_reloc(s, r, is_aarch64, sec_name_to_idx, sec_addrs, sym_name_to_idx, all_symbols);
         }
     }
 
