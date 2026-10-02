@@ -12,6 +12,7 @@
 // one), so a second object with an id already taken goes to a hash map
 // instead, and the answer stays exact either way.
 
+#include <cstddef>
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
