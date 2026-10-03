@@ -15,10 +15,10 @@ Stage 3 is done on the brotensor side: its trace JIT builds the elementwise
 and row-norm fusion plans as MIR through `KernelBuilder` and compiles them
 with `SpirvTarget::compile` (brotensor `src/jit/spirv_emit*.cpp`,
 `src/vulkan/vulkan_jit.cpp`), dispatched inside its own Vulkan runtime per
-the runtime contract below. One gap it worked around: MIR has no 32-bit
-float/int bitcast, so BF16 unpack/round goes through a per-thread word of
-shared memory (which lowers to `OpBitcast`); a `bitcast` MIR op would remove
-that.
+the runtime contract below. Its BF16 unpack/round reinterprets f32 bits
+with `bitcast.i32` / `bitcast.f32` ([mir_reference.md](mir_reference.md)),
+which lower to `OpBitcast`; before that pair existed it round-tripped each
+value through a per-thread word of shared memory.
 
 ## Pipeline
 

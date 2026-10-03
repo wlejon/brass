@@ -136,6 +136,11 @@ bool emit_baseline_aarch64_fp_op(AArch64BaselineEmitter& em, const Instruction& 
             enc.ldr(GPR::X0, em.slot_addr(inst.operand(0), 8));
             enc.str(GPR::X0, em.slot_addr(inst.result(), 8));
             return true;
+        case Opcode::bitcast_i32_f32:
+        case Opcode::bitcast_f32_i32:
+            enc.ldr32(GPR::X0, em.slot_addr(inst.operand(0), 4));
+            enc.str32(GPR::X0, em.slot_addr(inst.result(), 4));
+            return true;
 
         // Float -> integer: truncating, as a C cast (which is fcvtzs here).
         case Opcode::fptosi_i32:

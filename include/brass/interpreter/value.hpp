@@ -583,6 +583,16 @@ inline RuntimeValue val_bitcast_f64_i64(RuntimeValue v) noexcept {
     return RuntimeValue::from_f64(d);
 }
 
+// The 32-bit pair moves the low word unchanged: as_f32/as_i32 would convert
+// numerically across kinds, so both read raw_bits.
+inline RuntimeValue val_bitcast_i32_f32(RuntimeValue v) noexcept {
+    return RuntimeValue::from_bits(Type::i32(), v.raw_bits() & 0xFFFFFFFFULL);
+}
+
+inline RuntimeValue val_bitcast_f32_i32(RuntimeValue v) noexcept {
+    return RuntimeValue::from_bits(Type::f32(), v.raw_bits() & 0xFFFFFFFFULL);
+}
+
 // Arithmetic & Bitwise
 RuntimeValue val_add(RuntimeValue lhs, RuntimeValue rhs);
 RuntimeValue val_sub(RuntimeValue lhs, RuntimeValue rhs);

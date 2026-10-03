@@ -31,6 +31,9 @@ enum class Opcode : uint16_t {
     fpext_f64_f32,
     bitcast_i64_f64,
     bitcast_f64_i64,
+    // The 32-bit pair: an f32's bits as an i32, and an f32 from bits.
+    bitcast_i32_f32,
+    bitcast_f32_i32,
     // The bits of a tagged value (tagged -> i64) and a tagged value from bits
     // (i64 -> tagged). The first reads a snapshot: when the value is a
     // reference, the bits name where the object was, so passes never move it

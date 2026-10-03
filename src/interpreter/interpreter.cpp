@@ -211,6 +211,8 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                     frame.set_value(inst->result(), val_bitcast_f64_i64(frame.get_value(inst->operand(0))));
                     break;
                 }
+                case Opcode::bitcast_i32_f32: frame.set_value(inst->result(), val_bitcast_i32_f32(frame.get_value(inst->operand(0)))); break;
+                case Opcode::bitcast_f32_i32: frame.set_value(inst->result(), val_bitcast_f32_i32(frame.get_value(inst->operand(0)))); break;
                 case Opcode::bitcast_i64_tagged:
                     frame.set_value(inst->result(), RuntimeValue::from_i64(static_cast<int64_t>(frame.get_value(inst->operand(0)).raw_bits())));
                     break;

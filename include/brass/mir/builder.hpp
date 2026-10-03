@@ -79,6 +79,8 @@ public:
     Value* build_fpext_f64_f32(Value* val);
     Value* build_bitcast_i64_f64(Value* val);
     Value* build_bitcast_f64_i64(Value* val);
+    Value* build_bitcast_i32_f32(Value* val);
+    Value* build_bitcast_f32_i32(Value* val);
     // The bits of a tagged value, and a tagged value from bits.
     Value* build_bitcast_i64_tagged(Value* val);
     Value* build_bitcast_tagged_i64(Value* val);

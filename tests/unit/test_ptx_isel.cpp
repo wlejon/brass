@@ -690,6 +690,61 @@ TEST_CASE("PTX ISel - every original intrinsic alias lowers, verifies and assemb
     }
 }
 
+TEST_CASE("PTX ISel - bitcasts are same-width cross-class movs (mov.b32 / mov.b64)") {
+    Module mod("bitcasts");
+    brass::Function* f = mod.create_function("bitcasts", Type::void_type(),
+                                             {Type::f32(), Type::i32(), Type::f64(), Type::i64(), Type::ptr()});
+    Builder b(mod);
+    b.set_function(f);
+    BasicBlock* e = b.append_block("entry");
+    b.position_at_end(e);
+    Value* x32 = b.add_block_param(e, Type::f32());
+    Value* i32 = b.add_block_param(e, Type::i32());
+    Value* x64 = b.add_block_param(e, Type::f64());
+    Value* i64 = b.add_block_param(e, Type::i64());
+    Value* out = b.add_block_param(e, Type::ptr());
+    b.build_store(Type::i32(), out, 0, b.build_bitcast_i32_f32(x32));
+    b.build_store(Type::f32(), out, 4, b.build_bitcast_f32_i32(i32));
+    b.build_store(Type::i64(), out, 8, b.build_bitcast_i64_f64(x64));
+    b.build_store(Type::f64(), out, 16, b.build_bitcast_f64_i64(i64));
+    b.build_ret_void();
+
+    ptx::Function fn = lower_ok(*f);
+    const Block* bb = block_of(fn, e);
+    // One cross-class mov per bitcast, typed by the width.
+    int f2i32 = 0, i2f32 = 0, f2i64 = 0, i2f64 = 0;
+    for (const Inst& inst : bb->insts) {
+        if (inst.op != ptx::Opcode::mov || !inst.srcs[0].is_reg()) continue;
+        RegClass d = inst.dsts[0].reg_val.cls, s = inst.srcs[0].reg_val.cls;
+        if (d == RegClass::B32 && s == RegClass::F32) { ++f2i32; CHECK(inst.type == ptx::Type::b32); }
+        if (d == RegClass::F32 && s == RegClass::B32) { ++i2f32; CHECK(inst.type == ptx::Type::b32); }
+        if (d == RegClass::B64 && s == RegClass::F64) { ++f2i64; CHECK(inst.type == ptx::Type::b64); }
+        if (d == RegClass::F64 && s == RegClass::B64) { ++i2f64; CHECK(inst.type == ptx::Type::b64); }
+    }
+    CHECK_EQ(f2i32, 1);
+    CHECK_EQ(i2f32, 1);
+    CHECK_EQ(f2i64, 1);
+    CHECK_EQ(i2f64, 1);
+    std::string ptx = target::PtxTarget::emit_function(*f);
+    CHECK(ptx.find("mov.b32") != std::string::npos);
+    CHECK(ptx.find("mov.b64") != std::string::npos);
+    if (ptxas_available()) CHECK(ptxas_assembles(ptx, "sm_70"));
+    if (!gpu_ready()) return;
+
+    float xf = -1.5f;
+    uint32_t xi = 0x40490fdbu; // pi
+    double xd = 2.5;
+    uint64_t xl = 0x3ff8000000000000ull; // 1.5
+    CudaBuffer out_buf = CudaBuffer::alloc(24);
+    REQUIRE(out_buf.valid() && out_buf.zero());
+    void* po = out_buf.device_ptr();
+    auto got = run_kernel<uint32_t>(ptx, "bitcasts", {&xf, &xi, &xd, &xl, &po}, out_buf, 6);
+    CHECK_EQ(got[0], 0xbfc00000u);
+    CHECK_EQ(got[1], xi);
+    CHECK_EQ(uint64_t(got[2]) | (uint64_t(got[3]) << 32), 0x4004000000000000ull);
+    CHECK_EQ(uint64_t(got[4]) | (uint64_t(got[5]) << 32), xl);
+}
+
 TEST_CASE("PTX ISel - verifier failures surface as loud errors, unknown opcodes name the opcode") {
     Module mod("bad");
     brass::Function* f = mod.create_function("bad", Type::void_type(), {});

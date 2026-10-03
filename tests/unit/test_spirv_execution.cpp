@@ -479,3 +479,34 @@ TEST_CASE("SPIR-V exec - conversions and bitcasts") {
     for (size_t i = 0; i < bits_in.size(); ++i)
         CHECK_EQ(static_cast<uint64_t>(gb[i]), f64_bits(bits_in[i]) ^ 0x8000000000000000ull);
 }
+
+// The 32-bit pair, as brotensor's trace JIT uses it: an f32's bits flipped
+// as an i32, and a bf16 widened to f32 by shifting it into the high half.
+TEST_CASE("SPIR-V exec - 32-bit bitcasts: f32 bits as i32, bf16 widened through i32") {
+    if (!vk_ready()) return;
+    std::vector<float> f = {1.0f, -2.0f, kNaN, 1e-40f, 3.14159265f, -0.0f};
+    std::vector<int32_t> dummy(f.size(), 0);
+    std::vector<int32_t> got = run_map<float, int32_t, int32_t>([](KernelBuilder& k, Value* x, Value*) {
+        Builder& b = k.builder();
+        Value* asi = b.build_bitcast_i32_f32(x);
+        Value* asf = b.build_bitcast_f32_i32(b.build_xor(asi, b.build_iconst_i32(kMin32))); // flip the sign
+        return b.build_bitcast_i32_f32(asf);
+    }, f, dummy);
+    for (size_t i = 0; i < f.size(); ++i) CHECK_EQ(static_cast<uint32_t>(got[i]), f32_bits(f[i]) ^ 0x80000000u);
+
+    // bf16 bit patterns (1.0, -2.5, 0.0078125, 3.140625, 65280, -0) widened
+    // and scaled: the result is exact in f32.
+    std::vector<int32_t> bf = {0x3F80, 0xC020, 0x3C00, 0x4049, 0x477F, 0x8000};
+    std::vector<float> scale = {2.0f, 0.5f, 4.0f, 1.0f, 0.25f, 3.0f};
+    std::vector<float> wide = run_map<int32_t, float, float>([](KernelBuilder& k, Value* h, Value* s) {
+        Builder& b = k.builder();
+        return b.build_mul(b.build_bitcast_f32_i32(b.build_shl(h, b.build_iconst_i32(16))), s);
+    }, bf, scale);
+    for (size_t i = 0; i < bf.size(); ++i) {
+        uint32_t bits = static_cast<uint32_t>(bf[i]) << 16;
+        float want = 0.0f;
+        std::memcpy(&want, &bits, 4);
+        want *= scale[i];
+        CHECK_EQ(wide[i], want);
+    }
+}

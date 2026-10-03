@@ -358,7 +358,9 @@ void SpirvISel::lower_instruction(const brass::Instruction& inst) {
         case Opcode::fptrunc_f32_f64:
         case Opcode::fpext_f64_f32:  lower_convert(inst, spv::OpFConvert, inst.type()); break;
         case Opcode::bitcast_i64_f64:
-        case Opcode::bitcast_f64_i64: lower_convert(inst, spv::OpBitcast, inst.type()); break;
+        case Opcode::bitcast_f64_i64:
+        case Opcode::bitcast_i32_f32:
+        case Opcode::bitcast_f32_i32: lower_convert(inst, spv::OpBitcast, inst.type()); break;
 
         case Opcode::load:          lower_load(inst); break;
         case Opcode::store:         lower_store(inst); break;

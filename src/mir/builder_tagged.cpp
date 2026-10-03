@@ -1,5 +1,5 @@
 // Builders for tagged values: the two bitcasts between a tagged value and its
-// bits, the frame buffer of tagged words, and keep_alive, which holds a value
+// bits (and, beside them, the 32-bit pair between f32 and i32), the frame buffer of tagged words, and keep_alive, which holds a value
 // (and so its referent) live to a point (docs/gc_contract.md).
 
 #include <brass/mir/builder.hpp>
@@ -26,6 +26,16 @@ Value* Builder::build_bitcast_i64_tagged(Value* val) {
 
 Value* Builder::build_bitcast_tagged_i64(Value* val) {
     return build_unary(*this, Opcode::bitcast_tagged_i64, Type::tagged(), val);
+}
+
+// An f32's bits as an i32, and an f32 from bits: the 32-bit counterparts of
+// build_bitcast_i64_f64 / build_bitcast_f64_i64 (builder.cpp).
+Value* Builder::build_bitcast_i32_f32(Value* val) {
+    return build_unary(*this, Opcode::bitcast_i32_f32, Type::i32(), val);
+}
+
+Value* Builder::build_bitcast_f32_i32(Value* val) {
+    return build_unary(*this, Opcode::bitcast_f32_i32, Type::f32(), val);
 }
 
 Instruction* Builder::build_keep_alive(Value* val) {

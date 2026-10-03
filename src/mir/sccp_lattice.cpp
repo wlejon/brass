@@ -234,6 +234,22 @@ LatticeValue evaluate_conversion(Opcode op, Type res_type, const LatticeValue& v
             std::memcpy(&d, &i, sizeof(double));
             return LatticeValue::make_f64(d);
         }
+        case Opcode::bitcast_i32_f32: {
+            float f = val.as_f32();
+            int32_t i = 0;
+            std::memcpy(&i, &f, sizeof(int32_t));
+            return LatticeValue::make_i32(i);
+        }
+        case Opcode::bitcast_f32_i32: {
+            int32_t i = val.as_i32();
+            float f = 0.0f;
+            std::memcpy(&f, &i, sizeof(float));
+            // An f32 constant materialises through an f64 immediate
+            // (fconst_f64 typed f32), which would quiet a signalling NaN's
+            // payload; leave NaN bit patterns to run.
+            if (std::isnan(f)) break;
+            return LatticeValue::make_f32(f);
+        }
         default:
             break;
     }

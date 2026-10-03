@@ -221,6 +221,7 @@ bool is_pure_nontrapping(const Instruction& inst) noexcept {
         case Opcode::sitofp_f64_i32: case Opcode::sitofp_f64_i64: case Opcode::sitofp_f32_i32:
         case Opcode::sitofp_f32_i64: case Opcode::fptrunc_f32_f64: case Opcode::fpext_f64_f32:
         case Opcode::bitcast_i64_f64: case Opcode::bitcast_f64_i64:
+        case Opcode::bitcast_i32_f32: case Opcode::bitcast_f32_i32:
         case Opcode::add: case Opcode::sub: case Opcode::mul: case Opcode::neg:
         case Opcode::fma_f32: case Opcode::fma_f64: case Opcode::sqrt_f32: case Opcode::sqrt_f64:
         case Opcode::floor_f32: case Opcode::floor_f64: case Opcode::ceil_f32: case Opcode::ceil_f64:

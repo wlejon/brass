@@ -233,8 +233,12 @@ void PtxISel::lower_fptosi(const brass::Instruction& inst, Type dst) {
     lower_cvt(inst, dst, src, Rounding::rzi);
 }
 
+// A same-width reinterpretation across register classes: mov.b64 between
+// %rd and %fd, mov.b32 between %r and %f.
 void PtxISel::lower_bitcast(const brass::Instruction& inst) {
-    emit(Inst::make(Opcode::mov, Type::b64)
+    const bool wide = inst.opcode() == brass::Opcode::bitcast_i64_f64 ||
+                      inst.opcode() == brass::Opcode::bitcast_f64_i64;
+    emit(Inst::make(Opcode::mov, wide ? Type::b64 : Type::b32)
              .dst(result_reg(inst))
              .src(reg_of(inst.operand(0), "operand 0")));
 }

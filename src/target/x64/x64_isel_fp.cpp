@@ -149,6 +149,17 @@ void X64ISel::lower_fp_instruction(const Instruction& inst, LirBlock& lir_bb) {
             lir_bb.append_inst(std::move(lir_inst));
             break;
         }
+        // The 32-bit pair: movd r32, xmm / movd xmm, r32.
+        case Opcode::bitcast_i32_f32:
+        case Opcode::bitcast_f32_i32: {
+            const bool to_gpr = inst.opcode() == Opcode::bitcast_i32_f32;
+            auto lir_inst = std::make_unique<LirInst>(to_gpr ? LirOpcode::Movd_gx : LirOpcode::Movd_xg);
+            lir_inst->add_def(LirOperand::vreg(get_vreg(inst.result()), 4));
+            lir_inst->add_use(LirOperand::vreg(get_vreg(inst.operand(0)), 4));
+            lir_inst->mir_origin = &inst;
+            lir_bb.append_inst(std::move(lir_inst));
+            break;
+        }
         default:
             codegen::throw_unsupported("x64 isel (fp)", opcode_name(inst.opcode()));
     }

@@ -206,6 +206,7 @@ add_executable(brass_unit_tests
     unit/test_speculative_inlining.cpp
     unit/test_baseline_jit.cpp
     unit/test_baseline_jit_opcodes.cpp
+    unit/test_bitcast32.cpp
     unit/test_baseline_jit_vector.cpp
     unit/test_tier2_vector_calls.cpp
     unit/test_invoke_return_types.cpp

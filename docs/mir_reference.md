@@ -69,6 +69,8 @@ Integer literals must fit the field they fill, or the parser reports "out of ran
 - `sitofp.f64 <val:i32|i64>` -> `f64` (the bare form takes its source width from the operand; `sitofp.f64.i32` / `sitofp.f64.i64` name it explicitly; `sitofp.f32` likewise)
 - `bitcast.i64 <val:f64>` -> `i64` (also spelled `bitcast.i64.f64`, as the printer writes it)
 - `bitcast.f64 <val:i64>` -> `f64` (also spelled `bitcast.f64.i64`, as the printer writes it)
+- `bitcast.i32 <val:f32>` -> `i32` (also spelled `bitcast.i32.f32`, as the printer writes it)
+- `bitcast.f32 <val:i32>` -> `f32` (also spelled `bitcast.f32.i32`, as the printer writes it). Both bitcast pairs move the bits unchanged on every backend, NaN payloads and denormals included: `movq`/`movd` between a GPR and an XMM register on x64, `fmov x<->d` / `fmov w<->s` on AArch64, `mov.b64` / `mov.b32` across register classes in PTX, `OpBitcast` in SPIR-V. SCCP folds both, except a `bitcast.f32` whose constant result is a NaN: an `f32` constant materialises through an `f64` immediate, which would quiet a signalling payload
 - `bitcast.tagged.i64 <val:i64>` -> `tagged` (box: the bits become a value the collector tracks; pure)
 - `bitcast.i64.tagged <val:tagged>` -> `i64` (unbox: the bits as they are now. It is not pure, because a GC point between two unboxes can move the object, so it is never merged or hoisted across one)
 

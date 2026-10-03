@@ -84,7 +84,7 @@ with every diagnostic attached; nothing that fails verification is printed.
 `.f32`/`.f64` operands must be F32/F64 registers and `.u*/.s*` operands must
 be B32/B64, but `.b32` accepts B32 *or* F32 and `.b64` accepts B64 *or* F64.
 The relaxation is required by `shfl.sync.down.b32` on f32 accumulators and
-by `mov.b64` bitcasts between `%rd` and `%fd`.
+by `mov.b64` / `mov.b32` bitcasts between `%rd` and `%fd`, `%r` and `%f`.
 
 **Immediate operands.** One table, `allows_immediate(op, src_index)`, is
 consulted by `PtxISel::operand_of` when it turns a MIR value into a source

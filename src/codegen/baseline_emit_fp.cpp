@@ -159,6 +159,11 @@ bool emit_baseline_x64_fp_op(X64BaselineEmitter& em, const Instruction& inst) {
             enc.mov(GPR::RAX, em.slot_addr(inst.operand(0)));
             enc.mov(em.slot_addr(inst.result()), GPR::RAX);
             return true;
+        case Opcode::bitcast_i32_f32:
+        case Opcode::bitcast_f32_i32:
+            enc.mov32(GPR::RAX, em.slot_addr(inst.operand(0)));
+            enc.mov32(em.slot_addr(inst.result()), GPR::RAX);
+            return true;
 
         // Float -> integer: truncating, as a C cast.
         case Opcode::fptosi_i32:

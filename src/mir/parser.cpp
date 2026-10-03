@@ -180,6 +180,8 @@ namespace brass::mir_parser {
             case Opcode::fpext_f64_f32: { Value* v = parse_val(); if (!v) return false; res_val = b.build_fpext_f64_f32(v); break; }
             case Opcode::bitcast_i64_f64: { Value* v = parse_val(); if (!v) return false; res_val = b.build_bitcast_i64_f64(v); break; }
             case Opcode::bitcast_f64_i64: { Value* v = parse_val(); if (!v) return false; res_val = b.build_bitcast_f64_i64(v); break; }
+            case Opcode::bitcast_i32_f32: { Value* v = parse_val(); if (!v) return false; res_val = b.build_bitcast_i32_f32(v); break; }
+            case Opcode::bitcast_f32_i32: { Value* v = parse_val(); if (!v) return false; res_val = b.build_bitcast_f32_i32(v); break; }
             case Opcode::bitcast_i64_tagged: { Value* v = parse_val(); if (!v) return false; res_val = b.build_bitcast_i64_tagged(v); break; }
             case Opcode::bitcast_tagged_i64: { Value* v = parse_val(); if (!v) return false; res_val = b.build_bitcast_tagged_i64(v); break; }
 

@@ -332,21 +332,20 @@ bool Verifier::verify_function(const Function& fn) {
                     break;
                 }
                 case Opcode::bitcast_i64_f64:
-                    if (inst->operand_count() != 1 || !inst->operand(0) || inst->operand(0)->type() != Type::f64()) {
-                        report_error(inst_prefix + "Requires 1 f64 operand.");
-                    }
-                    if (inst->type() != Type::i64()) {
-                        report_error(inst_prefix + "Result type must be i64.");
-                    }
-                    break;
                 case Opcode::bitcast_f64_i64:
-                    if (inst->operand_count() != 1 || !inst->operand(0) || inst->operand(0)->type() != Type::i64()) {
-                        report_error(inst_prefix + "Requires 1 i64 operand.");
-                    }
-                    if (inst->type() != Type::f64()) {
-                        report_error(inst_prefix + "Result type must be f64.");
-                    }
+                case Opcode::bitcast_i32_f32:
+                case Opcode::bitcast_f32_i32: {
+                    // Same-width reinterpretation, {to, from} per opcode.
+                    const Opcode op = inst->opcode();
+                    const bool wide = op == Opcode::bitcast_i64_f64 || op == Opcode::bitcast_f64_i64;
+                    const bool to_int = op == Opcode::bitcast_i64_f64 || op == Opcode::bitcast_i32_f32;
+                    const Type ity = wide ? Type::i64() : Type::i32(), fty = wide ? Type::f64() : Type::f32();
+                    const Type to = to_int ? ity : fty, from = to_int ? fty : ity;
+                    if (inst->operand_count() != 1 || !inst->operand(0) || inst->operand(0)->type() != from)
+                        report_error(inst_prefix + "Requires 1 " + std::string(from.name()) + " operand.");
+                    if (inst->type() != to) report_error(inst_prefix + "Result type must be " + std::string(to.name()) + ".");
                     break;
+                }
 
                 case Opcode::add:
                 case Opcode::sub: {

@@ -27,6 +27,8 @@ std::string_view opcode_name(Opcode op) noexcept {
         case Opcode::fpext_f64_f32: return "fpext_f64_f32";
         case Opcode::bitcast_i64_f64: return "bitcast_i64_f64";
         case Opcode::bitcast_f64_i64: return "bitcast_f64_i64";
+        case Opcode::bitcast_i32_f32: return "bitcast_i32_f32";
+        case Opcode::bitcast_f32_i32: return "bitcast_f32_i32";
         case Opcode::bitcast_i64_tagged: return "bitcast_i64_tagged";
         case Opcode::bitcast_tagged_i64: return "bitcast_tagged_i64";
 
@@ -200,6 +202,8 @@ bool is_conversion(Opcode op) noexcept {
         case Opcode::fpext_f64_f32:
         case Opcode::bitcast_i64_f64:
         case Opcode::bitcast_f64_i64:
+        case Opcode::bitcast_i32_f32:
+        case Opcode::bitcast_f32_i32:
             return true;
         default:
             return false;

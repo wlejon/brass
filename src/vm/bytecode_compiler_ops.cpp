@@ -42,6 +42,7 @@ void FunctionCompilerContext::lower_instruction(const Instruction& inst) {
         case Opcode::sitofp_f64_i32: case Opcode::sitofp_f64_i64: case Opcode::sitofp_f32_i32:
         case Opcode::sitofp_f32_i64: case Opcode::fptrunc_f32_f64: case Opcode::fpext_f64_f32:
         case Opcode::bitcast_i64_f64: case Opcode::bitcast_f64_i64:
+        case Opcode::bitcast_i32_f32: case Opcode::bitcast_f32_i32:
             lower_conversion(inst);
             break;
 
@@ -179,6 +180,9 @@ void FunctionCompilerContext::lower_conversion(const Instruction& inst) {
         case Opcode::fpext_f64_f32: op = BytecodeOp::fpext_f64; break;
         case Opcode::bitcast_i64_f64: op = BytecodeOp::bitcast_i64_f64; break;
         case Opcode::bitcast_f64_i64: op = BytecodeOp::bitcast_f64_i64; break;
+        // An i32 and an f32 both sit zero-extended in the low word of a
+        // register, so the 32-bit pair is the low word, unchanged.
+        case Opcode::bitcast_i32_f32: case Opcode::bitcast_f32_i32: op = BytecodeOp::trunc32; break;
         default: fail("not a conversion");
     }
     emit(op, dst, src);

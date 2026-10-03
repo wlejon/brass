@@ -75,6 +75,8 @@ TEST_CASE("SPIR-V ISel - scalar ALU ops on i32 i64 f32 f64") {
     put(b.build_fpext_f64_f32(k.p(5)));
     put(b.build_bitcast_i64_f64(k.p(7)));
     put(b.build_bitcast_f64_i64(k.p(3)));
+    put(b.build_bitcast_i32_f32(k.p(5)));
+    put(b.build_bitcast_f32_i32(k.p(1)));
     put(b.build_add(k.p(1), b.build_iconst_i32(-7)));
     put(b.build_mul(k.p(5), b.build_fconst_f32(0.5f)));
     put(b.build_mul(k.p(7), b.build_fconst_f64(0.25)));
@@ -92,6 +94,22 @@ TEST_CASE("SPIR-V ISel - scalar ALU ops on i32 i64 f32 f64") {
     }
     CHECK(has(d, "OpCapability Float64"));
     CHECK(has(d, "OpCapability Int64"));
+}
+
+// The 32-bit pair lowers to OpBitcast between 32-bit types alone: no
+// Float64 capability, no 64-bit detour.
+TEST_CASE("SPIR-V ISel - bitcast.i32 / bitcast.f32 are OpBitcast on 32-bit types") {
+    Kernel k({Type::ptr(), Type::f32(), Type::i32()});
+    Builder& b = k.b;
+    b.build_store(Type::i32(), k.p(0), 0, b.build_bitcast_i32_f32(k.p(1)));
+    b.build_store(Type::f32(), k.p(0), 4, b.build_bitcast_f32_i32(k.p(2)));
+    b.build_ret_void();
+
+    compile_checked(*k.fn);
+    std::string d = dump_of(*k.fn);
+    CHECK_EQ(count_of(d, "OpBitcast"), size_t(2));
+    CHECK(!has(d, "OpCapability Float64"));
+    CHECK(!has(d, "OpFConvert"));
 }
 
 TEST_CASE("SPIR-V ISel - comparisons give bools, i32 only when used as a value") {

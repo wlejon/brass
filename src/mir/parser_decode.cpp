@@ -112,10 +112,13 @@ bool decode_opcode_string(std::string_view str, Opcode& op, Type& type_suffix, T
     if (str == "fptrunc.f32.f64" || str == "fptrunc_f32_f64") { op = Opcode::fptrunc_f32_f64; type_suffix = Type::f32(); return true; }
     if (str == "fpext.f64.f32" || str == "fpext_f64_f32") { op = Opcode::fpext_f64_f32; type_suffix = Type::f64(); return true; }
 
-    // The bare `bitcast.i64` / `bitcast.f64` (docs/mir_reference.md) name
+    // The bare `bitcast.i64` / `bitcast.f64` / `bitcast.i32` /
+    // `bitcast.f32` (docs/mir_reference.md) name
     // only the result: each has exactly one source type.
     if (str == "bitcast.i64.f64" || str == "bitcast_i64_f64" || str == "bitcast.i64") { op = Opcode::bitcast_i64_f64; type_suffix = Type::i64(); return true; }
     if (str == "bitcast.f64.i64" || str == "bitcast_f64_i64" || str == "bitcast.f64") { op = Opcode::bitcast_f64_i64; type_suffix = Type::f64(); return true; }
+    if (str == "bitcast.i32.f32" || str == "bitcast_i32_f32" || str == "bitcast.i32") { op = Opcode::bitcast_i32_f32; type_suffix = Type::i32(); return true; }
+    if (str == "bitcast.f32.i32" || str == "bitcast_f32_i32" || str == "bitcast.f32") { op = Opcode::bitcast_f32_i32; type_suffix = Type::f32(); return true; }
     if (str == "bitcast.i64.tagged" || str == "bitcast_i64_tagged") { op = Opcode::bitcast_i64_tagged; type_suffix = Type::i64(); return true; }
     if (str == "bitcast.tagged.i64" || str == "bitcast_tagged_i64" || str == "bitcast.tagged") { op = Opcode::bitcast_tagged_i64; type_suffix = Type::tagged(); return true; }
 

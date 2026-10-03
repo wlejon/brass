@@ -575,6 +575,8 @@ void AArch64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
         case Opcode::fpext_f64_f32:
         case Opcode::bitcast_i64_f64:
         case Opcode::bitcast_f64_i64:
+        case Opcode::bitcast_i32_f32:
+        case Opcode::bitcast_f32_i32:
             lower_fp_instruction(inst, lir_bb);
             break;
         case Opcode::bitcast_i64_tagged:

@@ -163,6 +163,14 @@ bb0:
   ret %4
 }
 
+func @bitcast32(%0: f32, %1: i32) -> f32 {
+bb0:
+  %2 = bitcast.i32.f32 %0
+  %3 = xor.i32 %2, %1
+  %4 = bitcast.f32.i32 %3
+  ret %4
+}
+
 func @exceptions(%0: i64) -> i64 {
 bb0:
   %1 = invoke.i64 @rt_plain(%0), bb1(%0), bb2

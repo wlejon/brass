@@ -231,6 +231,12 @@ public:
             case Opcode::bitcast_f64_i64:
                 os_ << "bitcast.f64.i64 " << value_name(inst.operand(0));
                 break;
+            case Opcode::bitcast_i32_f32:
+                os_ << "bitcast.i32.f32 " << value_name(inst.operand(0));
+                break;
+            case Opcode::bitcast_f32_i32:
+                os_ << "bitcast.f32.i32 " << value_name(inst.operand(0));
+                break;
             case Opcode::bitcast_i64_tagged:
                 os_ << "bitcast.i64.tagged " << value_name(inst.operand(0));
                 break;
