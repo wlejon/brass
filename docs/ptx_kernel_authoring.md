@@ -8,6 +8,15 @@ ML kernels the library ships, and the checklist for adding and testing a
 new kernel. Nothing here involves PTX text; a kernel author never writes a
 mnemonic.
 
+The same kernels also lower to SPIR-V compute shaders for Vulkan
+(`target::SpirvTarget`, [spirv_backend_design.md](spirv_backend_design.md)),
+under the same intrinsic names. PTX-only, with a diagnostic on SPIR-V:
+`ptx_warpid`/`ptx_warp_id`, `ptx_nwarpid`, `ptx_smid`, `ptx_nsmid`,
+`ptx_globaltimer` and `ptx_bar_sync_count`. Two restrictions apply there:
+a shared pointer may only be offset with `add` and passed to the
+`ptx_shared_*` intrinsics (true of every helper below), and a shared access
+must have the element size of its array.
+
 ## A kernel is a MIR function
 
 ```cpp

@@ -102,6 +102,27 @@ list(APPEND BRASS_SOURCES
 )
 list(REMOVE_DUPLICATES BRASS_SOURCES)
 
+# SPIR-V compute target (src/target/spirv*, docs/spirv_backend_design.md):
+# needs the Khronos SPIR-V headers (spirv/unified1/spirv.hpp,
+# GLSL.std.450.h) -- the Vulkan SDK, a distribution's spirv-headers package,
+# a SPIRV-Headers checkout beside brass, or -DBRASS_SPIRV_HEADERS_DIR=<dir>.
+# Without them the target is left out and BRASS_WITH_SPIRV is 0.
+find_path(BRASS_SPIRV_HEADERS_DIR spirv/unified1/spirv.hpp
+    HINTS
+        "$ENV{VULKAN_SDK}/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../SPIRV-Headers/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/SPIRV-Headers/include"
+    DOC "Directory holding spirv/unified1/spirv.hpp")
+if(BRASS_SPIRV_HEADERS_DIR)
+    set(_brass_with_spirv ON)
+else()
+    set(_brass_with_spirv OFF)
+    list(FILTER BRASS_SOURCES EXCLUDE REGEX "/src/target/spirv(/|_target\\.cpp$)")
+    message(STATUS "brass: SPIR-V headers not found; the SPIR-V target is not built "
+        "(set BRASS_SPIRV_HEADERS_DIR to the directory holding spirv/unified1/spirv.hpp)")
+endif()
+set(BRASS_WITH_SPIRV ${_brass_with_spirv} CACHE INTERNAL "brass builds the SPIR-V compute target")
+
 # The entry, throw and invoke stubs of an MSVC build (cl or clang-cl) are
 # assembly; GCC/Clang builds define them as file-scope asm in C++.
 if(MSVC)
@@ -150,6 +171,10 @@ target_include_directories(brass
 
 target_compile_features(brass PUBLIC cxx_std_20)
 target_compile_definitions(brass PUBLIC BRASS_HOST_BACKEND=$<BOOL:${BRASS_HOST_BACKEND}>)
+target_compile_definitions(brass PUBLIC BRASS_WITH_SPIRV=$<BOOL:${BRASS_WITH_SPIRV}>)
+if(BRASS_WITH_SPIRV)
+    target_include_directories(brass PUBLIC $<BUILD_INTERFACE:${BRASS_SPIRV_HEADERS_DIR}>)
+endif()
 
 if(MSVC)
     target_compile_options(brass PRIVATE
@@ -193,6 +218,10 @@ if(BRASS_BUILD_SHARED)
 
     target_compile_features(brass_shared PUBLIC cxx_std_20)
     target_compile_definitions(brass_shared PUBLIC BRASS_HOST_BACKEND=$<BOOL:${BRASS_HOST_BACKEND}>)
+    target_compile_definitions(brass_shared PUBLIC BRASS_WITH_SPIRV=$<BOOL:${BRASS_WITH_SPIRV}>)
+    if(BRASS_WITH_SPIRV)
+        target_include_directories(brass_shared PUBLIC $<BUILD_INTERFACE:${BRASS_SPIRV_HEADERS_DIR}>)
+    endif()
 
     target_compile_definitions(brass_shared
         PRIVATE

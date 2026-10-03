@@ -22,6 +22,7 @@ Standalone C++20 library with CMake.
 9. **Object files and linkers**: COFF (with Win64 `.pdata`/`.xdata`), ELF64 (with `.eh_frame`) and Mach-O relocatable objects, emitted deterministically (a test checks byte-identical output across runs), and built-in PE DLL, ELF `.so` and Mach-O `.dylib` linkers.
 10. **Tiers and oracle**: a reference MIR interpreter, a register-bytecode interpreter, a baseline JIT and an optimizing JIT, with a differential fuzzer that compares them. A program's fast interpreter tiers a hot loop up in place through on-stack replacement: it requests an optimized OSR entry function for the loop header and transfers the live values into it once the code is installed.
 11. **PTX backend**: `PtxTarget` lowers MIR to PTX through a typed PTX IR with cleanup passes and a verifier. GPU intrinsics (thread indices, shuffles, barriers, `.shared` arrays, approximate math, f16, atomics) are MIR builtins with `KernelBuilder` helpers. A dynamically loaded CUDA driver runtime (no link-time CUDA dependency) JIT-compiles the PTX and launches it; the tests validate kernels with `ptxas` and against host references when a GPU is present.
+12. **SPIR-V backend**: `SpirvTarget` lowers the same MIR kernels to SPIR-V 1.5 compute shaders for Vulkan 1.2+: a typed SPIR-V module model with a binary writer and verifier, a structurizer that recovers structured control flow from the MIR CFG, kernel pointers as buffer device addresses with parameters in a push-constant block, and the PTX intrinsic names lowered to subgroup, barrier, atomic and GLSL.std.450 operations. The tests run every module through `spirv-val` when it is installed.
 
 ## Performance Tracking
 
@@ -108,3 +109,4 @@ and the library itself has no link-time CUDA dependency.
 - [Host Engine & Heap Embedding Guide](docs/embedding.md)
 - [PTX Backend Design](docs/ptx_backend_design.md)
 - [Writing PTX Kernels with KernelBuilder](docs/ptx_kernel_authoring.md)
+- [SPIR-V Backend Design](docs/spirv_backend_design.md)

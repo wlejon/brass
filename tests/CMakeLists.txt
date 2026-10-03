@@ -253,6 +253,23 @@ add_executable(brass_unit_tests
     unit/test_frontend_gpu_hardening.cpp
 )
 
+# The SPIR-V target's tests (built when the SPIR-V headers were found) run
+# every emitted module through spirv-val and disassemble with spirv-dis when
+# those tools exist; without them the checks print a visible [SKIP].
+if(BRASS_WITH_SPIRV)
+    target_sources(brass_unit_tests PRIVATE
+        unit/test_spirv_ir.cpp
+        unit/test_spirv_isel.cpp
+        unit/test_spirv_target.cpp
+        unit/test_spirv_intrinsics.cpp
+    )
+    find_program(BRASS_SPIRV_VAL spirv-val HINTS "$ENV{VULKAN_SDK}/bin")
+    find_program(BRASS_SPIRV_DIS spirv-dis HINTS "$ENV{VULKAN_SDK}/bin")
+    target_compile_definitions(brass_unit_tests PRIVATE
+        BRASS_SPIRV_VAL="$<$<BOOL:${BRASS_SPIRV_VAL}>:${BRASS_SPIRV_VAL}>"
+        BRASS_SPIRV_DIS="$<$<BOOL:${BRASS_SPIRV_DIS}>:${BRASS_SPIRV_DIS}>")
+endif()
+
 target_include_directories(brass_unit_tests
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/harness
@@ -325,6 +342,9 @@ endif()
 file(GLOB_RECURSE BRASS_PUBLIC_HEADERS CONFIGURE_DEPENDS
     "${BRASS_INCLUDE_DIR}/*.hpp" "${BRASS_INCLUDE_DIR}/*.h")
 list(SORT BRASS_PUBLIC_HEADERS)
+if(NOT BRASS_WITH_SPIRV)
+    list(FILTER BRASS_PUBLIC_HEADERS EXCLUDE REGEX "/target/spirv")
+endif()
 set(_brass_header_check_src "")
 foreach(_hdr IN LISTS BRASS_PUBLIC_HEADERS)
     file(RELATIVE_PATH _rel "${BRASS_INCLUDE_DIR}" "${_hdr}")
@@ -339,6 +359,9 @@ set_target_properties(brass_public_headers_check PROPERTIES COMPILE_OPTIONS "")
 target_include_directories(brass_public_headers_check PRIVATE ${BRASS_INCLUDE_DIR})
 target_compile_features(brass_public_headers_check PRIVATE cxx_std_20)
 target_compile_definitions(brass_public_headers_check PRIVATE BRASS_HOST_BACKEND=$<BOOL:${BRASS_HOST_BACKEND}>)
+if(BRASS_WITH_SPIRV)
+    target_include_directories(brass_public_headers_check PRIVATE ${BRASS_SPIRV_HEADERS_DIR})
+endif()
 if(MSVC)
     target_compile_options(brass_public_headers_check PRIVATE
         /W4 /WX /EHsc /permissive- /Zc:__cplusplus /utf-8)
