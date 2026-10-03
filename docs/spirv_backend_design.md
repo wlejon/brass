@@ -11,8 +11,14 @@ with `KernelBuilder` lowers to PTX for NVIDIA and to SPIR-V for Vulkan. The
 PTX backend this one mirrors is described in
 [ptx_backend_design.md](ptx_backend_design.md).
 
-Planned next: brotensor driving these kernels inside its own Vulkan runtime,
-then its trace JIT emitting through this target (stage 3).
+Stage 3 is done on the brotensor side: its trace JIT builds the elementwise
+and row-norm fusion plans as MIR through `KernelBuilder` and compiles them
+with `SpirvTarget::compile` (brotensor `src/jit/spirv_emit*.cpp`,
+`src/vulkan/vulkan_jit.cpp`), dispatched inside its own Vulkan runtime per
+the runtime contract below. One gap it worked around: MIR has no 32-bit
+float/int bitcast, so BF16 unpack/round goes through a per-thread word of
+shared memory (which lowers to `OpBitcast`); a `bitcast` MIR op would remove
+that.
 
 ## Pipeline
 
