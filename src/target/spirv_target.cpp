@@ -55,6 +55,7 @@ SpirvKernel SpirvTarget::compile(const Function& fn, const SpirvOptions& opts) {
     k.local_size[0] = opts.local_size_x;
     k.local_size[1] = opts.local_size_y;
     k.local_size[2] = opts.local_size_z;
+    k.local_size_spec_constants = opts.local_size_spec_constants;
     for (spv::Capability c : m.capabilities) k.capabilities.emplace_back(spv::CapabilityToString(c));
     k.extensions = m.extensions;
     return k;

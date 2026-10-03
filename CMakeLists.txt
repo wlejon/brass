@@ -104,16 +104,14 @@ list(REMOVE_DUPLICATES BRASS_SOURCES)
 
 # SPIR-V compute target (src/target/spirv*, docs/spirv_backend_design.md):
 # needs the Khronos SPIR-V headers (spirv/unified1/spirv.hpp,
-# GLSL.std.450.h) -- the Vulkan SDK, a distribution's spirv-headers package,
-# a SPIRV-Headers checkout beside brass, or -DBRASS_SPIRV_HEADERS_DIR=<dir>.
-# Without them the target is left out and BRASS_WITH_SPIRV is 0.
-find_path(BRASS_SPIRV_HEADERS_DIR spirv/unified1/spirv.hpp
-    HINTS
-        "$ENV{VULKAN_SDK}/include"
-        "${CMAKE_CURRENT_SOURCE_DIR}/../SPIRV-Headers/include"
-        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/SPIRV-Headers/include"
-    DOC "Directory holding spirv/unified1/spirv.hpp")
-if(BRASS_SPIRV_HEADERS_DIR)
+# GLSL.std.450.h). brass vendors them in third_party/spirv-headers (MIT), so
+# the target is built everywhere; -DBRASS_SPIRV_HEADERS_DIR=<dir> points the
+# build at another copy (a Vulkan SDK, a SPIRV-Headers checkout). Only a
+# directory without spirv/unified1/spirv.hpp leaves the target out
+# (BRASS_WITH_SPIRV 0).
+set(BRASS_SPIRV_HEADERS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/spirv-headers/include"
+    CACHE PATH "Directory holding spirv/unified1/spirv.hpp (default: the vendored copy)")
+if(BRASS_SPIRV_HEADERS_DIR AND EXISTS "${BRASS_SPIRV_HEADERS_DIR}/spirv/unified1/spirv.hpp")
     set(_brass_with_spirv ON)
 else()
     set(_brass_with_spirv OFF)

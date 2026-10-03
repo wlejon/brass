@@ -1,0 +1,32 @@
+#version 460
+// Hand-written GLSL twin of fused_swiglu_kernel (bench_spirv_vulkan.cpp):
+// the same push-constant ABI (gate, up, out as device addresses, u32 n),
+// grid-stride float4 body plus a scalar tail.
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+layout(local_size_x_id = 0) in;
+
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer V4 { vec4 v[]; };
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer F1 { float v[]; };
+
+layout(push_constant) uniform P { uint64_t gate; uint64_t up; uint64_t outp; uint n; } p;
+
+void main() {
+    uint nvec = p.n >> 2;
+    uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    V4 g = V4(p.gate);
+    V4 u = V4(p.up);
+    V4 o = V4(p.outp);
+    for (uint i = gl_GlobalInvocationID.x; i < nvec; i += stride) {
+        vec4 a = g.v[i];
+        o.v[i] = a / (1.0 + exp(-a)) * u.v[i];
+    }
+    F1 gs = F1(p.gate);
+    F1 us = F1(p.up);
+    F1 os = F1(p.outp);
+    for (uint i = (nvec << 2) + gl_LocalInvocationID.x; i < p.n; i += gl_WorkGroupSize.x) {
+        float a = gs.v[i];
+        os.v[i] = a / (1.0 + exp(-a)) * us.v[i];
+    }
+}

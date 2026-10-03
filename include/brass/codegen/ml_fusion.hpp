@@ -4,6 +4,7 @@
 #include <brass/mir/function.hpp>
 #include <brass/codegen/kernel_jit.hpp>
 #include <brass/target/ptx_target.hpp>
+#include <brass/target/spirv_target.hpp>
 
 #include <string>
 #include <string_view>
@@ -93,6 +94,29 @@ using BlockQ8DotProductFn = void (*)(
     uint64_t num_blocks
 );
 
+// The fused GPU kernels by name, for the backend-generic entry points
+// (MlFusionCompiler::build_gpu_kernel / compile_spirv). Each has the launch
+// contract documented on its build_ptx_* builder below.
+enum class GpuKernel {
+    swiglu,                 // fused_swiglu_kernel
+    swiglu_packed,          // fused_swiglu_packed_kernel
+    adaln_modulate,         // fused_adaln_modulate_kernel
+    adaln_modulate_gated,   // fused_adaln_modulate_gated_kernel
+    residual_rms_norm,      // fused_residual_rms_norm_kernel
+    layernorm_modulate,     // fused_layernorm_modulate_kernel
+    residual_layernorm,     // fused_residual_layernorm_kernel
+    gemv_swiglu,            // fused_gemv_swiglu_kernel
+    gemv_residual,          // fused_gemv_residual_kernel
+    gemv_q8_0,              // fused_gemv_q8_0_kernel
+    gemv_q4_k,              // fused_gemv_q4_k_kernel
+};
+inline constexpr GpuKernel kAllGpuKernels[] = {
+    GpuKernel::swiglu, GpuKernel::swiglu_packed, GpuKernel::adaln_modulate, GpuKernel::adaln_modulate_gated,
+    GpuKernel::residual_rms_norm, GpuKernel::layernorm_modulate, GpuKernel::residual_layernorm,
+    GpuKernel::gemv_swiglu, GpuKernel::gemv_residual, GpuKernel::gemv_q8_0, GpuKernel::gemv_q4_k,
+};
+const char* gpu_kernel_entry(GpuKernel k);   // the entry-point name
+
 class MlFusionCompiler {
 public:
     MlFusionCompiler();
@@ -160,6 +184,17 @@ public:
     Function* build_ptx_gemv_residual(Module& mod);
     Function* build_ptx_gemv_q8_0(Module& mod);
     Function* build_ptx_gemv_q4_k(Module& mod);
+
+    // The same MIR, by kernel id (the build_ptx_* builder for it).
+    Function* build_gpu_kernel(Module& mod, GpuKernel k);
+
+    // --- SPIR-V (Vulkan) Code Generation ---
+    // The kernel lowered through SpirvTarget::compile: the same MIR as the PTX
+    // emitters, the same parameters in the same order (as the push-constant
+    // block, see docs/spirv_backend_design.md), the same launch geometry, with
+    // the block size as specialization constants 0..2. Throws
+    // std::runtime_error when brass was built without the SPIR-V target.
+    target::SpirvKernel compile_spirv(GpuKernel k, const target::SpirvOptions& opts = {});
 
     // --- CPU Compilation (Zero GC overhead) ---
     KernelFunction compile_residual_rms_norm();

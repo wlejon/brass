@@ -430,6 +430,12 @@ Id SpirvISel::op(spv::Op o, Id type, std::initializer_list<Id> ids) {
     Inst inst(o, type, r);
     for (Id i : ids) inst.id(i);
     emit(std::move(inst));
+    // Float conversions are NoContraction: without it Mesa's NIR treats them
+    // as inexact and folds fpext(fptrunc(x)) to x and fpext(sitofp_f32(i)) to
+    // sitofp_f64(i), skipping the rounding MIR requires (found on RADV).
+    if (o == spv::OpFConvert || o == spv::OpConvertSToF || o == spv::OpConvertUToF || o == spv::OpConvertFToS ||
+        o == spv::OpConvertFToU)
+        m_.decorate(r, spv::DecorationNoContraction);
     return r;
 }
 

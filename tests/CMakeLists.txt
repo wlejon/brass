@@ -262,6 +262,12 @@ if(BRASS_WITH_SPIRV)
         unit/test_spirv_isel.cpp
         unit/test_spirv_target.cpp
         unit/test_spirv_intrinsics.cpp
+        unit/test_spirv_execution.cpp
+        unit/test_spirv_execution_cf.cpp
+        unit/test_spirv_execution_mem.cpp
+        unit/test_spirv_execution_subgroup.cpp
+        unit/test_spirv_kernels.cpp
+        unit/test_spirv_kernels_quant.cpp
     )
     find_program(BRASS_SPIRV_VAL spirv-val HINTS "$ENV{VULKAN_SDK}/bin")
     find_program(BRASS_SPIRV_DIS spirv-dis HINTS "$ENV{VULKAN_SDK}/bin")
@@ -440,6 +446,31 @@ add_executable(brass_gc_pause_bench benchmarks/gc_pause_bench.cpp)
 target_include_directories(brass_gc_pause_bench PRIVATE ${BRASS_INCLUDE_DIR})
 target_link_libraries(brass_gc_pause_bench PRIVATE brass)
 add_test(NAME gc_pause_ratchet COMMAND brass_gc_pause_bench --check)
+
+# SpirvTarget kernels vs hand-written GLSL twins (glslc at build time, when
+# found) through the same Vulkan driver: bandwidth per kernel. Run by hand;
+# the numbers are in docs/spirv_backend_design.md ("Measured").
+if(BRASS_WITH_SPIRV)
+    add_executable(brass_spirv_bench benchmarks/bench_spirv_vulkan.cpp)
+    target_include_directories(brass_spirv_bench PRIVATE ${BRASS_INCLUDE_DIR})
+    target_link_libraries(brass_spirv_bench PRIVATE brass)
+    find_program(BRASS_GLSLC glslc HINTS "$ENV{VULKAN_SDK}/bin")
+    if(BRASS_GLSLC)
+        set(_spv_dir "${CMAKE_CURRENT_BINARY_DIR}/spirv_bench")
+        set(_spv_outputs "")
+        foreach(_shader swiglu rms_norm subgroup_size)
+            set(_src "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/spirv/${_shader}.comp")
+            add_custom_command(OUTPUT "${_spv_dir}/${_shader}.spv"
+                COMMAND ${CMAKE_COMMAND} -E make_directory "${_spv_dir}"
+                COMMAND ${BRASS_GLSLC} --target-env=vulkan1.2 -O "${_src}" -o "${_spv_dir}/${_shader}.spv"
+                DEPENDS "${_src}" COMMENT "glslc ${_shader}.comp" VERBATIM)
+            list(APPEND _spv_outputs "${_spv_dir}/${_shader}.spv")
+        endforeach()
+        add_custom_target(brass_spirv_bench_shaders DEPENDS ${_spv_outputs})
+        add_dependencies(brass_spirv_bench brass_spirv_bench_shaders)
+        target_compile_definitions(brass_spirv_bench PRIVATE BRASS_SPIRV_BENCH_SHADER_DIR="${_spv_dir}")
+    endif()
+endif()
 set_tests_properties(gc_pause_ratchet PROPERTIES TIMEOUT 600 RUN_SERIAL TRUE LABELS "perf")
 
 if(BRASS_BUILD_TOOLS)

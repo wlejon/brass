@@ -51,7 +51,8 @@ struct SpirvKernel {
     std::vector<SpirvParam> params;        // push-constant layout, in parameter order
     uint32_t push_constant_bytes = 0;
     uint32_t shared_bytes = 0;             // total Workgroup storage
-    uint32_t local_size[3] = {1, 1, 1};
+    uint32_t local_size[3] = {1, 1, 1};       // the LocalSize default
+    bool local_size_spec_constants = true;    // SpecId 0..2 override local_size
     std::vector<std::string> capabilities; // e.g. "Int64", "Float64", "GroupNonUniformShuffle"
     std::vector<std::string> extensions;   // e.g. "SPV_EXT_shader_atomic_float_add"
 };

@@ -1,0 +1,16 @@
+#version 460
+// Reports gl_SubgroupSize, so the benchmark can say which wave size the
+// driver actually ran a pipeline with (required 32 / 64, or its choice).
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_KHR_shader_subgroup_basic : require
+
+layout(local_size_x_id = 0) in;
+
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer U1 { uint v[]; };
+
+layout(push_constant) uniform P { uint64_t outp; } p;
+
+void main() {
+    if (gl_GlobalInvocationID.x == 0) U1(p.outp).v[0] = gl_SubgroupSize;
+}

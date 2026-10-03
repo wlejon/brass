@@ -1,0 +1,44 @@
+#version 460
+// Hand-written GLSL twin of fused_residual_rms_norm_kernel
+// (bench_spirv_vulkan.cpp): the same push-constant ABI (x, res, gamma, y as
+// device addresses, u32 rows, u32 d, f32 eps), one workgroup per row,
+// x += res in place, y = x * gamma * inversesqrt(mean(x^2) + eps). Rows are
+// assumed to be a multiple of 4 floats (the benchmark's 4096).
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x_id = 0) in;
+
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer V4 { vec4 v[]; };
+
+layout(push_constant) uniform P { uint64_t x; uint64_t res; uint64_t gamma; uint64_t y; uint rows; uint d; float eps; } p;
+
+shared float partial[64];
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    if (row >= p.rows) return;
+    uint nv = p.d >> 2;
+    uint64_t off = uint64_t(row) * uint64_t(p.d) * 4ul;
+    V4 x = V4(p.x + off);
+    V4 r = V4(p.res + off);
+    V4 y = V4(p.y + off);
+    V4 g = V4(p.gamma);
+    float acc = 0.0;
+    for (uint i = gl_LocalInvocationID.x; i < nv; i += gl_WorkGroupSize.x) {
+        vec4 v = x.v[i] + r.v[i];
+        x.v[i] = v;
+        acc += dot(v, v);
+    }
+    acc = subgroupAdd(acc);
+    if (subgroupElect()) partial[gl_SubgroupID] = acc;
+    barrier();
+    float total = 0.0;
+    for (uint s = 0; s < gl_NumSubgroups; ++s) total += partial[s];
+    float rr = inversesqrt(total / float(p.d) + p.eps);
+    for (uint i = gl_LocalInvocationID.x; i < nv; i += gl_WorkGroupSize.x) {
+        y.v[i] = x.v[i] * g.v[i] * rr;
+    }
+}

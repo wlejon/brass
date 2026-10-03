@@ -458,6 +458,32 @@ TEST_CASE("SPIR-V ISel - loop-carried 256-bit vectors") {
     compile_checked(*k.fn);
 }
 
+// Device finding (RADV): without NoContraction Mesa folds fpext(fptrunc(x))
+// to x and fpext(sitofp_f32(i)) to sitofp_f64(i), dropping the f32 rounding.
+// Every float conversion carries the decoration; integer ones do not.
+TEST_CASE("SPIR-V ISel - float conversions are NoContraction") {
+    Kernel k({Type::ptr(), Type::f64(), Type::i32(), Type::i64()});
+    Builder& b = k.b;
+    Value* t = b.build_fpext_f64_f32(b.build_fptrunc_f32_f64(k.p(1)));
+    Value* s = b.build_fpext_f64_f32(b.build_sitofp_f32_i32(k.p(2)));
+    Value* i = b.build_sitofp_f64_i64(b.build_fptosi_i64(k.p(1)));
+    Value* u = b.build_call("ptx_u32_to_f32", Type::f32(), {k.p(2)});
+    b.build_store(Type::f64(), k.p(0), 0, b.build_add(b.build_add(t, s), i));
+    b.build_store(Type::f32(), k.p(0), 8, u);
+    b.build_store(Type::i64(), k.p(0), 16, b.build_sext_i64(k.p(2)));
+    b.build_ret_void();
+    compile_checked(*k.fn);
+    std::string d = dump_of(*k.fn);
+    // fptrunc, fpext x2, sitofp x2, fptosi, ptx_u32_to_f32 (the dump prints
+    // the decoration by number: NoContraction = 42)
+    const std::string no_contraction = " " + std::to_string(static_cast<int>(spv::DecorationNoContraction)) + "\n";
+    size_t n = 0;
+    std::istringstream lines(d);
+    for (std::string line; std::getline(lines, line);)
+        if (line.rfind("OpDecorate %", 0) == 0 && has(line + "\n", no_contraction)) ++n;
+    CHECK_EQ(n, 7u);
+}
+
 // ---------------------------------------------------------------------------
 // Diagnostics
 // ---------------------------------------------------------------------------

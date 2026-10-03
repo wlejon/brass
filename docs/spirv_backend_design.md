@@ -1,17 +1,18 @@
 # SPIR-V Backend Design
 
-Status: the target, its IR, verifier and tests (stage 1 of 3). This document
-is the reference for the SPIR-V compute backend: the typed SPIR-V module
-model, the writer and verifier, the structurizer, the instruction selector,
-the memory model and the kernel ABI. Kernels are written exactly as for PTX
+Status: the target, its IR, verifier and tests (stage 1 of 3), and the
+Vulkan runtime with on-device execution of the ISel features and the fused
+ML kernels (stage 2). This document is the reference for the SPIR-V compute
+backend: the typed SPIR-V module model, the writer and verifier, the
+structurizer, the instruction selector, the memory model, the kernel ABI and
+the runtime contract an embedder's Vulkan code must honour. Kernels are written exactly as for PTX
 ([ptx_kernel_authoring.md](ptx_kernel_authoring.md)); the same MIR built
 with `KernelBuilder` lowers to PTX for NVIDIA and to SPIR-V for Vulkan. The
 PTX backend this one mirrors is described in
 [ptx_backend_design.md](ptx_backend_design.md).
 
-Planned next: a Vulkan runtime (`gpu/vulkan_driver`) that loads and
-dispatches these modules and runs the fused ML kernels on device (stage 2),
-then brotensor's trace JIT emitting through this target (stage 3).
+Planned next: brotensor driving these kernels inside its own Vulkan runtime,
+then its trace JIT emitting through this target (stage 3).
 
 ## Pipeline
 
@@ -50,11 +51,11 @@ returned.
 
 - Opcodes and enumerants are the Khronos headers' (`spv::Op`,
   `spv::Capability`, `GLSLstd450*`, from `<spirv/unified1/spirv.hpp>` and
-  `GLSL.std.450.h`); nothing hand-types an opcode number. CMake finds the
-  headers (`BRASS_SPIRV_HEADERS_DIR`; hints: `$VULKAN_SDK/include`, a
-  `SPIRV-Headers` checkout beside brass, the system include path, any
-  `CMAKE_PREFIX_PATH`). Without them the SPIR-V sources and tests are left
-  out and `BRASS_WITH_SPIRV` is 0.
+  `GLSL.std.450.h`); nothing hand-types an opcode number. Both headers are
+  vendored, unmodified, in `third_party/spirv-headers` (MIT, Khronos), so
+  `BRASS_WITH_SPIRV` is 1 in every build; `-DBRASS_SPIRV_HEADERS_DIR=<dir>`
+  points at another copy (a Vulkan SDK, a SPIRV-Headers checkout), and only
+  a directory without `spirv/unified1/spirv.hpp` leaves the target out.
 - `spirv::Inst { op, type, result, operands, origin }`; each `Operand` is
   tagged as an id or a literal word, so the verifier can check every id.
   Strings (entry-point names, `OpName`, extensions, the extended-instruction
@@ -276,6 +277,23 @@ Rules:
   GLSL precisions, comparable to PTX `.approx`. `Fma` is fused.
 - `fptosi` / `ptx_f32_to_i32` out of range are undefined (PTX saturates);
   shifts by the bit width or more are undefined (PTX clamps).
+- NaN and infinity results are undefined except where SPIR-V defines them
+  (comparisons, `NMin`/`NMax`): the module does not declare
+  `SignedZeroInfNanPreserve`, so the driver may assume finite values. On
+  RADV `f64` division by NaN returns 0. Signed zeros may be lost the same
+  way.
+- `smod` on floats is `OpFRem`, whose Vulkan precision is that of
+  `x - y * trunc(x / y)`: exact for small quotients, wrong by whole
+  multiples of `y` once `x / y` loses integer precision (RADV:
+  `fmod(1e10f, 3)` gives 256).
+- The driver may contract a MIR `mul` feeding an `add` into an FMA (the
+  instructions are not `NoContraction`), as `ptxas` may for PTX `mul`/`add`
+  without a rounding modifier.
+- Float **conversions** are exact: every `OpFConvert`, `OpConvertSToF`,
+  `OpConvertUToF`, `OpConvertFToS` and `OpConvertFToU` is decorated
+  `NoContraction`, because Mesa otherwise treats them as inexact and folds
+  `fpext(fptrunc(x))` to `x` and `fpext(sitofp_f32(i))` to `sitofp_f64(i)`,
+  dropping the rounding MIR specifies (found on device, see Measured).
 - `fmin`/`fmax` are `NMin`/`NMax` (the non-NaN operand wins, like PTX
   `min/max` and `fminf`).
 - `ptx_f32_to_f16` is `PackHalf2x16(x, 0)`: the half in the low 16 bits,
@@ -333,51 +351,205 @@ the ISel throws it, naming the kernel and block:
 | `ptx_globaltimer` | a nanosecond clock; device-scope `OpReadClockKHR` counts ticks of unspecified frequency |
 | `ptx_bar_sync_count` | a barrier for a subset of the block; `OpControlBarrier` waits for the whole workgroup |
 
+## Vulkan runtime (`include/brass/gpu/vulkan_driver.hpp`)
+
+`src/gpu/vulkan_driver.cpp` (loader, device, buffers, submission) and
+`vulkan_driver_module.cpp` (pipelines, dispatch, the capability check). It is
+the test and benchmark harness and the reference for an embedder's own
+runtime, not a general one: one process-wide device and compute queue, one
+command buffer, every submission waited on with a fence.
+
+- **Loading.** `libvulkan.so.1` (`vulkan-1.dll`, `libvulkan.1.dylib`) is
+  `dlopen`ed on first use, like `cuda_driver`; nothing links against Vulkan.
+  The implementation needs the Vulkan 1.3 headers at build time
+  (`__has_include(<vulkan/vulkan.h>)`); without them every entry point
+  reports "unavailable" and the tests print `[SKIP]`.
+- **Device.** Instance API version `min(loader, 1.3)`; the first discrete
+  GPU, else the first integrated one, else any Vulkan 1.2 device;
+  `BRASS_VULKAN_DEVICE=<index>` overrides. The device must have
+  `bufferDeviceAddress` and `shaderInt64` (every kernel needs them);
+  everything else is enabled when supported and reported in
+  `VulkanDeviceCaps`.
+- **Features enabled** (exactly these, not everything the device has):
+  `shaderInt64`, `shaderFloat64`, `shaderInt16`; `storageBuffer16BitAccess`
+  (1.1); `bufferDeviceAddress`, `storageBuffer8BitAccess`,
+  `shaderBufferInt64Atomics`, `shaderSharedInt64Atomics` (1.2);
+  `subgroupSizeControl` + `computeFullSubgroups` (1.3 core, or
+  `VK_EXT_subgroup_size_control`); `shaderBufferFloat32AtomicAdd`,
+  `shaderSharedFloat32AtomicAdd`, `shaderBufferFloat64AtomicAdd`
+  (`VK_EXT_shader_atomic_float`); `shaderSubgroupClock`
+  (`VK_KHR_shader_clock`). Subgroup BASIC and SHUFFLE in the compute stage
+  are properties: checked, not enabled.
+- **`VulkanDeviceCaps::missing_for(kernel)`** maps each name in
+  `SpirvKernel::capabilities` to its feature (`Float64` -> `shaderFloat64`,
+  `StorageBuffer8BitAccess` -> `storageBuffer8BitAccess`,
+  `GroupNonUniformShuffle` -> compute-stage SHUFFLE, `AtomicFloat32AddEXT`
+  -> `shaderBufferFloat32AtomicAdd`, `Int64Atomics` ->
+  `shaderBufferInt64Atomics`, `ShaderClockKHR` -> `shaderSubgroupClock`,
+  ...) and checks `push_constant_bytes` and `shared_bytes` against the
+  limits; `VulkanModule::load` refuses a kernel with that list, naming the
+  device. An unknown capability is refused too.
+- **`VulkanBuffer`**: device-local memory allocated with
+  `VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT`, usage `STORAGE_BUFFER |
+  TRANSFER_SRC | TRANSFER_DST | SHADER_DEVICE_ADDRESS`, size rounded up to 4;
+  `device_address()` is `vkGetBufferDeviceAddress`. `upload` / `download`
+  go through a temporary host-visible coherent staging buffer and
+  `vkCmdCopyBuffer`; `fill` / `zero` are `vkCmdFillBuffer`.
+- **`VulkanModule::load(kernel, err, {subgroup_size})`**: one shader module,
+  a pipeline layout with no descriptor sets and one push-constant range
+  (compute stage, offset 0, `push_constant_bytes`), and one compute
+  pipeline per distinct workgroup size, created on first use and cached
+  (the kernel's default size is created at load, so a driver compile error
+  surfaces there). The workgroup size goes in as specialization constants
+  0, 1, 2 (`uint32`) unless the kernel has a fixed `LocalSize`
+  (`SpirvKernel::local_size_spec_constants` false), in which case a
+  dispatch must use exactly that size. `subgroup_size` (default 32) chains
+  `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo` when the device can
+  require that size in compute, plus `REQUIRE_FULL_SUBGROUPS` when the
+  block's x size is a multiple of it; 0 leaves the choice to the driver.
+- **`launch(dispatch, args)` / `launch_1d(grid, block, {args})`**: packs the
+  push-constant block from `VulkanArg`s (a `VulkanBuffer` is its device
+  address; `uint64_t`/`int64_t` for `ptr`/`i64`, `uint32_t`/`int32_t` for
+  `i32`, `float`, `double`), checking the count and each kind against
+  `SpirvKernel::params`, then binds, pushes, dispatches `repeat` times
+  (compute-to-compute barriers between) and waits on the fence. Every
+  submission starts with an all-commands memory barrier and ends with one
+  to host reads, because submission order alone is not a memory
+  dependency. `gpu_ms` returns the GPU time from two timestamp queries.
+
+### Runtime contract (what an embedder's Vulkan code must do)
+
+1. Device: Vulkan 1.2+ with `bufferDeviceAddress` and `shaderInt64`
+   enabled, plus whichever features of the list above the kernels'
+   declared capabilities need (check them as `missing_for` does). SPIR-V
+   1.6 modules only on a Vulkan 1.3 device.
+2. Buffers: every buffer a kernel touches is created with
+   `VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT` (plus storage/transfer usage
+   as needed) on memory allocated with `VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT`;
+   a `ptr` argument is `vkGetBufferDeviceAddress(buffer) + byte offset`.
+   Alignment: scalar accesses need their element size, `vload`/`vstore`
+   (every float4 path of the fused kernels) 16 bytes -- the `Aligned`
+   operands promise it and the driver compiles to it.
+3. Pipeline layout: zero descriptor set layouts and exactly one
+   push-constant range `{VK_SHADER_STAGE_COMPUTE_BIT, 0, push_constant_bytes}`.
+4. Push constants: the parameters in declaration order at
+   `SpirvKernel::params[i].offset` (each aligned to its own size: `ptr`/`i64`
+   8 bytes, `i32`/`f32` 4, `f64` 8), little-endian, pushed with
+   `vkCmdPushConstants(cmd, layout, COMPUTE, 0, push_constant_bytes, data)`.
+   The fused kernels take 24 to 60 bytes.
+5. Workgroup size: `VkSpecializationInfo` with map entries `{0, 0, 4}`,
+   `{1, 4, 4}`, `{2, 8, 4}` (constant ids 0, 1, 2 = `uint32` x, y, z) when
+   `local_size_spec_constants`; the entry point is `SpirvKernel::entry`.
+6. Subgroups: require size 32 with
+   `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo` when the device
+   allows it (and `REQUIRE_FULL_SUBGROUPS` for x sizes that are multiples of
+   32). The kernels are also exact at 64 (tested on RADV), so a device that
+   cannot require 32 works as long as subgroups are consecutive local
+   invocation ids (true for 1-D workgroups on AMD and NVIDIA).
+7. Dispatch: `vkCmdDispatch(grid_x, grid_y, grid_z)` with the grids of the
+   PTX launch contracts (`ml_fusion.hpp`); shared memory is static. A
+   compute-to-compute memory barrier between dependent dispatches (several
+   kernels update `x` in place).
+
 ## Testing
 
 Every test that needs `spirv-val` or `spirv-dis` (SPIRV-Tools; found by
 CMake with `find_program`, else on `PATH`) prints a visible `[SKIP]` and
-passes without them. `tests/unit/spirv_test_support.hpp` has the helpers:
+passes without them, and every test that executes prints `[SKIP]` without a
+Vulkan device. `tests/unit/spirv_test_support.hpp` has the static helpers:
 `compile_checked` (facade + `spirv::verify` + `spirv-val --target-env
 vulkan1.2`, or `vulkan1.3` for SPIR-V 1.6), `disassemble`,
-`require_diagnostic`, and a `Kernel` builder.
+`require_diagnostic`, and a `Kernel` builder; `spirv_exec_support.hpp` adds
+`vk_ready`, `load`, `launch`, `upload`/`download` and the
+one-thread-per-element `run_map`.
 
 | File | Covers |
 | --- | --- |
 | `test_spirv_ir.cpp` | type/constant dedup, the binary layout (header, word counts, strings, 64-bit literals), the dump, every verifier rule on a hand-built failing module, and spirv-val rejecting an unstructured branch the verifier allows (proving the tool runs) |
 | `test_spirv_isel.cpp` | every scalar ALU op and conversion, comparisons and their materialization, the division fixup, scalar/indexed/vector memory, every vector op on all eight vector types; if, if-else with a phi, loops with carried scalars and 256-bit vectors, nested and unrolled loops, early return and break in a loop, nested ifs sharing a join, both arms returning, a do-while latch, a loop left by return, a loop at the entry block, a `br_if` with one target; diagnostics for irreducible CFGs, multi-exit loops, unsupported opcodes/terminators/calls, non-void kernels and escaping shared pointers |
 | `test_spirv_intrinsics.cpp` | a signature row per table entry (coverage-checked), each validated; every PTX intrinsic lowered or diagnosed with its reason; per-family opcodes in the spirv-dis text; shared-access size and constant-count diagnostics; the KernelBuilder warp and block reductions as a kernel |
-| `test_spirv_target.cpp` | the push-constant layout, spec-constant vs fixed workgroup size, a two-kernel module, SPIR-V 1.6, the disassembly of a full kernel, and the ten fused ML kernels lowering unchanged to valid modules |
+| `test_spirv_target.cpp` | the push-constant layout, spec-constant vs fixed workgroup size, a two-kernel module, SPIR-V 1.6, the disassembly of a full kernel, and the fused ML kernels lowering unchanged to valid modules |
+| `test_spirv_execution.cpp` | on device: the runtime (buffers, partial transfers, the capability check, every parameter type and its push-constant padding, argument count/kind errors, spec-constant and fixed workgroup sizes, SPIR-V 1.6, 3-D grids and every index builtin); i32/i64 ALU with MIN / -1, MIN % -1, shifts and constant divisors; f32/f64 ALU with NMin/NMax on NaN and RoundEven; every comparison as a value and as a condition (float `ne` unordered); conversions and bitcasts |
+| `test_spirv_execution_cf.cpp` | on device: if / if-else phis, nested and unrolled loops with divergent trip counts, early return and break in a loop, nested ifs sharing a join, both arms returning, do-while, a loop left by return, a loop at the entry block with a one-target `br_if`, loop-carried 256-bit vectors, a grid-stride loop |
+| `test_spirv_execution_mem.cpp` | on device: scalar loads/stores of every width (indexed, displaced, one pointer at two types), 8/16-bit access at odd offsets, all eight vector types, shared memory of every element type with barriers and pointer offsets, global and shared atomics (float add, old values), f16 unpack of all 65536 halves and pack, clock, the math and wide-multiply intrinsics |
+| `test_spirv_execution_subgroup.cpp` | on device: every shuffle mode (f32/i32, constant and register deltas) against PTX semantics, and the warp and block reductions at blocks 32..1024, each at subgroup size 32, 64 and the driver's choice |
+| `test_spirv_kernels.cpp` | on device: the eleven fused kernels (`MlFusionCompiler::compile_spirv`) against double-precision host references over `test_gpu_kernels.cpp`'s shapes and tolerances, and against the CPU `KernelJit` SwiGLU, AdaLN and residual RMSNorm |
+| `test_spirv_kernels_quant.cpp` | on device: GEMV Q8_0 / Q4_K over `test_gpu_kernels_quant.cpp`'s shapes at subgroup sizes 32 and 64, and against the CPU `KernelJit` GEMVs |
 
-There are no on-device tests yet; `spirv-val` passing is the bar for this
-stage.
+`brass_spirv_bench` (`tests/benchmarks/bench_spirv_vulkan.cpp`, run by
+hand, not a ctest) times kernels against hand-written GLSL twins in
+`tests/benchmarks/spirv/*.comp`, compiled by `glslc` at build time when
+CMake finds it and launched through the same runtime with the same
+push-constant ABI.
+
+## Measured
+
+AMD Radeon 8060S (Strix Halo, gfx1151, integrated, LPDDR5X), Mesa RADV
+26.2.3, Vulkan 1.4, October 2026.
+
+**Device features.** Everything the target can declare is supported and
+enabled: `bufferDeviceAddress`, `shaderInt64`, `shaderFloat64`,
+`shaderInt16`, 8/16-bit storage, subgroup BASIC + SHUFFLE in compute,
+`shaderBufferFloat32AtomicAdd` / `shaderSharedFloat32AtomicAdd`,
+`shaderBufferInt64Atomics`, `shaderSubgroupClock`, `subgroupSizeControl`
+with `computeFullSubgroups`. Push constants up to 256 bytes, 64 KiB of
+shared memory, timestamp period 10.02 ns.
+
+**Subgroup size.** RADV reports `subgroupSize` 64 and a range of 32..64,
+requirable in compute. Without a required size, compute pipelines run
+wave64 (`gl_SubgroupSize` 64 at blocks 64 and 256); requiring 32 or 64 is
+honoured. The runtime requires 32 by default. The fused kernels and the
+reductions give bit-identical results at 32 and 64 (the shuffles work on
+32-lane segments, so the reduction order does not change).
+
+**What the device found.** Every stage-1 kernel and control-flow shape ran
+correctly the first time except float conversions: Mesa folded
+`fpext(fptrunc(x))` and `fpext(sitofp_f32(i))`, skipping the f32 rounding.
+Fixed by decorating every float conversion `NoContraction`
+(`test_spirv_isel.cpp` checks the decorations, `test_spirv_execution.cpp`
+the values). It also showed the precision rules listed under "Semantic
+differences": `OpFRem` loses whole multiples of `y` for large quotients,
+and NaN results are undefined without `SignedZeroInfNanPreserve`
+(documented, not changed: matching x64 there would cost every kernel).
+Accuracy of the fused kernels against the double-precision references is
+far inside the CUDA tolerances: max relative error 1.4e-7 for SwiGLU, 4e-8
+for AdaLN, 1.1e-7 for the norms, 1.9e-6 for the GEMVs and 2.6e-6 for the
+quantized GEMVs; the in-place `x += res` outputs are exact.
+
+**Bandwidth** (`brass_spirv_bench`, median of 5 command buffers of 20
+dispatches, both at subgroup size 32):
+
+| Kernel | Block | brass SPIR-V | GLSL (glslc -O) |
+| --- | --- | --- | --- |
+| SwiGLU, 64M floats (768 MiB per run) | 128 | 220.4 GB/s | 220.8 GB/s |
+| | 256 | 229.7 GB/s | 230.0 GB/s |
+| | 512 | 230.8 GB/s | 230.7 GB/s |
+| residual RMSNorm, 4096 x 4096 (256 MiB per run) | 128 | 180.5 GB/s | 182.8 GB/s |
+| | 256 | 208.5 GB/s | 208.2 GB/s |
+| | 512 | 210.7 GB/s | 212.8 GB/s |
+| | 1024 | 217.9 GB/s | 216.7 GB/s |
+
+The generated kernels are within 1.5% of the GLSL ones everywhere (outputs
+identical for SwiGLU, within 6e-8 for RMSNorm), about 90% of the memory's
+nominal 256 GB/s: the `Aligned 16` vector accesses become 128-bit global
+loads and stores as in the GLSL, so no codegen change was needed. The
+RMSNorm at subgroup size 64 is 2-3% slower at blocks 256..1024 and 2%
+faster at 128.
 
 ## What is not done
 
-- No Vulkan runtime and no execution (stage 2).
 - `switch`, `invoke` and the other exception/coroutine terminators;
   `clz`/`ctz`/`popcnt` and the overflow ops; `i8`/`i16` values; calls to
   non-intrinsic functions.
 - Loops whose exits continue into different blocks (route them through one
   exit block); multi-level breaks other than an inner loop's only exit.
 - A storage-buffer-descriptor mode (device addresses only).
-- Mixed-size accesses of one shared array.
+- Mixed-size accesses of one shared array (no fused kernel needs one).
 - Backend-side optimisation (the driver compiler does it).
-
-## Requirements for the Vulkan runtime (stage 2)
-
-Device features by capability (`SpirvKernel::capabilities`):
-`bufferDeviceAddress` (always), `shaderInt64` (always), `shaderFloat64`
-(`Float64`), `storageBuffer8BitAccess` / `storageBuffer16BitAccess`
-(narrow access), subgroup `SHUFFLE` and `BASIC` operations in the compute
-stage (`GroupNonUniform*`), `shaderBufferFloat32AtomicAdd` /
-`shaderSharedFloat32AtomicAdd` from `VK_EXT_shader_atomic_float`
-(`AtomicFloat32AddEXT`), `shaderInt64Atomics` (`Int64Atomics`),
-`shaderSubgroupClock` from `VK_KHR_shader_clock` (`ShaderClockKHR`).
-Buffers need `VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT` and memory
-allocated with `VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT`; the pipeline layout
-has one push-constant range of `push_constant_bytes` and no descriptor
-sets; the workgroup size is specialization constants 0..2.
+- An option declaring `SignedZeroInfNanPreserve`, and an exact `fmod`, for
+  kernels that need x64's NaN and remainder semantics.
+- The runtime is synchronous and single-queue by design; asynchronous
+  submission and buffer pooling belong to the embedder's runtime.
 
 ## File size rule
 
