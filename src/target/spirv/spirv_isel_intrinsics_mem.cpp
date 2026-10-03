@@ -115,7 +115,9 @@ void SpirvISel::Intrinsics::atom(SpirvISel& isel, const brass::Instruction& inst
     Module& m = isel.m_;
     Type vt = value->type();
     Id t = isel.scalar_type(vt);
-    if (A != Atom::add && vt.is_float()) isel.malformed(inst, "only atomic add supports float values");
+    if constexpr (A != Atom::add) {
+        if (vt.is_float()) isel.malformed(inst, "only atomic add supports float values");
+    }
     if (vt.size_in_bytes() == 8) m.add_capability(spv::CapabilityInt64Atomics);
 
     Id ptr = 0;
@@ -128,14 +130,20 @@ void SpirvISel::Intrinsics::atom(SpirvISel& isel, const brass::Instruction& inst
     }
 
     spv::Op o = spv::OpAtomicIAdd;
-    if (A == Atom::add && vt.is_float()) {
-        o = spv::OpAtomicFAddEXT;
-        m.add_capability(vt.size_in_bytes() == 8 ? spv::CapabilityAtomicFloat64AddEXT : spv::CapabilityAtomicFloat32AddEXT);
-        m.add_extension("SPV_EXT_shader_atomic_float_add");
+    if constexpr (A == Atom::add) {
+        if (vt.is_float()) {
+            o = spv::OpAtomicFAddEXT;
+            m.add_capability(vt.size_in_bytes() == 8 ? spv::CapabilityAtomicFloat64AddEXT
+                                                     : spv::CapabilityAtomicFloat32AddEXT);
+            m.add_extension("SPV_EXT_shader_atomic_float_add");
+        }
+    } else if constexpr (A == Atom::min) {
+        o = spv::OpAtomicSMin;
+    } else if constexpr (A == Atom::max) {
+        o = spv::OpAtomicSMax;
+    } else if constexpr (A == Atom::exch) {
+        o = spv::OpAtomicExchange;
     }
-    if (A == Atom::min) o = spv::OpAtomicSMin;
-    if (A == Atom::max) o = spv::OpAtomicSMax;
-    if (A == Atom::exch) o = spv::OpAtomicExchange;
     isel.define(inst.result(), isel.op(o, t, {ptr, m.c_u32(scope), m.c_u32(spv::MemorySemanticsMaskNone),
                                               isel.id_of(value, "atomic value")}));
 }
@@ -201,7 +209,9 @@ template void SpirvISel::Intrinsics::shared_alloc<TypeKind::I64>(SpirvISel&, con
 // (ptr[, byte offset]) or, indexed, (ptr, element index)
 template <TypeKind K, bool Indexed>
 void SpirvISel::Intrinsics::shared_load(SpirvISel& isel, const brass::Instruction& inst) {
-    if (Indexed && !inst.operand(1)) isel.malformed(inst, "missing index");
+    if constexpr (Indexed) {
+        if (!inst.operand(1)) isel.malformed(inst, "missing index");
+    }
     const SharedRef& ref = isel.shared_ref(inst.operand(0), "shared load pointer");
     isel.define(inst.result(), isel.shared_load(ref, inst.operand(1), Indexed, Type(K)));
 }
