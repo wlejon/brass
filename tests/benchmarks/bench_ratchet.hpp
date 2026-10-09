@@ -8,11 +8,18 @@
 // shadow stack, compile speed) is held by its golden like everything else,
 // and the goldens sit well inside those claims.
 //
+// Goldens are per machine: bench/hosts/<host>.json. Every key compares brass
+// with native code the host compiler built (or, for compile_speed, is a raw
+// time), so a number is only meaningful against the same CPU and toolchain.
+// A machine with no file of its own reports its numbers and passes.
+//
 // Included from bench_utils.hpp after BenchmarkResult; do not include
 // directly.
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <map>
@@ -44,7 +51,7 @@ public:
     }
 
     // Kept for call sites that take a ratchet by default; goldens come only
-    // from bench/ratchet*.json, so a missing file means every key is new.
+    // from bench/hosts/<host>.json, so a missing file means every key is new.
     static RatchetManager defaults() { return RatchetManager{}; }
 
     // Per-key direction and margin. The default margin is 10%; a key whose
@@ -90,10 +97,42 @@ public:
 
     const std::map<std::string, double>& ratios() const { return ratios_; }
 
+    // The key's policy on this host: policy(key), with the margin widened
+    // when this host's goldens file says so ("margin.<key>", written by
+    // --update-ratchet for a key whose recording runs disagreed).
+    RatchetPolicy policy_for(const std::string& key) const {
+        RatchetPolicy p = policy(key);
+        auto it = margins_.find(key);
+        if (it != margins_.end() && it->second > p.margin) p.margin = it->second;
+        return p;
+    }
+
+    // --update-ratchet: `vals` are one key's numbers from the recording runs
+    // and `golden` their median. Where the runs spread past half the key's
+    // margin, this host cannot hold the key to it: some keys are bimodal
+    // from process to process on some machines (fib on halo, Strix Halo;
+    // interp_prime_sieve_100k on the Windows box and the M2 Pro; 20-35%
+    // apart, not ASLR on halo), so the margin becomes the observed worst-run
+    // excursion plus the key's margin. Otherwise any widening is dropped.
+    // Returns the recorded margin override, or 0 when there is none.
+    double record_margin(const std::string& key, const std::vector<double>& vals, double golden) {
+        margins_.erase(key);
+        if (vals.size() < 2 || golden <= 0.0) return 0.0;
+        const RatchetPolicy p = policy(key);
+        double worst = golden;
+        for (double v : vals) worst = p.higher_is_better ? std::min(worst, v) : std::max(worst, v);
+        if (worst <= 0.0) return 0.0;
+        const double spread = p.higher_is_better ? golden / worst - 1.0 : worst / golden - 1.0;
+        if (spread <= 0.5 * p.margin) return 0.0;
+        const double m = std::ceil((spread + p.margin) * 100.0) / 100.0;
+        margins_[key] = m;
+        return m;
+    }
+
     RatchetCheck check(const BenchmarkResult& res) const {
         RatchetCheck c;
         if (!has_ratio(res.key)) return c;
-        const RatchetPolicy p = policy(res.key);
+        const RatchetPolicy p = policy_for(res.key);
         c.golden = get_ratio(res.key);
         if (p.higher_is_better) {
             c.bound = c.golden / (1.0 + p.margin);
@@ -112,7 +151,7 @@ public:
             const RatchetCheck c = check(res);
             if (c.verdict != RatchetVerdict::Fail) continue;
             all_passed = false;
-            const RatchetPolicy p = policy(res.key);
+            const RatchetPolicy p = policy_for(res.key);
             std::ostringstream oss;
             oss << std::fixed << std::setprecision(3) << res.key << " (" << res.name << "): measured "
                 << res.ratio << p.unit << (p.higher_is_better ? " below " : " above ") << c.bound << p.unit
@@ -123,27 +162,33 @@ public:
         return all_passed;
     }
 
-    static std::string find_ratchet_file(const std::string& explicit_path = "") {
-        if (!explicit_path.empty()) {
-            std::ifstream f(explicit_path);
-            if (f.good()) return explicit_path;
+    // A host name as a file name: lower case, the first DNS label only
+    // ("Jonnys-MacBook-Pro.local" -> "jonnys-macbook-pro"), anything outside
+    // [a-z0-9_-] replaced by '-'.
+    static std::string normalize_host(const std::string& raw) {
+        std::string out;
+        for (char ch : raw) {
+            if (ch == '.') break;
+            const unsigned char c = static_cast<unsigned char>(std::tolower(static_cast<unsigned char>(ch)));
+            out += (std::isalnum(c) || c == '-' || c == '_') ? static_cast<char>(c) : '-';
         }
-#if defined(BRASS_BENCH_RATCHET_PATH)
-        {
-            std::ifstream f(BRASS_BENCH_RATCHET_PATH);
-            if (f.good()) return BRASS_BENCH_RATCHET_PATH;
+        return out.empty() ? "unknown-host" : out;
+    }
+
+    // The goldens for `host`: <bench dir>/hosts/<host>.json, the bench dir
+    // being the source tree's bench/ (BRASS_BENCH_DIR) or, failing that, the
+    // first bench/ found from the working directory up.
+    static std::string host_ratchet_path(const std::string& host) {
+        std::string dir = "bench";
+#if defined(BRASS_BENCH_DIR)
+        dir = BRASS_BENCH_DIR;
+#else
+        for (const char* cand : {"bench", "../bench", "../../bench"}) {
+            std::error_code ec;
+            if (std::filesystem::is_directory(std::string(cand) + "/hosts", ec)) { dir = cand; break; }
         }
 #endif
-        const std::vector<std::string> candidates = {
-            "bench/ratchet.json",
-            "../bench/ratchet.json",
-            "../../bench/ratchet.json"
-        };
-        for (const auto& path : candidates) {
-            std::ifstream f(path);
-            if (f.good()) return path;
-        }
-        return "bench/ratchet.json";
+        return dir + "/hosts/" + host + ".json";
     }
 
     // Flat {"key": number, ...} reader.
@@ -176,7 +221,12 @@ public:
             }
             if (val_end > val_start) {
                 try {
-                    ratios_[key] = std::stod(content.substr(val_start, val_end - val_start));
+                    const double v = std::stod(content.substr(val_start, val_end - val_start));
+                    if (key.rfind(kMarginPrefix, 0) == 0) {
+                        margins_[key.substr(sizeof(kMarginPrefix) - 1)] = v;
+                    } else {
+                        ratios_[key] = v;
+                    }
                     any = true;
                 } catch (...) {}
             }
@@ -185,69 +235,26 @@ public:
         return any;
     }
 
-    // Per-platform goldens. The ratios compare brass against native code the
-    // host compiler built, so a baseline pinned under MSVC need not hold
-    // against GCC or Clang: bench/ratchet.<platform>.json, when present,
-    // overrides the keys it names.
-    static const char* platform_name() {
-#if defined(_WIN32)
-        return "windows";
-#elif defined(__APPLE__)
-        return "macos";
-#else
-        return "linux";
-#endif
+    // The median of a key's numbers over several suite runs (--runs).
+    static double median(std::vector<double> vals) {
+        if (vals.empty()) return 0.0;
+        std::sort(vals.begin(), vals.end());
+        const size_t n = vals.size();
+        return n % 2 ? vals[n / 2] : 0.5 * (vals[n / 2 - 1] + vals[n / 2]);
     }
 
-    static std::string platform_overlay_path(const std::string& base_path) {
-        const std::string ext = ".json";
-        std::string stem = base_path;
-        if (stem.size() >= ext.size() && stem.compare(stem.size() - ext.size(), ext.size(), ext) == 0) {
-            stem.resize(stem.size() - ext.size());
-        }
-        return stem + "." + platform_name() + ext;
-    }
-
-    bool load_overlay(const std::string& filepath) {
-        RatchetManager overlay;
-        if (!overlay.load(filepath)) return false;
-        for (const auto& [key, val] : overlay.ratios_) {
-            ratios_[key] = val;
-            overlay_keys_.push_back(key);
-        }
-        return true;
-    }
-
-    bool has_overlay() const { return !overlay_keys_.empty(); }
-
-    // --update-ratchet. With a platform overlay loaded, every measured key is
-    // written to the overlay and the base file is left alone, so re-baselining
-    // one platform never rewrites another's goldens. Without one, measured
-    // keys go to the base file. Keys a run did not measure are kept.
-    void update_from_results(const std::vector<BenchmarkResult>& results) {
-        for (const auto& res : results) {
-            if (res.key.empty() || res.ratio <= 0.0) continue;
-            ratios_[res.key] = res.ratio;
-            if (has_overlay() &&
-                std::find(overlay_keys_.begin(), overlay_keys_.end(), res.key) == overlay_keys_.end()) {
-                overlay_keys_.push_back(res.key);
-            }
-        }
-    }
-
-    bool save(const std::string& filepath) const { return save_filtered(filepath, false); }
-    bool save_overlay(const std::string& filepath) const { return save_filtered(filepath, true); }
-
-private:
-    bool save_filtered(const std::string& filepath, bool overlay_only) const {
+    bool save(const std::string& filepath) const {
         // Reload what is on disk so keys this process does not own survive.
         RatchetManager on_disk;
         on_disk.load(filepath);
         std::map<std::string, double> rows = on_disk.ratios_;
-        for (const auto& [key, val] : ratios_) {
-            const bool in_overlay = std::find(overlay_keys_.begin(), overlay_keys_.end(), key) != overlay_keys_.end();
-            if (in_overlay == overlay_only) rows[key] = val;
-        }
+        for (const auto& [key, val] : ratios_) rows[key] = val;
+        // Margins are this object's alone: it loaded the file's, and
+        // record_margin adds or drops one per recorded key.
+        for (const auto& [key, val] : margins_) rows[kMarginPrefix + key] = val;
+        std::error_code ec;
+        const std::filesystem::path parent = std::filesystem::path(filepath).parent_path();
+        if (!parent.empty()) std::filesystem::create_directories(parent, ec);
         std::ofstream file(filepath);
         if (!file.is_open()) return false;
         file << "{\n";
@@ -261,8 +268,11 @@ private:
         return true;
     }
 
+private:
+    static constexpr char kMarginPrefix[] = "margin.";
+
     std::map<std::string, double> ratios_;
-    std::vector<std::string> overlay_keys_;
+    std::map<std::string, double> margins_;  // per-host widened margins, by key
 };
 
 } // namespace brass::bench

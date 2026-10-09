@@ -64,7 +64,7 @@ inline std::string get_provenance_git_commit() {
 
 class BenchmarkReporter {
 public:
-    // The one verdict: regression against the golden in bench/ratchet*.json.
+    // The one verdict: regression against the golden in bench/hosts/<host>.json.
     static std::string ratchet_status(const BenchmarkResult& res) {
         if (is_debug_build()) return "[INFO]";
         const RatchetManager* rm = RatchetManager::active();
@@ -209,7 +209,7 @@ public:
 
         for (const auto& res : results) {
             if (res.key.empty()) continue;
-            const RatchetPolicy p = RatchetManager::policy(res.key);
+            const RatchetPolicy p = rm.policy_for(res.key);
             const RatchetCheck c = rm.check(res);
             const int prec = res.ratio >= 100.0 ? 1 : 3;
             auto num = [&](double v) {

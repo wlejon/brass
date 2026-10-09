@@ -44,8 +44,15 @@
 #endif
 #endif
 
+// The walk recognises s31_call_main by its entry address, so the frame on the
+// stack must be that function, not an IPA clone of it: GCC 16 specialises it
+// for the constant argument (s31_call_main.constprop.0), whose frame then
+// never matches &s31_call_main and the walk runs off the end. noipa keeps
+// every call going to the one body.
 #if defined(_MSC_VER)
 #define S31_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) && !defined(__clang__)
+#define S31_NOINLINE __attribute__((noipa))
 #else
 #define S31_NOINLINE __attribute__((noinline))
 #endif
@@ -93,7 +100,10 @@ std::string guard_exit_src(int nstate) {
 }
 
 uintptr_t g_limit_rsp = 0;  // an address in s31_call_main's frame
-uintptr_t g_main_lo = 0, g_main_hi = 0;
+uintptr_t g_main_lo = 0;
+#if defined(S31_WIN64_WALK)
+uintptr_t g_main_hi = 0;
+#endif
 bool g_walk_ok = false;
 bool g_cpp_throw = false;
 

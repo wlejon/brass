@@ -6,6 +6,8 @@
 // before it starts and across the whole run (less its own CPU time) and says
 // plainly when either was high enough that the numbers are not trustworthy.
 
+#include <string>
+
 namespace brass::bench {
 
 struct CpuLoadSample {
@@ -43,5 +45,9 @@ double report_load_during_run(const CpuLoadSample& start);
 // run lands on whichever the scheduler picks, and ratios then move between
 // runs by more than any regression margin. Returns false if it could not.
 bool pin_current_thread(int cpu);
+
+// This machine's host name as the OS reports it (not normalized); empty if
+// unavailable. Picks the ratchet's per-host goldens.
+std::string machine_host_name();
 
 } // namespace brass::bench

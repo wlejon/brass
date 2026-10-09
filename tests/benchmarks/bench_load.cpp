@@ -21,6 +21,9 @@
 #else
 #include <sys/resource.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#endif
 #endif
 
 namespace brass::bench {
@@ -99,6 +102,18 @@ CpuLoadSample sample_cpu_load() {
         s.valid = true;
     }
     s.self_seconds = self_cpu_seconds();
+#elif defined(__APPLE__)
+    host_cpu_load_info_data_t info;
+    mach_msg_type_number_t count = HOST_CPU_LOAD_INFO_COUNT;
+    if (host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, reinterpret_cast<host_info_t>(&info), &count) ==
+        KERN_SUCCESS) {
+        unsigned long long total = 0;
+        for (int i = 0; i < CPU_STATE_MAX; ++i) total += info.cpu_ticks[i];
+        s.total = total;
+        s.busy = total - info.cpu_ticks[CPU_STATE_IDLE];
+        s.valid = true;
+    }
+    s.self_seconds = self_cpu_seconds();
 #else
     s.self_seconds = self_cpu_seconds();
 #endif
@@ -145,6 +160,21 @@ bool pin_current_thread(int cpu) {
     return sched_setaffinity(0, sizeof(set), &set) == 0;
 #else
     return false;
+#endif
+}
+
+std::string machine_host_name() {
+#if defined(_WIN32)
+    char buf[256] = {};
+    DWORD len = sizeof(buf);
+    if (GetComputerNameExA(ComputerNameDnsHostname, buf, &len)) return std::string(buf, len);
+    len = sizeof(buf);
+    if (GetComputerNameA(buf, &len)) return std::string(buf, len);
+    return {};
+#else
+    char buf[256] = {};
+    if (gethostname(buf, sizeof(buf) - 1) != 0) return {};
+    return std::string(buf);
 #endif
 }
 

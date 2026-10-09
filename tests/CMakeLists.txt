@@ -426,7 +426,7 @@ target_compile_definitions(brass_benchmarks
     PRIVATE
         BRASS_GIT_COMMIT="${BRASS_GIT_COMMIT_HASH}"
         BRASS_BUILD_TYPE="${CMAKE_BUILD_TYPE}"
-        BRASS_BENCH_RATCHET_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../bench/ratchet.json"
+        BRASS_BENCH_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../bench"
 )
 
 target_link_libraries(brass_benchmarks
