@@ -125,7 +125,9 @@ JitExecutionEngine::LoadRegistrations::LoadRegistrations(LoadRegistrations&& oth
       pdata_count(std::exchange(other.pdata_count, 0)),
       code_base(std::exchange(other.code_base, 0)),
       fdes(std::exchange(other.fdes, {})),
-      text_base(std::exchange(other.text_base, nullptr)) {}
+      text_base(std::exchange(other.text_base, nullptr)),
+      code_begin(std::exchange(other.code_begin, nullptr)),
+      code_end(std::exchange(other.code_end, nullptr)) {}
 
 JitExecutionEngine::LoadRegistrations&
 JitExecutionEngine::LoadRegistrations::operator=(LoadRegistrations&& other) noexcept {
@@ -139,6 +141,8 @@ JitExecutionEngine::LoadRegistrations::operator=(LoadRegistrations&& other) noex
         code_base = std::exchange(other.code_base, 0);
         fdes = std::exchange(other.fdes, {});
         text_base = std::exchange(other.text_base, nullptr);
+        code_begin = std::exchange(other.code_begin, nullptr);
+        code_end = std::exchange(other.code_end, nullptr);
     }
     return *this;
 }
@@ -152,6 +156,8 @@ void JitExecutionEngine::LoadRegistrations::release() noexcept {
         runtime::get_global_exception_registry().unregister_function_mapping(fn_addr);
     }
     exception_fns.clear();
+    runtime::unregister_deopt_resumers_in(code_begin, code_end);
+    code_begin = code_end = nullptr;
     text_base = nullptr;
 }
 
@@ -342,6 +348,8 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
         if (!code_mem_.is_valid()) {
             return false;
         }
+        regs_.code_begin = code_mem_.data();
+        regs_.code_end = code_mem_.data() + code_mem_.size();
     } else {
         code_mem_.reset();
     }

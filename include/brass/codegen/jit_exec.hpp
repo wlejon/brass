@@ -379,6 +379,10 @@ private:
         // given, the whole .eh_frame or, on Apple, each FDE.
         std::vector<void*> fdes;
         uint8_t* text_base = nullptr;
+        // The code pages: the deopt resumers registered inside them are
+        // dropped before they are freed.
+        const uint8_t* code_begin = nullptr;
+        const uint8_t* code_end = nullptr;
     };
 
     Target target_;

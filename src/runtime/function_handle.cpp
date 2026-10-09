@@ -151,6 +151,13 @@ std::shared_ptr<codegen::BaselineCompiledFunction> FunctionHandle::baseline_func
     return baseline_function_;
 }
 
+FunctionHandle::~FunctionHandle() {
+    // Before the engines (members) free the code the entries point into.
+    std::lock_guard<std::mutex> lock(engine_mutex_);
+    for (const DeoptEntry& d : deopt_entries_) unregister_deopt_resumer(d.entry);
+    deopt_entries_.clear();
+}
+
 void FunctionHandle::retire() noexcept {
     set_native_entry(nullptr);
     mir_function_.store(nullptr, std::memory_order_release);

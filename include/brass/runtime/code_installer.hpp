@@ -41,7 +41,10 @@ RuntimeValue invoke_native_address(void* addr, Type ret_type, const std::vector<
 class FunctionHandle {
 public:
     explicit FunctionHandle(std::string_view name, const Function* mir_fn = nullptr);
-    ~FunctionHandle() = default;
+    // Unregisters the deopt resumers of its code, which resume through this
+    // handle: a handle never retired (one outside any table) takes them
+    // with it rather than leaving them to a later load at the same address.
+    ~FunctionHandle();
 
     FunctionHandle(const FunctionHandle&) = delete;
     FunctionHandle& operator=(const FunctionHandle&) = delete;

@@ -126,14 +126,19 @@ DeoptHandlerFn get_deopt_handler() {
 }
 
 namespace {
-std::mutex g_resumer_mutex;
+// Never destroyed, as the map: handles of the default program unregister
+// their resumers while static objects are torn down.
+std::mutex& resumer_mutex() {
+    static auto* m = new std::mutex();
+    return *m;
+}
 std::unordered_map<void*, std::shared_ptr<const DeoptResumerFn>>& resumers() {
     static auto* map = new std::unordered_map<void*, std::shared_ptr<const DeoptResumerFn>>();
     return *map;
 }
 std::shared_ptr<const DeoptResumerFn> find_resumer(void* code_entry) {
     if (!code_entry) return nullptr;
-    std::lock_guard<std::mutex> lock(g_resumer_mutex);
+    std::lock_guard<std::mutex> lock(resumer_mutex());
     auto it = resumers().find(code_entry);
     return it != resumers().end() ? it->second : nullptr;
 }
@@ -203,13 +208,25 @@ void register_deopt_resumer(void* code_entry, DeoptResumerFn resumer) {
     if (!code_entry || !resumer) {
         throw std::invalid_argument("register_deopt_resumer: null code entry or resumer");
     }
-    std::lock_guard<std::mutex> lock(g_resumer_mutex);
+    std::lock_guard<std::mutex> lock(resumer_mutex());
     resumers()[code_entry] = std::make_shared<const DeoptResumerFn>(std::move(resumer));
 }
 
 void unregister_deopt_resumer(void* code_entry) {
-    std::lock_guard<std::mutex> lock(g_resumer_mutex);
+    std::lock_guard<std::mutex> lock(resumer_mutex());
     resumers().erase(code_entry);
+}
+
+void unregister_deopt_resumers_in(const void* begin, const void* end) noexcept {
+    const auto lo = reinterpret_cast<uintptr_t>(begin);
+    const auto hi = reinterpret_cast<uintptr_t>(end);
+    if (lo >= hi) return;
+    std::lock_guard<std::mutex> lock(resumer_mutex());
+    auto& map = resumers();
+    for (auto it = map.begin(); it != map.end();) {
+        const auto at = reinterpret_cast<uintptr_t>(it->first);
+        it = (at >= lo && at < hi) ? map.erase(it) : std::next(it);
+    }
 }
 
 bool has_deopt_resumer(void* code_entry) {

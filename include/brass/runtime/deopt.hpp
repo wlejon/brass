@@ -277,8 +277,15 @@ void deopt_handler_throw_native(uint64_t value, uintptr_t stack_limit, std::exce
 // tier-2 installer for each entry point it publishes; takes precedence over
 // the thread's handler.
 using DeoptResumerFn = std::function<uint64_t(const DeoptFrame&)>;
+// A resumer lives no longer than its code or the handle it resumes through:
+// the handle unregisters its entries when it retires or is destroyed, and
+// the engine holding the code drops every resumer inside it before the code
+// is freed (unregister_deopt_resumers_in), so a later load at the same
+// address never finds a stale one.
 void register_deopt_resumer(void* code_entry, DeoptResumerFn resumer);
 void unregister_deopt_resumer(void* code_entry);
+// Every resumer whose code entry lies in [begin, end).
+void unregister_deopt_resumers_in(const void* begin, const void* end) noexcept;
 bool has_deopt_resumer(void* code_entry);
 
 } // namespace brass::runtime
