@@ -433,6 +433,50 @@ body:
     REQUIRE(all_tiers_agree(src, kIntArgs));
 }
 
+// A 16-bit element stored as two bytes at `index * 2` and `index * 2 + 1`
+// (bronze's Int16Array store): byte accesses scaled by 2. An AArch64
+// register-offset access scales its index only by its own size, so the scale
+// was dropped (`strb w, [x, x, lsl #0]`) and every element landed at
+// `index * 1`, overlapping its neighbours.
+TEST_CASE("JIT regression - narrow accesses scaled by more than their size") {
+    const char* src = R"(
+module @m
+func @fuzz_fn(%0: i64, %1: i64) -> i64 {
+entry:
+  %2 = alloca 32, 8
+  %z = iconst.i64 0
+  %c1 = iconst.i64 1
+  %c2 = iconst.i64 2
+  %c3 = iconst.i64 3
+  store_indexed.i64 %2, %z, 8, %z
+  store_indexed.i64 %2, %c1, 8, %z
+  store_indexed.i64 %2, %c2, 8, %z
+  store_indexed.i64 %2, %c3, 8, %z
+  %idx = and.i64 %1, %c3
+  %lo = trunc.i8 %0
+  %eight = iconst.i64 8
+  %sh = lshr.i64 %0, %eight
+  %hi = trunc.i8 %sh
+  store_indexed.i8 %2, %idx, 2, 0, %lo
+  store_indexed.i8 %2, %idx, 2, 1, %hi
+  %next = add.i64 %idx, %c1
+  %lo2 = trunc.i8 %1
+  store_indexed.i8 %2, %next, 2, 0, %lo2
+  %w = load_indexed.i8 %2, %idx, 2
+  %wz = zext.i64 %w
+  %b = load_indexed.i8 %2, %idx, 2, 1
+  %bz = zext.i64 %b
+  %all = load_indexed.i64 %2, %z, 8
+  %k = iconst.i64 1099511628211
+  %m1 = mul.i64 %all, %k
+  %s1 = add.i64 %wz, %bz
+  %r = xor.i64 %m1, %s1
+  ret %r
+}
+)";
+    REQUIRE(all_tiers_agree(src, kIntArgs));
+}
+
 // The index of a load_indexed is `(row - n + j) + 1`: the constant folds into
 // the displacement, leaving `row - n + j` as the index register. That add had
 // also been fused into a lea computing the `+ 1` add, which itself was folded

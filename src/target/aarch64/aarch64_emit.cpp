@@ -55,6 +55,29 @@ MemAddress AArch64EmitContext::to_mem_address(const LirOperand& op) {
             else if (m.scale == x64::Scale::Four) shift = 2;
             else if (m.scale == x64::Scale::Two) shift = 1;
 
+            // A register offset scales its index by the access size or not
+            // at all (the S bit: LSL #log2(size) or LSL #0), so an index
+            // scaled by anything else is applied here. bronze stores a
+            // 16-bit element as two bytes at index * 2 (+1): byte accesses
+            // at scale 2, which encoded as LSL #0 wrote every element at
+            // index * 1.
+            const uint8_t size_shift = op.size == 8 ? 3 : (op.size == 4 ? 2 : (op.size == 2 ? 1 : (op.size == 16 ? 4 : 0)));
+            if (shift != 0 && shift != size_shift) {
+                GPR addr_scratch = (base == GPR::X16 || index == GPR::X16) ? GPR::X17 : GPR::X16;
+                enc_.lsl(addr_scratch, index, shift);
+                enc_.add(addr_scratch, base, addr_scratch);
+                if (m.disp >= 0 && m.disp <= 4095) {
+                    if (m.disp != 0) enc_.add(addr_scratch, addr_scratch, static_cast<uint32_t>(m.disp));
+                } else if (m.disp < 0 && -m.disp <= 4095) {
+                    enc_.sub(addr_scratch, addr_scratch, static_cast<uint32_t>(-m.disp));
+                } else {
+                    GPR other = addr_scratch == GPR::X16 ? GPR::X17 : GPR::X16;
+                    enc_.mov(other, static_cast<uint64_t>(m.disp));
+                    enc_.add(addr_scratch, addr_scratch, other);
+                }
+                return ptr(addr_scratch, 0);
+            }
+
             if (m.disp != 0) {
                 GPR disp_scratch = (base == GPR::X16 || index == GPR::X16) ? GPR::X17 : GPR::X16;
                 if (m.disp >= 0 && m.disp <= 4095) {

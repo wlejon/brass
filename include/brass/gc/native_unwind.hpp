@@ -42,6 +42,19 @@ bool brass_unwind_step(NativeUnwindFrame& f, bool ip_is_return_address = true) n
 // that deep or cannot be unwound.
 bool brass_capture_frame(NativeUnwindFrame& f, unsigned skip) noexcept;
 
+// While one is live on this thread, brass_unwind_step reuses the call-frame
+// rows it has already found for a return address instead of finding each
+// again. A stack walk holds one for its duration: the code its frames return
+// into stays loaded for as long as those frames are live, which a walk of
+// them does not outlast. Nested scopes share the outermost one's rows.
+class UnwindRowCacheScope {
+public:
+    UnwindRowCacheScope() noexcept;
+    ~UnwindRowCacheScope();
+    UnwindRowCacheScope(const UnwindRowCacheScope&) = delete;
+    UnwindRowCacheScope& operator=(const UnwindRowCacheScope&) = delete;
+};
+
 // Whether ip lies in a loaded image (compiled code: the host's, brass's own
 // runtime, the C++ runtime, the system) rather than in code generated at
 // run time.

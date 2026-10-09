@@ -121,6 +121,9 @@ size_t walk_stack(
     uintptr_t stop_at,
     [[maybe_unused]] const StartFrame* start
 ) {
+#if defined(BRASS_NATIVE_UNWIND)
+    UnwindRowCacheScope row_cache;
+#endif
     size_t frame_count = 0;
     uintptr_t cur_rbp = top_rbp;
     uintptr_t cur_return_ip = top_return_ip;
@@ -140,15 +143,48 @@ size_t walk_stack(
     }
 #endif
 
-    // The registry holds the maps of all code brass loaded; the given maps
-    // add code registered elsewhere (an embedder's own images).
-    auto find_map = [&](uintptr_t ip) -> const FunctionStackMap* {
-        const FunctionStackMap* m = find_code_stack_map(registered.get(), ip);
-        if (m == nullptr && !stack_maps.indexed_by_code_registry()) {
-            m = stack_maps.find_function_by_ip(ip);
-        }
-        return m;
+    // What the walk has learned about each return address: its stack map,
+    // and whether it lies in a loaded image. A deep stack is a few return
+    // addresses many times over (a recursion repeats one per call), and a
+    // walk under gc-stress runs at every allocation, so both lookups (a
+    // binary search per registry segment, an image-table search) are
+    // answered once per address per walk. Direct-mapped: a collision only
+    // costs the lookup again. The snapshot is fixed for the walk, so an
+    // answer cannot go stale within it.
+    struct IpFacts {
+        uintptr_t ip = 0;  // 0: empty slot
+        const FunctionStackMap* map = nullptr;
+        int8_t in_image = -1;  // -1: not asked yet
     };
+    constexpr size_t kIpFactSlots = 64;
+    IpFacts ip_facts[kIpFactSlots];
+    auto facts_for = [&](uintptr_t ip) -> IpFacts& {
+        IpFacts& f = ip_facts[((ip >> 2) ^ (ip >> 9)) & (kIpFactSlots - 1)];
+        if (f.ip != ip) {
+            f.ip = ip;
+            // The registry holds the maps of all code brass loaded; the
+            // given maps add code registered elsewhere (an embedder's own
+            // images).
+            f.map = find_code_stack_map(registered.get(), ip);
+            if (f.map == nullptr && !stack_maps.indexed_by_code_registry()) {
+                f.map = stack_maps.find_function_by_ip(ip);
+            }
+            f.in_image = -1;
+        }
+        return f;
+    };
+    auto find_map = [&](uintptr_t ip) -> const FunctionStackMap* {
+        if (ip == 0) return nullptr;
+        return facts_for(ip).map;
+    };
+#if BRASS_WALK_UNWINDS
+    auto in_image = [&](uintptr_t ip) -> bool {
+        if (ip == 0) return ip_in_image(ip);
+        IpFacts& f = facts_for(ip);
+        if (f.in_image < 0) f.in_image = ip_in_image(ip) ? 1 : 0;
+        return f.in_image != 0;
+    };
+#endif
 
 #if !BRASS_WALK_UNWINDS
     // Entry scopes the walk passes (above): the innermost one not yet
@@ -214,7 +250,7 @@ size_t walk_stack(
                 entry = entry->outer();
             }
             if (answered) break;
-            if (find_map(cur.ip()) != nullptr || !ip_in_image(cur.ip())) {
+            if (find_map(cur.ip()) != nullptr || !in_image(cur.ip())) {
                 result = UnwindResult::Generated;
                 break;
             }
@@ -252,7 +288,7 @@ size_t walk_stack(
         const FunctionStackMap* fn_map = find_map(cur_return_ip);
 
 #if BRASS_WALK_UNWINDS
-        if (fn_map == nullptr && ip_in_image(cur_return_ip)) {
+        if (fn_map == nullptr && in_image(cur_return_ip)) {
             // A compiled frame: cur_rbp is only the value its rbp register
             // held. Its stack pointer at the call is just above the return
             // address, which sits at callee_rbp + 8.
@@ -343,7 +379,7 @@ size_t walk_stack(
 
 #if BRASS_WALK_UNWINDS
         // A compiled caller's rbp is any value; the unwind above checks it.
-        const bool next_checked_by_unwind = find_map(next_return_ip) == nullptr && ip_in_image(next_return_ip);
+        const bool next_checked_by_unwind = find_map(next_return_ip) == nullptr && in_image(next_return_ip);
 #else
         const bool next_checked_by_unwind = false;
 #endif

@@ -711,6 +711,12 @@ void AArch64Encoder::emit_load_store_imm(bool is_load, uint8_t size_bytes, bool 
         case 1: size_code = 0; break;
         default: size_code = 3; break;
         }
+        // S scales the index by the access size (for a byte access it means
+        // LSL #0); no other shift is encodable, and dropping it addresses the
+        // wrong element (AArch64EmitContext::to_mem_address applies it).
+        if (mem.shift != 0 && mem.shift != size_code) {
+            throw std::runtime_error("AArch64Encoder: register-offset shift does not match the access size");
+        }
 
         uint32_t inst = (size_code << 30) | (7u << 27) | (opc << 22) | (1u << 21) |
                         (rm << 16) | (ext << 13) | (s << 12) | (2u << 10) | (rn << 5) | rt;

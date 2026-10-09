@@ -194,6 +194,16 @@ public:
     // runaway loop or recursion hits the limit.
     void set_max_call_depth(size_t max_depth) noexcept { max_call_depth_ = max_depth; }
     size_t max_call_depth() const noexcept { return max_call_depth_; }
+    // The call-depth limit every FastInterpreter constructed from now on
+    // starts with (10000 unless set). The limit keeps a recursion from
+    // running the thread out of native stack, which an embedder that checks
+    // its stack itself (a guard in each function's code that throws the
+    // language's own error) does better: its check follows the stack's real
+    // size, where 10000 frames is far short of an 8 MB stack on some targets
+    // and a hard InterpreterException, not a catchable error, when reached.
+    // SIZE_MAX leaves the depth to that check.
+    static void set_default_max_call_depth(size_t max_depth) noexcept;
+    static size_t default_max_call_depth() noexcept;
     void set_max_instructions(uint64_t max_insts) noexcept { max_instructions_ = max_insts; }
     uint64_t max_instructions() const noexcept { return max_instructions_; }
     uint64_t instruction_count() const noexcept { return total_instructions_executed_; }
@@ -308,7 +318,7 @@ private:
 
     FastFrame* current_frame_ = nullptr;
     size_t call_depth_ = 0;
-    size_t max_call_depth_ = 10000;
+    size_t max_call_depth_ = default_max_call_depth();
     uint64_t max_instructions_ = 0;
     uint64_t total_instructions_executed_ = 0;
     uint64_t tls_block_ = 0;

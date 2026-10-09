@@ -5,8 +5,21 @@
 #include "fast_interpreter_impl.hpp"
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
+#include <atomic>
 
 namespace brass {
+
+namespace {
+std::atomic<size_t> g_default_max_call_depth{10000};
+} // namespace
+
+void FastInterpreter::set_default_max_call_depth(size_t max_depth) noexcept {
+    g_default_max_call_depth.store(max_depth, std::memory_order_relaxed);
+}
+
+size_t FastInterpreter::default_max_call_depth() noexcept {
+    return g_default_max_call_depth.load(std::memory_order_relaxed);
+}
 
 FastInterpreter::FastInterpreter(gc::Heap* heap) : alloca_arena_(std::make_unique<FastAllocaArena>()) {
     use_heap(heap ? heap : gc::Heap::current());

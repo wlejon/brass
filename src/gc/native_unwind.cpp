@@ -13,9 +13,17 @@
 
 #include <cstring>
 #include <dlfcn.h>
+#include <new>
 #include <unwind.h>
 #if defined(__APPLE__)
+#include <algorithm>
+#include <atomic>
+#include <iterator>
 #include <libunwind.h>
+#include <mach-o/dyld.h>
+#include <mach-o/loader.h>
+#include <mutex>
+#include <vector>
 #endif
 
 namespace brass {
@@ -433,7 +441,10 @@ bool apply_rule(const Rule& rule, const NativeUnwindFrame& f, uintptr_t cfa, uin
 // here (the return address is undefined), or no CFI describes the frame.
 enum class CfiStep { Stepped, End, NoCfi, Failed };
 
-CfiStep step_by_cfi(NativeUnwindFrame& f, uintptr_t lookup) noexcept {
+// The row of the CFI table in effect at `lookup`: Stepped when `row` holds
+// it, NoCfi when no FDE describes the code there, Failed when one does but
+// cannot be read.
+CfiStep find_row(uintptr_t lookup, Row& row) noexcept {
     uintptr_t fn_start = 0;
     const auto* fde = static_cast<const uint8_t*>(detail::find_fde(lookup, fn_start));
     if (!fde) return CfiStep::NoCfi;
@@ -459,10 +470,55 @@ CfiStep step_by_cfi(NativeUnwindFrame& f, uintptr_t lookup) noexcept {
     Row initial;
     uintptr_t loc = fn_start;
     if (!run_cfa_program(cie.instructions, cie.end, cie, loc, UINTPTR_MAX, initial, initial)) return CfiStep::Failed;
-    Row row = initial;
+    row = initial;
     loc = fn_start;
     if (!run_cfa_program(r.p, r.end, cie, loc, lookup, row, initial)) return CfiStep::Failed;
     if (!row.cfa_ok) return CfiStep::Failed;
+    return CfiStep::Stepped;
+}
+
+// Rows already found during the current walk (UnwindRowCacheScope). A deep
+// stack is mostly a few return addresses repeated (nested async resumes are
+// the same five or six), so a walk of N frames finds a handful of rows
+// instead of running N call-frame programs; under GC stress a collection
+// walks the whole stack at every allocation, and finding each row afresh
+// was most of the time a deep program spent. The rows are kept only for one
+// walk: a return address on the stack being walked is code that cannot be
+// unloaded or replaced while its frame is live, but between walks it can
+// (a module unloaded, generated code freed), so the next walk starts empty.
+struct CachedRow {
+    uintptr_t pc = 0;
+    uint32_t epoch = 0;
+    CfiStep kind = CfiStep::Failed;
+    Row row;
+};
+constexpr size_t kRowCacheSize = 64;  // direct-mapped, a power of two
+
+thread_local unsigned t_row_cache_depth = 0;
+thread_local uint32_t t_row_cache_epoch = 0;
+thread_local CachedRow* t_row_cache = nullptr;
+
+CfiStep find_row_cached(uintptr_t lookup, Row& row) noexcept {
+    if (t_row_cache_depth == 0 || t_row_cache == nullptr) return find_row(lookup, row);
+    CachedRow& slot = t_row_cache[(lookup ^ (lookup >> 6)) & (kRowCacheSize - 1)];
+    if (slot.epoch == t_row_cache_epoch && slot.pc == lookup) {
+        if (slot.kind == CfiStep::Stepped) row = slot.row;
+        return slot.kind;
+    }
+    const CfiStep kind = find_row(lookup, row);
+    if (kind == CfiStep::Stepped || kind == CfiStep::NoCfi) {
+        slot.pc = lookup;
+        slot.epoch = t_row_cache_epoch;
+        slot.kind = kind;
+        if (kind == CfiStep::Stepped) slot.row = row;
+    }
+    return kind;
+}
+
+CfiStep step_by_cfi(NativeUnwindFrame& f, uintptr_t lookup) noexcept {
+    Row row;
+    const CfiStep found = find_row_cached(lookup, row);
+    if (found != CfiStep::Stepped) return found;
 
     uintptr_t cfa = 0;
     if (row.cfa_is_expr) {
@@ -512,6 +568,26 @@ bool brass_unwind_step(NativeUnwindFrame& f, bool ip_is_return_address) noexcept
         return true;
     default: return false;
     }
+#endif
+}
+
+UnwindRowCacheScope::UnwindRowCacheScope() noexcept {
+#if !defined(__APPLE__)
+    if (t_row_cache_depth++ != 0) return;  // a nested walk shares the outer one's rows
+    if (t_row_cache == nullptr) t_row_cache = new (std::nothrow) CachedRow[kRowCacheSize];
+    if (++t_row_cache_epoch == 0) {
+        // Wrapped: an entry from 2^32 walks ago must not match.
+        if (t_row_cache != nullptr) {
+            for (size_t i = 0; i < kRowCacheSize; ++i) t_row_cache[i] = CachedRow{};
+        }
+        t_row_cache_epoch = 1;
+    }
+#endif
+}
+
+UnwindRowCacheScope::~UnwindRowCacheScope() {
+#if !defined(__APPLE__)
+    --t_row_cache_depth;
 #endif
 }
 
@@ -577,8 +653,117 @@ __attribute__((noinline)) bool brass_capture_frame(NativeUnwindFrame& f, unsigne
 #endif
 }
 
+#if defined(__APPLE__)
+namespace {
+
+// The executable segments of every loaded image, sorted by start address.
+// dyld has no counterpart to glibc's _dl_find_object, and its dladdr is the
+// slow path described below (on Apple it walks the image's symbol table in
+// dyld3::MachOLoaded::findClosestSymbol), so the table is kept here instead,
+// maintained by dyld's add/remove-image callbacks. Readers load an immutable
+// snapshot; a writer copies it under the mutex and publishes the copy. The
+// superseded snapshots are kept, never freed, since a collection on another
+// thread may still be reading one; images load rarely, so they are few.
+struct CodeRange {
+    uintptr_t lo = 0;
+    uintptr_t hi = 0;
+    const void* header = nullptr;
+};
+
+struct ImageTable {
+    std::vector<CodeRange> ranges;
+};
+
+std::atomic<const ImageTable*> g_image_table{nullptr};
+
+std::mutex& image_table_mutex() {
+    static std::mutex m;
+    return m;
+}
+
+std::vector<const ImageTable*>& retired_image_tables() {
+    static std::vector<const ImageTable*> v;
+    return v;
+}
+
+void publish_image_table(ImageTable* next) {
+    std::sort(next->ranges.begin(), next->ranges.end(),
+              [](const CodeRange& a, const CodeRange& b) { return a.lo < b.lo; });
+    const ImageTable* prev = g_image_table.exchange(next, std::memory_order_acq_rel);
+    if (prev != nullptr) retired_image_tables().push_back(prev);
+}
+
+void on_add_image(const mach_header* mh, intptr_t slide) {
+    std::lock_guard<std::mutex> lock(image_table_mutex());
+    const ImageTable* cur = g_image_table.load(std::memory_order_acquire);
+    auto* next = new ImageTable(cur != nullptr ? *cur : ImageTable{});
+    // Every image dyld loads on a 64-bit Apple target has a 64-bit header.
+    const auto* hdr = reinterpret_cast<const mach_header_64*>(mh);
+    const auto* cmd = reinterpret_cast<const load_command*>(hdr + 1);
+    for (uint32_t i = 0; i < hdr->ncmds; ++i) {
+        if (cmd->cmd == LC_SEGMENT_64) {
+            const auto* seg = reinterpret_cast<const segment_command_64*>(cmd);
+            if ((seg->initprot & VM_PROT_EXECUTE) != 0 && seg->vmsize != 0) {
+                const uintptr_t lo = static_cast<uintptr_t>(seg->vmaddr + slide);
+                next->ranges.push_back({lo, lo + static_cast<uintptr_t>(seg->vmsize), mh});
+            }
+        }
+        cmd = reinterpret_cast<const load_command*>(reinterpret_cast<const char*>(cmd) + cmd->cmdsize);
+    }
+    publish_image_table(next);
+}
+
+void on_remove_image(const mach_header* mh, intptr_t) {
+    std::lock_guard<std::mutex> lock(image_table_mutex());
+    const ImageTable* cur = g_image_table.load(std::memory_order_acquire);
+    if (cur == nullptr) return;
+    auto* next = new ImageTable();
+    for (const CodeRange& r : cur->ranges) {
+        if (r.header != mh) next->ranges.push_back(r);
+    }
+    publish_image_table(next);
+}
+
+const ImageTable* image_table() noexcept {
+    // dyld calls on_add_image for every image already loaded before the
+    // registration returns, then for each one loaded after.
+    static const bool registered = [] {
+        _dyld_register_func_for_add_image(on_add_image);
+        _dyld_register_func_for_remove_image(on_remove_image);
+        return true;
+    }();
+    (void)registered;
+    return g_image_table.load(std::memory_order_acquire);
+}
+
+} // namespace
+#endif
+
 bool brass_ip_in_image(uintptr_t ip) noexcept {
-#if defined(DLFO_EH_SEGMENT_TYPE)
+#if defined(__APPLE__)
+    if (const ImageTable* table = image_table()) {
+        // A walk asks about the same two or three images frame after frame
+        // (the program's, the runtime's, the C++ library's), so the range
+        // that answered last is tried before the search. A table is never
+        // freed, so a remembered one can be compared by address.
+        thread_local const ImageTable* t_last_table = nullptr;
+        thread_local CodeRange t_last_range;
+        if (t_last_table == table && ip >= t_last_range.lo && ip < t_last_range.hi) return true;
+        const auto& r = table->ranges;
+        auto it = std::upper_bound(r.begin(), r.end(), ip,
+                                   [](uintptr_t v, const CodeRange& c) { return v < c.lo; });
+        if (it != r.begin() && ip < std::prev(it)->hi) {
+            t_last_table = table;
+            t_last_range = *std::prev(it);
+            return true;
+        }
+    }
+    // Not in the table: generated code (the walk asks about a frame only
+    // once its stack maps have not claimed it, so this is rare), or dyld
+    // itself, which the add-image callback never reports. dladdr settles it.
+    Dl_info info;
+    return dladdr(reinterpret_cast<void*>(ip), &info) != 0 && info.dli_fbase != nullptr;
+#elif defined(DLFO_EH_SEGMENT_TYPE)
     // glibc 2.35+: a lock-free lookup in a sorted table of the loaded
     // objects. dladdr answers the same question but also looks for the
     // nearest symbol, scanning the object's whole symbol table on every

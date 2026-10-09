@@ -2,7 +2,11 @@
 #include <brass/gc/stack_walker.hpp>
 #include <brass/gc/native_unwind.hpp>
 #include <vector>
+#include <chrono>
 #include <cstdint>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 using namespace brass;
 
@@ -319,5 +323,102 @@ TEST_CASE("Stack Walker - a CFI step crosses a frame that realigns its stack") {
     CHECK(p.stepped_again);
     CHECK(p.further.sp > p.up.sp);
     CHECK(brass_ip_in_image(p.further.ip));
+}
+
+// A collection asks brass_ip_in_image about frames it steps, and under GC
+// stress it collects at every allocation, so the lookup is on the path of
+// every frame of every collection. On Apple it was dladdr, which searches
+// the image's symbol table for the nearest symbol (findClosestSymbol) on
+// each call: a deep async recursion under BRONZE_GC_STRESS spent nearly all
+// its time there and ran for hours (bronze's async_suspend_protocol oracle
+// case on arm64 macOS). The answer must be right and must not cost a symbol
+// search.
+TEST_CASE("Stack Walker - brass_ip_in_image tells image code from other memory, cheaply") {
+    CaptureProbe p;
+    capture_caller(p);
+    REQUIRE(p.ok);
+    CHECK(brass_ip_in_image(p.frame.ip));                                         // this test binary
+    CHECK(brass_ip_in_image(reinterpret_cast<uintptr_t>(&brass_ip_in_image)));    // brass
+    CHECK(brass_ip_in_image(reinterpret_cast<uintptr_t>(&::getpid)));             // the C library
+
+    std::vector<uint8_t> heap(4096);
+    CHECK_FALSE(brass_ip_in_image(reinterpret_cast<uintptr_t>(heap.data())));
+    volatile int local = 0;
+    CHECK_FALSE(brass_ip_in_image(reinterpret_cast<uintptr_t>(&local)));
+
+    // A symbol search per call costs microseconds in a large image; the
+    // lookup is meant to cost tens of nanoseconds. 200k lookups in one
+    // second leaves room for a slow, loaded machine and none for a search.
+    const auto start = std::chrono::steady_clock::now();
+    size_t hits = 0;
+    for (int i = 0; i < 200000; ++i) {
+        hits += brass_ip_in_image(p.frame.ip + static_cast<uintptr_t>(i % 64)) ? 1 : 0;
+        hits += brass_ip_in_image(reinterpret_cast<uintptr_t>(&brass_ip_in_image)) ? 1 : 0;
+    }
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start).count();
+    CHECK_EQ(hits, 400000ULL);
+    CHECK(ms < 1000);
+}
+
+namespace {
+
+// Recurses `depth` times through the same call site, so the stack holds one
+// return address many times over, then steps every frame from the bottom
+// back to the probe's caller, with and without the row cache.
+struct DeepProbe {
+    std::vector<NativeUnwindFrame> plain;
+    std::vector<NativeUnwindFrame> cached;
+    std::vector<NativeUnwindFrame> cached_again;
+};
+
+void step_all(NativeUnwindFrame f, std::vector<NativeUnwindFrame>& out, size_t limit) {
+    out.push_back(f);
+    while (out.size() < limit && brass_unwind_step(f)) out.push_back(f);
+}
+
+__attribute__((noinline)) int deep_recurse(DeepProbe& p, int depth) {
+    if (depth == 0) {
+        NativeUnwindFrame f;
+        if (!brass_capture_frame(f, 0)) return 0;
+        step_all(f, p.plain, 200);
+        {
+            UnwindRowCacheScope scope;
+            step_all(f, p.cached, 200);
+        }
+        {
+            UnwindRowCacheScope scope;
+            step_all(f, p.cached_again, 200);
+            UnwindRowCacheScope nested;  // shares the outer scope's rows
+            std::vector<NativeUnwindFrame> inner;
+            step_all(f, inner, 200);
+            if (inner.size() != p.cached_again.size()) return 0;
+        }
+        return 1;
+    }
+    volatile int keep = deep_recurse(p, depth - 1);
+    return keep + 0;
+}
+
+} // namespace
+
+// A walk keeps the call-frame rows it has found (UnwindRowCacheScope), so a
+// deep stack of one repeated return address runs that address's call-frame
+// program once rather than at every frame. The frames a cached walk steps
+// to must be exactly the ones an uncached walk does.
+TEST_CASE("Stack Walker - steps under the row cache match steps without it") {
+    DeepProbe p;
+    REQUIRE(deep_recurse(p, 60) == 1);
+    REQUIRE(p.plain.size() > 60);
+    REQUIRE_EQ(p.cached.size(), p.plain.size());
+    REQUIRE_EQ(p.cached_again.size(), p.plain.size());
+    for (size_t i = 0; i < p.plain.size(); ++i) {
+        CHECK_EQ(p.cached[i].ip, p.plain[i].ip);
+        CHECK_EQ(p.cached[i].sp, p.plain[i].sp);
+        CHECK_EQ(p.cached[i].fp, p.plain[i].fp);
+        CHECK_EQ(p.cached_again[i].ip, p.plain[i].ip);
+        CHECK_EQ(p.cached_again[i].sp, p.plain[i].sp);
+        CHECK_EQ(p.cached_again[i].fp, p.plain[i].fp);
+    }
 }
 #endif
