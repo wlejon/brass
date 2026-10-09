@@ -44,15 +44,23 @@ void SpirvISel::lower_int_div_rem(const brass::Instruction& inst, bool is_rem, b
         define(inst.result(), op(is_rem ? spv::OpUMod : spv::OpUDiv, ty, {a, d}));
         return;
     }
-    spv::Op o = is_rem ? spv::OpSRem : spv::OpSDiv;
+    // The remainder is a - (a / d) * d rather than OpSRem: NVIDIA's driver
+    // (550 on Linux with an RTX 3060, and on Windows with an RTX 4090)
+    // computes OpSRem of the unsigned-typed integers this target uses as an
+    // unsigned remainder (-7 % 3 gives 0), where its OpSDiv is right.
+    auto quotient_or_rem = [&](Id divisor) {
+        Id q = op(spv::OpSDiv, ty, {a, divisor});
+        if (!is_rem) return q;
+        return op(spv::OpISub, ty, {a, op(spv::OpIMul, ty, {q, divisor})});
+    };
     int64_t c = 0;
     if (const_int(inst.operand(1), &c) && c != -1 && c != 0) {
-        define(inst.result(), op(o, ty, {a, d}));
+        define(inst.result(), quotient_or_rem(d));
         return;
     }
     Id is_m1 = op(spv::OpIEqual, t_bool(), {d, m_.c_int(w, ~0ull)});
     Id safe = op(spv::OpSelect, ty, {is_m1, m_.c_int(w, 1), d});
-    Id q = op(o, ty, {a, safe});
+    Id q = quotient_or_rem(safe);
     Id wrapped = is_rem ? m_.c_int(w, 0) : op(spv::OpSNegate, ty, {a});
     define(inst.result(), op(spv::OpSelect, ty, {is_m1, wrapped, q}));
 }

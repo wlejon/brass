@@ -66,6 +66,22 @@ const char* type_name(VkPhysicalDeviceType t) {
     }
 }
 
+std::string env_value(const char* name) {
+#if defined(_MSC_VER)
+    // MSVC deprecates getenv (C4996, an error under /WX); _dupenv_s is its
+    // owned-copy equivalent.
+    char* owned = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&owned, &len, name) != 0 || !owned) return {};
+    std::string v(owned);
+    std::free(owned);
+    return v;
+#else
+    const char* v = std::getenv(name);
+    return v ? std::string(v) : std::string();
+#endif
+}
+
 bool has_ext(const std::vector<VkExtensionProperties>& exts, const char* name) {
     for (const VkExtensionProperties& e : exts)
         if (std::strcmp(e.extensionName, name) == 0) return true;
@@ -114,8 +130,8 @@ bool pick_device(Runtime& r) {
     for (uint32_t i = 0; i < n; ++i) r.vkGetPhysicalDeviceProperties(devs[i], &props[i]);
 
     int chosen = -1;
-    if (const char* env = std::getenv("BRASS_VULKAN_DEVICE"); env && *env) {
-        int idx = std::atoi(env);
+    if (const std::string env = env_value("BRASS_VULKAN_DEVICE"); !env.empty()) {
+        int idx = std::atoi(env.c_str());
         if (idx < 0 || static_cast<uint32_t>(idx) >= n)
             return r.fail("BRASS_VULKAN_DEVICE=" + std::string(env) + " is out of range (" + std::to_string(n) + " devices)");
         chosen = idx;
@@ -318,10 +334,43 @@ bool Runtime::fail(const std::string& msg) {
     return false;
 }
 
-Runtime* runtime() {
+namespace {
+
+Runtime& the_runtime() {
     static Runtime r;
+    return r;
+}
+
+// At exit: the device and instance go while the driver is still whole.
+void close_runtime() {
+    Runtime& r = the_runtime();
+    std::lock_guard<std::mutex> lock(r.submit_mutex);
+    if (!r.ok) return;
+    r.ok = false;
+    r.error = "the Vulkan runtime was closed at exit";
+    r.vkDeviceWaitIdle(r.device);
+    if (r.fence) r.vkDestroyFence(r.device, r.fence, nullptr);
+    if (r.pool) r.vkDestroyCommandPool(r.device, r.pool, nullptr);
+    r.vkDestroyDevice(r.device, nullptr);
+    r.vkDestroyInstance(r.instance, nullptr);
+    r.fence = VK_NULL_HANDLE;
+    r.pool = VK_NULL_HANDLE;
+    r.cmd = VK_NULL_HANDLE;
+    r.device = VK_NULL_HANDLE;
+    r.instance = VK_NULL_HANDLE;
+}
+
+} // namespace
+
+Runtime* runtime() {
+    Runtime& r = the_runtime();
     static std::once_flag once;
-    std::call_once(once, [] { r.ok = open_instance(r) && pick_device(r) && open_device(r); });
+    std::call_once(once, [&r] {
+        r.ok = open_instance(r) && pick_device(r) && open_device(r);
+        // Registered after the loader and the driver were loaded, so it runs
+        // before their own exit-time teardown.
+        if (r.ok) std::atexit(close_runtime);
+    });
     if (!r.ok) tls_last_error = r.error;
     return r.ok ? &r : nullptr;
 }

@@ -368,7 +368,19 @@ int check() {
     bound("churn: full collections inside batches", static_cast<double>(c.batch_fulls), 4.0);
     bound("churn: minor pause while building, max ms", c.build_minor_max_ms, 60.0);
     bound("churn: full pause while building, max ms", c.build_full_max_ms, 250.0);
+#if defined(NDEBUG)
     return failures ? 1 : 0;
+#else
+    // The bounds are for optimized code. An unoptimized collector pauses
+    // about five times longer (jserve, 2026-10-09: churn minors 30 / 122 ms
+    // in Debug, 6.4 / 25.6 ms in Release), so a Debug build reports and
+    // never fails, as brass_benchmarks --check-ratchet does.
+    if (failures) {
+        std::printf("\n  unoptimized build: %d bound(s) crossed; reported, not enforced (the bounds are for "
+                    "optimized builds)\n", failures);
+    }
+    return 0;
+#endif
 }
 
 }  // namespace

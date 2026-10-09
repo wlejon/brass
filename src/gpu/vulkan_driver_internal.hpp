@@ -44,8 +44,11 @@ namespace brass::gpu::vk {
 
 #define BRASS_VK_DEVICE_FNS(X)          \
     X(vkDestroyDevice)                  \
+    X(vkDeviceWaitIdle)                 \
     X(vkGetDeviceQueue)                 \
     X(vkCreateCommandPool)              \
+    X(vkDestroyCommandPool)             \
+    X(vkDestroyFence)                   \
     X(vkAllocateCommandBuffers)         \
     X(vkResetCommandBuffer)             \
     X(vkBeginCommandBuffer)             \
@@ -81,8 +84,12 @@ namespace brass::gpu::vk {
     X(vkCmdWriteTimestamp)              \
     X(vkGetQueryPoolResults)
 
-// The process-wide device. Created once (runtime()), never destroyed: the
-// driver reclaims it at exit, and buffers held in statics stay valid.
+// The process-wide device. Created once (runtime()) and closed at exit by an
+// atexit handler registered once the driver is loaded, so it runs before the
+// driver's own teardown: a process leaving a live VkDevice to NVIDIA's
+// (550, Linux) faults in it after main returns, several exits in a hundred.
+// From then on runtime() is null, so a buffer or module in a static
+// destroyed later frees nothing.
 struct Runtime {
     bool ok = false;
     std::string error;

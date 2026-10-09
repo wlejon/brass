@@ -84,7 +84,7 @@ TEST_CASE("SPIR-V ISel - scalar ALU ops on i32 i64 f32 f64") {
 
     compile_checked(*k.fn);
     std::string d = dump_of(*k.fn);
-    for (const char* op : {"OpIAdd", "OpISub", "OpIMul", "OpSDiv", "OpUDiv", "OpSRem", "OpUMod", "OpSNegate",
+    for (const char* op : {"OpIAdd", "OpISub", "OpIMul", "OpSDiv", "OpUDiv", "OpUMod", "OpSNegate",
                            "OpBitwiseAnd", "OpBitwiseOr", "OpBitwiseXor", "OpNot", "OpShiftLeftLogical",
                            "OpShiftRightLogical", "OpShiftRightArithmetic", "OpFAdd", "OpFSub", "OpFMul", "OpFDiv",
                            "OpFRem", "OpFNegate", "OpSConvert", "OpUConvert", "OpConvertSToF", "OpConvertFToS",
@@ -155,8 +155,9 @@ TEST_CASE("SPIR-V ISel - signed division wraps MIN / -1, constant divisors stay 
     b.build_ret_void();
     compile_checked(*k.fn);
     std::string d = dump_of(*k.fn);
-    CHECK_EQ(count_of(d, "OpSDiv"), 2u);
-    CHECK_EQ(count_of(d, "OpSRem"), 1u);
+    // smod is a - (a / d) * d (spirv_isel_alu.cpp says why), never OpSRem.
+    CHECK_EQ(count_of(d, "OpSDiv"), 3u);
+    CHECK_EQ(count_of(d, "OpSRem"), 0u);
     CHECK_EQ(count_of(d, "OpSelect"), 4u); // safe divisor + wrapped result, for each variable divisor
 }
 
