@@ -114,6 +114,15 @@ struct TierHotFunction {
     // When tiering first asked for its optimized code (a tier-2 or OSR
     // request); negative: never.
     double requested_ms = -1.0;
+    // Why the baseline tier rejected it ("" if it did not): such a function
+    // goes to Tier 2 from Tier 0 (MultiTierPipeline::promote_tier0).
+    std::string tier1_rejected;
+};
+
+struct TierRejectedFunction {
+    std::string name;
+    std::string reason;
+    bool tier2 = false;  // its optimized code was ready at some point
 };
 
 struct TierTimelineSummary {
@@ -133,6 +142,10 @@ struct TierTimelineSummary {
     size_t deopts = 0;
     size_t invalidations = 0;
     std::vector<TierHotFunction> hot;  // hottest first
+    // Functions the baseline tier rejected, by name, and how many of them
+    // had optimized code anyway (tier-2 or OSR).
+    std::vector<TierRejectedFunction> rejected;
+    size_t rejected_tier2 = 0;
 };
 
 // Summarizes the events recorded so far for the functions of `registry`'s
@@ -140,7 +153,7 @@ struct TierTimelineSummary {
 // with the most invocations and backedges that crossed a tier-up threshold.
 TierTimelineSummary summarize_tier_timeline(const TieringRegistry* registry, size_t hot_count = 8);
 // "tier-timeline ..." lines: the summary as key=value, the hot functions and,
-// with `events`, every event.
+// with `events`, every rejected function and every event.
 void write_tier_report(std::ostream& os, const TierTimelineSummary& summary, bool events = false);
 // The report BRASS_TIER_LOG asks for, of `registry`'s program; nothing when
 // the variable is unset.

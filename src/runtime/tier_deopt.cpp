@@ -216,6 +216,10 @@ void MultiTierPipeline::charge_deopt(FunctionHandle& handle, FunctionDispatchTab
     if (tier2_front_pass() && fb.record_reoptimization() <= kMaxReoptimizations) {
         fb.clear_deopts();
         fb.clear_bailout();
+        // Tier-1 code asks for Tier 2 again from its invocation hook. A
+        // function the baseline tier rejected is back in Tier 0, whose
+        // counting asks again once its promotion check is re-armed.
+        if (fb.tier1_rejected()) fb.rearm_tier0_promotion();
     } else {
         fb.trigger_bailout("guard " + std::to_string(resume_id) + " failed repeatedly in tier-2 code");
     }

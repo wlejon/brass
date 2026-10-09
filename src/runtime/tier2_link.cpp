@@ -169,6 +169,30 @@ void link_declared_functions(const Module& mod, FunctionDispatchTable& table, co
     }
 }
 
+DeclaredLink check_declared_functions(const Module& mod, FunctionDispatchTable& table, std::string& why) {
+    MultiTierPipeline& pipeline = table.pipeline();
+    DeclaredLink result = DeclaredLink::Linkable;
+    for (std::string_view name : mod.external_symbols()) {
+        if (mod.get_function(name)) continue;
+        FunctionHandle* h = table.find(name);
+        const Function* def = h ? h->mir_function() : nullptr;
+        if (!def || !def->has_body() || h->has_native_entry()) continue;
+        std::string no_bridge;
+        if (MultiTierPipeline::tier0_bridge_supported(*def, &no_bridge)) continue;
+        if (!pipeline.is_baseline_rejected(name) && pipeline.compile_and_install_tier1(name)) continue;
+        // Compiling elsewhere, or rejected by tier 1 but still on its way to
+        // Tier 2 from Tier 0 (promote_tier0): its code may exist later.
+        if (!pipeline.is_baseline_rejected(name) || !h->tier2_rejected()) {
+            result = DeclaredLink::Pending;
+            continue;
+        }
+        why = "it calls '" + std::string(name) + "', which tier 1 rejects (" + pipeline.baseline_rejection(name) +
+              "), tier 2 rejects, and no Tier-0 bridge can call (" + no_bridge + ")";
+        return DeclaredLink::Unlinkable;
+    }
+    return result;
+}
+
 void register_tier2_resumer(FunctionDispatchTable& table, FunctionHandle& handle, void* entry,
                             const Function* compiled_from, std::function<void(const DeoptFrame&)> before) {
     // The resumer is unregistered when the handle retires, which the table

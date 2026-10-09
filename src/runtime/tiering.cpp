@@ -60,27 +60,61 @@ TieringRegistry& TieringFeedback::registry() const noexcept {
 
 uint64_t TieringFeedback::record_invocation() noexcept {
     const uint64_t n = invocations_.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (n == config_.invocation_tier1_threshold || n >= tier1_retry_at_.load(std::memory_order_relaxed)) {
-        attempt_tier1(n);
+    if (n == config_.invocation_tier1_threshold || n >= tierup_check_at_.load(std::memory_order_relaxed)) {
+        attempt_tier_up(n);
     }
     return n;
 }
 
-void TieringFeedback::attempt_tier1(uint64_t n) noexcept {
+void TieringFeedback::attempt_tier_up(uint64_t n) noexcept {
     if (n != config_.invocation_tier1_threshold) {
-        // A retry: one caller claims it.
-        uint64_t at = tier1_retry_at_.load(std::memory_order_relaxed);
-        if (n < at || !tier1_retry_at_.compare_exchange_strong(at, UINT64_MAX, std::memory_order_acq_rel)) return;
-        tier1_retries_.fetch_add(1, std::memory_order_relaxed);
+        // A retry or a promotion check: one caller claims it.
+        uint64_t at = tierup_check_at_.load(std::memory_order_relaxed);
+        if (n < at || !tierup_check_at_.compare_exchange_strong(at, UINT64_MAX, std::memory_order_acq_rel)) return;
+        if (!tier1_rejected()) tier1_retries_.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (tier1_rejected()) {
+        check_tier0_promotion(n);
+        return;
     }
     TieringRegistry& reg = registry();
     if (reg.on_invocation_threshold_reached(fn_name_)) return;
     if (current_tier() != TierLevel::Tier0_Interpreter || bailout_triggered_) return;
+    // Rejected by this attempt: from here on the function is checked for
+    // promotion instead (mark_tier1_rejected armed it).
+    if (tier1_rejected()) return;
     if (!reg.tier1_retry_possible(fn_name_)) return;
     // Not finished (a function it needs is compiling on another thread):
     // asked again after 1, 2, 4, ... more calls.
     const uint32_t shift = std::min<uint32_t>(tier1_retries_.load(std::memory_order_relaxed), 20);
-    tier1_retry_at_.store(n + (uint64_t{1} << shift), std::memory_order_relaxed);
+    tierup_check_at_.store(n + (uint64_t{1} << shift), std::memory_order_relaxed);
+}
+
+void TieringFeedback::mark_tier1_rejected() noexcept {
+    backedges_at_rejection_.store(backedge_count(), std::memory_order_relaxed);
+    tier1_rejected_.store(true, std::memory_order_release);
+    rearm_tier0_promotion();
+}
+
+void TieringFeedback::rearm_tier0_promotion() noexcept {
+    tierup_check_at_.store(invocation_count() + 1, std::memory_order_relaxed);
+}
+
+void TieringFeedback::check_tier0_promotion(uint64_t n) noexcept {
+    // Optimized code installed (it is not counted here), or tiering gave up
+    // on the function: nothing to check until an invalidation re-arms it.
+    if (current_tier() != TierLevel::Tier0_Interpreter || bailout_triggered_) return;
+    // As hot as tier-1 code is when it asks for Tier 2: the invocation
+    // threshold, or a backedge budget's worth of iterations.
+    const uint64_t loops = backedge_count() - backedges_at_rejection_.load(std::memory_order_relaxed);
+    if (n >= config_.invocation_tier2_threshold || loops >= static_cast<uint64_t>(kTier1BackedgeBudget)) {
+        if (registry().pipeline().promote_tier0(*this)) return;
+    }
+    // Next at the interval, or at the invocation threshold if that comes
+    // first.
+    uint64_t next = n + kTier0PromotionInterval;
+    if (n < config_.invocation_tier2_threshold) next = std::min(next, config_.invocation_tier2_threshold);
+    tierup_check_at_.store(next, std::memory_order_relaxed);
 }
 
 TypeFeedbackVector* TieringFeedback::type_feedback_vector() {
@@ -122,7 +156,9 @@ void TieringFeedback::record_deopt(uint32_t guard_site_id) noexcept {
     } else if (n >= config_.deopt_threshold) {
         TierLevel t = current_tier();
         if (t == TierLevel::Tier2_Optimized) {
-            set_tier(TierLevel::Tier1_Baseline);
+            // A function the baseline tier rejected has no tier-1 code to
+            // fall back to.
+            set_tier(tier1_rejected() ? TierLevel::Tier0_Interpreter : TierLevel::Tier1_Baseline);
         } else if (t == TierLevel::Tier1_Baseline) {
             set_tier(TierLevel::Tier0_Interpreter);
         }
@@ -168,8 +204,10 @@ void TieringFeedback::reset() noexcept {
     unkeyed_backedges_.store(0, std::memory_order_relaxed);
     tier1_backedge_budget_.store(kTier1BackedgeBudget, std::memory_order_relaxed);
     deopt_count_.store(0, std::memory_order_relaxed);
-    tier1_retry_at_.store(UINT64_MAX, std::memory_order_relaxed);
+    tierup_check_at_.store(UINT64_MAX, std::memory_order_relaxed);
     tier1_retries_.store(0, std::memory_order_relaxed);
+    tier1_rejected_.store(false, std::memory_order_relaxed);
+    backedges_at_rejection_.store(0, std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lock(maps_mutex_);
         loop_backedges_.clear();
@@ -341,6 +379,10 @@ void TieringRegistry::dump_stats(std::ostream& os) const {
            << fb.deopt_threshold() << ")\n";
         if (fb.is_bailout_set()) {
             os << "  Bail-out triggered: " << fb.last_bailout_reason() << "\n";
+        }
+        if (fb.tier1_rejected()) {
+            // Why: MultiTierPipeline::dump_stats lists the rejections.
+            os << "  Rejected by Tier 1 (tiers up from Tier 0 to Tier 2)\n";
         }
         const auto loops = fb.loop_backedges_map();
         if (!loops.empty()) {

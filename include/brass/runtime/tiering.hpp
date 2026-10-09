@@ -122,10 +122,30 @@ public:
     // count reaches the Tier 1 threshold; an attempt that cannot finish yet
     // (a callee compiling on another thread) is retried with exponential
     // backoff, at no cost to the calls in between beyond one compare.
+    //
+    // A function the baseline tier rejects is checked again at intervals
+    // while it stays in Tier 0: once it is as hot as tier-1 code must be to
+    // tier up (the Tier 2 invocation threshold, or a tier-1 backedge budget's
+    // worth of loop iterations since the rejection) the pipeline sends it
+    // to Tier 2 directly (MultiTierPipeline::promote_tier0).
     uint64_t invocation_count() const noexcept { return invocations_.load(std::memory_order_relaxed); }
     uint64_t record_invocation() noexcept;
     // Tier 1 attempts made after the first (introspection).
     uint32_t tier1_retries() const noexcept { return tier1_retries_.load(std::memory_order_relaxed); }
+
+    // The baseline tier rejected this function (the pipeline keeps why:
+    // MultiTierPipeline::baseline_rejection). Marking it arms the Tier-0
+    // promotion check for the next invocation.
+    bool tier1_rejected() const noexcept { return tier1_rejected_.load(std::memory_order_acquire); }
+    void mark_tier1_rejected() noexcept;
+    // The pipeline forgot its rejections (clear_baseline_cache): the
+    // function may be tried at Tier 1 again.
+    void clear_tier1_rejected() noexcept { tier1_rejected_.store(false, std::memory_order_release); }
+    // A function with no tier-1 code whose tier-2 code was dropped (and may
+    // be recompiled): the promotion check runs again from the next call.
+    void rearm_tier0_promotion() noexcept;
+    // Invocations between two promotion checks of a rejected function.
+    static constexpr uint64_t kTier0PromotionInterval = 16;
 
     // Type feedback vector
     TypeFeedbackVector* type_feedback_vector();
@@ -216,17 +236,23 @@ public:
     std::unordered_map<uint32_t, uint32_t> guard_failures_map() const;
 
 private:
-    void attempt_tier1(uint64_t n) noexcept;
+    void attempt_tier_up(uint64_t n) noexcept;
+    // A rejected function's promotion check (see record_invocation).
+    void check_tier0_promotion(uint64_t n) noexcept;
 
     std::string fn_name_;
     TieringRegistry* registry_ = nullptr;
     TieringConfig config_;
     std::atomic<TierLevel> tier_{TierLevel::Tier0_Interpreter};
     std::atomic<uint64_t> invocations_{0};
-    // The invocation count at which a Tier 1 attempt that could not finish
-    // is retried (UINT64_MAX: none wanted), and how many retries were made.
-    std::atomic<uint64_t> tier1_retry_at_{UINT64_MAX};
+    // The invocation count at which the tier-up hook runs again
+    // (UINT64_MAX: not wanted): a Tier 1 attempt that could not finish, or
+    // a rejected function's next promotion check. Tier 1 retries made.
+    std::atomic<uint64_t> tierup_check_at_{UINT64_MAX};
     std::atomic<uint32_t> tier1_retries_{0};
+    std::atomic<bool> tier1_rejected_{false};
+    // backedge_count() when the baseline tier rejected the function.
+    std::atomic<uint64_t> backedges_at_rejection_{0};
     std::atomic<uint64_t> total_backedges_{0};
     std::atomic<uint64_t> unkeyed_backedges_{0};
     std::atomic<int64_t> tier1_backedge_budget_{kTier1BackedgeBudget};

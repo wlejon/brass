@@ -40,28 +40,40 @@ struct MultiTierStats {
     std::atomic<uint64_t> tier2_compilations{0};
     std::atomic<uint64_t> tier2_invocations{0};
     std::atomic<uint64_t> total_tier1_compile_time_us{0};
+    // Functions the baseline tier rejected, and tier-2 compiles requested
+    // for such a function straight from Tier 0 (MultiTierPipeline::
+    // promote_tier0; also counted in tier2_compilations).
+    std::atomic<uint64_t> tier1_rejections{0};
+    std::atomic<uint64_t> tier0_promotions{0};
 
     MultiTierStats() = default;
 
-    MultiTierStats(const MultiTierStats& other) noexcept
-        : tier0_invocations(other.tier0_invocations.load(std::memory_order_relaxed)),
-          tier1_compilations(other.tier1_compilations.load(std::memory_order_relaxed)),
-          tier1_invocations(other.tier1_invocations.load(std::memory_order_relaxed)),
-          tier2_compilations(other.tier2_compilations.load(std::memory_order_relaxed)),
-          tier2_invocations(other.tier2_invocations.load(std::memory_order_relaxed)),
-          total_tier1_compile_time_us(other.total_tier1_compile_time_us.load(std::memory_order_relaxed)) {}
+    MultiTierStats(const MultiTierStats& other) noexcept { *this = other; }
 
     MultiTierStats& operator=(const MultiTierStats& other) noexcept {
         if (this != &other) {
-            tier0_invocations.store(other.tier0_invocations.load(std::memory_order_relaxed), std::memory_order_relaxed);
-            tier1_compilations.store(other.tier1_compilations.load(std::memory_order_relaxed), std::memory_order_relaxed);
-            tier1_invocations.store(other.tier1_invocations.load(std::memory_order_relaxed), std::memory_order_relaxed);
-            tier2_compilations.store(other.tier2_compilations.load(std::memory_order_relaxed), std::memory_order_relaxed);
-            tier2_invocations.store(other.tier2_invocations.load(std::memory_order_relaxed), std::memory_order_relaxed);
-            total_tier1_compile_time_us.store(other.total_tier1_compile_time_us.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            auto copy = [](std::atomic<uint64_t>& to, const std::atomic<uint64_t>& from) {
+                to.store(from.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            };
+            copy(tier0_invocations, other.tier0_invocations);
+            copy(tier1_compilations, other.tier1_compilations);
+            copy(tier1_invocations, other.tier1_invocations);
+            copy(tier2_compilations, other.tier2_compilations);
+            copy(tier2_invocations, other.tier2_invocations);
+            copy(total_tier1_compile_time_us, other.total_tier1_compile_time_us);
+            copy(tier1_rejections, other.tier1_rejections);
+            copy(tier0_promotions, other.tier0_promotions);
         }
         return *this;
     }
+};
+
+// A function the baseline tier rejected, and why: the construct it does not
+// compile ("x64 baseline: unsupported operation '...'"), or the function
+// whose rejection it inherits (a callee or address it needs, a call cycle).
+struct BaselineRejection {
+    std::string name;
+    std::string reason;
 };
 
 // Native code the pipeline installed for one program function, as its
@@ -153,6 +165,21 @@ public:
     // at most one queued or running per function. True if it was queued.
     bool request_tier1(std::string_view fn_name);
     bool is_baseline_rejected(std::string_view fn_name) const;
+    // Why the baseline tier rejected `fn_name` ("" if it did not), and every
+    // rejection so far, by name.
+    std::string baseline_rejection(std::string_view fn_name) const;
+    std::vector<BaselineRejection> baseline_rejections() const;
+
+    // A function the baseline tier rejected has no tier-1 code to tier up
+    // from, so it goes to Tier 2 from Tier 0 once it is as hot as tier-1
+    // code is when it tiers up (TieringFeedback::record_invocation counts
+    // it). Its tier-2 code is compiled from the feedback Tier 0 collected
+    // (sites with none speculate or not as the front pass decides), and a
+    // failed guard finishes the call in Tier 0, where it may tier up again
+    // after an invalidation. Returns true when there is nothing more to
+    // check (the compile was queued or done, or the function cannot go to
+    // Tier 2), false to be asked again later.
+    bool promote_tier0(TieringFeedback& fb);
 
     // The program's one function-pointer representation: the address every
     // tier's func_addr of program function `name` (MIR `fn`) yields, and
@@ -231,6 +258,13 @@ public:
     // Set before compiles start.
     void set_tier1_compile_hook(std::function<void(std::string_view)> hook) {
         tier1_compile_hook_ = std::move(hook);
+    }
+    // Testing only: called with each function's name before its Tier 1
+    // compile; a non-empty result rejects the function with that reason, as
+    // the baseline compiler rejects a construct it does not compile (which
+    // on some targets no test program can reach). Set before compiles start.
+    void set_tier1_reject_hook(std::function<std::string(std::string_view)> hook) {
+        tier1_reject_hook_ = std::move(hook);
     }
     // Testing only: called with each function's name as its Tier 1 code is
     // installed, after the code is registered (find_baseline_compiled) and
@@ -345,6 +379,11 @@ private:
     // Their claims are released only after every entry is published.
     void install_tier1_group(const std::vector<detail::Tier1Node*>& group);
     void release_tier1_claims(const std::vector<detail::Tier1Node*>& group, bool rejected);
+    // Records the baseline tier's rejection of `name` (compiling_mutex_
+    // held) and returns whether it is new; note_rejected tells its tiering
+    // feedback, with compiling_mutex_ released.
+    bool record_rejection_locked(std::string_view name, std::string reason);
+    void note_rejected(std::string_view name);
     // A func_addr target's lazy stub, first called with no native entry:
     // compiles and installs it (waiting out another thread's compile of
     // it), returning its entry, or null when the baseline tier rejects it.
@@ -428,7 +467,8 @@ private:
 
     mutable std::mutex compiling_mutex_;
     std::unordered_set<std::string> in_progress_compilations_;
-    std::unordered_set<std::string> baseline_rejected_; // under compiling_mutex_
+    // Rejected function -> why (BaselineRejection::reason).
+    std::unordered_map<std::string, std::string> baseline_rejected_; // under compiling_mutex_
     std::unordered_set<std::string> tier2_in_progress_; // under compiling_mutex_
     std::unordered_set<std::string> tier1_requested_;   // under compiling_mutex_
     // Drops the queued request_tier1 jobs and waits out the running ones.
@@ -444,6 +484,7 @@ private:
     // Testing only (set_tier1_compile_hook, set_tier1_install_hook).
     std::function<void(std::string_view)> tier1_compile_hook_;
     std::function<void(std::string_view)> tier1_install_hook_;
+    std::function<std::string(std::string_view)> tier1_reject_hook_;
     BytecodeWarmer warmer_;
 };
 

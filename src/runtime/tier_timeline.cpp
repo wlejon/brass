@@ -2,6 +2,7 @@
 // and the report that reads time-to-optimized-code and stalls off them.
 
 #include <brass/runtime/tier_timeline.hpp>
+#include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/tiering.hpp>
 
 #include <algorithm>
@@ -177,6 +178,19 @@ TierTimelineSummary summarize_tier_timeline(const TieringRegistry* registry, siz
         }
     }
 
+    std::unordered_map<std::string, std::string> rejected_why;
+    if (registry) {
+        for (BaselineRejection& r : registry->pipeline().baseline_rejections()) {
+            TierRejectedFunction f;
+            f.name = r.name;
+            f.reason = r.reason;
+            f.tier2 = tier2_at.count(r.name) != 0;
+            if (f.tier2) ++s.rejected_tier2;
+            rejected_why.emplace(std::move(r.name), std::move(r.reason));
+            s.rejected.push_back(std::move(f));
+        }
+    }
+
     if (registry) {
         // Hot: crossed the tier-2 invocation threshold or the OSR backedge
         // threshold, the functions tiering means to optimize.
@@ -200,6 +214,7 @@ TierTimelineSummary summarize_tier_timeline(const TieringRegistry* registry, siz
         for (TierHotFunction& h : hot) {
             if (auto it = tier1_at.find(h.name); it != tier1_at.end()) h.tier1_ms = it->second;
             if (auto it = requested_at.find(h.name); it != requested_at.end()) h.requested_ms = it->second;
+            if (auto it = rejected_why.find(h.name); it != rejected_why.end()) h.tier1_rejected = it->second;
             if (auto it = tier2_at.find(h.name); it != tier2_at.end()) {
                 h.tier2_ms = it->second;
                 s.hot_tier2_ms = std::max(s.hot_tier2_ms, h.tier2_ms);
@@ -223,13 +238,19 @@ void write_tier_report(std::ostream& os, const TierTimelineSummary& s, bool even
        << " compile_ms=" << s.compile_ms << " worker_compile_ms=" << s.worker_compile_ms
        << " stall_ms=" << s.stall_ms << " max_stall_ms=" << s.max_stall_ms << " tier1=" << s.tier1_compiles
        << " tier2=" << s.tier2_compiles << " osr=" << s.osr_compiles << " failed=" << s.failed_compiles
-       << " deopts=" << s.deopts << " invalidations=" << s.invalidations << "\n";
+       << " deopts=" << s.deopts << " invalidations=" << s.invalidations
+       << " tier1_rejected=" << s.rejected.size() << " tier1_rejected_tier2=" << s.rejected_tier2 << "\n";
     for (const TierHotFunction& h : s.hot) {
         os << "tier-timeline hot " << h.name << " invocations=" << h.invocations << " backedges=" << h.backedges
-           << " tier1_ms=" << h.tier1_ms << " requested_ms=" << h.requested_ms << " tier2_ms=" << h.tier2_ms
-           << "\n";
+           << " tier1_ms=" << h.tier1_ms << " requested_ms=" << h.requested_ms << " tier2_ms=" << h.tier2_ms;
+        if (!h.tier1_rejected.empty()) os << " tier1_rejected: " << h.tier1_rejected;
+        os << "\n";
     }
     if (events) {
+        for (const TierRejectedFunction& r : s.rejected) {
+            os << "tier-timeline rejected " << r.name << (r.tier2 ? " tier2" : " interpreted") << ": " << r.reason
+               << "\n";
+        }
         for (const TierEvent& e : tier_timeline_snapshot()) {
             os << "tier-timeline event " << to_string(e.kind) << " " << e.name << " at_ms=" << ms(e.start_ns)
                << " dur_ms=" << ms(e.dur_ns) << (e.on_worker ? " worker" : " mutator") << (e.ok ? "" : " failed")

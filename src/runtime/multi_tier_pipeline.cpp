@@ -91,7 +91,15 @@ struct Tier1Node {
     bool on_stack = false;
     bool claimed = true;
     Tier1Link link = Tier1Link::Ready;
+    // Why the link is Rejected: the function it needs that never compiles.
+    std::string rejected_why;
 };
+
+// The first reason a node's link became Rejected is the one it keeps.
+inline void inherit_rejection(Tier1Node& node, Tier1Link link, std::string_view callee) {
+    if (link != Tier1Link::Rejected || !node.rejected_why.empty()) return;
+    node.rejected_why = "calls '" + std::string(callee) + "', which tier 1 rejects";
+}
 } // namespace detail
 
 namespace {
@@ -448,12 +456,18 @@ bool MultiTierPipeline::compile_and_install_tier1(std::string_view fn_name, cons
                 const Tier1Node& w = nodes[it->second];
                 // On the stack: the same call cycle. Otherwise a finished
                 // one, installed or failed.
-                if (w.on_stack) nodes[v].low = std::min(nodes[v].low, w.index);
-                else nodes[v].link = detail::worse(nodes[v].link, w.link);
+                if (w.on_stack) {
+                    nodes[v].low = std::min(nodes[v].low, w.index);
+                } else {
+                    nodes[v].link = detail::worse(nodes[v].link, w.link);
+                    detail::inherit_rejection(nodes[v], w.link, w.name);
+                }
                 continue;
             }
-            if (std::optional<Tier1Link> link = visit(sym, def)) {
+            const std::string callee = sym;
+            if (std::optional<Tier1Link> link = visit(callee, def)) {
                 nodes[v].link = detail::worse(nodes[v].link, *link);
+                detail::inherit_rejection(nodes[v], *link, callee);
             }
             continue;
         }
@@ -481,6 +495,7 @@ bool MultiTierPipeline::compile_and_install_tier1(std::string_view fn_name, cons
             const size_t u = dfs.back();
             nodes[u].low = std::min(nodes[u].low, nodes[v].low);
             nodes[u].link = detail::worse(nodes[u].link, nodes[v].link);
+            detail::inherit_rejection(nodes[u], nodes[v].link, nodes[v].name);
         }
     }
     return nodes.front().link == Tier1Link::Ready;
@@ -532,13 +547,23 @@ std::optional<detail::Tier1Link> MultiTierPipeline::open_tier1_node(std::string_
     codegen::BaselineCompiledFunction compiled;
     TierEventScope timed(TierEventKind::Tier1Compile, name);
     try {
+        if (tier1_reject_hook_) {
+            if (std::string why = tier1_reject_hook_(name); !why.empty()) {
+                throw codegen::UnsupportedOperation("tier-1 reject hook", why);
+            }
+        }
         compiled = baseline_compiler_.compile(*fn, Target::host());
-    } catch (const codegen::UnsupportedOperation&) {
+    } catch (const codegen::UnsupportedOperation& e) {
         timed.set_ok(false);
         // The baseline tier does not compile this function (an opcode it
-        // rejects, e.g. exceptions or coroutines): it stays in Tier 0.
-        std::lock_guard<std::mutex> lock(compiling_mutex_);
-        baseline_rejected_.emplace(name);
+        // rejects, e.g. exceptions or coroutines): it stays in Tier 0 until
+        // it is hot enough for Tier 2 (promote_tier0).
+        bool fresh = false;
+        {
+            std::lock_guard<std::mutex> lock(compiling_mutex_);
+            fresh = record_rejection_locked(name, e.what());
+        }
+        if (fresh) note_rejected(name);
         return Tier1Link::Rejected;
     }
     auto end = std::chrono::high_resolution_clock::now();
@@ -575,9 +600,14 @@ std::optional<detail::Tier1Link> MultiTierPipeline::open_tier1_node(std::string_
         if (table_->get_or_create(sym, def)->native_entry()) continue;
         // The bridge first: it reads only the signature, where the prescan
         // reads (and so builds) the body.
-        if (!tier0_bridge_supported(*def) &&
+        std::string no_bridge;
+        if (!tier0_bridge_supported(*def, &no_bridge) &&
             (is_baseline_rejected(sym) || !baseline_compiler_.passes_prescan(*def, Target::host()))) {
             node.link = Tier1Link::Rejected;
+            if (node.rejected_why.empty()) {
+                node.rejected_why = "takes the address of '" + sym +
+                                    "', which tier 1 rejects and no Tier-0 bridge can call (" + no_bridge + ")";
+            }
         }
     }
     node.code = std::make_shared<codegen::BaselineCompiledFunction>(std::move(compiled));
@@ -650,12 +680,26 @@ void MultiTierPipeline::release_tier1_claims(const std::vector<detail::Tier1Node
     // Left in Tier 0: compiled again when next asked for, unless something
     // it needs was rejected, which it then is too, since its code could
     // not call that.
-    std::lock_guard<std::mutex> lock(compiling_mutex_);
-    for (Tier1Node* d : group) {
-        if (rejected) baseline_rejected_.emplace(d->name);
-        in_progress_compilations_.erase(d->name);
-        d->claimed = false;
+    std::string cycle_why;
+    if (rejected) {
+        for (const Tier1Node* d : group) {
+            if (d->rejected_why.empty()) continue;
+            cycle_why = "is in a call cycle with '" + d->name + "', which " + d->rejected_why;
+            break;
+        }
     }
+    std::vector<std::string> fresh;
+    {
+        std::lock_guard<std::mutex> lock(compiling_mutex_);
+        for (Tier1Node* d : group) {
+            if (rejected && record_rejection_locked(d->name, d->rejected_why.empty() ? cycle_why : d->rejected_why)) {
+                fresh.push_back(d->name);
+            }
+            in_progress_compilations_.erase(d->name);
+            d->claimed = false;
+        }
+    }
+    for (const std::string& name : fresh) note_rejected(name);
 }
 
 bool MultiTierPipeline::enqueue_tier2(
@@ -874,12 +918,7 @@ MultiTierStats MultiTierPipeline::stats() const {
 }
 
 void MultiTierPipeline::reset_stats() {
-    stats_.tier0_invocations.store(0, std::memory_order_relaxed);
-    stats_.tier1_compilations.store(0, std::memory_order_relaxed);
-    stats_.tier1_invocations.store(0, std::memory_order_relaxed);
-    stats_.tier2_compilations.store(0, std::memory_order_relaxed);
-    stats_.tier2_invocations.store(0, std::memory_order_relaxed);
-    stats_.total_tier1_compile_time_us.store(0, std::memory_order_relaxed);
+    stats_ = MultiTierStats{};
 }
 
 void MultiTierPipeline::dump_stats(std::ostream& os) const {
@@ -904,6 +943,11 @@ void MultiTierPipeline::dump_stats(std::ostream& os) const {
     }
     os << "  Tier 2 (Optimized JIT) Compilations: " << t2_comps << "\n";
     os << "  Tier 2 (Optimized JIT) Invocations:  " << t2_invs << "\n";
+    os << "  Tier 1 Rejections:                   " << s.tier1_rejections.load(std::memory_order_relaxed) << "\n";
+    os << "  Tier 0 -> Tier 2 Promotions:         " << s.tier0_promotions.load(std::memory_order_relaxed) << "\n";
+    for (const BaselineRejection& r : baseline_rejections()) {
+        os << "    rejected by tier 1: " << r.name << ": " << r.reason << "\n";
+    }
     os << "=================================================\n";
     tiering().dump_stats(os);
 }

@@ -314,6 +314,9 @@ void OsrCoordinator::compile_entry(const Function& fn, Module& copy, const std::
             auto sib = siblings.find(std::string(f->name()));
             if (!deopt_targets_valid(*f, sib != siblings.end() ? sib->second : nullptr, why)) return fail();
         }
+        // A loop of a function tier 1 rejected may call another such
+        // function that nothing native can call.
+        if (detail::check_declared_functions(*mod, table, why) != detail::DeclaredLink::Linkable) return fail();
         jit = detail::make_tier2_engine(table, Target::host());
         jit->set_code_tier(debug::JitTier::Osr);
         auto known = [&](std::string_view name) { return name == fn.name() || siblings.count(std::string(name)) != 0; };

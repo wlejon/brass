@@ -58,6 +58,17 @@ void link_coroutine_bodies(Module& mod, FunctionDispatchTable& table, codegen::J
 // their stubs: a call reaches whatever code each has.
 void link_declared_functions(const Module& mod, FunctionDispatchTable& table, codegen::JitExecutionEngine& jit);
 
+// Whether every program function `mod` names but does not define can be
+// called through its stub: it has native code, or a native-to-Tier-0 bridge
+// can call it, or it compiles to Tier 1 now. A stub that resolves to none of
+// these traps. Tier-1 code is only installed once its callees are callable;
+// a function tier 1 rejected reaches tier 2 without that check, so its copy
+// makes it here. Unlinkable says why; Pending is a callee compiling on
+// another thread, or one tier 1 rejected that has no tier-2 code yet, which
+// a later attempt may find done.
+enum class DeclaredLink { Linkable, Pending, Unlinkable };
+DeclaredLink check_declared_functions(const Module& mod, FunctionDispatchTable& table, std::string& why);
+
 // Registers the deopt continuation of the tier-2 code at `entry`, compiled
 // from `compiled_from` for `handle`'s function: a failed guard finishes
 // the call in Tier 0 (MultiTierPipeline::resume_after_deopt). `before`, when

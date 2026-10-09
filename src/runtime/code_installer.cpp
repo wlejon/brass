@@ -516,6 +516,15 @@ CodeInstallResult CodeInstaller::install_tier2(
         auto known = [&](std::string_view name) {
             return name == fn_name ? bindings.target != nullptr : bindings.siblings.count(std::string(name)) != 0;
         };
+        std::string why;
+        switch (detail::check_declared_functions(*module, *table_, why)) {
+            case detail::DeclaredLink::Linkable: break;
+            case detail::DeclaredLink::Pending:
+                return {false, nullptr, "a function Tier-2 code for '" + std::string(fn_name) +
+                                            "' calls is being compiled on another thread", 0};
+            case detail::DeclaredLink::Unlinkable:
+                return reject("Tier-2 code for '" + std::string(fn_name) + "' cannot link: " + why);
+        }
         detail::canonicalize_function_addresses(*module, known, table_->pipeline(), *jit);
         detail::link_declared_functions(*module, *table_, *jit);
         detail::link_coroutine_bodies(*module, *table_, *jit);
