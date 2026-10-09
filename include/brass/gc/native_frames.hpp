@@ -54,6 +54,7 @@ private:
     uintptr_t ip_;
     NativeFramesScope* prev_;
     friend void brass_append_native_frame_roots(std::vector<uintptr_t*>& roots);
+    friend uintptr_t brass_native_frames_cover_start() noexcept;
 };
 
 // Records, for its lifetime, roots that every collection on this thread
@@ -118,5 +119,14 @@ GeneratedCodeEntryScope* brass_innermost_entry_scope() noexcept;
 // The gcref slots of every recorded run of native frames on this thread,
 // and the roots of every ThreadRootsScope.
 void brass_append_native_frame_roots(std::vector<uintptr_t*>& roots);
+
+// Where the recorded runs' walks (brass_append_native_frame_roots) cover
+// the stack from: the frame pointer of the innermost run that starts at a
+// generated frame, whose walk visits every frame from there to the base.
+// A walk from above it (a collection's walk from its own frame) stops
+// there instead of visiting those frames a second time. UINTPTR_MAX when
+// no run covers (none recorded, or a host where the walk cannot tell a
+// generated frame from a compiled one: Windows ARM64).
+uintptr_t brass_native_frames_cover_start() noexcept;
 
 } // namespace brass

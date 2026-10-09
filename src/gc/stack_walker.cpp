@@ -428,25 +428,26 @@ __attribute__((noinline))
 size_t brass_stack_walk_from_here(
     const ModuleStackMap& stack_maps,
     brass_root_visitor_fn visitor,
-    void* user_data
+    void* user_data,
+    uintptr_t stop_at
 ) {
 #if defined(_WIN32) && defined(_M_X64)
     Cursor cur;
     RtlCaptureContext(&cur.ctx);
-    return walk_stack(0, 0, stack_maps, visitor, user_data, UINTPTR_MAX, &cur);
+    return walk_stack(0, 0, stack_maps, visitor, user_data, stop_at, &cur);
 #elif defined(BRASS_NATIVE_UNWIND)
     // This function's caller, as the unwinder recovers it; the compiled
     // frames from there to the first generated one are stepped by their CFI.
     Cursor cur;
     if (!brass_capture_frame(cur.f, 0)) return 0;
-    return walk_stack(0, 0, stack_maps, visitor, user_data, UINTPTR_MAX, &cur);
+    return walk_stack(0, 0, stack_maps, visitor, user_data, stop_at, &cur);
 #else
     // This frame's record: the caller's frame pointer, then the return
     // address into it. The compiled frames up to the first generated one
     // are followed by their frame pointers.
     const auto* fp = static_cast<const uintptr_t*>(__builtin_frame_address(0));
     if (fp == nullptr) return 0;
-    return walk_stack(fp[0], fp[1], stack_maps, visitor, user_data, UINTPTR_MAX, nullptr);
+    return walk_stack(fp[0], fp[1], stack_maps, visitor, user_data, stop_at, nullptr);
 #endif
 }
 

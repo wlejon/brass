@@ -224,10 +224,15 @@ void visit_roots(HeapState& s, Tracer& t) {
     // each registered frame's is_done, and once a frame has been evacuated
     // its old copy holds the forwarding address there instead.
     std::vector<uintptr_t*> slots;
+    // The recorded runs of native frames cover the stack from the innermost
+    // one that starts at a generated frame to the base; the walk from the
+    // collection's own frame stops there rather than visit those frames
+    // twice (a deep async recursion records a run per resumed frame).
+    const uintptr_t covered_from = brass_native_frames_cover_start();
     if (s.mutator_fp != 0) {
-        brass_append_generated_frame_roots(s.mutator_fp, s.mutator_ip, slots);
+        brass_append_generated_frame_roots(s.mutator_fp, s.mutator_ip, slots, covered_from);
     } else if (s.config.walk_stack_on_host_collection) {
-        brass_append_stack_roots_from_here(slots);
+        brass_append_stack_roots_from_here(slots, covered_from);
     }
     brass_append_native_frame_roots(slots);
     // The registry's slots hold raw frame addresses, references on any heap.

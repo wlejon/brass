@@ -1,4 +1,5 @@
 #include <brass/gc/native_frames.hpp>
+#include <brass/gc/code_stack_maps.hpp>
 #include <brass/gc/native_unwind.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/gc/stack_map.hpp>
@@ -110,43 +111,108 @@ GeneratedCodeEntryScope::~GeneratedCodeEntryScope() {
 
 GeneratedCodeEntryScope* brass_innermost_entry_scope() noexcept { return t_entry_scopes; }
 
-void brass_append_native_frame_roots(std::vector<uintptr_t*>& roots) {
-    for (const ThreadRootsScope* s = t_thread_roots; s != nullptr; s = s->prev_) {
-        if (s->provider_) s->provider_(s->ctx_, roots);
-    }
-    if (!t_native_frames) return;
-    // The code registry describes every frame of code brass loaded; the
-    // thread's installed maps add code registered elsewhere.
+namespace {
+
+// The maps the runs are walked with: the code registry describes every
+// frame of code brass loaded; the thread's installed maps add code
+// registered elsewhere.
+const ModuleStackMap& run_maps() {
     static const ModuleStackMap* const registry_only = [] {
         auto* m = new ModuleStackMap();
         m->set_indexed_by_code_registry(true);
         return m;
     }();
     const ModuleStackMap* installed = brass_get_active_stack_maps();
-    const ModuleStackMap& maps = installed ? *installed : *registry_only;
+    return installed ? *installed : *registry_only;
+}
+
+// Where a run starts, as its walk tells (stack_walker.cpp):
+//   Generated  a return address with a stack map (JIT code, or AOT code in a
+//              loaded image) or outside every image (a stub): the walk
+//              visits every frame from there to the base.
+//   Compiled   one in a loaded image with no map (a C++ frame): the walk
+//              has no stack position to unwind from and visits nothing.
+//   Unknown    a host where the walk cannot unwind compiled frames (Windows
+//              ARM64) and follows frame pointers from anywhere.
+enum class RunStart : uint8_t { Unknown, Generated, Compiled };
+
+RunStart classify_run_start([[maybe_unused]] const ModuleStackMap& maps,
+                            [[maybe_unused]] const CodeStackMapSnapshot* registered, [[maybe_unused]] uintptr_t ip) {
+#if (defined(_WIN32) && defined(_M_X64)) || defined(BRASS_NATIVE_UNWIND)
+    if (find_code_stack_map(registered, ip) != nullptr) return RunStart::Generated;
+    if (!maps.indexed_by_code_registry() && maps.find_function_by_ip(ip) != nullptr) return RunStart::Generated;
+#if defined(_WIN32) && defined(_M_X64)
+    return detail::win64_ip_in_image(ip) ? RunStart::Compiled : RunStart::Generated;
+#else
+    return brass_ip_in_image(ip) ? RunStart::Compiled : RunStart::Generated;
+#endif
+#else
+    return RunStart::Unknown;
+#endif
+}
+
+// classify_run_start answered once per return address for one collection:
+// the runs of a deep recursion are a few call sites many times over.
+// Direct-mapped; a collision only asks again.
+struct StartKinds {
+    struct Slot {
+        uintptr_t ip = 0;
+        RunStart kind = RunStart::Unknown;
+    };
+    Slot slots[32];
+    RunStart of(const ModuleStackMap& maps, const CodeStackMapSnapshot* registered, uintptr_t ip) {
+        Slot& s = slots[((ip >> 2) ^ (ip >> 9)) & 31];
+        if (s.ip != ip) {
+            s.ip = ip;
+            s.kind = classify_run_start(maps, registered, ip);
+        }
+        return s.kind;
+    }
+};
+
+} // namespace
+
+uintptr_t brass_native_frames_cover_start() noexcept {
+    if (!t_native_frames) return UINTPTR_MAX;
+    const ModuleStackMap& maps = run_maps();
+    const auto registered = code_stack_map_snapshot();
+    StartKinds kinds;
+    for (const NativeFramesScope* s = t_native_frames; s != nullptr; s = s->prev_) {
+        if (s->rbp_ == 0 || s->ip_ == 0) continue;
+        if (kinds.of(maps, registered.get(), s->ip_) == RunStart::Generated) return s->rbp_;
+    }
+    return UINTPTR_MAX;
+}
+
+void brass_append_native_frame_roots(std::vector<uintptr_t*>& roots) {
+    for (const ThreadRootsScope* s = t_thread_roots; s != nullptr; s = s->prev_) {
+        if (s->provider_) s->provider_(s->ctx_, roots);
+    }
+    if (!t_native_frames) return;
+    const ModuleStackMap& maps = run_maps();
+    const auto registered = code_stack_map_snapshot();
     // Each run's walk stops where the next outer run whose walk covers the
-    // frames from there on begins: one that starts at a generated frame (a
-    // return address outside every image). Unbounded, N nested runs would
-    // each walk everything below them: O(N^2) per collection. Where the walk
-    // cannot unwind compiled frames (Windows ARM64) a run cannot be told
-    // apart, and walks unbounded.
+    // frames from there on begins (run_covers). Unbounded, N nested runs
+    // would each walk everything below them: O(N^2) per collection.
     std::vector<const NativeFramesScope*> runs;
     for (const NativeFramesScope* s = t_native_frames; s != nullptr; s = s->prev_) {
         if (s->rbp_ != 0 && s->ip_ != 0) runs.push_back(s);
     }
     uintptr_t cover = UINTPTR_MAX;  // start of the innermost covering run outside the current one
+    StartKinds kinds;
     for (size_t i = runs.size(); i-- > 0;) {
         const NativeFramesScope* s = runs[i];
+        const RunStart start = kinds.of(maps, registered.get(), s->ip_);
+        // A run recorded at a C++ caller (a coroutine resumed from the
+        // runtime) starts in compiled code, where its walk stops at once:
+        // nothing to visit. A deep async recursion records thousands.
+        if (start == RunStart::Compiled) continue;
         const uintptr_t stop_at = cover > s->rbp_ ? cover : UINTPTR_MAX;
         brass_stack_walk_bounded(s->rbp_, s->ip_, maps, [](void** slot, void* user_data) {
             auto* vec = static_cast<std::vector<uintptr_t*>*>(user_data);
             if (slot != nullptr && *slot != nullptr) vec->push_back(reinterpret_cast<uintptr_t*>(slot));
         }, &roots, stop_at);
-#if defined(_WIN32) && defined(_M_X64)
-        if (!detail::win64_ip_in_image(s->ip_)) cover = s->rbp_;
-#elif defined(BRASS_NATIVE_UNWIND)
-        if (!brass_ip_in_image(s->ip_)) cover = s->rbp_;
-#endif
+        if (start == RunStart::Generated) cover = s->rbp_;
     }
 }
 

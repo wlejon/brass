@@ -77,16 +77,16 @@ const ModuleStackMap* brass_stack_maps_for_caller(uintptr_t caller_ip) noexcept 
 }
 
 void brass_append_generated_frame_roots(uintptr_t caller_fp, uintptr_t caller_ip,
-                                        std::vector<uintptr_t*>& roots) {
+                                        std::vector<uintptr_t*>& roots, uintptr_t stop_at) {
     if (caller_fp == 0 || caller_ip == 0) return;
     const auto* maps = walk_maps(caller_ip);
     if (!maps) return;
-    brass_stack_walk(caller_fp, caller_ip, *maps, &push_slot, &roots);
+    brass_stack_walk_bounded(caller_fp, caller_ip, *maps, &push_slot, &roots, stop_at);
 }
 
-void brass_append_stack_roots_from_here(std::vector<uintptr_t*>& roots) {
+void brass_append_stack_roots_from_here(std::vector<uintptr_t*>& roots, uintptr_t stop_at) {
     const ModuleStackMap* maps = g_active_stack_maps ? g_active_stack_maps : registry_only_maps();
-    brass_stack_walk_from_here(*maps, &push_slot, &roots);
+    brass_stack_walk_from_here(*maps, &push_slot, &roots, stop_at);
 }
 
 } // namespace brass

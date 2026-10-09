@@ -26,14 +26,15 @@ const ModuleStackMap* brass_stack_maps_for_caller(uintptr_t caller_ip) noexcept;
 
 // The root slots (gcref and tagged) of the generated frames from
 // (caller_fp, caller_ip) upward, through the code stack maps; nothing when
-// either is 0 or no maps describe the caller.
+// either is 0 or no maps describe the caller. Frames at or beyond `stop_at`
+// are left out (brass_stack_walk_bounded).
 void brass_append_generated_frame_roots(uintptr_t caller_fp, uintptr_t caller_ip,
-                                        std::vector<uintptr_t*>& roots);
+                                        std::vector<uintptr_t*>& roots, uintptr_t stop_at = UINTPTR_MAX);
 
 // The root slots of every generated frame on this thread's stack above the
 // caller (brass_stack_walk_from_here), through the thread's active maps and
-// the code registry.
-void brass_append_stack_roots_from_here(std::vector<uintptr_t*>& roots);
+// the code registry, up to `stop_at`.
+void brass_append_stack_roots_from_here(std::vector<uintptr_t*>& roots, uintptr_t stop_at = UINTPTR_MAX);
 
 } // namespace brass
 

@@ -45,11 +45,12 @@ size_t brass_stack_walk_bounded(
 // unwind information (Win64 unwind data, or DWARF CFI: native_unwind.hpp;
 // on Windows ARM64 by their frame pointers, which that code must then keep),
 // and every generated frame from there on is visited as brass_stack_walk
-// visits it.
+// visits it, up to `stop_at` as brass_stack_walk_bounded stops.
 size_t brass_stack_walk_from_here(
     const ModuleStackMap& stack_maps,
     brass_root_visitor_fn visitor,
-    void* user_data
+    void* user_data,
+    uintptr_t stop_at = UINTPTR_MAX
 );
 
 // The number of compiled (C++) frames the walks on this thread have unwound
