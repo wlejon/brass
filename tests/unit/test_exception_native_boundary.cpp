@@ -132,7 +132,8 @@ TEST_CASE("Native boundary - a generated throw leaves re-entered C++ as a C++ ex
     g_thrower = nullptr;
 }
 
-#if defined(__x86_64__) || defined(_M_X64)
+// The AArch64 baseline tier compiles exceptions off Windows only.
+#if defined(__x86_64__) || defined(_M_X64) || (defined(__aarch64__) && !defined(_WIN32))
 
 namespace {
 

@@ -9,6 +9,7 @@
 #include <brass/runtime/tiering.hpp>
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/deopt_stress.hpp>
+#include <brass/runtime/exception.hpp>
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
@@ -52,10 +53,12 @@ void check_supported(const Function& fn, const Target& target) {
             if (!BaselineJitCompiler::supports_opcode(op)) {
                 throw_unsupported(kA64BaselineStage, opcode_name(op));
             }
-            // Exceptions are compiled by the x64 tier only: here a function
-            // that throws or catches stays in the interpreter.
-            if (op == Opcode::throw_ || op == Opcode::invoke || op == Opcode::landing_pad ||
-                op == Opcode::resume) {
+            // Exceptions (aarch64_baseline_emit_eh.cpp) land through the
+            // .eh_frame's personality and the JIT registry; the Windows ARM64
+            // unwind data names no handler, so there a function that throws
+            // or catches stays in the interpreter.
+            if (target.is_windows() && (op == Opcode::throw_ || op == Opcode::invoke ||
+                                        op == Opcode::landing_pad || op == Opcode::resume)) {
                 throw_unsupported(kA64BaselineStage, opcode_name(op));
             }
             // So are the coroutine operations: a function that creates or
@@ -207,6 +210,16 @@ void emit_control_op(AArch64BaselineEmitter& em, const Instruction& inst) {
         case Opcode::guard:
             emit_guard(em, inst);
             return;
+        case Opcode::invoke:
+            em.emit_invoke(inst);
+            return;
+        case Opcode::landing_pad:
+            em.emit_landing_pad(inst);
+            return;
+        case Opcode::throw_:
+        case Opcode::resume:
+            em.emit_raise(inst);
+            return;
         case Opcode::resume_point:
         case Opcode::keep_alive:
             // A metadata marker, and a use of a value whose slot is already
@@ -231,6 +244,8 @@ struct Pass {
     std::vector<std::string> lazy_addr_symbols;
     // Where each source position begins (BaselineCompiledFunction::line_table).
     std::vector<DebugLineEntry> lines;
+    // Each invoke's call and its pad, as code offsets.
+    std::vector<runtime::ExceptionScopeEntry> eh_scopes;
 };
 
 } // namespace
@@ -361,6 +376,10 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
                 emit_control_op(em, inst);
             }
         }
+        em.emit_unwind_trampolines();
+        for (const auto& s : em.eh_scopes) {
+            pass.eh_scopes.push_back({s.begin, s.end, static_cast<uint32_t>(buffer.label_offset(s.pad))});
+        }
         pass.uses_lazy_stubs = em.uses_lazy_stubs;
         pass.lazy_call_symbols = std::move(em.lazy_call_symbols);
         pass.lazy_addr_symbols = std::move(em.lazy_addr_symbols);
@@ -393,11 +412,15 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
     prologue.mov_end = pass.mov_end;
     prologue.tls_save_end = pass.tls_save_end;
     prologue.alloc_bytes = pass.alloc_bytes;
+    runtime::FunctionExceptionTable eh_table{std::string(fn.name()), 0, static_cast<uint32_t>(code_bytes)};
+    eh_table.set_frame_size(static_cast<uint32_t>(frame_bytes));
+    for (const auto& s : pass.eh_scopes) eh_table.add_scope(s.begin_offset, s.end_offset, s.landing_pad_offset);
     size_t unwind_off = 0;
     if (runs_here) {
         unwind_off = target.is_windows()
             ? append_aarch64_baseline_win_unwind(image, static_cast<uint32_t>(code_bytes), prologue)
-            : append_aarch64_baseline_eh_frame(image, static_cast<uint32_t>(code_bytes), prologue);
+            : append_aarch64_baseline_eh_frame(image, static_cast<uint32_t>(code_bytes), prologue,
+                                               eh_table.has_scopes());
     }
     auto mem_block = std::make_shared<JitMemoryBlock>(image.size());
     if (!mem_block->is_valid()) {
@@ -417,6 +440,15 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
 
     BaselineCompiledFunction compiled(
         fn.name(), fn.return_type(), fn.param_types(), mem_block, entry_ptr, code_bytes, std::move(pass.stack_map));
+    if (runs_here && !target.is_windows()) {
+        // Every baseline function, pads or not, as on x64: a raise steps
+        // through a registered frame to the pads beyond it.
+        const auto start = reinterpret_cast<uintptr_t>(entry_ptr);
+        runtime::get_global_exception_registry().register_function_mapping(start, code_bytes, eh_table);
+        compiled.set_eh_registration(std::shared_ptr<const void>(entry_ptr, [](const void* p) {
+            runtime::get_global_exception_registry().unregister_function_mapping(reinterpret_cast<uintptr_t>(p));
+        }));
+    }
     if (runs_here) {
         compiled.set_debug_registration(
             debug::register_jit_code(debug::JitTier::Baseline, fn.name(), entry_ptr, code_bytes));

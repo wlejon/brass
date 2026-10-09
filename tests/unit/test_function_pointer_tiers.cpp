@@ -352,7 +352,7 @@ b2:
     }
     FunctionHandle* t = prog.find("bx_t");
     REQUIRE(t != nullptr);
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__x86_64__) || defined(_M_X64) || (defined(__aarch64__) && !defined(_WIN32))
     CHECK(t->native_entry() != nullptr);
     CHECK(!prog.pipeline().is_baseline_rejected("bx_t"));
 #else

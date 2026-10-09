@@ -78,6 +78,16 @@ struct AArch64BaselineEmitter {
     // (BaselineJitCompiler::function_address_in), or null.
     BaselineSymbolResolver function_address;
 
+    // Each invoke's call instruction and the pad a throw from it lands at.
+    struct EhScope {
+        uint32_t begin = 0;
+        uint32_t end = 0;
+        Label pad;
+    };
+    std::vector<EhScope> eh_scopes;
+    // An invoke whose unwind edge passes block arguments lands here first.
+    std::vector<std::pair<Label, const Instruction*>> unwind_trampolines;
+
     // The slot of a value / at a layout offset, for an access of `size`
     // bytes: [fp, #-off] when that encodes, [sp, #frame_bytes-off] when
     // that does, else X17 = its address.
@@ -105,8 +115,18 @@ struct AArch64BaselineEmitter {
     void call_abs(const void* fn_ptr);
     void record_safepoint(uint32_t site_id);
     void emit_return();
+    // call_start / call_end, when given, receive the code offsets around the
+    // call instruction itself (an invoke's scope).
     void emit_call(std::string_view symbol, const Value* indirect,
-                   const std::vector<const Value*>& args, const Value* result, uint32_t site_id);
+                   const std::vector<const Value*>& args, const Value* result, uint32_t site_id,
+                   uint32_t* call_start = nullptr, uint32_t* call_end = nullptr);
+
+    // The exception opcodes (aarch64_baseline_emit_eh.cpp): invoke,
+    // landing_pad, and throw / resume.
+    void emit_invoke(const Instruction& inst);
+    void emit_landing_pad(const Instruction& inst);
+    void emit_raise(const Instruction& inst);
+    void emit_unwind_trampolines();
 };
 
 // The frame's outgoing-argument and parallel-copy needs, for the prologue.
@@ -140,8 +160,11 @@ struct A64BaselinePrologue {
 // returns the offset to pass to JitMemoryBlock::register_unwind_info. DWARF
 // .eh_frame (CIE, one FDE, terminator), or Windows ARM64 .xdata followed by
 // its RUNTIME_FUNCTION.
+// With `personality`, the .eh_frame's CIE names brass_sysv_personality,
+// which lands a C++ BrassException at the function's pads (found in the JIT
+// registry).
 size_t append_aarch64_baseline_eh_frame(std::vector<uint8_t>& image, uint32_t code_size,
-                                        const A64BaselinePrologue& prologue);
+                                        const A64BaselinePrologue& prologue, bool personality = false);
 size_t append_aarch64_baseline_win_unwind(std::vector<uint8_t>& image, uint32_t code_size,
                                           const A64BaselinePrologue& prologue);
 

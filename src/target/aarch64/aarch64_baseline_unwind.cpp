@@ -9,6 +9,7 @@
 // sp is fixed after the prologue; epilogues are not described (no call is
 // made from one).
 #include "aarch64_baseline_emit_internal.hpp"
+#include <brass/runtime/exception.hpp>
 #include <stdexcept>
 
 namespace brass::aarch64 {
@@ -53,18 +54,27 @@ void advance(std::vector<uint8_t>& out, uint32_t delta) {
 } // namespace
 
 size_t append_aarch64_baseline_eh_frame(std::vector<uint8_t>& image, uint32_t code_size,
-                                        const A64BaselinePrologue& p) {
+                                        const A64BaselinePrologue& p, bool personality) {
     constexpr uint8_t kX28 = 28, kFp = 29, kLr = 30, kSp = 31;
     align_to(image, 8);
     const size_t cie = image.size();
     put_u32(image, 0);                      // length, patched
     put_u32(image, 0);                      // CIE id
     image.push_back(1);                     // version
-    image.push_back('z'); image.push_back('R'); image.push_back(0);
+    // With pads, "zPR": the personality by its absolute address (it finds
+    // the pads in the JIT registry), as the x64 tier's CIE.
+    image.push_back('z');
+    if (personality) image.push_back('P');
+    image.push_back('R'); image.push_back(0);
     put_uleb(image, 4);                     // code alignment
     image.push_back(0x78);                  // data alignment -8 (sleb)
     image.push_back(kLr);                   // return address column
-    put_uleb(image, 1);                     // augmentation data length
+    put_uleb(image, personality ? 10 : 1);  // augmentation data length
+    if (personality) {
+        image.push_back(0x00);              // personality: absptr
+        const auto target = reinterpret_cast<uint64_t>(&runtime::brass_default_sysv_personality);
+        for (int i = 0; i < 8; ++i) image.push_back(static_cast<uint8_t>(target >> (8 * i)));
+    }
     image.push_back(0x1B);                  // FDE pointers: pcrel | sdata4
     image.push_back(0x0C); image.push_back(kSp); image.push_back(0); // def_cfa sp+0
     align_to(image, 8);

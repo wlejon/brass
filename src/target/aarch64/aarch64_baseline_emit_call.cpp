@@ -191,7 +191,7 @@ void AArch64BaselineEmitter::emit_return() {
 
 void AArch64BaselineEmitter::emit_call(std::string_view symbol, const Value* indirect,
                                        const std::vector<const Value*>& args, const Value* result,
-                                       uint32_t site_id) {
+                                       uint32_t site_id, uint32_t* call_start, uint32_t* call_end) {
     std::vector<Type> types;
     types.reserve(args.size());
     for (const Value* a : args) types.push_back(a->type());
@@ -232,8 +232,10 @@ void AArch64BaselineEmitter::emit_call(std::string_view symbol, const Value* ind
     }
 
     if (indirect) {
+        if (call_start) *call_start = static_cast<uint32_t>(buffer.size());
         enc.blr(GPR::X16);
     } else if (symbol == fn.name()) {
+        if (call_start) *call_start = static_cast<uint32_t>(buffer.size());
         enc.bl(fn_entry_label);
     } else {
         void* target_addr = resolve_sym(symbol);
@@ -243,8 +245,11 @@ void AArch64BaselineEmitter::emit_call(std::string_view symbol, const Value* ind
                 lazy_call_symbols.emplace_back(symbol);
             }
         }
-        call_abs(target_addr);
+        enc.mov(GPR::X16, reinterpret_cast<uint64_t>(target_addr));
+        if (call_start) *call_start = static_cast<uint32_t>(buffer.size());
+        enc.blr(GPR::X16);
     }
+    if (call_end) *call_end = static_cast<uint32_t>(buffer.size());
     // Keyed by the return address.
     record_safepoint(site_id);
 
@@ -268,6 +273,7 @@ void for_each_call(const Function& fn, F&& visit) {
             switch (inst->opcode()) {
                 case Opcode::call:
                 case Opcode::patchable_call:
+                case Opcode::invoke:
                 case Opcode::call_indirect: {
                     const size_t first = inst->opcode() == Opcode::call_indirect ? 1 : 0;
                     for (size_t i = first; i < inst->operand_count(); ++i) types.push_back(inst->operand(i)->type());
