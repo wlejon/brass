@@ -99,23 +99,24 @@ brass_gc_alloc_end
         ENDP
         BRASS_FRAME_UNWIND brass_gc_alloc, 16, 1
 
-; uintptr_t brass_coro_create(void* fn_ptr, uint32_t slot_count, uint64_t pointer_mask)
-; Generated code's coroutine-frame allocation: as brass_gc_alloc, passes the
-; calling frame so a collection it triggers updates that frame's gcrefs.
+; uintptr_t brass_default_coro_create(void* fn_ptr, uint32_t slot_count, uint64_t pointer_mask)
+; Generated code's coroutine-frame allocation (named brass_coro_create; see
+; runtime/coroutine.hpp): as brass_gc_alloc, passes the calling frame so a
+; collection it triggers updates that frame's gcrefs.
 ; x0 = fn_ptr, w1 = slot_count, x2 = pointer_mask; x3 = caller_fp, x4 = caller_ip
         ALIGN   4
-        EXPORT  brass_coro_create
-brass_coro_create PROC
+        EXPORT  brass_default_coro_create
+brass_default_coro_create PROC
         stp     x29, x30, [sp, #-16]!
         mov     x29, sp
         ldp     x3, x4, [x29]
         bl      brass_coro_create_at
-brass_coro_create_epilog
+brass_default_coro_create_epilog
         ldp     x29, x30, [sp], #16
         ret
-brass_coro_create_end
+brass_default_coro_create_end
         ENDP
-        BRASS_FRAME_UNWIND brass_coro_create, 16, 1
+        BRASS_FRAME_UNWIND brass_default_coro_create, 16, 1
 
 ; uintptr_t brass_coro_create_body(const void* body)
 ; The same for a frame of a body descriptor.

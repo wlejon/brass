@@ -118,7 +118,7 @@ TEST_CASE("Coroutine MIR - Reference Interpreter") {
     Function* target = mod.get_function("gen_test");
     CHECK(target != nullptr);
 
-    uintptr_t frame = brass_coro_create(nullptr, 16, 0);
+    uintptr_t frame = brass_default_coro_create(nullptr, 16, 0);
     CHECK(frame != 0);
 
     Interpreter interp;

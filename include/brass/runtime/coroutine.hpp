@@ -300,7 +300,17 @@ extern "C" {
 // is set (any bit from 56 up traces every slot from 56 on; a body needing
 // more precision uses brass_coro_create_body), with the calling frame's gcrefs among a
 // collection's roots (as brass_gc_alloc).
-uintptr_t brass_coro_create(void* fn_ptr, uint32_t slot_count, uint64_t pointer_mask);
+//
+// Generated code names it brass_coro_create. Like brass_throw
+// (exception.hpp), brass defines no function of that name: an engine's symbol
+// table binds the name to this definition (the JIT), and for AOT objects the
+// one image that exports the name as an alias of it (a host runtime, or
+// brass_bind_eh_symbols in an executable that links brass itself) does. A
+// process that also links brass statically — a compiler in-process — then
+// still has one definition of the name, so an object linked into it cannot
+// bind a second copy of the coroutine runtime, whose frames the other copy's
+// registries would not know.
+uintptr_t brass_default_coro_create(void* fn_ptr, uint32_t slot_count, uint64_t pointer_mask);
 // The same with the generated frame named: its frame pointer and the return
 // address into it (both 0: none, e.g. an interpreter's call).
 uintptr_t brass_coro_create_at(void* fn_ptr, uint32_t slot_count, uint64_t pointer_mask,

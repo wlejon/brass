@@ -471,7 +471,7 @@ uintptr_t brass_coro_create_body_at(const void* body, uintptr_t caller_fp, uintp
 // MSVC: the stubs in gc_msvc_x64.asm / gc_msvc_arm64.asm, which call the
 // _at functions.
 #if !defined(_MSC_VER)
-uintptr_t brass_coro_create(void* fn_ptr, uint32_t slot_count, uint64_t pointer_mask) {
+uintptr_t brass_default_coro_create(void* fn_ptr, uint32_t slot_count, uint64_t pointer_mask) {
     void* frame = __builtin_frame_address(0);
     uintptr_t caller_fp = frame ? *reinterpret_cast<uintptr_t*>(frame) : 0;
     uintptr_t caller_ip = reinterpret_cast<uintptr_t>(__builtin_return_address(0));

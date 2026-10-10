@@ -53,10 +53,11 @@ brass_gc_alloc PROC FRAME
     ret
 brass_gc_alloc ENDP
 
-; uintptr_t brass_coro_create(void* fn_ptr, uint32_t slot_count, uint64_t pointer_mask)
-; Generated code's coroutine-frame allocation: as brass_gc_alloc, passes the
-; calling frame so a collection it triggers updates that frame's gcrefs.
-brass_coro_create PROC FRAME
+; uintptr_t brass_default_coro_create(void* fn_ptr, uint32_t slot_count, uint64_t pointer_mask)
+; Generated code's coroutine-frame allocation (named brass_coro_create; see
+; runtime/coroutine.hpp): as brass_gc_alloc, passes the calling frame so a
+; collection it triggers updates that frame's gcrefs.
+brass_default_coro_create PROC FRAME
     push rbp
     .pushreg rbp
     mov rbp, rsp
@@ -76,7 +77,7 @@ brass_coro_create PROC FRAME
     add rsp, 48
     pop rbp
     ret
-brass_coro_create ENDP
+brass_default_coro_create ENDP
 
 ; uintptr_t brass_coro_create_body(const void* body)
 ; The same for a frame of a body descriptor: rcx = body, rdx = caller_rbp,

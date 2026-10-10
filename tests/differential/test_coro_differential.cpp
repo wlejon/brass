@@ -45,7 +45,7 @@ TEST_CASE("Coroutine Differential - Interpreter vs JIT") {
     void* jit_fn = jit.get_symbol_address("diff_coro");
     CHECK(jit_fn != nullptr);
 
-    uintptr_t jit_frame = brass_coro_create(jit_fn, 16, 0);
+    uintptr_t jit_frame = brass_default_coro_create(jit_fn, 16, 0);
     CHECK(jit_frame != 0);
 
     uint64_t jit_y1 = brass_coro_resume(jit_frame, 0);
@@ -59,7 +59,7 @@ TEST_CASE("Coroutine Differential - Interpreter vs JIT") {
     Function* interp_fn = mod.get_function("diff_coro");
     CHECK(interp_fn != nullptr);
 
-    uintptr_t interp_frame = brass_coro_create(nullptr, 16, 0);
+    uintptr_t interp_frame = brass_default_coro_create(nullptr, 16, 0);
     CHECK(interp_frame != 0);
     auto* f_ptr = reinterpret_cast<runtime::BrassCoroFrame*>(interp_frame);
 

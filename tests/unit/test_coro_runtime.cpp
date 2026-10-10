@@ -45,7 +45,7 @@ TEST_CASE("Coroutine Runtime - JIT Generator Execution") {
     void* fn_ptr = jit.get_symbol_address("counter_gen");
     CHECK(fn_ptr != nullptr);
 
-    uintptr_t frame_addr = brass_coro_create(fn_ptr, 16, 0);
+    uintptr_t frame_addr = brass_default_coro_create(fn_ptr, 16, 0);
     CHECK(frame_addr != 0);
 
     // Yield 1: 10
@@ -94,7 +94,7 @@ std::unique_ptr<Module> build_fib_step_module(std::string_view fn_name) {
 }
 
 void step_fib_in_fast_interpreter(FastInterpreter& interp, const Function& fn) {
-    uintptr_t c_frame = brass_coro_create(nullptr, 16, 0);
+    uintptr_t c_frame = brass_default_coro_create(nullptr, 16, 0);
     REQUIRE(c_frame != 0);
     auto* f_ptr = reinterpret_cast<runtime::BrassCoroFrame*>(c_frame);
 
@@ -125,7 +125,7 @@ TEST_CASE("Coroutine Runtime - Baseline JIT resumes a transformed coroutine on e
     REQUIRE(entry != nullptr);
 
     for (int round = 0; round < 4; ++round) {
-        uintptr_t frame = brass_coro_create(entry, 16, 0);
+        uintptr_t frame = brass_default_coro_create(entry, 16, 0);
         REQUIRE(frame != 0);
         CHECK_EQ(brass_coro_resume(frame, 0), 10u);
         CHECK_EQ(brass_coro_resume(frame, 0), 30u);

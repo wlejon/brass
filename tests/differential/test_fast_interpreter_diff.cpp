@@ -657,7 +657,7 @@ TEST_CASE("Differential - FastInterpreter vs Oracle: Coroutines") {
 
     // Run in Oracle Interpreter
     Interpreter oracle;
-    uintptr_t o_frame = brass_coro_create(nullptr, 16, 0);
+    uintptr_t o_frame = brass_default_coro_create(nullptr, 16, 0);
     REQUIRE(o_frame != 0);
     auto* o_fptr = reinterpret_cast<runtime::BrassCoroFrame*>(o_frame);
 
@@ -671,7 +671,7 @@ TEST_CASE("Differential - FastInterpreter vs Oracle: Coroutines") {
 
     // Run in FastInterpreter
     FastInterpreter fast;
-    uintptr_t f_frame = brass_coro_create(nullptr, 16, 0);
+    uintptr_t f_frame = brass_default_coro_create(nullptr, 16, 0);
     REQUIRE(f_frame != 0);
     auto* f_fptr = reinterpret_cast<runtime::BrassCoroFrame*>(f_frame);
 

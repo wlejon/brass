@@ -137,11 +137,11 @@ add_library(brass STATIC ${BRASS_SOURCES})
 add_library(brass::brass ALIAS brass)
 
 # brass_bind_eh_symbols(<target>): an executable that links AOT objects and
-# brass itself, with no runtime image exporting the canonical throw and
-# personality names (include/brass/runtime/exception.hpp), binds those names
-# to brass's brass_default_* definitions.
+# brass itself, with no runtime image exporting the canonical throw,
+# personality and coroutine-frame names (include/brass/runtime/exception.hpp,
+# coroutine.hpp), binds those names to brass's brass_default_* definitions.
 function(brass_bind_eh_symbols target)
-    set(_names brass_throw brass_rethrow)
+    set(_names brass_throw brass_rethrow brass_coro_create)
     if(WIN32)
         list(APPEND _names brass_seh_personality)
     else()

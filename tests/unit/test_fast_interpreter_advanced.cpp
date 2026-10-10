@@ -312,7 +312,7 @@ TEST_CASE("Fast Interpreter - Transformed Coroutine MIR Parity") {
     Function* t_fn = mod.get_function("t_coro");
     REQUIRE(t_fn != nullptr);
 
-    uintptr_t c_frame = brass_coro_create(nullptr, 16, 0);
+    uintptr_t c_frame = brass_default_coro_create(nullptr, 16, 0);
     REQUIRE(c_frame != 0);
     auto* f_ptr = reinterpret_cast<runtime::BrassCoroFrame*>(c_frame);
 
