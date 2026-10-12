@@ -4,6 +4,9 @@
 #include <brass/runtime/code_installer.hpp>
 #include <algorithm>
 
+// Tier-1 code's backedge hook (runtime/multi_tier_pipeline.cpp).
+extern "C" void brass_tier1_backedges_fb(void* feedback);
+
 namespace brass::aarch64 {
 
 using namespace brass::codegen;
@@ -166,6 +169,23 @@ void AArch64BaselineEmitter::copy_block_args(const BranchTarget& target_branch) 
 void AArch64BaselineEmitter::call_abs(const void* fn_ptr) {
     enc.mov(GPR::X16, reinterpret_cast<uint64_t>(fn_ptr));
     enc.blr(GPR::X16);
+}
+
+void AArch64BaselineEmitter::count_backedge(const BasicBlock* dest) {
+    if (!backedge_budget || !dest) return;
+    auto it = block_pos.find(dest->id());
+    if (it == block_pos.end() || it->second > cur_block_pos) return;
+    // ldr x16, [budget]; subs x16, x16, #1; str x16, [budget]; b.ne done;
+    // then the hook with the feedback.
+    Label done = buffer.create_label();
+    enc.mov(GPR::X17, reinterpret_cast<uint64_t>(backedge_budget));
+    enc.ldr(GPR::X16, MemAddress::base_disp(GPR::X17, 0));
+    enc.subs(GPR::X16, GPR::X16, 1u);
+    enc.str(GPR::X16, MemAddress::base_disp(GPR::X17, 0));
+    enc.b(Condition::NE, done);
+    enc.mov(GPR::X0, reinterpret_cast<uint64_t>(backedge_feedback));
+    call_abs(reinterpret_cast<const void*>(&brass_tier1_backedges_fb));
+    buffer.bind(done);
 }
 
 void AArch64BaselineEmitter::record_safepoint(uint32_t site_id) {

@@ -111,6 +111,20 @@ struct AArch64BaselineEmitter {
     void store_v(const Value* v, FPR src);
 
     void copy_block_args(const BranchTarget& target_branch);
+    // Backedge counting (TieringFeedback::tier1_backedge_budget), as the x64
+    // baseline does: the function's feedback, its budget cell, each block's
+    // position in emission order, and the position of the block being
+    // emitted. An edge to a block at or before the current one is a loop
+    // backedge.
+    void* backedge_feedback = nullptr;
+    void* backedge_budget = nullptr;
+    std::unordered_map<uint32_t, uint32_t> block_pos;
+    uint32_t cur_block_pos = 0;
+    // Emits the budget decrement (and the hook call at zero) for an edge to
+    // `target` when it is a backedge. Clobbers flags, X0, X16, X17 and the
+    // hook's caller-saved registers; the block arguments must already be
+    // copied (every value is in its slot).
+    void count_backedge(const BasicBlock* target);
     // mov x16, fn; blr x16.
     void call_abs(const void* fn_ptr);
     void record_safepoint(uint32_t site_id);

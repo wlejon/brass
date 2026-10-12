@@ -252,3 +252,44 @@ TEST_CASE("Program runtime state - aarch64 baseline bakes in its program's feedb
         CHECK(contains(code_a, compiled_a.code_size(), buf.bytes()));
     }
 }
+
+TEST_CASE("Program runtime state - a loop-heavy tier-1 function called once reaches tier 2") {
+    // Tier-up by work: tier-1 code counts its loop backedges down the
+    // feedback's budget and, when it runs out, sends the function to Tier 2,
+    // so a function called a few times that loops a lot does not stay in
+    // baseline code for good (call-count thresholds out of reach here). The
+    // aarch64 baseline lacked the countdown: on arm64 such a function ran
+    // its tier-1 code for every call after the first (a pixel loop 6x slow).
+    Module mod("prs_backedge"); // outlives the program that routes into it
+    FunctionDispatchTable prog;
+    Function* fn = build_sum_loop(mod, "prs_be_sum");
+    TieringConfig cfg;
+    cfg.invocation_tier1_threshold = 1000000;
+    cfg.invocation_tier2_threshold = 1000000;
+    cfg.enable_background_compile = false;
+    prog.pipeline().initialize(cfg);
+    prog.tiering().set_active_module(&mod);
+    ProgramScope scope(prog);
+
+    REQUIRE(prog.pipeline().compile_and_install_tier1("prs_be_sum", fn));
+    const TieringFeedback* fb = prog.tiering().find_feedback("prs_be_sum");
+    REQUIRE(fb != nullptr);
+    CHECK(fb->current_tier() == TierLevel::Tier1_Baseline);
+    auto code = prog.pipeline().find_baseline_compiled("prs_be_sum");
+    REQUIRE(code != nullptr);
+
+    // Fewer iterations than the budget: counted, no tier-up yet.
+    using I64Fn = int64_t (*)(int64_t);
+    const int64_t few = TieringFeedback::kTier1BackedgeBudget / 4;
+    CHECK_EQ(code->get_function_ptr<I64Fn>()(few), (few - 1) * few / 2);
+    CHECK(fb->current_tier() == TierLevel::Tier1_Baseline);
+
+    // One call that loops past it: Tier 2 for the calls after it.
+    const int64_t many = TieringFeedback::kTier1BackedgeBudget * 4;
+    CHECK_EQ(code->get_function_ptr<I64Fn>()(many), (many - 1) * many / 2);
+    CHECK(fb->backedge_count() >= static_cast<uint64_t>(TieringFeedback::kTier1BackedgeBudget));
+    CHECK(fb->current_tier() == TierLevel::Tier2_Optimized);
+
+    prog.pipeline().shutdown();
+    prog.tiering().set_active_module(nullptr);
+}

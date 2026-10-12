@@ -10,6 +10,7 @@
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/deopt_stress.hpp>
 #include <brass/runtime/exception.hpp>
+#include <brass/runtime/multi_tier_pipeline.hpp>
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
@@ -144,10 +145,12 @@ void emit_switch(AArch64BaselineEmitter& em, const Instruction& inst) {
         enc.b(Condition::EQ, body);
     }
     em.copy_block_args(inst.default_target());
+    em.count_backedge(inst.default_target().block);
     enc.b(em.block_labels.at(inst.default_target().block->id()));
     for (size_t i = 0; i < inst.switch_cases().size(); ++i) {
         em.buffer.bind(case_labels[i]);
         em.copy_block_args(inst.switch_cases()[i].target);
+        em.count_backedge(inst.switch_cases()[i].target.block);
         enc.b(em.block_labels.at(inst.switch_cases()[i].target.block->id()));
     }
 }
@@ -178,15 +181,18 @@ void emit_control_op(AArch64BaselineEmitter& em, const Instruction& inst) {
         }
         case Opcode::br:
             em.copy_block_args(inst.branch_target());
+            em.count_backedge(inst.branch_target().block);
             enc.b(em.block_labels.at(inst.branch_target().block->id()));
             return;
         case Opcode::br_if: {
             Label true_edge = em.buffer.create_label();
             branch_if_nonzero(em, inst.operand(0), true_edge);
             em.copy_block_args(inst.false_target());
+            em.count_backedge(inst.false_target().block);
             enc.b(em.block_labels.at(inst.false_target().block->id()));
             em.buffer.bind(true_edge);
             em.copy_block_args(inst.true_target());
+            em.count_backedge(inst.true_target().block);
             enc.b(em.block_labels.at(inst.true_target().block->id()));
             return;
         }
@@ -311,6 +317,17 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
             frame_bytes, out_bytes, fn_entry_label, preserves_tls, lazy
         };
         em.function_address = function_address;
+        // Tier-up by work: loop backedges count down the feedback's budget
+        // (only for code whose program has a pipeline to tier it up), so a
+        // function called a few times that loops a lot reaches Tier 2.
+        if (feedback && registry.pipeline().is_initialized()) {
+            em.backedge_feedback = feedback;
+            em.backedge_budget = feedback->tier1_backedge_budget();
+            uint32_t pos = 0;
+            for (const auto* bb : fn.blocks()) {
+                if (bb) em.block_pos[bb->id()] = pos++;
+            }
+        }
 
         // Zero the root slots so a GC before their first store sees null.
         for (int32_t off : layout.gcref_slots) enc.str(GPR::XZR, em.off_addr(off, 8));
@@ -364,6 +381,7 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
         for (const auto* bb : fn.blocks()) {
             if (!bb) continue;
             buffer.bind(block_labels[bb->id()]);
+            if (auto it = em.block_pos.find(bb->id()); it != em.block_pos.end()) em.cur_block_pos = it->second;
             for (const auto* inst_ptr : *bb) {
                 if (!inst_ptr) continue;
                 const Instruction& inst = *inst_ptr;
