@@ -347,6 +347,26 @@ void FastInterpreter::execute_call_indirect(FastFrame& frame, uint32_t cs_idx) {
     dispatch_call(t, frame, cs, "Call indirect to unregistered target pointer: ");
 }
 
+namespace {
+
+#if defined(_MSC_VER)
+#define BRASS_CALL_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#define BRASS_CALL_NOINLINE __attribute__((noinline))
+#else
+#define BRASS_CALL_NOINLINE
+#endif
+
+[[noreturn]] BRASS_CALL_NOINLINE void throw_undefined_call(const char* what, const std::string& name) {
+    throw InterpreterException(what + name);
+}
+
+[[noreturn]] BRASS_CALL_NOINLINE void throw_call_depth_limit(size_t max_depth) {
+    throw InterpreterException("Call stack depth limit exceeded (" + std::to_string(max_depth) + ")");
+}
+
+} // namespace
+
 void FastInterpreter::dispatch_call(FastCallTarget& t, FastFrame& frame, const CallSiteInfo& cs, const char* what) {
     RuntimeValue result;
     if (t.callee) {
@@ -364,7 +384,7 @@ void FastInterpreter::dispatch_call(FastCallTarget& t, FastFrame& frame, const C
     } else if (t.raw_native) {
         result = call_raw_native(t.indirect_ptr, frame, cs);
     } else {
-        throw InterpreterException(what + t.name);
+        throw_undefined_call(what, t.name);
     }
     if (cs.dst_reg != kNoReg) fast_set_reg(frame, cs.dst_reg, result);
 }
@@ -406,7 +426,7 @@ RuntimeValue FastInterpreter::call_bytecode(FastCallTarget& t, FastFrame& caller
         return call_native(*h, caller, cs);
     }
     if (BRASS_UNLIKELY(call_depth_ >= max_call_depth_)) {
-        throw InterpreterException("Call stack depth limit exceeded (" + std::to_string(max_call_depth_) + ")");
+        throw_call_depth_limit(max_call_depth_);
     }
     if (BRASS_UNLIKELY(++total_instructions_executed_ > max_instructions_ && max_instructions_ > 0)) {
         throw_instruction_limit();

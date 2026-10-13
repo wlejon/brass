@@ -35,9 +35,62 @@ bool stress_fails_guard(const GuardInfo& g, const Module* module, bool has_handl
     return can_exit && runtime::deopt_stress_should_fail(g.resume_id);
 }
 
+template <typename T>
+inline uint64_t load_unaligned(uintptr_t addr) noexcept {
+    T v;
+    std::memcpy(&v, reinterpret_cast<const void*>(addr), sizeof(T));
+    return static_cast<uint64_t>(v);
+}
+
+template <typename T>
+inline void store_unaligned(uintptr_t addr, uint64_t raw) noexcept {
+    const T v = static_cast<T>(raw);
+    std::memcpy(reinterpret_cast<void*>(addr), &v, sizeof(T));
+}
+
+#if defined(_MSC_VER)
+#define BRASS_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#define BRASS_NOINLINE __attribute__((noinline))
+#else
+#define BRASS_NOINLINE
+#endif
+
+[[noreturn]] BRASS_NOINLINE void throw_interp_msg(const char* msg) {
+    throw InterpreterException(msg);
+}
+
+[[noreturn]] BRASS_NOINLINE void throw_invalid_opcode(BytecodeOp op, const std::string& fn_name) {
+    throw InterpreterException("Invalid opcode " + std::to_string(static_cast<int>(op)) +
+                               " in bytecode function " + fn_name);
+}
+
+[[noreturn]] BRASS_NOINLINE void throw_deopt(const DeoptResult& state) {
+    throw DeoptException(state);
+}
+
+BRASS_NOINLINE void record_thread_deopt_frame(const GuardInfo& g, const FastFrame& frame,
+                                              DeoptResult& last_deopt) {
+    last_deopt.deoptimized = true;
+    last_deopt.exit_stub = g.exit_stub;
+    last_deopt.resume_id = g.resume_id;
+    last_deopt.state_map.clear();
+    last_deopt.state_map.reserve(g.state_regs.size());
+    runtime::DeoptFrame df;
+    df.resume_id = g.resume_id;
+    df.exit_symbol = g.exit_stub;
+    df.reason = runtime::DeoptReason::Generic;
+    for (BcReg sreg : g.state_regs) {
+        RuntimeValue rv = fast_reg_value(frame, sreg);
+        last_deopt.state_map.push_back(rv);
+        df.push_value(frame.registers[sreg], runtime::DeoptValue::from_runtime_value(rv).kind);
+    }
+    runtime::set_thread_deopt_frame(&df);
+}
+
 } // namespace
 
-void FastInterpreter::throw_instruction_limit() const {
+BRASS_NOINLINE void FastInterpreter::throw_instruction_limit() const {
     throw InterpreterException("Maximum instruction execution count exceeded (" + std::to_string(max_instructions_) + ")");
 }
 
@@ -62,6 +115,7 @@ RuntimeValue FastInterpreter::execute_frame(FastFrame& frame) {
     const runtime::OsrCoordinator& osr = dispatch_table().osr();
     const bool osr_on = frame.mir_fn != nullptr && osr.is_enabled() && osr.runs_program();
     runtime::TieringFeedback* const feedback = &frame.info->tiering(dispatch_table_);
+    RuntimeValue osr_res_;
 
 #define RA registers[decode_a(inst)]
 #define RB registers[decode_b(inst)]
@@ -72,7 +126,6 @@ RuntimeValue FastInterpreter::execute_frame(FastFrame& frame) {
         total_instructions_executed_ += static_cast<uint64_t>(-static_cast<int64_t>(off)) + 1; \
         if (BRASS_UNLIKELY(total_instructions_executed_ > insn_limit)) throw_instruction_limit(); \
         if (BRASS_UNLIKELY(osr_on)) {                                                         \
-            RuntimeValue osr_res_;                                                            \
             const uint32_t target_pc_ = static_cast<uint32_t>((pc - code_base) + (off));      \
             if (handle_osr_backedge(frame, target_pc_, osr_res_)) return osr_res_;            \
         } else {                                                                              \
@@ -171,9 +224,10 @@ RuntimeValue FastInterpreter::execute_frame(FastFrame& frame) {
 #else
 #define BRASS_DIRECT_THREADED 0
 #define OP_CASE(name) case BytecodeOp::name:
-#define DISPATCH() do { inst = *pc; goto loop_start; } while (0)
+#define DISPATCH() goto loop_start
 
 loop_start:
+    inst = *pc;
     switch (decode_op(inst))
 #endif
     {
@@ -191,13 +245,13 @@ loop_start:
 #define BRANCH_NOT_F32(name, op) OP_CASE(name) { if (!(get_f32(RA) op get_f32(RB))) JUMP_BY(decode_imm24(inst)); NEXT(); }
 #define BRANCH_F64(name, op) OP_CASE(name) { if (get_f64(RA) op get_f64(RB)) JUMP_BY(decode_imm24(inst)); NEXT(); }
 #define BRANCH_NOT_F64(name, op) OP_CASE(name) { if (!(get_f64(RA) op get_f64(RB))) JUMP_BY(decode_imm24(inst)); NEXT(); }
-#define LOAD(name, T) OP_CASE(name) { T v_; std::memcpy(&v_, reinterpret_cast<const void*>(RB + static_cast<int64_t>(decode_imm24(inst))), sizeof(T)); RA = static_cast<uint64_t>(v_); NEXT(); }
-#define STORE(name, T) OP_CASE(name) { const T v_ = static_cast<T>(RA); std::memcpy(reinterpret_cast<void*>(RB + static_cast<int64_t>(decode_imm24(inst))), &v_, sizeof(T)); NEXT(); }
-#define LOAD_INDEXED(name, T) OP_CASE(name) { T v_; std::memcpy(&v_, reinterpret_cast<const void*>(RB + RC * decode_d(inst)), sizeof(T)); RA = static_cast<uint64_t>(v_); NEXT(); }
-#define STORE_INDEXED(name, T) OP_CASE(name) { const T v_ = static_cast<T>(RA); std::memcpy(reinterpret_cast<void*>(RB + RC * decode_d(inst)), &v_, sizeof(T)); NEXT(); }
+#define LOAD(name, T) OP_CASE(name) { RA = load_unaligned<T>(static_cast<uintptr_t>(RB + static_cast<int64_t>(decode_imm24(inst)))); NEXT(); }
+#define STORE(name, T) OP_CASE(name) { store_unaligned<T>(static_cast<uintptr_t>(RB + static_cast<int64_t>(decode_imm24(inst))), RA); NEXT(); }
+#define LOAD_INDEXED(name, T) OP_CASE(name) { RA = load_unaligned<T>(static_cast<uintptr_t>(RB + RC * decode_d(inst))); NEXT(); }
+#define STORE_INDEXED(name, T) OP_CASE(name) { store_unaligned<T>(static_cast<uintptr_t>(RB + RC * decode_d(inst)), RA); NEXT(); }
 
         OP_CASE(nop) { NEXT(); }
-        OP_CASE(unreachable) { throw InterpreterException("Execution reached unreachable instruction"); }
+        OP_CASE(unreachable) { throw_interp_msg("Execution reached unreachable instruction"); }
 
         OP_CASE(iconst32) { RA = decode_uimm32(inst); NEXT(); }
         OP_CASE(load_const) { RA = fn.constants[decode_uimm32(inst)]; NEXT(); }
@@ -255,53 +309,53 @@ loop_start:
 
         OP_CASE(sdiv_i32) {
             const int32_t b = static_cast<int32_t>(RC);
-            if (BRASS_UNLIKELY(b == 0)) throw InterpreterException("Division by zero");
+            if (BRASS_UNLIKELY(b == 0)) throw_interp_msg("Division by zero");
             const int32_t a = static_cast<int32_t>(RB);
             RA = (BRASS_UNLIKELY(a == std::numeric_limits<int32_t>::min() && b == -1)) ? static_cast<uint32_t>(a) : static_cast<uint32_t>(a / b);
             NEXT();
         }
         OP_CASE(sdiv_i64) {
             const int64_t b = static_cast<int64_t>(RC);
-            if (BRASS_UNLIKELY(b == 0)) throw InterpreterException("Division by zero");
+            if (BRASS_UNLIKELY(b == 0)) throw_interp_msg("Division by zero");
             const int64_t a = static_cast<int64_t>(RB);
             RA = (BRASS_UNLIKELY(a == std::numeric_limits<int64_t>::min() && b == -1)) ? static_cast<uint64_t>(a) : static_cast<uint64_t>(a / b);
             NEXT();
         }
         OP_CASE(udiv_i32) {
             const uint32_t b = static_cast<uint32_t>(RC);
-            if (BRASS_UNLIKELY(b == 0)) throw InterpreterException("Division by zero");
+            if (BRASS_UNLIKELY(b == 0)) throw_interp_msg("Division by zero");
             RA = static_cast<uint32_t>(RB) / b;
             NEXT();
         }
         OP_CASE(udiv_i64) {
             const uint64_t b = RC;
-            if (BRASS_UNLIKELY(b == 0)) throw InterpreterException("Division by zero");
+            if (BRASS_UNLIKELY(b == 0)) throw_interp_msg("Division by zero");
             RA = RB / b;
             NEXT();
         }
         OP_CASE(smod_i32) {
             const int32_t b = static_cast<int32_t>(RC);
-            if (BRASS_UNLIKELY(b == 0)) throw InterpreterException("Modulo by zero");
+            if (BRASS_UNLIKELY(b == 0)) throw_interp_msg("Modulo by zero");
             const int32_t a = static_cast<int32_t>(RB);
             RA = (BRASS_UNLIKELY(a == std::numeric_limits<int32_t>::min() && b == -1)) ? 0 : static_cast<uint32_t>(a % b);
             NEXT();
         }
         OP_CASE(smod_i64) {
             const int64_t b = static_cast<int64_t>(RC);
-            if (BRASS_UNLIKELY(b == 0)) throw InterpreterException("Modulo by zero");
+            if (BRASS_UNLIKELY(b == 0)) throw_interp_msg("Modulo by zero");
             const int64_t a = static_cast<int64_t>(RB);
             RA = (BRASS_UNLIKELY(a == std::numeric_limits<int64_t>::min() && b == -1)) ? 0 : static_cast<uint64_t>(a % b);
             NEXT();
         }
         OP_CASE(umod_i32) {
             const uint32_t b = static_cast<uint32_t>(RC);
-            if (BRASS_UNLIKELY(b == 0)) throw InterpreterException("Modulo by zero");
+            if (BRASS_UNLIKELY(b == 0)) throw_interp_msg("Modulo by zero");
             RA = static_cast<uint32_t>(RB) % b;
             NEXT();
         }
         OP_CASE(umod_i64) {
             const uint64_t b = RC;
-            if (BRASS_UNLIKELY(b == 0)) throw InterpreterException("Modulo by zero");
+            if (BRASS_UNLIKELY(b == 0)) throw_interp_msg("Modulo by zero");
             RA = RB % b;
             NEXT();
         }
@@ -416,7 +470,7 @@ loop_start:
         OP_CASE(store64) {
             const uint64_t v_ = RA;
             const uintptr_t at_ = static_cast<uintptr_t>(RB + static_cast<int64_t>(decode_imm24(inst)));
-            std::memcpy(reinterpret_cast<void*>(at_), &v_, sizeof v_);
+            store_unaligned<uint64_t>(at_, v_);
             heap_->write_barrier_interior(at_, v_);
             NEXT();
         }
@@ -430,7 +484,7 @@ loop_start:
         OP_CASE(store64_indexed) {
             const uint64_t v_ = RA;
             const uintptr_t at_ = static_cast<uintptr_t>(RB + RC * decode_d(inst));
-            std::memcpy(reinterpret_cast<void*>(at_), &v_, sizeof v_);
+            store_unaligned<uint64_t>(at_, v_);
             heap_->write_barrier_interior(at_, v_);
             NEXT();
         }
@@ -540,25 +594,7 @@ loop_start:
                 NEXT();
             }
             const GuardInfo& g = fn.guards[decode_uimm32(inst)];
-            last_deopt_.deoptimized = true;
-            last_deopt_.exit_stub = g.exit_stub;
-            last_deopt_.resume_id = g.resume_id;
-            last_deopt_.state_map.clear();
-            last_deopt_.state_map.reserve(g.state_regs.size());
-            // Own scope: the resume path below leaves by computed goto,
-            // which would skip df's destructor.
-            {
-                runtime::DeoptFrame df;
-                df.resume_id = g.resume_id;
-                df.exit_symbol = g.exit_stub;
-                df.reason = runtime::DeoptReason::Generic;
-                for (BcReg sreg : g.state_regs) {
-                    RuntimeValue rv = fast_reg_value(frame, sreg);
-                    last_deopt_.state_map.push_back(rv);
-                    df.push_value(registers[sreg], runtime::DeoptValue::from_runtime_value(rv).kind);
-                }
-                runtime::set_thread_deopt_frame(&df);
-            }
+            record_thread_deopt_frame(g, frame, last_deopt_);
             if (deopt_handler_) {
                 return deopt_handler_(*this, last_deopt_);
             }
@@ -574,7 +610,7 @@ loop_start:
                 }
                 JUMP_BY(static_cast<int32_t>(rp.target_pc) - static_cast<int32_t>(pc - code_base));
             }
-            throw DeoptException(last_deopt_);
+            throw_deopt(last_deopt_);
         }
 
         OP_CASE(resume_point) { NEXT(); }
@@ -590,8 +626,7 @@ loop_start:
             NEXT();
         }
         OP_CASE(read_sp) {
-            char marker = 0;
-            RA = reinterpret_cast<uint64_t>(&marker);
+            RA = reinterpret_cast<uint64_t>(&osr_res_);
             NEXT();
         }
 
@@ -612,14 +647,12 @@ loop_start:
 
         OP_CASE(coro_create) {
             const CallSiteInfo& cs = fn.call_sites[decode_uimm32(inst)];
-            // Own scope: DISPATCH() leaves by computed goto, which would skip
-            // the vector's destructor and leak it.
-            {
+            RA = [this, &frame, &cs]() BRASS_NOINLINE -> uintptr_t {
                 std::vector<RuntimeValue> args;
                 args.reserve(cs.arg_regs.size());
                 for (BcReg ar : cs.arg_regs) args.push_back(fast_reg_value(frame, ar));
-                RA = coro_create(cs.callee, args);
-            }
+                return coro_create(cs.callee, args);
+            }();
             NEXT();
         }
         OP_CASE(coro_suspend) {
@@ -659,8 +692,7 @@ loop_start:
 #else
         default:
 #endif
-            throw InterpreterException("Invalid opcode " + std::to_string(static_cast<int>(decode_op(inst))) +
-                                       " in bytecode function " + fn.name);
+            throw_invalid_opcode(decode_op(inst), fn.name);
     }
     // Unreachable: every handler dispatches onward, returns, or throws.
 
