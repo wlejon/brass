@@ -250,8 +250,28 @@ enum class BytecodeOp : uint8_t {
     br_sle_i64,
     br_ult_i64,
     br_ule_i64,
+    br_eq_f32,
+    br_ne_f32,
+    br_lt_f32,
+    br_le_f32,
+    br_not_lt_f32,
+    br_not_le_f32,
+    br_eq_f64,
+    br_ne_f64,
+    br_lt_f64,
+    br_le_f64,
+    br_not_lt_f64,
+    br_not_le_f64,
     add_imm_i32, // ABI24 a <- b + imm24 (32-bit wrap)
     add_imm_i64, // ABI24 a <- b + imm24
+    load8_indexed,   // ABCD  a <- zext8(*(b + c * d8))
+    load16_indexed,  // ABCD  a <- zext16(*(b + c * d8))
+    load32_indexed,  // ABCD  a <- zext32(*(b + c * d8))
+    load64_indexed,  // ABCD  a <- *(b + c * d8)
+    store8_indexed,  // ABCD  *(b + c * d8) <- trunc8(a)
+    store16_indexed, // ABCD  *(b + c * d8) <- trunc16(a)
+    store32_indexed, // ABCD  *(b + c * d8) <- trunc32(a)
+    store64_indexed, // ABCD  *(b + c * d8) <- a
 
     op_count_
 };

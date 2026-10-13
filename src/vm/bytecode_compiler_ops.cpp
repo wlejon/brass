@@ -25,6 +25,20 @@ BytecodeOp store_op(Type t) {
     return BytecodeOp::store64;
 }
 
+BytecodeOp load_indexed_op(Type t) {
+    if (t == Type::i8()) return BytecodeOp::load8_indexed;
+    if (t == Type::i16()) return BytecodeOp::load16_indexed;
+    if (t == Type::i32() || t == Type::f32()) return BytecodeOp::load32_indexed;
+    return BytecodeOp::load64_indexed;
+}
+
+BytecodeOp store_indexed_op(Type t) {
+    if (t == Type::i8()) return BytecodeOp::store8_indexed;
+    if (t == Type::i16()) return BytecodeOp::store16_indexed;
+    if (t == Type::i32() || t == Type::f32()) return BytecodeOp::store32_indexed;
+    return BytecodeOp::store64_indexed;
+}
+
 } // namespace
 
 void FunctionCompilerContext::lower_instruction(const Instruction& inst) {
@@ -347,15 +361,15 @@ void FunctionCompilerContext::lower_memory(const Instruction& inst) {
         out_base = tmp;
         out_off = 0;
     };
-    // scratch_reg <- base + sext(idx) * scale, for the indexed forms.
-    auto indexed_base = [&](const Value* base_v, const Value* idx_v, uint32_t scale) {
+    // Returns the index register (sign-extended into scratch_reg2 when narrow).
+    auto indexed_reg = [&](const Value* idx_v, uint32_t scale) -> BcReg {
+        if (scale > 255) fail("index scale out of range");
         BcReg idx = get_reg(idx_v);
         if (is_narrow_int(idx_v->type())) {
             emit(BytecodeOp::sext64, scratch_reg2, idx);
             idx = scratch_reg2;
         }
-        if (scale > 255) fail("index scale out of range");
-        emit(BytecodeOp::index_addr, scratch_reg, get_reg(base_v), idx, scale);
+        return idx;
     };
 
     switch (inst.opcode()) {
@@ -399,7 +413,12 @@ void FunctionCompilerContext::lower_memory(const Instruction& inst) {
         }
         case Opcode::load_indexed: {
             BcReg dst = get_result_reg(inst);
-            indexed_base(inst.operand(0), inst.operand(1), inst.scale());
+            BcReg idx = indexed_reg(inst.operand(1), inst.scale());
+            if (inst.offset() == 0 && !inst.type().is_vector()) {
+                emit(load_indexed_op(inst.type()), dst, get_reg(inst.operand(0)), idx, inst.scale());
+                break;
+            }
+            emit(BytecodeOp::index_addr, scratch_reg, get_reg(inst.operand(0)), idx, inst.scale());
             BcReg base = 0;
             int32_t off = 0;
             address(scratch_reg, inst.offset(), base, off, scratch_reg);
@@ -408,11 +427,16 @@ void FunctionCompilerContext::lower_memory(const Instruction& inst) {
         }
         case Opcode::store_indexed: {
             BcReg val = get_reg(inst.operand(2));
-            indexed_base(inst.operand(0), inst.operand(1), inst.scale());
+            Type mt = inst.memory_type().is_void() ? inst.operand(2)->type() : inst.memory_type();
+            BcReg idx = indexed_reg(inst.operand(1), inst.scale());
+            if (inst.offset() == 0 && !mt.is_vector()) {
+                emit(store_indexed_op(mt), val, get_reg(inst.operand(0)), idx, inst.scale());
+                break;
+            }
+            emit(BytecodeOp::index_addr, scratch_reg, get_reg(inst.operand(0)), idx, inst.scale());
             BcReg base = 0;
             int32_t off = 0;
             address(scratch_reg, inst.offset(), base, off, scratch_reg);
-            Type mt = inst.memory_type().is_void() ? inst.operand(2)->type() : inst.memory_type();
             emit_abi(mt.is_vector() ? BytecodeOp::vstore : store_op(mt), val, base, off);
             break;
         }

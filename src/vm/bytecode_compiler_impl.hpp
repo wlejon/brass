@@ -51,6 +51,8 @@ public:
 
     BcReg scratch_reg = 0;
     BcReg scratch_reg2 = 0;
+    std::vector<uint32_t> move_use_count;
+    std::vector<int32_t> move_writer_of;
     // The block laid out after the one being lowered (fall-through target).
     const BasicBlock* next_block = nullptr;
 

@@ -129,6 +129,10 @@ size_t print_operands(std::ostream& os, const BytecodeFunction& fn, size_t pc) {
         case BytecodeOp::br_sle_i32: case BytecodeOp::br_ult_i32: case BytecodeOp::br_ule_i32:
         case BytecodeOp::br_eq_i64: case BytecodeOp::br_ne_i64: case BytecodeOp::br_slt_i64:
         case BytecodeOp::br_sle_i64: case BytecodeOp::br_ult_i64: case BytecodeOp::br_ule_i64:
+        case BytecodeOp::br_eq_f32: case BytecodeOp::br_ne_f32: case BytecodeOp::br_lt_f32:
+        case BytecodeOp::br_le_f32: case BytecodeOp::br_not_lt_f32: case BytecodeOp::br_not_le_f32:
+        case BytecodeOp::br_eq_f64: case BytecodeOp::br_ne_f64: case BytecodeOp::br_lt_f64:
+        case BytecodeOp::br_le_f64: case BytecodeOp::br_not_lt_f64: case BytecodeOp::br_not_le_f64:
             os << " " << reg_name(a) << ", " << reg_name(b) << ", ";
             print_target(os, pc, decode_imm24(w));
             break;
@@ -142,6 +146,14 @@ size_t print_operands(std::ostream& os, const BytecodeFunction& fn, size_t pc) {
         case BytecodeOp::store8: case BytecodeOp::store16: case BytecodeOp::store32: case BytecodeOp::store64:
         case BytecodeOp::vstore:
             os << " [" << reg_name(b) << " + " << decode_imm24(w) << "], " << reg_name(a);
+            break;
+        case BytecodeOp::load8_indexed: case BytecodeOp::load16_indexed:
+        case BytecodeOp::load32_indexed: case BytecodeOp::load64_indexed:
+            os << " " << reg_name(a) << ", [" << reg_name(b) << " + " << reg_name(c) << " * " << decode_d(w) << "]";
+            break;
+        case BytecodeOp::store8_indexed: case BytecodeOp::store16_indexed:
+        case BytecodeOp::store32_indexed: case BytecodeOp::store64_indexed:
+            os << " [" << reg_name(b) << " + " << reg_name(c) << " * " << decode_d(w) << "], " << reg_name(a);
             break;
         case BytecodeOp::alloca_:
             os << " " << reg_name(a) << ", size=" << next << ", align=" << decode_d(w);

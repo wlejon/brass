@@ -171,10 +171,26 @@ void FastInterpreter::collect_all_roots(std::vector<uintptr_t*>& roots) {
 }
 
 void FastInterpreter::collect_typed_roots(std::vector<uintptr_t*>& gcrefs, std::vector<uintptr_t*>& tagged) {
-    for_each_register([&](uint64_t* slot, RegisterRootKind kind) {
-        if (kind == RegisterRootKind::GcRef) gcrefs.push_back(reinterpret_cast<uintptr_t*>(slot));
-        else if (kind == RegisterRootKind::Tagged) tagged.push_back(reinterpret_cast<uintptr_t*>(slot));
-    });
+    auto add_slot = [&](uint64_t* slot, const Type& t) {
+        if (t.is_gcref()) gcrefs.push_back(reinterpret_cast<uintptr_t*>(slot));
+        else if (t.is_tagged()) tagged.push_back(reinterpret_cast<uintptr_t*>(slot));
+    };
+    for (FastFrame* f = current_frame_; f != nullptr; f = f->caller) {
+        if (!f->bfn || (f->info && !f->info->has_gc_regs)) continue;
+        const auto& rtypes = f->bfn->register_types;
+        const uint32_t lim = std::min<uint32_t>(f->num_registers, static_cast<uint32_t>(rtypes.size()));
+        for (uint32_t i = 0; i < lim; ++i) {
+            if (f->registers[i] != 0) add_slot(&f->registers[i], rtypes[i]);
+        }
+    }
+    for (auto& [handle, coro] : active_coros_) {
+        if (!coro || coro->is_done || !coro->bfn) continue;
+        const auto& rtypes = coro->bfn->register_types;
+        const size_t lim = std::min(coro->registers.size(), rtypes.size());
+        for (size_t i = 0; i < lim; ++i) {
+            if (coro->registers[i] != 0) add_slot(&coro->registers[i], rtypes[i]);
+        }
+    }
     for (const auto& [words, count] : tagged_allocas_) {
         for (uint32_t i = 0; i < count; ++i) {
             if (words[i] != 0) tagged.push_back(reinterpret_cast<uintptr_t*>(&words[i]));

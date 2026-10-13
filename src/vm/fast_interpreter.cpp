@@ -153,7 +153,13 @@ RuntimeValue FastInterpreter::execute_frame(FastFrame& frame) {
         TENTRY(br_eq_i32); TENTRY(br_ne_i32); TENTRY(br_slt_i32); TENTRY(br_sle_i32);
         TENTRY(br_ult_i32); TENTRY(br_ule_i32); TENTRY(br_eq_i64); TENTRY(br_ne_i64);
         TENTRY(br_slt_i64); TENTRY(br_sle_i64); TENTRY(br_ult_i64); TENTRY(br_ule_i64);
+        TENTRY(br_eq_f32); TENTRY(br_ne_f32); TENTRY(br_lt_f32); TENTRY(br_le_f32);
+        TENTRY(br_not_lt_f32); TENTRY(br_not_le_f32);
+        TENTRY(br_eq_f64); TENTRY(br_ne_f64); TENTRY(br_lt_f64); TENTRY(br_le_f64);
+        TENTRY(br_not_lt_f64); TENTRY(br_not_le_f64);
         TENTRY(add_imm_i32); TENTRY(add_imm_i64);
+        TENTRY(load8_indexed); TENTRY(load16_indexed); TENTRY(load32_indexed); TENTRY(load64_indexed);
+        TENTRY(store8_indexed); TENTRY(store16_indexed); TENTRY(store32_indexed); TENTRY(store64_indexed);
 #undef TENTRY
         table_inited.store(true, std::memory_order_release);
         }
@@ -165,10 +171,9 @@ RuntimeValue FastInterpreter::execute_frame(FastFrame& frame) {
 #else
 #define BRASS_DIRECT_THREADED 0
 #define OP_CASE(name) case BytecodeOp::name:
-#define DISPATCH() goto loop_start
+#define DISPATCH() do { inst = *pc; goto loop_start; } while (0)
 
 loop_start:
-    inst = *pc;
     switch (decode_op(inst))
 #endif
     {
@@ -182,8 +187,14 @@ loop_start:
 #define CMP_F32(name, op) OP_CASE(name) { RA = (get_f32(RB) op get_f32(RC)) ? 1 : 0; NEXT(); }
 #define CMP_F64(name, op) OP_CASE(name) { RA = (get_f64(RB) op get_f64(RC)) ? 1 : 0; NEXT(); }
 #define BRANCH(name, T, op) OP_CASE(name) { if (static_cast<T>(RA) op static_cast<T>(RB)) JUMP_BY(decode_imm24(inst)); NEXT(); }
+#define BRANCH_F32(name, op) OP_CASE(name) { if (get_f32(RA) op get_f32(RB)) JUMP_BY(decode_imm24(inst)); NEXT(); }
+#define BRANCH_NOT_F32(name, op) OP_CASE(name) { if (!(get_f32(RA) op get_f32(RB))) JUMP_BY(decode_imm24(inst)); NEXT(); }
+#define BRANCH_F64(name, op) OP_CASE(name) { if (get_f64(RA) op get_f64(RB)) JUMP_BY(decode_imm24(inst)); NEXT(); }
+#define BRANCH_NOT_F64(name, op) OP_CASE(name) { if (!(get_f64(RA) op get_f64(RB))) JUMP_BY(decode_imm24(inst)); NEXT(); }
 #define LOAD(name, T) OP_CASE(name) { T v_; std::memcpy(&v_, reinterpret_cast<const void*>(RB + static_cast<int64_t>(decode_imm24(inst))), sizeof(T)); RA = static_cast<uint64_t>(v_); NEXT(); }
 #define STORE(name, T) OP_CASE(name) { const T v_ = static_cast<T>(RA); std::memcpy(reinterpret_cast<void*>(RB + static_cast<int64_t>(decode_imm24(inst))), &v_, sizeof(T)); NEXT(); }
+#define LOAD_INDEXED(name, T) OP_CASE(name) { T v_; std::memcpy(&v_, reinterpret_cast<const void*>(RB + RC * decode_d(inst)), sizeof(T)); RA = static_cast<uint64_t>(v_); NEXT(); }
+#define STORE_INDEXED(name, T) OP_CASE(name) { const T v_ = static_cast<T>(RA); std::memcpy(reinterpret_cast<void*>(RB + RC * decode_d(inst)), &v_, sizeof(T)); NEXT(); }
 
         OP_CASE(nop) { NEXT(); }
         OP_CASE(unreachable) { throw InterpreterException("Execution reached unreachable instruction"); }
@@ -409,6 +420,20 @@ loop_start:
             heap_->write_barrier_interior(at_, v_);
             NEXT();
         }
+        LOAD_INDEXED(load8_indexed, uint8_t)
+        LOAD_INDEXED(load16_indexed, uint16_t)
+        LOAD_INDEXED(load32_indexed, uint32_t)
+        LOAD_INDEXED(load64_indexed, uint64_t)
+        STORE_INDEXED(store8_indexed, uint8_t)
+        STORE_INDEXED(store16_indexed, uint16_t)
+        STORE_INDEXED(store32_indexed, uint32_t)
+        OP_CASE(store64_indexed) {
+            const uint64_t v_ = RA;
+            const uintptr_t at_ = static_cast<uintptr_t>(RB + RC * decode_d(inst));
+            std::memcpy(reinterpret_cast<void*>(at_), &v_, sizeof v_);
+            heap_->write_barrier_interior(at_, v_);
+            NEXT();
+        }
 
         OP_CASE(alloca_) {
             // The size is the next code word; the alignment is d.
@@ -432,6 +457,12 @@ loop_start:
         BRANCH(br_eq_i64, uint64_t, ==) BRANCH(br_ne_i64, uint64_t, !=)
         BRANCH(br_slt_i64, int64_t, <) BRANCH(br_sle_i64, int64_t, <=)
         BRANCH(br_ult_i64, uint64_t, <) BRANCH(br_ule_i64, uint64_t, <=)
+        BRANCH_F32(br_eq_f32, ==) BRANCH_F32(br_ne_f32, !=)
+        BRANCH_F32(br_lt_f32, <) BRANCH_F32(br_le_f32, <=)
+        BRANCH_NOT_F32(br_not_lt_f32, <) BRANCH_NOT_F32(br_not_le_f32, <=)
+        BRANCH_F64(br_eq_f64, ==) BRANCH_F64(br_ne_f64, !=)
+        BRANCH_F64(br_lt_f64, <) BRANCH_F64(br_le_f64, <=)
+        BRANCH_NOT_F64(br_not_lt_f64, <) BRANCH_NOT_F64(br_not_le_f64, <=)
 
         OP_CASE(ret) {
             const uint32_t r = decode_a(inst);
@@ -643,8 +674,14 @@ loop_start:
 #undef CMP_F32
 #undef CMP_F64
 #undef BRANCH
+#undef BRANCH_F32
+#undef BRANCH_NOT_F32
+#undef BRANCH_F64
+#undef BRANCH_NOT_F64
 #undef LOAD
 #undef STORE
+#undef LOAD_INDEXED
+#undef STORE_INDEXED
 #undef OP_CASE
 #undef DISPATCH
 #undef BACKEDGE

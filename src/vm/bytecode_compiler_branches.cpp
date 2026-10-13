@@ -14,6 +14,16 @@ bool is_int_compare_type(Type t) {
     return t == Type::i32() || t == Type::i64() || t.is_pointer() || t.is_gcref();
 }
 
+bool is_float_compare_op(Opcode op) {
+    switch (op) {
+        case Opcode::eq: case Opcode::ne:
+        case Opcode::slt: case Opcode::sle: case Opcode::sgt: case Opcode::sge:
+            return true;
+        default:
+            return false;
+    }
+}
+
 struct FusedBranch {
     BytecodeOp op;
     BcReg lhs;
@@ -25,6 +35,28 @@ FusedBranch fused_branch(const FunctionCompilerContext& ctx, const Instruction& 
     BcReg a = ctx.get_reg(cmp.operand(0));
     BcReg b = ctx.get_reg(cmp.operand(1));
     Type t = cmp.operand(0)->type();
+    if (t.is_float()) {
+        const bool f32 = t == Type::f32();
+        auto fpick = [f32](BytecodeOp op32, BytecodeOp op64) { return f32 ? op32 : op64; };
+        const BytecodeOp eq = fpick(BytecodeOp::br_eq_f32, BytecodeOp::br_eq_f64);
+        const BytecodeOp ne = fpick(BytecodeOp::br_ne_f32, BytecodeOp::br_ne_f64);
+        const BytecodeOp lt = fpick(BytecodeOp::br_lt_f32, BytecodeOp::br_lt_f64);
+        const BytecodeOp le = fpick(BytecodeOp::br_le_f32, BytecodeOp::br_le_f64);
+        const BytecodeOp not_lt = fpick(BytecodeOp::br_not_lt_f32, BytecodeOp::br_not_lt_f64);
+        const BytecodeOp not_le = fpick(BytecodeOp::br_not_le_f32, BytecodeOp::br_not_le_f64);
+        // For IEEE-754 floats, !(a < b) is NOT (b <= a) when either operand is NaN:
+        // inverted ordered comparisons use the explicit unordered-or-negated opcodes.
+        switch (cmp.opcode()) {
+            case Opcode::eq: return {invert ? ne : eq, a, b};
+            case Opcode::ne: return {invert ? eq : ne, a, b};
+            case Opcode::slt: return {invert ? not_lt : lt, a, b};
+            case Opcode::sle: return {invert ? not_le : le, a, b};
+            case Opcode::sgt: return {invert ? not_lt : lt, b, a};
+            case Opcode::sge: return {invert ? not_le : le, b, a};
+            default: break;
+        }
+        ctx.fail("cannot fuse float " + std::string(opcode_name(cmp.opcode())) + " into a branch");
+    }
     const bool w32 = t == Type::i32() || t == Type::i16() || t == Type::i8();
     auto pick = [w32](BytecodeOp op32, BytecodeOp op64) { return w32 ? op32 : op64; };
     const BytecodeOp eq = pick(BytecodeOp::br_eq_i32, BytecodeOp::br_eq_i64);
@@ -53,16 +85,17 @@ FusedBranch fused_branch(const FunctionCompilerContext& ctx, const Instruction& 
 } // namespace
 
 bool FunctionCompilerContext::can_fuse_compare_branch(const Instruction& cmp) const {
+    if (cmp.operand_count() != 2 || !cmp.operand(0) || !cmp.operand(1)) return false;
+    const Type t = cmp.operand(0)->type();
+    if (t.is_float()) return is_float_compare_op(cmp.opcode());
     switch (cmp.opcode()) {
         case Opcode::eq: case Opcode::ne:
         case Opcode::slt: case Opcode::sle: case Opcode::sgt: case Opcode::sge:
         case Opcode::ult: case Opcode::ule: case Opcode::ugt: case Opcode::uge:
-            break;
+            return is_int_compare_type(t);
         default:
             return false;
     }
-    return cmp.operand_count() == 2 && cmp.operand(0) && cmp.operand(1) &&
-           is_int_compare_type(cmp.operand(0)->type());
 }
 
 void FunctionCompilerContext::emit_jump_to(const BasicBlock* target) {
@@ -81,6 +114,7 @@ void FunctionCompilerContext::emit_parallel_moves(const BranchTarget& target) {
     struct Move {
         BcReg src;
         BcReg dst;
+        bool done;
     };
     std::vector<Move> moves;
     moves.reserve(target.args.size());
@@ -89,36 +123,53 @@ void FunctionCompilerContext::emit_parallel_moves(const BranchTarget& target) {
         if (!param_val) continue;
         BcReg src = get_reg(target.args[i]);
         BcReg dst = get_reg(param_val);
-        if (src != dst) moves.push_back({src, dst});
+        if (src == dst || move_writer_of[dst] >= 0) continue;
+        move_writer_of[dst] = static_cast<int32_t>(moves.size());
+        ++move_use_count[src];
+        moves.push_back({src, dst, false});
     }
+    if (moves.empty()) return;
 
     auto move_op = [&](BcReg dst) {
         return reg_type(dst).is_vector() ? BytecodeOp::vmov : BytecodeOp::mov;
     };
 
-    while (!moves.empty()) {
-        // A move whose destination no other pending move still reads.
-        int free_idx = -1;
-        for (size_t i = 0; i < moves.size() && free_idx < 0; ++i) {
-            bool dst_is_src = false;
-            for (size_t j = 0; j < moves.size(); ++j) {
-                if (i != j && moves[i].dst == moves[j].src) {
-                    dst_is_src = true;
-                    break;
+    std::vector<uint32_t> ready;
+    ready.reserve(moves.size());
+    for (uint32_t i = 0; i < moves.size(); ++i) {
+        if (move_use_count[moves[i].dst] == 0) ready.push_back(i);
+    }
+
+    size_t scan = 0;
+    size_t remaining = moves.size();
+    while (remaining > 0) {
+        while (!ready.empty()) {
+            uint32_t idx = ready.back();
+            ready.pop_back();
+            Move& m = moves[idx];
+            if (m.done) continue;
+            emit(move_op(m.dst), m.dst, m.src);
+            m.done = true;
+            move_writer_of[m.dst] = -1;
+            --remaining;
+            if (m.src != scratch_reg && --move_use_count[m.src] == 0) {
+                int32_t w = move_writer_of[m.src];
+                if (w >= 0 && !moves[static_cast<size_t>(w)].done) {
+                    ready.push_back(static_cast<uint32_t>(w));
                 }
             }
-            if (!dst_is_src) free_idx = static_cast<int>(i);
         }
-
-        if (free_idx >= 0) {
-            emit(move_op(moves[free_idx].dst), moves[free_idx].dst, moves[free_idx].src);
-            moves.erase(moves.begin() + free_idx);
-        } else {
-            // Only cycles are left: park one source in the scratch register.
-            Move m = moves[0];
-            emit(move_op(m.dst), scratch_reg, m.src);
-            for (auto& pending : moves) {
-                if (pending.src == m.src) pending.src = scratch_reg;
+        if (remaining == 0) break;
+        // Only disjoint cycles remain: each remaining dst has use_count == 1.
+        while (moves[scan].done) ++scan;
+        Move& m = moves[scan];
+        BcReg old_src = m.src;
+        emit(move_op(m.dst), scratch_reg, old_src);
+        m.src = scratch_reg;
+        if (--move_use_count[old_src] == 0) {
+            int32_t w = move_writer_of[old_src];
+            if (w >= 0 && !moves[static_cast<size_t>(w)].done) {
+                ready.push_back(static_cast<uint32_t>(w));
             }
         }
     }

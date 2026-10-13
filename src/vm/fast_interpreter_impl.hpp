@@ -83,6 +83,7 @@ struct FastFnInfo {
     const Function* mir_fn = nullptr;
     uint32_t num_regs = 1;
     bool has_vector_params = false;
+    bool has_gc_regs = false;
     runtime::TieringFeedback* feedback = nullptr;
     uint64_t feedback_gen = 0;
     // The program the feedback was resolved in (null: the default program).
@@ -141,6 +142,27 @@ public:
             }
         }
         return allocate_slow(size, align);
+    }
+
+    // Allocates `n` 8-byte registers where the first `initialized_prefix`
+    // registers will be overwritten immediately by the caller, zero-filling
+    // only the remaining `n - initialized_prefix` registers.
+    uint64_t* allocate_regs(size_t n, size_t initialized_prefix) {
+        const size_t size = n * sizeof(uint64_t);
+        if (BRASS_LIKELY(cur_ < chunks_.size())) {
+            Chunk& c = chunks_[cur_];
+            const uintptr_t base = reinterpret_cast<uintptr_t>(c.data.get());
+            const size_t start = ((base + off_ + alignof(uint64_t) - 1) & ~(static_cast<uintptr_t>(alignof(uint64_t)) - 1)) - base;
+            if (BRASS_LIKELY(start + size <= c.size)) {
+                off_ = start + size;
+                uint64_t* p = reinterpret_cast<uint64_t*>(c.data.get() + start);
+                if (n > initialized_prefix) {
+                    std::memset(p + initialized_prefix, 0, (n - initialized_prefix) * sizeof(uint64_t));
+                }
+                return p;
+            }
+        }
+        return static_cast<uint64_t*>(allocate_slow(size, alignof(uint64_t)));
     }
 
 private:

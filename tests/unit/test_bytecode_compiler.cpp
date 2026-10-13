@@ -609,3 +609,243 @@ TEST_CASE("Bytecode Compiler - Switch edges carry block arguments") {
     check_same_i64(mod, *fn, {RuntimeValue::from_i64(2)}, 2010);
     check_same_i64(mod, *fn, {RuntimeValue::from_i64(3)}, -80);
 }
+
+TEST_CASE("Bytecode Compiler - Fused Float Compare-Branches (f64 and f32, including NaN)") {
+    Module mod("float_br_mod");
+    Builder b(mod);
+
+    const Opcode ops[] = {Opcode::eq, Opcode::ne, Opcode::slt, Opcode::sle, Opcode::sgt, Opcode::sge};
+    const char* names[] = {"eq", "ne", "slt", "sle", "sgt", "sge"};
+
+    auto build_cmp = [&](Builder& bld, Opcode op, Value* lhs, Value* rhs) -> Value* {
+        switch (op) {
+            case Opcode::eq: return bld.build_eq(lhs, rhs);
+            case Opcode::ne: return bld.build_ne(lhs, rhs);
+            case Opcode::slt: return bld.build_slt(lhs, rhs);
+            case Opcode::sle: return bld.build_sle(lhs, rhs);
+            case Opcode::sgt: return bld.build_sgt(lhs, rhs);
+            case Opcode::sge: return bld.build_sge(lhs, rhs);
+            default: return nullptr;
+        }
+    };
+
+    // Build both normal (false_bb is fallthrough) and inverted (true_bb is fallthrough) layouts
+    // for every float comparison opcode on f64 and f32.
+    std::vector<Function*> f64_fns;
+    std::vector<Function*> f32_fns;
+    for (size_t i = 0; i < 6; ++i) {
+        for (int layout_invert = 0; layout_invert < 2; ++layout_invert) {
+            // f64
+            {
+                std::string fname = std::string("f64_") + names[i] + (layout_invert ? "_inv" : "_dir");
+                Function* fn = mod.create_function(fname, Type::i64(), {Type::f64(), Type::f64()});
+                b.set_function(fn);
+                BasicBlock* entry = b.append_block("entry");
+                BasicBlock* first_bb = b.append_block(layout_invert ? "true_bb" : "false_bb");
+                BasicBlock* second_bb = b.append_block(layout_invert ? "false_bb" : "true_bb");
+                BasicBlock* true_bb = layout_invert ? first_bb : second_bb;
+                BasicBlock* false_bb = layout_invert ? second_bb : first_bb;
+
+                b.position_at_end(entry);
+                Value* x = b.add_block_param(entry, Type::f64());
+                Value* y = b.add_block_param(entry, Type::f64());
+                Value* cmp = build_cmp(b, ops[i], x, y);
+                b.build_br_if(cmp, true_bb, {}, false_bb, {});
+
+                b.position_at_end(true_bb);
+                b.build_ret(b.build_iconst_i64(111));
+
+                b.position_at_end(false_bb);
+                b.build_ret(b.build_iconst_i64(222));
+
+                f64_fns.push_back(fn);
+            }
+            // f32
+            {
+                std::string fname = std::string("f32_") + names[i] + (layout_invert ? "_inv" : "_dir");
+                Function* fn = mod.create_function(fname, Type::i64(), {Type::f32(), Type::f32()});
+                b.set_function(fn);
+                BasicBlock* entry = b.append_block("entry");
+                BasicBlock* first_bb = b.append_block(layout_invert ? "true_bb" : "false_bb");
+                BasicBlock* second_bb = b.append_block(layout_invert ? "false_bb" : "true_bb");
+                BasicBlock* true_bb = layout_invert ? first_bb : second_bb;
+                BasicBlock* false_bb = layout_invert ? second_bb : first_bb;
+
+                b.position_at_end(entry);
+                Value* x = b.add_block_param(entry, Type::f32());
+                Value* y = b.add_block_param(entry, Type::f32());
+                Value* cmp = build_cmp(b, ops[i], x, y);
+                b.build_br_if(cmp, true_bb, {}, false_bb, {});
+
+                b.position_at_end(true_bb);
+                b.build_ret(b.build_iconst_i64(111));
+
+                b.position_at_end(false_bb);
+                b.build_ret(b.build_iconst_i64(222));
+
+                f32_fns.push_back(fn);
+            }
+        }
+    }
+
+    BytecodeCompiler compiler;
+    for (Function* fn : f64_fns) {
+        auto bfn = compiler.compile(*fn);
+        REQUIRE(bfn != nullptr);
+        CHECK_FALSE(has_op(*bfn, BytecodeOp::jump_if));
+        CHECK_FALSE(has_op(*bfn, BytecodeOp::jump_if_not));
+        bool found_fused = false;
+        for (BytecodeOp op : ops_of(*bfn)) {
+            if (is_bytecode_cond_branch(op)) found_fused = true;
+        }
+        CHECK(found_fused);
+    }
+    for (Function* fn : f32_fns) {
+        auto bfn = compiler.compile(*fn);
+        REQUIRE(bfn != nullptr);
+        CHECK_FALSE(has_op(*bfn, BytecodeOp::jump_if));
+        CHECK_FALSE(has_op(*bfn, BytecodeOp::jump_if_not));
+        bool found_fused = false;
+        for (BytecodeOp op : ops_of(*bfn)) {
+            if (is_bytecode_cond_branch(op)) found_fused = true;
+        }
+        CHECK(found_fused);
+    }
+
+    Interpreter oracle;
+    oracle.set_module(&mod);
+    FastInterpreter fast;
+    fast.set_module(&mod);
+
+    const double qnan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    const double d_vals[] = {qnan, -qnan, -inf, -2.5, -0.0, +0.0, 1.25, 2.5, inf};
+    for (Function* fn : f64_fns) {
+        for (double vx : d_vals) {
+            for (double vy : d_vals) {
+                std::vector<RuntimeValue> args = {RuntimeValue::from_f64(vx), RuntimeValue::from_f64(vy)};
+                CHECK_EQ(fast.run(*fn, args).as_i64(), oracle.run(*fn, args).as_i64());
+            }
+        }
+    }
+
+    const float fqnan = std::numeric_limits<float>::quiet_NaN();
+    const float finf = std::numeric_limits<float>::infinity();
+    const float f_vals[] = {fqnan, -fqnan, -finf, -2.5f, -0.0f, +0.0f, 1.25f, 2.5f, finf};
+    for (Function* fn : f32_fns) {
+        for (float vx : f_vals) {
+            for (float vy : f_vals) {
+                std::vector<RuntimeValue> args = {RuntimeValue::from_f32(vx), RuntimeValue::from_f32(vy)};
+                CHECK_EQ(fast.run(*fn, args).as_i64(), oracle.run(*fn, args).as_i64());
+            }
+        }
+    }
+}
+
+TEST_CASE("Bytecode Compiler - Fused Indexed Load and Store Superinstructions") {
+    Module mod("indexed_mem_mod");
+    Builder b(mod);
+
+    Function* fn = mod.create_function("indexed_rw", Type::i64(), {Type::i64()});
+    b.set_function(fn);
+    BasicBlock* bb = b.append_block("entry");
+    Value* idx = b.add_block_param(bb, Type::i64());
+
+    Value* buf64 = b.build_alloca(64, 8);
+    Value* buf32 = b.build_alloca(32, 4);
+    Value* buf16 = b.build_alloca(16, 2);
+    Value* buf8 = b.build_alloca(8, 1);
+
+    b.build_store_indexed(Type::i64(), buf64, idx, 8, 0, b.build_iconst_i64(0x1122334455667788LL));
+    b.build_store_indexed(Type::i32(), buf32, idx, 4, 0, b.build_iconst_i32(0x12345678));
+    b.build_store_indexed(Type::i16(), buf16, idx, 2, 0, b.build_iconst_i32(0xABCD));
+    b.build_store_indexed(Type::i8(), buf8, idx, 1, 0, b.build_trunc_i8(b.build_iconst_i32(0x7F)));
+
+    Value* v64 = b.build_load_indexed(Type::i64(), buf64, idx, 8, 0);
+    Value* v32 = b.build_zext_i64(b.build_load_indexed(Type::i32(), buf32, idx, 4, 0));
+    Value* v16 = b.build_zext_i64(b.build_load_indexed(Type::i16(), buf16, idx, 2, 0));
+    Value* v8 = b.build_zext_i64(b.build_load_indexed(Type::i8(), buf8, idx, 1, 0));
+
+    Value* sum = b.build_add(b.build_add(v64, v32), b.build_add(v16, v8));
+    b.build_ret(sum);
+
+    BytecodeCompiler compiler;
+    auto bfn = compiler.compile(*fn);
+    REQUIRE(bfn != nullptr);
+
+    CHECK(has_op(*bfn, BytecodeOp::store64_indexed));
+    CHECK(has_op(*bfn, BytecodeOp::store32_indexed));
+    CHECK(has_op(*bfn, BytecodeOp::store16_indexed));
+    CHECK(has_op(*bfn, BytecodeOp::store8_indexed));
+    CHECK(has_op(*bfn, BytecodeOp::load64_indexed));
+    CHECK(has_op(*bfn, BytecodeOp::load32_indexed));
+    CHECK(has_op(*bfn, BytecodeOp::load16_indexed));
+    CHECK(has_op(*bfn, BytecodeOp::load8_indexed));
+    CHECK_FALSE(has_op(*bfn, BytecodeOp::index_addr));
+
+    std::string dis = disassemble(*bfn);
+    CHECK(dis.find("load64_indexed") != std::string::npos);
+    CHECK(dis.find("store64_indexed") != std::string::npos);
+
+    const int64_t expected = 0x1122334455667788LL + 0x12345678LL + 0xABCDLL + 0x7FLL;
+    check_same_i64(mod, *fn, {RuntimeValue::from_i64(3)}, expected);
+}
+
+TEST_CASE("Bytecode Compiler - Parallel Moves with Multi-Cycles and Fan-Out") {
+    Module mod("parallel_moves_mod");
+    Builder b(mod);
+
+    // 7 block parameters: a 2-cycle (0<->1), a 3-cycle (2->3->4->2), and fan-out (5<-0, 6<-2).
+    Function* fn = mod.create_function("perm_loop", Type::i64(), {Type::i64()});
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    BasicBlock* loop = b.append_block("loop");
+    BasicBlock* exit = b.append_block("exit");
+
+    b.position_at_end(entry);
+    Value* steps = b.add_block_param(entry, Type::i64());
+    b.build_br(loop, {
+        steps,
+        b.build_iconst_i64(10),
+        b.build_iconst_i64(20),
+        b.build_iconst_i64(30),
+        b.build_iconst_i64(40),
+        b.build_iconst_i64(50),
+        b.build_iconst_i64(60),
+        b.build_iconst_i64(70)
+    });
+
+    b.position_at_end(loop);
+    Value* k = b.add_block_param(loop, Type::i64());
+    Value* p0 = b.add_block_param(loop, Type::i64());
+    Value* p1 = b.add_block_param(loop, Type::i64());
+    Value* p2 = b.add_block_param(loop, Type::i64());
+    Value* p3 = b.add_block_param(loop, Type::i64());
+    Value* p4 = b.add_block_param(loop, Type::i64());
+    Value* p5 = b.add_block_param(loop, Type::i64());
+    Value* p6 = b.add_block_param(loop, Type::i64());
+
+    Value* done = b.build_sle(k, b.build_iconst_i64(0));
+    Value* k_next = b.build_sub(k, b.build_iconst_i64(1));
+    b.build_br_if(done, exit, {}, loop, {k_next, p1, p0, p4, p2, p3, p0, p2});
+
+    b.position_at_end(exit);
+    Value* res = b.build_add(
+        b.build_add(b.build_mul(p0, b.build_iconst_i64(1)), b.build_mul(p1, b.build_iconst_i64(10))),
+        b.build_add(
+            b.build_add(b.build_mul(p2, b.build_iconst_i64(100)), b.build_mul(p3, b.build_iconst_i64(1000))),
+            b.build_add(b.build_mul(p4, b.build_iconst_i64(10000)),
+                        b.build_add(b.build_mul(p5, b.build_iconst_i64(100000)),
+                                    b.build_mul(p6, b.build_iconst_i64(1000000))))));
+    b.build_ret(res);
+
+    Interpreter oracle;
+    oracle.set_module(&mod);
+    FastInterpreter fast;
+    fast.set_module(&mod);
+    for (int64_t s = 0; s <= 6; ++s) {
+        std::vector<RuntimeValue> args = {RuntimeValue::from_i64(s)};
+        CHECK_EQ(fast.run(*fn, args).as_i64(), oracle.run(*fn, args).as_i64());
+    }
+}
+

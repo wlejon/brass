@@ -59,6 +59,8 @@ std::unique_ptr<BytecodeFunction> BytecodeCompiler::compile(const Function& fn) 
     bfn->register_types.push_back(Type::i64());
     bfn->register_types.push_back(Type::i64());
     bfn->num_registers = regs.num_registers + 2;
+    ctx.move_use_count.assign(bfn->num_registers, 0);
+    ctx.move_writer_of.assign(bfn->num_registers, -1);
     bfn->ssa_to_reg.assign(fn.current_next_value_id(), kNoReg);
     regs.reg.for_each([&](const Value* v, BcReg r) {
         if (v->id() >= bfn->ssa_to_reg.size()) bfn->ssa_to_reg.resize(v->id() + 1, kNoReg);

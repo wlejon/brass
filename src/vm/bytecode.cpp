@@ -223,15 +223,35 @@ std::string_view bytecode_op_name(BytecodeOp op) noexcept {
         case BytecodeOp::br_sle_i64: return "br_sle_i64";
         case BytecodeOp::br_ult_i64: return "br_ult_i64";
         case BytecodeOp::br_ule_i64: return "br_ule_i64";
+        case BytecodeOp::br_eq_f32: return "br_eq_f32";
+        case BytecodeOp::br_ne_f32: return "br_ne_f32";
+        case BytecodeOp::br_lt_f32: return "br_lt_f32";
+        case BytecodeOp::br_le_f32: return "br_le_f32";
+        case BytecodeOp::br_not_lt_f32: return "br_not_lt_f32";
+        case BytecodeOp::br_not_le_f32: return "br_not_le_f32";
+        case BytecodeOp::br_eq_f64: return "br_eq_f64";
+        case BytecodeOp::br_ne_f64: return "br_ne_f64";
+        case BytecodeOp::br_lt_f64: return "br_lt_f64";
+        case BytecodeOp::br_le_f64: return "br_le_f64";
+        case BytecodeOp::br_not_lt_f64: return "br_not_lt_f64";
+        case BytecodeOp::br_not_le_f64: return "br_not_le_f64";
         case BytecodeOp::add_imm_i32: return "add_imm_i32";
         case BytecodeOp::add_imm_i64: return "add_imm_i64";
+        case BytecodeOp::load8_indexed: return "load8_indexed";
+        case BytecodeOp::load16_indexed: return "load16_indexed";
+        case BytecodeOp::load32_indexed: return "load32_indexed";
+        case BytecodeOp::load64_indexed: return "load64_indexed";
+        case BytecodeOp::store8_indexed: return "store8_indexed";
+        case BytecodeOp::store16_indexed: return "store16_indexed";
+        case BytecodeOp::store32_indexed: return "store32_indexed";
+        case BytecodeOp::store64_indexed: return "store64_indexed";
         case BytecodeOp::op_count_: break;
     }
     return "unknown";
 }
 
 bool is_bytecode_cond_branch(BytecodeOp op) noexcept {
-    return op >= BytecodeOp::br_eq_i32 && op <= BytecodeOp::br_ule_i64;
+    return op >= BytecodeOp::br_eq_i32 && op <= BytecodeOp::br_not_le_f64;
 }
 
 bool is_bytecode_jump(BytecodeOp op) noexcept {

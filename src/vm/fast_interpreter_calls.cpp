@@ -237,8 +237,10 @@ FastFnInfo& FastInterpreter::fn_info(const BytecodeFunction& bfn, const Function
     info->bfn = &bfn;
     info->mir_fn = mir_fn ? mir_fn : (module_ ? module_->get_function(bfn.name) : nullptr);
     info->num_regs = std::max<uint32_t>(bfn.num_registers, 1);
-    for (uint32_t i = 0; i < bfn.num_params && i < bfn.register_types.size(); ++i) {
-        if (bfn.register_types[i].is_vector()) info->has_vector_params = true;
+    for (uint32_t i = 0; i < bfn.register_types.size(); ++i) {
+        const Type rt = bfn.register_types[i];
+        if (i < bfn.num_params && rt.is_vector()) info->has_vector_params = true;
+        if (rt.is_gc_root()) info->has_gc_regs = true;
     }
     info->calls.resize(bfn.call_sites.size());
     FastFnInfo& ref = *info;
@@ -411,9 +413,9 @@ RuntimeValue FastInterpreter::call_bytecode(FastCallTarget& t, FastFrame& caller
     }
 
     const uint32_t n = callee.num_regs;
-    const FastAllocaArena::Mark mark = alloca_arena_->mark();
-    uint64_t* regs = static_cast<uint64_t*>(alloca_arena_->allocate(static_cast<size_t>(n) * sizeof(uint64_t), alignof(uint64_t)));
     const size_t nargs = std::min<size_t>(cs.arg_regs.size(), n);
+    const FastAllocaArena::Mark mark = alloca_arena_->mark();
+    uint64_t* regs = alloca_arena_->allocate_regs(n, nargs);
     for (size_t i = 0; i < nargs; ++i) regs[i] = caller.registers[cs.arg_regs[i]];
 
     FastFrame frame;

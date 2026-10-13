@@ -511,3 +511,50 @@ TEST_CASE("Fast Interpreter - Vector SIMD Operations") {
     RuntimeValue r = interp.run(*fn);
     CHECK_EQ(r.as_i32(), 10);
 }
+
+TEST_CASE("Fast Interpreter - Fused Indexed Store Write Barrier Preserves Young Referent") {
+    Module mod("indexed_wb_mod");
+    Builder b(mod);
+
+    // Allocates an old-gen array (after a minor GC), then allocates a young object,
+    // stores it into the old array via store_indexed (store64_indexed) WITHOUT an
+    // explicit MIR write_barrier instruction, triggers a minor GC, and reads a payload
+    // field from the young object through load_indexed (load64_indexed).
+    Function* fn = mod.create_function("test_indexed_wb", Type::i64(), {Type::i64()});
+    b.set_function(fn);
+    BasicBlock* bb = b.append_block("entry");
+    Value* idx = b.add_block_param(bb, Type::i64());
+
+    // Allocate 32-byte container with 4 pointer slots (mask = 0xF)
+    Value* arr = b.build_call("brass_gc_alloc", Type::gcref(),
+                              {b.build_iconst_i64(32), b.build_iconst_i64(0xF), b.build_iconst_i32(1)});
+    // Promote `arr` to old generation
+    b.build_call("minor_gc_host", Type::void_type(), {});
+
+    // Allocate a young object (16 bytes, no pointers, mask = 0) and store 0xCAFEBABE1234ULL at offset 0
+    Value* young = b.build_call("brass_gc_alloc", Type::gcref(),
+                                {b.build_iconst_i64(16), b.build_iconst_i64(0), b.build_iconst_i32(2)});
+    b.build_store(Type::i64(), young, 0, b.build_iconst_i64(0xCAFEBABE1234LL));
+
+    // Store `young` into `arr` at `idx * 8` via store_indexed
+    b.build_store_indexed(Type::gcref(), arr, idx, 8, 0, young);
+
+    // Clear `young` register life by not referencing `young` past the minor GC;
+    // only the old-generation `arr` keeps it alive via store64_indexed's write barrier.
+    b.build_call("minor_gc_host", Type::void_type(), {});
+
+    Value* loaded_young = b.build_load_indexed(Type::gcref(), arr, idx, 8, 0);
+    Value* payload = b.build_load(Type::i64(), loaded_young, 0);
+    b.build_ret(payload);
+
+    FastInterpreter interp;
+    interp.set_module(&mod);
+    interp.register_external_function("minor_gc_host", [](FastInterpreter& self, const std::vector<RuntimeValue>&) {
+        self.heap().collect(gc::CollectionKind::Minor);
+        return RuntimeValue::from_void();
+    });
+
+    RuntimeValue res = interp.run(*fn, {RuntimeValue::from_i64(2)});
+    CHECK_EQ(res.as_i64(), 0xCAFEBABE1234LL);
+}
+
