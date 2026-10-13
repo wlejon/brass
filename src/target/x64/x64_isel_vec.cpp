@@ -205,12 +205,21 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
                                            std::string(opcode_name(inst.opcode())) + " " + brass::to_string(t));
             }
 
+            if (!t.element_type().is_float() &&
+                (inst.opcode() == Opcode::vadd || inst.opcode() == Opcode::vmul ||
+                 inst.opcode() == Opcode::vmin || inst.opcode() == Opcode::vmax) &&
+                v0 != v1 && mir_fn_ && inst.parent() &&
+                !is_value_dead_after(*mir_fn_, *inst.parent(), &inst, inst.operand(0)) &&
+                is_value_dead_after(*mir_fn_, *inst.parent(), &inst, inst.operand(1))) {
+                std::swap(v0, v1);
+            }
+
             emit_movaps(dst, v0);
 
             auto binop = std::make_unique<LirInst>(op);
             binop->add_def(LirOperand::vreg(dst, 16));
             binop->add_use(LirOperand::vreg(dst, 16));
-            binop->add_use(LirOperand::vreg(v1, 16));
+            binop->add_use(LirOperand::vreg(v1 == v0 ? dst : v1, 16));
             binop->mir_origin = &inst;
             lir_bb.append_inst(std::move(binop));
             break;
@@ -264,12 +273,18 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
             if (inst.opcode() == Opcode::vor) op = LirOpcode::Por;
             else if (inst.opcode() == Opcode::vxor) op = LirOpcode::Pxor;
 
+            if (v0 != v1 && mir_fn_ && inst.parent() &&
+                !is_value_dead_after(*mir_fn_, *inst.parent(), &inst, inst.operand(0)) &&
+                is_value_dead_after(*mir_fn_, *inst.parent(), &inst, inst.operand(1))) {
+                std::swap(v0, v1);
+            }
+
             emit_movaps(dst, v0);
 
             auto binop = std::make_unique<LirInst>(op);
             binop->add_def(LirOperand::vreg(dst, 16));
             binop->add_use(LirOperand::vreg(dst, 16));
-            binop->add_use(LirOperand::vreg(v1, 16));
+            binop->add_use(LirOperand::vreg(v1 == v0 ? dst : v1, 16));
             binop->mir_origin = &inst;
             lir_bb.append_inst(std::move(binop));
             break;
@@ -805,8 +820,8 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
             auto fma = std::make_unique<LirInst>(fma_op);
             fma->add_def(LirOperand::vreg(dst, sz));
             fma->add_use(LirOperand::vreg(dst, sz));
-            fma->add_use(LirOperand::vreg(b, sz));
-            fma->add_use(LirOperand::vreg(c, sz));
+            fma->add_use(LirOperand::vreg(b == a ? dst : b, sz));
+            fma->add_use(LirOperand::vreg(c == a ? dst : c, sz));
             fma->mir_origin = &inst;
             lir_bb.append_inst(std::move(fma));
             break;
@@ -831,8 +846,8 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
             auto fma = std::make_unique<LirInst>(fma_op);
             fma->add_def(LirOperand::vreg(dst, sz));
             fma->add_use(LirOperand::vreg(dst, sz));
-            fma->add_use(LirOperand::vreg(b, sz));
-            fma->add_use(LirOperand::vreg(c, sz));
+            fma->add_use(LirOperand::vreg(b == a ? dst : b, sz));
+            fma->add_use(LirOperand::vreg(c == a ? dst : c, sz));
             fma->mir_origin = &inst;
             lir_bb.append_inst(std::move(fma));
             break;

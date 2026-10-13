@@ -716,3 +716,73 @@ TEST_CASE("Linear Scan - a guard's state is live to its Jcc, not to its exit blo
     // The allocation still succeeds with the shortened intervals.
     run_linear_scan_regalloc(*lir, liveness, CallingConvention::win64());
 }
+
+TEST_CASE("Linear Scan - Self-Operand Squaring Coalesces Without Extra Move") {
+    Module mod;
+    Function* fn = mod.create_function("square_f64", Type::f64(), {Type::f64()});
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    Value* x = b.add_block_param(entry, Type::f64());
+    Value* sq = b.build_mul(x, x);
+    b.build_ret(sq);
+    fn->rebuild_cfg_predecessors();
+    REQUIRE(verify_function(*fn));
+
+    X64ISel isel(Target::x64_windows(), CallingConvention::win64());
+    auto lir = isel.lower(*fn);
+    REQUIRE(lir != nullptr);
+    LivenessAnalysis liveness(*lir);
+    liveness.run();
+    run_linear_scan_regalloc(*lir, liveness, CallingConvention::win64());
+
+    // After coalescing x and sq into XMM0, only mulsd xmm0, xmm0 and ret remain (no extra movsd).
+    size_t movsd_count = 0;
+    const LirInst* mulsd = nullptr;
+    for (const auto& inst : lir->blocks[0]->instructions) {
+        if (inst->opcode == LirOpcode::Movsd) movsd_count++;
+        if (inst->opcode == LirOpcode::Mulsd) mulsd = inst.get();
+    }
+    CHECK_EQ(movsd_count, size_t(0));
+    REQUIRE(mulsd != nullptr);
+    CHECK(mulsd->defs[0].preg_val == PReg::xmm(XMM::XMM0));
+    CHECK(mulsd->uses[0].preg_val == PReg::xmm(XMM::XMM0));
+    CHECK(mulsd->uses[1].preg_val == PReg::xmm(XMM::XMM0));
+}
+
+TEST_CASE("Linear Scan - LEA Coalesce Hint Reuses Dead Input Register") {
+    LirFunction fn;
+    fn.name = "lea_coalesce";
+    fn.calling_conv = CallingConvention::win64();
+    LirBlock* entry = fn.create_block("entry");
+
+    VReg x = fn.allocate_vreg(RegClass::GPR, 8);
+    auto init_x = std::make_unique<LirInst>(LirOpcode::Mov);
+    init_x->add_def(LirOperand::vreg(x, 8));
+    init_x->add_use(LirOperand::preg_gpr(GPR::RCX, 8), FixedConstraint::gpr(GPR::RCX));
+    entry->append_inst(std::move(init_x));
+
+    VReg y = fn.allocate_vreg(RegClass::GPR, 8);
+    auto lea = std::make_unique<LirInst>(LirOpcode::Lea);
+    lea->add_def(LirOperand::vreg(y, 8));
+    lea->add_use(LirOperand::mem(x, 1, 8));
+    entry->append_inst(std::move(lea));
+
+    // Force y out to RDX so y's only hint comes from x via Lea
+    auto out = std::make_unique<LirInst>(LirOpcode::Mov);
+    out->add_def(LirOperand::preg_gpr(GPR::RDX, 8), FixedConstraint::gpr(GPR::RDX));
+    out->add_use(LirOperand::vreg(y, 8));
+    entry->append_inst(std::move(out));
+
+    auto ret = std::make_unique<LirInst>(LirOpcode::Ret);
+    ret->add_use(LirOperand::preg_gpr(GPR::RDX, 8), FixedConstraint::gpr(GPR::RDX));
+    entry->append_inst(std::move(ret));
+
+    LivenessAnalysis liveness(fn);
+    liveness.run();
+    LinearScanAllocator regalloc(fn, liveness, fn.calling_conv);
+    regalloc.allocate();
+
+    CHECK(fn.get_vreg_info(x).assigned_preg == PReg::gpr(GPR::RCX));
+}
+

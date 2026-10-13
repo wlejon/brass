@@ -397,3 +397,37 @@ TEST_CASE("ISEL - LEA Scale-Disp Arithmetic and Test-Branch Fusion") {
     CHECK(odd_has_lea);
 }
 
+TEST_CASE("ISEL - Commutative Integer Binary Op Prefers Dead Operand First") {
+    Module mod;
+    Function* fn = mod.create_function("comm_dead_rhs", Type::i64(), {Type::i64(), Type::i64()});
+    Builder b(mod);
+    b.set_function(fn);
+
+    BasicBlock* entry = b.append_block("entry");
+    Value* a = b.add_block_param(entry, Type::i64());
+    Value* c = b.add_block_param(entry, Type::i64());
+
+    // t dies at prod = mul(a, t), while a is still used after prod in sum = add(prod, a)
+    Value* t = b.build_sub(c, a);
+    Value* prod = b.build_mul(a, t);
+    Value* sum = b.build_add(prod, a);
+    b.build_ret(sum);
+
+    fn->rebuild_cfg_predecessors();
+    REQUIRE(verify_function(*fn));
+
+    X64ISel isel(Target::x64_windows(), CallingConvention::win64());
+    auto lir = isel.lower(*fn);
+    REQUIRE(lir != nullptr);
+
+    // Find the Imul instruction: its rhs (uses[1]) should be `a`'s vreg so `prod` copies from dead `t`
+    const LirInst* imul = nullptr;
+    for (const auto& inst : lir->blocks[0]->instructions) {
+        if (inst->opcode == LirOpcode::Imul) imul = inst.get();
+    }
+    REQUIRE(imul != nullptr);
+    REQUIRE_EQ(imul->uses.size(), size_t(2));
+    // Entry ParallelCopy defines vreg 0 for `a` and vreg 1 for `c`
+    CHECK_EQ(imul->uses[1].vreg_val.id, uint32_t(0));
+}
+

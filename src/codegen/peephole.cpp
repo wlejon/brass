@@ -138,7 +138,8 @@ bool PeepholeOptimizer::eliminate_redundant_moves(LirBlock& block) {
         // which is how trunc.i32 / zext.i64 are lowered.
         if (!is_protected(inst) &&
             (inst.opcode == LirOpcode::Mov || inst.opcode == LirOpcode::Movsd ||
-             inst.opcode == LirOpcode::Movss) &&
+             inst.opcode == LirOpcode::Movss || inst.opcode == LirOpcode::Movaps ||
+             inst.opcode == LirOpcode::Vmovaps || inst.opcode == LirOpcode::Vmovups) &&
             inst.defs.size() >= 1 && inst.uses.size() >= 1 &&
             inst.defs[0].is_preg() && inst.uses[0].is_preg() &&
             inst.defs[0].preg_val == inst.uses[0].preg_val) {
@@ -161,7 +162,9 @@ bool PeepholeOptimizer::eliminate_load_after_store(LirBlock& block) {
         if (is_protected(store_inst)) continue;
 
         bool is_store = (store_inst.opcode == LirOpcode::Mov || store_inst.opcode == LirOpcode::Mov32 ||
-                         store_inst.opcode == LirOpcode::Movsd || store_inst.opcode == LirOpcode::Movss) &&
+                         store_inst.opcode == LirOpcode::Movsd || store_inst.opcode == LirOpcode::Movss ||
+                         store_inst.opcode == LirOpcode::Movaps || store_inst.opcode == LirOpcode::Vmovaps ||
+                         store_inst.opcode == LirOpcode::Vmovups) &&
                         !store_inst.defs.empty() && (store_inst.defs[0].is_spill_slot() || store_inst.defs[0].is_mem()) &&
                         !store_inst.uses.empty() && store_inst.uses[0].is_preg();
         if (!is_store) continue;
@@ -183,11 +186,23 @@ bool PeepholeOptimizer::eliminate_load_after_store(LirBlock& block) {
             if (is_protected(candidate)) break;
             if (candidate.is_call() || candidate.is_branch() || candidate.is_terminator()) break;
 
-            bool is_matching_load = (candidate.opcode == store_inst.opcode) &&
-                                    !candidate.defs.empty() && candidate.defs[0].is_preg() &&
-                                    !candidate.uses.empty() && operands_equal(candidate.uses[0], store_loc);
+            bool same_op_load = (candidate.opcode == store_inst.opcode ||
+                                 (store_inst.opcode == LirOpcode::Vmovups && candidate.opcode == LirOpcode::Vmovaps) ||
+                                 (store_inst.opcode == LirOpcode::Vmovaps && candidate.opcode == LirOpcode::Vmovups)) &&
+                                !candidate.defs.empty() && candidate.defs[0].is_preg() &&
+                                !candidate.uses.empty() && operands_equal(candidate.uses[0], store_loc);
+            // A 32-bit GPR spill is stored as a full 64-bit Mov to its spill
+            // slot and reloaded with Mov32; forwarding to Mov32 dst, src_reg
+            // keeps the 32-bit zero-extension without touching memory.
+            bool narrowed_spill_load = store_inst.opcode == LirOpcode::Mov && store_loc.is_spill_slot() &&
+                                       store_loc.size == 8 && store_src_reg.is_gpr() &&
+                                       candidate.opcode == LirOpcode::Mov32 &&
+                                       !candidate.defs.empty() && candidate.defs[0].is_preg() &&
+                                       !candidate.uses.empty() && candidate.uses[0].is_spill_slot() &&
+                                       candidate.uses[0].spill_slot == store_loc.spill_slot &&
+                                       candidate.uses[0].size == 4;
 
-            if (is_matching_load) {
+            if (same_op_load) {
                 PReg load_dst_reg = candidate.defs[0].preg_val;
                 if (load_dst_reg == store_src_reg) {
                     // Exact redundant load: mov [loc], r; ...; mov r, [loc]
@@ -201,8 +216,11 @@ bool PeepholeOptimizer::eliminate_load_after_store(LirBlock& block) {
                     candidate.uses[0] = LirOperand::preg(store_src_reg, store_loc.size);
                     stats_.load_after_store_eliminated++;
                     changed = true;
-                    break;
                 }
+            } else if (narrowed_spill_load) {
+                candidate.uses[0] = LirOperand::preg(store_src_reg, 4);
+                stats_.load_after_store_eliminated++;
+                changed = true;
             }
 
             // Check for invalidation
@@ -238,6 +256,8 @@ bool PeepholeOptimizer::eliminate_dead_moves(LirBlock& block) {
 
         bool is_pure_move = (inst.opcode == LirOpcode::Mov || inst.opcode == LirOpcode::Mov32 ||
                              inst.opcode == LirOpcode::Movsd || inst.opcode == LirOpcode::Movss ||
+                             inst.opcode == LirOpcode::Movaps || inst.opcode == LirOpcode::Vmovaps ||
+                             inst.opcode == LirOpcode::Vmovups ||
                              inst.opcode == LirOpcode::Movabs || inst.opcode == LirOpcode::Movsx8 ||
                              inst.opcode == LirOpcode::Movsx16 || inst.opcode == LirOpcode::Movsxd ||
                              inst.opcode == LirOpcode::Movzx8 || inst.opcode == LirOpcode::Movzx16) &&
@@ -453,7 +473,9 @@ bool PeepholeOptimizer::propagate_copies(LirBlock& block) {
         if (is_protected(mov_inst)) continue;
 
         bool is_reg_move = (mov_inst.opcode == LirOpcode::Mov || mov_inst.opcode == LirOpcode::Mov32 ||
-                            mov_inst.opcode == LirOpcode::Movsd || mov_inst.opcode == LirOpcode::Movss) &&
+                            mov_inst.opcode == LirOpcode::Movsd || mov_inst.opcode == LirOpcode::Movss ||
+                            mov_inst.opcode == LirOpcode::Movaps || mov_inst.opcode == LirOpcode::Vmovaps ||
+                            mov_inst.opcode == LirOpcode::Vmovups) &&
                            mov_inst.defs.size() == 1 && mov_inst.defs[0].is_preg() &&
                            mov_inst.uses.size() == 1 && mov_inst.uses[0].is_preg() &&
                            mov_inst.defs[0].preg_val != mov_inst.uses[0].preg_val;

@@ -618,6 +618,9 @@ void X64ISel::lower_binary_alu(
                 mov_inst->add_use(LirOperand::vreg(first_src, sz));
                 lir_bb.append_inst(std::move(mov_inst));
             }
+            if (second_src.is_vreg() && second_src.vreg_val == first_src) {
+                second_src = LirOperand::vreg(dst, sz);
+            }
 
             auto alu_inst = std::make_unique<LirInst>(alu_op);
             alu_inst->add_def(LirOperand::vreg(dst, sz));
@@ -662,6 +665,9 @@ void X64ISel::lower_binary_alu(
             mov_inst->add_use(LirOperand::vreg(first_src, sz));
             lir_bb.append_inst(std::move(mov_inst));
         }
+        if (second_src.is_vreg() && second_src.vreg_val == first_src) {
+            second_src = LirOperand::vreg(dst, sz);
+        }
 
         auto alu_inst = std::make_unique<LirInst>(sz == 4 ? op32 : op64);
         alu_inst->add_def(LirOperand::vreg(dst, sz));
@@ -669,6 +675,12 @@ void X64ISel::lower_binary_alu(
         alu_inst->add_use(second_src);
         alu_inst->mir_origin = &inst;
         lir_bb.append_inst(std::move(alu_inst));
+    };
+    auto prefer_rhs_first = [&]() {
+        return dst == src1 ||
+               (src0 != src1 && mir_fn_ && inst.parent() &&
+                !is_value_dead_after(*mir_fn_, *inst.parent(), &inst, op0_val) &&
+                is_value_dead_after(*mir_fn_, *inst.parent(), &inst, op1_val));
     };
 
     if (inst.opcode() == Opcode::mul) {
@@ -752,7 +764,7 @@ void X64ISel::lower_binary_alu(
             emit_mov_alu(src0, get_load_mem_operand(op1_val->defining_instruction()));
         } else if (op0_val && op0_val->is_instruction() && can_fuse_load(op0_val->defining_instruction(), &inst)) {
             emit_mov_alu(src1, get_load_mem_operand(op0_val->defining_instruction()));
-        } else if (dst == src1) {
+        } else if (prefer_rhs_first()) {
             emit_mov_alu(src1, LirOperand::vreg(src0, sz));
         } else {
             emit_mov_alu(src0, LirOperand::vreg(src1, sz));
@@ -963,7 +975,7 @@ void X64ISel::lower_binary_alu(
         emit_mov_alu(src0, get_load_mem_operand(op1_val->defining_instruction()));
     } else if (is_comm && op0_val && op0_val->is_instruction() && can_fuse_load(op0_val->defining_instruction(), &inst)) {
         emit_mov_alu(src1, get_load_mem_operand(op0_val->defining_instruction()));
-    } else if (is_comm && dst == src1) {
+    } else if (is_comm && prefer_rhs_first()) {
         emit_mov_alu(src1, LirOperand::vreg(src0, sz));
     } else {
         emit_mov_alu(src0, LirOperand::vreg(src1, sz));

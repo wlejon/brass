@@ -116,6 +116,22 @@ void LinearScanAllocator::build_coalesce_hints() {
                         vreg_at_preg_hints_.emplace((static_cast<uint64_t>(use.vreg_val.id) << 32) | inst->id, def.preg_val);
                     }
                 }
+            } else if (inst->opcode == LirOpcode::Lea && inst->defs.size() == 1 &&
+                       inst->defs[0].is_vreg() && inst->uses.size() == 1 && inst->uses[0].is_mem()) {
+                VReg dst = inst->defs[0].vreg_val;
+                const auto& mem = inst->uses[0].mem_val;
+                if (mem.base_vreg.is_valid() && dst.reg_class == mem.base_vreg.reg_class && dst.id != mem.base_vreg.id &&
+                    (!mem.index_vreg.is_valid() || (mem.scale == x64::Scale::One && mem.disp == 0))) {
+                    coalesce_hints_[dst.id].push_back(mem.base_vreg);
+                    coalesce_hints_[mem.base_vreg.id].push_back(dst);
+                }
+                if (mem.index_vreg.is_valid() && mem.base_vreg.is_valid() &&
+                    mem.scale == x64::Scale::One && mem.disp == 0 &&
+                    dst.reg_class == mem.index_vreg.reg_class && dst.id != mem.index_vreg.id &&
+                    mem.index_vreg.id != mem.base_vreg.id) {
+                    coalesce_hints_[dst.id].push_back(mem.index_vreg);
+                    coalesce_hints_[mem.index_vreg.id].push_back(dst);
+                }
             }
         }
     }

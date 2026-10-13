@@ -202,3 +202,81 @@ TEST_CASE("Peephole - Preserves Safepoint and Deopt Metadata") {
     CHECK_EQ(bb->instructions[1]->safepoint_id, uint32_t(123));
     CHECK_EQ(bb->instructions[2]->resume_id, uint32_t(456));
 }
+
+TEST_CASE("Peephole - Multi-Reload Store Forwarding and Narrowed 32-bit Spill Reload") {
+    LirFunction fn;
+    LirBlock* bb = fn.create_block("entry");
+
+    // 64-bit spill store: mov [slot 0], rax
+    auto store = std::make_unique<LirInst>(LirOpcode::Mov);
+    store->add_def(LirOperand::slot(0, 8));
+    store->add_use(LirOperand::preg_gpr(GPR::RAX, 8));
+    bb->append_inst(std::move(store));
+
+    // First 32-bit reload: mov32 ecx, [slot 0, 4] -> mov32 ecx, eax
+    auto load1 = std::make_unique<LirInst>(LirOpcode::Mov32);
+    load1->add_def(LirOperand::preg_gpr(GPR::RCX, 4));
+    load1->add_use(LirOperand::slot(0, 4));
+    bb->append_inst(std::move(load1));
+
+    // Second 64-bit reload in the same block: mov rdx, [slot 0, 8] -> mov rdx, rax
+    auto load2 = std::make_unique<LirInst>(LirOpcode::Mov);
+    load2->add_def(LirOperand::preg_gpr(GPR::RDX, 8));
+    load2->add_use(LirOperand::slot(0, 8));
+    bb->append_inst(std::move(load2));
+
+    // Keep ecx and rdx live at return
+    auto add = std::make_unique<LirInst>(LirOpcode::Add);
+    add->add_def(LirOperand::preg_gpr(GPR::RCX, 8));
+    add->add_use(LirOperand::preg_gpr(GPR::RCX, 8));
+    add->add_use(LirOperand::preg_gpr(GPR::RDX, 8));
+    bb->append_inst(std::move(add));
+
+    auto ret = std::make_unique<LirInst>(LirOpcode::Ret);
+    ret->add_use(LirOperand::preg_gpr(GPR::RCX, 8));
+    bb->append_inst(std::move(ret));
+
+    PeepholeStats stats = run_lir_peephole_optimizations(fn);
+    CHECK_EQ(stats.load_after_store_eliminated, size_t(2));
+}
+
+TEST_CASE("Peephole - Vector Move Redundancy and Copy Propagation") {
+    LirFunction fn;
+    LirBlock* bb = fn.create_block("entry");
+
+    // movaps xmm0, xmm0 (redundant self-move)
+    auto self_mov = std::make_unique<LirInst>(LirOpcode::Movaps);
+    self_mov->add_def(LirOperand::preg_xmm(XMM::XMM0, 16));
+    self_mov->add_use(LirOperand::preg_xmm(XMM::XMM0, 16));
+    bb->append_inst(std::move(self_mov));
+
+    // vmovaps ymm1, ymm0 (propagated into vaddps ymm2, ymm1, ymm0 and then eliminated as dead)
+    auto copy_mov = std::make_unique<LirInst>(LirOpcode::Vmovaps);
+    copy_mov->add_def(LirOperand::preg_xmm(XMM::XMM1, 32));
+    copy_mov->add_use(LirOperand::preg_xmm(XMM::XMM0, 32));
+    bb->append_inst(std::move(copy_mov));
+
+    auto vadd = std::make_unique<LirInst>(LirOpcode::Vaddps);
+    vadd->add_def(LirOperand::preg_xmm(XMM::XMM2, 32));
+    vadd->add_use(LirOperand::preg_xmm(XMM::XMM1, 32));
+    vadd->add_use(LirOperand::preg_xmm(XMM::XMM0, 32));
+    bb->append_inst(std::move(vadd));
+
+    // Overwrite ymm1 so copy_mov becomes dead
+    auto kill_xmm1 = std::make_unique<LirInst>(LirOpcode::Vmovaps);
+    kill_xmm1->add_def(LirOperand::preg_xmm(XMM::XMM1, 32));
+    kill_xmm1->add_use(LirOperand::preg_xmm(XMM::XMM2, 32));
+    bb->append_inst(std::move(kill_xmm1));
+
+    auto ret = std::make_unique<LirInst>(LirOpcode::Ret);
+    ret->add_use(LirOperand::preg_xmm(XMM::XMM1, 32));
+    bb->append_inst(std::move(ret));
+
+    PeepholeStats stats = run_lir_peephole_optimizations(fn);
+    CHECK(stats.redundant_moves_eliminated >= size_t(2));
+    CHECK_EQ(stats.dead_moves_eliminated, size_t(1));
+    REQUIRE_EQ(bb->instructions.size(), size_t(3));
+    CHECK(bb->instructions[0]->opcode == LirOpcode::Vaddps);
+    CHECK(bb->instructions[0]->uses[0].preg_val.as_xmm() == XMM::XMM0);
+}
+
