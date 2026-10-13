@@ -203,9 +203,11 @@ ValueRange ValueRange::lshr(const ValueRange& a, const ValueRange& b) noexcept {
     if (b.is_constant() && b.min_val >= 0 && b.min_val <= 64) {
         int shift = static_cast<int>(b.min_val);
         if (shift >= 64) return constant(0);
+        if (shift == 0) return a;
         if (a.is_non_negative()) {
             return range(a.min_val >> shift, a.max_val >> shift);
         }
+        return range(0, static_cast<int64_t>(UINT64_MAX >> shift));
     }
     return full();
 }

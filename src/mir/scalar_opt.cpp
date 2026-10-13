@@ -1,4 +1,5 @@
 #include <brass/mir/scalar_opt.hpp>
+#include <brass/mir/alias_analysis.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/gc_refs.hpp>
@@ -6,6 +7,7 @@
 #include <brass/mir/runtime_symbols.hpp>
 #include <brass/mir/uses.hpp>
 #include "int_fold.hpp"
+#include <cmath>
 #include <cstring>
 #include <optional>
 #include <string_view>
@@ -171,12 +173,27 @@ std::optional<ExprKey> expr_key(const Instruction* inst) {
     return key;
 }
 
-bool licm_loop(Function& fn, LoopInfo& loop) {
+bool licm_loop(Function& fn, LoopInfo& loop, const DominatorTree& dom) {
     BasicBlock* preheader = loop.preheader();
     if (!preheader) preheader = LoopAnalysis::ensure_preheader(fn, loop);
     if (!preheader) return false;
     Instruction* ph_term = preheader->terminator();
     if (!ph_term) return false;
+
+    std::optional<AliasAnalysis> aa;
+    auto is_op_invariant = [&](Value* op) -> bool {
+        if (!op) return true;
+        if (op->is_block_param()) {
+            return !loop.contains(op->defining_block());
+        }
+        if (op->is_instruction()) {
+            Instruction* def_inst = op->defining_instruction();
+            if (def_inst && loop.contains(def_inst->parent()) && def_inst->parent() != preheader) {
+                return false;
+            }
+        }
+        return true;
+    };
 
     bool any_hoisted = false;
     bool hoisted_in_round = true;
@@ -190,18 +207,9 @@ bool licm_loop(Function& fn, LoopInfo& loop) {
                 if (is_pure_instruction(cur) && cur->produces_value()) {
                     bool all_operands_invariant = true;
                     for (Value* op : cur->operands()) {
-                        if (!op) continue;
-                        if (op->is_block_param()) {
-                            if (loop.contains(op->defining_block())) {
-                                all_operands_invariant = false;
-                                break;
-                            }
-                        } else if (op->is_instruction()) {
-                            Instruction* def_inst = op->defining_instruction();
-                            if (def_inst && loop.contains(def_inst->parent()) && def_inst->parent() != preheader) {
-                                all_operands_invariant = false;
-                                break;
-                            }
+                        if (!is_op_invariant(op)) {
+                            all_operands_invariant = false;
+                            break;
                         }
                     }
                     if (all_operands_invariant) {
@@ -209,6 +217,83 @@ bool licm_loop(Function& fn, LoopInfo& loop) {
                         preheader->insert_before(cur, ph_term);
                         hoisted_in_round = true;
                         any_hoisted = true;
+                    }
+                } else if (cur->opcode() == Opcode::load && cur->produces_value() &&
+                           !is_derived_gcref(cur->result()) && is_op_invariant(cur->operand(0))) {
+                    Value* base = cur->operand(0);
+                    bool dominates_latches = (bb == loop.header()) || !loop.latches().empty();
+                    if (bb != loop.header()) {
+                        for (BasicBlock* latch : loop.latches()) {
+                            if (!latch || !dom.dominates(bb, latch)) {
+                                dominates_latches = false;
+                                break;
+                            }
+                        }
+                    }
+                    bool null_guarded = false;
+                    auto check_null_cmp = [&](BasicBlock* check_bb, Instruction* stop_at) {
+                        if (!check_bb) return;
+                        for (Instruction* inst : *check_bb) {
+                            if (inst == stop_at) break;
+                            if (!inst) continue;
+                            if ((inst->opcode() == Opcode::eq || inst->opcode() == Opcode::ne) &&
+                                (inst->operand(0) == base || inst->operand(1) == base)) {
+                                null_guarded = true;
+                                break;
+                            }
+                        }
+                    };
+                    if (bb != loop.header()) check_null_cmp(loop.header(), nullptr);
+                    check_null_cmp(bb, cur);
+
+                    if (dominates_latches && !null_guarded) {
+                        if (!aa.has_value()) aa.emplace(fn);
+                        bool clobbered = false;
+                        for (BasicBlock* lbb : loop.blocks()) {
+                            if (!lbb || lbb == preheader) continue;
+                            for (const Instruction* w : *lbb) {
+                                if (w && aa->can_clobber(w, cur)) {
+                                    clobbered = true;
+                                    break;
+                                }
+                            }
+                            if (clobbered) break;
+                        }
+                        if (!clobbered) {
+                            auto find_existing = [&](BasicBlock* search_bb, Instruction* from_inst) -> Value* {
+                                for (Instruction* p = from_inst; p != nullptr; p = p->prev()) {
+                                    if (p->opcode() == Opcode::load &&
+                                        p->operand(0) == base &&
+                                        p->offset() == cur->offset() &&
+                                        p->memory_type() == cur->memory_type() &&
+                                        p->type() == cur->type()) {
+                                        return p->result();
+                                    }
+                                    if (aa->can_clobber(p, cur)) return nullptr;
+                                }
+                                return nullptr;
+                            };
+                            Value* existing = find_existing(preheader, ph_term->prev());
+                            if (!existing && preheader->predecessors().size() == 1) {
+                                BasicBlock* ppred = preheader->predecessors()[0];
+                                bool ph_clobbers = false;
+                                for (Instruction* p = ph_term->prev(); p != nullptr; p = p->prev()) {
+                                    if (aa->can_clobber(p, cur)) { ph_clobbers = true; break; }
+                                }
+                                if (!ph_clobbers && ppred && ppred->terminator()) {
+                                    existing = find_existing(ppred, ppred->terminator()->prev());
+                                }
+                            }
+                            if (existing) {
+                                replace_all_uses(fn, cur->result(), existing);
+                                bb->remove_instruction(cur);
+                            } else {
+                                bb->remove_instruction(cur);
+                                preheader->insert_before(cur, ph_term);
+                            }
+                            hoisted_in_round = true;
+                            any_hoisted = true;
+                        }
                     }
                 }
                 cur = next;
@@ -285,6 +370,26 @@ bool fold_constants(Function& fn) {
                         b.position_before(cur);
                         replacement = b.build_fconst_f64(0.0);
                     }
+                } else if ((op == Opcode::eq || op == Opcode::ne) && int_result &&
+                           op0 && (op0->type() == Type::f64() || op0->type() == Type::f32())) {
+                    auto is_non_nan_sitofp = [](const Value* v) -> const Instruction* {
+                        if (!v || !v->is_instruction()) return nullptr;
+                        const Instruction* d = v->defining_instruction();
+                        if (!d) return nullptr;
+                        Opcode dop = d->opcode();
+                        if (dop == Opcode::sitofp_f64_i32 || dop == Opcode::sitofp_f64_i64 ||
+                            dop == Opcode::sitofp_f32_i32 || dop == Opcode::sitofp_f32_i64) {
+                            return d;
+                        }
+                        if (dop == Opcode::fconst_f64 && !std::isnan(d->imm_f64())) return d;
+                        return nullptr;
+                    };
+                    const Instruction* d0 = is_non_nan_sitofp(op0);
+                    const Instruction* d1 = is_non_nan_sitofp(op1);
+                    if (d0 && d1 && (op0 == op1 ||
+                        (d0->opcode() == d1->opcode() && d0->operand_count() == 1 && d0->operand(0) == d1->operand(0)))) {
+                        replacement = build_int(op == Opcode::eq ? 1 : 0);
+                    }
                 }
             } else if (cur->operand_count() == 1 && !is_call(op)) {
                 Value* op0 = cur->operand(0);
@@ -300,6 +405,38 @@ bool fold_constants(Function& fn) {
                         b.position_before(cur);
                         replacement = (cur->type() == Type::i32()) ? b.build_iconst_i32(static_cast<int32_t>(*folded))
                                                                    : b.build_iconst_i64(*folded);
+                    }
+                } else if (op0 && op0->is_instruction()) {
+                    const Instruction* def = op0->defining_instruction();
+                    Opcode dop = def ? def->opcode() : Opcode::unreachable;
+                    if (op == Opcode::bitcast_f64_i64 && dop == Opcode::bitcast_i64_f64 && def->operand(0)->type() == cur->type()) {
+                        replacement = def->operand(0);
+                    } else if (op == Opcode::bitcast_i64_f64 && dop == Opcode::bitcast_f64_i64 && def->operand(0)->type() == cur->type()) {
+                        replacement = def->operand(0);
+                    } else if (op == Opcode::bitcast_f32_i32 && dop == Opcode::bitcast_i32_f32 && def->operand(0)->type() == cur->type()) {
+                        replacement = def->operand(0);
+                    } else if (op == Opcode::bitcast_i32_f32 && dop == Opcode::bitcast_f32_i32 && def->operand(0)->type() == cur->type()) {
+                        replacement = def->operand(0);
+                    } else if (op == Opcode::bitcast_f64_i64 && dop == Opcode::select && def->operand_count() == 3) {
+                        int64_t nan_c = 0;
+                        const Value* bits_v = nullptr;
+                        if (get_const_int(def->operand(1), nan_c) &&
+                            (static_cast<uint64_t>(nan_c) & 0x7FF8000000000000ULL) == 0x7FF8000000000000ULL) {
+                            bits_v = def->operand(2);
+                        } else if (get_const_int(def->operand(2), nan_c) &&
+                                   (static_cast<uint64_t>(nan_c) & 0x7FF8000000000000ULL) == 0x7FF8000000000000ULL) {
+                            bits_v = def->operand(1);
+                        }
+                        const Instruction* bits = (bits_v && bits_v->is_instruction()) ? bits_v->defining_instruction() : nullptr;
+                        if (bits && bits->opcode() == Opcode::bitcast_i64_f64 &&
+                            bits->operand(0) && bits->operand(0)->type() == Type::f64()) {
+                            replacement = bits->operand(0);
+                        }
+                    } else if (op == Opcode::fptosi_i32 && dop == Opcode::sitofp_f64_i32 && def->operand(0)->type() == Type::i32()) {
+                        replacement = def->operand(0);
+                    } else if (op == Opcode::fptosi_i64 && dop == Opcode::sitofp_f64_i32 && def->operand(0)->type() == Type::i32()) {
+                        b.position_before(cur);
+                        replacement = b.build_sext_i64(def->operand(0));
                     }
                 }
             } else if (cur->operand_count() == 3 && op == Opcode::select) {
@@ -539,7 +676,7 @@ bool hoist_loop_invariants(Function& fn) {
     LoopAnalysis loops(fn, dom);
     bool changed = false;
     for (LoopInfo* loop : loops.post_order_loops()) {
-        if (loop) changed |= licm_loop(fn, *loop);
+        if (loop) changed |= licm_loop(fn, *loop, dom);
     }
     if (changed) fn.rebuild_cfg_predecessors();
     return changed;

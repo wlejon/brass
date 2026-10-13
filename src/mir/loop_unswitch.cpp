@@ -47,7 +47,7 @@ bool unswitch_loop(
     }
 
     if (!cand_bb || !cand_term) {
-        return false;
+        return unswitch_fast_slow_loop(fn, loop, dom, opts);
     }
 
     return transform_unswitch_loop(fn, loop, dom, cand_bb, cand_term, opts);

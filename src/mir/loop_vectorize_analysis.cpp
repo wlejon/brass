@@ -28,6 +28,8 @@ static bool is_supported_loop_arithmetic(Opcode op) {
         case Opcode::add:
         case Opcode::sub:
         case Opcode::mul:
+        case Opcode::fma_f32:
+        case Opcode::fma_f64:
         case Opcode::sdiv:
         case Opcode::udiv:
         case Opcode::neg:
@@ -59,6 +61,8 @@ bool vector_op_lowerable(Opcode op, Type elem, Type vec) {
             return true;
         case Opcode::mul:
             return elem != Type::i64();
+        case Opcode::fma_f32:
+        case Opcode::fma_f64:
         case Opcode::sdiv:
         case Opcode::udiv:
             return elem.is_float();
@@ -73,7 +77,8 @@ bool vector_op_lowerable(Opcode op, Type elem, Type vec) {
 // Opcodes the body transform emits a vector instruction for.
 bool transform_vectorizes(Opcode op) {
     switch (op) {
-        case Opcode::add: case Opcode::sub: case Opcode::mul: case Opcode::sdiv: case Opcode::udiv:
+        case Opcode::add: case Opcode::sub: case Opcode::mul: case Opcode::fma_f32: case Opcode::fma_f64:
+        case Opcode::sdiv: case Opcode::udiv:
         case Opcode::neg: case Opcode::and_: case Opcode::or_: case Opcode::xor_: case Opcode::not_:
             return true;
         default:
@@ -138,13 +143,21 @@ bool transform_is_closed(const LoopInfo& loop,const VectorizableLoopInfo& vli, c
         if (inst->is_terminator()) break;
         if (inst == step_inst || (next_iv && inst->result() == next_iv)) continue;
         const Opcode op = inst->opcode();
+        if ((op == Opcode::sext_i64 || op == Opcode::zext_i64) && inst->operand(0) == iv) {
+            continue;
+        }
         if (op == Opcode::iconst_i32 || op == Opcode::iconst_i64 || op == Opcode::fconst_f64) {
             mapped.emplace(inst->result(), inst->type());
             continue;
         }
         if (vli.has_reduction && inst == vli.reduction_update_inst) {
-            const Value* val_op = inst->operand(0) == acc ? inst->operand(1) : inst->operand(0);
-            if (!usable(val_op)) return false;
+            if (op == Opcode::fma_f32 || op == Opcode::fma_f64) {
+                if (!usable(inst->operand(0)) || !usable(inst->operand(1))) return false;
+            } else {
+                const Value* val_op = inst->operand(0) == acc ? inst->operand(1) : inst->operand(0);
+                if (!usable(val_op)) return false;
+            }
+            mapped.emplace(inst->result(), vli.vec_type);
             continue;
         }
         if (op == Opcode::load_indexed) {
@@ -310,25 +323,26 @@ bool analyze_vectorizable_loop(
         if (latch_next && latch_next->is_instruction()) {
             Instruction* def = latch_next->defining_instruction();
             if (def && loop.contains(def->parent())) {
-                if (def->opcode() == Opcode::add) {
-                    Value* op0 = def->operand(0);
-                    Value* op1 = def->operand(1);
-                    if (op0 == param || op1 == param) {
-                        Type t = param->type();
-                        if (t.is_float() && !allow_fp) {
-                            return false; // FP reduction refused without opt-in FP reassociation
-                        }
-                        if (found_reduction) {
-                            return false; // Multiple reductions not supported currently
-                        }
-                        found_reduction = true;
-                        vli.has_reduction = true;
-                        vli.reduction_param_index = i;
-                        vli.reduction_type = t;
-                        vli.reduction_update_inst = def;
-                        vli.reduction_init_val = ph_bt->args[i];
-                        continue;
+                bool is_add_red = (def->opcode() == Opcode::add &&
+                                   (def->operand(0) == param || def->operand(1) == param));
+                bool is_fma_red = ((def->opcode() == Opcode::fma_f32 || def->opcode() == Opcode::fma_f64) &&
+                                   def->operand(2) == param &&
+                                   def->operand(0) != param && def->operand(1) != param);
+                if (is_add_red || is_fma_red) {
+                    Type t = param->type();
+                    if (t.is_float() && !allow_fp) {
+                        return false; // FP reduction refused without opt-in FP reassociation
                     }
+                    if (found_reduction) {
+                        return false; // Multiple reductions not supported currently
+                    }
+                    found_reduction = true;
+                    vli.has_reduction = true;
+                    vli.reduction_param_index = i;
+                    vli.reduction_type = t;
+                    vli.reduction_update_inst = def;
+                    vli.reduction_init_val = ph_bt->args[i];
+                    continue;
                 }
             }
         }
@@ -353,7 +367,15 @@ bool analyze_vectorizable_loop(
             Value* base = inst->operand(0);
             Value* index = inst->operand(1);
             if (!loop.is_loop_invariant(base)) return false;
-            if (index != primary_iv_param) return false;
+            bool is_iv_index = (index == primary_iv_param);
+            if (!is_iv_index && index && index->is_instruction()) {
+                Instruction* idx_def = index->defining_instruction();
+                if (idx_def && (idx_def->opcode() == Opcode::sext_i64 || idx_def->opcode() == Opcode::zext_i64) &&
+                    idx_def->operand(0) == primary_iv_param) {
+                    is_iv_index = true;
+                }
+            }
+            if (!is_iv_index) return false;
             // `a[i] = i` needs the lane vector [i, i+1, ...], which the
             // transform cannot build: it would store broadcast(i).
             if (is_store && inst->operand(2) == primary_iv_param) return false;
@@ -377,6 +399,10 @@ bool analyze_vectorizable_loop(
             mop.offset = inst->offset();
             mop.elem_type = mem_t;
             mem_ops.push_back(mop);
+            continue;
+        }
+
+        if ((op == Opcode::sext_i64 || op == Opcode::zext_i64) && inst->operand(0) == primary_iv_param) {
             continue;
         }
 

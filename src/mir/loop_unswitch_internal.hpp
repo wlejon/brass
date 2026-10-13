@@ -13,4 +13,11 @@ bool transform_unswitch_loop(
     const LoopUnswitchOptions& opts
 );
 
+bool unswitch_fast_slow_loop(
+    Function& fn,
+    LoopInfo& loop,
+    const DominatorTree& dom,
+    const LoopUnswitchOptions& opts
+);
+
 } // namespace brass

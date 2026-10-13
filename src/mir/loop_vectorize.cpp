@@ -136,19 +136,24 @@ bool vectorize_loop(
     }
 
     // Runtime alias checks for memory operations that may alias
+    auto widen_i64 = [&](Value* v) -> Value* {
+        return (v->type() == Type::i32()) ? b.build_sext_i64(v) : v;
+    };
     for (const auto& check : vli.alias_checks) {
         uint8_t shift1 = (check.op1.elem_type.size_in_bytes() == 4) ? 2 : 3;
         uint8_t shift2 = (check.op2.elem_type.size_in_bytes() == 4) ? 2 : 3;
-        Value* s1 = build_const_step(b, vli.iv_type, shift1);
-        Value* s2 = build_const_step(b, vli.iv_type, shift2);
+        Value* s1 = b.build_iconst_i64(shift1);
+        Value* s2 = b.build_iconst_i64(shift2);
+        Value* init64 = widen_i64(vli.init_iv);
+        Value* lim64 = widen_i64(vli.limit_val);
 
-        Value* off_init1 = b.build_add(b.build_shl(vli.init_iv, s1), b.build_iconst_i64(check.op1.offset));
-        Value* off_limit1 = b.build_add(b.build_shl(vli.limit_val, s1), b.build_iconst_i64(check.op1.offset));
+        Value* off_init1 = b.build_add(b.build_shl(init64, s1), b.build_iconst_i64(check.op1.offset));
+        Value* off_limit1 = b.build_add(b.build_shl(lim64, s1), b.build_iconst_i64(check.op1.offset));
         Value* ptr_start1 = b.build_add(check.op1.base, off_init1);
         Value* ptr_end1 = b.build_add(check.op1.base, off_limit1);
 
-        Value* off_init2 = b.build_add(b.build_shl(vli.init_iv, s2), b.build_iconst_i64(check.op2.offset));
-        Value* off_limit2 = b.build_add(b.build_shl(vli.limit_val, s2), b.build_iconst_i64(check.op2.offset));
+        Value* off_init2 = b.build_add(b.build_shl(init64, s2), b.build_iconst_i64(check.op2.offset));
+        Value* off_limit2 = b.build_add(b.build_shl(lim64, s2), b.build_iconst_i64(check.op2.offset));
         Value* ptr_start2 = b.build_add(check.op2.base, off_init2);
         Value* ptr_end2 = b.build_add(check.op2.base, off_limit2);
 
@@ -247,6 +252,24 @@ bool vectorize_loop(
         }
 
         if (vli.has_reduction && inst == vli.reduction_update_inst) {
+            if (inst->opcode() == Opcode::fma_f32 || inst->opcode() == Opcode::fma_f64) {
+                auto to_vec = [&](Value* v) -> Value* {
+                    Value* mv = vec_map[v];
+                    if (!mv) return b.build_vbroadcast(vli.vec_type, v);
+                    if (mv->type() == vli.elem_type) return b.build_vbroadcast(vli.vec_type, mv);
+                    return mv;
+                };
+                Value* va = to_vec(inst->operand(0));
+                Value* vb = to_vec(inst->operand(1));
+                Value* acc_op = inst->operand(2);
+                Value* current_acc = vec_map[acc_op];
+                if (current_acc && current_acc->type() == vli.elem_type) {
+                    current_acc = b.build_vbroadcast(vli.vec_type, current_acc);
+                }
+                next_vec_acc = b.build_vfma(va, vb, current_acc ? current_acc : vec_acc_param);
+                vec_map[inst->result()] = next_vec_acc;
+                continue;
+            }
             Value* acc_op = (inst->operand(0) == header->param(vli.reduction_param_index))
                                 ? inst->operand(0)
                                 : inst->operand(1);
@@ -274,8 +297,8 @@ bool vectorize_loop(
             Value* base = inst->operand(0);
             int32_t offset = inst->offset();
             uint8_t shift_amount = (vli.elem_type.size_in_bytes() == 4) ? 2 : 3;
-            Value* shift_val = build_const_step(b, vli.iv_type, shift_amount);
-            Value* byte_off = b.build_shl(vec_iv_param, shift_val);
+            Value* iv64 = widen_i64(vec_iv_param);
+            Value* byte_off = b.build_shl(iv64, b.build_iconst_i64(shift_amount));
             Value* addr = b.build_add(base, byte_off);
             Value* vloaded = b.build_vload(vli.vec_type, addr, offset);
             vec_map[inst->result()] = vloaded;
@@ -296,8 +319,8 @@ bool vectorize_loop(
                 vec_val = b.build_vbroadcast(vli.vec_type, vec_val);
             }
             uint8_t shift_amount = (vli.elem_type.size_in_bytes() == 4) ? 2 : 3;
-            Value* shift_val = build_const_step(b, vli.iv_type, shift_amount);
-            Value* byte_off = b.build_shl(vec_iv_param, shift_val);
+            Value* iv64 = widen_i64(vec_iv_param);
+            Value* byte_off = b.build_shl(iv64, b.build_iconst_i64(shift_amount));
             Value* addr = b.build_add(base, byte_off);
             b.build_vstore(vli.vec_type, addr, offset, vec_val);
             continue;
@@ -338,6 +361,8 @@ bool vectorize_loop(
             case Opcode::add: v_res = b.build_vadd(vec_operands[0], vec_operands[1]); break;
             case Opcode::sub: v_res = b.build_vsub(vec_operands[0], vec_operands[1]); break;
             case Opcode::mul: v_res = b.build_vmul(vec_operands[0], vec_operands[1]); break;
+            case Opcode::fma_f32:
+            case Opcode::fma_f64: v_res = b.build_vfma(vec_operands[0], vec_operands[1], vec_operands[2]); break;
             case Opcode::sdiv:
             case Opcode::udiv: v_res = b.build_vdiv(vec_operands[0], vec_operands[1]); break;
             case Opcode::neg: v_res = b.build_vneg(vec_operands[0]); break;

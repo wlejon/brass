@@ -1,9 +1,12 @@
 #include <brass/mir/bounds_check_elim.hpp>
+#include <brass/mir/alias_analysis.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/cfg_simplify.hpp>
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/loop_analysis.hpp>
+#include <brass/mir/loop_unswitch.hpp>
 #include <brass/mir/uses.hpp>
+#include "loop_unswitch_internal.hpp"
 #include <cstdint>
 #include <optional>
 #include <unordered_map>
@@ -12,6 +15,21 @@
 namespace brass {
 
 namespace {
+
+bool get_const_int(const Value* v, int64_t& out) {
+    if (!v || !v->is_instruction()) return false;
+    const Instruction* d = v->defining_instruction();
+    if (!d) return false;
+    if (d->opcode() == Opcode::iconst_i32 || d->opcode() == Opcode::patchable_const_i32) {
+        out = static_cast<int64_t>(d->imm_i32());
+        return true;
+    }
+    if (d->opcode() == Opcode::iconst_i64 || d->opcode() == Opcode::patchable_const_i64) {
+        out = d->imm_i64();
+        return true;
+    }
+    return false;
+}
 
 Opcode invert_comparison_opcode(Opcode op) noexcept {
     switch (op) {
@@ -33,12 +51,16 @@ bool is_int_value(const Value* v) noexcept {
     return v && (v->type() == Type::i32() || v->type() == Type::i64());
 }
 
-// An integer comparison `a op b`, as an instruction or as a fact known to hold.
+bool is_ptr_or_int_value(const Value* v) noexcept {
+    return v && (v->type() == Type::i32() || v->type() == Type::i64() || v->type().is_pointer_or_gcref());
+}
+
+// A comparison `a op b`, as an instruction or as a fact known to hold.
 const Instruction* as_int_comparison(const Value* v) {
     if (!v || !v->is_instruction()) return nullptr;
     const Instruction* def = v->defining_instruction();
     if (!def || !is_comparison(def->opcode()) || def->operand_count() != 2) return nullptr;
-    if (!is_int_value(def->operand(0)) || !is_int_value(def->operand(1))) return nullptr;
+    if (!is_ptr_or_int_value(def->operand(0)) || !is_ptr_or_int_value(def->operand(1))) return nullptr;
     return def;
 }
 
@@ -122,91 +144,379 @@ std::optional<bool> implied_by(const Fact& fact, Opcode check_op, const Value* x
     return std::nullopt;
 }
 
-// The facts that entering a block along an edge controlled by `cond` taking
-// its true (or false) side establishes.
-void collect_edge_facts(const Value* cond, bool on_true, std::vector<Fact>& out) {
-    if (!cond || !cond->is_instruction()) return;
-    const Instruction* def = cond->defining_instruction();
-    if (!def) return;
-    if (const Instruction* cmp = as_int_comparison(cond)) {
-        out.push_back(Fact{on_true ? cmp->opcode() : invert_comparison_opcode(cmp->opcode()),
-                           cmp->operand(0), cmp->operand(1)});
-        return;
-    }
-    // Comparisons yield 0 or 1, so `and` of them is non-zero only when both
-    // hold and `or` is zero only when both fail.
-    if (def->opcode() == Opcode::and_ && on_true) {
-        collect_edge_facts(def->operand(0), true, out);
-        collect_edge_facts(def->operand(1), true, out);
-    } else if (def->opcode() == Opcode::or_ && !on_true) {
-        collect_edge_facts(def->operand(0), false, out);
-        collect_edge_facts(def->operand(1), false, out);
-    }
-}
-
 class ImpliedCheckFolder {
 public:
-    ImpliedCheckFolder(Function& fn, Module& mod, const DominatorTree& dom, const RangeAnalysis& ra,
-                       const RangeAnalysisOptions& opts)
-        : fn_(fn), mod_(mod), dom_(dom), ra_(ra), opts_(opts) {}
+    ImpliedCheckFolder(Function& fn, Module& mod, const DominatorTree& dom, const LoopAnalysis& loops,
+                       const RangeAnalysis& ra, const AliasAnalysis& aa, const RangeAnalysisOptions& opts)
+        : fn_(fn), mod_(mod), dom_(dom), loops_(loops), ra_(ra), aa_(aa), opts_(opts) {}
 
     bool run() {
-        // Each open block's facts_ height on entry; leaving it drops its facts.
-        std::vector<size_t> marks;
+        struct Marks {
+            size_t facts;
+            size_t loads;
+            size_t exprs;
+        };
+        std::vector<Marks> marks;
         walk_dominator_tree(
             dom_, fn_.entry_block(),
             [&](const BasicBlock* bb) {
-                marks.push_back(facts_.size());
+                marks.push_back({facts_.size(), dom_loads_.size(), dom_exprs_.size()});
                 visit(const_cast<BasicBlock*>(bb));
             },
             [&](const BasicBlock*) {
-                facts_.resize(marks.back());
+                facts_.resize(marks.back().facts);
+                dom_loads_.resize(marks.back().loads);
+                dom_exprs_.resize(marks.back().exprs);
                 marks.pop_back();
             });
         return changed_;
     }
 
 private:
+    struct DomExpr {
+        Opcode op;
+        const Value* op0;
+        const Value* op1;
+        int64_t imm;
+        const Value* result;
+    };
+
+    bool is_load_preserved(const Instruction* dom_load, const Instruction* cur_load) const {
+        const BasicBlock* dom_bb = dom_load->parent();
+        const BasicBlock* cur_bb = cur_load->parent();
+        if (!dom_bb || !cur_bb) return false;
+
+        // Check non-call memory writers across the function
+        for (const BasicBlock* bb : fn_.blocks()) {
+            if (!bb) continue;
+            for (const Instruction* inst : *bb) {
+                if (!inst) continue;
+                if (!is_call(inst->opcode()) && aa_.can_clobber(inst, cur_load)) {
+                    return false;
+                }
+            }
+        }
+        // Check calls in blocks that dominate cur_bb (after dom_load)
+        for (const BasicBlock* bb : fn_.blocks()) {
+            if (!bb || !dom_.dominates(dom_bb, bb) || !dom_.dominates(bb, cur_bb)) continue;
+            bool after_dom = (bb != dom_bb);
+            for (const Instruction* inst : *bb) {
+                if (!inst) continue;
+                if (inst == dom_load) { after_dom = true; continue; }
+                if (inst == cur_load) break;
+                if (after_dom && is_call(inst->opcode()) && aa_.can_clobber(inst, cur_load)) {
+                    return false;
+                }
+            }
+        }
+        // Check calls in any enclosing loop that execute on the main loop path (dominate a latch)
+        for (LoopInfo* loop : loops_.post_order_loops()) {
+            if (!loop || !loop->contains(cur_bb)) continue;
+            for (BasicBlock* lbb : loop->blocks()) {
+                if (!lbb) continue;
+                bool dominates_any_latch = false;
+                for (BasicBlock* latch : loop->latches()) {
+                    if (latch && dom_.dominates(lbb, latch)) {
+                        dominates_any_latch = true;
+                        break;
+                    }
+                }
+                if (!dominates_any_latch) continue;
+                for (const Instruction* inst : *lbb) {
+                    if (inst && is_call(inst->opcode()) && aa_.can_clobber(inst, cur_load)) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    const Value* canonicalize(const Value* v, const BasicBlock* bb, int depth = 0) const {
+        if (!v || depth > 6) return v;
+        while (v && v->is_instruction()) {
+            const Instruction* d = v->defining_instruction();
+            if (!d) break;
+            if ((d->opcode() == Opcode::sext_i64 || d->opcode() == Opcode::zext_i64) &&
+                ra_.get_range_at(d->operand(0), bb).min_val >= 0) {
+                v = d->operand(0);
+            } else {
+                break;
+            }
+        }
+        if (!v || !v->is_instruction()) return v;
+        const Instruction* d = v->defining_instruction();
+        if (!d) return v;
+        if (d->opcode() == Opcode::load && d->offset() >= 0 && d->offset() <= 64) {
+            const Value* c_base = canonicalize(d->operand(0), bb, depth + 1);
+            for (const Instruction* dl : dom_loads_) {
+                if (dl == d) return v;
+                if (dl->offset() == d->offset() && dl->memory_type() == d->memory_type() &&
+                    dl->type() == d->type() &&
+                    canonicalize(dl->operand(0), dl->parent(), depth + 1) == c_base &&
+                    is_load_preserved(dl, d)) {
+                    return dl->result();
+                }
+            }
+        } else if (d->opcode() == Opcode::lshr || d->opcode() == Opcode::ashr ||
+                   d->opcode() == Opcode::shl || d->opcode() == Opcode::add ||
+                   d->opcode() == Opcode::sub || d->opcode() == Opcode::mul ||
+                   d->opcode() == Opcode::and_) {
+            const Value* c0 = d->operand_count() >= 1 ? canonicalize(d->operand(0), bb, depth + 1) : nullptr;
+            const Value* c1 = d->operand_count() >= 2 ? canonicalize(d->operand(1), bb, depth + 1) : nullptr;
+            int64_t c1_const = 0;
+            bool has_c1 = get_const_int(c1, c1_const);
+            for (const DomExpr& de : dom_exprs_) {
+                if (de.op == d->opcode() && de.op0 == c0) {
+                    int64_t de_const = 0;
+                    if (de.op1 == c1 || (has_c1 && get_const_int(de.op1, de_const) && de_const == c1_const)) {
+                        return de.result;
+                    }
+                }
+            }
+        }
+        return v;
+    }
+
+public:
+    static bool is_bool_expr(const Value* v, int depth = 0) {
+        if (!v || !v->is_instruction() || depth > 6) return false;
+        if (as_int_comparison(v)) return true;
+        int64_t c = 0;
+        if (get_const_int(v, c)) return c == 0 || c == 1;
+        const Instruction* d = v->defining_instruction();
+        if (!d || (d->opcode() != Opcode::and_ && d->opcode() != Opcode::or_) || d->operand_count() != 2) return false;
+        return is_bool_expr(d->operand(0), depth + 1) && is_bool_expr(d->operand(1), depth + 1);
+    }
+
+private:
+
+    void collect_edge_facts(const Value* cond, bool on_true, const BasicBlock* bb) {
+        if (!cond || !cond->is_instruction()) return;
+        const Instruction* def = cond->defining_instruction();
+        if (!def) return;
+        if (const Instruction* cmp = as_int_comparison(cond)) {
+            Opcode op = on_true ? cmp->opcode() : invert_comparison_opcode(cmp->opcode());
+            const Value* lhs = canonicalize(cmp->operand(0), bb);
+            const Value* rhs = canonicalize(cmp->operand(1), bb);
+            facts_.push_back(Fact{op, lhs, rhs});
+            return;
+        }
+        if (def->opcode() == Opcode::and_ && on_true && is_bool_expr(cond)) {
+            collect_edge_facts(def->operand(0), true, bb);
+            collect_edge_facts(def->operand(1), true, bb);
+        } else if (def->opcode() == Opcode::or_ && !on_true) {
+            collect_edge_facts(def->operand(0), false, bb);
+            collect_edge_facts(def->operand(1), false, bb);
+        }
+    }
+
+    bool match_shifted(const Value* v, const BasicBlock* bb, const Value*& out_idx, int64_t& out_shift) const {
+        if (!v || !v->is_instruction()) return false;
+        const Instruction* d = v->defining_instruction();
+        if (!d) return false;
+        int64_t c = 0;
+        if (d->opcode() == Opcode::shl && get_const_int(d->operand(1), c) && c >= 1 && c <= 4) {
+            out_idx = canonicalize(d->operand(0), bb);
+            out_shift = c;
+            return true;
+        }
+        if (d->opcode() == Opcode::mul) {
+            const Value* idx_op = nullptr;
+            if (get_const_int(d->operand(1), c)) idx_op = d->operand(0);
+            else if (get_const_int(d->operand(0), c)) idx_op = d->operand(1);
+            if (idx_op && (c == 2 || c == 4 || c == 8 || c == 16)) {
+                out_idx = canonicalize(idx_op, bb);
+                out_shift = (c == 2) ? 1 : (c == 4) ? 2 : (c == 8) ? 3 : 4;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool is_length_bound(const Value* n, const Value* byte_len, int64_t shift, const BasicBlock* bb) const {
+        const Value* cn = canonicalize(n, bb);
+        while (cn && cn->is_instruction()) {
+            const Instruction* d = cn->defining_instruction();
+            if (d && (d->opcode() == Opcode::trunc_i32 || d->opcode() == Opcode::sext_i64 || d->opcode() == Opcode::zext_i64)) {
+                cn = canonicalize(d->operand(0), bb);
+            } else {
+                break;
+            }
+        }
+        const Value* cbl = canonicalize(byte_len, bb);
+        if (cn && cn->is_instruction()) {
+            const Instruction* d = cn->defining_instruction();
+            int64_t sc = 0;
+            if ((d->opcode() == Opcode::lshr || d->opcode() == Opcode::ashr) &&
+                get_const_int(d->operand(1), sc) && sc == shift &&
+                canonicalize(d->operand(0), bb) == cbl) {
+                return true;
+            }
+        }
+        if (cbl && cbl->is_instruction()) {
+            const Value* idx = nullptr;
+            int64_t s = 0;
+            if (match_shifted(cbl, bb, idx, s) && s == shift && idx == cn) {
+                return true;
+            }
+        }
+        for (const Fact& f : facts_) {
+            // Check if fact implies cn <= (cbl >> shift) or (cn << shift) <= cbl
+            if (f.rhs && f.rhs->is_instruction()) {
+                const Instruction* rd = f.rhs->defining_instruction();
+                int64_t sc = 0;
+                if ((rd->opcode() == Opcode::lshr || rd->opcode() == Opcode::ashr) &&
+                    get_const_int(rd->operand(1), sc) && sc == shift &&
+                    canonicalize(rd->operand(0), bb) == cbl) {
+                    if (implied_by(f, Opcode::ule, cn, f.rhs, true) == true) return true;
+                }
+            }
+            const Value* sh_idx = nullptr;
+            int64_t s = 0;
+            if (match_shifted(f.lhs, bb, sh_idx, s) && s == shift && sh_idx == cn) {
+                if (implied_by(f, Opcode::ule, f.lhs, cbl, true) == true) return true;
+            }
+        }
+        return false;
+    }
+
+    std::optional<bool> check_implied(Opcode check_op, const Value* raw_x, const Value* raw_y, const BasicBlock* bb) const {
+        const Value* x = canonicalize(raw_x, bb);
+        const Value* y = canonicalize(raw_y, bb);
+        const bool x_non_neg = ra_.get_range_at(raw_x, bb).min_val >= 0 || ra_.get_range_at(x, bb).min_val >= 0;
+        const bool y_non_neg = ra_.get_range_at(raw_y, bb).min_val >= 0 || ra_.get_range_at(y, bb).min_val >= 0;
+        const bool both_non_negative = x_non_neg && y_non_neg;
+
+        int64_t yc = 0;
+        if (get_const_int(raw_y, yc)) y = raw_y;
+
+        // Direct fact lookup
+        for (auto it = facts_.rbegin(); it != facts_.rend(); ++it) {
+            int64_t f_rc = 0;
+            Fact f = *it;
+            if (get_const_int(raw_y, yc) && get_const_int(f.rhs, f_rc) && yc == f_rc) {
+                f.rhs = y;
+            }
+            if (auto outcome = implied_by(f, check_op, x, y, both_non_negative)) {
+                return outcome;
+            }
+        }
+
+        auto check_pred = predicate_of(check_op);
+        if (!check_pred) return std::nullopt;
+
+        // Transitive inequality: x < mid <= y or x <= mid < y
+        if (x_non_neg) {
+            for (const Fact& f1 : facts_) {
+                const Value* mid = nullptr;
+                bool strict1 = false;
+                if (f1.lhs == x && implied_by(f1, Opcode::ule, x, f1.rhs, true) == true) {
+                    mid = f1.rhs;
+                    strict1 = (implied_by(f1, Opcode::ult, x, f1.rhs, true) == true);
+                } else if (f1.rhs == x && implied_by(f1, Opcode::ule, x, f1.lhs, true) == true) {
+                    mid = f1.lhs;
+                    strict1 = (implied_by(f1, Opcode::ult, x, f1.lhs, true) == true);
+                }
+                if (!mid) continue;
+                for (const Fact& f2 : facts_) {
+                    if (implied_by(f2, Opcode::ule, mid, y, true) == true) {
+                        bool strict2 = (implied_by(f2, Opcode::ult, mid, y, true) == true);
+                        uint8_t trans_accepts = (strict1 || strict2) ? kLess : (kLess | kEqual);
+                        if ((trans_accepts & ~check_pred->accepts) == 0) return true;
+                        if ((trans_accepts & check_pred->accepts) == 0) return false;
+                    }
+                }
+            }
+        }
+
+        // Scaled/shifted bounds check: (idx << shift) < byte_len when 0 <= idx < N and (N << shift) <= byte_len
+        const Value* idx = nullptr;
+        int64_t shift = 0;
+        if (match_shifted(raw_x, bb, idx, shift) && ra_.get_range_at(idx, bb).min_val >= 0) {
+            for (const Fact& f : facts_) {
+                const Value* bound_n = nullptr;
+                if (f.lhs == idx && implied_by(f, Opcode::ult, idx, f.rhs, true) == true) {
+                    bound_n = f.rhs;
+                } else if (f.rhs == idx && implied_by(f, Opcode::ult, idx, f.lhs, true) == true) {
+                    bound_n = f.lhs;
+                }
+                if (bound_n && is_length_bound(bound_n, y, shift, bb)) {
+                    if (check_pred->order == Order::Signed && !y_non_neg) {
+                        // If y is used in lshr(y, shift), y >= (1 << shift) > 0 unless y has sign bit set;
+                        // check if bound_n was derived via ashr or y is non-negative.
+                        const Value* cn = canonicalize(bound_n, bb);
+                        bool signed_safe = false;
+                        if (cn && cn->is_instruction() && cn->defining_instruction()->opcode() == Opcode::ashr) {
+                            signed_safe = true;
+                        } else if (cn && cn->is_instruction() && cn->defining_instruction()->opcode() == Opcode::lshr) {
+                            // Standard TypedArray byte_length is non-negative; if loop bound used slt(i, N), N > 0
+                            signed_safe = true;
+                        }
+                        if (!signed_safe) continue;
+                    }
+                    if ((kLess & ~check_pred->accepts) == 0) return true;
+                    if ((kLess & check_pred->accepts) == 0) return false;
+                }
+            }
+        }
+
+        return std::nullopt;
+    }
+
     void visit(BasicBlock* bb) {
         if (bb->predecessors().size() == 1) {
             const BasicBlock* pred = bb->predecessors()[0];
             const Instruction* term = pred ? pred->terminator() : nullptr;
             if (term && term->opcode() == Opcode::br_if && term->true_target().block != term->false_target().block) {
-                collect_edge_facts(term->operand(0), term->true_target().block == bb, facts_);
+                collect_edge_facts(term->operand(0), term->true_target().block == bb, bb);
             }
         }
 
-        if (facts_.size() > 0) fold_checks_in(bb);
+        fold_checks_in(bb);
     }
 
     void fold_checks_in(BasicBlock* bb) {
         for (Instruction* cur = bb->head(); cur; cur = cur->next()) {
+            if (cur->opcode() == Opcode::load && cur->offset() >= 0 && cur->offset() <= 64) {
+                dom_loads_.push_back(cur);
+            } else if (cur->produces_value() &&
+                       (cur->opcode() == Opcode::lshr || cur->opcode() == Opcode::ashr ||
+                        cur->opcode() == Opcode::shl || cur->opcode() == Opcode::add ||
+                        cur->opcode() == Opcode::sub || cur->opcode() == Opcode::mul ||
+                        cur->opcode() == Opcode::and_)) {
+                const Value* c0 = cur->operand_count() >= 1 ? canonicalize(cur->operand(0), bb) : nullptr;
+                const Value* c1 = cur->operand_count() >= 2 ? canonicalize(cur->operand(1), bb) : nullptr;
+                dom_exprs_.push_back({cur->opcode(), c0, c1, cur->imm_i64(), cur->result()});
+            } else if (cur->opcode() == Opcode::guard) {
+                collect_edge_facts(cur->operand(0), true, bb);
+                continue;
+            }
+
+            if (facts_.empty()) continue;
             const Instruction* cmp = as_int_comparison(cur->result());
             if (!cmp) continue;
-            const Value* x = cmp->operand(0);
-            const Value* y = cmp->operand(1);
-            const bool both_non_negative =
-                ra_.get_range_at(x, bb).min_val >= 0 && ra_.get_range_at(y, bb).min_val >= 0;
-            for (auto it = facts_.rbegin(); it != facts_.rend(); ++it) {
-                std::optional<bool> outcome = implied_by(*it, cmp->opcode(), x, y, both_non_negative);
-                if (!outcome) continue;
-                Builder b(mod_);
-                b.set_function(&fn_);
-                b.position_before(cur);
-                replace_all_uses(fn_, cur->result(), b.build_iconst_i32(*outcome ? 1 : 0));
-                if (opts_.stats) opts_.stats->checks_implied++;
-                changed_ = true;
-                break;
-            }
+            std::optional<bool> outcome = check_implied(cmp->opcode(), cmp->operand(0), cmp->operand(1), bb);
+            if (!outcome) continue;
+            Builder b(mod_);
+            b.set_function(&fn_);
+            b.position_before(cur);
+            replace_all_uses(fn_, cur->result(), b.build_iconst_i32(*outcome ? 1 : 0));
+            if (opts_.stats) opts_.stats->checks_implied++;
+            changed_ = true;
         }
     }
 
     Function& fn_;
     Module& mod_;
     const DominatorTree& dom_;
+    const LoopAnalysis& loops_;
     const RangeAnalysis& ra_;
+    const AliasAnalysis& aa_;
     const RangeAnalysisOptions& opts_;
     std::vector<Fact> facts_;
+    std::vector<const Instruction*> dom_loads_;
+    std::vector<DomExpr> dom_exprs_;
     bool changed_ = false;
 };
 
@@ -217,7 +527,8 @@ bool eliminate_range_decided_checks(
     Function& fn,
     Module& mod,
     const RangeAnalysis& ra,
-    const RangeAnalysisOptions& opts
+    const RangeAnalysisOptions& opts,
+    bool& branches_folded
 ) {
     bool changed = false;
 
@@ -228,9 +539,7 @@ bool eliminate_range_decided_checks(
         while (cur) {
             Instruction* next = cur->next();
 
-            if (as_int_comparison(cur->result())) {
-                // The comparison's own range at its block already accounts
-                // for signedness, widths and every dominating branch.
+            if (as_int_comparison(cur->result()) && is_int_value(cur->operand(0)) && is_int_value(cur->operand(1))) {
                 ValueRange r = ra.get_range_at(cur->result(), bb);
                 if (r.is_constant() && (r.min_val == 0 || r.min_val == 1)) {
                     Builder b(mod);
@@ -243,6 +552,7 @@ bool eliminate_range_decided_checks(
                     if (term && term->opcode() == Opcode::br_if && term->operand(0) == folded) {
                         fold_branch(term, r.min_val != 0);
                         if (opts.stats) opts.stats->branches_folded++;
+                        branches_folded = true;
                     }
                     if (opts.stats) opts.stats->bounds_checks_eliminated++;
                     changed = true;
@@ -259,6 +569,7 @@ bool eliminate_range_decided_checks(
                 if (r_cond.is_constant()) {
                     fold_branch(cur, r_cond.min_val != 0);
                     if (opts.stats) opts.stats->branches_folded++;
+                    branches_folded = true;
                     changed = true;
                 }
             }
@@ -267,6 +578,60 @@ bool eliminate_range_decided_checks(
         }
     }
 
+    return changed;
+}
+
+bool fold_boolean_and_branches(Function& fn, Module& mod, const RangeAnalysisOptions& opts, bool& branches_folded) {
+    bool changed = false;
+    for (BasicBlock* bb : fn.blocks()) {
+        if (!bb) continue;
+        for (Instruction* cur = bb->head(); cur; cur = cur->next()) {
+            if ((cur->opcode() == Opcode::and_ || cur->opcode() == Opcode::or_) && cur->operand_count() == 2 && cur->type() == Type::i32()) {
+                int64_t c0 = 0, c1 = 0;
+                bool has0 = get_const_int(cur->operand(0), c0);
+                bool has1 = get_const_int(cur->operand(1), c1);
+                Value* rep = nullptr;
+                if (has0 && has1) {
+                    Builder b(mod);
+                    b.set_function(&fn);
+                    b.position_before(cur);
+                    int32_t res = (cur->opcode() == Opcode::and_) ? static_cast<int32_t>(c0 & c1) : static_cast<int32_t>(c0 | c1);
+                    rep = b.build_iconst_i32(res);
+                } else if (cur->opcode() == Opcode::and_) {
+                    if (has0 && c0 == 1 && ImpliedCheckFolder::is_bool_expr(cur->operand(1))) rep = cur->operand(1);
+                    else if (has1 && c1 == 1 && ImpliedCheckFolder::is_bool_expr(cur->operand(0))) rep = cur->operand(0);
+                    else if ((has0 && c0 == 0) || (has1 && c1 == 0)) {
+                        Builder b(mod);
+                        b.set_function(&fn);
+                        b.position_before(cur);
+                        rep = b.build_iconst_i32(0);
+                    }
+                } else if (cur->opcode() == Opcode::or_) {
+                    if (has0 && c0 == 0) rep = cur->operand(1);
+                    else if (has1 && c1 == 0) rep = cur->operand(0);
+                    else if ((has0 && c0 == 1 && ImpliedCheckFolder::is_bool_expr(cur->operand(1))) ||
+                             (has1 && c1 == 1 && ImpliedCheckFolder::is_bool_expr(cur->operand(0)))) {
+                        Builder b(mod);
+                        b.set_function(&fn);
+                        b.position_before(cur);
+                        rep = b.build_iconst_i32(1);
+                    }
+                }
+                if (rep && rep->type() == cur->type()) {
+                    replace_all_uses(fn, cur->result(), rep);
+                    changed = true;
+                }
+            } else if (cur->opcode() == Opcode::br_if) {
+                int64_t c = 0;
+                if (get_const_int(cur->operand(0), c)) {
+                    fold_branch(cur, c != 0);
+                    if (opts.stats) opts.stats->branches_folded++;
+                    branches_folded = true;
+                    changed = true;
+                }
+            }
+        }
+    }
     return changed;
 }
 
@@ -296,25 +661,56 @@ bool run_bounds_check_elimination(Function& fn, Module& mod, const RangeAnalysis
     if (fn.blocks().empty() || !fn.entry_block()) return false;
     if (!opts.enable_bce && !opts.enable_implied_checks) return false;
 
-    fn.rebuild_cfg_predecessors();
-    DominatorTree dom(fn);
-    LoopAnalysis loops(fn, dom);
-    RangeAnalysis ra(fn, dom, loops);
-
     bool any_changed = false;
-    if (opts.enable_implied_checks) {
-        any_changed |= ImpliedCheckFolder(fn, mod, dom, ra, opts).run();
-    }
-    if (opts.enable_bce) {
-        any_changed |= eliminate_range_decided_checks(fn, mod, ra, opts);
+    constexpr size_t kMaxRounds = 4;
+    for (size_t round = 0; round < kMaxRounds; ++round) {
+        fn.rebuild_cfg_predecessors();
+        DominatorTree dom(fn);
+        LoopAnalysis loops(fn, dom);
+        RangeAnalysis ra(fn, dom, loops);
+        AliasAnalysis aa(fn);
+
+        bool round_changed = false;
+        bool branches_folded = false;
+        if (opts.enable_implied_checks) {
+            round_changed |= ImpliedCheckFolder(fn, mod, dom, loops, ra, aa, opts).run();
+        }
+        if (opts.enable_bce) {
+            round_changed |= eliminate_range_decided_checks(fn, mod, ra, opts, branches_folded);
+        }
+        if (round_changed) {
+            round_changed |= fold_boolean_and_branches(fn, mod, opts, branches_folded);
+            any_changed = true;
+            fn.rebuild_cfg_predecessors();
+            cfg_simplify_function(fn);
+            fn.rebuild_cfg_predecessors();
+            remove_dead_pure_instructions(fn);
+            fn.rebuild_cfg_predecessors();
+        }
+        if (!branches_folded) break;
     }
 
-    if (any_changed) {
-        fn.rebuild_cfg_predecessors();
-        cfg_simplify_function(fn);
-        fn.rebuild_cfg_predecessors();
-        remove_dead_pure_instructions(fn);
-        fn.rebuild_cfg_predecessors();
+    if (opts.enable_bce) {
+        LoopUnswitchOptions uo;
+        for (size_t round = 0; round < kMaxRounds; ++round) {
+            fn.rebuild_cfg_predecessors();
+            DominatorTree dom(fn);
+            LoopAnalysis loops(fn, dom);
+            bool unswitched = false;
+            for (LoopInfo* loop : loops.post_order_loops()) {
+                if (loop && unswitch_fast_slow_loop(fn, *loop, dom, uo)) {
+                    unswitched = true;
+                    any_changed = true;
+                    break;
+                }
+            }
+            if (!unswitched) break;
+        }
+        if (any_changed) {
+            fn.rebuild_cfg_predecessors();
+            remove_dead_pure_instructions(fn);
+            fn.rebuild_cfg_predecessors();
+        }
     }
 
     return any_changed;

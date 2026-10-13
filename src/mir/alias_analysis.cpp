@@ -324,6 +324,49 @@ bool AliasAnalysis::can_clobber(const Instruction* write_inst, const Instruction
         }
     }
 
+    // Indexed array payload stores through a pointer loaded from an object
+    // header (e.g., TypedArray data_ptr or ArrayBuffer backing store) cannot
+    // clobber fixed-offset header loads.
+    if (w_op == Opcode::store_indexed && r_op == Opcode::load &&
+        r.offset >= 0 && r.offset + static_cast<int64_t>(r.size) <= 64) {
+        auto strip_mask = [](const Value* v) -> const Value* {
+            if (v && v->is_instruction()) {
+                const Instruction* d = v->defining_instruction();
+                if (d && d->opcode() == Opcode::and_) return d->operand(0);
+            }
+            return v;
+        };
+        int64_t acc_r = 0;
+        const Value* br = get_underlying_base(r.ptr, acc_r);
+        const Value* br_unmasked = strip_mask(br);
+        auto is_payload_ptr = [&](auto& self, const Value* p, int depth) -> bool {
+            if (!p || !p->is_instruction() || depth > 6) return false;
+            if (p == r.ptr || p == br || p == br_unmasked) return false;
+            const Instruction* def = p->defining_instruction();
+            if (!def) return false;
+            if (def->opcode() == Opcode::load) return true;
+            if (def->opcode() == Opcode::and_) return self(self, def->operand(0), depth + 1);
+            if (def->opcode() == Opcode::add) {
+                int64_t c = 0;
+                if (get_const_integer_val(def->operand(1), c)) {
+                    if (c >= 40 && r.offset + static_cast<int64_t>(r.size) <= c &&
+                        (def->operand(0) == r.ptr || def->operand(0) == br)) {
+                        return true;
+                    }
+                    return self(self, def->operand(0), depth + 1);
+                }
+                return self(self, def->operand(0), depth + 1) || self(self, def->operand(1), depth + 1);
+            }
+            if (def->opcode() == Opcode::select) {
+                return self(self, def->operand(1), depth + 1) && self(self, def->operand(2), depth + 1);
+            }
+            return false;
+        };
+        if (is_payload_ptr(is_payload_ptr, w.ptr, 0)) {
+            return false;
+        }
+    }
+
     // A variable index can reach any byte of the object; only distinct
     // objects keep the accesses apart.
     return !are_distinct_objects(w.ptr, r.ptr);

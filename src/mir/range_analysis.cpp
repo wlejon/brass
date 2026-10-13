@@ -309,7 +309,12 @@ ValueRange RangeAnalysis::evaluate_instruction(
             const int64_t width_mask = inst->type() == Type::i32() ? 31 : 63;
             r1 = ValueRange::constant(r1.min_val & width_mask);
             if (op == Opcode::shl) return ValueRange::shl(r0, r1);
-            if (op == Opcode::lshr) return ValueRange::lshr(r0, r1);
+            if (op == Opcode::lshr) {
+                if (inst->type() == Type::i32() && r1.min_val > 0 && !r0.is_non_negative()) {
+                    return ValueRange::range(0, static_cast<int64_t>(UINT32_MAX >> r1.min_val));
+                }
+                return ValueRange::lshr(r0, r1);
+            }
             return ValueRange::ashr(r0, r1);
         }
         case Opcode::zext_i64: {
@@ -542,70 +547,112 @@ void RangeAnalysis::infer_loop_induction_variables(const LoopAnalysis& loops) {
 
         Value* cond = hdr_term->operand(0);
         if (!cond || !cond->is_instruction()) continue;
-        Instruction* cmp = cond->defining_instruction();
-        if (cmp && cmp->opcode() == Opcode::and_) {
-            // `a && b` holding says `a` holds; `a && b` failing says nothing
-            // about `a`, so only a body on the true edge learns from it.
-            if (!body_is_true) continue;
-            if (cmp->operand(0) && cmp->operand(0)->is_instruction() && is_comparison(cmp->operand(0)->defining_instruction()->opcode())) {
-                cmp = cmp->operand(0)->defining_instruction();
-            } else if (cmp->operand(1) && cmp->operand(1)->is_instruction() && is_comparison(cmp->operand(1)->defining_instruction()->opcode())) {
-                cmp = cmp->operand(1)->defining_instruction();
+        auto is_bool_tree = [](auto& self, const Value* v, int depth) -> bool {
+            if (!v || !v->is_instruction() || depth > 5) return false;
+            const Instruction* d = v->defining_instruction();
+            if (!d) return false;
+            if (is_comparison(d->opcode())) return true;
+            int64_t c = 0;
+            if (get_const_int(v, c)) return c == 0 || c == 1;
+            if ((d->opcode() == Opcode::and_ || d->opcode() == Opcode::or_) && d->operand_count() == 2) {
+                return self(self, d->operand(0), depth + 1) && self(self, d->operand(1), depth + 1);
             }
-        }
-        if (!cmp || !is_comparison(cmp->opcode())) continue;
-
-        Opcode cmp_op = body_is_true ? cmp->opcode() : invert_comparison_opcode(cmp->opcode());
-        Value* cmp_lhs = cmp->operand(0);
-        Value* cmp_rhs = cmp->operand(1);
-        if (!is_int_value(cmp_lhs) || !is_int_value(cmp_rhs)) continue;
-
-        for (size_t i = 0; i < header->param_count(); ++i) {
-            Value* param = header->param(i);
-            if (param != cmp_lhs || !loop->is_loop_invariant(cmp_rhs)) continue;
-            Value* init_v = ph_bt->args[i];
-            Value* step_v = latch_bt->args[i];
-            if (!step_v || !step_v->is_instruction()) continue;
-            Instruction* sdef = step_v->defining_instruction();
-            if (!sdef || sdef->opcode() != Opcode::add) continue;
-            Value* sop0 = sdef->operand(0);
-            Value* sop1 = sdef->operand(1);
-            Value* step_c_v = (sop0 == param) ? sop1 : ((sop1 == param) ? sop0 : nullptr);
-            int64_t step_c = 0;
-            if (!step_c_v || !get_const_int(step_c_v, step_c) || step_c <= 0) continue;
-
-            const bool strict = cmp_op == Opcode::slt || cmp_op == Opcode::ult;
-            const bool non_strict = cmp_op == Opcode::sle || cmp_op == Opcode::ule;
-            if (!strict && !non_strict) continue;
-            const bool is_unsigned = cmp_op == Opcode::ult || cmp_op == Opcode::ule;
-
-            const ValueRange init_r = get_range(init_v);
-            const ValueRange lim_r = get_range(cmp_rhs);
-            if (init_r.is_empty() || lim_r.is_empty()) continue;
-            // Unsigned bounds agree with signed ones only for non-negative values.
-            if (is_unsigned && (init_r.min_val < 0 || lim_r.min_val < 0)) continue;
-
-            // Largest value the body sees, and the largest the step can then
-            // produce. If that step could wrap, the variable can come back
-            // around below its start and none of this holds.
-            const int64_t type_max = param->type() == Type::i32() ? INT32_MAX : INT64_MAX;
-            const int64_t body_max = strict ? sat_sub(lim_r.max_val, 1) : lim_r.max_val;
-            if (body_max > type_max - step_c) continue;
-            const int64_t after_step_max = body_max + step_c;
-
-            // Every value the header sees is the start value or one step past
-            // a value the body saw.
-            ValueRange header_r = ValueRange::range(init_r.min_val, std::max(init_r.max_val, after_step_max));
-            ValueRange body_r = ValueRange::range(init_r.min_val, body_max);
-
-            auto global_it = global_ranges_.find(param);
-            if (global_it != global_ranges_.end()) {
-                header_r.intersect_with(global_it->second);
-                body_r.intersect_with(global_it->second);
+            return false;
+        };
+        std::vector<std::pair<Instruction*, bool>> cmps;
+        auto collect_cmps = [&](auto& self, Value* v, bool is_true, int depth) -> void {
+            if (!v || !v->is_instruction() || depth > 4) return;
+            Instruction* def = v->defining_instruction();
+            if (!def) return;
+            if (def->opcode() == Opcode::and_ && is_true && is_bool_tree(is_bool_tree, v, 0)) {
+                self(self, def->operand(0), true, depth + 1);
+                self(self, def->operand(1), true, depth + 1);
+            } else if (def->opcode() == Opcode::or_ && !is_true) {
+                self(self, def->operand(0), false, depth + 1);
+                self(self, def->operand(1), false, depth + 1);
+            } else if (is_comparison(def->opcode())) {
+                cmps.emplace_back(def, is_true);
             }
-            global_ranges_[param] = header_r;
-            for (BasicBlock* lbb : loop->blocks()) {
-                block_ranges_[lbb][param] = (lbb == header) ? header_r : body_r;
+        };
+        collect_cmps(collect_cmps, cond, body_is_true, 0);
+        if (cmps.empty()) continue;
+
+        auto commute_op = [](Opcode op) noexcept -> Opcode {
+            switch (op) {
+                case Opcode::slt: return Opcode::sgt;
+                case Opcode::sle: return Opcode::sge;
+                case Opcode::sgt: return Opcode::slt;
+                case Opcode::sge: return Opcode::sle;
+                case Opcode::ult: return Opcode::ugt;
+                case Opcode::ule: return Opcode::uge;
+                case Opcode::ugt: return Opcode::ult;
+                case Opcode::uge: return Opcode::ule;
+                default: return op;
+            }
+        };
+
+        for (const auto& [cmp, cmp_true] : cmps) {
+            Opcode base_op = cmp_true ? cmp->opcode() : invert_comparison_opcode(cmp->opcode());
+            Value* raw_lhs = cmp->operand(0);
+            Value* raw_rhs = cmp->operand(1);
+            if (!is_int_value(raw_lhs) || !is_int_value(raw_rhs)) continue;
+
+            for (size_t i = 0; i < header->param_count(); ++i) {
+                Value* param = header->param(i);
+                Opcode cmp_op = base_op;
+                Value* cmp_rhs = nullptr;
+                if (param == raw_lhs && loop->is_loop_invariant(raw_rhs)) {
+                    cmp_rhs = raw_rhs;
+                } else if (param == raw_rhs && loop->is_loop_invariant(raw_lhs)) {
+                    cmp_rhs = raw_lhs;
+                    cmp_op = commute_op(base_op);
+                } else {
+                    continue;
+                }
+                Value* init_v = ph_bt->args[i];
+                Value* step_v = latch_bt->args[i];
+                if (!step_v || !step_v->is_instruction()) continue;
+                Instruction* sdef = step_v->defining_instruction();
+                if (!sdef || sdef->opcode() != Opcode::add) continue;
+                Value* sop0 = sdef->operand(0);
+                Value* sop1 = sdef->operand(1);
+                Value* step_c_v = (sop0 == param) ? sop1 : ((sop1 == param) ? sop0 : nullptr);
+                int64_t step_c = 0;
+                if (!step_c_v || !get_const_int(step_c_v, step_c) || step_c <= 0) continue;
+
+                const bool strict = cmp_op == Opcode::slt || cmp_op == Opcode::ult;
+                const bool non_strict = cmp_op == Opcode::sle || cmp_op == Opcode::ule;
+                if (!strict && !non_strict) continue;
+                const bool is_unsigned = cmp_op == Opcode::ult || cmp_op == Opcode::ule;
+
+                const ValueRange init_r = get_range(init_v);
+                const ValueRange lim_r = get_range(cmp_rhs);
+                if (init_r.is_empty() || lim_r.is_empty()) continue;
+                // Unsigned bounds agree with signed ones only for non-negative values.
+                if (is_unsigned && (init_r.min_val < 0 || lim_r.min_val < 0)) continue;
+
+                // Largest value the body sees, and the largest the step can then
+                // produce. If that step could wrap, the variable can come back
+                // around below its start and none of this holds.
+                const int64_t type_max = param->type() == Type::i32() ? INT32_MAX : INT64_MAX;
+                const int64_t body_max = strict ? sat_sub(lim_r.max_val, 1) : lim_r.max_val;
+                if (body_max > type_max - step_c) continue;
+                const int64_t after_step_max = body_max + step_c;
+
+                // Every value the header sees is the start value or one step past
+                // a value the body saw.
+                ValueRange header_r = ValueRange::range(init_r.min_val, std::max(init_r.max_val, after_step_max));
+                ValueRange body_r = ValueRange::range(init_r.min_val, body_max);
+
+                auto global_it = global_ranges_.find(param);
+                if (global_it != global_ranges_.end()) {
+                    header_r.intersect_with(global_it->second);
+                    body_r.intersect_with(global_it->second);
+                }
+                global_ranges_[param] = header_r;
+                for (BasicBlock* lbb : loop->blocks()) {
+                    block_ranges_[lbb][param] = (lbb == header) ? header_r : body_r;
+                }
             }
         }
     }

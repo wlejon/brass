@@ -158,7 +158,7 @@ PassStep jump_threading(const LoopOptOptions& options, bool cfg_follow_up) {
 PassStep bce(std::string name, bool dump_stats, RangeAnalysisStats* stats, bool cleanup_follow_up,
              FunctionFilter filter) {
     std::function<bool(Function&)> follow;
-    if (cleanup_follow_up) follow = [](Function& fn) { return scalar_cleanup(fn); };
+    if (cleanup_follow_up) follow = [](Function& fn) { return brass::loop_cleanup(fn); };
     return function_step(std::move(name), filter, [=](Function& fn) {
         if (!fn.parent()) return false;
         RangeAnalysisOptions o;

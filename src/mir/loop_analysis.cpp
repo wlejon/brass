@@ -253,6 +253,24 @@ BasicBlock* LoopAnalysis::ensure_preheader(Function& fn, LoopInfo& loop) {
         blocks.push_back(preheader);
     }
 
+    if (outside_preds.size() == 1) {
+        Instruction* term = outside_preds[0]->terminator();
+        if (term && term->opcode() == Opcode::br_if &&
+            (term->true_target().block == header) != (term->false_target().block == header)) {
+            BranchTarget& edge = (term->true_target().block == header) ? term->true_target() : term->false_target();
+            std::vector<Value*> edge_args = std::move(edge.args);
+            edge.args.clear();
+            edge.block = preheader;
+            Instruction* br_inst = fn.parent() ? fn.parent()->arena().make<Instruction>(Opcode::br, Type::void_type())
+                                               : new Instruction(Opcode::br, Type::void_type());
+            br_inst->set_branch_target(BranchTarget(header, std::move(edge_args)));
+            preheader->append_instruction(br_inst);
+            fn.rebuild_cfg_predecessors();
+            loop.set_preheader(preheader);
+            return preheader;
+        }
+    }
+
     // Create block parameters in preheader matching header's parameters
     std::vector<Value*> ph_params;
     ph_params.reserve(header->param_count());

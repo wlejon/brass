@@ -151,7 +151,7 @@ bool verify_vector_instruction(
                 return false;
             }
             Type base_t = inst->operand(0)->type();
-            if (!base_t.is_pointer_or_gcref()) {
+            if (!base_t.is_pointer_or_gcref() && base_t != Type::i64()) {
                 report_error(inst_prefix + "Base operand must be pointer or gcref.");
                 return false;
             }
@@ -172,7 +172,7 @@ bool verify_vector_instruction(
                 return false;
             }
             Type base_t = inst->operand(0)->type();
-            if (!base_t.is_pointer_or_gcref()) {
+            if (!base_t.is_pointer_or_gcref() && base_t != Type::i64()) {
                 report_error(inst_prefix + "Base operand must be pointer or gcref.");
                 return false;
             }
