@@ -133,7 +133,7 @@ void record_loop_stats(
             }
         }
 
-        if (f64_param_count > 0 && demoted_param_count == f64_param_count && f64_param_count == header->param_count()) {
+        if (demoted_param_count > 0) {
             rec.demoted = true;
             rec.refusal_reason = DemoteRefusalReason::None;
         } else {

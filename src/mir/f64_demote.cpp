@@ -160,13 +160,16 @@ bool is_unprofitable_loop(const LoopInfo* loop, const Function& fn) {
 
     bool has_div_in_loop = false;
     bool has_variable_mod = false;
+    bool has_fptosi = false;
 
     for (const BasicBlock* bb : loop->blocks()) {
         if (!bb) continue;
         for (const Instruction* inst : *bb) {
             if (!inst) continue;
             Opcode op = inst->opcode();
-            if (op == Opcode::sdiv || op == Opcode::udiv) {
+            if (op == Opcode::fptosi_i32 || op == Opcode::fptosi_i64) {
+                has_fptosi = true;
+            } else if (op == Opcode::sdiv || op == Opcode::udiv) {
                 has_div_in_loop = true;
             } else if (op == Opcode::smod || op == Opcode::umod || (callee_has_role(*inst, SymbolRole::FloatRem))) {
                 if (inst->operand_count() >= 2) {
@@ -178,6 +181,8 @@ bool is_unprofitable_loop(const LoopInfo* loop, const Function& fn) {
             }
         }
     }
+
+    if (has_fptosi) return false;
 
     bool has_f64_boundary = false;
     if (fn.return_type() == Type::f64()) has_f64_boundary = true;
@@ -198,6 +203,107 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
     fn.rebuild_cfg_predecessors();
     DominatorTree dom(fn);
     LoopAnalysis loop_analysis(fn, dom);
+
+    // 0. Canonicalize loop-invariant f64 bounds on array-indexing loops so
+    // counted f64 loops with runtime f64 bounds (e.g. `i < n_f64`) have a
+    // provably bounded i32 upper bound in the preheader.
+    bool canonicalized_bounds = false;
+    if (fn.parent()) {
+        for (LoopInfo* loop : loop_analysis.post_order_loops()) {
+            if (!loop || !loop->header() || loop->latches().size() != 1) continue;
+            BasicBlock* header = loop->header();
+            BasicBlock* ph = loop->preheader();
+            if (!ph) {
+                for (BasicBlock* pred : header->predecessors()) {
+                    if (pred && !loop->contains(pred)) {
+                        if (ph) { ph = nullptr; break; }
+                        ph = pred;
+                    }
+                }
+            }
+            if (!ph || is_unprofitable_loop(loop, fn)) continue;
+            bool loop_has_fptosi = false;
+            for (const BasicBlock* bb : loop->blocks()) {
+                if (!bb) continue;
+                for (const Instruction* inst : *bb) {
+                    if (inst && (inst->opcode() == Opcode::fptosi_i32 || inst->opcode() == Opcode::fptosi_i64)) {
+                        loop_has_fptosi = true;
+                        break;
+                    }
+                }
+                if (loop_has_fptosi) break;
+            }
+            if (!loop_has_fptosi) continue;
+            BasicBlock* latch = loop->latches()[0];
+            Instruction* ph_term = ph->terminator();
+            Instruction* latch_term = latch ? latch->terminator() : nullptr;
+            Instruction* hdr_term = header->terminator();
+            if (!ph_term || ph_term->opcode() != Opcode::br || ph_term->branch_target().block != header) continue;
+            if (!latch_term || latch_term->opcode() != Opcode::br || latch_term->branch_target().block != header) continue;
+            if (!hdr_term || hdr_term->opcode() != Opcode::br_if || !hdr_term->operand(0) || !hdr_term->operand(0)->is_instruction()) continue;
+
+            const bool stay_true = loop->contains(hdr_term->true_target().block);
+            const bool stay_false = loop->contains(hdr_term->false_target().block);
+            if (stay_true == stay_false) continue;
+
+            Instruction* hdr_cmp = hdr_term->operand(0)->defining_instruction();
+            if (!hdr_cmp || hdr_cmp->operand_count() != 2) continue;
+
+            for (size_t i = 0; i < header->param_count(); ++i) {
+                Value* p = header->param(i);
+                if (!p || p->type() != Type::f64()) continue;
+                if (i >= ph_term->branch_target().args.size() || i >= latch_term->branch_target().args.size()) continue;
+                Value* init_v = ph_term->branch_target().args[i];
+                if (!init_v || !init_v->is_instruction() || init_v->defining_instruction()->opcode() != Opcode::fconst_f64) continue;
+                const double init_f = init_v->defining_instruction()->imm_f64();
+                if (!is_safe_integer_f64(init_f) || init_f < 0.0 || init_f > 2147483647.0) continue;
+
+                Value* step_v = latch_term->branch_target().args[i];
+                if (!step_v || !step_v->is_instruction() || step_v->defining_instruction()->opcode() != Opcode::add) continue;
+                Instruction* sdef = step_v->defining_instruction();
+                Value* step_c = (sdef->operand(0) == p) ? sdef->operand(1) : ((sdef->operand(1) == p) ? sdef->operand(0) : nullptr);
+                if (!step_c || !step_c->is_instruction() || step_c->defining_instruction()->opcode() != Opcode::fconst_f64 ||
+                    step_c->defining_instruction()->imm_f64() != 1.0) {
+                    continue;
+                }
+
+                const size_t lim_idx = (hdr_cmp->operand(0) == p) ? 1 : ((hdr_cmp->operand(1) == p) ? 0 : 2);
+                if (lim_idx > 1) continue;
+                const bool is_p_lt_lim = (lim_idx == 1)
+                    ? (stay_true ? hdr_cmp->opcode() == Opcode::slt : hdr_cmp->opcode() == Opcode::sge)
+                    : (stay_true ? hdr_cmp->opcode() == Opcode::sgt : hdr_cmp->opcode() == Opcode::sle);
+                if (!is_p_lt_lim) continue;
+
+                Value* limit_v = hdr_cmp->operand(lim_idx);
+                if (!limit_v || limit_v->type() != Type::f64() || !loop->is_loop_invariant(limit_v)) continue;
+                if (limit_v->is_instruction()) {
+                    const Instruction* ldef = limit_v->defining_instruction();
+                    const Opcode lop = ldef->opcode();
+                    if (lop == Opcode::fconst_f64 || lop == Opcode::sitofp_f64_i32 || lop == Opcode::sitofp_f64_i64) {
+                        continue;
+                    }
+                    if (!ldef->parent() || !dom.dominates(ldef->parent(), ph)) continue;
+                } else if (limit_v->is_block_param()) {
+                    if (!limit_v->defining_block() || !dom.dominates(limit_v->defining_block(), ph)) continue;
+                }
+
+                Builder ph_b(*fn.parent());
+                ph_b.set_function(&fn);
+                ph_b.position_before(ph_term);
+                Value* ceil_lim = ph_b.build_ceil_f64(limit_v);
+                Value* init_f_v = ph_b.build_fconst_f64(init_f);
+                Value* max_i32_f = ph_b.build_fconst_f64(2147483647.0);
+                Value* gt_init = ph_b.build_sgt(ceil_lim, init_f_v);
+                Value* le_max = ph_b.build_sle(ceil_lim, max_i32_f);
+                Value* clamped_f = ph_b.build_select(le_max, ceil_lim, max_i32_f);
+                Value* safe_f = ph_b.build_select(gt_init, clamped_f, init_f_v);
+                Value* lim_i32 = ph_b.build_fptosi_i32(safe_f);
+                Value* exact_lim = ph_b.build_sitofp_f64_i32(lim_i32);
+                hdr_cmp->set_operand(lim_idx, exact_lim);
+                canonicalized_bounds = true;
+            }
+        }
+    }
 
     std::unordered_set<const Value*> exact_ints;
     std::unordered_set<const Value*> entry_params;
@@ -341,26 +447,49 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
     }
     };
     propagate_exactness();
-    while (drop_unprovable_exact_values(fn, dom, loop_analysis, exact_ints)) {
+    std::unordered_set<const Value*> i32_bounded;
+    while (drop_unprovable_exact_values(fn, dom, loop_analysis, exact_ints, &i32_bounded)) {
+        i32_bounded.clear();
         propagate_exactness();
     }
 
-    // 2.5 All-or-nothing loop filtering & Profitability Filtering:
+    // 2.5 Loop filtering & Profitability Filtering:
+    std::unordered_set<const BasicBlock*> all_loop_blocks;
     for (LoopInfo* loop : loop_analysis.post_order_loops()) {
         if (!loop || !loop->header()) continue;
+        for (const BasicBlock* bb : loop->blocks()) all_loop_blocks.insert(bb);
         BasicBlock* header = loop->header();
-        bool all_header_params_exact = true;
+        bool any_header_param_exact = false;
         for (size_t i = 0; i < header->param_count(); ++i) {
             Value* p = header->param(i);
-            if (!p || !exact_ints.count(p)) {
-                all_header_params_exact = false;
+            if (p && exact_ints.count(p)) {
+                any_header_param_exact = true;
                 break;
             }
         }
-
-        if (!all_header_params_exact || is_unprofitable_loop(loop, fn)) {
+        bool has_exact_fptosi = false;
+        if (!any_header_param_exact) {
             for (BasicBlock* bb : loop->blocks()) {
                 if (!bb) continue;
+                for (Instruction* inst : *bb) {
+                    if (inst && (inst->opcode() == Opcode::fptosi_i32 || inst->opcode() == Opcode::fptosi_i64) &&
+                        inst->operand_count() >= 1 && exact_ints.count(inst->operand(0))) {
+                        has_exact_fptosi = true;
+                        break;
+                    }
+                }
+                if (has_exact_fptosi) break;
+            }
+        }
+
+        if ((!any_header_param_exact && !has_exact_fptosi) || is_unprofitable_loop(loop, fn)) {
+            for (BasicBlock* bb : loop->blocks()) {
+                if (!bb) continue;
+                bool in_sub = false;
+                for (const auto& sub : loop->sub_loops()) {
+                    if (sub && sub->contains(bb)) { in_sub = true; break; }
+                }
+                if (in_sub) continue;
                 for (size_t i = 0; i < bb->param_count(); ++i) {
                     Value* p = bb->param(i);
                     if (p) exact_ints.erase(p);
@@ -375,10 +504,10 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
     }
 
     // 3. Relevance Filtering:
-    // Only demote values that are connected to loop headers in exact_ints, modulo, or proven exact division
+    // Demote values connected to loop headers in exact_ints, loop index fptosi conversions, modulo, or proven exact division
     std::unordered_set<const Value*> relevant_demote;
 
-    // Seed roots: loop header parameters in exact_ints, `frem` calls, proven sdiv
+    // Seed roots: loop header parameters in exact_ints, loop `fptosi`, `frem` calls, proven sdiv
     for (LoopInfo* loop : loop_analysis.post_order_loops()) {
         if (!loop || !loop->header()) continue;
         BasicBlock* header = loop->header();
@@ -392,6 +521,7 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
 
     for (const BasicBlock* bb : fn.blocks()) {
         if (!bb) continue;
+        const bool in_loop = (all_loop_blocks.count(bb) != 0);
         for (const Instruction* inst : *bb) {
             if (!inst) continue;
             Opcode op = inst->opcode();
@@ -403,6 +533,12 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
                 if (inst->result() && exact_ints.count(inst->result())) {
                     relevant_demote.insert(inst->result());
                 }
+            } else if (in_loop && (op == Opcode::fptosi_i32 || op == Opcode::fptosi_i64) && inst->operand_count() >= 1) {
+                const Value* opd = inst->operand(0);
+                if (opd && exact_ints.count(opd) &&
+                    !(opd->is_instruction() && opd->defining_instruction()->opcode() == Opcode::fconst_f64)) {
+                    relevant_demote.insert(opd);
+                }
             }
         }
     }
@@ -411,8 +547,13 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
         if (options.stats) {
             record_loop_stats(fn, loop_analysis, {}, options.stats);
         }
-        return false;
+        return canonicalized_bounds;
     }
+
+    auto is_non_const_relevant = [&](const Value* v) -> bool {
+        return v && relevant_demote.count(v) &&
+               !(v->is_instruction() && v->defining_instruction()->opcode() == Opcode::fconst_f64);
+    };
 
     // Propagate backward and forward across dataflow
     bool rel_changed = true;
@@ -431,6 +572,16 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
                             relevant_demote.insert(opd);
                             rel_changed = true;
                         }
+                    }
+                } else if (is_comparison(inst->opcode()) && inst->operand_count() == 2) {
+                    const Value* op0 = inst->operand(0);
+                    const Value* op1 = inst->operand(1);
+                    if (is_non_const_relevant(op0) && op1 && exact_ints.count(op1) && !relevant_demote.count(op1)) {
+                        relevant_demote.insert(op1);
+                        rel_changed = true;
+                    } else if (is_non_const_relevant(op1) && op0 && exact_ints.count(op0) && !relevant_demote.count(op0)) {
+                        relevant_demote.insert(op0);
+                        rel_changed = true;
                     }
                 }
 
@@ -459,7 +610,7 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
             }
         }
 
-        // Forward propagation: if all operands of an exact arithmetic op are relevant, the result is relevant
+        // Forward propagation: if an exact arithmetic op uses a non-constant relevant value and exact operands, its result is relevant
         for (const BasicBlock* bb : fn.blocks()) {
             if (!bb) continue;
             for (const Instruction* inst : *bb) {
@@ -469,15 +620,17 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
 
                 Opcode op = inst->opcode();
                 if (op == Opcode::add || op == Opcode::sub || op == Opcode::mul || op == Opcode::neg) {
-                    bool all_ops_rel = true;
+                    bool any_non_const_rel = false;
+                    bool all_ops_exact = true;
                     for (size_t i = 0; i < inst->operand_count(); ++i) {
                         const Value* o = inst->operand(i);
-                        if (!o || (!relevant_demote.count(o) && !o->type().is_integer() && !entry_params.count(o))) {
-                            all_ops_rel = false;
+                        if (is_non_const_relevant(o)) any_non_const_rel = true;
+                        if (!o || (!exact_ints.count(o) && !o->type().is_integer() && !entry_params.count(o))) {
+                            all_ops_exact = false;
                             break;
                         }
                     }
-                    if (all_ops_rel) {
+                    if (any_non_const_rel && all_ops_exact) {
                         relevant_demote.insert(res);
                         rel_changed = true;
                     }
@@ -498,7 +651,7 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
         record_loop_stats(fn, loop_analysis, demote_set, options.stats);
     }
 
-    if (demote_set.empty()) return false;
+    if (demote_set.empty()) return canonicalized_bounds;
 
     Builder b(*fn.parent());
     b.set_function(&fn);
@@ -597,9 +750,15 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
                 } else if (op == Opcode::sitofp_f64_i32) {
                     inst->set_opcode(Opcode::sext_i64);
                 } else if (op == Opcode::sitofp_f64_i64) {
+                    if (i32_bounded.count(inst->result()) && inst->operand(0)) {
+                        i32_bounded.insert(inst->operand(0));
+                    }
                     replace_all_uses(fn, inst->result(), inst->operand(0));
                     dead_instructions.push_back(inst);
                 } else if (op == Opcode::bitcast_i64_f64 || op == Opcode::bitcast_f64_i64) {
+                    if (i32_bounded.count(inst->result()) && inst->operand(0)) {
+                        i32_bounded.insert(inst->operand(0));
+                    }
                     replace_all_uses(fn, inst->result(), inst->operand(0));
                     dead_instructions.push_back(inst);
                 }
@@ -689,52 +848,38 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
             } else if (op == Opcode::add || op == Opcode::sub || op == Opcode::mul ||
                        op == Opcode::sdiv || op == Opcode::udiv || op == Opcode::smod ||
                        op == Opcode::umod || op == Opcode::neg) {
-                if (inst->type() == Type::f64()) {
+                if (inst->type() == Type::f64() || inst->type() == Type::i64()) {
+                    const bool want_f64 = (inst->type() == Type::f64());
                     for (size_t op_i = 0; op_i < inst->operand_count(); ++op_i) {
                         Value* o = inst->operand(op_i);
-                        if (o && o->type() == Type::i64()) {
+                        if (!o) continue;
+                        if (want_f64 && o->type() == Type::i64()) {
                             b.position_before(inst);
-                            Value* conv = b.build_sitofp_f64_i64(o);
-                            inst->set_operand(op_i, conv);
-                        }
-                    }
-                } else if (inst->type() == Type::i64()) {
-                    for (size_t op_i = 0; op_i < inst->operand_count(); ++op_i) {
-                        Value* o = inst->operand(op_i);
-                        if (o && o->type() == Type::f64()) {
+                            inst->set_operand(op_i, b.build_sitofp_f64_i64(o));
+                        } else if (!want_f64 && o->type() == Type::f64()) {
                             b.position_before(inst);
-                            Value* conv = b.build_fptosi_i64(o);
-                            inst->set_operand(op_i, conv);
+                            inst->set_operand(op_i, b.build_fptosi_i64(o));
                         }
                     }
                 }
-            } else if (op == Opcode::fptosi_i64) {
-                if (inst->operand(0) && inst->operand(0)->type() == Type::i64()) {
+            } else if (op == Opcode::fptosi_i64 && inst->operand(0)) {
+                if (inst->operand(0)->type() == Type::i64()) {
                     replace_all_uses(fn, inst->result(), inst->operand(0));
                     bb->remove_instruction(inst);
-                } else if (inst->operand(0) && inst->operand(0)->type() == Type::i32()) {
+                } else if (inst->operand(0)->type() == Type::i32()) {
                     b.position_before(inst);
-                    Value* conv = b.build_sext_i64(inst->operand(0));
-                    replace_all_uses(fn, inst->result(), conv);
+                    replace_all_uses(fn, inst->result(), b.build_sext_i64(inst->operand(0)));
                     bb->remove_instruction(inst);
                 }
-            } else if (op == Opcode::fptosi_i32) {
-                if (inst->operand(0) && inst->operand(0)->type() == Type::i64()) {
-                    inst->set_opcode(Opcode::trunc_i32);
-                }
-            } else if (op == Opcode::trunc_i32) {
-                if (inst->operand(0) && inst->operand(0)->type() == Type::f64()) {
-                    inst->set_opcode(Opcode::fptosi_i32);
-                }
-            } else if (op == Opcode::bitcast_i64_f64) {
-                if (inst->operand(0) && inst->operand(0)->type() == Type::i64()) {
-                    b.position_before(inst);
-                    Value* conv = b.build_sitofp_f64_i64(inst->operand(0));
-                    inst->set_operand(0, conv);
-                }
+            } else if (op == Opcode::fptosi_i32 && inst->operand(0) && inst->operand(0)->type() == Type::i64()) {
+                inst->set_opcode(Opcode::trunc_i32);
+            } else if (op == Opcode::trunc_i32 && inst->operand(0) && inst->operand(0)->type() == Type::f64()) {
+                inst->set_opcode(Opcode::fptosi_i32);
+            } else if (op == Opcode::bitcast_i64_f64 && inst->operand(0) && inst->operand(0)->type() == Type::i64()) {
+                b.position_before(inst);
+                inst->set_operand(0, b.build_sitofp_f64_i64(inst->operand(0)));
             }
 
-            // Fix branch target arguments
             auto fix_target_args = [&](BranchTarget& target) {
                 if (!target.block) return;
                 for (size_t i = 0; i < target.args.size() && i < target.block->param_count(); ++i) {
@@ -743,27 +888,89 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
                     if (!arg || !param) continue;
                     if (arg->type() == Type::i64() && param->type() == Type::f64()) {
                         b.position_before(inst);
-                        Value* conv = b.build_sitofp_f64_i64(arg);
-                        target.args[i] = conv;
+                        target.args[i] = b.build_sitofp_f64_i64(arg);
                     } else if (arg->type() == Type::f64() && param->type() == Type::i64()) {
                         b.position_before(inst);
-                        Value* conv = b.build_fptosi_i64(arg);
-                        target.args[i] = conv;
+                        target.args[i] = b.build_fptosi_i64(arg);
                     }
                 }
             };
 
-            if (op == Opcode::br) {
-                fix_target_args(inst->branch_target());
-            } else if (op == Opcode::br_if) {
-                fix_target_args(inst->true_target());
-                fix_target_args(inst->false_target());
-            } else if (op == Opcode::switch_) {
+            if (op == Opcode::br) fix_target_args(inst->branch_target());
+            else if (op == Opcode::br_if) { fix_target_args(inst->true_target()); fix_target_args(inst->false_target()); }
+            else if (op == Opcode::switch_) {
                 fix_target_args(inst->default_target());
                 for (auto& sc : inst->switch_cases()) fix_target_args(sc.target);
             }
-
             inst = next;
+        }
+    }
+
+    // 8. Fold redundant i32/i64 roundtrip casts and integer self-comparisons
+    auto is_i32_valued = [&](const Value* v) -> bool {
+        if (!v || v->type() != Type::i64()) return false;
+        if (i32_bounded.count(v) != 0) return true;
+        if (!v->is_instruction()) return false;
+        const Instruction* d = v->defining_instruction();
+        return d->opcode() == Opcode::sext_i64 ||
+               (d->opcode() == Opcode::iconst_i64 && d->imm_i64() >= -2147483648LL && d->imm_i64() <= 2147483647LL);
+    };
+    auto same_int_val = [](const Value* a, const Value* b) -> bool {
+        if (a == b) return a != nullptr;
+        if (!a || !b || !a->is_instruction() || !b->is_instruction()) return false;
+        const Instruction* da = a->defining_instruction();
+        const Instruction* db = b->defining_instruction();
+        return (da->opcode() == Opcode::sext_i64 || da->opcode() == Opcode::zext_i64) &&
+               da->opcode() == db->opcode() && da->operand(0) == db->operand(0);
+    };
+
+    for (BasicBlock* bb : fn.blocks()) {
+        if (!bb) continue;
+        for (Instruction* inst = bb->head(); inst != nullptr;) {
+            Instruction* next = inst->next();
+            Opcode op = inst->opcode();
+            if (op == Opcode::trunc_i32 && inst->operand_count() == 1 && inst->operand(0) && inst->operand(0)->is_instruction()) {
+                Instruction* def = inst->operand(0)->defining_instruction();
+                if ((def->opcode() == Opcode::sext_i64 || def->opcode() == Opcode::zext_i64) &&
+                    def->operand(0) && def->operand(0)->type() == Type::i32()) {
+                    replace_all_uses(fn, inst->result(), def->operand(0));
+                    bb->remove_instruction(inst);
+                }
+            } else if (op == Opcode::sext_i64 && inst->operand_count() == 1 && inst->operand(0) && inst->operand(0)->is_instruction()) {
+                Instruction* def = inst->operand(0)->defining_instruction();
+                if (def->opcode() == Opcode::trunc_i32 && is_i32_valued(def->operand(0))) {
+                    replace_all_uses(fn, inst->result(), def->operand(0));
+                    bb->remove_instruction(inst);
+                }
+            } else if ((op == Opcode::eq || op == Opcode::ne) && inst->operand_count() == 2 &&
+                       same_int_val(inst->operand(0), inst->operand(1)) &&
+                       inst->operand(0)->type().is_integer() && inst->type() == Type::i32()) {
+                b.position_before(inst);
+                replace_all_uses(fn, inst->result(), b.build_iconst_i32(op == Opcode::eq ? 1 : 0));
+                bb->remove_instruction(inst);
+            }
+            inst = next;
+        }
+    }
+
+    auto use_counts = compute_use_counts(fn);
+    for (auto bit = fn.blocks().rbegin(); bit != fn.blocks().rend(); ++bit) {
+        BasicBlock* bb = *bit;
+        if (!bb) continue;
+        for (Instruction* cur = bb->tail(); cur != nullptr;) {
+            Instruction* prev = cur->prev();
+            if (!cur->has_side_effects() && cur->produces_value()) {
+                Value* res = cur->result();
+                auto it = res ? use_counts.find(res) : use_counts.end();
+                if (!res || it == use_counts.end() || it->second == 0) {
+                    for_each_use(*cur, [&](const Value* u) {
+                        auto uit = use_counts.find(u);
+                        if (uit != use_counts.end() && uit->second > 0) --uit->second;
+                    });
+                    bb->remove_instruction(cur);
+                }
+            }
+            cur = prev;
         }
     }
 
@@ -774,9 +981,7 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
 bool f64_demote_module_pass(Module& mod, const F64DemoteOptions& options) {
     bool changed = false;
     for (Function* fn : mod.functions()) {
-        if (fn) {
-            changed |= f64_demote_pass(*fn, options);
-        }
+        if (fn) changed |= f64_demote_pass(*fn, options);
     }
     return changed;
 }

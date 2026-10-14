@@ -16,7 +16,8 @@ bool is_unprofitable_loop(const LoopInfo* loop, const Function& fn);
 // -0.0, the conditions under which its i64 image computes the same thing.
 // Returns whether anything was removed.
 bool drop_unprovable_exact_values(const Function& fn, const DominatorTree& dom, const LoopAnalysis& loops,
-                                  std::unordered_set<const Value*>& exact_ints);
+                                  std::unordered_set<const Value*>& exact_ints,
+                                  std::unordered_set<const Value*>* i32_bounded = nullptr);
 
 void record_loop_stats(
     Function& fn,

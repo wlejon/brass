@@ -71,6 +71,9 @@ bool is_pure_unswitch_inst(const Instruction* inst) {
         case Opcode::iconst_i32: case Opcode::iconst_i64: case Opcode::fconst_f64:
         case Opcode::patchable_const_i32: case Opcode::patchable_const_i64:
         case Opcode::sext_i64: case Opcode::zext_i64: case Opcode::trunc_i32:
+        case Opcode::fptosi_i32: case Opcode::fptosi_i64:
+        case Opcode::sitofp_f64_i32: case Opcode::sitofp_f64_i64:
+        case Opcode::ceil_f64: case Opcode::floor_f64:
         case Opcode::bitcast_i64_f64: case Opcode::bitcast_f64_i64:
         case Opcode::bitcast_i32_f32: case Opcode::bitcast_f32_i32:
         case Opcode::add: case Opcode::sub: case Opcode::mul: case Opcode::neg:
@@ -391,13 +394,21 @@ bool unswitch_fast_slow_loop(
     }
     if (fast_branches.empty()) return false;
 
+    bool need_limit_24bit = false;
     auto match_iv_affine = [&](Value* v, AffineIvExpr& out) -> bool {
         out = AffineIvExpr{};
-        auto strip_ext = [](Value* x) -> Value* {
+        auto strip_ext = [&](Value* x) -> Value* {
             while (x && x->is_instruction()) {
                 Instruction* d = x->defining_instruction();
-                if (d && (d->opcode() == Opcode::sext_i64 || d->opcode() == Opcode::zext_i64)) x = d->operand(0);
-                else break;
+                if (!d) break;
+                if (d->opcode() == Opcode::sext_i64 || d->opcode() == Opcode::zext_i64) {
+                    x = d->operand(0);
+                } else if (d->opcode() == Opcode::trunc_i32) {
+                    need_limit_24bit = true;
+                    x = d->operand(0);
+                } else {
+                    break;
+                }
             }
             return x;
         };
@@ -498,6 +509,14 @@ bool unswitch_fast_slow_loop(
         collect_clauses(collect_clauses, fb.term->operand(0), fb.fast_on_true, 0);
     }
 
+    auto match_sext_trunc = [](Value* ext_v, Value* orig_v) -> bool {
+        if (!ext_v || !orig_v || !ext_v->is_instruction()) return false;
+        Instruction* d = ext_v->defining_instruction();
+        if (!d || d->opcode() != Opcode::sext_i64 || !d->operand(0) || !d->operand(0)->is_instruction()) return false;
+        Instruction* td = d->operand(0)->defining_instruction();
+        return td && td->opcode() == Opcode::trunc_i32 && td->operand(0) == orig_v;
+    };
+
     for (const auto& rc : raw_clauses) {
         int64_t c = 0;
         if (get_const_int(rc.val, c)) {
@@ -506,7 +525,7 @@ bool unswitch_fast_slow_loop(
         }
         bool has_load = false;
         if (can_materialize(can_materialize, rc.val, has_load, 0)) {
-            if ( rc.val->type() != Type::i32() && rc.val->type() != Type::i64()) return false;
+            if (rc.val->type() != Type::i32() && rc.val->type() != Type::i64()) return false;
             if (has_load) stage2_clauses.push_back(rc);
             else stage1_clauses.push_back(rc);
             continue;
@@ -518,6 +537,16 @@ bool unswitch_fast_slow_loop(
         Value* lhs = cmp->operand(0);
         Value* rhs = cmp->operand(1);
         if (!lhs || !rhs || (lhs->type() != Type::i32() && lhs->type() != Type::i64())) return false;
+
+        if (op == Opcode::eq) {
+            Value* idx_v = match_sext_trunc(lhs, rhs) ? rhs : (match_sext_trunc(rhs, lhs) ? lhs : nullptr);
+            AffineIvExpr iv_expr;
+            if (idx_v && match_iv_affine(idx_v, iv_expr)) {
+                need_limit_24bit = true;
+                if (init_r.min_val < 0 || iv_expr.inv_offset != nullptr) need_iv_non_neg = true;
+                continue;
+            }
+        }
 
         bool lhs_mat = can_materialize(can_materialize, lhs, has_load, 0);
         bool rhs_mat = can_materialize(can_materialize, rhs, has_load, 0);
@@ -589,6 +618,25 @@ bool unswitch_fast_slow_loop(
         br_fast->set_branch_target(std::move(kept));
         fb.bb->remove_instruction(fb.term);
         fb.bb->append_instruction(br_fast);
+    }
+
+    // In the fast loop, any sext_i64(trunc_i32(x)) of an affine i64 IV expression
+    // is guaranteed equal to x under the preheader/guard bounds, so forward x directly.
+    for (BasicBlock* bb : loop.blocks()) {
+        if (!bb || slow_blocks.count(bb)) continue;
+        for (Instruction* inst = bb->head(); inst != nullptr;) {
+            Instruction* next = inst->next();
+            if (inst->opcode() == Opcode::sext_i64 && inst->operand(0) && inst->operand(0)->is_instruction()) {
+                Instruction* td = inst->operand(0)->defining_instruction();
+                AffineIvExpr dummy_expr;
+                if (td && td->opcode() == Opcode::trunc_i32 && td->operand(0) &&
+                    td->operand(0)->type() == Type::i64() && match_iv_affine(td->operand(0), dummy_expr)) {
+                    replace_all_uses(fn, inst->result(), td->operand(0));
+                    bb->remove_instruction(inst);
+                }
+            }
+            inst = next;
+        }
     }
 
     Builder b(*fn.parent());
@@ -718,6 +766,9 @@ bool unswitch_fast_slow_loop(
         return v;
     };
     Value* limit_i64 = to_i64(mat_limit_v);
+    if (need_limit_24bit) {
+        add_s2(b.build_ult(limit_i64, b.build_iconst_i64(1LL << 24)));
+    }
     for (const auto& mb : mat_bounds) {
         const auto& bc = mb.bc;
         Value* rhs_i64 = to_i64(mb.rhs_m);

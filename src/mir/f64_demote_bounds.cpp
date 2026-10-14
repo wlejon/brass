@@ -58,6 +58,7 @@ double magnitude(const Interval& a) { return std::max(std::fabs(a.lo), std::fabs
 struct Guard {
     const Value* limit = nullptr;
     bool upper = true;
+    bool strict = false;
     const BasicBlock* stay = nullptr;
 };
 
@@ -93,6 +94,11 @@ public:
         return false;
     }
 
+    bool fits_in_i32(const Value* v) const {
+        const Interval r = get(v, nullptr);
+        return !r.empty() && r.lo >= -2147483648.0 && r.hi <= 2147483647.0;
+    }
+
     // Whether `v` provably agrees with its i64 image everywhere it is computed.
     bool representable(const Value* v) const {
         const Interval r = get(v, nullptr);
@@ -110,7 +116,7 @@ public:
             case Opcode::mul: {
                 const Interval a = op(0);
                 const Interval b = op(1);
-                return (a.lo >= 0.0 && b.lo >= 0.0) || (!a.contains_zero() && !b.contains_zero());
+                return (!a.contains_zero() || b.lo >= 0.0) && (!b.contains_zero() || a.lo >= 0.0);
             }
             case Opcode::smod:
                 return op(0).lo >= 0.0 && !op(1).contains_zero();
@@ -147,6 +153,9 @@ private:
             case Opcode::sgt: case Opcode::sge: less = false; break;
             default: return;
         }
+        const bool strict = stay_true
+            ? (cmp->opcode() == Opcode::slt || cmp->opcode() == Opcode::sgt)
+            : (cmp->opcode() == Opcode::sle || cmp->opcode() == Opcode::sge);
         if (!stay_true) less = !less;  // staying on false negates the test
         for (int side = 0; side < 2; ++side) {
             const Value* p = cmp->operand(static_cast<size_t>(side));
@@ -154,13 +163,75 @@ private:
             if (!p || !p->is_block_param() || p->defining_block() != header) continue;
             // lhs < rhs bounds lhs above and rhs below.
             const bool upper = (side == 0) ? less : !less;
-            guards_[p] = Guard{limit, upper, stay};
+            guards_[p] = Guard{limit, upper, strict, stay};
         }
+    }
+
+    bool is_int_or_exact(const Value* v) const {
+        return v && (v->type().is_integer() || exact_.count(v) != 0);
     }
 
     Interval get(const Value* v, const BasicBlock* use_block) const {
         if (!v) return Interval::all();
-        if (v->type() == Type::i32()) return {-2147483648.0, 2147483647.0};
+        if (v->type() == Type::i32()) {
+            if (v->is_instruction() && v->defining_instruction()->opcode() == Opcode::iconst_i32) {
+                return Interval::point(static_cast<double>(v->defining_instruction()->imm_i32()));
+            }
+            Interval r = {-2147483648.0, 2147483647.0};
+            auto g = guards_.find(v);
+            if (use_block && g != guards_.end() && dom_.dominates(g->second.stay, use_block)) {
+                const Interval lim = get(g->second.limit, nullptr);
+                const double delta = (g->second.strict && is_int_or_exact(g->second.limit)) ? 1.0 : 0.0;
+                if (g->second.upper) r.hi = std::min(r.hi, lim.hi - delta);
+                else r.lo = std::max(r.lo, lim.lo + delta);
+            }
+            if (v->is_block_param() && v->defining_block() && g != guards_.end() && g->second.upper) {
+                const Interval lim = get(g->second.limit, nullptr);
+                const double delta = (g->second.strict && is_int_or_exact(g->second.limit)) ? 1.0 : 0.0;
+                if (lim.hi - delta < 2147483647.0) {
+                    const BasicBlock* hdr = v->defining_block();
+                    const size_t p_idx = v->param_index();
+                    bool non_neg_iv = !hdr->predecessors().empty();
+                    for (const BasicBlock* pred : hdr->predecessors()) {
+                        const Instruction* term = pred ? pred->terminator() : nullptr;
+                        if (!term) { non_neg_iv = false; break; }
+                        auto check_bt = [&](const BranchTarget& bt) {
+                            if (bt.block != hdr) return;
+                            if (p_idx >= bt.args.size() || !bt.args[p_idx] || !bt.args[p_idx]->is_instruction()) {
+                                non_neg_iv = false;
+                                return;
+                            }
+                            const Instruction* d = bt.args[p_idx]->defining_instruction();
+                            if (d->opcode() == Opcode::iconst_i32 && d->imm_i32() >= 0) return;
+                            if (d->opcode() == Opcode::add && dom_.dominates(g->second.stay, pred)) {
+                                const Value* s = (d->operand(0) == v) ? d->operand(1) : ((d->operand(1) == v) ? d->operand(0) : nullptr);
+                                if (s && s->is_instruction() && s->defining_instruction()->opcode() == Opcode::iconst_i32 &&
+                                    s->defining_instruction()->imm_i32() == 1) {
+                                    return;
+                                }
+                            }
+                            non_neg_iv = false;
+                        };
+                        check_bt(term->branch_target());
+                        check_bt(term->true_target());
+                        check_bt(term->false_target());
+                    }
+                    if (non_neg_iv) r.lo = std::max(r.lo, 0.0);
+                }
+            }
+            return r;
+        }
+        if (v->type() == Type::i64()) {
+            if (v->is_instruction()) {
+                const Instruction* d = v->defining_instruction();
+                if (d->opcode() == Opcode::iconst_i64 && std::fabs(static_cast<double>(d->imm_i64())) <= kExactLimit) {
+                    return Interval::point(static_cast<double>(d->imm_i64()));
+                }
+                if (d->opcode() == Opcode::sext_i64) return get(d->operand(0), use_block);
+                if (d->opcode() == Opcode::zext_i64) return {0.0, 4294967295.0};
+            }
+            return Interval::all();
+        }
         if (v->type() != Type::f64()) return Interval::all();
         auto it = iv_.find(v);
         Interval r = it != iv_.end() ? it->second : (exact_.count(v) ? Interval{} : Interval::all());
@@ -168,8 +239,9 @@ private:
             auto g = guards_.find(v);
             if (g != guards_.end() && dom_.dominates(g->second.stay, use_block)) {
                 const Interval lim = get(g->second.limit, nullptr);
-                if (g->second.upper) r.hi = std::min(r.hi, lim.hi);
-                else r.lo = std::max(r.lo, lim.lo);
+                const double delta = (g->second.strict && is_int_or_exact(v) && is_int_or_exact(g->second.limit)) ? 1.0 : 0.0;
+                if (g->second.upper) r.hi = std::min(r.hi, lim.hi - delta);
+                else r.lo = std::max(r.lo, lim.lo + delta);
             }
         }
         return r;
@@ -199,7 +271,8 @@ private:
         auto op = [&](size_t i) { return get(inst.operand(i), bb); };
         switch (inst.opcode()) {
             case Opcode::fconst_f64: return Interval::point(inst.imm_f64());
-            case Opcode::sitofp_f64_i32: return {-2147483648.0, 2147483647.0};
+            case Opcode::sitofp_f64_i32: return op(0);
+            case Opcode::sitofp_f64_i64: return op(0);
             case Opcode::add: return {op(0).lo + op(1).lo, op(0).hi + op(1).hi};
             case Opcode::sub: return {op(0).lo - op(1).hi, op(0).hi - op(1).lo};
             case Opcode::mul: return mul(op(0), op(1));
@@ -239,7 +312,8 @@ private:
 } // namespace
 
 bool drop_unprovable_exact_values(const Function& fn, const DominatorTree& dom, const LoopAnalysis& loops,
-                                  std::unordered_set<const Value*>& exact_ints) {
+                                  std::unordered_set<const Value*>& exact_ints,
+                                  std::unordered_set<const Value*>* i32_bounded) {
     if (exact_ints.empty()) return false;
     Bounds bounds(fn, dom, loops, exact_ints);
     if (!bounds.solve()) {
@@ -251,6 +325,11 @@ bool drop_unprovable_exact_values(const Function& fn, const DominatorTree& dom, 
         if (!bounds.representable(v)) drop.push_back(v);
     }
     for (const Value* v : drop) exact_ints.erase(v);
+    if (drop.empty() && i32_bounded) {
+        for (const Value* v : exact_ints) {
+            if (bounds.fits_in_i32(v)) i32_bounded->insert(v);
+        }
+    }
     return !drop.empty();
 }
 

@@ -45,7 +45,9 @@ bool is_pure_instruction(const Instruction* inst) {
     switch (op) {
         case Opcode::iconst_i32: case Opcode::iconst_i64: case Opcode::fconst_f64:
         case Opcode::sext_i64: case Opcode::zext_i64: case Opcode::trunc_i32:
-        case Opcode::fptosi_i32: case Opcode::fptosi_i64: case Opcode::sitofp_f64_i32: case Opcode::sitofp_f64_i64:
+        case Opcode::fptosi_i32: case Opcode::fptosi_i64:
+        case Opcode::sitofp_f64_i32: case Opcode::sitofp_f64_i64:
+        case Opcode::ceil_f64: case Opcode::floor_f64:
         case Opcode::bitcast_i64_f64: case Opcode::bitcast_f64_i64: case Opcode::bitcast_tagged_i64:
         case Opcode::bitcast_i32_f32: case Opcode::bitcast_f32_i32:
         case Opcode::add: case Opcode::sub: case Opcode::mul: case Opcode::neg:
@@ -352,16 +354,22 @@ bool fold_constants(Function& fn) {
                         if (same_type(op0)) replacement = op0;
                     } else if (op == Opcode::mul && c1 == 1) {
                         if (same_type(op0)) replacement = op0;
-                    } else if (op == Opcode::mul && c1 == 0 && int_result) {
+                    } else if ((op == Opcode::mul || op == Opcode::and_) && c1 == 0 && int_result) {
                         replacement = build_int(0);
+                    } else if (op == Opcode::and_ && same_type(op0) &&
+                               (c1 == -1 || (c1 == 1 && op0->is_instruction() && is_comparison(op0->defining_instruction()->opcode())))) {
+                        replacement = op0;
                     }
                 } else if (has_c0 && op1 && int_fold::width_of(op1->type()) != 0) {
                     if ((op == Opcode::add || op == Opcode::or_ || op == Opcode::xor_) && c0 == 0) {
                         if (same_type(op1)) replacement = op1;
                     } else if (op == Opcode::mul && c0 == 1) {
                         if (same_type(op1)) replacement = op1;
-                    } else if (op == Opcode::mul && c0 == 0 && int_result) {
+                    } else if ((op == Opcode::mul || op == Opcode::and_) && c0 == 0 && int_result) {
                         replacement = build_int(0);
+                    } else if (op == Opcode::and_ && same_type(op1) &&
+                               (c0 == -1 || (c0 == 1 && op1->is_instruction() && is_comparison(op1->defining_instruction()->opcode())))) {
+                        replacement = op1;
                     }
                 } else if (op0 == op1 && (op == Opcode::sub || op == Opcode::xor_)) {
                     if (int_result && width != 0) {
@@ -370,6 +378,10 @@ bool fold_constants(Function& fn) {
                         b.position_before(cur);
                         replacement = b.build_fconst_f64(0.0);
                     }
+                } else if (op0 == op1 && int_result && width != 0 && is_comparison(op)) {
+                    const bool refl = (op == Opcode::eq || op == Opcode::sle || op == Opcode::ule ||
+                                       op == Opcode::sge || op == Opcode::uge);
+                    replacement = build_int(refl ? 1 : 0);
                 } else if ((op == Opcode::eq || op == Opcode::ne) && int_result &&
                            op0 && (op0->type() == Type::f64() || op0->type() == Type::f32())) {
                     auto is_non_nan_sitofp = [](const Value* v) -> const Instruction* {
@@ -417,6 +429,9 @@ bool fold_constants(Function& fn) {
                         replacement = def->operand(0);
                     } else if (op == Opcode::bitcast_i32_f32 && dop == Opcode::bitcast_f32_i32 && def->operand(0)->type() == cur->type()) {
                         replacement = def->operand(0);
+                    } else if (op == Opcode::trunc_i32 && (dop == Opcode::sext_i64 || dop == Opcode::zext_i64) &&
+                               def->operand(0) && def->operand(0)->type() == Type::i32()) {
+                        replacement = def->operand(0);
                     } else if (op == Opcode::bitcast_f64_i64 && dop == Opcode::select && def->operand_count() == 3) {
                         int64_t nan_c = 0;
                         const Value* bits_v = nullptr;
@@ -437,6 +452,16 @@ bool fold_constants(Function& fn) {
                     } else if (op == Opcode::fptosi_i64 && dop == Opcode::sitofp_f64_i32 && def->operand(0)->type() == Type::i32()) {
                         b.position_before(cur);
                         replacement = b.build_sext_i64(def->operand(0));
+                    } else if (op == Opcode::fptosi_i64 && dop == Opcode::sitofp_f64_i64 &&
+                               def->operand(0) && def->operand(0)->is_instruction() &&
+                               (def->operand(0)->defining_instruction()->opcode() == Opcode::sext_i64 ||
+                                def->operand(0)->defining_instruction()->opcode() == Opcode::zext_i64)) {
+                        replacement = def->operand(0);
+                    } else if (op == Opcode::fptosi_i32 && dop == Opcode::sitofp_f64_i64 &&
+                               def->operand(0) && def->operand(0)->is_instruction() &&
+                               def->operand(0)->defining_instruction()->opcode() == Opcode::sext_i64 &&
+                               def->operand(0)->defining_instruction()->operand(0)->type() == Type::i32()) {
+                        replacement = def->operand(0)->defining_instruction()->operand(0);
                     }
                 }
             } else if (cur->operand_count() == 3 && op == Opcode::select) {

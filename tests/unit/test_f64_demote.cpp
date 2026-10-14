@@ -2,6 +2,7 @@
 #include <brass/brass.hpp>
 #include <brass/mir/f64_demote.hpp>
 #include <brass/mir/loop_opt.hpp>
+#include <brass/mir/pass_pipeline.hpp>
 #include <brass/mir/verifier.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/codegen/jit_exec.hpp>
@@ -387,3 +388,350 @@ TEST_CASE("F64 Demote - Non-exact Floating Point Division Preserved") {
     REQUIRE(div_fn != nullptr);
     CHECK(std::abs(div_fn(7.0, 3.0) - (7.0 / 3.0)) < 1e-9);
 }
+
+namespace {
+
+struct MockTaHeader {
+    uint64_t pad0 = 0;
+    uint64_t pad1 = 0;
+    uint64_t pad2 = 0;
+    double* data_ptr = nullptr; // offset 24
+    uint64_t byte_len = 0;      // offset 32
+};
+
+size_t count_opcode_in_fn(const Function& fn, Opcode op) {
+    size_t n = 0;
+    for (const BasicBlock* bb : fn.blocks()) {
+        if (!bb) continue;
+        for (const Instruction* inst : *bb) {
+            if (inst && inst->opcode() == op) ++n;
+        }
+    }
+    return n;
+}
+
+std::pair<BasicBlock*, Value*> build_ta_get_f64_idx_diamond(
+    Builder& b, Function* fn, BasicBlock* cur_bb, Value* ta_ptr, Value* idx_f64, const char* tag
+) {
+    BasicBlock* bb_idx_ok = b.create_block(std::string(tag) + "_idx_ok");
+    BasicBlock* bb_load = b.create_block(std::string(tag) + "_load");
+    BasicBlock* bb_slow = b.create_block(std::string(tag) + "_slow");
+    BasicBlock* bb_merge = b.create_block(std::string(tag) + "_merge");
+
+    b.position_at_end(cur_bb);
+    Value* idx_i32 = b.build_fptosi_i32(idx_f64);
+    Value* back_f64 = b.build_sitofp_f64_i32(idx_i32);
+    Value* is_int = b.build_eq(back_f64, idx_f64);
+    Value* non_neg = b.build_sge(idx_i32, b.build_iconst_i32(0));
+    Value* idx_valid = b.build_and(is_int, non_neg);
+    b.build_br_if(idx_valid, bb_idx_ok, {}, bb_slow, {});
+
+    fn->append_block(bb_idx_ok);
+    b.position_at_end(bb_idx_ok);
+    Value* zero64 = b.build_iconst_i64(0);
+    Value* data_ptr = b.build_load(Type::i64(), ta_ptr, 24);
+    Value* not_detached = b.build_ne(data_ptr, zero64);
+    Value* byte_len = b.build_load(Type::i64(), ta_ptr, 32);
+    Value* idx_i64 = b.build_sext_i64(idx_i32);
+    Value* byte_off = b.build_shl(idx_i64, b.build_iconst_i64(3));
+    Value* in_bounds = b.build_ult(byte_off, byte_len);
+    Value* fast_ok = b.build_and(not_detached, in_bounds);
+    b.build_br_if(fast_ok, bb_load, {}, bb_slow, {});
+
+    fn->append_block(bb_load);
+    b.position_at_end(bb_load);
+    Value* raw_val = b.build_load_indexed(Type::f64(), data_ptr, idx_i64, 8, 0);
+    Value* is_num = b.build_eq(raw_val, raw_val);
+    Value* raw_bits = b.build_bitcast_i64_f64(raw_val);
+    Value* canon_nan = b.build_iconst_i64(0x7FF8000000000000LL);
+    Value* boxed = b.build_select(is_num, raw_bits, canon_nan);
+    b.build_br(bb_merge, {boxed});
+
+    fn->append_block(bb_slow);
+    b.position_at_end(bb_slow);
+    Value* slow_idx = b.build_bitcast_i64_f64(idx_f64);
+    Value* slow_val = b.build_call("mock_ta_slow_get", Type::i64(), {ta_ptr, slow_idx});
+    b.build_br(bb_merge, {slow_val});
+
+    fn->append_block(bb_merge);
+    b.position_at_end(bb_merge);
+    Value* merged_bits = b.add_block_param(bb_merge, Type::i64());
+    Value* merged_f64 = b.build_bitcast_f64_i64(merged_bits);
+    return {bb_merge, merged_f64};
+}
+
+BasicBlock* build_ta_set_f64_idx_diamond(
+    Builder& b, Function* fn, BasicBlock* cur_bb, Value* ta_ptr, Value* idx_f64, Value* val_f64, const char* tag
+) {
+    BasicBlock* bb_idx_ok = b.create_block(std::string(tag) + "_idx_ok");
+    BasicBlock* bb_store = b.create_block(std::string(tag) + "_store");
+    BasicBlock* bb_slow = b.create_block(std::string(tag) + "_slow");
+    BasicBlock* bb_merge = b.create_block(std::string(tag) + "_merge");
+
+    b.position_at_end(cur_bb);
+    Value* idx_i32 = b.build_fptosi_i32(idx_f64);
+    Value* back_f64 = b.build_sitofp_f64_i32(idx_i32);
+    Value* is_int = b.build_eq(back_f64, idx_f64);
+    Value* non_neg = b.build_sge(idx_i32, b.build_iconst_i32(0));
+    Value* idx_valid = b.build_and(is_int, non_neg);
+    b.build_br_if(idx_valid, bb_idx_ok, {}, bb_slow, {});
+
+    fn->append_block(bb_idx_ok);
+    b.position_at_end(bb_idx_ok);
+    Value* zero64 = b.build_iconst_i64(0);
+    Value* data_ptr = b.build_load(Type::i64(), ta_ptr, 24);
+    Value* not_detached = b.build_ne(data_ptr, zero64);
+    Value* byte_len = b.build_load(Type::i64(), ta_ptr, 32);
+    Value* idx_i64 = b.build_sext_i64(idx_i32);
+    Value* byte_off = b.build_shl(idx_i64, b.build_iconst_i64(3));
+    Value* in_bounds = b.build_ult(byte_off, byte_len);
+    Value* fast_ok = b.build_and(not_detached, in_bounds);
+    b.build_br_if(fast_ok, bb_store, {}, bb_slow, {});
+
+    fn->append_block(bb_store);
+    b.position_at_end(bb_store);
+    b.build_store_indexed(Type::f64(), data_ptr, idx_i64, 8, 0, val_f64);
+    b.build_br(bb_merge, {});
+
+    fn->append_block(bb_slow);
+    b.position_at_end(bb_slow);
+    Value* slow_idx = b.build_bitcast_i64_f64(idx_f64);
+    Value* val_bits = b.build_bitcast_i64_f64(val_f64);
+    b.build_call("mock_ta_slow_set", Type::i64(), {ta_ptr, slow_idx, val_bits});
+    b.build_br(bb_merge, {});
+
+    fn->append_block(bb_merge);
+    return bb_merge;
+}
+
+} // namespace
+
+TEST_CASE("F64 Demote - Affine i*3+k TypedArray Crunch Loop Demotes, Unswitches, and Fuses FMA") {
+    Module mod("test_f64_iv_verlet_crunch");
+    Builder b(mod);
+
+    Function* fn = mod.create_function(
+        "verlet_step", Type::i32(), {Type::i64(), Type::i64(), Type::i32(), Type::f64()}
+    );
+    b.set_function(fn);
+
+    BasicBlock* entry = b.append_block("entry");
+    Value* ta_pos = b.add_block_param(entry, Type::i64());
+    Value* ta_vel = b.add_block_param(entry, Type::i64());
+    Value* n_i32 = b.add_block_param(entry, Type::i32());
+    Value* dt = b.add_block_param(entry, Type::f64());
+
+    BasicBlock* loop_hdr = b.create_block("loop_hdr");
+    BasicBlock* loop_body = b.create_block("loop_body");
+    BasicBlock* exit_bb = b.create_block("exit");
+
+    Value* n_f64 = b.build_sitofp_f64_i32(n_i32);
+    b.build_br(loop_hdr, {b.build_fconst_f64(0.0)});
+
+    fn->append_block(loop_hdr);
+    b.position_at_end(loop_hdr);
+    Value* iv_f64 = b.add_block_param(loop_hdr, Type::f64());
+    Value* cond = b.build_slt(iv_f64, n_f64);
+    b.build_br_if(cond, loop_body, {}, exit_bb, {});
+
+    fn->append_block(loop_body);
+    b.position_at_end(loop_body);
+    Value* ix = b.build_mul(iv_f64, b.build_fconst_f64(3.0));
+    Value* iy = b.build_add(ix, b.build_fconst_f64(1.0));
+    Value* iz = b.build_add(ix, b.build_fconst_f64(2.0));
+
+    auto [bb1, px] = build_ta_get_f64_idx_diamond(b, fn, loop_body, ta_pos, ix, "get_px");
+    auto [bb2, vx] = build_ta_get_f64_idx_diamond(b, fn, bb1, ta_vel, ix, "get_vx");
+    b.position_at_end(bb2);
+    Value* npx = b.build_fadd(b.build_mul(vx, dt), px);
+    BasicBlock* bb3 = build_ta_set_f64_idx_diamond(b, fn, bb2, ta_pos, ix, npx, "set_px");
+
+    auto [bb4, py] = build_ta_get_f64_idx_diamond(b, fn, bb3, ta_pos, iy, "get_py");
+    auto [bb5, vy] = build_ta_get_f64_idx_diamond(b, fn, bb4, ta_vel, iy, "get_vy");
+    b.position_at_end(bb5);
+    Value* npy = b.build_fadd(b.build_mul(vy, dt), py);
+    BasicBlock* bb6 = build_ta_set_f64_idx_diamond(b, fn, bb5, ta_pos, iy, npy, "set_py");
+
+    auto [bb7, pz] = build_ta_get_f64_idx_diamond(b, fn, bb6, ta_pos, iz, "get_pz");
+    auto [bb8, vz] = build_ta_get_f64_idx_diamond(b, fn, bb7, ta_vel, iz, "get_vz");
+    b.position_at_end(bb8);
+    Value* npz = b.build_fadd(b.build_mul(vz, dt), pz);
+    BasicBlock* bb9 = build_ta_set_f64_idx_diamond(b, fn, bb8, ta_pos, iz, npz, "set_pz");
+
+    b.position_at_end(bb9);
+    Value* next_iv = b.build_add(iv_f64, b.build_fconst_f64(1.0));
+    b.build_br(loop_hdr, {next_iv});
+
+    fn->append_block(exit_bb);
+    b.position_at_end(exit_bb);
+    b.build_ret(b.build_iconst_i32(0));
+
+    fn->rebuild_cfg_predecessors();
+
+    PassPipelineOptions pipe_opts = production_pass_pipeline_options();
+    pipe_opts.loop.enable_fma = true;
+    REQUIRE(run_pass_pipeline(mod, pipe_opts));
+
+    DiagnosticReporter diag;
+    REQUIRE(verify_function(*fn, &diag));
+
+    // Verify the f64 IV and affine indices were demoted, the fast loop collapsed into
+    // header + 1 body block with zero slow-path calls, and scalar FMA fused all 3 updates!
+    CHECK_EQ(loop_hdr->param(0)->type(), Type::i64());
+    CHECK(count_opcode_in_fn(*fn, Opcode::fma_f64) >= 3);
+    DominatorTree dom(*fn);
+    LoopAnalysis loops(*fn, dom);
+    bool found_fast_loop = false;
+    for (LoopInfo* l : loops.post_order_loops()) {
+        if (l->header() == loop_hdr) {
+            found_fast_loop = true;
+            CHECK_EQ(l->blocks().size(), size_t{2});
+            for (BasicBlock* lbb : l->blocks()) {
+                for (Instruction* inst : *lbb) {
+                    CHECK(!is_call(inst->opcode()));
+                }
+            }
+        }
+    }
+    CHECK(found_fast_loop);
+
+    constexpr size_t kParticles = 32;
+    constexpr size_t kLen = kParticles * 3;
+    std::vector<double> pos(kLen), vel(kLen), expected(kLen);
+    const double dt_val = 0.125;
+    for (size_t i = 0; i < kLen; ++i) {
+        pos[i] = static_cast<double>(i) * 1.25;
+        vel[i] = static_cast<double>(i + 1) * -0.5;
+        expected[i] = std::fma(vel[i], dt_val, pos[i]);
+    }
+    MockTaHeader hdr_pos{0, 0, 0, pos.data(), kLen * sizeof(double)};
+    MockTaHeader hdr_vel{0, 0, 0, vel.data(), kLen * sizeof(double)};
+
+    codegen::JitExecutionEngine jit;
+    jit.register_external_symbol("mock_ta_slow_get", reinterpret_cast<void*>(+[](int64_t, int64_t) -> int64_t { return 0; }));
+    jit.register_external_symbol("mock_ta_slow_set", reinterpret_cast<void*>(+[](int64_t, int64_t, int64_t) -> int64_t { return 0; }));
+    REQUIRE(jit.compile_and_load(mod));
+    using VerletFn = int32_t(*)(MockTaHeader*, MockTaHeader*, int32_t, double);
+    auto fn_ptr = jit.get_function_ptr<VerletFn>("verlet_step");
+    REQUIRE(fn_ptr != nullptr);
+
+    CHECK_EQ(fn_ptr(&hdr_pos, &hdr_vel, static_cast<int32_t>(kParticles), dt_val), 0);
+    for (size_t i = 0; i < kLen; ++i) {
+        CHECK_EQ(pos[i], expected[i]);
+    }
+}
+
+TEST_CASE("F64 Demote - Counted i32 IV With Lifted f64 Affine Index i*3+k Demotes, Unswitches, and Fuses FMA") {
+    Module mod("test_i32_iv_lifted_f64_affine_ta");
+    Builder b(mod);
+
+    // Mirrors bronze LoopCounted lowering where i is already an i32 loop IV,
+    // lifted via sitofp_f64_i32(i) for affine index arithmetic (i * 3.0 + k):
+    Function* fn = mod.create_function(
+        "verlet_i32_iv", Type::i32(), {Type::i64(), Type::i64(), Type::i32(), Type::f64()}
+    );
+    b.set_function(fn);
+
+    BasicBlock* entry = b.append_block("entry");
+    Value* ta_pos = b.add_block_param(entry, Type::i64());
+    Value* ta_vel = b.add_block_param(entry, Type::i64());
+    Value* n_i32 = b.add_block_param(entry, Type::i32());
+    Value* dt = b.add_block_param(entry, Type::f64());
+
+    BasicBlock* loop_hdr = b.create_block("loop_hdr");
+    BasicBlock* loop_body = b.create_block("loop_body");
+    BasicBlock* exit_bb = b.create_block("exit");
+
+    b.build_br(loop_hdr, {b.build_iconst_i32(0)});
+
+    fn->append_block(loop_hdr);
+    b.position_at_end(loop_hdr);
+    Value* iv_i32 = b.add_block_param(loop_hdr, Type::i32());
+    Value* cond = b.build_slt(iv_i32, n_i32);
+    b.build_br_if(cond, loop_body, {}, exit_bb, {});
+
+    fn->append_block(loop_body);
+    b.position_at_end(loop_body);
+    Value* iv_f64 = b.build_sitofp_f64_i32(iv_i32);
+    Value* ix = b.build_mul(iv_f64, b.build_fconst_f64(3.0));
+    Value* iy = b.build_add(ix, b.build_fconst_f64(1.0));
+    Value* iz = b.build_add(ix, b.build_fconst_f64(2.0));
+
+    auto [bb1, px] = build_ta_get_f64_idx_diamond(b, fn, loop_body, ta_pos, ix, "get_px");
+    auto [bb2, vx] = build_ta_get_f64_idx_diamond(b, fn, bb1, ta_vel, ix, "get_vx");
+    b.position_at_end(bb2);
+    Value* npx = b.build_fadd(b.build_mul(vx, dt), px);
+    BasicBlock* bb3 = build_ta_set_f64_idx_diamond(b, fn, bb2, ta_pos, ix, npx, "set_px");
+
+    auto [bb4, py] = build_ta_get_f64_idx_diamond(b, fn, bb3, ta_pos, iy, "get_py");
+    auto [bb5, vy] = build_ta_get_f64_idx_diamond(b, fn, bb4, ta_vel, iy, "get_vy");
+    b.position_at_end(bb5);
+    Value* npy = b.build_fadd(b.build_mul(vy, dt), py);
+    BasicBlock* bb6 = build_ta_set_f64_idx_diamond(b, fn, bb5, ta_pos, iy, npy, "set_py");
+
+    auto [bb7, pz] = build_ta_get_f64_idx_diamond(b, fn, bb6, ta_pos, iz, "get_pz");
+    auto [bb8, vz] = build_ta_get_f64_idx_diamond(b, fn, bb7, ta_vel, iz, "get_vz");
+    b.position_at_end(bb8);
+    Value* npz = b.build_fadd(b.build_mul(vz, dt), pz);
+    BasicBlock* bb9 = build_ta_set_f64_idx_diamond(b, fn, bb8, ta_pos, iz, npz, "set_pz");
+
+    b.position_at_end(bb9);
+    Value* next_iv = b.build_add(iv_i32, b.build_iconst_i32(1));
+    b.build_br(loop_hdr, {next_iv});
+
+    fn->append_block(exit_bb);
+    b.position_at_end(exit_bb);
+    b.build_ret(b.build_iconst_i32(0));
+
+    fn->rebuild_cfg_predecessors();
+
+    PassPipelineOptions pipe_opts = production_pass_pipeline_options();
+    pipe_opts.loop.enable_fma = true;
+    REQUIRE(run_pass_pipeline(mod, pipe_opts));
+
+    DiagnosticReporter diag;
+    REQUIRE(verify_function(*fn, &diag));
+
+    CHECK(count_opcode_in_fn(*fn, Opcode::fma_f64) >= 3);
+    DominatorTree dom(*fn);
+    LoopAnalysis loops(*fn, dom);
+    bool found_fast_loop = false;
+    for (LoopInfo* l : loops.post_order_loops()) {
+        if (l->header() == loop_hdr) {
+            found_fast_loop = true;
+            CHECK_EQ(l->blocks().size(), size_t{2});
+            for (BasicBlock* lbb : l->blocks()) {
+                for (Instruction* inst : *lbb) {
+                    CHECK(!is_call(inst->opcode()));
+                }
+            }
+        }
+    }
+    CHECK(found_fast_loop);
+
+    constexpr size_t kParticles = 32;
+    constexpr size_t kLen = kParticles * 3;
+    std::vector<double> pos(kLen), vel(kLen), expected(kLen);
+    const double dt_val = 0.25;
+    for (size_t i = 0; i < kLen; ++i) {
+        pos[i] = static_cast<double>(i) * 0.75;
+        vel[i] = static_cast<double>(i + 1) * 1.5;
+        expected[i] = std::fma(vel[i], dt_val, pos[i]);
+    }
+    MockTaHeader hdr_pos{0, 0, 0, pos.data(), kLen * sizeof(double)};
+    MockTaHeader hdr_vel{0, 0, 0, vel.data(), kLen * sizeof(double)};
+
+    codegen::JitExecutionEngine jit;
+    jit.register_external_symbol("mock_ta_slow_get", reinterpret_cast<void*>(+[](int64_t, int64_t) -> int64_t { return 0; }));
+    jit.register_external_symbol("mock_ta_slow_set", reinterpret_cast<void*>(+[](int64_t, int64_t, int64_t) -> int64_t { return 0; }));
+    REQUIRE(jit.compile_and_load(mod));
+    using VerletFn = int32_t(*)(MockTaHeader*, MockTaHeader*, int32_t, double);
+    auto fn_ptr = jit.get_function_ptr<VerletFn>("verlet_i32_iv");
+    REQUIRE(fn_ptr != nullptr);
+
+    CHECK_EQ(fn_ptr(&hdr_pos, &hdr_vel, static_cast<int32_t>(kParticles), dt_val), 0);
+    for (size_t i = 0; i < kLen; ++i) {
+        CHECK_EQ(pos[i], expected[i]);
+    }
+}
+
