@@ -58,14 +58,8 @@ bool are_equivalent_values(const Value* a, const Value* b) noexcept {
     }
     return false;
 }
-
-
-bool is_proven_exact_div(
-    const Instruction* div_inst,
-    const Value* num,
-    const Value* denom,
-    const DominatorTree& dom
-) {
+bool is_proven_exact_div(const Instruction* div_inst, const Value* num, const Value* denom,
+                         const DominatorTree& dom) {
     if (!num || !denom) return false;
     int64_t c_num, c_denom;
     bool has_c_num = get_const_int_or_f64_int(num, c_num);
@@ -207,103 +201,7 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
     // 0. Canonicalize loop-invariant f64 bounds on array-indexing loops so
     // counted f64 loops with runtime f64 bounds (e.g. `i < n_f64`) have a
     // provably bounded i32 upper bound in the preheader.
-    bool canonicalized_bounds = false;
-    if (fn.parent()) {
-        for (LoopInfo* loop : loop_analysis.post_order_loops()) {
-            if (!loop || !loop->header() || loop->latches().size() != 1) continue;
-            BasicBlock* header = loop->header();
-            BasicBlock* ph = loop->preheader();
-            if (!ph) {
-                for (BasicBlock* pred : header->predecessors()) {
-                    if (pred && !loop->contains(pred)) {
-                        if (ph) { ph = nullptr; break; }
-                        ph = pred;
-                    }
-                }
-            }
-            if (!ph || is_unprofitable_loop(loop, fn)) continue;
-            bool loop_has_fptosi = false;
-            for (const BasicBlock* bb : loop->blocks()) {
-                if (!bb) continue;
-                for (const Instruction* inst : *bb) {
-                    if (inst && (inst->opcode() == Opcode::fptosi_i32 || inst->opcode() == Opcode::fptosi_i64)) {
-                        loop_has_fptosi = true;
-                        break;
-                    }
-                }
-                if (loop_has_fptosi) break;
-            }
-            if (!loop_has_fptosi) continue;
-            BasicBlock* latch = loop->latches()[0];
-            Instruction* ph_term = ph->terminator();
-            Instruction* latch_term = latch ? latch->terminator() : nullptr;
-            Instruction* hdr_term = header->terminator();
-            if (!ph_term || ph_term->opcode() != Opcode::br || ph_term->branch_target().block != header) continue;
-            if (!latch_term || latch_term->opcode() != Opcode::br || latch_term->branch_target().block != header) continue;
-            if (!hdr_term || hdr_term->opcode() != Opcode::br_if || !hdr_term->operand(0) || !hdr_term->operand(0)->is_instruction()) continue;
-
-            const bool stay_true = loop->contains(hdr_term->true_target().block);
-            const bool stay_false = loop->contains(hdr_term->false_target().block);
-            if (stay_true == stay_false) continue;
-
-            Instruction* hdr_cmp = hdr_term->operand(0)->defining_instruction();
-            if (!hdr_cmp || hdr_cmp->operand_count() != 2) continue;
-
-            for (size_t i = 0; i < header->param_count(); ++i) {
-                Value* p = header->param(i);
-                if (!p || p->type() != Type::f64()) continue;
-                if (i >= ph_term->branch_target().args.size() || i >= latch_term->branch_target().args.size()) continue;
-                Value* init_v = ph_term->branch_target().args[i];
-                if (!init_v || !init_v->is_instruction() || init_v->defining_instruction()->opcode() != Opcode::fconst_f64) continue;
-                const double init_f = init_v->defining_instruction()->imm_f64();
-                if (!is_safe_integer_f64(init_f) || init_f < 0.0 || init_f > 2147483647.0) continue;
-
-                Value* step_v = latch_term->branch_target().args[i];
-                if (!step_v || !step_v->is_instruction() || step_v->defining_instruction()->opcode() != Opcode::add) continue;
-                Instruction* sdef = step_v->defining_instruction();
-                Value* step_c = (sdef->operand(0) == p) ? sdef->operand(1) : ((sdef->operand(1) == p) ? sdef->operand(0) : nullptr);
-                if (!step_c || !step_c->is_instruction() || step_c->defining_instruction()->opcode() != Opcode::fconst_f64 ||
-                    step_c->defining_instruction()->imm_f64() != 1.0) {
-                    continue;
-                }
-
-                const size_t lim_idx = (hdr_cmp->operand(0) == p) ? 1 : ((hdr_cmp->operand(1) == p) ? 0 : 2);
-                if (lim_idx > 1) continue;
-                const bool is_p_lt_lim = (lim_idx == 1)
-                    ? (stay_true ? hdr_cmp->opcode() == Opcode::slt : hdr_cmp->opcode() == Opcode::sge)
-                    : (stay_true ? hdr_cmp->opcode() == Opcode::sgt : hdr_cmp->opcode() == Opcode::sle);
-                if (!is_p_lt_lim) continue;
-
-                Value* limit_v = hdr_cmp->operand(lim_idx);
-                if (!limit_v || limit_v->type() != Type::f64() || !loop->is_loop_invariant(limit_v)) continue;
-                if (limit_v->is_instruction()) {
-                    const Instruction* ldef = limit_v->defining_instruction();
-                    const Opcode lop = ldef->opcode();
-                    if (lop == Opcode::fconst_f64 || lop == Opcode::sitofp_f64_i32 || lop == Opcode::sitofp_f64_i64) {
-                        continue;
-                    }
-                    if (!ldef->parent() || !dom.dominates(ldef->parent(), ph)) continue;
-                } else if (limit_v->is_block_param()) {
-                    if (!limit_v->defining_block() || !dom.dominates(limit_v->defining_block(), ph)) continue;
-                }
-
-                Builder ph_b(*fn.parent());
-                ph_b.set_function(&fn);
-                ph_b.position_before(ph_term);
-                Value* ceil_lim = ph_b.build_ceil_f64(limit_v);
-                Value* init_f_v = ph_b.build_fconst_f64(init_f);
-                Value* max_i32_f = ph_b.build_fconst_f64(2147483647.0);
-                Value* gt_init = ph_b.build_sgt(ceil_lim, init_f_v);
-                Value* le_max = ph_b.build_sle(ceil_lim, max_i32_f);
-                Value* clamped_f = ph_b.build_select(le_max, ceil_lim, max_i32_f);
-                Value* safe_f = ph_b.build_select(gt_init, clamped_f, init_f_v);
-                Value* lim_i32 = ph_b.build_fptosi_i32(safe_f);
-                Value* exact_lim = ph_b.build_sitofp_f64_i32(lim_i32);
-                hdr_cmp->set_operand(lim_idx, exact_lim);
-                canonicalized_bounds = true;
-            }
-        }
-    }
+    const bool canonicalized_bounds = canonicalize_loop_bounds(fn, dom, loop_analysis);
 
     std::unordered_set<const Value*> exact_ints;
     std::unordered_set<const Value*> entry_params;
@@ -847,7 +745,10 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
                 }
             } else if (op == Opcode::add || op == Opcode::sub || op == Opcode::mul ||
                        op == Opcode::sdiv || op == Opcode::udiv || op == Opcode::smod ||
-                       op == Opcode::umod || op == Opcode::neg) {
+                       op == Opcode::umod || op == Opcode::neg || op == Opcode::sqrt_f64 ||
+                       op == Opcode::floor_f64 || op == Opcode::ceil_f64 || op == Opcode::round_f64 ||
+                       op == Opcode::fabs_f64 || op == Opcode::fmin_f64 || op == Opcode::fmax_f64 ||
+                       op == Opcode::fma_f64) {
                 if (inst->type() == Type::f64() || inst->type() == Type::i64()) {
                     const bool want_f64 = (inst->type() == Type::f64());
                     for (size_t op_i = 0; op_i < inst->operand_count(); ++op_i) {
@@ -875,9 +776,16 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
                 inst->set_opcode(Opcode::trunc_i32);
             } else if (op == Opcode::trunc_i32 && inst->operand(0) && inst->operand(0)->type() == Type::f64()) {
                 inst->set_opcode(Opcode::fptosi_i32);
-            } else if (op == Opcode::bitcast_i64_f64 && inst->operand(0) && inst->operand(0)->type() == Type::i64()) {
+            } else if ((op == Opcode::bitcast_i64_f64 || op == Opcode::fptrunc_f32_f64) &&
+                       inst->operand(0) && inst->operand(0)->type() == Type::i64()) {
                 b.position_before(inst);
                 inst->set_operand(0, b.build_sitofp_f64_i64(inst->operand(0)));
+            } else if ((op == Opcode::store || op == Opcode::store_indexed) && inst->memory_type() == Type::f64()) {
+                const size_t val_i = (op == Opcode::store) ? 1 : 2;
+                if (val_i < inst->operand_count() && inst->operand(val_i) && inst->operand(val_i)->type() == Type::i64()) {
+                    b.position_before(inst);
+                    inst->set_operand(val_i, b.build_sitofp_f64_i64(inst->operand(val_i)));
+                }
             }
 
             auto fix_target_args = [&](BranchTarget& target) {

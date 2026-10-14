@@ -12,6 +12,8 @@ bool is_safe_integer_f64(double v) noexcept;
 bool get_const_int_or_f64_int(const Value* val, int64_t& out) noexcept;
 bool is_unprofitable_loop(const LoopInfo* loop, const Function& fn);
 
+bool canonicalize_loop_bounds(Function& fn, const DominatorTree& dom, const LoopAnalysis& loop_analysis);
+
 // Removes from `exact_ints` every value not provably within +-2^53 and never
 // -0.0, the conditions under which its i64 image computes the same thing.
 // Returns whether anything was removed.

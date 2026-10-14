@@ -1,4 +1,5 @@
 #include "f64_demote_internal.hpp"
+#include <brass/mir/builder.hpp>
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/opcodes.hpp>
 #include <brass/mir/runtime_symbols.hpp>
@@ -310,6 +311,143 @@ private:
 };
 
 } // namespace
+
+bool canonicalize_loop_bounds(Function& fn, const DominatorTree& dom, const LoopAnalysis& loop_analysis) {
+    if (!fn.parent()) return false;
+    bool canonicalized_bounds = false;
+    std::unordered_set<const Value*> canonical_ivs;
+
+    const auto& po_loops = loop_analysis.post_order_loops();
+    for (auto it = po_loops.rbegin(); it != po_loops.rend(); ++it) {
+        LoopInfo* loop = *it;
+        if (!loop || !loop->header() || loop->latches().size() != 1) continue;
+        BasicBlock* header = loop->header();
+        BasicBlock* ph = loop->preheader();
+        if (!ph) {
+            for (BasicBlock* pred : header->predecessors()) {
+                if (pred && !loop->contains(pred)) {
+                    if (ph) { ph = nullptr; break; }
+                    ph = pred;
+                }
+            }
+        }
+        if (!ph || is_unprofitable_loop(loop, fn)) continue;
+        bool loop_has_fptosi = false;
+        for (const BasicBlock* bb : loop->blocks()) {
+            if (!bb) continue;
+            for (const Instruction* inst : *bb) {
+                if (inst && (inst->opcode() == Opcode::fptosi_i32 || inst->opcode() == Opcode::fptosi_i64)) {
+                    loop_has_fptosi = true;
+                    break;
+                }
+            }
+            if (loop_has_fptosi) break;
+        }
+        if (!loop_has_fptosi) continue;
+        BasicBlock* latch = loop->latches()[0];
+        Instruction* ph_term = ph->terminator();
+        Instruction* latch_term = latch ? latch->terminator() : nullptr;
+        Instruction* hdr_term = header->terminator();
+        if (!ph_term || ph_term->opcode() != Opcode::br || ph_term->branch_target().block != header) continue;
+        if (!latch_term || latch_term->opcode() != Opcode::br || latch_term->branch_target().block != header) continue;
+        if (!hdr_term || hdr_term->opcode() != Opcode::br_if || !hdr_term->operand(0) || !hdr_term->operand(0)->is_instruction()) continue;
+
+        const bool stay_true = loop->contains(hdr_term->true_target().block);
+        const bool stay_false = loop->contains(hdr_term->false_target().block);
+        if (stay_true == stay_false) continue;
+
+        Instruction* hdr_cmp = hdr_term->operand(0)->defining_instruction();
+        if (!hdr_cmp || hdr_cmp->operand_count() != 2) continue;
+
+        for (size_t i = 0; i < header->param_count(); ++i) {
+            Value* p = header->param(i);
+            if (!p || p->type() != Type::f64()) continue;
+            if (i >= ph_term->branch_target().args.size() || i >= latch_term->branch_target().args.size()) continue;
+            Value* init_v = ph_term->branch_target().args[i];
+            if (!init_v) continue;
+
+            double init_const = -1.0;
+            bool is_valid_init = false;
+            if (init_v->is_instruction() && init_v->defining_instruction()->opcode() == Opcode::fconst_f64) {
+                init_const = init_v->defining_instruction()->imm_f64();
+                is_valid_init = is_safe_integer_f64(init_const) && init_const >= 0.0 && init_const <= 2147483647.0;
+            } else if (canonical_ivs.count(init_v) != 0) {
+                is_valid_init = true;
+            } else if (init_v->is_instruction() && init_v->defining_instruction()->opcode() == Opcode::add) {
+                Instruction* idef = init_v->defining_instruction();
+                Value* op0 = idef->operand(0);
+                Value* op1 = idef->operand(1);
+                Value* c_op = canonical_ivs.count(op0) ? op1 : (canonical_ivs.count(op1) ? op0 : nullptr);
+                if (c_op && c_op->is_instruction() && c_op->defining_instruction()->opcode() == Opcode::fconst_f64) {
+                    const double d = c_op->defining_instruction()->imm_f64();
+                    if (d == 0.0 || d == 1.0) is_valid_init = true;
+                }
+            }
+            if (!is_valid_init) continue;
+
+            Value* step_v = latch_term->branch_target().args[i];
+            if (!step_v || !step_v->is_instruction() || step_v->defining_instruction()->opcode() != Opcode::add) continue;
+            Instruction* sdef = step_v->defining_instruction();
+            auto matches_iv = [&](Value* v) -> bool {
+                if (v == p) return true;
+                if (v && v->is_block_param() && v->defining_block() == latch && latch->predecessors().size() == 1) {
+                    BasicBlock* lpred = latch->predecessors()[0];
+                    Instruction* lterm = lpred ? lpred->terminator() : nullptr;
+                    if (lterm && lterm->opcode() == Opcode::br && lterm->branch_target().block == latch) {
+                        const size_t pidx = v->param_index();
+                        if (pidx < lterm->branch_target().args.size() && lterm->branch_target().args[pidx] == p) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            };
+            Value* step_c = matches_iv(sdef->operand(0)) ? sdef->operand(1) : (matches_iv(sdef->operand(1)) ? sdef->operand(0) : nullptr);
+            if (!step_c || !step_c->is_instruction() || step_c->defining_instruction()->opcode() != Opcode::fconst_f64 ||
+                step_c->defining_instruction()->imm_f64() != 1.0) {
+                continue;
+            }
+
+            const size_t lim_idx = (hdr_cmp->operand(0) == p) ? 1 : ((hdr_cmp->operand(1) == p) ? 0 : 2);
+            if (lim_idx > 1) continue;
+            const bool is_p_lt_lim = (lim_idx == 1)
+                ? (stay_true ? hdr_cmp->opcode() == Opcode::slt : hdr_cmp->opcode() == Opcode::sge)
+                : (stay_true ? hdr_cmp->opcode() == Opcode::sgt : hdr_cmp->opcode() == Opcode::sle);
+            if (!is_p_lt_lim) continue;
+
+            Value* limit_v = hdr_cmp->operand(lim_idx);
+            if (!limit_v || limit_v->type() != Type::f64() || !loop->is_loop_invariant(limit_v)) continue;
+            if (limit_v->is_instruction()) {
+                const Instruction* ldef = limit_v->defining_instruction();
+                const Opcode lop = ldef->opcode();
+                if (lop == Opcode::fconst_f64 || lop == Opcode::sitofp_f64_i32 || lop == Opcode::sitofp_f64_i64) {
+                    canonical_ivs.insert(p);
+                    continue;
+                }
+                if (!ldef->parent() || !dom.dominates(ldef->parent(), ph)) continue;
+            } else if (limit_v->is_block_param()) {
+                if (!limit_v->defining_block() || !dom.dominates(limit_v->defining_block(), ph)) continue;
+            }
+
+            Builder ph_b(*fn.parent());
+            ph_b.set_function(&fn);
+            ph_b.position_before(ph_term);
+            Value* ceil_lim = ph_b.build_ceil_f64(limit_v);
+            Value* init_f_v = (init_const >= 0.0) ? ph_b.build_fconst_f64(init_const) : init_v;
+            Value* max_i32_f = ph_b.build_fconst_f64(2147483647.0);
+            Value* gt_init = ph_b.build_sgt(ceil_lim, init_f_v);
+            Value* le_max = ph_b.build_sle(ceil_lim, max_i32_f);
+            Value* clamped_f = ph_b.build_select(le_max, ceil_lim, max_i32_f);
+            Value* safe_f = ph_b.build_select(gt_init, clamped_f, init_f_v);
+            Value* lim_i32 = ph_b.build_fptosi_i32(safe_f);
+            Value* exact_lim = ph_b.build_sitofp_f64_i32(lim_i32);
+            hdr_cmp->set_operand(lim_idx, exact_lim);
+            canonical_ivs.insert(p);
+            canonicalized_bounds = true;
+        }
+    }
+    return canonicalized_bounds;
+}
 
 bool drop_unprovable_exact_values(const Function& fn, const DominatorTree& dom, const LoopAnalysis& loops,
                                   std::unordered_set<const Value*>& exact_ints,
