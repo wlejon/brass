@@ -136,21 +136,21 @@ PassStep cfg_simplify(std::string name, FunctionFilter filter) {
                          [](Function& fn) { return cfg_simplify_function(fn, CfgSimplifyOptions{}); });
 }
 
-PassStep loop_unswitch(const LoopOptOptions& options, bool cfg_follow_up) {
+PassStep loop_unswitch(const LoopOptOptions& options, bool cfg_follow_up, std::string name) {
     const LoopUnswitchOptions uo = options.unswitch_options;
     LoopUnswitchStats* stats = options.stats ? &options.stats->unswitch_stats : nullptr;
     const pgo::ProfileData* profile = options.profile_data;
     const uint64_t min_count = options.min_pgo_unswitch_count;
-    return function_step("loop_unswitch", FunctionFilter::All, [=](Function& fn) {
+    return function_step(std::move(name), FunctionFilter::All, [=](Function& fn) {
         if (!has_hot_loop(fn, profile, min_count, 0)) return false;
         return unswitch_loops_in_function(fn, uo, stats);
     }, cfg_cleanup(cfg_follow_up));
 }
 
-PassStep jump_threading(const LoopOptOptions& options, bool cfg_follow_up) {
+PassStep jump_threading(const LoopOptOptions& options, bool cfg_follow_up, std::string name) {
     const JumpThreadingOptions jo = options.jump_threading_options;
     JumpThreadingStats* stats = options.stats ? &options.stats->jump_threading_stats : nullptr;
-    return function_step("jump_threading", FunctionFilter::All,
+    return function_step(std::move(name), FunctionFilter::All,
                          [=](Function& fn) { return run_jump_threading(fn, jo, stats); },
                          cfg_cleanup(cfg_follow_up));
 }

@@ -283,7 +283,7 @@ bool unswitch_fast_slow_loop(
             }
         }
     }
-    const size_t max_fast_insts = std::max<size_t>(opts.max_loop_instructions * 3, 256);
+    const size_t max_fast_insts = std::max<size_t>(opts.max_loop_instructions * 4, 400);
     if (fast_inst_count > max_fast_insts) return false;
 
     // Identify canonical primary induction variable
@@ -583,7 +583,7 @@ bool unswitch_fast_slow_loop(
             if (inst) ++region_instructions;
         }
     }
-    if (region_instructions > 2 * max_fast_insts) return false;
+    if (region_instructions > 3 * max_fast_insts) return false;
 
     const std::vector<Value*> init_args = ph_term->branch_target().args;
 

@@ -41,8 +41,8 @@ PassStep sccp(bool guard_elim = true, FunctionFilter filter = FunctionFilter::No
 PassStep cfg_simplify(std::string name = "cfg_simplify", FunctionFilter filter = FunctionFilter::NonWrapper);
 // Gated by options.profile_data (hot loops only) when a profile is given;
 // `cfg_follow_up` runs CFG simplification on each function it changed.
-PassStep loop_unswitch(const LoopOptOptions& options, bool cfg_follow_up);
-PassStep jump_threading(const LoopOptOptions& options, bool cfg_follow_up);
+PassStep loop_unswitch(const LoopOptOptions& options, bool cfg_follow_up, std::string name = "loop_unswitch");
+PassStep jump_threading(const LoopOptOptions& options, bool cfg_follow_up, std::string name = "jump_threading");
 // Range-analysis bounds-check elimination with implied-check folding.
 PassStep bce(std::string name, bool dump_stats, RangeAnalysisStats* stats, bool cleanup_follow_up,
              FunctionFilter filter = FunctionFilter::All);

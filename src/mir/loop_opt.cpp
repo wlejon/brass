@@ -26,6 +26,8 @@ Pipeline loop_pipeline(const LoopOptOptions& o) {
     if (o.enable_allocation_sinking || o.enable_partial_escape) {
         p.add(passes::allocation_sinking(pea_stats_of(o), FunctionFilter::LoopEligible, false));
     }
+    if (o.enable_loop_unswitch) p.add(passes::loop_unswitch(o, o.enable_cfg_simplify, "loop_unswitch 2"));
+    if (o.enable_jump_threading) p.add(passes::jump_threading(o, o.enable_cfg_simplify, "jump_threading 2"));
     if (o.enable_licm || o.enable_dce) p.add(passes::loop_cleanup(o));
     if (o.enable_loop_tile) p.add(passes::loop_tile(o));
     if (o.enable_loop_distribution) p.add(passes::loop_distribution(o));

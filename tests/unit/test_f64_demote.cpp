@@ -735,3 +735,263 @@ TEST_CASE("F64 Demote - Counted i32 IV With Lifted f64 Affine Index i*3+k Demote
     }
 }
 
+namespace {
+
+struct MockBronzeArrayBuffer {
+    uint64_t header;
+    uint64_t flags;       // offset 8
+    double* ext_ptr;      // offset 16 (BRONZE_ABI_BUF_EXTPTR_OFFSET)
+    double inline_data[8]; // offset 24 (BRONZE_ABI_BUF_DATA_OFFSET)
+};
+
+struct MockBronzeTypedArray {
+    uint64_t header;
+    uint64_t shape;
+    uint64_t buffer_boxed;  // offset 16 (BRONZE_ABI_TA_BUFFER_OFFSET)
+    uint64_t byte_offset;   // offset 24 (BRONZE_ABI_TA_BYTE_OFFSET)
+    uint64_t byte_length;   // offset 32 (BRONZE_ABI_TA_BYTE_LEN_OFFSET)
+};
+
+std::pair<BasicBlock*, Value*> build_bronze_ta_get_f64_diamond(
+    Builder& b, Function* fn, BasicBlock* cur_bb, Value* ta_ptr, Value* idx_f64, const char* tag
+) {
+    BasicBlock* bb_idx_ok = b.create_block(std::string(tag) + "_idx_ok");
+    BasicBlock* bb_load = b.create_block(std::string(tag) + "_load");
+    BasicBlock* bb_slow = b.create_block(std::string(tag) + "_slow");
+    BasicBlock* bb_merge = b.create_block(std::string(tag) + "_merge");
+
+    b.position_at_end(cur_bb);
+    Value* idx_i32 = b.build_fptosi_i32(idx_f64);
+    Value* back_f64 = b.build_sitofp_f64_i32(idx_i32);
+    Value* is_int = b.build_eq(back_f64, idx_f64);
+    Value* non_neg = b.build_sge(idx_i32, b.build_iconst_i32(0));
+    Value* idx_valid = b.build_and(is_int, non_neg);
+    b.build_br_if(idx_valid, bb_idx_ok, {}, bb_slow, {});
+
+    fn->append_block(bb_idx_ok);
+    b.position_at_end(bb_idx_ok);
+    Value* payload_mask = b.build_iconst_i64(0x0000FFFFFFFFFFFFLL);
+    Value* zero64 = b.build_iconst_i64(0);
+    Value* buf_boxed = b.build_load(Type::i64(), ta_ptr, 16);
+    Value* buf = b.build_and(buf_boxed, payload_mask);
+    Value* flags_boxed = b.build_load(Type::i64(), buf, 8);
+    Value* flags = b.build_sext_i64(b.build_trunc_i32(flags_boxed));
+    Value* not_detached = b.build_eq(b.build_and(flags, b.build_iconst_i64(1)), zero64);
+    Value* byte_len_boxed = b.build_load(Type::i64(), ta_ptr, 32);
+    Value* byte_len = b.build_sext_i64(b.build_trunc_i32(byte_len_boxed));
+    Value* idx_i64 = b.build_sext_i64(idx_i32);
+    Value* byte_off_idx = b.build_shl(idx_i64, b.build_iconst_i64(3));
+    Value* in_bounds = b.build_ult(byte_off_idx, byte_len);
+    Value* fast_ok = b.build_and(not_detached, in_bounds);
+    b.build_br_if(fast_ok, bb_load, {}, bb_slow, {});
+
+    fn->append_block(bb_load);
+    b.position_at_end(bb_load);
+    Value* ext = b.build_load(Type::i64(), buf, 16);
+    Value* has_ext = b.build_ne(ext, zero64);
+    Value* inline_data = b.build_add(buf, b.build_iconst_i64(24));
+    Value* base_data = b.build_select(has_ext, ext, inline_data);
+    Value* ta_byte_off_boxed = b.build_load(Type::i64(), ta_ptr, 24);
+    Value* ta_byte_off = b.build_sext_i64(b.build_trunc_i32(ta_byte_off_boxed));
+    Value* data_ptr = b.build_add(base_data, ta_byte_off);
+    Value* raw_val = b.build_load_indexed(Type::f64(), data_ptr, idx_i64, 8, 0);
+    Value* is_num = b.build_eq(raw_val, raw_val);
+    Value* raw_bits = b.build_bitcast_i64_f64(raw_val);
+    Value* canon_nan = b.build_iconst_i64(0x7FF8000000000000LL);
+    Value* boxed = b.build_select(is_num, raw_bits, canon_nan);
+    b.build_br(bb_merge, {boxed});
+
+    fn->append_block(bb_slow);
+    b.position_at_end(bb_slow);
+    Value* slow_idx = b.build_bitcast_i64_f64(idx_f64);
+    Value* slow_val = b.build_call("mock_ta_slow_get", Type::i64(), {ta_ptr, slow_idx});
+    b.build_br(bb_merge, {slow_val});
+
+    fn->append_block(bb_merge);
+    b.position_at_end(bb_merge);
+    Value* merged_bits = b.add_block_param(bb_merge, Type::i64());
+    Value* merged_f64 = b.build_bitcast_f64_i64(merged_bits);
+    return {bb_merge, merged_f64};
+}
+
+BasicBlock* build_bronze_ta_set_f64_diamond(
+    Builder& b, Function* fn, BasicBlock* cur_bb, Value* ta_ptr, Value* idx_f64, Value* val_f64, const char* tag
+) {
+    BasicBlock* bb_idx_ok = b.create_block(std::string(tag) + "_idx_ok");
+    BasicBlock* bb_store = b.create_block(std::string(tag) + "_store");
+    BasicBlock* bb_slow = b.create_block(std::string(tag) + "_slow");
+    BasicBlock* bb_merge = b.create_block(std::string(tag) + "_merge");
+
+    b.position_at_end(cur_bb);
+    Value* idx_i32 = b.build_fptosi_i32(idx_f64);
+    Value* back_f64 = b.build_sitofp_f64_i32(idx_i32);
+    Value* is_int = b.build_eq(back_f64, idx_f64);
+    Value* non_neg = b.build_sge(idx_i32, b.build_iconst_i32(0));
+    Value* idx_valid = b.build_and(is_int, non_neg);
+    b.build_br_if(idx_valid, bb_idx_ok, {}, bb_slow, {});
+
+    fn->append_block(bb_idx_ok);
+    b.position_at_end(bb_idx_ok);
+    Value* payload_mask = b.build_iconst_i64(0x0000FFFFFFFFFFFFLL);
+    Value* zero64 = b.build_iconst_i64(0);
+    Value* buf_boxed = b.build_load(Type::i64(), ta_ptr, 16);
+    Value* buf = b.build_and(buf_boxed, payload_mask);
+    Value* flags_boxed = b.build_load(Type::i64(), buf, 8);
+    Value* flags = b.build_sext_i64(b.build_trunc_i32(flags_boxed));
+    Value* not_detached = b.build_eq(b.build_and(flags, b.build_iconst_i64(1)), zero64);
+    Value* byte_len_boxed = b.build_load(Type::i64(), ta_ptr, 32);
+    Value* byte_len = b.build_sext_i64(b.build_trunc_i32(byte_len_boxed));
+    Value* idx_i64 = b.build_sext_i64(idx_i32);
+    Value* byte_off_idx = b.build_shl(idx_i64, b.build_iconst_i64(3));
+    Value* in_bounds = b.build_ult(byte_off_idx, byte_len);
+    Value* fast_ok = b.build_and(not_detached, in_bounds);
+    b.build_br_if(fast_ok, bb_store, {}, bb_slow, {});
+
+    fn->append_block(bb_store);
+    b.position_at_end(bb_store);
+    Value* ext = b.build_load(Type::i64(), buf, 16);
+    Value* has_ext = b.build_ne(ext, zero64);
+    Value* inline_data = b.build_add(buf, b.build_iconst_i64(24));
+    Value* base_data = b.build_select(has_ext, ext, inline_data);
+    Value* ta_byte_off_boxed = b.build_load(Type::i64(), ta_ptr, 24);
+    Value* ta_byte_off = b.build_sext_i64(b.build_trunc_i32(ta_byte_off_boxed));
+    Value* data_ptr = b.build_add(base_data, ta_byte_off);
+    b.build_store_indexed(Type::f64(), data_ptr, idx_i64, 8, 0, val_f64);
+    b.build_br(bb_merge, {});
+
+    fn->append_block(bb_slow);
+    b.position_at_end(bb_slow);
+    Value* slow_idx = b.build_bitcast_i64_f64(idx_f64);
+    Value* val_bits = b.build_bitcast_i64_f64(val_f64);
+    b.build_call("mock_ta_slow_set", Type::i64(), {ta_ptr, slow_idx, val_bits});
+    b.build_br(bb_merge, {});
+
+    fn->append_block(bb_merge);
+    return bb_merge;
+}
+
+} // namespace
+
+TEST_CASE("F64 Demote - Phase Ordering Demotes f64 IV, Unswitches Fast/Slow Loop, and Hoists TypedArray Data Chain in LICM") {
+    Module mod("test_f64_demote_unswitch_licm_hoist");
+    Builder b(mod);
+
+    Function* fn = mod.create_function(
+        "ta_scale_bias", Type::i32(), {Type::i64(), Type::i32()}
+    );
+    b.set_function(fn);
+
+    BasicBlock* entry = b.append_block("entry");
+    Value* ta_ptr = b.add_block_param(entry, Type::i64());
+    Value* n_i32 = b.add_block_param(entry, Type::i32());
+
+    BasicBlock* loop_hdr = b.create_block("loop_hdr");
+    BasicBlock* loop_body = b.create_block("loop_body");
+    BasicBlock* exit_bb = b.create_block("exit");
+
+    Value* n_f64 = b.build_sitofp_f64_i32(n_i32);
+    b.build_br(loop_hdr, {b.build_fconst_f64(0.0)});
+
+    fn->append_block(loop_hdr);
+    b.position_at_end(loop_hdr);
+    Value* iv_f64 = b.add_block_param(loop_hdr, Type::f64());
+    Value* cond = b.build_slt(iv_f64, n_f64);
+    b.build_br_if(cond, loop_body, {}, exit_bb, {});
+
+    fn->append_block(loop_body);
+    auto [bb1, val] = build_bronze_ta_get_f64_diamond(b, fn, loop_body, ta_ptr, iv_f64, "get_elem");
+    b.position_at_end(bb1);
+    Value* updated = b.build_fadd(b.build_mul(val, b.build_fconst_f64(2.0)), b.build_fconst_f64(1.0));
+    BasicBlock* bb2 = build_bronze_ta_set_f64_diamond(b, fn, bb1, ta_ptr, iv_f64, updated, "set_elem");
+    b.position_at_end(bb2);
+    Value* next_iv = b.build_add(iv_f64, b.build_fconst_f64(1.0));
+    b.build_br(loop_hdr, {next_iv});
+
+    fn->append_block(exit_bb);
+    b.position_at_end(exit_bb);
+    b.build_ret(b.build_iconst_i32(0));
+
+    fn->rebuild_cfg_predecessors();
+
+    // Run pass_pipeline with vectorization/unrolling/IVSR disabled first so we can
+    // inspect the exact fast loop produced by f64_demote -> loop_unswitch -> loop_cleanup (LICM).
+    PassPipelineOptions opts = production_pass_pipeline_options();
+    opts.enable_bce = false;
+    opts.loop.enable_bce = false;
+    opts.loop.enable_vectorize = false;
+    opts.loop.enable_slp = false;
+    opts.loop.enable_unroll = false;
+    opts.loop.enable_ivsr = false;
+    REQUIRE(run_pass_pipeline(mod, opts));
+
+    DiagnosticReporter diag;
+    REQUIRE(verify_function(*fn, &diag));
+
+    // 1. IV was demoted from f64 to i64
+    CHECK_EQ(loop_hdr->param(0)->type(), Type::i64());
+
+    // 2. Fast loop was unswitched by loop_unswitch (even with BCE disabled!) and
+    //    the entire typed_array_data chain (buf, ext, inline_data, select, add byte_offset)
+    //    was hoisted out of the fast loop into the preheader by loop_cleanup (LICM)!
+    DominatorTree dom(*fn);
+    LoopAnalysis loops(*fn, dom);
+    bool found_fast_loop = false;
+    for (LoopInfo* l : loops.post_order_loops()) {
+        if (l->header() == loop_hdr) {
+            found_fast_loop = true;
+            CHECK_EQ(l->blocks().size(), size_t{2});
+            size_t header_loads_in_loop = 0;
+            size_t selects_in_loop = 0;
+            size_t calls_in_loop = 0;
+            for (BasicBlock* lbb : l->blocks()) {
+                for (Instruction* inst : *lbb) {
+                    if (inst->opcode() == Opcode::load) ++header_loads_in_loop;
+                    if (inst->opcode() == Opcode::select) ++selects_in_loop;
+                    if (is_call(inst->opcode())) ++calls_in_loop;
+                }
+            }
+            CHECK_EQ(header_loads_in_loop, size_t{0});
+            CHECK_EQ(selects_in_loop, size_t{0});
+            CHECK_EQ(calls_in_loop, size_t{0});
+
+            BasicBlock* preheader = LoopAnalysis::ensure_preheader(*fn, *l);
+            REQUIRE(preheader != nullptr);
+            bool has_hoisted_select = false;
+            for (Instruction* inst : *preheader) {
+                if (inst->opcode() == Opcode::select) has_hoisted_select = true;
+            }
+            CHECK(has_hoisted_select);
+        }
+    }
+    CHECK(found_fast_loop);
+
+    // 3. Execute via JIT and verify numerical results
+    constexpr size_t kLen = 16;
+    std::vector<double> backing(kLen), expected(kLen);
+    for (size_t i = 0; i < kLen; ++i) {
+        backing[i] = static_cast<double>(i) * 1.5;
+        expected[i] = backing[i] * 2.0 + 1.0;
+    }
+    MockBronzeArrayBuffer abuf{};
+    abuf.flags = 0;
+    abuf.ext_ptr = backing.data();
+
+    MockBronzeTypedArray ta{};
+    ta.buffer_boxed = reinterpret_cast<uint64_t>(&abuf) | 0xFFFC000000000000ULL;
+    ta.byte_offset = 0;
+    ta.byte_length = static_cast<uint64_t>(kLen * sizeof(double));
+
+    codegen::JitExecutionEngine jit;
+    jit.register_external_symbol("mock_ta_slow_get", reinterpret_cast<void*>(+[](int64_t, int64_t) -> int64_t { return 0; }));
+    jit.register_external_symbol("mock_ta_slow_set", reinterpret_cast<void*>(+[](int64_t, int64_t, int64_t) -> int64_t { return 0; }));
+    REQUIRE(jit.compile_and_load(mod));
+    using ScaleBiasFn = int32_t(*)(MockBronzeTypedArray*, int32_t);
+    auto fn_ptr = jit.get_function_ptr<ScaleBiasFn>("ta_scale_bias");
+    REQUIRE(fn_ptr != nullptr);
+
+    CHECK_EQ(fn_ptr(&ta, static_cast<int32_t>(kLen)), 0);
+    for (size_t i = 0; i < kLen; ++i) {
+        CHECK_EQ(backing[i], expected[i]);
+    }
+}
+

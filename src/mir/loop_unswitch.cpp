@@ -22,7 +22,7 @@ bool unswitch_loop(
         }
     }
     if (total_instructions > opts.max_loop_instructions) {
-        return false;
+        return unswitch_fast_slow_loop(fn, loop, dom, opts);
     }
 
     // Find candidate loop-invariant conditional branch

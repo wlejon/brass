@@ -349,11 +349,20 @@ bool AliasAnalysis::can_clobber(const Instruction* write_inst, const Instruction
             if (def->opcode() == Opcode::add) {
                 int64_t c = 0;
                 if (get_const_integer_val(def->operand(1), c)) {
-                    if (c >= 40 && r.offset + static_cast<int64_t>(r.size) <= c &&
-                        (def->operand(0) == r.ptr || def->operand(0) == br)) {
+                    if (c >= 16 && r.offset + static_cast<int64_t>(r.size) <= c &&
+                        (def->operand(0) == r.ptr || def->operand(0) == br ||
+                         strip_mask(def->operand(0)) == br_unmasked)) {
                         return true;
                     }
                     return self(self, def->operand(0), depth + 1);
+                }
+                if (get_const_integer_val(def->operand(0), c)) {
+                    if (c >= 16 && r.offset + static_cast<int64_t>(r.size) <= c &&
+                        (def->operand(1) == r.ptr || def->operand(1) == br ||
+                         strip_mask(def->operand(1)) == br_unmasked)) {
+                        return true;
+                    }
+                    return self(self, def->operand(1), depth + 1);
                 }
                 return self(self, def->operand(0), depth + 1) || self(self, def->operand(1), depth + 1);
             }
