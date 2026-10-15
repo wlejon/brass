@@ -349,6 +349,101 @@ TEST_CASE("OSR resume - the entry function, compiled, continues the loop from a 
     }
 }
 
+// An inner loop reading the result of an invoke its enclosing loop makes on
+// each pass. The OSR entry at the inner header carries that result in, and
+// the region defines it again (the invoke, reached through the outer
+// latch), so its SSA form is rebuilt through a stack slot. The invoke is a
+// terminator: its result exists only on the normal edge, which is where
+// the slot's store has to go for later outer passes to see their own value.
+constexpr std::string_view kNestedInvoke = R"(module @osr_resume_nested
+func @osr_triple(%x: i64) -> i64 {
+entry:
+  %c3 = iconst.i64 3
+  %r = mul %x, %c3
+  ret %r
+}
+func @osr_nested(%n: i64) -> i64 {
+entry:
+  %c0 = iconst.i64 0
+  br outer(%c0, %c0)
+outer(%j: i64, %acc: i64):
+  %x = invoke.i64 @osr_triple(%j), body, pad
+body:
+  %z = iconst.i64 0
+  br inner(%z, %acc)
+inner(%i: i64, %a: i64):
+  %a2 = add %a, %x
+  %one = iconst.i64 1
+  %i2 = add %i, %one
+  %c4 = iconst.i64 4
+  %more_i = slt %i2, %c4
+  br_if %more_i, inner(%i2, %a2), latch
+latch:
+  %one_j = iconst.i64 1
+  %j2 = add %j, %one_j
+  %more_j = slt %j2, %n
+  br_if %more_j, outer(%j2, %a2), done
+done:
+  ret %a2
+pad:
+  %e = landing_pad
+  ret %e
+}
+)";
+
+// The rest of osr_nested from the inner header with (i, a), in outer pass j.
+int64_t nested_from(int64_t n, int64_t j, int64_t i, int64_t a) {
+    for (; i < 4; ++i) a += 3 * j;
+    for (++j; j < n; ++j) a += 4 * 3 * j;
+    return a;
+}
+
+TEST_CASE("OSR resume - an inner loop sees each outer pass's invoke result, not the one it entered with") {
+    auto mod = parse_or_fail(kNestedInvoke);
+    const Function& fn = *mod->get_function("osr_nested");
+    const BasicBlock* inner = block_named(fn, "inner");
+    const BasicBlock* outer = block_named(fn, "outer");
+    auto plan = plan_osr_entry(fn, *inner);
+    REQUIRE(plan.has_value());
+    REQUIRE(region_has_call(*plan));
+
+    Module dst("osr_resume_nested_entry");
+    clone_function(*mod->get_function("osr_triple"), dst);
+    std::string why;
+    Function* entry = build_osr_entry_function(*plan, dst, "osr_nested.osr", &why);
+    if (!entry) std::cerr << why << "\n";
+    REQUIRE(entry != nullptr);
+    REQUIRE(verify_module(dst));
+    // %j and %x come back as parameters of the inner header, beside %i and
+    // %a. Checked before running it: with either stuck at its entry value
+    // the outer loop never ends.
+    const BasicBlock* entry_inner = block_named(*entry, "inner");
+    REQUIRE(entry_inner != nullptr);
+    REQUIRE_EQ(entry_inner->param_count(), size_t{4});
+
+    codegen::JitExecutionEngine jit(Target::host());
+    REQUIRE(jit.compile_and_load(dst));
+    const Value* n_param = fn.entry_block()->param(0);
+    const int64_t n = 6;
+    for (int64_t j0 : {int64_t{0}, int64_t{1}, int64_t{4}}) {
+        for (int64_t i0 : {int64_t{0}, int64_t{2}}) {
+            const int64_t a0 = j0 * 100 + i0;
+            std::vector<uint64_t> buf(plan->live_ins.size(), 0xDEADBEEFDEADBEEFull);
+            for (size_t k = 0; k < plan->live_ins.size(); ++k) {
+                const auto& li = plan->live_ins[k];
+                if (li.rematerialize) continue;
+                if (li.value == inner->param(0)) buf[k] = static_cast<uint64_t>(i0);
+                else if (li.value == inner->param(1)) buf[k] = static_cast<uint64_t>(a0);
+                else if (li.value == outer->param(0)) buf[k] = static_cast<uint64_t>(j0);
+                else if (li.value == n_param) buf[k] = static_cast<uint64_t>(n);
+                else buf[k] = static_cast<uint64_t>(3 * j0); // %x
+            }
+            const RuntimeValue r = jit.invoke("osr_nested.osr", {RuntimeValue::from_ptr(buf.data())});
+            CHECK_EQ(r.as_i64(), nested_from(n, j0, i0, a0));
+        }
+    }
+}
+
 TEST_CASE("OSR resume - a guard failing inside OSR code finishes the call through its exit stub") {
     auto mod = parse_or_fail(kStubLoop);
     const Function& fn = *mod->get_function("sum_spec");

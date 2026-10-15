@@ -277,7 +277,20 @@ Function* build_osr_entry_function(const OsrEntryPlan& plan, Module& dst, std::s
                 }
             } else {
                 Instruction* d = def->defining_instruction();
-                if (d->next()) {
+                if (d->is_terminator()) {
+                    // An invoke's result exists only on its normal edge, and
+                    // a store placed after a terminator is past the end of
+                    // its block, where SROA never sees the definition (the
+                    // slot reads then all fold to the entry's value). The
+                    // store goes on that edge, in a block of its own, since
+                    // the normal successor may have other predecessors.
+                    BranchTarget& normal = d->normal_target();
+                    BasicBlock* on_edge = ir::new_block(*out, "osr.def");
+                    b.position_at_end(on_edge);
+                    b.build_br(normal.block, Span<Value* const>(normal.args.data(), normal.args.size()));
+                    normal = BranchTarget(on_edge);
+                    b.position_before(on_edge->head());
+                } else if (d->next()) {
                     b.position_before(d->next());
                 } else {
                     b.position_at_end(d->parent());
