@@ -224,10 +224,10 @@ RuntimeValue FastInterpreter::execute_frame(FastFrame& frame) {
 #else
 #define BRASS_DIRECT_THREADED 0
 #define OP_CASE(name) case BytecodeOp::name:
-#define DISPATCH() goto loop_start
+#define DISPATCH() do { inst = *pc; goto loop_start; } while (0)
 
-loop_start:
     inst = *pc;
+loop_start:
     switch (decode_op(inst))
 #endif
     {
