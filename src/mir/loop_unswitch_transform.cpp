@@ -642,10 +642,13 @@ bool unswitch_fast_slow_loop(
     Builder b(*fn.parent());
     b.set_function(&fn);
 
-    // Materializer for pure/load instructions into a target block
+    // Materializer for pure/load instructions into a target block. The returned
+    // lambda owns its block and its memo: they must outlive make_materializer's
+    // frame (captured by reference they dangled, and the memo lookups read a
+    // dead stack slot).
     auto make_materializer = [&](BasicBlock* target_bb) {
-        std::unordered_map<const Value*, Value*> mat_map;
-        auto materialize = [&](auto& self, Value* v) -> Value* {
+        auto materialize = [&, target_bb, mat_map = std::unordered_map<const Value*, Value*>{}](
+                               auto& self, Value* v) mutable -> Value* {
             if (!v) return nullptr;
             if (dominates_preheader(v)) return v;
             auto it = mat_map.find(v);
