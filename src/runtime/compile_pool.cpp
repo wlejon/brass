@@ -2,6 +2,7 @@
 #include <brass/runtime/tier_timeline.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <string>
 
@@ -89,7 +90,27 @@ void CompilePool::start_locked(size_t threads) {
     closed_ = false;
     configured_threads_ = threads;
     workers_.reserve(threads);
+    live_ += threads;
     for (size_t i = 0; i < threads; ++i) workers_.emplace_back(&CompilePool::worker_loop, this);
+}
+
+void CompilePool::spawn_locked() {
+    if (queue_.size() <= idle_ || live_ >= configured_threads_) return;
+    // Join the workers that ended idle: each recorded itself and let go of
+    // the lock on its way out, so joining under it cannot wait on it.
+    if (!exited_.empty()) {
+        for (auto it = workers_.begin(); it != workers_.end();) {
+            if (std::find(exited_.begin(), exited_.end(), it->get_id()) == exited_.end()) {
+                ++it;
+                continue;
+            }
+            it->join();
+            it = workers_.erase(it);
+        }
+        exited_.clear();
+    }
+    ++live_;
+    workers_.emplace_back(&CompilePool::worker_loop, this);
 }
 
 void CompilePool::start(size_t threads) {
@@ -101,12 +122,12 @@ bool CompilePool::submit(Owner owner, uint8_t priority, std::function<void()> jo
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (closed_ || stopping_) return false;
-        if (workers_.empty() && is_shared_) {
+        queue_.push_back(Job{owner, priority, next_seq_++, std::move(job)});
+        if (is_shared_) {
             static const bool registered = [] { return std::atexit(&shutdown_shared_at_exit) == 0; }();
             (void)registered;
-            start_locked(configured_threads_);
+            spawn_locked();
         }
-        queue_.push_back(Job{owner, priority, next_seq_++, std::move(job)});
     }
     cv_work_.notify_one();
     return true;
@@ -135,7 +156,7 @@ void CompilePool::wait_owner(Owner owner) {
     std::unique_lock<std::mutex> lock(mutex_);
     cv_done_.wait(lock, [&] {
         // With no workers, queued jobs never run: only the running ones count.
-        if (workers_.empty()) return running_.count(owner) == 0 || running_.at(owner) == 0;
+        if (live_ == 0) return running_.count(owner) == 0 || running_.at(owner) == 0;
         return owner_idle_locked(owner);
     });
 }
@@ -143,7 +164,7 @@ void CompilePool::wait_owner(Owner owner) {
 void CompilePool::wait_idle() {
     if (process_exiting()) return;
     std::unique_lock<std::mutex> lock(mutex_);
-    cv_done_.wait(lock, [&] { return busy_ == 0 && (queue_.empty() || workers_.empty()); });
+    cv_done_.wait(lock, [&] { return busy_ == 0 && (queue_.empty() || live_ == 0); });
 }
 
 size_t CompilePool::queued(Owner owner) const {
@@ -175,17 +196,18 @@ void CompilePool::shutdown() {
         if (t.joinable()) t.join();
     }
     std::lock_guard<std::mutex> lock(mutex_);
+    exited_.clear();
     stopping_ = false;
 }
 
 bool CompilePool::is_running() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return !workers_.empty() && !stopping_;
+    return live_ > 0 && !stopping_;
 }
 
 size_t CompilePool::thread_count() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return workers_.size();
+    return live_;
 }
 
 // Jobs below this priority (tier-2 compiles, which can run for a long time
@@ -195,7 +217,10 @@ size_t CompilePool::thread_count() const {
 constexpr uint8_t kReservedPriority = 128;
 
 std::vector<CompilePool::Job>::iterator CompilePool::pick_locked() {
-    const size_t bulk_limit = workers_.size() > 1 ? workers_.size() - 1 : workers_.size();
+    // Against the pool's size, not the threads alive now: the shared pool
+    // starts another worker for the latency-bound job that cannot start.
+    const size_t size = is_shared_ ? configured_threads_ : workers_.size();
+    const size_t bulk_limit = size > 1 ? size - 1 : size;
     const bool bulk_ok = bulk_running_ < bulk_limit;
     // Highest priority, then oldest, among the jobs that may start now.
     auto best = queue_.end();
@@ -217,12 +242,26 @@ void CompilePool::worker_loop() {
         {
             std::unique_lock<std::mutex> lock(mutex_);
             auto best = queue_.end();
-            cv_work_.wait(lock, [this, &best] {
+            auto ready = [this, &best] {
                 if (stopping_) return true;
                 best = pick_locked();
                 return best != queue_.end();
-            });
-            if (stopping_) return;
+            };
+            ++idle_;
+            bool woke = true;
+            if (is_shared_) {
+                // A shared worker with nothing to do for this long ends; the
+                // next submit starts another.
+                woke = cv_work_.wait_for(lock, std::chrono::seconds(30), ready);
+            } else {
+                cv_work_.wait(lock, ready);
+            }
+            --idle_;
+            if (stopping_ || !woke) {
+                --live_;
+                if (!stopping_) exited_.push_back(std::this_thread::get_id());
+                return;
+            }
             job = std::move(*best);
             queue_.erase(best);
             ++running_[job.owner];

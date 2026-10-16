@@ -33,10 +33,11 @@ class CompilePool {
 public:
     using Owner = const void*;
 
-    // The process's pool, sized default_thread_count(). Its threads start
-    // with the first job submitted to it, so a process that never tiers
-    // anything up never starts one. BRASS_JIT_THREADS in the environment
-    // overrides the size.
+    // The process's pool, of at most default_thread_count() threads. A
+    // thread starts when a job is submitted and none is free, and ends
+    // after a while with nothing to do, so a process that never tiers
+    // anything up never starts one and one whose start is over keeps none.
+    // BRASS_JIT_THREADS in the environment overrides the size.
     static CompilePool& shared();
     // A quarter of the hardware threads, at least one and at most eight: a
     // compile job is long, and the threads it would take are the mutator's
@@ -88,6 +89,8 @@ private:
 
     void worker_loop();
     void start_locked(size_t threads);
+    // shared(): a worker for the job just queued if none is free.
+    void spawn_locked();
     bool owner_idle_locked(Owner owner) const;
     // The job a free worker takes now (queue_.end(): none may start), with
     // one worker kept back from long, low-priority jobs (compile_pool.cpp).
@@ -99,6 +102,9 @@ private:
     std::condition_variable cv_work_;
     std::condition_variable cv_done_;
     std::vector<std::thread> workers_;
+    std::vector<std::thread::id> exited_; // shared(): workers that ended idle, to join
+    size_t live_ = 0;                     // workers whose loop is running
+    size_t idle_ = 0;                     // of those, the ones waiting for a job
     std::vector<Job> queue_;
     std::unordered_map<Owner, size_t> running_;
     size_t busy_ = 0;
