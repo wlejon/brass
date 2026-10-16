@@ -219,6 +219,13 @@ public:
     void safepoint_at(uintptr_t caller_fp, uintptr_t caller_ip);
     void request_collection(CollectionKind kind) noexcept;
     [[nodiscard]] bool in_collection() const noexcept;
+    // Hands the young generation's unused pages back to the system: eden
+    // above its allocation top and each survivor space above its top. They
+    // stay committed, and
+    // read as zero when next touched. For a host gone idle (after a minor
+    // collection, eden is all of it). Returns the bytes released. Not during
+    // a collection.
+    size_t release_unused_young() noexcept;
 
     // ---- Barrier -----------------------------------------------------------
     // Every store of a reference into an object that may be old: `object` is

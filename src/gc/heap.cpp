@@ -429,6 +429,33 @@ uint64_t Heap::collection_count() const noexcept {
 }
 uint64_t Heap::relocation_epoch() const noexcept { return s_->relocation_epoch; }
 
+size_t Heap::release_unused_young() noexcept {
+    HeapState& s = *s_;
+    if (in_collection()) return 0;
+    const size_t page = detail::os_page_bytes();
+    size_t released = 0;
+    auto release = [&](uintptr_t lo, uintptr_t hi) {
+        lo = (lo + page - 1) & ~(uintptr_t{page} - 1);
+        hi &= ~(uintptr_t{page} - 1);
+        if (hi <= lo) return;
+        // Decommitted and committed again: fresh zero pages, as at the start.
+        try {
+            detail::vm_decommit(reinterpret_cast<void*>(lo), hi - lo);
+            detail::vm_commit(reinterpret_cast<void*>(lo), hi - lo);
+        } catch (...) {
+            // vm_commit throws only when the system refuses the range, which
+            // the heap cannot run without: as at a failed allocation.
+            std::abort();
+        }
+        released += hi - lo;
+    };
+    release(alloc_->top, s.eden_hi);
+    // Between collections only one survivor space holds anything; each is
+    // released above its top either way.
+    for (int i = 0; i < 2; ++i) release(s.survivor_top[i], s.survivor_lo[i] + s.survivor_bytes);
+    return released;
+}
+
 size_t Heap::young_used_bytes() const noexcept {
     const HeapState& s = *s_;
     const int from = s.from_survivor;

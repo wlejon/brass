@@ -156,6 +156,30 @@ TEST_CASE("gc::Heap - chains survive many minor collections under verification")
     h.remove_root(&root);
 }
 
+TEST_CASE("gc::Heap - releasing the young generation's unused pages keeps its objects") {
+    HeapConfig c = small_config();
+    c.verify = true;
+    Heap h(c);
+    uint64_t root = 0;
+    h.add_root(&root);
+    build_chain(h, &root, 5000);  // more than eden holds: minors, survivors
+    CHECK(h.stats().minor_collections > 0);
+    CHECK(h.release_unused_young() > 0);
+    size_t len = 0;
+    CHECK_EQ(chain_sum(root, &len), uint64_t{5000} * 4999 / 2);
+    // After a minor collection eden is empty: all of it goes, and allocation
+    // over the released pages starts from zeroed memory.
+    h.collect(CollectionKind::Minor);
+    CHECK(h.release_unused_young() >= c.eden_bytes);
+    const uintptr_t fresh = h.allocate(48, kArray);
+    for (size_t i = 0; i < 6; ++i) CHECK_EQ(reinterpret_cast<uint64_t*>(fresh)[i], uint64_t{0});
+    build_chain(h, &root, 5000);
+    CHECK_EQ(chain_sum(root, &len), uint64_t{5000} * 4999 / 2 * 2);
+    CHECK_EQ(len, size_t{10000});
+    h.verify();
+    h.remove_root(&root);
+}
+
 TEST_CASE("gc::Heap - an old object's store of a young reference keeps the target alive") {
     Heap h(small_config());
     uint64_t holder = h.allocate(16, kNode, kAllocPinned);
