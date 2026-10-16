@@ -432,18 +432,22 @@ public:
     // The register of the SSA value with each id, kNoReg for an id with
     // none (reg_of_ssa reads it).
     std::vector<BcReg> ssa_to_reg;
-    // Each block's first pc, in increasing pc order (block_at_pc reads it).
-    std::vector<std::pair<uint32_t, const BasicBlock*>> pc_block_map;
+    // Each block's first pc and the block's id, in increasing pc order
+    // (block_at_pc reads it). An id, not the block: the MIR body may be
+    // released and built again (Module::release_bodies) while this code
+    // runs, and the body built again numbers its blocks the same.
+    std::vector<std::pair<uint32_t, uint32_t>> pc_block_map;
+    static constexpr uint32_t kNoBlock = UINT32_MAX;
 
     BcReg reg_of_ssa(uint32_t id) const noexcept { return id < ssa_to_reg.size() ? ssa_to_reg[id] : kNoReg; }
-    // The block whose code starts at `pc`, or null.
-    const BasicBlock* block_at_pc(uint32_t pc) const noexcept {
+    // The id of the block whose code starts at `pc`, or kNoBlock.
+    uint32_t block_at_pc(uint32_t pc) const noexcept {
         size_t lo = 0, hi = pc_block_map.size();
         while (lo < hi) {
             const size_t mid = (lo + hi) / 2;
             if (pc_block_map[mid].first < pc) lo = mid + 1; else hi = mid;
         }
-        return lo < pc_block_map.size() && pc_block_map[lo].first == pc ? pc_block_map[lo].second : nullptr;
+        return lo < pc_block_map.size() && pc_block_map[lo].first == pc ? pc_block_map[lo].second : kNoBlock;
     }
     std::vector<ExceptionEntry> exception_table;
     std::vector<ResumePointEntry> resume_points;

@@ -661,17 +661,23 @@ RuntimeValue FastInterpreter::resume_from_native(const Function& fn, uint32_t re
     FastModuleRestore restore{*this, module_};
     // The exits the guard takes, in its order (Interpreter::
     // resume_after_guard): the exit stub, whose result is the function's,
-    // else the resume target.
-    const Instruction* guard = fn.find_guard(resume_id);
-    if (!guard) {
-        throw InterpreterException("No guard with resume id " + std::to_string(resume_id) + " in function " +
-                                   std::string(fn.name()));
+    // else the resume target. Read from the body, which may have been
+    // released since it ran; the continuation runs bytecode.
+    const Function* stub = nullptr;
+    {
+        Module::BodyRead read(fn);
+        const Instruction* guard = fn.find_guard(resume_id);
+        if (!guard) {
+            throw InterpreterException("No guard with resume id " + std::to_string(resume_id) + " in function " +
+                                       std::string(fn.name()));
+        }
+        stub = fn.guard_exit_stub(*guard);
+        if (!stub && !fn.get_resume_target(resume_id)) {
+            throw InterpreterException("Guard " + std::to_string(resume_id) + " in function " +
+                                       std::string(fn.name()) + " has neither an exit stub nor a resume target");
+        }
     }
-    if (const Function* stub = fn.guard_exit_stub(*guard)) return run(*stub, state_values);
-    if (!fn.get_resume_target(resume_id)) {
-        throw InterpreterException("Guard " + std::to_string(resume_id) + " in function " + std::string(fn.name()) +
-                                   " has neither an exit stub nor a resume target");
-    }
+    if (stub) return run(*stub, state_values);
     return resume(fn, resume_id, state_values);
 }
 

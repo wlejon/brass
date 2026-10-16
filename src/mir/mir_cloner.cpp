@@ -13,7 +13,7 @@
 namespace brass {
 
 Function* clone_function(const Function& src, Module& dst_mod) {
-    if (src.is_lazy() && src.parent()) src.parent()->materialize(src);
+    Module::BodyRead read(src);
     std::vector<Type> params = src.param_types();
     Function* dst_fn = dst_mod.create_function(src.name(), src.return_type(), params);
 
@@ -135,18 +135,20 @@ void clone_callee_closure(const Module& src, Module& dst, const std::vector<cons
     // The functions the blocks name directly and those of `also`, with
     // their bodies; and, for every body copied, the exit stubs its guards
     // name, which a guard's code is compiled together with.
+    Module::BodyRead read(src);
     std::vector<const Function*> bodies;
     std::unordered_set<const Function*> copied;
     if (exclude) copied.insert(exclude);
-    // A lazy body has never run, so it has no feedback worth inlining with:
-    // it stays a declaration, called through its stub. An exit stub is
+    // A lazy body never built has never run, so it has no feedback worth
+    // inlining with: it stays a declaration, called through its stub. One
+    // built before and released since is built again. An exit stub is
     // compiled with its guard, so it is built if it is lazy.
     auto copy = [&](std::string_view name, bool needed = false) {
         if (name.empty()) return;
         const Function* f = src.get_function(name);
         if (!f || dst.get_function(f->name())) return;
         if (f->is_lazy()) {
-            if (!needed) return;
+            if (!needed && !f->built_before()) return;
             src.materialize(*f);
         }
         if (f->block_count() != 0 && copied.insert(f).second) bodies.push_back(f);
@@ -196,7 +198,7 @@ std::unique_ptr<Module> clone_function_module(const Module& src, std::string_vie
                                               const std::vector<std::string>& also) {
     const Function* target = src.get_function(fn_name);
     if (!target) return nullptr;
-    src.materialize(*target);
+    Module::BodyRead read(*target);
     auto dst = std::make_unique<Module>(src.name());
     dst->set_allow_fp_reassociation(src.allow_fp_reassociation());
     dst->set_pinned_tls_register(src.pinned_tls_register());
@@ -208,6 +210,7 @@ std::unique_ptr<Module> clone_function_module(const Module& src, std::string_vie
 }
 
 std::unique_ptr<Module> clone_module(const Module& src) {
+    Module::BodyRead read(src);
     auto dst = std::make_unique<Module>(src.name());
     dst->set_allow_fp_reassociation(src.allow_fp_reassociation());
     dst->set_pinned_tls_register(src.pinned_tls_register());

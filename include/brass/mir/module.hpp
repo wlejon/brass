@@ -121,6 +121,51 @@ public:
     // How many lazy bodies have been built, for a host's load report.
     size_t materialized_count() const noexcept;
 
+    // Releasing bodies. A body the provider built (or a front end built in
+    // its own arena: Function::own_body_arena) is only needed while
+    // something reads it: the bytecode compiler, a tier's compile, a
+    // deopt's look at its guards. Once the function's code exists it can go,
+    // and the provider builds it again, the same, when something next reads
+    // it. Every reader of a body holds a BodyRead for as long as it reads
+    // (or keeps pointers into) any body of the module; release_bodies does
+    // nothing while one is held.
+    //
+    // Only for a module whose Tier 0 runs bytecode (the FastInterpreter):
+    // the reference Interpreter walks the MIR as it runs, holding no BodyRead.
+    class BodyRead {
+    public:
+        // Holds the module's bodies and builds `fn`'s if it is lazy.
+        explicit BodyRead(const Function& fn);
+        // Holds the module's bodies.
+        explicit BodyRead(const Module& mod);
+        ~BodyRead();
+        BodyRead(const BodyRead&) = delete;
+        BodyRead& operator=(const BodyRead&) = delete;
+
+    private:
+        void enter(const Module& mod);
+        // Null for a module without a provider: nothing to hold.
+        const Module* mod_ = nullptr;
+    };
+    // Drops every releasable body (Function::body_releasable) and returns
+    // the bytes their arenas held; 0, releasing nothing, while a BodyRead is
+    // held or a body is being built. Any thread.
+    size_t release_bodies();
+    // How many bodies release_bodies has dropped, for a host's report.
+    size_t released_count() const noexcept;
+    // release_bodies over every live module with a body provider, for a host
+    // gone idle. Returns the bytes released.
+    static size_t release_idle_bodies();
+    // Over every live module with a body provider: bodies built (first
+    // builds and builds again), bodies released, and the bytes the bodies
+    // held now keep in their own arenas.
+    struct BodyStats {
+        size_t built = 0;
+        size_t released = 0;
+        size_t live_bytes = 0;
+    };
+    static BodyStats body_stats();
+
 private:
     Arena arena_;
     StringPool string_pool_;

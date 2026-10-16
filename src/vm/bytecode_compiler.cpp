@@ -42,7 +42,7 @@ detail::DenseIdMap<Value, uint32_t> count_uses(const Function& fn, const detail:
 } // namespace
 
 std::unique_ptr<BytecodeFunction> BytecodeCompiler::compile(const Function& fn) {
-    if (fn.is_lazy() && fn.parent()) fn.parent()->materialize(fn);
+    Module::BodyRead read(fn);
     auto bfn = std::make_unique<BytecodeFunction>(fn.name(), fn.return_type(), fn.param_types());
 
     // Step 1: register allocation over the emission order.
@@ -80,9 +80,9 @@ std::unique_ptr<BytecodeFunction> BytecodeCompiler::compile(const Function& fn) 
         // nothing shares its pc with the next and the later one wins, as a
         // map's assignment did.
         if (!bfn->pc_block_map.empty() && bfn->pc_block_map.back().first == b_pc) {
-            bfn->pc_block_map.back().second = bb;
+            bfn->pc_block_map.back().second = bb->id();
         } else {
-            bfn->pc_block_map.emplace_back(b_pc, bb);
+            bfn->pc_block_map.emplace_back(b_pc, bb->id());
         }
         // Falling off a block into its layout successor would be silent
         // misexecution; malformed blocks are rejected.

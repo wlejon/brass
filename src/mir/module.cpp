@@ -14,15 +14,60 @@ struct Module::LazyBodies {
     std::mutex mutex;
     BodyProvider provider;
     std::atomic<size_t> built{0};
+    std::atomic<size_t> released{0};
+    // BodyReads held now, and whether release_bodies is running (BodyRead's
+    // handshake with it: each side writes its own flag, then reads the
+    // other's).
+    std::atomic<uint32_t> readers{0};
+    std::atomic<bool> releasing{false};
 };
 
+namespace {
+
+// The live modules with a body provider, for release_idle_bodies.
+std::mutex& provider_modules_mutex() {
+    static std::mutex m;
+    return m;
+}
+std::vector<Module*>& provider_modules() {
+    static std::vector<Module*> mods;
+    return mods;
+}
+
+void forget_provider_module(Module* mod) {
+    std::lock_guard<std::mutex> lock(provider_modules_mutex());
+    std::erase(provider_modules(), mod);
+}
+
+} // namespace
+
 Module::Module() noexcept = default;
-Module::Module(Module&&) noexcept = default;
+
+Module::Module(Module&& other) noexcept
+    : arena_(std::move(other.arena_)),
+      string_pool_(std::move(other.string_pool_)),
+      name_(other.name_),
+      functions_(std::move(other.functions_)),
+      function_map_(std::move(other.function_map_)),
+      external_symbols_(std::move(other.external_symbols_)),
+      symbol_roles_(std::move(other.symbol_roles_)),
+      string_symbols_(std::move(other.string_symbols_)),
+      allow_fp_reassociation_(other.allow_fp_reassociation_),
+      pinned_tls_register_(other.pinned_tls_register_),
+      has_loop_optimizations_(other.has_loop_optimizations_),
+      debug_context_(std::move(other.debug_context_)),
+      lazy_(std::move(other.lazy_)) {
+    if (lazy_) {
+        std::lock_guard<std::mutex> lock(provider_modules_mutex());
+        std::replace(provider_modules().begin(), provider_modules().end(), &other, this);
+    }
+}
 
 Module::Module(std::string_view name)
     : arena_(), string_pool_(), name_(string_pool_.intern(name)) {}
 
 Module::~Module() {
+    if (lazy_) forget_provider_module(this);
     // Runtime registries hold raw pointers into this module; drop them before
     // the arena frees the functions, so a new module reusing the addresses is
     // never mistaken for this one.
@@ -31,7 +76,12 @@ Module::~Module() {
 
 Module& Module::operator=(Module&& other) noexcept {
     if (this == &other) return *this;
+    if (lazy_) forget_provider_module(this);
     runtime::forget_module(*this);
+    if (other.lazy_) {
+        std::lock_guard<std::mutex> lock(provider_modules_mutex());
+        std::replace(provider_modules().begin(), provider_modules().end(), &other, this);
+    }
     arena_ = std::move(other.arena_);
     string_pool_ = std::move(other.string_pool_);
     name_ = other.name_;
@@ -49,7 +99,11 @@ Module& Module::operator=(Module&& other) noexcept {
 }
 
 void Module::set_body_provider(BodyProvider provider) {
-    if (!lazy_) lazy_ = std::make_unique<LazyBodies>();
+    if (!lazy_) {
+        lazy_ = std::make_unique<LazyBodies>();
+        std::lock_guard<std::mutex> lock(provider_modules_mutex());
+        provider_modules().push_back(this);
+    }
     lazy_->provider = std::move(provider);
 }
 
@@ -64,6 +118,8 @@ void Module::materialize(const Function& fn) const {
     std::lock_guard<std::mutex> lock(lazy_->mutex);
     if (!fn.is_lazy()) return;
     auto& body = const_cast<Function&>(fn);
+    // Its own arena, so release_bodies can drop it again.
+    body.own_body_arena();
     if (!lazy_->provider(body)) {
         std::fprintf(stderr, "brass: fatal: building the body of '%.*s' failed\n",
                      static_cast<int>(fn.name().size()), fn.name().data());
@@ -85,11 +141,122 @@ void Module::materialize(const Function& fn) const {
         }
     }
     lazy_->built.fetch_add(1, std::memory_order_relaxed);
+    body.note_built();
     body.mark_body_ready();
 }
 
 size_t Module::materialized_count() const noexcept {
     return lazy_ ? lazy_->built.load(std::memory_order_relaxed) : 0;
+}
+
+Module::BodyRead::BodyRead(const Module& mod) {
+    enter(mod);
+}
+
+void Module::BodyRead::enter(const Module& mod) {
+    LazyBodies* lazy = mod.lazy_.get();
+    if (!lazy) return;
+    mod_ = &mod;
+    lazy->readers.fetch_add(1, std::memory_order_seq_cst);
+    // A release under way finishes first (it holds the lock throughout);
+    // one that starts after this sees the reader and releases nothing.
+    if (lazy->releasing.load(std::memory_order_seq_cst)) {
+        std::lock_guard<std::mutex> wait(lazy->mutex);
+    }
+}
+
+Module::BodyRead::BodyRead(const Function& fn) {
+    if (!fn.parent()) return;
+    enter(*fn.parent());
+    if (fn.is_lazy()) fn.parent()->materialize(fn);
+}
+
+namespace {
+// BRASS_RELEASE_BODIES_STRESS=N: every N-th time the last reader leaves,
+// it releases every body, so a read after that builds the body again (a
+// front end's test that its provider builds the same body twice, and
+// brass's that nothing keeps pointers into a body past its read). N=1 is
+// every time; a larger N keeps a program that deopts on every call (each
+// resume reads its guard) from building a body per call.
+uint32_t release_stress_period() {
+    static const uint32_t period = [] {
+        auto parse = [](const char* v) -> uint32_t {
+            if (!v) return 0;
+            const unsigned long n = std::strtoul(v, nullptr, 10);
+            return n > 0xFFFFu ? 0xFFFFu : static_cast<uint32_t>(n);
+        };
+#if defined(_MSC_VER)
+        char* v = nullptr;
+        size_t len = 0;
+        if (_dupenv_s(&v, &len, "BRASS_RELEASE_BODIES_STRESS") != 0 || !v) return 0u;
+        const uint32_t n = parse(v);
+        std::free(v);
+        return n;
+#else
+        return parse(std::getenv("BRASS_RELEASE_BODIES_STRESS"));
+#endif
+    }();
+    return period;
+}
+
+bool release_stress_now() {
+    const uint32_t period = release_stress_period();
+    if (period == 0) return false;
+    static std::atomic<uint32_t> exits{0};
+    return exits.fetch_add(1, std::memory_order_relaxed) % period == 0;
+}
+} // namespace
+
+Module::BodyRead::~BodyRead() {
+    if (!mod_) return;
+    const uint32_t before = mod_->lazy_->readers.fetch_sub(1, std::memory_order_seq_cst);
+    if (before == 1 && release_stress_now()) const_cast<Module*>(mod_)->release_bodies();
+}
+
+size_t Module::release_bodies() {
+    LazyBodies* lazy = lazy_.get();
+    if (!lazy || !lazy->provider) return 0;
+    std::unique_lock<std::mutex> lock(lazy->mutex, std::try_to_lock);
+    if (!lock.owns_lock()) return 0;
+    lazy->releasing.store(true, std::memory_order_seq_cst);
+    size_t bytes = 0;
+    if (lazy->readers.load(std::memory_order_seq_cst) == 0) {
+        size_t count = 0;
+        for (Function* fn : functions_) {
+            if (!fn || !fn->body_releasable()) continue;
+            bytes += fn->release_body();
+            ++count;
+        }
+        lazy->released.fetch_add(count, std::memory_order_relaxed);
+    }
+    lazy->releasing.store(false, std::memory_order_seq_cst);
+    return bytes;
+}
+
+size_t Module::released_count() const noexcept {
+    return lazy_ ? lazy_->released.load(std::memory_order_relaxed) : 0;
+}
+
+size_t Module::release_idle_bodies() {
+    std::lock_guard<std::mutex> lock(provider_modules_mutex());
+    size_t bytes = 0;
+    for (Module* mod : provider_modules()) bytes += mod->release_bodies();
+    return bytes;
+}
+
+Module::BodyStats Module::body_stats() {
+    std::lock_guard<std::mutex> lock(provider_modules_mutex());
+    BodyStats stats;
+    for (Module* mod : provider_modules()) {
+        stats.built += mod->materialized_count();
+        stats.released += mod->released_count();
+        // Under the body lock: a body being built or released is not read.
+        std::lock_guard<std::mutex> body_lock(mod->lazy_->mutex);
+        for (const Function* fn : mod->functions_) {
+            if (fn && fn->body_arena()) stats.live_bytes += fn->body_arena()->bytes_capacity();
+        }
+    }
+    return stats;
 }
 
 void Module::set_name(std::string_view name) {

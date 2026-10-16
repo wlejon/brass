@@ -59,6 +59,8 @@ void Builder::position_after(Instruction* inst) noexcept {
 }
 
 Arena& Builder::get_arena() {
+    // A body the module can release lives in the function's own arena.
+    if (function_ && function_->body_arena()) return *function_->body_arena();
     if (module_) {
         return module_->arena();
     }

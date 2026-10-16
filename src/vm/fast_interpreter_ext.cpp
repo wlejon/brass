@@ -202,9 +202,19 @@ bool FastInterpreter::handle_osr_backedge(FastFrame& frame, uint32_t target_pc, 
     fb.count_backedge_fast();
     const uint64_t n = fb.backedge_count();
     if (!frame.mir_fn || !bfn || n < coordinator.threshold() || (n & 63) != 0) return false;
-    const BasicBlock* target = bfn->block_at_pc(target_pc);
-    if (!target) return false;
-    return coordinator.try_osr_migration(*this, *frame.mir_fn, const_cast<BasicBlock*>(target), frame, out_res);
+    const uint32_t target_id = bfn->block_at_pc(target_pc);
+    if (target_id == BytecodeFunction::kNoBlock) return false;
+    // The header by id, in the body as it is now (built again if it was
+    // released). The coordinator keys its entries on the header and plans
+    // from the body: a function whose loop gets this far keeps its body.
+    BasicBlock* target = nullptr;
+    {
+        Module::BodyRead read(*frame.mir_fn);
+        target = frame.mir_fn->get_block_by_id(target_id);
+        if (!target) return false;
+        frame.mir_fn->pin_body();
+    }
+    return coordinator.try_osr_migration(*this, *frame.mir_fn, target, frame, out_res);
 }
 
 } // namespace brass

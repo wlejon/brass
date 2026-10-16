@@ -2,7 +2,9 @@
 
 #include <brass/mir/types.hpp>
 #include <brass/mir/block.hpp>
+#include <brass/core/arena.hpp>
 #include <atomic>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -63,6 +65,33 @@ public:
     void mark_lazy() noexcept { body_state_.store(kBodyLazy, std::memory_order_release); }
     // Called by Module::materialize once the body is built: publishes it.
     void mark_body_ready() noexcept { body_state_.store(kBodyReady, std::memory_order_release); }
+
+    // A body the module's provider builds can be built again: Module::
+    // materialize gives each one its own arena (body_arena, which a Builder
+    // positioned in the function allocates from), so the module can drop it
+    // once its code exists (Module::release_bodies) and build it anew the
+    // next time something reads it. A front end makes the same claim for a
+    // body it built up front with own_body_arena before building it, and
+    // takes on the provider's promise for it: built again, it is the same
+    // body.
+    Arena* body_arena() const noexcept { return body_arena_.get(); }
+    // Gives the function a fresh arena for the body about to be built (sized
+    // after the last one, if it had one), and notes the ids it starts from.
+    void own_body_arena();
+    // Whether the body was built at least once: a lazy function that was
+    // never built has never run, while one released has.
+    bool built_before() const noexcept { return built_before_; }
+    void note_built() noexcept { built_before_ = true; }
+    // A body something keeps pointers into beyond any read of it (an OSR
+    // entry's plan names its blocks and values): never released.
+    void pin_body() const noexcept { body_pinned_.store(true, std::memory_order_release); }
+    bool body_pinned() const noexcept { return body_pinned_.load(std::memory_order_acquire); }
+    // Whether release_body may drop the body now.
+    bool body_releasable() const noexcept { return body_arena_ && !body_pinned() && body_ready(); }
+    // Drops the body (blocks, resume points, the arena) and makes the
+    // function lazy again, with the ids it was first built from. Returns the
+    // arena's bytes. Module::release_bodies' part, under its body lock.
+    size_t release_body();
 
     // Set once a handle is bound to this function (the only Functions code
     // is compiled from, so also every deopt target): runtime::forget_module
@@ -151,6 +180,13 @@ private:
     static constexpr uint8_t kBodyLazy = 1;
     std::atomic<uint8_t> body_state_{kBodyReady};
     mutable std::atomic<bool> dispatch_referenced_{false};
+    mutable std::atomic<bool> body_pinned_{false};
+    bool built_before_ = false;
+    std::unique_ptr<Arena> body_arena_;
+    // The last body's arena size, and the ids the body is built from.
+    size_t body_bytes_ = 0;
+    uint32_t body_first_value_id_ = 0;
+    uint32_t body_first_block_id_ = 0;
 
     std::string_view name_;
     Type return_type_ = Type::void_type();

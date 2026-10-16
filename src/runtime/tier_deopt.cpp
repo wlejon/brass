@@ -62,7 +62,10 @@ RuntimeValue materialize(Type t, uint64_t bits) {
 
 bool deopt_targets_valid(const Function& optimized, const Function* tier0, std::string& why) {
     // Tier 0's guards by resume id, built on the first guard: one walk of
-    // its body rather than one per guard of the optimized copy.
+    // its body rather than one per guard of the optimized copy. Its body may
+    // have been released since it ran, so it is held (and built again if
+    // need be) from the first guard on.
+    std::optional<Module::BodyRead> tier0_read;
     std::optional<std::unordered_map<uint32_t, const Instruction*>> tier0_guards;
     for (const auto* bb : optimized.blocks()) {
         if (!bb) continue;
@@ -73,7 +76,10 @@ bool deopt_targets_valid(const Function& optimized, const Function* tier0, std::
                 why = site + " but no Tier-0 function to resume in";
                 return false;
             }
-            if (!tier0_guards) tier0_guards = tier0->guards_by_resume_id();
+            if (!tier0_guards) {
+                tier0_read.emplace(*tier0);
+                tier0_guards = tier0->guards_by_resume_id();
+            }
             const auto git = tier0_guards->find(inst->resume_id());
             const Instruction* g = git == tier0_guards->end() ? nullptr : git->second;
             if (!g) {
@@ -141,20 +147,30 @@ uint64_t MultiTierPipeline::resume_after_deopt(FunctionHandle& handle, const Deo
     // and its failures say nothing about the handle's current code.
     const bool current_code = handle.mir_function() == fn;
     const std::string fname(fn->name());
-    const Instruction* guard = find_guard(*fn, frame.resume_id);
-    if (!guard) {
-        deopt_fatal("no guard with resume id " + std::to_string(frame.resume_id) + " in '" + fname + "'");
-    }
-    const auto& state_map = guard->state_map();
-    if (state_map.size() != frame.count) {
-        deopt_fatal("deopt frame of '" + fname + "' carries " + std::to_string(frame.count) +
-                    " values, guard expects " + std::to_string(state_map.size()));
-    }
+    // The guard's state and exits, read from the Tier-0 body (built again
+    // if it was released since it ran) and held only while read: the
+    // continuation runs bytecode.
     std::vector<RuntimeValue> state;
-    state.reserve(frame.count);
-    for (size_t i = 0; i < frame.count; ++i) {
-        const Value* sv = state_map[i];
-        state.push_back(materialize(sv ? sv->type() : Type::i64(), frame.slots[i]));
+    const Function* stub = nullptr;
+    bool has_resume = false;
+    {
+        Module::BodyRead read(*fn);
+        const Instruction* guard = find_guard(*fn, frame.resume_id);
+        if (!guard) {
+            deopt_fatal("no guard with resume id " + std::to_string(frame.resume_id) + " in '" + fname + "'");
+        }
+        const auto& state_map = guard->state_map();
+        if (state_map.size() != frame.count) {
+            deopt_fatal("deopt frame of '" + fname + "' carries " + std::to_string(frame.count) +
+                        " values, guard expects " + std::to_string(state_map.size()));
+        }
+        state.reserve(frame.count);
+        for (size_t i = 0; i < frame.count; ++i) {
+            const Value* sv = state_map[i];
+            state.push_back(materialize(sv ? sv->type() : Type::i64(), frame.slots[i]));
+        }
+        stub = exit_stub_of(*fn, *guard);
+        has_resume = fn->get_resume_target(frame.resume_id) != nullptr;
     }
 
     tier2_deopts_.fetch_add(1, std::memory_order_relaxed);
@@ -165,8 +181,6 @@ uint64_t MultiTierPipeline::resume_after_deopt(FunctionHandle& handle, const Deo
     if (current_code) charge_deopt(handle, table, frame.resume_id);
 
     // The same exits the interpreter's guard takes, in its order.
-    const Function* stub = exit_stub_of(*fn, *guard);
-    const bool has_resume = fn->get_resume_target(frame.resume_id) != nullptr;
     if (!stub && !has_resume) {
         deopt_fatal("guard " + std::to_string(frame.resume_id) + " of '" + fname +
                     "' has neither an exit stub nor a resume target");

@@ -7,12 +7,16 @@ namespace brass {
 Arena::Arena(size_t default_chunk_size)
     : default_chunk_size_(default_chunk_size) {}
 
+Arena::Arena(size_t first_chunk_size, size_t max_chunk_size)
+    : default_chunk_size_(first_chunk_size), max_chunk_size_(max_chunk_size) {}
+
 Arena::~Arena() {
     clear();
 }
 
 Arena::Arena(Arena&& other) noexcept
     : default_chunk_size_(other.default_chunk_size_),
+      max_chunk_size_(other.max_chunk_size_),
       chunks_(std::move(other.chunks_)),
       current_chunk_idx_(other.current_chunk_idx_),
       bytes_allocated_(other.bytes_allocated_),
@@ -27,6 +31,7 @@ Arena& Arena::operator=(Arena&& other) noexcept {
     if (this != &other) {
         clear();
         default_chunk_size_ = other.default_chunk_size_;
+        max_chunk_size_ = other.max_chunk_size_;
         chunks_ = std::move(other.chunks_);
         current_chunk_idx_ = other.current_chunk_idx_;
         bytes_allocated_ = other.bytes_allocated_;
@@ -41,7 +46,11 @@ Arena& Arena::operator=(Arena&& other) noexcept {
 }
 
 void Arena::allocate_new_chunk(size_t min_size) {
-    size_t chunk_size = std::max(default_chunk_size_, min_size);
+    size_t chunk_size = default_chunk_size_;
+    if (max_chunk_size_ > default_chunk_size_) {
+        chunk_size = std::min(max_chunk_size_, std::max(default_chunk_size_, bytes_capacity_));
+    }
+    chunk_size = std::max(chunk_size, min_size);
     uint8_t* mem = static_cast<uint8_t*>(::operator new(chunk_size));
     chunks_.push_back(Chunk{mem, chunk_size, 0});
     bytes_capacity_ += chunk_size;

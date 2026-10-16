@@ -27,6 +27,37 @@ void Function::remove_block(BasicBlock* bb) {
     }
 }
 
+namespace {
+// A body arena's first chunk when the body's size is not known yet, and the
+// largest chunk it grows to.
+constexpr size_t kBodyArenaFirstChunk = 2 * 1024;
+constexpr size_t kBodyArenaMaxChunk = Arena::DefaultChunkSize;
+} // namespace
+
+void Function::own_body_arena() {
+    // Built again, the body is the same size: one chunk holds it.
+    const size_t first = body_bytes_ ? body_bytes_ + 64 : kBodyArenaFirstChunk;
+    body_arena_ = std::make_unique<Arena>(first, std::max(first, kBodyArenaMaxChunk));
+    body_first_value_id_ = next_value_id_;
+    body_first_block_id_ = next_block_id_;
+}
+
+size_t Function::release_body() {
+    if (!body_releasable()) return 0;
+    body_state_.store(kBodyLazy, std::memory_order_release);
+    std::vector<BasicBlock*>().swap(blocks_);
+    std::vector<std::pair<uint32_t, BasicBlock*>>().swap(resume_points_);
+    std::unordered_map<uint32_t, uint32_t>().swap(resume_index_);
+    next_value_id_ = body_first_value_id_;
+    next_block_id_ = body_first_block_id_;
+    next_guard_id_ = 0;
+    guard_id_known_ = false;
+    const size_t bytes = body_arena_->bytes_capacity();
+    body_bytes_ = body_arena_->bytes_allocated();
+    body_arena_.reset();
+    return bytes;
+}
+
 BasicBlock* Function::get_block_by_name(std::string_view name) const noexcept {
     for (BasicBlock* bb : blocks_) {
         if (bb && bb->name() == name) {

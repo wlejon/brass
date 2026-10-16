@@ -131,4 +131,74 @@ TEST_CASE("Lazy bodies - a caller's tier-up leaves a callee that never ran unbui
     CHECK_EQ(built, 1);
 }
 
+TEST_CASE("Lazy bodies - a built body is released, and built again when next read") {
+    int built = 0;
+    auto mod = lazy_module(built);
+    FunctionDispatchTable prog;
+    prog.pipeline().initialize(config(TierLevel::Tier0_Interpreter));
+    CHECK_EQ(prog.pipeline().execute(*mod, "lb_f", {RuntimeValue::from_i64(200)}).as_i64(), expected(200));
+    const Function* cold = mod->get_function("lb_cold");
+    CHECK_EQ(built, 1);
+    CHECK(cold->body_ready());
+    CHECK(cold->body_arena() != nullptr);
+    CHECK(cold->built_before());
+    REQUIRE(cold->entry_block() != nullptr);
+    const uint32_t first_block_id = cold->entry_block()->id();
+    const uint32_t first_param_id = cold->entry_block()->param(0)->id();
+
+    // Only the provider's bodies go: @lb_f was parsed into the module arena.
+    CHECK(mod->release_bodies() > 0);
+    CHECK_EQ(mod->released_count(), 1u);
+    CHECK(cold->is_lazy());
+    CHECK(cold->has_body());
+    CHECK(cold->blocks().empty());
+    CHECK(cold->body_arena() == nullptr);
+    CHECK(mod->get_function("lb_f")->body_ready());
+
+    // Tier 0 runs @lb_cold's bytecode, compiled before the release.
+    CHECK_EQ(prog.pipeline().execute(*mod, "lb_f", {RuntimeValue::from_i64(300)}).as_i64(), expected(300));
+    CHECK_EQ(built, 1);
+
+    // A reader builds it again, numbered as it was first.
+    {
+        Module::BodyRead read(*cold);
+        CHECK_EQ(built, 2);
+        CHECK(cold->body_ready());
+        REQUIRE(cold->entry_block() != nullptr);
+        CHECK_EQ(cold->entry_block()->id(), first_block_id);
+        CHECK_EQ(cold->entry_block()->param(0)->id(), first_param_id);
+        // Nothing is released while a read is held.
+        CHECK_EQ(mod->release_bodies(), 0u);
+        CHECK(cold->body_ready());
+    }
+    CHECK(mod->release_bodies() > 0);
+    CHECK(cold->is_lazy());
+}
+
+TEST_CASE("Lazy bodies - a pinned body is never released") {
+    int built = 0;
+    auto mod = lazy_module(built);
+    const Function* cold = mod->get_function("lb_cold");
+    mod->materialize(*cold);
+    cold->pin_body();
+    CHECK_EQ(mod->release_bodies(), 0u);
+    CHECK(cold->body_ready());
+}
+
+TEST_CASE("Lazy bodies - a caller's tier-up compiles a released callee, which has run") {
+    int built = 0;
+    auto mod = lazy_module(built);
+    FunctionDispatchTable prog;
+    prog.pipeline().initialize(config(TierLevel::Tier1_Baseline));
+    CHECK_EQ(prog.pipeline().execute(*mod, "lb_f", {RuntimeValue::from_i64(200)}).as_i64(), expected(200));
+    CHECK(mod->release_bodies() > 0);
+    for (int64_t x : {1, 2, 3, 400}) {
+        CHECK_EQ(prog.pipeline().execute(*mod, "lb_f", {RuntimeValue::from_i64(x)}).as_i64(), expected(x));
+    }
+    FunctionHandle* f = prog.find("lb_f");
+    REQUIRE(f != nullptr);
+    CHECK_EQ(f->tier(), TierLevel::Tier1_Baseline);
+    CHECK_EQ(built, 2);
+}
+
 #endif

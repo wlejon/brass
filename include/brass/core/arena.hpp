@@ -28,6 +28,11 @@ public:
     };
 
     explicit Arena(size_t default_chunk_size = DefaultChunkSize);
+    // An arena that starts small and grows: its first chunk is
+    // `first_chunk_size`, and each later one as large as all before it, up
+    // to `max_chunk_size`. For many small arenas (one per function body),
+    // where a fixed 64 KB chunk would be mostly empty.
+    Arena(size_t first_chunk_size, size_t max_chunk_size);
     ~Arena();
 
     Arena(const Arena&) = delete;
@@ -119,6 +124,8 @@ private:
     void allocate_new_chunk(size_t min_size);
 
     size_t default_chunk_size_;
+    // Larger than default_chunk_size_: the growing arena's cap.
+    size_t max_chunk_size_ = 0;
     std::vector<Chunk> chunks_;
     size_t current_chunk_idx_ = 0;
     size_t bytes_allocated_ = 0;

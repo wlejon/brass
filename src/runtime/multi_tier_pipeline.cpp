@@ -577,11 +577,13 @@ std::optional<detail::Tier1Link> MultiTierPipeline::open_tier1_node(std::string_
         // Anything else is a host symbol, bound when it is registered.
         const Function* def = mod ? mod->get_function(sym) : nullptr;
         if (!def || !def->has_body()) continue;
-        // A lazy body has never run in any tier: compiling it now would
-        // build (and compile) code that may never run, and so on through
-        // its callees. Its stub compiles it on its first call instead, as
-        // for a func_addr target, when a Tier-0 bridge can stand in.
-        if (def->is_lazy() && !is_baseline_rejected(sym) && tier0_bridge_supported(*def)) {
+        // A lazy body never built has never run in any tier: compiling it
+        // now would build (and compile) code that may never run, and so on
+        // through its callees. Its stub compiles it on its first call
+        // instead, as for a func_addr target, when a Tier-0 bridge can stand
+        // in. (One released since it ran is compiled as any other.)
+        if (def->is_lazy() && !def->built_before() && !is_baseline_rejected(sym) &&
+            tier0_bridge_supported(*def)) {
             table_->get_or_create(sym, def);
             continue;
         }
