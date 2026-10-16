@@ -10,20 +10,60 @@ namespace brass {
 
 namespace {
 
+// One function's map still encoded (register_encoded_code_stack_maps),
+// decoded by the first lookup that needs it. Racing lookups may each decode
+// it; the first to publish wins and the others drop theirs.
+struct LazyMap {
+    const uint8_t* encoded = nullptr;
+    uint32_t encoded_size = 0;
+    uintptr_t code_start = 0;
+    uint32_t code_size = 0;
+    mutable std::atomic<FunctionStackMap*> decoded{nullptr};
+};
+
 // The maps of one registration. It lives as long as a segment indexes it, so
 // an entry's map stays readable after the code is unregistered; lookups skip
 // the entries of a registration that is no longer alive.
 struct RegistrationData {
     std::vector<FunctionStackMap> maps;
+    std::unique_ptr<LazyMap[]> lazy;
+    size_t lazy_count = 0;
     std::atomic<bool> alive{true};
+
+    ~RegistrationData() {
+        for (size_t i = 0; i < lazy_count; ++i) delete lazy[i].decoded.load(std::memory_order_acquire);
+    }
+    // Every map of a registration has a code range: one entry each.
+    size_t entry_count() const noexcept { return maps.size() + lazy_count; }
 };
 
 struct Entry {
     uintptr_t begin = 0;
     uintptr_t end = 0; // exclusive
-    const FunctionStackMap* map = nullptr;
+    const FunctionStackMap* map = nullptr; // null: `lazy` holds it
+    const LazyMap* lazy = nullptr;
     const RegistrationData* owner = nullptr;
 };
+
+const FunctionStackMap* resolve(const LazyMap& l) {
+    if (FunctionStackMap* m = l.decoded.load(std::memory_order_acquire)) return m;
+    auto fresh = std::make_unique<FunctionStackMap>();
+    ModuleStackMap one;
+    if (decode_stack_maps_into(std::span<const uint8_t>(l.encoded, l.encoded_size), one) && !one.empty()) {
+        *fresh = std::move(one.functions().front());
+    }
+    fresh->function_address = l.code_start;
+    fresh->code_size = l.code_size;
+    fresh->sort_records();
+    FunctionStackMap* expected = nullptr;
+    if (l.decoded.compare_exchange_strong(expected, fresh.get(), std::memory_order_acq_rel,
+                                          std::memory_order_acquire)) {
+        return fresh.release();
+    }
+    return expected;
+}
+
+const FunctionStackMap* entry_map(const Entry& e) { return e.map ? e.map : resolve(*e.lazy); }
 
 // An immutable run of entries, sorted by begin and disjoint, with the
 // registrations they point into.
@@ -105,7 +145,9 @@ bool code_range(const FunctionStackMap& fn, uintptr_t& begin, uintptr_t& end) {
     return true;
 }
 
-[[noreturn]] void fatal_overlap(const FunctionStackMap& fn, const FunctionStackMap& other) {
+[[noreturn]] void fatal_overlap(const Entry& e, const Entry& o) {
+    const FunctionStackMap& fn = *entry_map(e);
+    const FunctionStackMap& other = *entry_map(o);
     std::fprintf(stderr,
                  "brass: fatal: stack maps registered for '%s' at %p overlap the registered code of '%s' at %p; "
                  "the owner of freed code did not drop its stack map registration\n",
@@ -189,6 +231,7 @@ struct Token {
 
 std::shared_ptr<const void> publish(std::shared_ptr<RegistrationData> data) {
     auto seg = std::make_shared<Segment>();
+    seg->entries.reserve(data->entry_count());
     for (const auto& fn : data->maps) {
         Entry e;
         if (!code_range(fn, e.begin, e.end)) continue;
@@ -196,10 +239,19 @@ std::shared_ptr<const void> publish(std::shared_ptr<RegistrationData> data) {
         e.owner = data.get();
         seg->entries.push_back(e);
     }
+    for (size_t i = 0; i < data->lazy_count; ++i) {
+        const LazyMap& l = data->lazy[i];
+        Entry e;
+        e.begin = l.code_start;
+        e.end = l.code_start + l.code_size;
+        e.lazy = &l;
+        e.owner = data.get();
+        seg->entries.push_back(e);
+    }
     std::sort(seg->entries.begin(), seg->entries.end(), [](const Entry& a, const Entry& b) { return a.begin < b.begin; });
     for (size_t i = 1; i < seg->entries.size(); ++i) {
         if (seg->entries[i].begin < seg->entries[i - 1].end) {
-            fatal_overlap(*seg->entries[i].map, *seg->entries[i - 1].map);
+            fatal_overlap(seg->entries[i], seg->entries[i - 1]);
         }
     }
     seg->owners.push_back(data);
@@ -209,7 +261,7 @@ std::shared_ptr<const void> publish(std::shared_ptr<RegistrationData> data) {
     auto old = r.current.load(std::memory_order_acquire);
     for (const auto& e : seg->entries) {
         for (const auto& s : old->segments) {
-            if (const Entry* other = live_overlap(*s, e.begin, e.end)) fatal_overlap(*e.map, *other->map);
+            if (const Entry* other = live_overlap(*s, e.begin, e.end)) fatal_overlap(e, *other);
         }
     }
     r.live_entries += seg->entries.size();
@@ -225,8 +277,7 @@ Token::~Token() {
     if (!data) return;
     Registry& r = registry();
     std::lock_guard<std::mutex> lock(r.write_mutex);
-    // Every map of a registration has a code range: one entry each.
-    const size_t n = data->maps.size();
+    const size_t n = data->entry_count();
     data->alive.store(false, std::memory_order_release);
     r.live_entries -= n;
     r.dead_entries += n;
@@ -260,11 +311,56 @@ std::shared_ptr<const void> register_code_stack_map(const FunctionStackMap& map)
     return publish(std::move(data));
 }
 
+std::shared_ptr<const void> register_encoded_code_stack_maps(std::span<const EncodedCodeStackMap> ranges) {
+    auto data = std::make_shared<RegistrationData>();
+    // What a range is: 0 skipped, 1 decoded on first use, 2 decoded now.
+    auto kind = [](const EncodedCodeStackMap& r) {
+        uint32_t functions = 0, records = 0;
+        if (!r.map || r.map_size == 0 || r.code_start == 0) return 0;
+        if (!peek_stack_maps(std::span<const uint8_t>(r.map, r.map_size), functions, records)) return 0;
+        // One function: with no records nothing a walk needs (not indexed,
+        // as when decoded); without a code size its extent is in its records.
+        if (functions == 1 && records == 0) return 0;
+        return functions == 1 && r.code_size > 0 ? 1 : 2;
+    };
+    size_t lazy = 0;
+    for (const auto& r : ranges) lazy += kind(r) == 1 ? 1 : 0;
+    data->lazy = std::make_unique<LazyMap[]>(lazy);
+    for (const auto& r : ranges) {
+        const int k = kind(r);
+        if (k == 0) continue;
+        if (k == 1) {
+            LazyMap& l = data->lazy[data->lazy_count++];
+            l.encoded = r.map;
+            l.encoded_size = r.map_size;
+            l.code_start = r.code_start;
+            l.code_size = r.code_size;
+            continue;
+        }
+        // Several functions over one range, or no code size: decoded now.
+        ModuleStackMap one;
+        if (!decode_stack_maps_into(std::span<const uint8_t>(r.map, r.map_size), one)) continue;
+        for (FunctionStackMap& fn : one.functions()) {
+            fn.function_address = r.code_start;
+            fn.code_size = r.code_size;
+            uintptr_t b = 0, e = 0;
+            if (!code_range(fn, b, e)) continue;
+            data->maps.push_back(std::move(fn));
+            data->maps.back().sort_records();
+        }
+    }
+    if (data->entry_count() == 0) return nullptr;
+    return publish(std::move(data));
+}
+
 std::shared_ptr<const CodeStackMapSnapshot> code_stack_map_snapshot() noexcept {
     return registry().current.load(std::memory_order_acquire);
 }
 
-const FunctionStackMap* find_code_stack_map(const CodeStackMapSnapshot* snapshot, uintptr_t ip) noexcept {
+namespace {
+
+// The live entry containing ip, or null.
+const Entry* find_entry(const CodeStackMapSnapshot* snapshot, uintptr_t ip) noexcept {
     if (!snapshot) return nullptr;
     // Live entries are disjoint across segments: at most one contains ip.
     for (auto s = snapshot->segments.rbegin(); s != snapshot->segments.rend(); ++s) {
@@ -272,14 +368,23 @@ const FunctionStackMap* find_code_stack_map(const CodeStackMapSnapshot* snapshot
         auto it = std::upper_bound(v.begin(), v.end(), ip, [](uintptr_t x, const Entry& e) { return x < e.begin; });
         if (it == v.begin()) continue;
         --it;
-        if (ip < it->end && is_alive(*it)) return it->map;
+        if (ip < it->end && is_alive(*it)) return &*it;
     }
     return nullptr;
 }
 
+} // namespace
+
+const FunctionStackMap* find_code_stack_map(const CodeStackMapSnapshot* snapshot, uintptr_t ip) noexcept {
+    const Entry* e = find_entry(snapshot, ip);
+    // A map decoded on first use: decoding allocates, and running out of
+    // memory in the middle of a stack walk is fatal either way.
+    return e ? entry_map(*e) : nullptr;
+}
+
 bool code_stack_maps_cover(uintptr_t ip) noexcept {
     auto snap = code_stack_map_snapshot();
-    return find_code_stack_map(snap.get(), ip) != nullptr;
+    return find_entry(snap.get(), ip) != nullptr;
 }
 
 size_t code_stack_map_segment_count() noexcept {

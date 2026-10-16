@@ -90,6 +90,12 @@ public:
         return true;
     }
 
+    bool skip(size_t len) noexcept {
+        if (!has_bytes(len)) return false;
+        pos_ += len;
+        return true;
+    }
+
     size_t remaining() const noexcept {
         return pos_ < data_.size() ? (data_.size() - pos_) : 0;
     }
@@ -350,6 +356,23 @@ ModuleStackMap decode_stack_maps(std::span<const uint8_t> data, uintptr_t text_b
     ModuleStackMap res;
     decode_stack_maps_into(data, res, text_base_address);
     return res;
+}
+
+bool peek_stack_maps(std::span<const uint8_t> data, uint32_t& function_count, uint32_t& first_record_count) {
+    function_count = 0;
+    first_record_count = 0;
+    BinaryReader reader(data);
+    uint32_t magic = 0, version = 0;
+    if (!reader.read_u32(magic) || magic != STACK_MAP_MAGIC) return false;
+    if (!reader.read_u32(version) || version != STACK_MAP_VERSION) return false;
+    if (!reader.read_u32(function_count)) return false;
+    if (function_count == 0) return true;
+    // The first function: its name, code offset and size, then its count.
+    uint32_t name_len = 0, code_size = 0;
+    uint64_t code_offset = 0;
+    if (!reader.read_u32(name_len) || !reader.skip(name_len)) return false;
+    if (!reader.read_u64(code_offset) || !reader.read_u32(code_size)) return false;
+    return reader.read_u32(first_record_count);
 }
 
 } // namespace brass

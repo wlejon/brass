@@ -142,5 +142,9 @@ constexpr uint32_t STACK_MAP_VERSION = 1;
 std::vector<uint8_t> encode_stack_maps(const ModuleStackMap& stack_maps);
 ModuleStackMap decode_stack_maps(std::span<const uint8_t> data, uintptr_t text_base_address = 0);
 bool decode_stack_maps_into(std::span<const uint8_t> data, ModuleStackMap& out, uintptr_t text_base_address = 0);
+// The shape of encoded maps without decoding them: how many functions, and
+// how many records the first one has. False when the header is not one
+// decode_stack_maps accepts.
+bool peek_stack_maps(std::span<const uint8_t> data, uint32_t& function_count, uint32_t& first_record_count);
 
 } // namespace brass

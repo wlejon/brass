@@ -3,6 +3,7 @@
 #include <brass/gc/stack_map.hpp>
 #include <cstdint>
 #include <memory>
+#include <span>
 
 namespace brass {
 
@@ -20,6 +21,23 @@ namespace brass {
 // one of the two registrations describes code that no longer exists.
 [[nodiscard]] std::shared_ptr<const void> register_code_stack_maps(const ModuleStackMap& maps);
 [[nodiscard]] std::shared_ptr<const void> register_code_stack_map(const FunctionStackMap& map);
+
+// Code whose maps are still encoded (encode_stack_maps), one function's each:
+// a loaded image's, where they sit read-only beside the code. Registered
+// without decoding: a function's map is decoded the first time a stack walk
+// looks it up, so the maps of code that is never on a stack during a
+// collection cost nothing but their index entry. The encoded bytes are NOT
+// copied and must stay readable for as long as the registration. Ranges
+// whose maps have no records, or whose header is not one the decoder takes,
+// are skipped (as register_code_stack_maps skips functions without records);
+// maps of several functions are decoded now.
+struct EncodedCodeStackMap {
+    uintptr_t code_start = 0;
+    uint32_t code_size = 0;
+    const uint8_t* map = nullptr;
+    uint32_t map_size = 0;
+};
+[[nodiscard]] std::shared_ptr<const void> register_encoded_code_stack_maps(std::span<const EncodedCodeStackMap> ranges);
 
 class CodeStackMapSnapshot;
 
