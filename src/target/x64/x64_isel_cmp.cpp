@@ -77,10 +77,17 @@ void X64ISel::lower_comparison(
     if (op0.is_xmm()) {
         uint8_t sz = op0.size;
         LirOpcode ucomi_op = (sz == 4) ? LirOpcode::Ucomiss : LirOpcode::Ucomisd;
+        const bool fuse_op1_load =
+            op1_val && op1_val->is_instruction() && can_fuse_load(op1_val->defining_instruction(), &inst);
+        if (!fuse_op1_load && (float_cond == Condition::B || float_cond == Condition::BE)) {
+            std::swap(op0, op1);
+            std::swap(op0_val, op1_val);
+            float_cond = (float_cond == Condition::B) ? Condition::A : Condition::AE;
+        }
 
         auto ucomi = std::make_unique<LirInst>(ucomi_op);
         ucomi->add_use(LirOperand::vreg(op0, sz));
-        if (op1_val && op1_val->is_instruction() && can_fuse_load(op1_val->defining_instruction(), &inst)) {
+        if (fuse_op1_load) {
             ucomi->add_use(get_load_mem_operand(op1_val->defining_instruction()));
         } else {
             ucomi->add_use(LirOperand::vreg(op1, sz));
@@ -143,7 +150,7 @@ void X64ISel::lower_comparison(
             or_inst->add_use(LirOperand::vreg(tmp, dst_sz));
             or_inst->mir_origin = &inst;
             lir_bb.append_inst(std::move(or_inst));
-        } else if (float_cond == Condition::B || float_cond == Condition::BE || float_cond == Condition::A || float_cond == Condition::AE) {
+        } else if (float_cond == Condition::B || float_cond == Condition::BE) {
             auto setcc = std::make_unique<LirInst>(LirOpcode::Setcc);
             setcc->condition = float_cond;
             setcc->add_def(LirOperand::vreg(dst, 1));
