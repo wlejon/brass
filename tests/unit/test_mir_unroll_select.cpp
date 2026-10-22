@@ -330,3 +330,105 @@ TEST_CASE("Loop Unrolling - Reduction Accumulator with Remainder Loops (i64 & f6
         }
     }
 }
+
+TEST_CASE("Diamond to Select - Rejects sdiv/smod by -1, derived gcrefs, and resume_points") {
+    // 1. sdiv / smod by -1 must not be speculatively hoisted (traps on INT_MIN / -1)
+    {
+        Module mod("test_diamond_sdiv_neg1");
+        Builder b(mod);
+        Function* fn = mod.create_function("sdiv_neg1", Type::i32(), {Type::i32(), Type::i32()});
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        BasicBlock* bb_then = b.append_block("bb_then");
+        BasicBlock* bb_else = b.append_block("bb_else");
+        BasicBlock* bb_join = b.append_block("bb_join");
+
+        b.position_at_end(entry);
+        Value* cond = b.add_block_param(entry, Type::i32());
+        Value* x = b.add_block_param(entry, Type::i32());
+        b.build_br_if(cond, bb_then, {}, bb_else, {});
+
+        b.position_at_end(bb_then);
+        Value* q = b.build_sdiv(x, b.build_iconst_i32(-1));
+        b.build_br(bb_join, {q});
+
+        b.position_at_end(bb_else);
+        b.build_br(bb_join, {b.build_iconst_i32(0)});
+
+        b.position_at_end(bb_join);
+        Value* res = b.add_block_param(bb_join, Type::i32());
+        b.build_ret(res);
+
+        fn->rebuild_cfg_predecessors();
+        CHECK(!simplify_cfg_diamonds(*fn));
+        CHECK_EQ(fn->blocks().size(), size_t{4});
+    }
+
+    // 2. Derived gcref in diamond arm must not be hoisted into a select across blocks
+    {
+        Module mod("test_diamond_derived_gcref");
+        Builder b(mod);
+        Function* fn = mod.create_function("derived_gcref_diamond", Type::i64(), {Type::i32(), Type::gcref()});
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        BasicBlock* bb_then = b.append_block("bb_then");
+        BasicBlock* bb_else = b.append_block("bb_else");
+        BasicBlock* bb_join = b.append_block("bb_join");
+
+        b.position_at_end(entry);
+        Value* cond = b.add_block_param(entry, Type::i32());
+        Value* obj = b.add_block_param(entry, Type::gcref());
+        b.build_br_if(cond, bb_then, {}, bb_else, {});
+
+        b.position_at_end(bb_then);
+        Value* derived = b.build_add(obj, b.build_iconst_i64(8));
+        Value* eq_null = b.build_eq(derived, obj);
+        b.build_br(bb_join, {b.build_zext_i64(eq_null)});
+
+        b.position_at_end(bb_else);
+        b.build_br(bb_join, {b.build_iconst_i64(0)});
+
+        b.position_at_end(bb_join);
+        Value* res = b.add_block_param(bb_join, Type::i64());
+        b.build_ret(res);
+
+        fn->rebuild_cfg_predecessors();
+        CHECK(!simplify_cfg_diamonds(*fn));
+        CHECK_EQ(fn->blocks().size(), size_t{4});
+    }
+
+    // 3. Diamond arm registered in fn.resume_points() must not be deleted
+    {
+        Module mod("test_diamond_resume_point");
+        Builder b(mod);
+        Function* fn = mod.create_function("resume_diamond", Type::i64(), {Type::i32(), Type::i64()});
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        BasicBlock* bb_then = b.append_block("bb_then");
+        BasicBlock* bb_else = b.append_block("bb_else");
+        BasicBlock* bb_join = b.append_block("bb_join");
+
+        b.position_at_end(entry);
+        Value* cond = b.add_block_param(entry, Type::i32());
+        Value* x = b.add_block_param(entry, Type::i64());
+        b.build_br_if(cond, bb_then, {}, bb_else, {});
+
+        b.position_at_end(bb_then);
+        Value* v1 = b.build_add(x, b.build_iconst_i64(1));
+        b.build_br(bb_join, {v1});
+
+        b.position_at_end(bb_else);
+        Value* v2 = b.build_add(x, b.build_iconst_i64(2));
+        b.build_br(bb_join, {v2});
+
+        b.position_at_end(bb_join);
+        Value* res = b.add_block_param(bb_join, Type::i64());
+        b.build_ret(res);
+
+        fn->add_resume_point(0, bb_then);
+        fn->rebuild_cfg_predecessors();
+        CHECK(!simplify_cfg_diamonds(*fn));
+        CHECK_EQ(fn->blocks().size(), size_t{4});
+    }
+}
+

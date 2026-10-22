@@ -3,6 +3,7 @@
 #include <brass/mir/builder.hpp>
 #include <brass/mir/verifier.hpp>
 #include <brass/mir/range_analysis.hpp>
+#include <brass/mir/bounds_check_elim.hpp>
 #include <iostream>
 
 using namespace brass;
@@ -240,3 +241,113 @@ TEST_CASE("RangeAnalysis - Loop Induction Variable Range Inference") {
     CHECK_EQ(i_body_range.max_val, 15);
     CHECK(i_body_range.is_non_negative());
 }
+
+TEST_CASE("RangeAnalysis - ValueRange::sext Constant Folding and Overflow Wrapping") {
+    // 1. Constant out of signed 32-bit range wraps via static_cast<int32_t>
+    ValueRange c_wrap = ValueRange::sext(ValueRange::constant(0x80000000LL));
+    CHECK(c_wrap.is_constant());
+    CHECK_EQ(c_wrap.min_val, static_cast<int64_t>(INT32_MIN));
+
+    ValueRange c_pos = ValueRange::sext(ValueRange::constant(0x10000002ALL));
+    CHECK(c_pos.is_constant());
+    CHECK_EQ(c_pos.min_val, 42);
+
+    // 2. Range entirely within [INT32_MIN, INT32_MAX] is preserved
+    ValueRange r_in = ValueRange::sext(ValueRange::range(-100, 200));
+    CHECK_EQ(r_in.min_val, -100);
+    CHECK_EQ(r_in.max_val, 200);
+
+    // 3. Range exceeding INT32_MAX can wrap to negative 32-bit values and must not clamp to [0, INT32_MAX]
+    ValueRange r_overflow = ValueRange::sext(ValueRange::range(0, 0x80000000LL));
+    CHECK_EQ(r_overflow.min_val, static_cast<int64_t>(INT32_MIN));
+    CHECK_EQ(r_overflow.max_val, static_cast<int64_t>(INT32_MAX));
+}
+
+TEST_CASE("BCE - ImpliedCheckFolder Soundness: 32/64-bit DomExpr, trunc_i32/overflow bounds, and negative slt") {
+    // 1. 32-bit wrapping shl.i32 must not canonicalize to 64-bit shl.i64 (or vice versa)
+    {
+        Module mod("test_bce_dom_expr_width");
+        Builder b(mod);
+        Function* fn = mod.create_function("dom_width", Type::i32(), {Type::i32(), Type::i64()});
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        BasicBlock* bb_pos = b.append_block("bb_pos");
+        BasicBlock* bb_check = b.append_block("bb_check");
+        BasicBlock* bb_exit = b.append_block("bb_exit");
+
+        b.position_at_end(entry);
+        Value* a32 = b.add_block_param(entry, Type::i32());
+        Value* len64 = b.add_block_param(entry, Type::i64());
+        Value* non_neg = b.build_sge(a32, b.build_iconst_i32(0));
+        b.build_br_if(non_neg, bb_pos, {}, bb_exit, {b.build_iconst_i32(0)});
+
+        b.position_at_end(bb_pos);
+        // 32-bit shift (can wrap for e.g. a32 = 0x40000001 -> shl32 = 4)
+        Value* shl32 = b.build_shl(a32, b.build_iconst_i32(2));
+        Value* shl32_zext = b.build_zext_i64(shl32);
+        Value* guard_32 = b.build_ult(shl32_zext, len64);
+        b.build_br_if(guard_32, bb_check, {}, bb_exit, {b.build_iconst_i32(0)});
+
+        b.position_at_end(bb_check);
+        // 64-bit shift of zext(a32): for a32 = 0x40000001, shl64 = 0x100000004 != 4
+        Value* a64 = b.build_zext_i64(a32);
+        Value* shl64 = b.build_shl(a64, b.build_iconst_i64(2));
+        Value* cmp64 = b.build_ult(shl64, len64);
+        b.build_br(bb_exit, {cmp64});
+
+        b.position_at_end(bb_exit);
+        Value* res = b.add_block_param(bb_exit, Type::i32());
+        b.build_ret(res);
+
+        fn->rebuild_cfg_predecessors();
+        RangeAnalysisStats stats;
+        RangeAnalysisOptions opts;
+        opts.stats = &stats;
+        run_bounds_check_elimination(*fn, mod, opts);
+        CHECK_EQ(stats.checks_implied, size_t{0});
+    }
+
+    // 2. is_length_bound must not strip trunc_i32 on arbitrary i64 or accept overflowing cn << shift,
+    //    and check_implied must not treat slt with negative RHS as implying ult.
+    {
+        Module mod("test_bce_neg_slt_and_overflow_bound");
+        Builder b(mod);
+        Function* fn = mod.create_function("neg_slt", Type::i32(), {Type::i64(), Type::i64()});
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        BasicBlock* bb_body = b.append_block("bb_body");
+        BasicBlock* bb_exit = b.append_block("bb_exit");
+
+        b.position_at_end(entry);
+        Value* idx = b.add_block_param(entry, Type::i64());
+        Value* n64 = b.add_block_param(entry, Type::i64());
+        Value* idx_nn = b.build_sge(idx, b.build_iconst_i64(0));
+        b.build_br_if(idx_nn, bb_body, {}, bb_exit, {b.build_iconst_i32(0)});
+
+        b.position_at_end(bb_body);
+        // Guard with negative RHS (-8): slt(idx, -8) does NOT imply ult(idx << 3, -8 >> 3)
+        Value* neg_bound = b.build_iconst_i64(-8);
+        Value* bad_slt = b.build_slt(idx, neg_bound);
+        b.build_guard(bad_slt, "@deopt");
+        // Also unbounded shift cbl = n64 << 3 (can overflow 64 bits)
+        Value* cbl = b.build_shl(n64, b.build_iconst_i64(3));
+        Value* lt_n = b.build_ult(idx, n64);
+        b.build_guard(lt_n, "@deopt");
+        Value* sh_idx = b.build_shl(idx, b.build_iconst_i64(3));
+        Value* check = b.build_ult(sh_idx, cbl);
+        b.build_br(bb_exit, {check});
+
+        b.position_at_end(bb_exit);
+        Value* res = b.add_block_param(bb_exit, Type::i32());
+        b.build_ret(res);
+
+        fn->rebuild_cfg_predecessors();
+        RangeAnalysisStats stats;
+        RangeAnalysisOptions opts;
+        opts.stats = &stats;
+        run_bounds_check_elimination(*fn, mod, opts);
+        CHECK_EQ(stats.checks_implied, size_t{0});
+    }
+}
+
+

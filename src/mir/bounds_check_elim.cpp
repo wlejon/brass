@@ -175,11 +175,28 @@ public:
 private:
     struct DomExpr {
         Opcode op;
+        Type type;
         const Value* op0;
         const Value* op1;
         int64_t imm;
         const Value* result;
     };
+
+    bool is_non_negative(const Value* v, const BasicBlock* bb) const {
+        if (!v) return false;
+        ValueRange r = ra_.get_range_at(v, bb);
+        return !r.is_empty() && r.min_val >= 0;
+    }
+
+    bool can_shift_without_overflow(const Value* shifted_val, const Value* idx_val, int64_t shift, const BasicBlock* bb) const {
+        if (!shifted_val || !idx_val || shift < 0 || shift >= 63) return false;
+        ValueRange r = ra_.get_range_at(idx_val, bb);
+        if (r.is_empty() || r.min_val < 0) return false;
+        int64_t max_safe = (shifted_val->type() == Type::i32())
+                               ? (static_cast<int64_t>(INT32_MAX) >> shift)
+                               : (INT64_MAX >> shift);
+        return r.max_val <= max_safe;
+    }
 
     bool is_load_preserved(const Instruction* dom_load, const Instruction* cur_load) const {
         const BasicBlock* dom_bb = dom_load->parent();
@@ -238,7 +255,7 @@ private:
             const Instruction* d = v->defining_instruction();
             if (!d) break;
             if ((d->opcode() == Opcode::sext_i64 || d->opcode() == Opcode::zext_i64) &&
-                ra_.get_range_at(d->operand(0), bb).min_val >= 0) {
+                is_non_negative(d->operand(0), bb)) {
                 v = d->operand(0);
             } else {
                 break;
@@ -267,7 +284,7 @@ private:
             int64_t c1_const = 0;
             bool has_c1 = get_const_int(c1, c1_const);
             for (const DomExpr& de : dom_exprs_) {
-                if (de.op == d->opcode() && de.op0 == c0) {
+                if (de.op == d->opcode() && de.type == d->type() && de.op0 == c0) {
                     int64_t de_const = 0;
                     if (de.op1 == c1 || (has_c1 && get_const_int(de.op1, de_const) && de_const == c1_const)) {
                         return de.result;
@@ -334,12 +351,20 @@ private:
         return false;
     }
 
-    bool is_length_bound(const Value* n, const Value* byte_len, int64_t shift, const BasicBlock* bb) const {
+    bool is_length_bound(const Value* n, const Value* byte_len, int64_t shift, Type shifted_type, const BasicBlock* bb) const {
         const Value* cn = canonicalize(n, bb);
         while (cn && cn->is_instruction()) {
             const Instruction* d = cn->defining_instruction();
-            if (d && (d->opcode() == Opcode::trunc_i32 || d->opcode() == Opcode::sext_i64 || d->opcode() == Opcode::zext_i64)) {
+            if (d && (d->opcode() == Opcode::sext_i64 || d->opcode() == Opcode::zext_i64) &&
+                is_non_negative(d->operand(0), bb)) {
                 cn = canonicalize(d->operand(0), bb);
+            } else if (d && d->opcode() == Opcode::trunc_i32) {
+                ValueRange r = ra_.get_range_at(d->operand(0), bb);
+                if (!r.is_empty() && r.min_val >= 0 && r.max_val <= INT32_MAX) {
+                    cn = canonicalize(d->operand(0), bb);
+                } else {
+                    break;
+                }
             } else {
                 break;
             }
@@ -347,8 +372,19 @@ private:
         const Value* cbl = canonicalize(byte_len, bb);
         if (cn && cn->is_instruction()) {
             const Instruction* d = cn->defining_instruction();
+            if (d && d->opcode() == Opcode::trunc_i32 && shifted_type == Type::i64() &&
+                d->operand(0) && d->operand(0)->is_instruction()) {
+                const Instruction* inner = d->operand(0)->defining_instruction();
+                int64_t sc = 0;
+                if (inner && inner->opcode() == Opcode::lshr && inner->type() == Type::i64() &&
+                    get_const_int(inner->operand(1), sc) && sc == shift &&
+                    canonicalize(inner->operand(0), bb) == cbl) {
+                    return true;
+                }
+            }
             int64_t sc = 0;
             if ((d->opcode() == Opcode::lshr || d->opcode() == Opcode::ashr) &&
+                d->type() == shifted_type &&
                 get_const_int(d->operand(1), sc) && sc == shift &&
                 canonicalize(d->operand(0), bb) == cbl) {
                 return true;
@@ -357,7 +393,8 @@ private:
         if (cbl && cbl->is_instruction()) {
             const Value* idx = nullptr;
             int64_t s = 0;
-            if (match_shifted(cbl, bb, idx, s) && s == shift && idx == cn) {
+            if (cbl->type() == shifted_type && match_shifted(cbl, bb, idx, s) &&
+                s == shift && idx == cn && can_shift_without_overflow(cbl, cn, shift, bb)) {
                 return true;
             }
         }
@@ -367,15 +404,20 @@ private:
                 const Instruction* rd = f.rhs->defining_instruction();
                 int64_t sc = 0;
                 if ((rd->opcode() == Opcode::lshr || rd->opcode() == Opcode::ashr) &&
+                    rd->type() == shifted_type &&
                     get_const_int(rd->operand(1), sc) && sc == shift &&
                     canonicalize(rd->operand(0), bb) == cbl) {
-                    if (implied_by(f, Opcode::ule, cn, f.rhs, true) == true) return true;
+                    const bool both_nn = is_non_negative(cn, bb) && is_non_negative(f.rhs, bb);
+                    if (implied_by(f, Opcode::ule, cn, f.rhs, both_nn) == true) return true;
                 }
             }
             const Value* sh_idx = nullptr;
             int64_t s = 0;
-            if (match_shifted(f.lhs, bb, sh_idx, s) && s == shift && sh_idx == cn) {
-                if (implied_by(f, Opcode::ule, f.lhs, cbl, true) == true) return true;
+            if (f.lhs && f.lhs->type() == shifted_type &&
+                match_shifted(f.lhs, bb, sh_idx, s) && s == shift && sh_idx == cn &&
+                can_shift_without_overflow(f.lhs, cn, shift, bb)) {
+                const bool both_nn = is_non_negative(f.lhs, bb) && is_non_negative(cbl, bb);
+                if (implied_by(f, Opcode::ule, f.lhs, cbl, both_nn) == true) return true;
             }
         }
         return false;
@@ -384,8 +426,8 @@ private:
     std::optional<bool> check_implied(Opcode check_op, const Value* raw_x, const Value* raw_y, const BasicBlock* bb) const {
         const Value* x = canonicalize(raw_x, bb);
         const Value* y = canonicalize(raw_y, bb);
-        const bool x_non_neg = ra_.get_range_at(raw_x, bb).min_val >= 0 || ra_.get_range_at(x, bb).min_val >= 0;
-        const bool y_non_neg = ra_.get_range_at(raw_y, bb).min_val >= 0 || ra_.get_range_at(y, bb).min_val >= 0;
+        const bool x_non_neg = is_non_negative(raw_x, bb) || is_non_negative(x, bb);
+        const bool y_non_neg = is_non_negative(raw_y, bb) || is_non_negative(y, bb);
         const bool both_non_negative = x_non_neg && y_non_neg;
 
         int64_t yc = 0;
@@ -411,17 +453,20 @@ private:
             for (const Fact& f1 : facts_) {
                 const Value* mid = nullptr;
                 bool strict1 = false;
-                if (f1.lhs == x && implied_by(f1, Opcode::ule, x, f1.rhs, true) == true) {
+                const bool f1_rhs_nn = is_non_negative(f1.rhs, bb);
+                const bool f1_lhs_nn = is_non_negative(f1.lhs, bb);
+                if (f1.lhs == x && implied_by(f1, Opcode::ule, x, f1.rhs, f1_rhs_nn) == true) {
                     mid = f1.rhs;
-                    strict1 = (implied_by(f1, Opcode::ult, x, f1.rhs, true) == true);
-                } else if (f1.rhs == x && implied_by(f1, Opcode::ule, x, f1.lhs, true) == true) {
+                    strict1 = (implied_by(f1, Opcode::ult, x, f1.rhs, f1_rhs_nn) == true);
+                } else if (f1.rhs == x && implied_by(f1, Opcode::ule, x, f1.lhs, f1_lhs_nn) == true) {
                     mid = f1.lhs;
-                    strict1 = (implied_by(f1, Opcode::ult, x, f1.lhs, true) == true);
+                    strict1 = (implied_by(f1, Opcode::ult, x, f1.lhs, f1_lhs_nn) == true);
                 }
                 if (!mid) continue;
+                const bool mid_and_y_nn = is_non_negative(mid, bb) && y_non_neg;
                 for (const Fact& f2 : facts_) {
-                    if (implied_by(f2, Opcode::ule, mid, y, true) == true) {
-                        bool strict2 = (implied_by(f2, Opcode::ult, mid, y, true) == true);
+                    if (implied_by(f2, Opcode::ule, mid, y, mid_and_y_nn) == true) {
+                        bool strict2 = (implied_by(f2, Opcode::ult, mid, y, mid_and_y_nn) == true);
                         uint8_t trans_accepts = (strict1 || strict2) ? kLess : (kLess | kEqual);
                         if ((trans_accepts & ~check_pred->accepts) == 0) return true;
                         if ((trans_accepts & check_pred->accepts) == 0) return false;
@@ -433,24 +478,21 @@ private:
         // Scaled/shifted bounds check: (idx << shift) < byte_len when 0 <= idx < N and (N << shift) <= byte_len
         const Value* idx = nullptr;
         int64_t shift = 0;
-        if (match_shifted(raw_x, bb, idx, shift) && ra_.get_range_at(idx, bb).min_val >= 0) {
+        if (match_shifted(raw_x, bb, idx, shift) && is_non_negative(idx, bb)) {
             for (const Fact& f : facts_) {
                 const Value* bound_n = nullptr;
-                if (f.lhs == idx && implied_by(f, Opcode::ult, idx, f.rhs, true) == true) {
+                const bool f_rhs_nn = is_non_negative(f.rhs, bb);
+                const bool f_lhs_nn = is_non_negative(f.lhs, bb);
+                if (f.lhs == idx && implied_by(f, Opcode::ult, idx, f.rhs, f_rhs_nn) == true) {
                     bound_n = f.rhs;
-                } else if (f.rhs == idx && implied_by(f, Opcode::ult, idx, f.lhs, true) == true) {
+                } else if (f.rhs == idx && implied_by(f, Opcode::ult, idx, f.lhs, f_lhs_nn) == true) {
                     bound_n = f.lhs;
                 }
-                if (bound_n && is_length_bound(bound_n, y, shift, bb)) {
+                if (bound_n && is_length_bound(bound_n, y, shift, raw_x->type(), bb)) {
                     if (check_pred->order == Order::Signed && !y_non_neg) {
-                        // If y is used in lshr(y, shift), y >= (1 << shift) > 0 unless y has sign bit set;
-                        // check if bound_n was derived via ashr or y is non-negative.
                         const Value* cn = canonicalize(bound_n, bb);
                         bool signed_safe = false;
                         if (cn && cn->is_instruction() && cn->defining_instruction()->opcode() == Opcode::ashr) {
-                            signed_safe = true;
-                        } else if (cn && cn->is_instruction() && cn->defining_instruction()->opcode() == Opcode::lshr) {
-                            // Standard TypedArray byte_length is non-negative; if loop bound used slt(i, N), N > 0
                             signed_safe = true;
                         }
                         if (!signed_safe) continue;
@@ -487,7 +529,7 @@ private:
                         cur->opcode() == Opcode::and_)) {
                 const Value* c0 = cur->operand_count() >= 1 ? canonicalize(cur->operand(0), bb) : nullptr;
                 const Value* c1 = cur->operand_count() >= 2 ? canonicalize(cur->operand(1), bb) : nullptr;
-                dom_exprs_.push_back({cur->opcode(), c0, c1, cur->imm_i64(), cur->result()});
+                dom_exprs_.push_back({cur->opcode(), cur->type(), c0, c1, cur->imm_i64(), cur->result()});
             } else if (cur->opcode() == Opcode::guard) {
                 collect_edge_facts(cur->operand(0), true, bb);
                 continue;

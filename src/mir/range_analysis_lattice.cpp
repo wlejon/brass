@@ -231,10 +231,13 @@ ValueRange ValueRange::zext(const ValueRange& a) noexcept {
 
 ValueRange ValueRange::sext(const ValueRange& a) noexcept {
     if (a.is_empty()) return empty();
-    int64_t min_v = std::max(static_cast<int64_t>(INT32_MIN), a.min_val);
-    int64_t max_v = std::min(static_cast<int64_t>(INT32_MAX), a.max_val);
-    if (min_v > max_v) return range(INT32_MIN, INT32_MAX);
-    return range(min_v, max_v);
+    if (a.is_constant()) {
+        return constant(static_cast<int64_t>(static_cast<int32_t>(static_cast<uint64_t>(a.min_val))));
+    }
+    if (a.min_val >= INT32_MIN && a.max_val <= INT32_MAX) {
+        return range(a.min_val, a.max_val);
+    }
+    return range(INT32_MIN, INT32_MAX);
 }
 
 ValueRange ValueRange::trunc(const ValueRange& a) noexcept {

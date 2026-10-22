@@ -1,5 +1,6 @@
 #include <brass/mir/select_opt.hpp>
 #include <brass/mir/builder.hpp>
+#include <brass/mir/gc_refs.hpp>
 #include <brass/mir/verifier.hpp>
 #include <vector>
 #include <unordered_map>
@@ -13,6 +14,9 @@ namespace {
 bool is_safe_for_select_hoist(const Instruction* inst) {
     if (!inst) return false;
     if (inst->has_side_effects() || inst->is_terminator() || inst->is_call()) {
+        return false;
+    }
+    if (inst->produces_value() && is_derived_gcref(inst->result())) {
         return false;
     }
     Opcode op = inst->opcode();
@@ -56,12 +60,26 @@ bool is_safe_for_select_hoist(const Instruction* inst) {
         case Opcode::smod:
         case Opcode::umod: {
             // Div/mod is only safe to hoist if divisor is non-zero constant
+            // (and not -1 for signed div/mod, which traps on INT_MIN / -1).
             if (inst->operand_count() >= 2 && inst->operand(1)) {
                 const Value* denom = inst->operand(1);
                 if (denom->is_instruction()) {
                     const Instruction* ddef = denom->defining_instruction();
-                    if (ddef && (ddef->opcode() == Opcode::iconst_i32 || ddef->opcode() == Opcode::iconst_i64)) {
-                        return ddef->imm_i64() != 0;
+                    if (ddef) {
+                        int64_t c = 0;
+                        bool is_const = false;
+                        if (ddef->opcode() == Opcode::iconst_i32) {
+                            c = static_cast<int64_t>(ddef->imm_i32());
+                            is_const = true;
+                        } else if (ddef->opcode() == Opcode::iconst_i64) {
+                            c = ddef->imm_i64();
+                            is_const = true;
+                        }
+                        if (is_const) {
+                            if (c == 0) return false;
+                            if ((op == Opcode::sdiv || op == Opcode::smod) && c == -1) return false;
+                            return true;
+                        }
                     }
                 }
             }
@@ -76,9 +94,11 @@ bool is_valid_branch_arm(
     BasicBlock* arm,
     BasicBlock* pred,
     BasicBlock* join,
-    size_t max_insts
+    size_t max_insts,
+    const std::unordered_set<BasicBlock*>& resume_targets
 ) {
     if (!arm || arm == pred || arm == join) return false;
+    if (resume_targets.count(arm) > 0) return false;
     if (arm->predecessors().size() != 1 || arm->predecessors()[0] != pred) return false;
     if (arm->successors().size() != 1 || arm->successors()[0] != join) return false;
 
@@ -86,6 +106,9 @@ bool is_valid_branch_arm(
     if (!term || term->opcode() != Opcode::br) return false;
     if (term->branch_target().block != join) return false;
     if (term->branch_target().args.size() != join->param_count()) return false;
+    for (const Value* arg : term->branch_target().args) {
+        if (arg && is_derived_gcref(arg)) return false;
+    }
 
     size_t count = 0;
     for (Instruction* inst = arm->head(); inst != nullptr; inst = inst->next()) {
@@ -136,6 +159,12 @@ void hoist_block_instructions(
 bool simplify_cfg_diamonds(Function& fn, size_t max_instructions_per_branch) {
     bool any_changed = false;
     bool progress = true;
+    std::unordered_set<BasicBlock*> resume_targets;
+    for (const auto& rp : fn.resume_points()) {
+        if (rp.second) {
+            resume_targets.insert(rp.second);
+        }
+    }
 
     while (progress) {
         progress = false;
@@ -166,8 +195,8 @@ bool simplify_cfg_diamonds(Function& fn, size_t max_instructions_per_branch) {
                 if (join_bb && join_bb == false_term->branch_target().block &&
                     join_bb != pred_bb && join_bb != true_bb && join_bb != false_bb) {
 
-                    if (is_valid_branch_arm(true_bb, pred_bb, join_bb, max_instructions_per_branch) &&
-                        is_valid_branch_arm(false_bb, pred_bb, join_bb, max_instructions_per_branch)) {
+                    if (is_valid_branch_arm(true_bb, pred_bb, join_bb, max_instructions_per_branch, resume_targets) &&
+                        is_valid_branch_arm(false_bb, pred_bb, join_bb, max_instructions_per_branch, resume_targets)) {
 
                         Builder b(*fn.parent());
                         b.set_function(&fn);
