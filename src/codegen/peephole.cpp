@@ -309,13 +309,25 @@ bool PeepholeOptimizer::simplify_arithmetic(LirBlock& block) {
         if ((inst.opcode == LirOpcode::Add || inst.opcode == LirOpcode::Add32) &&
             inst.defs.size() >= 1 && inst.defs[0].is_preg() &&
             !inst.uses.empty() && inst.uses.back().is_imm_int() && inst.uses.back().imm_int == 0) {
-            if (inst.uses.size() >= 2 && inst.uses[0].is_preg() && inst.defs[0].preg_val != inst.uses[0].preg_val) {
-                inst.opcode = (inst.opcode == LirOpcode::Add32 ? LirOpcode::Mov32 : LirOpcode::Mov);
-                inst.uses.pop_back();
-            } else if (!are_flags_live_after(block, it, lir_arch(fn_))) {
-                it->reset();
+            if (are_flags_live_after(block, it, lir_arch(fn_))) {
                 ++it;
-                removed = true;
+                continue;
+            }
+            const bool is_32 = (inst.opcode == LirOpcode::Add32);
+            if (inst.uses.size() >= 2 && inst.uses[0].is_preg() && inst.defs[0].preg_val == inst.uses[0].preg_val) {
+                if (is_32) {
+                    inst.opcode = LirOpcode::Mov32;
+                    inst.uses.pop_back();
+                    ++it;
+                } else {
+                    it->reset();
+                    ++it;
+                    removed = true;
+                }
+            } else if (inst.uses.size() >= 2) {
+                inst.opcode = (is_32 ? LirOpcode::Mov32 : LirOpcode::Mov);
+                inst.uses.pop_back();
+                ++it;
             } else {
                 ++it;
                 continue;
@@ -329,13 +341,25 @@ bool PeepholeOptimizer::simplify_arithmetic(LirBlock& block) {
         if ((inst.opcode == LirOpcode::Sub || inst.opcode == LirOpcode::Sub32) &&
             inst.defs.size() >= 1 && inst.defs[0].is_preg() &&
             !inst.uses.empty() && inst.uses.back().is_imm_int() && inst.uses.back().imm_int == 0) {
-            if (inst.uses.size() >= 2 && inst.uses[0].is_preg() && inst.defs[0].preg_val != inst.uses[0].preg_val) {
-                inst.opcode = (inst.opcode == LirOpcode::Sub32 ? LirOpcode::Mov32 : LirOpcode::Mov);
-                inst.uses.pop_back();
-            } else if (!are_flags_live_after(block, it, lir_arch(fn_))) {
-                it->reset();
+            if (are_flags_live_after(block, it, lir_arch(fn_))) {
                 ++it;
-                removed = true;
+                continue;
+            }
+            const bool is_32 = (inst.opcode == LirOpcode::Sub32);
+            if (inst.uses.size() >= 2 && inst.uses[0].is_preg() && inst.defs[0].preg_val == inst.uses[0].preg_val) {
+                if (is_32) {
+                    inst.opcode = LirOpcode::Mov32;
+                    inst.uses.pop_back();
+                    ++it;
+                } else {
+                    it->reset();
+                    ++it;
+                    removed = true;
+                }
+            } else if (inst.uses.size() >= 2) {
+                inst.opcode = (is_32 ? LirOpcode::Mov32 : LirOpcode::Mov);
+                inst.uses.pop_back();
+                ++it;
             } else {
                 ++it;
                 continue;
@@ -349,13 +373,28 @@ bool PeepholeOptimizer::simplify_arithmetic(LirBlock& block) {
         if ((inst.opcode == LirOpcode::Imul || inst.opcode == LirOpcode::Imul32) &&
             inst.defs.size() >= 1 && inst.defs[0].is_preg() &&
             !inst.uses.empty() && inst.uses.back().is_imm_int() && inst.uses.back().imm_int == 1) {
-            if (inst.uses.size() >= 2 && inst.uses[0].is_preg() && inst.defs[0].preg_val != inst.uses[0].preg_val) {
-                inst.opcode = (inst.opcode == LirOpcode::Imul32 ? LirOpcode::Mov32 : LirOpcode::Mov);
-                inst.uses.pop_back();
-            } else {
-                it->reset();
+            if (are_flags_live_after(block, it, lir_arch(fn_))) {
                 ++it;
-                removed = true;
+                continue;
+            }
+            const bool is_32 = (inst.opcode == LirOpcode::Imul32);
+            if (inst.uses.size() >= 2 && inst.uses[0].is_preg() && inst.defs[0].preg_val == inst.uses[0].preg_val) {
+                if (is_32) {
+                    inst.opcode = LirOpcode::Mov32;
+                    inst.uses.pop_back();
+                    ++it;
+                } else {
+                    it->reset();
+                    ++it;
+                    removed = true;
+                }
+            } else if (inst.uses.size() >= 2) {
+                inst.opcode = (is_32 ? LirOpcode::Mov32 : LirOpcode::Mov);
+                inst.uses.pop_back();
+                ++it;
+            } else {
+                ++it;
+                continue;
             }
             stats_.arithmetic_simplified++;
             changed = true;

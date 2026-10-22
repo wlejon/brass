@@ -280,3 +280,115 @@ TEST_CASE("Peephole - Vector Move Redundancy and Copy Propagation") {
     CHECK(bb->instructions[0]->uses[0].preg_val.as_xmm() == XMM::XMM0);
 }
 
+TEST_CASE("Peephole - 32-bit Identity Ops Preserve Upper-Bit Zero Extension") {
+    for (LirOpcode op : {LirOpcode::Add32, LirOpcode::Sub32, LirOpcode::Imul32}) {
+        LirFunction fn;
+        LirBlock* bb = fn.create_block("entry");
+        const int64_t identity_imm = (op == LirOpcode::Imul32) ? 1 : 0;
+
+        auto inst = std::make_unique<LirInst>(op);
+        inst->add_def(LirOperand::preg_gpr(GPR::RAX, 4));
+        inst->add_use(LirOperand::preg_gpr(GPR::RAX, 4));
+        inst->add_use(LirOperand::imm(identity_imm, 4));
+        bb->append_inst(std::move(inst));
+
+        auto ret = std::make_unique<LirInst>(LirOpcode::Ret);
+        ret->add_use(LirOperand::preg_gpr(GPR::RAX, 8));
+        bb->append_inst(std::move(ret));
+
+        PeepholeStats stats = run_lir_peephole_optimizations(fn);
+        CHECK_EQ(stats.arithmetic_simplified, size_t(1));
+        CHECK_EQ(stats.redundant_moves_eliminated, size_t(0));
+        REQUIRE_EQ(bb->instructions.size(), size_t(2));
+        CHECK(bb->instructions[0]->opcode == LirOpcode::Mov32);
+        REQUIRE_EQ(bb->instructions[0]->defs.size(), size_t(1));
+        REQUIRE_EQ(bb->instructions[0]->uses.size(), size_t(1));
+        CHECK(bb->instructions[0]->defs[0].preg_val.as_gpr() == GPR::RAX);
+        CHECK(bb->instructions[0]->uses[0].preg_val.as_gpr() == GPR::RAX);
+    }
+}
+
+TEST_CASE("Peephole - Memory and Spill Source Identity Ops Rewrite to Mov") {
+    LirFunction fn;
+    LirBlock* bb = fn.create_block("entry");
+
+    // imul rax, [rcx + 16], 1 -> mov rax, [rcx + 16]
+    auto imul_mem = std::make_unique<LirInst>(LirOpcode::Imul);
+    imul_mem->add_def(LirOperand::preg_gpr(GPR::RAX, 8));
+    imul_mem->add_use(LirOperand::mem(PReg::gpr(GPR::RCX), 16, 8));
+    imul_mem->add_use(LirOperand::imm(1, 8));
+    bb->append_inst(std::move(imul_mem));
+
+    // imul32 edx, [slot 0], 1 -> mov32 edx, [slot 0]
+    auto imul_slot = std::make_unique<LirInst>(LirOpcode::Imul32);
+    imul_slot->add_def(LirOperand::preg_gpr(GPR::RDX, 4));
+    imul_slot->add_use(LirOperand::slot(0, 4));
+    imul_slot->add_use(LirOperand::imm(1, 4));
+    bb->append_inst(std::move(imul_slot));
+
+    // add r8, [rcx + 24], 0 -> mov r8, [rcx + 24]
+    auto add_mem = std::make_unique<LirInst>(LirOpcode::Add);
+    add_mem->add_def(LirOperand::preg_gpr(GPR::R8, 8));
+    add_mem->add_use(LirOperand::mem(PReg::gpr(GPR::RCX), 24, 8));
+    add_mem->add_use(LirOperand::imm(0, 8));
+    bb->append_inst(std::move(add_mem));
+
+    auto ret = std::make_unique<LirInst>(LirOpcode::Ret);
+    ret->add_use(LirOperand::preg_gpr(GPR::RAX, 8));
+    ret->add_use(LirOperand::preg_gpr(GPR::RDX, 8));
+    ret->add_use(LirOperand::preg_gpr(GPR::R8, 8));
+    bb->append_inst(std::move(ret));
+
+    PeepholeStats stats = run_lir_peephole_optimizations(fn);
+    CHECK_EQ(stats.arithmetic_simplified, size_t(3));
+    REQUIRE_EQ(bb->instructions.size(), size_t(4));
+    CHECK(bb->instructions[0]->opcode == LirOpcode::Mov);
+    CHECK(bb->instructions[0]->uses[0].is_mem());
+    CHECK(bb->instructions[1]->opcode == LirOpcode::Mov32);
+    CHECK(bb->instructions[1]->uses[0].is_spill_slot());
+    CHECK(bb->instructions[2]->opcode == LirOpcode::Mov);
+    CHECK(bb->instructions[2]->uses[0].is_mem());
+}
+
+TEST_CASE("Peephole - Identity Arithmetic Preserved When Flags Are Live") {
+    LirFunction fn;
+    LirBlock* bb = fn.create_block("entry");
+    LirBlock* target = fn.create_block("target");
+    bb->id = 0;
+    target->id = 1;
+
+    // add rax, rcx, 0 followed by jcc (flags live! cannot rewrite to mov rax, rcx)
+    auto add_inst = std::make_unique<LirInst>(LirOpcode::Add);
+    add_inst->add_def(LirOperand::preg_gpr(GPR::RAX, 8));
+    add_inst->add_use(LirOperand::preg_gpr(GPR::RCX, 8));
+    add_inst->add_use(LirOperand::imm(0, 8));
+    bb->append_inst(std::move(add_inst));
+
+    auto jcc = std::make_unique<LirInst>(LirOpcode::Jcc);
+    jcc->condition = Condition::E;
+    jcc->add_use(LirOperand::label(1));
+    bb->append_inst(std::move(jcc));
+
+    // imul rdx, rdx, 1 followed by setcc (flags live! cannot delete)
+    auto imul_inst = std::make_unique<LirInst>(LirOpcode::Imul);
+    imul_inst->add_def(LirOperand::preg_gpr(GPR::RDX, 8));
+    imul_inst->add_use(LirOperand::preg_gpr(GPR::RDX, 8));
+    imul_inst->add_use(LirOperand::imm(1, 8));
+    target->append_inst(std::move(imul_inst));
+
+    auto setcc = std::make_unique<LirInst>(LirOpcode::Setcc);
+    setcc->condition = Condition::O;
+    setcc->add_def(LirOperand::preg_gpr(GPR::RAX, 1));
+    target->append_inst(std::move(setcc));
+
+    auto ret = std::make_unique<LirInst>(LirOpcode::Ret);
+    ret->add_use(LirOperand::preg_gpr(GPR::RAX, 8));
+    target->append_inst(std::move(ret));
+
+    PeepholeStats stats = run_lir_peephole_optimizations(fn);
+    CHECK_EQ(stats.arithmetic_simplified, size_t(0));
+    CHECK(bb->instructions[0]->opcode == LirOpcode::Add);
+    CHECK(target->instructions[0]->opcode == LirOpcode::Imul);
+}
+
+
