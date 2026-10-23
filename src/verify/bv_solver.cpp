@@ -831,48 +831,20 @@ uint64_t BVContext::eval_node_concrete(const BVNode& n, uint64_t va, uint64_t vb
         case BVOp::FDiv:
             return (w == 32) ? f32_to_bits(fparith::div(bits_to_f32(va), bits_to_f32(vb)))
                              : f64_to_bits(fparith::div(bits_to_f64(va), bits_to_f64(vb)));
-        case BVOp::FSqrt:
-            return (w == 32) ? f32_to_bits(std::sqrt(bits_to_f32(va)))
-                             : f64_to_bits(std::sqrt(bits_to_f64(va)));
-        case BVOp::FAbs:
-            return (w == 32) ? f32_to_bits(std::fabs(bits_to_f32(va)))
-                             : f64_to_bits(std::fabs(bits_to_f64(va)));
-        case BVOp::FNeg:
-            return (w == 32) ? f32_to_bits(-bits_to_f32(va))
-                             : f64_to_bits(-bits_to_f64(va));
-        case BVOp::FFloor:
-            return (w == 32) ? f32_to_bits(std::floor(bits_to_f32(va)))
-                             : f64_to_bits(std::floor(bits_to_f64(va)));
-        case BVOp::FCeil:
-            return (w == 32) ? f32_to_bits(std::ceil(bits_to_f32(va)))
-                             : f64_to_bits(std::ceil(bits_to_f64(va)));
-        case BVOp::FRound:
-            return (w == 32) ? f32_to_bits(std::round(bits_to_f32(va)))
-                             : f64_to_bits(std::round(bits_to_f64(va)));
-        case BVOp::FMin:
-            return (w == 32) ? f32_to_bits(std::fmin(bits_to_f32(va), bits_to_f32(vb)))
-                             : f64_to_bits(std::fmin(bits_to_f64(va), bits_to_f64(vb)));
-        case BVOp::FMax:
-            return (w == 32) ? f32_to_bits(std::fmax(bits_to_f32(va), bits_to_f32(vb)))
-                             : f64_to_bits(std::fmax(bits_to_f64(va), bits_to_f64(vb)));
-        case BVOp::FEq:
-            return (aw == 32) ? (bits_to_f32(va) == bits_to_f32(vb) ? 1 : 0)
-                              : (bits_to_f64(va) == bits_to_f64(vb) ? 1 : 0);
-        case BVOp::FNe:
-            return (aw == 32) ? (bits_to_f32(va) != bits_to_f32(vb) ? 1 : 0)
-                              : (bits_to_f64(va) != bits_to_f64(vb) ? 1 : 0);
-        case BVOp::FLt:
-            return (aw == 32) ? (bits_to_f32(va) < bits_to_f32(vb) ? 1 : 0)
-                              : (bits_to_f64(va) < bits_to_f64(vb) ? 1 : 0);
-        case BVOp::FLe:
-            return (aw == 32) ? (bits_to_f32(va) <= bits_to_f32(vb) ? 1 : 0)
-                              : (bits_to_f64(va) <= bits_to_f64(vb) ? 1 : 0);
-        case BVOp::FGt:
-            return (aw == 32) ? (bits_to_f32(va) > bits_to_f32(vb) ? 1 : 0)
-                              : (bits_to_f64(va) > bits_to_f64(vb) ? 1 : 0);
-        case BVOp::FGe:
-            return (aw == 32) ? (bits_to_f32(va) >= bits_to_f32(vb) ? 1 : 0)
-                              : (bits_to_f64(va) >= bits_to_f64(vb) ? 1 : 0);
+        case BVOp::FSqrt: return (w == 32) ? f32_to_bits(std::sqrt(bits_to_f32(va))) : f64_to_bits(std::sqrt(bits_to_f64(va)));
+        case BVOp::FAbs:  return (w == 32) ? f32_to_bits(std::fabs(bits_to_f32(va))) : f64_to_bits(std::fabs(bits_to_f64(va)));
+        case BVOp::FNeg:  return (w == 32) ? f32_to_bits(-bits_to_f32(va)) : f64_to_bits(-bits_to_f64(va));
+        case BVOp::FFloor: return (w == 32) ? f32_to_bits(std::floor(bits_to_f32(va))) : f64_to_bits(std::floor(bits_to_f64(va)));
+        case BVOp::FCeil:  return (w == 32) ? f32_to_bits(std::ceil(bits_to_f32(va)))  : f64_to_bits(std::ceil(bits_to_f64(va)));
+        case BVOp::FRound: return (w == 32) ? f32_to_bits(std::round(bits_to_f32(va))) : f64_to_bits(std::round(bits_to_f64(va)));
+        case BVOp::FMin:   return (w == 32) ? f32_to_bits(std::fmin(bits_to_f32(va), bits_to_f32(vb))) : f64_to_bits(std::fmin(bits_to_f64(va), bits_to_f64(vb)));
+        case BVOp::FMax:   return (w == 32) ? f32_to_bits(std::fmax(bits_to_f32(va), bits_to_f32(vb))) : f64_to_bits(std::fmax(bits_to_f64(va), bits_to_f64(vb)));
+        case BVOp::FEq:    return (aw == 32) ? (bits_to_f32(va) == bits_to_f32(vb) ? 1 : 0) : (bits_to_f64(va) == bits_to_f64(vb) ? 1 : 0);
+        case BVOp::FNe:    return (aw == 32) ? (bits_to_f32(va) != bits_to_f32(vb) ? 1 : 0) : (bits_to_f64(va) != bits_to_f64(vb) ? 1 : 0);
+        case BVOp::FLt:    return (aw == 32) ? (bits_to_f32(va) < bits_to_f32(vb) ? 1 : 0)  : (bits_to_f64(va) < bits_to_f64(vb) ? 1 : 0);
+        case BVOp::FLe:    return (aw == 32) ? (bits_to_f32(va) <= bits_to_f32(vb) ? 1 : 0) : (bits_to_f64(va) <= bits_to_f64(vb) ? 1 : 0);
+        case BVOp::FGt:    return (aw == 32) ? (bits_to_f32(va) > bits_to_f32(vb) ? 1 : 0)  : (bits_to_f64(va) > bits_to_f64(vb) ? 1 : 0);
+        case BVOp::FGe:    return (aw == 32) ? (bits_to_f32(va) >= bits_to_f32(vb) ? 1 : 0) : (bits_to_f64(va) >= bits_to_f64(vb) ? 1 : 0);
         case BVOp::SiToFp: {
             int64_t sv = sign_extend_bits(va, aw);
             return (w == 32) ? f32_to_bits(static_cast<float>(sv))
@@ -898,20 +870,54 @@ uint64_t BVContext::eval_node_concrete(const BVNode& n, uint64_t va, uint64_t vb
     return 0;
 }
 
+void BVContext::compute_cone(BVNodeId root, std::vector<BVNodeId>& out_nodes, std::vector<uint32_t>& out_vars) const {
+    out_nodes.clear();
+    out_vars.clear();
+    if (root >= nodes_.size()) return;
+    auto& reachable = scratch_cone_.reachable;
+    auto& stack = scratch_cone_.stack;
+    if (reachable.size() < nodes_.size()) reachable.resize(nodes_.size(), 0);
+    stack.assign(1, root);
+    reachable[root] = 1;
+    for (size_t idx = 0; idx < stack.size(); ++idx) {
+        const BVNode& n = nodes_[stack[idx]];
+        for (BVNodeId ch : {n.a, n.b, n.c}) {
+            if (ch < nodes_.size() && !reachable[ch]) { reachable[ch] = 1; stack.push_back(ch); }
+        }
+    }
+    std::sort(stack.begin(), stack.end());
+    for (BVNodeId id : stack) {
+        reachable[id] = 0;
+        out_nodes.push_back(id);
+        if (nodes_[id].op == BVOp::Var) out_vars.push_back(static_cast<uint32_t>(nodes_[id].imm));
+    }
+}
+
+void BVContext::evaluate_cone(const std::vector<BVNodeId>& cone_nodes, const std::vector<uint64_t>& var_values, std::vector<uint64_t>& node_vals) const {
+    if (node_vals.size() < nodes_.size()) node_vals.resize(nodes_.size(), 0);
+    for (BVNodeId id : cone_nodes) {
+        const BVNode& n = nodes_[id];
+        if (n.op == BVOp::Var) {
+            node_vals[id] = ((n.imm < var_values.size()) ? var_values[static_cast<size_t>(n.imm)] : 0) & width_mask(n.width);
+        } else if (n.op == BVOp::Const) {
+            node_vals[id] = n.imm & width_mask(n.width);
+        } else {
+            node_vals[id] = eval_node_concrete(n, node_vals[n.a], node_vals[n.b], node_vals[n.c]);
+        }
+    }
+}
+
 void BVContext::evaluate_all(const std::vector<uint64_t>& var_values, std::vector<uint64_t>& node_vals) const {
     node_vals.resize(nodes_.size(), 0);
     for (size_t i = 0; i < nodes_.size(); ++i) {
         const BVNode& n = nodes_[i];
         if (n.op == BVOp::Var) {
-            uint64_t v = (n.imm < var_values.size()) ? var_values[static_cast<size_t>(n.imm)] : 0;
-            node_vals[i] = v & width_mask(n.width);
-            continue;
-        }
-        if (n.op == BVOp::Const) {
+            node_vals[i] = ((n.imm < var_values.size()) ? var_values[static_cast<size_t>(n.imm)] : 0) & width_mask(n.width);
+        } else if (n.op == BVOp::Const) {
             node_vals[i] = n.imm & width_mask(n.width);
-            continue;
+        } else {
+            node_vals[i] = eval_node_concrete(n, node_vals[n.a], node_vals[n.b], node_vals[n.c]);
         }
-        node_vals[i] = eval_node_concrete(n, node_vals[n.a], node_vals[n.b], node_vals[n.c]);
     }
 }
 
@@ -924,36 +930,20 @@ uint64_t BVContext::eval_concrete(BVNodeId root, const std::vector<uint64_t>& va
 std::string BVContext::export_smt2(BVNodeId bad_cond, std::string_view comment) const {
     std::ostringstream os;
     os << "; Brass Symbolic Bitvector Equivalence Query\n";
-    if (!comment.empty()) {
-        os << "; " << comment << "\n";
-    }
+    if (!comment.empty()) os << "; " << comment << "\n";
     os << "(set-logic QF_BV)\n";
-    for (const auto& v : vars_) {
-        os << "(declare-fun " << v.name << " () (_ BitVec " << v.width << "))\n";
-    }
+    for (const auto& v : vars_) os << "(declare-fun " << v.name << " () (_ BitVec " << v.width << "))\n";
     for (size_t i = 0; i < nodes_.size(); ++i) {
         const BVNode& n = nodes_[i];
         os << "(define-fun t" << i << " () (_ BitVec " << n.width << ") ";
         auto r = [](BVNodeId id) { return "t" + std::to_string(id); };
         switch (n.op) {
-            case BVOp::Const:
-                os << "(_ bv" << n.imm << " " << n.width << ")";
-                break;
-            case BVOp::Var:
-                os << vars_[static_cast<size_t>(n.imm)].name;
-                break;
-            case BVOp::Extract:
-                os << "((_ extract " << n.imm << " " << n.extra << ") " << r(n.a) << ")";
-                break;
-            case BVOp::Concat:
-                os << "(concat " << r(n.a) << " " << r(n.b) << ")";
-                break;
-            case BVOp::ZExt:
-                os << "((_ zero_extend " << n.extra << ") " << r(n.a) << ")";
-                break;
-            case BVOp::SExt:
-                os << "((_ sign_extend " << n.extra << ") " << r(n.a) << ")";
-                break;
+            case BVOp::Const:   os << "(_ bv" << n.imm << " " << n.width << ")"; break;
+            case BVOp::Var:     os << vars_[static_cast<size_t>(n.imm)].name; break;
+            case BVOp::Extract: os << "((_ extract " << n.imm << " " << n.extra << ") " << r(n.a) << ")"; break;
+            case BVOp::Concat:  os << "(concat " << r(n.a) << " " << r(n.b) << ")"; break;
+            case BVOp::ZExt:    os << "((_ zero_extend " << n.extra << ") " << r(n.a) << ")"; break;
+            case BVOp::SExt:    os << "((_ sign_extend " << n.extra << ") " << r(n.a) << ")"; break;
             case BVOp::Not: os << "(bvnot " << r(n.a) << ")"; break;
             case BVOp::Neg: os << "(bvneg " << r(n.a) << ")"; break;
             case BVOp::And: os << "(bvand " << r(n.a) << " " << r(n.b) << ")"; break;
@@ -984,8 +974,7 @@ std::string BVContext::export_smt2(BVNodeId bad_cond, std::string_view comment) 
         }
         os << ")\n";
     }
-    os << "(assert (= t" << bad_cond << " #b1))\n";
-    os << "(check-sat)\n(get-model)\n";
+    os << "(assert (= t" << bad_cond << " #b1))\n(check-sat)\n(get-model)\n";
     return os.str();
 }
 

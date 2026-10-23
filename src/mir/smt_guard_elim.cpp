@@ -561,30 +561,61 @@ bool run_smt_guard_elimination(
         // 2. Inductive loop IV bounds for enclosing loops
         collect_loop_iv_assumptions(enc, loops, bb, assumptions);
 
+        auto filter_path_cond = [&](BVNodeId target_bv) -> BVNodeId {
+            verify::BVCone& sc = ctx.scratch_cone();
+            ctx.compute_cone(target_bv, sc.nodes, sc.vars);
+            if (sc.vars.empty()) return ctx.make_const(1, 1);
+            auto& vseen = sc.var_seen;
+            vseen.assign(ctx.vars().size(), 0);
+            for (uint32_t vi : sc.vars) {
+                if (vi < vseen.size()) vseen[vi] = 1;
+            }
+            BVNodeId pc = ctx.make_const(1, 1);
+            std::vector<BVNodeId> f_nodes;
+            std::vector<uint32_t> f_vars;
+            // Fixed-point expansion (2 rounds) to capture transitive relational chains
+            for (int round = 0; round < 2; ++round) {
+                auto try_add_fact = [&](BVNodeId fact) {
+                    ctx.compute_cone(fact, f_nodes, f_vars);
+                    bool relevant = false;
+                    for (uint32_t fvi : f_vars) {
+                        if (fvi < vseen.size() && vseen[fvi]) {
+                            relevant = true;
+                            break;
+                        }
+                    }
+                    if (relevant) {
+                        for (uint32_t fvi : f_vars) {
+                            if (fvi < vseen.size()) vseen[fvi] = 1;
+                        }
+                        if (round == 1) {
+                            pc = ctx.make_binary(BVOp::And, pc, fact, 1);
+                        }
+                    }
+                };
+                for (BVNodeId a : assumptions) try_add_fact(a);
+                for (BVNodeId r : enc.range_assumptions) try_add_fact(r);
+            }
+            return pc;
+        };
+
         // Walk instructions in `bb`
         Instruction* cur = bb->head();
         uint32_t block_queries = 0;
-        constexpr uint32_t kMaxBlockQueries = 96;
+        constexpr uint32_t kMaxBlockQueries = 24;
         while (cur && block_queries < kMaxBlockQueries) {
             Instruction* next = cur->next();
-            ++block_queries;
 
-            auto build_path_cond = [&]() -> BVNodeId {
-                BVNodeId pc = ctx.make_const(1, 1);
-                for (BVNodeId a : assumptions) {
-                    pc = ctx.make_binary(BVOp::And, pc, a, 1);
-                }
-                for (BVNodeId r : enc.range_assumptions) {
-                    pc = ctx.make_binary(BVOp::And, pc, r, 1);
-                }
-                return pc;
+            auto build_path_cond = [&](BVNodeId target_bv) -> BVNodeId {
+                return filter_path_cond(target_bv);
             };
 
             if (cur->opcode() == Opcode::guard && cur->operand(0)) {
+                ++block_queries;
                 const Value* cond_val = cur->operand(0);
                 BVNodeId cond_bit = enc.encode_bool(cond_val);
                 if (cond_bit != kInvalidBV) {
-                    BVNodeId path_cond = build_path_cond();
+                    BVNodeId path_cond = build_path_cond(cond_bit);
                     bool proven = is_proven_true(ctx, path_cond, cond_bit, opts.max_sat_conflicts, opts.stats);
                     if (!proven && cond_val->is_instruction()) {
                         proven = try_prove_2d_strided_bound(
@@ -613,9 +644,10 @@ bool run_smt_guard_elimination(
                        cur->operand(0) && !cur->operand(0)->type().is_float() &&
                        !(next && (next->opcode() == Opcode::guard || next->opcode() == Opcode::br_if) &&
                          next->operand_count() > 0 && next->operand(0) == cur->result())) {
+                ++block_queries;
                 BVNodeId cmp_bit = enc.encode_bool(cur->result());
                 if (cmp_bit != kInvalidBV) {
-                    BVNodeId path_cond = build_path_cond();
+                    BVNodeId path_cond = build_path_cond(cmp_bit);
                     bool proven_true = is_proven_true(ctx, path_cond, cmp_bit, opts.max_sat_conflicts, opts.stats);
                     if (!proven_true) {
                         proven_true = try_prove_2d_strided_bound(
@@ -641,9 +673,10 @@ bool run_smt_guard_elimination(
                     }
                 }
             } else if (opts.fold_branches && cur->opcode() == Opcode::br_if && cur->operand(0)) {
+                ++block_queries;
                 BVNodeId br_bit = enc.encode_bool(cur->operand(0));
                 if (br_bit != kInvalidBV) {
-                    BVNodeId path_cond = build_path_cond();
+                    BVNodeId path_cond = build_path_cond(br_bit);
                     if (is_proven_true(ctx, path_cond, br_bit, opts.max_sat_conflicts, opts.stats)) {
                         BranchTarget kept = cur->true_target();
                         cur->set_opcode(Opcode::br);

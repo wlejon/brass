@@ -336,17 +336,40 @@ bool run_mir_superopt(
             }
         }
 
+        auto filter_path_cond = [&](BVNodeId target_bv) -> BVNodeId {
+            verify::BVCone& sc = ctx.scratch_cone();
+            ctx.compute_cone(target_bv, sc.nodes, sc.vars);
+            if (sc.vars.empty()) return ctx.make_const(1, 1);
+            auto& vseen = sc.var_seen;
+            vseen.assign(ctx.vars().size(), 0);
+            for (uint32_t vi : sc.vars) {
+                if (vi < vseen.size()) vseen[vi] = 1;
+            }
+            BVNodeId pc = ctx.make_const(1, 1);
+            auto try_add_fact = [&](BVNodeId fact) {
+                std::vector<BVNodeId> f_nodes;
+                std::vector<uint32_t> f_vars;
+                ctx.compute_cone(fact, f_nodes, f_vars);
+                for (uint32_t fvi : f_vars) {
+                    if (fvi < vseen.size() && vseen[fvi]) {
+                        pc = ctx.make_binary(BVOp::And, pc, fact, 1);
+                        return;
+                    }
+                }
+            };
+            for (BVNodeId a : assumptions) try_add_fact(a);
+            for (BVNodeId r : enc.range_assumptions) try_add_fact(r);
+            return pc;
+        };
+
         Instruction* cur = bb->head();
         uint32_t block_queries = 0;
-        constexpr uint32_t kMaxBlockQueries = 96;
+        constexpr uint32_t kMaxBlockQueries = 24;
         while (cur && block_queries < kMaxBlockQueries) {
             Instruction* next = cur->next();
 
-            auto build_path_cond = [&]() -> BVNodeId {
-                BVNodeId pc = ctx.make_const(1, 1);
-                for (BVNodeId a : assumptions) pc = ctx.make_binary(BVOp::And, pc, a, 1);
-                for (BVNodeId r : enc.range_assumptions) pc = ctx.make_binary(BVOp::And, pc, r, 1);
-                return pc;
+            auto build_path_cond = [&](BVNodeId target_bv) -> BVNodeId {
+                return filter_path_cond(target_bv);
             };
 
             auto check_equal = [&](BVNodeId path_cond, BVNodeId a, BVNodeId b) -> bool {
@@ -386,7 +409,7 @@ bool run_mir_superopt(
                 cur = next;
                 continue;
             }
-            BVNodeId path_cond = build_path_cond();
+            BVNodeId path_cond = build_path_cond(orig_bv);
 
             // ---------------------------------------------------------------
             // 1. Solver-Proven Redundant Bitmask Elision
@@ -399,19 +422,23 @@ bool run_mir_superopt(
                 int64_t c0 = 0, c1 = 0;
                 bool is_c0 = get_const_imm(op0, c0);
                 bool is_c1 = get_const_imm(op1, c1);
-                if (!is_c0 && check_equal(path_cond, orig_bv, b0)) {
-                    replace_all_uses(fn, cur->result(), op0);
-                    if (opts.stats) opts.stats->masks_elided++;
-                    changed = true;
-                    cur = next;
-                    continue;
+                if (!is_c0 && (orig_bv == b0 || (op1 && (op1->is_instruction() || !assumptions.empty())))) {
+                    if (check_equal(path_cond, orig_bv, b0)) {
+                        replace_all_uses(fn, cur->result(), op0);
+                        if (opts.stats) opts.stats->masks_elided++;
+                        changed = true;
+                        cur = next;
+                        continue;
+                    }
                 }
-                if (!is_c1 && check_equal(path_cond, orig_bv, b1)) {
-                    replace_all_uses(fn, cur->result(), op1);
-                    if (opts.stats) opts.stats->masks_elided++;
-                    changed = true;
-                    cur = next;
-                    continue;
+                if (!is_c1 && (orig_bv == b1 || (op0 && (op0->is_instruction() || !assumptions.empty())))) {
+                    if (check_equal(path_cond, orig_bv, b1)) {
+                        replace_all_uses(fn, cur->result(), op1);
+                        if (opts.stats) opts.stats->masks_elided++;
+                        changed = true;
+                        cur = next;
+                        continue;
+                    }
                 }
             }
 
@@ -460,23 +487,38 @@ bool run_mir_superopt(
             // ---------------------------------------------------------------
             // 4. Solver-Proven Single-Variable Identity / Window Collapse
             // ---------------------------------------------------------------
-            std::vector<Value*> window_vals;
-            collect_window_values(cur->result(), 0, opts.max_window_depth, window_vals);
-            bool collapsed = false;
-            for (Value* cand_v : window_vals) {
-                if (!cand_v || cand_v == cur->result() || cand_v->type() != res_t) continue;
-                BVNodeId cand_bv = enc.encode(cand_v);
-                if (check_equal(path_cond, orig_bv, cand_bv)) {
-                    replace_all_uses(fn, cur->result(), cand_v);
-                    if (opts.stats) opts.stats->dags_synthesized++;
-                    changed = true;
-                    collapsed = true;
+            bool has_inst_op = false;
+            for (size_t oi = 0; oi < cur->operand_count(); ++oi) {
+                if (cur->operand(oi) && cur->operand(oi)->is_instruction()) {
+                    has_inst_op = true;
                     break;
                 }
             }
-            if (collapsed) {
-                cur = next;
-                continue;
+            if (has_inst_op) {
+                std::vector<Value*> window_vals;
+                collect_window_values(cur->result(), 0, std::min<uint32_t>(opts.max_window_depth, 3u), window_vals);
+                bool collapsed = false;
+                for (Value* cand_v : window_vals) {
+                    if (!cand_v || cand_v == cur->result() || cand_v->type() != res_t) continue;
+                    // Do not compare against a direct operand unless algebraic canonicalization already simplified it
+                    const bool is_direct_op =
+                        (cand_v == cur->operand(0)) || (cur->operand_count() > 1 && cand_v == cur->operand(1));
+                    BVNodeId cand_bv = enc.encode(cand_v);
+                    if (is_direct_op && orig_bv != cand_bv && assumptions.empty()) {
+                        continue;
+                    }
+                    if (check_equal(path_cond, orig_bv, cand_bv)) {
+                        replace_all_uses(fn, cur->result(), cand_v);
+                        if (opts.stats) opts.stats->dags_synthesized++;
+                        changed = true;
+                        collapsed = true;
+                        break;
+                    }
+                }
+                if (collapsed) {
+                    cur = next;
+                    continue;
+                }
             }
 
             // ---------------------------------------------------------------

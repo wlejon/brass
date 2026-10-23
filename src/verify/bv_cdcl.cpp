@@ -355,12 +355,22 @@ private:
 // ---------------------------------------------------------------------------
 bool try_concrete_search(const BVContext& ctx, BVNodeId bad_cond, std::vector<uint64_t>& out_model) {
     const auto& vars = ctx.vars();
-    const size_t nvars = vars.size();
-    std::vector<uint64_t> model(nvars, 0);
-    std::vector<uint64_t> node_vals;
+    const auto& nodes = ctx.nodes();
+    const size_t total_vars = vars.size();
+
+    BVCone& sc = ctx.scratch_cone();
+    ctx.compute_cone(bad_cond, sc.nodes, sc.vars);
+    const auto& cone_nodes = sc.nodes;
+    const auto& cone_vars = sc.vars;
+    const size_t nvars = cone_vars.size();
+
+    sc.model.assign(total_vars, 0);
+    sc.node_vals.resize(nodes.size(), 0);
+    auto& model = sc.model;
+    auto& node_vals = sc.node_vals;
 
     auto check = [&](const std::vector<uint64_t>& m) -> bool {
-        ctx.evaluate_all(m, node_vals);
+        ctx.evaluate_cone(cone_nodes, m, node_vals);
         if (node_vals[bad_cond] != 0) {
             out_model = m;
             return true;
@@ -379,23 +389,30 @@ bool try_concrete_search(const BVContext& ctx, BVNodeId bad_cond, std::vector<ui
         static_cast<uint64_t>(-1LL), static_cast<uint64_t>(-2LL), static_cast<uint64_t>(-8LL)
     };
 
-    const double fp_interesting[] = {0.0, -0.0, 1.0, -1.0, 0.5, -0.5, 2.0, -2.0,
-                                     std::numeric_limits<double>::infinity(),
-                                     -std::numeric_limits<double>::infinity(),
-                                     std::numeric_limits<double>::quiet_NaN()};
-    for (double d : fp_interesting) {
-        uint64_t b64 = 0;
-        std::memcpy(&b64, &d, 8);
-        cands.push_back(b64);
-        float f = static_cast<float>(d);
-        uint32_t b32 = 0;
-        std::memcpy(&b32, &f, 4);
-        cands.push_back(b32);
+    bool has_fp_var = false;
+    for (uint32_t vi : cone_vars) {
+        if (vars[vi].is_float) { has_fp_var = true; break; }
+    }
+    if (has_fp_var) {
+        const double fp_interesting[] = {0.0, -0.0, 1.0, -1.0, 0.5, -0.5, 2.0, -2.0,
+                                         std::numeric_limits<double>::infinity(),
+                                         -std::numeric_limits<double>::infinity(),
+                                         std::numeric_limits<double>::quiet_NaN()};
+        for (double d : fp_interesting) {
+            uint64_t b64 = 0;
+            std::memcpy(&b64, &d, 8);
+            cands.push_back(b64);
+            float f = static_cast<float>(d);
+            uint32_t b32 = 0;
+            std::memcpy(&b32, &f, 4);
+            cands.push_back(b32);
+        }
     }
 
-    // Keep candidate count bounded so large contexts never go quadratic
-    for (const auto& n : ctx.nodes()) {
-        if (cands.size() >= 64) break;
+    // Extract constants only from the cone of influence
+    for (BVNodeId id : cone_nodes) {
+        if (cands.size() >= 48) break;
+        const auto& n = nodes[id];
         if (n.op == BVOp::Const && n.width > 1) {
             cands.push_back(n.imm);
             cands.push_back(n.imm + 1ULL);
@@ -411,43 +428,46 @@ bool try_concrete_search(const BVContext& ctx, BVNodeId bad_cond, std::vector<ui
     std::sort(cands.begin(), cands.end());
     cands.erase(std::unique(cands.begin(), cands.end()), cands.end());
 
-    // 1. All-equal sweep
+    // 1. All-equal sweep over cone variables
     for (uint64_t c : cands) {
-        for (size_t i = 0; i < nvars; ++i) model[i] = c & width_mask(vars[i].width);
+        for (uint32_t vi : cone_vars) model[vi] = c & width_mask(vars[vi].width);
         if (check(model)) return true;
     }
 
-    // 2. Single-variable sweep against 0 and -1 backgrounds (bounded to first 8 vars)
-    const size_t sweep_vars = std::min<size_t>(nvars, 8);
-    const size_t sweep_cands = std::min<size_t>(cands.size(), 32);
+    // 2. Single-variable sweep against 0 and -1 backgrounds (bounded to first 6 cone vars)
+    const size_t sweep_vars = std::min<size_t>(nvars, 6);
+    const size_t sweep_cands = std::min<size_t>(cands.size(), 24);
     for (uint64_t bg : {0ULL, ~0ULL, 1ULL}) {
-        for (size_t i = 0; i < nvars; ++i) model[i] = bg & width_mask(vars[i].width);
+        for (uint32_t vi : cone_vars) model[vi] = bg & width_mask(vars[vi].width);
         for (size_t i = 0; i < sweep_vars; ++i) {
-            uint64_t orig = model[i];
+            uint32_t vi = cone_vars[i];
+            uint64_t orig = model[vi];
             for (size_t ci = 0; ci < sweep_cands; ++ci) {
-                model[i] = cands[ci] & width_mask(vars[i].width);
+                model[vi] = cands[ci] & width_mask(vars[vi].width);
                 if (check(model)) return true;
             }
-            model[i] = orig;
+            model[vi] = orig;
         }
     }
 
-    // 3. Pairwise sweep for first 3 variables over compact boundary set (only on small contexts)
-    if (ctx.nodes().size() <= 128) {
+    // 3. Pairwise sweep for first 3 cone variables over compact boundary set (only on small cones)
+    if (cone_nodes.size() <= 32 && nvars <= 4) {
         const size_t pair_vars = std::min<size_t>(nvars, 3);
-        const size_t pair_cands = std::min<size_t>(cands.size(), 24);
-        std::fill(model.begin(), model.end(), 0ULL);
+        const size_t pair_cands = std::min<size_t>(cands.size(), 16);
+        for (uint32_t vi : cone_vars) model[vi] = 0ULL;
         for (size_t i = 0; i < pair_vars; ++i) {
+            uint32_t vi = cone_vars[i];
             for (size_t j = i + 1; j < pair_vars; ++j) {
+                uint32_t vj = cone_vars[j];
                 for (size_t ci = 0; ci < pair_cands; ++ci) {
-                    model[i] = cands[ci] & width_mask(vars[i].width);
+                    model[vi] = cands[ci] & width_mask(vars[vi].width);
                     for (size_t cj = 0; cj < pair_cands; ++cj) {
-                        model[j] = cands[cj] & width_mask(vars[j].width);
+                        model[vj] = cands[cj] & width_mask(vars[vj].width);
                         if (check(model)) return true;
                     }
                 }
-                model[i] = 0;
-                model[j] = 0;
+                model[vi] = 0;
+                model[vj] = 0;
             }
         }
     }
@@ -460,14 +480,14 @@ bool try_concrete_search(const BVContext& ctx, BVNodeId bad_cond, std::vector<ui
         rng ^= rng >> 27;
         return rng * 0x2545F4914F6CDD1DULL;
     };
-    const uint32_t prng_iters = (ctx.nodes().size() <= 128) ? 256u : 48u;
+    const uint32_t prng_iters = (cone_nodes.size() <= 32) ? 32u : 12u;
     for (uint32_t iter = 0; iter < prng_iters; ++iter) {
-        for (size_t i = 0; i < nvars; ++i) {
+        for (uint32_t vi : cone_vars) {
             uint64_t r = next_rng();
             if ((r & 3ULL) != 0 && !cands.empty()) {
-                model[i] = cands[static_cast<size_t>((r >> 8) % cands.size())] & width_mask(vars[i].width);
+                model[vi] = cands[static_cast<size_t>((r >> 8) % cands.size())] & width_mask(vars[vi].width);
             } else {
-                model[i] = next_rng() & width_mask(vars[i].width);
+                model[vi] = next_rng() & width_mask(vars[vi].width);
             }
         }
         if (check(model)) return true;

@@ -121,6 +121,17 @@ struct BVInterval {
     uint64_t known_ones = 0;
 };
 
+struct BVCone {
+    BVNodeId root = UINT32_MAX;
+    std::vector<BVNodeId> nodes;
+    std::vector<uint32_t> vars;
+    std::vector<uint8_t> reachable;
+    std::vector<BVNodeId> stack;
+    std::vector<uint8_t> var_seen;
+    std::vector<uint64_t> node_vals;
+    std::vector<uint64_t> model;
+};
+
 inline constexpr uint64_t width_mask(uint32_t w) noexcept {
     if (w == 0) return 0;
     if (w >= 64) return ~0ULL;
@@ -160,6 +171,9 @@ public:
 
     uint64_t eval_concrete(BVNodeId root, const std::vector<uint64_t>& var_values) const;
     void evaluate_all(const std::vector<uint64_t>& var_values, std::vector<uint64_t>& node_vals) const;
+    void evaluate_cone(const std::vector<BVNodeId>& cone_nodes, const std::vector<uint64_t>& var_values, std::vector<uint64_t>& node_vals) const;
+    void compute_cone(BVNodeId root, std::vector<BVNodeId>& out_nodes, std::vector<uint32_t>& out_vars) const;
+    BVCone& scratch_cone() const noexcept { return scratch_cone_; }
 
     std::string export_smt2(BVNodeId bad_cond, std::string_view comment = "") const;
 
@@ -172,6 +186,7 @@ private:
     std::vector<BVInterval> intervals_;
     std::vector<BVVarInfo> vars_;
     std::unordered_map<BVNode, BVNodeId, BVNodeHasher> memo_;
+    mutable BVCone scratch_cone_;
 };
 
 struct SolveOutcome {
