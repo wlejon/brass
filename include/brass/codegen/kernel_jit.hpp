@@ -68,9 +68,10 @@ using KernelJitOptions = KernelOptions;
 template <typename BodyFn>
 inline void parallel_for(int64_t start, int64_t end, BodyFn&& fn, uint64_t grain_size = 0) {
     if (end <= start) return;
+    using FnType = std::remove_reference_t<BodyFn>;
     struct Context {
         int64_t base;
-        BodyFn* body;
+        FnType* body;
     } ctx{start, &fn};
     uint64_t trip_count = static_cast<uint64_t>(end - start);
     ::brass_parallel_for(
