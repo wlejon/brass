@@ -225,6 +225,10 @@ public:
                     var_inc_ *= 1e-100;
                 }
                 if (bt_level < base_lvl) {
+                    if (propagate() != UINT32_MAX) {
+                        ok_ = false;
+                        return SolveOutcome::Unsat;
+                    }
                     int8_t cur_av = value_lit(assumption);
                     if (cur_av == 0) {
                         backtrack(0);
