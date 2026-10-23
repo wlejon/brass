@@ -93,6 +93,7 @@
 #include <brass/vm/bytecode_compiler.hpp>
 #include <brass/vm/fast_interpreter.hpp>
 #include <brass/verify/smt_equiv.hpp>
+#include <brass/verify/arm64_lir_equiv.hpp>
 
 #include <string_view>
 

@@ -256,6 +256,7 @@ add_executable(brass_unit_tests
     unit/test_smt_equiv.cpp
     unit/test_verifier_certs.cpp
     unit/test_smt_guard_elim.cpp
+    test_arm64_lir_equiv.cpp
 )
 
 add_executable(test_smt_equiv unit/test_smt_equiv.cpp)
@@ -272,6 +273,11 @@ add_executable(test_smt_guard_elim unit/test_smt_guard_elim.cpp)
 target_compile_definitions(test_smt_guard_elim PRIVATE BRASS_STANDALONE_TEST)
 target_link_libraries(test_smt_guard_elim PRIVATE brass)
 target_include_directories(test_smt_guard_elim PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/harness" "${BRASS_INCLUDE_DIR}")
+
+add_executable(test_arm64_lir_equiv test_arm64_lir_equiv.cpp)
+target_compile_definitions(test_arm64_lir_equiv PRIVATE BRASS_STANDALONE_TEST)
+target_link_libraries(test_arm64_lir_equiv PRIVATE brass)
+target_include_directories(test_arm64_lir_equiv PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/harness" "${BRASS_INCLUDE_DIR}")
 
 # The SPIR-V target's tests (built when the SPIR-V headers were found) run
 # every emitted module through spirv-val and disassemble with spirv-dis when
