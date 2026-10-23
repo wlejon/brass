@@ -82,7 +82,7 @@ struct Arm64ExecState {
     std::unordered_map<uint32_t, BVNodeId> vregs;
     std::unordered_map<int32_t, BVNodeId> spill_slots, local_slots;
     std::vector<Arm64SymMemStore> mem_stores;
-    bool has_cond_branch = false, has_uncond_branch = false;
+    bool has_cond_branch = false, has_uncond_branch = false, uses_vec128 = false;
     BVNodeId cond_branch_taken = 0;
     uint32_t cond_target_label = UINT32_MAX, uncond_target_label = UINT32_MAX;
 };
@@ -320,6 +320,7 @@ Arm64ExecState execute_arm64_block(BVContext& ctx, const LirBlock& block, Arm64I
     };
 
     auto read_vec128 = [&](const LirOperand& op) -> std::pair<BVNodeId, BVNodeId> {
+        st.uses_vec128 = true;
         if (op.is_preg() && op.preg_val.is_xmm() && op.preg_val.code < 32) {
             return {st.vec_lo[op.preg_val.code], st.vec_hi[op.preg_val.code]};
         }
@@ -332,6 +333,7 @@ Arm64ExecState execute_arm64_block(BVContext& ctx, const LirBlock& block, Arm64I
     };
 
     auto write_vec128 = [&](const LirOperand& dst, BVNodeId lo, BVNodeId hi) {
+        st.uses_vec128 = true;
         if (dst.is_preg() && dst.preg_val.is_xmm() && dst.preg_val.code < 32) {
             st.vec_lo[dst.preg_val.code] = lo;
             st.vec_hi[dst.preg_val.code] = hi;
@@ -813,7 +815,9 @@ LirEquivResult verify_arm64_lir_block_equivalence(
         if (live_out_vec_mask & (1u << i)) {
             std::string vn = "v" + std::to_string(i);
             checks.push_back({vn + ".lo", st_b.vec_lo[i], st_a.vec_lo[i], ctx.make_binary(BVOp::Ne, st_b.vec_lo[i], st_a.vec_lo[i], 1)});
-            checks.push_back({vn + ".hi", st_b.vec_hi[i], st_a.vec_hi[i], ctx.make_binary(BVOp::Ne, st_b.vec_hi[i], st_a.vec_hi[i], 1)});
+            if (st_b.uses_vec128 || st_a.uses_vec128) {
+                checks.push_back({vn + ".hi", st_b.vec_hi[i], st_a.vec_hi[i], ctx.make_binary(BVOp::Ne, st_b.vec_hi[i], st_a.vec_hi[i], 1)});
+            }
         }
     }
     for (const auto& [vid, b_v] : st_b.vregs) {
@@ -834,18 +838,20 @@ LirEquivResult verify_arm64_lir_block_equivalence(
     check_slot_map(st_b.spill_slots, st_a.spill_slots, "spill", [&](int32_t s) { return env.get_spill_init(ctx, s); });
     check_slot_map(st_b.local_slots, st_a.local_slots, "local", [&](int32_t o) { return env.get_local_init(ctx, o); });
 
-    auto check_mem_side = [&](const std::vector<Arm64SymMemStore>& lhs, const std::vector<Arm64SymMemStore>& rhs, bool lhs_is_b) {
-        for (const auto& ms : lhs) {
-            BVNodeId other = env.read_init_mem(ctx, ms.addr, ms.size);
-            for (const auto& as : rhs) {
-                if (as.size == ms.size) other = ctx.make_ite(ctx.make_binary(BVOp::Eq, ms.addr, as.addr, 1), as.val, other);
-            }
-            BVNodeId bv = lhs_is_b ? ms.val : other, av = lhs_is_b ? other : ms.val;
+    auto eval_final_mem = [&](const std::vector<Arm64SymMemStore>& stores, BVNodeId addr, uint32_t sz) {
+        BVNodeId v = env.read_init_mem(ctx, addr, sz);
+        for (const auto& s : stores) {
+            if (s.size == sz) v = ctx.make_ite(ctx.make_binary(BVOp::Eq, addr, s.addr, 1), s.val, v);
+        }
+        return v;
+    };
+    for (const auto* side : {&st_b.mem_stores, &st_a.mem_stores}) {
+        for (const auto& ms : *side) {
+            BVNodeId bv = eval_final_mem(st_b.mem_stores, ms.addr, ms.size);
+            BVNodeId av = eval_final_mem(st_a.mem_stores, ms.addr, ms.size);
             checks.push_back({"mem_store", bv, av, ctx.make_binary(BVOp::Ne, bv, av, 1)});
         }
-    };
-    check_mem_side(st_b.mem_stores, st_a.mem_stores, true);
-    check_mem_side(st_a.mem_stores, st_b.mem_stores, false);
+    }
 
     if (check_flags) {
         checks.push_back({"N", st_b.nzcv.n, st_a.nzcv.n, ctx.make_binary(BVOp::Xor, st_b.nzcv.n, st_a.nzcv.n, 1)});

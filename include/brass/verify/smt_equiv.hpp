@@ -102,13 +102,25 @@ std::string export_mir_equivalence_smt2(
 
 /// Verify semantic equivalence between two x64 LIR basic blocks (`before` and `after`),
 /// modeling all 16 GPRs (including 32-bit zero-extension to 64 bits), 16 XMM registers,
-/// spill slots, memory reads/writes, and RFLAGS (ZF, SF, OF, CF).
+/// spill slots, memory reads/writes, RFLAGS (ZF, SF, OF, CF), and branch targets.
 LirEquivResult verify_x64_lir_block_equivalence(
     const codegen::LirBlock& before,
     const codegen::LirBlock& after,
     uint16_t live_out_gpr_mask = 0xFFFF,
     uint16_t live_out_xmm_mask = 0xFFFF,
-    bool check_flags = true
+    bool check_flags = true,
+    uint32_t fallthrough_block_id = UINT32_MAX
+);
+
+/// Verify semantic equivalence across all basic blocks of two x64 LIR functions.
+LirEquivResult verify_x64_lir_function_equivalence(
+    const codegen::LirFunction& before,
+    const codegen::LirFunction& after
+);
+
+/// Clone an x64 LIR function, run PeepholeOptimizer on the clone, and verify equivalence.
+LirEquivResult verify_x64_peephole(
+    const codegen::LirFunction& fn
 );
 
 inline LirEquivResult verify_lir_equivalence(
@@ -131,4 +143,6 @@ using verify::verify_lir_equivalence;
 using verify::verify_mir_equivalence;
 using verify::verify_mir_module_equivalence;
 using verify::verify_x64_lir_block_equivalence;
+using verify::verify_x64_lir_function_equivalence;
+using verify::verify_x64_peephole;
 } // namespace brass

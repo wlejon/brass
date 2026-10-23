@@ -430,6 +430,9 @@ BVNodeId BVContext::make_binary(BVOp op, BVNodeId a, BVNodeId b, uint32_t res_wi
             }
             if (ca.op == BVOp::Sub && ca.b == b) return ca.a;
             if (cb.op == BVOp::Sub && cb.b == a) return cb.a;
+            if (((intervals_[a].known_zeros | intervals_[b].known_zeros) & m) == m) {
+                return make_binary(BVOp::Or, a, b, w);
+            }
             break;
 
         case BVOp::Sub:
@@ -542,6 +545,12 @@ BVNodeId BVContext::make_binary(BVOp op, BVNodeId a, BVNodeId b, uint32_t res_wi
                     BVNodeId t1 = make_binary(BVOp::Shl, ca.a, b, w);
                     BVNodeId t2 = make_const((nodes_[ca.b].imm << sh) & m, w);
                     return make_binary(BVOp::Add, t1, t2, w);
+                }
+                if (op == BVOp::Shl && ca.op == BVOp::LShr && nodes_[ca.b].op == BVOp::Const && nodes_[ca.b].imm == sh) {
+                    return make_binary(BVOp::And, ca.a, make_const((m << sh) & m, w), w);
+                }
+                if (op == BVOp::LShr && ca.op == BVOp::Shl && nodes_[ca.b].op == BVOp::Const && nodes_[ca.b].imm == sh) {
+                    return make_binary(BVOp::And, ca.a, make_const(m >> sh, w), w);
                 }
             }
             break;

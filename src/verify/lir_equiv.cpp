@@ -2,6 +2,7 @@
 #include "bv_solver.hpp"
 #include <brass/codegen/lir.hpp>
 #include <brass/codegen/lir_flags.hpp>
+#include <brass/codegen/peephole.hpp>
 #include <algorithm>
 #include <sstream>
 #include <unordered_map>
@@ -555,13 +556,50 @@ LirExecState execute_lir_block(BVContext& ctx, const LirBlock& block, LirInitEnv
             }
 
             case LirOpcode::Lea: {
-                if (inst.defs.empty() || inst.uses.empty() || !inst.uses[0].is_mem()) break;
-                BVNodeId addr = eval_mem_addr(inst.uses[0].mem_val);
-                if (inst.defs[0].size == 4) {
-                    write_op(inst.defs[0], ctx.make_extract(addr, 31, 0), true);
+                if (inst.defs.empty() || inst.uses.empty()) break;
+                BVNodeId addr = 0;
+                if (inst.uses[0].is_mem()) {
+                    addr = eval_mem_addr(inst.uses[0].mem_val);
+                } else if (inst.uses[0].is_spill_slot()) {
+                    addr = ctx.make_binary(BVOp::Add, st.gpr[static_cast<uint8_t>(x64::GPR::RBP)],
+                        ctx.make_const(static_cast<uint64_t>(int64_t{-8} * (inst.uses[0].spill_slot + 1)), 64), 64);
+                } else if (inst.uses[0].is_local_slot()) {
+                    addr = ctx.make_binary(BVOp::Add, st.gpr[static_cast<uint8_t>(x64::GPR::RBP)],
+                        ctx.make_const(static_cast<uint64_t>(static_cast<int64_t>(inst.uses[0].local_offset)), 64), 64);
                 } else {
-                    write_op(inst.defs[0], addr, true);
+                    break;
                 }
+                write_op(inst.defs[0], (inst.defs[0].size == 4) ? ctx.make_extract(addr, 31, 0) : addr, true);
+                break;
+            }
+
+            case LirOpcode::Push: {
+                if (inst.uses.empty()) break;
+                BVNodeId v = read_op(inst.uses[0], 64);
+                BVNodeId rsp = ctx.make_binary(BVOp::Sub, st.gpr[static_cast<uint8_t>(x64::GPR::RSP)], ctx.make_const(8, 64), 64);
+                st.gpr[static_cast<uint8_t>(x64::GPR::RSP)] = rsp;
+                st.mem_stores.push_back({rsp, 8, v});
+                break;
+            }
+            case LirOpcode::Pop: {
+                if (inst.defs.empty()) break;
+                BVNodeId rsp = st.gpr[static_cast<uint8_t>(x64::GPR::RSP)];
+                write_op(inst.defs[0], read_mem_sized(rsp, 8), true);
+                st.gpr[static_cast<uint8_t>(x64::GPR::RSP)] = ctx.make_binary(BVOp::Add, rsp, ctx.make_const(8, 64), 64);
+                break;
+            }
+
+            case LirOpcode::ParallelCopy: {
+                size_t pairs = std::min(inst.defs.size(), inst.uses.size());
+                std::vector<std::pair<LirOperand, BVNodeId>> pending;
+                pending.reserve(pairs);
+                for (size_t k = 0; k < pairs; ++k) {
+                    const auto &dst = inst.defs[k], &src = inst.uses[k];
+                    uint32_t w = (dst.size == 4 || src.size == 4) ? 32 : 64;
+                    if (dst.is_spill_slot() && src.is_preg() && src.preg_val.is_gpr()) w = 64;
+                    pending.push_back({dst, read_op(src, w)});
+                }
+                for (const auto& [dst, v] : pending) write_op(dst, v, true);
                 break;
             }
 
@@ -570,7 +608,11 @@ LirExecState execute_lir_block(BVContext& ctx, const LirBlock& block, LirInitEnv
             case LirOpcode::Movq_gx:
             case LirOpcode::Movq_xg:
             case LirOpcode::Movd_gx:
-            case LirOpcode::Movd_xg: {
+            case LirOpcode::Movd_xg:
+            case LirOpcode::Movaps:
+            case LirOpcode::Movups:
+            case LirOpcode::Vmovaps:
+            case LirOpcode::Vmovups: {
                 if (inst.defs.empty() || inst.uses.empty()) break;
                 uint32_t w = (op == LirOpcode::Movss || op == LirOpcode::Movd_gx || op == LirOpcode::Movd_xg) ? 32 : 64;
                 BVNodeId v = read_op(inst.uses[0], w);
@@ -585,15 +627,80 @@ LirExecState execute_lir_block(BVContext& ctx, const LirBlock& block, LirInitEnv
             case LirOpcode::Mulsd:
             case LirOpcode::Mulss:
             case LirOpcode::Divsd:
-            case LirOpcode::Divss: {
+            case LirOpcode::Divss:
+            case LirOpcode::Minsd:
+            case LirOpcode::Minss:
+            case LirOpcode::Maxsd:
+            case LirOpcode::Maxss: {
                 uint32_t w = (op == LirOpcode::Addss || op == LirOpcode::Subss ||
-                              op == LirOpcode::Mulss || op == LirOpcode::Divss) ? 32 : 64;
+                              op == LirOpcode::Mulss || op == LirOpcode::Divss ||
+                              op == LirOpcode::Minss || op == LirOpcode::Maxss) ? 32 : 64;
                 BVNodeId a = get_bin_lhs(w);
                 BVNodeId b = get_bin_rhs(w);
                 BVOp fop = (op == LirOpcode::Addsd || op == LirOpcode::Addss) ? BVOp::FAdd
                          : (op == LirOpcode::Subsd || op == LirOpcode::Subss) ? BVOp::FSub
-                         : (op == LirOpcode::Mulsd || op == LirOpcode::Mulss) ? BVOp::FMul : BVOp::FDiv;
+                         : (op == LirOpcode::Mulsd || op == LirOpcode::Mulss) ? BVOp::FMul
+                         : (op == LirOpcode::Divsd || op == LirOpcode::Divss) ? BVOp::FDiv
+                         : (op == LirOpcode::Minsd || op == LirOpcode::Minss) ? BVOp::FMin : BVOp::FMax;
                 write_op(inst.defs[0], ctx.make_binary(fop, a, b, w), true);
+                break;
+            }
+
+            case LirOpcode::Sqrtsd:  case LirOpcode::Sqrtss:
+            case LirOpcode::Floor64: case LirOpcode::Floor32:
+            case LirOpcode::Ceil64:  case LirOpcode::Ceil32:
+            case LirOpcode::Round64: case LirOpcode::Round32:
+            case LirOpcode::Fabs64:  case LirOpcode::Fabs32:
+            case LirOpcode::Fneg:    case LirOpcode::Fneg32: {
+                uint32_t w = (op == LirOpcode::Sqrtss  || op == LirOpcode::Floor32 || op == LirOpcode::Ceil32 ||
+                              op == LirOpcode::Round32 || op == LirOpcode::Fabs32  || op == LirOpcode::Fneg32) ? 32 : 64;
+                BVOp uop = (op == LirOpcode::Sqrtsd  || op == LirOpcode::Sqrtss)  ? BVOp::FSqrt
+                         : (op == LirOpcode::Floor64 || op == LirOpcode::Floor32) ? BVOp::FFloor
+                         : (op == LirOpcode::Ceil64  || op == LirOpcode::Ceil32)  ? BVOp::FCeil
+                         : (op == LirOpcode::Round64 || op == LirOpcode::Round32) ? BVOp::FRound
+                         : (op == LirOpcode::Fabs64  || op == LirOpcode::Fabs32)  ? BVOp::FAbs : BVOp::FNeg;
+                write_op(inst.defs[0], ctx.make_unary(uop, read_op(inst.uses.back(), w), w), true);
+                break;
+            }
+
+            case LirOpcode::Cvtsi2sd: case LirOpcode::Cvtsi2sd32:
+            case LirOpcode::Cvtsi2ss: case LirOpcode::Cvtsi2ss32: {
+                uint32_t src_w = (op == LirOpcode::Cvtsi2sd32 || op == LirOpcode::Cvtsi2ss32) ? 32 : 64;
+                uint32_t dst_w = (op == LirOpcode::Cvtsi2ss   || op == LirOpcode::Cvtsi2ss32) ? 32 : 64;
+                write_op(inst.defs[0], ctx.make_unary(BVOp::SiToFp, read_op(inst.uses[0], src_w), dst_w), true);
+                break;
+            }
+
+            case LirOpcode::Cvttsd2si: case LirOpcode::Cvttsd2si32:
+            case LirOpcode::Cvttss2si: case LirOpcode::Cvttss2si32: {
+                uint32_t src_w = (op == LirOpcode::Cvttss2si   || op == LirOpcode::Cvttss2si32) ? 32 : 64;
+                uint32_t dst_w = (op == LirOpcode::Cvttsd2si32 || op == LirOpcode::Cvttss2si32) ? 32 : 64;
+                write_op(inst.defs[0], ctx.make_unary(BVOp::FpToSi, read_op(inst.uses[0], src_w), dst_w), true);
+                break;
+            }
+
+            case LirOpcode::Cvtsd2ss:
+                write_op(inst.defs[0], ctx.make_unary(BVOp::FpTrunc, read_op(inst.uses[0], 64), 32), true);
+                break;
+            case LirOpcode::Cvtss2sd:
+                write_op(inst.defs[0], ctx.make_unary(BVOp::FpExt, read_op(inst.uses[0], 32), 64), true);
+                break;
+
+            case LirOpcode::Ucomisd:
+            case LirOpcode::Ucomiss: {
+                uint32_t w = (op == LirOpcode::Ucomiss) ? 32 : 64;
+                BVNodeId a = read_op(inst.uses[0], w), b = read_op(inst.uses[1], w);
+                BVNodeId unord = ctx.make_binary(BVOp::Or,
+                    ctx.make_unary(BVOp::Not, ctx.make_binary(BVOp::FEq, a, a, 1), 1),
+                    ctx.make_unary(BVOp::Not, ctx.make_binary(BVOp::FEq, b, b, 1), 1), 1);
+                BVNodeId eq = ctx.make_binary(BVOp::FEq, a, b, 1);
+                BVNodeId lt = ctx.make_binary(BVOp::FLt, a, b, 1);
+                st.flags.zf = ctx.make_binary(BVOp::Or, unord, eq, 1);
+                st.flags.cf = ctx.make_binary(BVOp::Or, unord, lt, 1);
+                st.flags.pf = unord;
+                st.flags.sf = ctx.make_const(0, 1);
+                st.flags.of = ctx.make_const(0, 1);
+                st.flags_defined = true;
                 break;
             }
 
@@ -657,7 +764,8 @@ LirEquivResult verify_x64_lir_block_equivalence(
     const codegen::LirBlock& after,
     uint16_t live_out_gpr_mask,
     uint16_t live_out_xmm_mask,
-    bool check_flags) {
+    bool check_flags,
+    uint32_t fallthrough_block_id) {
 
     LirEquivResult res;
     BVContext ctx;
@@ -726,29 +834,19 @@ LirEquivResult verify_x64_lir_block_equivalence(
     }
 
     // Check memory stores
-    for (const auto& ms : st_b.mem_stores) {
-        BVNodeId bv = ms.val;
-        BVNodeId av = env.read_init_mem(ctx, ms.addr, ms.size);
-        for (const auto& as : st_a.mem_stores) {
-            if (as.size == ms.size) {
-                BVNodeId hit = ctx.make_binary(BVOp::Eq, ms.addr, as.addr, 1);
-                av = ctx.make_ite(hit, as.val, av);
-            }
+    auto eval_final_mem = [&](const std::vector<LirSymMemStore>& stores, BVNodeId addr, uint32_t sz) {
+        BVNodeId v = env.read_init_mem(ctx, addr, sz);
+        for (const auto& s : stores) {
+            if (s.size == sz) v = ctx.make_ite(ctx.make_binary(BVOp::Eq, addr, s.addr, 1), s.val, v);
         }
-        BVNodeId d = ctx.make_binary(BVOp::Ne, bv, av, 1);
-        checks.push_back({"mem_store", bv, av, d});
-    }
-    for (const auto& as : st_a.mem_stores) {
-        BVNodeId av = as.val;
-        BVNodeId bv = env.read_init_mem(ctx, as.addr, as.size);
-        for (const auto& ms : st_b.mem_stores) {
-            if (ms.size == as.size) {
-                BVNodeId hit = ctx.make_binary(BVOp::Eq, as.addr, ms.addr, 1);
-                bv = ctx.make_ite(hit, ms.val, bv);
-            }
+        return v;
+    };
+    for (const auto* side : {&st_b.mem_stores, &st_a.mem_stores}) {
+        for (const auto& ms : *side) {
+            BVNodeId bv = eval_final_mem(st_b.mem_stores, ms.addr, ms.size);
+            BVNodeId av = eval_final_mem(st_a.mem_stores, ms.addr, ms.size);
+            checks.push_back({"mem_store", bv, av, ctx.make_binary(BVOp::Ne, bv, av, 1)});
         }
-        BVNodeId d = ctx.make_binary(BVOp::Ne, bv, av, 1);
-        checks.push_back({"mem_store", bv, av, d});
     }
 
     if (check_flags) {
@@ -756,6 +854,16 @@ LirEquivResult verify_x64_lir_block_equivalence(
         checks.push_back({"SF", st_b.flags.sf, st_a.flags.sf, ctx.make_binary(BVOp::Xor, st_b.flags.sf, st_a.flags.sf, 1)});
         checks.push_back({"OF", st_b.flags.of, st_a.flags.of, ctx.make_binary(BVOp::Xor, st_b.flags.of, st_a.flags.of, 1)});
         checks.push_back({"CF", st_b.flags.cf, st_a.flags.cf, ctx.make_binary(BVOp::Xor, st_b.flags.cf, st_a.flags.cf, 1)});
+    }
+
+    if (st_b.has_branch || st_a.has_branch || fallthrough_block_id != UINT32_MAX) {
+        auto target_of = [&](const LirExecState& st) -> BVNodeId {
+            uint32_t ft = (st.fallthrough_label != UINT32_MAX) ? st.fallthrough_label : fallthrough_block_id;
+            BVNodeId ft_node = ctx.make_const(ft, 32);
+            return st.has_branch ? ctx.make_ite(st.branch_taken, ctx.make_const(st.taken_label, 32), ft_node) : ft_node;
+        };
+        BVNodeId tb = target_of(st_b), ta = target_of(st_a);
+        checks.push_back({"branch_target", tb, ta, ctx.make_binary(BVOp::Ne, tb, ta, 1)});
     }
 
     BVNodeId total_diff = ctx.make_const(0, 1);
@@ -788,6 +896,66 @@ LirEquivResult verify_x64_lir_block_equivalence(
     }
     res.diagnostic = diag.str();
     return res;
+}
+
+static bool are_x64_flags_live_out_of_block(const LirFunction& fn, size_t block_idx) noexcept {
+    if (block_idx >= fn.blocks.size()) return false;
+    for (const LirBlock* succ : fn.blocks[block_idx]->successors) {
+        if (!succ) continue;
+        for (const auto& inst : succ->instructions) {
+            if (!inst) continue;
+            if (lir_reads_flags(*inst, Arch::x64)) return true;
+            if (lir_kills_flags(*inst, Arch::x64)) break;
+        }
+    }
+    return false;
+}
+
+LirEquivResult verify_x64_lir_function_equivalence(
+    const codegen::LirFunction& before, const codegen::LirFunction& after) {
+
+    if (before.blocks.size() != after.blocks.size()) {
+        return {EquivStatus::Counterexample, "Block count mismatch between before and after LirFunction"};
+    }
+    for (size_t i = 0; i < before.blocks.size(); ++i) {
+        uint32_t fallthrough_id = (i + 1 < before.blocks.size()) ? before.blocks[i + 1]->id : UINT32_MAX;
+        bool check_flags = are_x64_flags_live_out_of_block(before, i) || are_x64_flags_live_out_of_block(after, i);
+        LirEquivResult blk_res = verify_x64_lir_block_equivalence(
+            *before.blocks[i], *after.blocks[i], 0xFFFF, 0xFFFF, check_flags, fallthrough_id);
+        if (blk_res.status == EquivStatus::Counterexample || blk_res.status == EquivStatus::Unknown) return blk_res;
+    }
+    return {EquivStatus::ProvenEquivalent, {}};
+}
+
+LirEquivResult verify_x64_peephole(const codegen::LirFunction& fn) {
+    LirFunction copy;
+    copy.name = fn.name;
+    copy.return_type = fn.return_type;
+    copy.calling_conv = fn.calling_conv;
+    copy.vreg_table = fn.vreg_table;
+    copy.frame = fn.frame;
+    copy.resume_entries = fn.resume_entries;
+    copy.reserved_gprs = fn.reserved_gprs;
+    copy.forced_saved_gprs = fn.forced_saved_gprs;
+
+    std::unordered_map<uint32_t, LirBlock*> id_map;
+    for (const auto& blk : fn.blocks) {
+        auto cloned = std::make_unique<LirBlock>(blk->id, blk->name);
+        cloned->loop_depth = blk->loop_depth;
+        cloned->is_landing_pad = blk->is_landing_pad;
+        for (const auto& inst : blk->instructions) {
+            if (inst) cloned->append_inst(std::make_unique<LirInst>(*inst));
+        }
+        id_map[cloned->id] = cloned.get();
+        copy.blocks.push_back(std::move(cloned));
+    }
+    for (size_t i = 0; i < fn.blocks.size(); ++i) {
+        for (const LirBlock* succ : fn.blocks[i]->successors) {
+            if (succ && id_map.count(succ->id)) link_blocks(*copy.blocks[i], *id_map[succ->id]);
+        }
+    }
+    run_lir_peephole_optimizations(copy);
+    return verify_x64_lir_function_equivalence(fn, copy);
 }
 
 } // namespace brass::verify

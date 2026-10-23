@@ -206,10 +206,19 @@ bool PeepholeOptimizer::eliminate_load_after_store(LirBlock& block) {
                 PReg load_dst_reg = candidate.defs[0].preg_val;
                 if (load_dst_reg == store_src_reg) {
                     // Exact redundant load: mov [loc], r; ...; mov r, [loc]
-                    block.instructions[j].reset();
-                    stats_.load_after_store_eliminated++;
-                    changed = true;
-                    removed = true;
+                    if (store_inst.opcode == LirOpcode::Mov32) {
+                        // A 32-bit GPR load zero-extends bits [63:32] on both x64 and
+                        // AArch64, whereas storing the low 32 bits of r to memory leaves
+                        // r's upper 32 bits untouched. Rewrite to Mov32 r, r.
+                        candidate.uses[0] = LirOperand::preg(store_src_reg, 4);
+                        stats_.load_after_store_eliminated++;
+                        changed = true;
+                    } else {
+                        block.instructions[j].reset();
+                        stats_.load_after_store_eliminated++;
+                        changed = true;
+                        removed = true;
+                    }
                     continue;
                 } else {
                     // Forwarding: mov [loc], r1; ...; mov r2, [loc] -> mov r2, r1

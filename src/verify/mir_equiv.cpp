@@ -689,6 +689,8 @@ SymExecOutput symbolically_execute_mir(
                     }
 
                     case Opcode::ret: {
+                        bool first_ret = (ctx.nodes()[out.returned].op == BVOp::Const &&
+                                          ctx.nodes()[out.returned].imm == 0);
                         out.returned = ctx.make_binary(BVOp::Or, out.returned, cur_cond, 1);
                         out.completed = ctx.make_binary(BVOp::Or, out.completed, cur_cond, 1);
                         if (!fn.return_type().is_void()) {
@@ -696,7 +698,7 @@ SymExecOutput symbolically_execute_mir(
                                 inst->operand(0)->type() != fn.return_type())
                                 out.has_type_error = true;
                             BVNodeId rv = coerce_width(ctx, get_op(0), ret_w, false);
-                            out.ret_val = ctx.make_ite(cur_cond, rv, out.ret_val);
+                            out.ret_val = first_ret ? rv : ctx.make_ite(cur_cond, rv, out.ret_val);
                         }
                         break;
                     }
