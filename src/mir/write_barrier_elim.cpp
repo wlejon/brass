@@ -122,23 +122,53 @@ bool WriteBarrierElimination::run_on_function(Function& fn) {
             const Value* val = inst->operand(1);
 
             bool eliminate = false;
+            BarrierCertKind cert_kind = BarrierCertKind::None;
             if (is_non_pointer_value(val)) {
                 // Rule 1: the stored value cannot be a young reference.
                 stats_.eliminated_non_pointer++;
                 eliminate = true;
+                int64_t c_imm = 0;
+                cert_kind = (constant_integer(val, c_imm) && c_imm == 0)
+                    ? BarrierCertKind::ConstantOrNullRef
+                    : BarrierCertKind::NonRefStore;
             } else if (obj && young_in_block.count(obj) > 0) {
                 // Rule 2: a young object needs no card mark, and nothing
                 // since its allocation could have promoted it.
                 stats_.eliminated_young_provenance++;
                 eliminate = true;
+                cert_kind = BarrierCertKind::YoungGenBumpAlloc;
             } else if (obj && barriered.count({obj, val}) > 0) {
                 // Rule 3: an identical barrier already ran with no collection
                 // in between, so it left the card exactly as this one would.
                 stats_.eliminated_redundant++;
                 eliminate = true;
+                cert_kind = BarrierCertKind::RedundantSameEpoch;
             }
 
             if (eliminate) {
+                // Attach the proof certificate to associated store(s) in this GC epoch
+                for (Instruction* cur = inst->prev(); cur != nullptr; cur = cur->prev()) {
+                    if (may_trigger_gc(*cur)) break;
+                    if (cur->opcode() == Opcode::write_barrier &&
+                        cur->operand(0) == obj && cur->operand(1) == val) {
+                        break;
+                    }
+                    if ((cur->opcode() == Opcode::store && cur->operand(0) == obj && cur->operand(1) == val) ||
+                        (cur->opcode() == Opcode::store_indexed && cur->operand(0) == obj && cur->operand(2) == val)) {
+                        if (cur->barrier_cert() == BarrierCertKind::None) {
+                            cur->set_barrier_cert(cert_kind);
+                        }
+                    }
+                }
+                for (Instruction* cur = inst->next(); cur != nullptr; cur = cur->next()) {
+                    if (may_trigger_gc(*cur)) break;
+                    if ((cur->opcode() == Opcode::store && cur->operand(0) == obj && cur->operand(1) == val) ||
+                        (cur->opcode() == Opcode::store_indexed && cur->operand(0) == obj && cur->operand(2) == val)) {
+                        if (cur->barrier_cert() == BarrierCertKind::None) {
+                            cur->set_barrier_cert(cert_kind);
+                        }
+                    }
+                }
                 to_remove.push_back(inst);
                 changed = true;
             } else {

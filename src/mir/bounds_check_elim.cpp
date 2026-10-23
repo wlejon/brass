@@ -7,6 +7,7 @@
 #include <brass/mir/loop_unswitch.hpp>
 #include <brass/mir/uses.hpp>
 #include "loop_unswitch_internal.hpp"
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <unordered_map>
@@ -120,6 +121,7 @@ struct Fact {
     Opcode op;
     const Value* lhs;
     const Value* rhs;
+    const Value* witness = nullptr;
 };
 
 // What `fact` says about `check_op(x, y)`, if anything.
@@ -147,8 +149,10 @@ std::optional<bool> implied_by(const Fact& fact, Opcode check_op, const Value* x
 class ImpliedCheckFolder {
 public:
     ImpliedCheckFolder(Function& fn, Module& mod, const DominatorTree& dom, const LoopAnalysis& loops,
-                       const RangeAnalysis& ra, const AliasAnalysis& aa, const RangeAnalysisOptions& opts)
-        : fn_(fn), mod_(mod), dom_(dom), loops_(loops), ra_(ra), aa_(aa), opts_(opts) {}
+                       const RangeAnalysis& ra, const AliasAnalysis& aa, const RangeAnalysisOptions& opts,
+                       std::unordered_map<const Value*, GuardElimCert>& pending_certs)
+        : fn_(fn), mod_(mod), dom_(dom), loops_(loops), ra_(ra), aa_(aa), opts_(opts),
+          pending_certs_(pending_certs) {}
 
     bool run() {
         struct Marks {
@@ -316,7 +320,7 @@ private:
             Opcode op = on_true ? cmp->opcode() : invert_comparison_opcode(cmp->opcode());
             const Value* lhs = canonicalize(cmp->operand(0), bb);
             const Value* rhs = canonicalize(cmp->operand(1), bb);
-            facts_.push_back(Fact{op, lhs, rhs});
+            facts_.push_back(Fact{op, lhs, rhs, cond});
             return;
         }
         if (def->opcode() == Opcode::and_ && on_true && is_bool_expr(cond)) {
@@ -543,7 +547,16 @@ private:
             Builder b(mod_);
             b.set_function(&fn_);
             b.position_before(cur);
-            replace_all_uses(fn_, cur->result(), b.build_iconst_i32(*outcome ? 1 : 0));
+            Value* folded = b.build_iconst_i32(*outcome ? 1 : 0);
+            if (*outcome) {
+                GuardElimCert cert;
+                cert.reason = GuardElimCert::Reason::DominatedSameCond;
+                cert.check_op = cmp->opcode();
+                const Value* w = facts_.back().witness;
+                cert.witness_inst_or_val_id = w ? w->id() : 0;
+                pending_certs_[folded] = cert;
+            }
+            replace_all_uses(fn_, cur->result(), folded);
             if (opts_.stats) opts_.stats->checks_implied++;
             changed_ = true;
         }
@@ -556,6 +569,7 @@ private:
     const RangeAnalysis& ra_;
     const AliasAnalysis& aa_;
     const RangeAnalysisOptions& opts_;
+    std::unordered_map<const Value*, GuardElimCert>& pending_certs_;
     std::vector<Fact> facts_;
     std::vector<const Instruction*> dom_loads_;
     std::vector<DomExpr> dom_exprs_;
@@ -570,7 +584,8 @@ bool eliminate_range_decided_checks(
     Module& mod,
     const RangeAnalysis& ra,
     const RangeAnalysisOptions& opts,
-    bool& branches_folded
+    bool& branches_folded,
+    std::unordered_map<const Value*, GuardElimCert>& pending_certs
 ) {
     bool changed = false;
 
@@ -588,6 +603,27 @@ bool eliminate_range_decided_checks(
                     b.set_function(&fn);
                     b.position_before(cur);
                     Value* folded = b.build_iconst_i32(static_cast<int32_t>(r.min_val));
+                    if (r.min_val == 1) {
+                        GuardElimCert cert;
+                        cert.check_op = cur->opcode();
+                        const Value* lhs = cur->operand(0);
+                        cert.witness_inst_or_val_id = lhs ? lhs->id() : 0;
+                        int64_t mask_c = 0;
+                        if (lhs && lhs->is_instruction() && lhs->defining_instruction() &&
+                            lhs->defining_instruction()->opcode() == Opcode::and_ &&
+                            ((get_const_int(lhs->defining_instruction()->operand(1), mask_c) && mask_c >= 0) ||
+                             (get_const_int(lhs->defining_instruction()->operand(0), mask_c) && mask_c >= 0))) {
+                            cert.reason = GuardElimCert::Reason::NonNegativeMask;
+                            cert.bound_min = 0;
+                            cert.bound_max = mask_c;
+                        } else {
+                            ValueRange r_lhs = ra.get_range_at(lhs, bb);
+                            cert.reason = GuardElimCert::Reason::RangeProven;
+                            cert.bound_min = r_lhs.is_empty() ? 0 : r_lhs.min_val;
+                            cert.bound_max = r_lhs.is_empty() ? 0 : r_lhs.max_val;
+                        }
+                        pending_certs[folded] = cert;
+                    }
                     replace_all_uses(fn, cur->result(), folded);
 
                     Instruction* term = bb->terminator();
@@ -602,6 +638,18 @@ bool eliminate_range_decided_checks(
             } else if (cur->opcode() == Opcode::guard) {
                 ValueRange r_cond = ra.get_range_at(cur->operand(0), bb);
                 if (r_cond.is_constant() && r_cond.min_val != 0) {
+                    GuardElimCert cert;
+                    auto it = pending_certs.find(cur->operand(0));
+                    if (it != pending_certs.end()) {
+                        cert = it->second;
+                    } else {
+                        cert.reason = GuardElimCert::Reason::RangeProven;
+                        cert.bound_min = r_cond.min_val;
+                        cert.bound_max = r_cond.max_val;
+                    }
+                    cert.eliminated_resume_id = cur->resume_id();
+                    cert.block_id = bb->id();
+                    fn.add_guard_elim_cert(cert);
                     bb->remove_instruction(cur);
                     if (opts.stats) opts.stats->guards_eliminated++;
                     changed = true;
@@ -697,6 +745,35 @@ void remove_dead_pure_instructions(Function& fn) {
     }
 }
 
+void reconcile_guard_elim_certs(Function& fn) {
+    if (fn.guard_elim_certs().empty()) return;
+    std::unordered_map<uint32_t, const Value*> live_vals;
+    for (const BasicBlock* bb : fn.blocks()) {
+        if (!bb) continue;
+        for (size_t i = 0; i < bb->param_count(); ++i) {
+            if (bb->param(i)) live_vals[bb->param(i)->id()] = bb->param(i);
+        }
+        for (const Instruction* inst : *bb) {
+            if (inst && inst->result()) live_vals[inst->result()->id()] = inst->result();
+        }
+    }
+    auto& certs = fn.guard_elim_certs();
+    certs.erase(
+        std::remove_if(certs.begin(), certs.end(), [&](GuardElimCert& c) {
+            const BasicBlock* bb = fn.get_block_by_id(c.block_id);
+            if (!bb) return true; // Block itself was unreachable and removed
+            if (c.witness_inst_or_val_id != 0 && live_vals.find(c.witness_inst_or_val_id) == live_vals.end()) {
+                c.witness_inst_or_val_id = 0;
+                if (c.reason == GuardElimCert::Reason::DominatedSameCond ||
+                    c.reason == GuardElimCert::Reason::NonNegativeMask) {
+                    c.reason = GuardElimCert::Reason::ImpliedRelational;
+                }
+            }
+            return false;
+        }),
+        certs.end());
+}
+
 } // namespace
 
 bool run_bounds_check_elimination(Function& fn, Module& mod, const RangeAnalysisOptions& opts) {
@@ -704,6 +781,7 @@ bool run_bounds_check_elimination(Function& fn, Module& mod, const RangeAnalysis
     if (!opts.enable_bce && !opts.enable_implied_checks) return false;
 
     bool any_changed = false;
+    std::unordered_map<const Value*, GuardElimCert> pending_certs;
     constexpr size_t kMaxRounds = 4;
     for (size_t round = 0; round < kMaxRounds; ++round) {
         fn.rebuild_cfg_predecessors();
@@ -715,10 +793,10 @@ bool run_bounds_check_elimination(Function& fn, Module& mod, const RangeAnalysis
         bool round_changed = false;
         bool branches_folded = false;
         if (opts.enable_implied_checks) {
-            round_changed |= ImpliedCheckFolder(fn, mod, dom, loops, ra, aa, opts).run();
+            round_changed |= ImpliedCheckFolder(fn, mod, dom, loops, ra, aa, opts, pending_certs).run();
         }
         if (opts.enable_bce) {
-            round_changed |= eliminate_range_decided_checks(fn, mod, ra, opts, branches_folded);
+            round_changed |= eliminate_range_decided_checks(fn, mod, ra, opts, branches_folded, pending_certs);
         }
         if (round_changed) {
             round_changed |= fold_boolean_and_branches(fn, mod, opts, branches_folded);
@@ -755,6 +833,7 @@ bool run_bounds_check_elimination(Function& fn, Module& mod, const RangeAnalysis
         }
     }
 
+    reconcile_guard_elim_certs(fn);
     return any_changed;
 }
 

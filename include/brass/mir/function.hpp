@@ -153,6 +153,14 @@ public:
     bool allow_fp_reassociation() const noexcept { return allow_fp_reassociation_; }
     void set_allow_fp_reassociation(bool allow) noexcept { allow_fp_reassociation_ = allow; }
 
+    bool requires_barrier_certs() const noexcept { return requires_barrier_certs_; }
+    void set_requires_barrier_certs(bool req = true) noexcept { requires_barrier_certs_ = req; }
+
+    const std::vector<GuardElimCert>& guard_elim_certs() const noexcept { return guard_elim_certs_; }
+    std::vector<GuardElimCert>& guard_elim_certs() noexcept { return guard_elim_certs_; }
+    void add_guard_elim_cert(GuardElimCert cert) { guard_elim_certs_.push_back(cert); }
+    void clear_guard_elim_certs() noexcept { guard_elim_certs_.clear(); }
+
     // A lowered coroutine body's frame shape, recorded by coroutine lowering
     // (compute_coro_frame_layout): the slot count and which slots hold
     // references. Recorded rather than rederived because the passes that run
@@ -207,10 +215,12 @@ private:
     uint32_t next_guard_id_ = 0;
     bool guard_id_known_ = false;
     bool allow_fp_reassociation_ = false;
+    bool requires_barrier_certs_ = false;
 
     bool has_coro_frame_layout_ = false;
     uint32_t coro_frame_slot_count_ = 0;
     std::vector<uint64_t> coro_frame_ref_bits_;
+    std::vector<GuardElimCert> guard_elim_certs_;
 };
 
 } // namespace brass

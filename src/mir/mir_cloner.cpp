@@ -79,6 +79,7 @@ Function* clone_function(const Function& src, Module& dst_mod) {
             dst_inst->set_scale(src_inst->scale());
             dst_inst->set_offset(src_inst->offset());
             dst_inst->set_memory_type(src_inst->memory_type());
+            dst_inst->set_barrier_cert(src_inst->barrier_cert());
             dst_inst->set_loc(src_inst->loc());
             if (!src_inst->symbol().empty()) dst_inst->set_symbol(dst_fn->parent()->string_pool().intern(src_inst->symbol()));
             if (!src_inst->extra_symbol().empty()) dst_inst->set_extra_symbol(dst_fn->parent()->string_pool().intern(src_inst->extra_symbol()));
@@ -123,6 +124,8 @@ Function* clone_function(const Function& src, Module& dst_mod) {
     }
 
     dst_fn->set_allow_fp_reassociation(src.allow_fp_reassociation());
+    dst_fn->set_requires_barrier_certs(src.requires_barrier_certs());
+    dst_fn->guard_elim_certs() = src.guard_elim_certs();
     if (src.has_coro_frame_layout()) {
         dst_fn->set_coro_frame_layout(src.coro_frame_slot_count(), src.coro_frame_ref_bits());
     }

@@ -3,6 +3,7 @@
 #include <brass/core/span.hpp>
 #include <brass/mir/types.hpp>
 #include <brass/mir/opcodes.hpp>
+#include <brass/mir/proof_cert.hpp>
 #include <brass/debug/source_loc.hpp>
 #include <cstdint>
 #include <string_view>
@@ -201,6 +202,9 @@ public:
         loc_ = DebugLoc(file_id, line, col, inlined);
     }
 
+    BarrierCertKind barrier_cert() const noexcept { return barrier_cert_; }
+    void set_barrier_cert(BarrierCertKind cert) noexcept { barrier_cert_ = cert; }
+
 private:
     Opcode opcode_ = Opcode::unreachable;
     Type type_ = Type::void_type();
@@ -215,6 +219,7 @@ private:
     double imm_f64_ = 0.0;
     int32_t offset_ = 0;
     uint8_t scale_ = 1;
+    BarrierCertKind barrier_cert_ = BarrierCertKind::None;
     Type memory_type_ = Type::void_type();
 
     std::string_view symbol_;

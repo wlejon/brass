@@ -8,6 +8,7 @@
 
 #include <brass/mir/types.hpp>
 #include <brass/mir/opcodes.hpp>
+#include <brass/mir/proof_cert.hpp>
 #include <brass/mir/instruction.hpp>
 #include <brass/mir/block.hpp>
 #include <brass/mir/function.hpp>

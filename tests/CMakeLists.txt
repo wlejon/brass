@@ -254,12 +254,18 @@ add_executable(brass_unit_tests
     unit/test_mir_optimizer_hardening.cpp
     unit/test_frontend_gpu_hardening.cpp
     unit/test_smt_equiv.cpp
+    unit/test_verifier_certs.cpp
 )
 
 add_executable(test_smt_equiv unit/test_smt_equiv.cpp)
 target_compile_definitions(test_smt_equiv PRIVATE BRASS_STANDALONE_TEST)
 target_link_libraries(test_smt_equiv PRIVATE brass)
 target_include_directories(test_smt_equiv PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/harness" "${BRASS_INCLUDE_DIR}")
+
+add_executable(test_verifier_certs unit/test_verifier_certs.cpp)
+target_compile_definitions(test_verifier_certs PRIVATE BRASS_STANDALONE_TEST)
+target_link_libraries(test_verifier_certs PRIVATE brass)
+target_include_directories(test_verifier_certs PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/harness" "${BRASS_INCLUDE_DIR}")
 
 # The SPIR-V target's tests (built when the SPIR-V headers were found) run
 # every emitted module through spirv-val and disassemble with spirv-dis when
