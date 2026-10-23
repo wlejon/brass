@@ -393,7 +393,9 @@ bool try_concrete_search(const BVContext& ctx, BVNodeId bad_cond, std::vector<ui
         cands.push_back(b32);
     }
 
+    // Keep candidate count bounded so large contexts never go quadratic
     for (const auto& n : ctx.nodes()) {
+        if (cands.size() >= 64) break;
         if (n.op == BVOp::Const && n.width > 1) {
             cands.push_back(n.imm);
             cands.push_back(n.imm + 1ULL);
@@ -415,34 +417,38 @@ bool try_concrete_search(const BVContext& ctx, BVNodeId bad_cond, std::vector<ui
         if (check(model)) return true;
     }
 
-    // 2. Single-variable sweep against 0 and -1 backgrounds
+    // 2. Single-variable sweep against 0 and -1 backgrounds (bounded to first 8 vars)
+    const size_t sweep_vars = std::min<size_t>(nvars, 8);
+    const size_t sweep_cands = std::min<size_t>(cands.size(), 32);
     for (uint64_t bg : {0ULL, ~0ULL, 1ULL}) {
         for (size_t i = 0; i < nvars; ++i) model[i] = bg & width_mask(vars[i].width);
-        for (size_t i = 0; i < nvars; ++i) {
+        for (size_t i = 0; i < sweep_vars; ++i) {
             uint64_t orig = model[i];
-            for (uint64_t c : cands) {
-                model[i] = c & width_mask(vars[i].width);
+            for (size_t ci = 0; ci < sweep_cands; ++ci) {
+                model[i] = cands[ci] & width_mask(vars[i].width);
                 if (check(model)) return true;
             }
             model[i] = orig;
         }
     }
 
-    // 3. Pairwise sweep for first 4 variables over compact boundary set
-    const size_t pair_vars = std::min<size_t>(nvars, 4);
-    const size_t pair_cands = std::min<size_t>(cands.size(), 36);
-    std::fill(model.begin(), model.end(), 0ULL);
-    for (size_t i = 0; i < pair_vars; ++i) {
-        for (size_t j = i + 1; j < pair_vars; ++j) {
-            for (size_t ci = 0; ci < pair_cands; ++ci) {
-                model[i] = cands[ci] & width_mask(vars[i].width);
-                for (size_t cj = 0; cj < pair_cands; ++cj) {
-                    model[j] = cands[cj] & width_mask(vars[j].width);
-                    if (check(model)) return true;
+    // 3. Pairwise sweep for first 3 variables over compact boundary set (only on small contexts)
+    if (ctx.nodes().size() <= 128) {
+        const size_t pair_vars = std::min<size_t>(nvars, 3);
+        const size_t pair_cands = std::min<size_t>(cands.size(), 24);
+        std::fill(model.begin(), model.end(), 0ULL);
+        for (size_t i = 0; i < pair_vars; ++i) {
+            for (size_t j = i + 1; j < pair_vars; ++j) {
+                for (size_t ci = 0; ci < pair_cands; ++ci) {
+                    model[i] = cands[ci] & width_mask(vars[i].width);
+                    for (size_t cj = 0; cj < pair_cands; ++cj) {
+                        model[j] = cands[cj] & width_mask(vars[j].width);
+                        if (check(model)) return true;
+                    }
                 }
+                model[i] = 0;
+                model[j] = 0;
             }
-            model[i] = 0;
-            model[j] = 0;
         }
     }
 
@@ -454,7 +460,8 @@ bool try_concrete_search(const BVContext& ctx, BVNodeId bad_cond, std::vector<ui
         rng ^= rng >> 27;
         return rng * 0x2545F4914F6CDD1DULL;
     };
-    for (uint32_t iter = 0; iter < 512; ++iter) {
+    const uint32_t prng_iters = (ctx.nodes().size() <= 128) ? 256u : 48u;
+    for (uint32_t iter = 0; iter < prng_iters; ++iter) {
         for (size_t i = 0; i < nvars; ++i) {
             uint64_t r = next_rng();
             if ((r & 3ULL) != 0 && !cands.empty()) {

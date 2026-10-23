@@ -563,8 +563,11 @@ bool run_smt_guard_elimination(
 
         // Walk instructions in `bb`
         Instruction* cur = bb->head();
-        while (cur) {
+        uint32_t block_queries = 0;
+        constexpr uint32_t kMaxBlockQueries = 96;
+        while (cur && block_queries < kMaxBlockQueries) {
             Instruction* next = cur->next();
+            ++block_queries;
 
             auto build_path_cond = [&]() -> BVNodeId {
                 BVNodeId pc = ctx.make_const(1, 1);

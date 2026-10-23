@@ -337,7 +337,9 @@ bool run_mir_superopt(
         }
 
         Instruction* cur = bb->head();
-        while (cur) {
+        uint32_t block_queries = 0;
+        constexpr uint32_t kMaxBlockQueries = 96;
+        while (cur && block_queries < kMaxBlockQueries) {
             Instruction* next = cur->next();
 
             auto build_path_cond = [&]() -> BVNodeId {
@@ -345,6 +347,12 @@ bool run_mir_superopt(
                 for (BVNodeId a : assumptions) pc = ctx.make_binary(BVOp::And, pc, a, 1);
                 for (BVNodeId r : enc.range_assumptions) pc = ctx.make_binary(BVOp::And, pc, r, 1);
                 return pc;
+            };
+
+            auto check_equal = [&](BVNodeId path_cond, BVNodeId a, BVNodeId b) -> bool {
+                if (block_queries >= kMaxBlockQueries) return false;
+                if (a != b) ++block_queries;
+                return is_proven_equal(ctx, path_cond, a, b, opts.max_sat_conflicts, opts.stats);
             };
 
             if (cur->opcode() == Opcode::guard && cur->operand(0)) {
@@ -391,14 +399,14 @@ bool run_mir_superopt(
                 int64_t c0 = 0, c1 = 0;
                 bool is_c0 = get_const_imm(op0, c0);
                 bool is_c1 = get_const_imm(op1, c1);
-                if (!is_c0 && is_proven_equal(ctx, path_cond, orig_bv, b0, opts.max_sat_conflicts, opts.stats)) {
+                if (!is_c0 && check_equal(path_cond, orig_bv, b0)) {
                     replace_all_uses(fn, cur->result(), op0);
                     if (opts.stats) opts.stats->masks_elided++;
                     changed = true;
                     cur = next;
                     continue;
                 }
-                if (!is_c1 && is_proven_equal(ctx, path_cond, orig_bv, b1, opts.max_sat_conflicts, opts.stats)) {
+                if (!is_c1 && check_equal(path_cond, orig_bv, b1)) {
                     replace_all_uses(fn, cur->result(), op1);
                     if (opts.stats) opts.stats->masks_elided++;
                     changed = true;
@@ -418,7 +426,7 @@ bool run_mir_superopt(
                         Value* src = inner_inst->operand(0);
                         if (src && src->type() == res_t) {
                             BVNodeId src_bv = enc.encode(src);
-                            if (is_proven_equal(ctx, path_cond, orig_bv, src_bv, opts.max_sat_conflicts, opts.stats)) {
+                            if (check_equal(path_cond, orig_bv, src_bv)) {
                                 replace_all_uses(fn, cur->result(), src);
                                 if (opts.stats) opts.stats->extensions_elided++;
                                 changed = true;
@@ -435,8 +443,7 @@ bool run_mir_superopt(
             // ---------------------------------------------------------------
             if (ctx.nodes()[orig_bv].op == BVOp::Const) {
                 uint64_t c_imm = ctx.nodes()[orig_bv].imm;
-                if (is_proven_equal(ctx, path_cond, orig_bv, ctx.make_const(c_imm, w),
-                                    opts.max_sat_conflicts, opts.stats)) {
+                if (check_equal(path_cond, orig_bv, ctx.make_const(c_imm, w))) {
                     Builder b(mod);
                     b.set_function(&fn);
                     b.position_before(cur);
@@ -459,7 +466,7 @@ bool run_mir_superopt(
             for (Value* cand_v : window_vals) {
                 if (!cand_v || cand_v == cur->result() || cand_v->type() != res_t) continue;
                 BVNodeId cand_bv = enc.encode(cand_v);
-                if (is_proven_equal(ctx, path_cond, orig_bv, cand_bv, opts.max_sat_conflicts, opts.stats)) {
+                if (check_equal(path_cond, orig_bv, cand_bv)) {
                     replace_all_uses(fn, cur->result(), cand_v);
                     if (opts.stats) opts.stats->dags_synthesized++;
                     changed = true;
@@ -485,8 +492,7 @@ bool run_mir_superopt(
                         BVNodeId lhs_bv = enc.encode(lhs);
                         if (op == Opcode::sdiv || op == Opcode::udiv) {
                             BVNodeId cand_bv = ctx.make_binary(BVOp::LShr, lhs_bv, ctx.make_const(sh, w), w);
-                            if (is_proven_equal(ctx, path_cond, orig_bv, cand_bv,
-                                                opts.max_sat_conflicts, opts.stats)) {
+                            if (check_equal(path_cond, orig_bv, cand_bv)) {
                                 Builder b(mod);
                                 b.set_function(&fn);
                                 b.position_before(cur);
@@ -502,8 +508,7 @@ bool run_mir_superopt(
                         } else {
                             uint64_t mask_bits = udiv_imm - 1;
                             BVNodeId cand_bv = ctx.make_binary(BVOp::And, lhs_bv, ctx.make_const(mask_bits, w), w);
-                            if (is_proven_equal(ctx, path_cond, orig_bv, cand_bv,
-                                                opts.max_sat_conflicts, opts.stats)) {
+                            if (check_equal(path_cond, orig_bv, cand_bv)) {
                                 Builder b(mod);
                                 b.set_function(&fn);
                                 b.position_before(cur);
@@ -544,7 +549,7 @@ bool run_mir_superopt(
                     BVOp bop = (op == Opcode::and_) ? BVOp::And : (op == Opcode::or_) ? BVOp::Or
                              : (op == Opcode::xor_) ? BVOp::Xor : BVOp::Add;
                     BVNodeId cand_bv = ctx.make_binary(bop, x_bv, ctx.make_const(comb, w), w);
-                    if (is_proven_equal(ctx, path_cond, orig_bv, cand_bv, opts.max_sat_conflicts, opts.stats)) {
+                    if (check_equal(path_cond, orig_bv, cand_bv)) {
                         Builder b(mod);
                         b.set_function(&fn);
                         b.position_before(cur);
@@ -592,7 +597,7 @@ bool run_mir_superopt(
                             BVNodeId r1_bv = enc.encode(rem1);
                             BVNodeId comb_bv = ctx.make_binary(outer_bop, r0_bv, r1_bv, w);
                             BVNodeId cand_bv = ctx.make_binary(inner_bop, sh_bv, comb_bv, w);
-                            if (is_proven_equal(ctx, path_cond, orig_bv, cand_bv, opts.max_sat_conflicts, opts.stats)) {
+                            if (check_equal(path_cond, orig_bv, cand_bv)) {
                                 Builder b(mod);
                                 b.set_function(&fn);
                                 b.position_before(cur);
@@ -624,7 +629,7 @@ bool run_mir_superopt(
                     BVOp inner_bop = (op == Opcode::and_) ? BVOp::Or : BVOp::And;
                     BVNodeId inner_bv = ctx.make_binary(inner_bop, enc.encode(x), enc.encode(y), w);
                     BVNodeId cand_bv = ctx.make_unary(BVOp::Not, inner_bv, w);
-                    if (is_proven_equal(ctx, path_cond, orig_bv, cand_bv, opts.max_sat_conflicts, opts.stats)) {
+                    if (check_equal(path_cond, orig_bv, cand_bv)) {
                         Builder b(mod);
                         b.set_function(&fn);
                         b.position_before(cur);
