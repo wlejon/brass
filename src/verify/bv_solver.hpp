@@ -206,4 +206,16 @@ SolveOutcome solve_nonzero(
     uint32_t max_sat_conflicts = 10000
 );
 
+struct MagicConstU32 {
+    uint32_t multiplier = 0;
+    uint32_t pre_shift = 0;
+    uint32_t post_shift = 0;
+    bool needs_add = false;
+};
+
+MagicConstU32 compute_magic_const_u32(uint32_t d) noexcept;
+BVNodeId build_magic_udiv_u32(BVContext& ctx, BVNodeId a, const MagicConstU32& mag);
+BVNodeId expand_const_div_rem_bv(BVContext& ctx, BVOp op, BVNodeId a, BVNodeId b, uint32_t w);
+BVNodeId try_eval_gpu_call_bv(BVContext& ctx, std::string_view sym, const std::vector<BVNodeId>& args);
+
 } // namespace brass::verify

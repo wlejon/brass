@@ -12,9 +12,7 @@
 #include <unordered_set>
 
 namespace brass::verify {
-
 namespace {
-
 uint32_t type_bv_width(Type t) noexcept {
     switch (t.kind()) {
         case TypeKind::I8: return 8;
@@ -57,6 +55,8 @@ struct InitMemEnv {
 
     BVNodeId eval_uninterpreted_call(BVContext& ctx, std::string_view sym,
                                      const std::vector<BVNodeId>& args, Type ret_type) {
+        BVNodeId gpu_v = try_eval_gpu_call_bv(ctx, sym, args);
+        if (gpu_v != UINT32_MAX) return gpu_v;
         uint32_t w = type_bv_width(ret_type);
         if (w == 0) return 0;
         for (const auto& c : calls) {
@@ -64,16 +64,15 @@ struct InitMemEnv {
         }
         BVNodeId v = ctx.make_var("call_" + std::string(sym) + "_" + std::to_string(calls.size()),
                                   w, ret_type.is_float());
+        if (w == 32 && args.empty() && sym.substr(0, 4) == "ptx_") {
+            v = ctx.make_binary(BVOp::And, v, ctx.make_const(0x3FFFFFFu, 32), 32);
+        }
         for (const auto& c : calls) {
             if (c.sym == sym && c.args.size() == args.size() && ctx.width(c.ret_val) == w) {
                 BVNodeId all_eq = ctx.make_const(1, 1);
                 for (size_t i = 0; i < args.size(); ++i) {
-                    if (ctx.width(args[i]) != ctx.width(c.args[i])) {
-                        all_eq = ctx.make_const(0, 1);
-                        break;
-                    }
-                    all_eq = ctx.make_binary(BVOp::And, all_eq,
-                                             ctx.make_binary(BVOp::Eq, args[i], c.args[i], 1), 1);
+                    if (ctx.width(args[i]) != ctx.width(c.args[i])) { all_eq = ctx.make_const(0, 1); break; }
+                    all_eq = ctx.make_binary(BVOp::And, all_eq, ctx.make_binary(BVOp::Eq, args[i], c.args[i], 1), 1);
                 }
                 v = ctx.make_ite(all_eq, c.ret_val, v);
             }

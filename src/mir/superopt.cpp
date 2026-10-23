@@ -695,6 +695,24 @@ bool run_mir_superopt(
     if (changed) {
         remove_dead_pure_instructions(fn);
     }
+    bool is_gpu_fn = opts.enable_gpu_superopt;
+    if (!is_gpu_fn) {
+        for (const BasicBlock* bb : fn.blocks()) {
+            if (!bb) continue;
+            for (const Instruction* inst : *bb) {
+                if (inst && inst->opcode() == Opcode::call && inst->symbol().substr(0, 4) == "ptx_") {
+                    is_gpu_fn = true;
+                    break;
+                }
+            }
+            if (is_gpu_fn) break;
+        }
+    }
+    if (is_gpu_fn) {
+        SuperoptOptions gpu_opts = opts;
+        gpu_opts.enable_gpu_superopt = true;
+        changed |= run_gpu_mir_superopt(fn, mod, gpu_opts);
+    }
     return changed;
 }
 

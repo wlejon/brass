@@ -87,6 +87,21 @@ BVInterval BVContext::compute_interval(const BVNode& n) const noexcept {
         return iv;
     }
 
+    if (n.op == BVOp::Extract) {
+        const auto& a = intervals_[n.a];
+        uint32_t lo = n.extra;
+        iv.known_zeros = ((a.known_zeros >> lo) & m) | ~m;
+        iv.known_ones = (a.known_ones >> lo) & m;
+        iv.umin = iv.known_ones;
+        iv.umax = m & ~iv.known_zeros;
+        uint64_t sign_bit = (w >= 64) ? (1ULL << 63) : (1ULL << (w - 1));
+        if (iv.known_zeros & sign_bit) {
+            iv.smin = static_cast<int64_t>(iv.umin);
+            iv.smax = static_cast<int64_t>(iv.umax);
+        }
+        return iv;
+    }
+
     if (n.op == BVOp::ZExt) {
         const auto& a = intervals_[n.a];
         uint32_t aw = nodes_[n.a].width;
@@ -109,6 +124,8 @@ BVInterval BVContext::compute_interval(const BVNode& n) const noexcept {
         if (a.smin >= 0) {
             iv.umin = static_cast<uint64_t>(a.smin);
             iv.umax = static_cast<uint64_t>(a.smax);
+            uint32_t bits = (iv.umax == 0) ? 0u : static_cast<uint32_t>(64 - std::countl_zero(iv.umax));
+            iv.known_zeros = a.known_zeros | ~width_mask(bits);
         }
         return iv;
     }
@@ -179,32 +196,40 @@ BVInterval BVContext::compute_interval(const BVNode& n) const noexcept {
         return iv;
     }
 
-    if (n.op == BVOp::Add && w <= 32) {
+    if (n.op == BVOp::Add && w <= 64) {
         const auto& a = intervals_[n.a];
         const auto& b = intervals_[n.b];
-        if (a.umin + b.umin <= m && a.umax + b.umax <= m) {
+        if (static_cast<__uint128_t>(a.umin) + b.umin <= m &&
+            static_cast<__uint128_t>(a.umax) + b.umax <= m) {
             iv.umin = a.umin + b.umin;
             iv.umax = a.umax + b.umax;
+            uint32_t bits = (iv.umax == 0) ? 0u : static_cast<uint32_t>(64 - std::countl_zero(iv.umax));
+            iv.known_zeros = ~width_mask(bits);
         }
-        int64_t min_s = -(1LL << (w - 1));
-        int64_t max_s = (1LL << (w - 1)) - 1LL;
-        if (a.smin + b.smin >= min_s && a.smax + b.smax <= max_s) {
+        int64_t min_s = (w >= 64) ? INT64_MIN : -(1LL << (w - 1));
+        int64_t max_s = (w >= 64) ? INT64_MAX : ((1LL << (w - 1)) - 1LL);
+        __extension__ __int128 smin_sum = static_cast<__int128>(a.smin) + b.smin;
+        __extension__ __int128 smax_sum = static_cast<__int128>(a.smax) + b.smax;
+        if (smin_sum >= min_s && smax_sum <= max_s) {
             iv.smin = a.smin + b.smin;
             iv.smax = a.smax + b.smax;
         }
         return iv;
     }
 
-    if (n.op == BVOp::Mul && w <= 32) {
+    if (n.op == BVOp::Mul && w <= 64) {
         const auto& a = intervals_[n.a];
         const auto& b = intervals_[n.b];
         if (a.smin >= 0 && b.smin >= 0) {
-            int64_t max_s = (1LL << (w - 1)) - 1LL;
-            if (a.smax == 0 || b.smax == 0 || a.smax <= max_s / b.smax) {
+            int64_t max_s = (w >= 64) ? INT64_MAX : ((1LL << (w - 1)) - 1LL);
+            __extension__ __int128 smax_prod = static_cast<__int128>(a.smax) * b.smax;
+            if (smax_prod <= max_s) {
                 iv.smin = a.smin * b.smin;
                 iv.smax = a.smax * b.smax;
                 iv.umin = static_cast<uint64_t>(iv.smin);
                 iv.umax = static_cast<uint64_t>(iv.smax);
+                uint32_t bits = (iv.umax == 0) ? 0u : static_cast<uint32_t>(64 - std::countl_zero(iv.umax));
+                iv.known_zeros = ~width_mask(bits);
             }
         }
         return iv;
@@ -247,11 +272,18 @@ BVNodeId BVContext::make_var(std::string name, uint32_t width, bool is_float) {
 BVNodeId BVContext::make_extract(BVNodeId a, uint32_t hi, uint32_t lo) {
     const BVNode na = nodes_[a];
     uint32_t w = hi - lo + 1;
+    uint64_t w_mask = width_mask(w);
     if (lo == 0 && hi + 1 == na.width) {
         return a;
     }
     if (na.op == BVOp::Const) {
-        return make_const((na.imm >> lo) & width_mask(w), w);
+        return make_const((na.imm >> lo) & w_mask, w);
+    }
+    if (((intervals_[a].known_zeros >> lo) & w_mask) == w_mask) {
+        return make_const(0, w);
+    }
+    if (na.op == BVOp::Ite) {
+        return make_ite(na.a, make_extract(na.b, hi, lo), make_extract(na.c, hi, lo));
     }
     if (na.op == BVOp::Extract) {
         return make_extract(na.a, na.extra + hi, na.extra + lo);
@@ -274,6 +306,9 @@ BVNodeId BVContext::make_extract(BVNodeId a, uint32_t hi, uint32_t lo) {
     if (lo == 0 && (na.op == BVOp::And || na.op == BVOp::Or || na.op == BVOp::Xor ||
                     na.op == BVOp::Add || na.op == BVOp::Sub || na.op == BVOp::Mul)) {
         return make_binary(na.op, make_extract(na.a, hi, 0), make_extract(na.b, hi, 0), w);
+    }
+    if (lo == 0 && na.op == BVOp::Shl && nodes_[na.b].op == BVOp::Const && nodes_[na.b].imm < w) {
+        return make_binary(BVOp::Shl, make_extract(na.a, hi, 0), make_const(nodes_[na.b].imm, w), w);
     }
     BVNode n;
     n.op = BVOp::Extract;
@@ -558,43 +593,12 @@ BVNodeId BVContext::make_binary(BVOp op, BVNodeId a, BVNodeId b, uint32_t res_wi
 
         case BVOp::UDiv:
         case BVOp::SDiv:
-            if (cb.op == BVOp::Const && cb.imm == 1) return a;
-            if (a == b && intervals_[b].umin > 0) return make_const(1, w);
-            if (cb.op == BVOp::Const && std::has_single_bit(cb.imm)) {
-                uint32_t sh = static_cast<uint32_t>(std::countr_zero(cb.imm));
-                if (op == BVOp::UDiv) {
-                    return make_binary(BVOp::LShr, a, make_const(sh, w), w);
-                }
-                if (sh > 0 && sh + 1 < w) {
-                    BVNodeId sh_c = make_const(sh, w);
-                    BVNodeId non_neg = make_binary(BVOp::Sge, a, make_const(0, w), 1);
-                    BVNodeId pos_q = make_binary(BVOp::LShr, a, sh_c, w);
-                    BVNodeId neg_a = make_unary(BVOp::Neg, a, w);
-                    BVNodeId neg_q = make_unary(BVOp::Neg, make_binary(BVOp::LShr, neg_a, sh_c, w), w);
-                    return make_ite(non_neg, pos_q, neg_q);
-                }
-            }
-            break;
-
         case BVOp::URem:
-        case BVOp::SRem:
-            if (cb.op == BVOp::Const && cb.imm == 1) return make_const(0, w);
-            if (a == b && intervals_[b].umin > 0) return make_const(0, w);
-            if (cb.op == BVOp::Const && std::has_single_bit(cb.imm)) {
-                BVNodeId mask_c = make_const(cb.imm - 1, w);
-                if (op == BVOp::URem) {
-                    return make_binary(BVOp::And, a, mask_c, w);
-                }
-                uint32_t sh = static_cast<uint32_t>(std::countr_zero(cb.imm));
-                if (sh > 0 && sh + 1 < w) {
-                    BVNodeId non_neg = make_binary(BVOp::Sge, a, make_const(0, w), 1);
-                    BVNodeId pos_r = make_binary(BVOp::And, a, mask_c, w);
-                    BVNodeId neg_a = make_unary(BVOp::Neg, a, w);
-                    BVNodeId neg_r = make_unary(BVOp::Neg, make_binary(BVOp::And, neg_a, mask_c, w), w);
-                    return make_ite(non_neg, pos_r, neg_r);
-                }
-            }
+        case BVOp::SRem: {
+            BVNodeId exp = expand_const_div_rem_bv(*this, op, a, b, w);
+            if (exp != UINT32_MAX) return exp;
             break;
+        }
 
         case BVOp::Eq:
         case BVOp::Ne: {
@@ -687,6 +691,13 @@ BVNodeId BVContext::make_ite(BVNodeId cond, BVNodeId t_val, BVNodeId f_val) {
     if (nc.op == BVOp::Not) {
         return make_ite(nc.a, f_val, t_val);
     }
+    if (nodes_[t_val].op == BVOp::Ite && nodes_[t_val].a == cond) {
+        t_val = nodes_[t_val].b;
+    }
+    if (nodes_[f_val].op == BVOp::Ite && nodes_[f_val].a == cond) {
+        f_val = nodes_[f_val].c;
+    }
+    if (t_val == f_val) return t_val;
     uint32_t w = nodes_[t_val].width;
     if (w == 1) {
         const BVNode nt = nodes_[t_val];

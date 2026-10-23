@@ -146,3 +146,6 @@ using verify::verify_x64_lir_block_equivalence;
 using verify::verify_x64_lir_function_equivalence;
 using verify::verify_x64_peephole;
 } // namespace brass
+
+#include <brass/verify/gpu_equiv.hpp>
+#include <brass/verify/gpu_kernel_prover.hpp>

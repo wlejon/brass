@@ -13,6 +13,8 @@ struct SuperoptStats {
     uint32_t dags_synthesized = 0;
     uint32_t constants_synthesized = 0;
     uint32_t lir_windows_optimized = 0;
+    uint32_t magic_divs_reduced = 0;
+    uint32_t indices_narrowed = 0;
     uint32_t solver_queries = 0;
 };
 
@@ -21,6 +23,7 @@ struct SuperoptOptions {
     uint32_t max_sat_conflicts = 2000;
     uint64_t lir_live_out_gpr_mask = 0xFFFFULL;
     bool lir_check_flags = false;
+    bool enable_gpu_superopt = false;
     SuperoptStats* stats = nullptr;
 };
 
@@ -45,3 +48,5 @@ bool run_x64_lir_superopt(
     const SuperoptOptions& opts = {});
 
 } // namespace brass
+
+#include <brass/mir/gpu_superopt.hpp>

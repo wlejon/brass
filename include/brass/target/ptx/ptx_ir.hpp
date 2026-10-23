@@ -358,4 +358,7 @@ private:
     uint32_t next_label_id_ = 0;
 };
 
+using Kernel = Function;
+using Module = Function;
+
 } // namespace brass::ptx
