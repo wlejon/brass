@@ -96,16 +96,101 @@ private:
     }
 
     void check_globals() {
-        for (size_t i = 0; i < m_.globals.size(); ++i) check_operands(m_.globals[i], "", 0, i);
-        for (const Inst& a : m_.annotations) check_operands(a, "", 0, 0);
+        std::unordered_set<Id> has_desc_set;
+        std::unordered_set<Id> has_binding;
+        std::unordered_set<Id> has_io_decor;
+        std::unordered_set<Id> struct_has_io_decor;
+        for (const Inst& a : m_.annotations) {
+            check_operands(a, "", 0, 0);
+            if (a.op == spv::OpDecorate && a.operands.size() >= 2) {
+                Id target = a.operands[0].value;
+                auto dec = static_cast<spv::Decoration>(a.operands[1].value);
+                if (dec == spv::DecorationDescriptorSet) has_desc_set.insert(target);
+                if (dec == spv::DecorationBinding) has_binding.insert(target);
+                if (dec == spv::DecorationBuiltIn || dec == spv::DecorationLocation) has_io_decor.insert(target);
+                if (dec == spv::DecorationBlock) struct_has_io_decor.insert(target);
+            } else if (a.op == spv::OpMemberDecorate && a.operands.size() >= 3) {
+                auto dec = static_cast<spv::Decoration>(a.operands[2].value);
+                if (dec == spv::DecorationBuiltIn || dec == spv::DecorationLocation) {
+                    struct_has_io_decor.insert(a.operands[0].value);
+                }
+            }
+        }
+        for (size_t i = 0; i < m_.globals.size(); ++i) {
+            const Inst& g = m_.globals[i];
+            check_operands(g, "", 0, i);
+            if (g.op == spv::OpTypeSampledImage && !g.operands.empty()) {
+                const TypeInfo* img = m_.type_info(g.operands[0].value);
+                if (!img || img->op != spv::OpTypeImage || img->sampled != 1) {
+                    report("", 0, i, "OpTypeSampledImage base type must be a sampled OpTypeImage (Sampled=1)", &g);
+                }
+            } else if (g.op == spv::OpVariable && !g.operands.empty()) {
+                auto sc = static_cast<spv::StorageClass>(g.operands[0].value);
+                if (sc == spv::StorageClassUniformConstant) {
+                    if (!has_desc_set.count(g.result) || !has_binding.count(g.result)) {
+                        report("", 0, i, "UniformConstant variable %" + std::to_string(g.result) +
+                                             " is missing DescriptorSet or Binding decoration", &g);
+                    }
+                } else if (sc == spv::StorageClassInput || sc == spv::StorageClassOutput) {
+                    const TypeInfo* pt = m_.type_info(g.type);
+                    Id pointee = pt ? pt->elem : 0;
+                    if (!has_io_decor.count(g.result) && !struct_has_io_decor.count(pointee)) {
+                        report("", 0, i, "stage Input/Output variable %" + std::to_string(g.result) +
+                                             " is missing BuiltIn or Location decoration", &g);
+                    }
+                }
+            }
+        }
         for (const Inst& e : m_.execution_modes) check_operands(e, "", 0, 0);
     }
 
-    const TypeInfo* pointer_type_of(Id value) const {
+    const TypeInfo* type_of(Id value) const {
         auto it = value_type_.find(value);
-        if (it == value_type_.end()) return nullptr;
-        const TypeInfo* ti = m_.type_info(it->second);
+        return it == value_type_.end() ? nullptr : m_.type_info(it->second);
+    }
+
+    const TypeInfo* pointer_type_of(Id value) const {
+        const TypeInfo* ti = type_of(value);
         return (ti && ti->op == spv::OpTypePointer) ? ti : nullptr;
+    }
+
+    void check_image_op(const Inst& inst, const std::string& fn, Id block, size_t index) {
+        if (inst.op == spv::OpImageRead) {
+            if (inst.operands.size() < 2) {
+                report(fn, block, index, "OpImageRead requires image and coordinate operands", &inst);
+                return;
+            }
+            const TypeInfo* img = type_of(inst.operands[0].value);
+            if (!img || img->op != spv::OpTypeImage || img->sampled != 2) {
+                report(fn, block, index, "OpImageRead image operand is not a storage OpTypeImage (Sampled=2)", &inst);
+            }
+            const TypeInfo* rt = m_.type_info(inst.type);
+            if (!rt || rt->op != spv::OpTypeVector || rt->width != 4) {
+                report(fn, block, index, "OpImageRead result type must be a 4-component vector", &inst);
+            }
+        } else if (inst.op == spv::OpImageWrite) {
+            if (inst.operands.size() < 3) {
+                report(fn, block, index, "OpImageWrite requires image, coordinate and texel operands", &inst);
+                return;
+            }
+            const TypeInfo* img = type_of(inst.operands[0].value);
+            if (!img || img->op != spv::OpTypeImage || img->sampled != 2) {
+                report(fn, block, index, "OpImageWrite image operand is not a storage OpTypeImage (Sampled=2)", &inst);
+            }
+        } else if (inst.op == spv::OpImageSampleExplicitLod) {
+            if (inst.operands.size() < 4) {
+                report(fn, block, index, "OpImageSampleExplicitLod requires sampled image, coordinate, mask and LOD", &inst);
+                return;
+            }
+            const TypeInfo* simg = type_of(inst.operands[0].value);
+            if (!simg || simg->op != spv::OpTypeSampledImage) {
+                report(fn, block, index, "OpImageSampleExplicitLod operand 0 is not an OpTypeSampledImage", &inst);
+            }
+            const TypeInfo* rt = m_.type_info(inst.type);
+            if (!rt || rt->op != spv::OpTypeVector || rt->width != 4) {
+                report(fn, block, index, "OpImageSampleExplicitLod result type must be a 4-component vector", &inst);
+            }
+        }
     }
 
     // OpLoad: pointer at operand 0, memory operands from 1; OpStore: pointer
@@ -164,6 +249,10 @@ private:
                     phis_done = true;
                 }
                 if (inst.op == spv::OpLoad || inst.op == spv::OpStore) check_memory_access(inst, f.name, b.label, i);
+                if (inst.op == spv::OpImageRead || inst.op == spv::OpImageWrite ||
+                    inst.op == spv::OpImageSampleExplicitLod) {
+                    check_image_op(inst, f.name, b.label, i);
+                }
                 if (inst.op == spv::OpSelectionMerge || inst.op == spv::OpLoopMerge) {
                     check_merge(f, b, i, labels, merge_of);
                 }
@@ -250,6 +339,20 @@ private:
             }
             for (Id v : missing) {
                 report(fit->name, 0, 0, "global variable %" + std::to_string(v) + " is used but not in the entry point interface");
+            }
+            bool has_local_size = false;
+            bool has_origin = false;
+            for (const Inst& em : m_.execution_modes) {
+                if (em.operands.size() < 2 || em.operands[0].value != ep.function) continue;
+                auto mode = static_cast<spv::ExecutionMode>(em.operands[1].value);
+                if (mode == spv::ExecutionModeLocalSize || mode == spv::ExecutionModeLocalSizeId) has_local_size = true;
+                if (mode == spv::ExecutionModeOriginUpperLeft || mode == spv::ExecutionModeOriginLowerLeft) has_origin = true;
+            }
+            if ((ep.model == spv::ExecutionModelVertex || ep.model == spv::ExecutionModelFragment) && has_local_size) {
+                report(fit->name, 0, 0, "graphics entry point '" + ep.name + "' must not declare LocalSize execution mode");
+            }
+            if (ep.model == spv::ExecutionModelFragment && !has_origin) {
+                report(fit->name, 0, 0, "Fragment entry point '" + ep.name + "' requires OriginUpperLeft (or OriginLowerLeft) execution mode");
             }
         }
     }

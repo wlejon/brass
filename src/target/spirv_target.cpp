@@ -48,14 +48,23 @@ SpirvKernel SpirvTarget::compile(const Function& fn, const SpirvOptions& opts) {
 
     SpirvKernel k;
     k.entry = std::string(fn.name());
+    k.stage = opts.stage;
     k.words = spirv::write(m);
     k.params = std::move(layout.params);
+    k.descriptors = std::move(layout.descriptors);
     k.push_constant_bytes = layout.push_constant_bytes;
     k.shared_bytes = layout.shared_bytes;
-    k.local_size[0] = opts.local_size_x;
-    k.local_size[1] = opts.local_size_y;
-    k.local_size[2] = opts.local_size_z;
-    k.local_size_spec_constants = opts.local_size_spec_constants;
+    if (opts.stage == SpirvStage::Compute) {
+        k.local_size[0] = opts.local_size_x;
+        k.local_size[1] = opts.local_size_y;
+        k.local_size[2] = opts.local_size_z;
+        k.local_size_spec_constants = opts.local_size_spec_constants;
+    } else {
+        k.local_size[0] = 0;
+        k.local_size[1] = 0;
+        k.local_size[2] = 0;
+        k.local_size_spec_constants = false;
+    }
     for (spv::Capability c : m.capabilities) k.capabilities.emplace_back(spv::CapabilityToString(c));
     k.extensions = m.extensions;
     return k;

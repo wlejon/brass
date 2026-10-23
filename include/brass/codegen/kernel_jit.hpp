@@ -353,6 +353,13 @@ public:
     Value* fabs(Value* x);          // f32 or f64
     Value* fmin(Value* a, Value* b);
     Value* fmax(Value* a, Value* b);
+    Value* sin_approx(Value* x);
+    Value* cos_approx(Value* x);
+    Value* tanh_approx(Value* x);
+    Value* clamp_f32(Value* x, Value* lo, Value* hi);
+    Value* mix_f32(Value* x, Value* y, Value* a);
+    Value* smoothstep_f32(Value* edge0, Value* edge1, Value* x);
+    Value* step_f32(Value* edge, Value* x);
 
     // Conversions
     Value* f16_to_f32(Value* bits_i32);
@@ -373,6 +380,56 @@ public:
     // Atomics (global memory; return the previous value)
     Value* atom_add_f32(Value* ptr, Value* val);
     Value* atom_add_i32(Value* ptr, Value* val);
+
+    // ------------------------------------------------------------------
+    // SPIR-V descriptor-bound 2D/3D storage images & sampled textures
+    // ------------------------------------------------------------------
+    Value* image2d_load_r32f(uint32_t set, uint32_t binding, Value* ix, Value* iy);
+    Instruction* image2d_store_r32f(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* val);
+    Value* image3d_load_r32f(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* iz);
+    Instruction* image3d_store_r32f(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* iz, Value* val);
+
+    Value* image2d_load_vec4(uint32_t set, uint32_t binding, Value* ix, Value* iy);
+    Instruction* image2d_store_vec4(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* rgba);
+    Value* image3d_load_vec4(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* iz);
+    Instruction* image3d_store_vec4(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* iz, Value* rgba);
+
+    Value* sampler2d_lod_r32f(uint32_t set, uint32_t binding, Value* u, Value* v, Value* lod = nullptr);
+    Value* sampler3d_lod_r32f(uint32_t set, uint32_t binding, Value* u, Value* v, Value* w, Value* lod = nullptr);
+    Value* sampler2d_lod_vec4(uint32_t set, uint32_t binding, Value* u, Value* v, Value* lod = nullptr);
+    Value* sampler3d_lod_vec4(uint32_t set, uint32_t binding, Value* u, Value* v, Value* w, Value* lod = nullptr);
+
+    Value* image2d_load(uint32_t set, uint32_t binding, Value* ix, Value* iy) { return image2d_load_r32f(set, binding, ix, iy); }
+    Instruction* image2d_store(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* val) { return image2d_store_r32f(set, binding, ix, iy, val); }
+    Value* image3d_load(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* iz) { return image3d_load_r32f(set, binding, ix, iy, iz); }
+    Instruction* image3d_store(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* iz, Value* val) { return image3d_store_r32f(set, binding, ix, iy, iz, val); }
+    Value* sampler2d_lod(uint32_t set, uint32_t binding, Value* u, Value* v, Value* lod = nullptr) { return sampler2d_lod_r32f(set, binding, u, v, lod); }
+    Value* sampler3d_lod(uint32_t set, uint32_t binding, Value* u, Value* v, Value* w, Value* lod = nullptr) { return sampler3d_lod_r32f(set, binding, u, v, w, lod); }
+
+    // ------------------------------------------------------------------
+    // SPIR-V graphics rendering stages (Vertex & Fragment)
+    // ------------------------------------------------------------------
+    Value* vertex_index();
+    Value* instance_index();
+    Value* frag_coord_x();
+    Value* frag_coord_y();
+    Value* frag_coord_z();
+    Value* frag_coord_w();
+    Value* frag_coord_vec4();
+
+    Value* stage_input_f32(uint32_t location, uint32_t component = 0);
+    Value* stage_input_vec4(uint32_t location);
+    Instruction* stage_output_f32(uint32_t location, uint32_t component, Value* val);
+    Instruction* stage_output_vec4(uint32_t location, Value* x, Value* y, Value* z, Value* w);
+    Instruction* stage_output_vec4(uint32_t location, Value* xyzw);
+    Instruction* set_vertex_position(Value* x, Value* y, Value* z, Value* w);
+    Instruction* set_vertex_position_vec4(Value* xyzw);
+    Instruction* set_frag_color(uint32_t location, Value* r, Value* g, Value* b, Value* a) {
+        return stage_output_vec4(location, r, g, b, a);
+    }
+    Instruction* set_frag_color_vec4(uint32_t location, Value* rgba) {
+        return stage_output_vec4(location, rgba);
+    }
 
     // Structured control flow. All leave the builder positioned in the
     // join/exit block they create. `body` receives the induction variable

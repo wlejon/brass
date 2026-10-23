@@ -37,6 +37,7 @@ struct StructuredCfg;
 
 struct KernelLayout {
     std::vector<target::SpirvParam> params;
+    std::vector<target::SpirvDescriptorBinding> descriptors;
     uint32_t push_constant_bytes = 0;
     uint32_t shared_bytes = 0;
 };
@@ -90,6 +91,7 @@ private:
     std::vector<Id> prologue_args_;                           // kernel parameter values when the entry has phis
     std::vector<size_t> node_block_;                          // cfg node -> block index (kNoNode: none)
     std::vector<std::vector<Id>> node_phis_;                  // cfg node -> its phi ids, in parameter/part order
+    std::vector<target::SpirvDescriptorBinding> descriptors_; // descriptor bindings referenced by this kernel
     uint32_t shared_bytes_ = 0;
 
     // ---- driver (spirv_isel.cpp) --------------------------------------------------
@@ -115,8 +117,12 @@ private:
     template <typename F>
     Id prologue_value(const std::string& key, F make);
     Id builtin_component(spv::BuiltIn b, uint32_t component); // uvec3 builtin, one component
+    Id builtin_fvec4_component(spv::BuiltIn b, uint32_t component); // vec4 float builtin, one component
+    Id builtin_fvec4(spv::BuiltIn b);                               // vec4 float builtin
     Id builtin_scalar(spv::BuiltIn b);                        // u32 builtin
     Id workgroup_size(uint32_t component);
+    Id descriptor_var(uint32_t set, uint32_t binding, target::SpirvDescriptorKind kind, Id handle_type);
+    Id stage_io_var(spv::StorageClass sc, uint32_t location); // Input/Output vec4 variable at Location
 
     // ---- types and values -------------------------------------------------------
     Id t_u32() { return m_.t_int(32); }

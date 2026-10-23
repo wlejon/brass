@@ -156,6 +156,21 @@ Value* KernelBuilder::sqrt_approx(Value* x)         { return b_.build_call("ptx_
 Value* KernelBuilder::fabs(Value* x)                { return b_.build_call("ptx_fabs", x->type(), {x}); }
 Value* KernelBuilder::fmin(Value* a, Value* b)      { return b_.build_call("ptx_fmin", a->type(), {a, b}); }
 Value* KernelBuilder::fmax(Value* a, Value* b)      { return b_.build_call("ptx_fmax", a->type(), {a, b}); }
+Value* KernelBuilder::sin_approx(Value* x)          { return b_.build_call("ptx_sin", Type::f32(), {x}); }
+Value* KernelBuilder::cos_approx(Value* x)          { return b_.build_call("ptx_cos", Type::f32(), {x}); }
+Value* KernelBuilder::tanh_approx(Value* x)         { return b_.build_call("ptx_tanh", Type::f32(), {x}); }
+Value* KernelBuilder::clamp_f32(Value* x, Value* lo, Value* hi) {
+    return b_.build_call("ptx_clamp", x->type(), {x, lo, hi});
+}
+Value* KernelBuilder::mix_f32(Value* x, Value* y, Value* a) {
+    return b_.build_call("ptx_mix", x->type(), {x, y, a});
+}
+Value* KernelBuilder::smoothstep_f32(Value* edge0, Value* edge1, Value* x) {
+    return b_.build_call("ptx_smoothstep", x->type(), {edge0, edge1, x});
+}
+Value* KernelBuilder::step_f32(Value* edge, Value* x) {
+    return b_.build_call("ptx_step", x->type(), {edge, x});
+}
 
 Value* KernelBuilder::f16_to_f32(Value* bits) { return b_.build_call("ptx_f16_to_f32", Type::f32(), {bits}); }
 Value* KernelBuilder::f32_to_f16(Value* x)    { return b_.build_call("ptx_f32_to_f16", Type::i32(), {x}); }
@@ -183,6 +198,128 @@ Instruction* KernelBuilder::store_u16(Value* ptr, Value* val, int32_t off) {
 
 Value* KernelBuilder::atom_add_f32(Value* ptr, Value* val) { return b_.build_call("ptx_atom_add_f32", Type::f32(), {ptr, val}); }
 Value* KernelBuilder::atom_add_i32(Value* ptr, Value* val) { return b_.build_call("ptx_atom_add_i32", Type::i32(), {ptr, val}); }
+
+// ---------------------------------------------------------------------------
+// SPIR-V descriptor-bound images & samplers
+// ---------------------------------------------------------------------------
+
+Value* KernelBuilder::image2d_load_r32f(uint32_t set, uint32_t binding, Value* ix, Value* iy) {
+    return b_.build_call("spirv_image2d_load_r32f", Type::f32(),
+                         {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)), ix, iy});
+}
+
+Instruction* KernelBuilder::image2d_store_r32f(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* val) {
+    b_.build_call("spirv_image2d_store_r32f", Type::void_type(),
+                  {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)), ix, iy, val});
+    return b_.current_block()->tail();
+}
+
+Value* KernelBuilder::image3d_load_r32f(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* iz) {
+    return b_.build_call("spirv_image3d_load_r32f", Type::f32(),
+                         {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)), ix, iy, iz});
+}
+
+Instruction* KernelBuilder::image3d_store_r32f(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* iz, Value* val) {
+    b_.build_call("spirv_image3d_store_r32f", Type::void_type(),
+                  {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)), ix, iy, iz, val});
+    return b_.current_block()->tail();
+}
+
+Value* KernelBuilder::image2d_load_vec4(uint32_t set, uint32_t binding, Value* ix, Value* iy) {
+    return b_.build_call("spirv_image2d_load_vec4", Type::f32x4(),
+                         {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)), ix, iy});
+}
+
+Instruction* KernelBuilder::image2d_store_vec4(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* rgba) {
+    b_.build_call("spirv_image2d_store_vec4", Type::void_type(),
+                  {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)), ix, iy, rgba});
+    return b_.current_block()->tail();
+}
+
+Value* KernelBuilder::image3d_load_vec4(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* iz) {
+    return b_.build_call("spirv_image3d_load_vec4", Type::f32x4(),
+                         {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)), ix, iy, iz});
+}
+
+Instruction* KernelBuilder::image3d_store_vec4(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* iz, Value* rgba) {
+    b_.build_call("spirv_image3d_store_vec4", Type::void_type(),
+                  {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)), ix, iy, iz, rgba});
+    return b_.current_block()->tail();
+}
+
+Value* KernelBuilder::sampler2d_lod_r32f(uint32_t set, uint32_t binding, Value* u, Value* v, Value* lod) {
+    if (!lod) lod = const_f32(0.0f);
+    return b_.build_call("spirv_sampler2d_lod_r32f", Type::f32(),
+                         {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)), u, v, lod});
+}
+
+Value* KernelBuilder::sampler3d_lod_r32f(uint32_t set, uint32_t binding, Value* u, Value* v, Value* w, Value* lod) {
+    if (!lod) lod = const_f32(0.0f);
+    return b_.build_call("spirv_sampler3d_lod_r32f", Type::f32(),
+                         {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)), u, v, w, lod});
+}
+
+Value* KernelBuilder::sampler2d_lod_vec4(uint32_t set, uint32_t binding, Value* u, Value* v, Value* lod) {
+    if (!lod) lod = const_f32(0.0f);
+    return b_.build_call("spirv_sampler2d_lod_vec4", Type::f32x4(),
+                         {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)), u, v, lod});
+}
+
+Value* KernelBuilder::sampler3d_lod_vec4(uint32_t set, uint32_t binding, Value* u, Value* v, Value* w, Value* lod) {
+    if (!lod) lod = const_f32(0.0f);
+    return b_.build_call("spirv_sampler3d_lod_vec4", Type::f32x4(),
+                         {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)), u, v, w, lod});
+}
+
+// ---------------------------------------------------------------------------
+// SPIR-V graphics rendering stages (Vertex & Fragment)
+// ---------------------------------------------------------------------------
+
+Value* KernelBuilder::vertex_index()   { return b_.build_call("spirv_vertex_index", Type::i32()); }
+Value* KernelBuilder::instance_index() { return b_.build_call("spirv_instance_index", Type::i32()); }
+Value* KernelBuilder::frag_coord_x()   { return b_.build_call("spirv_frag_coord_x", Type::f32()); }
+Value* KernelBuilder::frag_coord_y()   { return b_.build_call("spirv_frag_coord_y", Type::f32()); }
+Value* KernelBuilder::frag_coord_z()   { return b_.build_call("spirv_frag_coord_z", Type::f32()); }
+Value* KernelBuilder::frag_coord_w()   { return b_.build_call("spirv_frag_coord_w", Type::f32()); }
+Value* KernelBuilder::frag_coord_vec4() { return b_.build_call("spirv_frag_coord_vec4", Type::f32x4()); }
+
+Value* KernelBuilder::stage_input_f32(uint32_t location, uint32_t component) {
+    return b_.build_call("spirv_stage_input_f32", Type::f32(),
+                         {const_i32(static_cast<int32_t>(location)), const_i32(static_cast<int32_t>(component))});
+}
+
+Value* KernelBuilder::stage_input_vec4(uint32_t location) {
+    return b_.build_call("spirv_stage_input_vec4", Type::f32x4(),
+                         {const_i32(static_cast<int32_t>(location))});
+}
+
+Instruction* KernelBuilder::stage_output_f32(uint32_t location, uint32_t component, Value* val) {
+    b_.build_call("spirv_stage_output_f32", Type::void_type(),
+                  {const_i32(static_cast<int32_t>(location)), const_i32(static_cast<int32_t>(component)), val});
+    return b_.current_block()->tail();
+}
+
+Instruction* KernelBuilder::stage_output_vec4(uint32_t location, Value* x, Value* y, Value* z, Value* w) {
+    b_.build_call("spirv_stage_output_vec4", Type::void_type(),
+                  {const_i32(static_cast<int32_t>(location)), x, y, z, w});
+    return b_.current_block()->tail();
+}
+
+Instruction* KernelBuilder::stage_output_vec4(uint32_t location, Value* xyzw) {
+    b_.build_call("spirv_stage_output_vec4", Type::void_type(),
+                  {const_i32(static_cast<int32_t>(location)), xyzw});
+    return b_.current_block()->tail();
+}
+
+Instruction* KernelBuilder::set_vertex_position(Value* x, Value* y, Value* z, Value* w) {
+    b_.build_call("spirv_set_vertex_position", Type::void_type(), {x, y, z, w});
+    return b_.current_block()->tail();
+}
+
+Instruction* KernelBuilder::set_vertex_position_vec4(Value* xyzw) {
+    b_.build_call("spirv_set_vertex_position", Type::void_type(), {xyzw});
+    return b_.current_block()->tail();
+}
 
 // ---------------------------------------------------------------------------
 // Structured control flow

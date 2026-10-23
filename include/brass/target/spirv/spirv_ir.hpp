@@ -81,10 +81,13 @@ struct EntryPoint {
 
 // What a type id is, for queries and the dump.
 struct TypeInfo {
-    spv::Op op = spv::OpNop;  // OpTypeInt, OpTypeFloat, OpTypeVector, OpTypePointer, ...
+    spv::Op op = spv::OpNop;  // OpTypeInt, OpTypeFloat, OpTypeVector, OpTypePointer, OpTypeImage, ...
     uint32_t width = 0;        // int/float width, vector component count, array length id
-    Id elem = 0;               // vector/array component type, pointer pointee
+    Id elem = 0;               // vector/array component type, pointer pointee, image sampled/base type
     spv::StorageClass storage = spv::StorageClassMax; // pointers
+    spv::Dim dim = spv::DimMax;                       // OpTypeImage dimension
+    uint32_t sampled = 0;                             // OpTypeImage: 1 = sampled, 2 = storage
+    spv::ImageFormat image_format = spv::ImageFormatUnknown; // OpTypeImage format
 };
 
 class Module {
@@ -119,6 +122,9 @@ public:
     Id t_array(Id elem, uint32_t length);
     Id t_struct(const std::vector<Id>& members); // always a fresh id (structs get decorated)
     Id t_pointer(spv::StorageClass sc, Id pointee);
+    Id t_image(Id sampled_type, spv::Dim dim, uint32_t depth, uint32_t arrayed, uint32_t ms,
+               uint32_t sampled, spv::ImageFormat format);
+    Id t_sampled_image(Id image_type);
     Id t_function(Id ret, const std::vector<Id>& params);
     const TypeInfo* type_info(Id type) const; // nullptr when `type` is not a type
 

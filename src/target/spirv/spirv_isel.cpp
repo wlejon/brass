@@ -51,6 +51,7 @@ KernelLayout SpirvISel::lower(const brass::Function& mir_fn) {
     value_uses_.clear();
     prologue_cache_.clear();
     prologue_args_.clear();
+    descriptors_.clear();
     shared_bytes_ = 0;
 
     StructuredCfg cfg = structurize(mir_fn);
@@ -72,10 +73,14 @@ KernelLayout SpirvISel::lower(const brass::Function& mir_fn) {
         fn().blocks.push_back(std::move(b));
     }
 
-    // Workgroup size: spec constants (once per module) or a fixed LocalSize.
-    if (opts_.local_size_spec_constants) workgroup_size(0);
-    m_.add_execution_mode(fn().id, spv::ExecutionModeLocalSize,
-                          {opts_.local_size_x, opts_.local_size_y, opts_.local_size_z});
+    // Execution modes depend on the shader stage.
+    if (opts_.stage == target::SpirvStage::Compute) {
+        if (opts_.local_size_spec_constants) workgroup_size(0);
+        m_.add_execution_mode(fn().id, spv::ExecutionModeLocalSize,
+                              {opts_.local_size_x, opts_.local_size_y, opts_.local_size_z});
+    } else if (opts_.stage == target::SpirvStage::Fragment) {
+        m_.add_execution_mode(fn().id, spv::ExecutionModeOriginUpperLeft, {});
+    }
 
     KernelLayout layout;
     cur_ = node_block_[0];
@@ -90,7 +95,11 @@ KernelLayout SpirvISel::lower(const brass::Function& mir_fn) {
     emit(Inst(spv::OpBranch).id(label_of(cfg.edges[cfg.nodes[0].out.at(0)].to)));
     fill_phis();
 
-    m_.add_entry_point(spv::ExecutionModelGLCompute, fn().id, name, fn().interface);
+    spv::ExecutionModel exec_model = spv::ExecutionModelGLCompute;
+    if (opts_.stage == target::SpirvStage::Vertex) exec_model = spv::ExecutionModelVertex;
+    else if (opts_.stage == target::SpirvStage::Fragment) exec_model = spv::ExecutionModelFragment;
+    m_.add_entry_point(exec_model, fn().id, name, fn().interface);
+    layout.descriptors = descriptors_;
     layout.shared_bytes = shared_bytes_;
     cfg_ = nullptr;
     mir_ = nullptr;

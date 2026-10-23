@@ -19,11 +19,15 @@ using namespace spvtest;
 namespace {
 
 enum class Sig {
-    void_i32, void_i64, f32_f32, f32f32_f32, f64_f64, i32_f32, i64_f32, f32_i32, f32_f64, f64_f32,
+    void_i32, void_i64, f32_f32, f32f32_f32, f32x3_f32, f64_f64, i32_f32, i64_f32, f32_i32, f32_f64, f64_f32,
     shfl_f32, shfl_i32, shfl_sync_f32, bar, bar_id, atom_f32, atom_i32, atom_i64, atom_shared_f32, atom_shared_i32,
     i32i32_i64, i32i32_i32, i32x3_i32, shared_alloc,
     shared_ld, shared_ldx, shared_st, shared_stx, // element type from the name's suffix
     load_narrow, store_narrow,
+    img2d_ld_r32f, img2d_st_r32f, img3d_ld_r32f, img3d_st_r32f,
+    img2d_ld_v4, img2d_st_v4, img3d_ld_v4, img3d_st_v4,
+    samp2d_r32f, samp3d_r32f, samp2d_v4, samp3d_v4,
+    vert_i32, vert_pos, frag_f32, frag_v4, stage_in_f32, stage_in_v4, stage_out_f32, stage_out_v4,
 };
 
 const std::map<std::string, Sig>& signatures() {
@@ -49,6 +53,13 @@ const std::map<std::string, Sig>& signatures() {
         {"fabsf", Sig::f32_f32}, {"fabs", Sig::f64_f64}, {"ptx_fabs", Sig::f32_f32},
         {"fminf", Sig::f32f32_f32}, {"fmin", Sig::f32f32_f32}, {"ptx_fmin", Sig::f32f32_f32},
         {"fmaxf", Sig::f32f32_f32}, {"fmax", Sig::f32f32_f32}, {"ptx_fmax", Sig::f32f32_f32},
+        {"tanhf", Sig::f32_f32}, {"ptx_tanh", Sig::f32_f32},
+        {"signf", Sig::f32_f32}, {"ptx_sign", Sig::f32_f32},
+        {"fractf", Sig::f32_f32}, {"ptx_fract", Sig::f32_f32},
+        {"stepf", Sig::f32f32_f32}, {"ptx_step", Sig::f32f32_f32},
+        {"clampf", Sig::f32x3_f32}, {"ptx_clamp", Sig::f32x3_f32},
+        {"mixf", Sig::f32x3_f32}, {"ptx_mix", Sig::f32x3_f32},
+        {"smoothstepf", Sig::f32x3_f32}, {"ptx_smoothstep", Sig::f32x3_f32},
         {"ptx_div_approx", Sig::f32f32_f32},
 
         {"i32_to_f32", Sig::i32_f32}, {"ptx_i32_to_f32", Sig::i32_f32}, {"ptx_u32_to_f32", Sig::i32_f32},
@@ -87,6 +98,32 @@ const std::map<std::string, Sig>& signatures() {
         {"ptx_load_u8", Sig::load_narrow}, {"ptx_load_s8", Sig::load_narrow},
         {"ptx_load_u16", Sig::load_narrow}, {"ptx_load_s16", Sig::load_narrow},
         {"ptx_store_u8", Sig::store_narrow}, {"ptx_store_u16", Sig::store_narrow},
+
+        {"spirv_image2d_load_r32f", Sig::img2d_ld_r32f},
+        {"spirv_image2d_store_r32f", Sig::img2d_st_r32f},
+        {"spirv_image3d_load_r32f", Sig::img3d_ld_r32f},
+        {"spirv_image3d_store_r32f", Sig::img3d_st_r32f},
+        {"spirv_image2d_load_vec4", Sig::img2d_ld_v4},
+        {"spirv_image2d_store_vec4", Sig::img2d_st_v4},
+        {"spirv_image3d_load_vec4", Sig::img3d_ld_v4},
+        {"spirv_image3d_store_vec4", Sig::img3d_st_v4},
+        {"spirv_sampler2d_lod_r32f", Sig::samp2d_r32f},
+        {"spirv_sampler3d_lod_r32f", Sig::samp3d_r32f},
+        {"spirv_sampler2d_lod_vec4", Sig::samp2d_v4},
+        {"spirv_sampler3d_lod_vec4", Sig::samp3d_v4},
+
+        {"spirv_vertex_index", Sig::vert_i32},
+        {"spirv_instance_index", Sig::vert_i32},
+        {"spirv_set_vertex_position", Sig::vert_pos},
+        {"spirv_frag_coord_x", Sig::frag_f32},
+        {"spirv_frag_coord_y", Sig::frag_f32},
+        {"spirv_frag_coord_z", Sig::frag_f32},
+        {"spirv_frag_coord_w", Sig::frag_f32},
+        {"spirv_frag_coord_vec4", Sig::frag_v4},
+        {"spirv_stage_input_f32", Sig::stage_in_f32},
+        {"spirv_stage_input_vec4", Sig::stage_in_v4},
+        {"spirv_stage_output_f32", Sig::stage_out_f32},
+        {"spirv_stage_output_vec4", Sig::stage_out_v4},
     };
     return kSigs;
 }
@@ -129,6 +166,7 @@ Function* build(Module& mod, const std::string& name, Sig sig) {
         case Sig::void_i64: r = b.build_call(name, Type::i64()); break;
         case Sig::f32_f32: r = b.build_call(name, Type::f32(), {x}); break;
         case Sig::f32f32_f32: r = b.build_call(name, Type::f32(), {x, x}); break;
+        case Sig::f32x3_f32: r = b.build_call(name, Type::f32(), {x, x, x}); break;
         case Sig::f64_f64: r = b.build_call(name, Type::f64(), {d}); break;
         case Sig::i32_f32: r = b.build_call(name, Type::f32(), {i}); break;
         case Sig::i64_f32: r = b.build_call(name, Type::f32(), {l}); break;
@@ -163,8 +201,31 @@ Function* build(Module& mod, const std::string& name, Sig sig) {
         case Sig::shared_stx: b.build_call(name, Type::void_type(), {alloc(st), c8, sval}); break;
         case Sig::load_narrow: r = b.build_call(name, Type::i32(), {p, b.build_iconst_i32(3)}); break;
         case Sig::store_narrow: b.build_call(name, Type::void_type(), {p, i, i}); break;
+        case Sig::img2d_ld_r32f: r = b.build_call(name, Type::f32(), {b.build_iconst_i32(0), b.build_iconst_i32(0), i, i}); break;
+        case Sig::img2d_st_r32f: b.build_call(name, Type::void_type(), {b.build_iconst_i32(0), b.build_iconst_i32(0), i, i, x}); break;
+        case Sig::img3d_ld_r32f: r = b.build_call(name, Type::f32(), {b.build_iconst_i32(0), b.build_iconst_i32(0), i, i, i}); break;
+        case Sig::img3d_st_r32f: b.build_call(name, Type::void_type(), {b.build_iconst_i32(0), b.build_iconst_i32(0), i, i, i, x}); break;
+        case Sig::img2d_ld_v4: r = b.build_call(name, Type::f32x4(), {b.build_iconst_i32(0), b.build_iconst_i32(0), i, i}); break;
+        case Sig::img2d_st_v4: b.build_call(name, Type::void_type(), {b.build_iconst_i32(0), b.build_iconst_i32(0), i, i, b.build_vbroadcast(Type::f32x4(), x)}); break;
+        case Sig::img3d_ld_v4: r = b.build_call(name, Type::f32x4(), {b.build_iconst_i32(0), b.build_iconst_i32(0), i, i, i}); break;
+        case Sig::img3d_st_v4: b.build_call(name, Type::void_type(), {b.build_iconst_i32(0), b.build_iconst_i32(0), i, i, i, b.build_vbroadcast(Type::f32x4(), x)}); break;
+        case Sig::samp2d_r32f: r = b.build_call(name, Type::f32(), {b.build_iconst_i32(0), b.build_iconst_i32(0), x, x, x}); break;
+        case Sig::samp3d_r32f: r = b.build_call(name, Type::f32(), {b.build_iconst_i32(0), b.build_iconst_i32(0), x, x, x, x}); break;
+        case Sig::samp2d_v4: r = b.build_call(name, Type::f32x4(), {b.build_iconst_i32(0), b.build_iconst_i32(0), x, x, x}); break;
+        case Sig::samp3d_v4: r = b.build_call(name, Type::f32x4(), {b.build_iconst_i32(0), b.build_iconst_i32(0), x, x, x, x}); break;
+        case Sig::vert_i32: r = b.build_call(name, Type::i32()); break;
+        case Sig::vert_pos: b.build_call(name, Type::void_type(), {x, x, x, x}); break;
+        case Sig::frag_f32: r = b.build_call(name, Type::f32()); break;
+        case Sig::frag_v4: r = b.build_call(name, Type::f32x4()); break;
+        case Sig::stage_in_f32: r = b.build_call(name, Type::f32(), {b.build_iconst_i32(0), b.build_iconst_i32(0)}); break;
+        case Sig::stage_in_v4: r = b.build_call(name, Type::f32x4(), {b.build_iconst_i32(0)}); break;
+        case Sig::stage_out_f32: b.build_call(name, Type::void_type(), {b.build_iconst_i32(0), b.build_iconst_i32(0), x}); break;
+        case Sig::stage_out_v4: b.build_call(name, Type::void_type(), {b.build_iconst_i32(0), x, x, x, x}); break;
     }
-    if (r) b.build_store(r->type(), p, 0, r);
+    if (r) {
+        if (r->type().is_vector()) b.build_vstore(r->type(), p, 0, r);
+        else b.build_store(r->type(), p, 0, r);
+    }
     b.build_ret_void();
     return f;
 }
@@ -172,7 +233,15 @@ Function* build(Module& mod, const std::string& name, Sig sig) {
 std::vector<uint32_t> intrinsic_words(const std::string& name, Sig sig, std::string* dis = nullptr) {
     Module mod("intrin");
     Function* f = build(mod, name, sig);
-    target::SpirvKernel k = compile_checked(*f);
+    target::SpirvOptions opts;
+    if (sig == Sig::vert_i32 || sig == Sig::vert_pos) {
+        opts.stage = target::SpirvStage::Vertex;
+    } else if (sig == Sig::frag_f32 || sig == Sig::frag_v4 ||
+               sig == Sig::stage_in_f32 || sig == Sig::stage_in_v4 ||
+               sig == Sig::stage_out_f32 || sig == Sig::stage_out_v4) {
+        opts.stage = target::SpirvStage::Fragment;
+    }
+    target::SpirvKernel k = compile_checked(*f, opts);
     if (dis) *dis = disassemble(k.words);
     return k.words;
 }

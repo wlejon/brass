@@ -191,6 +191,25 @@ Id Module::t_pointer(spv::StorageClass sc, Id pointee) {
     return intern(Inst(spv::OpTypePointer).lit(static_cast<uint32_t>(sc)).id(pointee), &ti);
 }
 
+Id Module::t_image(Id sampled_type, spv::Dim dim, uint32_t depth, uint32_t arrayed, uint32_t ms,
+                   uint32_t sampled, spv::ImageFormat format) {
+    TypeInfo ti{spv::OpTypeImage, 0, sampled_type, spv::StorageClassMax, dim, sampled, format};
+    return intern(Inst(spv::OpTypeImage)
+                      .id(sampled_type)
+                      .lit(static_cast<uint32_t>(dim))
+                      .lit(depth)
+                      .lit(arrayed)
+                      .lit(ms)
+                      .lit(sampled)
+                      .lit(static_cast<uint32_t>(format)),
+                  &ti);
+}
+
+Id Module::t_sampled_image(Id image_type) {
+    TypeInfo ti{spv::OpTypeSampledImage, 0, image_type};
+    return intern(Inst(spv::OpTypeSampledImage).id(image_type), &ti);
+}
+
 Id Module::t_function(Id ret, const std::vector<Id>& params) {
     Inst inst(spv::OpTypeFunction);
     inst.id(ret);

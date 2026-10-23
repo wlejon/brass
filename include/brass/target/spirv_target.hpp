@@ -24,7 +24,31 @@
 
 namespace brass::target {
 
+enum class SpirvStage : uint8_t {
+    Compute = 0,
+    Vertex = 1,
+    Fragment = 2,
+};
+
+enum class SpirvDescriptorKind : uint8_t {
+    StorageImage2D = 0,
+    StorageImage3D = 1,
+    SampledImage2D = 2,
+    SampledImage3D = 3,
+};
+
+struct SpirvDescriptorBinding {
+    uint32_t set = 0;
+    uint32_t binding = 0;
+    SpirvDescriptorKind kind = SpirvDescriptorKind::StorageImage2D;
+
+    bool operator==(const SpirvDescriptorBinding& o) const noexcept {
+        return set == o.set && binding == o.binding && kind == o.kind;
+    }
+};
+
 struct SpirvOptions {
+    SpirvStage stage = SpirvStage::Compute;
     uint32_t local_size_x = 256;
     uint32_t local_size_y = 1;
     uint32_t local_size_z = 1;
@@ -47,8 +71,10 @@ struct SpirvParam {
 // One compiled kernel plus what the runtime needs to launch it.
 struct SpirvKernel {
     std::string entry;                     // OpEntryPoint name (the MIR function name)
+    SpirvStage stage = SpirvStage::Compute;
     std::vector<uint32_t> words;           // the SPIR-V binary
     std::vector<SpirvParam> params;        // push-constant layout, in parameter order
+    std::vector<SpirvDescriptorBinding> descriptors; // descriptor-bound images/samplers
     uint32_t push_constant_bytes = 0;
     uint32_t shared_bytes = 0;             // total Workgroup storage
     uint32_t local_size[3] = {1, 1, 1};       // the LocalSize default

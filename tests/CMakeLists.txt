@@ -301,6 +301,7 @@ if(BRASS_WITH_SPIRV)
         unit/test_spirv_isel.cpp
         unit/test_spirv_target.cpp
         unit/test_spirv_intrinsics.cpp
+        unit/test_spirv_graphics_and_images.cpp
         unit/test_spirv_execution.cpp
         unit/test_spirv_execution_cf.cpp
         unit/test_spirv_execution_mem.cpp
@@ -322,6 +323,14 @@ if(BRASS_WITH_SPIRV)
         BRASS_SPIRV_DIS="$<$<BOOL:${BRASS_SPIRV_DIS}>:${BRASS_SPIRV_DIS}>")
     target_link_libraries(test_spirv_binary_reader PRIVATE brass)
     target_include_directories(test_spirv_binary_reader PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/harness" "${BRASS_INCLUDE_DIR}" "${BRASS_SPIRV_HEADERS_DIR}")
+
+    add_executable(test_spirv_graphics_and_images unit/test_spirv_graphics_and_images.cpp)
+    target_compile_definitions(test_spirv_graphics_and_images PRIVATE
+        BRASS_STANDALONE_TEST
+        BRASS_SPIRV_VAL="$<$<BOOL:${BRASS_SPIRV_VAL}>:${BRASS_SPIRV_VAL}>"
+        BRASS_SPIRV_DIS="$<$<BOOL:${BRASS_SPIRV_DIS}>:${BRASS_SPIRV_DIS}>")
+    target_link_libraries(test_spirv_graphics_and_images PRIVATE brass)
+    target_include_directories(test_spirv_graphics_and_images PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/harness" "${BRASS_INCLUDE_DIR}" "${BRASS_SPIRV_HEADERS_DIR}")
 
     add_executable(test_gpu_verify unit/test_gpu_verify.cpp)
     target_compile_definitions(test_gpu_verify PRIVATE BRASS_STANDALONE_TEST)

@@ -43,6 +43,8 @@ struct SpirvISel::Intrinsics {
     static void glsl_unary(SpirvISel& isel, const brass::Instruction& inst);  // type from argument 0
     template <uint32_t Glsl>
     static void glsl_binary(SpirvISel& isel, const brass::Instruction& inst); // type from argument 0
+    template <uint32_t Glsl>
+    static void glsl_ternary(SpirvISel& isel, const brass::Instruction& inst); // type from argument 0
     static void rcp(SpirvISel& isel, const brass::Instruction& inst);
     static void fdiv(SpirvISel& isel, const brass::Instruction& inst);
     template <spv::Op O, uint32_t Bits, bool Float>
@@ -77,6 +79,32 @@ struct SpirvISel::Intrinsics {
     template <uint32_t Bits>
     static void store_narrow(SpirvISel& isel, const brass::Instruction& inst);
     static Id byte_address(SpirvISel& isel, const Value* ptr, const Value* offset);
+
+    // ---- descriptor images, samplers, graphics stages (spirv_isel_graphics.cpp)
+    static void parse_set_binding(SpirvISel& isel, const brass::Instruction& inst, uint32_t& out_set, uint32_t& out_binding);
+    template <spv::Dim Dim, bool Vec4>
+    static void image_load(SpirvISel& isel, const brass::Instruction& inst);
+    template <spv::Dim Dim, bool Vec4>
+    static void image_store(SpirvISel& isel, const brass::Instruction& inst);
+    template <spv::Dim Dim, bool Vec4>
+    static void sampler_lod(SpirvISel& isel, const brass::Instruction& inst);
+
+    template <spv::BuiltIn B>
+    static void builtin_scalar_in(SpirvISel& isel, const brass::Instruction& inst) {
+        isel.define(inst.result(), isel.builtin_scalar(B));
+    }
+    template <uint32_t C>
+    static void frag_coord_comp(SpirvISel& isel, const brass::Instruction& inst) {
+        isel.define(inst.result(), isel.builtin_fvec4_component(spv::BuiltInFragCoord, C));
+    }
+    static void frag_coord_vec4(SpirvISel& isel, const brass::Instruction& inst) {
+        isel.define(inst.result(), isel.builtin_fvec4(spv::BuiltInFragCoord));
+    }
+    static void stage_input_f32(SpirvISel& isel, const brass::Instruction& inst);
+    static void stage_input_vec4(SpirvISel& isel, const brass::Instruction& inst);
+    static void stage_output_f32(SpirvISel& isel, const brass::Instruction& inst);
+    static void stage_output_vec4(SpirvISel& isel, const brass::Instruction& inst);
+    static void set_vertex_position(SpirvISel& isel, const brass::Instruction& inst);
 };
 
 } // namespace brass::spirv

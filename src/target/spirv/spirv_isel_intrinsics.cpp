@@ -74,6 +74,16 @@ void SpirvISel::Intrinsics::glsl_binary(SpirvISel& isel, const brass::Instructio
                                         {isel.id_of(a, "argument 0"), isel.id_of(inst.operand(1), "argument 1")}));
 }
 
+template <uint32_t Glsl>
+void SpirvISel::Intrinsics::glsl_ternary(SpirvISel& isel, const brass::Instruction& inst) {
+    const Value* a = inst.operand(0);
+    if (!a || !a->type().is_float()) isel.malformed(inst, "argument 0 must be f32 or f64");
+    isel.define(inst.result(), isel.ext(Glsl, isel.scalar_type(a->type()),
+                                        {isel.id_of(a, "argument 0"),
+                                         isel.id_of(inst.operand(1), "argument 1"),
+                                         isel.id_of(inst.operand(2), "argument 2")}));
+}
+
 void SpirvISel::Intrinsics::rcp(SpirvISel& isel, const brass::Instruction& inst) {
     isel.define(inst.result(), isel.op(spv::OpFDiv, isel.t_f32(), {isel.m_.c_f32(1.0f), isel.id_of(inst.operand(0), "argument 0")}));
 }
@@ -172,6 +182,20 @@ const SpirvISel::Intrinsics::Table& SpirvISel::Intrinsics::table() {
         { "fmaxf",          &glsl_binary<GLSLstd450NMax> },
         { "fmax",           &glsl_binary<GLSLstd450NMax> },
         { "ptx_fmax",       &glsl_binary<GLSLstd450NMax> },
+        { "tanhf",          &glsl_unary<GLSLstd450Tanh> },
+        { "ptx_tanh",       &glsl_unary<GLSLstd450Tanh> },
+        { "signf",          &glsl_unary<GLSLstd450FSign> },
+        { "ptx_sign",       &glsl_unary<GLSLstd450FSign> },
+        { "fractf",         &glsl_unary<GLSLstd450Fract> },
+        { "ptx_fract",      &glsl_unary<GLSLstd450Fract> },
+        { "stepf",          &glsl_binary<GLSLstd450Step> },
+        { "ptx_step",       &glsl_binary<GLSLstd450Step> },
+        { "clampf",         &glsl_ternary<GLSLstd450FClamp> },
+        { "ptx_clamp",      &glsl_ternary<GLSLstd450FClamp> },
+        { "mixf",           &glsl_ternary<GLSLstd450FMix> },
+        { "ptx_mix",        &glsl_ternary<GLSLstd450FMix> },
+        { "smoothstepf",    &glsl_ternary<GLSLstd450SmoothStep> },
+        { "ptx_smoothstep", &glsl_ternary<GLSLstd450SmoothStep> },
 
         // Conversions
         { "i32_to_f32",     &convert<spv::OpConvertSToF, 32, true> },
@@ -251,6 +275,34 @@ const SpirvISel::Intrinsics::Table& SpirvISel::Intrinsics::table() {
         { "ptx_load_s16",  &load_narrow<16, true> },
         { "ptx_store_u8",  &store_narrow<8> },
         { "ptx_store_u16", &store_narrow<16> },
+
+        // Descriptor-bound 2D/3D storage images & sampled textures
+        { "spirv_image2d_load_r32f",   &image_load<spv::Dim2D, false> },
+        { "spirv_image2d_store_r32f",  &image_store<spv::Dim2D, false> },
+        { "spirv_image3d_load_r32f",   &image_load<spv::Dim3D, false> },
+        { "spirv_image3d_store_r32f",  &image_store<spv::Dim3D, false> },
+        { "spirv_image2d_load_vec4",   &image_load<spv::Dim2D, true> },
+        { "spirv_image2d_store_vec4",  &image_store<spv::Dim2D, true> },
+        { "spirv_image3d_load_vec4",   &image_load<spv::Dim3D, true> },
+        { "spirv_image3d_store_vec4",  &image_store<spv::Dim3D, true> },
+        { "spirv_sampler2d_lod_r32f",  &sampler_lod<spv::Dim2D, false> },
+        { "spirv_sampler3d_lod_r32f",  &sampler_lod<spv::Dim3D, false> },
+        { "spirv_sampler2d_lod_vec4",  &sampler_lod<spv::Dim2D, true> },
+        { "spirv_sampler3d_lod_vec4",  &sampler_lod<spv::Dim3D, true> },
+
+        // Graphics rendering stages (Vertex & Fragment)
+        { "spirv_vertex_index",        &builtin_scalar_in<spv::BuiltInVertexIndex> },
+        { "spirv_instance_index",      &builtin_scalar_in<spv::BuiltInInstanceIndex> },
+        { "spirv_frag_coord_x",        &frag_coord_comp<0> },
+        { "spirv_frag_coord_y",        &frag_coord_comp<1> },
+        { "spirv_frag_coord_z",        &frag_coord_comp<2> },
+        { "spirv_frag_coord_w",        &frag_coord_comp<3> },
+        { "spirv_frag_coord_vec4",     &frag_coord_vec4 },
+        { "spirv_stage_input_f32",     &stage_input_f32 },
+        { "spirv_stage_input_vec4",    &stage_input_vec4 },
+        { "spirv_stage_output_f32",    &stage_output_f32 },
+        { "spirv_stage_output_vec4",   &stage_output_vec4 },
+        { "spirv_set_vertex_position", &set_vertex_position },
     };
     return kIntrinsics;
 }

@@ -488,6 +488,13 @@ bool parse_binary(std::span<const uint32_t> words, Module& out_mod, std::string*
                 } else if (op == spv::OpTypePointer && inst.operands.size() >= 2) {
                     ti.storage = static_cast<spv::StorageClass>(inst.operands[0].value);
                     ti.elem = inst.operands[1].value;
+                } else if (op == spv::OpTypeImage && inst.operands.size() >= 7) {
+                    ti.elem = inst.operands[0].value;
+                    ti.dim = static_cast<spv::Dim>(inst.operands[1].value);
+                    ti.sampled = inst.operands[5].value;
+                    ti.image_format = static_cast<spv::ImageFormat>(inst.operands[6].value);
+                } else if (op == spv::OpTypeSampledImage && !inst.operands.empty()) {
+                    ti.elem = inst.operands[0].value;
                 } else if (op == spv::OpTypeFunction && !inst.operands.empty()) {
                     ti.elem = inst.operands[0].value;
                 }
