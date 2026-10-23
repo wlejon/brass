@@ -112,7 +112,8 @@ BVInterval BVContext::compute_interval(const BVNode& n) const noexcept {
             iv.smin = static_cast<int64_t>(iv.umin);
             iv.smax = static_cast<int64_t>(iv.umax);
         }
-        iv.known_zeros = a.known_zeros | ~am;
+        uint32_t bits = (iv.umax == 0) ? 0u : static_cast<uint32_t>(64 - std::countl_zero(iv.umax));
+        iv.known_zeros = a.known_zeros | ~am | ~width_mask(bits);
         iv.known_ones = a.known_ones & am;
         return iv;
     }
@@ -126,6 +127,9 @@ BVInterval BVContext::compute_interval(const BVNode& n) const noexcept {
             iv.umax = static_cast<uint64_t>(a.smax);
             uint32_t bits = (iv.umax == 0) ? 0u : static_cast<uint32_t>(64 - std::countl_zero(iv.umax));
             iv.known_zeros = a.known_zeros | ~width_mask(bits);
+        } else if (a.smax < 0) {
+            iv.umin = static_cast<uint64_t>(a.smin) & m;
+            iv.umax = static_cast<uint64_t>(a.smax) & m;
         }
         return iv;
     }
@@ -213,6 +217,15 @@ BVInterval BVContext::compute_interval(const BVNode& n) const noexcept {
         if (smin_sum >= min_s && smax_sum <= max_s) {
             iv.smin = a.smin + b.smin;
             iv.smax = a.smax + b.smax;
+            if (iv.smin >= 0) {
+                iv.umin = std::max(iv.umin, static_cast<uint64_t>(iv.smin));
+                iv.umax = std::min(iv.umax, static_cast<uint64_t>(iv.smax));
+                uint32_t bits = (iv.umax == 0) ? 0u : static_cast<uint32_t>(64 - std::countl_zero(iv.umax));
+                iv.known_zeros |= ~width_mask(bits);
+            } else if (iv.smax < 0) {
+                iv.umin = std::max(iv.umin, static_cast<uint64_t>(iv.smin) & m);
+                iv.umax = std::min(iv.umax, static_cast<uint64_t>(iv.smax) & m);
+            }
         }
         return iv;
     }
@@ -667,6 +680,9 @@ BVNodeId BVContext::make_binary(BVOp op, BVNodeId a, BVNodeId b, uint32_t res_wi
             if (ca.op == BVOp::SExt && cb.op == BVOp::SExt && nodes_[ca.a].width == nodes_[cb.a].width) {
                 return make_binary(op, ca.a, cb.a, 1);
             }
+            // Algebraic signed offset comparison:
+            //   (X + C) <s (X + D)  ==>  C <s D   when X in [smin, smax] cannot signed-overflow with C or D
+            //   (X + C) <s Y        ==>  X <s (Y - C) when C in [0, smax] and Y - C cannot signed-overflow
             break;
         }
 

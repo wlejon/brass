@@ -622,6 +622,41 @@ bool run_smt_guard_elimination(
                             enc, path_cond, cond_val->defining_instruction(),
                             dom_guard_conds, opts.max_sat_conflicts, opts.stats);
                     }
+                    if (!proven && cond_val->is_instruction()) {
+                        // Transitive signed offset bound:
+                        // Prove `(base + k) <s len` (or `<=s len`) when:
+                        //   1) `k <=s C` (from interval/range of `k`)
+                        //   2) `0 <=s k`
+                        //   3) `base <=s len - C` (or `base + C <=s len`) holds under `path_cond`
+                        //   4) `len >=s C` holds under `path_cond` (so `len - C` does not underflow)
+                        const Instruction* ci = cond_val->defining_instruction();
+                        if (ci && (ci->opcode() == Opcode::slt || ci->opcode() == Opcode::sle) &&
+                            ci->operand(0) && ci->operand(0)->is_instruction()) {
+                            const Instruction* lhs_i = ci->operand(0)->defining_instruction();
+                            if (lhs_i && lhs_i->opcode() == Opcode::add) {
+                                BVNodeId a_bv = enc.encode(lhs_i->operand(0));
+                                BVNodeId b_bv = enc.encode(lhs_i->operand(1));
+                                BVNodeId r_bv = enc.encode(ci->operand(1));
+                                if (a_bv != kInvalidBV && b_bv != kInvalidBV && r_bv != kInvalidBV &&
+                                    ctx.width(a_bv) == ctx.width(b_bv) && ctx.width(a_bv) == ctx.width(r_bv)) {
+                                    uint32_t w = ctx.width(a_bv);
+                                    auto check_offset = [&](BVNodeId base_bv, BVNodeId off_bv) -> bool {
+                                        const auto& iv = ctx.interval(off_bv);
+                                        if (iv.smin < 0 || iv.smax >= 0x40000000LL) return false;
+                                        uint64_t need_c = static_cast<uint64_t>(
+                                            ci->opcode() == Opcode::slt ? (iv.smax + 1) : iv.smax);
+                                        BVNodeId c_bv = ctx.make_const(need_c, w);
+                                        BVNodeId r_ge_c = ctx.make_binary(BVOp::Sge, r_bv, c_bv, 1);
+                                        BVNodeId lim_bv = ctx.make_binary(BVOp::Sub, r_bv, c_bv, w);
+                                        BVNodeId base_le_lim = ctx.make_binary(BVOp::Sle, base_bv, lim_bv, 1);
+                                        return is_proven_true(ctx, path_cond, r_ge_c, opts.max_sat_conflicts, opts.stats) &&
+                                               is_proven_true(ctx, path_cond, base_le_lim, opts.max_sat_conflicts, opts.stats);
+                                    };
+                                    proven = check_offset(a_bv, b_bv) || check_offset(b_bv, a_bv);
+                                }
+                            }
+                        }
+                    }
                     if (proven) {
                         GuardElimCert cert;
                         cert.eliminated_resume_id = cur->resume_id();
