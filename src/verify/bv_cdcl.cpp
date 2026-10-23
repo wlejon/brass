@@ -41,6 +41,8 @@ public:
         seen_.push_back(0);
         activity_.push_back(0.0);
         phase_.push_back(false);
+        xor_lhs_.push_back(kLitUndef);
+        xor_rhs_.push_back(kLitUndef);
         watches_.emplace_back();
         watches_.emplace_back();
         return v;
@@ -109,7 +111,12 @@ public:
         if (b == true_lit()) return a;
         if (a == b) return a;
         if (a == neg(b)) return false_lit();
+        if (a > b) std::swap(a, b);
+        uint64_t key = (1ULL << 62) | (static_cast<uint64_t>(a) << 30) | static_cast<uint64_t>(b);
+        auto it = gate_cache_.find(key);
+        if (it != gate_cache_.end()) return it->second;
         Lit out = mk_lit(new_var());
+        gate_cache_[key] = out;
         add_clause(neg(a), neg(b), out);
         add_clause(a, neg(out));
         add_clause(b, neg(out));
@@ -127,12 +134,32 @@ public:
         if (b == true_lit()) return neg(a);
         if (a == b) return false_lit();
         if (a == neg(b)) return true_lit();
-        Lit out = mk_lit(new_var());
-        add_clause(neg(a), neg(b), neg(out));
-        add_clause(a, b, neg(out));
-        add_clause(a, neg(b), out);
-        add_clause(neg(a), b, out);
-        return out;
+        bool neg_out = sign(a) ^ sign(b);
+        Lit ua = mk_lit(var(a), false);
+        Lit ub = mk_lit(var(b), false);
+        uint32_t va = var(ua), vb = var(ub);
+        if (xor_lhs_[va] != kLitUndef) {
+            if (xor_lhs_[va] == ub) return neg_out ? neg(xor_rhs_[va]) : xor_rhs_[va];
+            if (xor_rhs_[va] == ub) return neg_out ? neg(xor_lhs_[va]) : xor_lhs_[va];
+        }
+        if (xor_lhs_[vb] != kLitUndef) {
+            if (xor_lhs_[vb] == ua) return neg_out ? neg(xor_rhs_[vb]) : xor_rhs_[vb];
+            if (xor_rhs_[vb] == ua) return neg_out ? neg(xor_lhs_[vb]) : xor_lhs_[vb];
+        }
+        if (ua > ub) std::swap(ua, ub);
+        uint64_t key = (2ULL << 62) | (static_cast<uint64_t>(ua) << 30) | static_cast<uint64_t>(ub);
+        auto it = gate_cache_.find(key);
+        if (it != gate_cache_.end()) return neg_out ? neg(it->second) : it->second;
+        uint32_t vout = new_var();
+        Lit out = mk_lit(vout, false);
+        xor_lhs_[vout] = ua;
+        xor_rhs_[vout] = ub;
+        gate_cache_[key] = out;
+        add_clause(neg(ua), neg(ub), neg(out));
+        add_clause(ua, ub, neg(out));
+        add_clause(ua, neg(ub), out);
+        add_clause(neg(ua), ub, out);
+        return neg_out ? neg(out) : out;
     }
 
     Lit mk_ite(Lit c, Lit t, Lit f) {
@@ -141,6 +168,10 @@ public:
         if (t == f) return t;
         if (t == true_lit() && f == false_lit()) return c;
         if (t == false_lit() && f == true_lit()) return neg(c);
+        if (sign(c)) {
+            c = neg(c);
+            std::swap(t, f);
+        }
         Lit out = mk_lit(new_var());
         add_clause(neg(c), neg(t), out);
         add_clause(neg(c), t, neg(out));
@@ -149,12 +180,20 @@ public:
         return out;
     }
 
-    SolveOutcome::Status solve(uint32_t max_conflicts) {
+    SolveOutcome::Status solve_assuming(Lit assumption, uint32_t max_conflicts) {
         if (!ok_) return SolveOutcome::Unsat;
+        backtrack(0);
         if (propagate() != UINT32_MAX) {
             ok_ = false;
             return SolveOutcome::Unsat;
         }
+        int8_t av = value_lit(assumption);
+        if (av == 0) return SolveOutcome::Unsat;
+        if (av < 0) {
+            trail_lim_.push_back(static_cast<uint32_t>(trail_.size()));
+            assign(assumption, kReasonDecision);
+        }
+        uint32_t base_lvl = decision_level();
         uint32_t conflicts = 0;
         std::vector<Lit> learnt;
 
@@ -162,9 +201,10 @@ public:
             uint32_t confl = propagate();
             if (confl != UINT32_MAX) {
                 ++conflicts;
-                if (decision_level() == 0) return SolveOutcome::Unsat;
-                if (conflicts >= max_conflicts) return SolveOutcome::Unknown;
-
+                if (decision_level() == 0) {
+                    ok_ = false;
+                    return SolveOutcome::Unsat;
+                }
                 uint32_t bt_level = 0;
                 learnt.clear();
                 analyze(confl, learnt, bt_level);
@@ -184,6 +224,22 @@ public:
                     for (double& a : activity_) a *= 1e-100;
                     var_inc_ *= 1e-100;
                 }
+                if (bt_level < base_lvl) {
+                    int8_t cur_av = value_lit(assumption);
+                    if (cur_av == 0) {
+                        backtrack(0);
+                        return SolveOutcome::Unsat;
+                    }
+                    if (cur_av < 0) {
+                        trail_lim_.push_back(static_cast<uint32_t>(trail_.size()));
+                        assign(assumption, kReasonDecision);
+                    }
+                    base_lvl = decision_level();
+                }
+                if (conflicts >= max_conflicts) {
+                    backtrack(0);
+                    return SolveOutcome::Unknown;
+                }
             } else {
                 uint32_t next_v = pick_branch_var();
                 if (next_v == UINT32_MAX) {
@@ -193,6 +249,10 @@ public:
                 assign(mk_lit(next_v, !phase_[next_v]), kReasonDecision);
             }
         }
+    }
+
+    SolveOutcome::Status solve(uint32_t max_conflicts) {
+        return solve_assuming(true_lit(), max_conflicts);
     }
 
 private:
@@ -346,6 +406,9 @@ private:
     std::vector<bool> phase_;
     std::vector<Lit> trail_;
     std::vector<uint32_t> trail_lim_;
+    std::vector<Lit> xor_lhs_;
+    std::vector<Lit> xor_rhs_;
+    std::unordered_map<uint64_t, Lit> gate_cache_;
     uint32_t qhead_ = 0;
     double var_inc_ = 1.0;
 };
@@ -428,15 +491,11 @@ bool try_concrete_search(const BVContext& ctx, BVNodeId bad_cond, std::vector<ui
     std::sort(cands.begin(), cands.end());
     cands.erase(std::unique(cands.begin(), cands.end()), cands.end());
 
-    // 1. All-equal sweep over cone variables
     for (uint64_t c : cands) {
         for (uint32_t vi : cone_vars) model[vi] = c & width_mask(vars[vi].width);
         if (check(model)) return true;
     }
-
-    // 2. Single-variable sweep against 0 and -1 backgrounds (bounded to first 6 cone vars)
-    const size_t sweep_vars = std::min<size_t>(nvars, 6);
-    const size_t sweep_cands = std::min<size_t>(cands.size(), 24);
+    const size_t sweep_vars = std::min<size_t>(nvars, 6), sweep_cands = std::min<size_t>(cands.size(), 24);
     for (uint64_t bg : {0ULL, ~0ULL, 1ULL}) {
         for (uint32_t vi : cone_vars) model[vi] = bg & width_mask(vars[vi].width);
         for (size_t i = 0; i < sweep_vars; ++i) {
@@ -449,16 +508,12 @@ bool try_concrete_search(const BVContext& ctx, BVNodeId bad_cond, std::vector<ui
             model[vi] = orig;
         }
     }
-
-    // 3. Pairwise sweep for first 3 cone variables over compact boundary set (only on small cones)
     if (cone_nodes.size() <= 32 && nvars <= 4) {
-        const size_t pair_vars = std::min<size_t>(nvars, 3);
-        const size_t pair_cands = std::min<size_t>(cands.size(), 16);
+        const size_t pair_vars = std::min<size_t>(nvars, 3), pair_cands = std::min<size_t>(cands.size(), 16);
         for (uint32_t vi : cone_vars) model[vi] = 0ULL;
         for (size_t i = 0; i < pair_vars; ++i) {
-            uint32_t vi = cone_vars[i];
             for (size_t j = i + 1; j < pair_vars; ++j) {
-                uint32_t vj = cone_vars[j];
+                uint32_t vi = cone_vars[i], vj = cone_vars[j];
                 for (size_t ci = 0; ci < pair_cands; ++ci) {
                     model[vi] = cands[ci] & width_mask(vars[vi].width);
                     for (size_t cj = 0; cj < pair_cands; ++cj) {
@@ -615,7 +670,6 @@ struct BitBlaster {
                     for (size_t i = ba.size(); i < w; ++i) out[i] = sat.false_lit();
                     break;
                 }
-
                 case BVOp::SExt: {
                     const auto& ba = bits[n.a];
                     Lit sign_b = ba.back();
@@ -623,63 +677,61 @@ struct BitBlaster {
                     for (size_t i = ba.size(); i < w; ++i) out[i] = sign_b;
                     break;
                 }
-
                 case BVOp::Not: {
-                    const auto& ba = bits[n.a];
-                    for (uint32_t i = 0; i < w; ++i) out[i] = CDCLSolver::neg(ba[i]);
+                    for (uint32_t i = 0; i < w; ++i) out[i] = CDCLSolver::neg(bits[n.a][i]);
                     break;
                 }
-
                 case BVOp::And: {
-                    const auto& ba = bits[n.a];
-                    const auto& bb = bits[n.b];
-                    for (uint32_t i = 0; i < w; ++i) out[i] = sat.mk_and(ba[i], bb[i]);
+                    for (uint32_t i = 0; i < w; ++i) out[i] = sat.mk_and(bits[n.a][i], bits[n.b][i]);
                     break;
                 }
-
                 case BVOp::Or: {
-                    const auto& ba = bits[n.a];
-                    const auto& bb = bits[n.b];
-                    for (uint32_t i = 0; i < w; ++i) out[i] = sat.mk_or(ba[i], bb[i]);
+                    for (uint32_t i = 0; i < w; ++i) out[i] = sat.mk_or(bits[n.a][i], bits[n.b][i]);
                     break;
                 }
-
                 case BVOp::Xor: {
-                    const auto& ba = bits[n.a];
-                    const auto& bb = bits[n.b];
-                    for (uint32_t i = 0; i < w; ++i) out[i] = sat.mk_xor(ba[i], bb[i]);
+                    for (uint32_t i = 0; i < w; ++i) out[i] = sat.mk_xor(bits[n.a][i], bits[n.b][i]);
                     break;
                 }
-
                 case BVOp::Add: {
                     add_adder(bits[n.a], bits[n.b], sat.false_lit(), out);
                     break;
                 }
-
                 case BVOp::Sub: {
-                    const auto& ba = bits[n.a];
-                    const auto& bb = bits[n.b];
                     std::vector<Lit> nb(w);
-                    for (uint32_t i = 0; i < w; ++i) nb[i] = CDCLSolver::neg(bb[i]);
-                    add_adder(ba, nb, sat.true_lit(), out);
+                    for (uint32_t i = 0; i < w; ++i) nb[i] = CDCLSolver::neg(bits[n.b][i]);
+                    add_adder(bits[n.a], nb, sat.true_lit(), out);
                     break;
                 }
 
                 case BVOp::Mul: {
                     const auto& ba = bits[n.a];
                     const auto& bb = bits[n.b];
-                    std::vector<Lit> acc(w, sat.false_lit());
-                    for (uint32_t i = 0; i < w; ++i) {
-                        if (bb[i] == sat.false_lit()) continue;
-                        std::vector<Lit> partial(w, sat.false_lit());
-                        for (uint32_t j = 0; i + j < w; ++j) {
-                            partial[i + j] = sat.mk_and(ba[j], bb[i]);
+                    auto mul_half = [&](uint32_t ja_off, uint32_t ja_len, uint32_t ib_lim) {
+                        std::vector<Lit> acc(w, sat.false_lit());
+                        for (uint32_t i = 0; i < ib_lim; ++i) {
+                            if (bb[i] == sat.false_lit()) continue;
+                            std::vector<Lit> partial(w, sat.false_lit());
+                            for (uint32_t j = 0; j < ja_len && i + j < w; ++j)
+                                partial[i + j] = sat.mk_and(ba[ja_off + j], bb[i]);
+                            std::vector<Lit> next_acc;
+                            add_adder(acc, partial, sat.false_lit(), next_acc);
+                            acc = std::move(next_acc);
                         }
-                        std::vector<Lit> next_acc;
-                        add_adder(acc, partial, sat.false_lit(), next_acc);
-                        acc = std::move(next_acc);
+                        return acc;
+                    };
+                    bool has_hi = false;
+                    if (w == 32) {
+                        for (uint32_t j = 16; j < 32; ++j)
+                            if (ba[j] != sat.false_lit()) { has_hi = true; break; }
                     }
-                    out = std::move(acc);
+                    if (!has_hi) {
+                        out = mul_half(0, w, w);
+                    } else {
+                        std::vector<Lit> lo = mul_half(0, 16, 32), hi = mul_half(16, 16, 16), hi_sh(32, sat.false_lit());
+                        for (uint32_t j = 0; j < 16; ++j) hi_sh[16 + j] = hi[j];
+                        add_adder(lo, hi_sh, sat.false_lit(), out);
+                    }
                     break;
                 }
 
@@ -846,6 +898,54 @@ SolveOutcome solve_nonzero(
     BitBlaster blaster(ctx);
     blaster.blast_all(bad_cond);
 
+    // Inductive LSB-to-MSB bit-sliced equivalence check when bad_cond is (lhs != rhs) && domain
+    if (root.width == 1) {
+        BVNodeId neq_eq_node = UINT32_MAX;
+        std::vector<BVNodeId> dom_nodes, stack = {bad_cond};
+        while (!stack.empty()) {
+            BVNodeId u = stack.back();
+            stack.pop_back();
+            const BVNode& n = nodes[u];
+            if (n.op == BVOp::And && n.width == 1) {
+                stack.push_back(n.a);
+                stack.push_back(n.b);
+            } else if (neq_eq_node == UINT32_MAX && n.op == BVOp::Not && n.width == 1 &&
+                       nodes[n.a].op == BVOp::Eq && nodes[nodes[n.a].a].width > 1) {
+                neq_eq_node = n.a;
+            } else {
+                dom_nodes.push_back(u);
+            }
+        }
+        if (neq_eq_node != UINT32_MAX) {
+            for (BVNodeId d : dom_nodes) {
+                if (!blaster.sat.add_clause(blaster.bits[d][0])) {
+                    out.status = SolveOutcome::Unsat;
+                    return out;
+                }
+            }
+            const auto& ba = blaster.bits[nodes[neq_eq_node].a];
+            const auto& bb = blaster.bits[nodes[neq_eq_node].b];
+            bool all_bits_unsat = true;
+            for (size_t bi = 0; bi < ba.size(); ++bi) {
+                CDCLSolver::Lit diff_i = blaster.sat.mk_xor(ba[bi], bb[bi]);
+                SolveOutcome::Status bst = blaster.sat.solve_assuming(diff_i, max_sat_conflicts);
+                if (bst == SolveOutcome::Unsat) {
+                    if (!blaster.sat.add_clause(CDCLSolver::neg(diff_i))) {
+                        out.status = SolveOutcome::Unsat;
+                        return out;
+                    }
+                } else {
+                    all_bits_unsat = false;
+                    break;
+                }
+            }
+            if (all_bits_unsat) {
+                out.status = SolveOutcome::Unsat;
+                return out;
+            }
+        }
+    }
+
     CDCLSolver::Lit root_lit = blaster.sat.false_lit();
     for (CDCLSolver::Lit b : blaster.bits[bad_cond]) {
         root_lit = blaster.sat.mk_or(root_lit, b);
@@ -867,9 +967,7 @@ SolveOutcome solve_nonzero(
             uint64_t val = 0;
             const auto& vbits = blaster.bits[vid];
             for (size_t bi = 0; bi < vbits.size(); ++bi) {
-                if (blaster.sat.value_lit(vbits[bi]) == 1) {
-                    val |= (1ULL << bi);
-                }
+                if (blaster.sat.value_lit(vbits[bi]) == 1) val |= (1ULL << bi);
             }
             model[vi] = val;
         }
