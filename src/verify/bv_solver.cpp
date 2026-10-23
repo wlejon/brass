@@ -13,63 +13,34 @@ namespace {
 
 constexpr bool is_commutative(BVOp op) noexcept {
     switch (op) {
-        case BVOp::And:
-        case BVOp::Or:
-        case BVOp::Xor:
-        case BVOp::Add:
-        case BVOp::Mul:
-        case BVOp::Eq:
-        case BVOp::Ne:
-        case BVOp::UAddOvf:
-        case BVOp::SAddOvf:
-        case BVOp::UMulOvf:
-        case BVOp::SMulOvf:
+        case BVOp::And: case BVOp::Or: case BVOp::Xor: case BVOp::Add: case BVOp::Mul:
+        case BVOp::Eq: case BVOp::Ne:
+        case BVOp::UAddOvf: case BVOp::SAddOvf: case BVOp::UMulOvf: case BVOp::SMulOvf:
             return true;
         default:
             return false;
     }
 }
 
-uint64_t f32_to_bits(float f) noexcept {
-    uint32_t u = 0;
-    std::memcpy(&u, &f, sizeof(float));
-    return u;
-}
-
+uint64_t f32_to_bits(float f) noexcept { uint32_t u = 0; std::memcpy(&u, &f, sizeof(float)); return u; }
 float bits_to_f32(uint64_t b) noexcept {
     uint32_t u = static_cast<uint32_t>(b & 0xFFFFFFFFULL);
     float f = 0.0f;
     std::memcpy(&f, &u, sizeof(float));
     return f;
 }
-
-uint64_t f64_to_bits(double d) noexcept {
-    uint64_t u = 0;
-    std::memcpy(&u, &d, sizeof(double));
-    return u;
-}
-
-double bits_to_f64(uint64_t b) noexcept {
-    double d = 0.0;
-    std::memcpy(&d, &b, sizeof(double));
-    return d;
-}
+uint64_t f64_to_bits(double d) noexcept { uint64_t u = 0; std::memcpy(&u, &d, sizeof(double)); return u; }
+double bits_to_f64(uint64_t b) noexcept { double d = 0.0; std::memcpy(&d, &b, sizeof(double)); return d; }
 
 bool mul_u64_overflow(uint64_t a, uint64_t b) noexcept {
-    if (a == 0 || b == 0) return false;
-    uint64_t prod = a * b;
-    return (prod / a) != b;
+    return a != 0 && b != 0 && ((a * b) / a) != b;
 }
 
 bool mul_s64_overflow(int64_t a, int64_t b) noexcept {
     if (a == 0 || b == 0) return false;
-    if (a == -1 && b == INT64_MIN) return true;
-    if (b == -1 && a == INT64_MIN) return true;
-    if (a > 0 && b > 0 && a > INT64_MAX / b) return true;
-    if (a > 0 && b < 0 && b < INT64_MIN / a) return true;
-    if (a < 0 && b > 0 && a < INT64_MIN / b) return true;
-    if (a < 0 && b < 0 && a < INT64_MAX / b) return true;
-    return false;
+    if ((a == -1 && b == INT64_MIN) || (b == -1 && a == INT64_MIN)) return true;
+    if (a > 0) return b > 0 ? (a > INT64_MAX / b) : (b < INT64_MIN / a);
+    return b > 0 ? (a < INT64_MIN / b) : (a < INT64_MAX / b);
 }
 
 } // namespace
@@ -580,14 +551,39 @@ BVNodeId BVContext::make_binary(BVOp op, BVNodeId a, BVNodeId b, uint32_t res_wi
         case BVOp::SDiv:
             if (cb.op == BVOp::Const && cb.imm == 1) return a;
             if (a == b && intervals_[b].umin > 0) return make_const(1, w);
+            if (cb.op == BVOp::Const && std::has_single_bit(cb.imm)) {
+                uint32_t sh = static_cast<uint32_t>(std::countr_zero(cb.imm));
+                if (op == BVOp::UDiv) {
+                    return make_binary(BVOp::LShr, a, make_const(sh, w), w);
+                }
+                if (sh > 0 && sh + 1 < w) {
+                    BVNodeId sh_c = make_const(sh, w);
+                    BVNodeId non_neg = make_binary(BVOp::Sge, a, make_const(0, w), 1);
+                    BVNodeId pos_q = make_binary(BVOp::LShr, a, sh_c, w);
+                    BVNodeId neg_a = make_unary(BVOp::Neg, a, w);
+                    BVNodeId neg_q = make_unary(BVOp::Neg, make_binary(BVOp::LShr, neg_a, sh_c, w), w);
+                    return make_ite(non_neg, pos_q, neg_q);
+                }
+            }
             break;
 
         case BVOp::URem:
         case BVOp::SRem:
             if (cb.op == BVOp::Const && cb.imm == 1) return make_const(0, w);
             if (a == b && intervals_[b].umin > 0) return make_const(0, w);
-            if (op == BVOp::URem && cb.op == BVOp::Const && std::has_single_bit(cb.imm)) {
-                return make_binary(BVOp::And, a, make_const(cb.imm - 1, w), w);
+            if (cb.op == BVOp::Const && std::has_single_bit(cb.imm)) {
+                BVNodeId mask_c = make_const(cb.imm - 1, w);
+                if (op == BVOp::URem) {
+                    return make_binary(BVOp::And, a, mask_c, w);
+                }
+                uint32_t sh = static_cast<uint32_t>(std::countr_zero(cb.imm));
+                if (sh > 0 && sh + 1 < w) {
+                    BVNodeId non_neg = make_binary(BVOp::Sge, a, make_const(0, w), 1);
+                    BVNodeId pos_r = make_binary(BVOp::And, a, mask_c, w);
+                    BVNodeId neg_a = make_unary(BVOp::Neg, a, w);
+                    BVNodeId neg_r = make_unary(BVOp::Neg, make_binary(BVOp::And, neg_a, mask_c, w), w);
+                    return make_ite(non_neg, pos_r, neg_r);
+                }
             }
             break;
 

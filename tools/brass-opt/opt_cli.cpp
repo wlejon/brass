@@ -122,6 +122,7 @@ bool apply_flag(std::string_view arg, OptCli& cli) {
         {{"--guard-elim"}, {&OptCli::enable_guard_elim, &OptCli::enable_sccp}},
         {{"--bce"}, {&OptCli::enable_bce}},
         {{"--smt-guard-elim"}, {&OptCli::enable_smt_guard_elim}},
+        {{"--superopt"}, {&OptCli::enable_superopt}},
         {{"--dump-range-stats"}, {&OptCli::dump_range_stats, &OptCli::enable_bce}},
         {{"--cfg-simplify"}, {&OptCli::enable_cfg_simplify}},
         {{"--loop-unswitch"}, {&OptCli::enable_loop_unswitch}},

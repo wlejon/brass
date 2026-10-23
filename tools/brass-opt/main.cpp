@@ -202,6 +202,10 @@ int main(int argc, char** argv) {
         brass::run_smt_guard_elimination(*mod);
         if (!verified(*mod, "smt_guard_elim")) return 1;
     }
+    if (cli.enable_superopt) {
+        brass::run_mir_superopt(*mod);
+        if (!verified(*mod, "superopt")) return 1;
+    }
 
     if (!cli.emit_smt2_file.empty() && unopt_mod) {
         std::ostringstream smt2_out;
