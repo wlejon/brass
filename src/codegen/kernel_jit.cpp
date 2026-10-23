@@ -123,6 +123,56 @@ void KernelJit::setup_default_symbols(codegen::JitExecutionEngine& engine) const
     engine.register_external_symbol("tanh", reinterpret_cast<void*>(static_cast<double(*)(double)>(&std::tanh)));
     engine.register_external_symbol("tanhf", reinterpret_cast<void*>(static_cast<float(*)(float)>(&std::tanh)));
 
+    static const auto fmin_f = +[](float a, float b) -> float { return std::fmin(a, b); };
+    static const auto fmax_f = +[](float a, float b) -> float { return std::fmax(a, b); };
+    static const auto rcp_f = +[](float x) -> float { return 1.0f / x; };
+    static const auto div_f = +[](float a, float b) -> float { return a / b; };
+    static const auto clamp_f = +[](float x, float lo, float hi) -> float {
+        return std::fmin(std::fmax(x, lo), hi);
+    };
+    static const auto mix_f = +[](float x, float y, float a) -> float {
+        return x + (y - x) * a;
+    };
+    static const auto step_f = +[](float edge, float x) -> float {
+        return x < edge ? 0.0f : 1.0f;
+    };
+    static const auto smoothstep_f = +[](float e0, float e1, float x) -> float {
+        float t = std::fmin(std::fmax((x - e0) / (e1 - e0), 0.0f), 1.0f);
+        return t * t * (3.0f - 2.0f * t);
+    };
+    static const auto fract_f = +[](float x) -> float { return x - std::floor(x); };
+    static const auto sign_f = +[](float x) -> float {
+        return (x > 0.0f) ? 1.0f : ((x < 0.0f) ? -1.0f : 0.0f);
+    };
+    engine.register_external_symbol("ptx_sin", reinterpret_cast<void*>(static_cast<float(*)(float)>(&std::sin)));
+    engine.register_external_symbol("ptx_cos", reinterpret_cast<void*>(static_cast<float(*)(float)>(&std::cos)));
+    engine.register_external_symbol("ptx_tanh", reinterpret_cast<void*>(static_cast<float(*)(float)>(&std::tanh)));
+    engine.register_external_symbol("ptx_sqrt", reinterpret_cast<void*>(static_cast<float(*)(float)>(&std::sqrt)));
+    engine.register_external_symbol("ptx_sqrt_rn", reinterpret_cast<void*>(static_cast<float(*)(float)>(&std::sqrt)));
+    engine.register_external_symbol("ptx_rsqrt", reinterpret_cast<void*>(rsqrt_f));
+    engine.register_external_symbol("ptx_fabs", reinterpret_cast<void*>(static_cast<float(*)(float)>(&std::fabs)));
+    engine.register_external_symbol("ptx_fmin", reinterpret_cast<void*>(fmin_f));
+    engine.register_external_symbol("ptx_fmax", reinterpret_cast<void*>(fmax_f));
+    engine.register_external_symbol("ptx_ex2", reinterpret_cast<void*>(static_cast<float(*)(float)>(&std::exp2)));
+    engine.register_external_symbol("ptx_lg2", reinterpret_cast<void*>(static_cast<float(*)(float)>(&std::log2)));
+    engine.register_external_symbol("ptx_exp", reinterpret_cast<void*>(static_cast<float(*)(float)>(&std::exp)));
+    engine.register_external_symbol("ptx_log", reinterpret_cast<void*>(static_cast<float(*)(float)>(&std::log)));
+    engine.register_external_symbol("ptx_rcp", reinterpret_cast<void*>(rcp_f));
+    engine.register_external_symbol("ptx_rcp_approx", reinterpret_cast<void*>(rcp_f));
+    engine.register_external_symbol("ptx_div_approx", reinterpret_cast<void*>(div_f));
+    engine.register_external_symbol("ptx_clamp", reinterpret_cast<void*>(clamp_f));
+    engine.register_external_symbol("clampf", reinterpret_cast<void*>(clamp_f));
+    engine.register_external_symbol("ptx_mix", reinterpret_cast<void*>(mix_f));
+    engine.register_external_symbol("mixf", reinterpret_cast<void*>(mix_f));
+    engine.register_external_symbol("ptx_step", reinterpret_cast<void*>(step_f));
+    engine.register_external_symbol("stepf", reinterpret_cast<void*>(step_f));
+    engine.register_external_symbol("ptx_smoothstep", reinterpret_cast<void*>(smoothstep_f));
+    engine.register_external_symbol("smoothstepf", reinterpret_cast<void*>(smoothstep_f));
+    engine.register_external_symbol("ptx_fract", reinterpret_cast<void*>(fract_f));
+    engine.register_external_symbol("fractf", reinterpret_cast<void*>(fract_f));
+    engine.register_external_symbol("ptx_sign", reinterpret_cast<void*>(sign_f));
+    engine.register_external_symbol("signf", reinterpret_cast<void*>(sign_f));
+
     for (const auto& [name, addr] : external_symbols_) {
         engine.register_external_symbol(name, addr);
     }

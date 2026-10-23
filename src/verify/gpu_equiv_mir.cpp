@@ -554,6 +554,62 @@ GpuExecTrace execute_gpu_mir(
                     res = env.eval_uf(ctx, "gpu_f16_to_f32", {gpu_coerce_width(ctx, get_v(inst->operand(0)), 32)}, 32, true);
                 } else if (sym == "ptx_f32_to_f16") {
                     res = env.eval_uf(ctx, "gpu_f32_to_f16", {gpu_coerce_width(ctx, get_v(inst->operand(0)), 32)}, 32, false);
+                } else if (sym == "clampf" || sym == "ptx_clamp") {
+                    res = env.eval_uf(ctx, "gpu_clamp", {
+                        gpu_coerce_width(ctx, get_v(inst->operand(0)), rw),
+                        gpu_coerce_width(ctx, get_v(inst->operand(1)), rw),
+                        gpu_coerce_width(ctx, get_v(inst->operand(2)), rw)}, rw, true);
+                } else if (sym == "mixf" || sym == "ptx_mix") {
+                    res = env.eval_uf(ctx, "gpu_mix", {
+                        gpu_coerce_width(ctx, get_v(inst->operand(0)), rw),
+                        gpu_coerce_width(ctx, get_v(inst->operand(1)), rw),
+                        gpu_coerce_width(ctx, get_v(inst->operand(2)), rw)}, rw, true);
+                } else if (sym == "smoothstepf" || sym == "ptx_smoothstep") {
+                    res = env.eval_uf(ctx, "gpu_smoothstep", {
+                        gpu_coerce_width(ctx, get_v(inst->operand(0)), rw),
+                        gpu_coerce_width(ctx, get_v(inst->operand(1)), rw),
+                        gpu_coerce_width(ctx, get_v(inst->operand(2)), rw)}, rw, true);
+                } else if (sym == "stepf" || sym == "ptx_step") {
+                    res = env.eval_uf(ctx, "gpu_step", {
+                        gpu_coerce_width(ctx, get_v(inst->operand(0)), rw),
+                        gpu_coerce_width(ctx, get_v(inst->operand(1)), rw)}, rw, true);
+                } else if (sym == "fractf" || sym == "ptx_fract") {
+                    res = env.eval_uf(ctx, "gpu_fract", {gpu_coerce_width(ctx, get_v(inst->operand(0)), rw)}, rw, true);
+                } else if (sym == "signf" || sym == "ptx_sign") {
+                    res = env.eval_uf(ctx, "gpu_sign", {gpu_coerce_width(ctx, get_v(inst->operand(0)), rw)}, rw, true);
+                } else if (sym == "tanhf" || sym == "ptx_tanh") {
+                    res = env.eval_uf(ctx, "gpu_tanh", {gpu_coerce_width(ctx, get_v(inst->operand(0)), rw)}, rw, true);
+                } else if (sym == "spirv_vertex_index") {
+                    res = env.eval_uf(ctx, "spirv_vertex_index", {}, 32, false);
+                } else if (sym == "spirv_instance_index") {
+                    res = env.eval_uf(ctx, "spirv_instance_index", {}, 32, false);
+                } else if (sym == "spirv_frag_coord_x" || sym == "spirv_frag_coord_y" ||
+                           sym == "spirv_frag_coord_z" || sym == "spirv_frag_coord_w") {
+                    uint32_t c = sym.ends_with("_x") ? 0u : sym.ends_with("_y") ? 1u : sym.ends_with("_z") ? 2u : 3u;
+                    res = env.eval_uf(ctx, "spirv_frag_coord", {bv_const(ctx, 32, c)}, 32, true);
+                } else if (sym == "spirv_stage_input_f32") {
+                    res = env.eval_uf(ctx, "spirv_stage_in", {
+                        gpu_coerce_width(ctx, get_v(inst->operand(0)), 32),
+                        gpu_coerce_width(ctx, get_v(inst->operand(1)), 32)}, 32, true);
+                } else if (sym == "spirv_set_vertex_position" && inst->operand_count() == 4) {
+                    for (uint32_t c = 0; c < 4; ++c) {
+                        BVNodeId cv = gpu_coerce_width(ctx, get_v(inst->operand(c)), 32);
+                        trace.global_stores.push_back({cur.cond, bv_const(ctx, 64, 0x6000000000000000ULL + c * 4), 4, cv});
+                    }
+                } else if (sym == "spirv_stage_output_f32" && inst->operand_count() >= 3) {
+                    BVNodeId loc_n = get_v(inst->operand(0));
+                    BVNodeId comp_n = get_v(inst->operand(1));
+                    uint64_t loc = (bv_node(ctx, loc_n).op == BVOp::Const) ? bv_node(ctx, loc_n).imm : 0;
+                    uint64_t comp = (bv_node(ctx, comp_n).op == BVOp::Const) ? bv_node(ctx, comp_n).imm : 0;
+                    BVNodeId cv = gpu_coerce_width(ctx, get_v(inst->operand(2)), 32);
+                    trace.global_stores.push_back({cur.cond, bv_const(ctx, 64, 0x6000000000001000ULL + loc * 16 + comp * 4), 4, cv});
+                } else if (sym == "spirv_stage_output_vec4" && inst->operand_count() == 5) {
+                    BVNodeId loc_n = get_v(inst->operand(0));
+                    uint64_t loc = (bv_node(ctx, loc_n).op == BVOp::Const) ? bv_node(ctx, loc_n).imm : 0;
+                    for (uint32_t c = 0; c < 4; ++c) {
+                        BVNodeId cv = gpu_coerce_width(ctx, get_v(inst->operand(1 + c)), 32);
+                        trace.global_stores.push_back({cur.cond, bv_const(ctx, 64, 0x6000000000001000ULL + loc * 16 + c * 4), 4, cv});
+                    }
                 } else {
                     std::vector<BVNodeId> args;
                     for (size_t i = 0; i < inst->operand_count(); ++i) args.push_back(get_v(inst->operand(i)));

@@ -41,6 +41,7 @@ GpuExecTrace execute_gpu_spirv(
 
     std::unordered_map<spirv::Id, uint32_t> builtin_map;
     std::unordered_map<spirv::Id, uint32_t> spec_id_map;
+    std::unordered_map<spirv::Id, uint32_t> location_map;
     for (const auto& ann : mod.annotations) {
         if (ann.op == spv::OpDecorate && ann.operands.size() >= 3) {
             spirv::Id target = ann.operands[0].value;
@@ -48,6 +49,7 @@ GpuExecTrace execute_gpu_spirv(
             uint32_t val = ann.operands[2].value;
             if (dec == spv::DecorationBuiltIn) builtin_map[target] = val;
             else if (dec == spv::DecorationSpecId) spec_id_map[target] = val;
+            else if (dec == spv::DecorationLocation) location_map[target] = val;
         }
     }
 
@@ -92,6 +94,7 @@ GpuExecTrace execute_gpu_spirv(
     std::unordered_map<spirv::Id, std::vector<BVNodeId>> var_composites;
     std::unordered_map<spirv::Id, BVNodeId> var_scalars;
     std::unordered_map<spirv::Id, uint32_t> workgroup_var_idx;
+    std::unordered_map<spirv::Id, uint64_t> stage_out_base;
     spirv::Id push_const_var = 0;
 
     for (const auto& g : mod.globals) {
@@ -155,6 +158,30 @@ GpuExecTrace execute_gpu_spirv(
                     var_composites[g.result] = {env.ntid[0], env.ntid[1], env.ntid[2]};
                 } else if (bi == spv::BuiltInSubgroupLocalInvocationId) {
                     var_scalars[g.result] = env.raw_subgroup_lane;
+                } else if (bi == spv::BuiltInVertexIndex) {
+                    var_scalars[g.result] = env.eval_uf(ctx, "spirv_vertex_index", {}, 32, false);
+                } else if (bi == spv::BuiltInInstanceIndex) {
+                    var_scalars[g.result] = env.eval_uf(ctx, "spirv_instance_index", {}, 32, false);
+                } else if (bi == spv::BuiltInFragCoord) {
+                    var_composites[g.result] = {
+                        env.eval_uf(ctx, "spirv_frag_coord", {bv_const(ctx, 32, 0)}, 32, true),
+                        env.eval_uf(ctx, "spirv_frag_coord", {bv_const(ctx, 32, 1)}, 32, true),
+                        env.eval_uf(ctx, "spirv_frag_coord", {bv_const(ctx, 32, 2)}, 32, true),
+                        env.eval_uf(ctx, "spirv_frag_coord", {bv_const(ctx, 32, 3)}, 32, true)};
+                } else if (location_map.count(g.result)) {
+                    uint32_t loc = location_map[g.result];
+                    var_composites[g.result] = {
+                        env.eval_uf(ctx, "spirv_stage_in", {bv_const(ctx, 32, loc), bv_const(ctx, 32, 0)}, 32, true),
+                        env.eval_uf(ctx, "spirv_stage_in", {bv_const(ctx, 32, loc), bv_const(ctx, 32, 1)}, 32, true),
+                        env.eval_uf(ctx, "spirv_stage_in", {bv_const(ctx, 32, loc), bv_const(ctx, 32, 2)}, 32, true),
+                        env.eval_uf(ctx, "spirv_stage_in", {bv_const(ctx, 32, loc), bv_const(ctx, 32, 3)}, 32, true)};
+                }
+            } else if (sc == spv::StorageClassOutput) {
+                uint32_t bi = builtin_map.count(g.result) ? builtin_map[g.result] : UINT32_MAX;
+                if (bi == spv::BuiltInPosition) {
+                    stage_out_base[g.result] = 0x6000000000000000ULL;
+                } else if (location_map.count(g.result)) {
+                    stage_out_base[g.result] = 0x6000000000001000ULL + static_cast<uint64_t>(location_map[g.result]) * 16ULL;
                 }
             } else if (sc == spv::StorageClassPushConstant) {
                 push_const_var = g.result;
@@ -306,6 +333,10 @@ GpuExecTrace execute_gpu_spirv(
                         cur.chains[inst.result] = {
                             false, true, workgroup_var_idx[base_id],
                             gpu_coerce_width(ctx, get_v(idx_id), 32, false)};
+                    } else if (stage_out_base.count(base_id)) {
+                        BVNodeId idx_v = get_v(idx_id);
+                        uint64_t cidx = (bv_node(ctx, idx_v).op == BVOp::Const) ? bv_node(ctx, idx_v).imm : 0;
+                        stage_out_base[inst.result] = stage_out_base[base_id] + cidx * 4ULL;
                     }
                 }
                 break;
@@ -350,7 +381,19 @@ GpuExecTrace execute_gpu_spirv(
                 BVNodeId val = get_v(val_id);
                 uint32_t nb = ctx.width(val) / 8;
                 if (nb == 0) nb = 4;
-                if (cur.chains.count(ptr_id) && cur.chains[ptr_id].is_workgroup) {
+                if (stage_out_base.count(ptr_id)) {
+                    uint64_t base_addr = stage_out_base[ptr_id];
+                    if (cur.composites.count(val_id)) {
+                        const auto& comp = cur.composites[val_id];
+                        for (size_t c = 0; c < comp.size(); ++c) {
+                            BVNodeId cv = gpu_coerce_width(ctx, comp[c], 32);
+                            trace.global_stores.push_back({cur.cond, bv_const(ctx, 64, base_addr + c * 4), 4, cv});
+                        }
+                    } else {
+                        BVNodeId cv = gpu_coerce_width(ctx, val, 32);
+                        trace.global_stores.push_back({cur.cond, bv_const(ctx, 64, base_addr), 4, cv});
+                    }
+                } else if (cur.chains.count(ptr_id) && cur.chains[ptr_id].is_workgroup) {
                     const auto& ch = cur.chains[ptr_id];
                     record_shared_access(ctx, trace, cur.cond, true, ch.index, ch.elem_idx, nb);
                     BVNodeId caddr = make_shared_canonical_addr(ctx, ch.index, ch.elem_idx, nb);
@@ -583,6 +626,33 @@ GpuExecTrace execute_gpu_spirv(
                     case GLSLstd450Log2: res = env.eval_uf(ctx, "gpu_lg2", {gpu_coerce_width(ctx, a0, rw)}, rw, true); break;
                     case GLSLstd450Exp:  res = env.eval_uf(ctx, "gpu_exp", {gpu_coerce_width(ctx, a0, rw)}, rw, true); break;
                     case GLSLstd450Log:  res = env.eval_uf(ctx, "gpu_log", {gpu_coerce_width(ctx, a0, rw)}, rw, true); break;
+                    case GLSLstd450Tanh: res = env.eval_uf(ctx, "gpu_tanh", {gpu_coerce_width(ctx, a0, rw)}, rw, true); break;
+                    case GLSLstd450FSign: res = env.eval_uf(ctx, "gpu_sign", {gpu_coerce_width(ctx, a0, rw)}, rw, true); break;
+                    case GLSLstd450Fract: res = env.eval_uf(ctx, "gpu_fract", {gpu_coerce_width(ctx, a0, rw)}, rw, true); break;
+                    case GLSLstd450Step:
+                        res = env.eval_uf(ctx, "gpu_step", {
+                            gpu_coerce_width(ctx, a0, rw),
+                            gpu_coerce_width(ctx, get_v(inst.operands[3].value), rw)}, rw, true);
+                        break;
+                    case GLSLstd450FClamp:
+                    case GLSLstd450NClamp:
+                        res = env.eval_uf(ctx, "gpu_clamp", {
+                            gpu_coerce_width(ctx, a0, rw),
+                            gpu_coerce_width(ctx, get_v(inst.operands[3].value), rw),
+                            gpu_coerce_width(ctx, get_v(inst.operands[4].value), rw)}, rw, true);
+                        break;
+                    case GLSLstd450FMix:
+                        res = env.eval_uf(ctx, "gpu_mix", {
+                            gpu_coerce_width(ctx, a0, rw),
+                            gpu_coerce_width(ctx, get_v(inst.operands[3].value), rw),
+                            gpu_coerce_width(ctx, get_v(inst.operands[4].value), rw)}, rw, true);
+                        break;
+                    case GLSLstd450SmoothStep:
+                        res = env.eval_uf(ctx, "gpu_smoothstep", {
+                            gpu_coerce_width(ctx, a0, rw),
+                            gpu_coerce_width(ctx, get_v(inst.operands[3].value), rw),
+                            gpu_coerce_width(ctx, get_v(inst.operands[4].value), rw)}, rw, true);
+                        break;
                     case GLSLstd450UnpackHalf2x16: {
                         BVNodeId lo = env.eval_uf(ctx, "gpu_f16_to_f32", {gpu_coerce_width(ctx, a0, 32)}, 32, true);
                         cur.composites[inst.result] = {lo, bv_const(ctx, 32, 0)};
