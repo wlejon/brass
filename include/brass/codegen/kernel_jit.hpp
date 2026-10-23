@@ -7,6 +7,7 @@
 #include <brass/mir/builder.hpp>
 #include <brass/mir/types.hpp>
 #include <brass/mir/loop_parallel.hpp>
+#include <brass/runtime/parallel_runtime.hpp>
 #include <brass/codegen/jit_exec.hpp>
 
 #include <functional>
@@ -21,7 +22,12 @@
 namespace brass::codegen {
 
 struct KernelOptions {
+    int opt_level = 2;
     bool enable_optimizations = true;
+    bool enable_sroa = true;
+    bool enable_bce = true;
+    bool enable_smt_guard_elim = true;
+    bool enable_superopt = true;
     bool enable_avx2 = true;
     bool enable_fma = true;
     bool enable_fp_reassociation = true;
@@ -37,7 +43,12 @@ struct KernelOptions {
 
     static KernelOptions audio_realtime() {
         KernelOptions opts;
+        opts.opt_level = 2;
         opts.enable_optimizations = true;
+        opts.enable_sroa = true;
+        opts.enable_bce = true;
+        opts.enable_smt_guard_elim = true;
+        opts.enable_superopt = true;
         opts.enable_avx2 = true;
         opts.enable_fma = true;
         opts.enable_fp_reassociation = true;
@@ -50,6 +61,77 @@ struct KernelOptions {
         return opts;
     }
 };
+
+using KernelJitOptions = KernelOptions;
+
+// Convenience helper to dispatch [start, end) iterations across brass's persistent DOALL worker pool.
+template <typename BodyFn>
+inline void parallel_for(int64_t start, int64_t end, BodyFn&& fn, uint64_t grain_size = 0) {
+    if (end <= start) return;
+    struct Context {
+        int64_t base;
+        BodyFn* body;
+    } ctx{start, &fn};
+    uint64_t trip_count = static_cast<uint64_t>(end - start);
+    ::brass_parallel_for(
+        trip_count,
+        grain_size,
+        +[](uint64_t chunk_start, uint64_t chunk_end, void* raw_ctx) {
+            auto* c = static_cast<Context*>(raw_ctx);
+            (*c->body)(c->base + static_cast<int64_t>(chunk_start),
+                       c->base + static_cast<int64_t>(chunk_end));
+        },
+        &ctx,
+        runtime::ReductionKind::None,
+        nullptr
+    );
+}
+
+inline void brass_parallel_for(int64_t start, int64_t end, void (*fn)(int64_t, void*), void* user_ctx) {
+    if (end <= start || !fn) return;
+    struct Context {
+        int64_t base;
+        void (*fn)(int64_t, void*);
+        void* user_ctx;
+    } ctx{start, fn, user_ctx};
+    uint64_t trip_count = static_cast<uint64_t>(end - start);
+    ::brass_parallel_for(
+        trip_count,
+        0,
+        +[](uint64_t chunk_start, uint64_t chunk_end, void* raw_ctx) {
+            auto* c = static_cast<Context*>(raw_ctx);
+            for (uint64_t i = chunk_start; i < chunk_end; ++i) {
+                c->fn(c->base + static_cast<int64_t>(i), c->user_ctx);
+            }
+        },
+        &ctx,
+        runtime::ReductionKind::None,
+        nullptr
+    );
+}
+
+inline void brass_parallel_for_range(int64_t start, int64_t end, void (*fn)(int64_t, int64_t, void*), void* user_ctx, uint64_t grain_size = 0) {
+    if (end <= start || !fn) return;
+    struct Context {
+        int64_t base;
+        void (*fn)(int64_t, int64_t, void*);
+        void* user_ctx;
+    } ctx{start, fn, user_ctx};
+    uint64_t trip_count = static_cast<uint64_t>(end - start);
+    ::brass_parallel_for(
+        trip_count,
+        grain_size,
+        +[](uint64_t chunk_start, uint64_t chunk_end, void* raw_ctx) {
+            auto* c = static_cast<Context*>(raw_ctx);
+            c->fn(c->base + static_cast<int64_t>(chunk_start),
+                  c->base + static_cast<int64_t>(chunk_end),
+                  c->user_ctx);
+        },
+        &ctx,
+        runtime::ReductionKind::None,
+        nullptr
+    );
+}
 
 struct KernelDependenceInfo {
     DependenceKind kind = DependenceKind::None;
@@ -373,3 +455,6 @@ private:
 };
 
 } // namespace brass::codegen
+
+using brass::codegen::brass_parallel_for;
+using brass::codegen::brass_parallel_for_range;

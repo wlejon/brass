@@ -559,3 +559,101 @@ TEST_CASE("Kernel JIT - C-API Bindings (Compile & Execute Pure-Compute Kernel)")
     brass_kernel_options_destroy(opts);
     brass_context_destroy(ctx);
 }
+
+TEST_CASE("Kernel JIT - SMT Guard Elimination, MIR Superopt, BCE & SROA (#96)") {
+    Module mod("superopt_guard_kernel_mod");
+
+    // Kernel with redundant bitmask on bounded index, power-of-two division, and guarded bounds check:
+    // out[i] = ((i & 0x7FFFFFFF) / 8) * 10 + in[i]
+    Function* fn = mod.create_function("superopt_guard_kernel", Type::void_type(), {
+        Type::ptr(), Type::ptr(), Type::i64()
+    });
+
+    Builder b(mod);
+    b.set_function(fn);
+
+    BasicBlock* entry = b.append_block("entry");
+    Value* in_p = b.add_block_param(entry, Type::ptr());
+    Value* out_p = b.add_block_param(entry, Type::ptr());
+    Value* n_val = b.add_block_param(entry, Type::i64());
+    in_p->set_noalias(true);
+    out_p->set_noalias(true);
+
+    BasicBlock* hdr = b.create_block("loop_hdr");
+    BasicBlock* body = b.create_block("loop_body");
+    BasicBlock* exit = b.create_block("loop_exit");
+
+    b.position_at_end(entry);
+    Value* zero = b.build_iconst_i64(0);
+    Value* one = b.build_iconst_i64(1);
+    Value* eight = b.build_iconst_i64(8);
+    Value* ten = b.build_iconst_i64(10);
+    Value* mask = b.build_iconst_i64(0x7FFFFFFF);
+    Value* bound = b.build_iconst_i64(1024);
+    b.build_br(hdr, {zero});
+
+    fn->append_block(hdr);
+    b.position_at_end(hdr);
+    Value* iv = b.add_block_param(hdr, Type::i64());
+    Value* cond = b.build_slt(iv, bound);
+    b.build_br_if(cond, body, {}, exit, {});
+
+    fn->append_block(body);
+    b.position_at_end(body);
+    // Redundant bounds check (0 <= iv < 1024 is already guaranteed by loop header)
+    Value* non_neg = b.build_sge(iv, zero);
+    Value* in_range = b.build_slt(iv, bound);
+    Value* safe = b.build_and(non_neg, in_range);
+    // Redundant mask and signed power-of-two division on non-negative iv
+    Value* masked = b.build_and(iv, mask);
+    Value* div8 = b.build_sdiv(masked, eight);
+    Value* scaled = b.build_mul(div8, ten);
+
+    KernelBuilder kb(b);
+    Value* loaded = kb.load_i64_indexed(in_p, iv, 8, 0);
+    Value* sum = b.build_add(scaled, loaded);
+    Value* res = b.build_select(safe, sum, zero);
+    kb.store_i64_indexed(out_p, iv, res, 8, 0);
+
+    Value* next_iv = b.build_add(iv, one);
+    b.build_br(hdr, {next_iv});
+
+    fn->append_block(exit);
+    b.position_at_end(exit);
+    b.build_ret_void();
+
+    fn->rebuild_cfg_predecessors();
+
+    KernelOptions opts;
+    opts.opt_level = 2;
+    opts.enable_sroa = true;
+    opts.enable_bce = true;
+    opts.enable_smt_guard_elim = true;
+    opts.enable_superopt = true;
+
+    KernelJit jit(opts);
+    KernelFunction kfn = jit.compile(mod, "superopt_guard_kernel");
+    REQUIRE(kfn.is_valid());
+
+    auto fn_ptr = kfn.as<void(*)(const int64_t*, int64_t*, int64_t)>();
+    REQUIRE(fn_ptr != nullptr);
+
+    std::vector<int64_t> in_data(1024), out_data(1024, 0);
+    for (int64_t i = 0; i < 1024; ++i) in_data[static_cast<size_t>(i)] = i * 3 + 1;
+    fn_ptr(in_data.data(), out_data.data(), 1024);
+
+    for (int64_t i = 0; i < 1024; ++i) {
+        CHECK_EQ(out_data[static_cast<size_t>(i)], (i / 8) * 10 + (i * 3 + 1));
+    }
+
+    // Verify parallel_for helper on persistent DOALL pool
+    std::vector<int64_t> par_out(256, 0);
+    brass::codegen::parallel_for(0, 256, [&](int64_t s, int64_t e) {
+        for (int64_t idx = s; idx < e; ++idx) {
+            par_out[static_cast<size_t>(idx)] = idx * idx;
+        }
+    });
+    for (int64_t i = 0; i < 256; ++i) {
+        CHECK_EQ(par_out[static_cast<size_t>(i)], i * i);
+    }
+}

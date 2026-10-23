@@ -3,6 +3,10 @@
 #include <brass/mir/printer.hpp>
 #include <iostream>
 #include <brass/mir/loop_opt.hpp>
+#include <brass/mir/smt_guard_elim.hpp>
+#include <brass/mir/superopt.hpp>
+#include <brass/mir/scalar_opt.hpp>
+#include <brass/mir/sroa.hpp>
 #include <brass/mir/verifier.hpp>
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/loop_analysis.hpp>
@@ -210,8 +214,10 @@ void KernelJit::run_kernel_optimizations(Module& mod) const {
     }
 
     // 2. Compute kernel optimization pass (FMA fusion, Vectorization, Unrolling, DCE, GVN)
-    if (options_.enable_optimizations) {
+    if (options_.enable_optimizations && options_.opt_level >= 1) {
         LoopOptOptions loop_opts;
+        loop_opts.enable_sroa = options_.enable_sroa && (options_.opt_level >= 2);
+        loop_opts.enable_bce = options_.enable_bce && (options_.opt_level >= 2);
         loop_opts.enable_avx2 = options_.enable_avx2;
         loop_opts.enable_fma = options_.enable_fma;
         loop_opts.enable_fp_reassociation = options_.enable_fp_reassociation || mod.allow_fp_reassociation();
@@ -228,6 +234,15 @@ void KernelJit::run_kernel_optimizations(Module& mod) const {
         }
         for (Function* fn : fns) {
             optimize_function(*fn, loop_opts);
+            if (options_.opt_level >= 2) {
+                if (options_.enable_smt_guard_elim) {
+                    run_smt_guard_elimination(*fn, mod);
+                }
+                if (options_.enable_superopt) {
+                    run_mir_superopt(*fn, mod);
+                }
+                eliminate_dead_code(*fn);
+            }
         }
     }
 }
@@ -269,6 +284,11 @@ KernelFunction KernelJit::compile(Module& mod, std::string_view entry_name) {
 
     auto engine = std::make_shared<codegen::JitExecutionEngine>(target_);
     setup_default_symbols(*engine);
+    if (options_.enable_optimizations && options_.opt_level >= 2 && options_.enable_superopt) {
+        codegen::SchedOptions sched_opts = engine->sched_options();
+        sched_opts.enable_lir_superopt = true;
+        engine->set_sched_options(sched_opts);
+    }
 
     bool ok = engine->compile_and_load(working_mod);
     if (!ok) {

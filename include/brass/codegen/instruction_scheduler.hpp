@@ -11,6 +11,7 @@ struct SchedOptions {
     bool enable_pre_ra = false;
     bool enable_post_ra = false;
     bool enable_software_pipelining = false;
+    bool enable_lir_superopt = false;
     size_t max_block_instructions = 500;
     size_t gpr_pressure_threshold = 12;
     size_t xmm_pressure_threshold = 12;

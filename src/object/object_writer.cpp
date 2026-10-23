@@ -11,6 +11,7 @@
 #include <brass/codegen/instruction_scheduler.hpp>
 #include <brass/codegen/software_pipeline.hpp>
 #include <brass/mir/loop_opt.hpp>
+#include <brass/mir/superopt.hpp>
 #include <brass/mir/verifier.hpp>
 #include <algorithm>
 #include <unordered_set>
@@ -241,6 +242,15 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
 
         // 3.6 LIR Peephole Optimization
         codegen::run_lir_peephole_optimizations(*lir);
+        if (sched_opts_.enable_lir_superopt && target_.is_x64()) {
+            SuperoptOptions sopts;
+            sopts.lir_check_flags = true;
+            for (auto& blk : lir->blocks) {
+                if (blk && blk->instructions.size() <= 128) {
+                    run_x64_lir_superopt(*blk, sopts);
+                }
+            }
+        }
 
         if (target_.is_aarch64()) {
             // 4. AArch64 Machine Code Emission
