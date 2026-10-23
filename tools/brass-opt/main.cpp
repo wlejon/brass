@@ -198,6 +198,10 @@ int main(int argc, char** argv) {
     brass::PassPipelineHooks hooks;
     hooks.after_pass = [&mod](std::string_view step) { return verified(*mod, std::string(step).c_str()); };
     if (!brass::run_pipeline(*mod, pipeline, hooks).completed) return 1;
+    if (cli.enable_smt_guard_elim) {
+        brass::run_smt_guard_elimination(*mod);
+        if (!verified(*mod, "smt_guard_elim")) return 1;
+    }
 
     if (!cli.emit_smt2_file.empty() && unopt_mod) {
         std::ostringstream smt2_out;

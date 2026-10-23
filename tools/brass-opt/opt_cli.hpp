@@ -48,6 +48,7 @@ struct OptCli {
     bool enable_loop_unswitch = false;
     bool enable_jump_threading = false;
     bool enable_bce = false;
+    bool enable_smt_guard_elim = false;
     bool enable_wbe = false;
     bool enable_vectorize = false;
     bool enable_slp = false;

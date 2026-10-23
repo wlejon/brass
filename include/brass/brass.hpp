@@ -33,6 +33,7 @@
 #include <brass/mir/cfg_simplify.hpp>
 #include <brass/mir/range_analysis.hpp>
 #include <brass/mir/bounds_check_elim.hpp>
+#include <brass/mir/smt_guard_elim.hpp>
 #include <brass/mir/loop_unswitch.hpp>
 #include <brass/mir/jump_threading.hpp>
 #include <brass/mir/branch_probability.hpp>

@@ -767,7 +767,8 @@ SolveOutcome solve_nonzero(
     uint32_t max_sat_conflicts
 ) {
     SolveOutcome out;
-    const auto& root = ctx.nodes()[bad_cond];
+    const auto& nodes = ctx.nodes();
+    const auto& root = nodes[bad_cond];
     if (root.op == BVOp::Const) {
         if (root.imm == 0) {
             out.status = SolveOutcome::Unsat;
@@ -776,6 +777,36 @@ SolveOutcome solve_nonzero(
             out.model.assign(ctx.vars().size(), 0);
         }
         return out;
+    }
+
+    // Fast level-0 structural contradiction check on top-level 1-bit And conjuncts
+    if (root.width == 1 && root.op == BVOp::And) {
+        std::vector<BVNodeId> stack = {bad_cond};
+        std::vector<BVNodeId> pos_lits;
+        std::vector<BVNodeId> neg_lits;
+        while (!stack.empty()) {
+            BVNodeId u = stack.back();
+            stack.pop_back();
+            const BVNode& n = nodes[u];
+            if (n.op == BVOp::Const && n.imm == 0) {
+                out.status = SolveOutcome::Unsat;
+                return out;
+            }
+            if (n.op == BVOp::And && n.width == 1) {
+                stack.push_back(n.a);
+                stack.push_back(n.b);
+            } else if (n.op == BVOp::Not && n.width == 1) {
+                neg_lits.push_back(n.a);
+            } else {
+                pos_lits.push_back(u);
+            }
+        }
+        for (BVNodeId p : pos_lits) {
+            if (std::find(neg_lits.begin(), neg_lits.end(), p) != neg_lits.end()) {
+                out.status = SolveOutcome::Unsat;
+                return out;
+            }
+        }
     }
 
     // Stage 1: Fast concrete boundary & algebraic constant search

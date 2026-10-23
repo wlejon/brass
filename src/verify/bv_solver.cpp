@@ -399,21 +399,6 @@ BVNodeId BVContext::make_unary(BVOp op, BVNodeId a, uint32_t res_width) {
     if (op == BVOp::Neg) {
         return make_binary(BVOp::Sub, make_const(0, w), a, w);
     }
-    if (op == BVOp::Not && w == 1) {
-        switch (na.op) {
-            case BVOp::Eq:  return make_binary(BVOp::Ne,  na.a, na.b, 1);
-            case BVOp::Ne:  return make_binary(BVOp::Eq,  na.a, na.b, 1);
-            case BVOp::Ult: return make_binary(BVOp::Uge, na.a, na.b, 1);
-            case BVOp::Ule: return make_binary(BVOp::Ugt, na.a, na.b, 1);
-            case BVOp::Ugt: return make_binary(BVOp::Ule, na.a, na.b, 1);
-            case BVOp::Uge: return make_binary(BVOp::Ult, na.a, na.b, 1);
-            case BVOp::Slt: return make_binary(BVOp::Sge, na.a, na.b, 1);
-            case BVOp::Sle: return make_binary(BVOp::Sgt, na.a, na.b, 1);
-            case BVOp::Sgt: return make_binary(BVOp::Sle, na.a, na.b, 1);
-            case BVOp::Sge: return make_binary(BVOp::Slt, na.a, na.b, 1);
-            default: break;
-        }
-    }
     BVNode n;
     n.op = op;
     n.width = w;
@@ -428,9 +413,12 @@ BVNodeId BVContext::make_binary(BVOp op, BVNodeId a, BVNodeId b, uint32_t res_wi
     const uint64_t m = width_mask(na.width);
 
     if (op == BVOp::Ugt) return make_binary(BVOp::Ult, b, a, 1);
-    if (op == BVOp::Uge) return make_binary(BVOp::Ule, b, a, 1);
+    if (op == BVOp::Uge) return make_unary(BVOp::Not, make_binary(BVOp::Ult, a, b, 1), 1);
+    if (op == BVOp::Ule) return make_unary(BVOp::Not, make_binary(BVOp::Ult, b, a, 1), 1);
     if (op == BVOp::Sgt) return make_binary(BVOp::Slt, b, a, 1);
-    if (op == BVOp::Sge) return make_binary(BVOp::Sle, b, a, 1);
+    if (op == BVOp::Sge) return make_unary(BVOp::Not, make_binary(BVOp::Slt, a, b, 1), 1);
+    if (op == BVOp::Sle) return make_unary(BVOp::Not, make_binary(BVOp::Slt, b, a, 1), 1);
+    if (op == BVOp::Ne)  return make_unary(BVOp::Not, make_binary(BVOp::Eq, a, b, 1), 1);
 
     if (is_commutative(op)) {
         bool swap = false;
@@ -620,6 +608,11 @@ BVNodeId BVContext::make_binary(BVOp op, BVNodeId a, BVNodeId b, uint32_t res_wi
             if ((ca.op == BVOp::ZExt && cb.op == BVOp::ZExt && nodes_[ca.a].width == nodes_[cb.a].width) ||
                 (ca.op == BVOp::SExt && cb.op == BVOp::SExt && nodes_[ca.a].width == nodes_[cb.a].width)) {
                 return make_binary(op, ca.a, cb.a, 1);
+            }
+            if (ca.op == BVOp::ZExt && nodes_[ca.a].width == 1 && cb.op == BVOp::Const) {
+                if (cb.imm == 0) return make_unary(BVOp::Not, ca.a, 1);
+                if (cb.imm == 1) return is_eq ? ca.a : make_unary(BVOp::Not, ca.a, 1);
+                return make_const(is_eq ? 0 : 1, 1);
             }
             const auto& ia = intervals_[a];
             const auto& ib = intervals_[b];
