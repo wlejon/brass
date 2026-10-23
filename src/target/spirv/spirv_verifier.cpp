@@ -55,12 +55,24 @@ private:
         for (const auto& imp : m_.ext_imports) define(imp.first, "", 0, 0, nullptr);
         for (size_t i = 0; i < m_.globals.size(); ++i) {
             const Inst& g = m_.globals[i];
-            define(g.result, "", 0, i, &g);
+            if (g.op != spv::OpTypeForwardPointer) define(g.result, "", 0, i, &g);
             if (g.type) value_type_[g.result] = g.type;
-            if (g.op == spv::OpVariable) global_vars_.insert(g.result);
+            if (g.op == spv::OpVariable) {
+                bool must_list = m_.version() >= 0x00010400;
+                if (!must_list && !g.operands.empty()) {
+                    auto sc = static_cast<spv::StorageClass>(g.operands[0].value);
+                    must_list = (sc == spv::StorageClassInput || sc == spv::StorageClassOutput);
+                }
+                if (must_list) global_vars_.insert(g.result);
+            }
         }
         for (const Function& f : m_.functions) {
             define(f.id, f.name, 0, 0, nullptr);
+            for (size_t i = 0; i < f.params.size(); ++i) {
+                const Inst& p = f.params[i];
+                define(p.result, f.name, 0, i, &p);
+                if (p.result && p.type) value_type_[p.result] = p.type;
+            }
             for (const Block& b : f.blocks) {
                 define(b.label, f.name, b.label, 0, nullptr);
                 for (size_t i = 0; i < b.insts.size(); ++i) {
@@ -122,6 +134,7 @@ private:
     }
 
     void check_function(const Function& f) {
+        for (size_t i = 0; i < f.params.size(); ++i) check_operands(f.params[i], f.name, 0, i);
         if (f.blocks.empty()) {
             report(f.name, 0, 0, "function has no blocks");
             return;

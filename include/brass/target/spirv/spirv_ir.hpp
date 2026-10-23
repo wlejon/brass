@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <map>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -62,7 +63,9 @@ struct Function {
     Id id = 0;
     Id return_type = 0;
     Id fn_type = 0;
+    uint32_t control = spv::FunctionControlMaskNone;
     std::string name;
+    std::vector<Inst> params;
     std::vector<Block> blocks;
     // Global variables the function references (the OpEntryPoint interface
     // must list every one of them since SPIR-V 1.4).
@@ -91,6 +94,9 @@ public:
     uint32_t version() const { return version_; }
     Id new_id() { return bound_++; }
     uint32_t bound() const { return bound_; }
+    void reset_from_binary(uint32_t version, Id bound);
+    void register_type(Id id, const TypeInfo& info) { types_[id] = info; }
+    void register_value_type(Id id, Id type_id) { value_types_[id] = type_id; }
 
     // ---- module header sections ------------------------------------------
     void add_capability(spv::Capability c);
@@ -163,9 +169,10 @@ private:
     std::unordered_map<std::string, Id> cache_;
 };
 
-// ---- binary writer ------------------------------------------------------------
+// ---- binary writer / reader ---------------------------------------------------
 // Encodes the module in the logical layout order of SPIR-V 2.4.
 std::vector<uint32_t> write(const Module& m);
+bool parse_binary(std::span<const uint32_t> words, Module& out_mod, std::string* err_out = nullptr);
 
 // ---- verifier ---------------------------------------------------------------
 struct Diagnostic {
@@ -178,6 +185,21 @@ struct Diagnostic {
 
 std::vector<Diagnostic> verify(const Module& m);
 std::string format_diagnostics(const std::vector<Diagnostic>& diags);
+
+inline bool verify_spirv_module(const Module& m, std::string* err_out = nullptr) {
+    std::vector<Diagnostic> diags = verify(m);
+    if (!diags.empty()) {
+        if (err_out) *err_out = format_diagnostics(diags);
+        return false;
+    }
+    return true;
+}
+
+inline bool verify_spirv_module(std::span<const uint32_t> words, std::string* err_out = nullptr) {
+    Module m;
+    if (!parse_binary(words, m, err_out)) return false;
+    return verify_spirv_module(m, err_out);
+}
 
 // ---- text ---------------------------------------------------------------------
 const char* op_name(spv::Op op);

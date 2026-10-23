@@ -59,6 +59,26 @@ Module::Module(uint32_t version) : version_(version) {
     add_capability(spv::CapabilityShader);
 }
 
+void Module::reset_from_binary(uint32_t version, Id bound) {
+    version_ = version;
+    bound_ = bound;
+    addressing_ = spv::AddressingModelLogical;
+    memory_model_ = spv::MemoryModelGLSL450;
+    capabilities.clear();
+    extensions.clear();
+    ext_imports.clear();
+    entry_points.clear();
+    execution_modes.clear();
+    names.clear();
+    annotations.clear();
+    globals.clear();
+    functions.clear();
+    interned_.clear();
+    types_.clear();
+    value_types_.clear();
+    cache_.clear();
+}
+
 void Module::add_capability(spv::Capability c) {
     if (!has_capability(c)) capabilities.push_back(c);
 }
@@ -278,7 +298,8 @@ std::vector<uint32_t> write(const Module& m) {
     for (const Inst& inst : m.annotations) encode(out, inst);
     for (const Inst& inst : m.globals) encode(out, inst);
     for (const Function& f : m.functions) {
-        encode(out, Inst(spv::OpFunction, f.return_type, f.id).lit(spv::FunctionControlMaskNone).id(f.fn_type));
+        encode(out, Inst(spv::OpFunction, f.return_type, f.id).lit(f.control).id(f.fn_type));
+        for (const Inst& p : f.params) encode(out, p);
         for (const Block& b : f.blocks) {
             encode(out, Inst(spv::OpLabel, 0, b.label));
             for (const Inst& inst : b.insts) encode(out, inst);
@@ -343,6 +364,7 @@ std::string dump(const Module& m) {
     for (const Inst& inst : m.globals) os << to_string(inst) << "\n";
     for (const Function& f : m.functions) {
         os << "%" << f.id << " = OpFunction %" << f.return_type << " None %" << f.fn_type << "   ; " << f.name << "\n";
+        for (const Inst& p : f.params) os << "    " << to_string(p) << "\n";
         for (const Block& b : f.blocks) {
             os << "%" << b.label << " = OpLabel\n";
             for (const Inst& inst : b.insts) os << "    " << to_string(inst) << "\n";
