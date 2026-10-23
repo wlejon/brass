@@ -1,4 +1,5 @@
 #include <brass/fuzz/diff_fuzzer.hpp>
+#include <brass/verify/smt_equiv.hpp>
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/vm/fast_interpreter.hpp>
 #include <brass/codegen/jit_exec.hpp>
@@ -253,13 +254,20 @@ OptimizeOutcome DiffFuzzer::optimize(const Module& mod,
     }
     const FuzzPipeline pipeline = options_.pipeline;
     const std::vector<std::string> skip = options_.skip_passes;
+    const bool smt_verify = options_.smt_verify_passes;
 
-    auto task = [state, pipeline, skip, after_step]() {
+    auto task = [state, pipeline, skip, smt_verify, after_step]() {
         Module& m = *state->module;
+        std::unique_ptr<Module> pre_pass_mod;
         PassPipelineHooks hooks;
         hooks.before_pass = [&](std::string_view name) {
-            std::lock_guard<std::mutex> lock(state->mtx);
-            state->current = std::string(name);
+            {
+                std::lock_guard<std::mutex> lock(state->mtx);
+                state->current = std::string(name);
+            }
+            if (smt_verify) {
+                pre_pass_mod = clone_module(m);
+            }
         };
         hooks.after_pass = [&](std::string_view name) {
             DiagnosticReporter diag;
@@ -268,6 +276,15 @@ OptimizeOutcome DiffFuzzer::optimize(const Module& mod,
                 state->outcome.pass = std::string(name);
                 state->outcome.message = "Verification failed after " + std::string(name) + ": " + diag.format_all();
                 return false;
+            }
+            if (smt_verify && pre_pass_mod) {
+                verify::EquivResult eq = verify::verify_mir_module_equivalence(*pre_pass_mod, m);
+                if (eq.status == verify::EquivStatus::Counterexample) {
+                    state->outcome.status = ExecutionStatus::VerificationFailure;
+                    state->outcome.pass = std::string(name);
+                    state->outcome.message = "SMT equivalence check failed after " + std::string(name) + ": " + eq.diagnostic;
+                    return false;
+                }
             }
             return !after_step || after_step(name, m);
         };

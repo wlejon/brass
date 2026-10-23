@@ -105,6 +105,7 @@ bool apply_flag(std::string_view arg, OptCli& cli) {
         {{"-p", "--print"}, {&OptCli::print_canonical}},
         {{"--check-roundtrip"}, {&OptCli::check_roundtrip}},
         {{"--print-pipeline"}, {&OptCli::print_pipeline}},
+        {{"--tv", "--translation-validation"}, {&OptCli::tv}},
         {{"--gc-stress"}, {&OptCli::gc_stress}},
         {{"--inline"}, {&OptCli::enable_inlining}},
         {{"--speculative-inlining", "--enable-speculative-inlining"}, {&OptCli::enable_speculative_inlining}},
@@ -229,6 +230,10 @@ ParseOutcome parse_command_line(int argc, char** argv, OptCli& cli, std::ostream
                 cli.obj_format = v;
             } else if (take_value("--emit-source-map", arg, argc, argv, i, v)) {
                 cli.emit_source_map_file = v;
+            } else if (take_value("--emit-smt2", arg, argc, argv, i, v)) {
+                cli.emit_smt2_file = v;
+            } else if (arg == "--emit-smt2") {
+                cli.emit_smt2_file = "-";
             } else if (take_value("--symbolize-offset", arg, argc, argv, i, v)) {
                 cli.symbolize_offset_arg = v;
             } else if (arg == "-r" || arg == "--run") {

@@ -1,6 +1,7 @@
 #include <brass/brass.hpp>
 #include <brass/mir/coro_transform.hpp>
 #include <brass/runtime/type_feedback.hpp>
+#include <brass/verify/smt_equiv.hpp>
 #include "opt_actions.hpp"
 #include "opt_cli.hpp"
 #include "opt_pipeline.hpp"
@@ -189,9 +190,37 @@ int main(int argc, char** argv) {
     }
     if (cli.run_alias_analysis) brass::opt::report_alias_analysis(*mod, std::cout);
 
+    std::unique_ptr<brass::Module> unopt_mod;
+    if (cli.tv || !cli.emit_smt2_file.empty()) {
+        unopt_mod = brass::clone_module(*mod);
+    }
+
     brass::PassPipelineHooks hooks;
     hooks.after_pass = [&mod](std::string_view step) { return verified(*mod, std::string(step).c_str()); };
     if (!brass::run_pipeline(*mod, pipeline, hooks).completed) return 1;
+
+    if (!cli.emit_smt2_file.empty() && unopt_mod) {
+        std::ostringstream smt2_out;
+        for (const brass::Function* fb : unopt_mod->functions()) {
+            if (!fb || fb->blocks().empty()) continue;
+            const brass::Function* fa = mod->get_function(fb->name());
+            if (!fa || fa->blocks().empty()) continue;
+            smt2_out << brass::verify::export_mir_equivalence_smt2(*fb, *fa);
+        }
+        if (!write_file(cli.emit_smt2_file, smt2_out.str())) {
+            std::cerr << "Error: Could not write SMT2 file '" << cli.emit_smt2_file << "'\n";
+            return 1;
+        }
+        if (cli.emit_smt2_file == "-" && !cli.tv) return 0;
+    }
+
+    if (cli.tv && unopt_mod) {
+        brass::verify::EquivResult eq = brass::verify::verify_mir_module_equivalence(*unopt_mod, *mod);
+        if (eq.status == brass::verify::EquivStatus::Counterexample) {
+            std::cerr << "Translation validation failed: " << eq.diagnostic << "\n";
+            return 1;
+        }
+    }
 
     brass::opt::dump_stats(cli, stats, std::cout);
     return emit(cli, *mod);

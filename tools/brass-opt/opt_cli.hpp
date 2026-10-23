@@ -22,6 +22,8 @@ struct OptCli {
     bool print_canonical = false;
     bool check_roundtrip = false;
     bool print_pipeline = false;
+    bool tv = false;
+    std::string emit_smt2_file;
     bool compile_object = false;
     bool emit_shared = false;
     bool use_jit = false;

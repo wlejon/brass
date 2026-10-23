@@ -82,6 +82,8 @@ struct DiffFuzzerOptions {
     // On a wrong answer from an optimized tier, re-run the pipeline checking
     // the answer after every step to name the first step that changes it.
     bool bisect = true;
+    // Run the symbolic bitvector SMT equivalence checker across every pass.
+    bool smt_verify_passes = false;
     // Budget for running the whole optimization pipeline once.
     uint32_t pipeline_timeout_ms = 20000;
     bool sandbox_process = false;
