@@ -371,6 +371,33 @@ GpuMemorySafetyResult verify_spirv_memory_safety(
     eq_opts.loop_unroll_bound = opts.loop_unroll_bound;
     eq_opts.max_sat_conflicts = opts.max_sat_conflicts;
     GpuExecTrace trace = execute_gpu_spirv(ctx, spv_mod, env, eq_opts);
+    if (!trace.supported) {
+        spirv::ComputeShaderAuditReport rep = spirv::audit_compute_shader(spv_mod);
+        GpuMemorySafetyResult res;
+        if (!rep.parse_ok || !rep.structural_ok || !rep.dominance_ok) {
+            res.status = EquivStatus::Unsupported;
+            res.diagnostic = trace.error_msg;
+            return res;
+        }
+        for (const auto& sa : rep.shared_accesses) {
+            if (sa.proven_in_bounds) {
+                ++res.shared_accesses_proven;
+            } else {
+                GpuAccessViolation v;
+                v.is_shared = true;
+                v.is_alignment = false;
+                v.region_index = sa.variable;
+                v.bound_limit = sa.array_length;
+                v.description = sa.detail;
+                res.violations.push_back(std::move(v));
+                res.status = EquivStatus::Counterexample;
+            }
+        }
+        if (!res.violations.empty()) {
+            res.diagnostic = res.violations.front().description;
+        }
+        return res;
+    }
     return check_trace_memory_safety(ctx, env, trace, opts);
 }
 
@@ -427,6 +454,34 @@ BarrierUniformityResult verify_spirv_barrier_uniformity(
     eq_opts.loop_unroll_bound = opts.loop_unroll_bound;
     eq_opts.max_sat_conflicts = opts.max_sat_conflicts;
     GpuExecTrace trace_a = execute_gpu_spirv(ctx, spv_mod, env_a, eq_opts);
+    if (!trace_a.supported) {
+        spirv::ComputeShaderAuditReport rep = spirv::audit_compute_shader(spv_mod);
+        BarrierUniformityResult res;
+        if (!rep.parse_ok || !rep.structural_ok || !rep.dominance_ok) {
+            res.status = EquivStatus::Unsupported;
+            res.diagnostic = trace_a.error_msg;
+            return res;
+        }
+        for (size_t i = 0; i < rep.barriers.size(); ++i) {
+            const auto& b = rep.barriers[i];
+            const bool is_coll = (b.op != spv::OpControlBarrier);
+            if (b.uniform_control_flow) {
+                if (is_coll) ++res.collectives_proven;
+                else ++res.barriers_proven;
+            } else {
+                BarrierDivergence div;
+                div.is_subgroup_collective = is_coll;
+                div.inst_index = static_cast<uint32_t>(i);
+                div.description = b.detail;
+                res.divergences.push_back(std::move(div));
+                res.status = EquivStatus::Counterexample;
+            }
+        }
+        if (!res.divergences.empty()) {
+            res.diagnostic = res.divergences.front().description;
+        }
+        return res;
+    }
     env_b.param_vars = env_a.param_vars;
     env_b.param_types = env_a.param_types;
     env_b.uf_calls = env_a.uf_calls;

@@ -3,6 +3,7 @@
 #include <brass/mir/function.hpp>
 #include <brass/mir/module.hpp>
 #include <brass/target/ptx/ptx_ir.hpp>
+#include <brass/target/spirv/spirv_binary_reader.hpp>
 #include <brass/target/spirv/spirv_ir.hpp>
 #include <brass/verify/smt_equiv.hpp>
 #include <cstdint>
@@ -151,6 +152,22 @@ uint32_t eliminate_interior_tile_bounds(
     uint32_t tile_extent,
     uint32_t dim_size);
 
+inline spirv::ComputeShaderAuditReport prove_spirv_shader_safety(const spirv::Module& spv_mod) {
+    return spirv::audit_compute_shader(spv_mod);
+}
+
+inline spirv::ComputeShaderAuditReport prove_spirv_shader_safety(std::span<const uint32_t> words) {
+    return spirv::audit_compute_shader_binary(words);
+}
+
+inline bool verify_spirv_structural(const spirv::Module& spv_mod, std::string* err_out = nullptr) {
+    return spirv::verify_spirv_structural(spv_mod, err_out);
+}
+
+inline bool verify_spirv_structural(std::span<const uint32_t> words, std::string* err_out = nullptr) {
+    return spirv::verify_spirv_structural(words, err_out);
+}
+
 } // namespace brass::verify
 
 namespace brass {
@@ -162,6 +179,7 @@ using verify::GpuMemorySafetyResult;
 using verify::GpuProverOptions;
 using verify::TileBoundsProofResult;
 using verify::eliminate_interior_tile_bounds;
+using verify::prove_spirv_shader_safety;
 using verify::prove_tile_interior_bounds;
 using verify::verify_gpu_barrier_uniformity;
 using verify::verify_gpu_memory_safety;
@@ -169,4 +187,5 @@ using verify::verify_ptx_barrier_uniformity;
 using verify::verify_ptx_memory_safety;
 using verify::verify_spirv_barrier_uniformity;
 using verify::verify_spirv_memory_safety;
+using verify::verify_spirv_structural;
 } // namespace brass

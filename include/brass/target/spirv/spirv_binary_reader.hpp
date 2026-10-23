@@ -106,4 +106,12 @@ struct ComputeShaderAuditReport {
 ComputeShaderAuditReport audit_compute_shader(const Module& mod);
 ComputeShaderAuditReport audit_compute_shader_binary(std::span<const uint32_t> words);
 
+inline ComputeShaderAuditReport prove_spirv_shader_safety(const Module& mod) {
+    return audit_compute_shader(mod);
+}
+
+inline ComputeShaderAuditReport prove_spirv_shader_safety(std::span<const uint32_t> words) {
+    return audit_compute_shader_binary(words);
+}
+
 } // namespace brass::spirv

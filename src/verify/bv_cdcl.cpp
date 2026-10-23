@@ -568,17 +568,23 @@ struct BitBlaster {
 
     using Lit = CDCLSolver::Lit;
 
+    Lit bit_at(const std::vector<Lit>& v, size_t i) const noexcept {
+        return (i < v.size()) ? v[i] : sat.false_lit();
+    }
+
     void add_adder(const std::vector<Lit>& a, const std::vector<Lit>& b,
                    Lit cin, std::vector<Lit>& sum, Lit* cout_last = nullptr, Lit* cin_last = nullptr) {
-        const size_t w = a.size();
+        const size_t w = std::max(a.size(), b.size());
         sum.resize(w);
         Lit carry = cin;
         for (size_t i = 0; i < w; ++i) {
+            Lit ai = bit_at(a, i);
+            Lit bi = bit_at(b, i);
             if (i + 1 == w && cin_last) *cin_last = carry;
-            Lit axb = sat.mk_xor(a[i], b[i]);
+            Lit axb = sat.mk_xor(ai, bi);
             sum[i] = sat.mk_xor(axb, carry);
             if (i + 1 < w || cout_last) {
-                Lit ab = sat.mk_and(a[i], b[i]);
+                Lit ab = sat.mk_and(ai, bi);
                 Lit c_axb = sat.mk_and(carry, axb);
                 carry = sat.mk_or(ab, c_axb);
             }
@@ -587,9 +593,9 @@ struct BitBlaster {
     }
 
     Lit blast_ult(const std::vector<Lit>& a, const std::vector<Lit>& b) {
-        const size_t w = a.size();
+        const size_t w = std::max(a.size(), b.size());
         std::vector<Lit> nb(w);
-        for (size_t i = 0; i < w; ++i) nb[i] = CDCLSolver::neg(b[i]);
+        for (size_t i = 0; i < w; ++i) nb[i] = CDCLSolver::neg(bit_at(b, i));
         std::vector<Lit> diff;
         Lit cout = sat.false_lit();
         add_adder(a, nb, sat.true_lit(), diff, &cout, nullptr);
@@ -597,18 +603,23 @@ struct BitBlaster {
     }
 
     Lit blast_slt(const std::vector<Lit>& a, const std::vector<Lit>& b) {
-        const size_t w = a.size();
-        std::vector<Lit> sa = a;
-        std::vector<Lit> sb = b;
+        const size_t w = std::max(a.size(), b.size());
+        if (w == 0) return sat.false_lit();
+        std::vector<Lit> sa(w), sb(w);
+        for (size_t i = 0; i < w; ++i) {
+            sa[i] = bit_at(a, i);
+            sb[i] = bit_at(b, i);
+        }
         sa[w - 1] = CDCLSolver::neg(sa[w - 1]);
         sb[w - 1] = CDCLSolver::neg(sb[w - 1]);
         return blast_ult(sa, sb);
     }
 
     Lit blast_eq(const std::vector<Lit>& a, const std::vector<Lit>& b) {
+        const size_t w = std::max(a.size(), b.size());
         Lit acc = sat.true_lit();
-        for (size_t i = 0; i < a.size(); ++i) {
-            Lit eq_i = CDCLSolver::neg(sat.mk_xor(a[i], b[i]));
+        for (size_t i = 0; i < w; ++i) {
+            Lit eq_i = CDCLSolver::neg(sat.mk_xor(bit_at(a, i), bit_at(b, i)));
             acc = sat.mk_and(acc, eq_i);
         }
         return acc;
@@ -682,19 +693,19 @@ struct BitBlaster {
                     break;
                 }
                 case BVOp::Not: {
-                    for (uint32_t i = 0; i < w; ++i) out[i] = CDCLSolver::neg(bits[n.a][i]);
+                    for (uint32_t i = 0; i < w; ++i) out[i] = CDCLSolver::neg(bit_at(bits[n.a], i));
                     break;
                 }
                 case BVOp::And: {
-                    for (uint32_t i = 0; i < w; ++i) out[i] = sat.mk_and(bits[n.a][i], bits[n.b][i]);
+                    for (uint32_t i = 0; i < w; ++i) out[i] = sat.mk_and(bit_at(bits[n.a], i), bit_at(bits[n.b], i));
                     break;
                 }
                 case BVOp::Or: {
-                    for (uint32_t i = 0; i < w; ++i) out[i] = sat.mk_or(bits[n.a][i], bits[n.b][i]);
+                    for (uint32_t i = 0; i < w; ++i) out[i] = sat.mk_or(bit_at(bits[n.a], i), bit_at(bits[n.b], i));
                     break;
                 }
                 case BVOp::Xor: {
-                    for (uint32_t i = 0; i < w; ++i) out[i] = sat.mk_xor(bits[n.a][i], bits[n.b][i]);
+                    for (uint32_t i = 0; i < w; ++i) out[i] = sat.mk_xor(bit_at(bits[n.a], i), bit_at(bits[n.b], i));
                     break;
                 }
                 case BVOp::Add: {
@@ -703,7 +714,7 @@ struct BitBlaster {
                 }
                 case BVOp::Sub: {
                     std::vector<Lit> nb(w);
-                    for (uint32_t i = 0; i < w; ++i) nb[i] = CDCLSolver::neg(bits[n.b][i]);
+                    for (uint32_t i = 0; i < w; ++i) nb[i] = CDCLSolver::neg(bit_at(bits[n.b], i));
                     add_adder(bits[n.a], nb, sat.true_lit(), out);
                     break;
                 }
@@ -766,31 +777,19 @@ struct BitBlaster {
                     break;
                 }
 
-                case BVOp::Eq:
-                    out[0] = blast_eq(bits[n.a], bits[n.b]);
-                    break;
-                case BVOp::Ne:
-                    out[0] = CDCLSolver::neg(blast_eq(bits[n.a], bits[n.b]));
-                    break;
-                case BVOp::Ult:
-                    out[0] = blast_ult(bits[n.a], bits[n.b]);
-                    break;
-                case BVOp::Ule:
-                    out[0] = CDCLSolver::neg(blast_ult(bits[n.b], bits[n.a]));
-                    break;
-                case BVOp::Slt:
-                    out[0] = blast_slt(bits[n.a], bits[n.b]);
-                    break;
-                case BVOp::Sle:
-                    out[0] = CDCLSolver::neg(blast_slt(bits[n.b], bits[n.a]));
-                    break;
+                case BVOp::Eq:  out[0] = blast_eq(bits[n.a], bits[n.b]); break;
+                case BVOp::Ne:  out[0] = CDCLSolver::neg(blast_eq(bits[n.a], bits[n.b])); break;
+                case BVOp::Ult: out[0] = blast_ult(bits[n.a], bits[n.b]); break;
+                case BVOp::Ule: out[0] = CDCLSolver::neg(blast_ult(bits[n.b], bits[n.a])); break;
+                case BVOp::Slt: out[0] = blast_slt(bits[n.a], bits[n.b]); break;
+                case BVOp::Sle: out[0] = CDCLSolver::neg(blast_slt(bits[n.b], bits[n.a])); break;
 
                 case BVOp::Ite: {
-                    Lit c = bits[n.a][0];
+                    Lit c = bit_at(bits[n.a], 0);
                     const auto& bt = bits[n.b];
                     const auto& bf = bits[n.c];
                     for (uint32_t i = 0; i < w; ++i) {
-                        out[i] = sat.mk_ite(c, bt[i], bf[i]);
+                        out[i] = sat.mk_ite(c, bit_at(bt, i), bit_at(bf, i));
                     }
                     break;
                 }

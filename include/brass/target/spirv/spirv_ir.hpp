@@ -207,6 +207,14 @@ inline bool verify_spirv_module(std::span<const uint32_t> words, std::string* er
     return verify_spirv_module(m, err_out);
 }
 
+inline bool verify_spirv_structural(const Module& m, std::string* err_out = nullptr) {
+    return verify_spirv_module(m, err_out);
+}
+
+inline bool verify_spirv_structural(std::span<const uint32_t> words, std::string* err_out = nullptr) {
+    return verify_spirv_module(words, err_out);
+}
+
 // ---- text ---------------------------------------------------------------------
 const char* op_name(spv::Op op);
 std::string to_string(const Inst& inst);
