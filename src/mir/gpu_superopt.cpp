@@ -27,7 +27,8 @@ MagicConstU32 compute_magic_const_u32(uint32_t d) noexcept {
             uint64_t two_p = 1ULL << (32 + s);
             uint64_t rem = two_p % dp;
             uint64_t delta = (rem == 0) ? 0ULL : (dp - rem);
-            if (static_cast<__uint128_t>(nc) * static_cast<__uint128_t>(delta) < static_cast<__uint128_t>(two_p)) {
+            // (nc and delta are both under 2^32: their product fits 64 bits.)
+            if (nc * delta < two_p) {
                 uint64_t m64 = (two_p + delta) / dp;
                 first_m64 = m64;
                 first_s = s;

@@ -11,6 +11,20 @@ namespace brass::verify {
 
 namespace {
 
+// a + b against a bound, exactly, without 128-bit integers (MSVC has none).
+constexpr bool sum_at_least(int64_t a, int64_t b, int64_t lo) noexcept {
+    if (b > 0 && a > std::numeric_limits<int64_t>::max() - b) return true;    // over INT64_MAX
+    if (b < 0 && a < std::numeric_limits<int64_t>::min() - b) return false;   // under INT64_MIN
+    return a + b >= lo;
+}
+constexpr bool sum_at_most(int64_t a, int64_t b, int64_t hi) noexcept {
+    if (b > 0 && a > std::numeric_limits<int64_t>::max() - b) return false;
+    if (b < 0 && a < std::numeric_limits<int64_t>::min() - b) return true;
+    return a + b <= hi;
+}
+// a + b <= m for unsigned a, b, without wrapping.
+constexpr bool usum_at_most(uint64_t a, uint64_t b, uint64_t m) noexcept { return a <= m && b <= m - a; }
+
 constexpr bool is_commutative(BVOp op) noexcept {
     switch (op) {
         case BVOp::And: case BVOp::Or: case BVOp::Xor: case BVOp::Add: case BVOp::Mul:
@@ -203,8 +217,7 @@ BVInterval BVContext::compute_interval(const BVNode& n) const noexcept {
     if (n.op == BVOp::Add && w <= 64) {
         const auto& a = intervals_[n.a];
         const auto& b = intervals_[n.b];
-        if (static_cast<__uint128_t>(a.umin) + b.umin <= m &&
-            static_cast<__uint128_t>(a.umax) + b.umax <= m) {
+        if (usum_at_most(a.umin, b.umin, m) && usum_at_most(a.umax, b.umax, m)) {
             iv.umin = a.umin + b.umin;
             iv.umax = a.umax + b.umax;
             uint32_t bits = (iv.umax == 0) ? 0u : static_cast<uint32_t>(64 - std::countl_zero(iv.umax));
@@ -212,9 +225,7 @@ BVInterval BVContext::compute_interval(const BVNode& n) const noexcept {
         }
         int64_t min_s = (w >= 64) ? INT64_MIN : -(1LL << (w - 1));
         int64_t max_s = (w >= 64) ? INT64_MAX : ((1LL << (w - 1)) - 1LL);
-        __extension__ __int128 smin_sum = static_cast<__int128>(a.smin) + b.smin;
-        __extension__ __int128 smax_sum = static_cast<__int128>(a.smax) + b.smax;
-        if (smin_sum >= min_s && smax_sum <= max_s) {
+        if (sum_at_least(a.smin, b.smin, min_s) && sum_at_most(a.smax, b.smax, max_s)) {
             iv.smin = a.smin + b.smin;
             iv.smax = a.smax + b.smax;
             if (iv.smin >= 0) {
@@ -235,8 +246,8 @@ BVInterval BVContext::compute_interval(const BVNode& n) const noexcept {
         const auto& b = intervals_[n.b];
         if (a.smin >= 0 && b.smin >= 0) {
             int64_t max_s = (w >= 64) ? INT64_MAX : ((1LL << (w - 1)) - 1LL);
-            __extension__ __int128 smax_prod = static_cast<__int128>(a.smax) * b.smax;
-            if (smax_prod <= max_s) {
+            // (Both non-negative: the product is at most max_s unless it overflows.)
+            if (a.smax == 0 || b.smax == 0 || a.smax <= max_s / b.smax) {
                 iv.smin = a.smin * b.smin;
                 iv.smax = a.smax * b.smax;
                 iv.umin = static_cast<uint64_t>(iv.smin);
