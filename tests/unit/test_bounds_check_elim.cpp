@@ -267,9 +267,18 @@ TEST_CASE("BCE - Check against an unrelated bound is not folded or guarded") {
 
     // Nothing relates `len` to `n`, so the per-iteration check has to stay,
     // and no deopt guard may stand in for it (AOT code has nowhere to go).
+    // The loop is versioned on it (range_check_version): a copy without it
+    // runs when the first and last iteration pass it, so the copy has no
+    // check and the loop as written keeps its own.
     CHECK_EQ(stats.checks_implied, size_t(0));
     CHECK_EQ(count_opcode(*loop.fn, Opcode::guard), size_t(0));
-    CHECK_EQ(count_opcode(*loop.fn, Opcode::ult), size_t(1));
+    bool versioned = false;
+    for (const BasicBlock* bb : loop.fn->blocks()) {
+        if (bb->name().find("_rcv") == std::string_view::npos) continue;
+        versioned = true;
+        for (const Instruction* inst : *bb) CHECK(inst->opcode() != Opcode::ult);
+    }
+    CHECK(versioned);
     Instruction* term = loop.loop_check->terminator();
     REQUIRE(term != nullptr);
     CHECK_EQ(term->opcode(), Opcode::br_if);

@@ -201,6 +201,7 @@ add_executable(brass_unit_tests
     unit/test_pass_manager.cpp
     unit/test_mir_uses.cpp
     unit/test_loop_ivsr.cpp
+    unit/test_range_check_version.cpp
     unit/test_jit_fuzz_regressions.cpp
     unit/test_type_feedback.cpp
     unit/test_speculative_inlining.cpp

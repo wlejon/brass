@@ -7,6 +7,7 @@
 #include <brass/mir/loop_unswitch.hpp>
 #include <brass/mir/uses.hpp>
 #include "loop_unswitch_internal.hpp"
+#include "range_check_version.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <optional>
@@ -827,6 +828,14 @@ bool run_bounds_check_elimination(Function& fn, Module& mod, const RangeAnalysis
                 }
             }
             if (!unswitched) break;
+        }
+        // The checks that skip an access rather than call out (a typed
+        // array's read or write out of bounds), which have no slow path for
+        // the unswitch above to split off.
+        if (version_loops_on_range_checks(fn)) {
+            any_changed = true;
+            fn.rebuild_cfg_predecessors();
+            cfg_simplify_function(fn);
         }
         if (any_changed) {
             fn.rebuild_cfg_predecessors();
