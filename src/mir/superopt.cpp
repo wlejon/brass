@@ -235,7 +235,11 @@ bool is_proven_equal(
     BVNodeId violated = ctx.make_binary(BVOp::And, path_cond, diff, 1);
     if (stats) stats->solver_queries++;
     SolveOutcome res = verify::solve_nonzero(ctx, violated, max_conflicts);
-    return res.status == SolveOutcome::Unsat;
+    if (res.status == SolveOutcome::Unsat) {
+        verify::debug_verify_unsat_samples(ctx, violated);
+        return true;
+    }
+    return false;
 }
 
 void collect_window_values(const Value* root, uint32_t depth, uint32_t max_depth, std::vector<Value*>& out) {

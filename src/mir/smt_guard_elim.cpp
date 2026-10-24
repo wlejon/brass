@@ -224,7 +224,11 @@ bool is_proven_true(BVContext& ctx, BVNodeId path_cond, BVNodeId implication_bit
     BVNodeId violated = ctx.make_binary(BVOp::And, path_cond, ctx.make_unary(BVOp::Not, implication_bit, 1), 1);
     if (stats) stats->queries_solved++;
     SolveOutcome res = verify::solve_nonzero(ctx, violated, max_conflicts);
-    return res.status == SolveOutcome::Unsat;
+    if (res.status == SolveOutcome::Unsat) {
+        verify::debug_verify_unsat_samples(ctx, violated);
+        return true;
+    }
+    return false;
 }
 
 // Nonlinear 2D strided indexing theorem:

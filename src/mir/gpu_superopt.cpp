@@ -631,7 +631,11 @@ bool run_gpu_mir_superopt(
         auto prove_unsat = [&](BVNodeId bad_cond) -> bool {
             if (opts.stats) opts.stats->solver_queries++;
             SolveOutcome out = verify::solve_nonzero(ctx, bad_cond, opts.max_sat_conflicts);
-            return out.status == SolveOutcome::Unsat;
+            if (out.status == SolveOutcome::Unsat) {
+                verify::debug_verify_unsat_samples(ctx, bad_cond);
+                return true;
+            }
+            return false;
         };
 
         Instruction* cur = bb->head();
