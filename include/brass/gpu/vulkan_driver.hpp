@@ -87,6 +87,14 @@ struct VulkanDeviceCaps {
 // the first of any type; BRASS_VULKAN_DEVICE=<index> overrides.
 bool vulkan_available();
 
+// Destroy the device and instance now; later calls find no device. The
+// runtime closes itself at exit, which suffices when brass is linked into an
+// executable. A shared library that embeds brass must call this from its own
+// shutdown: its exit handlers run in its DLL_PROCESS_DETACH, after the
+// Vulkan driver has detached, and the device teardown then calls into the
+// unloaded driver. Every VulkanModule and VulkanBuffer must be gone first.
+void vulkan_close();
+
 // Human-readable description of the last failure on this thread.
 std::string vulkan_last_error();
 

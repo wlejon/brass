@@ -174,6 +174,22 @@ if(BRASS_WITH_SPIRV)
     target_include_directories(brass PUBLIC $<BUILD_INTERFACE:${BRASS_SPIRV_HEADERS_DIR}>)
 endif()
 
+# The Vulkan runtime (src/gpu/vulkan_driver*.cpp) loads libvulkan at run time
+# but compiles against <vulkan/vulkan.h>; without the header it is built as a
+# stub that reports no device, and every SPIR-V dispatch fails. The header is
+# in the Vulkan SDK ($VULKAN_SDK: Windows, macOS) or on the system include
+# path (Linux packages), so it is looked up here rather than left to whatever
+# the compiler's environment happens to search.
+find_path(BRASS_VULKAN_INCLUDE_DIR vulkan/vulkan.h
+    HINTS "$ENV{VULKAN_SDK}/include" "$ENV{VULKAN_SDK}/Include"
+    DOC "Directory holding vulkan/vulkan.h (without it the Vulkan runtime is a stub)")
+if(BRASS_VULKAN_INCLUDE_DIR)
+    target_include_directories(brass PRIVATE ${BRASS_VULKAN_INCLUDE_DIR})
+else()
+    message(STATUS "brass: vulkan/vulkan.h not found; the Vulkan runtime is built as a stub "
+        "(install the Vulkan SDK or set BRASS_VULKAN_INCLUDE_DIR)")
+endif()
+
 if(MSVC)
     target_compile_options(brass PRIVATE
         $<$<COMPILE_LANGUAGE:CXX>:/EHs>

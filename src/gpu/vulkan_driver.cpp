@@ -341,7 +341,8 @@ Runtime& the_runtime() {
     return r;
 }
 
-// At exit: the device and instance go while the driver is still whole.
+// At exit (or vulkan_close): the device and instance go while the driver is
+// still whole. Idempotent; the runtime does not reopen afterwards.
 void close_runtime() {
     Runtime& r = the_runtime();
     std::lock_guard<std::mutex> lock(r.submit_mutex);
@@ -483,6 +484,8 @@ using vk::Runtime;
 
 bool vulkan_available() { return vk::runtime() != nullptr; }
 
+void vulkan_close() { vk::close_runtime(); }
+
 std::string vulkan_last_error() { return vk::last_error(); }
 
 const VulkanDeviceCaps* vulkan_device_caps() {
@@ -616,6 +619,7 @@ const char* kNoHeaders = "brass was built without the Vulkan headers (vulkan/vul
 }
 
 bool vulkan_available() { return false; }
+void vulkan_close() {}
 std::string vulkan_last_error() { return kNoHeaders; }
 std::vector<VulkanDeviceInfo> vulkan_devices() { return {}; }
 const VulkanDeviceCaps* vulkan_device_caps() { return nullptr; }
