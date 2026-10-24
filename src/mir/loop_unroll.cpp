@@ -726,7 +726,10 @@ bool loop_unroll_pass(
     const LoopUnrollOptions& options
 ) {
     LoopUnrollOptions effective_opts = options;
-    if (fn.allow_fp_reassociation() || (fn.parent() && fn.parent()->allow_fp_reassociation())) {
+    const bool det_fp = fn.is_deterministic_fp() || (fn.parent() && fn.parent()->is_deterministic_fp());
+    if (det_fp) {
+        effective_opts.enable_fp_reduction_jam = false;
+    } else if (fn.allow_fp_reassociation() || (fn.parent() && fn.parent()->allow_fp_reassociation())) {
         effective_opts.enable_fp_reduction_jam = true;
     }
     LoopAnalysis loops(fn, dom);

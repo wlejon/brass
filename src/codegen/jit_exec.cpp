@@ -12,6 +12,7 @@
 #include <brass/runtime/coroutine.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/parallel_runtime.hpp>
+#include <brass/runtime/deterministic_math.hpp>
 #include <brass/debug/jit_unwind_registry.hpp>
 #include <brass/codegen/jit_unwind_apple.hpp>
 #include <algorithm>
@@ -89,6 +90,18 @@ static void register_brass_runtime_symbols(JitExecutionEngine& e) {
     e.register_external_symbol("brass_parallel_reduce_f64", reinterpret_cast<void*>(&brass_parallel_reduce_f64));
     e.register_external_symbol("brass_parallel_alloc_context", reinterpret_cast<void*>(&brass_parallel_alloc_context));
     e.register_external_symbol("brass_parallel_free_context", reinterpret_cast<void*>(&brass_parallel_free_context));
+    e.register_external_symbol("brass_det_sin", reinterpret_cast<void*>(&brass_det_sin));
+    e.register_external_symbol("brass_det_cos", reinterpret_cast<void*>(&brass_det_cos));
+    e.register_external_symbol("brass_det_tan", reinterpret_cast<void*>(&brass_det_tan));
+    e.register_external_symbol("brass_det_asin", reinterpret_cast<void*>(&brass_det_asin));
+    e.register_external_symbol("brass_det_acos", reinterpret_cast<void*>(&brass_det_acos));
+    e.register_external_symbol("brass_det_atan", reinterpret_cast<void*>(&brass_det_atan));
+    e.register_external_symbol("brass_det_atan2", reinterpret_cast<void*>(&brass_det_atan2));
+    e.register_external_symbol("brass_det_exp", reinterpret_cast<void*>(&brass_det_exp));
+    e.register_external_symbol("brass_det_log", reinterpret_cast<void*>(&brass_det_log));
+    e.register_external_symbol("brass_det_pow", reinterpret_cast<void*>(&brass_det_pow));
+    e.register_external_symbol("brass_det_hypot", reinterpret_cast<void*>(&brass_det_hypot));
+    e.register_external_symbol("brass_det_cbrt", reinterpret_cast<void*>(&brass_det_cbrt));
 }
 
 JitExecutionEngine::JitExecutionEngine(const Target& target)

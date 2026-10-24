@@ -15,6 +15,9 @@ std::string FmaOptStats::format_report() const {
 }
 
 bool fma_opt_pass(Function& fn, const FmaOptOptions& options) {
+    if (fn.is_deterministic_fp() || (fn.parent() && fn.parent()->is_deterministic_fp())) {
+        return false;
+    }
     bool changed = false;
 
     for (BasicBlock* bb : fn.blocks()) {

@@ -50,6 +50,7 @@ struct LoopOptOptions {
     size_t unroll_factor = 4;
     size_t max_iterations = 8;
     bool enable_fp_reassociation = false; // Opt-in FP reassociation (default OFF / IEEE-strict)
+    bool deterministic_fp = false; // Strict deterministic FP: disables FMA contraction and FP reduction reassociation
     bool enable_sroa = false;
     bool enable_gvn = true;
     bool enable_sccp = true;

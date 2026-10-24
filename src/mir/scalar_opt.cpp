@@ -374,7 +374,8 @@ bool fold_constants(Function& fn) {
                 } else if (op0 == op1 && (op == Opcode::sub || op == Opcode::xor_)) {
                     if (int_result && width != 0) {
                         replacement = build_int(0);
-                    } else if (op == Opcode::sub && res_type == Type::f64() && fn.allow_fp_reassociation()) {
+                    } else if (op == Opcode::sub && res_type == Type::f64() &&
+                               fn.allow_fp_reassociation() && !fn.is_deterministic_fp()) {
                         b.position_before(cur);
                         replacement = b.build_fconst_f64(0.0);
                     }

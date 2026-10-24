@@ -348,6 +348,17 @@ BrassStatus brass_function_set_param_noalias(BrassFunction fn, size_t index, int
     return BRASS_OK;
 }
 
+BrassStatus brass_function_set_deterministic_fp(BrassFunction fn, int enable) {
+    if (!fn || !fn->func) return BRASS_ERR_INVALID_ARGUMENT;
+    fn->func->set_deterministic_fp(enable != 0);
+    return BRASS_OK;
+}
+
+int brass_function_is_deterministic_fp(BrassFunction fn) {
+    if (!fn || !fn->func) return 0;
+    return fn->func->is_deterministic_fp() ? 1 : 0;
+}
+
 /* JIT Execution Engine */
 BrassJitEngine brass_jit_create(BrassContext ctx) {
     try {

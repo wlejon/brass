@@ -163,6 +163,8 @@ BRASS_API BrassValue BRASS_CALL brass_function_get_param(BrassFunction fn, size_
  * reaches the object it points to (C `restrict`). Loop parallelization and
  * tiling rely on it to tell arrays apart. */
 BRASS_API BrassStatus BRASS_CALL brass_function_set_param_noalias(BrassFunction fn, size_t index, int noalias);
+BRASS_API BrassStatus BRASS_CALL brass_function_set_deterministic_fp(BrassFunction fn, int enable);
+BRASS_API int BRASS_CALL brass_function_is_deterministic_fp(BrassFunction fn);
 
 /* ========================================================================= */
 /* IR Builder                                                                */

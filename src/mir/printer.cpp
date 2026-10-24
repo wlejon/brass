@@ -105,6 +105,7 @@ public:
         os_ << ") -> " << fn_.return_type().name();
         // Function attributes.
         if (fn_.allow_fp_reassociation()) os_ << " fp_reassociation";
+        if (fn_.is_deterministic_fp()) os_ << " deterministic_fp";
         os_ << " {\n";
 
         // Print basic blocks
@@ -782,9 +783,10 @@ void print_module(const Module& mod, std::ostream& os) {
     }
 
     // Module attributes.
-    if (mod.allow_fp_reassociation() || mod.pinned_tls_register() || mod.has_loop_optimizations()) {
+    if (mod.allow_fp_reassociation() || mod.is_deterministic_fp() || mod.pinned_tls_register() || mod.has_loop_optimizations()) {
         os << "attributes";
         if (mod.allow_fp_reassociation()) os << " fp_reassociation";
+        if (mod.is_deterministic_fp()) os << " deterministic_fp";
         if (mod.pinned_tls_register()) os << " pinned_tls_register";
         if (mod.has_loop_optimizations()) os << " loop_optimizations";
         os << "\n\n";

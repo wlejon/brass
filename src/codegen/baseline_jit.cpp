@@ -10,6 +10,7 @@
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/coroutine.hpp>
+#include <brass/runtime/deterministic_math.hpp>
 #include <brass/core/string_pool.hpp>
 #include <brass/pgo/instrument.hpp>
 #include <cstring>
@@ -263,6 +264,18 @@ BaselineJitCompiler::BaselineJitCompiler(Target target)
     symbols_["brass_tier1_record_invocation_fb"] = reinterpret_cast<void*>(&brass_tier1_record_invocation_fb);
     symbols_["brass_coro_set_awaiter"] = reinterpret_cast<void*>(&brass_coro_set_awaiter);
     symbols_["brass_coro_awaiter"] = reinterpret_cast<void*>(&brass_coro_awaiter);
+    symbols_["brass_det_sin"] = reinterpret_cast<void*>(&brass_det_sin);
+    symbols_["brass_det_cos"] = reinterpret_cast<void*>(&brass_det_cos);
+    symbols_["brass_det_tan"] = reinterpret_cast<void*>(&brass_det_tan);
+    symbols_["brass_det_asin"] = reinterpret_cast<void*>(&brass_det_asin);
+    symbols_["brass_det_acos"] = reinterpret_cast<void*>(&brass_det_acos);
+    symbols_["brass_det_atan"] = reinterpret_cast<void*>(&brass_det_atan);
+    symbols_["brass_det_atan2"] = reinterpret_cast<void*>(&brass_det_atan2);
+    symbols_["brass_det_exp"] = reinterpret_cast<void*>(&brass_det_exp);
+    symbols_["brass_det_log"] = reinterpret_cast<void*>(&brass_det_log);
+    symbols_["brass_det_pow"] = reinterpret_cast<void*>(&brass_det_pow);
+    symbols_["brass_det_hypot"] = reinterpret_cast<void*>(&brass_det_hypot);
+    symbols_["brass_det_cbrt"] = reinterpret_cast<void*>(&brass_det_cbrt);
     lazy_ = std::make_shared<LazySymbolTable>([this](std::string_view name) { return resolve_lazy(name); });
 }
 

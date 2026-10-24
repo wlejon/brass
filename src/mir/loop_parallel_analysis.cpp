@@ -275,8 +275,9 @@ bool analyze_parallel_loop(
     }
 
     // Header parameters other than the induction variable.
-    const bool allow_fp = options.allow_fp_reassociation || fn.allow_fp_reassociation() ||
-                          (fn.parent() && fn.parent()->allow_fp_reassociation());
+    const bool det_fp = fn.is_deterministic_fp() || (fn.parent() && fn.parent()->is_deterministic_fp());
+    const bool allow_fp = !det_fp && (options.allow_fp_reassociation || fn.allow_fp_reassociation() ||
+                          (fn.parent() && fn.parent()->allow_fp_reassociation()));
     for (size_t i = 0; i < header->param_count(); ++i) {
         if (i == iv_idx) continue;
         Value* param = header->param(i);

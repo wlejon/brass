@@ -148,6 +148,7 @@ Function* build_osr_entry_function(const OsrEntryPlan& plan, Module& dst, std::s
     const std::vector<Type> params{Type::ptr()};
     Function* out = dst.create_function(name, fn.return_type(), params);
     out->set_allow_fp_reassociation(fn.allow_fp_reassociation());
+    out->set_deterministic_fp(fn.is_deterministic_fp());
     // New blocks and values are numbered past fn's.
     uint32_t max_block = 0;
     uint32_t max_value = 0;

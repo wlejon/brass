@@ -3,6 +3,7 @@
 #include <brass/runtime/coroutine.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
 #include <brass/runtime/code_installer.hpp>
+#include <brass/runtime/deterministic_math.hpp>
 #include <cmath>
 
 namespace brass {
@@ -131,6 +132,31 @@ void FastInterpreter::register_builtin_host_functions() {
         if (args.empty()) return RuntimeValue::from_f64(0.0);
         return RuntimeValue::from_f64(std::ceil(args[0].as_f64()));
     });
+
+    auto reg_det1 = [this](const char* name, double (*fn)(double)) {
+        register_external_function(name, [fn](FastInterpreter&, const std::vector<RuntimeValue>& args) -> RuntimeValue {
+            if (args.empty()) return RuntimeValue::from_f64(0.0);
+            return RuntimeValue::from_f64(fn(args[0].as_f64()));
+        });
+    };
+    auto reg_det2 = [this](const char* name, double (*fn)(double, double)) {
+        register_external_function(name, [fn](FastInterpreter&, const std::vector<RuntimeValue>& args) -> RuntimeValue {
+            if (args.size() < 2) return RuntimeValue::from_f64(0.0);
+            return RuntimeValue::from_f64(fn(args[0].as_f64(), args[1].as_f64()));
+        });
+    };
+    reg_det1("brass_det_sin", &brass_det_sin);
+    reg_det1("brass_det_cos", &brass_det_cos);
+    reg_det1("brass_det_tan", &brass_det_tan);
+    reg_det1("brass_det_asin", &brass_det_asin);
+    reg_det1("brass_det_acos", &brass_det_acos);
+    reg_det1("brass_det_atan", &brass_det_atan);
+    reg_det1("brass_det_exp", &brass_det_exp);
+    reg_det1("brass_det_log", &brass_det_log);
+    reg_det1("brass_det_cbrt", &brass_det_cbrt);
+    reg_det2("brass_det_atan2", &brass_det_atan2);
+    reg_det2("brass_det_pow", &brass_det_pow);
+    reg_det2("brass_det_hypot", &brass_det_hypot);
 }
 
 void FastInterpreter::handle_write_barrier(FastFrame& frame, uint32_t obj_reg, uint32_t val_reg) {

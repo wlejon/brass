@@ -124,6 +124,7 @@ Function* clone_function(const Function& src, Module& dst_mod) {
     }
 
     dst_fn->set_allow_fp_reassociation(src.allow_fp_reassociation());
+    dst_fn->set_deterministic_fp(src.is_deterministic_fp());
     dst_fn->set_requires_barrier_certs(src.requires_barrier_certs());
     dst_fn->guard_elim_certs() = src.guard_elim_certs();
     if (src.has_coro_frame_layout()) {
@@ -204,6 +205,7 @@ std::unique_ptr<Module> clone_function_module(const Module& src, std::string_vie
     Module::BodyRead read(*target);
     auto dst = std::make_unique<Module>(src.name());
     dst->set_allow_fp_reassociation(src.allow_fp_reassociation());
+    dst->set_deterministic_fp(src.is_deterministic_fp());
     dst->set_pinned_tls_register(src.pinned_tls_register());
     dst->copy_declarations_from(src);
     clone_function(*target, *dst);
@@ -216,6 +218,7 @@ std::unique_ptr<Module> clone_module(const Module& src) {
     Module::BodyRead read(src);
     auto dst = std::make_unique<Module>(src.name());
     dst->set_allow_fp_reassociation(src.allow_fp_reassociation());
+    dst->set_deterministic_fp(src.is_deterministic_fp());
     dst->set_pinned_tls_register(src.pinned_tls_register());
     dst->copy_declarations_from(src);
     for (const Function* fn : src.functions()) if (fn) clone_function(*fn, *dst);

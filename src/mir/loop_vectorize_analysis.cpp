@@ -307,8 +307,9 @@ bool analyze_vectorizable_loop(
     vli.exit_on_false = exit_on_false;
 
     // Check for reductions in header parameters
-    bool allow_fp = options.allow_fp_reassociation || fn.allow_fp_reassociation() ||
-                    (fn.parent() && fn.parent()->allow_fp_reassociation());
+    const bool det_fp = fn.is_deterministic_fp() || (fn.parent() && fn.parent()->is_deterministic_fp());
+    bool allow_fp = !det_fp && (options.allow_fp_reassociation || fn.allow_fp_reassociation() ||
+                    (fn.parent() && fn.parent()->allow_fp_reassociation()));
 
     bool found_reduction = false;
     for (size_t i = 0; i < header->param_count(); ++i) {
