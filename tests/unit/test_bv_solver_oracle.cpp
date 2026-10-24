@@ -490,7 +490,22 @@ TEST_CASE("BVSolver #153 - Bitvector Identity & Edge-Case Regression Corpus (wit
     CHECK(strict_solver_check_enabled());
     const uint64_t checks_before = unsat_sample_checks_performed();
     uint64_t expected_unsat_count = 0;
+#if defined(_MSC_VER)
+    // MSVC deprecates getenv (C4996, an error under /WX); _dupenv_s is its
+    // owned-copy equivalent.
+    std::string dump_dir_owned;
+    {
+        char* owned = nullptr;
+        size_t len = 0;
+        if (_dupenv_s(&owned, &len, "BRASS_DUMP_SMT2_CORPUS_DIR") == 0 && owned) {
+            dump_dir_owned = owned;
+            std::free(owned);
+        }
+    }
+    const char* dump_dir_env = dump_dir_owned.empty() ? nullptr : dump_dir_owned.c_str();
+#else
     const char* dump_dir_env = std::getenv("BRASS_DUMP_SMT2_CORPUS_DIR");
+#endif
 
     for (const auto& tc : corpus) {
         BVContext ctx;

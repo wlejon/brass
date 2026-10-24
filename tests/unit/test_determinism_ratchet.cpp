@@ -556,14 +556,14 @@ TEST_CASE("Determinism #156 - deterministic_fp MIR Attribute Disables FMA Contra
         CHECK(parsed_fn->is_deterministic_fp());
 
         // fma_opt_pass must be a no-op when deterministic_fp is enabled
-        CHECK_EQ(fma_opt_pass(*parsed_fn), 0u);
+        CHECK(!fma_opt_pass(*parsed_fn));
         for (const Instruction* inst : *parsed_fn->entry_block()) {
             CHECK(inst->opcode() != Opcode::fma_f64);
         }
 
         // Disabling deterministic_fp allows fma_opt_pass to fuse mul+add -> fma.f64
         parsed_fn->set_deterministic_fp(false);
-        CHECK_EQ(fma_opt_pass(*parsed_fn), 1u);
+        CHECK(fma_opt_pass(*parsed_fn));
     }
 
     // 2. Verify horizontal FP reduction is NOT vectorized/reassociated when deterministic_fp is true
