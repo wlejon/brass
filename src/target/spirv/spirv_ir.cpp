@@ -100,8 +100,8 @@ Id Module::glsl_std_450() {
     return id;
 }
 
-EntryPoint& Module::add_entry_point(spv::ExecutionModel model, Id fn, std::string name, std::vector<Id> interface) {
-    entry_points.push_back(EntryPoint{model, fn, std::move(name), std::move(interface)});
+EntryPoint& Module::add_entry_point(spv::ExecutionModel model, Id fn, std::string name, std::vector<Id> interface_ids) {
+    entry_points.push_back(EntryPoint{model, fn, std::move(name), std::move(interface_ids)});
     return entry_points.back();
 }
 
@@ -310,7 +310,7 @@ std::vector<uint32_t> write(const Module& m) {
     encode(out, Inst(spv::OpMemoryModel).lit(static_cast<uint32_t>(m.addressing()))
                     .lit(static_cast<uint32_t>(m.memory_model())));
     for (const EntryPoint& ep : m.entry_points) {
-        encode_with_string(out, spv::OpEntryPoint, {static_cast<uint32_t>(ep.model), ep.function}, ep.name, ep.interface);
+        encode_with_string(out, spv::OpEntryPoint, {static_cast<uint32_t>(ep.model), ep.function}, ep.name, ep.interface_ids);
     }
     for (const Inst& inst : m.execution_modes) encode(out, inst);
     for (const auto& n : m.names) encode_with_string(out, spv::OpName, {n.first}, n.second);
@@ -374,7 +374,7 @@ std::string dump(const Module& m) {
        << spv::MemoryModelToString(m.memory_model()) << "\n";
     for (const EntryPoint& ep : m.entry_points) {
         os << "OpEntryPoint " << spv::ExecutionModelToString(ep.model) << " %" << ep.function << " \"" << ep.name << "\"";
-        for (Id i : ep.interface) os << " %" << i;
+        for (Id i : ep.interface_ids) os << " %" << i;
         os << "\n";
     }
     for (const Inst& inst : m.execution_modes) os << to_string(inst) << "\n";

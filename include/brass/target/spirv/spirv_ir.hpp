@@ -68,15 +68,16 @@ struct Function {
     std::vector<Inst> params;
     std::vector<Block> blocks;
     // Global variables the function references (the OpEntryPoint interface
-    // must list every one of them since SPIR-V 1.4).
-    std::vector<Id> interface;
+    // must list every one of them since SPIR-V 1.4). Not named `interface`:
+    // windows.h defines that as `struct`.
+    std::vector<Id> interface_ids;
 };
 
 struct EntryPoint {
     spv::ExecutionModel model = spv::ExecutionModelGLCompute;
     Id function = 0;
     std::string name;
-    std::vector<Id> interface;
+    std::vector<Id> interface_ids;
 };
 
 // What a type id is, for queries and the dump.
@@ -107,7 +108,7 @@ public:
     void add_extension(const std::string& name);
     Id glsl_std_450();   // OpExtInstImport "GLSL.std.450", created on first use
     void set_memory_model(spv::AddressingModel a, spv::MemoryModel m) { addressing_ = a; memory_model_ = m; }
-    EntryPoint& add_entry_point(spv::ExecutionModel model, Id fn, std::string name, std::vector<Id> interface);
+    EntryPoint& add_entry_point(spv::ExecutionModel model, Id fn, std::string name, std::vector<Id> interface_ids);
     void add_execution_mode(Id fn, spv::ExecutionMode mode, std::vector<uint32_t> literals);
     void set_name(Id target, std::string name);
     void decorate(Id target, spv::Decoration d, std::vector<uint32_t> literals = {});

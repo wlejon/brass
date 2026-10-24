@@ -162,7 +162,7 @@ TEST_CASE("SPIR-V binary reader - round-trips hand-built and SpirvTarget modules
     Id ptr_wg_arr = m.t_pointer(spv::StorageClassWorkgroup, arr_t);
     Id ptr_wg_f32 = m.t_pointer(spv::StorageClassWorkgroup, cb.f32_t);
     Id shm = m.variable(ptr_wg_arr, spv::StorageClassWorkgroup);
-    m.entry_points[0].interface.push_back(shm);
+    m.entry_points[0].interface_ids.push_back(shm);
 
     Block entry{m.new_id(), {}};
     Id lid_x = cb.load_lid_x(entry);
@@ -353,7 +353,7 @@ TEST_CASE("SPIR-V prover - shared memory bounds verification via BVSolver") {
         Id ptr_wg_arr = m.t_pointer(spv::StorageClassWorkgroup, arr_t);
         Id ptr_wg_f32 = m.t_pointer(spv::StorageClassWorkgroup, cb.f32_t);
         Id shm = m.variable(ptr_wg_arr, spv::StorageClassWorkgroup);
-        m.entry_points[0].interface.push_back(shm);
+        m.entry_points[0].interface_ids.push_back(shm);
 
         Block entry{m.new_id(), {}};
         Id lid_x = cb.load_lid_x(entry);
@@ -379,7 +379,7 @@ TEST_CASE("SPIR-V prover - shared memory bounds verification via BVSolver") {
         Id ptr_wg_arr = m.t_pointer(spv::StorageClassWorkgroup, arr_t);
         Id ptr_wg_f32 = m.t_pointer(spv::StorageClassWorkgroup, cb.f32_t);
         Id shm = m.variable(ptr_wg_arr, spv::StorageClassWorkgroup);
-        m.entry_points[0].interface.push_back(shm);
+        m.entry_points[0].interface_ids.push_back(shm);
 
         Id b_entry = m.new_id(), b_then = m.new_id(), b_merge = m.new_id();
         Block entry{b_entry, {}};

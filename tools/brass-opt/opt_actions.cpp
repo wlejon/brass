@@ -28,6 +28,12 @@ namespace brass {
 
 namespace {
 
+// The C entry point by its exact type: a using-directive for brass::codegen
+// in scope makes its inline overload of the same name visible to `::` lookup
+// too, and `&::brass_parallel_for` alone is then ambiguous.
+using ParallelForFn = void (*)(uint64_t, uint64_t, runtime::ParallelKernelFn, void*, runtime::ReductionKind, void*);
+void* parallel_for_address() { return reinterpret_cast<void*>(static_cast<ParallelForFn>(&::brass_parallel_for)); }
+
 bool write_binary_file(const std::string& path, const std::vector<uint8_t>& bytes) {
     std::ofstream file(path, std::ios::out | std::ios::binary);
     if (!file.is_open()) {
@@ -253,7 +259,7 @@ bool execute_run_function(Module& mod, const RunFunctionOptions& opts) {
     if (opts.use_baseline_jit) {
         codegen::BaselineJitCompiler baseline(Target::host());
         baseline.register_external_symbol("brass_pgo_inc", reinterpret_cast<void*>(&brass_pgo_inc));
-        baseline.register_external_symbol("brass_parallel_for", reinterpret_cast<void*>(&::brass_parallel_for));
+        baseline.register_external_symbol("brass_parallel_for", parallel_for_address());
         baseline.register_external_symbol("brass_set_parallel_workers", reinterpret_cast<void*>(&brass_set_parallel_workers));
         baseline.register_external_symbol("brass_get_parallel_workers", reinterpret_cast<void*>(&brass_get_parallel_workers));
         baseline.register_external_symbol("brass_parallel_reduce_i64", reinterpret_cast<void*>(&brass_parallel_reduce_i64));
@@ -304,7 +310,7 @@ bool execute_run_function(Module& mod, const RunFunctionOptions& opts) {
         sched_opts.enable_software_pipelining = opts.enable_software_pipeline;
         jit.set_sched_options(sched_opts);
         jit.register_external_symbol("brass_pgo_inc", reinterpret_cast<void*>(&brass_pgo_inc));
-        jit.register_external_symbol("brass_parallel_for", reinterpret_cast<void*>(&::brass_parallel_for));
+        jit.register_external_symbol("brass_parallel_for", parallel_for_address());
         jit.register_external_symbol("brass_set_parallel_workers", reinterpret_cast<void*>(&brass_set_parallel_workers));
         jit.register_external_symbol("brass_get_parallel_workers", reinterpret_cast<void*>(&brass_get_parallel_workers));
         jit.register_external_symbol("brass_parallel_reduce_i64", reinterpret_cast<void*>(&brass_parallel_reduce_i64));

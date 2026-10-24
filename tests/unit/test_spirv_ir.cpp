@@ -278,7 +278,7 @@ TEST_CASE("SPIR-V verify - entry point interface and capabilities") {
         Id var = m.variable(m.t_pointer(spv::StorageClassWorkgroup, u32), spv::StorageClassWorkgroup);
         mini.add(Inst(spv::OpStore).id(var).id(m.c_u32(3)));
         CHECK(has_diag(verify(m), "not in the entry point interface"));
-        m.entry_points[0].interface.push_back(var);
+        m.entry_points[0].interface_ids.push_back(var);
         CHECK(verify(m).empty());
         require_valid(write(m), dump(m));
     }

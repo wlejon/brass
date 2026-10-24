@@ -98,7 +98,7 @@ KernelLayout SpirvISel::lower(const brass::Function& mir_fn) {
     spv::ExecutionModel exec_model = spv::ExecutionModelGLCompute;
     if (opts_.stage == target::SpirvStage::Vertex) exec_model = spv::ExecutionModelVertex;
     else if (opts_.stage == target::SpirvStage::Fragment) exec_model = spv::ExecutionModelFragment;
-    m_.add_entry_point(exec_model, fn().id, name, fn().interface);
+    m_.add_entry_point(exec_model, fn().id, name, fn().interface_ids);
     layout.descriptors = descriptors_;
     layout.shared_bytes = shared_bytes_;
     cfg_ = nullptr;
@@ -460,7 +460,7 @@ Id SpirvISel::ext(uint32_t glsl_inst, Id type, std::initializer_list<Id> ids) {
 }
 
 void SpirvISel::use_global(Id var) {
-    auto& iface = fn().interface;
+    auto& iface = fn().interface_ids;
     for (Id v : iface) if (v == var) return;
     iface.push_back(var);
 }

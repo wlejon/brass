@@ -182,7 +182,7 @@ TEST_CASE("OSR Runtime - Bi-Directional Deoptimization Resume back to Interprete
 
 TEST_CASE("OSR Runtime - First-Call OSR Promotes Function to Tier 2 Before Second Call") {
     Module mod("osr_tier2_promote_mod");
-    Function* fn = build_sum_loop(mod, "hot_first_call");
+    REQUIRE(build_sum_loop(mod, "hot_first_call") != nullptr);
 
     FunctionDispatchTable prog;
     TieringConfig cfg;

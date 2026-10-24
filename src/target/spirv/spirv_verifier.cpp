@@ -328,7 +328,7 @@ private:
                 report("", 0, 0, "entry point '" + ep.name + "' names a function that does not exist");
                 continue;
             }
-            std::unordered_set<Id> listed(ep.interface.begin(), ep.interface.end());
+            std::unordered_set<Id> listed(ep.interface_ids.begin(), ep.interface_ids.end());
             std::set<Id> missing;
             for (const Block& b : fit->blocks) {
                 for (const Inst& inst : b.insts) {
