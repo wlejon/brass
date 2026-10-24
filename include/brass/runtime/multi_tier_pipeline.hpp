@@ -280,7 +280,8 @@ public:
     bool enqueue_tier2(
         std::string_view fn_name,
         const Module* mod = nullptr,
-        FunctionHandle* handle = nullptr
+        FunctionHandle* handle = nullptr,
+        CompilePriority priority = CompilePriority::Normal
     );
     // Tier 2 on the calling thread (tier-up with background compile off):
     // compiles `fn_name` from tiering().tier2_source_module(handle) and

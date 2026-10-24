@@ -146,6 +146,17 @@ void FunctionHandle::set_baseline_function(std::shared_ptr<codegen::BaselineComp
     baseline_function_ = std::move(compiled);
 }
 
+bool FunctionHandle::publish_baseline(std::shared_ptr<codegen::BaselineCompiledFunction> compiled) {
+    std::lock_guard<std::mutex> lock(engine_mutex_);
+    if (retired_ || mir_detached_) return false;
+    baseline_function_ = std::move(compiled);
+    if (tier() == TierLevel::Tier2_Optimized || jit_engine_ != nullptr) return false;
+    void* entry = baseline_function_ ? baseline_function_->entry_point() : nullptr;
+    set_native_entry(entry);
+    set_tier(entry ? TierLevel::Tier1_Baseline : TierLevel::Tier0_Interpreter);
+    return entry != nullptr;
+}
+
 std::shared_ptr<codegen::BaselineCompiledFunction> FunctionHandle::baseline_function() const {
     std::lock_guard<std::mutex> lock(engine_mutex_);
     return baseline_function_;

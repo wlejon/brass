@@ -582,8 +582,10 @@ std::optional<detail::Tier1Link> MultiTierPipeline::open_tier1_node(std::string_
         // through its callees. Its stub compiles it on its first call
         // instead, as for a func_addr target, when a Tier-0 bridge can stand
         // in. (One released since it ran is compiled as any other.)
-        if (def->is_lazy() && !def->built_before() && !is_baseline_rejected(sym) &&
-            tier0_bridge_supported(*def)) {
+        const TieringFeedback* callee_fb = config_.enable_background_tier1 ? tiering().find_feedback(sym) : nullptr;
+        if (def->is_lazy() &&
+            (!def->built_before() || (config_.enable_background_tier1 && (!callee_fb || callee_fb->invocation_count() == 0))) &&
+            !is_baseline_rejected(sym) && tier0_bridge_supported(*def)) {
             table_->get_or_create(sym, def);
             continue;
         }
@@ -656,15 +658,22 @@ void MultiTierPipeline::install_tier1_group(const std::vector<detail::Tier1Node*
         notify_code_installed({d->name, TierLevel::Tier1_Baseline, d->code->entry_point(), d->code->code_size(),
                                &d->code->line_table()});
     }
-    for (const Tier1Node* d : group) baseline_compiler_.lazy_symbols()->define(d->name, d->code->entry_point());
+    for (const Tier1Node* d : group) {
+        void* entry = d->handle->tier() == TierLevel::Tier2_Optimized ? d->handle->native_entry() : nullptr;
+        baseline_compiler_.lazy_symbols()->define(d->name, entry ? entry : d->code->entry_point());
+    }
     if (tier1_install_hook_) {
         for (const Tier1Node* d : group) tier1_install_hook_(d->name);
     }
     for (const Tier1Node* d : group) {
-        d->handle->set_baseline_function(d->code);
-        d->handle->set_native_entry(d->code->entry_point());
-        d->handle->set_tier(TierLevel::Tier1_Baseline);
-        tiering().get_feedback(d->name).set_tier(TierLevel::Tier1_Baseline);
+        if (d->handle->publish_baseline(d->code)) {
+            tiering().get_feedback(d->name).set_tier(TierLevel::Tier1_Baseline);
+            if (d->handle->tier() == TierLevel::Tier2_Optimized) {
+                baseline_compiler_.lazy_symbols()->define(d->name, d->handle->native_entry());
+            }
+        } else if (void* entry = d->handle->native_entry()) {
+            baseline_compiler_.lazy_symbols()->define(d->name, entry);
+        }
         stats_.tier1_compilations.fetch_add(1, std::memory_order_relaxed);
         stats_.total_tier1_compile_time_us.fetch_add(d->elapsed_us, std::memory_order_relaxed);
     }
@@ -707,7 +716,8 @@ void MultiTierPipeline::release_tier1_claims(const std::vector<detail::Tier1Node
 bool MultiTierPipeline::enqueue_tier2(
     std::string_view fn_name,
     const Module* mod,
-    FunctionHandle* handle
+    FunctionHandle* handle,
+    CompilePriority priority
 ) {
     if (config_.max_tier < TierLevel::Tier2_Optimized) return false;
     if (!handle) {
@@ -721,7 +731,7 @@ bool MultiTierPipeline::enqueue_tier2(
         fn_name,
         *target_mod,
         handle,
-        CompilePriority::Normal,
+        priority,
         TierLevel::Tier2_Optimized
     );
 

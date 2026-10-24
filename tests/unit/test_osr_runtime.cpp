@@ -180,4 +180,32 @@ TEST_CASE("OSR Runtime - Bi-Directional Deoptimization Resume back to Interprete
     CHECK(prog.pipeline().tier2_deopts() > deopts_before);
 }
 
+TEST_CASE("OSR Runtime - First-Call OSR Promotes Function to Tier 2 Before Second Call") {
+    Module mod("osr_tier2_promote_mod");
+    Function* fn = build_sum_loop(mod, "hot_first_call");
+
+    FunctionDispatchTable prog;
+    TieringConfig cfg;
+    cfg.invocation_tier1_threshold = 1;
+    cfg.invocation_tier2_threshold = 100;
+    cfg.enable_background_tier1 = true;
+    cfg.enable_background_compile = true;
+    cfg.set_use_fast_interpreter(true);
+    prog.pipeline().initialize(cfg);
+    prog.osr().set_enabled(true);
+    prog.osr().set_threshold(64);
+
+    // A single long call enters OSR mid-loop and promotes the function to
+    // whole-function Tier 2 so the second call enters Tier 2 directly rather
+    // than getting trapped in unoptimized Tier-1 baseline code.
+    const int64_t n = 100000;
+    CHECK_EQ(prog.pipeline().execute(mod, "hot_first_call", {RuntimeValue::from_i64(n)}).as_i64(), sum_below(n));
+    CHECK(prog.osr().total_osr_migrations() > 0);
+
+    FunctionHandle* handle = prog.find("hot_first_call");
+    REQUIRE(handle != nullptr);
+    CHECK_EQ(handle->tier(), TierLevel::Tier2_Optimized);
+    CHECK_EQ(prog.pipeline().execute(mod, "hot_first_call", {RuntimeValue::from_i64(n)}).as_i64(), sum_below(n));
+}
+
 #endif

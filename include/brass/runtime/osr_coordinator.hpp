@@ -7,6 +7,7 @@
 #include <memory>
 #include <unordered_map>
 #include <mutex>
+#include <condition_variable>
 #include <atomic>
 #include <vector>
 
@@ -110,6 +111,7 @@ private:
     bool enter(const Function& fn, FastFrame& frame, const Entry& e, RuntimeValue& out_result);
 
     std::mutex mutex_;
+    std::condition_variable ready_cv_;
     bool released_ = false;
     std::unordered_map<const BasicBlock*, std::shared_ptr<Entry>> entries_;
     // Invalidated entries whose code frames may still be running, and how

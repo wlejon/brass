@@ -130,6 +130,7 @@ public:
     bool tier2_rejected() const;
 
     void set_baseline_function(std::shared_ptr<codegen::BaselineCompiledFunction> compiled);
+    bool publish_baseline(std::shared_ptr<codegen::BaselineCompiledFunction> compiled);
     std::shared_ptr<codegen::BaselineCompiledFunction> baseline_function() const;
 
     // The signature of the code the handle routes to. It is an immutable

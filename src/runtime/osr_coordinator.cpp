@@ -32,6 +32,7 @@ struct OsrCoordinator::Entry {
     void* entry = nullptr;
     const BasicBlock* header = nullptr;
     std::atomic<uint64_t> deopts{0};
+    std::atomic<uint32_t> polls{0};
     mutable std::atomic<bool> entered{false};
     // The code's leave flag (OsrEntryPlan::leave_check), read by the code at
     // each backedge to its header: set when the code is invalidated, so a
@@ -60,6 +61,7 @@ private:
 };
 
 constexpr uint8_t kOsrPriority = 255;
+constexpr uint32_t kWaitPolls = 256;
 
 static_assert(sizeof(std::atomic<uint64_t>) == sizeof(uint64_t) && std::atomic<uint64_t>::is_always_lock_free,
               "OSR code reads the leave flag as a plain u64");
@@ -115,6 +117,7 @@ void OsrCoordinator::release_program() {
         std::lock_guard<std::mutex> lock(mutex_);
         released_ = true;
     }
+    ready_cv_.notify_all();
     CompilePool& pool = CompilePool::shared();
     pool.cancel(this);
     pool.wait_owner(this);
@@ -155,14 +158,17 @@ void OsrCoordinator::stop_compiles() {
     pool.wait_owner(this);
     // Nothing of this coordinator's is queued or running now: an entry still
     // compiling was dropped.
-    std::lock_guard<std::mutex> lock(mutex_);
-    for (auto it = entries_.begin(); it != entries_.end();) {
-        if (it->second->state.load(std::memory_order_acquire) == Entry::State::Compiling) {
-            it = entries_.erase(it);
-        } else {
-            ++it;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto it = entries_.begin(); it != entries_.end();) {
+            if (it->second->state.load(std::memory_order_acquire) == Entry::State::Compiling) {
+                it = entries_.erase(it);
+            } else {
+                ++it;
+            }
         }
     }
+    ready_cv_.notify_all();
 }
 
 bool OsrCoordinator::runs_program() const noexcept {
@@ -175,7 +181,7 @@ bool OsrCoordinator::try_osr_migration(FastInterpreter&, const Function& fn, Bas
     std::shared_ptr<Entry> e;
     bool start = false;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         if (released_) return false;
         auto it = entries_.find(loop_header);
         if (it == entries_.end()) {
@@ -188,6 +194,19 @@ bool OsrCoordinator::try_osr_migration(FastInterpreter&, const Function& fn, Bas
             for (const auto& [header, other] : entries_) {
                 if (header->parent() == loop_header->parent() &&
                     other->state.load(std::memory_order_acquire) == Entry::State::Compiling) {
+                    if (other->polls.fetch_add(1, std::memory_order_relaxed) + 1 == kWaitPolls &&
+                        !process_exiting() && CompilePool::shared().is_running()) {
+                        std::shared_ptr<Entry> wait_other = other;
+                        ready_cv_.wait_for(lock, std::chrono::milliseconds(50), [&] {
+                            return released_ ||
+                                   wait_other->state.load(std::memory_order_acquire) != Entry::State::Compiling;
+                        });
+                        if (!released_ &&
+                            wait_other->state.load(std::memory_order_acquire) != Entry::State::Compiling &&
+                            entries_.find(loop_header) == entries_.end()) {
+                            break;
+                        }
+                    }
                     return false;
                 }
             }
@@ -202,7 +221,17 @@ bool OsrCoordinator::try_osr_migration(FastInterpreter&, const Function& fn, Bas
         request_entry(fn, *loop_header, e);
         return false;
     }
-    if (e->state.load(std::memory_order_acquire) != Entry::State::Ready) return false;
+    Entry::State st = e->state.load(std::memory_order_acquire);
+    if (st == Entry::State::Compiling &&
+        e->polls.fetch_add(1, std::memory_order_relaxed) + 1 == kWaitPolls &&
+        !process_exiting() && CompilePool::shared().is_running()) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        ready_cv_.wait_for(lock, std::chrono::milliseconds(50), [&] {
+            return released_ || e->state.load(std::memory_order_acquire) != Entry::State::Compiling;
+        });
+        st = e->state.load(std::memory_order_acquire);
+    }
+    if (st != Entry::State::Ready) return false;
     return enter(fn, frame, *e, out_result);
 }
 
@@ -210,13 +239,23 @@ void OsrCoordinator::request_entry(const Function& fn, const BasicBlock& header,
     TierEventScope timed(TierEventKind::OsrRequest, fn.name());
     auto fail = [&] {
         timed.set_ok(false);
-        e->state.store(Entry::State::Failed, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            e->state.store(Entry::State::Failed, std::memory_order_release);
+        }
+        ready_cv_.notify_all();
     };
     FunctionDispatchTable& table = registry().dispatch_table();
     // The function's handle is where a failed guard of the code resumes;
     // one bound to another Function is not this code's.
     FunctionHandle* handle = table.get_or_create(fn.name(), &fn);
     if (!fn.parent() || !handle || handle->mir_function() != &fn) return fail();
+
+    MultiTierPipeline& pipeline = table.pipeline();
+    if (pipeline.config().enable_background_compile &&
+        fn.name().find("__bronze_dyn_entry_") == std::string_view::npos) {
+        pipeline.enqueue_tier2(fn.name(), fn.parent(), handle, CompilePriority::High);
+    }
 
     // Only the call targets are read here, on the interpreter's thread: its
     // type feedback grows as it runs. Planning the entry and copying it
@@ -227,7 +266,11 @@ void OsrCoordinator::request_entry(const Function& fn, const BasicBlock& header,
     auto job = [this, &fn, hdr = &header, e, targets = detail::speculated_call_targets(table, fn.name())] {
         std::unique_ptr<Module> mod = copy_entry(fn, *hdr, e, targets);
         if (!mod) {
-            e->state.store(Entry::State::Failed, std::memory_order_release);
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                e->state.store(Entry::State::Failed, std::memory_order_release);
+            }
+            ready_cv_.notify_all();
             return;
         }
         compile_entry(fn, *mod, e);
@@ -282,7 +325,11 @@ void OsrCoordinator::compile_entry(const Function& fn, Module& copy, const std::
     TierEventScope timed(TierEventKind::OsrCompile, fn.name());
     auto fail = [&] {
         timed.set_ok(false);
-        e.state.store(Entry::State::Failed, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            e.state.store(Entry::State::Failed, std::memory_order_release);
+        }
+        ready_cv_.notify_all();
     };
     FunctionDispatchTable& table = registry().dispatch_table();
     MultiTierPipeline& pipeline = table.pipeline();
@@ -363,7 +410,11 @@ void OsrCoordinator::compile_entry(const Function& fn, Module& copy, const std::
     detail::register_tier2_resumer(table, *handle, entry, &fn, count_against_entry);
     e.jit = std::move(jit);
     e.entry = entry;
-    e.state.store(Entry::State::Ready, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        e.state.store(Entry::State::Ready, std::memory_order_release);
+    }
+    ready_cv_.notify_all();
 }
 
 bool OsrCoordinator::enter(const Function& fn, FastFrame& frame, const Entry& e, RuntimeValue& out_result) {
@@ -394,6 +445,11 @@ bool OsrCoordinator::enter(const Function& fn, FastFrame& frame, const Entry& e,
         result = invoke_native_address(e.entry, fn.return_type(), &params, args);
     }
     if (!e.plan.leave_check || buffer[e.plan.left_slot()] == 0) {
+        MultiTierPipeline& pipeline = registry().dispatch_table().pipeline();
+        if (!process_exiting() && pipeline.config().enable_background_compile &&
+            pipeline.background_compiler().is_queued_or_compiling(fn.name())) {
+            pipeline.background_compiler().wait_for_function(fn.name(), std::chrono::milliseconds(50));
+        }
         out_result = result;
         return true;
     }
