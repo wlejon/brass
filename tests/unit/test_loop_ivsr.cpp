@@ -14,9 +14,11 @@
 #include <brass/mir/printer.hpp>
 #include <brass/mir/scalar_opt.hpp>
 #include <brass/mir/verifier.hpp>
+#include <cmath>
 #include <iostream>
 #include <limits>
 #include <string>
+#include <tuple>
 
 using namespace brass;
 
@@ -234,6 +236,21 @@ size_t count_op(const Function& fn, Opcode op) {
     return n;
 }
 
+// count_op over the demoted body alone: a function whose demotion takes its
+// f64 parameters for integers also carries the check of them at entry and
+// the body as it was, for the arguments that fail it (f64_demote_version).
+size_t count_op_demoted(const Function& fn, Opcode op) {
+    size_t n = 0;
+    for (const BasicBlock* bb : fn.blocks()) {
+        const std::string_view name = bb->name();
+        if (name == "f64_demote.entry" || (name.size() >= 5 && name.substr(name.size() - 5) == "_f64v")) continue;
+        for (const Instruction* inst : *bb) {
+            if (inst->opcode() == op) ++n;
+        }
+    }
+    return n;
+}
+
 // A column walk: kS steps by a stride only known at run time (1..4), so its
 // accesses become loads and stores through a pointer variable, which the
 // unroller then copies. The trip count is n & 15.
@@ -421,8 +438,10 @@ b_exit:
     DiagnosticReporter diag;
     REQUIRE(verify_module(*mod, &diag));
     // All f64 arithmetic inside the loop is demoted to integer, the ToInt32
-    // slow path is folded away, and the loop is 4x unrolled.
-    CHECK_EQ(count_op(fn, Opcode::fptosi_i64), size_t{0});
+    // slow path is folded away, and the loop is 4x unrolled; the only
+    // conversion left is the entry check's of n, a loop limit.
+    CHECK_EQ(fn.entry_block()->name(), std::string("f64_demote.entry"));
+    CHECK_EQ(count_op_demoted(fn, Opcode::fptosi_i64), size_t{0});
     CHECK(count_op(fn, Opcode::xor_) >= 4u);
 
     codegen::JitExecutionEngine jit(Target::host());
@@ -442,7 +461,134 @@ b_exit:
     CHECK_EQ(scalar_fn(100000.0), ref_scalar(100000));
 }
 
-TEST_CASE("IVSR - 2D stencil blur loop decomposes (y+dy)*w+(x+dx) into constant displacements and scaled IV") {
+// A 2D walk whose demotion takes %w and %h for sizes, with its limits
+// clamped to 2^26 - 1: what the entry check sends to the body as written must
+// run every iteration it asks for (a fraction, a negative, a NaN, a limit over
+// the clamp), and the demoted body must still be the one sizes run.
+TEST_CASE("f64 demote - the entry check runs the body as written for arguments that are not sizes") {
+    constexpr std::string_view kCount = R"(
+func @count(%dst: ptr, %w: f64, %h: f64) -> f64 {
+b0:
+  %zero = fconst.f64 0
+  %one = fconst.f64 1
+  br b_y(%zero, %zero)
+
+b_y(%y: f64, %n: f64):
+  %cy = slt.f64 %y, %h
+  br_if %cy, b_y_body, b_exit
+
+b_y_body:
+  br b_x(%zero, %n)
+
+b_x(%x: f64, %m: f64):
+  %cx = slt.f64 %x, %w
+  br_if %cx, b_x_body, b_y_latch
+
+b_x_body:
+  %r = mul.f64 %y, %w
+  %ri = fptosi.i64 %r
+  %xi = fptosi.i64 %x
+  %i = add.i64 %ri, %xi
+  %seven = iconst.i64 7
+  %slot = and.i64 %i, %seven
+  %m2 = add.f64 %m, %one
+  store_indexed.f64 %dst, %slot, 8, %m2
+  %x2 = add.f64 %x, %one
+  br b_x(%x2, %m2)
+
+b_y_latch:
+  %y2 = add.f64 %y, %one
+  br b_y(%y2, %m)
+
+b_exit:
+  ret %n
+}
+)";
+    auto mod = parse(kCount);
+    Function& fn = *mod->get_function("count");
+    CHECK(optimize_function_loops(fn));
+    DiagnosticReporter diag;
+    REQUIRE(verify_module(*mod, &diag));
+    CHECK(fn.entry_block()->name() == "f64_demote.entry");
+
+    std::vector<double> dst(8, 0.0);
+    codegen::JitExecutionEngine jit(Target::host());
+    REQUIRE(jit.compile_and_load(*mod));
+    auto count_fn = jit.get_function_ptr<double(*)(double*, double, double)>("count");
+    REQUIRE(count_fn != nullptr);
+    CHECK_EQ(count_fn(dst.data(), 4.0, 3.0), 12.0);
+    CHECK_EQ(count_fn(dst.data(), 10.5, 2.0), 22.0);
+    CHECK_EQ(count_fn(dst.data(), 3.0, 2.5), 9.0);
+    CHECK_EQ(count_fn(dst.data(), -3.0, 2.0), 0.0);
+    CHECK_EQ(count_fn(dst.data(), std::nan(""), 2.0), 0.0);
+    CHECK_EQ(count_fn(dst.data(), 67108874.0, 1.0), 67108874.0);
+    CHECK_EQ(count_fn(dst.data(), 67108863.0, 1.0), 67108863.0);
+}
+
+// The same walk with its width loaded, a limit the entry cannot compute: the
+// loop is the one versioned, on whether the width is within the clamp.
+TEST_CASE("f64 demote - a loaded loop limit over the clamp runs the loop as written") {
+    constexpr std::string_view kCountLoaded = R"(
+func @count(%dst: ptr, %lim: ptr, %h: f64) -> f64 {
+b0:
+  %zero = fconst.f64 0
+  %one = fconst.f64 1
+  %z = iconst.i64 0
+  %w = load_indexed.f64 %lim, %z, 8
+  br b_y(%zero, %zero)
+
+b_y(%y: f64, %n: f64):
+  %cy = slt.f64 %y, %h
+  br_if %cy, b_y_body, b_exit
+
+b_y_body:
+  br b_x(%zero, %n)
+
+b_x(%x: f64, %m: f64):
+  %cx = slt.f64 %x, %w
+  br_if %cx, b_x_body, b_y_latch
+
+b_x_body:
+  %r = mul.f64 %y, %w
+  %ri = fptosi.i64 %r
+  %xi = fptosi.i64 %x
+  %i = add.i64 %ri, %xi
+  %seven = iconst.i64 7
+  %slot = and.i64 %i, %seven
+  %m2 = add.f64 %m, %one
+  store_indexed.f64 %dst, %slot, 8, %m2
+  %x2 = add.f64 %x, %one
+  br b_x(%x2, %m2)
+
+b_y_latch:
+  %y2 = add.f64 %y, %one
+  br b_y(%y2, %m)
+
+b_exit:
+  ret %n
+}
+)";
+    auto mod = parse(kCountLoaded);
+    Function& fn = *mod->get_function("count");
+    CHECK(optimize_function_loops(fn));
+    DiagnosticReporter diag;
+    const bool verified = verify_module(*mod, &diag);
+    if (!verified) std::cerr << diag.format_all() << "\n" << to_string(fn) << "\n";
+    REQUIRE(verified);
+
+    std::vector<double> dst(8, 0.0);
+    codegen::JitExecutionEngine jit(Target::host());
+    REQUIRE(jit.compile_and_load(*mod));
+    auto count_fn = jit.get_function_ptr<double(*)(double*, double*, double)>("count");
+    REQUIRE(count_fn != nullptr);
+    for (const auto& [w, h, expect] : {std::tuple{4.0, 3.0, 12.0}, {10.5, 2.0, 22.0}, {-3.0, 2.0, 0.0},
+                                       {67108874.0, 1.0, 67108874.0}, {67108863.0, 1.0, 67108863.0}}) {
+        double lim = w;
+        CHECK_EQ(count_fn(dst.data(), &lim, h), expect);
+    }
+}
+
+TEST_CASE("IVSR - 2D stencil blur loop decomposes (y+dy) times w plus (x+dx) into constant displacements and scaled IV") {
     constexpr std::string_view kBlurLoop = R"(
 func @blur(%src: ptr, %dst: ptr, %w: f64, %h: f64) -> f64 {
 b0:
@@ -522,8 +668,10 @@ b_exit:
     CHECK(optimize_function_loops(fn));
     DiagnosticReporter diag;
     REQUIRE(verify_module(*mod, &diag));
-    // All 6 in-loop fptosi_i64 in the stencil are demoted away (only %w conversion in preheader remains).
-    CHECK(count_op(fn, Opcode::fptosi_i64) <= 1u);
+    // All 6 in-loop fptosi_i64 in the stencil are demoted away (only %w conversion in preheader remains),
+    // behind the entry check that %w and %h are sizes.
+    CHECK(fn.entry_block()->name() == "f64_demote.entry");
+    CHECK(count_op_demoted(fn, Opcode::fptosi_i64) <= 1u);
 
     std::vector<float> src(16, 2.0f), dst(16, 0.0f);
     codegen::JitExecutionEngine jit(Target::host());
@@ -533,7 +681,7 @@ b_exit:
     CHECK_EQ(blur_fn(src.data(), dst.data(), 4.0, 4.0), 18.0);
 }
 
-TEST_CASE("IVSR - 2D matrix multiply inner loop strength-reduces b[k*n+j] to pointer IV") {
+TEST_CASE("IVSR - 2D matrix multiply inner loop strength-reduces the b load at k times n plus j to a pointer IV") {
     constexpr std::string_view kMatLoop = R"(
 func @mat(%a: ptr, %b: ptr, %c: ptr, %n: f64) -> f64 {
 b0:
@@ -595,7 +743,8 @@ b_exit:
     CHECK(optimize_function_loops(fn));
     DiagnosticReporter diag;
     REQUIRE(verify_module(*mod, &diag));
-    CHECK(count_op(fn, Opcode::fptosi_i64) <= 1u);
+    CHECK(fn.entry_block()->name() == "f64_demote.entry");
+    CHECK(count_op_demoted(fn, Opcode::fptosi_i64) <= 1u);
     // b[k*n+j] becomes a direct `load` through a stepped pointer IV (4x unrolled + remainder).
     CHECK(count_op(fn, Opcode::load) >= 5u);
 

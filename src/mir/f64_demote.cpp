@@ -7,6 +7,7 @@
 #include <brass/mir/runtime_symbols.hpp>
 #include <brass/mir/uses.hpp>
 #include <cmath>
+#include <memory>
 #include <vector>
 #include <unordered_set>
 #include <unordered_map>
@@ -194,15 +195,41 @@ bool is_unprofitable_loop(const LoopInfo* loop, const Function& fn) {
 
 bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
     if (fn.blocks().empty() || !fn.entry_block()) return false;
+    // Demoted once already: the fallback beside the demoted body is the code
+    // for the parameters the demotion could not take, and must stay as it is.
+    if (fn.entry_block()->name() == kF64VersionEntryName) return false;
 
     fn.rebuild_cfg_predecessors();
-    DominatorTree dom(fn);
-    LoopAnalysis loop_analysis(fn, dom);
+    auto dom_p = std::make_unique<DominatorTree>(fn);
+    auto loops_p = std::make_unique<LoopAnalysis>(fn, *dom_p);
 
     // 0. Canonicalize loop-invariant f64 bounds on array-indexing loops so
     // counted f64 loops with runtime f64 bounds (e.g. `i < n_f64`) have a
     // provably bounded i32 upper bound in the preheader.
-    const bool canonicalized_bounds = canonicalize_loop_bounds(fn, dom, loop_analysis);
+    std::vector<ClampedLimit> all_clamped;
+    const bool canonicalized_bounds = canonicalize_loop_bounds(fn, *dom_p, *loops_p, &all_clamped);
+    // A clamp shortens its loop whenever it fires, so each one stands only
+    // where a check says it does not: the entry check for a limit made from
+    // the parameters (kept in `clamped`), a copy of the loop with its own
+    // limit for any other; failing both, the loop keeps its own limit.
+    std::vector<ClampedLimit> clamped;
+    bool versioned_loops = false;
+    for (const ClampedLimit& c : all_clamped) {
+        if (limit_computable_at_entry(fn, c.limit)) {
+            clamped.push_back(c);
+        } else if (version_loop_on_clamp(fn, c, all_clamped)) {
+            versioned_loops = true;
+        } else {
+            c.restore();
+        }
+    }
+    if (versioned_loops) {
+        loops_p.reset();
+        dom_p = std::make_unique<DominatorTree>(fn);
+        loops_p = std::make_unique<LoopAnalysis>(fn, *dom_p);
+    }
+    const DominatorTree& dom = *dom_p;
+    LoopAnalysis& loop_analysis = *loops_p;
 
     std::unordered_set<const Value*> exact_ints;
     std::unordered_set<const Value*> entry_params;
@@ -446,6 +473,7 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
         if (options.stats) {
             record_loop_stats(fn, loop_analysis, {}, options.stats);
         }
+        for (const ClampedLimit& c : clamped) c.restore();
         return canonicalized_bounds;
     }
 
@@ -550,7 +578,19 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
         record_loop_stats(fn, loop_analysis, demote_set, options.stats);
     }
 
-    if (demote_set.empty()) return canonicalized_bounds;
+    if (demote_set.empty()) {
+        for (const ClampedLimit& c : clamped) c.restore();
+        return canonicalized_bounds;
+    }
+
+    // The demoted body is the original one, entered only when the entry
+    // parameters it takes for integers are integers and no clamped limit
+    // would clamp.
+    // The sized parameters are assumptions whatever reads them: through a
+    // loop's guard they bound IVs that never read them.
+    const std::unordered_set<const Value*> sized = sized_entry_params(fn);
+    const std::vector<Value*> assumed = assumed_entry_params(fn, demote_set, exact_ints, sized);
+    if (!assumed.empty() || !clamped.empty()) version_on_entry_params(fn, assumed, sized, clamped);
 
     Builder b(*fn.parent());
     b.set_function(&fn);

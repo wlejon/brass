@@ -182,52 +182,18 @@ private:
         }
     }
 
+    // What the entry check (f64_demote_version.cpp) will hold true of these
+    // parameters before the demoted code runs.
     void seed_bounded_entry_params() {
-        const BasicBlock* entry = fn_.entry_block();
-        if (!entry || entry->param_count() == 0) return;
-        std::unordered_set<const Value*> ceil_sources;
-        std::unordered_set<const Value*> unsafe_entry_uses;
-        for (const BasicBlock* bb : fn_.blocks()) {
-            if (!bb) continue;
-            for (const Instruction* inst : *bb) {
-                if (!inst) continue;
-                if (inst->opcode() == Opcode::ceil_f64 && inst->operand_count() == 1 && inst->operand(0)) {
-                    const Value* src = inst->operand(0);
-                    ceil_sources.insert(src);
-                    if (src->is_instruction()) {
-                        const Instruction* sdef = src->defining_instruction();
-                        if ((sdef->opcode() == Opcode::add || sdef->opcode() == Opcode::sub) && sdef->operand_count() == 2) {
-                            ceil_sources.insert(sdef->operand(0));
-                            ceil_sources.insert(sdef->operand(1));
-                        }
-                    }
-                }
-                if (inst->opcode() == Opcode::ret && inst->operand_count() >= 1 && inst->operand(0)) {
-                    unsafe_entry_uses.insert(inst->operand(0));
-                }
-                auto mark_bt = [&](const BranchTarget& bt) {
-                    for (const Value* a : bt.args) {
-                        if (a) unsafe_entry_uses.insert(a);
-                    }
-                };
-                if (inst->opcode() == Opcode::br) mark_bt(inst->branch_target());
-                else if (inst->opcode() == Opcode::br_if) { mark_bt(inst->true_target()); mark_bt(inst->false_target()); }
-                else if (inst->opcode() == Opcode::switch_) {
-                    mark_bt(inst->default_target());
-                    for (const auto& sc : inst->switch_cases()) mark_bt(sc.target);
-                }
-            }
-        }
-        for (size_t i = 0; i < entry->param_count(); ++i) {
-            const Value* ep = entry->param(i);
-            if (ep && ep->type() == Type::f64() && ceil_sources.count(ep) && !unsafe_entry_uses.count(ep)) {
-                iv_[ep] = {0.0, 67108863.0};
-            }
+        const double max = sized_limit_max(fn_);
+        for (const Value* ep : sized_entry_params(fn_)) {
+            iv_[ep] = {0.0, max};
+            seeded_.insert(ep);
         }
     }
 
     bool is_int_or_exact(const Value* v) const {
-        return v && (v->type().is_integer() || exact_.count(v) != 0 || iv_.count(v) != 0);
+        return v && (v->type().is_integer() || exact_.count(v) != 0 || seeded_.count(v) != 0);
     }
 
     Interval get(const Value* v, const BasicBlock* use_block) const {
@@ -529,37 +495,18 @@ private:
     const std::unordered_set<const Value*>& exact_;
     std::unordered_map<const Value*, Guard> guards_;
     std::unordered_map<const Value*, Interval> iv_;
+    std::unordered_set<const Value*> seeded_;
     std::unordered_map<const Value*, int> grow_count_;
 };
 
 } // namespace
 
-bool canonicalize_loop_bounds(Function& fn, const DominatorTree& dom, const LoopAnalysis& loop_analysis) {
+bool canonicalize_loop_bounds(Function& fn, const DominatorTree& dom, const LoopAnalysis& loop_analysis,
+                              std::vector<ClampedLimit>* clamped) {
     if (!fn.parent()) return false;
     bool canonicalized_bounds = false;
     std::unordered_set<const Value*> canonical_ivs;
-
-    bool has_2d_index_mul = false;
-    for (const BasicBlock* bb : fn.blocks()) {
-        if (!bb) continue;
-        for (const Instruction* inst : *bb) {
-            if (inst && inst->opcode() == Opcode::mul && inst->result() && inst->result()->type() == Type::f64()) {
-                const Value* op0 = inst->operand(0);
-                const Value* op1 = inst->operand(1);
-                auto is_small_const = [](const Value* v) {
-                    return v && v->is_instruction() && v->defining_instruction()->opcode() == Opcode::fconst_f64 &&
-                           std::fabs(v->defining_instruction()->imm_f64()) <= 4.0;
-                };
-                if (!is_small_const(op0) && !is_small_const(op1) &&
-                    ((op0 && op0->is_block_param()) || (op1 && op1->is_block_param()))) {
-                    has_2d_index_mul = true;
-                    break;
-                }
-            }
-        }
-        if (has_2d_index_mul) break;
-    }
-    const double max_bound_f = has_2d_index_mul ? 67108863.0 : 2147483647.0;
+    const double max_bound_f = sized_limit_max(fn);
 
     const auto& po_loops = loop_analysis.post_order_loops();
     for (auto it = po_loops.rbegin(); it != po_loops.rend(); ++it) {
@@ -732,12 +679,109 @@ bool canonicalize_loop_bounds(Function& fn, const DominatorTree& dom, const Loop
             Value* safe_f = ph_b.build_select(gt_init, clamped_f, init_f_v);
             Value* lim_i32 = ph_b.build_fptosi_i32(safe_f);
             Value* exact_lim = ph_b.build_sitofp_f64_i32(lim_i32);
+            if (clamped) {
+                clamped->push_back(ClampedLimit{hdr_cmp, lim_idx, hdr_cmp->operand(lim_idx), limit_v, max_bound_f,
+                                                ph, header, le_max});
+            }
             hdr_cmp->set_operand(lim_idx, exact_lim);
             canonical_ivs.insert(p);
             canonicalized_bounds = true;
         }
     }
     return canonicalized_bounds;
+}
+
+double sized_limit_max(const Function& fn) {
+    // A product of two loop values (`y * w`) has to stay exact, so with one
+    // in the function both factors are held to 2^26, whose square is 2^52.
+    for (const BasicBlock* bb : fn.blocks()) {
+        if (!bb) continue;
+        for (const Instruction* inst : *bb) {
+            if (inst && inst->opcode() == Opcode::mul && inst->result() && inst->result()->type() == Type::f64()) {
+                const Value* op0 = inst->operand(0);
+                const Value* op1 = inst->operand(1);
+                auto is_small_const = [](const Value* v) {
+                    return v && v->is_instruction() && v->defining_instruction()->opcode() == Opcode::fconst_f64 &&
+                           std::fabs(v->defining_instruction()->imm_f64()) <= 4.0;
+                };
+                if (!is_small_const(op0) && !is_small_const(op1) &&
+                    ((op0 && op0->is_block_param()) || (op1 && op1->is_block_param()))) {
+                    return 67108863.0;
+                }
+            }
+        }
+    }
+    return 2147483647.0;
+}
+
+bool limit_computable_at_entry(const Function& fn, const Value* limit) {
+    const BasicBlock* entry = fn.entry_block();
+    std::vector<std::pair<const Value*, int>> stack = {{limit, 0}};
+    while (!stack.empty()) {
+        auto [v, depth] = stack.back();
+        stack.pop_back();
+        if (!v || depth > 8) return false;
+        if (v->is_block_param()) {
+            if (v->defining_block() != entry || v->type() != Type::f64()) return false;
+            continue;
+        }
+        if (!v->is_instruction()) return false;
+        const Instruction* d = v->defining_instruction();
+        if (d->opcode() == Opcode::fconst_f64) continue;
+        if ((d->opcode() != Opcode::add && d->opcode() != Opcode::sub && d->opcode() != Opcode::mul) ||
+            d->operand_count() != 2 || d->type() != Type::f64()) {
+            return false;
+        }
+        stack.push_back({d->operand(0), depth + 1});
+        stack.push_back({d->operand(1), depth + 1});
+    }
+    return true;
+}
+
+std::unordered_set<const Value*> sized_entry_params(const Function& fn) {
+    std::unordered_set<const Value*> out;
+    const BasicBlock* entry = fn.entry_block();
+    if (!entry || entry->param_count() == 0) return out;
+    std::unordered_set<const Value*> ceil_sources;
+    std::unordered_set<const Value*> unsafe_entry_uses;
+    for (const BasicBlock* bb : fn.blocks()) {
+        if (!bb) continue;
+        for (const Instruction* inst : *bb) {
+            if (!inst) continue;
+            if (inst->opcode() == Opcode::ceil_f64 && inst->operand_count() == 1 && inst->operand(0)) {
+                const Value* src = inst->operand(0);
+                ceil_sources.insert(src);
+                if (src->is_instruction()) {
+                    const Instruction* sdef = src->defining_instruction();
+                    if ((sdef->opcode() == Opcode::add || sdef->opcode() == Opcode::sub) && sdef->operand_count() == 2) {
+                        ceil_sources.insert(sdef->operand(0));
+                        ceil_sources.insert(sdef->operand(1));
+                    }
+                }
+            }
+            if (inst->opcode() == Opcode::ret && inst->operand_count() >= 1 && inst->operand(0)) {
+                unsafe_entry_uses.insert(inst->operand(0));
+            }
+            auto mark_bt = [&](const BranchTarget& bt) {
+                for (const Value* a : bt.args) {
+                    if (a) unsafe_entry_uses.insert(a);
+                }
+            };
+            if (inst->opcode() == Opcode::br) mark_bt(inst->branch_target());
+            else if (inst->opcode() == Opcode::br_if) { mark_bt(inst->true_target()); mark_bt(inst->false_target()); }
+            else if (inst->opcode() == Opcode::switch_) {
+                mark_bt(inst->default_target());
+                for (const auto& sc : inst->switch_cases()) mark_bt(sc.target);
+            }
+        }
+    }
+    for (size_t i = 0; i < entry->param_count(); ++i) {
+        const Value* ep = entry->param(i);
+        if (ep && ep->type() == Type::f64() && ceil_sources.count(ep) && !unsafe_entry_uses.count(ep)) {
+            out.insert(ep);
+        }
+    }
+    return out;
 }
 
 bool drop_unprovable_exact_values(const Function& fn, const DominatorTree& dom, const LoopAnalysis& loops,
