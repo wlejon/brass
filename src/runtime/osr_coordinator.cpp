@@ -251,19 +251,13 @@ void OsrCoordinator::request_entry(const Function& fn, const BasicBlock& header,
     FunctionHandle* handle = table.get_or_create(fn.name(), &fn);
     if (!fn.parent() || !handle || handle->mir_function() != &fn) return fail();
 
-    MultiTierPipeline& pipeline = table.pipeline();
-    if (pipeline.config().enable_background_compile &&
-        fn.name().find("__bronze_dyn_entry_") == std::string_view::npos) {
-        pipeline.enqueue_tier2(fn.name(), fn.parent(), handle, CompilePriority::High);
-    }
-
     // Only the call targets are read here, on the interpreter's thread: its
     // type feedback grows as it runs. Planning the entry and copying it
     // with its callees read the program's MIR, which running it does not
     // change, and take milliseconds (a loop nest's liveness, the region's
     // SSA repair), so they run on the worker, ahead of the compile, while
     // the interpreter carries on with the loop.
-    auto job = [this, &fn, hdr = &header, e, targets = detail::speculated_call_targets(table, fn.name())] {
+    auto job = [this, &fn, hdr = &header, e, handle, targets = detail::speculated_call_targets(table, fn.name())] {
         std::unique_ptr<Module> mod = copy_entry(fn, *hdr, e, targets);
         if (!mod) {
             {
@@ -272,6 +266,17 @@ void OsrCoordinator::request_entry(const Function& fn, const BasicBlock& header,
             }
             ready_cv_.notify_all();
             return;
+        }
+        // The whole function's Tier-2 code too, so the next call runs it
+        // rather than the baseline (which has no OSR) — unless the loop
+        // calls out: that code has no leave check, and a callee it carries
+        // that starts failing a guard would fail it on every iteration
+        // left in the frame's loop (tests/tier_ratchet osr_leave, bronze).
+        // Such a loop's next call goes through this OSR entry instead.
+        MultiTierPipeline& pipeline = registry().dispatch_table().pipeline();
+        if (!e->plan.leave_check && pipeline.config().enable_background_compile &&
+            fn.name().find("__bronze_dyn_entry_") == std::string_view::npos) {
+            pipeline.enqueue_tier2(fn.name(), fn.parent(), handle, CompilePriority::High);
         }
         compile_entry(fn, *mod, e);
     };
