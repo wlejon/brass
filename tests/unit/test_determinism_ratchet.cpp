@@ -11,6 +11,8 @@
 #include <brass/mir/pass_pipeline.hpp>
 #include <brass/codegen/jit_exec.hpp>
 #include <brass/codegen/baseline_jit.hpp>
+#include <brass/target/x64/x64_isel.hpp>
+#include <brass/target/aarch64/aarch64_isel.hpp>
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/vm/fast_interpreter.hpp>
 #include <brass/runtime/deterministic_math.hpp>
@@ -434,6 +436,94 @@ TEST_CASE("Determinism #156 - Bit-Exact Double-Double Transcendentals (Accuracy 
         CHECK(ulp_distance(math::det_asin(u), std::asin(u)) <= 2);
         CHECK(ulp_distance(math::det_acos(u), std::acos(u)) <= 2);
     }
+
+    // 3. Cross-platform bit-exact IEEE-754 golden table for all 12 brass_det_* functions.
+    //    Every architecture (Linux x64, Windows x64, macOS arm64, Linux arm64) must produce
+    //    these exact 64-bit IEEE-754 bit patterns with zero ULP drift.
+    struct UnaryGolden {
+        double x;
+        uint64_t sin_bits;
+        uint64_t cos_bits;
+        uint64_t tan_bits;
+        uint64_t atan_bits;
+        uint64_t exp_bits;
+        uint64_t cbrt_bits;
+    };
+    static constexpr UnaryGolden kUnaryGoldens[] = {
+        {-100.0,
+         0x3fe03425b78c4db8ULL, 0x3feb981dbf665fdfULL, 0x3fe2ca74d62b5d38ULL,
+         0xbff8f905eb2def22ULL, 0x36ea8c1f14e2af5dULL, 0xc01290fca9c761f8ULL},
+        {-3.141592653589793,
+         0xbca1a62633145c07ULL, 0xbff0000000000000ULL, 0x3ca1a62633145c07ULL,
+         0xbff433b8a322ddd3ULL, 0x3fa620227b598efaULL, 0xbff76ef7e73104b7ULL},
+        {-0.7853981633974483,
+         0xbfe6a09e667f3bccULL, 0x3fe6a09e667f3bcdULL, 0xbfefffffffffffffULL,
+         0xbfe54e04c05d06a0ULL, 0x3fdd2e171cf04879ULL, 0xbfed8639fdcb60eaULL},
+        {-1e-7,
+         0xbe7ad7f29abcaf3bULL, 0x3fefffffffffffd3ULL, 0xbe7ad7f29abcaf61ULL,
+         0xbe7ad7f29abcaf2fULL, 0x3fefffffca501af8ULL, 0xbf73030f03de9991ULL},
+        {0.1234567890123456,
+         0x3fbf8653acfa781fULL, 0x3fefc1a655cf1085ULL, 0x3fbfc438ddd978aaULL,
+         0x3fbf722151138c9aULL, 0x3ff21a380e18c48dULL, 0x3fdfde25fa3f00a4ULL},
+        {0.7853981633974483,
+         0x3fe6a09e667f3bccULL, 0x3fe6a09e667f3bcdULL, 0x3fefffffffffffffULL,
+         0x3fe54e04c05d06a0ULL, 0x40018bd669471caaULL, 0x3fed8639fdcb60eaULL},
+        {1.5707963267948966,
+         0x3ff0000000000000ULL, 0x3c91a62633145c07ULL, 0x434d02967c31cdb5ULL,
+         0x3ff00fe987ed02ffULL, 0x40133dedc855935fULL, 0x3ff2996264e0e3feULL},
+        {42.5,
+         0xbfefdff0cd5c5750ULL, 0x3fb6a0506a04973dULL, 0xc0268a40b864aa65ULL,
+         0x3ff8c19f811be511ULL, 0x43c3e5d83907a3dcULL, 0x400beb0a72eb6e31ULL},
+    };
+    for (const auto& g : kUnaryGoldens) {
+        CHECK_EQ(f64_raw_bits(brass_det_sin(g.x)), g.sin_bits);
+        CHECK_EQ(f64_raw_bits(brass_det_cos(g.x)), g.cos_bits);
+        CHECK_EQ(f64_raw_bits(brass_det_tan(g.x)), g.tan_bits);
+        CHECK_EQ(f64_raw_bits(brass_det_atan(g.x)), g.atan_bits);
+        CHECK_EQ(f64_raw_bits(brass_det_exp(g.x)), g.exp_bits);
+        CHECK_EQ(f64_raw_bits(brass_det_cbrt(g.x)), g.cbrt_bits);
+    }
+
+    struct UnitDomainGolden {
+        double u;
+        uint64_t asin_bits;
+        uint64_t acos_bits;
+        uint64_t log_u_plus_1p5_bits;
+    };
+    static constexpr UnitDomainGolden kUnitGoldens[] = {
+        {-0.999, 0xbff86ac9ad18f803ULL, 0x4008c66280ae928eULL, 0xbfe61de4e1773bf8ULL},
+        {-0.5,   0xbfe0c152382d7366ULL, 0x4000c152382d7366ULL, 0x0000000000000000ULL},
+        {-0.125, 0xbfc00abe0c129e1eULL, 0x3ffb235315c680dcULL, 0x3fd4618bc21c5ec2ULL},
+        {0.125,  0x3fc00abe0c129e1eULL, 0x3ff720a392c1d955ULL, 0x3fdf128f5faf06edULL},
+        {0.5,    0x3fe0c152382d7366ULL, 0x3ff0c152382d7365ULL, 0x3fe62e42fefa39efULL},
+        {0.999,  0x3ff86ac9ad18f803ULL, 0x3fa6e634e566a29eULL, 0x3fed4ef9e98d7058ULL},
+    };
+    for (const auto& g : kUnitGoldens) {
+        CHECK_EQ(f64_raw_bits(brass_det_asin(g.u)), g.asin_bits);
+        CHECK_EQ(f64_raw_bits(brass_det_acos(g.u)), g.acos_bits);
+        CHECK_EQ(f64_raw_bits(brass_det_log(g.u + 1.5)), g.log_u_plus_1p5_bits);
+    }
+
+    struct BinaryGolden {
+        double a;
+        double b;
+        uint64_t atan2_bits;
+        uint64_t hypot_bits;
+        uint64_t pow_abs_a_b_bits;
+    };
+    static constexpr BinaryGolden kBinaryGoldens[] = {
+        {0.375, 1.25, 0x3fd2a73a661eaf06ULL, 0x3ff4e16fdacff937ULL, 0x3fd2c7f098b2a9f8ULL},
+        {-2.5,  0.75, 0xbff4782cbabc8157ULL, 0x4004e16fdacff937ULL, 0x3fffcf927fccd2a0ULL},
+        {3.141592653589793, -1.5707963267948966, 0x4000468a8ace4df6ULL, 0x400c196908691da6ULL, 0x3fc5329c93a33fb0ULL},
+        {1e-6,  1e6,  0x3d719799812dea11ULL, 0x412e848000000000ULL, 0x0000000000000000ULL},
+        {2.25,  1.5,  0x3fef730bd281f69bULL, 0x4005a22073490377ULL, 0x400b000000000000ULL},
+        {7.5,  -0.25, 0x3ff9aa76ecfd4070ULL, 0x401e0443f6a332a8ULL, 0x3fe35638b103c0a2ULL},
+    };
+    for (const auto& g : kBinaryGoldens) {
+        CHECK_EQ(f64_raw_bits(brass_det_atan2(g.a, g.b)), g.atan2_bits);
+        CHECK_EQ(f64_raw_bits(brass_det_hypot(g.a, g.b)), g.hypot_bits);
+        CHECK_EQ(f64_raw_bits(brass_det_pow(std::fabs(g.a), g.b)), g.pow_abs_a_b_bits);
+    }
 }
 
 TEST_CASE("Determinism #156 - deterministic_fp MIR Attribute Disables FMA Contraction and Horizontal FP Reduction") {
@@ -493,6 +583,33 @@ TEST_CASE("Determinism #156 - deterministic_fp MIR Attribute Disables FMA Contra
             for (const Instruction* inst : *bb) {
                 CHECK(inst->opcode() != Opcode::fma_f64);
                 CHECK(inst->opcode() != Opcode::vfma);
+            }
+        }
+
+        // Verify that lowering fn_det through BOTH x64 and AArch64 instruction selectors
+        // emits zero fused multiply-add (Vfmadd*) LIR instructions on either architecture.
+        auto is_lir_fma = [](codegen::LirOpcode op) {
+            return op == codegen::LirOpcode::Vfmadd213ss || op == codegen::LirOpcode::Vfmadd231ss ||
+                   op == codegen::LirOpcode::Vfmadd213sd || op == codegen::LirOpcode::Vfmadd231sd ||
+                   op == codegen::LirOpcode::Vfmadd213ps || op == codegen::LirOpcode::Vfmadd231ps ||
+                   op == codegen::LirOpcode::Vfmadd213pd || op == codegen::LirOpcode::Vfmadd231pd;
+        };
+
+        x64::X64ISel x64_isel(Target::x64_linux());
+        auto x64_lir = x64_isel.lower(*fn_det);
+        REQUIRE(x64_lir != nullptr);
+        for (const auto& lbb : x64_lir->blocks) {
+            for (const auto& linst : lbb->instructions) {
+                CHECK(!is_lir_fma(linst->opcode));
+            }
+        }
+
+        aarch64::AArch64ISel arm64_isel(Target::aarch64_linux());
+        auto arm64_lir = arm64_isel.lower(*fn_det);
+        REQUIRE(arm64_lir != nullptr);
+        for (const auto& lbb : arm64_lir->blocks) {
+            for (const auto& linst : lbb->instructions) {
+                CHECK(!is_lir_fma(linst->opcode));
             }
         }
     }
@@ -585,7 +702,33 @@ TEST_CASE("Determinism #156 - Tier-0 vs Tier-1 vs Tier-2 1,000-Frame Lockstep St
         rolling_hash_t0 = math::hash_f64_state(state_t0.data(), state_t0.size(), rolling_hash_t0);
         rolling_hash_t2 = math::hash_f64_state(state_t2.data(), state_t2.size(), rolling_hash_t2);
         REQUIRE_EQ(rolling_hash_t0, rolling_hash_t2);
+
+        // Cross-machine golden state-hash checkpoints at frames 1, 10, 100, 500, and 1000:
+        if (frame == 0) {
+            CHECK_EQ(h2, 0xac76118ffe36f8eeULL);
+            CHECK_EQ(f64_raw_bits(r2), 0x4013efb07fcd96c2ULL);
+        } else if (frame == 9) {
+            CHECK_EQ(h2, 0xc4f18a340467cb31ULL);
+            CHECK_EQ(rolling_hash_t2, 0x6bf263ead634651cULL);
+            CHECK_EQ(f64_raw_bits(r2), 0x40456ab60524b086ULL);
+        } else if (frame == 99) {
+            CHECK_EQ(h2, 0x87160d4b376384a9ULL);
+            CHECK_EQ(rolling_hash_t2, 0xbbefd184a9a2c395ULL);
+            CHECK_EQ(f64_raw_bits(r2), 0x407a4109fdc79123ULL);
+        } else if (frame == 499) {
+            CHECK_EQ(h2, 0xf22834e15b5b0759ULL);
+            CHECK_EQ(rolling_hash_t2, 0x464a33192f31cd8cULL);
+            CHECK_EQ(f64_raw_bits(r2), 0x40a05d77c45cc2d9ULL);
+        } else if (frame == 999) {
+            CHECK_EQ(h2, 0xceda671d02fd55d8ULL);
+            CHECK_EQ(rolling_hash_t2, 0x25aadb257097a35aULL);
+            CHECK_EQ(f64_raw_bits(r2), 0x40b05dfafd7e4684ULL);
+        }
     }
+
+    static constexpr uint64_t kExpected1000FrameRollingHash = 0x25aadb257097a35aULL;
+    CHECK_EQ(rolling_hash_t0, kExpected1000FrameRollingHash);
+    CHECK_EQ(rolling_hash_t2, kExpected1000FrameRollingHash);
 
     // 2. Contrast: When deterministic_fp is FALSE, Tier-2 FMA contraction & vector reduction
     //    reassociation produce single-rounding / reordered-sum drift relative to Tier-0 Interpreter.
