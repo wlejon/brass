@@ -1,5 +1,6 @@
 #include <brass/mir/f64_demote.hpp>
 #include <brass/mir/builder.hpp>
+#include <brass/mir/cfg_simplify.hpp>
 #include <brass/mir/verifier.hpp>
 #include <brass/mir/opcodes.hpp>
 #include <brass/mir/loop_analysis.hpp>
@@ -556,13 +557,24 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
 
     // Every call argument that is an f64 now must still be one after the
     // rewrite: whatever the callee is, it was typed to take the f64.
+    // Likewise, every f64 value in a guard's state_map() must remain f64 so
+    // Tier-0 deoptimization can rebuild the frame with matching types.
     std::vector<std::pair<Instruction*, size_t>> f64_call_args;
+    std::vector<std::pair<Instruction*, size_t>> f64_guard_states;
     for (BasicBlock* bb : fn.blocks()) {
         if (!bb) continue;
         for (Instruction* inst : *bb) {
-            if (!inst || !is_call(inst->opcode())) continue;
-            for (size_t i = 0; i < inst->operand_count(); ++i) {
-                if (inst->operand(i) && inst->operand(i)->type() == Type::f64()) f64_call_args.emplace_back(inst, i);
+            if (!inst) continue;
+            if (is_call(inst->opcode())) {
+                for (size_t i = 0; i < inst->operand_count(); ++i) {
+                    if (inst->operand(i) && inst->operand(i)->type() == Type::f64()) f64_call_args.emplace_back(inst, i);
+                }
+            } else if (inst->opcode() == Opcode::guard) {
+                for (size_t i = 0; i < inst->state_map().size(); ++i) {
+                    if (inst->state_map()[i] && inst->state_map()[i]->type() == Type::f64()) {
+                        f64_guard_states.emplace_back(inst, i);
+                    }
+                }
             }
         }
     }
@@ -683,6 +695,16 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
         }
         b.position_before(call);
         call->set_operand(idx, b.build_sitofp_f64_i64(arg));
+    }
+
+    for (const auto& [guard, idx] : f64_guard_states) {
+        if (idx >= guard->state_map().size()) continue;
+        Value* sv = guard->state_map()[idx];
+        if (!sv || sv->type() == Type::f64()) continue;
+        if (sv->type() == Type::i64()) {
+            b.position_before(guard);
+            guard->state_map()[idx] = b.build_sitofp_f64_i64(sv);
+        }
     }
 
     for (BasicBlock* bb : fn.blocks()) {
@@ -832,6 +854,7 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
                da->opcode() == db->opcode() && da->operand(0) == db->operand(0);
     };
 
+    bool folded_toint32_guard = false;
     for (BasicBlock* bb : fn.blocks()) {
         if (!bb) continue;
         for (Instruction* inst = bb->head(); inst != nullptr;) {
@@ -856,9 +879,41 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
                 b.position_before(inst);
                 replace_all_uses(fn, inst->result(), b.build_iconst_i32(op == Opcode::eq ? 1 : 0));
                 bb->remove_instruction(inst);
+            } else if ((op == Opcode::ult || op == Opcode::ule) && inst->operand_count() == 2 && inst->type() == Type::i32() &&
+                       inst->operand(0) && inst->operand(0)->is_instruction() &&
+                       inst->operand(1) && inst->operand(1)->is_instruction()) {
+                Instruction* and_i = inst->operand(0)->defining_instruction();
+                Instruction* lim_i = inst->operand(1)->defining_instruction();
+                if (and_i->opcode() == Opcode::and_ && lim_i->opcode() == Opcode::iconst_i64 &&
+                    static_cast<uint64_t>(lim_i->imm_i64()) >= 0x4350000000000000ULL) {
+                    Value* a0 = and_i->operand(0);
+                    Value* a1 = and_i->operand(1);
+                    Value* bc_v = (a1 && a1->is_instruction() && a1->defining_instruction()->opcode() == Opcode::iconst_i64 &&
+                                   static_cast<uint64_t>(a1->defining_instruction()->imm_i64()) == 0x7FFFFFFFFFFFFFFFULL) ? a0 :
+                                  ((a0 && a0->is_instruction() && a0->defining_instruction()->opcode() == Opcode::iconst_i64 &&
+                                    static_cast<uint64_t>(a0->defining_instruction()->imm_i64()) == 0x7FFFFFFFFFFFFFFFULL) ? a1 : nullptr);
+                    if (bc_v && bc_v->is_instruction() && bc_v->defining_instruction()->opcode() == Opcode::bitcast_i64_f64) {
+                        Value* fp_v = bc_v->defining_instruction()->operand(0);
+                        if (fp_v && fp_v->is_instruction()) {
+                            Instruction* s_i = fp_v->defining_instruction();
+                            if ((s_i->opcode() == Opcode::sitofp_f64_i64 || s_i->opcode() == Opcode::sitofp_f64_i32) &&
+                                s_i->operand(0) && (demote_set.count(s_i->operand(0)) != 0 || is_i32_valued(s_i->operand(0)))) {
+                                b.position_before(inst);
+                                replace_all_uses(fn, inst->result(), b.build_iconst_i32(1));
+                                bb->remove_instruction(inst);
+                                folded_toint32_guard = true;
+                            }
+                        }
+                    }
+                }
             }
             inst = next;
         }
+    }
+
+    fn.rebuild_cfg_predecessors();
+    if (folded_toint32_guard) {
+        cfg_simplify_function(fn);
     }
 
     auto use_counts = compute_use_counts(fn);

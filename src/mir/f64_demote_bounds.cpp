@@ -67,10 +67,11 @@ class Bounds {
 public:
     Bounds(const Function& fn, const DominatorTree& dom, const LoopAnalysis& loops,
            const std::unordered_set<const Value*>& exact)
-        : fn_(fn), dom_(dom), exact_(exact) {
+        : fn_(fn), dom_(dom), loops_(loops), exact_(exact) {
         for (const LoopInfo* loop : loops.post_order_loops()) {
             if (loop) collect_guards(*loop);
         }
+        seed_bounded_entry_params();
     }
 
     // Returns false if the analysis did not settle; nothing can be trusted then.
@@ -147,7 +148,20 @@ private:
         if (stay->predecessors().size() != 1) return;
 
         const Instruction* cmp = term->operand(0)->defining_instruction();
-        if (cmp->operand_count() != 2) return;
+        if (cmp && cmp->opcode() == Opcode::and_ && cmp->operand_count() == 2) {
+            for (size_t side = 0; side < 2; ++side) {
+                const Value* mask_v = cmp->operand(side);
+                const Value* inner_v = cmp->operand(1 - side);
+                if (mask_v && mask_v->is_instruction() &&
+                    mask_v->defining_instruction()->opcode() == Opcode::iconst_i32 &&
+                    mask_v->defining_instruction()->imm_i32() == 1 &&
+                    inner_v && inner_v->is_instruction()) {
+                    cmp = inner_v->defining_instruction();
+                    break;
+                }
+            }
+        }
+        if (!cmp || cmp->operand_count() != 2) return;
         bool less = false;  // lhs < or <= rhs holds when true
         switch (cmp->opcode()) {
             case Opcode::slt: case Opcode::sle: less = true; break;
@@ -168,15 +182,95 @@ private:
         }
     }
 
+    void seed_bounded_entry_params() {
+        const BasicBlock* entry = fn_.entry_block();
+        if (!entry || entry->param_count() == 0) return;
+        std::unordered_set<const Value*> ceil_sources;
+        std::unordered_set<const Value*> unsafe_entry_uses;
+        for (const BasicBlock* bb : fn_.blocks()) {
+            if (!bb) continue;
+            for (const Instruction* inst : *bb) {
+                if (!inst) continue;
+                if (inst->opcode() == Opcode::ceil_f64 && inst->operand_count() == 1 && inst->operand(0)) {
+                    const Value* src = inst->operand(0);
+                    ceil_sources.insert(src);
+                    if (src->is_instruction()) {
+                        const Instruction* sdef = src->defining_instruction();
+                        if ((sdef->opcode() == Opcode::add || sdef->opcode() == Opcode::sub) && sdef->operand_count() == 2) {
+                            ceil_sources.insert(sdef->operand(0));
+                            ceil_sources.insert(sdef->operand(1));
+                        }
+                    }
+                }
+                if (inst->opcode() == Opcode::ret && inst->operand_count() >= 1 && inst->operand(0)) {
+                    unsafe_entry_uses.insert(inst->operand(0));
+                }
+                auto mark_bt = [&](const BranchTarget& bt) {
+                    for (const Value* a : bt.args) {
+                        if (a) unsafe_entry_uses.insert(a);
+                    }
+                };
+                if (inst->opcode() == Opcode::br) mark_bt(inst->branch_target());
+                else if (inst->opcode() == Opcode::br_if) { mark_bt(inst->true_target()); mark_bt(inst->false_target()); }
+                else if (inst->opcode() == Opcode::switch_) {
+                    mark_bt(inst->default_target());
+                    for (const auto& sc : inst->switch_cases()) mark_bt(sc.target);
+                }
+            }
+        }
+        for (size_t i = 0; i < entry->param_count(); ++i) {
+            const Value* ep = entry->param(i);
+            if (ep && ep->type() == Type::f64() && ceil_sources.count(ep) && !unsafe_entry_uses.count(ep)) {
+                iv_[ep] = {0.0, 67108863.0};
+            }
+        }
+    }
+
     bool is_int_or_exact(const Value* v) const {
-        return v && (v->type().is_integer() || exact_.count(v) != 0);
+        return v && (v->type().is_integer() || exact_.count(v) != 0 || iv_.count(v) != 0);
     }
 
     Interval get(const Value* v, const BasicBlock* use_block) const {
         if (!v) return Interval::all();
         if (v->type() == Type::i32()) {
-            if (v->is_instruction() && v->defining_instruction()->opcode() == Opcode::iconst_i32) {
-                return Interval::point(static_cast<double>(v->defining_instruction()->imm_i32()));
+            if (v->is_instruction()) {
+                const Instruction* d = v->defining_instruction();
+                if (d->opcode() == Opcode::iconst_i32) {
+                    return Interval::point(static_cast<double>(d->imm_i32()));
+                }
+                if (d->opcode() == Opcode::fptosi_i32 && d->operand_count() == 1 && d->operand(0) &&
+                    d->operand(0)->is_instruction()) {
+                    const Instruction* s1 = d->operand(0)->defining_instruction();
+                    if (s1->opcode() == Opcode::select && s1->operand_count() == 3 && s1->operand(1) &&
+                        s1->operand(1)->is_instruction()) {
+                        const Instruction* s2 = s1->operand(1)->defining_instruction();
+                        if (s2->opcode() == Opcode::select && s2->operand_count() == 3 && s2->operand(2) &&
+                            s2->operand(2)->is_instruction() &&
+                            s2->operand(2)->defining_instruction()->opcode() == Opcode::fconst_f64) {
+                            const double max_c = s2->operand(2)->defining_instruction()->imm_f64();
+                            const Interval init_iv = get(s1->operand(2), s1->parent());
+                            const double lo = (!init_iv.empty() && init_iv.lo >= 0.0) ? std::trunc(init_iv.lo) : 0.0;
+                            return {lo, std::trunc(max_c)};
+                        }
+                    }
+                }
+                if (d->opcode() == Opcode::and_ && d->operand_count() == 2) {
+                    for (size_t side = 0; side < 2; ++side) {
+                        const Value* m = d->operand(side);
+                        if (m && m->is_instruction() && m->defining_instruction()->opcode() == Opcode::iconst_i32 &&
+                            m->defining_instruction()->imm_i32() >= 0) {
+                            return {0.0, static_cast<double>(m->defining_instruction()->imm_i32())};
+                        }
+                    }
+                }
+                if (d->opcode() == Opcode::lshr && d->operand_count() == 2 && d->operand(1) &&
+                    d->operand(1)->is_instruction() &&
+                    d->operand(1)->defining_instruction()->opcode() == Opcode::iconst_i32) {
+                    const int32_t sh = d->operand(1)->defining_instruction()->imm_i32();
+                    if (sh > 0 && sh < 32) {
+                        return {0.0, static_cast<double>(0xFFFFFFFFu >> static_cast<uint32_t>(sh))};
+                    }
+                }
             }
             Interval r = {-2147483648.0, 2147483647.0};
             auto g = guards_.find(v);
@@ -251,6 +345,102 @@ private:
     Interval param_interval(const BasicBlock* bb, size_t idx) const {
         const Value* p = bb->param(idx);
         if (p->type() != Type::f64() || !exact_.count(p)) return Interval::all();
+        const LoopInfo* loop = nullptr;
+        for (const LoopInfo* l : loops_.post_order_loops()) {
+            if (l && l->header() == bb) { loop = l; break; }
+        }
+        if (loop && loop->latches().size() == 1 && !guards_.count(p)) {
+            const BasicBlock* latch = loop->latches()[0];
+            Interval init_r;
+            const Value* latch_arg = nullptr;
+            bool ok_preds = true;
+            for (const BasicBlock* pred : bb->predecessors()) {
+                const Instruction* term = pred ? pred->terminator() : nullptr;
+                if (!term) { ok_preds = false; break; }
+                auto visit_pred = [&](const BranchTarget& bt) {
+                    if (bt.block != bb) return;
+                    const Value* arg = idx < bt.args.size() ? bt.args[idx] : nullptr;
+                    if (!arg) { ok_preds = false; return; }
+                    if (pred == latch) latch_arg = arg;
+                    else if (!loop->contains(pred)) init_r = hull(init_r, get(arg, pred));
+                    else ok_preds = false;
+                };
+                visit_pred(term->branch_target());
+                visit_pred(term->true_target());
+                visit_pred(term->false_target());
+                for (const auto& sc : term->switch_cases()) visit_pred(sc.target);
+            }
+            auto unwrap_latch = [&](const Value* v) -> const Value* {
+                if (v && v->is_block_param() && v->defining_block() == latch && latch->predecessors().size() == 1) {
+                    const BasicBlock* lpred = latch->predecessors()[0];
+                    const Instruction* lterm = lpred ? lpred->terminator() : nullptr;
+                    if (lterm && lterm->opcode() == Opcode::br && lterm->branch_target().block == latch &&
+                        v->param_index() < lterm->branch_target().args.size()) {
+                        return lterm->branch_target().args[v->param_index()];
+                    }
+                }
+                return v;
+            };
+            latch_arg = unwrap_latch(latch_arg);
+            if (ok_preds && latch_arg && latch_arg->is_instruction() && !init_r.empty() &&
+                std::isfinite(init_r.lo) && std::isfinite(init_r.hi)) {
+                const Instruction* ldef = latch_arg->defining_instruction();
+                if (ldef->opcode() == Opcode::add || ldef->opcode() == Opcode::sub) {
+                    const Value* op0 = unwrap_latch(ldef->operand(0));
+                    const Value* op1 = unwrap_latch(ldef->operand(1));
+                    const Value* delta = nullptr;
+                    bool is_sub = (ldef->opcode() == Opcode::sub);
+                    if (op0 == p) delta = op1;
+                    else if (!is_sub && op1 == p) delta = op0;
+                    if (delta && !depends_on_in_loop(delta, p, loop)) {
+                        const Interval d_iv = is_sub
+                            ? Interval{-get(delta, ldef->parent()).hi, -get(delta, ldef->parent()).lo}
+                            : get(delta, ldef->parent());
+                        if (!d_iv.empty() && std::isfinite(d_iv.lo) && std::isfinite(d_iv.hi)) {
+                            for (size_t j = 0; j < bb->param_count(); ++j) {
+                                if (j == idx) continue;
+                                const Value* iv = bb->param(j);
+                                auto git = guards_.find(iv);
+                                if (git == guards_.end() || !git->second.upper || !dom_.dominates(git->second.stay, latch)) continue;
+                                Interval iv_init;
+                                const Value* iv_latch = nullptr;
+                                for (const BasicBlock* pred : bb->predecessors()) {
+                                    const Instruction* term = pred->terminator();
+                                    auto visit_iv = [&](const BranchTarget& bt) {
+                                        if (bt.block != bb || j >= bt.args.size()) return;
+                                        if (pred == latch) iv_latch = bt.args[j];
+                                        else if (!loop->contains(pred)) iv_init = hull(iv_init, get(bt.args[j], pred));
+                                    };
+                                    visit_iv(term->branch_target());
+                                    visit_iv(term->true_target());
+                                    visit_iv(term->false_target());
+                                }
+                                iv_latch = unwrap_latch(iv_latch);
+                                if (!iv_latch || !iv_latch->is_instruction() || iv_init.empty() || !std::isfinite(iv_init.lo)) continue;
+                                const Instruction* iv_def = iv_latch->defining_instruction();
+                                if (iv_def->opcode() != Opcode::add) continue;
+                                const Value* iop0 = unwrap_latch(iv_def->operand(0));
+                                const Value* iop1 = unwrap_latch(iv_def->operand(1));
+                                const Value* step_v = (iop0 == iv) ? iop1 : ((iop1 == iv) ? iop0 : nullptr);
+                                if (!step_v) continue;
+                                const Interval step_iv = get(step_v, iv_def->parent());
+                                if (step_iv.empty() || !(step_iv.lo >= 1.0)) continue;
+                                const Interval lim_iv = get(git->second.limit, nullptr);
+                                if (lim_iv.empty() || !std::isfinite(lim_iv.hi)) continue;
+                                const double g_delta = (git->second.strict && is_int_or_exact(iv) && is_int_or_exact(git->second.limit)) ? 1.0 : 0.0;
+                                const double max_stay_iv = lim_iv.hi - g_delta;
+                                if (max_stay_iv <= kExactLimit) {
+                                    const double trips = (max_stay_iv < iv_init.lo) ? 0.0 : (std::floor((max_stay_iv - iv_init.lo) / step_iv.lo) + 1.0);
+                                    const double lo = init_r.lo + trips * std::min(0.0, d_iv.lo);
+                                    const double hi = init_r.hi + trips * std::max(0.0, d_iv.hi);
+                                    return {lo, hi};
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         Interval r;
         for (const BasicBlock* pred : bb->predecessors()) {
             const Instruction* term = pred ? pred->terminator() : nullptr;
@@ -265,6 +455,37 @@ private:
             for (const auto& sc : term->switch_cases()) visit(sc.target);
         }
         return r;
+    }
+
+    static bool depends_on_in_loop(const Value* v, const Value* target, const LoopInfo* loop) {
+        std::unordered_set<const Value*> vis;
+        std::vector<const Value*> stack = {v};
+        while (!stack.empty()) {
+            const Value* cur = stack.back();
+            stack.pop_back();
+            if (!cur || !vis.insert(cur).second) continue;
+            if (cur == target) return true;
+            if (cur->is_instruction()) {
+                const Instruction* inst = cur->defining_instruction();
+                if (!inst->parent() || !loop->contains(inst->parent())) continue;
+                for (size_t i = 0; i < inst->operand_count(); ++i) stack.push_back(inst->operand(i));
+            } else if (cur->is_block_param()) {
+                const BasicBlock* bb = cur->defining_block();
+                if (!bb || !loop->contains(bb)) continue;
+                const size_t idx = cur->param_index();
+                for (const BasicBlock* pred : bb->predecessors()) {
+                    const Instruction* term = pred ? pred->terminator() : nullptr;
+                    if (!term) continue;
+                    auto push_arg = [&](const BranchTarget& bt) {
+                        if (bt.block == bb && idx < bt.args.size()) stack.push_back(bt.args[idx]);
+                    };
+                    push_arg(term->branch_target());
+                    push_arg(term->true_target());
+                    push_arg(term->false_target());
+                }
+            }
+        }
+        return false;
     }
 
     Interval instruction_interval(const Instruction& inst) const {
@@ -304,6 +525,7 @@ private:
 
     const Function& fn_;
     const DominatorTree& dom_;
+    const LoopAnalysis& loops_;
     const std::unordered_set<const Value*>& exact_;
     std::unordered_map<const Value*, Guard> guards_;
     std::unordered_map<const Value*, Interval> iv_;
@@ -316,6 +538,28 @@ bool canonicalize_loop_bounds(Function& fn, const DominatorTree& dom, const Loop
     if (!fn.parent()) return false;
     bool canonicalized_bounds = false;
     std::unordered_set<const Value*> canonical_ivs;
+
+    bool has_2d_index_mul = false;
+    for (const BasicBlock* bb : fn.blocks()) {
+        if (!bb) continue;
+        for (const Instruction* inst : *bb) {
+            if (inst && inst->opcode() == Opcode::mul && inst->result() && inst->result()->type() == Type::f64()) {
+                const Value* op0 = inst->operand(0);
+                const Value* op1 = inst->operand(1);
+                auto is_small_const = [](const Value* v) {
+                    return v && v->is_instruction() && v->defining_instruction()->opcode() == Opcode::fconst_f64 &&
+                           std::fabs(v->defining_instruction()->imm_f64()) <= 4.0;
+                };
+                if (!is_small_const(op0) && !is_small_const(op1) &&
+                    ((op0 && op0->is_block_param()) || (op1 && op1->is_block_param()))) {
+                    has_2d_index_mul = true;
+                    break;
+                }
+            }
+        }
+        if (has_2d_index_mul) break;
+    }
+    const double max_bound_f = has_2d_index_mul ? 67108863.0 : 2147483647.0;
 
     const auto& po_loops = loop_analysis.post_order_loops();
     for (auto it = po_loops.rbegin(); it != po_loops.rend(); ++it) {
@@ -357,6 +601,22 @@ bool canonicalize_loop_bounds(Function& fn, const DominatorTree& dom, const Loop
         if (stay_true == stay_false) continue;
 
         Instruction* hdr_cmp = hdr_term->operand(0)->defining_instruction();
+        if (hdr_cmp && hdr_cmp->opcode() == Opcode::and_ && hdr_cmp->operand_count() == 2) {
+            for (size_t side = 0; side < 2; ++side) {
+                Value* mask_v = hdr_cmp->operand(side);
+                Value* inner_v = hdr_cmp->operand(1 - side);
+                if (mask_v && mask_v->is_instruction() &&
+                    mask_v->defining_instruction()->opcode() == Opcode::iconst_i32 &&
+                    mask_v->defining_instruction()->imm_i32() == 1 &&
+                    inner_v && inner_v->is_instruction() &&
+                    is_comparison(inner_v->defining_instruction()->opcode())) {
+                    hdr_term->set_operand(0, inner_v);
+                    hdr_cmp = inner_v->defining_instruction();
+                    canonicalized_bounds = true;
+                    break;
+                }
+            }
+        }
         if (!hdr_cmp || hdr_cmp->operand_count() != 2) continue;
 
         for (size_t i = 0; i < header->param_count(); ++i) {
@@ -416,7 +676,30 @@ bool canonicalize_loop_bounds(Function& fn, const DominatorTree& dom, const Loop
             if (!is_p_lt_lim) continue;
 
             Value* limit_v = hdr_cmp->operand(lim_idx);
-            if (!limit_v || limit_v->type() != Type::f64() || !loop->is_loop_invariant(limit_v)) continue;
+            if (!limit_v || limit_v->type() != Type::f64()) continue;
+            auto avail_in_ph = [&](Value* v) -> bool {
+                if (!v || !loop->is_loop_invariant(v)) return false;
+                if (v->is_instruction()) {
+                    const Instruction* def = v->defining_instruction();
+                    if (def->opcode() == Opcode::fconst_f64) return true;
+                    return def->parent() && dom.dominates(def->parent(), ph);
+                }
+                if (v->is_block_param()) {
+                    return v->defining_block() && dom.dominates(v->defining_block(), ph);
+                }
+                return false;
+            };
+            Builder ph_b(*fn.parent());
+            ph_b.set_function(&fn);
+            ph_b.position_before(ph_term);
+            auto mat_in_ph = [&](Value* v) -> Value* {
+                if (v->is_instruction() && v->defining_instruction()->opcode() == Opcode::fconst_f64 &&
+                    (!v->defining_instruction()->parent() || !dom.dominates(v->defining_instruction()->parent(), ph))) {
+                    return ph_b.build_fconst_f64(v->defining_instruction()->imm_f64());
+                }
+                return v;
+            };
+
             if (limit_v->is_instruction()) {
                 const Instruction* ldef = limit_v->defining_instruction();
                 const Opcode lop = ldef->opcode();
@@ -424,17 +707,25 @@ bool canonicalize_loop_bounds(Function& fn, const DominatorTree& dom, const Loop
                     canonical_ivs.insert(p);
                     continue;
                 }
-                if (!ldef->parent() || !dom.dominates(ldef->parent(), ph)) continue;
+                if (!ldef->parent() || !dom.dominates(ldef->parent(), ph)) {
+                    if ((lop == Opcode::sub || lop == Opcode::add) &&
+                        avail_in_ph(ldef->operand(0)) && avail_in_ph(ldef->operand(1))) {
+                        Value* lhs = mat_in_ph(ldef->operand(0));
+                        Value* rhs = mat_in_ph(ldef->operand(1));
+                        limit_v = (lop == Opcode::sub) ? ph_b.build_sub(lhs, rhs) : ph_b.build_add(lhs, rhs);
+                    } else {
+                        continue;
+                    }
+                }
             } else if (limit_v->is_block_param()) {
                 if (!limit_v->defining_block() || !dom.dominates(limit_v->defining_block(), ph)) continue;
+            } else {
+                continue;
             }
 
-            Builder ph_b(*fn.parent());
-            ph_b.set_function(&fn);
-            ph_b.position_before(ph_term);
             Value* ceil_lim = ph_b.build_ceil_f64(limit_v);
             Value* init_f_v = (init_const >= 0.0) ? ph_b.build_fconst_f64(init_const) : init_v;
-            Value* max_i32_f = ph_b.build_fconst_f64(2147483647.0);
+            Value* max_i32_f = ph_b.build_fconst_f64(max_bound_f);
             Value* gt_init = ph_b.build_sgt(ceil_lim, init_f_v);
             Value* le_max = ph_b.build_sle(ceil_lim, max_i32_f);
             Value* clamped_f = ph_b.build_select(le_max, ceil_lim, max_i32_f);

@@ -5,9 +5,11 @@
 #include <brass/mir/uses.hpp>
 #include "ir_clone.hpp"
 #include <algorithm>
+#include <functional>
 #include <limits>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -76,6 +78,16 @@ bool get_const_int(const Value* val, int64_t& out_val) {
         out_val = def->imm_i64();
         return true;
     }
+    if (def->opcode() == Opcode::sext_i64 && def->operand_count() == 1) {
+        return get_const_int(def->operand(0), out_val);
+    }
+    if (def->opcode() == Opcode::zext_i64 && def->operand_count() == 1) {
+        int64_t inner = 0;
+        if (get_const_int(def->operand(0), inner)) {
+            out_val = static_cast<int64_t>(static_cast<uint32_t>(inner));
+            return true;
+        }
+    }
     return false;
 }
 
@@ -87,6 +99,22 @@ Value* build_mul(Builder& b, Value* lhs, int64_t scale) {
     }
     if (scale == 1) return lhs;
     return b.build_mul(lhs, b.build_iconst_i64(scale));
+}
+
+Value* build_mul_val(Builder& b, Value* lhs, Value* rhs) {
+    if (!rhs) return lhs;
+    int64_t c = 0;
+    if (get_const_int(lhs, c)) {
+        if (c == 0) return b.build_iconst_i64(0);
+        if (c == 1) return rhs;
+        return build_mul(b, rhs, c);
+    }
+    if (get_const_int(rhs, c)) {
+        if (c == 0) return b.build_iconst_i64(0);
+        if (c == 1) return lhs;
+        return build_mul(b, lhs, c);
+    }
+    return b.build_mul(lhs, rhs);
 }
 
 Value* build_add(Builder& b, Value* lhs, Value* rhs) {
@@ -127,24 +155,38 @@ BasicBlock* existing_preheader(const LoopInfo& loop) {
     return found;
 }
 
-// True when, with constant bounds, every value the header compare
-// `cmp(i, limit)` sees satisfies 0 <= i and s*i <= INT64_MAX, and s*limit
-// fits too: then comparing s*i with s*limit orders exactly as comparing i
-// with limit, signed or unsigned. The loop must continue on the compare's
-// true edge, so i stops growing once the compare fails.
+// True when, with constant or i32-extended bounds, every value the header
+// compare `cmp(i, limit)` sees satisfies 0 <= i and s*i <= INT64_MAX, and
+// s*limit fits too: then comparing s*i with s*limit orders exactly as
+// comparing i with limit, signed or unsigned. The loop must continue on the
+// compare's true edge, so i stops growing once the compare fails.
 bool scaled_exit_compare_is_exact(const BasicIV& biv, const Instruction& cmp, Value* limit,
                                   const LoopInfo& loop, const Instruction& header_term, int64_t scale) {
     const Opcode op = cmp.opcode();
     if (op != Opcode::slt && op != Opcode::sle && op != Opcode::ult && op != Opcode::ule) return false;
     if (biv.is_sub) return false;
     int64_t init = 0, step = 0, lim = 0;
-    if (!get_const_int(biv.init, init) || !get_const_int(biv.step, step) || !get_const_int(limit, lim)) return false;
-    if (init < 0 || step <= 0 || lim < 0) return false;
+    if (!get_const_int(biv.init, init) || !get_const_int(biv.step, step)) return false;
+    if (init < 0 || step <= 0) return false;
     if (!loop.contains(header_term.true_target().block) || loop.contains(header_term.false_target().block)) return false;
-    // The last value tested is below lim + step (strict) or at most lim + step.
-    if (lim > std::numeric_limits<int64_t>::max() - step) return false;
-    const int64_t bound = std::max(init, lim + step);
-    return bound <= std::numeric_limits<int64_t>::max() / scale;
+    if (get_const_int(limit, lim)) {
+        if (lim < 0) return false;
+        // The last value tested is below lim + step (strict) or at most lim + step.
+        if (lim > std::numeric_limits<int64_t>::max() - step) return false;
+        const int64_t bound = std::max(init, lim + step);
+        return bound <= std::numeric_limits<int64_t>::max() / scale;
+    }
+    if (limit && limit->is_instruction()) {
+        const Instruction* ldef = limit->defining_instruction();
+        if (ldef && ldef->operand_count() == 1 && ldef->operand(0) && ldef->operand(0)->type() == Type::i32()) {
+            const bool is_sext = ldef->opcode() == Opcode::sext_i64 && (op == Opcode::slt || op == Opcode::sle);
+            const bool is_zext = ldef->opcode() == Opcode::zext_i64;
+            if ((is_sext || is_zext) && init <= INT32_MAX && step <= INT32_MAX && scale <= 16) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 bool ivsr_loop(Function& fn, LoopInfo& loop) {
@@ -224,11 +266,102 @@ bool ivsr_loop(Function& fn, LoopInfo& loop) {
         }
     }
 
+    struct DecomposedIndex {
+        const BasicIV* biv = nullptr;
+        Value* biv_stride = nullptr;
+        int64_t const_offset = 0;
+        std::vector<std::pair<int, Value*>> inv_terms;
+        std::vector<const Instruction*> expr_insts;
+    };
+    auto decompose_index = [&](Value* index, DecomposedIndex& out) -> bool {
+        std::vector<std::pair<int, Value*>> work = {{1, index}};
+        int expansions = 0;
+        while (!work.empty()) {
+            auto [sign, v] = work.back();
+            work.pop_back();
+            if (!v || !is_i64(v)) return false;
+            int64_t c = 0;
+            if (get_const_int(v, c)) {
+                out.const_offset = static_cast<int64_t>(
+                    static_cast<uint64_t>(out.const_offset) +
+                    static_cast<uint64_t>(sign) * static_cast<uint64_t>(c));
+                continue;
+            }
+            if (auto it = param_to_biv.find(v); it != param_to_biv.end()) {
+                if (sign != 1 || out.biv != nullptr) return false;
+                out.biv = &bivs[it->second];
+                out.biv_stride = nullptr;
+                continue;
+            }
+            if (loop.is_loop_invariant(v)) {
+                out.inv_terms.emplace_back(sign, v);
+                continue;
+            }
+            if (!v->is_instruction() || ++expansions > 8) return false;
+            const Instruction* def = v->defining_instruction();
+            if (!def || def->type() != Type::i64()) return false;
+            if (def->opcode() == Opcode::add) {
+                out.expr_insts.push_back(def);
+                work.emplace_back(sign, def->operand(1));
+                work.emplace_back(sign, def->operand(0));
+            } else if (def->opcode() == Opcode::sub) {
+                out.expr_insts.push_back(def);
+                work.emplace_back(-sign, def->operand(1));
+                work.emplace_back(sign, def->operand(0));
+            } else if (def->opcode() == Opcode::mul && sign == 1 && !out.biv) {
+                Value* op0 = def->operand(0);
+                Value* op1 = def->operand(1);
+                if (param_to_biv.count(op0) && loop.is_loop_invariant(op1)) {
+                    const BasicIV& cand = bivs[param_to_biv[op0]];
+                    if (cand.is_sub) return false;
+                    out.biv = &cand;
+                    out.biv_stride = op1;
+                    out.expr_insts.push_back(def);
+                } else if (param_to_biv.count(op1) && loop.is_loop_invariant(op0)) {
+                    const BasicIV& cand = bivs[param_to_biv[op1]];
+                    if (cand.is_sub) return false;
+                    out.biv = &cand;
+                    out.biv_stride = op0;
+                    out.expr_insts.push_back(def);
+                } else {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        return out.biv != nullptr;
+    };
+
+    struct CandidateAccess {
+        Instruction* inst;
+        DecomposedIndex dec;
+    };
+    std::vector<CandidateAccess> candidates;
+    std::unordered_set<const Instruction*> reducible_access_insts;
+    std::unordered_set<const Instruction*> reducible_expr_insts;
+    for (BasicBlock* bb : loop.blocks()) {
+        if (!bb || bb == preheader) continue;
+        for (Instruction* inst : *bb) {
+            if (!inst || (inst->opcode() != Opcode::load_indexed && inst->opcode() != Opcode::store_indexed)) continue;
+            Value* base = inst->operand(0);
+            Value* index = inst->operand(1);
+            if (!base || !index || !loop.is_loop_invariant(base)) continue;
+            if (!base->type().is_pointer() && base->type() != Type::i64()) continue;
+            DecomposedIndex dec;
+            if (!decompose_index(index, dec)) continue;
+            candidates.push_back({inst, dec});
+            if (inst->scale() > 1 || dec.biv_stride != nullptr) {
+                reducible_access_insts.insert(inst);
+                for (const Instruction* e : dec.expr_insts) reducible_expr_insts.insert(e);
+            }
+        }
+    }
+
     // Whether the variable stays in a register across the loop whatever this
     // pass does with its addresses: something other than an indexed access
-    // (or an add feeding only those), its own update, or an exit compare
-    // this pass can move onto the variable scaled by `scale`, reads it - an
-    // exit edge, a compare against a variable limit, arithmetic.
+    // (or an affine tree feeding only those), its own update, or an exit
+    // compare this pass can move onto the variable scaled by `scale`, reads it.
     std::unordered_map<const Value*, UseList> uses;
     bool uses_ready = false;
     auto stays_live = [&](const BasicIV& biv, uint8_t scale) -> bool {
@@ -236,18 +369,27 @@ bool ivsr_loop(Function& fn, LoopInfo& loop) {
             uses = collect_uses(fn);
             uses_ready = true;
         }
-        auto only_indexes = [&](const Value* v) {
+        std::function<bool(const Value*, int)> only_indexes = [&](const Value* v, int depth) -> bool {
+            if (depth > 8) return false;
             for (const auto& [u, slot] : uses[v]) {
-                if (!is_index_slot(u, slot) || !loop.contains(u->parent())) return false;
+                if (!loop.contains(u->parent())) return false;
+                if (is_index_slot(u, slot)) {
+                    if (!reducible_access_insts.count(u)) return false;
+                    continue;
+                }
+                if (reducible_expr_insts.count(u) && (slot == 0 || slot == 1) &&
+                    only_indexes(u->result(), depth + 1)) {
+                    continue;
+                }
+                return false;
             }
             return true;
         };
         for (const auto& [u, slot] : uses[biv.param]) {
             if (u == biv.update) continue;
             if (!loop.contains(u->parent())) return true;
-            if (is_index_slot(u, slot)) continue;
-            if (u->opcode() == Opcode::add && u->type() == Type::i64() && (slot == 0 || slot == 1) &&
-                loop.is_loop_invariant(u->operand(1 - slot)) && only_indexes(u->result())) {
+            if (is_index_slot(u, slot) && reducible_access_insts.count(u)) continue;
+            if (reducible_expr_insts.count(u) && (slot == 0 || slot == 1) && only_indexes(u->result(), 0)) {
                 continue;
             }
             if (u == exit_cmp && slot == 0 &&
@@ -262,27 +404,29 @@ bool ivsr_loop(Function& fn, LoopInfo& loop) {
         return false;
     };
 
-    // Pointer variables: `base + s*i` stepped by s*step, one per (base,
-    // variable, scale). Used when the step is not a constant: the unroller's
-    // copies then address `p + k*s*step` from one register, where the scaled
-    // form needs `base + (si + k*s*step)`, an add per copy.
+    // Pointer variables: `base + s*i*stride` stepped by s*step*stride, one per
+    // (base, variable, stride, scale). Used when the step is not a constant or
+    // when the BIV is multiplied by a loop-invariant stride (e.g. `b[k*n + j]`).
     struct PointerIV {
         const Value* base;
         const Value* param;
+        const Value* stride;
         uint8_t scale;
         Value* p;
     };
     std::vector<PointerIV> pointer_ivs;
-    auto pointer_iv = [&](Value* base, const BasicIV& biv, uint8_t scale) -> Value* {
+    auto pointer_iv = [&](Value* base, const BasicIV& biv, Value* stride, uint8_t scale) -> Value* {
         for (const PointerIV& e : pointer_ivs) {
-            if (e.base == base && e.param == biv.param && e.scale == scale) return e.p;
+            if (e.base == base && e.param == biv.param && e.stride == stride && e.scale == scale) return e.p;
         }
-        Value* init = build_add(b_ph, base, build_mul(b_ph, biv.init, scale));
-        Value* step_bytes = build_mul(b_ph, biv.step, scale);
+        Value* eff_init = build_mul_val(b_ph, biv.init, stride);
+        Value* eff_step = build_mul_val(b_ph, biv.step, stride);
+        Value* init = build_add(b_ph, base, build_mul(b_ph, eff_init, scale));
+        Value* step_bytes = build_mul(b_ph, eff_step, scale);
         Value* p = ir::new_block_param(fn, header, base->type());
         ph_bt->args.push_back(init);
         latch_bt->args.push_back(b_latch.build_add(p, step_bytes));
-        pointer_ivs.push_back({base, biv.param, scale, p});
+        pointer_ivs.push_back({base, biv.param, stride, scale, p});
         return p;
     };
 
@@ -290,61 +434,56 @@ bool ivsr_loop(Function& fn, LoopInfo& loop) {
     struct Access {
         Instruction* inst;
         const BasicIV* biv;
-        Value* inv_offset;
+        Value* biv_stride;
+        std::vector<std::pair<int, Value*>> inv_terms;
+        int64_t const_offset;
         AccessMode mode;
     };
     std::vector<Access> accesses;
-    for (BasicBlock* bb : loop.blocks()) {
-        if (!bb || bb == preheader) continue;
-        for (Instruction* inst : *bb) {
-            if (!inst || (inst->opcode() != Opcode::load_indexed && inst->opcode() != Opcode::store_indexed)) continue;
-            Value* base = inst->operand(0);
-            Value* index = inst->operand(1);
-            const uint8_t scale = inst->scale();
-            if (!base || !index || !loop.is_loop_invariant(base)) continue;
-            // base + offset would be a derived gcref live across the loop.
-            if (!base->type().is_pointer() && base->type() != Type::i64()) continue;
-
-            const BasicIV* matched = nullptr;
-            Value* inv_offset = nullptr;
-            if (auto p = param_to_biv.find(index); p != param_to_biv.end()) {
-                if (scale <= 1) continue;
-                matched = &bivs[p->second];
-            } else if (index->is_instruction()) {
-                Instruction* idx_def = index->defining_instruction();
-                if (!idx_def || idx_def->opcode() != Opcode::add || idx_def->type() != Type::i64()) continue;
-                Value* a = idx_def->operand(0);
-                Value* c = idx_def->operand(1);
-                if (param_to_biv.count(a) && loop.is_loop_invariant(c)) {
-                    matched = &bivs[param_to_biv[a]];
-                    inv_offset = c;
-                } else if (param_to_biv.count(c) && loop.is_loop_invariant(a)) {
-                    matched = &bivs[param_to_biv[c]];
-                    inv_offset = a;
-                }
-            }
-            if (!matched) continue;
-
-            // How the access is rewritten, decided before any rewriting
-            // changes the uses stays_live reads.
-            //  - Index: the variable stays live anyway and its scale is an
-            //    addressing-mode one, so it indexes the access itself
-            //    (`base + i*s + d`) rather than feeding a second, scaled
-            //    variable that would be live beside it.
-            //  - Pointer: the step is not a constant (see pointer_iv).
-            //  - Scaled: `base + si + d` with si the scaled variable, shared
-            //    by every array the variable indexes.
-            int64_t step_c = 0;
-            AccessMode mode = AccessMode::Scaled;
-            if (get_const_int(matched->step, step_c)) {
-                if ((scale == 2 || scale == 4 || scale == 8) && stays_live(*matched, scale)) mode = AccessMode::Index;
-            } else if (!matched->is_sub) {
-                mode = AccessMode::Pointer;
-            }
-            if (mode == AccessMode::Index && !inv_offset) continue;  // already `base + i*s`
-            accesses.push_back({inst, matched, inv_offset, mode});
+    for (const CandidateAccess& cand : candidates) {
+        Instruction* inst = cand.inst;
+        const uint8_t scale = inst->scale();
+        const BasicIV* matched = cand.dec.biv;
+        if (!cand.dec.biv_stride && cand.dec.inv_terms.empty() && cand.dec.const_offset == 0 && scale <= 1) {
+            continue;
         }
+        int64_t step_c = 0;
+        AccessMode mode = AccessMode::Scaled;
+        if (cand.dec.biv_stride != nullptr) {
+            mode = AccessMode::Pointer;
+        } else if (get_const_int(matched->step, step_c)) {
+            if ((scale == 2 || scale == 4 || scale == 8) && stays_live(*matched, scale)) mode = AccessMode::Index;
+        } else if (!matched->is_sub) {
+            mode = AccessMode::Pointer;
+        }
+        if (mode == AccessMode::Index && cand.dec.inv_terms.empty() && cand.dec.const_offset == 0) continue;
+        accesses.push_back({inst, matched, cand.dec.biv_stride, cand.dec.inv_terms, cand.dec.const_offset, mode});
     }
+
+    // Deduplicated preheader invariant index combinations.
+    std::vector<std::pair<std::pair<std::vector<std::pair<int, Value*>>, int64_t>, Value*>> inv_combos;
+    auto build_inv_combo = [&](const std::vector<std::pair<int, Value*>>& terms, int64_t rem_const) -> Value* {
+        if (terms.empty() && rem_const == 0) return nullptr;
+        if (terms.size() == 1 && terms[0].first == 1 && rem_const == 0) return terms[0].second;
+        if (terms.empty()) return b_ph.build_iconst_i64(rem_const);
+        auto key = std::make_pair(terms, rem_const);
+        for (const auto& [k, v] : inv_combos) {
+            if (k == key) return v;
+        }
+        Value* acc = nullptr;
+        for (const auto& [sign, tv] : terms) {
+            if (!acc) {
+                acc = (sign == 1) ? tv : b_ph.build_sub(b_ph.build_iconst_i64(0), tv);
+            } else {
+                acc = (sign == 1) ? b_ph.build_add(acc, tv) : b_ph.build_sub(acc, tv);
+            }
+        }
+        if (rem_const != 0) {
+            acc = b_ph.build_add(acc, b_ph.build_iconst_i64(rem_const));
+        }
+        inv_combos.emplace_back(std::move(key), acc);
+        return acc;
+    };
 
     // A hoisted `base + inv*s`, one per (base, invariant, scale).
     std::vector<std::pair<std::tuple<Value*, Value*, uint8_t>, Value*>> hoisted_bases;
@@ -369,13 +508,15 @@ bool ivsr_loop(Function& fn, LoopInfo& loop) {
         Value* new_base = inst->operand(0);
         const int32_t offset = inst->offset();
         int64_t new_offset = offset;
-        int64_t inv_const = 0;
-        if (a.inv_offset && get_const_int(a.inv_offset, inv_const) && inv_const >= INT32_MIN / 8 &&
-            inv_const <= INT32_MAX / 8 && offset + inv_const * scale >= INT32_MIN &&
-            offset + inv_const * scale <= INT32_MAX) {
-            new_offset = offset + inv_const * scale;
-        } else if (a.inv_offset) {
-            new_base = hoisted_base(new_base, a.inv_offset, scale);
+        int64_t rem_const = a.const_offset;
+        if (rem_const != 0 && rem_const >= INT32_MIN / 8 && rem_const <= INT32_MAX / 8 &&
+            offset + rem_const * scale >= INT32_MIN && offset + rem_const * scale <= INT32_MAX) {
+            new_offset = offset + rem_const * scale;
+            rem_const = 0;
+        }
+        Value* inv_offset = build_inv_combo(a.inv_terms, rem_const);
+        if (inv_offset) {
+            new_base = hoisted_base(new_base, inv_offset, scale);
         }
         switch (a.mode) {
             case AccessMode::Index:
@@ -385,7 +526,7 @@ bool ivsr_loop(Function& fn, LoopInfo& loop) {
             case AccessMode::Pointer: {
                 // load_indexed/store_indexed without the index are load/store
                 // with the same operands, offset and memory type.
-                Value* p = pointer_iv(new_base, *a.biv, scale);
+                Value* p = pointer_iv(new_base, *a.biv, a.biv_stride, scale);
                 auto& ops = inst->operands();
                 ops.erase(ops.begin() + 1);
                 inst->set_opcode(inst->opcode() == Opcode::load_indexed ? Opcode::load : Opcode::store);

@@ -798,8 +798,10 @@ bool run_bounds_check_elimination(Function& fn, Module& mod, const RangeAnalysis
         if (opts.enable_bce) {
             round_changed |= eliminate_range_decided_checks(fn, mod, ra, opts, branches_folded, pending_certs);
         }
-        if (round_changed) {
+        if (round == 0 || round_changed) {
             round_changed |= fold_boolean_and_branches(fn, mod, opts, branches_folded);
+        }
+        if (round_changed) {
             any_changed = true;
             fn.rebuild_cfg_predecessors();
             cfg_simplify_function(fn);

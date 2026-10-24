@@ -135,15 +135,19 @@ void EmitContext::emit_sse_instruction(const LirInst& inst) {
             break;
         case LirOpcode::Xorpd: enc_.xorpd(to_xmm(inst.defs[0]), to_xmm(inst.uses.back())); break;
         case LirOpcode::Cvtsi2sd: {
+            XMM dst = to_xmm(inst.defs[0]);
             const auto& src = inst.uses[0];
-            if (src.is_preg()) enc_.cvtsi2sd(to_xmm(inst.defs[0]), to_gpr(src));
-            else enc_.cvtsi2sd(to_xmm(inst.defs[0]), to_mem_address(src));
+            enc_.xorpd(dst, dst);
+            if (src.is_preg()) enc_.cvtsi2sd(dst, to_gpr(src));
+            else enc_.cvtsi2sd(dst, to_mem_address(src));
             break;
         }
         case LirOpcode::Cvtsi2sd32: {
+            XMM dst = to_xmm(inst.defs[0]);
             const auto& src = inst.uses[0];
-            if (src.is_preg()) enc_.cvtsi2sd32(to_xmm(inst.defs[0]), to_gpr(src));
-            else enc_.cvtsi2sd32(to_xmm(inst.defs[0]), to_mem_address(src));
+            enc_.xorpd(dst, dst);
+            if (src.is_preg()) enc_.cvtsi2sd32(dst, to_gpr(src));
+            else enc_.cvtsi2sd32(dst, to_mem_address(src));
             break;
         }
         case LirOpcode::Cvttsd2si: {
@@ -159,15 +163,19 @@ void EmitContext::emit_sse_instruction(const LirInst& inst) {
             break;
         }
         case LirOpcode::Cvtsi2ss: {
+            XMM dst = to_xmm(inst.defs[0]);
             const auto& src = inst.uses[0];
-            if (src.is_preg()) enc_.cvtsi2ss(to_xmm(inst.defs[0]), to_gpr(src));
-            else enc_.cvtsi2ss(to_xmm(inst.defs[0]), to_mem_address(src));
+            enc_.xorpd(dst, dst);
+            if (src.is_preg()) enc_.cvtsi2ss(dst, to_gpr(src));
+            else enc_.cvtsi2ss(dst, to_mem_address(src));
             break;
         }
         case LirOpcode::Cvtsi2ss32: {
+            XMM dst = to_xmm(inst.defs[0]);
             const auto& src = inst.uses[0];
-            if (src.is_preg()) enc_.cvtsi2ss32(to_xmm(inst.defs[0]), to_gpr(src));
-            else enc_.cvtsi2ss32(to_xmm(inst.defs[0]), to_mem_address(src));
+            enc_.xorpd(dst, dst);
+            if (src.is_preg()) enc_.cvtsi2ss32(dst, to_gpr(src));
+            else enc_.cvtsi2ss32(dst, to_mem_address(src));
             break;
         }
         case LirOpcode::Cvttss2si: {
@@ -183,15 +191,29 @@ void EmitContext::emit_sse_instruction(const LirInst& inst) {
             break;
         }
         case LirOpcode::Cvtsd2ss: {
+            XMM dst = to_xmm(inst.defs[0]);
             const auto& src = inst.uses[0];
-            if (src.is_preg()) enc_.cvtsd2ss(to_xmm(inst.defs[0]), to_xmm(src));
-            else enc_.cvtsd2ss(to_xmm(inst.defs[0]), to_mem_address(src));
+            if (src.is_preg()) {
+                XMM s = to_xmm(src);
+                if (dst != s) enc_.xorpd(dst, dst);
+                enc_.cvtsd2ss(dst, s);
+            } else {
+                enc_.xorpd(dst, dst);
+                enc_.cvtsd2ss(dst, to_mem_address(src));
+            }
             break;
         }
         case LirOpcode::Cvtss2sd: {
+            XMM dst = to_xmm(inst.defs[0]);
             const auto& src = inst.uses[0];
-            if (src.is_preg()) enc_.cvtss2sd(to_xmm(inst.defs[0]), to_xmm(src));
-            else enc_.cvtss2sd(to_xmm(inst.defs[0]), to_mem_address(src));
+            if (src.is_preg()) {
+                XMM s = to_xmm(src);
+                if (dst != s) enc_.xorpd(dst, dst);
+                enc_.cvtss2sd(dst, s);
+            } else {
+                enc_.xorpd(dst, dst);
+                enc_.cvtss2sd(dst, to_mem_address(src));
+            }
             break;
         }
         case LirOpcode::Floor32: {

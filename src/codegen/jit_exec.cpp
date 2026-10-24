@@ -206,6 +206,9 @@ bool JitExecutionEngine::compile_and_load(const Module& mod, size_t code_padding
 
     object::ModuleCompiler compiler(target_);
     compiler.set_sched_options(sched_opts_);
+    if (code_tier_ == debug::JitTier::Optimized && (sched_opts_.enable_post_ra || sched_opts_.enable_software_pipelining)) {
+        compiler.set_enable_trace_layout(true);
+    }
     const runtime::DeoptStressConfig stress = runtime::deopt_stress_config();
     if (stress.active()) {
         DeoptStressPlan plan;

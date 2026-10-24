@@ -88,6 +88,10 @@ bool run_tier2_optimization_pipeline(Module& mod, FunctionDispatchTable& table, 
 
 std::shared_ptr<codegen::JitExecutionEngine> make_tier2_engine(FunctionDispatchTable& table, const Target& target) {
     auto jit = std::make_shared<codegen::JitExecutionEngine>(target);
+    codegen::SchedOptions sched;
+    sched.enable_post_ra = true;
+    sched.enable_software_pipelining = true;
+    jit->set_sched_options(sched);
     // Tier-2 and OSR code of a program finish a failed guard in Tier 0.
     jit->set_lower_tier_resumes(true);
     jit->register_external_symbol("brass_gc_safepoint", reinterpret_cast<void*>(&brass_gc_safepoint));
