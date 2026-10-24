@@ -575,7 +575,7 @@ TEST_CASE("Kernel JIT - SMT Guard Elimination, MIR Superopt, BCE & SROA (#96)") 
     BasicBlock* entry = b.append_block("entry");
     Value* in_p = b.add_block_param(entry, Type::ptr());
     Value* out_p = b.add_block_param(entry, Type::ptr());
-    Value* n_val = b.add_block_param(entry, Type::i64());
+    (void)b.add_block_param(entry, Type::i64());
     in_p->set_noalias(true);
     out_p->set_noalias(true);
 

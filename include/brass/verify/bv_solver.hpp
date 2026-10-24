@@ -206,6 +206,16 @@ SolveOutcome solve_nonzero(
     uint32_t max_sat_conflicts = 10000
 );
 
+/// Enable or query strict solver verification mode (enabled by default in Debug builds,
+/// when BRASS_VERIFY_UNSAT_SAMPLES=1 is set, and in test suites). When enabled:
+/// - Every Unsat result is cross-checked against 32 boundary/PRNG concrete samples.
+/// - Any bit-blaster SAT model mismatch on supported ops aborts immediately.
+/// When disabled (production Release default), bit-blaster model mismatches log a
+/// one-time warning and return SolveOutcome::Unknown without aborting the host process.
+void set_strict_solver_check(bool enabled) noexcept;
+bool strict_solver_check_enabled() noexcept;
+uint64_t unsat_sample_checks_performed() noexcept;
+
 struct MagicConstU32 {
     uint32_t multiplier = 0;
     uint32_t pre_shift = 0;

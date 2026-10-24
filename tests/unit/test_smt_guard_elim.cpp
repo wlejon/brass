@@ -63,7 +63,9 @@ TEST_CASE("SMT Guard Elim - Discharges 2D Strided Indexing Bounds (i + stride * 
     SmtGuardElimStats stats;
     SmtGuardElimOptions opts;
     opts.stats = &stats;
+    const uint64_t unsat_checks_before = verify::unsat_sample_checks_performed();
     CHECK(run_smt_guard_elimination(*fn, mod, opts));
+    CHECK(verify::unsat_sample_checks_performed() > unsat_checks_before);
     CHECK_EQ(stats.guards_proven_eliminated, 2u);
     CHECK_EQ(count_guards(*fn), 6u);
     CHECK_EQ(fn->guard_elim_certs().size(), 2u);

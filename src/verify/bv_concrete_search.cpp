@@ -1,6 +1,7 @@
 #include "bv_solver.hpp"
 #include <brass/interpreter/float_arith.hpp>
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cassert>
 #include <cmath>
@@ -13,6 +14,18 @@
 namespace brass::verify {
 
 namespace {
+
+bool default_strict_solver_check() noexcept {
+#if !defined(NDEBUG) || defined(BRASS_VERIFY_UNSAT_SAMPLES)
+    return true;
+#else
+    const char* env = std::getenv("BRASS_VERIFY_UNSAT_SAMPLES");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+#endif
+}
+
+std::atomic<bool> g_strict_solver_check{default_strict_solver_check()};
+std::atomic<uint64_t> g_unsat_sample_checks{0};
 
 uint64_t f32_to_bits(float f) noexcept { uint32_t u = 0; std::memcpy(&u, &f, sizeof(float)); return u; }
 float bits_to_f32(uint64_t b) noexcept {
@@ -175,11 +188,24 @@ bool try_concrete_search(const BVContext& ctx, BVNodeId bad_cond, std::vector<ui
     return false;
 }
 
+void set_strict_solver_check(bool enabled) noexcept {
+    g_strict_solver_check.store(enabled, std::memory_order_relaxed);
+}
+
+bool strict_solver_check_enabled() noexcept {
+    return g_strict_solver_check.load(std::memory_order_relaxed);
+}
+
+uint64_t unsat_sample_checks_performed() noexcept {
+    return g_unsat_sample_checks.load(std::memory_order_relaxed);
+}
+
 void debug_verify_unsat_samples(const BVContext& ctx, BVNodeId bad_cond) {
-#if !defined(NDEBUG) || defined(BRASS_VERIFY_UNSAT_SAMPLES)
+    if (!strict_solver_check_enabled()) return;
     const auto& vars = ctx.vars();
     const auto& nodes = ctx.nodes();
     if (bad_cond >= nodes.size()) return;
+    g_unsat_sample_checks.fetch_add(1, std::memory_order_relaxed);
 
     BVCone& sc = ctx.scratch_cone();
     ctx.compute_cone(bad_cond, sc.nodes, sc.vars);
@@ -224,10 +250,6 @@ void debug_verify_unsat_samples(const BVContext& ctx, BVNodeId bad_cond) {
         }
         check_unsat();
     }
-#else
-    (void)ctx;
-    (void)bad_cond;
-#endif
 }
 
 uint64_t BVContext::eval_node_concrete(const BVNode& n, uint64_t va, uint64_t vb, uint64_t vc) const noexcept {

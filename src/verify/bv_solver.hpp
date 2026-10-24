@@ -4,10 +4,6 @@
 #include <cstdint>
 #include <vector>
 
-#ifndef BRASS_VERIFY_UNSAT_SAMPLES
-#define BRASS_VERIFY_UNSAT_SAMPLES 1
-#endif
-
 namespace brass::verify {
 
 inline constexpr uint32_t shift_mask(uint32_t w) noexcept {

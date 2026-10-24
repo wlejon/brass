@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <utility>
 #include <type_traits>
+#include <brass/verify/bv_solver.hpp>
 
 namespace brass::test {
 
@@ -131,6 +132,9 @@ public:
         if (list) {
             return list_tests();
         }
+
+        // Enable strict solver verification (32-sample Unsat checks + model checks) across all test suites.
+        brass::verify::set_strict_solver_check(true);
 
         int total = 0;
         int passed = 0;

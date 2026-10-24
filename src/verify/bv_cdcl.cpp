@@ -1,7 +1,9 @@
 #include "bv_solver.hpp"
 #include "bv_cdcl_solver.hpp"
 #include <algorithm>
+#include <atomic>
 #include <cassert>
+#include <cstdio>
 #include <cstdlib>
 #include <vector>
 
@@ -488,9 +490,7 @@ struct BitBlaster {
     }
 };
 
-} // namespace
-
-SolveOutcome solve_nonzero(
+SolveOutcome solve_nonzero_impl(
     const BVContext& ctx,
     BVNodeId bad_cond,
     uint32_t max_sat_conflicts
@@ -618,14 +618,36 @@ SolveOutcome solve_nonzero(
             return out;
         }
         if (!blaster.has_unsupported_op) {
-            assert(false && "BVSolver soundness bug: SAT model from bit-blaster failed concrete evaluation");
-            std::abort();
+            if (strict_solver_check_enabled()) {
+                assert(false && "BVSolver soundness bug: SAT model from bit-blaster failed concrete evaluation");
+                std::abort();
+            }
+            static std::atomic<bool> s_logged_mismatch{false};
+            if (!s_logged_mismatch.exchange(true, std::memory_order_relaxed)) {
+                std::fprintf(stderr,
+                    "[brass::verify] warning: BVSolver bit-blaster SAT model failed concrete evaluation; "
+                    "falling back to SolveOutcome::Unknown\n");
+            }
         }
         out.status = SolveOutcome::Unknown;
         return out;
     }
 
     out.status = SolveOutcome::Unknown;
+    return out;
+}
+
+} // namespace
+
+SolveOutcome solve_nonzero(
+    const BVContext& ctx,
+    BVNodeId bad_cond,
+    uint32_t max_sat_conflicts
+) {
+    SolveOutcome out = solve_nonzero_impl(ctx, bad_cond, max_sat_conflicts);
+    if (out.status == SolveOutcome::Unsat) {
+        debug_verify_unsat_samples(ctx, bad_cond);
+    }
     return out;
 }
 
