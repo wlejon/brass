@@ -224,6 +224,10 @@ uintptr_t Heap::allocate_at(size_t bytes, LayoutId layout, uint32_t flags, uint8
     if (bytes > (size_t{1} << 31)) throw std::bad_alloc();
     const size_t payload = payload_bytes_for(bytes);
     const size_t total = payload + kHeaderBytes;
+    const bool zero = (flags & kAllocUninitialized) == 0;
+    if (!zero && layout_descriptor(layout).kind != LayoutKind::Leaf) {
+        detail::gc_fatal("kAllocUninitialized for a layout the collector traces");
+    }
     MutatorFrame frame(s, caller_fp, caller_ip);
 
     if (s.stress != StressMode::None) {
@@ -268,7 +272,7 @@ uintptr_t Heap::allocate_at(size_t bytes, LayoutId layout, uint32_t flags, uint8
         h->layout = layout;
         h->gc_bits = (flags & kAllocPinned) ? kGcPinned : 0;
         h->host_bits = host_bits;
-        std::memset(reinterpret_cast<void*>(header + kHeaderBytes), 0, payload);
+        if (zero) std::memset(reinterpret_cast<void*>(header + kHeaderBytes), 0, payload);
         s.old_allocated_since_full += total;
         s.old_direct_bytes += total;
         return header + kHeaderBytes;
@@ -284,7 +288,7 @@ uintptr_t Heap::allocate_at(size_t bytes, LayoutId layout, uint32_t flags, uint8
             h->layout = layout;
             h->gc_bits = 0;
             h->host_bits = host_bits;
-            std::memset(reinterpret_cast<void*>(at + kHeaderBytes), 0, payload);
+            if (zero) std::memset(reinterpret_cast<void*>(at + kHeaderBytes), 0, payload);
             return at + kHeaderBytes;
         }
         s.trigger = detail::GcTrigger::EdenFull;
@@ -455,7 +459,8 @@ size_t Heap::committed_bytes() const noexcept {
     const HeapState& s = *s_;
     size_t blocks = 0;
     for (const auto& meta : s.blocks) blocks += meta->committed ? 1 : 0;
-    return (s.eden_hi - s.eden_lo) + 2 * s.survivor_bytes + blocks * kBlockBytes + s.large_used_bytes;
+    return (s.eden_hi - s.eden_lo) + 2 * s.survivor_bytes + blocks * kBlockBytes + s.large_used_bytes +
+           s.large_retained_bytes;
 }
 
 uint64_t Heap::allocated_bytes() const noexcept {

@@ -42,6 +42,11 @@ enum class StressMode : uint8_t {
 // Allocation flags.
 inline constexpr uint32_t kAllocOld = 1u << 0;     // allocate in the old generation (pretenure)
 inline constexpr uint32_t kAllocPinned = 1u << 1;  // old, and never moved by any collection
+// The payload is not zeroed: for a Leaf layout only (the collector never
+// reads it), whose caller writes every byte it later reads. A runtime that
+// fills a fresh buffer with its own empty value pays for one pass, not two.
+// Any other layout is a fatal error.
+inline constexpr uint32_t kAllocUninitialized = 1u << 2;
 
 struct HeapConfig {
     size_t eden_bytes = size_t{16} << 20;

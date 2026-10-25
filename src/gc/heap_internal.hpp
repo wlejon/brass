@@ -154,6 +154,11 @@ struct HeapState {
     std::unordered_map<uint32_t, uint32_t> large_objects;  // head page -> page count
     std::vector<uint32_t> large_page_head;           // page -> head page + 1 (0: none)
     size_t large_used_bytes = 0;
+    // Pages of free runs left committed for the next large object (a growing
+    // array frees one run for the next every time it doubles): which pages
+    // are committed, and how many bytes of free runs are.
+    std::vector<uint8_t> large_page_committed;
+    size_t large_retained_bytes = 0;
 
     // Cards over [mature_lo, large_lo + large_reserve), committed as the
     // spaces grow.

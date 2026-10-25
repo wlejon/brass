@@ -13,6 +13,12 @@ namespace brass::gc::detail {
 namespace {
 
 constexpr size_t kRetainedFreeBlocks = 64;
+// Bytes of freed large-object pages kept committed at least: a reused run
+// then costs no VirtualAlloc / mprotect and no fresh page faults. Up to the
+// full-collection threshold is kept, the old bytes one cycle allocates, so
+// a program whose large garbage dies every cycle commits nothing in steady
+// state.
+constexpr size_t kRetainedLargeBytes = size_t{8} << 20;
 constexpr uint8_t kPoisonByte = 0xDB;
 
 } // namespace
@@ -143,10 +149,24 @@ uintptr_t HeapState::large_allocate(size_t total) {
         start = large_frontier;
         large_frontier += pages;
         large_page_head.resize(large_frontier, 0);
+        large_page_committed.resize(large_frontier, 0);
     }
     const uintptr_t header = large_lo + static_cast<uintptr_t>(start) * kPageBytes;
     const size_t bytes = static_cast<size_t>(pages) * kPageBytes;
-    vm_commit(reinterpret_cast<void*>(header), bytes);
+    // Commit the run's pages a retained free run did not leave committed, a
+    // range of consecutive ones at a time.
+    for (uint32_t p = start; p < start + pages;) {
+        if (large_page_committed[p]) {
+            large_retained_bytes -= kPageBytes;
+            ++p;
+            continue;
+        }
+        uint32_t q = p;
+        while (q < start + pages && !large_page_committed[q]) large_page_committed[q++] = 1;
+        vm_commit(reinterpret_cast<void*>(large_lo + static_cast<uintptr_t>(p) * kPageBytes),
+                  static_cast<size_t>(q - p) * kPageBytes);
+        p = q;
+    }
     commit_cards(header, header + bytes);
     large_objects.emplace(start, pages);
     for (uint32_t p = start; p < start + pages; ++p) large_page_head[p] = start + 1;
@@ -157,7 +177,13 @@ uintptr_t HeapState::large_allocate(size_t total) {
 void HeapState::free_large(uint32_t head, uint32_t pages) {
     const uintptr_t header = large_lo + static_cast<uintptr_t>(head) * kPageBytes;
     const size_t bytes = static_cast<size_t>(pages) * kPageBytes;
-    vm_decommit(reinterpret_cast<void*>(header), bytes);
+    const size_t retain_cap = std::max<size_t>(kRetainedLargeBytes, static_cast<size_t>(full_threshold));
+    if (large_retained_bytes + bytes <= retain_cap) {
+        large_retained_bytes += bytes;
+    } else {
+        vm_decommit(reinterpret_cast<void*>(header), bytes);
+        for (uint32_t p = head; p < head + pages; ++p) large_page_committed[p] = 0;
+    }
     for (uint32_t p = head; p < head + pages; ++p) large_page_head[p] = 0;
     large_used_bytes -= bytes;
     uint32_t start = head;

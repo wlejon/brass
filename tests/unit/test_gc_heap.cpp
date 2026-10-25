@@ -82,6 +82,25 @@ TEST_CASE("gc::Heap - allocation writes the header and zeroes the payload") {
     CHECK(!h.is_valid_object(a + 8));
 }
 
+TEST_CASE("gc::Heap - an uninitialized leaf, filled by its caller, lives like any other") {
+    Heap h(small_config());
+    // Young (moved by the minor collection) and pinned old.
+    for (const uint32_t where : {0u, kAllocPinned}) {
+        uintptr_t a = h.allocate(64, kLeafLayout, where | kAllocUninitialized);
+        REQUIRE(a != 0);
+        CHECK(h.is_valid_object(a));
+        CHECK_EQ(Heap::object_size(a), size_t{64});
+        for (size_t i = 0; i < 8; ++i) reinterpret_cast<uint64_t*>(a)[i] = 0xA5A5A5A5A5A5A5A5ull + i;
+        uint64_t root = a;
+        h.add_root(&root);
+        h.collect(CollectionKind::Minor);
+        h.collect(CollectionKind::Full);
+        h.verify();
+        for (size_t i = 0; i < 8; ++i) CHECK_EQ(Heap::load(static_cast<uintptr_t>(root), i), 0xA5A5A5A5A5A5A5A5ull + i);
+        h.remove_root(&root);
+    }
+}
+
 TEST_CASE("gc::Heap - checked access rejects out-of-bounds and non-object addresses") {
     Heap h(small_config());
     uintptr_t a = h.allocate(16, kLeafLayout);
@@ -244,11 +263,18 @@ TEST_CASE("gc::Heap - large objects: direct allocation, cards, reclamation, inte
     CHECK_EQ(sum, uint64_t{64 * 63 / 2});
     CHECK_EQ(static_cast<uintptr_t>(big), b);  // never moves
 
+    // A dead large object's run is freed and its pages kept committed for the
+    // next one (heap_spaces.cpp, kRetainedLargeBytes): the same size again
+    // takes the same run, zeroed, and commits nothing more.
     const size_t committed = h.committed_bytes();
     big = 0;
     h.collect(CollectionKind::Full);
-    CHECK(h.committed_bytes() < committed);
     CHECK(!h.is_valid_object(b));
+    CHECK_EQ(h.committed_bytes(), committed);
+    big = h.allocate(200 * 1024, kArray);
+    CHECK_EQ(static_cast<uintptr_t>(big), b);
+    CHECK_EQ(h.committed_bytes(), committed);
+    CHECK_EQ(Heap::load(b, 100), uint64_t{0});
     h.remove_root(&big);
 }
 

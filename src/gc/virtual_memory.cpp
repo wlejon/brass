@@ -35,9 +35,12 @@ namespace brass::gc::detail {
 
 size_t os_page_bytes() {
 #if defined(_WIN32)
-    SYSTEM_INFO info;
-    GetSystemInfo(&info);
-    return info.dwPageSize;
+    static const size_t page_sz = [] {
+        SYSTEM_INFO info;
+        GetSystemInfo(&info);
+        return static_cast<size_t>(info.dwPageSize);
+    }();
+    return page_sz;
 #else
     static const size_t page_sz = static_cast<size_t>(sysconf(_SC_PAGESIZE));
     return page_sz ? page_sz : 4096;
