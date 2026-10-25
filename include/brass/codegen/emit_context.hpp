@@ -109,6 +109,7 @@ private:
     // stack arguments use the outgoing area the guard exit allocated below
     // the record; RSP does not move.
     void emit_exit_stub_call(const LirInst& inst, int32_t slots_disp);
+    void pad_invoke_return();
 };
 
 CompilationResult compile_lir_to_x64(const LirFunction& fn, const Target& target);

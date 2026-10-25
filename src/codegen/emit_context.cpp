@@ -329,6 +329,16 @@ ExitStubArgPlan plan_exit_stub_args(const LirInst& inst, bool win64) {
 
 } // namespace
 
+// On Win64 the OS unwinder reads the code at a frame's return address, and
+// when it is an epilogue (add rsp / lea rsp, pops, ret) it takes the frame to
+// be in its epilogue: it unwinds by running that code and calls no language
+// handler, so an invoke whose normal edge goes straight to a return would
+// never reach its pad. A nop after the call keeps the return address off the
+// epilogue, as MSVC does after calls.
+void EmitContext::pad_invoke_return() {
+    if (fn_.calling_conv.kind() == CallingConvKind::Win64) enc_.nop();
+}
+
 void EmitContext::emit_exit_stub_call(const LirInst& inst, int32_t slots_disp) {
     // Slots hold a float in its low bits and a narrow integer sign-extended.
     // The stack arguments go into the outgoing area the guard exit allocated
@@ -476,6 +486,7 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
 
             if (inst.is_invoke && inst.unwind_block_id != UINT32_MAX) {
                 pending_exception_scopes_.push_back({call_start, return_offset, inst.unwind_block_id});
+                pad_invoke_return();
             }
             record_gc_point(inst, return_offset, nullptr);
             break;
@@ -490,6 +501,7 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
 
             if (inst.is_invoke && inst.unwind_block_id != UINT32_MAX) {
                 pending_exception_scopes_.push_back({call_start, return_offset, inst.unwind_block_id});
+                pad_invoke_return();
             }
             record_gc_point(inst, return_offset, nullptr);
             break;

@@ -3,6 +3,8 @@
 #include <brass/runtime/exception.hpp>
 #include <brass/codegen/jit_exec.hpp>
 #include <brass/gc/heap.hpp>
+#include <brass/mir/parser.hpp>
+#include <string>
 
 using namespace brass;
 using namespace brass::runtime;
@@ -159,4 +161,84 @@ TEST_CASE("Exception Dispatch - JIT Nested Try Catch & Rethrow") {
     // 2. in_arg = 20: inner rethrows to outer, outer catches and returns 20 * 2 = 40
     int64_t r2 = outer_fn(20);
     CHECK_EQ(r2, 40);
+}
+
+TEST_CASE("Exception Dispatch - JIT pad reached wherever an invoke returns to") {
+    // Each caller computes the thrown value by a different sequence of neg
+    // (3 bytes) and imul (4 bytes) before its invoke, whose normal edge
+    // returns, so across them the return address falls at every offset of a
+    // 16-byte block, the epilogue starting right there in some. On Win64 an
+    // epilogue at the return address made the OS unwinder skip the frame's
+    // handler and the throw left as a C++ exception.
+    std::string src =
+        "func @thrower(%0: i64) -> i64 {\n"
+        "bb0:\n"
+        "  throw %0\n"
+        "}\n";
+    std::vector<std::string> shapes;
+    for (int len = 0; len <= 6; ++len) {
+        for (int bits = 0; bits < (1 << len); ++bits) {
+            std::string shape;
+            for (int i = 0; i < len; ++i) shape += (bits >> i) & 1 ? 'm' : 'n';
+            shapes.push_back(shape);
+        }
+    }
+    for (size_t s = 0; s < shapes.size(); ++s) {
+        std::string body;
+        int v = 0;
+        for (char op : shapes[s]) {
+            if (op == 'n') {
+                body += "  %" + std::to_string(v + 1) + "0 = iconst.i64 0\n";
+                body += "  %" + std::to_string(v + 1) + " = sub.i64 %" + std::to_string(v + 1) + "0, %" +
+                        std::to_string(v) + "\n";
+            } else {
+                body += "  %" + std::to_string(v + 1) + " = mul.i64 %" + std::to_string(v) + ", %0\n";
+            }
+            ++v;
+        }
+        src += "func @c" + std::to_string(s) + "(%0: i64) -> i64 {\n"
+               "bb0:\n" + body +
+               "  %900 = invoke.i64 @thrower(%" + std::to_string(v) + "), bb1, bb2\n"
+               "\n"
+               "bb1:\n"
+               "  ret %900\n"
+               "\n"
+               "bb2:\n"
+               "  %901 = landing_pad\n"
+               "  %902 = iconst.i64 1\n"
+               "  %903 = add.i64 %901, %902\n"
+               "  ret %903\n"
+               "}\n";
+    }
+    DiagnosticReporter diag;
+    auto mod = parse_module(src, &diag);
+    REQUIRE(mod != nullptr);
+
+    // Called through invoke, as embedders do: the throw's pad search stops at
+    // the generated-code entry it opens, so a pad the unwinder misses is not
+    // found further up either. Scheduling changes the block layout (with it
+    // on, the normal edge's return falls through from the call).
+    for (bool sched : {false, true}) {
+        JitExecutionEngine jit;
+        SchedOptions sched_opts;
+        sched_opts.enable_pre_ra = sched;
+        sched_opts.enable_post_ra = sched;
+        jit.set_sched_options(sched_opts);
+        REQUIRE(jit.compile_and_load(*mod));
+        for (size_t s = 0; s < shapes.size(); ++s) {
+            int64_t want = 3;
+            for (char op : shapes[s]) want = op == 'n' ? -want : want * 3;
+            int64_t got = 0;
+            try {
+                got = jit.invoke("c" + std::to_string(s), {RuntimeValue::from_i64(3)}).as_i64();
+            } catch (const BrassException&) {
+                got = INT64_MIN;
+            }
+            if (got != want + 1) {
+                std::cerr << "shape '" << shapes[s] << "' sched " << sched << ": " << got << ", want "
+                          << want + 1 << "\n";
+            }
+            CHECK_EQ(got, want + 1);
+        }
+    }
 }
