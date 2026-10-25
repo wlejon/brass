@@ -226,14 +226,15 @@ constexpr double kLn2_Hex1 = 0x1.df473dp-26;         // 25 bits
 constexpr double kLn2_Hex2 = 0x1.cd5e4fp-51;         // 25 bits
 constexpr double kLn2_Hex3 = 0x1.d9c01fp-75;
 
-// Payne-Hanek 2/pi table (64-bit chunks of 2/pi = 0.a2f9836e4e441529fc2757d1f534ddc0db6295993c439041fe5163abdebbc561b7246e3a424dd2e006492eea09d1921cfe1deb1cb129a73ee88235f52...)
-constexpr uint64_t kTwoOverPiBits[6] = {
-    0xa2f9836e4e441529ULL,
-    0xfc2757d1f534ddc0ULL,
-    0xdb6295993c439041ULL,
-    0xfe5163abdebbc561ULL,
-    0xb7246e3a424dd2e0ULL,
-    0x06492eea09d1921cULL,
+// 2/pi in 24-bit digits, 2/pi = sum kTwoOverPi24[i] * 2^(-24 (i + 1)): 1584
+// bits, enough to reduce any double (fdlibm's ipio2).
+constexpr uint32_t kTwoOverPi24[66] = {
+    0xA2F983, 0x6E4E44, 0x1529FC, 0x2757D1, 0xF534DD, 0xC0DB62, 0x95993C, 0x439041, 0xFE5163, 0xABDEBB, 0xC561B7,
+    0x246E3A, 0x424DD2, 0xE00649, 0x2EEA09, 0xD1921C, 0xFE1DEB, 0x1CB129, 0xA73EE8, 0x8235F5, 0x2EBB44, 0x84E99C,
+    0x7026B4, 0x5F7E41, 0x3991D6, 0x398353, 0x39F49C, 0x845F8B, 0xBDF928, 0x3B1FF8, 0x97FFDE, 0x05980F, 0xEF2F11,
+    0x8B5A0A, 0x6D1F6D, 0x367ECF, 0x27CB09, 0xB74F46, 0x3F669E, 0x5FEA2D, 0x7527BA, 0xC7EBE5, 0xF17B3D, 0x0739F7,
+    0x8A5292, 0xEA6BFB, 0x5FB11F, 0x8D5D08, 0x560330, 0x46FC7B, 0x6BABF0, 0xCFBC20, 0x9AF436, 0x1DA9E3, 0x91615E,
+    0xE61B08, 0x659985, 0x5F14A0, 0x68408D, 0xFFD880, 0x4D7327, 0x310606, 0x1556CA, 0x73A8C9, 0x60E27B, 0xC08C6B,
 };
 
 // Reduces x mod pi/2 into r in [-pi/4, pi/4] in double-double, returning quadrant k mod 4.
@@ -255,119 +256,70 @@ inline int reduce_trig_pi2(double x, DD& out_r) noexcept {
         return static_cast<int>(k & 3);
     }
 
-    // Large argument Payne-Hanek style reduction using 24-bit chunks of ax
-    // or multi-step reduction for |x| >= 2^20.
+    // Payne-Hanek: |x| * 2/pi in exact integer arithmetic, base-2^24 digits
+    // acc[k] of weight 2^(-24k). Digits above the binary point are multiples
+    // of 4 (x's quadrant mod 4 is all that is wanted) except acc[0]'s low
+    // bits, so only the table digits that land at or below it are multiplied.
+    // A double's distance to a multiple of pi/2 is at least 2^-61 of it, so
+    // the eight fraction digits keep 130 significant bits or more.
+    constexpr int kFrac = 8;
+    constexpr int kGuard = 3;
     int e = 0;
-    double m = frexp_norm(ax, e);
-    uint64_t mant = (to_bits(m) & kMantMask) | (1ULL << 52); // 53-bit integer, value = mant * 2^(e - 52)
-    // We want (mant * 2^(e - 52)) * (2 / pi).
-    // Let shift = e - 52. Since ax >= 2^20, e >= 20.
-    // Multiply mant by kTwoOverPiBitschunks aligned to the binary point.
-    int bit_pos = e - 52; // >= -32
-    int word_idx = 0;
-    int bit_off = bit_pos;
-    while (bit_off <= -64 && word_idx < 4) {
-        bit_off += 64;
-        ++word_idx;
+    const double m = frexp_norm(ax, e);
+    const uint64_t mant = (to_bits(m) & kMantMask) | (1ULL << 52); // ax = mant * 2^(e - 52)
+    // mant * 2^(e - 52) = (mant << t) * 2^(24 q), 0 <= t < 24.
+    const int s = e - 52;
+    const int q = s >= 0 ? s / 24 : -((-s + 23) / 24);
+    const int t = s - 24 * q;
+    // mant << t is below 2^76: four 24-bit chunks, chunk j of weight 2^(24 (q + j)).
+    uint64_t chunk[4];
+    {
+        const uint64_t lo = mant << t; // the low 64 bits (t < 24, so only bits >= 64 spill)
+        const uint64_t hi = t ? mant >> (64 - t) : 0;
+        chunk[0] = lo & 0xffffff;
+        chunk[1] = (lo >> 24) & 0xffffff;
+        chunk[2] = ((lo >> 48) | (hi << 16)) & 0xffffff;
+        chunk[3] = (hi >> 8) & 0xffffff;
     }
-    // Accumulate 192 bits around the binary point using 64x64->128 products.
-    auto mul128 = [](uint64_t a, uint64_t b, uint64_t& hi, uint64_t& lo) noexcept {
-#if defined(__SIZEOF_INT128__)
-        __uint128_t p = static_cast<__uint128_t>(a) * b;
-        hi = static_cast<uint64_t>(p >> 64);
-        lo = static_cast<uint64_t>(p);
-#else
-        uint64_t a_lo = a & 0xffffffffULL, a_hi = a >> 32;
-        uint64_t b_lo = b & 0xffffffffULL, b_hi = b >> 32;
-        uint64_t p0 = a_lo * b_lo;
-        uint64_t p1 = a_lo * b_hi;
-        uint64_t p2 = a_hi * b_lo;
-        uint64_t p3 = a_hi * b_hi;
-        uint64_t cy = ((p0 >> 32) + (p1 & 0xffffffffULL) + (p2 & 0xffffffffULL)) >> 32;
-        lo = p0 + (p1 << 32) + (p2 << 32);
-        hi = p3 + (p1 >> 32) + (p2 >> 32) + cy;
-#endif
-    };
-
-    // Build 4 words of 2/pi shifted by e - 52 so binary point is between w[0] and w[1].
-    auto get_table_word = [&](int idx) noexcept -> uint64_t {
-        if (idx < 0 || idx >= 6) return 0ULL;
-        return kTwoOverPiBits[idx];
-    };
-    // In kTwoOverPiBits, the binary point is at the top of kTwoOverPiBits[0].
-    // Multiplying by 2^(e - 52) shifts the binary point right by (e - 52) bits.
-    //Wait: mant is 53 bits (bit 52 is 1, representing 1.xxxx * 2^52), so mant * 2^(e-52) = x.
-    // And table[0] * 2^-64 + table[1] * 2^-128 + ... = 2/pi.
-    // So mant * table[i] contributes at 2^(e - 52 - 64*(i+1)).
-    uint64_t p_hi[6]{}, p_lo[6]{};
-    for (int i = 0; i < 6; ++i) {
-        mul128(mant, get_table_word(i), p_hi[i], p_lo[i]);
-    }
-    // Sum into a 6-word 64-bit array acc[0..6] (big-endian, where acc[0] has weight 2^(e - 52)):
-    uint64_t acc[7]{};
-    for (int i = 5; i >= 0; --i) {
-        // p_lo[i] goes to acc[i+1], p_hi[i] goes to acc[i]
-        uint64_t s1 = acc[i + 1] + p_lo[i];
-        uint64_t c1 = (s1 < acc[i + 1]) ? 1ULL : 0ULL;
-        acc[i + 1] = s1;
-        uint64_t s0 = acc[i] + p_hi[i] + c1;
-        uint64_t c0 = (s0 < acc[i] || (c1 && s0 == acc[i])) ? 1ULL : 0ULL;
-        acc[i] = s0;
-        for (int j = i - 1; j >= 0 && c0; --j) {
-            uint64_t sj = acc[j] + c0;
-            c0 = (sj < acc[j]) ? 1ULL : 0ULL;
-            acc[j] = sj;
+    // chunk j times table digit i lands at digit 2^(24 (q + j - i - 1)) = acc[k], k = i + 1 - q - j.
+    uint64_t acc[kFrac + kGuard + 1]{};
+    for (int k = 0; k <= kFrac + kGuard; ++k) {
+        for (int j = 0; j < 4; ++j) {
+            const int i = k + q + j - 1;
+            if (i >= 0 && i < 66) acc[k] += chunk[j] * kTwoOverPi24[i];
         }
     }
-    // Weight of acc[k] is 2^(e - 52 - 64*k).
-    // We want the 2 lowest integer bits (weight 2^0 and 2^1) and the fractional bits (weight < 2^0).
-    // Find which bit in acc[] has weight 2^0:
-    // Bit b (0..63, where 63 is MSB) of acc[k] has weight 2^(e - 52 - 64*k - (63 - b)) = 2^(e - 115 - 64*k + b).
-    // For weight 2^0: 64*k - b = e - 115.
-    // Easier: shift the entire bit-stream so the binary point aligns at the top of frac_hi!
-    // Number of integer bits above 2^0 in acc[0..6]:
-    // MSB of acc[0] has weight 2^(e - 52). So there are (e - 52 + 1) integer bits in acc[0..]!
-    int int_bits = e - 51; // since e >= 20, int_bits >= -31.
-    // Extract 64 bits ending at weight 2^0 (the integer part mod 2^64) and 128 fractional bits below 2^0:
-    auto get_bit = [&](int bit_from_top) noexcept -> uint64_t {
-        if (bit_from_top < 0 || bit_from_top >= 7 * 64) return 0ULL;
-        int w = bit_from_top >> 6;
-        int b = 63 - (bit_from_top & 63);
-        return (acc[w] >> b) & 1ULL;
-    };
-    auto get_u64_at = [&](int start_bit_from_top) noexcept -> uint64_t {
-        uint64_t val = 0;
-        for (int i = 0; i < 64; ++i) {
-            val = (val << 1) | get_bit(start_bit_from_top + i);
-        }
-        return val;
-    };
-    uint64_t int_part = get_u64_at(int_bits - 64);
-    uint64_t frac_hi  = get_u64_at(int_bits);
-    uint64_t frac_lo  = get_u64_at(int_bits + 64);
-
-    // Round to nearest integer: if MSB of frac_hi is 1, increment int_part and subtract 1 from fraction.
-    bool neg_frac = false;
-    if (frac_hi >= 0x8000000000000000ULL) {
-        ++int_part;
-        neg_frac = true;
-        frac_lo = ~frac_lo + 1ULL;
-        frac_hi = ~frac_hi + (frac_lo == 0 ? 1ULL : 0ULL);
+    for (int k = kFrac + kGuard; k > 0; --k) {
+        acc[k - 1] += acc[k] >> 24;
+        acc[k] &= 0xffffff;
     }
-    int quad = static_cast<int>(int_part & 3ULL);
-    // Convert (frac_hi * 2^-64 + frac_lo * 2^-128) to DD and multiply by pi/2:
-    double f_hi = scale_pow2(static_cast<double>(frac_hi >> 11), -53);
-    double f_mid = scale_pow2(static_cast<double>(frac_hi & 0x7ffULL), -64) +
-                   scale_pow2(static_cast<double>(frac_lo >> 11), -117);
-    DD frac_dd = two_sum(f_hi, f_mid);
+    int quad = static_cast<int>(acc[0] & 3);
+    // Round to the nearest quadrant: a fraction of a half or more is 1 - it, negated.
+    const bool neg_frac = acc[1] >= 0x800000;
+    if (neg_frac) {
+        ++quad;
+        uint64_t borrow = 0;
+        for (int k = kFrac + kGuard; k >= 1; --k) {
+            const uint64_t sub = acc[k] + borrow;
+            acc[k] = sub ? 0x1000000 - sub : 0;
+            borrow = sub ? 1 : 0;
+        }
+    }
+    // The fraction's first nonzero digit and the three after it, as two exact
+    // 48-bit doubles.
+    int k0 = 1;
+    while (k0 < kFrac && acc[k0] == 0) ++k0;
+    const double f_hi = scale_pow2(static_cast<double>((acc[k0] << 24) | acc[k0 + 1]), -24 * (k0 + 1));
+    const double f_lo = scale_pow2(static_cast<double>((acc[k0 + 2] << 24) | acc[k0 + 3]), -24 * (k0 + 3));
+    DD frac_dd = two_sum(f_hi, f_lo);
     if (neg_frac) frac_dd = dd_neg(frac_dd);
     DD r_dd = dd_mul(frac_dd, kPiOver2);
     if (to_bits(x) & kSignMask) {
         r_dd = dd_neg(r_dd);
-        quad = (4 - quad) & 3;
+        quad = -quad;
     }
     out_r = r_dd;
-    return quad;
+    return quad & 3;
 }
 
 // Evaluates sin(r) and cos(r) for |r| <= pi/4 in 106-bit DD using Taylor series
@@ -445,6 +397,129 @@ inline DD eval_cos_dd_reduced(DD r) noexcept {
         p = dd_add(dd_mul(p, r2), kC[i]);
     }
     return dd_add_d(dd_mul(r2, p), 1.0);
+}
+
+// ============================================================================
+// sin and cos: fdlibm's kernels and medium-range reduction (as V8 runs them,
+// so Math.sin and Math.cos agree with V8's bit for bit below 2^19 * pi/2).
+// Plain doubles with contraction off are as deterministic as the
+// double-double path and cost a tenth of it.
+// ============================================================================
+
+inline int32_t high_word(double x) noexcept { return static_cast<int32_t>(to_bits(x) >> 32); }
+
+// sin(x + y) for |x + y| <= pi/4, y the tail of x; iy = 0 when there is none.
+inline double fdlibm_kernel_sin(double x, double y, int iy) noexcept {
+    constexpr double S1 = -1.66666666666666324348e-01;
+    constexpr double S2 = 8.33333333332248946124e-03;
+    constexpr double S3 = -1.98412698298579493134e-04;
+    constexpr double S4 = 2.75573137070700676789e-06;
+    constexpr double S5 = -2.50507602534068634195e-08;
+    constexpr double S6 = 1.58969099521155010221e-10;
+    const int32_t ix = high_word(x) & 0x7fffffff;
+    if (ix < 0x3e400000 && static_cast<int>(x) == 0) return x; // |x| < 2^-27
+    const double z = x * x;
+    const double v = z * x;
+    const double r = S2 + z * (S3 + z * (S4 + z * (S5 + z * S6)));
+    if (iy == 0) return x + v * (S1 + z * r);
+    return x - ((z * (0.5 * y - v * r) - y) - v * S1);
+}
+
+// cos(x + y) for |x + y| <= pi/4.
+inline double fdlibm_kernel_cos(double x, double y) noexcept {
+    constexpr double C1 = 4.16666666666666019037e-02;
+    constexpr double C2 = -1.38888888888741095749e-03;
+    constexpr double C3 = 2.48015872894767294178e-05;
+    constexpr double C4 = -2.75573143513906633035e-07;
+    constexpr double C5 = 2.08757232129817482790e-09;
+    constexpr double C6 = -1.13596475577881948265e-11;
+    const int32_t ix = high_word(x) & 0x7fffffff;
+    if (ix < 0x3e400000 && static_cast<int>(x) == 0) return 1.0; // |x| < 2^-27
+    const double z = x * x;
+    const double r = z * (C1 + z * (C2 + z * (C3 + z * (C4 + z * (C5 + z * C6)))));
+    if (ix < 0x3fd33333) return 1.0 - (0.5 * z - (z * r - x * y)); // |x| < 0.3
+    // qx = x/4, its low word cleared (0.28125 above 0.78125).
+    const double qx = ix > 0x3fe90000 ? 0.28125 : from_bits(static_cast<uint64_t>(ix - 0x00200000) << 32);
+    const double hz = 0.5 * z - qx;
+    const double a = 1.0 - qx;
+    return a - (hz - (z * r - x * y));
+}
+
+// x reduced by pi/2 into y0 + y1 (|y0 + y1| <= pi/4), returning the multiple
+// of pi/2 taken. fdlibm's __ieee754_rem_pio2 below 2^19 * pi/2 (its table of
+// near-multiples only skips the cancellation check, which is made always);
+// above, the Payne-Hanek double-double reduction.
+inline int fdlibm_rem_pio2(double x, double& y0, double& y1) noexcept {
+    constexpr double invpio2 = 6.36619772367581382433e-01;
+    constexpr double pio2_1 = 1.57079632673412561417e+00;
+    constexpr double pio2_1t = 6.07710050650619224932e-11;
+    constexpr double pio2_2 = 6.07710050630396597660e-11;
+    constexpr double pio2_2t = 2.02226624879595063154e-21;
+    constexpr double pio2_3 = 2.02226624871116645580e-21;
+    constexpr double pio2_3t = 8.47842766036889956997e-32;
+    const int32_t hx = high_word(x);
+    const int32_t ix = hx & 0x7fffffff;
+    if (ix < 0x4002d97c) { // |x| < 3pi/4: n = +-1
+        if (hx > 0) {
+            double z = x - pio2_1;
+            if (ix != 0x3ff921fb) {
+                y0 = z - pio2_1t;
+                y1 = (z - y0) - pio2_1t;
+            } else { // near pi/2: 33+33+53 bits of pi
+                z -= pio2_2;
+                y0 = z - pio2_2t;
+                y1 = (z - y0) - pio2_2t;
+            }
+            return 1;
+        }
+        double z = x + pio2_1;
+        if (ix != 0x3ff921fb) {
+            y0 = z + pio2_1t;
+            y1 = (z - y0) + pio2_1t;
+        } else {
+            z += pio2_2;
+            y0 = z + pio2_2t;
+            y1 = (z - y0) + pio2_2t;
+        }
+        return -1;
+    }
+    if (ix <= 0x413921fb) { // |x| <= 2^19 * pi/2
+        const double t = abs_f64(x);
+        const int32_t n = static_cast<int32_t>(t * invpio2 + 0.5);
+        const double fn = static_cast<double>(n);
+        double r = t - fn * pio2_1;
+        double w = fn * pio2_1t; // good to 85 bits
+        const int32_t j = ix >> 20;
+        y0 = r - w;
+        int32_t i = j - ((high_word(y0) >> 20) & 0x7ff);
+        if (i > 16) { // cancellation: a second step, good to 118 bits
+            double u = r;
+            w = fn * pio2_2;
+            r = u - w;
+            w = fn * pio2_2t - ((u - r) - w);
+            y0 = r - w;
+            i = j - ((high_word(y0) >> 20) & 0x7ff);
+            if (i > 49) { // a third, 151 bits
+                u = r;
+                w = fn * pio2_3;
+                r = u - w;
+                w = fn * pio2_3t - ((u - r) - w);
+                y0 = r - w;
+            }
+        }
+        y1 = (r - y0) - w;
+        if (hx < 0) {
+            y0 = -y0;
+            y1 = -y1;
+            return -n;
+        }
+        return n;
+    }
+    DD r{};
+    const int q = reduce_trig_pi2(x, r);
+    y0 = r.hi + r.lo;
+    y1 = r.lo - (y0 - r.hi);
+    return q;
 }
 
 // ============================================================================
@@ -599,36 +674,29 @@ uint64_t canonical_f64_bits(double x) noexcept {
 double det_sin(double x) noexcept {
     uint64_t u = to_bits(x);
     if (is_nan_bits(u) || is_inf_bits(u)) return qnan();
-    if (is_zero_bits(u)) return x; // preserves +-0.0
-    if (abs_f64(x) < 1.4901161193847656e-8) return x; // |x| < 2^-26: sin(x) == x to 53 bits
+    if ((high_word(x) & 0x7fffffff) <= 0x3fe921fb) return fdlibm_kernel_sin(x, 0.0, 0); // |x| <= pi/4
 
-    DD r{};
-    int q = reduce_trig_pi2(x, r);
-    DD res{};
-    switch (q & 3) {
-        case 0: res = eval_sin_dd_reduced(r); break;
-        case 1: res = eval_cos_dd_reduced(r); break;
-        case 2: res = dd_neg(eval_sin_dd_reduced(r)); break;
-        case 3: res = dd_neg(eval_cos_dd_reduced(r)); break;
+    double y0 = 0.0, y1 = 0.0;
+    switch (fdlibm_rem_pio2(x, y0, y1) & 3) {
+        case 0: return fdlibm_kernel_sin(y0, y1, 1);
+        case 1: return fdlibm_kernel_cos(y0, y1);
+        case 2: return -fdlibm_kernel_sin(y0, y1, 1);
+        default: return -fdlibm_kernel_cos(y0, y1);
     }
-    return to_double(res);
 }
 
 double det_cos(double x) noexcept {
     uint64_t u = to_bits(x);
     if (is_nan_bits(u) || is_inf_bits(u)) return qnan();
-    if (abs_f64(x) < 1.4901161193847656e-8) return 1.0;
+    if ((high_word(x) & 0x7fffffff) <= 0x3fe921fb) return fdlibm_kernel_cos(x, 0.0); // |x| <= pi/4
 
-    DD r{};
-    int q = reduce_trig_pi2(x, r);
-    DD res{};
-    switch (q & 3) {
-        case 0: res = eval_cos_dd_reduced(r); break;
-        case 1: res = dd_neg(eval_sin_dd_reduced(r)); break;
-        case 2: res = dd_neg(eval_cos_dd_reduced(r)); break;
-        case 3: res = eval_sin_dd_reduced(r); break;
+    double y0 = 0.0, y1 = 0.0;
+    switch (fdlibm_rem_pio2(x, y0, y1) & 3) {
+        case 0: return fdlibm_kernel_cos(y0, y1);
+        case 1: return -fdlibm_kernel_sin(y0, y1, 1);
+        case 2: return -fdlibm_kernel_cos(y0, y1);
+        default: return fdlibm_kernel_sin(y0, y1, 1);
     }
-    return to_double(res);
 }
 
 double det_tan(double x) noexcept {

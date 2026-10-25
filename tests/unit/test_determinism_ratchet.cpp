@@ -472,7 +472,7 @@ TEST_CASE("Determinism #156 - Bit-Exact Double-Double Transcendentals (Accuracy 
          0x3ff0000000000000ULL, 0x3c91a62633145c07ULL, 0x434d02967c31cdb5ULL,
          0x3ff00fe987ed02ffULL, 0x40133dedc855935fULL, 0x3ff2996264e0e3feULL},
         {42.5,
-         0xbfefdff0cd5c5750ULL, 0x3fb6a0506a04973dULL, 0xc0268a40b864aa65ULL,
+         0xbfefdff0cd5c5750ULL, 0x3fb6a0506a04973eULL, 0xc0268a40b864aa65ULL,
          0x3ff8c19f811be511ULL, 0x43c3e5d83907a3dcULL, 0x400beb0a72eb6e31ULL},
     };
     for (const auto& g : kUnaryGoldens) {
@@ -482,6 +482,25 @@ TEST_CASE("Determinism #156 - Bit-Exact Double-Double Transcendentals (Accuracy 
         CHECK_EQ(f64_raw_bits(brass_det_atan(g.x)), g.atan_bits);
         CHECK_EQ(f64_raw_bits(brass_det_exp(g.x)), g.exp_bits);
         CHECK_EQ(f64_raw_bits(brass_det_cbrt(g.x)), g.cbrt_bits);
+    }
+
+    // Arguments past fdlibm's medium reduction take the Payne-Hanek path,
+    // which needs 2/pi to beyond a thousand bits (sin(1e10) once came out
+    // 1e-9). The bits are V8's (fdlibm), which these agree with.
+    struct TrigGolden {
+        double x;
+        uint64_t sin_bits;
+        uint64_t cos_bits;
+    };
+    static constexpr TrigGolden kLargeTrigGoldens[] = {
+        {1e10, 0xbfdf334c7896a4e3ULL, 0x3febf098901c931aULL},
+        {1e22, 0xbfeb453ab76bf397ULL, 0x3fe0be2cef01c8f4ULL},
+        {1e300, 0xbfea2c16b010e385ULL, 0xbfe2699022adc4c1ULL},
+        {-823551.0, 0xbfef1e1d322aef27ULL, 0x3fcdd9e00a413200ULL},
+    };
+    for (const auto& g : kLargeTrigGoldens) {
+        CHECK_EQ(f64_raw_bits(brass_det_sin(g.x)), g.sin_bits);
+        CHECK_EQ(f64_raw_bits(brass_det_cos(g.x)), g.cos_bits);
     }
 
     struct UnitDomainGolden {
@@ -713,20 +732,20 @@ TEST_CASE("Determinism #156 - Tier-0 vs Tier-1 vs Tier-2 1,000-Frame Lockstep St
             CHECK_EQ(f64_raw_bits(r2), 0x40456ab60524b086ULL);
         } else if (frame == 99) {
             CHECK_EQ(h2, 0x87160d4b376384a9ULL);
-            CHECK_EQ(rolling_hash_t2, 0xbbefd184a9a2c395ULL);
+            CHECK_EQ(rolling_hash_t2, 0x347b7c99a4272397ULL);
             CHECK_EQ(f64_raw_bits(r2), 0x407a4109fdc79123ULL);
         } else if (frame == 499) {
             CHECK_EQ(h2, 0xf22834e15b5b0759ULL);
-            CHECK_EQ(rolling_hash_t2, 0x464a33192f31cd8cULL);
+            CHECK_EQ(rolling_hash_t2, 0xa7063a6e0a85014aULL);
             CHECK_EQ(f64_raw_bits(r2), 0x40a05d77c45cc2d9ULL);
         } else if (frame == 999) {
             CHECK_EQ(h2, 0xceda671d02fd55d8ULL);
-            CHECK_EQ(rolling_hash_t2, 0x25aadb257097a35aULL);
+            CHECK_EQ(rolling_hash_t2, 0xbb0addf237e24647ULL);
             CHECK_EQ(f64_raw_bits(r2), 0x40b05dfafd7e4684ULL);
         }
     }
 
-    static constexpr uint64_t kExpected1000FrameRollingHash = 0x25aadb257097a35aULL;
+    static constexpr uint64_t kExpected1000FrameRollingHash = 0xbb0addf237e24647ULL;
     CHECK_EQ(rolling_hash_t0, kExpected1000FrameRollingHash);
     CHECK_EQ(rolling_hash_t2, kExpected1000FrameRollingHash);
 
