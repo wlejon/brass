@@ -668,7 +668,7 @@ void LinearScanAllocator::clear_dead_callee_gprs_at_calls(uint32_t final_callee_
     const size_t num_vregs = fn_.vreg_table.size();
     std::vector<char> live_vreg(num_vregs, 0);
     for (const auto& block : fn_.blocks) {
-        std::fill(live_vreg.begin(), live_vreg.end(), 0);
+        std::fill(live_vreg.begin(), live_vreg.end(), char{0});
         for (VReg v : liveness_.block_liveness(block.get()).live_out) {
             if (v.is_valid() && v.id < num_vregs && v.is_gpr()) live_vreg[v.id] = 1;
         }
