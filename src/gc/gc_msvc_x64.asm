@@ -329,4 +329,86 @@ skip_stack_copy:
     ret
 x64_win64_invoke_thunk ENDP
 
+; The stack switch of gc::Fiber on Windows x64 (fiber.cpp), the twin of
+; fiber_switch.cpp's off Windows. brass_fiber_swap(save_sp, load_sp) is an
+; ordinary call to its caller: it saves what the callee keeps (rbp, rbx, rdi,
+; rsi, r12-r15, xmm6-xmm15, mxcsr and the x87 control word) and the TIB's
+; bounds of the running stack (StackBase, StackLimit, DeallocationStack, which
+; guard-page growth, __chkstk and exception dispatch read), stores the stack
+; pointer through save_sp, and resumes the stack at load_sp where its own
+; switch left it. fiber.cpp reads the saved frame (position_of), so the
+; layout, from the stored stack pointer, is one contract:
+;   [0, 160)  xmm6..xmm15     [160] mxcsr, [164] x87 control word
+;   [176] DeallocationStack  [184] StackLimit  [192] StackBase
+;   [200] r15 [208] r14 [216] r13 [224] r12 [232] rsi [240] rdi [248] rbx
+;   [256] rbp [264] the return address
+EXTERN brass_fiber_main: PROC
+
+brass_fiber_swap PROC
+    push rbp
+    push rbx
+    push rdi
+    push rsi
+    push r12
+    push r13
+    push r14
+    push r15
+    push qword ptr gs:[8]
+    push qword ptr gs:[16]
+    push qword ptr gs:[1478h]
+    sub rsp, 176
+    movaps xmmword ptr [rsp], xmm6
+    movaps xmmword ptr [rsp + 16], xmm7
+    movaps xmmword ptr [rsp + 32], xmm8
+    movaps xmmword ptr [rsp + 48], xmm9
+    movaps xmmword ptr [rsp + 64], xmm10
+    movaps xmmword ptr [rsp + 80], xmm11
+    movaps xmmword ptr [rsp + 96], xmm12
+    movaps xmmword ptr [rsp + 112], xmm13
+    movaps xmmword ptr [rsp + 128], xmm14
+    movaps xmmword ptr [rsp + 144], xmm15
+    stmxcsr dword ptr [rsp + 160]
+    fnstcw word ptr [rsp + 164]
+    mov qword ptr [rcx], rsp
+    mov rsp, rdx
+    movaps xmm6, xmmword ptr [rsp]
+    movaps xmm7, xmmword ptr [rsp + 16]
+    movaps xmm8, xmmword ptr [rsp + 32]
+    movaps xmm9, xmmword ptr [rsp + 48]
+    movaps xmm10, xmmword ptr [rsp + 64]
+    movaps xmm11, xmmword ptr [rsp + 80]
+    movaps xmm12, xmmword ptr [rsp + 96]
+    movaps xmm13, xmmword ptr [rsp + 112]
+    movaps xmm14, xmmword ptr [rsp + 128]
+    movaps xmm15, xmmword ptr [rsp + 144]
+    ldmxcsr dword ptr [rsp + 160]
+    fldcw word ptr [rsp + 164]
+    add rsp, 176
+    pop qword ptr gs:[1478h]
+    pop qword ptr gs:[16]
+    pop qword ptr gs:[8]
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rsi
+    pop rdi
+    pop rbx
+    pop rbp
+    ret
+brass_fiber_swap ENDP
+
+; Where a new stack's first switch returns to (the frame Fiber::create lays
+; out), with the fiber in r12 and the stack pointer 16-byte aligned. The word
+; at its entry stack pointer is 0: the return address its unwind data names,
+; which ends every unwind there.
+brass_fiber_start PROC FRAME
+    sub rsp, 32
+    .allocstack 32
+    .endprolog
+    mov rcx, r12
+    call brass_fiber_main
+    int 3
+brass_fiber_start ENDP
+
 END

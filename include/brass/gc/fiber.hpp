@@ -25,9 +25,10 @@
 // A fiber belongs to the thread that first resumes it and is resumed and
 // suspended only there. Switching costs a register save and restore, no
 // walk: the position a collection needs is what the switch leaves behind.
-// Windows uses the system's fibers (the thread is converted the first time
-// it resumes one); x86-64 and AArch64 elsewhere switch with a few
-// instructions of their own.
+// x86-64 (Windows included, where the switch also carries the TIB's stack
+// bounds) and AArch64 off Windows switch with a few instructions of their
+// own; Windows on ARM64 uses the system's fibers (the thread is converted
+// the first time it resumes one).
 
 #include <cstddef>
 #include <cstdint>
@@ -75,8 +76,8 @@ public:
     // maps). [low, high) is the stack's live words; `high` is 0 for the
     // thread's own stack, whose base brass does not know (the host scans it
     // up to its own anchor). [regs, regs_end), when not empty, holds register
-    // values the switch kept off the stack (Windows' fibers save them in the
-    // fiber, not on its stack), to be scanned the same way.
+    // values the switch kept off the stack (Windows on ARM64's system fibers
+    // save them in the fiber, not on its stack), to be scanned the same way.
     struct StackSpan {
         uintptr_t low = 0;
         uintptr_t high = 0;

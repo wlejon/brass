@@ -147,6 +147,7 @@ add_executable(brass_unit_tests
     differential/test_pea_differential.cpp
     unit/test_card_table.cpp
     unit/test_gc_heap.cpp
+    unit/test_gc_fiber.cpp
     unit/test_gc_heap_weak.cpp
     unit/test_gc_heap_roots.cpp
     unit/test_gc_heap_threads.cpp

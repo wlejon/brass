@@ -1,6 +1,7 @@
 // The stack switch of gc::Fiber off Windows (fiber.cpp), as file-scope asm.
-// Windows switches with the system's fibers, which also keep the TIB's stack
-// bounds right for the running stack.
+// Windows x64's is gc_msvc_x64.asm's (which also keeps the TIB's stack bounds
+// right for the running stack); Windows on ARM64 switches with the system's
+// fibers.
 //
 // brass_fiber_swap(save_sp, load_sp) is an ordinary call to its caller: it
 // pushes the callee-saved registers, stores the stack pointer through

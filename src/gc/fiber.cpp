@@ -28,9 +28,16 @@
 #define BRASS_FIBER_NOINLINE __attribute__((noinline))
 #endif
 
-#if !defined(_WIN32)
+// Windows on ARM64 switches with the system's fibers (no switch of brass's
+// own there yet); everywhere else brass switches stacks itself.
+#if defined(_WIN32) && !defined(_M_X64)
+#define BRASS_FIBER_SYSTEM 1
+#endif
+
+#if !defined(BRASS_FIBER_SYSTEM)
 extern "C" {
-// fiber_switch.cpp. Saves the callee-saved registers on the running stack,
+// fiber_switch.cpp, or gc_msvc_x64.asm on Windows. Saves the callee-saved
+// registers on the running stack (and, on Windows, the TIB's stack bounds),
 // stores its stack pointer through `save_sp`, and resumes the stack whose
 // pointer is `load_sp` where its own switch left it.
 void brass_fiber_swap(void** save_sp, void* load_sp);
@@ -63,7 +70,7 @@ struct StackRecord {
     bool switched_out = false;
     bool active = false;             // running, or waiting on a fiber it resumed
     Fiber* fiber = nullptr;          // null: the thread's own stack
-#if defined(_WIN32)
+#if defined(BRASS_FIBER_SYSTEM)
     void* handle = nullptr;          // the system fiber
     CONTEXT context;                 // captured where it switched away
     uintptr_t low = 0;               // its extent then (the TIB names only the running stack)
@@ -71,6 +78,9 @@ struct StackRecord {
 #else
     void* saved_sp = nullptr;        // what brass_fiber_swap left on it
     uintptr_t top = 0;               // the stack's base (highest address); 0 for the thread's own
+#if defined(_WIN32)
+    CONTEXT context;                 // made from the saved frame when a collection walks it
+#endif
 #endif
 };
 
@@ -101,7 +111,30 @@ void unlink_switched_out(StackRecord* r) noexcept {
 SwitchedStack position_of(StackRecord& r) noexcept {
     SwitchedStack s;
     s.entries = r.chains.entry_scopes;
-#if defined(_WIN32)
+#if defined(_WIN32) && defined(_M_X64)
+    // gc_msvc_x64.asm's frame (see its layout): the context at the return
+    // into brass_fiber_swap's caller, with the registers the caller kept,
+    // which is what the unwind data needs to go on from there.
+    const auto* base = static_cast<const unsigned char*>(r.saved_sp);
+    const auto* w = static_cast<const uintptr_t*>(r.saved_sp);
+    CONTEXT& c = r.context;
+    std::memset(&c, 0, sizeof c);
+    c.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_FLOATING_POINT;
+    std::memcpy(&c.Xmm6, base, 10 * sizeof(M128A));
+    c.R15 = w[25];
+    c.R14 = w[26];
+    c.R13 = w[27];
+    c.R12 = w[28];
+    c.Rsi = w[29];
+    c.Rdi = w[30];
+    c.Rbx = w[31];
+    c.Rbp = w[32];
+    c.Rip = w[33];
+    c.Rsp = reinterpret_cast<uintptr_t>(r.saved_sp) + 272;
+    s.context = &c;
+    s.low = w[23];   // StackLimit
+    s.high = w[24];  // StackBase
+#elif defined(BRASS_FIBER_SYSTEM)
     s.context = &r.context;
     s.low = r.low;
     s.high = r.high;
@@ -132,7 +165,7 @@ SwitchedStack position_of(StackRecord& r) noexcept {
 // stays (it will be resumed again), what a collection needs to walk it is
 // recorded first; a finished fiber's stack is never walked again.
 BRASS_FIBER_NOINLINE void machine_switch(StackRecord* from, StackRecord* to, bool from_stays) {
-#if defined(_WIN32)
+#if defined(BRASS_FIBER_SYSTEM)
     if (from_stays) {
         // The context of this frame, which stays as it is until the switch
         // back returns here; the walk unwinds from it to this frame's callers.
@@ -169,7 +202,7 @@ struct Fiber::Impl {
     size_t stack_bytes_rounded = 0;
     bool started = false;
     bool finished = false;
-#if !defined(_WIN32)
+#if !defined(BRASS_FIBER_SYSTEM)
     void* mapping = nullptr;
     size_t mapping_bytes = 0;
 #endif
@@ -177,17 +210,23 @@ struct Fiber::Impl {
 
 namespace {
 
+void release_stack(Fiber::Impl& impl) noexcept {
+#if defined(BRASS_FIBER_SYSTEM)
+    if (impl.rec.handle) DeleteFiber(impl.rec.handle);
+#elif defined(_WIN32)
+    if (impl.mapping) VirtualFree(impl.mapping, 0, MEM_RELEASE);
+#else
+    if (impl.mapping) munmap(impl.mapping, impl.mapping_bytes);
+#endif
+}
+
 struct FiberPool {
     static constexpr size_t kMaxCached = 16;
     std::vector<std::unique_ptr<Fiber::Impl>> free_list;
     ~FiberPool() {
         for (auto& impl : free_list) {
             if (!impl) continue;
-#if defined(_WIN32)
-            if (impl->rec.handle) DeleteFiber(impl->rec.handle);
-#else
-            if (impl->mapping) munmap(impl->mapping, impl->mapping_bytes);
-#endif
+            release_stack(*impl);
         }
     }
 };
@@ -223,7 +262,7 @@ size_t page_size() {
 #endif
 }
 
-#if defined(_WIN32)
+#if defined(BRASS_FIBER_SYSTEM)
 void WINAPI fiber_proc(void* impl) { fiber_main(static_cast<Fiber::Impl*>(impl)); }
 #endif
 
@@ -231,7 +270,7 @@ void WINAPI fiber_proc(void* impl) { fiber_main(static_cast<Fiber::Impl*>(impl))
 
 } // namespace brass::gc
 
-#if !defined(_WIN32)
+#if !defined(BRASS_FIBER_SYSTEM)
 extern "C" void brass_fiber_main(void* impl) {
     brass::gc::fiber_main(static_cast<brass::gc::Fiber::Impl*>(impl));
 }
@@ -263,11 +302,48 @@ std::unique_ptr<Fiber> Fiber::create(Entry entry, void* arg, size_t stack_bytes)
     impl->entry = entry;
     impl->arg = arg;
     impl->stack_bytes_rounded = bytes;
-#if defined(_WIN32)
+#if defined(BRASS_FIBER_SYSTEM)
     // The system reserves `bytes`, commits as the stack grows and keeps a
     // guard page below what is committed.
     impl->rec.handle = CreateFiberEx(64 * 1024, bytes, FIBER_FLAG_FLOAT_SWITCH, &fiber_proc, impl.get());
     if (impl->rec.handle == nullptr) return nullptr;
+#elif defined(_WIN32)
+    // `bytes` reserved over a page never committed, the top 64 KiB committed
+    // and a guard page under them: the system grows the stack a page at a
+    // time as it does a thread's, since the switch keeps the TIB's bounds
+    // (DeallocationStack, StackLimit, StackBase) the running stack's.
+    const size_t total = bytes + page;
+    const size_t commit = bytes < 64 * 1024 ? bytes : 64 * 1024;
+    void* mem = VirtualAlloc(nullptr, total, MEM_RESERVE, PAGE_READWRITE);
+    if (mem == nullptr) return nullptr;
+    const uintptr_t lo = reinterpret_cast<uintptr_t>(mem);
+    const uintptr_t base = lo + total;
+    const uintptr_t limit = base - commit;
+    if (VirtualAlloc(reinterpret_cast<void*>(limit), commit, MEM_COMMIT, PAGE_READWRITE) == nullptr ||
+        VirtualAlloc(reinterpret_cast<void*>(limit - page), page, MEM_COMMIT, PAGE_READWRITE | PAGE_GUARD) == nullptr) {
+        VirtualFree(mem, 0, MEM_RELEASE);
+        return nullptr;
+    }
+    impl->mapping = mem;
+    impl->mapping_bytes = total;
+    // The frame brass_fiber_swap pops the first time it switches here (its
+    // layout in gc_msvc_x64.asm): the fiber in r12, a null rbp, the new
+    // stack's TIB bounds, a return into brass_fiber_start with the stack
+    // pointer 16-byte aligned, and a 0 there for its return address.
+    auto* w = reinterpret_cast<uintptr_t*>(base - 288);
+    std::memset(w, 0, 288);
+    const uint32_t mxcsr = 0x1F80;  // the default: all exceptions masked, round to nearest
+    const uint16_t fpucw = 0x027F;  // the Windows x64 default
+    std::memcpy(reinterpret_cast<char*>(w) + 160, &mxcsr, sizeof mxcsr);
+    std::memcpy(reinterpret_cast<char*>(w) + 164, &fpucw, sizeof fpucw);
+    w[22] = lo;     // DeallocationStack
+    w[23] = limit;  // StackLimit
+    w[24] = base;   // StackBase
+    w[28] = reinterpret_cast<uintptr_t>(impl.get());  // r12
+    w[32] = 0;                                        // rbp
+    w[33] = reinterpret_cast<uintptr_t>(&brass_fiber_start);
+    impl->rec.saved_sp = w;
+    impl->rec.top = base;
 #else
     const size_t total = bytes + page;  // the guard page below the stack
     void* mem = mmap(nullptr, total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -316,18 +392,14 @@ Fiber::~Fiber() {
         t_fiber_pool.free_list.push_back(std::move(impl_));
         return;
     }
-#if defined(_WIN32)
-    if (impl_->rec.handle) DeleteFiber(impl_->rec.handle);
-#else
-    if (impl_->mapping) munmap(impl_->mapping, impl_->mapping_bytes);
-#endif
+    release_stack(*impl_);
 }
 
 void Fiber::resume() {
     if (impl_->finished) fiber_fatal("a finished fiber was resumed");
     if (impl_->rec.active) fiber_fatal("a fiber was resumed while running or waiting on a fiber it resumed");
     StackRecord* from = running_record();
-#if defined(_WIN32)
+#if defined(BRASS_FIBER_SYSTEM)
     if (from == &t_own_stack) {
         // The thread's own stack is a system fiber too, so it can be
         // switched back to; a thread a host already runs as fibers is
@@ -362,7 +434,7 @@ void Fiber::for_each_stack_span(uintptr_t sp, void (*fn)(void* ctx, const StackS
     StackSpan running;
     running.low = sp;
     if (t_running != nullptr) {
-#if defined(_WIN32)
+#if defined(BRASS_FIBER_SYSTEM)
         running.high = reinterpret_cast<uintptr_t>(reinterpret_cast<PNT_TIB>(NtCurrentTeb())->StackBase);
 #else
         running.high = t_running->top;
@@ -371,12 +443,8 @@ void Fiber::for_each_stack_span(uintptr_t sp, void (*fn)(void* ctx, const StackS
     fn(ctx, running);
     for (StackRecord* r = t_switched_out; r != nullptr; r = r->next) {
         StackSpan s;
-#if defined(_WIN32)
-#if defined(_M_X64)
-        s.low = static_cast<uintptr_t>(r->context.Rsp);
-#else
+#if defined(BRASS_FIBER_SYSTEM)
         s.low = static_cast<uintptr_t>(r->context.Sp);
-#endif
         s.high = r->fiber != nullptr ? r->high : 0;
         s.regs = &r->context;
         s.regs_end = &r->context + 1;
