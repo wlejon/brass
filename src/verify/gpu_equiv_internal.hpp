@@ -102,7 +102,9 @@ BVNodeId extract_shared_elem_index_32(BVContext& ctx, BVNodeId byte_off_64, uint
 BVNodeId gpu_add_addr64(BVContext& ctx, BVNodeId a, BVNodeId b);
 BVNodeId gpu_mul_or_shl(BVContext& ctx, uint32_t w, BVNodeId a, BVNodeId b);
 
-inline const BVNode& bv_node(const BVContext& ctx, BVNodeId id) noexcept { return ctx.nodes()[id]; }
+// A copy, not a reference into the node table: callers hold it across calls
+// that add nodes, and a reference dies when the table grows.
+inline BVNode bv_node(const BVContext& ctx, BVNodeId id) noexcept { return ctx.nodes()[id]; }
 inline BVNodeId bv_true(BVContext& ctx) { return ctx.make_const(1, 1); }
 inline BVNodeId bv_false(BVContext& ctx) { return ctx.make_const(0, 1); }
 inline BVNodeId bv_const(BVContext& ctx, uint32_t w, uint64_t v) { return ctx.make_const(v, w); }
