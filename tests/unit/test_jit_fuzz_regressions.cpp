@@ -395,6 +395,46 @@ d3(%15: i64):
     }));
 }
 
+// A value compared with itself (the NaN test a NaN-boxing front end makes of
+// every float it boxes) fuses into its select / branch on the parity flag
+// alone: x != x and x == x, on f64 and f32, fed by an operation that makes a
+// negative NaN (inf - inf).
+TEST_CASE("JIT regression - fused NaN self-test in select and branch") {
+    const char* src = R"(
+module @m
+func @fuzz_fn(%0: i64, %1: i64) -> i64 {
+entry:
+  %2 = bitcast.f64.i64 %0
+  %3 = bitcast.f64.i64 %1
+  %4 = sub.f64 %2, %3
+  %5 = bitcast.i64.f64 %4
+  %6 = ne.f64 %4, %4
+  %7 = iconst.i64 9221120237041090560
+  %8 = select.i64 %6, %7, %5
+  %9 = fptrunc.f32.f64 %4
+  %10 = eq.f32 %9, %9
+  br_if %10, ord, unord
+ord:
+  %11 = iconst.i64 1
+  br done(%11)
+unord:
+  %12 = iconst.i64 2
+  br done(%12)
+done(%13: i64):
+  %14 = xor.i64 %8, %13
+  ret %14
+}
+)";
+    const int64_t nan = 0x7ff8000000000000LL;
+    const int64_t neg_nan = static_cast<int64_t>(0xfff8000000000000ULL);
+    const int64_t inf = 0x7ff0000000000000LL;
+    const int64_t one = 0x3ff0000000000000LL;
+    const int64_t two = 0x4000000000000000LL;
+    REQUIRE(all_tiers_agree(src, {
+        {inf, inf}, {nan, one}, {neg_nan, one}, {one, two}, {two, one}, {one, one}, {0, 0},
+    }));
+}
+
 // A gcref held across a safepoint in a loop whose body is laid out after the
 // loop exit: the stack map only listed gcrefs whose last use came later in
 // block order, so the collector never updated the slot and the exit read

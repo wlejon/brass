@@ -71,8 +71,10 @@ private:
     // one ucomis and one flags condition. That is exact only for the ordered
     // relations: a < b is ucomis(b, a) + A, a <= b is ucomis(b, a) + AE, and
     // so on, all false on unordered operands. Equality needs the parity
-    // flag as well, so eq / ne (and the unsigned predicates) are not fused.
+    // flag as well, so eq / ne (and the unsigned predicates) are not fused,
+    // except a value against itself (the NaN test: parity alone).
     static bool fused_float_compare(Opcode cmp, Condition& cond, bool& swap_operands) noexcept;
+    static bool is_self_nan_test(const Instruction& cmp) noexcept;
     // Whether analyze_function may fold this comparison into its single
     // branch / select / guard user.
     static bool comparison_fusible(const Instruction& cmp) noexcept;

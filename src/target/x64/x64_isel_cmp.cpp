@@ -40,14 +40,25 @@ bool X64ISel::comparison_fusible(const Instruction& cmp) noexcept {
     // which only the unfused lowering does.
     if (narrow_compare(cmp)) return false;
     if (!t.is_float()) return true;
+    if (is_self_nan_test(cmp)) return true;
     Condition cond = Condition::None;
     bool swap = false;
     return fused_float_compare(cmp.opcode(), cond, swap);
 }
 
+// `ne x, x` / `eq x, x` on a float: the NaN test, which is ucomis x, x and the
+// parity flag alone (unordered), where a general float eq/ne needs two flags.
+// A NaN-boxing front end canonicalizes every float it boxes with one.
+bool X64ISel::is_self_nan_test(const Instruction& cmp) noexcept {
+    return (cmp.opcode() == Opcode::eq || cmp.opcode() == Opcode::ne) && cmp.operand_count() == 2 &&
+           cmp.operand(0) && cmp.operand(0) == cmp.operand(1) && cmp.operand(0)->type().is_float();
+}
+
 void X64ISel::append_fused_float_compare(const Instruction& cmp, LirBlock& lir_bb, Condition& cond) {
     bool swap = false;
-    if (!fused_float_compare(cmp.opcode(), cond, swap)) {
+    if (is_self_nan_test(cmp)) {
+        cond = cmp.opcode() == Opcode::ne ? Condition::P : Condition::NP;
+    } else if (!fused_float_compare(cmp.opcode(), cond, swap)) {
         throw std::logic_error("x64 isel: floating-point " + std::string(opcode_name(cmp.opcode())) +
                                " cannot be fused into its user");
     }
