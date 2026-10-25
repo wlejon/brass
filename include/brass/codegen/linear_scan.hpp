@@ -229,6 +229,7 @@ private:
     // Fill live_gcrefs of every call and safepoint with the gcref vregs live
     // across it (live after the site and not defined by it).
     void record_live_gcrefs();
+    void clear_dead_callee_gprs_at_calls(uint32_t final_callee_gprs);
 };
 
 void run_linear_scan_regalloc(

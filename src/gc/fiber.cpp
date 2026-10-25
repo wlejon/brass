@@ -166,6 +166,7 @@ struct Fiber::Impl {
     StackRecord rec;
     Entry entry = nullptr;
     void* arg = nullptr;
+    size_t stack_bytes_rounded = 0;
     bool started = false;
     bool finished = false;
 #if !defined(_WIN32)
@@ -176,18 +177,40 @@ struct Fiber::Impl {
 
 namespace {
 
+struct FiberPool {
+    static constexpr size_t kMaxCached = 16;
+    std::vector<std::unique_ptr<Fiber::Impl>> free_list;
+    ~FiberPool() {
+        for (auto& impl : free_list) {
+            if (!impl) continue;
+#if defined(_WIN32)
+            if (impl->rec.handle) DeleteFiber(impl->rec.handle);
+#else
+            if (impl->mapping) munmap(impl->mapping, impl->mapping_bytes);
+#endif
+        }
+    }
+};
+
+thread_local FiberPool t_fiber_pool;
+
 // The fiber's outermost frame. The entry may not throw (an exception that
 // leaves it ends the process here, which is the only frame that could catch
-// it); when it returns the fiber is finished and switches back for good.
+// it); when it returns the fiber is finished and switches back. If pooled and
+// reused by a subsequent Fiber::create, it resumes at the loop back-edge.
 void fiber_main(Fiber::Impl* impl) noexcept {
-    impl->entry(impl->arg);
-    impl->finished = true;
-    StackRecord* self = &impl->rec;
-    StackRecord* to = self->resumer;
-    self->resumer = nullptr;
-    self->active = false;
-    switch_stacks(self, to, false);
-    fiber_fatal("a finished fiber was resumed");
+    for (;;) {
+        impl->entry(impl->arg);
+        impl->finished = true;
+        StackRecord* self = &impl->rec;
+        StackRecord* to = self->resumer;
+        self->resumer = nullptr;
+        self->active = false;
+        switch_stacks(self, to, false);
+        if (impl->finished) {
+            fiber_fatal("a finished fiber was resumed");
+        }
+    }
 }
 
 size_t page_size() {
@@ -222,9 +245,24 @@ std::unique_ptr<Fiber> Fiber::create(Entry entry, void* arg, size_t stack_bytes)
     if (entry == nullptr) return nullptr;
     const size_t page = page_size();
     const size_t bytes = ((stack_bytes < 16 * 1024 ? 16 * 1024 : stack_bytes) + page - 1) / page * page;
+    for (size_t i = t_fiber_pool.free_list.size(); i > 0; --i) {
+        if (t_fiber_pool.free_list[i - 1]->stack_bytes_rounded == bytes) {
+            std::unique_ptr<Impl> reused = std::move(t_fiber_pool.free_list[i - 1]);
+            t_fiber_pool.free_list.erase(t_fiber_pool.free_list.begin() + static_cast<ptrdiff_t>(i - 1));
+            reused->entry = entry;
+            reused->arg = arg;
+            reused->started = false;
+            reused->finished = false;
+            reused->rec.chains = StackChains{};
+            reused->rec.resumer = nullptr;
+            reused->rec.active = false;
+            return std::unique_ptr<Fiber>(new Fiber(std::move(reused)));
+        }
+    }
     auto impl = std::make_unique<Impl>();
     impl->entry = entry;
     impl->arg = arg;
+    impl->stack_bytes_rounded = bytes;
 #if defined(_WIN32)
     // The system reserves `bytes`, commits as the stack grows and keeps a
     // guard page below what is committed.
@@ -273,6 +311,11 @@ std::unique_ptr<Fiber> Fiber::create(Entry entry, void* arg, size_t stack_bytes)
 Fiber::~Fiber() {
     if (impl_->rec.active) fiber_fatal("a fiber was destroyed while running or waiting on a fiber it resumed");
     unlink_switched_out(&impl_->rec);
+    if (impl_->finished && t_fiber_pool.free_list.size() < FiberPool::kMaxCached) {
+        impl_->rec.fiber = nullptr;
+        t_fiber_pool.free_list.push_back(std::move(impl_));
+        return;
+    }
 #if defined(_WIN32)
     if (impl_->rec.handle) DeleteFiber(impl_->rec.handle);
 #else

@@ -497,6 +497,7 @@ void LinearScanAllocator::allocate() {
     // 6. Rewrite all instructions in the function, with the moves between
     // the pieces of split values, and give critical edges their blocks.
     collect_resolution_moves();
+    clear_dead_callee_gprs_at_calls(final_callee_gprs);
     rewrite_instructions();
     split_critical_edges();
     if (emitted_parallel_copy_ && cc_.kind() == CallingConvKind::Win64) {
@@ -636,6 +637,185 @@ void LinearScanAllocator::record_live_gcrefs() {
                 } else if (u.is_mem()) {
                     mark_use(u.mem_val.base_vreg);
                     mark_use(u.mem_val.index_vreg);
+                } else if (u.is_label() && inst.opcode == LirOpcode::Jcc) {
+                    const auto& exits = liveness_.guard_exits();
+                    if (auto eit = exits.find(u.label_id); eit != exits.end()) {
+                        for (const auto& gu : eit->second->uses) {
+                            if (gu.is_vreg()) mark_use(gu.vreg_val);
+                            else if (gu.is_mem()) {
+                                mark_use(gu.mem_val.base_vreg);
+                                mark_use(gu.mem_val.index_vreg);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+void LinearScanAllocator::clear_dead_callee_gprs_at_calls(uint32_t final_callee_gprs) {
+    const uint32_t alloc_callee_gprs = final_callee_gprs & ~fn_.reserved_gprs & ~fn_.forced_saved_gprs;
+    uint64_t gpr_spill_mask = 0;
+    for (size_t id = 0; id < vreg_slot_.size(); ++id) {
+        int32_t s = vreg_slot_[id];
+        if (s >= 0 && s < 64 && fn_.vreg_table[id].vreg.is_gpr() && fn_.vreg_table[id].vreg.size == 8) {
+            gpr_spill_mask |= (uint64_t{1} << s);
+        }
+    }
+    if ((alloc_callee_gprs == 0 && gpr_spill_mask == 0) || !fn_.frame.has_calls) return;
+
+    const size_t num_vregs = fn_.vreg_table.size();
+    std::vector<char> live_vreg(num_vregs, 0);
+    for (const auto& block : fn_.blocks) {
+        std::fill(live_vreg.begin(), live_vreg.end(), 0);
+        for (VReg v : liveness_.block_liveness(block.get()).live_out) {
+            if (v.is_valid() && v.id < num_vregs && v.is_gpr()) live_vreg[v.id] = 1;
+        }
+        const size_t n_inst = block->instructions.size();
+        std::vector<uint32_t> live_callee_at(n_inst, 0);
+        std::vector<uint64_t> live_spill_at(n_inst, 0);
+        for (size_t idx = n_inst; idx-- > 0;) {
+            const LirInst& inst = *block->instructions[idx];
+            if (inst.is_call()) {
+                uint32_t mask = 0;
+                uint64_t smask = 0;
+                auto mark_loc = [&](const LirOperand& op) {
+                    if (op.is_preg() && op.preg_val.is_valid() && op.preg_val.is_gpr() && op.preg_val.code < 32) {
+                        mask |= (1u << op.preg_val.code);
+                    } else if (op.is_spill_slot() && op.spill_slot >= 0 && op.spill_slot < 64) {
+                        smask |= (uint64_t{1} << op.spill_slot);
+                    }
+                };
+                auto mark_vreg = [&](VReg v) {
+                    if (!v.is_valid() || v.id >= num_vregs) return;
+                    mark_loc(location_at(fn_.vreg_table[v.id].vreg, inst.id, 8));
+                    int32_t s = vreg_slot_[v.id];
+                    if (s >= 0 && s < 64) {
+                        smask |= (uint64_t{1} << s);
+                    }
+                };
+                for (uint32_t id = 0; id < num_vregs; ++id) {
+                    if (live_vreg[id]) {
+                        mark_vreg(fn_.vreg_table[id].vreg);
+                    }
+                };
+                for (const auto& u : inst.uses) {
+                    if (u.is_vreg()) mark_vreg(u.vreg_val);
+                    else if (u.is_preg() || u.is_spill_slot()) mark_loc(u);
+                    else if (u.is_mem()) {
+                        if (u.mem_val.base_vreg.is_valid()) mark_vreg(u.mem_val.base_vreg);
+                        if (u.mem_val.index_vreg.is_valid()) mark_vreg(u.mem_val.index_vreg);
+                    }
+                }
+                if (auto mit = moves_before_.find(inst.id); mit != moves_before_.end()) {
+                    for (const auto& pm : mit->second) {
+                        mark_loc(pm.src);
+                        mark_loc(pm.dst);
+                    }
+                }
+                live_callee_at[idx] = mask;
+                live_spill_at[idx] = smask;
+            }
+            for (const auto& d : inst.defs) {
+                if (d.is_vreg() && d.vreg_val.is_valid() && d.vreg_val.id < num_vregs) {
+                    live_vreg[d.vreg_val.id] = 0;
+                }
+            }
+            auto mark_use = [&](VReg v) {
+                if (v.is_valid() && v.id < num_vregs && v.is_gpr()) live_vreg[v.id] = 1;
+            };
+            for (const auto& d : inst.defs) {
+                if (d.is_mem()) {
+                    mark_use(d.mem_val.base_vreg);
+                    mark_use(d.mem_val.index_vreg);
+                }
+            }
+            for (const auto& u : inst.uses) {
+                if (u.is_vreg()) mark_use(u.vreg_val);
+                else if (u.is_mem()) {
+                    mark_use(u.mem_val.base_vreg);
+                    mark_use(u.mem_val.index_vreg);
+                } else if (u.is_label() && inst.opcode == LirOpcode::Jcc) {
+                    const auto& exits = liveness_.guard_exits();
+                    if (auto eit = exits.find(u.label_id); eit != exits.end()) {
+                        for (const auto& gu : eit->second->uses) {
+                            if (gu.is_vreg()) mark_use(gu.vreg_val);
+                            else if (gu.is_mem()) {
+                                mark_use(gu.mem_val.base_vreg);
+                                mark_use(gu.mem_val.index_vreg);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        uint32_t dirty_callee = alloc_callee_gprs;
+        uint64_t dirty_spill = gpr_spill_mask;
+        for (size_t idx = 0; idx < n_inst; ++idx) {
+            const LirInst& inst = *block->instructions[idx];
+            auto note_loc = [&](const LirOperand& loc) {
+                if (loc.is_preg() && loc.preg_val.is_gpr() && loc.preg_val.code < 32) {
+                    dirty_callee |= (1u << loc.preg_val.code);
+                } else if (loc.is_spill_slot() && loc.spill_slot >= 0 && loc.spill_slot < 64) {
+                    if (gpr_spill_mask & (uint64_t{1} << loc.spill_slot)) {
+                        dirty_spill |= (uint64_t{1} << loc.spill_slot);
+                        if (!cc_.target().is_aarch64()) {
+                            dirty_callee |= brass::x64::reg_mask(brass::x64::GPR::R14) |
+                                            brass::x64::reg_mask(brass::x64::GPR::R15);
+                        }
+                    }
+                }
+            };
+            auto note_op = [&](const LirOperand& op) {
+                if (op.is_vreg() && op.vreg_val.is_valid()) {
+                    note_loc(location_at(op.vreg_val, inst.id, 8));
+                } else if (op.is_preg() || op.is_spill_slot()) {
+                    note_loc(op);
+                } else if (op.is_mem()) {
+                    if (op.mem_val.base_vreg.is_valid()) {
+                        note_loc(location_at(op.mem_val.base_vreg, inst.id, 8));
+                    }
+                    if (op.mem_val.index_vreg.is_valid()) {
+                        note_loc(location_at(op.mem_val.index_vreg, inst.id, 8));
+                    }
+                }
+            };
+            if (auto mit = moves_before_.find(inst.id); mit != moves_before_.end()) {
+                for (const auto& pm : mit->second) {
+                    note_op(pm.src);
+                    note_op(pm.dst);
+                }
+            }
+            for (const auto& u : inst.uses) note_op(u);
+            if (inst.is_call()) {
+                uint32_t to_clear = (dirty_callee & alloc_callee_gprs) & ~live_callee_at[idx];
+                while (to_clear != 0) {
+                    uint32_t r = static_cast<uint32_t>(std::countr_zero(to_clear));
+                    to_clear &= (to_clear - 1);
+                    PReg preg = cc_.target().is_aarch64()
+                                    ? PReg::aarch64_gpr(static_cast<aarch64::GPR>(r))
+                                    : PReg::gpr(static_cast<x64::GPR>(r));
+                    moves_before_[inst.id].push_back(
+                        PendingMove{LirOperand::preg(preg, 8), LirOperand::imm32(0), false, 8});
+                }
+                dirty_callee = live_callee_at[idx] & alloc_callee_gprs;
+
+                uint64_t spill_to_clear = (dirty_spill & gpr_spill_mask) & ~live_spill_at[idx];
+                while (spill_to_clear != 0) {
+                    uint32_t s = static_cast<uint32_t>(std::countr_zero(spill_to_clear));
+                    spill_to_clear &= (spill_to_clear - 1);
+                    moves_before_[inst.id].push_back(
+                        PendingMove{LirOperand::slot(static_cast<int32_t>(s), 8), LirOperand::imm32(0), false, 8});
+                }
+                dirty_spill = live_spill_at[idx] & gpr_spill_mask;
+            }
+            for (const auto& d : inst.defs) note_op(d);
+            if (auto mit = moves_after_.find(inst.id); mit != moves_after_.end()) {
+                for (const auto& pm : mit->second) {
+                    note_op(pm.src);
+                    note_op(pm.dst);
                 }
             }
         }
