@@ -63,9 +63,24 @@ bool SroaTransformer::run() {
             break;
         }
 
+        if (!dom_) {
+            dom_.emplace(fn_);
+            for (BasicBlock* b : fn_.blocks()) {
+                if (!b || b->predecessors().size() < 2) continue;
+                const BasicBlock* idom_b = dom_->immediate_dominator(b);
+                for (BasicBlock* pred : b->predecessors()) {
+                    const BasicBlock* runner = pred;
+                    while (runner && runner != idom_b && dom_->is_reachable(runner)) {
+                        df_[runner].push_back(b);
+                        runner = dom_->immediate_dominator(runner);
+                    }
+                }
+            }
+        }
+
         bool round_changed = false;
         for (const Value* alloc_val : candidates) {
-            if (process_candidate(alloc_val, ea)) {
+            if (process_candidate(alloc_val)) {
                 round_changed = true;
                 changed = true;
             }
@@ -79,7 +94,7 @@ bool SroaTransformer::run() {
     return changed;
 }
 
-bool SroaTransformer::process_candidate(const Value* alloc_val, const EscapeAnalysis& /*ea*/) {
+bool SroaTransformer::process_candidate(const Value* alloc_val) {
     if (!alloc_val || !alloc_val->is_instruction()) return false;
     Instruction* alloc_inst = alloc_val->defining_instruction();
     if (!alloc_inst) return false;
@@ -236,8 +251,6 @@ bool SroaTransformer::process_candidate(const Value* alloc_val, const EscapeAnal
         }
     }
 
-    DominatorTree dom(fn_);
-
     // Field liveness. The allocation itself redefines every field (each
     // execution makes a fresh object), so it kills like a store. A field is
     // live into a block if a load of it is reachable without an intervening
@@ -262,17 +275,48 @@ bool SroaTransformer::process_candidate(const Value* alloc_val, const EscapeAnal
         }
         return false;
     };
+    // Each block that touches the object, scanned once: the first event of
+    // every field in it. A block absent from the map has none.
+    std::unordered_map<const BasicBlock*, std::unordered_map<int32_t, Event>> block_events;
+    {
+        std::unordered_set<const BasicBlock*> touched{alloc_bb};
+        for (const Instruction* ld : candidate_loads) touched.insert(ld->parent());
+        for (const Instruction* st : candidate_stores) touched.insert(st->parent());
+        for (const BasicBlock* b : touched) {
+            auto& events = block_events[b];
+            for (const Instruction* cur = b->head(); cur; cur = cur->next()) {
+                if (cur == alloc_inst) {
+                    for (const auto& field : fields) events.emplace(field.first, Event::Kill);
+                } else if (cur->operand_count() > 0 && aliases.count(cur->operand(0))) {
+                    if (cur->opcode() == Opcode::load) events.emplace(cur->offset(), Event::Load);
+                    else if (cur->opcode() == Opcode::store) events.emplace(cur->offset(), Event::Kill);
+                }
+            }
+        }
+    }
+    auto block_event = [&](const BasicBlock* b, int32_t off) {
+        auto it = block_events.find(b);
+        if (it == block_events.end()) return Event::None;
+        auto e = it->second.find(off);
+        return e == it->second.end() ? Event::None : e->second;
+    };
     for (const auto& [off, type] : fields) {
         if (!live_offsets.count(off)) continue;
+        // Backward from the blocks whose first event is a load, through the
+        // blocks the field passes through untouched.
         auto& live = live_in[off];
-        for (bool grew = true; grew;) {
-            grew = false;
-            for (BasicBlock* b : fn_.blocks()) {
-                if (!b || live.count(b)) continue;
-                const Event e = first_event(b->head(), off);
-                if (e == Event::Load || (e == Event::None && live_into_any_successor(b, off))) {
-                    live.insert(b);
-                    grew = true;
+        std::vector<const BasicBlock*> work;
+        for (const Instruction* ld : candidate_loads) {
+            const BasicBlock* b = ld->parent();
+            if (ld->offset() == off && block_event(b, off) == Event::Load && live.insert(b).second) work.push_back(b);
+        }
+        while (!work.empty()) {
+            const BasicBlock* b = work.back();
+            work.pop_back();
+            for (const BasicBlock* p : b->predecessors()) {
+                if (p && !live.count(p) && block_event(p, off) == Event::None) {
+                    live.insert(p);
+                    work.push_back(p);
                 }
             }
         }
@@ -283,20 +327,6 @@ bool SroaTransformer::process_candidate(const Value* alloc_val, const EscapeAnal
             const Event after = first_event(alloc_inst->next(), off);
             if (after == Event::Load || (after == Event::None && live_into_any_successor(alloc_inst->parent(), off))) {
                 return false;
-            }
-        }
-    }
-
-    // Compute Dominance Frontiers
-    std::unordered_map<const BasicBlock*, std::vector<BasicBlock*>> df;
-    for (BasicBlock* b : fn_.blocks()) {
-        if (!b || b->predecessors().size() < 2) continue;
-        const BasicBlock* idom_b = dom.immediate_dominator(b);
-        for (BasicBlock* pred : b->predecessors()) {
-            const BasicBlock* runner = pred;
-            while (runner && runner != idom_b && dom.is_reachable(runner)) {
-                df[runner].push_back(b);
-                runner = dom.immediate_dominator(runner);
             }
         }
     }
@@ -319,8 +349,8 @@ bool SroaTransformer::process_candidate(const Value* alloc_val, const EscapeAnal
         size_t w_i = 0;
         while (w_i < worklist.size()) {
             BasicBlock* b = worklist[w_i++];
-            auto it = df.find(b);
-            if (it != df.end()) {
+            auto it = df_.find(b);
+            if (it != df_.end()) {
                 for (BasicBlock* y : it->second) {
                     if (idf_set.insert(y).second) {
                         if (in_worklist.insert(y).second) {
@@ -367,6 +397,14 @@ bool SroaTransformer::process_candidate(const Value* alloc_val, const EscapeAnal
 
     // defs_stack.back() is the reaching definitions at the end of the innermost
     // open block; each dominator-tree child starts from a copy of its parent's.
+    // A removed load's result -> the field value it read. Values recorded are
+    // never themselves removed loads: a stored value dominates its store, so
+    // a load of this object it came from was renamed first and is resolved.
+    std::unordered_map<const Value*, Value*> replaced;
+    auto resolve = [&](Value* v) {
+        auto it = v ? replaced.find(v) : replaced.end();
+        return it == replaced.end() ? v : it->second;
+    };
     std::vector<std::unordered_map<int32_t, Value*>> defs_stack;
     defs_stack.emplace_back();
     auto rename_block = [&](const BasicBlock* cbb) -> void {
@@ -402,7 +440,7 @@ bool SroaTransformer::process_candidate(const Value* alloc_val, const EscapeAnal
             } else if (cur->opcode() == Opcode::store && aliases.count(cur->operand(0)) > 0) {
                 int32_t off = cur->offset();
                 if (live_offsets.count(off) > 0) {
-                    current_def[off] = cur->operand(1);
+                    current_def[off] = resolve(cur->operand(1));
                 }
                 insts_to_remove.insert(cur);
                 if (stats_) stats_->stores_eliminated++;
@@ -413,7 +451,7 @@ bool SroaTransformer::process_candidate(const Value* alloc_val, const EscapeAnal
                     loaded_val = get_or_create_zero_constant(builder, entry_bb, cur->type());
                     current_def[off] = loaded_val;
                 }
-                replace_all_uses(fn_, cur->result(), loaded_val);
+                replaced[cur->result()] = loaded_val;
                 insts_to_remove.insert(cur);
                 if (stats_) stats_->loads_eliminated++;
             }
@@ -445,7 +483,17 @@ bool SroaTransformer::process_candidate(const Value* alloc_val, const EscapeAnal
         defs_stack.push_back(std::move(current_def));
     };
 
-    walk_dominator_tree(dom, entry_bb, rename_block, [&](const BasicBlock*) { defs_stack.pop_back(); });
+    walk_dominator_tree(*dom_, entry_bb, rename_block, [&](const BasicBlock*) { defs_stack.pop_back(); });
+
+    // Every use of a removed load reads its field's value, in one pass.
+    if (!replaced.empty()) {
+        for (BasicBlock* bb : fn_.blocks()) {
+            if (!bb) continue;
+            for (Instruction* inst : *bb) {
+                if (inst) for_each_use_slot(*inst, [&](Value*& v) { v = resolve(v); });
+            }
+        }
+    }
 
     // 7. Remove dead instructions
     for (Instruction* inst : insts_to_remove) {

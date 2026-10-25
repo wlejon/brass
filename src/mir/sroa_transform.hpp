@@ -7,6 +7,7 @@
 #include <brass/mir/escape_analysis.hpp>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -28,13 +29,17 @@ public:
     bool run();
 
 private:
-    bool process_candidate(const Value* alloc_val, const EscapeAnalysis& ea);
+    bool process_candidate(const Value* alloc_val);
     Value* get_or_create_zero_constant(Builder& b, BasicBlock* entry, Type type);
 
     Function& fn_;
     SroaOptions options_;
     SroaStats* stats_ = nullptr;
     std::unordered_map<uint8_t, Value*> zero_constants_;
+    // Promotion adds block parameters and edge arguments but never a block or
+    // an edge, so the dominator tree and frontiers hold for the whole run.
+    std::optional<DominatorTree> dom_;
+    std::unordered_map<const BasicBlock*, std::vector<BasicBlock*>> df_;
 };
 
 } // namespace brass
