@@ -132,12 +132,14 @@ bool PeepholeOptimizer::touches_memory(const LirInst& inst) noexcept {
 
 bool PeepholeOptimizer::eliminate_redundant_moves(LirBlock& block) {
     bool changed = false;
-    for (auto& slot : block.instructions) {
+    const size_t n = block.instructions.size();
+    for (size_t i = 0; i < n; ++i) {
+        auto& slot = block.instructions[i];
+        if (!slot) continue;
         const auto& inst = *slot;
-        // A GPR mov32 to itself is not a no-op: it zeroes the upper half,
-        // which is how trunc.i32 / zext.i64 are lowered.
-        if (!is_protected(inst) &&
-            (inst.opcode == LirOpcode::Mov || inst.opcode == LirOpcode::Movsd ||
+        if (is_protected(inst)) continue;
+
+        if ((inst.opcode == LirOpcode::Mov || inst.opcode == LirOpcode::Movsd ||
              inst.opcode == LirOpcode::Movss || inst.opcode == LirOpcode::Movaps ||
              inst.opcode == LirOpcode::Vmovaps || inst.opcode == LirOpcode::Vmovups) &&
             inst.defs.size() >= 1 && inst.uses.size() >= 1 &&
@@ -146,6 +148,82 @@ bool PeepholeOptimizer::eliminate_redundant_moves(LirBlock& block) {
             slot.reset();
             stats_.redundant_moves_eliminated++;
             changed = true;
+            continue;
+        }
+
+        // A GPR Mov32 to itself zeroes the upper 32 bits, which is how
+        // trunc.i32 / zext.i64 are lowered. However, when it comes from a
+        // coalesced two-address pre-copy (`mov edi, edi; xor edi, edx`), it is
+        // redundant if either:
+        //   (a) the most recent def of `reg` in this block already wrote a
+        //       32-bit GPR (`size == 4`), which zeroed bits [63:32], or
+        //   (b) all uses of `reg` up to the next >=32-bit redefinition in this
+        //       block only read the low 32 bits (`size <= 4`).
+        if (inst.opcode == LirOpcode::Mov32 &&
+            inst.defs.size() == 1 && inst.uses.size() == 1 &&
+            inst.defs[0].is_preg() && inst.uses[0].is_preg() &&
+            inst.defs[0].preg_val == inst.uses[0].preg_val &&
+            inst.defs[0].preg_val.is_gpr()) {
+            const PReg reg = inst.defs[0].preg_val;
+            bool redundant = false;
+
+            // (a) Backward scan for prior 32-bit def in the same block.
+            for (size_t k = i; k > 0 && i - k < kScanWindow; ) {
+                --k;
+                if (!block.instructions[k]) continue;
+                const auto& prev = *block.instructions[k];
+                if (prev.is_call() || prev.is_branch() || prev.is_terminator() || is_protected(prev)) {
+                    break;
+                }
+                if (defines_register(prev, reg)) {
+                    if (prev.defs.size() == 1 && prev.defs[0].is_preg() &&
+                        prev.defs[0].preg_val == reg && prev.defs[0].size == 4) {
+                        redundant = true;
+                    }
+                    break;
+                }
+            }
+
+            // (b) Forward scan up to next >=32-bit redefinition in the same block.
+            if (!redundant) {
+                for (size_t j = i + 1; j < n && j - i <= kScanWindow; ++j) {
+                    if (!block.instructions[j]) continue;
+                    const auto& next = *block.instructions[j];
+                    if (next.is_call() || next.is_branch() || next.is_terminator() || is_protected(next)) {
+                        break;
+                    }
+                    bool reads_upper_bits = false;
+                    for (const auto& u : next.uses) {
+                        if (u.is_preg() && u.preg_val == reg && u.size > 4) {
+                            reads_upper_bits = true;
+                        }
+                        if (u.is_mem() && (u.mem_val.base_preg == reg || u.mem_val.index_preg == reg)) {
+                            reads_upper_bits = true;
+                        }
+                    }
+                    for (const auto& d : next.defs) {
+                        if (d.is_mem() && (d.mem_val.base_preg == reg || d.mem_val.index_preg == reg)) {
+                            reads_upper_bits = true;
+                        }
+                    }
+                    if (reads_upper_bits) break;
+
+                    if (next.defs.size() >= 1 && next.defs[0].is_preg() &&
+                        next.defs[0].preg_val == reg && next.defs[0].size >= 4) {
+                        redundant = true;
+                        break;
+                    }
+                    if (defines_register(next, reg)) {
+                        break;
+                    }
+                }
+            }
+
+            if (redundant) {
+                slot.reset();
+                stats_.redundant_moves_eliminated++;
+                changed = true;
+            }
         }
     }
     if (changed) compact_block(block);

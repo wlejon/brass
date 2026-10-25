@@ -58,17 +58,16 @@ bool SroaTransformer::run() {
         EscapeAnalysisOptions ea_opts;
         EscapeAnalysis ea(fn_, ea_opts);
 
-        const auto& non_escaping = ea.non_escaping_allocations();
-        if (non_escaping.empty()) {
+        const auto candidates = ea.non_escaping_allocations();
+        if (candidates.empty()) {
             break;
         }
 
         bool round_changed = false;
-        for (const Value* alloc_val : non_escaping) {
+        for (const Value* alloc_val : candidates) {
             if (process_candidate(alloc_val, ea)) {
                 round_changed = true;
                 changed = true;
-                break; // Re-analyze after dissolving an allocation
             }
         }
 

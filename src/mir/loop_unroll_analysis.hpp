@@ -19,7 +19,8 @@ enum class ParamRole {
     DerivedIV,
     Invariant,
     ReductionAcc,
-    SerialReductionAcc
+    SerialReductionAcc,
+    LoopCarried
 };
 
 struct ParamAnalysis {

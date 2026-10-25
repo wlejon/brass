@@ -203,6 +203,15 @@ bool analyze_loop(
             }
         }
     }
+    for (Instruction* inst : *header) {
+        if (inst == hdr_term) continue;
+        if (inst->produces_value()) {
+            const size_t expected_uses = (inst == cmp_inst) ? 1 : 0;
+            if (in_loop_uses(inst->result(), loop, nullptr) > expected_uses) {
+                return false;
+            }
+        }
+    }
 
     cla.params.resize(header->param_count());
     bool found_primary_iv = false;
@@ -286,14 +295,29 @@ bool analyze_loop(
         }
     }
 
-    for (size_t i = 0; i < header->param_count(); ++i) {
-        const ParamAnalysis& pa = cla.params[i];
-        if (pa.latch_next_val != pa.header_param && pa.role == ParamRole::Invariant) {
-            return false;
+    bool has_serial_reduction = false;
+    for (size_t red_i : cla.reduction_indices) {
+        if (cla.params[red_i].role == ParamRole::SerialReductionAcc) {
+            has_serial_reduction = true;
+            break;
         }
     }
 
     if (!found_primary_iv || !cla.limit_val) return false;
+
+    int64_t const_limit = 0;
+    const bool has_const_limit = get_const_int(cla.limit_val, const_limit);
+
+    for (size_t i = 0; i < header->param_count(); ++i) {
+        ParamAnalysis& pa = cla.params[i];
+        if (pa.latch_next_val != pa.header_param && pa.role == ParamRole::Invariant) {
+            if (options.enable_general_unroll && !has_serial_reduction && has_const_limit) {
+                pa.role = ParamRole::LoopCarried;
+            } else {
+                return false;
+            }
+        }
+    }
 
     // An accumulator is only rewritten through its own update: jamming splits
     // it into partial sums, and the serial chain is emitted apart from the
@@ -330,13 +354,18 @@ bool analyze_loop(
         return false;
     }
 
+    size_t body_inst_count = 0;
     for (Instruction* inst = body_bb->head(); inst != nullptr; inst = inst->next()) {
         if (inst->is_terminator()) continue;
+        ++body_inst_count;
         Opcode op = inst->opcode();
         if (op == Opcode::call || op == Opcode::call_indirect || op == Opcode::patchable_call ||
             op == Opcode::safepoint || op == Opcode::guard || op == Opcode::resume_point) {
             return false;
         }
+    }
+    if (body_inst_count > 32) {
+        return false;
     }
 
     cla.is_counted = true;

@@ -320,6 +320,23 @@ bool fold_constants(Function& fn) {
         while (cur) {
             Instruction* next = cur->next();
             pending.remap(*cur);
+            if ((cur->opcode() == Opcode::load_indexed && cur->operand_count() == 2) ||
+                (cur->opcode() == Opcode::store_indexed && cur->operand_count() == 3)) {
+                int64_t idx_c = 0;
+                if (get_const_int(cur->operand(1), idx_c)) {
+                    int64_t new_off = static_cast<int64_t>(cur->offset()) +
+                                      idx_c * static_cast<int64_t>(cur->scale());
+                    if (new_off >= INT32_MIN && new_off <= INT32_MAX) {
+                        cur->set_opcode(cur->opcode() == Opcode::load_indexed ? Opcode::load : Opcode::store);
+                        cur->set_offset(static_cast<int32_t>(new_off));
+                        cur->set_scale(1);
+                        cur->operands().erase(cur->operands().begin() + 1);
+                        changed = true;
+                        cur = next;
+                        continue;
+                    }
+                }
+            }
             if (!is_pure_instruction(cur) || !cur->produces_value()) {
                 cur = next;
                 continue;
@@ -433,6 +450,61 @@ bool fold_constants(Function& fn) {
                     } else if (op == Opcode::trunc_i32 && (dop == Opcode::sext_i64 || dop == Opcode::zext_i64) &&
                                def->operand(0) && def->operand(0)->type() == Type::i32()) {
                         replacement = def->operand(0);
+                    } else if (op == Opcode::trunc_i32 &&
+                               (dop == Opcode::add || dop == Opcode::sub || dop == Opcode::mul ||
+                                dop == Opcode::and_ || dop == Opcode::or_ || dop == Opcode::xor_) &&
+                               def->type() == Type::i64() && def->operand_count() == 2) {
+                        auto can_narrow_free = [](const Value* v) -> bool {
+                            int64_t dummy = 0;
+                            if (get_const_int(v, dummy)) return true;
+                            if (!v || !v->is_instruction()) return false;
+                            const Instruction* d = v->defining_instruction();
+                            return d && (d->opcode() == Opcode::sext_i64 || d->opcode() == Opcode::zext_i64) &&
+                                   d->operand_count() == 1 && d->operand(0) && d->operand(0)->type() == Type::i32();
+                        };
+                        if (can_narrow_free(def->operand(0)) || can_narrow_free(def->operand(1))) {
+                            b.position_before(cur);
+                            auto narrow_op = [&](Value* v) -> Value* {
+                                int64_t cv = 0;
+                                if (get_const_int(v, cv)) return b.build_iconst_i32(static_cast<int32_t>(cv));
+                                if (v && v->is_instruction()) {
+                                    const Instruction* d = v->defining_instruction();
+                                    if (d && (d->opcode() == Opcode::sext_i64 || d->opcode() == Opcode::zext_i64) &&
+                                        d->operand_count() == 1 && d->operand(0) && d->operand(0)->type() == Type::i32()) {
+                                        return d->operand(0);
+                                    }
+                                }
+                                return b.build_trunc_i32(v);
+                            };
+                            Value* lhs32 = narrow_op(def->operand(0));
+                            Value* rhs32 = narrow_op(def->operand(1));
+                            switch (dop) {
+                                case Opcode::add:  replacement = b.build_add(lhs32, rhs32); break;
+                                case Opcode::sub:  replacement = b.build_sub(lhs32, rhs32); break;
+                                case Opcode::mul:  replacement = b.build_mul(lhs32, rhs32); break;
+                                case Opcode::and_: replacement = b.build_and(lhs32, rhs32); break;
+                                case Opcode::or_:  replacement = b.build_or(lhs32, rhs32); break;
+                                case Opcode::xor_: replacement = b.build_xor(lhs32, rhs32); break;
+                                default: break;
+                            }
+                        }
+                    } else if (op == Opcode::sext_i64 && op0->type() == Type::i32()) {
+                        bool known_non_negative = false;
+                        int64_t imm_c = 0;
+                        if (dop == Opcode::and_ && def->operand_count() == 2) {
+                            if ((get_const_int(def->operand(0), imm_c) && static_cast<int32_t>(imm_c) >= 0) ||
+                                (get_const_int(def->operand(1), imm_c) && static_cast<int32_t>(imm_c) >= 0)) {
+                                known_non_negative = true;
+                            }
+                        } else if (dop == Opcode::lshr && def->operand_count() == 2 &&
+                                   get_const_int(def->operand(1), imm_c) &&
+                                   (static_cast<uint32_t>(imm_c) & 31u) > 0) {
+                            known_non_negative = true;
+                        }
+                        if (known_non_negative) {
+                            b.position_before(cur);
+                            replacement = b.build_zext_i64(op0);
+                        }
                     } else if (op == Opcode::bitcast_f64_i64 && dop == Opcode::select && def->operand_count() == 3) {
                         int64_t nan_c = 0;
                         const Value* bits_v = nullptr;

@@ -391,4 +391,94 @@ TEST_CASE("Peephole - Identity Arithmetic Preserved When Flags Are Live") {
     CHECK(target->instructions[0]->opcode == LirOpcode::Imul);
 }
 
+TEST_CASE("Peephole - Mov32 Self-Move Elimination and 64-bit Reader Preservation") {
+    // Case 1: Prior 32-bit def in the same block already zeroed bits [63:32].
+    {
+        LirFunction fn;
+        LirBlock* bb = fn.create_block("entry");
+
+        auto xor32 = std::make_unique<LirInst>(LirOpcode::Xor32);
+        xor32->add_def(LirOperand::preg_gpr(GPR::RAX, 4));
+        xor32->add_use(LirOperand::preg_gpr(GPR::RAX, 4));
+        xor32->add_use(LirOperand::preg_gpr(GPR::RCX, 4));
+        bb->append_inst(std::move(xor32));
+
+        auto self32 = std::make_unique<LirInst>(LirOpcode::Mov32);
+        self32->add_def(LirOperand::preg_gpr(GPR::RAX, 4));
+        self32->add_use(LirOperand::preg_gpr(GPR::RAX, 4));
+        bb->append_inst(std::move(self32));
+
+        auto ret = std::make_unique<LirInst>(LirOpcode::Ret);
+        ret->add_use(LirOperand::preg_gpr(GPR::RAX, 8));
+        bb->append_inst(std::move(ret));
+
+        PeepholeStats stats = run_lir_peephole_optimizations(fn);
+        CHECK_EQ(stats.redundant_moves_eliminated, size_t(1));
+        REQUIRE_EQ(bb->instructions.size(), size_t(2));
+        CHECK(bb->instructions[0]->opcode == LirOpcode::Xor32);
+        CHECK(bb->instructions[1]->opcode == LirOpcode::Ret);
+    }
+
+    // Case 2: Subsequent uses only read 32 bits before a full (>=4-byte) redefinition.
+    {
+        LirFunction fn;
+        LirBlock* bb = fn.create_block("entry");
+
+        auto self32 = std::make_unique<LirInst>(LirOpcode::Mov32);
+        self32->add_def(LirOperand::preg_gpr(GPR::RAX, 4));
+        self32->add_use(LirOperand::preg_gpr(GPR::RAX, 4));
+        bb->append_inst(std::move(self32));
+
+        auto xor32 = std::make_unique<LirInst>(LirOpcode::Xor32);
+        xor32->add_def(LirOperand::preg_gpr(GPR::RAX, 4));
+        xor32->add_use(LirOperand::preg_gpr(GPR::RAX, 4));
+        xor32->add_use(LirOperand::preg_gpr(GPR::RCX, 4));
+        bb->append_inst(std::move(xor32));
+
+        auto ret = std::make_unique<LirInst>(LirOpcode::Ret);
+        ret->add_use(LirOperand::preg_gpr(GPR::RAX, 8));
+        bb->append_inst(std::move(ret));
+
+        PeepholeStats stats = run_lir_peephole_optimizations(fn);
+        CHECK_EQ(stats.redundant_moves_eliminated, size_t(1));
+        REQUIRE_EQ(bb->instructions.size(), size_t(2));
+        CHECK(bb->instructions[0]->opcode == LirOpcode::Xor32);
+        CHECK(bb->instructions[1]->opcode == LirOpcode::Ret);
+    }
+
+    // Case 3: A 64-bit reader follows before any redefinition -> Mov32 must be kept.
+    {
+        LirFunction fn;
+        LirBlock* bb = fn.create_block("entry");
+
+        auto self32 = std::make_unique<LirInst>(LirOpcode::Mov32);
+        self32->add_def(LirOperand::preg_gpr(GPR::RAX, 4));
+        self32->add_use(LirOperand::preg_gpr(GPR::RAX, 4));
+        bb->append_inst(std::move(self32));
+
+        auto add64 = std::make_unique<LirInst>(LirOpcode::Add);
+        add64->add_def(LirOperand::preg_gpr(GPR::RDX, 8));
+        add64->add_use(LirOperand::preg_gpr(GPR::RDX, 8));
+        add64->add_use(LirOperand::preg_gpr(GPR::RAX, 8));
+        bb->append_inst(std::move(add64));
+
+        auto xor32 = std::make_unique<LirInst>(LirOpcode::Xor32);
+        xor32->add_def(LirOperand::preg_gpr(GPR::RAX, 4));
+        xor32->add_use(LirOperand::preg_gpr(GPR::RAX, 4));
+        xor32->add_use(LirOperand::preg_gpr(GPR::RCX, 4));
+        bb->append_inst(std::move(xor32));
+
+        auto ret = std::make_unique<LirInst>(LirOpcode::Ret);
+        ret->add_use(LirOperand::preg_gpr(GPR::RDX, 8));
+        ret->add_use(LirOperand::preg_gpr(GPR::RAX, 8));
+        bb->append_inst(std::move(ret));
+
+        PeepholeStats stats = run_lir_peephole_optimizations(fn);
+        CHECK_EQ(stats.redundant_moves_eliminated, size_t(0));
+        REQUIRE_EQ(bb->instructions.size(), size_t(4));
+        CHECK(bb->instructions[0]->opcode == LirOpcode::Mov32);
+    }
+}
+
+
 

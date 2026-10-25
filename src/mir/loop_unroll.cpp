@@ -30,12 +30,18 @@ Value* build_unroll_trip_test(Builder& b, BasicBlock& preheader, const CountedLo
                               const ParamAnalysis& primary_iv, Value* cur_iv, size_t F) {
     const Type iv_type = primary_iv.type;
     int64_t step = 0;
-    if (!primary_iv.is_sub && (cla.cmp_opcode == Opcode::slt || cla.cmp_opcode == Opcode::ult) &&
+    const bool is_lt = (cla.cmp_opcode == Opcode::slt || cla.cmp_opcode == Opcode::ult);
+    const bool is_le = (cla.cmp_opcode == Opcode::sle || cla.cmp_opcode == Opcode::ule);
+    int64_t init_c = 0;
+    const int64_t type_min = (iv_type == Type::i32() ? int64_t{INT32_MIN} : INT64_MIN);
+    const bool le_safe_init = is_le && get_const_int(primary_iv.ph_init_val, init_c) &&
+                              ((cla.cmp_opcode == Opcode::sle) ? (init_c > type_min) : (static_cast<uint64_t>(init_c) > 0));
+    if (!primary_iv.is_sub && (is_lt || le_safe_init) &&
         (iv_type == Type::i32() || iv_type == Type::i64()) && get_const_int(primary_iv.step_val, step) &&
         step > 0 && step <= (iv_type == Type::i32() ? int64_t{INT32_MAX} : INT64_MAX) / static_cast<int64_t>(F)) {
         const int64_t c = step * static_cast<int64_t>(F - 1);
-        const bool is_signed = cla.cmp_opcode == Opcode::slt;
-        const int64_t floor = is_signed ? (iv_type == Type::i32() ? int64_t{INT32_MIN} : INT64_MIN) + c : c;
+        const bool is_signed = (cla.cmp_opcode == Opcode::slt || cla.cmp_opcode == Opcode::sle);
+        const int64_t floor = is_signed ? type_min + c : c;
         Builder ph(*preheader.parent()->parent());
         ph.set_function(preheader.parent());
         ph.position_before(preheader.terminator());
@@ -44,6 +50,9 @@ Value* build_unroll_trip_test(Builder& b, BasicBlock& preheader, const CountedLo
         Value* below = is_signed ? ph.build_slt(limit, floor_v) : ph.build_ult(limit, floor_v);
         Value* clamped = ph.build_select(below, floor_v, limit);
         Value* limit2 = ph.build_sub(clamped, make_smart_const_int(ph, iv_type, c));
+        if (is_le) {
+            return is_signed ? b.build_sle(cur_iv, limit2) : b.build_ule(cur_iv, limit2);
+        }
         return is_signed ? b.build_slt(cur_iv, limit2) : b.build_ult(cur_iv, limit2);
     }
 
@@ -226,6 +235,7 @@ bool unroll_loop(
     std::vector<Value*> cur_acc_vals(header->param_count());
     std::vector<std::vector<Value*>> next_acc_vals(header->param_count());
     std::unordered_map<size_t, Value*> serial_acc_map;
+    std::unordered_map<size_t, Value*> loop_carried_map;
 
     size_t init_non_red_idx = 0;
     for (size_t i = 0; i < header->param_count(); ++i) {
@@ -236,6 +246,8 @@ bool unroll_loop(
             Value* p = unroll_hdr_params[init_non_red_idx++];
             if (pa.role == ParamRole::SerialReductionAcc) {
                 serial_acc_map[i] = p;
+            } else if (pa.role == ParamRole::LoopCarried) {
+                loop_carried_map[i] = p;
             }
         }
     }
@@ -380,6 +392,9 @@ bool unroll_loop(
                         Value* k_val = pa.is_sub ? b.build_sub(base_p, k_step) : make_smart_add(b, pa.type, base_p, k_step);
                         iter_val_map[orig_param] = k_val;
                     }
+                } else if (pa.role == ParamRole::LoopCarried) {
+                    non_red_idx++;
+                    iter_val_map[orig_param] = loop_carried_map[i];
                 } else {
                     // Invariant
                     iter_val_map[orig_param] = unroll_hdr_params[non_red_idx++];
@@ -426,6 +441,15 @@ bool unroll_loop(
 
                 unroll_body->append_instruction(cloned);
             }
+
+            // Advance general loop-carried parameters to their next-iteration value
+            for (size_t i = 0; i < header->param_count(); ++i) {
+                const ParamAnalysis& pa = cla.params[i];
+                if (pa.role == ParamRole::LoopCarried) {
+                    auto it_v = iter_val_map.find(pa.latch_next_val);
+                    loop_carried_map[i] = (it_v != iter_val_map.end()) ? it_v->second : pa.latch_next_val;
+                }
+            }
         }
     }
 
@@ -441,6 +465,9 @@ bool unroll_loop(
             }
         } else if (pa.role == ParamRole::SerialReductionAcc) {
             next_unroll_latch_args.push_back(serial_acc_map[i]);
+            non_red_idx++;
+        } else if (pa.role == ParamRole::LoopCarried) {
+            next_unroll_latch_args.push_back(loop_carried_map[i]);
             non_red_idx++;
         } else if (pa.role == ParamRole::BasicIV || pa.role == ParamRole::DerivedIV) {
             Value* base_p = unroll_hdr_params[non_red_idx++];
@@ -600,6 +627,9 @@ bool unroll_loop(
             rem_next_latch_args[i] = next_v;
         } else if (pa.role == ParamRole::ReductionAcc || pa.role == ParamRole::SerialReductionAcc) {
             rem_next_latch_args[i] = rem_val_map[pa.update_inst->result()];
+        } else if (pa.role == ParamRole::LoopCarried) {
+            auto it_v = rem_val_map.find(pa.latch_next_val);
+            rem_next_latch_args[i] = (it_v != rem_val_map.end()) ? it_v->second : pa.latch_next_val;
         } else {
             rem_next_latch_args[i] = rem_hdr->param(i);
         }
