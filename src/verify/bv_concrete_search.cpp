@@ -1,4 +1,5 @@
 #include "bv_solver.hpp"
+#include <brass/core/env.hpp>
 #include <brass/interpreter/float_arith.hpp>
 #include <algorithm>
 #include <atomic>
@@ -18,18 +19,9 @@ namespace {
 bool default_strict_solver_check() noexcept {
 #if !defined(NDEBUG) || defined(BRASS_VERIFY_UNSAT_SAMPLES)
     return true;
-#elif defined(_MSC_VER)
-    // MSVC deprecates getenv (C4996, an error under /WX); _dupenv_s is its
-    // owned-copy equivalent.
-    char* env = nullptr;
-    size_t len = 0;
-    if (_dupenv_s(&env, &len, "BRASS_VERIFY_UNSAT_SAMPLES") != 0 || !env) return false;
-    const bool on = env[0] != '\0' && env[0] != '0';
-    std::free(env);
-    return on;
 #else
-    const char* env = std::getenv("BRASS_VERIFY_UNSAT_SAMPLES");
-    return env != nullptr && env[0] != '\0' && env[0] != '0';
+    const std::string env = env_value("BRASS_VERIFY_UNSAT_SAMPLES");
+    return !env.empty() && env[0] != '0';
 #endif
 }
 

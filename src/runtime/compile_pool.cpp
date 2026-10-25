@@ -1,4 +1,5 @@
 #include <brass/runtime/compile_pool.hpp>
+#include <brass/core/env.hpp>
 #include <brass/runtime/tier_timeline.hpp>
 
 #include <algorithm>
@@ -42,17 +43,7 @@ void shutdown_shared_at_exit() {
 
 // BRASS_JIT_THREADS, or 0 when unset or not a positive count.
 long env_thread_count() {
-#if defined(_MSC_VER)
-    // MSVC deprecates getenv (C4996, an error under /WX).
-    char* owned = nullptr;
-    size_t len = 0;
-    if (_dupenv_s(&owned, &len, "BRASS_JIT_THREADS") != 0 || !owned) return 0;
-    const long n = std::strtol(owned, nullptr, 10);
-    std::free(owned);
-#else
-    const char* env = std::getenv("BRASS_JIT_THREADS");
-    const long n = env ? std::strtol(env, nullptr, 10) : 0;
-#endif
+    const long n = std::strtol(env_value("BRASS_JIT_THREADS").c_str(), nullptr, 10);
     return n > 0 ? n : 0;
 }
 

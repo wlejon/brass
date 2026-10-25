@@ -1,4 +1,5 @@
 #include <brass/mir/module.hpp>
+#include <brass/core/env.hpp>
 #include <brass/runtime/code_installer.hpp>
 #include <algorithm>
 #include <atomic>
@@ -182,21 +183,8 @@ namespace {
 // resume reads its guard) from building a body per call.
 uint32_t release_stress_period() {
     static const uint32_t period = [] {
-        auto parse = [](const char* v) -> uint32_t {
-            if (!v) return 0;
-            const unsigned long n = std::strtoul(v, nullptr, 10);
-            return n > 0xFFFFu ? 0xFFFFu : static_cast<uint32_t>(n);
-        };
-#if defined(_MSC_VER)
-        char* v = nullptr;
-        size_t len = 0;
-        if (_dupenv_s(&v, &len, "BRASS_RELEASE_BODIES_STRESS") != 0 || !v) return 0u;
-        const uint32_t n = parse(v);
-        std::free(v);
-        return n;
-#else
-        return parse(std::getenv("BRASS_RELEASE_BODIES_STRESS"));
-#endif
+        const unsigned long n = std::strtoul(env_value("BRASS_RELEASE_BODIES_STRESS").c_str(), nullptr, 10);
+        return n > 0xFFFFu ? 0xFFFFu : static_cast<uint32_t>(n);
     }();
     return period;
 }

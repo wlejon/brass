@@ -1,4 +1,5 @@
 #include <brass/runtime/multi_tier_pipeline.hpp>
+#include <brass/core/env.hpp>
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/vm/fast_interpreter.hpp>
 #include <brass/runtime/host_symbols.hpp>
@@ -41,20 +42,7 @@ extern "C" void brass_tier1_backedges_fb(void* feedback) {
     fb.tier1_backedge_budget()->store(TieringFeedback::kTier1BackedgeRearm, std::memory_order_relaxed);
     fb.add_backedges(static_cast<uint64_t>(spent));
     // BRASS_TIER1_BACKEDGE_TIERUP=0 counts but never tiers up (A/B knob).
-    static const bool enabled = [] {
-#if defined(_MSC_VER)
-        // MSVC deprecates getenv (C4996, an error under /WX).
-        char* owned = nullptr;
-        size_t len = 0;
-        if (_dupenv_s(&owned, &len, "BRASS_TIER1_BACKEDGE_TIERUP") != 0 || !owned) return true;
-        const bool off = owned[0] == '0';
-        std::free(owned);
-        return !off;
-#else
-        const char* v = std::getenv("BRASS_TIER1_BACKEDGE_TIERUP");
-        return !(v && v[0] == '0');
-#endif
-    }();
+    static const bool enabled = brass::env_value("BRASS_TIER1_BACKEDGE_TIERUP").c_str()[0] != '0';
     if (!enabled) return;
     brass::runtime::MultiTierPipeline& pipeline = fb.registry().pipeline();
     if (!pipeline.is_initialized()) return;

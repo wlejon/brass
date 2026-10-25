@@ -5,6 +5,7 @@
 // dispatch are in vulkan_driver_module.cpp.
 
 #include "vulkan_driver_internal.hpp"
+#include <brass/core/env.hpp>
 
 #if BRASS_VULKAN_HEADERS
 
@@ -64,22 +65,6 @@ const char* type_name(VkPhysicalDeviceType t) {
         case VK_PHYSICAL_DEVICE_TYPE_CPU: return "cpu";
         default: return "other";
     }
-}
-
-std::string env_value(const char* name) {
-#if defined(_MSC_VER)
-    // MSVC deprecates getenv (C4996, an error under /WX); _dupenv_s is its
-    // owned-copy equivalent.
-    char* owned = nullptr;
-    size_t len = 0;
-    if (_dupenv_s(&owned, &len, name) != 0 || !owned) return {};
-    std::string v(owned);
-    std::free(owned);
-    return v;
-#else
-    const char* v = std::getenv(name);
-    return v ? std::string(v) : std::string();
-#endif
 }
 
 bool has_ext(const std::vector<VkExtensionProperties>& exts, const char* name) {

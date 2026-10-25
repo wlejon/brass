@@ -2,6 +2,7 @@
 // and the report that reads time-to-optimized-code and stalls off them.
 
 #include <brass/runtime/tier_timeline.hpp>
+#include <brass/core/env.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/tiering.hpp>
 
@@ -39,17 +40,8 @@ Timeline& timeline() {
 }
 
 // The variable's value; empty when it is unset or "0".
-std::string env_value(const char* name) {
-#if defined(_MSC_VER)
-    char* owned = nullptr;
-    size_t len = 0;
-    if (_dupenv_s(&owned, &len, name) != 0 || !owned) return {};
-    std::string v(owned);
-    std::free(owned);
-#else
-    const char* raw = std::getenv(name);
-    std::string v = raw ? raw : "";
-#endif
+std::string env_setting(const char* name) {
+    std::string v = env_value(name);
     return v == "0" ? std::string() : v;
 }
 
@@ -80,7 +72,7 @@ void enable_tier_timeline(bool on) {
 void enable_tier_timeline_from_env() {
     static std::once_flag once;
     std::call_once(once, [] {
-        if (!env_value("BRASS_TIER_LOG").empty()) enable_tier_timeline(true);
+        if (!env_setting("BRASS_TIER_LOG").empty()) enable_tier_timeline(true);
     });
 }
 
@@ -262,10 +254,10 @@ void write_tier_report(std::ostream& os, const TierTimelineSummary& s, bool even
 }
 
 void emit_tier_report_from_env(const TieringRegistry& registry) {
-    const std::string where = env_value("BRASS_TIER_LOG");
+    const std::string where = env_setting("BRASS_TIER_LOG");
     if (where.empty() || !tier_timeline_enabled()) return;
     std::ostringstream out;
-    write_tier_report(out, summarize_tier_timeline(&registry), !env_value("BRASS_TIER_LOG_EVENTS").empty());
+    write_tier_report(out, summarize_tier_timeline(&registry), !env_setting("BRASS_TIER_LOG_EVENTS").empty());
     if (where == "1") {
         std::fputs(out.str().c_str(), stderr);
         std::fflush(stderr);

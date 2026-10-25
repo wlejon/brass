@@ -4,6 +4,7 @@
 
 #include "heap_internal.hpp"
 
+#include <brass/core/env.hpp>
 #include <brass/gc/gc_limits.hpp>
 #include <brass/runtime/coroutine.hpp>
 
@@ -38,22 +39,6 @@ namespace {
 constexpr size_t kYoungGranularity = 64 * 1024;
 
 size_t round_up(size_t value, size_t unit) { return (value + unit - 1) / unit * unit; }
-
-std::string env_value(const char* name) {
-#if defined(_MSC_VER)
-    // MSVC deprecates getenv (C4996, an error under /WX); _dupenv_s is its
-    // owned-copy equivalent.
-    char* owned = nullptr;
-    size_t len = 0;
-    if (_dupenv_s(&owned, &len, name) != 0 || !owned) return {};
-    std::string v(owned);
-    std::free(owned);
-    return v;
-#else
-    const char* v = std::getenv(name);
-    return v ? std::string(v) : std::string();
-#endif
-}
 
 void apply_environment(HeapConfig& config) {
     if (!config.read_environment) return;

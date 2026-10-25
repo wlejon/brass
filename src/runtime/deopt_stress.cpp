@@ -2,6 +2,7 @@
 // read from BRASS_DEOPT_STRESS once, and the counters every tier shares.
 #include <brass/runtime/deopt_stress.hpp>
 #include <brass/core/atomic_ref.hpp>
+#include <brass/core/env.hpp>
 
 #include <cstdlib>
 #include <string>
@@ -20,20 +21,6 @@ std::atomic<int64_t> g_resume_id{-1};
 // evaluation fails); C++ updates them through atomic_ref.
 alignas(8) uint64_t g_evaluations = 0;
 alignas(8) uint64_t g_forced = 0;
-
-std::string env_value(const char* name) {
-#if defined(_MSC_VER)
-    char* owned = nullptr;
-    size_t len = 0;
-    if (_dupenv_s(&owned, &len, name) != 0 || !owned) return {};
-    std::string v(owned);
-    std::free(owned);
-    return v;
-#else
-    const char* v = std::getenv(name);
-    return v ? std::string(v) : std::string();
-#endif
-}
 
 uint64_t parse_u64(const std::string& s, uint64_t fallback) {
     if (s.empty()) return fallback;

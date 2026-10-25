@@ -4,6 +4,7 @@
 
 #include <brass/debug/jit_code_registry.hpp>
 #include "jit_sinks.hpp"
+#include <brass/core/env.hpp>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -14,20 +15,6 @@
 namespace brass::debug {
 
 namespace {
-
-std::string env_value(const char* name) {
-#if defined(_MSC_VER)
-    char* owned = nullptr;
-    size_t len = 0;
-    if (_dupenv_s(&owned, &len, name) != 0 || !owned) return {};
-    std::string v(owned);
-    std::free(owned);
-    return v;
-#else
-    const char* v = std::getenv(name);
-    return v ? std::string(v) : std::string();
-#endif
-}
 
 bool env_on(const char* name, bool fallback) {
     const std::string v = env_value(name);
