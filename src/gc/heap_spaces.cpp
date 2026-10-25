@@ -237,9 +237,13 @@ uint64_t HeapState::sweep_old() {
     // committed again when reused. The retained count scales with the blocks
     // in use, so a heap that promotes steadily is not decommitting and
     // recommitting the same blocks at every full collection; runs of
-    // adjacent blocks go back in one call.
+    // adjacent blocks go back in one call. The blocks one cycle's old
+    // allocation fills before the next full collection are kept too, else a
+    // program allocating old garbage (a runtime that allocates its objects
+    // pinned) page-faults a fresh block for every 32 KiB it allocates.
     const size_t in_use = blocks.size() - free_blocks.size();
-    const size_t retained = std::max(kRetainedFreeBlocks, in_use / 4);
+    const size_t retained = std::max({kRetainedFreeBlocks, in_use / 4,
+                                      static_cast<size_t>(config.min_full_threshold_bytes / kBlockBytes)});
     if (free_blocks.size() > retained) {
         const size_t release = free_blocks.size() - retained;
         size_t k = 0;
