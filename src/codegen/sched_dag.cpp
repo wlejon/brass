@@ -281,10 +281,7 @@ static std::vector<MemoryRef> get_memory_refs(const LirInst& inst) {
     return refs;
 }
 
-static bool may_memory_alias(const LirInst& a, const LirInst& b) {
-    std::vector<MemoryRef> refs_a = get_memory_refs(a);
-    std::vector<MemoryRef> refs_b = get_memory_refs(b);
-
+static bool may_memory_alias(const std::vector<MemoryRef>& refs_a, const std::vector<MemoryRef>& refs_b) {
     if (refs_a.empty() || refs_b.empty()) {
         return false;
     }
@@ -348,10 +345,9 @@ static bool may_memory_alias(const LirInst& a, const LirInst& b) {
 }
 
 SchedDAG::SchedDAG(LirBlock& block, Arch arch, bool is_pre_ra)
-    : block_(block), arch_(arch), is_pre_ra_(is_pre_ra) {}
+    : block_(&block), arch_(arch), is_pre_ra_(is_pre_ra) {}
 
 void SchedDAG::build() {
-    nodes_.clear();
     build_nodes();
     build_register_dependencies();
     build_memory_dependencies();
@@ -360,17 +356,23 @@ void SchedDAG::build() {
 }
 
 void SchedDAG::build_nodes() {
-    nodes_.reserve(block_.instructions.size());
-    for (size_t i = 0; i < block_.instructions.size(); ++i) {
-        SchedNode node;
+    // Nodes left from an earlier build keep their edge lists' storage.
+    const size_t n = block_->instructions.size();
+    nodes_.resize(n);
+    for (size_t i = 0; i < n; ++i) {
+        SchedNode& node = nodes_[i];
         node.id = static_cast<uint32_t>(i);
-        node.inst = block_.instructions[i].get();
+        node.inst = block_->instructions[i].get();
         node.latency = get_instruction_latency(*node.inst);
+        node.height = 0;
+        node.depth = 0;
         node.is_pre_ra = is_pre_ra_;
         node.is_load = instruction_reads_memory(*node.inst);
         node.is_store = instruction_writes_memory(*node.inst);
         node.is_barrier = is_scheduling_barrier(*node.inst);
-        nodes_.push_back(std::move(node));
+        node.preds.clear();
+        node.succs.clear();
+        node.unscheduled_preds = 0;
     }
 }
 
@@ -379,33 +381,31 @@ void SchedDAG::add_edge(uint32_t from, uint32_t to, EdgeKind kind, uint32_t late
         return;
     }
 
-    // Check if edge already exists
-    for (auto& s : nodes_[from].succs) {
-        if (s.target_node == to) {
-            s.latency = std::max(s.latency, latency);
-            if (kind == EdgeKind::RAW) s.kind = EdgeKind::RAW;
-            for (auto& p : nodes_[to].preds) {
-                if (p.target_node == from) {
-                    p.latency = std::max(p.latency, latency);
-                    if (kind == EdgeKind::RAW) p.kind = EdgeKind::RAW;
-                    break;
-                }
-            }
-            return;
+    // An existing edge is looked for from the end with fewer edges (a
+    // barrier's list can hold most of the block).
+    auto& succs = nodes_[from].succs;
+    auto& preds = nodes_[to].preds;
+    SchedEdge* s = nullptr;
+    SchedEdge* p = nullptr;
+    if (succs.size() <= preds.size()) {
+        for (auto& e : succs) {
+            if (e.target_node == to) { s = &e; p = &preds[e.mirror]; break; }
+        }
+    } else {
+        for (auto& e : preds) {
+            if (e.target_node == from) { p = &e; s = &succs[e.mirror]; break; }
         }
     }
+    if (s) {
+        s->latency = p->latency = std::max(s->latency, latency);
+        if (kind == EdgeKind::RAW) s->kind = p->kind = EdgeKind::RAW;
+        return;
+    }
 
-    SchedEdge succ_edge;
-    succ_edge.target_node = to;
-    succ_edge.kind = kind;
-    succ_edge.latency = latency;
-    nodes_[from].succs.push_back(succ_edge);
-
-    SchedEdge pred_edge;
-    pred_edge.target_node = from;
-    pred_edge.kind = kind;
-    pred_edge.latency = latency;
-    nodes_[to].preds.push_back(pred_edge);
+    const auto succ_at = static_cast<uint32_t>(succs.size());
+    const auto pred_at = static_cast<uint32_t>(preds.size());
+    succs.push_back(SchedEdge{to, kind, latency, pred_at});
+    preds.push_back(SchedEdge{from, kind, latency, succ_at});
 
     nodes_[to].unscheduled_preds++;
 }
@@ -417,16 +417,30 @@ void SchedDAG::build_register_dependencies() {
     std::unordered_map<uint32_t, uint32_t> last_def_vreg;
     std::unordered_map<uint32_t, std::vector<uint32_t>> last_uses_vreg;
 
-    // Physical register tracking: (reg_class << 8 | code) -> node index
-    std::unordered_map<uint32_t, uint32_t> last_def_preg;
-    std::unordered_map<uint32_t, std::vector<uint32_t>> last_uses_preg;
+    // Physical register tracking, indexed by (reg_class << 8 | code)
+    constexpr uint32_t kNoDef = UINT32_MAX;
+    constexpr size_t kPregKeys = 2u << 8;
+    std::vector<uint32_t> last_def_preg(kPregKeys, kNoDef);
+    // The reads of each register since its last def, newest first, as lists
+    // threaded through use_links.
+    struct UseLink {
+        uint32_t node;
+        uint32_t next;
+    };
+    std::vector<UseLink> use_links;
+    std::vector<uint32_t> last_use_preg(kPregKeys, kNoDef);
+
+    std::vector<uint32_t> uses_vregs;
+    std::vector<uint32_t> uses_pregs;
+    std::vector<uint32_t> defs_vregs;
+    std::vector<uint32_t> defs_pregs;
 
     for (uint32_t j = 0; j < n; ++j) {
         const auto& inst = *nodes_[j].inst;
 
         // 1. Collect VReg and PReg uses
-        std::vector<uint32_t> uses_vregs;
-        std::vector<uint32_t> uses_pregs;
+        uses_vregs.clear();
+        uses_pregs.clear();
 
         for (const auto& u : inst.uses) {
             if (u.is_vreg() && u.vreg_val.is_valid()) {
@@ -475,16 +489,17 @@ void SchedDAG::build_register_dependencies() {
 
         // Apply PReg uses
         for (uint32_t pkey : uses_pregs) {
-            auto def_it = last_def_preg.find(pkey);
-            if (def_it != last_def_preg.end()) {
-                add_edge(def_it->second, j, EdgeKind::RAW, nodes_[def_it->second].latency);
+            const uint32_t def = last_def_preg[pkey];
+            if (def != kNoDef) {
+                add_edge(def, j, EdgeKind::RAW, nodes_[def].latency);
             }
-            last_uses_preg[pkey].push_back(j);
+            use_links.push_back({j, last_use_preg[pkey]});
+            last_use_preg[pkey] = static_cast<uint32_t>(use_links.size() - 1);
         }
 
         // 2. Collect VReg and PReg defs
-        std::vector<uint32_t> defs_vregs;
-        std::vector<uint32_t> defs_pregs;
+        defs_vregs.clear();
+        defs_pregs.clear();
 
         for (const auto& d : inst.defs) {
             if (d.is_vreg() && d.vreg_val.is_valid()) {
@@ -528,18 +543,14 @@ void SchedDAG::build_register_dependencies() {
 
         // Apply PReg defs
         for (uint32_t pkey : defs_pregs) {
-            auto u_it = last_uses_preg.find(pkey);
-            if (u_it != last_uses_preg.end()) {
-                for (uint32_t u_node : u_it->second) {
-                    if (u_node != j) {
-                        add_edge(u_node, j, EdgeKind::WAR, 0);
-                    }
+            for (uint32_t l = last_use_preg[pkey]; l != kNoDef; l = use_links[l].next) {
+                if (use_links[l].node != j) {
+                    add_edge(use_links[l].node, j, EdgeKind::WAR, 0);
                 }
-                u_it->second.clear();
             }
-            auto def_it = last_def_preg.find(pkey);
-            if (def_it != last_def_preg.end()) {
-                add_edge(def_it->second, j, EdgeKind::WAW, 1);
+            last_use_preg[pkey] = kNoDef;
+            if (last_def_preg[pkey] != kNoDef) {
+                add_edge(last_def_preg[pkey], j, EdgeKind::WAW, 1);
             }
             last_def_preg[pkey] = j;
         }
@@ -575,21 +586,26 @@ void SchedDAG::build_register_dependencies() {
 }
 
 void SchedDAG::build_memory_dependencies() {
-    size_t n = nodes_.size();
+    std::vector<uint32_t> mem;
+    std::vector<std::vector<MemoryRef>> refs(nodes_.size());
+    for (uint32_t i = 0; i < nodes_.size(); ++i) {
+        if (!nodes_[i].is_load && !nodes_[i].is_store) continue;
+        mem.push_back(i);
+        refs[i] = get_memory_refs(*nodes_[i].inst);
+    }
 
-    for (uint32_t i = 0; i < n; ++i) {
-        const auto& inst_i = *nodes_[i].inst;
-        bool i_reads = instruction_reads_memory(inst_i);
-        bool i_writes = instruction_writes_memory(inst_i);
-        if (!i_reads && !i_writes) continue;
+    for (size_t a = 0; a < mem.size(); ++a) {
+        const uint32_t i = mem[a];
+        const bool i_reads = nodes_[i].is_load;
+        const bool i_writes = nodes_[i].is_store;
 
-        for (uint32_t j = i + 1; j < n; ++j) {
-            const auto& inst_j = *nodes_[j].inst;
-            bool j_reads = instruction_reads_memory(inst_j);
-            bool j_writes = instruction_writes_memory(inst_j);
-            if (!j_reads && !j_writes) continue;
+        for (size_t b = a + 1; b < mem.size(); ++b) {
+            const uint32_t j = mem[b];
+            const bool j_reads = nodes_[j].is_load;
+            const bool j_writes = nodes_[j].is_store;
+            if (!i_writes && !j_writes) continue; // two reads are never ordered
 
-            if (may_memory_alias(inst_i, inst_j)) {
+            if (may_memory_alias(refs[i], refs[j])) {
                 if (i_writes && j_reads) {
                     // Store -> Load hazard (RAW)
                     add_edge(i, j, EdgeKind::MemRAW, 4);
@@ -609,58 +625,90 @@ void SchedDAG::build_barrier_dependencies() {
     size_t n = nodes_.size();
     if (n == 0) return;
 
-    // 1. Barrier-to-barrier ordering (Calls, Safepoints, GuardExits must strictly preserve relative order)
+    // Each rule orders a set of pairs; the edges below are enough for the
+    // scheduler to respect them, since it never runs a node before all of its
+    // predecessors, so an order that follows from a chain of edges holds as
+    // surely as a direct edge. A rule's all-pairs edges made a block's DAG
+    // cubic to build (every edge added was searched for among its node's).
+
+    // 1. Barrier-to-barrier ordering (Calls, Safepoints, GuardExits must
+    // strictly preserve relative order): each barrier after the one before.
+    int64_t prev_barrier = -1;
     for (uint32_t i = 0; i < n; ++i) {
-        if (nodes_[i].is_barrier) {
-            for (uint32_t k = 0; k < i; ++k) {
-                if (nodes_[k].is_barrier) {
-                    add_edge(k, i, EdgeKind::Barrier, 1);
-                }
-            }
-        }
+        if (!nodes_[i].is_barrier) continue;
+        if (prev_barrier >= 0) add_edge(static_cast<uint32_t>(prev_barrier), i, EdgeKind::Barrier, 1);
+        prev_barrier = i;
     }
 
-    // 2. Full barriers (Safepoints and GuardExits require exact program state; cannot reorder across them).
-    // An invoke's call is one too: its landing pad is entered from the call
-    // itself, so everything before it must be done when it raises (a value the
-    // pad reads, computed after the call, would be computed only on the normal
-    // path), and nothing after it may run first (a def moved above it could
-    // overwrite a register the pad reads).
+    // 2. Full barriers (Safepoints and GuardExits require exact program state;
+    // cannot reorder across them). An invoke's call is one too: its landing
+    // pad is entered from the call itself, so everything before it must be
+    // done when it raises (a value the pad reads, computed after the call,
+    // would be computed only on the normal path), and nothing after it may run
+    // first (a def moved above it could overwrite a register the pad reads).
+    // Everything from the previous full barrier on precedes one, and it
+    // precedes everything up to the next; a node beyond reaches it through them.
+    auto is_full_barrier = [&](uint32_t i) {
+        const LirInst& inst = *nodes_[i].inst;
+        return inst.opcode == LirOpcode::Safepoint || inst.opcode == LirOpcode::GuardExit ||
+               inst.opcode == LirOpcode::ParallelCopy || inst.is_invoke;
+    };
+    std::vector<uint32_t> full;
     for (uint32_t i = 0; i < n; ++i) {
-        if (nodes_[i].inst->opcode == LirOpcode::Safepoint ||
-            nodes_[i].inst->opcode == LirOpcode::GuardExit ||
-            nodes_[i].inst->opcode == LirOpcode::ParallelCopy ||
-            nodes_[i].inst->is_invoke) {
-            for (uint32_t k = 0; k < i; ++k) {
-                add_edge(k, i, EdgeKind::Barrier, 1);
-            }
-            for (uint32_t k = i + 1; k < n; ++k) {
-                add_edge(i, k, EdgeKind::Barrier, 1);
-            }
+        if (is_full_barrier(i)) full.push_back(i);
+    }
+    // Every node of [lo, i) before i: walking down, a node with a successor
+    // in (it, i] already is, through that successor.
+    auto all_before = [&](uint32_t lo, uint32_t i) {
+        for (uint32_t k = i; k-- > lo;) {
+            bool ordered = false;
+            for (const SchedEdge& s : nodes_[k].succs) ordered |= s.target_node <= i;
+            if (!ordered) add_edge(k, i, EdgeKind::Barrier, 1);
         }
+    };
+    // i before every node of (i, hi]: walking up, a node with a predecessor
+    // in [i, it) already is.
+    auto all_after = [&](uint32_t i, uint32_t hi) {
+        for (uint32_t k = i + 1; k <= hi; ++k) {
+            bool ordered = false;
+            for (const SchedEdge& p : nodes_[k].preds) ordered |= p.target_node >= i;
+            if (!ordered) add_edge(i, k, EdgeKind::Barrier, 1);
+        }
+    };
+    for (size_t f = 0; f < full.size(); ++f) {
+        const uint32_t i = full[f];
+        const uint32_t lo = f > 0 ? full[f - 1] : 0;
+        const uint32_t hi = f + 1 < full.size() ? full[f + 1] : static_cast<uint32_t>(n - 1);
+        all_before(lo, i);
+        all_after(i, hi);
     }
 
-    // 3. Call barriers: all memory operations before a call must precede the call;
-    // call must precede all subsequent memory operations.
+    // 3. Call barriers: all memory operations before a call must precede the
+    // call; call must precede all subsequent memory operations. Calls are
+    // chained by rule 1, so a call is joined to those back to the previous
+    // call and on to the next.
+    std::vector<uint32_t> calls;
     for (uint32_t i = 0; i < n; ++i) {
-        if (nodes_[i].inst->is_call()) {
-            for (uint32_t k = 0; k < i; ++k) {
-                if (nodes_[k].is_load || nodes_[k].is_store) {
-                    add_edge(k, i, EdgeKind::Barrier, 1);
-                }
-            }
-            for (uint32_t k = i + 1; k < n; ++k) {
-                if (nodes_[k].is_load || nodes_[k].is_store) {
-                    add_edge(i, k, EdgeKind::Barrier, 1);
-                }
-            }
+        if (nodes_[i].inst->is_call()) calls.push_back(i);
+    }
+    for (size_t c = 0; c < calls.size(); ++c) {
+        const uint32_t i = calls[c];
+        const uint32_t lo = c > 0 ? calls[c - 1] + 1 : 0;
+        const uint32_t hi = c + 1 < calls.size() ? calls[c + 1] : static_cast<uint32_t>(n);
+        for (uint32_t k = lo; k < i; ++k) {
+            if (nodes_[k].is_load || nodes_[k].is_store) add_edge(k, i, EdgeKind::Barrier, 1);
+        }
+        for (uint32_t k = i + 1; k < hi; ++k) {
+            if (nodes_[k].is_load || nodes_[k].is_store) add_edge(i, k, EdgeKind::Barrier, 1);
         }
     }
 
     // 4. Control-flow & Terminator barrier:
     // Once the first terminator (e.g. Jcc, Jmp, Ret) is reached, all subsequent
     // instructions (including intervening parallel copies, argument setups, and jumps)
-    // must strictly remain after all preceding instructions and preserve their exact order.
+    // must strictly remain after all preceding instructions and preserve their exact order:
+    // everything before the first terminator precedes it, and from it on each
+    // instruction follows the one before.
     uint32_t first_term_idx = static_cast<uint32_t>(n);
     for (uint32_t i = 0; i < n; ++i) {
         if (nodes_[i].inst->is_terminator()) {
@@ -669,11 +717,8 @@ void SchedDAG::build_barrier_dependencies() {
         }
     }
     if (first_term_idx < n) {
-        for (uint32_t i = first_term_idx; i < n; ++i) {
-            for (uint32_t k = 0; k < i; ++k) {
-                add_edge(k, i, EdgeKind::Barrier, 1);
-            }
-        }
+        all_before(0, first_term_idx);
+        for (uint32_t i = first_term_idx + 1; i < n; ++i) add_edge(i - 1, i, EdgeKind::Barrier, 1);
     }
 }
 

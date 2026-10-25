@@ -25,6 +25,9 @@ struct SchedEdge {
     uint32_t target_node = 0;
     EdgeKind kind = EdgeKind::RAW;
     uint32_t latency = 1;
+    // The same edge's index in the other end's list (a succ's in its
+    // target's preds, a pred's in its target's succs).
+    uint32_t mirror = 0;
 };
 
 struct SchedNode {
@@ -50,6 +53,13 @@ public:
     // condition flags differs (x64 `add` does, AArch64 `add` does not).
     SchedDAG(LirBlock& block, Arch arch, bool is_pre_ra = true);
 
+    // Points the DAG at another block, for a build that reuses the node and
+    // edge storage of the last one.
+    void rebind(LirBlock& block, bool is_pre_ra) noexcept {
+        block_ = &block;
+        is_pre_ra_ = is_pre_ra;
+    }
+
     void build();
 
     const std::vector<SchedNode>& nodes() const noexcept { return nodes_; }
@@ -61,7 +71,7 @@ public:
     void add_edge(uint32_t from, uint32_t to, EdgeKind kind, uint32_t latency);
 
 private:
-    LirBlock& block_;
+    LirBlock* block_;
     Arch arch_;
     bool is_pre_ra_;
     std::vector<SchedNode> nodes_;

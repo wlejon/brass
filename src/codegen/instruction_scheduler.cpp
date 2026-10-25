@@ -1,6 +1,7 @@
 #include <brass/codegen/instruction_scheduler.hpp>
 #include <brass/codegen/lir_flags.hpp>
 #include <algorithm>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -33,8 +34,12 @@ static bool is_block_pre_ra(const LirBlock& block) {
     return false;
 }
 
-static RegUsage get_instruction_reg_usage(const LirInst& inst, bool is_pre_ra) {
-    RegUsage usage;
+// Fills `usage` in place, so a reused one keeps its lists' storage.
+static void get_instruction_reg_usage(const LirInst& inst, bool is_pre_ra, RegUsage& usage) {
+    usage.defs_gpr = 0;
+    usage.defs_xmm = 0;
+    usage.uses_gpr.clear();
+    usage.uses_xmm.clear();
 
     if (is_pre_ra) {
         for (const auto& d : inst.defs) {
@@ -107,13 +112,36 @@ static RegUsage get_instruction_reg_usage(const LirInst& inst, bool is_pre_ra) {
             }
         }
     }
-
-    return usage;
 }
 
-} // namespace
+struct Score {
+    bool is_term;
+    int32_t delta;
+    uint32_t height;
+    bool is_load;
+    uint32_t id;
+};
 
-SchedStats schedule_block(LirBlock& block, Arch arch, const SchedOptions& opts) {
+// One function's blocks are scheduled with the same DAG and working arrays,
+// so a block reuses the storage of the blocks before it.
+struct BlockScheduler {
+    Arch arch;
+    std::optional<SchedDAG> dag_slot;
+    std::unordered_map<uint64_t, uint32_t> dense;
+    std::vector<uint32_t> remaining_uses;
+    std::vector<RegUsage> node_usage;
+    std::vector<uint32_t> ready_queue;
+    std::vector<uint32_t> ready_cycle;
+    std::vector<bool> in_ready_queue;
+    std::vector<uint32_t> scheduled_order;
+    std::vector<uint32_t> ready_now;
+    std::vector<Score> scores;
+    std::vector<std::unique_ptr<LirInst>> reordered;
+
+    SchedStats run(LirBlock& block, const SchedOptions& opts);
+};
+
+SchedStats BlockScheduler::run(LirBlock& block, const SchedOptions& opts) {
     SchedStats stats;
     size_t inst_count = block.instructions.size();
     if (inst_count <= 1 || inst_count > opts.max_block_instructions) {
@@ -124,27 +152,37 @@ SchedStats schedule_block(LirBlock& block, Arch arch, const SchedOptions& opts) 
     if (is_pre_ra && !opts.enable_pre_ra) return stats;
     if (!is_pre_ra && !opts.enable_post_ra) return stats;
 
-    SchedDAG dag(block, arch, is_pre_ra);
+    if (dag_slot) dag_slot->rebind(block, is_pre_ra);
+    else dag_slot.emplace(block, arch, is_pre_ra);
+    SchedDAG& dag = *dag_slot;
     dag.build();
 
     size_t n = dag.size();
     if (n != inst_count) return stats;
 
-    // Track total uses per register in this block
-    std::unordered_map<uint32_t, uint32_t> remaining_uses_gpr;
-    std::unordered_map<uint32_t, uint32_t> remaining_uses_xmm;
-    std::vector<RegUsage> node_usage(n);
+    // Each register the block reads becomes a dense index (the usage lists
+    // hold those), with how many reads of it are still to be scheduled.
+    dense.clear();
+    remaining_uses.clear();
+    if (node_usage.size() < n) node_usage.resize(n);
+    auto to_dense = [&](std::vector<uint32_t>& regs, uint64_t reg_class) {
+        for (uint32_t& reg : regs) {
+            auto [it, fresh] = dense.try_emplace((reg_class << 32) | reg, static_cast<uint32_t>(remaining_uses.size()));
+            if (fresh) remaining_uses.push_back(0);
+            reg = it->second;
+            remaining_uses[reg]++;
+        }
+    };
 
     for (size_t i = 0; i < n; ++i) {
-        node_usage[i] = get_instruction_reg_usage(*dag.node(i).inst, is_pre_ra);
-        for (uint32_t reg : node_usage[i].uses_gpr) remaining_uses_gpr[reg]++;
-        for (uint32_t reg : node_usage[i].uses_xmm) remaining_uses_xmm[reg]++;
+        get_instruction_reg_usage(*dag.node(i).inst, is_pre_ra, node_usage[i]);
+        to_dense(node_usage[i].uses_gpr, 0);
+        to_dense(node_usage[i].uses_xmm, 1);
     }
 
-    std::vector<uint32_t> ready_queue;
-    std::vector<uint32_t> ready_cycle(n, 0);
-    std::vector<bool> in_ready_queue(n, false);
-    std::vector<bool> is_scheduled(n, false);
+    ready_queue.clear();
+    ready_cycle.assign(n, 0);
+    in_ready_queue.assign(n, false);
 
     for (size_t i = 0; i < n; ++i) {
         if (dag.node(i).unscheduled_preds == 0) {
@@ -153,8 +191,7 @@ SchedStats schedule_block(LirBlock& block, Arch arch, const SchedOptions& opts) 
         }
     }
 
-    std::vector<uint32_t> scheduled_order;
-    scheduled_order.reserve(n);
+    scheduled_order.clear();
 
     uint32_t current_cycle = 0;
     bool last_scheduled_was_load = false;
@@ -163,7 +200,7 @@ SchedStats schedule_block(LirBlock& block, Arch arch, const SchedOptions& opts) 
 
     while (!ready_queue.empty()) {
         // 1. Check which ready nodes are ready at current_cycle
-        std::vector<uint32_t> ready_now;
+        ready_now.clear();
         for (uint32_t u : ready_queue) {
             if (ready_cycle[u] <= current_cycle) {
                 ready_now.push_back(u);
@@ -191,34 +228,20 @@ SchedStats schedule_block(LirBlock& block, Arch arch, const SchedOptions& opts) 
         bool pressure_high = (live_gprs >= opts.gpr_pressure_threshold) ||
                              (live_xmms >= opts.xmm_pressure_threshold);
 
-        auto evaluate_node = [&](uint32_t node_idx) {
+        scores.clear();
+        for (uint32_t node_idx : ready_now) {
             const auto& sn = dag.node(node_idx);
             const auto& ru = node_usage[node_idx];
+            int32_t kills = 0;
+            for (uint32_t reg : ru.uses_gpr) kills += remaining_uses[reg] == 1;
+            for (uint32_t reg : ru.uses_xmm) kills += remaining_uses[reg] == 1;
+            const int32_t delta = static_cast<int32_t>(ru.defs_gpr + ru.defs_xmm) - kills;
+            scores.push_back({sn.inst->is_terminator(), delta, sn.height, sn.is_load, sn.id});
+        }
 
-            int32_t kills_gpr = 0;
-            for (uint32_t reg : ru.uses_gpr) {
-                auto it = remaining_uses_gpr.find(reg);
-                if (it != remaining_uses_gpr.end() && it->second == 1) {
-                    kills_gpr++;
-                }
-            }
-            int32_t kills_xmm = 0;
-            for (uint32_t reg : ru.uses_xmm) {
-                auto it = remaining_uses_xmm.find(reg);
-                if (it != remaining_uses_xmm.end() && it->second == 1) {
-                    kills_xmm++;
-                }
-            }
-
-            int32_t delta = static_cast<int32_t>(ru.defs_gpr + ru.defs_xmm) - (kills_gpr + kills_xmm);
-            bool is_term = sn.inst->is_terminator();
-
-            return std::make_tuple(is_term, delta, sn.height, sn.is_load, sn.id);
-        };
-
-        auto compare_nodes = [&](uint32_t a, uint32_t b) -> bool {
-            auto [term_a, delta_a, height_a, is_load_a, id_a] = evaluate_node(a);
-            auto [term_b, delta_b, height_b, is_load_b, id_b] = evaluate_node(b);
+        auto compare_nodes = [&](const Score& a, const Score& b) -> bool {
+            auto [term_a, delta_a, height_a, is_load_a, id_a] = a;
+            auto [term_b, delta_b, height_b, is_load_b, id_b] = b;
 
             // Heuristic 0: Terminators must be scheduled last
             if (term_a != term_b) {
@@ -255,8 +278,7 @@ SchedStats schedule_block(LirBlock& block, Arch arch, const SchedOptions& opts) 
             return id_a < id_b;
         };
 
-        auto best_it = std::min_element(ready_now.begin(), ready_now.end(), compare_nodes);
-        uint32_t chosen = *best_it;
+        const uint32_t chosen = std::min_element(scores.begin(), scores.end(), compare_nodes)->id;
 
         // Check if load was hoisted
         if (dag.node(chosen).is_load && chosen > scheduled_order.size()) {
@@ -268,24 +290,17 @@ SchedStats schedule_block(LirBlock& block, Arch arch, const SchedOptions& opts) 
 
         // Remove from ready queue
         ready_queue.erase(std::remove(ready_queue.begin(), ready_queue.end(), chosen), ready_queue.end());
-        is_scheduled[chosen] = true;
         scheduled_order.push_back(chosen);
 
         // Update register live counts and remaining uses
         const auto& ru = node_usage[chosen];
         for (uint32_t reg : ru.uses_gpr) {
-            auto it = remaining_uses_gpr.find(reg);
-            if (it != remaining_uses_gpr.end()) {
-                if (it->second == 1 && live_gprs > 0) live_gprs--;
-                it->second--;
-            }
+            if (remaining_uses[reg] == 1 && live_gprs > 0) live_gprs--;
+            remaining_uses[reg]--;
         }
         for (uint32_t reg : ru.uses_xmm) {
-            auto it = remaining_uses_xmm.find(reg);
-            if (it != remaining_uses_xmm.end()) {
-                if (it->second == 1 && live_xmms > 0) live_xmms--;
-                it->second--;
-            }
+            if (remaining_uses[reg] == 1 && live_xmms > 0) live_xmms--;
+            remaining_uses[reg]--;
         }
         live_gprs += ru.defs_gpr;
         live_xmms += ru.defs_xmm;
@@ -309,17 +324,23 @@ SchedStats schedule_block(LirBlock& block, Arch arch, const SchedOptions& opts) 
     }
 
     if (scheduled_order.size() == n) {
-        std::vector<std::unique_ptr<LirInst>> reordered;
-        reordered.reserve(n);
+        reordered.clear();
         for (uint32_t idx : scheduled_order) {
             reordered.push_back(std::move(block.instructions[idx]));
         }
-        block.instructions = std::move(reordered);
+        block.instructions.swap(reordered);
         stats.blocks_scheduled = 1;
         stats.instructions_scheduled = n;
     }
 
     return stats;
+}
+
+} // namespace
+
+SchedStats schedule_block(LirBlock& block, Arch arch, const SchedOptions& opts) {
+    BlockScheduler scheduler{arch};
+    return scheduler.run(block, opts);
 }
 
 SchedStats schedule_block(LirBlock& block, Arch arch) {
@@ -329,10 +350,10 @@ SchedStats schedule_block(LirBlock& block, Arch arch) {
 
 SchedStats schedule_function(LirFunction& fn, const SchedOptions& opts) {
     SchedStats total_stats;
-    const Arch arch = lir_arch(fn);
+    BlockScheduler scheduler{lir_arch(fn)};
     for (auto& block : fn.blocks) {
         if (block) {
-            SchedStats bs = schedule_block(*block, arch, opts);
+            SchedStats bs = scheduler.run(*block, opts);
             total_stats.blocks_scheduled += bs.blocks_scheduled;
             total_stats.instructions_scheduled += bs.instructions_scheduled;
             total_stats.stalls_hidden += bs.stalls_hidden;
