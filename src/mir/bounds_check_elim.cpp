@@ -820,14 +820,24 @@ bool run_bounds_check_elimination(Function& fn, Module& mod, const RangeAnalysis
             DominatorTree dom(fn);
             LoopAnalysis loops(fn, dom);
             bool unswitched = false;
+            bool cfg_changed = false;
             for (LoopInfo* loop : loops.post_order_loops()) {
-                if (loop && unswitch_fast_slow_loop(fn, *loop, dom, uo)) {
+                if (!loop) continue;
+                const size_t blocks_before = fn.blocks().size();
+                if (unswitch_fast_slow_loop(fn, *loop, dom, uo)) {
                     unswitched = true;
                     any_changed = true;
                     break;
                 }
+                // A preheader it made for a loop it then left: the analyses
+                // above no longer describe the CFG.
+                if (fn.blocks().size() != blocks_before) {
+                    cfg_changed = true;
+                    any_changed = true;
+                    break;
+                }
             }
-            if (!unswitched) break;
+            if (!unswitched && !cfg_changed) break;
         }
         // The checks that skip an access rather than call out (a typed
         // array's read or write out of bounds), which have no slow path for

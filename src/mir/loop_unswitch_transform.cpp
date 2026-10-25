@@ -6,6 +6,7 @@
 #include <brass/mir/gc_refs.hpp>
 #include <brass/mir/range_analysis.hpp>
 #include <algorithm>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -215,7 +216,6 @@ bool unswitch_fast_slow_loop(
     const DominatorTree& dom,
     const LoopUnswitchOptions& opts
 ) {
-    (void)dom;
     if (!fn.parent() || loop.depth() > opts.max_unswitch_depth) return false;
     BasicBlock* header = loop.header();
     if (!header || loop.latches().size() != 1) return false;
@@ -223,8 +223,12 @@ bool unswitch_fast_slow_loop(
     BasicBlock* latch = loop.latches()[0];
     if (!latch) return false;
 
+    // LoopAnalysis records no preheaders, so ensure_preheader usually finds
+    // the existing one; only a block it adds changes the CFG.
+    const size_t blocks_before = fn.blocks().size();
     BasicBlock* preheader = loop.preheader();
     if (!preheader) preheader = LoopAnalysis::ensure_preheader(fn, loop);
+    const bool made_preheader = fn.blocks().size() != blocks_before;
     if (!preheader || !preheader->terminator()) return false;
     Instruction* ph_term = preheader->terminator();
     if (ph_term->opcode() != Opcode::br || ph_term->branch_target().block != header) return false;
@@ -240,9 +244,16 @@ bool unswitch_fast_slow_loop(
     bool body_is_false = loop.contains(hdr_term->false_target().block);
     if (body_is_true == body_is_false) return false;
 
-    fn.rebuild_cfg_predecessors();
-    DominatorTree cur_dom(fn);
-    LoopAnalysis cur_loops(fn, cur_dom);
+    // The caller's dominators are of this CFG unless a preheader was just made.
+    // Every caller analyses the function afresh after a transform, and most
+    // loops are rejected below, so they are rebuilt only when needed: building
+    // them per candidate loop was most of a large function's compile.
+    std::optional<DominatorTree> own_dom;
+    if (made_preheader) {
+        fn.rebuild_cfg_predecessors();
+        own_dom.emplace(fn);
+    }
+    const DominatorTree& cur_dom = own_dom ? *own_dom : dom;
 
     // Identify slow-path fallback blocks (do not dominate latch, contain calls/throws)
     std::unordered_set<BasicBlock*> slow_blocks;
@@ -307,6 +318,7 @@ bool unswitch_fast_slow_loop(
     };
 
     AliasAnalysis aa(fn);
+    LoopAnalysis cur_loops(fn, cur_dom);
     RangeAnalysis ra(fn, cur_dom, cur_loops);
 
     auto can_materialize = [&](auto& self, Value* v, bool& has_load, int depth) -> bool {

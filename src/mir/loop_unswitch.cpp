@@ -72,7 +72,15 @@ bool unswitch_loops_in_function(Function& fn, const LoopUnswitchOptions& opts, L
 
         for (LoopInfo* loop : post_order) {
             if (!loop) continue;
-            if (unswitch_loop(fn, *loop, dom, opts)) {
+            const size_t blocks_before = fn.blocks().size();
+            const bool unswitched = unswitch_loop(fn, *loop, dom, opts);
+            if (!unswitched && fn.blocks().size() != blocks_before) {
+                // A preheader made for a loop then left: analyse again.
+                round_changed = true;
+                changed = true;
+                break;
+            }
+            if (unswitched) {
                 round_changed = true;
                 changed = true;
                 if (stats) {
