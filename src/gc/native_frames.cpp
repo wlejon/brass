@@ -184,20 +184,47 @@ uintptr_t brass_native_frames_cover_start() noexcept {
     return UINTPTR_MAX;
 }
 
+struct NativeFramesAccess {
+    // The roots of one stack's chains; `stack` is null for the running one.
+    static void append(const StackChains& chains, const SwitchedStack* stack, std::vector<uintptr_t*>& roots);
+};
+
 void brass_append_native_frame_roots(std::vector<uintptr_t*>& roots) {
-    for (const ThreadRootsScope* s = t_thread_roots; s != nullptr; s = s->prev_) {
+    NativeFramesAccess::append(StackChains{t_native_frames, t_thread_roots, t_entry_scopes}, nullptr, roots);
+}
+
+void brass_append_switched_native_frame_roots(const StackChains& chains, const SwitchedStack& stack,
+                                              std::vector<uintptr_t*>& roots) {
+    NativeFramesAccess::append(chains, &stack, roots);
+}
+
+StackChains brass_exchange_stack_chains(const StackChains& incoming) noexcept {
+    const StackChains outgoing{t_native_frames, t_thread_roots, t_entry_scopes};
+    t_native_frames = incoming.native_frames;
+    t_thread_roots = incoming.thread_roots;
+    t_entry_scopes = incoming.entry_scopes;
+    return outgoing;
+}
+
+void NativeFramesAccess::append(const StackChains& chains, const SwitchedStack* stack,
+                                std::vector<uintptr_t*>& roots) {
+    for (const ThreadRootsScope* s = chains.thread_roots; s != nullptr; s = s->prev_) {
         if (s->provider_) s->provider_(s->ctx_, roots);
     }
-    if (!t_native_frames) return;
+    if (!chains.native_frames) return;
     const ModuleStackMap& maps = run_maps();
     const auto registered = code_stack_map_snapshot();
     // Each run's walk stops where the next outer run whose walk covers the
     // frames from there on begins (run_covers). Unbounded, N nested runs
     // would each walk everything below them: O(N^2) per collection.
     std::vector<const NativeFramesScope*> runs;
-    for (const NativeFramesScope* s = t_native_frames; s != nullptr; s = s->prev_) {
+    for (const NativeFramesScope* s = chains.native_frames; s != nullptr; s = s->prev_) {
         if (s->rbp_ != 0 && s->ip_ != 0) runs.push_back(s);
     }
+    auto push = [](void** slot, void* user_data) {
+        auto* vec = static_cast<std::vector<uintptr_t*>*>(user_data);
+        if (slot != nullptr && *slot != nullptr) vec->push_back(reinterpret_cast<uintptr_t*>(slot));
+    };
     uintptr_t cover = UINTPTR_MAX;  // start of the innermost covering run outside the current one
     StartKinds kinds;
     for (size_t i = runs.size(); i-- > 0;) {
@@ -208,10 +235,11 @@ void brass_append_native_frame_roots(std::vector<uintptr_t*>& roots) {
         // nothing to visit. A deep async recursion records thousands.
         if (start == RunStart::Compiled) continue;
         const uintptr_t stop_at = cover > s->rbp_ ? cover : UINTPTR_MAX;
-        brass_stack_walk_bounded(s->rbp_, s->ip_, maps, [](void** slot, void* user_data) {
-            auto* vec = static_cast<std::vector<uintptr_t*>*>(user_data);
-            if (slot != nullptr && *slot != nullptr) vec->push_back(reinterpret_cast<uintptr_t*>(slot));
-        }, &roots, stop_at);
+        if (stack != nullptr) {
+            brass_stack_walk_bounded_on(s->rbp_, s->ip_, maps, push, &roots, stop_at, *stack);
+        } else {
+            brass_stack_walk_bounded(s->rbp_, s->ip_, maps, push, &roots, stop_at);
+        }
         if (start == RunStart::Generated) cover = s->rbp_;
     }
 }

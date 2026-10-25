@@ -23,6 +23,7 @@
 
 #include "heap_internal.hpp"
 
+#include <brass/gc/fiber.hpp>
 #include <brass/gc/native_frames.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/runtime/coroutine.hpp>
@@ -235,6 +236,9 @@ void visit_roots(HeapState& s, Tracer& t) {
         brass_append_stack_roots_from_here(slots, covered_from);
     }
     brass_append_native_frame_roots(slots);
+    // The thread's other stacks (gc::Fiber): each suspended fiber, and each
+    // stack waiting on a fiber it resumed, from where it switched away.
+    brass_append_switched_stack_roots(slots);
     // The registry's slots hold raw frame addresses, references on any heap.
     std::vector<uintptr_t*> frame_slots;
     if (s.coro_frames) runtime::append_active_coro_roots(*s.coro_frames, frame_slots);

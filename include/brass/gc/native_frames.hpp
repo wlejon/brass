@@ -53,7 +53,7 @@ private:
     uintptr_t rbp_;
     uintptr_t ip_;
     NativeFramesScope* prev_;
-    friend void brass_append_native_frame_roots(std::vector<uintptr_t*>& roots);
+    friend struct NativeFramesAccess;
     friend uintptr_t brass_native_frames_cover_start() noexcept;
 };
 
@@ -75,7 +75,7 @@ private:
     Provider provider_;
     void* ctx_;
     ThreadRootsScope* prev_;
-    friend void brass_append_native_frame_roots(std::vector<uintptr_t*>& roots);
+    friend struct NativeFramesAccess;
 };
 
 // Marks, for its lifetime, a place where compiled (C++) code calls generated
@@ -119,6 +119,27 @@ GeneratedCodeEntryScope* brass_innermost_entry_scope() noexcept;
 // The gcref slots of every recorded run of native frames on this thread,
 // and the roots of every ThreadRootsScope.
 void brass_append_native_frame_roots(std::vector<uintptr_t*>& roots);
+
+// The three chains above as one stack holds them. The chains live in the
+// frames of the stack that made them, so a thread that switches stacks (a
+// fiber, fiber.hpp) keeps one set per stack: the switch puts the outgoing
+// stack's away and installs the incoming one's, which keeps each chain in
+// LIFO order on its own stack.
+struct StackChains {
+    NativeFramesScope* native_frames = nullptr;
+    ThreadRootsScope* thread_roots = nullptr;
+    GeneratedCodeEntryScope* entry_scopes = nullptr;
+};
+
+// Installs `incoming` as this thread's chains and returns the ones it held.
+StackChains brass_exchange_stack_chains(const StackChains& incoming) noexcept;
+
+struct SwitchedStack;
+
+// brass_append_native_frame_roots for a stack the thread is not running on:
+// the runs and thread roots of `chains`, walked on `stack`.
+void brass_append_switched_native_frame_roots(const StackChains& chains, const SwitchedStack& stack,
+                                              std::vector<uintptr_t*>& roots);
 
 // Where the recorded runs' walks (brass_append_native_frame_roots) cover
 // the stack from: the frame pointer of the innermost run that starts at a

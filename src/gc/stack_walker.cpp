@@ -108,10 +108,22 @@ using StartFrame = Cursor;
 struct StartFrame {};
 #endif
 
-// The walk. `start`, when given, is a compiled frame on this thread's stack:
+// Which stack a walk is on, when it is not the one the thread is running on:
+// a stack a fiber switched away from (fiber.hpp). Its bounds replace the
+// thread's (on Windows the TIB names only the running stack), and its own
+// chain of entry scopes replaces the thread's, which belongs to the stack
+// that is running.
+struct OtherStack {
+    uintptr_t low = 0;
+    uintptr_t high = UINTPTR_MAX;
+    GeneratedCodeEntryScope* entries = nullptr;
+};
+
+// The walk. `start`, when given, is a compiled frame on the walked stack:
 // the walk unwinds from it to the first generated frame and starts there
 // instead of at (top_rbp, top_return_ip). Every step moves strictly toward
-// the stack's base, so the walk ends without a frame limit.
+// the stack's base, so the walk ends without a frame limit. `other` names
+// the stack when it is not the running one.
 size_t walk_stack(
     uintptr_t top_rbp,
     uintptr_t top_return_ip,
@@ -119,7 +131,8 @@ size_t walk_stack(
     brass_root_visitor_fn visitor,
     void* user_data,
     uintptr_t stop_at,
-    [[maybe_unused]] const StartFrame* start
+    [[maybe_unused]] const StartFrame* start,
+    const OtherStack* other = nullptr
 ) {
 #if defined(BRASS_NATIVE_UNWIND)
     UnwindRowCacheScope row_cache;
@@ -142,6 +155,12 @@ size_t walk_stack(
         stack_high = reinterpret_cast<uintptr_t>(tib->StackBase);
     }
 #endif
+    if (other != nullptr) {
+        stack_low = other->low;
+        stack_high = other->high;
+    }
+    [[maybe_unused]] GeneratedCodeEntryScope* const innermost_entry =
+        other != nullptr ? other->entries : brass_innermost_entry_scope();
 
     // What the walk has learned about each return address: its stack map,
     // and whether it lies in a loaded image. A deep stack is a few return
@@ -191,7 +210,7 @@ size_t walk_stack(
     // passed, and the passed ones waiting for the answer beneath them. A
     // scope above the first pair lies in a frame the walk does not visit.
     using Beneath = GeneratedCodeEntryScope::Beneath;
-    GeneratedCodeEntryScope* entry = brass_innermost_entry_scope();
+    GeneratedCodeEntryScope* entry = innermost_entry;
     while (entry && entry->address() < top_rbp) entry = entry->outer();
     constexpr size_t MAX_PENDING = 16;
     GeneratedCodeEntryScope* pending[MAX_PENDING];
@@ -213,7 +232,7 @@ size_t walk_stack(
     // scopes (native_frames.hpp) the unwind passes answer for the frames
     // beneath them, or learn the answer this unwind finds.
     enum class UnwindResult { Generated, Nothing, GaveUp };
-    GeneratedCodeEntryScope* entry = brass_innermost_entry_scope();
+    GeneratedCodeEntryScope* entry = innermost_entry;
     auto unwind_to_generated = [&](Cursor& cur) -> UnwindResult {
         constexpr size_t MAX_PENDING = 16;
         GeneratedCodeEntryScope* pending[MAX_PENDING];
@@ -449,6 +468,44 @@ size_t brass_stack_walk_from_here(
     if (fp == nullptr) return 0;
     return walk_stack(fp[0], fp[1], stack_maps, visitor, user_data, stop_at, nullptr);
 #endif
+}
+
+size_t brass_stack_walk_switched(
+    const SwitchedStack& stack,
+    const ModuleStackMap& stack_maps,
+    brass_root_visitor_fn visitor,
+    void* user_data
+) {
+    const OtherStack other{stack.low, stack.high, stack.entries};
+#if defined(_WIN32) && defined(_M_X64)
+    if (stack.context == nullptr) return 0;
+    Cursor cur;
+    cur.ctx = *static_cast<const CONTEXT*>(stack.context);
+    return walk_stack(0, 0, stack_maps, visitor, user_data, UINTPTR_MAX, &cur, &other);
+#elif defined(BRASS_NATIVE_UNWIND)
+    if (stack.ip == 0) return 0;
+    Cursor cur;
+    cur.set(stack.ip, stack.sp, stack.fp);
+    return walk_stack(0, 0, stack_maps, visitor, user_data, UINTPTR_MAX, &cur, &other);
+#else
+    // Frame pointers only: the switch point's frame record.
+    if (stack.fp == 0) return 0;
+    const auto* fp = reinterpret_cast<const uintptr_t*>(stack.fp);
+    return walk_stack(fp[0], fp[1], stack_maps, visitor, user_data, UINTPTR_MAX, nullptr, &other);
+#endif
+}
+
+size_t brass_stack_walk_bounded_on(
+    uintptr_t top_rbp,
+    uintptr_t top_return_ip,
+    const ModuleStackMap& stack_maps,
+    brass_root_visitor_fn visitor,
+    void* user_data,
+    uintptr_t stop_at,
+    const SwitchedStack& stack
+) {
+    const OtherStack other{stack.low, stack.high, stack.entries};
+    return walk_stack(top_rbp, top_return_ip, stack_maps, visitor, user_data, stop_at, nullptr, &other);
 }
 
 size_t brass_stack_walk(

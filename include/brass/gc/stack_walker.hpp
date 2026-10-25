@@ -58,6 +58,47 @@ size_t brass_stack_walk_from_here(
 // with the depth of the host's stack under a GeneratedCodeEntryScope.
 size_t brass_stack_walk_unwind_steps() noexcept;
 
+class GeneratedCodeEntryScope;
+
+// A stack the thread is not running on: one a fiber switched away from
+// (fiber.hpp), described as of the switch. It cannot change until it is
+// switched back to, so a collection walks it from there like the running one.
+struct SwitchedStack {
+    // Where the stack's code switched away. On Windows x64 the register
+    // context captured there (a CONTEXT, which the unwind data needs);
+    // elsewhere the frame: the pc, the stack pointer at it and the frame
+    // pointer register's value.
+    const void* context = nullptr;
+    uintptr_t ip = 0;
+    uintptr_t sp = 0;
+    uintptr_t fp = 0;
+    // The stack's extent, where it is known (Windows), and its own chain of
+    // entry scopes, which the thread's does not hold while it is switched out.
+    uintptr_t low = 0;
+    uintptr_t high = UINTPTR_MAX;
+    GeneratedCodeEntryScope* entries = nullptr;
+};
+
+// Visits the roots of every generated frame on `stack` from its switch point
+// to its base, as brass_stack_walk_from_here does for the running stack.
+size_t brass_stack_walk_switched(
+    const SwitchedStack& stack,
+    const ModuleStackMap& stack_maps,
+    brass_root_visitor_fn visitor,
+    void* user_data
+);
+
+// brass_stack_walk_bounded for a run of frames recorded on `stack`.
+size_t brass_stack_walk_bounded_on(
+    uintptr_t top_rbp,
+    uintptr_t top_return_ip,
+    const ModuleStackMap& stack_maps,
+    brass_root_visitor_fn visitor,
+    void* user_data,
+    uintptr_t stop_at,
+    const SwitchedStack& stack
+);
+
 // C++ std::function overload for convenience
 size_t brass_stack_walk(
     uintptr_t top_rbp,
