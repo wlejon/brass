@@ -1,4 +1,5 @@
 #include <brass/mir/pass_manager.hpp>
+#include <brass/core/phase_times.hpp>
 #include <brass/mir/block.hpp>
 #include <brass/mir/instruction.hpp>
 #include <stdexcept>
@@ -104,6 +105,7 @@ PipelineResult run_pipeline(Module& mod, const Pipeline& pipeline, const PassPip
     const std::vector<Function*> fns = mod.functions();
     for (const PassStep& step : pipeline.steps()) {
         if (hooks.before_pass) hooks.before_pass(step.name);
+        PhaseTimeScope timing(step.name);
         if (step.scope == PassScope::Module) {
             result.changed |= step.run_module(mod);
         } else {
@@ -130,7 +132,10 @@ PipelineResult run_pipeline(Function& fn, const Pipeline& pipeline, const PassPi
     PipelineResult result;
     for (const PassStep& step : pipeline.steps()) {
         if (hooks.before_pass) hooks.before_pass(step.name);
-        result.changed |= run_on_function(step, fn);
+        {
+            PhaseTimeScope timing(step.name);
+            result.changed |= run_on_function(step, fn);
+        }
         if (hooks.after_pass && !hooks.after_pass(step.name)) {
             result.completed = false;
             return result;

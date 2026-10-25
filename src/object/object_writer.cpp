@@ -1,4 +1,5 @@
 #include <brass/object/object_writer.hpp>
+#include <brass/core/phase_times.hpp>
 #include <brass/object/aarch64_reloc.hpp>
 #include <brass/target/x64/x64_isel.hpp>
 #include <brass/target/aarch64/aarch64_isel.hpp>
@@ -198,38 +199,47 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
 
         // 1. ISel to LIR
         std::unique_ptr<codegen::LirFunction> lir;
-        if (target_.is_aarch64()) {
-            aarch64::AArch64ISel isel(target_, cc_);
-            isel.set_callee_module(&mod);
-            lir = isel.lower(*fn_to_lower);
-        } else {
-            x64::X64ISel isel(target_, cc_);
-            isel.set_callee_module(&mod);
-            lir = isel.lower(*fn_to_lower);
+        {
+            PhaseTimeScope timing("backend: isel");
+            if (target_.is_aarch64()) {
+                aarch64::AArch64ISel isel(target_, cc_);
+                isel.set_callee_module(&mod);
+                lir = isel.lower(*fn_to_lower);
+            } else {
+                x64::X64ISel isel(target_, cc_);
+                isel.set_callee_module(&mod);
+                lir = isel.lower(*fn_to_lower);
+            }
+            if (lir) lir->sort_blocks_rpo();
         }
         if (!lir) continue;
-        lir->sort_blocks_rpo();
 
         // 1.5 Loop Software Pipelining (if enabled)
         if (sched_opts_.enable_software_pipelining) {
+            PhaseTimeScope timing("backend: software pipelining");
             codegen::run_software_pipelining(*lir);
         }
 
         // 1.6 Pre-RA Instruction Scheduling (if enabled)
         if (sched_opts_.enable_pre_ra) {
+            PhaseTimeScope timing("backend: pre-RA scheduling");
             codegen::schedule_function(*lir, sched_opts_);
         }
 
-        // 2. Liveness Analysis
-        codegen::LivenessAnalysis liveness(*lir);
-        liveness.run();
+        {
+            PhaseTimeScope timing("backend: liveness + register allocation");
+            // 2. Liveness Analysis
+            codegen::LivenessAnalysis liveness(*lir);
+            liveness.run();
 
-        // 3. Linear Scan Register Allocation
-        codegen::LinearScanAllocator regalloc(*lir, liveness, cc_);
-        regalloc.allocate();
+            // 3. Linear Scan Register Allocation
+            codegen::LinearScanAllocator regalloc(*lir, liveness, cc_);
+            regalloc.allocate();
+        }
 
         // 3.4 Post-RA Instruction Scheduling (if enabled)
         if (sched_opts_.enable_post_ra) {
+            PhaseTimeScope timing("backend: post-RA scheduling");
             codegen::schedule_function(*lir, sched_opts_);
         }
 
@@ -237,10 +247,12 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
         // (The loop options' enable_trace_layout was always its default,
         // false, here.)
         if (enable_trace_layout_) {
+            PhaseTimeScope timing("backend: block layout");
             codegen::optimize_block_layout(*lir);
         }
 
         // 3.6 LIR Peephole Optimization
+        PhaseTimeScope peephole_timing("backend: peephole + emit");
         codegen::run_lir_peephole_optimizations(*lir);
         if (sched_opts_.enable_lir_superopt && target_.is_x64()) {
             SuperoptOptions sopts;
