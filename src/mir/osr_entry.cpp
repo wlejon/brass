@@ -236,6 +236,14 @@ Function* build_osr_entry_function(const OsrEntryPlan& plan, Module& dst, std::s
             cloned.emplace_back(inst, copy);
         }
     }
+    // A rematerialized live value (a constant, a function's address) is the
+    // same wherever it is computed: every use reads the entry's copy, which
+    // dominates the region, even where the region defines it too (an
+    // enclosing loop's body, reached again through its latch). Its clone
+    // there is left unused.
+    for (size_t i = 0; i < incoming.size(); ++i) {
+        if (plan.live_ins[i].rematerialize) values[incoming[i].first] = incoming[i].second;
+    }
     for (const auto& [src_inst, copy] : cloned) ir::clone_uses(*src_inst, *copy, values, blocks);
 
     if (leave_check) {

@@ -444,6 +444,82 @@ TEST_CASE("OSR resume - an inner loop sees each outer pass's invoke result, not 
     }
 }
 
+// An inner loop whose bound is a constant its enclosing loop's body defines.
+// The constant is live into the inner header and rematerialized in the
+// entry; the region defines it again (the outer body, reached through the
+// outer latch), and every use must still read the entry's copy, which is the
+// one that dominates them.
+constexpr std::string_view kNestedConst = R"(module @osr_resume_const
+func @osr_const(%n: i64) -> i64 {
+entry:
+  %c0 = iconst.i64 0
+  br outer(%c0, %c0)
+outer(%j: i64, %acc: i64):
+  %lim = iconst.i64 4
+  %z = iconst.i64 0
+  br inner(%z, %acc)
+inner(%i: i64, %a: i64):
+  %more_i = slt %i, %lim
+  br_if %more_i, ibody, latch
+ibody:
+  %a2 = add %a, %j
+  %one = iconst.i64 1
+  %i2 = add %i, %one
+  br inner(%i2, %a2)
+latch:
+  %one_j = iconst.i64 1
+  %j2 = add %j, %one_j
+  %more_j = slt %j2, %n
+  br_if %more_j, outer(%j2, %a), done
+done:
+  ret %a
+}
+)";
+
+// The rest of osr_const from the inner header with (i, a), in outer pass j.
+int64_t const_from(int64_t n, int64_t j, int64_t i, int64_t a) {
+    for (; i < 4; ++i) a += j;
+    for (++j; j < n; ++j) a += 4 * j;
+    return a;
+}
+
+TEST_CASE("OSR resume - a constant the enclosing loop defines reads the entry's copy in the inner loop") {
+    auto mod = parse_or_fail(kNestedConst);
+    const Function& fn = *mod->get_function("osr_const");
+    const BasicBlock* inner = block_named(fn, "inner");
+    const BasicBlock* outer = block_named(fn, "outer");
+    auto plan = plan_osr_entry(fn, *inner);
+    REQUIRE(plan.has_value());
+
+    Module dst("osr_resume_const_entry");
+    std::string why;
+    Function* entry = build_osr_entry_function(*plan, dst, "osr_const.osr", &why);
+    if (!entry) std::cerr << why << "\n";
+    REQUIRE(entry != nullptr);
+    REQUIRE(verify_module(dst));
+
+    codegen::JitExecutionEngine jit(Target::host());
+    REQUIRE(jit.compile_and_load(dst));
+    const Value* n_param = fn.entry_block()->param(0);
+    const int64_t n = 5;
+    for (int64_t j0 : {int64_t{0}, int64_t{3}}) {
+        for (int64_t i0 : {int64_t{0}, int64_t{3}}) {
+            const int64_t a0 = j0 * 100 + i0;
+            std::vector<uint64_t> buf(plan->live_ins.size(), 0xDEADBEEFDEADBEEFull);
+            for (size_t k = 0; k < plan->live_ins.size(); ++k) {
+                const auto& li = plan->live_ins[k];
+                if (li.rematerialize) continue;
+                if (li.value == inner->param(0)) buf[k] = static_cast<uint64_t>(i0);
+                else if (li.value == inner->param(1)) buf[k] = static_cast<uint64_t>(a0);
+                else if (li.value == outer->param(0)) buf[k] = static_cast<uint64_t>(j0);
+                else if (li.value == n_param) buf[k] = static_cast<uint64_t>(n);
+            }
+            const RuntimeValue r = jit.invoke("osr_const.osr", {RuntimeValue::from_ptr(buf.data())});
+            CHECK_EQ(r.as_i64(), const_from(n, j0, i0, a0));
+        }
+    }
+}
+
 TEST_CASE("OSR resume - a guard failing inside OSR code finishes the call through its exit stub") {
     auto mod = parse_or_fail(kStubLoop);
     const Function& fn = *mod->get_function("sum_spec");
