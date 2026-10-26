@@ -8,6 +8,7 @@
 
 #include <brass/runtime/deterministic_math.hpp>
 #include <bit>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 
@@ -167,29 +168,17 @@ inline DD dd_neg(DD a) noexcept { return {-a.hi, -a.lo}; }
 
 inline double to_double(DD a) noexcept { return a.hi + a.lo; }
 
-// Software 106-bit square root for positive finite DD a.
+// 106-bit square root for positive finite DD a. The machine's square root is
+// IEEE-754's correctly rounded one, the same bits on every target as `/` is,
+// so it seeds the root at 53 bits; one Newton step in double-double from
+// there (the residual a - y*y taken exactly with two_prod) doubles that.
+// The software iteration this replaced (five divisions in double, then two
+// dd_div steps) cost Math.hypot ~250 ns a call.
 inline DD dd_sqrt(DD a) noexcept {
     if (a.hi <= 0.0) return {0.0, 0.0};
-    int e = 0;
-    double m = frexp_norm(a.hi, e);
-    if (e & 1) {
-        m *= 2.0;
-        --e;
-    }
-    // Initial approximation on [1, 4) followed by 4 Newton steps in double.
-    double y = 0.4 + 0.5 * m;
-    for (int i = 0; i < 5; ++i) {
-        y = 0.5 * (y + m / y);
-    }
-    y = scale_pow2(y, e >> 1);
-    // Two Newton-Raphson refinements in double-double:
-    DD x_dd = {y, 0.0};
-    for (int i = 0; i < 2; ++i) {
-        DD q = dd_div(a, x_dd);
-        DD s = dd_add(x_dd, q);
-        x_dd = {s.hi * 0.5, s.lo * 0.5};
-    }
-    return x_dd;
+    const double y = std::sqrt(a.hi);
+    const DD r = dd_sub(a, two_prod(y, y));
+    return quick_two_sum(y, r.hi / (2.0 * y));
 }
 
 // ============================================================================
