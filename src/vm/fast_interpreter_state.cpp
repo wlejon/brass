@@ -170,6 +170,24 @@ void FastInterpreter::collect_all_roots(std::vector<uintptr_t*>& roots) {
     collect_typed_roots(roots, roots);
 }
 
+namespace {
+// Calls `fn` with each register of `f` that may hold a value read again: at
+// a call or safepoint, those live there; anywhere else, every one.
+template <typename Fn>
+void for_each_frame_register(const FastFrame& f, Fn&& fn) {
+    if (f.bfn) {
+        if (const BytecodeFunction::GcSafepoint* sp = f.bfn->gc_safepoint_at(f.pc)) {
+            const BcReg* regs = f.bfn->gc_live_regs.data() + sp->first;
+            for (uint32_t k = 0; k < sp->count; ++k) {
+                if (regs[k] < f.num_registers) fn(regs[k]);
+            }
+            return;
+        }
+    }
+    for (uint32_t i = 0; i < f.num_registers; ++i) fn(i);
+}
+} // namespace
+
 void FastInterpreter::collect_typed_roots(std::vector<uintptr_t*>& gcrefs, std::vector<uintptr_t*>& tagged) {
     auto add_slot = [&](uint64_t* slot, const Type& t) {
         if (t.is_gcref()) gcrefs.push_back(reinterpret_cast<uintptr_t*>(slot));
@@ -178,10 +196,9 @@ void FastInterpreter::collect_typed_roots(std::vector<uintptr_t*>& gcrefs, std::
     for (FastFrame* f = current_frame_; f != nullptr; f = f->caller) {
         if (!f->bfn || (f->info && !f->info->has_gc_regs)) continue;
         const auto& rtypes = f->bfn->register_types;
-        const uint32_t lim = std::min<uint32_t>(f->num_registers, static_cast<uint32_t>(rtypes.size()));
-        for (uint32_t i = 0; i < lim; ++i) {
-            if (f->registers[i] != 0) add_slot(&f->registers[i], rtypes[i]);
-        }
+        for_each_frame_register(*f, [&](uint32_t i) {
+            if (i < rtypes.size() && f->registers[i] != 0) add_slot(&f->registers[i], rtypes[i]);
+        });
     }
     for (auto& [handle, coro] : active_coros_) {
         if (!coro || coro->is_done || !coro->bfn) continue;
@@ -223,10 +240,9 @@ void FastInterpreter::for_each_register(Fn&& fn) {
     };
     // The active frames on the call stack, then the suspended coroutines.
     for (FastFrame* f = current_frame_; f != nullptr; f = f->caller) {
-        for (uint32_t i = 0; i < f->num_registers; ++i) {
-            if (f->registers[i] == 0) continue;
-            fn(&f->registers[i], kind_of(f->bfn, i));
-        }
+        for_each_frame_register(*f, [&](uint32_t i) {
+            if (f->registers[i] != 0) fn(&f->registers[i], kind_of(f->bfn, i));
+        });
     }
     for (auto& [handle, coro] : active_coros_) {
         if (!coro || coro->is_done) continue;

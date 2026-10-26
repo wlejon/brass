@@ -240,6 +240,8 @@ bool FastInterpreter::handle_osr_backedge(FastFrame& frame, uint32_t target_pc, 
         if (!target) return false;
         frame.mir_fn->pin_body();
     }
+    // The frame is at its loop's header while the OSR code finishes it.
+    frame.pc = target_pc;
     return coordinator.try_osr_migration(*this, *frame.mir_fn, target, frame, out_res);
 }
 

@@ -584,7 +584,11 @@ loop_start:
             NEXT();
         }
 
-        OP_CASE(safepoint) { handle_safepoint(frame); NEXT(); }
+        OP_CASE(safepoint) {
+            frame.pc = static_cast<uint32_t>(pc - code_base);
+            handle_safepoint(frame);
+            NEXT();
+        }
         OP_CASE(write_barrier) { handle_write_barrier(frame, decode_b(inst), decode_c(inst)); NEXT(); }
 
         OP_CASE(guard) {
@@ -593,6 +597,7 @@ loop_start:
                  !stress_fails_guard(fn.guards[decode_uimm32(inst)], module_, static_cast<bool>(deopt_handler_)))) {
                 NEXT();
             }
+            frame.pc = static_cast<uint32_t>(pc - code_base);
             const GuardInfo& g = fn.guards[decode_uimm32(inst)];
             record_thread_deopt_frame(g, frame, last_deopt_);
             if (deopt_handler_) {
@@ -631,6 +636,7 @@ loop_start:
         }
 
         OP_CASE(throw_) {
+            frame.pc = static_cast<uint32_t>(pc - code_base);
             handle_throw(frame, decode_a(inst), pc, code_base);
             // A throw caught in this frame can loop without a backward
             // branch, so it is charged too.
@@ -646,6 +652,7 @@ loop_start:
         OP_CASE(resume) { handle_resume(frame, decode_a(inst)); NEXT(); }
 
         OP_CASE(coro_create) {
+            frame.pc = static_cast<uint32_t>(pc - code_base);
             const CallSiteInfo& cs = fn.call_sites[decode_uimm32(inst)];
             RA = [this, &frame, &cs]() BRASS_NOINLINE -> uintptr_t {
                 std::vector<RuntimeValue> args;
@@ -663,6 +670,7 @@ loop_start:
             DISPATCH();
         }
         OP_CASE(coro_resume) {
+            frame.pc = static_cast<uint32_t>(pc - code_base);
             const uint32_t input_reg = decode_c(inst);
             const uint64_t input_val = input_reg != kNoReg ? registers[input_reg] : 0;
             // The resume-mode register is the next code word.
@@ -672,7 +680,11 @@ loop_start:
             pc += 2;
             DISPATCH();
         }
-        OP_CASE(coro_destroy) { coro_destroy(static_cast<uintptr_t>(RB)); NEXT(); }
+        OP_CASE(coro_destroy) {
+            frame.pc = static_cast<uint32_t>(pc - code_base);
+            coro_destroy(static_cast<uintptr_t>(RB));
+            NEXT();
+        }
 
         OP_CASE(vadd) OP_CASE(vsub) OP_CASE(vmul) OP_CASE(vdiv) OP_CASE(vfma) OP_CASE(vneg)
         OP_CASE(vmin) OP_CASE(vmax) OP_CASE(vsqrt) OP_CASE(vand) OP_CASE(vor) OP_CASE(vxor)

@@ -109,6 +109,7 @@ RegisterAssignment allocate_bytecode_registers(const Function& fn, const BlockLa
     // Positions: one for each block start (where its parameters are
     // defined) and one for each instruction.
     uint32_t pos = 0;
+    std::vector<std::pair<uint32_t, const Instruction*>> safepoints; // in position order
     for (uint32_t bi = 0; bi < nblocks; ++bi) {
         const BasicBlock* bb = layout.order[bi];
         block_start[bi] = pos;
@@ -117,6 +118,7 @@ RegisterAssignment allocate_bytecode_registers(const Function& fn, const BlockLa
         for (const Instruction* inst : *bb) {
             if (!inst) continue;
             if (inst->produces_value() && inst->result()) define(inst->result(), bi, pos, -1);
+            if (is_gc_safepoint(*inst)) safepoints.emplace_back(pos, inst);
             ++pos;
         }
         block_end[bi] = pos - 1;
@@ -246,7 +248,37 @@ RegisterAssignment allocate_bytecode_registers(const Function& fn, const BlockLa
         active.emplace(vi.hi, vi_idx);
     }
     out.num_registers = next_reg;
+
+    // A register holds, at each position, the one value whose interval holds
+    // it, or nothing anything reads again.
+    if (!safepoints.empty()) {
+        std::vector<std::vector<BcReg>> live(safepoints.size());
+        for (uint32_t i = 0; i < values.size(); ++i) {
+            const ValueInfo& vi = values[i];
+            auto it = std::lower_bound(safepoints.begin(), safepoints.end(), vi.lo,
+                                       [](const auto& sp, uint32_t p) { return sp.first < p; });
+            for (; it != safepoints.end() && it->first <= vi.hi; ++it) {
+                if (it->first != vi.def_pos) live[it - safepoints.begin()].push_back(assigned[i]);
+            }
+        }
+        out.live_at_safepoint.reserve(safepoints.size());
+        for (size_t s = 0; s < safepoints.size(); ++s) {
+            std::sort(live[s].begin(), live[s].end());
+            out.live_at_safepoint.emplace(safepoints[s].second, std::move(live[s]));
+        }
+    }
     return out;
+}
+
+bool is_gc_safepoint(const Instruction& inst) noexcept {
+    switch (inst.opcode()) {
+        case Opcode::call:
+        case Opcode::patchable_call:
+        case Opcode::call_indirect:
+        case Opcode::invoke:
+        case Opcode::safepoint: return true;
+        default: return false;
+    }
 }
 
 } // namespace brass::detail

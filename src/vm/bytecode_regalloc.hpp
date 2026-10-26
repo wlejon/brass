@@ -18,6 +18,7 @@
 #include <brass/mir/block.hpp>
 #include <brass/mir/instruction.hpp>
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 
 namespace brass::detail {
@@ -39,7 +40,14 @@ struct RegisterAssignment {
     std::vector<Type> register_types; // per register
     uint32_t num_registers = 0;       // allocated registers (no scratch)
     uint32_t num_values = 0;          // SSA values allocated
+    // The registers of the values live at each call, invoke and safepoint
+    // (their intervals hold it; its operands included, its result not): what
+    // a collection run while a frame is stopped there has to root.
+    std::unordered_map<const Instruction*, std::vector<BcReg>> live_at_safepoint;
 };
+
+// Whether a collection may run while a frame is stopped at `inst`.
+bool is_gc_safepoint(const Instruction& inst) noexcept;
 
 // Throws std::runtime_error when the function needs more registers than
 // the encoding holds, or uses a value it never defines.

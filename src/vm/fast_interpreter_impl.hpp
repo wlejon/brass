@@ -185,7 +185,10 @@ struct FastFrame {
     uint64_t* registers = nullptr;
     uint32_t num_registers = 0;
     // The entry pc until the frame runs; while it runs, the pc of the call
-    // it is in (stored by every call, so a stack walk sees where it is).
+    // it is in (stored by every call, safepoint, guard failure, throw,
+    // coroutine operation and OSR, so a stack walk sees where it is and a
+    // collection roots only what is live there: BytecodeFunction::
+    // gc_safepoints). An op that can reach either must store it.
     uint32_t pc = 0;
     FastFrame* caller = nullptr;
     // The frame that was innermost on this thread, of any interpreter, when

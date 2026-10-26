@@ -39,6 +39,35 @@ detail::DenseIdMap<Value, uint32_t> count_uses(const Function& fn, const detail:
     return uses;
 }
 
+bool is_safepoint_op(BytecodeOp op) noexcept {
+    switch (op) {
+        case BytecodeOp::call:
+        case BytecodeOp::patchable_call:
+        case BytecodeOp::call_indirect:
+        case BytecodeOp::invoke:
+        case BytecodeOp::safepoint: return true;
+        default: return false;
+    }
+}
+
+// The live registers of the call or safepoint lowered from `from` on, at
+// its word's pc. The scratch registers may carry an operand into it.
+void record_gc_safepoint(BytecodeFunction& bfn, uint32_t from, const std::vector<BcReg>& live, BcReg scratch,
+                         BcReg scratch2) {
+    for (size_t pc = from; pc < bfn.code.size(); pc += bytecode_inst_words(decode_op(bfn.code[pc]))) {
+        if (!is_safepoint_op(decode_op(bfn.code[pc]))) continue;
+        BytecodeFunction::GcSafepoint sp;
+        sp.pc = static_cast<uint32_t>(pc);
+        sp.first = static_cast<uint32_t>(bfn.gc_live_regs.size());
+        bfn.gc_live_regs.insert(bfn.gc_live_regs.end(), live.begin(), live.end());
+        bfn.gc_live_regs.push_back(scratch);
+        bfn.gc_live_regs.push_back(scratch2);
+        sp.count = static_cast<uint32_t>(bfn.gc_live_regs.size()) - sp.first;
+        bfn.gc_safepoints.push_back(sp);
+        return;
+    }
+}
+
 } // namespace
 
 std::unique_ptr<BytecodeFunction> BytecodeCompiler::compile(const Function& fn) {
@@ -105,7 +134,11 @@ std::unique_ptr<BytecodeFunction> BytecodeCompiler::compile(const Function& fn) 
                     continue;
                 }
             }
+            const uint32_t inst_pc = static_cast<uint32_t>(bfn->current_pc());
             ctx.lower_instruction(*inst);
+            if (auto live = regs.live_at_safepoint.find(inst); live != regs.live_at_safepoint.end()) {
+                record_gc_safepoint(*bfn, inst_pc, live->second, ctx.scratch_reg, ctx.scratch_reg2);
+            }
         }
         ctx.fused_compare = nullptr;
     }

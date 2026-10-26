@@ -449,6 +449,25 @@ public:
         }
         return lo < pc_block_map.size() && pc_block_map[lo].first == pc ? pc_block_map[lo].second : kNoBlock;
     }
+    // The registers live at each call, invoke and safepoint, by the pc of
+    // its word (what FastFrame::pc holds while the frame is stopped there),
+    // in increasing pc order: a stopped frame's GC roots. A frame at a pc
+    // with none has every register scanned.
+    struct GcSafepoint {
+        uint32_t pc = 0;
+        uint32_t first = 0; // into gc_live_regs
+        uint32_t count = 0;
+    };
+    std::vector<GcSafepoint> gc_safepoints;
+    std::vector<BcReg> gc_live_regs;
+    const GcSafepoint* gc_safepoint_at(uint32_t pc) const noexcept {
+        size_t lo = 0, hi = gc_safepoints.size();
+        while (lo < hi) {
+            const size_t mid = (lo + hi) / 2;
+            if (gc_safepoints[mid].pc < pc) lo = mid + 1; else hi = mid;
+        }
+        return lo < gc_safepoints.size() && gc_safepoints[lo].pc == pc ? &gc_safepoints[lo] : nullptr;
+    }
     std::vector<ExceptionEntry> exception_table;
     std::vector<ResumePointEntry> resume_points;
     std::vector<LineInfoEntry> line_info_table;
