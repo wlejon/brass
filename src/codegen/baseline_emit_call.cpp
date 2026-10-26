@@ -57,9 +57,20 @@ void X64BaselineEmitter::call_abs(const void* fn_ptr) {
 }
 
 void X64BaselineEmitter::count_backedge(const BasicBlock* dest) {
-    if (!backedge_budget || !dest) return;
+    if ((!backedge_budget && !interrupt_handler) || !dest) return;
     auto it = block_pos.find(dest->id());
     if (it == block_pos.end() || it->second > cur_block_pos) return;
+    if (interrupt_handler) {
+        // cmp rsp, [r13 + offset]; jae polled; call the handler. Every value
+        // lives in its frame slot, so the call is a GC point like any other.
+        Label polled = buffer.create_label();
+        enc.cmp(GPR::RSP, MemAddress::base_disp(GPR::R13, interrupt_offset));
+        enc.jae(polled);
+        call_abs(interrupt_handler);
+        record_safepoint(0);
+        buffer.bind(polled);
+    }
+    if (!backedge_budget) return;
     // sub qword [budget], 1; jne done; call the hook with the feedback.
     Label done = buffer.create_label();
     enc.movabs(GPR::R11, reinterpret_cast<uint64_t>(backedge_budget));

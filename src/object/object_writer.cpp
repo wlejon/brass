@@ -11,6 +11,7 @@
 #include <brass/codegen/block_layout.hpp>
 #include <brass/codegen/instruction_scheduler.hpp>
 #include <brass/codegen/software_pipeline.hpp>
+#include <brass/mir/interrupt_poll.hpp>
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/superopt.hpp>
 #include <brass/mir/verifier.hpp>
@@ -195,6 +196,20 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
             }
             insert_deopt_stress_guards(*opt_fn_mut, &mod, deopt_stress_);
             opt_fn_mut->rebuild_cfg_predecessors();
+        }
+
+        // Interrupt polls on the back edges (Module::interrupt_poll), last,
+        // so neither the optimizer nor the stress guards see them.
+        if (mod.interrupt_poll() && needs_interrupt_polls(*fn_to_lower)) {
+            if (!opt_fn_mut) {
+                opt_mod = std::make_unique<Module>(mod.name());
+                opt_mod->set_allow_fp_reassociation(mod.allow_fp_reassociation());
+                opt_mod->set_pinned_tls_register(mod.pinned_tls_register());
+                opt_mod->copy_declarations_from(mod);
+                opt_fn_mut = clone_function(*fn, *opt_mod);
+                fn_to_lower = opt_fn_mut;
+            }
+            insert_interrupt_polls(*opt_fn_mut);
         }
 
         // 1. ISel to LIR

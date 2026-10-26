@@ -120,6 +120,11 @@ struct AArch64BaselineEmitter {
     void* backedge_budget = nullptr;
     std::unordered_map<uint32_t, uint32_t> block_pos;
     uint32_t cur_block_pos = 0;
+    // The module's interrupt poll (Module::interrupt_poll), as the x64
+    // baseline emits it: the handler, resolved, and the offset in the
+    // pinned TLS block (X28) of the word SP is compared with.
+    const void* interrupt_handler = nullptr;
+    int32_t interrupt_offset = 0;
     // Emits the budget decrement (and the hook call at zero) for an edge to
     // `target` when it is a backedge. Clobbers flags, X0, X16, X17 and the
     // hook's caller-saved registers; the block arguments must already be

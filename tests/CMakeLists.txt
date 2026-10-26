@@ -148,6 +148,7 @@ add_executable(brass_unit_tests
     unit/test_card_table.cpp
     unit/test_gc_heap.cpp
     unit/test_gc_fiber.cpp
+    unit/test_interrupt_poll.cpp
     unit/test_gc_heap_weak.cpp
     unit/test_gc_heap_roots.cpp
     unit/test_gc_heap_threads.cpp

@@ -783,12 +783,16 @@ void print_module(const Module& mod, std::ostream& os) {
     }
 
     // Module attributes.
-    if (mod.allow_fp_reassociation() || mod.is_deterministic_fp() || mod.pinned_tls_register() || mod.has_loop_optimizations()) {
+    if (mod.allow_fp_reassociation() || mod.is_deterministic_fp() || mod.pinned_tls_register() ||
+        mod.has_loop_optimizations() || mod.interrupt_poll()) {
         os << "attributes";
         if (mod.allow_fp_reassociation()) os << " fp_reassociation";
         if (mod.is_deterministic_fp()) os << " deterministic_fp";
         if (mod.pinned_tls_register()) os << " pinned_tls_register";
         if (mod.has_loop_optimizations()) os << " loop_optimizations";
+        if (mod.interrupt_poll()) {
+            os << " interrupt_poll " << mod.interrupt_poll().tls_offset << " " << sym_ref(mod.interrupt_poll().handler);
+        }
         os << "\n\n";
     }
 

@@ -257,6 +257,10 @@ public:
 
     // OSR backedge helper
     bool handle_osr_backedge(FastFrame& frame, uint32_t target_pc, RuntimeValue& out_res);
+    // A backedge whose interrupt poll (Module::interrupt_poll) fired: the
+    // frame stops at `pc` (so a collection scans it whole) and the module's
+    // handler runs. The handler may collect, switch fibers or throw.
+    void run_interrupt_handler(FastFrame& frame, uint32_t pc);
 
     // Internal execution helpers
     RuntimeValue execute_frame(FastFrame& frame);

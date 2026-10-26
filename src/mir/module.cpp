@@ -56,6 +56,7 @@ Module::Module(Module&& other) noexcept
       allow_fp_reassociation_(other.allow_fp_reassociation_),
       deterministic_fp_(other.deterministic_fp_),
       pinned_tls_register_(other.pinned_tls_register_),
+      interrupt_poll_(other.interrupt_poll_),
       has_loop_optimizations_(other.has_loop_optimizations_),
       debug_context_(std::move(other.debug_context_)),
       lazy_(std::move(other.lazy_)) {
@@ -95,6 +96,7 @@ Module& Module::operator=(Module&& other) noexcept {
     allow_fp_reassociation_ = other.allow_fp_reassociation_;
     deterministic_fp_ = other.deterministic_fp_;
     pinned_tls_register_ = other.pinned_tls_register_;
+    interrupt_poll_ = other.interrupt_poll_;
     has_loop_optimizations_ = other.has_loop_optimizations_;
     debug_context_ = std::move(other.debug_context_);
     lazy_ = std::move(other.lazy_);
@@ -365,6 +367,17 @@ void Module::copy_declarations_from(const Module& src) {
         for (SymbolRole role : src.symbol_roles(sym)) add_symbol_role(sym, role);
     }
     for (const auto& [sym, text] : src.string_symbols()) define_string_symbol(sym, text);
+    if (src.interrupt_poll()) set_interrupt_poll(src.interrupt_poll().tls_offset, src.interrupt_poll().handler);
+}
+
+void Module::set_interrupt_poll(int32_t tls_offset, std::string_view handler) {
+    if (tls_offset < 0 || handler.empty()) {
+        interrupt_poll_ = {};
+        return;
+    }
+    add_external_symbol(handler);
+    interrupt_poll_.tls_offset = tls_offset;
+    interrupt_poll_.handler = string_pool_.intern(handler);
 }
 
 } // namespace brass

@@ -35,6 +35,25 @@ private:
     HostValue value_;
 };
 
+// A host's termination of whatever runs on the current stack: thrown by an
+// interrupt poll's handler (Module::interrupt_poll) or by a native the host
+// stops, it unwinds every frame up to the host's own catch. No guest code
+// can catch it: it is neither a BrassException nor a std::exception, so the
+// generated code's personalities (SEH and SysV) pass it by every landing
+// pad, the interpreters' handlers (which take only the guest's throws)
+// never see it, and a guest catch or finally does not run. Compiled frames
+// run their destructors as it passes. A host native that catches `...` must
+// rethrow it. `token` is the host's, naming what was terminated.
+class TerminationException {
+public:
+    explicit TerminationException(void* token = nullptr) noexcept : token_(token) {}
+
+    [[nodiscard]] void* token() const noexcept { return token_; }
+
+private:
+    void* token_;
+};
+
 // 2. Exception scope entry
 struct ExceptionScopeEntry {
     uint32_t begin_offset = 0;       // Start of protected call / region (relative to function)

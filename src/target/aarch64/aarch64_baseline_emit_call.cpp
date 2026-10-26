@@ -172,9 +172,23 @@ void AArch64BaselineEmitter::call_abs(const void* fn_ptr) {
 }
 
 void AArch64BaselineEmitter::count_backedge(const BasicBlock* dest) {
-    if (!backedge_budget || !dest) return;
+    if ((!backedge_budget && !interrupt_handler) || !dest) return;
     auto it = block_pos.find(dest->id());
     if (it == block_pos.end() || it->second > cur_block_pos) return;
+    if (interrupt_handler) {
+        // mov x16, sp; ldr x17, [x28 + offset]; cmp x16, x17; b.hs polled;
+        // call the handler. Every value lives in its frame slot, so the call
+        // is a GC point like any other.
+        Label polled = buffer.create_label();
+        enc.mov(GPR::X16, GPR::SP);
+        enc.ldr(GPR::X17, MemAddress::base_disp(GPR::X28, interrupt_offset));
+        enc.cmp(GPR::X16, GPR::X17);
+        enc.b(Condition::CS, polled);
+        call_abs(interrupt_handler);
+        record_safepoint(0);
+        buffer.bind(polled);
+    }
+    if (!backedge_budget) return;
     // ldr x16, [budget]; subs x16, x16, #1; str x16, [budget]; b.ne done;
     // then the hook with the feedback.
     Label done = buffer.create_label();

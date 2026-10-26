@@ -80,9 +80,15 @@ struct X64BaselineEmitter {
     void* backedge_budget = nullptr;
     std::unordered_map<uint32_t, uint32_t> block_pos;
     uint32_t cur_block_pos = 0;
-    // Emits the budget decrement (and the hook call at zero) for an edge to
-    // `target` when it is a backedge. Clobbers flags, R11 and the first
-    // argument register; the block arguments must already be copied.
+    // The module's interrupt poll (Module::interrupt_poll): its handler,
+    // resolved, and the offset in the pinned TLS block (R13) of the word
+    // the stack pointer is compared with. Null: no poll.
+    const void* interrupt_handler = nullptr;
+    int32_t interrupt_offset = 0;
+    // Emits, for an edge to `target` that is a backedge, the interrupt poll
+    // and the budget decrement (and the hook call at zero). Clobbers flags,
+    // R11 and the caller-saved registers; the block arguments must already
+    // be copied.
     void count_backedge(const BasicBlock* target);
 
     // The invoke call sites: [begin, end) holds the call, whose return

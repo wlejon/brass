@@ -100,6 +100,18 @@ void* FastInterpreter::find_external_symbol(std::string_view name) const noexcep
     return nullptr;
 }
 
+void FastInterpreter::run_interrupt_handler(FastFrame& frame, uint32_t pc) {
+    const Module* mod = frame.mir_fn ? frame.mir_fn->parent() : nullptr;
+    if (!mod || !mod->interrupt_poll()) return;
+    const std::string_view name = mod->interrupt_poll().handler;
+    void* handler = find_external_symbol(name);
+    if (!handler) {
+        throw InterpreterException("unresolved interrupt poll handler " + std::string(name));
+    }
+    frame.pc = pc;
+    reinterpret_cast<void (*)()>(handler)();
+}
+
 bool FastInterpreter::has_external_symbol(std::string_view name) const noexcept {
     const std::string key(name);
     return external_symbols_.find(key) != external_symbols_.end() ||

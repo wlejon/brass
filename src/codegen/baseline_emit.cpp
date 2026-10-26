@@ -398,10 +398,22 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
     // 5. Code for each block, noting where each source position begins
     // Tier-up by work: loop backedges count down the feedback's budget
     // (only for code whose program has a pipeline to tier it up).
-    if (!fn.name().empty() && dispatch_table().tiering().pipeline().is_initialized()) {
+    // Interrupt polls at the same backedges (Module::interrupt_poll).
+    const bool tier_up = !fn.name().empty() && dispatch_table().tiering().pipeline().is_initialized();
+    if (preserves_r13 && fn.parent()->interrupt_poll()) {
+        const Module::InterruptPoll& poll = fn.parent()->interrupt_poll();
+        emitter.interrupt_handler = resolve_symbol_in(fn, poll.handler);
+        if (!emitter.interrupt_handler) {
+            throw_unsupported(kX64BaselineStage, "unresolved interrupt poll handler " + std::string(poll.handler));
+        }
+        emitter.interrupt_offset = poll.tls_offset;
+    }
+    if (tier_up) {
         runtime::TieringFeedback* feedback = &dispatch_table().tiering().get_feedback(fn.name());
         emitter.backedge_feedback = feedback;
         emitter.backedge_budget = feedback->tier1_backedge_budget();
+    }
+    if (tier_up || emitter.interrupt_handler) {
         uint32_t pos = 0;
         for (const auto* bb : fn.blocks()) {
             if (bb) emitter.block_pos[bb->id()] = pos++;

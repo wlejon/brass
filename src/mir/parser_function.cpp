@@ -145,8 +145,8 @@ bool Parser::parse_extern_decl(Module& mod) {
     return true;
 }
 
-// `attributes fp_reassociation pinned_tls_register loop_optimizations`:
-// module attributes.
+// `attributes fp_reassociation pinned_tls_register loop_optimizations
+// interrupt_poll 16 @handler`: module attributes.
 bool Parser::parse_module_attributes(Module& mod) {
     advance(); // consume 'attributes'
     while (peek().is(TokenKind::Ident) && !is_top_level_directive(peek())) {
@@ -159,6 +159,15 @@ bool Parser::parse_module_attributes(Module& mod) {
             mod.set_pinned_tls_register(true);
         } else if (attr == "loop_optimizations") {
             mod.set_has_loop_optimizations(true);
+        } else if (attr == "interrupt_poll") {
+            // `interrupt_poll <tls offset> @handler` (Module::set_interrupt_poll)
+            advance();
+            uint32_t offset = 0;
+            if (!take_unsigned(INT32_MAX, "an interrupt poll's TLS offset", offset)) return false;
+            std::string_view handler = parse_symbol_name();
+            if (handler.empty()) return false;
+            mod.set_interrupt_poll(static_cast<int32_t>(offset), handler);
+            continue;
         } else {
             error(peek().location, "Unknown module attribute '" + std::string(attr) + "'");
             return false;

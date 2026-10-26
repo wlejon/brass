@@ -107,6 +107,27 @@ public:
     bool pinned_tls_register() const noexcept { return pinned_tls_register_; }
     void set_pinned_tls_register(bool pinned) noexcept { pinned_tls_register_ = pinned; }
 
+    // Interrupt polls (a host's time slices). When set, every loop backedge
+    // of every function in the module polls, in every tier: Tier 0 at its
+    // backward jumps, Tier 1 at its backedges, and Tier 2, OSR and AOT code
+    // on every retreating edge of the CFG, inserted after the optimizer so
+    // no loop transform sees the poll. A poll compares the stack pointer
+    // with the 64-bit word at [pinned TLS block + tls_offset] and, when the
+    // stack pointer is below it (unsigned), calls `handler`: a C function
+    // taking and returning nothing, which may collect, switch fibers
+    // (gc::Fiber) or throw. A host arms a poll by storing UINT64_MAX there,
+    // or uses the word as the stack limit its own function prologues
+    // already compare against, so one store interrupts both. Requires
+    // pinned_tls_register. The handler is declared external here.
+    struct InterruptPoll {
+        int32_t tls_offset = -1;
+        std::string_view handler;
+        explicit operator bool() const noexcept { return tls_offset >= 0 && !handler.empty(); }
+    };
+    const InterruptPoll& interrupt_poll() const noexcept { return interrupt_poll_; }
+    void set_interrupt_poll(int32_t tls_offset, std::string_view handler);
+    void clear_interrupt_poll() noexcept { interrupt_poll_ = {}; }
+
     bool has_loop_optimizations() const noexcept { return has_loop_optimizations_; }
     void set_has_loop_optimizations(bool opt) noexcept { has_loop_optimizations_ = opt; }
 
@@ -187,6 +208,7 @@ private:
     bool allow_fp_reassociation_ = false;
     bool deterministic_fp_ = false;
     bool pinned_tls_register_ = false;
+    InterruptPoll interrupt_poll_;
     bool has_loop_optimizations_ = false;
     DebugContext debug_context_;
     // Last: the lazy-body state is defined in module.cpp.

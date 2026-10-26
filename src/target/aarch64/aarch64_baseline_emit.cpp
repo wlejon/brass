@@ -320,9 +320,20 @@ codegen::BaselineCompiledFunction compile_baseline_aarch64(
         // Tier-up by work: loop backedges count down the feedback's budget
         // (only for code whose program has a pipeline to tier it up), so a
         // function called a few times that loops a lot reaches Tier 2.
-        if (feedback && registry.pipeline().is_initialized()) {
+        const bool tier_up = feedback && registry.pipeline().is_initialized();
+        if (preserves_tls && fn.parent()->interrupt_poll()) {
+            const Module::InterruptPoll& poll = fn.parent()->interrupt_poll();
+            em.interrupt_handler = resolver ? resolver(poll.handler) : nullptr;
+            if (!em.interrupt_handler) {
+                throw_unsupported(kA64BaselineStage, "unresolved interrupt poll handler " + std::string(poll.handler));
+            }
+            em.interrupt_offset = poll.tls_offset;
+        }
+        if (tier_up) {
             em.backedge_feedback = feedback;
             em.backedge_budget = feedback->tier1_backedge_budget();
+        }
+        if (tier_up || em.interrupt_handler) {
             uint32_t pos = 0;
             for (const auto* bb : fn.blocks()) {
                 if (bb) em.block_pos[bb->id()] = pos++;

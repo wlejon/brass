@@ -116,6 +116,15 @@ RuntimeValue FastInterpreter::execute_frame(FastFrame& frame) {
     const bool osr_on = frame.mir_fn != nullptr && osr.is_enabled() && osr.runs_program();
     runtime::TieringFeedback* const feedback = &frame.info->tiering(dispatch_table_);
     RuntimeValue osr_res_;
+    // The module's interrupt poll (Module::interrupt_poll): at each backward
+    // branch, this frame's address (what read_sp gives the program) against
+    // the word at [TLS block + offset].
+    int32_t poll_off = -1;
+    if (const Module* poll_mod = frame.mir_fn ? frame.mir_fn->parent() : nullptr;
+        poll_mod && poll_mod->pinned_tls_register() && poll_mod->interrupt_poll()) {
+        if (tls_block_ == 0) tls_block_ = reinterpret_cast<uint64_t>(runtime::host_pinned_tls_block());
+        poll_off = poll_mod->interrupt_poll().tls_offset;
+    }
 
 #define RA registers[decode_a(inst)]
 #define RB registers[decode_b(inst)]
@@ -125,6 +134,11 @@ RuntimeValue FastInterpreter::execute_frame(FastFrame& frame) {
     do {                                                                                      \
         total_instructions_executed_ += static_cast<uint64_t>(-static_cast<int64_t>(off)) + 1; \
         if (BRASS_UNLIKELY(total_instructions_executed_ > insn_limit)) throw_instruction_limit(); \
+        if (BRASS_UNLIKELY(poll_off >= 0) && tls_block_ != 0 &&                               \
+            BRASS_UNLIKELY(reinterpret_cast<uint64_t>(&osr_res_) <                            \
+                           *reinterpret_cast<const uint64_t*>(tls_block_ + poll_off))) {      \
+            run_interrupt_handler(frame, static_cast<uint32_t>(pc - code_base));              \
+        }                                                                                     \
         if (BRASS_UNLIKELY(osr_on)) {                                                         \
             const uint32_t target_pc_ = static_cast<uint32_t>((pc - code_base) + (off));      \
             if (handle_osr_backedge(frame, target_pc_, osr_res_)) return osr_res_;            \
