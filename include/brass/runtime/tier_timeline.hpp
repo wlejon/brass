@@ -52,6 +52,7 @@ struct TierEvent {
     uint64_t start_ns = 0;   // from the timeline's epoch
     uint64_t dur_ns = 0;     // zero for instant events
     std::string name;
+    std::string why;         // why a failed compile failed, when it says
 };
 
 namespace detail {
@@ -77,7 +78,8 @@ uint64_t tier_timeline_now_ns() noexcept;
 // Whether the calling thread is a CompilePool worker.
 bool on_compile_worker() noexcept;
 
-void record_tier_event(TierEventKind kind, std::string_view name, uint64_t start_ns, uint64_t dur_ns, bool ok = true);
+void record_tier_event(TierEventKind kind, std::string_view name, uint64_t start_ns, uint64_t dur_ns, bool ok = true,
+                       std::string why = {});
 inline void record_tier_instant(TierEventKind kind, std::string_view name) {
     if (tier_timeline_enabled()) record_tier_event(kind, name, tier_timeline_now_ns(), 0);
 }
@@ -92,12 +94,18 @@ public:
     TierEventScope(const TierEventScope&) = delete;
     TierEventScope& operator=(const TierEventScope&) = delete;
     void set_ok(bool ok) noexcept { ok_ = ok; }
+    // The compile failed, for this reason.
+    void fail(std::string_view why) {
+        ok_ = false;
+        if (on_) why_.assign(why);
+    }
 
 private:
     TierEventKind kind_;
     std::string_view name_;
     bool on_;
     bool ok_ = true;
+    std::string why_;
     uint64_t start_;
 };
 

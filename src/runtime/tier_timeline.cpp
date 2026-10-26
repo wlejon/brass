@@ -91,7 +91,8 @@ uint64_t tier_timeline_now_ns() noexcept {
 
 bool on_compile_worker() noexcept { return detail::t_on_compile_worker; }
 
-void record_tier_event(TierEventKind kind, std::string_view name, uint64_t start_ns, uint64_t dur_ns, bool ok) {
+void record_tier_event(TierEventKind kind, std::string_view name, uint64_t start_ns, uint64_t dur_ns, bool ok,
+                       std::string why) {
     if (!tier_timeline_enabled()) return;
     TierEvent e;
     e.kind = kind;
@@ -100,6 +101,7 @@ void record_tier_event(TierEventKind kind, std::string_view name, uint64_t start
     e.start_ns = start_ns;
     e.dur_ns = dur_ns;
     e.name.assign(name);
+    e.why = std::move(why);
     Timeline& t = timeline();
     std::lock_guard<std::mutex> lock(t.mutex);
     t.events.push_back(std::move(e));
@@ -108,7 +110,7 @@ void record_tier_event(TierEventKind kind, std::string_view name, uint64_t start
 TierEventScope::~TierEventScope() {
     if (!on_) return;
     const uint64_t end = tier_timeline_now_ns();
-    record_tier_event(kind_, name_, start_, end > start_ ? end - start_ : 0, ok_);
+    record_tier_event(kind_, name_, start_, end > start_ ? end - start_ : 0, ok_, std::move(why_));
 }
 
 std::vector<TierEvent> tier_timeline_snapshot() {
@@ -245,8 +247,9 @@ void write_tier_report(std::ostream& os, const TierTimelineSummary& s, bool even
         }
         for (const TierEvent& e : tier_timeline_snapshot()) {
             os << "tier-timeline event " << to_string(e.kind) << " " << e.name << " at_ms=" << ms(e.start_ns)
-               << " dur_ms=" << ms(e.dur_ns) << (e.on_worker ? " worker" : " mutator") << (e.ok ? "" : " failed")
-               << "\n";
+               << " dur_ms=" << ms(e.dur_ns) << (e.on_worker ? " worker" : " mutator") << (e.ok ? "" : " failed");
+            if (!e.why.empty()) os << ": " << e.why;
+            os << "\n";
         }
     }
     os.flags(flags);

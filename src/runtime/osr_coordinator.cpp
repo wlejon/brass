@@ -237,8 +237,8 @@ bool OsrCoordinator::try_osr_migration(FastInterpreter&, const Function& fn, Bas
 
 void OsrCoordinator::request_entry(const Function& fn, const BasicBlock& header, const std::shared_ptr<Entry>& e) {
     TierEventScope timed(TierEventKind::OsrRequest, fn.name());
-    auto fail = [&] {
-        timed.set_ok(false);
+    auto fail = [&](std::string_view why) {
+        timed.fail(why);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             e->state.store(Entry::State::Failed, std::memory_order_release);
@@ -249,7 +249,7 @@ void OsrCoordinator::request_entry(const Function& fn, const BasicBlock& header,
     // The function's handle is where a failed guard of the code resumes;
     // one bound to another Function is not this code's.
     FunctionHandle* handle = table.get_or_create(fn.name(), &fn);
-    if (!fn.parent() || !handle || handle->mir_function() != &fn) return fail();
+    if (!fn.parent() || !handle || handle->mir_function() != &fn) return fail("the function's handle is another's");
 
     // Only the call targets are read here, on the interpreter's thread: its
     // type feedback grows as it runs. Planning the entry and copying it
@@ -280,7 +280,7 @@ void OsrCoordinator::request_entry(const Function& fn, const BasicBlock& header,
         }
         compile_entry(fn, *mod, e);
     };
-    if (!CompilePool::shared().submit(this, kOsrPriority, std::move(job))) fail();
+    if (!CompilePool::shared().submit(this, kOsrPriority, std::move(job))) fail("the compile pool refused the job");
 }
 
 std::unique_ptr<Module> OsrCoordinator::copy_entry(const Function& fn, const BasicBlock& header,
@@ -292,7 +292,10 @@ std::unique_ptr<Module> OsrCoordinator::copy_entry(const Function& fn, const Bas
     FunctionDispatchTable& table = registry().dispatch_table();
     std::string why;
     auto plan = plan_osr_entry(fn, header, &why);
-    if (!plan) return nullptr;
+    if (!plan) {
+        timed.fail(why);
+        return nullptr;
+    }
     e->plan = std::move(*plan);
     e->plan.leave_check = region_has_call(e->plan);
     e->name = std::string(fn.name()) + ".osr" + std::to_string(header.id());
@@ -305,7 +308,10 @@ std::unique_ptr<Module> OsrCoordinator::copy_entry(const Function& fn, const Bas
         mod->set_allow_fp_reassociation(src->allow_fp_reassociation());
         mod->set_pinned_tls_register(src->pinned_tls_register());
         mod->copy_declarations_from(*src);
-        if (!build_osr_entry_function(e->plan, *mod, e->name, &why)) return nullptr;
+        if (!build_osr_entry_function(e->plan, *mod, e->name, &why)) {
+            timed.fail(why);
+            return nullptr;
+        }
         clone_callee_closure(*src, *mod, e->plan.region, targets, &fn);
         // Every program function the copy carries a body of has its handle
         // now: a guard of that body failing in the OSR code resumes through
@@ -317,7 +323,8 @@ std::unique_ptr<Module> OsrCoordinator::copy_entry(const Function& fn, const Bas
             if (const Function* def = src->get_function(f->name())) table.get_or_create(f->name(), def);
         }
         detail::bind_declared_handles(table, *mod, *src);
-    } catch (const std::exception&) {
+    } catch (const std::exception& ex) {
+        timed.fail(ex.what());
         return nullptr;
     }
     timed.set_ok(true);
@@ -328,8 +335,8 @@ void OsrCoordinator::compile_entry(const Function& fn, Module& copy, const std::
     Entry& e = *shared;
     Module* const mod = &copy;
     TierEventScope timed(TierEventKind::OsrCompile, fn.name());
-    auto fail = [&] {
-        timed.set_ok(false);
+    auto fail = [&](std::string_view why) {
+        timed.fail(why);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             e.state.store(Entry::State::Failed, std::memory_order_release);
@@ -339,7 +346,7 @@ void OsrCoordinator::compile_entry(const Function& fn, Module& copy, const std::
     FunctionDispatchTable& table = registry().dispatch_table();
     MultiTierPipeline& pipeline = table.pipeline();
     FunctionHandle* handle = table.find(fn.name());
-    if (!handle || handle->mir_function() != &fn) return fail();
+    if (!handle || handle->mir_function() != &fn) return fail("the function's handle was rebound");
 
     // The program's own functions this copy defines: their func_addrs yield
     // the program's addresses, their guards resume in their Functions.
@@ -354,34 +361,35 @@ void OsrCoordinator::compile_entry(const Function& fn, Module& copy, const std::
     std::shared_ptr<codegen::JitExecutionEngine> jit;
     try {
         std::string errors;
-        if (!detail::run_tier2_optimization_pipeline(*mod, table, errors)) return fail();
+        if (!detail::run_tier2_optimization_pipeline(*mod, table, errors)) return fail(errors);
         const Function* entry_fn = mod->get_function(e.name);
         std::string why;
-        if (!entry_fn || !deopt_targets_valid(*entry_fn, &fn, why)) return fail();
+        if (!entry_fn) return fail("the optimizer dropped the entry");
+        if (!deopt_targets_valid(*entry_fn, &fn, why)) return fail(why);
         // Every other body's guards need a Tier-0 Function to resume in (its
         // resumer, registered below): a guard failing where there is none
         // would be fatal, so such a copy stays uncompiled.
         for (const Function* f : mod->functions()) {
             if (!f || f->block_count() == 0 || f == entry_fn) continue;
             auto sib = siblings.find(std::string(f->name()));
-            if (!deopt_targets_valid(*f, sib != siblings.end() ? sib->second : nullptr, why)) return fail();
+            if (!deopt_targets_valid(*f, sib != siblings.end() ? sib->second : nullptr, why)) return fail(why);
         }
         // A loop of a function tier 1 rejected may call another such
         // function that nothing native can call.
-        if (detail::check_declared_functions(*mod, table, why) != detail::DeclaredLink::Linkable) return fail();
+        if (detail::check_declared_functions(*mod, table, why) != detail::DeclaredLink::Linkable) return fail(why);
         jit = detail::make_tier2_engine(table, Target::host());
         jit->set_code_tier(debug::JitTier::Osr);
         auto known = [&](std::string_view name) { return name == fn.name() || siblings.count(std::string(name)) != 0; };
         detail::canonicalize_function_addresses(*mod, known, pipeline, *jit);
         detail::link_declared_functions(*mod, table, *jit);
         detail::link_coroutine_bodies(*mod, table, *jit);
-        if (!jit->compile_and_load(*mod)) return fail();
-    } catch (const std::exception&) {
-        return fail();
+        if (!jit->compile_and_load(*mod)) return fail("the JIT rejected the entry's module");
+    } catch (const std::exception& ex) {
+        return fail(ex.what());
     }
 
     void* entry = jit->get_symbol_address(e.name);
-    if (!entry) return fail();
+    if (!entry) return fail("the entry has no address after loading");
     pipeline.add_stack_maps(jit->stack_maps());
     for (const auto& lf : jit->loaded_functions()) {
         const Function* f = mod->get_function(lf.name);
