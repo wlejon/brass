@@ -39,6 +39,7 @@ Function* clone_function(const Function& src, Module& dst_mod) {
         if (!src_bb) continue;
         BasicBlock* dst_bb = dst_fn->parent()->arena().make<BasicBlock>(src_bb->id(), dst_fn->parent()->string_pool().intern(src_bb->name()));
         dst_bb->set_parent(dst_fn);
+        dst_bb->set_cold(src_bb->is_cold());
         dst_fn->append_block(dst_bb);
         block_map[src_bb] = dst_bb;
 
@@ -74,11 +75,7 @@ Function* clone_function(const Function& src, Module& dst_mod) {
         for (const Instruction* src_inst : *src_bb) {
             if (!src_inst) continue;
             Instruction* dst_inst = dst_fn->parent()->arena().make<Instruction>(src_inst->opcode(), src_inst->type());
-            dst_inst->set_imm_i64(src_inst->imm_i64());
-            dst_inst->set_imm_f64(src_inst->imm_f64());
-            dst_inst->set_scale(src_inst->scale());
-            dst_inst->set_offset(src_inst->offset());
-            dst_inst->set_memory_type(src_inst->memory_type());
+            dst_inst->copy_attributes_from(*src_inst);
             dst_inst->set_barrier_cert(src_inst->barrier_cert());
             dst_inst->set_loc(src_inst->loc());
             if (!src_inst->symbol().empty()) dst_inst->set_symbol(dst_fn->parent()->string_pool().intern(src_inst->symbol()));

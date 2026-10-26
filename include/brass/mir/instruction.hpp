@@ -137,6 +137,32 @@ public:
     Type memory_type() const noexcept { return memory_type_; }
     void set_memory_type(Type t) noexcept { memory_type_ = t; }
 
+    // The memory a load or store touches, as its front end names it: two
+    // accesses of different non-zero classes never overlap (a table's
+    // header fields and its array's elements). 0 is any memory.
+    uint8_t alias_class() const noexcept { return alias_class_; }
+    void set_alias_class(uint8_t c) noexcept { alias_class_ = c; }
+
+    // A call its front end wants inlined (a call it has bet the callee of,
+    // in a hot path): the inliner weighs the callee against its hinted
+    // budget (InlinerOptions::hinted_callee_instruction_count), not the
+    // general one.
+    bool inline_hint() const noexcept { return inline_hint_; }
+    void set_inline_hint(bool hint = true) noexcept { inline_hint_ = hint; }
+
+    // The plain attributes a copy of `src` keeps: immediates, scale, offset,
+    // memory type, alias class, inline hint (not symbols, which live in a
+    // module's pool, nor the debug location or a barrier certificate).
+    void copy_attributes_from(const Instruction& src) noexcept {
+        imm_i64_ = src.imm_i64_;
+        imm_f64_ = src.imm_f64_;
+        scale_ = src.scale_;
+        offset_ = src.offset_;
+        memory_type_ = src.memory_type_;
+        alias_class_ = src.alias_class_;
+        inline_hint_ = src.inline_hint_;
+    }
+
     std::string_view symbol() const noexcept { return symbol_; }
     void set_symbol(std::string_view sym) noexcept { symbol_ = sym; }
 
@@ -219,6 +245,8 @@ private:
     double imm_f64_ = 0.0;
     int32_t offset_ = 0;
     uint8_t scale_ = 1;
+    uint8_t alias_class_ = 0;
+    bool inline_hint_ = false;
     BarrierCertKind barrier_cert_ = BarrierCertKind::None;
     Type memory_type_ = Type::void_type();
 

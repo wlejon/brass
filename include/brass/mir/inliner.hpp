@@ -19,6 +19,10 @@ struct InlinerOptions {
     double loop_call_priority_bonus = 4.0;
     size_t max_callee_instruction_count = 120;
     size_t max_total_caller_instructions = 1000;
+    // A call with an inline hint (Instruction::inline_hint) inlines a callee
+    // of up to this many (non-cold) instructions, leaf or not, so long as the
+    // caller stays within max_total_caller_instructions.
+    size_t hinted_callee_instruction_count = 600;
     // Rewrites every patchable_call to a direct call of its default target.
     // Only correct when nothing will ever patch those sites (brass_patch_call,
     // inline caches), which the compiler cannot know, so it is opt-in.

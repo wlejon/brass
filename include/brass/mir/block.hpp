@@ -106,6 +106,12 @@ public:
     Function* parent() const noexcept { return parent_; }
     void set_parent(Function* fn) noexcept { parent_ = fn; }
 
+    // A block its front end expects to run rarely (a slow path, a guard's
+    // exit): the inliner does not count it in a callee's size nor inline the
+    // calls in it. Only a hint, so a pass that makes blocks need not keep it.
+    bool is_cold() const noexcept { return cold_; }
+    void set_cold(bool cold = true) noexcept { cold_ = cold; }
+
     const std::vector<Value*>& params() const noexcept { return params_; }
     std::vector<Value*>& params() noexcept { return params_; }
     Value* param(size_t index) const noexcept {
@@ -154,6 +160,7 @@ private:
     uint32_t id_ = 0;
     std::string_view name_;
     Function* parent_ = nullptr;
+    bool cold_ = false;
 
     std::vector<Value*> params_;
 

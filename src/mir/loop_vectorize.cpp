@@ -488,11 +488,7 @@ bool vectorize_loop(
         if (inst->is_terminator()) break;
 
         Instruction* cloned = fn.parent()->arena().make<Instruction>(inst->opcode(), inst->type());
-        cloned->set_imm_i64(inst->imm_i64());
-        cloned->set_imm_f64(inst->imm_f64());
-        cloned->set_scale(inst->scale());
-        cloned->set_offset(inst->offset());
-        cloned->set_memory_type(inst->memory_type());
+        cloned->copy_attributes_from(*inst);
         if (!inst->symbol().empty()) cloned->set_symbol(fn.parent()->string_pool().intern(inst->symbol()));
 
         for (Value* op : inst->operands()) {

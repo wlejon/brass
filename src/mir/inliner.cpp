@@ -20,10 +20,12 @@ namespace brass {
 
 namespace {
 
+// A function's size as inlining weighs it: its blocks' instructions, cold
+// ones not counted (a slow path inlined costs code, not time).
 size_t get_function_instruction_count(const Function& fn) {
     size_t count = 0;
     for (const BasicBlock* bb : fn.blocks()) {
-        if (bb) {
+        if (bb && !bb->is_cold()) {
             count += bb->instruction_count();
         }
     }
@@ -52,13 +54,19 @@ bool should_inline_call(
     size_t current_caller_size,
     const InlinerOptions& options
 ) {
-    (void)site;
     if (&caller == &callee) return false;
     if (caller.name().starts_with("__wrapper_") || callee.name().starts_with("__wrapper_")) return false;
     if (callee.blocks().empty() || !callee.entry_block()) return false;
 
     // Reject recursive cycles to prevent code explosion
     if (cg.is_recursive(&callee)) return false;
+
+    // A call its front end asks to inline: the hinted budget alone.
+    if (site.instruction && site.instruction->inline_hint()) {
+        const size_t size = get_function_instruction_count(callee);
+        return current_depth < options.max_inline_depth && size <= options.hinted_callee_instruction_count &&
+               current_caller_size + size <= options.max_total_caller_instructions;
+    }
 
     // If restricted to leaf functions for stack trace / unwind safety, reject non-leaf callees
     if (options.only_inline_leaf_functions && !cg.is_leaf(&callee)) return false;
@@ -160,7 +168,7 @@ bool inline_function(Function& fn, Module& mod, const InlinerOptions& options, c
         // Discover candidate call sites
         std::vector<InlineCandidate> candidates;
         for (BasicBlock* bb : fn.blocks()) {
-            if (!bb) continue;
+            if (!bb || bb->is_cold()) continue;
             for (Instruction* inst : *bb) {
                 if (!inst || (inst->opcode() != Opcode::call && inst->opcode() != Opcode::invoke)) continue;
 

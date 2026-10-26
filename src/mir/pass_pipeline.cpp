@@ -11,9 +11,7 @@ Pipeline pass_pipeline(const PassPipelineOptions& options) {
     if (options.enable_sroa) p.add(passes::sroa());
     if (options.enable_inlining) {
         if (options.enable_speculative_inlining) p.add(passes::speculative_devirtualization());
-        InlinerOptions inliner;
-        inliner.only_inline_leaf_functions = options.inline_leaf_only;
-        p.add(passes::inline_calls(inliner));
+        p.add(passes::inline_calls(options.inliner));
         // Inlined bodies bring their allocations into the caller.
         if (options.enable_sroa) p.add(passes::sroa("sroa 2"));
     }
@@ -50,7 +48,7 @@ PassPipelineOptions production_pass_pipeline_options() {
     p.enable_sroa = true;
     p.enable_inlining = false;
     p.enable_speculative_inlining = false;
-    p.inline_leaf_only = true;
+    p.inliner.only_inline_leaf_functions = true;
     p.enable_gvn = true;
     p.enable_gvn_pre = true;
     p.enable_sccp = true;

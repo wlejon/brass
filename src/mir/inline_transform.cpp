@@ -22,11 +22,17 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
     // A guard deopts the function it is in: its exit stub's result is that
     // function's result and its resume id names that function's Tier-0
     // guard. Copied into the caller it would finish the caller with the
-    // callee's exit, so callees with guards are not inlined.
+    // callee's exit; instead the copy branches, where it fails, to a call of
+    // the exit stub, whose result is the inlined call's. A guard with no
+    // stub (one resuming in a Tier-0 frame) keeps its callee out of line, as
+    // does any guard at an invoke site (the stub may raise).
+    const bool is_invoke_site = call_inst->opcode() == Opcode::invoke;
     for (const BasicBlock* bb : callee.blocks()) {
         if (!bb) continue;
         for (const Instruction* inst : *const_cast<BasicBlock*>(bb)) {
-            if (inst && inst->opcode() == Opcode::guard) return result;
+            if (inst && inst->opcode() == Opcode::guard && (is_invoke_site || !callee.guard_exit_stub(*inst))) {
+                return result;
+            }
         }
     }
 
@@ -131,6 +137,7 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
             mod->string_pool().intern(cloned_name)
         );
         cloned_bb->set_parent(&caller);
+        cloned_bb->set_cold(src_bb->is_cold());
         block_map[src_bb] = cloned_bb;
         cloned_blocks.push_back(cloned_bb);
 
@@ -180,6 +187,14 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
 
     // 6. Clone callee instructions into cloned blocks (two passes to resolve any out-of-order block references)
     std::vector<std::pair<const Instruction*, Instruction*>> inst_pairs;
+    // Each guard copied as a branch and a call of its exit stub, whose
+    // operands (the condition, the state) are mapped with the rest below.
+    struct GuardExit {
+        const Instruction* guard;
+        Instruction* branch;
+        Instruction* stub_call;
+    };
+    std::vector<GuardExit> guard_exits;
     std::unordered_map<const BasicBlock*, BasicBlock*> final_block_map;
     for (const BasicBlock* src_bb : callee.blocks()) {
         if (!src_bb) continue;
@@ -200,15 +215,12 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
                     mod->string_pool().intern(std::string(dst_bb->name()) + ".call_cont")
                 );
                 cont_bb->set_parent(&caller);
+                cont_bb->set_cold(dst_bb->is_cold());
                 cloned_blocks.push_back(cont_bb);
 
                 Instruction* dst_inst = mod->arena().make<Instruction>(Opcode::invoke, src_inst->type());
                 dst_inst->set_loc(wrap_loc(src_inst->loc()));
-                dst_inst->set_imm_i64(src_inst->imm_i64());
-                dst_inst->set_imm_f64(src_inst->imm_f64());
-                dst_inst->set_scale(src_inst->scale());
-                dst_inst->set_offset(src_inst->offset());
-                dst_inst->set_memory_type(src_inst->memory_type());
+                dst_inst->copy_attributes_from(*src_inst);
                 if (!src_inst->symbol().empty()) {
                     dst_inst->set_symbol(mod->string_pool().intern(src_inst->symbol()));
                 }
@@ -237,13 +249,52 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
                 continue;
             }
 
+            if (src_inst->opcode() == Opcode::guard) {
+                // br_if %cond, cont, exit; exit: the stub's result is the call's.
+                auto make_block = [&](std::string_view suffix) {
+                    BasicBlock* nb = mod->arena().make<BasicBlock>(
+                        caller.next_block_id(),
+                        mod->string_pool().intern(std::string(dst_bb->name()) + std::string(suffix)));
+                    nb->set_parent(&caller);
+                    cloned_blocks.push_back(nb);
+                    return nb;
+                };
+                BasicBlock* cont_bb = make_block(".guard_ok");
+                cont_bb->set_cold(dst_bb->is_cold());
+                BasicBlock* exit_bb = make_block(".guard_exit");
+                exit_bb->set_cold();
+                Instruction* br = mod->arena().make<Instruction>(Opcode::br_if, Type::void_type());
+                br->set_loc(wrap_loc(src_inst->loc()));
+                br->set_true_target(BranchTarget(cont_bb, {}));
+                br->set_false_target(BranchTarget(exit_bb, {}));
+                dst_bb->append_instruction(br);
+
+                const Function* stub = callee.guard_exit_stub(*src_inst);
+                Instruction* stub_call = mod->arena().make<Instruction>(Opcode::call, stub->return_type());
+                stub_call->set_loc(wrap_loc(src_inst->loc()));
+                stub_call->set_symbol(mod->string_pool().intern(stub->name()));
+                std::vector<Value*> tail_args;
+                if (!stub->return_type().is_void()) {
+                    Value* r = mod->arena().make<Value>(caller.next_value_id(), stub->return_type(),
+                                                        ValueKind::InstructionResult);
+                    r->set_defining_instruction(stub_call);
+                    stub_call->set_result(r);
+                    if (ret_param) tail_args.push_back(r);
+                }
+                exit_bb->append_instruction(stub_call);
+                Instruction* to_tail = mod->arena().make<Instruction>(Opcode::br, Type::void_type());
+                to_tail->set_loc(wrap_loc(src_inst->loc()));
+                to_tail->set_branch_target(BranchTarget(split_tail, std::move(tail_args)));
+                exit_bb->append_instruction(to_tail);
+                guard_exits.push_back({src_inst, br, stub_call});
+
+                dst_bb = cont_bb;
+                continue;
+            }
+
             Instruction* dst_inst = mod->arena().make<Instruction>(src_inst->opcode(), src_inst->type());
             dst_inst->set_loc(wrap_loc(src_inst->loc()));
-            dst_inst->set_imm_i64(src_inst->imm_i64());
-            dst_inst->set_imm_f64(src_inst->imm_f64());
-            dst_inst->set_scale(src_inst->scale());
-            dst_inst->set_offset(src_inst->offset());
-            dst_inst->set_memory_type(src_inst->memory_type());
+            dst_inst->copy_attributes_from(*src_inst);
             if (!src_inst->symbol().empty()) {
                 dst_inst->set_symbol(mod->string_pool().intern(src_inst->symbol()));
             }
@@ -263,7 +314,13 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
                 value_map[src_res] = dst_res;
             }
 
-            dst_bb->append_instruction(dst_inst);
+            // The callee's frame slots (its entry's allocas) become the
+            // caller's: allocated once, in its entry, not per call.
+            if (src_inst->opcode() == Opcode::alloca_ && src_bb == callee_entry) {
+                caller.entry_block()->prepend_instruction(dst_inst);
+            } else {
+                dst_bb->append_instruction(dst_inst);
+            }
             inst_pairs.emplace_back(src_inst, dst_inst);
         }
         final_block_map[src_bb] = dst_bb;
@@ -296,6 +353,10 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
             dst_inst->set_normal_target(map_target(src_inst->normal_target()));
             dst_inst->set_unwind_target(map_target(src_inst->unwind_target()));
         }
+    }
+    for (const GuardExit& ge : guard_exits) {
+        ge.branch->add_operand(map_val(ge.guard->operand(0)));
+        for (const Value* sv : ge.guard->state_map()) ge.stub_call->add_operand(map_val(sv));
     }
 
     // 6c. Remap ret instructions to br split_tail(...)

@@ -49,11 +49,7 @@ Instruction* clone_shell(Function& fn, const Instruction& src, ValueMap& values)
     Instruction* dst = fn.parent()
         ? fn.parent()->arena().make<Instruction>(src.opcode(), src.type())
         : new Instruction(src.opcode(), src.type());
-    dst->set_imm_i64(src.imm_i64());
-    dst->set_imm_f64(src.imm_f64());
-    dst->set_scale(src.scale());
-    dst->set_offset(src.offset());
-    dst->set_memory_type(src.memory_type());
+    dst->copy_attributes_from(src);
     dst->set_symbol(intern(fn, src.symbol()));
     dst->set_extra_symbol(intern(fn, src.extra_symbol()));
     dst->set_loc(src.loc());

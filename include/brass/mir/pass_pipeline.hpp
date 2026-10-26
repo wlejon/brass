@@ -1,6 +1,7 @@
 #pragma once
 
 #include <brass/mir/module.hpp>
+#include <brass/mir/inliner.hpp>
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/pass_manager.hpp>
 
@@ -19,7 +20,8 @@ struct PassPipelineOptions {
     bool enable_sroa = false;
     bool enable_inlining = false;
     bool enable_speculative_inlining = false;
-    bool inline_leaf_only = false;
+    // What the inliner inlines (with enable_inlining).
+    InlinerOptions inliner;
     bool enable_gvn = true;
     bool enable_gvn_pre = true;
     bool enable_sccp = true;

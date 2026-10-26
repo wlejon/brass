@@ -1,6 +1,7 @@
 #include <brass/mir/loop_unroll.hpp>
 #include "loop_unroll_analysis.hpp"
 #include <brass/mir/builder.hpp>
+#include <brass/mir/uses.hpp>
 #include <brass/mir/verifier.hpp>
 #include <vector>
 #include <unordered_map>
@@ -304,11 +305,7 @@ bool unroll_loop(
                 if (is_serial_update) continue;
 
                 Instruction* cloned = fn.parent()->arena().make<Instruction>(inst->opcode(), inst->type());
-                cloned->set_imm_i64(inst->imm_i64());
-                cloned->set_imm_f64(inst->imm_f64());
-                cloned->set_scale(inst->scale());
-                cloned->set_offset(inst->offset());
-                cloned->set_memory_type(inst->memory_type());
+                cloned->copy_attributes_from(*inst);
                 if (!inst->symbol().empty()) cloned->set_symbol(fn.parent()->string_pool().intern(inst->symbol()));
 
                 for (Value* op : inst->operands()) {
@@ -343,11 +340,7 @@ bool unroll_loop(
                 iter_val_map[orig_param] = serial_acc_map[red_i];
 
                 Instruction* cloned = fn.parent()->arena().make<Instruction>(inst->opcode(), inst->type());
-                cloned->set_imm_i64(inst->imm_i64());
-                cloned->set_imm_f64(inst->imm_f64());
-                cloned->set_scale(inst->scale());
-                cloned->set_offset(inst->offset());
-                cloned->set_memory_type(inst->memory_type());
+                cloned->copy_attributes_from(*inst);
                 if (!inst->symbol().empty()) cloned->set_symbol(fn.parent()->string_pool().intern(inst->symbol()));
 
                 for (Value* op : inst->operands()) {
@@ -406,11 +399,7 @@ bool unroll_loop(
                 if (inst->is_terminator()) break;
 
                 Instruction* cloned = fn.parent()->arena().make<Instruction>(inst->opcode(), inst->type());
-                cloned->set_imm_i64(inst->imm_i64());
-                cloned->set_imm_f64(inst->imm_f64());
-                cloned->set_scale(inst->scale());
-                cloned->set_offset(inst->offset());
-                cloned->set_memory_type(inst->memory_type());
+                cloned->copy_attributes_from(*inst);
                 if (!inst->symbol().empty()) cloned->set_symbol(fn.parent()->string_pool().intern(inst->symbol()));
 
                 for (Value* op : inst->operands()) {
@@ -590,11 +579,7 @@ bool unroll_loop(
         if (inst->is_terminator()) break;
 
         Instruction* cloned = fn.parent()->arena().make<Instruction>(inst->opcode(), inst->type());
-        cloned->set_imm_i64(inst->imm_i64());
-        cloned->set_imm_f64(inst->imm_f64());
-        cloned->set_scale(inst->scale());
-        cloned->set_offset(inst->offset());
-        cloned->set_memory_type(inst->memory_type());
+        cloned->copy_attributes_from(*inst);
         if (!inst->symbol().empty()) cloned->set_symbol(fn.parent()->string_pool().intern(inst->symbol()));
 
         for (Value* op : inst->operands()) {
@@ -669,30 +654,9 @@ bool unroll_loop(
                 bb == rem_hdr || bb == rem_body || loop.contains(bb)) {
                 continue;
             }
+            // Every use: operands, a guard's state, block arguments.
             for (Instruction* inst : *bb) {
-                for (Value* op : inst->operands()) {
-                    if (op == hp) { is_used_outside = true; break; }
-                }
-                if (is_used_outside) break;
-                for (Value* a : inst->branch_target().args) {
-                    if (a == hp) { is_used_outside = true; break; }
-                }
-                if (is_used_outside) break;
-                for (Value* a : inst->true_target().args) {
-                    if (a == hp) { is_used_outside = true; break; }
-                }
-                if (is_used_outside) break;
-                for (Value* a : inst->false_target().args) {
-                    if (a == hp) { is_used_outside = true; break; }
-                }
-                if (is_used_outside) break;
-                for (const auto& sc : inst->switch_cases()) {
-                    for (Value* a : sc.target.args) {
-                        if (a == hp) { is_used_outside = true; break; }
-                    }
-                    if (is_used_outside) break;
-                }
-                if (is_used_outside) break;
+                if (uses_value(*inst, hp)) { is_used_outside = true; break; }
             }
             if (is_used_outside) break;
         }
@@ -718,20 +682,7 @@ bool unroll_loop(
                 bb == rem_hdr || bb == rem_body || loop.contains(bb)) {
                 continue;
             }
-            for (Instruction* inst : *bb) {
-                for (size_t op_i = 0; op_i < inst->operand_count(); ++op_i) {
-                    Value* op = inst->operand(op_i);
-                    if (op && exit_rewrite_map.count(op)) {
-                        inst->set_operand(op_i, exit_rewrite_map[op]);
-                    }
-                }
-                for (Value*& a : inst->branch_target().args) update_val(a);
-                for (Value*& a : inst->true_target().args) update_val(a);
-                for (Value*& a : inst->false_target().args) update_val(a);
-                for (auto& sc : inst->switch_cases()) {
-                    for (Value*& a : sc.target.args) update_val(a);
-                }
-            }
+            for (Instruction* inst : *bb) for_each_use_slot(*inst, update_val);
         }
     }
 
