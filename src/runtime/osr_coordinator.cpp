@@ -251,6 +251,19 @@ void OsrCoordinator::request_entry(const Function& fn, const BasicBlock& header,
     FunctionHandle* handle = table.get_or_create(fn.name(), &fn);
     if (!fn.parent() || !handle || handle->mir_function() != &fn) return fail("the function's handle is another's");
 
+    // A coroutine body has no OSR entry (plan_osr_entry), but its frames
+    // resume in the body's best tier, so the whole body's Tier-2 code is what
+    // a hot loop in it wants: the frame's next resume (an `await` in the loop,
+    // the shape of work done in frame-sized slices) runs it. Without this the
+    // request failed at planning and nothing else asked, and a body called
+    // once ran every slice of its loop interpreted.
+    if (fn.has_coro_frame_layout()) {
+        MultiTierPipeline& pipeline = table.pipeline();
+        if (pipeline.config().enable_background_compile)
+            pipeline.enqueue_tier2(fn.name(), fn.parent(), handle, CompilePriority::High);
+        return fail("a coroutine body: its next resume runs the body's Tier-2 code");
+    }
+
     // Only the call targets are read here, on the interpreter's thread: its
     // type feedback grows as it runs. Planning the entry and copying it
     // with its callees read the program's MIR, which running it does not
