@@ -4,9 +4,11 @@
 #include <brass/gc/stack_map.hpp>
 #include <brass/gc/stack_walker.hpp>
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <vector>
 
 #if defined(_WIN32)
@@ -64,6 +66,8 @@ namespace {
 // that collections walk.
 struct StackRecord {
     StackChains chains;
+    void* locals[kMaxStackLocals] = {};  // what each stack local saved here (StackLocal)
+    bool entered = false;            // has run at least once (a fiber's first resume is fresh)
     StackRecord* resumer = nullptr;  // the stack this one returns to when it suspends
     StackRecord* prev = nullptr;     // the thread's switched-out list
     StackRecord* next = nullptr;
@@ -89,6 +93,41 @@ thread_local StackRecord* t_running = nullptr;       // null: the thread's own s
 thread_local StackRecord* t_switched_out = nullptr;  // head of the list
 
 StackRecord* running_record() noexcept { return t_running ? t_running : &t_own_stack; }
+
+// The registered stack locals: written once per index before its count is
+// published, read by every switch after.
+StackLocal g_stack_locals[kMaxStackLocals];
+std::atomic<int> g_stack_local_count{0};
+std::mutex& stack_local_mutex() {
+    static std::mutex m;
+    return m;
+}
+
+void release_locals(StackRecord& r) noexcept {
+    const int n = g_stack_local_count.load(std::memory_order_acquire);
+    for (int i = 0; i < n; ++i) {
+        if (r.locals[i] != nullptr && g_stack_locals[i].release) g_stack_locals[i].release(r.locals[i]);
+        r.locals[i] = nullptr;
+    }
+}
+
+void exchange_locals(StackRecord* from, StackRecord* to, bool from_stays) {
+    const int n = g_stack_local_count.load(std::memory_order_acquire);
+    if (n == 0) {
+        to->entered = true;
+        return;
+    }
+    for (int i = 0; i < n; ++i) {
+        if (g_stack_locals[i].save) g_stack_locals[i].save(&from->locals[i]);
+    }
+    // The thread's own stack was running before any switch: never fresh.
+    const bool fresh = !to->entered && to->fiber != nullptr;
+    for (int i = 0; i < n; ++i) {
+        if (g_stack_locals[i].restore) g_stack_locals[i].restore(&to->locals[i], fresh);
+    }
+    to->entered = true;
+    if (!from_stays) release_locals(*from);
+}
 
 void link_switched_out(StackRecord* r) noexcept {
     r->prev = nullptr;
@@ -185,6 +224,7 @@ BRASS_FIBER_NOINLINE void machine_switch(StackRecord* from, StackRecord* to, boo
 // the running stack named before the machine switch, so whatever runs on
 // `to` first (a collection included) sees the thread as it now is.
 void switch_stacks(StackRecord* from, StackRecord* to, bool from_stays) {
+    exchange_locals(from, to, from_stays);
     from->chains = brass_exchange_stack_chains(to->chains);
     to->chains = StackChains{};
     if (from_stays) link_switched_out(from);
@@ -295,6 +335,8 @@ std::unique_ptr<Fiber> Fiber::create(Entry entry, void* arg, size_t stack_bytes)
             reused->rec.chains = StackChains{};
             reused->rec.resumer = nullptr;
             reused->rec.active = false;
+            reused->rec.entered = false;
+            release_locals(reused->rec);
             return std::unique_ptr<Fiber>(new Fiber(std::move(reused)));
         }
     }
@@ -387,6 +429,9 @@ std::unique_ptr<Fiber> Fiber::create(Entry entry, void* arg, size_t stack_bytes)
 Fiber::~Fiber() {
     if (impl_->rec.active) fiber_fatal("a fiber was destroyed while running or waiting on a fiber it resumed");
     unlink_switched_out(&impl_->rec);
+    // A fiber destroyed while suspended never runs again: what its stack
+    // saved goes now (a finished one released its own as it ended).
+    release_locals(impl_->rec);
     if (impl_->finished && t_fiber_pool.free_list.size() < FiberPool::kMaxCached) {
         impl_->rec.fiber = nullptr;
         t_fiber_pool.free_list.push_back(std::move(impl_));
@@ -453,6 +498,44 @@ void Fiber::for_each_stack_span(uintptr_t sp, void (*fn)(void* ctx, const StackS
         s.high = r->top;
 #endif
         fn(ctx, s);
+    }
+}
+
+void Fiber::stack_bounds(uintptr_t& low, uintptr_t& high) const noexcept {
+    low = high = 0;
+#if defined(BRASS_FIBER_SYSTEM)
+    low = impl_->rec.low;
+    high = impl_->rec.high;
+    if (Fiber::current() == this) {
+        PNT_TIB tib = reinterpret_cast<PNT_TIB>(NtCurrentTeb());
+        // The reservation's base: the TIB's limit is only what is committed.
+        ULONG_PTR lo = 0, hi = 0;
+        GetCurrentThreadStackLimits(&lo, &hi);
+        low = static_cast<uintptr_t>(lo);
+        high = reinterpret_cast<uintptr_t>(tib->StackBase);
+    }
+#else
+    // The page below the stack is never usable (the guard, or on Windows
+    // the reservation's floor the guard page moves down to).
+    const size_t page = page_size();
+    low = reinterpret_cast<uintptr_t>(impl_->mapping) + page;
+    high = reinterpret_cast<uintptr_t>(impl_->mapping) + impl_->mapping_bytes;
+#endif
+}
+
+int register_stack_local(const StackLocal& local) {
+    std::lock_guard<std::mutex> lock(stack_local_mutex());
+    const int n = g_stack_local_count.load(std::memory_order_relaxed);
+    if (n >= kMaxStackLocals) fiber_fatal("too many stack locals (kMaxStackLocals)");
+    g_stack_locals[n] = local;
+    g_stack_local_count.store(n + 1, std::memory_order_release);
+    return n;
+}
+
+void for_each_switched_stack_local(int index, void (*fn)(void* ctx, void* value), void* ctx) {
+    if (index < 0 || index >= kMaxStackLocals) return;
+    for (StackRecord* r = t_switched_out; r != nullptr; r = r->next) {
+        if (r->locals[index] != nullptr) fn(ctx, r->locals[index]);
     }
 }
 

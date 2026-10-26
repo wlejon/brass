@@ -1,6 +1,7 @@
 #include <brass/runtime/coroutine.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/gc/heap.hpp>
+#include <brass/gc/fiber.hpp>
 #include <brass/gc/native_frames.hpp>
 #include <brass/embedding/nanbox.hpp>
 #include <brass/interpreter/interpreter.hpp>
@@ -647,6 +648,25 @@ namespace {
 // The root slots of the frames being resumed on this thread, innermost
 // last (each is a root its resumer registered, so it names the live copy).
 thread_local std::vector<uintptr_t*> t_running_frames;
+// Per stack (gc::StackLocal): a body resumed on a fiber is that stack's
+// current frame, not the one a suspended stack was resuming. The slot keeps
+// one vector per stack, swapped with the thread's.
+[[maybe_unused]] const int k_running_frames_local = gc::register_stack_local(gc::StackLocal{
+    [](void** slot) {
+        auto* box = static_cast<std::vector<uintptr_t*>*>(*slot);
+        if (!box) {
+            if (t_running_frames.empty()) return;
+            box = new std::vector<uintptr_t*>();
+            *slot = box;
+        }
+        box->swap(t_running_frames);
+    },
+    [](void** slot, bool) {
+        auto* box = static_cast<std::vector<uintptr_t*>*>(*slot);
+        if (box) box->swap(t_running_frames);
+        else t_running_frames.clear();
+    },
+    [](void* value) { delete static_cast<std::vector<uintptr_t*>*>(value); }});
 } // namespace
 
 RunningCoroScope::RunningCoroScope(uintptr_t* frame_root) {

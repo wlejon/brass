@@ -7,6 +7,7 @@
 
 #include <brass/gc/fiber.hpp>
 
+#include <algorithm>
 #include <cfenv>
 #include <cmath>
 #include <cstring>
@@ -251,6 +252,103 @@ TEST_CASE("gc::Fiber - a switched-out stack's words are in its span") {
     f->resume();
     CHECK(f->finished());
     CHECK_EQ(m.word, 0x5EC0DE5EC0DE1235ull);
+}
+
+// A stack local over a thread_local "scope chain head": each stack sees only
+// what it pushed, a fiber starts with what `restore` picks for a fresh
+// stack, the suspended stacks' values are enumerable, and a fiber destroyed
+// while suspended has its value released.
+thread_local intptr_t t_scope_head = 0;
+int g_released = 0;
+int g_fresh_restores = 0;
+
+const int k_test_local = register_stack_local(StackLocal{
+    [](void** slot) { *slot = reinterpret_cast<void*>(t_scope_head); },
+    [](void** slot, bool fresh) {
+        if (fresh) {
+            ++g_fresh_restores;
+            t_scope_head = 0;
+        } else {
+            t_scope_head = reinterpret_cast<intptr_t>(*slot);
+        }
+        *slot = nullptr;
+    },
+    [](void*) { ++g_released; }});
+
+struct LocalArgs {
+    intptr_t seen_at_start = -1;
+    intptr_t seen_after_resume = -1;
+    intptr_t mine = 0;
+};
+
+void local_entry(void* arg) {
+    auto* a = static_cast<LocalArgs*>(arg);
+    a->seen_at_start = t_scope_head;
+    t_scope_head = a->mine;
+    Fiber::suspend();
+    a->seen_after_resume = t_scope_head;
+    t_scope_head = a->mine + 1;
+    Fiber::suspend();
+}
+
+void collect_local(void* ctx, void* value) {
+    static_cast<std::vector<intptr_t>*>(ctx)->push_back(reinterpret_cast<intptr_t>(value));
+}
+
+TEST_CASE("gc::Fiber - stack locals are per stack, enumerable while switched out, released with the fiber") {
+    t_scope_head = 7;
+    const int fresh_before = g_fresh_restores;
+    LocalArgs a, b;
+    a.mine = 100;
+    b.mine = 200;
+    auto fa = Fiber::create(&local_entry, &a, 64 * 1024);
+    auto fb = Fiber::create(&local_entry, &b, 64 * 1024);
+    fa->resume();
+    CHECK_EQ(a.seen_at_start, 0);  // a fresh stack starts empty
+    CHECK_EQ(t_scope_head, 7);     // the host's own value is back
+    fb->resume();
+    CHECK_EQ(b.seen_at_start, 0);
+    CHECK_EQ(g_fresh_restores - fresh_before, 2);
+    t_scope_head = 8;
+    std::vector<intptr_t> saved;
+    for_each_switched_stack_local(k_test_local, &collect_local, &saved);
+    std::sort(saved.begin(), saved.end());
+    REQUIRE(saved.size() == 2);
+    CHECK_EQ(saved[0], 100);
+    CHECK_EQ(saved[1], 200);
+    fb->resume();
+    CHECK_EQ(b.seen_after_resume, 200);
+    fa->resume();
+    CHECK_EQ(a.seen_after_resume, 100);
+    CHECK_EQ(t_scope_head, 8);
+    const int released_before = g_released;
+    fa.reset();  // suspended, holding 101
+    CHECK_EQ(g_released - released_before, 1);
+    fb->resume();  // finishes: its last value is released as it ends
+    CHECK(fb->finished());
+    CHECK_EQ(g_released - released_before, 2);
+    CHECK_EQ(t_scope_head, 8);
+    t_scope_head = 0;
+}
+
+TEST_CASE("gc::Fiber - a fiber's stack bounds hold its frames") {
+    struct Probe {
+        uintptr_t addr = 0;
+    } probe;
+    auto f = Fiber::create(
+        [](void* arg) {
+            volatile int local = 0;
+            static_cast<Probe*>(arg)->addr = reinterpret_cast<uintptr_t>(&local);
+        },
+        &probe, 64 * 1024);
+    f->resume();
+    uintptr_t low = 0, high = 0;
+    f->stack_bounds(low, high);
+#if !defined(_WIN32) || defined(_M_X64)
+    CHECK(low < probe.addr);
+    CHECK(probe.addr < high);
+    CHECK(high - low >= 64 * 1024);
+#endif
 }
 
 TEST_CASE("gc::Fiber - finished fibers' stacks are reused and many switches stay cheap") {

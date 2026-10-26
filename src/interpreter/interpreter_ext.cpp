@@ -1,5 +1,6 @@
 #include <brass/interpreter/interpreter.hpp>
 #include <brass/gc/runtime_gc.hpp>
+#include <brass/gc/fiber.hpp>
 #include <brass/runtime/parallel_runtime.hpp>
 #include <brass/runtime/coroutine.hpp>
 #include <brass/runtime/code_installer.hpp>
@@ -15,6 +16,14 @@ namespace {
 thread_local void* s_interp_red_target = nullptr;
 thread_local runtime::ReductionKind s_interp_red_kind = runtime::ReductionKind::None;
 thread_local Interpreter* s_active_interp = nullptr;
+// Per stack, as the fast interpreter's current one (fast_interpreter_state.cpp).
+[[maybe_unused]] const int k_active_interp_local = gc::register_stack_local(gc::StackLocal{
+    [](void** slot) { *slot = s_active_interp; },
+    [](void** slot, bool fresh) {
+        s_active_interp = fresh ? nullptr : static_cast<Interpreter*>(*slot);
+        *slot = nullptr;
+    },
+    nullptr});
 } // namespace
 
 Interpreter::ActiveScope::ActiveScope(Interpreter* interp) noexcept

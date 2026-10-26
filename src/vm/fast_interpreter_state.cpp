@@ -3,6 +3,7 @@
 // The dispatch loop lives in fast_interpreter.cpp.
 
 #include "fast_interpreter_impl.hpp"
+#include <brass/gc/fiber.hpp>
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <atomic>
@@ -113,6 +114,28 @@ static thread_local FastFrame* s_thread_frame_top = nullptr;
 FastFrame*& FastInterpreter::thread_frame_top() noexcept {
     return s_thread_frame_top;
 }
+
+// Both are per STACK (gc::StackLocal): an interpreter's frames sit on one
+// stack, so a fiber starts with no current interpreter and an empty frame
+// chain, and a native-to-Tier-0 call on it takes an interpreter of its own
+// (call_tier0_from_native) instead of one whose frames are suspended on
+// another stack.
+namespace {
+[[maybe_unused]] const int k_current_interp_local = gc::register_stack_local(gc::StackLocal{
+    [](void** slot) { *slot = s_current_fast_interp; },
+    [](void** slot, bool fresh) {
+        s_current_fast_interp = fresh ? nullptr : static_cast<FastInterpreter*>(*slot);
+        *slot = nullptr;
+    },
+    nullptr});
+[[maybe_unused]] const int k_frame_top_local = gc::register_stack_local(gc::StackLocal{
+    [](void** slot) { *slot = s_thread_frame_top; },
+    [](void** slot, bool fresh) {
+        s_thread_frame_top = fresh ? nullptr : static_cast<FastFrame*>(*slot);
+        *slot = nullptr;
+    },
+    nullptr});
+} // namespace
 
 void FastInterpreter::for_each_frame_on_thread(const std::function<bool(const InterpretedFrameInfo&)>& visit) {
     for (const FastFrame* f = s_thread_frame_top; f; f = f->thread_prev) {

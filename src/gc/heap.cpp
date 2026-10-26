@@ -5,6 +5,7 @@
 #include "heap_internal.hpp"
 
 #include <brass/core/env.hpp>
+#include <brass/gc/fiber.hpp>
 #include <brass/gc/gc_limits.hpp>
 #include <brass/runtime/coroutine.hpp>
 
@@ -35,6 +36,17 @@ __attribute__((visibility("default"))) thread_local Heap* t_current_heap = nullp
 using detail::t_current_heap;
 
 namespace {
+
+// Per stack (StackLocal): set and restored around each interpreter frame
+// and runtime entry on one stack. A fiber starts on the heap current where
+// it was first resumed.
+[[maybe_unused]] const int k_current_heap_local = register_stack_local(StackLocal{
+    [](void** slot) { *slot = t_current_heap; },
+    [](void** slot, bool fresh) {
+        if (!fresh) t_current_heap = static_cast<Heap*>(*slot);
+        *slot = nullptr;
+    },
+    nullptr});
 
 constexpr size_t kYoungGranularity = 64 * 1024;
 

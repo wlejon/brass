@@ -2,6 +2,7 @@
 #include <brass/codegen/jit_exec.hpp>
 #include <brass/codegen/baseline_jit.hpp>
 #include <brass/gc/runtime_gc.hpp>
+#include <brass/gc/fiber.hpp>
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/pass_catalog.hpp>
 #include <brass/mir/verifier.hpp>
@@ -88,6 +89,15 @@ OsrCoordinator& FunctionDispatchTable::osr() const noexcept {
 
 namespace {
 thread_local FunctionDispatchTable* t_current_program = nullptr;
+// Per stack (gc::StackLocal), nested by ProgramScope on one stack; a fiber
+// starts in the program current where it was first resumed.
+[[maybe_unused]] const int k_current_program_local = gc::register_stack_local(gc::StackLocal{
+    [](void** slot) { *slot = t_current_program; },
+    [](void** slot, bool fresh) {
+        if (!fresh) t_current_program = static_cast<FunctionDispatchTable*>(*slot);
+        *slot = nullptr;
+    },
+    nullptr});
 } // namespace
 
 FunctionDispatchTable& current_program() noexcept {
