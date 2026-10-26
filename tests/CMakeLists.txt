@@ -162,6 +162,7 @@ add_executable(brass_unit_tests
     differential/test_deopt_stress_differential.cpp
     differential/test_eh_coro_regressions.cpp
     unit/test_critical_edge.cpp
+    unit/test_branch_split.cpp
     unit/test_gvn_pre.cpp
     differential/test_gvn_pre_differential.cpp
     unit/test_loop_fusion.cpp

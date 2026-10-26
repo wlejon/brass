@@ -56,6 +56,8 @@ Pipeline loop_pipeline(const LoopOptOptions& o) {
     if (o.enable_ivsr && o.enable_unroll) p.add(passes::ivsr(o, "ivsr 2"));
     if (o.enable_dce) p.add(passes::dce());
     if (o.enable_diamond_select) p.add(passes::select_opt("select_opt 2"));
+    // Last: what reads a loop's exit condition as one and-tree has run.
+    p.add(passes::split_branch_conditions());
     return p;
 }
 

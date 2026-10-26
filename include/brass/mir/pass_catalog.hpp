@@ -49,6 +49,7 @@ PassStep bce(std::string name, bool dump_stats, RangeAnalysisStats* stats, bool 
 PassStep allocation_sinking(PartialEscapeStats* stats, FunctionFilter filter, bool cfg_follow_up);
 PassStep dce(std::string name = "dce", FunctionFilter filter = FunctionFilter::LoopEligible);
 PassStep split_critical_edges();
+PassStep split_branch_conditions();
 
 // --- Loop passes (FunctionFilter::LoopEligible) -------------------------
 PassStep f64_demote(DemoteStats* stats);

@@ -3,6 +3,7 @@
 #include <brass/mir/array_contraction.hpp>
 #include <brass/mir/bounds_check_elim.hpp>
 #include <brass/mir/branch_probability.hpp>
+#include <brass/mir/branch_split.hpp>
 #include <brass/mir/cfg_simplify.hpp>
 #include <brass/mir/critical_edge.hpp>
 #include <brass/mir/devirtualize.hpp>
@@ -188,6 +189,11 @@ PassStep dce(std::string name, FunctionFilter filter) {
 PassStep split_critical_edges() {
     return function_step("split_critical_edges", FunctionFilter::All,
                          [](Function& fn) { return brass::split_critical_edges(fn); });
+}
+
+PassStep split_branch_conditions() {
+    return function_step("split_branch_conditions", FunctionFilter::All,
+                         [](Function& fn) { return brass::split_branch_conditions(fn); });
 }
 
 PassStep f64_demote(DemoteStats* stats) {
