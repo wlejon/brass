@@ -20,6 +20,9 @@ RangeAnalysisStats* range_stats_of(const LoopOptOptions& o) {
 Pipeline loop_pipeline(const LoopOptOptions& o) {
     Pipeline p;
     p.set_marks_loop_optimized(true);
+    // First: what reads a loop's numbers (f64 demotion, the vectorizers)
+    // sees doubles, not their boxes.
+    p.add(passes::unbox_double_params());
     if (o.enable_f64_demote) p.add(passes::f64_demote(o.demote_stats));
     if (o.enable_diamond_select) p.add(passes::select_opt());
     if (o.enable_sroa) p.add(passes::sroa("sroa", FunctionFilter::LoopEligible));

@@ -50,6 +50,7 @@ PassStep allocation_sinking(PartialEscapeStats* stats, FunctionFilter filter, bo
 PassStep dce(std::string name = "dce", FunctionFilter filter = FunctionFilter::LoopEligible);
 PassStep split_critical_edges();
 PassStep split_branch_conditions();
+PassStep unbox_double_params();
 
 // --- Loop passes (FunctionFilter::LoopEligible) -------------------------
 PassStep f64_demote(DemoteStats* stats);

@@ -25,6 +25,13 @@ bool eliminate_dead_code(Function& fn);
 // chain) that feed nothing but themselves.
 bool eliminate_dead_induction_cycles(Function& fn);
 
+// Makes an i64 block parameter that only ever holds a NaN-boxed double
+// (`select(ne.f64(f, f), NAN, bitcast(f))` or a constant's bits) on every
+// edge, and is unboxed (`bitcast.f64.i64`) where it is read, an f64
+// parameter: its unboxes read the double, anything else the double boxed
+// again. A loop's boxed number is carried round as the double.
+bool unbox_double_params(Function& fn);
+
 // fold_constants, dominator_cse, then eliminate_dead_code: the cleanup most
 // transforms want after they change a function.
 bool scalar_cleanup(Function& fn);

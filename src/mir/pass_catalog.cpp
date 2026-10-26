@@ -196,6 +196,11 @@ PassStep split_branch_conditions() {
                          [](Function& fn) { return brass::split_branch_conditions(fn); });
 }
 
+PassStep unbox_double_params() {
+    return loop_step("unbox_double_params", [](Function& fn) { return brass::unbox_double_params(fn); },
+                     [](Function& fn) { return scalar_cleanup(fn); });
+}
+
 PassStep f64_demote(DemoteStats* stats) {
     return loop_step("f64_demote", [stats](Function& fn) {
         F64DemoteOptions o;

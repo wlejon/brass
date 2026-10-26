@@ -7,6 +7,7 @@
 #include <brass/mir/runtime_symbols.hpp>
 #include <brass/mir/uses.hpp>
 #include "int_fold.hpp"
+#include "number_bits.hpp"
 #include <cmath>
 #include <cstring>
 #include <optional>
@@ -313,6 +314,7 @@ bool fold_constants(Function& fn) {
     Builder b(*fn.parent());
     b.set_function(&fn);
     PendingReplacements pending;
+    std::optional<number_bits::Facts> facts;
 
     for (BasicBlock* bb : fn.blocks()) {
         if (!bb) continue;
@@ -419,6 +421,30 @@ bool fold_constants(Function& fn) {
                     if (d0 && d1 && (op0 == op1 ||
                         (d0->opcode() == d1->opcode() && d0->operand_count() == 1 && d0->operand(0) == d1->operand(0)))) {
                         replacement = build_int(op == Opcode::eq ? 1 : 0);
+                    }
+                } else if (op0 == op1 && (op == Opcode::and_ || op == Opcode::or_) && same_type(op0)) {
+                    replacement = op0;
+                }
+                // A boxed number's check against the bound of the numbers
+                // (number_bits.hpp).
+                if (!replacement && int_result && width == 64 && (has_c0 != has_c1) &&
+                    (op == Opcode::ule || op == Opcode::ult || op == Opcode::uge || op == Opcode::ugt)) {
+                    // As `x OP k`, the constant on the right.
+                    Opcode xop = op;
+                    if (has_c0) {
+                        xop = op == Opcode::ule ? Opcode::uge : op == Opcode::ult ? Opcode::ugt
+                            : op == Opcode::uge ? Opcode::ule : Opcode::ult;
+                    }
+                    const uint64_t k = static_cast<uint64_t>(has_c0 ? c0 : c1);
+                    const Value* x = has_c0 ? op1 : op0;
+                    const uint64_t m = number_bits::kMaxOrderedBits;
+                    const bool decides = (xop == Opcode::ule && k >= m) || (xop == Opcode::ult && k > m) ||
+                                         (xop == Opcode::ugt && k >= m) || (xop == Opcode::uge && k > m);
+                    if (decides) {
+                        if (!facts) facts.emplace(fn);
+                        if (facts->at_most_ordered_max(x)) {
+                            replacement = build_int(xop == Opcode::ule || xop == Opcode::ult ? 1 : 0);
+                        }
                     }
                 }
             } else if (cur->operand_count() == 1 && !is_call(op)) {
