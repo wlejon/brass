@@ -23,6 +23,10 @@ namespace brass {
 
 namespace {
 
+// What a frame of a module with no interrupt poll compares its backedges
+// against: no frame address is below zero, so the poll never fires.
+const uint64_t kNoInterruptWord = 0;
+
 // Deopt stress (runtime/deopt_stress.hpp): whether this evaluation of a
 // passing guard must fail. Only a guard the guard op can exit without a
 // handler counts: an exit stub of `module`, or a resume point.
@@ -118,13 +122,18 @@ RuntimeValue FastInterpreter::execute_frame(FastFrame& frame) {
     RuntimeValue osr_res_;
     // The module's interrupt poll (Module::interrupt_poll): at each backward
     // branch, this frame's address (what read_sp gives the program) against
-    // the word at [TLS block + offset].
-    int32_t poll_off = -1;
+    // the word at [TLS block + offset]. Both are found once per frame, so a
+    // backedge pays one load and one compare, and a module with no poll
+    // compares against a word that never fires.
+    const uint64_t* poll_word = &kNoInterruptWord;
     if (const Module* poll_mod = frame.mir_fn ? frame.mir_fn->parent() : nullptr;
         poll_mod && poll_mod->pinned_tls_register() && poll_mod->interrupt_poll()) {
         if (tls_block_ == 0) tls_block_ = reinterpret_cast<uint64_t>(runtime::host_pinned_tls_block());
-        poll_off = poll_mod->interrupt_poll().tls_offset;
+        if (tls_block_ != 0) {
+            poll_word = reinterpret_cast<const uint64_t*>(tls_block_ + poll_mod->interrupt_poll().tls_offset);
+        }
     }
+    const uint64_t poll_sp = reinterpret_cast<uint64_t>(&osr_res_);
 
 #define RA registers[decode_a(inst)]
 #define RB registers[decode_b(inst)]
@@ -134,9 +143,7 @@ RuntimeValue FastInterpreter::execute_frame(FastFrame& frame) {
     do {                                                                                      \
         total_instructions_executed_ += static_cast<uint64_t>(-static_cast<int64_t>(off)) + 1; \
         if (BRASS_UNLIKELY(total_instructions_executed_ > insn_limit)) throw_instruction_limit(); \
-        if (BRASS_UNLIKELY(poll_off >= 0) && tls_block_ != 0 &&                               \
-            BRASS_UNLIKELY(reinterpret_cast<uint64_t>(&osr_res_) <                            \
-                           *reinterpret_cast<const uint64_t*>(tls_block_ + poll_off))) {      \
+        if (BRASS_UNLIKELY(poll_sp < *reinterpret_cast<const volatile uint64_t*>(poll_word))) { \
             run_interrupt_handler(frame, static_cast<uint32_t>(pc - code_base));              \
         }                                                                                     \
         if (BRASS_UNLIKELY(osr_on)) {                                                         \

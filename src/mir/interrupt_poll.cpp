@@ -79,17 +79,28 @@ Value* build_poll_condition(Builder& b, int32_t offset) {
     return b.build_ult(sp, limit);
 }
 
+// A loop the parallel transform outlined (loop_parallel_transform.cpp) runs
+// its chunk of a counted range on a parallel runtime worker, entered with no
+// pinned TLS register loaded, and has nowhere to yield to: it is not polled.
+// The function that dispatches it polls its own back edges.
+bool is_parallel_kernel(const Function& fn) {
+    return fn.name().find("_par_k_") != std::string_view::npos;
+}
+
+bool polled(const Function& fn) {
+    const Module* mod = fn.parent();
+    return mod && mod->interrupt_poll() && mod->pinned_tls_register() && !is_parallel_kernel(fn);
+}
+
 } // namespace
 
 bool needs_interrupt_polls(const Function& fn) {
-    const Module* mod = fn.parent();
-    if (!mod || !mod->interrupt_poll() || !mod->pinned_tls_register()) return false;
-    return !back_edges(fn).empty();
+    return polled(fn) && !back_edges(fn).empty();
 }
 
 size_t insert_interrupt_polls(Function& fn) {
     Module* mod = fn.parent();
-    if (!mod || !mod->interrupt_poll() || !mod->pinned_tls_register()) return 0;
+    if (!polled(fn)) return 0;
     const Module::InterruptPoll poll = mod->interrupt_poll();
     const std::vector<Edge> edges = back_edges(fn);
     if (edges.empty()) return 0;

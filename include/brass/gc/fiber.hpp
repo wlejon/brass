@@ -133,7 +133,7 @@ struct StackLocal {
     void (*release)(void* value) = nullptr;
 };
 
-inline constexpr int kMaxStackLocals = 24;
+inline constexpr int kMaxStackLocals = 48;
 
 // Registers a stack local, process-wide; returns its index. Registration
 // belongs before the first switch of any thread (a static initializer, or
