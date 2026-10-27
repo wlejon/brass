@@ -25,4 +25,12 @@ private:
 bool verify_module(const Module& mod, DiagnosticReporter* diag = nullptr);
 bool verify_function(const Function& fn, DiagnosticReporter* diag = nullptr);
 
+// The proof certificates alone: each write barrier the optimizer elided and
+// each guard it eliminated, checked against the reason it recorded, without
+// the structural checks. What a host's release build runs on everything the
+// optimizer removed (the full verifier checks the translator, and costs a
+// quarter of a large app's load). A lazy body is checked when it is built.
+bool verify_certificates(const Function& fn, DiagnosticReporter* diag = nullptr);
+bool verify_module_certificates(const Module& mod, DiagnosticReporter* diag = nullptr);
+
 } // namespace brass

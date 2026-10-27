@@ -974,4 +974,23 @@ bool verify_function(const Function& fn, DiagnosticReporter* diag) {
     return v.verify_function(fn);
 }
 
+bool verify_certificates(const Function& fn, DiagnosticReporter* diag) {
+    if (fn.is_lazy() || fn.blocks().empty()) return true;
+    bool ok = true;
+    verify_proof_certificates(fn, "Function '" + std::string(fn.name()) + "': ",
+                              [&](const std::string& msg) {
+                                  ok = false;
+                                  if (diag) diag->error("proof certificate refused: " + msg);
+                              });
+    return ok;
+}
+
+bool verify_module_certificates(const Module& mod, DiagnosticReporter* diag) {
+    bool ok = true;
+    for (const Function* fn : mod.functions()) {
+        if (fn && !verify_certificates(*fn, diag)) ok = false;
+    }
+    return ok;
+}
+
 } // namespace brass
