@@ -61,6 +61,20 @@ static std::optional<LirOpcode> direct_slot_copy(const LirInst& inst, bool def_i
     return kNone;
 }
 
+// note_x64_emitter_scratch's AArch64 counterpart: a store of an immediate, or a
+// memory-to-memory move, to an address it builds in X16 (base + index +
+// displacement, or an offset out of range) puts the data through X15, one of
+// the use scratches. A reload into X15 the scheduler hoisted above such a
+// store was overwritten before its use: [0, 3]'s second element, reloaded for
+// the next store, was stored as the 0 the first one wrote.
+static void note_aarch64_emitter_scratch(LirInst& inst) {
+    using namespace brass::aarch64;
+    if (inst.opcode != LirOpcode::Mov && inst.opcode != LirOpcode::Mov32) return;
+    if (inst.defs.empty() || inst.uses.empty() || !inst.defs[0].is_mem()) return;
+    if (inst.uses[0].is_preg()) return;
+    inst.clobbered_gprs |= reg_mask(GPR::X15);
+}
+
 static bool is_xmm_opcode(LirOpcode op) {
     switch (op) {
         case LirOpcode::Movsd:
@@ -543,7 +557,8 @@ void LinearScanAllocator::rewrite_instructions() {
                 }
             }
 
-            if (!is_aarch64) note_x64_emitter_scratch(*inst);
+            if (is_aarch64) note_aarch64_emitter_scratch(*inst);
+            else note_x64_emitter_scratch(*inst);
             rewritten.push_back(std::move(inst));
 
             // Write back to spill slot if def was spilled
