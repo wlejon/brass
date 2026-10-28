@@ -7,6 +7,7 @@
 #endif
 
 #include <brass/runtime/deterministic_math.hpp>
+#include "deterministic_math_internal.hpp"
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -389,129 +390,6 @@ inline DD eval_cos_dd_reduced(DD r) noexcept {
 }
 
 // ============================================================================
-// sin and cos: fdlibm's kernels and medium-range reduction (as V8 runs them,
-// so Math.sin and Math.cos agree with V8's bit for bit below 2^19 * pi/2).
-// Plain doubles with contraction off are as deterministic as the
-// double-double path and cost a tenth of it.
-// ============================================================================
-
-inline int32_t high_word(double x) noexcept { return static_cast<int32_t>(to_bits(x) >> 32); }
-
-// sin(x + y) for |x + y| <= pi/4, y the tail of x; iy = 0 when there is none.
-inline double fdlibm_kernel_sin(double x, double y, int iy) noexcept {
-    constexpr double S1 = -1.66666666666666324348e-01;
-    constexpr double S2 = 8.33333333332248946124e-03;
-    constexpr double S3 = -1.98412698298579493134e-04;
-    constexpr double S4 = 2.75573137070700676789e-06;
-    constexpr double S5 = -2.50507602534068634195e-08;
-    constexpr double S6 = 1.58969099521155010221e-10;
-    const int32_t ix = high_word(x) & 0x7fffffff;
-    if (ix < 0x3e400000 && static_cast<int>(x) == 0) return x; // |x| < 2^-27
-    const double z = x * x;
-    const double v = z * x;
-    const double r = S2 + z * (S3 + z * (S4 + z * (S5 + z * S6)));
-    if (iy == 0) return x + v * (S1 + z * r);
-    return x - ((z * (0.5 * y - v * r) - y) - v * S1);
-}
-
-// cos(x + y) for |x + y| <= pi/4.
-inline double fdlibm_kernel_cos(double x, double y) noexcept {
-    constexpr double C1 = 4.16666666666666019037e-02;
-    constexpr double C2 = -1.38888888888741095749e-03;
-    constexpr double C3 = 2.48015872894767294178e-05;
-    constexpr double C4 = -2.75573143513906633035e-07;
-    constexpr double C5 = 2.08757232129817482790e-09;
-    constexpr double C6 = -1.13596475577881948265e-11;
-    const int32_t ix = high_word(x) & 0x7fffffff;
-    if (ix < 0x3e400000 && static_cast<int>(x) == 0) return 1.0; // |x| < 2^-27
-    const double z = x * x;
-    const double r = z * (C1 + z * (C2 + z * (C3 + z * (C4 + z * (C5 + z * C6)))));
-    if (ix < 0x3fd33333) return 1.0 - (0.5 * z - (z * r - x * y)); // |x| < 0.3
-    // qx = x/4, its low word cleared (0.28125 above 0.78125).
-    const double qx = ix > 0x3fe90000 ? 0.28125 : from_bits(static_cast<uint64_t>(ix - 0x00200000) << 32);
-    const double hz = 0.5 * z - qx;
-    const double a = 1.0 - qx;
-    return a - (hz - (z * r - x * y));
-}
-
-// x reduced by pi/2 into y0 + y1 (|y0 + y1| <= pi/4), returning the multiple
-// of pi/2 taken. fdlibm's __ieee754_rem_pio2 below 2^19 * pi/2 (its table of
-// near-multiples only skips the cancellation check, which is made always);
-// above, the Payne-Hanek double-double reduction.
-inline int fdlibm_rem_pio2(double x, double& y0, double& y1) noexcept {
-    constexpr double invpio2 = 6.36619772367581382433e-01;
-    constexpr double pio2_1 = 1.57079632673412561417e+00;
-    constexpr double pio2_1t = 6.07710050650619224932e-11;
-    constexpr double pio2_2 = 6.07710050630396597660e-11;
-    constexpr double pio2_2t = 2.02226624879595063154e-21;
-    constexpr double pio2_3 = 2.02226624871116645580e-21;
-    constexpr double pio2_3t = 8.47842766036889956997e-32;
-    const int32_t hx = high_word(x);
-    const int32_t ix = hx & 0x7fffffff;
-    if (ix < 0x4002d97c) { // |x| < 3pi/4: n = +-1
-        if (hx > 0) {
-            double z = x - pio2_1;
-            if (ix != 0x3ff921fb) {
-                y0 = z - pio2_1t;
-                y1 = (z - y0) - pio2_1t;
-            } else { // near pi/2: 33+33+53 bits of pi
-                z -= pio2_2;
-                y0 = z - pio2_2t;
-                y1 = (z - y0) - pio2_2t;
-            }
-            return 1;
-        }
-        double z = x + pio2_1;
-        if (ix != 0x3ff921fb) {
-            y0 = z + pio2_1t;
-            y1 = (z - y0) + pio2_1t;
-        } else {
-            z += pio2_2;
-            y0 = z + pio2_2t;
-            y1 = (z - y0) + pio2_2t;
-        }
-        return -1;
-    }
-    if (ix <= 0x413921fb) { // |x| <= 2^19 * pi/2
-        const double t = abs_f64(x);
-        const int32_t n = static_cast<int32_t>(t * invpio2 + 0.5);
-        const double fn = static_cast<double>(n);
-        double r = t - fn * pio2_1;
-        double w = fn * pio2_1t; // good to 85 bits
-        const int32_t j = ix >> 20;
-        y0 = r - w;
-        int32_t i = j - ((high_word(y0) >> 20) & 0x7ff);
-        if (i > 16) { // cancellation: a second step, good to 118 bits
-            double u = r;
-            w = fn * pio2_2;
-            r = u - w;
-            w = fn * pio2_2t - ((u - r) - w);
-            y0 = r - w;
-            i = j - ((high_word(y0) >> 20) & 0x7ff);
-            if (i > 49) { // a third, 151 bits
-                u = r;
-                w = fn * pio2_3;
-                r = u - w;
-                w = fn * pio2_3t - ((u - r) - w);
-                y0 = r - w;
-            }
-        }
-        y1 = (r - y0) - w;
-        if (hx < 0) {
-            y0 = -y0;
-            y1 = -y1;
-            return -n;
-        }
-        return n;
-    }
-    DD r{};
-    const int q = reduce_trig_pi2(x, r);
-    y0 = r.hi + r.lo;
-    y1 = r.lo - (y0 - r.hi);
-    return q;
-}
-
-// ============================================================================
 // Core log(x) and exp(x) in 106-bit Double-Double
 // ============================================================================
 
@@ -650,6 +528,18 @@ inline DD eval_atan_pos_dd(DD z) noexcept {
 
 } // namespace
 
+namespace detail {
+
+int reduce_pio2_huge(double x, double& y0, double& y1) noexcept {
+    DD r{};
+    const int q = reduce_trig_pi2(x, r);
+    y0 = r.hi + r.lo;
+    y1 = r.lo - (y0 - r.hi);
+    return q;
+}
+
+} // namespace detail
+
 double canonicalize_nan(double x) noexcept {
     uint64_t u = to_bits(x);
     return is_nan_bits(u) ? qnan() : x;
@@ -658,34 +548,6 @@ double canonicalize_nan(double x) noexcept {
 uint64_t canonical_f64_bits(double x) noexcept {
     uint64_t u = to_bits(x);
     return is_nan_bits(u) ? kCanonicalNaNBits : u;
-}
-
-double det_sin(double x) noexcept {
-    uint64_t u = to_bits(x);
-    if (is_nan_bits(u) || is_inf_bits(u)) return qnan();
-    if ((high_word(x) & 0x7fffffff) <= 0x3fe921fb) return fdlibm_kernel_sin(x, 0.0, 0); // |x| <= pi/4
-
-    double y0 = 0.0, y1 = 0.0;
-    switch (fdlibm_rem_pio2(x, y0, y1) & 3) {
-        case 0: return fdlibm_kernel_sin(y0, y1, 1);
-        case 1: return fdlibm_kernel_cos(y0, y1);
-        case 2: return -fdlibm_kernel_sin(y0, y1, 1);
-        default: return -fdlibm_kernel_cos(y0, y1);
-    }
-}
-
-double det_cos(double x) noexcept {
-    uint64_t u = to_bits(x);
-    if (is_nan_bits(u) || is_inf_bits(u)) return qnan();
-    if ((high_word(x) & 0x7fffffff) <= 0x3fe921fb) return fdlibm_kernel_cos(x, 0.0); // |x| <= pi/4
-
-    double y0 = 0.0, y1 = 0.0;
-    switch (fdlibm_rem_pio2(x, y0, y1) & 3) {
-        case 0: return fdlibm_kernel_cos(y0, y1);
-        case 1: return -fdlibm_kernel_sin(y0, y1, 1);
-        case 2: return -fdlibm_kernel_cos(y0, y1);
-        default: return fdlibm_kernel_sin(y0, y1, 1);
-    }
 }
 
 double det_tan(double x) noexcept {

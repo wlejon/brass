@@ -503,6 +503,43 @@ TEST_CASE("Determinism #156 - Bit-Exact Double-Double Transcendentals (Accuracy 
         CHECK_EQ(f64_raw_bits(brass_det_cos(g.x)), g.cos_bits);
     }
 
+    // One argument down each of fdlibm's paths, which the fast path takes
+    // without its branches (deterministic_trig.cpp): kernel_cos's three qx,
+    // the +-1 step through the medium one, both signs of every quadrant, x by
+    // pi/2's own high word and the cancellation steps (fdlibm_rem_pio2 whole),
+    // and the medium range's top. The bits are V8's (fdlibm).
+    static constexpr TrigGolden kPathTrigGoldens[] = {
+        {0.2, 0x3fc96dff233dd2bcULL, 0x3fef5cb49577627aULL},
+        {0.5, 0x3fdeaee8744b05f0ULL, 0x3fec1528065b7d50ULL},
+        {0.785, 0x3fe69e4fd79ac743ULL, 0x3fe6a2ecb934b59aULL},
+        {1.0, 0x3feaed548f090ceeULL, 0x3fe14a280fb5068cULL},
+        {-1.0, 0xbfeaed548f090ceeULL, 0x3fe14a280fb5068cULL},
+        {2.0, 0x3fed18f6ead1b446ULL, 0xbfdaa22657537205ULL},
+        {-2.3, 0xbfe7dcd12d582f24ULL, 0xbfe5522217302fe0ULL},
+        {2.356, 0x3fe6a1bec8ab043dULL, 0xbfe69f7df5f75366ULL},
+        {1.5707963, 0x3feffffffffffffdULL, 0x3e5cc553391a6262ULL},
+        {-1.5707964, 0xbfefffffffffffe8ULL, 0xbe73a69dccb96762ULL},
+        {3.0, 0x3fc210386db6d55bULL, 0xbfefae04be85e5d2ULL},
+        {-3.0, 0xbfc210386db6d55bULL, 0xbfefae04be85e5d2ULL},
+        {4.0, 0xbfe837b9dddc1eaeULL, 0xbfe4eaa606db24c1ULL},
+        {-4.0, 0x3fe837b9dddc1eaeULL, 0xbfe4eaa606db24c1ULL},
+        {5.0, 0xbfeeaf81f5e09933ULL, 0x3fd22785706b4ad9ULL},
+        {-5.0, 0x3feeaf81f5e09933ULL, 0x3fd22785706b4ad9ULL},
+        {6.0, 0xbfd1e1f18ab0a2c0ULL, 0x3feeb9b7097822f6ULL},
+        {-6.0, 0x3fd1e1f18ab0a2c0ULL, 0x3feeb9b7097822f6ULL},
+        {7.0, 0x3fe50608c26d0a08ULL, 0x3fe81ff79ed92017ULL},
+        {250.41, 0xbfe968b443c61358ULL, 0x3fe373ba497791d0ULL},
+        {4.71238898038469, 0xbff0000000000000ULL, 0xbcaa79394c9e8a0aULL},
+        {-7.853981633974483, 0xbff0000000000000ULL, 0x3cb60fafbfd97309ULL},
+        {6.283185307179586, 0xbcb1a62633145c07ULL, 0x3ff0000000000000ULL},
+        {157079.63267948966, 0x3daaa8ecfb27878aULL, 0x3ff0000000000000ULL},
+        {823549.0, 0xbfe3bc41ec71c06dULL, 0x3fe930880dddf826ULL},
+    };
+    for (const auto& g : kPathTrigGoldens) {
+        CHECK_EQ(f64_raw_bits(brass_det_sin(g.x)), g.sin_bits);
+        CHECK_EQ(f64_raw_bits(brass_det_cos(g.x)), g.cos_bits);
+    }
+
     struct UnitDomainGolden {
         double u;
         uint64_t asin_bits;
