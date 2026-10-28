@@ -63,9 +63,25 @@ BranchThreading::BranchThreading(const LirFunction& fn) {
     // Which blocks something still enters.
     std::vector<uint8_t> entered(forward_.size(), 0);
     auto enter = [&](uint32_t id) { if (id < entered.size()) entered[id] = 1; };
+    // A block branched to from itself or after it is a loop's head only where
+    // the loop is entered: some predecessor at a lower loop depth. The join of
+    // a diamond whose one arm the layout placed at the function's end (a cold
+    // miss, an inline cache's slow call) is branched to from after itself as
+    // well, and aligning it executed the padding on the arm that falls into
+    // it — the hot one. With no loop depths at all (none computed, or no
+    // loop), every such target is taken for a head, as the layout promises.
+    bool depths_known = false;
+    for (const auto& b : fn.blocks) depths_known = depths_known || b->loop_depth > 0;
+    auto entered_from_outside = [&](const LirBlock& b) {
+        if (!depths_known) return true;
+        for (const LirBlock* p : b.predecessors) {
+            if (p && p->loop_depth < b.loop_depth) return true;
+        }
+        return false;
+    };
     auto branch_to = [&](uint32_t to, size_t from) {
         enter(to);
-        if (to < pos.size() && pos[to] <= from) head_[pos[to]] = 1;
+        if (to < pos.size() && pos[to] <= from && entered_from_outside(*fn.blocks[pos[to]])) head_[pos[to]] = 1;
     };
     enter(fn.blocks.front()->id);
     for (const auto& r : fn.resume_entries) enter(r.second);
