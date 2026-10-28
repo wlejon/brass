@@ -68,9 +68,11 @@ BranchThreading::BranchThreading(const LirFunction& fn) {
     // a diamond whose one arm the layout placed at the function's end (a cold
     // miss, an inline cache's slow call) is branched to from after itself as
     // well, and aligning it executed the padding on the arm that falls into
-    // it — the hot one. With no loop depths at all (none computed, or no
-    // loop), every such target is taken for a head, as the layout promises.
-    bool depths_known = false;
+    // it — the hot one. A function liveness found loop-free has no head at
+    // all: there every such target is such a join, and padding them put a
+    // nop run on the hot path of each inline cache's merge. With no depths
+    // computed, every such target is taken for a head, as the layout promises.
+    bool depths_known = fn.loop_depths_computed;
     for (const auto& b : fn.blocks) depths_known = depths_known || b->loop_depth > 0;
     auto entered_from_outside = [&](const LirBlock& b) {
         if (!depths_known) return true;

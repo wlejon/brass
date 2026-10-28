@@ -434,8 +434,18 @@ void LinearScanAllocator::allocate_blocked(uint32_t idx, std::vector<uint32_t>& 
             if (whole_only) {
                 whole_cost[r] += other.base->spill_weight;
                 holders[r].push_back(a);
+            } else if (only_copied_[other.vreg().id]) {
+                // A value that cannot be split, read only by block-argument
+                // copies, gives its register up for its whole life: it moves
+                // to its slot, its definition stores there and the copies
+                // read it there (weighed below).
+                holders[r].push_back(a);
             } else {
-                // A value that cannot be split keeps its register.
+                // Any other value that cannot be split keeps its register:
+                // moved to its slot for good, each read of it waits on a
+                // reload (taken from any such value, instanced_mesh_churn
+                // ran a fifth more cycles, its hottest loads waiting on
+                // receivers reloaded just after they were stored).
                 hard_q[r] = std::min(hard_q[r], c);
                 use_q[r] = std::min(use_q[r], c);
             }
@@ -515,6 +525,19 @@ void LinearScanAllocator::allocate_blocked(uint32_t idx, std::vector<uint32_t>& 
         invariant_only[r] = !holders[r].empty();
         for (uint32_t a : holders[r]) {
             const AllocPiece& h = pieces_[a];
+            if (unsplittable_[h.vreg().id]) {
+                // Its whole life in the slot: its definition stores there
+                // and each copy loads from there, or from nowhere when the
+                // parameter shares the slot. Among more such values than
+                // there are registers (a run of loads joined at a block,
+                // each boxed for its parameter), that is two accesses at
+                // most, where a value the scan would evict instead (the
+                // address every one of those loads reads) is reloaded at
+                // each of them.
+                invariant_only[r] = false;
+                for (const UsePosition& u : h.base->use_positions) cost[r] += weight(u.inst_id);
+                continue;
+            }
             const uint32_t again = needed_again(h, p.start);
             if (again != kNever) cost[r] += weight(again);
             const uint32_t def = def_pos_[h.vreg().id];

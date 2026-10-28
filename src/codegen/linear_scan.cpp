@@ -368,13 +368,16 @@ void LinearScanAllocator::allocate() {
     build_coalesce_hints();
     build_constraint_index();
     build_block_spans();
+    std::vector<uint32_t> copy_ids;  // ParallelCopy positions, ascending
     for (const auto& block : fn_.blocks) {
         for (const auto& inst : block->instructions) {
             if (inst->is_call() || inst->opcode == LirOpcode::Safepoint || inst->opcode == LirOpcode::GuardExit) {
                 fn_.frame.has_calls = true;
             }
+            if (inst->opcode == LirOpcode::ParallelCopy) copy_ids.push_back(inst->id);
         }
     }
+    std::sort(copy_ids.begin(), copy_ids.end());
 
     const size_t num_vregs = fn_.vreg_table.size();
     pieces_.clear();
@@ -389,6 +392,7 @@ void LinearScanAllocator::allocate() {
         if (fn_.vreg_table[id].vreg.is_gcref) unsplittable_[id] = 1;
     }
     def_pos_.assign(num_vregs, UINT32_MAX);
+    only_copied_.assign(num_vregs, 0);
     for (const auto& interval : liveness_.intervals()) {
         if (!interval.vreg.is_valid() || interval.vreg.id >= num_vregs) continue;
         uint32_t def = UINT32_MAX;
@@ -401,6 +405,15 @@ void LinearScanAllocator::allocate() {
             def = u.inst_id;
         }
         def_pos_[interval.vreg.id] = def;
+        bool only_copied = true;
+        for (const auto& u : interval.use_positions) {
+            if (u.is_def || !u.requires_reg) continue;
+            if (!std::binary_search(copy_ids.begin(), copy_ids.end(), u.inst_id)) {
+                only_copied = false;
+                break;
+            }
+        }
+        only_copied_[interval.vreg.id] = only_copied;
     }
     active_.clear();
     next_seq_ = 0;

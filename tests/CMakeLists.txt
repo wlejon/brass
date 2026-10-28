@@ -25,6 +25,7 @@ add_executable(brass_unit_tests
     unit/test_x64_encoder.cpp
     unit/test_lir_isel.cpp
     unit/test_linear_scan.cpp
+    unit/test_linear_scan_spill_copies.cpp
     unit/test_regalloc_held_pregs.cpp
     unit/test_peephole.cpp
     unit/test_x64_codegen.cpp

@@ -4,6 +4,7 @@
 #include <vector>
 #include <memory>
 #include <algorithm>
+#include <optional>
 #include <cassert>
 #include <stdexcept>
 
@@ -27,6 +28,37 @@ static void note_x64_emitter_scratch(LirInst& inst) {
         inst.clobbered_gprs |= reg_mask(GPR::R11);
         inst.clobbered_xmms |= reg_mask(XMM::XMM15);
     }
+}
+
+// The plain load or store an eight-byte copy between a register and a spill
+// slot is, or none when `inst` is no such copy: a Mov (GPR) or
+// Movsd (XMM) with one side a register of its class and the other a slot, or
+// a Movq between the classes with its GPR or its XMM side in a slot. A slot
+// holds bits, not a class, so the register side alone says which load or
+// store it takes: the XMM value a Movq_gx reads from its slot is the GPR
+// value it would have made.
+static std::optional<LirOpcode> direct_slot_copy(const LirInst& inst, bool def_is_xmm, bool use_is_xmm) {
+    constexpr std::nullopt_t kNone = std::nullopt;
+    if (inst.defs.size() != 1 || inst.uses.size() != 1) return kNone;
+    const LirOperand& d = inst.defs[0];
+    const LirOperand& u = inst.uses[0];
+    if (d.size != 8 || u.size != 8) return kNone;
+    bool want_def_xmm = false;
+    bool want_use_xmm = false;
+    switch (inst.opcode) {
+        case LirOpcode::Mov: break;
+        case LirOpcode::Movsd: want_def_xmm = want_use_xmm = true; break;
+        case LirOpcode::Movq_xg: want_def_xmm = true; break;
+        case LirOpcode::Movq_gx: want_use_xmm = true; break;
+        default: return kNone;
+    }
+    if (def_is_xmm != want_def_xmm || use_is_xmm != want_use_xmm) return kNone;
+    auto reg_of_class = [](const LirOperand& op, bool xmm) {
+        return op.is_preg() && op.preg_val.reg_class == (xmm ? RegClass::XMM : RegClass::GPR);
+    };
+    if (d.is_spill_slot() && reg_of_class(u, want_use_xmm)) return want_use_xmm ? LirOpcode::Movsd : LirOpcode::Mov;
+    if (reg_of_class(d, want_def_xmm) && u.is_spill_slot()) return want_def_xmm ? LirOpcode::Movsd : LirOpcode::Mov;
+    return kNone;
 }
 
 static bool is_xmm_opcode(LirOpcode op) {
@@ -280,6 +312,19 @@ void LinearScanAllocator::rewrite_instructions() {
 
             bool def_is_mem = !inst->defs.empty() && (inst->defs[0].is_mem() || inst->defs[0].is_spill_slot());
             bool use_is_mem = !inst->uses.empty() && (inst->uses[0].is_mem() || inst->uses[0].is_spill_slot());
+
+            // A full-width copy between a register and a spill slot is itself
+            // the store or the reload: `slot = mov reg` and `reg = mov slot`
+            // are one instruction each, where the general path below took the
+            // value through a scratch register first (two, and a scratch
+            // register's write on the chain). Mov32 keeps that path: its
+            // store is widened to the whole slot, which needs the zero-extended
+            // copy only the scratch holds.
+            if (const auto direct = direct_slot_copy(*inst, orig_def_is_xmm, !orig_use_is_xmm.empty() && orig_use_is_xmm[0])) {
+                inst->opcode = *direct;
+                rewritten.push_back(std::move(inst));
+                continue;
+            }
 
             // Moves between memory / spill slots:
             if ((inst->opcode == LirOpcode::Mov || inst->opcode == LirOpcode::Mov32 ||

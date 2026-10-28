@@ -146,6 +146,11 @@ private:
     std::vector<uint8_t> is_mem_index_;
     // Per vreg, its one definition's position (UINT32_MAX: several or none).
     std::vector<uint32_t> def_pos_;
+    // Per vreg, whether every read of it is a parallel copy's (a block
+    // argument) or one that takes no register (a guard exit's state): a
+    // value only on its way into a block parameter, which waits in its slot
+    // for that copy at no cost to anything that reads it.
+    std::vector<uint8_t> only_copied_;
     std::vector<uint32_t> active_;   // piece indices holding a register
     uint32_t next_seq_ = 0;
 

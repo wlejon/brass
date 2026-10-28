@@ -523,6 +523,7 @@ uint32_t LivenessAnalysis::get_loop_depth_at(uint32_t inst_id) const {
 
 void LivenessAnalysis::compute_loop_depths() {
     block_ranges_.clear();
+    fn_.loop_depths_computed = true;
     size_t n = fn_.blocks.size();
     if (n == 0) return;
 

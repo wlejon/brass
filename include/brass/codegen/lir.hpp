@@ -549,6 +549,10 @@ public:
     // to get back. Both are x64 GPR masks on x64 and aarch64 GPR masks on aarch64.
     uint32_t reserved_gprs = 0;
     uint32_t forced_saved_gprs = 0;
+    // Set once liveness has given every block its loop depth (zero outside
+    // any loop), so a function whose depths are all zero is known loop-free
+    // rather than unanalysed.
+    bool loop_depths_computed = false;
 
     LirFunction() = default;
 
