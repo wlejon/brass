@@ -2,9 +2,7 @@
 
 #include <brass/mir/function.hpp>
 #include <brass/mir/block.hpp>
-#include <unordered_map>
-#include <unordered_set>
-#include <queue>
+#include <brass/mir/dense_id_map.hpp>
 #include <vector>
 
 namespace brass {
@@ -16,27 +14,21 @@ public:
     }
 
     bool is_reachable(const BasicBlock* bb) const {
-        return reachable_.find(bb) != reachable_.end();
+        return bb && block_idx_.contains(bb);
     }
 
     bool dominates(const BasicBlock* a, const BasicBlock* b) const {
         if (!a || !b) return false;
         if (a == b) return true;
-        if (!is_reachable(a) || !is_reachable(b)) {
-            return false;
-        }
-
-        auto it_b = block_idx_.find(b);
-        auto it_a = block_idx_.find(a);
-        if (it_b == block_idx_.end() || it_a == block_idx_.end()) {
-            return false;
-        }
+        const int* found_b = block_idx_.find(b);
+        const int* found_a = block_idx_.find(a);
+        if (!found_b || !found_a) return false;
 
         // a dominates b exactly when b's dominator-tree interval nests in
         // a's. Walking b's idom chain instead was O(depth) per query and
         // quadratic on deeply nested control flow.
-        const int ia = it_a->second;
-        const int ib = it_b->second;
+        const int ia = *found_a;
+        const int ib = *found_b;
         return tin_[ia] <= tin_[ib] && tout_[ib] <= tout_[ia];
     }
 
@@ -45,28 +37,22 @@ private:
         entry_block_ = fn.entry_block();
         if (!entry_block_) return;
 
-        // 1. Find reachable blocks via BFS
-        std::queue<const BasicBlock*> q;
-        q.push(entry_block_);
-        reachable_.insert(entry_block_);
-
+        // 1. Find reachable blocks via BFS, numbered in visit order
+        //    (reachable_blocks is the queue).
+        block_idx_.reserve(fn.current_next_block_id());
         std::vector<const BasicBlock*> reachable_blocks;
-        while (!q.empty()) {
-            const BasicBlock* curr = q.front();
-            q.pop();
-            reachable_blocks.push_back(curr);
-
-            for (const BasicBlock* succ : curr->successors()) {
-                if (succ && reachable_.insert(succ).second) {
-                    q.push(succ);
+        reachable_blocks.reserve(fn.block_count());
+        block_idx_.insert(entry_block_, 0);
+        reachable_blocks.push_back(entry_block_);
+        for (size_t head = 0; head < reachable_blocks.size(); ++head) {
+            for (const BasicBlock* succ : reachable_blocks[head]->successors()) {
+                if (succ && block_idx_.insert(succ, static_cast<int>(reachable_blocks.size()))) {
+                    reachable_blocks.push_back(succ);
                 }
             }
         }
 
         int n = static_cast<int>(reachable_blocks.size());
-        for (int i = 0; i < n; ++i) {
-            block_idx_[reachable_blocks[i]] = i;
-        }
 
         // 2. Compute DFS post-order
         std::vector<bool> visited(n, false);
@@ -77,11 +63,11 @@ private:
         // blocks overflowed the native stack.
         struct Frame {
             int u;
-            std::vector<BasicBlock*> succs;
+            SuccessorList succs;
             size_t next;
         };
         std::vector<Frame> stack;
-        const int entry = block_idx_[entry_block_];
+        const int entry = 0;
         visited[entry] = true;
         stack.push_back({entry, reachable_blocks[entry]->successors(), 0});
         while (!stack.empty()) {
@@ -93,9 +79,9 @@ private:
             }
             const BasicBlock* succ = f.succs[f.next++];
             if (!succ) continue;
-            auto it = block_idx_.find(succ);
-            if (it != block_idx_.end() && !visited[it->second]) {
-                const int v = it->second;
+            const int* found = block_idx_.find(succ);
+            if (found && !visited[*found]) {
+                const int v = *found;
                 visited[v] = true;
                 stack.push_back({v, reachable_blocks[v]->successors(), 0});
             }
@@ -108,7 +94,7 @@ private:
 
         // 3. Iterative Dominators (Cooper-Harvey-Kennedy)
         idom_.assign(n, -1);
-        int entry_idx = block_idx_[entry_block_];
+        const int entry_idx = 0;
         idom_[entry_idx] = entry_idx;
 
         auto intersect = [&](int b1, int b2) -> int {
@@ -137,9 +123,8 @@ private:
                 // Find first processed predecessor
                 for (const BasicBlock* pred : reachable_blocks[b]->predecessors()) {
                     if (!pred) continue;
-                    auto it = block_idx_.find(pred);
-                    if (it != block_idx_.end()) {
-                        int p = it->second;
+                    if (const int* found = block_idx_.find(pred)) {
+                        int p = *found;
                         if (idom_[p] != -1) {
                             new_idom = p;
                             break;
@@ -151,9 +136,8 @@ private:
 
                 for (const BasicBlock* pred : reachable_blocks[b]->predecessors()) {
                     if (!pred) continue;
-                    auto it = block_idx_.find(pred);
-                    if (it != block_idx_.end()) {
-                        int p = it->second;
+                    if (const int* found = block_idx_.find(pred)) {
+                        int p = *found;
                         if (p != new_idom && idom_[p] != -1) {
                             new_idom = intersect(p, new_idom);
                         }
@@ -193,8 +177,7 @@ private:
     }
 
     const BasicBlock* entry_block_ = nullptr;
-    std::unordered_set<const BasicBlock*> reachable_;
-    std::unordered_map<const BasicBlock*, int> block_idx_;
+    DenseIdMap<BasicBlock, int> block_idx_;
     std::vector<int> idom_;
     std::vector<int> tin_;
     std::vector<int> tout_;

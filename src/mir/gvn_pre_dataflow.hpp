@@ -1,5 +1,9 @@
 #pragma once
 
+#include <brass/core/ptr_map.hpp>
+#include <brass/core/scratch_alloc.hpp>
+#include <brass/mir/dense_id_map.hpp>
+
 #include <brass/mir/function.hpp>
 #include <brass/mir/block.hpp>
 #include <brass/mir/instruction.hpp>
@@ -45,7 +49,7 @@ struct PreExprHash {
 };
 
 struct BlockLocalInfo {
-    std::vector<Instruction*> evaluations;
+    ScratchVector<Instruction*> evaluations;
     bool ant_loc = false;
     bool transp = true;
     bool avail_loc = false;
@@ -77,18 +81,21 @@ struct PreFunctionIndex {
     };
 
     std::vector<BasicBlock*> blocks;
-    std::unordered_map<const BasicBlock*, uint32_t> block_ordinal;
+    DenseIdMap<BasicBlock, uint32_t> block_ordinal;
     // Where every instruction sits.
-    std::unordered_map<const Instruction*, Position> positions;
+    PtrMap<Instruction, Position> positions;
     // Per block ordinal, in program order, the instructions
     // AliasAnalysis::can_clobber can answer true for: stores and calls.
     std::vector<std::vector<Writer>> memory_writers;
     // Per candidate expression, its evaluations in program order.
-    std::unordered_map<PreExpression, std::vector<Instruction*>, PreExprHash> evaluations;
+    // Scratch storage (brass/core/scratch_alloc.hpp): a node and a vector
+    // per candidate, rebuilt every iteration, were most of the pass's
+    // allocations.
+    ScratchMap<PreExpression, ScratchVector<Instruction*>, PreExprHash> evaluations;
     // Candidate expressions in first-seen order, with the first instruction
     // evaluating each — the order and exemplars the pass always used.
     std::vector<PreExpression> candidates;
-    std::unordered_map<PreExpression, const Instruction*, PreExprHash> exemplars;
+    ScratchMap<PreExpression, const Instruction*, PreExprHash> exemplars;
     // The memory types some store in the function writes. A load whose type
     // no store writes can never become available through store-to-load
     // forwarding, which is the one way a load evaluated once can still be a
@@ -181,7 +188,7 @@ private:
     const Instruction* exemplar_ = nullptr;
     // Per underlying base, the blocks holding a store off it, in block order:
     // the only stores that can MUST-alias a load off the same base.
-    std::unordered_map<const Value*, std::vector<uint32_t>> stores_by_base_;
+    ScratchMap<const Value*, ScratchVector<uint32_t>> stores_by_base_;
     std::vector<uint8_t> ant_in_;
     std::vector<uint32_t> ant_set_;
     std::vector<Value*> avail_at_exit_;
@@ -192,8 +199,8 @@ private:
     std::vector<uint32_t> no_exit_blocks_;
     // Per block ordinal, the successor and predecessor ordinals, so the
     // fixpoint sweeps index vectors and never touch a pointer map.
-    std::vector<std::vector<uint32_t>> succs_;
-    std::vector<std::vector<uint32_t>> preds_;
+    ScratchVector<ScratchVector<uint32_t>> succs_;
+    ScratchVector<ScratchVector<uint32_t>> preds_;
     // `succs_` reversed: the blocks listing this one as a successor. What
     // anticipation walks backwards over, so it reads the edges it propagates
     // along rather than the predecessor lists availability uses.

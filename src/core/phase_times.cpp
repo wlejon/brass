@@ -52,6 +52,13 @@ PhaseTable& table() {
     return t;
 }
 
+thread_local std::string_view current_subject;
+
+const std::string& subject_filter() {
+    static const std::string f = env_value("BRASS_PASS_TIMES_FUNCTION");
+    return f;
+}
+
 } // namespace
 
 bool phase_times_enabled() noexcept {
@@ -64,7 +71,18 @@ bool phase_times_enabled() noexcept {
     return on;
 }
 
+PhaseTimeSubject::PhaseTimeSubject(std::string_view subject) noexcept : on_(phase_times_enabled()) {
+    if (!on_) return;
+    previous_ = current_subject;
+    current_subject = subject;
+}
+
+PhaseTimeSubject::~PhaseTimeSubject() {
+    if (on_) current_subject = previous_;
+}
+
 void record_phase_time(std::string_view name, uint64_t ns) noexcept {
+    if (const std::string& only = subject_filter(); !only.empty() && current_subject != only) return;
     PhaseTable& t = table();
     std::lock_guard<std::mutex> lock(t.mutex);
     auto it = t.totals.find(name);

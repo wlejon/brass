@@ -181,6 +181,10 @@ void PreFunctionIndex::build(
     blocks.clear();
     block_ordinal.clear();
     positions.clear();
+    size_t instructions = 0;
+    for (const BasicBlock* bb : fn.blocks()) instructions += bb ? bb->instruction_count() : 0;
+    block_ordinal.reserve(fn.current_next_block_id());
+    positions.reserve(instructions);
     memory_writers.clear();
     evaluations.clear();
     candidates.clear();
@@ -191,13 +195,13 @@ void PreFunctionIndex::build(
         if (!bb) continue;
         const uint32_t ordinal = static_cast<uint32_t>(blocks.size());
         blocks.push_back(bb);
-        block_ordinal[bb] = ordinal;
+        block_ordinal.insert(bb, ordinal);
         memory_writers.emplace_back();
 
         uint32_t index = 0;
         for (Instruction* inst : *bb) {
             if (!inst) continue;
-            positions[inst] = Position{ordinal, index};
+            positions.insert(inst, Position{ordinal, index});
 
             const Opcode op = inst->opcode();
             if (op == Opcode::store || op == Opcode::store_indexed || op == Opcode::vstore || is_call(op) ||
@@ -225,7 +229,7 @@ void PreFunctionIndex::build(
             PreExpression expr = PreExpression::from_instruction(inst, leaders);
             auto ev = evaluations.find(expr);
             if (ev == evaluations.end()) {
-                evaluations.emplace(expr, std::vector<Instruction*>{inst});
+                evaluations[expr].push_back(inst);
                 candidates.push_back(expr);
                 exemplars[expr] = inst;
             } else {
@@ -241,9 +245,8 @@ bool PreFunctionIndex::has_store_of_type(Type memory_type) const noexcept {
 }
 
 const BasicBlock* PreFunctionIndex::block_of(const Instruction* inst) const noexcept {
-    auto pos = positions.find(inst);
-    if (pos == positions.end()) return nullptr;
-    return blocks[pos->second.block];
+    const Position* pos = positions.find(inst);
+    return pos ? blocks[pos->block] : nullptr;
 }
 
 // ---- PreDataflow -----------------------------------------------------------
@@ -323,8 +326,7 @@ PreDataflow::PreDataflow(
 
 uint32_t PreDataflow::ordinal(const BasicBlock* bb) const noexcept {
     if (!bb) return kNoBlock;
-    auto it = index_.block_ordinal.find(bb);
-    return it == index_.block_ordinal.end() ? kNoBlock : it->second;
+    return index_.block_ordinal.value_or(bb, kNoBlock);
 }
 
 void PreDataflow::analyze_expression(const PreExpression& expr, const Instruction* exemplar) {
@@ -361,9 +363,9 @@ void PreDataflow::compute_local_info(const PreExpression& expr, const Instructio
     // The few events every expression has: evaluations and operand kills.
     std::vector<Event> sparse;
     auto add_sparse = [&](Instruction* inst, EventKind kind) {
-        auto pos = index_.positions.find(inst);
-        if (pos == index_.positions.end()) return;
-        sparse.push_back(Event{pos->second.block, pos->second.index, kind, inst});
+        const PreFunctionIndex::Position* pos = index_.positions.find(inst);
+        if (!pos) return;
+        sparse.push_back(Event{pos->block, pos->index, kind, inst});
     };
     if (auto ev = index_.evaluations.find(expr); ev != index_.evaluations.end()) {
         for (Instruction* inst : ev->second) add_sparse(inst, EventKind::Evaluation);

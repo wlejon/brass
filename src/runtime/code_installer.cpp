@@ -14,6 +14,7 @@
 #include <brass/runtime/coroutine.hpp>
 #include <brass/runtime/tier_timeline.hpp>
 #include "tier2_link.hpp"
+#include <brass/core/phase_times.hpp>
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -456,6 +457,7 @@ CodeInstallResult CodeInstaller::install_tier2(
     // finishes.
     const Function* bound = bindings.target;
     TierEventScope timed(TierEventKind::Tier2Compile, fn_name);
+    PhaseTimeSubject timing_subject(fn_name);
     timed.set_ok(false);
 
     // Compile errors are results, never exceptions: a background worker

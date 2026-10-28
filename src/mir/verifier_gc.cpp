@@ -65,26 +65,30 @@ void verify_derived_gcrefs(
         std::unordered_map<const Value*, bool> usable;
         for (const Instruction* inst : *bb) {
             if (!inst) continue;
-            const std::string where = fn_prefix + "Block '" + std::string(bb->name()) +
-                                      "': Instruction '" + std::string(opcode_name(inst->opcode())) + "': ";
+            // Built only for a report: a string per instruction was an
+            // allocation per instruction of every verified function.
+            auto where = [&] {
+                return fn_prefix + "Block '" + std::string(bb->name()) + "': Instruction '" +
+                       std::string(opcode_name(inst->opcode())) + "': ";
+            };
             for (size_t i = 0; i < inst->operand_count(); ++i) {
                 const Value* op = inst->operand(i);
                 if (!is_derived_gcref(op)) continue;
                 auto it = usable.find(op);
                 if (it == usable.end()) {
-                    report_error(where + "derived gcref operand " + std::to_string(i) +
+                    report_error(where() + "derived gcref operand " + std::to_string(i) +
                                  " is defined in another block; derived gcrefs are block-local.");
                 } else if (!it->second) {
-                    report_error(where + "derived gcref operand " + std::to_string(i) +
+                    report_error(where() + "derived gcref operand " + std::to_string(i) +
                                  " is live across a GC point; recompute it after the GC point.");
                 } else if (escapes_through_operand(*inst, i)) {
-                    report_error(where + "derived gcref operand " + std::to_string(i) +
+                    report_error(where() + "derived gcref operand " + std::to_string(i) +
                                  " escapes as an object reference.");
                 }
             }
             for (const Value* sv : inst->state_map()) {
                 if (is_derived_gcref(sv)) {
-                    report_error(where + "derived gcref in deopt state; the GC cannot relocate it.");
+                    report_error(where() + "derived gcref in deopt state; the GC cannot relocate it.");
                 }
             }
             bool in_edge = false;
@@ -96,7 +100,7 @@ void verify_derived_gcrefs(
             check_edge(inst->false_target());
             for (const SwitchCase& sc : inst->switch_cases()) check_edge(sc.target);
             if (in_edge) {
-                report_error(where + "derived gcref passed as a branch argument; derived gcrefs are block-local.");
+                report_error(where() + "derived gcref passed as a branch argument; derived gcrefs are block-local.");
             }
 
             if (may_trigger_gc(*inst)) {

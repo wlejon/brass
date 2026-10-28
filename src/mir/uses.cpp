@@ -78,11 +78,8 @@ bool has_uses(const Function& fn, const Value* val) {
     return false;
 }
 
-std::unordered_map<const Value*, uint32_t> compute_use_counts(const Function& fn) {
-    std::unordered_map<const Value*, uint32_t> counts;
-    size_t n = 0;
-    for (const BasicBlock* bb : fn.blocks()) n += bb ? bb->instruction_count() + bb->param_count() : 0;
-    counts.reserve(n);
+UseCounts compute_use_counts(const Function& fn) {
+    UseCounts counts(fn.current_next_value_id());
     for (const BasicBlock* bb : fn.blocks()) {
         if (!bb) continue;
         for (const Instruction* inst : *bb) {

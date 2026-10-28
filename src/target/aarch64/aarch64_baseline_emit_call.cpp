@@ -80,19 +80,19 @@ MemAddress AArch64BaselineEmitter::off_addr(int32_t off, int size) const {
 }
 
 MemAddress AArch64BaselineEmitter::slot_addr(const Value* val, int size) const {
-    auto it = layout.slot_map.find(val);
-    if (it == layout.slot_map.end()) {
+    const int32_t* slot = layout.slot_map.find(val);
+    if (!slot) {
         throw_unsupported(kA64BaselineStage, "operand with no frame slot in " + std::string(fn.name()));
     }
-    return off_addr(it->second, size);
+    return off_addr(*slot, size);
 }
 
 MemAddress AArch64BaselineEmitter::slot_addr_at(const Value* val, int32_t byte, int size) const {
-    auto it = layout.slot_map.find(val);
-    if (it == layout.slot_map.end()) {
+    const int32_t* slot = layout.slot_map.find(val);
+    if (!slot) {
         throw_unsupported(kA64BaselineStage, "operand with no frame slot in " + std::string(fn.name()));
     }
-    return off_addr(it->second - byte, size);
+    return off_addr(*slot - byte, size);
 }
 
 void* AArch64BaselineEmitter::resolve_sym(std::string_view name) const {

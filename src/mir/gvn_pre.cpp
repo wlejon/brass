@@ -340,7 +340,7 @@ bool gvn_pre_function(Function& fn, const GvnPreOptions& options) {
 
         for (const PreExpression& expr : index.candidates) {
             const Instruction* exemplar = index.exemplars.at(expr);
-            const std::vector<Instruction*>& evals = index.evaluations.at(expr);
+            const auto& evals = index.evaluations.at(expr);
             if (evals.size() == 1) {
                 // A lone evaluation can only be hoisted out of a cycle or fed
                 // by a store of its type; anything else has nothing to gain
@@ -399,7 +399,7 @@ bool gvn_pre_function(Function& fn, const GvnPreOptions& options) {
                 // Eliminate all evaluations in the loop
                 for (BasicBlock* b_block : loop_set) {
                     const auto& b_info = dataflow.get_local_info(b_block);
-                    std::vector<Instruction*> to_remove = b_info.evaluations;
+                    std::vector<Instruction*> to_remove(b_info.evaluations.begin(), b_info.evaluations.end());
                     for (Instruction* inst : to_remove) {
                         if (inst && inst->parent()) {
                             replace_all_uses(fn, inst->result(), hoisted_val);
@@ -511,7 +511,7 @@ bool gvn_pre_function(Function& fn, const GvnPreOptions& options) {
 
                 // Eliminate evaluations of expr in bb and dominated blocks
                 const auto& info = dataflow.get_local_info(bb);
-                std::vector<Instruction*> to_remove = info.evaluations;
+                std::vector<Instruction*> to_remove(info.evaluations.begin(), info.evaluations.end());
                 for (Instruction* inst : to_remove) {
                     if (inst && inst->parent()) {
                         replace_all_uses(fn, inst->result(), unified_val);

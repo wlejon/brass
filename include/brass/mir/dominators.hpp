@@ -1,5 +1,8 @@
 #pragma once
 
+#include <brass/mir/dense_id_map.hpp>
+#include <span>
+
 #include <brass/mir/function.hpp>
 #include <brass/mir/block.hpp>
 #include <vector>
@@ -15,7 +18,8 @@ public:
     bool is_reachable(const BasicBlock* bb) const noexcept;
     bool dominates(const BasicBlock* a, const BasicBlock* b) const noexcept;
     const BasicBlock* immediate_dominator(const BasicBlock* bb) const noexcept;
-    const std::vector<const BasicBlock*>& children(const BasicBlock* bb) const noexcept;
+    // In the order of reachable_blocks().
+    std::span<const BasicBlock* const> children(const BasicBlock* bb) const noexcept;
     const std::vector<const BasicBlock*>& reachable_blocks() const noexcept { return reachable_blocks_; }
 
 private:
@@ -23,12 +27,14 @@ private:
 
     const BasicBlock* entry_block_ = nullptr;
     std::vector<const BasicBlock*> reachable_blocks_;
-    std::unordered_map<const BasicBlock*, int> block_idx_;
+    DenseIdMap<BasicBlock, int> block_idx_;
     std::vector<int> idom_;
-    std::vector<std::vector<const BasicBlock*>> dom_children_;
+    // The children of reachable block i are child_list_[child_start_[i],
+    // child_start_[i + 1]): one array, not a vector per block.
+    std::vector<uint32_t> child_start_;
+    std::vector<const BasicBlock*> child_list_;
     std::vector<int> dfs_in_;
     std::vector<int> dfs_out_;
-    std::vector<const BasicBlock*> empty_children_;
 };
 
 // Walks the dominator subtree rooted at `root` depth-first with an explicit
@@ -43,7 +49,7 @@ void walk_dominator_tree(const DominatorTree& dom, const BasicBlock* root, Enter
     stack.push_back({root, 0});
     while (!stack.empty()) {
         const BasicBlock* bb = stack.back().first;
-        const std::vector<const BasicBlock*>& kids = dom.children(bb);
+        const std::span<const BasicBlock* const> kids = dom.children(bb);
         size_t& next = stack.back().second;
         if (next == kids.size()) {
             stack.pop_back();

@@ -5,6 +5,7 @@
 #include <brass/mir/block.hpp>
 #include <brass/mir/instruction.hpp>
 #include <brass/mir/dominators.hpp>
+#include <brass/mir/dense_id_map.hpp>
 #include <brass/mir/loop_analysis.hpp>
 #include <cstdint>
 #include <algorithm>
@@ -165,18 +166,39 @@ private:
 
     // What pass 3 knows per block it visited: only what the block CHANGED in
     // the in-scope ranges — its parameters, the refinement its lone
-    // predecessor's branch implies, its own instructions' results — and its
-    // immediate dominator. The range of a value at a block is the last write
-    // found walking the dominator chain from the block, else the pass-3
-    // starting snapshot, else the global range. That is exactly what a copy
-    // of the whole in-scope map per block used to answer; the copy was
-    // O(blocks × values) in time and memory, which on a flattened module top
-    // level of a thousand blocks was most of bounds-check elimination.
-    struct BlockDelta {
-        const BasicBlock* idom = nullptr;
-        std::vector<std::pair<const Value*, ValueRange>> changes;  // write order; a value's last entry wins
+    // predecessor's branch implies, its own instructions' results. The range
+    // of a value at a block is its write in the nearest block on the
+    // dominator chain that wrote it, else the pass-3 starting snapshot, else
+    // the global range. That is exactly what a copy of the whole in-scope map
+    // per block used to answer; the copy was O(blocks × values) in time and
+    // memory, which on a flattened module top level of a thousand blocks was
+    // most of bounds-check elimination.
+    //
+    // Blocks are numbered in the walk's preorder (`visit_`), and block t's
+    // dominator subtree is the preorder interval [t, subtree_end_[t]]. Each
+    // value's writes (`writes_`, one run per value, in preorder; a block's
+    // last write of a value is its only one) carry the index of the nearest
+    // write of the same value in a dominating block. A query takes the
+    // value's last write at or before the block in preorder and climbs those
+    // links to the first whose block dominates it. Walking the block's
+    // dominator chain instead, scanning each block's changes, was O(depth)
+    // per query, and bounds-check elimination's queries over a deep chain
+    // were most of its time.
+    struct Pass3Write {
+        uint32_t block = 0;      // preorder number of the writing block
+        int32_t enclosing = -1;  // nearest write of the same value dominating it
+        ValueRange range;
     };
-    std::unordered_map<const BasicBlock*, BlockDelta> block_deltas_;
+    DenseIdMap<BasicBlock, uint32_t> visit_;
+    std::vector<uint32_t> subtree_end_;
+    DenseIdMap<Value, uint32_t> write_run_;  // value -> its run in write_start_
+    std::vector<uint32_t> write_start_;
+    std::vector<Pass3Write> writes_;
+    // While pass 3 walks: the writes in walk order, and each value's latest.
+    std::vector<std::pair<const Value*, Pass3Write>> staged_;
+    DenseIdMap<Value, int32_t> last_staged_;
+    void stage_write(const Value* v, uint32_t block, const ValueRange& r);
+    void index_writes();
     std::unordered_map<const Value*, ValueRange> pass3_initial_ranges_;
 };
 

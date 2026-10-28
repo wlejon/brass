@@ -210,19 +210,23 @@ ValueRange RangeAnalysis::get_range_at(const Value* v, const BasicBlock* bb) con
         return ValueRange::constant(c);
     }
     if (bb) {
-        auto d_it = block_deltas_.find(bb);
-        if (d_it != block_deltas_.end()) {
+        if (const uint32_t* visited = visit_.find(bb)) {
             // A block pass 3 reached: the in-scope range is the nearest write
             // on the dominator chain, else the snapshot pass 3 started from.
-            for (const BlockDelta* delta = &d_it->second;;) {
-                const auto& changes = delta->changes;
-                for (auto c = changes.rbegin(); c != changes.rend(); ++c) {
-                    if (c->first == v) return c->second;
+            const uint32_t t = *visited;
+            if (const uint32_t* run = write_run_.find(v)) {
+                const Pass3Write* first = writes_.data() + write_start_[*run];
+                const Pass3Write* last = writes_.data() + write_start_[*run + 1];
+                // The last write at or before t in preorder, then up.
+                const Pass3Write* w = std::upper_bound(first, last, t, [](uint32_t x, const Pass3Write& e) {
+                    return x < e.block;
+                });
+                int32_t at = w == first ? -1 : static_cast<int32_t>(w - 1 - writes_.data());
+                while (at >= 0) {
+                    const Pass3Write& e = writes_[static_cast<size_t>(at)];
+                    if (e.block <= t && t <= subtree_end_[e.block]) return e.range;
+                    at = e.enclosing;
                 }
-                if (!delta->idom) break;
-                auto up = block_deltas_.find(delta->idom);
-                if (up == block_deltas_.end()) break;
-                delta = &up->second;
             }
             auto s_it = pass3_initial_ranges_.find(v);
             if (s_it != pass3_initial_ranges_.end()) return s_it->second;
@@ -676,10 +680,13 @@ void RangeAnalysis::visit_dominator_block(
         [&](const BasicBlock* bb) {
             const BasicBlock* idom = path.empty() ? root_idom : path.back();
             path.push_back(bb);
+            visit_.insert(bb, static_cast<uint32_t>(subtree_end_.size()));
+            subtree_end_.push_back(UINT32_MAX);  // open while its subtree is walked
             rollbacks.emplace_back();
             enter_dominator_block(bb, idom, current_ranges, rollbacks.back());
         },
-        [&](const BasicBlock*) {
+        [&](const BasicBlock* bb) {
+            subtree_end_[*visit_.find(bb)] = static_cast<uint32_t>(subtree_end_.size() - 1);
             Rollback& rollback = rollbacks.back();
             for (auto it = rollback.rbegin(); it != rollback.rend(); ++it) {
                 if (it->second.has_value()) {
@@ -753,21 +760,69 @@ void RangeAnalysis::enter_dominator_block(
     // What this block changed, at the values the changes left in place. Every
     // write above went through `rollback`, so its entries name exactly the
     // values whose in-scope range differs here from the dominator's.
-    {
-        BlockDelta& delta = block_deltas_[bb];
-        delta.idom = idom;
-        delta.changes.reserve(rollback.size());
-        for (const auto& entry : rollback) {
-            auto it = current_ranges.find(entry.first);
-            if (it != current_ranges.end()) delta.changes.emplace_back(entry.first, it->second);
-        }
+    (void)idom;
+    const uint32_t block = *visit_.find(bb);
+    for (const auto& entry : rollback) {
+        auto it = current_ranges.find(entry.first);
+        if (it != current_ranges.end()) stage_write(entry.first, block, it->second);
     }
+}
+
+void RangeAnalysis::stage_write(const Value* v, uint32_t block, const ValueRange& r) {
+    int32_t& latest = last_staged_.get_or_insert(v, -1);
+    if (latest >= 0 && staged_[static_cast<size_t>(latest)].second.block == block) {
+        staged_[static_cast<size_t>(latest)].second.range = r;  // the block's last write wins
+        return;
+    }
+    // The blocks still open in the walk are exactly the dominators of this
+    // one, so the nearest dominating write is the first open one up the
+    // value's chain.
+    int32_t up = latest;
+    while (up >= 0) {
+        const Pass3Write& w = staged_[static_cast<size_t>(up)].second;
+        if (subtree_end_[w.block] == UINT32_MAX) break;
+        up = w.enclosing;
+    }
+    latest = static_cast<int32_t>(staged_.size());
+    staged_.push_back({v, Pass3Write{block, up, r}});
+}
+
+void RangeAnalysis::index_writes() {
+    // One run per value, each in walk order (the preorder), so a run is
+    // sorted by block; the enclosing links follow the writes to their runs.
+    std::vector<uint32_t> counts;
+    for (const auto& [v, w] : staged_) {
+        uint32_t& run = write_run_.get_or_insert(v, static_cast<uint32_t>(counts.size()));
+        if (run == counts.size()) counts.push_back(0);
+        ++counts[run];
+    }
+    write_start_.assign(counts.size() + 1, 0);
+    for (size_t i = 0; i < counts.size(); ++i) write_start_[i + 1] = write_start_[i] + counts[i];
+    std::vector<uint32_t> fill(write_start_.begin(), write_start_.end() - 1);
+    std::vector<int32_t> moved(staged_.size());
+    writes_.resize(staged_.size());
+    for (size_t i = 0; i < staged_.size(); ++i) {
+        const uint32_t at = fill[*write_run_.find(staged_[i].first)]++;
+        moved[i] = static_cast<int32_t>(at);
+        writes_[at] = staged_[i].second;
+    }
+    for (Pass3Write& w : writes_) {
+        if (w.enclosing >= 0) w.enclosing = moved[static_cast<size_t>(w.enclosing)];
+    }
+    std::vector<std::pair<const Value*, Pass3Write>>().swap(staged_);
+    last_staged_.clear();
 }
 
 void RangeAnalysis::run_analysis(Function& fn, const DominatorTree& dom, const LoopAnalysis& loops) {
     global_ranges_.clear();
     block_ranges_.clear();
-    block_deltas_.clear();
+    visit_.clear();
+    subtree_end_.clear();
+    write_run_.clear();
+    write_start_.clear();
+    writes_.clear();
+    staged_.clear();
+    last_staged_.clear();
     pass3_initial_ranges_.clear();
 
     // Pass 1: Forward evaluation of instructions and block parameters. The
@@ -883,7 +938,10 @@ void RangeAnalysis::run_analysis(Function& fn, const DominatorTree& dom, const L
     // and get_range_at reads it as such.
     if (fn.entry_block()) {
         pass3_initial_ranges_ = global_ranges_;
+        visit_.reserve(fn.current_next_block_id());
+        last_staged_.reserve(fn.current_next_value_id());
         visit_dominator_block(fn.entry_block(), nullptr, dom, pass3_initial_ranges_);
+        index_writes();
     }
 }
 

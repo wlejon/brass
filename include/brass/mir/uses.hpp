@@ -1,5 +1,7 @@
 #pragma once
 
+#include <brass/mir/dense_id_map.hpp>
+
 #include <brass/mir/block.hpp>
 #include <brass/mir/function.hpp>
 #include <brass/mir/instruction.hpp>
@@ -89,8 +91,9 @@ size_t count_uses(const Function& fn, const Value* val);
 // True when some instruction in `fn` reads `val`.
 bool has_uses(const Function& fn, const Value* val);
 
-// Use counts of every value `fn` reads.
-std::unordered_map<const Value*, uint32_t> compute_use_counts(const Function& fn);
+// Use counts of every value `fn` reads; a value it never reads has none.
+using UseCounts = DenseIdMap<Value, uint32_t>;
+UseCounts compute_use_counts(const Function& fn);
 
 // Removes parameter `index` of `bb` and the matching argument on every edge
 // into `bb` from any block of its function, whatever kind of terminator the

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <brass/codegen/lir.hpp>
+#include <brass/core/scratch_alloc.hpp>
 #include <vector>
 #include <unordered_map>
 #include <algorithm>
@@ -34,8 +35,11 @@ public:
     VReg vreg;
     uint32_t start_id = UINT32_MAX;
     uint32_t end_id = 0;
-    std::vector<LiveRangeSegment> segments;
-    std::vector<UsePosition> use_positions;
+    // Scratch storage (brass/core/scratch_alloc.hpp): an interval lives and
+    // dies inside one compile, and two vectors per virtual register were a
+    // large share of the backend's allocations.
+    ScratchVector<LiveRangeSegment> segments;
+    ScratchVector<UsePosition> use_positions;
     float spill_weight = 0.0f;
     PReg assigned_preg;
     int32_t assigned_spill_slot = -1;
@@ -63,10 +67,10 @@ struct BlockLiveness {
     uint32_t start_id = 0;
     uint32_t end_id = 0;
     uint32_t loop_depth = 0;
-    std::vector<VReg> defs;
-    std::vector<VReg> uses;
-    std::vector<VReg> live_in;
-    std::vector<VReg> live_out;
+    ScratchVector<VReg> defs;
+    ScratchVector<VReg> uses;
+    ScratchVector<VReg> live_in;
+    ScratchVector<VReg> live_out;
 };
 
 class LivenessAnalysis {
@@ -96,7 +100,7 @@ private:
 
     LirFunction& fn_;
     std::vector<LiveInterval> intervals_;
-    std::unordered_map<const LirBlock*, BlockLiveness> block_liveness_;
+    ScratchMap<const LirBlock*, BlockLiveness> block_liveness_;
     std::vector<uint32_t> call_inst_ids_;   // in id order
     std::vector<BlockRange> block_ranges_;  // non-empty blocks, by start id
     // Guard exit blocks entered only by a Jcc: block id -> its GuardExit.

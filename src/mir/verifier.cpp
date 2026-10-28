@@ -6,6 +6,7 @@
 #include "verifier_gc.hpp"
 #include "verifier_guards.hpp"
 #include "verifier_certs.hpp"
+#include <brass/core/ptr_map.hpp>
 #include <unordered_map>
 #include <unordered_set>
 #include <queue>
@@ -107,22 +108,24 @@ bool Verifier::verify_function(const Function& fn) {
     }
 
     // Index blocks and instruction positions
-    std::unordered_set<const BasicBlock*> block_set;
-    std::unordered_map<const Instruction*, size_t> inst_index;
+    size_t insts = 0;
+    for (const BasicBlock* bb : fn.blocks()) insts += bb ? bb->instruction_count() : 0;
+    PtrMap<BasicBlock, char> block_set(fn.block_count());
+    PtrMap<Instruction, size_t> inst_index(insts);
 
     for (const BasicBlock* bb : fn.blocks()) {
         if (!bb) {
             report_error(fn_prefix + "Contains null basic block pointer.");
             continue;
         }
-        if (!block_set.insert(bb).second) {
+        if (!block_set.insert(bb, 1)) {
             report_error(fn_prefix + "Duplicate basic block in block list.");
         }
 
         size_t idx = 0;
         for (const Instruction* inst : *const_cast<BasicBlock*>(bb)) {
             if (inst) {
-                inst_index[inst] = idx++;
+                inst_index.insert(inst, idx++);
             }
         }
     }
@@ -130,10 +133,13 @@ bool Verifier::verify_function(const Function& fn) {
     // Compute Dominance
     DominanceCalculator dom(fn);
 
-    // Verify each block and instruction
+    // Verify each block and instruction. The report prefixes are rebuilt in
+    // place, not allocated per instruction of every verified function.
+    std::string bb_prefix;
+    std::string inst_prefix;
     for (const BasicBlock* bb : fn.blocks()) {
         if (!bb) continue;
-        const std::string bb_prefix = fn_prefix + "Block '" + std::string(bb->name()) + "': ";
+        bb_prefix.assign(fn_prefix).append("Block '").append(bb->name()).append("': ");
 
         if (bb->is_empty()) {
             report_error(bb_prefix + "Basic block is empty (missing terminator).");
@@ -169,8 +175,7 @@ bool Verifier::verify_function(const Function& fn) {
 
         // Verify each instruction in block
         for (const Instruction* inst = bb->head(); inst != nullptr; inst = inst->next()) {
-            const std::string inst_prefix = bb_prefix + "Instruction '" +
-                                            std::string(opcode_name(inst->opcode())) + "': ";
+            inst_prefix.assign(bb_prefix).append("Instruction '").append(opcode_name(inst->opcode())).append("': ");
 
             // Check operands & SSA Dominance
             auto check_value_dom = [&](const Value* val, std::string_view kind, size_t index) {  // desc(): built for a report only
@@ -203,15 +208,13 @@ bool Verifier::verify_function(const Function& fn) {
                         if (!def_bb) {
                             report_error(inst_prefix + desc() +" defining instruction has null parent block.");
                         } else if (def_bb == bb) {
-                            auto it_def = inst_index.find(def_inst);
-                            auto it_use = inst_index.find(inst);
-                            if (it_def != inst_index.end() && it_use != inst_index.end()) {
-                                if (it_def->second >= it_use->second) {
-                                    report_error(inst_prefix + "SSA Dominance violation: " + desc() +
-                                                 " is used before or at its definition in the same block (def_idx=" +
-                                                 std::to_string(it_def->second) + " use_idx=" + std::to_string(it_use->second) +
-                                                 " def_op=" + std::to_string(static_cast<int>(def_inst->opcode())) + ").");
-                                }
+                            const size_t* def_idx = inst_index.find(def_inst);
+                            const size_t* use_idx = inst_index.find(inst);
+                            if (def_idx && use_idx && *def_idx >= *use_idx) {
+                                report_error(inst_prefix + "SSA Dominance violation: " + desc() +
+                                             " is used before or at its definition in the same block (def_idx=" +
+                                             std::to_string(*def_idx) + " use_idx=" + std::to_string(*use_idx) +
+                                             " def_op=" + std::to_string(static_cast<int>(def_inst->opcode())) + ").");
                             }
                         } else if (dom.is_reachable(bb) && !dom.dominates(def_bb, bb)) {
                             report_error(inst_prefix + "SSA Dominance violation: " + desc() +
@@ -798,7 +801,7 @@ bool Verifier::verify_function(const Function& fn) {
                     if (!target.block) {
                         report_error(inst_prefix + "Branch has null target block.");
                     } else {
-                        if (block_set.find(target.block) == block_set.end()) {
+                        if (!block_set.contains(target.block)) {
                             report_error(inst_prefix + "Branch target block does not belong to function.");
                         }
                         if (target.args.size() != target.block->param_count()) {
@@ -828,7 +831,7 @@ bool Verifier::verify_function(const Function& fn) {
                         if (!target.block) {
                             report_error(inst_prefix + label + " target block is null.");
                         } else {
-                            if (block_set.find(target.block) == block_set.end()) {
+                            if (!block_set.contains(target.block)) {
                                 report_error(inst_prefix + label + " target block does not belong to function.");
                             }
                             if (target.args.size() != target.block->param_count()) {
@@ -860,7 +863,7 @@ bool Verifier::verify_function(const Function& fn) {
                         if (!target.block) {
                             report_error(inst_prefix + label + " target block is null.");
                         } else {
-                            if (block_set.find(target.block) == block_set.end()) {
+                            if (!block_set.contains(target.block)) {
                                 report_error(inst_prefix + label + " target block does not belong to function.");
                             }
                             if (target.args.size() != target.block->param_count()) {
@@ -951,7 +954,7 @@ bool Verifier::verify_function(const Function& fn) {
     for (const auto& entry_pair : fn.resume_points()) {
         if (!entry_pair.second) {
             report_error(fn_prefix + "Resume point " + std::to_string(entry_pair.first) + " has null target block.");
-        } else if (block_set.find(entry_pair.second) == block_set.end()) {
+        } else if (!block_set.contains(entry_pair.second)) {
             report_error(fn_prefix + "Resume point " + std::to_string(entry_pair.first) +
                          " points to block not in function.");
         }

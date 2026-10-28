@@ -27,7 +27,7 @@
 #include <brass/mir/gc_refs.hpp>
 #include <algorithm>
 #include <functional>
-#include <unordered_set>
+#include <bit>
 
 namespace brass::codegen {
 
@@ -86,11 +86,10 @@ BaselineFrameLayout layout_baseline_frame(const Function& fn, int32_t start_offs
     int32_t offset = start_offset;
 
     std::vector<const BasicBlock*> blocks;
-    std::unordered_map<const BasicBlock*, size_t> block_index;
+    DenseIdMap<BasicBlock, size_t> block_index(fn.current_next_block_id());
     for (const auto* bb : fn.blocks()) {
         if (!bb) continue;
-        block_index[bb] = blocks.size();
-        blocks.push_back(bb);
+        if (block_index.insert(bb, blocks.size())) blocks.push_back(bb);
     }
 
     // Allocas first: fixed buffers, never shared.
@@ -122,101 +121,118 @@ BaselineFrameLayout layout_baseline_frame(const Function& fn, int32_t start_offs
     };
 
     auto dedicated = [&](const Value* v) {
-        if (layout.slot_map.count(v)) return;
+        if (layout.slot_map.contains(v)) return;
         if (bl_is_v128(v->type())) offset = ((offset + 15) & ~15) + 16;
         else offset += 8;
-        layout.slot_map[v] = offset;
+        layout.slot_map.insert(v, offset);
         add_root_slot(root_of(v), offset);
     };
 
+    // The values whose slots may be shared: instruction results other than
+    // 128-bit vectors, numbered densely. Liveness is computed over these
+    // alone (a block parameter has a dedicated slot and is never shareable,
+    // and the dataflow is per value), as bit rows per block: per-block hash
+    // sets of values made a tier-1 compile of a big function mostly
+    // allocation.
+    DenseIdMap<Value, uint32_t> share_index(fn.current_next_value_id());
+    std::vector<Range> ranges;
+    for (const BasicBlock* bb : blocks) {
+        for (const auto* param : bb->params()) dedicated(param);
+        for (const auto* inst : *bb) {
+            if (!inst || !inst->produces_value() || !inst->result()) continue;
+            const Value* r = inst->result();
+            if (bl_is_v128(r->type())) { dedicated(r); continue; }
+            if (share_index.insert(r, static_cast<uint32_t>(ranges.size()))) ranges.push_back(Range{r});
+        }
+    }
+    auto shared_index = [&](const Value* v) -> const uint32_t* { return share_index.find(v); };
+
     // Positions: block b spans [begin[b], end[b]]; its k-th instruction is
     // at begin[b] + 1 + k.
-    std::vector<size_t> begin(blocks.size()), end(blocks.size());
-    std::vector<std::vector<const BasicBlock*>> succs(blocks.size());
-    std::vector<std::unordered_set<const Value*>> gen(blocks.size()), kill(blocks.size());
+    const size_t nb = blocks.size();
+    const size_t words = (ranges.size() + 63) / 64;
+    std::vector<uint64_t> gen(nb * words, 0), kill(nb * words, 0), live_in(nb * words, 0), live_out(nb * words, 0);
+    auto row = [&](std::vector<uint64_t>& bits, size_t b) { return bits.data() + b * words; };
+    auto has = [](const uint64_t* r, uint32_t i) { return (r[i >> 6] >> (i & 63)) & 1; };
+    auto put = [](uint64_t* r, uint32_t i) { r[i >> 6] |= uint64_t{1} << (i & 63); };
+    std::vector<size_t> begin(nb), end(nb);
+    std::vector<std::vector<uint32_t>> succs(nb);
     // The instruction at each position (null at block boundaries).
     std::vector<const Instruction*> at_pos;
     size_t pos = 0;
-    for (size_t b = 0; b < blocks.size(); ++b) {
+    for (size_t b = 0; b < nb; ++b) {
         const BasicBlock* bb = blocks[b];
+        uint64_t* g = row(gen, b);
+        uint64_t* k = row(kill, b);
         begin[b] = pos++;
         at_pos.push_back(nullptr);
-        for (const auto* param : bb->params()) kill[b].insert(param);
         for (const auto* inst : *bb) {
             if (!inst) continue;
             ++pos;
             at_pos.push_back(inst);
             for_each_use(fn, *inst, [&](const Value* v) {
-                if (!kill[b].count(v)) gen[b].insert(v);
+                if (const uint32_t* i = shared_index(v); i && !has(k, *i)) put(g, *i);
             });
             for_each_target(fn, *inst, [&](const BranchTarget& t) {
-                if (t.block && block_index.count(t.block)) succs[b].push_back(t.block);
+                if (!t.block) return;
+                if (const size_t* si = block_index.find(t.block)) succs[b].push_back(static_cast<uint32_t>(*si));
             });
-            if (inst->produces_value() && inst->result()) kill[b].insert(inst->result());
+            if (inst->produces_value() && inst->result()) {
+                if (const uint32_t* i = shared_index(inst->result())) put(k, *i);
+            }
         }
         end[b] = pos++;
         at_pos.push_back(nullptr);
     }
 
-    std::vector<std::unordered_set<const Value*>> live_in(blocks.size()), live_out(blocks.size());
+    // out = union of the successors' live-in; in = gen | (out & ~kill).
+    // Both only grow, so a pass that changes no word is the fixpoint.
     for (bool changed = true; changed;) {
         changed = false;
-        for (size_t i = blocks.size(); i-- > 0;) {
-            std::unordered_set<const Value*> out;
-            for (const BasicBlock* s : succs[i]) {
-                const size_t si = block_index[s];
-                const auto& params = s->params();
-                for (const Value* v : live_in[si]) {
-                    if (std::find(params.begin(), params.end(), v) == params.end()) out.insert(v);
+        for (size_t i = nb; i-- > 0;) {
+            uint64_t* out = row(live_out, i);
+            uint64_t* in = row(live_in, i);
+            const uint64_t* g = row(gen, i);
+            const uint64_t* k = row(kill, i);
+            for (uint32_t s : succs[i]) {
+                const uint64_t* sin = row(live_in, s);
+                for (size_t w = 0; w < words; ++w) out[w] |= sin[w];
+            }
+            for (size_t w = 0; w < words; ++w) {
+                const uint64_t next = g[w] | (out[w] & ~k[w]);
+                if (next != in[w]) {
+                    in[w] = next;
+                    changed = true;
                 }
             }
-            std::unordered_set<const Value*> in = gen[i];
-            for (const Value* v : out) {
-                if (!kill[i].count(v)) in.insert(v);
-            }
-            if (out.size() != live_out[i].size() || in.size() != live_in[i].size()) changed = true;
-            live_out[i] = std::move(out);
-            live_in[i] = std::move(in);
         }
     }
 
     // Ranges of the shareable values.
-    std::unordered_map<const Value*, Range> ranges;
-    auto shareable = [&](const Value* v) { return ranges.count(v) != 0; };
-    for (size_t b = 0; b < blocks.size(); ++b) {
-        for (const auto* param : blocks[b]->params()) dedicated(param);
+    for (size_t b = 0; b < nb; ++b) {
         size_t p = begin[b];
         for (const auto* inst : *blocks[b]) {
             if (!inst) continue;
             ++p;
-            if (!inst->produces_value() || !inst->result()) continue;
-            const Value* r = inst->result();
-            if (bl_is_v128(r->type())) { dedicated(r); continue; }
-            Range& range = ranges[r];
-            range.val = r;
-            range.cover(p);
-        }
-    }
-    for (size_t b = 0; b < blocks.size(); ++b) {
-        size_t p = begin[b];
-        for (const auto* inst : *blocks[b]) {
-            if (!inst) continue;
-            ++p;
+            if (inst->produces_value() && inst->result()) {
+                if (const uint32_t* i = shared_index(inst->result())) ranges[*i].cover(p);
+            }
             for_each_use(fn, *inst, [&](const Value* v) {
-                if (shareable(v)) ranges[v].cover(p);
+                if (const uint32_t* i = shared_index(v)) ranges[*i].cover(p);
             });
         }
-        for (const Value* v : live_in[b]) {
-            if (shareable(v)) ranges[v].cover(begin[b]);
-        }
-        for (const Value* v : live_out[b]) {
-            if (shareable(v)) ranges[v].cover(end[b]);
+        const uint64_t* in = row(live_in, b);
+        const uint64_t* out = row(live_out, b);
+        for (size_t w = 0; w < words; ++w) {
+            for (uint64_t bits = in[w]; bits; bits &= bits - 1) ranges[w * 64 + std::countr_zero(bits)].cover(begin[b]);
+            for (uint64_t bits = out[w]; bits; bits &= bits - 1) ranges[w * 64 + std::countr_zero(bits)].cover(end[b]);
         }
     }
 
     // A derived gcref sits in an unrooted slot, so the collector would not
     // move it: it must be dead at every GC point and at every block boundary.
-    for (const auto& [v, r] : ranges) {
+    for (const Range& r : ranges) {
+        const Value* v = r.val;
         if (!v->type().is_gcref() || rooted(v)) continue;
         for (size_t p = r.start; p <= r.end; ++p) {
             const Instruction* inst = at_pos[p];
@@ -234,9 +250,7 @@ BaselineFrameLayout layout_baseline_frame(const Function& fn, int32_t start_offs
     // Linear scan. A slot is reused only by a range starting strictly after
     // its previous owner's last use, so an instruction's result never shares
     // a slot with one of its own operands.
-    std::vector<Range> order;
-    order.reserve(ranges.size());
-    for (auto& [v, r] : ranges) order.push_back(r);
+    std::vector<Range> order = std::move(ranges);
     std::sort(order.begin(), order.end(), [](const Range& a, const Range& b) {
         return a.start != b.start ? a.start < b.start : a.val->id() < b.val->id();
     });
@@ -264,7 +278,7 @@ BaselineFrameLayout layout_baseline_frame(const Function& fn, int32_t start_offs
             slot = offset;
             add_root_slot(kind, slot);
         }
-        layout.slot_map[r.val] = slot;
+        layout.slot_map.insert(r.val, slot);
         active.push_back({r.end, slot, kind});
     }
 

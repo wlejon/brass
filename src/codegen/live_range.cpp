@@ -6,11 +6,13 @@
 
 namespace brass::codegen {
 
-[[maybe_unused]] static bool contains_vreg(const std::vector<VReg>& vec, VReg v) {
+template <typename Vec>
+[[maybe_unused]] static bool contains_vreg(const Vec& vec, VReg v) {
     return std::find(vec.begin(), vec.end(), v) != vec.end();
 }
 
-[[maybe_unused]] static void add_vreg_unique(std::vector<VReg>& vec, VReg v) {
+template <typename Vec>
+[[maybe_unused]] static void add_vreg_unique(Vec& vec, VReg v) {
     if (v.is_valid() && !contains_vreg(vec, v)) {
         vec.push_back(v);
     }
@@ -334,7 +336,7 @@ void LivenessAnalysis::compute_global_liveness() {
 
     // Per register, the blocks using it upward-exposed and the blocks
     // defining it: flat arrays indexed by per-register offsets.
-    auto bucket = [&](std::vector<VReg> BlockLiveness::*member, std::vector<uint32_t>& start,
+    auto bucket = [&](ScratchVector<VReg> BlockLiveness::*member, std::vector<uint32_t>& start,
                       std::vector<uint32_t>& blocks) {
         start.assign(num_vregs + 1, 0);
         for (size_t i = 0; i < n; ++i) {

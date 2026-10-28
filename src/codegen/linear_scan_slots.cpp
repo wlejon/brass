@@ -117,15 +117,35 @@ void LinearScanAllocator::clear_dead_callee_gprs_at_calls(uint32_t final_callee_
 
     const size_t num_vregs = fn_.vreg_table.size();
     const size_t num_blocks = fn_.blocks.size();
-    std::vector<char> live_vreg(num_vregs, 0);
+    // The live vregs as a sparse set: reset per block and walked per call in
+    // time proportional to what is live. A flag per vreg, cleared per block
+    // and scanned whole at every call, was blocks x vregs plus calls x vregs,
+    // a fifth of allocating registers for a big function.
+    std::vector<uint32_t> live_list;
+    std::vector<uint32_t> live_pos(num_vregs, UINT32_MAX);
+    auto live_add = [&](uint32_t id) {
+        if (live_pos[id] != UINT32_MAX) return;
+        live_pos[id] = static_cast<uint32_t>(live_list.size());
+        live_list.push_back(id);
+    };
+    auto live_remove = [&](uint32_t id) {
+        const uint32_t p = live_pos[id];
+        if (p == UINT32_MAX) return;
+        const uint32_t last = live_list.back();
+        live_list[p] = last;
+        live_pos[last] = p;
+        live_list.pop_back();
+        live_pos[id] = UINT32_MAX;
+    };
     // What is live at each call, by block and instruction index.
     std::vector<std::vector<uint32_t>> live_callee_by_block(num_blocks);
     std::vector<std::vector<uint64_t>> live_spill_by_block(num_blocks);
     for (size_t bi = 0; bi < num_blocks; ++bi) {
         const auto& block = fn_.blocks[bi];
-        std::fill(live_vreg.begin(), live_vreg.end(), char{0});
+        for (uint32_t id : live_list) live_pos[id] = UINT32_MAX;
+        live_list.clear();
         for (VReg v : liveness_.block_liveness(block.get()).live_out) {
-            if (v.is_valid() && v.id < num_vregs && v.is_gpr()) live_vreg[v.id] = 1;
+            if (v.is_valid() && v.id < num_vregs && v.is_gpr()) live_add(v.id);
         }
         const size_t n_inst = block->instructions.size();
         std::vector<uint32_t>& live_callee_at = live_callee_by_block[bi];
@@ -152,11 +172,7 @@ void LinearScanAllocator::clear_dead_callee_gprs_at_calls(uint32_t final_callee_
                         smask |= (uint64_t{1} << s);
                     }
                 };
-                for (uint32_t id = 0; id < num_vregs; ++id) {
-                    if (live_vreg[id]) {
-                        mark_vreg(fn_.vreg_table[id].vreg);
-                    }
-                };
+                for (uint32_t id : live_list) mark_vreg(fn_.vreg_table[id].vreg);
                 for (const auto& u : inst.uses) {
                     if (u.is_vreg()) mark_vreg(u.vreg_val);
                     else if (u.is_preg() || u.is_spill_slot()) mark_loc(u);
@@ -176,11 +192,11 @@ void LinearScanAllocator::clear_dead_callee_gprs_at_calls(uint32_t final_callee_
             }
             for (const auto& d : inst.defs) {
                 if (d.is_vreg() && d.vreg_val.is_valid() && d.vreg_val.id < num_vregs) {
-                    live_vreg[d.vreg_val.id] = 0;
+                    live_remove(d.vreg_val.id);
                 }
             }
             auto mark_use = [&](VReg v) {
-                if (v.is_valid() && v.id < num_vregs && v.is_gpr()) live_vreg[v.id] = 1;
+                if (v.is_valid() && v.id < num_vregs && v.is_gpr()) live_add(v.id);
             };
             for (const auto& d : inst.defs) {
                 if (d.is_mem()) {
@@ -318,6 +334,30 @@ void LinearScanAllocator::clear_dead_callee_gprs_at_calls(uint32_t final_callee_
         return d;
     };
 
+    // A block's walk only ORs in what it touches, and a call replaces what
+    // is dirty, so its exit is (entry | touched) for a block without a call
+    // and, for one with a call, what follows its last call whatever the
+    // entry: walk(b, {}) either way. The fixpoint runs on those summaries;
+    // re-walking every instruction (and looking up every operand's
+    // location) on every round was most of this function's time.
+    std::vector<Dirty> touched(num_blocks);
+    std::vector<char> has_call(num_blocks, 0);
+    for (size_t bi = 0; bi < num_blocks; ++bi) {
+        touched[bi] = walk(bi, Dirty{}, false);
+        for (const auto& inst : fn_.blocks[bi]->instructions) {
+            if (inst->is_call()) {
+                has_call[bi] = 1;
+                break;
+            }
+        }
+    }
+    auto exit_of = [&](size_t bi, Dirty d) -> Dirty {
+        if (has_call[bi]) return touched[bi];
+        d.callee |= touched[bi].callee;
+        d.spill |= touched[bi].spill;
+        return d;
+    };
+
     std::vector<Dirty> in(num_blocks), out(num_blocks);
     for (size_t bi = 0; bi < num_blocks; ++bi) in[bi] = starts_dirty[bi] ? all : Dirty{};
     for (bool changed = true; changed;) {
@@ -336,7 +376,7 @@ void LinearScanAllocator::clear_dead_callee_gprs_at_calls(uint32_t final_callee_
             d.callee |= edge_writes[bi].callee;
             d.spill |= edge_writes[bi].spill;
             in[bi] = d;
-            const Dirty o = walk(bi, d, false);
+            const Dirty o = exit_of(bi, d);
             if (!(o == out[bi])) {
                 out[bi] = o;
                 changed = true;

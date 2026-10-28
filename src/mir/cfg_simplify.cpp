@@ -90,7 +90,7 @@ private:
     // replacement when a parameter is forwarded, dropped with an edge
     // argument. What `count_uses` over the whole function answered, without
     // the walk.
-    std::unordered_map<const Value*, uint32_t> use_counts_;
+    UseCounts use_counts_;
 
     Value* resolve(Value* v) const {
         while (v) {
@@ -105,18 +105,17 @@ private:
         to = resolve(to);
         if (!from || !to || from == to) return;
         forward_[from] = to;
-        auto moved = use_counts_.find(from);
-        if (moved != use_counts_.end()) {
-            use_counts_[to] += moved->second;
-            moved->second = 0;
+        if (uint32_t* moved = use_counts_.find(from)) {
+            const uint32_t n = *moved;
+            *moved = 0;
+            use_counts_[to] += n;
         }
     }
 
     void drop_use(Value* v) {
         v = resolve(v);
         if (!v) return;
-        auto it = use_counts_.find(v);
-        if (it != use_counts_.end() && it->second > 0) --it->second;
+        if (uint32_t* n = use_counts_.find(v); n && *n > 0) --*n;
     }
 
     void apply_forwarding() {
@@ -298,8 +297,7 @@ private:
 
             for (size_t i = 0; i < bb->param_count(); ++i) {
                 Value* param = bb->param(i);
-                const auto counted = use_counts_.find(param);
-                const size_t use_count = counted == use_counts_.end() ? 0 : counted->second;
+                const size_t use_count = use_counts_.value_or(param, 0);
                 if (use_count == 0) {
                     keep_param[i] = false;
                     any_param_removed = true;

@@ -46,7 +46,7 @@ struct X64BaselineEmitter {
     X64Encoder& enc;
     Target target;
     const Function& fn;
-    const std::unordered_map<const Value*, int32_t>& slot_map;
+    const DenseIdMap<Value, int32_t>& slot_map;
     const std::unordered_map<const Instruction*, int32_t>& alloca_offsets;
     const std::unordered_map<uint32_t, Label>& block_labels;
     FunctionStackMap& fn_stack_map;
@@ -104,11 +104,11 @@ struct X64BaselineEmitter {
     std::vector<std::pair<Label, const Instruction*>> unwind_trampolines;
 
     MemAddress slot_addr(const Value* val) const {
-        auto it = slot_map.find(val);
-        if (it == slot_map.end()) {
+        const int32_t* slot = slot_map.find(val);
+        if (!slot) {
             throw_unsupported(kX64BaselineStage, "operand with no frame slot in " + std::string(fn.name()));
         }
-        return MemAddress::base_disp(GPR::RBP, -it->second);
+        return MemAddress::base_disp(GPR::RBP, -*slot);
     }
 
     // Byte `byte` of a (vector) value's slot.

@@ -6,6 +6,7 @@
 #include <brass/mir/loop_analysis.hpp>
 #include <brass/mir/runtime_symbols.hpp>
 #include <brass/mir/uses.hpp>
+#include <brass/core/scratch_alloc.hpp>
 #include "int_fold.hpp"
 #include "number_bits.hpp"
 #include <cmath>
@@ -82,11 +83,11 @@ class PendingReplacements {
 public:
     Value* resolve(Value* v) {
         Value* root = v;
-        for (auto it = map_.find(root); it != map_.end(); it = map_.find(root)) root = it->second;
+        for (Value** next = map_.find(root); next; next = map_.find(root)) root = *next;
         while (v != root) {  // path compression
-            auto it = map_.find(v);
-            Value* next = it->second;
-            it->second = root;
+            Value** slot = map_.find(v);
+            Value* next = *slot;
+            *slot = root;
             v = next;
         }
         return root;
@@ -102,6 +103,7 @@ public:
     void replace_and_remove(BasicBlock* bb, Instruction* inst, Value* replacement) {
         Value* target = resolve(replacement);
         if (target != inst->result()) map_[inst->result()] = target;
+
         bb->remove_instruction(inst);
     }
 
@@ -117,7 +119,9 @@ public:
     }
 
 private:
-    std::unordered_map<const Value*, Value*> map_;
+    // Looked up for every operand of every instruction a pass visits, so
+    // indexed by value id rather than hashed.
+    DenseIdMap<Value, Value*> map_;
 };
 
 // The key two pure instructions share exactly when they compute the same
@@ -590,13 +594,13 @@ bool dominator_cse(Function& fn) {
     fn.rebuild_cfg_predecessors();
     DominatorTree dom(fn);
     bool changed = false;
-    std::unordered_map<ExprKey, Value*, ExprKeyHash> expr_map;
+    ScratchMap<ExprKey, Value*, ExprKeyHash> expr_map;
     PendingReplacements pending;
 
     // An explicit stack: a deep dominator tree must not overflow the C++ one.
     struct Frame {
         BasicBlock* bb;
-        std::vector<ExprKey> added;
+        ScratchVector<ExprKey> added;
         bool entered = false;
     };
     std::vector<Frame> stack;
@@ -609,7 +613,7 @@ bool dominator_cse(Function& fn) {
         }
         stack.back().entered = true;
         BasicBlock* bb = stack.back().bb;
-        std::vector<ExprKey> added;
+        ScratchVector<ExprKey> added;
         Instruction* cur = bb->head();
         while (cur) {
             Instruction* next = cur->next();
@@ -629,7 +633,7 @@ bool dominator_cse(Function& fn) {
             cur = next;
         }
         stack.back().added = std::move(added);
-        const auto& children = dom.children(bb);
+        const auto children = dom.children(bb);
         for (auto it = children.rbegin(); it != children.rend(); ++it) {
             if (*it) stack.push_back({const_cast<BasicBlock*>(*it), {}, false});
         }
@@ -655,11 +659,9 @@ bool eliminate_dead_code(Function& fn) {
                 Instruction* prev = cur->prev();
                 if (!cur->has_side_effects() && cur->produces_value()) {
                     Value* res = cur->result();
-                    auto r_it = res ? use_counts.find(res) : use_counts.end();
-                    if (!res || r_it == use_counts.end() || r_it->second == 0) {
+                    if (!res || use_counts.value_or(res, 0) == 0) {
                         for_each_use(*cur, [&](const Value* v) {
-                            auto it = use_counts.find(v);
-                            if (it != use_counts.end() && it->second > 0) --it->second;
+                            if (uint32_t* n = use_counts.find(v); n && *n > 0) --*n;
                         });
                         bb->remove_instruction(cur);
                         progress = true;
@@ -676,8 +678,7 @@ bool eliminate_dead_code(Function& fn) {
             size_t p_i = 0;
             while (p_i < bb->param_count()) {
                 Value* p = bb->param(p_i);
-                auto p_it = p ? use_counts.find(p) : use_counts.end();
-                if (p && (p_it == use_counts.end() || p_it->second == 0)) {
+                if (p && use_counts.value_or(p, 0) == 0) {
                     // The edge arguments that fed it go with it: each loses
                     // a use (recounting the function per parameter was
                     // quadratic in large functions).
@@ -686,8 +687,7 @@ bool eliminate_dead_code(Function& fn) {
                         if (!term) continue;
                         for_each_edge(*term, [&](BranchTarget& bt) {
                             if (bt.block != bb || p_i >= bt.args.size()) return;
-                            auto it = use_counts.find(bt.args[p_i]);
-                            if (it != use_counts.end() && it->second > 0) --it->second;
+                            if (uint32_t* n = use_counts.find(bt.args[p_i]); n && *n > 0) --*n;
                         });
                     }
                     remove_block_param(*bb, p_i);
@@ -710,18 +710,56 @@ bool eliminate_dead_induction_cycles(Function& fn) {
         // The instructions that mention each value, built once per round:
         // scanning the whole function for every parameter was quadratic.
         // An instruction removed during the round keeps its entries and is
-        // skipped by its null parent.
-        std::unordered_map<const Value*, std::vector<Instruction*>> users;
+        // skipped by its null parent. Laid out flat (each value's users one
+        // run of `user_list`) rather than a vector per value, which was an
+        // allocation per value used.
+        DenseIdMap<Value, uint32_t> user_slot(fn.current_next_value_id());
+        std::vector<uint32_t> user_start;
+        std::vector<const Instruction*> last_user;
         for (BasicBlock* u_bb : fn.blocks()) {
             if (!u_bb) continue;
             for (Instruction* inst : *u_bb) {
                 if (!inst) continue;
                 for_each_use(*inst, [&](const Value* v) {
-                    auto& list = users[v];
-                    if (list.empty() || list.back() != inst) list.push_back(inst);
+                    uint32_t& slot = user_slot.get_or_insert(v, static_cast<uint32_t>(user_start.size()));
+                    if (slot == user_start.size()) {
+                        user_start.push_back(0);
+                        last_user.push_back(nullptr);
+                    }
+                    if (last_user[slot] != inst) {
+                        last_user[slot] = inst;
+                        ++user_start[slot];
+                    }
                 });
             }
         }
+        // Counts to run starts; each run fills from its start upwards.
+        uint32_t running = 0;
+        for (uint32_t& start : user_start) {
+            const uint32_t n = start;
+            start = running;
+            running += n;
+        }
+        user_start.push_back(running);
+        std::vector<Instruction*> user_list(running);
+        std::vector<uint32_t> fill(user_start.begin(), user_start.end() - 1);
+        std::fill(last_user.begin(), last_user.end(), nullptr);
+        for (BasicBlock* u_bb : fn.blocks()) {
+            if (!u_bb) continue;
+            for (Instruction* inst : *u_bb) {
+                if (!inst) continue;
+                for_each_use(*inst, [&](const Value* v) {
+                    const uint32_t slot = *user_slot.find(v);
+                    if (last_user[slot] == inst) return;
+                    last_user[slot] = inst;
+                    user_list[fill[slot]++] = inst;
+                });
+            }
+        }
+        // Per parameter, reused: the cycles are a handful of values.
+        std::vector<Instruction*> cycle_insts;
+        std::vector<Value*> worklist;
+        std::vector<Value*> visited;
         for (BasicBlock* bb : fn.blocks()) {
             if (!bb || bb == fn.entry_block()) continue;
             size_t p_i = 0;
@@ -732,17 +770,18 @@ bool eliminate_dead_induction_cycles(Function& fn) {
                 // The values reachable from `p` through add/sub; the cycle is
                 // dead when they reach nothing else and flow back only into
                 // `p` itself.
-                std::unordered_set<Instruction*> cycle_insts;
-                std::vector<Value*> worklist = {p};
-                std::unordered_set<Value*> visited = {p};
+                cycle_insts.clear();
+                worklist.assign(1, p);
+                visited.assign(1, p);
                 bool is_pure_cycle = true;
                 while (!worklist.empty() && is_pure_cycle) {
                     Value* cur_v = worklist.back();
                     worklist.pop_back();
-                    auto found = users.find(cur_v);
-                    if (found == users.end()) continue;
+                    const uint32_t* slot = user_slot.find(cur_v);
+                    if (!slot) continue;
                     {
-                        for (Instruction* inst : found->second) {
+                        for (uint32_t u = user_start[*slot]; u < user_start[*slot + 1]; ++u) {
+                            Instruction* inst = user_list[u];
                             if (!inst || !inst->parent()) continue;
                             for (Value* sv : inst->state_map()) {
                                 if (sv == cur_v) is_pure_cycle = false;
@@ -754,9 +793,14 @@ bool eliminate_dead_induction_cycles(Function& fn) {
                                     is_pure_cycle = false;
                                     break;
                                 }
-                                cycle_insts.insert(inst);
+                                if (std::find(cycle_insts.begin(), cycle_insts.end(), inst) == cycle_insts.end()) {
+                                    cycle_insts.push_back(inst);
+                                }
                                 Value* res = inst->result();
-                                if (res && visited.insert(res).second) worklist.push_back(res);
+                                if (res && std::find(visited.begin(), visited.end(), res) == visited.end()) {
+                                    visited.push_back(res);
+                                    worklist.push_back(res);
+                                }
                             }
                             for_each_edge(*inst, [&](const BranchTarget& bt) {
                                 for (size_t arg_idx = 0; arg_idx < bt.args.size(); ++arg_idx) {

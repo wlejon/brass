@@ -12,7 +12,7 @@
 // type, which keeps BytecodeFunction::register_types exact (the GC and the
 // deopt/throw paths read it).
 
-#include "dense_id_map.hpp"
+#include <brass/mir/dense_id_map.hpp>
 #include <brass/vm/bytecode.hpp>
 #include <brass/mir/function.hpp>
 #include <brass/mir/block.hpp>

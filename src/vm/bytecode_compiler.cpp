@@ -20,8 +20,8 @@ std::unique_ptr<BytecodeModule> BytecodeCompiler::compile(const Module& mod) {
 namespace {
 
 // Use counts of every value, for compare-branch fusion.
-detail::DenseIdMap<Value, uint32_t> count_uses(const Function& fn, const detail::BlockLayout& layout) {
-    detail::DenseIdMap<Value, uint32_t> uses;
+DenseIdMap<Value, uint32_t> count_uses(const Function& fn, const detail::BlockLayout& layout) {
+    DenseIdMap<Value, uint32_t> uses;
     uses.reserve(fn.current_next_value_id());
     auto count = [&](const Value* v) {
         if (v) ++uses.get_or_insert(v, 0);

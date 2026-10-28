@@ -10,7 +10,6 @@ namespace brass {
 
 namespace {
 
-using UseCounts = std::unordered_map<const Value*, uint32_t>;
 
 bool is_and_or(Opcode op) noexcept {
     return op == Opcode::and_ || op == Opcode::or_;
@@ -22,8 +21,7 @@ bool is_split_tree(const Value* v, const BasicBlock* bb, const UseCounts& uses, 
     if (!v || !v->is_instruction() || depth > 4) return false;
     const Instruction* d = v->defining_instruction();
     if (!d || d->parent() != bb) return false;
-    auto it = uses.find(v);
-    if (it == uses.end() || it->second != 1) return false;
+    if (uses.value_or(v, 0) != 1) return false;
     if (is_comparison(d->opcode())) return true;
     return is_and_or(d->opcode()) && d->operand_count() == 2 &&
            is_split_tree(d->operand(0), bb, uses, depth + 1) &&

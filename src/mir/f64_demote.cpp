@@ -964,11 +964,9 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
             Instruction* prev = cur->prev();
             if (!cur->has_side_effects() && cur->produces_value()) {
                 Value* res = cur->result();
-                auto it = res ? use_counts.find(res) : use_counts.end();
-                if (!res || it == use_counts.end() || it->second == 0) {
+                if (!res || use_counts.value_or(res, 0) == 0) {
                     for_each_use(*cur, [&](const Value* u) {
-                        auto uit = use_counts.find(u);
-                        if (uit != use_counts.end() && uit->second > 0) --uit->second;
+                        if (uint32_t* n = use_counts.find(u); n && *n > 0) --*n;
                     });
                     bb->remove_instruction(cur);
                 }

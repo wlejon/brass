@@ -330,7 +330,9 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
         static constexpr XMM kWinXmms[4] = {XMM::XMM0, XMM::XMM1, XMM::XMM2, XMM::XMM3};
         for (size_t i = 0; i < entry_bb->param_count(); ++i) {
             const Value* param = entry_bb->param(i);
-            MemAddress dst = slot_off_addr(slot_map.at(param));
+            const int32_t* param_slot = slot_map.find(param);
+            if (!param_slot) throw_unsupported(kX64BaselineStage, "parameter with no frame slot");
+            MemAddress dst = slot_off_addr(*param_slot);
             const bool is_vec = bl_is_v128(param->type());
             const bool is_flt = bl_in_xmm(param->type());
             auto from_stack = [&](int32_t caller_off) {

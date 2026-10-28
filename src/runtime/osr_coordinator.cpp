@@ -14,6 +14,7 @@
 #include <brass/vm/fast_interpreter.hpp>
 #include "../vm/fast_interpreter_impl.hpp"
 #include "tier2_link.hpp"
+#include <brass/core/phase_times.hpp>
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
@@ -384,6 +385,8 @@ void OsrCoordinator::compile_entry(const Function& fn, Module& copy, const std::
     Entry& e = *shared;
     Module* const mod = &copy;
     TierEventScope timed(TierEventKind::OsrCompile, fn.name());
+    const std::string timing_name = std::string(fn.name()) + " osr";
+    PhaseTimeSubject timing_subject(timing_name);
     auto fail = [&](std::string_view why) {
         timed.fail(why);
         {

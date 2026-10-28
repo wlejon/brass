@@ -1,5 +1,7 @@
 #pragma once
 
+#include <brass/core/scratch_alloc.hpp>
+
 #include <brass/target/x64/x64_registers.hpp>
 #include <brass/target/x64/x64_operands.hpp>
 #include <brass/target/x64/code_buffer.hpp>
@@ -427,14 +429,21 @@ struct FixedConstraint {
     }
 };
 
+// An instruction and its operand lists come from the compiling thread's
+// scratch pool (brass/core/scratch_alloc.hpp): a function's LIR is made and
+// dropped inside one compile, and the instruction plus four vectors each
+// was most of the backend's allocations.
 class LirInst {
 public:
+    static void* operator new(size_t bytes) { return ScratchPool::allocate_owned(bytes); }
+    static void operator delete(void* p, size_t bytes) noexcept { ScratchPool::deallocate_owned(p, bytes); }
+
     uint32_t id = 0;
     LirOpcode opcode = LirOpcode::Nop;
-    std::vector<LirOperand> defs;
-    std::vector<LirOperand> uses;
-    std::vector<FixedConstraint> def_constraints;
-    std::vector<FixedConstraint> use_constraints;
+    ScratchVector<LirOperand> defs;
+    ScratchVector<LirOperand> uses;
+    ScratchVector<FixedConstraint> def_constraints;
+    ScratchVector<FixedConstraint> use_constraints;
     uint32_t clobbered_gprs = 0;
     uint32_t clobbered_xmms = 0;
     x64::Condition condition = x64::Condition::None;

@@ -4,6 +4,7 @@
 // target/aarch64/aarch64_baseline_emit*.cpp) share: the slot conventions and
 // the frame layout. Target-neutral, so it names no encoder.
 
+#include <brass/mir/dense_id_map.hpp>
 #include <brass/mir/function.hpp>
 #include <brass/mir/types.hpp>
 #include <cstdint>
@@ -33,7 +34,7 @@ inline bool bl_is_v128(Type t) { return t.is_v128(); }
 // A function the layout cannot place is rejected (UnsupportedOperation)
 // under `stage`.
 struct BaselineFrameLayout {
-    std::unordered_map<const Value*, int32_t> slot_map;
+    DenseIdMap<Value, int32_t> slot_map;
     std::unordered_map<const Instruction*, int32_t> alloca_offsets;
     std::vector<int32_t> gcref_slots;
     std::vector<int32_t> tagged_slots;

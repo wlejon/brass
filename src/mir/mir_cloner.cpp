@@ -6,6 +6,7 @@
 #include <brass/core/arena.hpp>
 #include <brass/core/string_pool.hpp>
 #include <string_view>
+#include <brass/mir/dense_id_map.hpp>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -32,8 +33,10 @@ Function* clone_function(const Function& src, Module& dst_mod) {
     dst_fn->set_next_block_id(max_block_id + 1);
     dst_fn->set_next_value_id(max_val_id + 1);
 
-    std::unordered_map<const BasicBlock*, BasicBlock*> block_map;
-    std::unordered_map<const Value*, Value*> value_map;
+    // Indexed by the source's ids: a hash node per block, value and
+    // instruction was most of what a clone cost.
+    DenseIdMap<BasicBlock, BasicBlock*> block_map(max_block_id + 1);
+    DenseIdMap<Value, Value*> value_map(max_val_id + 1);
 
     for (const BasicBlock* src_bb : src.blocks()) {
         if (!src_bb) continue;
@@ -41,36 +44,38 @@ Function* clone_function(const Function& src, Module& dst_mod) {
         dst_bb->set_parent(dst_fn);
         dst_bb->set_cold(src_bb->is_cold());
         dst_fn->append_block(dst_bb);
-        block_map[src_bb] = dst_bb;
+        block_map.insert(src_bb, dst_bb);
 
         for (size_t i = 0; i < src_bb->param_count(); ++i) {
             const Value* src_p = src_bb->param(i);
             Value* dst_p = dst_fn->parent()->arena().make<Value>(src_p->id(), src_p->type(), ValueKind::BlockParam);
             dst_bb->add_param(dst_p);
-            value_map[src_p] = dst_p;
+            value_map.insert(src_p, dst_p);
         }
     }
 
     auto map_value = [&](const Value* v) -> Value* {
         if (!v) return nullptr;
-        auto it = value_map.find(v);
-        if (it != value_map.end()) return it->second;
+        if (Value* const* mapped = value_map.find(v)) return *mapped;
         return const_cast<Value*>(v);
     };
 
     auto map_target = [&](const BranchTarget& src_bt) -> BranchTarget {
         BranchTarget dst_bt;
-        if (src_bt.block) dst_bt.block = block_map[src_bt.block];
+        if (src_bt.block) dst_bt.block = block_map.value_or(src_bt.block, nullptr);
+        dst_bt.args.reserve(src_bt.args.size());
         for (const Value* arg : src_bt.args) dst_bt.args.push_back(map_value(arg));
         return dst_bt;
     };
 
-    std::unordered_map<const Instruction*, Instruction*> inst_map;
+    // The copies in the source's instruction order; pass 2 walks the same
+    // order.
+    std::vector<Instruction*> copies;
 
     // Pass 1: Create all instructions and their result values
     for (const BasicBlock* src_bb : src.blocks()) {
         if (!src_bb) continue;
-        BasicBlock* dst_bb = block_map[src_bb];
+        BasicBlock* dst_bb = *block_map.find(src_bb);
 
         for (const Instruction* src_inst : *src_bb) {
             if (!src_inst) continue;
@@ -86,20 +91,21 @@ Function* clone_function(const Function& src, Module& dst_mod) {
                 Value* dst_res = dst_fn->parent()->arena().make<Value>(src_res->id(), src_res->type(), ValueKind::InstructionResult);
                 dst_res->set_defining_instruction(dst_inst);
                 dst_inst->set_result(dst_res);
-                value_map[src_res] = dst_res;
+                value_map.insert(src_res, dst_res);
             }
 
             dst_bb->append_instruction(dst_inst);
-            inst_map[src_inst] = dst_inst;
+            copies.push_back(dst_inst);
         }
     }
 
     // Pass 2: Connect operands and control-flow targets
+    size_t next_copy = 0;
     for (const BasicBlock* src_bb : src.blocks()) {
         if (!src_bb) continue;
         for (const Instruction* src_inst : *src_bb) {
             if (!src_inst) continue;
-            Instruction* dst_inst = inst_map[src_inst];
+            Instruction* dst_inst = copies[next_copy++];
 
             for (const Value* op : src_inst->operands()) dst_inst->add_operand(map_value(op));
             for (const Value* sv : src_inst->state_map()) dst_inst->add_state_value(map_value(sv));
@@ -117,7 +123,7 @@ Function* clone_function(const Function& src, Module& dst_mod) {
     }
 
     for (const auto& rp : src.resume_points()) {
-        if (rp.second) dst_fn->add_resume_point(rp.first, block_map[rp.second]);
+        if (rp.second) dst_fn->add_resume_point(rp.first, block_map.value_or(rp.second, nullptr));
     }
 
     dst_fn->set_allow_fp_reassociation(src.allow_fp_reassociation());

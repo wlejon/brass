@@ -115,7 +115,7 @@ void LinearScanAllocator::mark_unsplittable_live_ins() {
     auto mark = [this](VReg v) {
         if (v.is_valid() && v.id < unsplittable_.size()) unsplittable_[v.id] = 1;
     };
-    auto mark_all = [&](const std::vector<VReg>& vs) {
+    auto mark_all = [&](const auto& vs) {
         for (VReg v : vs) mark(v);
     };
     // A guard exit entered by more than one Jcc reads its state where each

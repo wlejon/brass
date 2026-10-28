@@ -9,10 +9,28 @@
 // took, summed over all functions and compile threads, and the process prints
 // the table on exit (to stderr, or to the file BRASS_PASS_TIMES names when it
 // is not "1"). Unset, a scope costs one predictable branch.
+//
+// With BRASS_PASS_TIMES_FUNCTION=<name> as well, only the compiles whose
+// subject (PhaseTimeSubject) is <name> count, so one big function's compile
+// reads pass by pass instead of drowning in every other function's; the
+// subject of an OSR entry's compile is "<name> osr".
 namespace brass {
 
 bool phase_times_enabled() noexcept;
 void record_phase_time(std::string_view name, uint64_t ns) noexcept;
+
+// Names the function the calling thread compiles until the scope ends.
+class PhaseTimeSubject {
+public:
+    explicit PhaseTimeSubject(std::string_view subject) noexcept;
+    ~PhaseTimeSubject();
+    PhaseTimeSubject(const PhaseTimeSubject&) = delete;
+    PhaseTimeSubject& operator=(const PhaseTimeSubject&) = delete;
+
+private:
+    std::string_view previous_;
+    bool on_;
+};
 
 class PhaseTimeScope {
 public:

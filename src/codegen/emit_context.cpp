@@ -77,7 +77,7 @@ bool is_vex256_opcode(LirOpcode op) {
 
 // A 32-byte operand is a YMM register or a 256-bit memory access; there is
 // no 32-byte GPR value.
-bool has_256_operand(const std::vector<LirOperand>& ops) {
+bool has_256_operand(const ScratchVector<LirOperand>& ops) {
     for (const auto& op : ops) {
         if (op.size == 32) return true;
     }

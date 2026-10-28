@@ -1,5 +1,7 @@
 #pragma once
 
+#include <brass/core/scratch_alloc.hpp>
+
 #include <brass/codegen/lir.hpp>
 #include <brass/codegen/live_range.hpp>
 #include <brass/target/calling_conv.hpp>
@@ -88,14 +90,14 @@ private:
     uint32_t used_callee_xmms_ = 0;
     size_t next_spill_slot_ = 0;
 
-    std::unordered_map<uint32_t, std::vector<VReg>> coalesce_hints_;
+    ScratchMap<uint32_t, std::vector<VReg>> coalesce_hints_;
     // Per unordered pair of values, the positions of the copies between them
     // (a Mov or a ParallelCopy entry), which slot_of lets them meet at.
-    std::unordered_map<uint64_t, std::vector<uint32_t>> copy_positions_;
+    ScratchMap<uint64_t, std::vector<uint32_t>> copy_positions_;
     static uint64_t copy_key(uint32_t a, uint32_t b) noexcept {
         return a < b ? (uint64_t{a} << 32) | b : (uint64_t{b} << 32) | a;
     }
-    std::unordered_map<uint32_t, std::vector<PReg>> fixed_preg_hints_;
+    ScratchMap<uint32_t, std::vector<PReg>> fixed_preg_hints_;
     std::unordered_multimap<uint64_t, PReg> vreg_at_preg_hints_;
 
     // Per register class, the instructions that can block a register for a
@@ -121,11 +123,11 @@ private:
     std::vector<VReg> mem_index_vregs_;
     // Guard exit block id -> the one Jcc position entering it (the place its
     // GuardExit reads its state from).
-    std::unordered_map<uint32_t, uint32_t> guard_exit_at_;
+    ScratchMap<uint32_t, uint32_t> guard_exit_at_;
 
     // Pieces, and per vreg id the indices of its pieces in window order.
-    std::vector<AllocPiece> pieces_;
-    std::vector<std::vector<uint32_t>> vreg_pieces_;
+    ScratchVector<AllocPiece> pieces_;
+    ScratchVector<ScratchVector<uint32_t>> vreg_pieces_;
     std::vector<int32_t> vreg_slot_;
     // The values each shareable slot has been given so far (slot_of).
     struct SlotOwners {
@@ -223,10 +225,10 @@ private:
         std::vector<PendingMove> moves;
     };
     enum class EdgePlace : uint8_t { EndOfPred, StartOfSucc, Split, None };
-    std::unordered_map<uint32_t, std::vector<PendingMove>> moves_before_;   // inst id
-    std::unordered_map<uint32_t, std::vector<PendingMove>> moves_after_;    // inst id
-    std::unordered_map<uint32_t, std::vector<PendingMove>> moves_at_start_; // block id
-    std::unordered_map<uint32_t, std::vector<PendingMove>> moves_at_end_;   // block id
+    ScratchMap<uint32_t, std::vector<PendingMove>> moves_before_;   // inst id
+    ScratchMap<uint32_t, std::vector<PendingMove>> moves_after_;    // inst id
+    ScratchMap<uint32_t, std::vector<PendingMove>> moves_at_start_; // block id
+    ScratchMap<uint32_t, std::vector<PendingMove>> moves_at_end_;   // block id
     std::vector<EdgeSplit> edge_splits_;
     std::vector<uint32_t> landing_pads_;
     std::vector<uint32_t> resume_targets_;

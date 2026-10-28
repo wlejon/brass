@@ -30,8 +30,8 @@ uint32_t limit_before(uint32_t blocked_at) {
 // A piece's segments, clamped to its window.
 struct SegCursor {
     const AllocPiece& p;
-    std::vector<LiveRangeSegment>::const_iterator it;
-    std::vector<LiveRangeSegment>::const_iterator end;
+    ScratchVector<LiveRangeSegment>::const_iterator it;
+    ScratchVector<LiveRangeSegment>::const_iterator end;
 
     explicit SegCursor(const AllocPiece& piece) : p(piece), end(piece.base->segments.end()) {
         const auto& segs = piece.base->segments;
