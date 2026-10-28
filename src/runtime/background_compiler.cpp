@@ -154,7 +154,8 @@ bool BackgroundCompiler::take_deferred_copy(CompileTask& task) {
     timed.set_ok(false);
     FunctionDispatchTable& table = installer_.dispatch_table();
     const Module& src = *task.copy_source;
-    std::unique_ptr<Module> copy = clone_function_module(src, task.function_name, task.copy_targets);
+    std::unique_ptr<Module> copy =
+        clone_function_module(src, task.function_name, task.copy_targets, detail::uninlinable_callees(table));
     if (!copy) return false;
     detail::bind_declared_handles(table, *copy, src);
     Tier2Bindings bindings = installer_.capture_tier2_bindings(*task.handle, *copy, task.function_name, &src);

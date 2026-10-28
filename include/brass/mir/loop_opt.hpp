@@ -3,6 +3,7 @@
 #include <brass/mir/module.hpp>
 #include <brass/mir/function.hpp>
 #include <brass/mir/pass_manager.hpp>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -125,16 +126,22 @@ std::unique_ptr<Module> clone_module(const Module& src);
 // listed in `also` (its speculated call targets, say) for the optimizer to
 // inline, and every other module function those bodies name as an external
 // symbol, linked by name. Null when src has no such function.
+// `declare_only`, when given, names callees to leave external even so: a
+// tier-up's copy passes the ones its inliner could never take, which would
+// only be copied to be dropped again.
 std::unique_ptr<Module> clone_function_module(const Module& src, std::string_view fn_name,
-                                              const std::vector<std::string>& also = {});
+                                              const std::vector<std::string>& also = {},
+                                              const std::function<bool(const Function&)>& declare_only = {});
 
 // What clone_function_module adds around its target, for code taken from
 // `blocks` (of a function of src): the bodies of the src functions they
 // name directly and of those in `also`, the exit stubs those bodies' guards
 // name, and every other src function any of them names, as an external
 // symbol. `exclude` is never copied (named, it is external), nor is a
-// function `dst` already defines.
+// function `dst` already defines, nor a callee `declare_only` accepts (an
+// exit stub a guard names is copied whatever it says).
 void clone_callee_closure(const Module& src, Module& dst, const std::vector<const BasicBlock*>& blocks,
-                          const std::vector<std::string>& also, const Function* exclude);
+                          const std::vector<std::string>& also, const Function* exclude,
+                          const std::function<bool(const Function&)>& declare_only = {});
 
 } // namespace brass

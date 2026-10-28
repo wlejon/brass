@@ -362,8 +362,16 @@ bool MultiTierPipeline::is_baseline_rejected(std::string_view fn_name) const {
     return baseline_rejected_.count(std::string(fn_name)) != 0;
 }
 
+bool MultiTierPipeline::is_tier1_requested(std::string_view fn_name) const {
+    std::lock_guard<std::mutex> lock(compiling_mutex_);
+    return tier1_requested_.count(std::string(fn_name)) != 0;
+}
+
 bool MultiTierPipeline::request_tier1(std::string_view fn_name) {
     std::string key(fn_name);
+    // Tier 2 first means an OSR'd loop (multi_tier_pipeline.hpp says why
+    // tier 1 waits then).
+    if (config_.enable_background_compile && background_compiler().is_queued_or_compiling(fn_name)) return false;
     {
         std::lock_guard<std::mutex> lock(compiling_mutex_);
         if (baseline_rejected_.count(key) || !tier1_requested_.insert(key).second) return false;

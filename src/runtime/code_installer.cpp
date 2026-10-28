@@ -30,7 +30,8 @@ std::unique_ptr<Module> clone_for_tier2(FunctionDispatchTable& table, const Modu
     if (!table.pipeline().is_initialized()) return clone_module(module);
     // The call targets its type feedback names, with bodies, for
     // speculative inlining.
-    auto copy = clone_function_module(module, fn_name, detail::speculated_call_targets(table, fn_name));
+    auto copy = clone_function_module(module, fn_name, detail::speculated_call_targets(table, fn_name),
+                                      detail::uninlinable_callees(table));
     if (!copy) return copy;
     // Each program function it names links to its handle's stub.
     detail::bind_declared_handles(table, *copy, module);
@@ -482,7 +483,7 @@ CodeInstallResult CodeInstaller::install_tier2(
     std::shared_ptr<codegen::JitExecutionEngine> jit;
     try {
     // 1. Run full Tier-2 optimization passes
-    if (std::string errors; !detail::run_tier2_optimization_pipeline(*module, *table_, errors)) {
+    if (std::string errors; !detail::run_tier2_optimization_pipeline(*module, *table_, fn_name, errors)) {
         return reject("Tier-2 optimization pipeline failed or invalidated module: " + errors);
     }
 

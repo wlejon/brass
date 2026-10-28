@@ -163,7 +163,15 @@ public:
     bool compile_and_install_tier1(std::string_view fn_name, const Function* fn = nullptr);
     // compile_and_install_tier1 of `fn_name` as a CompilePool::shared() job,
     // at most one queued or running per function. True if it was queued.
+    // Declined while the function's tier-2 code is queued or compiling: a
+    // function asks for Tier 2 before Tier 1 only when a loop of it went
+    // to OSR (or tier 1 rejected it), and its next calls are better off in
+    // Tier 0, which enters the loop's OSR entry, than in baseline code,
+    // which has none and would run the rest of a long loop there. Tiering
+    // asks again later, and finds tier 2 installed or given up.
     bool request_tier1(std::string_view fn_name);
+    // Whether a request_tier1 job of `fn_name` is queued or running.
+    bool is_tier1_requested(std::string_view fn_name) const;
     bool is_baseline_rejected(std::string_view fn_name) const;
     // Why the baseline tier rejected `fn_name` ("" if it did not), and every
     // rejection so far, by name.

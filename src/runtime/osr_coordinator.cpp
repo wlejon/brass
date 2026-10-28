@@ -16,6 +16,7 @@
 #include "tier2_link.hpp"
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace brass::runtime {
@@ -39,6 +40,10 @@ struct OsrCoordinator::Entry {
     // frame still in it goes back to the interpreter there instead of
     // calling a failing callee copy on every iteration.
     mutable std::atomic<uint64_t> leave{0};
+    // Under the coordinator's mutex: for a loop header of the same function
+    // a frame asked at while this entry compiled, whether `header` can be
+    // reached from it (block_reaches).
+    std::unordered_map<const BasicBlock*, bool> reached_from;
 };
 
 namespace {
@@ -175,6 +180,27 @@ bool OsrCoordinator::runs_program() const noexcept {
     return registry().dispatch_table().pipeline().is_initialized();
 }
 
+namespace {
+
+// Whether a frame at `from` can still come to `to`: a path of successors
+// leads there.
+bool block_reaches(const BasicBlock& from, const BasicBlock& to) {
+    std::unordered_set<const BasicBlock*> seen{&from};
+    std::vector<const BasicBlock*> work{&from};
+    while (!work.empty()) {
+        const BasicBlock* bb = work.back();
+        work.pop_back();
+        for (const BasicBlock* s : bb->successors()) {
+            if (!s) continue;
+            if (s == &to) return true;
+            if (seen.insert(s).second) work.push_back(s);
+        }
+    }
+    return false;
+}
+
+} // namespace
+
 bool OsrCoordinator::try_osr_migration(FastInterpreter&, const Function& fn, BasicBlock* loop_header,
                                        FastFrame& frame, RuntimeValue& out_result) {
     if (!enabled_ || !loop_header || !runs_program()) return false;
@@ -189,11 +215,21 @@ bool OsrCoordinator::try_osr_migration(FastInterpreter&, const Function& fn, Bas
             // is the function's, so a frame past the threshold asks at every
             // loop header it crosses, and an entry is a copy of the whole
             // rest of the function: each would cost a full compile of the
-            // same code. The frame enters the first one at its header, and a
-            // header it never reaches again asks once that one is done.
+            // same code. The frame enters the first one at its header; a
+            // header that can no longer lead there asks at once (below).
             for (const auto& [header, other] : entries_) {
                 if (header->parent() == loop_header->parent() &&
                     other->state.load(std::memory_order_acquire) == Entry::State::Compiling) {
+                    // Unless the frame has left that loop for good: from a
+                    // header that cannot lead back to it (the next loop of
+                    // a function that runs its loops one after another)
+                    // the entry compiling is of no use to this frame, and
+                    // waiting for it ran this loop interpreted for a whole
+                    // compile before it asked for its own (mesh_churn_2k's
+                    // frame loop, behind the setup loop's entry).
+                    auto [known, fresh] = other->reached_from.emplace(loop_header, false);
+                    if (fresh) known->second = block_reaches(*loop_header, *header);
+                    if (!known->second) continue;
                     if (other->polls.fetch_add(1, std::memory_order_relaxed) + 1 == kWaitPolls &&
                         !process_exiting() && CompilePool::shared().is_running()) {
                         std::shared_ptr<Entry> wait_other = other;
@@ -325,7 +361,7 @@ std::unique_ptr<Module> OsrCoordinator::copy_entry(const Function& fn, const Bas
             timed.fail(why);
             return nullptr;
         }
-        clone_callee_closure(*src, *mod, e->plan.region, targets, &fn);
+        clone_callee_closure(*src, *mod, e->plan.region, targets, &fn, detail::uninlinable_callees(table));
         // Every program function the copy carries a body of has its handle
         // now: a guard of that body failing in the OSR code resumes through
         // it (compile_entry registers the resumer), and a callee the
@@ -374,7 +410,7 @@ void OsrCoordinator::compile_entry(const Function& fn, Module& copy, const std::
     std::shared_ptr<codegen::JitExecutionEngine> jit;
     try {
         std::string errors;
-        if (!detail::run_tier2_optimization_pipeline(*mod, table, errors)) return fail(errors);
+        if (!detail::run_tier2_optimization_pipeline(*mod, table, e.name, errors)) return fail(errors);
         const Function* entry_fn = mod->get_function(e.name);
         std::string why;
         if (!entry_fn) return fail("the optimizer dropped the entry");
@@ -471,8 +507,16 @@ bool OsrCoordinator::enter(const Function& fn, FastFrame& frame, const Entry& e,
         result = invoke_native_address(e.entry, fn.return_type(), &params, args);
     }
     if (!e.plan.leave_check || buffer[e.plan.left_slot()] == 0) {
+        // The function's tier-2 code is on its way. The next call waits for
+        // it only if it would otherwise run baseline code, which has no OSR
+        // and would keep a long loop there; in Tier 0 it reaches this
+        // entry again at the loop's first backedge (request_tier1 holds
+        // tier 1 back meanwhile), at no cost to the mutator.
         MultiTierPipeline& pipeline = registry().dispatch_table().pipeline();
-        if (!process_exiting() && pipeline.config().enable_background_compile &&
+        const FunctionHandle* handle = registry().dispatch_table().find(fn.name());
+        const bool baseline_next = (handle && handle->tier() == TierLevel::Tier1_Baseline) ||
+                                   pipeline.is_tier1_requested(fn.name());
+        if (baseline_next && !process_exiting() && pipeline.config().enable_background_compile &&
             pipeline.background_compiler().is_queued_or_compiling(fn.name())) {
             pipeline.background_compiler().wait_for_function(fn.name(), std::chrono::milliseconds(50));
         }

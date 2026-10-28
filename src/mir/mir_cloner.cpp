@@ -132,7 +132,8 @@ Function* clone_function(const Function& src, Module& dst_mod) {
 }
 
 void clone_callee_closure(const Module& src, Module& dst, const std::vector<const BasicBlock*>& blocks,
-                          const std::vector<std::string>& also, const Function* exclude) {
+                          const std::vector<std::string>& also, const Function* exclude,
+                          const std::function<bool(const Function&)>& declare_only) {
     // The functions the blocks name directly and those of `also`, with
     // their bodies; and, for every body copied, the exit stubs its guards
     // name, which a guard's code is compiled together with.
@@ -152,6 +153,7 @@ void clone_callee_closure(const Module& src, Module& dst, const std::vector<cons
             if (!needed && !f->built_before()) return;
             src.materialize(*f);
         }
+        if (!needed && declare_only && copied.count(f) == 0 && declare_only(*f)) return;
         if (f->block_count() != 0 && copied.insert(f).second) bodies.push_back(f);
     };
     for (const BasicBlock* bb : blocks) {
@@ -196,7 +198,8 @@ void clone_callee_closure(const Module& src, Module& dst, const std::vector<cons
 }
 
 std::unique_ptr<Module> clone_function_module(const Module& src, std::string_view fn_name,
-                                              const std::vector<std::string>& also) {
+                                              const std::vector<std::string>& also,
+                                              const std::function<bool(const Function&)>& declare_only) {
     const Function* target = src.get_function(fn_name);
     if (!target) return nullptr;
     Module::BodyRead read(*target);
@@ -207,7 +210,7 @@ std::unique_ptr<Module> clone_function_module(const Module& src, std::string_vie
     dst->copy_declarations_from(src);
     clone_function(*target, *dst);
     const std::vector<const BasicBlock*> blocks(target->blocks().begin(), target->blocks().end());
-    clone_callee_closure(src, *dst, blocks, also, target);
+    clone_callee_closure(src, *dst, blocks, also, target, declare_only);
     return dst;
 }
 

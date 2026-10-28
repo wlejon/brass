@@ -295,6 +295,14 @@ void Module::rename_function(Function* fn, std::string_view new_name) {
     function_map_[interned] = fn;
 }
 
+void Module::remove_function(Function* fn) {
+    if (!fn) return;
+    if (auto it = function_map_.find(fn->name()); it != function_map_.end() && it->second == fn) {
+        function_map_.erase(it);
+    }
+    std::erase(functions_, fn);
+}
+
 void Module::add_external_symbol(std::string_view sym) {
     std::string_view interned_sym = string_pool_.intern(sym);
     if (!has_external_symbol(interned_sym)) {

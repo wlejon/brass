@@ -5,6 +5,7 @@
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/pass_catalog.hpp>
 #include <brass/mir/pass_pipeline.hpp>
+#include <brass/core/phase_times.hpp>
 #include <brass/mir/verifier.hpp>
 #include <brass/runtime/deopt.hpp>
 #include <brass/runtime/coroutine.hpp>
@@ -14,9 +15,11 @@
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/type_feedback.hpp>
 #include <brass/runtime/tier_timeline.hpp>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <unordered_map>
+#include <unordered_set>
 
 extern "C" void brass_pgo_inc(uint32_t);
 
@@ -74,12 +77,140 @@ void bind_declared_handles(FunctionDispatchTable& table, const Module& copy, con
     }
 }
 
-bool run_tier2_optimization_pipeline(Module& mod, FunctionDispatchTable& table, std::string& errors) {
+namespace {
+
+// Whether a call of `name` in tier-2 code can go through the program's stub,
+// as a call of a function the copy never carried does, and reach code no
+// worse than this copy would make of it soon: a handle bound to a body that
+// has native code installed, or whose baseline compile is queued or running
+// (the stub runs it in Tier 0 through the bridge until the install repoints
+// the stub). check_declared_functions finds either linkable at once, with
+// no compile of its own and nothing to wait out. A callee with neither keeps
+// its body, and the install publishes the copy as its code (install_tier2's
+// sibling copies), which is how a callee no tier has compiled yet gets any.
+bool links_through_stub(FunctionDispatchTable& table, std::string_view name) {
+    // Only a program its pipeline runs has stubs (link_declared_functions).
+    MultiTierPipeline& pipeline = table.pipeline();
+    if (!pipeline.is_initialized()) return false;
+    const FunctionHandle* h = table.find(name);
+    const Function* def = h ? h->mir_function() : nullptr;
+    if (!def || !def->has_body()) return false;
+    if (h->has_native_entry()) return true;
+    return pipeline.is_tier1_requested(name) && MultiTierPipeline::tier0_bridge_supported(*def);
+}
+
+// A callee's size as the inliners measure it: its instructions outside cold
+// blocks.
+size_t hot_instruction_count(const Function& fn) {
+    size_t n = 0;
+    for (const BasicBlock* bb : fn.blocks()) {
+        if (bb && !bb->is_cold()) n += bb->instruction_count();
+    }
+    return n;
+}
+
+} // namespace
+
+std::function<bool(const Function&)> uninlinable_callees(FunctionDispatchTable& table) {
+    // The largest callee any of the tier-2 pipeline's inlining steps takes:
+    // speculative devirtualization's default, and the inliner's own limits
+    // when the program's passes inline. Twice that leaves room for what the
+    // front pass and scalar replacement remove before the inliner looks.
+    size_t largest = 120;
+    if (const std::optional<PassPipelineOptions> passes = table.pipeline().tier2_passes();
+        passes && passes->enable_inlining) {
+        largest = std::max({largest, passes->inliner.max_callee_instruction_count,
+                            passes->inliner.hinted_callee_instruction_count});
+    }
+    const size_t limit = 2 * largest;
+    return [&table, limit](const Function& f) {
+        return hot_instruction_count(f) > limit && links_through_stub(table, f.name());
+    };
+}
+
+void drop_carried_bodies(Module& mod, FunctionDispatchTable& table, std::string_view keep) {
+    // A program its pipeline does not run compiles the whole module
+    // (clone_for_tier2): every body is its code, called or not.
+    if (!table.pipeline().is_initialized()) return;
+    Function* root = mod.get_function(keep);
+    if (!root || root->block_count() == 0) return;
+    // The bodies the kept code still needs: what its guards name (an exit
+    // stub is compiled with its guard), and every callee that cannot link
+    // through its stub (links_through_stub). A callee that can becomes a
+    // declaration, and the stub reaches its best tier: its own tier-2 code
+    // once that lands, rather than a second copy compiled here.
+    std::unordered_set<const Function*> kept{root};
+    std::unordered_set<std::string_view> declared;
+    std::vector<const Function*> work{root};
+    auto reach = [&](std::string_view sym, bool needed) {
+        if (sym.empty()) return;
+        Function* f = mod.get_function(sym);
+        if (!f || f->block_count() == 0 || kept.count(f)) return;
+        if (!needed && links_through_stub(table, f->name())) {
+            declared.insert(f->name());
+            return;
+        }
+        kept.insert(f);
+        work.push_back(f);
+    };
+    while (!work.empty()) {
+        const Function* f = work.back();
+        work.pop_back();
+        for (const BasicBlock* bb : f->blocks()) {
+            if (!bb) continue;
+            for (const Instruction* inst : *bb) {
+                if (!inst) continue;
+                reach(inst->symbol(), inst->opcode() == Opcode::guard);
+                reach(inst->extra_symbol(), false);
+            }
+        }
+    }
+    // A function reached both ways (an exit stub a guard names, also
+    // called) is kept, and keeps its body.
+    std::vector<Function*> drop;
+    for (Function* f : mod.functions()) {
+        if (f && f->block_count() != 0 && !kept.count(f)) drop.push_back(f);
+    }
+    for (Function* f : drop) {
+        const bool named = declared.count(f->name()) != 0;
+        const std::string name(f->name());
+        mod.remove_function(f);
+        if (named) mod.add_external_symbol(name);
+    }
+}
+
+bool run_tier2_optimization_pipeline(Module& mod, FunctionDispatchTable& table, std::string_view target,
+                                     std::string& errors) {
     if (MultiTierPipeline::Tier2FrontPass front = table.pipeline().tier2_front_pass()) {
         TierEventScope timed(TierEventKind::FrontPass, mod.name());
         front(mod);
     }
-    run_pipeline(mod, tier2_pipeline(table.tiering().type_feedback(), table.pipeline().tier2_passes()));
+    const Pipeline pipeline = tier2_pipeline(table.tiering().type_feedback(), table.pipeline().tier2_passes());
+    // The carried callee bodies are there for the inliner (clone_callee_
+    // closure): once it and the scalar replacement of what it brought in
+    // have run, what is left of them would only be optimized and compiled
+    // again here while their own tier-2 compiles do the same.
+    std::string_view last_use;
+    for (const PassStep& step : pipeline.steps()) {
+        if (step.name == "inline" || step.name == "sroa 2" || step.name == "speculative_devirt") last_use = step.name;
+    }
+    PassPipelineHooks hooks;
+    bool dropped = false;
+    auto drop = [&] {
+        if (dropped) return;
+        dropped = true;
+        PhaseTimeScope timing("drop carried bodies");
+        drop_carried_bodies(mod, table, target);
+    };
+    if (last_use.empty()) {
+        drop();
+    } else {
+        hooks.after_pass = [&](std::string_view name) {
+            if (name == last_use) drop();
+            return true;
+        };
+    }
+    run_pipeline(mod, pipeline, hooks);
     DiagnosticReporter diag;
     if (verify_module(mod, &diag)) return true;
     errors = diag.format_all();

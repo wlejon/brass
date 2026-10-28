@@ -32,9 +32,28 @@ std::vector<std::string> speculated_call_targets(FunctionDispatchTable& table, s
 // would), so the copy links to its stub.
 void bind_declared_handles(FunctionDispatchTable& table, const Module& copy, const Module& src);
 
+// For clone_callee_closure's declare_only: the callees too large for any
+// inlining step of the program's tier-2 passes, which link through their
+// stubs. Copied, they would be dropped again (drop_carried_bodies) once the
+// inliner had passed them over.
+std::function<bool(const Function&)> uninlinable_callees(FunctionDispatchTable& table);
+
+// Drops from `mod` every body the code of `keep` no longer needs: callees
+// that can be called through their stubs become external symbols, and
+// bodies nothing kept names go. What its guards name, and callees with no
+// code of their own on the way (links_through_stub in tier2_link.cpp), keep
+// their bodies.
+// Nothing is dropped from a program whose pipeline does not run it: its
+// copy is the whole module, and each body is that function's code.
+void drop_carried_bodies(Module& mod, FunctionDispatchTable& table, std::string_view keep);
+
 // Runs the program's tier-2 passes (MultiTierPipeline::tier2_passes) over
-// `mod` and verifies it; false with the verifier's report in `errors`.
-bool run_tier2_optimization_pipeline(Module& mod, FunctionDispatchTable& table, std::string& errors);
+// `mod`, a copy made to compile `target` (a function or an OSR entry), and
+// verifies it; false with the verifier's report in `errors`. The other
+// bodies the copy carries are dropped once the inliner has used them
+// (drop_carried_bodies).
+bool run_tier2_optimization_pipeline(Module& mod, FunctionDispatchTable& table, std::string_view target,
+                                     std::string& errors);
 
 // An engine for `target` that resolves the runtime's GC and feedback
 // symbols, the host's, and the program's own (its data tables).

@@ -48,6 +48,10 @@ public:
     size_t function_count() const noexcept { return functions_.size(); }
     Function* get_function(std::string_view name) const noexcept;
     void rename_function(Function* fn, std::string_view new_name);
+    // Takes `fn` out of the module (its memory stays in the arena until the
+    // module goes): a copy made for one compile drops the bodies its
+    // optimizer no longer needs, which then become external symbols.
+    void remove_function(Function* fn);
 
     void add_external_symbol(std::string_view sym);
     bool has_external_symbol(std::string_view sym) const noexcept;
