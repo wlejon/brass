@@ -317,10 +317,15 @@ void LinearScanAllocator::evict_from(uint32_t idx, uint32_t pos, std::vector<uin
     spill_and_requeue(right, pos, unhandled);
 }
 
-std::vector<PReg> LinearScanAllocator::hint_regs(const AllocPiece& p) const {
+LinearScanAllocator::HintRegs LinearScanAllocator::hint_regs(const AllocPiece& p) const {
     const VReg v = p.vreg();
     const auto& pool = v.is_gpr() ? available_gprs_ : available_xmms_;
-    std::vector<PReg> hints;
+    uint32_t pool_mask = 0;
+    for (const PReg& x : pool) {
+        if (x.code < 32) pool_mask |= 1u << x.code;
+    }
+    HintRegs hints;
+    uint32_t added = 0;
     // Only a register the allocator could have picked anyway: a copy from
     // the stack pointer (`read_sp`) hints its destination at SP, and a value
     // that lives in SP is not a value. AArch64's register 31 is SP only to
@@ -328,9 +333,10 @@ std::vector<PReg> LinearScanAllocator::hint_regs(const AllocPiece& p) const {
     // against a vreg allocated there compared against zero.
     auto add = [&](PReg r) {
         if (!r.is_valid() || r.reg_class != v.reg_class || r.code >= 32) return;
-        if (std::none_of(pool.begin(), pool.end(), [&](const PReg& x) { return x.code == r.code; })) return;
-        if (std::find(hints.begin(), hints.end(), r) != hints.end()) return;
-        hints.push_back(r);
+        const uint32_t bit = 1u << r.code;
+        if (!(pool_mask & bit) || (added & bit)) return;
+        added |= bit;
+        hints.regs[hints.count++] = r;
     };
     // The value's own previous piece: the same register needs no move.
     const auto& list = vreg_pieces_[v.id];
@@ -373,7 +379,7 @@ bool LinearScanAllocator::try_allocate_free(uint32_t idx, std::vector<uint32_t>&
         if (c != kNever) max_q[other.reg.code] = std::min(max_q[other.reg.code], c);
     }
 
-    const std::vector<PReg> hints = hint_regs(p);
+    const HintRegs hints = hint_regs(p);
     auto whole = [&](PReg r) { return max_q[r.code] >= p.end; };
     for (PReg r : hints) {
         if (whole(r)) { assign(idx, r); return true; }
@@ -439,7 +445,7 @@ void LinearScanAllocator::allocate_blocked(uint32_t idx, std::vector<uint32_t>& 
         }
     }
 
-    const std::vector<PReg> hints = hint_regs(p);
+    const HintRegs hints = hint_regs(p);
     if (whole_only) {
         // The value takes a register for its whole life, over holders that
         // cost less to spill than it does, or its slot.

@@ -110,10 +110,16 @@ void CompilePool::start(size_t threads) {
 }
 
 bool CompilePool::submit(Owner owner, uint8_t priority, std::function<void()> job) {
+    return submit(owner, priority, std::move(job), nullptr);
+}
+
+bool CompilePool::submit(Owner owner, uint8_t priority, std::function<void()> job,
+                         std::function<uint64_t()> heat) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (closed_ || stopping_) return false;
-        queue_.push_back(Job{owner, priority, next_seq_++, std::move(job)});
+        const uint64_t at_submit = heat ? heat() : 0;
+        queue_.push_back(Job{owner, priority, next_seq_++, std::move(job), std::move(heat), at_submit});
         if (is_shared_) {
             static const bool registered = [] { return std::atexit(&shutdown_shared_at_exit) == 0; }();
             (void)registered;
@@ -213,13 +219,21 @@ std::vector<CompilePool::Job>::iterator CompilePool::pick_locked() {
     const size_t size = is_shared_ ? configured_threads_ : workers_.size();
     const size_t bulk_limit = size > 1 ? size - 1 : size;
     const bool bulk_ok = bulk_running_ < bulk_limit;
-    // Highest priority, then oldest, among the jobs that may start now.
+    // Highest priority, then most heat gained while queued, then oldest,
+    // among the jobs that may start now. Arrival order alone left a hot
+    // function's tier-up behind a burst of lukewarm ones requested just
+    // before it (mesh_churn_2k: 8 to 10 ms queued at its start).
     auto best = queue_.end();
+    uint64_t best_gain = 0;
     for (auto it = queue_.begin(); it != queue_.end(); ++it) {
         if (it->priority < kReservedPriority && !bulk_ok) continue;
+        const uint64_t now = it->heat ? it->heat() : 0;
+        const uint64_t gain = now > it->heat_at_submit ? now - it->heat_at_submit : 0;
         if (best == queue_.end() || it->priority > best->priority ||
-            (it->priority == best->priority && it->seq < best->seq)) {
+            (it->priority == best->priority &&
+             (gain > best_gain || (gain == best_gain && it->seq < best->seq)))) {
             best = it;
+            best_gain = gain;
         }
     }
     return best;

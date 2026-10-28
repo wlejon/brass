@@ -206,7 +206,15 @@ private:
     void assign(uint32_t idx, PReg reg);
     bool try_allocate_free(uint32_t idx, std::vector<uint32_t>& unhandled);
     void allocate_blocked(uint32_t idx, std::vector<uint32_t>& unhandled);
-    std::vector<PReg> hint_regs(const AllocPiece& p) const;
+    // A piece's preferred registers, in order of preference, each once. Held
+    // inline: one is built for every piece the scan takes.
+    struct HintRegs {
+        PReg regs[32];
+        uint32_t count = 0;
+        const PReg* begin() const { return regs; }
+        const PReg* end() const { return regs + count; }
+    };
+    HintRegs hint_regs(const AllocPiece& p) const;
 
     // linear_scan_resolve.cpp: moves where a value changes location, between
     // two pieces inside a block (before the instruction at the next

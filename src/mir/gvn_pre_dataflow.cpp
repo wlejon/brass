@@ -102,7 +102,7 @@ bool is_pre_candidate_op(const Instruction* inst) noexcept {
 
 PreExpression PreExpression::from_instruction(
     const Instruction* inst,
-    const std::unordered_map<const Value*, const Value*>& leaders
+    const PreLeaders& leaders
 ) {
     PreExpression expr;
     if (!inst) return expr;
@@ -123,8 +123,8 @@ PreExpression PreExpression::from_instruction(
 
     auto resolve = [&](const Value* v) -> const Value* {
         if (!v) return nullptr;
-        auto it = leaders.find(v);
-        return (it != leaders.end()) ? it->second : v;
+        const Value* const* leader = leaders.find(v);
+        return leader ? *leader : v;
     };
 
     size_t op_count = inst->operand_count();
@@ -175,7 +175,7 @@ size_t PreExprHash::operator()(const PreExpression& k) const noexcept {
 
 void PreFunctionIndex::build(
     Function& fn,
-    const std::unordered_map<const Value*, const Value*>& leaders,
+    const PreLeaders& leaders,
     bool include_load_candidates
 ) {
     blocks.clear();
@@ -227,13 +227,11 @@ void PreFunctionIndex::build(
             // evaluation lists collected here are exactly what a scan
             // comparing every instruction's expression would have found.
             PreExpression expr = PreExpression::from_instruction(inst, leaders);
-            auto ev = evaluations.find(expr);
-            if (ev == evaluations.end()) {
-                evaluations[expr].push_back(inst);
+            auto [ev, fresh] = evaluations.try_emplace(expr);
+            ev->second.push_back(inst);
+            if (fresh) {
                 candidates.push_back(expr);
-                exemplars[expr] = inst;
-            } else {
-                ev->second.push_back(inst);
+                exemplars.emplace(expr, inst);
             }
         }
     }

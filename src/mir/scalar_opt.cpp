@@ -702,7 +702,50 @@ bool eliminate_dead_code(Function& fn) {
     return changed;
 }
 
+namespace {
+
+// Whether any block reaches itself, reachable from the entry or not: a value
+// can flow back to a block parameter only along a cycle of edges.
+bool has_cfg_cycle(const Function& fn) {
+    // 0: unseen, 1: on the walk's path, 2: done.
+    DenseIdMap<BasicBlock, uint8_t> state(fn.current_next_block_id());
+    struct Frame {
+        const BasicBlock* bb;
+        SuccessorList succs;
+        size_t next;
+    };
+    std::vector<Frame> stack;
+    for (const BasicBlock* root : fn.blocks()) {
+        if (!root || state.value_or(root, 0) != 0) continue;
+        state[root] = 1;
+        stack.push_back({root, root->successors(), 0});
+        while (!stack.empty()) {
+            Frame& f = stack.back();
+            if (f.next == f.succs.size()) {
+                state[f.bb] = 2;
+                stack.pop_back();
+                continue;
+            }
+            const BasicBlock* s = f.succs[f.next++];
+            if (!s) continue;
+            const uint8_t st = state.value_or(s, 0);
+            if (st == 1) return true;
+            if (st == 0) {
+                state[s] = 1;
+                stack.push_back({s, s->successors(), 0});
+            }
+        }
+    }
+    return false;
+}
+
+} // namespace
+
 bool eliminate_dead_induction_cycles(Function& fn) {
+    // Without a cycle in the CFG there is no induction cycle, and indexing
+    // every value's users first was most of loop_cleanup on a straight-line
+    // function (three.js' Matrix4.invert).
+    if (!has_cfg_cycle(fn)) return false;
     bool changed = false;
     bool progress = true;
     while (progress) {

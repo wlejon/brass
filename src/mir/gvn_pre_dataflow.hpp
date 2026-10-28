@@ -20,6 +20,10 @@ namespace brass {
 bool is_pre_commutative_op(Opcode op, Type type) noexcept;
 bool is_pre_candidate_op(const Instruction* inst) noexcept;
 
+// Each constant's result to the first constant of its value: what an
+// expression names in place of an operand.
+using PreLeaders = PtrMap<Value, const Value*>;
+
 struct PreExpression {
     Opcode opcode = Opcode::unreachable;
     Type type = Type::void_type();
@@ -38,7 +42,7 @@ struct PreExpression {
 
     static PreExpression from_instruction(
         const Instruction* inst,
-        const std::unordered_map<const Value*, const Value*>& leaders
+        const PreLeaders& leaders
     );
 
     bool operator==(const PreExpression& other) const noexcept;
@@ -104,7 +108,7 @@ struct PreFunctionIndex {
 
     void build(
         Function& fn,
-        const std::unordered_map<const Value*, const Value*>& leaders,
+        const PreLeaders& leaders,
         bool include_load_candidates
     );
 

@@ -228,7 +228,14 @@ bool BackgroundCompiler::submit_task(std::shared_ptr<CompileTask> task) {
 
     // The pool calls back under its own lock only to queue; this lock is
     // never taken by the pool, so holding it here is safe.
-    if (!pool_->submit(this, priority, [this, task] { run_task(*task); })) return false;
+    // The function's calls and loop iterations: what runs in a lower tier
+    // while this waits (the registry never frees a feedback while its
+    // program lives, and the program outlives its queued compiles).
+    std::function<uint64_t()> heat;
+    if (const TieringFeedback* fb = installer_.dispatch_table().tiering().find_feedback(key)) {
+        heat = [fb] { return fb->invocation_count() + fb->backedge_count(); };
+    }
+    if (!pool_->submit(this, priority, [this, task] { run_task(*task); }, std::move(heat))) return false;
 
     active_names_.insert(key);
     queued_names_.insert(key);

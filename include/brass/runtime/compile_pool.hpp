@@ -25,7 +25,9 @@ bool process_exiting() noexcept;
 // threads, sized for the machine, however many programs it holds. A
 // standalone BackgroundCompiler owns a private pool instead.
 //
-// Jobs run highest priority first, then in submission order. Each job is
+// Jobs run highest priority first; among equals, the one whose function ran
+// most while it waited (its heat, when the submitter gave one), then in
+// submission order. Each job is
 // submitted on behalf of an owner (a program's background compiler, its
 // OSR coordinator), which can drop its queued jobs and wait out its running
 // ones without touching anyone else's.
@@ -59,6 +61,11 @@ public:
     // is shut down. A job must not throw; one that does is dropped with
     // its exception.
     bool submit(Owner owner, uint8_t priority, std::function<void()> job);
+    // As above, with the job's heat: how hot its function is now (a count
+    // that only grows, read under the pool's lock whenever a worker picks,
+    // so it must be cheap and must not lock). What it grew by since the
+    // submit is how much ran in a lower tier for want of this job.
+    bool submit(Owner owner, uint8_t priority, std::function<void()> job, std::function<uint64_t()> heat);
     // Drops `owner`'s queued jobs; returns how many.
     size_t cancel(Owner owner);
     // Blocks until `owner` has no job queued or running.
@@ -85,6 +92,8 @@ private:
         uint8_t priority;
         uint64_t seq;
         std::function<void()> run;
+        std::function<uint64_t()> heat; // empty: none given
+        uint64_t heat_at_submit = 0;
     };
 
     void worker_loop();

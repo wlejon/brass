@@ -137,6 +137,28 @@ void LinearScanAllocator::clear_dead_callee_gprs_at_calls(uint32_t final_callee_
         live_list.pop_back();
         live_pos[id] = UINT32_MAX;
     };
+    // location_at for the live values at calls, which the backward walk
+    // asks at falling positions: each value's last piece is tried first.
+    // It answers as location_at does, the later of two pieces sharing a
+    // split point included.
+    std::vector<uint32_t> last_piece(num_vregs, 0);
+    auto location_near = [&](VReg v, uint32_t id) -> LirOperand {
+        const auto& list = vreg_pieces_[v.id];
+        const uint32_t k = last_piece[v.id];
+        if (k < list.size()) {
+            const AllocPiece& p = pieces_[list[k]];
+            if (p.from <= id && id <= p.to && (k + 1 == list.size() || pieces_[list[k + 1]].from > id)) {
+                if (p.spilled) return LirOperand::slot(vreg_slot_[v.id], 8);
+                return p.reg.is_valid() ? LirOperand::preg(p.reg, 8) : LirOperand{};
+            }
+        }
+        if (list.size() > 1) {
+            auto it = std::upper_bound(list.begin(), list.end(), id,
+                [this](uint32_t pos, uint32_t i) { return pos < pieces_[i].from; });
+            if (it != list.begin()) last_piece[v.id] = static_cast<uint32_t>(it - list.begin()) - 1;
+        }
+        return location_at(v, id, 8);
+    };
     // What is live at each call, by block and instruction index.
     std::vector<std::vector<uint32_t>> live_callee_by_block(num_blocks);
     std::vector<std::vector<uint64_t>> live_spill_by_block(num_blocks);
@@ -166,7 +188,8 @@ void LinearScanAllocator::clear_dead_callee_gprs_at_calls(uint32_t final_callee_
                 };
                 auto mark_vreg = [&](VReg v) {
                     if (!v.is_valid() || v.id >= num_vregs) return;
-                    mark_loc(location_at(fn_.vreg_table[v.id].vreg, inst.id, 8));
+                    mark_loc(v.id < vreg_pieces_.size() ? location_near(fn_.vreg_table[v.id].vreg, inst.id)
+                                                         : LirOperand{});
                     int32_t s = vreg_slot_[v.id];
                     if (s >= 0 && s < 64) {
                         smask |= (uint64_t{1} << s);
@@ -282,14 +305,23 @@ void LinearScanAllocator::clear_dead_callee_gprs_at_calls(uint32_t final_callee_
                            is_guard_exit(block);
     }
 
-    // One block's walk from `d`: notes every location an instruction or a
-    // pending move touches, and at each call either records what to clear
-    // (`emit`) or only applies it.
-    auto walk = [&](size_t bi, Dirty d, bool emit) -> Dirty {
+    // One walk of each block notes every location an instruction or a
+    // pending move touches, cut at its calls: segs[bi][k] is what is touched
+    // after call k-1 (or the block's start) up to call k's uses, and the
+    // block's last entry what is touched after its last call. A call clears
+    // what is dirty there and replaces it with what is live across it, so
+    // the dirty set at call k is the one at its segment's start OR'd with
+    // the segment, and nothing else of the walk is needed again: the
+    // fixpoint and the clearing below run on the segments. (Walking every
+    // instruction again, looking up every operand's location, on every
+    // round and once more to emit was most of this function's time.)
+    std::vector<std::vector<Dirty>> segs(num_blocks);
+    std::vector<std::vector<size_t>> call_at(num_blocks);
+    for (size_t bi = 0; bi < num_blocks; ++bi) {
         const auto& block = fn_.blocks[bi];
+        std::vector<Dirty>& seg = segs[bi];
+        Dirty d{};
         if (auto mit = moves_at_start_.find(block->id); mit != moves_at_start_.end()) note_moves_into(d, mit->second);
-        const auto& live_callee_at = live_callee_by_block[bi];
-        const auto& live_spill_at = live_spill_by_block[bi];
         for (size_t idx = 0; idx < block->instructions.size(); ++idx) {
             const LirInst& inst = *block->instructions[idx];
             if (auto mit = moves_before_.find(inst.id); mit != moves_before_.end()) {
@@ -300,27 +332,9 @@ void LinearScanAllocator::clear_dead_callee_gprs_at_calls(uint32_t final_callee_
             }
             for (const auto& u : inst.uses) note_op_into(d, u, inst.id);
             if (inst.is_call()) {
-                if (emit) {
-                    uint32_t to_clear = (d.callee & alloc_callee_gprs) & ~live_callee_at[idx];
-                    while (to_clear != 0) {
-                        uint32_t r = static_cast<uint32_t>(std::countr_zero(to_clear));
-                        to_clear &= (to_clear - 1);
-                        PReg preg = cc_.target().is_aarch64()
-                                        ? PReg::aarch64_gpr(static_cast<aarch64::GPR>(r))
-                                        : PReg::gpr(static_cast<x64::GPR>(r));
-                        moves_before_[inst.id].push_back(
-                            PendingMove{LirOperand::preg(preg, 8), LirOperand::imm32(0), false, 8});
-                    }
-                    uint64_t spill_to_clear = (d.spill & gpr_spill_mask) & ~live_spill_at[idx];
-                    while (spill_to_clear != 0) {
-                        uint32_t s = static_cast<uint32_t>(std::countr_zero(spill_to_clear));
-                        spill_to_clear &= (spill_to_clear - 1);
-                        moves_before_[inst.id].push_back(PendingMove{LirOperand::slot(static_cast<int32_t>(s), 8),
-                                                                     LirOperand::imm32(0), false, 8});
-                    }
-                }
-                d.callee = live_callee_at[idx] & alloc_callee_gprs;
-                d.spill = live_spill_at[idx] & gpr_spill_mask;
+                seg.push_back(d);
+                call_at[bi].push_back(idx);
+                d = Dirty{};
             }
             for (const auto& def : inst.defs) note_op_into(d, def, inst.id);
             if (auto mit = moves_after_.find(inst.id); mit != moves_after_.end()) {
@@ -331,30 +345,17 @@ void LinearScanAllocator::clear_dead_callee_gprs_at_calls(uint32_t final_callee_
             }
         }
         if (auto mit = moves_at_end_.find(block->id); mit != moves_at_end_.end()) note_moves_into(d, mit->second);
-        return d;
-    };
-
-    // A block's walk only ORs in what it touches, and a call replaces what
-    // is dirty, so its exit is (entry | touched) for a block without a call
-    // and, for one with a call, what follows its last call whatever the
-    // entry: walk(b, {}) either way. The fixpoint runs on those summaries;
-    // re-walking every instruction (and looking up every operand's
-    // location) on every round was most of this function's time.
-    std::vector<Dirty> touched(num_blocks);
-    std::vector<char> has_call(num_blocks, 0);
-    for (size_t bi = 0; bi < num_blocks; ++bi) {
-        touched[bi] = walk(bi, Dirty{}, false);
-        for (const auto& inst : fn_.blocks[bi]->instructions) {
-            if (inst->is_call()) {
-                has_call[bi] = 1;
-                break;
-            }
-        }
+        seg.push_back(d);
     }
     auto exit_of = [&](size_t bi, Dirty d) -> Dirty {
-        if (has_call[bi]) return touched[bi];
-        d.callee |= touched[bi].callee;
-        d.spill |= touched[bi].spill;
+        const std::vector<Dirty>& seg = segs[bi];
+        if (seg.size() > 1) {
+            const size_t last_call = call_at[bi].back();
+            d.callee = live_callee_by_block[bi][last_call] & alloc_callee_gprs;
+            d.spill = live_spill_by_block[bi][last_call] & gpr_spill_mask;
+        }
+        d.callee |= seg.back().callee;
+        d.spill |= seg.back().spill;
         return d;
     };
 
@@ -383,7 +384,35 @@ void LinearScanAllocator::clear_dead_callee_gprs_at_calls(uint32_t final_callee_
             }
         }
     }
-    for (size_t bi = 0; bi < num_blocks; ++bi) walk(bi, in[bi], true);
+
+    // At each call, the dead registers and slots dirty there are zeroed.
+    for (size_t bi = 0; bi < num_blocks; ++bi) {
+        const auto& block = fn_.blocks[bi];
+        Dirty d = in[bi];
+        for (size_t k = 0; k < call_at[bi].size(); ++k) {
+            const size_t idx = call_at[bi][k];
+            d.callee |= segs[bi][k].callee;
+            d.spill |= segs[bi][k].spill;
+            const uint32_t inst_id = block->instructions[idx]->id;
+            uint32_t to_clear = (d.callee & alloc_callee_gprs) & ~live_callee_by_block[bi][idx];
+            while (to_clear != 0) {
+                uint32_t r = static_cast<uint32_t>(std::countr_zero(to_clear));
+                to_clear &= (to_clear - 1);
+                PReg preg = cc_.target().is_aarch64() ? PReg::aarch64_gpr(static_cast<aarch64::GPR>(r))
+                                                      : PReg::gpr(static_cast<x64::GPR>(r));
+                moves_before_[inst_id].push_back(PendingMove{LirOperand::preg(preg, 8), LirOperand::imm32(0), false, 8});
+            }
+            uint64_t spill_to_clear = (d.spill & gpr_spill_mask) & ~live_spill_by_block[bi][idx];
+            while (spill_to_clear != 0) {
+                uint32_t sl = static_cast<uint32_t>(std::countr_zero(spill_to_clear));
+                spill_to_clear &= (spill_to_clear - 1);
+                moves_before_[inst_id].push_back(
+                    PendingMove{LirOperand::slot(static_cast<int32_t>(sl), 8), LirOperand::imm32(0), false, 8});
+            }
+            d.callee = live_callee_by_block[bi][idx] & alloc_callee_gprs;
+            d.spill = live_spill_by_block[bi][idx] & gpr_spill_mask;
+        }
+    }
 }
 
 }  // namespace brass::codegen

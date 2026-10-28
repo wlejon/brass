@@ -160,15 +160,21 @@ bool gvn_pre_function(Function& fn, const GvnPreOptions& options) {
         return overall_changed;
     }
 
-    // 2. Iterative GVN-PRE optimization loop
+    // 2. Iterative GVN-PRE optimization loop. The dominator tree is built
+    // once: an iteration inserts and removes only non-terminator
+    // instructions, adds block parameters and appends branch arguments, so
+    // the blocks and edges it was built from stay as they are. The alias
+    // analysis is per iteration, since it answers for the values the
+    // previous iteration made.
+    fn.rebuild_cfg_predecessors();
+    const DominatorTree dom(fn);
     for (size_t iter = 0; iter < options.max_iterations; ++iter) {
         bool iter_changed = false;
         fn.rebuild_cfg_predecessors();
 
-        DominatorTree dom(fn);
         AliasAnalysis aa(fn);
 
-        std::unordered_map<const Value*, const Value*> value_leaders;
+        PreLeaders value_leaders;
 
         // Populate value leaders for constant instructions so equivalent constants share a leader
         struct ConstKey {

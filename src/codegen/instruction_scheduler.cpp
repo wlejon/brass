@@ -132,7 +132,7 @@ struct BlockScheduler {
     std::vector<RegUsage> node_usage;
     std::vector<uint32_t> ready_queue;
     std::vector<uint32_t> ready_cycle;
-    std::vector<bool> in_ready_queue;
+    std::vector<uint8_t> in_ready_queue;
     std::vector<uint32_t> scheduled_order;
     std::vector<uint32_t> ready_now;
     std::vector<Score> scores;
@@ -199,20 +199,20 @@ SchedStats BlockScheduler::run(LirBlock& block, const SchedOptions& opts) {
     size_t live_xmms = 0;
 
     while (!ready_queue.empty()) {
-        // 1. Check which ready nodes are ready at current_cycle
+        // 1. Check which ready nodes are ready at current_cycle, noting the
+        // earliest cycle any becomes ready in the same pass.
         ready_now.clear();
+        uint32_t min_r = UINT32_MAX;
         for (uint32_t u : ready_queue) {
             if (ready_cycle[u] <= current_cycle) {
                 ready_now.push_back(u);
+            } else {
+                min_r = std::min(min_r, ready_cycle[u]);
             }
         }
 
         // 2. If nothing ready at current_cycle, advance current_cycle to min ready_cycle
         if (ready_now.empty()) {
-            uint32_t min_r = UINT32_MAX;
-            for (uint32_t u : ready_queue) {
-                min_r = std::min(min_r, ready_cycle[u]);
-            }
             if (min_r > current_cycle && min_r != UINT32_MAX) {
                 stats.stalls_hidden += (min_r - current_cycle);
                 current_cycle = min_r;
@@ -228,14 +228,20 @@ SchedStats BlockScheduler::run(LirBlock& block, const SchedOptions& opts) {
         bool pressure_high = (live_gprs >= opts.gpr_pressure_threshold) ||
                              (live_xmms >= opts.xmm_pressure_threshold);
 
+        // The pressure delta is read only under high pressure; counting
+        // the kills of every ready node at every step otherwise was most of
+        // scheduling a big block.
         scores.clear();
         for (uint32_t node_idx : ready_now) {
             const auto& sn = dag.node(node_idx);
-            const auto& ru = node_usage[node_idx];
-            int32_t kills = 0;
-            for (uint32_t reg : ru.uses_gpr) kills += remaining_uses[reg] == 1;
-            for (uint32_t reg : ru.uses_xmm) kills += remaining_uses[reg] == 1;
-            const int32_t delta = static_cast<int32_t>(ru.defs_gpr + ru.defs_xmm) - kills;
+            int32_t delta = 0;
+            if (pressure_high) {
+                const auto& ru = node_usage[node_idx];
+                int32_t kills = 0;
+                for (uint32_t reg : ru.uses_gpr) kills += remaining_uses[reg] == 1;
+                for (uint32_t reg : ru.uses_xmm) kills += remaining_uses[reg] == 1;
+                delta = static_cast<int32_t>(ru.defs_gpr + ru.defs_xmm) - kills;
+            }
             scores.push_back({sn.inst->is_terminator(), delta, sn.height, sn.is_load, sn.id});
         }
 
@@ -289,7 +295,9 @@ SchedStats BlockScheduler::run(LirBlock& block, const SchedOptions& opts) {
         }
 
         // Remove from ready queue
-        ready_queue.erase(std::remove(ready_queue.begin(), ready_queue.end(), chosen), ready_queue.end());
+        // A node is queued once (in_ready_queue), so erasing its one entry
+        // keeps the order the rest were queued in.
+        ready_queue.erase(std::find(ready_queue.begin(), ready_queue.end(), chosen));
         scheduled_order.push_back(chosen);
 
         // Update register live counts and remaining uses

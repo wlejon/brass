@@ -171,8 +171,13 @@ void LinearScanAllocator::rewrite_instructions() {
     PReg idx_scratch_reg = is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X13) : PReg::gpr(brass::x64::GPR::R11);
 
     const auto& guard_exits = liveness_.guard_exits();
+    // Reused across blocks and instructions: allocating these per block and
+    // per instruction was a tenth of rewriting.
+    std::vector<std::unique_ptr<LirInst>> rewritten;
+    std::vector<char> orig_use_is_xmm;
     for (const auto& block : fn_.blocks) {
-        std::vector<std::unique_ptr<LirInst>> rewritten;
+        rewritten.clear();
+        rewritten.reserve(block->instructions.size());
         // A guard exit's state is read where the Jcc entering it is.
         uint32_t exit_at = UINT32_MAX;
         if (guard_exits.count(block->id)) {
@@ -243,7 +248,7 @@ void LinearScanAllocator::rewrite_instructions() {
                 }
             }
 
-            std::vector<bool> orig_use_is_xmm(inst->uses.size(), false);
+            orig_use_is_xmm.assign(inst->uses.size(), 0);
             for (size_t i = 0; i < inst->uses.size(); ++i) {
                 if (inst->uses[i].is_vreg() && inst->uses[i].vreg_val.is_valid() && inst->uses[i].vreg_val.id < fn_.vreg_table.size()) {
                     orig_use_is_xmm[i] = fn_.get_vreg_info(inst->uses[i].vreg_val).vreg.is_xmm();
@@ -515,7 +520,7 @@ void LinearScanAllocator::rewrite_instructions() {
         if (prev_id != UINT32_MAX) emit_pending(moves_after_, prev_id);
         if (!ends_with_jmp) emit_pending(moves_at_end_, block->id);
 
-        block->instructions = std::move(rewritten);
+        block->instructions.swap(rewritten);
     }
 }
 
