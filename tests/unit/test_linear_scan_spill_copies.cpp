@@ -9,8 +9,9 @@
 
 // What the allocator makes of a value in its spill slot: a copy to or from the
 // slot is the load or the store itself, a value only on its way into a block
-// parameter is the one to give its register up, and a loop-free function's
-// joins are not padded as loop heads.
+// parameter is the one to give its register up, an x64 ALU source left in its
+// slot is read from it in place, and a loop-free function's joins are not
+// padded as loop heads.
 
 using namespace brass;
 using namespace brass::codegen;
@@ -224,4 +225,72 @@ TEST_CASE("Branches - a loop-free function's join is not padded as a loop head")
     REQUIRE(f != nullptr);
     CHECK_EQ(f(5), 6);
     CHECK_EQ(f(-5), 6);
+}
+
+namespace {
+
+// Fourteen i64s loaded off %p and all read twice, xor-ed in order and then
+// added in reverse: more live values than registers, so the first reads
+// find some of them in their slots, each as the source of an xor or an add,
+// the operand x64 encodes as r/m.
+std::string fold_text() {
+    std::string s = "module @m\n\nfunc @fold(%p: ptr) -> i64 {\nentry:\n";
+    for (int i = 0; i < 14; ++i) {
+        s += "  %v" + std::to_string(i) + " = load.i64 %p, " + std::to_string(i * 8) + "\n";
+    }
+    s += "  %s0 = iconst.i64 0\n";
+    for (int i = 0; i < 14; ++i) {
+        s += "  %s" + std::to_string(i + 1) + " = xor.i64 %s" + std::to_string(i) + ", %v" + std::to_string(i) + "\n";
+    }
+    for (int i = 0; i < 14; ++i) {
+        s += "  %t" + std::to_string(i + 1) + " = add.i64 %" + (i ? "t" + std::to_string(i) : std::string("s14")) +
+             ", %v" + std::to_string(13 - i) + "\n";
+    }
+    s += "  ret %t14\n}\n";
+    return s;
+}
+
+} // namespace
+
+TEST_CASE("Linear Scan - an x64 ALU source in its spill slot is read in place") {
+    const std::string text = fold_text();
+    Allocated a = allocate(text.c_str(), "fold");
+    size_t in_place = 0;
+    for (const auto& b : a.lir->blocks) {
+        for (const auto& inst : b->instructions) {
+            const bool alu = inst->opcode == LirOpcode::Add || inst->opcode == LirOpcode::Xor;
+            if (!alu || inst->uses.empty()) continue;
+            // The general path loaded the slot into R10 first; the slot
+            // read by the instruction itself is that load.
+            if (inst->uses.back().is_spill_slot()) ++in_place;
+            // Never two memory operands: the def and other uses are registers.
+            for (size_t i = 0; i + 1 < inst->uses.size(); ++i) CHECK_FALSE(inst->uses[i].is_spill_slot());
+            for (const auto& d : inst->defs) CHECK_FALSE(d.is_spill_slot());
+        }
+    }
+    CHECK(in_place >= 4u);
+    // Nor did anything else take a slot through the scratch.
+    for (const auto& b : a.lir->blocks) {
+        for (const auto& inst : b->instructions) {
+            if (inst->opcode != LirOpcode::Mov || inst->defs.empty() || !inst->defs[0].is_preg()) continue;
+            if (inst->uses.size() == 1 && inst->uses[0].is_spill_slot()) {
+                CHECK(inst->defs[0].preg_val.as_gpr() != GPR::R10);
+            }
+        }
+    }
+
+    JitExecutionEngine jit;
+    auto mod = parse_module(text.c_str());
+    REQUIRE(mod != nullptr);
+    REQUIRE(jit.compile_and_load(*mod));
+    auto fn = jit.get_function_ptr<int64_t (*)(uint64_t*)>("fold");
+    REQUIRE(fn != nullptr);
+    uint64_t words[14];
+    uint64_t x = 0;
+    for (int i = 0; i < 14; ++i) {
+        words[i] = 0x9e3779b97f4a7c15ull * static_cast<uint64_t>(i + 1);
+        x ^= words[i];
+    }
+    for (int i = 0; i < 14; ++i) x += words[13 - i];
+    CHECK_EQ(static_cast<uint64_t>(fn(words)), x);
 }

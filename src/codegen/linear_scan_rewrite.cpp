@@ -75,6 +75,54 @@ static void note_aarch64_emitter_scratch(LirInst& inst) {
     inst.clobbered_gprs |= reg_mask(GPR::X15);
 }
 
+// Whether x64 reads `inst`'s last use straight from its spill slot when the
+// value is spilled there: the source of a two-address ALU or scalar-double
+// operation and the right side of a compare, which the emitters encode as an
+// r/m operand (emit_alu.cpp, emit_sse.cpp). Reading the slot in place is the
+// load the scratch register would have made, with one instruction fewer and
+// no scratch: a guard's spilled tag constant is `xor slot, r`, not a reload
+// into R10 and `xor r10, r`. Only the last use, which is the one operand
+// those encodings take from memory, and only at the slot's own width.
+static bool reads_last_use_from_slot(const LirInst& inst) {
+    if (inst.uses.empty()) return false;
+    const LirOperand& src = inst.uses.back();
+    if (!src.is_spill_slot()) return false;
+    uint8_t want = 8;
+    switch (inst.opcode) {
+        case LirOpcode::Add:
+        case LirOpcode::Sub:
+        case LirOpcode::And:
+        case LirOpcode::Or:
+        case LirOpcode::Xor:
+        case LirOpcode::Cmp:
+        case LirOpcode::Addsd:
+        case LirOpcode::Subsd:
+        case LirOpcode::Mulsd:
+        case LirOpcode::Divsd:
+            break;
+        case LirOpcode::Add32:
+        case LirOpcode::Sub32:
+        case LirOpcode::And32:
+        case LirOpcode::Or32:
+        case LirOpcode::Xor32:
+        case LirOpcode::Cmp32:
+            want = 4;  // the slot's low half: the whole slot is written at every spill
+            break;
+        default:
+            return false;
+    }
+    if (src.size != want) return false;
+    // One memory operand an instruction: every other operand is a register
+    // or an immediate by the time this is asked.
+    for (size_t i = 0; i + 1 < inst.uses.size(); ++i) {
+        if (inst.uses[i].is_mem() || inst.uses[i].is_spill_slot()) return false;
+    }
+    for (const auto& d : inst.defs) {
+        if (d.is_mem() || d.is_spill_slot()) return false;
+    }
+    return true;
+}
+
 static bool is_xmm_opcode(LirOpcode op) {
     switch (op) {
         case LirOpcode::Movsd:
@@ -466,8 +514,12 @@ void LinearScanAllocator::rewrite_instructions() {
             // relative), so spilled state needs no scratch: any number of
             // values can be spilled.
             const bool uses_read_from_memory = inst->opcode == LirOpcode::GuardExit;
+            // Decided after the spilled def took its scratch, so the def is a
+            // register here and the last use is the only memory operand.
+            const bool last_use_in_place = !is_aarch64 && reads_last_use_from_slot(*inst);
 
             for (size_t i = 0; i < inst->uses.size(); ++i) {
+                if (last_use_in_place && i + 1 == inst->uses.size()) continue;
                 if (inst->uses[i].is_spill_slot() && !uses_read_from_memory) {
                     uint8_t sz = inst->uses[i].size;
                     bool is_xmm_use = (i < orig_use_is_xmm.size()) ? orig_use_is_xmm[i] : false;
