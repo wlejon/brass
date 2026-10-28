@@ -30,7 +30,7 @@ std::vector<SpecFeedback::SiteRecord> SpecFeedback::snapshot() const {
     out.reserve(misses_.size());
     for (size_t i = 0; i < misses_.size(); ++i) {
         const uint32_t misses = *static_cast<const volatile uint32_t*>(&misses_[i]);
-        out.push_back({kinds_[i], misses, ran_locked(i), fns_[i], tags_[i]});
+        out.push_back({kinds_[i], misses, ran_locked(static_cast<uint32_t>(i)), fns_[i], tags_[i]});
     }
     return out;
 }
