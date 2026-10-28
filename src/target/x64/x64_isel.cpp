@@ -193,6 +193,8 @@ void X64ISel::analyze_function(const Function& mir_fn) {
         }
     }
 
+    find_and_chains(mir_fn);
+
     std::unordered_map<const Value*, uint32_t> folded_uses;
 
     // A memory operation that folds its address computation reads only the
@@ -254,23 +256,37 @@ void X64ISel::analyze_function(const Function& mir_fn) {
             }
 
             if (inst->opcode() == Opcode::br_if) {
+                // What append_fused_compare folds of a comparison it emits
+                // for this branch: a constant operand, or a load.
+                auto count_compare_folds = [&](const Instruction* def_inst) {
+                    const Value* lhs = def_inst->operand(0);
+                    const Value* rhs = def_inst->operand(1);
+                    ImmIntInfo rhs_imm = get_imm_int_info(rhs);
+                    ImmIntInfo lhs_imm = get_imm_int_info(lhs);
+
+                    if (rhs_imm.is_imm && rhs_imm.fits_i32) {
+                        folded_uses[rhs]++;
+                    } else if (lhs_imm.is_imm && lhs_imm.fits_i32) {
+                        folded_uses[lhs]++;
+                    } else if (!lhs->type().is_float() && rhs && rhs->is_instruction() &&
+                               can_fuse_load(rhs->defining_instruction(), inst)) {
+                        skipped_insts_.insert(rhs->defining_instruction());
+                    }
+                };
+                if (auto chain = and_chains_.find(inst); chain != and_chains_.end()) {
+                    for (const Value* leaf : chain->second) {
+                        const Instruction* def_inst = leaf->defining_instruction();
+                        if (def_inst && skipped_insts_.count(def_inst) && is_comparison(def_inst->opcode())) {
+                            count_compare_folds(def_inst);
+                        }
+                    }
+                    continue;
+                }
                 const Value* cond = inst->operand(0);
                 if (cond && cond->is_instruction()) {
                     const Instruction* def_inst = cond->defining_instruction();
                     if (def_inst && def_inst->parent() == bb && is_comparison(def_inst->opcode()) && skipped_insts_.count(def_inst)) {
-                        const Value* lhs = def_inst->operand(0);
-                        const Value* rhs = def_inst->operand(1);
-                        ImmIntInfo rhs_imm = get_imm_int_info(rhs);
-                        ImmIntInfo lhs_imm = get_imm_int_info(lhs);
-
-                        if (rhs_imm.is_imm && rhs_imm.fits_i32) {
-                            folded_uses[rhs]++;
-                        } else if (lhs_imm.is_imm && lhs_imm.fits_i32) {
-                            folded_uses[lhs]++;
-                        } else if (!lhs->type().is_float() && rhs && rhs->is_instruction() &&
-                                   can_fuse_load(rhs->defining_instruction(), inst)) {
-                            skipped_insts_.insert(rhs->defining_instruction());
-                        }
+                        count_compare_folds(def_inst);
                         continue;
                     }
                 }
@@ -463,10 +479,22 @@ std::unique_ptr<LirFunction> X64ISel::lower(const Function& mir_fn) {
             }
             return false;
         };
+        // Through any run of blocks the isel made (a trampoline carrying
+        // edge copies, the links of an and-chain).
         auto reached_by_trampoline = [&](const LirBlock* target) {
+            std::vector<const LirBlock*> work;
+            std::unordered_set<const LirBlock*> seen;
             for (const LirBlock* s : lir_bb->successors) {
-                if (mir_block_ids.count(s->id)) continue;
-                if (std::find(s->successors.begin(), s->successors.end(), target) != s->successors.end()) return true;
+                if (!mir_block_ids.count(s->id)) work.push_back(s);
+            }
+            while (!work.empty()) {
+                const LirBlock* s = work.back();
+                work.pop_back();
+                if (!seen.insert(s).second) continue;
+                for (const LirBlock* n : s->successors) {
+                    if (n == target) return true;
+                    if (!mir_block_ids.count(n->id)) work.push_back(n);
+                }
             }
             return false;
         };
@@ -656,7 +684,105 @@ void X64ISel::lower_branch(const Instruction& inst, LirBlock& lir_bb) {
     lir_bb.append_inst(std::move(jmp_inst));
 }
 
+// The flags of a comparison analyze_function folded into its branch `user`
+// (a br_if, or one leaf of an and-chain, x64_isel_and_chain.cpp), emitted
+// into `lir_bb`, and the condition that holds exactly when it is true.
+Condition X64ISel::append_fused_compare(const Instruction& cmp, const Instruction& user, LirBlock& lir_bb) {
+    const Instruction* cmp_inst = &cmp;
+    const Instruction& inst = user;
+    Condition branch_cond = Condition::NE;
+    const Opcode cmp_op = cmp_inst->opcode();
+    const Condition gpr_c = get_comparison_conditions(cmp_op).first;
+    const Value* lhs = cmp_inst->operand(0);
+    const Value* rhs = cmp_inst->operand(1);
+
+    if (lhs->type().is_float()) {
+        append_fused_float_compare(*cmp_inst, lir_bb, branch_cond);
+    } else {
+        uint8_t sz = static_cast<uint8_t>(lhs->type().size_in_bytes());
+        if (sz == 0) sz = 8;
+        LirOpcode cmp_lir_op = (sz == 4) ? LirOpcode::Cmp32 : LirOpcode::Cmp;
+        LirOpcode test_lir_op = (sz == 4) ? LirOpcode::Test32 : LirOpcode::Test;
+
+        ImmIntInfo rhs_imm = get_imm_int_info(rhs);
+        ImmIntInfo lhs_imm = get_imm_int_info(lhs);
+
+        if ((cmp_op == Opcode::eq || cmp_op == Opcode::ne) && ((rhs_imm.is_imm && rhs_imm.val == 0) || (lhs_imm.is_imm && lhs_imm.val == 0))) {
+            const Value* non_zero = (rhs_imm.is_imm && rhs_imm.val == 0) ? lhs : rhs;
+            if (non_zero->is_instruction() && skipped_insts_.count(non_zero->defining_instruction()) && non_zero->defining_instruction()->opcode() == Opcode::and_) {
+                const Instruction* and_inst = non_zero->defining_instruction();
+                const Value* a = and_inst->operand(0);
+                const Value* b = and_inst->operand(1);
+                ImmIntInfo imm_b = get_imm_int_info(b);
+                ImmIntInfo imm_a = get_imm_int_info(a);
+
+                auto test_lir = std::make_unique<LirInst>(test_lir_op);
+                if (imm_b.is_imm && imm_b.fits_i32) {
+                    test_lir->add_use(LirOperand::vreg(get_vreg(a), sz));
+                    test_lir->add_use(LirOperand::imm(imm_b.val, sz));
+                } else if (imm_a.is_imm && imm_a.fits_i32) {
+                    test_lir->add_use(LirOperand::vreg(get_vreg(b), sz));
+                    test_lir->add_use(LirOperand::imm(imm_a.val, sz));
+                } else {
+                    test_lir->add_use(LirOperand::vreg(get_vreg(a), sz));
+                    test_lir->add_use(LirOperand::vreg(get_vreg(b), sz));
+                }
+                lir_bb.append_inst(std::move(test_lir));
+                branch_cond = (cmp_op == Opcode::eq) ? Condition::E : Condition::NE;
+            } else {
+                auto test_lir = std::make_unique<LirInst>(test_lir_op);
+                VReg reg = get_vreg(non_zero);
+                test_lir->add_use(LirOperand::vreg(reg, sz));
+                test_lir->add_use(LirOperand::vreg(reg, sz));
+                lir_bb.append_inst(std::move(test_lir));
+                branch_cond = (rhs_imm.is_imm && rhs_imm.val == 0) ? gpr_c : swap_relational_condition(gpr_c);
+            }
+        } else if (rhs_imm.is_imm && rhs_imm.val == 0) {
+            auto test_lir = std::make_unique<LirInst>(test_lir_op);
+            test_lir->add_use(LirOperand::vreg(get_vreg(lhs), sz));
+            test_lir->add_use(LirOperand::vreg(get_vreg(lhs), sz));
+            lir_bb.append_inst(std::move(test_lir));
+            branch_cond = gpr_c;
+        } else if (lhs_imm.is_imm && lhs_imm.val == 0) {
+            auto test_lir = std::make_unique<LirInst>(test_lir_op);
+            test_lir->add_use(LirOperand::vreg(get_vreg(rhs), sz));
+            test_lir->add_use(LirOperand::vreg(get_vreg(rhs), sz));
+            lir_bb.append_inst(std::move(test_lir));
+            branch_cond = swap_relational_condition(gpr_c);
+        } else if (rhs_imm.is_imm && rhs_imm.fits_i32) {
+            branch_cond = gpr_c;
+            auto cmp_lir = std::make_unique<LirInst>(cmp_lir_op);
+            cmp_lir->add_use(LirOperand::vreg(get_vreg(lhs), sz));
+            cmp_lir->add_use(LirOperand::imm(rhs_imm.val, sz));
+            lir_bb.append_inst(std::move(cmp_lir));
+        } else if (lhs_imm.is_imm && lhs_imm.fits_i32) {
+            branch_cond = swap_relational_condition(gpr_c);
+            auto cmp_lir = std::make_unique<LirInst>(cmp_lir_op);
+            cmp_lir->add_use(LirOperand::vreg(get_vreg(rhs), sz));
+            cmp_lir->add_use(LirOperand::imm(lhs_imm.val, sz));
+            lir_bb.append_inst(std::move(cmp_lir));
+        } else if (rhs && rhs->is_instruction() && can_fuse_load(rhs->defining_instruction(), &inst)) {
+            branch_cond = gpr_c;
+            auto cmp_lir = std::make_unique<LirInst>(cmp_lir_op);
+            cmp_lir->add_use(LirOperand::vreg(get_vreg(lhs), sz));
+            cmp_lir->add_use(get_load_mem_operand(rhs->defining_instruction()));
+            lir_bb.append_inst(std::move(cmp_lir));
+        } else {
+            branch_cond = gpr_c;
+            auto cmp_lir = std::make_unique<LirInst>(cmp_lir_op);
+            cmp_lir->add_use(LirOperand::vreg(get_vreg(lhs), sz));
+            cmp_lir->add_use(LirOperand::vreg(get_vreg(rhs), sz));
+            lir_bb.append_inst(std::move(cmp_lir));
+        }
+    }
+    return branch_cond;
+}
+
 void X64ISel::lower_branch_if(const Instruction& inst, LirBlock& lir_bb) {
+    if (auto chain = and_chains_.find(&inst); chain != and_chains_.end()) {
+        lower_and_chain_branch(inst, chain->second, lir_bb);
+        return;
+    }
     const Value* cond_val = inst.operand(0);
     const auto& t_target = inst.true_target();
     const auto& f_target = inst.false_target();
@@ -670,90 +796,7 @@ void X64ISel::lower_branch_if(const Instruction& inst, LirBlock& lir_bb) {
     Condition branch_cond = Condition::NE;
 
     if (is_fused_cmp) {
-        Opcode cmp_op = cmp_inst->opcode();
-        const Condition gpr_c = get_comparison_conditions(cmp_op).first;
-        const Value* lhs = cmp_inst->operand(0);
-        const Value* rhs = cmp_inst->operand(1);
-
-        if (lhs->type().is_float()) {
-            append_fused_float_compare(*cmp_inst, lir_bb, branch_cond);
-        } else {
-            uint8_t sz = static_cast<uint8_t>(lhs->type().size_in_bytes());
-            if (sz == 0) sz = 8;
-            LirOpcode cmp_lir_op = (sz == 4) ? LirOpcode::Cmp32 : LirOpcode::Cmp;
-            LirOpcode test_lir_op = (sz == 4) ? LirOpcode::Test32 : LirOpcode::Test;
-
-            ImmIntInfo rhs_imm = get_imm_int_info(rhs);
-            ImmIntInfo lhs_imm = get_imm_int_info(lhs);
-
-            if ((cmp_op == Opcode::eq || cmp_op == Opcode::ne) && ((rhs_imm.is_imm && rhs_imm.val == 0) || (lhs_imm.is_imm && lhs_imm.val == 0))) {
-                const Value* non_zero = (rhs_imm.is_imm && rhs_imm.val == 0) ? lhs : rhs;
-                if (non_zero->is_instruction() && skipped_insts_.count(non_zero->defining_instruction()) && non_zero->defining_instruction()->opcode() == Opcode::and_) {
-                    const Instruction* and_inst = non_zero->defining_instruction();
-                    const Value* a = and_inst->operand(0);
-                    const Value* b = and_inst->operand(1);
-                    ImmIntInfo imm_b = get_imm_int_info(b);
-                    ImmIntInfo imm_a = get_imm_int_info(a);
-
-                    auto test_lir = std::make_unique<LirInst>(test_lir_op);
-                    if (imm_b.is_imm && imm_b.fits_i32) {
-                        test_lir->add_use(LirOperand::vreg(get_vreg(a), sz));
-                        test_lir->add_use(LirOperand::imm(imm_b.val, sz));
-                    } else if (imm_a.is_imm && imm_a.fits_i32) {
-                        test_lir->add_use(LirOperand::vreg(get_vreg(b), sz));
-                        test_lir->add_use(LirOperand::imm(imm_a.val, sz));
-                    } else {
-                        test_lir->add_use(LirOperand::vreg(get_vreg(a), sz));
-                        test_lir->add_use(LirOperand::vreg(get_vreg(b), sz));
-                    }
-                    lir_bb.append_inst(std::move(test_lir));
-                    branch_cond = (cmp_op == Opcode::eq) ? Condition::E : Condition::NE;
-                } else {
-                    auto test_lir = std::make_unique<LirInst>(test_lir_op);
-                    VReg reg = get_vreg(non_zero);
-                    test_lir->add_use(LirOperand::vreg(reg, sz));
-                    test_lir->add_use(LirOperand::vreg(reg, sz));
-                    lir_bb.append_inst(std::move(test_lir));
-                    branch_cond = (rhs_imm.is_imm && rhs_imm.val == 0) ? gpr_c : swap_relational_condition(gpr_c);
-                }
-            } else if (rhs_imm.is_imm && rhs_imm.val == 0) {
-                auto test_lir = std::make_unique<LirInst>(test_lir_op);
-                test_lir->add_use(LirOperand::vreg(get_vreg(lhs), sz));
-                test_lir->add_use(LirOperand::vreg(get_vreg(lhs), sz));
-                lir_bb.append_inst(std::move(test_lir));
-                branch_cond = gpr_c;
-            } else if (lhs_imm.is_imm && lhs_imm.val == 0) {
-                auto test_lir = std::make_unique<LirInst>(test_lir_op);
-                test_lir->add_use(LirOperand::vreg(get_vreg(rhs), sz));
-                test_lir->add_use(LirOperand::vreg(get_vreg(rhs), sz));
-                lir_bb.append_inst(std::move(test_lir));
-                branch_cond = swap_relational_condition(gpr_c);
-            } else if (rhs_imm.is_imm && rhs_imm.fits_i32) {
-                branch_cond = gpr_c;
-                auto cmp_lir = std::make_unique<LirInst>(cmp_lir_op);
-                cmp_lir->add_use(LirOperand::vreg(get_vreg(lhs), sz));
-                cmp_lir->add_use(LirOperand::imm(rhs_imm.val, sz));
-                lir_bb.append_inst(std::move(cmp_lir));
-            } else if (lhs_imm.is_imm && lhs_imm.fits_i32) {
-                branch_cond = swap_relational_condition(gpr_c);
-                auto cmp_lir = std::make_unique<LirInst>(cmp_lir_op);
-                cmp_lir->add_use(LirOperand::vreg(get_vreg(rhs), sz));
-                cmp_lir->add_use(LirOperand::imm(lhs_imm.val, sz));
-                lir_bb.append_inst(std::move(cmp_lir));
-            } else if (rhs && rhs->is_instruction() && can_fuse_load(rhs->defining_instruction(), &inst)) {
-                branch_cond = gpr_c;
-                auto cmp_lir = std::make_unique<LirInst>(cmp_lir_op);
-                cmp_lir->add_use(LirOperand::vreg(get_vreg(lhs), sz));
-                cmp_lir->add_use(get_load_mem_operand(rhs->defining_instruction()));
-                lir_bb.append_inst(std::move(cmp_lir));
-            } else {
-                branch_cond = gpr_c;
-                auto cmp_lir = std::make_unique<LirInst>(cmp_lir_op);
-                cmp_lir->add_use(LirOperand::vreg(get_vreg(lhs), sz));
-                cmp_lir->add_use(LirOperand::vreg(get_vreg(rhs), sz));
-                lir_bb.append_inst(std::move(cmp_lir));
-            }
-        }
+        branch_cond = append_fused_compare(*cmp_inst, inst, lir_bb);
     } else {
         VReg cond = get_vreg(cond_val);
         uint8_t sz = cond.size;

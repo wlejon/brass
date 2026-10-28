@@ -40,6 +40,9 @@ private:
     std::unordered_map<const Value*, codegen::VReg> val_to_vreg_;
     std::unordered_map<const Value*, uint32_t> use_count_;
     std::unordered_set<const Instruction*> skipped_insts_;
+    // br_if -> the leaves of its AND condition, tested one branch each
+    // (x64_isel_and_chain.cpp).
+    std::unordered_map<const Instruction*, std::vector<const Value*>> and_chains_;
 
     struct ImmIntInfo {
         bool is_imm = false;
@@ -123,6 +126,12 @@ private:
     void lower_landing_pad(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_branch(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_branch_if(const Instruction& inst, codegen::LirBlock& lir_bb);
+    // The flags of a comparison folded into branch `user`, and the condition
+    // true exactly when it is.
+    Condition append_fused_compare(const Instruction& cmp, const Instruction& user, codegen::LirBlock& lir_bb);
+    void find_and_chains(const Function& mir_fn);
+    void lower_and_chain_branch(const Instruction& inst, const std::vector<const Value*>& leaves,
+                                codegen::LirBlock& lir_bb);
     void lower_switch(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_overflow_check(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_return(const Instruction& inst, codegen::LirBlock& lir_bb);

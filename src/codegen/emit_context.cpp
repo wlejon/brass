@@ -166,6 +166,8 @@ CompilationResult EmitContext::compile_once() {
         return ins.size() == 1 && c.count == 1 && !c.conditional && i + 1 < fn_.blocks.size() &&
                threading.target(c.other) == fn_.blocks[i + 1]->id;
     };
+    // Whether the last block emitted runs into the next one's first byte.
+    bool prev_falls_through = true;
     for (size_t b_idx = 0; b_idx < fn_.blocks.size(); ++b_idx) {
         const auto& block = fn_.blocks[b_idx];
         if (threading.skipped(b_idx)) {
@@ -173,10 +175,18 @@ CompilationResult EmitContext::compile_once() {
             continue;
         }
         if (b_idx > 0) {
-            // Branch targets start 16-byte aligned, and a loop's head 32:
-            // a small loop then sits in one 32-byte fetch window (on Zen
-            // one straddling two ran the sieve's inner loop 1.3x slower).
-            buffer_.align(threading.loop_head(b_idx) ? 32 : 16);
+            // A loop's head starts 32-byte aligned: a small loop then sits in
+            // one 32-byte fetch window (on Zen one straddling two ran the
+            // sieve's inner loop 1.3x slower). Any other block 16, but only
+            // where nothing falls into it: padding a block that the one
+            // before runs straight into executes the padding on that path,
+            // which on a chain of small blocks (an and-chain's tests, an
+            // inline cache's guards) was a nop or two per branch.
+            if (threading.loop_head(b_idx)) {
+                buffer_.align(32);
+            } else if (!prev_falls_through) {
+                buffer_.align(16);
+            }
         }
         buffer_.bind(block_labels_[block->id]);
         result.block_offsets[block->id] = buffer_.size();
@@ -223,11 +233,14 @@ CompilationResult EmitContext::compile_once() {
 
             if (falls_to(false_target)) {
                 enc_.j(jcc.condition, block_labels_[true_target]);
+                prev_falls_through = true;
             } else if (falls_to(true_target)) {
                 enc_.j(invert(jcc.condition), block_labels_[false_target]);
+                prev_falls_through = true;
             } else {
                 enc_.j(jcc.condition, block_labels_[true_target]);
                 enc_.jmp(block_labels_[false_target]);
+                prev_falls_through = false;
             }
         } else if (closing.count == 1) {
             const auto& jmp = *block->instructions[n_insts - 1];
@@ -237,7 +250,15 @@ CompilationResult EmitContext::compile_once() {
             uint32_t target = threading.target(closing.other);
             if (!falls_to(target)) {
                 enc_.jmp(block_labels_[target]);
+                prev_falls_through = false;
+            } else {
+                prev_falls_through = true;
             }
+        } else {
+            // Anything but a return or a trap may run on; assuming it does
+            // only skips padding.
+            const LirOpcode last = n_insts > 0 ? block->instructions[n_insts - 1]->opcode : LirOpcode::Nop;
+            prev_falls_through = !(last == LirOpcode::Ret || last == LirOpcode::Trap);
         }
     }
 

@@ -89,6 +89,12 @@ private:
     size_t next_spill_slot_ = 0;
 
     std::unordered_map<uint32_t, std::vector<VReg>> coalesce_hints_;
+    // Per unordered pair of values, the positions of the copies between them
+    // (a Mov or a ParallelCopy entry), which slot_of lets them meet at.
+    std::unordered_map<uint64_t, std::vector<uint32_t>> copy_positions_;
+    static uint64_t copy_key(uint32_t a, uint32_t b) noexcept {
+        return a < b ? (uint64_t{a} << 32) | b : (uint64_t{b} << 32) | a;
+    }
     std::unordered_map<uint32_t, std::vector<PReg>> fixed_preg_hints_;
     std::unordered_multimap<uint64_t, PReg> vreg_at_preg_hints_;
 
@@ -121,6 +127,15 @@ private:
     std::vector<AllocPiece> pieces_;
     std::vector<std::vector<uint32_t>> vreg_pieces_;
     std::vector<int32_t> vreg_slot_;
+    // The values each shareable slot has been given so far (slot_of).
+    struct SlotOwners {
+        int32_t slot = -1;
+        bool is_gcref = false;
+        bool is_gpr = false;
+        uint8_t size = 0;
+        std::vector<uint32_t> vregs;
+    };
+    std::vector<SlotOwners> shared_slots_;
     // Values that keep one location for their whole life: GC references
     // (stack maps name one place per value), and values live into a block
     // entered other than by an ordinary branch (a landing pad, a resume
