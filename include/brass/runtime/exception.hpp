@@ -140,6 +140,8 @@ public:
     void clear();
 
     [[nodiscard]] const FunctionExceptionTable* find_function_by_pc(uintptr_t pc) const noexcept;
+    // Whether any function mapping is registered: none means no pc can be found.
+    [[nodiscard]] bool has_functions() const noexcept;
     [[nodiscard]] const ExceptionScopeEntry* find_scope_by_pc(
         uintptr_t pc,
         uintptr_t* out_fn_start = nullptr,

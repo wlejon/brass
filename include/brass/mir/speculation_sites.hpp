@@ -49,9 +49,26 @@ class Value;
 class SpecFeedback {
 public:
     // Whether tier 2 should arm a site of `kind` whose slow path ran
-    // `misses` times.
-    using ArmPolicy = std::function<bool(uint8_t kind, uint32_t misses)>;
+    // `misses` times; `ran` is whether the site was reached at all, known
+    // only for the kinds that record it (set_ran_kinds), and true for the
+    // others.
+    using ArmPolicy = std::function<bool(uint8_t kind, uint32_t misses, bool ran)>;
     explicit SpecFeedback(ArmPolicy policy);
+
+    // The kinds (bit `1 << kind`) whose sites record that they ran: a flag
+    // the lower tiers set every time the site is reached, which tells a site
+    // whose slow path never ran because its operands were always the fast
+    // path's from one that never ran at all. It costs a store per run, so a
+    // front end asks for it only for the kinds whose policy needs the
+    // difference. Set before any site is emitted.
+    void set_ran_kinds(uint32_t mask) noexcept { ran_kinds_ = mask; }
+    [[nodiscard]] bool records_ran(uint8_t kind) const noexcept {
+        return kind < 32 && (ran_kinds_ & (1u << kind)) != 0;
+    }
+    // Site `site`'s ran flag, which the lowered code sets to 1, and its
+    // address (0 when the site's kind records no flag).
+    uint32_t* ran_flag(uint32_t site);
+    uintptr_t ran_flag_address(uint32_t site) const;
 
     // `fn` is the site's function and `tag` what the site tests (a property
     // key, a helper): with the kind and the site's occurrence they name it,
@@ -73,6 +90,7 @@ public:
     struct SiteRecord {
         uint8_t kind = 0;
         uint32_t misses = 0;
+        bool ran = true;
         std::string fn;
         std::string tag;
     };
@@ -81,9 +99,13 @@ public:
     SiteRecord site(uint32_t site) const;
 
 private:
+    // Under mutex_.
+    bool ran_locked(uint32_t site) const;
     ArmPolicy policy_;
+    uint32_t ran_kinds_ = 0;
     mutable std::mutex mutex_;
     std::deque<uint32_t> misses_;
+    std::deque<uint32_t> ran_;
     std::deque<uint8_t> failed_;
     std::deque<uint8_t> kinds_;
     std::deque<std::string> fns_;

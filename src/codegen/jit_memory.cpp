@@ -6,6 +6,7 @@
 // per thread by pthread_jit_write_protect_np, so each thread still sees it as
 // either writable or executable, never both.)
 #include <brass/codegen/jit_exec.hpp>
+#include <brass/gc/native_unwind.hpp>
 #include <brass/codegen/jit_unwind_apple.hpp>
 #include <brass/debug/jit_unwind_registry.hpp>
 #include <algorithm>
@@ -221,11 +222,13 @@ bool JitMemoryBlock::register_unwind_info(size_t offset, uint32_t count) {
         std::memcpy(&cie_id, p + 4, 4);
         if (cie_id != 0) {
             __register_frame(p);
+            brass_note_unwind_info_changed();
         }
         p += 4 + len;
     }
 #else
     __register_frame(table);
+    brass_note_unwind_info_changed();
 #endif
     unwind_table_ = table;
     return true;
@@ -257,11 +260,13 @@ void JitMemoryBlock::unregister_unwind_info() noexcept {
         std::memcpy(&cie_id, p + 4, 4);
         if (cie_id != 0) {
             __deregister_frame(p);
+            brass_note_unwind_info_changed();
         }
         p += 4 + len;
     }
 #else
     __deregister_frame(unwind_table_);
+    brass_note_unwind_info_changed();
 #endif
 #endif
     unwind_table_ = nullptr;

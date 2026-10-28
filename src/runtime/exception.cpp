@@ -73,6 +73,11 @@ const ExceptionTableRegistry::RangeEntry* ExceptionTableRegistry::find_range(uin
     return (lookup_pc >= r.start && lookup_pc < r.end) ? &r : nullptr;
 }
 
+bool ExceptionTableRegistry::has_functions() const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return !ranges_.empty();
+}
+
 const FunctionExceptionTable* ExceptionTableRegistry::find_function_by_pc(uintptr_t pc) const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     const RangeEntry* r = find_range(pc);

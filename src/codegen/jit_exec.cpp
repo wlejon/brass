@@ -1,4 +1,5 @@
 #include <brass/codegen/jit_exec.hpp>
+#include <brass/gc/native_unwind.hpp>
 #include <brass/object/coff_writer.hpp>
 #include <brass/object/elf_writer.hpp>
 #include <brass/object/aarch64_reloc.hpp>
@@ -828,6 +829,7 @@ void JitExecutionEngine::register_eh_frame(uint8_t* eh_frame, size_t eh_size) {
         std::memcpy(&cie_id, p + 4, 4);
         if (cie_id != 0) {
             __register_frame(p);
+            brass_note_unwind_info_changed();
             regs_.fdes.push_back(p);
         }
         p += 4 + len;
@@ -836,6 +838,7 @@ void JitExecutionEngine::register_eh_frame(uint8_t* eh_frame, size_t eh_size) {
     (void)eh_size;
     // libgcc takes the whole zero-terminated section.
     __register_frame(eh_frame);
+    brass_note_unwind_info_changed();
     regs_.fdes.push_back(eh_frame);
 #endif
 #else
@@ -853,6 +856,7 @@ void JitExecutionEngine::LoadRegistrations::release_eh_frame() noexcept {
 #endif
     for (auto it = fdes.rbegin(); it != fdes.rend(); ++it) {
         __deregister_frame(*it);
+        brass_note_unwind_info_changed();
     }
 #endif
     fdes.clear();

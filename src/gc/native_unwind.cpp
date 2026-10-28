@@ -11,8 +11,13 @@
 
 #if defined(BRASS_NATIVE_UNWIND)
 
+#include <atomic>
+#include <cstddef>
 #include <cstring>
 #include <dlfcn.h>
+#if !defined(__APPLE__)
+#include <link.h>
+#endif
 #include <new>
 #include <unwind.h>
 #if defined(__APPLE__)
@@ -444,8 +449,8 @@ enum class CfiStep { Stepped, End, NoCfi, Failed };
 // The row of the CFI table in effect at `lookup`: Stepped when `row` holds
 // it, NoCfi when no FDE describes the code there, Failed when one does but
 // cannot be read.
-CfiStep find_row(uintptr_t lookup, Row& row) noexcept {
-    uintptr_t fn_start = 0;
+CfiStep find_row(uintptr_t lookup, Row& row, uintptr_t& fn_start) noexcept {
+    fn_start = 0;
     const auto* fde = static_cast<const uint8_t*>(detail::find_fde(lookup, fn_start));
     if (!fde) return CfiStep::NoCfi;
 
@@ -488,6 +493,7 @@ CfiStep find_row(uintptr_t lookup, Row& row) noexcept {
 // (a module unloaded, generated code freed), so the next walk starts empty.
 struct CachedRow {
     uintptr_t pc = 0;
+    uintptr_t fn_start = 0;
     uint32_t epoch = 0;
     CfiStep kind = CfiStep::Failed;
     Row row;
@@ -498,16 +504,18 @@ thread_local unsigned t_row_cache_depth = 0;
 thread_local uint32_t t_row_cache_epoch = 0;
 thread_local CachedRow* t_row_cache = nullptr;
 
-CfiStep find_row_cached(uintptr_t lookup, Row& row) noexcept {
-    if (t_row_cache_depth == 0 || t_row_cache == nullptr) return find_row(lookup, row);
+CfiStep find_row_cached(uintptr_t lookup, Row& row, uintptr_t& fn_start) noexcept {
+    if (t_row_cache_depth == 0 || t_row_cache == nullptr) return find_row(lookup, row, fn_start);
     CachedRow& slot = t_row_cache[(lookup ^ (lookup >> 6)) & (kRowCacheSize - 1)];
     if (slot.epoch == t_row_cache_epoch && slot.pc == lookup) {
         if (slot.kind == CfiStep::Stepped) row = slot.row;
+        fn_start = slot.fn_start;
         return slot.kind;
     }
-    const CfiStep kind = find_row(lookup, row);
+    const CfiStep kind = find_row(lookup, row, fn_start);
     if (kind == CfiStep::Stepped || kind == CfiStep::NoCfi) {
         slot.pc = lookup;
+        slot.fn_start = fn_start;
         slot.epoch = t_row_cache_epoch;
         slot.kind = kind;
         if (kind == CfiStep::Stepped) slot.row = row;
@@ -517,7 +525,8 @@ CfiStep find_row_cached(uintptr_t lookup, Row& row) noexcept {
 
 CfiStep step_by_cfi(NativeUnwindFrame& f, uintptr_t lookup) noexcept {
     Row row;
-    const CfiStep found = find_row_cached(lookup, row);
+    uintptr_t fn_start = 0;
+    const CfiStep found = find_row_cached(lookup, row, fn_start);
     if (found != CfiStep::Stepped) return found;
 
     uintptr_t cfa = 0;
@@ -571,10 +580,74 @@ bool brass_unwind_step(NativeUnwindFrame& f, bool ip_is_return_address) noexcept
 #endif
 }
 
+#if !defined(__APPLE__)
+namespace {
+
+// How many times the unwind information in the process has changed:
+// generated code's frames registered or deregistered
+// (brass_note_unwind_info_changed) and images loaded or unloaded (the
+// dynamic linker's counts). While none moved, every row a thread found,
+// and every pc it found no CFI for, still describes the code at that pc, so
+// its rows carry over from one walk to the next; an Error's stack is walked
+// at its creation, and finding the same few rows afresh for every Error was
+// a third of creating one.
+std::atomic<uint64_t> g_unwind_changes{0};
+thread_local uint64_t t_rows_jit_changes = 0;
+thread_local uint64_t t_rows_image_changes = 0;
+thread_local bool t_rows_keyed = false;
+
+// The dynamic linker's count of images loaded plus unloaded; false when it
+// does not report them.
+bool image_changes(uint64_t& out) noexcept {
+    struct Count {
+        uint64_t n = 0;
+        bool known = false;
+    } count;
+    dl_iterate_phdr(
+        [](dl_phdr_info* info, size_t size, void* data) -> int {
+            auto* c = static_cast<Count*>(data);
+            if (size >= offsetof(dl_phdr_info, dlpi_subs) + sizeof(info->dlpi_subs)) {
+                c->n = info->dlpi_adds + info->dlpi_subs;
+                c->known = true;
+            }
+            return 1;
+        },
+        &count);
+    out = count.n;
+    return count.known;
+}
+
+} // namespace
+#endif
+
+void brass_note_unwind_info_changed() noexcept {
+#if !defined(__APPLE__)
+    g_unwind_changes.fetch_add(1, std::memory_order_acq_rel);
+#endif
+}
+
+uintptr_t brass_function_start(uintptr_t pc) noexcept {
+#if defined(__APPLE__)
+    return reinterpret_cast<uintptr_t>(_Unwind_FindEnclosingFunction(reinterpret_cast<void*>(pc)));
+#else
+    Row row;
+    uintptr_t fn_start = 0;
+    const CfiStep kind = find_row_cached(pc, row, fn_start);
+    return kind == CfiStep::NoCfi ? 0 : fn_start;
+#endif
+}
+
 UnwindRowCacheScope::UnwindRowCacheScope() noexcept {
 #if !defined(__APPLE__)
     if (t_row_cache_depth++ != 0) return;  // a nested walk shares the outer one's rows
     if (t_row_cache == nullptr) t_row_cache = new (std::nothrow) CachedRow[kRowCacheSize];
+    uint64_t images = 0;
+    const bool known = image_changes(images);
+    const uint64_t jit = g_unwind_changes.load(std::memory_order_acquire);
+    if (known && t_rows_keyed && images == t_rows_image_changes && jit == t_rows_jit_changes) return;
+    t_rows_keyed = known;
+    t_rows_image_changes = images;
+    t_rows_jit_changes = jit;
     if (++t_row_cache_epoch == 0) {
         // Wrapped: an entry from 2^32 walks ago must not match.
         if (t_row_cache != nullptr) {
@@ -643,6 +716,25 @@ __attribute__((noinline)) bool brass_capture_frame(NativeUnwindFrame& f, unsigne
     f = cur;
     return true;
 #else
+    // This frame as it is at the asm below, stepped by its own CFI to the
+    // frame asked for: libgcc's _Unwind_Backtrace builds a whole context per
+    // frame to the same end, and capturing at every Error's creation made
+    // it a seventh of the cost of one. Its walk stays the fallback.
+    {
+        NativeUnwindFrame cur;
+#if defined(__x86_64__)
+        asm volatile("lea 0(%%rip), %0\n\tmov %%rsp, %1\n\tmov %%rbp, %2"
+                     : "=r"(cur.ip), "=r"(cur.sp), "=r"(cur.fp));
+#else
+        asm volatile("adr %0, .\n\tmov %1, sp\n\tmov %2, x29" : "=r"(cur.ip), "=r"(cur.sp), "=r"(cur.fp));
+#endif
+        bool ok = brass_unwind_step(cur, /*ip_is_return_address=*/false);
+        for (unsigned i = 0; ok && i <= skip; ++i) ok = brass_unwind_step(cur);
+        if (ok) {
+            f = cur;
+            return true;
+        }
+    }
     // Frame 0 is this function, 1 its caller, 2 that caller's caller.
     Capture c;
     c.want = skip + 2;

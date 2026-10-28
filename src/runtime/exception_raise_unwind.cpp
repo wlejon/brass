@@ -156,7 +156,8 @@ void walk_native_frames(Visit&& visit) {
         f.sp = s->callee_cfa;
         s->callee_cfa = static_cast<uintptr_t>(_Unwind_GetCFA(ctx));
         f.fp = static_cast<uintptr_t>(gpr(kFpReg));
-        f.fn_start = reinterpret_cast<uintptr_t>(_Unwind_FindEnclosingFunction(reinterpret_cast<void*>(f.pc)));
+        // fn_start is left 0: finding it is a second FDE search per frame,
+        // and only frame_of (a deopt's raise) asks for it.
         f.has_lsda = _Unwind_GetLanguageSpecificData(ctx) != nullptr;
         // libgcc keeps the low 64 bits of v8-v15 (the callee-saved part) as
         // 8-byte registers, readable as general ones.
@@ -216,7 +217,11 @@ bool needs_cxx_unwind(const NativeFrame& f) {
 // info or by the JIT registry's range for it.
 bool frame_of(const NativeFrame& f, const void* entry) {
     const auto e = reinterpret_cast<uintptr_t>(entry);
+#if defined(__APPLE__)
     if (f.fn_start == e) return true;
+#else
+    if (reinterpret_cast<uintptr_t>(_Unwind_FindEnclosingFunction(reinterpret_cast<void*>(f.pc))) == e) return true;
+#endif
     uintptr_t fn_start = 0;
     (void)get_global_exception_registry().find_scope_by_pc(f.pc, &fn_start, nullptr);
     return fn_start == e;
@@ -225,6 +230,10 @@ bool frame_of(const NativeFrame& f, const void* entry) {
 } // namespace
 
 bool brass_seh_raise(HostValue val) {
+    // A pad it could jump to is one of registered generated code: with none
+    // registered (an AOT program that never compiles at run time) the walk
+    // could only come back empty, and the caller's C++ throw is all there is.
+    if (!get_global_exception_registry().has_functions()) return false;
     const uintptr_t boundary = entry_boundary();
     PadTarget target;
     bool found = false;

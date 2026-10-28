@@ -55,6 +55,17 @@ public:
     UnwindRowCacheScope& operator=(const UnwindRowCacheScope&) = delete;
 };
 
+// The start of the function whose unwind information covers pc (a call's
+// own byte, as _Unwind_FindEnclosingFunction takes it), or 0 when none does.
+// Answered from the row cache while an UnwindRowCacheScope is live.
+uintptr_t brass_function_start(uintptr_t pc) noexcept;
+
+// Generated code's unwind information is being registered or removed: rows
+// a thread kept from earlier walks may not describe the code at their pc any
+// more, so its next walk finds them afresh. Called before the code runs, or
+// before its memory can be reused.
+void brass_note_unwind_info_changed() noexcept;
+
 // Whether ip lies in a loaded image (compiled code: the host's, brass's own
 // runtime, the C++ runtime, the system) rather than in code generated at
 // run time.
