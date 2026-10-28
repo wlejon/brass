@@ -24,6 +24,13 @@
 
 namespace brass::object {
 
+namespace {
+// The x64 emitter aligns a loop's head to 32 bytes from the start of its
+// function (EmitContext::compile), which holds in memory only where the
+// function, and the section under it, start 32-byte aligned too.
+constexpr uint32_t kTextAlignment = 32;
+} // namespace
+
 Section* ObjectFile::get_section(std::string_view name) {
     for (auto& sec : sections) {
         if (sec.name == name) {
@@ -127,7 +134,7 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
         ".text",
         SectionKind::Text,
         SectionFlags::Read | SectionFlags::Execute | SectionFlags::Alloc,
-        16
+        kTextAlignment
     );
 
     // The loop pipeline, built once per FP-reassociation setting rather than
@@ -372,8 +379,8 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
             codegen::EmitContext emit_ctx(*lir, target_);
             codegen::CompilationResult res = emit_ctx.compile();
 
-            // 5. Place in .text
-            text_sec.align_to(16);
+            // 5. Place in .text, where the loop heads' alignment holds.
+            text_sec.align_to(kTextAlignment);
             size_t fn_offset = text_sec.data.size();
             size_t fn_size = res.code_buffer.size();
             text_sec.emit_bytes(res.code_buffer.span());

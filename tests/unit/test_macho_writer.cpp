@@ -101,7 +101,9 @@ TEST_CASE("Mach-O Writer - Header and Section Table Layout") {
             CHECK_EQ(std::string(segname), "__TEXT");
             CHECK(size > 0);
             CHECK(offset >= 32 + sizeofcmds);
-            CHECK_EQ(align_pow2, 4u); // 2^4 = 16-byte aligned
+            // 2^5: an x64 function's loop heads are 32-byte aligned from its start
+            // (ModuleCompiler's kTextAlignment), so the section is too.
+            CHECK_EQ(align_pow2, 5u);
             CHECK((flags & macho::S_ATTR_PURE_INSTRUCTIONS) != 0);
         } else if (std::strcmp(sectname, "__compact_unwind") == 0 || std::strcmp(sectname, "__eh_frame") == 0) {
             found_unwind = true;

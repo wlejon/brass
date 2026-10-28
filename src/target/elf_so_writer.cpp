@@ -324,6 +324,8 @@ std::vector<uint8_t> ElfSoWriter::write() {
     }
     const uint32_t text_idx = add(".text", elf64::SHT_PROGBITS, elf64::SHF_ALLOC | elf64::SHF_EXECINSTR, 16, 0, {});
     if (const auto* ts = working_obj.get_section(".text")) {
+        // The object's own alignment, which its functions' are placed by.
+        if (ts->alignment > sections[text_idx].sh_addralign) sections[text_idx].sh_addralign = ts->alignment;
         sections[text_idx].data = ts->data;
         sections[text_idx].relocations = ts->relocations;
         sections[text_idx].source = ".text";
