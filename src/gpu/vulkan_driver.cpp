@@ -32,15 +32,30 @@ namespace {
 
 thread_local std::string tls_last_error;
 
+#if !defined(_WIN32)
+// The loader the host process already links, opened again by its own path:
+// on macOS a Homebrew loader (/opt/homebrew/lib) is on no default dyld search
+// path, so a bare name finds nothing although the process has it mapped.
+void* open_process_loader() {
+    void* sym = dlsym(RTLD_DEFAULT, "vkGetInstanceProcAddr");
+    Dl_info info{};
+    if (!sym || !dladdr(sym, &info) || !info.dli_fname) return nullptr;
+    return dlopen(info.dli_fname, RTLD_NOW | RTLD_LOCAL);
+}
+#endif
+
 void* open_loader() {
 #if defined(_WIN32)
     return reinterpret_cast<void*>(LoadLibraryA("vulkan-1.dll"));
 #elif defined(__APPLE__)
-    const char* names[] = {"libvulkan.1.dylib", "libvulkan.dylib", "libMoltenVK.dylib", nullptr};
+    if (void* h = open_process_loader()) return h;
+    const char* names[] = {"libvulkan.1.dylib", "libvulkan.dylib", "libMoltenVK.dylib",
+                           "/opt/homebrew/lib/libvulkan.1.dylib", "/usr/local/lib/libvulkan.1.dylib", nullptr};
     for (int i = 0; names[i]; ++i)
         if (void* h = dlopen(names[i], RTLD_NOW | RTLD_LOCAL)) return h;
     return nullptr;
 #else
+    if (void* h = open_process_loader()) return h;
     const char* names[] = {"libvulkan.so.1", "libvulkan.so", nullptr};
     for (int i = 0; names[i]; ++i)
         if (void* h = dlopen(names[i], RTLD_NOW | RTLD_LOCAL)) return h;
@@ -93,6 +108,21 @@ bool open_instance(Runtime& r) {
     app.apiVersion = std::min<uint32_t>(loader_version, VK_API_VERSION_1_3);
     auto ci = vk::make<VkInstanceCreateInfo>(VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO);
     ci.pApplicationInfo = &app;
+    // Portability drivers (MoltenVK) are enumerated only when asked for, and
+    // with none to enumerate the loader fails the create.
+    const char* portability = "VK_KHR_portability_enumeration";
+    if (auto enum_exts = reinterpret_cast<PFN_vkEnumerateInstanceExtensionProperties>(
+            global("vkEnumerateInstanceExtensionProperties"))) {
+        uint32_t n = 0;
+        enum_exts(nullptr, &n, nullptr);
+        std::vector<VkExtensionProperties> exts(n);
+        enum_exts(nullptr, &n, exts.data());
+        if (has_ext(exts, portability)) {
+            ci.enabledExtensionCount = 1;
+            ci.ppEnabledExtensionNames = &portability;
+            ci.flags |= 0x00000001;   // VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
+        }
+    }
     if (create(&ci, nullptr, &r.instance) != VK_SUCCESS) return r.fail("vkCreateInstance failed");
     r.instance_version = app.apiVersion;
 
@@ -272,6 +302,8 @@ bool open_device(Runtime& r) {
         *tail = &eclk; tail = &eclk.pNext;
         enable_exts.push_back(VK_KHR_SHADER_CLOCK_EXTENSION_NAME);
     }
+    // (A portability driver's device must be made with its subset enabled.)
+    if (has_ext(exts, "VK_KHR_portability_subset")) enable_exts.push_back("VK_KHR_portability_subset");
     r.enabled_extensions.assign(enable_exts.begin(), enable_exts.end());
 
     float prio = 1.0f;
