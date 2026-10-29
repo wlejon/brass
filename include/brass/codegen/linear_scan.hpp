@@ -155,6 +155,7 @@ private:
     uint32_t next_seq_ = 0;
 
     struct BlockSpan {
+        const LirBlock* block = nullptr;
         uint32_t start = 0;
         uint32_t end = 0;
         uint32_t depth = 0;      // loop depth of the block

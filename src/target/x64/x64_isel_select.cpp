@@ -36,6 +36,25 @@ static constexpr Condition swap_relational_condition(Condition cond) noexcept {
     }
 }
 
+// The register a 64-bit constant a select made shortly before in this block
+// still holds, when nothing in between is a call (which would make it a
+// value kept across the call, in a callee-saved register or a slot, for what
+// one movabs costs): a run of boxed double stores each canonicalises NaN
+// with `cmovp bits, 0x7ff8...`, and rematerialised it at every one. The
+// window bounds how long the constant holds a register.
+VReg X64ISel::recent_select_constant(const LirBlock& lir_bb, int64_t value) const {
+    constexpr size_t kWindow = 64;
+    auto it = select_constants_.find(value);
+    if (it == select_constants_.end() || it->second.block != &lir_bb) return VReg{};
+    const size_t from = it->second.end;
+    const size_t to = lir_bb.instructions.size();
+    if (from > to || to - from > kWindow) return VReg{};
+    for (size_t i = from; i < to; ++i) {
+        if (lir_bb.instructions[i]->is_call()) return VReg{};
+    }
+    return it->second.vreg;
+}
+
 void X64ISel::lower_select(const Instruction& inst, LirBlock& lir_bb) {
     const Value* cond_val = inst.operand(0);
     const Value* true_val = inst.operand(1);
@@ -107,8 +126,12 @@ void X64ISel::lower_select(const Instruction& inst, LirBlock& lir_bb) {
     } else {
         ImmIntInfo true_imm = get_imm_int_info(true_val);
         if (true_imm.is_imm) {
-            VReg tmp = lir_fn_->allocate_vreg(RegClass::GPR, sz);
-            if (true_imm.val == 0) {
+            const bool wide = sz != 4 && (true_imm.val < INT32_MIN || true_imm.val > INT32_MAX);
+            const VReg held = wide ? recent_select_constant(lir_bb, true_imm.val) : VReg{};
+            VReg tmp = held.is_valid() ? held : lir_fn_->allocate_vreg(RegClass::GPR, sz);
+            if (held.is_valid()) {
+                // the register the earlier select left the constant in
+            } else if (true_imm.val == 0) {
                 auto xor_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Xor32 : LirOpcode::Xor);
                 xor_inst->add_def(LirOperand::vreg(tmp, sz));
                 xor_inst->add_use(LirOperand::vreg(tmp, sz));
@@ -124,6 +147,7 @@ void X64ISel::lower_select(const Instruction& inst, LirBlock& lir_bb) {
                 movabs_inst->add_def(LirOperand::vreg(tmp, 8));
                 movabs_inst->add_use(LirOperand::imm(true_imm.val, 8));
                 lir_bb.append_inst(std::move(movabs_inst));
+                select_constants_[true_imm.val] = SelectConstant{&lir_bb, lir_bb.instructions.size(), tmp};
             }
             src_vreg = tmp;
         } else {

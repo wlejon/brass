@@ -240,3 +240,55 @@ TEST_CASE("x64 VEX - Extended Registers (XMM8-15)") {
     enc.vaddps(XMM::XMM0, XMM::XMM1, XMM::XMM8);
     CHECK_VEX_BYTES(buf, 0xC4, 0xC1, 0x74, 0x58, 0xC0);
 }
+
+// The scalar three-operand forms the x64 isel emits under AVX
+// (LirFunction::x64_avx): VEX.128 (L = 0), F2 (sd) / F3 (ss), checked
+// against GNU as.
+TEST_CASE("x64 VEX - Scalar three-operand arithmetic") {
+    CodeBuffer buf;
+    X64Encoder enc(buf);
+
+    // vaddsd xmm0, xmm1, xmm2 -> C5 F3 58 C2
+    enc.vaddsd(XMM::XMM0, XMM::XMM1, XMM::XMM2);
+    CHECK_VEX_BYTES(buf, 0xC5, 0xF3, 0x58, 0xC2);
+
+    buf.clear();
+    // vmulsd xmm11, xmm4, xmm9 (R and B: 3-byte VEX) -> C4 41 5B 59 D9
+    enc.vmulsd(XMM::XMM11, XMM::XMM4, XMM::XMM9);
+    CHECK_VEX_BYTES(buf, 0xC4, 0x41, 0x5B, 0x59, 0xD9);
+
+    buf.clear();
+    // vmulsd xmm2, xmm8, [rbp - 0x200] (vvvv = xmm8) -> C5 BB 59 95 00 FE FF FF
+    enc.vmulsd(XMM::XMM2, XMM::XMM8, MemAddress::base_disp(GPR::RBP, -0x200));
+    CHECK_VEX_BYTES(buf, 0xC5, 0xBB, 0x59, 0x95, 0x00, 0xFE, 0xFF, 0xFF);
+
+    buf.clear();
+    // vsubsd xmm13, xmm14, xmm15 -> C4 41 0B 5C EF
+    enc.vsubsd(XMM::XMM13, XMM::XMM14, XMM::XMM15);
+    CHECK_VEX_BYTES(buf, 0xC4, 0x41, 0x0B, 0x5C, 0xEF);
+
+    buf.clear();
+    // vdivsd xmm0, xmm1, xmm2 -> C5 F3 5E C2
+    enc.vdivsd(XMM::XMM0, XMM::XMM1, XMM::XMM2);
+    CHECK_VEX_BYTES(buf, 0xC5, 0xF3, 0x5E, 0xC2);
+
+    buf.clear();
+    // vsubss xmm1, xmm2, xmm3 -> C5 EA 5C CB
+    enc.vsubss(XMM::XMM1, XMM::XMM2, XMM::XMM3);
+    CHECK_VEX_BYTES(buf, 0xC5, 0xEA, 0x5C, 0xCB);
+
+    buf.clear();
+    // vaddss xmm7, xmm0, [rax + r12*8 + 8] (X: 3-byte VEX) -> C4 A1 7A 58 7C E0 08
+    enc.vaddss(XMM::XMM7, XMM::XMM0, MemAddress::base_index(GPR::RAX, GPR::R12, Scale::Eight, 8));
+    CHECK_VEX_BYTES(buf, 0xC4, 0xA1, 0x7A, 0x58, 0x7C, 0xE0, 0x08);
+
+    buf.clear();
+    // vmulss xmm0, xmm0, xmm0 -> C5 FA 59 C0
+    enc.vmulss(XMM::XMM0, XMM::XMM0, XMM::XMM0);
+    CHECK_VEX_BYTES(buf, 0xC5, 0xFA, 0x59, 0xC0);
+
+    buf.clear();
+    // vdivss xmm12, xmm6, xmm5 -> C5 4A 5E E5
+    enc.vdivss(XMM::XMM12, XMM::XMM6, XMM::XMM5);
+    CHECK_VEX_BYTES(buf, 0xC5, 0x4A, 0x5E, 0xE5);
+}

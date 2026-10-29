@@ -5,6 +5,34 @@ namespace brass::x64 {
 
 using namespace brass::codegen;
 
+// With AVX the arithmetic is three-operand (vaddsd dst, src0, src1), so
+// neither operand is copied into dst first: src0 read again later (each of a
+// 4x4 product's inputs is read four times) needs no copy and dst no register
+// of its own before the instruction. The order stays src0 first, for the
+// lhs-NaN rule (x86 returns the first source's NaN in VEX form as well).
+// Min/max keep the two-address form: they are not in the VEX set emitted.
+bool X64ISel::lower_three_operand_float(const Instruction& inst, LirBlock& lir_bb, LirOpcode alu_op) {
+    const bool three_operand = avx_ && (alu_op == LirOpcode::Addsd || alu_op == LirOpcode::Subsd ||
+                                        alu_op == LirOpcode::Mulsd || alu_op == LirOpcode::Divsd ||
+                                        alu_op == LirOpcode::Addss || alu_op == LirOpcode::Subss ||
+                                        alu_op == LirOpcode::Mulss || alu_op == LirOpcode::Divss);
+    if (!three_operand) return false;
+    const VReg dst = get_vreg(inst.result());
+    const uint8_t sz = dst.size;
+    const Value* op1_val = inst.operand(1);
+    auto alu_inst = std::make_unique<LirInst>(alu_op);
+    alu_inst->add_def(LirOperand::vreg(dst, sz));
+    alu_inst->add_use(LirOperand::vreg(get_vreg(inst.operand(0)), sz));
+    if (op1_val && op1_val->is_instruction() && can_fuse_load(op1_val->defining_instruction(), &inst)) {
+        alu_inst->add_use(get_load_mem_operand(op1_val->defining_instruction()));
+    } else {
+        alu_inst->add_use(LirOperand::vreg(get_vreg(op1_val), sz));
+    }
+    alu_inst->mir_origin = &inst;
+    lir_bb.append_inst(std::move(alu_inst));
+    return true;
+}
+
 void X64ISel::lower_fp_instruction(const Instruction& inst, LirBlock& lir_bb) {
     auto emit_unary_fp = [&](LirOpcode op, uint8_t dst_sz, uint8_t src_sz) {
         VReg dst = get_vreg(inst.result());

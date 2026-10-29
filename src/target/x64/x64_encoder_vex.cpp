@@ -81,6 +81,35 @@ void X64Encoder::vmovups(const MemAddress& dst, XMM src) {
 }
 
 // =========================================================================
+// SCALAR THREE-OPERAND OPS (VEX.128.F2/F3.0F, L = 0)
+// =========================================================================
+
+#define DEFINE_VEX_SCALAR(name, opcode, pp_val)                                              \
+    void X64Encoder::name(XMM dst, XMM src1, XMM src2) {                                     \
+        emit_vex(false, 1, pp_val, false, is_extended(dst), false,                          \
+                 is_extended(src2), reg_id(src1));                                          \
+        buffer_.emit8(opcode);                                                               \
+        emit_modrm(3, reg_code(dst), reg_code(src2));                                        \
+    }                                                                                        \
+    void X64Encoder::name(XMM dst, XMM src1, const MemAddress& src2) {                       \
+        emit_vex(false, 1, pp_val, false, is_extended(dst),                                  \
+                 is_extended(src2.index), is_extended(src2.base), reg_id(src1));             \
+        buffer_.emit8(opcode);                                                               \
+        emit_mem_operand(reg_code(dst), src2);                                               \
+    }
+
+DEFINE_VEX_SCALAR(vaddsd, 0x58, 3)
+DEFINE_VEX_SCALAR(vsubsd, 0x5C, 3)
+DEFINE_VEX_SCALAR(vmulsd, 0x59, 3)
+DEFINE_VEX_SCALAR(vdivsd, 0x5E, 3)
+DEFINE_VEX_SCALAR(vaddss, 0x58, 2)
+DEFINE_VEX_SCALAR(vsubss, 0x5C, 2)
+DEFINE_VEX_SCALAR(vmulss, 0x59, 2)
+DEFINE_VEX_SCALAR(vdivss, 0x5E, 2)
+
+#undef DEFINE_VEX_SCALAR
+
+// =========================================================================
 // 256-BIT THREE-OPERAND VECTOR OPS
 // =========================================================================
 

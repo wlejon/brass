@@ -211,6 +211,14 @@ public:
     void set_enable_mir_opts(bool enable) { enable_mir_opts_ = enable; }
     bool enable_mir_opts() const noexcept { return enable_mir_opts_; }
 
+    // x64: scalar float arithmetic in the three-operand VEX (AVX) form,
+    // which needs no copy to keep an operand that is read again. Only for
+    // code that will run on a CPU with AVX: the JIT sets it from
+    // Target::host_has_avx(), an AOT host when it builds for its own
+    // machine. Off by default (SSE2, every x64 CPU).
+    void set_x64_avx(bool enable) { x64_avx_ = enable; }
+    bool x64_avx() const noexcept { return x64_avx_; }
+
     // The whole module's stack maps, encoded into read-only data under the
     // global symbol `__brass_stack_maps`, for a host that loads the object's
     // image and registers its maps by that name. Off for a host that encodes
@@ -234,6 +242,7 @@ private:
     DeoptStressPlan deopt_stress_;
     bool enable_trace_layout_ = false;
     bool enable_mir_opts_ = true;
+    bool x64_avx_ = false;
     bool emit_stack_map_symbol_ = true;
 };
 

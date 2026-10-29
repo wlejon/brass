@@ -418,10 +418,12 @@ std::unique_ptr<LirFunction> X64ISel::lower(const Function& mir_fn) {
     lir_fn_ = lir.get();
     mir_fn_ = &mir_fn;
     val_to_vreg_.clear();
+    select_constants_.clear();
 
     lir_fn_->name = std::string(mir_fn.name());
     lir_fn_->return_type = mir_fn.return_type();
     lir_fn_->calling_conv = cc_;
+    lir_fn_->x64_avx = avx_;
     if (mir_fn.parent() && mir_fn.parent()->pinned_tls_register()) {
         lir_fn_->reserved_gprs |= reg_mask(kPinnedTlsGpr);
     }

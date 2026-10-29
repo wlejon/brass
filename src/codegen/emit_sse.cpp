@@ -1,8 +1,32 @@
 #include <brass/codegen/emit_context.hpp>
+#include <optional>
+#include <stdexcept>
+#include <string>
 
 namespace brass::codegen {
 
 using namespace brass::x64;
+
+// The first source of a scalar Addsd-family instruction when it is not the
+// destination: the three-operand form the isel emits under
+// LirFunction::x64_avx. Anything else (the first use is the def, or there is
+// no separate first use) is two-address and goes out as legacy SSE. A
+// register first use other than the def without x64_avx is a lowering bug:
+// legacy SSE would compute def op src, silently dropping that operand.
+std::optional<XMM> EmitContext::three_operand_src1(const LirInst& inst) const {
+    if (inst.uses.size() < 2) return std::nullopt;
+    const LirOperand& a = inst.uses[0];
+    const LirOperand& d = inst.defs[0];
+    if (!a.is_preg()) {
+        throw std::logic_error("x64 emit: the first source of `" + to_string(inst) + "` is not a register");
+    }
+    if (d.is_preg() && a.preg_val == d.preg_val) return std::nullopt;
+    if (!fn_.x64_avx) {
+        throw std::logic_error("x64 emit: `" + to_string(inst) + "` names a first source other than its "
+                               "destination in a function compiled without AVX");
+    }
+    return a.preg_val.as_xmm();
+}
 
 void EmitContext::emit_sse_instruction(const LirInst& inst) {
     switch (inst.opcode) {
@@ -60,56 +84,80 @@ void EmitContext::emit_sse_instruction(const LirInst& inst) {
         case LirOpcode::Addsd: {
             XMM dst = to_xmm(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_preg()) enc_.addsd(dst, to_xmm(src));
+            if (const auto src1 = three_operand_src1(inst)) {
+                if (src.is_preg()) enc_.vaddsd(dst, *src1, to_xmm(src));
+                else enc_.vaddsd(dst, *src1, to_mem_address(src));
+            } else if (src.is_preg()) enc_.addsd(dst, to_xmm(src));
             else enc_.addsd(dst, to_mem_address(src));
             break;
         }
         case LirOpcode::Addss: {
             XMM dst = to_xmm(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_preg()) enc_.addss(dst, to_xmm(src));
+            if (const auto src1 = three_operand_src1(inst)) {
+                if (src.is_preg()) enc_.vaddss(dst, *src1, to_xmm(src));
+                else enc_.vaddss(dst, *src1, to_mem_address(src));
+            } else if (src.is_preg()) enc_.addss(dst, to_xmm(src));
             else enc_.addss(dst, to_mem_address(src));
             break;
         }
         case LirOpcode::Subsd: {
             XMM dst = to_xmm(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_preg()) enc_.subsd(dst, to_xmm(src));
+            if (const auto src1 = three_operand_src1(inst)) {
+                if (src.is_preg()) enc_.vsubsd(dst, *src1, to_xmm(src));
+                else enc_.vsubsd(dst, *src1, to_mem_address(src));
+            } else if (src.is_preg()) enc_.subsd(dst, to_xmm(src));
             else enc_.subsd(dst, to_mem_address(src));
             break;
         }
         case LirOpcode::Subss: {
             XMM dst = to_xmm(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_preg()) enc_.subss(dst, to_xmm(src));
+            if (const auto src1 = three_operand_src1(inst)) {
+                if (src.is_preg()) enc_.vsubss(dst, *src1, to_xmm(src));
+                else enc_.vsubss(dst, *src1, to_mem_address(src));
+            } else if (src.is_preg()) enc_.subss(dst, to_xmm(src));
             else enc_.subss(dst, to_mem_address(src));
             break;
         }
         case LirOpcode::Mulsd: {
             XMM dst = to_xmm(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_preg()) enc_.mulsd(dst, to_xmm(src));
+            if (const auto src1 = three_operand_src1(inst)) {
+                if (src.is_preg()) enc_.vmulsd(dst, *src1, to_xmm(src));
+                else enc_.vmulsd(dst, *src1, to_mem_address(src));
+            } else if (src.is_preg()) enc_.mulsd(dst, to_xmm(src));
             else enc_.mulsd(dst, to_mem_address(src));
             break;
         }
         case LirOpcode::Mulss: {
             XMM dst = to_xmm(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_preg()) enc_.mulss(dst, to_xmm(src));
+            if (const auto src1 = three_operand_src1(inst)) {
+                if (src.is_preg()) enc_.vmulss(dst, *src1, to_xmm(src));
+                else enc_.vmulss(dst, *src1, to_mem_address(src));
+            } else if (src.is_preg()) enc_.mulss(dst, to_xmm(src));
             else enc_.mulss(dst, to_mem_address(src));
             break;
         }
         case LirOpcode::Divsd: {
             XMM dst = to_xmm(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_preg()) enc_.divsd(dst, to_xmm(src));
+            if (const auto src1 = three_operand_src1(inst)) {
+                if (src.is_preg()) enc_.vdivsd(dst, *src1, to_xmm(src));
+                else enc_.vdivsd(dst, *src1, to_mem_address(src));
+            } else if (src.is_preg()) enc_.divsd(dst, to_xmm(src));
             else enc_.divsd(dst, to_mem_address(src));
             break;
         }
         case LirOpcode::Divss: {
             XMM dst = to_xmm(inst.defs[0]);
             const auto& src = inst.uses.back();
-            if (src.is_preg()) enc_.divss(dst, to_xmm(src));
+            if (const auto src1 = three_operand_src1(inst)) {
+                if (src.is_preg()) enc_.vdivss(dst, *src1, to_xmm(src));
+                else enc_.vdivss(dst, *src1, to_mem_address(src));
+            } else if (src.is_preg()) enc_.divss(dst, to_xmm(src));
             else enc_.divss(dst, to_mem_address(src));
             break;
         }

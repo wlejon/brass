@@ -27,6 +27,12 @@ public:
     // being lowered is a clone in a scratch module (default: its parent).
     void set_callee_module(const Module* mod) noexcept { callee_module_ = mod; }
 
+    // Three-operand VEX scalar arithmetic (LirFunction::x64_avx): only for
+    // code that runs on a CPU with AVX (Target::host_has_avx). Off by
+    // default: the baseline is SSE2.
+    void set_avx(bool enable) noexcept { avx_ = enable; }
+    bool avx() const noexcept { return avx_; }
+
     const Target& target() const noexcept { return target_; }
     const CallingConvention& calling_conv() const noexcept { return cc_; }
 
@@ -34,6 +40,17 @@ private:
     Target target_;
     CallingConvention cc_;
     const Module* callee_module_ = nullptr;
+    bool avx_ = false;
+    // A select's 64-bit constant, per value: the block it was made in, the
+    // instruction count there just after it, its register
+    // (recent_select_constant).
+    struct SelectConstant {
+        const codegen::LirBlock* block = nullptr;
+        size_t end = 0;
+        codegen::VReg vreg;
+    };
+    std::unordered_map<int64_t, SelectConstant> select_constants_;
+    codegen::VReg recent_select_constant(const codegen::LirBlock& lir_bb, int64_t value) const;
 
     codegen::LirFunction* lir_fn_ = nullptr;
     const Function* mir_fn_ = nullptr;
@@ -110,6 +127,7 @@ private:
     void lower_instruction(const Instruction& inst, codegen::LirBlock& lir_bb);
 
     void lower_binary_alu(const Instruction& inst, codegen::LirBlock& lir_bb, codegen::LirOpcode op32, codegen::LirOpcode op64, codegen::LirOpcode op_f64, codegen::LirOpcode op_f32);
+    bool lower_three_operand_float(const Instruction& inst, codegen::LirBlock& lir_bb, codegen::LirOpcode alu_op);
     void lower_div_mod(const Instruction& inst, codegen::LirBlock& lir_bb, bool is_signed, bool is_mod);
     void lower_shift(const Instruction& inst, codegen::LirBlock& lir_bb, codegen::LirOpcode op32, codegen::LirOpcode op64);
     void lower_comparison(const Instruction& inst, codegen::LirBlock& lir_bb, Condition cond, Condition float_cond);

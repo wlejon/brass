@@ -562,6 +562,12 @@ public:
     // any loop), so a function whose depths are all zero is known loop-free
     // rather than unanalysed.
     bool loop_depths_computed = false;
+    // x64: the function may encode scalar float arithmetic in the three-
+    // operand VEX form, so an Addsd-family instruction whose first use is a
+    // register other than its def (the isel emits that only when this is
+    // set) is `vaddsd def, use0, use1`. Off, every such instruction is two-
+    // address (def == use0) and legacy SSE.
+    bool x64_avx = false;
 
     LirFunction() = default;
 

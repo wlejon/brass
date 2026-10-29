@@ -71,6 +71,14 @@ public:
 
     static Target host() noexcept;
 
+    // Whether the CPU running this process executes VEX-encoded (AVX)
+    // instructions: CPUID's AVX and OSXSAVE bits and the OS saving the YMM
+    // state (XCR0 bits 1-2). False on any other architecture. Code compiled
+    // for the host may use the three-operand scalar forms only when this
+    // holds (ModuleCompiler::set_x64_avx); code for another machine may not
+    // assume it.
+    static bool host_has_avx() noexcept;
+
     constexpr bool operator==(const Target& other) const noexcept = default;
     constexpr bool operator!=(const Target& other) const noexcept = default;
 

@@ -184,6 +184,45 @@ void LinearScanAllocator::collect_resolution_moves() {
     std::vector<std::pair<LirBlock*, LirBlock*>> edges;
     auto depth_of = [](const LirBlock* b) { return b->loop_depth; };
 
+    // Whether the slot still holds v where its piece k is about to be stored
+    // there: an earlier piece of v waited in the slot, on the one path to
+    // here, and v was not defined since (a block parameter reloaded for one
+    // use and evicted after it: its value never changed, and the slot was
+    // never another value's, v being live throughout). The path is this
+    // block back through blocks each entered only from the one laid out
+    // before it, so the positions in between are all that ran. Several
+    // definitions (a block parameter, a two-address chain) put v out of
+    // reach of the store-once rule below; this is the same fact seen from
+    // the store.
+    auto block_of = [this](uint32_t pos) {
+        auto it = std::upper_bound(spans_.begin(), spans_.end(), pos,
+                                   [](uint32_t v, const BlockSpan& s) { return v < s.start; });
+        return it == spans_.begin() ? spans_.end() : std::prev(it);
+    };
+    auto slot_still_holds = [&](const ScratchVector<uint32_t>& list, size_t k, uint32_t q) {
+        auto span = block_of(q);
+        if (span == spans_.end() || q > span->end) return false;
+        for (size_t j = k - 1; j-- > 0;) {
+            const AllocPiece& p = pieces_[list[j]];
+            while (p.to < span->start) {
+                if (span == spans_.begin()) return false;
+                const LirBlock* b = span->block;
+                const auto prev = std::prev(span);
+                if (b->predecessors.size() != 1 || b->predecessors[0] != prev->block ||
+                    is_entered_implicitly(b)) {
+                    return false;
+                }
+                span = prev;
+            }
+            if (!p.spilled) continue;
+            for (const UsePosition& u : p.base->use_positions) {
+                if (u.is_def && u.inst_id > p.to && u.inst_id <= q) return false;
+            }
+            return true;
+        }
+        return false;
+    };
+
     // 1. Inside blocks.
     for (size_t id = 0; id < vreg_pieces_.size(); ++id) {
         const auto& list = vreg_pieces_[id];
@@ -198,6 +237,7 @@ void LinearScanAllocator::collect_resolution_moves() {
             LirOperand src = piece_location(left, sz);
             LirOperand dst = piece_location(right, sz);
             if (same_location(src, dst)) continue;
+            if (src.is_preg() && dst.is_spill_slot() && slot_still_holds(list, k, q)) continue;
             candidates.push_back(Candidate{PendingMove{dst, src, v.is_xmm(), sz}, static_cast<uint32_t>(id),
                                            liveness_.get_loop_depth_at(q + 1), Place::Before, q + 1});
         }

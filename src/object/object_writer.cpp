@@ -250,6 +250,7 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
             } else {
                 x64::X64ISel isel(target_, cc_);
                 isel.set_callee_module(&mod);
+                isel.set_avx(x64_avx_);
                 lir = isel.lower(*fn_to_lower);
             }
             if (lir) lir->sort_blocks_rpo();

@@ -1,5 +1,9 @@
 #include <brass/target/target.hpp>
 #include <ostream>
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+#include <intrin.h>
+#include <immintrin.h>
+#endif
 
 namespace brass {
 
@@ -20,6 +24,30 @@ Target Target::host() noexcept {
 #else
     return Target::x64_linux();
 #endif
+#endif
+}
+
+bool Target::host_has_avx() noexcept {
+#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__GNUC__) || defined(__clang__)
+    // libgcc's check includes OSXSAVE and XCR0, not just the CPUID bit.
+    static const bool supported = __builtin_cpu_supports("avx") != 0;
+    return supported;
+#elif defined(_MSC_VER)
+    static const bool supported = []() noexcept {
+        int info[4] = {0, 0, 0, 0};
+        __cpuid(info, 1);
+        const bool osxsave = (info[2] & (1 << 27)) != 0;
+        const bool avx = (info[2] & (1 << 28)) != 0;
+        if (!osxsave || !avx) return false;
+        return (_xgetbv(0) & 0x6ULL) == 0x6ULL;
+    }();
+    return supported;
+#else
+    return false;
+#endif
+#else
+    return false;
 #endif
 }
 

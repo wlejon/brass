@@ -6,6 +6,7 @@
 #include <brass/codegen/lir.hpp>
 #include <brass/codegen/unsupported_operation.hpp>
 #include <brass/gc/stack_map.hpp>
+#include <optional>
 #include <vector>
 #include <unordered_map>
 #include <cstddef>
@@ -91,6 +92,7 @@ private:
     void emit_mov_instruction(const LirInst& inst);
     void emit_alu_instruction(const LirInst& inst);
     void emit_sse_instruction(const LirInst& inst);
+    std::optional<x64::XMM> three_operand_src1(const LirInst& inst) const;
     void emit_vec_instruction(const LirInst& inst);
     void emit_parallel_copy(const LirInst& inst);
     void emit_control_instruction(const LirInst& inst);

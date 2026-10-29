@@ -452,6 +452,26 @@ public:
     // which leaves the upper halves of the YMM registers dirty.
     bool wrote_256() const noexcept { return wrote_256_; }
 
+    // Scalar arithmetic in the three-operand VEX.128 form (AVX):
+    // dst = src1 op src2, bits 127:64 (127:32 for ss) from src1 and 255:128
+    // zeroed. Only for a CPU that has AVX (Target::host_has_avx).
+    void vaddsd(XMM dst, XMM src1, XMM src2);
+    void vaddsd(XMM dst, XMM src1, const MemAddress& src2);
+    void vsubsd(XMM dst, XMM src1, XMM src2);
+    void vsubsd(XMM dst, XMM src1, const MemAddress& src2);
+    void vmulsd(XMM dst, XMM src1, XMM src2);
+    void vmulsd(XMM dst, XMM src1, const MemAddress& src2);
+    void vdivsd(XMM dst, XMM src1, XMM src2);
+    void vdivsd(XMM dst, XMM src1, const MemAddress& src2);
+    void vaddss(XMM dst, XMM src1, XMM src2);
+    void vaddss(XMM dst, XMM src1, const MemAddress& src2);
+    void vsubss(XMM dst, XMM src1, XMM src2);
+    void vsubss(XMM dst, XMM src1, const MemAddress& src2);
+    void vmulss(XMM dst, XMM src1, XMM src2);
+    void vmulss(XMM dst, XMM src1, const MemAddress& src2);
+    void vdivss(XMM dst, XMM src1, XMM src2);
+    void vdivss(XMM dst, XMM src1, const MemAddress& src2);
+
     // 256-bit AVX/AVX2 Moves
     void vmovaps(XMM dst, XMM src);
     void vmovaps(XMM dst, const MemAddress& src);

@@ -630,6 +630,9 @@ void X64ISel::lower_binary_alu(
             lir_bb.append_inst(std::move(alu_inst));
         };
 
+        // With AVX: vaddsd dst, src0, src1 (x64_isel_fp.cpp).
+        if (lower_three_operand_float(inst, lir_bb, alu_op)) return;
+
         // addsd/mulsd return the destination (first) operand's NaN when both
         // are NaN, which is the MIR lhs-NaN rule only while src0 stays
         // first: float add/mul are not commutative here.

@@ -249,6 +249,7 @@ void LinearScanAllocator::build_block_spans() {
         if (block->instructions.empty()) continue;
         const BlockLiveness& bl = liveness_.block_liveness(block.get());
         BlockSpan s;
+        s.block = block.get();
         s.start = bl.start_id;
         s.end = bl.end_id;
         s.depth = block->loop_depth;
