@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <string>
 
 namespace brass {
 
@@ -207,6 +208,13 @@ void drop_ran_store(BasicBlock& bb, Instruction* guard, const SpecFeedback& feed
     bb.remove_instruction(store);
 }
 
+// Names `bb` as block layout's cold blocks are named (a "cold" in the name,
+// codegen/block_layout.cpp), once.
+void mark_cold(Module& mod, BasicBlock& bb) {
+    if (bb.name().find("cold") != std::string_view::npos) return;
+    bb.set_name(mod.string_pool().intern(std::string(bb.name()) + "_cold"));
+}
+
 } // namespace
 
 void arm_speculation_sites(Module& mod, const SpecFeedback& feedback, const ArmSpeculationOptions& options) {
@@ -244,6 +252,11 @@ void arm_speculation_sites(Module& mod, const SpecFeedback& feedback, const ArmS
                 }
             } else {
                 bb->remove_instruction(guard);
+                if (options.cold_slow) {
+                    const SpecFeedback::SiteRecord r = feedback.site(site);
+                    BasicBlock* slow = br->false_target().block;
+                    if (slow && options.cold_slow(r.kind, r.misses, r.ran)) mark_cold(mod, *slow);
+                }
             }
         }
         for (uint32_t site : seen) fn->remove_resume_point(site);

@@ -665,7 +665,18 @@ RuntimeValue FastInterpreter::call_from_native(const Function& fn, const std::ve
     FastModuleRestore restore{*this, module_};
     if (fn.parent()) use_module(fn.parent());
     const BytecodeFunction* bfn = get_or_compile(fn);
-    return enter_frame(fn_info(*bfn, &fn), args, 0, nullptr);
+    FastFnInfo& info = fn_info(*bfn, &fn);
+    // A Tier-0 call like any other (call_bytecode, run, and the oracle
+    // Interpreter's call_from_native count it too). Its caller is a
+    // native-to-Tier-0 bridge, whose stub stays on the bridge until an
+    // install points it elsewhere, and only a count asks again for a
+    // background tier-1 compile that gave up (a callee was compiling on
+    // another thread): uncounted, the function ran in Tier 0 for the rest
+    // of the run (mesh_churn_2k's updateMatrixWorld wrapper in about one
+    // run in three, 2.5M bridged calls, 58 ms a rep against 26). One the
+    // baseline tier rejects is checked for Tier-0 promotion the same way.
+    info.tiering(dispatch_table_).record_invocation();
+    return enter_frame(info, args, 0, nullptr);
 }
 
 RuntimeValue FastInterpreter::resume_from_native(const Function& fn, uint32_t resume_id,

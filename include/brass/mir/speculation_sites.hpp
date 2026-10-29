@@ -178,6 +178,14 @@ struct ArmSpeculationOptions {
     int trace = 0;
     // Run on each function of the copy once its sites are decided.
     std::function<void(Function&)> after_function;
+    // For a site left a branch: whether its slow side ran so rarely before
+    // tier-up (a cache fill, never) that tier 2 lays it out after the
+    // function's hot code, as an AOT profile's cold site is (the "_cold"
+    // block name codegen/block_layout.cpp reads). Without it an unarmed
+    // site's slow path stays in line with the fast one, and a loop of many
+    // sites carries every one in its body: instanced_mesh_churn's OSR'd
+    // loop ran 34 ms against 29 laid out. Null lays nothing out.
+    std::function<bool(uint8_t kind, uint32_t misses, bool ran)> cold_slow;
 };
 
 // The tier-2 front pass of a program lowered with `feedback`: arms each site

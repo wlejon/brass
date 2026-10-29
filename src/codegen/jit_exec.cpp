@@ -17,6 +17,7 @@
 #include <brass/debug/jit_unwind_registry.hpp>
 #include <brass/codegen/jit_unwind_apple.hpp>
 #include <algorithm>
+#include <atomic>
 #include <mutex>
 #include <vector>
 #include <stdexcept>
@@ -42,6 +43,28 @@
 #endif
 
 namespace brass::codegen {
+
+namespace {
+
+// Where in its first page the next load's code starts. Every load maps a
+// block of its own, page-aligned, so without an offset every tier-up and OSR
+// entry would start at the same instruction-cache set, and a program's hot
+// functions would all compete for the first sets of a 32 KiB 8-way L1i (set
+// = address bits 6-11) instead of spreading over it as one image's do:
+// instanced_mesh_churn's tier-2 code, thirteen hot functions each at offset 0
+// of a page, took three times the L1i misses of the same code in one image
+// (19 against 6.2 M per rep) and ran 30.6 ms against 26.9. Each load starts
+// where the last one would have ended in a contiguous image, modulo a page,
+// so consecutive loads color the sets as consecutive functions do.
+std::atomic<size_t> g_next_code_color{0};
+constexpr size_t kCodeColorAlign = 64;
+
+size_t take_code_color(size_t code_bytes, size_t page_sz) noexcept {
+    const size_t step = (code_bytes + kCodeColorAlign - 1) & ~(kCodeColorAlign - 1);
+    return g_next_code_color.fetch_add(step, std::memory_order_relaxed) % page_sz;
+}
+
+} // namespace
 
 static void* brass_exit_stub(uint32_t, const uint64_t*) {
     return nullptr;
@@ -308,8 +331,15 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
     size_t page_sz = jit_system_page_size();
 
     // Compute memory size and section offsets:
-    // 1. Executable code sections (.text) first
-    size_t code_size = code_padding;
+    // 1. Executable code sections (.text) first, after the padding asked for
+    // and this load's cache color (take_code_color).
+    size_t text_bytes = 0;
+    for (const auto& sec : working_obj.sections) {
+        if (sec.kind == object::SectionKind::Text || object::has_flag(sec.flags, object::SectionFlags::Execute)) {
+            text_bytes += sec.data.size();
+        }
+    }
+    size_t code_size = code_padding + (text_bytes > 0 ? take_code_color(text_bytes, page_sz) : 0);
     std::vector<size_t> sec_offsets(working_obj.sections.size(), 0);
     std::vector<bool> is_code_sec(working_obj.sections.size(), false);
 
@@ -813,7 +843,16 @@ void JitExecutionEngine::register_eh_frame(uint8_t* eh_frame, size_t eh_size) {
 #if defined(__APPLE__)
     if (has_apple_dynamic_unwind()) {
         const void* code_start = regs_.text_base ? regs_.text_base : (code_mem_.is_valid() ? code_mem_.data() : nullptr);
-        size_t code_size = code_mem_.is_valid() ? code_mem_.size() : 0;
+        // The range ends where the block ends: text_base sits past the
+        // block's start by the padding and cache color (take_code_color),
+        // and a range that ran on by that much would cover the start of the
+        // next block, whose PCs would then find this load's .eh_frame first.
+        size_t code_size = 0;
+        if (code_start && code_mem_.is_valid()) {
+            const uint8_t* end = code_mem_.data() + code_mem_.size();
+            const uint8_t* start = static_cast<const uint8_t*>(code_start);
+            if (start >= code_mem_.data() && start < end) code_size = static_cast<size_t>(end - start);
+        }
         if (code_start && code_size > 0 && register_apple_dynamic_unwind(code_start, code_size, eh_frame, eh_size)) {
             return;
         }

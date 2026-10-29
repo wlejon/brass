@@ -8,7 +8,10 @@
 #include <brass/mir/module.hpp>
 #include <brass/mir/parser.hpp>
 #include <brass/mir/verifier.hpp>
+#include <brass/codegen/baseline_jit.hpp>
+#include <brass/codegen/lazy_symbols.hpp>
 #include <brass/interpreter/interpreter.hpp>
+#include <brass/vm/fast_interpreter.hpp>
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/tiering.hpp>
@@ -216,6 +219,75 @@ b0:
                         {RuntimeValue::from_ptr(reinterpret_cast<uintptr_t>(p)), RuntimeValue::from_i64(5)})
                  .as_i64(),
              12);
+}
+
+TEST_CASE("Function pointers - a function called only through its bridge counts its calls and tiers up") {
+    // @br_t is rejected by the baseline tier and is only ever called from
+    // Tier-1 @br_call through its address, so every call is a bridged one,
+    // run by the FastInterpreter whose @br_main frame called into native
+    // code. They count as Tier-0 calls of @br_t: at the tenth (two for tier
+    // 1, then the eight tier-1 code would make) it is promoted to Tier 2
+    // from Tier 0, and the stub, which pointed at the bridge, now jumps to
+    // the optimized code. Uncounted, it stayed in Tier 0 behind the bridge.
+    auto mod = parse_or_fail(R"(module @fpt_bridged
+func @br_t(%n: i64) -> i64 {
+b0:
+  %v = vzero.f64x4
+  %c = iconst.i64 9
+  %r = mul.i64 %n, %c
+  ret %r
+}
+func @br_call(%p: ptr, %n: i64) -> i64 {
+b0:
+  %r = call_indirect.i64 %p(%n)
+  ret %r
+}
+func @br_main(%k: i64) -> i64 {
+b0:
+  %z = iconst.i64 0
+  %p = func_addr @br_t
+  br loop(%z, %z)
+loop(%i: i64, %acc: i64):
+  %more = slt.i64 %i, %k
+  br_if %more, body, done
+body:
+  %r = call.i64 @br_call(%p, %i)
+  %a = add.i64 %acc, %r
+  %one = iconst.i64 1
+  %ni = add.i64 %i, %one
+  br loop(%ni, %a)
+done:
+  ret %acc
+}
+)");
+    TieringConfig cfg;
+    cfg.invocation_tier1_threshold = 2;
+    cfg.invocation_tier2_threshold = 10;
+    cfg.enable_background_compile = false;
+    cfg.enable_osr = false;
+    cfg.set_use_fast_interpreter(true);
+    FunctionDispatchTable prog;
+    prog.pipeline().initialize(cfg);
+    FastInterpreter fast;
+    fast.set_dispatch_table(&prog);
+    fast.set_module(mod.get());
+    REQUIRE(prog.pipeline().compile_and_install_tier1("br_call", mod->get_function("br_call")));
+    Function* main = mod->get_function("br_main");
+    // Sum of 9 i for i below k.
+    auto expected = [](int64_t k) { return 9 * k * (k - 1) / 2; };
+    CHECK_EQ(fast.run(*main, {RuntimeValue::from_i64(4)}).as_i64(), expected(4));
+    CHECK(prog.pipeline().is_baseline_rejected("br_t"));
+    const TieringFeedback* fb = prog.tiering().find_feedback("br_t");
+    REQUIRE(fb != nullptr);
+    CHECK_EQ(fb->invocation_count(), 4u);
+    FunctionHandle* t = prog.find("br_t");
+    REQUIRE(t != nullptr);
+    CHECK(t->native_entry() == nullptr);
+    CHECK_EQ(fast.run(*main, {RuntimeValue::from_i64(30)}).as_i64(), expected(30));
+    CHECK_EQ(t->tier(), TierLevel::Tier2_Optimized);
+    REQUIRE(t->native_entry() != nullptr);
+    CHECK(prog.pipeline().baseline_compiler().lazy_symbols()->resolved_target("br_t") == t->native_entry());
+    CHECK_EQ(fast.run(*main, {RuntimeValue::from_i64(7)}).as_i64(), expected(7));
 }
 
 TEST_CASE("Function pointers - a bridged callee's exception reaches the Tier-0 and host handlers") {
