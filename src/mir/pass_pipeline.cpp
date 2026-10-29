@@ -1,8 +1,6 @@
 #include <brass/mir/pass_pipeline.hpp>
 #include <brass/mir/pass_catalog.hpp>
-#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
-#include <intrin.h>
-#endif
+#include <brass/target/host_cpu.hpp>
 
 namespace brass {
 
@@ -88,39 +86,14 @@ PassPipelineOptions production_pass_pipeline_options() {
     l.parallel_workers = 0;
     l.enable_bce = true;
     // The vector width follows what the CPU running it supports.
-#if defined(__x86_64__) || defined(_M_X64) || defined(_M_IX86)
-#if defined(__GNUC__) || defined(__clang__)
-    if (__builtin_cpu_supports("avx2")) {
+    if (host_has_avx2()) {
         l.enable_avx2 = true;
         l.vector_width = 256;
     }
-    l.enable_fma = true;
-#elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
-    int cpu_info[4] = {0, 0, 0, 0};
-    __cpuid(cpu_info, 0);
-    const int max_leaf = cpu_info[0];
-    if (max_leaf >= 1) {
-        int info1[4] = {0, 0, 0, 0};
-        __cpuid(info1, 1);
-        const bool os_xsave = (info1[2] & (1 << 27)) != 0;
-        const bool has_fma = (info1[2] & (1 << 12)) != 0;
-        if (os_xsave && has_fma) {
-            l.enable_fma = true;
-        }
-        if (os_xsave && max_leaf >= 7) {
-            int info7[4] = {0, 0, 0, 0};
-            __cpuidex(info7, 7, 0);
-            if ((info7[1] & (1 << 5)) != 0) {
-                l.enable_avx2 = true;
-                l.vector_width = 256;
-            }
-        }
-    }
-#endif
-#elif defined(__aarch64__) || defined(_M_ARM64)
-    // NEON is 128 bits wide and FMA is part of the base ISA.
+    l.enable_fma = host_has_fma();
+#if defined(__aarch64__) || defined(_M_ARM64)
+    // NEON is 128 bits wide.
     l.vector_width = 128;
-    l.enable_fma = true;
 #endif
     return p;
 }
