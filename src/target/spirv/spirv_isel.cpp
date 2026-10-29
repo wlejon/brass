@@ -447,6 +447,9 @@ Id SpirvISel::op(spv::Op o, Id type, std::initializer_list<Id> ids) {
     if (o == spv::OpFConvert || o == spv::OpConvertSToF || o == spv::OpConvertUToF || o == spv::OpConvertFToS ||
         o == spv::OpConvertFToU)
         m_.decorate(r, spv::DecorationNoContraction);
+    else if (opts_.precise_float && (o == spv::OpFAdd || o == spv::OpFSub || o == spv::OpFMul || o == spv::OpFDiv ||
+                                     o == spv::OpFNegate || o == spv::OpFRem || o == spv::OpFMod))
+        m_.decorate(r, spv::DecorationNoContraction);
     return r;
 }
 

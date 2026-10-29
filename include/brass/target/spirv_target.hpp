@@ -60,6 +60,12 @@ struct SpirvOptions {
     // versions are rejected (PhysicalStorageBuffer and 8/16-bit storage are
     // core from 1.5).
     uint32_t spirv_version = 0x00010500;
+    // Every float add / sub / mul / div / negate / rem is NoContraction, so
+    // the driver rounds each as MIR does (no FMA formation, and NVIDIA's
+    // compiler then also keeps a*b + a*c from becoming a*(b + c)): the
+    // kernel computes what the CPU JIT computes, at the cost of the fusions.
+    // An explicit fma is still fused.
+    bool precise_float = false;
 };
 
 struct SpirvParam {

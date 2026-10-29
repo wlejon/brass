@@ -294,7 +294,11 @@ Rules:
   `fmod(1e10f, 3)` gives 256).
 - The driver may contract a MIR `mul` feeding an `add` into an FMA (the
   instructions are not `NoContraction`), as `ptxas` may for PTX `mul`/`add`
-  without a rounding modifier.
+  without a rounding modifier. `SpirvOptions::precise_float` decorates every
+  float add, sub, mul, div, negate and remainder `NoContraction` instead, so
+  each rounds as MIR specifies: on an RTX 4090 a Cody-Waite reduction
+  `x - k*hi - k*lo` otherwise came out as `x - k*(hi + lo)` (f64 `exp(-80)`
+  13 ulp off), and with the option it matches the CPU JIT.
 - Float **conversions** are exact: every `OpFConvert`, `OpConvertSToF`,
   `OpConvertUToF`, `OpConvertFToS` and `OpConvertFToU` is decorated
   `NoContraction`, because Mesa otherwise treats them as inexact and folds

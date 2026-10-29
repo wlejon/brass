@@ -503,6 +503,32 @@ TEST_CASE("SPIR-V ISel - float conversions are NoContraction") {
     CHECK_EQ(n, 7u);
 }
 
+// precise_float: every float arithmetic result is NoContraction; integer
+// arithmetic is untouched, and without the option nothing is decorated.
+TEST_CASE("SPIR-V ISel - precise_float makes float arithmetic NoContraction") {
+    auto count = [](bool precise) {
+        Kernel k({Type::ptr(), Type::f64(), Type::i32()});
+        Builder& b = k.b;
+        Value* x = k.p(1);
+        Value* r = b.build_sdiv(b.build_sub(b.build_add(b.build_mul(x, x), x), x), x); // mul add sub div
+        b.build_store(Type::f64(), k.p(0), 0, r);
+        b.build_store(Type::i32(), k.p(0), 8, b.build_add(b.build_mul(k.p(2), k.p(2)), k.p(2)));
+        b.build_ret_void();
+        target::SpirvOptions opts;
+        opts.precise_float = precise;
+        compile_checked(*k.fn, opts);
+        std::string d = dump_of(*k.fn, opts);
+        const std::string no_contraction = " " + std::to_string(static_cast<int>(spv::DecorationNoContraction)) + "\n";
+        size_t n = 0;
+        std::istringstream lines(d);
+        for (std::string line; std::getline(lines, line);)
+            if (line.rfind("OpDecorate %", 0) == 0 && has(line + "\n", no_contraction)) ++n;
+        return n;
+    };
+    CHECK_EQ(count(false), 0u);
+    CHECK_EQ(count(true), 4u);
+}
+
 // ---------------------------------------------------------------------------
 // Diagnostics
 // ---------------------------------------------------------------------------
