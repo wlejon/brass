@@ -409,7 +409,9 @@ TEST_CASE("SPIR-V exec mem - math, conversion and wide-multiply intrinsics") {
     }, xs, ys);
     for (size_t i = 0; i < xs.size(); ++i) CHECK(near(dv[i], static_cast<double>(xs[i]) / ys[i], 1e-6));
 
-    // Integer intrinsics on (a, b) pairs, packed into i64 results.
+    // Integer intrinsics on (a, b) pairs, packed into i64 results; an f32
+    // result as its bits, not widened to f64, as shaderFloat64 is optional
+    // (Apple's GPUs lack it).
     std::vector<int32_t> a = {0, 1, -1, 0x7FFFFFFF, static_cast<int32_t>(0x80000000u), 123456789, -98765, 65536};
     std::vector<int32_t> bb = {5, -1, -1, 2, 3, 1000, 77, 65536};
     for (const char* op : {"ptx_mul_wide_u32", "ptx_mul_wide_s32", "ptx_mul_hi_u32", "ptx_mad_lo_u32", "ptx_u32_to_f32",
@@ -425,12 +427,12 @@ TEST_CASE("SPIR-V exec mem - math, conversion and wide-multiply intrinsics") {
             else if (o == "ptx_f32_to_u32")
                 return b.build_zext_i64(b.build_call(o, Type::i32(), {b.build_fabs(b.build_sitofp_f32_i32(y))}));
             else f = b.build_call(o, Type::f32(), {b.build_mul(b.build_sext_i64(x), b.build_iconst_i64(1 << 20))});
-            return b.build_bitcast_i64_f64(b.build_fpext_f64_f32(f));
+            return b.build_zext_i64(b.build_bitcast_i32_f32(f));
         }, a, bb);
         for (size_t i = 0; i < a.size(); ++i) {
             uint32_t ua = static_cast<uint32_t>(a[i]), ub = static_cast<uint32_t>(bb[i]);
             int64_t want;
-            auto as_f = [](float f) { return static_cast<int64_t>(f64_bits(static_cast<double>(f))); };
+            auto as_f = [](float f) { return static_cast<int64_t>(f32_bits(f)); };
             if (o == "ptx_mul_wide_u32") want = static_cast<int64_t>(uint64_t{ua} * ub);
             else if (o == "ptx_mul_wide_s32") want = int64_t{a[i]} * bb[i];
             else if (o == "ptx_mul_hi_u32") want = static_cast<int64_t>((uint64_t{ua} * ub) >> 32);
