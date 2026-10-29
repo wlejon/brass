@@ -110,6 +110,12 @@ RegisterAssignment allocate_bytecode_registers(const Function& fn, const BlockLa
     // defined) and one for each instruction.
     uint32_t pos = 0;
     std::vector<std::pair<uint32_t, const Instruction*>> safepoints; // in position order
+    // The blocks holding a safepoint, numbered in layout order (-1: none),
+    // and the first of each one's safepoints; their live-in and live-out
+    // values are kept for the safepoints' live sets.
+    std::vector<int32_t> sp_slot(nblocks, -1);
+    std::vector<uint32_t> sp_block;    // per slot: the block
+    std::vector<uint32_t> sp_first;    // per slot: its first safepoint
     for (uint32_t bi = 0; bi < nblocks; ++bi) {
         const BasicBlock* bb = layout.order[bi];
         block_start[bi] = pos;
@@ -118,11 +124,19 @@ RegisterAssignment allocate_bytecode_registers(const Function& fn, const BlockLa
         for (const Instruction* inst : *bb) {
             if (!inst) continue;
             if (inst->produces_value() && inst->result()) define(inst->result(), bi, pos, -1);
-            if (is_gc_safepoint(*inst)) safepoints.emplace_back(pos, inst);
+            if (is_gc_safepoint(*inst)) {
+                if (sp_slot[bi] < 0) {
+                    sp_slot[bi] = static_cast<int32_t>(sp_block.size());
+                    sp_block.push_back(bi);
+                    sp_first.push_back(static_cast<uint32_t>(safepoints.size()));
+                }
+                safepoints.emplace_back(pos, inst);
+            }
             ++pos;
         }
         block_end[bi] = pos - 1;
     }
+    std::vector<std::vector<uint32_t>> sp_live_in(sp_block.size()), sp_live_out(sp_block.size());
 
     // Uses, and the live-range hull of every value. A use outside its
     // value's defining block is recorded first and walked after, all of one
@@ -159,7 +173,7 @@ RegisterAssignment allocate_bytecode_registers(const Function& fn, const BlockLa
     // Walk back from each use to the definition: the value is live into
     // every block on the way and live out of each of their predecessors.
     std::sort(cross_uses.begin(), cross_uses.end());
-    std::vector<uint32_t> stamp(nblocks, 0);
+    std::vector<uint32_t> stamp(nblocks, 0), out_stamp(nblocks, 0);
     std::vector<uint32_t> worklist;
     for (size_t i = 0; i < cross_uses.size();) {
         const uint32_t vidx = cross_uses[i].first;
@@ -169,6 +183,7 @@ RegisterAssignment allocate_bytecode_registers(const Function& fn, const BlockLa
             if (stamp[b] == tag) return;
             stamp[b] = tag;
             worklist.push_back(b);
+            if (sp_slot[b] >= 0) sp_live_in[sp_slot[b]].push_back(vidx);
         };
         for (; i < cross_uses.size() && cross_uses[i].first == vidx; ++i) live_in(cross_uses[i].second);
         while (!worklist.empty()) {
@@ -179,6 +194,10 @@ RegisterAssignment allocate_bytecode_registers(const Function& fn, const BlockLa
             for (uint32_t p : layout.preds[b]) {
                 vi.lo = std::min(vi.lo, block_end[p]);
                 vi.hi = std::max(vi.hi, block_end[p]);
+                if (out_stamp[p] != tag) {
+                    out_stamp[p] = tag;
+                    if (sp_slot[p] >= 0) sp_live_out[sp_slot[p]].push_back(vidx);
+                }
                 if (p != vi.def_block) live_in(p);
             }
         }
@@ -249,16 +268,67 @@ RegisterAssignment allocate_bytecode_registers(const Function& fn, const BlockLa
     }
     out.num_registers = next_reg;
 
-    // A register holds, at each position, the one value whose interval holds
-    // it, or nothing anything reads again.
+    // The registers live at a safepoint are those of the values live there,
+    // not those whose intervals hold it. An interval is a hull in layout
+    // order and also spans blocks laid out between its live blocks, where
+    // the value may never have been written: its register then still holds
+    // an earlier occupant's value, one the collections run while it was dead
+    // there did not update. Rooted, that word names an object already moved
+    // or freed. A value live at a point has its definition dominating it, so
+    // its register was written on every path there.
     if (!safepoints.empty()) {
         std::vector<std::vector<BcReg>> live(safepoints.size());
-        for (uint32_t i = 0; i < values.size(); ++i) {
-            const ValueInfo& vi = values[i];
-            auto it = std::lower_bound(safepoints.begin(), safepoints.end(), vi.lo,
-                                       [](const auto& sp, uint32_t p) { return sp.first < p; });
-            for (; it != safepoints.end() && it->first <= vi.hi; ++it) {
-                if (it->first != vi.def_pos) live[it - safepoints.begin()].push_back(assigned[i]);
+        // Per block holding a safepoint, the values that may be live at one:
+        // those it reads (each with its last use there) and those live into
+        // or out of it.
+        std::vector<uint32_t> last_use(values.size(), 0);
+        std::vector<uint32_t> use_stamp(values.size(), 0), cand_stamp(values.size(), 0);
+        std::vector<uint8_t> is_in(values.size(), 0), is_out(values.size(), 0);
+        std::vector<uint32_t> candidates;
+        for (uint32_t k = 0; k < sp_block.size(); ++k) {
+            const uint32_t bi = sp_block[k];
+            const uint32_t tag = k + 1;
+            candidates.clear();
+            auto candidate = [&](uint32_t vidx) {
+                if (cand_stamp[vidx] == tag) return;
+                cand_stamp[vidx] = tag;
+                is_in[vidx] = 0;
+                is_out[vidx] = 0;
+                candidates.push_back(vidx);
+            };
+            uint32_t at = block_start[bi];
+            for (const Instruction* inst : *layout.order[bi]) {
+                if (!inst) continue;
+                ++at;
+                auto read = [&](const Value* v) {
+                    if (!v) return;
+                    const uint32_t vidx = *vindex.find(v);
+                    use_stamp[vidx] = tag;
+                    last_use[vidx] = at;
+                    candidate(vidx);
+                };
+                for (size_t i = 0; i < inst->operand_count(); ++i) read(inst->operand(i));
+                for (const Value* v : inst->state_map()) read(v);
+                for_each_branch_target(*inst, [&](const BranchTarget& t) {
+                    for (const Value* v : t.args) read(v);
+                });
+            }
+            for (uint32_t vidx : sp_live_in[k]) { candidate(vidx); is_in[vidx] = 1; }
+            for (uint32_t vidx : sp_live_out[k]) { candidate(vidx); is_out[vidx] = 1; }
+
+            const auto first = safepoints.begin() + sp_first[k];
+            const auto last = k + 1 < sp_block.size() ? safepoints.begin() + sp_first[k + 1] : safepoints.end();
+            for (uint32_t vidx : candidates) {
+                const ValueInfo& vi = values[vidx];
+                // Written in this block before its live part begins, or live
+                // into it; live to the block's end, or to its last use here
+                // (a safepoint's own operands included, its result not).
+                if (!is_in[vidx] && vi.def_block != bi) continue;
+                const uint32_t from = is_in[vidx] ? block_start[bi] : vi.def_pos;
+                const uint32_t to = is_out[vidx] ? block_end[bi] : (use_stamp[vidx] == tag ? last_use[vidx] : from);
+                auto it = std::upper_bound(first, last, from,
+                                           [](uint32_t p, const auto& sp) { return p < sp.first; });
+                for (; it != last && it->first <= to; ++it) live[it - safepoints.begin()].push_back(assigned[vidx]);
             }
         }
         out.live_at_safepoint.reserve(safepoints.size());

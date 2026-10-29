@@ -10,6 +10,8 @@
 #include <brass/runtime/deopt.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
 #include <brass/gc/heap.hpp>
+// FastFrame, for a frame's registers.
+#include "../../src/vm/fast_interpreter_impl.hpp"
 #include <vector>
 #include <cstring>
 
@@ -666,4 +668,46 @@ TEST_CASE("Fast Interpreter - GC Root Scanning of Suspended Coroutine") {
     CHECK(interp.coro_is_done(handle));
 
     interp.coro_destroy(handle);
+}
+
+TEST_CASE("FastInterpreter - A collection clears a frame's registers dead at its safepoint") {
+    Module mod("dead_reg_mod");
+    Builder b(mod);
+
+    // x is dead past use(x): at inspect() its register still holds x's
+    // address, which the collection inspect() runs neither updates nor keeps.
+    // Left there, a later scan of the frame stopped where no live set is
+    // recorded (it visits every register) would trace a freed object.
+    Function* fn = mod.create_function("dead_after_use", Type::i64(), {});
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    b.position_at_end(entry);
+    Value* x = b.build_call("make_obj", Type::gcref());
+    Value* used = b.build_call("use_obj", Type::i64(), {x});
+    Value* seen = b.build_call("collect_and_look", Type::i64());
+    b.build_ret(b.build_add(used, seen));
+
+    FastInterpreter interp(gc::HeapConfig{});
+    uintptr_t made = 0;
+    interp.register_external_function("make_obj", [&](FastInterpreter& in, const std::vector<RuntimeValue>&) -> RuntimeValue {
+        made = in.heap().allocate_masked(16, 0, 10);
+        in.heap().store(made, 0, 40);
+        return RuntimeValue::from_gcref(made);
+    });
+    interp.register_external_function("use_obj", [&](FastInterpreter&, const std::vector<RuntimeValue>& args) -> RuntimeValue {
+        return RuntimeValue::from_i64(static_cast<int64_t>(gc::Heap::load(args[0].as_gcref(), 0)));
+    });
+    interp.register_external_function("collect_and_look", [&](FastInterpreter& in, const std::vector<RuntimeValue>&) -> RuntimeValue {
+        in.heap().collect(gc::CollectionKind::Minor);
+        // The frame's registers hold no word naming the object it no longer
+        // reads: the collection cleared the dead one.
+        int64_t stale = 0;
+        const FastFrame* f = in.current_frame();
+        REQUIRE(f != nullptr);
+        for (uint32_t i = 0; i < f->num_registers; ++i) stale += f->registers[i] == made ? 1 : 0;
+        return RuntimeValue::from_i64(stale);
+    });
+
+    RuntimeValue r = interp.run(*fn, {});
+    CHECK_EQ(r.as_i64(), 40);
 }

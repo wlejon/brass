@@ -41,7 +41,8 @@ struct RegisterAssignment {
     uint32_t num_registers = 0;       // allocated registers (no scratch)
     uint32_t num_values = 0;          // SSA values allocated
     // The registers of the values live at each call, invoke and safepoint
-    // (their intervals hold it; its operands included, its result not): what
+    // (by liveness, not by interval: an interval may hold a point where its
+    // value was never written; its operands included, its result not): what
     // a collection run while a frame is stopped there has to root.
     std::unordered_map<const Instruction*, std::vector<BcReg>> live_at_safepoint;
 };

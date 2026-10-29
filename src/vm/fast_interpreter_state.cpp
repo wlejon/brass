@@ -196,13 +196,27 @@ void FastInterpreter::collect_all_roots(std::vector<uintptr_t*>& roots) {
 namespace {
 // Calls `fn` with each register of `f` that may hold a value read again: at
 // a call or safepoint, those live there; anywhere else, every one.
+//
+// At a safepoint the other registers are dead, and they are cleared: a
+// collection updates only the registers it visits, so a dead one would keep
+// the address of an object it then moved or freed. A frame is also scanned
+// stopped where no live set is recorded (at its loop header while OSR code
+// runs the loop, at a backedge's interrupt poll, in a coroutine or deopt
+// op), and there every register is visited: cleared, a dead one is nothing
+// to trace. Dead is exact here (the register allocator's live sets are
+// liveness, not intervals), so a cleared register is written before it is
+// read again.
 template <typename Fn>
-void for_each_frame_register(const FastFrame& f, Fn&& fn) {
+void for_each_frame_register(FastFrame& f, Fn&& fn) {
     if (f.bfn) {
         if (const BytecodeFunction::GcSafepoint* sp = f.bfn->gc_safepoint_at(f.pc)) {
+            // Sorted, the scratch registers (the highest) last.
             const BcReg* regs = f.bfn->gc_live_regs.data() + sp->first;
-            for (uint32_t k = 0; k < sp->count; ++k) {
-                if (regs[k] < f.num_registers) fn(regs[k]);
+            uint32_t k = 0;
+            for (uint32_t i = 0; i < f.num_registers; ++i) {
+                while (k < sp->count && regs[k] < i) ++k;
+                if (k < sp->count && regs[k] == i) fn(i);
+                else f.registers[i] = 0;
             }
             return;
         }

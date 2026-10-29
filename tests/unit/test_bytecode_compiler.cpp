@@ -580,6 +580,65 @@ TEST_CASE("Bytecode Compiler - Register reuse across loops, calls and types") {
     }
 }
 
+TEST_CASE("Bytecode Compiler - A safepoint roots the values live at it, not those whose interval spans it") {
+    Module mod("safepoint_live_mod");
+    Builder b(mod);
+
+    Function* helper = mod.create_function("helper", Type::i64(), {Type::i64()});
+    b.set_function(helper);
+    BasicBlock* hb = b.append_block("entry");
+    Value* ha = b.add_block_param(hb, Type::i64());
+    b.build_ret(b.build_add(ha, b.build_iconst_i64(1)));
+
+    // `slow` and `tail` are laid out around `fast`, so p's interval spans the
+    // call in `fast`, a path on which p is never written. Its register there
+    // holds whatever it held before: rooted, a collection would trace a dead
+    // word.
+    Function* fn = mod.create_function("split", Type::i64(), {Type::i64()});
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    BasicBlock* slow = b.append_block("slow");
+    BasicBlock* fast = b.append_block("fast");
+    BasicBlock* tail = b.append_block("tail");
+    b.position_at_end(entry);
+    Value* x = b.add_block_param(entry, Type::i64());
+    b.build_br_if(b.build_slt(x, b.build_iconst_i64(0)), slow, {b.build_mul(x, b.build_iconst_i64(7))}, fast, {});
+
+    b.position_at_end(slow);
+    Value* p = b.add_block_param(slow, Type::i64());
+    b.build_br(tail);
+
+    b.position_at_end(fast);
+    b.build_ret(b.build_call("helper", Type::i64(), {x}));
+
+    b.position_at_end(tail);
+    Value* h = b.build_call("helper", Type::i64(), {x});
+    b.build_ret(b.build_add(p, h));
+
+    BytecodeCompiler compiler;
+    auto bfn = compiler.compile(*fn);
+    REQUIRE(bfn != nullptr);
+    REQUIRE_EQ(bfn->gc_safepoints.size(), size_t{2});
+    const BcReg p_reg = bfn->ssa_to_reg[p->id()];
+    const BcReg x_reg = bfn->ssa_to_reg[x->id()];
+    auto live_at = [&](size_t k, BcReg r) {
+        const auto& sp = bfn->gc_safepoints[k];
+        for (uint32_t i = 0; i < sp.count; ++i) {
+            if (bfn->gc_live_regs[sp.first + i] == r) return true;
+        }
+        return false;
+    };
+    // fast's call, then tail's: x is an operand of both, p live only past
+    // the second.
+    CHECK(live_at(0, x_reg));
+    CHECK(!live_at(0, p_reg));
+    CHECK(live_at(1, x_reg));
+    CHECK(live_at(1, p_reg));
+
+    check_same_i64(mod, *fn, {RuntimeValue::from_i64(5)}, 6);
+    check_same_i64(mod, *fn, {RuntimeValue::from_i64(-2)}, -15);
+}
+
 TEST_CASE("Bytecode Compiler - Switch edges carry block arguments") {
     Module mod("switch_args_mod");
     Builder b(mod);
