@@ -45,7 +45,11 @@ int jit_write_depth() noexcept;
 class JitMemoryBlock {
 public:
     JitMemoryBlock() = default;
-    explicit JitMemoryBlock(size_t size);
+    // At `address_hint` when the OS can place it there (else wherever it
+    // can). Off Windows and Apple platforms no block holds an address that
+    // is a multiple of 4 GiB: libgcc's unwinder ignores the unwind
+    // information of a function starting at one (jit_memory.cpp).
+    explicit JitMemoryBlock(size_t size, const void* address_hint = nullptr);
     // One mapping holding the code pages first and `data_size` bytes of data
     // pages after them, so that every image-relative 32-bit offset in the
     // loaded object (.pdata's function and unwind-info RVAs, Addr32NB

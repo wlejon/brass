@@ -112,22 +112,79 @@ bool is_jit_code_address(const void* addr) noexcept {
     return false;
 }
 
-JitMemoryBlock::JitMemoryBlock(size_t size) {
+#if !defined(_WIN32) && !defined(__APPLE__)
+namespace {
+
+// libgcc's unwinder (every Linux target, x86-64 and AArch64 alike) skips an
+// FDE whose pc_begin, cut to the width of its encoding, is zero: that is how
+// it recognizes the FDE of a link-once function the linker discarded.
+// Every FDE brass writes encodes pc_begin as pcrel | sdata4 (elf_cfi.cpp,
+// baseline_unwind.cpp, aarch64_baseline_unwind.cpp), which libgcc decodes
+// to the absolute address and masks to its low 32 bits, so a function that
+// starts at a multiple of 4 GiB has no unwind information as far as libgcc
+// is concerned: _Unwind_Find_FDE misses it, a C++ exception cannot get
+// through its frame (std::terminate), and the raise walk
+// (exception_raise_unwind.cpp) stops at it. No block may therefore hold
+// such an address. A block lands on one more often than chance would have
+// it: aligned reservations (malloc's 64 MiB thread heaps among them) leave
+// gaps that start on large boundaries, and the kernel fills the highest gap
+// that fits first. bronze's tiered runs met it about once in a thousand.
+constexpr uintptr_t kUnwindBlindAlign = uintptr_t{1} << 32;
+
+// More boundaries than a process could plausibly meet; each attempt retires
+// a different one, so running out means mmap is not behaving as above.
+constexpr int kMaxBlindBoundaries = 64;
+
+uint8_t* map_code_read_write(size_t bytes, const void* address_hint) noexcept {
+    const size_t page_sz = jit_system_page_size();
+    void* hint = const_cast<void*>(address_hint);
+    for (int boundaries = 0; boundaries < kMaxBlindBoundaries; ++boundaries) {
+        void* p = mmap(hint, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED) return nullptr;
+        const auto at = reinterpret_cast<uintptr_t>(p);
+        const uintptr_t blind = (at + kUnwindBlindAlign - 1) & ~(kUnwindBlindAlign - 1);
+        if (blind - at >= bytes) return static_cast<uint8_t*>(p);
+        // The boundary's page stays mapped, inaccessible, for the life of
+        // the process, so the kernel never offers it to a block again (this
+        // retry or any later one); the rest is given back. One page per
+        // boundary met, never touched, so it costs no memory.
+        if (blind > at) munmap(p, blind - at);
+        if (blind + page_sz < at + bytes) {
+            munmap(reinterpret_cast<void*>(blind + page_sz), at + bytes - (blind + page_sz));
+        }
+        mprotect(reinterpret_cast<void*>(blind), page_sz, PROT_NONE);
+        hint = nullptr;
+    }
+    return nullptr;
+}
+
+} // namespace
+#endif
+
+JitMemoryBlock::JitMemoryBlock(size_t size, const void* address_hint) {
     if (size == 0) return;
     size_t page_sz = jit_system_page_size();
     size_t page_aligned = (size + page_sz - 1) & ~(page_sz - 1);
 #if defined(_WIN32)
-    ptr_ = static_cast<uint8_t*>(VirtualAlloc(nullptr, page_aligned, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    ptr_ = static_cast<uint8_t*>(
+        VirtualAlloc(const_cast<void*>(address_hint), page_aligned, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    if (!ptr_ && address_hint) {
+        ptr_ = static_cast<uint8_t*>(VirtualAlloc(nullptr, page_aligned, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    }
 #elif defined(__APPLE__) && defined(__aarch64__)
-    ptr_ = static_cast<uint8_t*>(mmap(nullptr, page_aligned, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS | MAP_JIT, -1, 0));
+    ptr_ = static_cast<uint8_t*>(mmap(const_cast<void*>(address_hint), page_aligned, PROT_READ | PROT_WRITE | PROT_EXEC,
+                                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_JIT, -1, 0));
     if (ptr_ == MAP_FAILED) {
         ptr_ = nullptr;
     } else {
         begin_write();
     }
-#else
-    ptr_ = static_cast<uint8_t*>(mmap(nullptr, page_aligned, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+#elif defined(__APPLE__)
+    ptr_ = static_cast<uint8_t*>(
+        mmap(const_cast<void*>(address_hint), page_aligned, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
     if (ptr_ == MAP_FAILED) ptr_ = nullptr;
+#else
+    ptr_ = map_code_read_write(page_aligned, address_hint);
 #endif
     if (ptr_) size_ = page_aligned;
 }

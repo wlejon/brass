@@ -25,6 +25,10 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#if !defined(_WIN32) && !defined(__APPLE__)
+#include <sys/mman.h>
+#include <unwind.h>
+#endif
 
 using namespace brass;
 
@@ -682,3 +686,144 @@ TEST_CASE("JIT unwind - reloading an engine replaces its registration") {
         CHECK_EQ(caught, int64_t{(600 + round) * 3});
     }
 }
+
+#if !defined(_WIN32) && !defined(__APPLE__) && (defined(__x86_64__) || defined(__aarch64__))
+
+namespace {
+
+constexpr uintptr_t k4GiB = uintptr_t{1} << 32;
+
+// A multiple of 4 GiB with `bytes` free after it, among the addresses the
+// kernel hands out (just below a fresh mapping), or 0.
+uintptr_t free_4gib_boundary(size_t bytes) {
+    void* probe = mmap(nullptr, bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (probe == MAP_FAILED) return 0;
+    munmap(probe, bytes);
+    for (uintptr_t a = reinterpret_cast<uintptr_t>(probe) & ~(k4GiB - 1), tries = 0; a >= k4GiB && tries < 64;
+         a -= k4GiB, ++tries) {
+        void* p = mmap(reinterpret_cast<void*>(a), bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
+                       -1, 0);
+        if (p == MAP_FAILED) continue;
+        munmap(p, bytes);
+        if (reinterpret_cast<uintptr_t>(p) == a) return a;
+    }
+    return 0;
+}
+
+// fn(callee, arg) = callee(arg) behind a frame-pointer frame, and the
+// .eh_frame (one CIE, one FDE, the encoding every brass FDE uses for
+// pc_begin: pcrel | sdata4) that describes it.
+#if defined(__x86_64__)
+const uint8_t kForwarder[] = {
+    0x55,             // push rbp
+    0x48, 0x89, 0xe5, // mov rbp, rsp
+    0x48, 0x89, 0xf8, // mov rax, rdi
+    0x48, 0x89, 0xf7, // mov rdi, rsi
+    0xff, 0xd0,       // call rax
+    0x5d,             // pop rbp
+    0xc3,             // ret
+};
+constexpr uint8_t kCodeAlign = 1, kRaReg = 16, kSpReg = 7, kFpReg = 6;
+const uint8_t kCieInsns[] = {0x0c, kSpReg, 8, 0x80 | kRaReg, 1};         // cfa = rsp+8, ra at cfa-8
+const uint8_t kFdeInsns[] = {0x41, 0x0e, 16, 0x80 | kFpReg, 2, 0x43, 0x0d, kFpReg}; // push; mov rbp
+#else
+const uint32_t kForwarderWords[] = {
+    0xa9bf7bfd, // stp x29, x30, [sp, #-16]!
+    0x910003fd, // mov x29, sp
+    0xaa0003f0, // mov x16, x0
+    0xaa0103e0, // mov x0, x1
+    0xd63f0200, // blr x16
+    0xa8c17bfd, // ldp x29, x30, [sp], #16
+    0xd65f03c0, // ret
+};
+constexpr uint8_t kCodeAlign = 4, kRaReg = 30, kSpReg = 31, kFpReg = 29;
+const uint8_t kCieInsns[] = {0x0c, kSpReg, 0};                                // cfa = sp
+const uint8_t kFdeInsns[] = {0x41, 0x0e, 16, 0x80 | kFpReg, 2, 0x80 | kRaReg, 1, // stp
+                             0x41, 0x0d, kFpReg};                                // mov x29
+#endif
+
+void put32(std::vector<uint8_t>& v, uint32_t x) {
+    for (int i = 0; i < 4; ++i) v.push_back(static_cast<uint8_t>(x >> (8 * i)));
+}
+
+void patch32(std::vector<uint8_t>& v, size_t at, uint32_t x) {
+    for (int i = 0; i < 4; ++i) v[at + i] = static_cast<uint8_t>(x >> (8 * i));
+}
+
+// The .eh_frame for a forwarder of `code_size` bytes at `fn`, to be placed at `table`.
+std::vector<uint8_t> forwarder_eh_frame(uintptr_t fn, uint32_t code_size, uintptr_t table) {
+    std::vector<uint8_t> v;
+    put32(v, 0);                      // CIE length, patched
+    put32(v, 0);                      // CIE id
+    v.push_back(1);                   // version
+    v.push_back('z'); v.push_back('R'); v.push_back(0);
+    v.push_back(kCodeAlign);
+    v.push_back(0x78);                // data alignment -8
+    v.push_back(kRaReg);
+    v.push_back(1);                   // augmentation data length
+    v.push_back(0x1b);                // FDE pointers: pcrel | sdata4
+    v.insert(v.end(), std::begin(kCieInsns), std::end(kCieInsns));
+    while (v.size() % 8 != 0) v.push_back(0);
+    patch32(v, 0, static_cast<uint32_t>(v.size() - 4));
+
+    const size_t fde = v.size();
+    put32(v, 0);                                      // FDE length, patched
+    put32(v, static_cast<uint32_t>(v.size()));        // CIE pointer: back to offset 0
+    const size_t pc_field = v.size();
+    put32(v, static_cast<uint32_t>(fn - (table + pc_field)));
+    put32(v, code_size);
+    v.push_back(0);                                   // augmentation data length
+    v.insert(v.end(), std::begin(kFdeInsns), std::end(kFdeInsns));
+    while ((v.size() - fde) % 8 != 4) v.push_back(0); // DW_CFA_nop
+    patch32(v, fde, static_cast<uint32_t>(v.size() - fde - 4));
+    put32(v, 0);                                      // terminator
+    return v;
+}
+
+using ForwarderFn = int64_t (*)(int64_t (*)(int64_t), int64_t);
+
+} // namespace
+
+// libgcc's unwinder skips an FDE whose pc_begin is zero in the width of its
+// encoding (it takes it for a discarded link-once function's), so with
+// pcrel | sdata4 a function at a multiple of 4 GiB has no unwind info: a C++
+// exception thrown through it terminates. bronze's tiered runs aborted that
+// way about once in a thousand when a JIT block happened to start on one.
+// A block asked for at such an address must come back elsewhere, and code at
+// its start must be visible to the unwinder and unwind.
+TEST_CASE("JIT unwind - no code block holds a 4 GiB boundary, whose FDE libgcc would ignore") {
+    const size_t page = codegen::jit_system_page_size();
+    const uintptr_t boundary = free_4gib_boundary(2 * page);
+    REQUIRE(boundary != 0);
+
+    codegen::JitMemoryBlock block(2 * page, reinterpret_cast<void*>(boundary));
+    REQUIRE(block.is_valid());
+    const auto at = reinterpret_cast<uintptr_t>(block.data());
+    const uintptr_t next_boundary = (at + k4GiB - 1) & ~(k4GiB - 1);
+    CHECK(next_boundary - at >= block.size());
+
+#if defined(__x86_64__)
+    const uint32_t code_size = sizeof(kForwarder);
+    std::memcpy(block.data(), kForwarder, sizeof(kForwarder));
+#else
+    const uint32_t code_size = sizeof(kForwarderWords);
+    std::memcpy(block.data(), kForwarderWords, sizeof(kForwarderWords));
+#endif
+    const auto eh = forwarder_eh_frame(at, code_size, at + page);
+    std::memcpy(block.data() + page, eh.data(), eh.size());
+    REQUIRE(block.make_executable_read_only(page));
+    REQUIRE(block.register_unwind_info(page, 1));
+    REQUIRE(_Unwind_FindEnclosingFunction(block.data() + 1) == block.data());
+
+    auto forward = reinterpret_cast<ForwarderFn>(block.data());
+    CHECK_EQ(forward(&host_maybe_throw, 41), int64_t{42});
+    int64_t caught = 0;
+    try {
+        (void)forward(&host_maybe_throw, 5000);
+    } catch (const HostError& e) {
+        caught = e.value;
+    }
+    CHECK_EQ(caught, int64_t{5000});
+}
+
+#endif
