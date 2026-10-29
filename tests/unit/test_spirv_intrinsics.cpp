@@ -28,6 +28,7 @@ enum class Sig {
     img2d_ld_v4, img2d_st_v4, img3d_ld_v4, img3d_st_v4,
     samp2d_r32f, samp3d_r32f, samp2d_v4, samp3d_v4,
     vert_i32, vert_pos, frag_f32, frag_v4, stage_in_f32, stage_in_v4, stage_out_f32, stage_out_v4,
+    frag_f32_f32, frag_i32, frag_void, i32_i32,
 };
 
 const std::map<std::string, Sig>& signatures() {
@@ -124,6 +125,17 @@ const std::map<std::string, Sig>& signatures() {
         {"spirv_stage_input_vec4", Sig::stage_in_v4},
         {"spirv_stage_output_f32", Sig::stage_out_f32},
         {"spirv_stage_output_vec4", Sig::stage_out_v4},
+        {"spirv_front_facing", Sig::frag_i32}, {"spirv_demote_to_helper", Sig::frag_void},
+        {"spirv_subgroup_all", Sig::i32_i32}, {"spirv_subgroup_any", Sig::i32_i32},
+        {"spirv_dpdx_f32", Sig::frag_f32_f32}, {"spirv_dpdy_f32", Sig::frag_f32_f32},
+        {"spirv_fwidth_f32", Sig::frag_f32_f32},
+
+        {"spirv_subgroup_add_f32", Sig::f32_f32}, {"spirv_subgroup_add_i32", Sig::i32_i32},
+        {"spirv_subgroup_min_f32", Sig::f32_f32}, {"spirv_subgroup_min_i32", Sig::i32_i32},
+        {"spirv_subgroup_max_f32", Sig::f32_f32}, {"spirv_subgroup_max_i32", Sig::i32_i32},
+        {"spirv_subgroup_broadcast_first_f32", Sig::f32_f32},
+        {"spirv_subgroup_broadcast_first_i32", Sig::i32_i32},
+        {"spirv_subgroup_size", Sig::void_i32}, {"spirv_subgroup_local_id", Sig::void_i32},
     };
     return kSigs;
 }
@@ -221,6 +233,10 @@ Function* build(Module& mod, const std::string& name, Sig sig) {
         case Sig::stage_in_v4: r = b.build_call(name, Type::f32x4(), {b.build_iconst_i32(0)}); break;
         case Sig::stage_out_f32: b.build_call(name, Type::void_type(), {b.build_iconst_i32(0), b.build_iconst_i32(0), x}); break;
         case Sig::stage_out_v4: b.build_call(name, Type::void_type(), {b.build_iconst_i32(0), x, x, x, x}); break;
+        case Sig::frag_f32_f32: r = b.build_call(name, Type::f32(), {x}); break;
+        case Sig::frag_i32: r = b.build_call(name, Type::i32()); break;
+        case Sig::frag_void: b.build_call(name, Type::void_type()); break;
+        case Sig::i32_i32: r = b.build_call(name, Type::i32(), {i}); break;
     }
     if (r) {
         if (r->type().is_vector()) b.build_vstore(r->type(), p, 0, r);
@@ -238,7 +254,8 @@ std::vector<uint32_t> intrinsic_words(const std::string& name, Sig sig, std::str
         opts.stage = target::SpirvStage::Vertex;
     } else if (sig == Sig::frag_f32 || sig == Sig::frag_v4 ||
                sig == Sig::stage_in_f32 || sig == Sig::stage_in_v4 ||
-               sig == Sig::stage_out_f32 || sig == Sig::stage_out_v4) {
+               sig == Sig::stage_out_f32 || sig == Sig::stage_out_v4 ||
+               sig == Sig::frag_f32_f32 || sig == Sig::frag_i32 || sig == Sig::frag_void) {
         opts.stage = target::SpirvStage::Fragment;
     }
     target::SpirvKernel k = compile_checked(*f, opts);
@@ -327,6 +344,15 @@ TEST_CASE("SPIR-V intrinsics - families lower to the expected SPIR-V (spirv-dis)
         {"ptx_shared_load_f32_indexed", {"OpAccessChain", "Workgroup"}},
         {"ptx_load_s8", {"OpCapability StorageBuffer8BitAccess", "OpSConvert", "OpTypeInt 8 0"}},
         {"ptx_store_u16", {"OpCapability StorageBuffer16BitAccess", "OpTypeInt 16 0"}},
+        {"spirv_front_facing", {"BuiltIn FrontFacing", "OpSelect"}},
+        {"spirv_dpdx_f32", {"OpDPdx "}},
+        {"spirv_fwidth_f32", {"OpFwidth "}},
+        {"spirv_subgroup_add_f32", {"OpGroupNonUniformFAdd", "Reduce", "OpCapability GroupNonUniformArithmetic"}},
+        {"spirv_subgroup_min_i32", {"OpGroupNonUniformSMin", "Reduce"}},
+        {"spirv_subgroup_broadcast_first_i32", {"OpGroupNonUniformBroadcastFirst", "OpCapability GroupNonUniformBallot"}},
+        {"spirv_subgroup_size", {"BuiltIn SubgroupSize"}},
+        {"spirv_subgroup_any", {"OpGroupNonUniformAny ", "OpCapability GroupNonUniformVote"}},
+        {"spirv_demote_to_helper", {"OpDemoteToHelperInvocation", "SPV_EXT_demote_to_helper_invocation"}},
     };
     for (const Expect& ex : expects) {
         std::string dis;

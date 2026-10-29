@@ -303,6 +303,25 @@ const SpirvISel::Intrinsics::Table& SpirvISel::Intrinsics::table() {
         { "spirv_stage_output_f32",    &stage_output_f32 },
         { "spirv_stage_output_vec4",   &stage_output_vec4 },
         { "spirv_set_vertex_position", &set_vertex_position },
+        { "spirv_front_facing",        &front_facing },
+        { "spirv_demote_to_helper",    &demote_to_helper },
+        { "spirv_dpdx_f32",            &derivative<spv::OpDPdx> },
+        { "spirv_dpdy_f32",            &derivative<spv::OpDPdy> },
+        { "spirv_fwidth_f32",          &derivative<spv::OpFwidth> },
+
+        // Subgroup operations (the whole subgroup)
+        { "spirv_subgroup_add_f32",             &subgroup_reduce<Group::add> },
+        { "spirv_subgroup_add_i32",             &subgroup_reduce<Group::add> },
+        { "spirv_subgroup_min_f32",             &subgroup_reduce<Group::min> },
+        { "spirv_subgroup_min_i32",             &subgroup_reduce<Group::min> },
+        { "spirv_subgroup_max_f32",             &subgroup_reduce<Group::max> },
+        { "spirv_subgroup_max_i32",             &subgroup_reduce<Group::max> },
+        { "spirv_subgroup_broadcast_first_f32", &subgroup_broadcast_first },
+        { "spirv_subgroup_broadcast_first_i32", &subgroup_broadcast_first },
+        { "spirv_subgroup_all",                 &subgroup_vote<true> },
+        { "spirv_subgroup_any",                 &subgroup_vote<false> },
+        { "spirv_subgroup_size",                &subgroup_size },
+        { "spirv_subgroup_local_id",            &subgroup_local_id },
     };
     return kIntrinsics;
 }

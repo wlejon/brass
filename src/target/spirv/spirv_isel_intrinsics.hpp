@@ -79,6 +79,14 @@ struct SpirvISel::Intrinsics {
     template <uint32_t Bits>
     static void store_narrow(SpirvISel& isel, const brass::Instruction& inst);
     static Id byte_address(SpirvISel& isel, const Value* ptr, const Value* offset);
+    enum class Group { add, min, max };
+    template <Group G>
+    static void subgroup_reduce(SpirvISel& isel, const brass::Instruction& inst);
+    static void subgroup_broadcast_first(SpirvISel& isel, const brass::Instruction& inst);
+    template <bool All>
+    static void subgroup_vote(SpirvISel& isel, const brass::Instruction& inst);
+    static void subgroup_size(SpirvISel& isel, const brass::Instruction& inst);
+    static void subgroup_local_id(SpirvISel& isel, const brass::Instruction& inst);
 
     // ---- descriptor images, samplers, graphics stages (spirv_isel_graphics.cpp)
     static void parse_set_binding(SpirvISel& isel, const brass::Instruction& inst, uint32_t& out_set, uint32_t& out_binding);
@@ -105,6 +113,11 @@ struct SpirvISel::Intrinsics {
     static void stage_output_f32(SpirvISel& isel, const brass::Instruction& inst);
     static void stage_output_vec4(SpirvISel& isel, const brass::Instruction& inst);
     static void set_vertex_position(SpirvISel& isel, const brass::Instruction& inst);
+    static void require_fragment(SpirvISel& isel, const brass::Instruction& inst);
+    template <spv::Op O>
+    static void derivative(SpirvISel& isel, const brass::Instruction& inst);  // f32 -> f32
+    static void front_facing(SpirvISel& isel, const brass::Instruction& inst); // -> i32 0/1
+    static void demote_to_helper(SpirvISel& isel, const brass::Instruction& inst);
 };
 
 } // namespace brass::spirv

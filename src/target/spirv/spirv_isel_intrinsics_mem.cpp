@@ -274,4 +274,76 @@ void SpirvISel::Intrinsics::store_narrow(SpirvISel& isel, const brass::Instructi
 template void SpirvISel::Intrinsics::store_narrow<8>(SpirvISel&, const brass::Instruction&);
 template void SpirvISel::Intrinsics::store_narrow<16>(SpirvISel&, const brass::Instruction&);
 
+// ---------------------------------------------------------------------------
+// Subgroup operations over the whole subgroup (not the 32-lane segments the
+// shuffles keep): reductions of the active invocations' values
+// (GroupNonUniformArithmetic), the first active invocation's value
+// (GroupNonUniformBallot), the subgroup size and the raw lane.
+// ---------------------------------------------------------------------------
+
+template <SpirvISel::Intrinsics::Group G>
+void SpirvISel::Intrinsics::subgroup_reduce(SpirvISel& isel, const brass::Instruction& inst) {
+    const Value* v = inst.operand(0);
+    if (!v || v->type().is_vector() || v->type().size_in_bytes() != 4) {
+        isel.malformed(inst, "subgroup value must be a 32-bit f32/i32");
+    }
+    Module& m = isel.m_;
+    m.add_capability(spv::CapabilityGroupNonUniform);
+    m.add_capability(spv::CapabilityGroupNonUniformArithmetic);
+    const bool f = v->type().is_float();
+    spv::Op o = spv::OpGroupNonUniformIAdd;
+    switch (G) {
+        case Group::add: o = f ? spv::OpGroupNonUniformFAdd : spv::OpGroupNonUniformIAdd; break;
+        case Group::min: o = f ? spv::OpGroupNonUniformFMin : spv::OpGroupNonUniformSMin; break;
+        case Group::max: o = f ? spv::OpGroupNonUniformFMax : spv::OpGroupNonUniformSMax; break;
+    }
+    Id r = m.new_id();
+    isel.emit(Inst(o, isel.scalar_type(v->type()), r)
+                  .id(m.c_u32(spv::ScopeSubgroup))
+                  .lit(spv::GroupOperationReduce)
+                  .id(isel.id_of(v, "subgroup value")));
+    isel.define(inst.result(), r);
+}
+template void SpirvISel::Intrinsics::subgroup_reduce<SpirvISel::Intrinsics::Group::add>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::subgroup_reduce<SpirvISel::Intrinsics::Group::min>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::subgroup_reduce<SpirvISel::Intrinsics::Group::max>(SpirvISel&, const brass::Instruction&);
+
+void SpirvISel::Intrinsics::subgroup_broadcast_first(SpirvISel& isel, const brass::Instruction& inst) {
+    const Value* v = inst.operand(0);
+    if (!v || v->type().is_vector() || v->type().size_in_bytes() != 4) {
+        isel.malformed(inst, "subgroup value must be a 32-bit f32/i32");
+    }
+    Module& m = isel.m_;
+    m.add_capability(spv::CapabilityGroupNonUniform);
+    m.add_capability(spv::CapabilityGroupNonUniformBallot);
+    isel.define(inst.result(), isel.op(spv::OpGroupNonUniformBroadcastFirst, isel.scalar_type(v->type()),
+                                       {m.c_u32(spv::ScopeSubgroup), isel.id_of(v, "subgroup value")}));
+}
+
+// (i32 predicate) -> i32 1 / 0: whether it is nonzero on every / any active
+// invocation (GroupNonUniformVote).
+template <bool All>
+void SpirvISel::Intrinsics::subgroup_vote(SpirvISel& isel, const brass::Instruction& inst) {
+    const Value* v = inst.operand(0);
+    if (!v || v->type() != Type::i32()) isel.malformed(inst, "subgroup predicate must be i32");
+    Module& m = isel.m_;
+    m.add_capability(spv::CapabilityGroupNonUniform);
+    m.add_capability(spv::CapabilityGroupNonUniformVote);
+    Id pred = isel.op(spv::OpINotEqual, isel.t_bool(), {isel.id_of(v, "subgroup predicate"), m.c_u32(0)});
+    Id r = isel.op(All ? spv::OpGroupNonUniformAll : spv::OpGroupNonUniformAny, isel.t_bool(),
+                   {m.c_u32(spv::ScopeSubgroup), pred});
+    isel.define(inst.result(), isel.op(spv::OpSelect, isel.t_u32(), {r, m.c_u32(1), m.c_u32(0)}));
+}
+template void SpirvISel::Intrinsics::subgroup_vote<true>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::subgroup_vote<false>(SpirvISel&, const brass::Instruction&);
+
+void SpirvISel::Intrinsics::subgroup_size(SpirvISel& isel, const brass::Instruction& inst) {
+    isel.m_.add_capability(spv::CapabilityGroupNonUniform);
+    isel.define(inst.result(), isel.builtin_scalar(spv::BuiltInSubgroupSize));
+}
+
+void SpirvISel::Intrinsics::subgroup_local_id(SpirvISel& isel, const brass::Instruction& inst) {
+    isel.define(inst.result(), raw_subgroup_lane(isel));
+}
+
 } // namespace brass::spirv

@@ -46,9 +46,20 @@ inline std::string redirect(const std::filesystem::path& out) {
     return " >\"" + out.string() + "\" 2>&1";
 }
 
+// std::system on Windows runs `cmd /c <cmd>`, which strips the first and last
+// quote of a line that starts with one: a quoted tool path followed by a
+// quoted argument loses both. One more pair around the line keeps them.
+inline int run(const std::string& cmd) {
+#ifdef _WIN32
+    return std::system(("\"" + cmd + "\"").c_str());
+#else
+    return std::system(cmd.c_str());
+#endif
+}
+
 inline bool tool_available(const char* configured, const char* name) {
     std::filesystem::path log = brass::test::scratch_dir() / "spirv_tool_probe.txt";
-    return std::system(("\"" + tool(configured, name) + "\" --version" + redirect(log)).c_str()) == 0;
+    return run("\"" + tool(configured, name) + "\" --version" + redirect(log)) == 0;
 }
 
 inline bool spirv_val_available() {
@@ -86,7 +97,7 @@ inline bool spirv_val(const std::vector<uint32_t>& words, std::string* log = nul
     std::filesystem::path out = brass::test::scratch_dir() / "brass_spirv_check.txt";
     std::string cmd = "\"" + tool(BRASS_SPIRV_VAL, "spirv-val") + "\" --target-env " + env + " \"" + in.string() + "\"" +
                       redirect(out);
-    bool ok = std::system(cmd.c_str()) == 0;
+    bool ok = run(cmd) == 0;
     if (log) *log = read_file(out);
     return ok;
 }
@@ -97,7 +108,7 @@ inline std::string disassemble(const std::vector<uint32_t>& words) {
     std::filesystem::path in = write_spv(words, "brass_spirv_dis.spv");
     std::filesystem::path out = brass::test::scratch_dir() / "brass_spirv_dis.txt";
     std::string cmd = "\"" + tool(BRASS_SPIRV_DIS, "spirv-dis") + "\" --raw-id \"" + in.string() + "\"" + redirect(out);
-    if (std::system(cmd.c_str()) != 0) return "";
+    if (run(cmd) != 0) return "";
     return read_file(out);
 }
 

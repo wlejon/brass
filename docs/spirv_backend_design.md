@@ -332,6 +332,13 @@ Same MIR names and signatures as the PTX table
 | `ptx_mul_wide_{u32,s32}` / `ptx_mul_hi_u32` / `ptx_mad_lo_u32` | `OpUConvert`/`OpSConvert` + `OpIMul` / `OpUMulExtended` high word / `OpIMul` + `OpIAdd` |
 | `ptx_shared_alloc_*`, `ptx_shared_load/store_*[_indexed]` | Workgroup arrays and `OpAccessChain` (see Shared memory) |
 | `ptx_load_{u8,s8,u16,s16}`, `ptx_store_{u8,u16}` | 8/16-bit PhysicalStorageBuffer access |
+| `spirv_subgroup_{add,min,max}_{f32,i32}` | `OpGroupNonUniform{FAdd,IAdd,FMin,SMin,FMax,SMax}` subgroup scope, `Reduce` (`GroupNonUniformArithmetic`): the whole subgroup, not a 32-lane segment |
+| `spirv_subgroup_broadcast_first_{f32,i32}` | `OpGroupNonUniformBroadcastFirst` (`GroupNonUniformBallot`) |
+| `spirv_subgroup_all`, `spirv_subgroup_any` | `OpGroupNonUniformAll` / `Any` of `x != 0` (`GroupNonUniformVote`), as i32 1 / 0 |
+| `spirv_subgroup_size` / `spirv_subgroup_local_id` | `BuiltIn SubgroupSize` / `SubgroupLocalInvocationId` (unmasked) |
+| `spirv_dpdx_f32`, `spirv_dpdy_f32`, `spirv_fwidth_f32` | `OpDPdx`, `OpDPdy`, `OpFwidth` (fragment stage only; any other stage fails) |
+| `spirv_front_facing` | `BuiltIn FrontFacing` as i32 1 / 0 (fragment stage only) |
+| `spirv_demote_to_helper` | `OpDemoteToHelperInvocation` (`DemoteToHelperInvocation`; `SPV_EXT_demote_to_helper_invocation` below SPIR-V 1.6): the fragment's outputs are dropped, it is not a terminator (fragment stage only) |
 
 **Shuffles** keep PTX semantics on 32-lane segments of the subgroup: the
 source lane is computed from the lane within the segment, a source outside

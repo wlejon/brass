@@ -356,4 +356,54 @@ void SpirvISel::Intrinsics::set_vertex_position(SpirvISel& isel, const brass::In
     isel.emit(Inst(spv::OpStore).id(vid).id(vec));
 }
 
+// ---------------------------------------------------------------------------
+// Fragment-only: screen-space derivatives and facing
+// ---------------------------------------------------------------------------
+
+void SpirvISel::Intrinsics::require_fragment(SpirvISel& isel, const brass::Instruction& inst) {
+    if (isel.opts_.stage != target::SpirvStage::Fragment) {
+        isel.fail(std::string(inst.symbol()) + " is only valid in a fragment stage");
+    }
+}
+
+template <spv::Op O>
+void SpirvISel::Intrinsics::derivative(SpirvISel& isel, const brass::Instruction& inst) {
+    require_fragment(isel, inst);
+    const Value* a = inst.operand(0);
+    if (!a || a->type() != Type::f32()) isel.malformed(inst, "argument 0 must be f32");
+    isel.define(inst.result(), isel.op(O, isel.t_f32(), {isel.id_of(a, "argument 0")}));
+}
+template void SpirvISel::Intrinsics::derivative<spv::OpDPdx>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::derivative<spv::OpDPdy>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::derivative<spv::OpFwidth>(SpirvISel&, const brass::Instruction&);
+
+// Discard as OpDemoteToHelperInvocation: the invocation's outputs are dropped
+// but it keeps running as a helper, so the call is not a terminator and the
+// structured control flow around it stays as written (core in SPIR-V 1.6,
+// SPV_EXT_demote_to_helper_invocation before).
+void SpirvISel::Intrinsics::demote_to_helper(SpirvISel& isel, const brass::Instruction& inst) {
+    require_fragment(isel, inst);
+    isel.m_.add_capability(spv::CapabilityDemoteToHelperInvocation);
+    if (isel.opts_.spirv_version < 0x00010600) isel.m_.add_extension("SPV_EXT_demote_to_helper_invocation");
+    isel.emit(Inst(spv::OpDemoteToHelperInvocation));
+}
+
+// BuiltIn FrontFacing is a bool input; the call yields i32 1 (front) or 0.
+void SpirvISel::Intrinsics::front_facing(SpirvISel& isel, const brass::Instruction& inst) {
+    require_fragment(isel, inst);
+    Module& m = isel.m_;
+    const std::string key = "builtin.front_facing";
+    Id& var = m.cached(key);
+    if (!var) {
+        var = m.variable(m.t_pointer(spv::StorageClassInput, isel.t_bool()), spv::StorageClassInput);
+        m.decorate(var, spv::DecorationBuiltIn, {static_cast<uint32_t>(spv::BuiltInFrontFacing)});
+    }
+    Id vid = var;
+    isel.use_global(vid);
+    isel.define(inst.result(), isel.prologue_value(key, [&] {
+        Id front = isel.op(spv::OpLoad, isel.t_bool(), {vid});
+        return isel.op(spv::OpSelect, isel.t_u32(), {front, m.c_u32(1), m.c_u32(0)});
+    }));
+}
+
 } // namespace brass::spirv
