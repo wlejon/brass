@@ -71,6 +71,9 @@ public:
         for (const LoopInfo* loop : loops.post_order_loops()) {
             if (loop) collect_guards(*loop);
         }
+        for (const BasicBlock* bb : fn.blocks()) {
+            if (bb) collect_branch_facts(*bb);
+        }
         seed_bounded_entry_params();
     }
 
@@ -180,6 +183,67 @@ private:
             const bool upper = (side == 0) ? less : !less;
             guards_[p] = Guard{limit, upper, strict, stay};
         }
+    }
+
+    // A branch that tests an f64 against constants and goes to `region` only
+    // when every test holds: inside the blocks `region` dominates, the value
+    // lies within the constants (an ordered compare is false for NaN). That
+    // stands while control stays there, which it does from the edge on: the
+    // value is defined before the branch and outside the region, so computing
+    // it again means leaving the region, and the only way back in from
+    // outside is this edge again, each of the region head's other
+    // predecessors being a latch it dominates. f64_demote_step.cpp puts such
+    // a test in front of a loop whose step it bounds.
+    void collect_branch_facts(const BasicBlock& bb) {
+        const Instruction* term = bb.terminator();
+        if (!term || term->opcode() != Opcode::br_if || !term->operand(0)) return;
+        const BasicBlock* region = term->true_target().block;
+        if (!region || region == term->false_target().block || region == &bb) return;
+        for (const BasicBlock* pred : region->predecessors()) {
+            if (pred != &bb && !dom_.dominates(region, pred)) return;
+        }
+        std::vector<const Value*> terms = {term->operand(0)};
+        std::vector<std::pair<const Value*, Fact>> found;
+        while (!terms.empty()) {
+            const Value* t = terms.back();
+            terms.pop_back();
+            const Instruction* c = t && t->is_instruction() ? t->defining_instruction() : nullptr;
+            if (!c || c->operand_count() != 2) continue;  // a test it cannot read adds no fact
+            if (c->opcode() == Opcode::and_) {
+                terms.push_back(c->operand(0));
+                terms.push_back(c->operand(1));
+                continue;
+            }
+            bool less;  // operand 0 < (or <=) operand 1 when the test holds
+            switch (c->opcode()) {
+                case Opcode::slt: case Opcode::sle: less = true; break;
+                case Opcode::sgt: case Opcode::sge: less = false; break;
+                default: continue;
+            }
+            for (size_t side = 0; side < 2; ++side) {
+                const Value* v = c->operand(side);
+                const Value* k = c->operand(1 - side);
+                if (!v || v->type() != Type::f64() || !k || !k->is_instruction() ||
+                    k->defining_instruction()->opcode() != Opcode::fconst_f64) {
+                    continue;
+                }
+                const double kv = k->defining_instruction()->imm_f64();
+                if (std::isnan(kv)) continue;
+                const BasicBlock* def = v->is_block_param() ? v->defining_block()
+                                        : (v->is_instruction() ? v->defining_instruction()->parent() : nullptr);
+                // Defined inside the region (a do-while's latch testing what
+                // its body just computed), v is recomputed there before the
+                // test sees it again, so a use in the region may read an
+                // untested value.
+                if (!def || !dom_.dominates(def, &bb) || dom_.dominates(region, def)) continue;
+                // v on the left of `<` is bounded above, on the right below.
+                const bool upper = (side == 0) == less;
+                Fact fact{region, -kInf, kInf};
+                if (upper) fact.hi = kv; else fact.lo = kv;
+                found.emplace_back(v, fact);
+            }
+        }
+        for (auto& [v, fact] : found) facts_[v].push_back(fact);
     }
 
     // What the entry check (f64_demote_version.cpp) will hold true of these
@@ -303,6 +367,14 @@ private:
                 const double delta = (g->second.strict && is_int_or_exact(v) && is_int_or_exact(g->second.limit)) ? 1.0 : 0.0;
                 if (g->second.upper) r.hi = std::min(r.hi, lim.hi - delta);
                 else r.lo = std::max(r.lo, lim.lo + delta);
+            }
+            auto f = facts_.find(v);
+            if (f != facts_.end() && !r.empty()) {
+                for (const Fact& fact : f->second) {
+                    if (!dom_.dominates(fact.region, use_block)) continue;
+                    r.lo = std::max(r.lo, fact.lo);
+                    r.hi = std::min(r.hi, fact.hi);
+                }
             }
         }
         return r;
@@ -493,7 +565,13 @@ private:
     const DominatorTree& dom_;
     const LoopAnalysis& loops_;
     const std::unordered_set<const Value*>& exact_;
+    struct Fact {
+        const BasicBlock* region = nullptr;
+        double lo = -kInf;
+        double hi = kInf;
+    };
     std::unordered_map<const Value*, Guard> guards_;
+    std::unordered_map<const Value*, std::vector<Fact>> facts_;
     std::unordered_map<const Value*, Interval> iv_;
     std::unordered_set<const Value*> seeded_;
     std::unordered_map<const Value*, int> grow_count_;

@@ -200,6 +200,7 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
     if (fn.entry_block()->name() == kF64VersionEntryName) return false;
 
     fn.rebuild_cfg_predecessors();
+    version_loops_on_step(fn);
     auto dom_p = std::make_unique<DominatorTree>(fn);
     auto loops_p = std::make_unique<LoopAnalysis>(fn, *dom_p);
 

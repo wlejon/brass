@@ -37,6 +37,11 @@ struct ClampedLimit {
 // written. Returns false, changing nothing, when the copy would be too big.
 bool version_loop_on_clamp(Function& fn, const ClampedLimit& site, const std::vector<ClampedLimit>& all);
 
+// Versions each loop whose counter is stepped by a loop-invariant value the
+// bounds cannot show positive on 1 <= step <= 2^31 (f64_demote_step.cpp).
+// Returns whether any loop was versioned.
+bool version_loops_on_step(Function& fn);
+
 bool canonicalize_loop_bounds(Function& fn, const DominatorTree& dom, const LoopAnalysis& loop_analysis,
                               std::vector<ClampedLimit>* clamped);
 
