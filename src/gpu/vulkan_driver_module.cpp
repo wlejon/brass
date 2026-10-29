@@ -23,6 +23,28 @@ VulkanArg::VulkanArg(float v) : kind_(Kind::F32), bits_(0) {
 
 VulkanArg::VulkanArg(double v) : kind_(Kind::F64), bits_(0) { std::memcpy(&bits_, &v, 8); }
 
+std::string pack_push_constants(const brass::target::SpirvKernel& k, const std::vector<VulkanArg>& args,
+                                std::vector<uint8_t>& block) {
+    if (args.size() != k.params.size())
+        return "kernel '" + k.entry + "' takes " + std::to_string(k.params.size()) + " arguments, got " +
+               std::to_string(args.size());
+    block.assign(k.push_constant_bytes, 0);
+    for (size_t i = 0; i < args.size(); ++i) {
+        const brass::target::SpirvParam& p = k.params[i];
+        VulkanArg::Kind want;
+        if (p.type.is_pointer() || p.type.is_i64()) want = VulkanArg::Kind::U64;
+        else if (p.type.is_i32()) want = VulkanArg::Kind::U32;
+        else if (p.type.kind() == TypeKind::F32) want = VulkanArg::Kind::F32;
+        else want = VulkanArg::Kind::F64;
+        if (args[i].kind() != want)
+            return "kernel '" + k.entry + "' argument " + std::to_string(i) + " has the wrong kind for its " +
+                   std::to_string(p.size) + "-byte parameter";
+        uint64_t bits = args[i].bits();
+        std::memcpy(block.data() + p.offset, &bits, p.size);  // little-endian
+    }
+    return "";
+}
+
 // SPIR-V capability (as SpirvKernel lists it) -> the device feature it needs.
 std::string VulkanDeviceCaps::missing_for(const brass::target::SpirvKernel& k) const {
     struct Need { const char* capability; bool VulkanDeviceCaps::*feature; const char* feature_name; };
@@ -178,33 +200,6 @@ VulkanModule VulkanModule::load(const brass::target::SpirvKernel& kernel, std::s
     return out;
 }
 
-namespace {
-
-// Packs the push-constant block; "" or the mismatch.
-std::string pack_args(const brass::target::SpirvKernel& k, const std::vector<VulkanArg>& args,
-                      std::vector<uint8_t>& block) {
-    if (args.size() != k.params.size())
-        return "kernel '" + k.entry + "' takes " + std::to_string(k.params.size()) + " arguments, got " +
-               std::to_string(args.size());
-    block.assign(k.push_constant_bytes, 0);
-    for (size_t i = 0; i < args.size(); ++i) {
-        const brass::target::SpirvParam& p = k.params[i];
-        VulkanArg::Kind want;
-        if (p.type.is_pointer() || p.type.is_i64()) want = VulkanArg::Kind::U64;
-        else if (p.type.is_i32()) want = VulkanArg::Kind::U32;
-        else if (p.type.kind() == TypeKind::F32) want = VulkanArg::Kind::F32;
-        else want = VulkanArg::Kind::F64;
-        if (args[i].kind() != want)
-            return "kernel '" + k.entry + "' argument " + std::to_string(i) + " has the wrong kind for its " +
-                   std::to_string(p.size) + "-byte parameter";
-        uint64_t bits = args[i].bits();
-        std::memcpy(block.data() + p.offset, &bits, p.size);  // little-endian
-    }
-    return "";
-}
-
-} // namespace
-
 bool VulkanModule::launch(const VulkanDispatch& d, const std::vector<VulkanArg>& args, std::string* error) const {
     auto fail = [&](const std::string& msg) {
         vk::set_error(msg);
@@ -226,7 +221,7 @@ bool VulkanModule::launch(const VulkanDispatch& d, const std::vector<VulkanArg>&
     if (d.grid[0] == 0 || d.grid[1] == 0 || d.grid[2] == 0) return true;
 
     std::vector<uint8_t> block;
-    if (std::string bad = pack_args(k, args, block); !bad.empty()) return fail(bad);
+    if (std::string bad = pack_push_constants(k, args, block); !bad.empty()) return fail(bad);
     std::string err;
     VkPipeline pipe = s_->pipeline(*r, d.block, err);
     if (!pipe) return fail(err);

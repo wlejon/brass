@@ -159,6 +159,14 @@ private:
     uint64_t bits_;
 };
 
+// Packs `args` into `kernel`'s push-constant block (`block` is resized to
+// SpirvKernel::push_constant_bytes): ptr and i64 parameters take U64, i32
+// U32, f32 F32, f64 F64. Returns "" or the mismatch. VulkanModule::launch
+// packs with it; a host that runs the kernel on its own device packs with
+// it too and pushes the block as is.
+std::string pack_push_constants(const brass::target::SpirvKernel& kernel, const std::vector<VulkanArg>& args,
+                                std::vector<uint8_t>& block);
+
 struct VulkanModuleOptions {
     // Subgroup size for the pipeline: 32 (the PTX warp the kernels are
     // written for; the default), 64, or 0 for the driver's choice. Honoured
