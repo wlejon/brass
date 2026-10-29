@@ -51,6 +51,9 @@ PassStep dce(std::string name = "dce", FunctionFilter filter = FunctionFilter::L
 PassStep split_critical_edges();
 PassStep split_branch_conditions();
 PassStep unbox_double_params();
+// Every function: the integer path of each remaining `frem` call
+// (float_rem_inline.hpp).
+PassStep float_rem_inline();
 
 // --- Loop passes (FunctionFilter::LoopEligible) -------------------------
 PassStep f64_demote(DemoteStats* stats);

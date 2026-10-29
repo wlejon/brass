@@ -34,6 +34,9 @@ Pipeline pass_pipeline(const PassPipelineOptions& options) {
     if (options.enable_loop_unswitch && loops.enable_f64_demote) loops.enable_loop_unswitch = true;
     if (options.enable_jump_threading && loops.enable_f64_demote) loops.enable_jump_threading = true;
     p.append(loop_pipeline(loops));
+    // After the loop stage, whose f64 demotion turns a proven-integral
+    // `frem` into an `smod` the expansion would only get in the way of.
+    if (options.enable_float_rem_inline) p.add(passes::float_rem_inline());
     if (options.enable_wbe) p.add(passes::write_barrier_elim(options.dump_wbe_stats));
     return p;
 }

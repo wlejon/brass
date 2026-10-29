@@ -67,6 +67,7 @@ add_executable(brass_unit_tests
     differential/test_embedding_differential.cpp
     differential/test_fuzz_js_loops.cpp
     unit/test_f64_demote.cpp
+    unit/test_float_rem_inline.cpp
     unit/test_f64_demote_step.cpp
     unit/test_inliner.cpp
     differential/test_inlining_differential.cpp

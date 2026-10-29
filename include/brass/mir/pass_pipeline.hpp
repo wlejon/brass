@@ -14,7 +14,7 @@ struct RangeAnalysisStats;
 // the modules it ships): SROA -> optional IPO (speculative devirtualization,
 // inlining, SROA again) -> GVN -> GVN-PRE -> SCCP ->
 // CFG simplify -> loop unswitch -> jump threading -> CFG simplify -> BCE ->
-// loop pipeline -> write-barrier elimination. Keeping it in one place lets
+// loop pipeline -> frem inlining -> write-barrier elimination. Keeping it in one place lets
 // tools (the differential fuzzer) run exactly what embedders ship.
 struct PassPipelineOptions {
     bool enable_sroa = false;
@@ -31,6 +31,8 @@ struct PassPipelineOptions {
     bool enable_jump_threading = true;
     bool enable_bce = true;
     bool enable_wbe = true;
+    // The inline integer path of `frem` calls (float_rem_inline.hpp).
+    bool enable_float_rem_inline = true;
     bool dump_wbe_stats = false;
     bool dump_range_stats = false;
     GvnPreStats* pre_stats = nullptr;

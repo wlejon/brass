@@ -9,6 +9,7 @@
 #include <brass/mir/devirtualize.hpp>
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/f64_demote.hpp>
+#include <brass/mir/float_rem_inline.hpp>
 #include <brass/mir/fma_opt.hpp>
 #include <brass/mir/gvn.hpp>
 #include <brass/mir/gvn_pre.hpp>
@@ -207,6 +208,11 @@ PassStep f64_demote(DemoteStats* stats) {
         o.stats = stats;
         return f64_demote_pass(fn, o);
     });
+}
+
+PassStep float_rem_inline() {
+    return function_step("float_rem_inline", FunctionFilter::All,
+                         [](Function& fn) { return inline_float_rem(fn) != 0; });
 }
 
 PassStep select_opt(std::string name) {
