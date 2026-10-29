@@ -128,7 +128,8 @@ std::unique_ptr<Module> clone_module(const Module& src);
 // symbol, linked by name. Null when src has no such function.
 // `declare_only`, when given, names callees to leave external even so: a
 // tier-up's copy passes the ones its inliner could never take, which would
-// only be copied to be dropped again.
+// only be copied to be dropped again. Both clones carry src's debug context:
+// the copied positions' file and inlined-scope ids index it.
 std::unique_ptr<Module> clone_function_module(const Module& src, std::string_view fn_name,
                                               const std::vector<std::string>& also = {},
                                               const std::function<bool(const Function&)>& declare_only = {});

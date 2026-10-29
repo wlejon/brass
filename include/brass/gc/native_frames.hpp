@@ -42,9 +42,14 @@ bool brass_capture_caller_frame(uintptr_t& rbp, uintptr_t& ip) noexcept;
 // run of frames whose gcrefs every collection on this thread must update.
 // Scopes nest (a bridge under a bridge); they must be destroyed in reverse
 // order, which RAII on one thread guarantees.
+//
+// A deoptimization's scope is `deoptimized`: the frame at (rbp, ip) failed
+// a guard and Tier 0 is finishing its call (deopt.cpp). Its code stays on the
+// stack until then but runs none of the function any more; the Tier-0 frame
+// does (brass_native_frame_deoptimized).
 class NativeFramesScope {
 public:
-    NativeFramesScope(uintptr_t rbp, uintptr_t ip) noexcept;
+    NativeFramesScope(uintptr_t rbp, uintptr_t ip, bool deoptimized = false) noexcept;
     ~NativeFramesScope();
     NativeFramesScope(const NativeFramesScope&) = delete;
     NativeFramesScope& operator=(const NativeFramesScope&) = delete;
@@ -53,9 +58,20 @@ private:
     uintptr_t rbp_;
     uintptr_t ip_;
     NativeFramesScope* prev_;
+    bool deoptimized_;
     friend struct NativeFramesAccess;
     friend uintptr_t brass_native_frames_cover_start() noexcept;
+    friend bool brass_native_frame_deoptimized(uintptr_t ip) noexcept;
 };
+
+// Whether the native frame whose return address (the pc after its last call)
+// is `ip` is one that deoptimized and is being finished in Tier 0, on this
+// stack: a host reporting the stack (a stack trace) reports the Tier-0 frame
+// that runs the rest of the call, which the interpreter shows, and leaves
+// this one out, as it would otherwise show the function twice. Only a
+// deoptimization's call returns to that pc, so the pc alone names such
+// frames, every one of them (a function that deoptimized again further in).
+bool brass_native_frame_deoptimized(uintptr_t ip) noexcept;
 
 // Records, for its lifetime, roots that every collection on this thread
 // must update although the collector's own root provider does not know

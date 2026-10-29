@@ -85,6 +85,12 @@ struct InstalledCode {
     size_t size = 0;
     // Where each source position begins, as ascending offsets from `code`.
     const std::vector<DebugLineEntry>* lines = nullptr;
+    // The context whose inlined scopes the lines' `inlined_at_id`s index:
+    // the module the code was compiled from (the program's for tier 1, the
+    // tier-2 or OSR copy's, which begins as the program's, for tier 2). A
+    // host that reports inline frames reads it during the observer's call
+    // only; the copy is gone after.
+    const DebugContext* debug_context = nullptr;
 };
 // Called as code is installed, before any call can reach it, on whichever
 // thread installs it (the mutator, or a background compiler's worker).

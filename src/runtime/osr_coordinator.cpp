@@ -358,6 +358,9 @@ std::unique_ptr<Module> OsrCoordinator::copy_entry(const Function& fn, const Bas
         mod->set_allow_fp_reassociation(src->allow_fp_reassociation());
         mod->set_pinned_tls_register(src->pinned_tls_register());
         mod->copy_declarations_from(*src);
+        // The copied positions keep their file and inlined-scope ids, which
+        // index the source's context (clone_function_module).
+        mod->debug_context() = src->debug_context();
         if (!build_osr_entry_function(e->plan, *mod, e->name, &why)) {
             timed.fail(why);
             return nullptr;
@@ -447,7 +450,8 @@ void OsrCoordinator::compile_entry(const Function& fn, Module& copy, const std::
         const Function* f = mod->get_function(lf.name);
         if (!f || f->block_count() == 0) continue;
         const std::string_view shown = lf.name == e.name ? fn.name() : std::string_view(lf.name);
-        pipeline.notify_code_installed({shown, TierLevel::Tier2_Optimized, lf.code, lf.size, &lf.lines});
+        pipeline.notify_code_installed(
+            {shown, TierLevel::Tier2_Optimized, lf.code, lf.size, &lf.lines, &mod->debug_context()});
     }
     // Weak: the entry owns the code the resumers are registered for. A
     // guard of a carried callee body failing counts against the entry as

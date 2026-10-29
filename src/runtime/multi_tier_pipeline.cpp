@@ -651,8 +651,12 @@ void MultiTierPipeline::install_tier1_group(const std::vector<detail::Tier1Node*
     // a member not yet installed.
     for (const Tier1Node* d : group) register_baseline_compiled(d->code);
     for (const Tier1Node* d : group) {
+        // Baseline code is compiled from the handle's own Function, so its
+        // positions name the program module's inlined scopes.
+        const Function* fn = d->handle->mir_function();
+        const DebugContext* debug = fn && fn->parent() ? &fn->parent()->debug_context() : nullptr;
         notify_code_installed({d->name, TierLevel::Tier1_Baseline, d->code->entry_point(), d->code->code_size(),
-                               &d->code->line_table()});
+                               &d->code->line_table(), debug});
     }
     for (const Tier1Node* d : group) {
         void* entry = d->handle->tier() == TierLevel::Tier2_Optimized ? d->handle->native_entry() : nullptr;

@@ -165,7 +165,7 @@ void* call_deopt_handler(const DeoptHandlerFn& handler, const DeoptFrame& frame,
     t_handler_outcome = HandlerOutcome{};
     void* r = nullptr;
     {
-        brass::NativeFramesScope native_frames(caller_rbp, caller_ip);
+        brass::NativeFramesScope native_frames(caller_rbp, caller_ip, /*deoptimized=*/true);
         r = handler(frame);
     }
     outcome = std::move(t_handler_outcome);
@@ -324,7 +324,7 @@ const uint64_t* brass_deopt_exit_record(const brass::runtime::DeoptExitRecord* r
         t_handler_outcome = HandlerOutcome{};
         uint64_t result = 0;
         {
-            brass::NativeFramesScope native_frames(caller_rbp, caller_ip);
+            brass::NativeFramesScope native_frames(caller_rbp, caller_ip, /*deoptimized=*/true);
             // The resumer may run code that deoptimizes again and overwrites
             // the thread frame: it works on a copy.
             DeoptFrame snapshot = *frame;

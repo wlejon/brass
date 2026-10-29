@@ -214,6 +214,12 @@ std::unique_ptr<Module> clone_function_module(const Module& src, std::string_vie
     dst->set_deterministic_fp(src.is_deterministic_fp());
     dst->set_pinned_tls_register(src.pinned_tls_register());
     dst->copy_declarations_from(src);
+    // clone_function keeps each position's file and inlined-scope ids, which
+    // index the source's context: the copy carries it, so a host reading the
+    // copy's code (its inline frames) and the copy's own inliner, which
+    // records new scopes above the ones it finds and wraps those, see the
+    // same scopes the source's positions name.
+    dst->debug_context() = src.debug_context();
     clone_function(*target, *dst);
     const std::vector<const BasicBlock*> blocks(target->blocks().begin(), target->blocks().end());
     clone_callee_closure(src, *dst, blocks, also, target, declare_only);
@@ -227,6 +233,8 @@ std::unique_ptr<Module> clone_module(const Module& src) {
     dst->set_deterministic_fp(src.is_deterministic_fp());
     dst->set_pinned_tls_register(src.pinned_tls_register());
     dst->copy_declarations_from(src);
+    // As clone_function_module: the positions index the source's context.
+    dst->debug_context() = src.debug_context();
     for (const Function* fn : src.functions()) if (fn) clone_function(*fn, *dst);
     return dst;
 }

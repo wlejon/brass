@@ -68,9 +68,17 @@ BRASS_NATIVE_FRAMES_NOINLINE bool brass_capture_caller_frame(uintptr_t& rbp, uin
     return rbp != 0 && ip != 0;
 }
 
-NativeFramesScope::NativeFramesScope(uintptr_t rbp, uintptr_t ip) noexcept
-    : rbp_(rbp), ip_(ip), prev_(t_native_frames) {
+NativeFramesScope::NativeFramesScope(uintptr_t rbp, uintptr_t ip, bool deoptimized) noexcept
+    : rbp_(rbp), ip_(ip), prev_(t_native_frames), deoptimized_(deoptimized) {
     t_native_frames = this;
+}
+
+bool brass_native_frame_deoptimized(uintptr_t ip) noexcept {
+    if (ip == 0) return false;
+    for (const NativeFramesScope* s = t_native_frames; s; s = s->prev_) {
+        if (s->deoptimized_ && s->ip_ == ip) return true;
+    }
+    return false;
 }
 
 NativeFramesScope::~NativeFramesScope() {

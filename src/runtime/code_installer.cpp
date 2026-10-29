@@ -561,7 +561,8 @@ CodeInstallResult CodeInstaller::install_tier2(
     for (const auto& lf : jit->loaded_functions()) {
         const Function* f = module->get_function(lf.name);
         if (!f || f->block_count() == 0) continue;
-        program_pipeline.notify_code_installed({lf.name, TierLevel::Tier2_Optimized, lf.code, lf.size, &lf.lines});
+        program_pipeline.notify_code_installed(
+            {lf.name, TierLevel::Tier2_Optimized, lf.code, lf.size, &lf.lines, &module->debug_context()});
     }
 
     // 3. load_object has already turned the code pages read-execute (W^X)

@@ -2,7 +2,13 @@
 #include <brass/debug/source_loc.hpp>
 #include <brass/mir/instruction.hpp>
 #include <brass/mir/builder.hpp>
+#include <brass/mir/block.hpp>
+#include <brass/mir/function.hpp>
+#include <brass/mir/loop_opt.hpp>
+#include <brass/mir/module.hpp>
 #include <brass/codegen/lir.hpp>
+#include <memory>
+#include <string>
 
 TEST_CASE("SourceLoc - DebugLoc basic properties and equality") {
     brass::DebugLoc default_loc;
@@ -183,4 +189,45 @@ TEST_CASE("SourceLoc - Instruction and Builder propagation") {
     ret->set_loc(f_id, 13, 2);
     CHECK(ret->loc().is_valid());
     CHECK_EQ(ret->loc().line, 13u);
+}
+
+// A tier-up compiles a copy of the function (clone_function_module), whose
+// positions keep the source's file and inlined-scope ids: the copy carries
+// the context they index, so the copy's own inliner records new scopes after
+// them and a host reading the copy's code finds the scopes its positions name.
+TEST_CASE("SourceLoc - a function's copy carries the context its positions index") {
+    brass::Module mod("test_mod");
+    brass::Builder builder(mod);
+    brass::Function* fn = mod.create_function("foo", brass::Type::i32());
+    builder.set_function(fn);
+    builder.position_at_end(builder.append_block("entry"));
+    brass::DebugContext& ctx = mod.debug_context();
+    const uint32_t file = ctx.get_or_add_file("foo.js");
+    ctx.record_inlined_scope("unrelated", brass::DebugLoc(file, 1, 1));
+    const uint32_t scope = ctx.record_inlined_scope("callee", brass::DebugLoc(file, 7, 3));
+    builder.set_current_loc(brass::DebugLoc(file, 20, 5, scope));
+    builder.build_ret(builder.build_iconst_i32(1));
+
+    const auto check = [&](std::unique_ptr<brass::Module> copy) {
+        REQUIRE(copy != nullptr);
+        const brass::Function* cf = copy->get_function("foo");
+        REQUIRE(cf != nullptr);
+        const brass::Instruction* first = nullptr;
+        for (const brass::Instruction* inst : *cf->blocks().front()) {
+            if (inst && inst->loc().is_valid()) {
+                first = inst;
+                break;
+            }
+        }
+        REQUIRE(first != nullptr);
+        CHECK_EQ(first->loc().inlined_at_id, scope);
+        const brass::InlinedScope* s = copy->debug_context().get_inlined_scope(first->loc().inlined_at_id);
+        REQUIRE(s != nullptr);
+        CHECK_EQ(s->callee_name, std::string("callee"));
+        CHECK_EQ(s->callsite_loc.line, 7u);
+        CHECK_EQ(copy->debug_context().get_file(first->loc().file_id), std::string("foo.js"));
+        CHECK_EQ(copy->debug_context().record_inlined_scope("next", brass::DebugLoc(file, 9, 1)), scope + 1);
+    };
+    check(brass::clone_function_module(mod, "foo"));
+    check(brass::clone_module(mod));
 }
