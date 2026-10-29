@@ -75,6 +75,13 @@ struct TestFailure {
     std::string message;
 };
 
+// Thrown by a test that cannot run here (a device without a feature it
+// needs): the runner reports it as [SKIP] with the reason and counts it
+// passed. Not a std::exception, so no catch-all in a test swallows it.
+struct TestSkipped {
+    std::string why;
+};
+
 struct TestCase {
     std::string name;
     std::string file;
@@ -173,8 +180,12 @@ public:
             current_test_ = &tc;
             std::cout << "  [RUN ] " << tc.name << "\n" << std::flush;
             auto start = std::chrono::high_resolution_clock::now();
+            bool skipped = false;
             try {
                 tc.func();
+            } catch (const TestSkipped& skip) {
+                skipped = true;
+                std::cout << "  [SKIP] " << skip.why << "\n" << std::flush;
             } catch (const std::exception& ex) {
                 tc.passed = false;
                 tc.failures.push_back({tc.file, tc.line, "exception", ex.what()});
@@ -187,7 +198,7 @@ public:
 
             if (tc.passed && tc.failures.empty()) {
                 passed++;
-                std::cout << "  [PASS] " << tc.name << " (" << tc.duration_ms << " ms)\n" << std::flush;
+                if (!skipped) std::cout << "  [PASS] " << tc.name << " (" << tc.duration_ms << " ms)\n" << std::flush;
             } else {
                 failed++;
                 std::cout << "  [FAIL] " << tc.name << " (" << tc.duration_ms << " ms)\n" << std::flush;

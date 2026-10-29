@@ -69,10 +69,20 @@ std::vector<T> download(const VulkanBuffer& buf, size_t n) {
     return host;
 }
 
+// A kernel needing a feature this device lacks (Apple's GPUs have no
+// shaderFloat64, no 64-bit atomics, no shader clock) ends the test as a
+// skip naming the feature, rather than failing it: the device cannot run it.
+inline void skip_unless_runs(const brass::target::SpirvKernel& k) {
+    std::string missing = caps().missing_for(k);
+    if (!missing.empty())
+        throw brass::test::TestSkipped{"kernel '" + k.entry + "' needs what " + caps().info.name + " lacks: " + missing};
+}
+
 // compile_checked (ISel + verify + spirv-val) then load on the device.
 inline VulkanModule load(const brass::Function& fn, const VulkanModuleOptions& mo = {},
                          const brass::target::SpirvOptions& so = {}) {
     brass::target::SpirvKernel k = spvtest::compile_checked(fn, so);
+    skip_unless_runs(k);
     std::string err;
     VulkanModule m = VulkanModule::load(k, &err, mo);
     if (!m.valid()) std::cerr << "VulkanModule::load: " << err << "\n";
@@ -81,6 +91,7 @@ inline VulkanModule load(const brass::Function& fn, const VulkanModuleOptions& m
 }
 
 inline VulkanModule load_kernel(const brass::target::SpirvKernel& k, const VulkanModuleOptions& mo = {}) {
+    skip_unless_runs(k);
     std::string err;
     VulkanModule m = VulkanModule::load(k, &err, mo);
     if (!m.valid()) std::cerr << "VulkanModule::load: " << err << "\n";
