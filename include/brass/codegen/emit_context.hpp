@@ -94,6 +94,7 @@ private:
     void emit_sse_instruction(const LirInst& inst);
     std::optional<x64::XMM> three_operand_src1(const LirInst& inst) const;
     void emit_vec_instruction(const LirInst& inst);
+    void emit_vex_lanes_instruction(const LirInst& inst);
     void emit_parallel_copy(const LirInst& inst);
     void emit_control_instruction(const LirInst& inst);
     // The GC points (calls, safepoints): the callee-saved registers holding

@@ -138,6 +138,23 @@ std::string_view opcode_name(Opcode op) noexcept {
         case Opcode::vinsert_lane: return "vinsert_lane";
         case Opcode::vshuffle: return "vshuffle";
         case Opcode::vzero: return "vzero";
+        case Opcode::vcmp_eq: return "vcmp_eq";
+        case Opcode::vcmp_ne: return "vcmp_ne";
+        case Opcode::vcmp_lt: return "vcmp_lt";
+        case Opcode::vcmp_le: return "vcmp_le";
+        case Opcode::vcmp_gt: return "vcmp_gt";
+        case Opcode::vcmp_ge: return "vcmp_ge";
+        case Opcode::vselect: return "vselect";
+        case Opcode::vshl: return "vshl";
+        case Opcode::vlshr: return "vlshr";
+        case Opcode::vashr: return "vashr";
+        case Opcode::vconvert: return "vconvert";
+        case Opcode::vbitcast: return "vbitcast";
+        case Opcode::vfloor: return "vfloor";
+        case Opcode::vceil: return "vceil";
+        case Opcode::vtrunc: return "vtrunc";
+        case Opcode::vround: return "vround";
+        case Opcode::vany: return "vany";
 
         case Opcode::coro_create: return "coro_create";
         case Opcode::coro_suspend: return "coro_suspend";
@@ -329,6 +346,23 @@ bool is_vector_op(Opcode op) noexcept {
         case Opcode::vinsert_lane:
         case Opcode::vshuffle:
         case Opcode::vzero:
+        case Opcode::vcmp_eq:
+        case Opcode::vcmp_ne:
+        case Opcode::vcmp_lt:
+        case Opcode::vcmp_le:
+        case Opcode::vcmp_gt:
+        case Opcode::vcmp_ge:
+        case Opcode::vselect:
+        case Opcode::vshl:
+        case Opcode::vlshr:
+        case Opcode::vashr:
+        case Opcode::vconvert:
+        case Opcode::vbitcast:
+        case Opcode::vfloor:
+        case Opcode::vceil:
+        case Opcode::vtrunc:
+        case Opcode::vround:
+        case Opcode::vany:
             return true;
         default:
             return false;

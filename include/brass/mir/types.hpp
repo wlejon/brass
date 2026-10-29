@@ -188,6 +188,18 @@ public:
         }
     }
 
+    // The integer vector with this vector's lane count and lane width: the
+    // type of its lane masks (f32x8 -> i32x8, f64x4 -> i64x4).
+    constexpr Type vector_mask_type() const noexcept {
+        switch (kind_) {
+            case TypeKind::F32x4: case TypeKind::I32x4: return Type(TypeKind::I32x4);
+            case TypeKind::F64x2: case TypeKind::I64x2: return Type(TypeKind::I64x2);
+            case TypeKind::F32x8: case TypeKind::I32x8: return Type(TypeKind::I32x8);
+            case TypeKind::F64x4: case TypeKind::I64x4: return Type(TypeKind::I64x4);
+            default: return *this;
+        }
+    }
+
     std::string_view name() const noexcept;
 
     constexpr bool operator==(const Type& other) const noexcept = default;

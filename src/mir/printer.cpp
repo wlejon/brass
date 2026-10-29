@@ -622,6 +622,37 @@ public:
                 os_ << "vzero." << inst.type().name();
                 break;
 
+            case Opcode::vcmp_eq:
+            case Opcode::vcmp_ne:
+            case Opcode::vcmp_lt:
+            case Opcode::vcmp_le:
+            case Opcode::vcmp_gt:
+            case Opcode::vcmp_ge:
+            case Opcode::vshl:
+            case Opcode::vlshr:
+            case Opcode::vashr:
+                os_ << opcode_name(op) << " "
+                    << value_name(inst.operand(0)) << ", " << value_name(inst.operand(1));
+                break;
+
+            case Opcode::vselect:
+                os_ << "vselect " << value_name(inst.operand(0)) << ", "
+                    << value_name(inst.operand(1)) << ", " << value_name(inst.operand(2));
+                break;
+
+            case Opcode::vconvert:
+            case Opcode::vbitcast:
+                os_ << opcode_name(op) << "." << inst.type().name() << " " << value_name(inst.operand(0));
+                break;
+
+            case Opcode::vfloor:
+            case Opcode::vceil:
+            case Opcode::vtrunc:
+            case Opcode::vround:
+            case Opcode::vany:
+                os_ << opcode_name(op) << " " << value_name(inst.operand(0));
+                break;
+
             case Opcode::trunc_i8:
                 os_ << "trunc.i8 " << value_name(inst.operand(0));
                 break;

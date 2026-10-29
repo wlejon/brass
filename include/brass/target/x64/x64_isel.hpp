@@ -167,6 +167,9 @@ private:
     void lower_safepoint(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_guard(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_vector_instruction(const Instruction& inst, codegen::LirBlock& lir_bb);
+    // vcmp_*, vselect, the shifts, vconvert, vbitcast, the roundings and vany
+    // (x64_isel_vec_lanes.cpp).
+    void lower_vector_lanes(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_fp_instruction(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_coro(const Instruction& inst, codegen::LirBlock& lir_bb);
 };

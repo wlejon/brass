@@ -123,6 +123,18 @@ FlagEffect x64_flag_effect(LirOpcode op) noexcept {
         case LirOpcode::Vfmadd213pd: case LirOpcode::Vfmadd231pd:
         case LirOpcode::Vfmadd213ss: case LirOpcode::Vfmadd231ss:
         case LirOpcode::Vfmadd213sd: case LirOpcode::Vfmadd231sd:
+        case LirOpcode::Vcmpps: case LirOpcode::Vcmppd:
+        case LirOpcode::Vpcmpeqd: case LirOpcode::Vpcmpgtd:
+        case LirOpcode::Vpcmpeqq: case LirOpcode::Vpcmpgtq:
+        case LirOpcode::Vpminsd: case LirOpcode::Vpmaxsd:
+        case LirOpcode::Vpsllvd: case LirOpcode::Vpsllvq:
+        case LirOpcode::Vpsrlvd: case LirOpcode::Vpsrlvq: case LirOpcode::Vpsravd:
+        case LirOpcode::Vshufps: case LirOpcode::Vblendvps: case LirOpcode::Vblendvpd:
+        case LirOpcode::Vcvtdq2ps: case LirOpcode::Vcvttps2dq:
+        case LirOpcode::Vcvtdq2pd: case LirOpcode::Vcvttpd2dq:
+        case LirOpcode::Vcvtps2pd: case LirOpcode::Vcvtpd2ps: case LirOpcode::Vpmovsxdq:
+        case LirOpcode::Vroundps: case LirOpcode::Vroundpd:
+        case LirOpcode::Vmovmskps: case LirOpcode::Vmovmskpd:
         case LirOpcode::Jmp: case LirOpcode::Jcc: case LirOpcode::Ret:
         case LirOpcode::Push: case LirOpcode::Pop: case LirOpcode::Lea:
         case LirOpcode::ParallelCopy:
@@ -235,6 +247,18 @@ FlagEffect aarch64_flag_effect(LirOpcode op) noexcept {
         case LirOpcode::Vfmadd213pd: case LirOpcode::Vfmadd231pd:
         case LirOpcode::Vfmadd213ss: case LirOpcode::Vfmadd231ss:
         case LirOpcode::Vfmadd213sd: case LirOpcode::Vfmadd231sd:
+        case LirOpcode::Vcmpps: case LirOpcode::Vcmppd:
+        case LirOpcode::Vpcmpeqd: case LirOpcode::Vpcmpgtd:
+        case LirOpcode::Vpcmpeqq: case LirOpcode::Vpcmpgtq:
+        case LirOpcode::Vpminsd: case LirOpcode::Vpmaxsd:
+        case LirOpcode::Vpsllvd: case LirOpcode::Vpsllvq:
+        case LirOpcode::Vpsrlvd: case LirOpcode::Vpsrlvq: case LirOpcode::Vpsravd:
+        case LirOpcode::Vshufps: case LirOpcode::Vblendvps: case LirOpcode::Vblendvpd:
+        case LirOpcode::Vcvtdq2ps: case LirOpcode::Vcvttps2dq:
+        case LirOpcode::Vcvtdq2pd: case LirOpcode::Vcvttpd2dq:
+        case LirOpcode::Vcvtps2pd: case LirOpcode::Vcvtpd2ps: case LirOpcode::Vpmovsxdq:
+        case LirOpcode::Vroundps: case LirOpcode::Vroundpd:
+        case LirOpcode::Vmovmskps: case LirOpcode::Vmovmskpd:
         case LirOpcode::Jmp: case LirOpcode::Jcc: case LirOpcode::Ret:
         case LirOpcode::Push: case LirOpcode::Pop: case LirOpcode::Lea:
         case LirOpcode::ParallelCopy:

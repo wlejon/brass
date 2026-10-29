@@ -239,6 +239,11 @@ bool is_pure_nontrapping(const Instruction& inst) noexcept {
         case Opcode::vmin: case Opcode::vmax: case Opcode::vsqrt: case Opcode::vand: case Opcode::vor:
         case Opcode::vxor: case Opcode::vnot: case Opcode::vbroadcast: case Opcode::vextract_lane:
         case Opcode::vinsert_lane: case Opcode::vshuffle: case Opcode::vzero:
+        case Opcode::vcmp_eq: case Opcode::vcmp_ne: case Opcode::vcmp_lt:
+        case Opcode::vcmp_le: case Opcode::vcmp_gt: case Opcode::vcmp_ge:
+        case Opcode::vselect: case Opcode::vshl: case Opcode::vlshr: case Opcode::vashr:
+        case Opcode::vconvert: case Opcode::vbitcast: case Opcode::vfloor: case Opcode::vceil:
+        case Opcode::vtrunc: case Opcode::vround: case Opcode::vany:
             return true;
         case Opcode::vdiv:
             // Lane-wise integer division could divide by zero.

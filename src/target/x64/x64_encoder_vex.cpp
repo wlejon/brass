@@ -40,6 +40,14 @@ void X64Encoder::vzeroupper() {
     buffer_.emit8(0x77);
 }
 
+void X64Encoder::vex_rr(uint8_t opcode, uint8_t mmmmm, uint8_t pp, bool w, bool l,
+                        uint8_t reg, uint8_t vvvv, uint8_t rm, int imm) {
+    emit_vex(w, mmmmm, pp, l, (reg & 8) != 0, false, (rm & 8) != 0, vvvv & 0x0F);
+    buffer_.emit8(opcode);
+    emit_modrm(3, reg & 7, rm & 7);
+    if (imm >= 0) buffer_.emit8(static_cast<uint8_t>(imm));
+}
+
 // =========================================================================
 // 256-BIT AVX / AVX2 MOVES
 // =========================================================================

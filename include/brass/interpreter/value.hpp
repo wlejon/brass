@@ -1,6 +1,7 @@
 #pragma once
 
 #include <brass/mir/types.hpp>
+#include <brass/mir/opcodes.hpp>
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
@@ -657,6 +658,9 @@ RuntimeValue val_vextract_lane(RuntimeValue val, uint32_t lane);
 RuntimeValue val_vinsert_lane(RuntimeValue vec, RuntimeValue scalar, uint32_t lane);
 RuntimeValue val_vshuffle(RuntimeValue v1, RuntimeValue v2, uint32_t mask);
 RuntimeValue val_vzero(Type vec_type);
+// vcmp_*, vselect, vshl/vlshr/vashr, vconvert, vbitcast, vfloor/vceil/vtrunc/
+// vround and vany over the instruction's operands (value_vec_lanes.cpp).
+RuntimeValue val_vlanes(Opcode op, Type result_type, const RuntimeValue* operands);
 
 std::string to_string(const RuntimeValue& val);
 std::ostream& operator<<(std::ostream& os, const RuntimeValue& val);

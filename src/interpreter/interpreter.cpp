@@ -523,6 +523,17 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                     frame.set_value(inst->result(), val_vzero(inst->type()));
                     break;
                 }
+                case Opcode::vcmp_eq: case Opcode::vcmp_ne: case Opcode::vcmp_lt:
+                case Opcode::vcmp_le: case Opcode::vcmp_gt: case Opcode::vcmp_ge:
+                case Opcode::vselect: case Opcode::vshl: case Opcode::vlshr: case Opcode::vashr:
+                case Opcode::vconvert: case Opcode::vbitcast: case Opcode::vfloor: case Opcode::vceil:
+                case Opcode::vtrunc: case Opcode::vround: case Opcode::vany: {
+                    RuntimeValue ops[3];
+                    for (size_t i = 0; i < inst->operand_count() && i < 3; ++i)
+                        ops[i] = frame.get_value(inst->operand(i));
+                    frame.set_value(inst->result(), val_vlanes(inst->opcode(), inst->type(), ops));
+                    break;
+                }
 
                 case Opcode::func_addr: {
                     std::string_view callee = inst->symbol();

@@ -167,6 +167,40 @@ enum class Opcode : uint16_t {
     vinsert_lane,
     vshuffle,
     vzero,
+    // Lane compares: each lane all ones where the relation holds, else zero,
+    // in the integer vector of the operands' lane width (f32x8 -> i32x8,
+    // f64x4 -> i64x4). Floats compare ordered (a NaN lane is false), except
+    // vcmp_ne, which is true for a NaN lane; integers compare signed.
+    vcmp_eq,
+    vcmp_ne,
+    vcmp_lt,
+    vcmp_le,
+    vcmp_gt,
+    vcmp_ge,
+    // vselect mask, a, b: a's lane where the mask lane is all ones, else b's
+    // (the mask an integer vector of a's lane width, each lane 0 or all ones).
+    vselect,
+    // Per-lane integer shifts by the second operand's lanes (an amount at or
+    // past the lane width gives 0, or the sign for vashr).
+    vshl,
+    vlshr,
+    vashr,
+    // A lane-wise conversion, chosen by the operand and result types:
+    // i32xN <-> f32xN, i32x4 <-> f64x4, f32x4 <-> f64x4, i32x4 <-> i64x4
+    // (float to integer truncates; i64 to i32 keeps the low half; i32 to i64
+    // sign-extends). A float lane past the integer's range gives its minimum.
+    vconvert,
+    // The bits of a vector as another vector type of the same size.
+    vbitcast,
+    // Lane-wise rounding of a float vector: toward -inf, +inf, zero, and to
+    // nearest (ties to even).
+    vfloor,
+    vceil,
+    vtrunc,
+    vround,
+    // vany mask: an i32, 1 if any lane of the integer vector has its sign bit
+    // set, else 0.
+    vany,
 
     // Coroutines
     coro_create,

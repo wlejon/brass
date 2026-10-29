@@ -37,6 +37,14 @@ void X64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
             lower_vector_instruction(inst, lir_bb);
             break;
 
+        case Opcode::vcmp_eq: case Opcode::vcmp_ne: case Opcode::vcmp_lt:
+        case Opcode::vcmp_le: case Opcode::vcmp_gt: case Opcode::vcmp_ge:
+        case Opcode::vselect: case Opcode::vshl: case Opcode::vlshr: case Opcode::vashr:
+        case Opcode::vconvert: case Opcode::vbitcast: case Opcode::vfloor: case Opcode::vceil:
+        case Opcode::vtrunc: case Opcode::vround: case Opcode::vany:
+            lower_vector_lanes(inst, lir_bb);
+            break;
+
         case Opcode::iconst_i32: {
             VReg dst = get_vreg(inst.result());
             int32_t val = inst.imm_i32();

@@ -385,6 +385,37 @@ enum class LirOpcode : uint16_t {
     Vfmadd231ss,
     Vfmadd213sd,
     Vfmadd231sd,
+    // VEX vector ops at either width: VEX.256 when any operand is 32 bytes,
+    // else VEX.128 (emit_vec_lanes.cpp). defs[0] is the destination; the
+    // uses are the sources in Intel order (the vvvv source first when there
+    // is one), then an imm.
+    Vcmpps,         // uses: a, b, imm predicate
+    Vcmppd,
+    Vpcmpeqd,       // uses: a, b
+    Vpcmpgtd,
+    Vpcmpeqq,
+    Vpcmpgtq,
+    Vpminsd,
+    Vpmaxsd,
+    Vpsllvd,        // uses: value, per-lane amounts
+    Vpsllvq,
+    Vpsrlvd,
+    Vpsrlvq,
+    Vpsravd,
+    Vshufps,        // uses: a, b, imm
+    Vblendvps,      // uses: b (lanes where the mask is clear), a, mask
+    Vblendvpd,
+    Vcvtdq2ps,      // uses: src
+    Vcvttps2dq,
+    Vcvtdq2pd,      // ymm from xmm
+    Vcvttpd2dq,     // xmm from ymm
+    Vcvtps2pd,      // ymm from xmm
+    Vcvtpd2ps,      // xmm from ymm
+    Vpmovsxdq,      // ymm from xmm
+    Vroundps,       // uses: src, imm mode
+    Vroundpd,
+    Vmovmskps,      // def gpr; uses: src
+    Vmovmskpd,
     // Branches & Calls
     Jmp,
     Jcc,

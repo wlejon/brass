@@ -201,6 +201,20 @@ public:
     Value* build_vshuffle(Value* v1, Value* v2, uint32_t mask);
     Value* build_vzero(Type vec_type);
 
+    // Vector Compare, Select, Shift, Convert & Round (opcodes.hpp)
+    Value* build_vcmp(Opcode cmp, Value* lhs, Value* rhs);   // cmp: vcmp_eq .. vcmp_ge
+    Value* build_vselect(Value* mask, Value* a, Value* b);
+    Value* build_vshl(Value* val, Value* amount);
+    Value* build_vlshr(Value* val, Value* amount);
+    Value* build_vashr(Value* val, Value* amount);
+    Value* build_vconvert(Type to, Value* val);
+    Value* build_vbitcast(Type to, Value* val);
+    Value* build_vfloor(Value* val);
+    Value* build_vceil(Value* val);
+    Value* build_vtrunc(Value* val);
+    Value* build_vround(Value* val);
+    Value* build_vany(Value* mask);
+
     // Calls & Safepoints
     Value* build_call(std::string_view callee, Type return_type, Span<Value* const> args);
     Value* build_call(std::string_view callee, Type return_type, std::initializer_list<Value*> args);

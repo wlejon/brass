@@ -300,6 +300,125 @@ bool verify_vector_instruction(
             return true;
         }
 
+        case Opcode::vcmp_eq:
+        case Opcode::vcmp_ne:
+        case Opcode::vcmp_lt:
+        case Opcode::vcmp_le:
+        case Opcode::vcmp_gt:
+        case Opcode::vcmp_ge: {
+            if (inst->operand_count() != 2 || !inst->operand(0) || !inst->operand(1)) {
+                report_error(inst_prefix + "Requires 2 operands.");
+                return false;
+            }
+            Type t0 = inst->operand(0)->type();
+            if (!t0.is_vector() || inst->operand(1)->type() != t0) {
+                report_error(inst_prefix + "Operands must be vectors of one type.");
+                return false;
+            }
+            if (inst->type() != t0.vector_mask_type()) {
+                report_error(inst_prefix + "Result type must be " +
+                             std::string(t0.vector_mask_type().name()) + ".");
+                return false;
+            }
+            return true;
+        }
+
+        case Opcode::vselect: {
+            if (inst->operand_count() != 3 || !inst->operand(0) || !inst->operand(1) || !inst->operand(2)) {
+                report_error(inst_prefix + "Requires 3 operands (mask, a, b).");
+                return false;
+            }
+            Type t = inst->operand(1)->type();
+            if (!t.is_vector() || inst->operand(2)->type() != t || inst->type() != t) {
+                report_error(inst_prefix + "Values and result must be vectors of one type.");
+                return false;
+            }
+            if (inst->operand(0)->type() != t.vector_mask_type()) {
+                report_error(inst_prefix + "Mask must be " + std::string(t.vector_mask_type().name()) + ".");
+                return false;
+            }
+            return true;
+        }
+
+        case Opcode::vshl:
+        case Opcode::vlshr:
+        case Opcode::vashr: {
+            if (inst->operand_count() != 2 || !inst->operand(0) || !inst->operand(1)) {
+                report_error(inst_prefix + "Requires 2 operands.");
+                return false;
+            }
+            Type t0 = inst->operand(0)->type();
+            if (!t0.is_vector() || !t0.element_type().is_integer() ||
+                inst->operand(1)->type() != t0 || inst->type() != t0) {
+                report_error(inst_prefix + "Operands and result must be integer vectors of one type.");
+                return false;
+            }
+            return true;
+        }
+
+        case Opcode::vconvert: {
+            if (inst->operand_count() != 1 || !inst->operand(0)) {
+                report_error(inst_prefix + "Requires 1 operand.");
+                return false;
+            }
+            Type from = inst->operand(0)->type();
+            Type to = inst->type();
+            auto pair = [&](Type a, Type b) {
+                return (from == a && to == b) || (from == b && to == a);
+            };
+            if (!(pair(Type::i32x4(), Type::f32x4()) || pair(Type::i32x8(), Type::f32x8()) ||
+                  pair(Type::i32x4(), Type::f64x4()) || pair(Type::f32x4(), Type::f64x4()) ||
+                  pair(Type::i32x4(), Type::i64x4()))) {
+                report_error(inst_prefix + "No vconvert from " + std::string(from.name()) +
+                             " to " + std::string(to.name()) + ".");
+                return false;
+            }
+            return true;
+        }
+
+        case Opcode::vbitcast: {
+            if (inst->operand_count() != 1 || !inst->operand(0)) {
+                report_error(inst_prefix + "Requires 1 operand.");
+                return false;
+            }
+            Type from = inst->operand(0)->type();
+            if (!from.is_vector() || !inst->type().is_vector() ||
+                from.size_in_bytes() != inst->type().size_in_bytes()) {
+                report_error(inst_prefix + "Operand and result must be vectors of one size.");
+                return false;
+            }
+            return true;
+        }
+
+        case Opcode::vfloor:
+        case Opcode::vceil:
+        case Opcode::vtrunc:
+        case Opcode::vround: {
+            if (inst->operand_count() != 1 || !inst->operand(0)) {
+                report_error(inst_prefix + "Requires 1 operand.");
+                return false;
+            }
+            Type t0 = inst->operand(0)->type();
+            if (!t0.is_vector() || !t0.element_type().is_float() || inst->type() != t0) {
+                report_error(inst_prefix + "Operand and result must be one float vector type.");
+                return false;
+            }
+            return true;
+        }
+
+        case Opcode::vany: {
+            if (inst->operand_count() != 1 || !inst->operand(0)) {
+                report_error(inst_prefix + "Requires 1 operand.");
+                return false;
+            }
+            Type t0 = inst->operand(0)->type();
+            if (!t0.is_vector() || !t0.element_type().is_integer() || inst->type() != Type::i32()) {
+                report_error(inst_prefix + "Operand must be an integer vector, the result i32.");
+                return false;
+            }
+            return true;
+        }
+
         default:
             return false;
     }

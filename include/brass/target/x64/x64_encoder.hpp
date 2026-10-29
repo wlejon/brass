@@ -448,6 +448,11 @@ public:
     // VEX.128.0F.WIG 77: zeroes bits 255:128 of every YMM register, so the
     // legacy-SSE code that runs next pays no upper-state penalty.
     void vzeroupper();
+    // A VEX instruction on registers (encodings 0-15): ModRM.reg = reg,
+    // VEX.vvvv = vvvv (0 when the instruction has no such source), ModRM.rm =
+    // rm, then an imm8 when imm >= 0. `l` selects VEX.256.
+    void vex_rr(uint8_t opcode, uint8_t mmmmm, uint8_t pp, bool w, bool l,
+                uint8_t reg, uint8_t vvvv, uint8_t rm, int imm = -1);
     // Whether anything encoded so far is a VEX.256 instruction (L = 1),
     // which leaves the upper halves of the YMM registers dirty.
     bool wrote_256() const noexcept { return wrote_256_; }

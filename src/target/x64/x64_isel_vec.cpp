@@ -151,9 +151,11 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
                 } else if (inst.opcode() == Opcode::vmin) {
                     if (t.kind() == TypeKind::F32x8) op = LirOpcode::Vminps;
                     else if (t.kind() == TypeKind::F64x4) op = LirOpcode::Vminpd;
+                    else if (t.kind() == TypeKind::I32x8) op = LirOpcode::Vpminsd;
                 } else if (inst.opcode() == Opcode::vmax) {
                     if (t.kind() == TypeKind::F32x8) op = LirOpcode::Vmaxps;
                     else if (t.kind() == TypeKind::F64x4) op = LirOpcode::Vmaxpd;
+                    else if (t.kind() == TypeKind::I32x8) op = LirOpcode::Vpmaxsd;
                 }
                 // No 256-bit instruction for this op/type pair (i64x4 vmul,
                 // integer vdiv, ...): an error, never the 128-bit path, which

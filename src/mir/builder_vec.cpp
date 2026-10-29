@@ -150,4 +150,39 @@ Value* Builder::build_vzero(Type vec_type) {
     return res;
 }
 
+static Value* build_vec_typed(Builder* b, Arena& arena, Opcode op, Type res_type,
+                              std::initializer_list<Value*> operands) {
+    Instruction* inst = arena.make<Instruction>(op, res_type);
+    for (Value* v : operands) inst->add_operand(v);
+    Value* res = b->create_value(res_type);
+    res->set_defining_instruction(inst);
+    inst->set_result(res);
+    b->insert(inst);
+    return res;
+}
+
+Value* Builder::build_vcmp(Opcode cmp, Value* lhs, Value* rhs) {
+    Type res_type = (lhs ? lhs->type() : Type::f32x4()).vector_mask_type();
+    return build_vec_typed(this, get_arena(), cmp, res_type, {lhs, rhs});
+}
+Value* Builder::build_vselect(Value* mask, Value* a, Value* b) {
+    return build_vec_typed(this, get_arena(), Opcode::vselect, a ? a->type() : Type::f32x4(), {mask, a, b});
+}
+Value* Builder::build_vshl(Value* val, Value* amount) { return build_vec_bin_op(this, get_arena(), Opcode::vshl, val, amount); }
+Value* Builder::build_vlshr(Value* val, Value* amount) { return build_vec_bin_op(this, get_arena(), Opcode::vlshr, val, amount); }
+Value* Builder::build_vashr(Value* val, Value* amount) { return build_vec_bin_op(this, get_arena(), Opcode::vashr, val, amount); }
+Value* Builder::build_vconvert(Type to, Value* val) {
+    return build_vec_typed(this, get_arena(), Opcode::vconvert, to, {val});
+}
+Value* Builder::build_vbitcast(Type to, Value* val) {
+    return build_vec_typed(this, get_arena(), Opcode::vbitcast, to, {val});
+}
+Value* Builder::build_vfloor(Value* val) { return build_vec_un_op(this, get_arena(), Opcode::vfloor, val); }
+Value* Builder::build_vceil(Value* val) { return build_vec_un_op(this, get_arena(), Opcode::vceil, val); }
+Value* Builder::build_vtrunc(Value* val) { return build_vec_un_op(this, get_arena(), Opcode::vtrunc, val); }
+Value* Builder::build_vround(Value* val) { return build_vec_un_op(this, get_arena(), Opcode::vround, val); }
+Value* Builder::build_vany(Value* mask) {
+    return build_vec_typed(this, get_arena(), Opcode::vany, Type::i32(), {mask});
+}
+
 } // namespace brass

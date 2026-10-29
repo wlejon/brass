@@ -79,6 +79,23 @@ bool decode_vector_opcode(
     if (base == "vinsert_lane") { op = Opcode::vinsert_lane; return true; }
     if (base == "vshuffle") { op = Opcode::vshuffle; return true; }
     if (base == "vzero") { op = Opcode::vzero; return true; }
+    if (base == "vcmp_eq") { op = Opcode::vcmp_eq; return true; }
+    if (base == "vcmp_ne") { op = Opcode::vcmp_ne; return true; }
+    if (base == "vcmp_lt") { op = Opcode::vcmp_lt; return true; }
+    if (base == "vcmp_le") { op = Opcode::vcmp_le; return true; }
+    if (base == "vcmp_gt") { op = Opcode::vcmp_gt; return true; }
+    if (base == "vcmp_ge") { op = Opcode::vcmp_ge; return true; }
+    if (base == "vselect") { op = Opcode::vselect; return true; }
+    if (base == "vshl") { op = Opcode::vshl; return true; }
+    if (base == "vlshr") { op = Opcode::vlshr; return true; }
+    if (base == "vashr") { op = Opcode::vashr; return true; }
+    if (base == "vconvert") { op = Opcode::vconvert; return true; }
+    if (base == "vbitcast") { op = Opcode::vbitcast; return true; }
+    if (base == "vfloor") { op = Opcode::vfloor; return true; }
+    if (base == "vceil") { op = Opcode::vceil; return true; }
+    if (base == "vtrunc") { op = Opcode::vtrunc; return true; }
+    if (base == "vround") { op = Opcode::vround; return true; }
+    if (base == "vany") { op = Opcode::vany; return true; }
 
     return false;
 }
@@ -295,6 +312,69 @@ bool parse_vector_instruction(
             Type vt = type_suffix.is_vector() ? type_suffix :
                       (type_annotation.is_vector() ? type_annotation : Type::f32x4());
             res_val = b.build_vzero(vt);
+            return true;
+        }
+
+        case Opcode::vcmp_eq:
+        case Opcode::vcmp_ne:
+        case Opcode::vcmp_lt:
+        case Opcode::vcmp_le:
+        case Opcode::vcmp_gt:
+        case Opcode::vcmp_ge:
+        case Opcode::vshl:
+        case Opcode::vlshr:
+        case Opcode::vashr: {
+            Value* lhs = ctx.parse_val();
+            if (!lhs) return false;
+            if (!ctx.expect(TokenKind::Comma, "','")) return false;
+            Value* rhs = ctx.parse_val();
+            if (!rhs) return false;
+            switch (op) {
+                case Opcode::vshl:  res_val = b.build_vshl(lhs, rhs); break;
+                case Opcode::vlshr: res_val = b.build_vlshr(lhs, rhs); break;
+                case Opcode::vashr: res_val = b.build_vashr(lhs, rhs); break;
+                default:            res_val = b.build_vcmp(op, lhs, rhs); break;
+            }
+            return true;
+        }
+
+        case Opcode::vselect: {
+            Value* mask = ctx.parse_val();
+            if (!mask) return false;
+            if (!ctx.expect(TokenKind::Comma, "','")) return false;
+            Value* a = ctx.parse_val();
+            if (!a) return false;
+            if (!ctx.expect(TokenKind::Comma, "','")) return false;
+            Value* c = ctx.parse_val();
+            if (!c) return false;
+            res_val = b.build_vselect(mask, a, c);
+            return true;
+        }
+
+        case Opcode::vconvert:
+        case Opcode::vbitcast: {
+            Value* val = ctx.parse_val();
+            if (!val) return false;
+            Type vt = type_suffix.is_vector() ? type_suffix :
+                      (type_annotation.is_vector() ? type_annotation : Type::f32x4());
+            res_val = op == Opcode::vconvert ? b.build_vconvert(vt, val) : b.build_vbitcast(vt, val);
+            return true;
+        }
+
+        case Opcode::vfloor:
+        case Opcode::vceil:
+        case Opcode::vtrunc:
+        case Opcode::vround:
+        case Opcode::vany: {
+            Value* val = ctx.parse_val();
+            if (!val) return false;
+            switch (op) {
+                case Opcode::vfloor: res_val = b.build_vfloor(val); break;
+                case Opcode::vceil:  res_val = b.build_vceil(val); break;
+                case Opcode::vtrunc: res_val = b.build_vtrunc(val); break;
+                case Opcode::vround: res_val = b.build_vround(val); break;
+                default:             res_val = b.build_vany(val); break;
+            }
             return true;
         }
 

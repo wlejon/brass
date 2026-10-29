@@ -75,6 +75,11 @@ bool is_pre_candidate_op(const Instruction* inst) noexcept {
         case Opcode::vinsert_lane:
         case Opcode::vshuffle:
         case Opcode::vzero:
+        case Opcode::vcmp_eq: case Opcode::vcmp_ne: case Opcode::vcmp_lt:
+        case Opcode::vcmp_le: case Opcode::vcmp_gt: case Opcode::vcmp_ge:
+        case Opcode::vselect: case Opcode::vshl: case Opcode::vlshr: case Opcode::vashr:
+        case Opcode::vconvert: case Opcode::vbitcast: case Opcode::vfloor: case Opcode::vceil:
+        case Opcode::vtrunc: case Opcode::vround: case Opcode::vany:
             return true;
         case Opcode::sdiv:
         case Opcode::udiv:

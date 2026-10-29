@@ -219,6 +219,23 @@ bb0:
   %26: f64x4 = vzero.f64x4
   %27: f32x8 = vzero.f32x8
   %28: i32x4 = vzero.i32x4
+  %29: i32x4 = vcmp_eq %3, %4
+  %30: i32x4 = vcmp_ne %3, %4
+  %31: i32x4 = vcmp_lt %3, %4
+  %32: i32x4 = vcmp_le %3, %4
+  %33: i32x4 = vcmp_gt %3, %4
+  %34: i32x4 = vcmp_ge %3, %4
+  %35: f32x4 = vselect %29, %3, %4
+  %36: i32x4 = vshl %29, %30
+  %37: i32x4 = vlshr %29, %30
+  %38: i32x4 = vashr %29, %30
+  %39: f32x4 = vconvert.f32x4 %36
+  %40: i32x4 = vbitcast.i32x4 %3
+  %41: f32x4 = vfloor %3
+  %42: f32x4 = vceil %3
+  %43: f32x4 = vtrunc %3
+  %44: f32x4 = vround %3
+  %45 = vany %29
   vstore.f32x4 %0, 48, %22
   vstore.i64x4 %0, 0, %18
   ret
