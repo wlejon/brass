@@ -176,7 +176,7 @@ void LinearScanAllocator::clear_dead_callee_gprs_at_calls(uint32_t final_callee_
         live_spill_at.assign(n_inst, 0);
         for (size_t idx = n_inst; idx-- > 0;) {
             const LirInst& inst = *block->instructions[idx];
-            if (inst.is_call()) {
+            if (inst.is_call() && !inst.no_gc_point) {
                 uint32_t mask = 0;
                 uint64_t smask = 0;
                 auto mark_loc = [&](const LirOperand& op) {
@@ -251,11 +251,15 @@ void LinearScanAllocator::clear_dead_callee_gprs_at_calls(uint32_t final_callee_
 
     // Which registers and slots may hold a stale word, forward over the CFG:
     // a call clears the dead ones, so what is dirty at a call is what was
-    // written since the last call on SOME path to it. Each block's entry is
-    // the union of its predecessors' exits; the function's entry, and a block
-    // control reaches by no edge the CFG records (a landing pad, a resume
-    // target, a guard exit), starts with everything dirty, which is what a
-    // block started with when the walk was one block at a time.
+    // written since the last call on SOME path to it. A call that reaches no
+    // GC point (no_gc_point: the write barrier, a pure helper) is no call
+    // here: nothing scans the frame while it runs, so what is dirty before it
+    // waits for the next call that can collect, cleared there if still
+    // dead. Each block's entry is the union of its predecessors' exits; the
+    // function's entry, and a block control reaches by no edge the CFG
+    // records (a landing pad, a resume target, a guard exit), starts with
+    // everything dirty, which is what a block started with when the walk was
+    // one block at a time.
     struct Dirty {
         uint32_t callee = 0;
         uint64_t spill = 0;
@@ -270,12 +274,60 @@ void LinearScanAllocator::clear_dead_callee_gprs_at_calls(uint32_t final_callee_
         } else if (loc.is_spill_slot() && loc.spill_slot >= 0 && loc.spill_slot < 64) {
             if (gpr_spill_mask & (uint64_t{1} << loc.spill_slot)) {
                 d.spill |= (uint64_t{1} << loc.spill_slot);
-                if (!cc_.target().is_aarch64()) {
-                    d.callee |= brass::x64::reg_mask(brass::x64::GPR::R14) |
-                                brass::x64::reg_mask(brass::x64::GPR::R15);
-                }
             }
         }
+    };
+    // The x64 rewrite's callee-saved scratches (rewrite_instructions): R14
+    // takes a general register value defined into its slot by anything but
+    // a register-to-slot copy, R15 a move between slots or memory (a load
+    // into a spilled value included) or the third operand reloaded for one
+    // instruction (R10 and R11 come first, and are
+    // caller-saved). Only those instructions leave a stale word in them; a
+    // split's store or reload is a move of its own, through R10/R11 at most.
+    // Marking both at every slot touched cleared them at nearly every call.
+    const uint32_t r14 = cc_.target().is_aarch64() ? 0u : brass::x64::reg_mask(brass::x64::GPR::R14);
+    const uint32_t r15 = cc_.target().is_aarch64() ? 0u : brass::x64::reg_mask(brass::x64::GPR::R15);
+    auto in_gpr_slot = [&](VReg v, uint32_t inst_id) {
+        if (!v.is_valid() || !v.is_gpr()) return false;
+        const LirOperand loc = location_at(v, inst_id, 8);
+        return loc.is_spill_slot() && loc.spill_slot >= 0;
+    };
+    auto use_scratches_into = [&](Dirty& d, const LirInst& inst) {
+        if (r15 == 0) return;
+        uint32_t reloads = 0;
+        bool slot_use = false;
+        for (const auto& u : inst.uses) {
+            if (u.is_vreg() && in_gpr_slot(u.vreg_val, inst.id)) { ++reloads; slot_use = true; }
+            else if (u.is_spill_slot()) slot_use = true;
+            else if (u.is_mem()) {
+                // A memory source into a slot is a memory-to-memory move,
+                // through R15 like a slot's.
+                slot_use = true;
+                reloads += in_gpr_slot(u.mem_val.base_vreg, inst.id);
+                reloads += in_gpr_slot(u.mem_val.index_vreg, inst.id);
+            }
+        }
+        for (const auto& df : inst.defs) {
+            if (!df.is_mem()) continue;
+            reloads += in_gpr_slot(df.mem_val.base_vreg, inst.id);
+            reloads += in_gpr_slot(df.mem_val.index_vreg, inst.id);
+        }
+        bool slot_def = false;
+        for (const auto& df : inst.defs) {
+            if ((df.is_vreg() && in_gpr_slot(df.vreg_val, inst.id)) || df.is_spill_slot() || df.is_mem()) slot_def = true;
+        }
+        if (reloads >= 3 || (slot_def && slot_use)) d.callee |= r15;
+    };
+    auto def_scratch_into = [&](Dirty& d, const LirInst& inst) {
+        if (r14 == 0 || inst.defs.empty() || inst.is_call()) return;
+        const LirOperand& df = inst.defs[0];
+        if (!df.is_vreg() || !in_gpr_slot(df.vreg_val, inst.id)) return;
+        const bool reg_copy = inst.opcode == LirOpcode::Mov && inst.uses.size() == 1 && df.size == 8 &&
+                              inst.uses[0].size == 8 &&
+                              ((inst.uses[0].is_vreg() && inst.uses[0].vreg_val.is_gpr() &&
+                                !in_gpr_slot(inst.uses[0].vreg_val, inst.id)) ||
+                               inst.uses[0].is_preg());
+        if (!reg_copy) d.callee |= r14;
     };
     auto note_op_into = [&](Dirty& d, const LirOperand& op, uint32_t inst_id) {
         if (op.is_vreg() && op.vreg_val.is_valid()) {
@@ -331,12 +383,14 @@ void LinearScanAllocator::clear_dead_callee_gprs_at_calls(uint32_t final_callee_
                 }
             }
             for (const auto& u : inst.uses) note_op_into(d, u, inst.id);
-            if (inst.is_call()) {
+            use_scratches_into(d, inst);
+            if (inst.is_call() && !inst.no_gc_point) {
                 seg.push_back(d);
                 call_at[bi].push_back(idx);
                 d = Dirty{};
             }
             for (const auto& def : inst.defs) note_op_into(d, def, inst.id);
+            def_scratch_into(d, inst);
             if (auto mit = moves_after_.find(inst.id); mit != moves_after_.end()) {
                 for (const auto& pm : mit->second) {
                     note_op_into(d, pm.src, inst.id);

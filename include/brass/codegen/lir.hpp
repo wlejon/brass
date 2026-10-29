@@ -460,6 +460,10 @@ public:
     std::string callee_symbol;
     std::vector<VReg> live_gcrefs;
     bool is_invoke = false;
+    // A call whose callee never reaches a GC point (SymbolRole::Pure or
+    // NoCollect, or the write barrier): no collection scans the frame while
+    // it runs, so it is not where dead slots are cleared.
+    bool no_gc_point = false;
     uint32_t unwind_block_id = UINT32_MAX;
 
     LirInst() = default;
@@ -492,6 +496,11 @@ public:
     uint32_t loop_depth = 0;
     x64::Label x64_label;
     bool is_landing_pad = false;
+    // Rarely run (the MIR block's is_cold, or an edge block leading only
+    // into such a block): ordered after the hot blocks of its loop before
+    // register allocation, so the scan's positions after its calls are not
+    // the hot path's, and placed at the end by the block layout.
+    bool cold = false;
 
     LirBlock() = default;
     LirBlock(uint32_t id, std::string name) : id(id), name(std::move(name)) {}

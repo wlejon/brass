@@ -482,3 +482,78 @@ TEST_CASE("Peephole - Mov32 Self-Move Elimination and 64-bit Reader Preservation
 
 
 
+
+// A double spilled from a general register: `r = mov slot; x = movq r` is
+// one SSE load of the slot, `r = movq x; slot = mov r` one SSE store, when
+// nothing reads r afterwards; when something does, both moves stay.
+TEST_CASE("Peephole - Bitcast Through a Spill Slot Is One SSE Move") {
+    LirFunction fn;
+    LirBlock* bb = fn.create_block("entry");
+
+    auto load = std::make_unique<LirInst>(LirOpcode::Mov);
+    load->add_def(LirOperand::preg_gpr(GPR::RAX, 8));
+    load->add_use(LirOperand::slot(0, 8));
+    bb->append_inst(std::move(load));
+    auto to_xmm = std::make_unique<LirInst>(LirOpcode::Movq_xg);
+    to_xmm->add_def(LirOperand::preg_xmm(XMM::XMM0, 8));
+    to_xmm->add_use(LirOperand::preg_gpr(GPR::RAX, 8));
+    bb->append_inst(std::move(to_xmm));
+
+    auto to_gpr = std::make_unique<LirInst>(LirOpcode::Movq_gx);
+    to_gpr->add_def(LirOperand::preg_gpr(GPR::RCX, 8));
+    to_gpr->add_use(LirOperand::preg_xmm(XMM::XMM1, 8));
+    bb->append_inst(std::move(to_gpr));
+    auto store = std::make_unique<LirInst>(LirOpcode::Mov);
+    store->add_def(LirOperand::slot(1, 8));
+    store->add_use(LirOperand::preg_gpr(GPR::RCX, 8));
+    bb->append_inst(std::move(store));
+
+    // rax and rcx are written before anything reads them again.
+    for (GPR g : {GPR::RAX, GPR::RCX}) {
+        auto kill = std::make_unique<LirInst>(LirOpcode::Mov);
+        kill->add_def(LirOperand::preg_gpr(g, 8));
+        kill->add_use(LirOperand::imm(7, 8));
+        bb->append_inst(std::move(kill));
+    }
+    auto add = std::make_unique<LirInst>(LirOpcode::Add);
+    add->add_def(LirOperand::preg_gpr(GPR::RAX, 8));
+    add->add_use(LirOperand::preg_gpr(GPR::RAX, 8));
+    add->add_use(LirOperand::preg_gpr(GPR::RCX, 8));
+    bb->append_inst(std::move(add));
+    auto ret = std::make_unique<LirInst>(LirOpcode::Ret);
+    ret->add_use(LirOperand::preg_gpr(GPR::RAX, 8));
+    bb->append_inst(std::move(ret));
+
+    PeepholeStats stats = run_lir_peephole_optimizations(fn);
+    CHECK_EQ(stats.bitcasts_through_slots, size_t(2));
+    const LirInst& l = *bb->instructions[0];
+    CHECK(l.opcode == LirOpcode::Movsd);
+    CHECK(l.defs[0].is_preg() && l.defs[0].preg_val.as_xmm() == XMM::XMM0);
+    CHECK(l.uses[0].is_spill_slot() && l.uses[0].spill_slot == 0);
+    const LirInst& s = *bb->instructions[1];
+    CHECK(s.opcode == LirOpcode::Movsd);
+    CHECK(s.defs[0].is_spill_slot() && s.defs[0].spill_slot == 1);
+    CHECK(s.uses[0].is_preg() && s.uses[0].preg_val.as_xmm() == XMM::XMM1);
+}
+
+TEST_CASE("Peephole - Bitcast Through a Spill Slot Keeps a Register Read Later") {
+    LirFunction fn;
+    LirBlock* bb = fn.create_block("entry");
+
+    auto load = std::make_unique<LirInst>(LirOpcode::Mov);
+    load->add_def(LirOperand::preg_gpr(GPR::RAX, 8));
+    load->add_use(LirOperand::slot(0, 8));
+    bb->append_inst(std::move(load));
+    auto to_xmm = std::make_unique<LirInst>(LirOpcode::Movq_xg);
+    to_xmm->add_def(LirOperand::preg_xmm(XMM::XMM0, 8));
+    to_xmm->add_use(LirOperand::preg_gpr(GPR::RAX, 8));
+    bb->append_inst(std::move(to_xmm));
+    auto ret = std::make_unique<LirInst>(LirOpcode::Ret);
+    ret->add_use(LirOperand::preg_gpr(GPR::RAX, 8));
+    bb->append_inst(std::move(ret));
+
+    PeepholeStats stats = run_lir_peephole_optimizations(fn);
+    CHECK_EQ(stats.bitcasts_through_slots, size_t(0));
+    CHECK(bb->instructions[0]->opcode == LirOpcode::Mov);
+    CHECK(bb->instructions[1]->opcode == LirOpcode::Movq_xg);
+}

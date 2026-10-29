@@ -670,6 +670,18 @@ void LirFunction::sort_blocks_rpo() {
             preds[it->second].push_back(static_cast<uint32_t>(i));
         }
     }
+    // An edge block (one way in, one way out) into a cold block is cold:
+    // instruction selection's block for a branch's arguments, a critical
+    // edge's.
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (uint32_t i = 0; i < n; ++i) {
+            if (!blocks[i] || blocks[i]->cold || succs[i].size() != 1 || preds[i].size() != 1) continue;
+            if (blocks[i].get() == entry || !blocks[succs[i][0]]->cold) continue;
+            blocks[i]->cold = true;
+            changed = true;
+        }
+    }
     std::vector<uint32_t> roots;
     roots.push_back(block_idx.at(entry));
     for (const auto& entry_pair : resume_entries) {
@@ -750,11 +762,27 @@ void LirFunction::sort_blocks_rpo() {
             }
             return k;
         };
+        // Among successors that stay in as many loops, a cold one goes first,
+        // so it is placed after the hot ones: the scan walks positions in this
+        // order, and a value a cold block's call evicts waits in its slot from
+        // the call to the end of the order. With the back edge's interrupt
+        // poll ahead of the loop's own latch, every value the loop carried in
+        // a caller-saved register was stored and reloaded on the hot back edge.
         for (uint32_t i = 0; i < n; ++i) {
             if (loops_of[i].empty() || succs[i].size() < 2) continue;
-            std::stable_sort(succs[i].begin(), succs[i].end(),
-                [&](uint32_t a, uint32_t b) { return shared(i, a) < shared(i, b); });
+            std::stable_sort(succs[i].begin(), succs[i].end(), [&](uint32_t a, uint32_t b) {
+                const size_t sa = shared(i, a), sb = shared(i, b);
+                if (sa != sb) return sa < sb;
+                return blocks[a]->cold && !blocks[b]->cold;
+            });
         }
+    }
+
+    for (uint32_t i = 0; i < n; ++i) {
+        if (succs[i].size() < 2 || !loops_of[i].empty()) continue;
+        std::stable_sort(succs[i].begin(), succs[i].end(), [&](uint32_t a, uint32_t b) {
+            return blocks[a]->cold && !blocks[b]->cold;
+        });
     }
 
     std::fill(state.begin(), state.end(), uint8_t{0});

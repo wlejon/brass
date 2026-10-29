@@ -12,10 +12,11 @@ struct PeepholeStats {
     size_t dead_moves_eliminated = 0;
     size_t arithmetic_simplified = 0;
     size_t branches_simplified = 0;
+    size_t bitcasts_through_slots = 0;
 
     constexpr size_t total_optimizations() const noexcept {
         return redundant_moves_eliminated + load_after_store_eliminated +
-               dead_moves_eliminated + arithmetic_simplified + branches_simplified;
+               dead_moves_eliminated + arithmetic_simplified + branches_simplified + bitcasts_through_slots;
     }
 };
 
@@ -35,6 +36,7 @@ private:
     bool propagate_copies(LirBlock& block);
     bool eliminate_load_after_store(LirBlock& block);
     bool eliminate_dead_moves(LirBlock& block);
+    bool bitcast_through_slots(LirBlock& block);
     bool simplify_arithmetic(LirBlock& block);
     bool simplify_branches(LirBlock& block, size_t block_index);
 
@@ -43,6 +45,7 @@ private:
     static bool uses_register(const LirInst& inst, PReg reg) noexcept;
     static bool defines_register(const LirInst& inst, PReg reg) noexcept;
     static bool touches_memory(const LirInst& inst) noexcept;
+    static bool reg_dead_from(const LirBlock& block, size_t from, PReg reg) noexcept;
     // The registers the rewriter and emitters use behind the LIR's back
     // (spill reloads, the spilled-def scratch, fabs masks, memory-to-memory
     // moves). A value in one of them does not survive to a later

@@ -16,6 +16,7 @@ bool is_block_cold(const LirFunction& fn, const LirBlock& block, const BlockLayo
     if (!fn.blocks.empty() && fn.blocks[0].get() == &block) {
         return false;
     }
+    if (block.cold) return true;
 
     if (opts.block_freq && opts.mir_function) {
         const BasicBlock* mb = opts.mir_function->get_block_by_name(block.name);
@@ -117,6 +118,31 @@ BlockBranchTargets get_branch_targets(const LirBlock& block) {
     return res;
 }
 
+// Only register and slot moves and the jump on: the block an edge's
+// arguments get (a branch's default value, a phi's copies), no work of its
+// own.
+bool is_copy_block(const LirBlock& block) {
+    for (const auto& inst : block.instructions) {
+        if (!inst) continue;
+        switch (inst->opcode) {
+        case LirOpcode::Mov: case LirOpcode::Mov32: case LirOpcode::Movsd: case LirOpcode::Movss:
+        case LirOpcode::Movaps: case LirOpcode::ParallelCopy:
+            for (const auto& o : inst->uses) {
+                if (o.is_mem()) return false;
+            }
+            for (const auto& o : inst->defs) {
+                if (o.is_mem()) return false;
+            }
+            break;
+        case LirOpcode::Jmp:
+            break;
+        default:
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 void optimize_block_layout(LirFunction& fn, const BlockLayoutOptions& opts) {
@@ -184,6 +210,39 @@ void optimize_block_layout(LirFunction& fn, const BlockLayoutOptions& opts) {
         trace_starts.push({b_score, -static_cast<int64_t>(i)});
     }
 
+    // Per block, how many blocks branch to it, and where it goes.
+    std::unordered_map<uint32_t, BlockBranchTargets> targets_of;
+    std::unordered_map<uint32_t, uint32_t> entries;
+    for (const auto& b : fn.blocks) {
+        if (!b) continue;
+        BlockBranchTargets t = get_branch_targets(*b);
+        std::sort(t.targets.begin(), t.targets.end());
+        t.targets.erase(std::unique(t.targets.begin(), t.targets.end()), t.targets.end());
+        for (uint32_t x : t.targets) ++entries[x];
+        targets_of.emplace(b->id, std::move(t));
+    }
+    // With no profile, a two-way branch's sides are equally likely, so the
+    // layout picks the one whose fall-through saves an instruction: the body
+    // of an if without an else (entered only from here, going on to the other
+    // side) falls through, so only the taken skip jumps and the body needs no
+    // jump back; and between a side with work and a side that only carries
+    // the edge's copies (a typed array read's NaN for an index out of bounds,
+    // a phi's default), the side with work. Falling into the jump target
+    // instead put every in-bounds typed array access of computeForces on a
+    // taken branch and a jump back.
+    auto shape_score = [&](const LirBlock& from, const BlockBranchTargets& bt, const LirBlock& s) {
+        if (bt.targets.size() != 2 || entries[s.id] != 1) return 0;
+        const uint32_t other = bt.targets[0] == s.id ? bt.targets[1] : bt.targets[0];
+        if (other == s.id || other == from.id) return 0;
+        const BlockBranchTargets& st = targets_of[s.id];
+        if (st.targets.size() == 1 && st.targets[0] == other) return 45;
+        auto ob = id_to_block.find(other);
+        if (ob == id_to_block.end() || entries[other] != 1) return 0;
+        const bool s_copies = is_copy_block(s), o_copies = is_copy_block(*ob->second);
+        if (s_copies != o_copies) return s_copies ? -45 : 45;
+        return 0;
+    };
+
     // Trace building loop for hot/regular blocks
     while (layout.size() < non_cold_count) {
         BlockBranchTargets bt = get_branch_targets(*curr);
@@ -223,6 +282,7 @@ void optimize_block_layout(LirFunction& fn, const BlockLayoutOptions& opts) {
                 if (s->id == bt.fallthrough_target && s->loop_depth >= curr->loop_depth) {
                     score += 40;
                 }
+                if (s->loop_depth == curr->loop_depth) score += shape_score(*curr, bt, *s);
                 if (bt.single_unconditional_jump) {
                     score += 60;
                 }

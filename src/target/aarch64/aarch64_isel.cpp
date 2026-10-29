@@ -39,7 +39,7 @@ std::unique_ptr<LirFunction> AArch64ISel::lower(const Function& mir_fn) {
     analyze_function(mir_fn);
 
     for (const auto* bb : mir_fn.blocks()) {
-        lir_fn_->create_block_with_id(bb->id(), std::string(bb->name()));
+        lir_fn_->create_block_with_id(bb->id(), std::string(bb->name()))->cold = bb->is_cold();
     }
 
     for (const auto* bb : mir_fn.blocks()) {

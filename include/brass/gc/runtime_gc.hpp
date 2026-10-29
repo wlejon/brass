@@ -56,7 +56,9 @@ void brass_gc_collect();
 // default a host runtime overrides with its own barrier. It is deliberately
 // not defined under that name: a host runtime may define
 // `brass_gc_write_barrier` itself, and two strong definitions collide when
-// both are statically linked.
+// both are statically linked. Whichever barrier is linked must reach no GC
+// point: compiled code clears the frame's dead slots only at calls that can
+// collect, and treats the barrier's call as one that cannot.
 void brass_default_gc_write_barrier(uintptr_t obj, uintptr_t val);
 // The thread heap's card table and old-generation base (card of old address
 // a: base[(a - heap_base) >> 9]); null / 0 without a heap.

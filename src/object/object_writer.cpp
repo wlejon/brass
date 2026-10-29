@@ -25,6 +25,26 @@
 namespace brass::object {
 
 namespace {
+
+// The calls of `lir` whose callee never reaches a GC point: one declared
+// `pure` or `nocollect`, and the write barrier, which by its contract
+// (runtime_gc.hpp) only marks a card. The allocator clears the frame's dead
+// spill slots and callee-saved registers for a conservative scan only at the
+// others: no collection, so no scan of this frame, runs inside these.
+void mark_no_gc_calls(codegen::LirFunction& lir, const Module& mod) {
+    for (auto& block : lir.blocks) {
+        for (auto& inst : block->instructions) {
+            if (!inst->is_call() || inst->callee_symbol.empty() || inst->is_patchable) continue;
+            const std::string_view sym = inst->callee_symbol;
+            inst->no_gc_point = sym == "brass_gc_write_barrier" || mod.has_symbol_role(sym, SymbolRole::Pure) ||
+                                mod.has_symbol_role(sym, SymbolRole::NoCollect);
+        }
+    }
+}
+
+} // namespace
+
+namespace {
 // The x64 emitter aligns a loop's head to 32 bytes from the start of its
 // function (EmitContext::compile), which holds in memory only where the
 // function, and the section under it, start 32-byte aligned too.
@@ -235,6 +255,7 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
             if (lir) lir->sort_blocks_rpo();
         }
         if (!lir) continue;
+        mark_no_gc_calls(*lir, mod);
 
         // 1.5 Loop Software Pipelining (if enabled)
         if (sched_opts_.enable_software_pipelining) {

@@ -381,6 +381,92 @@ bool PeepholeOptimizer::eliminate_dead_moves(LirBlock& block) {
     return changed;
 }
 
+// Whether `reg` is dead from instruction `from` on: the first later
+// instruction naming it writes all of it without reading it. A block's end,
+// a call, a branch or the scan window counts as live.
+bool PeepholeOptimizer::reg_dead_from(const LirBlock& block, size_t from, PReg reg) noexcept {
+    const size_t n = block.instructions.size();
+    for (size_t j = from; j < n && j - from <= kScanWindow; ++j) {
+        const auto& c = *block.instructions[j];
+        if (uses_register(c, reg)) return false;
+        if (c.is_call() || c.is_branch() || c.is_terminator() || is_protected(c)) return false;
+        if (defines_register(c, reg)) {
+            return c.defs.size() >= 1 && c.defs[0].is_preg() && c.defs[0].preg_val == reg && c.defs[0].size >= 4;
+        }
+    }
+    return false;
+}
+
+// A value spilled from a general register and read as a double goes through
+// that register: `r = mov slot; x = movq r` (a boxed Number's bits reloaded
+// for its arithmetic), and the reverse `r = movq x; slot = mov r`. The slot
+// holds the same 64 bits either way, so one SSE load or store of it does
+// both, when r is not read afterwards. In Matrix4.multiplyMatrices' fast
+// path each of the 32 elements came through a GPR this way. x64 only.
+bool PeepholeOptimizer::bitcast_through_slots(LirBlock& block) {
+    if (fn_.calling_conv.target().is_aarch64()) return false;
+    bool changed = false;
+    const size_t n = block.instructions.size();
+    auto is_slot_mov = [](const LirInst& m) {
+        return m.opcode == LirOpcode::Mov && m.defs.size() == 1 && m.uses.size() == 1 && m.uses[0].size == 8 &&
+               m.defs[0].size == 8;
+    };
+    for (size_t i = 0; i < n; ++i) {
+        if (!block.instructions[i]) continue;
+        LirInst& a = *block.instructions[i];
+        if (is_protected(a) || !is_slot_mov(a)) continue;
+        // Load: r = mov slot, then x = movq_xg r.
+        if (a.defs[0].is_preg() && a.defs[0].preg_val.is_gpr() && a.uses[0].is_spill_slot()) {
+            const PReg r = a.defs[0].preg_val;
+            const int32_t slot = a.uses[0].spill_slot;
+            for (size_t j = i + 1; j < n && j - i <= kScanWindow; ++j) {
+                if (!block.instructions[j]) continue;
+                LirInst& b = *block.instructions[j];
+                if (b.opcode == LirOpcode::Movq_xg && b.uses.size() == 1 && b.uses[0].is_preg() &&
+                    b.uses[0].preg_val == r && b.defs.size() == 1 && b.defs[0].is_preg() && !is_protected(b)) {
+                    if (!reg_dead_from(block, j + 1, r)) break;
+                    b.opcode = LirOpcode::Movsd;
+                    b.uses[0] = LirOperand::slot(slot, 8);
+                    block.instructions[i].reset();
+                    stats_.bitcasts_through_slots++;
+                    changed = true;
+                    break;
+                }
+                if (uses_register(b, r) || defines_register(b, r) || b.is_call() || b.is_branch() ||
+                    b.is_terminator() || is_protected(b)) {
+                    break;
+                }
+                bool writes_slot = false;
+                for (const auto& d : b.defs) {
+                    if (d.is_spill_slot() && d.spill_slot == slot) writes_slot = true;
+                }
+                if (writes_slot) break;
+            }
+            continue;
+        }
+        // Store: slot = mov r, where r = movq_gx x just before it.
+        if (a.defs[0].is_spill_slot() && a.uses[0].is_preg() && a.uses[0].preg_val.is_gpr() && i > 0) {
+            const PReg r = a.uses[0].preg_val;
+            size_t k = i;
+            while (k > 0 && !block.instructions[k - 1]) --k;
+            if (k == 0) continue;
+            LirInst& b = *block.instructions[k - 1];
+            if (b.opcode != LirOpcode::Movq_gx || is_protected(b) || b.defs.size() != 1 || !b.defs[0].is_preg() ||
+                b.defs[0].preg_val != r || b.uses.size() != 1 || !b.uses[0].is_preg()) {
+                continue;
+            }
+            if (!reg_dead_from(block, i + 1, r)) continue;
+            a.opcode = LirOpcode::Movsd;
+            a.uses[0] = b.uses[0];
+            block.instructions[k - 1].reset();
+            stats_.bitcasts_through_slots++;
+            changed = true;
+        }
+    }
+    if (changed) compact_block(block);
+    return changed;
+}
+
 bool PeepholeOptimizer::simplify_arithmetic(LirBlock& block) {
     bool changed = false;
     bool removed = false;
@@ -661,6 +747,7 @@ bool PeepholeOptimizer::optimize_block(LirBlock& block, size_t block_index) {
     changed |= propagate_copies(block);
     changed |= eliminate_load_after_store(block);
     changed |= eliminate_dead_moves(block);
+    changed |= bitcast_through_slots(block);
     changed |= simplify_arithmetic(block);
     changed |= simplify_branches(block, block_index);
     return changed;

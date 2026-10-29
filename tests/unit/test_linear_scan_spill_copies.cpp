@@ -24,8 +24,10 @@ struct Allocated {
     std::unique_ptr<LirFunction> lir;
 };
 
-// `name` lowered for x64 SysV and allocated, its blocks in the order written.
-Allocated allocate(const char* text, const char* name, bool rpo = true) {
+// `name` lowered for x64 SysV and allocated, its blocks in the order written;
+// `prepare` sees the LIR before allocation.
+Allocated allocate(const char* text, const char* name, bool rpo = true,
+                   void (*prepare)(LirFunction&) = nullptr) {
     Allocated out;
     out.mod = parse_module(text);
     REQUIRE(out.mod != nullptr);
@@ -36,6 +38,7 @@ Allocated allocate(const char* text, const char* name, bool rpo = true) {
     out.lir = isel.lower(*fn);
     REQUIRE(out.lir != nullptr);
     if (rpo) out.lir->sort_blocks_rpo();
+    if (prepare) prepare(*out.lir);
     LivenessAnalysis liveness(*out.lir);
     liveness.run();
     LinearScanAllocator regalloc(*out.lir, liveness, CallingConvention::sysv64());
@@ -293,4 +296,65 @@ TEST_CASE("Linear Scan - an x64 ALU source in its spill slot is read in place") 
     }
     for (int i = 0; i < 14; ++i) x += words[13 - i];
     CHECK_EQ(static_cast<uint64_t>(fn(words)), x);
+}
+
+namespace {
+
+// %t lives across the first call, so in a callee-saved register, and dies
+// before the second: the second call finds a dead register holding a stale
+// word, which a conservative scan from inside it would read as a root.
+const char* kStaleAtCall = R"(module @m
+
+func @g(%a: i64) -> i64 {
+entry:
+  %r = add.i64 %a, %a
+  ret %r
+}
+
+func @stale(%a: i64) -> i64 {
+entry:
+  %t = mul.i64 %a, %a
+  %c1 = call.i64 @g(%a)
+  %u = add.i64 %t, %c1
+  %c2 = call.i64 @g(%u)
+  ret %c2
+}
+)";
+
+// Zeroing moves into registers or slots ahead of the function's last call.
+size_t clears_before_last_call(const LirFunction& fn) {
+    size_t clears = 0, since_call = 0;
+    for (const auto& b : fn.blocks) {
+        for (const auto& inst : b->instructions) {
+            if (inst->is_call()) {
+                clears = since_call;
+                since_call = 0;
+                continue;
+            }
+            const bool zero = inst->opcode == LirOpcode::Mov && inst->uses.size() == 1 && inst->uses[0].is_imm_int() &&
+                              inst->uses[0].imm_int == 0;
+            if (zero) ++since_call;
+        }
+    }
+    return clears;
+}
+
+void mark_last_call_no_gc(LirFunction& fn) {
+    LirInst* last = nullptr;
+    for (auto& b : fn.blocks) {
+        for (auto& inst : b->instructions) {
+            if (inst->is_call()) last = inst.get();
+        }
+    }
+    REQUIRE(last != nullptr);
+    last->no_gc_point = true;
+}
+
+} // namespace
+
+TEST_CASE("Linear Scan - a call that reaches no GC point clears no dead register") {
+    Allocated plain = allocate(kStaleAtCall, "stale");
+    CHECK(clears_before_last_call(*plain.lir) >= 1u);
+    Allocated no_gc = allocate(kStaleAtCall, "stale", true, mark_last_call_no_gc);
+    CHECK_EQ(clears_before_last_call(*no_gc.lir), size_t(0));
 }

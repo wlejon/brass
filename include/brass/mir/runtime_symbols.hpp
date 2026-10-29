@@ -36,12 +36,17 @@ enum class SymbolRole : uint8_t {
     // address, so an engine that cannot resolve it when it compiles the
     // reference rejects the function (a lazy-link call stub is code).
     Data,
+    // `nocollect`: never reaches a GC point (no collection can run while it
+    // does), though it may have side effects. The caller's dead spill slots
+    // and callee-saved registers need no clearing for it (`pure` says the
+    // same).
+    NoCollect,
 };
 
 inline constexpr SymbolRole kAllSymbolRoles[] = {
     SymbolRole::Allocator, SymbolRole::Pure, SymbolRole::ArrayNew,
     SymbolRole::ArrayGet, SymbolRole::ArraySet, SymbolRole::FloatRem,
-    SymbolRole::Data,
+    SymbolRole::Data, SymbolRole::NoCollect,
 };
 
 // The keyword the printer writes and the parser reads for `role`.
