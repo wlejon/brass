@@ -325,14 +325,35 @@ void Heap::collect_at(CollectionKind kind, uintptr_t caller_fp, uintptr_t caller
         Collector::collect(*this, CollectionKind::Full);
     }
 
-    // Finalizers run once the heap is consistent again; they may allocate.
+    // Finalizers run once the heap is consistent again; they may allocate, and
+    // so collect. A collection a finalizer starts leaves what it finds dead
+    // queued, and the loop below runs it after the batch under way.
+    if (s.finalizers_running) return;
     const auto t0 = std::chrono::steady_clock::now();
     uint64_t ran = 0;
+    // A finalizer that throws (an allocation out of memory) leaves the rest of
+    // its batch unrun, as it always has, but must not leave the loop marked
+    // running, or no finalizer would run again.
+    struct RunningScope {
+        detail::HeapState& s;
+        explicit RunningScope(detail::HeapState& state) : s(state) { s.finalizers_running = true; }
+        ~RunningScope() {
+            s.running_finalizers.clear();
+            s.finalizers_running = false;
+        }
+    } running(s);
     while (!s.pending_finalizers.empty()) {
-        std::vector<detail::FinalizerEntry> pending;
-        pending.swap(s.pending_finalizers);
-        for (const auto& f : pending) f.fn(f.context);
-        ran += pending.size();
+        // Swapped, not copied: the two vectors trade buffers, so neither
+        // allocates once both have grown to the program's batch size.
+        s.running_finalizers.swap(s.pending_finalizers);
+        // Indexed: a finalizer's own collection appends to pending_finalizers,
+        // never to the batch being run, so the batch does not move under it.
+        for (size_t i = 0; i < s.running_finalizers.size(); ++i) {
+            const detail::FinalizerEntry& f = s.running_finalizers[i];
+            f.fn(f.a, f.b);
+        }
+        ran += s.running_finalizers.size();
+        s.running_finalizers.clear();
     }
     s.stats.last_finalizers = ran;
     s.stats.last_finalizer_ns = ran == 0 ? 0 : static_cast<uint64_t>(
@@ -415,13 +436,27 @@ void Heap::remove_post_collection_hook(RootSourceId id) noexcept {
                 hooks.end());
 }
 
+namespace {
+// The one-context form, stored as a two-context entry: `b` carries the
+// callback (a function pointer held as a data pointer, which every platform
+// brass targets round-trips exactly).
+void run_one_context_finalizer(void* context, void* fn) {
+    reinterpret_cast<void (*)(void*)>(fn)(context);
+}
+} // namespace
+
 void Heap::add_finalizer(uintptr_t object, void (*fn)(void*), void* context) {
+    if (!fn) return;
+    add_finalizer(object, &run_one_context_finalizer, context, reinterpret_cast<void*>(fn));
+}
+
+void Heap::add_finalizer(uintptr_t object, void (*fn)(void* a, void* b), void* a, void* b) {
     if (!fn) return;
     if (!is_valid_object(object)) {
         throw std::invalid_argument("brass::gc::Heap::add_finalizer: not an object of this heap");
     }
     auto& list = is_young(object) ? s_->young_finalizers : s_->old_finalizers;
-    list.push_back(detail::FinalizerEntry{object, fn, context});
+    list.push_back(detail::FinalizerEntry{object, fn, a, b});
 }
 
 // ---- modes and statistics ----------------------------------------------------------

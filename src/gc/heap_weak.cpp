@@ -77,24 +77,32 @@ void settle_weakness(GcState& g) {
     }
     g.ephemerons.clear();
 
-    std::vector<FinalizerEntry> still_young;
-    for (FinalizerEntry f : s.young_finalizers) {
+    // Finalizers, compacted in place (no allocation once the lists have their
+    // working-set capacity). A minor collection looks only at the young list:
+    // its cost is the finalizable objects allocated since the last one, not
+    // every finalizer registered.
+    std::vector<FinalizerEntry>& young = s.young_finalizers;
+    size_t still_young = 0;
+    for (size_t i = 0; i < young.size(); ++i) {
+        FinalizerEntry f = young[i];
         const uintptr_t live = live_address(g, f.object);
         if (!live) {
             s.pending_finalizers.push_back(f);
             continue;
         }
         f.object = live;
-        (g.heap.is_old(live) ? s.old_finalizers : still_young).push_back(f);
+        if (g.heap.is_old(live)) s.old_finalizers.push_back(f);
+        else young[still_young++] = f;
     }
-    s.young_finalizers.swap(still_young);
+    young.resize(still_young);
     if (g.kind == CollectionKind::Full) {
-        std::vector<FinalizerEntry> kept;
-        for (const FinalizerEntry& f : s.old_finalizers) {
-            if (live_address(g, f.object)) kept.push_back(f);
-            else s.pending_finalizers.push_back(f);
+        std::vector<FinalizerEntry>& old = s.old_finalizers;
+        size_t kept = 0;
+        for (size_t i = 0; i < old.size(); ++i) {
+            if (live_address(g, old[i].object)) old[kept++] = old[i];
+            else s.pending_finalizers.push_back(old[i]);
         }
-        s.old_finalizers.swap(kept);
+        old.resize(kept);
     }
 }
 

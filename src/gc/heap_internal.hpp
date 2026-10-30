@@ -90,10 +90,15 @@ struct HookEntry {
     Heap::PostCollectionHook hook;
 };
 
+// A registered finalizer: fn(a, b) once `object` is found dead. Two context
+// words so a host whose finalizer is a (pointer, destructor) pair registers it
+// by value, with no allocation of its own per object; the one-context form is
+// stored as a trampoline (Heap::add_finalizer).
 struct FinalizerEntry {
     uintptr_t object;
-    void (*fn)(void*);
-    void* context;
+    void (*fn)(void*, void*);
+    void* a;
+    void* b;
 };
 
 // The phases of a collection the log times.
@@ -171,9 +176,20 @@ struct HeapState {
     std::vector<RootSourceEntry> sources;
     std::vector<HookEntry> hooks;
     uint64_t next_id = 1;
+    // Every list below keeps its capacity across collections: a program that
+    // makes and drops native handles every frame registers and retires
+    // thousands a collection, and the bookkeeping allocates nothing once the
+    // lists have grown to that working set (settle_weakness compacts them in
+    // place).
     std::vector<FinalizerEntry> young_finalizers;
     std::vector<FinalizerEntry> old_finalizers;
     std::vector<FinalizerEntry> pending_finalizers;
+    // The batch Heap::collect_at is running. A finalizer may allocate and so
+    // collect; that nested collection leaves what it finds dead in
+    // pending_finalizers for the outer loop (running_finalizers says one is
+    // under way) rather than run it from inside the finalizer.
+    std::vector<FinalizerEntry> running_finalizers;
+    bool finalizers_running = false;
 
     // Policy.
     uint64_t old_allocated_since_full = 0;

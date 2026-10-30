@@ -353,8 +353,15 @@ public:
     [[nodiscard]] uintptr_t survivor_of(uintptr_t object) const noexcept;
     // Calls fn(context) once, after the collection in which `object` is found
     // dead (never with the object itself, which is gone by then). Callbacks
-    // run on this thread after the collection completes and may allocate.
+    // run on this thread after the collection completes and may allocate; a
+    // collection a callback causes queues what it finds dead for the same
+    // run, after the batch under way, rather than running it inside the
+    // callback.
     void add_finalizer(uintptr_t object, void (*fn)(void* context), void* context);
+    // The same with two context words, fn(a, b): a host whose finalizer is a
+    // (data, destructor) pair per object passes both by value instead of
+    // allocating a record per object to point `context` at.
+    void add_finalizer(uintptr_t object, void (*fn)(void* a, void* b), void* a, void* b);
 
     // ---- Queries -----------------------------------------------------------
     // Whether `object` is the payload address of an object this heap holds.
