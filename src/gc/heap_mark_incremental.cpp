@@ -37,8 +37,12 @@
 // the barrier or a minor collection, and never while the marker's threads
 // drain (MarkCycle::draining says when they do): slices and minor
 // collections run on the heap's thread between mutator turns, and the
-// barrier is the mutator's. So a shade's claim races no marker thread; it
-// is atomic anyway when the cycle has several workers, like the marker's.
+// barrier is the mutator's. So a shade's claim races no marker thread, and
+// is a plain store: a slice's helpers are woken through a lock and waited
+// for through a release/acquire count (heap_mark_threads.hpp), which order
+// it against their claims. An atomic claim's locked instruction was three
+// quarters of shade's time (every object a minor collection promotes, every
+// value the barrier stores) with a cycle open on a 200 MB heap.
 //
 // A slice drains the grey work on the marker's threads when its budget is
 // large enough to pay for starting them (kParallelSliceNs), on the calling
@@ -50,7 +54,6 @@
 
 #include "heap_mark.hpp"
 
-#include <brass/core/atomic_ref.hpp>
 #include <brass/runtime/coroutine.hpp>
 
 #include <algorithm>
@@ -61,8 +64,10 @@ namespace brass::gc::detail {
 
 namespace {
 
-// The least slice budget run on several threads: below it, starting and
-// joining the threads (tens of microseconds) is too much of the slice.
+// The least slice budget run on several threads: below it, waking the
+// parked helpers and waiting for them (heap_mark_threads.hpp; tens of
+// microseconds, about 0.1 ms when each drain creates its threads) is too
+// much of the slice.
 constexpr uint64_t kParallelSliceNs = 200'000;
 // StressMode::Incremental: slices a cycle runs before it is finished.
 constexpr uint64_t kStressSlicesPerCycle = 8;
@@ -98,23 +103,15 @@ MarkCycle& open_cycle(HeapState& s, const char* what) {
     return *s.cycle;
 }
 
-bool claim_bit(uint64_t& word, uint64_t bit, bool atomic) noexcept {
-    if (atomic) {
-        AtomicRef<uint64_t> w(word);
-        if (w.load(std::memory_order_relaxed) & bit) return false;
-        return (w.fetch_or(bit, std::memory_order_relaxed) & bit) == 0;
-    }
+// Sets `bit` in `word`; true when this call set it. Plain stores: see
+// "Shading" above.
+bool claim_bit(uint64_t& word, uint64_t bit) noexcept {
     if (word & bit) return false;
     word |= bit;
     return true;
 }
 
-bool claim_large_bit(uint8_t& bits, bool atomic) noexcept {
-    if (atomic) {
-        AtomicRef<uint8_t> b(bits);
-        if (b.load(std::memory_order_relaxed) & kGcLargeMarked) return false;
-        return (b.fetch_or(kGcLargeMarked, std::memory_order_relaxed) & kGcLargeMarked) == 0;
-    }
+bool claim_large_bit(uint8_t& bits) noexcept {
     if (bits & kGcLargeMarked) return false;
     bits = static_cast<uint8_t>(bits | kGcLargeMarked);
     return true;
@@ -171,7 +168,6 @@ bool run_slice(MarkCycle& c, uint64_t deadline) {
 void shade(HeapState& s, uintptr_t a) noexcept {
     MarkCycle& c = open_cycle(s, "an object shaded");
     if (c.draining) gc_fatal("an object shaded while the marker drains (a trace function stored into the heap)");
-    const bool atomic = c.workers.size() > 1;
     if (s.in_mature(a)) {
         const uint32_t index = s.block_index(a);
         if (index >= s.blocks.size() || !s.blocks[index]->in_use) return;
@@ -179,11 +175,11 @@ void shade(HeapState& s, uintptr_t a) noexcept {
         const size_t granule = (a - s.block_base(index)) / kGranuleBytes;
         const uint64_t bit = uint64_t{1} << (granule & 63);
         if ((meta.starts[granule >> 6] & bit) == 0) return;
-        if (!claim_bit(meta.marks[granule >> 6], bit, atomic)) return;
+        if (!claim_bit(meta.marks[granule >> 6], bit)) return;
     } else if (s.in_large(a)) {
         const uint32_t head = s.large_head_of(a);
         if (head == UINT32_MAX || s.large_object_at(head) != a) return;
-        if (!claim_large_bit(header_of(a)->gc_bits, atomic)) return;
+        if (!claim_large_bit(header_of(a)->gc_bits)) return;
     } else {
         return;
     }

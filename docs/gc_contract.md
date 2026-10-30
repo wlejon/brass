@@ -147,6 +147,7 @@ A heap belongs to one thread at a time; nothing in it is locked on the allocatio
 - `BRASS_GC_EAGER_SWEEP=1` (`HeapConfig::lazy_sweep = false`) sweeps inside the finish's pause, as before lazy sweep, for comparing against it.
 - `BRASS_GC_FIXED_EDEN=1` (`HeapConfig::adaptive_eden = false`) runs every minor collection at a full eden, for comparing against the adaptive limit.
 - `BRASS_GC_MARK_THREADS=n` (`HeapConfig::mark_threads`) sets the number of threads a full collection marks with; 1 marks on the collecting thread alone.
+- `BRASS_GC_MARK_POOL=0` (`HeapConfig::mark_thread_pool = false`) has each parallel drain create its marker threads and join them, as before the heap kept them parked between drains; a marking cycle's sub-millisecond slices then lose most of their parallelism to it (about 0.1 ms a slice), for comparing against the pool.
 - `BRASS_GC_OLD_RESERVE_MB=n` sets both old spaces' reservations (`mature_reserve_bytes`, `large_reserve_bytes`) to n MB, which makes the out-of-memory path reachable from a test.
 
 ### 2.9. Out of Memory

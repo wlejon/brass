@@ -76,6 +76,9 @@ void apply_environment(HeapConfig& config) {
     if (!eager_sweep.empty() && eager_sweep != "0") config.lazy_sweep = false;
     const std::string threads = env_value("BRASS_GC_MARK_THREADS");
     if (!threads.empty()) config.mark_threads = static_cast<unsigned>(std::strtoul(threads.c_str(), nullptr, 10));
+    // The A/B switch for the parked marker threads: created and joined by
+    // every drain.
+    if (env_value("BRASS_GC_MARK_POOL") == "0") config.mark_thread_pool = false;
     // Both old spaces' reservations, in MB: a small one makes the
     // out-of-memory path reachable from a test.
     const std::string old_mb = env_value("BRASS_GC_OLD_RESERVE_MB");

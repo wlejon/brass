@@ -99,6 +99,10 @@ struct HeapConfig {
     // collecting thread alone. 0: half the hardware threads, at most 8.
     unsigned mark_threads = 0;
     size_t parallel_mark_bytes = size_t{16} << 20;
+    // The helper threads stay parked between drains, so a marking cycle's
+    // short slices mark on all of them. false (or BRASS_GC_MARK_POOL=0): each
+    // drain creates its threads and joins them.
+    bool mark_thread_pool = true;
     // A full collection's sweep of the old generation is left for after its
     // pause: done by sweep_slice, by allocation as it needs memory, and
     // whatever is left by the next cycle's start (docs/gc_contract.md, "Lazy

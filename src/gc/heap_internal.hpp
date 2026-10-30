@@ -212,6 +212,11 @@ struct MarkCycle;
 struct MarkCycleDeleter {
     void operator()(MarkCycle* cycle) const noexcept;
 };
+// The marker's parked helper threads (heap_mark_threads.hpp).
+class MarkThreads;
+struct MarkThreadsDeleter {
+    void operator()(MarkThreads* threads) const noexcept;
+};
 
 // What a minor collection tells the adaptive eden (HeapState::adapt_eden_limit).
 struct MinorSample {
@@ -326,6 +331,9 @@ struct HeapState {
     // collection of its own.
     MarkPhase mark_phase = MarkPhase::Idle;
     std::unique_ptr<MarkCycle, MarkCycleDeleter> cycle;
+    // Made at the first parallel drain (HeapConfig::mark_thread_pool), kept
+    // parked until the heap is destroyed.
+    std::unique_ptr<MarkThreads, MarkThreadsDeleter> mark_threads;
 
     HeapStats stats;
     uint64_t relocation_epoch = 0;

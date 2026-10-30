@@ -19,6 +19,7 @@
 // most of the cache misses a mark loop otherwise waits on.
 
 #include "heap_mark.hpp"
+#include "heap_mark_threads.hpp"
 
 #include <algorithm>
 #include <brass/core/atomic_ref.hpp>
@@ -339,6 +340,42 @@ bool is_marked(const HeapState& s, uintptr_t a) noexcept {
     return true;
 }
 
+namespace {
+
+struct HelperDrain {
+    MarkWorkers* workers;
+    bool timed;
+};
+
+void helper_drain(void* context, unsigned helper) {
+    const HelperDrain& d = *static_cast<const HelperDrain*>(context);
+    MarkWorker& w = *(*d.workers)[helper + 1];
+    if (d.timed) drain<true, true>(w);
+    else drain<true, false>(w);
+}
+
+// mark_drain on the heap's parked helpers (heap_mark_threads.hpp): worker i
+// on helper i - 1, the first on the calling thread.
+bool drain_on_helpers(MarkShared& sh, MarkWorkers& workers, bool timed) {
+    if (!sh.s.mark_threads) sh.s.mark_threads.reset(new MarkThreads);
+    MarkThreads& helpers = *sh.s.mark_threads;
+    const unsigned wanted = static_cast<unsigned>(workers.size() - 1);
+    const unsigned have = std::min(helpers.ensure(wanted), wanted);
+    // A worker with no helper would not run; what an earlier slice left on
+    // its stack goes to the pool for the others. The termination count is
+    // set before any helper runs.
+    for (size_t i = have + 1; i < workers.size(); ++i) pool_stack(sh, *workers[i]);
+    sh.threads = have + 1;
+    HelperDrain d{&workers, timed};
+    helpers.run(have, &helper_drain, &d);
+    if (timed) drain<true, true>(*workers[0]);
+    else drain<true, false>(*workers[0]);
+    helpers.wait();
+    return grey_empty(sh, workers);
+}
+
+} // namespace
+
 unsigned mark_thread_count(const HeapState& s) {
     if (s.heap.old_used_bytes() < s.config.parallel_mark_bytes) return 1;
     unsigned n = s.config.mark_threads;
@@ -383,6 +420,7 @@ bool mark_drain(MarkShared& sh, MarkWorkers& workers, unsigned run) {
         else drain<false, false>(main);
         return grey_empty(sh, workers);
     }
+    if (sh.s.config.mark_thread_pool) return drain_on_helpers(sh, workers, timed);
     // Each worker thread starts at `go`, once `threads` counts exactly the
     // threads that were created: the termination count depends on it.
     std::atomic<bool> go{false};
