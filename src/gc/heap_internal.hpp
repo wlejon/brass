@@ -3,8 +3,10 @@
 // The heap's private state, shared by the translation units that implement
 // gc::Heap: heap.cpp (construction, allocation, roots, queries),
 // heap_spaces.cpp (the mature blocks and the large-object space),
-// heap_collect.cpp (the collections), heap_weak.cpp (weak slots, ephemerons,
-// finalizers) and heap_verify.cpp (verification, walking, poisoning).
+// heap_collect.cpp (the collections), heap_mark.cpp and
+// heap_mark_incremental.cpp (the old generation's marking and its cycle),
+// heap_weak.cpp (weak slots, ephemerons, finalizers) and heap_verify.cpp
+// (verification, walking, poisoning).
 
 #include <brass/gc/heap.hpp>
 #include <bit>
@@ -120,6 +122,20 @@ enum class GcTrigger : uint8_t {
     Requested,   // request_collection, honoured at an allocation or safepoint
     Stress,      // stress mode
     Exhausted,   // an old allocation found the reservation full
+    Incremental, // Heap::start_marking ... finish_marking
+};
+
+// Where the old generation's marking cycle is (heap_mark_incremental.cpp).
+enum class MarkPhase : uint8_t {
+    Idle,       // no cycle: the mark bitmaps are clear
+    Marking,    // started: roots are grey, slices drain the grey work
+    Finishing,  // in finish_marking: weakness, hooks, sweep
+};
+
+// A marking cycle's state between its calls (heap_mark_incremental.cpp).
+struct MarkCycle;
+struct MarkCycleDeleter {
+    void operator()(MarkCycle* cycle) const noexcept;
 };
 
 // What a minor collection tells the adaptive eden (HeapState::adapt_eden_limit).
@@ -226,6 +242,14 @@ struct HeapState {
     uintptr_t gc_from_top = 0;        // the from-survivor space's top when it started
     uintptr_t mutator_fp = 0;         // the generated frame the running allocation or safepoint came from
     uintptr_t mutator_ip = 0;
+
+    // The marking cycle, from start_marking (or a full collection's start)
+    // to its finish. Until the write barrier shades old referents (not yet),
+    // nothing may allocate or collect while one is open: the inline
+    // allocation path is shut (update_fast_limit) and the runtime's paths
+    // stop the process.
+    MarkPhase mark_phase = MarkPhase::Idle;
+    std::unique_ptr<MarkCycle, MarkCycleDeleter> cycle;
 
     HeapStats stats;
     uint64_t relocation_epoch = 0;
@@ -451,6 +475,12 @@ struct GcState {
     uint64_t eden_used = 0;
     uint64_t eden_limit = 0;    // the limit eden_used was allocated under
     uint64_t phase_ns[kGcPhaseCount] = {};
+    // A full collection's cycle: the pauses of its start, its mark slices
+    // (and how many) and its finish.
+    uint64_t start_ns = 0;
+    uint64_t mark_ns = 0;
+    uint64_t finish_ns = 0;
+    uint64_t slices = 0;
 
     GcState(HeapState& state, Heap& h, CollectionKind k) : s(state), heap(h), kind(k) {}
 
@@ -481,11 +511,19 @@ private:
     uint64_t last_;
 };
 
-// A full collection's marking (heap_mark.cpp): with the young generation
-// already empty, marks every old object the roots reach, resolving
-// ephemerons to a fixpoint. Leaves the weak slots and the ephemerons whose
-// keys died in `g` for settle_weakness, and the marked totals in `g`.
-void mark_old_generation(GcState& g, PhaseClock& clock);
+// A full collection's phases around the marking (heap_collect.cpp). Sets up
+// `g` for a collection starting now and marks the heap as collecting:
+void begin_collection(GcState& g);
+// first, the young generation emptied into the old one, every survivor
+// promoted;
+void full_evacuate(GcState& g, PhaseClock& clock);
+// last, with the marking done and its weak slots, dead ephemerons and totals
+// in `g`: weakness settled, hooks run, the old generation swept, the young
+// spaces reset and the next threshold set.
+void full_reclaim(GcState& g, PhaseClock& clock);
+// A finished collection's statistics and log line: `pause_ns` is all its
+// pauses together, `longest_ns` the longest (the same for one pause).
+void record_collection(const GcState& g, uint64_t pause_ns, uint64_t longest_ns);
 
 // Where the object at `a` is after this collection so far, or 0 if it is not
 // (yet) known to be alive. Addresses the collection does not collect are
@@ -522,6 +560,20 @@ uintptr_t containing_object(HeapState& s, uintptr_t a, bool accept_forwarded) no
 // The collections (heap_collect.cpp, heap_weak.cpp).
 struct Collector {
     static void collect(Heap& heap, CollectionKind kind);
+    // The marking cycle (heap_mark_incremental.cpp). A full collection is
+    // start_cycle, mark_cycle until it returns true, finish_cycle and
+    // end_cycle with nothing in between; Heap::start_marking and the rest
+    // run the same steps as separate calls.
+    static void collect_full(Heap& heap);
+    // The young generation emptied, the roots grey; the cycle is Marking.
+    static void start_cycle(Heap& heap);
+    // Grey work until it is gone, the ephemerons included, or `deadline_ns`
+    // (gc_now_ns) passes. True when it is gone.
+    static bool mark_cycle(Heap& heap, uint64_t deadline_ns);
+    // The rest of the grey work, then full_reclaim; the cycle is Idle after.
+    static void finish_cycle(Heap& heap);
+    // Records the finished cycle (record_collection) and drops its state.
+    static void end_cycle(Heap& heap, uint64_t pause_ns, uint64_t longest_ns);
     static HeapState& state(const Heap& heap) noexcept { return *heap.s_; }
     static Heap::AllocationBuffer& buffer(Heap& heap) noexcept { return *heap.alloc_; }
     static size_t max_young_total(const Heap& heap) noexcept { return heap.max_young_total_; }

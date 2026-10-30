@@ -15,7 +15,9 @@
 // generation is large, since nothing moves or is allocated while it runs.
 // Last, weak slots, ephemerons and finalizers are settled, the hooks run, and
 // the old generation is swept: unmarked objects' lines and pages are
-// reclaimed without moving anything.
+// reclaimed without moving anything. The three run as a marking cycle
+// (heap_mark_incremental.cpp: start, slices, finish), back to back here, or
+// as separate calls through Heap::start_marking and the rest.
 //
 // Every phase traces through a Tracer with a mode-specific slow path, and
 // each settles weak slots, ephemerons and finalizers the same way
@@ -184,11 +186,12 @@ void minor(GcState& g) {
     clock.lap(kPhaseSweep);
 }
 
-void full(GcState& g) {
-    HeapState& s = g.s;
-    PhaseClock clock(g);
+} // namespace
 
-    // Phase 1: the young generation, emptied into the old one.
+// A full collection's phase 1: the young generation, emptied into the old
+// one. Phase 2, the marking, is heap_mark_incremental.cpp's cycle.
+void full_evacuate(GcState& g, PhaseClock& clock) {
+    HeapState& s = g.s;
     GcState young(s, g.heap, CollectionKind::Minor);
     young.from = g.from;
     young.to = g.to;
@@ -201,11 +204,11 @@ void full(GcState& g) {
     g.promoted_bytes += young.promoted_bytes;
     g.promoted_objects += young.promoted_objects;
     g.dirty_cards += young.dirty_cards;
+}
 
-    // Phase 2: the old generation, marked in place.
-    mark_old_generation(g, clock);
-
-    // Phase 3: weakness, hooks, reclamation.
+// Phase 3: weakness, hooks, reclamation.
+void full_reclaim(GcState& g, PhaseClock& clock) {
+    HeapState& s = g.s;
     settle_weakness(g);
     clock.lap(kPhaseWeak);
     run_hooks(g);
@@ -246,8 +249,6 @@ void full(GcState& g) {
     s.minor_requested = false;
     clock.lap(kPhaseSweep);
 }
-
-} // namespace
 
 void visit_roots(HeapState& s, Tracer& t) {
     // Gathered before any root is visited: append_active_coro_roots reads
@@ -399,49 +400,68 @@ void trace_to_fixpoint(Tracer& t, GcState& g) {
     }
 }
 
-void Collector::collect(Heap& heap, CollectionKind kind) {
-    HeapState& s = state(heap);
-    const auto t0 = std::chrono::steady_clock::now();
-    std::optional<runtime::CoroRootsLock> coro_lock;
-    if (s.coro_frames) coro_lock.emplace(*s.coro_frames);
-    if (s.verify) verify_heap(heap, "before a collection");
-
+void begin_collection(GcState& g) {
+    HeapState& s = g.s;
     s.collecting = true;
-    s.collecting_kind = kind;
-    GcState g(s, heap, kind);
+    s.collecting_kind = g.kind;
     g.from = s.from_survivor;
     g.to = 1 - g.from;
-    g.eden_top = heap.alloc_->top;
+    g.eden_top = Collector::buffer(g.heap).top;
     g.from_top = s.survivor_top[g.from];
     g.eden_used = g.eden_top - s.eden_lo;
     g.eden_limit = s.eden_limit - s.eden_lo;
     s.gc_eden_top = g.eden_top;
     s.gc_from_top = g.from_top;
-    if (kind == CollectionKind::Minor) minor(g);
-    else full(g);
+}
+
+void record_collection(const GcState& g, uint64_t pause_ns, uint64_t longest_ns) {
+    HeapState& s = g.s;
+    HeapStats& st = s.stats;
+    st.last_pause_ns = longest_ns;
+    st.promoted_bytes += g.promoted_bytes;
+    st.last_survived_bytes = g.copied_bytes;
+    if (g.kind == CollectionKind::Minor) {
+        ++st.minor_collections;
+        st.minor_pause_ns_total += pause_ns;
+        st.minor_pause_ns_max = std::max(st.minor_pause_ns_max, longest_ns);
+    } else {
+        ++st.full_collections;
+        st.full_pause_ns_total += pause_ns;
+        st.full_pause_ns_max = std::max(st.full_pause_ns_max, longest_ns);
+    }
+    if (s.log) log_collection(g, pause_ns);
+    s.trigger = GcTrigger::Explicit;
+}
+
+void Collector::collect(Heap& heap, CollectionKind kind) {
+    HeapState& s = state(heap);
+    // Until minor collections shade the old objects they reach (and the
+    // barrier the ones stored), a collection inside an open cycle would
+    // leave live old objects white: a hard error, not a lost object.
+    if (s.mark_phase != MarkPhase::Idle) {
+        gc_fatal("a collection while a marking cycle is open (Heap::start_marking): nothing may allocate "
+                 "or collect before finish_marking");
+    }
+    if (kind == CollectionKind::Full) {
+        collect_full(heap);
+        return;
+    }
+    const uint64_t t0 = gc_now_ns();
+    std::optional<runtime::CoroRootsLock> coro_lock;
+    if (s.coro_frames) coro_lock.emplace(*s.coro_frames);
+    if (s.verify) verify_heap(heap, "before a collection");
+
+    GcState g(s, heap, kind);
+    begin_collection(g);
+    minor(g);
     s.collecting = false;
     s.old_critical = s.old_in_reserve();
 
     if (s.verify) verify_heap(heap, "after a collection");
     coro_lock.reset();
 
-    const uint64_t pause = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
-    HeapStats& st = s.stats;
-    st.last_pause_ns = pause;
-    st.promoted_bytes += g.promoted_bytes;
-    st.last_survived_bytes = g.copied_bytes;
-    if (kind == CollectionKind::Minor) {
-        ++st.minor_collections;
-        st.minor_pause_ns_total += pause;
-        st.minor_pause_ns_max = std::max(st.minor_pause_ns_max, pause);
-    } else {
-        ++st.full_collections;
-        st.full_pause_ns_total += pause;
-        st.full_pause_ns_max = std::max(st.full_pause_ns_max, pause);
-    }
-    if (s.log) log_collection(g, pause);
-    s.trigger = GcTrigger::Explicit;
+    const uint64_t pause = gc_now_ns() - t0;
+    record_collection(g, pause, pause);
 }
 
 } // namespace brass::gc::detail

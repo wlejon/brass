@@ -21,6 +21,7 @@ const char* trigger_name(GcTrigger t) noexcept {
     case GcTrigger::Requested: return "requested";
     case GcTrigger::Stress: return "stress";
     case GcTrigger::Exhausted: return "exhausted";
+    case GcTrigger::Incremental: return "incremental";
     }
     return "?";
 }
@@ -41,10 +42,16 @@ void log_collection(const GcState& g, uint64_t pause_ns) {
     const HeapStats& st = s.stats;
     const uint64_t index = st.minor_collections + st.full_collections;
     const bool minor = g.kind == CollectionKind::Minor;
+    // A full collection's cycle: its start, mark slices and finish pauses.
+    char cycle[96] = "";
+    if (!minor) {
+        std::snprintf(cycle, sizeof cycle, " | start %.3f mark %.3f/%llu finish %.3f", ms(g.start_ns),
+                      ms(g.mark_ns), static_cast<unsigned long long>(g.slices), ms(g.finish_ns));
+    }
     std::fprintf(stderr,
                  "[brass gc %p] #%llu %s (%s) %.3f ms | roots %.3f cards %.3f trace %.3f weak %.3f hooks %.3f "
                  "sweep %.3f | eden %.1fM copied %.2fM/%llu promoted %.2fM/%llu marked %.1fM/%llu cards %llu | "
-                 "old %.1fM threshold %.1fM | eden limit %.1fM -> %.1fM\n",
+                 "old %.1fM threshold %.1fM | eden limit %.1fM -> %.1fM%s\n",
                  static_cast<const void*>(&s.heap), static_cast<unsigned long long>(index),
                  minor ? "minor" : "full", trigger_name(s.trigger), ms(pause_ns), ms(g.phase_ns[kPhaseRoots]),
                  ms(g.phase_ns[kPhaseCards]), ms(g.phase_ns[kPhaseTrace]), ms(g.phase_ns[kPhaseWeak]),
@@ -52,7 +59,7 @@ void log_collection(const GcState& g, uint64_t pause_ns) {
                  static_cast<unsigned long long>(g.copied_objects), mb(g.promoted_bytes),
                  static_cast<unsigned long long>(g.promoted_objects), mb(g.marked_bytes),
                  static_cast<unsigned long long>(g.marked_objects), static_cast<unsigned long long>(g.dirty_cards),
-                 mb(s.heap.old_used_bytes()), mb(s.full_threshold), mb(g.eden_limit), mb(s.eden_limit - s.eden_lo));
+                 mb(s.heap.old_used_bytes()), mb(s.full_threshold), mb(g.eden_limit), mb(s.eden_limit - s.eden_lo), cycle);
 }
 
 void log_summary(const HeapState& s) {

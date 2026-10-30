@@ -209,9 +209,12 @@ void HeapState::update_fast_limit() noexcept {
     // Generated code bumps against `end` and nothing else, so the adaptive
     // limit takes effect there with no change to the code. `end` is never
     // below `top`: an object allowed past eden_limit (Heap::allocate_at) puts
-    // `top` above it, and the bump path computes end - top unsigned.
+    // `top` above it, and the bump path computes end - top unsigned. Stress
+    // mode and an open marking cycle (where allocating is an error, caught
+    // in allocate_at) shut it, so every allocation reaches the runtime.
     const uintptr_t top = heap.alloc_->top;
-    heap.alloc_->end = stress != StressMode::None ? top : std::max(top, eden_limit);
+    const bool shut = stress != StressMode::None || mark_phase == MarkPhase::Marking;
+    heap.alloc_->end = shut ? top : std::max(top, eden_limit);
 }
 
 namespace {
@@ -364,6 +367,13 @@ uintptr_t Heap::allocate_at(size_t bytes, LayoutId layout, uint32_t flags, uint8
         detail::gc_fatal("allocation during a collection (a trace function, root source or "
                          "post-collection hook allocated on the heap it runs for)");
     }
+    // An object allocated while a cycle is open would be neither marked nor
+    // scanned by it (nothing allocates black or shades yet), so finish would
+    // sweep it or what it points at: a hard error until that is supported.
+    if (s.mark_phase != detail::MarkPhase::Idle) {
+        detail::gc_fatal("allocation while a marking cycle is open (Heap::start_marking): nothing may allocate "
+                         "or collect before finish_marking");
+    }
     if (bytes > (size_t{1} << 31)) throw std::bad_alloc();
     const size_t payload = payload_bytes_for(bytes);
     const size_t total = payload + kHeaderBytes;
@@ -457,7 +467,11 @@ void Heap::collect_at(CollectionKind kind, uintptr_t caller_fp, uintptr_t caller
         s.trigger = detail::GcTrigger::OldGrowth;
         Collector::collect(*this, CollectionKind::Full);
     }
+    run_pending_finalizers();
+}
 
+void Heap::run_pending_finalizers() {
+    HeapState& s = *s_;
     // Finalizers run once the heap is consistent again; they may allocate, and
     // so collect. A collection a finalizer starts leaves what it finds dead
     // queued, and the loop below runs it after the batch under way.

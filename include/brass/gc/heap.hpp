@@ -263,6 +263,33 @@ public:
     // a collection.
     size_t release_unused_young() noexcept;
 
+    // ---- Marking cycle -----------------------------------------------------
+    // A full collection split into steps a host can spread out: start (the
+    // young generation emptied into the old one, the roots made grey), mark
+    // slices of about a budget each, finish (weak slots, ephemerons,
+    // finalizers, hooks, sweep). collect(Full) is the same steps back to
+    // back. Each step is a pause of its own; the collection is counted and
+    // logged once, at finish, its pauses together in full_pause_ns_total and
+    // the longest one in full_pause_ns_max and last_pause_ns.
+    //
+    // NOT YET SAFE WITH A MUTATOR IN BETWEEN: the write barrier does not
+    // shade old referents and minor collections do not mark what they
+    // promote, so between start_marking and finish_marking nothing may store
+    // into the heap, allocate or collect. Allocating or collecting then
+    // stops the process (docs/gc_contract.md, "Marking Cycle").
+    //
+    // Starts a cycle: false, doing nothing, if one is already open.
+    bool start_marking();
+    // Marks for about `budget_ns` (at least a little, however small);
+    // true once the grey work is gone and finish would add none. Calling it
+    // with no cycle open stops the process.
+    bool mark_slice(uint64_t budget_ns);
+    // Whether a cycle is open.
+    [[nodiscard]] bool marking() const noexcept;
+    // Finishes the open cycle (marking whatever grey work is left first),
+    // then runs the finalizers it queued. No cycle open stops the process.
+    void finish_marking();
+
     // ---- Barrier -----------------------------------------------------------
     // Every store of a reference into an object that may be old: `object` is
     // the object whose layout traces the slot written, `value` the word
@@ -439,6 +466,9 @@ private:
     friend struct detail::HeapState;
 
     void remember_interior(uintptr_t address) noexcept;
+    // Runs the finalizers collections have queued (after collect_at and
+    // finish_marking), unless a batch is already running.
+    void run_pending_finalizers();
     void remember_range_old(uintptr_t object, uintptr_t begin, uintptr_t end) noexcept;
     // Dirties the card of old address `a` and marks its region (kCardRegionShift).
     void dirty_card(uintptr_t a) noexcept {
