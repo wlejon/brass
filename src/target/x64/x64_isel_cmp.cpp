@@ -1,6 +1,8 @@
 #include <brass/target/x64/x64_isel.hpp>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 
 namespace brass::x64 {
 
@@ -70,6 +72,77 @@ void X64ISel::append_fused_float_compare(const Instruction& cmp, LirBlock& lir_b
     ucomi->add_use(LirOperand::vreg(get_vreg(a), sz));
     ucomi->add_use(LirOperand::vreg(get_vreg(b), sz));
     lir_bb.append_inst(std::move(ucomi));
+}
+
+// COMPARE REMATERIALIZATION. GVN shares a comparison between every block it
+// dominates: a guard's "is this an object" test in the hot block and the same
+// test recomputed by the miss path's cache lookup become one value. With two
+// users it can no longer be folded into either, so the hot block computes it
+// as a 0/1 (setcc, movzx), keeps the register alive into the miss path, and
+// tests it again at its own select (bronze's keyed-shape guard: setb, movzbl,
+// test, cmovne where one cmovb would do). Flags never live across blocks, so
+// the comparison is worth more as two cmp instructions than as one register.
+//
+// A comparison qualifies when EVERY use of it is the condition of a br_if or
+// select, or a leaf of an and-chain (x64_isel_and_chain.cpp). Each such user
+// then emits the comparison itself, exactly as a single-use same-block one
+// already is emitted at its user. It reads the same two SSA operands, which
+// dominate every user because the comparison does, so it computes the same
+// answer, with two exceptions this excludes:
+//   - a load folded into the compare would re-read memory at a later point,
+//     so a rematerialized compare reads every operand from a register
+//     (fused_into's callers check remat_cmps_ before folding a load);
+//   - a GC root operand (gcref / tagged) can be relocated between the
+//     definition and a later user by a moving collection, which rewrites
+//     the root and not a non-root copy of it. Only eq / ne of a root against
+//     an immediate is kept, which relocation cannot change (an object stays
+//     an object, its tag bits stay).
+// Integer comparisons only: a float compare's flags need parity handling
+// that the users do not all share.
+//
+// BRASS_NO_CMP_REMAT=1 turns it off (the A/B seam).
+void X64ISel::find_remat_compares(const Function& mir_fn) {
+    remat_cmps_.clear();
+    static const bool off = std::getenv("BRASS_NO_CMP_REMAT") != nullptr;
+    if (off) return;
+    std::unordered_map<const Value*, uint32_t> consumer_uses;
+    for (const auto* bb : mir_fn.blocks()) {
+        for (const auto* inst : *bb) {
+            const Opcode op = inst->opcode();
+            if (op != Opcode::br_if && op != Opcode::select) continue;
+            if (op == Opcode::br_if && and_chains_.count(inst)) continue;
+            const Value* cond = inst->operand(0);
+            if (cond && cond->is_instruction()) ++consumer_uses[cond];
+        }
+    }
+    for (const auto& [br, leaves] : and_chains_) {
+        for (const Value* leaf : leaves) ++consumer_uses[leaf];
+    }
+    for (const auto& [v, n] : consumer_uses) {
+        const Instruction* def = v->defining_instruction();
+        if (!def || skipped_insts_.count(def) || !is_comparison(def->opcode())) continue;
+        const auto it = use_count_.find(v);
+        if (it == use_count_.end() || it->second != n) continue;
+        if (!comparison_fusible(*def)) continue;
+        const Value* lhs = def->operand(0);
+        const Value* rhs = def->operand(1);
+        if (!lhs || !rhs || lhs->type().is_float() || rhs->type().is_float()) continue;
+        const bool lhs_imm = get_imm_int_info(lhs).is_imm;
+        const bool rhs_imm = get_imm_int_info(rhs).is_imm;
+        // Two constants are the folder's to decide, and which one the users
+        // would take as the immediate is not worth pinning down here.
+        if (lhs_imm && rhs_imm) continue;
+        const bool equality = def->opcode() == Opcode::eq || def->opcode() == Opcode::ne;
+        if (lhs->type().is_gc_root() && !(equality && rhs_imm)) continue;
+        if (rhs->type().is_gc_root() && !(equality && lhs_imm)) continue;
+        remat_cmps_.insert(def);
+        skipped_insts_.insert(def);
+    }
+}
+
+bool X64ISel::fused_into(const Instruction* cmp, const Instruction& user) const {
+    if (!cmp || !is_comparison(cmp->opcode()) || !skipped_insts_.count(cmp)) return false;
+    return cmp->parent() == user.parent() || remat_cmps_.count(cmp) != 0;
 }
 
 void X64ISel::lower_comparison(

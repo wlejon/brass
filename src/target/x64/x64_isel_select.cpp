@@ -157,7 +157,7 @@ void X64ISel::lower_select(const Instruction& inst, LirBlock& lir_bb) {
 
     // 3. Emit comparison / test
     const Instruction* cmp_inst = cond_val ? cond_val->defining_instruction() : nullptr;
-    bool is_fused_cmp = cmp_inst && cmp_inst->parent() == inst.parent() && is_comparison(cmp_inst->opcode()) && skipped_insts_.count(cmp_inst);
+    bool is_fused_cmp = fused_into(cmp_inst, inst);
 
     Condition select_cond = Condition::NE;
 
@@ -232,7 +232,8 @@ void X64ISel::lower_select(const Instruction& inst, LirBlock& lir_bb) {
                 cmp_lir->add_use(LirOperand::vreg(get_vreg(rhs), cmp_sz));
                 cmp_lir->add_use(LirOperand::imm(lhs_imm.val, cmp_sz));
                 lir_bb.append_inst(std::move(cmp_lir));
-            } else if (rhs && rhs->is_instruction() && can_fuse_load(rhs->defining_instruction(), &inst)) {
+            } else if (!remat_cmps_.count(cmp_inst) && rhs && rhs->is_instruction() &&
+                       can_fuse_load(rhs->defining_instruction(), &inst)) {
                 select_cond = gpr_c;
                 auto cmp_lir = std::make_unique<LirInst>(cmp_lir_op);
                 cmp_lir->add_use(LirOperand::vreg(get_vreg(lhs), cmp_sz));

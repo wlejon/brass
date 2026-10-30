@@ -60,6 +60,10 @@ private:
     // br_if -> the leaves of its AND condition, tested one branch each
     // (x64_isel_and_chain.cpp).
     std::unordered_map<const Instruction*, std::vector<const Value*>> and_chains_;
+    // Comparisons recomputed at each of their users, in whatever block, in
+    // place of one materialized 0/1 (x64_isel_cmp.cpp, find_remat_compares).
+    // Each is also in skipped_insts_.
+    std::unordered_set<const Instruction*> remat_cmps_;
 
     struct ImmIntInfo {
         bool is_imm = false;
@@ -148,6 +152,11 @@ private:
     // true exactly when it is.
     Condition append_fused_compare(const Instruction& cmp, const Instruction& user, codegen::LirBlock& lir_bb);
     void find_and_chains(const Function& mir_fn);
+    void find_remat_compares(const Function& mir_fn);
+    // Whether `cmp` is fused into the branch, select or chain leaf `user`
+    // lowers: a single-use comparison of the user's block, or a
+    // rematerialized one (remat_cmps_), from any block.
+    bool fused_into(const Instruction* cmp, const Instruction& user) const;
     void lower_and_chain_branch(const Instruction& inst, const std::vector<const Value*>& leaves,
                                 codegen::LirBlock& lir_bb);
     void lower_switch(const Instruction& inst, codegen::LirBlock& lir_bb);

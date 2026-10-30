@@ -194,8 +194,21 @@ void X64ISel::analyze_function(const Function& mir_fn) {
     }
 
     find_and_chains(mir_fn);
+    find_remat_compares(mir_fn);
 
     std::unordered_map<const Value*, uint32_t> folded_uses;
+    // A rematerialized comparison's users take a 32-bit constant operand as
+    // an immediate (append_fused_compare, lower_select), as step 3 counts for
+    // a single-use one below: its one use of the constant is folded.
+    for (const Instruction* cmp : remat_cmps_) {
+        const Value* lhs = cmp->operand(0);
+        const Value* rhs = cmp->operand(1);
+        if (get_imm_int_info(rhs).fits_i32) {
+            folded_uses[rhs]++;
+        } else if (get_imm_int_info(lhs).fits_i32) {
+            folded_uses[lhs]++;
+        }
+    }
 
     // A memory operation that folds its address computation reads only the
     // address value itself without a register: that is the one use it
@@ -259,6 +272,9 @@ void X64ISel::analyze_function(const Function& mir_fn) {
                 // What append_fused_compare folds of a comparison it emits
                 // for this branch: a constant operand, or a load.
                 auto count_compare_folds = [&](const Instruction* def_inst) {
+                    // Counted once for all its users above, and never with a
+                    // load folded in (find_remat_compares).
+                    if (remat_cmps_.count(def_inst)) return;
                     const Value* lhs = def_inst->operand(0);
                     const Value* rhs = def_inst->operand(1);
                     ImmIntInfo rhs_imm = get_imm_int_info(rhs);
@@ -763,7 +779,8 @@ Condition X64ISel::append_fused_compare(const Instruction& cmp, const Instructio
             cmp_lir->add_use(LirOperand::vreg(get_vreg(rhs), sz));
             cmp_lir->add_use(LirOperand::imm(lhs_imm.val, sz));
             lir_bb.append_inst(std::move(cmp_lir));
-        } else if (rhs && rhs->is_instruction() && can_fuse_load(rhs->defining_instruction(), &inst)) {
+        } else if (!remat_cmps_.count(cmp_inst) && rhs && rhs->is_instruction() &&
+                   can_fuse_load(rhs->defining_instruction(), &inst)) {
             branch_cond = gpr_c;
             auto cmp_lir = std::make_unique<LirInst>(cmp_lir_op);
             cmp_lir->add_use(LirOperand::vreg(get_vreg(lhs), sz));
@@ -792,8 +809,7 @@ void X64ISel::lower_branch_if(const Instruction& inst, LirBlock& lir_bb) {
     const Instruction* cmp_inst = cond_val ? cond_val->defining_instruction() : nullptr;
     // Only a comparison the analysis folded into this branch is recomputed
     // here; any other is a value in a register like every other condition.
-    bool is_fused_cmp = cmp_inst && cmp_inst->parent() == inst.parent() && is_comparison(cmp_inst->opcode()) &&
-                        skipped_insts_.count(cmp_inst);
+    bool is_fused_cmp = fused_into(cmp_inst, inst);
 
     Condition branch_cond = Condition::NE;
 
